@@ -5,3 +5,4 @@
 | 文章 | 代码 | 说明 |
 |---|---|---|
 | [开篇](../content/posts/hello-world/) | — | 无代码 |
+| [Flash Attention 精读系列](../content/posts/flash-attention-01-theory/) | [flash-attention/ref_impl.py](flash-attention/ref_impl.py) | 纯 PyTorch 参考实现：online softmax 递推、分块前向（含 LSE）、recompute 反向，含自测（`python ref_impl.py`） |

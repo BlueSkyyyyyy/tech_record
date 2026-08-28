@@ -24,6 +24,18 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 
 ## 文章索引
 
+### Flash Attention 精读系列（5 篇）
+
+1. [原理与数学推导：online softmax、分块、IO 复杂度](content/posts/flash-attention-01-theory/index.md)
+2. [Triton 教程版前向逐行精读](content/posts/flash-attention-02-triton-fwd/index.md)
+3. [FlashAttention-2/3 CUDA 前向实现](content/posts/flash-attention-03-cuda-fwd/index.md)
+4. [反向梯度推导与 recompute 实现](content/posts/flash-attention-04-bwd/index.md)
+5. [Gluon / TileLang / Liger 多实现对比](content/posts/flash-attention-05-dsl-zoo/index.md)
+
+配套代码：[code/flash-attention/](code/flash-attention/ref_impl.py)（纯 PyTorch 参考实现，含自测）
+
+### 其他
+
 - [开篇：为什么写这个博客](content/posts/hello-world/index.md)
 
 ## 本地开发
