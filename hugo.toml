@@ -1,0 +1,43 @@
+baseURL = "https://blueskyyyyyy.github.io/tech_record/"
+languageCode = "zh-cn"
+title = "Tech Record"
+theme = "PaperMod"
+hasCJKLanguage = true
+enableEmoji = true
+
+[pagination]
+  pagerSize = 10
+
+[params]
+  defaultTheme = "auto"
+  ShowReadingTime = true
+  ShowPostNavLinks = true
+  ShowCodeCopyButtons = true
+  ShowToc = true
+  description = "AI 训练系统 / 算子 / 优化器的学习笔记与代码"
+
+[params.homeInfoParams]
+  Title = "Tech Record"
+  Content = "AI 训练系统工程的学习笔记 —— Megatron-LM、Kernel、优化器、量化，以及一切踩过的坑。每篇文章配套可运行代码（见 code/ 目录）。"
+
+[[params.socialIcons]]
+  name = "github"
+  url = "https://github.com/BlueSkyyyyyy"
+
+[params.editPost]
+  URL = "https://github.com/BlueSkyyyyyy/tech_record/tree/main/content"
+  Text = "在 GitHub 上查看本站源文件"
+
+[markup]
+  [markup.highlight]
+    lineNos = true
+    codeFences = true
+    guessSyntax = true
+    style = "monokai"
+
+[outputs]
+  home = ["HTML", "RSS", "JSON"]
+
+[taxonomies]
+  tag = "tags"
+  category = "categories"
