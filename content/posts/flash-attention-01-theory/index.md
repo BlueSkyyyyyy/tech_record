@@ -109,13 +109,11 @@ $$
 **旧的部分和乘上一个修正因子，就迁移到了新的坐标系**。于是得到流式递推——每来一个新的 key 块 $j$：
 
 $$
-\boxed{
 \begin{aligned}
 m^{\text{new}} &= \max(m^{\text{old}}, \max_j S_{ij}) \\
 \ell^{\text{new}} &= e^{m^{\text{old}} - m^{\text{new}}} \cdot \ell^{\text{old}} + \sum_j e^{S_{ij} - m^{\text{new}}} \\
 P_{ij} &= e^{S_{ij} - m^{\text{new}}} \quad (\text{未归一化，最终再除 } \ell)
 \end{aligned}
-}
 $$
 
 用归纳法容易验证：处理完所有块后，$m = \max_k S_{ik}$，$\ell = \sum_k e^{S_{ik} - m}$，与三遍扫描结果完全一致。**这是精确算法，没有任何近似**——"approximate attention"（Linformer、Performer 等）是另一条技术路线，与 Flash Attention 无关。

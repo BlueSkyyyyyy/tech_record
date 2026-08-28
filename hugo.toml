@@ -34,6 +34,11 @@ enableEmoji = true
     codeFences = true
     guessSyntax = true
     style = "monokai"
+  [markup.goldmark.extensions.passthrough]
+    enable = true
+    [markup.goldmark.extensions.passthrough.delimiters]
+      block = [["$$", "$$"], ["\\[", "\\]"]]
+      inline = [["$", "$"], ["\\(", "\\)"]]
 
 [outputs]
   home = ["HTML", "RSS", "JSON"]
