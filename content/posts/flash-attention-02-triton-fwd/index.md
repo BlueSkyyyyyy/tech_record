@@ -2,8 +2,9 @@
 title: "Flash Attention 精读（二）：Triton 教程版前向逐行精读"
 date: 2026-08-28
 draft: false
+weight: 2
 tags: ["flash-attention", "triton", "attention", "gpu", "系列"]
-categories: ["Flash Attention 精读"]
+categories: ["算子开发"]
 ---
 
 本篇精读 [Triton 官方教程 `06-fused-attention.py`](https://github.com/triton-lang/triton/blob/main/python/tutorials/06-fused-attention.py) 的**前向**部分（约 L30–403 + autograd 封装 L755–905），约 200 行核心代码，实现了 Flash Attention v2。它是理解这个算法最好的教材——比 CUDA 版短一个数量级，又保留了所有关键的数学与工程决策。反向部分留给[第 4 篇]({{< relref "flash-attention-04-bwd" >}})。

@@ -2,8 +2,9 @@
 title: "Flash Attention 精读（五）：同一算法的四种写法 —— TileLang、Gluon 与 Liger 的启示"
 date: 2026-08-28
 draft: false
+weight: 5
 tags: ["flash-attention", "tilelang", "gluon", "triton", "liger-kernel", "系列"]
-categories: ["Flash Attention 精读"]
+categories: ["算子开发"]
 ---
 
 前四篇里，Flash Attention 的数学与工程已经拆完了。本篇换个视角：**同一个算法，在不同抽象层级的 DSL 里长什么样**。读的代码：
