@@ -2,8 +2,9 @@
 title: "Flash Attention 精读（三）：FlashAttention-2/3 的 CUDA 前向实现"
 date: 2026-08-28
 draft: false
+weight: 3
 tags: ["flash-attention", "cuda", "cutlass", "hopper", "attention", "系列"]
-categories: ["Flash Attention 精读"]
+categories: ["算子开发"]
 ---
 
 [第 2 篇]({{< relref "flash-attention-02-triton-fwd" >}})的 Triton 教程版把算法讲透了，但生产环境跑的是 CUDA。本篇精读官方仓库的两套前向实现：**FA2**（`csrc/flash_attn/src/flash_fwd_kernel.h`，Ampere/Hopper 通用）和 **FA3**（`hopper/`，Hopper 专属）。数学完全同前两篇，本篇要看的是：**同一份递推式，在"没有编译器帮忙"的层面如何被榨到硬件极限**。

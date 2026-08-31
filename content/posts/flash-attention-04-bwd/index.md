@@ -2,8 +2,9 @@
 title: "Flash Attention 精读（四）：反向梯度推导与 recompute 实现精读"
 date: 2026-08-28
 draft: false
+weight: 4
 tags: ["flash-attention", "triton", "cuda", "attention", "autograd", "系列"]
-categories: ["Flash Attention 精读"]
+categories: ["算子开发"]
 ---
 
 前向消灭了 $N \times N$ 的中间矩阵，代价落在反向：**梯度计算需要 $P$，而 $P$ 没有被保存**。本篇先完整推导 $dQ, dK, dV$（三个实现共享同一套数学），再逐一精读 Triton 教程版（`06-fused-attention.py` L410–748）和 FlashAttention-2 CUDA 版（`csrc/flash_attn/src/flash_bwd_kernel.h`）的反向实现，最后对照三种不同的 kernel 组织策略。

@@ -2,8 +2,9 @@
 title: "Flash Attention 精读（一）：从 softmax 的内存瓶颈到 online softmax 的数学推导"
 date: 2026-08-28
 draft: false
+weight: 1
 tags: ["flash-attention", "attention", "gpu", "softmax", "系列"]
-categories: ["Flash Attention 精读"]
+categories: ["算子开发"]
 ---
 
 本系列共 5 篇，从数学原理一路读到工业级实现的每一行代码：
