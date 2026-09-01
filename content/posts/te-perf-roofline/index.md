@@ -2,8 +2,9 @@
 title: "H100 上 Transformer Engine 算子的性能与 Roofline 对比"
 date: 2026-09-01
 draft: false
-tags: ["transformer-engine", "roofline", "性能分析", "kernel", "H100"]
+tags: ["transformer-engine", "roofline", "性能分析", "kernel", "H100", "系列"]
 categories: ["算子开发"]
+series: ["te-perf"]
 ---
 
 Transformer Engine（TE）是 NVIDIA 维护的一套训练加速库，训练框架（Megatron 等）会把 LayerNorm、attention 这些算子的 CUDA kernel 外包给它。但「外包出去」不等于「算得满」——TE 的算子到底吃到了 H100 的几成带宽/算力，和 roofline 模型差多远，只有实测才知道。本文在 H100 SXM（132 SM，CC 9.0）上对 TE 的 `rmsnorm` / `rmsnorm_bwd` / `rmsnorm_bwd_add`（残差融合反向）以及 `fused_attn_fwd` / `fused_attn_bwd` 做了一组微基准，把实测点放到 roofline 模型上看差距，并逐一拆解差距来源。
