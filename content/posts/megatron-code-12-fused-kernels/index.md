@@ -113,6 +113,6 @@ def backward(ctx, grad_output):
 - **mask 三态对应三个 autograd 函数**：`ScaledUpperTriangMaskedSoftmax`（causal）/ `ScaledMaskedSoftmax`（pad）/ `ScaledSoftmax`（无 mask）（`fused_softmax.py:11-108`）。
 - **fused 也管 TP 编排**：`fused_vocab_parallel_cross_entropy` 把「TP 局部 softmax + all-reduce」融合进 CE 计算，减少稠密中间量（`fused_cross_entropy.py:13-136`）。
 
-下一篇讲 **强化学习**：MCore 里 RLHF/GRPO 的 rollout、reward 模型打分、和 PPO 的价值/策略更新，怎么和「训练框架 + 数据并行」这套既有基础设施拼起来。
+下一篇讲 **强化学习**：MCore 里 RLHF/GRPO 的 rollout、reward 模型打分、和策略/价值更新，怎么和「训练框架 + 数据并行」这套既有基础设施拼起来，也就是《[强化学习]({{< relref "megatron-code-13-rl" >}})》。
 
 （本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`，对应文件 `megatron/core/fusions/fused_layer_norm.py`、`megatron/core/fusions/fused_softmax.py`、`megatron/core/fusions/fused_cross_entropy.py`。）
