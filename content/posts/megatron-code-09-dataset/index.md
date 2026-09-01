@@ -200,6 +200,6 @@ def _get_size_per_split_per_dataset(normalized_weights, target_size_per_split, s
 - **混合 = 再加一级索引**：`BlendedDataset` 用 `dataset_index` + `dataset_sample_index` 把「多数据集加权混合」也变成纯整数查表（`blended_dataset.py:107-109`）。
 - **surplus 防越界**：`mid_level_dataset_surplus`（默认 0.005）给 mid-level 数据集预留余量，`_get_size_per_split_per_dataset` 的双重向上取整是它的落地点（`blended_megatron_dataset_builder.py:555-583`）。
 
-下一篇进入「数据真正喂给训练的最后一公里」：`data_samplers` 里的 batch 组装、`num_workers` 预取、以及 varlen（变长序列）如何让「所有样本都 pad 到 sequence_length」不再是浪费。
+下一篇离开数据，讲训练的「存档与复活」——checkpoint 的目录布局、格式分档与加载守护，也就是《[checkpoint 处理]({{< relref "megatron-code-10-checkpoint" >}})》。
 
 （本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`，对应文件 `megatron/core/datasets/indexed_dataset.py`、`megatron/core/datasets/gpt_dataset.py`、`megatron/core/datasets/blended_dataset.py`、`megatron/core/datasets/blended_megatron_dataset_builder.py`、`megatron/core/datasets/blended_megatron_dataset_config.py`、`megatron/core/datasets/utils.py`。）
