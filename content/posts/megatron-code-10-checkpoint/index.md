@@ -143,6 +143,6 @@ _compare('num_attention_heads')
 - **tracker + 独立优化器文件**：`latest_checkpointed_iteration.txt` 定位迭代（`checkpointing.py:348-361`），分布式优化器 state 单独写 `distrib_optim.pt`（`checkpointing.py:710-720`）。
 - **加载三道守护**：格式自动探测（`checkpointing.py:2045-2063`）、结构一致性断言（`checkpointing.py:143-182`）、RNG 条件恢复（`checkpointing.py:2092-2115`）。
 
-下一篇讲**优化器**：MCore 的分布式优化器如何在 DP 维度切分 state、`sharded_state_dict` 到底怎么产生那些惰性张量——正好和本篇「优化器 state 单独落盘」接上。
+下一篇讲**优化器**：MCore 的分布式优化器如何在 DP 维度切分 state、`sharded_state_dict` 到底怎么产生那些惰性张量——正好和本篇「优化器 state 单独落盘」接上，也就是《[优化器]({{< relref "megatron-code-11-optimizer" >}})》。
 
 （本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`，对应文件 `megatron/training/checkpointing.py`。）
