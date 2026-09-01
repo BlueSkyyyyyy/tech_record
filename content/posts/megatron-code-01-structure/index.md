@@ -5,6 +5,7 @@ draft: false
 tags: ["megatron-lm", "系列", "训练框架"]
 categories: ["训练框架"]
 weight: 1
+series: ["megatron-code"]
 ---
 
 这是「Megatron-LM 源码精读」系列的第一篇。本系列以官方仓库 [NVIDIA/Megatron-LM](https://github.com/NVIDIA/Megatron-LM)（分析基准 commit `f713506ce`）为对象，逐块拆解它的分布式训练实现。本篇先搭骨架：讲清楚整个仓库的目录组织、从「一条训练命令」到「模型前向/反向」的启动调用链，以及 Megatron 独有的一些抽象（ModuleSpec、LanguageModule、ProcessGroupCollection 等）。

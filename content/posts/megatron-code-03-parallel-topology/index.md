@@ -4,7 +4,8 @@ date: 2026-09-01
 draft: false
 tags: ["megatron-lm", "系列", "训练框架", "分布式"]
 categories: ["训练框架"]
-weight: 2
+weight: 3
+series: ["megatron-code"]
 ---
 
 这是「Megatron-LM 源码精读」系列的第三篇。前一篇《模型并行的原理》讲过 TP/SP/PP/CP/DP/FSDP 各自的动机，本篇回答一个更具体的问题：**这些并行在真实的多卡集群里，到底如何把「全局 rank 编号」映射到一张张 GPU 上？** 答案全在 `megatron/core/parallel_state.py`（分析基准 commit `f713506ce`，约 2266 行）这一个文件里。

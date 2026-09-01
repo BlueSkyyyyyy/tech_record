@@ -3,6 +3,7 @@ title: "Flash Attention 精读（二）：Triton 教程版前向逐行精读"
 date: 2026-08-28
 draft: false
 weight: 2
+series: ["flash-attention"]
 tags: ["flash-attention", "triton", "attention", "gpu", "系列"]
 categories: ["算子开发"]
 ---

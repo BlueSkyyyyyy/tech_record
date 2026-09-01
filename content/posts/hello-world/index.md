@@ -2,6 +2,8 @@
 title: "开篇：为什么写这个博客"
 date: 2026-08-28
 draft: false
+weight: 1
+series: ["随笔"]
 tags: ["meta"]
 categories: ["随笔"]
 ---
