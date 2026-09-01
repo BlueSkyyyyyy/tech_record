@@ -34,6 +34,27 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 
 配套代码：[code/flash-attention/](code/flash-attention/ref_impl.py)（纯 PyTorch 参考实现，含自测）
 
+### Megatron-LM 源码精读系列（16 篇）
+
+1. [整体代码结构与启动链路](content/posts/megatron-code-01-structure/index.md)
+2. [模型并行的原理（TP/SP/PP/CP/DP/FSDP）](content/posts/megatron-code-02-parallel-principles/index.md)
+3. [并行拓扑：parallel_state.py 精读](content/posts/megatron-code-03-parallel-topology/index.md)
+4. [重计算原理与代码](content/posts/megatron-code-04-recompute/index.md)
+5. [随机种子的设置](content/posts/megatron-code-05-rng-seeds/index.md)
+6. [与 Transformer Engine 的关系](content/posts/megatron-code-06-transformer-engine/index.md)
+7. [CPU offload 实现](content/posts/megatron-code-07-cpu-offload/index.md)
+8. [ZeRO-1 / FSDP 实现](content/posts/megatron-code-08-zero-fsdp/index.md)
+9. [数据集处理](content/posts/megatron-code-09-dataset/index.md)
+10. [checkpoint 处理](content/posts/megatron-code-10-checkpoint/index.md)
+11. [优化器](content/posts/megatron-code-11-optimizer/index.md)
+12. [fused 算子](content/posts/megatron-code-12-fused-kernels/index.md)
+13. [强化学习](content/posts/megatron-code-13-rl/index.md)
+14. [MoE 实现与优化](content/posts/megatron-code-14-moe/index.md)
+15. [多模态（LLaVA）实现](content/posts/megatron-code-15-multimodal/index.md)
+16. [Context Parallel 细节](content/posts/megatron-code-16-context-parallel/index.md)
+
+配套代码：[code/megatron-code/](code/megatron-code/README.md)（写作素材与源码分析笔记）
+
 ### 其他
 
 - [开篇：为什么写这个博客](content/posts/hello-world/index.md)
