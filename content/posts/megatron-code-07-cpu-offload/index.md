@@ -300,6 +300,6 @@ CUDA graph 是这块最复杂的分支：capture/replay 阶段 tensor 形状已�
 - **状态分块 offload**：step 仍在 GPU；`_state_staging_slots` 两个槽（`chunked_optimizer_state_offload.py:173`）实现 H2D(N+1)/step(N)/D2H(N-1) 重叠；master 走全窗口换入换出；强依赖 distributed checkpoint。
 - **激活下放**：抓手是 `saved_tensors_hooks`（`fine_grained_activation_offload.py:463`）；层组粒度批量 D2H/H2D；`OffloadTensorPool` 复用 pinned CPU 内存；warmup 摸形状 + CUDA graph 缓存 chunk。
 
-下一篇《数据并行与 DistributedDataParallel》回到并行切分的主线，讲 Megatron 的 DP 实现、梯度 all-reduce 的时机与 `distrib_optimizer` 如何在 DP 之上继续分片优化器 state（正好接上本篇第 4 节没展开的 DistOpt 内部）。
+下一篇[《ZeRO-1 / FSDP 实现》]({{< relref "megatron-code-08-zero-fsdp" >}})回到并行切分的主线，讲 Megatron 的 `DistributedDataParallel` 如何在 `use_distributed_optimizer` 下把梯度 all-reduce 换成 reduce-scatter、销毁冗余参数副本（ZeRO-1），以及 `TorchFullyShardedDataParallel` 如何封装 PyTorch FSDP2（正好接上本篇第 4 节没展开的 DistOpt 内部）。
 
 （本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`，对应文件 `megatron/core/optimizer/cpu_offloading/hybrid_optimizer.py`、`megatron/core/optimizer/cpu_offloading/chunked_optimizer_state_offload.py`、`megatron/core/pipeline_parallel/fine_grained_activation_offload.py`、`megatron/core/optimizer/optimizer_config.py`。）
