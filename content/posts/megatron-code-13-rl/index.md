@@ -126,6 +126,6 @@ return ((rewards - reward_means) / (1e-4 + reward_stds)).tolist()
 - **异步四阶段 + 闸门背压**：`_RolloutPipeline` 的 prepare→infer→assemble→consume，靠 `_SubmissionGate` 和 `R/G/B` 提交粒度控制 run-ahead（`agent/api.py:229-258`、`rollout_granularity.py:7-26`）。
 - **GRPO advantage = 组内标准化**：`(r - group_mean) / (1e-4 + group_std)`，无 critic（`rl_utils.py:853-877`）。
 
-下一篇讲 **MoE 实现与优化**：专家并行的切分、`moe_layer` 的 token 路由（top-k + aux loss）、以及 expert capacity / dropless 这些把稀疏专家塞进密集硬件的工程手段。
+下一篇讲 **MoE 实现与优化**：专家并行的切分、`moe_layer` 的 token 路由（top-k + aux loss）、以及 expert capacity / dropless 这些把稀疏专家塞进密集硬件的工程手段，也就是《[MoE 实现与优化]({{< relref "megatron-code-14-moe" >}})》。
 
 （本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`，对应文件 `megatron/rl/README.md`、`megatron/rl/agent/api.py`、`megatron/rl/inference/api.py`、`megatron/rl/rollout_granularity.py`、`megatron/rl/rl_utils.py`。）
