@@ -55,6 +55,12 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 
 配套代码：[code/megatron-code/](code/megatron-code/README.md)（写作素材与源码分析笔记）
 
+### Kernel / 算子性能（1 篇）
+
+- [H100 上 Transformer Engine 算子的性能与 Roofline 对比](content/posts/te-perf-roofline/index.md)
+
+配套代码：[code/te-perf/](code/te-perf/)（TE 原生 kernel 微基准，含 launch overhead 测量）
+
 ### 其他
 
 - [开篇：为什么写这个博客](content/posts/hello-world/index.md)

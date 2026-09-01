@@ -1,0 +1,17 @@
+Device: NVIDIA H100 80GB HBM3
+SMs: 132, CC: 9.0
+
+==============================================================================
+KERNEL LAUNCH OVERHEAD (trivial fill_)
+==============================================================================
+minimal-kernel round-trip latency = 11.9 us/call
+(this is the fixed cost mixed into every measured kernel time;
+ subtract it to isolate the true kernel execution time for small shapes)
+
+==============================================================================
+CORRECTNESS CHECK (one-shot)
+==============================================================================
+rmsnorm_fwd max abs err = 2.704e-02 (out abs mean = 6.216e-01)
+fused_attn_fwd max abs err = 6.538e-03 (out abs mean = 1.424e-01)
+CHECK OK
+
