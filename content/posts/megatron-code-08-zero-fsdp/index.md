@@ -253,6 +253,6 @@ if args.use_torch_fsdp2:
 - **省内存不省带宽**：ZeRO-1/FSDP 的收益是显存（消灭每 rank 的冗余副本），不是通信量。
 - **互斥约束**：FSDP2 与 MCore 分布式优化器、pipeline、expert 并行都不兼容（`arguments.py:1087-1111`）。
 
-下一篇回到「模型吃进去的数据」，讲 MCore 的数据集处理（数据混合、序列打包、varlen），也就是《数据集处理》（待写）。
+下一篇回到「模型吃进去的数据」，讲 MCore 的数据集处理（数据混合、序列打包、varlen），也就是《[数据集处理]({{< relref "megatron-code-09-dataset" >}})》。
 
 （本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`，对应文件 `megatron/core/distributed/distributed_data_parallel.py`、`megatron/core/distributed/param_and_grad_buffer.py`、`megatron/core/distributed/torch_fully_sharded_data_parallel.py`、`megatron/core/distributed/distributed_data_parallel_config.py`、`megatron/training/models/dist_utils.py`、`megatron/training/arguments.py`。）
