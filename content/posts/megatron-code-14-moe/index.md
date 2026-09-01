@@ -129,6 +129,6 @@ Leaky 细节都在 docstring 的分布式部分（`moe_utils.py:84-97`）：序�
 - **aux loss = E·Σ(fᵢ·Pᵢ)**：专家实际负载 × 期望概率的内积，跨 rank 聚合（`moe_utils.py:58-97`）。
 - **专家 = batched GEMM + shared experts**：`TEGroupedMLP` 把 E 个专家拼成一次大矩阵乘（`experts.py:173`），shared expert 输出后加（`moe_layer.py:648-649`）。
 
-下一篇讲 **多模态（LLaVA）实现**：视觉编码器如何把图像 patch 变成 token、image token 和文本 token 怎么拼进同一个序列、以及多模态的数据/训练循环和纯文本有哪些不同。
+下一篇讲 **多模态（LLaVA）实现**：视觉编码器如何把图像 patch 变成 token、image token 和文本 token 怎么拼进同一个序列、以及多模态的数据/训练循环和纯文本有哪些不同，也就是《[多模态（LLaVA）实现]({{< relref "megatron-code-15-multimodal" >}})》。
 
 （本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`，对应文件 `megatron/core/transformer/moe/moe_layer.py`、`megatron/core/transformer/moe/router.py`、`megatron/core/transformer/moe/experts.py`、`megatron/core/transformer/moe/moe_utils.py`。）

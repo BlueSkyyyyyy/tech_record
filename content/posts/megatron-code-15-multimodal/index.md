@@ -130,4 +130,6 @@ per_tile = num_patches + (class_token_len if keep_class_token else 0)
 
 Megatron 的多模态实现没有发明新机制，而是**把 VLM 拆成「视觉编码器」和「语言模型」两个子网络，复用同一套 Transformer layer spec / 并行拓扑 / pipeline 基础设施**，再用一个投影层把它们缝起来。精华集中在 `_preprocess_data`——它用「负 index 占位 + 位置重排」的方式，把变长的图像 embedding 干净地嵌进定长的文本序列，同时正确维护了 label 左移和 loss mask。
 
+下一篇是本系列的收尾篇，讲 **Context Parallel（上下文并行）细节**：序列被切成多段分给不同 rank 后，attention 怎么跨段通信（all-gather K/V 还是 ring）、`context_parallel` 的 schedule 与前几篇的 TP/SP/PP 如何组装，也就是《[Context Parallel 细节]({{< relref "megatron-code-16-context-parallel" >}})》。
+
 （本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`；涉及文件：`megatron/core/models/multimodal/llava_model.py`、`megatron/core/models/vision/clip_vit_model.py`、`megatron/core/models/vision/multimodal_projector.py`、`megatron/core/tokenizers/vision/libraries/multimodal_tokenizer.py`。）
