@@ -3,6 +3,7 @@ title: "Flash Attention 精读（一）：从 softmax 的内存瓶颈到 online 
 date: 2026-08-28
 draft: false
 weight: 1
+series: ["flash-attention"]
 tags: ["flash-attention", "attention", "gpu", "softmax", "系列"]
 categories: ["算子开发"]
 ---

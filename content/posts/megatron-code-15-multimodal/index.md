@@ -5,6 +5,7 @@ draft: false
 tags: ["megatron-lm", "系列", "多模态", "训练框架"]
 categories: ["训练框架"]
 weight: 15
+series: ["megatron-code"]
 ---
 
 这是「Megatron-LM 源码精读」系列的第十五篇。前面 14 篇把语言模型的单模态训练管线（并行拓扑、重计算、优化器、MoE、蒸馏等）讲完了，本篇转向多模态（Vision-Language Model, VLM），聚焦 Megatron 内置的 LLaVA 实现（分析基准 commit `f713506ce`）：**一张图 + 一段文本，如何变成一条统一的 token 序列喂进语言模型**。核心代码在 `megatron/core/models/multimodal/llava_model.py`（1378 行）、`megatron/core/models/vision/`、`megatron/core/tokenizers/vision/`。

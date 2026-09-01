@@ -3,6 +3,7 @@ title: "Flash Attention 精读（五）：同一算法的四种写法 —— Til
 date: 2026-08-28
 draft: false
 weight: 5
+series: ["flash-attention"]
 tags: ["flash-attention", "tilelang", "gluon", "triton", "liger-kernel", "系列"]
 categories: ["算子开发"]
 ---

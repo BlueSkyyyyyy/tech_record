@@ -3,6 +3,7 @@ title: "Flash Attention 精读（四）：反向梯度推导与 recompute 实现
 date: 2026-08-28
 draft: false
 weight: 4
+series: ["flash-attention"]
 tags: ["flash-attention", "triton", "cuda", "attention", "autograd", "系列"]
 categories: ["算子开发"]
 ---

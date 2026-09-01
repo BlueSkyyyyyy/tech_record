@@ -3,6 +3,7 @@ title: "Flash Attention 精读（三）：FlashAttention-2/3 的 CUDA 前向实�
 date: 2026-08-28
 draft: false
 weight: 3
+series: ["flash-attention"]
 tags: ["flash-attention", "cuda", "cutlass", "hopper", "attention", "系列"]
 categories: ["算子开发"]
 ---
