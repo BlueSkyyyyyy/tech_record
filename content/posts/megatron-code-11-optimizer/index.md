@@ -150,6 +150,6 @@ shard_model_param = model_param.detach().view(-1)[
 - **layout 三细节**：反向遍历、bucket 结尾 pad 到 DP 整除、shared embedding 拆 bucket（`distrib_optimizer.py:547-565`）。
 - **六种 sharding 格式**：`sharded_state_dict` 按 `distrib_optim_sharding_type` 分派，返回惰性 `ShardedTensor`/`DTensor`，与 checkpoint 篇的 `save_checkpoint` 咬合（`distrib_optimizer.py:1514-1642`）。
 
-下一篇讲 **fused 算子**：MCore 里那些手写的 CUDA/融合 kernel（softmax、layernorm、rotary、moe 聚合等），说到底为什么要跟编译器抢活干、以及它们怎么和 `torch.autocast` 的调度协同。
+下一篇讲 **fused 算子**：MCore 里那些手写的 CUDA/融合 kernel（softmax、layernorm、rotary、moe 聚合等），说到底为什么要跟编译器抢活干、以及它们怎么和 `torch.autocast` 的调度协同，也就是《[fused 算子]({{< relref "megatron-code-12-fused-kernels" >}})》。
 
 （本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`，对应文件 `megatron/core/optimizer/distrib_optimizer.py`。）
