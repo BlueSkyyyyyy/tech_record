@@ -34,7 +34,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 
 配套代码：[code/flash-attention/](code/flash-attention/ref_impl.py)（纯 PyTorch 参考实现，含自测）
 
-### Megatron-LM 源码精读系列（19 篇）
+### Megatron-LM 源码精读系列（20 篇）
 
 1. [整体代码结构与启动链路](content/posts/megatron-code-01-structure/index.md)
 2. [模型并行的原理（TP/SP/PP/CP/DP/FSDP）](content/posts/megatron-code-02-parallel-principles/index.md)
@@ -55,6 +55,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 17. [MCore 架构与 layer spec 机制](content/posts/megatron-code-17-mcore-arch/index.md)
 18. [Pipeline 调度细节](content/posts/megatron-code-18-pipeline-schedule/index.md)
 19. [并行组装地图](content/posts/megatron-code-19-parallel-assembly/index.md)
+20. [通信与计算 overlap](content/posts/megatron-code-20-overlap/index.md)
 
 配套代码：[code/megatron-code/](code/megatron-code/README.md)（写作素材与源码分析笔记）
 
