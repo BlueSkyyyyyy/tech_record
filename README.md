@@ -57,6 +57,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 19. [并行组装地图](content/posts/megatron-code-19-parallel-assembly/index.md)
 20. [通信与计算 overlap](content/posts/megatron-code-20-overlap/index.md)
 21. [TP 通信原语与并行线性层](content/posts/megatron-code-21-tp-communication/index.md)
+22. [分布式 checkpoint 底层（dist_checkpointing）](content/posts/megatron-code-22-dist-checkpointing/index.md)
 
 配套代码：[code/megatron-code/](code/megatron-code/README.md)（写作素材与源码分析笔记）
 
