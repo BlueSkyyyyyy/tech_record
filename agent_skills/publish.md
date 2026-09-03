@@ -18,7 +18,7 @@
 
 1. **本地构建**（仓库根目录）：
    ```bash
-   cd /home/xieminglin/proj/tech_record
+   cd ~/tech_record
    /tmp/hugo_bin/hugo --gc --minify --baseURL "https://blueskyyyyyy.github.io/tech_record/"
    ```
    要求无 ERROR；新文章的目录应出现在 `public/posts/<slug>/`。

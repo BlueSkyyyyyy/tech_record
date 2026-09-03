@@ -16,8 +16,8 @@
 docker exec -it kimi26_train bash
 
 # 2. 把脚本拷进容器（或在容器内直接挂载宿主路径运行）
-#    脚本与本目录同步，直接在宿主侧写好的 /home/xieminglin/proj/tech_record/code/te-perf/ 下
-cd /home/xieminglin/proj/tech_record/code/te-perf
+#    脚本与本目录同步，直接在宿主侧写好的 ~/tech_record/code/te-perf/ 下
+cd ~/tech_record/code/te-perf
 
 # 3. 先做一次正确性校验（一次性跑通 API，确认无误）
 python bench_te.py --check

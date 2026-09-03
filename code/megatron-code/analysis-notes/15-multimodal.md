@@ -1,6 +1,6 @@
 # Megatron 的多模态模型实现
 
-> 基于本地仓库 `/home/xieminglin/proj/Megatron-LM`（commit f713506cea2e7705dd2ebb00c5c58a046ff974fe）精读。
+> 基于本地仓库 `~/Megatron-LM`（commit f713506cea2e7705dd2ebb00c5c58a046ff974fe）精读。
 > 核心结论：Megatron-Core 的多模态主线是 **LLaVA 风格的"encoder 侧外挂"架构**——vision/audio encoder 只活在 PP 第一个 stage，输出经 projector 对齐到 LM hidden size 后，在 embedding 层面把 `input_ids` 里的占位 token（-200）原位替换为图像 embedding，之后就是一个普通的 GPT 前向。真正精妙的部分全在这个"替换"和它在 TP/SP/CP/PP 下的分片上。
 
 ## 1. 支持的多模态模型清单

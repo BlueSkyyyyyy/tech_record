@@ -2,7 +2,7 @@
 
 对应博客系列「Megatron-LM 源码精读」（`content/posts/megatron-code-01` ~ `megatron-code-16`）。
 
-- 参考仓库：`/home/xieminglin/proj/Megatron-LM`
+- 参考仓库：`~/Megatron-LM`
 - 分析基准 commit：`f713506cea2e7705dd2ebb00c5c58a046ff974fe`（2026-08-31，`26.04-alpha.rc1-814-gf713506ce`）
 - 文章中源码引用格式：`文件路径:行号`，必要时附 GitHub 永久链接：
   `https://github.com/NVIDIA/Megatron-LM/blob/f713506cea2e7705dd2ebb00c5c58a046ff974fe/<path>#L<n>`
