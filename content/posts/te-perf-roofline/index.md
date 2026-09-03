@@ -22,20 +22,22 @@ Roofline 把一个算子归结到两个维度：**算术强度 AI（每搬运 1 
 
 两段的交点是 **ridge point（拐点）**，由峰值算力 ÷ 峰值带宽得到。本次在 H100 上取的常量：
 
-| 常量 | 值 |
-|---|---|
-| FP16/BF16 tensor-core peak | ≈ 989.4 TFLOPS（132 SM × 1.980 GHz，dense，不开 sparsity） |
-| FP32（CUDA-core FMA）peak | ≈ 66.9 TFLOPS |
-| HBM3 带宽 | ≈ 3.35 TB/s |
-| **ridge（FP16/BF16）** | **≈ 295 FLOP/byte** |
-| ridge（FP32） | ≈ 20 FLOP/byte |
+| 常量 | 值 | 谁用它 |
+|---|---|---|
+| FP16/BF16 tensor-core peak | ≈ 989.4 TFLOPS（132 SM × 1.980 GHz，dense，不开 sparsity） | MMA 类算子（fused_attn 的 QKᵀ/PV） |
+| FP32（CUDA-core FMA）peak | ≈ 66.9 TFLOPS | elementwise/scan 类算子（rmsnorm 三兄弟） |
+| HBM3 带宽 | ≈ 3.35 TB/s | 两类的内存天花板 |
+| **ridge（FP16/BF16）** | **≈ 295 FLOP/byte** | tensor core 的拐点 |
+| ridge（FP32） | ≈ 20 FLOP/byte | CUDA core 的拐点 |
 
-也就是说：AI 低于 295 FLOP/byte 的 FP16 算子一定是**内存受限**，理论上限就是 3.35 TB/s 那条斜线；AI 越过 295 之后才是**计算受限**。这个拐点非常陡（989.4 T / 3.35 T ≈ 295），意味着「是不是内存受限」这一个判断几乎决定了优化方向。
+这里要先分清两类硬件的**天花板**：FP16/BF16 矩阵法（`QKᵀ`、`PV`、GEMM）走 **tensor core**，峰值 989.4 TFLOPS；而 rmsnorm 这种逐元素扫描 + 归一的算子走的是 **CUDA core 的标量 FMA**，峰值只有 66.9 TFLOPS，对应的 ridge 也只有 20 FLOP/byte。
+
+也就是说：AI 低于 295 FLOP/byte 的 FP16 tensor-core 算子一定是**内存受限**，理论上限就是 3.35 TB/s 那条斜线；AI 越过 295 之后才是**计算受限**。这个拐点非常陡（989.4 T / 3.35 T ≈ 295），意味着「是不是内存受限」这一个判断几乎决定了优化方向。而 CUDA core 那条线虽然 ridge 只有 20，对 rmsnorm 却**无关紧要**——因为它的 AI 只有 0.25–0.67，连 20 都够不到，算力天花板根本摸不着（详见 §3 开头）。
 
 本次测的算子照 AI 从小到大排，正好横跨拐点两侧：
 
-- **rmsnorm 三兄弟**（fwd / bwd / bwd_add）：AI 只有 2–4 FLOP/byte（每个元素读一次、写一次，做几个乘加），远低于拐点 → 纯内存受限；
-- **fused_attn**：AI = `4·s²·h·d` 的量级（fwd 约 `4s` 每元素），随 seqlen 增长从 ~256 一路涨到 4096 FLOP/byte → 初始内存受限，seqlen 一大就翻进计算受限区。
+- **rmsnorm 三兄弟**（fwd / bwd / bwd_add）：AI 只有 0.25–0.67 FLOP/byte（每个元素读一次、写一次，外加几个乘加，FLOP 数远小于搬运字节数），远低于拐点 → 纯内存受限；
+- **fused_attn**：AI 随 seqlen 线性增长（fwd 总共 `4·b·s²·h·d` FLOP，fp16 下 AI ≈ `s/2` FLOP/byte，即 seqlen=512 时 256、8192 时 4096）→ 初始内存受限，seqlen 一大就翻进计算受限区。
 
 ## 2. 一个必须先扣掉的坑：launch overhead
 
@@ -54,9 +56,11 @@ minimal-kernel round-trip latency = 12.0 us/call
 | (128, 512) | fp32 | 17.9 | ≈ 5.9 µs |
 | (128, 512) | bf16/fp16 | 17.7 | ≈ 5.7 µs |
 
-**超过 2/3 的测时是启动开销**。`(128,512)` 一共才 64 万个元素、160 KB 数据，真正搬这份数据连 1 µs 都用不到——所以这类小 shape 测出来的「GB/s」奇低（29 GB/s 只有峰值带宽的 0.9%），不是 kernel 慢，是**根本没来得及跑满**。这也是为什么下面所有小 shape 的 `%BW` 数字都不具参考意义，要看大 shape 才收敛。
+**超过 2/3 的测时是启动开销**。`(128,512)` 一共才 65536（6.5 万）个元素，fp32 下 256 KB、bf16/fp16 下 128 KB，真正搬这份数据连 1 µs 都用不到——所以这类小 shape 测出来的「GB/s」奇低（fp32 是 29 GB/s、只有峰值带宽的 0.9%，fp16 更只到 14.8 GB/s / 0.4%），不是 kernel 慢，是**根本没来得及跑满**。这也是为什么下面所有小 shape 的 `%BW` 数字都不具参考意义，要看大 shape 才收敛。
 
 ## 3. 内存受限区：rmsnorm 三兄弟
+
+三个 rmsnorm kernel 都是逐元素乘加 + 沿行归一的 scan，走的是 **CUDA core 标量 FMA**（不走 tensor core，也没有能让 tensor core 发挥的矩阵结构）。它们的 AI 只有 0.25–0.67 FLOP/byte，靠上那张 66.9 TFLOPS / ridge=20 的「CUDA-core roofline」：即便把算力提升到 CUDA core 的 100%，性能上限也是 `3.35 TB/s × AI`，约 0.84–2.2 TB/s 这条斜线——**算力天花板根本碰不到，瓶颈从一开始就是带宽**。所以下面 rmsnorm 全部拿 `%BW`（带宽占比）说话，算力占比不提也罢。
 
 ### 3.1 rmsnorm_fwd
 
@@ -77,20 +81,20 @@ shape 一大，`%BW` 从 27% 一路爬到 73%，但**没到 100%**。rmsnorm 是
 
 1. **launch overhead 的残差**：12 µs 对 `(32768,2048)` 的 109 µs 已经只占 ~11%，但对中小 shape 影响仍在；
 2. **kernel 本身没做极致访存优化**：rmsnorm 要先把整行读进来算 `rsigma`，normalize 时可能再读一遍（取决于实现是否在寄存器/SMEM 里 hold 住），读放大就吃掉了带宽；
-3. **grid/CTA 调度的尾浪效应**：132 SM 分 32768 行，行粒度太小时 wave 数多、尾部不均衡。
+3. **fp16 固定行方向的网格划分**：TE 的 rmsnorm 按行划分 CTA，`(32768,2048)` 每个 SM 分 256 行、每行 2048 个元素恰好装满一个 warp 分段，读写仍有对齐/分摊损耗，离纯流式的 3.35 TB/s 还有一段距离。
 
 单看结论：**rmsnorm 这类内存受限算子，AI 定了上限之后，剩下的差距全是「搬字节的效率」，不是「算得快不快」**。
 
-### 3.2 rmsnorm_bwd：同样的内存受限，带宽反馈更差
+### 3.2 rmsnorm_bwd：同样内存受限，AI 略高、带宽略好
 
-bwd 的 AI = 0.33（fp32）/ 0.67（fp16），比 fwd 略高（因为要同时算 `dx` 和 `dw`），但依旧远在拐点左侧。同样的 `(32768, 2048)`：
+bwd 的 AI = 0.33（fp32）/ 0.67（fp16），比 fwd 略高（因为要多算 `dx` 与 `dw` 两路），但依旧远在拐点左侧。同样的 `(32768, 2048)`：
 
 | kernel | fp16 GB/s | %BW |
 |---|---|---|
 | rmsnorm_fwd | 2458 | 73.4% |
 | rmsnorm_bwd | 2551 | 76.1% |
 
-bwd 要额外读 `rsigma`、额外写 `dw`，但 `dw` 是沿列 reduce 一条向量、摊到每行就很小。整体带宽反而略高，是因为 bwd 每元素多做了几个乘加（AI 0.67 对 0.50），同样的带宽下「有效吞吐」更高。
+bwd 要额外读 `rsigma`、额外写 `dw`，但 `dw` 是沿列 reduce 一条向量、`rsigma` 每行一个标量，摊到每行就很小，所以访存总量只比 fwd 多了约一半（AI 0.67 对 0.50 也印证了这点）。`%BW` 反比 fwd 略高 2.7 个百分点，一是因为 AI 略高、同样带宽下「有效算力」更高，二是扣掉 12 µs 固定开销后，bwd 纯内核时间（~146 µs）比 fwd（~97 µs）长，launch overhead 的相对拖累更小。
 
 ### 3.3 rmsnorm_bwd_add：融合残差反向量，AI 回落但带宽更高
 
@@ -114,13 +118,13 @@ dx = dx1 + dx2                                     # 又一次读写
 两点值得注意：
 
 1. **绝对时间变长了**（158 → 194 µs），因为它确实多读了一个 `add` 张量（AI 从 0.67 掉回 0.50，同样的元素数、多读一路数据）；
-2. **但等效带宽反而更高**（76% → 83%），因为多读的 `add` 是顺序流式访问，把 HBM 吞吐推得更满。
+2. **但等效带宽反而更高**（76% → 83%）。原因不是它「访问更聪明」，而是测出来的 `GB/s` 本来就混进了 12 µs 的固定开销：`rmsnorm_bwd` 纯内核 ~146 µs、`rmsnorm_bwd_add` 纯内核 ~182 µs，前者被 launch overhead 拉低的相对幅度更大。同时多读的一路 `add` 让稳态流式访问占比更高、访存更「顺」，所以跑到这个量级的 shape，`%BW` 比单纯的 bwd 更贴近峰值。这也提醒：**用含 launch 的 `/ (t)` 去比带宽，对小 shape 不公平，应该扣掉 12 µs 再算**。
 
 融合的价值要跟「不融合」比：不融合时你得跑 `rmsnorm_bwd`（158 µs）+ add 反向（一次全量读写，约再一个 fwd 量级）+ 累加，总耗时显著超过 194 µs。所以 **`rmsnorm_bwd_add` 的意义不是更快地做同一个数学，而是把原本 2–3 个 kernel 串起来的内存流量压进 1 个 kernel**——这正是 Megatron 里 `LayerNormMLP` 之类把残差融合进 norm 反向的收益来源。
 
 ## 4. 计算受限区：fused_attn 穿越拐点
 
-attention 的 AI 随 seqlen 线性增长（fwd 每元素约 `4s`，bwd 约 `8s`）。我们用 seqlen 从 512 一路拉到 8192，观察它从内存受限翻进计算受限：
+attention 的 AI 随 seqlen 线性增长（fwd 总共 `4·b·s²·h·d` FLOP，按「每元素」即 AI = `s/es`，fp16 下 = `s/2`；bwd 约 2 倍）。我们用 seqlen 从 512 一路拉到 8192，观察它从内存受限翻进计算受限：
 
 | (batch, seq, head, dim) | fwd TFLOPS | %TC |
 |---|---|---|
@@ -136,9 +140,9 @@ attention 的 AI 随 seqlen 线性增长（fwd 每元素约 `4s`，bwd 约 `8s`�
 
 三个观察：
 
-1. **AI 穿越拐点**：小 seqlen 时 AI=256、落在斜线上（内存受限，`%TC` 才 5%）；seqlen 一过 1024，AI 超过 295，翻上平顶，`%TC` 逼近 95%+——完全符合 roofline 的分段预测。
-2. **batch 比 seqlen 更早把利用率拉满**：`(1,2048)`→`(2,2048)`→`(4,2048)`→`(8,2048)` 的 `%TC` 从 43% 单调爬到 95%，因为 batch 增长时 AI 不变（仍是 1024），但**并行度和占用率**上去了，尾浪被填平。
-3. **`(4,8192)` 出现 112.9% > 100%**：这暴露了 TFLOPS 口径的问题——我按 `4·b·s·h·d`（几何定义的 FLOP，没算 softmax、dropout 的额外算力，也没扣 causal mask 浪费的那一半）,实际 kernel 干的活更多。同时 8192 seq 下中间矩阵放不进 L2，读写压力反噬。所以这里「超 100%」不是真超额，是**口径偏乐观 + 大 seqlen 记忆墙**共同造成的。
+1. **AI 穿越拐点**：小 seqlen 时 AI=256（< 295）、落在斜线上（内存受限，`%TC` 才 5%）；seqlen 一过 1024，AI 超过 295，翻上平顶，`%TC` 逼近 95%+——完全符合 roofline 的分段预测。
+2. **batch 与 seqlen 的作用不同**：seqlen 涨会同时推高 AI（翻倍）和总 FLOP；而 batch 涨只增加并行度、AI 不变（仍是 1024）。`(1,2048)`→`(2,2048)`→`(4,2048)`→`(8,2048)` 的 `%TC` 从 43% 单调爬到 95%，纯靠**占用率**上来、尾浪被填平。对比 `(1,4096)`（77.6%）比 `(2,2048)`（62.0%）高，正是 seqlen 拉高 AI 的结果。
+3. **`(4,8192)` 出现 112.9% > 100%**：这暴露了 TFLOPS 口径的问题。我按 `4·b·s·h·d` 计几何 FLOP，但对 causal attention 而言只算**下三角** `s(s+1)/2` 个位置是有用的，掩掉的上三角接近一半——也就是说几何口径把 FLOP **高估了约 2 倍**；把这个修正回来，`(4,8192)` 的真实利用率其实落在 ~56% 上下，并不是真超额。而之所以大 seqlen 反而缩水，是 8192 seq 下中间 S/P 矩阵（`b·s·h·s` 个 fp16 ≈ 4×8192×16×8192×2 ≈ 8.6 GB）远超 L2（50 MB），读写压力反噬。所以「超 100%」是**口径偏乐观 + 大 seqlen 记忆墙**共同造成的假象。
 
 ### 4.1 fused_attn_bwd：约 2× fwd 的算力，但 `%TC` 整体更低
 
@@ -157,8 +161,8 @@ bwd 打不满的原因：forward 只写一次 O，backward 要写 `dQ/dK/dV` 三
 把整张图收敛成一句话：**rmsnorm 弟兄差在「搬字节的效率」，attn 差在「口径和记忆墙」，小 shape 差在「启动开销」**。具体：
 
 - **launch overhead（~12 µs/call）**：小 shape 的绝对误差来源，测 kernel 前必须先扣；
-- **内存受限区未饱和**：rmsnorm 最大 ~73–83% BW，来自读放大、尾浪、以及 bwd_add 多读一路 add 带来的流量；
-- **计算受限区口径偏差 + 记忆墙**：`%TC` 的 `>100%` 是几何 FLOP 口径乐观所致；大 seqlen 的中间矩阵溢出 L2 后，实测会被带宽反噬。
+- **内存受限区未饱和**：rmsnorm 最大 ~73–83% BW，来自读放大、行粒度网格划分的访存分摊，以及 bwd_add 多读一路 add 带来的流量；
+- **计算受限区口径偏差 + 记忆墙**：`%TC` 的 `>100%` 是几何 FLOP 没扣 causal mask 下三角约一半的浪费、导致 FLOP 高估近 2 倍所致；大 seqlen 的中间 S/P 矩阵溢出 L2 后，实测会被带宽反噬。
 
 **下一步**：把这张 roofline 图、尤其 `rmsnorm_bwd_add` 这类融合核的「带宽高效但流量更大」结论，进一步落到 TE 的真实模块（`LayerNormMLP`、`TransformerLayer` 的 memory 瓶颈），并纳入 PyTorch 的 CUDA Graph / greedy 流式复用来摊薄 launch overhead。
 
