@@ -1,4 +1,4 @@
-# Copyright (c) 2026, merlin. All rights reserved.
+# Copyright (c) 2026. All rights reserved.
 #
 # Benchmark TransformerEngine kernels:
 #   - te.rmsnorm (rmsnorm_fwd)
