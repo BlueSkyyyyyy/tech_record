@@ -34,7 +34,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 
 配套代码：[code/flash-attention/](code/flash-attention/ref_impl.py)（纯 PyTorch 参考实现，含自测）
 
-### Megatron-LM 源码精读系列（24 篇）
+### Megatron-LM 源码精读系列（25 篇）
 
 1. [整体代码结构与启动链路](content/posts/megatron-code-01-structure/index.md)
 2. [模型并行的原理（TP/SP/PP/CP/DP/FSDP）](content/posts/megatron-code-02-parallel-principles/index.md)
@@ -60,6 +60,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 22. [分布式 checkpoint 底层（dist_checkpointing）](content/posts/megatron-code-22-dist-checkpointing/index.md)
 23. [Mamba/SSM 与 Hybrid 模型](content/posts/megatron-code-23-mamba-ssm-hybrid/index.md)
 24. [显存估算：精度、并行与激活的完整账本](content/posts/megatron-code-24-memory-estimation/index.md)
+25. [一步训练耗时估算：计算、通信与气泡的完整账单](content/posts/megatron-code-25-step-time-estimation/index.md)
 
 配套代码：[code/megatron-code/](code/megatron-code/README.md)（写作素材与源码分析笔记）
 
