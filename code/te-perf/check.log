@@ -4,7 +4,7 @@ SMs: 132, CC: 9.0
 ==============================================================================
 KERNEL LAUNCH OVERHEAD (trivial fill_)
 ==============================================================================
-minimal-kernel round-trip latency = 11.9 us/call
+minimal-kernel round-trip latency = 12.0 us/call
 (this is the fixed cost mixed into every measured kernel time;
  subtract it to isolate the true kernel execution time for small shapes)
 

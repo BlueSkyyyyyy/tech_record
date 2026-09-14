@@ -73,6 +73,51 @@ python bench_te.py --attn-only --warmup 10 --repeat 100 --csv attn.csv
 - 与 roofline 的差距主要来自：launch overhead（小 shape）、未完全饱和的带宽、
   causal mask 的 wasted FLOPs、backward 的额外访存、以及 kernel 实现本身的效率。
 
+## 用 ncu / Nsight Systems 剖析单个算子
+
+脚本里的计时是「墙钟中位数」，只能拿到总耗时，看不到带宽/占用率/停顿原因等细节。
+要诊断单个 kernel（例如 `rmsnorm_bwd` 4096×4096），用 Nsight 工具深入剖析：
+
+### ncu（Nsight Compute，看单 kernel 的 GPU 内部指标）
+
+先写一个只跑目标算子的最小脚本 `prof_single.py`（已提供），避免 bench 里一大堆 kernel 互相干扰：
+
+```bash
+# bf16 反传，单 kernel profile（--launch-skip 4 跳过前面 randn/warmup 的 kernel）
+ncu --set full --kernel-name regex:"rmsnorm" \
+    --launch-count 1 --launch-skip 4 \
+    python prof_single.py --rows 4096 --cols 4096 --dtype bfloat16 --bwd --iters 10
+
+# 只看关键指标（速度/DRAM带宽/SM吞吐/活跃warp/占用率）
+ncu --metrics gpu__time_duration.avg,dram__throughput.avg.pct_of_peak_sustained_elapsed,sm__throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_active,sm__mix_inst_stranded.avg.pct_of_peak_sustained_active \
+    --kernel-name regex:"rmsnorm" --launch-count 1 --launch-skip 4 \
+    python prof_single.py --rows 4096 --cols 4096 --dtype bfloat16 --bwd --iters 10
+```
+
+rmsnorm 是**内存受限**算子，重点读 ncu 报告的 **SpeedOfLight** 与 **Memory Workload
+Analysis** 两节：
+
+- `dram__throughput` 应接近 HBM 峰值（H100 ≈ 3.35 TB/s）
+- `sm__throughput` 通常很低（被访存拖住，属正常）
+- 「actual / peak DRAM 带宽」即算子的真实带宽利用率，可对照 bench 打印的 `%BW`
+
+### Nsight Systems（nsys，看端到端时间线，不是看单算子性能）
+
+`nsys` 记录的是**时间线**（kernel 起止、内存拷贝、API 调用、调度重叠），用来分析并发/气泡/开销，
+**不用来做单算子的性能剖析**（它拿不到 SM 内部指标）。适合看：
+
+- 每个 kernel 的启动顺序与耗时（对应 wall-clock 时间）
+- kernel 之间是否有空闲气泡、是否与 H2D/D2H 拷贝重叠
+- launch overhead 与任务排队情况
+
+```bash
+# 端到端跑一遍 bench，抓时间线
+nsys profile --stats=true -o rmsnorm_bwd \
+    python prof_single.py --rows 4096 --cols 4096 --dtype bfloat16 --bwd --iters 10
+```
+
+结论：**单算子性能用 ncu**（SM/DRAM 指标），**端到端时序/并发用 nsys**。
+
 ## 说明
 
 - 使用 CUDA event 计时，warmup + 多次取中位数，避免首跑抖动。
