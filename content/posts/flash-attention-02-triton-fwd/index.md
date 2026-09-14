@@ -12,6 +12,8 @@ categories: ["算子开发"]
 
 建议对照[第 1 篇]({{< relref "flash-attention-01-theory" >}})的递推公式阅读：本篇的每一节都是"公式 → 代码"的映射。
 
+> 行号基于本地带中文注译的 `06-fused-attention.py`（Triton commit `932ceaa2b` + 注解）。上游 Triton 会持续更新该教程，行号可能漂移，读者以函数名定位即可。
+
 ## 1. 文件鸟瞰
 
 | 区段 | 行号 | 内容 |
@@ -23,6 +25,8 @@ categories: ["算子开发"]
 | `_attention` | L755–905 | `torch.autograd.Function` 封装 |
 
 前向的数据流一句话：**grid 维度并行 Q 块，循环维度串行 KV 块，三组寄存器状态（$m_i, \ell_i, \mathrm{acc}$）贯穿始终**。
+
+如果把第 1 篇的数学比作"菜谱"，这一篇就是"看厨师怎么颠勺"——同一个算法，落到真实指令上会多出一堆菜谱里不会写的讲究。我们跟着**一个 Q 块**从头走到尾：它怎么被派活、怎么记账、怎么处理边角料（掩码）、最后怎么装盘（归一化）。
 
 ## 2. 主 kernel `_attn_fwd`：并行结构
 
@@ -56,6 +60,8 @@ $$
 
 第一次迭代"自动退化"成普通计算，**不需要为第 0 块写特殊分支**。$\ell_i = 1.0$ 的作用是让被清零的旧值乘出来还是 0——数学上无所谓，代码上省一个 if。
 
+**为什么是 1 不是 0？** 因为 $\ell_i$ 要参与"旧值 × α + 新值"的累加，初值取 0 时公式写成 $\ell_i \leftarrow 0\times0 + \ell_{ij}$ 也对；取 1 只是让"空账本"这个占位值也有个好乘性。真正让第一块自动生效的是 $m_i=-\infty$ 带来的 $\alpha=0$——它把"还没有旧账"这件事编码进了一个乘法因子。**用数值本身表达控制流，是 kernel 代码的常见美学**。
+
 ### 2.3 scale 的折叠（L362–363）
 
 ```python
@@ -74,7 +80,7 @@ qk_scale = sm_scale * 1.44269504   # sm_scale / ln(2)
 for start_n in tl.range(lo, hi, BLOCK_N, warp_specialize=...):
 ```
 
-`tl.range` 的 `warp_specialize=True`（Hopper/Blackwell）让 Triton 把"加载 K/V"与 `tl.dot` 分派给不同 warp 组，形成软件流水（producer–consumer）。函数签名里 `offs_m / offs_n` 声明为 `tl.constexpr`（L70），让 mask 比较与地址计算在编译期折叠。
+`tl.range` 的 `warp_specialize=True`（Hopper/Blackwell）让 Triton 把"加载 K/V"与 `tl.dot` 分派给不同 warp 组，形成软件流水（producer–consumer）。**这就像后厨把"进货"和"炒菜"分成两个人**：一个专门跑仓库搬食材（producer），另一个只管掌勺（consumer），谁也不必停下来等对方——灶上的火因此几乎不停。函数签名里 `offs_m / offs_n` 声明为 `tl.constexpr`（L70），让 mask 比较与地址计算在编译期折叠。
 
 循环体一次处理一个 `[BLOCK_N, d]` 的 K/V 块，对照第 1 篇的框式递推：
 
@@ -122,6 +128,8 @@ acc = tl.dot(p, v, acc)                 # acc += P_block @ V_block
 ## 4. STAGE 两遍遍历：causal 的块级跳过（L91–100, L372–392）
 
 教程版最漂亮的结构设计。STAGE 是**位标志**：bit0 = off-band 遍历，bit1 = on-band 遍历。
+
+用读书打比方：causal 下每个 query 只允许看它前面的 key。当前 Q 块（一排 query）对应到 key 序列上，会切出三类"页"——**完全在前面、人人可看的**（off-band）、**压在折痕上、得逐行划线的**（on-band），以及**完全在后面、压根不该读的**。STAGE 的两遍遍历就是把"读"和"遮"彻底分开：绝大多数页不需要任何判定，只有折痕那一页才付出 mask 的代价。
 
 - **STAGE=1（非 causal）**：一次调用 inner，`lo, hi = 0, N_CTX`，全程无 mask。
 - **STAGE=3（causal）**：两次调用 inner——

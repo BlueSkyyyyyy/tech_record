@@ -109,6 +109,8 @@ gl.warp_specialize([
 
 15 个 warp 各司其职，寄存器预算极不均匀：两个 softmax partition 各 4 warp × 192 寄存器（重 SFU/向量计算），mma/load/epilogue 各 1 warp × 24 寄存器（只发异步指令，几乎不携状态）。这种"算力的不对称分配"在传统 Triton 里是编译器内部启发式，现在由用户直接排表（经 SASS `setmaxnreg` 动态再分配）。
 
+打个比方：传统 Triton 像跟司机说一句"**开快点**"，剩下交给他的经验；Gluon 则是你自己排好整张发车时刻表——谁几点发车、走哪条车道、加多少油（寄存器），全写死在代码里。**自由度换控制力**，这就是它敢收 3 倍代码量的底气。
+
 ### 2.2 Channel：手写生产者-消费者框架
 
 `num_stages=3` 在 Gluon 里没有对应物。替代品是 L84–174 的 `Channel` 泛型——一块多缓冲存储 + ready/empty 两组 mbarrier + 环形游标，被实例化为 `SharedMemoryChannel` 和 `TensorMemoryChannel` 两种（SMEM 和 TMEM 用同一套协议）。流水线深度变成**逐 channel 独立调参**：Q 2 个缓冲、KV 2~8 个（host 侧按 head_dim/dtype/causal 精调）、S 即产即销 1 个。Producer 等 `empty` 返回 `ready`，consumer 反之——教科书级的 handoff 协议，90 行框架代码换来的是流水线正确性自负。
@@ -180,3 +182,5 @@ Liger 的代码组织是一套优秀的五层模板（ops 层 kernel + autograd�
 **工程层**：让数学落到硅上的是一整套"分块 + 异步 + 精度边界"的决策——哪些量留在寄存器（$m, \ell, \mathrm{acc}$）、哪些降精度（只降 tensor core 操作数）、哪些提前算（LSE、$\Delta$）、哪些循环跳过（causal 对角带外）。每一层的实现，无论 Triton、CUDA、TileLang 还是 Gluon，都在回答同一组问题，只是给出答案的自由度不同。
 
 配套代码与基准脚本见仓库 [code/](https://github.com/BlueSkyyyyyy/tech_record/tree/main/code) 目录。
+
+到这里，前向的四种写法已经走完。但官方仓库里还藏着两件本篇没有展开的事：**这些文件在真实仓库里如何被组织、编译、调度**，以及**反向传播在每一代硬件上到底被写成了什么样**。分别见[第 6 篇：官方仓库源码全景]({{< relref "flash-attention-06-official-code" >}})与[第 7 篇：反向传播深潜]({{< relref "flash-attention-07-bwd-deep" >}})。
