@@ -40,11 +40,20 @@ python bench_te.py --attn-only --warmup 10 --repeat 100 --csv attn.csv
   `(128,512) (256,512) (64,1024) (128,1024) (512,512) (1024,512) (1024,1024)
    (1024,2048) (2048,1024) (2048,2048) (4096,2048) (4096,4096) (8192,2048)
    (8192,4096) (16384,2048) (32768,2048)`，精度覆盖 `fp32 / bf16 / fp16`。
-- **fused_attn fwd/bwd** shape 为 `(batch, seqlen, num_heads, head_dim)`，包含
+- **fused_attn fwd/bwd** shape 为 `(batch, seqlen, num_heads, qk_head_dim[, v_head_dim])`，
+  4 元组为普通 MHA（qk==v），5 元组为 MLA（qk≠v）。包含
   `(1,512,16,128) (1,1024,16,128) (1,2048,16,128) (2,2048,16,128) (4,2048,16,128)
    (8,2048,16,128) (1,4096,16,128) (2,4096,16,128) (4,1024,32,128)
    (8,1024,32,128) (4,8192,16,128)`，
+  以及生产模型形状（batch=1, seq=4096）：
+  - `(1,4096,64,192,128)` — Kimi-K2.6 MLA（qk=nope128+rope64=192，v=128，64 头）；
+  - `(1,4096,64,128,128)` — dsv4 DSA indexer（64 头，head_dim=128）；
+  - `(1,4096,32,128,128)` — dsv4.1 DSA indexer（32 头，head_dim=128）。
+
   精度覆盖 `bf16 / fp16`，mask 为 causal，bias 为 no_bias，training=True，dropout=0。
+  **限制**：dsv4 / dsv4.1 主注意力 `head_dim=512`（qk=448+64，v=512）超出 TE fused_attn
+  在 H100 上的支持范围（最大 256，且 `qk=256,v=128` 也不支持），这两个模型实际用自研
+  CSA/DSA 稀疏注意力 kernel，无法用 TE fused_attn 测试，故只测其 DSA indexer。
 
 ## 指标口径
 

@@ -176,12 +176,24 @@ def bench_rmsnorm_bwd_add(shape, dtype, timer):
 # --------------------------------------------------------------------------- #
 # fused attention fwd / bwd  (training, causal, dropped 0)
 # --------------------------------------------------------------------------- #
-def bench_fused_attn(shape, dtype, timer, do_backward=False):
-    bs, seqlen, num_heads, head_dim = shape
+def attn_dims(shape):
+    """shape = (batch, seqlen, num_heads, qk_head_dim[, v_head_dim]).
 
-    q = torch.randn(bs * seqlen, num_heads, head_dim, device="cuda", dtype=dtype)
-    k = torch.randn(bs * seqlen, num_heads, head_dim, device="cuda", dtype=dtype)
-    v = torch.randn(bs * seqlen, num_heads, head_dim, device="cuda", dtype=dtype)
+    The 4-tuple form is plain MHA (qk == v head dim). The 5-tuple form carries a
+    separate v head dim for MLA (e.g. Kimi-K2.6 qk=192, v=128); TE fused_attn
+    accepts q/k and v with different last dims.
+    """
+    bs, seqlen, num_heads, qk_dim = shape[0], shape[1], shape[2], shape[3]
+    v_dim = shape[4] if len(shape) > 4 else qk_dim
+    return bs, seqlen, num_heads, qk_dim, v_dim
+
+
+def bench_fused_attn(shape, dtype, timer, do_backward=False):
+    bs, seqlen, num_heads, qk_dim, v_dim = attn_dims(shape)
+
+    q = torch.randn(bs * seqlen, num_heads, qk_dim, device="cuda", dtype=dtype)
+    k = torch.randn(bs * seqlen, num_heads, qk_dim, device="cuda", dtype=dtype)
+    v = torch.randn(bs * seqlen, num_heads, v_dim, device="cuda", dtype=dtype)
 
     cu_seqlens = torch.arange(0, (bs + 1) * seqlen, seqlen, dtype=torch.int32, device="cuda")
     max_seqlen = seqlen
@@ -215,10 +227,10 @@ def bench_fused_attn(shape, dtype, timer, do_backward=False):
         mean, med, _ = timer.time(fn_fwd)
         ms = med
         # q + k + v read, o write (approx; s/m intermediate ignored)
-        gb = (bytes_of(q) * 3 + bytes_of(out)) / 1e9
+        gb = (bytes_of(q) + bytes_of(k) + bytes_of(v) + bytes_of(out)) / 1e9
         gb_s = gb / (ms / 1e3)
-        # FLOPs: QK^T (2*b*s*h*s*d) + PV (2*b*s*h*s*d) = 4*b*s*h*s*d
-        flops = 4 * bs * seqlen * num_heads * seqlen * head_dim
+        # FLOPs: QK^T (2*b*s*h*s*qk_dim) + PV (2*b*s*h*s*v_dim)
+        flops = 2 * bs * seqlen * num_heads * seqlen * (qk_dim + v_dim)
         tflops = flops / (ms / 1e3) / 1e12
         return {"mean_ms": mean, "med_ms": med, "gb_s": gb_s, "gb": gb, "tflops": tflops}
 
@@ -238,10 +250,12 @@ def bench_fused_attn(shape, dtype, timer, do_backward=False):
 
     mean, med, _ = timer.time(fn_bwd)
     ms = med
-    gb = (bytes_of(q) * 3 + bytes_of(out) + bytes_of(d_out) + bytes_of(q) * 3) / 1e9
+    # read q,k,v,o,d_o; write dq,dk,dv
+    gb = (bytes_of(q) + bytes_of(k) + bytes_of(v) + bytes_of(out) + bytes_of(d_out)
+          + bytes_of(q) + bytes_of(k) + bytes_of(v)) / 1e9
     gb_s = gb / (ms / 1e3)
-    # FLOPs: backward ~ 2x forward = 8*b*s*h*s*d
-    flops = 8 * bs * seqlen * num_heads * seqlen * head_dim
+    # FLOPs: backward ~ 2x forward = 4*b*s*h*s*(qk_dim + v_dim)
+    flops = 4 * bs * seqlen * num_heads * seqlen * (qk_dim + v_dim)
     tflops = flops / (ms / 1e3) / 1e12
     return {"mean_ms": mean, "med_ms": med, "gb_s": gb_s, "gb": gb, "tflops": tflops}
 
@@ -303,7 +317,8 @@ def main():
     ]
     dtypes = [torch.float32, torch.bfloat16, torch.float16]
 
-    # attention shapes: (batch, seqlen, num_heads, head_dim)
+    # attention shapes: (batch, seqlen, num_heads, qk_head_dim[, v_head_dim])
+    # The 4-tuple form is plain MHA; the 5-tuple form is MLA (qk != v).
     attn_shapes = [
         (1, 512, 16, 128),
         (1, 1024, 16, 128),
@@ -316,6 +331,14 @@ def main():
         (4, 1024, 32, 128),
         (8, 1024, 32, 128),
         (4, 8192, 16, 128),
+        # production models (batch=1, seq=4096):
+        # NOTE: dsv4/dsv4.1 MLA core attention uses head_dim=512 (qk=448+64, v=512),
+        #       which TE fused_attn does NOT support (H100 max 256); those models run
+        #       their sparse attention with custom CSA/DSA kernels. What TE *can* run
+        #       for them is the DSA indexer (head_dim=128).
+        (1, 4096, 64, 192, 128),  # Kimi-K2.6 MLA: qk=nope128+rope64=192, v=128, 64 heads
+        (1, 4096, 64, 128, 128),  # dsv4 DSA indexer: 64 heads, head_dim=128
+        (1, 4096, 32, 128, 128),  # dsv4.1 DSA indexer: 32 heads, head_dim=128
     ]
     attn_dtypes = [torch.bfloat16, torch.float16]
 
@@ -409,10 +432,10 @@ def main():
         print(f"{'shape':<22} {'dtype':<10} {'time(us)':>9} {'TFLOPS':>10} {'%TC':>6} {'GB/s':>12} {'AI(flop/B)':>10}")
         for shape in attn_shapes:
             for dt in attn_dtypes:
-                bs, s, nh, hd = shape
+                bs, s, nh, qk_dim, v_dim = attn_dims(shape)
                 r = bench_fused_attn(shape, dt, timer, do_backward=False)
                 results.append(("fused_attn_fwd", shape, str(dt), r))
-                flops = 4 * bs * s * nh * s * hd
+                flops = 2 * bs * s * nh * s * (qk_dim + v_dim)
                 ai = flops / (r["gb"] * 1e9)
                 print(f"{str(shape):<22} {str(dt):<10} {r['med_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
                       f"{r['tflops']/H100['fp16_tflops']*100:>5.1f}% {r['gb_s']:>12.1f} {ai:>10.1f}")
@@ -421,10 +444,10 @@ def main():
         print(f"{'shape':<22} {'dtype':<10} {'time(us)':>9} {'TFLOPS':>10} {'%TC':>6} {'GB/s':>12} {'AI(flop/B)':>10}")
         for shape in attn_shapes:
             for dt in attn_dtypes:
-                bs, s, nh, hd = shape
+                bs, s, nh, qk_dim, v_dim = attn_dims(shape)
                 r = bench_fused_attn(shape, dt, timer, do_backward=True)
                 results.append(("fused_attn_bwd", shape, str(dt), r))
-                flops = 8 * bs * s * nh * s * hd
+                flops = 4 * bs * s * nh * s * (qk_dim + v_dim)
                 ai = flops / (r["gb"] * 1e9)
                 print(f"{str(shape):<22} {str(dt):<10} {r['med_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
                       f"{r['tflops']/H100['fp16_tflops']*100:>5.1f}% {r['gb_s']:>12.1f} {ai:>10.1f}")
