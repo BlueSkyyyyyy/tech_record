@@ -10,9 +10,13 @@ categories: ["算子开发"]
 
 [第 2 篇]({{< relref "flash-attention-02-triton-fwd" >}})的 Triton 教程版把算法讲透了，但生产环境跑的是 CUDA。本篇精读官方仓库的两套前向实现：**FA2**（`csrc/flash_attn/src/flash_fwd_kernel.h`，Ampere/Hopper 通用）和 **FA3**（`hopper/`，Hopper 专属）。数学完全同前两篇，本篇要看的是：**同一份递推式，在"没有编译器帮忙"的层面如何被榨到硬件极限**。
 
+> 本篇及后续涉及的行号，均以官方仓库 commit `8d3a3b8`（2026-09-13）为准；仓库持续演进，行号可能随版本漂移，读者可对照同名文件定位。
+
 一个总纲先立在此处，读完回来再看会更有感觉：
 
-> FA2 的性能来自三件套——online softmax 消灭 HBM 中间矩阵、P fragment 零拷贝复用、1.5 级 cp.async 流水；**所有 warp 干同样的活**。FA3 把 attention kernel 彻底 GEMM 化：TMA 把加载从线程剥离、GMMA 让 smem 直读、warp specialization 让加载/GEMM/softmax 三类指令真正并行，再用 persistent 调度榨 L2。分水岭是"对称分工"到"角色分工"。
+> 如果说 Triton 版是"写个菜谱让厨房自己发挥"，CUDA 版就是"把每个厨师的站位、动作、交接时刻都写死"。**FA2 像一支划艇队**：所有 warp 喊着号子整齐划桨，靠精妙的队形（MMA 布局）让配合零成本；**FA3 像一条流水线**：有人搬料、有人掌勺、有人装盘，各司其职，靠"别让任何人闲着"榨出最后一点性能。分水岭就是"对称分工"到"角色分工"。
+
+具体到机制：FA2 的性能来自三件套——online softmax 消灭 HBM 中间矩阵、P fragment 零拷贝复用、1.5 级 cp.async 流水。FA3 则把 attention 彻底 GEMM 化：TMA 把加载从线程剥离、GMMA 让 smem 直读、warp specialization 让加载/GEMM/softmax 三类指令真正并行，再用 persistent 调度榨 L2。
 
 ## 1. FA2：`flash_fwd_kernel.h`
 
@@ -46,13 +50,17 @@ epilogue 的 `normalize_softmax_lse`（L170–186）做 quad 内 shuffle 归约�
 
 ### 1.4 细节一：softmax 归约不需要跨 warp 通信
 
-m16n8k16 MMA 的 accumulator 布局里，**一行的 8 个列元素恰好由同一 quad 的 4 个线程持有**（`lane%4 = 0..3`）。于是行 max/行 sum 的归约只需：线程内归约（`thread_reduce_`）→ quad 内 4 线程蝶形 shuffle（`Allreduce<4>`，`__shfl_xor_sync`）。**一次跨 warp 通信都没有**——softmax 的通信成本被 MMA 布局本身消化了。第 5 篇会看到 Gluon 干脆让"布局"成为用户显式声明的类型。
+m16n8k16 MMA 的 accumulator 布局里，**一行的 8 个列元素恰好由同一 quad 的 4 个线程持有**（`lane%4 = 0..3`）。于是行 max/行 sum 的归约只需：线程内归约（`thread_reduce_`）→ quad 内 4 线程蝶形 shuffle（`Allreduce<4>`，`__shfl_xor_sync`）。**一次跨 warp 通信都没有**——softmax 的通信成本被 MMA 布局本身消化了。
+
+换句话说：**数据正好摆在自家人手边，就不用打电话到处问**。这也是本章反复出现的一条暗线——很多"优化"的本质，是让需要的数恰好长在该在的地方。第 5 篇会看到 Gluon 干脆让"布局"成为用户显式声明的类型。
 
 ### 1.5 细节二：P fragment 的零拷贝复用（RS mma）
 
 SM80 HMMA 的操作数必须在寄存器，而 smem 里的 K/V 要经 ldmatrix 搬运。第一个 GEMM（QK^T）每个 k 步都走 `SM75_U32x4_LDSM_N`（ldmatrix）进寄存器再 mma，`gemm()` 里还做了软件流水（第 i 步 mma 同时预取第 i+1 步的 fragment）。
 
-关键在第二个 GEMM（PV）：`convert_layout_acc_Aregs`（`utils.h` L199–212）把 QK^T accumulator 的布局 $(\mathrm{MMA}=4, \mathrm{MMA\_M}, \mathrm{MMA\_N})$ **重排成 HMMA A 操作数布局** $((4,2), \mathrm{MMA\_M}, \mathrm{MMA\_N}/2)$——于是算出来的 $P$（寄存器里的 exp2 结果）**零拷贝直通**第二个 GEMM 的 A 操作数（`gemm_rs`，"RS" = A 在寄存器、B 在 smem）。V 侧则用 `ldmatrix.trans` 直接读 smem 的转置视图，免掉显式转置。这是 FA2 最关键的布局技巧：两个 GEMM 之间**不经过 smem**。
+关键在第二个 GEMM（PV）：`convert_layout_acc_Aregs`（`utils.h` L200–212）把 QK^T accumulator 的布局 $(\mathrm{MMA}=4, \mathrm{MMA\_M}, \mathrm{MMA\_N})$ **重排成 HMMA A 操作数布局** $((4,2), \mathrm{MMA\_M}, \mathrm{MMA\_N}/2)$——于是算出来的 $P$（寄存器里的 exp2 结果）**零拷贝直通**第二个 GEMM 的 A 操作数（`gemm_rs`，"RS" = A 在寄存器、B 在 smem）。V 侧则用 `ldmatrix.trans` 直接读 smem 的转置视图，免掉显式转置。
+
+**这个布局重排像"接力棒不落地"**：第一个 GEMM 刚把 $P$ 算在手里，不用先交给共享内存（smem）再取回来，而是就地转个身、直接喂给第二个 GEMM。省下的虽只是一次搬运，但它在内层循环里要重复成千上万次。这是 FA2 最关键的布局技巧：两个 GEMM 之间**不经过 smem**。
 
 ### 1.6 细节三：1.5 级 cp.async 流水
 
@@ -61,6 +69,8 @@ FA2 的 K/V smem 只有**单份**（不是多 stage 环形缓冲），靠"算当
 1. 循环体开头 `cp_async_wait<0>() + __syncthreads()`——等上一轮发出的 K 到位；
 2. 立刻发当前块的 V；
 3. QK^T mma 执行期间再预取下一个 K——`cp_async_fence()` 必须留在 `if` 内（L343–345 注释：放外面同步语义就错了，产生竞态）。
+
+这套"等上一批、发当前批、预取下一批"的节奏就是 1.5 级流水的全部——**只有单份 K/V 缓冲，却靠"提前一步下单"让搬运和计算重叠**。为什么叫 1.5 级：真正的多级流水有 N 份缓冲轮流用；这里只有 1 份，但多了"下一块已在路上"这半级。就像只有一个灶眼，却总在炒这道菜的间隙把下道菜的料先切好。
 
 gmem→smem 的拷贝 atom 是 `SM80_CP_ASYNC_CACHEGLOBAL<uint128_t>`，每线程 16B（8 个 fp16）。选 `CACHEGLOBAL` 而非 `CACHEALWAYS` 的理由写在注释里：同一 CTA 不会重复读同一地址，让它走 L2。谓词化越界处理：`Is_even_MN=true`（seqlen 整除 block）时整段 predicate 编译期消除，最后一个 block 才用 `Clear_OOB_MN` 把 smem 越界行清零。
 
@@ -72,7 +82,7 @@ gmem→smem 的拷贝 atom 是 `SM80_CP_ASYNC_CACHEGLOBAL<uint128_t>`，每线�
 
 FA3 把 kernel 拆成 `flash_fwd_kernel_sm90.h`（骨架）+ `mainloop_fwd_sm90_tma_gmma_ws.hpp`（1717 行主循环）+ `epilogue_fwd.hpp` + `tile_scheduler.hpp`。骨架（L179–454）：
 
-- **线程组织**：1 个 producer warp group（128 线程，发 TMA）+ 1~3 个 consumer warp group（跑 GMMA）。进入分支前各自做寄存器再分配：producer `warpgroup_reg_dealloc<24>()` 释放寄存器、consumer `warpgroup_reg_alloc<240>()` 拿走——**寄存器总量在 warp group 间不对称转移**，SM90 的 `setmaxnreg` 独有能力，load 线程只发指令不携状态。
+- **线程组织**：1 个 producer warp group（128 线程，发 TMA）+ 1~3 个 consumer warp group（跑 GMMA）。进入分支前各自做寄存器再分配：producer `warpgroup_reg_dealloc<LoadRegisterRequirement>()`（`flash_fwd_kernel_sm90.h:309`，双 WG + TMA 加载时典型值 24）释放寄存器、consumer `warpgroup_reg_alloc<MmaRegisterRequirement>()`（`:361`，典型值 240）拿走——**寄存器总量在 warp group 间不对称转移**，SM90 的 `setmaxnreg` 独有能力，load 线程只发指令不携状态。
 - **persistent**：grid = SM 数，CTA 常驻，`scheduler.get_next_work` 循环领 tile；且在 epilogue **之前**就先取下一个 work——下一个 tile 的 TMA 与本 tile 的收尾重叠。
 
 ### 2.1 TMA 与双 pipeline
@@ -96,13 +106,15 @@ Hopper 的 GMMA 允许 A/B 操作数以 smem descriptor 直读（SS），也可�
 
 **WG 间 pingpong**：两个 consumer warp group 通过 `WarpSchedulerWG1/WG2` named barrier 轮流进入 QK GEMM——一组做 QK+softmax 时另一组做 PV，softmax 的 SFU/ALU 指令与 GEMM 的 tensor core 指令**在不同 warp group 间并行**。
 
+**把 pingpong 想成双打接力**：一组在"动脑"（算 QK、跑 softmax），另一组同时在"出力"（算上一步的 PV）。这两类活用的硬件单元完全不同——softmax 靠 SFU/ALU，GEMM 靠 tensor core——所以能真正同时开工，谁也不用干等谁。FA2 里这两类活挤在同一批线程上排队，正是它和 FA3 的分水岭。
+
 **WG 内 GMMA 异步 overlap**（`IntraWGOverlap`）：利用 GMMA 的异步性，`gemm<..., wg_wait=-1>` 发出 GEMM 不等完成，先做上一迭代的 softmax（scale/max），之后 `warpgroup_wait<1>` 只等 1 条 mma 在飞。`fwd_step` 的时序（L1170–1207）：QK(n) 发出 → PV(n-1) 发出 → softmax(n-1) 前半 → release K → softmax(n-1) 后半 → P 转换 → PV 等待。
 
 相应地，FA2 的单体 `softmax_rescale_o` 被拆成四段可重组的状态机（`hopper/softmax.h`）：`max_get_scale` / `online_softmax` / `rescale_o` / `finalize`——`scores_scale` 作为一个寄存器 fragment 在 GEMM 前后传递。LargeHeadDimV（dv>256）场景甚至有**跨 warp group 的 softmax 状态交换**：WG1 算 QK+softmax，scale 经 `smem_scale` + `PFull/PEmpty` named barrier 传给专职做 PV 的 WG2。从 189 行单体到 170 行四段式，是架构变迁的最小缩影。
 
 ### 2.4 Persistent 调度与 L2 swizzle
 
-`DynamicPersistentTileScheduler` 做 **L2-aware swizzle**：按 `swizzle = 2^floor(log2(L2 / size_one_kv_head))` 把 head/batch 分组，让同一时间窗内的 CTA 集中在少数 KV head 上，令 KV 常驻 50MB L2。FA2 完全没有这层——第 1 篇说"SRAM 越大 attention 越快"，Hopper 的故事一半在片上，一半在这 50MB L2 的调度。
+`DynamicPersistentTileScheduler` 做 **L2-aware swizzle**：按 `swizzle = 2^floor(log2(size_l2 / size_one_kv_head))` 把 head/batch 分组，让同一时间窗内的 CTA 集中在少数 KV head 上，令 KV 常驻 L2（`tile_scheduler.hpp:255` 取 `size_l2 = 32MB`，另乘 `qhead_per_khead`）。注意这个 32MB 与下面 Split-KV 启发式里假设的 50MB L2 是两个独立的经验常数。FA2 完全没有这层——第 1 篇说"SRAM 越大 attention 越快"，Hopper 的故事一半在片上，一半在这块 L2 的调度。
 
 ### 2.5 Epilogue：TMA store
 
@@ -114,7 +126,7 @@ accumulator 经 STSM atom 写 `smem_o`，`fence_view_async_shared()` 后 TMA sto
 
 **触发启发式**（`flash_api.cpp` L281–315）：`batch*heads*m_blocks >= 0.8*num_SMs` 直接不分；否则枚举 split 数算 wave 效率 $\mathrm{eff} = n_{waves}/\lceil n_{waves} \rceil$，取达到最大效率 85% 的**最小** split 数——注释里给了具体例子：48 个 block 配 108 SM，2 splits（eff 0.89）优于 3 splits（0.67）。FA3 追加一条：单个 KV head 超 50MB L2 时即使 block 数够也要按 $\lceil \text{size}/50\text{MB} \rceil$ 分裂以保 L2 复用。
 
-**combine 的数学**：第 $s$ 段的局部量 $(O_s, L_s)$（$O_s$ 未归一、$L_s = m_s + \log \ell_s$）：
+**combine 的数学**：这就像**几口锅同时煮，最后兑到一起**——每段 KV 各煮出一份"没归一化的部分输出" $O_s$，外加一张自己的"咸淡记录" $L_s$（局部 LSE）。收尾的活儿，就是按咸淡记录把几份兑成一份。设第 $s$ 段的局部量 $(O_s, L_s)$（$O_s$ 未归一、$L_s = m_s + \log \ell_s$）：
 
 $$
 L = \log \sum_s e^{L_s}, \qquad O = \sum_s e^{L_s - L}\, O_s

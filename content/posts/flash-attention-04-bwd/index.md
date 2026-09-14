@@ -10,7 +10,11 @@ categories: ["算子开发"]
 
 前向消灭了 $N \times N$ 的中间矩阵，代价落在反向：**梯度计算需要 $P$，而 $P$ 没有被保存**。本篇先完整推导 $dQ, dK, dV$（三个实现共享同一套数学），再逐一精读 Triton 教程版（`06-fused-attention.py` L410–748）和 FlashAttention-2 CUDA 版（`csrc/flash_attn/src/flash_bwd_kernel.h`）的反向实现，最后对照三种不同的 kernel 组织策略。
 
+> 官方仓库行号以 commit `8d3a3b8` 为准；本篇只讲 FA2（sm80）反向，Hopper 与 Blackwell 的反向、MLA 反向、以及更完整的反向数学，集中在[第 7 篇]({{< relref "flash-attention-07-bwd-deep" >}})。
+
 前置阅读：[第 1 篇]({{< relref "flash-attention-01-theory" >}})的 LSE 定义、[第 2 篇]({{< relref "flash-attention-02-triton-fwd" >}})前向的 epilogue。
+
+打个比方：反向传播像一位**审计员**——前向为了省地方，把 $N\times N$ 的凭证（$P$）全烧了，只留下一本每行的总账（$O$ 和 LSE）。审计员要凭这本总账，倒推出每个中间环节（$dQ, dK, dV$）该负多少责。本篇的推导，就是这位审计员的三条"还原公式"。
 
 ## 1. 完整的梯度推导
 
@@ -58,7 +62,7 @@ $$
 \boxed{\ \Delta_i = dO_i \cdot O_i\ }
 $$
 
-**$O(N \cdot d)$ 的逐行点积替代了 $O(N^2)$ 的重算**。$O$ 和 $dO$ 都是前向/上游本来就有的矩阵，$\Delta$ 可以在反向开始前用一个极廉价的 kernel 一次性算好。这就是所有实现里那个 "preprocess kernel" 的全部数学内涵。
+**$O(N \cdot d)$ 的逐行点积替代了 $O(N^2)$ 的重算**——审计员不用翻明细了，因为"总额"本身就能推出来。$O$ 和 $dO$ 都是前向/上游本来就有的矩阵，$\Delta$ 可以在反向开始前用一个极廉价的 kernel 一次性算好。这就是所有实现里那个 "preprocess kernel" 的全部数学内涵。**整个反向最划算的一笔交易，就是把这张 $N\times N$ 的账换成一个 $N$ 维的向量。**
 
 ### 1.4 dQ 与 dK
 
@@ -109,7 +113,7 @@ p = tl.math.exp2(qk - m)        # L569 / L492：精确 softmax 概率
 
 ### 2.3 `_attn_bwd_dkdv`（L440–517）：输出所有权决定遍历方向
 
-**设计原则：谁的输出，谁独占 tile。** $dK_j = \sigma\sum_i dS_{ij} Q_i$ 沿 Q 归约，因此每个 program 独占一个 K/V 块（`start_n = pid * BLOCK_N1`，L641），沿 M 维内层循环累加，dk/dv 是寄存器累加器，最后一次性写回：
+**设计原则：谁的输出，谁独占 tile**——大白话就是**谁的孩子谁抱**。$dK_j = \sigma\sum_i dS_{ij} Q_i$ 沿 Q 归约，那就让每个 program 抱住一个 K/V 块，把相关的 Q 块一个个算过来、累在自己手里；dQ 反过来。这样任何一块梯度都只有一个"主人"负责写，天生不用抢锁、不用原子加。每个 program 沿 M 维内层循环累加，dk/dv 是寄存器累加器，最后一次性写回：
 
 ```python
 qkT = tl.dot(k, qT)                        # L491 (σ/ln2)·K Qᵀ
@@ -177,13 +181,15 @@ $P$ 的重算同样是 `scale_apply_exp2<scale_max=false>`（L536）——不减
 
 ### 3.2 dQ 的三种模式：问题与三个答案
 
-Triton 教程用"独占 Q 块"解决了 dQ，CUDA 版没这么做——它的主 kernel 按 KV tile 并行（dK/dV 的所有权），此时 dQ 天然跨 block 归约，三种处理模式（L598–687）：
+Triton 教程用"独占 Q 块"解决了 dQ，CUDA 版没这么做——它的主 kernel 按 KV tile 并行（dK/dV 的所有权），此时 dQ 天然跨 block 归约。
 
-**① gmem read-modify-write**（单 kernel 串行）：每 (b,h) 一个 block 串行处理全部 KV 块，dQ 部分和从 `dq_accum`（fp32 gmem 缓冲）读进寄存器、累加、写回；最后一块负责 fp32→fp16 转换写出到真正的 dQ。
+**dQ 的麻烦，好比全班分工抄同一份作业**：每人只抄一部分，最后要把所有答案合起来；合得对不对、每次合出来是不是同一个结果，都是问题。历史上给出过三种"合成方案"，但**在当前 commit（8d3a3b8）里只有后两种还在被 launch**，第一种已成化石：
 
-**② seq-parallel + atomicAdd**（当前主干，launcher L128–133 无条件启用）：grid `(num_n_block, b, h)`，每个 block 只处理一个 KV 块，dQ 部和直接对 `dq_accum` 逐元素 `atomicAdd`（L672–679）。grid 更大、长序列负载均衡更好，代价是 atomic 流量与浮点归约的不确定性。最后由独立的 `flash_bwd_convert_dq_kernel` 做格式转换——**"dq 转换 kernel"分出来的是累加结果的收尾，不是 dq 的计算**（dQ 的 GEMM 就在主循环里）。
+**① gmem read-modify-write**（历史路径，现已不 launch）：对应 `compute_dq_dk_dv` / `flash_bwd_dq_dk_dv_loop_kernel`（`flash_bwd_kernel.h:799`、`flash_bwd_launch_template.h:34`），每 (b,h) 一个 block 串行处理全部 KV 块，dQ 部分和从 `dq_accum`（fp32 gmem 缓冲）读进寄存器、累加、写回（`flash_bwd_kernel.h:672-673`）。函数仍在，但没有任何 `run_*` 会调用它。
 
-**③ deterministic 分片**：atomicAdd 的浮点加法不可复现。确定性模式把 `dq_accum` 分成 `{nsplits, ...}` 切片，每个 block 写自己的切片（归约顺序固定），再由转换 kernel 求和。
+**② seq-parallel + atomicAdd**（当前主干，`flash_bwd_launch_template.h:128-133` 无条件启用）：grid `(num_n_block, b, h)`，每个 block 只处理一个 KV 块，dQ 部和直接对 `dq_accum` 逐元素 `atomicAdd`（`flash_bwd_kernel.h:674-679`）。grid 更大、长序列负载均衡更好，代价是 atomic 流量与浮点归约的不确定性。最后由独立的 `flash_bwd_convert_dq_kernel` 做格式转换——**"dq 转换 kernel"分出来的是累加结果的收尾，不是 dQ 的计算**（dQ 的 GEMM 就在主循环里，`flash_bwd_kernel.h:655`）。
+
+**③ deterministic 分片**：atomicAdd 的浮点加法不可复现。确定性模式把 `dq_accum` 分成 `{nsplits, ...}` 切片，每个 block 通过 `+ blockIdx.x * params.dq_accum_split_stride` 写自己的切片（`flash_bwd_kernel.h:122-125`，归约顺序固定），再由 `convert_dQ` 的跨 split 累加求和（`flash_bwd_preprocess_kernel.h:243-248`）。
 
 ### 3.3 寄存器压力：反向真正的敌人
 
@@ -195,7 +201,7 @@ Triton 教程用"独占 Q 块"解决了 dQ，CUDA 版没这么做——它的主
 
 独立路径的 `compute_dot_do_o`（preprocess L57–140）按行块起 grid 算 $\Delta$：fragment 重排 + warp shuffle Allreduce，**零共享内存**，顺手把 `dq_accum` 清零（省一次 memset kernel）。FA3 的 preprocess 一个 kernel 干四件事：$\Delta$、LSE×log₂e、清零 dQaccum、清零信号量。
 
-Dropout 值得一提：前向实际用 $\tilde P = M \circ P/q$，反向把 $1/q$ 推迟到 epilogue 统一乘，$\Delta$ 相应缩放回未缩放量纲（preprocess L46, L128–132 的注释）；dropout mask 编码进 $P$ 的**符号位**（负值 = 被丢弃），`pointwise_mult` 对负值分支改用 $d$——恰好给出 softmax 分母路径的正确梯度。把信息藏进符号位这种"便宜存储"的用法，是性能代码里常见的黑话。
+Dropout 值得一提：前向用 $P_{\text{drop}} = M \circ P/q$（$q$ 为 keep 概率）。反向**把 $1/q$ 推迟到最后统一乘**——dP 不放大，$\Delta$ 反而乘上 $q$（preprocess 的 `scale` 参数，`flash_bwd_preprocess_kernel.h:44` 与 `:128-132` 注释："dP_sum 也要缩小 $q$ 倍，好让 $dP - \Delta$ 同量纲"），出口处再对 dQ/dK 乘 `scale_softmax_rp_dropout`（`flash_bwd_kernel.h:686`）。dropout mask 编码进 $P$ 的**符号位**（负值 = 被丢弃），`pointwise_mult` 对负值分支改用 $d$——恰好给出 softmax 分母路径的正确梯度。把信息藏进符号位这种"便宜存储"的用法，是性能代码里常见的黑话。
 
 ### 3.5 FA3 的反向：把两个瓶颈逐个拆掉
 
