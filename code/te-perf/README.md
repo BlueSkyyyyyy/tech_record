@@ -57,13 +57,19 @@ python bench_te.py --attn-only --warmup 10 --repeat 100 --csv attn.csv
 
 ## 指标口径
 
-- **time(us)**：每个 case 的中位运行时间（含 launch overhead，见下方说明）。
+- **time(us)**：每个 case 的**纯 device kernel 执行时间**（CUPTI / `torch.profiler` 实测），
+  统计一次调用所 launch 的全部 kernel（含 device memset）的 device 时长之和，对 repeat 次调用取平均，
+  **已排除 launch / 主机派发开销**。
 - **GB/s**：按算子实际读写的最小数据量估算（读 Q/K/V + 写 O 等），忽略中间 S/P 等。
 - **AI(flop/B)**：算术强度 = FLOPs / 实际搬运字节数，用于落 roofline 图。
 - **%BW / %TC**：实测带宽占 HBM 峰值带宽 / 实测算力占 tensor-core 峰值的百分比。
 - **TFLOPS**：attention 按 `4*b*s*h*s*d`（fwd）、`8*b*s*h*s*d`（bwd，约 2x fwd）计。
-- **launch overhead**：脚本会先跑一个最小 `fill_` kernel 测出单次内核启动的固定
-  开销（约 3–10 us/call），小 shape 时应从 `time(us)` 中扣掉它才是纯内核执行时间。
+- **计时方法**：主指标用 CUPTI（`torch.profiler`）直接测 **device kernel 时间**，天然不含 launch。
+  脚本开头另跑一个最小 `fill_` kernel 用 CUDA event 测 wall 值，用于展示主机派发开销
+  （wall ≈ 12 us、device ≈ 1 us，即 host 开销 ~11 us/call）。注意 **launch 开销不是常数**
+  （主机派发越重、gap 越大），所以不能靠"wall − 固定值"得到纯内核时间——这也是改用 CUPTI 的原因。
+- **L2 常驻**：小 shape 反复调用时数据可能常驻 L2（H100 ≈ 50MB），此时 `%BW`（按 HBM 峰值折算）
+  会偏高甚至 >100%，属正常现象；判断 HBM 效率请看工作集大于 L2 的大 shape。
 - **H100 roofline 常量**（硬编码，脚本末尾会打印）：
   - FP16/BF16 tensor-core dense peak ≈ 989.4 TFLOPS（132 SM × 1.980 GHz）
   - FP32 CUDA-core peak ≈ 66.9 TFLOPS
@@ -79,7 +85,7 @@ python bench_te.py --attn-only --warmup 10 --repeat 100 --csv attn.csv
   少一次全量读写，等价带宽通常更高、更接近峰值。
 - **fused_attn*** 随 seqlen 增长从内存受限过渡到计算受限（AI 穿越拐点），
   `%TC` 应在大 seqlen 时逼近 tensor-core 峰值。
-- 与 roofline 的差距主要来自：launch overhead（小 shape）、未完全饱和的带宽、
+- 与 roofline 的差距主要来自：**小 shape 数据常驻 L2**（`%BW` 会虚高）、未完全饱和的带宽、
   causal mask 的 wasted FLOPs、backward 的额外访存、以及 kernel 实现本身的效率。
 
 ## 用 ncu / Nsight Systems 剖析单个算子
@@ -129,7 +135,8 @@ nsys profile --stats=true -o rmsnorm_bwd \
 
 ## 说明
 
-- 使用 CUDA event 计时，warmup + 多次取中位数，避免首跑抖动。
+- 主指标用 CUPTI（`torch.profiler`）测纯 device kernel 时间（warmup + 多次取平均），已排除 launch 开销；
+  脚本仍用 CUDA event 测一个最小 `fill_` kernel 的 wall 值，仅用于展示主机派发开销的量级。
 - TE 的 rmsnorm / attention 均从 `transformer_engine_torch` / `cpp_extensions.fused_attn`
   直接调用原生 kernel（等同 `te.rmsnorm*` / `te.fused_attn*` 底层实现）。
 - 环境变量保持 TE 默认（`NVTE_FUSED_ATTN=1`、`NVTE_FUSED_ATTN_USE_FAv2_BWD=0`）。
