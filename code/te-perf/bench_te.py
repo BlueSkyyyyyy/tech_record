@@ -5,8 +5,11 @@
 #   - te.rmsnorm_bwd
 #   - te.fused_attn_fwd / te.fused_attn_bwd
 #
-# Measures achieved throughput (TFLOPS / GB/s) via CUDA events and compares to
-# hard-coded roofline numbers for NVIDIA H100 SXM (132 SM, 80GB HBM3).
+# Timing: reports PURE DEVICE kernel time (CUPTI / torch.profiler, launch
+# overhead excluded) as the primary metric, plus wall-clock CUDA-event median
+# (launch included) for reference. Achieved TFLOPS / GB/s are derived from the
+# pure device time. Compared against hard-coded roofline numbers for
+# NVIDIA H100 SXM (132 SM, 80GB HBM3).
 #
 # Usage (run inside the kimi26_train container, on a machine owning the GPU):
 #   python bench_te.py                # run everything, no correctness check
@@ -28,6 +31,7 @@ import os
 import sys
 
 import torch
+from torch.profiler import ProfilerActivity, profile
 
 # --------------------------------------------------------------------------- #
 # H100 SXM roofline constants (hard-coded, device-agnostic reference).
@@ -67,7 +71,19 @@ from transformer_engine_torch import rmsnorm_fwd, rmsnorm_bwd, rmsnorm_bwd_add  
 # Utilities
 # --------------------------------------------------------------------------- #
 class KernelTimer:
-    """CUDA-event timer with warmup + repeat, returns mean/median latency (ms)."""
+    """Two timers with warmup + repeat:
+
+    - ``time`` returns wall-clock CUDA-event latency (ms), which **includes** the
+      host-side launch/dispatch gap (that gap is exposed because the GPU is idle
+      at the start of each timed iteration).  Useful as an end-to-end number, but
+      for small kernels it is dominated by launch overhead.
+    - ``device_time`` returns the pure on-device kernel execution time (ms) via
+      CUPTI (``torch.profiler``), which **excludes** launch overhead.  This is the
+      number to use for bandwidth / FLOPs accounting.  Note launch overhead is
+      *not* a universal constant (it differs per op: deeper Python/C++ dispatch =
+      larger gap), so subtracting a fixed value from the wall-clock number is
+      inaccurate.
+    """
 
     def __init__(self, warmup: int = 10, repeat: int = 50):
         self.warmup = warmup
@@ -92,6 +108,23 @@ class KernelTimer:
         med = times[len(times) // 2]
         return mean, med, times
 
+    def device_time(self, fn, *args, **kwargs):
+        """Mean pure device kernel time (ms) over ``repeat`` calls, launch excluded.
+
+        Sums the CUPTI device duration of all kernels (and device memsets) launched
+        by ``fn`` in the profiling window, then divides by the number of calls.
+        """
+        for _ in range(self.warmup):
+            fn(*args, **kwargs)
+        torch.cuda.synchronize()
+
+        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+            for _ in range(self.repeat):
+                fn(*args, **kwargs)
+            torch.cuda.synchronize()
+        total_us = sum(evt.device_time_total for evt in prof.key_averages())
+        return total_us / self.repeat / 1e3
+
 
 def bytes_of(t: torch.Tensor) -> int:
     return t.numel() * t.element_size()
@@ -110,12 +143,11 @@ def bench_rmsnorm_fwd(shape, dtype, timer):
         y, _, _ = rmsnorm_fwd(x, w, 1e-5, None, None, TE_DType[dtype], 0, False)
         return y
 
-    mean, med, _ = timer.time(fn)
-    ms = med
+    ms = timer.device_time(fn)  # pure device time (launch excluded)
     # bytes moved: read x + read w + write y (+ rsigma, negligible)
     gb = (bytes_of(x) + bytes_of(w) * 1 + bytes_of(x)) / 1e9
     gb_s = gb / (ms / 1e3)
-    return {"mean_ms": mean, "med_ms": med, "gb_s": gb_s, "gb": gb}
+    return {"kernel_ms": ms, "gb_s": gb_s, "gb": gb}
 
 
 # --------------------------------------------------------------------------- #
@@ -135,12 +167,11 @@ def bench_rmsnorm_bwd(shape, dtype, timer):
         dx, dw = rmsnorm_bwd(dy, x, rsigma, w, 0, False)
         return dx, dw
 
-    mean, med, _ = timer.time(fn)
-    ms = med
+    ms = timer.device_time(fn)  # pure device time (launch excluded)
     # read dy + read x + read rsigma + read w, write dx + write dw
     gb = (bytes_of(dy) + bytes_of(x) + rows * 4 + bytes_of(w) + bytes_of(x) + bytes_of(w)) / 1e9
     gb_s = gb / (ms / 1e3)
-    return {"mean_ms": mean, "med_ms": med, "gb_s": gb_s, "gb": gb}
+    return {"kernel_ms": ms, "gb_s": gb_s, "gb": gb}
 
 
 # --------------------------------------------------------------------------- #
@@ -164,13 +195,12 @@ def bench_rmsnorm_bwd_add(shape, dtype, timer):
         dx, dw = rmsnorm_bwd_add(dy, x, add, rsigma, w, 0, False)
         return dx, dw
 
-    mean, med, _ = timer.time(fn)
-    ms = med
+    ms = timer.device_time(fn)  # pure device time (launch excluded)
     # read dy + read x + read add + read rsigma + read w, write dx + write dw
     gb = (bytes_of(dy) + bytes_of(x) + bytes_of(add) + rows * 4
           + bytes_of(w) + bytes_of(x) + bytes_of(w)) / 1e9
     gb_s = gb / (ms / 1e3)
-    return {"mean_ms": mean, "med_ms": med, "gb_s": gb_s, "gb": gb}
+    return {"kernel_ms": ms, "gb_s": gb_s, "gb": gb}
 
 
 # --------------------------------------------------------------------------- #
@@ -224,15 +254,14 @@ def bench_fused_attn(shape, dtype, timer, do_backward=False):
             )
             return o
 
-        mean, med, _ = timer.time(fn_fwd)
-        ms = med
+        ms = timer.device_time(fn_fwd)  # pure device time (launch excluded)
         # q + k + v read, o write (approx; s/m intermediate ignored)
         gb = (bytes_of(q) + bytes_of(k) + bytes_of(v) + bytes_of(out)) / 1e9
         gb_s = gb / (ms / 1e3)
         # FLOPs: QK^T (2*b*s*h*s*qk_dim) + PV (2*b*s*h*s*v_dim)
         flops = 2 * bs * seqlen * num_heads * seqlen * (qk_dim + v_dim)
         tflops = flops / (ms / 1e3) / 1e12
-        return {"mean_ms": mean, "med_ms": med, "gb_s": gb_s, "gb": gb, "tflops": tflops}
+        return {"kernel_ms": ms, "gb_s": gb_s, "gb": gb, "tflops": tflops}
 
     # backward
     def fn_bwd():
@@ -248,8 +277,7 @@ def bench_fused_attn(shape, dtype, timer, do_backward=False):
         )
         return dqkv
 
-    mean, med, _ = timer.time(fn_bwd)
-    ms = med
+    ms = timer.device_time(fn_bwd)  # pure device time (launch excluded)
     # read q,k,v,o,d_o; write dq,dk,dv
     gb = (bytes_of(q) + bytes_of(k) + bytes_of(v) + bytes_of(out) + bytes_of(d_out)
           + bytes_of(q) + bytes_of(k) + bytes_of(v)) / 1e9
@@ -257,7 +285,7 @@ def bench_fused_attn(shape, dtype, timer, do_backward=False):
     # FLOPs: backward ~ 2x forward = 4*b*s*h*s*(qk_dim + v_dim)
     flops = 4 * bs * seqlen * num_heads * seqlen * (qk_dim + v_dim)
     tflops = flops / (ms / 1e3) / 1e12
-    return {"mean_ms": mean, "med_ms": med, "gb_s": gb_s, "gb": gb, "tflops": tflops}
+    return {"kernel_ms": ms, "gb_s": gb_s, "gb": gb, "tflops": tflops}
 
 
 # --------------------------------------------------------------------------- #
@@ -344,15 +372,18 @@ def main():
 
     results = []
 
-    # measure kernel launch overhead with a trivial (minimal) kernel
+    # reference: host-side launch/dispatch overhead of a trivial kernel
     empty = torch.zeros(1, device="cuda")
     def noop():
         empty.fill_(1.0)
     _, launch_ms, _ = timer.time(noop)
-    print_sep("KERNEL LAUNCH OVERHEAD (trivial fill_)")
-    print(f"minimal-kernel round-trip latency = {launch_ms*1e3:.1f} us/call")
-    print("(this is the fixed cost mixed into every measured kernel time;")
-    print(" subtract it to isolate the true kernel execution time for small shapes)")
+    noop_kernel_ms = timer.device_time(noop)
+    print_sep("TIMING METHOD")
+    print("time columns below = CUPTI pure device kernel time (launch overhead EXCLUDED)")
+    print(f"trivial fill_ round-trip: wall={launch_ms*1e3:.1f} us, device={noop_kernel_ms*1e3:.2f} us")
+    print(f"-> host launch/dispatch overhead ~= {(launch_ms - noop_kernel_ms)*1e3:.1f} us for a trivial op")
+    print("launch overhead is NOT a universal constant (deeper host dispatch => larger gap),")
+    print("so wall-clock time cannot be corrected by subtracting a single fixed value.")
 
     launch_ovh = launch_ms
 
@@ -402,7 +433,7 @@ def main():
                 results.append(("rmsnorm_fwd", shape, str(dt), r))
                 bps = r["gb_s"] * 1e9
                 ai = (2.0 * shape[0] * shape[1]) / r["gb"] / 1e9  # ~2 FLOP/elem over bytes moved
-                print(f"{str(shape):<14} {str(dt):<10} {r['med_ms']*1e3:>8.1f} {r['gb_s']:>12.1f} "
+                print(f"{str(shape):<14} {str(dt):<10} {r['kernel_ms']*1e3:>8.1f} {r['gb_s']:>12.1f} "
                       f"{bps/H100['bandwidth']*100:>6.1f}% {ai:>10.2f}")
 
         print_sep("RMSNORM BWD  (mem-bound: floor = HBM BW)")
@@ -413,7 +444,7 @@ def main():
                 results.append(("rmsnorm_bwd", shape, str(dt), r))
                 bps = r["gb_s"] * 1e9
                 ai = (4.0 * shape[0] * shape[1]) / r["gb"] / 1e9
-                print(f"{str(shape):<14} {str(dt):<10} {r['med_ms']*1e3:>8.1f} {r['gb_s']:>12.1f} "
+                print(f"{str(shape):<14} {str(dt):<10} {r['kernel_ms']*1e3:>8.1f} {r['gb_s']:>12.1f} "
                       f"{bps/H100['bandwidth']*100:>6.1f}% {ai:>10.2f}")
 
         print_sep("RMSNORM BWD+ADD  (fused residual-add backward, mem-bound)")
@@ -424,7 +455,7 @@ def main():
                 results.append(("rmsnorm_bwd_add", shape, str(dt), r))
                 bps = r["gb_s"] * 1e9
                 ai = (4.0 * shape[0] * shape[1]) / r["gb"] / 1e9
-                print(f"{str(shape):<14} {str(dt):<10} {r['med_ms']*1e3:>8.1f} {r['gb_s']:>12.1f} "
+                print(f"{str(shape):<14} {str(dt):<10} {r['kernel_ms']*1e3:>8.1f} {r['gb_s']:>12.1f} "
                       f"{bps/H100['bandwidth']*100:>6.1f}% {ai:>10.2f}")
 
     if not args.rmsnorm_only:
@@ -437,7 +468,7 @@ def main():
                 results.append(("fused_attn_fwd", shape, str(dt), r))
                 flops = 2 * bs * s * nh * s * (qk_dim + v_dim)
                 ai = flops / (r["gb"] * 1e9)
-                print(f"{str(shape):<22} {str(dt):<10} {r['med_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
+                print(f"{str(shape):<22} {str(dt):<10} {r['kernel_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
                       f"{r['tflops']/H100['fp16_tflops']*100:>5.1f}% {r['gb_s']:>12.1f} {ai:>10.1f}")
 
         print_sep("FUSED ATTENTION BWD  (compute-bound: floor = tensor-core peak)")
@@ -449,7 +480,7 @@ def main():
                 results.append(("fused_attn_bwd", shape, str(dt), r))
                 flops = 4 * bs * s * nh * s * (qk_dim + v_dim)
                 ai = flops / (r["gb"] * 1e9)
-                print(f"{str(shape):<22} {str(dt):<10} {r['med_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
+                print(f"{str(shape):<22} {str(dt):<10} {r['kernel_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
                       f"{r['tflops']/H100['fp16_tflops']*100:>5.1f}% {r['gb_s']:>12.1f} {ai:>10.1f}")
 
     # Roofline reference summary
@@ -461,17 +492,18 @@ def main():
         ridge = peak * 1e12 / H100['bandwidth']
         print(f"Roofline ridge ({lbl})     : AI = {ridge:>8.1f} FLOP/byte "
               f"(below: mem-bound slope {H100['bandwidth']/1e9:.0f} GB/s/FLOP/byte; above: flat {peak:.0f} TFLOPS)")
-    print(f"Measured launch overhead   : ~{launch_ovh*1e3:.1f} us/call (subtract for small shapes)")
+    print(f"Trivial-kernel round-trip  : ~{launch_ovh*1e3:.1f} us/call wall (host dispatch, not subtracted)")
     print("Note: rmsnorm* are memory-bound (AI ~2-4 FLOP/byte, far below ridge);")
     print("      fused_attn* cross the ridge as seqlen grows -> compute-bound.")
 
     if args.csv:
         with open(args.csv, "w", newline="") as f:
             w = csv.writer(f)
-            w.writerow(["kernel", "shape", "dtype", "mean_ms", "med_ms",
+            # kernel_ms = CUPTI pure device kernel time (launch overhead excluded)
+            w.writerow(["kernel", "shape", "dtype", "kernel_ms",
                         "gb_s", "gb", "tflops"])
             for kernel, shape, dt, r in results:
-                w.writerow([kernel, shape, dt, r.get("mean_ms"), r.get("med_ms"),
+                w.writerow([kernel, shape, dt, r.get("kernel_ms"),
                             r.get("gb_s"), r.get("gb"), r.get("tflops")])
         print(f"\nCSV written to {args.csv}")
 
