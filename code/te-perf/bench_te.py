@@ -210,23 +210,26 @@ def bench_rmsnorm_bwd_add(shape, dtype, timer):
 # fused attention fwd / bwd  (training, causal, dropped 0)
 # --------------------------------------------------------------------------- #
 def attn_dims(shape):
-    """shape = (batch, seqlen, num_heads, qk_head_dim[, v_head_dim]).
+    """shape = (batch, seqlen, num_heads, qk_head_dim[, v_head_dim[, num_kv_heads]]).
 
-    The 4-tuple form is plain MHA (qk == v head dim). The 5-tuple form carries a
-    separate v head dim for MLA (e.g. Kimi-K2.6 qk=192, v=128); TE fused_attn
-    accepts q/k and v with different last dims.
+    The 4-tuple form is plain MHA (qk == v head dim, kv heads == query heads).
+    The 5-tuple form carries a separate v head dim for MLA (e.g. Kimi-K2.6
+    qk=192, v=128); TE fused_attn accepts q/k and v with different last dims.
+    The 6-tuple form adds ``num_kv_heads`` for GQA/MQA (e.g. Qwen3 q=40, kv=8);
+    TE fused_attn supports q/k/v with different head counts.
     """
     bs, seqlen, num_heads, qk_dim = shape[0], shape[1], shape[2], shape[3]
     v_dim = shape[4] if len(shape) > 4 else qk_dim
-    return bs, seqlen, num_heads, qk_dim, v_dim
+    num_kv_heads = shape[5] if len(shape) > 5 else num_heads
+    return bs, seqlen, num_heads, qk_dim, v_dim, num_kv_heads
 
 
-def bench_fused_attn(shape, dtype, timer, do_backward=False):
-    bs, seqlen, num_heads, qk_dim, v_dim = attn_dims(shape)
+def bench_fused_attn(shape, dtype, timer, do_backward=False, is_training=True):
+    bs, seqlen, num_heads, qk_dim, v_dim, num_kv_heads = attn_dims(shape)
 
     q = torch.randn(bs * seqlen, num_heads, qk_dim, device="cuda", dtype=dtype)
-    k = torch.randn(bs * seqlen, num_heads, qk_dim, device="cuda", dtype=dtype)
-    v = torch.randn(bs * seqlen, num_heads, v_dim, device="cuda", dtype=dtype)
+    k = torch.randn(bs * seqlen, num_kv_heads, qk_dim, device="cuda", dtype=dtype)
+    v = torch.randn(bs * seqlen, num_kv_heads, v_dim, device="cuda", dtype=dtype)
 
     cu_seqlens = torch.arange(0, (bs + 1) * seqlen, seqlen, dtype=torch.int32, device="cuda")
     max_seqlen = seqlen
@@ -238,7 +241,7 @@ def bench_fused_attn(shape, dtype, timer, do_backward=False):
 
     # forward
     out, aux_ctx = fused_attn_fwd(
-        True, max_seqlen, max_seqlen, cu_seqlens, cu_seqlens,
+        is_training, max_seqlen, max_seqlen, cu_seqlens, cu_seqlens,
         q, k, v, dtype, backend, None,
         attn_bias_type=attn_bias_type, attn_mask_type=attn_mask_type,
         softmax_type=softmax_type,
@@ -250,7 +253,7 @@ def bench_fused_attn(shape, dtype, timer, do_backward=False):
     if not do_backward:
         def fn_fwd():
             o, _ = fused_attn_fwd(
-                True, max_seqlen, max_seqlen, cu_seqlens, cu_seqlens,
+                is_training, max_seqlen, max_seqlen, cu_seqlens, cu_seqlens,
                 q, k, v, dtype, backend, None,
                 attn_bias_type=attn_bias_type, attn_mask_type=attn_mask_type,
                 softmax_type=softmax_type, qkv_layout="bshd_bshd_bshd",
@@ -309,14 +312,14 @@ def bench_fused_attn_fp8(shape, timer, do_backward=False):
     measured device time is the pure FP8 fused-attention kernel; per-call input
     quantization is not included (matching the high-precision path's scope).
     """
-    bs, seqlen, num_heads, qk_dim, v_dim = attn_dims(shape)
+    bs, seqlen, num_heads, qk_dim, v_dim, num_kv_heads = attn_dims(shape)
     nominal = torch.bfloat16
     e4m3 = tex.DType.kFloat8E4M3
     e5m2 = tex.DType.kFloat8E5M2
 
     q = torch.randn(bs * seqlen, num_heads, qk_dim, device="cuda", dtype=nominal)
-    k = torch.randn(bs * seqlen, num_heads, qk_dim, device="cuda", dtype=nominal)
-    v = torch.randn(bs * seqlen, num_heads, v_dim, device="cuda", dtype=nominal)
+    k = torch.randn(bs * seqlen, num_kv_heads, qk_dim, device="cuda", dtype=nominal)
+    v = torch.randn(bs * seqlen, num_kv_heads, v_dim, device="cuda", dtype=nominal)
 
     cu_seqlens = torch.arange(0, (bs + 1) * seqlen, seqlen, dtype=torch.int32, device="cuda")
     max_seqlen = seqlen
@@ -443,8 +446,8 @@ def main():
     ]
     dtypes = [torch.float32, torch.bfloat16, torch.float16]
 
-    # attention shapes: (batch, seqlen, num_heads, qk_head_dim[, v_head_dim])
-    # The 4-tuple form is plain MHA; the 5-tuple form is MLA (qk != v).
+    # attention shapes: (batch, seqlen, num_heads, qk_head_dim[, v_head_dim[, num_kv_heads]])
+    # 4-tuple = plain MHA; 5-tuple = MLA (qk != v); 6-tuple = GQA/MQA (q heads != kv heads).
     attn_shapes = [
         (1, 512, 16, 128),
         (1, 1024, 16, 128),
@@ -466,11 +469,32 @@ def main():
         (1, 4096, 64, 192, 128),  # Kimi-K2.6 MLA: qk=nope128+rope64=192, v=128, 64 heads
         (1, 4096, 64, 128, 128),  # dsv4 DSA indexer: 64 heads, head_dim=128
         (1, 4096, 32, 128, 128),  # dsv4.1 DSA indexer: 32 heads, head_dim=128
+        # Qwen3 dense / MoE models (GQA): (b, s, q_heads, qk, v, kv_heads), head_dim=128,
+        # derived from config.json (num_attention_heads / num_key_value_heads / head_dim).
+        (1, 4096, 40, 128, 128, 8),   # Qwen3-8B:        q=40, kv=8,  head_dim=128, GQA 5:1
+        (1, 4096, 32, 128, 128, 4),   # Qwen3-30B-A3B:   q=32, kv=4,  head_dim=128, GQA 8:1
+        (1, 4096, 64, 128, 128, 4),   # Qwen3-235B-A22B: q=64, kv=4,  head_dim=128, GQA 16:1
+        # DeepSeek-V4-Pro: main MLA attention is head_dim=512 (qk=448+64, v=512), 128 heads,
+        # which TE fused_attn does NOT support (H100 max 256); it runs a custom sparse_attn
+        # kernel. The TE-testable part is the DSA indexer: index_n_heads=64, index_head_dim=128,
+        # scoring 64 query heads against a single shared compressed-KV head (MQA), hence kv=1.
+        (1, 4096, 64, 128, 128, 1),   # DeepSeek-V4-Pro DSA indexer: q=64, kv=1, head_dim=128
     ]
     attn_dtypes = [torch.bfloat16, torch.float16]
     # subset also run in FP8 (E4M3 fwd / E5M2 bwd); label "fp8" in the CSV
     attn_fp8_shapes = [
         (1, 1024, 32, 128),
+    ]
+    # Shapes that TE fused_attn can run ONLY in INFERENCE mode (forward, is_training=False):
+    # the training/bwd kernel rejects head_dim > 256, but the inference fwd kernel
+    # (F16_arbitrary_seqlen) accepts much larger head dims (verified up to 1024). So these
+    # are measured as pure forward kernels and skipped in the training fwd/bwd sections.
+    attn_infer_shapes = [
+        # DeepSeek-V4-Pro main "MLA" attention (all 61 layers): 128 query heads share a
+        # single KV head (MQA-like), qk = 512 (nope448 + rope64), v = 512. TE inference
+        # fwd supports it; TE training fwd+bwd returns No_Backend (bwd head-dim <=256).
+        # (The model still uses its own tilelang `sparse_attn` kernel for the sparsity.)
+        (1, 4096, 128, 512, 512, 1),
     ]
 
     results = []
@@ -566,7 +590,7 @@ def main():
         print(f"{'shape':<22} {'dtype':<10} {'time(us)':>9} {'TFLOPS':>10} {'%TC':>6} {'GB/s':>12} {'AI(flop/B)':>10}")
         for shape in attn_shapes:
             for dt in attn_dtypes:
-                bs, s, nh, qk_dim, v_dim = attn_dims(shape)
+                bs, s, nh, qk_dim, v_dim, _kvh = attn_dims(shape)
                 r = bench_fused_attn(shape, dt, timer, do_backward=False)
                 results.append(("fused_attn_fwd", shape, str(dt), r))
                 flops = 2 * bs * s * nh * s * (qk_dim + v_dim)
@@ -574,7 +598,7 @@ def main():
                 print(f"{str(shape):<22} {str(dt):<10} {r['kernel_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
                       f"{r['tflops']/H100['fp16_tflops']*100:>5.1f}% {r['gb_s']:>12.1f} {ai:>10.1f}")
         for shape in attn_fp8_shapes:
-            bs, s, nh, qk_dim, v_dim = attn_dims(shape)
+            bs, s, nh, qk_dim, v_dim, _kvh = attn_dims(shape)
             r = bench_fused_attn_fp8(shape, timer, do_backward=False)
             results.append(("fused_attn_fwd", shape, "fp8", r))
             flops = 2 * bs * s * nh * s * (qk_dim + v_dim)
@@ -586,7 +610,7 @@ def main():
         print(f"{'shape':<22} {'dtype':<10} {'time(us)':>9} {'TFLOPS':>10} {'%TC':>6} {'GB/s':>12} {'AI(flop/B)':>10}")
         for shape in attn_shapes:
             for dt in attn_dtypes:
-                bs, s, nh, qk_dim, v_dim = attn_dims(shape)
+                bs, s, nh, qk_dim, v_dim, _kvh = attn_dims(shape)
                 r = bench_fused_attn(shape, dt, timer, do_backward=True)
                 results.append(("fused_attn_bwd", shape, str(dt), r))
                 flops = 4 * bs * s * nh * s * (qk_dim + v_dim)
@@ -594,13 +618,27 @@ def main():
                 print(f"{str(shape):<22} {str(dt):<10} {r['kernel_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
                       f"{r['tflops']/H100['fp16_tflops']*100:>5.1f}% {r['gb_s']:>12.1f} {ai:>10.1f}")
         for shape in attn_fp8_shapes:
-            bs, s, nh, qk_dim, v_dim = attn_dims(shape)
+            bs, s, nh, qk_dim, v_dim, _kvh = attn_dims(shape)
             r = bench_fused_attn_fp8(shape, timer, do_backward=True)
             results.append(("fused_attn_bwd", shape, "fp8", r))
             flops = 4 * bs * s * nh * s * (qk_dim + v_dim)
             ai = flops / (r["gb"] * 1e9)
             print(f"{str(shape):<22} {'fp8':<10} {r['kernel_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
                   f"{r['tflops']/H100['fp8_tflops']*100:>5.1f}% {r['gb_s']:>12.1f} {ai:>10.1f}")
+
+        # Inference-only fused attention forward: TE's training bwd rejects head_dim > 256,
+        # but the inference fwd kernel supports large head dims (e.g. DeepSeek-V4-Pro 512).
+        print_sep("FUSED ATTENTION FWD — INFERENCE ONLY (is_training=False; TE bwd unsupported >256)")
+        print(f"{'shape':<22} {'dtype':<10} {'time(us)':>9} {'TFLOPS':>10} {'%TC':>6} {'GB/s':>12} {'AI(flop/B)':>10}")
+        for shape in attn_infer_shapes:
+            for dt in attn_dtypes:
+                bs, s, nh, qk_dim, v_dim, _kvh = attn_dims(shape)
+                r = bench_fused_attn(shape, dt, timer, do_backward=False, is_training=False)
+                results.append(("fused_attn_fwd_infer", shape, str(dt), r))
+                flops = 2 * bs * s * nh * s * (qk_dim + v_dim)
+                ai = flops / (r["gb"] * 1e9)
+                print(f"{str(shape):<22} {str(dt):<10} {r['kernel_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
+                      f"{r['tflops']/H100['fp16_tflops']*100:>5.1f}% {r['gb_s']:>12.1f} {ai:>10.1f}")
 
     # Roofline reference summary
     print_sep("H100 ROOFLINE REFERENCE")

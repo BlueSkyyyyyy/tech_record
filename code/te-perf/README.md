@@ -40,23 +40,66 @@ python bench_te.py --attn-only --warmup 10 --repeat 100 --csv attn.csv
   `(128,512) (256,512) (64,1024) (128,1024) (512,512) (1024,512) (1024,1024)
    (1024,2048) (2048,1024) (2048,2048) (4096,2048) (4096,4096) (8192,2048)
    (8192,4096) (16384,2048) (32768,2048)`，精度覆盖 `fp32 / bf16 / fp16`。
-- **fused_attn fwd/bwd** shape 为 `(batch, seqlen, num_heads, qk_head_dim[, v_head_dim])`，
-  4 元组为普通 MHA（qk==v），5 元组为 MLA（qk≠v）。包含
+- **fused_attn fwd/bwd** shape 为
+  `(batch, seqlen, num_heads, qk_head_dim[, v_head_dim[, num_kv_heads]])`，
+  4 元组为普通 MHA（qk==v，kv 头数==query 头数），5 元组为 MLA（qk≠v），
+  6 元组为 GQA/MQA（q/k/v 头数不同，TE fused_attn 支持）。包含
   `(1,512,16,128) (1,1024,16,128) (1,2048,16,128) (2,2048,16,128) (4,2048,16,128)
    (8,2048,16,128) (1,4096,16,128) (2,4096,16,128) (1,1024,32,128)
    (4,1024,32,128) (8,1024,32,128) (4,8192,16,128)`，
   以及生产模型形状（batch=1, seq=4096）：
   - `(1,4096,64,192,128)` — Kimi-K2.6 MLA（qk=nope128+rope64=192，v=128，64 头）；
   - `(1,4096,64,128,128)` — dsv4 DSA indexer（64 头，head_dim=128）；
-  - `(1,4096,32,128,128)` — dsv4.1 DSA indexer（32 头，head_dim=128）。
+  - `(1,4096,32,128,128)` — dsv4.1 DSA indexer（32 头，head_dim=128）；
+  - `(1,4096,40,128,128,8)` — Qwen3-8B（GQA：q=40，kv=8，head_dim=128）；
+  - `(1,4096,32,128,128,4)` — Qwen3-30B-A3B（GQA：q=32，kv=4，head_dim=128）；
+  - `(1,4096,64,128,128,4)` — Qwen3-235B-A22B（GQA：q=64，kv=4，head_dim=128）；
+  - `(1,4096,64,128,128,1)` — DeepSeek-V4-Pro DSA indexer（MQA：q=64，共享压
+    缩 KV 1 头，head_dim=128）。
 
-  精度覆盖 `bf16 / fp16`，mask 为 causal，bias 为 no_bias，training=True，dropout=0。
-  其中 `(1,1024,32,128)` 额外测一组 **FP8**（fwd QKV/S/O 用 E4M3，bwd dO/dP/dQKV 用
-  E5M2；QKV/dO 在计时区外预先量化，故测到的仍是纯 FP8 fused-attn kernel）。TE fused_attn
-  **不支持 fp32**（`FusedAttnBackend` 仅有 F16_max512 / F16_arbitrary / FP8）。
-  **限制**：dsv4 / dsv4.1 主注意力 `head_dim=512`（qk=448+64，v=512）超出 TE fused_attn
-  在 H100 上的支持范围（最大 256，且 `qk=256,v=128` 也不支持），这两个模型实际用自研
-  CSA/DSA 稀疏注意力 kernel，无法用 TE fused_attn 测试，故只测其 DSA indexer。
+  Qwen3 系列 shape 由各自 `config.json` 的 `num_attention_heads / num_key_value_heads /
+  head_dim` 推导（qwen3-30B-A3B 与 235B-A22B 的 config 从 ModelScope 单独下载，仅取
+  `config.json` 小文件）。
+
+### 关于 TE 的 MLA 与 DeepSeek-V4-Pro 的注意力
+
+TE fused_attn 的 **MLA** 指 `head_dim_qk != head_dim_v`（Kimi-K2.6 `(1,4096,64,192,128)`、
+DeepSeek-V3 即此类），要求 `qkv_layout` 为 `bshd_bshd_bshd` 这类 `hd_hd_hd` 分组。本机上
+（TE 2.14 / H100 sm90）实测支持范围，**训练与推理不同**（`tex.get_fused_attn_backend` +
+实跑验证）：
+
+- **推理 fwd（`is_training=False`）**：head dim 很宽松，`qk=v=512`、`qk=576/v=512`、
+  `qk=1024/v=1024` 都返回 `F16_arbitrary_seqlen` 并成功执行；
+- **训练 fwd+bwd（`is_training=True`）**：受 bwd kernel 限制，`head_dim_qk==head_dim_v`
+  最大 256；`qk!=v` 只在 `qk<=192`、`v<=128` 附近可用（`192/128`、`128/128`、`192/192`
+  通过，`256/128`、`64/512` 失败）。`qk=512/v=512` 训练时返回 `No_Backend`。
+
+DeepSeek-V4-Pro 有**两类**注意力：
+
+1. **主稀疏注意力（全部 61 层）**：128 个 query 头共享 1 个 KV 头（MQA），qk = 512
+   （nope448 + rope64），v = 512，shape 为 `(1,4096,128,512,512,1)`。
+   - **推理 fwd 可用**：`(1,4096,128,512,512,1)` 走 `F16_arbitrary_seqlen`（脚本新增
+     `fused_attn_fwd_infer` 段实测）；
+   - **训练不可用**：TE bwd 不支持 `head_dim>256`，故不进入训练 fwd/bwd 段。
+   - 模型在生产中仍用自研 tilelang `sparse_attn` kernel（滑窗 + top-k 压缩 KV，
+     `kernel.py`），原因是它是**稀疏**注意力，而非 TE 做不了 512 维 dense 推理。
+2. **DSA indexer（`compress_ratio==4` 的层）**：`index_n_heads=64`、`index_head_dim=128`，
+   64 个 query 头对 1 个共享压缩 KV 头做打分（MQA），shape 为 `(1,4096,64,128,128,1)`，
+   进入常规训练 fwd/bwd 段。注意 indexer 只做 Q·Kᵀ 打分、无 softmax/PV，且压缩 KV
+   长度为 seq/ratio，这里按等长 seq=4096 的 fused-attn 近似口径衡量，与既有 dsv4
+   indexer 条目一致。
+
+各层 `compress_ratios` 取值为 `128`（带 compressor、无 indexer）、`4`（compressor + indexer）、
+`0`（纯滑窗，window=128），但主注意力 q/kv 的 `head_dim` 恒为 512，故模型层面只有上述两个
+可用于 TE 的 shape。
+
+  常规训练段精度覆盖 `bf16 / fp16`，mask 为 causal，bias 为 no_bias，training=True，
+  dropout=0。其中 `(1,1024,32,128)` 额外测一组 **FP8**（fwd QKV/S/O 用 E4M3，bwd
+  dO/dP/dQKV 用 E5M2；QKV/dO 在计时区外预先量化，故测到的仍是纯 FP8 fused-attn kernel）。
+  TE fused_attn **不支持 fp32**（`FusedAttnBackend` 仅有 F16_max512 / F16_arbitrary / FP8）。
+  **推理段** `fused_attn_fwd_infer`（`is_training=False`）只测 fwd，用于覆盖 `head_dim>256`
+  的模型（如 DeepSeek-V4-Pro 主注意力 512 维）。dsv4 / dsv4.1 主注意力 `head_dim=512`
+  （qk=448+64，v=512）同样只能在推理段测 fwd；其生产实现是自研 CSA/DSA 稀疏注意力 kernel。
 
 ## 指标口径
 
