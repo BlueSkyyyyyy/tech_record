@@ -38,12 +38,14 @@ from torch.profiler import ProfilerActivity, profile
 # --------------------------------------------------------------------------- #
 #   132 SMs @ 1.980 GHz
 #   FP16/BF16 tensor-core dense: ~989.4 TFLOPS (no sparsity)
+#   FP8 tensor-core dense:       ~1978.8 TFLOPS
 #   FP16/BF16 with 2:4 sparsity: ~1978.8 TFLOPS
 #   FP32 (CUDA core FMA):       ~66.9  TFLOPS
 #   HBM3 bandwidth:             ~3.35  TB/s (3.35e12 B/s)
 H100 = {
     "fp16_tflops": 989.4,
     "bf16_tflops": 989.4,
+    "fp8_tflops": 1978.8,
     "fp32_tflops": 66.9,
     "bandwidth": 3.35e12,  # bytes per second
 }
@@ -60,6 +62,7 @@ try:
         fused_attn_bwd,
         FusedAttnBackend,
     )
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
 except Exception as e:  # pragma: no cover - import at bench time
     print(f"[FATAL] unable to import transformer_engine: {e}", file=sys.stderr)
     sys.exit(1)
@@ -288,6 +291,101 @@ def bench_fused_attn(shape, dtype, timer, do_backward=False):
     return {"kernel_ms": ms, "gb_s": gb_s, "gb": gb, "tflops": tflops}
 
 
+def _fp8_quantizer(fp8_dtype):
+    """Rowwise-only FP8 quantizer, as used internally by TE's fused attention."""
+    return Float8Quantizer(
+        scale=torch.ones(1, device="cuda"),
+        amax=torch.zeros(1, device="cuda"),
+        fp8_dtype=fp8_dtype,
+        rowwise=True,
+        columnwise=False,
+    )
+
+
+def bench_fused_attn_fp8(shape, timer, do_backward=False):
+    """FP8 fused attention (E4M3 for fwd QKV/S/O, E5M2 for bwd dO/dP/dQKV).
+
+    Q/K/V (and dO) are quantized to FP8 *outside* the timed region, so the
+    measured device time is the pure FP8 fused-attention kernel; per-call input
+    quantization is not included (matching the high-precision path's scope).
+    """
+    bs, seqlen, num_heads, qk_dim, v_dim = attn_dims(shape)
+    nominal = torch.bfloat16
+    e4m3 = tex.DType.kFloat8E4M3
+    e5m2 = tex.DType.kFloat8E5M2
+
+    q = torch.randn(bs * seqlen, num_heads, qk_dim, device="cuda", dtype=nominal)
+    k = torch.randn(bs * seqlen, num_heads, qk_dim, device="cuda", dtype=nominal)
+    v = torch.randn(bs * seqlen, num_heads, v_dim, device="cuda", dtype=nominal)
+
+    cu_seqlens = torch.arange(0, (bs + 1) * seqlen, seqlen, dtype=torch.int32, device="cuda")
+    max_seqlen = seqlen
+
+    qkv_q = _fp8_quantizer(e4m3)
+    s_q = _fp8_quantizer(e4m3)
+    o_q = _fp8_quantizer(e4m3)
+    do_q = _fp8_quantizer(e5m2)
+    dp_q = _fp8_quantizer(e5m2)
+    dqkv_q = _fp8_quantizer(e5m2)
+
+    q8, k8, v8 = qkv_q(q), qkv_q(k), qkv_q(v)
+    backend = FusedAttnBackend["FP8"]
+    attn_bias_type = "no_bias"
+    attn_mask_type = "causal"
+    softmax_type = "vanilla"
+
+    out, aux_ctx, *_ = fused_attn_fwd(
+        True, max_seqlen, max_seqlen, cu_seqlens, cu_seqlens,
+        q8, k8, v8, nominal, backend, None,
+        s_quantizer=s_q, o_quantizer=o_q,
+        attn_bias_type=attn_bias_type, attn_mask_type=attn_mask_type,
+        softmax_type=softmax_type, qkv_layout="bshd_bshd_bshd",
+    )
+
+    if not do_backward:
+        def fn_fwd():
+            o, _, *_ = fused_attn_fwd(
+                True, max_seqlen, max_seqlen, cu_seqlens, cu_seqlens,
+                q8, k8, v8, nominal, backend, None,
+                s_quantizer=s_q, o_quantizer=o_q,
+                attn_bias_type=attn_bias_type, attn_mask_type=attn_mask_type,
+                softmax_type=softmax_type, qkv_layout="bshd_bshd_bshd",
+            )
+            return o
+
+        ms = timer.device_time(fn_fwd)
+        # fp8 = 1 byte/element; q + k + v read, o write
+        gb = (q.numel() + k.numel() + v.numel() + out.numel()) / 1e9
+        gb_s = gb / (ms / 1e3)
+        flops = 2 * bs * seqlen * num_heads * seqlen * (qk_dim + v_dim)
+        tflops = flops / (ms / 1e3) / 1e12
+        return {"kernel_ms": ms, "gb_s": gb_s, "gb": gb, "tflops": tflops}
+
+    d_out = torch.randn(bs * seqlen, num_heads, v_dim, device="cuda", dtype=nominal)
+    d_out8 = do_q(d_out)
+
+    def fn_bwd():
+        dqkv = fused_attn_bwd(
+            max_seqlen, max_seqlen, cu_seqlens, cu_seqlens,
+            q8, k8, v8, out, d_out8, nominal, d_out8._fp8_dtype,
+            list(aux_ctx), backend,
+            qkv_layout="bshd_bshd_bshd",
+            s_quantizer=s_q, dp_quantizer=dp_q, dqkv_quantizer=dqkv_q,
+            attn_bias_type=attn_bias_type, attn_mask_type=attn_mask_type,
+            softmax_type=softmax_type,
+        )
+        return dqkv
+
+    ms = timer.device_time(fn_bwd)
+    # fp8 = 1 byte/element; read q,k,v,o,d_o; write dq,dk,dv
+    gb = (q.numel() + k.numel() + v.numel() + out.numel() + d_out.numel()
+          + q.numel() + k.numel() + v.numel()) / 1e9
+    gb_s = gb / (ms / 1e3)
+    flops = 4 * bs * seqlen * num_heads * seqlen * (qk_dim + v_dim)
+    tflops = flops / (ms / 1e3) / 1e12
+    return {"kernel_ms": ms, "gb_s": gb_s, "gb": gb, "tflops": tflops}
+
+
 # --------------------------------------------------------------------------- #
 # Roofline helpers
 # --------------------------------------------------------------------------- #
@@ -370,6 +468,10 @@ def main():
         (1, 4096, 32, 128, 128),  # dsv4.1 DSA indexer: 32 heads, head_dim=128
     ]
     attn_dtypes = [torch.bfloat16, torch.float16]
+    # subset also run in FP8 (E4M3 fwd / E5M2 bwd); label "fp8" in the CSV
+    attn_fp8_shapes = [
+        (1, 1024, 32, 128),
+    ]
 
     results = []
 
@@ -471,6 +573,14 @@ def main():
                 ai = flops / (r["gb"] * 1e9)
                 print(f"{str(shape):<22} {str(dt):<10} {r['kernel_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
                       f"{r['tflops']/H100['fp16_tflops']*100:>5.1f}% {r['gb_s']:>12.1f} {ai:>10.1f}")
+        for shape in attn_fp8_shapes:
+            bs, s, nh, qk_dim, v_dim = attn_dims(shape)
+            r = bench_fused_attn_fp8(shape, timer, do_backward=False)
+            results.append(("fused_attn_fwd", shape, "fp8", r))
+            flops = 2 * bs * s * nh * s * (qk_dim + v_dim)
+            ai = flops / (r["gb"] * 1e9)
+            print(f"{str(shape):<22} {'fp8':<10} {r['kernel_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
+                  f"{r['tflops']/H100['fp8_tflops']*100:>5.1f}% {r['gb_s']:>12.1f} {ai:>10.1f}")
 
         print_sep("FUSED ATTENTION BWD  (compute-bound: floor = tensor-core peak)")
         print(f"{'shape':<22} {'dtype':<10} {'time(us)':>9} {'TFLOPS':>10} {'%TC':>6} {'GB/s':>12} {'AI(flop/B)':>10}")
@@ -483,13 +593,23 @@ def main():
                 ai = flops / (r["gb"] * 1e9)
                 print(f"{str(shape):<22} {str(dt):<10} {r['kernel_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
                       f"{r['tflops']/H100['fp16_tflops']*100:>5.1f}% {r['gb_s']:>12.1f} {ai:>10.1f}")
+        for shape in attn_fp8_shapes:
+            bs, s, nh, qk_dim, v_dim = attn_dims(shape)
+            r = bench_fused_attn_fp8(shape, timer, do_backward=True)
+            results.append(("fused_attn_bwd", shape, "fp8", r))
+            flops = 4 * bs * s * nh * s * (qk_dim + v_dim)
+            ai = flops / (r["gb"] * 1e9)
+            print(f"{str(shape):<22} {'fp8':<10} {r['kernel_ms']*1e3:>8.1f} {r['tflops']:>10.1f} "
+                  f"{r['tflops']/H100['fp8_tflops']*100:>5.1f}% {r['gb_s']:>12.1f} {ai:>10.1f}")
 
     # Roofline reference summary
     print_sep("H100 ROOFLINE REFERENCE")
     print(f"FP16/BF16 tensor-core peak : {H100['fp16_tflops']:>10.1f} TFLOPS (dense, no sparsity)")
+    print(f"FP8 tensor-core peak       : {H100['fp8_tflops']:>10.1f} TFLOPS (dense, no sparsity)")
     print(f"FP32 (CUDA-core FMA) peak  : {H100['fp32_tflops']:>10.1f} TFLOPS")
     print(f"HBM3 memory bandwidth      : {H100['bandwidth']/1e12:>10.2f} TB/s")
-    for lbl, peak in [("FP16/BF16", H100['fp16_tflops']), ("FP32", H100['fp32_tflops'])]:
+    for lbl, peak in [("FP16/BF16", H100['fp16_tflops']), ("FP8", H100['fp8_tflops']),
+                      ("FP32", H100['fp32_tflops'])]:
         ridge = peak * 1e12 / H100['bandwidth']
         print(f"Roofline ridge ({lbl})     : AI = {ridge:>8.1f} FLOP/byte "
               f"(below: mem-bound slope {H100['bandwidth']/1e9:.0f} GB/s/FLOP/byte; above: flat {peak:.0f} TFLOPS)")

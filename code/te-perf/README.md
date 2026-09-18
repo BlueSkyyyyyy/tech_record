@@ -51,6 +51,9 @@ python bench_te.py --attn-only --warmup 10 --repeat 100 --csv attn.csv
   - `(1,4096,32,128,128)` — dsv4.1 DSA indexer（32 头，head_dim=128）。
 
   精度覆盖 `bf16 / fp16`，mask 为 causal，bias 为 no_bias，training=True，dropout=0。
+  其中 `(1,1024,32,128)` 额外测一组 **FP8**（fwd QKV/S/O 用 E4M3，bwd dO/dP/dQKV 用
+  E5M2；QKV/dO 在计时区外预先量化，故测到的仍是纯 FP8 fused-attn kernel）。TE fused_attn
+  **不支持 fp32**（`FusedAttnBackend` 仅有 F16_max512 / F16_arbitrary / FP8）。
   **限制**：dsv4 / dsv4.1 主注意力 `head_dim=512`（qk=448+64，v=512）超出 TE fused_attn
   在 H100 上的支持范围（最大 256，且 `qk=256,v=128` 也不支持），这两个模型实际用自研
   CSA/DSA 稀疏注意力 kernel，无法用 TE fused_attn 测试，故只测其 DSA indexer。
@@ -72,9 +75,10 @@ python bench_te.py --attn-only --warmup 10 --repeat 100 --csv attn.csv
   会偏高甚至 >100%，属正常现象；判断 HBM 效率请看工作集大于 L2 的大 shape。
 - **H100 roofline 常量**（硬编码，脚本末尾会打印）：
   - FP16/BF16 tensor-core dense peak ≈ 989.4 TFLOPS（132 SM × 1.980 GHz）
+  - FP8 tensor-core dense peak ≈ 1978.8 TFLOPS（FP8 数据点的 `%TC` 按此折算）
   - FP32 CUDA-core peak ≈ 66.9 TFLOPS
   - HBM3 带宽 ≈ 3.35 TB/s
-  - roofline 拐点（ridge）：FP16/BF16 ≈ 295 FLOP/byte，FP32 ≈ 20 FLOP/byte
+  - roofline 拐点（ridge）：FP16/BF16 ≈ 295 FLOP/byte，FP8 ≈ 591 FLOP/byte，FP32 ≈ 20 FLOP/byte
 
 ## roofline 分析要点
 
