@@ -1,5 +1,22 @@
 # TE 算子性能测试结果汇总
 
+> `kernel耗时` 为 **CUPTI 实测的纯 device kernel 执行时间**（µs）：由 `torch.profiler` 统计一次调用所 launch 的全部 kernel（含 device memset）的 device 时长之和，对 repeat 次调用取平均，**不含 launch / 主机派发开销**。设备均为 NVIDIA H100。原始数据见 `te_perf.csv` / `perf.log`（含纯 device 时间与由此计算的 GB/s、TFLOPS）。
+>
+> 注意：小 shape 反复调用时数据可能常驻 L2（H100 约 50MB），此时按 HBM 峰值折算的 `%BW` 会偏高、甚至超过 100%，属正常现象，不代表超过 HBM 带宽；判断 HBM 效率请看工作集大于 L2 的大 shape。
+
+> **生产模型融合注意力形状**（batch=1, seq=4096）：
+> - `(1, 4096, 64, 192, 128)` — Kimi-K2.6 MLA（qk=nope128+rope64=192，v=128，64 头）
+> - `(1, 4096, 64, 128, 128)` — dsv4 DSA indexer（64 头，head_dim=128）
+> - `(1, 4096, 32, 128, 128)` — dsv4.1 DSA indexer（32 头，head_dim=128）
+> - `(1, 4096, 40, 128, 128, 8)` — Qwen3-8B GQA（q=40，kv=8）
+> - `(1, 4096, 32, 128, 128, 4)` — Qwen3-30B-A3B GQA（q=32，kv=4）
+> - `(1, 4096, 64, 128, 128, 4)` — Qwen3-235B-A22B GQA（q=64，kv=4）
+> - `(1, 4096, 64, 128, 128, 1)` — DeepSeek-V4-Pro DSA indexer（MQA：q=64 共享 1 个压缩 KV 头）
+>
+> 注：dsv4 / dsv4.1 / DeepSeek-V4-Pro 主 MLA 注意力 `head_dim=512`（qk=448+64，v=512）超出 TE fused_attn 在 H100 上训练 bwd 的支持范围（最大 256），仅推理 fwd 段 `fused_attn_fwd_infer` 可测；其生产实现是自研 CSA/DSA 稀疏注意力 kernel，故这里只测其 DSA indexer / 推理 fwd。
+
+| op name | dtype | shape | device | kernel耗时(µs) |
+|---|---|---|---|---|
 | rmsnorm_fwd | torch.float32 | (128, 512) | H100 | 1.9 |
 | rmsnorm_fwd | torch.bfloat16 | (128, 512) | H100 | 2.0 |
 | rmsnorm_fwd | torch.float16 | (128, 512) | H100 | 2.0 |
