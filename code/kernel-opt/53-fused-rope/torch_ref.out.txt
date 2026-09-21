@@ -1,0 +1,8 @@
+=== ds-mla-q: T=16384 H=128 HD=512 R=64 PAIR=interleaved ===
+  [check] our kernel vs model.py-fp64: max_abs_err = 4.024e-03  OK
+  torch clone (copy roof)              0.1793 ms    2994.8 GB/s
+  torch interleaved (model.py)         4.5654 ms     117.6 GB/s
+=== qwen3-q: T=16384 H=40 HD=128 R=128 PAIR=split-half ===
+  [check] our kernel vs model.py-fp64: max_abs_err = 4.226e-03  OK
+  torch clone (copy roof)              0.1134 ms    2960.2 GB/s
+  torch rotate_half (HF/Qwen3)         0.7811 ms     429.6 GB/s

@@ -1,0 +1,37 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+=== ds-mla-q-packed : T=16384 H=128 HD=64 R=64 PAIR=interleaved base=10000 yarn=65536 (bytes=536.9 MB) ===
+  [correctness] warp-v2 vs CPU-fp64: max_abs_err=0.000e+00 over 131072 elems  OK
+roof: pattern copy (r+w)       0.1845 ms    2909.7 GB/s  ( 86.8% of peak)
+roof: pattern read-only        0.0866 ms    3100.3 GB/s  ( 92.5% of peak)
+v0 naive (on-the-fly)          1.9198 ms     279.7 GB/s  (  8.3% of peak)
+v1a elementwise fp32-tab       0.2321 ms    2312.6 GB/s  ( 69.0% of peak)
+v1b elementwise bf16-tab       0.2343 ms    2291.7 GB/s  ( 68.4% of peak)
+v2a warp fp32-tab              0.2304 ms    2330.1 GB/s  ( 69.5% of peak)
+v2b warp bf16-tab              0.2313 ms    2320.9 GB/s  ( 69.2% of peak)
+v4 vec4 (uint4 stream)         0.1853 ms    2897.5 GB/s  ( 86.4% of peak)
+v6 vec4 VPT=2                  0.2079 ms    2582.0 GB/s  ( 77.0% of peak)
+v6 vec4 VPT=4                  0.2268 ms    2366.9 GB/s  ( 70.6% of peak)
+v6 VPT=2 grid=132              0.2771 ms    1937.8 GB/s  ( 57.8% of peak)
+v6 VPT=2 grid=264              0.2120 ms    2532.2 GB/s  ( 75.5% of peak)
+v6 VPT=2 grid=528              0.2130 ms    2520.9 GB/s  ( 75.2% of peak)
+v6 VPT=2 grid=1056             0.2135 ms    2514.8 GB/s  ( 75.0% of peak)
+v6 VPT=2 grid=2112             0.2113 ms    2540.3 GB/s  ( 75.8% of peak)
+v6 VPT=2 grid=4224             0.2091 ms    2567.2 GB/s  ( 76.6% of peak)
+v5 tok-warp reg-tab            0.2491 ms    2155.7 GB/s  ( 64.3% of peak)
+v5 grid=132                    0.8837 ms     607.5 GB/s  ( 18.1% of peak)
+v5 grid=264                    0.4999 ms    1073.9 GB/s  ( 32.0% of peak)
+v5 grid=528                    0.3098 ms    1733.2 GB/s  ( 51.7% of peak)
+v5 grid=1056                   0.2499 ms    2148.1 GB/s  ( 64.1% of peak)
+v5 grid=2112                   0.2493 ms    2153.8 GB/s  ( 64.2% of peak)
+v2b grid=132                   1.0342 ms     519.1 GB/s  ( 15.5% of peak)
+v2b grid=264                   0.5662 ms     948.1 GB/s  ( 28.3% of peak)
+v2b grid=528                   0.3291 ms    1631.5 GB/s  ( 48.7% of peak)
+v2b grid=1056                  0.2325 ms    2308.9 GB/s  ( 68.9% of peak)
+v2b grid=2112                  0.2380 ms    2255.6 GB/s  ( 67.3% of peak)
+
