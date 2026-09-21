@@ -1,0 +1,35 @@
+==== M=1 ====
+cmp_base_k5                 0.0823 ms      2.17 TFLOPS (  0.2% bf16)  W-bw   541.3 GB/s
+cmp_base_k8                 0.0832 ms      2.14 TFLOPS (  0.2% bf16)  W-bw   535.7 GB/s
+cmp_base_k16                0.0883 ms      2.02 TFLOPS (  0.2% bf16)  W-bw   504.9 GB/s
+cmp_persist_c4              0.0807 ms      2.21 TFLOPS (  0.2% bf16)  W-bw   552.3 GB/s
+cmp_persist_c8              0.0802 ms      2.22 TFLOPS (  0.2% bf16)  W-bw   555.9 GB/s
+cmp_persist_c16             0.0853 ms      2.09 TFLOPS (  0.2% bf16)  W-bw   522.3 GB/s
+==== M=4 ====
+cmp_base_k5                 0.0820 ms      8.70 TFLOPS (  0.9% bf16)  W-bw   543.7 GB/s
+cmp_base_k8                 0.0829 ms      8.60 TFLOPS (  0.9% bf16)  W-bw   537.4 GB/s
+cmp_base_k16                0.0879 ms      8.11 TFLOPS (  0.8% bf16)  W-bw   507.1 GB/s
+cmp_persist_c4              0.0802 ms      8.89 TFLOPS (  0.9% bf16)  W-bw   555.4 GB/s
+cmp_persist_c8              0.0798 ms      8.93 TFLOPS (  0.9% bf16)  W-bw   558.4 GB/s
+cmp_persist_c16             0.0851 ms      8.38 TFLOPS (  0.8% bf16)  W-bw   523.9 GB/s
+==== M=16 ====
+cmp_base_k5                 0.0824 ms     34.62 TFLOPS (  3.5% bf16)  W-bw   540.9 GB/s
+cmp_base_k8                 0.0847 ms     33.68 TFLOPS (  3.4% bf16)  W-bw   526.3 GB/s
+cmp_base_k16                0.0942 ms     30.28 TFLOPS (  3.1% bf16)  W-bw   473.1 GB/s
+cmp_persist_c4              0.0835 ms     34.14 TFLOPS (  3.5% bf16)  W-bw   533.5 GB/s
+cmp_persist_c8              0.0809 ms     35.27 TFLOPS (  3.6% bf16)  W-bw   551.1 GB/s
+cmp_persist_c16             0.0849 ms     33.60 TFLOPS (  3.4% bf16)  W-bw   525.0 GB/s
+==== M=32 ====
+cmp_base_k5                 0.0850 ms     67.09 TFLOPS (  6.8% bf16)  W-bw   524.2 GB/s
+cmp_base_k8                 0.0921 ms     61.96 TFLOPS (  6.3% bf16)  W-bw   484.0 GB/s
+cmp_base_k16                0.1044 ms     54.65 TFLOPS (  5.5% bf16)  W-bw   427.0 GB/s
+cmp_persist_c4              0.0967 ms     58.98 TFLOPS (  6.0% bf16)  W-bw   460.7 GB/s
+cmp_persist_c8              0.0859 ms     66.42 TFLOPS (  6.7% bf16)  W-bw   518.9 GB/s
+cmp_persist_c16             0.0879 ms     64.88 TFLOPS (  6.6% bf16)  W-bw   506.9 GB/s
+==== M=64 ====
+cmp_base_k5                 0.0947 ms    120.43 TFLOPS ( 12.2% bf16)  W-bw   470.4 GB/s
+cmp_base_k8                 0.1029 ms    110.92 TFLOPS ( 11.2% bf16)  W-bw   433.3 GB/s
+cmp_base_k16                0.1304 ms     87.51 TFLOPS (  8.8% bf16)  W-bw   341.8 GB/s
+cmp_persist_c4              0.1335 ms     85.45 TFLOPS (  8.6% bf16)  W-bw   333.8 GB/s
+cmp_persist_c8              0.1057 ms    107.92 TFLOPS ( 10.9% bf16)  W-bw   421.6 GB/s
+cmp_persist_c16             0.0990 ms    115.19 TFLOPS ( 11.6% bf16)  W-bw   450.0 GB/s
