@@ -103,6 +103,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 25. [MoE grouped GEMM：一个 kernel 吃掉 384 个 expert](content/posts/cuda-kernel-opt-25-moe-grouped-gemm/index.md)
 26. [MoE grouped GEMM 的 L2 墙：TMA cluster multicast 实测只赚 4%](content/posts/cuda-kernel-opt-26-moe-cluster-multicast/index.md)
 27. [MoE 的 router、top-k 与 token 置换：搬运才是大头，置换已贴 HBM 天花板](content/posts/cuda-kernel-opt-27-moe-router/index.md)
+28. [MoE 门控 GEMM 的 wgmma + TMA 冲刺：从 cuBLAS 的 28% 到 80%](content/posts/cuda-kernel-opt-28-moe-gate-wgmma/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 
