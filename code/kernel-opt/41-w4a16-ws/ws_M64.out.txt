@@ -1,0 +1,22 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A16 warp-specialized GEMM: M=64 N=17408 K=5120 group=128
+FLOPs = 11.41 GFLOP ; W_int4 = 44.6 MB
+
+  [ws_p1c1s3k4         ] max_abs_err=4.670e-03 (ref~3.02) OK
+ws_p1c1s3k4               0.1049 ms    108.79 TFLOPS ( 11.0% bf16)  W-bw   425.0 GB/s
+  [ws_p1c1s3k5         ] max_abs_err=4.670e-03 (ref~3.02) OK
+ws_p1c1s3k5               0.0957 ms    119.18 TFLOPS ( 12.1% bf16)  W-bw   465.6 GB/s
+  [ws_p1c1s3k8         ] max_abs_err=4.670e-03 (ref~3.02) OK
+ws_p1c1s3k8               0.1059 ms    107.72 TFLOPS ( 10.9% bf16)  W-bw   420.8 GB/s
+  [ws_p1c1s3k10        ] max_abs_err=4.670e-03 (ref~3.02) OK
+ws_p1c1s3k10              0.1075 ms    106.09 TFLOPS ( 10.7% bf16)  W-bw   414.4 GB/s
+  [ws_p1c1s3k16        ] max_abs_err=1.841e-02 (ref~3.02) OK
+ws_p1c1s3k16              0.1315 ms     86.77 TFLOPS (  8.8% bf16)  W-bw   338.9 GB/s
+  [ws_p1c1s3k20        ] max_abs_err=4.670e-03 (ref~3.02) OK
+ws_p1c1s3k20              0.1451 ms     78.63 TFLOPS (  8.0% bf16)  W-bw   307.2 GB/s

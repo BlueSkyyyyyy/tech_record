@@ -277,6 +277,9 @@ scripts/lab.sh status
   多发寄存器，ptxas 可能回 **`C7507 'setmaxnreg' ignored to maintain minimum register requirements`**
   并直接忽略。别照搬「DeepGEMM 用 232/248 寄存器」的结论，它的线程几何（128 线程 TMA warpgroup +
   persistent 调度器）与你的不同；先看 `-Xptxas -v` 实际拿到多少。
+- **mbarrier 的期望 count 必须与真实 arrive 次数逐一相等**（41 篇）：consumer 释放 `empty` 若写成「每个 consumer warp 的 lane0 arrive」（4 个 warp → 4 次）而 `mbar_init(empty, NCONS=1)`，会 **over-arrive** 把相位打乱 → producer 永久自旋，**不报 CUDA error、`timeout` 也杀不掉容器进程**。修法：`count = 所有 consumer 线程数`，每个 consumer 线程各自 `mbar_arrive`（复现 23 篇结论）。定位靠抽最小复现（`mbar_init/arrive/wait` + producer/consumer 两分支）。
+- **小 `M` 的 split-K GEMM 先算 wave quantization**（41 篇）：并发槽 `Nc = 2 CTA/SM × 132 = 264`；`grid = (N/BN)·KSPLIT` 若不是 `Nc` 整数倍，`ceil(grid/Nc)` 会多出一整波、而最后一波可能只有几个 CTA。判据 `T ≈ ceil(grid/Nc) × (K/BK/KSPLIT)`，取最小 KSPLIT，但每项别少于 ~8 个 stage（prologue 反噬）。实测同 kernel 换 `N` 让 grid 从 544(3 波) 变 528(2 波)，**−20%**。
+- **warp specialization 提 occupancy 不等于提速**（41 篇）：把 ALU（反量化/激活）与 `wgmma` 拆到不同 WG 后，occupancy 6.5%→21%、regs 156→90，但只快 1.07×——`fixed-latency` stall 高是**症状**，根因常在访存延迟/尾波。先看 ncu 确认瓶颈再决定是否上 WS。
 - **ue8m0（2 的幂）的 block scale 可以精确折进 e4m3 操作数**（37 篇）：`sa=2^e` 时 `q·sa` 只是 e4m3
   的指数平移，尾数不丢。于是 per-block GEMM 可退化成 per-tensor GEMM（`Σ(q_a·sa)(q_b·sb)=Σsa·sb·q_a·q_b`），
   折算开销彻底消失：GEMM 本体 940.6→1207.9 TFLOPS（1.28×）。折 B（权重）一次性免费；折 A（激活）

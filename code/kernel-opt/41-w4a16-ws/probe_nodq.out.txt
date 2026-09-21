@@ -1,0 +1,11 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A16 warp-specialized GEMM: M=64 N=17408 K=5120 group=128
+FLOPs = 11.41 GFLOP ; W_int4 = 44.6 MB
+
+probe_nodq                0.0696 ms    163.80 TFLOPS ( 16.6% bf16)  W-bw   639.8 GB/s
