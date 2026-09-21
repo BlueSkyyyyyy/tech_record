@@ -57,7 +57,7 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 
 - [x] **07 Softmax 优化**：多趟(29.8%) → 融合(37.4%) → 整行 smem 缓存(85.3%) · online softmax 引出 FlashAttention · LayerNorm 同套路
 - [x] **08 GEMM 入门**：naive(8.2%) → smem tiled(13.5%) · ncu 指出瓶颈是 L1/TEX 载入管道 · 引出寄存器分块
-- [ ] **09 GEMM 进阶**：寄存器分块（thread tile）· 向量化 + double buffering · 逼近 cuBLAS 的百分比
+- [x] **09 GEMM 进阶**：寄存器分块（thread tile）· 向量化 + double buffering · 逼近 cuBLAS 的百分比
 
 ### 第四部分：进阶专题
 
@@ -99,11 +99,12 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 
 - 2026-09-21：搭建容器 `kernel_lab` 与 `scripts/`、`common/cuda_utils.cuh`，起草路线图。
 - 2026-09-21：完成并发布 **01–08**（… / Softmax / GEMM 入门）。已 push 且线上 200。
+- 2026-09-21：完成并发布 **09 GEMM 进阶**：寄存器分块 8×8 + 交错映射消 bank conflict → 39.2%；float4 向量化 → 45.0%；cp.async 双缓冲 → **51.5%**（34.46 TFLOPS）；同口径 cuBLAS 75.8%（50.73 TFLOPS），达其 ~68%。
 
 ## 下一步（明确到可执行）
 
-- [ ] 完成 **09 GEMM 进阶**：寄存器分块（每线程 4×4/8×8）+ 向量化 + double buffering，目标 50%+，最好和 cuBLAS 对照
-- [ ] 之后接 **10 ncu 深潜**（occupancy / warp stall / roofline section）
+- [ ] 完成 **10 ncu 深潜**：occupancy 计算（第 09 篇占用被寄存器锁在 25%）、warp stall reasons、roofline section、source/sass 对照
+- [ ] 之后接 **11 launch 配置与 occupancy**（`__launch_bounds__` / 循环展开）
 - [ ] 每完成一篇：更新本文件、README 索引，提交推送
 - [ ] 可选：给 01 的 roofline 画一张 mermaid 图
 
