@@ -1,0 +1,104 @@
+==PROF== Connected to process 27291 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/13-tensor-core/tensor_core.out)
+==PROF== Profiling "gemm_mma_pipe": 0%....50%....100% - 10 passes
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+BF16 TC GEMM: M=N=K=2048, FLOPs = 17.18 GFLOP
+
+  [mma_pipe ] sampled max_abs_err = 3.937e-03 (ref~1933.2) OK
+mma_pipe    0.0799 ms    214.99 TFLOPS  ( 21.7% of bf16 TC peak)
+==PROF== Disconnected from process 27291
+[27291] tensor_core.out@127.0.0.1
+  gemm_mma_pipe(const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int, int) (16, 16, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.81
+    Elapsed Cycles                cycle       142891
+    Memory Throughput                 %        69.89
+    DRAM Throughput                   %         7.31
+    Duration                         us        78.66
+    L1/TEX Cache Throughput           %        55.71
+    L2 Cache Throughput               %        69.89
+    SM Active Cycles              cycle    131042.57
+    Compute (SM) Throughput           %        37.15
+    ----------------------- ----------- ------------
+
+    OPT   Memory is more heavily utilized than Compute: Look at the Memory Workload Analysis section to identify the L2 
+          bottleneck. Check memory replay (coalescing) metrics to make sure you're efficiently utilizing the bytes      
+          transferred. Also consider whether it is possible to do more work per memory access (kernel fusion) or        
+          whether there are values you can (re)compute.                                                                 
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   256
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                    256
+    Registers Per Thread             register/thread             128
+    Shared Memory Configuration Size           Kbyte          135.17
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block       byte/block               0
+    Static Shared Memory Per Block       Kbyte/block           37.89
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread           65536
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                                0.97
+    -------------------------------- --------------- ---------------
+
+    OPT   If you execute __syncthreads() to synchronize the threads of a block, it is recommended to have at least two  
+          blocks per multiprocessor (compared to the currently executed 1.9 blocks) This way, blocks that aren't        
+          waiting for __syncthreads() can keep the hardware busy.                                                       
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            2
+    Block Limit Shared Mem                block            3
+    Block Limit Warps                     block            8
+    Theoretical Active Warps per SM        warp           16
+    Theoretical Occupancy                     %           25
+    Achieved Occupancy                        %        23.28
+    Achieved Active Warps Per SM           warp        14.90
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 75%                                                                                       
+          The 4.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (25.0%) is limited by the number of required      
+          registers.                                                                                                    
+
+    Section: GPU and Memory Workload Distribution
+    -------------------------- ----------- ------------
+    Metric Name                Metric Unit Metric Value
+    -------------------------- ----------- ------------
+    Average DRAM Active Cycles       cycle     15051.60
+    Total DRAM Elapsed Cycles        cycle      8235008
+    Average L1 Active Cycles         cycle    131042.57
+    Total L1 Elapsed Cycles          cycle     18769376
+    Average L2 Active Cycles         cycle    132396.09
+    Total L2 Elapsed Cycles          cycle     10738560
+    Average SM Active Cycles         cycle    131042.57
+    Total SM Elapsed Cycles          cycle     18769376
+    Average SMSP Active Cycles       cycle    131240.33
+    Total SMSP Elapsed Cycles        cycle     75077504
+    -------------------------- ----------- ------------
+

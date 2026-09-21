@@ -1,0 +1,9 @@
+ptxas info    : Function properties for _Z13gemm_mma_pipePK13__nv_bfloat16S1_Pfiii
+ptxas info    : Used 128 registers, used 1 barriers, 37888 bytes smem
+ptxas info    : Function properties for _Z8gemm_mmaPK13__nv_bfloat16S1_Pfiii
+ptxas info    : Used 96 registers, used 1 barriers, 18944 bytes smem
+ptxas info    : Function properties for _Z14gemm_wmma_pipePK13__nv_bfloat16S1_Pfiii
+ptxas info    : Used 96 registers, used 1 barriers, 32768 bytes smem
+ptxas info    : Function properties for _Z9gemm_wmmaPK13__nv_bfloat16S1_Pfiii
+ptxas info    : Used 96 registers, used 1 barriers, 16384 bytes smem
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B

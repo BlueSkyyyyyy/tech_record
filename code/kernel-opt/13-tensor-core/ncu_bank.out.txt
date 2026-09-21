@@ -1,0 +1,20 @@
+# smem 行距 padding 消 bank conflict 的实测（M=N=K=2048, BK=32, kernel = gemm_mma_pipe）
+
+## 无 padding（ASP=BK=32, BNP=BN=128）
+scripts/run.sh 13-tensor-core/tensor_core.cu 2048 2048 2048 mma
+  mma         0.2612 ms     65.77 TFLOPS  (  6.7% of bf16 TC peak)
+scripts/run.sh 13-tensor-core/tensor_core.cu 2048 2048 2048 mma_pipe
+  mma_pipe    0.2254 ms     76.23 TFLOPS  (  7.7% of bf16 TC peak)
+
+scripts/ncu.sh 13-tensor-core/tensor_core.cu \
+  --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum \
+  --kernel-name regex:gemm_mma_pipe --launch-count 1 -- 2048 2048 2048 mma_pipe
+  l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum      35651584
+
+## 有 padding（ASP=BK+8=40, BNP=BN+8=136）
+metrics 同上
+  l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum             0
+
+scripts/run.sh 13-tensor-core/tensor_core.cu  (见 tensor_core.out.txt)
+  mma         0.1497 ms    114.76 TFLOPS  ( 11.6% of bf16 TC peak)
+  mma_pipe    0.0777 ms    220.98 TFLOPS  ( 22.3% of bf16 TC peak)
