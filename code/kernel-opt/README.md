@@ -1,6 +1,10 @@
 # kernel-opt — CUDA 算子调优系列配套代码
 
-配套博客系列：`content/posts/cuda-kernel-opt-*`。路线图与进度见 [ROADMAP.md](ROADMAP.md)。
+配套博客系列：`content/posts/cuda-kernel-opt-*`。路线图与进度见 [ROADMAP.md](ROADMAP.md)，
+优化技巧与性能榜见 [TECHNIQUES.md](TECHNIQUES.md)。
+
+> 系列分两阶段：**01–14 通用 CUDA 优化**；**15 起为模型场景算子**（DeepSeek-V4.x / Kimi-K2.6 / Qwen3 的
+> MLA、DSA 稀疏注意力、MoE、FP8 GEMM、MuonClip 等），并把性能持续推向极致。
 
 ## 目录
 

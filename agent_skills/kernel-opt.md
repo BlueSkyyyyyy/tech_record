@@ -6,13 +6,16 @@
 本技能把「写代码 → 本地实测 → ncu 剖析 → 写文章 → 发布」串成可重复的循环。
 
 > **无人值守模式**：本技能常被 `code/kernel-opt/scripts/autopilot.sh` 以无头会话反复调用，
-> 每轮只做一篇文章增量。若你是被 autopilot 唤醒的：全程不要请求人工确认（别用 question 类工具），
-> 做完一篇就停，更新 ROADMAP 后本轮即可结束；整个系列完成时 `touch code/kernel-opt/AUTOPILOT_STOP`。
+> 每轮只做一篇文章增量，做完就停，更新路线图后本轮结束。若你是被 autopilot 唤醒的：
+> 全程不要请求人工确认（别用 question 类工具），**永远不要自己创建 `AUTOPILOT_STOP`**
+> （只有用户运行 `autopilot.sh stop` 才停）。**当 ROADMAP 的「下一步」做完/为空时，
+> 自己从第五/六/七部分或 backlog 里补充具体、可测的新任务再继续**，持续把算子性能往极致推。
 
 ## 前置条件
 
 - 已读根目录 `agent_guide.md`（目录约定、已知坑）。
 - 已读系列控制面板 `code/kernel-opt/ROADMAP.md`（**每次先读它，从「下一步」做起，做完更新它**）。
+- 已读技巧台账 `code/kernel-opt/TECHNIQUES.md`（**每篇必须往里加技巧条目 + 更新性能榜**）。
 - 环境：宿主机有 `docker` 权限；镜像 `dsv4-inf:latest` 已存在（含 CUDA 13.2 / nvcc / ncu / nsys / PyTorch）。
 
 ## 环境：kernel_lab 容器（关键）
@@ -40,9 +43,13 @@ scripts/lab.sh status
 3. **写文章**：按 `write-post.md`，slug `cuda-kernel-opt-NN-<slug>`，加 `weight`（=NN）与系列 tag。
    结构：背景 → 现象/数据 → 根因 → 优化 → 实测对比表 → 小结 → 下一篇预告。讲人话，配图优先。
 4. **发布**：按 `publish.md`（构建 → commit → push → 验证线上 200）。
-5. **回写控制面板**：更新 `ROADMAP.md` 状态、`README.md`/`code/README.md` 索引，
+5. **回写控制面板**：更新 `ROADMAP.md` 状态与「下一步」、`README.md`/`code/README.md` 索引，
    把新踩的坑追加到本文件或 `agent_guide.md`。
-6. **提交**：每 1~2 篇 commit & push 一次，信息格式 `post:` / `bench:` / `skill:`。
+6. **回写台账**：在 `TECHNIQUES.md` 新增技巧条目（原理/场景/代码/实测收益/坑）并刷新性能榜；
+   模型类文章更新「模型场景台账」。
+7. **模型场景优先**：第五部分（MLA/DSA/MoE/FP8/MuonClip…）是当前重点，要用 `/ssd/models/*/config.json`
+   的真实参数构造 shape，并对标 `~/github/` 里的 FlashMLA / DeepGEMM / cutlass 等实现给出差距。
+8. **提交**：每篇 commit & push 一次，信息格式 `post:` / `bench:` / `skill:`。**不要**创建 `AUTOPILOT_STOP`。
 
 ## 验收标准
 
