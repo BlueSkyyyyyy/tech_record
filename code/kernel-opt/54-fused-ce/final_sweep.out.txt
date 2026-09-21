@@ -1,0 +1,29 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+Fused CE: X[M,7168] @ W[129280,7168]^T  logits[8192,129280]  (2118.1 MB bf16 if materialized)
+GEMM FLOPs=15182.71 GFLOP  peak bf16=989 TFLOPS
+
+[baseline cuBLAS+CE]
+  gemm            20.330 ms    746.8 TFLOPS  (75.5% peak)
+  ce               1.899 ms
+  total           24.525 ms   loss=11.769796
+
+[fused sweep]  (gemm = FUSE=false 写 bf16 logits)
+[128x128 s4      ] gemm  45.911 ms  330.7 TFLOPS | fused  44.513 ms  341.1 TFLOPS (34.5% peak) | loss=11.769797
+[128x256 s3      ] gemm  43.341 ms  350.3 TFLOPS | fused  41.560 ms  365.3 TFLOPS (36.9% peak) | loss=11.769794
+[256x128 s4      ] gemm  30.085 ms  504.7 TFLOPS | fused  28.726 ms  528.5 TFLOPS (53.4% peak) | loss=11.769794
+[sw 1x16         ] gemm  29.849 ms  508.7 TFLOPS | fused  28.509 ms  532.6 TFLOPS (53.8% peak) | loss=11.769796
+[sw 2x8          ] gemm  26.644 ms  569.8 TFLOPS | fused  26.272 ms  577.9 TFLOPS (58.4% peak) | loss=11.769796
+[sw 2x16         ] gemm  26.096 ms  581.8 TFLOPS | fused  26.362 ms  575.9 TFLOPS (58.2% peak) | loss=11.769794
+[sw 4x8          ] gemm  25.052 ms  606.1 TFLOPS | fused  25.068 ms  605.7 TFLOPS (61.2% peak) | loss=11.769797
+[sw 4x16         ] gemm  25.135 ms  604.0 TFLOPS | fused  25.166 ms  603.3 TFLOPS (61.0% peak) | loss=11.769796
+[sw 4x8 s3       ] gemm  26.875 ms  564.9 TFLOPS | fused  26.341 ms  576.4 TFLOPS (58.3% peak) | loss=11.769796
+[sw 4x8 s2       ] gemm  27.513 ms  551.8 TFLOPS | fused  26.620 ms  570.3 TFLOPS (57.7% peak) | loss=11.769795
+[128x256 s3 sw   ] gemm  27.267 ms  556.8 TFLOPS | fused  25.653 ms  591.8 TFLOPS (59.8% peak) | loss=11.769797
+[256x256 s2      ] gemm 206.172 ms   73.6 TFLOPS | fused 200.094 ms   75.9 TFLOPS ( 7.7% peak) | loss=11.769795
+baseline cuBLAS+CE total = 24.525 ms (gemm 20.330 + ce 1.899, loss 11.769796)

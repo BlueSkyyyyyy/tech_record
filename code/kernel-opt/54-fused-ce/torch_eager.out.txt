@@ -1,0 +1,6 @@
+cublas bf16 gemm        20.516 ms    667.0 TFLOPS
+F.cross_entropy(bf16)    2.709 ms
+CE with .float()         8.709 ms
+e2e x@W.t + CE          23.037 ms
+peak mem @e2e         12.60 GB
+loss(reference)       11.750000
