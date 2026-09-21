@@ -1,0 +1,41 @@
+fp8_gemm_tma.cu(122): warning #177-D: variable "NT" was declared but never referenced
+    constexpr int NT = NCONS + 32;
+                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z17fp8_tma_ws_kernelILi128ELi256ELi128ELi4ELb0EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 6801
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+FP8 e4m3 TMA+wgmma GEMM: M=4096 N=3072 K=7168  FLOPs=180.39 GFLOP
+
+-- TMA + warp specialization, per-tensor --
+  [tma128x128x128s3 ] max_abs_err=2.568e-01 (ref~66.4) OK
+tma128x128x128s3    0.1643 ms   1097.60 TFLOPS  ( 55.5% of fp8 peak)
+  [tma128x128x128s4 ] max_abs_err=2.568e-01 (ref~66.4) OK
+tma128x128x128s4    0.1918 ms    940.42 TFLOPS  ( 47.5% of fp8 peak)
+  [tma128x128x128s5 ] max_abs_err=2.568e-01 (ref~66.4) OK
+tma128x128x128s5    0.1970 ms    915.81 TFLOPS  ( 46.3% of fp8 peak)
+  [tma128x128x128s6 ] max_abs_err=2.568e-01 (ref~66.4) OK
+tma128x128x128s6    0.2051 ms    879.46 TFLOPS  ( 44.5% of fp8 peak)
+  [tma128x256x128s3 ] max_abs_err=2.568e-01 (ref~66.4) OK
+tma128x256x128s3    0.1551 ms   1162.87 TFLOPS  ( 58.8% of fp8 peak)
+  [tma128x256x128s4 ] max_abs_err=2.568e-01 (ref~66.4) OK
+tma128x256x128s4    0.1641 ms   1099.34 TFLOPS  ( 55.6% of fp8 peak)
+  [tma256x128x128s2 ] max_abs_err=2.568e-01 (ref~66.4) OK
+tma256x128x128s2    0.1654 ms   1090.65 TFLOPS  ( 55.1% of fp8 peak)
+  [tma256x128x128s3 ] max_abs_err=2.568e-01 (ref~66.4) OK
+tma256x128x128s3    0.1577 ms   1143.65 TFLOPS  ( 57.8% of fp8 peak)
+  [tma256x128x128s4 ] max_abs_err=2.568e-01 (ref~66.4) OK
+tma256x128x128s4    0.1482 ms   1217.28 TFLOPS  ( 61.5% of fp8 peak)
+
+-- TMA + warp specialization, per-block (sa 1x128, sb 128x128) --
+  [pb128x128x128s3  ] max_abs_err=8.152e-03 (ref~70.0) OK
+pb128x128x128s3     0.1991 ms    906.19 TFLOPS  ( 45.8% of fp8 peak)
+  [pb256x128x128s3  ] max_abs_err=8.152e-03 (ref~70.0) OK
+pb256x128x128s3     0.8063 ms    223.74 TFLOPS  ( 11.3% of fp8 peak)

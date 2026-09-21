@@ -89,7 +89,7 @@ scripts/ncu.sh 15-mla-attn/mla_attn.cu --set full --kernel-name regex:mla
 - [ ] **20 MoE（一）：router + top-k + permutation**：384 experts top-6，token permute/unpermute，测路由与搬运开销
 - [ ] **21 MoE（二）：grouped GEMM**：变长 group 的 grouped GEMM，对照 `~/github/DeepGEMM` 的 contiguous/masked 分组
 - [x] **22 FP8 GEMM（一）：per-tensor / per-block scaling**：e4m3 + ue8m0 缩放，weight_block 128×128 —— **已作为文章 22 发布**（见「当前进度」）
-- [ ] **23 FP8 GEMM（二）：TMA + warp specialization + DeepSeek-V4 推理口径**：TMA/mbarrier 多级流水、2 CTA/SM、block-wise scale 与 expert fp4，对照 bf16
+- [x] **23 FP8 GEMM（二）：TMA + mbarrier + warp specialization**：已完成并发布（见「当前进度」）。e4m3 per-tensor 768→**1217 TFLOPS（cuBLAS 的 88.1%）**；per-block 519→906。剩余：per-block 双累加器跨块重叠、cluster multicast、expert fp4
 - [x] **24 Muon / MuonClip 优化器算子**：Newton–Schulz 迭代做正交化（zeropower）+ clip 融合；参考 `~/github/muonclip`；N=4096 级矩阵，冲 TFLOPS → **已作为系列第 17 篇发布**（见「当前进度」）
 - [ ] **25 Paged KV-cache / flash-decoding 推理注意力**：GQA/MQA、block table、变长 seqlen；参考 `flashinfer`/`vllm`
 - [ ] **26 量化推理算子：W4A16 dequant-GEMM（GPTQ/AWQ）**：ERNIE/GLM/Kimi 量化部署常用；dequant 融合进 GEMM
@@ -101,8 +101,8 @@ scripts/ncu.sh 15-mla-attn/mla_attn.cu --set full --kernel-name regex:mla
 ### 第六部分：极致性能（把上面的算子推到极致）
 
 - [~] **31 wgmma（Hopper warpgroup MMA）**：用 `wgmma.mma_async` 替换 `mma.sync.m16n8k16`，目标 GEMM ≥ 400 TFLOPS。**已做（文章 20）**：SW128 swizzle 冒烟 GEMM 132、MLA 105.3（+24.5% vs INTERLEAVE）；剩 TMA/多级流水/warp specialization 才能冲高，见「下一步」。
-- [ ] **32 TMA + mbarrier 多级流水**：`cp.async.bulk.tensor.2d` + tensormap，替换 cp.async
-- [ ] **33 Warp specialization（生产者/消费者）+ ping-pong 调度**
+- [x] **32 TMA + mbarrier 多级流水**：`cp.async.bulk.tensor.2d` + tensormap，替换 cp.async —— **GEMM 上已完成（文章 23）**；attention/MLA 上仍待做（V 需转置，见 backlog）
+- [x] **33 Warp specialization（生产者/消费者）+ ping-pong 调度**：**FA8 GEMM 上已完成（文章 23）**，1 producer warp + N consumer warpgroup，mbarrier full/empty 握手，张量管线活跃度 72%
 - [ ] **34 Persistent kernel + Stream-K**：为 tall-skinny / 不规则 M×N 做工作分解
 - [ ] **35 Split-K / parallel-K**：小 M/N、大 K 的 GEMM
 - [ ] **36 Autotuning 台 + 性能回归看板**：系统扫 launch 配置/流水级数，最佳结果写入 TECHNIQUES.md
@@ -170,6 +170,8 @@ scripts/ncu.sh 15-mla-attn/mla_attn.cu --set full --kernel-name regex:mla
 
 - 2026-09-21：完成并发布 **文章 22（主题 22）FP8 GEMM（一）：e4m3 的 mma.sync 与 wgmma + per-tensor / per-block 缩放**：真实 shape 取自 `/ssd/models/DeepSeek-V4-Pro/config.json`（hidden=7168, moe_inter=3072, 384 experts top-6；e4m3 + ue8m0 + weight_block 128×128 + dynamic 1×128 激活），测 `M=4096,N=3072,K=7168`（180.4 GFLOP，AI≈1785 → 算力受限）。①`mma.m16n8k32` 版：FP8 片段用「两个 fp8 = 一个 b16」复用了 `ldmatrix`（`x4` 取 a0..a3、`x2` 取 b0/b1），smem 行距 BK+16 消 bank；`cp.async` 4 级流水 → **266.3 TFLOPS（13.5%）**；ncu：Compute 57%、tensor pipe 41%、`math_pipe_throttle` 1.12 + `wait` 1.59、DRAM 仅 7.9% → **发射端口受限，mma.sync 在 Hopper 打不满 FP8**。②换 `wgmma.m64n128k32`：**FP8 的 K-major SW128 atom 与 bf16 逐字节同构**（8 行×128B，只是每行 128 个 e4m3），20 篇描述符原样复用；主循环用 `wgmma.commit_group` + `wait_group(STAGES-2)` 代替每块 `wait0`（acc 到最后才读）→ **602/717/768 TFLOPS（s2/128×128s3/256×128s3）**，相对 mma.sync **+2.89×**，**达 cuBLAS FP8（1381.7）的 55.6%、同 shape cuBLAS bf16（800.7）的 96%**。③per-block（1×128 激活 + 128×128 权重，`sb` 每 n-tile 退化成标量）→ **519 TFLOPS（26.2%）**，每块折算 `wait0` 切断流水。踩坑：①相邻两列 c0/c1 各有 `sb`，共用一个 scale 只在逐列随机 scale 时暴露（常数 scale 会「假通过」）；②FP8 wgmma asm 尾部是 `p,scaleA,scaleB`（3 个，非 bf16 的 5 个）；③`__launch_bounds__` 写死 256 而 BM=256 需 512 线程时只算一半行、性能虚高且采样巧合通过（修正后 256×256 真值 218）。ncu（wgmma 版）：Compute 38.5%、occupancy 24.7%、No Eligible 59.9%、1 CTA/SM（regs+smem 双限）。代码 `22-fp8-gemm/`（`fp8_gemm.cu`、`fp8_gemm_wgmma.cu`、`cublas_fp8_ref.py`、`fp8_mma/fp8_wgmma/cublas_fp8/ncu_mma/ncu_wgmma.out.txt`）。
 
+- 2026-09-21：完成并发布 **文章 23（主题 23/32/33）FP8 GEMM（二）：TMA + mbarrier + warp specialization**：真实 shape 同 22（取自 `/ssd/models/DeepSeek-V4-Pro/config.json`：hidden=7168, moe_inter=3072，e4m3 + ue8m0 + weight_block 128×128）测 `M=4096,N=3072,K=7168`。①A/B 装载从 22 的「256 线程各自算 SW128 地址 + `LDGSTS.16B`」换成 **TMA `cp.async.bulk.tensor.2d` + `CU_TENSOR_MAP_SWIZZLE_128B`**——TMA 硬件写出的 smem 布局与 wgmma 的 K-major SW128 描述符逐字节一致，kernel 里零 swizzle 代码（`make_desc_sw128` 原样复用；驱动枚举无 FLOAT8，用 `UINT8` 搬字节，需 `-lcuda`；tensormap 作 `__grid_constant__` 参数）。②**warp specialization**：1 producer warp 专职 TMA（`mbarrier.arrive.expect_tx` + `full[st]`），`(BM/64)` 个 consumer warpgroup 只做 wgmma，用 `empty[st]`（count=消费者线程数）回压，消费者以 `wgmma.wait_group<STAGES-2>` 决定释放哪个 stage。③**两个关键坑**：相位数组 `phase[st]` 动态下标掉 **local memory**（ncu 报 local memory 占 L1TEX 47.5% sector、`long_scoreboard` 8.1，只有 988）→ 改成常量相位 `(kb/STAGES)&1`；epilogue 标量 store 半 sector（ncu 报 50% excessive）→ `float2` 向量存储。④结果 per-tensor **1217.3 TFLOPS（61.5%）**（22 的 768.3 → +58%），达 **cuBLAS FP8（1381.3）的 88.1%（差距 1.13×）**、超过同 shape cuBLAS bf16（800.4）的 1.52×；扫配置最佳 `256×128×BK128 s4`（smem 197KB、1 CTA/SM），对比 `128×128 s3`（2 CTA/SM 但 L2 80%）证明「降 L2 流量 > 堆 occupancy」。⑤per-block（1×128 激活 + 128×128 权重）**519 → 906 TFLOPS（+74%）**，ncu 寄存器 150、occ 13.8%，瓶颈转为每块折算等 mma。ncu（最佳）：Compute 67.8%、tensor pipe `hmma_cycles_active` **72.0%**、DRAM 27%、L2 56.7%、local mem 0、`long_scoreboard` 9.15。代码 `23-fp8-gemm-tma/fp8_gemm_tma.cu`（`fp8_tma.out.txt`、`ncu_tma256x128s4/ncu_tma128x128s3/ncu_pb128x128s3/ncu_stalls_best/cublas_ref.out.txt`）。
+
 ## 下一步（明确到可执行）
 
 - [x] **16 MLA 注意力（二）**：已完成（见「当前进度」）。
@@ -179,12 +181,13 @@ scripts/ncu.sh 15-mla-attn/mla_attn.cu --set full --kernel-name regex:mla
 - [x] **文章 20 — 主题 16b/31（已完成）MLA 极限冲刺（一）：SW128 swizzle + wgmma**：把 `wgmma` 的操作数 smem 布局从无 swizzle 的 K-major `INTERLEAVE` 换成 **K-major SW128（`layout_type=1` + `c'=c^r` 物理布局）**。①用 CUTLASS canonical 布局推导描述符（`LBO=1`、`SBO=(K/64)*1024`、k16 步进 `floor(s/4)*1024+(s%4)*32`）；②小 GEMM 冒烟验证 → **132 TFLOPS @4096³**；③QK576/PV 定点测试分别锁死；④移植回融合 MLA：INTERLEAVE 84.6 → **105.3 / 112.9 / 119.9 TFLOPS（Sk=1k/2k/4k，+24.5%）**；⑤踩坑：nvcc 合并相邻 bf16 标量存储丢高 16 位（3553 字节错位），改 `pack2` u32 修复。ncu：store bank conflict 2.7e8→4.4-way、L1 86%→70.8%，但 221KB smem 锁 1 CTA/SM（occ 12.5%、No Eligible 80.9%、47.8% 停 L1TEX）→ 仍 1.62× 慢于 `f4s`、距 FlashMLA ~640 约 6.1×。代码 `20-mla-wgmma-sw128/`。
 - [x] **文章 21 — 主题 32/33/39（上半）MLA 极限冲刺（二）：修 V 转置访存 + `cp.async` 单缓冲预取 K**：已完成并发布（见「当前进度」）。做了两件事，均实测：①V 转置迭代顺序 `dv` 最快 → global 读合并（`l1tex` 73%→46%，105.3→142.3）；②`cp.async` 在 softmax/P/PV 期间预取下一块 K（K 只被 QK 读，`wgmma.wait_group` 后即可覆盖，**单缓冲无需双缓冲**）→ 159.8/193.2/198.8（Sk=1k/4k/8k），Sk≥4096 反超 `f4s`，距 FlashMLA ~3.3×。**TMA/双缓冲/warp specialization 仍未做**（单缓冲约束让 V 的延迟藏不住、L1 46% + barrier 是下一道墙）。
 - [x] **文章 22 — 主题 22 FP8 GEMM（一）：e4m3 的 mma.sync 与 wgmma + per-tensor / per-block 缩放**：已完成并发布（见「当前进度」）。
-- [ ] **文章 23 — 主题 23/32/33 FP8 GEMM（二）or MLA 极限冲刺（三）：TMA + 双缓冲 + warp specialization（下一步，优先）**：两条都可以，按下面选一：
-  - **FP8 GEMM（二）**（推荐，承接 22）：`cp.async.bulk.tensor`（TMA）+ `mbarrier` 多级 stage，把 22 里「256 线程各自算 swizzle 地址写 smem」换成 TMA 一条指令，腾寄存器/发射槽；试 2 CTA/SM（降 smem/寄存器）、warp specialization。目标 per-tensor **≥ 1000 TFLOPS**（cuBLAS 1382 的差距 ≤1.4×），并把 per-block 折算改成双累加器跨块重叠。
-  - **MLA 极限冲刺（三）**（并行主线）：解决 21 遗留的 V 预取与 1 CTA/SM。①TMA + mbarrier 做 K/V 多级 stage（V 需转置，TMA 不支持 → 需 staging smem 或保持手动 gather + warp specialization）；②warp specialization 把 tensor pipe 从 30% 提到 ≥40%；③消 QK 2× 重复 / P 走 RS。目标稠密 MLA **250+ TFLOPS**（与 FlashMLA 差距 ≤2.6×）。SW128 基础设施复用。
-- [ ] **文章 24 — 主题 20/21 MoE：router + top-k + permutation / grouped GEMM**：从 `/ssd/models/DeepSeek-V4-Pro/config.json`（384 routed + 1 shared, top-6, moe_inter=3072）构造 shape，对照 `~/github/DeepGEMM` 的 contiguous/masked 分组，实测路由 + 搬运开销与 grouped GEMM 吞吐（可直接复用 22 的 FP8 wgmma kernel 做 grouped 版本）。
+- [x] **文章 23 — 主题 23/32/33 FP8 GEMM（二）：TMA + mbarrier + warp specialization**：已完成并发布（见「当前进度」）。
+- [ ] **文章 24 — 主题 21/23/32/33 FP8 GEMM（三）or MoE grouped GEMM（下一步，优先）**：两条都可以，按下面选一：
+  - **FP8 GEMM（三）· per-block 流水 + cluster multicast**（承接 23）：①**双累加器跨块重叠**——用两组累加器 ping-pong，让第 `kb` 块的 `sa*sb` 折算与第 `kb+1` 块的 wgmma 重叠，把 per-block 906 → 目标 1100+（当前瓶颈是「每块折算等 mma 完成」的流水断裂，寄存器 150、occ 13.8%）；②**cluster + TMA multicast**（`cluster::multicast`）：同一 A tile 在 N 方向广播，砍掉重复装载（当前 L2 57%、张量管线 72%）；③可选 expert fp4 / 2 CTA/SM 调参。目标 per-block 追平 cuBLAS per-row（1345）的 85%+。
+  - **MoE grouped GEMM**（并行主线，主题 21）：从 `/ssd/models/DeepSeek-V4-Pro/config.json`（384 routed + 1 shared, top-6, moe_inter=3072）构造变长分组，对照 `~/github/DeepGEMM` 的 contiguous/masked 布局，直接复用 23 的 TMA + wgmma kernel 做 grouped 版本。
+- [ ] **文章 25 — 主题 20 MoE（一）：router + top-k + permutation**：384 experts top-6 的 router GEMM、top-k（复用 18 篇 radix-select）、token permute/unpermute，实测路由与搬运开销。
 - [ ] **其他模型场景**：RoPE/RMSNorm/FP8 GEMM/compressor…（见上）。模型类文章优先；20 的 SW128 与主题 31/38/39 共用基础设施，是性能主线。
-  - **编号说明**：「系列大纲」里的数字是**主题编号**（稳定 ID），文章 `NN` 是**发布顺序**。主题 24（MuonClip）= 文章 17、主题 17 上半 = 文章 18、下半 = 文章 19、主题 22（FP8 GEMM 一）= 文章 22，二者已解耦。**下一篇是文章 23**；发布时把「文章号 ↔ 主题号」记进「当前进度」。
+  - **编号说明**：「系列大纲」里的数字是**主题编号**（稳定 ID），文章 `NN` 是**发布顺序**。主题 24（MuonClip）= 文章 17、主题 17 上半 = 文章 18、下半 = 文章 19、主题 22（FP8 GEMM 一）= 文章 22、主题 23/32/33（FP8 GEMM 二 · TMA）= 文章 23，二者已解耦。**下一篇是文章 24**；发布时把「文章号 ↔ 主题号」记进「当前进度」。
 
 ## 灵感 / backlog（想到就记，别丢）
 
