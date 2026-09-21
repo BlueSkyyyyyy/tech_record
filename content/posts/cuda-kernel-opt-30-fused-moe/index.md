@@ -208,7 +208,7 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a" \
 | K1 up+gate | 49152 | 6144 | 7168 | 750.6 TFLOPS | 492 TFLOPS（**带宽受限，见 §5**） |
 | K2 down | 49152 | 7168 | 3072 | 711.0 TFLOPS | **898 TFLOPS（nofuse）/ 858（fuse）** |
 
-K2 已经**超过同 shape 稠密 cuBLAS 的 1.21×**。K1 看起来只有 cuBLAS 的 66%，但注意 cuBLAS 那张
+K2 已经**超过同 shape 稠密 cuBLAS**——nofuse 898 是其 1.26×、fuse 858 是其 1.21×。K1 看起来只有 cuBLAS 的 66%，但注意 cuBLAS 那张
 表用的是**单一** `B[6144,7168]`（88 MB），而 MoE 的 K1 要对 384 个专家各读一份
 `W12[E,2I,H]`（合计 **33.8 GB**）——两者的 roofline 根本不同，见下节。
 
