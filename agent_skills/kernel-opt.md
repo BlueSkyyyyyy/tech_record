@@ -73,3 +73,12 @@ scripts/lab.sh status
   `for (q = t; q < N4; q += T)` 的通用循环后，同一 128×128×8 GEMM 从 118/128 寄存器涨到 168，
   occupancy 25%→12.5%，算力掉 ~35%。当某配置下每线程恰好搬 1 个 float4 时用 `if constexpr`
   走单发写法可恢复。**写通用模板后务必用 `NVCC_FLAGS="-Xptxas -v"` 核对寄存器数**，别只看功能正确。
+- **epilogue 融合的寄存器开销常常为 0**：第 14 篇把 `store_acc` 模板化加 bias+GELU/ReLU 后，
+  三个实例（MODE=0/2/3）都是 128 寄存器、0 spill，occupancy 与瓶颈指标逐项不变。别怕融合
+  「拖慢」GEMM；但每次都要用 `-Xptxas -v` 复核，激活换成更复杂的函数未必还免费。
+- **对照「两 kernel vs 融合」时，独立 epilogue kernel 必须自己先向量化**（float4 + grid-stride，
+  第 14 篇跑 ~4 TB/s），否则标量版只有几百 GB/s，会得到虚高的融合收益（稻草人对比）。
+- **device 辅助函数要在 host 参考实现里复用**（如 GELU）时，记得标 `__host__ __device__`，
+  否则 nvcc 报 `calling a __device__ function from a __host__ function is not allowed`。
+- **CUDA event 口径与 ncu 口径会有差**：第 14 篇独立 epilogue kernel event 测 8.4 µs、ncu 报
+  11.26 µs（含 replay）。写文章时同一结论尽量用同一口径，或两者都标注。
