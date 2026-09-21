@@ -1,0 +1,43 @@
+ptxas info    : (C7517) wgmma.wait_group is injected in around line 11302 by compiler to allow use of registers defined by GMMA in function '_Z17proj_mcast_kernelILi256ELi128ELi64ELi4ELi0ELi1ELb0ELi2EEv14CUtensorMap_stS0_Pviii'
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z17proj_mcast_kernelILi256ELi128ELi64ELi4ELi0ELi1ELb0ELi2EEv14CUtensorMap_stS0_Pviii' in line 11733
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z17proj_mcast_kernelILi128ELi256ELi64ELi3ELi0ELi1ELb0ELi2EEv14CUtensorMap_stS0_Pviii' in line 9976
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+DSA Compressor proj (ratio=128, coff=1): M=32768  Y[M,1024]=X[M,7168]@Wm[1024,7168]^T
+proj FLOPs=481.04 GFLOP  Wm=14.7 MB  X=469.8 MB  out=[256, 512]
+
+correctness (M=256): max_abs_err=7.569e-03 (ref~3.820) OK
+
+KSPLIT=2 vs =1 proj: max_abs_diff=5.186e-06 (ref~1.074) OK
+
+-- proj GEMM sweep, no multicast (BM x BN, BK=64) --
+  128x128s2                0.8833 ms    544.56 TFLOPS  ( 55.1%)
+  128x128s3                0.9112 ms    527.90 TFLOPS  ( 53.4%)
+  128x256s3                0.7740 ms    621.53 TFLOPS  ( 62.8%)
+  256x128s2                0.9167 ms    524.74 TFLOPS  ( 53.1%)
+  256x128s3                0.8133 ms    591.44 TFLOPS  ( 59.8%)
+  256x128s4                0.7607 ms    632.32 TFLOPS  ( 63.9%)
+  128x128s3 K2             1.0711 ms    449.11 TFLOPS  ( 45.4%)
+  128x256s3 K2             6.8250 ms     70.48 TFLOPS  (  7.1%)
+  256x128s4 K2             6.9644 ms     69.07 TFLOPS  (  7.0%)
+-- TMA cluster multicast (A=cluster.x / B=cluster.y) --
+  256x128s4 A-cx2          0.7897 ms    609.12 TFLOPS  ( 61.6%)
+  256x128s4 A-cx4          0.8569 ms    561.35 TFLOPS  ( 56.8%)
+  256x128s4 A-cx8          0.8959 ms    536.90 TFLOPS  ( 54.3%)
+  256x128s4 B-cy2          0.8063 ms    596.58 TFLOPS  ( 60.3%)
+  256x128s4 B-cy4          0.8911 ms    539.84 TFLOPS  ( 54.6%)
+  256x128s4 B-cy8          0.9373 ms    513.20 TFLOPS  ( 51.9%)
+  128x128s3 A-cx2          0.9104 ms    528.37 TFLOPS  ( 53.4%)
+  128x128s3 A-cx4          0.8840 ms    544.15 TFLOPS  ( 55.0%)
+  128x128s3 B-cy2          0.8781 ms    547.80 TFLOPS  ( 55.4%)
+  128x128s3 B-cy4          0.9218 ms    521.87 TFLOPS  ( 52.8%)
+  128x256s3 A-cx2          0.8500 ms    565.93 TFLOPS  ( 57.2%)
+  128x256s3 B-cy2          0.8357 ms    575.63 TFLOPS  ( 58.2%)
+-- L2 persisting window on Wm (14 MB) --
+  256x128s4 persist        0.7775 ms    618.66 TFLOPS  ( 62.6%)
+  128x128s3 persist        0.9527 ms    504.94 TFLOPS  ( 51.1%)

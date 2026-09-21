@@ -248,3 +248,24 @@ scripts/lab.sh status
   Q(73.7K)+K(73.7K)+P(8K)+V(65.5K)=216KB 强制 1 CTA/SM、只有 8 个 warp；而 KT 必须 ≥64（SW128 atom）、
   BM=32 又不满足 wgmma 的 m64，几何上腾不出 V 双缓冲空间。判断 attention 类 kernel 先看 smem 总量与
   CTA/SM，再谈流水。
+- **「L2 墙」先确认量的是不是最佳配置**（36 篇）：tall-skinny GEMM 的 B 重读次数 = `M/BM`。
+  35 篇的 `L2 84%` 是在 `BM=128`（B 重读 256×）上采的；换成 `BM=256`（重读 128×）后 ncu 变成
+  **tensor pipe 76%、L2 58%**，瓶颈完全反转。**换几何/换 config 前不要下瓶颈结论**。
+- **TMA cluster multicast 的判据（36 篇汇总 26/29/36）**：只有在 ① ncu `lts__throughput` >75%、
+  ② 瓶颈在**字节**（`lts__t_sectors` 读放大高）、③ `BM/BN` 已到 TMA box 上限、④ tensor pipe <60%、
+  ⑤ 从 `CN=2` 起试 时才值得。`tensor >70%` 时广播省字节但跨 CTA 耦合会拖低 tensor 活跃度，实测
+  compressor 投影 A/B multicast 全负（−3.7%~−19%）。**「放大 BM」和「广播 B」是同一个优化且无耦合，
+  优先放大 tile。**
+- **`cudaAccessPolicyWindow`（L2 persisting）只在命中率低时有用**（36 篇）：compressor 权重 14.7MB
+  < 50MB L2、`L2 Hit Rate` 已 82%，钉进 L2 反而 −2.2%。先用 ncu 看 `L2 Hit Rate` 与 `lts__throughput`。
+- **纯 TMA→wgmma 的消费者侧不需要 `fence.proxy.async`**（36 篇）：TMA 写 smem 与 wgmma 读 smem 都在
+  async proxy，mbarrier 的 `complete_tx` 已完成排序；消费者（纯计算、不写 smem）再插 generic↔async
+  fence 是多余的（实测中性）。23 篇起的 TMA kernel 都可以删掉这句。
+- **TMA 的 `boxR` 必须同时匹配 A 的 `BM` 和 B 的 `BN`**（36 篇复现 25/31）：写多 config 扫描时
+  `tmA` 的 box 行数随 `BM`、`tmB` 随 `BN`。compressor fp8 kernel 复用了固定 `boxR=128` 的 map 去跑
+  `BM=64/192`、`BN=256`，`expect_tx` 与实际搬运字节不符 → **mbarrier 死锁且不报错**（stdout 被 kill
+  吞掉，看不到任何输出）。
+- **基准的长短会改变结论**（36 篇）：同一 kernel `bench_ms(run, 200, 100)` 比 `bench_ms(run, 5, 30)`
+  慢 ~10%（H100 共享机上持续负载会降频）。**head-to-head 必须在同一进程、同样 warmup/iters 下测**；
+  跨文件的数字不能直接比。超时后用 `docker exec kernel_lab pkill -9 -f <binary>.out` 清残留进程，
+  否则 100% 占用的死锁 kernel 会污染后续所有基准（36 篇实测被拖慢 ~2×）。
