@@ -1,0 +1,45 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A8 IMMA pipe: N=17408 K=5120 group=128 ; W_int4=44.6 MB scales=2.8 MB total=47.3 MB
+纯读上界 w+s: 0.0189 ms  2505.4 GB/s (74.7% HBM)
+纯读上界 strided(64B/2560B): 0.0177 ms  2523.4 GB/s (75.3% HBM)
+  [wA_s2k8] threads=128 smem=34048
+  [wA_s3k4] threads=128 smem=56832
+  [t_s2k8] threads=128 smem=31040
+  [t_s3k8] threads=128 smem=40288
+  [t_s2k10] threads=128 smem=28736
+  [t_s2k4] threads=128 smem=42560
+
+=== 精度校验（M=16, 抽样 48 点）===
+  [wA_s2k8             ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wA_s3k4             ] max_abs_err=4.542e-07 (ref~3.8) rel=1.21e-07 OK
+  [t_s2k8              ] max_abs_err=4.542e-07 (ref~3.8) rel=1.21e-07 OK
+  [t_s3k8              ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [t_s2k10             ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [t_s2k4              ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+
+=== M 扫描（同进程、warmup=5 iters=50）===
+kernel\M                     1         2         3         4         6         8        12        16
+wA_s2k8               0.0275    0.0281    0.0282    0.0284    0.0294    0.0304    0.0327    0.0350  
+wA_s3k4               0.0280    0.0286    0.0287    0.0287    0.0292    0.0296    0.0309    0.0319  
+t_s2k8                0.0277    0.0282    0.0282    0.0284    0.0291    0.0303    0.0321    0.0341  
+t_s3k8                0.0269    0.0271    0.0273    0.0276    0.0286    0.0299    0.0315    0.0338  
+t_s2k10               0.0265    0.0268    0.0270    0.0275    0.0292    0.0299    0.0322    0.0356  
+t_s2k4                0.0274    0.0277    0.0278    0.0281    0.0284    0.0287    0.0297    0.0308  
+
+=== 每个 M 的最佳 kernel（含 base 与全部变体；GB/s 按 W+s 字节）===
+M      best                        ms    TFLOPS  W+s GB/s      %HBM
+1      t_s2k10                 0.0265      6.74    1789.3     53.4%
+2      t_s2k10                 0.0268     13.32    1769.5     52.8%
+3      t_s2k10                 0.0270     19.78    1751.7     52.3%
+4      t_s2k10                 0.0275     25.96    1724.1     51.4%
+6      t_s2k4                  0.0284     37.72    1670.0     49.8%
+8      t_s2k4                  0.0287     49.63    1647.9     49.2%
+12     t_s2k4                  0.0297     71.93    1592.1     47.5%
+16     t_s2k4                  0.0308     92.59    1537.1     45.9%
+汇总（8 个 M 点求和）：best=0.2253 ms   base48=0.0000 ms   best/base=inf
