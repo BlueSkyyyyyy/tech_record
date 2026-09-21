@@ -1,0 +1,13 @@
+sparse FLOPs = 0.146 TFLOP (sum valid=524288, avg 512) ; dense causal = 9.200 TFLOP (ratio 63.0x)
+  [s1    ] max_abs_err=1.830e-04 (ref~0.220) OK
+s1       BH=64  DVGRP=2 KT=64  warps=8      1.4303 ms    102.10 TFLOPS ( 10.3% peak)
+  [s2    ] max_abs_err=1.740e-04 (ref~0.220) OK
+s2       BH=64  DVGRP=2 KT=32  warps=8      1.6034 ms     91.07 TFLOPS (  9.2% peak)
+  [s3    ] max_abs_err=1.830e-04 (ref~0.220) OK
+s3       BH=32  DVGRP=4 KT=64  warps=8      2.3057 ms     63.33 TFLOPS (  6.4% peak)
+  [s4    ] max_abs_err=1.830e-04 (ref~0.220) OK
+s4       BH=64  DVGRP=4 KT=64  warps=16     1.3471 ms    108.40 TFLOPS ( 11.0% peak)
+p1       skipped (smem 234496 B > 227KB)
+  [p2    ] max_abs_err=1.740e-04 (ref~0.220) OK
+p2       BH=64  DVGRP=2 KT=32  warps=8      1.3021 ms    112.15 TFLOPS ( 11.3% peak)
+p4       skipped (smem 235520 B > 227KB)

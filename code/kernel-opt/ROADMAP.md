@@ -83,7 +83,7 @@ scripts/ncu.sh 15-mla-attn/mla_attn.cu --set full --kernel-name regex:mla
 
 - [x] **15 MLA 注意力（一）**：DeepSeek/Kimi MLA 数学（q_lora/kv_lora、decoupled RoPE、absorb）· 三个标量实现 + roofline（证明 prefill 算力受限）· 真实 shape 台账 · TC 三 kernel 115.6 TFLOPS
 - [x] **16 MLA 注意力（二）**：FlashMLA 式单 kernel 融合。online softmax 融进 QK epilogue（S 不落盘）· 累加器 C→PV A 片段零 shuffle · KV 常驻 smem · `f4`(dup2) 146.5 → **`f4s` 共享 P 消重复 170.1 TFLOPS（S=1024）/ 184.7（Sk=4096）** · wgmma(INTERLEAVE) 仅 84.6（暴露 swizzle 才是胜负手）· 距 FlashMLA 640 从 5.7× 收到 3.5×
-- [~] **17 DSA 稀疏注意力（DeepSeek-V4）**：**（一）已发布 = 文章 18**：lightning indexer（64×128）打分（287–311 TFLOPS）+ exact top-k radix-select（6.75ms @32k）；**（二）待做**：compressor（ratio 4/128/0）+ top-k gather + 稀疏 attention 实测，测 seq 4k/32k/128k 相对 dense 的加速（18 给了端到端预算：64k 18.6×，上限 ~30×）
+- [x] **17 DSA 稀疏注意力（DeepSeek-V4）**：**（一）= 文章 18**：lightning indexer（64×128）打分（287–311 TFLOPS）+ exact top-k radix-select（6.75ms @32k）；**（二）= 文章 19**：稀疏 MLA 消费端（gather top-k + 尾部掩码 + 共享 P + `cp.async` 双缓冲），132–137 TFLOPS，sparse attention 相对稠密 4k 3.0× → 64k 48.6×，DSA 端到端 4k 2.5× → 64k **17.3×**。**剩余**：compressor（ratio 4/128/0）未做，见 backlog。
 - [ ] **18 RoPE 融合算子**：yarn scaling（beta_fast/slow, factor 16）+ fused rotary，对照非融合
 - [ ] **19 RMSNorm / QK-Norm 融合**：DeepSeek/Kimi RMSNorm、QK-norm、fused residual+norm，冲 HBM 峰值
 - [ ] **20 MoE（一）：router + top-k + permutation**：384 experts top-6，token permute/unpermute，测路由与搬运开销
@@ -164,21 +164,23 @@ scripts/ncu.sh 15-mla-attn/mla_attn.cu --set full --kernel-name regex:mla
 
 - 2026-09-21：完成并发布 **文章 17（主题 24）Muon / MuonClip 的 Newton–Schulz 正交化**：还原成 5 步 × 3 GEMM = `30N³` 的链式算子（Kimi-K2.6 hidden=7168/18432、moe=2048、384 experts；DeepSeek-V4-Pro 7168）。三条路径对拍（自研 fused / cuBLAS+elementwise / fp32 参考）：N=4096 自研融合 **244 TFLOPS（24.7%）/ 8.44 ms**，融合 epilogue（`f·x+g`）比不融合快 5.5%；单 GEMM 自研 269 vs cuBLAS 883（峰值 89.3%）= 30.5%；端到端 cuBLAS 链 529 TFLOPS（2.17×）。ncu：L2 76%、occ 23.8%、Compute 45%、DRAM 13% → `mma` 路径天花板，出路 wgmma+TMA。踩坑：多级 `cp.async` 的 `wait_prior` 应为 `STAGES-1`（写成 `-2` 读到半写数据）；手搓多级 smem 时 B 的 stage 基址要乘 `STAGES`。代码 `17-muonclip-ns/`（`ns_all/sweep/single/ncu.out.txt`）。**注意：主题号与文章号已解耦，下一篇是文章 18。**
 - 2026-09-21：完成并发布 **文章 18（主题 17 上半）DSA 稀疏注意力（一）lightning indexer + exact top-k**：真实 shape 取自 `/ssd/models/DeepSeek-V4-Pro/config.json`（index_n_heads=64, index_head_dim=128, index_topk=1024）。①indexer 是「H^I 个小 GEMM 共享同一个 K」：标量 0.93 → TC 222 → **HG=2+BN=128 287–311 TFLOPS（31% 峰值）**；两条杠杆 head 合并（消 K 重复 ldmatrix，ncu L1 85%→62%）、加宽 BN；反例 HG=4/BN=128 溢出→69；网格顺序 `grid.x=KV` 让 Q 常驻 L2（32k 上 69.7→214，3.1×）。②exact top-k 用 radix-select（保序 uint32 + 4 趟 8-bit 直方图 + 收集），独占瓶颈是 shared atomicAdd：单直方图 26.7ms → **per-warp 私有直方图 6.75ms（3.96×，等效 3.2TB/s/95% HBM）**；整行塞 smem 长序列反慢（8.23 vs 6.75，occ 锁死 1 block/SM）。③DSA 预算（indexer+topk+稀疏 MLA 估算）相对稠密 MLA `f4s`：4k 2.9× / 16k 9.7× / 32k 14.8× / **64k 18.6×**，上限 ~30%（被 indexer O(S²) 封顶）。代码 `18-dsa-sparse/`（`dsa_S*.out.txt`、`indexer_ncu/topk_ncu/dense_mla_f4s.out.txt`）。踩坑：保序变换的逆不自逆（mask 依赖符号位，写错 out_val 全错）。
+- 2026-09-21：完成并发布 **文章 19（主题 17 下半）DSA 稀疏注意力（二）稀疏 MLA 消费端**：真实 shape 同 V4-Pro（H=128, DC=512, DR=64, DV=512, topk=1024）。CTA = 「1 个 query token × $B_H$ 个 head」（同 token 全 head 共享 $I_t$，gather 一次喂满 block）；在 16 篇 `mla_shared_kernel` 上加①逐 key gather（行内 `uint4` 合并、行间随机、`topk_idx` 同址广播）②尾部 tile 掩码（已知 `valid`，前 ⌊valid/KT⌋ 块全有效、跳过掩码，113→133）③`cp.async` 双缓冲（`long_scoreboard` 4.56→1.46，64k 反超同步 11%）。扫配置：`KT` 比 `DVGRP` 重要，`s3`(BH=32) 因 4× 重复 gather 掉到 66；最佳 **p2 = 136.3@4k / 127.9@64k TFLOPS（13.8% 峰值）**，为稠密 `f4s` 的 ~75% 效率、工作量 1/(Sk/k)。sparse attention 相对稠密实测：4k 3.0× / 8k 5.9× / 16k 12.9× / 32k 25.2× / **64k 48.6×**；DSA 端到端（+18 的 indexer/topk 折算）4k 2.5× / 32k 13.3× / **64k 17.3×**，逼近 18 的 ~31× 上限。距 FlashMLA sm90 sparse prefill 640（H800）约 **4.8×**。代码 `19-dsa-sparse-attn/`（`sparse_S32768.out.txt`、`sweep_sk.out.txt`、`sparse_S32768_K512.out.txt`、`dense_mla_f4s_1024.out.txt`、`ncu_sk8192/65536.out.txt`）。
 
 ## 下一步（明确到可执行）
 
 - [x] **16 MLA 注意力（二）**：已完成（见「当前进度」）。
-- [ ] **16b MLA 极限冲刺：SW128 swizzle + wgmma（并入第六部分 31/39 的前置）**。现在 `f4s`=170/184 TFLOPS，瓶颈是 smem `ldmatrix` + 12.5% occupancy（`short_scoreboard` 3.05、DRAM 7%）。把 `mla_wgmma.cu` 的 `INTERLEAVE` 布局换成 **K-major SW128（`layout_type=1` + 描述符 `base_offset` 相位）**，用 `cp.async`/TMA 按 swizzle 地址写入；先做**小 GEMM 冒烟测试**验证 SW128 描述符与逐 k16 步进（`16/wgmma_helpers.cuh` 已有 `m64n64k16`/`m64n256k16` 的 SS asm），再接回 MLA。目标：把 tensor pipe 从 26.7% 提到 ≥ 50%，冲 **250+ TFLOPS**（把与 FlashMLA 640 的差距压到 ≤ 2.6×）。
-  - 关键动作：①实现 `swizzle128(offset)` 与匹配描述符；②`cp.async` 16B swizzled store（消 store bank conflict）；③可选 warp specialization（producer 搬数据 / consumer 算）。
 - [x] **文章 17 — 主题 24 Muon / MuonClip 的 Newton–Schulz 正交化**：已完成并发布（见「当前进度」）。
 - [x] **文章 18 — 主题 17（上半）DSA lightning indexer + exact top-k**：已完成并发布（见「当前进度」）。
-- [ ] **文章 19 — 主题 17（下半）DSA 稀疏 MLA 消费端（下一步，优先）**：把 18 的 top-k 索引接进来，真正写**稀疏 MLA prefill kernel**：按 top-k 索引 gather `c_kv`+`k_rope`（tile 化、去重/合并），online softmax + `mma` 累加，替换 18 里「按稠密吞吐折算」的估算；并实现 DSA 的 **compressor**（ratio 4/128/0）。目标：实测 DSA 端到端加速（18 估算 64k 18.6×），与 `~/github/flashinfer` 的 MSA / DSA 实现同口径对标，给出差距百分比。
-  - 关键动作：①共享 top-k / per-query top-k 两种消费策略的取舍；②gather 访存优化（按 key 排序后合并、smem staging）；③复现 `flashinfer csrc/blackwell_msa/*topk*.cu` 的 block-level 选择思路做对照。
-- [ ] **其他模型场景**：RoPE/RMSNorm/MoE/FP8…（见上）；16b 的 wgmma+SW128 与主题 31/38 共用基础设施，可合并推进。模型类文章优先。
-  - **编号说明**：「系列大纲」里的数字是**主题编号**（稳定 ID），文章 `NN` 是**发布顺序**。主题 24（MuonClip）= 文章 17、主题 17 上半 = 文章 18，二者已解耦。**下一篇是文章 19**；发布时把「文章号 ↔ 主题号」记进「当前进度」。
+- [x] **文章 19 — 主题 17（下半）DSA 稀疏 MLA 消费端**：已完成并发布（见「当前进度」）。剩余 **compressor（ratio 4/128/0）** 未做，列入 backlog。
+- [ ] **文章 20 — 主题 16b/31（下一步，优先）MLA 极限冲刺：SW128 swizzle + wgmma**：现在 `f4s`=170/184、稀疏 p2=136 TFLOPS，瓶颈是 `ldmatrix` 的 smem 依赖（`short_scoreboard`）与 12.5–25% occupancy。把 `16/mla_wgmma.cu` 的 `INTERLEAVE` 布局换成 **K-major SW128（`layout_type=1` + 描述符 `base_offset` 相位）**，用 `cp.async`/TMA 按 swizzle 地址写入；先做**小 GEMM 冒烟测试**验证 SW128 描述符与逐 k16 步进（`16/wgmma_helpers.cuh` 已有 `m64n64k16`/`m64n256k16` 的 SS asm），再接回稠密 MLA 与 19 的稀疏 MLA。目标：tensor pipe 从 ~20% 提到 ≥ 40%，稠密 MLA 冲 **250+ TFLOPS**（与 FlashMLA 640 差距压到 ≤ 2.6×），稀疏 MLA 同步受益。
+  - 关键动作：①实现 `swizzle128(offset)` 与匹配描述符；②`cp.async` 16B swizzled store（消 store bank conflict）；③可选 warp specialization（producer 搬数据 / consumer 算）。
+- [ ] **文章 21 — 主题 20/21 MoE：router + top-k + permutation / grouped GEMM**：从 `/ssd/models/DeepSeek-V4-Pro/config.json`（384 routed + 1 shared, top-6, moe_inter=3072）构造 shape，对照 `~/github/DeepGEMM` 的 contiguous/masked 分组，实测路由 + 搬运开销与 grouped GEMM 吞吐。
+- [ ] **其他模型场景**：RoPE/RMSNorm/FP8 GEMM/compressor…（见上）。模型类文章优先；16b 的 wgmma+SW128 与主题 31/38/39 共用基础设施，是性能主线。
+  - **编号说明**：「系列大纲」里的数字是**主题编号**（稳定 ID），文章 `NN` 是**发布顺序**。主题 24（MuonClip）= 文章 17、主题 17 上半 = 文章 18、下半 = 文章 19，二者已解耦。**下一篇是文章 20**；发布时把「文章号 ↔ 主题号」记进「当前进度」。
 
 ## 灵感 / backlog（想到就记，别丢）
 
+- **DSA compressor**（主题 17 剩余）：ratio ∈ {4,128,0} 的 KV 压缩算子，V4-Pro/Lite 的层间压缩比不同，用来把超长上下文压成更少的 key，再接 indexer/top-k。
 - DeepGEMM 的 JIT + contiguous grouped GEMM 与 DeepSeek-V4 的 expert 分布对齐。
 - FlashMLA 的 split-KV + `m64n...` 细节，和本文 16 逐段对照。
 - ~~MuonClip 的 Newton–Schulz 5 步迭代（zeropower_via_newtonschulz）在 N=4096 上的 roofline：它到底是计算受限还是访存受限？~~ → **已答（文章 17）**：算力受限（DRAM 13%），瓶颈是自研 `mma` GEMM 的 L2 放大 + 寄存器墙；下一步 wgmma/TMA。

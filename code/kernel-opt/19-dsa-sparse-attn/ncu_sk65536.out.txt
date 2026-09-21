@@ -1,0 +1,34 @@
+===== s1 Sk=65536 =====
+s1       BH=64  DVGRP=2 KT=64  warps=8      2.5436 ms    114.82 TFLOPS ( 11.6% peak)
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %        14.75
+    gpu__time_duration.sum                                                             ms         2.54
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        43.18
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed             %        17.71
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        17.71
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.36
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         4.56
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         2.59
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.59
+===== p2 Sk=65536 =====
+p2       BH=64  DVGRP=2 KT=32  warps=8      2.2871 ms    127.70 TFLOPS ( 12.9% peak)
+===== s4 Sk=65536 =====
+s4       BH=64  DVGRP=4 KT=64  warps=16     2.3718 ms    123.14 TFLOPS ( 12.5% peak)
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %        16.16
+    gpu__time_duration.sum                                                             ms         2.38
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        55.58
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed             %        18.88
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        20.78
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.80
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         5.33
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         5.89
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         2.11
+p2       BH=64  DVGRP=2 KT=32  warps=8      2.2834 ms    127.90 TFLOPS ( 12.9% peak)
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %        16.45
+    gpu__time_duration.sum                                                             ms         2.28
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        51.56
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed             %        19.68
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        23.05
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.31
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.46
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         2.31
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.71
