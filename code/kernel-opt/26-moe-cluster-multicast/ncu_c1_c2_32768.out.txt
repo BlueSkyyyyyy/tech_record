@@ -1,0 +1,24 @@
+### 32768 grp128x128s3_c1
+  void moe_kernel<128, 128, 128, 3, 0, 1>(CUtensorMap_st, CUtensorMap_st, float *, const int *, int, int, int, int, float, int) (24, 1713, 1)x(288, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Metric Name                                                              Metric Unit Metric Value
+    gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed                             %        53.05
+    gpu__time_duration.sum                                                            ms         9.09
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                %        55.70
+    lts__t_sectors_op_read.sum                                                    sector   2580038978
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                  %        88.22
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed            %        65.05
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                   %        65.05
+    sm__warps_active.avg.pct_of_peak_sustained_active                                  %        27.77
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio        inst        11.59
+### 32768 grp128x128s3_c2
+  void moe_kernel<128, 128, 128, 3, 0, 2>(CUtensorMap_st, CUtensorMap_st, float *, const int *, int, int, int, int, float, int) (24, 1713, 1)x(288, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Metric Name                                                              Metric Unit Metric Value
+    gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed                             %        56.89
+    gpu__time_duration.sum                                                            ms         8.93
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                %        55.81
+    lts__t_sectors_op_read.sum                                                    sector   2095023441
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                  %        88.68
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed            %        64.99
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                   %        64.99
+    sm__warps_active.avg.pct_of_peak_sustained_active                                  %        27.82
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio        inst         8.00

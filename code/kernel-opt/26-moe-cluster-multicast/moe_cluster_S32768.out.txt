@@ -1,0 +1,64 @@
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z10moe_kernelILi256ELi256ELi128ELi3ELb0ELi2EEv14CUtensorMap_stS0_PfPKiiiiifi' in line 25447
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z10moe_kernelILi256ELi256ELi128ELi3ELb0ELi1EEv14CUtensorMap_stS0_PfPKiiiiifi' in line 23949
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z10moe_kernelILi256ELi256ELi128ELi2ELb0ELi1EEv14CUtensorMap_stS0_PfPKiiiiifi' in line 22399
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+=== MoE grouped GEMM + TMA cluster multicast (fp8 e4m3, per-tensor) ===
+config: tokens=32768 topk=6 G=384  K=7168 N=3072
+prefill(contiguous): expected_m/expert=512  M_total=219264 (aligned)  sum_actual=195475
+  padding waste = 10.8%
+  avg m-tiles/expert = 4.46  -> B L2 read amp ~4.46x; A read amp = N/BN
+
+-- A) per-expert loop (G=384 次 launch) --
+  [loop              ] max_abs_err=5.781e-02 (ref~38.2) OK
+loop(G launches)      14.0118 ms    689.16 TFLOPS/aligned ( 34.8% peak)  B-read  603.5 GB/s
+
+-- B) grouped contiguous + A-multicast (cluster.x = CN) --
+config                     ms    TFLOPS (vs CN=1)
+  [grp128x128s3_c1   ] max_abs_err=5.781e-02 (ref~38.2) OK
+grp128x128s3_c1       10.0515 ms    960.69 TFLOPS/aligned ( 48.6% peak)  B-read  841.2 GB/s
+  [grp128x128s3_c2   ] max_abs_err=5.781e-02 (ref~38.2) OK
+grp128x128s3_c2        9.6406 ms   1001.64 TFLOPS/aligned ( 50.6% peak)  B-read  877.1 GB/s
+  [grp128x128s3_c4   ] max_abs_err=5.781e-02 (ref~38.2) OK
+grp128x128s3_c4       11.9037 ms    811.21 TFLOPS/aligned ( 41.0% peak)  B-read  710.3 GB/s
+  [grp128x256s3_c1   ] max_abs_err=5.781e-02 (ref~38.2) OK
+grp128x256s3_c1        9.7605 ms    989.34 TFLOPS/aligned ( 50.0% peak)  B-read  866.3 GB/s
+  [grp128x256s3_c2   ] max_abs_err=5.781e-02 (ref~38.2) OK
+grp128x256s3_c2       10.0129 ms    964.40 TFLOPS/aligned ( 48.8% peak)  B-read  844.5 GB/s
+  [grp128x256s3_c4   ] max_abs_err=5.781e-02 (ref~38.2) OK
+grp128x256s3_c4       10.6426 ms    907.34 TFLOPS/aligned ( 45.9% peak)  B-read  794.5 GB/s
+  [grp128x128s4_c1   ] max_abs_err=5.781e-02 (ref~38.2) OK
+grp128x128s4_c1       12.4250 ms    777.18 TFLOPS/aligned ( 39.3% peak)  B-read  680.5 GB/s
+  [grp128x128s4_c2   ] max_abs_err=5.781e-02 (ref~38.2) OK
+grp128x128s4_c2       12.5518 ms    769.33 TFLOPS/aligned ( 38.9% peak)  B-read  673.7 GB/s
+  [grp128x128s4_c4   ] max_abs_err=5.781e-02 (ref~38.2) OK
+grp128x128s4_c4       13.3018 ms    725.95 TFLOPS/aligned ( 36.7% peak)  B-read  635.7 GB/s
+
+-- C) grouped masked (decode): G=384 max_m=128 expected_m=32 --
+  [masked            ] max_abs_err=1.749e-01 (ref~54.7) OK
+masked128x256s3_c1     3.0960 ms    174.23 TFLOPS/useful  (  8.8% peak)  B-read 2731.2 GB/s
+  [masked            ] max_abs_err=1.749e-01 (ref~54.7) OK
+masked128x256s3_c2     3.2210 ms    167.47 TFLOPS/useful  (  8.5% peak)  B-read 2625.2 GB/s
+  [masked            ] max_abs_err=1.749e-01 (ref~54.7) OK
+masked128x256s3_c4     3.4049 ms    158.42 TFLOPS/useful  (  8.0% peak)  B-read 2483.4 GB/s
+
+-- D) 大 M-tile（ALIGN=256）: M_total=243712 sum_actual=196011 waste=19.6% --
+  [d128x256s3_c1     ] max_abs_err=9.856e-02 (ref~33.0) OK
+d128x256s3_c1         11.6412 ms    741.53 TFLOPS/useful  ( 37.5% peak)  B-read  726.4 GB/s
+  [d256x128s3_c1     ] max_abs_err=9.856e-02 (ref~33.0) OK
+d256x128s3_c1         10.8034 ms    799.04 TFLOPS/useful  ( 40.4% peak)  B-read  782.7 GB/s
+  [d256x128s3_c2     ] max_abs_err=9.856e-02 (ref~33.0) OK
+d256x128s3_c2         11.3802 ms    758.55 TFLOPS/useful  ( 38.3% peak)  B-read  743.0 GB/s
+  [d256x128s4_c1     ] max_abs_err=9.856e-02 (ref~33.0) OK
+d256x128s4_c1         10.9696 ms    786.93 TFLOPS/useful  ( 39.8% peak)  B-read  770.8 GB/s
+  [d256x256s2_c1     ] max_abs_err=9.856e-02 (ref~33.0) OK
+d256x256s2_c1         69.4493 ms    124.30 TFLOPS/useful  (  6.3% peak)  B-read  121.8 GB/s
+  [d256x256s3_c1     ] max_abs_err=9.856e-02 (ref~33.0) OK
+d256x256s3_c1         70.1317 ms    123.09 TFLOPS/useful  (  6.2% peak)  B-read  120.6 GB/s
+  [d256x256s3_c2     ] max_abs_err=9.856e-02 (ref~33.0) OK
+d256x256s3_c2         65.8832 ms    131.03 TFLOPS/useful  (  6.6% peak)  B-read  128.3 GB/s

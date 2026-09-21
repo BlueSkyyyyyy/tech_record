@@ -101,6 +101,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 23. [FP8 GEMM（二）：TMA + mbarrier + warp specialization（768 → 1217 TFLOPS）](content/posts/cuda-kernel-opt-23-fp8-gemm-tma/index.md)
 24. [FP8 GEMM（三）：per-block 缩放的两堵墙——寄存器与 ptxas 序列化](content/posts/cuda-kernel-opt-24-fp8-gemm-pb/index.md)
 25. [MoE grouped GEMM：一个 kernel 吃掉 384 个 expert](content/posts/cuda-kernel-opt-25-moe-grouped-gemm/index.md)
+26. [MoE grouped GEMM 的 L2 墙：TMA cluster multicast 实测只赚 4%](content/posts/cuda-kernel-opt-26-moe-cluster-multicast/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 
