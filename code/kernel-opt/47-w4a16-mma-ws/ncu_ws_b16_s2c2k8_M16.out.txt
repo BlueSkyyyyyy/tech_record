@@ -1,0 +1,60 @@
+
+
+
+          detected during instantiation of "void add_mma_ws<BM,BN,STAGES,NCONS,KSPLIT>(std::vector<Spec, std::allocator<Spec>> &, const char *, const Buf &, int, int) [with BM=16, BN=128, STAGES=2, NCONS=1, KSPLIT=1]" at line 918
+
+
+    constexpr int NW4 = BKi / 8;
+          detected during instantiation of "void add_mma_ws<BM,BN,STAGES,NCONS,KSPLIT>(std::vector<Spec, std::allocator<Spec>> &, const char *, const Buf &, int, int) [with BM=16, BN=128, STAGES=2, NCONS=1, KSPLIT=1]" at line 918
+
+          detected during instantiation of "void add_wgmma<STAGES,KSPLIT>(std::vector<Spec, std::allocator<Spec>> &, const char *, const Buf &, int, int) [with STAGES=3, KSPLIT=1]" at line 925
+
+==PROF== Connected to process 291427 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/48-w4a16-mma-ws/w4a16_mma_ws.out)
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A16 small-M sweep: N=17408 K=5120 group=128 ; W_int4=44.6 MB scales=2.8 MB total=47.3 MB
+张量核 ridge M* = 989/(2/(0.53)) ... AI(M)=3.77*M, M* = 78
+
+  roof_g528            0.0596 ms  W+s   794.0 GB/s (23.7% HBM)
+  roof_g1056           0.0602 ms  W+s   786.6 GB/s (23.5% HBM)
+  roof_g2112           0.0611 ms  W+s   775.4 GB/s (23.1% HBM)
+=== 精度校验（M=16, 抽样 48 点）===
+==PROF== Profiling "mma_ws_kernel": 0%....50%....100% - 13 passes
+  [ws_b16_s2c2k8 ] max_abs_err=3.954e-03 (ref~2.8) rel=1.43e-03 OK
+
+=== M 扫描（同进程、warmup=5 iters=50；括号=权重读遍数）===
+kernel\M                      1          2          3          4          6          8         12         16         24         32         48         64
+ws_b16_s2c2k8          0.0748(1)   0.0750(1)   0.0753(1)   0.0754(1)   0.0760(1)   0.0765(1)   0.0776(1)   0.0792(1)   0.1340(2)   0.1374(2)   0.1966(3)   0.2545(4)
+==PROF== Disconnected from process 291427
+[291427] w4a16_mma_ws.out@127.0.0.1
+  void mma_ws_kernel<16, 128, 64, 2, 2, 8, 1, 1>(const __nv_bfloat16 *, const unsigned char *, const float *, float *, int, int, int) (136, 1, 8)x(384, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    --------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        20.16
+    gpu__time_duration.sum                                                               us           76
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                   %        35.76
+    launch__waves_per_multiprocessor                                                                2.75
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        33.82
+    sm__inst_executed.sum                                                              inst     33334140
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active                %         6.34
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        45.65
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        50.60
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                   inst         0.48
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio           inst        10.19
+    smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio        inst         0.38
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio              inst         0.64
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio          inst         1.09
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                      inst         1.41
+    smsp__inst_executed_pipe_alu.sum                                                   inst     15014400
+    smsp__inst_executed_pipe_fma.sum                                                   inst     11262976
+    smsp__inst_executed_pipe_lsu.sum                                                   inst      2711296
+    smsp__inst_executed_pipe_tensor.sum                                                inst       696320
+    --------------------------------------------------------------------------- ----------- ------------
+
