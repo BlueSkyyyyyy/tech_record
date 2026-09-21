@@ -132,6 +132,12 @@ scripts/lab.sh status
 - **`O(S²)` kernel 的 block 调度顺序决定 L2 工作集**：把输出 tile 的网格写成 `grid.x=KV块`、`grid.y=query块`，
   同一 query block 的 KV 块连续调度，Q tile 才留得住 L2。18 篇 `grid.x=query` 时 S=32768 indexer 只有
   69.7 TFLOPS，交换后 214（3.1×）。判据：ncu `DRAM Throughput` 高而 L1/L2 不高 → 先怀疑调度顺序。
+- **FP8 GEMM 的 `mma.sync` 在 Hopper 上打不满**：`mma.m16n8k32` 走 SM80 兼容路径，ncu 会显示 `math_pipe_throttle` 为主 + tensor pipe 只有 ~41%（实测 266 TFLOPS / 13.5%）。要打满 FP8 峰值必须换 `wgmma.m64nNk32`（SS 直读 smem 描述符）。**FP8 的 K-major SW128 atom 与 bf16 逐字节同构**（8 行×128B，只是每行 128 个 e4m3），20 篇的 `wgmma_sw128.cuh` 原样复用；`B[N][K]` 天然 K-major，GEMM 无需转置。换 wgmma 后同 shape 266→768 TFLOPS（+2.89×）。
+- **FP8 的 `ldmatrix` 可复用**：`ldmatrix` 吃 8×8 b16，「2 个相邻 fp8 = 1 个 b16」，所以 16×32 fp8 = 16×16 b16 = 4 个 m8n8 矩阵，`ldmatrix.x4` 一次取回 `a0..a3`；B 存 `[N][K]` 用 `x2` 取 `b0/b1`。smem 行距 `BK+16` 消 bank。
+- **FP8 的 wgmma asm 尾部操作数与 bf16 不同**：bf16 是 `..., p, 1, 1, 0, 0`（5 个），FP8 是 `..., p, scaleA, scaleB`（3 个）；照抄 bf16 模板会报 `Arguments mismatch for instruction 'wgmma.mma_async with FP8 types'`。操作数编号：64 累加器后 `da=%64, db=%65, pred=%66, scA=%67, scB=%68`。
+- **per-tensor 的 wgmma 循环别每块 `wait0`**：acc 到最后才读时用 `wgmma.commit_group` 每块提交、覆盖 stage 前只 `wgmma.wait_group STAGES-2`，允许 mma 跨块流水（710→768，+8%）；循环外补一次 `wait0` 再读 acc。
+- **per-block 缩放：相邻两列 c0/c1 各有自己的 scale**：`fin += sa[row]*sb[col]*acc` 时 c0/c2 用 `sb[col]`、c1/c3 用 `sb[col+1]`。只测常数 scale 会「假通过」，必须用逐列随机 scale 才能暴露（实测误差稳定 35%）。DeepSeek `weight_block=128×128` 时 `sb` 每个 n-tile 退化成标量。
+- **扫 config 时 check 采样必须打散**：`__launch_bounds__` 写死线程数 < 网格所需时只会算一部分行；若采样步长 `% BM` 后总落在已算区域，会显示 `OK` 且性能虚高一倍（曾把 256×256 的 898 当成绩，真值 218）。用与 BM/BN 互质的步长（如 `i*1009`）。
 - **exact top-k 用 radix-select，别全排序**：保序变换成 uint32 → 逐 8-bit 趟直方图定位第 k 大阈值（4 趟）
   → 收集。独占瓶颈是 shared `atomicAdd` 竞争，**每 warp 私有直方图** 18 篇带来 3.96×（26.7→6.75ms）。
   坑：①保序变换的逆**不自逆**（mask 依赖符号位；高位置位取低 31 位、否则取反），写错 `out_val` 全错；
