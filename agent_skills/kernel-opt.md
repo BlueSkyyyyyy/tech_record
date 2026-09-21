@@ -371,3 +371,13 @@ scripts/lab.sh status
   `blockIdx` 生成，输出留脏值、**不报错**，loss 悄悄错（11.764 vs 正确 11.7698）。正解是
   「1D 网格 = `ceil(Mt/GM)·ceil(Nt/GN)·GM·GN` + 越界 `return`」。**判据：任何 remap 改完都要
   用「对拍一个全局标量」而不是「kernel 正常退出」来验证**（本例损失值）。
+- **扫参前先查 `cudaFuncSetAttribute` 的返回值，否则失败 launch 会给出「鬼数据」**（55 篇踩到）：
+  smem 超 232448B 时 `cudaFuncSetAttribute(MaxDynamicSharedMemorySize)` 返回错误、kernel 不启动，
+  但若 `bench_ms` 只按 event 计时、不管返回值，就会得到 1.4e-6 ms 的假时间 → `10^7 TFLOPS`。
+  实例：`256×128` 下 `STAGES=5` 要 245KB 超限，扫参里出现 `10907119 TFLOPS`。约束
+  `(B_M+B_N)*128*STAGES ≤ 227KB`；扫参里任何「超峰值 10×」的吞吐先怀疑 launch 没成功。
+- **同一算子的 bf16/fp8 可以用一个 `bool FP8` 参数化**（55 篇）：SW128 的 128B atom 对 bf16（8×64）
+  与 fp8（8×128）**逐字节同构**，`make_desc_sw128`/`SBO=(K/64)*1024`/k-step 地址函数全不用改，
+  只差 `BK`（64/128）、TMA `rowbytes`（`K*2`/`K`）、wgmma 指令（`m64n128k16`/`m64n128k32`）。
+  **但 per-row 激活 scale 必须在 epilogue 乘回**（或折进存进去的 e4m3）：漏掉时 rel-RMS 直接
+  到 1.6e4；wgmma `m16n8` 里 `acc[j*4+0/1]` 同行、`acc[j*4+2/3]` 同行，同一行 4 个累加器共用一个 scale。
