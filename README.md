@@ -119,6 +119,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 42. [MLA decode 的 wgmma 改造：消掉 QK dup，却撞上 V 转置税，再用混合 mma 绕开（1.53×）](content/posts/cuda-kernel-opt-42-mla-decode-wgmma/index.md)
 43. [W4A16 decode 的跨 item 持久化流水：把 wave 2.58 压到 1，再跟每 stage 的除法/原子税算账](content/posts/cuda-kernel-opt-43-w4a16-persist/index.md)
 44. [W4A16 的 M=1 GEMV：M=1 时张量核有 63/64 的行在空转，不如回去做带宽最优的 GEMV](content/posts/cuda-kernel-opt-44-w4a16-decode-gemv/index.md)
+45. [W4A8 + dp4a：把 M=1 decode 的反量化 ALU 税从 60% 打到 30%，贴上 HBM 带宽（1.53×）](content/posts/cuda-kernel-opt-45-w4a8-dp4a-gemv/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 

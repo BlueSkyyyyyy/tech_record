@@ -1,0 +1,6 @@
+== gemv_a8b ==
+    gpu__time_duration.sum           us        26.85
+    smsp__inst_executed.sum        inst     11870080
+== gemv_a8h ==
+    gpu__time_duration.sum           us        23.10
+    smsp__inst_executed.sum        inst      7169920
