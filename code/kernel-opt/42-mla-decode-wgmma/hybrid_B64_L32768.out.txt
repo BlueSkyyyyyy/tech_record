@@ -1,0 +1,23 @@
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function '_Z17mla_dec_hy_kernelILi2EEvPK13__nv_bfloat16S2_S2_S2_Pfii' for 'sm_90a'
+ptxas info    : Function properties for _Z17mla_dec_hy_kernelILi2EEvPK13__nv_bfloat16S2_S2_S2_Pfii
+    16 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 254 registers, used 1 barriers, 16 bytes cumulative stack size
+ptxas info    : Compile time = 215.382 ms
+ptxas info    : Compiling entry function '_Z17mla_dec_hy_kernelILi4EEvPK13__nv_bfloat16S2_S2_S2_Pfii' for 'sm_90a'
+ptxas info    : Function properties for _Z17mla_dec_hy_kernelILi4EEvPK13__nv_bfloat16S2_S2_S2_Pfii
+    72 bytes stack frame, 56 bytes spill stores, 56 bytes spill loads
+ptxas info    : Used 128 registers, used 1 barriers, 72 bytes cumulative stack size
+ptxas info    : Compile time = 134.880 ms
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+MLA decode HYBRID (wgmma QK + mma/ldmatrix.trans PV + K double-buffer): H=128 B=64 L=32768
+     [v2  ] max_abs_err=2.693e-06 (ref~0.004) OK
+v2    hyb2     2.0094 ms   1202.3 GB/s ( 35.9% HBM)    290.7 TFLOPS ( 29.4%)
+     [v4  ] max_abs_err=2.693e-06 (ref~0.004) OK
+v4    hyb4     2.6176 ms    923.0 GB/s ( 27.6% HBM)    223.1 TFLOPS ( 22.6%)

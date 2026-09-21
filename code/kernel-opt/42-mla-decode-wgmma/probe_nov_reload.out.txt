@@ -1,0 +1,3 @@
+v1    split4g     2.0751 ms   1164.2 GB/s ( 34.8% HBM)    281.5 TFLOPS ( 28.5%)
+v1    split2g     1.5863 ms   1523.0 GB/s ( 45.5% HBM)    368.2 TFLOPS ( 37.2%)
+v1    dup2      1.8148 ms   1331.2 GB/s ( 39.7% HBM)    321.9 TFLOPS ( 32.5%)
