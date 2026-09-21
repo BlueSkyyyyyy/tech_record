@@ -1,0 +1,56 @@
+==PROF== Connected to process 307169 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/51-w4a8-imma-warp/w4a8_imma_warp.out)
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A8 IMMA pipe: N=17408 K=5120 group=128 ; W_int4=44.6 MB scales=2.8 MB total=47.3 MB
+纯读上界 w+s: 0.0606 ms  782.0 GB/s (23.3% HBM)
+纯读上界 strided(64B/2560B): 0.0619 ms  720.0 GB/s (21.5% HBM)
+  [base_tile_s2k8_b5] threads=128 smem=26368
+  [base_tile_s2k4] threads=128 smem=26368
+  [base_tile_s3k7] threads=128 smem=39552
+  [w_s2k8] threads=128 smem=40960
+  [w_s3k8] threads=128 smem=61440
+  [w_s4k8] threads=128 smem=81920
+  [w_s3k4] threads=128 smem=61440
+  [w_s3k5] threads=128 smem=61440
+  [w_s3k7] threads=128 smem=61440
+  [w_s4k5] threads=128 smem=81920
+  [w_s6k8] threads=128 smem=122880
+  [wA_s3k8] threads=128 smem=45312
+  [wA_s4k8] threads=128 smem=56576
+  [wA_s4k4] threads=128 smem=68096
+  [w_wn2_s4k8] threads=64 smem=62464
+  [w_bn256_s3k8] threads=256 smem=122880
+  [wA_bn256_s4k8] threads=256 smem=101632
+
+=== 精度校验（M=1, 抽样 48 点）===
+==PROF== Profiling "gemm_mma_w4a8_warp_kernel": 0%....50%....100% - 5 passes
+  [w_s3k7              ] max_abs_err=2.125e-07 (ref~2.7) rel=7.84e-08 OK
+
+=== M 扫描（同进程、warmup=5 iters=50）===
+kernel\M                     1         2         3         4         6         8        12        16
+w_s3k7                0.0716    0.0713    0.0705    0.0716    0.0708    0.0710    0.0707    0.0706  
+==PROF== Disconnected from process 307169
+[307169] w4a8_imma_warp.out@127.0.0.1
+  void gemm_mma_w4a8_warp_kernel<16, 128, 3, 1, 4, 7, 1, 1, 0>(const signed char *, const float *, const float *, const unsigned char *, const float *, float *, int, int, int) (136, 1, 7)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %        63.86
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        38.50
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        64.32
+    sm__inst_executed.sum                                                            inst     10196192
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        16.46
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst            0
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.52
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            inst         0.20
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio            inst         0.68
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.08
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         0.64
+    ------------------------------------------------------------------------- ----------- ------------
+

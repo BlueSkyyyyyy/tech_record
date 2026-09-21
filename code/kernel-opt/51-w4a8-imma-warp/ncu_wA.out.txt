@@ -1,0 +1,32 @@
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %        64.69
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        31.19
+    launch__occupancy_limit_registers                                                  block            6
+    launch__occupancy_limit_shared_mem                                                 block            6
+    launch__registers_per_thread                                             register/thread           76
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        65.35
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        47.63
+    sm__warps_active.avg.pct_of_peak_sustained_active                                      %        29.39
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         0.21
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         1.60
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio               inst         1.57
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         0.77
+    ------------------------------------------------------------------------ --------------- ------------
+
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %        54.26
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        28.25
+    launch__occupancy_limit_registers                                                  block            7
+    launch__occupancy_limit_shared_mem                                                 block            4
+    launch__registers_per_thread                                             register/thread           72
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        65.89
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        37.10
+    sm__warps_active.avg.pct_of_peak_sustained_active                                      %        20.71
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         0.12
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         1.69
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio               inst         1.04
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         0.67
+    ------------------------------------------------------------------------ --------------- ------------
+

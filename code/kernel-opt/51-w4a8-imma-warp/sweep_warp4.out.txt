@@ -1,0 +1,192 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A8 IMMA pipe: N=17408 K=5120 group=128 ; W_int4=44.6 MB scales=2.8 MB total=47.3 MB
+纯读上界 w+s: 0.0181 ms  2613.4 GB/s (78.0% HBM)
+纯读上界 strided(64B/2560B): 0.0173 ms  2574.4 GB/s (76.8% HBM)
+  [base_tile_s2k8_b5] threads=128 smem=26368
+  [base_tile_s2k4] threads=128 smem=26368
+  [base_tile_s3k7] threads=128 smem=39552
+  [w_s2k8] threads=128 smem=40960
+  [w_s3k8] threads=128 smem=61440
+  [w_s4k8] threads=128 smem=81920
+  [w_s3k4] threads=128 smem=61440
+  [w_s3k5] threads=128 smem=61440
+  [w_s3k7] threads=128 smem=61440
+  [w_s4k5] threads=128 smem=81920
+  [w_s6k8] threads=128 smem=122880
+  [wA_s3k8] threads=128 smem=45312
+  [wA_s4k8] threads=128 smem=56576
+  [wA_s4k4] threads=128 smem=68096
+  [wA_s2k4] threads=128 smem=45568
+  [wA_s2k6] threads=128 smem=38656
+  [wA_s2k7] threads=128 smem=36352
+  [wA_s2k8] threads=128 smem=34048
+  [wA_s3k4] threads=128 smem=56832
+  [wA_s3k5] threads=128 smem=52224
+  [wA_s3k6] threads=128 smem=49920
+  [wA_s3k7] threads=128 smem=47616
+  [wA_s2k10] threads=128 smem=31744
+  [wA_s2k16] threads=128 smem=29440
+  [wA_s2k8_b8] threads=128 smem=34048
+  [wA_s2k8_b10] threads=128 smem=34048
+  [wA_s2k4_b8] threads=128 smem=45568
+  [wA_s3k8_b6] threads=128 smem=45312
+  [wA_s3k4_b8] threads=128 smem=56832
+  [wC_s2k8] threads=128 smem=34048
+  [wC_s3k8] threads=128 smem=45312
+  [wC_s2k4] threads=128 smem=45568
+  [wC_s3k4] threads=128 smem=56832
+  [wC_s2k8_b8] threads=128 smem=34048
+  [wC_s2k8_b10] threads=128 smem=34048
+  [wC_s2k6_b8] threads=128 smem=38656
+  [wC_s2k4_b10] threads=128 smem=45568
+  [wC_s3k4_b8] threads=128 smem=56832
+  [wA_s2k4_S2] threads=128 smem=68096
+  [wA_s2k4_S5] threads=128 smem=135680
+  [wA_s2k5_S2] threads=128 smem=63488
+  [wA_s2k5_S4] threads=128 smem=108544
+  [wA_s3k5_S2] threads=128 smem=86016
+  [wA_s3k5_S4] threads=128 smem=153600
+  [wA_s2k10_S2] threads=128 smem=54272
+  [wA_s2k10_S4] threads=128 smem=99328
+  [wA_s3k10_S2] threads=128 smem=76800
+  [wA_s2k20_S2] threads=128 smem=49664
+  [wA_s2k2_S2] threads=128 smem=91136
+  [wA_s2k2_S4] threads=128 smem=136192
+  [w_s2k5] threads=128 smem=40960
+  [w_s2k6] threads=128 smem=40960
+  [w_wn2_s4k8] threads=64 smem=62464
+  [w_bn256_s3k8] threads=256 smem=122880
+  [wA_bn256_s4k8] threads=256 smem=101632
+
+=== 精度校验（M=16, 抽样 48 点）===
+  [base_tile_s2k8_b5   ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [base_tile_s2k4      ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+  [base_tile_s3k7      ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [w_s2k8              ] max_abs_err=2.835e-07 (ref~3.8) rel=7.52e-08 OK
+  [w_s3k8              ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [w_s4k8              ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [w_s3k4              ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+  [w_s3k5              ] max_abs_err=2.700e-07 (ref~3.8) rel=7.16e-08 OK
+  [w_s3k7              ] max_abs_err=1.734e-07 (ref~3.8) rel=4.60e-08 OK
+  [w_s4k5              ] max_abs_err=2.700e-07 (ref~3.8) rel=7.16e-08 OK
+  [w_s6k8              ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wA_s3k8             ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wA_s4k8             ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wA_s4k4             ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+  [wA_s2k4             ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+  [wA_s2k6             ] max_abs_err=3.264e-07 (ref~3.8) rel=8.66e-08 OK
+  [wA_s2k7             ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [wA_s2k8             ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wA_s3k4             ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+  [wA_s3k5             ] max_abs_err=2.700e-07 (ref~3.8) rel=7.16e-08 OK
+  [wA_s3k6             ] max_abs_err=2.610e-07 (ref~3.8) rel=6.93e-08 OK
+  [wA_s3k7             ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [wA_s2k10            ] max_abs_err=4.542e-07 (ref~3.8) rel=1.21e-07 OK
+  [wA_s2k16            ] max_abs_err=5.666e-07 (ref~3.8) rel=1.50e-07 OK
+  [wA_s2k8_b8          ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wA_s2k8_b10         ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wA_s2k4_b8          ] max_abs_err=4.542e-07 (ref~3.8) rel=1.21e-07 OK
+  [wA_s3k8_b6          ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wA_s3k4_b8          ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+  [wC_s2k8             ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wC_s3k8             ] max_abs_err=3.476e-07 (ref~3.8) rel=9.22e-08 OK
+  [wC_s2k4             ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+  [wC_s3k4             ] max_abs_err=4.542e-07 (ref~3.8) rel=1.21e-07 OK
+  [wC_s2k8_b8          ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wC_s2k8_b10         ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wC_s2k6_b8          ] max_abs_err=3.264e-07 (ref~3.8) rel=8.66e-08 OK
+  [wC_s2k4_b10         ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+  [wC_s3k4_b8          ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+  [wA_s2k4_S2          ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+  [wA_s2k4_S5          ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+  [wA_s2k5_S2          ] max_abs_err=2.700e-07 (ref~3.8) rel=7.16e-08 OK
+  [wA_s2k5_S4          ] max_abs_err=2.700e-07 (ref~3.8) rel=7.16e-08 OK
+  [wA_s3k5_S2          ] max_abs_err=2.700e-07 (ref~3.8) rel=7.16e-08 OK
+  [wA_s3k5_S4          ] max_abs_err=2.700e-07 (ref~3.8) rel=7.16e-08 OK
+  [wA_s2k10_S2         ] max_abs_err=3.871e-07 (ref~3.8) rel=1.03e-07 OK
+  [wA_s2k10_S4         ] max_abs_err=3.871e-07 (ref~3.8) rel=1.03e-07 OK
+  [wA_s3k10_S2         ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wA_s2k20_S2         ] max_abs_err=4.542e-07 (ref~3.8) rel=1.21e-07 OK
+  [wA_s2k2_S2          ] max_abs_err=4.542e-07 (ref~3.8) rel=1.21e-07 OK
+  [wA_s2k2_S4          ] max_abs_err=4.542e-07 (ref~3.8) rel=1.21e-07 OK
+  [w_s2k5              ] max_abs_err=2.700e-07 (ref~3.8) rel=7.16e-08 OK
+  [w_s2k6              ] max_abs_err=1.714e-07 (ref~3.8) rel=4.55e-08 OK
+  [w_wn2_s4k8          ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [w_bn256_s3k8        ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [wA_bn256_s4k8       ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+
+=== M 扫描（同进程、warmup=5 iters=50）===
+kernel\M                     1         2         3         4         6         8        12        16
+base_tile_s2k8_b5     0.0284    0.0284    0.0285    0.0286    0.0296    0.0303    0.0323    0.0344  
+base_tile_s2k4        0.0310    0.0311    0.0311    0.0312    0.0315    0.0319    0.0329    0.0341  
+base_tile_s3k7        0.0315    0.0316    0.0317    0.0317    0.0321    0.0326    0.0337    0.0353  
+w_s2k8                0.0293    0.0315    0.0327    0.0345    0.0357    0.0368    0.0417    0.0451  
+w_s3k8                0.0274    0.0316    0.0332    0.0346    0.0362    0.0376    0.0422    0.0467  
+w_s4k8                0.0310    0.0332    0.0347    0.0367    0.0389    0.0393    0.0428    0.0477  
+w_s3k4                0.0276    0.0325    0.0332    0.0347    0.0359    0.0373    0.0410    0.0435  
+w_s3k5                0.0274    0.0318    0.0331    0.0344    0.0345    0.0364    0.0405    0.0437  
+w_s3k7                0.0266    0.0311    0.0331    0.0336    0.0351    0.0362    0.0410    0.0457  
+w_s4k5                0.0291    0.0332    0.0346    0.0360    0.0372    0.0378    0.0423    0.0455  
+w_s6k8                0.0408    0.0388    0.0396    0.0410    0.0427    0.0432    0.0464    0.0505  
+wA_s3k8               0.0270    0.0278    0.0280    0.0283    0.0291    0.0300    0.0321    0.0345  
+wA_s4k8               0.0287    0.0293    0.0296    0.0300    0.0303    0.0310    0.0328    0.0345  
+wA_s4k4               0.0282    0.0286    0.0289    0.0290    0.0295    0.0298    0.0315    0.0326  
+wA_s2k4               0.0294    0.0296    0.0299    0.0300    0.0300    0.0311    0.0321    0.0336  
+wA_s2k6               0.0281    0.0301    0.0298    0.0302    0.0304    0.0311    0.0320    0.0333  
+wA_s2k7               0.0285    0.0290    0.0291    0.0293    0.0297    0.0302    0.0317    0.0337  
+wA_s2k8               0.0265    0.0272    0.0274    0.0278    0.0287    0.0297    0.0322    0.0343  
+wA_s3k4               0.0269    0.0276    0.0276    0.0278    0.0284    0.0286    0.0303    0.0309  
+wA_s3k5               0.0277    0.0283    0.0283    0.0286    0.0293    0.0299    0.0311    0.0327  
+wA_s3k6               0.0270    0.0277    0.0280    0.0282    0.0287    0.0293    0.0312    0.0325  
+wA_s3k7               0.0274    0.0279    0.0283    0.0283    0.0292    0.0303    0.0318    0.0337  
+wA_s2k10              0.0269    0.0274    0.0277    0.0282    0.0292    0.0303    0.0329    0.0359  
+wA_s2k16              0.0272    0.0278    0.0283    0.0290    0.0310    0.0327    0.0367    0.0415  
+wA_s2k8_b8            0.0271    0.0277    0.0277    0.0281    0.0291    0.0299    0.0322    0.0347  
+wA_s2k8_b10           0.0283    0.0292    0.0299    0.0305    0.0318    0.0328    0.0356    0.0384  
+wA_s2k4_b8            0.0287    0.0290    0.0297    0.0296    0.0299    0.0314    0.0319    0.0333  
+wA_s3k8_b6            0.0270    0.0278    0.0280    0.0285    0.0292    0.0302    0.0324    0.0345  
+wA_s3k4_b8            0.0273    0.0281    0.0283    0.0283    0.0290    0.0294    0.0309    0.0317  
+wC_s2k8               0.0309    0.0285    0.0313    0.0284    0.0310    0.0300    0.0324    0.0344  
+wC_s3k8               0.0300    0.0281    0.0303    0.0285    0.0307    0.0300    0.0328    0.0345  
+wC_s2k4               0.0297    0.0292    0.0311    0.0294    0.0304    0.0309    0.0318    0.0332  
+wC_s3k4               0.0302    0.0301    0.0315    0.0302    0.0309    0.0319    0.0305    0.0311  
+wC_s2k8_b8            0.0299    0.0289    0.0301    0.0286    0.0303    0.0307    0.0331    0.0348  
+wC_s2k8_b10           0.0344    0.0337    0.0349    0.0333    0.0355    0.0382    0.0426    0.0425  
+wC_s2k6_b8            0.0310    0.0295    0.0320    0.0293    0.0304    0.0310    0.0314    0.0346  
+wC_s2k4_b10           0.0329    0.0328    0.0343    0.0334    0.0338    0.0352    0.0364    0.0384  
+wC_s3k4_b8            0.0317    0.0316    0.0323    0.0320    0.0320    0.0337    0.0313    0.0323  
+wA_s2k4_S2            0.0284    0.0289    0.0290    0.0295    0.0297    0.0301    0.0317    0.0329  
+wA_s2k4_S5            0.0351    0.0355    0.0355    0.0355    0.0359    0.0361    0.0368    0.0381  
+wA_s2k5_S2            0.0279    0.0283    0.0283    0.0288    0.0290    0.0296    0.0313    0.0326  
+wA_s2k5_S4            0.0293    0.0298    0.0302    0.0303    0.0309    0.0309    0.0325    0.0343  
+wA_s3k5_S2            0.0286    0.0294    0.0296    0.0297    0.0304    0.0306    0.0322    0.0338  
+wA_s3k5_S4            0.0349    0.0352    0.0354    0.0352    0.0356    0.0359    0.0367    0.0383  
+wA_s2k10_S2           0.0275    0.0282    0.0287    0.0289    0.0297    0.0304    0.0333    0.0359  
+wA_s2k10_S4           0.0315    0.0312    0.0315    0.0318    0.0326    0.0332    0.0354    0.0381  
+wA_s3k10_S2           0.0275    0.0282    0.0287    0.0291    0.0303    0.0307    0.0333    0.0360  
+wA_s2k20_S2           0.0295    0.0298    0.0302    0.0310    0.0326    0.0347    0.0398    0.0455  
+wA_s2k2_S2            0.0317    0.0321    0.0322    0.0321    0.0327    0.0328    0.0339    0.0350  
+wA_s2k2_S4            0.0356    0.0356    0.0356    0.0355    0.0360    0.0359    0.0365    0.0374  
+w_s2k5                0.0293    0.0322    0.0335    0.0354    0.0367    0.0380    0.0411    0.0430  
+w_s2k6                0.0297    0.0316    0.0327    0.0349    0.0359    0.0367    0.0410    0.0437  
+w_wn2_s4k8            0.0291    0.0300    0.0308    0.0321    0.0332    0.0338    0.0363    0.0387  
+w_bn256_s3k8          0.0321    0.0341    0.0352    0.0374    0.0393    0.0401    0.0441    0.0490  
+wA_bn256_s4k8         0.0291    0.0297    0.0298    0.0301    0.0307    0.0316    0.0330    0.0348  
+
+=== 每个 M 的最佳 kernel（含 base 与全部变体；GB/s 按 W+s 字节）===
+M      best                        ms    TFLOPS  W+s GB/s      %HBM
+1      wA_s2k8                 0.0265      6.72    1784.3     53.2%
+2      wA_s2k8                 0.0272     13.12    1742.5     52.0%
+3      wA_s2k8                 0.0274     19.54    1730.2     51.6%
+4      wA_s2k8                 0.0278     25.69    1706.2     50.9%
+6      wA_s3k4                 0.0284     37.71    1669.4     49.8%
+8      wA_s3k4                 0.0286     49.80    1653.5     49.3%
+12     wA_s3k4                 0.0303     70.54    1561.4     46.6%
+16     wA_s3k4                 0.0309     92.31    1532.5     45.7%
+汇总（8 个 M 点求和）：best=0.2270 ms   base48=0.0000 ms   best/base=inf
