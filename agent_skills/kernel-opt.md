@@ -326,3 +326,21 @@ scripts/lab.sh status
   但每 item 的 `atomicAdd` 归约字节 ∝ `M×N×(N/BN)×(nblk/CHUNK)` 随 `M` 线性涨。交叉点：
   `M≤16` 持久化+细 chunk 赢（~1.02–1.04×），`M≥32` baseline 粗 chunk 赢。扫参必须跨过
   「归约流量 ≈ 权重流量」的拐点。
+- **算子的形状要跟着 work point 走，别一把 m64 打天下**（44 篇）：W4A16 的
+  `AI(M)=2MNK/(0.53NK)≈3.76M`，bf16 TC ridge≈295 → 只有 `M≳78` 才轮到张量核；
+  `wgmma.m64n128k16` 在 M=1 白算 63/64 行，kernel 退化成延迟受限（DRAM 11–18%）。
+  M=1 换「每 warp 一行 + warp 内沿 K 并行 + `x`/scale 常驻 smem + `shfl` 归约 + `__ldcs`」
+  的 GEMV：**0.0284ms / 1566.6 GB/s / 49.7% HBM，比 tensor-core M=1 快 2.81×**。
+  先算 `AI` 再选 GEMM/GEMV，是比调 tile 更值钱的一步。
+- **ncu 报 shared bank conflict 多 ≠ conflict 是瓶颈**（44 篇）：GEMV 里 conflicts 210 万
+  （70% wavefront 多余）、ncu 给「Est. Speedup 59%」，但按经典办法做免冲突置换布局后
+  conflicts 降到 5.4 K、**反而慢 6%**——因为拆散了 4 个连续 16B 读的局部性，而真正的墙是
+  **ALU pipe 64.9%**（反量化的移位/掩码/I2F），LSU 很闲。**先看 SOL 里哪级 pipe 到顶，
+  再决定动不动访存**；「Est. Speedup」只是上界提示。
+- **低比特反量化别轻易用 smem LUT 替 ALU**（44 篇）：int4 的 `(nib)-8`+`I2F` 是 3 串 ALU，
+  但 256 项 `float2` LUT 的随机 8B 读每 lane 命中 2 个 bank、warp 冲突爆炸 → 实测
+  **慢 68%**（16 项一维 LUT 也慢 14%）。用 LUT 把 ALU 成本换成访存成本，只在访存不冲突
+  且余量大时才划算。
+- **`__int_as_float(0x4B000000|n)=2^23+n` 位技巧在量纲悬殊时不可用**（44 篇）：GEMV 里
+  每项乘积被放大到 ~2e6、累加 ~7e7，f32 ulp≈8，真答案只有个位数 → **灾难性抵消**
+  （err 15% FAIL）。换小 bias(16) 又因尾数 LSB≠1 不成立。只有被乘数与结果同量级才安全。

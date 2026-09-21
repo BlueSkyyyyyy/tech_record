@@ -1,0 +1,53 @@
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function '_Z11gemv_kernelILi4ELi4ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii' for 'sm_90'
+ptxas info    : Function properties for _Z11gemv_kernelILi4ELi4ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 206 registers, used 1 barriers
+ptxas info    : Compile time = 374.560 ms
+ptxas info    : Compiling entry function '_Z11gemv_kernelILi4ELi2ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii' for 'sm_90'
+ptxas info    : Function properties for _Z11gemv_kernelILi4ELi2ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 121 registers, used 1 barriers
+ptxas info    : Compile time = 207.017 ms
+ptxas info    : Compiling entry function '_Z11gemv_kernelILi8ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii' for 'sm_90'
+ptxas info    : Function properties for _Z11gemv_kernelILi8ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 78 registers, used 1 barriers
+ptxas info    : Compile time = 287.185 ms
+ptxas info    : Compiling entry function '_Z11gemv_kernelILi4ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii' for 'sm_90'
+ptxas info    : Function properties for _Z11gemv_kernelILi4ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 55 registers, used 1 barriers
+ptxas info    : Compile time = 144.554 ms
+ptxas info    : Compiling entry function '_Z11gemv_kernelILi2ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii' for 'sm_90'
+ptxas info    : Function properties for _Z11gemv_kernelILi2ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 38 registers, used 1 barriers
+ptxas info    : Compile time = 65.454 ms
+ptxas info    : Compiling entry function '_Z11gemv_kernelILi1ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii' for 'sm_90'
+ptxas info    : Function properties for _Z11gemv_kernelILi1ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 34 registers, used 1 barriers
+ptxas info    : Compile time = 38.684 ms
+ptxas info    : Compiling entry function '_Z21wread_roofline_kernelPKhPKfPfii' for 'sm_90'
+ptxas info    : Function properties for _Z21wread_roofline_kernelPKhPKfPfii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers
+ptxas info    : Compile time = 3.670 ms
+ptxas info    : Compiling entry function '_Z17gemv_naive_kernelPK13__nv_bfloat16PKhPKfPfii' for 'sm_90'
+ptxas info    : Function properties for _Z17gemv_naive_kernelPK13__nv_bfloat16PKhPKfPfii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 28 registers, used 0 barriers
+ptxas info    : Compile time = 5.306 ms
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A16 GEMV: M=4 N=17408 K=5120 group=128
+FLOPs = 0.713 GFLOP ; W_int4 = 44.6 MB ; scales = 2.8 MB ; W+scale = 47.3 MB
+
+  [gemv_r4_mt4           ] max_abs_err=2.688e-07 (ref~2.70) OK
+gemv_r4_mt4               0.0593 ms     12.03 TFLOPS ( 1.2% bf16)  W-bw   751.9 GB/s  W+s   798.9 (23.8% HBM)
