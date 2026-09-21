@@ -22,7 +22,9 @@
 | 独立 epilogue kernel | float4 grid-stride | **~3979 GB/s** | >100%（数据驻 L2） | — | 14 |
 | MLA 注意力（absorb, prefill） | **单 kernel 融合 + 共享 P（f4s）** | **170.11 TFLOPS** @Sq=Sk=1024 | 17.2% (989) | FlashMLA 640（sparse prefill, H800）→ 差距 3.76× | 16-mla-fused |
 | MLA 注意力 · 长上下文 | 同上 f4s | **184.67 TFLOPS** @Sq=1024,Sk=4096 | 18.7% | 相对 15 三 kernel 5.78× | 16-mla-fused |
-| DSA 稀疏注意力 | *待填（17）* | — | — | 自研 kernel | — |
+| DSA lightning indexer (H^I=64, d=128) | TC mma + head 合并 HG=2 + BN=128 | **311.0 TFLOPS** @S=32768 | 31.4% (989) | 标量 0.93 → 335× | 18-dsa-sparse |
+| DSA exact top-k (k=1024) | radix-select 4 趟 + per-warp 直方图（流式） | **6.75 ms** @S=32768 | 95% HBM（等效 5 趟 21.5GB/6.75ms） | 单直方图 26.7ms → 3.96× | 18-dsa-sparse |
+| DSA 端到端（indexer+topk+稀疏 MLA 估算） | 同上 + 稀疏 MLA 按稠密实测吞吐折算 | **18.6× vs 稠密 MLA** @S=65536 | — | 理论上限 ~30×（indexer O(S²) 封顶） | 18-dsa-sparse |
 | MoE grouped GEMM | *待填（21）* | — | — | DeepGEMM | — |
 | FP8 GEMM | *待填（22/23）* | — | — | DeepGEMM | — |
 | MuonClip NS 正交化（N=4096） | 自研 GEMM 链 + 融合 epilogue（cfg1） | **244 TFLOPS** | 24.7% (989) | cuBLAS 链 529（53.5%）→ 差距 2.17× | 17-muonclip-ns |
@@ -104,6 +106,9 @@
 | G5 | **累加器 C 布局 == PV 的 A 片段布局** | flash-attention / MLA 单 kernel 融合 | `mma.m16n8k16` 的 fp32 累加器 `c0,c1`（行 `lane/4`）与 A 片段 `a0,a1` 位置完全一致；相邻两个 n8 tile 的累加器拼成 PV 的 k16 A 片段 | `16/mla_fused.cu`（`pack2`） | P 转换**零 shuffle**，只 4 次 f32→bf16 pack；三 kernel 115.6→融合 146.5（`f4`，dup2） | n8 tile 必须**相邻**成对（覆盖 KV `[0,8)`+`[8,16)`）；online softmax 的行归约只需 4-lane shuffle |
 | G6 | 用 smem 共享 P 消 QK 重复（dup） | DV 必须切分时的 MLA/GQA | `O[16,DV]` fp32 寄存器墙逼着按 DV 切 warp，代价是 QKᵀ 被重复算 `dup=DV/DVW` 次。让同 row 组的 warp **按 KV 对半分工**，行 max/sum 用 tiny smem 交换、P(bf16) 写 smem 共享读 | `16/mla_fused.cu`（`mla_shared_kernel`） | `f4`(dup2) 146.5 → `f4s`(dup1) **170.1 TFLOPS（+16%）**；P 共享只花 ~8KB smem | 别把 DV 切太细：`f2s`(DVGRP=4) 虽 dup=1，但 Q 被 4 个 warp 各读一遍，反而比 `f4s` 慢（113.9 vs 170.1） |
 | G7 | wgmma 的胜负手是 **smem swizzle，不是指令** | Hopper wgmma | `wgmma` 从描述符读 A/B，但无 swizzle 的 K-major `INTERLEAVE` 布局会让 smem store 撞 bank、tensor 读操作数低效 | `16/mla_wgmma.cu` | mma 融合 170 → wgmma(INTERLEAVE) 只有 **84.6 TFLOPS（更慢）**；ncu：L1/TEX 86.4%、store bank conflict 2.7e8、tensor pipe 13.1% | 必须用 **SW128 swizzle**（描述符 layout_type=1 + `base_offset` 相位）；先做小 GEMM 冒烟测试验证描述符（见 `16/wgmma_helpers.cuh`） |
+| G8 | **DSA indexer = H^I 个小 GEMM 共享同一个 K**：head 合并（HG）消 K 的重复 `ldmatrix` | DSA lightning indexer | $I_{t,s}=\sum_j w_{t,j}\mathrm{ReLU}(q_{t,j}\cdot k_s)$，$k_s$ 与 head 无关，所以每个 head 都把整个 K tile 重读一遍 → L1 85% 的元凶；把 HG 个 head 一起算，每个 `(kx,nb)` 只加载一次 B，K 的 L1 流量 ÷HG | `18-dsa-sparse/dsa.cu`（`indexer_kernel<BM,BN,W,HG>`） | S=16384：HG=1/BN=64 222 → HG=2/BN=64 252 → **HG=2/BN=128 287–311 TFLOPS**（+40%）；标量基线 0.93，总计 ~330× | HG 不能贪：HG=4/BN=128 寄存器顶到 255 + spill → 崩到 **69 TFLOPS**；每改一次都 `-Xptxas -v` 核对，`ncu` 看 L1/TEX% 是否真的降了 |
+| G9 | 把 head 循环放对网格顺序：**`grid.x=KV` 让 Q tile 常驻 L2** | 任何 $O(S^2)$ 的 QK 类 kernel | 若 `grid.x=query`，所有 query block 在同一 KV 轮次同时活跃，Q 工作集 = 全量 Q > L2；Q tile 被反复从 DRAM 拉 | `18-dsa-sparse/dsa.cu` | S=32768：`grid.x=query` **69.7 TFLOPS** → 交换后 **214 TFLOPS（3.1×）** | 判据：ncu `DRAM Throughput` 高而 L1/L2 不高时，先怀疑 block 调度顺序而非算法 |
+| G10 | exact top-k 用 **radix-select + per-warp 私有直方图**；别默认整行塞 smem | DSA / MoE 路由 / 采样 top-k | 只要第 k 大阈值，不需全排序：保序变换成 uint32，逐 8-bit 趟统计直方图定位阈值（4 趟），再收集 `>` + 补齐 `=`。独占瓶颈是 shared `atomicAdd` 竞争 → 每 warp 私有直方图 | `18-dsa-sparse/dsa.cu`（`topk_radix_*_kernel`） | S=32768：单直方图 26.7ms → **per-warp 6.75ms（3.96×，等效 3.2TB/s / 95% HBM）** | ①保序变换的逆**不自逆**（mask 依赖符号位）：高位置位取低 31 位、否则取反，写错则 `out_val` 全错；②整行塞 smem 在长序列反而更慢（S=32768：8.23 vs 6.75ms）——动态 smem 把 occupancy 锁成 1 block/SM；先算 occupancy 再决定 |
 
 ### H. 优化器 / MuonClip（17）
 
@@ -121,7 +126,7 @@
 | # | 模型 | 算子 | 关键 shape/参数 | 手段与结论 | 代码 | 实测 |
 |---|---|---|---|---|---|---|
 | M1 | DeepSeek-V3/V4、Kimi-K2.6 | MLA | V3: H=128,DC=512,DR=64,DV=512（absorb 576/512）；V4-Pro: H=128,DC=448,rope64；V4.1: H=64；Kimi: H=64,qk=192,v=128,kv_lora=512 | 吸收成 MQA。15：TC 三 kernel 115.6（S=1024）。**16：单 kernel 融合**（online softmax 进 QK epilogue、C→A 零 shuffle、KV 常驻 smem）；用 smem 共享 P 消 QK 重复 → `f4s` **170.1**（S=1024）/ **184.7**（Sk=4096）；DRAM 仅 7%，瓶颈=L1 的 ldmatrix + 12.5% occ；距 FlashMLA 640 ~3.5× | `15-mla-attn/mla_attn.cu`、`16-mla-fused/mla_fused.cu` | 15 tc S=1024/2048/4096: 2.53/9.41/36.58 ms；16 f4s: 1.72/3.18/6.33 ms |
-| M2 | DeepSeek-V4 | DSA 稀疏注意力 | index 64×128, topk=1024, compress 4/128/0 | *待填（17）* | — | — |
+| M2 | DeepSeek-V4-Pro / V4.1 | DSA 稀疏注意力（一）：indexer + top-k | index_n_heads=64(V4-Pro)/32(V4.1), index_head_dim=128, index_topk=1024(V4-Pro)/512(V4.1) | 18：indexer 是「H^I 个小 GEMM 共享 K」，TC+head 合并 HG=2 达 **287–311 TFLOPS（31% 峰值）**；exact top-k 用 radix-select + per-warp 直方图 **6.75ms @S=32768**。DSA 端到端（indexer+topk+稀疏 MLA 估算）相对稠密 MLA：4k 2.9× / 16k 9.7× / 32k 14.8× / **64k 18.6×**，上限 ~30×。ncu：indexer DRAM 2.9%、L1 62%；topk IPC 3.35、issue 83% | `18-dsa-sparse/dsa.cu` | indexer S=16384 HG2/BN128 15.32ms；topk S=32768 6.75ms；dense MLA f4s S=65536 6914.8ms |
 | M3 | DeepSeek-V4 | MoE | 384 routed+1 shared, top-6, inter=3072 | *待填（20/21/29）* | — | — |
 | M4 | DeepSeek-V4 | FP8 GEMM | e4m3 + ue8m0, block 128×128 | *待填（22/23）* | — | — |
 | M5 | Kimi-K2.6（hidden=7168/18432, moe=2048, 384 experts） | MuonClip / Newton–Schulz 正交化 | 5 步 NS，`30N³`；测 N=2048/4096/8192 | 还原成 15 个 GEMM 的链式算子。17：自研 `mma` GEMM + 融合 `f·x+g` epilogue，**244 TFLOPS（N=4096, 24.7%）**；单 GEMM 269 vs cuBLAS 883（30.5%）；端到端 cuBLAS 链 529（2.17×）。ncu：L2 76%、occ 24%、DRAM 13% | `17-muonclip-ns/ns_muonclip.cu` | 17 N=2048/4096/8192: 1.31/8.44/65.4 ms |

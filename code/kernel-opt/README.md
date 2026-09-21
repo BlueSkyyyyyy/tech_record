@@ -29,6 +29,7 @@
 | `15-mla-attn/` | 15 MLA 注意力（一） | MLA 吸收成 MQA：naive/head_reuse/smem 标量版（15~19 TFLOPS，算力受限）+ TC 三 kernel（115.6 TFLOPS），扫 S=1k/2k/4k |
 | `16-mla-fused/` | 16 MLA 注意力（二） | 单 kernel 融合：online softmax + 累加器 C→A 零 shuffle + KV 常驻 smem；`f4s` 共享 P 消重复 **170.1 TFLOPS**（Sk=4096 → 184.7）；附 `wgmma` 尝试（84.6，暴露 swizzle 才是胜负手）与描述符冒烟测试 |
 | `17-muonclip-ns/` | 17 Muon/MuonClip NS 正交化 | 5 步 NS = 15 个 GEMM（`30N³`）：自研 `mma` GEMM + 融合 `f·x+g` epilogue（**244 TFLOPS**，N=4096）；对照 cuBLAS 链（529）、fp32 参考；单 GEMM 269 vs cuBLAS 883；ncu 定位 L2/occupancy 瓶颈 |
+| `18-dsa-sparse/` | 18 DSA 稀疏注意力（一） | DeepSeek-V4 lightning indexer（H^I=64, d=128）打分 + exact top-k：TC + head 合并 HG=2 + BN=128 → **287–311 TFLOPS**（约 330× 标量）；radix-select + per-warp 直方图 top-k → **6.75ms @S=32768**（等效 3.2TB/s）；DSA 预算 64k 相对稠密 MLA **18.6×**；含 indexer/topk 的 ncu 与稠密 MLA 对照输出 |
 
 ## 怎么跑
 

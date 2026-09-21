@@ -1,0 +1,31 @@
+    Section: GPU Speed Of Light Throughput
+    Metric Name             Metric Unit Metric Value
+    DRAM Frequency                  Ghz         2.62
+    Memory Throughput                 %        48.42
+    DRAM Throughput                   %        25.61
+    Duration                         ms         6.75
+    L1/TEX Cache Throughput           %        48.54
+    L2 Cache Throughput               %        43.23
+    Compute (SM) Throughput           %        83.43
+    Metric Name          Metric Unit Metric Value
+    Executed Ipc Active   inst/cycle         3.35
+    Executed Ipc Elapsed  inst/cycle         3.34
+    Issue Slots Busy               %        83.43
+    Metric Name                             Metric Unit Metric Value
+    Memory Throughput                           Gbyte/s       858.57
+    L1/TEX Hit Rate                                   %         3.02
+    L2 Hit Rate                                       %        69.66
+    Metric Name                          Metric Unit    Metric Value
+    Registers Per Thread             register/thread              31
+    Metric Name                     Metric Unit Metric Value
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            2
+    Block Limit Shared Mem                block            2
+    Block Limit Warps                     block            2
+    Theoretical Occupancy                     %          100
+    Achieved Occupancy                        %        99.33
+    Metric Name                Metric Unit Metric Value
+    Average DRAM Active Cycles       cycle   4529456.60
+    Total DRAM Elapsed Cycles        cycle    707410176
+    Metric Name               Metric Unit Metric Value

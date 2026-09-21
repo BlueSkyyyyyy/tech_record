@@ -1,0 +1,20 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+DSA lightning indexer + top-k: S=4096  HI=64 D=128 topk=1024
+indexer FLOPs = 274.88 GFLOP ; scores = 0.07 GB
+
+[indexer TC ] max_abs_err=2.861e-06 (ref~18.150) OK
+[indexer BM=64 HG=1 BN=64 W=4]   1.3812 ms    199.02 TFLOPS (20.12% peak)
+[indexer BM=64 HG=2 BN=64 W=4]   1.2065 ms    227.83 TFLOPS (23.04% peak)
+[indexer BM=64 HG=1 BN=128 W=4]   1.2738 ms    215.79 TFLOPS (21.82% peak)
+[indexer BM=64 HG=2 BN=128 W=4]   1.0382 ms    264.76 TFLOPS (26.77% peak)
+[indexer BM=64 HG=4 BN=128 W=4]   4.0640 ms     67.64 TFLOPS ( 6.84% peak)
+[indexer scal] 296.7417 ms      0.93 TFLOPS
+[topk check ] selected set vs CPU exact top-1024: OK
+[topk smem  ]   0.6054 ms     110.9 GB/s(scores)  (radix-select, row in smem)
+[topk global]   0.5376 ms     124.8 GB/s(scores)  (5 passes streamed)

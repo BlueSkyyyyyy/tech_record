@@ -1,0 +1,25 @@
+##### dense MLA f4s  S=1024  H=128 #####
+MLA fused attention (MQA): H=128 Sq=1024 Sk=1024  DC=512 DR=64 DV=512
+FLOPs = 292.06 GFLOP   (KV tile smem 需 Sq%BM==0, Sk%KT==0)
+  [f4s   ] max_abs_err=9.100e-06 (ref~0.006) OK
+f4s      BM=64  DVGRP=2 KT=64  warps=8     1.7132 ms    170.48 TFLOPS ( 17.2% peak, QK dup 1x)
+##### dense MLA f4s  S=4096  H=128 #####
+MLA fused attention (MQA): H=128 Sq=4096 Sk=4096  DC=512 DR=64 DV=512
+FLOPs = 4672.92 GFLOP   (KV tile smem 需 Sq%BM==0, Sk%KT==0)
+  [f4s   ] max_abs_err=4.306e-06 (ref~0.003) OK
+f4s      BM=64  DVGRP=2 KT=64  warps=8    24.3484 ms    191.92 TFLOPS ( 19.4% peak, QK dup 1x)
+##### dense MLA f4s  S=16384  H=128 #####
+MLA fused attention (MQA): H=128 Sq=16384 Sk=16384  DC=512 DR=64 DV=512
+FLOPs = 74766.79 GFLOP   (KV tile smem 需 Sq%BM==0, Sk%KT==0)
+  [f4s   ] max_abs_err=2.378e-06 (ref~0.002) OK
+f4s      BM=64  DVGRP=2 KT=64  warps=8   437.5148 ms    170.89 TFLOPS ( 17.3% peak, QK dup 1x)
+##### dense MLA f4s  S=32768  H=128 #####
+MLA fused attention (MQA): H=128 Sq=32768 Sk=32768  DC=512 DR=64 DV=512
+FLOPs = 299067.16 GFLOP   (KV tile smem 需 Sq%BM==0, Sk%KT==0)
+  [f4s   ] max_abs_err=2.124e-06 (ref~0.001) OK
+f4s      BM=64  DVGRP=2 KT=64  warps=8   1737.5756 ms    172.12 TFLOPS ( 17.4% peak, QK dup 1x)
+##### dense MLA f4s  S=65536  H=128 #####
+MLA fused attention (MQA): H=128 Sq=65536 Sk=65536  DC=512 DR=64 DV=512
+FLOPs = 1196268.65 GFLOP   (KV tile smem 需 Sq%BM==0, Sk%KT==0)
+  [f4s   ] max_abs_err=1.222e-06 (ref~0.001) OK
+f4s      BM=64  DVGRP=2 KT=64  warps=8   6914.7664 ms    173.00 TFLOPS ( 17.5% peak, QK dup 1x)
