@@ -1,0 +1,106 @@
+moe_pb_launch.h(135): warning #550-D: variable "max_err" was set but never used
+      double max_err = 0, max_ref = 0, max_rel = 0;
+             ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+==PROF== Connected to process 163095 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/31-moe-grouped-pb/moe_pb.out)
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+=== MoE grouped GEMM (fp8 e4m3, per-block 128x128 scale) ===
+config: tokens=32768 topk=6 G=384  K=7168 N=3072  KBLK=56
+prefill(contiguous): expected_m/expert=512  M_total=219264 (aligned)  sum_actual=195475
+  padding waste = 10.8%
+
+-- B) grouped contiguous · per-block 128x128（单 launch，B 行坐标=group*N+n）--
+==PROF== Profiling "moe_pb_kernel": 0%....50%....100% - 12 passes
+  [pb128x128s3       ] max_rel_err=1.369e-04 (ref~14.1) OK
+pb128x128s3           12.1198 ms    796.75 TFLOPS ( 40.3% of fp8 peak)  B-read  697.7 GB/s
+
+-- B2) 同二进制 per-tensor 对照（PERBLOCK=false，不折算）--
+==PROF== Disconnected from process 163095
+[163095] moe_pb.out@127.0.0.1
+  void moe_pb_kernel<128, 128, 128, 3, 0, 1, 1>(CUtensorMap_st, CUtensorMap_st, float *, const int *, int, int, int, int, float, const float *, const float *, int, int) (24, 1713, 1)x(288, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                         0
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active              %        46.12
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         1.16
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         2.03
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.06
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         0.79
+    ------------------------------------------------------------------------- ----------- ------------
+
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.76
+    Elapsed Cycles                cycle     19654722
+    Memory Throughput                 %        55.75
+    DRAM Throughput                   %        48.66
+    Duration                         ms        11.15
+    L1/TEX Cache Throughput           %        44.79
+    L2 Cache Throughput               %        74.76
+    SM Active Cycles              cycle  19360939.44
+    Compute (SM) Throughput           %        45.63
+    ----------------------- ----------- ------------
+
+    OPT   This workload exhibits low compute throughput and memory bandwidth utilization relative to the peak           
+          performance of this device. Achieved compute throughput and/or memory bandwidth below 60.0% of peak           
+          typically indicate latency issues. Look at Scheduler Statistics and Warp State Statistics for potential       
+          reasons.                                                                                                      
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %         0.18
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Tbyte/s         1.63
+    Mem Busy                                          %        52.20
+    Max Bandwidth                                     %        55.75
+    L1/TEX Hit Rate                                   %        85.26
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector     84200220
+    L2 Hit Rate                                       %        60.43
+    Mem Pipes Busy                                    %        27.40
+    --------------------------------------- ----------- ------------
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            1
+    Block Limit Shared Mem                block            1
+    Block Limit Warps                     block            7
+    Theoretical Active Warps per SM        warp            9
+    Theoretical Occupancy                     %        14.06
+    Achieved Occupancy                        %        13.90
+    Achieved Active Warps Per SM           warp         8.90
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 85.94%                                                                                    
+          The 2.25 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (14.1%) is limited by the number of required      
+          registers, and the required amount of shared memory.                                                          
+

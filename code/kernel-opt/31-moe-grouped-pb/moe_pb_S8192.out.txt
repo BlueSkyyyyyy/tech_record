@@ -1,0 +1,49 @@
+moe_pb_launch.h(135): warning #550-D: variable "max_err" was set but never used
+      double max_err = 0, max_ref = 0, max_rel = 0;
+             ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+=== MoE grouped GEMM (fp8 e4m3, per-block 128x128 scale) ===
+config: tokens=8192 topk=6 G=384  K=7168 N=3072  KBLK=56
+prefill(contiguous): expected_m/expert=128  M_total=72192 (aligned)  sum_actual=48728
+  padding waste = 32.5%
+
+-- B) grouped contiguous · per-block 128x128（单 launch，B 行坐标=group*N+n）--
+  [pb128x128s2       ] max_rel_err=3.601e-04 (ref~15.9) OK
+pb128x128s2            5.1617 ms    615.96 TFLOPS ( 31.1% of fp8 peak)  B-read 1638.2 GB/s
+  [pb128x128s3       ] max_rel_err=3.601e-04 (ref~15.9) OK
+pb128x128s3            4.6195 ms    688.24 TFLOPS ( 34.8% of fp8 peak)  B-read 1830.4 GB/s
+  [pb128x128s4       ] max_rel_err=3.601e-04 (ref~15.9) OK
+pb128x128s4            4.4925 ms    707.70 TFLOPS ( 35.8% of fp8 peak)  B-read 1882.2 GB/s
+  [pb64x128s3        ] max_rel_err=3.601e-04 (ref~15.9) OK
+pb64x128s3             5.4156 ms    587.07 TFLOPS ( 29.7% of fp8 peak)  B-read 1561.4 GB/s
+  [pb64x128s4        ] max_rel_err=3.601e-04 (ref~15.9) OK
+pb64x128s4             5.3807 ms    590.88 TFLOPS ( 29.9% of fp8 peak)  B-read 1571.5 GB/s
+  [pb64x128s3x2      ] max_rel_err=3.601e-04 (ref~15.9) OK
+pb64x128s3x2           5.4669 ms    581.56 TFLOPS ( 29.4% of fp8 peak)  B-read 1546.7 GB/s
+  [pb64x128s4x2      ] max_rel_err=3.601e-04 (ref~15.9) OK
+pb64x128s4x2           6.8087 ms    466.95 TFLOPS ( 23.6% of fp8 peak)  B-read 1241.9 GB/s
+
+-- B2) 同二进制 per-tensor 对照（PERBLOCK=false，不折算）--
+  [pt128x128s2       ] max_rel_err=5.021e-02 (ref~15.0) FAIL
+pt128x128s2            4.6154 ms    688.86 TFLOPS ( 34.8% of fp8 peak)  B-read 1832.1 GB/s
+  [pt128x128s3       ] max_rel_err=5.021e-02 (ref~15.0) FAIL
+pt128x128s3            4.0895 ms    777.44 TFLOPS ( 39.3% of fp8 peak)  B-read 2067.7 GB/s
+  [pt128x128s4       ] max_rel_err=5.021e-02 (ref~15.0) FAIL
+pt128x128s4            4.6687 ms    680.99 TFLOPS ( 34.4% of fp8 peak)  B-read 1811.1 GB/s
+  [pt64x128s3        ] max_rel_err=5.021e-02 (ref~15.0) FAIL
+pt64x128s3             5.1885 ms    612.77 TFLOPS ( 31.0% of fp8 peak)  B-read 1629.7 GB/s
+
+-- C) grouped masked (decode): G=384 max_m=128 expected_m=32 --
+  [maskedPB128x128s3 ] max_rel_err=4.077e-03 (ref~14.5) OK
+maskedPB128x128s3      3.2524 ms    165.85 TFLOPS (  8.4% of fp8 peak)  B-read 2599.8 GB/s
+  [maskedPB64x128s3  ] max_rel_err=4.077e-03 (ref~14.5) OK
+maskedPB64x128s3       2.9523 ms    182.70 TFLOPS (  9.2% of fp8 peak)  B-read 2864.1 GB/s
