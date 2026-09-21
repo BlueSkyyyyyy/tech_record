@@ -96,6 +96,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 18. [DSA 稀疏注意力（一）：lightning indexer 与 exact top-k](content/posts/cuda-kernel-opt-18-dsa-indexer-topk/index.md)
 19. [DSA 稀疏注意力（二）：稀疏 MLA 消费端（gather top-k + cp.async 流水）](content/posts/cuda-kernel-opt-19-dsa-sparse-attn/index.md)
 20. [wgmma + SW128 swizzle：把 MLA 的 smem 布局换对](content/posts/cuda-kernel-opt-20-mla-wgmma-sw128/index.md)
+21. [MLA 极限冲刺（二）：修好 V 转置访存 + cp.async 预取 K](content/posts/cuda-kernel-opt-21-mla-wgmma-pipe/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 

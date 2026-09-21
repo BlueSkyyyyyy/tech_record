@@ -1,0 +1,266 @@
+=== ncu: mla_pipe.cu (coalesced V only), Sq=1024 H=128 Sk=4096 ===
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+MLA wgmma pipe (coalesced V): H=128 Sq=1024 Sk=4096  (BM=64 KT=64 NWG=2)
+FLOPs = 1168.23 GFLOP
+
+  [sw128 ] max_abs_err=4.506e-06 (ref~0.003) OK
+wgmma_pipe 377.3978 ms      3.10 TFLOPS (  0.3% peak, QK dup 2x)
+[108676] mla_pipe.out@127.0.0.1
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.30
+    gpu__time_duration.sum                                                                ms         7.40
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        46.01
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        18.97
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.51
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.28
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.50
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.29
+    gpu__time_duration.sum                                                                ms         7.39
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        46.16
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.23
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.59
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.37
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.53
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.30
+    gpu__time_duration.sum                                                                ms         7.31
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        46.01
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.63
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.51
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.28
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.51
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.33
+    gpu__time_duration.sum                                                                ms         7.32
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        45.83
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.46
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.42
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.18
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.51
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.32
+    gpu__time_duration.sum                                                                ms         7.33
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        45.72
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.14
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.37
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.12
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.33
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.50
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.26
+    gpu__time_duration.sum                                                                ms         7.35
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        46.16
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.59
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.60
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.37
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.49
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.28
+    gpu__time_duration.sum                                                                ms         7.27
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        45.98
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.83
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.50
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.26
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.54
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.32
+    gpu__time_duration.sum                                                                ms         7.32
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        45.91
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.39
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.47
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.23
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.50
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.33
+    gpu__time_duration.sum                                                                ms         7.27
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        45.87
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.74
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.45
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.21
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.33
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.52
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.29
+    gpu__time_duration.sum                                                                ms         7.32
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        46.06
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.67
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.54
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.32
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.51
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.33
+    gpu__time_duration.sum                                                                ms         7.32
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        45.91
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.40
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.47
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.23
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.51
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.30
+    gpu__time_duration.sum                                                                ms         7.32
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        45.96
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.43
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.50
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.26
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.50
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.33
+    gpu__time_duration.sum                                                                ms         7.31
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        45.74
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.34
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.37
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.13
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.33
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.50
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+
+  mla_pipe_kernel(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %         2.27
+    gpu__time_duration.sum                                                                ms         7.34
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        45.84
+    launch__occupancy_limit_shared_mem                                                 block            1
+    launch__registers_per_thread                                             register/thread          212
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                      %        19.36
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                        %        24.42
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        27.18
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         1.33
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         2.50
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                       inst         1.05
+    ------------------------------------------------------------------------ --------------- ------------
+

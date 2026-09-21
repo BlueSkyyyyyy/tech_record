@@ -32,6 +32,7 @@
 | `18-dsa-sparse/` | 18 DSA 稀疏注意力（一） | DeepSeek-V4 lightning indexer（H^I=64, d=128）打分 + exact top-k：TC + head 合并 HG=2 + BN=128 → **287–311 TFLOPS**（约 330× 标量）；radix-select + per-warp 直方图 top-k → **6.75ms @S=32768**（等效 3.2TB/s）；DSA 预算 64k 相对稠密 MLA **18.6×**；含 indexer/topk 的 ncu 与稠密 MLA 对照输出 |
 | `19-dsa-sparse-attn/` | 19 DSA 稀疏注意力（二） | 稀疏 MLA 消费端：CTA = 1 token × $B_H$ head，逐 key gather top-k 的 `c_kv`+`k_rope`、尾部 tile 掩码、共享 P；`cp.async` 双缓冲把 gather 延迟藏起来（`long_scoreboard` 4.56→1.46）。**132–137 TFLOPS**（~75% 稠密 f4s 效率）；sparse vs 稠密 attention 4k **3.0×** → 64k **48.6×**；DSA 端到端 4k **2.5×** → 64k **17.3×**；距 FlashMLA sparse prefill 640 约 4.8× |
 | `20-mla-wgmma-sw128/` | 20 wgmma + SW128 swizzle | 把 `wgmma` 操作数的 smem 布局从 `INTERLEAVE` 换成 **K-major SW128**（`layout_type=1`，16B 列 `c'=c^r`）。`wgmma_sw128.cuh` 描述符/布局/步进；冒烟 GEMM **132 TFLOPS @4096³**；QK576/PV 定点测试；`bf16_store_pitfall.cu` 复现 nvcc 合并 bf16 存储的坑。融合 MLA **105.3/112.9/119.9 TFLOPS**（Sk=1k/2k/4k），比 INTERLEAVE 84.6 **+24.5%**；ncu 指出剩余瓶颈是 1 CTA/SM + 单缓冲 |
+| `21-mla-wgmma-pipe/` | 21 MLA 极限冲刺（二） | ① **V 转置访存合并**（迭代顺序 `dv` 最快，`l1tex` 73%→46%，105.3→142.3）；② **`cp.async` 单缓冲预取下一块 K**（K 生命周期早于 PV，同一 buffer 边算边覆盖，`long_scoreboard` 2.50→1.42）→ **159.8/193.2/198.8 TFLOPS**（Sk=1k/4k/8k），Sk≥4096 反超 `f4s`。附 `mn128.cuh`/`mn_test2.cu` 记录 MN-major（免转置）描述符失败尝试 |
 
 ## 怎么跑
 
