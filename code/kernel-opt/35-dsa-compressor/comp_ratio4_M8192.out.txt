@@ -1,0 +1,24 @@
+compressor.cu(241): warning #177-D: variable "COFF" was declared but never referenced
+    constexpr int COFF = (RATIO == 4) ? 2 : 1;
+                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z14proj_ws_kernelILi192ELi256ELi64ELi3ELb0EEv14CUtensorMap_stS0_Pviii' in line 13351
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z14proj_ws_kernelILi128ELi256ELi64ELi4ELb0EEv14CUtensorMap_stS0_Pviii' in line 8405
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+DSA Compressor (ratio=4, coff=2): M=8192  Y[M,2048]=X[M,7168]@Wm[2048,7168]^T
+proj FLOPs=240.52 GFLOP  out=[2048, 512]
+
+correctness (M=8): max_abs_err=7.794e-03 (ref~3.398) OK
+
+pool(read Y)                   0.0280 ms    2394.7 GB/s  ( 71.4% of peak)
+proj_ws(256x128x64s4)    0.3669 ms    655.51 TFLOPS  ( 66.3% of bf16 peak)
+end-to-end (proj + pool)    0.3949 ms
+bf16-Y proj   0.3671 ms (655.2 TFLOPS)  pool   0.0198 ms  e2e   0.3869 ms  vs fp32-Y out diff=6.098e-03 (ref~5.12)

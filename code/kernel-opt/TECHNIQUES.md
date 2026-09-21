@@ -67,6 +67,9 @@
 | **融合 add+RMSNorm（H=7168）** | **寄存器缓存 + 融合残差**（`v2r`） | **2923 GB/s** | **87.2% HBM**（ncu DRAM 86.2%） | 5 pass→4 pass；离「2 读 2 写」物理极限很近 | 32-fused-norm |
 | 融合 add+RMSNorm+FP8 per-128 量化 | 寄存器缓存 + shared `atomicMax` amax | 2205 GB/s | 65.8%（ncu DRAM 64.8%、SM 50.2%） | 只省 8B→7B（−12.5%）却新增 amax 归约/打包 → **净变慢** | 32-fused-norm |
 | QK-Norm（Qwen3 40q/8kv×128） | 每 warp 一个 (token,head)，shfl 归约 | 2179 GB/s | 65.0% HBM | warp 只搬 256B、ILP 低；应一 warp 串多个 head | 32-fused-norm |
+| **DSA compressor 合并投影（bf16）** | **`wkv`+`wgate` 拼成 `[2C,D]` 单 GEMM + TMA/wgmma/WS** | **649.8 / 655.2 TFLOPS** @M=32768（ratio=128/4，256×128×64 s4） | **65.7 / 66.3%**（989） | cuBLAS 合并 bf16 809/814 → **~80%**；两次独立 bf16 cuBLAS 0.630/1.398 → 合并 0.595/1.185（**A 只读一遍，5.5%/15%**） | 35-dsa-compressor |
+| DSA compressor 融合池化（online softmax + RMSNorm + RoPE） | 一 block 一窗、线程=列、一 kernel 三合一 | **2812 / 2790 GB/s** @M=32768, 134/268MB | **83.9 / 83.2% HBM**（ncu DRAM 84/87.2%） | eager 池化 0.315 ms → **0.048 ms（~6.6×）** | 35-dsa-compressor |
+| **DSA compressor 端到端** | 合并投影 + 融合池化 | **0.790 / 1.577 ms** @M=32768, ratio=128/4 | e2e 相对官方 eager **2.00× / 2.04×**（M=8192 达 2.39×/2.14×） | 池化环节 ~6.6×；投影 1.70× | 35-dsa-compressor |
 
 > 口径说明：内存算子用有效带宽（读+写按实际最小搬运量）；GEMM 用 `2MNK/时间`；
 > bf16 TC 峰值按 989 TFLOPS、fp32 按 66.9 TFLOPS、FP8 按 1978 TFLOPS；对标一律「同 shape、同口径」。
@@ -273,13 +276,23 @@
 | H4 | 多级 `cp.async` 的 `wait_prior` 参数 | 通用软流水 | N 级流水 prologue 预取 N−1 级、循环每轮再 commit 1 级；等「当前 stage」应 `wait_prior(N-1)` 而非 `N-2` | `17-muonclip-ns/ns_muonclip.cu` | 写成 `N-2` 会过早放行、读到半写 smem（`max_abs_err` 爆到 1e6） | 动态 smem 手搓多级缓冲时 B 的 stage 基址要放在 A 的**全部** stage 之后（`smem + STAGES×BM×LDP`），漏乘 `STAGES` 会 A/B 槽覆盖 |
 
 ### T. fused MoE + FP8 / 权重带宽（34）
-
 | # | 技巧 | 适用场景 | 原理 | 代码 | 实测收益 / 现象 | 坑 |
 |---|---|---|---|---|---|---|
 | T1 | **MoE prefill FFN 的最大杠杆是权重字节，不是 activation** | 判断 MoE 优化方向 | 专家权重流量 $\approx \sum_g \lceil m_g/BM\rceil \cdot N\cdot K$ 字节，与 M 弱相关；activation 只 $\propto M$。30 篇 bf16 时权重 50.7 GB、activation 1.8 GB，融合上限 13%。换 FP8 后权重直接减半 | `34-fused-moe-fp8/moe_fp8.cu` | 端到端相对 bf16（30 篇）**1.92×**（M8k bal）/ **2.21×**（M16k bal）/ **2.06×**（M8k rand）；权重 50.7→25.4 GB | 先算 `E·N·K` vs `M·H` 再决定「省钱还是省搬运」；M 越大权重重读越多，FP8 收益越大 |
 | T2 | **unpermute 融合的收益会随 GEMM 变快而反转** | 把 scatter 归约融进 GEMM epilogue | bf16 时 down GEMM 8.67 ms，散写被藏住；FP8 把 GEMM 压到 3.35 ms 后，`red.global.add.f32` 的 6 路散写把瓶颈从 DRAM 顶成 L2 请求 | `34-fused-moe-fp8/moe_fp8.cu`（`UNPERM` 模板） | 30 篇 bf16 bn128：融合 **+10%**；本篇 FP8：K2f 3.83 vs 3.35+0.54，端到端 **0.96×**；ncu DRAM **73.2%**、L2 **94.4%** | 融合收益不是常数——它取决于被测算子有多快。改精度/工作点后**必须重测**融合，别照搬旧结论 |
 | T3 | **per-block FP8 与「双累加器 SwiGLU」寄存器互斥** | 想把 30 篇的 gate+up 融合叠进 FP8 | `acc`(2×64) + per-block `fin`(2×64) = **256 > 255**（每线程寄存器硬上限），任何调度都救不回来；`BN=256` 让 `NSPLIT=2` 的 `acc`+`fin` 同样翻倍 | `moe_fp8.cu`（负结果） | 双累加器只存在于「per-tensor」；per-block 只能单累加器（31 篇 64+64=128 刚好）。K1 `BN=256` 实测 7.1→**21.7 ms** | 先算 `acc+fin` 的寄存器账：per-block 的 `fin[64]` 是固定开销，凡是想叠加第二个累加器/更大 BN 的融合都要先过这一关 |
 | T4 | **SwiGLU + 动态量化：一行一 block、`float4` 读、warp 内 amax** | epilogue 把 fp32 激活转 fp8 per-128 | per-128 的 `amax` 天然是「一行」内的分段归约：让一个 block 处理一行、8 个 warp 轮流处理 24 个 128-列块，lane 用 `float4` 读 G/U 各 4 列，`__shfl_xor` 5 步归约得 amax，再打包 4 个 fp8 成 `uint32` 写 | `moe_fp8.cu`（`swiglu_quant_v2_kernel`） | 1.07→**0.44 ms**，**3090 GB/s / 92% HBM（2.4×）**；v1 是「128 线程各管 1 列 + block 级 smem 归约」，只有 39% | 别用 block 级 `__syncthreads` 归约 128 个元素的 amax（两次同步 + 标量读）；`float4` + warp shuffle 才打得满带宽 |
+
+### U. DSA compressor / 门控池化（35）
+
+| # | 技巧 | 适用场景 | 原理 | 代码 | 实测收益 / 现象 | 坑 |
+|---|---|---|---|---|---|---|
+| U1 | **把多个共享 A 的投影合并成一个 GEMM** | DSA compressor 的 `wkv`/`wgate`（输入同一 `x`） | 参考实现里两次 `linear` 各读一遍 A；拼成 `Wm=[wkv;wgate]`（`[2C,D]`）后 A 只 TMA 搬一次，N 翻倍 | `35-dsa-compressor/compressor.cu`（`proj_ws_kernel`） | cuBLAS 两次 bf16 GEMM 0.630→合并 **0.595 ms**（ratio128，−5.5%）；ratio4 1.398→**1.185**（−15%） | 输出 `Y[:, :C]=kv`、`Y[:, C:]=score` 的列偏移要写死对齐；合并后 N 变大，别忘 TMA `boxR` 随 `BN` 重建 |
+| U2 | **门控池化可以「一个 block 一个窗、一线程一列」地并行** | Compressor 的 `softmax_i(score)·kv`（每个输出列独立） | softmax 在窗口内 token 维，**列与列互不耦合**；让 block=窗、线程 j=输出列 j，用 online softmax 单趟做完 max/sum/加权，读完全合并 | `compressor.cu`（`pool_kernel`） | 纯访存，**2790–2812 GB/s / 83–84% HBM**（ncu DRAM 87.2%） | `ratio=4` 的 overlap 语义是 8 个 slot：前 `r` 个来自上一窗的前半 dim、后 `r` 个来自本窗后半 dim，首窗前半置 `-inf`；别把 `-inf` 直接喂 `exp`（会 NaN），跳过即可 |
+| U3 | **池化 + RMSNorm + RoPE 融成一个 kernel** | Compressor 输出后处理 | 池化的输出列先经 block 归约做 RMSNorm，再经 smem 交换成对元素做末 64 维 RoPE；省掉中间 `[S/r, r, 2C]` 与 5 次 launch | `compressor.cu`（`pool_kernel`） | eager 的池化+Norm+RoPE ≈0.315 ms（M=32768）→ **0.048 ms（~6.6×）** | RMSNorm 的 block 归约别用 `__shfl_xor_sync(0xffffffff,...)` 在只有 16 个活跃线程时跑（mask 含未参与 lane，UB）；让整 warp 参与、空 lane 补 0 |
+| U4 | **小 N 大 K 的投影是 L2 带宽受限，不是算力受限** | `[2C,D]` 权重只有几十 MB、M 很大 | B 被 `M/BM` 个 m-tile 重读、A 被 `2C/BN` 个 n-tile 重读；`M=32768,BM=256,BN=128` 时 L2 读 ≈ 7.5 GB | `compressor.cu`（ncu） | proj ncu：`L2` **85–88%**、`Compute` 57–59%、`DRAM` 26–29%、occ 28%、No Eligible 86% | 别看到「tensor 没满」就加 occupancy——`256×128 s4`（1 CTA/SM）赢过 `128×128 s2`（2 CTA/SM）13–20%；`BM=256` 把 B 重读砍半才是对的 |
+| U5 | **输出中间张量降精度（fp32→bf16）不划算（负结果）** | 想省 GEMM 写 + 池化读 | Y 从 134 MB 减到 67 MB，但 wgmma 累加器 `f32→bf16` 转换 + 更窄 store 把收益吃回去；且 GEMM 本就被 L2/算力卡住 | `compressor.cu`（`proj_ws_kernel<...,BF16OUT>`） | 池化读确实 0.048→0.038 ms，但投影 0.742→0.749 ms，**e2e 打平略负**（0.790 vs 0.787） | 和 32 篇「FP8 量化融合不划算」同源：**收益只在被优化的那一级真是瓶颈时才兑现** |
+
 
 ---
 
@@ -302,6 +315,7 @@
 | M3h | DeepSeek-V4-Pro | fused MoE expert FFN（FP8 per-block，端到端） | hidden=7168, moe_inter=3072, 384 experts top-6；`e4m3 + ue8m0 + weight_block 128×128`；A 已分组连续（Pp 对齐 BM=128） | 34：把 31 的 grouped per-block GEMM 接进 30 的 MoE FFN。①两版共用同一份 TMA+wgmma+WS 的 per-block grouped kernel，差异只有「down 是否融合 unpermute」；②端到端 **11.80 ms @M8k bal**（bf16 30 篇 22.65 → **1.92×**）、**20.58 @M16k**（45.44 → **2.21×**）、**15.93 @M8k rand**（32.80 → **2.06×**）；③专家权重 50.7→**25.4 GB**；K2 down **88.1% HBM**（ncu DRAM 89.3%）、K1 78%（DRAM 80.1%、long_scoreboard 占 stall 51.3%、occ 13.9%）；④**负结果一**：unpermute 融合在 FP8 下反向（K2f 3.83 vs 3.35+0.54，L2 94.4%、DRAM 73.2%）——GEMM 变快后散写不再被藏住；⑤**负结果二**：per-block + 双累加器 SwiGLU = 256>255 寄存器，`BN=256` 崩到 21.7 ms；⑥swiglu+动态量化从 39%→**92% HBM**（一行一 block/float4/warp amax） | `34-fused-moe-fp8/moe_fp8.cu` | K1 7.07 + swi 0.44 + K2 3.36 + unperm 0.54 + cast 0.15；ncu K1 DRAM 80.1%，K2f L2 94.4% |
 | M6 | Qwen3 / DeepSeek-V4 / GLM | RMSNorm / QK-Norm / 融合残差 / 融合 FP8 量化 | DeepSeek-V4-Pro H=7168 eps=1e-6；Qwen3-8B H=5120, 40q/8kv, head_dim=128；GLM-5.2 H=6144, qk_nope=192 | 32：RMSNorm 每行 14KB，**寄存器缓存整行**消掉 smem 往返（L1 76%→54%）；融合 `x+res` 省 1 个 pass；`M=8192,H=7168` 实测 v1r rmsnorm **2869 GB/s / 85.6%**、v2r add+rmsnorm **2923 GB/s / 87.2%**（ncu DRAM 86.2%）。再叠 FP8 per-128 动态量化**掉到 2205 GB/s / 65.8%**（amax 的 shared atomicMax 成瓶颈）→ 融合只在省 ≥1 个 pass 时才划算。QK-Norm（一 warp 一 head）2179 GB/s / 65% | `32-fused-norm/norm_fused.cu`、`fp8_test*.cu` | v0 1481(44%) → v1 2334(70%) → v1r 2869(86%) → v2r 2923(87%)；v3r 2205(66%)；QK-Norm 2179(65%) |
 | M7 | DeepSeek-V4 / Kimi-K2.6 | MLA 的 V 转置 / MN-major 免转置 | H=128, DC=512, DR=64, DV=512 | 32：CuTe 生成的 canonical MN-major 描述符经定点 GEMM 实测，**硬件忽略 LBO、按 K-major 解释 B**（改 LBO 结果逐位不变），判决 Hopper `wgmma` 免转置 V 不可行；MLA 的 PV 转置不可避免 | `32-mla-tma-v/mn_smoke.cu`、`desc_probe*.cu` | MN 描述符下 err 恒 ~0.15；LBO 64/256/1024 结果相同 |
+| M8 | DeepSeek-V4-Pro | DSA compressor（KV 门控池化，主题 17 剩余） | `hidden=7168, head_dim=512, qk_rope=64`；`compress_ratios` 在 128/4 交替，`coff=1+(ratio==4)`；`ratio=4` overlap 8-slot；`compress_rope_theta=160000`（YaRN factor16/32/1/orig65536） | 35：官方 prefill 语义取自 `/ssd/models/DeepSeek-V4-Pro/inference/model.py:279`。①**合并投影 GEMM**（`wkv`+`wgate` 拼 `[2C,D]`，A 只读一遍）+ TMA/wgmma/WS，bf16 **649.8/655.2 TFLOPS（65.7/66.3%，M=32768）**，为同 shape cuBLAS 合并 bf16（809/814）的 **~80%**；②**融合池化**（online softmax + RMSNorm + RoPE，一线程一列/一 block 一窗）**83–84% HBM**；③端到端相对官方 eager **2.00×（ratio128）/2.04×（ratio4）**（M=8192 达 2.39×/2.14×），其中池化环节 ~6.6×、投影 1.70×；④ncu：投影 **L2 85–88% 受限**（Compute 仅 57–59%、DRAM 26–29%），根因 B 被 `M/BM=128` 个 m-tile 重读（L2 读 ≈7.5GB）；⑤负结果：Y 降 bf16 打平略负；⑥正确性 CPU 全流程对拍 err ~0.2% | `35-dsa-compressor/compressor.cu`、`compressor_ref.py` | e2e M8k/16k/32k：0.195/0.402/0.790 ms（ratio128）、0.395/0.787/1.577 ms（ratio4）；pool 2812/2790 GB/s；config 扫 s4 赢 s2/s3 |
 ---
 
 ## 更新约定
