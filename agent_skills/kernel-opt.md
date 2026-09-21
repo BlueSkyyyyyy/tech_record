@@ -114,3 +114,15 @@ scripts/lab.sh status
 - **按 DV 切 warp 省寄存器会带来 QK 重复（dup）**：`O[16,DV]` fp32 的寄存器墙逼着按 `DVW` 切
   warp，`dup=DV/DVW`。16 篇用 smem 共享 `P`（同 row 组两 warp 各算一半 KV）把 dup 从 2 降到 1，
   提升 16%；但别切太细——DVGRP 越大，每个 warp 都要完整读一遍 Q，反而不划算。
+- **「H 个小 GEMM 共享同一个 B」要显式复用 B**：DSA 的 lightning indexer 是 $I=\sum_j w_j\mathrm{ReLU}(q_j\cdot k)$，
+  $k$ 与 head 无关；默认实现每个 head 都 `ldmatrix` 重读整个 K tile，ncu 会显示 L1/TEX ~85%、
+  DRAM ~2%。把 HG 个 head 一起算（每个 `(kx,nb)` 只加载一次 B）＋加宽 BN 摊薄 Q，18 篇从 222 → 311 TFLOPS。
+  **但 HG 别贪**：HG=4/BN=128 寄存器 255+spill → 69 TFLOPS。每改一次 `-Xptxas -v`。
+- **`O(S²)` kernel 的 block 调度顺序决定 L2 工作集**：把输出 tile 的网格写成 `grid.x=KV块`、`grid.y=query块`，
+  同一 query block 的 KV 块连续调度，Q tile 才留得住 L2。18 篇 `grid.x=query` 时 S=32768 indexer 只有
+  69.7 TFLOPS，交换后 214（3.1×）。判据：ncu `DRAM Throughput` 高而 L1/L2 不高 → 先怀疑调度顺序。
+- **exact top-k 用 radix-select，别全排序**：保序变换成 uint32 → 逐 8-bit 趟直方图定位第 k 大阈值（4 趟）
+  → 收集。独占瓶颈是 shared `atomicAdd` 竞争，**每 warp 私有直方图** 18 篇带来 3.96×（26.7→6.75ms）。
+  坑：①保序变换的逆**不自逆**（mask 依赖符号位；高位置位取低 31 位、否则取反），写错 `out_val` 全错；
+  ②「整行塞 smem」在长序列反而更慢（S=32768：8.23 vs 6.75ms）——动态 smem 把 occupancy 锁成 1 block/SM，
+  先算 occupancy 再决定。
