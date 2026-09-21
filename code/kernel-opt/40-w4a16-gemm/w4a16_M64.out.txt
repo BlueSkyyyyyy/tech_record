@@ -1,0 +1,33 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A16 GEMM (AWQ/GPTQ, group=128): M=64 N=17408 K=5120
+FLOPs = 11.41 GFLOP ; W_int4 = 44.6 MB ; W_bf16 = 178.3 MB (4x)
+
+  [v0-cublas         ] max_abs_err=4.665e-03 (ref~3.02) OK
+v0 dequant         0.0866 ms  (read 44.6 MB int4, write 178.3 MB bf16)
+v0 cuBLAS-bf16          0.0670 ms    170.28 TFLOPS ( 17.2% bf16)  W-bw  2660.6 GB/s
+v0 TOTAL                0.1536 ms     74.27 TFLOPS (  7.5% bf16)  W-bw  1160.4 GB/s
+  [fused64x128s3k1   ] max_abs_err=4.665e-03 (ref~3.02) OK
+fused64x128s3k1         0.1361 ms     83.84 TFLOPS (  8.5% bf16)  W-bw   327.5 GB/s
+  [fused64x128s2k1   ] max_abs_err=4.665e-03 (ref~3.02) OK
+fused64x128s2k1         0.1895 ms     60.21 TFLOPS (  6.1% bf16)  W-bw   235.2 GB/s
+  [fused64x128s3k2   ] max_abs_err=4.669e-03 (ref~3.02) OK
+fused64x128s3k2         0.1327 ms     86.00 TFLOPS (  8.7% bf16)  W-bw   335.9 GB/s
+  [fused64x128s3k4   ] max_abs_err=4.670e-03 (ref~3.02) OK
+fused64x128s3k4         0.1119 ms    101.96 TFLOPS ( 10.3% bf16)  W-bw   398.3 GB/s
+  [fused64x128s3k8   ] max_abs_err=4.670e-03 (ref~3.02) OK
+fused64x128s3k8         0.1114 ms    102.38 TFLOPS ( 10.4% bf16)  W-bw   399.9 GB/s
+  [fused64x128s2k4   ] max_abs_err=4.670e-03 (ref~3.02) OK
+fused64x128s2k4         0.1124 ms    101.52 TFLOPS ( 10.3% bf16)  W-bw   396.6 GB/s
+  [fused64x128s4k4   ] max_abs_err=4.670e-03 (ref~3.02) OK
+fused64x128s4k4         0.1256 ms     90.82 TFLOPS (  9.2% bf16)  W-bw   354.8 GB/s
+  [fused64x256s3k2   ] max_abs_err=4.669e-03 (ref~3.02) OK
+fused64x256s3k2         0.1896 ms     60.17 TFLOPS (  6.1% bf16)  W-bw   235.0 GB/s
+  [fused64x256s3k4   ] max_abs_err=4.670e-03 (ref~3.02) OK
+fused64x256s3k4         0.1544 ms     73.88 TFLOPS (  7.5% bf16)  W-bw   288.6 GB/s
+nodq64x128s3k4          0.0613 ms    186.26 TFLOPS ( 18.8% bf16)  W-bw   727.6 GB/s
