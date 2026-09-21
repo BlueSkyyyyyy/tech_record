@@ -1,0 +1,37 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+=== MoE grouped GEMM (fp8 e4m3, per-tensor) ===
+config: tokens=8192 topk=6 G=384  K=7168 N=3072
+prefill(contiguous): expected_m/expert=128  M_total=72192 (aligned)  sum_actual=48728
+  padding waste = 32.5%
+
+-- A) per-expert loop (G=384 次 launch, 每组一张 2D TMA) --
+  [loop            ] max_abs_err=9.915e-02 (ref~39.2) OK
+loop(G launches)    13.1759 ms    241.30 TFLOPS/aligned ( 12.2% of fp8 peak)  B-read  641.8 GB/s
+
+-- B) grouped contiguous (单 launch, B 行坐标 = group*N+n) --
+  [grp128x128s3    ] max_abs_err=9.915e-02 (ref~39.2) OK
+grp128x128s3         3.6759 ms    864.91 TFLOPS/aligned ( 43.7% of fp8 peak)  B-read 2300.3 GB/s
+  [grp128x128s4    ] max_abs_err=9.915e-02 (ref~39.2) OK
+grp128x128s4         4.6770 ms    679.78 TFLOPS/aligned ( 34.4% of fp8 peak)  B-read 1807.9 GB/s
+  [grp128x128s5    ] max_abs_err=9.915e-02 (ref~39.2) OK
+grp128x128s5         4.5944 ms    692.00 TFLOPS/aligned ( 35.0% of fp8 peak)  B-read 1840.4 GB/s
+  [grp128x256s2    ] max_abs_err=9.915e-02 (ref~39.2) OK
+grp128x256s2         3.9832 ms    798.19 TFLOPS/aligned ( 40.4% of fp8 peak)  B-read 2122.8 GB/s
+  [grp128x256s3    ] max_abs_err=9.915e-02 (ref~39.2) OK
+grp128x256s3         3.9330 ms    808.37 TFLOPS/aligned ( 40.9% of fp8 peak)  B-read 2149.9 GB/s
+  [grp128x256s4    ] max_abs_err=9.915e-02 (ref~39.2) OK
+grp128x256s4         4.0412 ms    786.73 TFLOPS/aligned ( 39.8% of fp8 peak)  B-read 2092.4 GB/s
+
+-- C) grouped masked (decode): G=384 max_m=128 expected_m=32 (useful=12248) --
+  [masked          ] max_abs_err=1.749e-01 (ref~54.7) OK
+masked128x128s3      3.0172 ms    178.77 TFLOPS/useful  (  9.0% of fp8 peak)  B-read 2802.5 GB/s
+  [masked          ] max_abs_err=1.749e-01 (ref~54.7) OK
+masked128x128s4      3.3243 ms    162.26 TFLOPS/useful  (  8.2% of fp8 peak)  B-read 2543.6 GB/s
+  [masked          ] max_abs_err=1.749e-01 (ref~54.7) OK
+masked128x256s3      3.2504 ms    165.95 TFLOPS/useful  (  8.4% of fp8 peak)  B-read 2601.4 GB/s

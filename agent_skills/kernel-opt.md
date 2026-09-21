@@ -164,3 +164,17 @@ scripts/lab.sh status
   `warpgroup_wait<0>` 严格分开，要么改 1-warpgroup/248-reg 布局。
 - **per-block 的好几何可能寄存器不可行**：BM=256 的 per-block 累加器 = `512×128 = 65536` 恰为整个 regfile，
   无论怎么调都 spill（96 regs + 608B → 224 TFLOPS）。换几何前先做寄存器账。
+- **MoE grouped 的第一性原理是并行度**：per-expert loop（G=384）每个 GEMM 只有 `N/BN × m_g/BM` 个 CTA
+  （实测 ~24 个），132 SM 空转，耗时对 token 数不敏感（25 篇 8k/16k/32k 都是 13–14ms）。把 expert 编码进
+  B 的行坐标 `b_row = group*N + n`（`(G,N,K)` 等价 `(G*N,K)`），一个 kernel 调度全部 tile，小 batch 3.6×。
+- **TMA 的 `boxR` 必须跟着 BN 一起建**（25 篇坑）：producer 用 `expect_tx(BM*BK + BN*BK)` 声明字节数，
+  若复用了 `boxR=128` 的 tensor map 却跑 BN=256，TMA 少搬的字节永远补不齐 → **mbarrier 死锁，且不报 CUDA error**。
+  症状是 kernel 直接挂死；用设备端 `printf` 打到 producer 才能定位。写多 config 扫描时，descriptor 要按 config 重建。
+- **能用 2D 坐标表达分组就别上 3D TMA**：3D tensormap（`dims={K,N,G}`）语义上更「正统」，但 2D 行折叠
+  （`b_row=group*N+n`）复用同一套 SW128 描述符、少一层维度推理、排错简单，性能相同（25 篇）。
+- **分组 GEMM 的墙常在 L2 而不是 DRAM**：每个 `(m_tile,n_tile)` CTA 读整块 `BN×K` 的 B，一个 expert 的 B
+  被它的每个 m-tile 重读，L2 流量放大 `(M_total/BM)` 倍。25 篇 ncu 实测 L2 **81.9%**、DRAM 仅 52%。
+  解法是 TMA cluster multicast（同 expert 相邻 m-tile 组队广播 B）。
+- **ncu 对某些配置会「看不到 kernel」**：25 篇 masked 的 `moe_kernel` 在 ncu 下反复报
+  `No kernels were profiled`（app 提前 disconnect），普通运行正常——不要因此怀疑 kernel 本身，
+  用吞吐指标（B-read GB/s）替代即可。
