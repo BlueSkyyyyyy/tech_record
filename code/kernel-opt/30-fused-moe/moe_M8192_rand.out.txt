@@ -1,0 +1,26 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+Fused MoE expert FFN (bf16): M=8192 E=384 topk=6 H=7168 I=3072
+routing=random  permuted rows: Pp=72704 (actual=49152)  padding waste=32.4%
+
+-- 正确性 --
+  [K1 gather+swiglu ] max_abs_err=2.984e-02 (ref~8.10) OK
+  [K2 down+unperm   ] max_abs_err=5.244e-04 (ref~102.47) OK
+  [fused vs unfused ] max_abs_err=3.052e-05 (ref~287.58) OK
+K1 fuse            19.2067 ms    338.11 TFLOPS(useful)  ( 34.2% of bf16 peak)
+K1 nofuse          21.2587 ms    305.48 TFLOPS(useful)  ( 30.9% of bf16 peak)
+K2 fuse bn128      12.2578 ms    529.78 TFLOPS(useful)  ( 53.6% of bf16 peak)
+K2 nofuse bn128    11.7940 ms    550.62 TFLOPS(useful)  ( 55.7% of bf16 peak)
+K2 fuse bn256      10.6262 ms    611.13 TFLOPS(useful)  ( 61.8% of bf16 peak)
+K2 nofuse bn256    12.0351 ms    539.59 TFLOPS(useful)  ( 54.6% of bf16 peak)
+aux: permute 0.4654  swiglu 0.9416  unpermute 0.5397  cast 0.1530 ms
+
+[unfused 5-kernel ]   32.7998 ms
+[fused   3-kernel ]   30.5350 ms   speedup 1.074x
+act bytes: unfused=13.72 GB  fused=2.41 GB  (-82%)
+all bytes: unfused=88.77 GB  fused=77.45 GB  (-13%);  B 重读占 75.0 GB

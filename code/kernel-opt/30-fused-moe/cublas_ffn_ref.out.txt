@@ -1,0 +1,6 @@
+device: NVIDIA H100 80GB HBM3
+torch: 2.12.0a0+0291f960b6.nv26.04.48445190
+K1 up+gate   M= 49152 N= 6144 K= 7168    5.7680 ms    750.57 TFLOPS  ( 75.9% of bf16 peak)
+K1 up+gate   M= 98304 N= 6144 K= 7168   12.6705 ms    683.37 TFLOPS  ( 69.1% of bf16 peak)
+K2 down      M= 49152 N= 7168 K= 3072    3.0443 ms    711.04 TFLOPS  ( 71.9% of bf16 peak)
+K2 down      M= 98304 N= 7168 K= 3072    6.0740 ms    712.76 TFLOPS  ( 72.1% of bf16 peak)
