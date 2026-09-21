@@ -1,0 +1,37 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+Fused MoE expert FFN (fp8 e4m3, per-block 128x128): M=8192 E=384 topk=6 H=7168 I=3072
+routing=balanced  permuted rows: Pp=49152 (actual=49152)  padding waste=0.0%
+m-tiles/expert = 1 共 384 个 -> K1 B 流量 16.91 GB, K2 B 流量 8.46 GB
+
+-- 正确性 --
+  [K1 up/gate fp8 pb ] max_rel_err=1.316e-04 (ref~73.4) OK
+  [swiglu+quant      ] max_rel_err=3.125e-02 (ref~754.66) OK
+  [K2 down+unperm    ] max_rel_err=5.914e-03 (ref~71806.8) OK
+K1 up/gate              7.0297 ms    923.79 TFLOPS(useful) ( 46.7% fp8 peak)  B-read 2405.7 GB/s
+swiglu+quant v1         1.0758 ms   6036.23 TFLOPS(useful) (305.2% fp8 peak)
+swiglu+quant v2         0.4399 ms  14764.07 TFLOPS(useful) (746.4% fp8 peak)
+K2 down                 3.3906 ms   1915.27 TFLOPS(useful) ( 96.8% fp8 peak)  B-read 2493.8 GB/s
+K2 down+unperm          4.3190 ms   1503.59 TFLOPS(useful) ( 76.0% fp8 peak)  B-read 1957.8 GB/s
+unpermute               0.5373 ms  12086.49 TFLOPS(useful) (611.0% fp8 peak)
+cast                    0.1528 ms  42500.47 TFLOPS(useful) (2148.7% fp8 peak)
+
+-- 扫参（B-read 用专家权重字节 / 耗时）--
+k1 128 s2               7.8170 ms    830.75 TFLOPS(useful) ( 42.0% fp8 peak)  B-read 2163.4 GB/s
+k1 128 s3               7.1146 ms    912.77 TFLOPS(useful) ( 46.1% fp8 peak)  B-read 2377.0 GB/s
+k1 256 s3              21.8524 ms    297.18 TFLOPS(useful) ( 15.0% fp8 peak)  B-read  773.9 GB/s
+k2 128 s2               4.0987 ms   1584.40 TFLOPS(useful) ( 80.1% fp8 peak)  B-read 2063.0 GB/s
+k2 128 s3               3.6141 ms   1796.86 TFLOPS(useful) ( 90.8% fp8 peak)  B-read 2339.7 GB/s
+k2 256 s2              11.1095 ms    584.55 TFLOPS(useful) ( 29.6% fp8 peak)  B-read  761.1 GB/s
+k2 256 s3              11.2326 ms    578.14 TFLOPS(useful) ( 29.2% fp8 peak)  B-read  752.8 GB/s
+
+[unfused 5-kernel ]   11.8000 ms
+[fused   4-kernel ]   12.2484 ms   speedup 0.963x
+act bytes: unfused=7.42 GB  fused=4.60 GB  (-38%)
+expert weights (fp8) = 25.37 GB (bf16 需 50.73 GB)
+K1+K2 权重流量 25.37 GB -> HBM 下限 @3.35TB/s = 7.57 ms (实测 K1=7.34 + K2=3.45 = 10.80 ms)
