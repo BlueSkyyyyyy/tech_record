@@ -43,13 +43,13 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 
 ### 第一部分：入门与测量
 
-- [~] **01 开篇**：为什么算子调优重要 · GPU 执行模型一页纸 · roofline 性能模型（带宽 vs 算力）· 工具链（nvcc/ncu/nsys）· 环境搭建
-- [ ] **02 第一个 CUDA kernel**：线程层次（grid/block/thread/warp）· vector add 的三种写法（单元素 / grid-stride / float4）· 编译与错查
-- [ ] **03 正确测量**：CUDA event 计时的陷阱（warmup、launch 开销、L2 常驻）· 有效带宽/FLOPs 怎么算 · ncu SpeedOfLight & Memory Workload 入门
+- [x] **01 开篇**：为什么算子调优重要 · GPU 执行模型一页纸 · roofline 性能模型（带宽 vs 算力）· 工具链（nvcc/ncu/nsys）· 环境搭建
+- [x] **02 第一个 CUDA kernel**：线程层次（grid/block/thread/warp）· vector add 的三种写法（单元素 / grid-stride / float4）· 编译与错查
+- [x] **03 正确测量**：CUDA event 计时的陷阱（warmup、launch 开销、L2 常驻）· 有效带宽/FLOPs 怎么算 · ncu SpeedOfLight & Memory Workload 入门
 
 ### 第二部分：内存是瓶颈
 
-- [ ] **04 访存合并与向量化**：coalescing 原理（一个 warp 一次 128B 事务）· 一个 elementwise 算子从 0.x 到接近峰值 · `__restrict__` / `const`
+- [x] **04 访存合并与向量化**：coalescing 原理（一个 warp 一次 128B 事务）· copy 行/列优先 7.4× 差距 · ncu sectors-per-request · float4 89% 峰值
 - [ ] **05 共享内存与 bank conflict**：矩阵转置（naive → 分块 smem → padding 消冲突）· bank 是怎么分的 · ncu Memory Workload 看冲突
 - [ ] **06 归约与 warp shuffle**：树形归约 · `__shfl_down_sync` · 多 block + atomics · 用归约拼出 softmax/LayerNorm 的雏形
 
@@ -87,14 +87,15 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 
 ## 当前进度
 
-- 2026-09-21：搭建容器 `kernel_lab` 与 `scripts/`、`common/cuda_utils.cuh`，起草路线图。开始 01/02/03。
+- 2026-09-21：搭建容器 `kernel_lab` 与 `scripts/`、`common/cuda_utils.cuh`，起草路线图。
+- 2026-09-21：完成并发布 **01–04**（开篇 / 第一个 kernel / 正确测量 / 访存合并）。已 push 且线上 200。
 
 ## 下一步（明确到可执行）
 
-- [ ] 完成 **02** 的三种 vector add 与实测
-- [ ] 完成 **03** 的计时实验（launch 开销 / L2 常驻演示）与 ncu 截图式输出
-- [ ] 补 **01** 的 roofline 手绘图（用 Hugo 支持的 mermaid 或 ASCII）
-- [ ] 把 01–03 一起提交
+- [ ] 完成 **05 共享内存与 bank conflict（矩阵转置）**：naive → tiled smem → padding 消冲突，ncu 看 bank conflict 与 smem 图
+- [ ] 完成 **06 归约与 warp shuffle** 的代码与实测
+- [ ] 每完成一篇：更新本文件、README 索引，提交推送
+- [ ] 可选：给 01 的 roofline 画一张 mermaid 图
 
 ## 灵感 / backlog（想到就记，别丢）
 

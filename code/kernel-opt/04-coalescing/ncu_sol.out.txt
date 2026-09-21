@@ -1,0 +1,43 @@
+### copy_rowwise SOL
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+
+### copy_colwise SOL
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.99
+    Elapsed Cycles                cycle      3284669
+    Memory Throughput                 %        84.75
+    DRAM Throughput                   %        10.20
+    Duration                         ms         1.65
+    L1/TEX Cache Throughput           %        46.17
+    L2 Cache Throughput               %        84.75
+    SM Active Cycles              cycle   3275878.36
+    Compute (SM) Throughput           %         5.81
+    ----------------------- ----------- ------------
+
+    INF   This workload is utilizing greater than 80.0% of the available compute or memory performance of this device.  
+          To further improve performance, work will likely need to be shifted from the most utilized to another unit.   
+          Start by analyzing L2 in the Memory Workload Analysis section.                                                
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %        36.88
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Gbyte/s       341.81
+    Mem Busy                                          %        84.75
+    Max Bandwidth                                     %        81.81
+    L1/TEX Hit Rate                                   %         4.05
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector     67112433
+    L2 Hit Rate                                       %        94.17

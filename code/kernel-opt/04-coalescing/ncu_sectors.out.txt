@@ -1,0 +1,14 @@
+######## copy_rowwise ########
+    Section: Command line profiler metrics
+    Metric Name                                                          Metric Unit Metric Value
+    dram__bytes.sum.per_second                                               Tbyte/s         2.35
+    gpu__time_duration.avg                                                        us       221.79
+    l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio      sector            4
+    l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio      sector            4
+######## copy_colwise ########
+    Section: Command line profiler metrics
+    Metric Name                                                          Metric Unit Metric Value
+    dram__bytes.sum.per_second                                               Gbyte/s       341.41
+    gpu__time_duration.avg                                                        ms         1.65
+    l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio      sector           32
+    l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio      sector           32
