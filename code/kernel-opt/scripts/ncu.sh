@@ -21,6 +21,10 @@ LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lab.sh"
 "$LAB" up >/dev/null
 LAB_NAME="${LAB_NAME:-kernel_lab}"
 
+# 逐参数引用，避免 <、>、| 等被远端 shell 解释
+NCU_ARGS=""
+for a in "$@"; do NCU_ARGS+=" $(printf '%q' "$a")"; done
+
 docker exec -e CUDA_VISIBLE_DEVICES="$GPU" "$LAB_NAME" bash -lc \
   "cd '$DIR' && nvcc -O3 -arch=$ARCH -lineinfo $NVCC_FLAGS '$NAME.cu' -o '$NAME.out' && \
-   CUDA_VISIBLE_DEVICES=$GPU ncu $* './$NAME.out'"
+   CUDA_VISIBLE_DEVICES=$GPU ncu$NCU_ARGS './$NAME.out'"

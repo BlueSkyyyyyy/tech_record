@@ -15,6 +15,7 @@
 | `05-transpose/` | 05 共享内存与 bank conflict | 矩阵转置：naive / smem 无 padding / padding |
 | `06-reduction/` | 06 归约与 warp shuffle | 求和：原子反面教材 / smem 树 / warp shuffle / float4 |
 | `07-softmax/` | 07 Softmax 优化 | 多趟 / 融合 / shared memory 缓存整行 |
+| `08-gemm/` | 08 GEMM 入门 | naive / smem tiling（TFLOPS + ncu 瓶颈）|
 
 ## 怎么跑
 
