@@ -1,0 +1,17 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+M=8192 N=8192, matrix 268.4 MB, working set (A+B) 536.9 MB
+
+  [naive] max_err = 0.000e+00 OK
+naive                          1.1511 ms     466.4 GB/s  ( 13.9% of peak)
+  [smem_nopad] max_err = 0.000e+00 OK
+smem no-pad                    0.5453 ms     984.6 GB/s  ( 29.4% of peak)
+  [smem_pad] max_err = 0.000e+00 OK
+smem padded                    0.3252 ms    1650.9 GB/s  ( 49.2% of peak)
+
+speedup smem_pad/naive = 3.54x, smem_pad/smem_nopad = 1.68x

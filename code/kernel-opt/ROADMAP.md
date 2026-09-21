@@ -50,7 +50,7 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 ### 第二部分：内存是瓶颈
 
 - [x] **04 访存合并与向量化**：coalescing 原理（一个 warp 一次 128B 事务）· copy 行/列优先 7.4× 差距 · ncu sectors-per-request · float4 89% 峰值
-- [ ] **05 共享内存与 bank conflict**：矩阵转置（naive → 分块 smem → padding 消冲突）· bank 是怎么分的 · ncu Memory Workload 看冲突
+- [x] **05 共享内存与 bank conflict**：矩阵转置（naive → 分块 smem → padding 消冲突）· bank 是怎么分的 · ncu 看冲突（6531 万→40 万）
 - [ ] **06 归约与 warp shuffle**：树形归约 · `__shfl_down_sync` · 多 block + atomics · 用归约拼出 softmax/LayerNorm 的雏形
 
 ### 第三部分：计算与融合
@@ -88,12 +88,12 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 ## 当前进度
 
 - 2026-09-21：搭建容器 `kernel_lab` 与 `scripts/`、`common/cuda_utils.cuh`，起草路线图。
-- 2026-09-21：完成并发布 **01–04**（开篇 / 第一个 kernel / 正确测量 / 访存合并）。已 push 且线上 200。
+- 2026-09-21：完成并发布 **01–05**（开篇 / 第一个 kernel / 正确测量 / 访存合并 / 矩阵转置）。已 push 且线上 200。
 
 ## 下一步（明确到可执行）
 
-- [ ] 完成 **05 共享内存与 bank conflict（矩阵转置）**：naive → tiled smem → padding 消冲突，ncu 看 bank conflict 与 smem 图
-- [ ] 完成 **06 归约与 warp shuffle** 的代码与实测
+- [ ] 完成 **06 归约与 warp shuffle** 的代码与实测：朴素归约 → 两两归约 → warp shuffle → 多 block（atomic / 两段式），对拍与 ncu
+- [ ] 之后接 **07 Softmax / LayerNorm 优化**（online softmax + 融合）
 - [ ] 每完成一篇：更新本文件、README 索引，提交推送
 - [ ] 可选：给 01 的 roofline 画一张 mermaid 图
 
