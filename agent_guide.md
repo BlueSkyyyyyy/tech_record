@@ -51,3 +51,4 @@ static/katex/                   # 自托管 KaTeX，勿删
 | [math-check](agent_skills/math-check.md) | 文章含 LaTeX 公式，或公式显示异常时 |
 | [code-dive](agent_skills/code-dive.md) | 深读某个 kernel/框架仓库，写源码分析文章 |
 | [publish](agent_skills/publish.md) | 构建、推送、验证线上部署 |
+| [kernel-opt](agent_skills/kernel-opt.md) | 推进「CUDA 算子调优」系列（长期自驱：写代码→实测→ncu→写文章→发布） |
