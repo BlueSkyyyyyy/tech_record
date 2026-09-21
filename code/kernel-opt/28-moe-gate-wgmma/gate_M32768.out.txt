@@ -1,0 +1,48 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+MoE gate GEMM (wgmma): M=32768 N=384 K=7168  FLOPs=180.39 GFLOP
+
+-- (a) wgmma SS + cp.async, SW128 --
+  [async128x128s3    ] max_abs_err=3.457e-06 (ref~0.53) OK
+async128x128s3       0.5017 ms    359.56 TFLOPS  (36.36% of bf16 peak)
+  [async128x128s4    ] max_abs_err=3.457e-06 (ref~0.53) OK
+async128x128s4       0.6718 ms    268.50 TFLOPS  (27.15% of bf16 peak)
+  [async64x128s4     ] max_abs_err=3.457e-06 (ref~0.53) OK
+async64x128s4        0.8832 ms    204.25 TFLOPS  (20.65% of bf16 peak)
+  [async256x128s3    ] max_abs_err=3.457e-06 (ref~0.53) OK
+async256x128s3       0.4928 ms    366.05 TFLOPS  (37.01% of bf16 peak)
+
+-- (b) wgmma SS + TMA + warp specialization, SW128 --
+  [ws64x128s2        ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws64x128s2           0.4481 ms    402.55 TFLOPS  (40.70% of bf16 peak)
+  [ws64x128s3        ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws64x128s3           0.4367 ms    413.10 TFLOPS  (41.77% of bf16 peak)
+  [ws64x128s4        ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws64x128s4           0.4291 ms    420.35 TFLOPS  (42.50% of bf16 peak)
+  [ws128x128s2       ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s2          0.3222 ms    559.88 TFLOPS  (56.61% of bf16 peak)
+  [ws128x128s3       ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s3          0.3284 ms    549.29 TFLOPS  (55.54% of bf16 peak)
+  [ws128x128s4       ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s4          0.3844 ms    469.29 TFLOPS  (47.45% of bf16 peak)
+  [ws128x128s5       ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s5          0.3984 ms    452.80 TFLOPS  (45.78% of bf16 peak)
+  [ws256x128s3       ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws256x128s3          0.3210 ms    561.88 TFLOPS  (56.81% of bf16 peak)
+  [ws256x128s4       ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws256x128s4          0.3005 ms    600.33 TFLOPS  (60.70% of bf16 peak)
+
+-- (c) split-K（攻 1.45 wave 的尾效应）--
+  [ws128x128s3k2     ] max_abs_err=1.544e-06 (ref~0.53) OK
+ws128x128s3k2        0.4213 ms    428.18 TFLOPS  (43.29% of bf16 peak)
+  [ws128x128s3k4     ] max_abs_err=7.093e-07 (ref~0.53) OK
+ws128x128s3k4        0.4867 ms    370.67 TFLOPS  (37.48% of bf16 peak)
+  [ws128x128s2k2     ] max_abs_err=1.544e-06 (ref~0.53) OK
+ws128x128s2k2        0.4252 ms    424.29 TFLOPS  (42.90% of bf16 peak)
+  [ws64x128s3k2      ] max_abs_err=1.544e-06 (ref~0.53) OK
+ws64x128s3k2         0.5323 ms    338.92 TFLOPS  (34.27% of bf16 peak)
