@@ -1,0 +1,25 @@
+28: Memory Throughput % 68.58
+29: DRAM Throughput % 5.14
+30: Duration ms 2.76
+31: L1/TEX Cache Throughput % 70.79
+32: L2 Cache Throughput % 29.80
+34: Compute (SM) Throughput % 18.51
+61: Executed Ipc Active inst/cycle 0.76
+63: Issue Slots Busy % 18.51
+81: Memory Throughput Gbyte/s 172.30
+111: The memory access pattern for shared stores might not be optimal and causes on average a 4.4 - way bank 
+112: conflict across all 11304960 shared store requests.This results in 11064742 bank conflicts, which represent 
+122: No Eligible % 80.94
+123: Active Warps Per Scheduler warp 2.00
+124: Eligible Warps Per Scheduler warp 0.24
+141: Warp Cycles Per Issued Instruction cycle 10.47
+148: On average, each warp of this workload spends 5.0 cycles being stalled waiting for a scoreboard dependency on 
+188: Registers Per Thread register/thread 205
+191: Dynamic Shared Memory Per Block Kbyte/block 221.18
+199: Waves Per SM 15.52
+210: Block Limit Barriers block 32
+211: Block Limit SM block 32
+212: Block Limit Registers block 1
+213: Block Limit Shared Mem block 1
+214: Block Limit Warps block 8
+217: Achieved Occupancy % 12.49

@@ -1,0 +1,5 @@
+### SW128 wgmma GEMM 冒烟
+SW128 wgmma GEMM: M=2048 N=2048 K=2048  (BM=128 BN=256 BK=64 NWG=2)
+gemm_sw128    0.1156 ms    148.66 TFLOPS ( 15.0% peak)
+SW128 wgmma GEMM: M=4096 N=4096 K=4096  (BM=128 BN=256 BK=64 NWG=2)
+gemm_sw128    1.0409 ms    132.04 TFLOPS ( 13.4% peak)
