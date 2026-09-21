@@ -1,0 +1,31 @@
+=== 21 MLA wgmma pipe: coalesced V + cp.async K prefetch · H100 SXM · Mon Sep 21 03:41:48 PM CST 2026 ===
+--- article20 baseline: mla_wgmma_sw.cu (uncoalesced V, single buffer) ---
+  [sw128 ] max_abs_err=9.100e-06 (ref~0.006) OK
+wgmma_sw128   2.7799 ms    105.06 TFLOPS ( 10.6% peak, QK dup 2x)
+  [sw128 ] max_abs_err=6.249e-06 (ref~0.006) OK
+wgmma_sw128   5.1704 ms    112.97 TFLOPS ( 11.4% peak, QK dup 2x)
+  [sw128 ] max_abs_err=4.506e-06 (ref~0.003) OK
+wgmma_sw128   9.7489 ms    119.83 TFLOPS ( 12.1% peak, QK dup 2x)
+--- v1 mla_pipe.cu: only coalesce V transpose (dv-fastest) ---
+  [sw128 ] max_abs_err=9.100e-06 (ref~0.006) OK
+wgmma_pipe   2.0522 ms    142.31 TFLOPS ( 14.4% peak, QK dup 2x)
+  [sw128 ] max_abs_err=6.249e-06 (ref~0.006) OK
+wgmma_pipe   3.7005 ms    157.85 TFLOPS ( 16.0% peak, QK dup 2x)
+  [sw128 ] max_abs_err=4.506e-06 (ref~0.003) OK
+wgmma_pipe   7.3285 ms    159.41 TFLOPS ( 16.1% peak, QK dup 2x)
+  [sw128 ] max_abs_err=3.377e-06 (ref~0.002) OK
+wgmma_pipe  15.4095 ms    151.62 TFLOPS ( 15.3% peak, QK dup 2x)
+--- v2 mla_pipe3.cu: coalesced V + cp.async K prefetch ---
+  [sw128 ] max_abs_err=9.100e-06 (ref~0.006) OK
+wgmma_pipe3   1.8272 ms    159.83 TFLOPS ( 16.2% peak, QK dup 2x)
+  [sw128 ] max_abs_err=6.249e-06 (ref~0.006) OK
+wgmma_pipe3   3.2776 ms    178.21 TFLOPS ( 18.0% peak, QK dup 2x)
+  [sw128 ] max_abs_err=4.506e-06 (ref~0.003) OK
+wgmma_pipe3   6.0484 ms    193.15 TFLOPS ( 19.5% peak, QK dup 2x)
+  [sw128 ] max_abs_err=3.377e-06 (ref~0.002) OK
+wgmma_pipe3  11.7516 ms    198.82 TFLOPS ( 20.1% peak, QK dup 2x)
+--- reference: article16 f4s (mma+ldmatrix, series best) ---
+f4s      BM=64  DVGRP=2 KT=64  warps=8     1.7256 ms    169.25 TFLOPS ( 17.1% peak, QK dup 1x)
+f4s      BM=64  DVGRP=2 KT=64  warps=8     3.1525 ms    185.28 TFLOPS ( 18.7% peak, QK dup 1x)
+f4s      BM=64  DVGRP=2 KT=64  warps=8     6.3562 ms    183.79 TFLOPS ( 18.6% peak, QK dup 1x)
+f4s      BM=64  DVGRP=2 KT=64  warps=8    13.4397 ms    173.85 TFLOPS ( 17.6% peak, QK dup 1x)
