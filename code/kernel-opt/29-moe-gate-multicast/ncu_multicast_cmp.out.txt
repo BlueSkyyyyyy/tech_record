@@ -1,0 +1,36 @@
+=== ws256x128s4_c1 ===
+    Metric Name                                                     Metric Unit Metric Value
+    dram__bytes.sum                                                       Mbyte       523.46
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                        %        53.79
+    gpu__time_duration.sum                                                   us       290.34
+    lts__t_sectors_op_write.sum                                          sector      2363424
+    lts__t_sectors_srcunit_tex_op_read.sum                               sector     46188208
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                         %        80.38
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                          %        68.82
+=== ws256x128s4_ax3 ===
+    Metric Name                                                     Metric Unit Metric Value
+    dram__bytes.sum                                                       Mbyte       540.31
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                        %        43.45
+    gpu__time_duration.sum                                                   us       370.94
+    lts__t_sectors_op_write.sum                                          sector      2362281
+    lts__t_sectors_srcunit_tex_op_read.sum                               sector     33988232
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                         %        48.54
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                          %        51.46
+=== ws128x128s3_c1 ===
+    Metric Name                                                     Metric Unit Metric Value
+    dram__bytes.sum                                                       Mbyte       528.90
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                        %        49.88
+    gpu__time_duration.sum                                                   us       316.35
+    lts__t_sectors_op_write.sum                                          sector      2363342
+    lts__t_sectors_srcunit_tex_op_read.sum                               sector     71198048
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                         %        82.34
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                          %        64.42
+=== ws128x128s3_by2 ===
+    Metric Name                                                     Metric Unit Metric Value
+    dram__bytes.sum                                                       Mbyte       523.71
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                        %        51.76
+    gpu__time_duration.sum                                                   us       301.86
+    lts__t_sectors_op_write.sum                                          sector      2364134
+    lts__t_sectors_srcunit_tex_op_read.sum                               sector     64108112
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                         %        84.99
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                          %        67.73

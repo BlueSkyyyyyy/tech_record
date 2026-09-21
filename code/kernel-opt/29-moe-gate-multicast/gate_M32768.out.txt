@@ -1,0 +1,70 @@
+gate_mcast.cu(302): warning #177-D: variable "NE" was declared but never referenced
+    constexpr int NE = 384;
+                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+MoE gate GEMM + TMA cluster multicast (bf16): M=32768 N=384 K=7168  FLOPs=180.39 GFLOP
+
+-- (a) baseline: TMA + warp specialization (CN=1，同 28) --
+  [ws64x128s3_c1     ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws64x128s3_c1          0.4378 ms    412.07 TFLOPS  (41.67% of bf16 peak)
+  [ws128x128s2_c1    ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s2_c1         0.3191 ms    565.31 TFLOPS  (57.16% of bf16 peak)
+  [ws128x128s3_c1    ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s3_c1         0.3243 ms    556.31 TFLOPS  (56.25% of bf16 peak)
+  [ws128x128s4_c1    ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s4_c1         0.3714 ms    485.70 TFLOPS  (49.11% of bf16 peak)
+  [ws128x128s5_c1    ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s5_c1         0.3916 ms    460.66 TFLOPS  (46.58% of bf16 peak)
+  [ws128x128s6_c1    ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s6_c1         0.4087 ms    441.37 TFLOPS  (44.63% of bf16 peak)
+  [ws256x128s3_c1    ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws256x128s3_c1         0.3119 ms    578.36 TFLOPS  (58.48% of bf16 peak)
+  [ws256x128s4_c1    ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws256x128s4_c1         0.2947 ms    612.21 TFLOPS  (61.90% of bf16 peak)
+
+-- (b) + A multicast (cluster.x=CN; grid.x=3 → CN 只能取 3) --
+  [ws64x128s3_ax3    ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws64x128s3_ax3         0.4192 ms    430.36 TFLOPS  (43.51% of bf16 peak)
+  [ws128x128s2_ax3   ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s2_ax3        0.3800 ms    474.69 TFLOPS  (48.00% of bf16 peak)
+  [ws128x128s3_ax3   ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s3_ax3        0.3601 ms    500.89 TFLOPS  (50.65% of bf16 peak)
+  [ws256x128s4_ax3   ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws256x128s4_ax3        0.3848 ms    468.73 TFLOPS  (47.39% of bf16 peak)
+
+-- (c) + B multicast (cluster.y=CM; B 权重被 M/BM 个 m-tile 重读) --
+  [ws128x128s2_by2   ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s2_by2        0.3216 ms    560.90 TFLOPS  (56.71% of bf16 peak)
+  [ws128x128s3_by2   ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s3_by2        0.3072 ms    587.21 TFLOPS  (59.37% of bf16 peak)
+  [ws128x128s3_by4   ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s3_by4        0.3585 ms    503.12 TFLOPS  (50.87% of bf16 peak)
+  [ws128x128s3_by8   ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws128x128s3_by8        0.3711 ms    486.04 TFLOPS  (49.14% of bf16 peak)
+  [ws256x128s3_by2   ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws256x128s3_by2        0.3335 ms    540.93 TFLOPS  (54.69% of bf16 peak)
+  [ws256x128s4_by2   ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws256x128s4_by2        0.3209 ms    562.15 TFLOPS  (56.84% of bf16 peak)
+  [ws256x128s4_by4   ] max_abs_err=3.457e-06 (ref~0.53) OK
+ws256x128s4_by4        0.4091 ms    440.96 TFLOPS  (44.59% of bf16 peak)
+
+-- (d) wide-N：一个 CTA 算完 N=384，A 只读一遍（免 cluster）--
+  [wide64s3          ] max_abs_err=3.457e-06 (ref~0.53) OK
+wide64s3               0.4058 ms    444.55 TFLOPS  (44.95% of bf16 peak)
+  [wide64s4          ] max_abs_err=3.457e-06 (ref~0.53) OK
+wide64s4               0.3953 ms    456.33 TFLOPS  (46.14% of bf16 peak)
+  [wide128s2         ] max_abs_err=3.457e-06 (ref~0.53) OK
+wide128s2              1.2107 ms    149.00 TFLOPS  (15.07% of bf16 peak)
+  [wide128s3         ] max_abs_err=3.457e-06 (ref~0.53) OK
+wide128s3              1.2401 ms    145.46 TFLOPS  (14.71% of bf16 peak)
+  [wide256s2         ] max_abs_err=3.457e-06 (ref~0.53) OK
+wide256s2              4.4018 ms     40.98 TFLOPS  ( 4.14% of bf16 peak)
