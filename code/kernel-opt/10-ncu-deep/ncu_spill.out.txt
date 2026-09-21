@@ -1,0 +1,56 @@
+===== occ1 =====
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ ----------- ------------
+    Metric Name                                                              Metric Unit Metric Value
+    ------------------------------------------------------------------------ ----------- ------------
+    l1tex__t_bytes_pipe_lsu_mem_local_op_ld.sum                                     byte            0
+    l1tex__t_bytes_pipe_lsu_mem_local_op_st.sum                                     byte            0
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio            inst            0
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio        inst            0
+    smsp__inst_executed.sum                                                         inst  11153488896
+    smsp__inst_executed_op_local_ld.sum                                             inst            0
+    smsp__inst_executed_op_local_st.sum                                             inst            0
+    ------------------------------------------------------------------------ ----------- ------------
+
+===== occ2 =====
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ ----------- ------------
+    Metric Name                                                              Metric Unit Metric Value
+    ------------------------------------------------------------------------ ----------- ------------
+    l1tex__t_bytes_pipe_lsu_mem_local_op_ld.sum                                     byte            0
+    l1tex__t_bytes_pipe_lsu_mem_local_op_st.sum                                     byte            0
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio            inst            0
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio        inst            0
+    smsp__inst_executed.sum                                                         inst  11153488896
+    smsp__inst_executed_op_local_ld.sum                                             inst            0
+    smsp__inst_executed_op_local_st.sum                                             inst            0
+    ------------------------------------------------------------------------ ----------- ------------
+
+===== occ4 =====
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ ----------- ------------
+    Metric Name                                                              Metric Unit Metric Value
+    ------------------------------------------------------------------------ ----------- ------------
+    l1tex__t_bytes_pipe_lsu_mem_local_op_ld.sum                                    Gbyte       194.65
+    l1tex__t_bytes_pipe_lsu_mem_local_op_st.sum                                    Gbyte       194.66
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio            inst         0.58
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio        inst        24.15
+    smsp__inst_executed.sum                                                         inst  14195081472
+    smsp__inst_executed_op_local_ld.sum                                             inst   1520724480
+    smsp__inst_executed_op_local_st.sum                                             inst   1520808960
+    ------------------------------------------------------------------------ ----------- ------------
+
+===== occ8 =====
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ ----------- ------------
+    Metric Name                                                              Metric Unit Metric Value
+    ------------------------------------------------------------------------ ----------- ------------
+    l1tex__t_bytes_pipe_lsu_mem_local_op_ld.sum                                    Tbyte         1.31
+    l1tex__t_bytes_pipe_lsu_mem_local_op_st.sum                                    Tbyte         1.31
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio            inst        78.02
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio        inst        40.37
+    smsp__inst_executed.sum                                                         inst  31599499008
+    smsp__inst_executed_op_local_ld.sum                                             inst  10222662912
+    smsp__inst_executed_op_local_st.sum                                             inst  10223288064
+    ------------------------------------------------------------------------ ----------- ------------
+

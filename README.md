@@ -85,6 +85,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 7. [Softmax 优化：从 3 个 kernel 到 1 个](content/posts/cuda-kernel-opt-07-softmax/index.md)
 8. [GEMM 入门：从朴素三重循环到 shared-memory tiling](content/posts/cuda-kernel-opt-08-gemm/index.md)
 9. [GEMM 进阶：寄存器分块、向量化与 double buffering](content/posts/cuda-kernel-opt-09-gemm-advanced/index.md)
+10. [ncu 深潜：occupancy、warp stall、roofline 与 source/SASS](content/posts/cuda-kernel-opt-10-ncu-deep/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验）
 

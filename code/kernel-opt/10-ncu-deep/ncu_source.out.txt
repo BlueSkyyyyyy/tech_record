@@ -1,0 +1,275 @@
+==PROF== Connected to process 14742 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/10-ncu-deep/ncu_deep.out)
+==PROF== Profiling "k_latency": 0%....50%....100% - 1 pass
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+================ occupancy：手动计算 vs 运行时 API ================
+k_occ<1>
+  regs=96  local=0    smem=0      | blocks/SM: regs=2  smem=32 blk=32 thr=8  -> 2 (25.0%, limit=registers)
+k_occ<2>
+  regs=96  local=0    smem=0      | blocks/SM: regs=2  smem=32 blk=32 thr=8  -> 2 (25.0%, limit=registers)
+k_occ<4>
+  regs=64  local=56   smem=0      | blocks/SM: regs=4  smem=32 blk=32 thr=8  -> 4 (50.0%, limit=registers)
+k_occ<8>
+  regs=32  local=344  smem=0      | blocks/SM: regs=8  smem=32 blk=32 thr=8  -> 8 (100.0%, limit=registers)
+k_latency
+  regs=32  local=0    smem=0      | blocks/SM: regs=8  smem=32 blk=32 thr=8  -> 8 (100.0%, limit=registers)
+k_stream
+  regs=14  local=0    smem=0      | blocks/SM: regs=16 smem=32 blk=32 thr=8  -> 8 (100.0%, limit=threads)
+k_smem_bar
+  regs=17  local=0    smem=1024   | blocks/SM: regs=10 smem=228 blk=32 thr=8  -> 8 (100.0%, limit=threads)
+
+================ 运行时间 ================
+  latency          0.9854 ms
+==PROF== Disconnected from process 14742
+/*
+File Path: /ssd/home/xieminglin/proj/tech_record/code/kernel-opt/10-ncu-deep/ncu_deep.cu
+*/
+/*
+Function Name: k_latency(const int *, float *, int, int)
+*/
+------------------ ------------------------------------------------------------
+Address            Source                                                      
+46                 __global__ void k_latency(const int* __restrict__ idx, float
+                   * __restrict__ out, int steps,                              
+------------------ ------------------------------------------------------------
+    0x7f38037c7500       LDC R1, c[0x0][0x28]                                  
+------------------ ------------------------------------------------------------
+Address            Source                                                      
+48                 int p = (blockIdx.x * blockDim.x + threadIdx.x) & (n - 1);  
+------------------ ------------------------------------------------------------
+    0x7f38037c7510       LDC.64 R16, c[0x0][0x220]                             
+    0x7f38037c7520       S2R R0, SR_CTAID.X                                    
+    0x7f38037c7530       ULDC UR4, c[0x0][0x0]                                 
+    ...                 ...                                                    
+    0x7f38037c7550       S2R R3, SR_TID.X                                      
+    ...                 ...                                                    
+    0x7f38037c7570       IMAD R0, R0, UR4, R3                                  
+    0x7f38037c7580       ULDC.64 UR4, c[0x0][0x208]                            
+    ...                 ...                                                    
+    0x7f38037c75b0       IADD3 R17, R17, -0x1, RZ                              
+    ...                 ...                                                    
+    0x7f38037c75f0       LOP3.LUT R17, R17, R0, RZ, 0xc0, !PT                  
+------------------ ------------------------------------------------------------
+Address            Source                                                      
+50                 for (int i = 0; i < steps; ++i) {                           
+------------------ ------------------------------------------------------------
+    0x7f38037c7540       HFMA2.MMA R4, -RZ, RZ, 0, 0                           
+    ...                 ...                                                    
+    0x7f38037c7560       ISETP.GE.AND P0, PT, R16, 0x1, PT                     
+    ...                 ...                                                    
+    0x7f38037c7590 @!P0  BRA 0x7f38037c7f20                                    
+    0x7f38037c75a0       IADD3 R2, R16, -0x1, RZ                               
+    ...                 ...                                                    
+    0x7f38037c75c0       ISETP.GE.U32.AND P0, PT, R2, 0x3, PT                  
+    0x7f38037c75d0       LOP3.LUT R3, R16, 0x3, RZ, 0xc0, !PT                  
+    0x7f38037c75e0       MOV R4, RZ                                            
+    ...                 ...                                                    
+    0x7f38037c7600 @!P0  BRA 0x7f38037c7e80                                    
+    ...                 ...                                                    
+    0x7f38037c7620       IADD3 R5, -R3, R16, RZ                                
+    0x7f38037c7630       MOV R4, RZ                                            
+    0x7f38037c7640       ISETP.GT.AND P0, PT, R5, RZ, PT                       
+    0x7f38037c7650 @!P0  BRA 0x7f38037c7d50                                    
+    0x7f38037c7660       ISETP.GT.AND P1, PT, R5, 0xc, PT                      
+    0x7f38037c7670       PLOP3.LUT P0, PT, PT, PT, PT, 0x80, 0x0               
+    0x7f38037c7680 @!P1  BRA 0x7f38037c7ae0                                    
+    0x7f38037c7690       PLOP3.LUT P0, PT, PT, PT, PT, 0x8, 0x0                
+    ...                 ...                                                    
+    0x7f38037c79e0       IADD3 R5, R5, -0x10, RZ                               
+    ...                 ...                                                    
+    0x7f38037c7ad0 @P1   BRA 0x7f38037c76a0                                    
+    0x7f38037c7ae0       ISETP.GT.AND P1, PT, R5, 0x4, PT                      
+    0x7f38037c7af0 @!P1  BRA 0x7f38037c7d30                                    
+    ...                 ...                                                    
+    0x7f38037c7ce0       IADD3 R5, R5, -0x8, RZ                                
+    ...                 ...                                                    
+    0x7f38037c7d40 @!P0  BRA 0x7f38037c7e80                                    
+    ...                 ...                                                    
+    0x7f38037c7db0       IADD3 R5, R5, -0x4, RZ                                
+    ...                 ...                                                    
+    0x7f38037c7dd0       ISETP.NE.AND P0, PT, R5, RZ, PT                       
+    ...                 ...                                                    
+    0x7f38037c7e70 @P0   BRA 0x7f38037c7d50                                    
+    ...                 ...                                                    
+    0x7f38037c7e90       ISETP.NE.AND P0, PT, R3, RZ, PT                       
+    0x7f38037c7ea0 @!P0  BRA 0x7f38037c7f20                                    
+    ...                 ...                                                    
+    0x7f38037c7ed0       IADD3 R3, R3, -0x1, RZ                                
+    0x7f38037c7ee0       ISETP.NE.AND P0, PT, R3, RZ, PT                       
+    ...                 ...                                                    
+    0x7f38037c7f10 @P0   BRA 0x7f38037c7eb0                                    
+------------------ ------------------------------------------------------------
+Address            Source                                                      
+51                 p = idx[p];       // 依赖上一步的 load，循环无法�
+                   ��叠                                                       
+------------------ ------------------------------------------------------------
+    0x7f38037c7610       LDC.64 R14, c[0x0][0x210]                             
+    ...                 ...                                                    
+    0x7f38037c76a0       LDC.64 R12, c[0x0][0x210]                             
+    0x7f38037c76b0       IMAD.WIDE R6, R17, 0x4, R12                           
+    0x7f38037c76c0       LDG.E.CONSTANT R2, desc[UR4][R6.64]                   
+    0x7f38037c76d0       IMAD.WIDE R16, R2, 0x4, R12                           
+    0x7f38037c76e0       LDG.E.CONSTANT R26, desc[UR4][R16.64]                 
+    0x7f38037c76f0       IMAD.WIDE R18, R26, 0x4, R12                          
+    0x7f38037c7700       LDG.E.CONSTANT R29, desc[UR4][R18.64]                 
+    0x7f38037c7710       IMAD.WIDE R20, R29, 0x4, R12                          
+    0x7f38037c7720       LDG.E.CONSTANT R27, desc[UR4][R20.64]                 
+    0x7f38037c7730       IMAD.WIDE R22, R27, 0x4, R12                          
+    0x7f38037c7740       LDG.E.CONSTANT R11, desc[UR4][R22.64]                 
+    0x7f38037c7750       IMAD.WIDE R18, R11, 0x4, R12                          
+    0x7f38037c7760       LDG.E.CONSTANT R10, desc[UR4][R18.64]                 
+    0x7f38037c7770       IMAD.WIDE R8, R10, 0x4, R12                           
+    0x7f38037c7780       LDG.E.CONSTANT R9, desc[UR4][R8.64]                   
+    0x7f38037c7790       IMAD.WIDE R22, R9, 0x4, R12                           
+    0x7f38037c77a0       LDG.E.CONSTANT R8, desc[UR4][R22.64]                  
+    0x7f38037c77b0       IMAD.WIDE R24, R8, 0x4, R12                           
+    0x7f38037c77c0       LDG.E.CONSTANT R7, desc[UR4][R24.64]                  
+    0x7f38037c77d0       IMAD.WIDE R16, R7, 0x4, R12                           
+    0x7f38037c77e0       LDG.E.CONSTANT R6, desc[UR4][R16.64]                  
+    0x7f38037c77f0       IMAD.WIDE R16, R6, 0x4, R12                           
+    0x7f38037c7800       LDG.E.CONSTANT R28, desc[UR4][R16.64]                 
+    0x7f38037c7810       IMAD.WIDE R18, R28, 0x4, R12                          
+    0x7f38037c7820       LDG.E.CONSTANT R19, desc[UR4][R18.64]                 
+    0x7f38037c7830       IMAD.WIDE R20, R19, 0x4, R12                          
+    0x7f38037c7840       LDG.E.CONSTANT R21, desc[UR4][R20.64]                 
+    0x7f38037c7850       IMAD.WIDE R22, R21, 0x4, R12                          
+    0x7f38037c7860       LDG.E.CONSTANT R23, desc[UR4][R22.64]                 
+    0x7f38037c7870       IMAD.WIDE R24, R23, 0x4, R12                          
+    0x7f38037c7880       LDG.E.CONSTANT R25, desc[UR4][R24.64]                 
+    ...                 ...                                                    
+    0x7f38037c7970       IMAD.WIDE R12, R25, 0x4, R12                          
+    0x7f38037c7980       LDG.E.CONSTANT R17, desc[UR4][R12.64]                 
+    ...                 ...                                                    
+    0x7f38037c7b00       LDC.64 R6, c[0x0][0x210]                              
+    0x7f38037c7b10       IMAD.WIDE R8, R17, 0x4, R6                            
+    0x7f38037c7b20       LDG.E.CONSTANT R9, desc[UR4][R8.64]                   
+    0x7f38037c7b30       IMAD.WIDE R10, R9, 0x4, R6                            
+    0x7f38037c7b40       LDG.E.CONSTANT R11, desc[UR4][R10.64]                 
+    0x7f38037c7b50       IMAD.WIDE R12, R11, 0x4, R6                           
+    0x7f38037c7b60       LDG.E.CONSTANT R13, desc[UR4][R12.64]                 
+    0x7f38037c7b70       IMAD.WIDE R18, R13, 0x4, R6                           
+    0x7f38037c7b80       LDG.E.CONSTANT R19, desc[UR4][R18.64]                 
+    0x7f38037c7b90       IMAD.WIDE R20, R19, 0x4, R6                           
+    0x7f38037c7ba0       LDG.E.CONSTANT R21, desc[UR4][R20.64]                 
+    0x7f38037c7bb0       IMAD.WIDE R22, R21, 0x4, R6                           
+    0x7f38037c7bc0       LDG.E.CONSTANT R23, desc[UR4][R22.64]                 
+    0x7f38037c7bd0       IMAD.WIDE R24, R23, 0x4, R6                           
+    0x7f38037c7be0       LDG.E.CONSTANT R25, desc[UR4][R24.64]                 
+    ...                 ...                                                    
+    0x7f38037c7c50       IMAD.WIDE R6, R25, 0x4, R6                            
+    0x7f38037c7c60       LDG.E.CONSTANT R17, desc[UR4][R6.64]                  
+    ...                 ...                                                    
+    0x7f38037c7d50       IMAD.WIDE R6, R17, 0x4, R14                           
+    0x7f38037c7d60       LDG.E.CONSTANT R7, desc[UR4][R6.64]                   
+    0x7f38037c7d70       IMAD.WIDE R8, R7, 0x4, R14                            
+    0x7f38037c7d80       LDG.E.CONSTANT R9, desc[UR4][R8.64]                   
+    0x7f38037c7d90       IMAD.WIDE R10, R9, 0x4, R14                           
+    0x7f38037c7da0       LDG.E.CONSTANT R11, desc[UR4][R10.64]                 
+    ...                 ...                                                    
+    0x7f38037c7de0       IMAD.WIDE R12, R11, 0x4, R14                          
+    0x7f38037c7df0       LDG.E.CONSTANT R17, desc[UR4][R12.64]                 
+    ...                 ...                                                    
+    0x7f38037c7e80       LDC.64 R6, c[0x0][0x210]                              
+    ...                 ...                                                    
+    0x7f38037c7eb0       IMAD.WIDE R8, R17, 0x4, R6                            
+    0x7f38037c7ec0       LDG.E.CONSTANT R17, desc[UR4][R8.64]                  
+------------------ ------------------------------------------------------------
+Address            Source                                                      
+52                 s += (float)p;                                              
+------------------ ------------------------------------------------------------
+    0x7f38037c7890       I2FP.F32.S32 R2, R2                                   
+    0x7f38037c78a0       I2FP.F32.S32 R26, R26                                 
+    0x7f38037c78b0       FADD R2, R2, R4                                       
+    0x7f38037c78c0       I2FP.F32.S32 R29, R29                                 
+    0x7f38037c78d0       FADD R2, R2, R26                                      
+    0x7f38037c78e0       I2FP.F32.S32 R27, R27                                 
+    0x7f38037c78f0       FADD R2, R2, R29                                      
+    0x7f38037c7900       I2FP.F32.S32 R11, R11                                 
+    0x7f38037c7910       FADD R2, R2, R27                                      
+    0x7f38037c7920       I2FP.F32.S32 R27, R10                                 
+    0x7f38037c7930       FADD R2, R2, R11                                      
+    0x7f38037c7940       I2FP.F32.S32 R9, R9                                   
+    0x7f38037c7950       FADD R2, R2, R27                                      
+    0x7f38037c7960       I2FP.F32.S32 R11, R8                                  
+    ...                 ...                                                    
+    0x7f38037c7990       FADD R2, R2, R9                                       
+    0x7f38037c79a0       I2FP.F32.S32 R7, R7                                   
+    0x7f38037c79b0       I2FP.F32.S32 R9, R6                                   
+    0x7f38037c79c0       FADD R2, R2, R11                                      
+    0x7f38037c79d0       I2FP.F32.S32 R19, R19                                 
+    ...                 ...                                                    
+    0x7f38037c79f0       FADD R2, R2, R7                                       
+    0x7f38037c7a00       I2FP.F32.S32 R7, R28                                  
+    0x7f38037c7a10       I2FP.F32.S32 R21, R21                                 
+    0x7f38037c7a20       FADD R2, R2, R9                                       
+    0x7f38037c7a30       ISETP.GT.AND P1, PT, R5, 0xc, PT                      
+    0x7f38037c7a40       I2FP.F32.S32 R23, R23                                 
+    0x7f38037c7a50       FADD R2, R2, R7                                       
+    0x7f38037c7a60       I2FP.F32.S32 R25, R25                                 
+    0x7f38037c7a70       FADD R2, R2, R19                                      
+    0x7f38037c7a80       FADD R2, R2, R21                                      
+    0x7f38037c7a90       FADD R2, R2, R23                                      
+    0x7f38037c7aa0       FADD R2, R2, R25                                      
+    0x7f38037c7ab0       I2FP.F32.S32 R7, R17                                  
+    0x7f38037c7ac0       FADD R4, R2, R7                                       
+    ...                 ...                                                    
+    0x7f38037c7bf0       I2FP.F32.S32 R9, R9                                   
+    0x7f38037c7c00       I2FP.F32.S32 R2, R11                                  
+    0x7f38037c7c10       FADD R9, R4, R9                                       
+    0x7f38037c7c20       I2FP.F32.S32 R13, R13                                 
+    0x7f38037c7c30       FADD R2, R9, R2                                       
+    0x7f38037c7c40       I2FP.F32.S32 R19, R19                                 
+    ...                 ...                                                    
+    0x7f38037c7c70       FADD R2, R2, R13                                      
+    0x7f38037c7c80       I2FP.F32.S32 R21, R21                                 
+    0x7f38037c7c90       I2FP.F32.S32 R23, R23                                 
+    0x7f38037c7ca0       FADD R2, R2, R19                                      
+    0x7f38037c7cb0       I2FP.F32.S32 R25, R25                                 
+    0x7f38037c7cc0       PLOP3.LUT P0, PT, PT, PT, PT, 0x8, 0x0                
+    0x7f38037c7cd0       FADD R2, R2, R21                                      
+    ...                 ...                                                    
+    0x7f38037c7cf0       FADD R2, R2, R23                                      
+    0x7f38037c7d00       FADD R2, R2, R25                                      
+    0x7f38037c7d10       I2FP.F32.S32 R7, R17                                  
+    0x7f38037c7d20       FADD R4, R2, R7                                       
+    0x7f38037c7d30       ISETP.NE.OR P0, PT, R5, RZ, P0                        
+    ...                 ...                                                    
+    0x7f38037c7dc0       I2FP.F32.S32 R19, R7                                  
+    ...                 ...                                                    
+    0x7f38037c7e00       I2FP.F32.S32 R2, R9                                   
+    0x7f38037c7e10       FADD R19, R19, R4                                     
+    0x7f38037c7e20       I2FP.F32.S32 R7, R11                                  
+    0x7f38037c7e30       FADD R2, R19, R2                                      
+    0x7f38037c7e40       FADD R2, R2, R7                                       
+    0x7f38037c7e50       I2FP.F32.S32 R9, R17                                  
+    0x7f38037c7e60       FADD R4, R2, R9                                       
+    ...                 ...                                                    
+    0x7f38037c7ef0       I2FP.F32.S32 R5, R17                                  
+    0x7f38037c7f00       FADD R4, R5, R4                                       
+------------------ ------------------------------------------------------------
+Address            Source                                                      
+54                 out[blockIdx.x * blockDim.x + threadIdx.x] = s;             
+------------------ ------------------------------------------------------------
+    0x7f38037c7f20       LDC.64 R2, c[0x0][0x218]                              
+    0x7f38037c7f30       IMAD.WIDE.U32 R2, R0, 0x4, R2                         
+    0x7f38037c7f40       STG.E desc[UR4][R2.64], R4                            
+------------------ ------------------------------------------------------------
+Address            Source                                                      
+55                 }                                                           
+------------------ ------------------------------------------------------------
+    0x7f38037c7f50       EXIT                                                  
+    0x7f38037c7f60       BRA `(.L_x_0) 0x7f38037c7f60                          
+    0x7f38037c7f70       NOP                                                   
+    0x7f38037c7f80       NOP                                                   
+    0x7f38037c7f90       NOP                                                   
+    0x7f38037c7fa0       NOP                                                   
+    0x7f38037c7fb0       NOP                                                   
+    0x7f38037c7fc0       NOP                                                   
+    0x7f38037c7fd0       NOP                                                   
+    0x7f38037c7fe0       NOP                                                   
+    0x7f38037c7ff0       NOP                                                   

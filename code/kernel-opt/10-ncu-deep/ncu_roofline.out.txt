@@ -1,0 +1,57 @@
+==PROF== Connected to process 14475 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/10-ncu-deep/ncu_deep.out)
+==PROF== Profiling "k_occ": 0%....50%....100% - 11 passes
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+================ occupancy：手动计算 vs 运行时 API ================
+k_occ<1>
+  regs=96  local=0    smem=0      | blocks/SM: regs=2  smem=32 blk=32 thr=8  -> 2 (25.0%, limit=registers)
+k_occ<2>
+  regs=96  local=0    smem=0      | blocks/SM: regs=2  smem=32 blk=32 thr=8  -> 2 (25.0%, limit=registers)
+k_occ<4>
+  regs=64  local=56   smem=0      | blocks/SM: regs=4  smem=32 blk=32 thr=8  -> 4 (50.0%, limit=registers)
+k_occ<8>
+  regs=32  local=344  smem=0      | blocks/SM: regs=8  smem=32 blk=32 thr=8  -> 8 (100.0%, limit=registers)
+k_latency
+  regs=32  local=0    smem=0      | blocks/SM: regs=8  smem=32 blk=32 thr=8  -> 8 (100.0%, limit=registers)
+k_stream
+  regs=14  local=0    smem=0      | blocks/SM: regs=16 smem=32 blk=32 thr=8  -> 8 (100.0%, limit=threads)
+k_smem_bar
+  regs=17  local=0    smem=1024   | blocks/SM: regs=10 smem=228 blk=32 thr=8  -> 8 (100.0%, limit=threads)
+
+================ 运行时间 ================
+  occ<2>          10.8373 ms
+==PROF== Disconnected from process 14475
+[14475] ncu_deep.out@127.0.0.1
+  void k_occ<2>(float *, int) (1056, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.98
+    Elapsed Cycles                cycle     21452160
+    Memory Throughput                 %         0.00
+    DRAM Throughput                   %         0.00
+    Duration                         ms        10.83
+    L1/TEX Cache Throughput           %         0.00
+    L2 Cache Throughput               %         0.34
+    SM Active Cycles              cycle  21448055.58
+    Compute (SM) Throughput           %        98.47
+    ----------------------- ----------- ------------
+
+    INF   This workload is utilizing greater than 80.0% of the available compute or memory performance of this device.  
+          To further improve performance, work will likely need to be shifted from the most utilized to another unit.   
+          Start by analyzing workloads in the Compute Workload Analysis section.                                        
+
+    Section: GPU Speed Of Light Roofline Chart (Overview)
+    INF   The ratio of peak float (FP32) to double (FP64) performance on this device is 2:1. The workload achieved 95%  
+          of this device's FP32 peak performance and 0% of its FP64 peak performance. See the Profiling Guide           
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#roofline) for more details on roofline      
+          analysis.                                                                                                     
+
+==WARNING== No metrics to show for section(s): SpeedOfLight_RooflineChart. Use --print-details option to change the part of the section that should be shown.

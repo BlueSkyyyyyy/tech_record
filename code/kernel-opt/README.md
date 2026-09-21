@@ -17,6 +17,7 @@
 | `07-softmax/` | 07 Softmax 优化 | 多趟 / 融合 / shared memory 缓存整行 |
 | `08-gemm/` | 08 GEMM 入门 | naive / smem tiling（TFLOPS + ncu 瓶颈）|
 | `09-gemm-advanced/` | 09 GEMM 进阶 | 寄存器分块 / float4 向量化 / cp.async 双缓冲 + cuBLAS 对照 |
+| `10-ncu-deep/` | 10 ncu 深潜 | occupancy 手算 / warp stall 指纹 / roofline / source-SASS 对照 |
 
 ## 怎么跑
 
