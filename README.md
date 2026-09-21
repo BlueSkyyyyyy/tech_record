@@ -118,6 +118,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 41. [W4A16 的 warp specialization：把 occupancy 从 6.5% 提到 22%，为什么只快 7%？](content/posts/cuda-kernel-opt-41-w4a16-warp-specialization/index.md)
 42. [MLA decode 的 wgmma 改造：消掉 QK dup，却撞上 V 转置税，再用混合 mma 绕开（1.53×）](content/posts/cuda-kernel-opt-42-mla-decode-wgmma/index.md)
 43. [W4A16 decode 的跨 item 持久化流水：把 wave 2.58 压到 1，再跟每 stage 的除法/原子税算账](content/posts/cuda-kernel-opt-43-w4a16-persist/index.md)
+44. [W4A16 的 M=1 GEMV：M=1 时张量核有 63/64 的行在空转，不如回去做带宽最优的 GEMV](content/posts/cuda-kernel-opt-44-w4a16-decode-gemv/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 
