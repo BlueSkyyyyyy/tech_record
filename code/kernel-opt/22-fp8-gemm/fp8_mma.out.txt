@@ -1,0 +1,25 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+FP8 e4m3 GEMM (per-tensor): M=4096 N=3072 K=7168  FLOPs=180.39 GFLOP
+
+  [sync     ] sampled max_abs_err=0.000e+00 (ref~73.6) OK
+sync64x64        1.0341 ms    174.44 TFLOPS  (  8.8% of fp8 peak)
+  [p128x128x64s3] sampled max_abs_err=0.000e+00 (ref~73.6) OK
+p128x128x64s3    0.7963 ms    226.53 TFLOPS  ( 11.5% of fp8 peak)
+  [p128x128x64s4] sampled max_abs_err=0.000e+00 (ref~73.6) OK
+p128x128x64s4    0.8087 ms    223.06 TFLOPS  ( 11.3% of fp8 peak)
+  [p128x128x128s3] sampled max_abs_err=0.000e+00 (ref~73.6) OK
+p128x128x128s3   0.7080 ms    254.78 TFLOPS  ( 12.9% of fp8 peak)
+  [p128x64x128s4] sampled max_abs_err=0.000e+00 (ref~73.6) OK
+p128x64x128s4    0.6773 ms    266.33 TFLOPS  ( 13.5% of fp8 peak)
+  [p64x128x128s4] sampled max_abs_err=0.000e+00 (ref~73.6) OK
+p64x128x128s4    0.6816 ms    264.65 TFLOPS  ( 13.4% of fp8 peak)
+  [p128x256x64s3] sampled max_abs_err=0.000e+00 (ref~73.6) OK
+p128x256x64s3    0.7487 ms    240.93 TFLOPS  ( 12.2% of fp8 peak)
+  [p256x128x64s3] sampled max_abs_err=0.000e+00 (ref~73.6) OK
+p256x128x64s3    0.7433 ms    242.70 TFLOPS  ( 12.3% of fp8 peak)

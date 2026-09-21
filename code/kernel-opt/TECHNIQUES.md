@@ -32,8 +32,10 @@
 | **DSA 稀疏 MLA 消费端**（gather top-k + online softmax + 共享 P） | **cp.async 双缓冲 p2**（BH=64,DVGRP=2,KT=32） | **136.3 → 127.9 TFLOPS** @Sk=4k→64k | 13.8% (989) | FlashMLA sm90 sparse prefill 640（H800）→ ~4.8× | 19-dsa-sparse-attn |
 | DSA 稀疏 attention vs 稠密 MLA | 同上 p2 | **3.0×(4k) / 25.2×(32k) / 48.6×(64k)** | 效率为稠密 f4s 的 ~75% | 稠密 f4s 168–184 TFLOPS | 19-dsa-sparse-attn |
 | DSA 端到端（indexer+topk+**实测**稀疏 MLA） | 18 的 indexer/topk + 19 的稀疏 MLA | **2.5×(4k) / 13.3×(32k) / 17.3×(64k)** | — | 理论上限 ~31× | 19-dsa-sparse-attn |
-| MoE grouped GEMM | *待填（21）* | — | — | DeepGEMM | — |
-| FP8 GEMM | *待填（22/23）* | — | — | DeepGEMM | — |
+| MoE grouped GEMM | *待填（23）* | — | — | DeepGEMM | — |
+| **FP8 e4m3 GEMM（per-tensor）** | **wgmma m64n128k32 + SW128 + `cp.async` 3 级 + `wait_group` 流水** | **768.3 TFLOPS** @4096×3072×7168 | 38.8% (1978) | cuBLAS 1381.7 (69.9%) → 55.6%；同 shape cuBLAS bf16 800.7 的 96% | 22-fp8-gemm |
+| FP8 e4m3 GEMM（mma.sync 对照） | `mma.m16n8k32` + ldmatrix(b16) + `cp.async` 4 级 | 266.3 TFLOPS | 13.5% | 换 wgmma 后 **+2.89×**；tensor pipe 41%、`math_pipe_throttle` 1.12 | 22-fp8-gemm |
+| FP8 e4m3 GEMM（per-block） | wgmma + 每 128-k 块折算 `sa[m,kb]*sb[nblk,kb]` | 519.0 TFLOPS | 26.2% | per-tensor 的 68%（折算切断流水）| 22-fp8-gemm |
 | MuonClip NS 正交化（N=4096） | 自研 GEMM 链 + 融合 epilogue（cfg1） | **244 TFLOPS** | 24.7% (989) | cuBLAS 链 529（53.5%）→ 差距 2.17× | 17-muonclip-ns |
 | MuonClip NS 单 GEMM（4096³） | 自研 128×128×64 3 级流水 | **269 TFLOPS** | 27.2% | cuBLAS 883（89.3%）→ 达其 30.5% | 17-muonclip-ns |
 
@@ -136,6 +138,17 @@
 | J2 | **`cp.async` 预取不一定要双缓冲**：只要该操作数的生命周期严格早于并行执行的计算 | 融合 attention / 链式算子的软流水 | K 只被 QK 的 `wgmma` 读，`wgmma.wait_group` 后即空闲；PV 不碰 K，于是可在 softmax/P/PV 期间用 `cp.async` 覆盖写同一块 `ks` | `21-mla-wgmma-pipe/mla_pipe3.cu:170`（`cp_async16` 在 :32） | `long_scoreboard` 2.50→1.42、tensor pipe 24.4%→30.0%；159.4→**193.2 TFLOPS**（Sk=4096），长上下文反超 f4s | 必须先论证「谁读谁、何时读完」；`cp.async.wait_group` 是 per-thread，需配 `__syncthreads` 才全局可见；目标地址 16B 对齐（SW128 每行 8×bf16 恰好） |
 | J3 | MN-major（转置）GMMA 描述符别硬猜 | 想免掉 V 转置直接喂 `wgmma` | CUTLASS canonical MN-major B128 = `((8,n),(8,k)):((1,LBO),(8,SBO))`，物理 `[kt/8][dv/64][8][64]` + `c'=c^r` | `21-mla-wgmma-pipe/mn128.cuh`、`mn_test2.cu` | **未跑通**：`make_gmma_desc<Major::MN>` 的 LBO/SBO 与硬件解释**相反**；cute 值直接 out-of-range，强行对调后结果盐值错乱（D 读出重排） | 盲试描述符字段费时且不可靠；应改用 CUTLASS `make_tiled_mma` 生成描述符对齐，或保持转置+合并（J1） |
 
+### K. FP8 GEMM / 低精度（22）
+
+| # | 技巧 | 适用场景 | 原理 | 代码 | 实测收益 / 现象 | 坑 |
+|---|---|---|---|---|---|---|
+| K1 | **FP8 的 `ldmatrix` 用「两个 fp8 = 一个 b16」复用** | e4m3/e5m2 的 `mma.m16n8k32` | `ldmatrix` 吃 8×8 b16；2 个相邻 fp8 = 1 个 b16，于是 16×32 fp8 = 16×16 b16 = 4 个 m8n8 矩阵，`x4` 一次取回 `a0..a3`；B 存 `[N][K]` 用 `x2` 取 `b0/b1` | `22-fp8-gemm/fp8_gemm.cu`（`ldmatrix_x4/x2`） | 朴素按坐标取 4B → ldmatrix 后同尺寸仍受发射限制，但省 4× 载入指令；smem 行距 `BK+16` 消 bank | k32 步内 `a0/a1` 是 k 0-15、`a2/a3` 是 k16-31；地址 lane 公式 `row=(lane&7)+((lane>>3)&1)*8, col=(lane>>4)*16` |
+| K2 | **Hopper 上打满 FP8 峰值必须换 `wgmma`** | FP8/bf16 GEMM | `mma.sync` 走 SM80 兼容路径，发射带宽受限；`wgmma.m64n128k32` 异步、SS 直读 smem 描述符 | `22-fp8-gemm/fp8_gemm_wgmma.cu` | 同 shape：mma.sync 266 → **wgmma 768 TFLOPS（+2.89×）**；ncu `math_pipe_throttle` 1.12 → 消失 | FP8 的 wgmma asm 尾部操作数是 `p, scaleA, scaleB`（**3 个**，不是 bf16 的 5 个）；操作数编号：64 累加器后 `da=%64,db=%65,ped=%66,scA=%67,scB=%68` |
+| K3 | **FP8 的 K-major SW128 atom 与 bf16 逐字节同构** | wgmma SS 的 fp8 操作数 | CUTLASS `Layout_K_SW128_Atom_Bits` 按 bit 定义、`upcast` 到 fp8 后是 8 行×128 字节（bf16 是 8 行×64 元素=8×128B）；Swizzle<3,4,3> 作用在字节上 | `22-fp8-gemm/fp8_gemm_wgmma.cu`（`sw_off`/`make_desc_sw128`） | 20 篇的 `wgmma_sw128.cuh` 原样复用；`SBO=(K/128)*1024`、k32 步进 `(s/4)*1024+(s%4)*32` | GEMM 里 `B[N][K]` 天然 K-major，**无需转置**；attention 里 V 才要转置 |
+| K4 | **per-tensor 的 wgmma 主循环别每块 `wait0`** | 融合/GEMM 的 wgmma 软流水 | 累加器到最后才读时，用 `wgmma.commit_group` 每块提交、覆盖 stage 前只 `wgmma.wait_group STAGES-2`，允许 mma 跨块流水 | `fp8_gemm_wgmma.cu`（`wgmma_wait_group<N>`） | 256×128×BK128 s3：710 → **768 TFLOPS** | 循环外要补一次 `wait0` 再读 acc；wait_group 只保证「本 warp 的 mma」，覆盖 stage 前仍需 `__syncthreads` |
+| K5 | **per-block 缩放：每 128-k 块折算，注意相邻列各有 scale** | DeepSeek/V4 的 e4m3 + block scale | 固定 k 块内 `sa/sb` 是标量 → 先无缩放累加 128 个 k，再 `fin += sa*sb*acc`（DeepGEMM 的 final_accum） | `fp8_gemm_wgmma.cu`（PERBLOCK） | per-block 519 vs per-tensor 768（折算每块 `wait0` 切断流水）；`weight_block=128×128` 让 `sb` 每个 n-tile 退化成 1 个标量 | **c0 与 c1 是相邻两列，`sb` 不同**：`sbv0=sb[col]` 给 c0/c2、`sbv1=sb[col+1]` 给 c1/c3；只测试常数 scale 发现不了（会「通过」），必须用逐列随机 scale |
+| K6 | **采样 check 要打散到全区间，别被 `__launch_bounds__` 骗** | 扫 config 时防假阳性 | BM=256 需 4 warpgroup/512 线程，若写死 256 只会算一半行；若采样步长 `%BM` 后总是落在已算区域，就会「OK 且快一倍」 | `22-fp8-gemm/fp8_gemm_wgmma.cu` | 曾把 256×256 的假成绩当成 898 TFLOPS；修正后真值 218 | 用与 BM/BN 互质的步长（如 `i*1009`），或对每个输出块至少采一个点 |
+
 ### H. 优化器 / MuonClip（17）
 
 | # | 技巧 | 适用场景 | 原理 | 代码 | 实测收益 / 现象 | 坑 |
@@ -154,8 +167,8 @@
 | M1 | DeepSeek-V3/V4、Kimi-K2.6 | MLA | V3: H=128,DC=512,DR=64,DV=512（absorb 576/512）；V4-Pro: H=128,DC=448,rope64；V4.1: H=64；Kimi: H=64,qk=192,v=128,kv_lora=512 | 吸收成 MQA。15：TC 三 kernel 115.6（S=1024）。**16：单 kernel 融合**（online softmax 进 QK epilogue、C→A 零 shuffle、KV 常驻 smem）；用 smem 共享 P 消 QK 重复 → `f4s` **170.1**（S=1024）/ **184.7**（Sk=4096）；DRAM 仅 7%，瓶颈=L1 的 ldmatrix + 12.5% occ；距 FlashMLA 640 ~3.5×。**20：wgmma SS + SW128 swizzle** → 105.3/112.9/119.9（Sk=1k/2k/4k），仍 1.62× 慢于 `f4s`；ncu：L1 70.8%、occ 12.5%、221KB smem。**21：修 V 转置访存**（迭代顺序 dv 最快，L1 73%→46%，+35%）+ **`cp.async` 单缓冲预取下一块 K**（`long_scoreboard` 4.81→1.42）→ **159.8/193.2/198.8**（Sk=1k/4k/8k），**Sk≥4096 反超 `f4s`**，距 FlashMLA ~640 收窄到 **~3.3×**；ncu：tensor 30%、L1 46%、barrier 1.17/wait 1.01 成下一道墙 | `15-mla-attn/mla_attn.cu`、`16-mla-fused/mla_fused.cu`、`20-mla-wgmma-sw128/mla_wgmma_sw.cu`、`21-mla-wgmma-pipe/mla_pipe.cu`/`mla_pipe3.cu` | 15 tc: 2.53/9.41/36.58 ms；16 f4s: 1.72/3.18/6.33 ms；20 wgmma_sw: 2.77/5.17/9.74 ms；21 pipe3: 1.83/3.28/6.06/11.75 ms（Sk=1k/2k/4k/8k） |
 | M2 | DeepSeek-V4-Pro / V4.1 | DSA 稀疏注意力（一）：indexer + top-k | index_n_heads=64(V4-Pro)/32(V4.1), index_head_dim=128, index_topk=1024(V4-Pro)/512(V4.1) | 18：indexer 是「H^I 个小 GEMM 共享 K」，TC+head 合并 HG=2 达 **287–311 TFLOPS（31% 峰值）**；exact top-k 用 radix-select + per-warp 直方图 **6.75ms @S=32768**。DSA 端到端（indexer+topk+稀疏 MLA 估算）相对稠密 MLA：4k 2.9× / 16k 9.7× / 32k 14.8× / **64k 18.6×**，上限 ~30×。ncu：indexer DRAM 2.9%、L1 62%；topk IPC 3.35、issue 83% | `18-dsa-sparse/dsa.cu` | indexer S=16384 HG2/BN128 15.32ms；topk S=32768 6.75ms；dense MLA f4s S=65536 6914.8ms |
 | M2b | DeepSeek-V4-Pro / V4.1 | DSA 稀疏注意力（二）：稀疏 MLA 消费端 | H=128(V4-Pro)/64(V4.1), DC=512,DR=64,DV=512, topk=1024/512 | 19：CTA = 1 token × $B_H$ head，gather top-k 的 $c_{kv}$+$k_{rope}$、尾部 tile 掩码、共享 P、`cp.async` 双缓冲。实测 132–137 TFLOPS（~75% 稠密 f4s 效率）；Sk=64k 时 sparse attention 比稠密快 **48.6×**；`long_scoreboard` 4.56→1.46。DSA 端到端（含 18 的 indexer/topk）4k 2.5× / 32k 13.3× / 64k **17.3×**；距 FlashMLA sparse prefill 640 约 4.8× | `19-dsa-sparse-attn/sparse_mla.cu` | p2: 4096/8192/16384/32768/65536 → 136.3/129.9/133.3/132.4/127.9 TFLOPS；dense f4s 6.36→110.87 ms |
-| M3 | DeepSeek-V4 | MoE | 384 routed+1 shared, top-6, inter=3072 | *待填（20/21/29）* | — | — |
-| M4 | DeepSeek-V4 | FP8 GEMM | e4m3 + ue8m0, block 128×128 | *待填（22/23）* | — | — |
+| M3 | DeepSeek-V4 | MoE | 384 routed+1 shared, top-6, inter=3072 | *待填（23）* | — | — |
+| M4 | DeepSeek-V4-Pro / V4.1 | FP8 GEMM | hidden=7168, moe_inter=3072；e4m3 + ue8m0, weight_block 128×128（V4.1 为 32×32 + expert fp4）, activation dynamic 1×128 | 22：真实 shape 4096×3072×7168。①`mma.m16n8k32`+ldmatrix(b16)+`cp.async` 流水 → **266 TFLOPS（13.5%）**，ncu tensor pipe 41%、`math_pipe_throttle` 1.12（发射受限）；②换 `wgmma.m64n128k32`+SW128（与 bf16 同构）+`wait_group` 流水 → **768 TFLOPS（38.8%）**，+2.89×，达 cuBLAS FP8（1381.7）的 55.6%、超过同 shape cuBLAS bf16（800.7）的 96%；③per-block（1×128 激活 + 128×128 权重）→ 519（26.2%），折算切断流水。剩余瓶颈：25% occupancy / 1 CTA/SM / wgmma 等待 | `22-fp8-gemm/fp8_gemm.cu`、`fp8_gemm_wgmma.cu` | mma.sync 174→266；wgmma 602/717/**768**（s2/s3/256×128s3）；per-block 519；cuBLAS 1381.7 |
 | M5 | Kimi-K2.6（hidden=7168/18432, moe=2048, 384 experts） | MuonClip / Newton–Schulz 正交化 | 5 步 NS，`30N³`；测 N=2048/4096/8192 | 还原成 15 个 GEMM 的链式算子。17：自研 `mma` GEMM + 融合 `f·x+g` epilogue，**244 TFLOPS（N=4096, 24.7%）**；单 GEMM 269 vs cuBLAS 883（30.5%）；端到端 cuBLAS 链 529（2.17×）。ncu：L2 76%、occ 24%、DRAM 13% | `17-muonclip-ns/ns_muonclip.cu` | 17 N=2048/4096/8192: 1.31/8.44/65.4 ms |
 | M6 | Qwen3 | GQA attention | q/kv=40/8, 32/4, 64/4 | *待填（25）* | — | — |
 

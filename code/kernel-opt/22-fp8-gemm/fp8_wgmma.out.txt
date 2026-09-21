@@ -1,0 +1,37 @@
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z16fp8_wgmma_kernelILi256ELi256ELi128ELi3ELb0EEvPK13__nv_fp8_e4m3S2_PfiiiPKfS5_i' in line 19348
+[CUDA ERROR] cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm) at fp8_gemm_wgmma.cu:306 -> invalid argument
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+FP8 e4m3 wgmma GEMM: M=4096 N=3072 K=7168  FLOPs=180.39 GFLOP
+
+
+-- per-block scaling (sa per 1x128, sb per 1x128 here) --
+  [pb128x128x128s3] max_abs_err=8.152e-03 (ref~70.0) OK
+pb128x128x128s3   0.3476 ms    518.95 TFLOPS  ( 26.2% of fp8 peak)
+  [pb256x128x128s3] max_abs_err=8.152e-03 (ref~70.0) OK
+pb256x128x128s3   0.4828 ms    373.64 TFLOPS  ( 18.9% of fp8 peak)
+
+-- per-tensor --
+  [wg128x128x128s2] max_abs_err=2.568e-01 (ref~66.4) OK
+wg128x128x128s2   0.2995 ms    602.33 TFLOPS  ( 30.5% of fp8 peak)
+  [wg128x128x128s3] max_abs_err=2.568e-01 (ref~66.4) OK
+wg128x128x128s3   0.2516 ms    717.01 TFLOPS  ( 36.2% of fp8 peak)
+  [wg128x128x128s4] max_abs_err=2.568e-01 (ref~66.4) OK
+wg128x128x128s4   0.2819 ms    639.97 TFLOPS  ( 32.4% of fp8 peak)
+  [wg128x256x128s3] max_abs_err=2.568e-01 (ref~66.4) OK
+wg128x256x128s3   0.2388 ms    755.51 TFLOPS  ( 38.2% of fp8 peak)
+  [wg256x128x128s3] max_abs_err=2.568e-01 (ref~66.4) OK
+wg256x128x128s3   0.2348 ms    768.31 TFLOPS  ( 38.8% of fp8 peak)
+  [wg256x256x128s3] max_abs_err=2.568e-01 (ref~66.4) OK
+wg256x256x128s3   0.8261 ms    218.36 TFLOPS  ( 11.0% of fp8 peak)
+  [wg256x128x256s2] max_abs_err=2.568e-01 (ref~66.4) OK
+wg256x128x256s2   0.2959 ms    609.64 TFLOPS  ( 30.8% of fp8 peak)
+  [wg128x128x256s2] max_abs_err=2.568e-01 (ref~66.4) OK
+wg128x128x256s2   0.3790 ms    475.96 TFLOPS  ( 24.1% of fp8 peak)
+  [wg128x256x256s2] max_abs_err=2.568e-01 (ref~66.4) OK
+wg128x256x256s2   0.3149 ms    572.90 TFLOPS  ( 29.0% of fp8 peak)

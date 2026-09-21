@@ -1,0 +1,61 @@
+==PROF== Connected to process 116563 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/22-fp8-gemm/fp8_gemm.out)
+==PROF== Profiling "fp8_gemm_pipe": 0%....50%....100% - 10 passes
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+FP8 e4m3 GEMM (per-tensor): M=4096 N=3072 K=7168  FLOPs=180.39 GFLOP
+
+  [p128x64x128s4] sampled max_abs_err=0.000e+00 (ref~73.6) OK
+p128x64x128s4    0.6997 ms    257.80 TFLOPS  ( 13.0% of fp8 peak)
+==PROF== Disconnected from process 116563
+[116563] fp8_gemm.out@127.0.0.1
+  void fp8_gemm_pipe<128, 64, 128, 4, 4, 2>(const __nv_fp8_e4m3 *, const __nv_fp8_e4m3 *, float *, int, int, int, float) (48, 32, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.78
+    Elapsed Cycles                cycle      1262033
+    Memory Throughput                 %        52.17
+    DRAM Throughput                   %         7.91
+    Duration                         us       707.78
+    L1/TEX Cache Throughput           %        34.61
+    L2 Cache Throughput               %        52.17
+    SM Active Cycles              cycle   1214589.08
+    Compute (SM) Throughput           %        57.18
+    ----------------------- ----------- ------------
+
+    OPT   This workload exhibits low compute throughput and memory bandwidth utilization relative to the peak           
+          performance of this device. Achieved compute throughput and/or memory bandwidth below 60.0% of peak           
+          typically indicate latency issues. Look at Scheduler Statistics and Warp State Statistics for potential       
+          reasons.                                                                                                      
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            2
+    Block Limit Shared Mem                block            2
+    Block Limit Warps                     block            8
+    Theoretical Active Warps per SM        warp           16
+    Theoretical Occupancy                     %           25
+    Achieved Occupancy                        %        24.16
+    Achieved Active Warps Per SM           warp        15.46
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 75%                                                                                       
+          The 4.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (25.0%) is limited by the number of required      
+          registers, and the required amount of shared memory.                                                          
+
