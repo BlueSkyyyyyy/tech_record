@@ -1,0 +1,50 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+B=1 Lmax=8192 nsplit=2  n_blocks=512  KV bytes=0.03 GB
+  [check] v3 split=2x4           max_abs_err=4.829e-04 mean=4.279e-05
+v3 split=2x4                   0.0948 ms     354.1 GB/s  ( 10.6% of peak)
+        v3 split=2x4   0.0948 ms  1.77 TFLOPS
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+B=8 Lmax=8192 nsplit=2  n_blocks=3956  KV bytes=0.26 GB
+  [check] v3 split=2x4           max_abs_err=4.829e-04 mean=4.048e-05
+v3 split=2x4                   0.1280 ms    2023.1 GB/s  ( 60.3% of peak)
+        v3 split=2x4   0.1280 ms  10.48 TFLOPS
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+B=32 Lmax=8192 nsplit=2  n_blocks=15701  KV bytes=1.03 GB
+  [check] v3 split=2x4           max_abs_err=7.608e-04 mean=4.058e-05
+v3 split=2x4                   0.3817 ms    2694.0 GB/s  ( 80.4% of peak)
+        v3 split=2x4   0.3817 ms  14.07 TFLOPS
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+B=64 Lmax=8192 nsplit=2  n_blocks=31382  KV bytes=2.06 GB
+  [check] v3 split=2x4           max_abs_err=7.608e-04 mean=4.069e-05
+v3 split=2x4                   0.6774 ms    3033.6 GB/s  ( 90.5% of peak)
+        v3 split=2x4   0.6774 ms  15.85 TFLOPS
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+B=128 Lmax=8192 nsplit=2  n_blocks=62684  KV bytes=4.10 GB
+  [check] v3 split=2x4           max_abs_err=7.608e-04 mean=4.067e-05
+v3 split=2x4                   1.3743 ms    2986.7 GB/s  ( 89.1% of peak)
+        v3 split=2x4   1.3743 ms  15.63 TFLOPS

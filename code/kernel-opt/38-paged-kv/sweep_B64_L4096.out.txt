@@ -1,0 +1,61 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+B=64 Lmax=4096 nsplit=1  n_blocks=15704  KV bytes=1.03 GB
+  [check] v0 naive               max_abs_err=1.870e-06 mean=1.217e-07
+v0 naive                       1.3884 ms     740.2 GB/s  ( 22.1% of peak)
+        v0 naive    1.3884 ms  3.87 TFLOPS
+  [check] v1 shared              max_abs_err=1.870e-06 mean=1.215e-07
+v1 shared                      0.9207 ms    1116.2 GB/s  ( 33.3% of peak)
+        v1 shared   0.9207 ms  5.83 TFLOPS
+  [check] v2 split=1             max_abs_err=1.870e-06 mean=1.215e-07
+v2 split=1                     0.9212 ms    1115.5 GB/s  ( 33.3% of peak)
+        v2 split=1     0.9212 ms  5.83 TFLOPS
+  [check] v2 split=2             max_abs_err=9.775e-06 mean=4.048e-07
+v2 split=2                     0.8435 ms    1218.3 GB/s  ( 36.3% of peak)
+        v2 split=2     0.8435 ms  6.36 TFLOPS
+  [check] v2 split=4             max_abs_err=1.389e-05 mean=5.549e-07
+v2 split=4                     0.7743 ms    1327.2 GB/s  ( 39.6% of peak)
+        v2 split=4     0.7743 ms  6.93 TFLOPS
+  [check] v2 split=8             max_abs_err=1.645e-05 mean=6.258e-07
+v2 split=8                     0.7337 ms    1400.5 GB/s  ( 41.8% of peak)
+        v2 split=8     0.7337 ms  7.32 TFLOPS
+  [check] v2 split=16            max_abs_err=1.764e-05 mean=6.605e-07
+v2 split=16                    0.7037 ms    1460.3 GB/s  ( 43.6% of peak)
+        v2 split=16    0.7037 ms  7.63 TFLOPS
+  [check] v2 split=32            max_abs_err=1.800e-05 mean=6.783e-07
+v2 split=32                    0.7077 ms    1452.0 GB/s  ( 43.3% of peak)
+        v2 split=32    0.7077 ms  7.59 TFLOPS
+  [check] v3 split=1x4           max_abs_err=9.376e-04 mean=5.602e-05
+v3 split=1x4                   0.3811 ms    2696.5 GB/s  ( 80.4% of peak)
+        v3 split=1x4   0.3811 ms  14.09 TFLOPS
+  [check] v3 split=2x4           max_abs_err=8.000e-04 mean=4.195e-05
+v3 split=2x4                   0.3512 ms    2925.7 GB/s  ( 87.3% of peak)
+        v3 split=2x4   0.3512 ms  15.29 TFLOPS
+  [check] v3 split=4x4           max_abs_err=7.742e-04 mean=3.107e-05
+v3 split=4x4                   0.3758 ms    2734.5 GB/s  ( 81.6% of peak)
+        v3 split=4x4   0.3758 ms  14.29 TFLOPS
+  [check] v3 split=8x4           max_abs_err=6.947e-04 mean=2.261e-05
+v3 split=8x4                   0.3965 ms    2591.4 GB/s  ( 77.3% of peak)
+        v3 split=8x4   0.3965 ms  13.54 TFLOPS
+  [check] v3 split=16x4          max_abs_err=6.960e-04 mean=1.651e-05
+v3 split=16x4                  0.4333 ms    2371.8 GB/s  ( 70.8% of peak)
+        v3 split=16x4   0.4333 ms  12.39 TFLOPS
+  [check] v3 split=2x8           max_abs_err=7.029e-04 mean=3.040e-05
+v3 split=2x8                   0.4078 ms    2520.0 GB/s  ( 75.2% of peak)
+        v3 split=2x8   0.4078 ms  13.17 TFLOPS
+  [check] v3 split=4x8           max_abs_err=7.028e-04 mean=2.222e-05
+v3 split=4x8                   0.4463 ms    2302.6 GB/s  ( 68.7% of peak)
+        v3 split=4x8   0.4463 ms  12.03 TFLOPS
+  [check] v3 split=2x16          max_abs_err=6.959e-04 mean=2.224e-05
+v3 split=2x16                  0.4519 ms    2274.2 GB/s  ( 67.8% of peak)
+        v3 split=2x16   0.4519 ms  11.88 TFLOPS
+  [check] v3 split=4x16          max_abs_err=6.936e-04 mean=1.616e-05
+v3 split=4x16                  0.5226 ms    1966.5 GB/s  ( 58.7% of peak)
+        v3 split=4x16   0.5226 ms  10.27 TFLOPS
+  [check] dense                  max_abs_err=1.870e-06 mean=1.215e-07
+dense                          0.8817 ms    1165.5 GB/s  ( 34.8% of peak)
+        dense        0.8817 ms  6.09 TFLOPS
