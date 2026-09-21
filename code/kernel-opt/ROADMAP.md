@@ -85,6 +85,16 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 5. 更新本文件状态、`content`/`code` 索引、`agent_skills/kernel-opt.md` 里踩到的坑。
 6. commit & push 阶段性成果（建议每 1~2 篇一次）。
 
+## 无人值守（autopilot）
+
+`scripts/autopilot.sh` 会循环启动 opencode 无头会话，每轮独立完成一篇文章增量，
+自动提交推送。启动/查看/停止：`scripts/autopilot.sh {start|status|stop}`。
+日志在 `autopilot.log`。**agent 每轮开始前先看本文的「下一步」；整个系列完成后 `touch AUTOPILOT_STOP` 让循环停下。**
+
+## 阻塞
+
+（当前无）
+
 ## 当前进度
 
 - 2026-09-21：搭建容器 `kernel_lab` 与 `scripts/`、`common/cuda_utils.cuh`，起草路线图。

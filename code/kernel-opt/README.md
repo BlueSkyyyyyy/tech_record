@@ -30,6 +30,23 @@ scripts/ncu.sh 02-first-kernel/vector_add.cu --set full --kernel-name regex:add
 
 环境变量：`ARCH`（默认 `sm_90`）、`GPU`（默认 0）、`NVCC_FLAGS`。
 
+## 无人值守自驱（autopilot）
+
+`scripts/autopilot.sh` 会**反复启动 opencode 无头会话**（`opencode run --auto`），每轮推进
+`ROADMAP.md` 里的一篇文章增量（写代码 → 实测 → ncu → 写文 → 发布 → 更新路线图），
+适合离开电脑后持续工作：
+
+```bash
+scripts/autopilot.sh start     # 后台启动（setsid 脱离终端，关终端也不停）
+scripts/autopilot.sh status    # 查看状态 + 最近日志
+scripts/autopilot.sh stop      # 停止
+scripts/autopilot.sh run       # 前台运行（调试）
+```
+
+- 日志：`code/kernel-opt/autopilot.log`；停止文件：`AUTOPILOT_STOP`（agent 做完整个系列也会自动创建）。
+- 可调：`MAX_ROUNDS`（默认 40）、`SLEEP_BETWEEN`（默认 30s）、`TIMEOUT_PER_ROUND`（默认 5400s）。
+- 连续失败 3 次会自行停止；`autopilot.lock` 防止重复启动。
+
 ## 约定
 
 - 每个 `.cu` 都能独立编译运行，自带参考实现对拍与计时输出。
