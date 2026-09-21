@@ -1,0 +1,223 @@
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function '_Z15gemv_a8h_kernelILi2ELi4ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8h_kernelILi2ELi4ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 51 registers, used 1 barriers
+ptxas info    : Compile time = 58.715 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8h_kernelILi4ELi2ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8h_kernelILi4ELi2ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 52 registers, used 1 barriers
+ptxas info    : Compile time = 58.692 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8h_kernelILi8ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8h_kernelILi8ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 53 registers, used 1 barriers
+ptxas info    : Compile time = 71.623 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8h_kernelILi4ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8h_kernelILi4ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 43 registers, used 1 barriers
+ptxas info    : Compile time = 46.322 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8h_kernelILi2ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8h_kernelILi2ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers
+ptxas info    : Compile time = 30.371 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8h_kernelILi1ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8h_kernelILi1ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers
+ptxas info    : Compile time = 23.793 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8g_kernelILi32ELi1ELi5120ELi1EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8g_kernelILi32ELi1ELi5120ELi1EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 135 registers, used 1 barriers
+ptxas info    : Compile time = 975.311 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8g_kernelILi16ELi1ELi5120ELi2EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8g_kernelILi16ELi1ELi5120ELi2EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 70 registers, used 1 barriers
+ptxas info    : Compile time = 436.810 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8g_kernelILi8ELi1ELi5120ELi2EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8g_kernelILi8ELi1ELi5120ELi2EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 48 registers, used 1 barriers
+ptxas info    : Compile time = 211.501 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8g_kernelILi8ELi1ELi5120ELi4EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8g_kernelILi8ELi1ELi5120ELi4EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 44 registers, used 1 barriers
+ptxas info    : Compile time = 188.106 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8g_kernelILi4ELi1ELi5120ELi4EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8g_kernelILi4ELi1ELi5120ELi4EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers
+ptxas info    : Compile time = 85.202 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8g_kernelILi2ELi1ELi5120ELi4EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8g_kernelILi2ELi1ELi5120ELi4EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers
+ptxas info    : Compile time = 51.133 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8e_kernelILi8ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8e_kernelILi8ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 60 registers, used 1 barriers
+ptxas info    : Compile time = 180.047 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8e_kernelILi4ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8e_kernelILi4ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers
+ptxas info    : Compile time = 94.759 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8e_kernelILi2ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8e_kernelILi2ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers
+ptxas info    : Compile time = 51.274 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8e_kernelILi1ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8e_kernelILi1ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers
+ptxas info    : Compile time = 33.855 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8c_kernelILi8ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8c_kernelILi8ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers
+ptxas info    : Compile time = 210.943 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8c_kernelILi4ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8c_kernelILi4ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers
+ptxas info    : Compile time = 97.813 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8c_kernelILi2ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8c_kernelILi2ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers
+ptxas info    : Compile time = 53.122 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8c_kernelILi1ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8c_kernelILi1ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers
+ptxas info    : Compile time = 35.036 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8b_kernelILi2ELi4ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8b_kernelILi2ELi4ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 54 registers, used 1 barriers
+ptxas info    : Compile time = 73.213 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8b_kernelILi4ELi2ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8b_kernelILi4ELi2ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 48 registers, used 1 barriers
+ptxas info    : Compile time = 113.254 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8b_kernelILi8ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8b_kernelILi8ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 44 registers, used 1 barriers
+ptxas info    : Compile time = 182.049 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8b_kernelILi4ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8b_kernelILi4ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers
+ptxas info    : Compile time = 83.474 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8b_kernelILi2ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8b_kernelILi2ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers
+ptxas info    : Compile time = 49.652 ms
+ptxas info    : Compiling entry function '_Z15gemv_a8b_kernelILi1ELi1ELi5120EEvPKaPKfPKhS3_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a8b_kernelILi1ELi1ELi5120EEvPKaPKfPKhS3_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers
+ptxas info    : Compile time = 33.172 ms
+ptxas info    : Compiling entry function '_Z15gemv_a16_kernelILi4ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a16_kernelILi4ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 55 registers, used 1 barriers
+ptxas info    : Compile time = 141.937 ms
+ptxas info    : Compiling entry function '_Z15gemv_a16_kernelILi2ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a16_kernelILi2ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 38 registers, used 1 barriers
+ptxas info    : Compile time = 65.450 ms
+ptxas info    : Compiling entry function '_Z15gemv_a16_kernelILi1ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii' for 'sm_90'
+ptxas info    : Function properties for _Z15gemv_a16_kernelILi1ELi1ELi5120EEvPK13__nv_bfloat16PKhPKfPfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 34 registers, used 1 barriers
+ptxas info    : Compile time = 38.995 ms
+ptxas info    : Compiling entry function '_Z21wread_roofline_kernelPKhPKfPfii' for 'sm_90'
+ptxas info    : Function properties for _Z21wread_roofline_kernelPKhPKfPfii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers
+ptxas info    : Compile time = 3.643 ms
+ptxas info    : Compiling entry function '_Z14quant_x_kernelPK13__nv_bfloat16PaPfii' for 'sm_90'
+ptxas info    : Function properties for _Z14quant_x_kernelPK13__nv_bfloat16PaPfii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 20 registers, used 0 barriers
+ptxas info    : Compile time = 11.833 ms
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A8 GEMV: M=1 N=17408 K=5120 group=128
+FLOPs = 0.178 GFLOP ; W_int4 = 44.6 MB ; scales = 2.8 MB ; W+scale = 47.3 MB ; x_int8 = 0.01 MB
+
+roof_g528                     0.0190 ms      9.39 TFLOPS ( 0.9% bf16)  W-bw  2347.4 GB/s  W+s  2494.1 (74.4% HBM)
+roof_g1088                    0.0212 ms      8.41 TFLOPS ( 0.9% bf16)  W-bw  2102.8 GB/s  W+s  2234.3 (66.6% HBM)
+roof_g1188                    0.0203 ms      8.80 TFLOPS ( 0.9% bf16)  W-bw  2199.7 GB/s  W+s  2337.2 (69.7% HBM)
+roof_g2112                    0.0197 ms      9.07 TFLOPS ( 0.9% bf16)  W-bw  2267.3 GB/s  W+s  2409.0 (71.9% HBM)
+roof_g4224                    0.0199 ms      8.97 TFLOPS ( 0.9% bf16)  W-bw  2242.6 GB/s  W+s  2382.7 (71.1% HBM)
+quant_x (M=1, 40 groups): 0.00253 ms  (W4A8 的额外前置 kernel)
+
+  [w4a16_r1              ] max_abs_err=1.658e-07 (ref~2.79) rel=5.95e-08 OK
+w4a16_r1                      0.0309 ms      5.77 TFLOPS ( 0.6% bf16)  W-bw  1441.8 GB/s  W+s  1531.9 (45.7% HBM)
+  [w4a16_r2              ] max_abs_err=1.658e-07 (ref~2.79) rel=5.95e-08 OK
+w4a16_r2                      0.0283 ms      6.29 TFLOPS ( 0.6% bf16)  W-bw  1572.5 GB/s  W+s  1670.8 (49.8% HBM)
+  [w4a16_r4              ] max_abs_err=1.658e-07 (ref~2.79) rel=5.95e-08 OK
+w4a16_r4                      0.0312 ms      5.72 TFLOPS ( 0.6% bf16)  W-bw  1429.5 GB/s  W+s  1518.8 (45.3% HBM)
+  [w4a8_r1               ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8_r1                       0.0231 ms      7.71 TFLOPS ( 0.8% bf16)  W-bw  1927.2 GB/s  W+s  2047.7 (61.1% HBM)
+  [w4a8_r2               ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8_r2                       0.0226 ms      7.88 TFLOPS ( 0.8% bf16)  W-bw  1969.7 GB/s  W+s  2092.8 (62.4% HBM)
+  [w4a8_r4               ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8_r4                       0.0261 ms      6.83 TFLOPS ( 0.7% bf16)  W-bw  1707.3 GB/s  W+s  1814.0 (54.1% HBM)
+  [w4a8_r8               ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8_r8                       0.0313 ms      5.69 TFLOPS ( 0.6% bf16)  W-bw  1422.3 GB/s  W+s  1511.1 (45.1% HBM)
+  [w4a8c_r1              ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8c_r1                      0.0237 ms      7.53 TFLOPS ( 0.8% bf16)  W-bw  1881.8 GB/s  W+s  1999.5 (59.6% HBM)
+  [w4a8c_r2              ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8c_r2                      0.0254 ms      7.01 TFLOPS ( 0.7% bf16)  W-bw  1753.5 GB/s  W+s  1863.1 (55.6% HBM)
+  [w4a8c_r4              ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8c_r4                      0.0283 ms      6.31 TFLOPS ( 0.6% bf16)  W-bw  1576.7 GB/s  W+s  1675.2 (50.0% HBM)
+  [w4a8c_r8              ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8c_r8                      0.0379 ms      4.71 TFLOPS ( 0.5% bf16)  W-bw  1177.4 GB/s  W+s  1251.0 (37.3% HBM)
+  [w4a8e_r1              ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8e_r1                      0.0230 ms      7.74 TFLOPS ( 0.8% bf16)  W-bw  1933.9 GB/s  W+s  2054.8 (61.3% HBM)
+  [w4a8e_r2              ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8e_r2                      0.0229 ms      7.79 TFLOPS ( 0.8% bf16)  W-bw  1946.7 GB/s  W+s  2068.3 (61.7% HBM)
+  [w4a8e_r4              ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8e_r4                      0.0248 ms      7.18 TFLOPS ( 0.7% bf16)  W-bw  1795.1 GB/s  W+s  1907.3 (56.9% HBM)
+  [w4a8e_r8              ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8e_r8                      0.0299 ms      5.97 TFLOPS ( 0.6% bf16)  W-bw  1492.0 GB/s  W+s  1585.3 (47.3% HBM)
+  [w4a8g_w4_r2           ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8g_w4_r2                   0.0240 ms      7.41 TFLOPS ( 0.7% bf16)  W-bw  1853.7 GB/s  W+s  1969.6 (58.8% HBM)
+  [w4a8g_w4_r4           ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8g_w4_r4                   0.0251 ms      7.10 TFLOPS ( 0.7% bf16)  W-bw  1774.7 GB/s  W+s  1885.7 (56.2% HBM)
+  [w4a8g_w4_r8           ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8g_w4_r8                   0.0296 ms      6.03 TFLOPS ( 0.6% bf16)  W-bw  1507.7 GB/s  W+s  1601.9 (47.8% HBM)
+  [w4a8g_w2_r8           ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8g_w2_r8                   0.0289 ms      6.18 TFLOPS ( 0.6% bf16)  W-bw  1544.2 GB/s  W+s  1640.7 (48.9% HBM)
+  [w4a8g_w2_r16          ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8g_w2_r16                  0.0429 ms      4.15 TFLOPS ( 0.4% bf16)  W-bw  1038.3 GB/s  W+s  1103.2 (32.9% HBM)
+  [w4a8g_w1_r32          ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8g_w1_r32                  0.0706 ms      2.53 TFLOPS ( 0.3% bf16)  W-bw   631.5 GB/s  W+s   671.0 (20.0% HBM)
+  [w4a8h_r1              ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8h_r1                      0.0193 ms      9.23 TFLOPS ( 0.9% bf16)  W-bw  2306.8 GB/s  W+s  2450.9 (73.1% HBM)
+  [w4a8h_r2              ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8h_r2                      0.0200 ms      8.90 TFLOPS ( 0.9% bf16)  W-bw  2225.7 GB/s  W+s  2364.8 (70.5% HBM)
+  [w4a8h_r4              ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8h_r4                      0.0185 ms      9.63 TFLOPS ( 1.0% bf16)  W-bw  2408.4 GB/s  W+s  2558.9 (76.3% HBM)
+  [w4a8h_r8              ] max_abs_err=1.125e-02 (ref~2.79) rel=4.04e-03 OK
+w4a8h_r8                      0.0195 ms      9.12 TFLOPS ( 0.9% bf16)  W-bw  2280.2 GB/s  W+s  2422.7 (72.3% HBM)

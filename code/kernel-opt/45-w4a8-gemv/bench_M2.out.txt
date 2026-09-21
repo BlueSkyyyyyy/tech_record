@@ -1,0 +1,14 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A8 GEMV: M=2 N=17408 K=5120 group=128
+FLOPs = 0.357 GFLOP ; W_int4 = 44.6 MB ; scales = 2.8 MB ; W+scale = 47.3 MB ; x_int8 = 0.01 MB
+
+quant_x (M=2, 80 groups): 0.00256 ms  (W4A8 的额外前置 kernel)
+
+  [w4a8h_r4_mt2          ] max_abs_err=1.065e-02 (ref~2.30) rel=4.62e-03 OK
+w4a8h_r4_mt2                  0.0241 ms     14.78 TFLOPS ( 1.5% bf16)  W-bw  1847.4 GB/s  W+s  1962.9 (58.6% HBM)
