@@ -1,0 +1,49 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+=========== 实验 1：ILP × occupancy（fp32 FMA 链）=======
+  ILP=1  1 blk/SM (12.5%)          29.87 TFLOPS  ( 44.7% of fp32 peak)
+  ILP=2  1 blk/SM (12.5%)          53.55 TFLOPS  ( 80.0% of fp32 peak)
+  ILP=4  1 blk/SM (12.5%)          52.86 TFLOPS  ( 79.0% of fp32 peak)
+  ILP=8  1 blk/SM (12.5%)          52.83 TFLOPS  ( 79.0% of fp32 peak)
+  ILP=1  8 blk/SM (100%)           63.66 TFLOPS  ( 95.2% of fp32 peak)
+  ILP=2  8 blk/SM (100%)           64.28 TFLOPS  ( 96.1% of fp32 peak)
+  ILP=4  8 blk/SM (100%)           63.05 TFLOPS  ( 94.3% of fp32 peak)
+  ILP=8  8 blk/SM (100%)           62.97 TFLOPS  ( 94.1% of fp32 peak)
+
+=========== GEMM M=N=K=2048（17.18 GFLOP）===========
+
+---- 实验 2：对同一 GEMM 配置强行提高驻留 block 数 ----
+  plain            regs=128 spill(local)=0     smem=8192   | 2 blk/SM  occ= 25.0%
+  MINB=1           regs=119 spill(local)=0     smem=8192   | 2 blk/SM  occ= 25.0%
+  MINB=2           regs=128 spill(local)=0     smem=8192   | 2 blk/SM  occ= 25.0%
+  MINB=3           regs=80  spill(local)=296   smem=8192   | 3 blk/SM  occ= 37.5%
+  MINB=4           regs=64  spill(local)=520   smem=8192   | 4 blk/SM  occ= 50.0%
+  [plain             ] max_abs_err = 8.940e-08 OK
+plain                    0.5612 ms     30.61 TFLOPS  ( 45.8% of fp32 peak)
+  [lb<1>             ] max_abs_err = 8.940e-08 OK
+lb<1>                    0.5543 ms     30.99 TFLOPS  ( 46.3% of fp32 peak)
+  [lb<2>             ] max_abs_err = 8.940e-08 OK
+lb<2>                    0.5607 ms     30.64 TFLOPS  ( 45.8% of fp32 peak)
+  [lb<3>             ] max_abs_err = 8.940e-08 OK
+lb<3>                    2.2659 ms      7.58 TFLOPS  ( 11.3% of fp32 peak)
+  [lb<4>             ] max_abs_err = 8.940e-08 OK
+lb<4>                    4.8689 ms      3.53 TFLOPS  (  5.3% of fp32 peak)
+
+---- 实验 3：thread tile 扫描（同 block 输出规模，不同每线程复用度）----
+  64x64 t2x2       regs=32  spill(local)=0     smem=4096   | 2 blk/SM  occ=100.0%
+  64x64 t4x4       regs=66  spill(local)=0     smem=4096   | 3 blk/SM  occ= 37.5%
+  64x64 t8x8       regs=168 spill(local)=0     smem=4096   | 6 blk/SM  occ= 18.8%
+  128x128 t8x8     regs=128 spill(local)=0     smem=8192   | 2 blk/SM  occ= 25.0%
+  [64x64 t2x2        ] max_abs_err = 8.940e-08 OK
+64x64 t2x2               1.3674 ms     12.56 TFLOPS  ( 18.8% of fp32 peak)
+  [64x64 t4x4        ] max_abs_err = 8.940e-08 OK
+64x64 t4x4               0.9396 ms     18.28 TFLOPS  ( 27.3% of fp32 peak)
+  [64x64 t8x8        ] max_abs_err = 8.940e-08 OK
+64x64 t8x8               1.0857 ms     15.82 TFLOPS  ( 23.7% of fp32 peak)
+  [128x128 t8x8      ] max_abs_err = 8.940e-08 OK
+128x128 t8x8             0.5487 ms     31.31 TFLOPS  ( 46.8% of fp32 peak)
