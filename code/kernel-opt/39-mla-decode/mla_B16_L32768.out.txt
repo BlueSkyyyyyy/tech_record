@@ -1,0 +1,43 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+MLA absorbed decode: H=128 B=16 L=32768  (DC=512 DR=64 DV=512 DK=576)
+FLOPs = 0.146 TFLOP ; bf16 KV bytes = 0.604 GB (AI=242) ; fp8 bytes = 0.302 GB
+
+     [v1  ] max_abs_err=8.148e-03 (ref~6.737) OK
+v1   ROWG=4 DVGRP=4 KT=64  warps=16 bf16         3.3842 ms    178.5 GB/s (  5.3% HBM)     43.2 TFLOPS (  4.4%)
+     [v2  ] max_abs_err=8.337e-03 (ref~6.737) OK
+v2   ROWG=4 DVGRP=2 KT=32  warps=8  bf16+pipe    3.0935 ms    195.2 GB/s (  5.8% HBM)     47.2 TFLOPS (  4.8%)
+     [v2  ] max_abs_err=8.148e-03 (ref~6.737) OK
+v2   ROWG=2 DVGRP=2 KT=64  warps=4  bf16+pipe    1.6632 ms    363.1 GB/s ( 10.8% HBM)     87.8 TFLOPS (  8.9%)
+     [v2  ] max_abs_err=8.148e-03 (ref~6.737) OK
+v2   ROWG=2 DVGRP=4 KT=64  warps=8  bf16+pipe    1.7451 ms    346.1 GB/s ( 10.3% HBM)     83.7 TFLOPS (  8.5%)
+     [v2  ] max_abs_err=8.148e-03 (ref~6.737) OK
+v2   ROWG=4 DVGRP=4 KT=64  warps=16 bf16         3.3015 ms    182.9 GB/s (  5.5% HBM)     44.2 TFLOPS (  4.5%)
+     [v3  ] max_abs_err=3.294e-06 (ref~0.003) OK
+v3   ROWG=4 DVGRP=4 KT=64  warps=16 fp8         3.4833 ms     86.7 GB/s (  2.6% HBM)     41.9 TFLOPS (  4.2%)
+     [v3  ] max_abs_err=0.000e+00 (ref~0.003) OK
+v3   ROWG=4 DVGRP=2 KT=32  warps=8  fp8+pipe    3.8416 ms     78.6 GB/s (  2.3% HBM)     38.0 TFLOPS (  3.8%)
+     [v3  ] max_abs_err=0.000e+00 (ref~0.003) OK
+v3   ROWG=2 DVGRP=2 KT=64  warps=4  fp8+pipe    2.8044 ms    107.7 GB/s (  3.2% HBM)     52.1 TFLOPS (  5.3%)
+     [v3  ] max_abs_err=0.000e+00 (ref~0.003) OK
+v3   ROWG=2 DVGRP=4 KT=64  warps=8  fp8+pipe    2.6851 ms    112.5 GB/s (  3.4% HBM)     54.4 TFLOPS (  5.5%)
+     [v3p ] max_abs_err=0.000e+00 (ref~0.003) OK
+v3p  ROWG=4 DVGRP=2 KT=32  warps=8  fp8+pipe    4.2580 ms     70.9 GB/s (  2.1% HBM)     34.3 TFLOPS (  3.5%)
+p    ROWG=4 DVGRP=2 KT=32  warps=8  bf16+pipe    3.0545 ms    197.7 GB/s (  5.9% HBM)     47.8 TFLOPS (  4.8%)
+s    ROWG=4 DVGRP=2 KT=32  warps=8  bf16+pipe    3.0541 ms    197.8 GB/s (  5.9% HBM)     47.8 TFLOPS (  4.8%)
+s    ROWG=4 DVGRP=2 KT=64  warps=8  bf16         3.5802 ms    168.7 GB/s (  5.0% HBM)     40.8 TFLOPS (  4.1%)
+s    ROWG=4 DVGRP=4 KT=64  warps=16 bf16         3.3000 ms    183.0 GB/s (  5.5% HBM)     44.3 TFLOPS (  4.5%)
+s    ROWG=2 DVGRP=4 KT=64  warps=8  bf16+pipe    1.7470 ms    345.7 GB/s ( 10.3% HBM)     83.6 TFLOPS (  8.5%)
+s    ROWG=2 DVGRP=4 KT=128 warps=8  bf16         2.2743 ms    265.6 GB/s (  7.9% HBM)     64.2 TFLOPS (  6.5%)
+s    ROWG=2 DVGRP=8 KT=128 warps=16 bf16         2.1240 ms    284.4 GB/s (  8.5% HBM)     68.8 TFLOPS (  7.0%)
+s    ROWG=2 DVGRP=2 KT=64  warps=4  bf16+pipe    1.6633 ms    363.1 GB/s ( 10.8% HBM)     87.8 TFLOPS (  8.9%)
+s    ROWG=2 DVGRP=2 KT=32  warps=4  bf16+pipe    2.1816 ms    276.9 GB/s (  8.3% HBM)     66.9 TFLOPS (  6.8%)
+s    ROWG=4 DVGRP=2 KT=32  warps=8  fp8+pipe    3.8402 ms     78.6 GB/s (  2.3% HBM)     38.0 TFLOPS (  3.8%)
+s    ROWG=2 DVGRP=4 KT=64  warps=8  fp8+pipe    2.6855 ms    112.5 GB/s (  3.4% HBM)     54.4 TFLOPS (  5.5%)
+s    ROWG=2 DVGRP=4 KT=128 warps=8  fp8         2.5144 ms    120.1 GB/s (  3.6% HBM)     58.1 TFLOPS (  5.9%)
+s    ROWG=2 DVGRP=8 KT=128 warps=16 fp8         2.6447 ms    114.2 GB/s (  3.4% HBM)     55.2 TFLOPS (  5.6%)
