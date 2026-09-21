@@ -1,0 +1,7 @@
+== proj GEMM config sweep (separate process each, ratio=128, M=32768)
+  128x128s2          0.8903 ms    540.29 TFLOPS  ( 54.6%)
+  128x128s3          0.9088 ms    529.30 TFLOPS  ( 53.5%)
+  128x256s3          0.7801 ms    616.64 TFLOPS  ( 62.3%)
+  256x128s2          0.8448 ms    569.43 TFLOPS  ( 57.6%)
+  256x128s3          0.8108 ms    593.26 TFLOPS  ( 60.0%)
+  256x128s4          0.7403 ms    649.75 TFLOPS  ( 65.7%)

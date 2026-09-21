@@ -1,0 +1,63 @@
+### pass 1 (warmup)
+device=NVIDIA H100 80GB HBM3  ratio=128 coff=1 M=8192 N=1024 D=7168
+[eager fp32 reference]        0.4684 ms
+[two fp32 matmul]             0.3072 ms
+[merged bf16 cublas GEMM]     0.1497 ms  (  803.48 TFLOPS)
+[two bf16 cublas GEMM]        0.1576 ms
+device=NVIDIA H100 80GB HBM3  ratio=128 coff=1 M=16384 N=1024 D=7168
+[eager fp32 reference]        0.8515 ms
+[two fp32 matmul]             0.6057 ms
+[merged bf16 cublas GEMM]     0.2983 ms  (  806.36 TFLOPS)
+[two bf16 cublas GEMM]        0.3086 ms
+device=NVIDIA H100 80GB HBM3  ratio=128 coff=1 M=32768 N=1024 D=7168
+[eager fp32 reference]        1.5835 ms
+[two fp32 matmul]             1.3142 ms
+[merged bf16 cublas GEMM]     0.5954 ms  (  807.95 TFLOPS)
+[two bf16 cublas GEMM]        0.6162 ms
+device=NVIDIA H100 80GB HBM3  ratio=4 coff=2 M=8192 N=2048 D=7168
+[eager fp32 reference]        0.8453 ms
+[two fp32 matmul]             0.6026 ms
+[merged bf16 cublas GEMM]     0.2961 ms  (  812.32 TFLOPS)
+[two bf16 cublas GEMM]        0.3000 ms
+device=NVIDIA H100 80GB HBM3  ratio=4 coff=2 M=16384 N=2048 D=7168
+[eager fp32 reference]        1.6269 ms
+[two fp32 matmul]             1.2403 ms
+[merged bf16 cublas GEMM]     0.5894 ms  (  816.19 TFLOPS)
+[two bf16 cublas GEMM]        0.6061 ms
+device=NVIDIA H100 80GB HBM3  ratio=4 coff=2 M=32768 N=2048 D=7168
+[eager fp32 reference]        3.1988 ms
+[two fp32 matmul]             2.6305 ms
+[merged bf16 cublas GEMM]     1.1819 ms  (  814.04 TFLOPS)
+[two bf16 cublas GEMM]        1.2783 ms
+
+### pass 2 (reported)
+device=NVIDIA H100 80GB HBM3  ratio=128 coff=1 M=8192 N=1024 D=7168
+[eager fp32 reference]        0.4678 ms
+[two fp32 matmul]             0.3072 ms
+[merged bf16 cublas GEMM]     0.1498 ms  (  802.73 TFLOPS)
+[two bf16 cublas GEMM]        0.1577 ms
+device=NVIDIA H100 80GB HBM3  ratio=128 coff=1 M=16384 N=1024 D=7168
+[eager fp32 reference]        0.8562 ms
+[two fp32 matmul]             0.6137 ms
+[merged bf16 cublas GEMM]     0.2985 ms  (  805.87 TFLOPS)
+[two bf16 cublas GEMM]        0.3093 ms
+device=NVIDIA H100 80GB HBM3  ratio=128 coff=1 M=32768 N=1024 D=7168
+[eager fp32 reference]        1.5773 ms
+[two fp32 matmul]             1.2617 ms
+[merged bf16 cublas GEMM]     0.5950 ms  (  808.50 TFLOPS)
+[two bf16 cublas GEMM]        0.6299 ms
+device=NVIDIA H100 80GB HBM3  ratio=4 coff=2 M=8192 N=2048 D=7168
+[eager fp32 reference]        0.8445 ms
+[two fp32 matmul]             0.5831 ms
+[merged bf16 cublas GEMM]     0.2962 ms  (  811.95 TFLOPS)
+[two bf16 cublas GEMM]        0.3000 ms
+device=NVIDIA H100 80GB HBM3  ratio=4 coff=2 M=16384 N=2048 D=7168
+[eager fp32 reference]        1.6352 ms
+[two fp32 matmul]             1.1602 ms
+[merged bf16 cublas GEMM]     0.5893 ms  (  816.32 TFLOPS)
+[two bf16 cublas GEMM]        0.6213 ms
+device=NVIDIA H100 80GB HBM3  ratio=4 coff=2 M=32768 N=2048 D=7168
+[eager fp32 reference]        3.2195 ms
+[two fp32 matmul]             2.6026 ms
+[merged bf16 cublas GEMM]     1.1850 ms  (  811.86 TFLOPS)
+[two bf16 cublas GEMM]        1.3984 ms
