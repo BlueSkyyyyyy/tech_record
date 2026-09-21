@@ -111,6 +111,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 34. [MoE 专家 FFN 的 FP8 化：权重流量减半换来 1.9~2.2×，以及 unpermute 融合在 FP8 下为什么失效](content/posts/cuda-kernel-opt-34-fused-moe-fp8/index.md)
 35. [DSA Compressor：把 KV 用「门控池化」压成更少的 key，以及一个被 L2 卡住的合并投影](content/posts/cuda-kernel-opt-35-dsa-compressor/index.md)
 36. [DSA Compressor 投影的「L2 墙」拆解：三种压 L2 的手段全负，以及用 FP8 把投影推到 1.4×](content/posts/cuda-kernel-opt-36-dsa-compressor-fp8/index.md)
+37. [FP8 per-block GEMM 的第三条路：把 ue8m0 的 2 的幂 scale 折进操作数（940→1208 TFLOPS）](content/posts/cuda-kernel-opt-37-fp8-pb-prescale/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 

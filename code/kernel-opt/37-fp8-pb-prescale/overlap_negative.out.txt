@@ -1,0 +1,72 @@
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z20fp8_tma_pb_ws_kernelILi64ELi256ELi128ELi4ELi1ELi240ELi40EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 46192
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+ptxas info    : (C7514) Potential Performance Loss: wgmma.mma_async instructions are serialized due to non wgmma instructions reading accumulator registers of  a wgmma between start and end of the pipeline stage in the function '_Z20fp8_tma_pb_ws_kernelILi64ELi128ELi128ELi6ELi1ELi240ELi40EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 0
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+ptxas info    : (C7514) Potential Performance Loss: wgmma.mma_async instructions are serialized due to non wgmma instructions reading accumulator registers of  a wgmma between start and end of the pipeline stage in the function '_Z20fp8_tma_pb_ws_kernelILi64ELi128ELi128ELi5ELi1ELi240ELi40EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 0
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+ptxas info    : (C7514) Potential Performance Loss: wgmma.mma_async instructions are serialized due to non wgmma instructions reading accumulator registers of  a wgmma between start and end of the pipeline stage in the function '_Z20fp8_tma_pb_ws_kernelILi64ELi128ELi128ELi4ELi1ELi240ELi40EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 0
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z20fp8_tma_pb_ws_kernelILi128ELi256ELi128ELi4ELi1ELi232ELi40EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 30080
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z20fp8_tma_pb_ws_kernelILi128ELi256ELi128ELi3ELi1ELi232ELi40EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 26447
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+ptxas info    : (C7514) Potential Performance Loss: wgmma.mma_async instructions are serialized due to non wgmma instructions reading accumulator registers of  a wgmma between start and end of the pipeline stage in the function '_Z20fp8_tma_pb_ws_kernelILi128ELi128ELi128ELi4ELi1ELi0ELi0EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 0
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+ptxas info    : (C7514) Potential Performance Loss: wgmma.mma_async instructions are serialized due to non wgmma instructions reading accumulator registers of  a wgmma between start and end of the pipeline stage in the function '_Z20fp8_tma_pb_ws_kernelILi128ELi128ELi128ELi6ELi1ELi232ELi40EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 0
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+ptxas info    : (C7514) Potential Performance Loss: wgmma.mma_async instructions are serialized due to non wgmma instructions reading accumulator registers of  a wgmma between start and end of the pipeline stage in the function '_Z20fp8_tma_pb_ws_kernelILi128ELi128ELi128ELi5ELi1ELi232ELi40EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 0
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+ptxas info    : (C7514) Potential Performance Loss: wgmma.mma_async instructions are serialized due to non wgmma instructions reading accumulator registers of  a wgmma between start and end of the pipeline stage in the function '_Z20fp8_tma_pb_ws_kernelILi128ELi128ELi128ELi4ELi1ELi232ELi40EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 0
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+ptxas info    : (C7514) Potential Performance Loss: wgmma.mma_async instructions are serialized due to non wgmma instructions reading accumulator registers of  a wgmma between start and end of the pipeline stage in the function '_Z20fp8_tma_pb_ws_kernelILi128ELi128ELi128ELi3ELi1ELi232ELi40EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 0
+ptxas info    : (C7507) Potential Performance Loss: 'setmaxnreg' ignored to maintain minimum register requirements.
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+FP8 e4m3 per-block WS-reg GEMM: M=4096 N=3072 K=7168  FLOPs=180.39 GFLOP
+
+-- A. 单累加器 + wait0（stages）--
+  [s0_128x128s3_off      ] max_abs_err=8.152e-03 (ref~70.0) OK
+s0_128x128s3_off         0.2067 ms    872.84 TFLOPS  ( 44.1% of fp8 peak)
+  [s0_128x128s4_off      ] max_abs_err=8.152e-03 (ref~70.0) OK
+s0_128x128s4_off         0.1998 ms    902.70 TFLOPS  ( 45.6% of fp8 peak)
+  [s0_128x128s4_reg      ] max_abs_err=8.152e-03 (ref~70.0) OK
+s0_128x128s4_reg         0.2010 ms    897.26 TFLOPS  ( 45.4% of fp8 peak)
+
+-- B. ping-pong（fold 与 wgmma 重叠）+ setmaxnreg --
+  [pp_128x128s3_reg      ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_128x128s3_reg         0.5184 ms    347.96 TFLOPS  ( 17.6% of fp8 peak)
+  [pp_128x128s4_reg      ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_128x128s4_reg         0.5178 ms    348.40 TFLOPS  ( 17.6% of fp8 peak)
+  [pp_128x128s5_reg      ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_128x128s5_reg         0.5156 ms    349.85 TFLOPS  ( 17.7% of fp8 peak)
+  [pp_128x128s6_reg      ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_128x128s6_reg         0.6035 ms    298.88 TFLOPS  ( 15.1% of fp8 peak)
+  [pp_128x128s4_off      ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_128x128s4_off         0.5187 ms    347.79 TFLOPS  ( 17.6% of fp8 peak)
+
+-- C. BN=256 --
+  [s0_128x256s3_reg      ] max_abs_err=8.152e-03 (ref~70.0) OK
+s0_128x256s3_reg         0.8987 ms    200.71 TFLOPS  ( 10.1% of fp8 peak)
+  [pp_128x256s3_reg      ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_128x256s3_reg         2.4848 ms     72.60 TFLOPS  (  3.7% of fp8 peak)
+  [pp_128x256s4_reg      ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_128x256s4_reg         2.4325 ms     74.16 TFLOPS  (  3.7% of fp8 peak)
+
+-- D. BM=64（单 warpgroup）--
+  [s0_64x128s4_reg       ] max_abs_err=8.152e-03 (ref~70.0) OK
+s0_64x128s4_reg          0.2689 ms    670.95 TFLOPS  ( 33.9% of fp8 peak)
+  [pp_64x128s4_reg       ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_64x128s4_reg          0.3462 ms    521.09 TFLOPS  ( 26.3% of fp8 peak)
+  [pp_64x128s5_reg       ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_64x128s5_reg          0.3454 ms    522.27 TFLOPS  ( 26.4% of fp8 peak)
+  [pp_64x128s6_reg       ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_64x128s6_reg          0.3453 ms    522.43 TFLOPS  ( 26.4% of fp8 peak)
+  [pp_64x256s4_reg       ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_64x256s4_reg          1.1586 ms    155.69 TFLOPS  (  7.9% of fp8 peak)

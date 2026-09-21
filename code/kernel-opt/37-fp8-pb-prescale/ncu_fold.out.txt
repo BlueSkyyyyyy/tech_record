@@ -1,0 +1,40 @@
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z17fp8_tma_pb_kernelILi256ELi256ELi128ELi3ELb0ELi3ELi1EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 17117
+==PROF== Connected to process 231386 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/37-fp8-pb-overlap/fp8_gemm_prescale.out)
+==PROF== Profiling "fp8_tma_pb_kernel": 0%....50%....100% - 10 passes
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+FP8 e4m3 per-block: fold vs prescale: M=4096 N=3072 K=7168  FLOPs=180.39 GFLOP
+
+-- A. per-block fold 基线（每 128-k 块 wait0 后折算；scale = 2 的幂）--
+  [fold_128x128s4    ] max_abs_err=3.326e-01 (ref~4532.1) OK
+fold_128x128s4       0.1929 ms    935.09 TFLOPS  ( 47.3% of fp8 peak)
+
+-- B. 折进操作数：prescale(A,B) 后跑 per-tensor GEMM --
+
+-- C. 端到端：per-1x128 动态量化 + GEMM --
+  [e2e_A_fold_128s4      ] vs raw-X fp32 ref: 1.648e-02 (量化误差)
+e2e_A_fold_128s4     0.2615 ms    689.85 TFLOPS  ( 34.9% of fp8 peak)
+  [e2e_B_fold_256s4      ] vs Path A: rel=1.515e-03  OK ; vs raw-X ref: 1.615e-02
+e2e_B_fold_256s4     0.2197 ms    821.02 TFLOPS  ( 41.5% of fp8 peak)
+==PROF== Disconnected from process 231386
+[231386] fp8_gemm_prescale.out@127.0.0.1
+  void fp8_tma_pb_kernel<128, 128, 128, 4, 0, 0, 1>(CUtensorMap_st, CUtensorMap_st, float *, int, int, int, const float *, const float *, int) (24, 32, 1)x(288, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ ----------- ------------
+    Metric Name                                                              Metric Unit Metric Value
+    ------------------------------------------------------------------------ ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                 %        30.37
+    gpu__time_duration.sum                                                            us       199.52
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                  %        65.94
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                    %        49.77
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                   %        49.77
+    sm__warps_active.avg.pct_of_peak_sustained_active                                  %        13.71
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                inst         1.09
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio        inst         1.19
+    ------------------------------------------------------------------------ ----------- ------------
+

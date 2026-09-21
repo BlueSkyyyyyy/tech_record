@@ -1,0 +1,47 @@
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z17fp8_tma_pb_kernelILi256ELi256ELi128ELi3ELb0ELi3ELi1EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 17117
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+FP8 e4m3 per-block: fold vs prescale: M=4096 N=3072 K=7168  FLOPs=180.39 GFLOP
+
+-- A. per-block fold 基线（每 128-k 块 wait0 后折算；scale = 2 的幂）--
+  [fold_128x128s2    ] max_abs_err=3.326e-01 (ref~4532.1) OK
+fold_128x128s2       0.2380 ms    757.85 TFLOPS  ( 38.3% of fp8 peak)
+  [fold_128x128s3    ] max_abs_err=3.326e-01 (ref~4532.1) OK
+fold_128x128s3       0.1976 ms    912.67 TFLOPS  ( 46.1% of fp8 peak)
+  [fold_128x128s4    ] max_abs_err=3.326e-01 (ref~4532.1) OK
+fold_128x128s4       0.1918 ms    940.64 TFLOPS  ( 47.6% of fp8 peak)
+  [fold_128x128s5    ] max_abs_err=3.326e-01 (ref~4532.1) OK
+fold_128x128s5       0.1932 ms    933.53 TFLOPS  ( 47.2% of fp8 peak)
+
+-- B. 折进操作数：prescale(A,B) 后跑 per-tensor GEMM --
+  [pt_only_128x128s3 ] max_abs_err=8.870e+00 (ref~4532.1) OK
+pt_only_128x128s3    0.1650 ms   1092.99 TFLOPS  ( 55.3% of fp8 peak)
+  [pt_only_128x128s4 ] max_abs_err=8.870e+00 (ref~4532.1) OK
+pt_only_128x128s4    0.1919 ms    939.92 TFLOPS  ( 47.5% of fp8 peak)
+  [pt_only_256x128s4 ] max_abs_err=8.870e+00 (ref~4532.1) OK
+pt_only_256x128s4    0.1493 ms   1207.87 TFLOPS  ( 61.1% of fp8 peak)
+  [pt_only_256x128s3 ] max_abs_err=8.870e+00 (ref~4532.1) OK
+pt_only_256x128s3    0.1553 ms   1161.70 TFLOPS  ( 58.7% of fp8 peak)
+  [pt_only_128x256s3 ] max_abs_err=8.870e+00 (ref~4532.1) OK
+pt_only_128x256s3    0.1560 ms   1156.21 TFLOPS  ( 58.5% of fp8 peak)
+  [pt_only_128x256s4 ] max_abs_err=8.870e+00 (ref~4532.1) OK
+pt_only_128x256s4    0.1519 ms   1187.71 TFLOPS  ( 60.0% of fp8 peak)
+  [pt_only_256x256s3 ] max_abs_err=8.870e+00 (ref~4532.1) OK
+pt_only_256x256s3    1.2788 ms    141.06 TFLOPS  (  7.1% of fp8 peak)
+  [presc_128x128s4   ] max_abs_err=8.870e+00 (ref~4532.1) OK
+presc_128x128s4      0.2181 ms    827.25 TFLOPS  ( 41.8% of fp8 peak)
+  [presc_256x128s4   ] max_abs_err=8.870e+00 (ref~4532.1) OK
+presc_256x128s4      0.1733 ms   1041.18 TFLOPS  ( 52.6% of fp8 peak)
+  [presc_128x256s3   ] max_abs_err=8.870e+00 (ref~4532.1) OK
+presc_128x256s3      0.1801 ms   1001.43 TFLOPS  ( 50.6% of fp8 peak)
+
+-- C. 端到端：per-1x128 动态量化 + GEMM --
+  [e2e_A_fold_128s4      ] vs raw-X fp32 ref: 1.648e-02 (量化误差)
+e2e_A_fold_128s4     0.2617 ms    689.38 TFLOPS  ( 34.9% of fp8 peak)
+  [e2e_B_fold_256s4      ] vs Path A: rel=1.515e-03  OK ; vs raw-X ref: 1.615e-02
+e2e_B_fold_256s4     0.2194 ms    822.31 TFLOPS  ( 41.6% of fp8 peak)

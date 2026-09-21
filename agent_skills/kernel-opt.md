@@ -269,3 +269,16 @@ scripts/lab.sh status
   慢 ~10%（H100 共享机上持续负载会降频）。**head-to-head 必须在同一进程、同样 warmup/iters 下测**；
   跨文件的数字不能直接比。超时后用 `docker exec kernel_lab pkill -9 -f <binary>.out` 清残留进程，
   否则 100% 占用的死锁 kernel 会污染后续所有基准（36 篇实测被拖慢 ~2×）。
+- **用 wgmma 指令自身的 `scale_d=0` 清零累加器，别用通用 FMA 写 `acc=0`**（37 篇）：后者会被 ptxas
+  判为 `C7514`（非 wgmma 指令定义了 wgmma 累加器）并主动串行化 wgmma。DeepGEMM 的
+  `WGMMA::wgmma(desc_a, desc_b, accum, k)` 把循环下标 `k` 当 `scale_d`（`k=0` 走 `ScaleOut::Zero`、
+  `k>0` 累加）就是这个意思。改完后单累加器路径的 C7514 消失（但 ping-pong 仍被寄存器墙卡住）。
+- **`setmaxnreg` 不是万能的**（37 篇）：内联 `setmaxnreg.inc/dec.sync.aligned.u32` 想给 math warpgroup
+  多发寄存器，ptxas 可能回 **`C7507 'setmaxnreg' ignored to maintain minimum register requirements`**
+  并直接忽略。别照搬「DeepGEMM 用 232/248 寄存器」的结论，它的线程几何（128 线程 TMA warpgroup +
+  persistent 调度器）与你的不同；先看 `-Xptxas -v` 实际拿到多少。
+- **ue8m0（2 的幂）的 block scale 可以精确折进 e4m3 操作数**（37 篇）：`sa=2^e` 时 `q·sa` 只是 e4m3
+  的指数平移，尾数不丢。于是 per-block GEMM 可退化成 per-tensor GEMM（`Σ(q_a·sa)(q_b·sb)=Σsa·sb·q_a·q_b`），
+  折算开销彻底消失：GEMM 本体 940.6→1207.9 TFLOPS（1.28×）。折 B（权重）一次性免费；折 A（激活）
+  应融进上游 per-1×128 动态量化器（写回前多乘一次 sa，零额外访存），端到端 1.19×。**边界**：只对
+  2 的幂 scale 精确（任意 fp32 scale 会多半个 ulp 舍入）；`A'` 与 scale 绑定，多 GEMM 共用 A 时要各存一份。
