@@ -360,3 +360,14 @@ scripts/lab.sh status
   `date: 2026-09-22T06:30:00+08:00`，`hugo --gc` **无 ERROR** 但
   `public/posts/<slug>/` 不存在 → 线上 404。发布前必须 `ls public/posts/<slug>/` 确认；
   时间不确定就写一个「现在之前」的时刻。
+- **跑基准前必须确认 GPU 上没有残留的 compute 进程**（54 篇踩到）：多次 `timeout` 触发的
+  死锁 kernel 会一个个留下来占着 GPU 0，**让所有基准一致地虚慢 ~2×**（且宿主 `pkill` 对容器
+  root 进程无效）。症状极隐蔽：单个 kernel「app 测 49 ms / ncu 测 22 ms」差 2.2×、cuBLAS 也
+  比 torch 慢一倍。修法：每轮 timeout 后 `docker exec kernel_lab pkill -9 -f <bin>`，跑基准前
+  `nvidia-smi --query-compute-apps=pid,process_name --format=csv` 确认空。**app 与 ncu 数字
+  系统性差 ~2× 时，先查残留进程，别急着怀疑 clock。**
+- **手搓的 grid remap（superblock swizzle / 1D 解码）必须是严格双射**（54 篇踩到）：当
+  `Nt/GN` 不整除（如 1010/8）时，用「原 2D 网格 + 块内解码」会让部分 `(mt,nt)` 永远不被任何
+  `blockIdx` 生成，输出留脏值、**不报错**，loss 悄悄错（11.764 vs 正确 11.7698）。正解是
+  「1D 网格 = `ceil(Mt/GM)·ceil(Nt/GN)·GM·GN` + 越界 `return`」。**判据：任何 remap 改完都要
+  用「对拍一个全局标量」而不是「kernel 正常退出」来验证**（本例损失值）。
