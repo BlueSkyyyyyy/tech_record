@@ -128,6 +128,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 52. [W4A8 IMMA 的 TMA warp-private：把 2 KB 权重交给 TMA 引擎（和一个必须自己造的无冲突布局）](content/posts/cuda-kernel-opt-52-w4a8-imma-tma/index.md)
 53. [融合 RoPE：交错配对、对半配对，以及一个被访问模式封顶的纯访存算子](content/posts/cuda-kernel-opt-53-fused-rope/index.md)
 54. [融合 cross-entropy：把 2.12 GB 的 logits 从显存里省掉，和那个卡在 L2 上的 LM head](content/posts/cuda-kernel-opt-54-fused-cross-entropy/index.md)
+55. [FP8 融合 cross-entropy：当 LM head 权重减半，那个卡在 L2 上的 GEMM 会变快吗（1.95×）](content/posts/cuda-kernel-opt-55-fp8-fused-ce/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 
