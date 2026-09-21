@@ -1,0 +1,11 @@
+GEMM 分块配置扫描（N=4096, MuonClip NS, 自研 fused）
+cfg0 128x128x32 w4x2 s2 | cfg1 128x128x64 w4x2 s3 | cfg2 128x256x32 w4x4 s2
+cfg3 256x128x32 w8x2 s2 | cfg4 128x128x32 w2x4 s3 | cfg5 128x128x128 s2 | cfg6 128x128x32 s4
+
+custom fused cfg=0       8.873 ms    232.34 TFLOPS  ( 23.5% peak)
+custom fused cfg=1       8.439 ms    244.31 TFLOPS  ( 24.7% peak)
+custom fused cfg=2       9.524 ms    216.46 TFLOPS  ( 21.9% peak)
+custom fused cfg=3       9.969 ms    206.81 TFLOPS  ( 20.9% peak)
+custom fused cfg=4       9.022 ms    228.52 TFLOPS  ( 23.1% peak)
+custom fused cfg=5       8.995 ms    229.19 TFLOPS  ( 23.2% peak)
+custom fused cfg=6       9.549 ms    215.89 TFLOPS  ( 21.8% peak)

@@ -25,7 +25,8 @@
 | DSA 稀疏注意力 | *待填（17）* | — | — | 自研 kernel | — |
 | MoE grouped GEMM | *待填（21）* | — | — | DeepGEMM | — |
 | FP8 GEMM | *待填（22/23）* | — | — | DeepGEMM | — |
-| MuonClip 正交化 | *待填（24）* | — | — | muonclip | — |
+| MuonClip NS 正交化（N=4096） | 自研 GEMM 链 + 融合 epilogue（cfg1） | **244 TFLOPS** | 24.7% (989) | cuBLAS 链 529（53.5%）→ 差距 2.17× | 17-muonclip-ns |
+| MuonClip NS 单 GEMM（4096³） | 自研 128×128×64 3 级流水 | **269 TFLOPS** | 27.2% | cuBLAS 883（89.3%）→ 达其 30.5% | 17-muonclip-ns |
 
 > 口径说明：内存算子用有效带宽（读+写按实际最小搬运量）；GEMM 用 `2MNK/时间`；
 > bf16 TC 峰值按 989 TFLOPS、fp32 按 66.9 TFLOPS、FP8 按 1978 TFLOPS；对标一律「同 shape、同口径」。
@@ -104,6 +105,15 @@
 | G6 | 用 smem 共享 P 消 QK 重复（dup） | DV 必须切分时的 MLA/GQA | `O[16,DV]` fp32 寄存器墙逼着按 DV 切 warp，代价是 QKᵀ 被重复算 `dup=DV/DVW` 次。让同 row 组的 warp **按 KV 对半分工**，行 max/sum 用 tiny smem 交换、P(bf16) 写 smem 共享读 | `16/mla_fused.cu`（`mla_shared_kernel`） | `f4`(dup2) 146.5 → `f4s`(dup1) **170.1 TFLOPS（+16%）**；P 共享只花 ~8KB smem | 别把 DV 切太细：`f2s`(DVGRP=4) 虽 dup=1，但 Q 被 4 个 warp 各读一遍，反而比 `f4s` 慢（113.9 vs 170.1） |
 | G7 | wgmma 的胜负手是 **smem swizzle，不是指令** | Hopper wgmma | `wgmma` 从描述符读 A/B，但无 swizzle 的 K-major `INTERLEAVE` 布局会让 smem store 撞 bank、tensor 读操作数低效 | `16/mla_wgmma.cu` | mma 融合 170 → wgmma(INTERLEAVE) 只有 **84.6 TFLOPS（更慢）**；ncu：L1/TEX 86.4%、store bank conflict 2.7e8、tensor pipe 13.1% | 必须用 **SW128 swizzle**（描述符 layout_type=1 + `base_offset` 相位）；先做小 GEMM 冒烟测试验证描述符（见 `16/wgmma_helpers.cuh`） |
 
+### H. 优化器 / MuonClip（17）
+
+| # | 技巧 | 适用场景 | 原理 | 代码 | 实测收益 / 现象 | 坑 |
+|---|---|---|---|---|---|---|
+| H1 | 优化器算子先算 roofline | Muon/NS、Shampoo 等 | NS 正交化 = 5 步 × 3 GEMM = `30N³` FLOPs；`AI=O(N)`，工作集仅 `2N²` | `17-muonclip-ns/ns_muonclip.cu` | ncu `DRAM 13.4%`、`Compute 45%` → **算力受限**；优化目标是把 GEMM 做快 | 别一看到「优化器」就以为访存受限；先看 ncu 的 DRAM% |
+| H2 | 融合 epilogue `f·x+g(GEMM)` | 链式 GEMM（NS/优化器） | mma 累加器 `c0,c1`(行 `lane/4`)/`c2,c3`(行+8) 坐标固定，结果还在寄存器时按同坐标读 `Cin` 做 `sc_c·Cin+sc_d·acc` | `17-muonclip-ns/ns_muonclip.cu`（`store_acc_epi`） | 消掉每步 2 趟 `axpby`（读 2 写 1）；N=4096 端到端 8.93→**8.44 ms（−5.5%）**；epilogue 不涨寄存器（126/0 spill） | `Cin` 与输出必须不同 buffer（`M=bA+cAA` 中 `Cin=A` 是另一 buffer，非原地别名）；尺寸越大收益越小 |
+| H3 | `mma` 路径的天花板是 L2 放大 + 寄存器墙 | 大 N 方阵 GEMM | `128×128` 分块下 A/B 各被重复读 32 次（每 GEMM ~2GB L2 流量）；块放大则每线程累加器翻倍 → 126 寄存器、occupancy 23.8% | `17-muonclip-ns/ns_muonclip.cu` | 自研单 GEMM 269 TFLOPS（cuBLAS 883），卡在 `L2 76% / occ 24%`；`128×256`/`256×128` 更慢 | 出路是 `wgmma`(SS 直读 smem，免 `ldmatrix`) + TMA 压 L2；见路线图 31/38 |
+| H4 | 多级 `cp.async` 的 `wait_prior` 参数 | 通用软流水 | N 级流水 prologue 预取 N−1 级、循环每轮再 commit 1 级；等「当前 stage」应 `wait_prior(N-1)` 而非 `N-2` | `17-muonclip-ns/ns_muonclip.cu` | 写成 `N-2` 会过早放行、读到半写 smem（`max_abs_err` 爆到 1e6） | 动态 smem 手搓多级缓冲时 B 的 stage 基址要放在 A 的**全部** stage 之后（`smem + STAGES×BM×LDP`），漏乘 `STAGES` 会 A/B 槽覆盖 |
+
 ---
 
 ## 三、模型场景台账（15 起填充）
@@ -114,7 +124,7 @@
 | M2 | DeepSeek-V4 | DSA 稀疏注意力 | index 64×128, topk=1024, compress 4/128/0 | *待填（17）* | — | — |
 | M3 | DeepSeek-V4 | MoE | 384 routed+1 shared, top-6, inter=3072 | *待填（20/21/29）* | — | — |
 | M4 | DeepSeek-V4 | FP8 GEMM | e4m3 + ue8m0, block 128×128 | *待填（22/23）* | — | — |
-| M5 | Kimi | MuonClip | Newton–Schulz 5 步正交化 | *待填（24）* | — | — |
+| M5 | Kimi-K2.6（hidden=7168/18432, moe=2048, 384 experts） | MuonClip / Newton–Schulz 正交化 | 5 步 NS，`30N³`；测 N=2048/4096/8192 | 还原成 15 个 GEMM 的链式算子。17：自研 `mma` GEMM + 融合 `f·x+g` epilogue，**244 TFLOPS（N=4096, 24.7%）**；单 GEMM 269 vs cuBLAS 883（30.5%）；端到端 cuBLAS 链 529（2.17×）。ncu：L2 76%、occ 24%、DRAM 13% | `17-muonclip-ns/ns_muonclip.cu` | 17 N=2048/4096/8192: 1.31/8.44/65.4 ms |
 | M6 | Qwen3 | GQA attention | q/kv=40/8, 32/4, 64/4 | *待填（25）* | — | — |
 
 ---

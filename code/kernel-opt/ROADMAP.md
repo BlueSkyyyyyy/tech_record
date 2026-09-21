@@ -90,7 +90,7 @@ scripts/ncu.sh 15-mla-attn/mla_attn.cu --set full --kernel-name regex:mla
 - [ ] **21 MoE（二）：grouped GEMM**：变长 group 的 grouped GEMM，对照 `~/github/DeepGEMM` 的 contiguous/masked 分组
 - [ ] **22 FP8 GEMM（一）：per-tensor / per-block scaling**：e4m3 + ue8m0 缩放，weight_block 128×128 vs 32×32，精度与速度
 - [ ] **23 FP8 GEMM（二）：DeepSeek-V4 推理口径 + 融合 dequant**：block-wise scale 应用、expert fp4，对照 bf16
-- [ ] **24 Muon / MuonClip 优化器算子**：Newton–Schulz 迭代做正交化（zeropower）+ clip 融合；参考 `~/github/muonclip`；N=4096 级矩阵，冲 TFLOPS
+- [x] **24 Muon / MuonClip 优化器算子**：Newton–Schulz 迭代做正交化（zeropower）+ clip 融合；参考 `~/github/muonclip`；N=4096 级矩阵，冲 TFLOPS → **已作为系列第 17 篇发布**（见「当前进度」）
 - [ ] **25 Paged KV-cache / flash-decoding 推理注意力**：GQA/MQA、block table、变长 seqlen；参考 `flashinfer`/`vllm`
 - [ ] **26 量化推理算子：W4A16 dequant-GEMM（GPTQ/AWQ）**：ERNIE/GLM/Kimi 量化部署常用；dequant 融合进 GEMM
 - [ ] **27 Attention 反向（FA bwd）**：自己推 dQ/dK/dV 并写 kernel，对拍 autograd（呼应 flash-attention 系列）
@@ -162,18 +162,22 @@ scripts/ncu.sh 15-mla-attn/mla_attn.cu --set full --kernel-name regex:mla
 - 2026-09-21：完成并发布 **15 MLA 注意力（一）**：读 `~/github/FlashMLA` 与 `/ssd/models/*/config.json` 对齐 MLA 吸收形式（V3 MH=128/DC=512/DR=64/DV=512，V4 448/64，Kimi 64head）；三个标量实现（naive/head_reuse/smem）全在 15~19 TFLOPS（ncu 证实 `Compute` 77~83%、`DRAM` 0.7%→算力受限，KV 驻 L2）；TC 三 kernel（QKᵀ+softmax+PV）**2.53ms / 115.64 TFLOPS（11.7%）**，比标量最好 `head2` 快 6.1×，距 FlashMLA 660 约 5.2×；扫 S=1024/2048/4096 暴露 S/P 物化流量 ∝S²（S=4096 占 21%），指出融合方向。
 - 2026-09-21：完成并发布 **16 MLA 注意力（二）· 单 kernel 融合**：online softmax 融进 QKᵀ epilogue（S 只留寄存器）+ 累加器 `C`→PV `A` 片段零 shuffle + KV 常驻 smem。扫 7 个配置得 `f4`(dup2) 146.5、**`f4s`（smem 共享 P，QK dup=1）170.1 TFLOPS/1.717ms（S=1024），Sk=4096 → 184.7，相对 15 三 kernel 1.47×/5.78×**；ncu：DRAM 仅 7%、L1/TEX 63%、tensor 26.7%、occupancy 12.5%、`short_scoreboard` 3.05 主导。额外实现 `wgmma` 版（SS，2 warpgroup，K-major INTERLEAVE 布局）实测 **84.6 TFLOPS**——暴露无 swizzle 布局的 smem store bank conflict（2.7e8）与操作数读取低效，结论：wgmma 胜负手是 SW128 swizzle。距 FlashMLA 640 收窄到 **3.5×**。踩坑：`S` wgmma/mma 累加器每块必须清零；CUDA 13 nvcc 不认 `-arch=sm_90a`，要 `-gencode=arch=compute_90a,code=sm_90a`（`run.sh`/`ncu.sh` 已支持 `ARCH=""`）。
 
+- 2026-09-21：完成并发布 **文章 17（主题 24）Muon / MuonClip 的 Newton–Schulz 正交化**：还原成 5 步 × 3 GEMM = `30N³` 的链式算子（Kimi-K2.6 hidden=7168/18432、moe=2048、384 experts；DeepSeek-V4-Pro 7168）。三条路径对拍（自研 fused / cuBLAS+elementwise / fp32 参考）：N=4096 自研融合 **244 TFLOPS（24.7%）/ 8.44 ms**，融合 epilogue（`f·x+g`）比不融合快 5.5%；单 GEMM 自研 269 vs cuBLAS 883（峰值 89.3%）= 30.5%；端到端 cuBLAS 链 529 TFLOPS（2.17×）。ncu：L2 76%、occ 23.8%、Compute 45%、DRAM 13% → `mma` 路径天花板，出路 wgmma+TMA。踩坑：多级 `cp.async` 的 `wait_prior` 应为 `STAGES-1`（写成 `-2` 读到半写数据）；手搓多级 smem 时 B 的 stage 基址要乘 `STAGES`。代码 `17-muonclip-ns/`（`ns_all/sweep/single/ncu.out.txt`）。**注意：主题号与文章号已解耦，下一篇是文章 18。**
+
 ## 下一步（明确到可执行）
 
 - [x] **16 MLA 注意力（二）**：已完成（见「当前进度」）。
 - [ ] **16b MLA 极限冲刺：SW128 swizzle + wgmma（并入第六部分 31/39 的前置）**。现在 `f4s`=170/184 TFLOPS，瓶颈是 smem `ldmatrix` + 12.5% occupancy（`short_scoreboard` 3.05、DRAM 7%）。把 `mla_wgmma.cu` 的 `INTERLEAVE` 布局换成 **K-major SW128（`layout_type=1` + 描述符 `base_offset` 相位）**，用 `cp.async`/TMA 按 swizzle 地址写入；先做**小 GEMM 冒烟测试**验证 SW128 描述符与逐 k16 步进（`16/wgmma_helpers.cuh` 已有 `m64n64k16`/`m64n256k16` 的 SS asm），再接回 MLA。目标：把 tensor pipe 从 26.7% 提到 ≥ 50%，冲 **250+ TFLOPS**（把与 FlashMLA 640 的差距压到 ≤ 2.6×）。
   - 关键动作：①实现 `swizzle128(offset)` 与匹配描述符；②`cp.async` 16B swizzled store（消 store bank conflict）；③可选 warp specialization（producer 搬数据 / consumer 算）。
-- [ ] 之后依次：17（DSA 稀疏注意力）→…（见上）。模型类文章优先。
+- [x] **文章 17 — 主题 24 Muon / MuonClip 的 Newton–Schulz 正交化**：已完成并发布（见「当前进度」）。
+- [ ] **文章 18 起**：DSA 稀疏注意力（主题 17）→ RoPE/RMSNorm/MoE/FP8…（见上）；16b 的 wgmma+SW128 与主题 31/38 共用基础设施，可合并推进。模型类文章优先。
+  - **编号说明**：「系列大纲」里的数字是**主题编号**（稳定 ID），文章 `NN` 是**发布顺序**。主题 24（MuonClip）已作为**文章 17** 发布，二者已解耦。**下一篇是文章 18**；发布时把「文章号 ↔ 主题号」记进「当前进度」。
 
 ## 灵感 / backlog（想到就记，别丢）
 
 - DeepGEMM 的 JIT + contiguous grouped GEMM 与 DeepSeek-V4 的 expert 分布对齐。
 - FlashMLA 的 split-KV + `m64n...` 细节，和本文 16 逐段对照。
-- MuonClip 的 Newton–Schulz 5 步迭代（zeropower_via_newtonschulz）在 N=4096 上的 roofline：它到底是计算受限还是访存受限？
+- ~~MuonClip 的 Newton–Schulz 5 步迭代（zeropower_via_newtonschulz）在 N=4096 上的 roofline：它到底是计算受限还是访存受限？~~ → **已答（文章 17）**：算力受限（DRAM 13%），瓶颈是自研 `mma` GEMM 的 L2 放大 + 寄存器墙；下一步 wgmma/TMA。
 - 用 nsys 把「GEMM + 两个 epilogue」与「融合 GEMM」对比端到端。
 - 把每篇 kernel 存成 v0/v1/v2 版本序列，做「优化步骤 diff 视图」。
 - 给 01 roofline 画 mermaid 图。

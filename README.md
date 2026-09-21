@@ -92,6 +92,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 14. [融合与 epilogue：给 GEMM 加上 bias 和激活](content/posts/cuda-kernel-opt-14-fusion-epilogue/index.md)
 15. [MLA 注意力（一）：从数学到第一个能跑的 kernel](content/posts/cuda-kernel-opt-15-mla-attn/index.md)
 16. [MLA 注意力（二）：单 kernel 融合，把 S/P 从显存里干掉](content/posts/cuda-kernel-opt-16-mla-fused/index.md)
+17. [MuonClip 的 Newton–Schulz 正交化：15 个 GEMM 的链式算子](content/posts/cuda-kernel-opt-17-muonclip-ns/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 

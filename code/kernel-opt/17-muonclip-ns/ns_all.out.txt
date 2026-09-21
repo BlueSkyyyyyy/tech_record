@@ -1,0 +1,45 @@
+===== N=2048 =====
+Device : NVIDIA H100 80GB HBM3
+
+Newton-Schulz (Muon): N=2048  steps=5  FLOPs = 0.26 TFLOP
+
+ref(fp32 cublas)      5.684 ms     45.33 TFLOPS
+  ref orthogonality  ||X X^T - I||(sample) = 0.0070
+
+custom fused cfg=1       1.312 ms    196.40 TFLOPS  ( 19.9% peak)
+    [custom] max_abs_err vs fp32 ref = 1.221e-03 (ref~0.0776) OK
+custom unfused cfg=1     1.350 ms    190.84 TFLOPS  ( 19.3% peak)
+    [custom_unfused] max_abs_err vs fp32 ref = 1.465e-03 (ref~0.0776) OK
+cublas+elementwise       0.859 ms    300.17 TFLOPS  ( 30.4% peak)
+    [cublas] max_abs_err vs fp32 ref = 1.465e-03 (ref~0.0776) OK
+
+===== N=4096 =====
+Device : NVIDIA H100 80GB HBM3
+
+Newton-Schulz (Muon): N=4096  steps=5  FLOPs = 2.06 TFLOP
+
+ref(fp32 cublas)     41.528 ms     49.64 TFLOPS
+  ref orthogonality  ||X X^T - I||(sample) = 0.0043
+
+custom fused cfg=1       8.565 ms    240.71 TFLOPS  ( 24.3% peak)
+    [custom] max_abs_err vs fp32 ref = 7.324e-04 (ref~0.0554) OK
+custom unfused cfg=1     8.929 ms    230.87 TFLOPS  ( 23.3% peak)
+    [custom_unfused] max_abs_err vs fp32 ref = 1.221e-03 (ref~0.0554) OK
+cublas+elementwise       4.252 ms    484.83 TFLOPS  ( 49.0% peak)
+    [cublas] max_abs_err vs fp32 ref = 1.221e-03 (ref~0.0554) OK
+
+===== N=8192 =====
+Device : NVIDIA H100 80GB HBM3
+
+Newton-Schulz (Muon): N=8192  steps=5  FLOPs = 16.49 TFLOP
+
+ref(fp32 cublas)    325.089 ms     50.73 TFLOPS
+  ref orthogonality  ||X X^T - I||(sample) = 0.0034
+
+custom fused cfg=1      65.463 ms    251.94 TFLOPS  ( 25.5% peak)
+    [custom] max_abs_err vs fp32 ref = 4.883e-04 (ref~0.0410) OK
+custom unfused cfg=1    66.410 ms    248.35 TFLOPS  ( 25.1% peak)
+    [custom_unfused] max_abs_err vs fp32 ref = 7.324e-04 (ref~0.0410) OK
+cublas+elementwise      29.907 ms    551.47 TFLOPS  ( 55.8% peak)
+    [cublas] max_abs_err vs fp32 ref = 7.324e-04 (ref~0.0410) OK
+
