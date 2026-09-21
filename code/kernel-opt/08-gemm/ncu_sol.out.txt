@@ -1,0 +1,54 @@
+### gemm_naive
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.99
+    Elapsed Cycles                cycle      6235738
+    Memory Throughput                 %        97.95
+    DRAM Throughput                   %         0.47
+    Duration                         ms         3.13
+    L1/TEX Cache Throughput           %        99.35
+    L2 Cache Throughput               %        20.11
+    SM Active Cycles              cycle   6147150.37
+    Compute (SM) Throughput           %        65.28
+### gemm_tiled<32> (launch-skip 24)
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.99
+    Elapsed Cycles                cycle      3748205
+    Memory Throughput                 %        89.07
+    DRAM Throughput                   %         0.78
+    Duration                         ms         1.88
+    L1/TEX Cache Throughput           %        91.00
+    L2 Cache Throughput               %        11.20
+    SM Active Cycles              cycle   3668437.54
+    Compute (SM) Throughput           %        74.68
+    ----------------------- ----------- ------------
+
+    INF   This workload is utilizing greater than 80.0% of the available compute or memory performance of this device.  
+          To further improve performance, work will likely need to be shifted from the most utilized to another unit.   
+          Start by analyzing L1 in the Memory Workload Analysis section.                                                
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %            0
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Gbyte/s        26.10
+    Mem Busy                                          %        89.07
+    Max Bandwidth                                     %        84.83
+    L1/TEX Hit Rate                                   %         0.00
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector       526741
+    L2 Hit Rate                                       %        97.38
