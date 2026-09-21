@@ -1,0 +1,29 @@
+==PROF== Connected to process 263568 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/42-mla-decode-wgmma/mla_decode_wgmma.out)
+==PROF== Profiling "mla_dec_wg_kernel" - 0 (1/1): 0%....50%....100% - 3 passes
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+MLA absorbed decode (wgmma): H=128 B=64 L=8192  (DC=512 DR=64 DV=512 DK=576)
+FLOPs = 0.146 TFLOP ; bf16 KV bytes = 0.604 GB (AI=242)
+p     split4g     0.8261 ms    731.1 GB/s ( 21.8% HBM)    176.8 TFLOPS ( 17.9%)
+==PROF== Disconnected from process 263568
+[263568] mla_decode_wgmma.out@127.0.0.1
+  void mla_dec_wg_kernel<4, 1>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (2, 64, 1)x(512, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    gpu__time_duration.sum                                                             us       821.41
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active              %        19.11
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        24.97
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         1.20
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         2.20
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio            inst         0.87
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.60
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.33
+    ------------------------------------------------------------------------- ----------- ------------
+

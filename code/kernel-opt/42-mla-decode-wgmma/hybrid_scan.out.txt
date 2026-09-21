@@ -1,0 +1,16 @@
+     [v2  ] max_abs_err=8.921e-06 (ref~0.007) OK
+v2    hyb2     0.2795 ms   1080.3 GB/s ( 32.2% HBM)    261.2 TFLOPS ( 26.4%)
+     [v4  ] max_abs_err=8.921e-06 (ref~0.007) OK
+v4    hyb4     0.3558 ms    848.8 GB/s ( 25.3% HBM)    205.2 TFLOPS ( 20.8%)
+     [v2  ] max_abs_err=6.610e-06 (ref~0.004) OK
+v2    hyb2     0.5265 ms   1147.1 GB/s ( 34.2% HBM)    277.3 TFLOPS ( 28.0%)
+     [v4  ] max_abs_err=6.610e-06 (ref~0.004) OK
+v4    hyb4     0.6779 ms    891.0 GB/s ( 26.6% HBM)    215.4 TFLOPS ( 21.8%)
+     [v2  ] max_abs_err=3.044e-06 (ref~0.002) OK
+v2    hyb2     3.9754 ms   1215.4 GB/s ( 36.3% HBM)    293.9 TFLOPS ( 29.7%)
+     [v4  ] max_abs_err=3.044e-06 (ref~0.002) OK
+v4    hyb4     5.1891 ms    931.2 GB/s ( 27.8% HBM)    225.1 TFLOPS ( 22.8%)
+     [v2  ] max_abs_err=3.535e-06 (ref~0.003) OK
+v2    hyb2     2.0614 ms    293.0 GB/s (  8.7% HBM)     70.8 TFLOPS (  7.2%)
+     [v4  ] max_abs_err=3.535e-06 (ref~0.003) OK
+v4    hyb4     2.6413 ms    228.7 GB/s (  6.8% HBM)     55.3 TFLOPS (  5.6%)
