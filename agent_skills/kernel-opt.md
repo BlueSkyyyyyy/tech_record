@@ -223,3 +223,28 @@ scripts/lab.sh status
   寄存器 90→155、occupancy 2→1 CTA/SM。prefill（算力受限）暴露 ~18% 损失；decode/masked（纯权重
   带宽）里 `wait0`+FMA 被 DRAM 延迟藏住，**完全免费**。分组场景（31 篇）比稠密单 GEMM 损失更小
   （18% < 23%），因为 grouped 天生偏 L2/带宽。
+- **纯访存算子的优化顺序：先减 pass、再消 L1、最后才抠指令**（32 篇）：RMSNorm 每行 14KB，
+  朴素两趟 44% → smem 行缓存单读 70%（但 ncu `l1tex` 76% 成墙）→ **整行留寄存器** 86%
+  （每线程 `NG=ceil((H/8)/T)` 个 `uint4`，只多 ~16 个寄存器）→ 融合残差 87%。判断哪一级是墙看
+  ncu `DRAM vs L1TEX vs L2`，**DRAM% 才是 HBM 利用率**。
+- **融合的收益只看「省掉几个 pass」**（32 篇）：add+norm 省 1 个 pass（5→4）值；norm+FP8 量化只省
+  0.5 个（8B→7B）却引入每 128 元素的 `amax`（shared `atomicMax`）+ 逐字节打包，实测反而从
+  87% 掉到 66%。**输出字节占比小的融合不划算。**
+- **这个 CUDA 工具链下 `float(fp8)` 返回原始位模式，不是数值**（32 篇）：`1.0f` 的 e4m3 位模式是
+  `0x38`，`float(fp8)` 直接给 `56`，导致精度校验误差恒定在 155% 查不出逻辑错。必须走
+  `__nv_cvt_float_to_fp8` + `__nv_cvt_fp8_to_halfraw`；也**别写 `fp8 v = fp8(storage_byte)` 再存**
+  （重载会选错）。最小复现见 `32-fused-norm/fp8_test*.cu`。
+- **Hopper `wgmma` 的 B 操作数只认 K-major，MN-major 描述符无效**（32 篇判决，解答 21 篇 J3）：
+  用 CuTe 生成正确的 canonical MN 描述符（`LBO`/`SBO` 与手推一致，raw=`0x4000010000400000`）后跑定点
+  GEMM，**改 LBO（64/256/1024）结果逐位不变**——硬件在 swizzle 布局下忽略 `leading_byte_offset`、
+  按 K-major 解释 B。所以 MLA 的 V 转置不可避免；免转置只能等 Blackwell `tcgen05` 或走
+  `mma.sync + ldmatrix.x4.trans`。别在这上面反复试描述符。
+- **跨迭代复用 wgmma 累积器做软流水会被 ptxas 主动串行化**（32 篇）：让 `S`（QK 的 fp32 累积器）
+  在 softmax 消费后又直接给下一块 QK 用，ptxas 报 `C7515`（非 wgmma 指令定义了 wgmma 累积器）并插入
+  `wait_group`，寄存器顶到 255 + 536B spill，MLA 从 199 掉到 147。即使改用 wgmma predicate 覆盖代替
+  清零、把 softmax 输出写独立数组也无效——`O` 的 rescale 是 PV 累积器，跨迭代必然触发。要重叠得像
+  DeepGEMM 那样 1 warpgroup/248 reg + `warpgroup_fence_operand`。
+- **`ncu` 里 `wgmma` 的寄存器墙和 smem 几何会锁死延迟隐藏**（32 篇）：MLA 融合 kernel 的
+  Q(73.7K)+K(73.7K)+P(8K)+V(65.5K)=216KB 强制 1 CTA/SM、只有 8 个 warp；而 KT 必须 ≥64（SW128 atom）、
+  BM=32 又不满足 wgmma 的 m64，几何上腾不出 V 双缓冲空间。判断 attention 类 kernel 先看 smem 总量与
+  CTA/SM，再谈流水。
