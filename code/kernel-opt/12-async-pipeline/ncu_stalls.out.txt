@@ -1,0 +1,64 @@
+########## sync ##########
+==PROF== Profiling "gemm_sync" - 0 (1/1): 0%....50%....100% - 12 passes
+  gemm_sync(const float *, const float *, float *, int, int, int) (16, 16, 1)x(16, 16, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                                             us       570.88
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        54.73
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.50
+    smsp__average_warps_issue_stalled_drain_per_issue_active.ratio                   inst         0.00
+    smsp__average_warps_issue_stalled_imc_miss_per_issue_active.ratio                inst         0.00
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             inst         0.00
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.91
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            inst         0.20
+    smsp__average_warps_issue_stalled_no_instruction_per_issue_active.ratio          inst         0.05
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio            inst         2.29
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.16
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         0.21
+    smsp__issue_active.avg.pct_of_peak_sustained_active                                 %        56.81
+########## pipe2 ##########
+==PROF== Profiling "gemm_pipe" - 0 (1/1): 0%....50%....100% - 12 passes
+  void gemm_pipe<2>(const float *, const float *, float *, int, int, int) (16, 16, 1)x(16, 16, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                                             us       510.40
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        65.48
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.53
+    smsp__average_warps_issue_stalled_drain_per_issue_active.ratio                   inst         0.00
+    smsp__average_warps_issue_stalled_imc_miss_per_issue_active.ratio                inst         0.00
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             inst         0.00
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.03
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            inst         0.08
+    smsp__average_warps_issue_stalled_no_instruction_per_issue_active.ratio          inst         0.03
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio            inst         2.01
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.18
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         0.26
+    smsp__issue_active.avg.pct_of_peak_sustained_active                                 %        67.75
+########## pipe3 ##########
+==PROF== Profiling "gemm_pipe" - 0 (1/1): 0%....50%....100% - 12 passes
+  void gemm_pipe<3>(const float *, const float *, float *, int, int, int) (16, 16, 1)x(16, 16, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                                             us       482.40
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        67.95
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.41
+    smsp__average_warps_issue_stalled_drain_per_issue_active.ratio                   inst         0.00
+    smsp__average_warps_issue_stalled_imc_miss_per_issue_active.ratio                inst         0.00
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             inst         0.00
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.03
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            inst         0.12
+    smsp__average_warps_issue_stalled_no_instruction_per_issue_active.ratio          inst         0.06
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio            inst         1.97
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.19
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         0.28
+    smsp__issue_active.avg.pct_of_peak_sustained_active                                 %        70.31
+########## pipe4 ##########
+==PROF== Profiling "gemm_pipe" - 0 (1/1): 0%....50%....100% - 12 passes
+  void gemm_pipe<4>(const float *, const float *, float *, int, int, int) (16, 16, 1)x(16, 16, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                                             us       483.84
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        68.32
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.33
+    smsp__average_warps_issue_stalled_drain_per_issue_active.ratio                   inst         0.00
+    smsp__average_warps_issue_stalled_imc_miss_per_issue_active.ratio                inst         0.00
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             inst         0.00
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.03
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            inst         0.12
+    smsp__average_warps_issue_stalled_no_instruction_per_issue_active.ratio          inst         0.03
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio            inst         2.06
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.17
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         0.28
+    smsp__issue_active.avg.pct_of_peak_sustained_active                                 %        70.86

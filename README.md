@@ -87,6 +87,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 9. [GEMM 进阶：寄存器分块、向量化与 double buffering](content/posts/cuda-kernel-opt-09-gemm-advanced/index.md)
 10. [ncu 深潜：occupancy、warp stall、roofline 与 source/SASS](content/posts/cuda-kernel-opt-10-ncu-deep/index.md)
 11. [launch 配置与 occupancy：ILP、`__launch_bounds__` 与 thread tile](content/posts/cuda-kernel-opt-11-launch-occupancy/index.md)
+12. [异步拷贝与流水线：cp.async 多级流水线把访存藏起来](content/posts/cuda-kernel-opt-12-async-pipeline/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验）
 
