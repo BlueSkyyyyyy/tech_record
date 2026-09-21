@@ -1,0 +1,16 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+RMSNorm / QK-Norm fusion: M=8192 H=7168 (DeepSeek-V4-Pro)  Qwen3 QK: 40/8 x 128
+  v0 rmsnorm naive         0.1586 ms   1481.0 GB/s ( 44.2% HBM)  err=7.81e-03
+  v1 rmsnorm smem 1-read   0.1006 ms   2334.3 GB/s ( 69.6% HBM)  err=7.80e-03
+  v2 add+rmsnorm fused     0.1644 ms   2857.9 GB/s ( 85.2% HBM)  err=7.79e-03/9.77e-04
+  v1r rmsnorm reg cache    0.0819 ms   2869.3 GB/s ( 85.6% HBM)  err=7.80e-03
+  v2r add+rmsnorm reg      0.1607 ms   2922.9 GB/s ( 87.2% HBM)  err=7.79e-03
+  v3 add+rmsnorm+fp8       0.1894 ms   2170.0 GB/s ( 64.7% HBM)  err=1.15e-01 (rel 3.31%)
+  v3r add+rmsnorm+fp8 reg  0.1864 ms   2205.0 GB/s ( 65.8% HBM)  err=1.15e-01 (rel 3.31%)
+  v4 QK-Norm (q40/k8 hd128) 0.0462 ms   2178.9 GB/s ( 65.0% HBM)  err=6.66e-03
