@@ -8,6 +8,7 @@
 | [math-check.md](math-check.md) | 文章含 LaTeX 公式，或公式显示异常时 |
 | [code-dive.md](code-dive.md) | 深读 kernel/框架仓库，写源码分析文章 |
 | [publish.md](publish.md) | 构建、推送、验证线上部署 |
+| [kernel-opt.md](kernel-opt.md) | 推进「CUDA 算子调优」系列（长期自驱任务） |
 
 新增技能的格式约定：
 
