@@ -164,6 +164,17 @@ scripts/lab.sh status
   `warpgroup_wait<0>` 严格分开，要么改 1-warpgroup/248-reg 布局。
 - **per-block 的好几何可能寄存器不可行**：BM=256 的 per-block 累加器 = `512×128 = 65536` 恰为整个 regfile，
   无论怎么调都 spill（96 regs + 608B → 224 TFLOPS）。换几何前先做寄存器账。
+- **bf16 的 TMA SW128：`BK` 必须是 64，`BN` 不能超 256**（28 篇）：Swizzle<3,4,3> 作用在字节上，
+  128B/行 ÷ 2B = 64 个 bf16，所以 TMA box 内维固定 128B、沿 K 的 `BK=64`（描述符 `SBO=1024`）。
+  另外 **TMA box 单维上限 256**，`BN=384` 会被 `cuTensorMapEncodeTiled` 直接拒掉（`invalid argument`）——
+  想在 N=384 上用整块 N 行不通，只能 `BN=128` 分 3 个 n-tile。
+- **权重天然 K-major：gate GEMM 的 B 免转置**（28 篇）：`wgmma` SS 的 B 要沿 K 连续，`W_g[E,H]` 的 H 连续
+  正好满足，直接建 tensormap 即可；别照搬 27 篇给 `ldmatrix.trans` 准备的 `WgT[H,E]`。
+- **tall-skinny GEMM 先算 wave 数再选 geometry**（28 篇）：输出 tile = `(M/BM)(N/BN)`。gate（N=384）
+  在 M=16384 时只有 384 个 tile、2 CTA/SM 下 **1.45 wave**，`128×128 s3`（塞得下 2 CTA）赢；
+  M=32768（768 tile）时反而是 **1 CTA/SM 的 `256×128 s4`** 赢（BM=256 让 A 复用翻倍、压 L2）。
+- **L2 利用率高时别上 split-K**（28 篇）：拆 K 让更多 CTA 抢同一批 A 的 L2 行，gate 实测
+  `s3` 565→`k2` 430、`k4` 348，全线更慢；`L2_PROMOTION_L2_256B` 同样负优化（600→576）。
 - **MoE grouped 的第一性原理是并行度**：per-expert loop（G=384）每个 GEMM 只有 `N/BN × m_g/BM` 个 CTA
   （实测 ~24 个），132 SM 空转，耗时对 token 数不敏感（25 篇 8k/16k/32k 都是 13–14ms）。把 expert 编码进
   B 的行坐标 `b_row = group*N + n`（`(G,N,K)` 等价 `(G*N,K)`），一个 kernel 调度全部 tile，小 batch 3.6×。
