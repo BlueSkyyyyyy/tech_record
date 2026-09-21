@@ -126,6 +126,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 50. [W4A8 IMMA 的收尾：K-blocked 权重布局把 `long_scoreboard` 打进 5.7×，以及持久化在这里为什么无效](content/posts/cuda-kernel-opt-50-w4a8-imma-pipe/index.md)
 51. [W4A8 IMMA 的 warp-private pipeline：把 barrier 从 1.61 清零之后，墙去哪了](content/posts/cuda-kernel-opt-51-w4a8-imma-warp/index.md)
 52. [W4A8 IMMA 的 TMA warp-private：把 2 KB 权重交给 TMA 引擎（和一个必须自己造的无冲突布局）](content/posts/cuda-kernel-opt-52-w4a8-imma-tma/index.md)
+53. [融合 RoPE：交错配对、对半配对，以及一个被访问模式封顶的纯访存算子](content/posts/cuda-kernel-opt-53-fused-rope/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 
