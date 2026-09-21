@@ -178,3 +178,17 @@ scripts/lab.sh status
 - **ncu 对某些配置会「看不到 kernel」**：25 篇 masked 的 `moe_kernel` 在 ncu 下反复报
   `No kernels were profiled`（app 提前 disconnect），普通运行正常——不要因此怀疑 kernel 本身，
   用吞吐指标（B-read GB/s）替代即可。
+- **`timeout` 杀不掉容器里的 GPU 进程**：`timeout N scripts/run.sh …` 超时时只杀掉宿主上的
+  `docker exec`，容器里的可执行文件（如 deadlock 的 kernel）会**继续占着 GPU 空转**，污染后续所有
+  基准（26 篇实测被拖慢约 2×、数字全废）。症状：`nvidia-smi` 看到残留进程，宿主 `pkill` 报
+  `Operation not permitted`（进程属容器 root）。修法：`docker exec kernel_lab pkill -9 -f <name>.out`。
+  **跑 benchmark 前先确认 GPU 干净**，超时后也要主动清理。
+- **TMA cluster multicast（26 篇）**：`cudaLaunchKernelEx` 的 `clusterDim.x=CN` 要求 `grid.x % CN == 0`；
+  leader 发 `cp.async.bulk.tensor.2d...multicast::cluster` + mask，每个 CTA 仍各自 `arrive.expect_tx`；
+  共享 operand 的 empty barrier count 是 `CN × 消费者 **warp** 数`（只有每 warp 的 lane0 用
+  `mapa.shared::cluster` 投到 leader），**写错不报错只死锁**；必须把「私有 operand 的 empty」与
+  「共享 operand 的 empty」拆成两个 barrier，否则非 leader 的私有 operand 被超等拖慢。
+- **`lts__throughput`（L2 请求/延迟占用）≠ `lts__t_sectors`（L2 字节）**：TMA multicast 能砍 A 的 L2
+  读 sector 15–19%，但 L2 利用率几乎不降（16k：94.08%→94.36%），因为每个 CTA 仍要发自己的 TMA、
+  且 leader↔peer 握手把访存耦合更紧。判据：**瓶颈在字节（大 batch、读放大高）才上 multicast**；
+  小 batch/masked decode（纯 DRAM 带宽）只有负收益。26 篇只有 32768+128×128 赢 +4.3%。
