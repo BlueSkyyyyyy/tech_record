@@ -344,3 +344,19 @@ scripts/lab.sh status
 - **`__int_as_float(0x4B000000|n)=2^23+n` 位技巧在量纲悬殊时不可用**（44 篇）：GEMV 里
   每项乘积被放大到 ~2e6、累加 ~7e7，f32 ulp≈8，真答案只有个位数 → **灾难性抵消**
   （err 15% FAIL）。换小 bias(16) 又因尾数 LSB≠1 不成立。只有被乘数与结果同量级才安全。
+- **上 warp specialization 之前先数「目标工作占多少指令/pipe」**（48 篇）：WS 只能*重叠*、
+  不能*减少*工作。W4A16 小 M 的 `mma_b16` 里反量化的 `pipe_alu`+`pipe_fma` 占 **78%**、
+  张量核只占 2.3%（tensor pipe 7.3%），把它拆进 producer WG 后 ALU/FMA 指令**一条没少**、
+  总指令反而 +9%，且 `long_scoreboard` **1.77→10.19（5.8×）**——生产者 warp 无事可做、独自干等。
+  判据：**被拆出去的工作是不是「发射即返回」的异步操作（TMA）**；要等结果的反量化/激活不适合。
+- **`long_scoreboard` 是「该不该拆 warpgroup」的指纹**（48 篇）：拆完若它不降反升，
+  说明你把「有别的指令可发射来躲延迟」的 warp 拆成了「独自干等」的 warp。别只看
+  `sm__warps_active`/occupancy 上升就以为变好。
+- **延迟受限的小 M GEMM：`KSPLIT` 粒度比 tile 形状更值钱**（48 篇）：`mma_b16` 的
+  `KSPLIT=8→16` 让 waves 2.06→4.12，`M∈[3,16]` 一致 **+5~11%**（切短 CTA 让更多独立访存流
+  互填 `long_scoreboard`）；但 KSPLIT 不是越大越好，`nblk_z` 少到 3~5 个 tile 时
+  prologue/drain + `atomicAdd` 归约税会吃回去（M=16 k32 比 k16 慢 13%）。
+- **文章 `date` 落在未来会被 Hugo 静默跳过**（48 篇踩到）：本机时间 04:28 CST 时写了
+  `date: 2026-09-22T06:30:00+08:00`，`hugo --gc` **无 ERROR** 但
+  `public/posts/<slug>/` 不存在 → 线上 404。发布前必须 `ls public/posts/<slug>/` 确认；
+  时间不确定就写一个「现在之前」的时刻。
