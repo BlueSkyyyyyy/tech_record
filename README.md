@@ -95,6 +95,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 17. [MuonClip 的 Newton–Schulz 正交化：15 个 GEMM 的链式算子](content/posts/cuda-kernel-opt-17-muonclip-ns/index.md)
 18. [DSA 稀疏注意力（一）：lightning indexer 与 exact top-k](content/posts/cuda-kernel-opt-18-dsa-indexer-topk/index.md)
 19. [DSA 稀疏注意力（二）：稀疏 MLA 消费端（gather top-k + cp.async 流水）](content/posts/cuda-kernel-opt-19-dsa-sparse-attn/index.md)
+20. [wgmma + SW128 swizzle：把 MLA 的 smem 布局换对](content/posts/cuda-kernel-opt-20-mla-wgmma-sw128/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 

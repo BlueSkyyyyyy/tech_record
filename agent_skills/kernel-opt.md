@@ -111,6 +111,17 @@ scripts/lab.sh status
   会让「连续线程写相邻 k-block」全撞同一 bank（16 篇实测 store bank conflict 2.7e8），且 tensor
   读操作数低效——`wgmma` 版反而比 `mma+ldmatrix` 慢一倍。**要用 SW128 swizzle**
   （描述符 `layout_type=1` + `base_offset` 相位）；先写小 GEMM 冒烟测试验证描述符。
+- **SW128（K-major）速查**（20 篇已跑通）：物理布局 `[row/8][k/64][8][64]`，atom 1024B，
+  元素 `(row,k)` 字节偏移 = `(rg*(K/64)+kg)*1024 + (rr*8+((kk/8)^rr))*16 + (kk%8)*2`；
+  描述符 `start>>4`(bit0-13)、`LBO=16B`(bit16-29，K-major 恒 1)、`SBO=(K/64)*1024`(bit32-45)、
+  `base_offset=0`(bit49-51)、`layout_type=1`(bit62-63)；**k16 步进 `floor(s/4)*1024+(s%4)*32`**
+  （跨 atom 是 +1024，不是一律 +32）。冒烟 GEMM 132 TFLOPS @4096³、MLA 105.3（+24.5% vs INTERLEAVE）。
+- **相邻两个 bf16/半精度标量存储会被 nvcc 合并成 `st.shared.u32` 并丢高 16 位**（20 篇实测
+  3553 字节错位，P 矩阵一半元素变 0）。症状极隐蔽：QK/PV 单独定点测试全过，只有写回那段错。
+  修法：显式 `__floats2bfloat162_rn` 打包成一次 `uint32_t` 存储（首地址 4B 对齐时）。
+- **`wgmma` SS 的 B 操作数必须 K-major**（CUTLASS 的 dense GMMA traits 里 B 全是
+  `smem_desc<Major::K>`）。所以 MLA 的 PV 必须把 `c_kv` `[k][dv]` 转置成 `[dv][k]`，
+  这次转置的 global gather 是额外开销——这是 wgmma 相对 `ldmatrix.x4.trans` 的一个劣势。
 - **按 DV 切 warp 省寄存器会带来 QK 重复（dup）**：`O[16,DV]` fp32 的寄存器墙逼着按 `DVW` 切
   warp，`dup=DV/DVW`。16 篇用 smem 共享 `P`（同 row 组两 warp 各算一半 KV）把 dup 从 2 降到 1，
   提升 16%；但别切太细——DVGRP 越大，每个 warp 都要完整读一遍 Q，反而不划算。
