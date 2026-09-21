@@ -1,0 +1,19 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+Fused epilogue GEMM: M=N=K=2048, FLOPs = 17.18 GFLOP
+
+  [base     ] sampled max_abs_err = 3.906e-03 (ref~1933.2) OK
+base         0.0778 ms    220.88 TFLOPS  ( 22.3% of bf16 TC peak)
+  [sep      ] sampled max_abs_err = 3.906e-03 (ref~1933.1) OK
+sep          0.0874 ms    196.49 TFLOPS  ( 19.9% of bf16 TC peak)
+  [fused    ] sampled max_abs_err = 3.906e-03 (ref~1933.1) OK
+fused        0.0786 ms    218.61 TFLOPS  ( 22.1% of bf16 TC peak)
+  [fused_relu] sampled max_abs_err = 3.906e-03 (ref~1933.1) OK
+fused_relu   0.0764 ms    224.78 TFLOPS  ( 22.7% of bf16 TC peak)
+  [epi      ] sampled max_abs_err = 3.906e-03 (ref~1933.1) OK
+epi_only     0.0084 ms    3979.4 GB/s  (33.6 MB moved)

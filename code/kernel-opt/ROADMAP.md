@@ -65,7 +65,7 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 - [x] **11 launch 配置与 occupancy**：寄存器/共享内存限制 · `__launch_bounds__` · 循环展开/ILP · thread tile 落地 09 GEMM
 - [x] **12 异步拷贝与流水线**：`cp.async` 多级软流水线（2/3/4/5 级）· `long_scoreboard` 0.91→0.03 · TMA 与 warp specialization 概念 · 与第 09 篇结合
 - [x] **13 Tensor Core 入门**：WMMA API / `mma` PTX · `m16n8k16` + `ldmatrix` · BF16 TC GEMM（220.98 TFLOPS / 22.3%）
-- [ ] **14 融合与 epilogue**：GEMM+bias+激活 · split-K · 生产算子（attention/GEMM）串讲
+- [x] **14 融合与 epilogue**：GEMM+bias+GELU/ReLU 寄存器融合 vs 独立 epilogue kernel · 省下 C 的一次额外读写（33.6 MB）· K 越小收益越大 · split-K 与生产算子串讲
 
 ## 每篇的 Definition of Done
 
@@ -104,12 +104,16 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 - 2026-09-21：完成并发布 **12 异步拷贝与流水线**：把 09 的 cp.async 双缓冲推广成模板化 N 级软流水线（`gemm_pipe<STAGES>`，环形缓冲 + `__pipeline_wait_prior(STAGES-1)`）：`sync` 30.18%（0.5692 ms）→ `pipe2` 50.4% → `pipe3` 53.3% → `pipe4` **53.6%**（35.84 TFLOPS）→ `pipe5` 53.4%，三级后饱和。ncu：`long_scoreboard` 0.91→0.03（双缓冲即归零），`issue_active` 56.8%→70.9%，头号 stall 变成 `not_selected`（~2.0，好信号）；DRAM 仅 2%（2048³ 驻 L2），瓶颈在 SM/发射。同口径 cuBLAS 50.73 TFLOPS（75.8%），达其 **70.6%**。附 TMA / warp specialization 演进说明。原始输出与 ncu 在 `12-async-pipeline/`。
 - 2026-09-21：完成并发布 **13 Tensor Core 入门**：WMMA API（62 TFLOPS / 6.3%）→ WMMA+cp.async（72.9）→ 裸 `mma.sync.aligned.m16n8k16` + 标量 LDS（~65）→ 裸 mma + `ldmatrix`（无 padding 76.2，有 padding 115）→ +cp.async 双缓冲 **220.98 TFLOPS / 22.3%**。最大杠杆是 **smem 行距 +8 padding 消 ldmatrix bank conflict**（3565 万 → 0，mma_pipe 76→221，2.9×）；瓶颈随优化 WMMA L1/TEX 77% → padding 后 Compute 37% / L2 70% / DRAM 7%。同口径 cuBLAS BF16 672.70 TFLOPS（68%），达其 32.8%，为 12 的 fp32（35.84）的 6.2×。原始输出/ncu 在 `13-tensor-core/`。
 - 2026-09-21：完成并发布 **11 launch 配置与 occupancy**：①ILP×occupancy 二维实验——12.5% occ 下 ILP=1→2 从 29.9 翻到 53.6 TFLOPS（`wait` stall 2.96→0.06），ILP=1 时 100% occ 也能到 63.7 TFLOPS，证明两者可互相替代；②在 09 GEMM（128×128/8×8/256 线程）上 `__launch_bounds__(256,MINB)` 扫描：`lb<2>`=128 寄存器/25%/30.6 TFLOPS 持平基线，`lb<3>`/`lb<4>` spill 296/520 B、occupancy 37.5%/50% 却是 11.3%/5.3%（最惨慢 8.7×，`long_scoreboard` 0.94→16.06）；③thread tile 扫描：`2×2`(100% occ) 18.8% vs `8×8`(25% occ) 46.8%，且 `8×8` 需 256 线程/block 才行（64 线程仅 23.7%）。模板化 GEMM 与 09 的 `gemm_reg_vec` 对齐（30.6 vs 30.1 TFLOPS）。
+- 2026-09-21：完成并发布 **14 融合与 epilogue**：在 13 的 `mma_pipe`（128×128×32 bf16 TC + ldmatrix padding + cp.async 双缓冲）上把 `store_acc` 模板化成可插拔 epilogue（bias / +GELU(tanh) / +ReLU）。M=N=K=2048：`base`(纯 GEMM) 0.0778 ms / 220.88 TFLOPS → `fused`(bias+GELU) **0.0786 ms / 218.61 TFLOPS（仅慢 ~1%）**；两 kernel 的 `sep` 0.0874 ms（+11%）。独立 epilogue kernel（float4 grid-stride）单测 `epi_only` 0.0084 ms / ~3979 GB/s（33.6 MB 的 C 读+写），`sep-fused=8.8µs` 恰等于它 + 一次 launch。三个 GEMM 实例（MODE=0/2/3）均 **128 寄存器 / 0 spill**，ncu 瓶颈指标逐项不变（L2 68.6~70.3%、DRAM 7.3%、Compute 37→40%）。K 扫描：sep/fused 慢 **11%(K=2048) / 26%(K=512) / 33%(K=256)**——算术强度越低融合越值钱。附 split-K 与生产算子阶段串讲。原始输出/ncu 在 `14-fusion-epilogue/`。
 
 ## 下一步（明确到可执行）
 
-- [ ] 完成 **14 融合与 epilogue**：在 13 的 `mma_pipe` 骨架上做 GEMM+bias+激活（GELU/ReLU）融合，写一个带 epilogue 的生产形态 GEMM；可选顺带讲解 split-K 与 attention/GEMM 串讲
-- [ ] 每完成一篇：更新本文件、README 索引，提交推送
-- [ ] 可选：给 01 的 roofline 画一张 mermaid 图
+**系列主体 01–14 已全部完成并发布**（`touch AUTOPILOT_STOP` 已创建，autopilot 循环停止）。
+
+若要继续拓展（均属 backlog，非原大纲）：
+- [ ] FlashAttention 串讲：把 07 online softmax / 14 epilogue 融合 / 12 异步流水线拼成完整 attention 算子
+- [ ] `wgmma`（Hopper warpgroup MMA）+ TMA 多级流水，把 13 的 22% 继续往上推
+- [ ] 给 01 的 roofline 画一张 mermaid 图
 
 ## 灵感 / backlog（想到就记，别丢）
 

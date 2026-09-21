@@ -1,0 +1,12 @@
+ptxas info    : Function properties for _Z14gemm_fused_epiILi3EEvPK13__nv_bfloat16S2_PKfPfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 128 registers, used 1 barriers, 37888 bytes smem
+ptxas info    : Function properties for _Z14gemm_fused_epiILi2EEvPK13__nv_bfloat16S2_PKfPfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 128 registers, used 1 barriers, 37888 bytes smem
+ptxas info    : Function properties for _Z15epilogue_kernelILi2EEvPfPKfii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 0 barriers
+ptxas info    : Function properties for _Z14gemm_fused_epiILi0EEvPK13__nv_bfloat16S2_PKfPfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 128 registers, used 1 barriers, 37888 bytes smem
