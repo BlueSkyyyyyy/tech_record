@@ -72,6 +72,16 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 
 配套代码：[code/te-perf/](code/te-perf/)（TE 原生 kernel 微基准，含 launch overhead 测量）
 
+### CUDA 算子调优系列（连载中）
+
+从零手写并优化 CUDA 算子，每篇含可运行代码、H100 实测数据与 `ncu` 剖析。路线图见 [code/kernel-opt/ROADMAP.md](code/kernel-opt/ROADMAP.md)。
+
+1. [开篇：GPU 怎么跑一个算子，怎么判断它快不快](content/posts/cuda-kernel-opt-01-overview/index.md)
+2. [第一个 kernel：从 vector add 看懂线程层次](content/posts/cuda-kernel-opt-02-first-kernel/index.md)
+3. [正确测量：计时陷阱、有效带宽与 ncu 入门](content/posts/cuda-kernel-opt-03-measurement/index.md)
+
+配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验）
+
 ### 其他
 
 - [开篇：为什么写这个博客](content/posts/hello-world/index.md)

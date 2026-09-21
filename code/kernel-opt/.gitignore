@@ -1,0 +1,6 @@
+# 编译产物
+*.out
+*.o
+*.cubin
+*.ptx
+*.fatbin

@@ -1,0 +1,25 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+=== A. launch overhead (empty kernel) ===
+  2000 empty launches: host_issue=3.749 ms (1.874 us/launch), +sync=3.775 ms
+  CUDA-event avg over 1000 launches: 1.886 us/launch (includes event overhead)
+
+=== B. cold start vs steady state ===
+  first (cold) launch : 0.025 ms
+  steady state        : 0.009 ms  (3734.2 GB/s)
+
+=== C. L2 residency (L2 = 52.4 MB) ===
+        size    working set           ms         GB/s
+        1 MB         2.0 MB       0.0025        810.2
+        4 MB         8.0 MB       0.0036       2205.0
+       16 MB        32.0 MB       0.0081       3954.1
+       32 MB        64.0 MB       0.0247       2595.2
+       64 MB       128.0 MB       0.0458       2792.8
+      256 MB       512.0 MB       0.1709       2995.0
+     1024 MB      2048.0 MB       0.6748       3035.1
+  注：working set << L2 时反复读同一份数据，带宽会远超 HBM 峰值，属正常现象。
