@@ -89,6 +89,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 11. [launch 配置与 occupancy：ILP、`__launch_bounds__` 与 thread tile](content/posts/cuda-kernel-opt-11-launch-occupancy/index.md)
 12. [异步拷贝与流水线：cp.async 多级流水线把访存藏起来](content/posts/cuda-kernel-opt-12-async-pipeline/index.md)
 13. [Tensor Core 入门：从 WMMA 到裸 mma.m16n8k16 + ldmatrix](content/posts/cuda-kernel-opt-13-tensor-core/index.md)
+14. [融合与 epilogue：给 GEMM 加上 bias 和激活](content/posts/cuda-kernel-opt-14-fusion-epilogue/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验）
 

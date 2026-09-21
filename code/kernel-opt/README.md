@@ -21,6 +21,7 @@
 | `11-launch-occupancy/` | 11 launch 配置与 occupancy | ILP × occupancy / `__launch_bounds__` 扫描 / thread tile 扫描（落地 09 GEMM）|
 | `12-async-pipeline/` | 12 异步拷贝与流水线 | cp.async 2/3/4/5 级软流水线 + ncu stall 对照（落地 09 GEMM）|
 | `13-tensor-core/` | 13 Tensor Core 入门 | WMMA / 裸 mma.m16n8k16 + ldmatrix / bank conflict padding + cuBLAS BF16 对照 |
+| `14-fusion-epilogue/` | 14 融合与 epilogue | GEMM+bias+GELU/ReLU 寄存器融合 vs 独立 epilogue kernel（11%/26%/33% 提速，随 K 缩小放大）|
 
 ## 怎么跑
 
