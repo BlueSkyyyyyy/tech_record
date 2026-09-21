@@ -23,17 +23,19 @@ PIDFILE="$DIR/autopilot.pid"
 OPENCODE="/home/xieminglin/.opencode/bin/opencode"
 MODEL="local-vllm//ssd/models/DeepSeek-V4.1-Flash"
 
-MAX_ROUNDS="${MAX_ROUNDS:-40}"
+MAX_ROUNDS="${MAX_ROUNDS:-200}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
 TIMEOUT_PER_ROUND="${TIMEOUT_PER_ROUND:-5400}"
 
-PROMPT='你是 tech_record 仓库的长期自驱 agent。按以下步骤**只完成一个增量**，做完就停，不要贪多。
-1. 先读 code/kernel-opt/ROADMAP.md 的「下一步」和「当前进度」，再读 agent_guide.md 与 agent_skills/kernel-opt.md。
-2. 挑其中**一篇**（或一个明确的增量），新增/修改代码到 code/kernel-opt/NN-*/；用 code/kernel-opt/scripts/run.sh 在 kernel_lab 容器里编译运行、与参考实现对拍，用 scripts/ncu.sh 采集关键指标；实测输出存到该目录 *.out.txt。
-3. 按 agent_skills/write-post.md 写文章 content/posts/cuda-kernel-opt-NN-<slug>/index.md（draft:false，带 weight 和系列 tag），数字必须来自实测，讲清楚优化思路与过程，配 ASCII/表格图示优先。
-4. 按 agent_skills/publish.md：/tmp/hugo_bin/hugo --gc --minify 确认无 ERROR → git add/commit（post:/bench:/skill:）→ push → 验证线上页面 HTTP 200。
-5. 更新 code/kernel-opt/ROADMAP.md（状态、当前进度、下一步）、README.md、code/README.md 索引。
-6. 如果整个系列已完成（ROADMAP 无未完成项），执行 `touch code/kernel-opt/AUTOPILOT_STOP` 后结束。
+PROMPT='你是 tech_record 仓库的长期自驱 agent，负责持续推进「CUDA 算子调优」系列。按以下步骤**只完成一个增量**，做完就停，不要贪多。
+1. 先读 code/kernel-opt/ROADMAP.md 的「下一步」「当前进度」，再读 code/kernel-opt/TECHNIQUES.md、agent_guide.md、agent_skills/kernel-opt.md。
+2. 优先做第五/六部分（模型场景算子：DeepSeek-V4.x / Kimi-K2.6 / Qwen3 的 MLA、DSA 稀疏注意力、MoE、FP8 GEMM、MuonClip 等）和把性能推向极致的工作。用 /ssd/models/*/config.json 的真实参数构造 shape，并可参考 ~/github 下的 FlashMLA / DeepGEMM / cutlass / flashinfer / muonclip / tilelang 等实现，给出与 SOTA 的差距百分比。
+3. 新增/修改代码到 code/kernel-opt/NN-*/；用 code/kernel-opt/scripts/run.sh 在 kernel_lab 容器里编译运行、与参考实现对拍，用 scripts/ncu.sh 采集关键指标；实测输出存到该目录 *.out.txt。要把性能尽可能做到最好（多版本对比、扫参、ncu 定位瓶颈→继续优化）。
+4. 按 agent_skills/write-post.md 写文章 content/posts/cuda-kernel-opt-NN-<slug>/index.md（draft:false，带 weight 和系列 tag），数字必须来自实测，讲清楚优化思路与过程，配 ASCII/表格/公式图示。
+5. 在 code/kernel-opt/TECHNIQUES.md 新增至少 1 条技巧条目（原理/场景/代码/实测收益/坑）并刷新性能榜；模型类文章更新「模型场景台账」。
+6. 按 agent_skills/publish.md：/tmp/hugo_bin/hugo --gc --minify 确认无 ERROR → git add/commit（post:/bench:/skill:）→ push → 验证线上页面 HTTP 200。
+7. 更新 code/kernel-opt/ROADMAP.md（状态、当前进度、下一步）、README.md、code/README.md 索引。
+**「下一步」做完或为空时，自己从第五/六/七部分或 backlog 里补充具体、可测的新任务，写进 ROADMAP 再继续，不要停。永远不要创建 AUTOPILOT_STOP（只有用户能停）。**
 若遇到无法自行解决的阻塞，把原因写进 ROADMAP 的「阻塞」小节并结束本轮，不要反复重试同一件事。
 全程不要请求人工确认、不要使用 question/交互类工具，自主决策。
 注意：GPU 用 kernel_lab 容器；ncu 必须在该容器里跑；git push 需要代理（NO_PROXY 已包含本地 vLLM 地址）。'

@@ -1,95 +1,148 @@
 # CUDA 算子调优系列 · 路线图（活文档）
 
-> 这是「CUDA 算子调优」系列持续自驱工作的**控制面板**。每完成一篇，
-> 更新这里的状态与「下一步」。AI agent 每次接管时：先读本文 → 读
-> `agent_guide.md` → 读本系列的 [agent skill](../../agent_skills/kernel-opt.md) → 从「下一步」做起。
+> 这是「CUDA 算子调优」系列持续自驱工作的**控制面板**。AI agent 每次接管时：
+> 先读本文 → 读 `agent_guide.md` → 读 [agent skill](../../agent_skills/kernel-opt.md) → 从「下一步」做起。
+> **配套台账：[TECHNIQUES.md](TECHNIQUES.md)**（技巧记录 + 性能榜，每篇必须往里加条目）。
 
 ## 目标
 
-一条**由浅入深、每篇都能自己跑出来**的算子调优学习线：
-从 CUDA 编程入门、正确测量，到访存/共享内存/归约/GEMM/Tensor Core/异步流水线，
-每篇都包含：可运行代码 + 本地实测数据 + ncu 剖析 + 通俗的优化思路说明。
+一条**由浅入深、每篇都能自己跑出来**的算子调优学习线，最终覆盖两件事：
+
+1. **通用 CUDA 优化**（01–14 已完成）：访存、共享内存、归约、GEMM、Tensor Core、异步流水线、融合。
+2. **模型场景算子**（15 起，重点）：把 DeepSeek-V4.x / Kimi-K2.6 / Qwen3 / GLM 等真实模型里的
+   MLA、DSA 稀疏注意力、MoE、FP8 GEMM、MuonClip 等算子**自己写出来并推到极致**；
+   建立**技巧台账 + 性能榜**，把每一次优化的手段、原理、实测收益记录下来。
+
+**北极星指标（持续逼近）**：
+
+- 内存受限算子：≥ 90~95% HBM 带宽；
+- GEMM（bf16 TC）：≥ 60% 峰值 / ≥ 80% 同口径 cuBLAS；
+- attention / MLA / DSA：对标 FlashMLA / 随模型规模可用的 SOTA 实现，给出差距百分比；
+- 每个算子都要有「优化前 → 优化后」的真实数字，并进入 `TECHNIQUES.md` 性能榜。
 
 原则：
 
-1. **代码必须能跑**：每个实验都有 `__main__` 式自测 / 参考实现对拍，实测数据写进文章。
-2. **数据必须真实**：文章里的数字来自本机 H100 实测（记录环境、命令、原始输出）。
+1. **代码必须能跑**：每个实验都有 `__main__` 式自测 / 参考实现对拍，实测数据写进文章与台账。
+2. **数据必须真实**：数字来自本机 H100 实测（记录环境、命令、原始输出）；不允许编造。
 3. **先说人话**：讲清楚「为什么慢 → 怎么想到的 → 改了什么 → 快了多少」。
-4. **循序渐进**：每篇只引入 1~2 个新概念，且依赖前面的结论。
-5. **持续演进**：路线图不是圣旨，跑出来有新发现就调整。
+4. **对标 SOTA**：能量化就量化（cuBLAS / CUTLASS / FlashMLA / DeepGEMM / flashinfer）。
+5. **持续演进**：路线图是活文档，跑出新发现就调整；**未完成项用完后自行补充新任务**。
 
-## 硬件 / 环境
+## 硬件 / 环境 / 本地资料
 
 | 项 | 值 |
 |---|---|
-| GPU | 8 × NVIDIA H100 80GB HBM3 (SXM)，CC 9.0，132 SM，峰值 ~3.35 TB/s，BF16 TC dense ~989 TFLOPS |
+| GPU | 8 × NVIDIA H100 80GB HBM3 (SXM)，CC 9.0，132 SM，HBM ~3.35 TB/s，BF16 TC dense ~989 TFLOPS，FP8 ~1978 TFLOPS |
 | 容器 | `kernel_lab`（镜像 `dsv4-inf:latest`，CUDA 13.2，含 nvcc / ncu / nsys / PyTorch） |
-| 关键点 | 宿主 `RmProfilingAdminOnly=1`，普通容器跑 ncu 报 ERR_NVGPUCTRPERM；`kernel_lab` 加了 `SYS_ADMIN`/`SYS_PTRACE` 才能 profiling |
+| 关键点 | 宿主 `RmProfilingAdminOnly=1`，普通容器跑 ncu 报 ERR_NVGPUCTRPERM；`kernel_lab` 加了 `SYS_ADMIN`/`SYS_PTRACE` |
 
 ```bash
-cd ~/proj/tech_record/code/kernel-opt   # 注意本机有软链：/home/xieminglin -> /ssd/home/xieminglin
-
-scripts/lab.sh up                  # 确保容器在跑（幂等）
-scripts/lab.sh enter               # 进容器
-scripts/run.sh 02-first-kernel/vector_add.cu   # 编译 + 运行
-scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 剖析
+cd ~/proj/tech_record/code/kernel-opt       # /home/xieminglin 是指向 /ssd/home/xieminglin 的软链
+scripts/lab.sh up                           # 确保容器在跑（幂等）
+scripts/run.sh 15-mla-attn/mla_attn.cu      # 编译 + 运行
+scripts/ncu.sh 15-mla-attn/mla_attn.cu --set full --kernel-name regex:mla
 ```
 
-> 容器可重建：`scripts/lab.sh rm && scripts/lab.sh up`。
+**本地参考仓库**（`~/github/`）：`FlashMLA`、`DeepGEMM`、`DeepEP`、`cutlass`、`flashinfer`、
+`flash-attention`、`tilelang`、`triton`、`Liger-Kernel`、`muonclip`、`TransformerEngine`、`vllm`、
+`How_to_optimize_in_GPU`、`CUDA_C_Programming_Guide.pdf`。
+
+**本地模型**（`/ssd/models/`，可读 `config.json` 拿真实算子形状）：
+
+| 模型 | 关键参数（用于构造 shape） |
+|---|---|
+| DeepSeek-V4-Pro | MLA: heads=128, kv_head=1, head_dim=512(qk_rope=64), q_lora=1536；DSA: index_n_heads=64, index_head_dim=128, index_topk=1024, compress_ratios∈{128,4,0}；MoE: 384 routed + 1 shared, top-6, moe_inter=3072；FP8 e4m3 + ue8m0, weight_block 128×128 |
+| DeepSeek-V4.1-Flash | model_type=deepseek_v41；FP8 dynamic, ue8m0, weight_block 32×32, expert_dtype fp4 |
+| Kimi-K2.6 | MLA（te-perf 已测 shape `(1,4096,64,192,128)`，qk=192, v=128）；kimi_k25 配置 |
+| Qwen3 系列 | GQA：q=40/kv=8、32/4、64/4，head_dim=128（te-perf 已列） |
+
+---
 
 ## 系列大纲
 
 状态：`[ ]` 未开始 · `[~]` 进行中 · `[x]` 已完成并发布 · `[-]` 暂缓。
 
-### 第一部分：入门与测量
+### 第一部分~第四部分（通用优化，01–14 已完成）
 
-- [x] **01 开篇**：为什么算子调优重要 · GPU 执行模型一页纸 · roofline 性能模型（带宽 vs 算力）· 工具链（nvcc/ncu/nsys）· 环境搭建
-- [x] **02 第一个 CUDA kernel**：线程层次（grid/block/thread/warp）· vector add 的三种写法（单元素 / grid-stride / float4）· 编译与错查
-- [x] **03 正确测量**：CUDA event 计时的陷阱（warmup、launch 开销、L2 常驻）· 有效带宽/FLOPs 怎么算 · ncu SpeedOfLight & Memory Workload 入门
+- [x] **01** 开篇：执行模型 / roofline / 工具链
+- [x] **02** 第一个 kernel：线程层次 / vector add 三写法
+- [x] **03** 正确测量：计时陷阱 / 有效带宽 / ncu 入门
+- [x] **04** 访存合并与向量化：copy 行/列 7.4×
+- [x] **05** 共享内存与 bank conflict：矩阵转置 466→1651 GB/s
+- [x] **06** 归约与 warp shuffle：0.1%→91%
+- [x] **07** Softmax 优化：多趟→融合→smem 85.3%
+- [x] **08** GEMM 入门：naive→smem tiled
+- [x] **09** GEMM 进阶：寄存器分块 + cp.async 双缓冲 51.5%
+- [x] **10** ncu 深潜：occupancy / stall / roofline / SASS
+- [x] **11** launch 配置与 occupancy：ILP × occupancy / `__launch_bounds__`
+- [x] **12** 异步拷贝与流水线：cp.async N 级软流水 53.6%
+- [x] **13** Tensor Core 入门：WMMA / `mma.m16n8k16` / ldmatrix 221 TFLOPS
+- [x] **14** 融合与 epilogue：GEMM+bias+GELU 仅慢 1% / split-K
 
-### 第二部分：内存是瓶颈
+### 第五部分：模型场景算子（15 起，重点）
 
-- [x] **04 访存合并与向量化**：coalescing 原理（一个 warp 一次 128B 事务）· copy 行/列优先 7.4× 差距 · ncu sectors-per-request · float4 89% 峰值
-- [x] **05 共享内存与 bank conflict**：矩阵转置（naive → 分块 smem → padding 消冲突）· bank 是怎么分的 · ncu 看冲突（6531 万→40 万）
-- [x] **06 归约与 warp shuffle**：树形归约 · `__shfl_down_sync` · 多 block + atomics · 每元素原子加 0.1% → 两级归约 91%
+- [ ] **15 MLA 注意力（一）**：DeepSeek/Kimi MLA 数学（q_lora/kv_lora、decoupled RoPE、absorb）· 朴素实现与 roofline · 真实 shape（Kimi 192/128、V4 512/64）· 附件：把 MLA 拆成可复用 kernel
+- [ ] **16 MLA 注意力（二）**：FlashMLA 式 KV 分块 + online softmax + split-KV 并行 · 寄存器/smem 布局 · 目标 ≥ 60% 峰值，对照 `~/github/FlashMLA`
+- [ ] **17 DSA 稀疏注意力（DeepSeek-V4）**：lightning indexer（64×128, top-k=1024）打分 + compressor（ratio 4/128/0）+ top-k gather + 稀疏 attention；测 seq 4k/32k/128k 相对 dense 的加速
+- [ ] **18 RoPE 融合算子**：yarn scaling（beta_fast/slow, factor 16）+ fused rotary，对照非融合
+- [ ] **19 RMSNorm / QK-Norm 融合**：DeepSeek/Kimi RMSNorm、QK-norm、fused residual+norm，冲 HBM 峰值
+- [ ] **20 MoE（一）：router + top-k + permutation**：384 experts top-6，token permute/unpermute，测路由与搬运开销
+- [ ] **21 MoE（二）：grouped GEMM**：变长 group 的 grouped GEMM，对照 `~/github/DeepGEMM` 的 contiguous/masked 分组
+- [ ] **22 FP8 GEMM（一）：per-tensor / per-block scaling**：e4m3 + ue8m0 缩放，weight_block 128×128 vs 32×32，精度与速度
+- [ ] **23 FP8 GEMM（二）：DeepSeek-V4 推理口径 + 融合 dequant**：block-wise scale 应用、expert fp4，对照 bf16
+- [ ] **24 Muon / MuonClip 优化器算子**：Newton–Schulz 迭代做正交化（zeropower）+ clip 融合；参考 `~/github/muonclip`；N=4096 级矩阵，冲 TFLOPS
+- [ ] **25 Paged KV-cache / flash-decoding 推理注意力**：GQA/MQA、block table、变长 seqlen；参考 `flashinfer`/`vllm`
+- [ ] **26 量化推理算子：W4A16 dequant-GEMM（GPTQ/AWQ）**：ERNIE/GLM/Kimi 量化部署常用；dequant 融合进 GEMM
+- [ ] **27 Attention 反向（FA bwd）**：自己推 dQ/dK/dV 并写 kernel，对拍 autograd（呼应 flash-attention 系列）
+- [ ] **28 融合 cross-entropy / logits**（vocab=129280）：分块在线 logsumexp，省一次全量读写
+- [ ] **29 MoE（三）：fused MoE（grouped GEMM + 激活 + unpermute）** 端到端对照
+- [ ] **30 选择性扫描 / SSM 算子**（Hy3 / Mamba 混合模型）：并行 scan kernel
 
-### 第三部分：计算与融合
+### 第六部分：极致性能（把上面的算子推到极致）
 
-- [x] **07 Softmax 优化**：多趟(29.8%) → 融合(37.4%) → 整行 smem 缓存(85.3%) · online softmax 引出 FlashAttention · LayerNorm 同套路
-- [x] **08 GEMM 入门**：naive(8.2%) → smem tiled(13.5%) · ncu 指出瓶颈是 L1/TEX 载入管道 · 引出寄存器分块
-- [x] **09 GEMM 进阶**：寄存器分块（thread tile）· 向量化 + double buffering · 逼近 cuBLAS 的百分比
+- [ ] **31 wgmma（Hopper warpgroup MMA）**：用 `wgmma.mma_async` 替换 `mma.sync.m16n8k16`，目标 GEMM ≥ 400 TFLOPS
+- [ ] **32 TMA + mbarrier 多级流水**：`cp.async.bulk.tensor.2d` + tensormap，替换 cp.async
+- [ ] **33 Warp specialization（生产者/消费者）+ ping-pong 调度**
+- [ ] **34 Persistent kernel + Stream-K**：为 tall-skinny / 不规则 M×N 做工作分解
+- [ ] **35 Split-K / parallel-K**：小 M/N、大 K 的 GEMM
+- [ ] **36 Autotuning 台 + 性能回归看板**：系统扫 launch 配置/流水级数，最佳结果写入 TECHNIQUES.md
+- [ ] **37 CUTLASS / CuTe 对照**：复现一个 CUTLASS 例程并在同 shape 对比
+- [ ] **38 GEMM 极限冲刺**：wgmma+TMA+persistent 叠加，目标 ≥ 80% 同口径 cuBLAS（4096³ bf16）
+- [ ] **39 MLA / attention 极限冲刺**：叠加前述技巧，对标 FlashMLA，给出差距百分比
 
-### 第四部分：进阶专题
+### 第七部分：更远
 
-- [x] **10 ncu 深潜**：occupancy 计算 · warp stall reasons · roofline section · source/sass 对照
-- [x] **11 launch 配置与 occupancy**：寄存器/共享内存限制 · `__launch_bounds__` · 循环展开/ILP · thread tile 落地 09 GEMM
-- [x] **12 异步拷贝与流水线**：`cp.async` 多级软流水线（2/3/4/5 级）· `long_scoreboard` 0.91→0.03 · TMA 与 warp specialization 概念 · 与第 09 篇结合
-- [x] **13 Tensor Core 入门**：WMMA API / `mma` PTX · `m16n8k16` + `ldmatrix` · BF16 TC GEMM（220.98 TFLOPS / 22.3%）
-- [x] **14 融合与 epilogue**：GEMM+bias+GELU/ReLU 寄存器融合 vs 独立 epilogue kernel · 省下 C 的一次额外读写（33.6 MB）· K 越小收益越大 · split-K 与生产算子串讲
+- [ ] **40 nsys 端到端与 compute/comm overlap**（结合 `DeepEP` 概念）
+- [ ] **41 Triton / TileLang 对照实现**：同一算子多 DSL 对比（呼应 flash-attention 05）
+- [ ] **42 H100 vs A100 调优差异**：smem/TC/带宽对策略的影响
 
 ## 每篇的 Definition of Done
 
-- [ ] 文章 `content/posts/cuda-kernel-opt-NN-<slug>/index.md`，`draft: false`，含 `weight`
+- [ ] 文章 `content/posts/cuda-kernel-opt-NN-<slug>/index.md`，`draft: false`，含 `weight`（=NN）
 - [ ] 配套代码 `code/kernel-opt/NN-<slug>/`，实测通过，原始输出留存（`*.out.txt` / `.log`）
-- [ ] 文章含：背景 → 现象/数据 → 根因 → 优化 → 实测对比表 → 小结 → 下一篇预告
-- [ ] 大数/结论有 ncu 或实测支撑；引用的行号/API 核对过
-- [ ] README.md 与 code/README.md 索引更新
-- [ ] `hugo --gc --minify` 无 ERROR；publish 技能验证线 200
+- [ ] 文章含：背景 → 现象/数据 → 根因 → 优化 → **实测对比表** → 小结 → 下一篇预告；模型类文章要给出真实 shape 与来源
+- [ ] 关键结论有 ncu/实测支撑；引用的行号/API/shape 核对过
+- [ ] **`TECHNIQUES.md` 至少新增 1 条技巧 + 更新性能榜**（记录手段、原理、代码位置、实测收益、坑）
+- [ ] README.md 与 code/README.md 索引更新；ROADMAP 状态与「下一步」更新
+- [ ] `hugo --gc --minify` 无 ERROR；publish 技能验证线上 200
 
 ## 工作循环（agent 自驱）
 
-1. 读 ROADMAP 的「下一步」，选一篇。
+1. 读本文「下一步」，选一篇；若「下一步」为空，**自己从第五/六/七部分或 backlog 里补充具体、可测的新任务**再继续。
 2. 写 / 改代码到 `code/kernel-opt/NN-*/`，用 `scripts/run.sh` 跑通，`scripts/ncu.sh` 采集关键指标。
-3. 写文章，把实测数字填进去（不要编）。
-4. 走 `agent_skills/publish.md`：构建 → commit → push → 验证线上 200。
-5. 更新本文件状态、`content`/`code` 索引、`agent_skills/kernel-opt.md` 里踩到的坑。
-6. commit & push 阶段性成果（建议每 1~2 篇一次）。
+3. 写文章，把实测数字填进去（不要编）；对标 SOTA 并给出百分比。
+4. 更新 `TECHNIQUES.md`（技巧 + 性能榜）。
+5. 走 `agent_skills/publish.md`：构建 → commit → push → 验证线上 200。
+6. 更新本文件、README/code 索引、`agent_skills/kernel-opt.md` 踩坑。
+7. commit & push（每篇一次）。
 
 ## 无人值守（autopilot）
 
-`scripts/autopilot.sh` 会循环启动 opencode 无头会话，每轮独立完成一篇文章增量，
-自动提交推送。启动/查看/停止：`scripts/autopilot.sh {start|status|stop}`。
-日志在 `autopilot.log`。**agent 每轮开始前先看本文的「下一步」；整个系列完成后 `touch AUTOPILOT_STOP` 让循环停下。**
+`scripts/autopilot.sh` 循环启动 opencode 无头会话，每轮独立完成一篇文章增量并自动提交推送。
+启动/查看/停止：`scripts/autopilot.sh {start|status|stop}`；日志 `autopilot.log`。
+
+**重要：agent 永远不要自己创建 `AUTOPILOT_STOP`**——只在用户执行 `autopilot.sh stop` 时才停。
+「下一步」做完了就自己扩充路线图，持续把算子性能往极致推。连续失败 3 次会由循环自动停。
 
 ## 阻塞
 
@@ -100,25 +153,24 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 - 2026-09-21：搭建容器 `kernel_lab` 与 `scripts/`、`common/cuda_utils.cuh`，起草路线图。
 - 2026-09-21：完成并发布 **01–08**（… / Softmax / GEMM 入门）。已 push 且线上 200。
 - 2026-09-21：完成并发布 **09 GEMM 进阶**：寄存器分块 8×8 + 交错映射消 bank conflict → 39.2%；float4 向量化 → 45.0%；cp.async 双缓冲 → **51.5%**（34.46 TFLOPS）；同口径 cuBLAS 75.8%（50.73 TFLOPS），达其 ~68%。
-- 2026-09-21：完成并发布 **10 ncu 深潜**：手算 occupancy（`k_occ<2>` = 2 block/25%，与 ncu 一致）；`__launch_bounds__` 强制提 occupancy → spill 1.31 TB local 流量、慢 34×；五类 stall 指纹表；roofline 拐点 AI\*≈20 并澄清 `Memory Throughput` 是缓存层级最大值（`k_latency` 97% 卡 L1、DRAM 仅 0.13%）；source/SASS 依赖链与 STL/LDL 对照。结论：`occ<2>` 25% occupancy 仍达 98.5% Compute / IPC 3.94。
-- 2026-09-21：完成并发布 **12 异步拷贝与流水线**：把 09 的 cp.async 双缓冲推广成模板化 N 级软流水线（`gemm_pipe<STAGES>`，环形缓冲 + `__pipeline_wait_prior(STAGES-1)`）：`sync` 30.18%（0.5692 ms）→ `pipe2` 50.4% → `pipe3` 53.3% → `pipe4` **53.6%**（35.84 TFLOPS）→ `pipe5` 53.4%，三级后饱和。ncu：`long_scoreboard` 0.91→0.03（双缓冲即归零），`issue_active` 56.8%→70.9%，头号 stall 变成 `not_selected`（~2.0，好信号）；DRAM 仅 2%（2048³ 驻 L2），瓶颈在 SM/发射。同口径 cuBLAS 50.73 TFLOPS（75.8%），达其 **70.6%**。附 TMA / warp specialization 演进说明。原始输出与 ncu 在 `12-async-pipeline/`。
-- 2026-09-21：完成并发布 **13 Tensor Core 入门**：WMMA API（62 TFLOPS / 6.3%）→ WMMA+cp.async（72.9）→ 裸 `mma.sync.aligned.m16n8k16` + 标量 LDS（~65）→ 裸 mma + `ldmatrix`（无 padding 76.2，有 padding 115）→ +cp.async 双缓冲 **220.98 TFLOPS / 22.3%**。最大杠杆是 **smem 行距 +8 padding 消 ldmatrix bank conflict**（3565 万 → 0，mma_pipe 76→221，2.9×）；瓶颈随优化 WMMA L1/TEX 77% → padding 后 Compute 37% / L2 70% / DRAM 7%。同口径 cuBLAS BF16 672.70 TFLOPS（68%），达其 32.8%，为 12 的 fp32（35.84）的 6.2×。原始输出/ncu 在 `13-tensor-core/`。
-- 2026-09-21：完成并发布 **11 launch 配置与 occupancy**：①ILP×occupancy 二维实验——12.5% occ 下 ILP=1→2 从 29.9 翻到 53.6 TFLOPS（`wait` stall 2.96→0.06），ILP=1 时 100% occ 也能到 63.7 TFLOPS，证明两者可互相替代；②在 09 GEMM（128×128/8×8/256 线程）上 `__launch_bounds__(256,MINB)` 扫描：`lb<2>`=128 寄存器/25%/30.6 TFLOPS 持平基线，`lb<3>`/`lb<4>` spill 296/520 B、occupancy 37.5%/50% 却是 11.3%/5.3%（最惨慢 8.7×，`long_scoreboard` 0.94→16.06）；③thread tile 扫描：`2×2`(100% occ) 18.8% vs `8×8`(25% occ) 46.8%，且 `8×8` 需 256 线程/block 才行（64 线程仅 23.7%）。模板化 GEMM 与 09 的 `gemm_reg_vec` 对齐（30.6 vs 30.1 TFLOPS）。
-- 2026-09-21：完成并发布 **14 融合与 epilogue**：在 13 的 `mma_pipe`（128×128×32 bf16 TC + ldmatrix padding + cp.async 双缓冲）上把 `store_acc` 模板化成可插拔 epilogue（bias / +GELU(tanh) / +ReLU）。M=N=K=2048：`base`(纯 GEMM) 0.0778 ms / 220.88 TFLOPS → `fused`(bias+GELU) **0.0786 ms / 218.61 TFLOPS（仅慢 ~1%）**；两 kernel 的 `sep` 0.0874 ms（+11%）。独立 epilogue kernel（float4 grid-stride）单测 `epi_only` 0.0084 ms / ~3979 GB/s（33.6 MB 的 C 读+写），`sep-fused=8.8µs` 恰等于它 + 一次 launch。三个 GEMM 实例（MODE=0/2/3）均 **128 寄存器 / 0 spill**，ncu 瓶颈指标逐项不变（L2 68.6~70.3%、DRAM 7.3%、Compute 37→40%）。K 扫描：sep/fused 慢 **11%(K=2048) / 26%(K=512) / 33%(K=256)**——算术强度越低融合越值钱。附 split-K 与生产算子阶段串讲。原始输出/ncu 在 `14-fusion-epilogue/`。
+- 2026-09-21：完成并发布 **10 ncu 深潜**：手算 occupancy、`__launch_bounds__` 反优化（spill 1.31 TB 慢 34×）、五类 stall 指纹、`Memory Throughput` 语义澄清。
+- 2026-09-21：完成并发布 **12 异步拷贝与流水线**：模板化 N 级软流水（`gemm_pipe<STAGES>`）：sync 30.18% → pipe4 **53.6%**（35.84 TFLOPS）；`long_scoreboard` 0.91→0.03；达同口径 cuBLAS 70.6%。
+- 2026-09-21：完成并发布 **13 Tensor Core 入门**：WMMA(62)→mma+ldmatrix(115)→+cp.async **220.98 TFLOPS / 22.3%**；关键杠杆是 smem 行距 +8 padding 消 ldmatrix bank conflict（3565 万→0，2.9×）；同口径 cuBLAS BF16 672.70（68%）。
+- 2026-09-21：完成并发布 **11 launch 配置与 occupancy**：ILP×occupancy 可互相替代；`__launch_bounds__` 扫描证实强制提 occupancy 负优化；thread tile 2×2(100%occ)18.8% vs 8×8(25%occ)46.8%。
+- 2026-09-21：完成并发布 **14 融合与 epilogue**：GEMM+bias+GELU 仅慢 ~1%（218.61 TFLOPS）；独立 epilogue kernel ~4 TB/s；K 越小融合越值钱（11%/26%/33%）。
+- 2026-09-21：**用户要求扩展**：新增第五/六/七部分（模型场景算子 + 极致性能）；新增台账 `TECHNIQUES.md`；autopilot 改为不停机、自我扩充。
 
 ## 下一步（明确到可执行）
 
-**系列主体 01–14 已全部完成并发布**（`touch AUTOPILOT_STOP` 已创建，autopilot 循环停止）。
-
-若要继续拓展（均属 backlog，非原大纲）：
-- [ ] FlashAttention 串讲：把 07 online softmax / 14 epilogue 融合 / 12 异步流水线拼成完整 attention 算子
-- [ ] `wgmma`（Hopper warpgroup MMA）+ TMA 多级流水，把 13 的 22% 继续往上推
-- [ ] 给 01 的 roofline 画一张 mermaid 图
+- [ ] **15 MLA 注意力（一）**：先读 `/ssd/models/DeepSeek-V4-Pro/config.json` 与 `~/github/FlashMLA/`，把 MLA 数学（q_lora/kv_lora、decoupled RoPE、absorb 技巧）与真实 shape 对齐；实现朴素 MLA 参考 + 一个能跑的 CUDA kernel（先不追极限），ncu 定位瓶颈；文章交代清楚 MLA 在 DeepSeek-V3/V4、Kimi-K2.6 里的参数差异。**注意**：V4-Pro 主注意力 head_dim=512 超出 TE/H100 训练 bwd 支持范围，本文做推理 fwd 口径即可。
+- [ ] 之后依次：16→17→…（见上）。模型类文章优先，因为用户明确要「针对模型的场景算子优化技巧」。
 
 ## 灵感 / backlog（想到就记，别丢）
 
-- 用 `torch.profiler`/CUPTI 与 CUDA event 对照，量化 launch 开销（呼应 te-perf 的结论）。
-- 拿 `How_to_optimize_in_GPU`（本地 `~/github`）里的例子做交叉验证。
-- cutlass 的 threadblock 层次与本文系列对照。
-- 单独一篇：H100 vs A100 的 smem/TC 差异对调优的影响。
-- 把每篇的 kernel 存成版本序列（v0/v1/v2），做一个 "diff 视图" 展示优化步骤。
+- DeepGEMM 的 JIT + contiguous grouped GEMM 与 DeepSeek-V4 的 expert 分布对齐。
+- FlashMLA 的 split-KV + `m64n...` 细节，和本文 16 逐段对照。
+- MuonClip 的 Newton–Schulz 5 步迭代（zeropower_via_newtonschulz）在 N=4096 上的 roofline：它到底是计算受限还是访存受限？
+- 用 nsys 把「GEMM + 两个 epilogue」与「融合 GEMM」对比端到端。
+- 把每篇 kernel 存成 v0/v1/v2 版本序列，做「优化步骤 diff 视图」。
+- 给 01 roofline 画 mermaid 图。
+- 复现 te-perf 文章里的生产 shape，把算子级结论接回模型级。
