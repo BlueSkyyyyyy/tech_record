@@ -215,3 +215,11 @@ scripts/lab.sh status
   少搬 1.72× 字节，不是赢在带宽。
 - **「一变多」scatter 置换：读一次写 K 行 vs 每行一读一写**（27 篇）：前者流量 `(1+K)MH·2`、HBM 效率 ~81%；
   后者流量 `(K+1)MH·2`、效率 ~91%，但净时间前者快 1.53×。**先算流量再比效率**，别被「效率掉 10 个点」骗回去。
+- **TMA 的 `boxR` 要同时匹配 `BM`（A）和 `BN`（B）**（31 篇）：25 篇记录了 `tmB` 的 `boxR=BN`；
+  31 篇跑 `BM=64` 时忘了把 `tmA` 的 `boxR` 从 128 改成 64，`expect_tx(BM*BK+BN*BK)` 与实际搬运字节
+  不符 → **mbarrier 永远等不齐、死锁且不报 CUDA error**（`timeout` 也杀不掉容器里的进程）。
+  写多 config 扫描时，A/B 两张 tensormap 都要按当前 `BM/BN` 重建；定位靠设备端 `printf` 打到 producer。
+- **per-block 缩放的代价是 occupancy，不是折算 FLOPs——工作点决定它贵不贵**（24/31 篇）：`fin` 让
+  寄存器 90→155、occupancy 2→1 CTA/SM。prefill（算力受限）暴露 ~18% 损失；decode/masked（纯权重
+  带宽）里 `wait0`+FMA 被 DRAM 延迟藏住，**完全免费**。分组场景（31 篇）比稠密单 GEMM 损失更小
+  （18% < 23%），因为 grouped 天生偏 L2/带宽。

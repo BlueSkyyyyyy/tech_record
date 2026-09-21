@@ -106,6 +106,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 28. [MoE 门控 GEMM 的 wgmma + TMA 冲刺：从 cuBLAS 的 28% 到 80%](content/posts/cuda-kernel-opt-28-moe-gate-wgmma/index.md)
 29. [MoE 门控 GEMM 的 TMA cluster multicast：广播 A 还是广播 B？](content/posts/cuda-kernel-opt-29-moe-gate-multicast/index.md)
 30. [MoE 专家 FFN 的融合：gather 输入 + SwiGLU epilogue + unpermute 融合](content/posts/cuda-kernel-opt-30-fused-moe/index.md)
+31. [MoE grouped GEMM 叠上 DeepSeek 的 per-block FP8 缩放：寄存器墙在分组场景下更便宜](content/posts/cuda-kernel-opt-31-moe-grouped-fp8pb/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 
