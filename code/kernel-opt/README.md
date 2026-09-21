@@ -26,6 +26,7 @@
 | `12-async-pipeline/` | 12 异步拷贝与流水线 | cp.async 2/3/4/5 级软流水线 + ncu stall 对照（落地 09 GEMM）|
 | `13-tensor-core/` | 13 Tensor Core 入门 | WMMA / 裸 mma.m16n8k16 + ldmatrix / bank conflict padding + cuBLAS BF16 对照 |
 | `14-fusion-epilogue/` | 14 融合与 epilogue | GEMM+bias+GELU/ReLU 寄存器融合 vs 独立 epilogue kernel（11%/26%/33% 提速，随 K 缩小放大）|
+| `15-mla-attn/` | 15 MLA 注意力（一） | MLA 吸收成 MQA：naive/head_reuse/smem 标量版（15~19 TFLOPS，算力受限）+ TC 三 kernel（115.6 TFLOPS），扫 S=1k/2k/4k |
 
 ## 怎么跑
 

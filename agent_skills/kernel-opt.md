@@ -89,3 +89,12 @@ scripts/lab.sh status
   否则 nvcc 报 `calling a __device__ function from a __host__ function is not allowed`。
 - **CUDA event 口径与 ncu 口径会有差**：第 14 篇独立 epilogue kernel event 测 8.4 µs、ncu 报
   11.26 µs（含 replay）。写文章时同一结论尽量用同一口径，或两者都标注。
+- **别被「读放大」骗了**：第 15 篇 MLA，`naive` 版读放大 131072×，但 `c_kv` 只有 1~5MB、常驻
+  50MB L2，ncu 实测 `DRAM Throughput` 仅 0.71%——真正瓶颈是 `Compute (SM)` 83.5%。判断优化方向
+  **先看 ncu 的 DRAM%**，DRAM 低就别做访存复用。
+- **attention/MLA 的 prefill 是算力受限**：`AI_ideal = 2H(DC+DR+DV)/(DC+DR)`，H=128/576/512 时≈242，
+  接近 bf16 TC ridge（295），但标量 FFMA ridge 只有 ~20。标量实现天花板 <7%，必须上 Tensor Core。
+- **按 head 复用 KV 会把寄存器吃爆**：第 15 篇 `head_reuse<8>` 达 255 寄存器 + 328B 栈溢出，比
+  `HG=2` 还慢。`-Xptxas -v` 核对；换来的复用若不减少 DRAM（见上条），纯属负优化。
+- **三 kernel 物化 attention 中间量的隐性税**：`S`(fp32)+`P`(bf16) 各写读一遍，流量 `∝H·S²`。第 15
+  篇 S=4096 时 25.8GB≈7.7ms，占 TC 总时长 21%。能融合就别物化。

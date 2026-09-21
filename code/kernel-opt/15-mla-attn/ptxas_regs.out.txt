@@ -1,0 +1,59 @@
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function '_Z8mla_smemILi4ELi8ELi32EEvPK13__nv_bfloat16S2_S2_S2_Pfii' for 'sm_90'
+ptxas info    : Function properties for _Z8mla_smemILi4ELi8ELi32EEvPK13__nv_bfloat16S2_S2_S2_Pfii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 190 registers, used 1 barriers, 37376 bytes smem
+ptxas info    : Compile time = 55.033 ms
+ptxas info    : Compiling entry function '_Z8mla_smemILi4ELi4ELi32EEvPK13__nv_bfloat16S2_S2_S2_Pfii' for 'sm_90'
+ptxas info    : Function properties for _Z8mla_smemILi4ELi4ELi32EEvPK13__nv_bfloat16S2_S2_S2_Pfii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 190 registers, used 1 barriers, 37376 bytes smem
+ptxas info    : Compile time = 53.210 ms
+ptxas info    : Compiling entry function '_Z14mla_head_reuseILi8EEvPK13__nv_bfloat16S2_S2_S2_Pfii' for 'sm_90'
+ptxas info    : Function properties for _Z14mla_head_reuseILi8EEvPK13__nv_bfloat16S2_S2_S2_Pfii
+    328 bytes stack frame, 346 bytes spill stores, 348 bytes spill loads
+ptxas info    : Used 255 registers, used 0 barriers, 328 bytes cumulative stack size
+ptxas info    : Compile time = 83.274 ms
+ptxas info    : Compiling entry function '_Z14mla_head_reuseILi2EEvPK13__nv_bfloat16S2_S2_S2_Pfii' for 'sm_90'
+ptxas info    : Function properties for _Z14mla_head_reuseILi2EEvPK13__nv_bfloat16S2_S2_S2_Pfii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 124 registers, used 0 barriers
+ptxas info    : Compile time = 20.826 ms
+ptxas info    : Compiling entry function '_Z14mla_head_reuseILi4EEvPK13__nv_bfloat16S2_S2_S2_Pfii' for 'sm_90'
+ptxas info    : Function properties for _Z14mla_head_reuseILi4EEvPK13__nv_bfloat16S2_S2_S2_Pfii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 225 registers, used 0 barriers
+ptxas info    : Compile time = 35.597 ms
+ptxas info    : Compiling entry function '_Z17softmax_rows_bf16PKfP13__nv_bfloat16ii' for 'sm_90'
+ptxas info    : Function properties for _Z17softmax_rows_bf16PKfP13__nv_bfloat16ii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 1 barriers, 32 bytes smem
+ptxas info    : Compile time = 10.310 ms
+ptxas info    : Compiling entry function '_Z13gemm_mma_pipePK13__nv_bfloat16S1_Pfiii' for 'sm_90'
+ptxas info    : Function properties for _Z13gemm_mma_pipePK13__nv_bfloat16S1_Pfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 164 registers, used 1 barriers, 37888 bytes smem
+ptxas info    : Compile time = 54.038 ms
+ptxas info    : Compiling entry function '_Z9mla_naivePK13__nv_bfloat16S1_S1_S1_Pfii' for 'sm_90'
+ptxas info    : Function properties for _Z9mla_naivePK13__nv_bfloat16S1_S1_S1_Pfii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 64 registers, used 0 barriers
+ptxas info    : Compile time = 12.326 ms
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+MLA absorbed attention (MQA): H=8 Sq=256 Sk=256  DC=512 DR=64 DV=512
+FLOPs = 1.14 GFLOP
+
+
+(理论最少读取量 = 0.000 GB，即 c_kv+k_rope 只读一遍)
+  [tc        ] sampled max_abs_err = 2.108e-05 (ref~0.013) OK
+tc(qk)         0.0215 ms     28.08 TFLOPS
+tc(softmax)    0.0052 ms
+tc(pv)         0.0142 ms     37.89 TFLOPS
+tc(total)      0.0403 ms     28.32 TFLOPS (  2.9% peak)
+   >> S/P 物化流量 = 0.01 GB，按 3352 GB/s 约 0.00 ms

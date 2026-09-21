@@ -90,6 +90,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 12. [异步拷贝与流水线：cp.async 多级流水线把访存藏起来](content/posts/cuda-kernel-opt-12-async-pipeline/index.md)
 13. [Tensor Core 入门：从 WMMA 到裸 mma.m16n8k16 + ldmatrix](content/posts/cuda-kernel-opt-13-tensor-core/index.md)
 14. [融合与 epilogue：给 GEMM 加上 bias 和激活](content/posts/cuda-kernel-opt-14-fusion-epilogue/index.md)
+15. [MLA 注意力（一）：从数学到第一个能跑的 kernel](content/posts/cuda-kernel-opt-15-mla-attn/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 
