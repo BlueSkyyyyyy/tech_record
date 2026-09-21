@@ -143,3 +143,16 @@ scripts/lab.sh status
   坑：①保序变换的逆**不自逆**（mask 依赖符号位；高位置位取低 31 位、否则取反），写错 `out_val` 全错；
   ②「整行塞 smem」在长序列反而更慢（S=32768：8.23 vs 6.75ms）——动态 smem 把 occupancy 锁成 1 block/SM，
   先算 occupancy 再决定。
+- **TMA（`cp.async.bulk.tensor.2d`）的 SW128 与 wgmma 描述符逐字节同构**（23 篇）：`CUtensorMap` 用
+  `CU_TENSOR_MAP_SWIZZLE_128B`，硬件写出的 smem 布局恰是 wgmma 的 K-major SW128，kernel 里零 swizzle 代码。
+  坑：①`CUDA 13` 驱动枚举**没有** `CU_TENSOR_MAP_DATA_TYPE_FLOAT8_E4M3` → 用 `UINT8` 搬字节；
+  ②`BK` 锁 128；③要 `-lcuda` 链接 `cuTensorMapEncodeTiled`；④tensormap 必须作 `const __grid_constant__` 参数。
+- **mbarrier 的相位别用动态下标数组**（23 篇）：`uint32_t phase[STAGES]; phase[st]^=1`（`st=kb%STAGES` 运行期）
+  会把数组推到 **local memory**，ncu 报 local memory 占 L1TEX 47.5% sector、`long_scoreboard` 8.1，只有 988 TFLOPS；
+  相位就是「该 stage 第 n 次使用」的奇偶，直接算 `(kb/STAGES)&1`（full）/`(kb/STAGES-1)&1`（empty）→ 1217。
+  **注意别只看 `Local Memory Spilling Requests=0`，要看 `Memory Workload Analysis` 里的 local memory 占比。**
+- **warp specialization 的 empty barrier count = 所有消费者线程数**：只让每 WG 的 lane0 `arrive` 会与同 WG
+  另一 warp 的 `wgmma.wait_group` 竞争（不确定对方读完了），实测会偶发错；让每个消费者线程都 arrive 才稳。
+- **算力受限 GEMM：降 L2 流量（大 BM）> 堆 occupancy**：23 篇 128×128 s3 有 2 CTA/SM 但 L2 80%、1097 TFLOPS；
+  256×128 s4 只有 1 CTA/SM、L2 57%，反而 1217。先看 ncu `L2 Cache Throughput` 与 tensor pipe 活跃度，别默认
+  occupancy 越高越好。
