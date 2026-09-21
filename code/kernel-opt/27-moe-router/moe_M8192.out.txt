@@ -1,0 +1,24 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+MoE router: M=8192  H=7168  E=384  topk=6  scale=2.5
+[gate BM128 ]   0.2274 ms    198.28 TFLOPS  571.68 GB/s(A+C)
+[gate BM256 ]   0.2529 ms    178.30 TFLOPS  (vs BM128 0.90x)
+[router topk]   0.0173 ms     750.0 GB/s(logits)  (8192 tokens, 8 warp/block)
+[gate check] sampled max_abs_err=3.509e-06 (ref~0.5) OK
+[rtr  check] top-6 set match 8/8 ; max_abs_err(w)=8.941e-08 OK
+[route meta ]   0.0312 ms  (独立 cudaMemset+count+scan+scatter, 49152 entries)
+[route+topk ]   0.0447 ms  (topk 融合直方图 + scan + scatter)
+[meta check] total=49152 (==49152)  offsets=OK  ptok membership=OK
+[perm v1/row ]   0.4516 ms    3120.9 GB/s  ( 93.1% HBM)  1.41 GB moved
+[perm v2/tok ]   0.3040 ms    2704.1 GB/s  ( 80.7% HBM)  0.82 GB moved  (vs v1 1.49x)
+[perm v3/cs  ]   0.3020 ms    2721.8 GB/s  ( 81.2% HBM)  (streaming store)
+[unpermute  ]   0.2697 ms    3047.8 GB/s  ( 90.9% HBM)  0.82 GB moved
+[roundtrip ] max_abs_err=9.765e-04 (ref~0.34) OK
+
+[total      ] gate 0.226 + route(融合 topk+meta) 0.045 + permute 0.304 + unpermute 0.270 = 0.845 ms
+[e2e        ] router(gate+route) 0.271 ms ; permutation 0.574 ms ; full 0.845 ms

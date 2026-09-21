@@ -1,0 +1,7 @@
+torch 2.12.0a0+0291f960b6.nv26.04.48445190  device NVIDIA H100 80GB HBM3
+M=16384 H=7168 E=384 topk=6
+[torch gate ]   0.1222 ms    738.20 TFLOPS
+[torch rtr  ]   0.4294 ms  (gate+softplus+topk+gather+renorm)
+[torch perm ]   0.9097 ms    1807.4 GB/s  ( 53.9% HBM)
+[torch unpm ]   9.4918 ms     173.2 GB/s  (  5.2% HBM)
+[torch e2e  ] gate 0.1222 + router 0.4294 + perm 0.9097 + unperm 9.4918 = 10.9531 ms
