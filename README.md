@@ -114,6 +114,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 37. [FP8 per-block GEMM 的第三条路：把 ue8m0 的 2 的幂 scale 折进操作数（940→1208 TFLOPS）](content/posts/cuda-kernel-opt-37-fp8-pb-prescale/index.md)
 38. [Paged KV-cache / flash-decoding 推理注意力：从 46% 打到 93% HBM](content/posts/cuda-kernel-opt-38-paged-kv/index.md)
 39. [MLA 吸收式 decode + FP8 KV-cache：一个张量核也吃不饱的「平衡」算子](content/posts/cuda-kernel-opt-39-mla-decode/index.md)
+40. [W4A16 dequant-GEMM：权重 4-bit 化在 decode 赚的那 1.4×，以及反量化税](content/posts/cuda-kernel-opt-40-w4a16-gemm/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 
