@@ -28,6 +28,7 @@
 | `14-fusion-epilogue/` | 14 融合与 epilogue | GEMM+bias+GELU/ReLU 寄存器融合 vs 独立 epilogue kernel（11%/26%/33% 提速，随 K 缩小放大）|
 | `15-mla-attn/` | 15 MLA 注意力（一） | MLA 吸收成 MQA：naive/head_reuse/smem 标量版（15~19 TFLOPS，算力受限）+ TC 三 kernel（115.6 TFLOPS），扫 S=1k/2k/4k |
 | `16-mla-fused/` | 16 MLA 注意力（二） | 单 kernel 融合：online softmax + 累加器 C→A 零 shuffle + KV 常驻 smem；`f4s` 共享 P 消重复 **170.1 TFLOPS**（Sk=4096 → 184.7）；附 `wgmma` 尝试（84.6，暴露 swizzle 才是胜负手）与描述符冒烟测试 |
+| `17-muonclip-ns/` | 17 Muon/MuonClip NS 正交化 | 5 步 NS = 15 个 GEMM（`30N³`）：自研 `mma` GEMM + 融合 `f·x+g` epilogue（**244 TFLOPS**，N=4096）；对照 cuBLAS 链（529）、fp32 参考；单 GEMM 269 vs cuBLAS 883；ncu 定位 L2/occupancy 瓶颈 |
 
 ## 怎么跑
 
