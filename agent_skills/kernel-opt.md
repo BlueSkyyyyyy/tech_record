@@ -285,3 +285,23 @@ scripts/lab.sh status
   折算开销彻底消失：GEMM 本体 940.6→1207.9 TFLOPS（1.28×）。折 B（权重）一次性免费；折 A（激活）
   应融进上游 per-1×128 动态量化器（写回前多乘一次 sa，零额外访存），端到端 1.19×。**边界**：只对
   2 的幂 scale 精确（任意 fp32 scale 会多半个 ulp 舍入）；`A'` 与 scale 绑定，多 GEMM 共用 A 时要各存一份。
+- **`ldmatrix` 能从 SW128 tile 里直接读「转置」的数据**（42 篇）：SW128 只在 **16B 粒度**做
+  `c'=c^r` 置换，每个 16B chunk（8×bf16）完好；`ldmatrix` 每个 lane 只需一个 16B 地址。
+  所以 `sw128_off(key, dv, DK)` 算出地址喂 `ldmatrix.x4.trans`，就能从 wgmma 用的那块 SW128
+  K tile 里读「转置」的 V——MLA 的 PV 因此**免掉 V 转置**（一个 KV tile 只从 global 读一次）。
+  反例：`wgmma` 的 B 只认 K-major（J4），纯 wgmma 版必须把 V 转置成 `V^T[DV,KT]`
+  （每 tile 4096 次跨 1KB 标量读），实测比 `mma+ldmatrix` 更慢（181 < 190）。
+- **怀疑某段 global 重载是墙，就把它短路掉看天花板**（42 篇）：保留全部骨架，只把那段 load
+  用 `if(false && …)` 关掉（结果无意义）。纯 wgmma MLA decode 完整版 181 → 关掉每轮 V 重载
+  **368 TFLOPS**，一步锁定「V 转置是全部瓶颈」。判据是 `long_scoreboard` 同步下降。
+- **`mma16816` 的累加器指针是「4 个连续 float」**（42 篇）：39 篇的 `O` 是 `float O[NDH][4]`，
+  传 `O[dn*2]` 得到一行；扁平 `float O[DVW/8*4]` 若传 `O+dn*2`，相邻两个 n8 tile 的累加器会
+  **重叠**（`O+dn*2` 与 `O+dn*2+1` 只差 1 个 float）→ 结果全错。正解 `O + (dn*2)*4`。
+  手搓 mma 时先写最小 GEMM 复现（`pvt_test.cu`）验证。
+- **跨 WG 交换 softmax max/sum 的行号别重复加 `16*W`**（42 篇）：`r0 = 16*(W&3) + (lane>>2)`
+  **已经是 CTA 内 0..63 的行号**；`red[wg*BM + 16*W + r0]` 会把它推到 96/144 越界别名。
+  症状隐蔽：`L=32768` 误差只有 7e-5（softmax 鲁棒掩盖），但 `L=64`（单 tile）相对误差 13% FAIL。
+  **短序列也要对拍**。
+- **`cudaFuncSetAttribute(MaxDynamicSharedMemorySize)` 上限恰是 232448B**（42 篇）：混合版 MLA
+  decode 的 smem = `Q 73728 + 2×K 73728 + P 9216 + red`，多算 1KB 冗余就 `invalid argument`。
+  缓冲块数×块大小要逐字节算，`red` 按当前模板参数的真实大小给。
