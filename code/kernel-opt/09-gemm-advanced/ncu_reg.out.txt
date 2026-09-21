@@ -1,0 +1,140 @@
+==PROF== Connected to process 11582 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/09-gemm-advanced/gemm_advanced.out)
+==PROF== Profiling "gemm_reg": 0%....50%....100% - 18 passes
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+M=N=K=2048, GEMM, FLOPs = 17.18 GFLOP
+
+  [tiled32   ] sampled max_abs_err = 8.940e-08 OK
+tiled32        1.8834 ms      9.12 TFLOPS  ( 13.6% of fp32 peak)
+  [reg       ] sampled max_abs_err = 8.940e-08 OK
+reg           91.2285 ms      0.19 TFLOPS  (  0.3% of fp32 peak)
+  [reg_vec   ] sampled max_abs_err = 8.940e-08 OK
+reg_vec        0.5715 ms     30.06 TFLOPS  ( 44.9% of fp32 peak)
+  [reg_db    ] sampled max_abs_err = 8.940e-08 OK
+reg_db         0.5007 ms     34.31 TFLOPS  ( 51.3% of fp32 peak)
+==PROF== Disconnected from process 11582
+[11582] gemm_advanced.out@127.0.0.1
+  gemm_reg(const float *, const float *, float *, int, int, int) (16, 16, 1)x(16, 16, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.99
+    Elapsed Cycles                cycle      1302524
+    Memory Throughput                 %        38.44
+    DRAM Throughput                   %         1.66
+    Duration                         us       653.09
+    L1/TEX Cache Throughput           %        39.29
+    L2 Cache Throughput               %        11.27
+    SM Active Cycles              cycle   1274128.80
+    Compute (SM) Throughput           %        62.53
+    ----------------------- ----------- ------------
+
+    OPT   Compute is more heavily utilized than Memory: Look at the Compute Workload Analysis section to see what the   
+          compute pipelines are spending their time doing. Also, consider whether any computation is redundant and      
+          could be reduced or moved to look-up tables.                                                                  
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %        15.57
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Gbyte/s        55.61
+    Mem Busy                                          %        38.44
+    Max Bandwidth                                     %        31.72
+    L1/TEX Hit Rate                                   %         2.27
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector       531920
+    L2 Hit Rate                                       %        90.41
+    Mem Pipes Busy                                    %        29.36
+    --------------------------------------- ----------- ------------
+
+    Section: Warp State Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Warp Cycles Per Issued Instruction             cycle         5.84
+    Warp Cycles Per Executed Instruction           cycle         5.84
+    Avg. Active Threads Per Warp                                   32
+    Avg. Not Predicated Off Threads Per Warp                    31.80
+    ---------------------------------------- ----------- ------------
+
+    WRN   The optional metric smsp__pcsamp_sample_count could not be found. Collecting it as an additional metric could 
+          enable the rule to provide more guidance.                                                                     
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Local Speedup: 31.23%                                                                                    
+          On average, each warp of this workload spends 1.8 cycles being stalled waiting for the micro scheduler to     
+          select the warp to issue. Not selected warps are eligible warps that were not picked by the scheduler to      
+          issue that cycle as another warp was selected. A high number of not selected warps typically means you have   
+          sufficient warps to cover warp latencies and you may consider reducing the number of active warps to          
+          possibly increase cache coherence and data locality. This stall type represents about 31.2% of the total      
+          average of 5.8 cycles between issuing two instructions.                                                       
+    ----- --------------------------------------------------------------------------------------------------------------
+    INF   Check the Warp Stall Sampling (All Samples) table for the top stall locations in your source based on         
+          sampling data. The Profiling Guide                                                                            
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-reference) provides more details    
+          on each stall reason.                                                                                         
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   256
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                    256
+    Registers Per Thread             register/thread             128
+    Shared Memory Configuration Size           Kbyte           65.54
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block       byte/block               0
+    Static Shared Memory Per Block       Kbyte/block            8.19
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread           65536
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                                0.97
+    -------------------------------- --------------- ---------------
+
+    OPT   If you execute __syncthreads() to synchronize the threads of a block, it is recommended to have at least two  
+          blocks per multiprocessor (compared to the currently executed 1.9 blocks) This way, blocks that aren't        
+          waiting for __syncthreads() can keep the hardware busy.                                                       
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            2
+    Block Limit Shared Mem                block            7
+    Block Limit Warps                     block            8
+    Theoretical Active Warps per SM        warp           16
+    Theoretical Occupancy                     %           25
+    Achieved Occupancy                        %        23.34
+    Achieved Active Warps Per SM           warp        14.93
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 75%                                                                                       
+          The 4.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (25.0%) is limited by the number of required      
+          registers.                                                                                                    
+

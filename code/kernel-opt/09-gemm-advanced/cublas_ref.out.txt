@@ -1,0 +1,3 @@
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 device NVIDIA H100 80GB HBM3
+cublas matmul (tf32=False)
+M=N=K=2048  0.3386 ms  50.73 TFLOPS  (75.8% of fp32 peak)

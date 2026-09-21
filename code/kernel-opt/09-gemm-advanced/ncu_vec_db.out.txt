@@ -1,0 +1,40 @@
+===== gemm_reg_vec =====
+    Section: GPU Speed Of Light Throughput
+    Metric Name             Metric Unit Metric Value
+    Memory Throughput                 %        44.21
+    DRAM Throughput                   %         1.91
+    Duration                         us       570.43
+    L1/TEX Cache Throughput           %        46.07
+    L2 Cache Throughput               %        11.11
+    Compute (SM) Throughput           %        54.75
+    Metric Name                              Metric Unit Metric Value
+    Warp Cycles Per Issued Instruction             cycle         6.69
+    Metric Name                          Metric Unit    Metric Value
+    Registers Per Thread             register/thread             118
+    Static Shared Memory Per Block       Kbyte/block            8.19
+    OPT   If you execute __syncthreads() to synchronize the threads of a block, it is recommended to have at least two  
+          waiting for __syncthreads() can keep the hardware busy.                                                       
+    Metric Name                     Metric Unit Metric Value
+    Block Limit Registers                 block            2
+    Theoretical Occupancy                     %           25
+    Achieved Occupancy                        %        23.83
+===== gemm_reg_db =====
+    Section: GPU Speed Of Light Throughput
+    Metric Name             Metric Unit Metric Value
+    Memory Throughput                 %        42.32
+    DRAM Throughput                   %         2.19
+    Duration                         us       498.91
+    L1/TEX Cache Throughput           %        43.78
+    L2 Cache Throughput               %        13.88
+    Compute (SM) Throughput           %        66.43
+    Metric Name                              Metric Unit Metric Value
+    Warp Cycles Per Issued Instruction             cycle         5.28
+    Metric Name                          Metric Unit    Metric Value
+    Registers Per Thread             register/thread             128
+    Static Shared Memory Per Block       Kbyte/block           16.38
+    OPT   If you execute __syncthreads() to synchronize the threads of a block, it is recommended to have at least two  
+          waiting for __syncthreads() can keep the hardware busy.                                                       
+    Metric Name                     Metric Unit Metric Value
+    Block Limit Registers                 block            2
+    Theoretical Occupancy                     %           25
+    Achieved Occupancy                        %        22.70
