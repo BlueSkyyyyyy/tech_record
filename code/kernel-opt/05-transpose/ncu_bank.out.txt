@@ -1,0 +1,12 @@
+######## transpose_smem_nopad ########
+    gpu__time_duration.avg                                            us       538.18
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                 65310220
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                   209668
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                     67407372
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_st.sum                      2306820
+######## transpose_smem_pad ########
+    gpu__time_duration.avg                                            us       322.50
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                   396327
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                   161046
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                      2493479
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_st.sum                      2258198

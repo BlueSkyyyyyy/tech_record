@@ -80,6 +80,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 2. [第一个 kernel：从 vector add 看懂线程层次](content/posts/cuda-kernel-opt-02-first-kernel/index.md)
 3. [正确测量：计时陷阱、有效带宽与 ncu 入门](content/posts/cuda-kernel-opt-03-measurement/index.md)
 4. [访存合并与向量化：同一个 copy，差 7 倍](content/posts/cuda-kernel-opt-04-coalescing/index.md)
+5. [共享内存与 bank conflict：矩阵转置](content/posts/cuda-kernel-opt-05-transpose/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验）
 

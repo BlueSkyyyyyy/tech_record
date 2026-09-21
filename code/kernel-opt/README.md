@@ -12,6 +12,7 @@
 | `02-first-kernel/` | 02 第一个 kernel | vector add 的三种写法 |
 | `03-measurement/` | 03 正确测量 | 计时陷阱 / launch 开销 / 带宽实验 |
 | `04-coalescing/` | 04 访存合并与向量化 | 合并 vs 跨行访问 vs float4 的带宽对比 |
+| `05-transpose/` | 05 共享内存与 bank conflict | 矩阵转置：naive / smem 无 padding / padding |
 
 ## 怎么跑
 
