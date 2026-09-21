@@ -1,0 +1,40 @@
+==PROF== Connected to process 297856 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/48-w4a8-imma/w4a8_imma.out)
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A8 IMMA small-M sweep: N=17408 K=5120 group=128 ; W_int4=44.6 MB scales=2.8 MB
+峰值: bf16 TC 989 TFLOPS / int8 TC 1978 TOPS ; bf16 ridge M*=78
+  [mma_b16_k8] threads=128 smem=49664
+  [mma_b16_k16] threads=128 smem=49664
+  [mma_b32_k8] threads=256 smem=54272
+
+激活量化对拍：int8 err=0/81920, scale max_err=0.000e+00
+
+=== 精度校验（M=16, 抽样 48 点）===
+==PROF== Profiling "gemm_mma_w4a16_kernel": 0%....50%....100% - 4 passes
+  [mma_b16_k8      ] max_abs_err=1.615e-02 (ref~2.8) rel=5.83e-03 OK
+
+=== M 扫描（同进程、warmup=5 iters=50；括号=权重读遍数）===
+kernel\M                  1          2          3          4          6          8         12         16         24         32         48         64
+mma_b16_k8         0.0712     0.0711     0.0711     0.0721     0.0715     0.0715     0.0731     0.0755     0.1194     0.1224     0.1689     0.2176  
+==PROF== Disconnected from process 297856
+[297856] w4a8_imma.out@127.0.0.1
+  void gemm_mma_w4a16_kernel<16, 128, 64, 2, 1, 4, 8>(const __nv_bfloat16 *, const unsigned char *, const float *, float *, int, int, int) (136, 1, 8)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    --------------------------------------------------------------------------- ----------- ------------
+    sm__inst_executed.sum                                                              inst     30598912
+    sm__inst_executed_pipe_lsu.avg.pct_of_peak_sustained_elapsed                          %        13.63
+    sm__pipe_alu_cycles_active.avg.pct_of_peak_sustained_elapsed                          %        43.01
+    sm__pipe_fma_cycles_active.avg.pct_of_peak_sustained_elapsed                          %        14.78
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio           inst         1.58
+    smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio        inst         0.47
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio              inst         0.79
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                      inst         1.31
+    --------------------------------------------------------------------------- ----------- ------------
+
