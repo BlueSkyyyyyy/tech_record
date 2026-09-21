@@ -1,0 +1,9 @@
+device=NVIDIA H100 80GB HBM3  G=384 N=3072 K=7168
+
+[prefill] tokens=16384 expected_m/expert=256 M_total=122240 sum_actual=97580 waste=20.2%
+  eager loop        6.9500 ms    774.60 TFLOPS
+  graph loop        6.5429 ms    822.79 TFLOPS
+
+[decode] max_m=128 (batched/padded, 无早退)
+  eager loop        6.0607 ms    357.16 TFLOPS(padded)  B-read  1395.2 GB/s
+  graph loop        4.6199 ms    468.55 TFLOPS(padded)  B-read  1830.3 GB/s
