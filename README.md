@@ -116,6 +116,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 39. [MLA 吸收式 decode + FP8 KV-cache：一个张量核也吃不饱的「平衡」算子](content/posts/cuda-kernel-opt-39-mla-decode/index.md)
 40. [W4A16 dequant-GEMM：权重 4-bit 化在 decode 赚的那 1.4×，以及反量化税](content/posts/cuda-kernel-opt-40-w4a16-gemm/index.md)
 41. [W4A16 的 warp specialization：把 occupancy 从 6.5% 提到 22%，为什么只快 7%？](content/posts/cuda-kernel-opt-41-w4a16-warp-specialization/index.md)
+42. [MLA decode 的 wgmma 改造：消掉 QK dup，却撞上 V 转置税，再用混合 mma 绕开（1.53×）](content/posts/cuda-kernel-opt-42-mla-decode-wgmma/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 
