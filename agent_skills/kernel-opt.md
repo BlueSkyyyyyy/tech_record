@@ -192,3 +192,15 @@ scripts/lab.sh status
   读 sector 15–19%，但 L2 利用率几乎不降（16k：94.08%→94.36%），因为每个 CTA 仍要发自己的 TMA、
   且 leader↔peer 握手把访存耦合更紧。判据：**瓶颈在字节（大 batch、读放大高）才上 multicast**；
   小 batch/masked decode（纯 DRAM 带宽）只有负收益。26 篇只有 32768+128×128 赢 +4.3%。
+- **bench 的每个子模式都要保证「上游数据已就绪」**（27 篇坑）：`perm`/`unperm` 单独跑时不会执行
+  `route_scatter`，于是 `pos[]` 是未初始化值 → kernel 读到垃圾、读写都落在少数行上（命中 L2），
+  ncu 会报出「91µs 搬 1.64GB」这种不可能的数字。修法：这些模式开头补 `run_topk(); run_meta();`。
+  判据：带宽超过峰值、或 ncu duration 与 `bench_ms` 差 5× 以上，先怀疑输入没准备好。
+- **ncu 的 `dram__bytes_write.sum` 对 write-back L2 的写会严重偏小**（27 篇）：permute 写 1.41GB，
+  ncu 只记到 2.65MB（dirty line 未回写、metrics 窗口就结束）。**带宽结论一律用 `bench_ms` 的外部口径**，
+  ncu 只用来看「瓶颈在哪一级」（DRAM/L2/Compute 百分比 + occupancy）。
+- **对标 torch `index_select` 注意字节口径**：它对每个出现都读一次源（27 篇 `x` 被读 K 次，
+  真实流量 `2·P·H·2` 而非 `(P+M)·H·2`）；其本身也贴 HBM（92%），手写 kernel 赢在「读一次写 K 行」
+  少搬 1.72× 字节，不是赢在带宽。
+- **「一变多」scatter 置换：读一次写 K 行 vs 每行一读一写**（27 篇）：前者流量 `(1+K)MH·2`、HBM 效率 ~81%；
+  后者流量 `(K+1)MH·2`、效率 ~91%，但净时间前者快 1.53×。**先算流量再比效率**，别被「效率掉 10 个点」骗回去。
