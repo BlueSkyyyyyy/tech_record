@@ -1,0 +1,12 @@
+  [check] v3 split=2x4           max_abs_err=3.687e-04 mean=4.553e-05
+v3 split=2x4                   0.4413 ms     304.2 GB/s  (  9.1% of peak)
+        v3 split=2x4   0.4413 ms  1.52 TFLOPS
+  [check] v3 split=4x4           max_abs_err=3.692e-04 mean=3.389e-05
+v3 split=4x4                   0.2299 ms     583.8 GB/s  ( 17.4% of peak)
+        v3 split=4x4   0.2299 ms  2.92 TFLOPS
+  [check] v3 split=8x4           max_abs_err=3.285e-04 mean=2.734e-05
+v3 split=8x4                   0.1235 ms    1086.5 GB/s  ( 32.4% of peak)
+        v3 split=8x4   0.1235 ms  5.43 TFLOPS
+  [check] v3 split=16x4          max_abs_err=1.726e-04 mean=1.999e-05
+v3 split=16x4                  0.0823 ms    1631.1 GB/s  ( 48.7% of peak)
+        v3 split=16x4   0.0823 ms  8.16 TFLOPS

@@ -1,0 +1,7 @@
+torch 2.12.0a0+0291f960b6.nv26.04.48445190  B=64 L=32768  Hq=40 Hkv=8 D=128 P=16
+KV bytes = 8.590 GB
+raw KV read               2.772 ms    3098.8 GB/s
+gather (view/reshape)     0.117 ms   72492.5 GB/s
+torch SDPA (gqa)          2.687 ms    3196.9 GB/s
+flash_attn decode         3.278 ms    2620.2 GB/s
+  flash_attn vs SDPA max_abs_err = 1.221e-04
