@@ -1,0 +1,21 @@
+=== 32 MLA MN-major 判定 + 软流水尝试（原始输出）===
+
+--- (1) cute 生成 canonical MN 描述符（desc_probe.cu，K=16 slice，N=256）---
+MN layout: Sw<3,4,3> o smem_ptr[16b](unset) o ((_64,_4),(_8,_2)):((_1,_512),(_64,_2048))
+  lbo=64 sbo=256 layout=1 raw=0x4000010000400000
+
+--- (2) 定点 GEMM：改 LBO（64/256/1024），结果逐位不变 => 硬件忽略 LBO、按 K-major ---
+layout=0 lbo=64 sbo=256 step=0  err=1.468e-01 ref=0.098 FAIL
+layout=0 lbo=256 sbo=256 step=0  err=1.468e-01 ref=0.098 FAIL
+layout=0 lbo=1024 sbo=256 step=0  err=1.468e-01 ref=0.098 FAIL
+
+--- (3) mla_v3（QK/PV 软流水）/ v5（prefetch.L1） vs 21 篇基线 198.8 ---
+--- (3) mla_v3（QK/PV 软流水，512B spill/255 regs/C7515）---
+  [v3    ] max_abs_err=3.377e-06 (ref~0.002) OK
+mla_v3  15.8935 ms    147.01 TFLOPS ( 14.9% peak, QK dup 2x)
+--- (4) mla_v4（向量化 global 读 + 标量 smem 散布）---
+  [sw128 ] max_abs_err=3.377e-06 (ref~0.002) OK
+wgmma_pipe3  44.3279 ms     52.71 TFLOPS (  5.3% peak, QK dup 2x)
+--- (5) mla_v5（prefetch.global.L1）---
+  [sw128 ] max_abs_err=3.377e-06 (ref~0.002) OK
+wgmma_pipe3  12.1683 ms    192.01 TFLOPS ( 19.4% peak, QK dup 2x)

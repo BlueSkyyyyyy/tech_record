@@ -1,0 +1,21 @@
+=== rmsnorm_v1r ===
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                %        82.85
+    gpu__time_duration.sum                                           us        77.15
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed               %        53.56
+    launch__registers_per_thread                        register/thread           48
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                 %        79.47
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                  %        31.36
+=== add_rmsnorm_v2r ===
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                %        86.20
+    gpu__time_duration.sum                                           us       155.58
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed               %        31.62
+    launch__registers_per_thread                        register/thread           48
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                 %        79.68
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                  %        19.51
+=== add_rmsnorm_fp8_v3r ===
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                %        64.84
+    gpu__time_duration.sum                                           us       182.50
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed               %        36.68
+    launch__registers_per_thread                        register/thread           61
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                 %        63.52
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                  %        50.19
