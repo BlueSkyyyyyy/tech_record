@@ -20,7 +20,7 @@
 | GEMM bf16 2048³ | mma.m16n8k16 + ldmatrix + cp.async | **220.98 TFLOPS** | 22.3% (989) | cuBLAS 672.70 (68%) → 达 32.8% | 13 |
 | GEMM bf16 + bias+GELU | 寄存器 epilogue 融合 | **218.61 TFLOPS** | 22.1% | 仅比纯 GEMM 慢 ~1% | 14 |
 | 独立 epilogue kernel | float4 grid-stride | **~3979 GB/s** | >100%（数据驻 L2） | — | 14 |
-| MLA 注意力 | *待填（15/16）* | — | — | FlashMLA | — |
+| MLA 注意力（absorb, prefill） | TC 三 kernel（QKᵀ/softmax/PV） | **115.64 TFLOPS** @S=1024 | 11.7% (989) | FlashMLA 660（decode, H800）→ 19% | 15-mla-attn |
 | DSA 稀疏注意力 | *待填（17）* | — | — | 自研 kernel | — |
 | MoE grouped GEMM | *待填（21）* | — | — | DeepGEMM | — |
 | FP8 GEMM | *待填（22/23）* | — | — | DeepGEMM | — |
@@ -91,13 +91,22 @@
 | F3 | 容器 profiling 权限 | ncu | 需 SYS_ADMIN/SYS_PTRACE | `scripts/lab.sh` | 否则 ERR_NVGPUCTRPERM | 用 kernel_lab，不用 kimi26_train |
 | F4 | event 与 ncu 口径差异 | 写文 | ncu replay 会拉长 | `14` | event 8.4µs vs ncu 11.26µs | 同一结论用同一口径 |
 
+### G. 模型场景 / 注意力（15）
+
+| # | 技巧 | 适用场景 | 原理 | 代码 | 实测收益 / 现象 | 坑 |
+|---|---|---|---|---|---|---|
+| G1 | MLA「吸收」成 MQA | MLA 推理/前向 | `q_nope·k_nope = (W_ukᵀ q_nope)·c_kv`，输出 `o = W_uv(Σp·c_kv)`；KV 只剩 latent+rope，所有 head 共享 | `15/mla_attn.cu` | kernel 从「H 份 KV」变成「1 份 KV + 1 个 GEMM」 | 吸收后 `DV=kv_lora`，v 上投影是另一个 GEMM；RoPE 必须留在 nope 之外 |
+| G2 | prefill MLA 是算力受限，不是访存受限 | 判断优化方向 | `c_kv` 仅 `Sk·576·2` B（S=4096 时 4.7MB）常驻 50MB L2 | `15` | ncu `DRAM Throughput` 0.71%、`Compute (SM)` 83.5%；读放大降 32× 耗时不变 | 别看到「读放大」就去做 smem/复用；先看 ncu 的 DRAM% |
+| G3 | 标量 FFMA 天花板 <7% | MLA/attention 选型 | `AI_ideal=2H(DC+DR+DV)/(DC+DR)≈242`，但 FFMA ridge 仅 ~20 FLOP/byte，上限 FP32 pipe 66.9 TFLOPS | `15` | naive/head2/smem 全在 15~19 TFLOPS（1.9%）；改 TC 后 115.6（6.1×） | HF=8 复用触发 255 寄存器 + 328B 栈溢出，比 HG=2 还慢 |
+| G4 | 别物化 S/P（attention 融合动机） | 长上下文 attention | 三 kernel 要把 `S`(fp32)+`P`(bf16) 各写读一遍，流量 `∝H·S²` | `15` | S=4096：25.8 GB≈7.7ms，占 TC 总时长 21%；S 越大越亏 | 三个「独立好 kernel」之和 ≠ 快；中间张量落显存是隐性税 |
+
 ---
 
 ## 三、模型场景台账（15 起填充）
 
 | # | 模型 | 算子 | 关键 shape/参数 | 手段与结论 | 代码 | 实测 |
 |---|---|---|---|---|---|---|
-| M1 | DeepSeek-V3/V4、Kimi-K2.6 | MLA | heads=128/kv=1；Kimi qk=192,v=128；V4 head_dim=512(rope64), q_lora=1536 | *待填（15/16）* | — | — |
+| M1 | DeepSeek-V3/V4、Kimi-K2.6 | MLA | V3: H=128,DC=512,DR=64,DV=512（absorb 576/512）；V4-Pro: H=128,DC=448,rope64；V4.1: H=64；Kimi: H=64,qk=192,v=128,kv_lora=512 | 吸收成 MQA；prefill 算力受限（DRAM 0.7%）；TC 三 kernel 115.6 TFLOPS（S=1024），距 FlashMLA 660 ~5.7×；瓶颈=未融合 S/P | `15-mla-attn/mla_attn.cu` | S=1024/2048/4096: tc 2.53/9.41/36.58 ms |
 | M2 | DeepSeek-V4 | DSA 稀疏注意力 | index 64×128, topk=1024, compress 4/128/0 | *待填（17）* | — | — |
 | M3 | DeepSeek-V4 | MoE | 384 routed+1 shared, top-6, inter=3072 | *待填（20/21/29）* | — | — |
 | M4 | DeepSeek-V4 | FP8 GEMM | e4m3 + ue8m0, block 128×128 | *待填（22/23）* | — | — |

@@ -1,0 +1,28 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+MLA absorbed attention (MQA): H=128 Sq=2048 Sk=2048  DC=512 DR=64 DV=512
+FLOPs = 1168.23 GFLOP
+
+  [naive     ] sampled max_abs_err = 1.324e-08 (ref~0.004) OK
+naive         67.4878 ms     17.31 TFLOPS (  1.8% peak)    9164.2 GB/s  (read 618.48 GB, amp 262144.0x)
+  [head4     ] sampled max_abs_err = 1.324e-08 (ref~0.004) OK
+head4         77.5806 ms     15.06 TFLOPS (  1.5% peak)    1993.0 GB/s  (read 154.62 GB, amp 65536.0x)
+  [head2     ] sampled max_abs_err = 1.324e-08 (ref~0.004) OK
+head2         60.5789 ms     19.28 TFLOPS (  1.9% peak)    5104.7 GB/s  (read 309.24 GB, amp 131072.0x)
+  [smem      ] sampled max_abs_err = 1.324e-08 (ref~0.004) OK
+smem          74.7381 ms     15.63 TFLOPS (  1.6% peak)     517.2 GB/s  (read 38.65 GB, amp 16384.0x)
+  [smem8     ] sampled max_abs_err = 1.324e-08 (ref~0.004) OK
+smem8         69.4529 ms     16.82 TFLOPS (  1.7% peak)     278.3 GB/s  (read 19.33 GB, amp 8192.0x)
+
+(理论最少读取量 = 0.002 GB，即 c_kv+k_rope 只读一遍)
+  [tc        ] sampled max_abs_err = 8.045e-06 (ref~0.004) OK
+tc(qk)         4.5000 ms    137.44 TFLOPS
+tc(softmax)    1.7344 ms
+tc(pv)         3.2112 ms    171.20 TFLOPS
+tc(total)      9.4131 ms    124.11 TFLOPS ( 12.5% peak)
+   >> S/P 物化流量 = 6.44 GB，按 3352 GB/s 约 1.92 ms

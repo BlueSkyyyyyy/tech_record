@@ -81,8 +81,8 @@ scripts/ncu.sh 15-mla-attn/mla_attn.cu --set full --kernel-name regex:mla
 
 ### 第五部分：模型场景算子（15 起，重点）
 
-- [ ] **15 MLA 注意力（一）**：DeepSeek/Kimi MLA 数学（q_lora/kv_lora、decoupled RoPE、absorb）· 朴素实现与 roofline · 真实 shape（Kimi 192/128、V4 512/64）· 附件：把 MLA 拆成可复用 kernel
-- [ ] **16 MLA 注意力（二）**：FlashMLA 式 KV 分块 + online softmax + split-KV 并行 · 寄存器/smem 布局 · 目标 ≥ 60% 峰值，对照 `~/github/FlashMLA`
+- [x] **15 MLA 注意力（一）**：DeepSeek/Kimi MLA 数学（q_lora/kv_lora、decoupled RoPE、absorb）· 三个标量实现 + roofline（证明 prefill 算力受限）· 真实 shape 台账 · TC 三 kernel 115.6 TFLOPS
+- [ ] **16 MLA 注意力（二）**：FlashMLA 式单 kernel 融合（KV 分块 + online softmax 融进 QK epilogue + P 不落盘）· `wgmma`/TMA · split-KV 并行 · 目标把与 FlashMLA 的 5.2× 差距压到 2× 内，对照 `~/github/FlashMLA`
 - [ ] **17 DSA 稀疏注意力（DeepSeek-V4）**：lightning indexer（64×128, top-k=1024）打分 + compressor（ratio 4/128/0）+ top-k gather + 稀疏 attention；测 seq 4k/32k/128k 相对 dense 的加速
 - [ ] **18 RoPE 融合算子**：yarn scaling（beta_fast/slow, factor 16）+ fused rotary，对照非融合
 - [ ] **19 RMSNorm / QK-Norm 融合**：DeepSeek/Kimi RMSNorm、QK-norm、fused residual+norm，冲 HBM 峰值
@@ -159,11 +159,16 @@ scripts/ncu.sh 15-mla-attn/mla_attn.cu --set full --kernel-name regex:mla
 - 2026-09-21：完成并发布 **11 launch 配置与 occupancy**：ILP×occupancy 可互相替代；`__launch_bounds__` 扫描证实强制提 occupancy 负优化；thread tile 2×2(100%occ)18.8% vs 8×8(25%occ)46.8%。
 - 2026-09-21：完成并发布 **14 融合与 epilogue**：GEMM+bias+GELU 仅慢 ~1%（218.61 TFLOPS）；独立 epilogue kernel ~4 TB/s；K 越小融合越值钱（11%/26%/33%）。
 - 2026-09-21：**用户要求扩展**：新增第五/六/七部分（模型场景算子 + 极致性能）；新增台账 `TECHNIQUES.md`；autopilot 改为不停机、自我扩充。
+- 2026-09-21：完成并发布 **15 MLA 注意力（一）**：读 `~/github/FlashMLA` 与 `/ssd/models/*/config.json` 对齐 MLA 吸收形式（V3 MH=128/DC=512/DR=64/DV=512，V4 448/64，Kimi 64head）；三个标量实现（naive/head_reuse/smem）全在 15~19 TFLOPS（ncu 证实 `Compute` 77~83%、`DRAM` 0.7%→算力受限，KV 驻 L2）；TC 三 kernel（QKᵀ+softmax+PV）**2.53ms / 115.64 TFLOPS（11.7%）**，比标量最好 `head2` 快 6.1×，距 FlashMLA 660 约 5.2×；扫 S=1024/2048/4096 暴露 S/P 物化流量 ∝S²（S=4096 占 21%），指出融合方向。
 
 ## 下一步（明确到可执行）
 
-- [ ] **15 MLA 注意力（一）**：先读 `/ssd/models/DeepSeek-V4-Pro/config.json` 与 `~/github/FlashMLA/`，把 MLA 数学（q_lora/kv_lora、decoupled RoPE、absorb 技巧）与真实 shape 对齐；实现朴素 MLA 参考 + 一个能跑的 CUDA kernel（先不追极限），ncu 定位瓶颈；文章交代清楚 MLA 在 DeepSeek-V3/V4、Kimi-K2.6 里的参数差异。**注意**：V4-Pro 主注意力 head_dim=512 超出 TE/H100 训练 bwd 支持范围，本文做推理 fwd 口径即可。
-- [ ] 之后依次：16→17→…（见上）。模型类文章优先，因为用户明确要「针对模型的场景算子优化技巧」。
+- [ ] **16 MLA 注意力（二）：FlashMLA 式单 kernel 融合**。以 15 的 TC 三 kernel 为基线（S=1024: 2.53ms/115.6 TFLOPS），做三件事：
+  1. **融合 online softmax**：QKᵀ 的 mma 累加器直接做行 max/exp/rescale，不把 `S` 写回 DRAM（省 15 里 S=4096 的 25.8GB 中 S 的部分）；
+  2. **P 留寄存器喂给 PV 的 mma**，不物化 bf16 `P`；
+  3. **KV 分块 + smem 布局优化**（15 里 smem 版仍有 `l1tex` wavefront 过量），并试 `wgmma`/加载流水；先做 Sq=1024 单 kernel 对拍 15 的 `tc`，目标 ≥ 200 TFLOPS（把与 FlashMLA 660 的差距压到 ~3×），再冲 split-KV。
+  - 参考 `~/github/FlashMLA/csrc` 的 `m64n...` 与 smoke 实现；形状用 15 的 V3 576/512 口径。
+- [ ] 之后依次：17→…（见上）。模型类文章优先。
 
 ## 灵感 / backlog（想到就记，别丢）
 
