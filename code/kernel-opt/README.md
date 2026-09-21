@@ -31,6 +31,7 @@
 | `17-muonclip-ns/` | 17 Muon/MuonClip NS 正交化 | 5 步 NS = 15 个 GEMM（`30N³`）：自研 `mma` GEMM + 融合 `f·x+g` epilogue（**244 TFLOPS**，N=4096）；对照 cuBLAS 链（529）、fp32 参考；单 GEMM 269 vs cuBLAS 883；ncu 定位 L2/occupancy 瓶颈 |
 | `18-dsa-sparse/` | 18 DSA 稀疏注意力（一） | DeepSeek-V4 lightning indexer（H^I=64, d=128）打分 + exact top-k：TC + head 合并 HG=2 + BN=128 → **287–311 TFLOPS**（约 330× 标量）；radix-select + per-warp 直方图 top-k → **6.75ms @S=32768**（等效 3.2TB/s）；DSA 预算 64k 相对稠密 MLA **18.6×**；含 indexer/topk 的 ncu 与稠密 MLA 对照输出 |
 | `19-dsa-sparse-attn/` | 19 DSA 稀疏注意力（二） | 稀疏 MLA 消费端：CTA = 1 token × $B_H$ head，逐 key gather top-k 的 `c_kv`+`k_rope`、尾部 tile 掩码、共享 P；`cp.async` 双缓冲把 gather 延迟藏起来（`long_scoreboard` 4.56→1.46）。**132–137 TFLOPS**（~75% 稠密 f4s 效率）；sparse vs 稠密 attention 4k **3.0×** → 64k **48.6×**；DSA 端到端 4k **2.5×** → 64k **17.3×**；距 FlashMLA sparse prefill 640 约 4.8× |
+| `20-mla-wgmma-sw128/` | 20 wgmma + SW128 swizzle | 把 `wgmma` 操作数的 smem 布局从 `INTERLEAVE` 换成 **K-major SW128**（`layout_type=1`，16B 列 `c'=c^r`）。`wgmma_sw128.cuh` 描述符/布局/步进；冒烟 GEMM **132 TFLOPS @4096³**；QK576/PV 定点测试；`bf16_store_pitfall.cu` 复现 nvcc 合并 bf16 存储的坑。融合 MLA **105.3/112.9/119.9 TFLOPS**（Sk=1k/2k/4k），比 INTERLEAVE 84.6 **+24.5%**；ncu 指出剩余瓶颈是 1 CTA/SM + 单缓冲 |
 
 ## 怎么跑
 
