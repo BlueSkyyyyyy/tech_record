@@ -1,0 +1,19 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+DSA Compressor proj FP8 (ratio=128): M=32768  Y[M,1024]=X[M,7168]@Wm[1024,7168]^T
+proj FLOPs=481.04 GFLOP  Wm(bf16)=14.7 MB  out=[256, 512]
+
+  bf16 256x128s4       0.6964 ms    690.76 TFLOPS  ( 69.8%)
+  fp8_128x128s4        0.5263 ms    913.93 TFLOPS  ( 46.2%)
+  fp8_128x128s3        0.5431 ms    885.65 TFLOPS  ( 44.8%)
+  fp8_128x128s5        0.5394 ms    891.78 TFLOPS  ( 45.1%)
+  fp8_128x256s3        2.4180 ms    198.94 TFLOPS  ( 10.1%)
+  fp8_64x128s4         0.6883 ms    698.88 TFLOPS  ( 35.3%)
+  fp8_192x128s4        0.6116 ms    786.49 TFLOPS  ( 39.8%)
+  FP8 quantization: pooled-output max_abs_diff=1.211e-01 (ref~3.820, 3.17%)
+
