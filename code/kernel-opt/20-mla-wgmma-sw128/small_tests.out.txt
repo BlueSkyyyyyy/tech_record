@@ -1,0 +1,4 @@
+### QK576 SW128 定点
+QK576 max_abs_err=1.603e-07 (ref~0.308) OK
+### PV SW128 定点
+PV max_abs_err=1.502e-08 (ref~0.114) OK

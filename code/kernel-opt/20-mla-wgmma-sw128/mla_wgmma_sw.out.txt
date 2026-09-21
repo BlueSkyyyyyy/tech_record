@@ -1,0 +1,7 @@
+### wgmma SW128 fused MLA (H=128)
+  [sw128 ] max_abs_err=9.100e-06 (ref~0.006) OK
+wgmma_sw128   2.7735 ms    105.30 TFLOPS ( 10.6% peak, QK dup 2x)
+  [sw128 ] max_abs_err=6.249e-06 (ref~0.006) OK
+wgmma_sw128   5.1733 ms    112.91 TFLOPS ( 11.4% peak, QK dup 2x)
+  [sw128 ] max_abs_err=4.506e-06 (ref~0.003) OK
+wgmma_sw128   9.7440 ms    119.89 TFLOPS ( 12.1% peak, QK dup 2x)
