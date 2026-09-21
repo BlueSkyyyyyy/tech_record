@@ -1,0 +1,5 @@
+f4s      BM=64  DVGRP=2 KT=64  warps=8     6.3572 ms    183.77 TFLOPS ( 18.6% peak, QK dup 1x)
+f4s      BM=64  DVGRP=2 KT=64  warps=8    13.3824 ms    174.59 TFLOPS ( 17.7% peak, QK dup 1x)
+f4s      BM=64  DVGRP=2 KT=64  warps=8    28.2260 ms    165.55 TFLOPS ( 16.7% peak, QK dup 1x)
+f4s      BM=64  DVGRP=2 KT=64  warps=8    55.6815 ms    167.84 TFLOPS ( 17.0% peak, QK dup 1x)
+f4s      BM=64  DVGRP=2 KT=64  warps=8   110.8666 ms    168.60 TFLOPS ( 17.0% peak, QK dup 1x)
