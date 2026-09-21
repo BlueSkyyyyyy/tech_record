@@ -62,7 +62,7 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 ### 第四部分：进阶专题
 
 - [x] **10 ncu 深潜**：occupancy 计算 · warp stall reasons · roofline section · source/sass 对照
-- [ ] **11 launch 配置与 occupancy**：寄存器/共享内存限制 · `__launch_bounds__` · 循环展开
+- [x] **11 launch 配置与 occupancy**：寄存器/共享内存限制 · `__launch_bounds__` · 循环展开/ILP · thread tile 落地 09 GEMM
 - [ ] **12 异步拷贝与流水线**：`cp.async` / TMA 概念 · producer-consumer 流水线 · 与第 09 篇结合
 - [ ] **13 Tensor Core 入门**：WMMA API / `mma` PTX · m16n8k16 · 写一个能跑的小 TC GEMM
 - [ ] **14 融合与 epilogue**：GEMM+bias+激活 · split-K · 生产算子（attention/GEMM）串讲
@@ -101,10 +101,11 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 - 2026-09-21：完成并发布 **01–08**（… / Softmax / GEMM 入门）。已 push 且线上 200。
 - 2026-09-21：完成并发布 **09 GEMM 进阶**：寄存器分块 8×8 + 交错映射消 bank conflict → 39.2%；float4 向量化 → 45.0%；cp.async 双缓冲 → **51.5%**（34.46 TFLOPS）；同口径 cuBLAS 75.8%（50.73 TFLOPS），达其 ~68%。
 - 2026-09-21：完成并发布 **10 ncu 深潜**：手算 occupancy（`k_occ<2>` = 2 block/25%，与 ncu 一致）；`__launch_bounds__` 强制提 occupancy → spill 1.31 TB local 流量、慢 34×；五类 stall 指纹表；roofline 拐点 AI\*≈20 并澄清 `Memory Throughput` 是缓存层级最大值（`k_latency` 97% 卡 L1、DRAM 仅 0.13%）；source/SASS 依赖链与 STL/LDL 对照。结论：`occ<2>` 25% occupancy 仍达 98.5% Compute / IPC 3.94。
+- 2026-09-21：完成并发布 **11 launch 配置与 occupancy**：①ILP×occupancy 二维实验——12.5% occ 下 ILP=1→2 从 29.9 翻到 53.6 TFLOPS（`wait` stall 2.96→0.06），ILP=1 时 100% occ 也能到 63.7 TFLOPS，证明两者可互相替代；②在 09 GEMM（128×128/8×8/256 线程）上 `__launch_bounds__(256,MINB)` 扫描：`lb<2>`=128 寄存器/25%/30.6 TFLOPS 持平基线，`lb<3>`/`lb<4>` spill 296/520 B、occupancy 37.5%/50% 却是 11.3%/5.3%（最惨慢 8.7×，`long_scoreboard` 0.94→16.06）；③thread tile 扫描：`2×2`(100% occ) 18.8% vs `8×8`(25% occ) 46.8%，且 `8×8` 需 256 线程/block 才行（64 线程仅 23.7%）。模板化 GEMM 与 09 的 `gemm_reg_vec` 对齐（30.6 vs 30.1 TFLOPS）。
 
 ## 下一步（明确到可执行）
 
-- [ ] 完成 **11 launch 配置与 occupancy**（`__launch_bounds__` / 循环展开 / ILP），回到第 09 篇的 GEMM 做落地
+- [ ] 完成 **12 异步拷贝与流水线**：`cp.async` 多级流水线（producer-consumer），在第 09/11 篇的 GEMM 上落地，目标把 `long_scoreboard` 进一步压下去
 - [ ] 每完成一篇：更新本文件、README 索引，提交推送
 - [ ] 可选：给 01 的 roofline 画一张 mermaid 图
 

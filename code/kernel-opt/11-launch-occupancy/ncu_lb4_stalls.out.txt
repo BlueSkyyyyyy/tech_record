@@ -1,0 +1,65 @@
+==PROF== Connected to process 18440 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/11-launch-occupancy/launch_occupancy.out)
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+=========== 实验 1：ILP × occupancy（fp32 FMA 链）=======
+  ILP=1  1 blk/SM (12.5%)           9.32 TFLOPS  ( 13.9% of fp32 peak)
+  ILP=2  1 blk/SM (12.5%)           9.31 TFLOPS  ( 13.9% of fp32 peak)
+  ILP=4  1 blk/SM (12.5%)           9.40 TFLOPS  ( 14.1% of fp32 peak)
+  ILP=8  1 blk/SM (12.5%)           9.44 TFLOPS  ( 14.1% of fp32 peak)
+  ILP=1  8 blk/SM (100%)           62.54 TFLOPS  ( 93.5% of fp32 peak)
+  ILP=2  8 blk/SM (100%)           63.18 TFLOPS  ( 94.4% of fp32 peak)
+  ILP=4  8 blk/SM (100%)           61.95 TFLOPS  ( 92.6% of fp32 peak)
+  ILP=8  8 blk/SM (100%)           61.91 TFLOPS  ( 92.5% of fp32 peak)
+
+=========== GEMM M=N=K=2048（17.18 GFLOP）===========
+
+---- 实验 2：对同一 GEMM 配置强行提高驻留 block 数 ----
+  plain            regs=128 spill(local)=0     smem=8192   | 2 blk/SM  occ= 25.0%
+  MINB=1           regs=119 spill(local)=0     smem=8192   | 2 blk/SM  occ= 25.0%
+  MINB=2           regs=128 spill(local)=0     smem=8192   | 2 blk/SM  occ= 25.0%
+  MINB=3           regs=80  spill(local)=296   smem=8192   | 3 blk/SM  occ= 37.5%
+  MINB=4           regs=64  spill(local)=520   smem=8192   | 4 blk/SM  occ= 50.0%
+  [plain             ] max_abs_err = 8.940e-08 OK
+plain                    0.5640 ms     30.46 TFLOPS  ( 45.5% of fp32 peak)
+  [lb<1>             ] max_abs_err = 8.940e-08 OK
+lb<1>                    0.5574 ms     30.82 TFLOPS  ( 46.1% of fp32 peak)
+  [lb<2>             ] max_abs_err = 8.940e-08 OK
+lb<2>                    0.5638 ms     30.47 TFLOPS  ( 45.5% of fp32 peak)
+  [lb<3>             ] max_abs_err = 8.940e-08 OK
+lb<3>                    2.4914 ms      6.90 TFLOPS  ( 10.3% of fp32 peak)
+  [lb<4>             ] max_abs_err = 8.940e-08 OK
+lb<4>                    4.9736 ms      3.45 TFLOPS  (  5.2% of fp32 peak)
+
+---- 实验 3：thread tile 扫描（同 block 输出规模，不同每线程复用度）----
+  64x64 t2x2       regs=32  spill(local)=0     smem=4096   | 2 blk/SM  occ=100.0%
+  64x64 t4x4       regs=66  spill(local)=0     smem=4096   | 3 blk/SM  occ= 37.5%
+  64x64 t8x8       regs=168 spill(local)=0     smem=4096   | 6 blk/SM  occ= 18.8%
+  128x128 t8x8     regs=128 spill(local)=0     smem=8192   | 2 blk/SM  occ= 25.0%
+  [64x64 t2x2        ] max_abs_err = 8.940e-08 OK
+64x64 t2x2               1.3726 ms     12.52 TFLOPS  ( 18.7% of fp32 peak)
+  [64x64 t4x4        ] max_abs_err = 8.940e-08 OK
+64x64 t4x4               0.9417 ms     18.24 TFLOPS  ( 27.3% of fp32 peak)
+  [64x64 t8x8        ] max_abs_err = 8.940e-08 OK
+64x64 t8x8               1.0833 ms     15.86 TFLOPS  ( 23.7% of fp32 peak)
+  [128x128 t8x8      ] max_abs_err = 8.940e-08 OK
+128x128 t8x8             0.5640 ms     30.46 TFLOPS  ( 45.5% of fp32 peak)
+==PROF== Disconnected from process 18440
+[18440] launch_occupancy.out@127.0.0.1
+  void gemm_lb<128, 128, 8, 8, 8, 4>(const float *, const float *, float *, int, int, int) (16, 16, 1)x(16, 16, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    --------------------------------------------------------------------------- ----------- ------------
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                   inst         5.47
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio               inst         0.70
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio           inst        16.06
+    smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio        inst         0.00
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio              inst         0.21
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                      inst         1.44
+    --------------------------------------------------------------------------- ----------- ------------
+
