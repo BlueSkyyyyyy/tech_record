@@ -1,0 +1,50 @@
+########## sync ##########
+    Elapsed Cycles                cycle      1139680
+    Memory Throughput                 %        44.50
+    DRAM Throughput                   %         1.90
+    Duration                         us       571.62
+    L1/TEX Cache Throughput           %        45.95
+    L2 Cache Throughput               %        11.58
+    SM Active Cycles              cycle   1093924.13
+    Compute (SM) Throughput           %        55.13
+    Executed Ipc Active   inst/cycle         2.28
+    Executed Ipc Elapsed  inst/cycle         2.21
+    Memory Throughput                           Gbyte/s        63.76
+    L1/TEX Hit Rate                                   %         2.13
+    L2 Hit Rate                                       %        90.18
+    Warp Cycles Per Issued Instruction             cycle         6.72
+    Registers Per Thread             register/thread             118
+    Static Shared Memory Per Block       Kbyte/block            8.19
+    Theoretical Occupancy                     %           25
+    Achieved Occupancy                        %        23.86
+    Total DRAM Elapsed Cycles        cycle     59878400
+    Total L1 Elapsed Cycles          cycle    149111966
+    Total L2 Elapsed Cycles          cycle     77983280
+    Average SM Active Cycles         cycle   1093924.13
+    Total SM Elapsed Cycles          cycle    149111966
+    Total SMSP Elapsed Cycles        cycle    596447864
+########## pipe3 ##########
+    Elapsed Cycles                cycle       960878
+    Memory Throughput                 %        43.80
+    DRAM Throughput                   %         2.27
+    Duration                         us       482.40
+    L1/TEX Cache Throughput           %        45.35
+    L2 Cache Throughput               %        13.98
+    SM Active Cycles              cycle    928089.88
+    Compute (SM) Throughput           %        67.91
+    Executed Ipc Active   inst/cycle         2.81
+    Executed Ipc Elapsed  inst/cycle         2.72
+    Memory Throughput                           Gbyte/s        76.05
+    L1/TEX Hit Rate                                   %         1.34
+    L2 Hit Rate                                       %        94.54
+    Warp Cycles Per Issued Instruction             cycle         5.09
+    Registers Per Thread             register/thread             127
+    Static Shared Memory Per Block       Kbyte/block           24.58
+    Theoretical Occupancy                     %           25
+    Achieved Occupancy                        %        22.37
+    Total DRAM Elapsed Cycles        cycle     50530048
+    Total L1 Elapsed Cycles          cycle    126856208
+    Total L2 Elapsed Cycles          cycle     65780080
+    Average SM Active Cycles         cycle    928089.88
+    Total SM Elapsed Cycles          cycle    126856208
+    Total SMSP Elapsed Cycles        cycle    507424832
