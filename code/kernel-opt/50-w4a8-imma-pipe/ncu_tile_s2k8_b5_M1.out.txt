@@ -1,0 +1,82 @@
+w4a8_imma_pipe.cu(415): warning #177-D: variable "g" was declared but never referenced
+      const int g = kb0 + t;
+                ^
+          detected during instantiation of "void add_pipe<BM,BN,STAGES,WM,WN,KSPLIT,MINB,ONEBAR,TILED>(std::vector<std::function<void (int, float *)>, std::allocator<std::function<void (int, float *)>>> &, const char *, const Buf &, int, int) [with BM=16, BN=128, STAGES=2, WM=1, WN=4, KSPLIT=7, MINB=1, ONEBAR=false, TILED=false]" at line 878
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+w4a8_imma_pipe.cu(46): warning #177-D: variable "BF16_PEAK" was declared but never referenced
+  constexpr double BF16_PEAK = 989.0;
+                   ^
+
+w4a8_imma_pipe.cu(47): warning #177-D: variable "INT8_PEAK" was declared but never referenced
+  constexpr double INT8_PEAK = 1978.0;
+                   ^
+
+==PROF== Connected to process 305297 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/50-w4a8-imma-pipe/w4a8_imma_pipe.out)
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A8 IMMA pipe: N=17408 K=5120 group=128 ; W_int4=44.6 MB scales=2.8 MB total=47.3 MB
+纯读上界 w+s: 0.0615 ms  770.2 GB/s (23.0% HBM)
+纯读上界 strided(64B/2560B): 0.0604 ms  738.4 GB/s (22.0% HBM)
+  [pipe_s2k7] threads=128 smem=26368
+  [pipe_s3k7] threads=128 smem=39552
+  [pipe_s4k7] threads=128 smem=52736
+  [pipe_s3k5] threads=128 smem=39552
+  [pipe_s3k8] threads=128 smem=39552
+  [pipe_s3k4] threads=128 smem=39552
+  [pipe_s3k7_b5] threads=128 smem=39552
+  [pipe_bn256_s2k7] threads=256 smem=47872
+  [pipe_bn256_s3k7] threads=256 smem=71808
+  [pipe_bn256_s2k4] threads=256 smem=47872
+  [pipe_bn512_s2k4] threads=512 smem=90880
+  [one_s3k7] threads=128 smem=39552
+  [one_s4k7] threads=128 smem=52736
+  [one_s3k7_b5] threads=128 smem=39552
+  [one_s3k5_b5] threads=128 smem=39552
+  [one_bn256_s3k7] threads=256 smem=71808
+  [tile_s3k7] threads=128 smem=39552
+  [tile_s3k7_b5] threads=128 smem=39552
+  [tile_s2k7] threads=128 smem=26368
+  [tile_bn256_s2k7] threads=256 smem=47872
+  [tile_one_s3k7] threads=128 smem=39552
+  [tile_s2k5] threads=128 smem=26368
+  [tile_s2k8] threads=128 smem=26368
+  [tile_s2k4] threads=128 smem=26368
+  [tile_bn256_s2k5] threads=256 smem=47872
+  [tile_s3k8] threads=128 smem=39552
+  [tile_s2k10] threads=128 smem=26368
+  [tile_s2k16] threads=128 smem=26368
+  [tile_s2k8_b5] threads=128 smem=26368
+
+=== 精度校验（M=1, 抽样 48 点）===
+==PROF== Profiling "gemm_mma_w4a8_pipe_kernel": 0%....50%....100% - 5 passes
+  [tile_s2k8_b5        ] max_abs_err=2.125e-07 (ref~2.7) rel=7.84e-08 OK
+
+=== M 扫描（同进程、warmup=5 iters=50）===
+kernel\M                     1         2         3         4         6         8        12        16
+tile_s2k8_b5          0.0702    0.0704    0.0703    0.0703    0.0701    0.0699    0.0705    0.0702  
+==PROF== Disconnected from process 305297
+[305297] w4a8_imma_pipe.out@127.0.0.1
+  void gemm_mma_w4a8_pipe_kernel<16, 128, 2, 1, 4, 8, 5, 0, 1>(const signed char *, const float *, const float *, const unsigned char *, const float *, float *, int, int, int) (136, 1, 8)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %        60.12
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        61.81
+    sm__inst_executed.sum                                                            inst     11561088
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        26.33
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         1.61
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.30
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            inst         0.11
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio            inst         1.01
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.42
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.04
+    ------------------------------------------------------------------------- ----------- ------------
+
