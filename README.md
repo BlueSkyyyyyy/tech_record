@@ -99,6 +99,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 21. [MLA 极限冲刺（二）：修好 V 转置访存 + cp.async 预取 K](content/posts/cuda-kernel-opt-21-mla-wgmma-pipe/index.md)
 22. [FP8 GEMM（一）：e4m3 的 mma.sync 与 wgmma，per-tensor / per-block 缩放](content/posts/cuda-kernel-opt-22-fp8-gemm/index.md)
 23. [FP8 GEMM（二）：TMA + mbarrier + warp specialization（768 → 1217 TFLOPS）](content/posts/cuda-kernel-opt-23-fp8-gemm-tma/index.md)
+24. [FP8 GEMM（三）：per-block 缩放的两堵墙——寄存器与 ptxas 序列化](content/posts/cuda-kernel-opt-24-fp8-gemm-pb/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 

@@ -1,0 +1,98 @@
+ptxas info    : (C7514) Potential Performance Loss: wgmma.mma_async instructions are serialized due to non wgmma instructions reading accumulator registers of  a wgmma between start and end of the pipeline stage in the function '_Z17fp8_tma_pb_kernelILi128ELi128ELi128ELi3ELb1ELi1ELi1EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 0
+ptxas info    : (C7514) Potential Performance Loss: wgmma.mma_async instructions are serialized due to non wgmma instructions reading accumulator registers of  a wgmma between start and end of the pipeline stage in the function '_Z17fp8_tma_pb_kernelILi128ELi128ELi128ELi2ELb1ELi1ELi1EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 0
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z17fp8_tma_pb_kernelILi192ELi128ELi128ELi4ELb0ELi2ELi1EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 43685
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z17fp8_tma_pb_kernelILi192ELi128ELi128ELi3ELb0ELi2ELi1EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 41789
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z17fp8_tma_pb_kernelILi128ELi128ELi128ELi3ELb0ELi2ELi2EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 33901
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z17fp8_tma_pb_kernelILi64ELi256ELi128ELi3ELb0ELi2ELi1EEv14CUtensorMap_stS0_PfiiiPKfS3_i' in line 28762
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+FP8 e4m3 per-block TMA+wgmma GEMM (ping-pong): M=4096 N=3072 K=7168  FLOPs=180.39 GFLOP
+
+-- 同一份代码的 per-tensor 对照（MODE=3，不折算）--
+  [pt_128x128s3      ] max_abs_err=2.568e-01 (ref~66.4) OK
+pt_128x128s3         0.1658 ms   1087.89 TFLOPS  ( 55.0% of fp8 peak)
+  [pt_128x128s4      ] max_abs_err=2.568e-01 (ref~66.4) OK
+pt_128x128s4         0.1922 ms    938.71 TFLOPS  ( 47.5% of fp8 peak)
+  [pt_128x128s5      ] max_abs_err=2.568e-01 (ref~66.4) OK
+pt_128x128s5         0.1976 ms    912.82 TFLOPS  ( 46.1% of fp8 peak)
+  [pt_128x256s3      ] max_abs_err=2.568e-01 (ref~66.4) OK
+pt_128x256s3         0.1551 ms   1162.83 TFLOPS  ( 58.8% of fp8 peak)
+  [pt_256x128s4      ] max_abs_err=2.568e-01 (ref~66.4) OK
+pt_256x128s4         0.1491 ms   1209.63 TFLOPS  ( 61.2% of fp8 peak)
+
+-- per-block 基线：单累加器 + 每块 wait0（23 篇结构）--
+  [base_gl_128x128s2 ] max_abs_err=8.152e-03 (ref~70.0) OK
+base_gl_128x128s2    0.2371 ms    760.95 TFLOPS  ( 38.5% of fp8 peak)
+  [base_gl_128x128s3 ] max_abs_err=8.152e-03 (ref~70.0) OK
+base_gl_128x128s3    0.1976 ms    913.02 TFLOPS  ( 46.2% of fp8 peak)
+  [base_gl_128x128s4 ] max_abs_err=8.152e-03 (ref~70.0) OK
+base_gl_128x128s4    0.1926 ms    936.52 TFLOPS  ( 47.3% of fp8 peak)
+  [base_gl_128x128s5 ] max_abs_err=8.152e-03 (ref~70.0) OK
+base_gl_128x128s5    0.1943 ms    928.45 TFLOPS  ( 46.9% of fp8 peak)
+  [base_gl_128x128s6 ] max_abs_err=8.152e-03 (ref~70.0) OK
+base_gl_128x128s6    0.1957 ms    921.90 TFLOPS  ( 46.6% of fp8 peak)
+
+-- per-block：scale 预取 smem（单累加器）--
+  [sm_128x128s3      ] max_abs_err=8.152e-03 (ref~70.0) OK
+sm_128x128s3         0.2070 ms    871.36 TFLOPS  ( 44.1% of fp8 peak)
+  [sm_128x128s4      ] max_abs_err=8.152e-03 (ref~70.0) OK
+sm_128x128s4         0.1959 ms    920.88 TFLOPS  ( 46.6% of fp8 peak)
+
+-- per-block：双累加器 pair-drain（一次 wait0 折算两块）--
+  [pd_gl_128x128s2   ] max_abs_err=8.152e-03 (ref~70.0) OK
+pd_gl_128x128s2      0.4646 ms    388.30 TFLOPS  ( 19.6% of fp8 peak)
+  [pd_gl_128x128s3   ] max_abs_err=8.152e-03 (ref~70.0) OK
+pd_gl_128x128s3      0.4541 ms    397.25 TFLOPS  ( 20.1% of fp8 peak)
+  [pd_gl_128x128s4   ] max_abs_err=8.152e-03 (ref~70.0) OK
+pd_gl_128x128s4      0.4531 ms    398.16 TFLOPS  ( 20.1% of fp8 peak)
+  [pd_sm_128x128s3   ] max_abs_err=8.152e-03 (ref~70.0) OK
+pd_sm_128x128s3      0.4406 ms    409.41 TFLOPS  ( 20.7% of fp8 peak)
+
+-- per-block：BM=64（单 warpgroup，寄存器充裕）--
+  [pd64_gl_64x128s3  ] max_abs_err=8.152e-03 (ref~70.0) OK
+pd64_gl_64x128s3     0.3660 ms    492.90 TFLOPS  ( 24.9% of fp8 peak)
+  [pd64_gl_64x128s4  ] max_abs_err=8.152e-03 (ref~70.0) OK
+pd64_gl_64x128s4     0.2752 ms    655.55 TFLOPS  ( 33.1% of fp8 peak)
+  [base_gl_64x128s4  ] max_abs_err=8.152e-03 (ref~70.0) OK
+base_gl_64x128s4     0.2599 ms    694.19 TFLOPS  ( 35.1% of fp8 peak)
+  [pd64_gl_64x256s3  ] max_abs_err=8.152e-03 (ref~70.0) OK
+pd64_gl_64x256s3     0.5419 ms    332.86 TFLOPS  ( 16.8% of fp8 peak)
+
+-- per-block：BM=256（4 warpgroup，寄存器墙）--
+  [base_gl_256x128s3 ] max_abs_err=8.152e-03 (ref~70.0) OK
+base_gl_256x128s3    0.8049 ms    224.11 TFLOPS  ( 11.3% of fp8 peak)
+  [base_gl_256x128s4 ] max_abs_err=8.152e-03 (ref~70.0) OK
+base_gl_256x128s4    0.8164 ms    220.95 TFLOPS  ( 11.2% of fp8 peak)
+
+-- per-block：强制 2 CTA/SM（__launch_bounds__ minBlocks=2）--
+  [base2_128x128s3   ] max_abs_err=8.152e-03 (ref~70.0) OK
+base2_128x128s3      0.8195 ms    220.12 TFLOPS  ( 11.1% of fp8 peak)
+  [pd2_128x128s3     ] max_abs_err=8.152e-03 (ref~70.0) OK
+pd2_128x128s3        1.3583 ms    132.81 TFLOPS  (  6.7% of fp8 peak)
+  [base2_128x128s2   ] max_abs_err=8.152e-03 (ref~70.0) OK
+base2_128x128s2      0.8081 ms    223.22 TFLOPS  ( 11.3% of fp8 peak)
+
+-- per-block：BM=192（3 warpgroup，reg budget 157）--
+  [base_gl_192x128s3 ] max_abs_err=8.152e-03 (ref~70.0) OK
+base_gl_192x128s3    0.2637 ms    683.99 TFLOPS  ( 34.6% of fp8 peak)
+  [base_gl_192x128s4 ] max_abs_err=8.152e-03 (ref~70.0) OK
+base_gl_192x128s4    0.2648 ms    681.23 TFLOPS  ( 34.4% of fp8 peak)
+  [base_gl_192x128s3p] max_abs_err=8.152e-03 (ref~70.0) OK
+base_gl_192x128s3p   0.2488 ms    725.14 TFLOPS  ( 36.7% of fp8 peak)
+  [base_gl_192x128s4p] max_abs_err=8.152e-03 (ref~70.0) OK
+base_gl_192x128s4p   0.2562 ms    704.16 TFLOPS  ( 35.6% of fp8 peak)
+  [pd_gl_192x128s3   ] max_abs_err=8.152e-03 (ref~70.0) OK
+pd_gl_192x128s3      0.4670 ms    386.30 TFLOPS  ( 19.5% of fp8 peak)
+  [pd_gl_192x128s4   ] max_abs_err=8.152e-03 (ref~70.0) OK
+pd_gl_192x128s4      0.4650 ms    387.96 TFLOPS  ( 19.6% of fp8 peak)
+
+-- per-block：双累加器 ping-pong（重叠折算）--
+  [pp_sm_128x128s2   ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_sm_128x128s2      0.6269 ms    287.73 TFLOPS  ( 14.5% of fp8 peak)
+  [pp_sm_128x128s3   ] max_abs_err=8.152e-03 (ref~70.0) OK
+pp_sm_128x128s3      0.5033 ms    358.39 TFLOPS  ( 18.1% of fp8 peak)
