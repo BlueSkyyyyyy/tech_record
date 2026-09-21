@@ -1,0 +1,45 @@
+######## reduce_atomic_every ########
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.99
+    Elapsed Cycles                cycle    235133649
+    Memory Throughput                 %         1.01
+    DRAM Throughput                   %         0.07
+    Duration                         ms       117.86
+    L1/TEX Cache Throughput           %         0.23
+    L2 Cache Throughput               %         1.01
+    SM Active Cycles              cycle 223459889.98
+    Compute (SM) Throughput           %         0.22
+######## reduce_smem_tree ########
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.99
+    Elapsed Cycles                cycle       182211
+    Memory Throughput                 %        88.47
+    DRAM Throughput                   %        88.47
+    Duration                         us        91.42
+    L1/TEX Cache Throughput           %        10.41
+    L2 Cache Throughput               %        83.86
+    SM Active Cycles              cycle    170224.33
+    Compute (SM) Throughput           %        10.51
+######## reduce_vec4_shuffle ########
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.99
+    Elapsed Cycles                cycle       176522
+    Memory Throughput                 %        91.61
+    DRAM Throughput                   %        91.61
+    Duration                         us        88.51
+    L1/TEX Cache Throughput           %        10.21
+    L2 Cache Throughput               %        86.33
+    SM Active Cycles              cycle    160714.18
+    Compute (SM) Throughput           %         4.66
