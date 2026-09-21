@@ -98,3 +98,19 @@ scripts/lab.sh status
   `HG=2` 还慢。`-Xptxas -v` 核对；换来的复用若不减少 DRAM（见上条），纯属负优化。
 - **三 kernel 物化 attention 中间量的隐性税**：`S`(fp32)+`P`(bf16) 各写读一遍，流量 `∝H·S²`。第 15
   篇 S=4096 时 25.8GB≈7.7ms，占 TC 总时长 21%。能融合就别物化。
+- **flash-attention 类融合的免费午餐**：`mma.m16n8k16` 的 fp32 累加器 `c0,c1`（行 `lane/4`）和
+  PV 的 A 片段 `a0,a1` 位置**完全一致**；softmax 后的 P 只要 `pack2(C_tile0.c0,c0.c1)` 等 4 次
+  `__floats2bfloat162_rn` 就变成 PV 的 k16 A 片段（相邻两个 n8 tile 配对），**零 shuffle**。见 16 篇。
+- **`mma`/`wgmma` 累加器是累加语义**：16 篇两次踩同一个坑——KV 分块循环里 `S` 累加器只在循环外
+  清零一次，第二块起把上一块的分数也加了进去（`max_abs_err` 稳定偏大 ~18%）。**每进入一个新 KV
+  tile 都要清零 `S`**（`O` 才跨块保留）。单块 shape 能过、多块就错，就是这个。
+- **CUDA 13 的 nvcc 不认 `-arch=sm_90a`**：会静默退化成 `sm_90`，ptxas 报
+  `Instruction 'wgmma.mma_async ...' not supported on .target 'sm_90'`。必须写
+  `-gencode=arch=compute_90a,code=sm_90a`。`scripts/run.sh`/`ncu.sh` 现支持 `ARCH=""` 跳过 `-arch`。
+- **wgmma 的 smem 布局决定生死**：无 swizzle 的 K-major `INTERLEAVE`（8×8 core matrix，行距 128B）
+  会让「连续线程写相邻 k-block」全撞同一 bank（16 篇实测 store bank conflict 2.7e8），且 tensor
+  读操作数低效——`wgmma` 版反而比 `mma+ldmatrix` 慢一倍。**要用 SW128 swizzle**
+  （描述符 `layout_type=1` + `base_offset` 相位）；先写小 GEMM 冒烟测试验证描述符。
+- **按 DV 切 warp 省寄存器会带来 QK 重复（dup）**：`O[16,DV]` fp32 的寄存器墙逼着按 `DVW` 切
+  warp，`dup=DV/DVW`。16 篇用 smem 共享 `P`（同 row 组两 warp 各算一半 KV）把 dup 从 2 降到 1，
+  提升 16%；但别切太细——DVGRP 越大，每个 warp 都要完整读一遍 Q，反而不划算。

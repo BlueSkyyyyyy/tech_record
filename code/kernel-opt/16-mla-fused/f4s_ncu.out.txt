@@ -1,0 +1,92 @@
+==PROF== Connected to process 45387 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/16-mla-fused/mla_fused.out)
+==PROF== Profiling "mla_shared_kernel": 0%....50%....100% - 11 passes
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+MLA fused attention (MQA): H=128 Sq=1024 Sk=1024  DC=512 DR=64 DV=512
+FLOPs = 292.06 GFLOP   (KV tile smem 需 Sq%BM==0, Sk%KT==0)
+
+  [f4s   ] max_abs_err=9.100e-06 (ref~0.006) OK
+f4s      BM=64  DVGRP=2 KT=64  warps=8     1.7040 ms    171.40 TFLOPS ( 17.3% peak, QK dup 1x)
+==PROF== Disconnected from process 45387
+[45387] mla_fused.out@127.0.0.1
+  void mla_shared_kernel<4, 2, 64>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int) (16, 128, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                         0
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %        26.73
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         3.05
+    ------------------------------------------------------------------------- ----------- ------------
+
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.81
+    Elapsed Cycles                cycle      3151776
+    Memory Throughput                 %        60.96
+    DRAM Throughput                   %         6.95
+    Duration                         ms         1.73
+    L1/TEX Cache Throughput           %        63.24
+    L2 Cache Throughput               %        20.98
+    SM Active Cycles              cycle   3030774.35
+    Compute (SM) Throughput           %        25.77
+    ----------------------- ----------- ------------
+
+    OPT   Memory is more heavily utilized than Compute: Look at the Memory Workload Analysis section to identify the L1 
+          bottleneck. Check memory replay (coalescing) metrics to make sure you're efficiently utilizing the bytes      
+          transferred. Also consider whether it is possible to do more work per memory access (kernel fusion) or        
+          whether there are values you can (re)compute.                                                                 
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        20.22
+    Issued Warp Per Scheduler                        0.20
+    No Eligible                            %        79.78
+    Active Warps Per Scheduler          warp         1.98
+    Eligible Warps Per Scheduler        warp         0.26
+    ---------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 39.04%                                                                                    
+          Every scheduler is capable of issuing one instruction per cycle, but for this workload each scheduler only    
+          issues an instruction every 4.9 cycles. This might leave hardware resources underutilized and may lead to     
+          less optimal performance. Out of the maximum of 16 warps per scheduler, this workload allocates an average    
+          of 1.98 active warps per scheduler, but only an average of 0.26 warps were eligible per cycle. Eligible       
+          warps are the subset of active warps that are ready to issue their next instruction. Every cycle with no      
+          eligible warp results in no instruction being issued and the issue slot remains unused. To increase the       
+          number of eligible warps, avoid possible load imbalances due to highly different execution durations per      
+          warp. Reducing stalls indicated on the Warp State Statistics and Source Counters sections can help, too.      
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            1
+    Block Limit Shared Mem                block            1
+    Block Limit Warps                     block            8
+    Theoretical Active Warps per SM        warp            8
+    Theoretical Occupancy                     %        12.50
+    Achieved Occupancy                        %        12.46
+    Achieved Active Warps Per SM           warp         7.98
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 39.04%                                                                                          
+          The 2.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (12.5%) is limited by the number of required      
+          registers, and the required amount of shared memory.                                                          
+
