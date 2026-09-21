@@ -28,6 +28,7 @@ static/katex/                   # 自托管 KaTeX，勿删
 2. **PaperMod 是 v8.0 不是最新版**：最新版要求 Hugo ≥ 0.146。且主题打过两处补丁（`themes/PaperMod/layouts/partials/templates/opengraph.html` 和 `twitter_cards.html` 删除了废弃的 `.Site.Social` 回退分支）。**升级主题或 Hugo 前必须重测构建**。
 3. **本机网络下载 GitHub release 资产不稳定**，`codeload.github.com` 的 tar.gz 通常可用；npmmirror 可作 npm 包镜像。
 4. **frontmatter 的 `draft: true` 必须改成 `false`**，否则文章不会发布（本地 `hugo server -D` 能看到但线上没有，极易误判）。
+5. **frontmatter 的裸 `date: YYYY-MM-DD` 会被解析成当天 00:00 UTC**（= 北京时间 08:00）。如果在**北京时间 08:00 之前**构建/部署，这个日期就落在「未来」，Hugo 会**静默跳过该页**（不打 ERROR，`hugo list all` 也能看到它，但 `public/` 里没有、线上 404）。凌晨发文章要写带时区的时间，例如 `date: 2026-09-22T01:00:00+08:00`。排查方法：`ls public/posts/<slug>/` 是否存在。
 
 ## 内容组织惯例
 
