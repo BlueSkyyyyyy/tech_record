@@ -1,0 +1,39 @@
+fused_ce_fp8.cu(565): warning #177-D: variable "T" was declared but never referenced
+      constexpr int BM = 256, BN = 128, S = 4, T = V / BN;
+                                               ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z10fce_kernelILb1ELi256ELi256ELi128ELi2ELb1ELi0ELi0EEv14CUtensorMap_stS0_PvPfS2_S2_PKiPKffiii' in line 75942
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z10fce_kernelILb0ELi256ELi256ELi64ELi2ELb1ELi0ELi0EEv14CUtensorMap_stS0_PvPfS2_S2_PKiPKffiii' in line 73191
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z10fce_kernelILb1ELi256ELi256ELi128ELi2ELb0ELi0ELi0EEv14CUtensorMap_stS0_PvPfS2_S2_PKiPKffiii' in line 71342
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z10fce_kernelILb0ELi256ELi256ELi64ELi2ELb0ELi0ELi0EEv14CUtensorMap_stS0_PvPfS2_S2_PKiPKffiii' in line 69595
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+Fused CE: X[M,7168] @ W[129280,7168]^T  logits[32768,129280]
+GEMM FLOPs=60730.84 GFLOP  peak bf16=989 / fp8=1978 TFLOPS
+
+[quant] W per-tensor sw=5.58581e-05  rel-RMS=2.557e-02  maxabs=8.894e-04
+[baseline cuBLAS bf16 + CE]
+  gemm            87.443 ms    694.5 TFLOPS  (70.2% bf16 peak)
+  ce               7.125 ms
+  total           93.121 ms   loss=11.769908
+
+[sweep]  (plain = FUSE=false 写 bf16 logits；fused = 只写 partial lse)
+[128x128 s4      ] plain bf16  332.0 | plain fp8  641.2 (32.4% fp8 peak) | fused bf16  343.8 (34.8%) | fused fp8  680.0 (34.4%) | loss bf=11.769910 fp8=11.769907
+[128x256 s3      ] plain bf16  347.7 | plain fp8  689.8 (34.9% fp8 peak) | fused bf16  366.5 (37.1%) | fused fp8  736.2 (37.2%) | loss bf=11.769906 fp8=11.769907
+[256x128 s4      ] plain bf16  513.9 | plain fp8  957.6 (48.4% fp8 peak) | fused bf16  542.4 (54.8%) | fused fp8 1051.1 (53.1%) | loss bf=11.769908 fp8=11.769907
+[sw 2x8          ] plain bf16  576.6 | plain fp8 1082.5 (54.7% fp8 peak) | fused bf16  580.7 (58.7%) | fused fp8 1121.9 (56.7%) | loss bf=11.769907 fp8=11.769906
+[sw 4x8          ] plain bf16  606.5 | plain fp8 1143.1 (57.8% fp8 peak) | fused bf16  593.2 (60.0%) | fused fp8 1172.9 (59.3%) | loss bf=11.769908 fp8=11.769908
+[sw 4x16         ] plain bf16  606.2 | plain fp8 1143.3 (57.8% fp8 peak) | fused bf16  592.4 (59.9%) | fused fp8 1173.8 (59.3%) | loss bf=11.769907 fp8=11.769908
+[sw 8x16         ] plain bf16  611.2 | plain fp8 1153.4 (58.3% fp8 peak) | fused bf16  597.9 (60.5%) | fused fp8 1178.5 (59.6%) | loss bf=11.769909 fp8=11.769907
+[sw 4x8 s3       ] plain bf16  562.5 | plain fp8 1061.7 (53.7% fp8 peak) | fused bf16  566.7 (57.3%) | fused fp8 1113.9 (56.3%) | loss bf=11.769909 fp8=11.769908
+[128x256 s3 sw   ] plain bf16  559.9 | plain fp8 1051.4 (53.2% fp8 peak) | fused bf16  589.8 (59.6%) | fused fp8 1122.2 (56.7%) | loss bf=11.769906 fp8=11.769905
+[256x256 s2      ] plain bf16   73.6 | plain fp8  147.8 ( 7.5% fp8 peak) | fused bf16   75.8 ( 7.7%) | fused fp8  150.3 ( 7.6%) | loss bf=11.769911 fp8=11.769907
+
+baseline cuBLAS bf16 + CE total = 93.121 ms (gemm 87.443 + ce 7.125, loss 11.769908)

@@ -1,0 +1,10 @@
+[bf16 ] gemm    4.790 ms   792.4 TFLOPS | CE  0.716 ms | total    5.507 ms | loss 11.750000
+[fp8  ] gemm    2.743 ms  1384.0 TFLOPS | CE  0.726 ms | total    3.495 ms | loss 11.750000
+[acc  ] fp8 vs bf16 logits rel-RMS 3.613e-02 maxabs 3.662e-03 | loss diff 0.000e+00
+[scales] sa=5.58581e-05 sw=5.58581e-05
+[bf16 ] gemm   20.557 ms   738.6 TFLOPS | CE  2.708 ms | total   23.266 ms | loss 11.750000
+[fp8  ] gemm   11.973 ms  1268.1 TFLOPS | CE  2.750 ms | total   13.803 ms | loss 11.750000
+[acc  ] fp8 vs bf16 logits rel-RMS 3.613e-02 maxabs 3.967e-03 | loss diff 0.000e+00
+[scales] sa=5.58581e-05 sw=5.58581e-05
+[bf16 ] gemm   87.191 ms   696.5 TFLOPS | CE 10.662 ms | total   97.853 ms | loss 11.750000
+[fp8  ] torch._scaled_mm failed: OutOfMemoryError('CUDA out of memory. Tried to allocate 15.78 GiB. GPU 0 has a total capacity of 79.19 GiB of which 10.95 GiB is free. Including non-PyTorch memory, this process has 68.12 GiB memory in use. Of the allocated memory 66.40 GiB is allocated by PyTorch, and 1.05 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)')

@@ -1,0 +1,264 @@
+fused_ce_fp8.cu(580): warning #177-D: variable "T" was declared but never referenced
+      constexpr int BM = 256, BN = 128, S = 4, T = V / BN;
+                                               ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z10fce_kernelILb1ELi256ELi256ELi128ELi2ELb1ELi0ELi0EEv14CUtensorMap_stS0_PvPfS2_S2_PKiPKffiii' in line 75942
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z10fce_kernelILb0ELi256ELi256ELi64ELi2ELb1ELi0ELi0EEv14CUtensorMap_stS0_PvPfS2_S2_PKiPKffiii' in line 73191
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z10fce_kernelILb1ELi256ELi256ELi128ELi2ELb0ELi0ELi0EEv14CUtensorMap_stS0_PvPfS2_S2_PKiPKffiii' in line 71342
+ptxas info    : (C7511) Potential Performance Loss: wgmma.mma_async instructions are serialized due to insufficient register resources for the wgmma pipeline in the function '_Z10fce_kernelILb0ELi256ELi256ELi64ELi2ELb0ELi0ELi0EEv14CUtensorMap_stS0_PvPfS2_S2_PKiPKffiii' in line 69595
+==PROF== Connected to process 326802 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/55-fp8-fused-ce/fused_ce_fp8.out)
+==WARNING== Unable to access the following 6 metrics: ctc__rx_bytes_data_user.sum, ctc__rx_bytes_data_user.sum.pct_of_peak_sustained_elapsed, ctc__rx_bytes_data_user.sum.per_second, ctc__tx_bytes_data_user.sum, ctc__tx_bytes_data_user.sum.pct_of_peak_sustained_elapsed, ctc__tx_bytes_data_user.sum.per_second.
+
+
+==PROF== Profiling "fce_kernel": 0%....50%....100% - 39 passes
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+Fused CE: X[M,7168] @ W[129280,7168]^T  logits[8192,129280]
+GEMM FLOPs=15182.71 GFLOP  peak bf16=989 / fp8=1978 TFLOPS
+
+[quant] W per-tensor sw=5.58581e-05  rel-RMS=2.557e-02  maxabs=8.894e-04
+[dbg] prof8 fused fp8 sw8x16 synced OK
+==PROF== Disconnected from process 326802
+[326802] fused_ce_fp8.out@127.0.0.1
+  void fce_kernel<1, 256, 128, 128, 4, 1, 8, 16>(CUtensorMap_st, CUtensorMap_st, void *, float *, float *, float *, const int *, const float *, float, int, int, int) (32768, 1, 1)x(544, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.69
+    Elapsed Cycles                cycle     19276021
+    Memory Throughput                 %        79.65
+    DRAM Throughput                   %        11.54
+    Duration                         ms        11.35
+    L1/TEX Cache Throughput           %        58.25
+    L2 Cache Throughput               %        79.00
+    SM Active Cycles              cycle  19078727.77
+    Compute (SM) Throughput           %        73.38
+    ----------------------- ----------- ------------
+
+    INF   Compute and Memory are well-balanced: To reduce runtime, both computation and memory traffic must be reduced. 
+          Check both the Compute Workload Analysis and Memory Workload Analysis sections.                               
+
+    Section: GPU Speed Of Light Roofline Chart (Overview)
+    INF   The ratio of peak float (FP32) to double (FP64) performance on this device is 2:1. The workload achieved      
+          close to 1% of this device's FP32 peak performance and 0% of its FP64 peak performance. See the Profiling     
+          Guide (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#roofline) for more details on         
+          roofline analysis.                                                                                            
+
+    Section: PM Sampling
+    ------------------------- ----------- ------------
+    Metric Name               Metric Unit Metric Value
+    ------------------------- ----------- ------------
+    Maximum Buffer Size             Mbyte        88.60
+    Maximum Sampling Interval          us            3
+    # Pass Groups                                    2
+    ------------------------- ----------- ------------
+
+    Section: Compute Workload Analysis
+    -------------------- ----------- ------------
+    Metric Name          Metric Unit Metric Value
+    -------------------- ----------- ------------
+    Executed Ipc Active   inst/cycle         1.10
+    Executed Ipc Elapsed  inst/cycle         1.09
+    Issue Slots Busy               %        27.36
+    Issued Ipc Active     inst/cycle         1.10
+    SM Busy                        %        73.38
+    -------------------- ----------- ------------
+
+    OPT   Shared is the highest-utilized pipeline (73.4%) based on elapsed cycles in the workload, taking into account  
+          the rates of its different instructions. It is the logical sum of several other pipelines which can't         
+          achieve full utilization on their own. It executes 64-bit floating point and tensor operations. It's          
+          dominated by its Tensor (FP) sub-pipeline. The pipeline is well-utilized, but might become a bottleneck if    
+          more work is added. Based on the number of executed instructions, the highest utilized pipeline (21.4%) is    
+          ALU. It executes integer and logic operations. Comparing the two, the overall pipeline utilization appears    
+          to be caused by high-latency instructions. See the Profiling Guide                                            
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-decoder) or hover over the          
+          pipeline name to understand the workloads handled by each pipeline. The Instruction Statistics section shows  
+          the mix of executed instructions for this workload. Check the Warp State Statistics section for which         
+          reasons cause warps to stall.                                                                                 
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %         0.01
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Gbyte/s       386.78
+    Mem Busy                                          %        58.08
+    Max Bandwidth                                     %        79.65
+    L1/TEX Hit Rate                                   %         3.29
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector     16588306
+    L2 Hit Rate                                       %        89.31
+    Mem Pipes Busy                                    %        41.40
+    --------------------------------------- ----------- ------------
+
+    Section: Memory Workload Analysis Chart
+    OPT   Est. Speedup: 11.27%                                                                                          
+          Out of the 530825792.0 bytes sent to the L2 Compression unit only 0.00% were successfully compressed. To      
+          increase this success rate, consider marking only those memory regions as compressible that contain the most  
+          zero values and/or expose the most homogeneous values.                                                        
+
+    Section: Memory Workload Analysis Tables
+    OPT   Est. Speedup: 68.15%                                                                                          
+          The memory access pattern for global stores to L2 might not be optimal. On average, only 4.0 of the 32 bytes  
+          transmitted per sector are utilized by each thread. This applies to the 98.6% of sectors missed in L1TEX.     
+          This could possibly be caused by a stride between threads. Check the Source Counters section for uncoalesced  
+          global stores.                                                                                                
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        27.52
+    Issued Warp Per Scheduler                        0.28
+    No Eligible                            %        72.48
+    Active Warps Per Scheduler          warp         4.21
+    Eligible Warps Per Scheduler        warp         0.60
+    ---------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 20.35%                                                                                    
+          Every scheduler is capable of issuing one instruction per cycle, but for this workload each scheduler only    
+          issues an instruction every 3.6 cycles. This might leave hardware resources underutilized and may lead to     
+          less optimal performance. Out of the maximum of 16 warps per scheduler, this workload allocates an average    
+          of 4.21 active warps per scheduler, but only an average of 0.60 warps were eligible per cycle. Eligible       
+          warps are the subset of active warps that are ready to issue their next instruction. Every cycle with no      
+          eligible warp results in no instruction being issued and the issue slot remains unused. To increase the       
+          number of eligible warps, avoid possible load imbalances due to highly different execution durations per      
+          warp. Reducing stalls indicated on the Warp State Statistics and Source Counters sections can help, too.      
+
+    Section: Warp State Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Warp Cycles Per Issued Instruction             cycle        15.29
+    Warp Cycles Per Executed Instruction           cycle        15.29
+    Avg. Active Threads Per Warp                                30.92
+    Avg. Not Predicated Off Threads Per Warp                    29.74
+    ---------------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 20.35%                                                                                          
+          On average, each warp of this workload spends 8.8 cycles being stalled waiting for a scoreboard dependency on 
+          a L1TEX (local, global, surface, texture) operation. Find the instruction producing the data being waited     
+          upon to identify the culprit. To reduce the number of cycles waiting on L1TEX data accesses verify the        
+          memory access patterns are optimal for the target architecture, attempt to increase cache hit rates by        
+          increasing data locality (coalescing), or by changing the cache configuration. Consider moving frequently     
+          used data to shared memory. This stall type represents about 57.8% of the total average of 15.3 cycles        
+          between issuing two instructions.                                                                             
+    ----- --------------------------------------------------------------------------------------------------------------
+    INF   Check the Warp Stall Sampling (All Samples) table for the top stall locations in your source based on         
+          sampling data. The Profiling Guide                                                                            
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-reference) provides more details    
+          on each stall reason.                                                                                         
+
+    Section: Instruction Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                  byte            0
+    Shared Memory Spilling Requests                 byte            0
+    Avg. Executed Instructions Per Scheduler        inst   5234359.24
+    Executed Instructions                           inst   2763741679
+    Avg. Issued Instructions Per Scheduler          inst   5234372.03
+    Issued Instructions                             inst   2763748433
+    ---------------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 2.929%                                                                                          
+          This workload executes 0 fused and 201676800 non-fused FP32 instructions. By converting pairs of non-fused    
+          instructions to their fused (https://docs.nvidia.com/cuda/floating-point/#cuda-and-floating-point),           
+          higher-throughput equivalent, the achieved FP32 performance could be increased by up to 50% (relative to its  
+          current performance).                                                                                         
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   544
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                  32768
+    Registers Per Thread             register/thread              90
+    Shared Memory Configuration Size           Kbyte          200.70
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block      Kbyte/block          197.63
+    Static Shared Memory Per Block        byte/block               0
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread        17825792
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                              248.24
+    -------------------------------- --------------- ---------------
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            1
+    Block Limit Shared Mem                block            1
+    Block Limit Warps                     block            3
+    Theoretical Active Warps per SM        warp           17
+    Theoretical Occupancy                     %        26.56
+    Achieved Occupancy                        %        26.28
+    Achieved Active Warps Per SM           warp        16.82
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 20.35%                                                                                          
+          The 4.25 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (26.6%) is limited by the number of required      
+          registers, and the required amount of shared memory.                                                          
+
+    Section: GPU and Memory Workload Distribution
+    -------------------------- ----------- ------------
+    Metric Name                Metric Unit Metric Value
+    -------------------------- ----------- ------------
+    Average DRAM Active Cycles       cycle   3430797.20
+    Total DRAM Elapsed Cycles        cycle   1189428480
+    Average L1 Active Cycles         cycle  19078727.77
+    Total L1 Elapsed Cycles          cycle   2525549610
+    Average L2 Active Cycles         cycle  19401828.18
+    Total L2 Elapsed Cycles          cycle   1550755040
+    Average SM Active Cycles         cycle  19078727.77
+    Total SM Elapsed Cycles          cycle   2525549610
+    Average SMSP Active Cycles       cycle  19022933.75
+    Total SMSP Elapsed Cycles        cycle  10102198440
+    -------------------------- ----------- ------------
+
+    Section: Source Counters
+    ------------------------- ----------- ------------
+    Metric Name               Metric Unit Metric Value
+    ------------------------- ----------- ------------
+    Branch Instructions Ratio           %         0.03
+    Branch Instructions              inst     72517508
+    Branch Efficiency                   %        99.21
+    Avg. Divergent Branches      branches      1040.61
+    ------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 77.81%                                                                                          
+          This workload has uncoalesced global accesses resulting in a total of 14479360 excessive sectors (78% of the  
+          total 18624512 sectors). Check the L2 Theoretical Sectors Global Excessive table for the primary source       
+          locations. The CUDA Programming Guide                                                                         
+          (https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#device-memory-accesses) has additional      
+          information on reducing uncoalesced device memory accesses.                                                   
+
