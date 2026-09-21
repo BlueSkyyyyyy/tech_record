@@ -156,3 +156,11 @@ scripts/lab.sh status
 - **算力受限 GEMM：降 L2 流量（大 BM）> 堆 occupancy**：23 篇 128×128 s3 有 2 CTA/SM 但 L2 80%、1097 TFLOPS；
   256×128 s4 只有 1 CTA/SM、L2 57%，反而 1217。先看 ncu `L2 Cache Throughput` 与 tensor pipe 活跃度，别默认
   occupancy 越高越好。
+- **per-block FP8 缩放的代价是寄存器→occupancy，不是折算 FLOPs**（24 篇）：`fin += sa*sb*acc` 要求每线程多一个
+  跨 k 保留的 fp32 `fin`。BM=128/BN=128 时 288 线程的寄存器从 90 顶到 154，越过 2-CTA 门槛 113，occupancy
+  2→1 CTA/SM，Compute 67.7%→49.7%。先算 `65536/线程数`（1 CTA）与 `65536/(2×线程数)`（2 CTA）再选 config。
+- **别把 wgmma 累加器攒到寄存器里做 ping-pong**（24 篇）：主循环里读「还在飞的 wgmma 累加器」会让 ptxas
+  主动串行化 wgmma（警告 `C7514`/`C7511`），实测比老实 `wait0` 折算还慢 2.3×。要么像 DeepGEMM 用
+  `warpgroup_wait<0>` 严格分开，要么改 1-warpgroup/248-reg 布局。
+- **per-block 的好几何可能寄存器不可行**：BM=256 的 per-block 累加器 = `512×128 = 65536` 恰为整个 regfile，
+  无论怎么调都 spill（96 regs + 608B → 224 TFLOPS）。换几何前先做寄存器账。
