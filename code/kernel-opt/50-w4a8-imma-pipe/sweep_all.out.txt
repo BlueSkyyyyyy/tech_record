@@ -1,0 +1,136 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+W4A8 IMMA pipe: N=17408 K=5120 group=128 ; W_int4=44.6 MB scales=2.8 MB total=47.3 MB
+纯读上界 w+s: 0.0183 ms  2581.1 GB/s (77.0% HBM)
+纯读上界 strided(64B/2560B): 0.0175 ms  2541.3 GB/s (75.8% HBM)
+  [base48_ns_s2k7] threads=128 smem=25088
+  [pipe_s2k7] threads=128 smem=26368
+  [pipe_s3k7] threads=128 smem=39552
+  [pipe_s4k7] threads=128 smem=52736
+  [pipe_s3k5] threads=128 smem=39552
+  [pipe_s3k8] threads=128 smem=39552
+  [pipe_s3k4] threads=128 smem=39552
+  [pipe_s3k7_b5] threads=128 smem=39552
+  [pipe_bn256_s2k7] threads=256 smem=47872
+  [pipe_bn256_s3k7] threads=256 smem=71808
+  [pipe_bn256_s2k4] threads=256 smem=47872
+  [pipe_bn512_s2k4] threads=512 smem=90880
+  [one_s3k7] threads=128 smem=39552
+  [one_s4k7] threads=128 smem=52736
+  [one_s3k7_b5] threads=128 smem=39552
+  [one_s3k5_b5] threads=128 smem=39552
+  [one_bn256_s3k7] threads=256 smem=71808
+  [tile_s3k7] threads=128 smem=39552
+  [tile_s3k7_b5] threads=128 smem=39552
+  [tile_s2k7] threads=128 smem=26368
+  [tile_bn256_s2k7] threads=256 smem=47872
+  [tile_one_s3k7] threads=128 smem=39552
+  [tile_s2k5] threads=128 smem=26368
+  [tile_s2k8] threads=128 smem=26368
+  [tile_s2k4] threads=128 smem=26368
+  [tile_bn256_s2k5] threads=256 smem=47872
+  [tile_s3k8] threads=128 smem=39552
+  [tile_s2k10] threads=128 smem=26368
+  [tile_s2k16] threads=128 smem=26368
+  [tile_s2k8_b5] threads=128 smem=26368
+
+=== 精度校验（M=16, 抽样 48 点）===
+  [base48_ns_s2k7      ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [pipe_s2k7           ] max_abs_err=1.734e-07 (ref~3.8) rel=4.60e-08 OK
+  [pipe_s3k7           ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [pipe_s4k7           ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [pipe_s3k5           ] max_abs_err=2.700e-07 (ref~3.8) rel=7.16e-08 OK
+  [pipe_s3k8           ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [pipe_s3k4           ] max_abs_err=2.158e-07 (ref~3.8) rel=5.73e-08 OK
+  [pipe_s3k7_b5        ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [pipe_bn256_s2k7     ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [pipe_bn256_s3k7     ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [pipe_bn256_s2k4     ] max_abs_err=4.542e-07 (ref~3.8) rel=1.21e-07 OK
+  [pipe_bn512_s2k4     ] max_abs_err=4.542e-07 (ref~3.8) rel=1.21e-07 OK
+  [one_s3k7            ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [one_s4k7            ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [one_s3k7_b5         ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [one_s3k5_b5         ] max_abs_err=2.700e-07 (ref~3.8) rel=7.16e-08 OK
+  [one_bn256_s3k7      ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [tile_s3k7           ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [tile_s3k7_b5        ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [tile_s2k7           ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [tile_bn256_s2k7     ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [tile_one_s3k7       ] max_abs_err=3.889e-07 (ref~3.8) rel=1.03e-07 OK
+  [tile_s2k5           ] max_abs_err=2.700e-07 (ref~3.8) rel=7.16e-08 OK
+  [tile_s2k8           ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [tile_s2k4           ] max_abs_err=4.542e-07 (ref~3.8) rel=1.21e-07 OK
+  [tile_bn256_s2k5     ] max_abs_err=2.700e-07 (ref~3.8) rel=7.16e-08 OK
+  [tile_s3k8           ] max_abs_err=2.835e-07 (ref~3.8) rel=7.52e-08 OK
+  [tile_s2k10          ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+  [tile_s2k16          ] max_abs_err=2.835e-07 (ref~3.8) rel=7.52e-08 OK
+  [tile_s2k8_b5        ] max_abs_err=2.310e-07 (ref~3.8) rel=6.13e-08 OK
+
+=== M 扫描（同进程、warmup=5 iters=50）===
+kernel\M                     1         2         3         4         6         8        12        16
+base48_ns_s2k7        0.0328    0.0330    0.0334    0.0339    0.0344    0.0351    0.0367    0.0386  
+pipe_s2k7             0.0336    0.0339    0.0340    0.0341    0.0345    0.0349    0.0361    0.0380  
+pipe_s3k7             0.0322    0.0325    0.0328    0.0330    0.0337    0.0341    0.0356    0.0371  
+pipe_s4k7             0.0338    0.0341    0.0343    0.0345    0.0352    0.0355    0.0368    0.0383  
+pipe_s3k5             0.0369    0.0369    0.0371    0.0373    0.0375    0.0379    0.0387    0.0400  
+pipe_s3k8             0.0330    0.0331    0.0331    0.0333    0.0338    0.0345    0.0362    0.0381  
+pipe_s3k4             0.0357    0.0358    0.0358    0.0360    0.0362    0.0367    0.0379    0.0391  
+pipe_s3k7_b5          0.0324    0.0329    0.0327    0.0332    0.0333    0.0331    0.0343    0.0364  
+pipe_bn256_s2k7       0.0317    0.0319    0.0321    0.0327    0.0334    0.0345    0.0359    0.0377  
+pipe_bn256_s3k7       0.0330    0.0333    0.0334    0.0341    0.0349    0.0356    0.0367    0.0385  
+pipe_bn256_s2k4       0.0404    0.0405    0.0405    0.0406    0.0411    0.0415    0.0425    0.0437  
+pipe_bn512_s2k4       0.0511    0.0512    0.0514    0.0517    0.0523    0.0529    0.0533    0.0546  
+one_s3k7              0.0317    0.0320    0.0325    0.0328    0.0335    0.0336    0.0351    0.0367  
+one_s4k7              0.0327    0.0328    0.0329    0.0332    0.0336    0.0341    0.0352    0.0369  
+one_s3k7_b5           0.0326    0.0328    0.0329    0.0332    0.0333    0.0338    0.0350    0.0367  
+one_s3k5_b5           0.0340    0.0344    0.0346    0.0348    0.0354    0.0355    0.0367    0.0378  
+one_bn256_s3k7        0.0319    0.0321    0.0324    0.0329    0.0340    0.0346    0.0358    0.0377  
+tile_s3k7             0.0313    0.0315    0.0315    0.0316    0.0320    0.0323    0.0336    0.0353  
+tile_s3k7_b5          0.0313    0.0314    0.0315    0.0316    0.0319    0.0324    0.0335    0.0354  
+tile_s2k7             0.0309    0.0310    0.0310    0.0312    0.0315    0.0319    0.0334    0.0353  
+tile_bn256_s2k7       0.0307    0.0308    0.0308    0.0313    0.0324    0.0333    0.0349    0.0366  
+tile_one_s3k7         0.0314    0.0315    0.0316    0.0316    0.0319    0.0322    0.0334    0.0354  
+tile_s2k5             0.0314    0.0316    0.0316    0.0318    0.0320    0.0322    0.0333    0.0346  
+tile_s2k8             0.0283    0.0287    0.0285    0.0288    0.0298    0.0306    0.0327    0.0349  
+tile_s2k4             0.0309    0.0310    0.0311    0.0312    0.0317    0.0320    0.0330    0.0343  
+tile_bn256_s2k5       0.0329    0.0331    0.0331    0.0332    0.0336    0.0343    0.0353    0.0368  
+tile_s3k8             0.0294    0.0295    0.0296    0.0299    0.0305    0.0313    0.0333    0.0354  
+tile_s2k10            0.0291    0.0294    0.0295    0.0298    0.0304    0.0314    0.0343    0.0371  
+tile_s2k16            0.0298    0.0300    0.0301    0.0305    0.0315    0.0334    0.0373    0.0420  
+tile_s2k8_b5          0.0283    0.0284    0.0284    0.0288    0.0297    0.0306    0.0327    0.0349  
+
+=== 每个 M 的最佳 kernel（含 base 与全部变体；GB/s 按 W+s 字节）===
+M      best                        ms    TFLOPS  W+s GB/s      %HBM
+1      tile_s2k8_b5            0.0283      6.29    1671.6     49.9%
+2      tile_s2k8_b5            0.0284     12.54    1665.3     49.7%
+3      tile_s2k8_b5            0.0284     18.80    1664.8     49.7%
+4      tile_s2k8_b5            0.0288     24.77    1644.8     49.1%
+6      tile_s2k8_b5            0.0297     35.96    1592.1     47.5%
+8      tile_s2k8               0.0306     46.62    1548.1     46.2%
+12     tile_s2k8_b5            0.0327     65.44    1448.6     43.2%
+16     tile_s2k4               0.0343     83.14    1380.3     41.2%
+汇总（8 个 M 点求和）：best=0.2413 ms   base48=0.2779 ms   best/base=0.868
+
+=== 持久化版 M 扫描（CHUNK/P 组合，同进程）===
+kernel\M                     1         2         3         4         6         8        12        16
+  [pers_c8_s3_p2sm] P=264 smem=39552
+  [pers_c8_s3_p4sm] P=528 smem=39552
+  [pers_c10_s3_p2sm] P=264 smem=39552
+  [pers_c8_s4_p2sm] P=264 smem=52736
+  [pers_c8_s2_p2sm] P=264 smem=26368
+  [pers_c5_s3_p2sm] P=264 smem=39552
+  [pers_c4_s3_p2sm] P=264 smem=39552
+  [pers_c40_s3_p2sm] P=264 smem=39552
+pers_c8_s3_p2sm       0.0390    0.0390    0.0390    0.0389    0.0390    0.0391    0.0396    0.0411  
+pers_c8_s3_p4sm       0.0334    0.0337    0.0338    0.0347    0.0348    0.0350    0.0360    0.0380  
+pers_c10_s3_p2sm      0.0431    0.0431    0.0431    0.0431    0.0431    0.0430    0.0436    0.0446  
+pers_c8_s4_p2sm       0.0387    0.0387    0.0387    0.0388    0.0387    0.0388    0.0395    0.0407  
+pers_c8_s2_p2sm       0.0393    0.0393    0.0394    0.0394    0.0395    0.0396    0.0404    0.0416  
+pers_c5_s3_p2sm       0.0379    0.0379    0.0380    0.0380    0.0381    0.0382    0.0400    0.0416  
+pers_c4_s3_p2sm       0.0372    0.0372    0.0372    0.0373    0.0373    0.0374    0.0394    0.0414  
+pers_c40_s3_p2sm      0.0596    0.0596    0.0595    0.0596    0.0598    0.0598    0.0598    0.0600  
