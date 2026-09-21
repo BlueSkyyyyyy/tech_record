@@ -19,7 +19,7 @@ DSA 把 attention 拆成两步：
 
 | 算子 | 实现 | S=16384 耗时 | 算力/带宽 | 峰值占比 |
 |---|---|---|---|---|
-| indexer 打分 | 标量 FFMA（基线） | 4560 ms（外推） | 0.93 TFLOPS | 0.09% |
+| indexer 打分 | 标量 FFMA（基线） | 4712 ms（按 S=4096 的 294.5 ms × 16 外推） | 0.93 TFLOPS | 0.09% |
 | indexer 打分 | TC `mma` + head 循环 | 19.70 ms | 222 TFLOPS | 22.5% |
 | **indexer 打分** | **TC + HG=2 + BN=128** | **15.32 ms** | **287–311 TFLOPS** | **≈31%** |
 | exact top-k | 单直方图 radix-select（S=32768） | 26.7 ms | — | — |
