@@ -65,6 +65,10 @@ scripts/lab.sh status
 - **强制提高 occupancy 可能是负优化**：`__launch_bounds__(threads, N)` 压寄存器会 spill 到 local memory（实测 `occ<8>` spill 1.31 TB，慢 34×）。先看 `not_selected`/`no_eligible` 是否真的空发射口。
 - `scripts/ncu.sh` 支持用 `--` 分隔 ncu 参数与程序参数（如 `... --set full -- 20000 occ2`）；收集 stall 用 `--metrics smsp__average_warps_issue_stalled_*_per_issue_active.ratio`。
 - 源码/SASS 对照：`ncu --page source --print-source cuda,sass --metrics smsp__inst_executed.sum ...`。
+- **`ldmatrix` 的 bank conflict 极其致命**：smem 行主序数组若不加 padding，`ldmatrix` 一次读 8 行会撞 bank（B 行距 128 bf16 时 8 行全在 bank 0，实测 3565 万次冲突）。给行距 **+8 个元素**（`LDA=BK+8`、`LDB=BN+8`）即可归零，同一 kernel 从 76→221 TFLOPS。写任何用 ldmatrix 的 kernel 先查 `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum`。
+- **WMMA `load_matrix_sync` 在 sm_90 上是负优化**：抽象导致共享内存流量失控（L1/TEX 77%、Compute 17%），同尺寸只有 62 TFLOPS；手写 `mma.m16n8k16` + `ldmatrix` 能到 221。入门可讲 WMMA，但性能路径必须自己控布局。
+- **`ldmatrix.x4.trans` 取 B 片段**：B 在 smem 里存成行主序 `[K][N]`，mma 需要 `.col` 布局，用转置 ldmatrix 让硬件顺带转置；地址 lane 公式：`row=(lane&7)+((lane>>3)&1)*8, col=(lane>>4)*8`。
+- **静态 smem 上限 48KB**：`__shared__` 数组超过 0xc000 会 ptxas 报错；BK=64 的 tc kernel 会超。要更大需 `cudaFuncSetAttribute` + 动态 smem。
 - **模板化 kernel 的「通用循环 loader」会悄悄多花寄存器**：把第 09 篇的单发 float4 载入改成
   `for (q = t; q < N4; q += T)` 的通用循环后，同一 128×128×8 GEMM 从 118/128 寄存器涨到 168，
   occupancy 25%→12.5%，算力掉 ~35%。当某配置下每线程恰好搬 1 个 float4 时用 `if constexpr`

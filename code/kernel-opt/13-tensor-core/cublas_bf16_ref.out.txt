@@ -1,0 +1,3 @@
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 device NVIDIA H100 80GB HBM3 dtype torch.bfloat16
+cublas bf16 matmul
+M=N=K=2048  0.0255 ms  672.70 TFLOPS  (68.0% of bf16 TC peak)
