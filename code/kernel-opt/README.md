@@ -27,6 +27,7 @@
 | `13-tensor-core/` | 13 Tensor Core 入门 | WMMA / 裸 mma.m16n8k16 + ldmatrix / bank conflict padding + cuBLAS BF16 对照 |
 | `14-fusion-epilogue/` | 14 融合与 epilogue | GEMM+bias+GELU/ReLU 寄存器融合 vs 独立 epilogue kernel（11%/26%/33% 提速，随 K 缩小放大）|
 | `15-mla-attn/` | 15 MLA 注意力（一） | MLA 吸收成 MQA：naive/head_reuse/smem 标量版（15~19 TFLOPS，算力受限）+ TC 三 kernel（115.6 TFLOPS），扫 S=1k/2k/4k |
+| `16-mla-fused/` | 16 MLA 注意力（二） | 单 kernel 融合：online softmax + 累加器 C→A 零 shuffle + KV 常驻 smem；`f4s` 共享 P 消重复 **170.1 TFLOPS**（Sk=4096 → 184.7）；附 `wgmma` 尝试（84.6，暴露 swizzle 才是胜负手）与描述符冒烟测试 |
 
 ## 怎么跑
 
@@ -39,7 +40,7 @@ scripts/run.sh 02-first-kernel/vector_add.cu
 scripts/ncu.sh 02-first-kernel/vector_add.cu --set full --kernel-name regex:add
 ```
 
-环境变量：`ARCH`（默认 `sm_90`）、`GPU`（默认 0）、`NVCC_FLAGS`。
+环境变量：`ARCH`（默认 `sm_90`；**设为空串 `ARCH=""` 则不传 `-arch`**，用 `NVCC_FLAGS` 里的 `-gencode` —— CUDA 13 的 nvcc 不认 `-arch=sm_90a`，wgmma 需 `NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a"`）、`GPU`（默认 0）、`NVCC_FLAGS`。
 
 ## 无人值守自驱（autopilot）
 
@@ -54,7 +55,7 @@ scripts/autopilot.sh stop      # 停止
 scripts/autopilot.sh run       # 前台运行（调试）
 ```
 
-- 日志：`code/kernel-opt/autopilot.log`；停止文件：`AUTOPILOT_STOP`（agent 做完整个系列也会自动创建）。
+- 日志：`code/kernel-opt/autopilot.log`；停止文件：`AUTOPILOT_STOP`（**只有用户 `autopilot.sh stop` 才会创建**；agent 永不自行创建，做完就自己扩充路线图继续）。
 - 可调：`MAX_ROUNDS`（默认 40）、`SLEEP_BETWEEN`（默认 30s）、`TIMEOUT_PER_ROUND`（默认 5400s）。
 - 连续失败 3 次会自行停止；`autopilot.lock` 防止重复启动。
 

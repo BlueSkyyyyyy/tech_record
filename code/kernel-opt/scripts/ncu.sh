@@ -23,9 +23,11 @@ done
 ABS="$(readlink -f "$SRC")"
 DIR="$(dirname "$ABS")"
 NAME="$(basename "$ABS" .cu)"
-ARCH="${ARCH:-sm_90}"
+ARCH="${ARCH-sm_90}"
 GPU="${GPU:-0}"
 NVCC_FLAGS="${NVCC_FLAGS:-}"
+ARCH_FLAG=""
+[[ -n "$ARCH" ]] && ARCH_FLAG="-arch=$ARCH"
 
 LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lab.sh"
 "$LAB" up >/dev/null
@@ -38,5 +40,5 @@ APP_ARGS=""
 for a in "${PROG_ARGS[@]}"; do APP_ARGS+=" $(printf '%q' "$a")"; done
 
 docker exec -e CUDA_VISIBLE_DEVICES="$GPU" "$LAB_NAME" bash -lc \
-  "cd '$DIR' && nvcc -O3 -arch=$ARCH -lineinfo $NVCC_FLAGS '$NAME.cu' -o '$NAME.out' && \
+  "cd '$DIR' && nvcc -O3 $ARCH_FLAG -lineinfo $NVCC_FLAGS '$NAME.cu' -o '$NAME.out' && \
    CUDA_VISIBLE_DEVICES=$GPU ncu$NCU_ARGS './$NAME.out'$APP_ARGS"

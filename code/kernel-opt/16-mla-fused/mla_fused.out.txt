@@ -1,0 +1,24 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+MLA fused attention (MQA): H=128 Sq=1024 Sk=1024  DC=512 DR=64 DV=512
+FLOPs = 292.06 GFLOP   (KV tile smem 需 Sq%BM==0, Sk%KT==0)
+
+  [f4    ] max_abs_err=9.100e-06 (ref~0.006) OK
+f4       BM=64  DVGRP=2 KT=64  warps=8     1.9931 ms    146.54 TFLOPS ( 14.8% peak, QK dup 2x -> 有效   7.4%)
+  [f2    ] max_abs_err=9.100e-06 (ref~0.006) OK
+f2       BM=32  DVGRP=4 KT=64  warps=8     2.7678 ms    105.52 TFLOPS ( 10.7% peak, QK dup 4x -> 有效   2.7%)
+  [f2k32 ] max_abs_err=9.100e-06 (ref~0.006) OK
+f2k32    BM=32  DVGRP=4 KT=32  warps=8     3.2891 ms     88.80 TFLOPS (  9.0% peak, QK dup 4x -> 有效   2.2%)
+  [f4s   ] max_abs_err=9.100e-06 (ref~0.006) OK
+f4s      BM=64  DVGRP=2 KT=64  warps=8     1.7169 ms    170.11 TFLOPS ( 17.2% peak, QK dup 1x)
+  [f2s   ] max_abs_err=9.100e-06 (ref~0.006) OK
+f2s      BM=32  DVGRP=4 KT=64  warps=8     2.5649 ms    113.87 TFLOPS ( 11.5% peak, QK dup 1x)
+  [f4k32 ] max_abs_err=9.100e-06 (ref~0.006) OK
+f4k32    BM=64  DVGRP=2 KT=32  warps=8     2.2465 ms    130.01 TFLOPS ( 13.1% peak, QK dup 2x -> 有效   6.6%)
+  [f1    ] max_abs_err=9.100e-06 (ref~0.006) OK
+f1       BM=16  DVGRP=8 KT=64  warps=8     4.6622 ms     62.64 TFLOPS (  6.3% peak, QK dup 8x -> 有效   0.8%)

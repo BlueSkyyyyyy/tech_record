@@ -1,0 +1,12 @@
+### Sq=1024 Sk=2048
+  [f4s   ] max_abs_err=6.249e-06 (ref~0.006) OK
+f4s      BM=64  DVGRP=2 KT=64  warps=8     3.1833 ms    183.49 TFLOPS ( 18.6% peak, QK dup 1x)
+f4       BM=64  DVGRP=2 KT=64  warps=8     3.6944 ms    158.11 TFLOPS ( 16.0% peak, QK dup 2x -> 有效   8.0%)
+### Sq=1024 Sk=4096
+  [f4s   ] max_abs_err=4.506e-06 (ref~0.003) OK
+f4s      BM=64  DVGRP=2 KT=64  warps=8     6.3260 ms    184.67 TFLOPS ( 18.7% peak, QK dup 1x)
+f4       BM=64  DVGRP=2 KT=64  warps=8     7.3932 ms    158.01 TFLOPS ( 16.0% peak, QK dup 2x -> 有效   8.0%)
+### Sq=2048 Sk=2048
+  [f4s   ] max_abs_err=5.791e-06 (ref~0.004) OK
+f4s      BM=64  DVGRP=2 KT=64  warps=8     6.5908 ms    177.25 TFLOPS ( 17.9% peak, QK dup 1x)
+f4       BM=64  DVGRP=2 KT=64  warps=8     7.5552 ms    154.63 TFLOPS ( 15.6% peak, QK dup 2x -> 有效   7.8%)
