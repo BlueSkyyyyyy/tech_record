@@ -1,0 +1,23 @@
+### softmax_fused
+    Memory Throughput                 %        59.08
+    DRAM Throughput                   %        59.08
+    Duration                         us       209.70
+    Compute (SM) Throughput           %        23.84
+    Memory Throughput                           Tbyte/s         1.98
+    L2 Hit Rate                                       %        39.03
+### softmax_smem
+    Memory Throughput                 %        83.38
+    DRAM Throughput                   %        83.38
+    Duration                         us        88.03
+    L2 Cache Throughput               %        80.83
+    Compute (SM) Throughput           %        35.63
+### k_row_max
+    DRAM Throughput                   %        63.50
+    Duration                         us        64.42
+    Compute (SM) Throughput           %        20.09
+    DRAM Throughput                   %        61.24
+    Duration                         us        66.75
+    Compute (SM) Throughput           %        25.29
+    DRAM Throughput                   %        56.47
+    Duration                         us       133.79
+    Compute (SM) Throughput           %        55.46

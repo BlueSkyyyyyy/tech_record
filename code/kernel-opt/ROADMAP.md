@@ -55,7 +55,7 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 
 ### 第三部分：计算与融合
 
-- [ ] **07 Softmax / LayerNorm 优化**：online softmax · warp-per-row vs block-per-row · 融合 affine · ncu 对比
+- [x] **07 Softmax 优化**：多趟(29.8%) → 融合(37.4%) → 整行 smem 缓存(85.3%) · online softmax 引出 FlashAttention · LayerNorm 同套路
 - [ ] **08 GEMM 入门**：从 naive 三重循环到 shared-memory tiled · 计算/访存比 · 为什么分块有效
 - [ ] **09 GEMM 进阶**：寄存器分块（thread tile）· 向量化 + double buffering · 逼近 cuBLAS 的百分比
 
@@ -88,12 +88,12 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 ## 当前进度
 
 - 2026-09-21：搭建容器 `kernel_lab` 与 `scripts/`、`common/cuda_utils.cuh`，起草路线图。
-- 2026-09-21：完成并发布 **01–06**（开篇 / 第一个 kernel / 正确测量 / 访存合并 / 矩阵转置 / 归约）。已 push 且线上 200。
+- 2026-09-21：完成并发布 **01–07**（… / 归约 / Softmax）。已 push 且线上 200。
 
 ## 下一步（明确到可执行）
 
-- [ ] 完成 **07 Softmax / LayerNorm 优化**：多趟 → 融合 → online softmax，ncu 对比
-- [ ] 之后接 **08 GEMM 入门**（naive → smem tiled）
+- [ ] 完成 **08 GEMM 入门**：naive 三重循环 → shared-memory tiled → 实测 TFLOPS，说明「数据复用」是计算受限算子的核心
+- [ ] 之后接 **09 GEMM 进阶**（寄存器分块 / double buffering）
 - [ ] 每完成一篇：更新本文件、README 索引，提交推送
 - [ ] 可选：给 01 的 roofline 画一张 mermaid 图
 

@@ -82,6 +82,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 4. [访存合并与向量化：同一个 copy，差 7 倍](content/posts/cuda-kernel-opt-04-coalescing/index.md)
 5. [共享内存与 bank conflict：矩阵转置](content/posts/cuda-kernel-opt-05-transpose/index.md)
 6. [归约与 warp shuffle：求和为什么能慢 1000 倍](content/posts/cuda-kernel-opt-06-reduction/index.md)
+7. [Softmax 优化：从 3 个 kernel 到 1 个](content/posts/cuda-kernel-opt-07-softmax/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验）
 
