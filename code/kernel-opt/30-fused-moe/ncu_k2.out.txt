@@ -1,0 +1,107 @@
+==PROF== Connected to process 157752 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/30-fused-moe/moe_fused.out)
+==PROF== Profiling "down_kernel": 0%
+==WARNING== Backing up device memory in system memory. Kernel replay might be slow. Consider using "--replay-mode application" to avoid memory save-and-restore.
+....50%....100% - 11 passes
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+Fused MoE expert FFN (bf16): M=8192 E=384 topk=6 H=7168 I=3072
+routing=balanced  permuted rows: Pp=49152 (actual=49152)  padding waste=0.0%
+K2 fuse bn128       8.0677 ms    804.94 TFLOPS(useful)  ( 81.4% of bf16 peak)
+K2 nofuse bn128     8.0715 ms    804.56 TFLOPS(useful)  ( 81.4% of bf16 peak)
+K2 fuse bn256       7.2765 ms    892.47 TFLOPS(useful)  ( 90.2% of bf16 peak)
+K2 nofuse bn256     7.2288 ms    898.35 TFLOPS(useful)  ( 90.8% of bf16 peak)
+==PROF== Disconnected from process 157752
+[157752] moe_fused.out@127.0.0.1
+  void down_kernel<128, 256, 64, 4, 1>(const __nv_bfloat16 *, const __nv_bfloat16 *, const int *, const int *, const float *, float *, int, int, int, int) (28, 384, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.83
+    Elapsed Cycles                cycle     12988623
+    Memory Throughput                 %        79.52
+    DRAM Throughput                   %        79.52
+    Duration                         ms         7.11
+    L1/TEX Cache Throughput           %        31.66
+    L2 Cache Throughput               %        88.10
+    SM Active Cycles              cycle  12788929.38
+    Compute (SM) Throughput           %        30.85
+    ----------------------- ----------- ------------
+
+    OPT   Memory is more heavily utilized than Compute: Look at the Memory Workload Analysis section to identify the    
+          DRAM bottleneck. Check memory replay (coalescing) metrics to make sure you're efficiently utilizing the       
+          bytes transferred. Also consider whether it is possible to do more work per memory access (kernel fusion) or  
+          whether there are values you can (re)compute.                                                                 
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %         0.75
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Tbyte/s         2.67
+    Mem Busy                                          %        52.97
+    Max Bandwidth                                     %        79.52
+    L1/TEX Hit Rate                                   %         0.01
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector         4974
+    L2 Hit Rate                                       %        29.76
+    Mem Pipes Busy                                    %        17.67
+    --------------------------------------- ----------- ------------
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        29.46
+    Issued Warp Per Scheduler                        0.29
+    No Eligible                            %        70.54
+    Active Warps Per Scheduler          warp         1.99
+    Eligible Warps Per Scheduler        warp         0.37
+    ---------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 20.48%                                                                                    
+          Every scheduler is capable of issuing one instruction per cycle, but for this workload each scheduler only    
+          issues an instruction every 3.4 cycles. This might leave hardware resources underutilized and may lead to     
+          less optimal performance. Out of the maximum of 16 warps per scheduler, this workload allocates an average    
+          of 1.99 active warps per scheduler, but only an average of 0.37 warps were eligible per cycle. Eligible       
+          warps are the subset of active warps that are ready to issue their next instruction. Every cycle with no      
+          eligible warp results in no instruction being issued and the issue slot remains unused. To increase the       
+          number of eligible warps, avoid possible load imbalances due to highly different execution durations per      
+          warp. Reducing stalls indicated on the Warp State Statistics and Source Counters sections can help, too.      
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            1
+    Block Limit Shared Mem                block            1
+    Block Limit Warps                     block            8
+    Theoretical Active Warps per SM        warp            8
+    Theoretical Occupancy                     %        12.50
+    Achieved Occupancy                        %        12.46
+    Achieved Active Warps Per SM           warp         7.97
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 20.48%                                                                                          
+          The 2.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (12.5%) is limited by the number of required      
+          registers, and the required amount of shared memory.                                                          
+

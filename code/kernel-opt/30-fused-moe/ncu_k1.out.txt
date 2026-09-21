@@ -1,0 +1,104 @@
+==PROF== Connected to process 156005 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/30-fused-moe/moe_fused.out)
+==PROF== Profiling "up_gate_kernel": 0%
+==WARNING== Backing up device memory in system memory. Kernel replay might be slow. Consider using "--replay-mode application" to avoid memory save-and-restore.
+....50%....100% - 11 passes
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+Fused MoE expert FFN (bf16): M=8192 E=384 topk=6 H=7168 I=3072
+routing=balanced  permuted rows: Pp=49152 (actual=49152)  padding waste=0.0%
+K1 fuse            13.1414 ms    494.16 TFLOPS(useful)  ( 50.0% of bf16 peak)
+K1 nofuse          13.4393 ms    483.21 TFLOPS(useful)  ( 48.9% of bf16 peak)
+==PROF== Disconnected from process 156005
+[156005] moe_fused.out@127.0.0.1
+  void up_gate_kernel<128, 64, 3, 1>(const __nv_bfloat16 *, const __nv_bfloat16 *, const int *, const int *, __nv_bfloat16 *, float *, float *, int, int, int, int) (24, 384, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.83
+    Elapsed Cycles                cycle     22288881
+    Memory Throughput                 %        84.47
+    DRAM Throughput                   %        84.47
+    Duration                         ms        12.19
+    L1/TEX Cache Throughput           %        32.38
+    L2 Cache Throughput               %        85.38
+    SM Active Cycles              cycle  22081913.91
+    Compute (SM) Throughput           %        36.60
+    ----------------------- ----------- ------------
+
+    INF   This workload is utilizing greater than 80.0% of the available compute or memory performance of this device.  
+          To further improve performance, work will likely need to be shifted from the most utilized to another unit.   
+          Start by analyzing DRAM in the Memory Workload Analysis section.                                              
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %         0.00
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Tbyte/s         2.83
+    Mem Busy                                          %        55.66
+    Max Bandwidth                                     %        84.47
+    L1/TEX Hit Rate                                   %         3.01
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector     18891015
+    L2 Hit Rate                                       %        23.42
+    Mem Pipes Busy                                    %        20.79
+    --------------------------------------- ----------- ------------
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        35.74
+    Issued Warp Per Scheduler                        0.36
+    No Eligible                            %        64.26
+    Active Warps Per Scheduler          warp         2.00
+    Eligible Warps Per Scheduler        warp         0.50
+    ---------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 15.53%                                                                                    
+          Every scheduler is capable of issuing one instruction per cycle, but for this workload each scheduler only    
+          issues an instruction every 2.8 cycles. This might leave hardware resources underutilized and may lead to     
+          less optimal performance. Out of the maximum of 16 warps per scheduler, this workload allocates an average    
+          of 2.00 active warps per scheduler, but only an average of 0.50 warps were eligible per cycle. Eligible       
+          warps are the subset of active warps that are ready to issue their next instruction. Every cycle with no      
+          eligible warp results in no instruction being issued and the issue slot remains unused. To increase the       
+          number of eligible warps, avoid possible load imbalances due to highly different execution durations per      
+          warp. Reducing stalls indicated on the Warp State Statistics and Source Counters sections can help, too.      
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            1
+    Block Limit Shared Mem                block            1
+    Block Limit Warps                     block            8
+    Theoretical Active Warps per SM        warp            8
+    Theoretical Occupancy                     %        12.50
+    Achieved Occupancy                        %        12.51
+    Achieved Active Warps Per SM           warp         8.01
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 15.53%                                                                                          
+          The 2.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (12.5%) is limited by the number of required      
+          registers, and the required amount of shared memory.                                                          
+
