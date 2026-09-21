@@ -5,6 +5,10 @@
 用户说「继续整理/推进算子优化系列」「CUDA 算子调优」（本仓库的长期自驱任务）。
 本技能把「写代码 → 本地实测 → ncu 剖析 → 写文章 → 发布」串成可重复的循环。
 
+> **无人值守模式**：本技能常被 `code/kernel-opt/scripts/autopilot.sh` 以无头会话反复调用，
+> 每轮只做一篇文章增量。若你是被 autopilot 唤醒的：全程不要请求人工确认（别用 question 类工具），
+> 做完一篇就停，更新 ROADMAP 后本轮即可结束；整个系列完成时 `touch code/kernel-opt/AUTOPILOT_STOP`。
+
 ## 前置条件
 
 - 已读根目录 `agent_guide.md`（目录约定、已知坑）。
