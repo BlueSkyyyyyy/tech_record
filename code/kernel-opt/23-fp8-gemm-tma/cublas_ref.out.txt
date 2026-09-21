@@ -1,0 +1,3 @@
+cublas fp8 per-tensor 4096x3072x7168: 0.1306 ms  1381.25 TFLOPS  (69.8% of 1978)
+cublas fp8 per-row   4096x3072x7168: 0.1341 ms  1345.40 TFLOPS  (68.0% of 1978)
+cublas bf16          4096x3072x7168: 0.2254 ms  800.39 TFLOPS  (80.9% of 989)
