@@ -305,3 +305,24 @@ scripts/lab.sh status
 - **`cudaFuncSetAttribute(MaxDynamicSharedMemorySize)` 上限恰是 232448B**（42 篇）：混合版 MLA
   decode 的 smem = `Q 73728 + 2×K 73728 + P 9216 + red`，多算 1KB 冗余就 `invalid argument`。
   缓冲块数×块大小要逐字节算，`red` 按当前模板参数的真实大小给。
+- **persistent / 跨 item 流水：epilogue 一进热循环，寄存器就爆炸**（43 篇）：把
+  `(item,kb)` 展平成一维 stage 流后，若 epilogue（`atomicAdd`/地址计算）写在 consumer 的
+  flat 循环体内，编译器会把 `acc[64]` + epilogue 状态一起保活并软件流水，寄存器 **90→207**、
+  occupancy 2→1 CTA/SM、慢 40%。改成 **item 外层 / kb 内层**、epilogue 落在内层循环之外即回到
+  90；内层还要 `#pragma unroll 1`（`CHUNK=4` 展开 4 份 wgmma 会 128 regs+272B spill）。
+  **定位法：把 epilogue 整段删掉再 `-Xptxas -v`，寄存器立刻露底（80）。**
+- **`acc[64]` 把 wgmma 融合算子的 occupancy 锁死在 2 CTA/SM**（43 篇）：`(BM/64)(BN/128)·64`
+  个 fp32 累加器 + smem 描述符至少要 ~90 regs，而 3 CTA/SM 的门槛是 `65536/(3×256)=85`。
+  想靠堆 CTA 消 wave quantization 走不通（ptxas `C7602 Insufficient registers`），只能调
+  work-item 粒度。先算 `regs ≈ acc + 26` 再决定。
+- **持久化的 stage 流：`CHUNK ≥ STAGES` 是硬约束**（43 篇）：item 比流水环还短（如 `CHUNK=2`、
+  `STAGES=3`）时 barrier 相位 `t/STAGES` 错乱，实测 **illegal memory access**；`static_assert`
+  钉死。跨 item 的累加器清零用 wgmma 自身 `scale_d=0`（避 `C7514`）。
+- **优化同时改了「并行度」和「每 stage 指令数」时，ncu 单次可能和 event 稳态反号**（43 篇）：
+  持久化把 wave 2.58→1（event 稳态快 2.6%），但每 stage 多两个 `gid/ntiles` 整数除法，
+  ncu 锁频下被放大 → ncu 单次反而显示持久化慢（Compute 47%→51%）。**decode 服务取 event
+  稳态（多 warmup + 多 iters）为发布口径；ncu 用来读机制（waves/occupancy），别单独下快慢结论。**
+- **wave quantization 和 K-split 归约税是一对矛盾**（43 篇）：细 K-chunk 增并行度、消尾波，
+  但每 item 的 `atomicAdd` 归约字节 ∝ `M×N×(N/BN)×(nblk/CHUNK)` 随 `M` 线性涨。交叉点：
+  `M≤16` 持久化+细 chunk 赢（~1.02–1.04×），`M≥32` baseline 粗 chunk 赢。扫参必须跨过
+  「归约流量 ≈ 权重流量」的拐点。
