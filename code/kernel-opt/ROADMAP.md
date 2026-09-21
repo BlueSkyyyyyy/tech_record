@@ -61,7 +61,7 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 
 ### 第四部分：进阶专题
 
-- [ ] **10 ncu 深潜**：occupancy 计算 · warp stall reasons · roofline section · source/sass 对照
+- [x] **10 ncu 深潜**：occupancy 计算 · warp stall reasons · roofline section · source/sass 对照
 - [ ] **11 launch 配置与 occupancy**：寄存器/共享内存限制 · `__launch_bounds__` · 循环展开
 - [ ] **12 异步拷贝与流水线**：`cp.async` / TMA 概念 · producer-consumer 流水线 · 与第 09 篇结合
 - [ ] **13 Tensor Core 入门**：WMMA API / `mma` PTX · m16n8k16 · 写一个能跑的小 TC GEMM
@@ -100,11 +100,11 @@ scripts/ncu.sh 03-measurement/foo.cu --set full --kernel-name regex:foo   # ncu 
 - 2026-09-21：搭建容器 `kernel_lab` 与 `scripts/`、`common/cuda_utils.cuh`，起草路线图。
 - 2026-09-21：完成并发布 **01–08**（… / Softmax / GEMM 入门）。已 push 且线上 200。
 - 2026-09-21：完成并发布 **09 GEMM 进阶**：寄存器分块 8×8 + 交错映射消 bank conflict → 39.2%；float4 向量化 → 45.0%；cp.async 双缓冲 → **51.5%**（34.46 TFLOPS）；同口径 cuBLAS 75.8%（50.73 TFLOPS），达其 ~68%。
+- 2026-09-21：完成并发布 **10 ncu 深潜**：手算 occupancy（`k_occ<2>` = 2 block/25%，与 ncu 一致）；`__launch_bounds__` 强制提 occupancy → spill 1.31 TB local 流量、慢 34×；五类 stall 指纹表；roofline 拐点 AI\*≈20 并澄清 `Memory Throughput` 是缓存层级最大值（`k_latency` 97% 卡 L1、DRAM 仅 0.13%）；source/SASS 依赖链与 STL/LDL 对照。结论：`occ<2>` 25% occupancy 仍达 98.5% Compute / IPC 3.94。
 
 ## 下一步（明确到可执行）
 
-- [ ] 完成 **10 ncu 深潜**：occupancy 计算（第 09 篇占用被寄存器锁在 25%）、warp stall reasons、roofline section、source/sass 对照
-- [ ] 之后接 **11 launch 配置与 occupancy**（`__launch_bounds__` / 循环展开）
+- [ ] 完成 **11 launch 配置与 occupancy**（`__launch_bounds__` / 循环展开 / ILP），回到第 09 篇的 GEMM 做落地
 - [ ] 每完成一篇：更新本文件、README 索引，提交推送
 - [ ] 可选：给 01 的 roofline 画一张 mermaid 图
 

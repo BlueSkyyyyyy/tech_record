@@ -1,0 +1,31 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+================ occupancy：手动计算 vs 运行时 API ================
+k_occ<1>
+  regs=96  local=0    smem=0      | blocks/SM: regs=2  smem=32 blk=32 thr=8  -> 2 (25.0%, limit=registers)
+k_occ<2>
+  regs=96  local=0    smem=0      | blocks/SM: regs=2  smem=32 blk=32 thr=8  -> 2 (25.0%, limit=registers)
+k_occ<4>
+  regs=64  local=56   smem=0      | blocks/SM: regs=4  smem=32 blk=32 thr=8  -> 4 (50.0%, limit=registers)
+k_occ<8>
+  regs=32  local=344  smem=0      | blocks/SM: regs=8  smem=32 blk=32 thr=8  -> 8 (100.0%, limit=registers)
+k_latency
+  regs=32  local=0    smem=0      | blocks/SM: regs=8  smem=32 blk=32 thr=8  -> 8 (100.0%, limit=registers)
+k_stream
+  regs=14  local=0    smem=0      | blocks/SM: regs=16 smem=32 blk=32 thr=8  -> 8 (100.0%, limit=threads)
+k_smem_bar
+  regs=17  local=0    smem=1024   | blocks/SM: regs=10 smem=228 blk=32 thr=8  -> 8 (100.0%, limit=threads)
+
+================ 运行时间 ================
+  occ<1>          10.7527 ms
+  occ<2>          10.7526 ms
+  occ<4>          54.4646 ms
+  occ<8>         367.7544 ms
+  latency          0.9858 ms
+  stream           0.0979 ms    2743.1 GB/s (81.8% peak)
+  smem_bar         2.7930 ms
