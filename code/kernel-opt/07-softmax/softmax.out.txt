@@ -1,0 +1,17 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+rows=4096 cols=8192, matrix 134.2 MB, working set (x+y) 268.4 MB
+
+  [multipass     ] max_abs_err = 4.37e-11 OK
+multipass (3 kernels)          0.2684 ms    1000.3 GB/s  ( 29.8% of peak)
+  [fused         ] max_abs_err = 4.37e-11 OK
+fused (1 block/row)            0.2138 ms    1255.4 GB/s  ( 37.4% of peak)
+  [fused_cache   ] max_abs_err = 4.37e-11 OK
+fused + smem cache             0.0938 ms    2861.0 GB/s  ( 85.3% of peak)
+
+speedup fused/multipass = 1.26x, cache/fused = 2.28x
