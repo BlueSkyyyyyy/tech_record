@@ -9,7 +9,8 @@
 >
 > 实测原始输出：`fa_bwd_bf16_onefile_s512.out.txt`、`..._s4096.out.txt`、
 > `..._ncu_main.out.txt`（ncu `--set full`）、`..._refbench.out.txt`（FA/TE 基线）、
-> `fa_bwd_bf16_{main,onefile}_p53_gqa.out.txt`（P5-3 数值）、`..._p53_ncu_*.out.txt`。
+> `fa_bwd_bf16_{main,onefile}_p53_gqa.out.txt`（P5-3 数值）、`..._p53_ncu_*.out.txt`、
+> `fa_bwd_bf16_{main,onefile}_p53_mla_*.out.txt` 与 `..._p53_ncu_mla_*.out.txt`（P5-3 续：MLA d=512）。
 > 对照：`docs/01-fp16-bwd-impl.md`、`docs/00-fa-bwd-optimization-catalog.md`、`../ROADMAP.md`。
 
 ---
@@ -251,6 +252,78 @@ stall: wait(fixed-latency) 1.74 | short_scoreboard 1.01 | long_scoreboard 0.39 |
 bound 与 bf16 MHA 同：**低 occupancy（1–2 CTA/SM）+ smem 依赖/固定延迟**，非带宽/算力
 （DRAM 0.12%、Compute 30%）。原始输出 `src/bf16/fa_bwd_bf16_main_p53_ncu_gqa_kv4.out.txt`、
 `..._p53_ncu_stall_kv4.out.txt`。
+
+---
+
+## 6d. MLA（head_dim=512，P5-3 续）
+
+**背景**：fp16 已在 P5-2 把 `head_dim` 模板化并支持 MLA 的 `D=Dv=512`（`docs/01` §9）；
+bf16 与 fp16 同源，本轮把同一改造落到 bf16（单/两文件），补齐 P5-3 的 MLA 部分。
+
+**改动**（与 fp16 逐字同构，单/两文件同源）：
+
+- 引入 `template <int HD, int BM> struct BwdTraits`：`WM_ROWS/WN_ROWS/NCH=HD/32`、
+  `KVStride=HD+2`（padding 随 head_dim 走）、`smem_bytes`；删除全局 `kHeadDim=128/BM=64/...`。
+- `preprocess_kernel` 增加运行时 `int HD`（`kHeadDim`→`HD`）。
+- `fa_bwd_bf16_kernel` 改为 `template <HD,BM>`；三处 head-dim 分段循环
+  `kk<4`→`kk<NCH`、`acc[4]`→`acc[NCH]`；K/V 行距 `kKVStride`→`T::KVStride`。
+- host：`launch_bwd_main<HD,BM>` 按 `D` 分派——**`HD=128→BM=64`**（回归）、
+  **`HD=512→BM=16`**（容量所限）。
+
+**为什么 `HD=512` 用 `BM=16`**：`dQs[BM*HD]` 是 fp32、占比最大，`HD=512,BM=64` 时
+`Qs+dOs(half)131072 + Ks+Vs(half,pad)65792 + Ss+Ps(fp32)16384 + dQs(fp32)131072 ≈ 336KB`
+超 smem 上限；`BM=16` 时降到 **135.42KB**（ncu decimal；= 132.25KiB），1 CTA/SM。
+与 fp16 的 `HD=512→BM=16` 一致；bf16 因 padding 比 fp16 多 256B（135.17→135.42KB）。
+
+**数值对拍（ours-vs-ref，bf16 causal，D=Dv=512）**：
+
+| MLA case (B1) | dq max_abs | dk max_abs | dv max_abs |
+|---|---|---|---|
+| (1,256,2,512) | 8.240e-3 | 7.905e-3 | 1.504e-2 |
+| (1,512,4,512) | 1.043e-2 | 1.033e-2 | 1.385e-2 |
+| (1,1024,2,512) | 5.152e-3 | 7.742e-3 | 1.557e-2 |
+
+均为 bf16 噪声量级（~1e-2），与 fp16 MLA（1.3–2.9e-3）同量级放大比例一致；
+FA/TE 反向不支持 head_dim=512（`fa=NA`/`te=NA`），只有 fp32 ref 可对。
+**MHA D=128 回归逐位不变**（S512 6.892/8.110/1.365e-2，与第 4 节一致）。
+单文件与两文件**逐位相同**（同一 `max_abs` 数字，main 时间差 <1% 噪声）。
+
+**性能（CUDA event，ours）**：
+
+| MLA case (B1) | preprocess | main | total | TFLOPS | 峰值占比(989) |
+|---|---|---|---|---|---|
+| (1,256,2,512) | 0.213 ms | 0.748 ms | 0.972 ms | 0.28 | 0.03% |
+| (1,512,4,512) | 1.297 ms | 1.461 ms | 2.872 ms | 0.75 | 0.08% |
+| (1,1024,2,512) | 2.471 ms | 2.905 ms | 5.522 ms | 0.78 | 0.08% |
+
+对比 fp16 MLA 的 main（1.058 / 2.080 / 4.143 ms），bf16 的 main **快 1.4–1.6×**——
+与 MHA 一致，得益于 K/V padding 把 bf16 的 `LDS.U16+SHF` 标量读 bank conflict 消掉。
+
+**ncu（main，S=1024 H2 D=512，`--set full` + stall metrics）**：
+
+```
+Duration                       ms   3.78        <- ncu 重放口径（event 2.91ms）
+DRAM Throughput                %    0.14        <- HBM 几乎空闲
+L2  Cache Throughput           %    2.33
+L1/TEX Cache Throughput        %   26.68
+Compute (SM) Throughput        %   13.07
+Achieved / Theoretical Occupancy % 6.25 / 6.25  <- 135.42KB smem，1 CTA/SM
+Waves Per SM                        0.97
+Registers Per Thread       register  48
+Dynamic Shared Memory      KB/block  135.42
+bank conflicts (ld/st)              5,315 / 8   <- padding 生效，基本无冲突
+stall: long_scoreboard 1.71 | wait(fixed-latency) 1.35 | short_scoreboard 0.25 | barrier 0.02
+```
+
+**bound 结论**：与 MHA/GQA 的 bf16 版不同——fp16 MLA 的 bound 是 **smem bank conflict
+（MIO scoreboard 36%、shared load 76.5% 多余 wavefront）**；bf16 MLA 因为 padding 已在，
+**冲突基本归零**（5.3K / 1.23e8 wavefronts），换成 **long_scoreboard 主导（1.71 / 4.55 ≈ 37.6%）+
+fixed-latency wait 1.35**。即 bound = **全局访存延迟 + 低并行度**（occupancy 6.25%、1 CTA/SM、
+`No Eligible 77.97%`），非带宽/算力（DRAM 0.14%、Compute 13.1%）。与 bf16 MHA 的
+「延迟/并行度受限」定性一致；下一步同样是把 MLA 的 smem 降下来冲 2 CTA/SM、上张量核/流水。
+
+原始输出：`fa_bwd_bf16_main_p53_mla_*.out.txt`、`fa_bwd_bf16_onefile_p53_mla_*.out.txt`、
+`fa_bwd_bf16_main_p53_ncu_mla_s1024h2.out.txt`、`..._p53_ncu_mla_stall_s1024h2.out.txt`。
 
 ---
 

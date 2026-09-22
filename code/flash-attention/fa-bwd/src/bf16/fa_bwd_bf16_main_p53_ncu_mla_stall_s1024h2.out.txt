@@ -1,0 +1,29 @@
+==PROF== Connected to process 454190 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/bf16/fa_bwd_bf16_main.out)
+==PROF== Profiling "fa_bwd_bf16_kernel": 0%....50%....100% - 4 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_bf16
+B=1 S=1024 H=2 Hkv=2 D=512 causal=1 scale=0.044194 dtype=bf16
+[timing] total(3 kernels) 5.5226 ms  0.78 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 2.4723 ms | main 2.9026 ms | convert 0.1477 ms
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=5.152e-03  max_rel=2.289e+00
+  dk   vs ref: max_abs=7.742e-03  max_rel=1.994e+00
+  dv   vs ref: max_abs=1.557e-02  max_rel=1.642e-01
+==PROF== Disconnected from process 454190
+[454190] fa_bwd_bf16_main.out@127.0.0.1
+  void fa_bwd_bf16_kernel<512, 16>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, const float *, float *, float *, float *, int, int, int, float, int) (64, 2, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                      5315
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                                         8
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                     122902723
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_st.sum                                       2869256
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.02
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.71
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            inst            0
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio            inst            0
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.25
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.35
+    ------------------------------------------------------------------------- ----------- ------------
+

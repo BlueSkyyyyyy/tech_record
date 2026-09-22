@@ -410,6 +410,34 @@
     `src/fp8/fa_bwd_fp8_p53_onefile_gqa_mha.out.txt`、`src/fp8/fa_bwd_fp8_main_p53_ncu_gqa_kv4.out.txt`、
     `src/fp8/fa_bwd_bench_requested_fp8_p53.out.txt`；文档 `docs/03-fp8-bwd-impl.md` §13、`docs/04` §7.4。
 
+- 2026-09-22（第十九轮）：**P5-3（bf16 GQA/MQA）完成**。
+  - bf16 反向（单/两文件）加 `Hkv`（映射同 fp16），`dk/dv` 按 `B*S*Hkv*D` 分配。
+  - 对拍（ours-vs-ref，bf16 causal，B1 S1024 D128）：h40kv8 1.011/1.885/3.150e-2；
+    h32kv4 9.631/20.19/30.94e-3；h64kv4 1.319/2.716/3.152e-2；h64kv1 1.066/3.385/5.891e-2，
+    与 FA/TE 同量级、多数更小。MHA 回归逐位不变。
+  - 性能（CUPTI）：ours total 15.5–28.4ms（1.11–1.21 TF）vs FA 155–189 / TE 241–281 TF（峰值 0.11–0.12%）。
+  - 文档 `docs/01b-bf16-bwd-impl.md` §6c、`docs/04` §7.5；原始输出
+    `src/bf16/fa_bwd_bf16_{main,onefile}_p53_gqa.out.txt`、`..._p53_ncu_*.out.txt`。
+
+- 2026-09-22（第二十轮）：**P5-3（bf16 MLA head_dim=512）完成**。
+  - bf16 反向复用 fp16 的 `HD/BM` 模板改造：`BwdTraits<HD,BM>`（`NCH=HD/32`、`KVStride=HD+2`）、
+    `preprocess_kernel` 加运行时 `int HD`、main 改 `template<HD,BM>` 且 `acc[4]`→`acc[NCH]`；
+    host `launch_bwd_main<HD,BM>` 按 `D` 分派——**`128→BM=64`（回归）、`512→BM=16`**（135.42KB smem，1 CTA/SM）。
+    单/两文件同源，device 代码逐字一致。
+  - **对拍（ours-vs-ref，bf16 causal，D=Dv=512）**：S=256H2 8.240/7.905/15.04e-3；
+    S=512H4 10.43/10.33/13.85e-3；S=1024H2 5.152/7.742/15.57e-3——均 bf16 噪声（~1e-2）。
+    FA/TE 反向不支持 head_dim=512（`fa=NA`/`te=NA`）；MHA D=128 回归逐位不变
+    （S512 6.892/8.110/1.365e-2）。单/两文件逐位一致。
+  - 性能（CUDA event）：preprocess/main/total = 0.213/0.748/0.972 ms（S256H2，0.28 TF）、
+    1.297/1.461/2.872（S512H4，0.75 TF）、2.471/2.905/5.522（S1024H2，0.78 TF），峰值占比 0.03–0.08%。
+    bf16 MLA 的 main 比 fp16 MLA 快 1.4–1.6×（padding 消冲突）。
+  - ncu（main, S1024H2）：DRAM 0.14% / L1TEX 26.68% / L2 2.33% / Compute 13.07% /
+    occ 6.25%（135.42KB smem，1 CTA/SM）/ Waves 0.97 / 48 regs / **bank conflicts ~0（padding 生效）** /
+    stall long_scoreboard 1.71 + wait 1.35 ⇒ bound = **全局访存延迟 + 低并行度**（与 fp16 MLA 的
+    smem 冲突不同）；非带宽/算力。
+  - 原始输出 `src/bf16/fa_bwd_bf16_main_p53_mla_*.out.txt`、`..._onefile_p53_mla_*.out.txt`、
+    `..._p53_ncu_mla_{s1024h2,stall_s1024h2}.out.txt`；文档 `docs/01b` §6d、`docs/04` §7.6。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -451,16 +479,22 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       Q 常驻 / 更小 K/V 分块 / 可能需 split-K 或 KV 分片），对拍 3 个 MLA case 的 ref；给出性能数字。
       **已完成（第十七轮）**：`HD` 模板化 + `BM` 随容量选择（128→64 / 512→16），单/两文件；详见
       `docs/01-fp16-bwd-impl.md` §9。
-- [ ] **P5-3**：bf16/fp8 复用同一 `Hkv`/`HD` 改造；fp8 GQA/MQA 对拍 vs TE FP8。
+- [~] **P5-3**：bf16/fp8 复用同一 `Hkv`/`HD` 改造；fp8 GQA/MQA 对拍 vs TE FP8。
+      （bf16 的 `Hkv`+`HD` 均已完成；**剩余 fp8 的 `HD`（MLA head_dim=512）**。）
       （P5-1/P5-2 的 fp16 改造已完成：`Hkv` 入参 + `hkv=h/(H/Hkv)` 映射 + `dk/dv` 按 `B*S*Hkv*D`
       分配、`convert` 收 `n_q/n_kv`；`HD`/`BM` 模板。bf16 可直接照搬，fp8 在已优化的 mma 路径上
       加同一映射与更大 head_dim 的分块。）
-      **进度（第十八/十九轮）**：fp8 的 `Hkv`（GQA/MQA）已完成（单/两文件，`docs/03` §13、`docs/04` §7.4）；
-      **bf16 的 `Hkv`（GQA/MQA）也已完成**（`docs/01b` §6c、`docs/04` §7.5，4 形状对拍与 ref/FA/TE 同量级）。
-      剩余：**fp8/bf16 的 `HD`（MLA head_dim=512）**（fp8 的 mma 路径需按 `BM/BN` 容量重新分块，工作量大）。
+      **进度（第十八/十九/二十轮）**：fp8 的 `Hkv`（GQA/MQA）已完成（单/两文件，`docs/03` §13、`docs/04` §7.4）；
+      **bf16 的 `Hkv`（GQA/MQA）也已完成**（`docs/01b` §6c、`docs/04` §7.5，4 形状对拍与 ref/FA/TE 同量级）；
+      **bf16 的 `HD`（MLA head_dim=512）也已完成（第二十轮）**：`HD/BM` 模板化（`128→64` 回归逐位不变、
+      `512→16`，135.42KB smem），单/两文件，3 个 MLA case 对拍 ref 全部 bf16 噪声（0.5–1.6e-2），
+      main 比 fp16 MLA 快 1.4–1.6×；`docs/01b` §6d、`docs/04` §7.6。
+      剩余：**fp8 的 `HD`（MLA head_dim=512）**（fp8 的 mma 路径需按 `BM/BN` 容量重新分块，工作量大）。
 - [x] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能 —— 第十八轮完成。
-- [ ] **MLA 优化（backlog）**：P5-2 已给出 fp16 的 ref 对拍与 ours 性能数字；下一步是**优化**——
-      把 MLA smem 降下来冲 2 CTA/SM、张量核版本，对标 FlashMLA 的分块/流水。
+- [ ] **MLA 优化（backlog）**：fp16（P5-2）与 bf16（第二十轮）已给出 MLA 的 ref 对拍与 ours 性能
+       数字，且两者都是 1 CTA/SM（~135KB smem）；下一步是**优化**——把 MLA smem 降下来冲 2 CTA/SM、
+       张量核版本，对标 FlashMLA 的分块/流水。（bf16 MLA 已把 bank conflict 消掉，ncu bound 变为
+       long_scoreboard + 低并行度，正是 occupancy 问题。）
 > 以下为既有 fp8 优化 backlog（可与 P5 并行/穿插）。
 
 > P4-2 完成后，ROADMAP 里的「P 项」已全部收口，后续为**优化 backlog**（按回报排序）。
