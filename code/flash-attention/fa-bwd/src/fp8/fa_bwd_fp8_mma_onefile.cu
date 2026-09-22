@@ -70,16 +70,19 @@ static constexpr int LBN = 64;
 static constexpr int kLseSmemBytes = LBM * ASLD + LBN * ASLD + (LBM + LBN) * (int)sizeof(float);
 
 // 动态 smem 布局
+// O2：把两个 per-tile 小缓冲折叠进「本 tile 内已死亡」的 Ks/Vs 空间：
+//   * dS3（[BN][QTS]=2560B）放进 Ks（[BN][ASLD]=4608B）——Ks 只在 GEMM1 用，GEMM1 后被 sync 隔开；
+//   * Ap （[BN][QTS]=2560B）放进 Vs（[BN][ASLD]=4608B）——Vs 只在 GEMM2 用，GEMM2 后被 sync 隔开。
+// GEMM3/4/5 只读 Ap/dS3，写它们的 fold 阶段在所有读者之后、且与 Vs/Ks 不冲突，故不会竞争。
+// P/dS 的 fp32 [BM][BN] 仍各占一块（两者在 fold 阶段同时被 Ap 与 dS2/dS3 读取，不能合并）。
 static constexpr int kFp8Bytes = BM * ASLD            // Qs
-                              + BN * ASLD            // Ks
-                              + BN * ASLD            // Vs
+                              + BN * ASLD            // Ks（dS3 复用尾部）
+                              + BN * ASLD            // Vs（Ap 复用尾部）
                               + BM * ASLD            // dOs
                               + kHeadDim * KTS       // Kt
                               + kHeadDim * QTS       // Qt
                               + kHeadDim * QTS       // dOt
-                              + BN * QTS             // Ap
-                              + BM * DSS2            // dS2
-                              + BN * QTS;            // dS3
+                              + BM * DSS2;           // dS2
 static constexpr int kNScale = 3 * BM + 4 * BN;       // qs,dos,sds2 (BM) + ks,vs,sA,sds3 (BN)
 static constexpr int kSmemBytes =
     kFp8Bytes + (kNScale + 2 * BM * BN) * (int)sizeof(float);
@@ -365,10 +368,10 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   unsigned char* Kt  = dOs + BM * ASLD;
   unsigned char* Qt  = Kt + kHeadDim * KTS;
   unsigned char* dOt = Qt + kHeadDim * QTS;
-  unsigned char* Ap  = dOt + kHeadDim * QTS;
-  unsigned char* dS2 = Ap + BN * QTS;
-  unsigned char* dS3 = dS2 + BM * DSS2;
-  float* scales = reinterpret_cast<float*>(dS3 + BN * QTS);
+  unsigned char* dS2 = dOt + kHeadDim * QTS;
+  unsigned char* Ap  = Vs;                   // O2：复用 GEMM2 后死亡的 Vs
+  unsigned char* dS3 = Ks;                   // O2：复用 GEMM1 后死亡的 Ks
+  float* scales = reinterpret_cast<float*>(smem + kFp8Bytes);
   float* Ps = scales + kNScale;              // P fp32 [BM][BN]
   float* Ss = Ps + BM * BN;                  // dS fp32 [BM][BN]
   float* qs_s = scales;

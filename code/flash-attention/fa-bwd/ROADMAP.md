@@ -259,12 +259,25 @@
     long_scoreboard 主导 ⇒ **bound = 延迟/并行度 + 尾波**。S=512 时 grid=128<132 SM、Waves 0.14。
   - 原始输出 `src/fp8/fa_bwd_fp8_main_o1_{s512,s1024h32,s4096}.out.txt`、
     `..._mma_onefile_o1_s512.out.txt`、`..._o1_ncu_{lse_s512,lse_s4096,delta_s4096}.out.txt`、
-    `..._o1_tebench.out.txt`。文档 `docs/03-fp8-bwd-impl.md` §9。
+     `..._o1_tebench.out.txt`。文档 `docs/03-fp8-bwd-impl.md` §9。
+
+- 2026-09-22（第十二轮）：**O2 完成（fp8 main 降 smem 提 occupancy，3 CTA/SM）**。
+  - 发现 per-tile 的 `dS3`（GEMM4 的 A）与 `Ap`（GEMM3 的 A）各只活一小段：`dS3` 可放进
+    `Ks`（只用于 GEMM1）、`Ap` 可放进 `Vs`（只用于 GEMM2），两处写入都在对应 GEMM 之后的
+    sync 之后，天然无竞争。smem 80.13→**75.01 KB**；驱动自动选 233.47 KB carveout。
+  - ncu（main, S=4096）：Block Limit Shared Mem 2→**3**、theoretical occ 12.5%→**18.75%**、
+    achieved 11.8%→16.85%、active warps/sched 1.91→2.69、No Eligible 82.83%→79.64%、
+    Duration 10.27→**8.85 ms**；Waves 3.88→2.59（尾波 233/396）。
+  - 性能：main S=1024H32 1.814→**1.526 ms（1.19×）**、S=4096 9.924→**8.562 ms（1.16×）**、
+    S=512 0.451→0.461 ms（**不变**，grid=128<132 SM 是 grid-bound）；total 11.47→**10.07 ms**。
+    数值与 P3-5/O1 逐位相同；单文件 `fa_bwd_fp8_mma_onefile.cu` 与两文件同步。
+  - 原始输出 `src/fp8/fa_bwd_fp8_main_o2_{s512,s1024h32,s4096,ncu_main_s512,ncu_main_s4096,tebench}.out.txt`、
+    `src/fp8/fa_bwd_fp8_mma_onefile_o2_{s512,s1024h32,s4096}.out.txt`；文档 `docs/03-fp8-bwd-impl.md` §10。
 
 ## 下一步（明确到可执行）
 
 > P4-2 完成后，ROADMAP 里的「P 项」已全部收口，后续为**优化 backlog**（按回报排序）。
-> **O1 已完成（第十一轮）**，下一项从 **O2（fp8 main 提 occupancy）** 起做。
+> **O1/O2 已完成**，下一项从 **O3（fp8 main 加流水）** 起做，或先做小 S 的 grid / 尾波。
 > 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
 
 - [x] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms。
@@ -275,12 +288,19 @@
       数值与 P3-5 逐位相同。ncu（lse, S=4096）：DRAM 0.46% / Compute 39.4% / L1TEX 20.6% /
       occ 29.5%（理论 43.8%，被 72 regs 卡）/ Waves 1.11（尾波）→ bound = 延迟/并行度 + 尾波。
       端到端瓶颈回落 main。详见 `docs/03-fp8-bwd-impl.md` §9。
-- [ ] **O2（fp8 main 提 occupancy；现为端到端第一瓶颈）**：当前 128 regs / 80KB smem / 1 CTA/SM、
-      Waves 0.48、No Eligible 91.7%。降 smem（复用 Kt/dOt 与 dV 的 A/B 缓冲）或降寄存器，
-      目标 ≥2 CTA/SM；先算寄存器账（`65536/线程数`）再调，避免 spill。
-      （O1 后 main 占端到端 87%，是下一项优先。）
+- [x] **O2（fp8 main 提 occupancy）**：**已完成（第十二轮）**。把 `dS3`/`Ap` 两个 per-tile 小缓冲
+      折叠进「本 tile 内已死亡」的 `Ks`/`Vs` 尾部（`Ks` 只用于 GEMM1、`Vs` 只用于 GEMM2，各有 sync 隔开）。
+      smem 80.13→**75.01 KB**，驱动自动选 233.47 KB carveout，Block Limit Shared Mem 2→**3**：
+      theoretical occupancy 12.5%→**18.75%**、achieved 11.8%→16.85%、active warps/sched 1.91→2.69、
+      ncu Duration 10.27→**8.85 ms**。main：S=1024H32 1.814→**1.526 ms（1.19×）**、
+      S=4096 9.924→**8.562 ms（1.16×）**；S=512 不变（grid=128<132 SM，grid-bound）。
+      数值与 P3-5/O1 逐位相同；单文件与两文件同步。详见 `docs/03-fp8-bwd-impl.md` §10。
 - [ ] **O3（fp8 main 加流水）**：K/V（及 Q/dO）用 `cp.async` 双缓冲，把「同步载入→算」改成
-      重叠流水；配合 O2 一起做，ncu 验证 `long_scoreboard` 下降。
+      重叠流水；O2 后仍是 `No Eligible 79.6%`（`long_scoreboard`+`barrier` 主导），验证
+      `long_scoreboard` 下降。可顺带做 **O2b**：小 S 的 grid 太小（S=512 grid=128<132 SM）
+      与 3 CTA 下的尾波（waves 2.59，partial 233/396）——考虑小 S 用 BM=32 或 N 方向切块。
+- [ ] **O2c（fp8 main → 4 CTA/SM）**：需再砍 ~17 KB smem，等价于消除 `Kt/Qt/dOt` 三个转置副本
+      （fp8 的 `ldmatrix.trans` 因为「2 字节=1 b16」的配对转置，布局不是 drop-in，需最小复现验证）。
 - [ ] **O4（确定性与归约）**：dK/dV 的 `atomicAdd` 换 `dK/dV_accum` 分块缓冲 + convert
       （对齐 FA2 做法），顺带消 atomic 竞争、便于 deterministic 口径。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
