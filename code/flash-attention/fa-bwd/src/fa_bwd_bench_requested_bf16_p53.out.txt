@@ -1,0 +1,10 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== bench CUPTI device time (dtype=bf16) ===
+[b1_s1024_h40_d128_kv8_causal_bf16] fa=0.2618ms/164.05TF  te=0.1687ms/254.56TF
+[b1_s1024_h32_d128_kv4_causal_bf16] fa=0.2211ms/155.40TF  te=0.1427ms/240.73TF
+[b1_s1024_h64_d128_kv4_causal_bf16] fa=0.3654ms/188.07TF  te=0.2448ms/280.76TF
+[b1_s1024_h64_d128_kv1_causal_bf16] fa=0.3627ms/189.49TF  te=0.2655ms/258.79TF
+[b1_s256_h2_d512_causal_bf16] fa=NA(FlashAttention forward only supports hea)  te=NA(/workspace/TransformerEngine/transformer)
+[b1_s512_h4_d512_causal_bf16] fa=NA(FlashAttention forward only supports hea)  te=NA(/workspace/TransformerEngine/transformer)
+[b1_s1024_h2_d512_causal_bf16] fa=NA(FlashAttention forward only supports hea)  te=NA(/workspace/TransformerEngine/transformer)
