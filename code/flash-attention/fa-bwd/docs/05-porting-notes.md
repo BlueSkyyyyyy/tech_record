@@ -178,8 +178,9 @@ smem 布局按 dtype 不同，是移植最易踩坑处：
 
 ## 5. 当前实现与目标卡的已知差距（移植前先读）
 
-- **`kHeadDim=128` 是编译期常量**，preprocess/main 都假设 `D=128`；`main.cu` 会显式拒绝
-  其他 dim（`D != kHeadDim` 报错）。要支持 FA2 的多 hdim（64/96/128/192/256）需模板化。
+- **head_dim 已部分模板化**：fp16/bf16 用 `BwdTraits<HD,BM>`，fp8 用 `Fp8Cfg<HD,BM,BN>`，
+  现支持 `D=128`（MHA/GQA）与 `D=512`（MLA）；`main.cu` 对不支持的 D 报错。要覆盖 FA2 的
+  64/96/192/256 需再补对应 `BM/BN` 与 `Fp8Cfg` 实例（fp8 的 `GEMM3/4/5` 还要求 `HD%128==0`）。
 - **无 `cp.async` / TMA 流水**：main kernel 是「同步载入→算→同步」的朴素循环，
   Waves<0.5、1 CTA/SM，属**延迟受限**；目标卡若延迟更高，会更慢，需先补流水。
 - **非确定性**：dK/dV 用 `atomicAdd` 跨 Q 块累加。要确定性需换 `dQ_accum` 分块缓冲 +

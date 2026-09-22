@@ -5,6 +5,9 @@
 // `fa_bwd_fp8_kernels.cuh`，本文件只保留 host 侧：npy 读取 / launcher / 自测对拍。
 // 行为与单文件版**逐指标一致**（kernel 代码逐字未改）。
 //
+// P5-3：按 head_dim 分派模板实例。HD=128 用 (BM=64,BN=32)（MHA/GQA，逐位回归）；
+// HD=512 用 (BM=64,BN=32)（MLA 主注意力，smem ~213KB，1 CTA/SM）。
+//
 // 用法：run.sh src/fp8/fa_bwd_fp8_main.cu [--dir=...] [--full|--causal] [--o=...] [--iters=N]
 // =============================================================================
 
@@ -104,6 +107,38 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 }
 
 // =============================================================================
+// 模板 launcher：按 HD 选择实例并设置动态 smem 上限。
+// =============================================================================
+template <int HD, int BM, int BN>
+static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
+                            const unsigned char* k8, const float* ks,
+                            const unsigned char* v8, const float* vs,
+                            const unsigned char* do8, const float* dos,
+                            const float* delta, const float* lse, float* dq_acc,
+                            float* dk_acc, float* dv_acc, int S, int H, int Hkv,
+                            float scale, int causal, int ksplit) {
+  using Cfg = Fp8Cfg<HD, BM, BN>;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                  Cfg::smem_bytes));
+  fa_bwd_fp8_mma_kernel<HD, BM, BN><<<mg, THREADS, Cfg::smem_bytes>>>(
+      q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
+      scale, causal, ksplit);
+}
+
+template <int HD>
+static void launch_lse(dim3 lg, const unsigned char* q8, const float* qs,
+                       const unsigned char* k8, const float* ks, float* lse, int S, int H,
+                       int Hkv, float scale, int causal) {
+  using Cfg = Fp8Cfg<HD, 64, 32>;
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<HD>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                  Cfg::lse_smem_bytes));
+  lse_mma_kernel<HD><<<lg, THREADS, Cfg::lse_smem_bytes>>>(q8, qs, k8, ks, lse, S, H, Hkv,
+                                                           scale, causal);
+}
+
+// =============================================================================
 // host / launcher / self-test
 // =============================================================================
 int main(int argc, char** argv) {
@@ -143,12 +178,12 @@ int main(int argc, char** argv) {
   const int B = (int)q_np.shape[0], S = (int)q_np.shape[1];
   const int H = (int)q_np.shape[2], D = (int)q_np.shape[3];
   const int Hkv = (int)k_np.shape[2];   // P5-3：GQA/MQA 的 KV 头数（MHA 时 Hkv==H）
-  if (D != kHeadDim) {
-    fprintf(stderr, "本版本仅支持 head_dim=%d（当前 %d）\n", kHeadDim, D);
+  if (D != 128 && D != 512) {
+    fprintf(stderr, "本版本支持 head_dim=128（MHA/GQA）或 512（MLA）；当前 %d\n", D);
     return 1;
   }
   if ((int)v_np.shape[2] != Hkv || (int)v_np.shape[3] != D) {
-    fprintf(stderr, "k/v 形状不一致\n");
+    fprintf(stderr, "k/v 形状不一致（不支持 Dv!=D）\n");
     return 1;
   }
   if (H % Hkv != 0) {
@@ -161,12 +196,18 @@ int main(int argc, char** argv) {
   const size_t rows_kv = (size_t)B * S * Hkv;
   const float scale = 1.0f / sqrtf((float)D);
 
+  // 主 kernel tile 固定 BM=64,BN=32；smem 随 HD 变化。
+  const int smem_bytes = (D == 128) ? Fp8Cfg<128, 64, 32>::smem_bytes
+                                    : Fp8Cfg<512, 64, 32>::smem_bytes;
+  const int lse_smem = (D == 128) ? Fp8Cfg<128, 64, 32>::lse_smem_bytes
+                                  : Fp8Cfg<512, 64, 32>::lse_smem_bytes;
+
   printf("case = %s\n", dir.c_str());
   printf("B=%d S=%d H=%d Hkv=%d D=%d causal=%d scale=%.6f\n", B, S, H, Hkv, D, (int)causal,
          scale);
   printf("FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32\n");
-  printf("smem = %d bytes (%.1f KB); lse smem = %d bytes (%.1f KB)\n", kSmemBytes,
-         kSmemBytes / 1024.0, kLseSmemBytes, kLseSmemBytes / 1024.0);
+  printf("smem = %d bytes (%.1f KB); lse smem = %d bytes (%.1f KB)\n", smem_bytes,
+         smem_bytes / 1024.0, lse_smem, lse_smem / 1024.0);
 
   float *d_q_f, *d_k_f, *d_v_f, *d_do_f, *d_o_f;
   unsigned char *d_q8, *d_k8, *d_v8, *d_do8;
@@ -201,18 +242,15 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemcpy(d_o_f, o_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
 
   auto quant = [&]() {
-    quantize_row_kernel<<<(int)rows_q, 128>>>(d_q_f, d_q8, d_qs, kHeadDim, 0);
-    quantize_row_kernel<<<(int)rows_kv, 128>>>(d_k_f, d_k8, d_ks, kHeadDim, 0);
-    quantize_row_kernel<<<(int)rows_kv, 128>>>(d_v_f, d_v8, d_vs, kHeadDim, 0);
-    quantize_row_kernel<<<(int)rows_q, 128>>>(d_do_f, d_do8, d_dos, kHeadDim, 1);
+    quantize_row_kernel<<<(int)rows_q, 128>>>(d_q_f, d_q8, d_qs, D, 0);
+    quantize_row_kernel<<<(int)rows_kv, 128>>>(d_k_f, d_k8, d_ks, D, 0);
+    quantize_row_kernel<<<(int)rows_kv, 128>>>(d_v_f, d_v8, d_vs, D, 0);
+    quantize_row_kernel<<<(int)rows_q, 128>>>(d_do_f, d_do8, d_dos, D, 1);
   };
 
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel,
-                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes));
-  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel,
-                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBytes));
   // ---- O2b：自动选择 N 方向切块数。base = 未切块时的 CTA 数；目标是让 grid 至少铺满
   //      一个波（132 SM × 3 CTA/SM ≈ 396 个并发槽），小 S 时把空转的 SM 用起来。----
+  constexpr int BM = 64;
   const long base_grid = (long)((S + BM - 1) / BM) * H * B;
   if (ksplit < 1) {
     const long wave_slots = 132L * 3L;
@@ -230,9 +268,24 @@ int main(int argc, char** argv) {
   const int cvt_blocks = (int)std::min<size_t>((nq + cvt_threads - 1) / cvt_threads, 65535);
 
   auto run_preprocess = [&]() {
-    lse_mma_kernel<<<lg, THREADS, kLseSmemBytes>>>(d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv,
-                                                   scale, (int)causal);
-    delta_kernel<<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+    if (D == 128) {
+      launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
+      delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+    } else {
+      launch_lse<512>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
+      delta_kernel<512><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+    }
+  };
+
+  auto run_main = [&]() {
+    if (D == 128)
+      launch_bwd_main<128, 64, 32>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
+                                   d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                   scale, (int)causal, ksplit);
+    else
+      launch_bwd_main<512, 64, 32>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
+                                   d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                   scale, (int)causal, ksplit);
   };
 
   auto run_all = [&]() {
@@ -241,9 +294,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
     run_preprocess();
-    fa_bwd_fp8_mma_kernel<<<mg, THREADS, kSmemBytes>>>(
-        d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+    run_main();
     convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
                                                 d_dv, nq, nkv);
   };
@@ -285,10 +336,7 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
   CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
   CUDA_CHECK(cudaEventRecord(ev0));
-  for (int i = 0; i < iters; ++i)
-    fa_bwd_fp8_mma_kernel<<<mg, THREADS, kSmemBytes>>>(
-        d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+  for (int i = 0; i < iters; ++i) run_main();
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
   float ms_main = 0.f;
@@ -311,6 +359,23 @@ int main(int argc, char** argv) {
   print_cmp("dq", mdq, rdq.data);
   print_cmp("dk", mdk, rdk.data);
   print_cmp("dv", mdv, rdv.data);
+  // P5-3 调试：head_dim>128 时按每 128 维一段给 max_abs，验证 GEMM3/4/5 的 N-tile
+  // 循环每一段都正确（若某段漏算/错位，该段误差会 O(1) 明显大于其它段）。
+  if (D > 128) {
+    auto print_band = [&](const char* name, const std::vector<float>& mine,
+                          const std::vector<float>& ref) {
+      for (int bnd = 0; bnd < D / 128; ++bnd) {
+        double mx = 0.0;
+        for (size_t i = 0; i < mine.size(); ++i)
+          if ((int)(i % (size_t)D) / 128 == bnd)
+            mx = std::max(mx, std::fabs((double)mine[i] - (double)ref[i]));
+        printf("    %s[d %3d..%3d] max_abs=%.3e\n", name, bnd * 128, bnd * 128 + 127, mx);
+      }
+    };
+    print_band("dq", mdq, rdq.data);
+    print_band("dk", mdk, rdk.data);
+    print_band("dv", mdv, rdv.data);
+  }
 
   auto cmp_to = [&](const char* name, const std::vector<float>& mine, const char* fname) {
     std::ifstream test(dir + "/" + fname + ".npy");

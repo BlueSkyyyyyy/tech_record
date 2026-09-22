@@ -359,3 +359,23 @@ ncu（main, S=1024 H2）：DRAM 0.14% / L1/TEX 26.68% / Compute 13.07% / occ 6.2
 1 CTA/SM）/ Waves 0.97 / 48 regs / **bank conflicts ~0（padding 生效）** /
 stall `long_scoreboard 1.71` + `wait 1.35` ⇒ bound = 全局访存延迟 + 低并行度（与 fp16 MLA 的
 「smem 冲突」不同，因为 padding 已消冲突）。详见 `docs/01b` §6d。
+
+### 7.7 ours 的 fp8 MLA（head_dim=512，P5-3 收口）
+
+fp8 反向（单/两文件）也复用了同一 `HD` 模板化：`Fp8Cfg<HD,BM,BN>` 参数化全部常量，
+`GEMM1/2` 的归约维随 `HD` 加长 k-loop，`GEMM3/4/5`（输出 N 维=HD）加一层 **N-tile 循环**
+（每 128 维一遍，共 `HD/128=4` 遍），`kVU` 预取在 HD>128 时关闭改走直接向量化读。
+FA/TE 反向均不支持 head_dim=512，只有 fp32 ref 与 ours：
+
+| MLA case (B1, D=Dv=512, causal, fp8) | ours-vs-ref dq/dk/dv max_abs | ours preprocess/main/total | total TFLOPS | 峰值占比 |
+|---|---|---|---|---|
+| (1,256,2,512) | 2.356e-1 / 2.290e-1 / 3.441e-1 | 0.107 / 0.162 / 0.308 ms | 0.87 | 0.044% |
+| (1,512,4,512) | 2.415e-1 / 2.992e-1 / 4.481e-1 | 0.196 / 0.318 / 0.591 ms | 3.64 | 0.18% |
+| (1,1024,2,512) | 2.232e-1 / 3.337e-1 / 3.602e-1 | 0.371 / 0.564 / 1.022 ms | 4.20 | 0.21% |
+
+误差与 MHA fp8 同量级（`~2.4–4.5e-1`），按 head_dim 每 128 维分段的 max_abs 均匀（N-tile 四段
+都正确）；MHA d128 回归逐位不变（`2.426/2.975/3.735e-1`）。fp8 张量核 MLA 的 main 比 fp16/bf16
+标量 MLA 快 **6.5–7.3×**。ncu（S=1024H2）：DRAM 1.98% / L1TEX 26.28% / Compute 5.13% /
+255 regs + spill / **223.2KB smem → 1 CTA/SM、occ 6.25%** / Waves 0.97 / No Eligible 90.7%
+⇒ bound = **低 occupancy/并行度**（要冲 2 CTA/SM 需先消 `Kt/Qt/dOt` 三个转置副本，即 O4b）。
+详见 `docs/03` §14。

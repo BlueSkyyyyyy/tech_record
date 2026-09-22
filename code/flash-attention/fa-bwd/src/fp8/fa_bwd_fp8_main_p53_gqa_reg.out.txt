@@ -1,0 +1,22 @@
+########## b1_s1024_h32_d128_kv4_causal_fp8
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp8
+smem = 75008 bytes (73.2 KB); lse smem = 18944 bytes (18.5 KB)
+[timing] total(quant+pre+main+cvt) 1.3748 ms  12.50 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0625 ms | preprocess 0.1964 ms | main 1.0649 ms | convert 0.0510 ms
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.994e+02
+  dk   vs ref: max_abs=5.408e-01  max_rel=1.632e+02
+  dv   vs ref: max_abs=7.072e-01  max_rel=9.226e+01
+  dq   vs te_dq: max_abs=5.050e-01  max_rel=1.879e+02
+  dk   vs te_dk: max_abs=9.572e-01  max_rel=2.488e+02
+  dv   vs te_dv: max_abs=1.432e+00  max_rel=1.645e+02
+########## b1_s1024_h64_d128_kv1_causal_fp8
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp8
+smem = 75008 bytes (73.2 KB); lse smem = 18944 bytes (18.5 KB)
+[timing] total(quant+pre+main+cvt) 2.2824 ms  15.05 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0993 ms | preprocess 0.3384 ms | main 1.7802 ms | convert 0.0645 ms
+  dq   vs ref: max_abs=4.097e-01  max_rel=1.536e+02
+  dk   vs ref: max_abs=1.519e+00  max_rel=2.333e+02
+  dv   vs ref: max_abs=2.127e+00  max_rel=2.814e+02
+  dq   vs te_dq: max_abs=5.473e-01  max_rel=1.237e+02
+  dk   vs te_dk: max_abs=2.699e+00  max_rel=3.613e+02
+  dv   vs te_dv: max_abs=3.385e+00  max_rel=2.641e+02

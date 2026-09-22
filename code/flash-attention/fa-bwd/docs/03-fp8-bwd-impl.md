@@ -806,3 +806,101 @@ docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python \
 原始输出：`src/fp8/fa_bwd_fp8_main_p53_{mha_s512,gqa}.out.txt`、
 `src/fp8/fa_bwd_fp8_p53_onefile_gqa_mha.out.txt`、`src/fp8/fa_bwd_fp8_main_p53_ncu_gqa_kv4.out.txt`、
 `src/fp8/fa_bwd_bench_requested_fp8_p53.out.txt`。
+
+## 14. P5-3（fp8 反向支持 MLA head_dim=512，单/两文件）
+
+### 14.1 目标与难点
+
+把 fp8 反向从 head_dim=128 扩到 **MLA 主注意力的 head_dim=512**（`D=Dv=512`）。
+这是 fp8 版相对 fp16/bf16 版**最难**的一处，因为 fp8 主 kernel 的 5 个 GEMM 全部是手写
+`mma.m16n8k32` + `ldmatrix`，原实现的 warp/tile 几何把 `HD=128` 硬编码进了两处：
+
+1. **GEMM1（S=QKᵀ）与 GEMM2（dP=dO·Vᵀ）**：`HD` 是**归约维**（K_TILE=HD）。原 k-loop
+   只有 4 步（128/32）；HD=512 时要 16 步，且 A 行距 `ASLD` 从 144 变 528。
+2. **GEMM3/4/5（dV/dK/dQ）**：`HD` 是**输出 N 维**（dOᵀ/Qᵀ/Kᵀ 的行）。原实现「2 warp ×
+   每 warp 64 列 = 128 列」刚好铺满 HD=128；HD=512 时必须再加一层 **N-tile 循环**
+   （每遍 128 列，共 `HD/128=4` 遍），B 操作数按 `d0*stride` 偏移、写回列号加 `d0`。
+   这一层若写错，会表现为「某个 128 维段全错」，故 §14.4 专门按段核对。
+
+另两处小改动：`quantize_row_kernel` 原来假设 `D<=128`（每线程一个元素），改成线程内
+grid-stride 的 amax/量化（`D<=128` 时逐位不变）；`O3` 的寄存器预取每线程要
+`KVU=BN*HD/4/THREADS` 个 uint32，HD=512 时 `KVU=32`（64 个寄存器）会挤爆寄存器，
+故只在 `KVU*2<=16`（HD=128）时启用，HD>128 走 `kv_load_direct` 的 4B 向量化直接载入。
+
+### 14.2 实现（`HD/BM/BN` 全模板化，单/两文件同源逐字一致）
+
+- 新增 `template<int HD,int BM_,int BN_> struct Fp8Cfg`：把 `ASLD/KTS/QTS/DSS2/KVU/
+  kNScale/smem_bytes/lse_smem_bytes/use_prefetch` 全部从全局常量改成派生常量。
+- `lse_mma_kernel<HD>` / `delta_kernel<HD>` / `fa_bwd_fp8_mma_kernel<HD,BM,BN>` 全部模板化；
+  `mma_block` 的 k-loop 由 `#pragma unroll` 改为 `#pragma unroll 4`（HD=128 时仍全展开、
+  逐位不变；HD=512 的 16 步限展开以压寄存器）。
+- `HD=512` 选 `BM=64,BN=32`：动态 smem = **228608 B（223.2 KB）**，`cudaFuncSetAttribute`
+  上限 232448 B 刚好放得下；**1 CTA/SM**。`lse` smem = 68096 B（66.5 KB）。
+- host 按 `D` 分派模板实例（`128→<128,64,32>`、`512→<512,64,32>`）并分别设动态 smem 上限。
+- 单文件版 `fa_bwd_fp8_mma_onefile.cu` 由两文件版 device 代码拼接生成，`device 代码逐字一致`。
+
+### 14.3 数值对拍（max_abs，causal，B=1；MLA 无 FA/TE 基线，只对 fp32 ref）
+
+| case | ours dq | ours dk | ours dv | smem | pre/main/total |
+|---|---|---|---|---|---|
+| S=256 H2 D512 | 2.356e-01 | 2.290e-01 | 3.441e-01 | 223.2 KB | 0.107 / 0.162 / 0.308 ms |
+| S=512 H4 D512 | 2.415e-01 | 2.992e-01 | 4.481e-01 | 223.2 KB | 0.196 / 0.318 / 0.591 ms |
+| S=1024 H2 D512 | 2.232e-01 | 3.337e-01 | 3.602e-01 | 223.2 KB | 0.371 / 0.564 / 1.022 ms |
+
+误差与 MHA fp8（§7/§13，`~2.4–4.5e-1`）**同量级**，无系统误差。**按 head_dim 每 128 维
+分段的 max_abs** 均匀（S=1024H2：dq 四段 1.80/1.42/1.63/2.23e-1、dk 2.84/3.34/2.27/2.71e-1、
+dv 2.47/2.42/3.60/2.73e-1），证明 **N-tile 循环四段都正确**（若某段漏算/错位会是 O(1)）。
+
+**MHA d128 回归逐位不变**：S=512 `2.426/2.975/3.735e-1`、main `0.1648 ms`（与 §7/§8/§13 一致）。
+单文件与两文件**逐位相同**（S=1024H2 MLA 2.232/3.337/3.602e-1；d128 S512 2.426/2.975/3.735e-1）。
+
+### 14.4 性能（event 纯 device，bwd FLOPs=4·B·S·H·S·D，FP8 峰值 1978.8 TFLOPS）
+
+| case | main | main TFLOPS | main 峰值占比 | total | total TFLOPS |
+|---|---|---|---|---|---|
+| S=256 H2 D512 | 0.162 ms | 1.66 | 0.08% | 0.308 ms | 0.87 |
+| S=512 H4 D512 | 0.318 ms | 6.75 | 0.34% | 0.591 ms | 3.64 |
+| S=1024 H2 D512 | 0.564 ms | 7.61 | 0.38% | 1.022 ms | 4.20 |
+
+对照：fp16/bf16 的 MLA（标量 CUDA-core，§01/§01b）main 为 1.06/2.08/4.14 ms（S256H2/S512H4/
+S1024H2），即 **fp8 张量核版比 fp16 标量版快 6.5×/6.5×/7.3×**。FA2/TE 反向均不支持
+head_dim=512，MLA 反向性能数字只能由 ours 提供。
+
+### 14.5 ncu（main，S=1024 H2 D512，`--set full -c 1`）
+
+- Duration **626.8 µs**；DRAM **1.98%** / L2 22.85% / L1TEX **26.28%** / Compute **5.13%**
+  ⇒ 非带宽、非算力。
+- 255 regs/thread，`Local Memory Spilling 137 KB`、`Shared Memory Spilling 122 KB`（寄存器墙）；
+  smem **228608 B** → `Block Limit Shared Mem=1`；Theoretical/Achieved Occ **6.25%**（1 CTA/SM，
+  4 warp/SM）；**Waves 0.97**；**No Eligible 90.73%**。
+- `#pragma unroll 4`（相比全展开）：Duration 676.6→626.8 µs，local spill 154→137 KB。
+- **bound = 低 occupancy / 并行度不足**（1 CTA/SM 被 223 KB smem 锁死 + 255 寄存器的
+  fixed-latency 空等），与 fp16 MLA 标量版「smem 冲突 + 低 occupancy」的结论衔接，但 fp8 版
+  已把冲突消掉、瓶颈纯在 occupancy。**要冲 2 CTA/SM 必须先把 smem 降到 ≤116 KB**——
+  大头是三个转置副本 `Kt/Qt/dOt`（HD×(BN+16)+2·HD×(BM+16) ≈ 107 KB），正是 backlog **O4b**
+  （fp8 `ldmatrix.trans` 消转置副本）的用武之地。
+
+### 14.6 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+# 两文件版（MLA）：3 个 shape
+for c in b1_s256_h2_d512_causal_fp8 b1_s512_h4_d512_causal_fp8 b1_s1024_h2_d512_causal_fp8; do
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=50 \
+    --dir=/home/xieminglin/proj/output/fa-bwd/$c
+done
+# 单文件版（逐位一致）
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=20 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8
+# d128 MHA 回归
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=50 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --kernel-name regex:fa_bwd_fp8_mma_kernel \
+  --launch-count 1 -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8 --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_p53_mla_final.out.txt`（两文件全程）、
+`src/fp8/fa_bwd_fp8_main_p53_mla_bands.out.txt`（分段核对）、
+`src/fp8/fa_bwd_fp8_mma_onefile_p53_mla_s1024h2.out.txt`（单文件）、
+`src/fp8/fa_bwd_fp8_main_p53_ncu_mla_unroll4_s1024h2.out.txt`（ncu）。
