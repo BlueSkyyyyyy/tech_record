@@ -117,6 +117,24 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > bf16 的 K/V smem 行距 +2 padding 已消除 9.5-way bank conflict，S=4096 main 从 197→42 ms
 > （4.7×），现已快过同款 fp16 main；**端到端被 preprocess 拖住**（S=4096 69.4 ms > main 41.9 ms）。
 
+**O5b：bf16 main 换张量核 `mma.m16n8k16` + `ldmatrix`**（单/两文件 `fa_bwd_bf16_mma_*`，第 6e 节）：
+
+| shape | ours total | ours main | main TFLOPS | FA3 (SM90) | TE2.14 | FA2.7.4 |
+|---|---|---|---|---|---|---|
+| (1,512,16,128) | 1.434 ms | **0.190 ms** | 22.6 (2.3%) | — | — | — |
+| (1,4096,16,128) | 73.43 ms | **4.511 ms** | 60.9 (6.2%) | 860 | 622 | 379 |
+| (1,1024,40,128) kv8 | 11.94 ms | **0.871 ms** | 49.3 (5.0%) | 356 | 326 | 229 |
+| (1,1024,32,128) kv4 | 9.490 ms | **0.639 ms** | 53.8 (5.4%) | 418 | 307 | 217 |
+| (1,1024,64,128) kv4 | 18.78 ms | **1.119 ms** | 61.4 (6.2%) | 431 | 356 | 257 |
+| (1,1024,64,128) kv1 | 18.62 ms | **1.009 ms** | 68.1 (6.9%) | 440 | 322 | 259 |
+
+> main 相对标量 bf16 golden **9.4–9.9×**（S=512 1.88→0.190、S=4096 42.2→4.51 ms），
+> 数值与 FA/TE 同为 bf16 噪声量级。main-only 到 FA3 的 5.7–15.5%。
+> **端到端仍被标量 preprocess 拖住**（S=4096 preprocess 68.8ms 占 94%）——即下一项 **O8**。
+> ncu（main, S=4096）：DRAM 1.41% / L1TEX 33.24% / L2 24.84% / Compute 17.33% / occ 18.75% /
+> 168 regs / 66.56KB / 3 CTA/SM；**`long_scoreboard` 63%** ⇒ bound = 全局访存延迟（无 cp.async/预取）。
+> FA2/FA3/TE 列为 `harness/fa_vs_te_bwd_only.py bf16` 纯反向 CUPTI 口径（`04` §7.2 同源）。
+
 ### 2.3 fp8（峰值 1978.8 TFLOPS；FA 无反向 FP8，仅对标 TE）
 
 | shape | ours total | ours main | TE FP8 |
