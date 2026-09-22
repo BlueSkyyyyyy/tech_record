@@ -108,8 +108,10 @@
       `HD=512→BM=16`，smem 135.17KB，1 CTA/SM），单/两文件同步。3 个 MLA case 对拍 ref 全部 fp16 噪声
       （1.3–2.9e-3），ncu bound = smem+bank conflict+低 occupancy；MLA 反向 FA/TE 均不支持，性能数字
       仅 ours（0.21–0.63 TF）。`docs/01-fp16-bwd-impl.md` §9。
-- [ ] **P5-3** MLA 对拍（只有 fp32 ref 可对）与性能数字；对标 FlashMLA 思路
-- [ ] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能
+- [ ] **P5-3** MLA 对拍（只有 fp32 ref 可对）与性能数字；对标 FlashMLA 思路（fp16 已给，见 §9）
+- [x] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能
+      → **已完成（第十八轮）**：fp8 反向（单/两文件）支持 GQA/MQA（`Hkv`，映射 `hkv=h/(H/Hkv)`）；
+      4 个 shape 对拍 ref/TE 同量级、性能 ~7–9% TE FP8。`docs/03` §13、`docs/04` §7.4。
 
 ### 可选
 
@@ -383,7 +385,30 @@
     峰值占比 ~0.02–0.06%（标量 + 1 CTA/SM）。同 session GQA/MQA FP16 基线 FA 155–187 TF、TE 240–278 TF。
   - 原始输出 `src/fp16/fa_bwd_fp16_{main,onefile}_p52_mla_*.out.txt`、
     `..._p52_reg_*.out.txt`、`..._p52_ncu_main_s1024h2.out.txt`、`src/fa_bwd_bench_requested_fp16_p52.out.txt`；
-    文档 `docs/01-fp16-bwd-impl.md` §9。
+     文档 `docs/01-fp16-bwd-impl.md` §9。
+
+- 2026-09-22（第十八轮）：**P5-4 完成（fp8 反向支持 GQA/MQA，单/两文件）**。
+  - 映射口径同 fp16：第 `h` 个 Q 头用 KV 头 `hkv=h/(H/Hkv)`。单/两文件同步改：
+    `lse_mma_kernel` 加 `Hkv`（K/ks 索引用 `*Hkv+hkv`）；`kv_prefetch` 入参 `(H,h)`→`(Hkv,hkv)`；
+    `fa_bwd_fp8_mma_kernel` 加 `Hkv`，K/V/Kt 与 `dk_acc/dv_acc` 用 `Hkv/hkv`、Q/dO/dQ 用 `H/h`；
+    `convert_kernel` 改收 `(nq,nkv)`；host 从 `k.npy` shape[2] 读 `Hkv`，按 `n_q/n_kv` 分配/启动/对拍。
+  - 顺带修 `harness/fa_bwd_bench.py` 的 TE 导入顺序（`import transformer_engine` 先于
+    `transformer_engine_torch`），否则 fp8 TE 基线报 `ModuleNotFoundError`。
+  - **对拍（ours-vs-ref，fp8 causal，B1 S1024 D128）**：h40kv8 2.869/5.390/7.107e-1；
+    h32kv4 2.517/5.408/7.072e-1；h64kv4 2.760/8.456/1.226；h64kv1(MQA) 4.097e-1/1.519/2.127。
+    与 TE-vs-ref 同量级，**多数情形 ≤ TE**（kv1 dk/dv 1.52/2.13 vs TE 2.22/2.60）。无系统误差。
+    MHA 回归逐位不变（S512 2.426/2.975/3.735e-1；S1024H32 2.400/4.195/3.536e-1；S4096
+    2.635/2.643/3.216e-1）；单文件 GQA kv4 与两文件逐位相同。
+  - ncu（main, h32kv4 S1024）：Duration 1.07ms、DRAM 0.93% / **L1TEX 70.54%** / L2 50.31% /
+    Compute 13.46% / occ 18.75%（achieved 15.83%，168 regs，Block Limit Shared Mem=3）/
+    Waves 1.29 / No Eligible 80.59% / **short_scoreboard 42.5%** ⇒ bound 与 MHA fp8 一致：
+    **smem→mma 依赖 + L1/TEX**，非带宽/算力。
+  - 性能（ours total / TE FP8 / 峰值占比）：h40kv8 1.635ms·13.1TF / 0.243ms·176.9TF；h32kv4
+    1.365·12.6 / 0.201·170.9；h64kv4 2.369·14.5 / 0.361·190.1；h64kv1 2.293·15.0 / 0.401·171.4。
+    ours/TE = 7.4/7.4/7.6/8.7%。
+  - 原始输出 `src/fp8/fa_bwd_fp8_main_p53_{mha_s512,gqa}.out.txt`、
+    `src/fp8/fa_bwd_fp8_p53_onefile_gqa_mha.out.txt`、`src/fp8/fa_bwd_fp8_main_p53_ncu_gqa_kv4.out.txt`、
+    `src/fp8/fa_bwd_bench_requested_fp8_p53.out.txt`；文档 `docs/03-fp8-bwd-impl.md` §13、`docs/04` §7.4。
 
 ## 下一步（明确到可执行）
 
@@ -402,7 +427,10 @@
       （P5-1/P5-2 的 fp16 改造已完成：`Hkv` 入参 + `hkv=h/(H/Hkv)` 映射 + `dk/dv` 按 `B*S*Hkv*D`
       分配、`convert` 收 `n_q/n_kv`；`HD`/`BM` 模板。bf16 可直接照搬，fp8 在已优化的 mma 路径上
       加同一映射与更大 head_dim 的分块。）
-- [ ] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能
+      **进度（第十八轮）**：fp8 的 `Hkv`（GQA/MQA）已完成（单/两文件，`docs/03` §13、`docs/04` §7.4）。
+      剩余：① **bf16 复用 `Hkv`**（照搬 fp16/bf16 标量路径，工作量小）；② **fp8/bf16 的 `HD`（MLA
+      head_dim=512）**（fp8 的 mma 路径需按 `BM/BN` 容量重新分块，工作量大）。
+- [x] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能 —— 第十八轮完成。
 - [ ] **MLA 优化（backlog）**：P5-2 已给出 fp16 的 ref 对拍与 ours 性能数字；下一步是**优化**——
       把 MLA smem 降下来冲 2 CTA/SM、张量核版本，对标 FlashMLA 的分块/流水。
 > 以下为既有 fp8 优化 backlog（可与 P5 并行/穿插）。

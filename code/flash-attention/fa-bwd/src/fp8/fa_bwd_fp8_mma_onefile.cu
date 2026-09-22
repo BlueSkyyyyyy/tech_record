@@ -32,6 +32,8 @@
 //   输出：c0/c1 在行 g=lane>>2，c2/c3 在 g+8；n8 内两列 = (lane&3)*2+(q&1)。
 //
 // 参考：docs/02-fp8-bwd-design.md、src/fp8/fa_bwd_fp8_mma_smoke.cu（布局已验证）。
+// P5-3（GQA/MQA）：第 h 个 Q 头映射到 KV 头 hkv=h/(H/Hkv)（与 ref 的 repeat_interleave
+// 对齐）。Q/dO/dQ 按 [B,S,H,D] 索引，K/V/dK/dV 按 [B,S,Hkv,D] 索引；Hkv==H 时退化为 MHA。
 // 运行：scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu
 // =============================================================================
 
@@ -205,7 +207,7 @@ static constexpr int KVU = BN * kHeadDim / 4 / THREADS;  // 每线程预取的 u
 
 __device__ __forceinline__ void kv_prefetch(const unsigned char* __restrict__ k8,
                                             const unsigned char* __restrict__ v8,
-                                            int j0, int S, int H, int h, int b, int tid,
+                                            int j0, int S, int Hkv, int hkv, int b, int tid,
                                             uint32_t pk[KVU], uint32_t pv[KVU]) {
 #pragma unroll
   for (int e = 0; e < KVU; ++e) {
@@ -214,7 +216,7 @@ __device__ __forceinline__ void kv_prefetch(const unsigned char* __restrict__ k8
     int jg = j0 + r;
     uint32_t kv = 0, vv = 0;
     if (jg < S) {  // 越界写 0 字节（等价 cvt_e4m3(0)=0x00）
-      size_t idx = (((size_t)(b * S + jg)) * H + h) * kHeadDim + d;
+      size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + d;
       kv = *reinterpret_cast<const uint32_t*>(k8 + idx);
       vv = *reinterpret_cast<const uint32_t*>(v8 + idx);
     }
@@ -276,7 +278,7 @@ __global__ void quantize_row_kernel(const float* __restrict__ x,
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                const unsigned char* __restrict__ k8, const float* __restrict__ ks,
-               float* __restrict__ lse, int S, int H, float scale, int causal) {
+               float* __restrict__ lse, int S, int H, int Hkv, float scale, int causal) {
   extern __shared__ __align__(16) char smem[];
   unsigned char* Qs = reinterpret_cast<unsigned char*>(smem);
   unsigned char* Ks = Qs + LBM * ASLD;
@@ -284,6 +286,8 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
   float* ks_s = qs_s + LBM;
 
   const int mblk = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // P5-3：GQA/MQA——第 h 个 Q 头映射到 KV 头 h/(H/Hkv)（与 ref 的 repeat_interleave 对齐）。
+  const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * LBM;
@@ -308,10 +312,10 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
       int r = i / kHeadDim, d = i % kHeadDim;
       int jg = j0 + r;
       Ks[r * ASLD + d] =
-          (jg < S) ? k8[(((size_t)(b * S + jg)) * H + h) * kHeadDim + d] : cvt_e4m3(0.f);
+          (jg < S) ? k8[(((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + d] : cvt_e4m3(0.f);
     }
     if (tid < LBN)
-      ks_s[tid] = (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * H + h] : 1.f;
+      ks_s[tid] = (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * Hkv + hkv] : 1.f;
     __syncthreads();
 
     float acc[1][8][4];
@@ -403,7 +407,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                       const float* __restrict__ delta,
                       const float* __restrict__ lse,
                       float* __restrict__ dq_acc, float* __restrict__ dk_acc,
-                      float* __restrict__ dv_acc, int S, int H, float scale,
+                      float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                       int causal, int ksplit) {
   extern __shared__ __align__(16) char smem[];
   unsigned char* Qs  = reinterpret_cast<unsigned char*>(smem);
@@ -433,6 +437,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   //      大 S 时用来削尾波（partial wave）。各部分数学上仍是同一个和，只是 fp 加法次序略变。----
   const int mblk = blockIdx.x / ksplit, part = blockIdx.x % ksplit;
   const int h = blockIdx.y, b = blockIdx.z;
+  // P5-3：GQA/MQA——Q 头 h 对应 KV 头 hkv；Q/dO/dQ 用 H，K/V/dK/dV 用 Hkv。
+  const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int wr = wid / WN, wc = wid % WN;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -469,12 +475,12 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   // ---- O4a：Q/dO 载入与 tile 的 K/V 落盘写的是互不重叠的 smem（Qs/Qt/dOs/dOt vs
   //            Ks/Vs/Kt），故把原来 prologue 的两处 __syncthreads 合并为一处。----
   uint32_t pk[KVU], pv[KVU];
-  kv_prefetch(k8, v8, nt_begin * BN, S, H, h, b, tid, pk, pv);
+  kv_prefetch(k8, v8, nt_begin * BN, S, Hkv, hkv, b, tid, pk, pv);
   kv_commit(Ks, Vs, Kt, pk, pv, tid);
   if (tid < BN) {
     int jg = nt_begin * BN + tid;
-    ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * H + h] : 1.f;
-    vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * H + h] : 1.f;
+    ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
+    vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
   }
   __syncthreads();
 
@@ -482,7 +488,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     const int j0 = nt * BN;
     // ---- O3：预取下一 tile 的 K/V 到寄存器（延迟被本轮 5 个 GEMM 覆盖）----
     const int nnt = nt + 1;
-    if (nnt < nt_end) kv_prefetch(k8, v8, nnt * BN, S, H, h, b, tid, pk, pv);
+    if (nnt < nt_end) kv_prefetch(k8, v8, nnt * BN, S, Hkv, hkv, b, tid, pk, pv);
 
     // ---- (1) S = scale·QKᵀ  →  P = exp(S − LSE)，存 fp32 ----
     {
@@ -617,7 +623,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
           int c = c0 + j * 8 + c2 + (q & 1);
           int jg = j0 + r;
           if (jg < S)
-            atomicAdd(dv_acc + (((size_t)(b * S + jg)) * H + h) * kHeadDim + c,
+            atomicAdd(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + c,
                       acc[0][j][q] * sA[r]);
         }
     }
@@ -639,7 +645,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
           int c = c0 + j * 8 + c2 + (q & 1);
           int jg = j0 + r;
           if (jg < S)
-            atomicAdd(dk_acc + (((size_t)(b * S + jg)) * H + h) * kHeadDim + c,
+            atomicAdd(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + c,
                       acc[0][j][q] * sds3[r] * scale);
         }
     }
@@ -675,8 +681,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       kv_commit(Ks, Vs, Kt, pk, pv, tid);
       if (tid < BN) {
         int jg = nnt * BN + tid;
-        ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * H + h] : 1.f;
-        vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * H + h] : 1.f;
+        ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
+        vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
       }
       __syncthreads();
     }
@@ -690,10 +696,12 @@ __global__ void convert_kernel(const float* __restrict__ dq_acc,
                                const float* __restrict__ dk_acc,
                                const float* __restrict__ dv_acc,
                                float* __restrict__ dq, float* __restrict__ dk,
-                               float* __restrict__ dv, size_t n) {
-  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
-       i += (size_t)gridDim.x * blockDim.x) {
+                               float* __restrict__ dv, size_t nq, size_t nkv) {
+  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < nq;
+       i += (size_t)gridDim.x * blockDim.x)
     dq[i] = dq_acc[i];
+  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < nkv;
+       i += (size_t)gridDim.x * blockDim.x) {
     dk[i] = dk_acc[i];
     dv[i] = dv_acc[i];
   }
@@ -806,18 +814,34 @@ int main(int argc, char** argv) {
     fprintf(stderr, "期望 q 为 4D [B,S,H,D]\n");
     return 1;
   }
+  if (k_np.shape.size() != 4 || v_np.shape.size() != 4) {
+    fprintf(stderr, "期望 k/v 为 4D [B,S,Hkv,D]\n");
+    return 1;
+  }
   const int B = (int)q_np.shape[0], S = (int)q_np.shape[1];
   const int H = (int)q_np.shape[2], D = (int)q_np.shape[3];
+  const int Hkv = (int)k_np.shape[2];   // P5-3：GQA/MQA 的 KV 头数（MHA 时 Hkv==H）
   if (D != kHeadDim) {
     fprintf(stderr, "本版本仅支持 head_dim=%d（当前 %d）\n", kHeadDim, D);
     return 1;
   }
-  const size_t n = (size_t)B * S * H * D;
-  const size_t rows = (size_t)B * S * H;
+  if ((int)v_np.shape[2] != Hkv || (int)v_np.shape[3] != D) {
+    fprintf(stderr, "k/v 形状不一致\n");
+    return 1;
+  }
+  if (H % Hkv != 0) {
+    fprintf(stderr, "H(%d) 必须是 Hkv(%d) 的整数倍\n", H, Hkv);
+    return 1;
+  }
+  const size_t nq = (size_t)B * S * H * D;      // q/dO/dq 长度
+  const size_t nkv = (size_t)B * S * Hkv * D;   // k/v/dk/dv 长度
+  const size_t rows_q = (size_t)B * S * H;
+  const size_t rows_kv = (size_t)B * S * Hkv;
   const float scale = 1.0f / sqrtf((float)D);
 
   printf("case = %s\n", dir.c_str());
-  printf("B=%d S=%d H=%d D=%d causal=%d scale=%.6f\n", B, S, H, D, (int)causal, scale);
+  printf("B=%d S=%d H=%d Hkv=%d D=%d causal=%d scale=%.6f\n", B, S, H, Hkv, D, (int)causal,
+         scale);
   printf("FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32\n");
   printf("smem = %d bytes (%.1f KB); lse smem = %d bytes (%.1f KB)\n", kSmemBytes,
          kSmemBytes / 1024.0, kLseSmemBytes, kLseSmemBytes / 1024.0);
@@ -826,39 +850,39 @@ int main(int argc, char** argv) {
   unsigned char *d_q8, *d_k8, *d_v8, *d_do8;
   float *d_qs, *d_ks, *d_vs, *d_dos;
   float *d_delta, *d_lse, *d_dq_acc, *d_dk_acc, *d_dv_acc, *d_dq, *d_dk, *d_dv;
-  CUDA_CHECK(cudaMalloc(&d_q_f, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_k_f, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_v_f, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_do_f, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_o_f, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_q8, n));
-  CUDA_CHECK(cudaMalloc(&d_k8, n));
-  CUDA_CHECK(cudaMalloc(&d_v8, n));
-  CUDA_CHECK(cudaMalloc(&d_do8, n));
-  CUDA_CHECK(cudaMalloc(&d_qs, rows * 4));
-  CUDA_CHECK(cudaMalloc(&d_ks, rows * 4));
-  CUDA_CHECK(cudaMalloc(&d_vs, rows * 4));
-  CUDA_CHECK(cudaMalloc(&d_dos, rows * 4));
-  CUDA_CHECK(cudaMalloc(&d_delta, rows * 4));
-  CUDA_CHECK(cudaMalloc(&d_lse, rows * 4));
-  CUDA_CHECK(cudaMalloc(&d_dq_acc, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_dk_acc, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_dv_acc, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_dq, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_dk, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_dv, n * 4));
+  CUDA_CHECK(cudaMalloc(&d_q_f, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_k_f, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_v_f, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_do_f, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_o_f, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_q8, nq));
+  CUDA_CHECK(cudaMalloc(&d_k8, nkv));
+  CUDA_CHECK(cudaMalloc(&d_v8, nkv));
+  CUDA_CHECK(cudaMalloc(&d_do8, nq));
+  CUDA_CHECK(cudaMalloc(&d_qs, rows_q * 4));
+  CUDA_CHECK(cudaMalloc(&d_ks, rows_kv * 4));
+  CUDA_CHECK(cudaMalloc(&d_vs, rows_kv * 4));
+  CUDA_CHECK(cudaMalloc(&d_dos, rows_q * 4));
+  CUDA_CHECK(cudaMalloc(&d_delta, rows_q * 4));
+  CUDA_CHECK(cudaMalloc(&d_lse, rows_q * 4));
+  CUDA_CHECK(cudaMalloc(&d_dq_acc, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_dk_acc, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_dv_acc, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_dq, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_dk, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_dv, nkv * 4));
 
-  CUDA_CHECK(cudaMemcpy(d_q_f, q_np.data.data(), n * 4, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_k_f, k_np.data.data(), n * 4, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_v_f, v_np.data.data(), n * 4, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_do_f, do_np.data.data(), n * 4, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_o_f, o_np.data.data(), n * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_q_f, q_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_k_f, k_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_v_f, v_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_do_f, do_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_o_f, o_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
 
   auto quant = [&]() {
-    quantize_row_kernel<<<(int)rows, 128>>>(d_q_f, d_q8, d_qs, kHeadDim, 0);
-    quantize_row_kernel<<<(int)rows, 128>>>(d_k_f, d_k8, d_ks, kHeadDim, 0);
-    quantize_row_kernel<<<(int)rows, 128>>>(d_v_f, d_v8, d_vs, kHeadDim, 0);
-    quantize_row_kernel<<<(int)rows, 128>>>(d_do_f, d_do8, d_dos, kHeadDim, 1);
+    quantize_row_kernel<<<(int)rows_q, 128>>>(d_q_f, d_q8, d_qs, kHeadDim, 0);
+    quantize_row_kernel<<<(int)rows_kv, 128>>>(d_k_f, d_k8, d_ks, kHeadDim, 0);
+    quantize_row_kernel<<<(int)rows_kv, 128>>>(d_v_f, d_v8, d_vs, kHeadDim, 0);
+    quantize_row_kernel<<<(int)rows_q, 128>>>(d_do_f, d_do8, d_dos, kHeadDim, 1);
   };
 
   CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel,
@@ -880,25 +904,25 @@ int main(int argc, char** argv) {
   printf("grid main = %d x %d x %d  (ksplit=%d, base_grid=%ld)\n", mg.x, mg.y, mg.z,
          ksplit, base_grid);
   const int cvt_threads = 256;
-  const int cvt_blocks = (int)std::min<size_t>((n + cvt_threads - 1) / cvt_threads, 65535);
+  const int cvt_blocks = (int)std::min<size_t>((nq + cvt_threads - 1) / cvt_threads, 65535);
 
   auto run_preprocess = [&]() {
-    lse_mma_kernel<<<lg, THREADS, kLseSmemBytes>>>(d_q8, d_qs, d_k8, d_ks, d_lse, S, H,
+    lse_mma_kernel<<<lg, THREADS, kLseSmemBytes>>>(d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv,
                                                    scale, (int)causal);
     delta_kernel<<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
   };
 
   auto run_all = [&]() {
     quant();
-    CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * 4));
-    CUDA_CHECK(cudaMemset(d_dk_acc, 0, n * 4));
-    CUDA_CHECK(cudaMemset(d_dv_acc, 0, n * 4));
+    CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+    CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+    CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
     run_preprocess();
     fa_bwd_fp8_mma_kernel<<<mg, THREADS, kSmemBytes>>>(
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-        d_dk_acc, d_dv_acc, S, H, scale, (int)causal, ksplit);
+        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
     convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
-                                                d_dv, n);
+                                                d_dv, nq, nkv);
   };
 
   for (int i = 0; i < 3; ++i) run_all();
@@ -934,14 +958,14 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaEventElapsedTime(&ms_pre, ev0, ev1));
   ms_pre /= iters;
 
-  CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * 4));
-  CUDA_CHECK(cudaMemset(d_dk_acc, 0, n * 4));
-  CUDA_CHECK(cudaMemset(d_dv_acc, 0, n * 4));
+  CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+  CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+  CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
   CUDA_CHECK(cudaEventRecord(ev0));
   for (int i = 0; i < iters; ++i)
     fa_bwd_fp8_mma_kernel<<<mg, THREADS, kSmemBytes>>>(
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-        d_dk_acc, d_dv_acc, S, H, scale, (int)causal, ksplit);
+        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
   float ms_main = 0.f;
@@ -950,10 +974,10 @@ int main(int argc, char** argv) {
   printf("[timing] quant %.4f ms | preprocess %.4f ms | main %.4f ms | convert %.4f ms\n",
          ms_quant, ms_pre, ms_main, ms - ms_quant - ms_pre - ms_main);
 
-  std::vector<float> mdq(n), mdk(n), mdv(n);
-  CUDA_CHECK(cudaMemcpy(mdq.data(), d_dq, n * 4, cudaMemcpyDeviceToHost));
-  CUDA_CHECK(cudaMemcpy(mdk.data(), d_dk, n * 4, cudaMemcpyDeviceToHost));
-  CUDA_CHECK(cudaMemcpy(mdv.data(), d_dv, n * 4, cudaMemcpyDeviceToHost));
+  std::vector<float> mdq(nq), mdk(nkv), mdv(nkv);
+  CUDA_CHECK(cudaMemcpy(mdq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(mdk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(mdv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
 
   auto print_cmp = [&](const char* name, const std::vector<float>& mine,
                        const std::vector<float>& ref) {
