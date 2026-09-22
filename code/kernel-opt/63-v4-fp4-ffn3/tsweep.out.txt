@@ -1,0 +1,28 @@
+
+
+
+
+
+
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+V4-Pro routed expert FFN FP4 decode: w1/w3 [3072,7168] + w2 [7168,3072], B=64 top-6 E=384 pairs=384  PIPE=1 DEC=8 KTMA=1 mode=tsweep
+routing balanced active=384/384  max_m=1
+== tsweep K1 (TMA row-tile) ==
+  K1-TMA RWW1 NW8  3.1300 ms  2870.4 GB/s (85.6%)  smem=37KB
+  K1-TMA RWW2 NW8  2.9169 ms  3080.0 GB/s (91.9%)  smem=66KB
+  K1-TMA RWW4 NW8  4.0387 ms  2224.5 GB/s (66.4%)  smem=126KB
+  K1-TMA RWW2 NW4  2.9373 ms  3058.7 GB/s (91.2%)  smem=37KB
+  K1-TMA RWW4 NW4  3.3154 ms  2709.9 GB/s (80.8%)  smem=66KB
+== tsweep K2 (TMA row-tile) ==
+  K2-TMA RWW2 NW8  1.6678 ms  2693.4 GB/s (80.3%)  smem=28KB
+  K2-TMA RWW4 NW8  1.5353 ms  2925.8 GB/s (87.3%)  smem=54KB
+  K2-TMA RWW8 NW8  1.4919 ms  3010.9 GB/s (89.8%)  smem=105KB
+  K2-TMA RWW4 NW4  1.5196 ms  2956.1 GB/s (88.2%)  smem=28KB
+  K2-TMA RWW8 NW4  1.5390 ms  2918.8 GB/s (87.1%)  smem=54KB
+  K2-TMA RWW2 NW4  1.9700 ms  2280.3 GB/s (68.0%)  smem=15KB
