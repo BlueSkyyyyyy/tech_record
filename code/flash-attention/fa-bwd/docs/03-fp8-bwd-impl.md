@@ -516,3 +516,98 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma --l
     --section LaunchStats --section Occupancy --section SpeedOfLight --section SchedulerStats -- \
     --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=1
 ```
+
+---
+
+## 11. O3：K/V 向量化 + 寄存器预取流水（main 1.15–1.18×）
+
+O2 后 main 仍是 latency-bound（`No Eligible 79.6%`，`long_scoreboard`/`barrier` 主导），
+而 per-tile 的 K/V 全局读是「载入 → `__syncthreads()` → 算」，全局/L2 延迟完全暴露。
+O3 把这段改成**向量化 4B 读 + 寄存器双缓冲预取**。
+
+### 11.1 实现：寄存器双缓冲（不加 smem，保持 3 CTA/SM）
+
+关键约束：**不能加 smem**。O2 后 smem=75008 B，3 CTA/SM 已用满 233.47 KB carveout，
+再加 ~9 KB（K/V 双缓冲）就会掉回 2 CTA/SM。因此用**寄存器**而不是 smem 做双缓冲：
+
+- 新增 `kv_prefetch` / `kv_commit`（`fa_bwd_fp8_kernels.cuh`，单文件同步）：
+  每线程按 `(tid + e*THREADS)*4` 预取 `KVU = BN*kHeadDim/4/THREADS = 8` 个 `uint32`
+  （= 4 个连续 fp8，行内 4B 对齐，故一次 4B 读）。相比原来的逐字节标量读（每线程 32 次），
+  **读指令数降到 1/4**，且省掉每元素的 `cvt`/地址计算。落盘时同时写 Kt 转置副本（供 GEMM5 的 B）。
+- 预取流水：`kv_prefetch(nt+1)` 发在本轮 5 个 GEMM **之前**，`kv_commit` 在本轮所有 GEMM
+  读完 smem 之后（末尾 `__syncthreads()` 后），于是全局延迟被**一整轮计算**覆盖。
+  barrier 数与原版相同（每 tile 5 个）。
+- prologue 用同款 `kv_prefetch(0)+kv_commit` 载入 tile 0。
+- 寄存器 128 → **168**（16 个给 `pk/pv`），无 spill；`65536/(3×128)=170` ⇒ 仍 3 CTA/SM。
+
+### 11.2 数值核对（与 P3-5/O1/O2 **逐位相同**）
+
+| shape | dq / dk / dv vs ref (max_abs) | 单文件 main | 两文件 main |
+|---|---|---|---|
+| S=512 H16 | 2.426e-1 / 2.975e-1 / 3.735e-1 | 0.3903 | 0.3934 |
+| S=1024 H32 | 2.400e-1 / 4.195e-1 / 3.536e-1 | — | 1.3231 |
+| S=4096 H16 | 2.635e-1 / 2.643e-1 / 3.216e-1 | 7.5002 | 7.5092 |
+
+三次 shape 的 max_abs 与 P3-5/O1/O2 表逐位一致；只换数据搬运方式，数学口径未变。
+单/两文件差异 <1%（run-to-run 噪声）。原始输出 `src/fp8/fa_bwd_fp8_{main,mma_onefile}_o3_*.out.txt`。
+
+### 11.3 收益归因（消融：向量化 vs 流水）
+
+为拆分「向量化」与「预取流水」两个变量，额外编了一个**只向量化、不跨迭代预取**
+（每 tile 开头同步载入）的消融版：
+
+| shape | O2 标量同步 | 向量化同步（消融） | O3 向量化+预取 | 向量化贡献 | 流水贡献 |
+|---|---|---|---|---|---|
+| S=512 H16 main | 0.4655 | 0.4007 | **0.3934** | 1.16× | 1.02× |
+| S=4096 H16 main | 8.6697 | 7.6952 | **7.5092** | 1.13× | 1.03× |
+
+**结论：O3 的收益主要来自把逐字节标量 K/V 读改成 4B 向量化读（少 3/4 读指令 + 少地址运算），
+寄存器预取流水只再贡献 ~2–3%。** 消融原始输出 `src/fp8/fa_bwd_fp8_main_o3_ablation_*.out.txt`。
+
+### 11.4 性能（event 计时，ms；FP8 峰值 = 1978.8 TFLOPS）
+
+| shape | main O2 | main O3 | 提速 | total O2 | total O3 | total TFLOPS |
+|---|---|---|---|---|---|---|
+| S=512 H16 | 0.4655 | **0.3934** | **1.18×** | 0.6214 | **0.5402** | 3.98 |
+| S=1024 H32 | 1.5255* | **1.3231** | **1.15×** | 1.9214* | **1.6978** | 10.12 |
+| S=4096 H16 | 8.6697 | **7.5092** | **1.15×** | 10.086 | **9.060** | 15.17 |
+
+（*S=1024H32 O2 值取自 O2 轮记录。）main-only TFLOPS = 5.46 / 12.98 / 18.30 TF
+（峰值占比 0.28% / 0.66% / **0.93%**）。同 session TE FP8 基线（CUPTI）
+0.0723 / 0.1377 / 0.4513 ms ⇒ main ours/TE = **18.4% / 10.4% / 6.0%**，端到端 13.4% / 8.1% / 5.0%。
+
+### 11.5 ncu（main，S=4096；stall 为 per-issued-inst 平均周期）
+
+| 指标 | O2 | **O3** | 说明 |
+|---|---|---|---|
+| Duration | 8.85 ms | **7.57 ms** | 1.16×（与 event 一致） |
+| Registers / Thread | 128 | **168** | +16（pk/pv），无 spill |
+| Theoretical / Achieved Occ | 18.75% / 16.85% | 18.75% / **16.71%** | 仍 3 CTA/SM |
+| Waves Per SM | 2.59 | 2.59 | 不变 |
+| DRAM / L1TEX / L2 / Compute | 1.25 / 51.99 / 46.49 / 15.95% | 1.48 / **65.59** / 53.67 / 13.79% | L1TEX 升（同字节下更多在飞请求） |
+| **long_scoreboard** stall | 2.94 | **2.21** | **全局延迟停顿下降**（O3 目标达成） |
+| short_scoreboard stall | 3.61 | **4.12** | smem → mma 依赖成为新主导 |
+| barrier stall | 3.34 | **5.13** | 5 个 `__syncthreads`/tile 成为最大停顿 |
+| No Eligible | 79.64% | 81.91% | issue 仍稀 |
+
+S=512（`--set full`）：Duration 406 µs、Theoretical Occ 18.75%、**Achieved 6.25%**
+（`grid=128 < 132 SM`，1 CTA/SM，grid-bound）、Waves 0.32、No Eligible 91.3%。
+
+**bound 结论**：O3 成功把 `long_scoreboard`（全局延迟）从主导项压下去（2.94→2.21），
+下一堵墙变成 **(a) CTA barrier（5.13，5 个 `__syncthreads`/tile）** 与
+**(b) short_scoreboard（4.12，smem→mma 的 `ldmatrix` 延迟）**。后续方向：减少 per-tile
+barrier 数（合并 GEMM/折叠阶段）、把 Kt 转置副本换成 `ldmatrix.trans`（既省 smem 又能省一次
+smem 往返，O2c/O4 backlog），以及小 S 的 grid/尾波。
+
+### 11.6 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+# stall 分解
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma_kernel \
+  --launch-count 1 \
+  --metrics smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+```
