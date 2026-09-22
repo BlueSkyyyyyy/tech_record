@@ -1,0 +1,21 @@
+===== O2b ablation: S=1024 H32 (base_grid=512) =====
+grid main = 16 x 32 x 1  (ksplit=1, base_grid=512)
+[timing] total(quant+pre+main+cvt) 1.3841 ms  12.41 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0979 ms | preprocess 0.2053 ms | main 0.9788 ms | convert 0.1021 ms
+grid main = 32 x 32 x 1  (ksplit=2, base_grid=512)
+[timing] total(quant+pre+main+cvt) 1.2411 ms  13.84 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0989 ms | preprocess 0.2054 ms | main 0.8508 ms | convert 0.0860 ms
+grid main = 64 x 32 x 1  (ksplit=4, base_grid=512)
+[timing] total(quant+pre+main+cvt) 1.1859 ms  14.49 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0995 ms | preprocess 0.2059 ms | main 0.7872 ms | convert 0.0933 ms
+
+===== O2b ablation: S=4096 ksplit=1/2/4 =====
+grid main = 64 x 16 x 1  (ksplit=1, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 7.4678 ms  18.40 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1802 ms | preprocess 1.2906 ms | main 5.8467 ms | convert 0.1503 ms
+grid main = 128 x 16 x 1  (ksplit=2, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 6.8358 ms  20.11 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1795 ms | preprocess 1.2902 ms | main 5.2366 ms | convert 0.1295 ms
+grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 6.5349 ms  21.03 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1801 ms | preprocess 1.2918 ms | main 4.9009 ms | convert 0.1621 ms

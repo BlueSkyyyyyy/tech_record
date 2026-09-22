@@ -1,0 +1,14 @@
+########## S=512 ksplit=1 ##########
+grid main = 8 x 16 x 1  (ksplit=1, base_grid=128)
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    816058
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                                   3514972
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %         6.25
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.66
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         2.05
+########## S=512 ksplit=16 ##########
+grid main = 128 x 16 x 1  (ksplit=16, base_grid=128)
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                   1146171
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                                   5207881
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        17.83
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         6.44
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         2.37

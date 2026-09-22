@@ -1,0 +1,18 @@
+########## b1_s256_h2_d512_causal_fp8 ##########
+grid main = 4 x 2 x 1  (ksplit=1, base_grid=8) [timing] total(quant+pre+main+cvt) 0.6192 ms  0.43 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0143 ms | preprocess 0.1066 ms | main 0.4714 ms | convert 0.0269 ms 
+grid main = 8 x 2 x 1  (ksplit=2, base_grid=8) [timing] total(quant+pre+main+cvt) 0.4251 ms  0.63 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0144 ms | preprocess 0.1078 ms | main 0.2730 ms | convert 0.0298 ms 
+grid main = 16 x 2 x 1  (ksplit=4, base_grid=8) [timing] total(quant+pre+main+cvt) 0.3076 ms  0.87 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0140 ms | preprocess 0.1072 ms | main 0.1604 ms | convert 0.0259 ms 
+grid main = 32 x 2 x 1  (ksplit=8, base_grid=8) [timing] total(quant+pre+main+cvt) 0.2476 ms  1.08 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0140 ms | preprocess 0.1066 ms | main 0.1026 ms | convert 0.0243 ms 
+grid main = 64 x 2 x 1  (ksplit=16, base_grid=8) [timing] total(quant+pre+main+cvt) 0.2492 ms  1.08 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0142 ms | preprocess 0.1071 ms | main 0.1027 ms | convert 0.0253 ms 
+########## b1_s512_h4_d512_causal_fp8 ##########
+grid main = 8 x 4 x 1  (ksplit=1, base_grid=32) [timing] total(quant+pre+main+cvt) 1.2191 ms  1.76 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0194 ms | preprocess 0.1939 ms | main 0.9282 ms | convert 0.0777 ms 
+grid main = 16 x 4 x 1  (ksplit=2, base_grid=32) [timing] total(quant+pre+main+cvt) 0.7900 ms  2.72 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0196 ms | preprocess 0.2003 ms | main 0.4919 ms | convert 0.0782 ms 
+grid main = 32 x 4 x 1  (ksplit=4, base_grid=32) [timing] total(quant+pre+main+cvt) 0.5914 ms  3.63 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0190 ms | preprocess 0.1967 ms | main 0.3244 ms | convert 0.0513 ms 
+grid main = 64 x 4 x 1  (ksplit=8, base_grid=32) [timing] total(quant+pre+main+cvt) 0.5918 ms  3.63 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0189 ms | preprocess 0.1989 ms | main 0.3404 ms | convert 0.0335 ms 
+grid main = 128 x 4 x 1  (ksplit=16, base_grid=32) [timing] total(quant+pre+main+cvt) 0.6746 ms  3.18 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0192 ms | preprocess 0.2000 ms | main 0.4237 ms | convert 0.0317 ms 
+########## b1_s1024_h2_d512_causal_fp8 ##########
+grid main = 16 x 2 x 1  (ksplit=1, base_grid=32) [timing] total(quant+pre+main+cvt) 2.2875 ms  1.88 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0184 ms | preprocess 0.3709 ms | main 1.7830 ms | convert 0.1152 ms 
+grid main = 32 x 2 x 1  (ksplit=2, base_grid=32) [timing] total(quant+pre+main+cvt) 1.4057 ms  3.06 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0198 ms | preprocess 0.3750 ms | main 0.9116 ms | convert 0.0993 ms 
+grid main = 64 x 2 x 1  (ksplit=4, base_grid=32) [timing] total(quant+pre+main+cvt) 1.0141 ms  4.24 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0192 ms | preprocess 0.3686 ms | main 0.5474 ms | convert 0.0788 ms 
+grid main = 128 x 2 x 1  (ksplit=8, base_grid=32) [timing] total(quant+pre+main+cvt) 1.0317 ms  4.16 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0197 ms | preprocess 0.3755 ms | main 0.5767 ms | convert 0.0597 ms 
+grid main = 256 x 2 x 1  (ksplit=16, base_grid=32) [timing] total(quant+pre+main+cvt) 0.9943 ms  4.32 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0195 ms | preprocess 0.3667 ms | main 0.5498 ms | convert 0.0583 ms 

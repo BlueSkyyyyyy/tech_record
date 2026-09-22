@@ -1,0 +1,22 @@
+===== O2b ksplit=8 =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+grid main = 64 x 16 x 1  (ksplit=8, base_grid=128)
+[timing] total(quant+pre+main+cvt) 0.2932 ms  7.33 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0303 ms | preprocess 0.0804 ms | main 0.1460 ms | convert 0.0365 ms
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_causal_fp8
+grid main = 128 x 32 x 1  (ksplit=8, base_grid=512)
+[timing] total(quant+pre+main+cvt) 1.2098 ms  14.20 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1006 ms | preprocess 0.2081 ms | main 0.8117 ms | convert 0.0895 ms
+  dq   vs ref: max_abs=2.400e-01  max_rel=1.887e+02
+  dk   vs ref: max_abs=4.195e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.536e-01  max_rel=8.068e+01
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 6.4065 ms  21.45 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1796 ms | preprocess 1.2929 ms | main 4.7838 ms | convert 0.1502 ms
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01

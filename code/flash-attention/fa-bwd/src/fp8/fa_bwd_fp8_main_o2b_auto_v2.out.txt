@@ -1,0 +1,43 @@
+===== O2b 新 auto：两文件版 =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+grid main = 128 x 16 x 1  (ksplit=16, base_grid=128)
+[timing] total(quant+pre+main+cvt) 0.2916 ms  7.36 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0308 ms | preprocess 0.0807 ms | main 0.1439 ms | convert 0.0362 ms
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_causal_fp8
+grid main = 128 x 32 x 1  (ksplit=8, base_grid=512)
+[timing] total(quant+pre+main+cvt) 1.2000 ms  14.32 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0991 ms | preprocess 0.2054 ms | main 0.8084 ms | convert 0.0871 ms
+  dq   vs ref: max_abs=2.400e-01  max_rel=1.887e+02
+  dk   vs ref: max_abs=4.195e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.536e-01  max_rel=8.068e+01
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 6.5265 ms  21.06 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1796 ms | preprocess 1.2912 ms | main 4.9084 ms | convert 0.1473 ms
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01
+case = /home/xieminglin/proj/output/fa-bwd/b1_s256_h2_d512_causal_fp8
+grid main = 64 x 2 x 1  (ksplit=16, base_grid=8)
+[timing] total(quant+pre+main+cvt) 0.2490 ms  1.08 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0134 ms | preprocess 0.1075 ms | main 0.1030 ms | convert 0.0251 ms
+  dq   vs ref: max_abs=2.356e-01  max_rel=8.127e+01
+  dk   vs ref: max_abs=2.290e-01  max_rel=6.894e+01
+  dv   vs ref: max_abs=3.441e-01  max_rel=4.412e+01
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp8
+grid main = 32 x 4 x 1  (ksplit=4, base_grid=32)
+[timing] total(quant+pre+main+cvt) 0.5892 ms  3.64 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0199 ms | preprocess 0.1961 ms | main 0.3194 ms | convert 0.0537 ms
+  dq   vs ref: max_abs=2.415e-01  max_rel=1.802e+02
+  dk   vs ref: max_abs=2.992e-01  max_rel=6.416e+01
+  dv   vs ref: max_abs=4.481e-01  max_rel=9.164e+01
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8
+grid main = 64 x 2 x 1  (ksplit=4, base_grid=32)
+[timing] total(quant+pre+main+cvt) 1.0114 ms  4.25 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0188 ms | preprocess 0.3750 ms | main 0.5716 ms | convert 0.0461 ms
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01

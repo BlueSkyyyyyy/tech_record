@@ -89,7 +89,9 @@ struct Fp8Cfg {
   // O4d：P/S 两个 fp32 [BM][BN] 缓冲的行距 padding。行距 = BN = 32 word（128B）时，
   //   * fold 里按「列」读 `P[m][j]`（j 固定、m 步进 16）会全部落同一 bank（32|stride）→ 4-way；
   //   * GEMM1/2 epilogue 里 8 行 × 4 列同时写 `P[r][c]`，bank=c，同列不同行全撞 → 8-way。
-  //   +1 word（33）让 bank 与行号线性相关，实测 bank conflict 2 亿+ 基本清零。奇数才能保证
+  //   +1 word（33）让 bank 与行号线性相关。实测（S=4096 ksplit=1）：`op_ld` 冲突
+  //   199.9M→77.3M（−61%）、`op_st` 231.6M→198.4M（−14%）、总多余 wavefronts
+  //   613.6M→456.0M（−26%），main 6.56→5.85 ms（1.12×）。奇数才能保证
   //   m 步进 16 时 `16*33 mod 32 = 16 != 0`（+4/+8 的偶数 padding 无效）。
   static constexpr int PSS = BN + 1;     // P/S fp32 行距（=33）
 

@@ -904,3 +904,134 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --kernel-name regex:fa_bwd_
 `src/fp8/fa_bwd_fp8_main_p53_mla_bands.out.txt`（分段核对）、
 `src/fp8/fa_bwd_fp8_mma_onefile_p53_mla_s1024h2.out.txt`（单文件）、
 `src/fp8/fa_bwd_fp8_main_p53_ncu_mla_unroll4_s1024h2.out.txt`（ncu）。
+
+---
+
+## 15. O2b + O4d：split-K 自动切块调参 + P/S fp32 行距 padding
+
+> 本轮把上一条 WIP commit（`fp8 main O4b/O4d WIP`）里已经写进代码、但还没进 ROADMAP/docs
+> 的两处优化正式收口：**O2b（split-K 切块数自动选择）** 与 **O4d（`Ps/Ss` 行距 padding）**。
+> 都是 fp8 反向的 main kernel，单/两文件同步；数值与 P3-5/O1–O4a **逐位相同**（见 15.4）。
+
+### 15.1 O2b：split-K 的机制与切块数 sweep
+
+机制（§内核 `fa_bwd_fp8_mma_kernel` 顶部）：`grid.x = ceil(S/BM) * ksplit`，第 `part` 个 CTA
+只处理 K/V 列块 `[part*ntiles/k, (part+1)*ntiles/k)`，`dq/dk/dv` 仍用跨 CTA 的 fp32 `atomicAdd`
+汇总。数学上仍是同一个和，只有浮点加法次序略变（对拍 `max_abs` 不变）。
+
+旧启发式是「让 grid 至少铺满一个波」——`k = ceil(396/base_grid)`、`cap=4`，于是 d128 在
+S=1024H32/S=4096 上都得 `k=1`，MLA 一律 `k=4`。实测这在大 S 和 MLA 小 S 上都明显次优。
+本轮先做 **ksplit sweep**（同一 session，B1 causal fp8，main 纯 device ms）：
+
+| case（base_grid） | k=1 | k=2 | k=4 | k=8 | k=16 | 最优 |
+|---|---|---|---|---|---|---|
+| d128 S=512 H16（128） | 0.2401 | 0.1842 | 0.1556 | 0.1460 | **0.1434** | k=16 |
+| d128 S=1024 H32（512） | 0.9788 | 0.8508 | **0.7872** | 0.8117 | 0.8718 | k=4 |
+| d128 S=4096 H16（1024） | 5.8467 | 5.2366 | 4.9009 | **4.7838** | 4.8770 | k=8 |
+| MLA S=256 H2 D512（8） | 0.4714 | 0.2730 | 0.1604 | **0.1026** | 0.1027 | k=8/16 |
+| MLA S=512 H4 D512（32） | 0.9282 | 0.4919 | **0.3244** | 0.3404 | 0.4237 | k=4 |
+| MLA S=1024 H2 D512（32） | 1.7830 | 0.9116 | **0.5474** | 0.5767 | 0.5498 | k=4 |
+
+规律：**d128（smem 73.8KB→3 CTA/SM）在 grid≈4096（≈10 个波）附近最优；MLA（smem 223KB→
+1 CTA/SM）在 grid≈一个波（132）时最优**——MLA 再切只增 Q/dO 复读与 `atomicAdd` 竞争，不增并发。
+故新启发式：
+
+```cpp
+const long target_ctas = (D == 128) ? 4096L : 132L;   // 目标 CTA 数
+long k = target_ctas / base_grid;                     // clamp 到 [1,16]，向下取 2 的幂
+```
+
+自动档（新）同 session main 相对**旧自动档**：d128 S512 `k4→k16` 0.1556→**0.1439（1.08×）**；
+S1024H32 `k1→k8` 0.9788→**0.8084（1.21×）**；S4096 `k1→k4` 5.8467→**4.9084（1.19×）**；
+MLA S256H2 `k4→k16` 0.1604→**0.1030（1.56×）**；MLA S512H4/S1024H2 仍选 k=4（不变）。
+三个 d128 形状实测落在各自 sweep 最优的 0–3% 内。
+
+### 15.2 O2b 的 ncu 证据（小 S 的 grid/occupancy 被填满）
+
+| main, S=512 | grid | Achieved Occ | long_scoreboard | short_scoreboard |
+|---|---|---|---|---|
+| ksplit=1 | 8×16=128 | **6.25%** | 1.66 | 2.05 |
+| ksplit=16 | 128×16=2048 | **17.83%** | 6.44 | 2.37 |
+
+旧的 128 个 CTA 连 132 个 SM 都铺不满（1 CTA/SM、6.25%）；切 16 后 grid 2048、occupancy
+17.8%（3 CTA/SM），`long_scoreboard`（全局访存延迟）被压下去，换来 main 1.67×。
+
+### 15.3 O4d：`Ps/Ss` 行距 `BN`→`BN+1`
+
+`Ps/Ss` 原是 `[BM][BN]`（BN=32 word=128B 行距）的 fp32 缓冲。两个访问模式撞 bank：
+① fold 里按列读 `Ps[m][j]`（`j` 固定、`m` 步进 16，32 为步长 → 全落同一 bank）；② GEMM1/2
+的 epilogue 里 8 行×4 列同时写 `P[r][c]`（bank=c，同列不同行全撞）。把行距改成 **`PSS=BN+1=33`
+（奇数）** 后 bank 与行号线性相关。S=4096 `ksplit=1` 实测：
+
+| 指标 | 改前（PSS=32） | 改后（PSS=33） | 变化 |
+|---|---|---|---|
+| `..._op_ld.sum` 冲突 | 199,883,030 | 77,258,028 | **−61%** |
+| `..._op_st.sum` 冲突 | 231,607,641 | 198,403,148 | **−14%** |
+| `..._wavefronts_mem_shared.sum` | 613,627,914 | 456,031,959 | **−26%** |
+| main（同 session） | 6.5649 ms | **5.8465 ms** | **1.12×** |
+
+S=512 同 session：main 0.1632→0.1553 ms（1.05×）。smem 73.2→73.8 KB（+0.5KB），
+仍是 3 CTA/SM。
+
+### 15.4 合并结果（新自动档，两文件版；单文件版逐位一致）
+
+数值（max_abs vs fp32 ref）与 P3-5/O1–O4a **逐位相同**：d128 S512 2.426/2.975/3.735e-1；
+S1024H32 2.400/4.195/3.536e-1；S4096 2.635/2.643/3.216e-1；MLA S256H2 2.356/2.290/3.441e-1；
+S512H4 2.415/2.992/4.481e-1；S1024H2 2.232/3.337/3.602e-1。GQA/MQA 回归不变
+（h32kv4 S1024 2.517/5.408/7.072e-1）。
+
+性能（event 纯 device；FP8 峰值 1978.8 TFLOPS；TE 为 CUPTI 端到端）：
+
+| case | ksplit | ours total | ours main | main TF（占比） | TE FP8 | main ours/TE |
+|---|---|---|---|---|---|---|
+| d128 S=512 H16 | 16 | 0.2916 ms / 7.36 TF | 0.1439 ms | 14.9（0.75%） | 0.1009 ms / 42.6 TF | 1.43× |
+| d128 S=1024 H32 | 8 | 1.2000 ms / 14.32 TF | 0.8084 ms | 21.3（1.07%） | 0.2061 ms / 166.8 TF | 3.92× |
+| d128 S=4096 H16 | 4 | 6.5265 ms / 21.06 TF | 4.9084 ms | 28.0（1.42%） | 0.5903 ms / 465.6 TF | 8.32× |
+| MLA S=256 H2 D512 | 16 | 0.2490 ms | 0.1030 ms | 0.89 TF | NA（FA/TE 不支持） | — |
+| MLA S=512 H4 D512 | 4 | 0.5892 ms | 0.3194 ms | 4.56 TF | NA | — |
+| MLA S=1024 H2 D512 | 4 | 1.0114 ms | 0.5716 ms | 5.10 TF | NA | — |
+
+### 15.5 ncu bound（main, S=4096, ksplit=4, `--set full -c 1`）
+
+- Duration **5.00 ms**（ncu 锁频）；**DRAM 1.41%** / **L2 81.53%** / L1TEX 69.91% /
+  Compute 21.70% ⇒ 非 DRAM、非算力。
+- Achieved Occ **18.27%**（3 CTA/SM，Regs 168）；**Waves 10.34**（O2b 切块后）；No Eligible **76.63%**。
+- stall：`long_scoreboard 4.46` + `short_scoreboard 3.96` + `wait 1.51` + `barrier 0.47`。
+- **新 bound = L2 带宽（81.5%）+ long/short scoreboard**：split-K 让每个 CTA 复读 Q/dO 并向
+  `dq/dk/dv` 发更多全局 `atomicAdd`，流量全落在 L2（DRAM 仅 1.4% 说明工作集在 L2 里）。
+  下一步优先级：**O4c（`atomicAdd` → 分块 `dK/dV_accum` + convert，消 L2 原子流量/竞争）** >
+  O4b（消转置副本冲 4 CTA/SM）> 更深流水。
+
+### 15.6 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+# O2b sweep（同一 session 顺序跑，保证可比）
+for k in 1 2 4 8 16; do
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --ksplit=$k --iters=50 \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+done
+# 自动档 + 对拍（6 个 shape）
+for c in b1_s512_h16_d128_causal_fp8 b1_s1024_h32_d128_causal_fp8 \
+         b1_s4096_h16_d128_causal_fp8 b1_s256_h2_d512_causal_fp8 \
+         b1_s512_h4_d512_causal_fp8 b1_s1024_h2_d512_causal_fp8; do
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=50 \
+    --dir=/home/xieminglin/proj/output/fa-bwd/$c
+done
+# ncu：bank conflict 与 full
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma_kernel -c 1 \
+  --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
+l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
+l1tex__data_pipe_lsu_wavefronts_mem_shared.sum -- \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --ksplit=1 --iters=1
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma_kernel -c 1 \
+  --set full -o ncu_full_s4096 -- \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o2b_ablation.out.txt`、`..._o2b_ablation2.out.txt`、
+`..._o2b_ksplit8.out.txt`、`..._o2b_ksplit16.out.txt`、`..._o2b_mla_sweep.out.txt`、
+`..._o2b_auto_v2.out.txt`、`..._o2b_auto_v2_onefile_gqa.out.txt`、
+`..._o4d_ncu_mem_s4096.out.txt`、`..._o4d_ncu_mem_s4096_ksplit1.out.txt`、
+`..._o2b_ncu_s512_ksplit1_vs16.out.txt`、`..._o2b_o4d_ncu_full_s4096.out.txt`、
+`..._o2b_o4d_stall_s4096.out.txt`、`..._o2b_o4d_tebench.out.txt`。

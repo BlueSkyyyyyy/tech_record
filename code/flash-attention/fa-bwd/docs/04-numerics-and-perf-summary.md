@@ -122,7 +122,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 - main 相对 FP8 峰值仍只 0.24–0.68%、相对 TE FP8 约 4–16%（低 occupancy、无流水、每 tile 原子累加）。
 - **端到端瓶颈已转移到 preprocess**（LSE 的 O(S²) 点积未分块）：S=4096 71.0 ms vs main 10.2 ms。
 
-> **下表为 O1/O2 优化后的最新值（第十二轮）**，覆盖上表旧值；详细见 `03` §9（O1）与 §10（O2）。
+> **下表为 O1/O2 阶段值（第十二轮）**，见 `03` §9（O1）与 §10（O2）；最新值见本节末尾。
 > fp16/bf16 两表自 P4-1 起未变。
 
 | shape | ours total（O2） | ours main（O2） | TE FP8（同 session） |
@@ -134,6 +134,23 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 - O1：`preprocess` 改 mma 分块 LSE + 独立 delta_kernel（14–62×），S=4096 端到端瓶颈回落 main。
 - O2：`dS3/Ap` 折叠进 `Ks/Vs` 死空间，smem 80.13→75.01 KB → **3 CTA/SM**；main 1.16–1.19×。
 
+> **下表为 O1–O4d 全部优化后的最新值（本轮 O2b+O4d）**；逐项见 `03` §9–§15。
+> `ours` 为同 session 实测，`TE` 为 CUPTI 端到端（FA 无反向 FP8）。fp16/bf16 两表自 P4-1 起未变。
+
+| shape | ours total | ours main | main TF（峰值占比） | TE FP8（同 session） |
+|---|---|---|---|---|
+| (1,512,16,128) | 0.2916 ms / 7.36 TF | 0.1439 ms | 14.9（0.75%） | 0.1009 ms / 42.6 TF |
+| (1,1024,32,128) | 1.2000 ms / 14.32 TF | 0.8084 ms | 21.3（1.07%） | 0.2061 ms / 166.8 TF |
+| (1,4096,16,128) | 6.5265 ms / 21.06 TF | 4.9084 ms | 28.0（1.42%） | 0.5903 ms / 465.6 TF |
+
+- O3：K/V 向量化 4B 读 + 寄存器双缓冲（main 1.15–1.18×）；O4a：消 GEMM1/2 barrier +
+  fold 全线程并行（main 1.21–1.54×）。
+- **O2b：split-K 自动切块调参**——d128 目标 grid≈4096、MLA 目标≈132（1 个波），
+  相对旧自动档 main 1.08–1.21×、MLA 小 S 1.56×。
+- **O4d：`Ps/Ss` 行距 `BN→BN+1`** 消 bank conflict（`op_ld` −61%、总 wavefronts −26%），
+  main 1.05–1.12×；smem 73.2→73.8 KB（仍 3 CTA/SM）。
+- 数值与 P3-5/O1–O4a **逐位相同**；端到端仍受 main 主导（S=4096 main 4.91/6.53 ms）。
+
 ---
 
 ## 3. ncu bound 小结（逐 dtype）
@@ -143,14 +160,14 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp16 | main (S=512) | 0.21% | **53.5%**（75% 多余 wavefront） | 8.45% | 6.25%（96KB） | 0.48 | — | **smem 访问 + 低 occupancy** |
 | bf16 | main (padding 后) | 0.26% | 24.9% | 13.5% | 6.25% | 0.48 | fixed-latency 37.3%、No Eligible 78% | **延迟 / 并行度不足** |
 | fp8 | golden main | 0.06% | **75.96%**（90% 多余） | 4.98% | 6.25%（68KB） | 0.32 | MIO scoreboard 69% | **smem 冲突 + FP8 解码 + 低 occ** |
-| fp8 | **mma main（O2 后, S=4096）** | 1.25% | 51.99% | 15.95% | **16.85%（75KB, 3 CTA/SM）** | 2.59 | No Eligible 79.6%、long_scoreboard/barrier | **延迟 / 并行度（3 CTA 后仍未饱和）+ 尾波** |
+| fp8 | **mma main（O2b+O4d 后, S=4096, ksplit=4）** | 1.41% | 69.91% | 21.70% | **18.27%（73.8KB, 3 CTA/SM）** | 10.34 | No Eligible 76.6%、long_scoreboard 4.46 + short_scoreboard 3.96 | **L2 带宽（81.5%）+ 延迟**（split-K 复读 Q/dO + 全局 atomic） |
 
 **共同结论**：三种 dtype 都不是 HBM 或算力 bound（DRAM <1%、Compute <16%）；真正的墙是
 **低 occupancy（fp8 已做到 3 CTA/SM）+ 并行度不足**。
 fp8 上 mma 后 bank conflict 已消失（L1/TEX 76%→19%），bound 从「smem 冲突」退化为「延迟受限」；
 O2 降 smem 后 fp8 从 2→3 CTA/SM（theoretical 12.5%→18.75%），main 1.16–1.19×。
-下一步优先级：**① `cp.async` 双缓冲流水（O3）；② 小 S 的 grid 太小 + 尾波（O2b）；
-③ 4 CTA/SM 需消转置副本（O2c）；④ dQ/dK/dV 的 atomicAdd 换 `dQ_accum` 缓冲**。
+下一步优先级：**① `atomicAdd` → 分块 `dK/dV_accum`/`dQ_accum` + convert（O4c，消 L2 原子流量）；
+② `cp.async` 双缓冲流水；③ 4 CTA/SM 需消转置副本（O4b）；④ wgmma/TMA（O9）。**
 
 ---
 
