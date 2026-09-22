@@ -1,6 +1,6 @@
 # flash-attention 反向（fa-bwd）开发 · 路线图（活文档）
 
-> 目标：借鉴 flash-attention / TransformerEngine 的实现，在目标 AI 卡（当前在 H100 sm90 上验证）上，
+> 目标：借鉴 flash-attention / TransformerEngine 的实现，在**目标 AI 卡**（当前在 H100 sm90 上开发验证）上，
 > 把 flash-attention **反向**整理/重写成**单文件**与**两文件**两种形式（fp16 / bf16 / **fp8 最重点**），
 > 编译、数值对拍（ref / TE）、ncu 剖析、与 TE 性能对标，并产出分析文档。
 > 这是与 `../../kernel-opt` 类似的自驱任务，但**时限更短**（autopilot 轮数少）。
