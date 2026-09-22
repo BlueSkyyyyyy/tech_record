@@ -711,3 +711,98 @@ docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python \
   /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_bench.py \
   bench --dtype fp8 --shape 1 4096 16 128 causal
 ```
+
+---
+
+## 13. P5-3（fp8 反向支持 GQA/MQA，单/两文件）
+
+### 13.1 目标与口径
+
+把 fp8 反向从 MHA 扩到 **GQA/MQA**（Q 头数 `H`、KV 头数 `Hkv`，`H % Hkv == 0`）。
+映射口径与 `ref_attn` 的 `repeat_interleave` 一致：**第 `h` 个 Q 头对应 KV 头 `hkv = h/(H/Hkv)`**。
+张量布局：`q/dO/dq` 为 `[B,S,H,D]`，`k/v/dk/dv` 为 `[B,S,Hkv,D]`；`Hkv==H` 时逐式退化为 MHA。
+
+### 13.2 改动（单/两文件 device 代码同源，逐字一致）
+
+| 位置 | 改动 |
+|---|---|
+| `lse_mma_kernel` | 入参加 `Hkv`，算 `hkv=h/(H/Hkv)`；K/ks 索引用 `*Hkv+hkv`（Q 仍用 H） |
+| `kv_prefetch` | 入参由 `(H,h)` 改 `(Hkv,hkv)`；K/V 全局索引 `*Hkv+hkv` |
+| `fa_bwd_fp8_mma_kernel` | 入参加 `Hkv`；K/V/Kt + `dk_acc/dv_acc` 用 `Hkv/hkv`，Q/dO/dQ 用 `H/h` |
+| `convert_kernel` | 入参改 `(nq, nkv)` 两个长度，分别拷贝 `dq` 与 `dk/dv` |
+| host / launcher | 从 `k.npy` 的 `shape[2]` 读 `Hkv`；`nq=B·S·H·D`、`nkv=B·S·Hkv·D`；quant/LSE/delta 按各自行数启动；compare 按各自长度 |
+
+两文件版：`fa_bwd_fp8_kernels.cuh` + `fa_bwd_fp8_main.cu`；单文件版：`fa_bwd_fp8_mma_onefile.cu`。
+`harness/fa_bwd_bench.py` 另修一处 TE 导入顺序（先 `import transformer_engine` 再
+`transformer_engine_torch`，否则 `ModuleNotFoundError`），使 TE FP8 GQA 基线可跑。
+
+### 13.3 数值对拍（max_abs，causal，B=1 S=1024 D=128）
+
+**ours vs fp32 ref**：
+
+| case | dq | dk | dv |
+|---|---|---|---|
+| h40 kv8 | 2.869e-01 | 5.390e-01 | 7.107e-01 |
+| h32 kv4 | 2.517e-01 | 5.408e-01 | 7.072e-01 |
+| h64 kv4 | 2.760e-01 | 8.456e-01 | 1.226e+00 |
+| h64 kv1 (MQA) | 4.097e-01 | 1.519e+00 | 2.127e+00 |
+
+**TE FP8 vs fp32 ref**（同形状，作对照）：
+
+| case | dq | dk | dv |
+|---|---|---|---|
+| h40 kv8 | 8.453e-01 | 6.625e-01 | 1.106e+00 |
+| h32 kv4 | 5.246e-01 | 7.664e-01 | 1.343e+00 |
+| h64 kv4 | 3.983e-01 | 1.011e+00 | 1.844e+00 |
+| h64 kv1 (MQA) | 4.100e-01 | 2.218e+00 | 2.597e+00 |
+
+结论：均在与 TE **同量级（fp8 噪声 O(1)）**，且多数情形 ours-vs-ref ≤ TE-vs-ref（kv1 的 dk/dv 尤其：
+1.52/2.13 vs 2.22/2.60）。`ref_amax`：kv1 dk=13.1、dv=26.1，即相对量级与 MHA fp8 一致。无系统误差。
+
+**MHA 回归逐位不变**：S=512 `2.426/2.975/3.735e-1`、S=1024H32 `2.400/4.195/3.536e-1`、
+S=4096 `2.635/2.643/3.216e-1`（与 §7/§8/§10–12 记录逐位一致）。单文件 GQA kv4 与两文件
+**逐位相同**（dq/dk/dv 2.517/5.408/7.072e-1）。
+
+### 13.4 性能对标（CUPTI/event 纯 device 时间，bwd FLOPs=4·B·S·H·S·D）
+
+| case | ours total | ours TFLOPS | 峰值占比 | TE FP8 | TE TFLOPS | ours/TE |
+|---|---|---|---|---|---|---|
+| h40 kv8 | 1.6346 ms | 13.14 | 0.66% | 0.2428 ms | 176.92 | 7.4% |
+| h32 kv4 | 1.3650 ms | 12.59 | 0.64% | 0.2010 ms | 170.93 | 7.4% |
+| h64 kv4 | 2.3690 ms | 14.50 | 0.73% | 0.3614 ms | 190.13 | 7.6% |
+| h64 kv1 | 2.2934 ms | 14.98 | 0.76% | 0.4009 ms | 171.42 | 8.7% |
+
+（ours total = quant+preprocess+main+convert；TE 为完整反向。FP8 峰值 1978.8 TFLOPS。）
+与 MHA fp8 的 ours/TE 水平（S=1024H32 端到端 ~9.5%）一致。
+
+### 13.5 ncu（main, h32 kv4, S=1024）
+
+`--set full --launch-count 1`，Duration **1.07 ms**：DRAM **0.93%** / L1TEX **70.54%** /
+L2 50.31% / Compute 13.46%；168 regs / 75.01 KB smem（Block Limit Shared Mem=3）；
+Theoretical Occ 18.75%、Achieved 15.83%；Waves 1.29；No Eligible 80.59%；
+**short_scoreboard 占 42.5%**（smem→mma 的 `ldmatrix` 依赖）。
+**bound 与 MHA O4a 完全一致：short_scoreboard（smem 依赖）+ L1/TEX，非带宽/算力**。
+后续优化沿用 backlog 的 O4b（fp8 `ldmatrix.trans` 消转置副本）与 O2b（小 S grid / 尾波）。
+
+### 13.6 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+# 两文件版（GQA）
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=20 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp8
+# 单文件版（逐位一致）
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=20 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp8
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --kernel-name regex:fa_bwd_fp8_mma_kernel \
+  --launch-count 1 -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp8 --iters=1
+# TE FP8 基线
+docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python \
+  /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_bench.py \
+  bench --requested --dtype fp8
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_p53_{mha_s512,gqa}.out.txt`、
+`src/fp8/fa_bwd_fp8_p53_onefile_gqa_mha.out.txt`、`src/fp8/fa_bwd_fp8_main_p53_ncu_gqa_kv4.out.txt`、
+`src/fp8/fa_bwd_bench_requested_fp8_p53.out.txt`。

@@ -136,18 +136,34 @@ int main(int argc, char** argv) {
     fprintf(stderr, "期望 q 为 4D [B,S,H,D]\n");
     return 1;
   }
+  if (k_np.shape.size() != 4 || v_np.shape.size() != 4) {
+    fprintf(stderr, "期望 k/v 为 4D [B,S,Hkv,D]\n");
+    return 1;
+  }
   const int B = (int)q_np.shape[0], S = (int)q_np.shape[1];
   const int H = (int)q_np.shape[2], D = (int)q_np.shape[3];
+  const int Hkv = (int)k_np.shape[2];   // P5-3：GQA/MQA 的 KV 头数（MHA 时 Hkv==H）
   if (D != kHeadDim) {
     fprintf(stderr, "本版本仅支持 head_dim=%d（当前 %d）\n", kHeadDim, D);
     return 1;
   }
-  const size_t n = (size_t)B * S * H * D;
-  const size_t rows = (size_t)B * S * H;
+  if ((int)v_np.shape[2] != Hkv || (int)v_np.shape[3] != D) {
+    fprintf(stderr, "k/v 形状不一致\n");
+    return 1;
+  }
+  if (H % Hkv != 0) {
+    fprintf(stderr, "H(%d) 必须是 Hkv(%d) 的整数倍\n", H, Hkv);
+    return 1;
+  }
+  const size_t nq = (size_t)B * S * H * D;      // q/dO/dq 长度
+  const size_t nkv = (size_t)B * S * Hkv * D;   // k/v/dk/dv 长度
+  const size_t rows_q = (size_t)B * S * H;
+  const size_t rows_kv = (size_t)B * S * Hkv;
   const float scale = 1.0f / sqrtf((float)D);
 
   printf("case = %s\n", dir.c_str());
-  printf("B=%d S=%d H=%d D=%d causal=%d scale=%.6f\n", B, S, H, D, (int)causal, scale);
+  printf("B=%d S=%d H=%d Hkv=%d D=%d causal=%d scale=%.6f\n", B, S, H, Hkv, D, (int)causal,
+         scale);
   printf("FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32\n");
   printf("smem = %d bytes (%.1f KB); lse smem = %d bytes (%.1f KB)\n", kSmemBytes,
          kSmemBytes / 1024.0, kLseSmemBytes, kLseSmemBytes / 1024.0);
@@ -156,39 +172,39 @@ int main(int argc, char** argv) {
   unsigned char *d_q8, *d_k8, *d_v8, *d_do8;
   float *d_qs, *d_ks, *d_vs, *d_dos;
   float *d_delta, *d_lse, *d_dq_acc, *d_dk_acc, *d_dv_acc, *d_dq, *d_dk, *d_dv;
-  CUDA_CHECK(cudaMalloc(&d_q_f, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_k_f, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_v_f, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_do_f, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_o_f, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_q8, n));
-  CUDA_CHECK(cudaMalloc(&d_k8, n));
-  CUDA_CHECK(cudaMalloc(&d_v8, n));
-  CUDA_CHECK(cudaMalloc(&d_do8, n));
-  CUDA_CHECK(cudaMalloc(&d_qs, rows * 4));
-  CUDA_CHECK(cudaMalloc(&d_ks, rows * 4));
-  CUDA_CHECK(cudaMalloc(&d_vs, rows * 4));
-  CUDA_CHECK(cudaMalloc(&d_dos, rows * 4));
-  CUDA_CHECK(cudaMalloc(&d_delta, rows * 4));
-  CUDA_CHECK(cudaMalloc(&d_lse, rows * 4));
-  CUDA_CHECK(cudaMalloc(&d_dq_acc, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_dk_acc, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_dv_acc, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_dq, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_dk, n * 4));
-  CUDA_CHECK(cudaMalloc(&d_dv, n * 4));
+  CUDA_CHECK(cudaMalloc(&d_q_f, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_k_f, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_v_f, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_do_f, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_o_f, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_q8, nq));
+  CUDA_CHECK(cudaMalloc(&d_k8, nkv));
+  CUDA_CHECK(cudaMalloc(&d_v8, nkv));
+  CUDA_CHECK(cudaMalloc(&d_do8, nq));
+  CUDA_CHECK(cudaMalloc(&d_qs, rows_q * 4));
+  CUDA_CHECK(cudaMalloc(&d_ks, rows_kv * 4));
+  CUDA_CHECK(cudaMalloc(&d_vs, rows_kv * 4));
+  CUDA_CHECK(cudaMalloc(&d_dos, rows_q * 4));
+  CUDA_CHECK(cudaMalloc(&d_delta, rows_q * 4));
+  CUDA_CHECK(cudaMalloc(&d_lse, rows_q * 4));
+  CUDA_CHECK(cudaMalloc(&d_dq_acc, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_dk_acc, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_dv_acc, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_dq, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_dk, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_dv, nkv * 4));
 
-  CUDA_CHECK(cudaMemcpy(d_q_f, q_np.data.data(), n * 4, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_k_f, k_np.data.data(), n * 4, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_v_f, v_np.data.data(), n * 4, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_do_f, do_np.data.data(), n * 4, cudaMemcpyHostToDevice));
-  CUDA_CHECK(cudaMemcpy(d_o_f, o_np.data.data(), n * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_q_f, q_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_k_f, k_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_v_f, v_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_do_f, do_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_o_f, o_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
 
   auto quant = [&]() {
-    quantize_row_kernel<<<(int)rows, 128>>>(d_q_f, d_q8, d_qs, kHeadDim, 0);
-    quantize_row_kernel<<<(int)rows, 128>>>(d_k_f, d_k8, d_ks, kHeadDim, 0);
-    quantize_row_kernel<<<(int)rows, 128>>>(d_v_f, d_v8, d_vs, kHeadDim, 0);
-    quantize_row_kernel<<<(int)rows, 128>>>(d_do_f, d_do8, d_dos, kHeadDim, 1);
+    quantize_row_kernel<<<(int)rows_q, 128>>>(d_q_f, d_q8, d_qs, kHeadDim, 0);
+    quantize_row_kernel<<<(int)rows_kv, 128>>>(d_k_f, d_k8, d_ks, kHeadDim, 0);
+    quantize_row_kernel<<<(int)rows_kv, 128>>>(d_v_f, d_v8, d_vs, kHeadDim, 0);
+    quantize_row_kernel<<<(int)rows_q, 128>>>(d_do_f, d_do8, d_dos, kHeadDim, 1);
   };
 
   CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel,
@@ -211,25 +227,25 @@ int main(int argc, char** argv) {
   printf("grid main = %d x %d x %d  (ksplit=%d, base_grid=%ld)\n", mg.x, mg.y, mg.z,
          ksplit, base_grid);
   const int cvt_threads = 256;
-  const int cvt_blocks = (int)std::min<size_t>((n + cvt_threads - 1) / cvt_threads, 65535);
+  const int cvt_blocks = (int)std::min<size_t>((nq + cvt_threads - 1) / cvt_threads, 65535);
 
   auto run_preprocess = [&]() {
-    lse_mma_kernel<<<lg, THREADS, kLseSmemBytes>>>(d_q8, d_qs, d_k8, d_ks, d_lse, S, H,
+    lse_mma_kernel<<<lg, THREADS, kLseSmemBytes>>>(d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv,
                                                    scale, (int)causal);
     delta_kernel<<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
   };
 
   auto run_all = [&]() {
     quant();
-    CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * 4));
-    CUDA_CHECK(cudaMemset(d_dk_acc, 0, n * 4));
-    CUDA_CHECK(cudaMemset(d_dv_acc, 0, n * 4));
+    CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+    CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+    CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
     run_preprocess();
     fa_bwd_fp8_mma_kernel<<<mg, THREADS, kSmemBytes>>>(
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-        d_dk_acc, d_dv_acc, S, H, scale, (int)causal, ksplit);
+        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
     convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
-                                                d_dv, n);
+                                                d_dv, nq, nkv);
   };
 
   for (int i = 0; i < 3; ++i) run_all();
@@ -265,14 +281,14 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaEventElapsedTime(&ms_pre, ev0, ev1));
   ms_pre /= iters;
 
-  CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * 4));
-  CUDA_CHECK(cudaMemset(d_dk_acc, 0, n * 4));
-  CUDA_CHECK(cudaMemset(d_dv_acc, 0, n * 4));
+  CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+  CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+  CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
   CUDA_CHECK(cudaEventRecord(ev0));
   for (int i = 0; i < iters; ++i)
     fa_bwd_fp8_mma_kernel<<<mg, THREADS, kSmemBytes>>>(
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-        d_dk_acc, d_dv_acc, S, H, scale, (int)causal, ksplit);
+        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
   float ms_main = 0.f;
@@ -281,10 +297,10 @@ int main(int argc, char** argv) {
   printf("[timing] quant %.4f ms | preprocess %.4f ms | main %.4f ms | convert %.4f ms\n",
          ms_quant, ms_pre, ms_main, ms - ms_quant - ms_pre - ms_main);
 
-  std::vector<float> mdq(n), mdk(n), mdv(n);
-  CUDA_CHECK(cudaMemcpy(mdq.data(), d_dq, n * 4, cudaMemcpyDeviceToHost));
-  CUDA_CHECK(cudaMemcpy(mdk.data(), d_dk, n * 4, cudaMemcpyDeviceToHost));
-  CUDA_CHECK(cudaMemcpy(mdv.data(), d_dv, n * 4, cudaMemcpyDeviceToHost));
+  std::vector<float> mdq(nq), mdk(nkv), mdv(nkv);
+  CUDA_CHECK(cudaMemcpy(mdq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(mdk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(mdv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
 
   auto print_cmp = [&](const char* name, const std::vector<float>& mine,
                        const std::vector<float>& ref) {

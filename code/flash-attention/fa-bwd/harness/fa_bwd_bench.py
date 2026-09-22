@@ -150,6 +150,7 @@ def _fp8_q(fp8_dtype, tex):
 
 def te_bwd_fp8(q, k, v, do, causal=True):
     """TE FP8 反向（Q/K/V/S/O=E4M3，dO/dP/dQKV=E5M2 rowwise）；返回反量化后的 fp32 结果。"""
+    import transformer_engine  # noqa: F401  先导主包，transformer_engine_torch 才可被找到
     import transformer_engine_torch as tex
     from transformer_engine.pytorch.cpp_extensions.fused_attn import (
         FusedAttnBackend, fused_attn_bwd, fused_attn_fwd,

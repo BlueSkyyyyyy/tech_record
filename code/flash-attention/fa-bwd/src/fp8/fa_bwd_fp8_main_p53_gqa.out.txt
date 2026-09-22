@@ -1,0 +1,64 @@
+########## b1_s1024_h32_d128_kv4_causal_fp8 ##########
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp8
+B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 75008 bytes (73.2 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 16 x 32 x 1  (ksplit=1, base_grid=512)
+[timing] total(quant+pre+main+cvt) 1.3650 ms  12.59 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0575 ms | preprocess 0.1957 ms | main 1.0341 ms | convert 0.0777 ms
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.994e+02
+  dk   vs ref: max_abs=5.408e-01  max_rel=1.632e+02
+  dv   vs ref: max_abs=7.072e-01  max_rel=9.226e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.050e-01  max_rel=1.879e+02
+  dk   vs te_dk: max_abs=9.572e-01  max_rel=2.488e+02
+  dv   vs te_dv: max_abs=1.432e+00  max_rel=1.645e+02
+########## b1_s1024_h40_d128_kv8_causal_fp8 ##########
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h40_d128_kv8_causal_fp8
+B=1 S=1024 H=40 Hkv=8 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 75008 bytes (73.2 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 16 x 40 x 1  (ksplit=1, base_grid=640)
+[timing] total(quant+pre+main+cvt) 1.6346 ms  13.14 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0746 ms | preprocess 0.2508 ms | main 1.2189 ms | convert 0.0904 ms
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.869e-01  max_rel=1.859e+02
+  dk   vs ref: max_abs=5.390e-01  max_rel=1.523e+02
+  dv   vs ref: max_abs=7.107e-01  max_rel=9.354e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=1.009e+00  max_rel=1.654e+02
+  dk   vs te_dk: max_abs=8.897e-01  max_rel=1.960e+02
+  dv   vs te_dv: max_abs=1.100e+00  max_rel=3.274e+02
+########## b1_s1024_h64_d128_kv1_causal_fp8 ##########
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp8
+B=1 S=1024 H=64 Hkv=1 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 75008 bytes (73.2 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 16 x 64 x 1  (ksplit=1, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 2.2934 ms  14.98 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0935 ms | preprocess 0.3399 ms | main 1.8007 ms | convert 0.0592 ms
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=4.097e-01  max_rel=1.536e+02
+  dk   vs ref: max_abs=1.519e+00  max_rel=2.333e+02
+  dv   vs ref: max_abs=2.127e+00  max_rel=2.814e+02
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.473e-01  max_rel=1.237e+02
+  dk   vs te_dk: max_abs=2.699e+00  max_rel=3.613e+02
+  dv   vs te_dv: max_abs=3.385e+00  max_rel=2.641e+02
+########## b1_s1024_h64_d128_kv4_causal_fp8 ##########
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv4_causal_fp8
+B=1 S=1024 H=64 Hkv=4 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 75008 bytes (73.2 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 16 x 64 x 1  (ksplit=1, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 2.3690 ms  14.50 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0971 ms | preprocess 0.3492 ms | main 1.8513 ms | convert 0.0714 ms
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.760e-01  max_rel=1.785e+02
+  dk   vs ref: max_abs=8.456e-01  max_rel=1.566e+02
+  dv   vs ref: max_abs=1.226e+00  max_rel=1.392e+02
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.379e-01  max_rel=1.634e+02
+  dk   vs te_dk: max_abs=1.530e+00  max_rel=1.959e+02
+  dv   vs te_dv: max_abs=2.524e+00  max_rel=2.117e+02

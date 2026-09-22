@@ -10,6 +10,9 @@
 //   * convert_kernel：fp32 累加缓冲 -> fp32 输出
 // host 侧（npy 读取 / launcher / 自测）见 `fa_bwd_fp8_main.cu`。
 //
+// P5-3（GQA/MQA）：第 h 个 Q 头映射到 KV 头 hkv=h/(H/Hkv)（与 ref 的 repeat_interleave
+// 对齐）。Q/dO/dQ 按 [B,S,H,D] 索引，K/V/dK/dV 按 [B,S,Hkv,D] 索引；Hkv==H 时逐式退化为 MHA。
+//
 // ----- 五个矩阵乘的量化/折算记账（rowwise）-----
 // 记 Q/K/V/dO 的 rowwise scale（over head_dim）为 qs[m],ks[j],vs[j],dos[m]。
 // mma 计算 Σ a_q·b_q（a_q,b_q 为 fp8 原始字节，不含 scale），scale 折回方式：
@@ -192,7 +195,7 @@ static constexpr int KVU = BN * kHeadDim / 4 / THREADS;  // 每线程预取的 u
 
 __device__ __forceinline__ void kv_prefetch(const unsigned char* __restrict__ k8,
                                             const unsigned char* __restrict__ v8,
-                                            int j0, int S, int H, int h, int b, int tid,
+                                            int j0, int S, int Hkv, int hkv, int b, int tid,
                                             uint32_t pk[KVU], uint32_t pv[KVU]) {
 #pragma unroll
   for (int e = 0; e < KVU; ++e) {
@@ -201,7 +204,7 @@ __device__ __forceinline__ void kv_prefetch(const unsigned char* __restrict__ k8
     int jg = j0 + r;
     uint32_t kv = 0, vv = 0;
     if (jg < S) {  // 越界写 0 字节（等价 cvt_e4m3(0)=0x00）
-      size_t idx = (((size_t)(b * S + jg)) * H + h) * kHeadDim + d;
+      size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + d;
       kv = *reinterpret_cast<const uint32_t*>(k8 + idx);
       vv = *reinterpret_cast<const uint32_t*>(v8 + idx);
     }
@@ -265,7 +268,7 @@ __global__ void quantize_row_kernel(const float* __restrict__ x,
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                const unsigned char* __restrict__ k8, const float* __restrict__ ks,
-               float* __restrict__ lse, int S, int H, float scale, int causal) {
+               float* __restrict__ lse, int S, int H, int Hkv, float scale, int causal) {
   extern __shared__ __align__(16) char smem[];
   unsigned char* Qs = reinterpret_cast<unsigned char*>(smem);
   unsigned char* Ks = Qs + LBM * ASLD;
@@ -273,6 +276,8 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
   float* ks_s = qs_s + LBM;
 
   const int mblk = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // P5-3：GQA/MQA——第 h 个 Q 头映射到 KV 头 h/(H/Hkv)（与 ref 的 repeat_interleave 对齐）。
+  const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * LBM;
@@ -298,10 +303,10 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
       int r = i / kHeadDim, d = i % kHeadDim;
       int jg = j0 + r;
       Ks[r * ASLD + d] =
-          (jg < S) ? k8[(((size_t)(b * S + jg)) * H + h) * kHeadDim + d] : cvt_e4m3(0.f);
+          (jg < S) ? k8[(((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + d] : cvt_e4m3(0.f);
     }
     if (tid < LBN)
-      ks_s[tid] = (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * H + h] : 1.f;
+      ks_s[tid] = (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * Hkv + hkv] : 1.f;
     __syncthreads();
 
     // S_tile = Q·Kᵀ（e4m3×e4m3→fp32），每 warp 16×64
@@ -397,7 +402,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                       const float* __restrict__ delta,
                       const float* __restrict__ lse,
                       float* __restrict__ dq_acc, float* __restrict__ dk_acc,
-                      float* __restrict__ dv_acc, int S, int H, float scale,
+                      float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                       int causal, int ksplit) {
   extern __shared__ __align__(16) char smem[];
   unsigned char* Qs  = reinterpret_cast<unsigned char*>(smem);
@@ -427,6 +432,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   //      大 S 时用来削尾波（partial wave）。各部分数学上仍是同一个和，只是 fp 加法次序略变。----
   const int mblk = blockIdx.x / ksplit, part = blockIdx.x % ksplit;
   const int h = blockIdx.y, b = blockIdx.z;
+  // P5-3：GQA/MQA——Q 头 h 对应 KV 头 hkv；Q/dO/dQ 用 H，K/V/dK/dV 用 Hkv。
+  const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int wr = wid / WN, wc = wid % WN;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -463,12 +470,12 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   // ---- O4a：Q/dO 载入与 tile 的 K/V 落盘写的是互不重叠的 smem（Qs/Qt/dOs/dOt vs
   //            Ks/Vs/Kt），故把原来 prologue 的两处 __syncthreads 合并为一处。----
   uint32_t pk[KVU], pv[KVU];
-  kv_prefetch(k8, v8, nt_begin * BN, S, H, h, b, tid, pk, pv);
+  kv_prefetch(k8, v8, nt_begin * BN, S, Hkv, hkv, b, tid, pk, pv);
   kv_commit(Ks, Vs, Kt, pk, pv, tid);
   if (tid < BN) {
     int jg = nt_begin * BN + tid;
-    ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * H + h] : 1.f;
-    vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * H + h] : 1.f;
+    ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
+    vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
   }
   __syncthreads();
 
@@ -476,7 +483,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     const int j0 = nt * BN;
     // ---- O3：预取下一 tile 的 K/V 到寄存器（延迟被本轮 5 个 GEMM 覆盖）----
     const int nnt = nt + 1;
-    if (nnt < nt_end) kv_prefetch(k8, v8, nnt * BN, S, H, h, b, tid, pk, pv);
+    if (nnt < nt_end) kv_prefetch(k8, v8, nnt * BN, S, Hkv, hkv, b, tid, pk, pv);
 
     // ---- (1) S = scale·QKᵀ  →  P = exp(S − LSE)，存 fp32 ----
     {
@@ -611,7 +618,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
           int c = c0 + j * 8 + c2 + (q & 1);
           int jg = j0 + r;
           if (jg < S)
-            atomicAdd(dv_acc + (((size_t)(b * S + jg)) * H + h) * kHeadDim + c,
+            atomicAdd(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + c,
                       acc[0][j][q] * sA[r]);
         }
     }
@@ -633,7 +640,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
           int c = c0 + j * 8 + c2 + (q & 1);
           int jg = j0 + r;
           if (jg < S)
-            atomicAdd(dk_acc + (((size_t)(b * S + jg)) * H + h) * kHeadDim + c,
+            atomicAdd(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + c,
                       acc[0][j][q] * sds3[r] * scale);
         }
     }
@@ -669,8 +676,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       kv_commit(Ks, Vs, Kt, pk, pv, tid);
       if (tid < BN) {
         int jg = nnt * BN + tid;
-        ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * H + h] : 1.f;
-        vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * H + h] : 1.f;
+        ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
+        vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
       }
       __syncthreads();
     }
@@ -684,10 +691,12 @@ __global__ void convert_kernel(const float* __restrict__ dq_acc,
                                const float* __restrict__ dk_acc,
                                const float* __restrict__ dv_acc,
                                float* __restrict__ dq, float* __restrict__ dk,
-                               float* __restrict__ dv, size_t n) {
-  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
-       i += (size_t)gridDim.x * blockDim.x) {
+                               float* __restrict__ dv, size_t nq, size_t nkv) {
+  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < nq;
+       i += (size_t)gridDim.x * blockDim.x)
     dq[i] = dq_acc[i];
+  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < nkv;
+       i += (size_t)gridDim.x * blockDim.x) {
     dk[i] = dk_acc[i];
     dv[i] = dv_acc[i];
   }
