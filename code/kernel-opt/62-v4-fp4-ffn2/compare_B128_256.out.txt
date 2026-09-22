@@ -1,0 +1,68 @@
+===== B=128 DEC=4 =====
+[check K1 GU  ] max_rel=1.430e-07 OK
+[check swiglu ] max_err=4.635e-01 (unit=group scale; <0.51 OK) OK
+[check K2 O   ] max_rel=1.377e-07 (ref~2.53) OK
+[check unperm ] max_rel=9.537e-07 OK
+[check e2e Y ] max_rel=5.789e-08 (ref~2.49) OK
+
+[roof] read all w1+w3 packed (8.46 GB): 2.6364 ms  3207.3 GB/s (95.7% HBM)
+
+== per-stage (B=128, PIPE=1 DEC=4) ==
+  quant_x       0.0035 ms
+  K1 gemv       4.0446 ms  weights 8.98 GB  2221.3 GB/s (66.3% HBM)
+  swiglu+quant  0.0079 ms
+  K2 gemv       2.3988 ms  weights 4.49 GB  1872.6 GB/s (55.9% HBM)
+  unpermute     0.0156 ms
+  ---- sum      6.4705 ms  (weights 13.48 GB, roofline 4.0200 ms, 62.1% of roof)
+  end-to-end    6.4993 ms  (kernel sum 6.4705)
+===== B=256 DEC=4 =====
+[check K1 GU  ] max_rel=1.031e-07 OK
+[check swiglu ] max_err=4.985e-01 (unit=group scale; <0.51 OK) OK
+[check K2 O   ] max_rel=6.979e-08 (ref~2.53) OK
+[check unperm ] max_rel=9.537e-07 OK
+[check e2e Y ] max_rel=1.023e-07 (ref~2.92) OK
+
+[roof] read all w1+w3 packed (8.46 GB): 2.6365 ms  3207.2 GB/s (95.7% HBM)
+
+== per-stage (B=256, PIPE=1 DEC=4) ==
+  quant_x       0.0044 ms
+  K1 gemv       4.8413 ms  weights 8.98 GB  1855.7 GB/s (55.4% HBM)
+  swiglu+quant  0.0209 ms
+  K2 gemv       2.7083 ms  weights 4.49 GB  1658.7 GB/s (49.5% HBM)
+  unpermute     0.0346 ms
+  ---- sum      7.6095 ms  (weights 13.48 GB, roofline 4.0200 ms, 52.8% of roof)
+  end-to-end    7.6441 ms  (kernel sum 7.6095)
+===== B=128 DEC=8 =====
+[check K1 GU  ] max_rel=1.430e-07 OK
+[check swiglu ] max_err=4.635e-01 (unit=group scale; <0.51 OK) OK
+[check K2 O   ] max_rel=1.377e-07 (ref~2.53) OK
+[check unperm ] max_rel=9.537e-07 OK
+[check e2e Y ] max_rel=1.321e-07 (ref~2.49) OK
+
+[roof] read all w1+w3 packed (8.46 GB): 2.6376 ms  3205.8 GB/s (95.6% HBM)
+
+== per-stage (B=128, PIPE=1 DEC=8) ==
+  quant_x       0.0035 ms
+  K1 gemv       3.3798 ms  weights 8.98 GB  2658.2 GB/s (79.3% HBM)
+  swiglu+quant  0.0079 ms
+  K2 gemv       2.2405 ms  weights 4.49 GB  2005.0 GB/s (59.8% HBM)
+  unpermute     0.0156 ms
+  ---- sum      5.6472 ms  (weights 13.48 GB, roofline 4.0200 ms, 71.2% of roof)
+  end-to-end    5.6438 ms  (kernel sum 5.6472)
+===== B=256 DEC=8 =====
+[check K1 GU  ] max_rel=1.031e-07 OK
+[check swiglu ] max_err=4.985e-01 (unit=group scale; <0.51 OK) OK
+[check K2 O   ] max_rel=6.979e-08 (ref~2.53) OK
+[check unperm ] max_rel=7.153e-07 OK
+[check e2e Y ] max_rel=1.619e-07 (ref~2.92) OK
+
+[roof] read all w1+w3 packed (8.46 GB): 2.6365 ms  3207.2 GB/s (95.7% HBM)
+
+== per-stage (B=256, PIPE=1 DEC=8) ==
+  quant_x       0.0043 ms
+  K1 gemv       4.2253 ms  weights 8.98 GB  2126.3 GB/s (63.4% HBM)
+  swiglu+quant  0.0207 ms
+  K2 gemv       2.5937 ms  weights 4.49 GB  1732.0 GB/s (51.7% HBM)
+  unpermute     0.0343 ms
+  ---- sum      6.8783 ms  (weights 13.48 GB, roofline 4.0200 ms, 58.4% of roof)
+  end-to-end    6.8929 ms  (kernel sum 6.8783)

@@ -1,0 +1,10 @@
+===== K1 DEC=4 inst =====
+    sm__inst_executed.sum                   inst   2531303424
+    smsp__inst_executed_pipe_alu.sum        inst   1496678400
+    smsp__inst_executed_pipe_fma.sum        inst    334503936
+    smsp__inst_executed_pipe_lsu.sum        inst    637157376
+===== K1 DEC=8 inst =====
+    sm__inst_executed.sum                   inst   2063499264
+    smsp__inst_executed_pipe_alu.sum        inst   1230151680
+    smsp__inst_executed_pipe_fma.sum        inst    648437760
+    smsp__inst_executed_pipe_lsu.sum        inst    108601344

@@ -1,0 +1,4 @@
+decode_word_prmt exhaustive: bad=0 OK
+PRMT selector field behavior (1 = 按 v&7 回绕):
+  0:wrap 1:wrap 2:wrap 3:wrap 4:wrap 5:wrap 6:wrap 7:wrap 8:wrap 9:wrap 10:wrap 11:wrap 12:wrap 13:wrap 14:wrap 15:wrap 
+  -> field 0-3 取 a、4-7 取 b、8-15 回绕到 v&7（bit3 被忽略）
