@@ -739,6 +739,30 @@
     `..._o8b_stall_lse_bal_s4096.out.txt`、`src/fp16/fa_bwd_fp16_o8b_fa3_te_baseline.out.txt`；
     文档 `docs/01` §13、`docs/04` §2.1/§3。
 
+- 2026-09-23（第三十二轮）：**O8b-bf16 完成（bf16 LSE 负载均衡 + `cp.async`，端到端 1.26×；O8b 全部收口）**。
+   - 把 fp16 的 O8b **逐字 dtype 参数化**到 bf16：新增 `lse_mma_kernel_bal<HD,PIPE>`
+     （`__half`→bf16、`__float2half`→`__float2bfloat16`），① 镜像配对（`m` 与 `nblk-1-m`，
+     工作量恒 `nblk+1`、grid.x 64→32）；② `PIPE=1` K 用 `cp.async.cg` 16B 双缓冲。仅 causal
+     走新 kernel，非 causal 走 O8 原版。单/两文件 device 代码逐字一致（脚本核对）。
+   - **消融（同 session，lse-only）**：O8 0.9696 → 镜像配对(单缓冲) 0.4524ms（**2.14×**）
+     → 镜像配对+cp.async 0.3503ms（**2.77×**）；S=512 1.38×、GQA kv4 2.06×。
+     收益主要来自负载均衡，cp.async 再叠加 ~1.29×（与 fp16 一致）。
+   - **数值与 O5b/O8/O6/O6b 逐位相同**（S=512 9.001/12.61/13.65e-3；S=4096 15.10/13.40/16.31e-3；
+     GQA kv4 12.01/21.25/31.56e-3），单/两文件逐指标一致。
+   - **性能**（同 session，端到端）：preprocess S4096 0.993→**0.392ms**；total S4096
+     2.961→**2.343ms（58.67 TF，O6b 46.4 TF）**、S512 0.186→**0.160ms**、GQA kv4
+     0.576→**0.482ms（35.66 TF）**。同 session 纯反向 FA3 S4096 **0.3194ms/861TF**、TE 0.4419/622；
+     GQA kv4 FA3 0.0825ms/416 ⇒ ours total 为 FA3 的 **6.8%**（O6b 5.4%）、时间比 7.3×；
+     GQA 8.6%、5.8×。
+   - ncu（lse_bal, S=4096）：Duration **356.4µs**、DRAM 3.07% / L1TEX 32.40% / L2 26.77% /
+     **Compute 60.40%**、64 regs / 52.22KB smem（**4 CTA/SM**，occ 22.91%）/ Waves **0.97**；
+     stall `wait 1.57 + short 1.33 + not_selected 0.79 + long 0.34`，与 fp16 O8b 逐项一致。
+     新墙 = **Compute 60% + smem 依赖**。
+   - 原始输出 `src/bf16/fa_bwd_bf16_mma_main_o8b_{s512,s4096,gqa_kv4}.out.txt`、
+     `..._mma_onefile_o8b_{s512,s4096}.out.txt`、`..._o8b_ncu_lse_bal_s4096.out.txt`、
+     `..._o8b_stall_lse_bal_s4096.out.txt`、`src/bf16/fa_bwd_bf16_o8b_fa3_te_baseline.out.txt`；
+     文档 `docs/01b` §6i、`docs/04` §2.2/§3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -783,11 +807,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `lse_mma_kernel<128>`（`mma.m16n8k16` QKᵀ + online-softmax + 4-lane `shfl`）+ 独立
       `delta_kernel<128>`；preprocess 17–70×、端到端 **4.4–13.2×**（S4096 total 73.3→5.58ms，
       24.6 TF；瓶颈回落 main），数值与 O5/O5b 逐位相同。详见 `docs/01` §11、`docs/01b` §6f。
-- [x] **O8b** LSE 预处理负载均衡 + `cp.async` 双缓冲。**已完成（第三十一轮，fp16）**：
+- [x] **O8b** LSE 预处理负载均衡 + `cp.async` 双缓冲。**已完成（第三十一/三十二轮，fp16+bf16）**：
       镜像配对（`m` 与 `nblk-1-m`，工作量恒 `nblk+1`）+ K 的 `cp.async.cg` 16B 双缓冲；
-      **lse S4096 0.985→0.348ms（2.81×）**、端到端 **2.952→2.336ms（58.8 TF，FA3 的 6.9%）**，
-      `long_scoreboard` 2.19→0.34、Waves 1.29→0.97，数值逐位相同。详见 `docs/01` §13。
-      bf16 同构改造（O8b-bf16）留待下一轮。
+      **lse S4096 0.985→0.348ms（2.81×，fp16）/ 0.970→0.350ms（2.77×，bf16）**、
+      端到端 **2.952→2.336ms（58.8 TF，FA3 的 6.9%，fp16）/ 2.961→2.343ms（58.7 TF，6.8%，bf16）**，
+      `long_scoreboard` 2.19→0.34、Waves 1.29→0.97，数值逐位相同。详见 `docs/01` §13、`docs/01b` §6i。
 - [ ] **O9**（对标 FA3）TMA + `wgmma` + warp specialization 多级流水。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
@@ -819,10 +843,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    3 CTA/SM；main S4096 1.900→1.860ms、GQA kv4 0.380→0.357ms（S512 单波走 O6，host 自动选）。
 >    ncu 新墙 = **L1/L2 吞吐 + `wait`**（occ 已不是瓶颈）。
 > 5. **O8b**：LSE 预处理的负载均衡 + `cp.async` 双缓冲（O6b 后 preprocess 又占端到端 34%）。
->    **已完成（第三十一轮，fp16）**：因果下第 `mblk` 个 CTA 做 `mblk+1` 个 K tile（尾波 50%），
+>    **已完成（第三十一/三十二轮，fp16+bf16）**：因果下第 `mblk` 个 CTA 做 `mblk+1` 个 K tile（尾波 50%），
 >    改**镜像配对**（每 CTA 做 `m` 与 `nblk-1-m`，工作量恒 `nblk+1`）+ K 的 `cp.async.cg` 双缓冲；
->    **lse S4096 0.985→0.348ms（2.81×）**、端到端 **2.952→2.336ms（58.8 TF，FA3 的 6.9%）**，
->    数值逐位相同。bf16 同构改造留待下一轮（O8b-bf16）。
+>    **lse S4096 0.985→0.348ms（2.81×）/ 0.970→0.350ms（2.77×）**、端到端 **2.952→2.336ms（58.8 TF，6.9%）/
+>    2.961→2.343ms（58.7 TF，6.8%）**，数值逐位相同。fp16/bf16 单/两文件均完成。
 > 6. **O7**：dQ/dK/dV 去 `atomicAdd`（分块 accum + convert；fp8 已做，移植）。
 >    **注意（本轮分析）**：fp16/bf16 的 dK/dV 原子流量与 dQ **对称**——无论 Q-resident 还是
 >    KV-resident，归约贡献总数都是 `S²/2`（每元素被 atomic `~S/BM` 次），单靠换归约维收益有限；

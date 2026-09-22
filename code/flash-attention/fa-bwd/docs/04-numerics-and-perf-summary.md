@@ -193,6 +193,16 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 同 session FA3 S4096 0.3205ms/858 ⇒ ours 为 FA3 的 **5.4%**；数值逐位相同。
 > 详见 `01b-bf16-bwd-impl.md` §6h。
 
+> **O8b（LSE 负载均衡 + `cp.async`，与 fp16 逐字同构）已完成**：镜像配对（`m` 与 `nblk-1-m`，
+> 工作量恒 `nblk+1`）+ K 的 `cp.async.cg` 16B 双缓冲。**lse S4096 0.970→0.350ms（2.77×）**、
+> S512 1.38×、GQA kv4 2.06×（收益主要来自负载均衡、cp.async 再叠 1.29×）；**preprocess
+> S4096 0.993→0.392ms**；端到端 **total S4096 2.961→2.343ms（58.67 TF，峰值 5.9%）**、
+> S512 0.186→0.160ms、GQA kv4 0.576→0.482ms（35.66 TF）。数值与 O5b/O8/O6/O6b **逐位相同**。
+> ncu（lse,S4096）：Duration 1.03ms→**356µs**、`long_scoreboard` 2.19→0.34、Waves 1.29→**0.97**、
+> Compute 39.5%→**60.4%**、occ 22.9%（52.2KB smem/4 CTA/SM）；新墙 = **Compute 60% + smem 依赖**。
+> 同 session 纯反向 FA3 S4096 **0.3194ms/861TF** ⇒ ours total 为 FA3 的 **6.8%**、时间比 7.3×；
+> GQA kv4 FA3 0.0825ms/416 ⇒ ours 8.6%、时间比 5.8×。详见 `01b-bf16-bwd-impl.md` §6i。
+
 ### 2.3 fp8（峰值 1978.8 TFLOPS；FA 无反向 FP8，仅对标 TE）
 
 | shape | ours total | ours main | TE FP8 |
@@ -296,6 +306,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp16 | **lse_mma（O8, S=4096）** | 1.06% | 23.42% | 39.53% | 28.49%（80 regs） | 1.29 | long_scoreboard 2.17、wait 1.34、No Eligible 42.9% | **全局访存延迟 + 低 occupancy/尾波** |
 | bf16 | **lse_mma（O8, S=4096）** | 1.13% | 23.37% | 44.70% | 28.41% | 1.29 | long_scoreboard（同 fp16） | 同 fp16 |
 | fp16 | **lse_mma_bal<128,1>（O8b, S=4096）** | 3.07% | 32.36% | **60.43%** | 22.89%（52.2KB, 4 CTA/SM, 64 regs） | **0.97** | long 0.34、wait 1.57、short 1.33 | **Compute 60% + smem 依赖**（镜像配对消尾波、cp.async 消 long_scoreboard） |
+| bf16 | **lse_mma_bal<128,1>（O8b, S=4096）** | 3.07% | 32.40% | **60.40%** | 22.91%（52.2KB, 4 CTA/SM, 64 regs） | **0.97** | long 0.34、wait 1.57、short 1.33 | 同 fp16（与 fp16 逐项一致） |
 | fp16 | **delta（O8, S=4096）** | 24.80% | 73.50% | 71.91% | 71.90%（17 regs） | 31.03 | — | 访存/算力均衡的轻量归约（<1% 端到端） |
 | fp16 | **mma main（O6, S=4096, cp.async 双缓冲）** | 3.31% | 65.19% | 27.07% | 11.83%（**83.97KB, 2 CTA/SM**, 182 regs） | 3.88 | **long_scoreboard 7.35→1.12**；wait 1.95、short_scoreboard 0.79、barrier 0.10 | **fixed-latency(`wait`) + short_scoreboard(smem→ldmatrix) + L1/TEX**（全局访存延迟已被 cp.async 消掉） |
 | bf16 | **mma main（O6, S=4096, cp.async 双缓冲）** | 3.43% | 64.96% | 25.49% | 11.79%（83.97KB, 2 CTA/SM） | 3.88 | long_scoreboard 同上降到 ~1、wait 主导 | 同 fp16（与 fp16 逐项一致） |
