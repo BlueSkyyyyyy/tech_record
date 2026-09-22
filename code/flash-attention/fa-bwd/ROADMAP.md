@@ -65,11 +65,16 @@
 - [x] **P2-3** bf16 文档（`docs/01b-bf16-bwd-impl.md`：P2-1 + P2-2 两文件一节）
 ### P3 fp8 反向（最重点）
 
-- [ ] **P3-1** `docs/02-fp8-bwd-design.md`：dO/dP/dQKV 的量化与 scaling 布局（对齐 TE 口径）
-- [ ] **P3-2** 单文件 fp8 反向（mma e5m2/e4m3，rowwise scale，fp32 累加）；编译运行
-- [ ] **P3-3** 对拍：vs fp32 ref（容差）与 vs TE fp8；给出误差统计
+- [x] **P3-1** `docs/02-fp8-bwd-design.md`：dO/dP/dQKV 的量化与 scaling 布局（对齐 TE 口径）
+- [x] **P3-2** 单文件 fp8 反向（golden：E4M3/E5M2 + rowwise scale + fp32 累加，标量）；编译运行
+      → `src/fp8/fa_bwd_fp8_onefile.cu`。**说明**：本阶段为正确性优先的标量 golden，
+      真实量化但不做 mma；mma.m16n8k32 版留给 P3-4（与 P1/P2 先标量后张量核的路线一致）。
+- [x] **P3-3** 对拍：vs fp32 ref 与 vs TE fp8；给出误差统计（3 个 shape）
+      → max_abs 全部 ~0.3–0.9，与 TE 同量级；`docs/03-fp8-bwd-impl.md` §2
 - [ ] **P3-4** ncu + 性能 vs TE fp8；找 bound 并继续优化
-- [ ] **P3-5** 两文件版 + `docs/03-fp8-bwd-impl.md`
+      （ncu/性能基线已完成：bound=smem bank conflict+低 occupancy；**优化待做**：
+       mma + padding + 提 occupancy）
+- [ ] **P3-5** 两文件版 + `docs/03-fp8-bwd-impl.md`（单文件实现分析已写在 03）
 
 ### P4 文档 / 汇总
 
@@ -150,11 +155,34 @@
     原始输出见 `src/bf16/fa_bwd_bf16_main_{s512,s4096,ncu_main}.out.txt`。
   - `docs/01b-bf16-bwd-impl.md` 增加「两文件版（P2-2）」一节。
 
+- 2026-09-22（第六轮）：**P3-1/P3-2/P3-3 完成（fp8 单文件 golden 打通）**。
+  - 设计 `docs/02-fp8-bwd-design.md`：Q/K/V=E4M3 rowwise、dO/dP=E5M2 rowwise、P=E4M3(scale=1)、
+    dS/LSE/D/累加 fp32；相对 TE 的差异（本版 dS/输出保留 fp32）与误差来源逐条写清。
+  - 实现 `src/fp8/fa_bwd_fp8_onefile.cu`（四段式：quantize_row + preprocess + main + convert）：
+    真实做 FP8 量化/反量化（`__nv_cvt_float_to_fp8`/`__nv_cvt_fp8_to_halfraw`），fp32 标量累加
+    模拟张量核。**关键坑**：FP8 转换不能用 `float(fp8)`（该工具链返回位模式）。
+  - `harness/fa_bwd_bench.py` 扩展 `--dtype fp8`：dump FP8 case（TE FP8 参考 `te_*`）+ TE FP8 bench。
+  - 对拍（max_abs）：S=512 ours-vs-ref 4.8e-1/6.4e-1/3.3e-1，TE-vs-ref 4.9e-1/4.0e-1/5.9e-1；
+    S=4096 ours-vs-ref 4.6e-1/5.0e-1/3.8e-1，TE-vs-ref 3.8e-1/3.7e-1/6.7e-1。ours-vs-TE 同量级
+    ⇒ 与 TE 口径一致，无系统误差（ref 梯度 amax 3–6，相对量级 ~8–20%）。
+  - ncu（main, S=512）：DRAM 0.06%、L2 0.26%、Compute 4.98%、**L1/TEX 75.96%**（90% 多余
+    wavefront）、occupancy 6.25%（68KB smem 卡 1 CTA/SM）、Waves 0.32、**69% stall = MIO scoreboard**。
+    bound = **smem 访问（bank conflict + FP8 解码）+ 低 occupancy**。
+  - 性能（ours total / TE FP8 / FP8 峰值占比）：S=512 7.17ms·0.30TF / 0.072ms·29.8TF；
+    S=1024H32 37.5ms·0.46TF / 0.136ms·126TF；S=4096 265.9ms·0.52TF / 0.451ms·304TF（15.4%）。
+    golden 约 TE 的 ~0.3%、峰值的 ~0.02%；mma 优化是 P3-4。
+  - 文档 `docs/03-fp8-bwd-impl.md`；原始输出 `src/fp8/*.out.txt`（含 ncu/refbench）。
+
 ## 下一步（明确到可执行）
 
-- [ ] **P3-1**：`docs/02-fp8-bwd-design.md`：对齐 TE 口径写清 dO/dP/dQKV 的量化与 scaling 布局
-      （dO E5M2 + rowwise scale，P/S 走 E4M3，fp32 累加，`scale_a*scale_b` 折回）。
-- [ ] 之后按 P3-2..P3-5 推进 fp8 单文件 → 对拍 → ncu/性能 → 两文件 + 文档（**fp8 为最重点**）。
+- [ ] **P3-4（fp8 最重点的优化）**：把 golden 标量版升级为张量核版：
+      - `docs/02` §3.2 的 rowwise `sa*sb` 在 epilogue 折回；用 `mma.m16n8k32`（E5M2×E4M3）；
+      - 用 `ldmatrix`（fp8 的 2 个相邻 = 1 个 b16）从 smem 取操作数，**smem 行距 padding 消 bank
+        conflict**（当前 90% 多余 wavefront）；
+      - 降 smem 提 occupancy（当前 68KB→1 CTA/SM）；目标先把 TE FP8 的 ~0.3% 提到有意义量级。
+      - 先用最小 GEMM 复现验证 fp8 mma 布局，再合入反向。
+- [ ] **P3-5**：fp8 两文件拆分（`fa_bwd_fp8_kernels.cuh` + `fa_bwd_fp8_main.cu`），行为一致。
+- [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 - [ ] （backlog，性能）**preprocess 已成 S=4096 端到端瓶颈**（69ms > main 42ms）：对 LSE 点积分块 +
       向量化（`__ldg`/float4），或把 LSE 并入前向摊薄；main 侧继续降 smem 提 occupancy、
       上张量核（mma）+ 流水；fp16 也可同步加 K/V padding。
