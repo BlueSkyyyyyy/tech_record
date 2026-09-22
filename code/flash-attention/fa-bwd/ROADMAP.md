@@ -455,9 +455,9 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       （P5-1/P5-2 的 fp16 改造已完成：`Hkv` 入参 + `hkv=h/(H/Hkv)` 映射 + `dk/dv` 按 `B*S*Hkv*D`
       分配、`convert` 收 `n_q/n_kv`；`HD`/`BM` 模板。bf16 可直接照搬，fp8 在已优化的 mma 路径上
       加同一映射与更大 head_dim 的分块。）
-      **进度（第十八轮）**：fp8 的 `Hkv`（GQA/MQA）已完成（单/两文件，`docs/03` §13、`docs/04` §7.4）。
-      剩余：① **bf16 复用 `Hkv`**（照搬 fp16/bf16 标量路径，工作量小）；② **fp8/bf16 的 `HD`（MLA
-      head_dim=512）**（fp8 的 mma 路径需按 `BM/BN` 容量重新分块，工作量大）。
+      **进度（第十八/十九轮）**：fp8 的 `Hkv`（GQA/MQA）已完成（单/两文件，`docs/03` §13、`docs/04` §7.4）；
+      **bf16 的 `Hkv`（GQA/MQA）也已完成**（`docs/01b` §6c、`docs/04` §7.5，4 形状对拍与 ref/FA/TE 同量级）。
+      剩余：**fp8/bf16 的 `HD`（MLA head_dim=512）**（fp8 的 mma 路径需按 `BM/BN` 容量重新分块，工作量大）。
 - [x] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能 —— 第十八轮完成。
 - [ ] **MLA 优化（backlog）**：P5-2 已给出 fp16 的 ref 对拍与 ours 性能数字；下一步是**优化**——
       把 MLA smem 降下来冲 2 CTA/SM、张量核版本，对标 FlashMLA 的分块/流水。
