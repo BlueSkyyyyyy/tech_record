@@ -15,10 +15,11 @@ enableEmoji = true
   ShowCodeCopyButtons = true
   ShowToc = true
   description = "AI 训练系统 / 算子 / 优化器的学习笔记与代码"
-  seriesOrder = ["flash-attention", "megatron-code", "te-perf", "随笔"]
+  seriesOrder = ["flash-attention", "fa-bwd", "megatron-code", "te-perf", "随笔"]
 
 [params.seriesTitles]
   "flash-attention" = "Flash Attention"
+  "fa-bwd" = "FlashAttention 反向工程"
   "megatron-code" = "Megatron-LM 源码精读"
   "te-perf" = "Transformer Engine 性能"
   "随笔" = "随笔"

@@ -27,7 +27,9 @@ PROMPT='你是 tech_record 仓库的长期自驱 agent，负责推进「flash-at
 6. 更新 docs/ 分析文档（实现与优化逐条说明、ncu bound 结论）与 ROADMAP（状态/进度/下一步），git add/commit/push，必要时验证线上（本项目文档不上站点，可只 push 代码与 md）。
 关键要求：**单文件 + 两文件**两种形式；fp16、bf16、fp8（fp8 最重点，参考 TE 的 E4M3/E5M2 + rowwise scaling）。
 **不要创建 AUTOPILOT_STOP（只有用户能停）。** 若遇无法解决的阻塞，写入 ROADMAP「阻塞」并结束本轮。
-全程不要请求人工确认、不要用 question 类工具。GPU 用 kernel_lab 容器，ncu 必须在该容器里跑，git push 需要代理（NO_PROXY 已含本地 vLLM）。'
+全程不要请求人工确认、不要用 question 类工具。GPU 用 kernel_lab 容器，ncu 必须在该容器里跑，git push 需要代理（NO_PROXY 已含本地 vLLM）。
+**安全**：不要在仓库任何文件（文章/代码/注释/commit message）里出现目标 AI 卡的实际代号，一律用「目标卡」指代。
+**博客**：code/flash-attention/fa-bwd/docs/*.md 会通过 fa_include shortcode 自动内联到博客专题，改 docs 即等于更新博客。'
 
 start() {
   if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
