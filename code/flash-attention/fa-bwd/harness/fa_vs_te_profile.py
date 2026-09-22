@@ -34,6 +34,15 @@ def fa_run(q, k, v, do, causal):
     o.backward(do)
 
 
+def fa3_run(q, k, v, do, causal):
+    from flash_attn_3 import flash_attn_interface as f3
+    q2 = q.detach().clone().requires_grad_(True)
+    k2 = k.detach().clone().requires_grad_(True)
+    v2 = v.detach().clone().requires_grad_(True)
+    o = f3.flash_attn_func(q2, k2, v2, causal=causal)
+    o.backward(do)
+
+
 def te_run(q, k, v, do, causal):
     from transformer_engine.pytorch.cpp_extensions.fused_attn import (
         FusedAttnBackend, fused_attn_bwd, fused_attn_fwd,
@@ -88,7 +97,8 @@ def main():
     sh = dict(B=B, S=S, H=H, D=D, Hkv=Hkv, dt=dt)
     print(f"shape={sh} causal={causal}")
     q, k, v, do = build(sh)
-    profile_kernels(lambda: fa_run(q, k, v, do, causal), "FA 2.7.4 bwd")
+    profile_kernels(lambda: fa_run(q, k, v, do, causal), "FA 2.7.4 bwd (SM80)")
+    profile_kernels(lambda: fa3_run(q, k, v, do, causal), "FA3 bwd (SM90)")
     profile_kernels(lambda: te_run(q, k, v, do, causal), "TE 2.14 bwd")
 
 

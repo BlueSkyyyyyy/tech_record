@@ -1,0 +1,25 @@
+shape={'B': 1, 'S': 4096, 'H': 16, 'D': 128, 'Hkv': 16, 'dt': torch.float16} causal=True
+
+===== FA 2.7.4 bwd (SM80): total 1.0563 ms/call, 5 kernels =====
+     680.89 us  void flash::flash_bwd_dq_dk_dv_loop_seqk_parallel_kernel<Flash_bwd_kernel_traits<128, 64, 128, 8, 2,
+     294.19 us  void flash::flash_fwd_kernel<Flash_fwd_kernel_traits<128, 128, 64, 4, false, false, cutlass::half_t,
+      36.17 us  Memcpy DtoD (Device -> Device)
+      23.57 us  void flash::flash_bwd_convert_dq_kernel<Flash_bwd_kernel_traits<128, 64, 128, 8, 2, 4, 2, false, fal
+      21.53 us  void flash::flash_bwd_dot_do_o_kernel<true, Flash_bwd_kernel_traits<128, 64, 128, 8, 2, 4, 2, false,
+
+===== FA3 bwd (SM90): total 0.4642 ms/call, 6 kernels =====
+     283.50 us  void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnBwdSm90<flash::CollectiveMainloopBwdS
+     106.67 us  void cutlass::device_kernel<flash::enable_sm90<flash::FlashAttnFwdSm90<flash::CollectiveMainloopFwdS
+      35.96 us  Memcpy DtoD (Device -> Device)
+      19.80 us  void cutlass::device_kernel<flash::FlashAttnBwdPreprocess<cute::tuple<cute::C<64>, cute::C<128> >, c
+      17.22 us  void cutlass::device_kernel<flash::FlashAttnBwdPostprocessConvertdQ<cute::tuple<cute::C<64>, cute::C
+       1.07 us  void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<int>, std::array<char*, 1u
+
+===== TE 2.14 bwd: total 0.5925 ms/call, 7 kernels =====
+     397.12 us  cudnn_generated_fort_native_sdpa_sm90_flash_bprop_wgmma_f16_knob_26_64x64x128_1x4x1_cga1x1x1_kernel0
+     148.23 us  cudnn_generated_fort_native_sdpa_sm90_flash_fprop_wgmma_f16_knob_7_64x128x128_4x1x1_cga1x1x1_kernel0
+      22.13 us  void cudnn::fusion::compute_dot_do_o_specialized<false, 128>(void const*, void const*, void*, void*,
+      21.02 us  void cudnn::fusion::convert_dq_to_16bits<false>(void const*, void*, unsigned int, unsigned int, unsi
+       2.08 us  Memset (Device)
+       0.98 us  void (anonymous namespace)::elementwise_kernel_with_index<int, at::native::arange_cuda_out(c10::Scal
+       0.96 us  transformer_engine::fused_attn::extract_seed_and_offset(long*, bool, long*, unsigned long, long*, un

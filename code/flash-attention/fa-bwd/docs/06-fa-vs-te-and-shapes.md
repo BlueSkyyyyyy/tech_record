@@ -122,7 +122,11 @@ Compute 都更高，L1/TEX 更低（更省片上流量）——与「wgmma 一�
 > **不是测试方法错**（口径已按 §1 修正），而是 **`flash_attn` 2.7.4 pip 包 = FA2 = SM80(Ampere)
 > kernel（mma.sync + cp.async）**，而 **TE 在 H100 上走 cuDNN 的 SM90 Hopper kernel（wgmma + TMA）**。
 > FA 的 Hopper 实现在 **FA3**（仓库 `hopper/`，包名 `flash_attn_3`），装的是 2.7.4，没有 FA3 内核。
-> 加上 FA 对 GQA/MQA 多一个 `reduce` kernel，所以小 shape 差距更明显。**要对标 TE 的 FA，应该用 FA3。**
+> 加上 FA 对 GQA/MQA 多一个 `reduce` kernel，所以小 shape 差距更明显。
+
+> **⚠️ 更正（见 `docs/07-fa3-sm90-comparison.md`）**：把 **FA3（SM90）编译出来重测**后，结论反转为
+> **FA3 比 TE 更快**（GQA/MQA 355–438 TF vs TE 307–356 TF；MHA S=4096 **850 TF vs 618 TF**）。
+> 本文「FA 比 TE 慢」仅对**FA2（SM80）**成立。**H100 上的正解对标是 FA3**，请以 `docs/07` 为准。
 
 ---
 
