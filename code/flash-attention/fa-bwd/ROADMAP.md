@@ -53,13 +53,12 @@
 - [x] **P1-2** 与 ref/FA/TE 数值对拍（读 dump 的输入，比 ref 输出），记录 max diff
       → S=512 / S=4096 均 max_abs ~1.5–2.2e-3，与 FA/TE 同量级
 - [x] **P1-3** ncu 剖析：bound = smem 访问（L1/TEX 53.5%、75% 多余 wavefront）+ occupancy（96KB smem→1 CTA/SM）；DRAM 仅 0.21%；与 FA2/TE 性能对比完成
-- [ ] **P1-4** 两文件版拆分为 `_kernels.cuh` + `_main.cu`，行为一致
+- [x] **P1-4** 两文件版拆分为 `_kernels.cuh` + `_main.cu`，行为一致（逐指标核对无差异）
 - [x] **P1-5** `docs/01-fp16-bwd-impl.md`：实现与优化逐条说明
 
 ### P2 bf16 反向
 
 - [ ] **P2-1..5** 同 P1（复用 fp16 骨架，dtype 参数化）
-
 ### P3 fp8 反向（最重点）
 
 - [ ] **P3-1** `docs/02-fp8-bwd-design.md`：dO/dP/dQKV 的量化与 scaling 布局（对齐 TE 口径）
@@ -115,12 +114,21 @@
     occupancy 6.25%（96KB smem 卡 1 CTA/SM）、waves 0.48。bound = **smem 访问 + 低 occupancy**，非带宽/算力。
   - 性能：ours 0.60 TF(S512) / 0.99 TF(S4096)，仅为 FA 的 ~0.8%、TE 的 ~0.4%（正确性优先的标量实现）。
   - 文档 `docs/01-fp16-bwd-impl.md` 完成；修复 `scripts/lab.sh` 相对路径、`scripts/ncu.sh` 的 `--` 分隔。
+- 2026-09-22（第三轮）：**P1-4 完成（fp16 全部收尾）**。
+  - 拆成两文件：`src/fp16/fa_bwd_fp16_kernels.cuh`（device：preprocess/main/convert + 常量）
+    + `src/fp16/fa_bwd_fp16_main.cu`（host：npy 读取/launcher/自测）；kernel 代码逐字未改。
+  - 逐指标核对与单文件**无差异**：S=512 dq/dk/dv max_abs 1.671/1.680/1.899e-3；
+    S=4096 1.499/1.572/2.225e-3；ncu DRAM 0.21% / L1TEX 53.52% / Compute 8.45% / occ 6.25%。
+    原始输出见 `src/fp16/fa_bwd_fp16_main_{s512,s4096,ncu_main}.out.txt`。
+  - `docs/01-fp16-bwd-impl.md` 增加「两文件版（P1-4）」一节。
 
 ## 下一步（明确到可执行）
 
-- [ ] **P1-4**：把单文件拆成两文件 `src/fp16/fa_bwd_fp16_kernels.cuh`（device：preprocess/main/convert）
-  + `src/fp16/fa_bwd_fp16_main.cu`（host：npy 读取/launcher/自测），行为与单文件逐位一致；用 `run.sh` 跑通对拍。
-- [ ] 之后进入 P2 bf16（复用 fp16 骨架做 dtype 参数化），再做 P3 fp8（重点）。
+- [ ] **P2-1**：以 `fa_bwd_fp16_kernels.cuh` 为模板做 dtype 参数化（`__half`→模板 `T`），
+  产出 bf16 单文件 `src/bf16/fa_bwd_bf16_onefile.cu`；用 `run.sh` 编译，读同一 dump 目录换 dtype
+  （需先 `harness/fa_bwd_bench.py dump --dtype bf16`），对拍 ref/FA/TE，记录 max diff（bf16 容差 ~1e-2）。
+- [ ] **P2-2**：bf16 两文件拆分为 `_kernels.cuh` + `_main.cu`，行为一致。
+- [ ] 之后进入 P3 fp8（重点，参考 TE 的 E4M3/E5M2 + rowwise scaling）。
 - [ ] （backlog，性能）消 smem bank conflict（行距 padding/向量化 half2）、降低 smem 提高 occupancy、
       上张量核（mma）+ 流水；preprocess 的 LSE 重算开销后续考虑摊入前向。
 
