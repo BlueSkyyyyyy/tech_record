@@ -104,13 +104,64 @@ def te_bwd(q, k, v, do, causal=True):
             dqkv[2].reshape(B, S, H, D))
 
 
+def te_bwd_fp8(q, k, v, do, causal=True, nominal=torch.bfloat16):
+    """TE 2.14 FP8 fused attention 反向（E4M3 fwd / E5M2 bwd，rowwise quantizer）。
+
+    对应 code/te-perf/bench_te.py:308-389：Q/K/V/S/O 用 E4M3，dO/dP/dQKV 用 E5M2；
+    输入在计时区外量化，调用的是纯 FP8 kernel。返回 (o, dq, dk, dv)（nominal dtype）。
+    """
+    import transformer_engine.pytorch as _te  # noqa: F401  (path setup)
+    import transformer_engine_torch as tex
+    from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+        FusedAttnBackend, fused_attn_bwd, fused_attn_fwd,
+    )
+    from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+
+    def qz(dt):
+        return Float8Quantizer(scale=torch.ones(1, device=DEV),
+                               amax=torch.zeros(1, device=DEV),
+                               fp8_dtype=dt, rowwise=True, columnwise=False)
+
+    B, S, H, D = q.shape
+    cu = torch.arange(0, (B + 1) * S, S, dtype=torch.int32, device=DEV)
+    e4m3, e5m2 = tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2
+    qkv_q, s_q, o_q = qz(e4m3), qz(e4m3), qz(e4m3)
+    do_q, dp_q, dqkv_q = qz(e5m2), qz(e5m2), qz(e5m2)
+
+    qf = q.reshape(B * S, H, D).to(nominal)
+    kf = k.reshape(B * S, H, D).to(nominal)
+    vf = v.reshape(B * S, H, D).to(nominal)
+    q8, k8, v8 = qkv_q(qf), qkv_q(kf), qkv_q(vf)
+    backend = FusedAttnBackend["FP8"]
+    mask = "causal" if causal else "no_mask"
+    out, aux, *_ = fused_attn_fwd(
+        True, S, S, cu, cu, q8, k8, v8, nominal, backend, None,
+        s_quantizer=s_q, o_quantizer=o_q,
+        attn_bias_type="no_bias", attn_mask_type=mask,
+        softmax_type="vanilla", qkv_layout="bshd_bshd_bshd",
+    )
+    dof = do.reshape(B * S, H, D).to(nominal)
+    do8 = do_q(dof)
+    dqkv = fused_attn_bwd(
+        S, S, cu, cu, q8, k8, v8, out, do8, nominal, do8._fp8_dtype,
+        list(aux), backend, qkv_layout="bshd_bshd_bshd",
+        s_quantizer=s_q, dp_quantizer=dp_q, dqkv_quantizer=dqkv_q,
+        attn_bias_type="no_bias", attn_mask_type=mask, softmax_type="vanilla",
+    )
+    o = out.reshape(B, S, H, D)
+    return (o.detach(), dqkv[0].reshape(B, S, H, D), dqkv[1].reshape(B, S, H, D),
+            dqkv[2].reshape(B, S, H, D))
+
+
 def maxdiff(a, b):
     return (a.float() - b.float()).abs().max().item()
 
 
 # ----------------------------- dump -----------------------------
 def dump_case(B, S, H, D, causal, dtype_name):
-    dtype = DTYPES[dtype_name]
+    # fp8：名义输入用 bf16（TE FP8 口径），保存成 fp32；对拍用 TE 的 FP8 反向。
+    is_fp8 = dtype_name == "fp8"
+    dtype = torch.bfloat16 if is_fp8 else DTYPES[dtype_name]
     seed_case(B, S, H, D)
     q = torch.randn(B, S, H, D, device=DEV, dtype=dtype)
     k = torch.randn(B, S, H, D, device=DEV, dtype=dtype)
@@ -119,12 +170,14 @@ def dump_case(B, S, H, D, causal, dtype_name):
 
     o_ref, dq_ref, dk_ref, dv_ref = ref_attn(q.float(), k.float(), v.float(), do.float(), causal)
     res = {"ref": (o_ref, dq_ref, dk_ref, dv_ref)}
+    if not is_fp8:
+        try:
+            res["fa"] = fa_bwd(q, k, v, do, causal)
+        except Exception as e:  # noqa
+            print(f"  [fa] failed: {e}")
     try:
-        res["fa"] = fa_bwd(q, k, v, do, causal)
-    except Exception as e:  # noqa
-        print(f"  [fa] failed: {e}")
-    try:
-        res["te"] = te_bwd(q, k, v, do, causal)
+        res["te"] = (te_bwd_fp8(q, k, v, do, causal) if is_fp8
+                     else te_bwd(q, k, v, do, causal))
     except Exception as e:  # noqa
         print(f"  [te] failed: {e}")
 
@@ -182,7 +235,8 @@ class CudaTimer:
 
 
 def bench_case(B, S, H, D, causal, dtype_name, timer):
-    dtype = DTYPES[dtype_name]
+    is_fp8 = dtype_name == "fp8"
+    dtype = torch.bfloat16 if is_fp8 else DTYPES[dtype_name]
     seed_case(B, S, H, D)
     q = torch.randn(B, S, H, D, device=DEV, dtype=dtype)
     k = torch.randn(B, S, H, D, device=DEV, dtype=dtype)
@@ -190,7 +244,8 @@ def bench_case(B, S, H, D, causal, dtype_name, timer):
     do = torch.randn(B, S, H, D, device=DEV, dtype=dtype)
     flops = 4.0 * B * S * H * S * D  # bwd 约 2x fwd
     out = []
-    for who, fn in (("fa", fa_bwd), ("te", te_bwd)):
+    fns = [("te", te_bwd_fp8)] if is_fp8 else [("fa", fa_bwd), ("te", te_bwd)]
+    for who, fn in fns:
         try:
             ms = timer.device_time(lambda: fn(q, k, v, do, causal))
             out.append((who, ms, flops / (ms * 1e-3) / 1e12))
