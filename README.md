@@ -133,6 +133,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 57. [FP4 专家权重接回 grouped MoE：现场折 vs 预折叠，与一份被「变换税」吃掉的字节红利（负结果）](content/posts/cuda-kernel-opt-57-v4-fp4-moe-fold/index.md)
 58. [FP4 decode GEMV 的第二轮：从 34.8% 到 38.7%，以及为什么 split-K / 无 smem / 位运算解码都救不了它](content/posts/cuda-kernel-opt-58-v4-fp4-decode/index.md)
 59. [FP4 decode 的 grouped GEMV：把 top-6 的 6B 个 (token, expert) 对按专家折叠，权重只读一遍](content/posts/cuda-kernel-opt-59-v4-fp4-grouped/index.md)
+60. [FP4 grouped decode 的 LUT 真的是墙吗：244.6M 次 bank conflict 被消掉，只快了 2.9%](content/posts/cuda-kernel-opt-60-v4-fp4-lut/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 

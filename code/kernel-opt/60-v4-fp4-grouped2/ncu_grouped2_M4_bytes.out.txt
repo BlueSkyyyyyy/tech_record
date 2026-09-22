@@ -1,0 +1,10 @@
+ ---------------------------------------------- ----------- ------------
+ Metric Name Metric Unit Metric Value
+ ---------------------------------------------- ----------- ------------
+ dram__bytes.sum Gbyte 5.31
+ dram__bytes_read.sum Gbyte 5.29
+ gpu__time_duration.sum ms 2.56
+ l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum sector 234418176
+ lts__t_sector_hit_rate.pct % 7.51
+ lts__t_sectors.sum sector 268098901
+ ---------------------------------------------- ----------- ------------
