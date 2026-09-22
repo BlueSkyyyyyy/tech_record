@@ -1,0 +1,42 @@
+fp4_decode.cu(730): warning #550-D: variable "launch" was set but never used
+          auto launch = [&]() {
+               ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+V4-Pro routed expert w1 [N=3072, K=7168]  M=4
+weight bytes: fp4=11.01 MB (25.0%)  fp8=22.02 MB  bf16=44.04 MB
+
+[roof] read fp4+scale 0.0039 ms  3025.7 GB/s (90.3% HBM)
+
+[gemv fp4 v4: 全量预取]
+  LUT   RWW=1 BN=  8    0.0140 ms    833.2 GB/s fp4-read (24.9% HBM)
+  arith RWW=1 BN=  8    0.0186 ms    627.5 GB/s fp4-read (18.7% HBM)
+  PRMT  RWW=1 BN=  8    0.0135 ms    869.3 GB/s fp4-read (25.9% HBM)
+  LUT   RWW=2 BN= 16    0.0138 ms    846.9 GB/s fp4-read (25.3% HBM)
+  arith RWW=2 BN= 16    0.0256 ms    457.8 GB/s fp4-read (13.7% HBM)
+  PRMT  RWW=2 BN= 16    0.0155 ms    754.1 GB/s fp4-read (22.5% HBM)
+
+[gemv fp4] B-read = fp4+scale 字节 / 耗时
+  LUT   KS=1    0.0140 ms    833.9 GB/s fp4-read (24.9% HBM)  waves=0.48
+  LUT   KS=2    0.0148 ms    788.3 GB/s fp4-read (23.5% HBM)  waves=0.97
+  LUT   KS=4    0.0167 ms    698.9 GB/s fp4-read (20.8% HBM)  waves=1.94
+  LUT   KS=7    0.0190 ms    616.9 GB/s fp4-read (18.4% HBM)  waves=3.39
+  LUT   KS=8    0.0186 ms    628.6 GB/s fp4-read (18.8% HBM)  waves=3.88
+  PRMT  KS=1    0.0133 ms    877.5 GB/s fp4-read (26.2% HBM)  waves=0.48
+  PRMT  KS=2    0.0151 ms    775.2 GB/s fp4-read (23.1% HBM)  waves=0.97
+  PRMT  KS=4    0.0159 ms    737.8 GB/s fp4-read (22.0% HBM)  waves=1.94
+  PRMT  KS=7    0.0159 ms    737.5 GB/s fp4-read (22.0% HBM)  waves=3.39
+  PRMT  KS=8    0.0171 ms    682.3 GB/s fp4-read (20.4% HBM)  waves=3.88
+  arith KS=1    0.0199 ms    588.1 GB/s fp4-read (17.5% HBM)  waves=0.48
+  arith KS=2    0.0220 ms    532.6 GB/s fp4-read (15.9% HBM)  waves=0.97
+  arith KS=4    0.0226 ms    518.6 GB/s fp4-read (15.5% HBM)  waves=1.94
+  arith KS=7    0.0217 ms    539.3 GB/s fp4-read (16.1% HBM)  waves=3.39
+  arith KS=8    0.0237 ms    492.9 GB/s fp4-read (14.7% HBM)  waves=3.88
