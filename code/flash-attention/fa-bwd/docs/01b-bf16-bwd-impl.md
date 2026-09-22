@@ -1,0 +1,203 @@
+# bf16 反向实现分析（P2-1）
+
+> 代码：**单文件** `src/bf16/fa_bwd_bf16_onefile.cu`（自包含：preprocess + main kernel + launcher + 自测 main）。
+> 由 fp16 单文件 `src/fp16/fa_bwd_fp16_onefile.cu` **dtype 参数化**而来（`__half`→`__nv_bfloat16`，
+> `__half2float`→`__bfloat162float`，`__float2half`→`__float2bfloat16`），算法/三段式/线程映射完全一致。
+> 在此基础上加了一处 **bf16 专属优化：K/V smem 行距 padding**（见第 3 节）。
+>
+> 实测原始输出：`fa_bwd_bf16_onefile_s512.out.txt`、`..._s4096.out.txt`、
+> `..._ncu_main.out.txt`（ncu `--set full`）、`..._refbench.out.txt`（FA/TE 基线）。
+> 对照：`docs/01-fp16-bwd-impl.md`、`docs/00-fa-bwd-optimization-catalog.md`、`../ROADMAP.md`。
+
+---
+
+## 1. 实现结构
+
+与 fp16 **逐字同构**（三段式 FA2 风格）：
+
+| 段 | 函数 | 职责 |
+|---|---|---|
+| preprocess | `preprocess_kernel` | 逐行求 `LSE=logsumexp(scale·QKᵀ)` 与 `D=rowsum(dO∘O)` |
+| main | `fa_bwd_bf16_kernel` | 每个 Q 块固定，遍历 K/V 块（1colblock），recompute S/P，累加 dQ/dK/dV |
+| convert | `convert_kernel` | fp32 累加缓冲 `dq/dk/dv` → bf16 写回 |
+
+分块：`BM=64`、`BN=32`、`THREADS=128`、head_dim=128；fp32 累加；dQ 在 smem 累加、dK/dV 全局
+`atomicAdd`；causal 整块跳过 + 对角 mask；动态 smem（~98.5KB）需 `cudaFuncSetAttribute`。
+详见 `docs/01-fp16-bwd-impl.md` 第 1、2 节，此处不重复。
+
+**bf16 与 fp16 唯一的语义差异只是元素类型**：preprocess/main/convert 的所有数学都是 fp32 累加，
+输入 smem 存 bf16，误差由 bf16 输入量化决定（容差 ~1e-2，见第 4 节）。
+
+---
+
+## 2. 发现：bf16 标量生成比 fp16 慢 2.9×（同款代码）
+
+dtype 参数化后跑 S=4096，main kernel 从 fp16 的 **68.2 ms 掉到 197.1 ms**（2.9× 慢），
+而 preprocess（纯 global 读 + 标量点积）两者一致（69.4 ms），排除跑机/降频因素。
+`ptxas -v` 两者寄存器相近（54 vs 52，0 spill），但 SASS 指令构成不同：
+
+| 指令 | fp16 main | bf16 main |
+|---|---|---|
+| `HADD2.F32`（half2→float，成对） | 1042 | 0 |
+| `LDS.U16`（标量取半字） | 512 | **1024** |
+| `SHF.L.U32`（bf16→fp32 左移 16） | 86 | **679** |
+| `IMAD.U32` | — | 430 |
+
+原因：ptxas 会把 `__half2float` 识别成 `HADD2.F32`（消费一个 `LDS.32/64` 的 half2），
+而 `__bfloat162float` 走「`LDS.U16` 标量取半字 + `SHF.L` 左移」路径，**K/V 行读被标量化**。
+由于 smem 里 K/V 行距 = 128 个 bf16 = **256B，恰是 128B bank 周期的整数倍**，
+「lane↔K/V 行」的读（跨 lane 步长 256B）会全部落到同一 bank：
+
+```
+ncu（padding 前，main S=512）：
+  L1/TEX Cache Throughput   %   78.47   <- 最高单元
+  Compute (SM) Throughput   %    4.59
+  DRAM Throughput           %    0.09
+  9.5-way bank conflict，585,108,389 次，89% 多余 shared wavefronts
+```
+
+对比 fp16（75% 多余 wavefronts、4.6-way）——bf16 把它放大成了真正的瓶颈。
+
+---
+
+## 3. 优化：K/V smem 行距 padding（+2 个元素）
+
+把 `Ks/Vs` 的行距从 `kHeadDim=128` 改为 `kHeadDim + 2 = 130`（元素数）：
+
+```cpp
+static constexpr int kKVStride = kHeadDim + 2;  // +2 bf16 = +4B
+bf16* Vs  = Ks + BN * kKVStride;
+bf16* dOs = Vs + BN * kKVStride;
+```
+
+跨 lane 步长从 256B 变成 `130*2 = 260B`。按 bank word（4B）算：
+`260/4 = 65`，`65 mod 32 = 1` ⇒ 地址 `lane` 的 bank = `(65·lane + d/2) mod 32 = (lane + d/2) mod 32`，
+32 个 lane 恰好铺满 32 个 bank，**冲突归零**（`d` 对所有 lane 相同，`Qs/dOs` 的读是广播或连续，
+不 padding）。仅改 `Ks/Vs` 的基址与三处索引（`QKᵀ`/`dP`/`dQ` 里的 `krow/vrow`），
+`S/P/dS` 的数学完全不动。
+
+| 指标（main，S=512） | padding 前 | padding 后 |
+|---|---|---|
+| Duration | 5.83 ms | **1.98 ms** |
+| L1/TEX Cache Throughput | 78.47% | **24.87%** |
+| Compute (SM) Throughput | 4.59% | 13.51% |
+| 多余 shared wavefronts | 89%（9.5-way） | 已低于阈值，不再报警 |
+| bank conflicts | 585.1 M | ~0 |
+
+---
+
+## 4. 数值对拍（vs fp32 ref，O 取 `ref_o.npy`）
+
+容差口径：bf16 ~1e-2。`max_rel = max |a−b|/(|b|+1e-3)`。
+
+### S=512, B=1, H=16, D=128, causal（`b1_s512_h16_d128_causal_bf16`）
+
+| | dq max_abs | dk max_abs | dv max_abs |
+|---|---|---|---|
+| **ours** | **6.892e-3** | **8.110e-3** | **1.365e-2** |
+| FA 2.7.4 | 1.040e-2 | 1.261e-2 | 1.365e-2 |
+| TE 2.14 | 1.374e-2 | 1.068e-2 | 1.365e-2 |
+
+### S=4096, B=1, H=16, D=128, causal
+
+| | dq max_abs | dk max_abs | dv max_abs |
+|---|---|---|---|
+| **ours** | **8.895e-3** | **8.078e-3** | **1.494e-2** |
+| FA 2.7.4 | 1.441e-2 | 1.332e-2 | 1.631e-2 |
+| TE 2.14 | 1.524e-2 | 1.763e-2 | 1.631e-2 |
+
+**结论**：我们的 bf16 实现与 ref 的偏差和 FA/TE **同量级（bf16 量化噪声，~1e-2）**，
+且 dq/dk 略优于 FA/TE（因为我们全程 fp32 累加、无 split/atomic 误差），无系统性误差，正确性达标。
+padding 前后数值**逐位一致**（同一 `max_abs` 数字）。
+
+---
+
+## 5. ncu 剖析（main kernel，S=512 causal，`--set full`，padding 后）
+
+```
+DRAM Throughput          %    0.26      <- HBM 几乎空闲
+L2  Cache Throughput     %    0.82
+L1/TEX Cache Throughput  %   24.87      <- 已从 78% 降下来
+Compute (SM) Throughput  %   13.51
+Issue Slots Busy         %   11.87
+No Eligible              %   78.34      <- 发射口大多数时间没有可发射 warp
+Achieved Occupancy       %    6.25      <- 受 98.5KB 动态 smem 限制，1 CTA/SM
+Waves Per SM                   0.48      <- grid 只有 128 个 block（<132 SM）
+Registers Per Thread     52
+Dynamic Shared Memory    98.56 KB/block
+Warp Cycles Per Issued Instruction  4.61
+top stall: fixed-latency execution dependency (37.3%)
+```
+
+### bound 结论（与 fp16 版对比）
+1. **bank conflict 已消**：L1/TEX 从 78.5% → 24.9%，不再报警；bf16 的「慢 2.9×」问题解决。
+2. **不再是 smem 访问 bound**（fp16 版最高是 L1/TEX 53.5%）；现在最高单元只有 24.9%，
+   且 **DRAM 0.26%、Compute 13.5% 都很低**。
+3. **当前真正的瓶颈是「延迟 / 并行度」**：`No Eligible 78%`、`Issued Ipc` 低、
+   top stall 是 **fixed-latency execution dependency（37.3%）**；根因是
+   **occupancy 6.25%（1 CTA/SM，98.5KB smem）+ grid 0.48 wave**——SM 大量空转，
+   没有足够的 warp 来隐藏 smem/ALU 延迟。
+4. 下一步优先级（与 backlog 一致）：**降 smem / 提 occupancy → 上张量核 + 流水**。
+   注意：padding 只对 bf16 做了（fp16 因成对读冲突仅 4.6-way，未改）；若要，fp16 同样可受益。
+
+---
+
+## 6. 性能对标（CUPTI 纯 device 时间，FA/TE 由 `fa_bwd_bench.py bench` 测得）
+
+FLOPs 口径与 harness 一致：`4·B·S²·H·D`（causal 实际约一半，尚未折算）。
+H100 峰值：BF16 Tensor Core dense ≈ 989 TFLOPS。
+
+| shape | ours (total) | FA 2.7.4 | TE 2.14 | ours 峰值占比 |
+|---|---|---|---|---|
+| B1 S512 H16 D128 causal | 3.108 ms / **0.69 TF** | 0.0687 ms / 31.25 TF | 0.0455 ms / 47.18 TF | 0.07% |
+| B1 S4096 H16 D128 causal | 111.65 ms / **1.23 TF** | 1.0479 ms / 131.16 TF | 0.5894 ms / 233.16 TF | 0.12% |
+
+分段时间（ours）：
+
+| shape | preprocess | main | convert |
+|---|---|---|---|
+| S=512 | 1.195 ms | 1.884 ms | 0.029 ms |
+| S=4096 | 69.41 ms | 42.17 ms | 0.066 ms |
+
+**结论**：
+- 本版本仍是**正确性优先的标量（CUDA-core）实现**，性能约为 FA 的 ~0.5–2%、TE 的 ~0.5%。
+- **padding 优化效果显著**：S=512 main 5.76→1.88 ms（**3.1×**），S=4096 main 197.1→42.2 ms（**4.7×**）；
+  现在 bf16 的 main（1.88/42.2 ms）已经**快过 fp16 同款**（2.38/68.2 ms）。
+- S=4096 时 **preprocess（69.4 ms）超过 main（42.2 ms）**：preprocess 的 LSE 重算没有分块，
+  对 causal 是 O(S²) 标量点积，成为端到端新瓶颈（FA 的 LSE 来自前向，反向不付这笔）。
+  若要端到端对标，需把 LSE 并入前向或对 preprocess 分块/向量化（列入 backlog）。
+- 性能优化（张量核、流水、提 occupancy）仍是后续任务。
+
+---
+
+## 7. 复现命令
+
+```bash
+cd code/flash-attention/fa-bwd
+
+# 1) dump bf16 输入/参考（S=512、S=4096 causal）
+docker exec kernel_lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py dump --dtype bf16 \
+    --shape 1 512 16 128 causal --shape 1 4096 16 128 causal"
+
+# 2) 编译运行 + 数值对拍
+scripts/run.sh src/bf16/fa_bwd_bf16_onefile.cu \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16 --iters=50
+scripts/run.sh src/bf16/fa_bwd_bf16_onefile.cu \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_bf16 --iters=50
+
+# 3) ncu（main kernel）
+scripts/ncu.sh src/bf16/fa_bwd_bf16_onefile.cu --set full \
+    --kernel-name regex:fa_bwd_bf16_kernel -- \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16 --iters=1
+
+# 4) FA/TE bf16 基线
+docker exec kernel_lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py bench --dtype bf16 \
+    --shape 1 512 16 128 causal --shape 1 4096 16 128 causal"
+```
+
+---
+
+## 8. 下一步
+
+见 `../ROADMAP.md`：P2-2（bf16 两文件拆分）→ P3 fp8（重点，参考 TE 的 E4M3/E5M2 + rowwise scaling）。
+backlog：降 smem/提 occupancy、张量核 + 流水、preprocess 向量化/摊入前向、fp16 同步 padding。
