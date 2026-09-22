@@ -1,0 +1,35 @@
+==PROF== Connected to process 525913 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "lse_mma_kernel_bal": 0%....50%....100% - 4 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6b] main grid=1024 auto_pipe=2 (CLI pipe=2; >=396→O6b/2 else O6/1)
+[timing] total(3 kernels) 2.3655 ms  58.10 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.4526 ms | main 1.8838 ms | convert 0.0291 ms
+[O8b A/B] lse O8 1.0035 ms | bal(单缓冲) 0.4516 ms (2.222x) | bal+cpasync(双缓冲) 0.3538 ms (2.837x)
+[O6 A/B] main nopipe 4.5282 ms (30.35 TF) | pipe(KV both) 1.9334 ms (71.09 TF) | pipe2(K only) 1.8103 ms (75.92 TF) => nopipe/pipe 2.342x, nopipe/pipe2 2.501x
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.355e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+==PROF== Disconnected from process 525913
+[525913] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void lse_mma_kernel_bal<128, 1>(const __half *, const __half *, float *, int, int, int, float) (32, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    --------------------------------------------------------------------------- ----------- ------------
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                   inst         0.10
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio           inst         0.34
+    smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio        inst         0.21
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio              inst         0.02
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio              inst         0.79
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio          inst         1.33
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                      inst         1.57
+    --------------------------------------------------------------------------- ----------- ------------
+

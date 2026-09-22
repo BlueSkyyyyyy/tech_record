@@ -285,6 +285,146 @@ lse_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
   }
 }
 
+// =============================================================================
+// O8b：LSE 预处理的两处优化（fp16，causal 专用）
+// =============================================================================
+// 动机（O8 ncu，S=4096）：`lse_mma_kernel` 1.03ms，占端到端 ~34%；SOL Compute 39.5%、
+// L1 23%、DRAM 1%，stall `long_scoreboard 2.19 + wait 1.34`（延迟受限）；且因果下工作量
+// 从第 0 块的 1 个 K tile 到第 63 块的 64 个 tile 线性增长，GPU 按 blockIdx 递增调度把重块
+// 全排在最后，ncu 报「尾波可达 50%」。两处改动（用模板 `PIPE` 分开，便于消融）：
+//   ① **镜像配对负载均衡**：每 CTA 同时处理配对的两个 m 块 `m` 与 `nblk-1-m`，工作量恒为
+//      `nblk+1` 个 tile（完美均衡），grid.x 从 nblk 减半到 ceil(nblk/2)。
+//   ② **K 的 cp.async.cg 双缓冲**（PIPE=1）：每 tile 的 K 从「同步标量读→sync→mma」改成
+//      16B 异步预取下一块（不占寄存器、走 L2-only），消掉全局访存延迟（对齐 main 的 O6）。
+//      PIPE=0 则退回「同步标量读 K」，用于和 PIPE=1 做同 session 消融。
+// 数学与 O8 完全一致（同一 QKᵀ mma、online-softmax、同 row 4-lane `shfl_xor` 归约），
+// 数值应逐位相同。仅用于 causal；非 causal 各块工作量相同，无需配对（host 走 O8 原版）。
+// smem：Qs[LBM*LD] +（PIPE=1 时 2 份 / PIPE=0 时 1 份）Ks[LBN*LD]。
+template <int HD, int PIPE>
+__global__ void __launch_bounds__(THREADS)
+lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
+                   float* __restrict__ lse, int S, int H, int Hkv, float scale) {
+  constexpr int LD  = HD + 8;
+  constexpr int KVL = LBN * LD;
+  constexpr int HDV = HD / 8;   // 每行 uint4(8 half) 数
+  extern __shared__ __align__(16) char smem[];
+  __half* Qs = reinterpret_cast<__half*>(smem);
+  __half* Ks = Qs + LBM * LD;   // PIPE=1：2 × LBN × LD；PIPE=0：1 × LBN × LD
+
+  const int nblk = (S + LBM - 1) / LBM;
+  const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  const int hkv = h / (H / Hkv);
+  const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  const int g = lane >> 2, c2 = (lane & 3) * 2;
+
+  // 把 K 的一个 tile（j0 起 LBN 行）写进 Kd：PIPE=1 用 16B cp.async（行越界写 0）；
+  // PIPE=0 用普通标量 smem 写（随后由调用处的 __syncthreads 保证可见）。
+  auto issue_k = [&](__half* Kd, int j0) {
+#pragma unroll
+    for (int u = tid; u < LBN * HDV; u += THREADS) {
+      const int row = u / HDV, c8 = u % HDV;
+      const int jg = j0 + row;
+      if (jg < S) {
+        const size_t off = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c8 * 8;
+        if constexpr (PIPE) {
+          cp_async16(Kd + row * LD + c8 * 8, k + off);
+        } else {
+#pragma unroll
+          for (int e = 0; e < 8; ++e) Kd[row * LD + c8 * 8 + e] = k[off + e];
+        }
+      } else {
+        *reinterpret_cast<uint4*>(Kd + row * LD + c8 * 8) = make_uint4(0, 0, 0, 0);
+      }
+    }
+    if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
+  };
+
+#pragma unroll
+  for (int t = 0; t < 2; ++t) {
+    const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
+    if (t == 1 && pair == nblk - 1 - pair) continue;  // 奇数 nblk 的中心块只做一次
+    const int m0 = mblk * LBM;
+
+    // ---- 载入本 m 块的 Q（越界补 0）----
+    for (int i = tid; i < LBM * HD; i += THREADS) {
+      int r = i / HD, d = i % HD;
+      int qi = m0 + r;
+      Qs[r * LD + d] =
+          (qi < S) ? q[(((size_t)(b * S + qi)) * H + h) * HD + d] : __float2half(0.f);
+    }
+
+    const int ncols = min(S, m0 + LBM);
+    const int ntiles = (ncols + LBN - 1) / LBN;
+
+    // prologue：PIPE=1 时发 tile0 进 stage0（Q 与 K 写不同 smem，由循环首 wait+sync 保证可见）
+    if constexpr (PIPE) {
+      if (ntiles > 0) issue_k(Ks, 0);
+    }
+
+    float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
+    for (int nt = 0; nt < ntiles; ++nt) {
+      const int j0 = nt * LBN;
+      __half* Kt = Ks + (PIPE ? (nt & 1) * KVL : 0);
+      if constexpr (PIPE) {
+        // 等本 tile 落地；此 barrier 同时证明「上一 tile 的 mma 已读完其 stage」，故可复用。
+        asm volatile("cp.async.wait_group 0;\n");
+        __syncthreads();
+        if (nt + 1 < ntiles) issue_k(Ks + ((nt + 1) & 1) * KVL, j0 + LBN);
+      } else {
+        issue_k(Ks, j0);
+        __syncthreads();
+      }
+
+      float acc[1][8][4];
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
+      mma_block_f16<16, LBN, HD, false>(Qs, LD, Kt, LD, acc, wid, 0, lane);
+
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          int s = q >= 2 ? 1 : 0;
+          int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+          int c = j * 8 + c2 + (q & 1);
+          int qi = m0 + r, jg = j0 + c;
+          float sv = -INFINITY;
+          if (qi < S && jg < S && jg <= qi) sv = acc[0][j][q] * scale;
+          if (sv != -INFINITY) {
+            float mn = fmaxf(mrow[s], sv);
+            lrow[s] = lrow[s] * expf(mrow[s] - mn) + expf(sv - mn);
+            mrow[s] = mn;
+          }
+        }
+    }
+
+    // 同一 row 由同 g 的 4 个 lane 持有，warp 内 shfl 归约
+#pragma unroll
+    for (int s = 0; s < 2; ++s) {
+      float m = mrow[s], l = lrow[s];
+#pragma unroll
+      for (int off = 1; off <= 2; off <<= 1) {
+        float m2 = __shfl_xor_sync(0xffffffffu, m, off);
+        float l2 = __shfl_xor_sync(0xffffffffu, l, off);
+        float mn = fmaxf(m, m2);
+        float ca = (m == -INFINITY) ? 0.f : l * expf(m - mn);
+        float cb = (m2 == -INFINITY) ? 0.f : l2 * expf(m2 - mn);
+        l = ca + cb;
+        m = mn;
+      }
+      if (c2 == 0) {
+        int r = wid * 16 + g + (s ? 8 : 0);
+        int qi = m0 + r;
+        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + logf(l);
+      }
+    }
+    // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
+    __syncthreads();
+  }
+}
+
 // delta_kernel：D = rowsum(dO ∘ O)（纯 O(S·H·D) 逐行归约，与 LSE 解耦）
 template <int HD>
 __global__ void delta_kernel(const __half* __restrict__ o,

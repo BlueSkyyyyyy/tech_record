@@ -698,9 +698,100 @@ GQA kv4 total 0.572ms/30.0 TF ⇒ **FA3 的 7.2%（时间比 6.9×）**。
 
 ---
 
-## 13. 下一步
+## 13. O8b：LSE 预处理负载均衡 + `cp.async` 双缓冲（fp16，端到端 1.27×）
 
-见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）** 完成。
-后续按回报排序：**O7**（dK/dV 去 `atomicAdd`，移植 fp8 的 O4c/O7；ncu 墙已是 L1/L2 吞吐）
-→ **O9**（`wgmma`+TMA+warp specialization，对标 FA3）→ **O8b**（LSE 的 occupancy/尾波、
-convert 融合）→ MLA 张量核。
+### 13.1 动机：preprocess 变成端到端 34% 的第一瓶颈
+
+O6/O6b（§12/§12b）把 main 从 4.5ms 打到 1.86ms 后，**preprocess 仍停在 ~1.0ms**，
+占端到端 `2.95ms` 的 **34%**。对 `lse_mma_kernel`（S=4096, causal）做定向 ncu：
+
+- Duration **1.03ms**、Compute 39.5%、L1/TEX 23.4%、L2 5.2%、DRAM **1.06%**；
+- stall `long_scoreboard 2.19 + wait 1.34`（**延迟受限**，每 tile 同步标量读 K→sync→mma）；
+- grid=(64,16,1)、Waves **1.29**，ncu 报「尾波可达 **50%**」——因为因果下第 `mblk` 个 CTA
+  要做 `mblk+1` 个 K tile（0→63 线性增长），而 GPU 按 blockIdx 递增把重块全排在最后。
+
+两处改动（用模板 `PIPE` 分开以便消融）：
+
+### 13.2 改动（单/两文件 device 代码逐字一致）
+
+1. **镜像配对负载均衡**。每 CTA 同时处理**配对的两个 m 块** `m = blockIdx.x` 与
+   `m' = nblk-1-m`：工作量 = `(m+1)+(nblk-m) = nblk+1` 个 tile（**完美均衡**），
+   grid.x 从 `nblk` 减半到 `ceil(nblk/2)`（S=4096 时 64→32，整块 grid 512）。
+   两个 m 块共用同一个 `Qs` 缓冲（逐块加载），`nvcc` 展开不变。
+2. **K 的 `cp.async.cg` 16B 双缓冲**（`PIPE=1`）。每 tile 的 K 从「同步标量读 8 个 half
+   →`__syncthreads`→mma」改成：prologue 发 tile0，循环首 `wait_group 0`+`sync` 后**把下一
+   tile 发进另一 stage**，再做 `QKᵀ`+online-softmax；复用 main 的 `cp_async16`。`PIPE=0`
+   退回同步标量读，用于同 session 消融。softmax 的 mask 由 `!(causal&&jg>qi)` 写成
+   `jg<=qi`（该 kernel 仅 causal 使用），其余 online-softmax / 4-lane `shfl_xor` 归约逐字不变。
+
+smem：`Qs[LBM*LD] + 2×Ks[LBN*LD]`（PIPE=1）= **52.2KB**（PIPE=0 与 O8 同为 34.8KB）。
+host：非 causal 各块工作量相同、无需配对，仍走 O8 原版；causal 走 `lse_mma_kernel_bal<128,1>`。
+
+### 13.3 消融（同 session A/B，CUDA event，lse-only）
+
+| shape | O8 原版 | 镜像配对(单缓冲) | **镜像配对+cp.async(双缓冲)** |
+|---|---|---|---|
+| MHA S=4096 | 0.9853ms | 0.4457ms（2.20×） | **0.3484ms（2.81×）** |
+| MHA S=512 | 0.0633ms | 0.0560ms（1.13×） | **0.0458ms（1.38×）** |
+| GQA q32/kv4 S=1024 | 0.1620ms | 0.1014ms（1.60×） | **0.0774ms（2.09×）** |
+
+⇒ **主收益来自镜像配对（负载均衡）**，`cp.async` 双缓冲再叠加 **1.28×**（S=4096）；
+S=512 网格小、本来就接近单波，收益只有 1.38×。
+
+### 13.4 性能（同 session，端到端 preprocess+main+convert）
+
+| shape | preprocess O8→O8b | total O6b→O8b | TFLOPS |
+|---|---|---|---|
+| MHA S=512 | 0.0536→**0.0481ms** | 0.1603→**0.1583ms** | 13.6 |
+| MHA S=4096 | 1.0094→**0.3870ms（2.6×）** | 2.9517→**2.3364ms（1.26×）** | **58.8** |
+| GQA q32/kv4 S=1024 | 0.1040→**0.0892ms** | 0.5720→**0.5183ms** | 33.4 |
+
+端到端瓶颈重新回落 **main**（S=4096：main 1.84ms 占 79%、preprocess 0.39ms 占 17%）。
+单文件与两文件**逐指标相同**（S=4096 total 2.3322 vs 2.3364，main 1.8435 vs 1.8372）。
+
+### 13.5 数值（与 O5/O8/O6/O6b **逐位相同**）
+
+| shape | dq | dk | dv |
+|---|---|---|---|
+| MHA S=512 | 1.671e-3 | 1.771e-3 | 1.899e-3 |
+| MHA S=4096 | 1.883e-3 | 1.734e-3 | 1.966e-3 |
+| GQA q32/kv4 S=1024 | 2.134e-3 | 3.305e-3 | 3.850e-3 |
+
+镜像配对只改「哪个 CTA 做哪块」、`cp.async` 只改「何时搬 K」，QKᵀ 的 k-loop 顺序与
+online-softmax 的归约顺序完全不变 ⇒ LSE 与 main 的 P 仍自洽，数值逐位不变。
+
+### 13.6 ncu（`lse_mma_kernel_bal<128,1>`，S=4096）
+
+```
+              Duration  grid      waves  occ(achieved)  Compute  L1/TEX  L2    DRAM
+O8  原版       1.03ms  (64,16,1)  1.29    28.49%        39.5%   23.4%   5.2%  1.06%
+O8b bal+async  354µs   (32,16,1)  0.97    22.89%        60.4%   32.4%  27.0%  3.07%
+```
+
+stall（per issue active）：O8b `wait 1.57 + short_scoreboard 1.33 + not_selected 0.79 +
+long_scoreboard 0.34`（O8：`long 2.19 + wait 1.34`）。**结论**：`long_scoreboard` 2.19→0.34
+（全局读延迟被 `cp.async` 消掉），Waves 1.29→**0.97**（尾波消除），吞吐从延迟受限变为
+**Compute 60%（张量核+softmax）+ smem 依赖**受限。occ 22.9%（52.2KB smem → 4 CTA/SM）。
+
+### 13.7 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`）
+
+FA3（SM90）MHA S4096 **0.3241ms / 848 TF**、TE 0.4454/617、FA2 0.7267/378；
+GQA q32/kv4 S1024 FA3 **0.0826ms / 416 TF**、TE 0.1121/307。
+ours（O8b）total S4096 **2.336ms / 58.8 TF ⇒ FA3 的 6.9%（时间比 7.2×）**，
+O6b 时为 5.5%（时间比 9.1×）；GQA kv4 total 0.518ms/33.4 TF ⇒ **FA3 的 8.0%**（O6b 7.2%）。
+
+### 13.8 原始输出
+
+`src/fp16/fa_bwd_fp16_mma_main_o8b_{s512,s4096,gqa_kv4}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o8b_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o8b_ncu_lse_bal_s4096.out.txt`、
+`..._o8b_stall_lse_bal_s4096.out.txt`、`src/fp16/fa_bwd_fp16_o8b_fa3_te_baseline.out.txt`。
+
+---
+
+## 14. 下一步
+
+见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
+O8b（§13）** 完成。后续按回报排序：**O8b(bf16)**（同款镜像配对+cp.async，代码 dtype 参数化）
+→ **O7**（dK/dV 去 `atomicAdd`；已分析其原子流量与 dQ 对称，单靠换归约维收益有限，需配合
+更大 `BM`/寄存器累加）→ **O9**（`wgmma`+TMA+warp specialization，对标 FA3）→ MLA 张量核。

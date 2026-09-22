@@ -710,8 +710,34 @@
     `src/fp16/fa_bwd_fp16_mma_onefile_o6b_{s512,s4096}.out.txt`、
     `..._o6b_ncu_main_s4096.out.txt`、`..._o6b_stall_s4096.out.txt`；
     `src/bf16/fa_bwd_bf16_mma_main_o6b_*.out.txt`、`..._onefile_o6b_*.out.txt`、
-    `..._o6b_ncu_main_s4096.out.txt`；`src/fa_bwd_o6b_fa3_te_baseline.out.txt`；
-    文档 `docs/01` §12b、`docs/01b` §6h、`docs/04` §2.1/§2.2/§3。
+     `..._o6b_ncu_main_s4096.out.txt`；`src/fa_bwd_o6b_fa3_te_baseline.out.txt`；
+     文档 `docs/01` §12b、`docs/01b` §6h、`docs/04` §2.1/§2.2/§3。
+
+- 2026-09-23（第三十一轮）：**O8b 完成（fp16 LSE 预处理负载均衡 + `cp.async` 双缓冲，端到端 1.26×）**。
+  - 动机：O6/O6b 把 main 打到 1.86ms 后，`lse_mma_kernel` 仍 1.03ms、占端到端 **34%**；
+    ncu 显示 Compute 39.5% / DRAM 1.1% / `long_scoreboard 2.19 + wait 1.34` / Waves 1.29
+    （ncu 报尾波可达 50%——因果下第 `mblk` 个 CTA 做 `mblk+1` 个 K tile，重块排最后）。
+  - **改动**（单/两文件 device 逐字一致，脚本核对 `device identical: True`）：新增
+    `lse_mma_kernel_bal<HD,PIPE>`：① **镜像配对**——每 CTA 处理 `m=blockIdx.x` 与
+    `m'=nblk-1-m`，工作量恒 `nblk+1`，grid.x 64→32；② `PIPE=1` K 用 `cp.async.cg` 16B 双缓冲
+    （prologue 发 tile0、循环首 wait+sync 后发下一 tile）；`PIPE=0` 退回同步标量读用于消融。
+    仅 causal 使用，非 causal 走 O8 原版；mask 由 `!(causal&&jg>qi)` 写为 `jg<=qi`。
+  - **消融（同 session，lse-only）**：O8 0.9853ms → 镜像配对(单缓冲) 0.4457ms（**2.20×**）
+    → 镜像配对+cp.async 0.3484ms（**2.81×**）；S=512 1.38×、GQA kv4 2.09×。
+    **收益主要来自负载均衡，cp.async 再叠加 1.28×**。
+  - **数值与 O5/O8/O6/O6b 逐位相同**（S512 1.671/1.771/1.899e-3；S4096 1.883/1.734/1.966e-3；
+    GQA kv4 2.134/3.305/3.850e-3），单/两文件逐指标一致。
+  - **性能**（同 session，端到端）：preprocess S4096 1.0094→**0.3870ms（2.6×）**；
+    total S4096 2.9517→**2.3364ms（58.8 TF，峰值 5.9%）**、GQA kv4 0.5720→0.5183ms。
+    同 session 纯反向 FA3 S4096 0.3241ms/848TF ⇒ **ours total 为 FA3 的 6.9%**（O6b 5.5%）、
+    时间比 7.2×。
+  - ncu（lse, S4096）：Duration 1.03ms→**354µs**、`long_scoreboard` **2.19→0.34**、
+    Waves **1.29→0.97**、Compute 39.5%→**60.4%**、occ 28.5%→22.9%（52.2KB smem→4 CTA/SM）；
+    新墙 = **Compute 60% + smem 依赖（wait 1.57 + short 1.33）**。
+  - 原始输出 `src/fp16/fa_bwd_fp16_mma_main_o8b_{s512,s4096,gqa_kv4}.out.txt`、
+    `..._mma_onefile_o8b_s4096.out.txt`、`..._o8b_ncu_lse_bal_s4096.out.txt`、
+    `..._o8b_stall_lse_bal_s4096.out.txt`、`src/fp16/fa_bwd_fp16_o8b_fa3_te_baseline.out.txt`；
+    文档 `docs/01` §13、`docs/04` §2.1/§3。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -757,6 +783,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `lse_mma_kernel<128>`（`mma.m16n8k16` QKᵀ + online-softmax + 4-lane `shfl`）+ 独立
       `delta_kernel<128>`；preprocess 17–70×、端到端 **4.4–13.2×**（S4096 total 73.3→5.58ms，
       24.6 TF；瓶颈回落 main），数值与 O5/O5b 逐位相同。详见 `docs/01` §11、`docs/01b` §6f。
+- [x] **O8b** LSE 预处理负载均衡 + `cp.async` 双缓冲。**已完成（第三十一轮，fp16）**：
+      镜像配对（`m` 与 `nblk-1-m`，工作量恒 `nblk+1`）+ K 的 `cp.async.cg` 16B 双缓冲；
+      **lse S4096 0.985→0.348ms（2.81×）**、端到端 **2.952→2.336ms（58.8 TF，FA3 的 6.9%）**，
+      `long_scoreboard` 2.19→0.34、Waves 1.29→0.97，数值逐位相同。详见 `docs/01` §13。
+      bf16 同构改造（O8b-bf16）留待下一轮。
 - [ ] **O9**（对标 FA3）TMA + `wgmma` + warp specialization 多级流水。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
@@ -787,9 +818,17 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    K 双缓冲 + V 单缓冲后段预取 + `ldmatrix.x4.trans` 消 `PsT/dSsT`，smem 83.97→**71.17KB**、
 >    3 CTA/SM；main S4096 1.900→1.860ms、GQA kv4 0.380→0.357ms（S512 单波走 O6，host 自动选）。
 >    ncu 新墙 = **L1/L2 吞吐 + `wait`**（occ 已不是瓶颈）。
-> 5. **O7**：dQ/dK/dV 去 `atomicAdd`（分块 accum + convert；fp8 已做，移植）。
->    **← 当前第一瓶颈（L1/L2 吞吐）**
-> 6. **O9**：`wgmma`+TMA+warp specialization，对标 FA3。
+> 5. **O8b**：LSE 预处理的负载均衡 + `cp.async` 双缓冲（O6b 后 preprocess 又占端到端 34%）。
+>    **已完成（第三十一轮，fp16）**：因果下第 `mblk` 个 CTA 做 `mblk+1` 个 K tile（尾波 50%），
+>    改**镜像配对**（每 CTA 做 `m` 与 `nblk-1-m`，工作量恒 `nblk+1`）+ K 的 `cp.async.cg` 双缓冲；
+>    **lse S4096 0.985→0.348ms（2.81×）**、端到端 **2.952→2.336ms（58.8 TF，FA3 的 6.9%）**，
+>    数值逐位相同。bf16 同构改造留待下一轮（O8b-bf16）。
+> 6. **O7**：dQ/dK/dV 去 `atomicAdd`（分块 accum + convert；fp8 已做，移植）。
+>    **注意（本轮分析）**：fp16/bf16 的 dK/dV 原子流量与 dQ **对称**——无论 Q-resident 还是
+>    KV-resident，归约贡献总数都是 `S²/2`（每元素被 atomic `~S/BM` 次），单靠换归约维收益有限；
+>    实测 main 的 L2 162M sectors 里 `red` 占 **102M（63%）**，真正杠杆是**更大 `BM` 或寄存器/
+>    smem 分块累加**。O7 需谨慎设计（优先考虑 O9）。
+> 7. **O9**：`wgmma`+TMA+warp specialization，对标 FA3。
 > 目标：fp16/bf16 main 先到 FA2 水平，再逼近 FA3/TE；每步用 `harness/fa_vs_te_bwd_only.py`（纯反向、三列）验收。
 
 > **用户新增需求（已完成）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
