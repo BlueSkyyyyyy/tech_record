@@ -422,6 +422,14 @@ scripts/lab.sh status
   把 4 个 byte 的低 3 位压成 selector 要 `(k&0xF)|((k>>4)&0xF0)|((k>>8)&0xF00)|((k>>12)&0xF000)`；
   直接拿展开后的 byte 当 selector 会全错。最小复现必须**穷举**（`prmt_test.cu` 扫 2^28）而不是抽点。
   且 PRMT 解码是 **ALU 密集**（~3 指令/nibble），在 ALU 已被 decode 占满的 kernel 里是负优化。
+- **`__byte_perm` 的 selector field 只用低 3 位，值 8–15 回绕到 `v&7`（bit3 被忽略）**（62 篇）：
+  这不是「8–15 取 0」，而是硬件把 selector nibble 当 `v & 7`。因此**原始 nibble（0–15）可以直接当
+  selector** 去查 8 项表（`n ≥ 8` 自动落到 `n-8` 的幅值上），再用 nibble 的 bit3 造逐字节符号掩码在
+  「幅值/负值」两表间选（`fp4_ffn2.cu` 的 `decode_word_prmt`）。**坑**：若按「selector 是按字节排」去
+  写（把索引放进每字节低 4 位），索引会落到 field 0/2/4/6，结果静默错位；必须穷举 16 个 nibble +
+  16 个 selector field 验证。**胜负判据**：PRMT 把成本记在 ALU、LUT 记在 LSU/L1TEX——先看 ncu
+  `pipe_alu` vs `pipe_lsu`/`L1/TEX` 谁高再选（58/59/60 输 29~33%，62 的 K1 ALU 75.9% 赢 13%）。
+
 - **MoE decode 是 grouped GEMV，不是 top-k 个独立 GEMV**（59 篇）：一步 decode 要算 `B×topk`
   个 `(token,expert)` 对。按 expert 折叠进一个 kernel（`grid.y=experts`），一个 CTA 吃下某专家
   全部 m 个 token，**权重每专家只读/decode 一次、被 m 个 token 的 `dp4a` 复用**，权重复用
