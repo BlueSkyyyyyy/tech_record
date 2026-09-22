@@ -447,3 +447,15 @@ scripts/lab.sh status
   grouped FP4 decode 的 ncu 是 DRAM 60.1% / **L1TEX 83.9%** / Compute 41.1%，残余 48% 多余 wavefront
   几乎全来自 256 项 `uint16` LUT 的随机读。换 PRMT（寄存器表）**慢 33%**——`dp4a` 已在整数管道上，
   换访存税为 ALU 税方向反了。判据：SM 利用率 41%≠ALU 空闲；先试**冲突无关的 LUT**（padding / 分半表）。
+- **「连续行即连续内存」→ 一条 1D `cp.async.bulk` 搬整 warp row-tile**（63 篇）：grouped GEMV 里一个 warp
+  负责的 RWW 行在行主序下连续（`RWW*(K/2)` 字节），scale 段同理，可用 **一条 1D bulk**（`mbarrier::complete_tx`）
+  替代 `DEPTH*RWW` 条 `cp.async`。warp 私有 mbarrier `count=1`（只 lane0 `arrive.expect_tx`+发 bulk，其余 lane
+  `try_wait.parity`）。**端到端 1.10×、K2 单算子 1.14×**，ncu DRAM 78→90%；**occ 反而从 34%→24% 却更快**——
+  TMA 把 latency 从 lane 的 dependency scoreboard 里拿出来，`long_scoreboard` 高的 kernel 先改搬运方式、别堆 warp。
+- **TMA 的收益靠「飞行期间有活干」，排序正负取决于 tile/激活比**（63 篇）：把激活的 global 读排在
+  issue TMA 之后、wait 之前。K1（tile 57KB、激活大）「TMA 先发」**+6.8%**；K2（tile 12KB、激活 3KB）反而 −1%。
+- **mbarrier 不需要为 init 单独 `__syncthreads`**（63 篇）：lane0「先 init 再 issue」同线程程序序已足够，
+  其余 lane 在后续的激活 `__syncthreads` 之后才 `wait`，那条 barrier 已保证 init 可见。多加一条实测值 ~3%。
+- **TMA 的 `L2::cache_hint`（`evict_first`）对流式权重是中性**（63 篇）：L2 命中率本就 ~19%、无复用可保；
+  流式读 ≠ hint 有收益，先看 ncu `L2 Hit Rate`。
+
