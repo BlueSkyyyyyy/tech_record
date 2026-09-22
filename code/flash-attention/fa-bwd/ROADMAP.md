@@ -78,7 +78,10 @@
       数值与 TE 同量级、S=4096 时优于 TE-vs-ref。ncu：bound 已从 smem 冲突变为
       **低 occupancy/并行度**（L1/TEX 76%→19%，No Eligible 91.7%、Waves 0.48、1 CTA/SM）。
       详见 `docs/03-fp8-bwd-impl.md` §7。剩余（pipeline/提 occupancy/dQ 缓冲）转 backlog。
-- [ ] **P3-5** 两文件版 + `docs/03-fp8-bwd-impl.md`（单文件实现分析已写在 03）
+- [x] **P3-5** 两文件版 `fa_bwd_fp8_kernels.cuh` + `fa_bwd_fp8_main.cu`（以 mma 单文件为源，行为逐指标一致）
+      → 数值逐位相同（S=512 2.426/2.975/3.735e-1；S=1024H32 2.400/4.195/3.536e-1；
+      S=4096 2.635/2.643/3.216e-1），ncu `Executed Instructions=25,543,552`/128 regs/80.13KB 与单文件一致；
+      `docs/03-fp8-bwd-impl.md` §8
 
 ### P4 文档 / 汇总
 
@@ -196,10 +199,22 @@
     main 相对 FP8 峰值 0.24/0.48/0.68%，相对 TE FP8 main 约 4–16%。
   - 文档 `docs/03-fp8-bwd-impl.md` §7；原始输出 `src/fp8/fa_bwd_fp8_mma_*`。
 
+- 2026-09-22（第八轮）：**P3-5 完成（fp8 两文件拆分，fp8 三种形态全部收尾）**。
+  - 拆成两文件：`src/fp8/fa_bwd_fp8_kernels.cuh`（device：常量/smem 布局/fp8 转换/mma+ldmatrix 封装
+    /quantize_row/preprocess/main/convert）+ `fa_bwd_fp8_main.cu`（host：npy/launcher/自测）；
+    以 **mma 单文件**为源，device 代码逐字未改。
+  - 逐指标核对与单文件**无差异**：S=512 dq/dk/dv max_abs 2.426/2.975/3.735e-1；
+    S=1024H32 2.400/4.195/3.536e-1；S=4096 2.635/2.643/3.216e-1；main 0.454/1.814/10.164 ms。
+    ncu 与单文件逐项相同（DRAM 0.93% / L1TEX 19.00% / Compute 4.75% / occ 6.25% / Waves 0.48 /
+    128 regs / 80.13KB / Executed Instructions 25,543,552）。
+    原始输出见 `src/fp8/fa_bwd_fp8_main_{s512,s1024h32,s4096,ncu_main}.out.txt`。
+  - `docs/03-fp8-bwd-impl.md` §8 记录拆分与核对。
+
 ## 下一步（明确到可执行）
 
-- [ ] **P3-5**：fp8 两文件拆分（`fa_bwd_fp8_kernels.cuh` + `fa_bwd_fp8_main.cu`），
-      以 mma 单文件为源，行为逐指标一致。
+- [ ] **P4-1**：`docs/04-numerics-and-perf-summary.md`：汇总 fp16/bf16/fp8 的数值表 + 性能表
+      （我们单/两文件 vs FA/TE，各 shape），引用各 `*.out.txt` 实测值。
+- [ ] **P4-2**：`docs/05-porting-notes.md`：目标卡抽象层与移植注意事项。
 - [ ] （backlog，fp8 性能）在 mma 版上继续：① pipeline（`cp.async` 双缓冲 K/V）；
       ② 降寄存器（128）/smem（80KB）提 occupancy（当前 1 CTA/SM、Waves 0.48）；
       ③ dQ/dK/dV 的 atomicAdd 换 `dQ_accum` 缓冲 + convert。

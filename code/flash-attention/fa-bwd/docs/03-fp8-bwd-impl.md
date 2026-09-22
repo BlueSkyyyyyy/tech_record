@@ -295,3 +295,57 @@ scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=3 \
 scripts/ncu.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --set full --launch-count 1 \
     --kernel-name regex:fa_bwd_fp8_mma -- /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8 --iters=1
 ```
+
+---
+
+## 8. P3-5：两文件版（`src/fp8/fa_bwd_fp8_kernels.cuh` + `fa_bwd_fp8_main.cu`）
+
+P3-4 的张量核版交付后，按 fp16/bf16 的同款约定把 FP8 反向也拆成两文件：
+
+- `src/fp8/fa_bwd_fp8_kernels.cuh`（device 部分）：编译期常量 + smem 布局 + fp8 转换 helper
+  + `mma`/`ldmatrix` 封装 + `quantize_row_kernel` + `preprocess_kernel` +
+  `fa_bwd_fp8_mma_kernel` + `convert_kernel`，即单文件里除 host/自测外的**全部 device 代码**。
+- `src/fp8/fa_bwd_fp8_main.cu`（host 部分）：`#include "fa_bwd_fp8_kernels.cuh"`，只保留
+  npy 读取 / launcher / 计时 / 对拍自测。
+
+拆分标准与 P1-4/P2-2 一致：**device 代码逐字未改**（只是移动到 `.cuh` 并用 include guard），
+因此期望逐指标完全一致。选择以 **mma 单文件**（`fa_bwd_fp8_mma_onefile.cu`）为源，
+而非 golden，因为 mma 版是 fp8 的最终形态，两文件版应对齐它。
+
+### 8.1 数值核对（与 mma 单文件逐指标一致）
+
+| shape | 指标 | mma 单文件 (P3-4) | 两文件版 (P3-5) |
+|---|---|---|---|
+| S=512 H16 | dq/dk/dv vs ref max_abs | 2.426 / 2.975 / 3.735e-1 | 2.426 / 2.975 / 3.735e-1 |
+| S=512 H16 | main | 0.452 ms | 0.454 ms |
+| S=1024 H32 | dq/dk/dv vs ref max_abs | 2.400 / 4.195 / 3.536e-1 | 2.400 / 4.195 / 3.536e-1 |
+| S=1024 H32 | main | 1.802 ms | 1.814 ms |
+| S=4096 H16 | dq/dk/dv vs ref max_abs | 2.635 / 2.643 / 3.216e-1 | 2.635 / 2.643 / 3.216e-1 |
+| S=4096 H16 | main | 10.188 ms | 10.164 ms |
+
+对拍误差**逐位相同**；main 时间在 event 计时噪声内一致。ncu 的 SASS 级统计也逐项相同
+（`Executed Instructions = 25,543,552`、`Registers = 128`、`Dynamic Shared Memory = 80.13 KB`、
+`DRAM 0.93% / L1TEX 19.0% / Compute 4.75% / occupancy 6.25% / Waves 0.48`），确认拆分无行为差异。
+原始输出见 `src/fp8/fa_bwd_fp8_main_{s512,s1024h32,s4096,ncu_main}.out.txt`。
+
+### 8.2 性能对标（未变）
+
+两文件版与单文件共用同一 kernel SASS，性能口径同 §7.6：main 相对 FP8 峰值 0.24–0.68%、
+相对 TE FP8 main 约 4–16%，端到端瓶颈仍是 `preprocess`（S=4096 时 70.8 ms >> main 10.2 ms）。
+优化 backlog（pipeline / 提 occupancy / dQ 缓冲 / preprocess 分块）见 `../ROADMAP.md`。
+
+### 8.3 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+# 两文件版：编译运行 + 对拍（默认 S=512）
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=10
+# S=1024 H32 / S=4096
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=10 \
+    /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_causal_fp8
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=3 \
+    /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --launch-count 1 \
+    --kernel-name regex:fa_bwd_fp8_mma -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8 --iters=1
+```
