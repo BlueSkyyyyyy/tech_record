@@ -99,6 +99,13 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | (1,1024,32,128) | — | — | 0.2238 ms / 76.78 TF (7.76%) | 0.1372 ms / 125.20 TF (12.66%) |
 | (1,4096,16,128) | 138.33 ms / 0.99 TF (0.10%) | 68.57 ms | 1.0582 ms / 129.88 TF (13.13%) | 0.5968 ms / 230.31 TF (23.29%) |
 
+> 上表 fp16 是**标量 golden**（`fa_bwd_fp16_{main,onefile}.cu`）。**O5** 新增张量核版
+> `fa_bwd_fp16_mma_{onefile.cu, kernels.cuh+main.cu}`（`mma.m16n8k16`+`ldmatrix`），
+> 同 session A/B：**main S=512 2.279→0.192ms（11.8×）、S=4096 67.55→4.555ms（14.9×）**
+> （main-only 22.4 / 60.4 TF，峰值 2.3%/6.1%），数值与 ref/FA/TE 同量级、单/两文件逐位一致。
+> 端到端仍被**标量 preprocess** 拖住（S=4096 preprocess 68.7ms > main 4.56ms，占 94%）→ 下一项 **O8**。
+> 详见 `01-fp16-bwd-impl.md` §10。
+
 ### 2.2 bf16（峰值 989 TFLOPS）
 
 | shape | ours total | ours main | FA2.7.4 | TE2.14 |
