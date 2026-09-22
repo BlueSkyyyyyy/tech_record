@@ -583,6 +583,75 @@ Waves **0.97**；stall `wait 1.57 + short_scoreboard 1.33 + not_selected 0.79 + 
 
 ---
 
+## 6j. O6c-bf16：主 kernel tile 几何参数化 + 小网格并行度自适应（main 最多 1.18×）
+
+与 fp16 的 O6c（`01-fp16-bwd-impl.md` §13b）**逐字 dtype 参数化**，只把 `__half`→bf16、
+`mma_f16`→`mma_bf16`。改动同 fp16：
+
+1. **tile 几何参数化**：`fa_bwd_bf16_mma_kernel<HD,BM,BN,PIPE>` 的 2×2 warp 几何全部由
+   `(BM,BN)` 派生（`GM1/GN1=BM/2,BN/2`；`GMV/GNV=BN/2,HD/2`；`GMQ/GNQ=BM/2,HD/2`；
+   `MT*=WARP_M/16,WARP_N/8`），`pval/dqacc/acc` 按 `MT*` 定义，`__launch_bounds__` 改为
+   `(THREADS,(BN>32)?2:3)`。`BM=64,BN=32` 展开与 O6b **完全同构**（回归逐位不变）。
+2. **host 自动档**：`grid<132 且 S≤1024` ⇒ `(BM=32,BN=32,PIPE=1)`（grid/并行度翻倍）；
+   否则 `BM=64`，`S≥4096` 用 `BN=64`，`grid≥396` 用 `PIPE=2`；CLI `--bm/--bn/--pipe/--sched` 覆盖。
+3. `sched`（静态 mblk 重排）沿用 fp16 的结论，**保留默认 0、不作为优化**（本轮复测同一结论）。
+4. 单文件 `fa_bwd_bf16_mma_onefile.cu` 由两文件 device 段 + host 段**重新拼接**生成
+   （device 段与 `fa_bwd_bf16_mma_kernels.cuh` **逐字一致**，脚本已核对）。
+
+### 配置 A/B（同 session，CUDA event，main-only，单位 ms）
+
+| shape (grid) | (64,32,2) | (64,64,2) | (32,32,1) | (32,32,2) | best/原 |
+|---|---|---|---|---|---|
+| MHA S=512 H16 (128) | 0.0886 | 0.0835 | **0.0800** | 0.0831 | **1.108×** |
+| GQA q32/kv4 S=1024 (512) | **0.3584** | 0.3875 | 0.4546 | 0.4583 | 1.00× |
+| MHA S=4096 H16 (1024) | 1.8672 | **1.8349** | 2.6322 | 2.6342 | 1.018× |
+
+自动档选中的配置：S=512⇒(32,32,1)、S=1024 kv4⇒(64,32,2)、S=4096⇒(64,64,2)。
+**端到端**（`preprocess+main+convert`）：S=512 0.1603→**0.1501ms（1.06×，14.31 TF）**、
+S=4096 2.3427→**2.3692ms（58.01 TF，持平，session 噪声）**、GQA kv4 0.4817→**0.4838ms（35.51 TF）**。
+（`(32,32,1)` 在 S=512 的收益 run-to-run 在 **1.11–1.18×** 之间波动，机制一致。）
+`[O6c A/B]` 的 `sched=0/1/2` 分别是 0.0845/0.0849/0.0846（S=512）与 1.8805/1.8547/1.8403（S=4096）
+⇒ **静态重排 0~2% 且方向不稳**，再次证伪。
+
+### 数值（与 O5b/O8/O6/O6b/O8b **逐位相同**）
+
+`BM=64,BN=32` 路径展开后与 O6b 同构；`BM=32`/`BN=64` 只改 tile 划分、不改数学口径。
+S=512 dq/dk/dv max_abs = 9.001/12.61/13.65e-3；S=4096 = 15.10/13.40/16.31e-3；
+GQA kv4 = 12.01/21.25/31.56e-3（与 §6e–§6i 记录一致）。单/两文件逐指标一致。
+
+### ncu（main）
+
+- **S=512 `(128,32,32,1)`**：Duration **83.9µs**、DRAM 5.74% / L1TEX **43.94%** / L2 44.89% /
+  Compute 11.91% / 145 regs / 59.90KB smem / 理论 occ **18.75%**、achieved **10.99%** / Waves **0.65**；
+  stall `long 3.23 + wait 1.89 + short 1.08 + mio 0.68 + lg_throttle 0.30 + barrier 0.23`。
+  与 fp16 O6c 同 config 逐项一致（fp16：83.87µs / L1 43.54% / occ 10.99%）。机制=**并行度**：
+  grid 128→256、每 SM 1→2 个 CTA，把 SM 从「单 CTA 等延迟」救出。
+- **S=4096 `(128,64,64,2)`**：Duration **1.86ms**、DRAM 3.48% / **L1TEX 57.05%** / **L2 63.02%** /
+  Compute 26.77% / 242 regs / 105.47KB smem / 理论 occ **12.50%**（2 CTA/SM）/ Waves **3.88** /
+  No Eligible 67.14%；stall `wait 1.94 + long 1.45 + short 0.46 + not_selected 0.18`。
+  对比 O6b `(128,64,32,2)`：Duration 1.94ms、L1TEX **71.71%**、L2 60.39%、Compute 31.42%、
+  168 regs / 71.17KB / occ **16.86%**（3 CTA/SM）/ Waves 2.59 ⇒ **`BN=64` 把 L1/TEX 71.7→57.1%
+  （Q/dO 复用翻倍），但 smem 105KB 使占用从 3→2 CTA/SM，净收益仅 ~1.5%**。要同时拿低 L1 与高
+  occupancy 须先把 smem 压到 ≤77.7KB（BN=64 需砍 ~28KB），留待 O9。**新墙 = L1/L2 吞吐 + `wait`**。
+
+### 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`，含 `fa_bwd_o6c_fa3_te_s512.out.txt`）
+
+| shape | FA3 | TE2.14 | ours total | ours/FA3 (TF) | 时间比 |
+|---|---|---|---|---|---|
+| MHA S=4096 | **0.3195ms / 860 TF** | 0.4360 / 630 | 2.3691ms / 58.0 | **6.7%** | 7.41× |
+| MHA S=512 | **0.0265ms / 162 TF** | 0.0324 / 132 | 0.1510ms / 14.2 | **8.8%** | 5.70× |
+| GQA q32/kv4 S=1024 | **0.0822ms / 418 TF** | 0.1116 / 308 | 0.4839ms / 35.5 | **8.5%** | 5.89× |
+
+（FA2 对比：S=4096 0.7278/378、GQA 0.1584/217。）
+
+原始输出 `src/bf16/fa_bwd_bf16_mma_main_o6c_{s512_h16,s4096_h16,s1024_h32_kv4}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o6c_{s512_h16,s4096_h16}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_main_o6c_ncu_{s512_main,s4096_main}.out.txt`、
+`..._o6c_stall_{s512,s4096}.out.txt`、`src/bf16/fa_bwd_o6c_fa3_te_baseline.out.txt`、
+`src/bf16/fa_bwd_o6c_fa3_te_s512.out.txt`。
+
+---
+
 ## 7. 复现命令
 
 ```bash
@@ -614,5 +683,6 @@ docker exec kernel_lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py bench
 
 见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）、O8（preprocess mma，§6f）、O6（main
 `cp.async` 双缓冲，§6g）、O6b（K/V 降 smem 回 3 CTA/SM + A 转置读，§6h）、O8b（LSE 负载
-均衡 + cp.async，§6i）已完成**；接下来是 O9（wgmma+TMA 对标 FA3）、O7（去 atomic）。
+均衡 + cp.async，§6i）、O6c（tile 几何参数化 + 小网格自适应，§6j）已完成**；接下来是
+**O7**（dK/dV 去 `atomicAdd`，降 L1/L2 流量）、**O9**（wgmma+TMA 对标 FA3）。
 backlog：fp8 侧残余 red（O7b）、MLA 降 smem / 张量核。

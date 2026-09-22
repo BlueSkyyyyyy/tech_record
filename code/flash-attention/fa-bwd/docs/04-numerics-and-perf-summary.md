@@ -212,6 +212,19 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 同 session 纯反向 FA3 S4096 **0.3194ms/861TF** ⇒ ours total 为 FA3 的 **6.8%**、时间比 7.3×；
 > GQA kv4 FA3 0.0825ms/416 ⇒ ours 8.6%、时间比 5.8×。详见 `01b-bf16-bwd-impl.md` §6i。
 
+> **O6c-bf16（主 kernel tile 几何参数化 + 小网格并行度自适应，与 fp16 逐字同构）已完成**：把
+> `fa_bwd_bf16_mma_kernel` 的 2×2 warp 几何从写死 `(BM=64,BN=32)` 改成由 `(BM,BN)` 派生；host
+> 自动档在 **`grid<132 且 S≤1024`** 用 `(BM=32,BN=32,PIPE=1)`（grid 翻倍、并行度翻倍），`S≥4096`
+> 用 `BN=64`。**main S=512 0.0886→0.0800ms（1.11×，另一 session 1.18×）/ 端到端 0.1603→0.1501ms
+> （1.06×，14.31 TF）**、S=4096 持平 2.369ms（58.01 TF）、GQA kv4 0.484ms（35.51 TF）**；
+> **数值与 O5b/O8/O6/O6b/O8b 逐位相同**。
+> **再次证伪**静态 mblk 重排（`[O6c A/B]` 0–2%、方向不稳）。ncu：S=512 `(32,32,1)` achieved occ
+> 6.24%→**10.99%**、Duration 99.3→**83.9µs**；S=4096 `BN=64` L1/TEX 71.7→**57.1%** 但 168→242 regs、
+> smem 105KB 使 3→2 CTA/SM（occ 16.9→11.8%），净 +1.5%，墙 = L1/L2 吞吐 + `wait`。
+> 对标（纯反向 `fa_vs_te_bwd_only.py bf16`）：S=512 FA3 0.0265ms/162TF ⇒ ours **8.8%**（时间 5.7×）；
+> S=4096 FA3 0.3195ms/860 ⇒ ours **6.7%**（7.4×）；GQA kv4 FA3 0.0822/418 ⇒ ours **8.5%**（5.9×）。
+> 详见 `01b-bf16-bwd-impl.md` §6j。
+
 ### 2.3 fp8（峰值 1978.8 TFLOPS；FA 无反向 FP8，仅对标 TE）
 
 | shape | ours total | ours main | TE FP8 |

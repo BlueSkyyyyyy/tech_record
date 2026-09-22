@@ -876,8 +876,7 @@ S=512 MHA：FA2 0.0442/49、**FA3 0.0265/81**、TE 0.0321/67；ours total 0.1504
 ## 14. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
-O8b（§13）、O6c（§13b）** 完成。后续按回报排序：**O6c(bf16)**（同款 tile 参数化 +
-小网格自适应，代码 dtype 参数化）→ **O7**（dK/dV 去 `atomicAdd`；已分析其原子流量与 dQ
-对称，单靠换归约维收益有限，需配合更大 `BM`/寄存器累加）→ **O9**（`wgmma`+TMA+warp
-specialization，对标 FA3；O6c 已证明 `BN=64` 能降 L1/TEX，但需 wgmma/TMA 才能在不掉
-occupancy 的前提下拿到）→ MLA 张量核。
+O8b（§13）、O6c（§13b）** 完成。后续按回报排序：**O7**（dK/dV 去 `atomicAdd`；已分析其
+原子流量与 dQ 对称，单靠换归约维收益有限，需配合更大 `BM`/寄存器累加）→ **O9**（`wgmma`+
+TMA+warp specialization，对标 FA3；O6c 已证明 `BN=64` 能降 L1/TEX，但需 wgmma/TMA 才能
+在不掉 occupancy 的前提下拿到）→ MLA 张量核。**O6c(bf16) 已完成（`01b` §6j）**。

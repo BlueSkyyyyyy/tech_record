@@ -1,5 +1,5 @@
 // =============================================================================
-// fa_bwd_bf16_mma_onefile.cu —— FlashAttention 反向（bf16）**张量核单文件版**（O5b）
+// fa_bwd_bf16_mma_onefile.cu —— FlashAttention 反向（bf16）**张量核单文件版**（O5b/O6c）
 // =============================================================================
 // 由两文件版 `fa_bwd_bf16_mma_kernels.cuh`（device） + `fa_bwd_bf16_mma_main.cu`（host）
 // 拼接生成，device 代码与两文件版**逐字一致**。
@@ -13,6 +13,9 @@
 //   `__half`→`__nv_bfloat16`、`f16.f16`→`bf16.bf16`、
 //   `__half2float/__float2half`→`__bfloat162float/__float2bfloat16`。
 // smem 布局与 ldmatrix padding（LD=HD+8/LDP=BM+8/LDS=BN+8）完全一致。
+//
+// O6c：主 kernel 的 2×2 warp 几何由 (BM,BN) 参数化，host 按网格自动选 tile；与 fp16 版
+// 逐字同构，详见 `docs/01` §13b 与 ROADMAP O6c。
 //
 // 用法：run.sh src/bf16/fa_bwd_bf16_mma_onefile.cu [--dir=...] [--full|--causal] [--iters=N]
 // =============================================================================
@@ -31,12 +34,23 @@
 
 using bf16 = __nv_bfloat16;
 
+#define CUDA_CHECK(call)                                                        \
+  do {                                                                          \
+    cudaError_t _e = (call);                                                    \
+    if (_e != cudaSuccess) {                                                    \
+      fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(_e),       \
+              __FILE__, __LINE__);                                              \
+      std::exit(1);                                                             \
+    }                                                                           \
+  } while (0)
+
+
 // ----------------------------- 编译期常量 -----------------------------
 static constexpr int THREADS = 128;   // 4 warps
 static constexpr int WN      = 2;     // N 方向 warp 数（2×2 warp 网格）
 
 // =============================================================================
-// mma / ldmatrix（smoke 已在 fp16 版验证三种操作数布局；bf16 位宽/布局同构）
+// mma / ldmatrix（与 smoke 完全一致）
 // =============================================================================
 __device__ __forceinline__ uint32_t smem_u32(const void* p) {
   return (uint32_t)__cvta_generic_to_shared(p);
@@ -62,7 +76,7 @@ __device__ __forceinline__ void ldmatrix_x2_trans(uint32_t addr, uint32_t d[2]) 
                : "r"(addr));
 }
 __device__ __forceinline__ void mma_bf16(float c[4], const uint32_t a[4],
-                                         const uint32_t b[2]) {
+                                        const uint32_t b[2]) {
   asm volatile(
       "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
       "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
@@ -79,8 +93,8 @@ __device__ __forceinline__ void red_add2(float* p, float a, float b) {
 // 把「全局→smem」的 K/V 搬运从「同步 LDG + STS」改成硬件异步流水：`cp.async.cg` 走
 // L2-only 路径（流式数据不污染 L1），发起后立即返回、不占寄存器、不阻塞发射；
 // 用 `commit_group` 打组、`wait_group 0` 在消费前统一等待。这是消 `long_scoreboard`
-// （O5b ncu：全局访存延迟占 ~63%）的标准手段（对齐 fp8 的 O3，但 fp8 因字节少用寄存器预取，
-// fp16/bf16 字节翻倍 → 改用 cp.async 双缓冲 smem，避免 32 个额外寄存器的代价）。
+// （O5 ncu：全局访存延迟占 ~63%）的标准手段（对齐 fp8 的 O3，但 fp8 因字节少用寄存器预取，
+// bf16 字节翻倍 → 改用 cp.async 双缓冲 smem，避免 32 个额外寄存器的代价）。
 __device__ __forceinline__ void cp_async16(void* dst_smem, const void* src_gmem) {
   uint32_t s = smem_u32(dst_smem);
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(src_gmem));
@@ -91,7 +105,8 @@ __device__ __forceinline__ void cp_async16(void* dst_smem, const void* src_gmem)
 // 行越界（jg>=S）用普通 smem 写 0（cp.async 无谓词，混合写 + 后续 __syncthreads 可见）。
 // O6b：DOK/DOV 分别控制是否发 K / V，便于把二者拆到不同 commit_group、在不同时点预取。
 //   * O6  ：DOK=DOV=true（一次发 K+V）。
-//   * O6b ：K 双缓冲、循环首预取（DOK=true,DOV=false）；V 单缓冲、GEMM2 之后才发下一 tile。
+//   * O6b ：K 用双缓冲、在循环首预取（DOK=true,DOV=false）；V 只单缓冲，在 GEMM2 之后
+//            （V 的最后一次使用）才发下一 tile（DOK=false,DOV=true），省下一整个 V 缓冲。
 template <int HD, int BN, bool DOK = true, bool DOV = true>
 __device__ __forceinline__ void kv_issue_async(const bf16* __restrict__ k,
                                                const bf16* __restrict__ v, int j0, int S,
@@ -118,19 +133,22 @@ __device__ __forceinline__ void kv_issue_async(const bf16* __restrict__ k,
 // A[M_TILE][K_TILE] 行主序（行距 asld，bf16）；B 两种布局：
 //   BTRANS=false：Bs=[N_TILE][K_TILE] 行主序（行距 bsld，bf16）→ ldmatrix.x2；
 //   BTRANS=true ：Bs=[K_TILE][N_TILE] 行主序（行距 bsld，bf16）→ ldmatrix.x2.trans。
-// ATRANS=true ：As=[K_TILE][M_TILE] 行主序 → ldmatrix.x4.trans（bit3/bit4 互换），
-//   用于 O6b 免掉 `PsT/dSsT` 转置副本（fp16 版 smoke 验证逐位一致，bf16 位宽同构）。
+// ATRANS=false：As=[M_TILE][K_TILE] 行主序（行距 asld）→ ldmatrix.x4（常态）。
+// ATRANS=true ：As=[K_TILE][M_TILE] 行主序（即 A 的转置副本）→ ldmatrix.x4.trans，
+//   地址的 bit3/bit4 互换（见 `fa_bwd_bf16_atrans_smoke.cu` 的逐位验证），
+//   这样 P/dS 只需存一份 [BM][BN]，省掉一份 `PsT/dSsT`（O6b）。
 template <int WARP_M, int WARP_N, int K_TILE, bool BTRANS, bool ATRANS = false>
 __device__ __forceinline__ void mma_block_bf16(const bf16* As, int asld,
-                                               const bf16* Bs, int bsld,
-                                               float acc[WARP_M / 16][WARP_N / 8][4],
-                                               int wm, int wn, int lane) {
+                                              const bf16* Bs, int bsld,
+                                              float acc[WARP_M / 16][WARP_N / 8][4],
+                                              int wm, int wn, int lane) {
   constexpr int MTM = WARP_M / 16, MTN = WARP_N / 8;
 #pragma unroll
   for (int kk = 0; kk < K_TILE / 16; ++kk) {
     const int koff = kk * 16;
     uint32_t av[MTM][4];
     if constexpr (ATRANS) {
+      // As=[K][M]：krow 选 K 行（bit4→k8-15），mcol 选 M 列（bit3→m8-15）。
       const int krow = (lane & 7) + ((lane >> 4) & 1) * 8;
       const int mcol = ((lane >> 3) & 1) * 8;
 #pragma unroll
@@ -169,9 +187,14 @@ __device__ __forceinline__ void mma_block_bf16(const bf16* As, int asld,
 // =============================================================================
 // 1) preprocess（O8：mma 分块 LSE + 独立 delta）——替代旧标量 preprocess_kernel
 // =============================================================================
-// 与 fp16 版（O8）逐字同构：旧版每 (s,h) 行一个 block、标量扫 K，S=4096 ~69ms 是
-// 端到端第一瓶颈。改为 `lse_mma_kernel`（mma.m16n8k16 QKᵀ + online-softmax + warp 内
-// shfl 归约，LBM=64 行 × LBN=64 列/CTA）+ 独立 `delta_kernel`。数学与旧版一致。
+// 旧版每 (s,h) 行一个 block、128 线程标量扫 K，每对 (i,j) 做 128 次 FFMA；S=4096 时
+// ~68ms，是端到端第一瓶颈（O5 main 才 4.5ms）。O8 照搬 fp8 的 O1：
+//   * LSE 用 `lse_mma_kernel`：与主 kernel 同源的 QKᵀ 张量核（mma.m16n8k16），每 CTA 吃
+//     LBM=64 行 Q × LBN=64 列 K，4 warp 各 16 行；P 不物化，accumulator 直接做
+//     online-softmax，行 max/sum 在同 row 的 4 个 lane 间 `shfl_xor` 归约。
+//   * delta=rowsum(dO∘O) 拆成独立 `delta_kernel`（纯 O(S·H·D) 归约，与 LSE 解耦）。
+// 数学与旧版一致（bf16 乘积在 fp32 里累加），且 QKᵀ 的 k-loop 分块顺序与 main GEMM1
+// 完全相同 ⇒ LSE 与 main 的 P 自洽，数值只会更稳。
 static constexpr int LBM = 64;   // LSE CTA 的 Q 行数
 static constexpr int LBN = 64;   // LSE 一次吃的 K 列数
 
@@ -212,7 +235,7 @@ lse_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
     }
     __syncthreads();
 
-    // S_tile = Q·Kᵀ（bf16×bf16→fp32），每 warp 16×64
+    // S_tile = Q·Kᵀ（f16×f16→fp32），每 warp 16×64
     float acc[1][8][4];
 #pragma unroll
     for (int j = 0; j < 8; ++j)
@@ -265,7 +288,6 @@ lse_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
 // =============================================================================
 // O8b：LSE 预处理的两处优化（bf16，causal 专用）
 // =============================================================================
-// 与 fp16 版（O8b）逐字同构，仅 `__half`→bf16、`__float2half`→`__float2bfloat16`。
 // 动机（O8 ncu，S=4096）：`lse_mma_kernel` 1.03ms，占端到端 ~34%；SOL Compute 39.5%、
 // L1 23%、DRAM 1%，stall `long_scoreboard 2.19 + wait 1.34`（延迟受限）；且因果下工作量
 // 从第 0 块的 1 个 K tile 到第 63 块的 64 个 tile 线性增长，GPU 按 blockIdx 递增调度把重块
@@ -435,19 +457,25 @@ __global__ void delta_kernel(const bf16* __restrict__ o,
 //   PIPE==2：Qs[BM*LD] + dOs[BM*LD] + Ks[2*KVL] + Vs[KVL]
 //     + Ps[BM*LDS]（P，GEMM3 A 用 trans 读） + dSs[BM*LDS]（GEMM4 A trans / GEMM5 A 普通）
 //   其中 LD=HD+8、LDP=BM+8、LDS=BN+8（+8 消 ldmatrix bank conflict）。
-// PIPE=0：O5b 原版（同步标量 K/V 载入，3 CTA/SM）。
+// PIPE=0：O5 原版（同步标量 K/V 载入，3 CTA/SM）。
 // PIPE=1：O6（cp.async 双缓冲 K/V，消全局访存延迟；smem 翻倍 → 2 CTA/SM）。
-// PIPE=2：O6b（cp.async 只双缓冲 K，V 单缓冲且 GEMM2 后预取 + A 转置读免掉 PsT/dSsT）。
-//   与 fp16 版逐字同构；smem 71.2KB → 3 CTA/SM。
+// PIPE=2：O6b（cp.async **只双缓冲 K**，V 单缓冲且在 GEMM2 后预取）+ **A 转置读**：
+//   * V 只在 GEMM2 里被读、且 GEMM2 在 tile 前段 ⇒ 发完 GEMM2（下方的 __syncthreads 之后）
+//     就把下一 tile 的 V 发进同一缓冲，靠 GEMM3/4/5 的时间把延迟盖住。K 全程被 GEMM1/GEMM5
+//     使用，必须双缓冲。
+//   * `PsT/dSsT` 两份转置副本删掉：GEMM3/GEMM4 的 A 改用 `ldmatrix.x4.trans` 直接从
+//     `Ps/dSs[BM][BN]` 读（`fa_bwd_bf16_atrans_smoke.cu` 验证逐位一致）。
+//   ⇒ smem 降到 71.2KB，回到 **3 CTA/SM**，且少写两份转置副本（降 L1/TEX 压力）。
 template <int HD, int BM, int BN, int PIPE>
-__global__ void __launch_bounds__(THREADS, PIPE == 1 ? 2 : 3)
+__global__ void __launch_bounds__(THREADS, (BN > 32) ? 2 : 3)
 fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
                        const bf16* __restrict__ v, const bf16* __restrict__ do_,
                        const float* __restrict__ delta, const float* __restrict__ lse,
                        float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                        float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                       int causal) {
+                       int causal, int sched) {
   static_assert(HD == 128, "O5b bf16 mma 目前只支持 head_dim=128");
+  static_assert(BM % 32 == 0 && BN % 16 == 0, "BM/BN 需为 2×2 warp 网格的整数倍");
   constexpr int LD  = HD + 8;    // Q/K/V/dO 行距（bf16）
   constexpr int LDP = BM + 8;    // PsT/dSsT 行距（bf16，PIPE!=2）
   constexpr int LDS = BN + 8;    // Ps/dSs 行距（bf16，[BM][BN] 布局）
@@ -456,16 +484,47 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
   constexpr int VSB = PIPE == 1 ? 2 * KVL : KVL;   // V 缓冲（只有 O6 双缓冲）
   constexpr int PSZ = (PIPE == 2) ? BM * LDS : BN * LDP;  // P 存储大小
 
+  // ---- 由 (BM,BN) 派生的 2×2 warp 网格几何（O5c：支持 BN=64 等更大 tile）----
+  // GEMM1/2（S/dP，输出 [BM][BN]）：每个 warp 吃 (BM/2)×(BN/2)
+  // GEMM3/4（dV/dK，输出 [BN][HD]）：每个 warp 吃 (BN/2)×(HD/2)，wm=wr 铺 BN、wn=wc 铺 HD
+  // GEMM5（dQ，输出 [BM][HD]）：每个 warp 吃 (BM/2)×(HD/2)
+  // 记 MT* 为每个 warp 的 m16/n8 tile 数。当前 HD=128 ⇒ 每个 warp 的 N 半宽恒为 64。
+  constexpr int GM1 = BM / 2, GN1 = BN / 2;   // GEMM1/2 warp tile
+  constexpr int GMV = BN / 2, GNV = HD / 2;   // GEMM3/4 warp tile
+  constexpr int GMQ = BM / 2, GNQ = HD / 2;   // GEMM5 warp tile
+  constexpr int MTM1 = GM1 / 16, MTN1 = GN1 / 8;
+  constexpr int MTMV = GMV / 16, MTNV = GNV / 8;
+  constexpr int MTMQ = GMQ / 16, MTNQ = GNQ / 8;
+  static_assert(GM1 % 16 == 0 && GN1 % 8 == 0 && GMV % 16 == 0 && GMQ % 16 == 0,
+                "warp 几何需为 mma tile 的整数倍");
+
   extern __shared__ __align__(16) char smem[];
   bf16* Qs   = reinterpret_cast<bf16*>(smem);
   bf16* dOs  = Qs + BM * LD;
   bf16* Ks   = dOs + BM * LD;
   bf16* Vs   = Ks + KSB;
-  bf16* Ps   = Vs + VSB;              // PIPE==2：[BM][LDS]；否则 [BN][LDP]（=PsT）
-  bf16* dSs  = Ps + PSZ;              // 始终 [BM][LDS]
-  bf16* dSsT = dSs + BM * LDS;        // PIPE!=2 的 dS 转置副本（PIPE==2 不用）
+  bf16* Ps   = Vs + VSB;            // PIPE==2：[BM][LDS]；否则 [BN][LDP]（=PsT）
+  bf16* dSs  = Ps + PSZ;            // 始终 [BM][LDS]
+  bf16* dSsT = dSs + BM * LDS;      // PIPE!=2 的 dS 转置副本（PIPE==2 不分配/不用）
 
-  const int mblk = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // ---- O6c：causal 下按 blockIdx 到 Q 块（mblk）的映射重排，做负载均衡 ----
+  // 因果下第 m 个 Q 块要算 m+1 个 K/V tile，工作量随 m 线性增长；GPU 按 blockIdx
+  // 递增调度，会把重块排到最后 → 尾波最重（O6b ncu：Waves 2.59、尾波最多占 33%，
+  // 且 SM active cycles 最大比均值高 23%、最小低 26%）。这里不改变每个 CTA 的数学，
+  // 只重排「blockIdx.x → mblk」这个双射，把轻/重块均匀铺进每个波：
+  //   sched=0：原样（mblk=bx，重块在后）
+  //   sched=1：交错（0, n-1, 1, n-2, ...，每个波都轻/重混合）
+  //   sched=2：逆序（n-1, n-2, ..., 0，重块先跑、尾波最轻）
+  const int bx = blockIdx.x;
+  const int nblk = (S + BM - 1) / BM;
+  int mblk = bx;
+  if (causal) {
+    if (sched == 1)
+      mblk = (bx & 1) ? (nblk - 1 - (bx >> 1)) : (bx >> 1);
+    else if (sched == 2)
+      mblk = nblk - 1 - bx;
+  }
+  const int h = blockIdx.y, b = blockIdx.z;
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int wr = wid / WN, wc = wid % WN;
@@ -505,11 +564,11 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
   }
 
   // dQ 沿 nt 在寄存器里累加（每个 Q 块唯一 CTA，无需跨 CTA atomic）。
-  float dqacc[2][8][4];
+  float dqacc[MTMQ][MTNQ][4];
 #pragma unroll
-  for (int i = 0; i < 2; ++i)
+  for (int i = 0; i < MTMQ; ++i)
 #pragma unroll
-    for (int j = 0; j < 8; ++j)
+    for (int j = 0; j < MTNQ; ++j)
 #pragma unroll
       for (int q = 0; q < 4; ++q) dqacc[i][j][q] = 0.f;
 
@@ -529,8 +588,9 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
         kv_issue_async<HD, BN, true, true>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
                                Ks + ((nt + 1) & 1) * KVL, Vs + ((nt + 1) & 1) * KVL, LD);
     } else if constexpr (PIPE == 2) {
-      // O6b：等 K[nt] 与上一轮发出的 V[nt] 落地；barrier 同时证明上一 tile 的 GEMM5
-      // 已读完 Ks 的另一 stage，故可把 K[nt+1] 发进该 stage。V 单缓冲，见下。
+      // O6b：等本 tile 的 K[nt] 与上一轮发出的 V[nt] 落地（同一个 wait_group 0 覆盖）。
+      // 此 barrier 同时证明「上一 tile 的 GEMM5 已读完 Ks 的另一 stage」，故可把 K[nt+1]
+      // 发进该 stage；V 单缓冲，下一 tile 的 V 留到 GEMM2 之后才发（见下）。
       asm volatile("cp.async.wait_group 0;\n");
       __syncthreads();
       if (nt + 1 < ntiles)
@@ -556,21 +616,21 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
     // ---- (1) S = scale·QKᵀ → P = exp(S − LSE) ----
     // 同一线程在 GEMM1/GEMM2 的 (r,c) 映射一致，故用寄存器 pval 保存 P 供 dS 用，
     // 同时把 P 转 bf16 写进转置布局 PsT（供 GEMM3 的 A）。
-    float pval[2][2][4];
+    float pval[MTM1][MTN1][4];
     {
-      float acc[2][2][4];
+      float acc[MTM1][MTN1][4];
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTM1; ++i)
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+        for (int j = 0; j < MTN1; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block_bf16<32, 16, HD, false>(Qs, LD, Kt, LD, acc, wr, wc, lane);
-      const int r0 = wr * 32, c0 = wc * 16;
+      mma_block_bf16<GM1, GN1, HD, false>(Qs, LD, Kt, LD, acc, wr, wc, lane);
+      const int r0 = wr * GM1, c0 = wc * GN1;
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTM1; ++i)
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+        for (int j = 0; j < MTN1; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) {
             int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
@@ -583,25 +643,25 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
             if constexpr (PIPE == 2)
               Ps[r * LDS + c] = __float2bfloat16(p);   // [BM][BN]，GEMM3 用 trans 读
             else
-              Ps[c * LDP + r] = __float2bfloat16(p);   // [BN][BM]（PIPE!=2）
+              Ps[c * LDP + r] = __float2bfloat16(p);   // [BN][BM]，转置副本（PIPE!=2）
           }
     }
 
     // ---- (2) dP = dO·Vᵀ → dS = P∘(dP − D)（同 warp/累加器映射）----
     {
-      float acc[2][2][4];
+      float acc[MTM1][MTN1][4];
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTM1; ++i)
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+        for (int j = 0; j < MTN1; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block_bf16<32, 16, HD, false>(dOs, LD, Vt, LD, acc, wr, wc, lane);
-      const int r0 = wr * 32, c0 = wc * 16;
+      mma_block_bf16<GM1, GN1, HD, false>(dOs, LD, Vt, LD, acc, wr, wc, lane);
+      const int r0 = wr * GM1, c0 = wc * GN1;
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTM1; ++i)
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+        for (int j = 0; j < MTN1; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) {
             int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
@@ -609,14 +669,15 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
             int qi = m0 + r;
             float del = (qi < S) ? delta[((size_t)(b * S + qi)) * H + h] : 0.f;
             float ds = pval[i][j][q] * (acc[i][j][q] - del);
-            dSs[r * LDS + c] = __float2bfloat16(ds);
+            dSs[r * LDS + c] = __float2bfloat16(ds);   // GEMM5 A（普通）
             if constexpr (PIPE != 2)
-              dSsT[c * LDP + r] = __float2bfloat16(ds);
+              dSsT[c * LDP + r] = __float2bfloat16(ds);  // GEMM4 A 转置副本（PIPE==2 用 trans 免掉）
           }
     }
     __syncthreads();
     if constexpr (PIPE == 2) {
-      // GEMM2 是 V 的唯一消费者；barrier 后把 V[nt+1] 发进单缓冲，延迟由 GEMM3/4/5 盖住。
+      // GEMM2 是 V 的唯一消费者；上面的 barrier 保证所有 warp 已读完 V[nt]，
+      // 于是把 V[nt+1] 发进同一个单缓冲，其延迟由随后的 GEMM3/4/5 盖住。
       if (nt + 1 < ntiles)
         kv_issue_async<HD, BN, false, true>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
                                             Ks, Vs, LD);
@@ -624,86 +685,96 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
 
     // ---- (3) dV = Pᵀ·dO（A=PsT[BN][BM], B=dO[BM][HD] 转置）----
     {
-      float acc[1][8][4];
+      float acc[MTMV][MTNV][4];
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int i = 0; i < MTMV; ++i)
 #pragma unroll
-        for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
+        for (int j = 0; j < MTNV; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
       if constexpr (PIPE == 2)
-        mma_block_bf16<16, 64, BM, true, true>(Ps, LDS, dOs, LD, acc, wr, wc, lane);
+        mma_block_bf16<GMV, GNV, BM, true, true>(Ps, LDS, dOs, LD, acc, wr, wc, lane);
       else
-        mma_block_bf16<16, 64, BM, true>(Ps, LDP, dOs, LD, acc, wr, wc, lane);
-      const int r0 = wr * 16, c0 = wc * 64;
+        mma_block_bf16<GMV, GNV, BM, true>(Ps, LDP, dOs, LD, acc, wr, wc, lane);
+      const int r0 = wr * GMV, c0 = wc * GNV;
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int i = 0; i < MTMV; ++i)
 #pragma unroll
-        for (int q = 0; q < 4; q += 2) {
-          int r = r0 + g + (q >= 2 ? 8 : 0);
-          int c = c0 + j * 8 + c2;
-          int jg = j0 + r;
-          if (jg < S)
-            red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                     acc[0][j][q], acc[0][j][q + 1]);
-        }
+        for (int j = 0; j < MTNV; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; q += 2) {
+            int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+            int c = c0 + j * 8 + c2;
+            int jg = j0 + r;
+            if (jg < S)
+              red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                       acc[i][j][q], acc[i][j][q + 1]);
+          }
     }
 
     // ---- (4) dK = scale·dSᵀ·Q（A=dSsT[BN][BM], B=Q[BM][HD] 转置）----
     {
-      float acc[1][8][4];
+      float acc[MTMV][MTNV][4];
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int i = 0; i < MTMV; ++i)
 #pragma unroll
-        for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
+        for (int j = 0; j < MTNV; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
       if constexpr (PIPE == 2)
-        mma_block_bf16<16, 64, BM, true, true>(dSs, LDS, Qs, LD, acc, wr, wc, lane);
+        mma_block_bf16<GMV, GNV, BM, true, true>(dSs, LDS, Qs, LD, acc, wr, wc, lane);
       else
-        mma_block_bf16<16, 64, BM, true>(dSsT, LDP, Qs, LD, acc, wr, wc, lane);
-      const int r0 = wr * 16, c0 = wc * 64;
+        mma_block_bf16<GMV, GNV, BM, true>(dSsT, LDP, Qs, LD, acc, wr, wc, lane);
+      const int r0 = wr * GMV, c0 = wc * GNV;
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int i = 0; i < MTMV; ++i)
 #pragma unroll
-        for (int q = 0; q < 4; q += 2) {
-          int r = r0 + g + (q >= 2 ? 8 : 0);
-          int c = c0 + j * 8 + c2;
-          int jg = j0 + r;
-          if (jg < S)
-            red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                     acc[0][j][q] * scale, acc[0][j][q + 1] * scale);
-        }
+        for (int j = 0; j < MTNV; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; q += 2) {
+            int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+            int c = c0 + j * 8 + c2;
+            int jg = j0 + r;
+            if (jg < S)
+              red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                       acc[i][j][q] * scale, acc[i][j][q + 1] * scale);
+          }
     }
 
     // ---- (5) dQ += scale·dS·K（A=dSs[BM][BN], B=K[BN][HD] 转置）----
     {
-      float acc[2][8][4];
+      float acc[MTMQ][MTNQ][4];
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTMQ; ++i)
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+        for (int j = 0; j < MTNQ; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block_bf16<32, 64, BN, true>(dSs, LDS, Kt, LD, acc, wr, wc, lane);
+      mma_block_bf16<GMQ, GNQ, BN, true>(dSs, LDS, Kt, LD, acc, wr, wc, lane);
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTMQ; ++i)
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+        for (int j = 0; j < MTNQ; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) {
             dqacc[i][j][q] += acc[i][j][q] * scale;
           }
     }
-    // PIPE=0 需要尾 barrier；PIPE=1/2 由下轮循环首的 barrier 承担。
+    // PIPE=0 需要尾 barrier 保护 Ks/Vs/dSs 在下一轮被覆盖；PIPE=1/2 由下轮
+    // 循环首的 barrier 承担（K 写的是另一 stage；dSs/PsT 的覆盖也在下轮首 barrier 之后），
+    // 故省掉一次同步。
     if constexpr (PIPE == 0) __syncthreads();
   }
 
   // ---- 写回 dQ（寄存器累加结果，直接存；每个 Q 块由唯一 CTA 负责）----
 #pragma unroll
-  for (int i = 0; i < 2; ++i)
+  for (int i = 0; i < MTMQ; ++i)
 #pragma unroll
-    for (int j = 0; j < 8; ++j)
+    for (int j = 0; j < MTNQ; ++j)
 #pragma unroll
       for (int q = 0; q < 4; q += 2) {
-        int r = wr * 32 + i * 16 + g + (q >= 2 ? 8 : 0);
-        int c = wc * 64 + j * 8 + c2;
+        int r = wr * GMQ + i * 16 + g + (q >= 2 ? 8 : 0);
+        int c = wc * GNQ + j * 8 + c2;
         int qi = m0 + r;
         if (qi < S) {
           float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
@@ -730,40 +801,6 @@ __global__ void convert_kernel(const float* __restrict__ dq_acc,
     dv[i] = __float2bfloat16(dv_acc[i]);
   }
 }
-
-
-
-
-// =============================================================================
-// fa_bwd_bf16_mma_main.cu —— bf16 张量核反向（O5b）**两文件版的 host 部分**
-// =============================================================================
-// device 代码（mma/ldmatrix 封装、preprocess_kernel、fa_bwd_bf16_mma_kernel、
-// convert_kernel）见 `fa_bwd_bf16_mma_kernels.cuh`；本文件只保留 host 侧：
-// npy 读取 / launcher / 自测对拍。行为与单文件 `fa_bwd_bf16_mma_onefile.cu`
-// **逐位一致**（device 代码逐字未改）。
-//
-// 用法：run.sh src/bf16/fa_bwd_bf16_mma_main.cu [--dir=...] [--full|--causal] [--iters=N]
-// =============================================================================
-
-
-#include <algorithm>
-#include <cmath>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <fstream>
-#include <string>
-#include <vector>
-
-#define CUDA_CHECK(call)                                                        \
-  do {                                                                          \
-    cudaError_t _e = (call);                                                    \
-    if (_e != cudaSuccess) {                                                    \
-      fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(_e),       \
-              __FILE__, __LINE__);                                              \
-      std::exit(1);                                                             \
-    }                                                                           \
-  } while (0)
 
 // =============================================================================
 // 极简 npy 读取（little-endian C-contiguous float32）
@@ -841,12 +878,13 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // =============================================================================
 // host / launcher / self-test
 // =============================================================================
-// PIPE=true 时 K/V 双缓冲，smem 增加 2*BN*(HD+8) 个 bf16。
+// PIPE=0：K/V 都不双缓冲；PIPE=1：K/V 都双缓冲；PIPE=2：只 K 双缓冲（V 单缓冲 + 后段预取）。
+// K/V 的 smem 份数：0→2（各 1）、1→4（各 2）、2→3（K 2 + V 1）。
 template <int HD, int BM, int BN, int PIPE>
 static void launch_bwd_mma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
                            const bf16* do_, const float* delta, const float* lse,
                            float* dq_acc, float* dk_acc, float* dv_acc, int S, int H, int Hkv,
-                           float scale, int causal) {
+                           float scale, int causal, int sched) {
   constexpr int kvn = (PIPE == 0) ? 2 : (PIPE == 1 ? 4 : 3);
   constexpr int pds = (PIPE == 2) ? 2 * BM * (BN + 8) : 2 * BN * (BM + 8) + BM * (BN + 8);
   constexpr int smem =
@@ -854,14 +892,19 @@ static void launch_bwd_mma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
   CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
   fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE><<<mg, THREADS, smem>>>(
-      q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal);
+      q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, sched);
 }
 
 int main(int argc, char** argv) {
   std::string dir = "/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16";
   std::string o_name = "ref_o";
   bool causal = true;
-  int pipe = -1;   // -1=自动（按网格大小选 1/2）、0=O5b、1=O6、2=O6b
+  // pipe: -1=自动（按网格大小选 1/2）、0=O5、1=O6、2=O6b。
+  int pipe = -1;
+  // O6c：causal 下 mblk 重排（0=原样，1=交错，2=逆序）。
+  int sched = 0;
+  // O6c：主 kernel tile 配置覆盖（-1=自动）。
+  int bm_opt = -1, bn_opt = -1;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -870,6 +913,9 @@ int main(int argc, char** argv) {
     else if (a == "--nopipe") pipe = 0;
     else if (a == "--pipe") pipe = 1;
     else if (a == "--pipe2") pipe = 2;
+    else if (a.rfind("--sched=", 0) == 0) sched = atoi(a.c_str() + 8);
+    else if (a.rfind("--bm=", 0) == 0) bm_opt = atoi(a.c_str() + 5);
+    else if (a.rfind("--bn=", 0) == 0) bn_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -905,16 +951,16 @@ int main(int argc, char** argv) {
   const float scale = 1.0f / sqrtf((float)D);
 
   printf("case = %s\n", dir.c_str());
-  printf("B=%d S=%d H=%d Hkv=%d D=%d causal=%d scale=%.6f dtype=bf16\n", B, S, H, Hkv, D,
-         (int)causal, scale);
+  printf("B=%d S=%d H=%d Hkv=%d D=%d causal=%d scale=%.6f\n", B, S, H, Hkv, D, (int)causal,
+         scale);
 
-  auto to_bf16 = [&](const std::vector<float>& src) {
+  auto to_half = [&](const std::vector<float>& src) {
     std::vector<bf16> h(src.size());
     for (size_t i = 0; i < src.size(); ++i) h[i] = __float2bfloat16(src[i]);
     return h;
   };
-  auto qh = to_bf16(q_np.data), kh = to_bf16(k_np.data), vh = to_bf16(v_np.data),
-       doh = to_bf16(do_np.data), oh = to_bf16(o_np.data);
+  auto qh = to_half(q_np.data), kh = to_half(k_np.data), vh = to_half(v_np.data),
+       doh = to_half(do_np.data), oh = to_half(o_np.data);
 
   bf16 *dq, *dk, *dv;
   bf16 *d_q, *d_k, *d_v, *d_o, *d_do;
@@ -958,23 +1004,48 @@ int main(int argc, char** argv) {
   const int cvt_blocks =
       (int)std::min<size_t>((std::max(n, nkv) + cvt_threads - 1) / cvt_threads, 65535);
 
-  // O6b 在网格足够大（≥ 一个满波 = 132 SM × 3 CTA/SM）时才占优；单波/网格受限形状用 O6。
+  // O6c：主 kernel 的 tile/PIPE 自动选择。
+  //  - grid < 132（不到「每 SM 一个 CTA」）且 S 较小时，把 BM 减半到 32 → grid 翻倍、
+  //    并行度翻倍（S=512 MHA：main 0.0876→0.0792ms，1.11×）。大 S 下 BM=32 会让
+  //    dK/dV 的跨 CTA 原子量翻倍，故只在 S≤1024 用。
+  //  - 否则 BM=64：大网格走 O6b（PIPE=2，只双缓冲 K）；小网格走 O6（PIPE=1）。
   const long long grid = (long long)((S + 63) / 64) * H * B;
-  const int auto_pipe = (grid >= 396) ? 2 : 1;
-  printf("[O6b] main grid=%lld auto_pipe=%d (CLI pipe=%d; >=396→O6b/2 else O6/1)\n", grid,
-         auto_pipe, pipe);
-  auto run_main = [&]() {
-    int m = (pipe < 0) ? auto_pipe : pipe;
-    if (m == 2)
-      launch_bwd_mma<128, 64, 32, 2>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
-    else if (m == 1)
-      launch_bwd_mma<128, 64, 32, 1>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
-    else
-      launch_bwd_mma<128, 64, 32, 0>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+  const bool tiny = (grid < 132) && (S <= 1024);
+  const int auto_bm = tiny ? 32 : 64;
+  const int auto_bn = (!tiny && S >= 4096) ? 64 : 32;
+  const int auto_pipe = (!tiny && grid >= 396) ? 2 : 1;
+  const int bm_sel = (bm_opt > 0) ? bm_opt : auto_bm;
+  const int bn_sel = (bn_opt > 0) ? bn_opt : auto_bn;
+  const int pp_sel = (pipe >= 0) ? pipe : auto_pipe;
+  printf("[O6c] main grid=%lld auto=(BM=%d,BN=%d,PIPE=%d) sel=(BM=%d,BN=%d,PIPE=%d)\n", grid,
+         auto_bm, auto_bn, auto_pipe, bm_sel, bn_sel, pp_sel);
+  auto launch_cfg = [&](int bm, int bn, int pp) {
+    dim3 g((S + bm - 1) / bm, H, B);
+    if (bm == 32) {
+      if (pp == 2)
+        launch_bwd_mma<128, 32, 32, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      else if (pp == 1)
+        launch_bwd_mma<128, 32, 32, 1>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      else
+        launch_bwd_mma<128, 32, 32, 0>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    } else if (bn == 64) {
+      launch_bwd_mma<128, 64, 64, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    } else if (pp == 2) {
+      launch_bwd_mma<128, 64, 32, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    } else if (pp == 1) {
+      launch_bwd_mma<128, 64, 32, 1>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    } else {
+      launch_bwd_mma<128, 64, 32, 0>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    }
   };
+  auto run_main = [&]() { launch_cfg(bm_sel, bn_sel, pp_sel); };
   auto run_pre = [&]() {
     if (causal)
       lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
@@ -1067,13 +1138,13 @@ int main(int argc, char** argv) {
   auto launch_mode = [&](int m) {
     if (m == 2)
       launch_bwd_mma<128, 64, 32, 2>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
     else if (m == 1)
       launch_bwd_mma<128, 64, 32, 1>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
     else
       launch_bwd_mma<128, 64, 32, 0>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
   };
   auto time_launch = [&](int m, float* out_ms) {
     CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
@@ -1099,6 +1170,48 @@ int main(int argc, char** argv) {
          main_flops / (ms_pipe * 1e-3) / 1e12, ms_pipe2,
          main_flops / (ms_pipe2 * 1e-3) / 1e12, ms_nopipe / ms_pipe,
          ms_nopipe / ms_pipe2);
+
+  // ---- O6c A/B（仅 causal）：mblk 重排 sched=0/1/2（同一 pipe）----
+  if (causal) {
+    const int mdef = (pipe < 0) ? auto_pipe : pipe;
+    float ms_s[3] = {0.f, 0.f, 0.f};
+    for (int s = 0; s < 3; ++s) {
+      sched = s;
+      time_launch(mdef, &ms_s[s]);
+    }
+    printf("[O6c A/B] main sched0(原样) %.4f ms | sched1(交错) %.4f ms (%.3fx) | "
+           "sched2(逆序) %.4f ms (%.3fx)\n",
+           ms_s[0], ms_s[1], ms_s[0] / ms_s[1], ms_s[2], ms_s[0] / ms_s[2]);
+    sched = 1;
+  }
+
+  // ---- O5c A/B（仅 causal）：不同 (BM,BN,PIPE) tile 配置 ----
+  if (causal) {
+    auto time_cfg = [&](int bm, int bn, int pp, float* out_ms) {
+      auto launch = [&]() { launch_cfg(bm, bn, pp); };
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    float ms0 = 0.f, ms1 = 0.f, ms2 = 0.f, ms3 = 0.f;
+    time_cfg(64, 32, 2, &ms0);
+    time_cfg(64, 64, 2, &ms1);
+    time_cfg(32, 32, 1, &ms2);
+    time_cfg(32, 32, 2, &ms3);
+    printf("[O5c A/B] main (64,32,2) %.4f ms (%.2f TF) | (64,64,2) %.4f (%.2f) | (32,32,1) %.4f "
+           "(%.2f) | (32,32,2) %.4f (%.2f) => best %.3fx\n",
+           ms0, main_flops / (ms0 * 1e-3) / 1e12, ms1, main_flops / (ms1 * 1e-3) / 1e12,
+           ms2, main_flops / (ms2 * 1e-3) / 1e12, ms3, main_flops / (ms3 * 1e-3) / 1e12,
+           ms0 / std::min(std::min(ms0, ms1), std::min(ms2, ms3)));
+  }
 
   // ---- 数值对拍（重新跑一次完整 forward 保证累加缓冲清零）----
   run_all();

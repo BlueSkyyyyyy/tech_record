@@ -6,6 +6,9 @@
 // npy 读取 / launcher / 自测对拍。行为与单文件 `fa_bwd_bf16_mma_onefile.cu`
 // **逐位一致**（device 代码逐字未改）。
 //
+// O6c：host 增加主 kernel tile/PIPE 自动档（小网格 BM=32、大 S BN=64）与 CLI
+// `--bm/--bn/--pipe/--sched` 覆盖；与 fp16 版逐字同构。
+//
 // 用法：run.sh src/bf16/fa_bwd_bf16_mma_main.cu [--dir=...] [--full|--causal] [--iters=N]
 // =============================================================================
 
@@ -112,7 +115,7 @@ template <int HD, int BM, int BN, int PIPE>
 static void launch_bwd_mma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
                            const bf16* do_, const float* delta, const float* lse,
                            float* dq_acc, float* dk_acc, float* dv_acc, int S, int H, int Hkv,
-                           float scale, int causal) {
+                           float scale, int causal, int sched) {
   constexpr int kvn = (PIPE == 0) ? 2 : (PIPE == 1 ? 4 : 3);
   constexpr int pds = (PIPE == 2) ? 2 * BM * (BN + 8) : 2 * BN * (BM + 8) + BM * (BN + 8);
   constexpr int smem =
@@ -120,15 +123,19 @@ static void launch_bwd_mma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
   CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
   fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE><<<mg, THREADS, smem>>>(
-      q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal);
+      q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, sched);
 }
 
 int main(int argc, char** argv) {
   std::string dir = "/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16";
   std::string o_name = "ref_o";
   bool causal = true;
-  // pipe: -1=自动（按网格大小选 1/2）、0=O5b、1=O6、2=O6b。
+  // pipe: -1=自动（按网格大小选 1/2）、0=O5、1=O6、2=O6b。
   int pipe = -1;
+  // O6c：causal 下 mblk 重排（0=原样，1=交错，2=逆序）。
+  int sched = 0;
+  // O6c：主 kernel tile 配置覆盖（-1=自动）。
+  int bm_opt = -1, bn_opt = -1;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -137,6 +144,9 @@ int main(int argc, char** argv) {
     else if (a == "--nopipe") pipe = 0;
     else if (a == "--pipe") pipe = 1;
     else if (a == "--pipe2") pipe = 2;
+    else if (a.rfind("--sched=", 0) == 0) sched = atoi(a.c_str() + 8);
+    else if (a.rfind("--bm=", 0) == 0) bm_opt = atoi(a.c_str() + 5);
+    else if (a.rfind("--bn=", 0) == 0) bn_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -172,16 +182,16 @@ int main(int argc, char** argv) {
   const float scale = 1.0f / sqrtf((float)D);
 
   printf("case = %s\n", dir.c_str());
-  printf("B=%d S=%d H=%d Hkv=%d D=%d causal=%d scale=%.6f dtype=bf16\n", B, S, H, Hkv, D,
-         (int)causal, scale);
+  printf("B=%d S=%d H=%d Hkv=%d D=%d causal=%d scale=%.6f\n", B, S, H, Hkv, D, (int)causal,
+         scale);
 
-  auto to_bf16 = [&](const std::vector<float>& src) {
+  auto to_half = [&](const std::vector<float>& src) {
     std::vector<bf16> h(src.size());
     for (size_t i = 0; i < src.size(); ++i) h[i] = __float2bfloat16(src[i]);
     return h;
   };
-  auto qh = to_bf16(q_np.data), kh = to_bf16(k_np.data), vh = to_bf16(v_np.data),
-       doh = to_bf16(do_np.data), oh = to_bf16(o_np.data);
+  auto qh = to_half(q_np.data), kh = to_half(k_np.data), vh = to_half(v_np.data),
+       doh = to_half(do_np.data), oh = to_half(o_np.data);
 
   bf16 *dq, *dk, *dv;
   bf16 *d_q, *d_k, *d_v, *d_o, *d_do;
@@ -225,23 +235,48 @@ int main(int argc, char** argv) {
   const int cvt_blocks =
       (int)std::min<size_t>((std::max(n, nkv) + cvt_threads - 1) / cvt_threads, 65535);
 
-  // O6b 在网格足够大（≥ 一个满波 = 132 SM × 3 CTA/SM）时才占优；单波/网格受限形状用 O6。
+  // O6c：主 kernel 的 tile/PIPE 自动选择。
+  //  - grid < 132（不到「每 SM 一个 CTA」）且 S 较小时，把 BM 减半到 32 → grid 翻倍、
+  //    并行度翻倍（S=512 MHA：main 0.0876→0.0792ms，1.11×）。大 S 下 BM=32 会让
+  //    dK/dV 的跨 CTA 原子量翻倍，故只在 S≤1024 用。
+  //  - 否则 BM=64：大网格走 O6b（PIPE=2，只双缓冲 K）；小网格走 O6（PIPE=1）。
   const long long grid = (long long)((S + 63) / 64) * H * B;
-  const int auto_pipe = (grid >= 396) ? 2 : 1;
-  printf("[O6b] main grid=%lld auto_pipe=%d (CLI pipe=%d; >=396→O6b/2 else O6/1)\n", grid,
-         auto_pipe, pipe);
-  auto run_main = [&]() {
-    int m = (pipe < 0) ? auto_pipe : pipe;
-    if (m == 2)
-      launch_bwd_mma<128, 64, 32, 2>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
-    else if (m == 1)
-      launch_bwd_mma<128, 64, 32, 1>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
-    else
-      launch_bwd_mma<128, 64, 32, 0>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+  const bool tiny = (grid < 132) && (S <= 1024);
+  const int auto_bm = tiny ? 32 : 64;
+  const int auto_bn = (!tiny && S >= 4096) ? 64 : 32;
+  const int auto_pipe = (!tiny && grid >= 396) ? 2 : 1;
+  const int bm_sel = (bm_opt > 0) ? bm_opt : auto_bm;
+  const int bn_sel = (bn_opt > 0) ? bn_opt : auto_bn;
+  const int pp_sel = (pipe >= 0) ? pipe : auto_pipe;
+  printf("[O6c] main grid=%lld auto=(BM=%d,BN=%d,PIPE=%d) sel=(BM=%d,BN=%d,PIPE=%d)\n", grid,
+         auto_bm, auto_bn, auto_pipe, bm_sel, bn_sel, pp_sel);
+  auto launch_cfg = [&](int bm, int bn, int pp) {
+    dim3 g((S + bm - 1) / bm, H, B);
+    if (bm == 32) {
+      if (pp == 2)
+        launch_bwd_mma<128, 32, 32, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      else if (pp == 1)
+        launch_bwd_mma<128, 32, 32, 1>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      else
+        launch_bwd_mma<128, 32, 32, 0>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    } else if (bn == 64) {
+      launch_bwd_mma<128, 64, 64, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    } else if (pp == 2) {
+      launch_bwd_mma<128, 64, 32, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    } else if (pp == 1) {
+      launch_bwd_mma<128, 64, 32, 1>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    } else {
+      launch_bwd_mma<128, 64, 32, 0>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    }
   };
+  auto run_main = [&]() { launch_cfg(bm_sel, bn_sel, pp_sel); };
   auto run_pre = [&]() {
     if (causal)
       lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
@@ -334,13 +369,13 @@ int main(int argc, char** argv) {
   auto launch_mode = [&](int m) {
     if (m == 2)
       launch_bwd_mma<128, 64, 32, 2>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
     else if (m == 1)
       launch_bwd_mma<128, 64, 32, 1>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
     else
       launch_bwd_mma<128, 64, 32, 0>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
   };
   auto time_launch = [&](int m, float* out_ms) {
     CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
@@ -366,6 +401,48 @@ int main(int argc, char** argv) {
          main_flops / (ms_pipe * 1e-3) / 1e12, ms_pipe2,
          main_flops / (ms_pipe2 * 1e-3) / 1e12, ms_nopipe / ms_pipe,
          ms_nopipe / ms_pipe2);
+
+  // ---- O6c A/B（仅 causal）：mblk 重排 sched=0/1/2（同一 pipe）----
+  if (causal) {
+    const int mdef = (pipe < 0) ? auto_pipe : pipe;
+    float ms_s[3] = {0.f, 0.f, 0.f};
+    for (int s = 0; s < 3; ++s) {
+      sched = s;
+      time_launch(mdef, &ms_s[s]);
+    }
+    printf("[O6c A/B] main sched0(原样) %.4f ms | sched1(交错) %.4f ms (%.3fx) | "
+           "sched2(逆序) %.4f ms (%.3fx)\n",
+           ms_s[0], ms_s[1], ms_s[0] / ms_s[1], ms_s[2], ms_s[0] / ms_s[2]);
+    sched = 1;
+  }
+
+  // ---- O5c A/B（仅 causal）：不同 (BM,BN,PIPE) tile 配置 ----
+  if (causal) {
+    auto time_cfg = [&](int bm, int bn, int pp, float* out_ms) {
+      auto launch = [&]() { launch_cfg(bm, bn, pp); };
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    float ms0 = 0.f, ms1 = 0.f, ms2 = 0.f, ms3 = 0.f;
+    time_cfg(64, 32, 2, &ms0);
+    time_cfg(64, 64, 2, &ms1);
+    time_cfg(32, 32, 1, &ms2);
+    time_cfg(32, 32, 2, &ms3);
+    printf("[O5c A/B] main (64,32,2) %.4f ms (%.2f TF) | (64,64,2) %.4f (%.2f) | (32,32,1) %.4f "
+           "(%.2f) | (32,32,2) %.4f (%.2f) => best %.3fx\n",
+           ms0, main_flops / (ms0 * 1e-3) / 1e12, ms1, main_flops / (ms1 * 1e-3) / 1e12,
+           ms2, main_flops / (ms2 * 1e-3) / 1e12, ms3, main_flops / (ms3 * 1e-3) / 1e12,
+           ms0 / std::min(std::min(ms0, ms1), std::min(ms2, ms3)));
+  }
 
   // ---- 数值对拍（重新跑一次完整 forward 保证累加缓冲清零）----
   run_all();

@@ -1,0 +1,19 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_bf16
+B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388
+[O6c] main grid=512 auto=(BM=64,BN=32,PIPE=2) sel=(BM=64,BN=32,PIPE=2)
+[timing] total(3 kernels) 0.4838 ms  35.51 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1051 ms | main 0.3575 ms | convert 0.0213 ms
+[O8b A/B] lse O8 0.1649 ms | bal(单缓冲) 0.1011 ms (1.631x) | bal+cpasync(双缓冲) 0.0780 ms (2.114x)
+[O6 A/B] main nopipe 0.6370 ms (26.97 TF) | pipe(KV both) 0.3744 ms (45.89 TF) | pipe2(K only) 0.3538 ms (48.56 TF) => nopipe/pipe 1.702x, nopipe/pipe2 1.801x
+[O6c A/B] main sched0(原样) 0.3521 ms | sched1(交错) 0.3596 ms (0.979x) | sched2(逆序) 0.3617 ms (0.974x)
+[O5c A/B] main (64,32,2) 0.3584 ms (47.94 TF) | (64,64,2) 0.3875 (44.34) | (32,32,1) 0.4546 (37.79) | (32,32,2) 0.4583 (37.48) => best 1.000x
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.201e-02  max_rel=1.712e+00
+  dk   vs ref: max_abs=2.125e-02  max_rel=3.799e+00
+  dv   vs ref: max_abs=3.156e-02  max_rel=3.637e+00
+  fa_dq     vs ref: max_abs=1.163e-02  max_rel=1.909e+00
+  fa_dk     vs ref: max_abs=3.110e-02  max_rel=5.365e+00
+  fa_dv     vs ref: max_abs=3.627e-02  max_rel=3.711e+00
+  te_dq     vs ref: max_abs=1.238e-02  max_rel=1.732e+00
+  te_dk     vs ref: max_abs=3.140e-02  max_rel=2.707e+00
+  te_dv     vs ref: max_abs=3.627e-02  max_rel=3.711e+00
