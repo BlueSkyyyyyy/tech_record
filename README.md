@@ -135,6 +135,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 59. [FP4 decode 的 grouped GEMV：把 top-6 的 6B 个 (token, expert) 对按专家折叠，权重只读一遍](content/posts/cuda-kernel-opt-59-v4-fp4-grouped/index.md)
 60. [FP4 grouped decode 的 LUT 真的是墙吗：244.6M 次 bank conflict 被消掉，只快了 2.9%](content/posts/cuda-kernel-opt-60-v4-fp4-lut/index.md)
 61. [FP4 decode 的 MoE FFN 端到端：w1/w3→SwiGLU→w2，以及 cp.async 到底救不救得了延迟墙（67.6% 权重 roofline）](content/posts/cuda-kernel-opt-61-v4-fp4-ffn/index.md)
+62. [FP4 解码的整 chunk 位拼装：把每 nibble 一次 LDS 换成两条 prmt，K1 从 73.6% 到 83.4% HBM（1.13×）](content/posts/cuda-kernel-opt-62-v4-fp4-ffn2/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 
