@@ -28,7 +28,15 @@ def main():
     v = torch.randn(B, S, Hkv, D, device=DEV, dtype=dt)
     do = torch.randn(B, S, H, D, device=DEV, dtype=dt)
 
-    if who == "fa":
+    if who == "fa3":
+        from flash_attn_3 import flash_attn_interface as f3
+        for _ in range(4):
+            q2 = q.clone().requires_grad_(True)
+            k2 = k.clone().requires_grad_(True)
+            v2 = v.clone().requires_grad_(True)
+            o = f3.flash_attn_func(q2, k2, v2, causal=causal)
+            o.backward(do)
+    elif who == "fa":
         from flash_attn import flash_attn_func
         for _ in range(4):
             q2 = q.clone().requires_grad_(True)

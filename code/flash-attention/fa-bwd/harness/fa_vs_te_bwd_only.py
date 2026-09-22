@@ -52,6 +52,20 @@ def bench_fa(B, S, H, D, Hkv, causal, dt):
     return dev_time(f)
 
 
+def bench_fa3(B, S, H, D, Hkv, causal, dt):
+    from flash_attn_3 import flash_attn_interface as f3
+    torch.manual_seed(0)
+    q = torch.randn(B, S, H, D, device=DEV, dtype=dt).requires_grad_(True)
+    k = torch.randn(B, S, Hkv, D, device=DEV, dtype=dt).requires_grad_(True)
+    v = torch.randn(B, S, Hkv, D, device=DEV, dtype=dt).requires_grad_(True)
+    do = torch.randn(B, S, H, D, device=DEV, dtype=dt)
+    o = f3.flash_attn_func(q, k, v, causal=causal)
+
+    def f():
+        torch.autograd.grad(o, [q, k, v], do, retain_graph=True)
+    return dev_time(f)
+
+
 def bench_te(B, S, H, D, Hkv, causal, dt):
     from transformer_engine.pytorch.cpp_extensions.fused_attn import (
         FusedAttnBackend, fused_attn_bwd, fused_attn_fwd,
@@ -80,21 +94,21 @@ def bench_te(B, S, H, D, Hkv, causal, dt):
 def main():
     dt = DT[sys.argv[1] if len(sys.argv) > 1 else "fp16"]
     print(f"pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype={dt}")
-    print(f"{'shape':34s} {'FA2.7.4':>16s} {'TE2.14':>16s} {'TE/FA':>6s}")
+    print(f"{'shape':30s} {'FA2.7.4':>15s} {'FA3':>15s} {'TE2.14':>15s} {'FA3/FA2':>8s}")
     for (B, S, H, D, Hkv, causal, label) in SHAPES:
         flops = 4.0 * B * S * H * S * (2 * D)
         row = {}
-        for who, fn in (("fa", bench_fa), ("te", bench_te)):
+        for who, fn in (("fa2", bench_fa), ("fa3", bench_fa3), ("te", bench_te)):
             try:
                 ms = fn(B, S, H, D, Hkv, causal, dt)
                 row[who] = (ms, flops / (ms * 1e-3) / 1e12)
             except Exception as e:  # noqa
                 row[who] = (float("nan"), float("nan"))
-                print(f"  {who} failed {label}: {str(e)[:60]}")
-        fa, te = row["fa"], row["te"]
-        ratio = te[0] / fa[0] if fa[0] == fa[0] and te[0] == te[0] else float("nan")
-        print(f"{(str((B,S,H,D))+' kv='+str(Hkv)):34s} "
-              f"{fa[0]:7.4f}ms/{fa[1]:6.1f}TF {te[0]:7.4f}ms/{te[1]:6.1f}TF {ratio:6.2f}x")
+                print(f"  {who} failed {label}: {str(e)[:70]}")
+        f2, f3, te = row["fa2"], row["fa3"], row["te"]
+        r = f2[0] / f3[0] if f2[0] == f2[0] and f3[0] == f3[0] else float("nan")
+        print(f"{(str((B,S,H,D))+' kv='+str(Hkv)):30s} "
+              f"{f2[0]:6.4f}/{f2[1]:5.0f} {f3[0]:6.4f}/{f3[1]:5.0f} {te[0]:6.4f}/{te[1]:5.0f} {r:7.2f}x")
 
 
 if __name__ == "__main__":
