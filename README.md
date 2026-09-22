@@ -132,6 +132,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 56. [DeepSeek-V4 的路由专家其实是 FP4：真实 checkpoint 的格式、无损折进 FP8、与 decode GEMV 的实测（2.16×）](content/posts/cuda-kernel-opt-56-v4-fp4-moe/index.md)
 57. [FP4 专家权重接回 grouped MoE：现场折 vs 预折叠，与一份被「变换税」吃掉的字节红利（负结果）](content/posts/cuda-kernel-opt-57-v4-fp4-moe-fold/index.md)
 58. [FP4 decode GEMV 的第二轮：从 34.8% 到 38.7%，以及为什么 split-K / 无 smem / 位运算解码都救不了它](content/posts/cuda-kernel-opt-58-v4-fp4-decode/index.md)
+59. [FP4 decode 的 grouped GEMV：把 top-6 的 6B 个 (token, expert) 对按专家折叠，权重只读一遍](content/posts/cuda-kernel-opt-59-v4-fp4-grouped/index.md)
 
 配套代码：[code/kernel-opt/](code/kernel-opt/README.md)（公共工具 + 容器/编译/剖析脚本 + 每篇实验 + [优化技巧台账/性能榜](code/kernel-opt/TECHNIQUES.md)）
 

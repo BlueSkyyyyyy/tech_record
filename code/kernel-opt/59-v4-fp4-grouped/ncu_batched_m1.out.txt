@@ -1,0 +1,127 @@
+==PROF== Connected to process 348481 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/59-v4-fp4-grouped/fp4_grouped.out)
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+V4-Pro routed expert w1 [N=3072,K=7168], B=256 tokens, top-6, E=384 experts
+balanced routing: m_e = 4 tokens/expert, pairs = 1536
+building 384 experts (fp4 4.23 GB + scale 1.06 GB) ...
+
+[roof] read all 384 experts fp4 (4.228 GB): 1.3214 ms  3199.6 GB/s (95.4% HBM)
+[roof] read all scales (1.057 GB): 0.3353 ms  3151.9 GB/s (94.0% HBM)  combined fp4+scale 3189.9 GB/s
+==PROF== Profiling "gemv_fp4_grouped": 0%....50%....100% - 11 passes
+==PROF== Disconnected from process 348481
+[348481] fp4_grouped.out@127.0.0.1
+  void gemv_fp4_grouped<1, 1, 2>(const signed char *, const float *, const unsigned char *, const float *, const int *, const int *, const int *, const int *, float *, int) (384, 1536, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.98
+    Elapsed Cycles                cycle     16767628
+    Memory Throughput                 %        99.40
+    DRAM Throughput                   %        60.79
+    Duration                         ms         8.47
+    L1/TEX Cache Throughput           %        99.45
+    L2 Cache Throughput               %        68.17
+    SM Active Cycles              cycle  16759936.05
+    Compute (SM) Throughput           %        45.02
+    ----------------------- ----------- ------------
+
+    INF   This workload is utilizing greater than 80.0% of the available compute or memory performance of this device.  
+          To further improve performance, work will likely need to be shifted from the most utilized to another unit.   
+          Start by analyzing L1 in the Memory Workload Analysis section.                                                
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %         0.00
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Tbyte/s         2.04
+    Mem Busy                                          %        99.40
+    Max Bandwidth                                     %        60.79
+    L1/TEX Hit Rate                                   %        26.87
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector      4510063
+    L2 Hit Rate                                       %        16.32
+    Mem Pipes Busy                                    %        36.27
+    --------------------------------------- ----------- ------------
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        45.05
+    Issued Warp Per Scheduler                        0.45
+    No Eligible                            %        54.95
+    Active Warps Per Scheduler          warp        11.26
+    Eligible Warps Per Scheduler        warp         1.14
+    ---------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 0.5976%                                                                                   
+          Every scheduler is capable of issuing one instruction per cycle, but for this workload each scheduler only    
+          issues an instruction every 2.2 cycles. This might leave hardware resources underutilized and may lead to     
+          less optimal performance. Out of the maximum of 16 warps per scheduler, this workload allocates an average    
+          of 11.26 active warps per scheduler, but only an average of 1.14 warps were eligible per cycle. Eligible      
+          warps are the subset of active warps that are ready to issue their next instruction. Every cycle with no      
+          eligible warp results in no instruction being issued and the issue slot remains unused. To increase the       
+          number of eligible warps, avoid possible load imbalances due to highly different execution durations per      
+          warp. Reducing stalls indicated on the Warp State Statistics and Source Counters sections can help, too.      
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   256
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                 589824
+    Registers Per Thread             register/thread              40
+    Shared Memory Configuration Size           Kbyte          135.17
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block      Kbyte/block            7.39
+    Static Shared Memory Per Block        byte/block             512
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread       150994944
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                              744.73
+    -------------------------------- --------------- ---------------
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            6
+    Block Limit Shared Mem                block           15
+    Block Limit Warps                     block            8
+    Theoretical Active Warps per SM        warp           48
+    Theoretical Occupancy                     %           75
+    Achieved Occupancy                        %        70.42
+    Achieved Active Warps Per SM           warp        45.07
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 0.5976%                                                                                         
+          The 12.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the      
+          hardware maximum of 16. This kernel's theoretical occupancy (75.0%) is limited by the number of required      
+          registers.                                                                                                    
+

@@ -422,3 +422,20 @@ scripts/lab.sh status
   把 4 个 byte 的低 3 位压成 selector 要 `(k&0xF)|((k>>4)&0xF0)|((k>>8)&0xF00)|((k>>12)&0xF000)`；
   直接拿展开后的 byte 当 selector 会全错。最小复现必须**穷举**（`prmt_test.cu` 扫 2^28）而不是抽点。
   且 PRMT 解码是 **ALU 密集**（~3 指令/nibble），在 ALU 已被 decode 占满的 kernel 里是负优化。
+- **MoE decode 是 grouped GEMV，不是 top-k 个独立 GEMV**（59 篇）：一步 decode 要算 `B×topk`
+  个 `(token,expert)` 对。按 expert 折叠进一个 kernel（`grid.y=experts`），一个 CTA 吃下某专家
+  全部 m 个 token，**权重每专家只读/decode 一次、被 m 个 token 的 `dp4a` 复用**，权重复用
+  `=pairs/active≈B·topk/E`。`B=256` 相对「一次 launch 但 M=1」快 **3.22×**、相对逐对 launch **5.87×**。
+  要点：① 权重必须**铺满真实专家数**（否则全命中 L2、带宽虚高）；② grouped kernel 的 smem/寄存器
+  要**随真实 m 缩放**（`MTMAX` 模板分派，且 `cudaFuncSetAttribute(MaxDynamicSharedMemorySize)`
+  要对**每个模板实例**设），按模板上限一把分配会把 occupancy 锁死；③ 三口径（逐对 launch /
+  batched M=1 / grouped）能把「并行度」和「权重复用」两个变量分离。
+- **「lane 沿 K 串行、每 chunk 读两个 `uint4`」的 int8 GEMV：激活要拆两平面消 8-way bank conflict**（59 篇）：
+  16B 权重 chunk = 32 个 k 值；int8 激活 32 个 k = 32B = 两个 `uint4`。若按 `[token][K]` 行主序存，
+  warp 内相邻 lane（`c=lane+32i`）地址差 32B → 每 8 个 lane 回到同批 bank。把 chunk 的前/后 16B
+  分进 **plane0/plane1**，lane 地址变相邻 16B、warp 铺满连续 512B，零冲突。实测 batched 67.6%→74.5%、
+  grouped 40.6%→59.9%。这个修复对 batched 基线也生效 → 修的是公共瓶颈。
+- **群组/小 N 算子把 HBM 用到 ~60% 后，下一堵墙常常是 L1/TEX（LUT 随机读），但别急着上 PRMT**（59 篇）：
+  grouped FP4 decode 的 ncu 是 DRAM 60.1% / **L1TEX 83.9%** / Compute 41.1%，残余 48% 多余 wavefront
+  几乎全来自 256 项 `uint16` LUT 的随机读。换 PRMT（寄存器表）**慢 33%**——`dp4a` 已在整数管道上，
+  换访存税为 ALU 税方向反了。判据：SM 利用率 41%≠ALU 空闲；先试**冲突无关的 LUT**（padding / 分半表）。
