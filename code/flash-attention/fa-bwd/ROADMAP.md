@@ -410,6 +410,34 @@
     `src/fp8/fa_bwd_fp8_p53_onefile_gqa_mha.out.txt`、`src/fp8/fa_bwd_fp8_main_p53_ncu_gqa_kv4.out.txt`、
     `src/fp8/fa_bwd_bench_requested_fp8_p53.out.txt`；文档 `docs/03-fp8-bwd-impl.md` §13、`docs/04` §7.4。
 
+## 为什么 ours 比 FA/TE 慢这么多（归因）
+
+「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
+dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没有照 FA**。实测证据（读
+`src/fp16/fa_bwd_fp16_kernels.cuh`）：
+
+| 维度 | FA2/FA3 实现 | ours（fp16/bf16 golden） | 影响 |
+|---|---|---|---|
+| 5 个 GEMM | **Tensor Core**：`mma.m16n8k16` / `wgmma` + `ldmatrix` | **标量 CUDA core**：`__half2float(q)*__half2float(k)` + fp32 FMA | 峰值差 ~15×（67 vs 989 TFLOPS），实际差 ~65× |
+| 数据搬运 | `cp.async`/TMA + 多级软流水/双缓冲 | 同步 `__syncthreads` 后读，无预取 | 延迟受限（ncu: L1/TEX 53.5%、Compute 8.4%、occ 6.25%） |
+| dK/dV 归约 | 专用累加 + convert（deterministic 可选） | 每元素 `atomicAdd` | 竞争 + 非确定性 |
+| preprocess LSE/D | 分块、向量化 | 标量逐行（fp16/bf16 未修；fp8 已用 mma 修，14–62×） | S=4096 时 preprocess 曾 > main |
+| grid/occupancy | 大 grid、wave 饱满 | grid 小、waves 0.48、1 CTA/SM | SM 空转 |
+
+**根本原因**：fp16/bf16 版是**正确性优先的标量 golden**（用来先把数学/对拍跑通），
+真正的性能杠杆（张量核）只在 fp8 版实现了（main 13–20×）。所以差距是**预期内**的，
+不是算法错了——数值对拍与 FA/TE 同量级就是证明。
+
+**补齐路径（按回报排序）**：
+
+- [ ] **O5（最大杠杆）** 把 fp8 的 `mma.m16n8k16` + `ldmatrix` 后端移植到 fp16/bf16 反向
+      （模板已有，改 dtype 与 smem 布局/padding）；预估 main **10–20×**。
+- [ ] **O6** `cp.async` 双缓冲 + 降 smem 提 occupancy（对齐 fp8 的 O2/O3）。
+- [ ] **O7** dQ/dK/dV 去 `atomicAdd`，改分块 `*_accum` + convert（确定性 + 消竞争）。
+- [ ] **O8** preprocess 的 LSE/D 改 mma 分块（对齐 fp8 的 O1）。
+- [ ] **O9**（对标 FA3）TMA + `wgmma` + warp specialization 多级流水。
+- [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
+
 ## 下一步（明确到可执行）
 
 > **用户新增需求（优先）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
