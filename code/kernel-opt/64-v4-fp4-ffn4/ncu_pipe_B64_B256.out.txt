@@ -1,0 +1,46 @@
+##### B=64 pipe instruction counts #####
+  void gemv_fp4_tma<7168, 2, 8, 1, 2, 8, 1>(const signed char *, const float *, const unsigned char *, const unsigned char *, const int *, const int *, const int *, const int *, float *, int, int, int) (384, 384, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed             %        92.54
+    sm__inst_executed.sum                                       inst   2173953632
+    sm__inst_executed_pipe_adu.sum                              inst     16670528
+    sm__inst_executed_pipe_alu.sum                              inst   1274757120
+    sm__inst_executed_pipe_fma.sum                              inst    687439872
+    sm__inst_executed_pipe_lsu.sum                              inst     92160000
+    sm__inst_executed_pipe_uniform.sum                          inst      7372800
+    sm__throughput.avg.pct_of_peak_sustained_elapsed               %        84.25
+    sm__warps_active.avg.pct_of_peak_sustained_elapsed             %        36.24
+    smsp__issue_active.avg.pct_of_peak_sustained_elapsed           %        71.84
+  void gemv_fp4_tma<3072, 8, 8, 1, 2, 8, 0>(const signed char *, const float *, const unsigned char *, const unsigned char *, const int *, const int *, const int *, const int *, float *, int, int, int) (112, 384, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed             %        90.26
+    sm__inst_executed.sum                                       inst   1037267032
+    sm__inst_executed_pipe_adu.sum                              inst      4090006
+    sm__inst_executed_pipe_alu.sum                              inst    619229184
+    sm__inst_executed_pipe_fma.sum                              inst    328065024
+    sm__inst_executed_pipe_lsu.sum                              inst     45674496
+    sm__inst_executed_pipe_uniform.sum                          inst      2107392
+    sm__throughput.avg.pct_of_peak_sustained_elapsed               %        79.73
+    sm__warps_active.avg.pct_of_peak_sustained_elapsed             %        24.18
+    smsp__issue_active.avg.pct_of_peak_sustained_elapsed           %        66.78
+##### B=256 pipe instruction counts #####
+  void gemv_fp4_tma<7168, 2, 8, 4, 2, 8, 1>(const signed char *, const float *, const unsigned char *, const unsigned char *, const int *, const int *, const int *, const int *, float *, int, int, int) (384, 384, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed             %        63.66
+    sm__inst_executed.sum                                       inst   2993061888
+    sm__inst_executed_pipe_adu.sum                              inst     19763482
+    sm__inst_executed_pipe_alu.sum                              inst   1356005376
+    sm__inst_executed_pipe_fma.sum                              inst   1192919040
+    sm__inst_executed_pipe_lsu.sum                              inst    251412480
+    sm__inst_executed_pipe_uniform.sum                          inst      5750784
+    sm__throughput.avg.pct_of_peak_sustained_elapsed               %        67.79
+    sm__warps_active.avg.pct_of_peak_sustained_elapsed             %        24.24
+    smsp__issue_active.avg.pct_of_peak_sustained_elapsed           %        67.79
+  void gemv_fp4_tma<3072, 4, 4, 4, 2, 8, 0>(const signed char *, const float *, const unsigned char *, const unsigned char *, const int *, const int *, const int *, const int *, float *, int, int, int) (448, 384, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed             %        62.55
+    sm__inst_executed.sum                                       inst   1628971008
+    sm__inst_executed_pipe_adu.sum                              inst     10155165
+    sm__inst_executed_pipe_alu.sum                              inst    743866368
+    sm__inst_executed_pipe_fma.sum                              inst    619143168
+    sm__inst_executed_pipe_lsu.sum                              inst    144850944
+    sm__inst_executed_pipe_uniform.sum                          inst      3268608
+    sm__throughput.avg.pct_of_peak_sustained_elapsed               %        72.09
+    sm__warps_active.avg.pct_of_peak_sustained_elapsed             %        30.73
+    smsp__issue_active.avg.pct_of_peak_sustained_elapsed           %        72.09

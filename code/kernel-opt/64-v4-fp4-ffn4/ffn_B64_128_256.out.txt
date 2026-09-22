@@ -1,0 +1,48 @@
+===== B=64  DEC=8 (final) =====
+routing balanced active=384/384  max_m=1
+[check K1 GU  ] max_rel=1.143e-07 OK
+[check swiglu ] max_err=4.864e-01 (unit=group scale; <0.51 OK) OK
+[check K2 O   ] max_rel=1.377e-07 (ref~2.59) OK
+[check unperm ] max_rel=8.354e-07 OK
+[check e2e Y ] max_rel=1.093e-07 (ref~3.26) OK
+[roof] read all w1+w3 packed (8.46 GB): 2.6448 ms  3197.1 GB/s (95.4% HBM)
+== per-stage (B=64, PIPE=1 DEC=8) ==
+  quant_x       0.0028 ms
+  K1 gemv       2.9250 ms  weights 8.98 GB  3071.5 GB/s (91.6% HBM)
+  swiglu+quant  0.0056 ms
+  K2 gemv       1.5224 ms  weights 4.49 GB  2950.7 GB/s (88.0% HBM)
+  unpermute     0.0092 ms
+  ---- sum      4.4650 ms  (weights 13.48 GB, roofline 4.0200 ms, 90.0% of roof)
+  end-to-end    4.4729 ms  (kernel sum 4.4650)
+===== B=128  DEC=8 (final) =====
+routing balanced active=384/384  max_m=2
+[check K1 GU  ] max_rel=1.430e-07 OK
+[check swiglu ] max_err=4.635e-01 (unit=group scale; <0.51 OK) OK
+[check K2 O   ] max_rel=1.377e-07 (ref~2.53) OK
+[check unperm ] max_rel=8.345e-07 OK
+[check e2e Y ] max_rel=6.632e-08 (ref~2.49) OK
+[roof] read all w1+w3 packed (8.46 GB): 2.6357 ms  3208.1 GB/s (95.7% HBM)
+== per-stage (B=128, PIPE=1 DEC=8) ==
+  quant_x       0.0033 ms
+  K1 gemv       3.0487 ms  weights 8.98 GB  2946.9 GB/s (87.9% HBM)
+  swiglu+quant  0.0081 ms
+  K2 gemv       1.7037 ms  weights 4.49 GB  2636.7 GB/s (78.7% HBM)
+  unpermute     0.0160 ms
+  ---- sum      4.7799 ms  (weights 13.48 GB, roofline 4.0200 ms, 84.1% of roof)
+  end-to-end    4.8449 ms  (kernel sum 4.7799)
+===== B=256  DEC=8 (final) =====
+routing balanced active=384/384  max_m=4
+[check K1 GU  ] max_rel=1.031e-07 OK
+[check swiglu ] max_err=4.985e-01 (unit=group scale; <0.51 OK) OK
+[check K2 O   ] max_rel=6.979e-08 (ref~2.53) OK
+[check unperm ] max_rel=9.537e-07 OK
+[check e2e Y ] max_rel=1.023e-07 (ref~2.92) OK
+[roof] read all w1+w3 packed (8.46 GB): 2.6364 ms  3207.3 GB/s (95.7% HBM)
+== per-stage (B=256, PIPE=1 DEC=8) ==
+  quant_x       0.0045 ms
+  K1 gemv       4.2325 ms  weights 8.98 GB  2122.6 GB/s (63.3% HBM)
+  swiglu+quant  0.0210 ms
+  K2 gemv       2.1757 ms  weights 4.49 GB  2064.7 GB/s (61.6% HBM)
+  unpermute     0.0345 ms
+  ---- sum      6.4683 ms  (weights 13.48 GB, roofline 4.0200 ms, 62.1% of roof)
+  end-to-end    6.4679 ms  (kernel sum 6.4683)
