@@ -603,7 +603,18 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **用户新增需求（优先）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
+> **当前冲刺（按序，把 ours 性能推到 FA3/TE 水平；这是最高优先级，别再被其它任务打断）**：
+> 1. **O5 收尾**：fp16/bf16 反向用 `mma.m16n8k16`+`ldmatrix` 张量核后端。
+>    进度：fp16 主 kernel 已 **2.38→0.19 ms（512）/ 68.6→4.53 ms（4096），12–15×**（`fa_bwd_fp16_mma_onefile.cu`，未 commit）；
+>    待办：bf16 同改、两文件版、对拍/commit、GQA/MLA 复用。
+> 2. **O8 preprocess mma**：fp16/bf16 的 LSE/D 改 mma 分块（照搬 fp8 的 O1）。**当前 S=4096 preprocess 68.7 ms
+>    已成为端到端第一瓶颈**（main 才 4.5 ms），做完 O5 立即做它。
+> 3. **O6**：`cp.async` 双缓冲 + 降 smem 提 occupancy（对齐 fp8 的 O2/O3/O4）。
+> 4. **O7**：dQ/dK/dV 去 `atomicAdd`（分块 accum + convert；fp8 已做，移植）。
+> 5. **O9**：`wgmma`+TMA+warp specialization，对标 FA3。
+> 目标：fp16/bf16 main 先到 FA2 水平，再逼近 FA3/TE；每步用 `harness/fa_vs_te_bwd_only.py`（纯反向、三列）验收。
+
+> **用户新增需求（已完成）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
 > 目前 FA/TE 做不了 MLA 反向，ML A 的性能数字只能由 ours 提供。
 
 - [x] **P5-1（优先）GQA/MQA**：改 fp16 反向（`src/fp16/`）支持 `Hkv`（由 `k.npy` 的 head 维读出），
