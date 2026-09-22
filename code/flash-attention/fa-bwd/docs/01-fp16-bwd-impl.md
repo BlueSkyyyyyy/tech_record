@@ -979,10 +979,81 @@ bf16 同款见 `01b` §6k。
 
 ---
 
+## 14b. MLA（head_dim=512）张量核反向（O5c，main 3.2–5.5×）
+
+P5-2 的 MLA 反向是**标量 golden**（CUDA-core FFMA，135KB smem、1 CTA/SM）；本节把 O5/O6/
+O6b/O6c/O7c 的张量核路径扩到 **head_dim=512**，与 fp8 的 MLA（`docs/03` §14）同构。
+
+### 14b.1 改动（单/两文件 device 代码逐字同源）
+
+`fa_bwd_fp16_mma_kernel<HD,BM,BN,PIPE,...>` 原先 `static_assert(HD==128)`，现支持 128/512：
+
+- **GEMM1/2（S=QKᵀ、dP=dO·Vᵀ）**：归约维是 HD ⇒ 只是 k-loop 从 `HD/16=8` 步变 `32` 步，
+  A/B 布局与累加器完全不变。
+- **GEMM3/4/5（dV/dK/dQ）**：输出 N 维是 HD ⇒ 加一层 **N-tile 循环**（`NTW=WN*64=128` 列/遍，
+  共 `NDT=HD/NTW` 遍）。B 操作数（dO/Q/K 的 `[K][HD]` 转置布局）列方向连续 ⇒ 基址 `+hd0`
+  即选中本遍列、写回列号 `+hd0`；`hd0=0` 时与 O5c **逐字等价**。
+- **dQ 累加**：HD=128 时 dQ 的 N 一次铺满，用「寄存器沿 nt 累加、结束统一写回」。HD=512 时
+  `[BM][HD]` 放不进寄存器 ⇒ 在 GEMM5 epilogue 里**直接全局累加**（`base[0/1] += ...`）。因为每个
+  `(qi, 列)` 由**唯一线程**拥有（唯一 CTA + 唯一 warp + 唯一 N-tile），这是**非原子 RMW、无竞争**；
+  `dq_acc` 由 host `memset(0)`（原本 run_all 就有）。
+- host：`D∈{128,512}` 均可；LSE/`delta` 按 `D` 分派 `<128>/<512>` 实例并各自设动态 smem；
+  MLA 自动档 `BM=32,BN=32,PIPE=1`（BM=64 的 K/V 双缓冲会超 232KB）。
+
+### 14b.2 数值对拍（ours vs fp32 ref，fp16 causal，D=Dv=512）
+
+| case | dq (max_abs) | dk | dv |
+|---|---|---|---|
+| S=256 H=2 | 1.638e-3 | 1.582e-3 | 1.753e-3 |
+| S=512 H=4 | 2.516e-3 | 2.916e-3 | 1.724e-3 |
+| S=1024 H=2 | 1.987e-3 | 1.712e-3 | 1.848e-3 |
+
+均为 fp16 噪声量级（与 P5-2 标量版同量级；S=256/S=512 的 dk/dv 与标量版**逐位相同**，
+dQ 因「寄存器累加→全局累加」次序略变而与标量版有 ~2e-3 差异，仍在噪声内）。
+**FA3/TE 反向不支持 head_dim=512**（FA 限 ≤256、TE 训练 bwd 限 256），只有 fp32 ref 可对。
+**MHA D=128 回归逐位不变**：S=512 1.671/1.771/1.899e-3、S=4096 1.883/1.734/1.966e-3（与
+O5/O6/O6b/O6c/O7c 记录相同），单/两文件逐指标一致。
+
+### 14b.3 性能（同 session CUDA event，preprocess/main/total，ms）
+
+| case | 标量 main | **张量核 main** | main 加速 | 标量 total | **张量核 total** | total 加速 |
+|---|---|---|---|---|---|---|
+| S=256 H=2 | 1.0651 | **0.2037** | **5.23×** | 1.2877 | **0.3003** | 4.29× |
+| S=512 H=4 | 2.1200 | **0.3847** | **5.51×** | 3.5065 | **0.5355** | 6.55× |
+| S=1024 H=2 | 4.2140 | **0.7248** | **5.81×** | 6.8166 | **0.9393** | 7.26× |
+
+配置 A/B（S=512 H4，main-only）：`(32,32,PIPE=1)` **0.3806ms**（5.64 TF 打印口径，真值 ~11.3 TF）
+< `(32,32,PIPE=0)` 0.6371ms < `(64,32,PIPE=0)` 0.9029ms ⇒ **K 双缓冲 + 小 BM 提高并行度**
+在 MLA 上值 **1.67×**。print 的 TFLOPS 用 `4BS²HD`，MLA 的 Dv=D ⇒ 真反向 FLOPs 是它的 **2×**。
+峰值（fp16 ~989 TF）占比 ~0.8–1.2%。
+
+### 14b.4 ncu（main，S=1024 H2 D=512，`(32,32,PIPE=1)`）
+
+Duration **769µs**（标量 main 4.21ms ⇒ 5.5×）；DRAM 0.83% / **L1/TEX 40.09%** / L2 13.87% /
+Compute 2.22%；168 regs、**207.36KB smem、1 CTA/SM**、理论=achieved occ **6.25%**、
+**Waves 0.48**、No Eligible 91.6%；stall **`long_scoreboard` 7.68** + `wait` 2.23 + short 0.55、
+barrier 0.05；smem bank conflict `op_ld` 仅 1.13M（对比标量 MLA 的 76.5% 多余 wavefront）。
+
+⇒ **bound = 全局访存延迟 + 低并行度**（grid=`S/BM·H`=64 < 132 SM ⇒ Waves 0.48；且 207KB smem
+把 occupancy 锁在 1 CTA/SM）。不再是标量版的 smem bank conflict。要进一步提速需**降 smem 冲
+2 CTA/SM**（消 `Qp/dOp/Kp` 等副本）或 **split-KV 提高 grid**，留 backlog。
+
+### 14b.5 原始输出
+
+`src/fp16/fa_bwd_fp16_mma_main_p5mla_{s256h2,s512h4,s1024h2}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_p5mla_s512h4.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_p5mla_reg_d128_s512.out.txt`、
+`src/fp16/fa_bwd_fp16_main_p5mla_{s256h2,s512h4,s1024h2}.out.txt`（标量基线）、
+`src/fp16/fa_bwd_fp16_mma_main_p5mla_ncu_{sol,stall}_s1024h2.out.txt`。
+bf16 同款见 `01b` §6l。
+
+---
+
 ## 15. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
-O8b（§13）、O6c（§13b）、O7c（§14）** 完成。O7c 已把「减 red 事务数」这条杠杆**证伪**
-（float4 更慢），并把墙从 L1/TEX 移到 L2/occupancy。后续按回报排序：**O9**（`wgmma`+TMA+
-warp specialization，对标 FA3；O6c/O7c 已证明 `BN=64` 能降 L1/TEX 但 smem/regs 锁死
-occupancy，只有更低 smem 的数据通路才能同时拿到）→ MLA 张量核。**O7c(bf16) 已完成（`01b` §6k）**。
+O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）** 完成。O7c 已把「减 red
+事务数」这条杠杆**证伪**（float4 更慢），并把墙从 L1/TEX 移到 L2/occupancy。后续按回报排序：
+**O9**（`wgmma`+TMA+warp specialization，对标 FA3；O6c/O7c 已证明 `BN=64` 能降 L1/TEX 但
+smem/regs 锁死 occupancy，只有更低 smem 的数据通路才能同时拿到）→ MLA 降 smem 冲 2 CTA/SM /
+split-KV。**O7c(bf16) 与 MLA 张量核(bf16) 见 `01b` §6k/§6l**。

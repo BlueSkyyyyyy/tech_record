@@ -642,5 +642,38 @@ FA/TE 反向均不支持 head_dim=512，只有 fp32 ref 与 ours：
 255 regs + spill / **223.2KB smem → 1 CTA/SM、occ 6.25%** / Waves 0.97 / No Eligible 90.7%
 ⇒ bound = **低 occupancy/并行度**（要冲 2 CTA/SM 需降 smem）。
 **O4b（第二十四轮）** 已把 `Kt/Qt/dOt` 换成 K 配对布局，smem **223.2→200.9KB**、main 1.20×
-（S=1024H2 0.3933→0.3251 ms）；但即使把三个配对数组也去掉仍 >116KB，MLA 冲 2 CTA/SM 需继续
+（S=1024H2 0.3933→0.3251 ms）；但即使把三个配对阵列也去掉仍 >116KB，MLA 冲 2 CTA/SM 需继续
 降 `Qs/Ks/Vs/dOs/dS2`（见 `03` §17.6）。详见 `docs/03` §14、§17。
+
+### 7.8 ours 的 fp16 / bf16 MLA 张量核（O5c，本节新增）
+
+P5-2/P5-3 的 fp16/bf16 MLA 反向原是**标量 golden**；本轮把 `HD` 模板从 128 扩到 **128/512**：
+GEMM1/2 的 k-loop 随 HD 加长，GEMM3/4/5（输出 N 维=HD）加 **N-tile 循环**（每遍 128 列），
+HD>128 的 dQ 改**直接全局累加**（每 `(qi,列)` 唯一线程拥有 ⇒ 非原子 RMW 无竞争），
+与 fp8 MLA（§7.7）同构。FA/TE 反向不支持 head_dim=512，仍只有 fp32 ref 与 ours。
+
+**数值对拍（ours vs fp32 ref，B1 D=Dv=512 causal，max_abs dq/dk/dv）**：
+
+| MLA case | fp16 | bf16 |
+|---|---|---|
+| (1,256,2,512) | 1.638 / 1.582 / 1.753e-3 | 1.230e-2 / 9.875e-3 / 1.50e-2 |
+| (1,512,4,512) | 2.516 / 2.916 / 1.724e-3 | 8.753e-3 / 1.082e-2 / 1.740e-2 |
+| (1,1024,2,512) | 1.987 / 1.712 / 1.848e-3 | 5.838e-3 / 9.519e-3 / ~1.5e-2 |
+
+对应 fp16/bf16 噪声量级；MHA D=128 回归**逐位不变**（fp16 S=512 1.671/1.771/1.899e-3、
+bf16 S=512 9.001/12.61/13.65e-3）。
+
+**性能（同 session CUDA event；main 加速 = 标量 main / 张量核 main）**：
+
+| MLA case | fp16 标量 main | fp16 TC main | 加速 | bf16 标量 main | bf16 TC main | 加速 |
+|---|---|---|---|---|---|---|
+| (1,256,2,512) | 1.065 ms | **0.204 ms** | 5.2× | 0.753 ms | **0.204 ms** | 3.7× |
+| (1,512,4,512) | 2.120 ms | **0.385 ms** | 5.5× | 1.488 ms | **0.385 ms** | 3.9× |
+| (1,1024,2,512) | 4.214 ms | **0.725 ms** | 5.8× | 2.959 ms | **0.725 ms** | 4.1× |
+
+最优配置 `(BM=32,BN=32,PIPE=1)`（K 双缓冲），比 `(32,32,0)` 快 1.67×。ncu（S=1024H2，fp16/bf16
+逐项相同）：Duration **769µs**、DRAM 0.83% / L1/TEX 40.1% / L2 13.9% / Compute 2.2%、
+168 regs / **207.36KB smem → 1 CTA/SM**、occ 6.25%、**Waves 0.48**、No Eligible 91.6%、
+stall `long_scoreboard 7.68 + wait 2.23` ⇒ **bound = 全局访存延迟 + 低并行度**（grid=64 < 132 SM、
+1 CTA/SM），非带宽/算力；进一步提速需降 smem 冲 2 CTA/SM 或 split-KV（backlog）。
+详见 `docs/01` §14b、`docs/01b` §6l。

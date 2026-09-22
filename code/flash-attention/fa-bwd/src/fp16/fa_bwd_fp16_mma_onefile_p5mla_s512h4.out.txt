@@ -1,0 +1,10 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp16
+B=1 S=512 H=4 Hkv=4 D=512 causal=1 scale=0.044194
+[O6c] main grid=32 auto=(BM=32,BN=32,PIPE=1) sel=(BM=32,BN=32,PIPE=1)
+[timing] total(3 kernels) 0.5336 ms  4.02 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1160 ms | main 0.3777 ms | convert 0.0399 ms
+[MLA512 A/B] main: (32,32,0) 0.6300 (3.41 TF) | (32,32,1) 0.3768 (5.70) | (64,32,0) 0.8934 (2.40) => best 1.672x
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.516e-03  max_rel=5.182e-01
+  dk   vs ref: max_abs=2.916e-03  max_rel=4.229e-01
+  dv   vs ref: max_abs=1.724e-03  max_rel=3.340e-02

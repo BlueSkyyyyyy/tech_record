@@ -1,0 +1,8 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_bf16
+B=1 S=1024 H=2 Hkv=2 D=512 causal=1 scale=0.044194 dtype=bf16
+[timing] total(3 kernels) 5.5703 ms  0.77 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 2.4905 ms | main 2.9590 ms | convert 0.1208 ms
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=5.152e-03  max_rel=2.289e+00
+  dk   vs ref: max_abs=7.742e-03  max_rel=1.994e+00
+  dv   vs ref: max_abs=1.557e-02  max_rel=1.642e-01
