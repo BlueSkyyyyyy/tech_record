@@ -6,6 +6,8 @@
 > `__half2float`→`__bfloat162float`，`__float2half`→`__float2bfloat16`），算法/三段式/线程映射完全一致。
 > 在此基础上加了一处 **bf16 专属优化：K/V smem 行距 padding**（见第 3 节）。
 > 后续新增 **GQA/MQA 支持**（P5-3，见第 6c 节；`Hkv` 映射同 fp16）。
+> **O5b**：又把 main kernel 换成**张量核 `mma.m16n8k16` + `ldmatrix`**（单/两文件
+> `fa_bwd_bf16_mma_{onefile.cu, kernels.cuh+main.cu}`，见第 6e 节；main 9.4–9.9×）。
 >
 > 实测原始输出：`fa_bwd_bf16_onefile_s512.out.txt`、`..._s4096.out.txt`、
 > `..._ncu_main.out.txt`（ncu `--set full`）、`..._refbench.out.txt`（FA/TE 基线）、
@@ -327,6 +329,87 @@ fixed-latency wait 1.35**。即 bound = **全局访存延迟 + 低并行度**（
 
 ---
 
+## 6e. 张量核版（O5b，单/两文件）
+
+> 代码：**两文件** `src/bf16/fa_bwd_bf16_mma_kernels.cuh` + `fa_bwd_bf16_mma_main.cu`；
+> **单文件** `src/bf16/fa_bwd_bf16_mma_onefile.cu`（由两文件拼接，device 代码逐字一致）。
+> 由 O5 的 fp16 张量核版 `src/fp16/fa_bwd_fp16_mma_*.cu` **dtype 参数化**而来。
+
+**动机**：P2 的 `fa_bwd_bf16_*.cu` 是**正确性优先的标量 golden**（CUDA-core FFMA），
+main 只有 ~1 TFLOPS；O5 已把 fp16 反向换成张量核（main 11.8–14.9×）。O5b 把同一后端
+移植到 bf16（对齐 ROADMAP「当前冲刺」第 1 项：O5 收尾）。
+
+**改动（相对 fp16 张量核版逐字同构，仅 dtype 替换）**：
+- `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32` → `...f32.bf16.bf16.f32`；
+- `__half`→`__nv_bfloat16`、`__half2float/__float2half`→`__bfloat162float/__float2bfloat16`；
+- smem 布局、ldmatrix（`.b16`，bf16 与 fp16 位宽/布局同构）、padding（`LD=HD+8`、`LDP=BM+8`、
+  `LDS=BN+8`）、dQ 寄存器累加、dK/dV `red_add2`（float2 atomicAdd）**全部不变**。
+
+5 个 GEMM（HD=128, BM=64, BN=32）：① `S=scale·QKᵀ`（B=K `[N][K]`，`ldmatrix.x2`）② `dP=dO·Vᵀ`
+（同）：③ `dV=Pᵀ·dO` ④ `dK=scale·dSᵀ·Q` ⑤ `dQ=scale·dS·K`（③④⑤ B 用 `ldmatrix.x2.trans`）。
+P/dS 就地转 bf16（`PsT/dSsT/dSs`），D/LSE 用 fp32；`__launch_bounds__(128,3)` → 168 regs、0 spill、
+66.56KB smem、3 CTA/SM。
+
+**数值对拍（ours-vs-ref，bf16 causal，max_abs/max_rel）**：
+
+| shape | dq | dk | dv | 参考：FA(FLA) | TE |
+|---|---|---|---|---|---|
+| S=512 H16 D128 (`b1_s512_h16_d128_causal_bf16`) | 9.00e-3 / 1.49 | 1.26e-2 / 1.78 | 1.37e-2 / 1.88 | 1.04e-2 / 1.26e-2 / 1.37e-2 | 1.37e-2 / 1.07e-2 / 1.37e-2 |
+| S=4096 H16 D128 | 1.51e-2 / 1.42 | 1.34e-2 / 1.22 | 1.63e-2 / 1.98 | 1.44e-2 / 1.33e-2 / 1.63e-2 | 1.52e-2 / 1.76e-2 / 1.63e-2 |
+| S=1024 H32 kv4 | 1.20e-2 | 2.13e-2 | 3.16e-2 | 1.16e-2 / 3.11e-2 / 3.63e-2 | 1.24e-2 / 3.14e-2 / 3.63e-2 |
+| S=1024 H40 kv8 | 1.23e-2 | 1.93e-2 | 3.15e-2 | 1.23e-2 / 2.49e-2 / 3.41e-2 | 1.30e-2 / 2.49e-2 / 3.41e-2 |
+| S=1024 H64 kv4 | 1.35e-2 | 3.09e-2 | 4.42e-2 | 1.71e-2 / 3.54e-2 / 6.51e-2 | 1.71e-2 / 3.53e-2 / 6.51e-2 |
+| S=1024 H64 kv1 (MQA) | 1.19e-2 | 4.56e-2 | 7.20e-2 | 1.79e-2 / 4.93e-2 / 8.39e-2 | 1.30e-2 / 6.02e-2 / 8.39e-2 |
+
+全部是 bf16 噪声量级（~1e-2），**多数情形 ≤ FA/TE**，无系统误差。单文件与两文件逐位一致
+（S=512 三者 max_abs 完全相同）。
+
+**性能（CUDA event；main-only TFLOPS 用与 `fa_vs_te_bwd_only.py` 一致的口径 `4·B·S·H·S·(D+Dv)`）**：
+
+| shape | preprocess | main | convert | total | main TFLOPS | FA3 | TE2.14 | FA2.7.4 |
+|---|---|---|---|---|---|---|---|---|
+| S=512 H16 D128 | 1.201 ms | **0.190 ms** | 0.043 ms | 1.434 ms | 22.6 | — | — | — |
+| S=4096 H16 D128 | 68.79 ms | **4.511 ms** | 0.136 ms | 73.43 ms | 60.9 | 860 | 622 | 379 |
+| S=1024 H40 kv8 | 11.07 ms | **0.871 ms** | ~0 ms | 11.94 ms | 49.3 | 356 | 326 | 229 |
+| S=1024 H32 kv4 | 8.826 ms | **0.639 ms** | 0.025 ms | 9.490 ms | 53.8 | 418 | 307 | 217 |
+| S=1024 H64 kv4 | 17.64 ms | **1.119 ms** | 0.022 ms | 18.78 ms | 61.4 | 431 | 356 | 257 |
+| S=1024 H64 kv1 (MQA) | 17.53 ms | **1.009 ms** | 0.084 ms | 18.62 ms | 68.1 | 440 | 322 | 259 |
+
+- **main 相对标量 bf16 golden**：S=512 1.88→**0.190 ms（9.9×）**、S=4096 42.2→**4.51 ms（9.4×）**。
+  （幅度小于 fp16 的 11.8–14.9×，是因为 bf16 标量版已做过 padding 优化、基线更快。）
+- main-only 到 FA3 的 **5.7–15.5%**（MHA S4096 60.9/860；GQA/MQA 49–68 / 356–440）；
+  到 TE 的 8–22%；到 FA2 的 16–26%。
+- **端到端被标量 preprocess 拖住**：S=4096 时 preprocess 占 94%（68.8ms vs main 4.5ms），
+  GQA S1024 亦占 ~93%。这正是 ROADMAP「当前冲刺」第 2 项 **O8（preprocess 的 LSE/D 改 mma 分块，
+  对齐 fp8 的 O1）**要解决的。
+
+**ncu（main, `--set full`）**：
+
+| 指标 | S=512 | S=4096 |
+|---|---|---|
+| Duration | 320.5 µs（ncu 重放；event 190µs） | 4.55 ms |
+| DRAM Throughput | 1.58% | 1.41% |
+| L1/TEX Throughput | 10.24% | 33.24% |
+| L2 Throughput | 7.69% | 24.84% |
+| Compute (SM) | 4.39% | 17.33% |
+| Achieved / Theoretical Occupancy | 6.25 / 18.75% | 16.40 / 18.75% |
+| Registers / smem / CTA | 168 / 66.56KB / 3 | 168 / 66.56KB / 3 |
+| Waves Per SM | 0.32（grid 128<132 SM，grid-bound） | 2.59 |
+| No Eligible | 92.40% | 77.39% |
+| stall | — | **long_scoreboard 7.35 / ~11.6 cycles = 63%**；wait 1.68、short 0.59、barrier 0.23 |
+
+**bound 结论**：与 fp16 张量核版**逐项一致**（Duration 4.55ms、DRAM 1.41%、L1TEX 33.24%、
+Compute 17.33%、168 regs、occ 18.75%、Waves 2.59）。S=4096 bound = **全局访存延迟**
+（`long_scoreboard` 63%，每 tile 同步 global→smem、无 cp.async/预取）；S=512 是 **grid-bound**
+（grid 128 < 132 SM）。非带宽（DRAM 1.4%）、非算力（Compute 17.3%）。
+下一步：O6（`cp.async` 双缓冲 + 降 smem 提 occupancy）打 main 的墙，O8 打端到端的墙。
+
+> 原始输出：`fa_bwd_bf16_mma_main_o5b_{s512,s4096,gqa}.out.txt`、
+> `fa_bwd_bf16_mma_onefile_o5b_s512.out.txt`、`fa_bwd_bf16_mma_main_o5b_ncu_main_{s512,s4096}.out.txt`、
+> `fa_bwd_bf16_mma_main_o5b_stall_s4096.out.txt`、`fa_bwd_bf16_mma_o5b_fa3_te_baseline.out.txt`。
+
+---
+
 ## 7. 复现命令
 
 ```bash
@@ -356,5 +439,8 @@ docker exec kernel_lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py bench
 
 ## 8. 下一步
 
-见 `../ROADMAP.md`：P2-2（bf16 两文件拆分，**已完成**）→ P3 fp8（重点，参考 TE 的 E4M3/E5M2 + rowwise scaling）。
-backlog：降 smem/提 occupancy、张量核 + 流水、preprocess 向量化/摊入前向、fp16 同步 padding。
+见 `../ROADMAP.md`。**O5b（bf16 张量核）已完成（第 6e 节）**；接下来是「当前冲刺」的
+**O8（preprocess 的 LSE/D 改 mma 分块，对齐 fp8 的 O1）**——它现在是端到端第一瓶颈
+（S=4096 preprocess 68.8ms vs main 4.5ms），然后 O6（main `cp.async` 双缓冲/提 occupancy）、
+O7（去 atomic）、O9（wgmma+TMA 对标 FA3）。
+backlog：fp8 侧残余 red（O7b）、MLA 降 smem / 张量核。
