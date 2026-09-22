@@ -507,7 +507,38 @@
      short_scoreboard 3.50**；occ/regs/smem/bank-conflict 不变（168 regs/75KB/3 CTA/SM）。
    - 原始输出 `src/fp8/fa_bwd_fp8_main_o4c_{s512_h16_d128,s1024_h32_d128,s4096_h16_d128,
      s1024_h2_d512,s1024_h32_d128_kv4}.out.txt`、`src/fp8/fa_bwd_fp8_mma_onefile_o4c_s4096.out.txt`、
-     `src/fp8/fa_bwd_fp8_main_o4c_ncu_s4096.out.txt`、`..._o4c_tebench.out.txt`；文档 `docs/03` §16。
+      `src/fp8/fa_bwd_fp8_main_o4c_ncu_s4096.out.txt`、`..._o4c_tebench.out.txt`；文档 `docs/03` §16。
+
+- 2026-09-23（第二十四轮）：**O4b 完成（转置副本 → `ldmatrix.x2.trans` + K 配对，main 1.17–1.76×）**。
+   - **先纠正 O4b 前提**：fp8 里 A/B 需要相反主序、且 `ldmatrix.trans` 的配对方向是 N
+     （「2 字节=1 b16」），所以 `Kt/Qt/dOt` **不能整个消掉**（每个张量必须存两种主序）。
+     真实收益 = 「逐字节 scatter 写 → 4B `__byte_perm` 交织写」+ 配对数组无 `+16` 行距放大。
+   - **第一步（smoke）**：新增 `src/fp8/fa_bwd_fp8_trans_smoke.cu`，证明 `[K/2][N]` K 配对
+     布局 + `ldmatrix.x2.trans` 与现有 `[N][K]` + `ldmatrix.x2` 读到的 B 片段 **逐位一致
+     （bitwise_diff=0/128，PASS）**。
+   - **合入（单/两文件 device 逐字一致）**：`Fp8Cfg` 的 `KTS/QTS → PSLD(HD+8)`、
+     `KVU → NPU`、`fp8_bytes` 改 `qp/kp`；新增 `ldmatrix_x2_trans` + `mma_block_bt`；
+     Q/dO 与 K/V 载入改「行对 unit」（Qp/dOp/Kp 用 `__byte_perm(q0,q1,0x5140/0x7362)` 交织，
+     Ks/Vs 两行一次写）；GEMM3/4/5 的 B 改 `mma_block_bt`；O3 寄存器预取保留
+     （NPU*4<=16 时启用）。
+   - **数值与 O4c 逐位相同**：S512 2.426/2.975/3.735e-1；S1024H32 2.400/4.195/3.536e-1；
+     S4096 2.635/2.643/3.216e-1；MLA S1024H2 2.232/3.337/3.602e-1；MLA S256H2 2.356/2.290/3.441e-1；
+     GQA h32kv4 2.517/5.408/7.072e-1。单/两文件一致。
+   - **性能（同 session A/B，main）**：S512 0.1091→**0.0733（1.49×）**、S1024H32 0.6765→**0.4552
+     （1.49×）**、S4096 3.4553→**2.9473（1.17×）**、MLA S1024H2 0.3896→**0.3251（1.20×）**、
+     MLA S256H2 0.0916→**0.0522（1.76×）**、GQA h32kv4 0.5923→**0.4404（1.34×）**；
+     端到端 ours/TE = **2.18×/4.18×/7.90×**（S512 main 达 TE 整条反向的 **73%**）。
+     smem **75520→70656B（d128）/ 229120→205824B（MLA）**。
+   - **ncu（main, S4096）**：Duration 3.60→**3.00ms**、**smem `op_st` bank conflict 206.4M→69.4M
+     （−66%）**、`op_ld` 68.4→69.3M、**L1/TEX 81.30%→69.69%**、L2 57.85→**69.12%**（上升成并列墙）、
+     Compute 29.4→34.4%、short 3.50→**2.73**、long 1.44→**1.16**、occ 18.2%（168 regs/70.66KB，3 CTA/SM）；
+     red 请求/扇区不变（17.0M/204.5M）。S=512：Duration **78.2µs**、L1/TEX 47.2%。
+     MLA S1024H2：Duration **359.8µs**、smem 205.8KB、regs 255、occ 6.25%（1 CTA/SM）。
+     **bound = L1/TEX 69.7% + L2 69.1%（残余 red）+ short 2.73**。
+   - 原始输出 `src/fp8/fa_bwd_fp8_trans_smoke.out.txt`、`src/fp8/fa_bwd_fp8_main_o4b_*.out.txt`、
+     `src/fp8/fa_bwd_fp8_mma_onefile_o4b_s4096_h16_d128.out.txt`、
+     `src/fp8/fa_bwd_fp8_main_o4b_ncu_{s512,s4096,mla_s1024h2}.out.txt`、
+     `src/fp8/fa_bwd_fp8_o4b_tebench.out.txt`；文档 `docs/03` §17、`docs/04` §2.3/§3。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -581,9 +612,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 以下为既有 fp8 优化 backlog（P5 已全部收口，现在可与 MLA 优化合并推进）。
 
 > P5-3 已完成，ROADMAP 里的「P 项」全部收口，后续为**优化 backlog**。
-> **O1/O2/O3/O4a/O2b/O4d/O4c 已完成**。O4c 已把 L2 原子流量砍半（L2 81.5%→57.9%），
-> **下一项 = O4b**（fp8 `ldmatrix.trans` 消 `Kt/Qt/dOt` 三个转置副本：既减 L1/TEX 的 smem 往返
-> ——新墙 L1/TEX 81.3%，又是 fp8 MLA 冲 2 CTA/SM 的关键）。
+> **O1/O2/O3/O4a/O2b/O4d/O4c/O4b 已完成**。O4c 把 L2 原子流量砍半（L2 81.5%→57.9%）；
+> O4b 把转置副本换成 K 配对 + `ldmatrix.x2.trans`（`op_st` 冲突 −66%、L1/TEX 81.3%→69.7%）。
+> **下一项 = O7**（分块 `*_accum` + convert 替全局 `atomicAdd`：消 O4c 后残余的 204.5M red，
+> 现 L2 并列墙 69.1%；同时得到确定性反向）。
 > 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
 
 - [x] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms。
@@ -614,10 +646,20 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       9.0992→**7.8488ms（17.51 TF）**。ncu：**barrier 5.13→0.46（基本清零）**，墙移到
       short_scoreboard（4.12→5.40）与 L1/TEX 65.59→78.51%；Duration 7.57→6.55ms。
       详见 `docs/03-fp8-bwd-impl.md` §12。
-- [ ] **O4b（消转置副本）**：把 `Kt/Qt/dOt` 三个转置副本换成 fp8 `ldmatrix.trans`
-      （既减 smem 冲 4 CTA/SM = 原 O2c，又减 smem 往返）。**注意**：fp8 的 `ldmatrix.trans`
-      因为「2 字节=1 b16」的配对转置，布局不是 drop-in，需先写最小复现验证（对照 `42` 篇
-      的 `ldmatrix.x4.trans` 用法）。
+- [x] **O4b（转置副本 → `ldmatrix.x2.trans` + K 配对布局）**：**已完成（第二十四轮）**。
+      **先纠正前提**：fp8 里 A/B 主序相反、且 `ldmatrix.trans` 的配对方向是 N，**转置副本
+      无法整个消掉**（须存两种主序）。真实收益：把「逐字节 scatter 写」换成 **4B 交织写**
+      （`__byte_perm 0x5140/0x7362`）、配对数组比 `[HD][K+16]` 更小。先写
+      `src/fp8/fa_bwd_fp8_trans_smoke.cu` 验证「`[K/2][N]` K 配对 + `ldmatrix.x2.trans`」
+      与现有 `ldmatrix.x2` **逐位一致（PASS）**；再合入：`Fp8Cfg` 的 `KTS/QTS→PSLD`、
+      `KVU→NPU`，新增 `mma_block_bt`，Q/dO 与 K/V 载入改「行对 unit」（O3 预取保留）。
+      smem **75520→70656B（d128）/ 229120→205824B（MLA）**；`op_st` bank conflict
+      **206.4M→69.4M（−66%）**、L1/TEX **81.3%→69.7%**、short_scoreboard 3.50→2.73；
+      main **1.17–1.76×**（S=512 0.1091→0.0733、S=1024H32 0.6765→0.4552、
+      S=4096 3.4553→2.9473、MLA S1024H2 0.3896→0.3251、MLA S256H2 0.0916→0.0522、
+      GQA 0.5923→0.4404），数值与 O4c **逐位相同**。新墙 = L1/TEX 69.7% + L2 69.1%（残余
+      red）+ short 2.73。MLA 即使去掉三个配对数组仍 >116KB → 冲 2 CTA/SM 需继续降 smem。
+      详见 `docs/03` §17、`docs/04` §2.3/§3。
 - [x] **O2b**：split-K 切块数自动选择（N 方向切块，`dq/dk/dv` 跨 CTA atomic 汇总）。
        **已完成（第二十二轮）**：先 sweep（k=1/2/4/8/16）× 6 个 shape，规律是
       **d128（3 CTA/SM）目标 grid≈4096、MLA（1 CTA/SM）目标≈132（1 个波）**；新启发式

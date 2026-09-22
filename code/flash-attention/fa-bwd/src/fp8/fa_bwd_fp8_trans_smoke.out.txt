@@ -1,0 +1,7 @@
+=== fp8 ldmatrix.x2.trans（K 配对布局）取 B 片段最小复现（O4b）===
+M=16 N=8 K=128  BSLD=144 SPSLD=16(uint16)
+  notrans-vs-ref : max_abs=3.052e-05
+  trans  -vs-ref : max_abs=3.052e-05
+  notrans-vs-trans: max_abs=0.000e+00  bitwise_diff=0/128
+  time=0.00673 ms
+=== PASS（K 配对 + ldmatrix.trans 与现有 ldmatrix.x2 路径逐位一致） ===
