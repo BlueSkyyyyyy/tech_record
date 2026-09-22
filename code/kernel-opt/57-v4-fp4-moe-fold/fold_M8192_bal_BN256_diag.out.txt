@@ -1,0 +1,33 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+[57] FP4 experts -> grouped MoE fold on-the-fly vs pre-fold	M=8192 balanced
+Pp=49152 actual=49152 padding=0.0%
+weights up/gate [E*N=2359296, K=7168]: fp8=16.91 GB  fp4=8.46 GB (+scale 0.53 GB)
+[fold check] 抽样 1048576 元素 fp4->fp8：最大位差 = 0  OK (逐位无损)
+[bitwise] MODE0(pre-fold fp8) vs MODE1(fp4 on-the-fly): max_abs_diff=0.000e+00 bad=0 OK
+  hsa sum=53.2717 first=1.0316 0.6690 A1[0]=-0.9375 W8[0]=0.0000
+    M0 bad p=3 cc=7 got=0.0000 ref=-4342.9987
+    M1 bad p=3 cc=7 got=0.0000 ref=-4342.9987
+    sample p=3 g=0 cc=7  M0=0.0000 M1=0.0000 ref=-4342.9987
+    M0 bad p=7922 cc=2144 got=0.0000 ref=4569.3715
+    M1 bad p=7922 cc=2144 got=0.0000 ref=4569.3715
+    sample p=7922 g=61 cc=2144  M0=0.0000 M1=0.0000 ref=4569.3715
+    M0 bad p=15841 cc=4281 got=0.0000 ref=9643.1209
+    M1 bad p=15841 cc=4281 got=0.0000 ref=9643.1209
+    sample p=15841 g=123 cc=4281  M0=0.0000 M1=0.0000 ref=9643.1209
+    M0 bad p=23760 cc=274 got=0.0000 ref=-4033.9345
+    M1 bad p=23760 cc=274 got=0.0000 ref=-4033.9345
+    sample p=23760 g=185 cc=274  M0=0.0000 M1=0.0000 ref=-4033.9345
+    M0 bad p=31679 cc=2411 got=0.0000 ref=1781.2527
+    M1 bad p=31679 cc=2411 got=0.0000 ref=1781.2527
+[vs CPU ref] M0 bad=200/200 max_rel=1.000e+00 (ref~17007.3) FAIL
+
+-- 计时（BN=256）--
+MODE0 pre-fold fp8            6.6037 ms   655.59 TFLOPS (33.1% fp8 peak)  B-read 2560.9 GB/s
+MODE1 fp4 on-the-fly          5.2493 ms   824.74 TFLOPS (41.7% fp8 peak)  B-read 1711.5 GB/s
+speedup fp4/pre-fold = 1.258x   (fp8 B=16.91 GB, fp4 B=8.98 GB)

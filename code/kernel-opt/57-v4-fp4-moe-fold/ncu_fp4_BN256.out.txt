@@ -1,0 +1,88 @@
+==PROF== Connected to process 340158 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/57-v4-fp4-moe-fold/fold_moe.out)
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+[57] FP4 experts -> grouped MoE fold on-the-fly vs pre-fold	M=8192 balanced
+Pp=49152 actual=49152 padding=0.0%
+weights up/gate [E*N=2359296, K=7168]: fp8=16.91 GB  fp4=8.46 GB (+scale 0.53 GB)
+==PROF== Profiling "fill_fp4_kernel" - 0 (1/1): 0%....50%....100% - 17 passes
+[fold check] 抽样 1048576 元素 fp4->fp8：最大位差 = 0  OK (逐位无损)
+==PROF== Disconnected from process 340158
+[340158] fold_moe.out@127.0.0.1
+  fill_fp4_kernel(unsigned char *, unsigned char *, unsigned long, unsigned long, unsigned int) (8192, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.98
+    Elapsed Cycles                cycle     11233132
+    Memory Throughput                 %        58.68
+    DRAM Throughput                   %        47.12
+    Duration                         ms         5.68
+    L1/TEX Cache Throughput           %        19.24
+    L2 Cache Throughput               %        58.68
+    SM Active Cycles              cycle  11058594.02
+    Compute (SM) Throughput           %        95.25
+    ----------------------- ----------- ------------
+
+    INF   This workload is utilizing greater than 80.0% of the available compute or memory performance of this device.  
+          To further improve performance, work will likely need to be shifted from the most utilized to another unit.   
+          Start by analyzing workloads in the Compute Workload Analysis section.                                        
+
+    Section: Warp State Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Warp Cycles Per Issued Instruction             cycle        20.66
+    Warp Cycles Per Executed Instruction           cycle        20.66
+    Avg. Active Threads Per Warp                                   32
+    Avg. Not Predicated Off Threads Per Warp                    32.00
+    ---------------------------------------- ----------- ------------
+
+    WRN   The optional metric smsp__pcsamp_sample_count could not be found. Collecting it as an additional metric could 
+          enable the rule to provide more guidance.                                                                     
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Local Speedup: 39.83%                                                                                    
+          On average, each warp of this workload spends 8.2 cycles being stalled waiting for the execution pipe to be   
+          available. This stall occurs when all active warps execute their next instruction on a specific,              
+          oversubscribed math pipeline. Try to increase the number of active warps to hide the existent latency or try  
+          changing the instruction mix to utilize all available pipelines in a more balanced way. This stall type       
+          represents about 39.8% of the total average of 20.7 cycles between issuing two instructions.                  
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Local Speedup: 39.72%                                                                                    
+          On average, each warp of this workload spends 8.2 cycles being stalled waiting for the micro scheduler to     
+          select the warp to issue. Not selected warps are eligible warps that were not picked by the scheduler to      
+          issue that cycle as another warp was selected. A high number of not selected warps typically means you have   
+          sufficient warps to cover warp latencies and you may consider reducing the number of active warps to          
+          possibly increase cache coherence and data locality. This stall type represents about 39.7% of the total      
+          average of 20.7 cycles between issuing two instructions.                                                      
+    ----- --------------------------------------------------------------------------------------------------------------
+    INF   Check the Warp Stall Sampling (All Samples) table for the top stall locations in your source based on         
+          sampling data. The Profiling Guide                                                                            
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-reference) provides more details    
+          on each stall reason.                                                                                         
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block           16
+    Block Limit Shared Mem                block           32
+    Block Limit Warps                     block            8
+    Theoretical Active Warps per SM        warp           64
+    Theoretical Occupancy                     %          100
+    Achieved Occupancy                        %        94.66
+    Achieved Active Warps Per SM           warp        60.58
+    ------------------------------- ----------- ------------
+
