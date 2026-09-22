@@ -349,3 +349,85 @@ scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=3 \
 scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --launch-count 1 \
     --kernel-name regex:fa_bwd_fp8_mma -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8 --iters=1
 ```
+
+## 9. O1：preprocess 的 mma 分块 LSE（`lse_mma_kernel` + `delta_kernel`）
+
+P4 之后端到端第一瓶颈是 `preprocess`：S=4096 时 **70.8 ms >> main 10.2 ms**。旧 `preprocess_kernel`
+每个 `(s,h)` 行一个 block、128 线程，逐 `j` 标量扫 K，每对 `(i,j)` 反量化 `2×128` 个 e4m3 再 FFMA，
+且 `grid=(S,H,B)=65536` 个「1 行」block 并行度看着高、实际每 block 只有 1 个 warp 在 N 上有活干、
+K 行反复从 global 读。O1 把它换成与反向主 kernel 同源的 **tensor-core QK**，并把 D 的计算拆出去。
+
+### 9.1 实现
+
+- **`lse_mma_kernel`**（`grid=(S/64, H, B)`，128 线程=4 warp）：
+  - 每 CTA 处理 `LBM=64` 行 Q，4 个 warp 各 16 行（`wm=wid`），沿 N 方向一次吃 `LBN=64` 列；
+    Q/K 分块进 smem（`ASLD=144`，`mma_block<16,64,kHeadDim,E4E4>`）。
+  - **P 不物化**：`mma.m16n8k32` E4M3×E4M3 的 fp32 累加器直接做 online-softmax（running max/l）。
+    同一行的 4 个 lane（`lane&3`）在 warp 内 `shfl_xor`（±1、±2）归约，`c2==0` 的 lane 写 `lse`。
+  - 数学与旧版逐项一致：`scale·qs[r]·ks[c]`、causal mask、`sv==-INF` 跳过保证 NaN 安全。
+- **`delta_kernel`**（`grid=(S,H,B)`，128 线程）：`D = rowsum(dO∘O)` 原本和 LSE 挤在一个 kernel，
+  现在独立——它只 O(S·H·D)，与 LSE 解耦后 LSE 可以纯粹地按 tile 并行。
+- 两文件版（`fa_bwd_fp8_kernels.cuh` + `fa_bwd_fp8_main.cu`）与 mma 单文件（`fa_bwd_fp8_mma_onefile.cu`）
+  同步修改，device 代码逐字一致。
+
+### 9.2 数值核对（与 P3-5 逐位相同）
+
+| shape | dq/dk/dv vs ref max_abs（P3-5 → O1） | vs TE max_abs（O1） |
+|---|---|---|
+| S=512 H16 | 2.426 / 2.975 / 3.735e-1 | 5.381e-1 / 4.429e-1 / 8.546e-1 |
+| S=1024 H32 | 2.400 / 4.195 / 3.536e-1 | 4.652e-1 / 5.701e-1 / 9.431e-1 |
+| S=4096 H16 | 2.635 / 2.643 / 3.216e-1 | 4.525e-1 / 5.324e-1 / 6.807e-1 |
+
+新 LSE 与旧标量 LSE 算出的 `lse` 在 fp32 上一致到末位（下游 dq/dk/dv 的误差**逐位相同**），
+确认只换了算法数据流、没改数学口径。
+
+### 9.3 性能（event 计时，ms；FP8 峰值 = 1978.8 TFLOPS）
+
+| shape | preprocess 旧 | preprocess 新 | 提速 | total 旧 | total 新 | total 提速 | total TFLOPS |
+|---|---|---|---|---|---|---|---|
+| S=512 H16 | 1.1991 | 0.0850 | **14.1×** | 1.7103 | 0.6049 | 2.83× | 3.55 |
+| S=1024 H32 | 8.8033 | 0.2162 | **40.7×** | 10.7192 | 2.2138 | 4.84× | 7.76 |
+| S=4096 H16 | 70.7674 | 1.1370 | **62.2×** | 80.8639 | 11.4702 | 7.05× | 11.98 |
+
+`main` 未改（0.451 / 1.812 / 9.924 ms，在 event 噪声内）。同 session 重测 TE FP8 基线
+（CUPTI）为 0.0723 / 0.1381 / 0.4537 ms，故端到端 ours/TE = 8.4× / 16.0× / 25.3×
+（P3-5 时是 23.5× / 77.7× / 178×）；total 相对 FP8 峰值占比 0.18% / 0.39% / 0.61%。
+S=4096 时端到端瓶颈已从 preprocess **回落到 main（9.92 ms，占 87%）**。
+
+### 9.4 ncu 剖析
+
+`lse_mma_kernel`（S=4096，`grid=(64,16,1)`，128 线程，17 passes）：
+
+| 指标 | 值 | 指标 | 值 |
+|---|---|---|---|
+| Duration | 1.16 ms | DRAM Throughput | **0.46%** |
+| Compute (SM) | 39.36% | L2 Throughput | 5.35% |
+| L1/TEX | 20.63% | Registers | 72 |
+| Achieved Occupancy | **29.48%**（理论 43.75%） | Waves Per SM | 1.11 |
+
+- **bound = 延迟/并行度 + 尾波**，不是带宽、也不是 smem：
+  `No Eligible 42.09%`（`long_scoreboard` 主导的访存等待）、`Waves=1.11`（1 个满波 + 100 个 block 的
+  尾波，ncu 估计尾波最多占 50% 时间）。理论 occupancy 被 **72 寄存器**卡在 43.75%
+  （`Block Limit Registers=7`，128 线程；降到 ≤64 可到 8 block/32 warp=50%）。
+- S=512 时 `grid=128 < 132 SM`，`Waves=0.14`，是纯粹的「grid 太小」——但即便如此仍比旧的标量版快 14×。
+- `delta_kernel`（S=4096）：43.6 µs，DRAM 30.65% / L1TEX 75.07% / Compute 75.36%，是 O(S·H·D) 的
+  逐行归约，量级可忽略（含在 preprocess 里）。
+
+### 9.5 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+# 两文件版（O1）：对拍 + 计时（S=512 / S=1024H32 / S=4096）
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=10
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=10 \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_causal_fp8
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=10 \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# 单文件版（与两文件逐位一致）
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=10
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --section SpeedOfLight --section Occupancy \
+    --section SchedulerStats --section WarpStateStats --section LaunchStats \
+    --kernel-name regex:lse_mma_kernel --launch-count 1 -- --iters=1 \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+```

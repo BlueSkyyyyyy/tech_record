@@ -1,0 +1,12 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== bench (CUPTI device time) ===
+[b1_s512_h16_d128_causal_fp8] te=0.0723ms/29.69TF
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== bench (CUPTI device time) ===
+[b1_s1024_h32_d128_causal_fp8] te=0.1381ms/124.36TF
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== bench (CUPTI device time) ===
+[b1_s4096_h16_d128_causal_fp8] te=0.4537ms/302.95TF

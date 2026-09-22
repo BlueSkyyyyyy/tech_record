@@ -147,7 +147,8 @@ int main(int argc, char** argv) {
   printf("case = %s\n", dir.c_str());
   printf("B=%d S=%d H=%d D=%d causal=%d scale=%.6f\n", B, S, H, D, (int)causal, scale);
   printf("FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32\n");
-  printf("smem = %d bytes (%.1f KB)\n", kSmemBytes, kSmemBytes / 1024.0);
+  printf("smem = %d bytes (%.1f KB); lse smem = %d bytes (%.1f KB)\n", kSmemBytes,
+         kSmemBytes / 1024.0, kLseSmemBytes, kLseSmemBytes / 1024.0);
 
   float *d_q_f, *d_k_f, *d_v_f, *d_do_f, *d_o_f;
   unsigned char *d_q8, *d_k8, *d_v8, *d_do8;
@@ -190,18 +191,26 @@ int main(int argc, char** argv) {
 
   CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes));
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBytes));
   dim3 pg(S, H, B);
+  dim3 lg((S + LBM - 1) / LBM, H, B);
   dim3 mg((S + BM - 1) / BM, H, B);
   const int cvt_threads = 256;
   const int cvt_blocks = (int)std::min<size_t>((n + cvt_threads - 1) / cvt_threads, 65535);
+
+  auto run_preprocess = [&]() {
+    lse_mma_kernel<<<lg, THREADS, kLseSmemBytes>>>(d_q8, d_qs, d_k8, d_ks, d_lse, S, H,
+                                                   scale, (int)causal);
+    delta_kernel<<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+  };
 
   auto run_all = [&]() {
     quant();
     CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * 4));
     CUDA_CHECK(cudaMemset(d_dk_acc, 0, n * 4));
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, n * 4));
-    preprocess_kernel<<<pg, THREADS>>>(d_q8, d_qs, d_k8, d_ks, d_o_f, d_do8, d_dos, d_delta,
-                                       d_lse, S, H, scale, (int)causal);
+    run_preprocess();
     fa_bwd_fp8_mma_kernel<<<mg, THREADS, kSmemBytes>>>(
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
         d_dk_acc, d_dv_acc, S, H, scale, (int)causal);
@@ -235,9 +244,7 @@ int main(int argc, char** argv) {
   ms_quant /= iters;
 
   CUDA_CHECK(cudaEventRecord(ev0));
-  for (int i = 0; i < iters; ++i)
-    preprocess_kernel<<<pg, THREADS>>>(d_q8, d_qs, d_k8, d_ks, d_o_f, d_do8, d_dos, d_delta,
-                                       d_lse, S, H, scale, (int)causal);
+  for (int i = 0; i < iters; ++i) run_preprocess();
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
   float ms_pre = 0.f;

@@ -243,18 +243,42 @@
      `smem=80128 B`、main 0.454 ms、dq/dk/dv vs ref 2.426/2.975/3.735e-1（与 `04` 表逐位一致）。
      原始输出 `src/fp8/fa_bwd_fp8_main_p42_verify_s512.out.txt`。
 
+- 2026-09-22（第十一轮）：**O1 完成（preprocess 的 mma 分块 LSE，端到端 7×）**。
+  - 旧 preprocess（每 (s,h) 行一个 block、标量扫 K）在 S=4096 时 70.8ms >> main 10.2ms。
+  - 新增 `lse_mma_kernel`：`mma.m16n8k32` E4M3×E4M3 分块 Q·Kᵀ（每 CTA 64 行 × 64 列、4 warp），
+    fp32 累加器直接 online-softmax，LSE 的行 max/sum 在 warp 内按 lane 组 `shfl_xor` 归约；
+    另把 `D=rowsum(dO∘O)` 拆成独立 `delta_kernel`。两文件版与 mma 单文件同步修改、device 代码逐字一致。
+  - **数值与 P3-5 逐位相同**（S=512 2.426/2.975/3.735e-1；S=1024H32 2.400/4.195/3.536e-1；
+    S=4096 2.635/2.643/3.216e-1），确认只换算法数据流、未改数学口径。
+  - **性能**：preprocess 1.1991→0.0850ms（14.1×）/ 8.8033→0.2162ms（40.7×）/
+    70.7674→**1.1370ms（62.2×）**；total 1.71→0.60 / 10.72→2.21 / 80.86→**11.47ms（7.05×，11.98 TF）**。
+    同 session TE FP8 基线 0.0723/0.1381/0.4537ms ⇒ 端到端 ours/TE 8.4×/16.0×/25.3×
+    （P3-5 时 23.5×/77.7×/178×）。S=4096 端到端瓶颈回落 main（9.92ms，占 87%）。
+  - ncu（lse, S=4096）：DRAM 0.46% / Compute 39.4% / L1TEX 20.6% / L2 5.35% / occ 29.5%
+    （理论 43.8%，被 72 regs 卡）/ Waves 1.11（1 满波+100 尾 block）/ No Eligible 42.1%、
+    long_scoreboard 主导 ⇒ **bound = 延迟/并行度 + 尾波**。S=512 时 grid=128<132 SM、Waves 0.14。
+  - 原始输出 `src/fp8/fa_bwd_fp8_main_o1_{s512,s1024h32,s4096}.out.txt`、
+    `..._mma_onefile_o1_s512.out.txt`、`..._o1_ncu_{lse_s512,lse_s4096,delta_s4096}.out.txt`、
+    `..._o1_tebench.out.txt`。文档 `docs/03-fp8-bwd-impl.md` §9。
+
 ## 下一步（明确到可执行）
 
 > P4-2 完成后，ROADMAP 里的「P 项」已全部收口，后续为**优化 backlog**（按回报排序）。
+> **O1 已完成（第十一轮）**，下一项从 **O2（fp8 main 提 occupancy）** 起做。
 > 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
 
-- [ ] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms，
-      当前是 LSE 的 O(S²) 逐元素点积（每行一个 block、标量 `deq_e4m3`）。做法：把每个
-      (s,h) 行的 K 扫描沿 S 分块 + 多行并行（grid 扩维）、`float4`/`__ldg` 向量化、
-      用 mma 做 Q·Kᵀ 复用；目标 preprocess 降到与 main 同量级。
-- [ ] **O2（fp8 main 提 occupancy）**：当前 128 regs / 80KB smem / 1 CTA/SM、Waves 0.48。
-      降 smem（复用 Kt/dOt 与 dV 的 A/B 缓冲）或降寄存器，目标 ≥2 CTA/SM；先算寄存器账
-      （`65536/线程数`）再调，避免 spill。
+- [x] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms。
+      **已完成（第十一轮）**：新增 `lse_mma_kernel`（`mma.m16n8k32` E4M3×E4M3 分块 Q·Kᵀ +
+      online-softmax + warp 内 `shfl` 归约）与独立 `delta_kernel`（rowsum(dO∘O)）。
+      preprocess：S=512 1.1991→**0.0850ms（14.1×）**、S=1024H32 8.8033→**0.2162ms（40.7×）**、
+      S=4096 70.7674→**1.1370ms（62.2×）**；total 1.71→0.60 / 10.72→2.21 / 80.86→**11.47ms（7.05×）**。
+      数值与 P3-5 逐位相同。ncu（lse, S=4096）：DRAM 0.46% / Compute 39.4% / L1TEX 20.6% /
+      occ 29.5%（理论 43.8%，被 72 regs 卡）/ Waves 1.11（尾波）→ bound = 延迟/并行度 + 尾波。
+      端到端瓶颈回落 main。详见 `docs/03-fp8-bwd-impl.md` §9。
+- [ ] **O2（fp8 main 提 occupancy；现为端到端第一瓶颈）**：当前 128 regs / 80KB smem / 1 CTA/SM、
+      Waves 0.48、No Eligible 91.7%。降 smem（复用 Kt/dOt 与 dV 的 A/B 缓冲）或降寄存器，
+      目标 ≥2 CTA/SM；先算寄存器账（`65536/线程数`）再调，避免 spill。
+      （O1 后 main 占端到端 87%，是下一项优先。）
 - [ ] **O3（fp8 main 加流水）**：K/V（及 Q/dO）用 `cp.async` 双缓冲，把「同步载入→算」改成
       重叠流水；配合 O2 一起做，ncu 验证 `long_scoreboard` 下降。
 - [ ] **O4（确定性与归约）**：dK/dV 的 `atomicAdd` 换 `dK/dV_accum` 分块缓冲 + convert
