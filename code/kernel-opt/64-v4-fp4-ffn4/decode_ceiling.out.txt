@@ -1,0 +1,27 @@
+##### B=64  DEC=8 vs DEC=99 (skip-decode ceiling) #####
+[check e2e Y ] max_rel=8.811e-08 (ref~3.26) OK
+  K1 gemv       2.9145 ms  weights 8.98 GB  3082.6 GB/s (92.0% HBM)
+  K2 gemv       1.5211 ms  weights 4.49 GB  2953.2 GB/s (88.1% HBM)
+  --- DEC=8 above ---
+[check e2e Y ] max_rel=2.076e+01 (ref~271.09) FAIL
+  K1 gemv       2.8364 ms  weights 8.98 GB  3167.5 GB/s (94.5% HBM)
+  K2 gemv       1.4321 ms  weights 4.49 GB  3136.8 GB/s (93.6% HBM)
+  --- DEC=99 above ---
+##### B=128  DEC=8 vs DEC=99 (skip-decode ceiling) #####
+[check e2e Y ] max_rel=8.950e-08 (ref~2.49) OK
+  K1 gemv       3.0953 ms  weights 8.98 GB  2902.5 GB/s (86.6% HBM)
+  K2 gemv       1.6966 ms  weights 4.49 GB  2647.7 GB/s (79.0% HBM)
+  --- DEC=8 above ---
+[check e2e Y ] max_rel=2.205e+01 (ref~513.06) FAIL
+  K1 gemv       2.8829 ms  weights 8.98 GB  3116.4 GB/s (93.0% HBM)
+  K2 gemv       1.4610 ms  weights 4.49 GB  3074.6 GB/s (91.7% HBM)
+  --- DEC=99 above ---
+##### B=256  DEC=8 vs DEC=99 (skip-decode ceiling) #####
+[check e2e Y ] max_rel=1.023e-07 (ref~2.92) OK
+  K1 gemv       4.2299 ms  weights 8.98 GB  2124.0 GB/s (63.4% HBM)
+  K2 gemv       2.1708 ms  weights 4.49 GB  2069.3 GB/s (61.7% HBM)
+  --- DEC=8 above ---
+[check e2e Y ] max_rel=1.402e+02 (ref~633.93) FAIL
+  K1 gemv       3.4429 ms  weights 8.98 GB  2609.5 GB/s (77.8% HBM)
+  K2 gemv       2.1850 ms  weights 4.49 GB  2055.9 GB/s (61.3% HBM)
+  --- DEC=99 above ---

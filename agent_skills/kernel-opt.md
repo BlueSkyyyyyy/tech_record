@@ -458,4 +458,21 @@ scripts/lab.sh status
   其余 lane 在后续的激活 `__syncthreads` 之后才 `wait`，那条 barrier 已保证 init 可见。多加一条实测值 ~3%。
 - **TMA 的 `L2::cache_hint`（`evict_first`）对流式权重是中性**（63 篇）：L2 命中率本就 ~19%、无复用可保；
   流式读 ≠ hint 有收益，先看 ncu `L2 Hit Rate`。
+- **低比特 decode 掉出带宽墙后，先算「指令预算」再决定优化方向**（64 篇）：用
+  `sm__inst_executed_pipe_{alu,fma,lsu}.sum` 数指令，`prmt`/LUT 解码是**每个权重 chunk 一次**
+  （与 token 数 m 无关，记 ALU），`dp4a` 是**每 (chunk, token) 8 条**（记 FMA）。FP4 decode FFN：
+  K1 m=1→4 时 ALU 只 +6%（1.275→1.356e9，常数项）、FMA +74%（0.687→1.193e9），拟合
+  `ALU≈73、FMA≈31+8m` → 解码占 **59%→43%**。判据：**DRAM%>90 抠字节；DRAM%<70 且 ALU/issue 高 抠指令**。
+  大 batch 的 HBM% 会低估效率（每 token 成本反而 2.76× 更好），别盯单一指标。
+- **「短路某段看天花板」必须用 `ref~` 绝对值判对拍，不能用 `max_rel`**（64 篇踩到）：`DEC=99`
+  跳过解码后输出全 0，而参考实现读同一份坏数据 → `max_rel = 0/max(0,1) = 0` **假 OK**。
+  症状是 `ref~0.00`。**模板参数分叉的辅助数组（LUT/描述符）每个实例都要 `init`**：63 的
+  `gemv_fp4_tma` 写死 `__shared__ uint16_t l16[1]` 且从没初始化，于是所有 `DEC≠8` 路径读越界垃圾、
+  输出 0——修前看到的「LUT 快 1.37×」就是幻影。cp.async 版有 LUT、TMA 版忘加，最毒的形态。
+- **短流水（`NITER=K/1024<4`）的 TMA kernel，墙是 DMA 事件等待，不是算力**（64 篇）：
+  `cp.async.bulk` 是单级「issue→wait→算完」；K2 `NITER=3` 时短路解码**无感**（2.17 vs 2.18ms），
+  几何扫 `RWW/NWARP` 也补不上。判据：`NITER<4` + 短路某段无反应 → 给 TMA 加第二级缓冲或放大 `BN`。
+- **共享 H100 上 run-to-run 抖动可达 ~8%**（64 篇）：跨进程/跨文件的数字不能直接比，几何/解码消融
+  必须**同一进程 head-to-head**（`bench_ms` 同 warmup/iters）。64 篇 K2 `(4,8)` 与 `(4,4)` 的 1.4%
+  差在两次 bg run 里一次是 1.68 vs 1.70、一次是 1.68 vs 1.83——只有进程内排序可信。
 
