@@ -341,8 +341,111 @@ docker exec kernel_lab python "$PWD/harness/fa_bwd_bench.py" bench --requested -
 
 ---
 
-## 10. 下一步
+## 10. fp16 张量核反向（O5，main 11.8–14.9×）
 
-见 `../ROADMAP.md`：P1~P4 已完成；P5-1（fp16 GQA/MQA）与 **P5-2（本节，MLA head_dim=512）** 完成；
-其后 **P5-3 bf16/fp8 复用 GQA/MLA 改造**、P5-4 fp8 GQA/MQA 对拍；MLA 的性能优化（更小 smem
-冲 2 CTA/SM、张量核）与其余消 bank conflict / 提 occupancy 一并列入 backlog。
+前面第 1–9 节的 fp16 反向都是**正确性优先的标量 golden**（CUDA-core FFMA），
+用来把数学/对拍/接口先跑通；真正的性能杠杆是**张量核**。本节（ROADMAP 的 **O5**）把 5 个
+GEMM 全部换成 `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32` + `ldmatrix`，
+与 fp8 张量核版（P3-4，`docs/03`）同构，但**没有 rowwise scale**（fp16 无量化）。
+
+- 前置：`src/fp16/fa_bwd_fp16_mma_smoke.cu` 已用最小 GEMM 验证三种操作数布局
+  （A=[M][K]+`ldmatrix.x4`、B=[N][K]+`ldmatrix.x2`、B=[K][N]+`ldmatrix.x2.trans`）与 CPU 参考一致（PASS）。
+- 交付：单文件 `src/fp16/fa_bwd_fp16_mma_onefile.cu` + 两文件
+  `fa_bwd_fp16_mma_kernels.cuh` / `fa_bwd_fp16_mma_main.cu`。本版只做 **head_dim=128**（MHA/GQA）；
+  MLA(HD=512) 的张量核留 backlog（标量 MLA 见 §9）。
+
+### 10.1 改动：5 个 GEMM 的 mma 布局（HD=128, BM=64, BN=32，4 warp 2×2）
+
+| GEMM | 输出 | A 操作数 | B 操作数（布局） |
+|---|---|---|---|
+| ① S=scale·QKᵀ | [BM][BN] | Qs[BM][HD] | Ks[BN][HD]（`[N][K]`，`ldmatrix.x2`）|
+| ② dP=dO·Vᵀ | [BM][BN] | dOs[BM][HD] | Vs[BN][HD]（`[N][K]`）|
+| ③ dV=Pᵀ·dO | [BN][HD] | PsT[BN][BM]（P 转置） | dOs[BM][HD]（`[K][N]`，`ldmatrix.x2.trans`）|
+| ④ dK=scale·dSᵀ·Q | [BN][HD] | dSsT[BN][BM]（dS 转置） | Qs[BM][HD]（`[K][N]`）|
+| ⑤ dQ=scale·dS·K | [BM][HD] | dSs[BM][BN] | Ks[BN][HD]（`[K][N]`）|
+
+要点与逐位等价性：
+
+- **P/dS 就地转 half**：① 的 epilogue 把 `P=exp(S−LSE)` 写成 `PsT[c][r]`（转置，供 ③ 的 A），
+  同时用寄存器 `pval[2][2][4]` 把 fp32 P 带到 ②；② 用同一 (r,c) 映射算 `dS=P∘(dP−D)`，
+  写 `dSs[r][c]`（供 ⑤）与 `dSsT[c][r]`（供 ④）。这与 FA2「P/dS 转 half 进张量核、D/LSE 用 fp32」一致。
+- **dQ 寄存器累加**：本版没有 split-K（grid=`S/BM×H×B`），每个 Q 块由**唯一 CTA** 独占，
+  故 ⑤ 的累加器 `dqacc[2][8][4]` 沿 nt 在寄存器里累加、循环后**直接写** `dq_acc`（无需跨 CTA atomic），
+  等价于 fp8 的 O7。
+- **dK/dV 跨 CTA 归约**：③④ 仍用 `atomicAdd(float2*)`（O4c 口径，相邻两列打包）。
+- **smem**：`Qs/dOs/Ks/Vs`（half）+ `PsT/dSs/dSsT`（half），行距分别 `HD+8`/`BM+8`/`BN+8`
+  （+8 个 half = +16B 消 `ldmatrix` bank conflict）；**共 66.56KB**，168 寄存器、0 spill，
+  **3 CTA/SM**（theoretical occ 18.75%）。不存 `[BM][HD]` 的 fp32 dQ 累加器，省 32KB。
+
+### 10.2 数值对拍（ours-vs-ref / FA / TE，fp16 causal）
+
+MHA 与 GQA/MQA（S512/S4096、S1024 各 KV 头数）**全部与 ref/FA/TE 同量级（~1e-3）**，无系统误差：
+
+| case (B1 causal) | dq max_abs | dk max_abs | dv max_abs | FA dk | TE dk |
+|---|---|---|---|---|---|
+| (1,512,16,128) MHA | 1.671e-3 | 1.771e-3 | 1.899e-3 | 1.684e-3 | 2.287e-3 |
+| (1,4096,16,128) MHA | 1.883e-3 | 1.734e-3 | 1.966e-3 | 1.734e-3 | 1.858e-3 |
+| (1,1024,32,128) kv4 | 2.134e-3 | 3.305e-3 | 3.850e-3 | 3.321e-3 | 3.175e-3 |
+| (1,1024,40,128) kv8 | 2.008e-3 | 2.931e-3 | 3.891e-3 | 2.996e-3 | 2.893e-3 |
+| (1,1024,64,128) kv4 | 2.348e-3 | 5.704e-3 | 3.893e-3 | 4.778e-3 | 3.818e-3 |
+| (1,1024,64,128) kv1 MQA | 2.292e-3 | 7.934e-3 | 7.517e-3 | 7.586e-3 | 6.452e-3 |
+
+单文件与两文件**逐指标一致**（168 regs、0 spill，数值逐位相同）。原始输出
+`src/fp16/fa_bwd_fp16_mma_onefile_o5_*.out.txt`、`src/fp16/fa_bwd_fp16_mma_main_o5_sweep.out.txt`。
+
+### 10.3 性能（CUDA-event；FLOPs 口径 `4·B·S·H·S·(D+Dv)`，峰值 989 TFLOPS）
+
+同 session A/B（标量 golden vs 本节张量核，只比 main）：
+
+| shape | scalar main | mma main | 加速 | mma main TFLOPS | 占峰值 |
+|---|---|---|---|---|---|
+| (1,512,16,128) | 2.279 ms | **0.192 ms** | **11.8×** | 22.4 | 2.3% |
+| (1,4096,16,128) | 67.55 ms | **4.555 ms** | **14.9×** | 60.4 | 6.1% |
+
+端到端（preprocess + main + convert）：
+
+| shape | ours total | preprocess | main | total TFLOPS (占峰值) |
+|---|---|---|---|---|
+| (1,512,16,128) | 1.440 ms | 1.209 ms | 0.195 ms | 2.98 (0.30%) |
+| (1,1024,32,128) kv4 | 9.459 ms | 8.802 ms | 0.634 ms | 3.63 (0.37%) |
+| (1,1024,40,128) kv8 | 11.85 ms | 10.97 ms | 0.868 ms | 3.63 (0.37%) |
+| (1,1024,64,128) kv4 | 18.74 ms | 17.62 ms | 1.113 ms | 3.67 (0.37%) |
+| (1,1024,64,128) kv1 | 18.57 ms | 17.46 ms | 1.015 ms | 3.70 (0.37%) |
+| (1,4096,16,128) | 73.34 ms | 68.70 ms | 4.555 ms | 3.75 (0.38%) |
+
+同 session **纯反向** FA3/TE/FA2 基线（`harness/fa_vs_te_bwd_only.py fp16`，本机 FA3 3.0.0 SM90）：
+GQA/MQA S1024 为 FA3 356–438 TF、TE 306–354 TF、FA2 218–259 TF；MHA S4096 为 FA3 848 / TE 624 / FA2 378 TF。
+即 **ours main 约 FA3 的 7–16%、端到端约 0.8–1.7%**。
+
+> **关键结论**：张量核把 **main 提高 12–15×**，但**端到端只提高 ~1.8×**——因为 fp16 的
+> **preprocess（LSE+D）仍是标量 O(S²)**，S=4096 时 68.7ms > main 4.56ms，占比 94%。
+> 下一步优先级：**O8（preprocess 的 mma 分块 LSE，对齐 fp8 的 O1）** 才是端到端最大杠杆。
+
+### 10.4 ncu 剖析（main kernel，`--set full`）
+
+S=4096（1,4096,16,128），3 CTA/SM：
+
+```
+Duration                 ms    4.55       DRAM Throughput        %   1.41
+L1/TEX Cache Throughput  %   33.32       L2 Cache Throughput    %  24.86
+Compute (SM) Throughput  %   17.44       Issued Ipc Active  inst/cyc 0.91
+Theoretical Occupancy    %   18.75       Achieved Occupancy     %  16.58
+Waves Per SM                  2.59       Registers Per Thread         168
+Dynamic Shared Mem/block Kbyte 66.56     Block Limit Shared Mem block   3
+```
+
+stall：**`long_scoreboard`（等 L1TEX/全局读）占平均 11.64 cycle 的 63.4%**
+（`No Eligible` 77.2%）。S=512（grid=128<132 SM、`Waves 0.32`、`Achieved occ 6.25%`）是纯 grid-bound。
+
+**bound = 全局访存延迟**（K/V/dO/Q 每 tile 同步 global→smem，无 `cp.async`/预取覆盖），
+DRAM/算力/L2 都很闲。下一步 **O3/O6（寄存器预取或 `cp.async` 双缓冲）** 可把 K/V 载入藏进 5 个 GEMM。
+原始输出 `src/fp16/fa_bwd_fp16_mma_onefile_o5_ncu_main_{s512,s4096}.out.txt`。
+
+---
+
+## 11. 下一步
+
+见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（本节，fp16 main 张量核）** 完成。
+后续按回报排序：**O8**（preprocess 的 mma 分块 LSE，端到端最大杠杆）→ **O3/O6**（main 的
+K/V `cp.async`/寄存器预取，消 63% 的 `long_scoreboard`）→ **O5b**（bf16 复用本节 mma 后端）
+→ MLA 张量核 / wgmma+TMA（O9）。

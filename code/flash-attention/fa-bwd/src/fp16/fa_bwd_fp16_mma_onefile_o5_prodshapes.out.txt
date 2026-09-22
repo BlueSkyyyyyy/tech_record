@@ -1,0 +1,43 @@
+===== b1_s1024_h32_d128_causal_fp16
+===== b1_s1024_h32_d128_kv4_causal_fp16
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp16
+B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388
+[timing] total(3 kernels) 9.4682 ms  1.81 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 8.8009 ms | main 0.6421 ms | convert 0.0252 ms
+  dq   vs ref: max_abs=2.134e-03  max_rel=5.101e-01
+  dk   vs ref: max_abs=3.305e-03  max_rel=1.032e+00
+  dv   vs ref: max_abs=3.850e-03  max_rel=2.703e-02
+  fa_dq     vs ref: max_abs=1.727e-03  max_rel=3.091e-01
+  fa_dk     vs ref: max_abs=3.321e-03  max_rel=8.086e-01
+  fa_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
+  te_dq     vs ref: max_abs=2.075e-03  max_rel=2.991e-01
+  te_dk     vs ref: max_abs=3.175e-03  max_rel=4.837e-01
+  te_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
+===== b1_s1024_h64_d128_kv1_causal_fp16
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp16
+B=1 S=1024 H=64 Hkv=1 D=128 causal=1 scale=0.088388
+[timing] total(3 kernels) 18.5680 ms  1.85 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 17.4619 ms | main 1.0109 ms | convert 0.0953 ms
+  dq   vs ref: max_abs=2.292e-03  max_rel=4.022e-01
+  dk   vs ref: max_abs=7.934e-03  max_rel=3.835e-01
+  dv   vs ref: max_abs=7.517e-03  max_rel=4.165e-02
+  fa_dq     vs ref: max_abs=1.971e-03  max_rel=3.588e-01
+  fa_dk     vs ref: max_abs=7.586e-03  max_rel=5.690e-01
+  fa_dv     vs ref: max_abs=1.057e-02  max_rel=9.507e-01
+  te_dq     vs ref: max_abs=2.141e-03  max_rel=3.596e-01
+  te_dk     vs ref: max_abs=6.452e-03  max_rel=4.311e-01
+  te_dv     vs ref: max_abs=1.057e-02  max_rel=8.528e-01
+===== b1_s1024_h40_d128_kv8_causal_fp16
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h40_d128_kv8_causal_fp16
+B=1 S=1024 H=40 Hkv=8 D=128 causal=1 scale=0.088388
+[timing] total(3 kernels) 11.8359 ms  1.81 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 10.9652 ms | main 0.8735 ms | convert -0.0028 ms
+  dq   vs ref: max_abs=2.008e-03  max_rel=5.284e-01
+  dk   vs ref: max_abs=2.931e-03  max_rel=5.084e-01
+  dv   vs ref: max_abs=3.891e-03  max_rel=3.104e-02
+  fa_dq     vs ref: max_abs=1.757e-03  max_rel=3.464e-01
+  fa_dk     vs ref: max_abs=2.996e-03  max_rel=5.725e-01
+  fa_dv     vs ref: max_abs=4.326e-03  max_rel=4.869e-01
+  te_dq     vs ref: max_abs=1.580e-03  max_rel=3.944e-01
+  te_dk     vs ref: max_abs=2.893e-03  max_rel=3.941e-01
+  te_dv     vs ref: max_abs=4.326e-03  max_rel=4.573e-01
