@@ -99,7 +99,10 @@
 
 - [x] **P5-0** harness 支持 GQA/MQA（`Hkv`）与 MLA（`Dv`），新增 7 个生产形状并 dump（fp16/bf16/fp8）到
   `/home/xieminglin/proj/output/fa-bwd/`；补数值+性能分析到 `docs/04` §7（FA/TE 基线）
-- [ ] **P5-1** ours 支持 **GQA/MQA**（Q 头共享 KV 头）：fp16 先行，再 bf16/fp8；对拍 dump 的 4 个 GQA/MQA 形状
+- [x] **P5-1** ours 支持 **GQA/MQA**（Q 头共享 KV 头）：fp16 先行，再 bf16/fp8；对拍 dump 的 4 个 GQA/MQA 形状
+      → **已完成（第十六轮）**：fp16 单/两文件均支持 `Hkv`（Q 头 `h`→KV 头 `h/(H/Hkv)`），
+      4 个形状 dq/dk/dv vs ref 同 fp16 噪声量级（dk/dv 与 FA/TE 同量级或更小）；MHA 回归逐位不变。
+      `docs/01-fp16-bwd-impl.md` §8。
 - [ ] **P5-2** ours 支持 **head_dim=512（MLA 主注意力）**：解决 smem/寄存器容量（K/V 分块变小、Q 常驻等）
 - [ ] **P5-3** MLA 对拍（只有 fp32 ref 可对）与性能数字；对标 FlashMLA 思路
 - [ ] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能
@@ -338,17 +341,38 @@
     只有 fp32 ref；需 ours 支持后才能给 MLA 性能数字。
   - 分析写入 `docs/04-numerics-and-perf-summary.md` §7；原始输出 `src/fa_bwd_bench_requested.out.txt`。
 
+- 2026-09-22（第十六轮）：**P5-1 完成（fp16 反向支持 GQA/MQA，单/两文件）**。
+  - 映射口径与 `ref_attn` 的 `repeat_interleave` 对齐：第 `h` 个 Q 头用 KV 头 `h/(H/Hkv)`。
+    单/两文件同步改：`preprocess_kernel`/`fa_bwd_fp16_kernel` 增加 `int Hkv` 入参、K/V 行索引用
+    `((b*S+j)*Hkv+hkv)*D`；`dk/dv`（及累加缓冲）按 `B*S*Hkv*D` 分配，`convert_kernel` 收 `n_q/n_kv`；
+    host 从 `k.npy` shape[2] 读 `Hkv`（`Hkv==H` 时逐式退化，MHA 行为不变）。
+  - **对拍（ours-vs-ref，fp16 causal）**：h32kv4 2.134/3.078/3.963e-3；h40kv8 1.580/2.380/3.999e-3；
+    h64kv4 1.974/5.704/4.938e-3；h64kv1(MQA) 1.780/7.586/7.517e-3——均 fp16 噪声量级，
+    **dk/dv 与 FA/TE 同量级或更小**，无系统误差；MHA 回归（S512 1.671/1.680/1.899e-3，
+    S4096 1.499/1.572/2.225e-3）与 P1 记录逐位一致。
+  - ncu（main, h32kv4 S1024）：DRAM 0.07% / **L1TEX 74.96%** / L2 0.97% / Compute 15.08% /
+    occ 11.5%（理论 12.5%，1 CTA/SM, Block Limit Shared Mem 2）/ No Eligible 78.16% / Waves 1.94 /
+    54 regs ⇒ bound 与 MHA 标量版一致：**smem bank conflict + 低 occupancy**。
+  - 性能（CUPTI）：ours total 19.32/23.38/34.85/34.91 ms（0.89–0.99 TF，峰值 989 的 ~0.1%）；
+    同 shape FA 155–188 TF、TE 240–279 TF（`fa_bwd_bench.py bench --requested --dtype fp16`）。
+  - 原始输出 `src/fp16/fa_bwd_fp16_main_p51_gqa.out.txt`、`..._onefile_p51_gqa.out.txt`、
+    `..._p51_ncu_gqa_kv4.out.txt`、`src/fa_bwd_bench_requested_fp16_p51.out.txt`；
+    文档 `docs/01-fp16-bwd-impl.md` §8。
+
 ## 下一步（明确到可执行）
 
 > **用户新增需求（优先）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
 > 目前 FA/TE 做不了 MLA 反向，ML A 的性能数字只能由 ours 提供。
 
-- [ ] **P5-1（优先）GQA/MQA**：改 fp16 反向（`src/fp16/`）支持 `Hkv`（由 `k.npy` 的 head 维读出），
+- [x] **P5-1（优先）GQA/MQA**：改 fp16 反向（`src/fp16/`）支持 `Hkv`（由 `k.npy` 的 head 维读出），
       K/V 索引 `h/(H/Hkv)` 映射到 KV 头；对拍 4 个 GQA/MQA dump case 的 `ref_dq/dk/dv.npy`，
       再用 `harness/fa_bwd_bench.py bench --requested` 对标 FA/TE（目标 ≥ FA）。
+      **已完成（第十六轮）**，详见 `docs/01-fp16-bwd-impl.md` §8。
 - [ ] **P5-2（优先）MLA head_dim=512**：fp16 反向支持 D=512（smem/寄存器容量、
       Q 常驻 / 更小 K/V 分块 / 可能需 split-K 或 KV 分片），对拍 3 个 MLA case 的 ref；给出性能数字。
 - [ ] **P5-3**：bf16/fp8 复用同一改造；fp8 GQA/MQA 对拍 vs TE FP8。
+      （P5-1 的 fp16 改造已完成：`Hkv` 入参 + `hkv=h/(H/Hkv)` 映射 + `dk/dv` 按 `B*S*Hkv*D` 分配、
+      `convert` 收 `n_q/n_kv`；bf16 可直接照搬，fp8 在已优化的 mma 路径上加同一映射。）
 
 > 以下为既有 fp8 优化 backlog（可与 P5 并行/穿插）。
 

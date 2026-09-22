@@ -179,7 +179,85 @@ docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python "$PWD/harness/fa_bwd_ben
 
 ---
 
-## 8. 下一步
+## 8. GQA / MQA 支持（P5-1）
 
-见 `../ROADMAP.md`：P1-4 已完成（本节），随后 P2 bf16（复用 fp16 骨架做 dtype 参数化）、P3 fp8（重点）。
+生产形状里 Q 头数 `H` 常远大于 KV 头数 `Hkv`（GQA，如 Qwen3），甚至 `Hkv=1`（MQA，如 DSA
+indexer）。ff16 反向加一层 Q 头 → KV 头映射即可，**算法/线程映射完全不变**：
+
+- **映射口径**：与 `ref_attn`（`harness/fa_bwd_bench.py`）的 `repeat_interleave` 对齐——
+  第 `h` 个 Q 头用 KV 头 `hkv = h / (H / Hkv)`（要求 `H % Hkv == 0`）。
+- **改动点（两文件 + 单文件同步，device 代码逐字一致）**：
+  1. `preprocess_kernel` / `fa_bwd_fp16_kernel` 增加入参 `int Hkv`，K/V 的行索引用
+     `((b*S+j)*Hkv + hkv)*D`（Q/O/dO/LSE/delta 仍按 `H`）；
+  2. `dk_acc/dv_acc` 及 `dk/dv` 输出按 `B*S*Hkv*D` 分配，`convert_kernel` 改为接收
+     `n_q`（dq）与 `n_kv`（dk/dv）两个长度；
+  3. host 从 `k.npy` 的 shape[2] 读出 `Hkv`（默认 MHA 时 `Hkv==H`，与旧行为逐位一致）。
+- **`Hkv==H` 时所有索引退化为原式**，MHA 回归数字与 P1 记录完全相同（S=512 1.671/1.680/1.899e-3；
+  S=4096 1.499/1.572/2.225e-3），确认无副作用。
+- 反向里 dK/dV 本就跨 Q 块 `atomicAdd`，GQA 下多个 Q 头同时累加到同一 KV 头行，语义天然成立
+  （非确定性，与 MHA 路径同一口径）。
+
+### 8.1 数值对拍（四个 dump 的 GQA/MQA case，ours-vs-ref，fp16 causal）
+
+| case (B1 S1024 D128 causal) | dq max_abs | dk max_abs | dv max_abs | FA dk/dv | TE dk/dv |
+|---|---|---|---|---|---|
+| h32 kv4 (Qwen3-30B) | 2.134e-3 | 3.078e-3 | 3.963e-3 | 3.32e-3 / 5.11e-3 | 3.18e-3 / 5.11e-3 |
+| h40 kv8 (Qwen3-8B) | 1.580e-3 | 2.380e-3 | 3.999e-3 | 3.00e-3 / 4.33e-3 | 2.89e-3 / 4.33e-3 |
+| h64 kv4 (Qwen3-235B) | 1.974e-3 | 5.704e-3 | 4.938e-3 | 4.78e-3 / 5.65e-3 | 3.82e-3 / 5.65e-3 |
+| h64 kv1 (DSA MQA) | 1.780e-3 | 7.586e-3 | 7.517e-3 | 7.59e-3 / 1.06e-2 | 6.45e-3 / 1.06e-2 |
+
+**结论**：全部在 fp16 噪声量级，且 **ours 的 dk/dv 与 FA/TE 同量级或更小**，无系统误差。
+原始输出：`src/fp16/fa_bwd_fp16_main_p51_gqa.out.txt`（两文件）、
+`src/fp16/fa_bwd_fp16_onefile_p51_gqa.out.txt`（单文件，与两文件逐位一致）。
+
+### 8.2 ncu（main kernel，h32 kv4 S1024，`--set full`）
+
+```
+Duration                 ms   10.73       L1/TEX Cache Throughput  %  74.96  <- 最高
+DRAM Throughput          %    0.07        L2 Cache Throughput      %   0.97
+Compute (SM) Throughput  %   15.08       No Eligible              %  78.16
+Theoretical Occupancy    %   12.50        Achieved Occupancy       %  11.50
+Waves Per SM                  1.94        Registers Per Thread            54
+Block Limit Shared Mem   block  2
+```
+
+bound 与 MHA 版一致：**smem 访问（fp16 标量读的 bank conflict，L1/TEX 75%）+ 被 96KB 动态 smem
+卡住的 1 CTA/SM 低 occupancy**，非 DRAM 也非算力。原始输出
+`src/fp16/fa_bwd_fp16_main_p51_ncu_gqa_kv4.out.txt`。
+
+### 8.3 性能对标（CUPTI，FA/TE 由 `fa_bwd_bench.py bench --requested --dtype fp16` 测得）
+
+FLOPs 口径与 harness 一致：`4·B·S·H·S·(D+Dv)`；H100 FP16 峰值 ≈ 989 TFLOPS。
+
+| shape | ours total | FA 2.7.4 | TE 2.14 | ours 峰值占比 |
+|---|---|---|---|---|
+| h32 kv4 S1024 | 19.32 ms / 0.89 TF | 0.2216 ms / 155.03 TF | 0.1430 ms / 240.25 TF | 0.09% |
+| h40 kv8 S1024 | 23.38 ms / 0.92 TF | 0.2608 ms / 164.66 TF | 0.1689 ms / 254.28 TF | 0.09% |
+| h64 kv4 S1024 | 34.85 ms / 0.99 TF | 0.3664 ms / 187.54 TF | 0.2460 ms / 279.30 TF | 0.10% |
+| h64 kv1 S1024 | 34.91 ms / 0.98 TF | 0.3663 ms / 187.60 TF | 0.2664 ms / 257.96 TF | 0.10% |
+
+**结论**：GQA/MQA 是纯索引改造，性能与 MHA 标量版同量级（~1 TF，峰值 0.1%）；相比 FA 差
+~170×、TE 差 ~260×——瓶颈是「标量 CUDA-core + 低 occupancy」，不是 GQA 本身。后续 bf16/fp8 复用
+同一改造（P5-3），fp8 走已优化的张量核路径。原始输出
+`src/fa_bwd_bench_requested_fp16_p51.out.txt`。
+
+复现：
+
+```bash
+cd code/flash-attention/fa-bwd
+scripts/run.sh src/fp16/fa_bwd_fp16_main.cu \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp16 --iters=20
+scripts/run.sh src/fp16/fa_bwd_fp16_onefile.cu \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp16 --iters=20
+scripts/ncu.sh src/fp16/fa_bwd_fp16_main.cu --set full --kernel-name regex:fa_bwd_fp16_kernel \
+    --launch-count 1 -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp16 --iters=1
+docker exec kernel_lab python "$PWD/harness/fa_bwd_bench.py" bench --requested --dtype fp16 --repeat 30
+```
+
+---
+
+## 9. 下一步
+
+见 `../ROADMAP.md`：P1~P4 已完成；P5-1（本节，fp16 GQA/MQA）完成，其后
+**P5-2 MLA head_dim=512**、**P5-3 bf16/fp8 复用 GQA 改造**、P5-4 fp8 GQA/MQA 对拍。
 性能优化（消 bank conflict / 提 occupancy / 张量核）列入 backlog。
