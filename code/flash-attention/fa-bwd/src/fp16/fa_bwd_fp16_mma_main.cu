@@ -208,10 +208,19 @@ int main(int argc, char** argv) {
 
   dim3 pg(S, H, B);
   dim3 mg((S + 63) / 64, H, B);
-  dim3 lg((S + LBM - 1) / LBM, H, B);
+  const int lse_nblk = (S + LBM - 1) / LBM;
+  dim3 lg(lse_nblk, H, B);
+  dim3 lg_bal((lse_nblk + 1) / 2, H, B);   // O8b：镜像配对，grid.x 减半
   constexpr int kLseSmem = (LBM + LBN) * (128 + 8) * (int)sizeof(__half);
+  // O8b：PIPE=0 单缓冲（与 O8 同尺寸），PIPE=1 双缓冲。
+  constexpr int kLseSmemBal0 = (LBM + LBN) * (128 + 8) * (int)sizeof(__half);
+  constexpr int kLseSmemBal1 = (LBM + 2 * LBN) * (128 + 8) * (int)sizeof(__half);
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<128>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 0>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal0));
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 1>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
   const int cvt_threads = 256;
   const int cvt_blocks =
       (int)std::min<size_t>((std::max(n, nkv) + cvt_threads - 1) / cvt_threads, 65535);
@@ -235,8 +244,12 @@ int main(int argc, char** argv) {
                                      d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
   };
   auto run_pre = [&]() {
-    lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
-                                                   (int)causal);
+    if (causal)
+      lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
+                                                                    Hkv, scale);
+    else
+      lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
+                                                     (int)causal);
     delta_kernel<128><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
   };
 
@@ -287,6 +300,36 @@ int main(int argc, char** argv) {
   ms_main /= iters;
   printf("[timing] preprocess %.4f ms | main %.4f ms | convert %.4f ms\n", ms_pre, ms_main,
          ms - ms_pre - ms_main);
+
+  // ---- O8b A/B（仅 causal）：LSE 原版(O8) vs 镜像配对(单缓冲) vs 镜像配对+cp.async双缓冲 ----
+  if (causal) {
+    auto time_lse = [&](int mode, float* out_ms) {
+      auto launch = [&]() {
+        if (mode == 2)
+          lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S,
+                                                                        H, Hkv, scale);
+        else if (mode == 1)
+          lse_mma_kernel_bal<128, 0><<<lg_bal, THREADS, kLseSmemBal0>>>(d_q, d_k, d_lse, S,
+                                                                        H, Hkv, scale);
+        else
+          lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale, 1);
+      };
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    float ms_o8 = 0.f, ms_bal = 0.f, ms_balp = 0.f;
+    time_lse(0, &ms_o8);
+    time_lse(1, &ms_bal);
+    time_lse(2, &ms_balp);
+    printf("[O8b A/B] lse O8 %.4f ms | bal(单缓冲) %.4f ms (%.3fx) | bal+cpasync(双缓冲) %.4f ms "
+           "(%.3fx)\n", ms_o8, ms_bal, ms_o8 / ms_bal, ms_balp, ms_o8 / ms_balp);
+  }
 
   // ---- O6 A/B：同 session 对比原版（PIPE=0）、K/V 双缓冲（PIPE=1）、只 K 双缓冲（PIPE=2）----
   auto launch_mode = [&](int m) {

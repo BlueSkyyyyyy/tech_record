@@ -135,6 +135,16 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 数值与 O5/O8/O6 **逐位相同**。ncu（main,S4096）L1/TEX 71.9% / L2 63.1% / Compute 29.8% /
 > 168 regs / 3 CTA/SM ⇒ **墙 = L1/L2 吞吐 + `wait`**。详见 `01-fp16-bwd-impl.md` §12b。
 
+> **O8b（LSE 预处理负载均衡 + `cp.async` 双缓冲）已完成（fp16）**：O6b 后 preprocess 占端到端
+> **34%**。① 因果下第 `mblk` 个 CTA 做 `mblk+1` 个 K tile，重块排最后（ncu 尾波 50%）⇒
+> **镜像配对**：每 CTA 处理 `m` 与 `nblk-1-m`，工作量恒为 `nblk+1`（完美均衡）。
+> ② K 改 `cp.async.cg` 16B 双缓冲，消掉每 tile 的同步读延迟。**lse S4096 0.985→0.348ms（2.81×）**、
+> S512 1.38×、GQA kv4 2.09×；消融：镜像配对贡献 2.20×，cp.async 再叠加 1.28×。
+> 端到端 **total S4096 2.952→2.336ms（58.8 TF，峰值 5.9%）**、GQA kv4 0.572→0.518ms；
+> 同 session FA3 S4096 0.3241ms/848 ⇒ ours total 为 FA3 的 **6.9%**（O6b 5.5%）；数值逐位相同。
+> ncu（lse,S4096）：Duration 1.03ms→354µs、`long_scoreboard` 2.19→0.34、Waves 1.29→0.97（尾波消除），
+> 新墙 = Compute 60% + smem 依赖。详见 `01-fp16-bwd-impl.md` §13。
+
 ### 2.2 bf16（峰值 989 TFLOPS）
 
 | shape | ours total | ours main | FA2.7.4 | TE2.14 |
@@ -285,6 +295,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | bf16 | **mma main（O5b, S=4096）** | 1.41% | 33.24% | 17.33% | 16.40% | 2.59 | long_scoreboard 63% | 同上（与 fp16 逐项一致） |
 | fp16 | **lse_mma（O8, S=4096）** | 1.06% | 23.42% | 39.53% | 28.49%（80 regs） | 1.29 | long_scoreboard 2.17、wait 1.34、No Eligible 42.9% | **全局访存延迟 + 低 occupancy/尾波** |
 | bf16 | **lse_mma（O8, S=4096）** | 1.13% | 23.37% | 44.70% | 28.41% | 1.29 | long_scoreboard（同 fp16） | 同 fp16 |
+| fp16 | **lse_mma_bal<128,1>（O8b, S=4096）** | 3.07% | 32.36% | **60.43%** | 22.89%（52.2KB, 4 CTA/SM, 64 regs） | **0.97** | long 0.34、wait 1.57、short 1.33 | **Compute 60% + smem 依赖**（镜像配对消尾波、cp.async 消 long_scoreboard） |
 | fp16 | **delta（O8, S=4096）** | 24.80% | 73.50% | 71.91% | 71.90%（17 regs） | 31.03 | — | 访存/算力均衡的轻量归约（<1% 端到端） |
 | fp16 | **mma main（O6, S=4096, cp.async 双缓冲）** | 3.31% | 65.19% | 27.07% | 11.83%（**83.97KB, 2 CTA/SM**, 182 regs） | 3.88 | **long_scoreboard 7.35→1.12**；wait 1.95、short_scoreboard 0.79、barrier 0.10 | **fixed-latency(`wait`) + short_scoreboard(smem→ldmatrix) + L1/TEX**（全局访存延迟已被 cp.async 消掉） |
 | bf16 | **mma main（O6, S=4096, cp.async 双缓冲）** | 3.43% | 64.96% | 25.49% | 11.79%（83.97KB, 2 CTA/SM） | 3.88 | long_scoreboard 同上降到 ~1、wait 主导 | 同 fp16（与 fp16 逐项一致） |
@@ -314,6 +325,14 @@ O2 降 smem 后 fp8 从 2→3 CTA/SM（theoretical 12.5%→18.75%），main 1.16
 下一步优先级：**① fp16/bf16 main 的 `cp.async` 双缓冲流水（O6，消 63% long_scoreboard，
 现已是端到端第一瓶颈）；② fp16/bf16 去 atomic（O7，移植 fp8）；③ dK/dV 的跨 CTA 归约
 （分块 `*_accum` + convert）；④ MLA 的 KV 分片/降 smem + 张量核；⑤ wgmma/TMA（O9 对标 FA3）。**
+
+> **O6（已做）与 O6b（已做）**把 fp16/bf16 main 从 4.5ms 打到 1.86ms（端到端 S4096 3.0ms）；
+> **O8b（fp16 已做）**再把 preprocess 从 1.0ms 打到 0.39ms（镜像配对消尾波 + K 的 cp.async 双缓冲），
+> **端到端 S4096 2.95→2.34ms（58.8 TF，FA3 的 6.9%）**，lse 的 `long_scoreboard` 2.19→0.34、
+> Waves 1.29→0.97，新墙变为 **Compute 60% + smem 依赖**。O6b 后的墙（L1/TEX 72% + L2 63%）
+> 仍是 main 的下一刀：**O7（去 dK/dV atomic）/ O9（wgmma+TMA）**。
+> 注：fp16/bf16 的 dK/dV 原子流量与 dQ 对称（无论 Q-resident 还是 KV-resident，归约贡献总数
+> 都是 `S²/2`），单靠换归约维收益有限，真正的杠杆是**更大 `BM` 或寄存器累加**——O7 需谨慎设计。
 
 > O4c（`atomicAdd`→`float2` 向量化 red）+ O4b（转置副本 → `ldmatrix.trans` + K 配对）+
 > O7（dQ 寄存器累加 + 单次 flush）均已完成。
