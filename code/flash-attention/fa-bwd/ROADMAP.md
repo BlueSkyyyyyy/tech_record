@@ -485,8 +485,29 @@
      Compute 21.70%、achieved occ 18.27%（3 CTA/SM）、**Waves 10.34**、No Eligible 76.63%、
      stall long 4.46 + short 3.96 ⇒ **bound = L2 带宽 + 延迟**（split-K 复读 Q/dO + 全局 atomic）。
      下一步 **O4c**（atomic→分块 accum）。
-   - 原始输出 `src/fp8/fa_bwd_fp8_main_o2b_*`、`..._o4d_ncu_mem_*`、`..._o2b_o4d_ncu_full_s4096*`、
-     `..._o2b_o4d_tebench.out.txt`；文档 `docs/03` §15、`docs/04` §2.3/§3。
+    - 原始输出 `src/fp8/fa_bwd_fp8_main_o2b_*`、`..._o4d_ncu_mem_*`、`..._o2b_o4d_ncu_full_s4096*`、
+      `..._o2b_o4d_tebench.out.txt`；文档 `docs/03` §15、`docs/04` §2.3/§3。
+
+- 2026-09-23（第二十三轮）：**O4c 完成（向量化归约，fp8 main 1.19–1.45×）**。
+   - 用 `lts__t_sectors_op_*` 把 O2b+O4d 后的 **L2 81.5%** 拆开：**全局 `red`（dQ/dK/dV 的
+     `atomicAdd`）占 L2 扇区 408.9 M / 444 M = 92%**，DRAM 仅 1.4%；L1 每 red 请求 8 扇区
+     （mma.m16n8 累加器 uncoalesced）。即所谓「L2 带宽」实为**原子归约吞吐**，非数据带宽。
+   - 改动（单/两文件逐字一致）：把累加器里**相邻两列（q=0/1 与 q=2/3，同行同 scale）**
+     打包成一次 `atomicAdd(float2*)`（`red.global.add.v2.f32`），新增 helper `red_add2`；
+     三处 epilogue（GEMM3 dV / GEMM4 dK / GEMM5 dQ）同步改，smem/regs/几何不变。
+   - **数值与 O2b+O4d 逐位相同**：S512 2.426/2.975/3.735e-1；S1024H32 2.400/4.195/3.536e-1；
+     S4096 2.635/2.643/3.216e-1；MLA S1024H2 2.232/3.337/3.602e-1；GQA h32kv4 2.517/5.408/7.072e-1。
+   - **性能**（event）：main base→O4c = 0.1439→**0.1090**（1.32×）/ 0.8084→**0.6772**（1.19×）/
+     4.9552→**3.5330**（1.39×）/ MLA 0.5716→**0.3933**（1.45×）；total 0.2916→0.2556 /
+     1.2000→1.0590 / 6.5833→**5.1601**ms。同 session TE 0.1014/0.2059/0.5894ms ⇒ main ours/TE
+     **93%/30%/17%**（S512 main 已几乎追平 TE 整条反向），端到端 2.52×/5.14×/8.75×。
+   - **ncu（main, S4096）**：red requests/sectors 34.1M/272.6M → **17.0M/136.3M（0.50×）**、
+     L2 red 408.9→**204.5M**、**L2 81.53%→57.85%**、Duration 5.00→**3.60ms**、
+     long_scoreboard 4.46→1.44；**新墙 = L1/TEX 81.3%（`ldmatrix`/smem + 残余 red）+
+     short_scoreboard 3.50**；occ/regs/smem/bank-conflict 不变（168 regs/75KB/3 CTA/SM）。
+   - 原始输出 `src/fp8/fa_bwd_fp8_main_o4c_{s512_h16_d128,s1024_h32_d128,s4096_h16_d128,
+     s1024_h2_d512,s1024_h32_d128_kv4}.out.txt`、`src/fp8/fa_bwd_fp8_mma_onefile_o4c_s4096.out.txt`、
+     `src/fp8/fa_bwd_fp8_main_o4c_ncu_s4096.out.txt`、`..._o4c_tebench.out.txt`；文档 `docs/03` §16。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -560,9 +581,9 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 以下为既有 fp8 优化 backlog（P5 已全部收口，现在可与 MLA 优化合并推进）。
 
 > P5-3 已完成，ROADMAP 里的「P 项」全部收口，后续为**优化 backlog**。
-> **O1/O2/O3/O4a/O2b/O4d 已完成**，下一项从 **O4c（`atomicAdd` → 分块 accum，消 L2 原子流量）**
-> 起做（O2b+O4d 后 ncu 显示 bound 已变成 **L2 带宽 81.5% + long/short scoreboard**，正是 atomics 的锅）；
-> 之后是 O4b（fp8 `ldmatrix.trans` 消转置副本 → 冲 4 CTA/SM，同时是 fp8 MLA 冲 2 CTA/SM 的关键）。
+> **O1/O2/O3/O4a/O2b/O4d/O4c 已完成**。O4c 已把 L2 原子流量砍半（L2 81.5%→57.9%），
+> **下一项 = O4b**（fp8 `ldmatrix.trans` 消 `Kt/Qt/dOt` 三个转置副本：既减 L1/TEX 的 smem 往返
+> ——新墙 L1/TEX 81.3%，又是 fp8 MLA 冲 2 CTA/SM 的关键）。
 > 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
 
 - [x] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms。
@@ -607,9 +628,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       **已完成（第二十二轮）**：S=4096 ksplit=1 `op_ld` 冲突 199.9M→77.3M（−61%）、`op_st`
       231.6M→198.4M（−14%）、总多余 wavefronts 613.6M→456.0M（−26%），main 6.56→5.85 ms（1.12×）；
       数值逐位不变。详见 `docs/03` §15。
-- [ ] **O4c（确定性与归约）**：dK/dV 的 `atomicAdd` 换 `dK/dV_accum` 分块缓冲 + convert
-      （对齐 FA2 做法），顺带消 atomic 竞争、降 L2 流量（O2b+O4d 后 ncu L2 81.5%）、便于
-      deterministic 口径。**（下一项）**
+- [x] **O4c（向量化归约，real lever）**：**已完成（第二十三轮）**。先用 `lts__t_sectors_op_*`
+      拆出 O2b+O4d 后「L2 81.5%」的真身——**全局 `red`（dQ/dK/dV 的 atomicAdd）占 L2 扇区
+      92%（408.9 M/444 M）**、DRAM 仅 1.4%，且 L1 每 red 请求 8 扇区（mma 累加器布局天然
+      uncoalesced）。改成把 `mma.m16n8` 累加器里**相邻两列（q=0/1、q=2/3，同行同 scale）**打包
+      成一次 `atomicAdd(float2*)`（`red.global.add.v2.f32`）。**red 请求/sector 各 0.50×**、
+      L2 red 408.9→204.5 M、**L2 81.5%→57.9%（墙被打掉）**；main S=512/1024H32/4096 =
+      1.32×/1.19×/1.39×（MLA 1.45×），数值与 O2b+O4d **逐位相同**。新墙 = **L1/TEX 81.3%
+      + short_scoreboard 3.50**。详见 `docs/03` §16。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog

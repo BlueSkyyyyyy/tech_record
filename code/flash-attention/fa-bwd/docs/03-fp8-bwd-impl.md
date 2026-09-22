@@ -1035,3 +1035,116 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma_ker
 `..._o4d_ncu_mem_s4096.out.txt`、`..._o4d_ncu_mem_s4096_ksplit1.out.txt`、
 `..._o2b_ncu_s512_ksplit1_vs16.out.txt`、`..._o2b_o4d_ncu_full_s4096.out.txt`、
 `..._o2b_o4d_stall_s4096.out.txt`、`..._o2b_o4d_tebench.out.txt`。
+
+---
+
+## 16. O4c：向量化归约（`atomicAdd` → `atomicAdd(float2*)`，main 1.19–1.45×）
+
+### 16.1 定位：L2 的 92% 是「全局 red」
+
+O2b+O4d 后 ncu 给出 **L2 81.53%** 是头号墙、DRAM 仅 1.41%，但没说清 L2 在传什么。
+用按操作类型拆分的 L2/L1 sector 计数（`lts__t_sectors_op_*`）一测就清楚（main，S=4096，ksplit=4）：
+
+| 计数 | 数值 |
+|---|---|
+| L1 全局 load sectors | 91.6 M |
+| L1 全局 **red**（`atomicAdd` 编译成 `red`）requests / sectors | **34.1 M / 272.6 M** |
+| L2 `op_read` / `op_write` / `op_red` sectors | 33.8 M / 0.10 M / **408.9 M** |
+
+即：L2 总扇区里 **`red` 占 92%**，且 L1 每个 red 请求要 8 个扇区（**uncoalesced**——
+mma 累加器一个 warp 内 4 lane 一行、列 c2 步进 2，天然散）。所以 O2b/O4d 说的「L2 带宽」
+其实是 **dQ/dK/dV 的全局原子归约吞吐**，不是数据带宽（DRAM 才 1.4%）。
+
+### 16.2 改动：把相邻两列打包成一次 `float2` red
+
+`mma.m16n8` 的 fp32 累加器 `acc[.][j][q]` 里 **q=0/1 两列相邻**（列 = `c2+(q&1)`）、
+**q=2/3 两列也相邻**，且同一个 q 对内**行号相同**（row = `r0+g` 或 `r0+g+8`）⇒ 两列共用同一个
+行 scale（`sA` / `sds3` / `sds2`）。于是 epilogue 把原来的 4 次标量 `atomicAdd` 换成 2 次
+`atomicAdd(float2*)`（sm_90 支持向量原子）：
+
+```cuda
+__device__ __forceinline__ void red_add2(float* p, float a, float b) {
+  atomicAdd(reinterpret_cast<float2*>(p), make_float2(a, b));  // red.global.add.v2.f32
+}
+#pragma unroll
+for (int q = 0; q < 4; q += 2) {                       // dV/dK：i 固定；dQ：外层 i,j
+  int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+  int c = c0 + j * 8 + c2;                             // c2 偶 ⇒ 8B 对齐
+  ...
+  red_add2(dv_acc + base + d0 + c, acc[..][q] * sA[r], acc[..][q+1] * sA[r]);
+}
+```
+
+三处（GEMM3 dV、GEMM4 dK、GEMM5 dQ）同步改；**smem/寄存器/几何一律不动**，只换 epilogue 的
+归约指令。`acc[...][q]` 与 `acc[...][q+1]` 的行、scale 完全相同，打包后每对两个 f32 仍各自
+原子累加，数值等价（实测 max_abs 与 O4a/O2b 逐位相同）。单文件 `fa_bwd_fp8_mma_onefile.cu`
+与两文件 `fa_bwd_fp8_kernels.cuh` device 代码逐字一致。
+
+### 16.3 数值核对（与 O4a/O2b **逐位相同**）
+
+| shape | dq / dk / dv vs ref (max_abs) | O2b+O4d | O4c |
+|---|---|---|---|
+| (1,512,16,128) | `2.426e-1 / 2.975e-1 / 3.735e-1` | 同 | 同 |
+| (1,1024,32,128) | `2.400e-1 / 4.195e-1 / 3.536e-1` | 同 | 同 |
+| (1,4096,16,128) | `2.635e-1 / 2.643e-1 / 3.216e-1` | 同 | 同 |
+| MLA (1,1024,2,512) | `2.232e-1 / 3.337e-1 / 3.602e-1` | 同 | 同 |
+| GQA h32kv4 | `2.517e-1 / 5.408e-1 / 7.072e-1` | 同 | 同 |
+
+### 16.4 性能（event 纯 device；同 session 先测 O2b+O4d 基线）
+
+| case | ksplit | main base | **main O4c** | 加速 | total base | total O4c | main TF | TE FP8 (CUPTI) |
+|---|---|---|---|---|---|---|---|---|
+| d128 S=512 H16 | 16 | 0.1439 | **0.1090** | **1.32×** | 0.2916 | **0.2556** | 19.7（1.00%） | 0.1014 |
+| d128 S=1024 H32 | 8 | 0.8084 | **0.6772** | **1.19×** | 1.2000 | **1.0590** | 25.4（1.28%） | 0.2059 |
+| d128 S=4096 H16 | 4 | 4.9552 | **3.5330** | **1.39×** | 6.5833 | **5.1601** | 38.9（1.97%） | 0.5894 |
+| MLA S=1024 H2 D512 | 4 | 0.5716 | **0.3933** | **1.45×** | 1.0114 | **0.8515** | 10.9（0.55%） | NA |
+| GQA h32kv4 S=1024 | 8 | — | **0.5978** | — | — | **0.9258** | 28.7（1.45%） | 0.243 |
+
+main-only ours/TE = **93% / 30% / 17%**；端到端 ours/TE = 2.52× / 5.14× / 8.75×（O2b+O4d 为
+2.89× / 5.82× / 11.06×）。S=512 的 main 已经**几乎追平 TE 的整条反向**（0.1090 vs 0.1014 ms），
+剩余差距主要在 preprocess/quant/convert。
+
+### 16.5 ncu（main, S=4096, ksplit=4；O2b+O4d → O4c）
+
+| 指标 | O2b+O4d | **O4c** | 说明 |
+|---|---|---|---|
+| Duration | 5.00 ms | **3.60 ms** | 1.39× |
+| L1 red requests / sectors | 34.1 M / 272.6 M | **17.0 M / 136.3 M** | **各 0.50×** |
+| L2 `op_red` sectors | 408.9 M | **204.5 M** | 0.50× |
+| **L2 Cache Throughput** | **81.53%** | **57.85%** | 墙被打掉 |
+| L1/TEX Cache Throughput | 69.91% | **81.30%** | 新主导 |
+| DRAM / Compute | 1.41 / 21.70% | 1.99 / 29.42% | |
+| short / long scoreboard | 3.96 / 4.46 | **3.50 / 1.44** | long 明显下降 |
+| barrier / wait | 0.47 / 1.51 | 0.30 / 1.58 | |
+| Occupancy（Regs/smem） | 18.27%（168/75.0KB） | 18.20%（168/75.0KB） | 不变，仍 3 CTA/SM |
+| bank conflict ld/st | 73.9 M / 203.8 M | 68.4 M / 206.4 M | 基本不变 |
+
+**bound 结论**：O4c 把 **L2 原子归约流量砍半**，L2 从 81.5% 掉到 57.9%，不再是墙；
+**新墙 = L1/TEX 81.3%（`ldmatrix`/smem 与残余 red）+ short_scoreboard 3.50**。下一步顺位：
+**O4b（fp8 `ldmatrix.trans` 消 `Kt/Qt/dOt` 三个转置副本：既减 L1/TEX 的 smem 往返，
+又是 MLA 冲 2 CTA/SM 的关键）** > 继续压 red（受 mma 累加器布局限制，`float4` 不可得）。
+
+### 16.6 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+for c in b1_s512_h16_d128_causal_fp8 b1_s1024_h32_d128_causal_fp8 \
+         b1_s4096_h16_d128_causal_fp8 b1_s1024_h2_d512_causal_fp8 \
+         b1_s1024_h32_d128_kv4_causal_fp8; do
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=10 \
+    --dir=/home/xieminglin/proj/output/fa-bwd/$c
+done
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=10 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma_kernel -c 1 \
+  --section SpeedOfLight --section Occupancy --section SchedulerStats \
+  --metrics lts__t_sectors_op_red.sum,l1tex__t_requests_pipe_lsu_mem_global_op_red.sum,\
+l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum,\
+smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,\
+smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o4c_{s512_h16_d128,s1024_h32_d128,s4096_h16_d128,
+s1024_h2_d512,s1024_h32_d128_kv4}.out.txt`、`src/fp8/fa_bwd_fp8_mma_onefile_o4c_s4096.out.txt`、
+`src/fp8/fa_bwd_fp8_main_o4c_ncu_s4096.out.txt`、`src/fp8/fa_bwd_fp8_main_o4c_tebench.out.txt`。
