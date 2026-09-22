@@ -1,0 +1,5 @@
+grid main = 64 x 16 x 1  (ksplit=1, base_grid=1024)
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                 77258028
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                198403148
+    l1tex__data_pipe_lsu_wavefronts_mem_shared.sum                          456031959
+    smsp__inst_executed_op_shared_ld.sum                            inst     80023552

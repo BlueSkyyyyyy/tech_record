@@ -466,6 +466,28 @@
      `..._mma_onefile_p53_mla_s1024h2.out.txt`、`..._p53_ncu_mla_unroll4_s1024h2.out.txt`；
      文档 `docs/03` §14、`docs/04` §7.7。
 
+- 2026-09-22（第二十二轮）：**O2b + O4d 收口（上一条 WIP 里的 split-K 自动切块调参 + P/S 行距 padding）**。
+   - 背景：HEAD 的 WIP commit（`fp8 main O4b/O4d WIP`）已把两处代码写进 `src/fp8/`，但未进
+     ROADMAP/docs，且 O2b 的自动切块启发式（cap=4、按「铺满一个波」）在大 S/MLA 上明显次优。本轮正式收口。
+   - **O2b**：ksplit sweep（k=1/2/4/8/16 × 6 shape，同 session）——d128 在 grid≈4096 最优、
+     MLA（1 CTA/SM）在 grid≈132 最优。新启发式 `TARGET=(D==128)?4096:132; k=clamp(TARGET/base,1,16)`
+     向下取 2 的幂。同 session main 相对旧自动档：S512 k4→k16 **1.08×**、S1024H32 k1→k8 **1.21×**、
+     S4096 k1→k4 **1.19×**、MLA S256H2 k4→k16 **1.56×**。ncu：S512 grid 128→2048、
+     achieved occ **6.25%→17.83%**（`long_scoreboard` 被压下）。
+   - **O4d**：`PSS=BN+1=33`（奇数行距）。S=4096 ksplit=1：`op_ld` 冲突 199.9M→**77.3M（−61%）**、
+     `op_st` 231.6M→198.4M（−14%）、总多余 wavefronts 613.6M→**456.0M（−26%）**，
+     main 6.56→**5.85 ms（1.12×）**；smem 73.2→73.8KB，仍 3 CTA/SM。
+   - 合并（新自动档）：total/main = 0.2916/0.1439（S512）、1.2000/0.8084（S1024H32）、
+     **6.5265/4.9084 ms（21.06 TF，S4096）**；MLA 0.2490/0.1030、0.5892/0.3194、1.0114/0.5716。
+     同 session TE FP8 0.1009/0.2061/0.5903 ms ⇒ 端到端 ours/TE 2.89×/5.82×/11.06×。
+     数值与 P3-5/O1–O4a **逐位相同**（单/两文件一致；GQA 回归不变）。
+   - **ncu（main, S4096, ksplit=4）**：Duration 5.00ms、DRAM 1.41% / **L2 81.53%** / L1TEX 69.91% /
+     Compute 21.70%、achieved occ 18.27%（3 CTA/SM）、**Waves 10.34**、No Eligible 76.63%、
+     stall long 4.46 + short 3.96 ⇒ **bound = L2 带宽 + 延迟**（split-K 复读 Q/dO + 全局 atomic）。
+     下一步 **O4c**（atomic→分块 accum）。
+   - 原始输出 `src/fp8/fa_bwd_fp8_main_o2b_*`、`..._o4d_ncu_mem_*`、`..._o2b_o4d_ncu_full_s4096*`、
+     `..._o2b_o4d_tebench.out.txt`；文档 `docs/03` §15、`docs/04` §2.3/§3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -538,9 +560,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 以下为既有 fp8 优化 backlog（P5 已全部收口，现在可与 MLA 优化合并推进）。
 
 > P5-3 已完成，ROADMAP 里的「P 项」全部收口，后续为**优化 backlog**。
-> **O1/O2/O3/O4a 已完成**，下一项从 **O4b（fp8 `ldmatrix.trans` 消转置副本 → 冲 4 CTA/SM）**
-> 起做（需先最小复现验证配对转置布局）——它同时是 fp8 MLA 冲 2 CTA/SM 的关键（转置副本 ≈107KB）；
-> 或先做小 S 的 grid / 尾波（O2b）。每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
+> **O1/O2/O3/O4a/O2b/O4d 已完成**，下一项从 **O4c（`atomicAdd` → 分块 accum，消 L2 原子流量）**
+> 起做（O2b+O4d 后 ncu 显示 bound 已变成 **L2 带宽 81.5% + long/short scoreboard**，正是 atomics 的锅）；
+> 之后是 O4b（fp8 `ldmatrix.trans` 消转置副本 → 冲 4 CTA/SM，同时是 fp8 MLA 冲 2 CTA/SM 的关键）。
+> 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
 
 - [x] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms。
       **已完成（第十一轮）**：新增 `lse_mma_kernel`（`mma.m16n8k32` E4M3×E4M3 分块 Q·Kᵀ +
@@ -574,11 +597,19 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       （既减 smem 冲 4 CTA/SM = 原 O2c，又减 smem 往返）。**注意**：fp8 的 `ldmatrix.trans`
       因为「2 字节=1 b16」的配对转置，布局不是 drop-in，需先写最小复现验证（对照 `42` 篇
       的 `ldmatrix.x4.trans` 用法）。
-- [ ] **O2b**：小 S 的 grid 太小（S=512 grid=128<132 SM，achieved occ 6.25%）与 3 CTA 下的
-      尾波（S=4096 waves 2.59，partial 233/396）——考虑小 S 用 BM=32 或 N 方向切块。
-      （O4a 后 S=512 已快 1.54×，此项目标仍是把 grid-bound 的 6.25% occupancy 抬起来。）
+- [x] **O2b**：split-K 切块数自动选择（N 方向切块，`dq/dk/dv` 跨 CTA atomic 汇总）。
+       **已完成（第二十二轮）**：先 sweep（k=1/2/4/8/16）× 6 个 shape，规律是
+      **d128（3 CTA/SM）目标 grid≈4096、MLA（1 CTA/SM）目标≈132（1 个波）**；新启发式
+      `TARGET=(D==128)?4096:132`、`k=clamp(TARGET/base,1,16)` 向下取 2 的幂。旧自动档（cap4、
+      `ceil(396/base)`）在大 S 和 MLA 小 S 上明显次优：main 相对旧自动档 d128 1.08–1.21×、
+      MLA S256H2 1.56×。ncu：S=512 grid 128（occ 6.25%）→2048（occ 17.83%）。详见 `docs/03` §15。
+- [x] **O4d**：`Ps/Ss` 两个 fp32 `[BM][BN]` 缓冲行距 `BN→BN+1`（33 word，奇数）消 bank conflict。
+      **已完成（第二十二轮）**：S=4096 ksplit=1 `op_ld` 冲突 199.9M→77.3M（−61%）、`op_st`
+      231.6M→198.4M（−14%）、总多余 wavefronts 613.6M→456.0M（−26%），main 6.56→5.85 ms（1.12×）；
+      数值逐位不变。详见 `docs/03` §15。
 - [ ] **O4c（确定性与归约）**：dK/dV 的 `atomicAdd` 换 `dK/dV_accum` 分块缓冲 + convert
-      （对齐 FA2 做法），顺带消 atomic 竞争、便于 deterministic 口径。
+      （对齐 FA2 做法），顺带消 atomic 竞争、降 L2 流量（O2b+O4d 后 ncu L2 81.5%）、便于
+      deterministic 口径。**（下一项）**
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog

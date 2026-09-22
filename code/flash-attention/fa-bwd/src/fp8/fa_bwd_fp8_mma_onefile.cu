@@ -51,7 +51,9 @@ struct Fp8Cfg {
   // O4d：P/S 两个 fp32 [BM][BN] 缓冲的行距 padding。行距 = BN = 32 word（128B）时，
   //   * fold 里按「列」读 `P[m][j]`（j 固定、m 步进 16）会全部落同一 bank（32|stride）→ 4-way；
   //   * GEMM1/2 epilogue 里 8 行 × 4 列同时写 `P[r][c]`，bank=c，同列不同行全撞 → 8-way。
-  //   +1 word（33）让 bank 与行号线性相关，实测 bank conflict 2 亿+ 基本清零。奇数才能保证
+  //   +1 word（33）让 bank 与行号线性相关。实测（S=4096 ksplit=1）：`op_ld` 冲突
+  //   199.9M→77.3M（−61%）、`op_st` 231.6M→198.4M（−14%）、总多余 wavefronts
+  //   613.6M→456.0M（−26%），main 6.56→5.85 ms（1.12×）。奇数才能保证
   //   m 步进 16 时 `16*33 mod 32 = 16 != 0`（+4/+8 的偶数 padding 无效）。
   static constexpr int PSS = BN + 1;     // P/S fp32 行距（=33）
 
@@ -991,16 +993,22 @@ int main(int argc, char** argv) {
     quantize_row_kernel<<<(int)rows_q, 128>>>(d_do_f, d_do8, d_dos, D, 1);
   };
 
-  // ---- O2b：自动选择 N 方向切块数。base = 未切块时的 CTA 数；目标是让 grid 至少铺满
-  //      一个波（132 SM × 3 CTA/SM ≈ 396 个并发槽），小 S 时把空转的 SM 用起来。----
+  // ---- O2b：自动选择 N 方向切块数 ksplit。base = 未切块时的 CTA 数；切块把小 S 时
+  //      不足一个波、或大 S 的尾波（partial wave）用更细的 CTA 补满并发槽。
+  //      实测（docs/03 §15 的 ksplit sweep）：d128（smem 73.8KB→3 CTA/SM）在
+  //      grid≈4096（≈10 个波）时最优；MLA d512（smem 223KB→1 CTA/SM）在 grid≈一个波
+  //      （132）时最优——再切只增 prologue 与 dQ atomic 竞争。故按 head_dim 取目标：
+  //        TARGET = (D==128) ? 4096 : 132;  k = clamp(TARGET/base, 1, 16) 后向下取 2 的幂。----
   constexpr int BM = 64;
   const long base_grid = (long)((S + BM - 1) / BM) * H * B;
   if (ksplit < 1) {
-    const long wave_slots = 132L * 3L;
-    long k = (base_grid + wave_slots - 1) / base_grid;  // 向上取整
+    const long target_ctas = (D == 128) ? 4096L : 132L;
+    long k = target_ctas / base_grid;
     if (k < 1) k = 1;
-    if (k > 4) k = 4;
-    ksplit = (int)k;
+    if (k > 16) k = 16;
+    long kp = 1;
+    while (kp * 2 <= k) kp *= 2;  // 向下取 2 的幂，让 grid 对齐到整数个波附近
+    ksplit = (int)kp;
   }
   dim3 pg(S, H, B);
   dim3 lg((S + LBM - 1) / LBM, H, B);

@@ -248,16 +248,22 @@ int main(int argc, char** argv) {
     quantize_row_kernel<<<(int)rows_q, 128>>>(d_do_f, d_do8, d_dos, D, 1);
   };
 
-  // ---- O2b：自动选择 N 方向切块数。base = 未切块时的 CTA 数；目标是让 grid 至少铺满
-  //      一个波（132 SM × 3 CTA/SM ≈ 396 个并发槽），小 S 时把空转的 SM 用起来。----
+  // ---- O2b：自动选择 N 方向切块数 ksplit。base = 未切块时的 CTA 数；切块把小 S 时
+  //      不足一个波、或大 S 的尾波（partial wave）用更细的 CTA 补满并发槽。
+  //      实测（docs/03 §15 的 ksplit sweep）：d128（smem 73.8KB→3 CTA/SM）在
+  //      grid≈4096（≈10 个波）时最优；MLA d512（smem 223KB→1 CTA/SM）在 grid≈一个波
+  //      （132）时最优——再切只增 prologue 与 dQ atomic 竞争。故按 head_dim 取目标：
+  //        TARGET = (D==128) ? 4096 : 132;  k = clamp(TARGET/base, 1, 16) 后向下取 2 的幂。----
   constexpr int BM = 64;
   const long base_grid = (long)((S + BM - 1) / BM) * H * B;
   if (ksplit < 1) {
-    const long wave_slots = 132L * 3L;
-    long k = (base_grid + wave_slots - 1) / base_grid;  // 向上取整
+    const long target_ctas = (D == 128) ? 4096L : 132L;
+    long k = target_ctas / base_grid;
     if (k < 1) k = 1;
-    if (k > 4) k = 4;
-    ksplit = (int)k;
+    if (k > 16) k = 16;
+    long kp = 1;
+    while (kp * 2 <= k) kp *= 2;  // 向下取 2 的幂，让 grid 对齐到整数个波附近
+    ksplit = (int)kp;
   }
   dim3 pg(S, H, B);
   dim3 lg((S + LBM - 1) / LBM, H, B);
