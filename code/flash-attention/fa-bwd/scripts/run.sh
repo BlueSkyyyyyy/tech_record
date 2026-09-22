@@ -7,15 +7,19 @@ SRC="${1:?usage: run.sh <file.cu> [args...]}"; shift || true
 ABS="$(readlink -f "$SRC")"
 DIR="$(dirname "$ABS")"
 NAME="$(basename "$ABS" .cu)"
-ARCH="${ARCH:-sm_90}"
+ARCH="${ARCH-sm_90}"
 GPU="${GPU:-0}"
 NVCC_FLAGS="${NVCC_FLAGS:-}"
 INCLUDES="${INCLUDES:-}"
+# 注意：CUDA 13 的 nvcc 不认 `-arch=sm_90a`（会静默退化成 sm_90），wgmma 需显式
+# `-gencode=arch=compute_90a,code=sm_90a`。把 ARCH 设为空串即可只用 NVCC_FLAGS 里的 gencode。
+ARCH_FLAG=""
+[[ -n "$ARCH" ]] && ARCH_FLAG="-arch=$ARCH"
 
 LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lab.sh"
 "$LAB" up >/dev/null
 LAB_NAME="${LAB_NAME:-kernel_lab}"
 
 docker exec -e CUDA_VISIBLE_DEVICES="$GPU" "$LAB_NAME" bash -lc \
-  "cd '$DIR' && nvcc -O3 -arch=$ARCH -lineinfo $INCLUDES $NVCC_FLAGS '$NAME.cu' -o '$NAME.out' && \
+  "cd '$DIR' && nvcc -O3 $ARCH_FLAG -lineinfo $INCLUDES $NVCC_FLAGS '$NAME.cu' -o '$NAME.out' && \
    CUDA_VISIBLE_DEVICES=$GPU ./'$NAME.out' $*"
