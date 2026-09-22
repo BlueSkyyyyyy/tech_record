@@ -3,7 +3,7 @@
 // =============================================================================
 // 由 P3-4 单文件 `fa_bwd_fp8_mma_onefile.cu` 拆分而来（P3-5），device 代码与单文件
 // **逐字一致**（preprocess 与 golden 相同，main 为张量核 mma 版）：
-//   * quantize_row_kernel：fp32 [rows][D] -> fp8 + rowwise scale
+//   * quantize_row_kernel：fp32 [rows][D] -> fp8 + rowwise scale（P5-3 起支持 D>128）
 //   * lse_mma_kernel（O1）：mma 分块 Q·Kᵀ + online-softmax 求 LSE
 //   * delta_kernel：反量化 dO 与 fp32 O 逐行点积求 D=rowsum(dO∘O)
 //   * fa_bwd_fp8_mma_kernel：1colblock 反向主 kernel，5 个 GEMM 全部 mma.m16n8k32
@@ -12,6 +12,15 @@
 //
 // P5-3（GQA/MQA）：第 h 个 Q 头映射到 KV 头 hkv=h/(H/Hkv)（与 ref 的 repeat_interleave
 // 对齐）。Q/dO/dQ 按 [B,S,H,D] 索引，K/V/dK/dV 按 [B,S,Hkv,D] 索引；Hkv==H 时逐式退化为 MHA。
+//
+// P5-3（MLA head_dim=512）：与 fp16/bf16 版同样的思路，把 head_dim 变成模板参数 `HD`。
+//   * **GEMM1/GEMM2 的 HD 是归约维**（K_TILE=HD）→ 只是把 k-loop 从 4 次变 16 次；
+//   * **GEMM3/4/5 的 HD 是输出 N 维**（dOᵀ/Qᵀ/Kᵀ 的行）→ 原实现硬编码「2 warp × 64 = 128
+//     列刚好铺满 HD=128」，HD>128 时必须再加一层 **N-tile 循环**（每遍 128 列，共 HD/128 遍），
+//     B 操作数按 `d0*stride` 偏移、写回列号加 `d0`。
+//   * `HD=128,BM=64,BN=32` 时 N-tile 循环只跑 1 遍，**与 P3-5/O1–O4a 逐位相同**。
+//   * `HD=512` 选 `BM=64,BN=32`：smem=213.5KB（1 CTA/SM）；寄存器预取（O3）每线程要
+//     `BN*HD/4/THREADS` 个 uint32，HD=512 时 64 个会爆寄存器，故只在 `KVU<=8` 时启用。
 //
 // ----- 五个矩阵乘的量化/折算记账（rowwise）-----
 // 记 Q/K/V/dO 的 rowwise scale（over head_dim）为 qs[m],ks[j],vs[j],dos[m]。
@@ -47,17 +56,8 @@
 #include <cstdint>
 
 // ----------------------------- 编译期常量 -----------------------------
-static constexpr int kHeadDim = 128;
-static constexpr int BM = 64;
-static constexpr int BN = 32;
 static constexpr int THREADS = 128;
 static constexpr int WN = 2;
-
-// smem 行距（字节，均为 16 的整数倍以配合 ldmatrix）
-static constexpr int ASLD = kHeadDim + 16;  // 144，A 行距离 head_dim=128
-static constexpr int KTS  = 32 + 16;        // 48，[d][j] 转置 K（K=32）
-static constexpr int QTS  = 64 + 16;        // 80，[d][m] / [j][m]（K=64）
-static constexpr int DSS2 = 32 + 16;        // 48，dS2 [m][j]（K=32）
 
 static constexpr float kE4M3Max = 448.0f;
 static constexpr float kE5M2Max = 57344.0f;
@@ -66,26 +66,45 @@ static constexpr float kE5M2Max = 57344.0f;
 // 每个 CTA 负责 LBM 行，4 个 warp 各 16 行（wm=wid），沿 N 一次 LBN 列。
 static constexpr int LBM = 64;
 static constexpr int LBN = 64;
-// LSE kernel 动态 smem：Qs[LBM][ASLD] + Ks[LBN][ASLD] + qs_s[LBM] + ks_s[LBN]
-static constexpr int kLseSmemBytes = LBM * ASLD + LBN * ASLD + (LBM + LBN) * (int)sizeof(float);
 
-// 动态 smem 布局
-static constexpr int kNScale = 3 * BM + 4 * BN;       // qs,dos,sds2 (BM) + ks,vs,sA,sds3 (BN)
-// O2：把两个 per-tile 小缓冲折叠进「本 tile 内已死亡」的 Ks/Vs 空间：
-//   * dS3（[BN][QTS]=2560B）放进 Ks（[BN][ASLD]=4608B）——Ks 只在 GEMM1 用，GEMM1 后被 sync 隔开；
-//   * Ap （[BN][QTS]=2560B）放进 Vs（[BN][ASLD]=4608B）——Vs 只在 GEMM2 用，GEMM2 后被 sync 隔开。
-// GEMM3/4/5 只读 Ap/dS3，写它们的 fold 阶段在所有读者之后、且与 Vs/Ks 不冲突，故不会竞争。
-// P/dS 的 fp32 [BM][BN] 仍各占一块（两者在 fold 阶段同时被 Ap 与 dS2/dS3 读取，不能合并）。
-static constexpr int kFp8Bytes = BM * ASLD            // Qs
-                              + BN * ASLD            // Ks（dS3 复用尾部）
-                              + BN * ASLD            // Vs（Ap 复用尾部）
-                              + BM * ASLD            // dOs
-                              + kHeadDim * KTS       // Kt
-                              + kHeadDim * QTS       // Qt
-                              + kHeadDim * QTS       // dOt
-                              + BM * DSS2;           // dS2
-static constexpr int kSmemBytes =
-    kFp8Bytes + (kNScale + 2 * BM * BN) * (int)sizeof(float);
+// =============================================================================
+// Fp8Cfg<HD,BM,BN>：把原来的一组全局常量按 head_dim/tile 参数化。
+//   * ASLD  = HD + 16      （Qs/Ks/Vs/dOs 行距，A 的行是 head_dim）
+//   * KTS/QTS/DSS2 = 32/64/32 + 16（转置副本与 dS2 的行距，只与 BN/BM 有关）
+//   * smem_bytes：主 kernel 动态 smem（含 O2 折叠后的布局）
+//   * lse_smem_bytes：LSE kernel 动态 smem（只与 HD 有关）
+//   * use_prefetch：O3 寄存器预取只在每线程预取量小时启用（HD=128 时 KVU=8）。
+// =============================================================================
+template <int HD, int BM_, int BN_>
+struct Fp8Cfg {
+  static constexpr int BM = BM_;
+  static constexpr int BN = BN_;
+  static constexpr int ASLD = HD + 16;   // 144（HD=128）/ 528（HD=512）
+  static constexpr int KTS = BN + 16;    // 48，[d][j] 转置 K（K=BN）
+  static constexpr int QTS = BM + 16;    // 80，[d][m] / [j][m]（K=BM）
+  static constexpr int DSS2 = BN + 16;   // 48，dS2 [m][j]（K=BN）
+  static constexpr int KVU = BN * HD / 4 / THREADS;  // 每线程预取的 uint32 数
+  static constexpr int kNScale = 3 * BM + 4 * BN;    // qs,dos,sds2 (BM) + ks,vs,sA,sds3 (BN)
+
+  // O2：dS3（[BN][QTS]）折进 Ks、Ap（[BN][QTS]）折进 Vs。
+  static constexpr int fp8_bytes = BM * ASLD   // Qs
+                                 + BN * ASLD   // Ks（dS3 复用尾部）
+                                 + BN * ASLD   // Vs（Ap 复用尾部）
+                                 + BM * ASLD   // dOs
+                                 + HD * KTS    // Kt
+                                 + HD * QTS    // Qt
+                                 + HD * QTS    // dOt
+                                 + BM * DSS2;  // dS2
+  static constexpr int smem_bytes =
+      fp8_bytes + (kNScale + 2 * BM * BN) * (int)sizeof(float);
+
+  static constexpr int lse_smem_bytes =
+      LBM * ASLD + LBN * ASLD + (LBM + LBN) * (int)sizeof(float);
+
+  // O3 寄存器预取：pk/pv 各 KVU 个 uint32。HD=128 时 KVU=8（16 regs，可行）；
+  // HD=512 时 KVU=32（64 regs，会挤掉累加器/地址寄存器）→ 关闭，走直接向量化读。
+  static constexpr bool use_prefetch = (KVU * 2 <= 16);
+};
 
 // ----------------------------- fp8 转换 -----------------------------
 __device__ __forceinline__ unsigned char cvt_e4m3(float x) {
@@ -152,7 +171,9 @@ __device__ __forceinline__ void mma_block(const unsigned char* As, int asld,
                                           float acc[WARP_M / 16][WARP_N / 8][4],
                                           int wm, int wn, int lane) {
   constexpr int MTM = WARP_M / 16, MTN = WARP_N / 8;
-#pragma unroll
+// HD=128 时 K_TILE/32<=4，`unroll 4` 仍是全展开（逐位不变）；HD=512 的 GEMM1/2 有 16 个
+// k-步，全展开会把寄存器顶到 255 并 spill，限成 4 让 ptxas 少保活一些操作数。
+#pragma unroll 4
   for (int kk = 0; kk < K_TILE / 32; ++kk) {
     const int koff = kk * 32;
     const int arow = (lane & 7) + ((lane >> 3) & 1) * 8;
@@ -188,23 +209,23 @@ __device__ __forceinline__ void mma_block(const unsigned char* As, int asld,
 // No Eligible ~80%、long_scoreboard 为主（全局延迟无处可躲）。这里**不加 smem**（加
 // 双缓冲会把 3 CTA/SM 压回 2 CTA）而是用**寄存器双缓冲**：
 //   * 每个线程按下轮 tile 的地址 (`tid + e*THREADS`)*4 预取 KVU 个 uint32（=4 个连续 fp8，
-//     行内对齐，故可一次 4B 读），结果留在 16 个寄存器里；
+//     行内对齐，故可一次 4B 读），结果留在 KVU 个寄存器里；
 //   * 预取发在本轮 5 个 GEMM 之前，落盘在本轮末尾（GEMM 全部读完 smem 之后），
 //     于是全局/L2 延迟被一整轮计算覆盖，且不占额外 smem、保持 3 CTA/SM。
-static constexpr int KVU = BN * kHeadDim / 4 / THREADS;  // 每线程预取的 uint32 数 = 8
-
+//   * 仅当 `KVU*2 <= 16`（HD=128）时启用；HD=512 走直接向量化读（kv_load_direct）。
+template <int KVU, int HD>
 __device__ __forceinline__ void kv_prefetch(const unsigned char* __restrict__ k8,
                                             const unsigned char* __restrict__ v8,
                                             int j0, int S, int Hkv, int hkv, int b, int tid,
-                                            uint32_t pk[KVU], uint32_t pv[KVU]) {
+                                            uint32_t* pk, uint32_t* pv) {
 #pragma unroll
   for (int e = 0; e < KVU; ++e) {
     int u = tid + e * THREADS;
-    int i = u * 4, r = i / kHeadDim, d = i % kHeadDim;
+    int i = u * 4, r = i / HD, d = i % HD;
     int jg = j0 + r;
     uint32_t kv = 0, vv = 0;
     if (jg < S) {  // 越界写 0 字节（等价 cvt_e4m3(0)=0x00）
-      size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + d;
+      size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d;
       kv = *reinterpret_cast<const uint32_t*>(k8 + idx);
       vv = *reinterpret_cast<const uint32_t*>(v8 + idx);
     }
@@ -213,32 +234,60 @@ __device__ __forceinline__ void kv_prefetch(const unsigned char* __restrict__ k8
   }
 }
 
+template <int KVU, int HD>
 __device__ __forceinline__ void kv_commit(unsigned char* Ks, unsigned char* Vs,
-                                          unsigned char* Kt, const uint32_t pk[KVU],
-                                          const uint32_t pv[KVU], int tid) {
+                                          unsigned char* Kt, const uint32_t* pk,
+                                          const uint32_t* pv, int tid, int asld, int kts) {
 #pragma unroll
   for (int e = 0; e < KVU; ++e) {
     int u = tid + e * THREADS;
-    int i = u * 4, r = i / kHeadDim, d = i % kHeadDim;
-    *reinterpret_cast<uint32_t*>(Ks + r * ASLD + d) = pk[e];
-    *reinterpret_cast<uint32_t*>(Vs + r * ASLD + d) = pv[e];
+    int i = u * 4, r = i / HD, d = i % HD;
+    *reinterpret_cast<uint32_t*>(Ks + r * asld + d) = pk[e];
+    *reinterpret_cast<uint32_t*>(Vs + r * asld + d) = pv[e];
 #pragma unroll
     for (int kk = 0; kk < 4; ++kk)  // 转置副本 Kt[d][r]（供 GEMM5 的 B 操作数）
-      Kt[(d + kk) * KTS + r] = (pk[e] >> (8 * kk)) & 0xff;
+      Kt[(d + kk) * kts + r] = (pk[e] >> (8 * kk)) & 0xff;
+  }
+}
+
+// HD>128 时的直接向量化载入（无寄存器预取）：4B/线程，K 同时写 Kt 转置副本。
+template <int HD, int BN>
+__device__ __forceinline__ void kv_load_direct(const unsigned char* __restrict__ k8,
+                                               const unsigned char* __restrict__ v8,
+                                               int j0, int S, int Hkv, int hkv, int b,
+                                               int tid, unsigned char* Ks, unsigned char* Vs,
+                                               unsigned char* Kt, int asld, int kts) {
+  for (int i = tid * 4; i < BN * HD; i += THREADS * 4) {
+    int r = i / HD, d = i % HD;
+    int jg = j0 + r;
+    uint32_t kv = 0, vv = 0;
+    if (jg < S) {
+      size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d;
+      kv = *reinterpret_cast<const uint32_t*>(k8 + idx);
+      vv = *reinterpret_cast<const uint32_t*>(v8 + idx);
+    }
+    *reinterpret_cast<uint32_t*>(Ks + r * asld + d) = kv;
+    *reinterpret_cast<uint32_t*>(Vs + r * asld + d) = vv;
+#pragma unroll
+    for (int kk = 0; kk < 4; ++kk) Kt[(d + kk) * kts + r] = (kv >> (8 * kk)) & 0xff;
   }
 }
 
 // =============================================================================
 // 1) quantize_row_kernel（与 golden 相同）：fp32 [rows][D] -> fp8 + rowwise scale
 // =============================================================================
+// P5-3：D 可以 >128（MLA head_dim=512），故 amax 与量化都改成线程内 grid-stride；
+// D<=128 时每线程恰好一个元素，与原实现（`sh[d]=|v|`）逐位一致。
 __global__ void quantize_row_kernel(const float* __restrict__ x,
                                     unsigned char* __restrict__ xq,
                                     float* __restrict__ scale, int D, int is_e5m2) {
   const int row = blockIdx.x;
   const int d = threadIdx.x;
-  const float v = (d < D) ? x[(size_t)row * D + d] : 0.f;
+  const float* xr = x + (size_t)row * D;
   __shared__ float sh[128];
-  sh[d] = fabsf(v);
+  float loc = 0.f;
+  for (int i = d; i < D; i += blockDim.x) loc = fmaxf(loc, fabsf(xr[i]));
+  sh[d] = loc;
   __syncthreads();
   for (int off = 64; off > 0; off >>= 1) {
     if (d < off) sh[d] = fmaxf(sh[d], sh[d + off]);
@@ -247,7 +296,8 @@ __global__ void quantize_row_kernel(const float* __restrict__ x,
   const float fp8_max = is_e5m2 ? kE5M2Max : kE4M3Max;
   const float s = (sh[0] > 0.f) ? (sh[0] / fp8_max) : 1.f;
   if (d == 0) scale[row] = s;
-  if (d < D) xq[(size_t)row * D + d] = is_e5m2 ? cvt_e5m2(v / s) : cvt_e4m3(v / s);
+  for (int i = d; i < D; i += blockDim.x)
+    xq[(size_t)row * D + i] = is_e5m2 ? cvt_e5m2(xr[i] / s) : cvt_e4m3(xr[i] / s);
 }
 
 // =============================================================================
@@ -263,12 +313,13 @@ __global__ void quantize_row_kernel(const float* __restrict__ x,
 //     LSE 的行 max/sum 在 warp 内按 lane 组（同 row 的 4 个 lane）shfl 归约。
 //   * 与旧版数学一致（scale·qs·ks、causal mask、NaN 安全），只是走张量核并大幅
 //     提升并行度（S=4096 时 1024 CTA vs 旧的 65536 个 1-行 CTA×标量）。
-//
-// 代价：比标量版多一次 fp32 累加器的 online-softmax（每 tile 64×64），可忽略。
+template <int HD>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                const unsigned char* __restrict__ k8, const float* __restrict__ ks,
                float* __restrict__ lse, int S, int H, int Hkv, float scale, int causal) {
+  using Cfg = Fp8Cfg<HD, 64, 32>;
+  constexpr int ASLD = Cfg::ASLD;
   extern __shared__ __align__(16) char smem[];
   unsigned char* Qs = reinterpret_cast<unsigned char*>(smem);
   unsigned char* Ks = Qs + LBM * ASLD;
@@ -283,11 +334,11 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
   const int m0 = mblk * LBM;
 
   // 载入 Q 块（rowwise scale 同步取回）
-  for (int i = tid; i < LBM * kHeadDim; i += THREADS) {
-    int r = i / kHeadDim, d = i % kHeadDim;
+  for (int i = tid; i < LBM * HD; i += THREADS) {
+    int r = i / HD, d = i % HD;
     int qi = m0 + r;
     Qs[r * ASLD + d] =
-        (qi < S) ? q8[(((size_t)(b * S + qi)) * H + h) * kHeadDim + d] : cvt_e4m3(0.f);
+        (qi < S) ? q8[(((size_t)(b * S + qi)) * H + h) * HD + d] : cvt_e4m3(0.f);
   }
   if (tid < LBM)
     qs_s[tid] = (m0 + tid < S) ? qs[((size_t)(b * S + m0 + tid)) * H + h] : 1.f;
@@ -299,11 +350,11 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
 
   for (int nt = 0; nt < ntiles; ++nt) {
     const int j0 = nt * LBN;
-    for (int i = tid; i < LBN * kHeadDim; i += THREADS) {
-      int r = i / kHeadDim, d = i % kHeadDim;
+    for (int i = tid; i < LBN * HD; i += THREADS) {
+      int r = i / HD, d = i % HD;
       int jg = j0 + r;
       Ks[r * ASLD + d] =
-          (jg < S) ? k8[(((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + d] : cvt_e4m3(0.f);
+          (jg < S) ? k8[(((size_t)(b * S + jg)) * Hkv + hkv) * HD + d] : cvt_e4m3(0.f);
     }
     if (tid < LBN)
       ks_s[tid] = (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * Hkv + hkv] : 1.f;
@@ -315,7 +366,7 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
     for (int j = 0; j < 8; ++j)
 #pragma unroll
       for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
-    mma_block<16, LBN, kHeadDim, E4E4>(Qs, ASLD, Ks, ASLD, acc, wid, 0, lane);
+    mma_block<16, LBN, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wid, 0, lane);
 
     // online-softmax：每个线程持有 2 个 row-slot（q<2 / q>=2），沿 N 就地更新
 #pragma unroll
@@ -364,6 +415,7 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
 // 2b) delta_kernel：D = rowsum(dO ∘ O)（反量化 e5m2·dos 后与 fp32 O 点积）
 // =============================================================================
 // 纯粹 O(S·H·D) 的逐行归约，与 LSE 解耦（原来和 LSE 挤在同一 kernel 里）。
+template <int HD>
 __global__ void delta_kernel(const float* __restrict__ o,
                              const unsigned char* __restrict__ do8,
                              const float* __restrict__ dos, float* __restrict__ delta,
@@ -371,11 +423,11 @@ __global__ void delta_kernel(const float* __restrict__ o,
   const int s = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
   const int tid = threadIdx.x;
   const size_t row = ((size_t)(b * S + s)) * H + h;
-  const float* orow = o + row * kHeadDim;
-  const unsigned char* dorow = do8 + row * kHeadDim;
+  const float* orow = o + row * HD;
+  const unsigned char* dorow = do8 + row * HD;
   const float do_scale = dos[row];
   float dp = 0.f;
-  for (int d = tid; d < kHeadDim; d += blockDim.x)
+  for (int d = tid; d < HD; d += blockDim.x)
     dp += orow[d] * (deq_e5m2(dorow[d]) * do_scale);
   __shared__ float sh_delta[THREADS];
   sh_delta[tid] = dp;
@@ -390,6 +442,7 @@ __global__ void delta_kernel(const float* __restrict__ o,
 // =============================================================================
 // 3) main kernel：1colblock 反向，5 个 GEMM 全部用 mma.m16n8k32
 // =============================================================================
+template <int HD, int BM, int BN>
 __global__ void __launch_bounds__(THREADS)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
@@ -404,15 +457,27 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                       float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                       float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                       int causal, int ksplit) {
+  using Cfg = Fp8Cfg<HD, BM, BN>;
+  constexpr int ASLD = Cfg::ASLD;
+  constexpr int KTS = Cfg::KTS;
+  constexpr int QTS = Cfg::QTS;
+  constexpr int DSS2 = Cfg::DSS2;
+  constexpr int KVU = Cfg::KVU;
+  constexpr int kNScale = Cfg::kNScale;
+  constexpr int kFp8Bytes = Cfg::fp8_bytes;
+  // GEMM3/4/5 的输出 N 维 = head_dim；每遍处理 NTW = WN*64 = 128 列，共 HD/NTW 遍。
+  constexpr int NTW = WN * 64;
+  static_assert(HD % NTW == 0, "HD 必须是 128 的整数倍");
+
   extern __shared__ __align__(16) char smem[];
   unsigned char* Qs  = reinterpret_cast<unsigned char*>(smem);
   unsigned char* Ks  = Qs + BM * ASLD;
   unsigned char* Vs  = Ks + BN * ASLD;
   unsigned char* dOs = Vs + BN * ASLD;
   unsigned char* Kt  = dOs + BM * ASLD;
-  unsigned char* Qt  = Kt + kHeadDim * KTS;
-  unsigned char* dOt = Qt + kHeadDim * QTS;
-  unsigned char* dS2 = dOt + kHeadDim * QTS;
+  unsigned char* Qt  = Kt + HD * KTS;
+  unsigned char* dOt = Qt + HD * QTS;
+  unsigned char* dS2 = dOt + HD * QTS;
   unsigned char* Ap  = Vs;                   // O2：复用 GEMM2 后死亡的 Vs
   unsigned char* dS3 = Ks;                   // O2：复用 GEMM1 后死亡的 Ks
   float* scales = reinterpret_cast<float*>(smem + kFp8Bytes);
@@ -446,12 +511,12 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   if (nt_end <= nt_begin) return;  // 该 part 无 tile（causal 下小 mblk 可能被切空）
 
   // ---- 载入 Q/dO（含转置副本 Qt/dOt，供 dK/dV 的 B 操作数）----
-  for (int i = tid; i < BM * kHeadDim; i += THREADS) {
-    int r = i / kHeadDim, d = i % kHeadDim;
+  for (int i = tid; i < BM * HD; i += THREADS) {
+    int r = i / HD, d = i % HD;
     int qi = m0 + r;
     unsigned char qv = cvt_e4m3(0.f), ov = cvt_e5m2(0.f);
     if (qi < S) {
-      size_t idx = (((size_t)(b * S + qi)) * H + h) * kHeadDim + d;
+      size_t idx = (((size_t)(b * S + qi)) * H + h) * HD + d;
       qv = q8[idx];
       ov = do8[idx];
     }
@@ -466,12 +531,17 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     dos_s[tid] = (qi < S) ? dos[((size_t)(b * S + qi)) * H + h] : 1.f;
   }
 
-  // ---- O3 prologue：寄存器预取本 part 首个 tile 并落盘 ----
+  // ---- O3 prologue：寄存器预取本 part 首个 tile 并落盘；HD>128 时直接向量化读。----
   // ---- O4a：Q/dO 载入与 tile 的 K/V 落盘写的是互不重叠的 smem（Qs/Qt/dOs/dOt vs
   //            Ks/Vs/Kt），故把原来 prologue 的两处 __syncthreads 合并为一处。----
   uint32_t pk[KVU], pv[KVU];
-  kv_prefetch(k8, v8, nt_begin * BN, S, Hkv, hkv, b, tid, pk, pv);
-  kv_commit(Ks, Vs, Kt, pk, pv, tid);
+  if (Cfg::use_prefetch) {
+    kv_prefetch<KVU, HD>(k8, v8, nt_begin * BN, S, Hkv, hkv, b, tid, pk, pv);
+    kv_commit<KVU, HD>(Ks, Vs, Kt, pk, pv, tid, ASLD, KTS);
+  } else {
+    kv_load_direct<HD, BN>(k8, v8, nt_begin * BN, S, Hkv, hkv, b, tid, Ks, Vs, Kt, ASLD,
+                           KTS);
+  }
   if (tid < BN) {
     int jg = nt_begin * BN + tid;
     ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
@@ -483,7 +553,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     const int j0 = nt * BN;
     // ---- O3：预取下一 tile 的 K/V 到寄存器（延迟被本轮 5 个 GEMM 覆盖）----
     const int nnt = nt + 1;
-    if (nnt < nt_end) kv_prefetch(k8, v8, nnt * BN, S, Hkv, hkv, b, tid, pk, pv);
+    if (Cfg::use_prefetch && nnt < nt_end)
+      kv_prefetch<KVU, HD>(k8, v8, nnt * BN, S, Hkv, hkv, b, tid, pk, pv);
 
     // ---- (1) S = scale·QKᵀ  →  P = exp(S − LSE)，存 fp32 ----
     {
@@ -494,7 +565,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
         for (int j = 0; j < 2; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block<32, 16, kHeadDim, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
+      mma_block<32, 16, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
       const int r0 = wr * 32, c0 = wc * 16;
 #pragma unroll
       for (int i = 0; i < 2; ++i)
@@ -526,7 +597,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
         for (int j = 0; j < 2; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block<32, 16, kHeadDim, E5E4>(dOs, ASLD, Vs, ASLD, acc, wr, wc, lane);
+      mma_block<32, 16, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc, wr, wc, lane);
       const int r0 = wr * 32, c0 = wc * 16;
 #pragma unroll
       for (int i = 0; i < 2; ++i)
@@ -601,81 +672,94 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     }
     __syncthreads();
 
-    // ---- (3) dV = Pᵀ·dO  : A=Ap[j][m] (e4m3), B=dOt[d][m] 原始 do8 (e5m2) ----
-    {
-      float acc[1][8][4];
+    // ---- (3)(4)(5) 沿 head_dim 的 N-tile 循环。GEMM3/4/5 的输出宽度是 HD，
+    //      每遍覆盖 NTW=128 列：B 操作数（dOt/Qt/Kt）按 d0*stride 偏移、写回列加 d0。
+    //      HD=128 时只跑 1 遍（与 O4a 逐位相同）。----
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
-#pragma unroll
-        for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
-      mma_block<16, 64, BM, E4E5>(Ap, QTS, dOt, QTS, acc, wr, wc, lane);
-      const int r0 = wr * 16, c0 = wc * 64;
-#pragma unroll
-      for (int j = 0; j < 8; ++j)
-#pragma unroll
-        for (int q = 0; q < 4; ++q) {
-          int r = r0 + g + (q >= 2 ? 8 : 0);
-          int c = c0 + j * 8 + c2 + (q & 1);
-          int jg = j0 + r;
-          if (jg < S)
-            atomicAdd(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + c,
-                      acc[0][j][q] * sA[r]);
-        }
-    }
+    for (int nd = 0; nd < HD / NTW; ++nd) {
+      const int d0 = nd * NTW;
 
-    // ---- (4) dK = scale·dSᵀ·Q : A=dS3[j][m] (e5m2), B=Qt[d][m] 原始 q8 (e4m3) ----
-    {
-      float acc[1][8][4];
-#pragma unroll
-      for (int j = 0; j < 8; ++j)
-#pragma unroll
-        for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
-      mma_block<16, 64, BM, E5E4>(dS3, QTS, Qt, QTS, acc, wr, wc, lane);
-      const int r0 = wr * 16, c0 = wc * 64;
-#pragma unroll
-      for (int j = 0; j < 8; ++j)
-#pragma unroll
-        for (int q = 0; q < 4; ++q) {
-          int r = r0 + g + (q >= 2 ? 8 : 0);
-          int c = c0 + j * 8 + c2 + (q & 1);
-          int jg = j0 + r;
-          if (jg < S)
-            atomicAdd(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + c,
-                      acc[0][j][q] * sds3[r] * scale);
-        }
-    }
-
-    // ---- (5) dQ += scale·dS·K : A=dS2[m][j] (e5m2), B=Kt[d][j] 原始 k8 (e4m3) ----
-    {
-      float acc[2][8][4];
-#pragma unroll
-      for (int i = 0; i < 2; ++i)
+      // ---- (3) dV = Pᵀ·dO  : A=Ap[j][m] (e4m3), B=dOt[d0+..][m] 原始 do8 (e5m2) ----
+      {
+        float acc[1][8][4];
 #pragma unroll
         for (int j = 0; j < 8; ++j)
 #pragma unroll
-          for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block<32, 64, BN, E5E4>(dS2, DSS2, Kt, KTS, acc, wr, wc, lane);
-      const int r0 = wr * 32, c0 = wc * 64;
-#pragma unroll
-      for (int i = 0; i < 2; ++i)
+          for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
+        mma_block<16, 64, BM, E4E5>(Ap, QTS, dOt + d0 * QTS, QTS, acc, wr, wc, lane);
+        const int r0 = wr * 16, c0 = wc * 64;
 #pragma unroll
         for (int j = 0; j < 8; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) {
-            int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+            int r = r0 + g + (q >= 2 ? 8 : 0);
             int c = c0 + j * 8 + c2 + (q & 1);
-            int qi = m0 + r;
-            if (qi < S)
-              atomicAdd(dq_acc + (((size_t)(b * S + qi)) * H + h) * kHeadDim + c,
-                        acc[i][j][q] * sds2[r] * scale);
+            int jg = j0 + r;
+            if (jg < S)
+              atomicAdd(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
+                        acc[0][j][q] * sA[r]);
           }
+      }
+
+      // ---- (4) dK = scale·dSᵀ·Q : A=dS3[j][m] (e5m2), B=Qt[d0+..][m] 原始 q8 (e4m3) ----
+      {
+        float acc[1][8][4];
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
+        mma_block<16, 64, BM, E5E4>(dS3, QTS, Qt + d0 * QTS, QTS, acc, wr, wc, lane);
+        const int r0 = wr * 16, c0 = wc * 64;
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            int r = r0 + g + (q >= 2 ? 8 : 0);
+            int c = c0 + j * 8 + c2 + (q & 1);
+            int jg = j0 + r;
+            if (jg < S)
+              atomicAdd(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
+                        acc[0][j][q] * sds3[r] * scale);
+          }
+      }
+
+      // ---- (5) dQ += scale·dS·K : A=dS2[m][j] (e5m2), B=Kt[d0+..][j] 原始 k8 (e4m3) ----
+      {
+        float acc[2][8][4];
+#pragma unroll
+        for (int i = 0; i < 2; ++i)
+#pragma unroll
+          for (int j = 0; j < 8; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+        mma_block<32, 64, BN, E5E4>(dS2, DSS2, Kt + d0 * KTS, KTS, acc, wr, wc, lane);
+        const int r0 = wr * 32, c0 = wc * 64;
+#pragma unroll
+        for (int i = 0; i < 2; ++i)
+#pragma unroll
+          for (int j = 0; j < 8; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              int c = c0 + j * 8 + c2 + (q & 1);
+              int qi = m0 + r;
+              if (qi < S)
+                atomicAdd(dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + d0 + c,
+                          acc[i][j][q] * sds2[r] * scale);
+            }
+      }
     }
     __syncthreads();
     // ---- O3：落盘预取的下一 tile 的 K/V（本轮 GEMM 已全部读完 smem），并更新 ks/vs ----
-    if (nnt < nt_end) {
-      kv_commit(Ks, Vs, Kt, pk, pv, tid);
+    if (nt + 1 < nt_end) {
+      if (Cfg::use_prefetch) {
+        kv_commit<KVU, HD>(Ks, Vs, Kt, pk, pv, tid, ASLD, KTS);
+      } else {
+        kv_load_direct<HD, BN>(k8, v8, (nt + 1) * BN, S, Hkv, hkv, b, tid, Ks, Vs, Kt,
+                               ASLD, KTS);
+      }
       if (tid < BN) {
-        int jg = nnt * BN + tid;
+        int jg = (nt + 1) * BN + tid;
         ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
         vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
       }

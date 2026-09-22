@@ -108,7 +108,9 @@
       `HD=512→BM=16`，smem 135.17KB，1 CTA/SM），单/两文件同步。3 个 MLA case 对拍 ref 全部 fp16 噪声
       （1.3–2.9e-3），ncu bound = smem+bank conflict+低 occupancy；MLA 反向 FA/TE 均不支持，性能数字
       仅 ours（0.21–0.63 TF）。`docs/01-fp16-bwd-impl.md` §9。
-- [ ] **P5-3** MLA 对拍（只有 fp32 ref 可对）与性能数字；对标 FlashMLA 思路（fp16 已给，见 §9）
+- [x] **P5-3** MLA 对拍（只有 fp32 ref 可对）与性能数字；对标 FlashMLA 思路
+      → fp16（P5-2/§9）、bf16（第二十轮）、fp8（第二十一轮）三 dtype 的 MLA 对拍与 ours 性能数字
+      均已给出；FlashMLA 式分块/流水优化（降 smem 冲 2 CTA/SM、张量核、持久化）留 backlog
 - [x] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能
       → **已完成（第十八轮）**：fp8 反向（单/两文件）支持 GQA/MQA（`Hkv`，映射 `hkv=h/(H/Hkv)`）；
       4 个 shape 对拍 ref/TE 同量级、性能 ~7–9% TE FP8。`docs/03` §13、`docs/04` §7.4。
@@ -435,8 +437,34 @@
     occ 6.25%（135.42KB smem，1 CTA/SM）/ Waves 0.97 / 48 regs / **bank conflicts ~0（padding 生效）** /
     stall long_scoreboard 1.71 + wait 1.35 ⇒ bound = **全局访存延迟 + 低并行度**（与 fp16 MLA 的
     smem 冲突不同）；非带宽/算力。
-  - 原始输出 `src/bf16/fa_bwd_bf16_main_p53_mla_*.out.txt`、`..._onefile_p53_mla_*.out.txt`、
-    `..._p53_ncu_mla_{s1024h2,stall_s1024h2}.out.txt`；文档 `docs/01b` §6d、`docs/04` §7.6。
+   - 原始输出 `src/bf16/fa_bwd_bf16_main_p53_mla_*.out.txt`、`..._onefile_p53_mla_*.out.txt`、
+     `..._p53_ncu_mla_{s1024h2,stall_s1024h2}.out.txt`；文档 `docs/01b` §6d、`docs/04` §7.6。
+
+- 2026-09-22（第二十一轮）：**P5-3（fp8 MLA head_dim=512）完成 — P5-3 全部收口**。
+   - `src/fp8/`（单/两文件）把 head_dim 模板化：新增 `Fp8Cfg<HD,BM_,BN_>`（派生 `ASLD/KTS/QTS/
+     DSS2/KVU/kNScale/smem_bytes/lse_smem_bytes/use_prefetch`）；`lse_mma_kernel<HD>`、
+     `delta_kernel<HD>`、`fa_bwd_fp8_mma_kernel<HD,BM,BN>`；`mma_block` 的 k-loop 由 `#pragma unroll`
+     改 `#pragma unroll 4`（HD=128 仍全展开）。
+   - **两处 head_dim 角色不同**：GEMM1/2 的 HD 是归约维（k-loop 4→16 步）；GEMM3/4/5 的 HD 是
+     输出 N 维 → 原「2warp×64=128 列铺满」必须加**N-tile 循环**（`HD/128=4` 遍，B 按 `d0*stride`
+     偏移、写回列加 `d0`）。另修 `quantize_row_kernel` 支持 D>128（线程内 grid-stride，D=128 逐位不变）；
+     `O3` 寄存器预取在 `KVU>8`（HD=512 时 KVU=32）时禁用、改 `kv_load_direct` 4B 向量化读。
+   - host 按 `D` 分派 `<128,64,32>` / `<512,64,32>` 并各设动态 smem 上限；单文件由两文件 device
+     代码拼接生成（逐字一致）。**HD=512 smem=228608B（223.2KB，上限 232448B 刚好放下），1 CTA/SM**。
+   - **对拍（ours-vs-ref，fp8 causal，D=Dv=512，FA/TE 反向后端均不支持）**：S=256H2
+     2.356/2.290/3.441e-1；S=512H4 2.415/2.992/4.481e-1；S=1024H2 2.232/3.337/3.602e-1——与 MHA
+     fp8 同量级；**按 head_dim 每 128 维分段的 max_abs 均匀**，证明 N-tile 四段都对。MHA d128
+     回归**逐位不变**（S512 2.426/2.975/3.735e-1），单/两文件逐位一致。
+   - 性能（event）：preprocess/main/total = 0.107/0.162/0.308 ms（S256H2）、0.196/0.318/0.591
+     （S512H4）、0.371/0.564/1.022（S1024H2）；total 0.87–4.20 TF（峰值 0.04–0.21%）。fp8 张量核
+     MLA 的 main 比 fp16/bf16 标量 MLA 快 **6.5–7.3×**。
+   - ncu（main, S=1024H2）：Duration **626.8µs**、DRAM 1.98% / L1TEX 26.28% / Compute 5.13%、
+     255 regs + spill（local 137KB/shared 122KB）、223.2KB smem → **1 CTA/SM、occ 6.25%**、Waves 0.97、
+     No Eligible 90.73% ⇒ **bound = 低 occupancy/并行度**（`unroll 4` 让 Duration 676.6→626.8µs）；
+     要冲 2 CTA/SM 须先消 `Kt/Qt/dOt` 三个转置副本（≈107KB），即 backlog **O4b**。
+   - 原始输出 `src/fp8/fa_bwd_fp8_main_p53_mla_final.out.txt`（含分段）、
+     `..._mma_onefile_p53_mla_s1024h2.out.txt`、`..._p53_ncu_mla_unroll4_s1024h2.out.txt`；
+     文档 `docs/03` §14、`docs/04` §7.7。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -479,28 +507,32 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       Q 常驻 / 更小 K/V 分块 / 可能需 split-K 或 KV 分片），对拍 3 个 MLA case 的 ref；给出性能数字。
       **已完成（第十七轮）**：`HD` 模板化 + `BM` 随容量选择（128→64 / 512→16），单/两文件；详见
       `docs/01-fp16-bwd-impl.md` §9。
-- [~] **P5-3**：bf16/fp8 复用同一 `Hkv`/`HD` 改造；fp8 GQA/MQA 对拍 vs TE FP8。
-      （bf16 的 `Hkv`+`HD` 均已完成；**剩余 fp8 的 `HD`（MLA head_dim=512）**。）
+- [x] **P5-3**：bf16/fp8 复用同一 `Hkv`/`HD` 改造；fp8 GQA/MQA 对拍 vs TE FP8。
+      （bf16 的 `Hkv`+`HD` 均已完成；**fp8 的 `HD`（MLA head_dim=512）也已完成（第二十一轮）**。）
       （P5-1/P5-2 的 fp16 改造已完成：`Hkv` 入参 + `hkv=h/(H/Hkv)` 映射 + `dk/dv` 按 `B*S*Hkv*D`
       分配、`convert` 收 `n_q/n_kv`；`HD`/`BM` 模板。bf16 可直接照搬，fp8 在已优化的 mma 路径上
       加同一映射与更大 head_dim 的分块。）
-      **进度（第十八/十九/二十轮）**：fp8 的 `Hkv`（GQA/MQA）已完成（单/两文件，`docs/03` §13、`docs/04` §7.4）；
-      **bf16 的 `Hkv`（GQA/MQA）也已完成**（`docs/01b` §6c、`docs/04` §7.5，4 形状对拍与 ref/FA/TE 同量级）；
-      **bf16 的 `HD`（MLA head_dim=512）也已完成（第二十轮）**：`HD/BM` 模板化（`128→64` 回归逐位不变、
-      `512→16`，135.42KB smem），单/两文件，3 个 MLA case 对拍 ref 全部 bf16 噪声（0.5–1.6e-2），
-      main 比 fp16 MLA 快 1.4–1.6×；`docs/01b` §6d、`docs/04` §7.6。
-      剩余：**fp8 的 `HD`（MLA head_dim=512）**（fp8 的 mma 路径需按 `BM/BN` 容量重新分块，工作量大）。
+      **进度（第十八/十九/二十/二十一轮）**：fp8 的 `Hkv`（GQA/MQA）已完成（单/两文件，`docs/03` §13、`docs/04` §7.4）；
+      **bf16 的 `Hkv`（GQA/MQA）也已完成**（`docs/01b` §6c、`docs/04` §7.5）；
+      **bf16 的 `HD`（MLA head_dim=512）也已完成（第二十轮）**；
+      **fp8 的 `HD`（MLA head_dim=512）也已完成（第二十一轮）**：`Fp8Cfg<HD,BM,BN>` 模板化，
+      GEMM1/2 加长 k-loop、GEMM3/4/5 加 N-tile 循环（每 128 维一遍），`HD=128` 回归逐位不变、
+      `HD=512` smem 223.2KB（1 CTA/SM），3 个 MLA case 对拍 ref 同 fp8 噪声（2.2–4.5e-1，分段均匀），
+      main 比 fp16/bf16 标量 MLA 快 6.5–7.3×；`docs/03` §14、`docs/04` §7.7。
 - [x] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能 —— 第十八轮完成。
-- [ ] **MLA 优化（backlog）**：fp16（P5-2）与 bf16（第二十轮）已给出 MLA 的 ref 对拍与 ours 性能
-       数字，且两者都是 1 CTA/SM（~135KB smem）；下一步是**优化**——把 MLA smem 降下来冲 2 CTA/SM、
-       张量核版本，对标 FlashMLA 的分块/流水。（bf16 MLA 已把 bank conflict 消掉，ncu bound 变为
-       long_scoreboard + 低并行度，正是 occupancy 问题。）
-> 以下为既有 fp8 优化 backlog（可与 P5 并行/穿插）。
+- [ ] **MLA 优化（backlog）**：fp16（P5-2）、bf16（第二十轮）、fp8（第二十一轮）均已给出 MLA 的
+       ref 对拍与 ours 性能数字；下一步是**优化**——fp16/bf16 都是标量 + 1 CTA/SM（~135KB smem），
+       目标是**上张量核**（对齐 fp8 mma 路径）并把 smem 降下来冲 2 CTA/SM；fp8 MLA 已是张量核但
+       1 CTA/SM（223KB smem，255 regs + spill），瓶颈在 occupancy。共同的最大障碍是 `Kt/Qt/dOt`
+       三个转置副本（fp8 MLA 里 ≈107KB），正好是 **O4b（`ldmatrix.trans` 消转置副本）**；其次是
+       preprocess 在 MLA（D=512）下占比升高（S=1024H2 时 0.371ms vs main 0.564ms）。
+       对标 FlashMLA 的分块/流水/persistent。
+> 以下为既有 fp8 优化 backlog（P5 已全部收口，现在可与 MLA 优化合并推进）。
 
-> P4-2 完成后，ROADMAP 里的「P 项」已全部收口，后续为**优化 backlog**（按回报排序）。
+> P5-3 已完成，ROADMAP 里的「P 项」全部收口，后续为**优化 backlog**。
 > **O1/O2/O3/O4a 已完成**，下一项从 **O4b（fp8 `ldmatrix.trans` 消转置副本 → 冲 4 CTA/SM）**
-> 起做（需先最小复现验证配对转置布局），或先做小 S 的 grid / 尾波（O2b）。
-> 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
+> 起做（需先最小复现验证配对转置布局）——它同时是 fp8 MLA 冲 2 CTA/SM 的关键（转置副本 ≈107KB）；
+> 或先做小 S 的 grid / 尾波（O2b）。每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
 
 - [x] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms。
       **已完成（第十一轮）**：新增 `lse_mma_kernel`（`mma.m16n8k32` E4M3×E4M3 分块 Q·Kᵀ +
