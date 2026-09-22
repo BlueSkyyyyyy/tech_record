@@ -1,0 +1,39 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+V4-Pro routed expert w1 [N=3072,K=7168], B=64 tokens, top-6, E=384 experts
+
+[roof] read all 384 experts fp4 (4.228 GB): 1.3198 ms  3203.3 GB/s (95.6% HBM)
+
+== routing ablation (RWW4, MTMAX8, LUTMODE0, CTA2) ==
+routing balanced   active=384/384  zero=0  max_m=1  weight=5.28 GB (100% of full)
+[check grouped         ] max_rel=1.249e-07 (ref~1.7) OK
+  MT8 m=1    2.9494 ms  read 5.28 GB  1791.8 GB/s  (53.4% HBM)  speedup 1.000x
+routing hot-75%    active=288/384  zero=96  max_m=2  weight=3.96 GB (75% of full)
+[check grouped-hot     ] max_rel=1.247e-07 (ref~1.7) OK
+  MT8 m=1    2.2695 ms  read 3.96 GB  1746.4 GB/s  (52.1% HBM)  speedup 1.300x
+routing zipf       active=168/384  zero=216  max_m=8  weight=2.31 GB (44% of full)
+[check grouped-zipf    ] max_rel=9.513e-08 (ref~1.7) OK
+  MT8 m=1    1.4141 ms  read 2.31 GB  1635.1 GB/s  (48.8% HBM)  speedup 2.086x
+
+== LUT layout x occupancy (balanced RWW4 MTMAX4) ==
+[check M4-nibble16     ] max_rel=1.249e-07 (ref~1.7) OK
+  M0 uint16 CTA2 (59)      2.1149 ms  2498.8 GB/s  (74.5% HBM)
+  M1 uint32 CTA2           2.3009 ms  2296.9 GB/s  (68.5% HBM)
+  M2 x2copy CTA2           2.2182 ms  2382.5 GB/s  (71.1% HBM)
+  M3 x4copy CTA2           2.3110 ms  2286.8 GB/s  (68.2% HBM)
+  M4 nibble16 CTA2         2.1421 ms  2467.2 GB/s  (73.6% HBM)
+  M0 uint16 CTA3           2.4611 ms  2147.3 GB/s  (64.1% HBM)
+  M0 uint16 CTA4           3.7750 ms  1399.9 GB/s  (41.8% HBM)
+
+== geometry x pipeline depth (M4 nibble, balanced) ==
+  M4 RWW4 D1               2.1423 ms  2466.9 GB/s  (73.6% HBM)
+  M4 RWW2 D2               2.3742 ms  2226.0 GB/s  (66.4% HBM)
+  M4 RWW2 D3               2.3518 ms  2247.1 GB/s  (67.0% HBM)
+  M4 RWW8 D1               3.6374 ms  1452.9 GB/s  (43.3% HBM)
+  M4 RWW8 D2               5.7228 ms  923.5 GB/s  (27.5% HBM)
+  M4 RWW1 D2               3.2656 ms  1618.3 GB/s  (48.3% HBM)

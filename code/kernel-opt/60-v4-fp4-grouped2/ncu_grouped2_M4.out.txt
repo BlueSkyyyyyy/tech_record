@@ -1,0 +1,19 @@
+ void gemv_fp4_g2<4, 4, 2, 4, 2>(const signed char *, const float *, const unsigned char *, const float *, const int *, const int *, const int *, const int *, float *, int) (96, 384, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+ ------------------------------------------------------------------------- --------------- ------------
+ Metric Name Metric Unit Metric Value
+ ------------------------------------------------------------------------- --------------- ------------
+ dram__throughput.avg.pct_of_peak_sustained_elapsed % 62.02
+ gpu__time_duration.sum ms 2.55
+ l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum 122786
+ l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum 363454370
+ l1tex__throughput.avg.pct_of_peak_sustained_elapsed % 68.80
+ l2__throughput.avg.pct_of_peak_sustained_elapsed (!) n/a
+ launch__occupancy_limit_registers block 2
+ launch__registers_per_thread register/thread 124
+ sm__throughput.avg.pct_of_peak_sustained_elapsed % 61.37
+ sm__warps_active.avg.pct_of_peak_sustained_active % 24.11
+ smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio inst 0.11
+ smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio inst 1.40
+ smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio inst 0.64
+ smsp__inst_executed_op_shared_ld.sum inst 313786368
+ ------------------------------------------------------------------------- --------------- ------------
