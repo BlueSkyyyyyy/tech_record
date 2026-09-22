@@ -55,6 +55,26 @@
 static constexpr int THREADS = 128;   // 4 warps
 static constexpr int WN      = 2;     // N 方向 warp 数（2×2 warp 网格）
 
+// ----------------------------- O11：快速指数/对数 -----------------------------
+// 与两文件版 `fa_bwd_fp16_mma_kernels.cuh` 逐字一致。
+#ifndef FAST_EXP
+#define FAST_EXP 1
+#endif
+__device__ __forceinline__ float fexp(float x) {
+#if FAST_EXP
+  return __expf(x);
+#else
+  return expf(x);
+#endif
+}
+__device__ __forceinline__ float flog(float x) {
+#if FAST_EXP
+  return __logf(x);
+#else
+  return logf(x);
+#endif
+}
+
 // =============================================================================
 // mma / ldmatrix（与 smoke 完全一致）
 // =============================================================================
@@ -301,7 +321,7 @@ lse_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
         if (qi < S && jg < S && !(causal && jg > qi)) sv = acc[0][j][q] * scale;
         if (sv != -INFINITY) {
           float mn = fmaxf(mrow[s], sv);
-          lrow[s] = lrow[s] * expf(mrow[s] - mn) + expf(sv - mn);
+          lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
           mrow[s] = mn;
         }
       }
@@ -317,15 +337,15 @@ lse_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
       float m2 = __shfl_xor_sync(0xffffffffu, m, off);
       float l2 = __shfl_xor_sync(0xffffffffu, l, off);
       float mn = fmaxf(m, m2);
-      float ca = (m == -INFINITY) ? 0.f : l * expf(m - mn);
-      float cb = (m2 == -INFINITY) ? 0.f : l2 * expf(m2 - mn);
+      float ca = (m == -INFINITY) ? 0.f : l * fexp(m - mn);
+      float cb = (m2 == -INFINITY) ? 0.f : l2 * fexp(m2 - mn);
       l = ca + cb;
       m = mn;
     }
     if (c2 == 0) {
       int r = wid * 16 + g + (s ? 8 : 0);
       int qi = m0 + r;
-      if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + logf(l);
+      if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
     }
   }
 }
@@ -456,7 +476,7 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
           if (qi < S && jg < S && jg <= qi) sv = acc[0][j][q] * scale;
           if (sv != -INFINITY) {
             float mn = fmaxf(mrow[s], sv);
-            lrow[s] = lrow[s] * expf(mrow[s] - mn) + expf(sv - mn);
+            lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
             mrow[s] = mn;
           }
         }
@@ -471,15 +491,15 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
         float m2 = __shfl_xor_sync(0xffffffffu, m, off);
         float l2 = __shfl_xor_sync(0xffffffffu, l, off);
         float mn = fmaxf(m, m2);
-        float ca = (m == -INFINITY) ? 0.f : l * expf(m - mn);
-        float cb = (m2 == -INFINITY) ? 0.f : l2 * expf(m2 - mn);
+        float ca = (m == -INFINITY) ? 0.f : l * fexp(m - mn);
+        float cb = (m2 == -INFINITY) ? 0.f : l2 * fexp(m2 - mn);
         l = ca + cb;
         m = mn;
       }
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + logf(l);
+        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
       }
     }
     // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
@@ -735,7 +755,7 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
               lv = lse[((size_t)(b * S + qi)) * H + h];
             float p = 0.f;
             if (qi < S && jg < S && !(causal && jg > qi))
-              p = expf(acc[i][j][q] * scale - lv);
+              p = fexp(acc[i][j][q] * scale - lv);
             pval[i][j][q] = p;
             if constexpr (PIPE == 2)
               Ps[r * LDS + c] = __float2half(p);   // [BM][BN]，GEMM3 用 trans 读

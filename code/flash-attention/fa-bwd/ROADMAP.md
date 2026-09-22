@@ -927,6 +927,37 @@
     `src/fp16/fa_bwd_fp16_mma_onefile_o10_*.out.txt`、`src/fp16/fa_bwd_fp16_o10_fa3_te_baseline.out.txt`；
     `src/bf16/` 同构文件（`..._o10_*`）；文档 `docs/01` §14c、`docs/01b` §6m、`docs/04` §2.1/§2.2。
 
+- 2026-09-23（第三十八轮）：**O11 完成（fp8 LSE 负载均衡 + `cp.async` 双缓冲，preprocess 3.1×；
+  另附 fp16/bf16/fp8 快速 exp/log）**。
+  - 动机：fp16/bf16 在 **O8b** 已把 LSE 做「镜像配对 + `cp.async` 双缓冲」（lse 2.8×），
+    但 **fp8 的 `lse_mma_kernel`（O1）从未做这两件事**——`S=4096` fp8 preprocess 仍 **1.20ms**
+    （占端到端 ~29%），而 fp16/bf16 同 shape 只有 0.35ms。
+  - 新增 `lse_mma_kernel_bal<HD,PIPE>`（`src/fp8/fa_bwd_fp8_kernels.cuh`，单文件同源）：
+    ① 镜像配对（每 CTA 做 `m` 与 `nblk-1-m`，工作量恒 `nblk+1`，grid.x 减半）；
+    ② K/Q 的 `cp.async.cg` 16B 双缓冲（fp8 一行 `HD` 字节 = `HD/16` 个 16B unit）。
+    仅 causal 走新 kernel，非 causal 走 O1 原版。新增 `Fp8Cfg::lse_smem_bytes_bal0/1`。
+  - 另附 **快速 exp/log**：`fexp`/`flog`（`__expf`/`__logf`，MUFU，相对误差 ~2^-21）替换
+    fp16/bf16/fp8 三套件里 softmax 热点的 9/9/5 处 `expf`/`logf`，`FAST_EXP` 宏 A/B。
+  - **数值与 O7 逐位相同**：S=4096 2.635/2.643/3.216e-1；S=512 2.426/2.975/3.735e-1；
+    GQA h32kv4 2.517/5.408/7.072e-1；MQA kv1 4.097e-1/1.519/2.127；MLA S1024H2
+    2.232/3.337/3.602e-1。单/两文件逐指标一致（S=4096 total 3.308 vs 3.310ms）。
+  - **性能（event）**：lse 消融 S=512 1.67× / S1024 kv4 2.01× / MQA kv1 2.40× /
+    S=4096 **2.71×**（0.936→0.345ms）；**preprocess S=4096 1.20→0.388ms（3.1×）**；
+    **端到端 4.13→3.31ms（1.25×，41.5 TF）**；纯反向（去 quant）≈3.13ms ⇒ ours/TE FP8
+    6.7×→**5.3×**。fast-exp A/B（fp16 S4096）：total 2.0053→1.9697（1.8%）、preprocess
+    0.3712→0.3439（**8.0%**）、main 不变。
+  - **同轮证伪两条**：fp16 主 kernel `(BM=32,BN=64,PIPE=2)`（dK/dV 原子量翻倍，main 慢 1.75×）、
+    `cp.async .L2::256B` 提示（无变化）。
+  - ncu（lse_bal, S=4096）：Duration **357µs**、DRAM 1.48% / L1/TEX 28.2% / L2 15.0% /
+    **Compute 61.2%** / occ 23.2% / **Waves 0.65** ⇒ 新墙 = **Compute 61% + 网格不足一个波**
+    （与 fp16/bf16 O8b 一致）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_main_o11_lsebal.out.txt`、
+    `src/fp8/fa_bwd_fp8_main_o11_ncu_lsebal_s4096.out.txt`、
+    `src/fp8/fa_bwd_fp8_mma_onefile_o11_s4096.out.txt`、
+    `src/fp16/fa_bwd_fp16_mma_main_o11_{ab_fastexp,s4096,s512}.out.txt`、
+    `src/bf16/fa_bwd_bf16_mma_main_o11_{s512,s4096}.out.txt`、`src/fa_bwd_o11_fa3_te_baseline.out.txt`；
+    文档 `docs/03` §19、`docs/01` §14d、`docs/01b` §6n、`docs/04` §2.3/§3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -987,7 +1018,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       镜像配对（`m` 与 `nblk-1-m`，工作量恒 `nblk+1`）+ K 的 `cp.async.cg` 16B 双缓冲；
       **lse S4096 0.985→0.348ms（2.81×，fp16）/ 0.970→0.350ms（2.77×，bf16）**、
       端到端 **2.952→2.336ms（58.8 TF，FA3 的 6.9%，fp16）/ 2.961→2.343ms（58.7 TF，6.8%，bf16）**，
-      `long_scoreboard` 2.19→0.34、Waves 1.29→0.97，数值逐位相同。详见 `docs/01` §13、`docs/01b` §6i。
+       `long_scoreboard` 2.19→0.34、Waves 1.29→0.97，数值逐位相同。详见 `docs/01` §13、`docs/01b` §6i。
+- [x] **O11** fp8 LSE 补上 O8b + 三 dtype 快速 exp/log。**已完成（第三十八轮）**：
+      `lse_mma_kernel_bal<HD,PIPE>`（镜像配对 + `cp.async.cg` 16B 双缓冲；fp8 = 1B/元素，
+      `HD/16` 个 unit）——lse **S4096 0.936→0.345ms（2.71×）**、preprocess **1.20→0.388ms（3.1×）**、
+      端到端 **4.13→3.31ms（1.25×）**，数值与 O7 逐位相同；另把 fp16/bf16/fp8 的 `expf/logf`
+      换 `__expf/__logf`（preprocess 再 ~8%）。详见 `docs/03` §19、`docs/01` §14d、`docs/01b` §6n。
 - [ ] **O9**（对标 FA3）TMA + `wgmma` + warp specialization 多级流水。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
@@ -1052,6 +1088,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 数值逐位不变；ncu `long_scoreboard` 1.38→0.89、指令数 −2.5%。这是 O9 之前对**现有数据通路**
 > 的最后一次清理——**墙仍是 `wait` + L2 + 2 CTA/SM，只有 O9 的更低-smem 数据通路能继续推进**。
 > 详见 `docs/01` §14c、`docs/01b` §6m。
+>
+> **旁支已完成（第三十八轮 O11）**：给 **fp8 的 LSE 补上 O8b**（镜像配对负载均衡 + `cp.async.cg`
+> 16B 双缓冲，fp8 一行 `HD` 字节 = `HD/16` 个 16B unit）——fp8 preprocess `S=4096` **1.20→0.388ms
+> （3.1×）**、端到端 **4.13→3.31ms（1.25×）**，数值与 O7 逐位相同；另把 fp16/bf16/fp8 的
+> `expf/logf` 换 `__expf/__logf`（preprocess 再 ~8%）。同轮证伪两条主 kernel 假设
+> （`(BM=32,BN=64,PIPE=2)` 慢 1.75×、`cp.async .L2::256B` 无变化）。详见 `docs/03` §19。
 
 > **用户新增需求（已完成）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
 > 目前 FA/TE 做不了 MLA 反向，ML A 的性能数字只能由 ours 提供。

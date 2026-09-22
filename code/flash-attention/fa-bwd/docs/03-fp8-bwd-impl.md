@@ -1412,3 +1412,114 @@ launch__registers_per_thread,gpu__time_duration.sum \
 原始输出：`src/fp8/fa_bwd_fp8_main_o7_sweep.out.txt`、
 `src/fp8/fa_bwd_fp8_mma_onefile_o7_sweep.out.txt`、`src/fp8/fa_bwd_fp8_main_o7_ncu_s4096.out.txt`、
 `src/fp8/fa_bwd_fp8_o7_tebench.out.txt`。
+
+---
+
+## 19. O11：fp8 LSE 预处理负载均衡 + `cp.async` 双缓冲（preprocess 3.1×，端到端 1.25×）+ 快速 exp/log
+
+### 19.1 动机：fp8 的 preprocess 一直没沾到 O8b 的光
+
+`docs/01`（fp16）/`docs/01b`（bf16）在 O8b 里对 LSE 预处理做了两件事，把 lse 从
+`S=4096` 的 ~0.99ms 打到 ~0.35ms（2.8×）：
+
+1. **镜像配对负载均衡**：因果下第 `m` 个 Q 块要做 `m+1` 个 K tile，工作量随 `m` 线性增长；
+   GPU 按 `blockIdx` 递增调度会把重块排到最后（尾波最重）。改成每 CTA 同时处理配对的两个
+   m 块 `m` 与 `nblk-1-m`，工作量恒为 `nblk+1`，`grid.x` 减半。
+2. **K 的 `cp.async.cg` 16B 双缓冲**：把「同步逐字节读 K → sync → mma」改成异步预取下一块。
+
+**但 fp8 的 `lse_mma_kernel`（O1）从来没有做这两件事**（它只做了 O1 的「mma 分块 LSE」）。
+实测 fp8 `S=4096` 的 preprocess 仍是 **1.20ms**（占端到端 ~29%），其中 lse 0.94ms、delta 0.04ms，
+而 fp16/bf16 同 shape 只有 0.35ms。这是本轮的主要目标。
+
+### 19.2 改动（单/两文件 device 代码同源逐字一致）
+
+新增 `lse_mma_kernel_bal<HD, PIPE>`（`src/fp8/fa_bwd_fp8_kernels.cuh`，单文件版同源），
+结构逐条对齐 fp16 的 `lse_mma_kernel_bal`：
+
+- **镜像配对**：`mblk = (t==0) ? pair : nblk-1-pair`，`pair = blockIdx.x`，`grid.x = ceil(nblk/2)`；
+  奇数 `nblk` 的中心块只做一次。mask 与 O1 完全一致，只把 `!(causal&&jg>qi)` 写成 `jg<=qi`。
+- **K/Q 的 `cp.async.cg` 16B 双缓冲**（`PIPE=1`）：fp8 是 1B/元素、一行 `HD` 字节，
+  **16B = 16 个 fp8**，故 unit 数 = `HD/16`（fp16/bf16 是 `HD/8`）；`PIPE=0` 退回同步标量读，
+  用于同 session 消融。新增 `cp_async16`（与 fp16 版同构，`cp.async.cg` L2-only）。
+- rowwise scale 与 O1 一致：`sv = acc·scale·qs_s[r]·ks_s[c]`，只是 `ks_s` 也按 tile 双缓冲。
+- smem：`Qs[LBM*ASLD] + (PIPE?2:1)·Ks[LBN*ASLD] + (LBM + (PIPE?2:1)·LBN)·4B`；
+  新增 `Fp8Cfg::lse_smem_bytes_bal0/1`。仅 causal 走新 kernel，非 causal 走 O1 原版。
+
+**另附：快速 exp/log（与 fp16/bf16 同款）**。把 softmax 热点的 libdevice 精确 `expf`/`logf`
+换成硬件内建 `__expf`/`__logf`（MUFU.EX2/LG2，相对误差 ~2^-21），用 `FAST_EXP` 宏做 A/B。
+fp8 容差 O(1)，无影响；A/B 见下。
+
+### 19.3 数值核对（与 O1/O7 **逐位相同**）
+
+`ours vs fp32 ref`（max_abs，causal）：
+
+| case | dq | dk | dv | 与 O7 记录 |
+|---|---|---|---|---|
+| S=4096 H16 D128 | 2.635e-01 | 2.643e-01 | 3.216e-01 | 逐位相同 |
+| S=512 H16 D128 | 2.426e-01 | 2.975e-01 | 3.735e-01 | 逐位相同 |
+| S=1024 H32 D128 kv4 | 2.517e-01 | 5.408e-01 | 7.072e-01 | 逐位相同 |
+| S=1024 H64 D128 kv1(MQA) | 4.097e-01 | 1.519e+00 | 2.127e+00 | 逐位相同 |
+| S=1024 H2 D512(MLA) | 2.232e-01 | 3.337e-01 | 3.602e-01 | 逐位相同 |
+
+证明只换算法数据流（负载均衡 + 搬运方式），未改数学口径。单文件（`fa_bwd_fp8_mma_onefile.cu`）
+与两文件**逐指标一致**（S=4096 total 3.308 vs 3.310ms）。
+
+### 19.4 性能（CUDA event 纯 device；同 session A/B）
+
+**lse 消融**（同 binary 内三档，`event`）：
+
+| shape | lse O1 | +镜像配对(单缓冲) | +cp.async 双缓冲 | 累计 |
+|---|---|---|---|---|
+| S=512 H16 D128 | 0.0652 ms | 0.0513 (1.27×) | **0.0389 (1.67×)** | 1.67× |
+| S=1024 H32 D128 kv4 | 0.1542 | 0.1005 (1.54×) | **0.0767 (2.01×)** | 2.01× |
+| S=1024 H64 D128 kv1 | 0.2416 | 0.1265 (1.91×) | **0.1009 (2.40×)** | 2.40× |
+| S=4096 H16 D128 | 0.9362 | 0.4257 (2.20×) | **0.3453 (2.71×)** | 2.71× |
+
+**端到端**（`quant+pre+main+cvt`，ms）：
+
+| shape | pre O1 | pre O11 | total O11 | 相对 O7 total |
+|---|---|---|---|---|
+| S=512 H16 D128 | 0.24 | **0.0465** | 0.1797 | — |
+| S=1024 H32 D128 kv4 | — | **0.1006** | 0.6380 | ~1.3× |
+| S=4096 H16 D128 | 1.2009 | **0.3878** | **3.3104**（3.31ms，41.5 TF）| 4.34→3.31（**1.31×**） |
+| S=1024 H2 D512 MLA | — | 0.1388 | 0.5390 | — |
+
+**快速 exp/log A/B**（fp16/bf16 同款；`docs/01` §14d）：fp16 MHA S=4096 `total` 2.0053→**1.9697ms**
+（1.8%）、preprocess 0.3712→**0.3439ms（8.0%）**、main 几乎不变——即墙不在 exp，但 LSE 白赚 8%。
+（本轮 fp8 的端到端大头来自 §19.4 的 lse 负载均衡，fast-exp 只是顺带。）
+
+**对标**（同 session 纯反向口径）：
+
+- FA2/FA3/TE（`harness/fa_vs_te_bwd_only.py`，fp16）：MHA S=4096 FA2 0.7269ms/378TF、
+  **FA3 0.3236/849**、TE 0.4416/622；bf16 **FA3 0.3207/857**、TE 0.4422/622。
+- TE FP8（`harness/fa_bwd_bench.py bench --dtype fp8`）：S=512 0.1005ms/42.7TF、
+  S=1024 0.1477/116.3、**S=4096 0.5908/465.3TF**。ours fp8 纯反向（去掉 quant）S=4096
+  ≈ 3.13ms ⇒ **ours/TE 5.3×**（O7 时 6.7×）。注意 TE FP8 复用前向的 LSE，我们则要自算 LSE。
+
+### 19.5 ncu（lse_mma_kernel_bal，S=4096，`--set full`）
+
+`Duration 357µs`、DRAM 1.48% / **L1/TEX 28.2%** / L2 15.0% / **Compute 61.2%**、
+77 regs、smem ~27.7KB/块（Block Limit Shared Mem 6）、**achieved occupancy 23.2%**、
+**Waves 0.65**（grid=528 < 一个满波）。对比 O1 原版：Duration 1.14ms、Compute 39.4%、
+Waves 1.11、long_scoreboard 主导。**新墙 = Compute 61% + 网格不足一个波（负载均衡后每 CTA
+工作量恒定，但 528 个 CTA 铺不满 132 SM × 6 CTA/SM）**；与 fp16/bf16 的 O8b 结论一致。
+
+### 19.6 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+# 单/两文件 fp8（含 lse 三档 A/B）
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=50 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=50 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# ncu：balanced LSE
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:lse_mma_kernel_bal -c 1 -- \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=2
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o11_lsebal.out.txt`、
+`src/fp8/fa_bwd_fp8_main_o11_ncu_lsebal_s4096.out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_o11_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o11_ab_fastexp.out.txt`、`src/fa_bwd_o11_fa3_te_baseline.out.txt`。

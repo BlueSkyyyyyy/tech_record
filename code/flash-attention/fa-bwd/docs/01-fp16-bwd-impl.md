@@ -1124,10 +1124,30 @@ GQA kv4 S=1024：FA3 0.0821ms/418TF，ours total 0.3767ms ⇒ 4.59×
 
 ---
 
+## 14d. O11：快速 exp/log（fp16，preprocess 8%，total ~1.8%）
+
+**动机**：softmax 的 `expf`/`logf` 在主 kernel 与 LSE 预处理里都是**每元素**要算的热点，
+而它们默认走 libdevice 的精确软件实现（~10 多条指令）。FA2/FA3 用的是硬件 `exp2f`（MUFU.EX2）。
+
+**改动**（单/两文件 device 代码逐字一致）：新增 `fexp`/`flog` 内联（`FAST_EXP` 宏，默认 1）把
+`expf`/`logf` 换成 `__expf`/`__logf`（MUFU.EX2/LG2，相对误差 ~2^-21），覆盖 `lse_mma_kernel`、
+`lse_mma_kernel_bal` 与主 kernel 的 P 计算共 9 处；`-DFAST_EXP=0` 可退回精确版做 A/B。
+
+**A/B（同文件顺序编译，fp16 MHA S=4096，CUDA event）**：`total` 2.0053→**1.9697ms（1.8%）**、
+`preprocess` 0.3712→**0.3439ms（8.0%）**、`main` 1.5429→1.5400（~不变）。**数值逐位不变**
+（dq/dk/dv vs ref 仍 1.883/1.734/1.966e-3）。结论：主 kernel 的墙**不在 exp**（是 L2/occupancy），
+但 LSE 白赚 8%。原始输出 `src/fp16/fa_bwd_fp16_mma_main_o11_ab_fastexp.out.txt`。
+
+> 同轮尝试并**证伪**的两条：① 主 kernel `(BM=32,BN=64,PIPE=2)`（更小 Q tile、更低寄存器、
+> grid 翻倍）——dK/dV 跨 CTA 原子量翻倍，`S=4096` main 1.49→2.61ms（**慢 1.75×**），不可用；
+> ② `cp.async` 加 `.L2::256B` 预取提示——main 无变化（L2 命中已 97%，不是扇区利用率问题）。
+
+---
+
 ## 15. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
-O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）** 完成。O7c 已把
+O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）、O11（§14d）** 完成。O7c 已把
 「减 red 事务数」这条杠杆**证伪**（float4 更慢），O10 又把 Q/dO 的标量载入与 dQ 写回向量化
 （`long_scoreboard` 压下、指令数 −2.5%），把墙进一步收敛到 **`wait`（mma 依赖）+ L2 + 2 CTA/SM**。
 后续按回报排序：**O9**（`wgmma`+TMA+warp specialization，对标 FA3；O6c/O7c/O10 已证明

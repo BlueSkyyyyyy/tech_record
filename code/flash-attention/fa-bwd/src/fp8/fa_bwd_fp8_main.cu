@@ -139,6 +139,18 @@ static void launch_lse(dim3 lg, const unsigned char* q8, const float* qs,
                                                            scale, causal);
 }
 
+// O11：LSE 的镜像配对（+可选 cp.async 双缓冲）版本，仅 causal。
+template <int HD, int PIPE>
+static void launch_lse_bal(dim3 lg, const unsigned char* q8, const float* qs,
+                           const unsigned char* k8, const float* ks, float* lse, int S, int H,
+                           int Hkv, float scale) {
+  using Cfg = Fp8Cfg<HD, 64, 32>;
+  constexpr int kSmem = PIPE ? Cfg::lse_smem_bytes_bal1 : Cfg::lse_smem_bytes_bal0;
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<HD, PIPE>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  lse_mma_kernel_bal<HD, PIPE><<<lg, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv, scale);
+}
+
 // =============================================================================
 // host / launcher / self-test
 // =============================================================================
@@ -272,6 +284,7 @@ int main(int argc, char** argv) {
   const bool use_regdq = (D == 128) && ((long)(S / 32) / 2 / ksplit >= 4);
   dim3 pg(S, H, B);
   dim3 lg((S + LBM - 1) / LBM, H, B);
+  dim3 lg_bal((((S + LBM - 1) / LBM) + 1) / 2, H, B);   // O11：镜像配对，grid.x 减半
   dim3 mg((S + BM - 1) / BM * ksplit, H, B);
   printf("grid main = %d x %d x %d  (ksplit=%d, base_grid=%ld)\n", mg.x, mg.y, mg.z,
          ksplit, base_grid);
@@ -281,10 +294,17 @@ int main(int argc, char** argv) {
 
   auto run_preprocess = [&]() {
     if (D == 128) {
-      launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
+      // O11：causal 走镜像配对 + cp.async 双缓冲（非 causal 各块工作量相同，走 O1 原版）。
+      if (causal)
+        launch_lse_bal<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+      else
+        launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
       delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
     } else {
-      launch_lse<512>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
+      if (causal)
+        launch_lse_bal<512, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+      else
+        launch_lse<512>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
       delta_kernel<512><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
     }
   };
@@ -361,6 +381,32 @@ int main(int argc, char** argv) {
   ms_main /= iters;
   printf("[timing] quant %.4f ms | preprocess %.4f ms | main %.4f ms | convert %.4f ms\n",
          ms_quant, ms_pre, ms_main, ms - ms_quant - ms_pre - ms_main);
+
+  // ---- O11 A/B（仅 causal, D=128）：LSE O1 原版 vs 镜像配对(单缓冲) vs 镜像配对+cp.async ----
+  if (causal && D == 128) {
+    auto bench_lse = [&](int which, float* out) {
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) {
+        if (which == 0)
+          launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, 1);
+        else if (which == 1)
+          launch_lse_bal<128, 0>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+        else
+          launch_lse_bal<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+      }
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float a = 0.f, b = 0.f, c = 0.f;
+    bench_lse(0, &a);
+    bench_lse(1, &b);
+    bench_lse(2, &c);
+    printf("[O11 A/B] lse O1 %.4f ms | bal(单缓冲) %.4f ms (%.3fx) | bal+cpasync %.4f ms "
+           "(%.3fx)\n",
+           a, b, a / b, c, a / c);
+  }
 
   std::vector<float> mdq(nq), mdk(nkv), mdv(nkv);
   CUDA_CHECK(cudaMemcpy(mdq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
