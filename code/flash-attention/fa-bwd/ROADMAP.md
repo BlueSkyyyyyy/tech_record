@@ -862,6 +862,38 @@
     改动前基线 `src/fp16/fa_bwd_fp16_mma_main_o7c_base_{s512,s4096}.out.txt`；
     文档 `docs/01` §14、`docs/01b` §6k、`docs/04` §2.1/§2.2/§3/§6。
 
+- 2026-09-23（第三十六轮）：**MLA（head_dim=512）张量核反向完成（O5c，fp16+bf16，单/两文件）**。
+  - 动机：P5-2/P5-3 的 fp16/bf16 MLA 反向一直是**标量 golden**（135KB smem、1 CTA/SM）。
+    fp8 早在第二十一轮就把 MLA 上了张量核（main 比标量 MLA 快 6.5–7.3×）；本轮把 fp16/bf16
+    补齐，消除 MLA 的标量短板。
+  - **改动（单/两文件 device 代码逐字同源）**：`fa_bwd_{fp16,bf16}_mma_kernel<HD,...>` 从
+    `static_assert(HD==128)` 扩到 **HD=128/512**：① GEMM1/2 归约维是 HD ⇒ 只是 k-loop 从
+    8 步变 32 步；② GEMM3/4/5 输出 N 维是 HD ⇒ 加 **N-tile 循环**（`NTW=WN*64=128` 列/遍，
+    `NDT=HD/NTW` 遍），B（`[K][HD]` 转置布局）基址/写回列号 `+hd0`；③ dQ 的 HD 列放不进寄存器 ⇒
+    HD>128 时在 GEMM5 epilogue **直接全局累加**（每 `(qi,列)` 由唯一线程拥有：唯一 CTA + 唯一
+    warp + 唯一 N-tile ⇒ **非原子 RMW 无竞争**，`dq_acc` 由 host `memset(0)`）。
+    host 按 `D∈{128,512}` 分派 LSE/delta/主 kernel 并各设 smem；MLA 自动档 `BM=32,BN=32,PIPE=1`。
+  - **数值（ours-vs-ref，fp16/bf16 causal，D=Dv=512）**：fp16 S256H2 1.638/1.582/1.753e-3、
+    S512H4 2.516/2.916/1.724e-3、S1024H2 1.987/1.712/1.848e-3；bf16 S512H4
+    8.753/1.082e-2/1.740e-2 等——均对应 dtype 噪声量级。**MHA D=128 回归逐位不变**
+    （fp16 S512 1.671/1.771/1.899e-3、S4096 1.883/1.734/1.966e-3；bf16 S512
+    9.001/12.61/13.65e-3），单/两文件逐指标一致。
+  - **性能（同 session CUDA event）**：fp16 main 标量→张量核 1.065→**0.204**（5.2×）/
+    2.120→**0.385**（5.5×）/4.214→**0.725ms**（5.8×），total 1.288→0.300 / 3.507→0.536 /
+    6.817→**0.939ms（7.3×）**；bf16 main 0.753→**0.204**（3.7×）/1.488→**0.385**（3.9×）/
+    2.959→**0.725ms**（4.1×）。配置 A/B `(32,32,PIPE=1)` 比 `(32,32,0)` 快 **1.67×**
+    （K 双缓冲）。FA/TE 反向不支持 head_dim=512，无对标基线（仅 fp32 ref）。
+  - **ncu（main，S=1024 H2 D=512，fp16/bf16 逐项相同）**：Duration **769µs**、
+    DRAM 0.83% / L1/TEX 40.1% / L2 13.9% / Compute 2.2%、168 regs / **207.36KB smem → 1 CTA/SM**、
+    occ 6.25%、**Waves 0.48**、No Eligible 91.6%、stall **`long_scoreboard` 7.68** + wait 2.23、
+    bank conflict `op_ld` 仅 1.13M ⇒ **bound = 全局访存延迟 + 低并行度**（grid=64 < 132 SM、
+    1 CTA/SM），不再是标量 MLA 的 smem bank conflict。
+  - 原始输出 `src/fp16/fa_bwd_fp16_mma_main_p5mla_{s256h2,s512h4,s1024h2}.out.txt`、
+    `..._mma_onefile_p5mla_s512h4.out.txt`、`..._mma_main_p5mla_reg_d128_s512.out.txt`、
+    `src/fp16/fa_bwd_fp16_main_p5mla_*.out.txt`（标量基线）、
+    `..._mma_main_p5mla_ncu_{sol,stall}_s1024h2.out.txt`；`src/bf16/` 同构文件（`..._p5mla_*`）；
+    文档 `docs/01` §14b、`docs/01b` §6l、`docs/04` §7.8。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -976,6 +1008,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    把 occupancy 锁死在 2 CTA/SM；**只有更低 smem 的数据通路（TMA 直写 smem + wgmma 免
 >    `ldmatrix`/转置副本）才能同时拿低 L1/L2 与高 occupancy**。
 > 目标：fp16/bf16 main 先到 FA2 水平，再逼近 FA3/TE；每步用 `harness/fa_vs_te_bwd_only.py`（纯反向、三列）验收。
+>
+> **旁支已完成（第三十六轮 O5c）**：把 fp16/bf16 的 **MLA（head_dim=512）反向从标量升级为张量核**
+> （`HD` 模板 128/512、GEMM3/4/5 N-tile 循环、dQ 全局累加），main 5.2–5.8×（fp16）/3.7–4.1×（bf16），
+> 数值同噪声、MHA 回归逐位不变。详见 `docs/01` §14b、`docs/01b` §6l、`docs/04` §7.8。
+> MLA 的下一步（降 smem 冲 2 CTA/SM / split-KV）列 backlog。
 
 > **用户新增需求（已完成）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
 > 目前 FA/TE 做不了 MLA 反向，ML A 的性能数字只能由 ours 提供。
@@ -1001,13 +1038,13 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `HD=512` smem 223.2KB（1 CTA/SM），3 个 MLA case 对拍 ref 同 fp8 噪声（2.2–4.5e-1，分段均匀），
       main 比 fp16/bf16 标量 MLA 快 6.5–7.3×；`docs/03` §14、`docs/04` §7.7。
 - [x] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能 —— 第十八轮完成。
-- [ ] **MLA 优化（backlog）**：fp16（P5-2）、bf16（第二十轮）、fp8（第二十一轮）均已给出 MLA 的
-       ref 对拍与 ours 性能数字；下一步是**优化**——fp16/bf16 都是标量 + 1 CTA/SM（~135KB smem），
-       目标是**上张量核**（对齐 fp8 mma 路径）并把 smem 降下来冲 2 CTA/SM；fp8 MLA 已是张量核但
-       1 CTA/SM（223KB smem，255 regs + spill），瓶颈在 occupancy。共同的最大障碍是 `Kt/Qt/dOt`
-       三个转置副本（fp8 MLA 里 ≈107KB），正好是 **O4b（`ldmatrix.trans` 消转置副本）**；其次是
-       preprocess 在 MLA（D=512）下占比升高（S=1024H2 时 0.371ms vs main 0.564ms）。
-       对标 FlashMLA 的分块/流水/persistent。
+- [~] **MLA 优化（backlog）**：fp16（P5-2）、bf16（第二十轮）、fp8（第二十一轮）均已给出 MLA 的
+      ref 对拍与 ours 性能数字。**fp16/bf16 上张量核已完成（第三十六轮 O5c，`docs/01` §14b / `01b` §6l）**：
+      `HD` 模板扩到 128/512、GEMM3/4/5 N-tile 循环、dQ 全局累加；main 5.2–5.8×（fp16）/
+      3.7–4.1×（bf16），数值同噪声、MHA 回归逐位不变。fp8 MLA 早在第二十一轮即为张量核。
+      **剩余**：三者都是 1 CTA/SM、grid 不足一个波（ncu Waves 0.48、bound=延迟+低并行度）⇒
+      下一步**降 smem 冲 2 CTA/SM** 与 **split-KV 提高 grid**；fp8 侧最大障碍是 `Kt/Qt/dOt`
+      转置副本（O4b 已把 fp8 MLA smem 223→201KB，仍需 >116KB）。对标 FlashMLA 的分块/流水/persistent。
 > 以下为既有 fp8 优化 backlog（P5 已全部收口，现在可与 MLA 优化合并推进）。
 
 > P5-3 已完成，ROADMAP 里的「P 项」全部收口，后续为**优化 backlog**。

@@ -172,8 +172,8 @@ int main(int argc, char** argv) {
   const int B = (int)q_np.shape[0], S = (int)q_np.shape[1];
   const int H = (int)q_np.shape[2], D = (int)q_np.shape[3];
   const int Hkv = (int)k_np.shape[2];
-  if (D != 128) {
-    fprintf(stderr, "O5 fp16 mma 版目前只支持 head_dim=128；当前 %d（MLA 见标量版）\n", D);
+  if (D != 128 && D != 512) {
+    fprintf(stderr, "O5 fp16 mma 版支持 head_dim=128/512；当前 %d\n", D);
     return 1;
   }
   if (H % Hkv != 0) {
@@ -224,16 +224,26 @@ int main(int argc, char** argv) {
   const int lse_nblk = (S + LBM - 1) / LBM;
   dim3 lg(lse_nblk, H, B);
   dim3 lg_bal((lse_nblk + 1) / 2, H, B);   // O8b：镜像配对，grid.x 减半
-  constexpr int kLseSmem = (LBM + LBN) * (128 + 8) * (int)sizeof(__half);
+  // LSE smem 随 head_dim 变化：Qs[LBM*LD] +（PIPE=0 时 1 份 / PIPE=1 时 2 份）Ks[LBN*LD]，LD=HD+8。
+  const int LDl = D + 8;
+  const int kLseSmem = (LBM + LBN) * LDl * (int)sizeof(__half);
   // O8b：PIPE=0 单缓冲（与 O8 同尺寸），PIPE=1 双缓冲。
-  constexpr int kLseSmemBal0 = (LBM + LBN) * (128 + 8) * (int)sizeof(__half);
-  constexpr int kLseSmemBal1 = (LBM + 2 * LBN) * (128 + 8) * (int)sizeof(__half);
+  const int kLseSmemBal0 = (LBM + LBN) * LDl * (int)sizeof(__half);
+  const int kLseSmemBal1 = (LBM + 2 * LBN) * LDl * (int)sizeof(__half);
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<128>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 0>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal0));
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 1>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
+  if (D == 512) {
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<512>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<512, 0>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal0));
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<512, 1>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
+  }
   const int cvt_threads = 256;
   const int cvt_blocks =
       (int)std::min<size_t>((std::max(n, nkv) + cvt_threads - 1) / cvt_threads, 65535);
@@ -245,9 +255,16 @@ int main(int argc, char** argv) {
   //  - 否则 BM=64：大网格走 O6b（PIPE=2，只双缓冲 K）；小网格走 O6（PIPE=1）。
   const long long grid = (long long)((S + 63) / 64) * H * B;
   const bool tiny = (grid < 132) && (S <= 1024);
-  const int auto_bm = tiny ? 32 : 64;
-  const int auto_bn = (!tiny && S >= 4096) ? 64 : 32;
-  const int auto_pipe = (!tiny && grid >= 396) ? 2 : 1;
+  int auto_bm = tiny ? 32 : 64;
+  int auto_bn = (!tiny && S >= 4096) ? 64 : 32;
+  int auto_pipe = (!tiny && grid >= 396) ? 2 : 1;
+  if (D == 512) {
+    // MLA（HD=512）：K/V 行有 520 个 half，BM=64 时双缓冲会超 smem，BM=32 时 PIPE=1
+    // （K 双缓冲）仍在 232KB 内且实测最快（1.67× vs PIPE=0）；S/H 小、grid 不足一个波。
+    auto_bm = 32;
+    auto_bn = 32;
+    auto_pipe = 1;
+  }
   const int bm_sel = (bm_opt > 0) ? bm_opt : auto_bm;
   const int bn_sel = (bn_opt > 0) ? bn_opt : auto_bn;
   const int pp_sel = (pipe >= 0) ? pipe : auto_pipe;
@@ -283,6 +300,17 @@ int main(int argc, char** argv) {
 
   auto launch_cfg = [&](int bm, int bn, int pp, bool r4, bool prel) {
     dim3 g((S + bm - 1) / bm, H, B);
+    if (D == 512) {
+      // MLA：BN=32；BM 可 32/64；只支持 PIPE=0/1（PIPE=2 的 V 单缓冲无意义且更费 smem）。
+      if (bm == 64) {
+        if (pp == 1) LAUNCH_CFG(512, 64, 32, 1);
+        else LAUNCH_CFG(512, 64, 32, 0);
+      } else {
+        if (pp == 1) LAUNCH_CFG(512, 32, 32, 1);
+        else LAUNCH_CFG(512, 32, 32, 0);
+      }
+      return;
+    }
     if (bm == 32) {
       if (pp == 2) LAUNCH_CFG(128, 32, 32, 2);
       else if (pp == 1) LAUNCH_CFG(128, 32, 32, 1);
@@ -302,13 +330,23 @@ int main(int argc, char** argv) {
   const bool prel_sel = (prel_opt >= 0) ? (prel_opt != 0) : true;
   auto run_main = [&]() { launch_cfg(bm_sel, bn_sel, pp_sel, r4_sel, prel_sel); };
   auto run_pre = [&]() {
-    if (causal)
-      lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
-                                                                    Hkv, scale);
-    else
-      lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
-                                                     (int)causal);
-    delta_kernel<128><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
+    if (D == 512) {
+      if (causal)
+        lse_mma_kernel_bal<512, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
+                                                                      Hkv, scale);
+      else
+        lse_mma_kernel<512><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
+                                                       (int)causal);
+      delta_kernel<512><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
+    } else {
+      if (causal)
+        lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
+                                                                      Hkv, scale);
+      else
+        lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
+                                                       (int)causal);
+      delta_kernel<128><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
+    }
   };
 
   cudaEvent_t ev0, ev1;
@@ -359,8 +397,8 @@ int main(int argc, char** argv) {
   printf("[timing] preprocess %.4f ms | main %.4f ms | convert %.4f ms\n", ms_pre, ms_main,
          ms - ms_pre - ms_main);
 
-  // ---- O8b A/B（仅 causal）：LSE 原版(O8) vs 镜像配对(单缓冲) vs 镜像配对+cp.async双缓冲 ----
-  if (causal) {
+  // ---- O8b A/B（仅 causal，HD=128）：LSE 原版(O8) vs 镜像配对 vs 镜像配对+cp.async ----
+  if (D == 128 && causal) {
     auto time_lse = [&](int mode, float* out_ms) {
       auto launch = [&]() {
         if (mode == 2)
@@ -389,7 +427,9 @@ int main(int argc, char** argv) {
            "(%.3fx)\n", ms_o8, ms_bal, ms_o8 / ms_bal, ms_balp, ms_o8 / ms_balp);
   }
 
-  // ---- O6 A/B：同 session 对比原版（PIPE=0）、K/V 双缓冲（PIPE=1）、只 K 双缓冲（PIPE=2）----
+  double main_flops = 4.0 * (double)B * S * H * S * D;
+  // ---- O6 A/B（仅 HD=128）：同 session 对比原版（PIPE=0）、K/V 双缓冲（PIPE=1）、只 K 双缓冲（PIPE=2）----
+  if (D == 128) {
   auto launch_mode = [&](int m) {
     if (m == 2)
       launch_bwd_mma<128, 64, 32, 2>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
@@ -418,7 +458,6 @@ int main(int argc, char** argv) {
   time_launch(0, &ms_nopipe);
   time_launch(1, &ms_pipe);
   time_launch(2, &ms_pipe2);
-  double main_flops = 4.0 * (double)B * S * H * S * D;
   printf("[O6 A/B] main nopipe %.4f ms (%.2f TF) | pipe(KV both) %.4f ms (%.2f TF) | "
          "pipe2(K only) %.4f ms (%.2f TF) => nopipe/pipe %.3fx, nopipe/pipe2 %.3fx\n",
          ms_nopipe, main_flops / (ms_nopipe * 1e-3) / 1e12, ms_pipe,
@@ -426,7 +465,7 @@ int main(int argc, char** argv) {
          main_flops / (ms_pipe2 * 1e-3) / 1e12, ms_nopipe / ms_pipe,
          ms_nopipe / ms_pipe2);
 
-  // ---- O6c A/B（仅 causal）：mblk 重排 sched=0/1/2（同一 pipe）----
+  // ---- O6c A/B（仅 causal，仍在 HD=128 块内）：mblk 重排 sched=0/1/2（同一 pipe）----
   if (causal) {
     const int mdef = (pipe < 0) ? auto_pipe : pipe;
     float ms_s[3] = {0.f, 0.f, 0.f};
@@ -439,9 +478,10 @@ int main(int argc, char** argv) {
            ms_s[0], ms_s[1], ms_s[0] / ms_s[1], ms_s[2], ms_s[0] / ms_s[2]);
     sched = 1;
   }
+  }  // end if (D == 128)
 
-  // ---- O5c A/B（仅 causal）：不同 (BM,BN,PIPE) tile 配置 ----
-  if (causal) {
+  // ---- O5c A/B（仅 HD=128 且 causal）：不同 (BM,BN,PIPE) tile 配置 ----
+  if (D == 128 && causal) {
     auto time_cfg = [&](int bm, int bn, int pp, float* out_ms) {
       auto launch = [&]() { launch_cfg(bm, bn, pp, false, true); };
       CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
@@ -468,8 +508,8 @@ int main(int argc, char** argv) {
            ms0 / std::min(std::min(ms0, ms1), std::min(ms2, ms3)));
   }
 
-  // ---- O7c A/B（仅 causal）：在 4 个几何上对比 {float2/float4} × {无/有 LSE-D 预装} ----
-  if (causal) {
+  // ---- O7c A/B（仅 HD=128 且 causal）：在 4 个几何上对比 {float2/float4} × {无/有 LSE-D 预装} ----
+  if (D == 128 && causal) {
     auto time_r4 = [&](int bm, int bn, int pp, bool r4, bool prel, float* out_ms) {
       auto launch = [&]() { launch_cfg(bm, bn, pp, r4, prel); };
       CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
@@ -499,6 +539,32 @@ int main(int argc, char** argv) {
              bm, bn, pp, a, tf(a), b, tf(b), (a / b - 1) * 100, c, tf(c), (a / c - 1) * 100, e,
              tf(e), (a / e - 1) * 100);
     }
+  }
+
+  // ---- MLA（HD=512）配置 A/B：BM=32/64 × PIPE=0/1，看哪种并行度/smem 组合最快 ----
+  if (D == 512 && causal) {
+    auto time_cfg2 = [&](int bm, int bn, int pp, float* out_ms) {
+      auto launch = [&]() { launch_cfg(bm, bn, pp, false, true); };
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    float a = 0.f, b = 0.f, c = 0.f;
+    time_cfg2(32, 32, 0, &a);
+    time_cfg2(32, 32, 1, &b);
+    time_cfg2(64, 32, 0, &c);
+    auto tf = [&](float ms) { return main_flops / (ms * 1e-3) / 1e12; };
+    printf("[MLA512 A/B] main: (32,32,0) %.4f (%.2f TF) | (32,32,1) %.4f (%.2f) | "
+           "(64,32,0) %.4f (%.2f) => best %.3fx\n",
+           a, tf(a), b, tf(b), c, tf(c), a / std::min(a, std::min(b, c)));
   }
 
   // ---- 数值对拍（重新跑一次完整 forward 保证累加缓冲清零）----

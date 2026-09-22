@@ -724,10 +724,57 @@ stall `wait 2.00 / long 1.39 / short 0.88 / mio 0.50`（`long` 从 ~1.8 降）�
 
 ---
 
+## 6l. MLA（head_dim=512）张量核反向（bf16，main 3.7–4.1×）
+
+把 fp16 的 MLA 张量核（`01` §14b）**逐字 dtype 参数化**到 bf16（`__half`→bf16、
+`mma_f16`→`mma_bf16`、`__float2half`→`__float2bfloat16`），device 代码与 fp16 同构：
+
+- `fa_bwd_bf16_mma_kernel<HD,BM,BN,PIPE,...>` 支持 HD=128/512：GEMM1/2 的 k-loop 变长；
+  GEMM3/4/5 加 **N-tile 循环**（每遍 `NTW=128` 列）；HD>128 的 dQ 直接**全局累加**
+  （每 `(qi,列)` 由唯一线程拥有 ⇒ 非原子 RMW 无竞争）。
+- host：`D∈{128,512}` 分派；MLA 自动档 `BM=32,BN=32,PIPE=1`。单/两文件 device 段逐字一致。
+
+**数值对拍（ours vs fp32 ref，bf16 causal，D=Dv=512）**：
+
+| case | dq (max_abs) | dk | dv |
+|---|---|---|---|
+| S=256 H=2 | 1.230e-2 | 9.875e-3 | 1.50e-2 |
+| S=512 H=4 | 8.753e-3 | 1.082e-2 | 1.740e-2 |
+| S=1024 H=2 | 5.838e-3 | 9.519e-3 | ~1.5e-2 |
+
+均 bf16 噪声量级（~1e-2），与 P5-3 标量 MLA（`01b` §6d：8.240/7.905/15.04e-3 等）同量级。
+**FA3/TE 反向不支持 head_dim=512**，只有 fp32 ref 可对。**MHA D=128 回归逐位不变**
+（S=512 9.001/12.61/13.65e-3），单/两文件一致。
+
+**性能（同 session CUDA event，preprocess/main/total，ms）**：
+
+| case | 标量 main | **张量核 main** | main 加速 | 标量 total | **张量核 total** | total 加速 |
+|---|---|---|---|---|---|---|
+| S=256 H=2 | 0.7531 | **0.2037** | **3.70×** | 0.9780 | **0.3003** | 3.26× |
+| S=512 H=4 | 1.4880 | **0.3847** | **3.87×** | 2.8835 | **0.5355** | 5.38× |
+| S=1024 H=2 | 2.9590 | **0.7248** | **4.08×** | 5.5703 | **0.9393** | 5.93× |
+
+配置 A/B（S=512 H4）：`(32,32,PIPE=1)` **0.3786ms** < `(32,32,PIPE=0)` 0.6263 < `(64,32,PIPE=0)`
+0.9208 ⇒ 1.65×。
+
+**ncu（main，S=1024 H2 D=512，`(32,32,PIPE=1)`）**：Duration **769.9µs**、DRAM 0.84% /
+L1/TEX 40.06% / L2 13.86% / Compute 2.22%、168 regs、207.36KB smem、1 CTA/SM、
+occ 6.25%、**Waves 0.48**、No Eligible 91.65%——与 fp16 MLA 逐项相同。**bound = 全局访存延迟
++ 低并行度**（grid=64 < 132 SM、1 CTA/SM），非带宽/算力。进一步提速需降 smem 冲 2 CTA/SM 或
+split-KV，留 backlog。
+
+原始输出 `src/bf16/fa_bwd_bf16_mma_main_p5mla_{s256h2,s512h4,s1024h2}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_p5mla_s512h4.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_main_p5mla_reg_d128_s512.out.txt`、
+`src/bf16/fa_bwd_bf16_main_p5mla_{s256h2,s512h4,s1024h2}.out.txt`（标量基线）、
+`src/bf16/fa_bwd_bf16_mma_main_p5mla_ncu_sol_s1024h2.out.txt`。
+
+---
+
 ## 8. 下一步
 
 见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）、O8（preprocess mma，§6f）、O6（main
 `cp.async` 双缓冲，§6g）、O6b（K/V 降 smem 回 3 CTA/SM + A 转置读，§6h）、O8b（LSE 负载
 均衡 + cp.async，§6i）、O6c（tile 几何参数化 + 小网格自适应，§6j）、O7c（LSE/D 预装 +
-float4 试错，§6k）已完成**；接下来是 **O9**（wgmma+TMA 对标 FA3）。
-backlog：fp8 侧残余 red（O7b）、MLA 降 smem / 张量核。
+float4 试错，§6k）、MLA 张量核（§6l）已完成**；接下来是 **O9**（wgmma+TMA 对标 FA3）。
+backlog：fp8 侧残余 red（O7b）、MLA 降 smem 冲 2 CTA/SM / split-KV。
