@@ -171,3 +171,127 @@ docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python harness/fa_bwd_bench.py 
 - **P3-4**：`mma.m16n8k32`（E5M2×E4M3）+ `ldmatrix` + smem padding，消 bank conflict、
   提 occupancy、把解码从 CUDA core 移到张量核；ncu 复测 bound。
 - **P3-5**：两文件拆分 + 本文档拆分/补全。
+
+---
+
+## 7. P3-4：张量核版（`src/fp8/fa_bwd_fp8_mma_onefile.cu`）
+
+> 目标：把 golden 的 5 个矩阵乘换成 `mma.sync.aligned.m16n8k32`（FP8），保持 rowwise 口径。
+> 原始输出：`src/fp8/fa_bwd_fp8_mma_onefile_{s512,s1024h32,s4096,ncu_main}.out.txt`；
+> 布局最小复现：`src/fp8/fa_bwd_fp8_mma_smoke.cu` + `..._smoke.out.txt`。
+
+### 7.1 先做「最小 GEMM 复现」验证 mma 布局（P3-4a）
+
+在合入反向之前，先用 `fa_bwd_fp8_mma_smoke.cu` 把 `m16n8k32` 的片段布局/`ldmatrix`/
+rowwise scale 折回逐位验证，覆盖 **E4M3×E4M3、E5M2×E4M3、E4M3×E5M2、E5M2×E5M2** 四种组合
+（反向 dV 恰是 E4M3×E5M2）：
+
+```
+[E4M3xE4M3] M=64 N=32 K=128  mma-vs-ref max_abs=4.77e-07
+[E5M2xE4M3] M=64 N=32 K=128  mma-vs-ref max_abs=7.15e-07
+[E4M3xE5M2] M=64 N=32 K=128  mma-vs-ref max_abs=4.77e-07   <- dV 用
+[E5M2xE5M2] M=64 N=32 K=128  mma-vs-ref max_abs=1.19e-07
+[E4M3xE5M2] M=128 N=64 K=128 mma-vs-ref max_abs=9.54e-07
+```
+
+误差 ~1e-6 即 fp32 舍入，说明 A/B 片段（`ldmatrix.x4`/`x2`）、累加器行列映射
+（`c0/c1: lane>>2`、`c2/c3: +8`；列 `(lane&3)*2+(q&1)`）与 epilogue `sa[r]*sb[c]`
+全部正确。布局公式沿用 `code/kernel-opt/22-fp8-gemm`（见 `agent_skills/kernel-opt.md`）。
+
+### 7.2 反向里的量化/折算记账
+
+5 个 GEMM 全部走 mma，累加器 fp32。**难点是 rowwise scale 的折算**：当某个操作数的
+scale 恰好沿**归约维**变化时，不能简单在 epilogue 乘常数，必须把该 scale 折进**另一个**
+操作数并重新量化。最终方案（`Ap/dS2/dS3` 三个折叠操作数）：
+
+| GEMM | A（fp8） | B（原始 fp8） | epilogue 折算 | dtype |
+|---|---|---|---|---|
+| `S=scale·QKᵀ` | Q | K | `scale·qs[m]·ks[j]` | E4M3×E4M3 |
+| `dP=dO·Vᵀ` | dO | V | `dos[m]·vs[j]` | E5M2×E4M3 |
+| `dV=PᵀdO` | `Ap[j][m]=P[m][j]·dos[m]` | `do8`（raw） | `sA[j]` | E4M3×E5M2 |
+| `dQ=scale·dS·K` | `dS2[m][j]=dS[m][j]·ks[j]` | `k8`（raw） | `scale·sds2[m]` | E5M2×E4M3 |
+| `dK=scale·dSᵀ·Q` | `dS3[j][m]=dS[m][j]·qs[m]` | `q8`（raw） | `scale·sds3[j]` | E5M2×E4M3 |
+
+以 `dV` 为例：真实值 `Σ_m P·dO = Σ_m (P·dos)·do8`，把 `dos[m]`（沿归约维 m 变化）折进
+`Ap=P·dos` 并按 j 行 rowwise 量化，B 改用**未乘 scale 的原始 `do8`**，于是折算因子退化为
+每输出行一个 `sA[j]`。`dQ/dK` 同理（分别折 `ks[j]`/`qs[m]`）。**与 golden 的差异**：
+`dP` 不再量化（它只进 `dS=P∘(dP−D)` 的 fp32 计算，不进张量核），更接近「只量化真正进
+张量核的操作数」的口径；`dS` 也由 fp32 经上述折叠后再量化。
+
+### 7.3 实现要点
+
+- `BM=64, BN=32, THREADS=128`（4 warp），`D=128`。5 个 mma 的 warp 平铺分别为
+  `S/dP: 2×2→32×16`、`dQ: 2×2→32×64`、`dK/dV: 2×2→16×64`。
+- smem 行距全部取 **16B 的整数倍 + padding**（`144/48/80/48`）以配合 `ldmatrix` 并消
+  bank conflict；为 `dK/dV/dQ` 的 B 操作数额外存了转置副本 `Qt/dOt/Kt`（`[d][m]`/`[d][j]`）。
+- **踩坑（已修）**：scale 数组个数数错导致 `sds2` 越过 `Ps`（`kNScale` 应为 `3*BM+4*BN`，
+  不是 `2*BM+…`）。症状是 S=512 正确、S≥1024 时 dV 出现 ~O(1) 误差——因为越界写入的
+  `sds2` 位置随 tile 数变化。定位靠「在 dV 里用同一份输入重算 P 并比对 `Ps`」的计数器。
+- `dQ/dK/dV` 仍用 fp32 全局 `atomicAdd` 累加（与 golden 口径一致，便于对拍）。
+
+### 7.4 数值对拍（max_abs，causal）
+
+| shape | | dq | dk | dv |
+|---|---|---|---|---|
+| S=512 | ours vs ref | 2.43e-1 | 2.98e-1 | 3.74e-1 |
+| | ours vs TE | 5.38e-1 | 4.43e-1 | 8.55e-1 |
+| S=1024 H32 | ours vs ref | 2.40e-1 | 4.20e-1 | 3.54e-1 |
+| | ours vs TE | 4.65e-1 | 5.70e-1 | 9.43e-1 |
+| S=4096 | ours vs ref | 2.64e-1 | 2.64e-1 | 3.22e-1 |
+| | ours vs TE | 4.53e-1 | 5.32e-1 | 6.81e-1 |
+
+对比 golden（S=512：0.48/0.64/0.33；S=4096：0.46/0.50/0.38），mma 版**数值相当或更好**
+（尤其 dq/dk），与 TE 同量级、无系统误差。S=4096 时 ours-vs-ref 甚至优于 TE-vs-ref
+（TE：dq 0.376 / dk 0.369 / dv 0.669）。
+
+### 7.5 ncu（main `fa_bwd_fp8_mma_kernel`，S=512，`--set full`）
+
+```
+Duration                  us    553.06
+DRAM Throughput           %     0.92
+L2 Cache Throughput       %    12.94
+L1/TEX Cache Throughput   %    19.15     <- 从 golden 的 75.96% 大幅下降
+Compute (SM) Throughput   %     4.76
+Issue Slots Busy          %     4.76
+No Eligible               %    91.66
+Registers Per Thread      reg   128
+Dynamic Shared Memory     KB    80.13     <- 1 CTA/SM
+Achieved Occupancy        %     6.25
+Waves Per SM                   0.48
+top stall = scoreboard 依赖（~31.9%）
+```
+
+**bound 变化**：golden 的「smem bank conflict + FP8 逐元素解码」（L1/TEX 76%、90% 多余
+wavefront、MIO scoreboard 69%）已经消失；现在是 **低 occupancy / 并行度不足**
+（1 CTA/SM、4 warp/SM、`No Eligible` 91.7%、`Waves 0.48`）导致的延迟受限。下一步：
+降寄存器/smem 提 occupancy、pipeline（`cp.async`/双缓冲）、把 dQ/dK/dV 的 atomicAdd 换成
+`dQ_accum` 缓冲。
+
+### 7.6 性能对标（CUPTI/event，FP8 峰值 1978.8 TFLOPS）
+
+| shape | golden main | mma main | **main 加速** | mma total | TE FP8 | mma main/峰值 |
+|---|---|---|---|---|---|---|
+| S=512 H16 | 5.898 ms | **0.452 ms** | **13.1×** | 1.697 ms / 1.27 TF | 0.072 ms / 29.8 TF | 0.24% |
+| S=1024 H32 | 29.165 ms | **1.802 ms** | **16.2×** | 10.78 ms / 1.59 TF | 0.136 ms / 126 TF | 0.48% |
+| S=4096 H16 | 198.484 ms | **10.188 ms** | **19.5×** | 80.55 ms / 1.71 TF | 0.451 ms / 304 TF | 0.68% |
+
+- main kernel 相对 golden 提速 **13–20×**；相对 TE FP8 的 main 仍只有 ~4–16%（因低 occupancy、
+  无流水、每 tile 原子累加）。
+- **端到端瓶颈已转移到 `preprocess`**（LSE 的 O(S²) 点积未分块）：S=4096 时 70.6 ms
+  vs main 10.2 ms。下一步优先把 preprocess 分块/向量化（或并入前向），再谈 main 的提升。
+
+### 7.7 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+# 布局最小复现（4 种 dtype 组合）
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_smoke.cu
+# mma 反向：编译运行 + 对拍（默认 S=512）
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=10
+# S=4096
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=3 \
+    /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --set full --launch-count 1 \
+    --kernel-name regex:fa_bwd_fp8_mma -- /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8 --iters=1
+```

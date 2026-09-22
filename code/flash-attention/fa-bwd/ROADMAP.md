@@ -71,9 +71,13 @@
       真实量化但不做 mma；mma.m16n8k32 版留给 P3-4（与 P1/P2 先标量后张量核的路线一致）。
 - [x] **P3-3** 对拍：vs fp32 ref 与 vs TE fp8；给出误差统计（3 个 shape）
       → max_abs 全部 ~0.3–0.9，与 TE 同量级；`docs/03-fp8-bwd-impl.md` §2
-- [ ] **P3-4** ncu + 性能 vs TE fp8；找 bound 并继续优化
-      （ncu/性能基线已完成：bound=smem bank conflict+低 occupancy；**优化待做**：
-       mma + padding + 提 occupancy）
+- [x] **P3-4** ncu + 性能 vs TE fp8；找 bound 并继续优化
+      → **张量核版完成**：`src/fp8/fa_bwd_fp8_mma_onefile.cu`（5 个 GEMM 全 mma.m16n8k32）。
+      先做 `fa_bwd_fp8_mma_smoke.cu` 验证 4 种 dtype 组合布局（误差 ~1e-6）；再合入反向，
+      rowwise scale 通过 `Ap/dS2/dS3` 折叠操作数折算。main 相对 golden **13–20×**，
+      数值与 TE 同量级、S=4096 时优于 TE-vs-ref。ncu：bound 已从 smem 冲突变为
+      **低 occupancy/并行度**（L1/TEX 76%→19%，No Eligible 91.7%、Waves 0.48、1 CTA/SM）。
+      详见 `docs/03-fp8-bwd-impl.md` §7。剩余（pipeline/提 occupancy/dQ 缓冲）转 backlog。
 - [ ] **P3-5** 两文件版 + `docs/03-fp8-bwd-impl.md`（单文件实现分析已写在 03）
 
 ### P4 文档 / 汇总
@@ -173,19 +177,35 @@
     golden 约 TE 的 ~0.3%、峰值的 ~0.02%；mma 优化是 P3-4。
   - 文档 `docs/03-fp8-bwd-impl.md`；原始输出 `src/fp8/*.out.txt`（含 ncu/refbench）。
 
+- 2026-09-22（第七轮）：**P3-4 完成（fp8 张量核版，main 13–20×）**。
+  - 先写 `src/fp8/fa_bwd_fp8_mma_smoke.cu`（P3-4a）：用最小 GEMM 验证 `mma.m16n8k32` 的
+    片段/`ldmatrix`/rowwise 折回，覆盖 E4M3×E4M3、E5M2×E4M3、E4M3×E5M2、E5M2×E5M2
+    四种组合，误差 ~1e-6（fp32 舍入）。
+  - 实现 `src/fp8/fa_bwd_fp8_mma_onefile.cu`：5 个 GEMM 全部 mma；因 rowwise scale 沿归约维
+    变化，引入折叠操作数 `Ap=P·dos`、`dS2=dS·ks`、`dS3=dS·qs`（B 用未乘 scale 的原始 fp8），
+    折算因子退化为每输出行一个；`dP` 不再量化（只进 fp32 的 dS）。smem 行距 padding（144/48/80）。
+  - **踩坑**：scale 数组个数数错（`kNScale` 应为 `3*BM+4*BN`），`sds2` 越界覆盖 `Ps`，
+    症状是 S=512 对、S≥1024 dV 错 ~O(1)。用「dV 内重算 P 比对 `Ps`」计数器定位。
+  - 对拍（max_abs, ours-vs-ref，causal）：S=512 2.43/2.98/3.74e-1；S=1024H32 2.40/4.20/3.54e-1；
+    S=4096 2.64/2.64/3.22e-1。与 TE 同量级，S=4096 时 ours-vs-ref 优于 TE-vs-ref。
+  - ncu（main, S=512）：DRAM 0.92%、**L1/TEX 19.15%**（golden 75.96%）、Compute 4.76%、
+    occupancy 6.25%（128 regs/80KB smem→1 CTA/SM）、Waves 0.48、No Eligible 91.7%。
+    **bound 已从 smem 冲突变为低 occupancy/延迟受限**。
+  - 性能：main golden→mma：S=512 5.90→**0.452ms（13.1×）**、S=1024H32 29.16→**1.802ms（16.2×）**、
+    S=4096 198.48→**10.188ms（19.5×）**；端到端 total 1.70/10.78/80.55ms（preprocess 成新瓶颈）。
+    main 相对 FP8 峰值 0.24/0.48/0.68%，相对 TE FP8 main 约 4–16%。
+  - 文档 `docs/03-fp8-bwd-impl.md` §7；原始输出 `src/fp8/fa_bwd_fp8_mma_*`。
+
 ## 下一步（明确到可执行）
 
-- [ ] **P3-4（fp8 最重点的优化）**：把 golden 标量版升级为张量核版：
-      - `docs/02` §3.2 的 rowwise `sa*sb` 在 epilogue 折回；用 `mma.m16n8k32`（E5M2×E4M3）；
-      - 用 `ldmatrix`（fp8 的 2 个相邻 = 1 个 b16）从 smem 取操作数，**smem 行距 padding 消 bank
-        conflict**（当前 90% 多余 wavefront）；
-      - 降 smem 提 occupancy（当前 68KB→1 CTA/SM）；目标先把 TE FP8 的 ~0.3% 提到有意义量级。
-      - 先用最小 GEMM 复现验证 fp8 mma 布局，再合入反向。
-- [ ] **P3-5**：fp8 两文件拆分（`fa_bwd_fp8_kernels.cuh` + `fa_bwd_fp8_main.cu`），行为一致。
+- [ ] **P3-5**：fp8 两文件拆分（`fa_bwd_fp8_kernels.cuh` + `fa_bwd_fp8_main.cu`），
+      以 mma 单文件为源，行为逐指标一致。
+- [ ] （backlog，fp8 性能）在 mma 版上继续：① pipeline（`cp.async` 双缓冲 K/V）；
+      ② 降寄存器（128）/smem（80KB）提 occupancy（当前 1 CTA/SM、Waves 0.48）；
+      ③ dQ/dK/dV 的 atomicAdd 换 `dQ_accum` 缓冲 + convert。
+- [ ] （backlog，性能）**preprocess 已是端到端瓶颈**（S=4096 70.6ms >> main 10.2ms）：
+      对 LSE 点积分块 + 向量化（`__ldg`/float4），或把 LSE 并入前向摊薄。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
-- [ ] （backlog，性能）**preprocess 已成 S=4096 端到端瓶颈**（69ms > main 42ms）：对 LSE 点积分块 +
-      向量化（`__ldg`/float4），或把 LSE 并入前向摊薄；main 侧继续降 smem 提 occupancy、
-      上张量核（mma）+ 流水；fp16 也可同步加 K/V padding。
 
 ## 灵感 / backlog
 
