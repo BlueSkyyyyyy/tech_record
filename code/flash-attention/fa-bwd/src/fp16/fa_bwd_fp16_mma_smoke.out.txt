@@ -1,0 +1,5 @@
+                              ^
+
+ldmatrix.x2 (B=[N][K], non-trans) vs CPU: max_abs=0.000e+00
+ldmatrix.x2.trans (B=[K][N])      vs CPU: max_abs=0.000e+00
+PASS

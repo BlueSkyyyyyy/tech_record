@@ -21,6 +21,7 @@
 - **FLOPs 口径**：`4·B·S²·H·D`（反向 ≈ 前向 2×）。**causal 未折半**，故所有实现的 TFLOPS
   都是下界；ours / FA / TE 用同一口径，横向可比。
 - **峰值**（H100 dense）：FP16/BF16 Tensor Core ~989 TFLOPS；FP8 ~1978.8 TFLOPS。
+- **单位**：性能**主指标是时间**（ms / µs，越小越好）；`TF`/`TFLOPS` = 每秒 Tera（10¹²）次浮点运算，是**吞吐/算力**单位、**不是时间**，由 `FLOPs ÷ 时间` 换算，仅作参考。
 - **计时**：ours 用 CUDA event（`run.sh` 内），FA/TE 用 CUPTI 纯 device 时间
   （`harness/fa_bwd_bench.py bench`）。“端到端”= preprocess+main+convert（fp8 另含 quant）；
   “main”单指反向主 kernel。
