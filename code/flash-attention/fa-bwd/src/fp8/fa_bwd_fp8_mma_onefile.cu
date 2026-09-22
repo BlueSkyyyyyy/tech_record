@@ -48,6 +48,13 @@ struct Fp8Cfg {
   static constexpr int KVU = BN * HD / 4 / THREADS;  // 每线程预取的 uint32 数
   static constexpr int kNScale = 3 * BM + 4 * BN;    // qs,dos,sds2 (BM) + ks,vs,sA,sds3 (BN)
 
+  // O4d：P/S 两个 fp32 [BM][BN] 缓冲的行距 padding。行距 = BN = 32 word（128B）时，
+  //   * fold 里按「列」读 `P[m][j]`（j 固定、m 步进 16）会全部落同一 bank（32|stride）→ 4-way；
+  //   * GEMM1/2 epilogue 里 8 行 × 4 列同时写 `P[r][c]`，bank=c，同列不同行全撞 → 8-way。
+  //   +1 word（33）让 bank 与行号线性相关，实测 bank conflict 2 亿+ 基本清零。奇数才能保证
+  //   m 步进 16 时 `16*33 mod 32 = 16 != 0`（+4/+8 的偶数 padding 无效）。
+  static constexpr int PSS = BN + 1;     // P/S fp32 行距（=33）
+
   // O2：dS3（[BN][QTS]）折进 Ks、Ap（[BN][QTS]）折进 Vs。
   static constexpr int fp8_bytes = BM * ASLD   // Qs
                                  + BN * ASLD   // Ks（dS3 复用尾部）
@@ -58,7 +65,7 @@ struct Fp8Cfg {
                                  + HD * QTS    // dOt
                                  + BM * DSS2;  // dS2
   static constexpr int smem_bytes =
-      fp8_bytes + (kNScale + 2 * BM * BN) * (int)sizeof(float);
+      fp8_bytes + (kNScale + 2 * BM * PSS) * (int)sizeof(float);
 
   static constexpr int lse_smem_bytes =
       LBM * ASLD + LBN * ASLD + (LBM + LBN) * (int)sizeof(float);
@@ -426,6 +433,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   constexpr int DSS2 = Cfg::DSS2;
   constexpr int KVU = Cfg::KVU;
   constexpr int kNScale = Cfg::kNScale;
+  constexpr int PSS = Cfg::PSS;
   constexpr int kFp8Bytes = Cfg::fp8_bytes;
   // GEMM3/4/5 的输出 N 维 = head_dim；每遍处理 NTW = WN*64 = 128 列，共 HD/NTW 遍。
   constexpr int NTW = WN * 64;
@@ -443,8 +451,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   unsigned char* Ap  = Vs;                   // O2：复用 GEMM2 后死亡的 Vs
   unsigned char* dS3 = Ks;                   // O2：复用 GEMM1 后死亡的 Ks
   float* scales = reinterpret_cast<float*>(smem + kFp8Bytes);
-  float* Ps = scales + kNScale;              // P fp32 [BM][BN]
-  float* Ss = Ps + BM * BN;                  // dS fp32 [BM][BN]
+  float* Ps = scales + kNScale;              // P fp32 [BM][PSS]
+  float* Ss = Ps + BM * PSS;                 // dS fp32 [BM][PSS]
   float* qs_s = scales;
   float* ks_s = qs_s + BM;
   float* vs_s = ks_s + BN;
@@ -543,11 +551,11 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
               float sval = acc[i][j][q] * scale * qs_s[r] * ks_s[c];
               p = expf(sval - lse[((size_t)(b * S + qi)) * H + h]);
             }
-            Ps[r * BN + c] = p;
+            Ps[r * PSS + c] = p;
           }
     }
     // ---- O4a：GEMM1 与 GEMM2 之间**不需要** barrier。GEMM2 只读 dOs/Vs（本 tile 前已
-    //      就绪），其 epilogue 读回的 Ps[r*BN+c] 正是**本线程**刚写入的同一地址（两次
+    //      就绪），其 epilogue 读回的 Ps[r*PSS+c] 正是**本线程**刚写入的同一地址（两次
     //      mma_block 的 (wm=wr, wn=wc) 与累加器映射完全一致），无线程间依赖。----
 
     // ---- (2) dP = dO·Vᵀ  →  dS = P∘(dP − D)，存 fp32 ----
@@ -572,7 +580,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
             int qi = m0 + r;
             float dpv = acc[i][j][q] * dos_s[r] * vs_s[c];
             float del = (qi < S) ? delta[((size_t)(b * S + qi)) * H + h] : 0.f;
-            Ss[r * BN + c] = Ps[r * BN + c] * (dpv - del);
+            Ss[r * PSS + c] = Ps[r * PSS + c] * (dpv - del);
           }
     }
     __syncthreads();
@@ -590,8 +598,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 #pragma unroll
       for (int t = 0; t < 16; ++t) {
         int m = sub4 * 16 + t;
-        amaxA = fmaxf(amaxA, fabsf(Ps[m * BN + j] * dos_s[m]));
-        amax3 = fmaxf(amax3, fabsf(Ss[m * BN + j] * qs_s[m]));
+        amaxA = fmaxf(amaxA, fabsf(Ps[m * PSS + j] * dos_s[m]));
+        amax3 = fmaxf(amax3, fabsf(Ss[m * PSS + j] * qs_s[m]));
       }
       amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 1));
       amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 2));
@@ -608,8 +616,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 #pragma unroll
       for (int t = 0; t < 16; ++t) {
         int m = sub4 * 16 + t;
-        Ap[j * QTS + m] = cvt_e4m3(Ps[m * BN + j] * dos_s[m] / scA);
-        dS3[j * QTS + m] = cvt_e5m2(Ss[m * BN + j] * qs_s[m] / sc3);
+        Ap[j * QTS + m] = cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA);
+        dS3[j * QTS + m] = cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3);
       }
     }
     {
@@ -620,7 +628,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 #pragma unroll
       for (int t = 0; t < 16; ++t) {
         int j = sub2 * 16 + t;
-        amax2 = fmaxf(amax2, fabsf(Ss[m * BN + j] * ks_s[j]));
+        amax2 = fmaxf(amax2, fabsf(Ss[m * PSS + j] * ks_s[j]));
       }
       amax2 = fmaxf(amax2, __shfl_xor_sync(0xffffffffu, amax2, 1));
       float sc2 = (amax2 > 0.f) ? amax2 / kE5M2Max : 1.f;
@@ -629,7 +637,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 #pragma unroll
       for (int t = 0; t < 16; ++t) {
         int j = sub2 * 16 + t;
-        dS2[m * DSS2 + j] = cvt_e5m2(Ss[m * BN + j] * ks_s[j] / sc2);
+        dS2[m * DSS2 + j] = cvt_e5m2(Ss[m * PSS + j] * ks_s[j] / sc2);
       }
     }
     __syncthreads();
