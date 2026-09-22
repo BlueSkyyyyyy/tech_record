@@ -49,11 +49,12 @@
 
 ### P1 fp16 反向（先打通全流程）
 
-- [ ] **P1-1** 单文件 `fa_bwd_fp16_onefile.cu`：preprocess(D) + main(1colblock) + launcher + 自测；编译运行
-- [ ] **P1-2** 与 ref/FA/TE 数值对拍（读 dump 的输入，比 ref 输出），记录 max diff
-- [ ] **P1-3** ncu 剖析：bound 在哪；与 FA2/TE 性能对比
+- [x] **P1-1** 单文件 `fa_bwd_fp16_onefile.cu`：preprocess(D+LSE) + main(1colblock) + launcher + 自测；编译运行
+- [x] **P1-2** 与 ref/FA/TE 数值对拍（读 dump 的输入，比 ref 输出），记录 max diff
+      → S=512 / S=4096 均 max_abs ~1.5–2.2e-3，与 FA/TE 同量级
+- [x] **P1-3** ncu 剖析：bound = smem 访问（L1/TEX 53.5%、75% 多余 wavefront）+ occupancy（96KB smem→1 CTA/SM）；DRAM 仅 0.21%；与 FA2/TE 性能对比完成
 - [ ] **P1-4** 两文件版拆分为 `_kernels.cuh` + `_main.cu`，行为一致
-- [ ] **P1-5** `docs/01-fp16-bwd-impl.md`：实现与优化逐条说明
+- [x] **P1-5** `docs/01-fp16-bwd-impl.md`：实现与优化逐条说明
 
 ### P2 bf16 反向
 
@@ -106,14 +107,22 @@
 - 2026-09-22：脚手架就绪。`probe_refs.py` 验证 FA2.7.4 / TE2.14 反向与 fp32 ref 吻合；
   `fa_bwd_bench.py` dump（CPU npy）+ CUPTI 基准可用。基线（fp16, causal, S=4096,H=16,B=1）：
   FA ~132 TFLOPS、TE ~230 TFLOPS。优化手段梳理初稿完成。
+- 2026-09-22（第二轮）：**P1-1/P1-2/P1-3/P1-5 完成**。
+  - 单文件 `src/fp16/fa_bwd_fp16_onefile.cu` 跑通：preprocess(LSE+D) + main(1colblock,recompute P) + convert。
+  - 数值对拍 vs fp32 ref：S=512 时 dq/dk/dv max_abs 1.67/1.68/1.90e-3；S=4096 时 1.50/1.57/2.23e-3，
+    与 FA/TE 同量级（fp16 噪声），无系统误差。原始输出见 `src/fp16/*.out.txt`。
+  - ncu（main, S=512）：DRAM 0.21%、L2 0.67%、Compute 8.45%、**L1/TEX 53.5%（75% 多余 wavefront）**、
+    occupancy 6.25%（96KB smem 卡 1 CTA/SM）、waves 0.48。bound = **smem 访问 + 低 occupancy**，非带宽/算力。
+  - 性能：ours 0.60 TF(S512) / 0.99 TF(S4096)，仅为 FA 的 ~0.8%、TE 的 ~0.4%（正确性优先的标量实现）。
+  - 文档 `docs/01-fp16-bwd-impl.md` 完成；修复 `scripts/lab.sh` 相对路径、`scripts/ncu.sh` 的 `--` 分隔。
 
 ## 下一步（明确到可执行）
 
-- [ ] **P1-1**：实现 `src/fp16/fa_bwd_fp16_onefile.cu`——先做**功能正确**的 FA2 风格单文件反向：
-  `preprocess` 求 D=rowsum(dO∘O)；主 kernel 每 Q 块固定、遍历 K 块，recompute S/P，算 dV/dP/dS/dQ/dK；
-  dQ 用全局 fp32 累加缓冲（atomicAdd），dK/dV 用 atomicAdd；支持 causal。用 `scripts/run.sh` 编译，
-  用 dump 的输入跑，和 `ref_dq/dk/dv` 对拍。
-- [ ] 之后按 P1-2 … 逐步推进；fp8 是重点。
+- [ ] **P1-4**：把单文件拆成两文件 `src/fp16/fa_bwd_fp16_kernels.cuh`（device：preprocess/main/convert）
+  + `src/fp16/fa_bwd_fp16_main.cu`（host：npy 读取/launcher/自测），行为与单文件逐位一致；用 `run.sh` 跑通对拍。
+- [ ] 之后进入 P2 bf16（复用 fp16 骨架做 dtype 参数化），再做 P3 fp8（重点）。
+- [ ] （backlog，性能）消 smem bank conflict（行距 padding/向量化 half2）、降低 smem 提高 occupancy、
+      上张量核（mma）+ 流水；preprocess 的 LSE 重算开销后续考虑摊入前向。
 
 ## 灵感 / backlog
 

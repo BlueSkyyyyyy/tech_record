@@ -4,6 +4,16 @@
 set -euo pipefail
 
 SRC="${1:?usage: ncu.sh <file.cu> [ncu args...]}"; shift || true
+
+# 按第一个 `--` 拆开：前面是 ncu 参数，后面是程序参数（放到可执行文件之后）。
+NCU_OPTS=()
+PROG_ARGS=()
+seen_dd=0
+for a in "$@"; do
+  if [[ "$seen_dd" == 0 && "$a" == "--" ]]; then seen_dd=1; continue; fi
+  if [[ "$seen_dd" == 1 ]]; then PROG_ARGS+=("$a"); else NCU_OPTS+=("$a"); fi
+done
+
 ABS="$(readlink -f "$SRC")"
 DIR="$(dirname "$ABS")"
 NAME="$(basename "$ABS" .cu)"
@@ -17,8 +27,10 @@ LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lab.sh"
 LAB_NAME="${LAB_NAME:-kernel_lab}"
 
 NCU_ARGS=""
-for a in "$@"; do NCU_ARGS+=" $(printf '%q' "$a")"; done
+for a in "${NCU_OPTS[@]}"; do NCU_ARGS+=" $(printf '%q' "$a")"; done
+APP_ARGS=""
+for a in "${PROG_ARGS[@]}"; do APP_ARGS+=" $(printf '%q' "$a")"; done
 
 docker exec -e CUDA_VISIBLE_DEVICES="$GPU" "$LAB_NAME" bash -lc \
   "cd '$DIR' && nvcc -O3 -arch=$ARCH -lineinfo $INCLUDES $NVCC_FLAGS '$NAME.cu' -o '$NAME.out' && \
-   CUDA_VISIBLE_DEVICES=$GPU ncu$NCU_ARGS './$NAME.out'"
+   CUDA_VISIBLE_DEVICES=$GPU ncu$NCU_ARGS './$NAME.out'$APP_ARGS"
