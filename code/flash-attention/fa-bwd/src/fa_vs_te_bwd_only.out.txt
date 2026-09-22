@@ -1,0 +1,34 @@
+==== fp16 ====
+pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype=torch.float16
+shape                                       FA2.7.4           TE2.14  TE/FA
+(1, 1024, 40, 128) kv=8             0.1874ms/ 229.1TF  0.1329ms/ 323.3TF   0.71x
+(1, 1024, 32, 128) kv=4             0.1584ms/ 216.9TF  0.1125ms/ 305.4TF   0.71x
+(1, 1024, 64, 128) kv=4             0.2667ms/ 257.7TF  0.1943ms/ 353.7TF   0.73x
+(1, 1024, 64, 128) kv=1             0.2666ms/ 257.8TF  0.2154ms/ 319.1TF   0.81x
+  fa failed MLA d512: FlashAttention forward only supports head dimension at most 
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused
+(1, 256, 2, 512) kv=2                  nanms/   nanTF     nanms/   nanTF    nanx
+  fa failed MLA d512: FlashAttention forward only supports head dimension at most 
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused
+(1, 512, 4, 512) kv=4                  nanms/   nanTF     nanms/   nanTF    nanx
+  fa failed MLA d512: FlashAttention forward only supports head dimension at most 
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused
+(1, 1024, 2, 512) kv=2                 nanms/   nanTF     nanms/   nanTF    nanx
+(1, 4096, 16, 128) kv=16            0.7293ms/ 376.9TF  0.4447ms/ 618.1TF   0.61x
+==== bf16 ====
+pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype=torch.bfloat16
+shape                                       FA2.7.4           TE2.14  TE/FA
+(1, 1024, 40, 128) kv=8             0.1877ms/ 228.8TF  0.1320ms/ 325.5TF   0.70x
+(1, 1024, 32, 128) kv=4             0.1588ms/ 216.4TF  0.1123ms/ 305.9TF   0.71x
+(1, 1024, 64, 128) kv=4             0.2660ms/ 258.3TF  0.1942ms/ 353.8TF   0.73x
+(1, 1024, 64, 128) kv=1             0.2668ms/ 257.6TF  0.2133ms/ 322.2TF   0.80x
+  fa failed MLA d512: FlashAttention forward only supports head dimension at most 
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused
+(1, 256, 2, 512) kv=2                  nanms/   nanTF     nanms/   nanTF    nanx
+  fa failed MLA d512: FlashAttention forward only supports head dimension at most 
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused
+(1, 512, 4, 512) kv=4                  nanms/   nanTF     nanms/   nanTF    nanx
+  fa failed MLA d512: FlashAttention forward only supports head dimension at most 
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused
+(1, 1024, 2, 512) kv=2                 nanms/   nanTF     nanms/   nanTF    nanx
+(1, 4096, 16, 128) kv=16            0.7259ms/ 378.7TF  0.4446ms/ 618.2TF   0.61x

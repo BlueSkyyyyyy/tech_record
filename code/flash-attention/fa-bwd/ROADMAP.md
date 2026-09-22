@@ -494,6 +494,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 - [ ] **O9**（对标 FA3）TMA + `wgmma` + warp specialization 多级流水。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
+
+## 目标形状 & FA/TE 归因（已分析，见 docs/06）
+
+- [x] 纯反向口径基准 `harness/fa_vs_te_bwd_only.py`：FA2.7.4 217–377 TF vs TE2.14 305–618 TF（TE 1.2–1.6×）
+- [x] kernel/SASS/SOL 归因：FA2.7.4=SM80 `HMMA/LDSM/LDGSTS`，TE=cuDNN SM90 `UTMALDG/WARPGROUP`(wgmma+TMA)；
+      FA 对 GQA/MQA 多一个 `reduce` kernel。详见 `docs/06`。
+- [ ] 后续：ours 张量核化（O5）与 wgmma/TMA（O9）；GQA KV 归约放进 kernel。
+
 ## 下一步（明确到可执行）
 
 > **用户新增需求（优先）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
