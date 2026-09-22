@@ -443,9 +443,91 @@ DRAM/算力/L2 都很闲。下一步 **O3/O6（寄存器预取或 `cp.async` 双
 
 ---
 
-## 11. 下一步
+## 11. preprocess 的 mma 分块 LSE（O8，端到端 4.4–13.2×）
 
-见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（本节，fp16 main 张量核）** 完成。
-后续按回报排序：**O8**（preprocess 的 mma 分块 LSE，端到端最大杠杆）→ **O3/O6**（main 的
-K/V `cp.async`/寄存器预取，消 63% 的 `long_scoreboard`）→ **O5b**（bf16 复用本节 mma 后端）
-→ MLA 张量核 / wgmma+TMA（O9）。
+§10 把 main 换成张量核后（12–15×），端到端却被**标量 preprocess（LSE + D）**拖住：
+它是 O(S²) 的逐行 QK 点积（每 (s,h) 行一个 block、128 线程标量扫 K），S=4096 时 68.7ms
+≈ main 的 15×，占端到端 94%。O8 照搬 fp8 的 O1：把 LSE 交给张量核、D 拆成独立 kernel。
+
+### 11.1 改动
+
+- **`lse_mma_kernel<HD>`**（替代旧 `preprocess_kernel` 的 LSE 部分）：
+  grid=`(S/LBM × H × B)`，每 CTA 吃 **LBM=64 行 Q**、沿 N 一次吃 **LBN=64 列 K**；4 个 warp
+  各 16 行（`wm=wid`），`mma.m16n8k16` 算 `QKᵀ`（f16×f16→fp32，与 main GEMM1 同一
+  `mma_block_f16` 封装、同一 k-loop 分块顺序 ⇒ 与 main 的 P 自洽）。**P 不物化**：
+  fp32 累加器直接做 online-softmax（每个线程 2 个 row-slot），行 max/sum 在同 row 的
+  4 个 lane（`lane&3`）间 `shfl_xor` 归约，仅 `lane&3==0` 写 LSE。causal mask 与
+  boundary（`qi<S/jg<S`）同旧版。smem = `(LBM+LBN)·(HD+8)` 个 half = **34816 B**。
+- **`delta_kernel<HD>`**（D=`rowsum(dO∘O)`）：纯 O(S·H·D) 的逐行归约（`pg=(S,H,B)`），
+  与 LSE 解耦。fp16 无量化，直接 `__half2float` 乘加（同旧版）。
+- 单/两文件同步：`fa_bwd_fp16_mma_{kernels.cuh,main.cu}` 与 `fa_bwd_fp16_mma_onefile.cu`
+  的 device O8 代码块**逐字一致**（脚本核对 `device O8 block identical: True`）。
+  旧 `preprocess_kernel` 被删除（标量 golden `fa_bwd_fp16_{kernels.cuh,onefile.cu}` 保留）。
+
+### 11.2 数值（与 O5 **逐位相同**，证明只换算法数据流、未改数学口径）
+
+| case (B1 causal) | dq max_abs | dk max_abs | dv max_abs |
+|---|---|---|---|
+| (1,512,16,128) MHA | 1.671e-3 | 1.771e-3 | 1.899e-3 |
+| (1,4096,16,128) MHA | 1.883e-3 | 1.734e-3 | 1.966e-3 |
+| (1,1024,32,128) kv4 | 2.134e-3 | 3.305e-3 | 3.850e-3 |
+| (1,1024,40,128) kv8 | 2.008e-3 | 2.931e-3 | 3.891e-3 |
+| (1,1024,64,128) kv4 | 2.348e-3 | 5.704e-3 | 3.893e-3 |
+| (1,1024,64,128) kv1 MQA | 2.292e-3 | 7.934e-3 | 7.517e-3 |
+
+与 §10.2 的 O5 表**逐位相同**，且与 ref/FA/TE 同量级。原始输出
+`src/fp16/fa_bwd_fp16_mma_main_o8_*.out.txt`、`..._onefile_o8_s512.out.txt`。
+
+### 11.3 性能（CUDA-event，同 session）
+
+| shape | preprocess 旧→新 | 加速 | total 旧→新 | total 加速 | total TFLOPS (占 989) |
+|---|---|---|---|---|---|
+| (1,512,16,128) | 1.209→**0.071 ms** | **17.0×** | 1.440→**0.326 ms** | **4.42×** | 6.59 (0.67%) |
+| (1,1024,32,128) kv4 | 8.802→**0.186 ms** | **47.4×** | 9.459→**0.871 ms** | **10.9×** | 19.72 (1.99%) |
+| (1,1024,40,128) kv8 | 10.97→**0.213 ms** | **51.5×** | 11.85→**1.106 ms** | **10.7×** | 19.41 (1.96%) |
+| (1,1024,64,128) kv4 | 17.62→**0.305 ms** | **57.7×** | 18.74→**1.467 ms** | **12.8×** | 23.42 (2.37%) |
+| (1,1024,64,128) kv1 | 17.46→**0.307 ms** | **56.9×** | 18.57→**1.415 ms** | **13.1×** | 24.28 (2.46%) |
+| (1,4096,16,128) | 68.70→**0.986 ms** | **69.7×** | 73.34→**5.581 ms** | **13.1×** | 24.63 (2.49%) |
+
+同 session **纯反向** FA3/TE/FA2 基线（`harness/fa_vs_te_bwd_only.py fp16`）：
+S4096 MHA FA3 **0.3246ms/847TF**、TE 0.4441/619、FA2 0.7284/377；GQA kv4 S1024 FA3
+0.0824/417、TE 0.1124/306。即 **ours total 现为 FA3 的 2.9–4.7%（按 TFLOPS），
+时间比 10.6–17.2×**（O5 时端到端只有 FA3 的 ~0.4%）。S512 MHA（单测）FA3 0.0265ms/162TF、
+TE 0.032/134：ours total 0.326ms，**时间比 12.3×**（TF 4.1%）。
+
+> **结论**：O8 把端到端从「preprocess 主导」翻转为「**main 主导**」：
+> S=4096 preprocess 68.7→0.99ms，每 CTA 只剩 LBM=64 行 Q 的 QKᵀ；total 13.1×。
+> 剩余空间在 **main（S4096 4.47ms，占 80%）**、S512 时 **convert（0.064ms）** 已和
+> preprocess 同量级。
+
+### 11.4 ncu（`--set full`，S=4096）
+
+`lse_mma_kernel<128>`（grid 64×16×1）：
+
+```
+Duration                 ms    1.03       DRAM Throughput        %   1.06
+L1/TEX Cache Throughput  %   23.42       L2 Cache Throughput    %   5.23
+Compute (SM) Throughput  %   39.53       No Eligible            %  42.88
+Theoretical Occupancy    %   37.50       Achieved Occupancy     %  28.49
+Waves Per SM                  1.29       Registers Per Thread         80
+Block Limit Shared Mem   block     6
+```
+
+stall（同 session 定向采集）：`long_scoreboard 2.17` + `wait 1.34` + `short_scoreboard 0.76`
++ `barrier 0.21` ⇒ **bound = 全局访存延迟 + 低 occupancy**（80 regs 把理论 occ 卡在 37.5%，
+且 grid=1024 只有 1.29 波、尾波明显），与 fp8 O1 的结论一致；DRAM/L2/张量核都很闲。
+
+`delta_kernel<128>`：Duration **42.8µs**、DRAM 24.8% / L1TEX 73.5% / Compute 71.9% /
+Achieved occ 71.9%（17 regs）、Waves 31.0 ⇒ 访存/算力均衡的轻量归约，仅占端到端 <1%。
+原始输出 `src/fp16/fa_bwd_fp16_mma_main_o8_ncu_lse_s4096.out.txt`、
+`..._o8_stall_lse_s4096.out.txt`、`..._o8_ncu_delta_s4096.out.txt`。
+
+---
+
+## 12. 下一步
+
+见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）与 O8（§11）** 完成。
+后续按回报排序：**O3/O6**（main 的 K/V `cp.async`/寄存器预取，消 §10.4 的 63%
+`long_scoreboard`；现已是端到端第一瓶颈）→ **O7**（fp16/bf16 的 dK/dV 去 `atomicAdd`，
+移植 fp8 的 O4c/O7）→ **O8b**（LSE 的 occupancy/尾波优化、convert 融合）→
+MLA 张量核 / wgmma+TMA（O9）。

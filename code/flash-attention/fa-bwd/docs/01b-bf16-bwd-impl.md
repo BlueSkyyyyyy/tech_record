@@ -410,6 +410,65 @@ Compute 17.33%、168 regs、occ 18.75%、Waves 2.59）。S=4096 bound = **全局
 
 ---
 
+## 6f. preprocess 的 mma 分块 LSE（O8，端到端 4.5–13.2×）
+
+> 代码：两文件 `fa_bwd_bf16_mma_{kernels.cuh,main.cu}` + 单文件 `fa_bwd_bf16_mma_onefile.cu`，
+> 与 fp16 的 O8（`docs/01` §11）**逐字同构**（仅 dtype 替换）。
+
+§6e 的 bf16 张量核 main 后，端到端被**标量 preprocess** 拖住（S=4096 占 94%）。O8 照搬 fp8 O1：
+
+**改动（与 fp16 O8 同构）**：
+- 旧 `preprocess_kernel`（每 (s,h) 行一个 block、标量扫 K）替换为
+  **`lse_mma_kernel<HD>`**（`mma.m16n8k16` `QKᵀ` + 累加器内 online-softmax + 同 row 4 lane
+  `shfl_xor` 归约；LBM=64 行 Q × LBN=64 列 K/CTA，4 warp 各 16 行；smem 34816 B）
+  + 独立 **`delta_kernel<HD>`**（D=`rowsum(dO∘O)`，O(S·H·D) 归约）。
+- 单/两文件 device O8 代码块**逐字一致**（脚本核对 `device O8 block identical: True`）。
+
+**数值（与 O5b 逐位相同，bf16 causal，max_abs）**：
+
+| shape | dq | dk | dv |
+|---|---|---|---|
+| S=512 H16 D128 | 9.001e-3 | 1.261e-2 | 1.365e-2 |
+| S=4096 H16 D128 | 1.510e-2 | 1.340e-2 | 1.631e-2 |
+| S=1024 H32 kv4 | 1.201e-2 | 2.125e-2 | 3.156e-2 |
+| S=1024 H40 kv8 | 1.233e-2 | 1.930e-2 | 3.150e-2 |
+| S=1024 H64 kv4 | 1.351e-2 | 3.091e-2 | 4.420e-2 |
+| S=1024 H64 kv1 (MQA) | 1.190e-2 | 4.558e-2 | 7.196e-2 |
+
+与 §6e 表**逐位相同**，且与 ref/FA/TE 同量级。原始输出
+`src/bf16/fa_bwd_bf16_mma_main_o8_*.out.txt`、`..._onefile_o8_s512.out.txt`。
+
+**性能（CUDA-event，同 session）**：
+
+| shape | preprocess 旧→新 | 加速 | total 旧→新 | total 加速 | total TFLOPS (占 989) |
+|---|---|---|---|---|---|
+| S=512 H16 D128 | 1.201→**0.072 ms** | **16.7×** | 1.434→**0.322 ms** | **4.45×** | 6.67 (0.67%) |
+| S=4096 H16 D128 | 68.79→**0.993 ms** | **69.3×** | 73.43→**5.573 ms** | **13.2×** | 24.66 (2.49%) |
+| S=1024 H40 kv8 | 11.07→**0.213 ms** | **52.0×** | 11.94→**1.110 ms** | **10.8×** | 19.35 (1.96%) |
+| S=1024 H32 kv4 | 8.826→**0.186 ms** | **47.4×** | 9.490→**0.867 ms** | **10.9×** | 19.81 (2.00%) |
+| S=1024 H64 kv4 | 17.64→**0.300 ms** | **58.8×** | 18.78→**1.453 ms** | **12.9×** | 23.65 (2.39%) |
+| S=1024 H64 kv1 | 17.53→**0.306 ms** | **57.3×** | 18.62→**1.415 ms** | **13.2×** | 24.28 (2.46%) |
+
+同 session **纯反向** FA3/TE/FA2（`harness/fa_vs_te_bwd_only.py bf16`）：S4096 MHA FA3
+**0.3217ms/854TF**、TE 0.4415/623、FA2 0.7359/374；kv4 S1024 FA3 0.0822/418、TE 0.1122/306。
+**ours total 现为 FA3 的 2.9–4.7%（TFLOPS，O5b 时 ~0.4%），时间比 ~10.6–17.3×**。
+
+**ncu（`lse_mma_kernel<128>`，S=4096，`--set full`）**：
+
+```
+Duration                 us   967.01      DRAM Throughput        %   1.13
+L1/TEX Cache Throughput  %   23.37       L2 Cache Throughput    %   5.55
+Compute (SM) Throughput  %   44.70       No Eligible            %  43.12
+Theoretical Occupancy    %   37.50       Achieved Occupancy     %  28.41
+Waves Per SM                  1.29       Registers Per Thread         80
+```
+
+与 fp16 版逐项一致 ⇒ bound = **全局访存延迟 + 低 occupancy/尾波**（80 regs 把理论 occ
+卡在 37.5%、grid 仅 1.29 波），非带宽/算力。原始输出
+`src/bf16/fa_bwd_bf16_mma_main_o8_ncu_lse_s4096.out.txt`。
+
+---
+
 ## 7. 复现命令
 
 ```bash
@@ -439,8 +498,7 @@ docker exec kernel_lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py bench
 
 ## 8. 下一步
 
-见 `../ROADMAP.md`。**O5b（bf16 张量核）已完成（第 6e 节）**；接下来是「当前冲刺」的
-**O8（preprocess 的 LSE/D 改 mma 分块，对齐 fp8 的 O1）**——它现在是端到端第一瓶颈
-（S=4096 preprocess 68.8ms vs main 4.5ms），然后 O6（main `cp.async` 双缓冲/提 occupancy）、
-O7（去 atomic）、O9（wgmma+TMA 对标 FA3）。
+见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）与 O8（preprocess mma，§6f）已完成**；
+接下来是「当前冲刺」的 **O6**（main 的 `cp.async` 双缓冲/提 occupancy，消 §6e 的
+63% `long_scoreboard`，现已是端到端第一瓶颈）、O7（去 atomic）、O9（wgmma+TMA 对标 FA3）。
 backlog：fp8 侧残余 red（O7b）、MLA 降 smem / 张量核。
