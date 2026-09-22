@@ -479,6 +479,11 @@ def main():
         # kernel. The TE-testable part is the DSA indexer: index_n_heads=64, index_head_dim=128,
         # scoring 64 query heads against a single shared compressed-KV head (MQA), hence kv=1.
         (1, 4096, 64, 128, 128, 1),   # DeepSeek-V4-Pro DSA indexer: q=64, kv=1, head_dim=128
+        # 上述生产模型 shape 的 seq=1024 短序列版本（与目标卡上的 shape 配置对齐）。
+        (1, 1024, 40, 128, 128, 8),   # Qwen3-8B        @ seq=1024, GQA q=40/kv=8
+        (1, 1024, 32, 128, 128, 4),   # Qwen3-30B-A3B   @ seq=1024, GQA q=32/kv=4
+        (1, 1024, 64, 128, 128, 4),   # Qwen3-235B-A22B @ seq=1024, GQA q=64/kv=4
+        (1, 1024, 64, 128, 128, 1),   # DeepSeek-V4-Pro DSA indexer @ seq=1024, MQA q=64/kv=1
     ]
     attn_dtypes = [torch.bfloat16, torch.float16]
     # subset also run in FP8 (E4M3 fwd / E5M2 bwd); label "fp8" in the CSV
@@ -495,6 +500,11 @@ def main():
         # fwd supports it; TE training fwd+bwd returns No_Backend (bwd head-dim <=256).
         # (The model still uses its own tilelang `sparse_attn` kernel for the sparsity.)
         (1, 4096, 128, 512, 512, 1),
+        # 目标卡上的 MLA head_dim=512 小 shape（seq=256/512/1024，头数 2/4）；
+        # TE 训练 bwd 拒绝 head_dim>256，故只在推理段测 fwd。
+        (1, 256, 2, 512),
+        (1, 512, 4, 512),
+        (1, 1024, 2, 512),
     ]
 
     results = []

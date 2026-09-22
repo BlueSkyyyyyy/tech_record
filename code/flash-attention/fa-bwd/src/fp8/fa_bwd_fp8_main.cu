@@ -111,12 +111,14 @@ int main(int argc, char** argv) {
   std::string o_name = "ref_o";
   bool causal = true;
   int iters = 20;
+  int ksplit = -1;  // -1 = 自动
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
+    else if (a.rfind("--ksplit=", 0) == 0) ksplit = atoi(a.c_str() + 9);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
     else if (!a.empty() && a[0] != '-') dir = a;
   }
@@ -193,9 +195,21 @@ int main(int argc, char** argv) {
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes));
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBytes));
+  // ---- O2b：自动选择 N 方向切块数。base = 未切块时的 CTA 数；目标是让 grid 至少铺满
+  //      一个波（132 SM × 3 CTA/SM ≈ 396 个并发槽），小 S 时把空转的 SM 用起来。----
+  const long base_grid = (long)((S + BM - 1) / BM) * H * B;
+  if (ksplit < 1) {
+    const long wave_slots = 132L * 3L;
+    long k = (base_grid + wave_slots - 1) / base_grid;  // 向上取整
+    if (k < 1) k = 1;
+    if (k > 4) k = 4;
+    ksplit = (int)k;
+  }
   dim3 pg(S, H, B);
   dim3 lg((S + LBM - 1) / LBM, H, B);
-  dim3 mg((S + BM - 1) / BM, H, B);
+  dim3 mg((S + BM - 1) / BM * ksplit, H, B);
+  printf("grid main = %d x %d x %d  (ksplit=%d, base_grid=%ld)\n", mg.x, mg.y, mg.z,
+         ksplit, base_grid);
   const int cvt_threads = 256;
   const int cvt_blocks = (int)std::min<size_t>((n + cvt_threads - 1) / cvt_threads, 65535);
 
@@ -213,7 +227,7 @@ int main(int argc, char** argv) {
     run_preprocess();
     fa_bwd_fp8_mma_kernel<<<mg, THREADS, kSmemBytes>>>(
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-        d_dk_acc, d_dv_acc, S, H, scale, (int)causal);
+        d_dk_acc, d_dv_acc, S, H, scale, (int)causal, ksplit);
     convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
                                                 d_dv, n);
   };
@@ -258,7 +272,7 @@ int main(int argc, char** argv) {
   for (int i = 0; i < iters; ++i)
     fa_bwd_fp8_mma_kernel<<<mg, THREADS, kSmemBytes>>>(
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-        d_dk_acc, d_dv_acc, S, H, scale, (int)causal);
+        d_dk_acc, d_dv_acc, S, H, scale, (int)causal, ksplit);
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
   float ms_main = 0.f;

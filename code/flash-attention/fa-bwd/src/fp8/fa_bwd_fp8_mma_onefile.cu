@@ -404,7 +404,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                       const float* __restrict__ lse,
                       float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                       float* __restrict__ dv_acc, int S, int H, float scale,
-                      int causal) {
+                      int causal, int ksplit) {
   extern __shared__ __align__(16) char smem[];
   unsigned char* Qs  = reinterpret_cast<unsigned char*>(smem);
   unsigned char* Ks  = Qs + BM * ASLD;
@@ -427,11 +427,22 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   float* sds2 = sA + BN;
   float* sds3 = sds2 + BM;
 
-  const int mblk = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // ---- O2b：N 方向切块（split-K）。同一 (mblk,h,b) 的 K/V 列块 [0,ntiles) 被均分给
+  //      ksplit 个 CTA；各自只算自己那一段，dQ/dK/dV 仍用跨 CTA 的 fp32 atomicAdd 汇总。
+  //      小 S 时把 grid 从 S/BM×H 抬到 ksplit 倍，消「grid 不足一整个波」的空 SM；
+  //      大 S 时用来削尾波（partial wave）。各部分数学上仍是同一个和，只是 fp 加法次序略变。----
+  const int mblk = blockIdx.x / ksplit, part = blockIdx.x % ksplit;
+  const int h = blockIdx.y, b = blockIdx.z;
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int wr = wid / WN, wc = wid % WN;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * BM;
+
+  const int ncols = causal ? min(S, m0 + BM) : S;
+  const int ntiles = (ncols + BN - 1) / BN;
+  const int nt_begin = part * ntiles / ksplit;
+  const int nt_end = (part + 1) * ntiles / ksplit;
+  if (nt_end <= nt_begin) return;  // 该 part 无 tile（causal 下小 mblk 可能被切空）
 
   // ---- 载入 Q/dO（含转置副本 Qt/dOt，供 dK/dV 的 B 操作数）----
   for (int i = tid; i < BM * kHeadDim; i += THREADS) {
@@ -454,26 +465,24 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     dos_s[tid] = (qi < S) ? dos[((size_t)(b * S + qi)) * H + h] : 1.f;
   }
 
-  const int ncols = causal ? min(S, m0 + BM) : S;
-  const int ntiles = (ncols + BN - 1) / BN;
-
-  // ---- O3 prologue：寄存器预取 tile 0 并落盘 ----
-  // ---- O4a：Q/dO 载入与 tile0 的 K/V 落盘写的是互不重叠的 smem（Qs/Qt/dOs/dOt vs
+  // ---- O3 prologue：寄存器预取本 part 首个 tile 并落盘 ----
+  // ---- O4a：Q/dO 载入与 tile 的 K/V 落盘写的是互不重叠的 smem（Qs/Qt/dOs/dOt vs
   //            Ks/Vs/Kt），故把原来 prologue 的两处 __syncthreads 合并为一处。----
   uint32_t pk[KVU], pv[KVU];
-  kv_prefetch(k8, v8, 0, S, H, h, b, tid, pk, pv);
+  kv_prefetch(k8, v8, nt_begin * BN, S, H, h, b, tid, pk, pv);
   kv_commit(Ks, Vs, Kt, pk, pv, tid);
   if (tid < BN) {
-    ks_s[tid] = (tid < S) ? ks[((size_t)(b * S + tid)) * H + h] : 1.f;
-    vs_s[tid] = (tid < S) ? vs[((size_t)(b * S + tid)) * H + h] : 1.f;
+    int jg = nt_begin * BN + tid;
+    ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * H + h] : 1.f;
+    vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * H + h] : 1.f;
   }
   __syncthreads();
 
-  for (int nt = 0; nt < ntiles; ++nt) {
+  for (int nt = nt_begin; nt < nt_end; ++nt) {
     const int j0 = nt * BN;
     // ---- O3：预取下一 tile 的 K/V 到寄存器（延迟被本轮 5 个 GEMM 覆盖）----
     const int nnt = nt + 1;
-    if (nnt < ntiles) kv_prefetch(k8, v8, nnt * BN, S, H, h, b, tid, pk, pv);
+    if (nnt < nt_end) kv_prefetch(k8, v8, nnt * BN, S, H, h, b, tid, pk, pv);
 
     // ---- (1) S = scale·QKᵀ  →  P = exp(S − LSE)，存 fp32 ----
     {
@@ -662,7 +671,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     }
     __syncthreads();
     // ---- O3：落盘预取的下一 tile 的 K/V（本轮 GEMM 已全部读完 smem），并更新 ks/vs ----
-    if (nnt < ntiles) {
+    if (nnt < nt_end) {
       kv_commit(Ks, Vs, Kt, pk, pv, tid);
       if (tid < BN) {
         int jg = nnt * BN + tid;
@@ -772,12 +781,14 @@ int main(int argc, char** argv) {
   std::string o_name = "ref_o";
   bool causal = true;
   int iters = 20;
+  int ksplit = -1;  // -1 = 自动
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
+    else if (a.rfind("--ksplit=", 0) == 0) ksplit = atoi(a.c_str() + 9);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
     else if (!a.empty() && a[0] != '-') dir = a;
   }
@@ -854,9 +865,20 @@ int main(int argc, char** argv) {
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes));
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBytes));
+  // ---- O2b：自动选择 N 方向切块数（目标：让 grid 至少铺满一个波 132SM×3CTA≈396）。----
+  const long base_grid = (long)((S + BM - 1) / BM) * H * B;
+  if (ksplit < 1) {
+    const long wave_slots = 132L * 3L;
+    long k = (base_grid + wave_slots - 1) / base_grid;
+    if (k < 1) k = 1;
+    if (k > 4) k = 4;
+    ksplit = (int)k;
+  }
   dim3 pg(S, H, B);
   dim3 lg((S + LBM - 1) / LBM, H, B);
-  dim3 mg((S + BM - 1) / BM, H, B);
+  dim3 mg((S + BM - 1) / BM * ksplit, H, B);
+  printf("grid main = %d x %d x %d  (ksplit=%d, base_grid=%ld)\n", mg.x, mg.y, mg.z,
+         ksplit, base_grid);
   const int cvt_threads = 256;
   const int cvt_blocks = (int)std::min<size_t>((n + cvt_threads - 1) / cvt_threads, 65535);
 
@@ -874,7 +896,7 @@ int main(int argc, char** argv) {
     run_preprocess();
     fa_bwd_fp8_mma_kernel<<<mg, THREADS, kSmemBytes>>>(
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-        d_dk_acc, d_dv_acc, S, H, scale, (int)causal);
+        d_dk_acc, d_dv_acc, S, H, scale, (int)causal, ksplit);
     convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
                                                 d_dv, n);
   };
@@ -919,7 +941,7 @@ int main(int argc, char** argv) {
   for (int i = 0; i < iters; ++i)
     fa_bwd_fp8_mma_kernel<<<mg, THREADS, kSmemBytes>>>(
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-        d_dk_acc, d_dv_acc, S, H, scale, (int)causal);
+        d_dk_acc, d_dv_acc, S, H, scale, (int)causal, ksplit);
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
   float ms_main = 0.f;
