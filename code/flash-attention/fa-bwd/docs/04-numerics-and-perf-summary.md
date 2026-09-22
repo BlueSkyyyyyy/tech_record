@@ -154,6 +154,19 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 对标：S=512 FA3 0.0265ms/81TF ⇒ ours total 17.6%（时间 5.7×，O8b 时 12.3×）；S=4096 仍 6.9%。
 > 详见 `01-fp16-bwd-impl.md` §13b。
 
+> **O7c（LSE/D 预装寄存器 + dK/dV float4 试错）已完成（fp16）**：① **负结果**——把 dK/dV 的
+> `red.global.add` 从 float2 提到 float4（quad `shfl` 打包成 `F32x4`、事务数减半）后**四个几何
+> 全变慢 1–7%**，证明该归约**不是事务数 bound**。② **正结果**——`lse`/`delta` 只依赖 CTA 自己的
+> Q 行、与 K tile 无关，原每 tile 在 GEMM1/2 epilogue 重复 global 读（ncu：4.4/32B）；循环前
+> 预装进 `lse_r/del_r` 后 **main (64,64,2) S=4096 1.8464→1.5576ms（+18.5%）、(64,32,2) +11.9%、
+> S=512 +14–16%、GQA kv4 +19.1%**。端到端 **total S=4096 2.3762→2.0935ms（1.13×）**、S=512
+> 0.1504→0.1495ms。数值与 O5/O8/O6/O6b/O8b/O6c **逐位相同**；单/两文件 device 逐字一致。
+> ncu（main,S4096）：Duration 1.99→**1.61ms**、**L2 58.7→71.6%（新墙）**、L1/TEX 57.5→55.7%、
+> `long_scoreboard` 1.79→**1.38**、regs 250 / smem 105.47KB（仍 2 CTA/SM）⇒ 墙从 L1/TEX 移到
+> **L2 + occupancy**，减 red 不划算 ⇒ 下一项 **O9（wgmma+TMA）**。对标同 session 纯反向 FA3
+> S=4096 0.3235ms/850TF ⇒ ours total 时间 6.47×（真反向 FLOPs 口径 131TF ≈ FA3 的 15.4%）。
+> 详见 `01-fp16-bwd-impl.md` §14。
+
 ### 2.2 bf16（峰值 989 TFLOPS）
 
 | shape | ours total | ours main | FA2.7.4 | TE2.14 |
@@ -224,6 +237,14 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 对标（纯反向 `fa_vs_te_bwd_only.py bf16`）：S=512 FA3 0.0265ms/162TF ⇒ ours **8.8%**（时间 5.7×）；
 > S=4096 FA3 0.3195ms/860 ⇒ ours **6.7%**（7.4×）；GQA kv4 FA3 0.0822/418 ⇒ ours **8.5%**（5.9×）。
 > 详见 `01b-bf16-bwd-impl.md` §6j。
+
+> **O7c-bf16（LSE/D 预装 + dK/dV float4 试错，与 fp16 逐字同构）已完成**：float4 一致变慢
+> （−2.4~−4.6%，同 fp16 负结论）；**PREL 正结果——main (64,64,2) S=4096 1.8297→1.5566ms（+17.5%）、
+> (64,32,2) +13.5%、S=512 +14–16%、GQA kv4 +17.5~18.9%**。端到端 **total S=4096 2.3692→2.0986ms
+> （1.13×）**、S=512 0.1495ms。数值与 O5b/O8/O6/O6b/O8b/O6c **逐位相同**；单/两文件逐字一致。
+> ncu（main,S4096）：Duration 1.87→**1.64ms**、**L2 70.5%（新墙）**、L1/TEX 55.7%、regs 250 /
+> smem 105.47KB（2 CTA/SM）、`wait 2.00 / long 1.39 / short 0.88`。对标纯反向 FA3 S=4096
+> 0.3193ms/861TF ⇒ ours total 时间 6.57×（真 FLOPs 口径 ≈15.2%）。详见 `01b-bf16-bwd-impl.md` §6k。
 
 ### 2.3 fp8（峰值 1978.8 TFLOPS；FA 无反向 FP8，仅对标 TE）
 
@@ -334,6 +355,9 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | bf16 | **mma main（O6, S=4096, cp.async 双缓冲）** | 3.43% | 64.96% | 25.49% | 11.79%（83.97KB, 2 CTA/SM） | 3.88 | long_scoreboard 同上降到 ~1、wait 主导 | 同 fp16（与 fp16 逐项一致） |
 | fp16 | **mma main（O6b, S=4096, K 双缓冲+A 转置读）** | 3.47% | 71.87% | 29.77% | 16.90%（**71.17KB, 3 CTA/SM**, 168 regs） | 2.59 | wait 1.88、long_scoreboard 1.79、short 0.81、not_selected 0.37 | **L1/TEX 吞吐 + L2 吞吐 + fixed-latency(`wait`)**（occ 升但吞吐受限） |
 | bf16 | **mma main（O6b, S=4096, K 双缓冲+A 转置读）** | 3.32% | 71.71% | 31.42% | 16.86%（71.17KB, 3 CTA/SM） | 2.59 | 同 fp16（与 fp16 逐项一致） | 同 fp16 |
+| fp16 | **mma main（O6c, S=4096, (64,64,2)）** | 3.24% | 57.47% | 27.04% | 11.78%（**105.47KB, 2 CTA/SM**, 242 regs） | 3.88 | wait 1.88、long_scoreboard 1.79、short 0.81 | **L1/L2 吞吐 + `wait`**（BN=64 降 L1 但掉 occ） |
+| fp16 | **mma main（O7c=PREL, S=4096, (64,64,2)）** | 4.01% | 55.73% | 23.37% | 11.84%（105.47KB, 2 CTA/SM, 250 regs） | 3.88 | wait 2.00、**long 1.79→1.38**、short 0.88、mio 0.49 | **L2 71.6%（新墙，残余 red）+ `wait` + 低 occupancy**（LSE/D 全局读已消；float4 red 更慢 ⇒ 非事务数 bound） |
+| bf16 | **mma main（O7c=PREL, S=4096, (64,64,2)）** | 3.95% | 55.69% | 23.38% | 11.81%（105.47KB, 2 CTA/SM, 250 regs） | 3.88 | wait 2.00、long 1.39、short 0.88、mio 0.50 | 同 fp16（与 fp16 逐项一致） |
 | fp8 | golden main | 0.06% | **75.96%**（90% 多余） | 4.98% | 6.25%（68KB） | 0.32 | MIO scoreboard 69% | **smem 冲突 + FP8 解码 + 低 occ** |
 | fp8 | **mma main（O2b+O4d 后, S=4096, ksplit=4）** | 1.41% | 69.91% | 21.70% | **18.27%（73.8KB, 3 CTA/SM）** | 10.34 | No Eligible 76.6%、long_scoreboard 4.46 + short_scoreboard 3.96 | **L2 带宽（81.5%）+ 延迟**（split-K 复读 Q/dO + 全局 atomic） |
 | fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |
@@ -369,6 +393,18 @@ O2 降 smem 后 fp8 从 2→3 CTA/SM（theoretical 12.5%→18.75%），main 1.16
 
 > O4c（`atomicAdd`→`float2` 向量化 red）+ O4b（转置副本 → `ldmatrix.trans` + K 配对）+
 > O7（dQ 寄存器累加 + 单次 flush）均已完成。
+
+> **O7c（fp16/bf16，已做）把「减 red 事务数」这条杠杆证伪**：dK/dV 从 float2 提到 float4
+> （quad `shfl` → `REDG.E.ADD.F32x4`，事务数减半）后**四个几何全变慢 1–7%**，说明该归约
+> 不是事务数 bound。真正有用的是 **PREL**：`lse`/`delta` 只依赖 CTA 自己的 Q 行、与 K tile
+> 无关，预装寄存器后 main **+14–19%**、端到端 S=4096 **2.376→2.094ms（1.13×）**，`long_scoreboard`
+> 1.79→1.38。**新墙 = L2 71.6%（残余 dK/dV `red`）+ `wait` + 低 occupancy（105KB smem / 250 regs
+> 锁死 2 CTA/SM）**。要同时拿低 L1/L2 与高 occupancy，只有**更低 smem 的数据通路（O9：wgmma+TMA）**
+> 这条路；继续抠 red 宽度或 tile 几何的边际收益已很小。
+
+> **下一步优先级**：**① O9（wgmma+TMA+warp specialization，对标 FA3）——当前唯一能同时
+> 降 smem 与提 occupancy 的杠杆；② fp8 侧残余 dK/dV 跨 CTA red（O7b，分块 `*_accum`+convert）；
+> ③ MLA 的 KV 分片/降 smem + 张量核。**
 
 ---
 
@@ -418,6 +454,10 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --launch-count 1 \
 - `src/fa_bwd_ours_summary.out.txt`：ours 两文件版 fp16/bf16/fp8 三个 shape 的计时与对拍。
 - `src/fa_bwd_refbench_summary.out.txt`：FA2.7.4 / TE2.14 CUPTI 基线（三 dtype × 三 shape）。
 - 各 dtype 目录下的 `*_s512 / *_s4096 / *_ncu_main.out.txt`：单文件/两文件的历史原始输出。
+- **O7c（本轮）**：`src/fp16/fa_bwd_fp16_mma_{main,onefile}_o7c_*.out.txt`、
+  `src/fp16/fa_bwd_fp16_mma_main_o7c_ncu_s4096.out.txt` / `..._o7c_stall_s4096.out.txt` /
+  `src/fp16/fa_bwd_fp16_o7c_fa3_te_baseline.out.txt`；bf16 同构文件在 `src/bf16/`（前缀 `..._o7c_`），
+  改动前基线 `fa_bwd_fp16_mma_main_o7c_base_{s512,s4096}.out.txt`。
 
 ---
 

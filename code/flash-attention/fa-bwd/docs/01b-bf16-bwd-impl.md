@@ -679,10 +679,55 @@ docker exec kernel_lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py bench
 
 ---
 
+## 6k. O7c-bf16：LSE/D 预装寄存器 + dK/dV float4 试错（main 1.14–1.19×）
+
+把 fp16 的 O7c（`01` §14）**逐字 dtype 参数化**到 bf16：在 `fa_bwd_bf16_mma_kernel` 加
+模板开关 `R4`（dK/dV 归约宽度，默认 false=float2）与 `PREL`（LSE/D 预装寄存器，默认 true），
+device 代码与 fp16 同构。单文件、两文件同步，脚本核对 device 段 **逐字一致（identical: True）**。
+
+**负结果（R4，float4）**：SASS 生成 `REDG.E.ADD.F32x4`，但四个几何一致变慢
+（(64,32,2) S=4096 −4.6%、(64,64,2) −3.3%、(32,32,1) −2.4%、GQA kv4 −3.0%）⇒ 与 fp16
+结论相同：dK/dV 归约**不是事务数 bound**，`shfl` 打包的代价超过省下的事务。
+
+**正结果（PREL）**：LSE/D 只依赖 CTA 自己的 Q 行、与 K tile 无关，原来每个 tile 都在
+GEMM1/2 epilogue 按 `qi` 去 global 读（ncu：每 thread 仅 4.4/32B）。循环前一次性装进
+`lse_r[MTM1][2]/del_r[MTM1][2]` 后，数值**逐位不变**、性能：
+
+| 几何 | base（f2） | f2+PREL | 提升 |
+|---|---|---|---|
+| (64,64,2) S=4096 | 1.8297 ms / 75.1 TF | **1.5566 / 88.3** | **+17.5%** |
+| (64,32,2) S=4096 | 1.8057 / 76.1 | **1.5905 / 86.4** | +13.5% |
+| (64,32,2) S=512 | 0.0851 / 25.3 | **0.0746 / 28.8** | +14.1% |
+| (64,64,2) S=512 | 0.0808 / 26.6 | **0.0697 / 30.8** | +15.9% |
+| (32,32,1) S=512 | 0.0797 / 26.9 | 0.0738 / 29.1 | +8.0% |
+| GQA kv4 S=1024 (64,32,2) | 0.3580 / 48.0 | **0.3046 / 56.4** | +17.5% |
+| GQA kv4 S=1024 (64,64,2) | 0.3821 / 45.0 | **0.3214 / 53.5** | +18.9% |
+
+端到端（自动档 S=4096）：`main 42.2→…` 见 O5b 后已到 mma 版；本轮相对 O6c `main 1.87→1.59ms`、
+total `2.3692→2.0986 ms`（1.13×）；S=512 total 0.1495ms。数值与 O5b/O8/O6/O6b/O8b/O6c
+**逐位相同**（S=512 9.001/12.61/13.65e-3；S=4096 15.10/13.40/16.31e-3；GQA kv4
+12.01/21.25/31.56e-3）。
+
+**ncu（main，S=4096，(64,64,2)）**：Duration 1.87→**1.64ms**、L1/TEX 55.7%、
+**L2 70.5%（新墙）**、Compute 23.4%、regs 250 / smem 105.47KB（2 CTA/SM，occ 11.8%）、
+stall `wait 2.00 / long 1.39 / short 0.88 / mio 0.50`（`long` 从 ~1.8 降）——与 fp16 逐项一致。
+**墙已从 L1/TEX 移到 L2 + occupancy**，进一步减 red 不划算 ⇒ 下一项 **O9（wgmma+TMA）**。
+
+**对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`）：S=4096 MHA FA3
+0.3193ms/861TF、TE 0.4426/621；ours total 2.0986ms（时间 6.57×）。GQA kv4 S=1024 FA3
+0.0827/415；ours total 0.4345（5.25×）。
+
+原始输出 `src/bf16/fa_bwd_bf16_mma_main_o7c_{s512,s4096,gqa_kv4}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o7c_{s512,s4096}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_main_o7c_ncu_s4096.out.txt`、`..._o7c_stall_s4096.out.txt`、
+`src/bf16/fa_bwd_bf16_o7c_fa3_te_baseline.out.txt`。
+
+---
+
 ## 8. 下一步
 
 见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）、O8（preprocess mma，§6f）、O6（main
 `cp.async` 双缓冲，§6g）、O6b（K/V 降 smem 回 3 CTA/SM + A 转置读，§6h）、O8b（LSE 负载
-均衡 + cp.async，§6i）、O6c（tile 几何参数化 + 小网格自适应，§6j）已完成**；接下来是
-**O7**（dK/dV 去 `atomicAdd`，降 L1/L2 流量）、**O9**（wgmma+TMA 对标 FA3）。
+均衡 + cp.async，§6i）、O6c（tile 几何参数化 + 小网格自适应，§6j）、O7c（LSE/D 预装 +
+float4 试错，§6k）已完成**；接下来是 **O9**（wgmma+TMA 对标 FA3）。
 backlog：fp8 侧残余 red（O7b）、MLA 降 smem / 张量核。

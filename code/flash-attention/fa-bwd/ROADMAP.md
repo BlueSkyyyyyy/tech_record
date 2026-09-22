@@ -822,8 +822,45 @@
     8.5%（GQA kv4，5.89×）**。
   - 原始输出 `src/bf16/fa_bwd_bf16_mma_main_o6c_{s512_h16,s4096_h16,s1024_h32_kv4}.out.txt`、
     `..._onefile_o6c_{s512_h16,s4096_h16}.out.txt`、`..._o6c_ncu_{s512_main,s4096_main}.out.txt`、
-    `..._o6c_stall_{s512,s4096}.out.txt`、`src/bf16/fa_bwd_o6c_fa3_te_{baseline,s512}.out.txt`；
+     `..._o6c_stall_{s512,s4096}.out.txt`、`src/bf16/fa_bwd_o6c_fa3_te_{baseline,s512}.out.txt`；
     文档 `docs/01b` §6j、`docs/04` §2.2。
+
+- 2026-09-23（第三十五轮）：**O7c 完成（fp16/bf16：LSE/D 预装寄存器 + dK/dV float4 试错）**。
+  - **负结果（先证伪一条路）**：O7 的「去原子/减 red 事务数」——把 dK/dV 的 `red.global.add`
+    从 float2 提到 **float4**（`mma.m16n8` 一个 quad 的 `c2=0/2/4/6` 恰是同 row 连续 8 列，
+    用两次 `shfl_down 1` 打包成两个 float4，偶 lane 落 `REDG.E.ADD.F32x4`，事务数减半）。
+    四个几何 **全部变慢 1–7%**（fp16 S4096 (64,32,2) −6.9% / (64,64,2) −2.6%；bf16 −3~−5%）
+    ⇒ **该归约不是事务数 bound**，`shfl` + 「半 lane 落 store」的代价 > 省下的事务。
+  - **正结果（本轮真实收益）**：`lse`/`delta` **只依赖 CTA 自己的 Q 行、与 K tile 无关**，
+    原实现每个 K tile 的 GEMM1/2 epilogue 都按 `qi` 去 global 读（ncu：global load 每 thread
+    仅 4.4/32B）。改在 `nt` 循环前一次性装进 `lse_r[MTM1][2]/del_r[MTM1][2]`，循环内零 global 读。
+  - **改动（单/两文件 device 逐字一致，脚本核对 `identical: True`）**：kernel 加模板开关
+    `R4`（float4 归约，默认 false）与 `PREL`（预装，默认 true）；host 加 `--r4=` / `--prel=`
+    与 2×2 A/B 段。fp16/bf16 同步。
+  - **性能（同 session A/B，event，main-only）**：**PREL 相对 base**——fp16 (64,64,2) S4096
+    1.8464→**1.5576ms（+18.5%）**、(64,32,2) 1.7990→**1.6081（+11.9%）**、S512 (64,64,2)
+    0.0809→**0.0698（+16.0%）**、GQA kv4 S1024 (64,32,2) 0.3627→**0.3044（+19.1%）**；
+    bf16 同构 1.8297→**1.5566（+17.5%）** / 0.3580→**0.3046（+17.5%）**。端到端 fp16
+    **total S4096 2.3762→2.0935ms（1.13×）**、S512 0.1504→0.1495、GQA kv4 0.4344；
+    bf16 total S4096 2.3692→**2.0986ms（1.13×）**。
+  - **数值与 O5/O5b/O8/O6/O6b/O8b/O6c 逐位相同**（fp16 S512 1.671/1.771/1.899e-3、
+    S4096 1.883/1.734/1.966e-3、GQA kv4 2.134/3.305/3.850e-3；bf16 S512 9.001/12.61/13.65e-3、
+    S4096 15.10/13.40/16.31e-3、GQA kv4 12.01/21.25/31.56e-3）。
+  - **ncu（main, S=4096, (64,64,2)）**：fp16 Duration 1.99→**1.61ms**、**L1/TEX 57.5→55.7%**、
+    **L2 58.7→71.6%（新墙）**、Compute 27.0→23.4%、DRAM 4.0%、regs 242→250 / smem 105.47KB /
+    仍 2 CTA/SM（occ 11.8%）、`long_scoreboard` 1.79→**1.38**、wait 1.88→2.00、short 0.81→0.88、
+    mio 0.28→0.49；bf16 逐项一致。**结论：墙从 L1/TEX 移到 L2（残余 dK/dV `red`）+ `wait` +
+    低 occupancy（105KB smem / 250 regs 锁死 2 CTA/SM）**；继续抠 red 宽度/tile 几何边际很小，
+    **下一步转 O9（wgmma+TMA，唯一能同时降 smem 与提 occupancy 的杠杆）**。
+  - **对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py`）**：fp16 S4096 MHA FA3
+    0.3235ms/850TF、TE 0.4438/619 ⇒ ours total 时间 **6.47×**（真反向 FLOPs 口径 131TF≈15.4%）；
+    GQA kv4 S1024 FA3 0.0828/415 ⇒ 5.25×。bf16 S4096 FA3 0.3193/861 ⇒ 6.57×、GQA kv4 5.25×。
+  - 原始输出 `src/fp16/fa_bwd_fp16_mma_main_o7c_{s512,s4096,gqa_kv4}.out.txt`、
+    `src/fp16/fa_bwd_fp16_mma_onefile_o7c_{s512,s4096}.out.txt`、
+    `src/fp16/fa_bwd_fp16_mma_main_o7c_ncu_s4096.out.txt`、`..._o7c_stall_s4096.out.txt`、
+    `src/fp16/fa_bwd_fp16_o7c_fa3_te_baseline.out.txt`；`src/bf16/` 同构文件（`..._o7c_*`）；
+    改动前基线 `src/fp16/fa_bwd_fp16_mma_main_o7c_base_{s512,s4096}.out.txt`；
+    文档 `docs/01` §14、`docs/01b` §6k、`docs/04` §2.1/§2.2/§3/§6。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -872,7 +909,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       **bf16 同款改造已完成（第三十四轮，单/两文件 device 逐字同构）**：S=512 main 0.0886→0.0800ms
       （1.11×，另一 session 1.18×）、端到端 1.06×，S=4096 1.018×、GQA 不变；数值逐位相同。
       详见 `docs/01` §13b、`docs/01b` §6j。
-- [ ] **O7** dQ/dK/dV 去 `atomicAdd`，改分块 `*_accum` + convert（确定性 + 消竞争）。**← 当前第一瓶颈（L1/L2 吞吐）**
+- [~] **O7** dQ/dK/dV 去 `atomicAdd`，改分块 `*_accum` + convert（确定性 + 消竞争）。
+      **fp16/bf16 侧已做 O7c（第三十五轮）并证伪「减 red 事务数」**：float4 归约全几何变慢 1–7%
+      （非事务数 bound）；真正有效的是 **LSE/D 预装寄存器**（main +14–19%、端到端 S4096 1.13×），
+      但新墙是 **L2 71.6%（残余 dK/dV red）+ `wait` + 低 occupancy（2 CTA/SM）** ⇒ 转 **O9**。
+      完整 dQ/dK/dV 去原子（分块 `*_accum`+convert）仍列 backlog（回报低于 O9）。详见 `docs/01` §14。
 - [x] **O8** preprocess 的 LSE/D 改 mma 分块（对齐 fp8 的 O1）。**已完成（第二十八轮，fp16/bf16）**：
       `lse_mma_kernel<128>`（`mma.m16n8k16` QKᵀ + online-softmax + 4-lane `shfl`）+ 独立
       `delta_kernel<128>`；preprocess 17–70×、端到端 **4.4–13.2×**（S4096 total 73.3→5.58ms，
@@ -924,12 +965,16 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    6.24%→10.99%、Duration −15.5%；S=4096 `BN=64` L1/TEX 71.9→57.3% 但 2 CTA/SM，净 +1.5%。
 >    **bf16 同款改造已完成（第三十四轮）**：S=512 main 0.0886→**0.0800ms（1.11×，另一 session 1.18×）**、
 >    端到端 0.1603→**0.1501ms（1.06×）**、S=4096 1.018×、GQA 持平；数值逐位相同。详见 `docs/01b` §6j。
-> 6. **O7**：dQ/dK/dV 去 `atomicAdd`（分块 accum + convert；fp8 已做，移植）。
->    **注意（本轮分析）**：fp16/bf16 的 dK/dV 原子流量与 dQ **对称**——无论 Q-resident 还是
->    KV-resident，归约贡献总数都是 `S²/2`（每元素被 atomic `~S/BM` 次），单靠换归约维收益有限；
->    实测 main 的 L2 162M sectors 里 `red` 占 **102M（63%）**，真正杠杆是**更大 `BM` 或寄存器/
->    smem 分块累加**。O7 需谨慎设计（优先考虑 O9）。
-> 7. **O9**：`wgmma`+TMA+warp specialization，对标 FA3。
+> 6. **O7c**（dQ/dK/dV 去原子 / 减 red 事务数）：**已完成（第三十五轮，fp16+bf16）并给出负结果**：
+>    dK/dV 归约 float2→float4（quad `shfl`，`REDG.E.ADD.F32x4`）四个几何全变慢 1–7% ⇒ 该归约
+>    **不是事务数 bound**；O7「去原子」这条路（分块 `*_accum`+convert）回报低于 O9，列 backlog。
+>    同轮发现并合入真正有效的 **O7c-PREL（LSE/D 预装寄存器）**：main **+14–19%**、端到端 S4096
+>    **2.376→2.094ms（1.13×）**、S512 ~持平，数值逐位相同；ncu 墙移到 **L2 71.6% + `wait` +
+>    低 occupancy（105KB smem/250 regs→2 CTA/SM）**。详见 `docs/01` §14、`docs/01b` §6k。
+> 7. **O9（当前第一优先级）**：`wgmma`+TMA+warp specialization，对标 FA3。
+>    理由：O6c/O7c 已证明 `BN=64` 能降 L1/TEX，但 fp16/bf16 的 smem（105KB）与寄存器（250）
+>    把 occupancy 锁死在 2 CTA/SM；**只有更低 smem 的数据通路（TMA 直写 smem + wgmma 免
+>    `ldmatrix`/转置副本）才能同时拿低 L1/L2 与高 occupancy**。
 > 目标：fp16/bf16 main 先到 FA2 水平，再逼近 FA3/TE；每步用 `harness/fa_vs_te_bwd_only.py`（纯反向、三列）验收。
 
 > **用户新增需求（已完成）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
@@ -980,9 +1025,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 并行度自适应）也已完成**：O6c 让 S=512 main 1.106×（grid 翻倍、occ 6.24→10.99%），并证伪了
 > 静态 mblk 重排；`BN=64` 能把 S=4096 的 L1/TEX 71.9→57.3% 但掉到 2 CTA/SM（净 +1.5%），
 > **要同时拿低 L1 与高 occupancy 须等 O9 的更低 smem 数据通路**。**O6c(bf16) 也已完成（第三十四轮）**
-> （S=512 main 1.18×、端到端 1.06×，S=4096/GQA 持平，数值逐位相同）。**下一项 = O7（dQ/dK/dV
-> 去 atomic，降 L1/L2 流量）、O9（wgmma+TMA）**；
-> 此外 fp8 侧剩余 108.5M red（dK/dV 跨 mblk/hkv 竞争）可做 O7b；MLA 降 smem / wgmma+TMA 亦在列。
+> （S=512 main 1.18×、端到端 1.06×，S=4096/GQA 持平，数值逐位相同）。**O7c（fp16+bf16，第三十五轮）
+> 完成了「O7 去原子」这一路的判决**：dK/dV float4 归约全几何变慢 1–7%（**非事务数 bound**），
+> 但同轮合入 **LSE/D 预装寄存器**（main +14–19%、端到端 S4096 2.376→**2.094ms，1.13×**，
+> 数值逐位相同）；ncu 墙从 L1/TEX 移到 **L2 71.6% + `wait` + 低 occupancy（105KB smem/250 regs→
+> 2 CTA/SM）**。**下一项 = O9（wgmma+TMA，当前唯一能同时降 smem 与提 occupancy 的杠杆）**；
+> fp8 侧剩余 108.5M red（dK/dV 跨 mblk/hkv 竞争）可做 O7b；MLA 降 smem / wgmma+TMA 亦在列。
 > 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
 
 - [x] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms。

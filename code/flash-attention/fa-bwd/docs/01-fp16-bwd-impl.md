@@ -873,10 +873,116 @@ S=512 MHA：FA2 0.0442/49、**FA3 0.0265/81**、TE 0.0321/67；ours total 0.1504
 
 ---
 
-## 14. 下一步
+## 14. O7c：LSE/D 预装寄存器 + dK/dV float4 归约试错（fp16，main 1.14–1.19×）
+
+O6c 之后 main 的墙是 `wait` + `long/short_scoreboard` + L1/TEX，`No Eligible` 66–72%、
+occupancy 只有 11.8%（`BN=64`）/16.9%（`BN=32`）。本节沿两条独立杠杆各做了一个「同 session
+A/B」实验：**① dK/dV 归约宽度 float2→float4（负结果）**；**② LSE/D 预装寄存器（正结果）**。
+实现都放进 `fa_bwd_fp16_mma_kernel` 的两个模板开关 `R4`（默认 false，float2）与
+`PREL`（默认 true，预装），host 用 `--r4=` / `--prel=` 及一个 2×2 A/B 段挑选。
+
+### 14.1 负结果：dK/dV 归约从 float2 提升到 float4 反而更慢
+
+`mma.m16n8` 的累加器里，一个 quad（`lane&3=0..3`）的 `c2=(lane&3)*2` 正好是同 row 的连续
+8 列。于是用两次 `__shfl_down_sync(...,1)` 把「本 lane 的 float2」和「下一 lane 的 float2」
+拼成两个 `float4`，让列 0–3 由 lane0、列 4–7 由 lane2 各发一次 `red.global.add.v4.f32`
+（地址天然 16B 对齐）。SASS 证实确实生成了 `REDG.E.ADD.F32x4`（相对 float2 的
+`F32x2` 事务数减半），但**四个几何全部变慢（−1% ~ −7%）**：
+
+| 几何（main-only，ms） | base（float2） | float4 | 变化 |
+|---|---|---|---|
+| (64,32,2) S=4096 | 1.7990 | 1.9317 | **−6.9%** |
+| (64,64,2) S=4096 | 1.8464 | 1.8954 | −2.6% |
+| (32,32,1) S=512 | 0.0750 | 0.0802 | −6.4% |
+| (64,32,2) S=512 | 0.0852 | 0.0914 | −6.8% |
+
+**结论**：此配置下 dK/dV 归约**不是事务数 bound**——`red.global` 的 RMW 已经在 L1/L2 内部
+高效合并，`float4` 省下的事务被 `shfl` 指令 + 「只有一半 lane 发 store」的并行度损失吃掉。
+所以 O7 的「去原子/reduce 事务数」在这条路上收益有限；真正的墙是 **occupancy/延迟**
+（见 §14.4），需靠 O9（wgmma+TMA，降 smem/提并行）而非抠归约宽度。
+
+### 14.2 正结果：LSE/D 预装寄存器（PREL）
+
+ncu 的 `Memory Workload Analysis` 报「global load 平均每 thread 只用 4.4/32B」。来源是
+**每个 K tile 的 GEMM1/GEMM2 epilogue 都按 `qi` 去 global 读 `lse[qi]` 与 `delta[qi]`**——
+而这两个量**只依赖 CTA 自己的 Q 行（`qi=m0+r`），与 K tile 完全无关**，本可只读一次。
+
+改法：在 `nt` 循环前，把本线程需要的 `MTM1×2` 个 row 的 `lse`/`delta` 一次性装进寄存器
+（`lse_r[MTM1][2]`、`del_r[MTM1][2]`，行号 `r=wr*GM1+i*16+g+(s?8:0)` 与 epilogue 的
+`(i, q>=2)` 一一对应，越界写 0），循环内 epilogue 改读寄存器、零 global 读。数学**逐位等价**。
+
+同 session A/B（CUDA event，main-only）：
+
+| 几何 | base（f2，无 PREL） | f2+PREL | 提升 |
+|---|---|---|---|
+| (64,64,2) S=4096 | 1.8464 ms / 74.4 TF | **1.5576 ms / 88.2 TF** | **+18.5%** |
+| (64,32,2) S=4096 | 1.7990 / 76.4 | **1.6081 / 85.5** | +11.9% |
+| (64,32,2) S=512 | 0.0852 / 25.2 | **0.0747 / 28.7** | +13.9% |
+| (64,64,2) S=512 | 0.0809 / 26.5 | **0.0698 / 30.8** | +16.0% |
+| (32,32,1) S=512 | 0.0750 / 28.6 | 0.0714 / 30.1 | +5.0% |
+| GQA kv4 S=1024 (64,32,2) | 0.3627 / 47.4 | **0.3044 / 56.4** | +19.1% |
+| GQA kv4 S=1024 (64,64,2) | 0.3801 / 45.2 | **0.3219 / 53.4** | +18.1% |
+
+（`(32,32,*)` 只 +4–5%：小 S 是 grid-bound，省下来的 LDG 不是主因。）
+
+端到端（自动档 `(BN=64,PIPE=2)`，S=4096）：`main 1.8819→1.6029 ms`、total
+`2.3762→2.0935 ms`（约 1.13×）；S=512：`main 0.0796→0.0763`、total `0.1504→0.1495 ms`。
+
+### 14.3 单/两文件与数值
+
+单文件 `fa_bwd_fp16_mma_onefile.cu` 与两文件 `fa_bwd_fp16_mma_kernels.cuh` 的 device 段
+**逐字一致**（脚本核对 `identical: True`）。数值与 O5/O8/O6/O6b/O8b/O6c **逐位相同**
+（PREL 只换读寄存器、float4 默认关）：
+
+| shape | dq | dk | dv |
+|---|---|---|---|
+| S=512 MHA | 1.671e-3 | 1.771e-3 | 1.899e-3 |
+| S=4096 MHA | 1.883e-3 | 1.734e-3 | 1.966e-3 |
+| S=1024 GQA kv4 | 2.134e-3 | 3.305e-3 | 3.850e-3 |
+
+### 14.4 ncu（main，S=4096，(64,64,2)）——墙从 L1/TEX 移到 L2
+
+| 指标 | O6c | O7c(PREL) |
+|---|---|---|
+| Duration | 1.99 ms | **1.61 ms** |
+| L1/TEX | 57.5% | 55.7% |
+| **L2** | 58.7% | **71.6%（新墙）** |
+| Compute (SM) | 27.0% | 23.4% |
+| DRAM | 3.2% | 4.0% |
+| occupancy（theor/achieved） | 12.5/11.8% | 12.5/11.8% |
+| regs / smem | 242 / 105.47KB（2 CTA/SM） | 250 / 105.47KB |
+| stall | long 1.79 / wait 1.88 / short 0.81 / mio 0.28 | long **1.38** / wait **2.00** / short 0.88 / mio 0.49 |
+
+`long_scoreboard` 1.79→1.38（消掉每 tile 的 LSE/D 全局读），墙前移到 **L2 71.6%**（残余
+dK/dV 的 `red` + Q/dO 重读）。**但 float4 实验已证明「减 red 事务数」不划算**，且 occupancy
+被 105KB smem / 250 regs 锁死在 2 CTA/SM——**要同时拿低 L1/L2 与高 occupancy 必须靠 O9
+（TMA+wgmma 的更低 smem 数据通路）**。
+
+### 14.5 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`）
+
+S=4096 MHA：FA2 0.7289ms/377TF、**FA3 0.3235ms/850TF**、TE 0.4438/619。ours total
+2.0935ms（时间 **6.47×** FA3；真反向 FLOPs 口径 131 TF ≈ FA3 的 15.4%）。S=512 MHA：
+FA3 0.0265ms/81TF，ours total 0.1495ms（时间 5.64×）。GQA kv4 S=1024：FA3 0.0828ms/415TF，
+ours total 0.4344ms（5.25×）。
+
+> 口径提醒：kernel 内打印的 TFLOPS 用 `4·B·S²·H·D`，而反向真 FLOPs 是
+> `4·B·S²·H·(D+Dv)`；当 `Dv=D` 时打印值恰是真值的一半（`harness/` 用的是真值口径）。
+
+### 14.6 原始输出
+
+`src/fp16/fa_bwd_fp16_mma_main_o7c_{s512,s4096,gqa_kv4}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o7c_{s512,s4096}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o7c_ncu_s4096.out.txt`、
+`..._o7c_stall_s4096.out.txt`、`src/fp16/fa_bwd_fp16_o7c_fa3_te_baseline.out.txt`；
+以及改动前基线 `src/fp16/fa_bwd_fp16_mma_main_o7c_base_{s512,s4096}.out.txt`。
+bf16 同款见 `01b` §6k。
+
+---
+
+## 15. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
-O8b（§13）、O6c（§13b）** 完成。后续按回报排序：**O7**（dK/dV 去 `atomicAdd`；已分析其
-原子流量与 dQ 对称，单靠换归约维收益有限，需配合更大 `BM`/寄存器累加）→ **O9**（`wgmma`+
-TMA+warp specialization，对标 FA3；O6c 已证明 `BN=64` 能降 L1/TEX，但需 wgmma/TMA 才能
-在不掉 occupancy 的前提下拿到）→ MLA 张量核。**O6c(bf16) 已完成（`01b` §6j）**。
+O8b（§13）、O6c（§13b）、O7c（§14）** 完成。O7c 已把「减 red 事务数」这条杠杆**证伪**
+（float4 更慢），并把墙从 L1/TEX 移到 L2/occupancy。后续按回报排序：**O9**（`wgmma`+TMA+
+warp specialization，对标 FA3；O6c/O7c 已证明 `BN=64` 能降 L1/TEX 但 smem/regs 锁死
+occupancy，只有更低 smem 的数据通路才能同时拿到）→ MLA 张量核。**O7c(bf16) 已完成（`01b` §6k）**。
