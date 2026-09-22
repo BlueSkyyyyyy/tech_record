@@ -542,6 +542,47 @@ GQA kv4 12.01/21.25/31.56e-3。
 
 ---
 
+## 6i. O8b-bf16：LSE 预处理负载均衡 + `cp.async` 双缓冲（端到端 1.27×）
+
+与 fp16 的 O8b（`01-fp16-bwd-impl.md` §13）**逐字 dtype 参数化**：新增
+`lse_mma_kernel_bal<HD,PIPE>`（`__half`→bf16、`__float2half`→`__float2bfloat16`），
+① **镜像配对**——每 CTA 处理 `m=blockIdx.x` 与 `m'=nblk-1-m`，因果下工作量恒 `nblk+1`
+（grid.x 64→32，尾波 50%→~0）；② `PIPE=1` 的 K 用 `cp.async.cg` 16B 双缓冲
+（`PIPE=0` 退回同步标量读用于消融）。仅 causal 走新 kernel，非 causal 走 O8 原版。
+单/两文件同源，device 代码**逐字一致**（脚本核对 `using bf16` 后主体相同、仅尾部 include guard 差异）。
+
+**消融（同 session，lse-only，CUDA event）**：
+
+| shape | O8 lse (ms) | **bal 单缓冲 (ms)** | **bal+cp.async (ms)** | 总加速 |
+|---|---|---|---|---|
+| MHA S=512 | 0.0630 | 0.0552 (1.14×) | **0.0456 (1.38×)** | 1.38× |
+| MHA S=4096 | 0.9696 | 0.4524 (2.14×) | **0.3503 (2.77×)** | **2.77×** |
+| GQA q32/kv4 S=1024 | 0.1621 | 0.1013 (1.60×) | **0.0787 (2.06×)** | 2.06× |
+
+**收益主要来自镜像配对负载均衡，`cp.async` 再叠加 ~1.29×**（与 fp16 一致）。
+
+**端到端（CUDA event）**：preprocess S=4096 0.993→**0.392ms**；total S=4096
+2.9605→**2.3427ms（58.67 TF，O6b 时 46.4 TF）**、S=512 0.1856→**0.1603ms**、
+GQA kv4 0.5764→**0.4817ms（35.66 TF）**。**数值与 O5b/O8/O6/O6b 逐位相同**
+（S=512 9.001/12.61/13.65e-3；S=4096 15.10/13.40/16.31e-3；GQA kv4 12.01/21.25/31.56e-3），
+单/两文件逐指标一致。
+
+**ncu（lse_bal, S=4096）**：Duration **356.4µs**、DRAM 3.07% / L1TEX 32.40% / L2 26.77% /
+**Compute 60.40%** / 64 regs / 52.22KB smem（**4 CTA/SM**，理论 occ 25%、achieved 22.91%）/
+Waves **0.97**；stall `wait 1.57 + short_scoreboard 1.33 + not_selected 0.79 + long_scoreboard 0.34`
+（与 fp16 O8b 逐项相同）。**新墙 = Compute（QKᵀ mma + softmax exp）60% + smem 依赖**，
+不再是 `long_scoreboard`（2.19→0.34）与尾波（1.29→0.97）。
+
+**对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`）：FA3 MHA S4096
+**0.3194ms/861 TF**、TE 0.4419/622；GQA kv4 FA3 0.0825ms/416。ours total 2.343ms/58.7 TF
+⇒ **FA3 的 6.8%**（O6b 5.4%）、时间比 7.3×；GQA kv4 total 0.482ms ⇒ FA3 的 8.6%、时间比 5.8×。
+原始输出 `src/bf16/fa_bwd_bf16_mma_main_o8b_{s512,s4096,gqa_kv4}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o8b_{s512,s4096}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_main_o8b_ncu_lse_bal_s4096.out.txt`、
+`..._o8b_stall_lse_bal_s4096.out.txt`、`src/bf16/fa_bwd_bf16_o8b_fa3_te_baseline.out.txt`。
+
+---
+
 ## 7. 复现命令
 
 ```bash
@@ -572,6 +613,6 @@ docker exec kernel_lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py bench
 ## 8. 下一步
 
 见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）、O8（preprocess mma，§6f）、O6（main
-`cp.async` 双缓冲，§6g）、O6b（K/V 降 smem 回 3 CTA/SM + A 转置读，§6h）已完成**；
-接下来是 O9（wgmma+TMA 对标 FA3）、O7（去 atomic）、O8b（LSE 尾波/occupancy）。
+`cp.async` 双缓冲，§6g）、O6b（K/V 降 smem 回 3 CTA/SM + A 转置读，§6h）、O8b（LSE 负载
+均衡 + cp.async，§6i）已完成**；接下来是 O9（wgmma+TMA 对标 FA3）、O7（去 atomic）。
 backlog：fp8 侧残余 red（O7b）、MLA 降 smem / 张量核。
