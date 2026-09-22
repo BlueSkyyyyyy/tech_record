@@ -111,7 +111,7 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // =============================================================================
 // PIPE=0：K/V 都不双缓冲；PIPE=1：K/V 都双缓冲；PIPE=2：只 K 双缓冲（V 单缓冲 + 后段预取）。
 // K/V 的 smem 份数：0→2（各 1）、1→4（各 2）、2→3（K 2 + V 1）。
-template <int HD, int BM, int BN, int PIPE>
+template <int HD, int BM, int BN, int PIPE, bool R4 = false, bool PREL = true>
 static void launch_bwd_mma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
                            const bf16* do_, const float* delta, const float* lse,
                            float* dq_acc, float* dk_acc, float* dv_acc, int S, int H, int Hkv,
@@ -120,9 +120,9 @@ static void launch_bwd_mma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
   constexpr int pds = (PIPE == 2) ? 2 * BM * (BN + 8) : 2 * BN * (BM + 8) + BM * (BN + 8);
   constexpr int smem =
       (2 * BM * (HD + 8) + kvn * BN * (HD + 8) + pds) * (int)sizeof(bf16);
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE>,
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE, R4, PREL>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-  fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE><<<mg, THREADS, smem>>>(
+  fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE, R4, PREL><<<mg, THREADS, smem>>>(
       q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, sched);
 }
 
@@ -136,6 +136,10 @@ int main(int argc, char** argv) {
   int sched = 0;
   // O6c：主 kernel tile 配置覆盖（-1=自动）。
   int bm_opt = -1, bn_opt = -1;
+  // O7c：dK/dV 归约宽度（-1=自动/float2，0=float2，1=float4）。
+  int r4_opt = -1;
+  // O7c：LSE/D 预装寄存器（-1=自动/开，0=关，1=开）。
+  int prel_opt = -1;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -147,6 +151,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--sched=", 0) == 0) sched = atoi(a.c_str() + 8);
     else if (a.rfind("--bm=", 0) == 0) bm_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--bn=", 0) == 0) bn_opt = atoi(a.c_str() + 5);
+    else if (a.rfind("--r4=", 0) == 0) r4_opt = atoi(a.c_str() + 5);
+    else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -250,33 +256,52 @@ int main(int argc, char** argv) {
   const int pp_sel = (pipe >= 0) ? pipe : auto_pipe;
   printf("[O6c] main grid=%lld auto=(BM=%d,BN=%d,PIPE=%d) sel=(BM=%d,BN=%d,PIPE=%d)\n", grid,
          auto_bm, auto_bn, auto_pipe, bm_sel, bn_sel, pp_sel);
-  auto launch_cfg = [&](int bm, int bn, int pp) {
+#define LAUNCH_CFG(HD_, BM_, BN_, PIPE_)                                                   \
+  do {                                                                                     \
+    if (r4) {                                                                              \
+      if (prel)                                                                            \
+        launch_bwd_mma<HD_, BM_, BN_, PIPE_, true, true>(g, d_q, d_k, d_v, d_do, d_delta,  \
+                                                         d_lse, d_dq_acc, d_dk_acc,        \
+                                                         d_dv_acc, S, H, Hkv, scale,       \
+                                                         (int)causal, sched);              \
+      else                                                                                 \
+        launch_bwd_mma<HD_, BM_, BN_, PIPE_, true, false>(g, d_q, d_k, d_v, d_do, d_delta, \
+                                                          d_lse, d_dq_acc, d_dk_acc,       \
+                                                          d_dv_acc, S, H, Hkv, scale,      \
+                                                          (int)causal, sched);             \
+    } else {                                                                               \
+      if (prel)                                                                            \
+        launch_bwd_mma<HD_, BM_, BN_, PIPE_, false, true>(g, d_q, d_k, d_v, d_do, d_delta, \
+                                                          d_lse, d_dq_acc, d_dk_acc,       \
+                                                          d_dv_acc, S, H, Hkv, scale,      \
+                                                          (int)causal, sched);             \
+      else                                                                                 \
+        launch_bwd_mma<HD_, BM_, BN_, PIPE_, false, false>(                            \
+            g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,    \
+            Hkv, scale, (int)causal, sched);                                              \
+    }                                                                                      \
+  } while (0)
+
+  auto launch_cfg = [&](int bm, int bn, int pp, bool r4, bool prel) {
     dim3 g((S + bm - 1) / bm, H, B);
     if (bm == 32) {
-      if (pp == 2)
-        launch_bwd_mma<128, 32, 32, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
-      else if (pp == 1)
-        launch_bwd_mma<128, 32, 32, 1>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
-      else
-        launch_bwd_mma<128, 32, 32, 0>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      if (pp == 2) LAUNCH_CFG(128, 32, 32, 2);
+      else if (pp == 1) LAUNCH_CFG(128, 32, 32, 1);
+      else LAUNCH_CFG(128, 32, 32, 0);
     } else if (bn == 64) {
-      launch_bwd_mma<128, 64, 64, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      LAUNCH_CFG(128, 64, 64, 2);
     } else if (pp == 2) {
-      launch_bwd_mma<128, 64, 32, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      LAUNCH_CFG(128, 64, 32, 2);
     } else if (pp == 1) {
-      launch_bwd_mma<128, 64, 32, 1>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      LAUNCH_CFG(128, 64, 32, 1);
     } else {
-      launch_bwd_mma<128, 64, 32, 0>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      LAUNCH_CFG(128, 64, 32, 0);
     }
   };
-  auto run_main = [&]() { launch_cfg(bm_sel, bn_sel, pp_sel); };
+#undef LAUNCH_CFG
+  const bool r4_sel = (r4_opt > 0);
+  const bool prel_sel = (prel_opt >= 0) ? (prel_opt != 0) : true;
+  auto run_main = [&]() { launch_cfg(bm_sel, bn_sel, pp_sel, r4_sel, prel_sel); };
   auto run_pre = [&]() {
     if (causal)
       lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
@@ -419,7 +444,7 @@ int main(int argc, char** argv) {
   // ---- O5c A/B（仅 causal）：不同 (BM,BN,PIPE) tile 配置 ----
   if (causal) {
     auto time_cfg = [&](int bm, int bn, int pp, float* out_ms) {
-      auto launch = [&]() { launch_cfg(bm, bn, pp); };
+      auto launch = [&]() { launch_cfg(bm, bn, pp, false, true); };
       CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
@@ -442,6 +467,39 @@ int main(int argc, char** argv) {
            ms0, main_flops / (ms0 * 1e-3) / 1e12, ms1, main_flops / (ms1 * 1e-3) / 1e12,
            ms2, main_flops / (ms2 * 1e-3) / 1e12, ms3, main_flops / (ms3 * 1e-3) / 1e12,
            ms0 / std::min(std::min(ms0, ms1), std::min(ms2, ms3)));
+  }
+
+  // ---- O7c A/B（仅 causal）：在 4 个几何上对比 {float2/float4} × {无/有 LSE-D 预装} ----
+  if (causal) {
+    auto time_r4 = [&](int bm, int bn, int pp, bool r4, bool prel, float* out_ms) {
+      auto launch = [&]() { launch_cfg(bm, bn, pp, r4, prel); };
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    const int cfgs[4][3] = {{64, 32, 2}, {64, 64, 2}, {32, 32, 1}, {32, 32, 2}};
+    printf("[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:\n");
+    for (int ci = 0; ci < 4; ++ci) {
+      const int bm = cfgs[ci][0], bn = cfgs[ci][1], pp = cfgs[ci][2];
+      float a = 0.f, b = 0.f, c = 0.f, e = 0.f;
+      time_r4(bm, bn, pp, false, false, &a);
+      time_r4(bm, bn, pp, true, false, &b);
+      time_r4(bm, bn, pp, false, true, &c);
+      time_r4(bm, bn, pp, true, true, &e);
+      auto tf = [&](float ms) { return main_flops / (ms * 1e-3) / 1e12; };
+      printf("  (BM=%d,BN=%d,PIPE=%d): base %.4f (%.2f) | f4 %.4f (%.2f,%+.1f%%) | "
+             "f2+PREL %.4f (%.2f,%+.1f%%) | f4+PREL %.4f (%.2f,%+.1f%%)\n",
+             bm, bn, pp, a, tf(a), b, tf(b), (a / b - 1) * 100, c, tf(c), (a / c - 1) * 100, e,
+             tf(e), (a / e - 1) * 100);
+    }
   }
 
   // ---- 数值对拍（重新跑一次完整 forward 保证累加缓冲清零）----

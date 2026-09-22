@@ -95,6 +95,15 @@ __device__ __forceinline__ void red_add2(float* p, float a, float b) {
   atomicAdd(reinterpret_cast<float2*>(p), make_float2(a, b));
 }
 
+// O7c：dK/dV 归约再把 float2 提升到 float4。mma.m16n8 里一个 quad（lane&3=0..3）的
+// `c2=(lane&3)*2` 分别是 0/2/4/6，即同 row 的连续 8 列；把 quad 的 float2 用 `shfl_down 1`
+// 拼成两个 float4（列 0-3 由 lane0 写、列 4-7 由 lane2 写），`red.global.add.v4.f32` 的
+// 事务数相对 float2 再减半。调用者须保证整个 warp 参与 shfl（在 `if (jg<S)` 之外算好），
+// 且仅 (lane&1)==0 的 lane 执行 st；偶 lane 的地址天然 16B 对齐（c2∈{0,4}）。
+__device__ __forceinline__ void red_add4(float* p, float a, float b, float c, float d) {
+  atomicAdd(reinterpret_cast<float4*>(p), make_float4(a, b, c, d));
+}
+
 // ---- O6：cp.async 异步拷贝（16B）----
 // 把「全局→smem」的 K/V 搬运从「同步 LDG + STS」改成硬件异步流水：`cp.async.cg` 走
 // L2-only 路径（流式数据不污染 L1），发起后立即返回、不占寄存器、不阻塞发射；
@@ -472,7 +481,7 @@ __global__ void delta_kernel(const bf16* __restrict__ o,
 //   * `PsT/dSsT` 两份转置副本删掉：GEMM3/GEMM4 的 A 改用 `ldmatrix.x4.trans` 直接从
 //     `Ps/dSs[BM][BN]` 读（`fa_bwd_bf16_atrans_smoke.cu` 验证逐位一致）。
 //   ⇒ smem 降到 71.2KB，回到 **3 CTA/SM**，且少写两份转置副本（降 L1/TEX 压力）。
-template <int HD, int BM, int BN, int PIPE>
+template <int HD, int BM, int BN, int PIPE, bool R4 = false, bool PREL = true>
 __global__ void __launch_bounds__(THREADS, (BN > 32) ? 2 : 3)
 fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
                        const bf16* __restrict__ v, const bf16* __restrict__ do_,
@@ -578,6 +587,25 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
 #pragma unroll
       for (int q = 0; q < 4; ++q) dqacc[i][j][q] = 0.f;
 
+  // O7c-prel：LSE 与 delta 只依赖 CTA 自己的 Q 行（与 K tile 无关）。原来在每个 tile 的
+  // GEMM1/2 epilogue 里按 (qi) 去 global 读，ncu 报「global load 每 thread 仅用 4.4/32B」。
+  // 这里在 nt 循环前一次性把本线程需要的 MTM1×2 个 row 的 LSE/D 装进寄存器，循环内零 global 读。
+  // 行号 r = wr*GM1 + i*16 + g + (s?8:0) 与 epilogue 的 (i, q>=2) 一一对应。
+  float lse_r[MTM1][2], del_r[MTM1][2];
+  if constexpr (PREL) {
+#pragma unroll
+    for (int i = 0; i < MTM1; ++i)
+#pragma unroll
+      for (int s = 0; s < 2; ++s) {
+        const int r = wr * GM1 + i * 16 + g + (s ? 8 : 0);
+        const int qi = m0 + r;
+        const size_t idx = ((size_t)(b * S + qi)) * H + h;
+        const bool ok = qi < S;
+        lse_r[i][s] = ok ? lse[idx] : 0.f;
+        del_r[i][s] = ok ? delta[idx] : 0.f;
+      }
+  }
+
   for (int nt = 0; nt < ntiles; ++nt) {
     const int j0 = nt * BN;
     // O6/O6b：本 tile 的 K 用 stage = nt&1；PIPE=0 时 stage 恒 0（布局退化为原版）。
@@ -642,9 +670,14 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
             int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
             int c = c0 + j * 8 + c2 + (q & 1);
             int qi = m0 + r, jg = j0 + c;
+            float lv = 0.f;
+            if constexpr (PREL)
+              lv = lse_r[i][q >= 2 ? 1 : 0];
+            else if (qi < S)
+              lv = lse[((size_t)(b * S + qi)) * H + h];
             float p = 0.f;
             if (qi < S && jg < S && !(causal && jg > qi))
-              p = expf(acc[i][j][q] * scale - lse[((size_t)(b * S + qi)) * H + h]);
+              p = expf(acc[i][j][q] * scale - lv);
             pval[i][j][q] = p;
             if constexpr (PIPE == 2)
               Ps[r * LDS + c] = __float2bfloat16(p);   // [BM][BN]，GEMM3 用 trans 读
@@ -673,7 +706,11 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
             int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
             int c = c0 + j * 8 + c2 + (q & 1);
             int qi = m0 + r;
-            float del = (qi < S) ? delta[((size_t)(b * S + qi)) * H + h] : 0.f;
+            float del = 0.f;
+            if constexpr (PREL)
+              del = del_r[i][q >= 2 ? 1 : 0];
+            else if (qi < S)
+              del = delta[((size_t)(b * S + qi)) * H + h];
             float ds = pval[i][j][q] * (acc[i][j][q] - del);
             dSs[r * LDS + c] = __float2bfloat16(ds);   // GEMM5 A（普通）
             if constexpr (PIPE != 2)
@@ -712,9 +749,16 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
             int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
             int c = c0 + j * 8 + c2;
             int jg = j0 + r;
-            if (jg < S)
-              red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                       acc[i][j][q], acc[i][j][q + 1]);
+            float* dst = dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
+            if constexpr (R4) {
+              // O7c：shfl 必须在 guard 之外（全 warp 参与），只有偶 lane 落 float4。
+              float a2 = __shfl_down_sync(0xffffffffu, acc[i][j][q], 1);
+              float b2 = __shfl_down_sync(0xffffffffu, acc[i][j][q + 1], 1);
+              if (jg < S && (lane & 1) == 0)
+                red_add4(dst, acc[i][j][q], acc[i][j][q + 1], a2, b2);
+            } else {
+              if (jg < S) red_add2(dst, acc[i][j][q], acc[i][j][q + 1]);
+            }
           }
     }
 
@@ -741,9 +785,15 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
             int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
             int c = c0 + j * 8 + c2;
             int jg = j0 + r;
-            if (jg < S)
-              red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                       acc[i][j][q] * scale, acc[i][j][q + 1] * scale);
+            float* dst = dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
+            if constexpr (R4) {
+              float a = acc[i][j][q] * scale, b = acc[i][j][q + 1] * scale;
+              float a2 = __shfl_down_sync(0xffffffffu, a, 1);
+              float b2 = __shfl_down_sync(0xffffffffu, b, 1);
+              if (jg < S && (lane & 1) == 0) red_add4(dst, a, b, a2, b2);
+            } else {
+              if (jg < S) red_add2(dst, acc[i][j][q] * scale, acc[i][j][q + 1] * scale);
+            }
           }
     }
 

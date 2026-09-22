@@ -1,0 +1,43 @@
+==PROF== Connected to process 552903 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/bf16/fa_bwd_bf16_mma_main.out)
+==PROF== Profiling "fa_bwd_bf16_mma_kernel": 0%....50%....100% - 4 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_bf16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[timing] total(3 kernels) 2.1007 ms  65.43 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.4258 ms | main 528.7003 ms | convert -527.0255 ms
+[O8b A/B] lse O8 0.9849 ms | bal(单缓冲) 0.4402 ms (2.238x) | bal+cpasync(双缓冲) 0.3477 ms (2.833x)
+[O6 A/B] main nopipe 2.2786 ms (60.32 TF) | pipe(KV both) 1.7456 ms (78.74 TF) | pipe2(K only) 1.6586 ms (82.87 TF) => nopipe/pipe 1.305x, nopipe/pipe2 1.374x
+[O6c A/B] main sched0(原样) 1.5785 ms | sched1(交错) 1.6284 ms (0.969x) | sched2(逆序) 1.5887 ms (0.994x)
+[O5c A/B] main (64,32,2) 1.6061 ms (85.57 TF) | (64,64,2) 1.5420 (89.13) | (32,32,1) 2.5940 (52.98) | (32,32,2) 2.5778 (53.32) => best 1.042x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.8782 (73.17) | f4 1.9145 (71.79,-1.9%) | f2+PREL 1.5728 (87.38,+19.4%) | f4+PREL 1.6230 (84.68,+15.7%)
+  (BM=64,BN=64,PIPE=2): base 1.8167 (75.65) | f4 1.8669 (73.62,-2.7%) | f2+PREL 1.5268 (90.02,+19.0%) | f4+PREL 1.6260 (84.53,+11.7%)
+  (BM=32,BN=32,PIPE=1): base 2.6220 (52.42) | f4 2.6422 (52.02,-0.8%) | f2+PREL 2.5582 (53.72,+2.5%) | f4+PREL 2.5939 (52.99,+1.1%)
+  (BM=32,BN=32,PIPE=2): base 2.6289 (52.28) | f4 2.7321 (50.31,-3.8%) | f2+PREL 2.6133 (52.59,+0.6%) | f4+PREL 2.5995 (52.87,+1.1%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  fa_dq     vs ref: max_abs=1.441e-02  max_rel=1.630e+00
+  fa_dk     vs ref: max_abs=1.332e-02  max_rel=1.612e+00
+  fa_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  te_dq     vs ref: max_abs=1.524e-02  max_rel=3.641e+00
+  te_dk     vs ref: max_abs=1.763e-02  max_rel=2.718e+00
+  te_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+==PROF== Disconnected from process 552903
+[552903] fa_bwd_bf16_mma_main.out@127.0.0.1
+  void fa_bwd_bf16_mma_kernel<128, 64, 64, 2, 0, 1>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (64, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    --------------------------------------------------------------------------- ----------- ------------
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                   inst         0.11
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio               inst         0.09
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio           inst         1.39
+    smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio        inst         0.08
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio              inst         0.50
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio              inst         0.17
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio          inst         0.88
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                      inst         2.00
+    --------------------------------------------------------------------------- ----------- ------------
+
