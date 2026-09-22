@@ -396,3 +396,18 @@ scripts/lab.sh status
   （ncu Compute 65.5%、DRAM 19.6%）。换成 **256 项 `uint16` smem LUT（一输入 byte → 两个 int8）**
   后 **1.99×**（0.0199→0.0100 ms，Compute 降到 20.5%）；LUT 的随机 `uint16` 读会撞 bank
   （59% 多余 wavefront、`short_scoreboard`），下一堵墙是免冲突布局。
+- **大规模逐元素 helper kernel 必须 grid-stride**（57 篇踩到，代价最大的一次）：host 侧预处理
+  （折叠 / 转置 scale / 量化）若写成固定 `<<<8192,256>>>` + `if (i >= tot) return`，只覆盖
+  0.04% 的数据，其余是未初始化显存。**最毒的是 CPU 参考读同一份坏数据，对拍全过**，把 bug 藏了
+  一整轮（我还误判成流水/竞态，换了两版 mbarrier 方案）。判据：任何带 `if (i>=tot) return` 的
+  kernel 都要有 `for (i = ...; i < tot; i += gridDim.x*blockDim.x)`。
+- **host 侧没有「读 fp8 原始字节」的便利**（57 篇复现 32 篇）：`std::vector<fp8>` 里 `ha[k]` 会走
+  `__nv_fp8_e4m3` 的转换运算符，`(float)ha[k]` 给位模式、`(unsigned char)ha[k]` 先转 float 再截断。
+  用 `reinterpret_cast<const unsigned char*>` 取字节，或存成 `std::vector<unsigned char>`，或手写
+  e4m3 解码。**先验证 host 数据本身，再怀疑 kernel**。
+- **fp8 的 SW128 与 bf16 不同**（57 篇）：fp8 一行 128B = **128 个元素**（bf16 是 64），16B chunk
+  下标是 `k/16`（bf16 是 `k/8`）；照抄 bf16 公式会写错。用「手写布局 vs TMA 逐字节对拍」的最小
+  复现（`swz_test.cu`）先验布局。另：SW128 置换是**纯 16B chunk 置换**，读 `uint4` 写 `uint4`
+  即可（逐字节搬要慢 3.45×）。
+- **wgmma 是 warpgroup 级**（57 篇）：单 warpgroup 只算 m64；BM=128 要 **2 个 warpgroup**（256 线程）
+  各算一半行，A 描述符按 `wg*64*BK` 偏移。最小复现里线程数给够、但行映射只写一半，会静默漏一半输出。
