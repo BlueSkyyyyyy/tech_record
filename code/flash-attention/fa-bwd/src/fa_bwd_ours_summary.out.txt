@@ -1,0 +1,47 @@
+===== fp16 two-file =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16
+B=1 S=512 H=16 D=128 causal=1 scale=0.088388
+[timing] total(3 kernels) 3.6051 ms  0.60 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 1.1995 ms | main 2.3799 ms | convert 0.0257 ms
+[compare] ours vs ref (O from ref_o.npy)
+--- S=1024 H=32 ---
+--- S=4096 H=16 ---
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+B=1 S=4096 H=16 D=128 causal=1 scale=0.088388
+[timing] total(3 kernels) 138.3273 ms  0.99 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 69.4743 ms | main 68.5748 ms | convert 0.2782 ms
+[compare] ours vs ref (O from ref_o.npy)
+===== bf16 two-file =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16
+B=1 S=512 H=16 D=128 causal=1 scale=0.088388 dtype=bf16
+[timing] total(3 kernels) 3.1156 ms  0.69 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 1.1978 ms | main 1.8841 ms | convert 0.0337 ms
+[compare] ours vs ref (O from ref_o.npy)
+--- S=1024 H=32 ---
+--- S=4096 H=16 ---
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_bf16
+B=1 S=4096 H=16 D=128 causal=1 scale=0.088388 dtype=bf16
+[timing] total(3 kernels) 111.3304 ms  1.23 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 69.3922 ms | main 41.9132 ms | convert 0.0250 ms
+[compare] ours vs ref (O from ref_o.npy)
+===== fp8 two-file =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+B=1 S=512 H=16 D=128 causal=1 scale=0.088388
+[timing] total(quant+pre+main+cvt) 1.6922 ms  1.27 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0308 ms | preprocess 1.1956 ms | main 0.4504 ms | convert 0.0154 ms
+[compare] ours vs fp32 ref (O from ref_o.npy)
+[compare] ours vs TE FP8
+--- S=1024 H=32 ---
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_causal_fp8
+B=1 S=1024 H=32 D=128 causal=1 scale=0.088388
+[timing] total(quant+pre+main+cvt) 10.8828 ms  1.58 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0933 ms | preprocess 8.9130 ms | main 1.8272 ms | convert 0.0493 ms
+[compare] ours vs fp32 ref (O from ref_o.npy)
+[compare] ours vs TE FP8
+--- S=4096 H=16 ---
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+B=1 S=4096 H=16 D=128 causal=1 scale=0.088388
+[timing] total(quant+pre+main+cvt) 80.6325 ms  1.70 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1720 ms | preprocess 71.0091 ms | main 10.2183 ms | convert -0.7669 ms
+[compare] ours vs fp32 ref (O from ref_o.npy)
+[compare] ours vs TE FP8

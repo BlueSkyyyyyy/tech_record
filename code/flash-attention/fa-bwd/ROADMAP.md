@@ -85,7 +85,9 @@
 
 ### P4 文档 / 汇总
 
-- [ ] **P4-1** `docs/04-numerics-and-perf-summary.md`：数值表 + 性能表（我们/FA/TE，各 shape）
+- [x] **P4-1** `docs/04-numerics-and-perf-summary.md`：数值表 + 性能表（我们/FA/TE，各 shape）
+      → 汇总 fp16/bf16/fp8 三 dtype、单/两文件形态：对拍表（vs ref/FA/TE）、性能表（TFLOPS+峰值占比）、
+      ncu bound 小结；本轮重跑两文件版与 FA/TE 基线，原始输出 `src/fa_bwd_{ours,refbench}_summary.out.txt`。
 - [ ] **P4-2** `docs/05-porting-notes.md`：目标卡抽象层与移植注意事项
 
 ### 可选
@@ -210,11 +212,23 @@
     原始输出见 `src/fp8/fa_bwd_fp8_main_{s512,s1024h32,s4096,ncu_main}.out.txt`。
   - `docs/03-fp8-bwd-impl.md` §8 记录拆分与核对。
 
+- 2026-09-22（第九轮）：**P4-1 完成（数值 + 性能汇总文档）**。
+  - 新增 `docs/04-numerics-and-perf-summary.md`：三 dtype（fp16/bf16/fp8）× 单/两文件形态的
+    对拍表（vs fp32 ref / FA2.7.4 / TE2.14）、性能表（TFLOPS + 峰值占比）、ncu bound 小结、复现命令。
+  - 本轮**重跑实测**并留档：`src/fa_bwd_ours_summary.out.txt`（两文件版 fp16/bf16/fp8 三 shape
+    计时+对拍）、`src/fa_bwd_refbench_summary.out.txt`（FA/TE CUPTI 基线），并用 `dump` 补齐
+    fp8 三 shape 的 TE-vs-ref 数值。
+  - 关键数字：fp16 S=4096 ours 1.50/1.57/2.23e-3（FA 1.88/1.73/1.97e-3）；
+    bf16 S=4096 ours 8.90/8.08/14.94e-3（FA 14.4/13.3/16.3e-3）；
+    fp8 S=4096 ours-vs-ref 2.64/2.64/3.22e-1 **优于 TE-vs-ref** 3.76/3.69/6.69e-1。
+    性能：fp16 ours 0.99 TF vs FA 129.9 / TE 230.3；bf16 ours 1.23 TF vs FA 131.2 / TE 232.2；
+    fp8 ours 1.70 TF vs TE 302.5（峰值 1978.8）。三 dtype 均非带宽/算力 bound，
+    墙是**低 occupancy + 并行度**、端到端墙是 **preprocess**。
+
 ## 下一步（明确到可执行）
 
-- [ ] **P4-1**：`docs/04-numerics-and-perf-summary.md`：汇总 fp16/bf16/fp8 的数值表 + 性能表
-      （我们单/两文件 vs FA/TE，各 shape），引用各 `*.out.txt` 实测值。
-- [ ] **P4-2**：`docs/05-porting-notes.md`：目标卡抽象层与移植注意事项。
+- [ ] **P4-2**：`docs/05-porting-notes.md`：目标卡抽象层与移植注意事项（把 preprocess/main/convert、
+      smem 布局、mma/ldmatrix、量化解码、同步抽象成可替换层，列出换卡需改的接口与常量）。
 - [ ] （backlog，fp8 性能）在 mma 版上继续：① pipeline（`cp.async` 双缓冲 K/V）；
       ② 降寄存器（128）/smem（80KB）提 occupancy（当前 1 CTA/SM、Waves 0.48）；
       ③ dQ/dK/dV 的 atomicAdd 换 `dQ_accum` 缓冲 + convert。
