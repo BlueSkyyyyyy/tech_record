@@ -431,3 +431,88 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --section SpeedOfLight --section Occup
     --kernel-name regex:lse_mma_kernel --launch-count 1 -- --iters=1 \
     --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
 ```
+
+## 10. O2：降 smem 提 occupancy（3 CTA/SM，main 1.16–1.19×）
+
+O1 后台端到端瓶颈回落到 `main`（S=4096 占 87%）。O2 的目标是把 main 的 occupancy
+从 2 CTA/SM 抬到 ≥2（实际做到 **3 CTA/SM**），手段是**降动态 smem**。
+
+### 10.1 实现：把两个 per-tile 小缓冲折叠进「本 tile 内已死亡」的 Ks/Vs
+
+| buffer | 原大小 | 原用途 | 只用在哪一步 | 处置 |
+|---|---|---|---|---|
+| `dS3` [BN][QTS] | 2560 B | dK 的 A（E5M2） | GEMM4 | 放进 `Ks`（[BN][ASLD]=4608 B）尾部 |
+| `Ap`  [BN][QTS] | 2560 B | dV 的 A（E4M3） | GEMM3 | 放进 `Vs`（[BN][ASLD]=4608 B）尾部 |
+
+依据：
+
+- `Ks` 只在 **GEMM1（S=QKᵀ）** 被读，GEMM1 后有一个 `__syncthreads()`；
+  `dS3` 是在其后的 fold 阶段才写入的，故不冲突。
+- `Vs` 只在 **GEMM2（dP=dO·Vᵀ）** 被读，GEMM2 后同样有 sync；`Ap` 在 fold 阶段才写。
+- `P`/`dS` 两块 fp32 不能合并（fold 阶段 `Ap` 读 P、`dS2/dS3` 读 dS，同时活跃），保留各一块。
+
+smem 从 `80128 B (78.25 KB)` 降到 **`75008 B (73.25 KB)`**（kFp8Bytes 57344 + scales/P/S 17664）。
+驱动据此自动选 `Shared Memory Configuration Size = 233.47 KB`（原先 167.94 KB）：
+
+```
+3 × (75008 + 1044 driver) = 228156 B ≤ 233472 B   ⇒  Block Limit Shared Mem = 3
+```
+
+**单文件 `fa_bwd_fp8_mma_onefile.cu` 与两文件 `fa_bwd_fp8_kernels.cuh` 同步修改**，device
+代码逐字一致（改的是 smem 指针与 `kFp8Bytes/kSmemBytes` 常量）。
+
+### 10.2 数值核对（与 P3-5/O1 **逐位相同**）
+
+| shape | dq / dk / dv vs ref (max_abs) | main ms（单文件 / 两文件） |
+|---|---|---|
+| S=512 H16 | 2.426e-1 / 2.975e-1 / 3.735e-1 | 0.4610 / 0.4651 |
+| S=1024 H32 | 2.400e-1 / 4.195e-1 / 3.536e-1 | 1.5255 / 1.5258 |
+| S=4096 H16 | 2.635e-1 / 2.643e-1 / 3.216e-1 | 8.5623 / 8.6167 |
+
+与 P3-4/P3-5 基线逐位一致；ncu `Executed Instructions = 25,543,552` 与改前相同
+（只挪 smem，未增删指令）。原始输出 `src/fp8/fa_bwd_fp8_{main,mma_onefile}_o2_*.out.txt`。
+
+### 10.3 性能（event 计时，ms）
+
+| shape | main O1 | main O2 | 提速 | total O1 | total O2 | total TFLOPS |
+|---|---|---|---|---|---|---|
+| S=512 H16 | 0.4506 | 0.4610 | 1.00×（grid-bound） | 0.6049 | 0.6209 | 3.46 |
+| S=1024 H32 | 1.8137 | **1.5255** | **1.19×** | 2.2138 | **1.9214** | 8.94 |
+| S=4096 H16 | 9.9241 | **8.5623** | **1.16×** | 11.4702 | **10.067** | 13.65 |
+
+同 session TE FP8 基线（CUPTI）0.0724 / 0.1371 / 0.4550 ms。main 相对 FP8 峰值
+（1978.8 TFLOPS）S=4096 = 16.05 TF / 0.81%；端到端 ours/TE = 8.6× / 14.0× / 22.1×。
+
+### 10.4 ncu（main `fa_bwd_fp8_mma_kernel`，S=4096）
+
+| 指标 | O1 | **O2** | 说明 |
+|---|---|---|---|
+| Duration | 10.27 ms | **8.85 ms** | 1.16× |
+| Dynamic smem/block | 80.13 KB | **75.01 KB** | -5.1 KB |
+| smem config | 167.94 KB | **233.47 KB** | 自动选最大 carveout |
+| Block Limit Shared Mem | 2 | **3** | 不再被 smem 卡在 2 |
+| Theoretical Occupancy | 12.50% | **18.75%** | 3 CTA/SM |
+| Achieved Occupancy | 11.80% | **16.85%** | |
+| Active Warps / Scheduler | 1.91 | **2.69** | +41% |
+| No Eligible | 82.83% | **79.64%** | |
+| Waves Per SM | 3.88 | 2.59 | 尾波占比上升（233/396 partial） |
+| DRAM / L1TEX / L2 / Compute | 0.72 / 43.29 / 39.58 / 13.81% | 1.25 / 51.99 / 46.49 / 15.95% | 各级利用率随 issue 提升 |
+
+**bound 结论**：O2 把墙从「smem 容量锁 2 CTA/SM」推到「occupancy=3 下仍 latency-bound」
+（`No Eligible 79.6%`，`long_scoreboard`/`barrier` 主导）。下一堵墙是：(a) 小 S 的
+**grid 太小**（S=512 `grid=128 < 132 SM`，achieved 仍 6.25%）；(b) S=4096 的 **尾波**
+（3 CTA 下 waves 2.59，partial wave 233 块）；(c) 想上 4 CTA/SM 需再砍 ~17 KB
+（等价于消除 `Kt/Qt/dOt` 三个转置副本 → 需要 fp8 的 `ldmatrix.trans`，留 backlog）。
+
+### 10.5 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=20 \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=20 \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma --launch-count 1 \
+    --section LaunchStats --section Occupancy --section SpeedOfLight --section SchedulerStats -- \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=1
+```

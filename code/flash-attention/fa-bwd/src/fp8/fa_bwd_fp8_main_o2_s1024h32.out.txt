@@ -1,0 +1,14 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_causal_fp8
+B=1 S=1024 H=32 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 75008 bytes (73.2 KB); lse smem = 18944 bytes (18.5 KB)
+[timing] total(quant+pre+main+cvt) 1.9290 ms  8.91 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0929 ms | preprocess 0.2159 ms | main 1.5258 ms | convert 0.0944 ms
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.400e-01  max_rel=1.887e+02
+  dk   vs ref: max_abs=4.195e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.536e-01  max_rel=8.068e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=4.652e-01  max_rel=1.714e+02
+  dk   vs te_dk: max_abs=5.701e-01  max_rel=1.501e+02
+  dv   vs te_dv: max_abs=9.431e-01  max_rel=1.436e+02

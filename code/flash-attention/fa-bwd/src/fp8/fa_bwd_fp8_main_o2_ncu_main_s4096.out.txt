@@ -1,0 +1,118 @@
+==PROF== Connected to process 425887 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_main.out)
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 11 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+B=1 S=4096 H=16 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 75008 bytes (73.2 KB); lse smem = 18944 bytes (18.5 KB)
+[timing] total(quant+pre+main+cvt) 10.2563 ms  13.40 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.3078 ms | preprocess 1.2217 ms | main 8.7300 ms | convert -0.0033 ms
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=4.525e-01  max_rel=1.054e+02
+  dk   vs te_dk: max_abs=5.324e-01  max_rel=1.158e+02
+  dv   vs te_dv: max_abs=6.807e-01  max_rel=1.077e+02
+==PROF== Disconnected from process 425887
+[425887] fa_bwd_fp8_main.out@127.0.0.1
+  fa_bwd_fp8_mma_kernel(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, float, int) (64, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.81
+    Elapsed Cycles                cycle     16170192
+    Memory Throughput                 %        46.49
+    DRAM Throughput                   %         1.25
+    Duration                         ms         8.85
+    L1/TEX Cache Throughput           %        51.99
+    L2 Cache Throughput               %        46.49
+    SM Active Cycles              cycle  12487087.53
+    Compute (SM) Throughput           %        15.95
+    ----------------------- ----------- ------------
+
+    OPT   This workload exhibits low compute throughput and memory bandwidth utilization relative to the peak           
+          performance of this device. Achieved compute throughput and/or memory bandwidth below 60.0% of peak           
+          typically indicate latency issues. Look at Scheduler Statistics and Warp State Statistics for potential       
+          reasons.                                                                                                      
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        20.36
+    Issued Warp Per Scheduler                        0.20
+    No Eligible                            %        79.64
+    Active Warps Per Scheduler          warp         2.69
+    Eligible Warps Per Scheduler        warp         0.24
+    ---------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 53.51%                                                                                    
+          Every scheduler is capable of issuing one instruction per cycle, but for this workload each scheduler only    
+          issues an instruction every 4.9 cycles. This might leave hardware resources underutilized and may lead to     
+          less optimal performance. Out of the maximum of 16 warps per scheduler, this workload allocates an average    
+          of 2.69 active warps per scheduler, but only an average of 0.24 warps were eligible per cycle. Eligible       
+          warps are the subset of active warps that are ready to issue their next instruction. Every cycle with no      
+          eligible warp results in no instruction being issued and the issue slot remains unused. To increase the       
+          number of eligible warps, avoid possible load imbalances due to highly different execution durations per      
+          warp. Reducing stalls indicated on the Warp State Statistics and Source Counters sections can help, too.      
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   128
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                   1024
+    Registers Per Thread             register/thread             128
+    Shared Memory Configuration Size           Kbyte          233.47
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block      Kbyte/block           75.01
+    Static Shared Memory Per Block        byte/block               0
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread          131072
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                                2.59
+    -------------------------------- --------------- ---------------
+
+    OPT   Est. Speedup: 33.33%                                                                                          
+          A wave of thread blocks is defined as the maximum number of blocks that can be executed in parallel on the    
+          target GPU. The number of blocks in a wave depends on the number of multiprocessors and the theoretical       
+          occupancy of the kernel. This kernel launch results in 2 full waves and a partial wave of 233 thread blocks.  
+          Under the assumption of a uniform execution duration of all thread blocks, this partial wave may account for  
+          up to 33.3% of the total runtime of this kernel. Try launching a grid with no partial wave. The overall       
+          impact of this tail effect also lessens with the number of full waves executed for a grid. See the Hardware   
+          Model (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-hw-model) description for     
+          more details on launch configurations.                                                                        
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            4
+    Block Limit Shared Mem                block            3
+    Block Limit Warps                     block           16
+    Theoretical Active Warps per SM        warp           12
+    Theoretical Occupancy                     %        18.75
+    Achieved Occupancy                        %        16.85
+    Achieved Active Warps Per SM           warp        10.78
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 53.51%                                                                                          
+          The 3.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (18.8%) is limited by the required amount of      
+          shared memory.                                                                                                
+
