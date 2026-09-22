@@ -1,0 +1,13 @@
+=== fp8 mma.m16n8k32 布局最小复现（P3-4a）===
+BM=64 BN=32 BK=128 WM=2 WN=2 threads=128  A row stride=144 B row stride=144
+  [E4M3xE4M3] M=64 N=32 K=128  mma-vs-ref max_abs=4.768e-07 max_rel=3.900e-06 (ref_amax=12.901)
+         time=0.0083 ms  0.06 TFLOPS  (0.00 GFLOP)
+  [E5M2xE4M3] M=64 N=32 K=128  mma-vs-ref max_abs=7.153e-07 max_rel=7.794e-07 (ref_amax=13.130)
+         time=0.0083 ms  0.06 TFLOPS  (0.00 GFLOP)
+  [E4M3xE5M2] M=64 N=32 K=128  mma-vs-ref max_abs=4.768e-07 max_rel=1.970e-07 (ref_amax=12.338)
+         time=0.0083 ms  0.06 TFLOPS  (0.00 GFLOP)
+  [E5M2xE5M2] M=64 N=32 K=128  mma-vs-ref max_abs=1.192e-07 max_rel=1.723e-07 (ref_amax=13.469)
+         time=0.0083 ms  0.06 TFLOPS  (0.00 GFLOP)
+  [E4M3xE5M2] M=128 N=64 K=128  mma-vs-ref max_abs=9.537e-07 max_rel=4.636e-06 (ref_amax=13.384)
+         time=0.0086 ms  0.24 TFLOPS  (0.00 GFLOP)
+=== done ===
