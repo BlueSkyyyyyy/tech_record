@@ -296,11 +296,33 @@
     `..._o2base_stall_s4096.out.txt`、`..._o3_ablation_{s512,s4096}.out.txt`、
     `..._o3_tebench.out.txt`。文档 `docs/03-fp8-bwd-impl.md` §11。
 
+- 2026-09-22（第十四轮）：**O4a 完成（消 barrier + fold 全线程并行，main 1.21–1.54×）**。
+   - 三处**逐位等价**改动：① 删 GEMM1/GEMM2 之间的 `__syncthreads`——GEMM2 只读 `dOs/Vs`，
+     其 epilogue 读回的 `Ps[r*BN+c]` 正是**本线程** GEMM1 刚写的同一地址（两次 `mma_block`
+     的 `(wm,wn)` 与累加器映射一致），无线程间依赖；② 合并 prologue 的两处 barrier（Q/dO
+     与 tile0 K/V 写在互不重叠 smem）；③ fold 改用**全 128 线程**（原仅 32/64 线程空等）：
+     `Ap/dS3` 每 warp 8 行×4 lane、`dS2` 每 warp 16 行×2 lane，`__shfl_xor_sync` 归约 amax
+     （`fmaxf` 可交换结合 ⇒ 值逐位相同）。主 kernel `__syncthreads` **7→5**。
+   - **数值与 O3 逐位相同**（S=512 2.426/2.975/3.735e-1；S=1024H32 2.400/4.195/3.536e-1；
+     S=4096 2.635/2.643/3.216e-1；vs TE 也逐位不变）。单/两文件 main kernel 函数体逐字相同。
+   - **性能**：main S=512 0.3947→**0.2566ms（1.54×）**、S=1024H32 1.3202→**1.0642（1.24×）**、
+     S=4096 7.7391→**6.4192（1.21×）**；端到端 total 0.5403→**0.4030**、1.7278→**1.4408**、
+     9.0992→**7.8488ms（17.51 TF）**。main-only 8.37/16.14/21.41 TF（峰值 0.42/0.82/1.08%）；
+     同 session TE 0.0723/0.1376/0.4537 ⇒ main ours/TE **28.2%/12.9%/7.1%**。
+   - ncu（main, S=4096）：Duration 7.57→**6.55ms**、**barrier 5.13→0.46（基本清零）**、
+     short_scoreboard 4.12→**5.40（新主导）**、long_scoreboard 2.21→3.35、
+     L1TEX 65.59→**78.51%**、L2 53.67→62.01%、Compute 13.79→15.95%、occ 16.71→17.02%（仍 3 CTA/SM）、
+     Waves 2.59。S=512：Duration 406→**272µs**、barrier 0.33、achieved occ 6.25%（grid-bound）。
+     **新墙 = short_scoreboard（smem→mma）+ L1/TEX**；下一步 O4b（`ldmatrix.trans` 消 `Kt/Qt/dOt`）
+     或 O2b（小 S grid / S=4096 尾波）。
+   - 原始输出 `src/fp8/fa_bwd_fp8_main_o4a_{s512,s1024h32,s4096,ncu_main_s4096,ncu_main_s512,stall_s4096,tebench}.out.txt`、
+     `src/fp8/fa_bwd_fp8_mma_onefile_o4a_{s512,s4096}.out.txt`；文档 `docs/03-fp8-bwd-impl.md` §12。
+
 ## 下一步（明确到可执行）
 
 > P4-2 完成后，ROADMAP 里的「P 项」已全部收口，后续为**优化 backlog**（按回报排序）。
-> **O1/O2/O3 已完成**，下一项从 **O4（barrier 合并 + `ldmatrix.trans` 消转置副本）** 起做，
-> 或先做小 S 的 grid / 尾波（O2b）。
+> **O1/O2/O3/O4a 已完成**，下一项从 **O4b（fp8 `ldmatrix.trans` 消转置副本 → 冲 4 CTA/SM）**
+> 起做（需先最小复现验证配对转置布局），或先做小 S 的 grid / 尾波（O2b）。
 > 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
 
 - [x] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms。
@@ -322,15 +344,23 @@
       预取（不加 smem，保持 3 CTA/SM，regs 128→168）；main 1.15–1.18×。消融显示收益主要来自
       向量化（1.13–1.16×），预取仅再 ~2–3%。ncu `long_scoreboard` 2.94→2.21，新墙 = CTA barrier
       （5.13）+ short_scoreboard（4.12）。详见 `docs/03-fp8-bwd-impl.md` §11。
-- [ ] **O4（barrier 合并 + 消转置副本）**：O3 后最大停顿是 per-tile 的 5 个 `__syncthreads`
-      （barrier 5.13）与 smem→mma 依赖（short_scoreboard 4.12）。合并 GEMM 之间的 barrier、
-      或把 `Kt/Qt/dOt` 三个转置副本换成 fp8 `ldmatrix.trans`（需求最小复现验证；既减 barrier 又
-      减 smem，可顺带冲 4 CTA/SM = 原 O2c）。
+- [x] **O4a（barrier 合并 + fold 并行）**：**已完成（第十四轮）**。三处逐位等价改动：
+      ① 删 GEMM1/GEMM2 之间的 barrier（GEMM2 读回的 `Ps[r*BN+c]` 是本线程同一地址，无线程间
+      依赖）；② 合并 prologue 两处 barrier；③ fold 改全 128 线程并行（warp 内 `shfl_xor`
+      归约 amax，`fmaxf` 结合律 ⇒ 逐位相同）。主 kernel `__syncthreads` 7→5。
+      **数值与 O3 逐位相同**；main **1.21–1.54×**（S=512 0.3947→0.2566、S=1024H32
+      1.3202→1.0642、S=4096 7.7391→**6.4192**），端到端 total 0.5403→0.4030 / 1.7278→1.4408 /
+      9.0992→**7.8488ms（17.51 TF）**。ncu：**barrier 5.13→0.46（基本清零）**，墙移到
+      short_scoreboard（4.12→5.40）与 L1/TEX 65.59→78.51%；Duration 7.57→6.55ms。
+      详见 `docs/03-fp8-bwd-impl.md` §12。
+- [ ] **O4b（消转置副本）**：把 `Kt/Qt/dOt` 三个转置副本换成 fp8 `ldmatrix.trans`
+      （既减 smem 冲 4 CTA/SM = 原 O2c，又减 smem 往返）。**注意**：fp8 的 `ldmatrix.trans`
+      因为「2 字节=1 b16」的配对转置，布局不是 drop-in，需先写最小复现验证（对照 `42` 篇
+      的 `ldmatrix.x4.trans` 用法）。
 - [ ] **O2b**：小 S 的 grid 太小（S=512 grid=128<132 SM，achieved occ 6.25%）与 3 CTA 下的
       尾波（S=4096 waves 2.59，partial 233/396）——考虑小 S 用 BM=32 或 N 方向切块。
-- [ ] **O2c（fp8 main → 4 CTA/SM）**：需再砍 ~17 KB smem，等价于消除 `Kt/Qt/dOt` 三个转置副本
-      （fp8 的 `ldmatrix.trans` 因为「2 字节=1 b16」的配对转置，布局不是 drop-in，需最小复现验证）。
-- [ ] **O4（确定性与归约）**：dK/dV 的 `atomicAdd` 换 `dK/dV_accum` 分块缓冲 + convert
+      （O4a 后 S=512 已快 1.54×，此项目标仍是把 grid-bound 的 6.25% occupancy 抬起来。）
+- [ ] **O4c（确定性与归约）**：dK/dV 的 `atomicAdd` 换 `dK/dV_accum` 分块缓冲 + convert
       （对齐 FA2 做法），顺带消 atomic 竞争、便于 deterministic 口径。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 

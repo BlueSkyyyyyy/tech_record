@@ -447,12 +447,13 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     qs_s[tid] = (qi < S) ? qs[((size_t)(b * S + qi)) * H + h] : 1.f;
     dos_s[tid] = (qi < S) ? dos[((size_t)(b * S + qi)) * H + h] : 1.f;
   }
-  __syncthreads();
 
   const int ncols = causal ? min(S, m0 + BM) : S;
   const int ntiles = (ncols + BN - 1) / BN;
 
   // ---- O3 prologue：寄存器预取 tile 0 并落盘 ----
+  // ---- O4a：Q/dO 载入与 tile0 的 K/V 落盘写的是互不重叠的 smem（Qs/Qt/dOs/dOt vs
+  //            Ks/Vs/Kt），故把原来 prologue 的两处 __syncthreads 合并为一处。----
   uint32_t pk[KVU], pv[KVU];
   kv_prefetch(k8, v8, 0, S, H, h, b, tid, pk, pv);
   kv_commit(Ks, Vs, Kt, pk, pv, tid);
@@ -496,7 +497,9 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
             Ps[r * BN + c] = p;
           }
     }
-    __syncthreads();
+    // ---- O4a：GEMM1 与 GEMM2 之间**不需要** barrier。GEMM2 只读 dOs/Vs（本 tile 前已
+    //      就绪），其 epilogue 读回的 Ps[r*BN+c] 正是**本线程**刚写入的同一地址（两次
+    //      mma_block 的 (wm=wr, wn=wc) 与累加器映射完全一致），无线程间依赖。----
 
     // ---- (2) dP = dO·Vᵀ  →  dS = P∘(dP − D)，存 fp32 ----
     {
@@ -526,32 +529,59 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     __syncthreads();
 
     // ---- 构造 dV/dK/dQ 的 fp8 操作数（fold 归约维上的 rowwise scale）----
-    if (tid < BN) {  // Ap[j][m] = P[m][j]*dos[m]，按 j 行 rowwise (e4m3)
-      int j = tid;
-      float amax = 0.f;
-      for (int m = 0; m < BM; ++m) amax = fmaxf(amax, fabsf(Ps[m * BN + j] * dos_s[m]));
-      float sc = (amax > 0.f) ? amax / kE4M3Max : 1.f;
-      sA[j] = sc;
-      for (int m = 0; m < BM; ++m)
-        Ap[j * QTS + m] = cvt_e4m3(Ps[m * BN + j] * dos_s[m] / sc);
+    // O4a：原来 fold 只让 `tid<BN`（32 线程）算 Ap/dS3、`tid<BM`（64 线程）算 dS2，其余
+    // 线程空等；现改为**全部 128 线程均衡分工**：warp 内 4 lane 一组做一行 amax 的
+    // `__shfl_xor_sync` 归约。fmaxf 可交换结合 ⇒ amax 结果与原顺序**逐位相同**，除法/量化
+    // 也逐元素一致，故数值仍与 O3 逐位相同；但这一段的墙钟缩短约 4×（Amax/写入都并行）。
+    {
+      // Ap[j][m]=P[m][j]*dos[m] (e4m3, per-j) 与 dS3[j][m]=dS[m][j]*qs[m] (e5m2, per-j)
+      const int jl = lane >> 2, sub4 = lane & 3;  // 每 warp 8 行 × 4 lane 分工
+      const int j = wid * 8 + jl;
+      float amaxA = 0.f, amax3 = 0.f;
+#pragma unroll
+      for (int t = 0; t < 16; ++t) {
+        int m = sub4 * 16 + t;
+        amaxA = fmaxf(amaxA, fabsf(Ps[m * BN + j] * dos_s[m]));
+        amax3 = fmaxf(amax3, fabsf(Ss[m * BN + j] * qs_s[m]));
+      }
+      amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 1));
+      amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 2));
+      amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 1));
+      amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 2));
+      float scA = (amaxA > 0.f) ? amaxA / kE4M3Max : 1.f;
+      float sc3 = (amax3 > 0.f) ? amax3 / kE5M2Max : 1.f;
+      if (sub4 == 0) {
+        sA[j] = scA;
+        sds3[j] = sc3;
+      }
+      scA = __shfl_sync(0xffffffffu, scA, jl * 4);
+      sc3 = __shfl_sync(0xffffffffu, sc3, jl * 4);
+#pragma unroll
+      for (int t = 0; t < 16; ++t) {
+        int m = sub4 * 16 + t;
+        Ap[j * QTS + m] = cvt_e4m3(Ps[m * BN + j] * dos_s[m] / scA);
+        dS3[j * QTS + m] = cvt_e5m2(Ss[m * BN + j] * qs_s[m] / sc3);
+      }
     }
-    if (tid < BM) {  // dS2[m][j] = dS[m][j]*ks[j]，按 m 行 rowwise (e5m2)
-      int m = tid;
-      float amax = 0.f;
-      for (int j = 0; j < BN; ++j) amax = fmaxf(amax, fabsf(Ss[m * BN + j] * ks_s[j]));
-      float sc = (amax > 0.f) ? amax / kE5M2Max : 1.f;
-      sds2[m] = sc;
-      for (int j = 0; j < BN; ++j)
-        dS2[m * DSS2 + j] = cvt_e5m2(Ss[m * BN + j] * ks_s[j] / sc);
-    }
-    if (tid < BN) {  // dS3[j][m] = dS[m][j]*qs[m]，按 j 行 rowwise (e5m2)
-      int j = tid;
-      float amax = 0.f;
-      for (int m = 0; m < BM; ++m) amax = fmaxf(amax, fabsf(Ss[m * BN + j] * qs_s[m]));
-      float sc = (amax > 0.f) ? amax / kE5M2Max : 1.f;
-      sds3[j] = sc;
-      for (int m = 0; m < BM; ++m)
-        dS3[j * QTS + m] = cvt_e5m2(Ss[m * BN + j] * qs_s[m] / sc);
+    {
+      // dS2[m][j] = dS[m][j]*ks[j] (e5m2, per-m)：每 warp 16 行 × 2 lane 分工
+      const int ml = lane >> 1, sub2 = lane & 1;
+      const int m = wid * 16 + ml;
+      float amax2 = 0.f;
+#pragma unroll
+      for (int t = 0; t < 16; ++t) {
+        int j = sub2 * 16 + t;
+        amax2 = fmaxf(amax2, fabsf(Ss[m * BN + j] * ks_s[j]));
+      }
+      amax2 = fmaxf(amax2, __shfl_xor_sync(0xffffffffu, amax2, 1));
+      float sc2 = (amax2 > 0.f) ? amax2 / kE5M2Max : 1.f;
+      if (sub2 == 0) sds2[m] = sc2;
+      sc2 = __shfl_sync(0xffffffffu, sc2, ml * 2);
+#pragma unroll
+      for (int t = 0; t < 16; ++t) {
+        int j = sub2 * 16 + t;
+        dS2[m * DSS2 + j] = cvt_e5m2(Ss[m * BN + j] * ks_s[j] / sc2);
+      }
     }
     __syncthreads();
 

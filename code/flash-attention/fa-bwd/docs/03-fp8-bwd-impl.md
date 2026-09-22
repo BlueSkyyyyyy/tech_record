@@ -611,3 +611,103 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma_ker
   --metrics smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio \
   -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
 ```
+
+---
+
+## 12. O4a：消 barrier（GEMM1/GEMM2 + prologue）+ fold 全线程并行（main 1.21–1.54×）
+
+O3 后 ncu 的最大停顿是 **CTA barrier（5.13 per-issued-inst）** 与 **short_scoreboard（4.12，
+smem→mma 的 `ldmatrix` 依赖）**。O4a 不动 smem/几何、不引张量核新指令，只做三件**逐位等价**
+（数值与 O3 完全相同）的改动：
+
+### 12.1 三处改动
+
+1. **删掉 GEMM1 与 GEMM2 之间的 `__syncthreads`**（per-tile barrier 5→4）。
+   依据：GEMM2（`dP=dO·Vᵀ`）只读 `dOs/Vs`，其 epilogue 读回的 `Ps[r*BN+c]` 正是**本线程**
+   在 GEMM1 epilogue 刚写入的同一地址——两次 `mma_block<32,16,…>` 的 `(wm=wr, wn=wc)`、
+   累加器映射 `(i,j,q)→(r,c)` 完全一致，故读取**无线程间依赖**，无需 barrier。
+2. **合并 prologue 的两处 barrier**（prologue 2→1）。Q/dO 与 tile0 的 K/V 写在互不重叠的
+   smem（`Qs/Qt/dOs/dOt` vs `Ks/Vs/Kt`），可以「先全部写、最后一处 syncthreads」。
+3. **fold 阶段全 128 线程并行**（原来只用 `tid<BN`=32 或 `tid<BM`=64 线程，其余空等）：
+   - `Ap`/`dS3`（j 行，32 行）：每 warp 8 行 × **4 lane** 分工，warp 内
+     `__shfl_xor_sync(±1,±2)` 做行长 64 的 amax 归约，`sub4==0` 写 scale 后
+     `__shfl_sync` 广播回同组；
+   - `dS2`（m 行，64 行）：每 warp 16 行 × **2 lane** 分工，`__shfl_xor_sync(1)` 归约。
+   `fmaxf` 可交换结合 ⇒ amax 值与原顺序**逐位相同**，除法/量化逐元素一致 ⇒ 结果位等价，
+   但这段的墙钟缩短约 **4×**。
+
+主 kernel 的 `__syncthreads` 数：**7 → 5**（prologue 2→1、per-tile 5→4；其余 1 个是
+kv_commit 后更新下一 tile 的、最后一块不执行）。单文件 `fa_bwd_fp8_mma_onefile.cu` 与两文件
+`fa_bwd_fp8_kernels.cuh` 同步修改，main kernel 函数体**逐字相同**（已脚本核对）。
+
+### 12.2 数值核对（与 O3/P3-5 **逐位相同**）
+
+| shape | dq / dk / dv vs ref (max_abs) | O3 | O4a |
+|---|---|---|---|
+| S=512 H16 | `2.426e-1 / 2.975e-1 / 3.735e-1` | 同 | 同 |
+| S=1024 H32 | `2.400e-1 / 4.195e-1 / 3.536e-1` | 同 | 同 |
+| S=4096 H16 | `2.635e-1 / 2.643e-1 / 3.216e-1` | 同 | 同 |
+
+与 TE 的 `max_abs` 也逐位不变（5.381/4.429/8.546e-1 等）。原始输出
+`src/fp8/fa_bwd_fp8_main_o4a_{s512,s1024h32,s4096}.out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_o4a_{s512,s4096}.out.txt`。
+
+### 12.3 性能（event 计时，ms；同 session 先测 O3 基线）
+
+| shape | main O3(base) | main O4a | **加速** | total O3 | total O4a | total TFLOPS |
+|---|---|---|---|---|---|---|
+| S=512 H16 | 0.3947 | **0.2566** | **1.54×** | 0.5403 | **0.4030** | 5.33 |
+| S=1024 H32 | 1.3202 | **1.0642** | **1.24×** | 1.7278 | **1.4408** | 11.92 |
+| S=4096 H16 | 7.7391 | **6.4192** | **1.21×** | 9.0992 | **7.8488** | 17.51 |
+
+main-only TFLOPS = **8.37 / 16.14 / 21.41 TF**（峰值 1978.8 的 **0.42% / 0.82% / 1.08%**）。
+同 session TE FP8 基线（CUPTI）`0.0723 / 0.1376 / 0.4537 ms` ⇒ main ours/TE =
+**28.2% / 12.9% / 7.1%**（O3 为 18.4/10.4/6.0%），端到端 18.0% / 9.5% / 5.8%。
+S=512 收益最大（1.54×）：该 shape 每块 tile 数少，prologue/每-tile 的 barrier 占比更高，
+fold 的串行部分相对也更重，故删 barrier + fold 并行的收益被放大。
+
+### 12.4 ncu（main，O3 → O4a）
+
+S=4096（`--set full` / stall 为 per-issued-inst 平均周期）：
+
+| 指标 | O3 | **O4a** | 说明 |
+|---|---|---|---|
+| Duration | 7.57 ms | **6.55 ms** | 1.16×（ncu 口径） |
+| Registers / smem | 168 / 75.01 KB | 168 / 75.01 KB | 不变（3 CTA/SM） |
+| Theoretical / Achieved Occ | 18.75% / 16.71% | 18.75% / **17.02%** | |
+| Waves Per SM | 2.59 | 2.59 | |
+| DRAM / L1TEX / L2 / Compute | 1.48 / 65.59 / 53.67 / 13.79% | 1.75 / **78.51** / 62.01 / 15.95% | L1TEX/L2 升（并行 fold 把更多 smem 请求压进 pipe） |
+| **barrier** stall | 5.13 | **0.46** | **目标达成：几乎消失** |
+| short_scoreboard stall | 4.12 | **5.40** | smem→mma `ldmatrix` 成为新主导 |
+| long_scoreboard stall | 2.21 | 3.35 | |
+| No Eligible | 81.91% | 79.04% | |
+
+S=512（`--set full`）：Duration 406 → **272 µs**、barrier 0.33 / short_scoreboard 2.59 /
+long_scoreboard 1.46、L1TEX 41.54%、achieved occ 6.25%（`grid=128<132 SM` 仍 grid-bound）、
+No Eligible 87.02%。
+
+**bound 结论**：O4a 把 O3 头号墙 **barrier 基本清零（5.13→0.46）**，墙移到
+**(a) short_scoreboard（5.40，仍 5 个 `__syncthreads`/tile 之外的 smem→mma 依赖）** 与
+**(b) L1/TEX 78.5%**（并行 fold 后 smem 读写并发度更高）。下一步仍是 backlog 的
+**O4b：用 fp8 `ldmatrix.trans` 消掉 `Kt/Qt/dOt` 三个转置副本**（既减 smem 冲 4 CTA/SM、
+又减 smem 往返；但「2 字节=1 b16」的配对转置不是 drop-in，需最小复现验证），或
+**O2b：小 S 的 grid / S=4096 的尾波**（Waves 2.59，partial 233/396）。
+
+### 12.5 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+# 两文件版
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=10 --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# 单文件版（逐位一致）
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=10 --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma_kernel \
+  --launch-count 1 --section SpeedOfLight --section Occupancy --section SchedulerStats \
+  --metrics smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=1
+# TE FP8 基线
+docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python \
+  /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_bench.py \
+  bench --dtype fp8 --shape 1 4096 16 128 causal
+```
