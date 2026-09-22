@@ -1,0 +1,32 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+V4-Pro routed expert w1 [N=3072,K=7168], B=128 tokens, top-6, E=384 experts
+balanced routing: m_e = 2 tokens/expert, pairs = 768
+building 384 experts (fp4 4.23 GB + scale 1.06 GB) ...
+
+[roof] read all 384 experts fp4 (4.228 GB): 1.3199 ms  3203.2 GB/s (95.6% HBM)
+[roof] read all scales (1.057 GB): 0.3343 ms  3161.6 GB/s (94.3% HBM)  combined fp4+scale 3194.8 GB/s
+[check grouped       ] max_rel=1.249e-07 (ref~1.7) OK
+  naive_loop     7.9084 ms  (weight read 10.57 GB, 1336.5 GB/s, 39.9% HBM)
+  batched_m1     4.2487 ms  (weight read 10.57 GB, 2487.8 GB/s, 74.2% HBM)
+  grouped RWW=1   2.4802 ms  (weight read 5.28 GB, 2130.8 GB/s, 63.6% HBM)
+  grouped RWW=2   2.1351 ms  (weight read 5.28 GB, 2475.2 GB/s, 73.8% HBM)
+  grouped RWW=4   2.2492 ms  (weight read 5.28 GB, 2349.6 GB/s, 70.1% HBM)
+  grouped RWW=8   2.1211 ms  (weight read 5.28 GB, 2491.5 GB/s, 74.3% HBM)
+  naive_loop     7.9314 ms  (weight read 10.57 GB, 1332.6 GB/s, 39.8% HBM)
+  batched_m1     4.2540 ms  (weight read 10.57 GB, 2484.6 GB/s, 74.1% HBM)
+  grouped RWW=1   2.4782 ms  (weight read 5.28 GB, 2132.6 GB/s, 63.6% HBM)
+  grouped RWW=2   2.1334 ms  (weight read 5.28 GB, 2477.2 GB/s, 73.9% HBM)
+  grouped RWW=4   2.2484 ms  (weight read 5.28 GB, 2350.5 GB/s, 70.1% HBM)
+  grouped RWW=8   2.1209 ms  (weight read 5.28 GB, 2491.8 GB/s, 74.3% HBM)
+  naive_loop     7.9214 ms  (weight read 10.57 GB, 1334.3 GB/s, 39.8% HBM)
+  batched_m1     4.2483 ms  (weight read 10.57 GB, 2488.0 GB/s, 74.2% HBM)
+  grouped RWW=1   2.4801 ms  (weight read 5.28 GB, 2130.9 GB/s, 63.6% HBM)
+  grouped RWW=2   2.1350 ms  (weight read 5.28 GB, 2475.3 GB/s, 73.8% HBM)
+  grouped RWW=4   2.2491 ms  (weight read 5.28 GB, 2349.7 GB/s, 70.1% HBM)
+  grouped RWW=8   2.1248 ms  (weight read 5.28 GB, 2487.2 GB/s, 74.2% HBM)
