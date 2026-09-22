@@ -167,6 +167,20 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > S=4096 0.3235ms/850TF ⇒ ours total 时间 6.47×（真反向 FLOPs 口径 131TF ≈ FA3 的 15.4%）。
 > 详见 `01-fp16-bwd-impl.md` §14。
 
+> **O10（Q/dO 载入向量化 + `cp.async` 重叠 + 打包写回）已完成（fp16，第三十七轮）**：ncu 显示
+> prologue 的 Q/dO 仍是逐元素 `LDG.U16/STS.U16`（global 仅用满 26.4/32 B/sector）、dQ 写回为两次
+> 4B store，且 Q/dO 的同步读延迟串在 K/V 的 `cp.async` 之前。改动：① 新增 `qdo_issue_async`
+> 把 Q/dO 用 16B `cp.async.cg` 发进 smem（与 K/V 同一 `wait_group 0` 等待 ⇒ 延迟重叠）；
+> ② `lse_mma_kernel_bal` 的 Q 同样向量化；③ dQ 写回打包 `float2`。**数值与 O5/O8/O6/O6b/O8b/O6c/O7c
+> 逐位相同**，单/两文件 device 逐字一致。**同 session A/B（改动前二进制 vs O10）**：端到端
+> **total S512 0.1485→0.1256ms（1.18×）、S4096 2.0965→2.0044ms（1.05×）、GQA kv4 0.4360→0.3767ms
+> （1.16×）、MLA S256H2 0.2990→0.2272ms（1.32×）、S512H4 0.5309→0.4357ms（1.22×）**；
+> main GQA kv4 0.3062→0.2620ms（1.17×）、MLA S256H2 1.22×。ncu（main,S4096）：Duration 1.61→**1.48ms**、
+> Executed Instructions 350.9M→**342.1M（−2.5%）**、`long_scoreboard` 1.38→**0.89**、shared load
+> 多余 wavefront 15.4→12.2%，墙仍 = `wait`（mma 依赖）+ L2 + 2 CTA/SM。对标同 session 纯反向 FA3
+> S=4096 0.3242ms/848TF ⇒ ours total 时间 6.18×（O7c 6.47×）。详见 `01-fp16-bwd-impl.md` §14c、
+> `01b` §6m。bf16 同构：total S512 1.15×、S4096 1.04×、GQA kv4 1.15×、MLA S256H2 1.31×。
+
 ### 2.2 bf16（峰值 989 TFLOPS）
 
 | shape | ours total | ours main | FA2.7.4 | TE2.14 |
@@ -245,6 +259,14 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > ncu（main,S4096）：Duration 1.87→**1.64ms**、**L2 70.5%（新墙）**、L1/TEX 55.7%、regs 250 /
 > smem 105.47KB（2 CTA/SM）、`wait 2.00 / long 1.39 / short 0.88`。对标纯反向 FA3 S=4096
 > 0.3193ms/861TF ⇒ ours total 时间 6.57×（真 FLOPs 口径 ≈15.2%）。详见 `01b-bf16-bwd-impl.md` §6k。
+
+> **O10-bf16（Q/dO 向量化 + `cp.async` 重叠 + `float2` 写回，与 fp16 逐字同构）已完成
+> （第三十七轮）**：数值与 O5b/O8/O6/O6b/O8b/O6c/O7c **逐位相同**（S512 9.001/12.61/13.65e-3、
+> S4096 15.10/13.40/16.31e-3）。同 session A/B：**total S512 0.1460→0.1268ms（1.15×）、S4096
+> 2.0824→1.9950ms（1.04×）、GQA kv4 0.4341→0.3761ms（1.15×）、MLA S256H2 0.2985→0.2285ms
+> （1.31×）、S512H4 0.5319→0.4343ms（1.22×）**；ncu（main,S4096）Duration 1.55ms、
+> Executed Instructions 342.1M（与 fp16 O10 相同）、墙 = `wait` + L2 + 2 CTA/SM。
+> 详见 `01b-bf16-bwd-impl.md` §6m。
 
 ### 2.3 fp8（峰值 1978.8 TFLOPS；FA 无反向 FP8，仅对标 TE）
 

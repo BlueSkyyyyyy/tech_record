@@ -136,6 +136,30 @@ __device__ __forceinline__ void kv_issue_async(const bf16* __restrict__ k,
   asm volatile("cp.async.commit_group;\n");
 }
 
+// O10：把一整块 Q/dO（BM 行 × HD 列，bf16）异步发进 smem（与 fp16 版逐字同构）。
+template <int HD, int BM>
+__device__ __forceinline__ void qdo_issue_async(const bf16* __restrict__ q,
+                                                const bf16* __restrict__ do_, int m0, int S,
+                                                int H, int h, int b, int tid, bf16* Qd,
+                                                bf16* dOd, int LD) {
+  constexpr int HDV = HD / 8;    // 每行 uint4(8 bf16) 数
+  constexpr int NU  = BM * HDV;  // 总 unit 数
+#pragma unroll
+  for (int u = tid; u < NU; u += THREADS) {
+    const int row = u / HDV, c8 = u % HDV;
+    const int qi = m0 + row;
+    if (qi < S) {
+      const size_t off = (((size_t)(b * S + qi)) * H + h) * HD + c8 * 8;
+      cp_async16(Qd + row * LD + c8 * 8, q + off);
+      cp_async16(dOd + row * LD + c8 * 8, do_ + off);
+    } else {
+      *reinterpret_cast<uint4*>(Qd + row * LD + c8 * 8) = make_uint4(0, 0, 0, 0);
+      *reinterpret_cast<uint4*>(dOd + row * LD + c8 * 8) = make_uint4(0, 0, 0, 0);
+    }
+  }
+  asm volatile("cp.async.commit_group;\n");
+}
+
 // A[M_TILE][K_TILE] 行主序（行距 asld，bf16）；B 两种布局：
 //   BTRANS=false：Bs=[N_TILE][K_TILE] 行主序（行距 bsld，bf16）→ ldmatrix.x2；
 //   BTRANS=true ：Bs=[K_TILE][N_TILE] 行主序（行距 bsld，bf16）→ ldmatrix.x2.trans。
@@ -345,6 +369,27 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
     if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
   };
 
+  // O10：Q 的载入向量化（与 fp16 版逐字同构）。
+  auto issue_q = [&](bf16* Qd, int m0) {
+#pragma unroll
+    for (int u = tid; u < LBM * HDV; u += THREADS) {
+      const int row = u / HDV, c8 = u % HDV;
+      const int qi = m0 + row;
+      if (qi < S) {
+        const size_t off = (((size_t)(b * S + qi)) * H + h) * HD + c8 * 8;
+        if constexpr (PIPE) {
+          cp_async16(Qd + row * LD + c8 * 8, q + off);
+        } else {
+#pragma unroll
+          for (int e = 0; e < 8; ++e) Qd[row * LD + c8 * 8 + e] = q[off + e];
+        }
+      } else {
+        *reinterpret_cast<uint4*>(Qd + row * LD + c8 * 8) = make_uint4(0, 0, 0, 0);
+      }
+    }
+    if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
+  };
+
 #pragma unroll
   for (int t = 0; t < 2; ++t) {
     const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
@@ -352,12 +397,7 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
     const int m0 = mblk * LBM;
 
     // ---- 载入本 m 块的 Q（越界补 0）----
-    for (int i = tid; i < LBM * HD; i += THREADS) {
-      int r = i / HD, d = i % HD;
-      int qi = m0 + r;
-      Qs[r * LD + d] =
-          (qi < S) ? q[(((size_t)(b * S + qi)) * H + h) * HD + d] : __float2bfloat16(0.f);
-    }
+    issue_q(Qs, m0);
 
     const int ncols = min(S, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
@@ -543,17 +583,23 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
   const int m0 = mblk * BM;
 
   // ---- 载入 Q/dO（越界补 0）----
-  for (int i = tid; i < BM * HD; i += THREADS) {
-    int r = i / HD, d = i % HD;
-    int qi = m0 + r;
-    bf16 qv = __float2bfloat16(0.f), ov = __float2bfloat16(0.f);
-    if (qi < S) {
-      size_t idx = (((size_t)(b * S + qi)) * H + h) * HD + d;
-      qv = q[idx];
-      ov = do_[idx];
+  // O10：PIPE>=1 用 16B cp.async 异步发 Q/dO（与 K/V 一起在循环首 wait_group 等待）；
+  // PIPE==0 保持同步标量读。
+  if constexpr (PIPE >= 1) {
+    qdo_issue_async<HD, BM>(q, do_, m0, S, H, h, b, tid, Qs, dOs, LD);
+  } else {
+    for (int i = tid; i < BM * HD; i += THREADS) {
+      int r = i / HD, d = i % HD;
+      int qi = m0 + r;
+      bf16 qv = __float2bfloat16(0.f), ov = __float2bfloat16(0.f);
+      if (qi < S) {
+        size_t idx = (((size_t)(b * S + qi)) * H + h) * HD + d;
+        qv = q[idx];
+        ov = do_[idx];
+      }
+      Qs[r * LD + d] = qv;
+      dOs[r * LD + d] = ov;
     }
-    Qs[r * LD + d] = qv;
-    dOs[r * LD + d] = ov;
   }
 
   const int ncols = causal ? min(S, m0 + BM) : S;
@@ -827,8 +873,10 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
                 int qi = m0 + r;
                 if (qi < S) {
                   float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
-                  base[0] += acc[i][j][q] * scale;
-                  base[1] += acc[i][j][q + 1] * scale;
+                  float2 old = *reinterpret_cast<float2*>(base);
+                  old.x += acc[i][j][q] * scale;
+                  old.y += acc[i][j][q + 1] * scale;
+                  *reinterpret_cast<float2*>(base) = old;
                 }
               }
             }
@@ -855,8 +903,8 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
           int qi = m0 + r;
           if (qi < S) {
             float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
-            base[0] = dqacc[i][j][q];
-            base[1] = dqacc[i][j][q + 1];
+            *reinterpret_cast<float2*>(base) =
+                make_float2(dqacc[i][j][q], dqacc[i][j][q + 1]);
           }
         }
   }
@@ -879,8 +927,8 @@ __global__ void convert_kernel(const float* __restrict__ dq_acc,
     dv[i] = __float2bfloat16(dv_acc[i]);
   }
 }
-// 极简 npy 读取（little-endian C-contiguous float32）
-// =============================================================================
+
+
 struct NpyF32 {
   std::vector<float> data;
   std::vector<long> shape;

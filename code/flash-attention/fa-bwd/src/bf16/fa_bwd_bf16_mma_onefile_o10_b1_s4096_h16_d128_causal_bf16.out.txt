@@ -1,0 +1,24 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_bf16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[timing] total(3 kernels) 1.9980 ms  68.79 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3659 ms | main 1.5374 ms | convert 0.0947 ms
+[O8b A/B] lse O8 0.9806 ms | bal(单缓冲) 0.4459 ms (2.199x) | bal+cpasync(双缓冲) 0.3252 ms (3.015x)
+[O6 A/B] main nopipe 2.2443 ms (61.24 TF) | pipe(KV both) 1.6068 ms (85.54 TF) | pipe2(K only) 1.5819 ms (86.88 TF) => nopipe/pipe 1.397x, nopipe/pipe2 1.419x
+[O6c A/B] main sched0(原样) 1.5758 ms | sched1(交错) 1.5655 ms (1.007x) | sched2(逆序) 1.5498 ms (1.017x)
+[O5c A/B] main (64,32,2) 1.5548 ms (88.40 TF) | (64,64,2) 1.4880 (92.37) | (32,32,1) 2.5915 (53.03) | (32,32,2) 2.5964 (52.93) => best 1.045x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.7204 (79.89) | f4 1.8811 (73.06,-8.5%) | f2+PREL 1.5522 (88.54,+10.8%) | f4+PREL 1.5599 (88.10,+10.3%)
+  (BM=64,BN=64,PIPE=2): base 1.7010 (80.80) | f4 1.7802 (77.21,-4.4%) | f2+PREL 1.4844 (92.59,+14.6%) | f4+PREL 1.5476 (88.81,+9.9%)
+  (BM=32,BN=32,PIPE=1): base 2.6185 (52.49) | f4 2.6492 (51.88,-1.2%) | f2+PREL 2.5843 (53.18,+1.3%) | f4+PREL 2.6133 (52.59,+0.2%)
+  (BM=32,BN=32,PIPE=2): base 2.6182 (52.49) | f4 2.6973 (50.95,-2.9%) | f2+PREL 2.5940 (52.98,+0.9%) | f4+PREL 2.6085 (52.69,+0.4%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  fa_dq     vs ref: max_abs=1.441e-02  max_rel=1.630e+00
+  fa_dk     vs ref: max_abs=1.332e-02  max_rel=1.612e+00
+  fa_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  te_dq     vs ref: max_abs=1.524e-02  max_rel=3.641e+00
+  te_dk     vs ref: max_abs=1.763e-02  max_rel=2.718e+00
+  te_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00

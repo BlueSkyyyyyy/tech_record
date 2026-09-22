@@ -1049,11 +1049,87 @@ bf16 同款见 `01b` §6l。
 
 ---
 
+## 14c. O10：Q/dO 载入向量化 + `cp.async` 重叠 + 打包写回（fp16，main/total 1.03–1.32×）
+
+### 14c.1 动机（ncu 证据）
+
+O7c 把墙移到 **L2 71.6% + `wait` + 低 occupancy** 后，逐条看 ncu 的 `Source Counters`，
+两处仍是「标量化的全局访问」：
+
+- **主 kernel prologue 的 Q/dO**：`for i = tid; i < BM*HD; i += THREADS` 逐元素
+  `LDG.U16 + STS.U16`（每线程 S=4096 时约 128 次标量 load + 128 次标量 store，且每元素都做
+  `i/HD`、`i%HD` 整数除模）。ncu 报 **global loads 平均仅用满 26.4/32 B/sector**，且这串
+  标量 load 的延迟**串在** K/V 的 `cp.async` 之前。
+- **`lse_mma_kernel_bal` 的 Q** 同样是逐元素标量读（K 早已是 16B `cp.async`）。
+- **dQ 写回**：`base[0]=…; base[1]=…` 两次 4B 写；ncu 报 global stores 平均仅 16/32 B/sector。
+
+### 14c.2 改动（单/两文件 device 代码逐字一致，脚本核对 `identical: True`）
+
+1. **新增 `qdo_issue_async<HD,BM>`**：把整块 Q/dO（BM×HD）用 16B `cp.async.cg` 发进 smem，
+   行越界写 0；与 `kv_issue_async` 同构。主 kernel `PIPE>=1` 的 prologue 改用它
+   （PIPE==0 保持同步标量读，因无流水语义）。Q/dO 与 K/V 各提交一个 `commit_group`，
+   循环首的 `cp.async.wait_group 0` 一并等待 ⇒ Q/dO 的全局延迟与 K/V **重叠**。
+2. **`lse_mma_kernel_bal` 的 Q** 同样改走 `issue_q`（PIPE=1 用 `cp.async`，PIPE=0 标量）。
+3. **dQ 写回**（含 HD>128 的直接累加路径）相邻两列打包成一次 `float2`（8B）读/写
+   （列号 `c` 恒为偶数 ⇒ 自然 8B 对齐）。
+
+**数值与 O5/O5b/O8/O6/O6b/O8b/O6c/O7c 逐位相同**（搬的是同样的 half、乘的同样的 scale），
+单/两文件逐指标一致。
+
+### 14c.3 性能（同 session A/B：改动前二进制 vs 改动后，CUDA event，ms）
+
+| case | total base → O10 | total 加速 | main base → O10 | main 加速 | preprocess base → O10 |
+|---|---|---|---|---|---|
+| S=512 H16 d128 | 0.1485 → **0.1256** | **1.18×** | 0.0770 → **0.0731** | 1.05× | 0.0536 → **0.0405** |
+| S=4096 H16 d128 | 2.0965 → **2.0044** | 1.05× | 1.5916 → **1.5350** | 1.04× | 0.3915 → 0.3653 |
+| S=1024 H32 kv4 | 0.4360 → **0.3767** | **1.16×** | 0.3062 → **0.2620** | **1.17×** | 0.1048 → 0.0874 |
+| S=256 H2 d512 | 0.2990 → **0.2272** | **1.32×** | 0.2030 → **0.1662** | **1.22×** | 0.0837 → 0.0470 |
+| S=512 H4 d512 | 0.5309 → **0.4357** | **1.22×** | 0.3833 → **0.3368** | 1.14× | 0.1154 → 0.0780 |
+| S=1024 H2 d512 | 0.9417 → **0.8230** | **1.14×** | 0.7190 → **0.6657** | 1.08× | 0.1756 → 0.1381 |
+| S=1024 H40 kv8 | 0.5159 → **0.4604** | 1.12× | 0.3657 → 0.3214 | 1.14× | 0.1220 → 0.1052 |
+| S=1024 H64 kv1 | 0.7104 → **0.6424** | 1.11× | 0.5140 → 0.4586 | 1.12× | 0.1574 → 0.1380 |
+
+收益来自两处：**LSE 的 Q 向量化**（S=512 时 preprocess 0.0536→0.0405，占端到端大头）与
+**主 kernel Q/dO 的 `cp.async` 重叠**（GQA/MQA 与 MLA 的 main 1.1–1.2×，小网格尤其明显）。
+端到端 total 1.05–1.32×，**大 S（S=4096）收益最小（1.05×）**，因 prologue 只占 kernel 的一小段。
+
+### 14c.4 ncu（main，S=4096，`(64,64,2)`）
+
+| 指标 | O7c | **O10** |
+|---|---|---|
+| Duration | 1.61 ms | **1.48 ms** |
+| Executed Instructions | 350,867,456 | **342,052,864（−2.5%）** |
+| `long_scoreboard` | 1.38 | **0.89** |
+| `mio_throttle` | 0.49 | 0.70 |
+| `wait` / `short` / `barrier` | 2.00 / 0.88 / 0.11 | 2.04 / 0.87 / 0.14 |
+| shared load 多余 wavefront | 15.36% | **12.2%** |
+| L1/TEX / L2 / Compute | 55.7 / 71.6 / 23.4 % | 57.0 / **76.9** / 23.7 % |
+| regs / smem / occ | 250 / 105.47KB / 11.8% | 250 / 105.47KB / 11.8% |
+
+`long_scoreboard`（全局读延迟）被压下，代价是 `mio_throttle` 略升（更多异步请求同时飞行）；
+**墙仍是 `wait`（fixed-latency mma 依赖）+ L2 吞吐 + 2 CTA/SM 的低 occupancy**，只有 O9
+（更低 smem 的 wgmma/TMA 数据通路）能同时解。
+
+### 14c.5 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`）
+
+MHA S=4096：FA3 0.3242ms/848TF、TE 0.4413/623、FA2 0.7287/377。ours total O10 **2.0044ms**
+（68.6 TF，O7c 2.0935ms）⇒ **ours total 时间 6.18×（O7c 6.47×）**，为 FA3 的 ~8%（端到端口径）。
+GQA kv4 S=1024：FA3 0.0821ms/418TF，ours total 0.3767ms ⇒ 4.59×
+
+### 14c.6 原始输出
+
+`src/fp16/fa_bwd_fp16_mma_main_o10_{ab,allshapes,ncu_s4096,ncu_s512,stall_s4096}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o10_*.out.txt`、
+`src/fp16/fa_bwd_fp16_o10_fa3_te_baseline.out.txt`。
+
+---
+
 ## 15. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
-O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）** 完成。O7c 已把「减 red
-事务数」这条杠杆**证伪**（float4 更慢），并把墙从 L1/TEX 移到 L2/occupancy。后续按回报排序：
-**O9**（`wgmma`+TMA+warp specialization，对标 FA3；O6c/O7c 已证明 `BN=64` 能降 L1/TEX 但
-smem/regs 锁死 occupancy，只有更低 smem 的数据通路才能同时拿到）→ MLA 降 smem 冲 2 CTA/SM /
-split-KV。**O7c(bf16) 与 MLA 张量核(bf16) 见 `01b` §6k/§6l**。
+O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）** 完成。O7c 已把
+「减 red 事务数」这条杠杆**证伪**（float4 更慢），O10 又把 Q/dO 的标量载入与 dQ 写回向量化
+（`long_scoreboard` 压下、指令数 −2.5%），把墙进一步收敛到 **`wait`（mma 依赖）+ L2 + 2 CTA/SM**。
+后续按回报排序：**O9**（`wgmma`+TMA+warp specialization，对标 FA3；O6c/O7c/O10 已证明
+`BN=64` 能降 L1/TEX 但 smem/regs 锁死 occupancy，只有更低 smem 的数据通路才能同时拿到）→
+MLA 降 smem 冲 2 CTA/SM / split-KV。**O7c(bf16)、MLA 张量核(bf16)、O10(bf16) 见 `01b` §6k/§6l/§6m**。

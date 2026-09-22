@@ -1,0 +1,27 @@
+######## b1_s1024_h2_d512_causal_fp16
+BASE [timing] total(3 kernels) 0.9417 ms  4.56 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.1756 ms | main 0.7190 ms | convert 0.0470 ms 
+NEW  [timing] total(3 kernels) 0.8230 ms  5.22 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.1381 ms | main 0.6657 ms | convert 0.0193 ms 
+######## b1_s1024_h32_d128_kv4_causal_fp16
+BASE [timing] total(3 kernels) 0.4359 ms  39.41 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.1048 ms | main 0.3089 ms | convert 0.0222 ms 
+NEW  [timing] total(3 kernels) 0.3779 ms  45.46 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.0878 ms | main 0.2635 ms | convert 0.0266 ms 
+######## b1_s1024_h40_d128_kv8_causal_fp16
+BASE [timing] total(3 kernels) 0.5159 ms  41.63 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.1220 ms | main 0.3657 ms | convert 0.0281 ms 
+NEW  [timing] total(3 kernels) 0.4604 ms  46.64 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.1052 ms | main 0.3214 ms | convert 0.0338 ms 
+######## b1_s1024_h64_d128_kv1_causal_fp16
+BASE [timing] total(3 kernels) 0.7104 ms  48.36 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.1574 ms | main 0.5140 ms | convert 0.0391 ms 
+NEW  [timing] total(3 kernels) 0.6424 ms  53.48 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.1380 ms | main 0.4586 ms | convert 0.0458 ms 
+######## b1_s1024_h64_d128_kv4_causal_fp16
+BASE [timing] total(3 kernels) 0.7298 ms  47.08 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.1559 ms | main 0.5318 ms | convert 0.0421 ms 
+NEW  [timing] total(3 kernels) 0.6729 ms  51.07 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.1347 ms | main 0.4879 ms | convert 0.0502 ms 
+######## b1_s256_h2_d512_causal_fp16
+BASE [timing] total(3 kernels) 0.2990 ms  0.90 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.0837 ms | main 0.2030 ms | convert 0.0123 ms 
+NEW  [timing] total(3 kernels) 0.2272 ms  1.18 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.0470 ms | main 0.1662 ms | convert 0.0140 ms 
+######## b1_s4096_h16_d128_causal_fp16
+BASE [timing] total(3 kernels) 2.0847 ms  65.93 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.3919 ms | main 1.5914 ms | convert 0.1014 ms 
+NEW  [timing] total(3 kernels) 2.0222 ms  67.97 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.3713 ms | main 1.5217 ms | convert 0.1292 ms 
+######## b1_s512_h16_d128_causal_fp16
+BASE [timing] total(3 kernels) 0.1486 ms  14.45 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.0536 ms | main 0.0799 ms | convert 0.0152 ms 
+NEW  [timing] total(3 kernels) 0.1269 ms  16.93 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.0404 ms | main 0.0697 ms | convert 0.0168 ms 
+######## b1_s512_h4_d512_causal_fp16
+BASE [timing] total(3 kernels) 0.5309 ms  4.04 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.1154 ms | main 0.3833 ms | convert 0.0322 ms 
+NEW  [timing] total(3 kernels) 0.4357 ms  4.93 TFLOPS (bwd FLOPs=4BS^2HD) [timing] preprocess 0.0780 ms | main 0.3368 ms | convert 0.0208 ms 
