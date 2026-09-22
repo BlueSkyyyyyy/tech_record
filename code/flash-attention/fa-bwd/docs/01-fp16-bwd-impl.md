@@ -614,12 +614,93 @@ preprocess 33%（LSE 尾波/occupancy，O8b）。
 `src/fp16/fa_bwd_fp16_mma_main_o6_ncu_s4096.out.txt`、
 `..._o6_stall_s4096.out.txt`、`src/fp16/fa_bwd_fp16_o6_fa3_te_baseline.out.txt`。
 
+## 12b. O6b：K/V 双缓冲压回 3 CTA/SM + `ldmatrix.x4.trans` 消转置副本（main 同 session +3–6%）
+
+### 12b.1 动机
+
+O6（§12）把全局访存延迟打掉后，ncu 新墙 = `wait`(fixed-latency) + `short_scoreboard`
+（smem→`ldmatrix`）+ L1/TEX，且**代价是 smem 83.97KB → 只能 2 CTA/SM**（理论 occ 12.5%）。
+要再进一步，得在不牺牲流水的前提下**把 smem 降回 3 CTA/SM 预算（≤ 77.8KB）**，同时减少
+smem 访存量（L1/TEX 已 65%）。
+
+### 12b.2 两个改动（单/两文件 device 代码逐字一致）
+
+1. **A 操作数改 `ldmatrix.x4.trans`，删掉 `PsT/dSsT` 两份转置副本**。
+   GEMM3/GEMM4 需要 A=`Pᵀ/dSᵀ`，原来把 P/dS（天然按 `[BM][BN]` 算出）**额外复制一份
+   转置**存成 `[BN][BM]`。新增 smoke `fa_bwd_fp16_atrans_smoke.cu` 证明：把 A 存成
+   `[K][M]` 行主序、用 `ldmatrix.x4.trans`（地址的 bit3/bit4 互换）读到的 A 片段与
+   `A[M][K]`+`ldmatrix.x4` **逐位一致**（`bitwise_diff=0/128`，PASS）。于是 P/dS 各只存
+   一份 `[BM][BN]`（`LDS=BN+8`），**免掉 `PsT`、`dSsT` 的写与读**。`mma_block_f16` 加
+   `ATRANS` 模板参数。
+2. **只双缓冲 K，V 单缓冲且在 GEMM2 之后预取**。V 只在 GEMM2 被读、GEMM2 在 tile 前段：
+   `cp.async` 的 K 仍走双缓冲（循环首预取），V 发进**同一个单缓冲**——发起点放在
+   GEMM2 的消费者 barrier 之后，延迟由随后的 GEMM3/4/5 盖住。省下一整个 V 缓冲。
+
+**smem**：`83.97KB → 71.17KB`（Q/dO 2×17.4 + K 双 2×8.5 + V 单 8.5 + Ps/dSs 2×5.1），
+Block Limit Shared Mem **2 → 3**，理论 occ 12.5%→**18.75%**（168 regs，0 spill）。
+
+### 12b.3 自动档（O6b 不是无脑更快）
+
+O6b 的 V 预取窗口比 O6 短：**网格受限**（S=512 grid=128 < 132 SM、单波）时 O6 反而更快，
+大网格时 O6b 赢。host 按网格大小自动选：`grid = (S/64)×H×B ≥ 396`（3 CTA/SM 的一个满波）
+用 **O6b(2)**，否则用 **O6(1)**；`--nopipe/--pipe/--pipe2` 可强制。
+
+### 12b.4 实测（同 session A/B，CUDA event，main-only）
+
+| shape | nopipe (ms) | **O6 (ms)** | **O6b (ms)** | O6/O6b |
+|---|---|---|---|---|
+| MHA S=512 (grid=128, 自动选 O6) | 0.1883 | **0.0832** | 0.0866 | 0.96× |
+| MHA S=4096 (grid=1024) | 4.4936 | 1.9000 | **1.8597** | 1.02× |
+| GQA q32/kv4 S=1024 (grid=512) | 0.6373 | 0.3802 | **0.3571** | 1.06× |
+
+端到端（preprocess+main+convert）：S=512 **0.1847ms（11.63 TF，走 O6）**、
+S=4096 **2.9517ms（46.56 TF，走 O6b）**、GQA kv4 **0.5720ms（30.04 TF，走 O6b）**。
+单文件与两文件**逐指标相同**（S512 0.0842、S4096 1.8635、GQA 0.3535 main；max_abs 逐位一致）。
+
+### 12b.5 数值（与 O5/O8/O6 **逐位相同**）
+
+| shape | dq | dk | dv |
+|---|---|---|---|
+| MHA S=512 | 1.671e-3 | 1.771e-3 | 1.899e-3 |
+| MHA S=4096 | 1.883e-3 | 1.734e-3 | 1.966e-3 |
+| GQA q32/kv4 S=1024 | 2.134e-3 | 3.305e-3 | 3.850e-3 |
+
+A 转置读只是换个读取方式（smoke 已证逐位）、K/V 只是换个流水时点 ⇒ 数学与 GEMM 顺序不变。
+
+### 12b.6 ncu（main, S=4096；`--set full` + 定向 stall）
+
+```
+              Duration  smem/block  occ(achieved)  L1/TEX  L2    Compute  DRAM  BlockLimitSMem
+O6  (PIPE=1)   1.95ms     83.97KB      11.83%       65.2%  60.1%  27.1%    3.31%   2
+O6b (PIPE=2)   1.86ms     71.17KB      16.90%       71.9%  63.1%  29.8%    3.47%   3
+```
+
+stall（per issue active）：O6b `wait 1.88 + long_scoreboard 1.79 + short 0.81 +
+not_selected 0.37 + mio 0.28 + barrier 0.17`；O6 `wait 1.94 + long 1.09 + short 0.78 +
+not_selected 0.17 + barrier 0.10`。**结论**：O6b 把 occupancy 从 11.8% 提到 16.9%、
+Duration 降 ~5%，但 V 预取晚 ⇒ `long_scoreboard` 1.09→1.79、warps 多 ⇒ `not_selected`
+0.17→0.37；墙仍是 **L1/TEX 72% + L2 63% + fixed-latency(`wait`)**，属于**吞吐受限**，
+加 warp 收益有限。真正下一刀是**降 L1/L2 流量**（O7 去 atomic / O4b 式配对）或 **O9 wgmma/TMA**。
+
+### 12b.7 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`）
+
+FA3（SM90）MHA S4096 **0.3248ms / 846 TF**、TE 0.4452/617、FA2 0.7279/378；
+GQA q32/kv4 S1024 FA3 **0.0823ms / 417 TF**、TE 0.1126/305。
+ours（O6b）total S4096 2.952ms/46.6 TF ⇒ **FA3 的 5.5%（时间比 9.1×）**；
+GQA kv4 total 0.572ms/30.0 TF ⇒ **FA3 的 7.2%（时间比 6.9×）**。
+
+### 12b.8 原始输出
+
+`src/fp16/fa_bwd_fp16_atrans_smoke.out.txt`、`src/fp16/fa_bwd_fp16_mma_main_o6b_{s512,s4096,gqa_kv4}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o6b_{s512,s4096}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o6b_ncu_main_s4096.out.txt`、`..._o6b_stall_s4096.out.txt`；
+`src/fa_bwd_o6b_fa3_te_baseline.out.txt`。
+
 ---
 
 ## 13. 下一步
 
-见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）** 完成。
-后续按回报排序：**O6b/降 smem**（fp16 main 现 2 CTA/SM，想办法把 K/V 双缓冲压回
-3 CTA/SM，如只双缓冲 K 或更省的转置布局）→ **O9**（`wgmma`+TMA+warp specialization，
-对标 FA3；或先把 `short_scoreboard`/`wait` 依赖压下去）→ **O7**（dK/dV 去 `atomicAdd`，
-移植 fp8 的 O4c/O7）→ **O8b**（LSE 的 occupancy/尾波、convert 融合）→ MLA 张量核。
+见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）** 完成。
+后续按回报排序：**O7**（dK/dV 去 `atomicAdd`，移植 fp8 的 O4c/O7；ncu 墙已是 L1/L2 吞吐）
+→ **O9**（`wgmma`+TMA+warp specialization，对标 FA3）→ **O8b**（LSE 的 occupancy/尾波、
+convert 融合）→ MLA 张量核。

@@ -106,16 +106,17 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // =============================================================================
 // host / launcher / self-test
 // =============================================================================
-// PIPE=true 时 K/V 双缓冲，smem 增加 2*BN*(HD+8) 个 bf16。
-template <int HD, int BM, int BN, bool PIPE>
+// PIPE=0：K/V 都不双缓冲；PIPE=1：K/V 都双缓冲；PIPE=2：只 K 双缓冲（V 单缓冲 + 后段预取）。
+// K/V 的 smem 份数：0→2（各 1）、1→4（各 2）、2→3（K 2 + V 1）。
+template <int HD, int BM, int BN, int PIPE>
 static void launch_bwd_mma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
                            const bf16* do_, const float* delta, const float* lse,
                            float* dq_acc, float* dk_acc, float* dv_acc, int S, int H, int Hkv,
                            float scale, int causal) {
-  constexpr int kvsb = (PIPE ? 2 : 1) * BN * (HD + 8);
+  constexpr int kvn = (PIPE == 0) ? 2 : (PIPE == 1 ? 4 : 3);
+  constexpr int pds = (PIPE == 2) ? 2 * BM * (BN + 8) : 2 * BN * (BM + 8) + BM * (BN + 8);
   constexpr int smem =
-      (2 * BM * (HD + 8) + 2 * kvsb + 2 * BN * (BM + 8) + BM * (BN + 8)) *
-      (int)sizeof(bf16);
+      (2 * BM * (HD + 8) + kvn * BN * (HD + 8) + pds) * (int)sizeof(bf16);
   CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
   fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE><<<mg, THREADS, smem>>>(
@@ -126,14 +127,16 @@ int main(int argc, char** argv) {
   std::string dir = "/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16";
   std::string o_name = "ref_o";
   bool causal = true;
-  bool pipe = true;   // O6：默认用 cp.async 双缓冲
+  // pipe: -1=自动（按网格大小选 1/2）、0=O5b、1=O6、2=O6b。
+  int pipe = -1;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
-    else if (a == "--nopipe") pipe = false;
-    else if (a == "--pipe") pipe = true;
+    else if (a == "--nopipe") pipe = 0;
+    else if (a == "--pipe") pipe = 1;
+    else if (a == "--pipe2") pipe = 2;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -213,13 +216,22 @@ int main(int argc, char** argv) {
   const int cvt_blocks =
       (int)std::min<size_t>((std::max(n, nkv) + cvt_threads - 1) / cvt_threads, 65535);
 
+  // O6b 在网格足够大（≥ 一个满波 = 132 SM × 3 CTA/SM）时才占优；单波/网格受限形状用 O6。
+  const long long grid = (long long)((S + 63) / 64) * H * B;
+  const int auto_pipe = (grid >= 396) ? 2 : 1;
+  printf("[O6b] main grid=%lld auto_pipe=%d (CLI pipe=%d; >=396→O6b/2 else O6/1)\n", grid,
+         auto_pipe, pipe);
   auto run_main = [&]() {
-    if (pipe)
-      launch_bwd_mma<128, 64, 32, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+    int m = (pipe < 0) ? auto_pipe : pipe;
+    if (m == 2)
+      launch_bwd_mma<128, 64, 32, 2>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+    else if (m == 1)
+      launch_bwd_mma<128, 64, 32, 1>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
     else
-      launch_bwd_mma<128, 64, 32, false>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                         d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+      launch_bwd_mma<128, 64, 32, 0>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
   };
   auto run_pre = [&]() {
     lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
@@ -275,42 +287,42 @@ int main(int argc, char** argv) {
   printf("[timing] preprocess %.4f ms | main %.4f ms | convert %.4f ms\n", ms_pre, ms_main,
          ms - ms_pre - ms_main);
 
-  // ---- O6 A/B：同 session 对比原版（PIPE=false）与 cp.async 双缓冲（PIPE=true）----
-  auto time_launch = [&](bool p, float* out_ms) {
+  // ---- O6 A/B：同 session 对比原版（PIPE=0）、K/V 双缓冲（PIPE=1）、只 K 双缓冲（PIPE=2）----
+  auto launch_mode = [&](int m) {
+    if (m == 2)
+      launch_bwd_mma<128, 64, 32, 2>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+    else if (m == 1)
+      launch_bwd_mma<128, 64, 32, 1>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+    else
+      launch_bwd_mma<128, 64, 32, 0>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+  };
+  auto time_launch = [&](int m, float* out_ms) {
     CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
-    for (int i = 0; i < 3; ++i) {
-      if (p) launch_bwd_mma<128, 64, 32, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse,
-                                               d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
-                                               (int)causal);
-      else
-        launch_bwd_mma<128, 64, 32, false>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                           d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
-    }
+    for (int i = 0; i < 3; ++i) launch_mode(m);
     CUDA_CHECK(cudaEventRecord(ev0));
-    for (int i = 0; i < iters; ++i) {
-      if (p) launch_bwd_mma<128, 64, 32, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse,
-                                               d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
-                                               (int)causal);
-      else
-        launch_bwd_mma<128, 64, 32, false>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                           d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
-    }
+    for (int i = 0; i < iters; ++i) launch_mode(m);
     CUDA_CHECK(cudaEventRecord(ev1));
     CUDA_CHECK(cudaEventSynchronize(ev1));
     float t = 0.f;
     CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
     *out_ms = t / iters;
   };
-  float ms_nopipe = 0.f, ms_pipe = 0.f;
-  time_launch(false, &ms_nopipe);
-  time_launch(true, &ms_pipe);
+  float ms_nopipe = 0.f, ms_pipe = 0.f, ms_pipe2 = 0.f;
+  time_launch(0, &ms_nopipe);
+  time_launch(1, &ms_pipe);
+  time_launch(2, &ms_pipe2);
   double main_flops = 4.0 * (double)B * S * H * S * D;
-  printf("[O6 A/B] main nopipe %.4f ms (%.2f TF) | pipe(cp.async) %.4f ms (%.2f TF) "
-         "=> %.3fx\n",
+  printf("[O6 A/B] main nopipe %.4f ms (%.2f TF) | pipe(KV both) %.4f ms (%.2f TF) | "
+         "pipe2(K only) %.4f ms (%.2f TF) => nopipe/pipe %.3fx, nopipe/pipe2 %.3fx\n",
          ms_nopipe, main_flops / (ms_nopipe * 1e-3) / 1e12, ms_pipe,
-         main_flops / (ms_pipe * 1e-3) / 1e12, ms_nopipe / ms_pipe);
+         main_flops / (ms_pipe * 1e-3) / 1e12, ms_pipe2,
+         main_flops / (ms_pipe2 * 1e-3) / 1e12, ms_nopipe / ms_pipe,
+         ms_nopipe / ms_pipe2);
 
   // ---- 数值对拍（重新跑一次完整 forward 保证累加缓冲清零）----
   run_all();

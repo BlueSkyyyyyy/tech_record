@@ -1,0 +1,16 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_bf16
+B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388 dtype=bf16
+[O6b] main grid=512 auto_pipe=2 (CLI pipe=-1; >=396→O6b/2 else O6/1)
+[timing] total(3 kernels) 0.5764 ms  29.80 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1877 ms | main 0.3519 ms | convert 0.0369 ms
+[O6 A/B] main nopipe 0.6346 ms (27.07 TF) | pipe(KV both) 0.3810 ms (45.10 TF) | pipe2(K only) 0.3584 ms (47.93 TF) => nopipe/pipe 1.666x, nopipe/pipe2 1.770x
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.201e-02  max_rel=1.712e+00
+  dk   vs ref: max_abs=2.125e-02  max_rel=3.799e+00
+  dv   vs ref: max_abs=3.156e-02  max_rel=3.637e+00
+  fa_dq     vs ref: max_abs=1.163e-02  max_rel=1.909e+00
+  fa_dk     vs ref: max_abs=3.110e-02  max_rel=5.365e+00
+  fa_dv     vs ref: max_abs=3.627e-02  max_rel=3.711e+00
+  te_dq     vs ref: max_abs=1.238e-02  max_rel=1.732e+00
+  te_dk     vs ref: max_abs=3.140e-02  max_rel=2.707e+00
+  te_dv     vs ref: max_abs=3.627e-02  max_rel=3.711e+00

@@ -1,0 +1,26 @@
+=== PIPE2 (O6b) fp16 S4096 ===
+    Metric Name                                                                 Metric Unit Metric Value
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                   inst         0.17
+    smsp__average_warps_issue_stalled_drain_per_issue_active.ratio                     inst         0.00
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio               inst         0.02
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio           inst         1.79
+    smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio        inst         0.16
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio              inst         0.28
+    smsp__average_warps_issue_stalled_no_instruction_per_issue_active.ratio            inst         0.04
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio              inst         0.37
+    smsp__average_warps_issue_stalled_selected_per_issue_active.ratio                  inst            1
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio          inst         0.81
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                      inst         1.88
+=== PIPE1 (O6) fp16 S4096 ===
+    Metric Name                                                                 Metric Unit Metric Value
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                   inst         0.10
+    smsp__average_warps_issue_stalled_drain_per_issue_active.ratio                     inst         0.01
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio               inst         0.02
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio           inst         1.09
+    smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio        inst         0.07
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio              inst         0.12
+    smsp__average_warps_issue_stalled_no_instruction_per_issue_active.ratio            inst         0.03
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio              inst         0.17
+    smsp__average_warps_issue_stalled_selected_per_issue_active.ratio                  inst            1
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio          inst         0.78
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                      inst         1.94
