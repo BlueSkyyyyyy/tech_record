@@ -958,6 +958,37 @@
     `src/bf16/fa_bwd_bf16_mma_main_o11_{s512,s4096}.out.txt`、`src/fa_bwd_o11_fa3_te_baseline.out.txt`；
     文档 `docs/03` §19、`docs/01` §14d、`docs/01b` §6n、`docs/04` §2.3/§3。
 
+- 2026-09-23（第三十九轮）：**O9a 完成（Hopper `wgmma` 数据通路建立 + LSE 上验证，单/两文件）**。
+  - 动机：O10 后 fp16/bf16 main 的墙是 **`wait`（mma 依赖）+ L2**；`mma.m16n8k16` 在 Hopper 上走
+    SM80 兼容路径（LSE ncu 还有 L1/TEX 32–38% 的 ldmatrix）。O9 要把它换成 Hopper 原生
+    `wgmma`。本轮做**风险最小的第一步**——先把 LSE 的单个 QKᵀ 换掉，验证 SW128+描述符+累加器映射。
+  - **冒烟** `src/fp16/fa_bwd_fp16_wgmma_smoke.cu`：证明 (1) SW128 K-major 布局 + wgmma 描述符
+    自洽；(2) `wgmma.m64n64k16.f32.f16.f16` 的累加器布局与 `mma.m16n8` 的 `acc[j][q]` **逐字同构**
+    （`d[j*4+q]`）。实测 `max_abs=0.000e+00` PASS。
+  - **集成**（`lse_mma_kernel_bal_wgmma<HD,PIPE>`，仅 HD=128/causal）：Q/K 改 **SW128 tile**
+    （`cp.async` 落 swizzled 地址）、8 条 wgmma 完成 64×64×128 的 QKᵀ，镜像配对/online-softmax/
+    行归约同 O8b。fp16/bf16 单/两文件 device 代码逐字一致；默认走 mma 版，`--lsewgm=1` 切换。
+  - **构建**：CUDA 13 需 `-gencode=arch=compute_90a,code=sm_90a`；`scripts/run.sh`/`ncu.sh`
+    改为「`ARCH` 为空串时只用 `NVCC_FLAGS` 的 gencode」，kernel 用 `__CUDA_ARCH_FEAT_SM90_ALL`
+    包 wgmma asm，使默认 `sm_90` 构建仍可用。
+  - **性能**（同 session，LSE-only，event）：fp16 S=4096 O8b 0.3004→**wgmma 0.2871ms（1.046×）**、
+    S=512 0.0338→0.0330、GQA kv4 0.0666→0.0642；bf16 S=4096 0.3006→**0.2856ms（1.054×）**。
+    端到端 fp16 S=4096 total **1.953ms（70.1 TF）**（O10 2.004）。
+  - **ncu**（S=4096，同 session 对照 O8b）：Duration 303.62→**286.18µs**、**L1/TEX 37.62→18.05%**
+    （ldmatrix 被 SS 直读取代）、L2 31.62→20.25%、Executed Ipc 2.36→**2.52**；regs 62、
+    smem 52.22→50.18KB、occ ~23%、Waves 0.97。**新墙 = Compute ~60% + 发射**（softmax epilogue）；
+    wgmma 只打掉访存那一半 ⇒ LSE 收益有限（1.05×）。
+  - **数值与 O8b 逐位相同**（fp16 S4096 1.883/1.734/1.966e-3、S512 1.671/1.771/1.899e-3、
+    GQA 2.134/3.305/3.850e-3；bf16 S4096 1.510/1.340/1.631e-2）；单/两文件逐指标一致。
+  - **对标**（同 session 纯反向 `fa_vs_te_bwd_only.py`）：FA3 MHA S4096 fp16 0.3240ms/848TF、
+    bf16 0.3194/861 ⇒ ours total 仍 ~6.0×（与 O8b/O10 持平，LSE 非主因）。
+  - 原始输出 `src/fp16/fa_bwd_fp16_wgmma_smoke.out.txt`、
+    `src/fp16/fa_bwd_fp16_mma_{main,onefile}_o9_*.out.txt`、`..._o9_gqa_kv4.out.txt`、
+    `src/bf16/fa_bwd_bf16_mma_{main,onefile}_o9_s4096.out.txt`、
+    `src/fp16/fa_bwd_fp16_mma_main_o9_ncu_lse_{wgmma,mma}_s4096.out.txt`、
+    `src/{fp16,bf16}/fa_bwd_*_o9_fa3_te_baseline.out.txt`；文档 `docs/01` §14e、`docs/01b` §6o、
+    `docs/04` §2.1/§2.2/§3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -1024,7 +1055,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `HD/16` 个 unit）——lse **S4096 0.936→0.345ms（2.71×）**、preprocess **1.20→0.388ms（3.1×）**、
       端到端 **4.13→3.31ms（1.25×）**，数值与 O7 逐位相同；另把 fp16/bf16/fp8 的 `expf/logf`
       换 `__expf/__logf`（preprocess 再 ~8%）。详见 `docs/03` §19、`docs/01` §14d、`docs/01b` §6n。
-- [ ] **O9**（对标 FA3）TMA + `wgmma` + warp specialization 多级流水。
+- [~] **O9**（对标 FA3）TMA + `wgmma` + warp specialization 多级流水。
+      **O9a 已完成（第三十九轮）**：建立 Hopper `wgmma + SW128` 数据通路（冒烟 PASS +
+      `lse_mma_kernel_bal_wgmma`，L1/TEX 37.6→18.1%、LSE 1.05×、数值逐位相同）；
+      但 LSE 是 softmax epilogue bound，收益有限 ⇒ **O9b = 把 wgmma 推到主 kernel 的 5 个 GEMM**
+      （那里是 `wait`+L2 双墙，异步 mma 可让 tile i+1 的 mma 与 tile i 的 epilogue 重叠；
+      dK/dV 的转置 B 需按 FA3 `dKV_swapAB` 思路处理）。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
 
@@ -1077,6 +1113,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    把 occupancy 锁死在 2 CTA/SM；**只有更低 smem 的数据通路（TMA 直写 smem + wgmma 免
 >    `ldmatrix`/转置副本）才能同时拿低 L1/L2 与高 occupancy**。
 > 目标：fp16/bf16 main 先到 FA2 水平，再逼近 FA3/TE；每步用 `harness/fa_vs_te_bwd_only.py`（纯反向、三列）验收。
+>    **O9a 已完成（第三十九轮）**：先在 LSE（单 GEMM、无转置）上跑通 `wgmma.m64n64k16 + SW128`——
+>    冒烟逐位 PASS、LSE L1/TEX 37.6→18.1%、1.05×、数值逐位不变；但 LSE 是 softmax epilogue bound，
+>    收益有限。**O9b（下一步）= 把 wgmma 推到主 kernel 的 5 个 GEMM**（`wait`+L2 才是主墙）；
+>    转置 B（dK/dV）按 FA3 `dKV_swapAB` 处理。构建 wgmma 需 `-gencode=arch=compute_90a,code=sm_90a`
+>    （`ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a" scripts/run.sh ...`）。
 >
 > **旁支已完成（第三十六轮 O5c）**：把 fp16/bf16 的 **MLA（head_dim=512）反向从标量升级为张量核**
 > （`HD` 模板 128/512、GEMM3/4/5 N-tile 循环、dQ 全局累加），main 5.2–5.8×（fp16）/3.7–4.1×（bf16），

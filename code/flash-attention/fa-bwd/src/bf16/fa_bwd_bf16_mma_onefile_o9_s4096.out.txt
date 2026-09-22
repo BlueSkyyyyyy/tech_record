@@ -1,0 +1,25 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_bf16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[timing] total(3 kernels) 1.9503 ms  70.47 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3260 ms | main 1.5167 ms | convert 0.1075 ms
+[O8b A/B] lse O8 0.8427 ms | bal(单缓冲) 0.4532 ms (1.860x) | bal+cpasync(双缓冲) 0.3000 ms (2.809x)
+[O9 A/B] lse wgmma+SW128 0.2858 ms (vs bal+cpasync 1.050x, vs O8 2.948x)
+[O6 A/B] main nopipe 2.2301 ms (61.63 TF) | pipe(KV both) 1.5712 ms (87.47 TF) | pipe2(K only) 1.6097 ms (85.38 TF) => nopipe/pipe 1.419x, nopipe/pipe2 1.385x
+[O6c A/B] main sched0(原样) 1.6084 ms | sched1(交错) 1.5641 ms (1.028x) | sched2(逆序) 1.5814 ms (1.017x)
+[O5c A/B] main (64,32,2) 1.5643 ms (87.86 TF) | (64,64,2) 1.4916 (92.14) | (32,32,1) 2.5996 (52.87) | (32,32,2) 2.5836 (53.20) => best 1.049x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.6982 (80.93) | f4 1.8371 (74.81,-7.6%) | f2+PREL 1.5593 (88.14,+8.9%) | f4+PREL 1.5613 (88.03,+8.8%)
+  (BM=64,BN=64,PIPE=2): base 1.6881 (81.42) | f4 1.7590 (78.13,-4.0%) | f2+PREL 1.4902 (92.23,+13.3%) | f4+PREL 1.5186 (90.50,+11.2%)
+  (BM=32,BN=32,PIPE=1): base 2.6103 (52.65) | f4 2.6315 (52.23,-0.8%) | f2+PREL 2.5787 (53.30,+1.2%) | f4+PREL 2.6097 (52.67,+0.0%)
+  (BM=32,BN=32,PIPE=2): base 2.6222 (52.41) | f4 2.6470 (51.92,-0.9%) | f2+PREL 2.5886 (53.09,+1.3%) | f4+PREL 2.5958 (52.95,+1.0%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  fa_dq     vs ref: max_abs=1.441e-02  max_rel=1.630e+00
+  fa_dk     vs ref: max_abs=1.332e-02  max_rel=1.612e+00
+  fa_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  te_dq     vs ref: max_abs=1.524e-02  max_rel=3.641e+00
+  te_dk     vs ref: max_abs=1.763e-02  max_rel=2.718e+00
+  te_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00

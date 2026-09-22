@@ -1144,12 +1144,114 @@ GQA kv4 S=1024：FA3 0.0821ms/418TF，ours total 0.3767ms ⇒ 4.59×
 
 ---
 
+## 14e. O9a：LSE 预处理上 Hopper `wgmma`（冒烟 + 集成，fp16/bf16，单/两文件）
+
+### 14e.1 动机
+
+O8b 把 LSE 从 0.99ms 打到 0.30ms 后，它仍是端到端 ~15% 的一块，且 ncu 报
+`Compute (SM) 60%` 而张量核利用率很低——因为 LSE 的 QKᵀ 走的是 **SM80 兼容的
+`mma.m16n8k16 + ldmatrix`**：每个 k-step 都要 `ldmatrix`（ncu L1/TEX 32–38%），
+且 mma 是同步指令、发射后要等结果，`Executed Ipc` 只有 2.36。
+
+O9 的目标是把反向整体推到 Hopper 原生 `wgmma + TMA`。作为**风险最小的第一步**
+（O9a），本节点先把 **LSE 的单个 QKᵀ GEMM** 换成 `wgmma.m64n64k16` SS：
+它只有 1 个 GEMM、没有转置操作数、epilogue 只是 online-softmax，最适合先验证
+「SW128 布局 + 描述符 + 累加器映射」这套机器。
+
+### 14e.2 冒烟：`fa_bwd_fp16_wgmma_smoke.cu`
+
+上集成前先证明两个映射（否则在完整 kernel 里 debug 布局极贵）：
+
+* **SW128（128B swizzle）K-major smem 布局**：`[row/8][k/64][8 行][64 元素]` atom 1024B，
+  atom 内 16B chunk `c' = c ^ r`；描述符 `SBO=(K/64)*1024`、`LBO=1`、k16 步进
+  `floor(s/4)*1024 + (s%4)*32`。
+* **`wgmma.mma_async.m64n64k16.f32.f16.f16` 的累加器布局**：warp w 持行 `[16w,16w+16)`，
+  warp 内 `d[j*4+q]` ↔ `row=16*wid+g+(q>=2?8:0)`、`col=j*8+2*(lane%4)+(q&1)`——
+  **与 `mma.m16n8` 的 `acc[i][j][q]` 逐字同构**，所以现有 epilogue 可以直接复用。
+
+实测：`wgmma.m64n64k16 SW128 vs CPU: max_abs=0.000e+00`（`PASS`）。
+注：CUDA 13 的 nvcc 必须用 `-gencode=arch=compute_90a,code=sm_90a`（`-arch=sm_90` 会静默
+退化成 `sm_90`、ptxas 拒绝 wgmma）；本轮把 `scripts/run.sh`/`ncu.sh` 改成「`ARCH` 为空串时
+只用 `NVCC_FLAGS` 里的 gencode」，并在 kernel 里用 `__CUDA_ARCH_FEAT_SM90_ALL` 把 wgmma asm
+包起来，使默认 `sm_90` 构建仍可用（wgmma 路径退化为空实现，只有显式开启且用 sm_90a 才走）。
+原始输出 `src/fp16/fa_bwd_fp16_wgmma_smoke.out.txt`。
+
+### 14e.3 集成：`lse_mma_kernel_bal_wgmma<HD, PIPE>`（仅 HD=128、causal）
+
+在 O8b 的镜像配对 + `cp.async` 双缓冲骨架上：
+
+* Q/K 改成 **SW128 tile**：`cp.async` 的目标地址由 `sw128_off(row, c8*8, HD)` 给出
+  （16B chunk 置换是双射，所以 16B 的 `cp.async` 可以直接落进 swizzled 布局）；行越界写 0。
+* 单个 64×64×128 的 QKᵀ 用 **8 条 `wgmma.m64n64k16`** 完成（取代「4 warp × m16n64 ×
+  8 k-step」的 mma + 每步 ldmatrix）。累加器按 §16.2 的映射直接喂给原有 online-softmax。
+* smem 从 52.22KB 降到 **50.18KB**（Q+2×K 的 SW128 tile = 3×16KB + 1KB 对齐余量）。
+* 单/两文件 device 代码逐字一致；默认走原 mma 版，`--lsewgm=1` 切 wgmma 版（需 sm_90a 构建）。
+
+### 14e.4 性能（同 session A/B，CUDA event，LSE-only，ms）
+
+| shape | O8（mma 单缓冲） | O8b bal+cpasync | **O9a wgmma+SW128** | vs O8b | vs O8 |
+|---|---|---|---|---|---|
+| fp16 S=512 MHA | 0.0641 | 0.0338 | **0.0330** | 1.024× | 1.942× |
+| fp16 S=4096 MHA | 0.8597 | 0.3004 | **0.2871** | 1.046× | 3.022× |
+| fp16 S=1024 GQA kv4 | 0.1515 | 0.0666 | **0.0642** | 1.037× | 2.360× |
+| bf16 S=4096 MHA | 0.8749 | 0.3006 | **0.2856** | 1.054× | 3.073× |
+
+端到端（fp16 S=4096）：preprocess 0.3251ms、main 1.5205ms、convert 0.1254ms、
+**total 1.953ms（70.1 TF）**——`preprocess` 比 O11 的 0.344ms 再低 ~5%，total 与 O10/O11
+基本持平（LSE 只占 ~15%，且 1.05× 的增益不足以改变总时间）。
+
+### 14e.5 ncu（LSE，S=4096，同 session 对照）
+
+| 指标 | O8b `lse_mma_kernel_bal` | **O9a wgmma** |
+|---|---|---|
+| Duration | 303.62 µs | **286.18 µs** |
+| Compute (SM) | 57.04% | 60.66% |
+| **L1/TEX** | **37.62%** | **18.05%**（ldmatrix 消失） |
+| L2 | 31.62% | 20.25% |
+| Executed Ipc Active | 2.36 | **2.52** |
+| regs / smem | 62 / 52.22KB | 62 / 50.18KB |
+| occupancy / Waves | 23.21% / 0.97 | 23.02% / 0.97 |
+
+**结论**：wgmma 把 LSE 的 **L1/TEX 打掉一半**（37.6%→18.1%，`ldmatrix` 被 SS 直读取代）、
+L2 也降（20.3%），`Executed Ipc` 升到 2.52；但 Duration 只快 6%——因为 LSE 的墙本来就不是
+张量吞吐，而是 **softmax epilogue + 发射（Compute 60%、Waves 0.97、网格不足一个波）**。
+所以 wgmma 在「小 GEMM + 重 epilogue」的 LSE 上收益有限（这也解释了 O8b 之后它的占比一直降不下来）。
+原始输出 `src/fp16/fa_bwd_fp16_mma_main_o9_ncu_lse_{wgmma,mma}_s4096.out.txt`。
+
+### 14e.6 数值（与 O8b **逐位相同**）
+
+wgmma 的 k 归约顺序与 mma 的 k-step 顺序一致、都是 fp32 累加，所以 LSE 逐位相同，最终
+dq/dk/dv 与 O8b/O10/O11 完全一致：fp16 S=4096 1.883/1.734/1.966e-3、S=512
+1.671/1.771/1.899e-3、GQA kv4 2.134/3.305/3.850e-3、bf16 S=4096 1.510/1.340/1.631e-2。
+单/两文件逐指标一致。
+
+### 14e.7 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py`）
+
+FA3 MHA S=4096 fp16 0.3240ms/848TF、TE 0.4406/624；bf16 FA3 0.3194/861、TE 0.4359/631。
+ours total 1.95ms ⇒ 仍为 FA3 的 ~6.0×（与 O8b/O10 持平；LSE 不是差距的主因）。
+
+### 14e.8 原始输出
+
+* `src/fp16/fa_bwd_fp16_wgmma_smoke.out.txt`（冒烟 PASS）
+* `src/fp16/fa_bwd_fp16_mma_{main,onefile}_o9_{s512,s4096}.out.txt`、`..._o9_gqa_kv4.out.txt`
+* `src/bf16/fa_bwd_bf16_mma_{main,onefile}_o9_s4096.out.txt`
+* `src/fp16/fa_bwd_fp16_mma_main_o9_ncu_lse_{wgmma,mma}_s4096.out.txt`
+* `src/fp16/fa_bwd_fp16_o9_fa3_te_baseline.out.txt`、`src/bf16/fa_bwd_bf16_o9_fa3_te_baseline.out.txt`
+
+**下一步（O9b）**：把这套 `wgmma + SW128` 机器推到 **主 kernel 的 5 个 GEMM**——那里 ncu 是
+`wait`（mma 依赖）+ L2（dK/dV 原子）双墙，wgmma 的异步 mma 允许把 tile i+1 的 mma 和 tile i 的
+epilogue 重叠、并免掉 ldmatrix；转置操作数（dK/dV 的 `B`）需要按 FA3 的 `dKV_swapAB` 思路处理。
+
+---
+
 ## 15. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
-O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）、O11（§14d）** 完成。O7c 已把
-「减 red 事务数」这条杠杆**证伪**（float4 更慢），O10 又把 Q/dO 的标量载入与 dQ 写回向量化
-（`long_scoreboard` 压下、指令数 −2.5%），把墙进一步收敛到 **`wait`（mma 依赖）+ L2 + 2 CTA/SM**。
-后续按回报排序：**O9**（`wgmma`+TMA+warp specialization，对标 FA3；O6c/O7c/O10 已证明
-`BN=64` 能降 L1/TEX 但 smem/regs 锁死 occupancy，只有更低 smem 的数据通路才能同时拿到）→
-MLA 降 smem 冲 2 CTA/SM / split-KV。**O7c(bf16)、MLA 张量核(bf16)、O10(bf16) 见 `01b` §6k/§6l/§6m**。
+O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）、O11（§14d）、
+**O9a（§14e，LSE 上 wgmma）** 完成。O7c 已把「减 red 事务数」这条杠杆**证伪**（float4 更慢），
+O10 又把 Q/dO 的标量载入与 dQ 写回向量化（`long_scoreboard` 压下、指令数 −2.5%），把墙进一步
+收敛到 **`wait`（mma 依赖）+ L2 + 2 CTA/SM**。O9a 建立了 Hopper `wgmma + SW128` 数据通路并先在
+LSE 上验证（L1/TEX 37.6%→18.1%、Duration −6%、数值逐位相同），但 LSE 是 epilogue/发射 bound，
+收益有限 ⇒ **下一步 O9b**：把 wgmma 推到主 kernel 的 5 个 GEMM（那里才是 `wait`+L2 双墙）。
+另：MLA 降 smem 冲 2 CTA/SM / split-KV 仍在列。
+**O7c(bf16)、MLA 张量核(bf16)、O10(bf16)、O9a(bf16) 见 `01b` §6k/§6l/§6m/§6o**。

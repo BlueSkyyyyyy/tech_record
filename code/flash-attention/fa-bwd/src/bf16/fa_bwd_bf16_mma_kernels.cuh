@@ -112,6 +112,91 @@ __device__ __forceinline__ void mma_bf16(float c[4], const uint32_t a[4],
       : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
+// =============================================================================
+// O9：Hopper `wgmma`（SS）+ SW128 布局（bf16，与 fp16 版逐字同构）
+// =============================================================================
+// bf16 与 fp16 同为 2 字节、SW128 布局/描述符/累加器映射**逐字节同构**，只差指令 dtype
+// （`mma...f16.f16` → `mma...bf16.bf16`）。冒烟验证见 fp16 的 `fa_bwd_fp16_wgmma_smoke.cu`。
+__device__ __forceinline__ int sw128_off(int row, int k, int K) {
+  const int rg = row >> 3, rr = row & 7;
+  const int kg = k >> 6, kk = k & 63;
+  const int cc = (kk >> 3) ^ rr;
+  return (rg * (K >> 6) + kg) * 1024 + (rr * 8 + cc) * 16 + (kk & 7) * 2;
+}
+__device__ __forceinline__ void sw128_store16(char* tile, int row, int k0, int K,
+                                              uint4 v) {
+  *reinterpret_cast<uint4*>(tile + sw128_off(row, k0, K)) = v;
+}
+__device__ __forceinline__ uint32_t sw128_k16_addr(uint32_t base, int s) {
+  return base + (uint32_t)((s >> 2) * 1024 + (s & 3) * 32);
+}
+__device__ __forceinline__ uint64_t make_desc_sw128(uint32_t addr, uint32_t sbo_bytes) {
+  uint64_t d = 0;
+  d |= (uint64_t)((addr >> 4) & 0x3FFF);
+  d |= (uint64_t)((16u >> 4) & 0x3FFF) << 16;  // LBO = 1（B128 下硬件忽略）
+  d |= (uint64_t)((sbo_bytes >> 4) & 0x3FFF) << 32;
+  d |= (uint64_t)0 << 49;  // base_offset（tile 1024B 对齐时相位 0）
+  d |= (uint64_t)1 << 62;  // layout_type = B128
+  return d;
+}
+#if defined(__CUDA_ARCH__) && defined(__CUDA_ARCH_FEAT_SM90_ALL)
+#define FA_HAS_WGMMA 1
+#else
+#define FA_HAS_WGMMA 0
+#endif
+__device__ __forceinline__ void wgmma_fence() {
+#if FA_HAS_WGMMA
+  asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void wgmma_commit() {
+#if FA_HAS_WGMMA
+  asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void wgmma_wait0() {
+#if FA_HAS_WGMMA
+  asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void wgmma_m64n64k16_bf16(float (&d)[32], uint64_t da,
+                                                     uint64_t db) {
+#if FA_HAS_WGMMA
+  asm volatile(
+      "{\n.reg .pred p;\nsetp.ne.b32 p, %34, 0;\n"
+      "wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 "
+      "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31},\n"
+      "%32, %33, p, 1, 1, 0, 0;\n}\n"
+      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]),
+        "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]),
+        "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]),
+        "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]),
+        "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]),
+        "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
+      : "l"(da), "l"(db), "r"(1));
+#else
+  for (int i = 0; i < 32; ++i) d[i] = 0.f;
+  (void)da;
+  (void)db;
+#endif
+}
+__device__ __forceinline__ void wgmma_qkt64(const char* Qsw, const char* Ksw, int HD,
+                                            float (&d)[32]) {
+#pragma unroll
+  for (int i = 0; i < 32; ++i) d[i] = 0.f;
+  wgmma_fence();
+  const uint32_t qa = smem_u32(Qsw), ka = smem_u32(Ksw);
+  const uint32_t sbo = (uint32_t)((HD / 64) * 1024);
+#pragma unroll
+  for (int s = 0; s < HD / 16; ++s) {
+    uint64_t da = make_desc_sw128(sw128_k16_addr(qa, s), sbo);
+    uint64_t db = make_desc_sw128(sw128_k16_addr(ka, s), sbo);
+    wgmma_m64n64k16_bf16(d, da, db);
+  }
+  wgmma_commit();
+  wgmma_wait0();
+}
+
 // O4c 风格向量化归约：mma.m16n8 累加器里 q/q+1 两列相邻且同 row → 一次 float2 atomicAdd。
 __device__ __forceinline__ void red_add2(float* p, float a, float b) {
   atomicAdd(reinterpret_cast<float2*>(p), make_float2(a, b));
@@ -498,6 +583,134 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
       }
     }
     // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
+    __syncthreads();
+  }
+}
+
+// =============================================================================
+// O9：wgmma 版 LSE（causal 专用，仅 HD=128；镜像配对 + SW128 + wgmma.m64n64k16）
+// =============================================================================
+// 与 fp16 版 `fa_bwd_fp16_mma_kernels.cuh` **逐字同构**（仅 dtype 不同）。
+template <int HD, int PIPE>
+__global__ void __launch_bounds__(THREADS)
+lse_mma_kernel_bal_wgmma(const bf16* __restrict__ q, const bf16* __restrict__ k,
+                         float* __restrict__ lse, int S, int H, int Hkv, float scale) {
+  static_assert(HD == 128, "wgmma LSE 目前只做 HD=128");
+  constexpr int HDV = HD / 8;
+  constexpr int TILE = (LBM / 8) * (HD / 64) * 1024;  // 单个 SW128 tile 字节数（HD=128→16KB）
+  extern __shared__ char smem_raw[];
+  const uint32_t a0 = smem_u32(smem_raw);
+  const uint32_t pad = (1024u - (a0 & 1023u)) & 1023u;
+  char* Qs = smem_raw + pad;
+  char* Ks = Qs + TILE;  // PIPE=1：2*TILE；PIPE=0：TILE
+
+  const int nblk = (S + LBM - 1) / LBM;
+  const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  const int hkv = h / (H / Hkv);
+  const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  const int g = lane >> 2, c2 = (lane & 3) * 2;
+
+  auto issue_k = [&](char* Kd, int j0) {
+#pragma unroll
+    for (int u = tid; u < LBN * HDV; u += THREADS) {
+      const int row = u / HDV, c8 = u % HDV;
+      const int jg = j0 + row;
+      uint4 v = make_uint4(0, 0, 0, 0);
+      if (jg < S) {
+        const size_t off = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c8 * 8;
+        if constexpr (PIPE) {
+          cp_async16(Kd + sw128_off(row, c8 * 8, HD), k + off);
+          continue;
+        }
+        v = *reinterpret_cast<const uint4*>(k + off);
+      }
+      *reinterpret_cast<uint4*>(Kd + sw128_off(row, c8 * 8, HD)) = v;
+    }
+    if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
+  };
+  auto issue_q = [&](char* Qd, int m0) {
+#pragma unroll
+    for (int u = tid; u < LBM * HDV; u += THREADS) {
+      const int row = u / HDV, c8 = u % HDV;
+      const int qi = m0 + row;
+      uint4 v = make_uint4(0, 0, 0, 0);
+      if (qi < S) {
+        const size_t off = (((size_t)(b * S + qi)) * H + h) * HD + c8 * 8;
+        if constexpr (PIPE) {
+          cp_async16(Qd + sw128_off(row, c8 * 8, HD), q + off);
+          continue;
+        }
+        v = *reinterpret_cast<const uint4*>(q + off);
+      }
+      *reinterpret_cast<uint4*>(Qd + sw128_off(row, c8 * 8, HD)) = v;
+    }
+    if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
+  };
+
+#pragma unroll
+  for (int t = 0; t < 2; ++t) {
+    const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
+    if (t == 1 && pair == nblk - 1 - pair) continue;
+    const int m0 = mblk * LBM;
+    issue_q(Qs, m0);
+    const int ncols = min(S, m0 + LBM);
+    const int ntiles = (ncols + LBN - 1) / LBN;
+    if constexpr (PIPE) {
+      if (ntiles > 0) issue_k(Ks, 0);
+    }
+
+    float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
+    for (int nt = 0; nt < ntiles; ++nt) {
+      const int j0 = nt * LBN;
+      char* Kt = Ks + (PIPE ? (nt & 1) * TILE : 0);
+      if constexpr (PIPE) {
+        asm volatile("cp.async.wait_group 0;\n");
+        __syncthreads();
+        if (nt + 1 < ntiles) issue_k(Ks + ((nt + 1) & 1) * TILE, j0 + LBN);
+      } else {
+        issue_k(Ks, j0);
+        __syncthreads();
+      }
+
+      float d[32];
+      wgmma_qkt64(Qs, Kt, HD, d);
+
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          int s = q >= 2 ? 1 : 0;
+          int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+          int c = j * 8 + c2 + (q & 1);
+          int qi = m0 + r, jg = j0 + c;
+          float sv = -INFINITY;
+          if (qi < S && jg < S && jg <= qi) sv = d[j * 4 + q] * scale;
+          if (sv != -INFINITY) {
+            float mn = fmaxf(mrow[s], sv);
+            lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
+            mrow[s] = mn;
+          }
+        }
+    }
+#pragma unroll
+    for (int s = 0; s < 2; ++s) {
+      float m = mrow[s], l = lrow[s];
+#pragma unroll
+      for (int off = 1; off <= 2; off <<= 1) {
+        float m2 = __shfl_xor_sync(0xffffffffu, m, off);
+        float l2 = __shfl_xor_sync(0xffffffffu, l, off);
+        float mn = fmaxf(m, m2);
+        float ca = (m == -INFINITY) ? 0.f : l * fexp(m - mn);
+        float cb = (m2 == -INFINITY) ? 0.f : l2 * fexp(m2 - mn);
+        l = ca + cb;
+        m = mn;
+      }
+      if (c2 == 0) {
+        int r = wid * 16 + g + (s ? 8 : 0);
+        int qi = m0 + r;
+        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+      }
+    }
     __syncthreads();
   }
 }

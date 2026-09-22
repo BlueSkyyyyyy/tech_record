@@ -1,0 +1,12 @@
+[timing] total(3 kernels) 0.3767 ms  45.60 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0873 ms | main 0.2648 ms | convert 0.0246 ms
+[O9 A/B] lse wgmma+SW128 0.0642 ms (vs bal+cpasync 1.037x, vs O8 2.360x)
+  dq   vs ref: max_abs=2.134e-03  max_rel=5.101e-01
+  dk   vs ref: max_abs=3.305e-03  max_rel=1.044e+00
+  dv   vs ref: max_abs=3.850e-03  max_rel=3.711e-02
+  fa_dq     vs ref: max_abs=1.727e-03  max_rel=3.091e-01
+  fa_dk     vs ref: max_abs=3.321e-03  max_rel=8.086e-01
+  fa_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
+  te_dq     vs ref: max_abs=2.075e-03  max_rel=2.991e-01
+  te_dk     vs ref: max_abs=3.175e-03  max_rel=4.837e-01
+  te_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01

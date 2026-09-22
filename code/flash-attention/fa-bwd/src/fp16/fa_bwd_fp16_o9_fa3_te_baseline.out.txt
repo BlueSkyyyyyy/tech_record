@@ -1,0 +1,15 @@
+(1, 1024, 64, 128) kv=4        0.2662/  258 0.1593/  431 0.1936/  355    1.67x
+(1, 1024, 64, 128) kv=1        0.2658/  259 0.1565/  439 0.2147/  320    1.70x
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 256, 2, 512) kv=2             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 512, 4, 512) kv=4             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 1024, 2, 512) kv=2            nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 4096, 16, 128) kv=16       0.7312/  376 0.3240/  848 0.4406/  624    2.26x

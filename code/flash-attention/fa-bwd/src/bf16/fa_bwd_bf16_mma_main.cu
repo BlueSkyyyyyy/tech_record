@@ -140,6 +140,8 @@ int main(int argc, char** argv) {
   int r4_opt = -1;
   // O7c：LSE/D 预装寄存器（-1=自动/开，0=关，1=开）。
   int prel_opt = -1;
+  // O9：LSE 是否用 wgmma（仅 D==128 且 causal；0=用 O8b 的 mma 版，1=wgmma 版）。
+  int lse_wgm = 0;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -153,6 +155,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--bn=", 0) == 0) bn_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--r4=", 0) == 0) r4_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
+    else if (a.rfind("--lsewgm=", 0) == 0) lse_wgm = atoi(a.c_str() + 9);
+    else if (a == "--lsewgm") lse_wgm = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -233,6 +237,18 @@ int main(int argc, char** argv) {
   // O8b：PIPE=0 单缓冲（与 O8 同尺寸），PIPE=1 双缓冲。
   const int kLseSmemBal0 = (LBM + LBN) * LDl * (int)sizeof(bf16);
   const int kLseSmemBal1 = (LBM + 2 * LBN) * LDl * (int)sizeof(bf16);
+  // O9：wgmma LSE（仅 D=128）用 SW128 tile：TILE=(LBM/8)*(D/64)*1024 B，另加 1024B 对齐余量。
+  const int kLseTileWgm = (LBM / 8) * (D / 64) * 1024;
+  const int kLseSmemWgm0 = 1024 + kLseTileWgm * 2;  // Q + K（单缓冲）
+  const int kLseSmemWgm1 = 1024 + kLseTileWgm * 3;  // Q + 2×K
+  if (D == 128) {
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<128, 0>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    kLseSmemWgm0));
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<128, 1>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    kLseSmemWgm1));
+  }
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<128>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 0>,
@@ -339,7 +355,10 @@ int main(int argc, char** argv) {
                                                        (int)causal);
       delta_kernel<512><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
     } else {
-      if (causal)
+      if (causal && lse_wgm)
+        lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse,
+                                                                            S, H, Hkv, scale);
+      else if (causal)
         lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
                                                                       Hkv, scale);
       else
@@ -401,7 +420,10 @@ int main(int argc, char** argv) {
   if (D == 128 && causal) {
     auto time_lse = [&](int mode, float* out_ms) {
       auto launch = [&]() {
-        if (mode == 2)
+        if (mode == 3)
+          lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse,
+                                                                              S, H, Hkv, scale);
+        else if (mode == 2)
           lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S,
                                                                         H, Hkv, scale);
         else if (mode == 1)
@@ -425,6 +447,13 @@ int main(int argc, char** argv) {
     time_lse(2, &ms_balp);
     printf("[O8b A/B] lse O8 %.4f ms | bal(单缓冲) %.4f ms (%.3fx) | bal+cpasync(双缓冲) %.4f ms "
            "(%.3fx)\n", ms_o8, ms_bal, ms_o8 / ms_bal, ms_balp, ms_o8 / ms_balp);
+    // 仅当显式开启 wgmma 时才跑 O9 A/B（sm_90 构建下 wgmma 是空实现，时序无意义）。
+    if (lse_wgm) {
+      float ms_wgm = 0.f;
+      time_lse(3, &ms_wgm);
+      printf("[O9 A/B] lse wgmma+SW128 %.4f ms (vs bal+cpasync %.3fx, vs O8 %.3fx)\n", ms_wgm,
+             ms_balp / ms_wgm, ms_o8 / ms_wgm);
+    }
   }
 
   double main_flops = 4.0 * (double)B * S * H * S * D;
