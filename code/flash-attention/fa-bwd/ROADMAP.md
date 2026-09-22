@@ -617,6 +617,38 @@
     `..._o5b_stall_s4096.out.txt`、`fa_bwd_bf16_mma_o5b_fa3_te_baseline.out.txt`；
     文档 `docs/01b-bf16-bwd-impl.md` §6e、`docs/04` §2.2。
 
+- 2026-09-23（第二十八轮）：**O8 完成（fp16/bf16 preprocess 的 mma 分块 LSE，端到端 4.4–13.2×）**。
+  - 动机：O5/O5b 把 main 换成张量核后，端到端被**标量 preprocess（LSE+D）**拖住
+    （S=4096 preprocess 68.7ms ≈ main 的 15×、占 94%）。照搬 fp8 的 O1 解决。
+  - **改动**（单/两文件 device 代码逐字一致，脚本核对 `device O8 block identical: True`）：
+    删掉旧 `preprocess_kernel`，新增 **`lse_mma_kernel<HD>`**（`mma.m16n8k16` QKᵀ；
+    LBM=64 行 Q × LBN=64 列 K/CTA，4 warp 各 16 行；P 不物化，fp32 累加器直接 online-softmax，
+    行 max/sum 在同 row 的 4 个 lane 间 `shfl_xor` 归约；smem `(64+64)·(128+8)·2=34816B`）
+    + 独立 **`delta_kernel<HD>`**（D=`rowsum(dO∘O)`，O(S·H·D)）。QKᵀ 的 k-loop 分块顺序与
+    main GEMM1 相同 ⇒ LSE 与 main 的 P 自洽。
+  - **数值与 O5/O5b 逐位相同**（fp16 S512 1.671/1.771/1.899e-3、S4096 1.883/1.734/1.966e-3、
+    GQA kv4 2.134/3.305/3.850e-3；bf16 S512 9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3、
+    kv4 12.01/21.25/31.56e-3），证明只换算法数据流、未改数学口径；单/两文件一致。
+  - **性能**（CUDA-event，同 session）：fp16 **preprocess** S512 1.209→**0.071ms（17.0×）**、
+    S4096 68.70→**0.986ms（69.7×）**、GQA kv4 8.802→0.186（47.4×）；**端到端 total**
+    S512 1.440→**0.326ms（4.42×，6.59 TF）**、S4096 73.34→**5.581ms（13.1×，24.63 TF）**、
+    GQA kv4 9.459→0.871（10.9×，19.72 TF）。bf16 同构（preprocess S4096 68.79→0.993ms 69.3×，
+    total 73.43→5.573ms 13.2×，24.66 TF）。
+  - **对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py`）：FA3 S4096 0.3246ms/847TF、
+    TE 0.4441/619（fp16）；bf16 FA3 0.3217/854、TE 0.4415/623。ours total 现为 **FA3 的 2.9–4.7%
+    （TFLOPS；O5 时 ~0.4%）**，时间比 10.6–17.2×。S512 MHA 单测 FA3 0.0265ms/162TF（ours total 12.3×）。
+  - **ncu（lse, S=4096）**：fp16 DRAM 1.06% / L1TEX 23.42% / L2 5.23% / **Compute 39.53%** /
+    occ 28.49%（80 regs 卡理论 37.5%）/ Waves 1.29 / No Eligible 42.88%，
+    stall `long_scoreboard 2.17 + wait 1.34` ⇒ **bound = 全局访存延迟 + 低 occupancy/尾波**
+    （与 fp8 O1 一致）；bf16 逐项一致。`delta_kernel` 仅 42.8µs（L1TEX 73.5%/Compute 71.9%/occ 71.9%）。
+  - **结论**：端到端瓶颈从 preprocess 翻转为 **main**（S4096 main 4.47ms 占 ~80%）；
+    S512 时 convert（0.064ms）已与 preprocess 同量级。**下一步 O6（main cp.async/预取）**。
+  - 原始输出 `src/fp16/fa_bwd_fp16_mma_main_o8_*.out.txt`、`..._mma_onefile_o8_s512.out.txt`、
+    `..._o8_ncu_{lse,delta}_s4096.out.txt`、`..._o8_stall_lse_s4096.out.txt`、`..._o8_fa3_te_baseline.out.txt`、
+    `..._o8_s512_fa3_te.out.txt`；`src/bf16/fa_bwd_bf16_mma_main_o8_*.out.txt`、
+    `..._onefile_o8_s512.out.txt`、`..._o8_ncu_lse_s4096.out.txt`、`..._o8_fa3_te_baseline.out.txt`；
+    文档 `docs/01-fp16-bwd-impl.md` §11、`docs/01b-bf16-bwd-impl.md` §6f、`docs/04` §2.1/§2.2/§3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -628,7 +660,7 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 | 5 个 GEMM | **Tensor Core**：`mma.m16n8k16` / `wgmma` + `ldmatrix` | **标量 CUDA core**：`__half2float(q)*__half2float(k)` + fp32 FMA | 峰值差 ~15×（67 vs 989 TFLOPS），实际差 ~65× |
 | 数据搬运 | `cp.async`/TMA + 多级软流水/双缓冲 | 同步 `__syncthreads` 后读，无预取 | 延迟受限（ncu: L1/TEX 53.5%、Compute 8.4%、occ 6.25%） |
 | dK/dV 归约 | 专用累加 + convert（deterministic 可选） | 每元素 `atomicAdd` | 竞争 + 非确定性 |
-| preprocess LSE/D | 分块、向量化 | 标量逐行（fp16/bf16 未修；fp8 已用 mma 修，14–62×） | S=4096 时 preprocess 曾 > main |
+| preprocess LSE/D | 分块、向量化 | fp8 已 mma（O1，14–62×）；fp16/bf16 已 mma（O8，17–70×） | S=4096 时 preprocess 曾 > main |
 | grid/occupancy | 大 grid、wave 饱满 | grid 小、waves 0.48、1 CTA/SM | SM 空转 |
 
 **根本原因**：fp16/bf16 版是**正确性优先的标量 golden**（用来先把数学/对拍跑通），
@@ -646,7 +678,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       S=4096 9.4×（22.6/60.9 TF）。**O5 fp16/bf16 全部收口。**
 - [ ] **O6** `cp.async` 双缓冲 + 降 smem 提 occupancy（对齐 fp8 的 O2/O3）。**（O5 后 main 的墙）**
 - [ ] **O7** dQ/dK/dV 去 `atomicAdd`，改分块 `*_accum` + convert（确定性 + 消竞争）。
-- [ ] **O8** preprocess 的 LSE/D 改 mma 分块（对齐 fp8 的 O1）。**（O5 后端到端最大杠杆）**
+- [x] **O8** preprocess 的 LSE/D 改 mma 分块（对齐 fp8 的 O1）。**已完成（第二十八轮，fp16/bf16）**：
+      `lse_mma_kernel<128>`（`mma.m16n8k16` QKᵀ + online-softmax + 4-lane `shfl`）+ 独立
+      `delta_kernel<128>`；preprocess 17–70×、端到端 **4.4–13.2×**（S4096 total 73.3→5.58ms，
+      24.6 TF；瓶颈回落 main），数值与 O5/O5b 逐位相同。详见 `docs/01` §11、`docs/01b` §6f。
 - [ ] **O9**（对标 FA3）TMA + `wgmma` + warp specialization 多级流水。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
@@ -666,9 +701,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    进度：fp16 主 kernel **2.28→0.19 ms（512）/ 67.6→4.55 ms（4096），11.8–14.9×**；
 >    **bf16 主 kernel 1.88→0.190 ms（512）/ 42.2→4.51 ms（4096），9.4–9.9×**（第二十七轮，单/两文件、
 >    对拍/ncu/FA3-TE 对标齐备）。**O5 已完成**，转入 O8。
-> 2. **O8 preprocess mma**：fp16/bf16 的 LSE/D 改 mma 分块（照搬 fp8 的 O1）。**当前 S=4096 preprocess 68.7 ms
->    已成为端到端第一瓶颈**（bf16 main 才 4.5 ms，preprocess 占 94%），立即做它。
-> 3. **O6**：`cp.async` 双缓冲 + 降 smem 提 occupancy（对齐 fp8 的 O2/O3/O4）。
+> 2. **O8 preprocess mma**：fp16/bf16 的 LSE/D 改 mma 分块（照搬 fp8 的 O1）。**已完成（第二十八轮）**：
+>    `lse_mma_kernel` + `delta_kernel`，preprocess S4096 68.7→0.99ms（69.7×）、端到端 total
+>    73.3→**5.58ms（13.1×，24.6 TF）**；数值与 O5/O5b 逐位相同、单/两文件一致；瓶颈已回落 **main**。
+> 3. **O6**：`cp.async` 双缓冲 + 降 smem 提 occupancy（对齐 fp8 的 O2/O3/O4）。**← 当前第一瓶颈**
+>    （fp16/bf16 main S=4096 4.47ms，占端到端 ~80%；ncu `long_scoreboard` 63%）。
 > 4. **O7**：dQ/dK/dV 去 `atomicAdd`（分块 accum + convert；fp8 已做，移植）。
 > 5. **O9**：`wgmma`+TMA+warp specialization，对标 FA3。
 > 目标：fp16/bf16 main 先到 FA2 水平，再逼近 FA3/TE；每步用 `harness/fa_vs_te_bwd_only.py`（纯反向、三列）验收。

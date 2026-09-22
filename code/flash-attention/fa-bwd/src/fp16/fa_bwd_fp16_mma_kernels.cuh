@@ -125,56 +125,117 @@ __device__ __forceinline__ void mma_block_f16(const __half* As, int asld,
 }
 
 // =============================================================================
-// 1) preprocess：逐行算 LSE 与 delta=rowsum(dO∘O)（与标量版逐字相同；O8 待优化）
+// 1) preprocess（O8：mma 分块 LSE + 独立 delta）——替代旧标量 preprocess_kernel
 // =============================================================================
-__global__ void preprocess_kernel(const __half* __restrict__ q,
-                                  const __half* __restrict__ k,
-                                  const __half* __restrict__ o,
-                                  const __half* __restrict__ do_,
-                                  float* __restrict__ delta, float* __restrict__ lse, int S,
-                                  int H, int Hkv, float scale, int causal, int HD) {
-  const int s = blockIdx.x;
-  const int h = blockIdx.y;
-  const int b = blockIdx.z;
-  const int tid = threadIdx.x;
-  const int hkv = h / (H / Hkv);
-  const size_t row = ((size_t)(b * S + s)) * H + h;
-  const __half* qr = q + row * HD;
+// 旧版每 (s,h) 行一个 block、128 线程标量扫 K，每对 (i,j) 做 128 次 FFMA；S=4096 时
+// ~68ms，是端到端第一瓶颈（O5 main 才 4.5ms）。O8 照搬 fp8 的 O1：
+//   * LSE 用 `lse_mma_kernel`：与主 kernel 同源的 QKᵀ 张量核（mma.m16n8k16），每 CTA 吃
+//     LBM=64 行 Q × LBN=64 列 K，4 warp 各 16 行；P 不物化，accumulator 直接做
+//     online-softmax，行 max/sum 在同 row 的 4 个 lane 间 `shfl_xor` 归约。
+//   * delta=rowsum(dO∘O) 拆成独立 `delta_kernel`（纯 O(S·H·D) 归约，与 LSE 解耦）。
+// 数学与旧版一致（fp16 乘积在 fp32 里累加），且 QKᵀ 的 k-loop 分块顺序与 main GEMM1
+// 完全相同 ⇒ LSE 与 main 的 P 自洽，数值只会更稳。
+static constexpr int LBM = 64;   // LSE CTA 的 Q 行数
+static constexpr int LBN = 64;   // LSE 一次吃的 K 列数
 
-  float m = -INFINITY;
-  float l = 0.f;
-  const int jmax = causal ? (s + 1) : S;
-  for (int j = tid; j < jmax; j += blockDim.x) {
-    const __half* kr = k + (((size_t)(b * S + j)) * Hkv + hkv) * HD;
-    float dot = 0.f;
-#pragma unroll 8
-    for (int d = 0; d < HD; ++d) dot += __half2float(qr[d]) * __half2float(kr[d]);
-    dot *= scale;
-    float mn = fmaxf(m, dot);
-    l = l * expf(m - mn) + expf(dot - mn);
-    m = mn;
+template <int HD>
+__global__ void __launch_bounds__(THREADS)
+lse_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
+               float* __restrict__ lse, int S, int H, int Hkv, float scale, int causal) {
+  constexpr int LD = HD + 8;
+  extern __shared__ __align__(16) char smem[];
+  __half* Qs = reinterpret_cast<__half*>(smem);
+  __half* Ks = Qs + LBM * LD;
+
+  const int mblk = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  const int hkv = h / (H / Hkv);
+  const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  const int g = lane >> 2, c2 = (lane & 3) * 2;
+  const int m0 = mblk * LBM;
+
+  for (int i = tid; i < LBM * HD; i += THREADS) {
+    int r = i / HD, d = i % HD;
+    int qi = m0 + r;
+    Qs[r * LD + d] =
+        (qi < S) ? q[(((size_t)(b * S + qi)) * H + h) * HD + d] : __float2half(0.f);
   }
-  __shared__ float sh_m[THREADS];
-  __shared__ float sh_l[THREADS];
-  sh_m[tid] = m;
-  sh_l[tid] = l;
   __syncthreads();
-  for (int off = THREADS / 2; off > 0; off >>= 1) {
-    if (tid < off) {
-      float m1 = sh_m[tid], l1 = sh_l[tid];
-      float m2 = sh_m[tid + off], l2 = sh_l[tid + off];
-      float mn = fmaxf(m1, m2);
-      float c1 = (m1 == -INFINITY) ? 0.f : l1 * expf(m1 - mn);
-      float c2 = (m2 == -INFINITY) ? 0.f : l2 * expf(m2 - mn);
-      sh_m[tid] = mn;
-      sh_l[tid] = c1 + c2;
+
+  const int ncols = causal ? min(S, m0 + LBM) : S;
+  const int ntiles = (ncols + LBN - 1) / LBN;
+  float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
+
+  for (int nt = 0; nt < ntiles; ++nt) {
+    const int j0 = nt * LBN;
+    for (int i = tid; i < LBN * HD; i += THREADS) {
+      int r = i / HD, d = i % HD;
+      int jg = j0 + r;
+      Ks[r * LD + d] =
+          (jg < S) ? k[(((size_t)(b * S + jg)) * Hkv + hkv) * HD + d] : __float2half(0.f);
     }
+    __syncthreads();
+
+    // S_tile = Q·Kᵀ（f16×f16→fp32），每 warp 16×64
+    float acc[1][8][4];
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+      for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
+    mma_block_f16<16, LBN, HD, false>(Qs, LD, Ks, LD, acc, wid, 0, lane);
+
+    // online-softmax：每个线程持有 2 个 row-slot（q<2 / q>=2），沿 N 就地更新
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        int s = q >= 2 ? 1 : 0;
+        int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+        int c = j * 8 + c2 + (q & 1);
+        int qi = m0 + r, jg = j0 + c;
+        float sv = -INFINITY;
+        if (qi < S && jg < S && !(causal && jg > qi)) sv = acc[0][j][q] * scale;
+        if (sv != -INFINITY) {
+          float mn = fmaxf(mrow[s], sv);
+          lrow[s] = lrow[s] * expf(mrow[s] - mn) + expf(sv - mn);
+          mrow[s] = mn;
+        }
+      }
     __syncthreads();
   }
 
-  float dp = 0.f;
+  // 同一 row 由 4 个 lane（同 g、lane&3=0..3）持有，warp 内 shfl 归约
+#pragma unroll
+  for (int s = 0; s < 2; ++s) {
+    float m = mrow[s], l = lrow[s];
+#pragma unroll
+    for (int off = 1; off <= 2; off <<= 1) {
+      float m2 = __shfl_xor_sync(0xffffffffu, m, off);
+      float l2 = __shfl_xor_sync(0xffffffffu, l, off);
+      float mn = fmaxf(m, m2);
+      float ca = (m == -INFINITY) ? 0.f : l * expf(m - mn);
+      float cb = (m2 == -INFINITY) ? 0.f : l2 * expf(m2 - mn);
+      l = ca + cb;
+      m = mn;
+    }
+    if (c2 == 0) {
+      int r = wid * 16 + g + (s ? 8 : 0);
+      int qi = m0 + r;
+      if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + logf(l);
+    }
+  }
+}
+
+// delta_kernel：D = rowsum(dO ∘ O)（纯 O(S·H·D) 逐行归约，与 LSE 解耦）
+template <int HD>
+__global__ void delta_kernel(const __half* __restrict__ o,
+                             const __half* __restrict__ do_, float* __restrict__ delta,
+                             int S, int H) {
+  const int s = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  const int tid = threadIdx.x;
+  const size_t row = ((size_t)(b * S + s)) * H + h;
   const __half* orow = o + row * HD;
   const __half* dorow = do_ + row * HD;
+  float dp = 0.f;
   for (int d = tid; d < HD; d += blockDim.x)
     dp += __half2float(orow[d]) * __half2float(dorow[d]);
   __shared__ float sh_delta[THREADS];
@@ -184,11 +245,7 @@ __global__ void preprocess_kernel(const __half* __restrict__ q,
     if (tid < off) sh_delta[tid] += sh_delta[tid + off];
     __syncthreads();
   }
-
-  if (tid == 0) {
-    delta[row] = sh_delta[0];
-    lse[row] = sh_m[0] + logf(sh_l[0]);
-  }
+  if (tid == 0) delta[row] = sh_delta[0];
 }
 
 // =============================================================================

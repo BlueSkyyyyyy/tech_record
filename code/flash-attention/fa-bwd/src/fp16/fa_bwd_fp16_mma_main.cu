@@ -201,6 +201,10 @@ int main(int argc, char** argv) {
 
   dim3 pg(S, H, B);
   dim3 mg((S + 63) / 64, H, B);
+  dim3 lg((S + LBM - 1) / LBM, H, B);
+  constexpr int kLseSmem = (LBM + LBN) * (128 + 8) * (int)sizeof(__half);
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<128>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
   const int cvt_threads = 256;
   const int cvt_blocks =
       (int)std::min<size_t>((std::max(n, nkv) + cvt_threads - 1) / cvt_threads, 65535);
@@ -210,8 +214,9 @@ int main(int argc, char** argv) {
                                 d_dv_acc, S, H, Hkv, scale, (int)causal);
   };
   auto run_pre = [&]() {
-    preprocess_kernel<<<pg, THREADS>>>(d_q, d_k, d_o, d_do, d_delta, d_lse, S, H, Hkv, scale,
-                                       (int)causal, D);
+    lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
+                                                   (int)causal);
+    delta_kernel<128><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
   };
 
   cudaEvent_t ev0, ev1;

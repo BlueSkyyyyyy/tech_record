@@ -1,0 +1,30 @@
+==PROF== Connected to process 507995 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "lse_mma_kernel": 0%....50%....100% - 3 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[timing] total(3 kernels) 5.6598 ms  24.28 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 1.0286 ms | main 4.5418 ms | convert 0.0893 ms
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.355e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+==PROF== Disconnected from process 507995
+[507995] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void lse_mma_kernel<128>(const __half *, const __half *, float *, int, int, int, float, int) (64, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.21
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         2.17
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio            inst         0.01
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.76
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.34
+    ------------------------------------------------------------------------- ----------- ------------
+
