@@ -1,0 +1,31 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+V4-Pro routed expert FFN FP4 decode: w1/w3 [3072,7168] + w2 [7168,3072], B=64 top-6 E=384 pairs=384  PIPE=1 LUTMODE=4
+routing balanced active=384/384  max_m=1
+== sweep K1 ==
+  K1 RWW2 DEPTH2 PIPE0  4.5367 ms  1980.4 GB/s (59.1%)
+  K1 RWW4 DEPTH2 PIPE0  4.0575 ms  2214.2 GB/s (66.0%)
+  K1 RWW8 DEPTH2 PIPE0  7.8975 ms  1137.6 GB/s (33.9%)
+  K1 RWW4 DEPTH3 PIPE0  4.4525 ms  2017.8 GB/s (60.2%)
+  K1 RWW2 DEPTH3 PIPE0  4.5158 ms  1989.5 GB/s (59.3%)
+  K1 RWW4 DEPTH4 PIPE0  4.0664 ms  2209.4 GB/s (65.9%)
+  K1 RWW4 DEPTH2 PIPE1  3.9267 ms  2288.0 GB/s (68.3%)
+  K1 RWW8 DEPTH2 PIPE1  12.7004 ms  707.4 GB/s (21.1%)
+  K1 RWW4 DEPTH3 PIPE1  3.9485 ms  2275.4 GB/s (67.9%)
+  K1 RWW8 DEPTH3 PIPE1  17.6526 ms  508.9 GB/s (15.2%)
+== sweep K2 ==
+  K2 RWW2 DEPTH2 PIPE0  2.9912 ms  1501.8 GB/s (44.8%)
+  K2 RWW4 DEPTH2 PIPE0  2.4065 ms  1866.7 GB/s (55.7%)
+  K2 RWW8 DEPTH2 PIPE0  2.4623 ms  1824.3 GB/s (54.4%)
+  K2 RWW4 DEPTH3 PIPE0  2.5713 ms  1747.0 GB/s (52.1%)
+  K2 RWW2 DEPTH3 PIPE0  2.9751 ms  1509.9 GB/s (45.0%)
+  K2 RWW4 DEPTH4 PIPE0  2.5713 ms  1747.0 GB/s (52.1%)
+  K2 RWW4 DEPTH2 PIPE1  2.2972 ms  1955.5 GB/s (58.3%)
+  K2 RWW8 DEPTH2 PIPE1  2.2695 ms  1979.4 GB/s (59.0%)
+  K2 RWW4 DEPTH3 PIPE1  2.4227 ms  1854.2 GB/s (55.3%)
+  K2 RWW8 DEPTH3 PIPE1  2.4903 ms  1803.8 GB/s (53.8%)

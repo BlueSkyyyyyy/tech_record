@@ -1,0 +1,25 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+V4-Pro routed expert FFN FP4 decode: w1/w3 [3072,7168] + w2 [7168,3072], B=128 top-6 E=384 pairs=768  PIPE=0 LUTMODE=4
+routing balanced active=384/384  max_m=2
+[check K1 GU  ] max_rel=1.430e-07 OK
+[check swiglu ] max_err=4.635e-01 (in units of group scale; <0.51 = OK) OK
+[check K2 O   ] max_rel=1.377e-07 (ref~2.53) OK
+[check unperm ] max_rel=7.749e-07 OK
+[check e2e Y ] max_rel=1.321e-07 (ref~2.49) OK
+
+[roof] read all w1+w3 packed (8.46 GB): 2.6350 ms  3209.0 GB/s (95.7% HBM)
+
+== per-stage (B=128, PIPE=0 LUT=4) ==
+  quant_x       0.0035 ms
+  K1 gemv       4.0973 ms  weights 8.98 GB  2192.7 GB/s (65.4% HBM)
+  swiglu+quant  0.0079 ms
+  K2 gemv       2.6733 ms  weights 4.49 GB  1680.4 GB/s (50.1% HBM)
+  unpermute     0.0153 ms
+  ---- sum      6.7973 ms  (weights 13.48 GB, roofline 4.0200 ms, 59.1% of roof)
+  end-to-end    6.8272 ms  (kernel sum 6.7973)
