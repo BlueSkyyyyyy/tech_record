@@ -1,8 +1,12 @@
-# fp16 反向单文件实现分析（P1-1 ~ P1-3）
+# fp16 反向实现分析（P1-1 ~ P1-5）
 
-> 代码：`src/fp16/fa_bwd_fp16_onefile.cu`（单文件自包含：preprocess + main kernel + launcher + 自测 main）
-> 实测原始输出：`src/fp16/fa_bwd_fp16_onefile.out.txt`（S=512）、`..._s4096.out.txt`（S=4096）、
-> `..._ncu_main.out.txt`（ncu `--set full`）、`..._refbench.out.txt`（FA/TE 基线）。
+> 代码：
+> - **单文件**：`src/fp16/fa_bwd_fp16_onefile.cu`（自包含：preprocess + main kernel + launcher + 自测 main）
+> - **两文件**（P1-4）：`src/fp16/fa_bwd_fp16_kernels.cuh`（device：三个 kernel）+ `src/fp16/fa_bwd_fp16_main.cu`（host：npy/launcher/自测）
+>
+> 实测原始输出：单文件 `fa_bwd_fp16_onefile.out.txt`（S=512）、`..._s4096.out.txt`（S=4096）、
+> `..._ncu_main.out.txt`（ncu `--set full`）、`..._refbench.out.txt`（FA/TE 基线）；
+> 两文件 `fa_bwd_fp16_main_s512.out.txt`、`..._s4096.out.txt`、`..._ncu_main.out.txt`。
 > 对照：`docs/00-fa-bwd-optimization-catalog.md`、`../ROADMAP.md`。
 
 ---
@@ -149,7 +153,33 @@ docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python "$PWD/harness/fa_bwd_ben
     --dtype fp16 --shape 1 4096 16 128 causal
 ```
 
-## 7. 下一步
+## 7. 两文件版（P1-4）
 
-见 `../ROADMAP.md`：P1-4 两文件拆分、P1-5 文档（本文）、随后 P2 bf16、P3 fp8（重点）。
+把单文件拆分为 **device 头 + host 源**，保持 kernel 代码**逐字未改**，行为与单文件**逐位一致**：
+
+| 文件 | 内容 |
+|---|---|
+| `fa_bwd_fp16_kernels.cuh` | 编译期常量（`BM/BN/THREADS/SMEM_BYTES`）、`preprocess_kernel`、`fa_bwd_fp16_kernel`、`convert_kernel` |
+| `fa_bwd_fp16_main.cu` | `#include "fa_bwd_fp16_kernels.cuh"` + `CUDA_CHECK`、npy 读取、`diff_stat`、`main`（launcher/计时/对拍） |
+
+**一致性验证**（同一 case，逐项对比单文件 vs 两文件）：
+
+| 指标 | 单文件 | 两文件 |
+|---|---|---|
+| S=512 dq/dk/dv max_abs | 1.671e-3 / 1.680e-3 / 1.899e-3 | 1.671e-3 / 1.680e-3 / 1.899e-3 |
+| S=4096 dq/dk/dv max_abs | 1.499e-3 / 1.572e-3 / 2.225e-3 | 1.499e-3 / 1.572e-3 / 2.225e-3 |
+| S=512 total / TFLOPS | 3.5925 ms / 0.60 | 3.5994 ms / 0.60 |
+| ncu DRAM / L1TEX / Compute | 0.21% / 53.52% / 8.45% | 0.21% / 53.52% / 8.45% |
+| ncu Achieved Occupancy | 6.25% | 6.25% |
+
+> 计时/对拍数字完全一致（±跑机噪声），ncu 逐指标一致；两文件仅改变了代码组织，
+> 未触碰 kernel 逻辑。后续 bf16/fp8 的 dtype 参数化会以 `_kernels.cuh` 为模板。
+
+复现：`scripts/run.sh src/fp16/fa_bwd_fp16_main.cu`（编译的是 host 源，`.cuh` 随 `#include` 编入）。
+
+---
+
+## 8. 下一步
+
+见 `../ROADMAP.md`：P1-4 已完成（本节），随后 P2 bf16（复用 fp16 骨架做 dtype 参数化）、P3 fp8（重点）。
 性能优化（消 bank conflict / 提 occupancy / 张量核）列入 backlog。
