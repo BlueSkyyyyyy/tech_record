@@ -761,7 +761,37 @@
    - 原始输出 `src/bf16/fa_bwd_bf16_mma_main_o8b_{s512,s4096,gqa_kv4}.out.txt`、
      `..._mma_onefile_o8b_{s512,s4096}.out.txt`、`..._o8b_ncu_lse_bal_s4096.out.txt`、
      `..._o8b_stall_lse_bal_s4096.out.txt`、`src/bf16/fa_bwd_bf16_o8b_fa3_te_baseline.out.txt`；
-     文档 `docs/01b` §6i、`docs/04` §2.2/§3。
+      文档 `docs/01b` §6i、`docs/04` §2.2/§3。
+
+- 2026-09-23（第三十三轮）：**O6c 完成（fp16 主 kernel tile 几何参数化 + 小网格并行度自适应，main 最多 1.13×）**。
+  - **先证伪一个假设**：O6b ncu 报 Waves 2.59、尾波最多 33%、SM active cycles 偏差 22.8%/26.5%，
+    于是做了「不改数学、只重排 `blockIdx.x→mblk` 双射」的负载均衡（`sched=1` 交错 / `sched=2` 逆序）。
+    **实测只有 0–2%、且不同 session 正负号不稳** ⇒ GPU block 调度本就是动态的，静态重排无收益
+    （`sched` 开关保留、默认 0，不作为优化）。
+  - **真杠杆 = 小网格的并行度**：S=512/H16 时 `grid=128 < 132 SM`，每 SM 只有 1 个 CTA（4 warp）。
+    把 `BM` 从 64→32 让 grid 翻倍到 256（每 SM 2 CTA）、并行度翻倍；代价是 dK/dV 跨 CTA 原子量随
+    `BM` 反比翻倍，故只在 `S≤1024` 用。
+  - **改动（单/两文件 device 逐字一致，`diff` 核对 `device region identical: True`）**：
+    ① `fa_bwd_fp16_mma_kernel<HD,BM,BN,PIPE>` 的 2×2 warp 几何全部由 `(BM,BN)` 派生
+    （`GM1/GN1=BM/2,BN/2`；`GMV/GNV=BN/2,HD/2`；`GMQ/GNQ=BM/2,HD/2`；`MT*=WARP_M/16,WARP_N/8`），
+    所有 `16/32/64` 字面量与 `acc/pval/dqacc` 维度改为按 `MT*` 定义；`BM=64,BN=32` 展开与 O6b 同构。
+    ② host `launch_cfg` 自动档 + CLI `--bm/--bn/--pipe` 覆盖：`grid<132 且 S≤1024`→`(32,32,1)`；
+    否则 `BM=64`（`grid≥396`→`PIPE=2`，否则 `PIPE=1`）；`S≥4096`→`BN=64`。
+  - **配置 A/B（同 session，event，main-only，ms）**：S=512 (64,32,2) 0.0858 → (64,64,2) 0.0814 →
+    **(32,32,1) 0.0776（1.106×）**；S=1024 kv4/kv8 仍 (64,32,2) 最优；S=4096 (64,64,2) 1.8220 vs
+    (64,32,2) 1.8535（**1.017×**）。(32,32,*) 在大 S 明显更差（原子量翻倍）。
+  - **端到端**：S=512 0.1598→**0.1504ms（1.06×，14.3 TF）**；S=4096 2.347→2.349ms（持平，main +1.7%）。
+    **数值与 O5/O8/O6/O6b/O8b 逐位相同**（S512 1.671/1.771/1.899e-3；S4096 1.883/1.734/1.966e-3；
+    kv4 2.134/3.305/3.850e-3；kv8 2.008/2.931/3.891e-3）。
+  - **ncu**：S=512 原 (64,32,1) Duration **99.3µs**/occ **6.24%**；新 (32,32,1) **83.9µs（−15.5%）**/
+    occ **10.99%**、L1TEX 26.3→43.5%（每 SM 干活更多）。S=4096 `BN=64`：**L1/TEX 71.87%→57.27%**
+    （Q/dO 复用翻倍）但 smem 105KB → **2 CTA/SM**（occ 18.75→12.5%），净 +1.5%；**要同时拿到低
+    L1 与高 occupancy 必须先把 smem 砍到 ≤77.7KB（BN=64 需砍 ~28KB），留待 O9**。
+  - **对标**（`harness/fa_vs_te_bwd_only.py fp16`）：S=4096 MHA FA3 0.3240ms/848TF、TE 0.4440/619
+    ⇒ ours total 6.9%（时间 7.25×，与 O8b 持平）；S=512 MHA FA3 0.0265ms/81TF、TE 0.0321/67
+    ⇒ ours total 17.6%（时间 5.7×，O8b 时 12.3×）。
+  - 原始输出 `src/fp16/fa_bwd_fp16_mma_main_o6c_*.out.txt`、`..._onefile_o6c_*.out.txt`、
+    `..._o6c_ncu_*.out.txt`、`src/fp16/fa_bwd_o6c_fa3_te_*.out.txt`；文档 `docs/01` §13b。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -802,6 +832,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       GQA kv4 0.380→**0.357ms**（S512 grid=128 单波 O6 反快，host 按网格自动选）。
       数值与 O5/O8/O6 逐位相同。ncu 新墙 = **L1/TEX 71.9% + L2 63.1% + `wait`**。
       详见 `docs/01` §12b、`docs/01b` §6h。
+- [x] **O6c** 主 kernel tile 几何参数化 + 小网格并行度自适应。**已完成（第三十三轮，fp16）**：
+      2×2 warp 几何全部由 `(BM,BN)` 派生；host 自动档 `grid<132 且 S≤1024`→`(BM=32,BN=32,PIPE=1)`
+      （提并行度）、`S≥4096`→`BN=64`；S=512 main **1.106×**、端到端 1.06×，S=4096 `BN=64` main 1.017×。
+      同时**证伪**了「静态 mblk 重排负载均衡」（0–2%、正负不稳，`sched` 保留默认 0）。ncu：S=512
+      achieved occ 6.24%→10.99%、Duration −15.5%；S=4096 `BN=64` L1/TEX 71.9→57.3% 但掉到 2 CTA/SM。
+      详见 `docs/01` §13b。
 - [ ] **O7** dQ/dK/dV 去 `atomicAdd`，改分块 `*_accum` + convert（确定性 + 消竞争）。**← 当前第一瓶颈（L1/L2 吞吐）**
 - [x] **O8** preprocess 的 LSE/D 改 mma 分块（对齐 fp8 的 O1）。**已完成（第二十八轮，fp16/bf16）**：
       `lse_mma_kernel<128>`（`mma.m16n8k16` QKᵀ + online-softmax + 4-lane `shfl`）+ 独立
@@ -847,6 +883,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    改**镜像配对**（每 CTA 做 `m` 与 `nblk-1-m`，工作量恒 `nblk+1`）+ K 的 `cp.async.cg` 双缓冲；
 >    **lse S4096 0.985→0.348ms（2.81×）/ 0.970→0.350ms（2.77×）**、端到端 **2.952→2.336ms（58.8 TF，6.9%）/
 >    2.961→2.343ms（58.7 TF，6.8%）**，数值逐位相同。fp16/bf16 单/两文件均完成。
+> 5b. **O6c**：主 kernel tile 几何参数化 + 小网格并行度自适应（fp16）。**已完成（第三十三轮）**：
+>    2×2 warp 几何由 `(BM,BN)` 派生，host 自动档在 `grid<132 且 S≤1024` 用 `(BM=32,BN=32,PIPE=1)`
+>    （grid 翻倍、并行度翻倍），`S≥4096` 用 `BN=64`；S=512 main **1.106×**/端到端 1.06×、S=4096
+>    main 1.017×，数值逐位相同。**证伪**静态 mblk 重排（0–2%、正负不稳）。ncu：S=512 occ
+>    6.24%→10.99%、Duration −15.5%；S=4096 `BN=64` L1/TEX 71.9→57.3% 但 2 CTA/SM，净 +1.5%。
+>    **bf16 同款改造未做（下一步）。**
 > 6. **O7**：dQ/dK/dV 去 `atomicAdd`（分块 accum + convert；fp8 已做，移植）。
 >    **注意（本轮分析）**：fp16/bf16 的 dK/dV 原子流量与 dQ **对称**——无论 Q-resident 还是
 >    KV-resident，归约贡献总数都是 `S²/2`（每元素被 atomic `~S/BM` 次），单靠换归约维收益有限；
@@ -899,7 +941,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 5.58→**3.04ms（45 TF，FA3 的 5.4%）**，数值逐位不变。**O6b 又把 K/V 双缓冲 smem
 > 83.97→71.17KB（K 双缓冲 + V 单缓冲后段预取 + `ldmatrix.x4.trans` 消转置副本）回到 3 CTA/SM**，
 > main S=4096 1.90→1.86ms、端到端 3.04→**2.95ms（46.6 TF）**。**当前新墙 = L1/TEX 72% +
-> L2 63% 吞吐 + `wait`**。**下一项 = O7（dQ/dK/dV 去 atomic，降 L1/L2 流量）、O9（wgmma+TMA）**；
+> L2 63% 吞吐 + `wait`**。**O8b（LSE 负载均衡+cp.async）与 O6c（tile 几何参数化 + 小网格
+> 并行度自适应）也已完成**：O6c 让 S=512 main 1.106×（grid 翻倍、occ 6.24→10.99%），并证伪了
+> 静态 mblk 重排；`BN=64` 能把 S=4096 的 L1/TEX 71.9→57.3% 但掉到 2 CTA/SM（净 +1.5%），
+> **要同时拿低 L1 与高 occupancy 须等 O9 的更低 smem 数据通路**。**下一项 = O6c(bf16)、
+> O7（dQ/dK/dV 去 atomic，降 L1/L2 流量）、O9（wgmma+TMA）**；
 > 此外 fp8 侧剩余 108.5M red（dK/dV 跨 mblk/hkv 竞争）可做 O7b；MLA 降 smem / wgmma+TMA 亦在列。
 > 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
 

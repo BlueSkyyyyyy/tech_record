@@ -1,0 +1,115 @@
+==PROF== Connected to process 533715 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "fa_bwd_fp16_mma_kernel": 0%....50%....100% - 17 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16
+B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=128 auto=(BM=32,BN=32,PIPE=1) sel=(BM=32,BN=32,PIPE=1)
+[timing] total(3 kernels) 0.2796 ms  7.68 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1163 ms | main 0.1339 ms | convert 0.0294 ms
+[O8b A/B] lse O8 0.0659 ms | bal(单缓冲) 0.0633 ms (1.040x) | bal+cpasync(双缓冲) 0.0680 ms (0.968x)
+[O6 A/B] main nopipe 0.1972 ms (10.89 TF) | pipe(KV both) 0.0872 ms (24.64 TF) | pipe2(K only) 0.0913 ms (23.51 TF) => nopipe/pipe 2.262x, nopipe/pipe2 2.159x
+[O6c A/B] main sched0(原样) 0.0871 ms | sched1(交错) 0.0875 ms (0.995x) | sched2(逆序) 0.0869 ms (1.002x)
+[O5c A/B] main (64,32,2) 0.0914 ms (23.50 TF) | (64,64,2) 0.0866 (24.79) | (32,32,1) 0.0838 (25.62) | (32,32,2) 0.0909 (23.63) => best 1.090x
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
+  dk   vs ref: max_abs=1.771e-03  max_rel=2.996e-01
+  dv   vs ref: max_abs=1.899e-03  max_rel=2.678e-02
+  fa_dq     vs ref: max_abs=1.679e-03  max_rel=2.666e-01
+  fa_dk     vs ref: max_abs=1.684e-03  max_rel=5.121e-01
+  fa_dv     vs ref: max_abs=1.899e-03  max_rel=2.719e-02
+  te_dq     vs ref: max_abs=1.716e-03  max_rel=2.439e-01
+  te_dk     vs ref: max_abs=2.287e-03  max_rel=5.140e-01
+  te_dv     vs ref: max_abs=1.899e-03  max_rel=3.699e-02
+==PROF== Disconnected from process 533715
+[533715] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void fa_bwd_fp16_mma_kernel<128, 32, 32, 1>(const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (16, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.85
+    Elapsed Cycles                cycle       155619
+    Memory Throughput                 %        47.06
+    DRAM Throughput                   %         6.02
+    Duration                         us        83.87
+    L1/TEX Cache Throughput           %        43.54
+    L2 Cache Throughput               %        47.06
+    SM Active Cycles              cycle    101086.98
+    Compute (SM) Throughput           %        12.42
+    ----------------------- ----------- ------------
+
+    OPT   This kernel grid is too small to fill the available resources on this device, resulting in only 0.65 full     
+          waves across all SMs. Look at Launch Statistics for more details.                                             
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        19.20
+    Issued Warp Per Scheduler                        0.19
+    No Eligible                            %        80.80
+    Active Warps Per Scheduler          warp         1.75
+    Eligible Warps Per Scheduler        warp         0.22
+    ---------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 52.94%                                                                                    
+          Every scheduler is capable of issuing one instruction per cycle, but for this workload each scheduler only    
+          issues an instruction every 5.2 cycles. This might leave hardware resources underutilized and may lead to     
+          less optimal performance. Out of the maximum of 16 warps per scheduler, this workload allocates an average    
+          of 1.75 active warps per scheduler, but only an average of 0.22 warps were eligible per cycle. Eligible       
+          warps are the subset of active warps that are ready to issue their next instruction. Every cycle with no      
+          eligible warp results in no instruction being issued and the issue slot remains unused. To increase the       
+          number of eligible warps, reduce the time the active warps are stalled by inspecting the top stall reasons    
+          on the Warp State Statistics and Source Counters sections.                                                    
+
+    Section: Warp State Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Warp Cycles Per Issued Instruction             cycle         9.10
+    Warp Cycles Per Executed Instruction           cycle         9.11
+    Avg. Active Threads Per Warp                                   32
+    Avg. Not Predicated Off Threads Per Warp                    28.78
+    ---------------------------------------- ----------- ------------
+
+    WRN   The optional metric smsp__pcsamp_sample_count could not be found. Collecting it as an additional metric could 
+          enable the rule to provide more guidance.                                                                     
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 35.95%                                                                                          
+          On average, each warp of this workload spends 3.3 cycles being stalled waiting for a scoreboard dependency on 
+          a L1TEX (local, global, surface, texture) operation. Find the instruction producing the data being waited     
+          upon to identify the culprit. To reduce the number of cycles waiting on L1TEX data accesses verify the        
+          memory access patterns are optimal for the target architecture, attempt to increase cache hit rates by        
+          increasing data locality (coalescing), or by changing the cache configuration. Consider moving frequently     
+          used data to shared memory. This stall type represents about 35.9% of the total average of 9.1 cycles         
+          between issuing two instructions.                                                                             
+    ----- --------------------------------------------------------------------------------------------------------------
+    INF   Check the Warp Stall Sampling (All Samples) table for the top stall locations in your source based on         
+          sampling data. The Profiling Guide                                                                            
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-reference) provides more details    
+          on each stall reason.                                                                                         
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            3
+    Block Limit Shared Mem                block            3
+    Block Limit Warps                     block           16
+    Theoretical Active Warps per SM        warp           12
+    Theoretical Occupancy                     %        18.75
+    Achieved Occupancy                        %        10.99
+    Achieved Active Warps Per SM           warp         7.03
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 52.94%                                                                                          
+          The 3.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (18.8%) is limited by the number of required      
+          registers, and the required amount of shared memory.                                                          
+

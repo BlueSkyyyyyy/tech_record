@@ -144,6 +144,15 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 同 session FA3 S4096 0.3241ms/848 ⇒ ours total 为 FA3 的 **6.9%**（O6b 5.5%）；数值逐位相同。
 > ncu（lse,S4096）：Duration 1.03ms→354µs、`long_scoreboard` 2.19→0.34、Waves 1.29→0.97（尾波消除），
 > 新墙 = Compute 60% + smem 依赖。详见 `01-fp16-bwd-impl.md` §13。
+>
+> **O6c（主 kernel tile 几何参数化 + 小网格并行度自适应）已完成（fp16）**：把 `fa_bwd_fp16_mma_kernel`
+> 的 2×2 warp 几何从写死的 `(BM=64,BN=32)` 改成由 `(BM,BN)` 派生；host 自动档在
+> **`grid<132 且 S≤1024`** 用 `(BM=32,BN=32,PIPE=1)`（grid 翻倍、并行度翻倍），`S≥4096` 用 `BN=64`。
+> **main S=512 0.0858→0.0776ms（1.106×）/ 端到端 0.1598→0.1504ms（1.06×）**、S=4096 `BN=64` main
+> 1.017×；数值逐位相同。**证伪**了静态 mblk 重排负载均衡（0–2%、正负不稳）。ncu：S=512 achieved
+> occ 6.24%→10.99%、Duration 99.3→83.9µs；S=4096 `BN=64` L1/TEX 71.9→57.3% 但掉到 2 CTA/SM（净 +1.5%）。
+> 对标：S=512 FA3 0.0265ms/81TF ⇒ ours total 17.6%（时间 5.7×，O8b 时 12.3×）；S=4096 仍 6.9%。
+> 详见 `01-fp16-bwd-impl.md` §13b。
 
 ### 2.2 bf16（峰值 989 TFLOPS）
 

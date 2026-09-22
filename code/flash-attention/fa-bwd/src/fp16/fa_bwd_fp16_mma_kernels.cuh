@@ -467,14 +467,15 @@ __global__ void delta_kernel(const __half* __restrict__ o,
 //     `Ps/dSs[BM][BN]` 读（`fa_bwd_fp16_atrans_smoke.cu` 验证逐位一致）。
 //   ⇒ smem 降到 71.2KB，回到 **3 CTA/SM**，且少写两份转置副本（降 L1/TEX 压力）。
 template <int HD, int BM, int BN, int PIPE>
-__global__ void __launch_bounds__(THREADS, PIPE == 1 ? 2 : 3)
+__global__ void __launch_bounds__(THREADS, (BN > 32) ? 2 : 3)
 fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
                        const __half* __restrict__ v, const __half* __restrict__ do_,
                        const float* __restrict__ delta, const float* __restrict__ lse,
                        float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                        float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                       int causal) {
+                       int causal, int sched) {
   static_assert(HD == 128, "O5 fp16 mma 目前只支持 head_dim=128");
+  static_assert(BM % 32 == 0 && BN % 16 == 0, "BM/BN 需为 2×2 warp 网格的整数倍");
   constexpr int LD  = HD + 8;    // Q/K/V/dO 行距（half）
   constexpr int LDP = BM + 8;    // PsT/dSsT 行距（half，PIPE!=2）
   constexpr int LDS = BN + 8;    // Ps/dSs 行距（half，[BM][BN] 布局）
@@ -482,6 +483,20 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
   constexpr int KSB = PIPE >= 1 ? 2 * KVL : KVL;   // K 缓冲（O6/O6b 双缓冲）
   constexpr int VSB = PIPE == 1 ? 2 * KVL : KVL;   // V 缓冲（只有 O6 双缓冲）
   constexpr int PSZ = (PIPE == 2) ? BM * LDS : BN * LDP;  // P 存储大小
+
+  // ---- 由 (BM,BN) 派生的 2×2 warp 网格几何（O5c：支持 BN=64 等更大 tile）----
+  // GEMM1/2（S/dP，输出 [BM][BN]）：每个 warp 吃 (BM/2)×(BN/2)
+  // GEMM3/4（dV/dK，输出 [BN][HD]）：每个 warp 吃 (BN/2)×(HD/2)，wm=wr 铺 BN、wn=wc 铺 HD
+  // GEMM5（dQ，输出 [BM][HD]）：每个 warp 吃 (BM/2)×(HD/2)
+  // 记 MT* 为每个 warp 的 m16/n8 tile 数。当前 HD=128 ⇒ 每个 warp 的 N 半宽恒为 64。
+  constexpr int GM1 = BM / 2, GN1 = BN / 2;   // GEMM1/2 warp tile
+  constexpr int GMV = BN / 2, GNV = HD / 2;   // GEMM3/4 warp tile
+  constexpr int GMQ = BM / 2, GNQ = HD / 2;   // GEMM5 warp tile
+  constexpr int MTM1 = GM1 / 16, MTN1 = GN1 / 8;
+  constexpr int MTMV = GMV / 16, MTNV = GNV / 8;
+  constexpr int MTMQ = GMQ / 16, MTNQ = GNQ / 8;
+  static_assert(GM1 % 16 == 0 && GN1 % 8 == 0 && GMV % 16 == 0 && GMQ % 16 == 0,
+                "warp 几何需为 mma tile 的整数倍");
 
   extern __shared__ __align__(16) char smem[];
   __half* Qs   = reinterpret_cast<__half*>(smem);
@@ -492,7 +507,24 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
   __half* dSs  = Ps + PSZ;            // 始终 [BM][LDS]
   __half* dSsT = dSs + BM * LDS;      // PIPE!=2 的 dS 转置副本（PIPE==2 不分配/不用）
 
-  const int mblk = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // ---- O6c：causal 下按 blockIdx 到 Q 块（mblk）的映射重排，做负载均衡 ----
+  // 因果下第 m 个 Q 块要算 m+1 个 K/V tile，工作量随 m 线性增长；GPU 按 blockIdx
+  // 递增调度，会把重块排到最后 → 尾波最重（O6b ncu：Waves 2.59、尾波最多占 33%，
+  // 且 SM active cycles 最大比均值高 23%、最小低 26%）。这里不改变每个 CTA 的数学，
+  // 只重排「blockIdx.x → mblk」这个双射，把轻/重块均匀铺进每个波：
+  //   sched=0：原样（mblk=bx，重块在后）
+  //   sched=1：交错（0, n-1, 1, n-2, ...，每个波都轻/重混合）
+  //   sched=2：逆序（n-1, n-2, ..., 0，重块先跑、尾波最轻）
+  const int bx = blockIdx.x;
+  const int nblk = (S + BM - 1) / BM;
+  int mblk = bx;
+  if (causal) {
+    if (sched == 1)
+      mblk = (bx & 1) ? (nblk - 1 - (bx >> 1)) : (bx >> 1);
+    else if (sched == 2)
+      mblk = nblk - 1 - bx;
+  }
+  const int h = blockIdx.y, b = blockIdx.z;
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int wr = wid / WN, wc = wid % WN;
@@ -532,11 +564,11 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
   }
 
   // dQ 沿 nt 在寄存器里累加（每个 Q 块唯一 CTA，无需跨 CTA atomic）。
-  float dqacc[2][8][4];
+  float dqacc[MTMQ][MTNQ][4];
 #pragma unroll
-  for (int i = 0; i < 2; ++i)
+  for (int i = 0; i < MTMQ; ++i)
 #pragma unroll
-    for (int j = 0; j < 8; ++j)
+    for (int j = 0; j < MTNQ; ++j)
 #pragma unroll
       for (int q = 0; q < 4; ++q) dqacc[i][j][q] = 0.f;
 
@@ -584,21 +616,21 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
     // ---- (1) S = scale·QKᵀ → P = exp(S − LSE) ----
     // 同一线程在 GEMM1/GEMM2 的 (r,c) 映射一致，故用寄存器 pval 保存 P 供 dS 用，
     // 同时把 P 转 half 写进转置布局 PsT（供 GEMM3 的 A）。
-    float pval[2][2][4];
+    float pval[MTM1][MTN1][4];
     {
-      float acc[2][2][4];
+      float acc[MTM1][MTN1][4];
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTM1; ++i)
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+        for (int j = 0; j < MTN1; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block_f16<32, 16, HD, false>(Qs, LD, Kt, LD, acc, wr, wc, lane);
-      const int r0 = wr * 32, c0 = wc * 16;
+      mma_block_f16<GM1, GN1, HD, false>(Qs, LD, Kt, LD, acc, wr, wc, lane);
+      const int r0 = wr * GM1, c0 = wc * GN1;
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTM1; ++i)
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+        for (int j = 0; j < MTN1; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) {
             int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
@@ -617,19 +649,19 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
 
     // ---- (2) dP = dO·Vᵀ → dS = P∘(dP − D)（同 warp/累加器映射）----
     {
-      float acc[2][2][4];
+      float acc[MTM1][MTN1][4];
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTM1; ++i)
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+        for (int j = 0; j < MTN1; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block_f16<32, 16, HD, false>(dOs, LD, Vt, LD, acc, wr, wc, lane);
-      const int r0 = wr * 32, c0 = wc * 16;
+      mma_block_f16<GM1, GN1, HD, false>(dOs, LD, Vt, LD, acc, wr, wc, lane);
+      const int r0 = wr * GM1, c0 = wc * GN1;
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTM1; ++i)
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+        for (int j = 0; j < MTN1; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) {
             int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
@@ -653,68 +685,76 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
 
     // ---- (3) dV = Pᵀ·dO（A=PsT[BN][BM], B=dO[BM][HD] 转置）----
     {
-      float acc[1][8][4];
+      float acc[MTMV][MTNV][4];
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int i = 0; i < MTMV; ++i)
 #pragma unroll
-        for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
+        for (int j = 0; j < MTNV; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
       if constexpr (PIPE == 2)
-        mma_block_f16<16, 64, BM, true, true>(Ps, LDS, dOs, LD, acc, wr, wc, lane);
+        mma_block_f16<GMV, GNV, BM, true, true>(Ps, LDS, dOs, LD, acc, wr, wc, lane);
       else
-        mma_block_f16<16, 64, BM, true>(Ps, LDP, dOs, LD, acc, wr, wc, lane);
-      const int r0 = wr * 16, c0 = wc * 64;
+        mma_block_f16<GMV, GNV, BM, true>(Ps, LDP, dOs, LD, acc, wr, wc, lane);
+      const int r0 = wr * GMV, c0 = wc * GNV;
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int i = 0; i < MTMV; ++i)
 #pragma unroll
-        for (int q = 0; q < 4; q += 2) {
-          int r = r0 + g + (q >= 2 ? 8 : 0);
-          int c = c0 + j * 8 + c2;
-          int jg = j0 + r;
-          if (jg < S)
-            red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                     acc[0][j][q], acc[0][j][q + 1]);
-        }
+        for (int j = 0; j < MTNV; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; q += 2) {
+            int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+            int c = c0 + j * 8 + c2;
+            int jg = j0 + r;
+            if (jg < S)
+              red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                       acc[i][j][q], acc[i][j][q + 1]);
+          }
     }
 
     // ---- (4) dK = scale·dSᵀ·Q（A=dSsT[BN][BM], B=Q[BM][HD] 转置）----
     {
-      float acc[1][8][4];
+      float acc[MTMV][MTNV][4];
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int i = 0; i < MTMV; ++i)
 #pragma unroll
-        for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
+        for (int j = 0; j < MTNV; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
       if constexpr (PIPE == 2)
-        mma_block_f16<16, 64, BM, true, true>(dSs, LDS, Qs, LD, acc, wr, wc, lane);
+        mma_block_f16<GMV, GNV, BM, true, true>(dSs, LDS, Qs, LD, acc, wr, wc, lane);
       else
-        mma_block_f16<16, 64, BM, true>(dSsT, LDP, Qs, LD, acc, wr, wc, lane);
-      const int r0 = wr * 16, c0 = wc * 64;
+        mma_block_f16<GMV, GNV, BM, true>(dSsT, LDP, Qs, LD, acc, wr, wc, lane);
+      const int r0 = wr * GMV, c0 = wc * GNV;
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int i = 0; i < MTMV; ++i)
 #pragma unroll
-        for (int q = 0; q < 4; q += 2) {
-          int r = r0 + g + (q >= 2 ? 8 : 0);
-          int c = c0 + j * 8 + c2;
-          int jg = j0 + r;
-          if (jg < S)
-            red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                     acc[0][j][q] * scale, acc[0][j][q + 1] * scale);
-        }
+        for (int j = 0; j < MTNV; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; q += 2) {
+            int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+            int c = c0 + j * 8 + c2;
+            int jg = j0 + r;
+            if (jg < S)
+              red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                       acc[i][j][q] * scale, acc[i][j][q + 1] * scale);
+          }
     }
 
     // ---- (5) dQ += scale·dS·K（A=dSs[BM][BN], B=K[BN][HD] 转置）----
     {
-      float acc[2][8][4];
+      float acc[MTMQ][MTNQ][4];
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTMQ; ++i)
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+        for (int j = 0; j < MTNQ; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block_f16<32, 64, BN, true>(dSs, LDS, Kt, LD, acc, wr, wc, lane);
+      mma_block_f16<GMQ, GNQ, BN, true>(dSs, LDS, Kt, LD, acc, wr, wc, lane);
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTMQ; ++i)
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+        for (int j = 0; j < MTNQ; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) {
             dqacc[i][j][q] += acc[i][j][q] * scale;
@@ -728,13 +768,13 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
 
   // ---- 写回 dQ（寄存器累加结果，直接存；每个 Q 块由唯一 CTA 负责）----
 #pragma unroll
-  for (int i = 0; i < 2; ++i)
+  for (int i = 0; i < MTMQ; ++i)
 #pragma unroll
-    for (int j = 0; j < 8; ++j)
+    for (int j = 0; j < MTNQ; ++j)
 #pragma unroll
       for (int q = 0; q < 4; q += 2) {
-        int r = wr * 32 + i * 16 + g + (q >= 2 ? 8 : 0);
-        int c = wc * 64 + j * 8 + c2;
+        int r = wr * GMQ + i * 16 + g + (q >= 2 ? 8 : 0);
+        int c = wc * GNQ + j * 8 + c2;
         int qi = m0 + r;
         if (qi < S) {
           float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
