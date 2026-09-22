@@ -61,8 +61,8 @@
 - [x] **P2-1** `src/bf16/fa_bwd_bf16_onefile.cu`：以 fp16 单文件为模板做 dtype 参数化
       （`__half`→`__nv_bfloat16`）；编译运行 + 对拍 ref/FA/TE；ncu；
       **附带 bf16 专属优化：K/V smem 行距 +2 padding**（消 9.5-way bank conflict，main 3.1–4.7×）
-- [ ] **P2-2** bf16 两文件拆分为 `fa_bwd_bf16_kernels.cuh` + `fa_bwd_bf16_main.cu`，行为一致
-- [ ] **P2-3** bf16 文档（`docs/01b-bf16-bwd-impl.md` 已完成 P2-1 部分）
+- [x] **P2-2** bf16 两文件拆分为 `fa_bwd_bf16_kernels.cuh` + `fa_bwd_bf16_main.cu`，行为一致
+- [x] **P2-3** bf16 文档（`docs/01b-bf16-bwd-impl.md`：P2-1 + P2-2 两文件一节）
 ### P3 fp8 反向（最重点）
 
 - [ ] **P3-1** `docs/02-fp8-bwd-design.md`：dO/dP/dQKV 的量化与 scaling 布局（对齐 TE 口径）
@@ -140,14 +140,21 @@
     不再是 smem 访问；下一步靠降 smem/提 occupancy + 张量核。
   - 性能：ours 0.69 TF(S512) / 1.23 TF(S4096)，约 FA 的 0.5–2%、TE 的 0.5%（标量实现）。
     S=4096 时 **preprocess 69.4ms > main 42.2ms**（LSE 重算 O(S²) 未分块）成新瓶颈。
-  - 文档 `docs/01b-bf16-bwd-impl.md`；原始输出 `src/bf16/*.out.txt`。
+   - 文档 `docs/01b-bf16-bwd-impl.md`；原始输出 `src/bf16/*.out.txt`。
+- 2026-09-22（第五轮）：**P2-2/P2-3 完成（bf16 全部收尾）**。
+  - 拆成两文件：`src/bf16/fa_bwd_bf16_kernels.cuh`（device：常量含 `kKVStride` padding +
+    preprocess/main/convert）+ `fa_bwd_bf16_main.cu`（host：npy/launcher/自测）；kernel 代码逐字未改。
+  - 逐指标核对与单文件**无差异**：S=512 dq/dk/dv max_abs 6.892/8.110/13.65e-3；
+    S=4096 8.895/8.078/14.94e-3；ncu DRAM 0.25% / L1TEX 24.89% / Compute 13.52% / occ 6.25% /
+    waves 0.48 / regs 52 / smem 98.56KB / Executed Instructions 247,182,666（与单文件完全相同）。
+    原始输出见 `src/bf16/fa_bwd_bf16_main_{s512,s4096,ncu_main}.out.txt`。
+  - `docs/01b-bf16-bwd-impl.md` 增加「两文件版（P2-2）」一节。
 
 ## 下一步（明确到可执行）
 
-- [ ] **P2-2**：把 bf16 单文件拆成 `src/bf16/fa_bwd_bf16_kernels.cuh`（device：三个 kernel + 常量，
-      含 `kKVStride` padding）+ `fa_bwd_bf16_main.cu`（host：npy/launcher/自测）；
-      用 `scripts/run.sh src/bf16/fa_bwd_bf16_main.cu` 编译，核对与单文件逐指标一致。
-- [ ] 之后进入 P3 fp8（重点，参考 TE 的 E4M3/E5M2 + rowwise scaling）。
+- [ ] **P3-1**：`docs/02-fp8-bwd-design.md`：对齐 TE 口径写清 dO/dP/dQKV 的量化与 scaling 布局
+      （dO E5M2 + rowwise scale，P/S 走 E4M3，fp32 累加，`scale_a*scale_b` 折回）。
+- [ ] 之后按 P3-2..P3-5 推进 fp8 单文件 → 对拍 → ncu/性能 → 两文件 + 文档（**fp8 为最重点**）。
 - [ ] （backlog，性能）**preprocess 已成 S=4096 端到端瓶颈**（69ms > main 42ms）：对 LSE 点积分块 +
       向量化（`__ldg`/float4），或把 LSE 并入前向摊薄；main 侧继续降 smem 提 occupancy、
       上张量核（mma）+ 流水；fp16 也可同步加 K/V padding。
