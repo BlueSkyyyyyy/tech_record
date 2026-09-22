@@ -1,0 +1,70 @@
+fp4_imma.cu(537): warning #1886-D: specified alignment (128) is different from alignment (16) specified on a previous declaration
+    extern __attribute__((shared)) __attribute__((aligned(128))) char smem[];
+                                   ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fp4_imma.cu(806): warning #177-D: variable "K1" was declared but never referenced
+    const int N1 = 2 * I, K1 = H;
+                          ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fp4_imma.cu(807): warning #177-D: variable "K2" was declared but never referenced
+    const int N2 = H, K2 = I;
+                      ^
+
+fp4_imma.cu(537): warning #1886-D: specified alignment (128) is different from alignment (16) specified on a previous declaration
+    extern __attribute__((shared)) __attribute__((aligned(128))) char smem[];
+                                   ^
+          detected during instantiation of "void launch_tma<KK,RWW,NWARP,MTMAX,DECODE,GATHER>(dim3, int, const int8_t *, const float *, const uint8_t *, const uint8_t *, const int *, const int *, const int *, const int *, float *, int, int, int) [with KK=7168, RWW=2, NWARP=8, MTMAX=4, DECODE=4, GATHER=1]" at line 981
+
+==PROF== Connected to process 402876 (/ssd/home/xieminglin/proj/tech_record/code/kernel-opt/65-v4-fp4-imma/fp4_imma.out)
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+V4-Pro routed expert FFN FP4 decode: w1/w3 [3072,7168] + w2 [7168,3072], B=256 top-6 E=384 pairs=1536  PIPE=1 DEC=8 KTMA=1 mode=imma
+routing balanced active=384/384  max_m=4
+permute w1/w3 fp4 -> IMMA layout: 10.245 ms (1650.6 GB/s)
+==PROF== Profiling "k1_imma": 0%....50%....100% - 12 passes
+[check K1 imma vs baseline] max_rel=2.004e-06 (ref~5.80) OK
+== K1 IMMA sweep (BN=128) ==
+  K1 IMMA DEC8 BN128 ST2 WN8 (MTN2)  5.4415 ms  1651.1 GB/s (49.3% HBM)  smem=52KB
+  K1 IMMA DEC8 BN128 ST3 WN8 (MTN2)  5.2178 ms  1721.8 GB/s (51.4% HBM)  smem=62KB
+  K1 IMMA DEC8 BN128 ST4 WN8 (MTN2)  4.9517 ms  1814.4 GB/s (54.1% HBM)  smem=72KB
+  K1 IMMA DEC4 BN128 ST4 WN8 (MTN2)  5.7760 ms  1555.4 GB/s (46.4% HBM)  smem=72KB
+  K1 IMMA DEC0 BN128 ST4 WN8 (MTN2)  6.2485 ms  1437.8 GB/s (42.9% HBM)  smem=72KB
+  K1 IMMA DEC8 BN128 ST4 WN4 (MTN4)  5.1699 ms  1737.8 GB/s (51.8% HBM)  smem=72KB
+  K1 IMMA DEC4 BN128 ST3 WN8 (MTN2)  5.8393 ms  1538.6 GB/s (45.9% HBM)  smem=62KB
+  DIAG1 (fold-off decode)  4.5039 ms  1994.8 GB/s (59.5% HBM)
+  DIAG2 (fold decode-off)  3.5824 ms  2507.9 GB/s (74.8% HBM)
+  DIAG3 (fold-off decode-off)  3.0392 ms  2956.1 GB/s (88.2% HBM)
+  K1 baseline (DEC=8)  4.5382 ms  1979.7 GB/s (59.1% HBM)
+==PROF== Disconnected from process 402876
+[402876] fp4_imma.out@127.0.0.1
+  void k1_imma<7168, 128, 3, 8, 1, 0, 8>(const signed char *, const float *, const unsigned int *, const unsigned char *, const int *, const int *, const int *, const int *, float *, int) (48, 384, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------ --------------- ------------
+    Metric Name                                                                  Metric Unit Metric Value
+    ------------------------------------------------------------------------ --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                     %        50.53
+    gpu__time_duration.sum                                                                ms         5.33
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                    %        47.25
+    launch__occupancy_limit_registers                                                  block            4
+    launch__registers_per_thread                                             register/thread           62
+    sm__inst_executed_pipe_alu.sum                                                      inst   1761656832
+    sm__inst_executed_pipe_fma.sum                                                      inst   1325703168
+    sm__inst_executed_pipe_lsu.sum                                                      inst    453574656
+    sm__inst_executed_pipe_tensor.sum                                                   inst     66060288
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                       %        78.13
+    sm__warps_active.avg.pct_of_peak_sustained_active                                      %        37.23
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                    inst         0.74
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio            inst         0.75
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio               inst         2.39
+    smsp__inst_executed.sum                                                             inst   3991025664
+    ------------------------------------------------------------------------ --------------- ------------
+
