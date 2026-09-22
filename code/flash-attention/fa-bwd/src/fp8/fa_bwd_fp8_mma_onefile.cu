@@ -64,6 +64,11 @@ static constexpr int DSS2 = 32 + 16;        // 48，dS2 [m][j]（K=32）
 static constexpr float kE4M3Max = 448.0f;
 static constexpr float kE5M2Max = 57344.0f;
 
+// O1：preprocess 的 LSE 改用 mma 分块（见下），独立的 tile 常量。
+static constexpr int LBM = 64;
+static constexpr int LBN = 64;
+static constexpr int kLseSmemBytes = LBM * ASLD + LBN * ASLD + (LBM + LBN) * (int)sizeof(float);
+
 // 动态 smem 布局
 static constexpr int kFp8Bytes = BM * ASLD            // Qs
                               + BN * ASLD            // Ks
@@ -208,59 +213,121 @@ __global__ void quantize_row_kernel(const float* __restrict__ x,
 }
 
 // =============================================================================
-// 2) preprocess（与 golden 相同）：反量化 Q/K 求 LSE；反量化 dO 与 fp32 O 求 D
+// 2a) lse_mma_kernel【O1 优化】：用 mma 分块 Q·Kᵀ 求 LSE
 // =============================================================================
-__global__ void preprocess_kernel(const unsigned char* __restrict__ q8,
-                                  const float* __restrict__ qs,
-                                  const unsigned char* __restrict__ k8,
-                                  const float* __restrict__ ks,
-                                  const float* __restrict__ o,
-                                  const unsigned char* __restrict__ do8,
-                                  const float* __restrict__ dos,
-                                  float* __restrict__ delta, float* __restrict__ lse,
-                                  int S, int H, float scale, int causal) {
-  const int s = blockIdx.x;
-  const int h = blockIdx.y;
-  const int b = blockIdx.z;
-  const int tid = threadIdx.x;
-  const size_t row = ((size_t)(b * S + s)) * H + h;
-  const unsigned char* qr = q8 + row * kHeadDim;
-  const float q_scale = qs[row];
+// 旧 preprocess 每个 (s,h) 行一个 block、128 线程标量扫 K，每对 (i,j) 反量化
+// 2×128 个 e4m3 再 FFMA；S=4096 时 preprocess ~71ms，是端到端第一瓶颈。
+//
+// 新做法：与反向主 kernel 同源的 tensor-core QK：
+//   * grid = (S/LBM, H, B)，每 CTA 处理 LBM=64 行 Q；4 个 warp 各 16 行（wm=wid），
+//     沿 N 方向一次吃 LBN=64 列；Q/K 分块进 smem，mma.m16n8k32 E4M3×E4M3 算 S 块。
+//   * P 不物化：mma 的 fp32 累加器直接做 online-softmax（running max/l），
+//     LSE 的行 max/sum 在 warp 内按 lane 组（同 row 的 4 个 lane）shfl 归约。
+//   * 与旧版数学一致（scale·qs·ks、causal mask、NaN 安全），只是走张量核并大幅
+//     提升并行度（S=4096 时 1024 CTA vs 旧的 65536 个 1-行 CTA×标量）。
+__global__ void __launch_bounds__(THREADS)
+lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
+               const unsigned char* __restrict__ k8, const float* __restrict__ ks,
+               float* __restrict__ lse, int S, int H, float scale, int causal) {
+  extern __shared__ __align__(16) char smem[];
+  unsigned char* Qs = reinterpret_cast<unsigned char*>(smem);
+  unsigned char* Ks = Qs + LBM * ASLD;
+  float* qs_s = reinterpret_cast<float*>(Ks + LBN * ASLD);
+  float* ks_s = qs_s + LBM;
 
-  float m = -INFINITY, l = 0.f;
-  const int jmax = causal ? (s + 1) : S;
-  for (int j = tid; j < jmax; j += blockDim.x) {
-    const size_t krow = ((size_t)(b * S + j)) * H + h;
-    const unsigned char* kr = k8 + krow * kHeadDim;
-    const float k_scale = ks[krow];
-    float dot = 0.f;
-#pragma unroll 8
-    for (int d = 0; d < kHeadDim; ++d) dot += deq_e4m3(qr[d]) * deq_e4m3(kr[d]);
-    dot *= q_scale * k_scale * scale;
-    float mn = fmaxf(m, dot);
-    l = l * expf(m - mn) + expf(dot - mn);
-    m = mn;
+  const int mblk = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  const int g = lane >> 2, c2 = (lane & 3) * 2;
+  const int m0 = mblk * LBM;
+
+  for (int i = tid; i < LBM * kHeadDim; i += THREADS) {
+    int r = i / kHeadDim, d = i % kHeadDim;
+    int qi = m0 + r;
+    Qs[r * ASLD + d] =
+        (qi < S) ? q8[(((size_t)(b * S + qi)) * H + h) * kHeadDim + d] : cvt_e4m3(0.f);
   }
-  __shared__ float sh_m[THREADS], sh_l[THREADS];
-  sh_m[tid] = m;
-  sh_l[tid] = l;
+  if (tid < LBM)
+    qs_s[tid] = (m0 + tid < S) ? qs[((size_t)(b * S + m0 + tid)) * H + h] : 1.f;
   __syncthreads();
-  for (int off = THREADS / 2; off > 0; off >>= 1) {
-    if (tid < off) {
-      float m1 = sh_m[tid], l1 = sh_l[tid];
-      float m2 = sh_m[tid + off], l2 = sh_l[tid + off];
-      float mn = fmaxf(m1, m2);
-      float c1 = (m1 == -INFINITY) ? 0.f : l1 * expf(m1 - mn);
-      float c2 = (m2 == -INFINITY) ? 0.f : l2 * expf(m2 - mn);
-      sh_m[tid] = mn;
-      sh_l[tid] = c1 + c2;
+
+  const int ncols = causal ? min(S, m0 + LBM) : S;
+  const int ntiles = (ncols + LBN - 1) / LBN;
+  float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
+
+  for (int nt = 0; nt < ntiles; ++nt) {
+    const int j0 = nt * LBN;
+    for (int i = tid; i < LBN * kHeadDim; i += THREADS) {
+      int r = i / kHeadDim, d = i % kHeadDim;
+      int jg = j0 + r;
+      Ks[r * ASLD + d] =
+          (jg < S) ? k8[(((size_t)(b * S + jg)) * H + h) * kHeadDim + d] : cvt_e4m3(0.f);
     }
+    if (tid < LBN)
+      ks_s[tid] = (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * H + h] : 1.f;
+    __syncthreads();
+
+    float acc[1][8][4];
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+      for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
+    mma_block<16, LBN, kHeadDim, E4E4>(Qs, ASLD, Ks, ASLD, acc, wid, 0, lane);
+
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        int s = q >= 2 ? 1 : 0;
+        int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+        int c = j * 8 + c2 + (q & 1);
+        int qi = m0 + r, jg = j0 + c;
+        float sv = -INFINITY;
+        if (qi < S && jg < S && !(causal && jg > qi))
+          sv = acc[0][j][q] * scale * qs_s[r] * ks_s[c];
+        if (sv != -INFINITY) {
+          float mn = fmaxf(mrow[s], sv);
+          lrow[s] = lrow[s] * expf(mrow[s] - mn) + expf(sv - mn);
+          mrow[s] = mn;
+        }
+      }
     __syncthreads();
   }
-  float dp = 0.f;
+
+#pragma unroll
+  for (int s = 0; s < 2; ++s) {
+    float m = mrow[s], l = lrow[s];
+#pragma unroll
+    for (int off = 1; off <= 2; off <<= 1) {
+      float m2 = __shfl_xor_sync(0xffffffffu, m, off);
+      float l2 = __shfl_xor_sync(0xffffffffu, l, off);
+      float mn = fmaxf(m, m2);
+      float ca = (m == -INFINITY) ? 0.f : l * expf(m - mn);
+      float cb = (m2 == -INFINITY) ? 0.f : l2 * expf(m2 - mn);
+      l = ca + cb;
+      m = mn;
+    }
+    if (c2 == 0) {
+      int r = wid * 16 + g + (s ? 8 : 0);
+      int qi = m0 + r;
+      if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + logf(l);
+    }
+  }
+}
+
+// =============================================================================
+// 2b) delta_kernel：D = rowsum(dO ∘ O)（反量化 e5m2·dos 后与 fp32 O 点积）
+// =============================================================================
+__global__ void delta_kernel(const float* __restrict__ o,
+                             const unsigned char* __restrict__ do8,
+                             const float* __restrict__ dos, float* __restrict__ delta,
+                             int S, int H) {
+  const int s = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  const int tid = threadIdx.x;
+  const size_t row = ((size_t)(b * S + s)) * H + h;
   const float* orow = o + row * kHeadDim;
   const unsigned char* dorow = do8 + row * kHeadDim;
   const float do_scale = dos[row];
+  float dp = 0.f;
   for (int d = tid; d < kHeadDim; d += blockDim.x)
     dp += orow[d] * (deq_e5m2(dorow[d]) * do_scale);
   __shared__ float sh_delta[THREADS];
@@ -270,10 +337,7 @@ __global__ void preprocess_kernel(const unsigned char* __restrict__ q8,
     if (tid < off) sh_delta[tid] += sh_delta[tid + off];
     __syncthreads();
   }
-  if (tid == 0) {
-    delta[row] = sh_delta[0];
-    lse[row] = sh_m[0] + logf(sh_l[0]);
-  }
+  if (tid == 0) delta[row] = sh_delta[0];
 }
 
 // =============================================================================
@@ -663,7 +727,8 @@ int main(int argc, char** argv) {
   printf("case = %s\n", dir.c_str());
   printf("B=%d S=%d H=%d D=%d causal=%d scale=%.6f\n", B, S, H, D, (int)causal, scale);
   printf("FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32\n");
-  printf("smem = %d bytes (%.1f KB)\n", kSmemBytes, kSmemBytes / 1024.0);
+  printf("smem = %d bytes (%.1f KB); lse smem = %d bytes (%.1f KB)\n", kSmemBytes,
+         kSmemBytes / 1024.0, kLseSmemBytes, kLseSmemBytes / 1024.0);
 
   float *d_q_f, *d_k_f, *d_v_f, *d_do_f, *d_o_f;
   unsigned char *d_q8, *d_k8, *d_v8, *d_do8;
@@ -706,18 +771,26 @@ int main(int argc, char** argv) {
 
   CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes));
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBytes));
   dim3 pg(S, H, B);
+  dim3 lg((S + LBM - 1) / LBM, H, B);
   dim3 mg((S + BM - 1) / BM, H, B);
   const int cvt_threads = 256;
   const int cvt_blocks = (int)std::min<size_t>((n + cvt_threads - 1) / cvt_threads, 65535);
+
+  auto run_preprocess = [&]() {
+    lse_mma_kernel<<<lg, THREADS, kLseSmemBytes>>>(d_q8, d_qs, d_k8, d_ks, d_lse, S, H,
+                                                   scale, (int)causal);
+    delta_kernel<<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+  };
 
   auto run_all = [&]() {
     quant();
     CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * 4));
     CUDA_CHECK(cudaMemset(d_dk_acc, 0, n * 4));
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, n * 4));
-    preprocess_kernel<<<pg, THREADS>>>(d_q8, d_qs, d_k8, d_ks, d_o_f, d_do8, d_dos, d_delta,
-                                       d_lse, S, H, scale, (int)causal);
+    run_preprocess();
     fa_bwd_fp8_mma_kernel<<<mg, THREADS, kSmemBytes>>>(
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
         d_dk_acc, d_dv_acc, S, H, scale, (int)causal);
@@ -751,9 +824,7 @@ int main(int argc, char** argv) {
   ms_quant /= iters;
 
   CUDA_CHECK(cudaEventRecord(ev0));
-  for (int i = 0; i < iters; ++i)
-    preprocess_kernel<<<pg, THREADS>>>(d_q8, d_qs, d_k8, d_ks, d_o_f, d_do8, d_dos, d_delta,
-                                       d_lse, S, H, scale, (int)causal);
+  for (int i = 0; i < iters; ++i) run_preprocess();
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
   float ms_pre = 0.f;
