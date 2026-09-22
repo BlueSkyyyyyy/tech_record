@@ -58,7 +58,11 @@
 
 ### P2 bf16 反向
 
-- [ ] **P2-1..5** 同 P1（复用 fp16 骨架，dtype 参数化）
+- [x] **P2-1** `src/bf16/fa_bwd_bf16_onefile.cu`：以 fp16 单文件为模板做 dtype 参数化
+      （`__half`→`__nv_bfloat16`）；编译运行 + 对拍 ref/FA/TE；ncu；
+      **附带 bf16 专属优化：K/V smem 行距 +2 padding**（消 9.5-way bank conflict，main 3.1–4.7×）
+- [ ] **P2-2** bf16 两文件拆分为 `fa_bwd_bf16_kernels.cuh` + `fa_bwd_bf16_main.cu`，行为一致
+- [ ] **P2-3** bf16 文档（`docs/01b-bf16-bwd-impl.md` 已完成 P2-1 部分）
 ### P3 fp8 反向（最重点）
 
 - [ ] **P3-1** `docs/02-fp8-bwd-design.md`：dO/dP/dQKV 的量化与 scaling 布局（对齐 TE 口径）
@@ -120,17 +124,33 @@
   - 逐指标核对与单文件**无差异**：S=512 dq/dk/dv max_abs 1.671/1.680/1.899e-3；
     S=4096 1.499/1.572/2.225e-3；ncu DRAM 0.21% / L1TEX 53.52% / Compute 8.45% / occ 6.25%。
     原始输出见 `src/fp16/fa_bwd_fp16_main_{s512,s4096,ncu_main}.out.txt`。
-  - `docs/01-fp16-bwd-impl.md` 增加「两文件版（P1-4）」一节。
+   - `docs/01-fp16-bwd-impl.md` 增加「两文件版（P1-4）」一节。
+- 2026-09-22（第四轮）：**P2-1 完成（bf16 单文件 + 一处 bf16 专属优化）**。
+  - `src/bf16/fa_bwd_bf16_onefile.cu`：fp16 单文件 dtype 参数化（算法/线程映射逐字一致）。
+  - 对拍 vs fp32 ref：S=512 dq/dk/dv max_abs 6.89/8.11/13.65e-3；S=4096 8.90/8.08/14.94e-3，
+    与 FA/TE 同量级（bf16 噪声 ~1e-2），dq/dk 略优于 FA/TE，无系统误差。
+  - **发现**：同款代码 bf16 的 main 比 fp16 慢 2.9×（S4096 main 197 vs 68 ms）——
+    ptxas 对 `__bfloat162float` 走「LDS.U16 标量取半字 + SHF.L」，K/V 行（256B 行距，
+    128B bank 周期整数倍）出现 **9.5-way bank conflict、89% 多余 wavefront、L1/TEX 78.5%**。
+  - **优化**：K/V smem 行距 +2 元素（256→260B，`65 mod 32=1`）⇒ 冲突归零：
+    S=512 main 5.76→1.88 ms（3.1×），S=4096 197.1→42.2 ms（4.7×）；L1/TEX 78.5%→24.9%。
+    现在 bf16 main 已快过 fp16 同款；数值逐位一致。
+  - ncu（padding 后）：DRAM 0.26%、L1TEX 24.9%、Compute 13.5%、occ 6.25%（1 CTA/SM）、
+    waves 0.48、No Eligible 78%。**bound = 延迟/并行度**（fixed-latency stall 37.3%），
+    不再是 smem 访问；下一步靠降 smem/提 occupancy + 张量核。
+  - 性能：ours 0.69 TF(S512) / 1.23 TF(S4096)，约 FA 的 0.5–2%、TE 的 0.5%（标量实现）。
+    S=4096 时 **preprocess 69.4ms > main 42.2ms**（LSE 重算 O(S²) 未分块）成新瓶颈。
+  - 文档 `docs/01b-bf16-bwd-impl.md`；原始输出 `src/bf16/*.out.txt`。
 
 ## 下一步（明确到可执行）
 
-- [ ] **P2-1**：以 `fa_bwd_fp16_kernels.cuh` 为模板做 dtype 参数化（`__half`→模板 `T`），
-  产出 bf16 单文件 `src/bf16/fa_bwd_bf16_onefile.cu`；用 `run.sh` 编译，读同一 dump 目录换 dtype
-  （需先 `harness/fa_bwd_bench.py dump --dtype bf16`），对拍 ref/FA/TE，记录 max diff（bf16 容差 ~1e-2）。
-- [ ] **P2-2**：bf16 两文件拆分为 `_kernels.cuh` + `_main.cu`，行为一致。
+- [ ] **P2-2**：把 bf16 单文件拆成 `src/bf16/fa_bwd_bf16_kernels.cuh`（device：三个 kernel + 常量，
+      含 `kKVStride` padding）+ `fa_bwd_bf16_main.cu`（host：npy/launcher/自测）；
+      用 `scripts/run.sh src/bf16/fa_bwd_bf16_main.cu` 编译，核对与单文件逐指标一致。
 - [ ] 之后进入 P3 fp8（重点，参考 TE 的 E4M3/E5M2 + rowwise scaling）。
-- [ ] （backlog，性能）消 smem bank conflict（行距 padding/向量化 half2）、降低 smem 提高 occupancy、
-      上张量核（mma）+ 流水；preprocess 的 LSE 重算开销后续考虑摊入前向。
+- [ ] （backlog，性能）**preprocess 已成 S=4096 端到端瓶颈**（69ms > main 42ms）：对 LSE 点积分块 +
+      向量化（`__ldg`/float4），或把 LSE 并入前向摊薄；main 侧继续降 smem 提 occupancy、
+      上张量核（mma）+ 流水；fp16 也可同步加 K/V padding。
 
 ## 灵感 / backlog
 
