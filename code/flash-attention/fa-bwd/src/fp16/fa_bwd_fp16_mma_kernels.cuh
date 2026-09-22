@@ -139,6 +139,36 @@ __device__ __forceinline__ void kv_issue_async(const __half* __restrict__ k,
   asm volatile("cp.async.commit_group;\n");
 }
 
+// O10：把一整块 Q/dO（BM 行 × HD 列，half）异步发进 smem。
+// 与 `kv_issue_async` 同构，但用于 Q/dO（每个 CTA 只在 prologue 载入一次）：
+//   * 用 16B `cp.async.cg` 向量化，取代原来的逐元素 `LDG.U16 + STS.U16`（ncu 报 Q/dO 的
+//     标量全局读未被利用满 32B/sector，且 prologue 的全局延迟串在 K/V 之后）。
+//   * 行越界（qi>=S）用普通 smem 写 0（与 K/V 一样，由后续 barrier 保证可见）。
+// 数值与标量路径**逐位相同**（搬的是同样的 half）。PIPE>=1 时 Q/dO 与 K/V 各提交一个
+// commit_group，循环首的 `cp.async.wait_group 0` 一并等待，从而让 Q/dO 的全局延迟与 K/V 重叠。
+template <int HD, int BM>
+__device__ __forceinline__ void qdo_issue_async(const __half* __restrict__ q,
+                                                const __half* __restrict__ do_, int m0, int S,
+                                                int H, int h, int b, int tid, __half* Qd,
+                                                __half* dOd, int LD) {
+  constexpr int HDV = HD / 8;    // 每行 uint4(8 half) 数
+  constexpr int NU  = BM * HDV;  // 总 unit 数
+#pragma unroll
+  for (int u = tid; u < NU; u += THREADS) {
+    const int row = u / HDV, c8 = u % HDV;
+    const int qi = m0 + row;
+    if (qi < S) {
+      const size_t off = (((size_t)(b * S + qi)) * H + h) * HD + c8 * 8;
+      cp_async16(Qd + row * LD + c8 * 8, q + off);
+      cp_async16(dOd + row * LD + c8 * 8, do_ + off);
+    } else {
+      *reinterpret_cast<uint4*>(Qd + row * LD + c8 * 8) = make_uint4(0, 0, 0, 0);
+      *reinterpret_cast<uint4*>(dOd + row * LD + c8 * 8) = make_uint4(0, 0, 0, 0);
+    }
+  }
+  asm volatile("cp.async.commit_group;\n");
+}
+
 // A[M_TILE][K_TILE] 行主序（行距 asld，half）；B 两种布局：
 //   BTRANS=false：Bs=[N_TILE][K_TILE] 行主序（行距 bsld，half）→ ldmatrix.x2；
 //   BTRANS=true ：Bs=[K_TILE][N_TILE] 行主序（行距 bsld，half）→ ldmatrix.x2.trans。
@@ -348,6 +378,28 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
     if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
   };
 
+  // O10：Q 的载入同样向量化（PIPE=1 用 16B cp.async，与 K 一起在循环首 wait 覆盖；
+  // PIPE=0 用标量写）。Q 只依赖本 CTA 的 m 块，行越界写 0。
+  auto issue_q = [&](__half* Qd, int m0) {
+#pragma unroll
+    for (int u = tid; u < LBM * HDV; u += THREADS) {
+      const int row = u / HDV, c8 = u % HDV;
+      const int qi = m0 + row;
+      if (qi < S) {
+        const size_t off = (((size_t)(b * S + qi)) * H + h) * HD + c8 * 8;
+        if constexpr (PIPE) {
+          cp_async16(Qd + row * LD + c8 * 8, q + off);
+        } else {
+#pragma unroll
+          for (int e = 0; e < 8; ++e) Qd[row * LD + c8 * 8 + e] = q[off + e];
+        }
+      } else {
+        *reinterpret_cast<uint4*>(Qd + row * LD + c8 * 8) = make_uint4(0, 0, 0, 0);
+      }
+    }
+    if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
+  };
+
 #pragma unroll
   for (int t = 0; t < 2; ++t) {
     const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
@@ -355,12 +407,7 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
     const int m0 = mblk * LBM;
 
     // ---- 载入本 m 块的 Q（越界补 0）----
-    for (int i = tid; i < LBM * HD; i += THREADS) {
-      int r = i / HD, d = i % HD;
-      int qi = m0 + r;
-      Qs[r * LD + d] =
-          (qi < S) ? q[(((size_t)(b * S + qi)) * H + h) * HD + d] : __float2half(0.f);
-    }
+    issue_q(Qs, m0);
 
     const int ncols = min(S, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
@@ -546,17 +593,23 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
   const int m0 = mblk * BM;
 
   // ---- 载入 Q/dO（越界补 0）----
-  for (int i = tid; i < BM * HD; i += THREADS) {
-    int r = i / HD, d = i % HD;
-    int qi = m0 + r;
-    __half qv = __float2half(0.f), ov = __float2half(0.f);
-    if (qi < S) {
-      size_t idx = (((size_t)(b * S + qi)) * H + h) * HD + d;
-      qv = q[idx];
-      ov = do_[idx];
+  // O10：PIPE>=1 时用 16B `cp.async` 异步发 Q/dO（与 K/V 一起在循环首 `wait_group 0` 等待），
+  // 让 Q/dO 的全局延迟与 K/V 重叠；PIPE==0 无流水语义，保持同步标量读。
+  if constexpr (PIPE >= 1) {
+    qdo_issue_async<HD, BM>(q, do_, m0, S, H, h, b, tid, Qs, dOs, LD);
+  } else {
+    for (int i = tid; i < BM * HD; i += THREADS) {
+      int r = i / HD, d = i % HD;
+      int qi = m0 + r;
+      __half qv = __float2half(0.f), ov = __float2half(0.f);
+      if (qi < S) {
+        size_t idx = (((size_t)(b * S + qi)) * H + h) * HD + d;
+        qv = q[idx];
+        ov = do_[idx];
+      }
+      Qs[r * LD + d] = qv;
+      dOs[r * LD + d] = ov;
     }
-    Qs[r * LD + d] = qv;
-    dOs[r * LD + d] = ov;
   }
 
   const int ncols = causal ? min(S, m0 + BM) : S;
@@ -833,8 +886,10 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
                 int qi = m0 + r;
                 if (qi < S) {
                   float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
-                  base[0] += acc[i][j][q] * scale;
-                  base[1] += acc[i][j][q + 1] * scale;
+                  float2 old = *reinterpret_cast<float2*>(base);
+                  old.x += acc[i][j][q] * scale;
+                  old.y += acc[i][j][q + 1] * scale;
+                  *reinterpret_cast<float2*>(base) = old;
                 }
               }
             }
@@ -861,8 +916,9 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
           int qi = m0 + r;
           if (qi < S) {
             float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
-            base[0] = dqacc[i][j][q];
-            base[1] = dqacc[i][j][q + 1];
+            // O10：相邻两列打包成一次 8B 写（c 为偶数 → 自然 8B 对齐），减少全局 store 事务。
+            *reinterpret_cast<float2*>(base) =
+                make_float2(dqacc[i][j][q], dqacc[i][j][q + 1]);
           }
         }
   }

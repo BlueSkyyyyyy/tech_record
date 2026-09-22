@@ -771,10 +771,46 @@ split-KV，留 backlog。
 
 ---
 
+## 6m. O10：Q/dO 载入向量化 + `cp.async` 重叠 + 打包写回（bf16，main/total 1.03–1.29×）
+
+把 fp16 的 O10（`docs/01` §14c）**逐字 dtype 参数化**到 bf16：新增 `qdo_issue_async<HD,BM>`
+（`__half`→bf16）、主 kernel `PIPE>=1` prologue 的 Q/dO 改 16B `cp.async.cg`（与 K/V 的
+`wait_group 0` 一并等待）、`lse_mma_kernel_bal` 的 Q 改 `issue_q`、dQ 写回（含 HD>128 直接累加
+路径）打包成 `float2`。单/两文件 device 代码**逐字一致**（脚本核对 `identical: True`）。
+
+**数值与 O5b/O8/O6/O6b/O8b/O6c/O7c 逐位相同**（S=512 9.001/12.61/13.65e-3、S=4096
+15.10/13.40/16.31e-3 等），单/两文件逐指标一致。
+
+**性能（同 session A/B，CUDA event，ms）**：
+
+| case | total base → O10 | total 加速 | main base → O10 | main 加速 |
+|---|---|---|---|---|
+| S=512 H16 d128 | 0.1460 → **0.1268** | **1.15×** | 0.0761 → **0.0720** | 1.06× |
+| S=4096 H16 d128 | 2.0824 → **1.9950** | 1.04× | 1.5860 → **1.5237** | 1.04× |
+| S=1024 H32 kv4 | 0.4341 → **0.3761** | **1.15×** | 0.3075 → **0.2621** | 1.17× |
+| S=256 H2 d512 | 0.2985 → **0.2285** | **1.31×** | 0.2022 → **0.1672** | 1.21× |
+| S=512 H4 d512 | 0.5319 → **0.4343** | **1.22×** | 0.3766 → **0.3257** | 1.16× |
+| S=1024 H2 d512 | 0.9320 → **0.8205** | **1.14×** | 0.7160 → **0.6584** | 1.09× |
+| S=1024 H40 kv8 | 0.5201 → **0.4589** | 1.13× | 0.3712 → 0.3215 | 1.15× |
+| S=1024 H64 kv1 | 0.7151 → **0.6359** | 1.13× | 0.5106 → 0.4606 | 1.11× |
+
+收益同 fp16：LSE 的 Q 向量化（preprocess 0.0533→0.0406）+ 主 kernel Q/dO 的 `cp.async` 重叠
+（GQA/MQA/MLA main 1.1–1.2×）；大 S 收益最小（prologue 占比小）。
+
+**ncu（main，S=4096，`(64,64,2)`）**：Duration **1.55 ms**、Executed Instructions
+**342,052,864**（与 fp16 O10 **完全相同**）、regs 250 / smem 105.47KB / 2 CTA/SM、Waves 3.88；
+`long_scoreboard` 0.89、`mio_throttle` 0.70、`wait` 2.04。**墙仍 = `wait` + L2 + 低 occupancy**。
+
+原始输出 `src/bf16/fa_bwd_bf16_mma_main_o10_{allshapes,ncu_s4096}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o10_*.out.txt`、`src/bf16/fa_bwd_bf16_o10_fa3_te_baseline.out.txt`。
+
+---
+
 ## 8. 下一步
 
 见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）、O8（preprocess mma，§6f）、O6（main
 `cp.async` 双缓冲，§6g）、O6b（K/V 降 smem 回 3 CTA/SM + A 转置读，§6h）、O8b（LSE 负载
 均衡 + cp.async，§6i）、O6c（tile 几何参数化 + 小网格自适应，§6j）、O7c（LSE/D 预装 +
-float4 试错，§6k）、MLA 张量核（§6l）已完成**；接下来是 **O9**（wgmma+TMA 对标 FA3）。
-backlog：fp8 侧残余 red（O7b）、MLA 降 smem 冲 2 CTA/SM / split-KV。
+float4 试错，§6k）、MLA 张量核（§6l）、O10（Q/dO 向量化 + cp.async 重叠，§6m）已完成**；
+接下来是 **O9**（wgmma+TMA 对标 FA3）。backlog：fp8 侧残余 red（O7b）、MLA 降 smem
+冲 2 CTA/SM / split-KV。

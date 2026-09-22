@@ -892,7 +892,40 @@
     `..._mma_onefile_p5mla_s512h4.out.txt`、`..._mma_main_p5mla_reg_d128_s512.out.txt`、
     `src/fp16/fa_bwd_fp16_main_p5mla_*.out.txt`（标量基线）、
     `..._mma_main_p5mla_ncu_{sol,stall}_s1024h2.out.txt`；`src/bf16/` 同构文件（`..._p5mla_*`）；
-    文档 `docs/01` §14b、`docs/01b` §6l、`docs/04` §7.8。
+     文档 `docs/01` §14b、`docs/01b` §6l、`docs/04` §7.8。
+
+- 2026-09-23（第三十七轮）：**O10 完成（fp16/bf16：Q/dO 载入向量化 + `cp.async` 重叠 + 打包写回，
+  端到端 1.04–1.32×）**。
+  - 动机（O7c ncu 的 `Source Counters`）：① 主 kernel prologue 的 Q/dO 仍是逐元素
+    `LDG.U16 + STS.U16`（global 平均仅用满 26.4/32 B/sector，且每元素做整除取模），其同步延迟
+    **串在** K/V 的 `cp.async` 之前；② `lse_mma_kernel_bal` 的 Q 同样是标量读；③ dQ 写回为两次
+    4B store（global stores 仅用满 16/32 B/sector）。
+  - **改动（单/两文件 device 代码逐字一致，脚本核对 `identical: True`）**：① 新增
+    `qdo_issue_async<HD,BM>`（16B `cp.async.cg` 发 Q/dO，行越界写 0），主 kernel `PIPE>=1`
+    prologue 改用它（`PIPE==0` 保持同步标量读），与 K/V 各自 `commit_group`、循环首
+    `wait_group 0` 一并等待 ⇒ Q/dO 延迟与 K/V 重叠；② `lse_mma_kernel_bal` 的 Q 改 `issue_q`
+    （PIPE=1 cp.async / PIPE=0 标量）；③ dQ 写回（含 HD>128 直接累加）相邻两列打包 `float2`。
+  - **数值与 O5/O5b/O8/O6/O6b/O8b/O6c/O7c 逐位相同**（fp16 S512 1.671/1.771/1.899e-3、
+    S4096 1.883/1.734/1.966e-3、GQA kv4 2.134/3.305/3.850e-3、MLA S1024H2 1.987/1.712/1.848e-3；
+    bf16 S512 9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3），单/两文件逐指标一致。
+  - **性能（同 session A/B：改动前二进制 vs O10，CUDA event）**：fp16 **total** S=512
+    0.1485→**0.1256ms（1.18×）**、S=4096 2.0965→**2.0044（1.05×）**、GQA kv4 0.4360→**0.3767
+    （1.16×）**、MLA S256H2 0.2990→**0.2272（1.32×）**、MLA S512H4 0.5309→**0.4357（1.22×）**、
+    MLA S1024H2 0.9417→**0.8230（1.14×）**；main GQA kv4 0.3062→**0.2620（1.17×）**、
+    MLA S256H2 1.22×。bf16 同构（S512 1.15×、S4096 1.04×、GQA kv4 1.15×、MLA S256H2 1.31×，
+    total）。收益主要来自 **LSE 的 Q 向量化**（S=512 preprocess 0.0536→0.0405）与
+    **主 kernel Q/dO 的 `cp.async` 重叠**（小网格更明显）；大 S 收益最小（prologue 占比小）。
+  - **ncu（main, S=4096, (64,64,2)）**：fp16 Duration 1.61→**1.48ms**、Executed Instructions
+    350.9M→**342.1M（−2.5%）**、`long_scoreboard` 1.38→**0.89**、`mio_throttle` 0.49→0.70、
+    shared load 多余 wavefront 15.4%→**12.2%**；regs 250 / smem 105.47KB / 2 CTA/SM 不变。
+    bf16 逐项相同（Executed Instructions 342,052,864）。**墙仍 = `wait`（mma 依赖）+ L2 + 低 occ**，
+    只有 O9 能同时解。
+  - **对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py`）**：fp16 MHA S=4096 FA3
+    0.3242ms/848TF、TE 0.4413/623、FA2 0.7287/377 ⇒ ours total 时间 **6.18×**（O7c 6.47×）；
+    GQA kv4 S=1024 FA3 0.0821ms/418TF ⇒ 4.59×。bf16 同量级。
+  - 原始输出 `src/fp16/fa_bwd_fp16_mma_main_o10_{ab,allshapes,ncu_s4096,ncu_s512,stall_s4096}.out.txt`、
+    `src/fp16/fa_bwd_fp16_mma_onefile_o10_*.out.txt`、`src/fp16/fa_bwd_fp16_o10_fa3_te_baseline.out.txt`；
+    `src/bf16/` 同构文件（`..._o10_*`）；文档 `docs/01` §14c、`docs/01b` §6m、`docs/04` §2.1/§2.2。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -1013,6 +1046,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > （`HD` 模板 128/512、GEMM3/4/5 N-tile 循环、dQ 全局累加），main 5.2–5.8×（fp16）/3.7–4.1×（bf16），
 > 数值同噪声、MHA 回归逐位不变。详见 `docs/01` §14b、`docs/01b` §6l、`docs/04` §7.8。
 > MLA 的下一步（降 smem 冲 2 CTA/SM / split-KV）列 backlog。
+>
+> **旁支已完成（第三十七轮 O10）**：fp16/bf16 的 **Q/dO 载入向量化（16B `cp.async`）+ 与 K/V
+> 重叠 + dQ `float2` 写回**（`qdo_issue_async`、LSE 的 Q 同样向量化）。端到端 **1.04–1.32×**、
+> 数值逐位不变；ncu `long_scoreboard` 1.38→0.89、指令数 −2.5%。这是 O9 之前对**现有数据通路**
+> 的最后一次清理——**墙仍是 `wait` + L2 + 2 CTA/SM，只有 O9 的更低-smem 数据通路能继续推进**。
+> 详见 `docs/01` §14c、`docs/01b` §6m。
 
 > **用户新增需求（已完成）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
 > 目前 FA/TE 做不了 MLA 反向，ML A 的性能数字只能由 ours 提供。
