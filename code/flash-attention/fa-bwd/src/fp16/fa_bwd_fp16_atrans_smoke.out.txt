@@ -1,0 +1,5 @@
+=== fp16 ldmatrix.x4.trans（A[K][M] 转置布局）取 A 片段最小复现（O6b）===
+M=16 N=8 K=64  ASLD=72 PSLD=24
+  notrans-vs-trans: max_abs=0.000e+00  bitwise_diff=0/128
+  time=0.00450 ms
+=== PASS（Aᵀ[K][M] + ldmatrix.x4.trans 与 A[M][K] + ldmatrix.x4 逐位一致） ===

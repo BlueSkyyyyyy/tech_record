@@ -508,6 +508,38 @@ GQA kv4 12.0/21.25/31.56e-3——只改搬运、不改数学，结果 bitwise �
 `src/bf16/fa_bwd_bf16_mma_main_o6_ncu_s4096.out.txt`、
 `src/bf16/fa_bwd_bf16_o6_fa3_te_baseline.out.txt`。
 
+## 6h. O6b：K/V 双缓冲压回 3 CTA/SM + `ldmatrix.x4.trans` 消转置副本
+
+bf16 复用 fp16 的 O6b（见 `01-fp16-bwd-impl.md` §12b），**逐字 dtype 参数化**：
+① GEMM3/GEMM4 的 A 改 `ldmatrix.x4.trans` 从 `Ps/dSs[BM][BN]` 直读（bit3/bit4 互换），
+删掉 `PsT/dSsT` 两份转置副本（`mma_block_bf16` 加 `ATRANS`）；② 只双缓冲 K、V 单缓冲
+且在 GEMM2 后预取。`--pipe2`；host 按网格 `(S/64)×H×B ≥ 396` 自动选 O6b/O6。
+smem `83.97→71.17KB`、Block Limit Shared Mem 2→3、occ 12.5%→**18.75%**（168 regs）。
+
+**实测（同 session A/B，CUDA event，main-only）**：
+
+| shape | nopipe (ms) | **O6 (ms)** | **O6b (ms)** | O6/O6b |
+|---|---|---|---|---|
+| MHA S=512 (grid=128, 自动选 O6) | 0.1900 | **0.0839** | 0.0873 | 0.96× |
+| MHA S=4096 (grid=1024) | 4.4966 | 1.8941 | **1.8643** | 1.02× |
+| GQA q32/kv4 S=1024 (grid=512) | 0.6346 | 0.3810 | **0.3584** | 1.06× |
+
+端到端：S=512 0.1856ms（走 O6）、S=4096 **2.9605ms（46.42 TF，走 O6b）**、
+GQA kv4 **0.5764ms（29.80 TF，走 O6b）**。单/两文件逐指标相同、数值**逐位一致**。
+
+**数值（与 O5b/O8/O6 逐位相同）**：S=512 9.001/12.61/13.65e-3；S=4096 15.10/13.40/16.31e-3；
+GQA kv4 12.01/21.25/31.56e-3。
+
+**ncu（main, S=4096, PIPE=2）**：Duration **1.94ms**、DRAM 3.32% / **L1TEX 71.71%** /
+**L2 60.39%** / Compute 31.42% / 168 regs / occ 16.86%（3 CTA/SM）。与 fp16 版逐项一致：
+墙 = **L1/TEX + L2 吞吐 + fixed-latency(`wait`)**。
+
+**对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`）：FA3 MHA S4096
+**0.3205ms/858 TF**、TE 0.4408/624；ours total 2.961ms/46.4 TF ⇒ **FA3 的 5.4%**。
+原始输出 `src/bf16/fa_bwd_bf16_mma_main_o6b_{s512,s4096,gqa_kv4}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o6b_{s512,s4096}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_main_o6b_ncu_main_s4096.out.txt`。
+
 ---
 
 ## 7. 复现命令
@@ -540,6 +572,6 @@ docker exec kernel_lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py bench
 ## 8. 下一步
 
 见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）、O8（preprocess mma，§6f）、O6（main
-`cp.async` 双缓冲，§6g）已完成**；接下来是 O6b/降 smem（把 K/V 双缓冲压回 3 CTA/SM）、
-O9（wgmma+TMA 对标 FA3）、O7（去 atomic）、O8b（LSE 尾波/occupancy）。
+`cp.async` 双缓冲，§6g）、O6b（K/V 降 smem 回 3 CTA/SM + A 转置读，§6h）已完成**；
+接下来是 O9（wgmma+TMA 对标 FA3）、O7（去 atomic）、O8b（LSE 尾波/occupancy）。
 backlog：fp8 侧残余 red（O7b）、MLA 降 smem / 张量核。

@@ -678,6 +678,41 @@
     `src/bf16/fa_bwd_bf16_mma_{main,onefile}_o6_*.out.txt`、`..._o6_ncu_s4096.out.txt`、
     `src/bf16/fa_bwd_bf16_o6_fa3_te_baseline.out.txt`；文档 `docs/01` §12、`docs/01b` §6g、`docs/04` §2.1/§2.2/§3。
 
+- 2026-09-23（第三十轮）：**O6b 完成（K/V 降 smem 回 3 CTA/SM + A 转置读，fp16/bf16 单/两文件）**。
+  - 背景：O6 的墙是 `wait`+`short_scoreboard`+L1/TEX，且代价是 smem 83.97KB → **2 CTA/SM**。
+    O6b 在不牺牲流水的前提下把 smem 压回 3 CTA/SM 预算（≤77.8KB）并**减少 smem 访存量**。
+  - **改动（单/两文件 device 逐字一致，脚本核对通过）**：① 新增 smoke
+    `src/fp16/fa_bwd_fp16_atrans_smoke.cu` 证明「A 存 `[K][M]` + `ldmatrix.x4.trans`
+    （地址 bit3/bit4 互换）」与「A `[M][K]` + `ldmatrix.x4`」**逐位一致**（`bitwise_diff=0/128`）；
+    于是 GEMM3/GEMM4 的 A 直接从 `Ps/dSs[BM][BN]` 读，**删掉 `PsT/dSsT` 两份转置副本**
+    （`mma_block_f16/bf16` 加 `ATRANS`）。② **只双缓冲 K**，V 单缓冲且在 GEMM2 后的 barrier
+    之后才发下一 tile（V 的唯一消费者是 GEMM2，延迟由 GEMM3/4/5 盖住），省一整个 V 缓冲。
+  - **smem 83.97→71.17KB**、Block Limit Shared Mem 2→**3**、理论 occ 12.5%→**18.75%**
+    （168 regs、0 spill）。host 加自动档：`grid=(S/64)*H*B ≥ 396`（3 CTA/SM 一个满波）用 O6b(2)，
+    否则 O6(1)；`--nopipe/--pipe/--pipe2` 可强制。
+  - **数值与 O5/O8/O6 逐位相同**：fp16 S512 1.671/1.771/1.899e-3、S4096 1.883/1.734/1.966e-3、
+    GQA kv4 2.134/3.305/3.850e-3；bf16 S512 9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3、
+    GQA kv4 12.01/21.25/31.56e-3。单/两文件逐位一致。
+  - **性能（同 session A/B，event，main-only）**：fp16 S4096 O6 1.900→**O6b 1.860ms**、
+    GQA kv4 0.380→**0.357ms**；S512（grid=128 单波）O6 0.0832 < O6b 0.0866 ⇒ 走 O6。bf16 同构。
+    端到端 fp16 total S4096 **2.9517ms（46.56 TF）**、GQA kv4 **0.5720ms（30.0 TF）**；
+    bf16 2.9605/0.5764。
+  - **对标**（同 session 纯反向 `fa_vs_te_bwd_only.py`）：FA3 MHA S4096 fp16 0.3248ms/846、
+    bf16 0.3205/858；GQA kv4 FA3 0.0823ms/417 ⇒ ours total 为 FA3 的 **5.5%（fp16）/5.4%（bf16）**、
+    GQA kv4 **7.2%**（时间比 9.1× / 6.9×）。
+  - **ncu（main, S4096, PIPE=2）**：fp16 Duration 1.86ms、DRAM 3.47% / **L1TEX 71.87%** /
+    **L2 63.09%** / Compute 29.77% / occ **16.90%**（71.17KB, 3 CTA/SM）/ Waves 2.59；stall
+    `wait 1.88 + long_scoreboard 1.79 + short 0.81 + not_selected 0.37`。bf16 逐项一致。
+    **结论**：occ 从 11.8%→16.9%、Duration ~5%，但 V 预取晚让 `long_scoreboard` 1.09→1.79，
+    **墙已是 L1/L2 吞吐 + `wait`**（加 warp 收益有限）⇒ 下一步 **O7（去 atomic 降 L1/L2）**。
+  - 原始输出 `src/fp16/fa_bwd_fp16_atrans_smoke.out.txt`、
+    `src/fp16/fa_bwd_fp16_mma_main_o6b_{s512,s4096,gqa_kv4}.out.txt`、
+    `src/fp16/fa_bwd_fp16_mma_onefile_o6b_{s512,s4096}.out.txt`、
+    `..._o6b_ncu_main_s4096.out.txt`、`..._o6b_stall_s4096.out.txt`；
+    `src/bf16/fa_bwd_bf16_mma_main_o6b_*.out.txt`、`..._onefile_o6b_*.out.txt`、
+    `..._o6b_ncu_main_s4096.out.txt`；`src/fa_bwd_o6b_fa3_te_baseline.out.txt`；
+    文档 `docs/01` §12b、`docs/01b` §6h、`docs/04` §2.1/§2.2/§3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -708,10 +743,16 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 - [x] **O6** `cp.async` 双缓冲（对齐 fp8 的 O3）。**已完成（第二十九轮，fp16/bf16）**：
       `cp.async.cg` 16B 双缓冲 K/V、每 tile barrier 3→2；main **2.26–2.41×**（S4096
       4.51→1.87ms）、端到端 5.58→**3.04ms（45 TF）**，数值与 O5/O8 逐位相同；
-      ncu `long_scoreboard` 7.35→1.12，新墙 = `wait`(fixed-latency)+`short_scoreboard`。
-      代价 smem 66.56→83.97KB、3→2 CTA/SM。详见 `docs/01` §12、`docs/01b` §6g。
-      **遗留 O6b**：K/V 双缓冲压回 3 CTA/SM（只双缓冲 K / 更省的转置布局）。
-- [ ] **O7** dQ/dK/dV 去 `atomicAdd`，改分块 `*_accum` + convert（确定性 + 消竞争）。
+       ncu `long_scoreboard` 7.35→1.12，新墙 = `wait`(fixed-latency)+`short_scoreboard`。
+       代价 smem 66.56→83.97KB、3→2 CTA/SM。详见 `docs/01` §12、`docs/01b` §6g。
+- [x] **O6b**：把 O6 的 K/V 双缓冲 smem 压回 3 CTA/SM。**已完成（第三十轮，fp16/bf16）**：
+      ① GEMM3/GEMM4 的 A 改 `ldmatrix.x4.trans` 从 `Ps/dSs[BM][BN]` 直读、删掉 `PsT/dSsT`
+      （smoke `fa_bwd_fp16_atrans_smoke.cu` 逐位一致）；② 只双缓冲 K、V 单缓冲在 GEMM2 后预取。
+      smem **83.97→71.17KB、3 CTA/SM、occ 11.8%→16.9%**；main S4096 1.900→**1.860ms**、
+      GQA kv4 0.380→**0.357ms**（S512 grid=128 单波 O6 反快，host 按网格自动选）。
+      数值与 O5/O8/O6 逐位相同。ncu 新墙 = **L1/TEX 71.9% + L2 63.1% + `wait`**。
+      详见 `docs/01` §12b、`docs/01b` §6h。
+- [ ] **O7** dQ/dK/dV 去 `atomicAdd`，改分块 `*_accum` + convert（确定性 + 消竞争）。**← 当前第一瓶颈（L1/L2 吞吐）**
 - [x] **O8** preprocess 的 LSE/D 改 mma 分块（对齐 fp8 的 O1）。**已完成（第二十八轮，fp16/bf16）**：
       `lse_mma_kernel<128>`（`mma.m16n8k16` QKᵀ + online-softmax + 4-lane `shfl`）+ 独立
       `delta_kernel<128>`；preprocess 17–70×、端到端 **4.4–13.2×**（S4096 total 73.3→5.58ms，
@@ -742,9 +783,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    `cp.async.cg` 16B 双缓冲 K/V，main **2.26–2.41×**（S4096 4.51→1.87ms）、端到端
 >    5.58→**3.04ms（45 TF，FA3 的 5.4%）**，数值逐位不变；ncu `long_scoreboard` 63%→~1 成。
 >    **代价**：smem 66.56→83.97KB、3→2 CTA/SM。
-> 4. **O6b**：把 K/V 双缓冲压回 3 CTA/SM（只双缓冲 K、或更省的转置布局），或先攻
->    `wait`/`short_scoreboard`（新墙 = fixed-latency + smem→ldmatrix 依赖）。**← 当前第一瓶颈**
+> 4. **O6b**：把 K/V 双缓冲压回 3 CTA/SM（只双缓冲 K、或更省的转置布局）。**已完成（第三十轮）**：
+>    K 双缓冲 + V 单缓冲后段预取 + `ldmatrix.x4.trans` 消 `PsT/dSsT`，smem 83.97→**71.17KB**、
+>    3 CTA/SM；main S4096 1.900→1.860ms、GQA kv4 0.380→0.357ms（S512 单波走 O6，host 自动选）。
+>    ncu 新墙 = **L1/L2 吞吐 + `wait`**（occ 已不是瓶颈）。
 > 5. **O7**：dQ/dK/dV 去 `atomicAdd`（分块 accum + convert；fp8 已做，移植）。
+>    **← 当前第一瓶颈（L1/L2 吞吐）**
 > 6. **O9**：`wgmma`+TMA+warp specialization，对标 FA3。
 > 目标：fp16/bf16 main 先到 FA2 水平，再逼近 FA3/TE；每步用 `harness/fa_vs_te_bwd_only.py`（纯反向、三列）验收。
 
@@ -789,10 +833,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > **O8（preprocess mma）与 O6（main cp.async 双缓冲）均已完成**：O5 把 fp16/bf16 main 换成
 > 张量核后，O8 打掉标量 preprocess（S=4096 68.7→0.99ms），O6 用 `cp.async.cg` 双缓冲把 main 的
 > **全局访存延迟 bound**（ncu `long_scoreboard` 63%）消掉（S=4096 4.51→1.87ms）——端到端
-> 5.58→**3.04ms（45 TF，FA3 的 5.4%）**，数值逐位不变。新墙 = `wait`(fixed-latency)+
-> `short_scoreboard`(smem→ldmatrix)+L1/TEX（2 CTA/SM）。**下一项候选 = O6b（降 smem 回 3 CTA/SM）、
-> O7（去 atomic）、O9（wgmma+TMA）**；此外 fp8 侧剩余 108.5M red（dK/dV 跨 mblk/hkv 竞争）
-> 仍可做 O7b；MLA 降 smem / wgmma+TMA（O9）亦在列。
+> 5.58→**3.04ms（45 TF，FA3 的 5.4%）**，数值逐位不变。**O6b 又把 K/V 双缓冲 smem
+> 83.97→71.17KB（K 双缓冲 + V 单缓冲后段预取 + `ldmatrix.x4.trans` 消转置副本）回到 3 CTA/SM**，
+> main S=4096 1.90→1.86ms、端到端 3.04→**2.95ms（46.6 TF）**。**当前新墙 = L1/TEX 72% +
+> L2 63% 吞吐 + `wait`**。**下一项 = O7（dQ/dK/dV 去 atomic，降 L1/L2 流量）、O9（wgmma+TMA）**；
+> 此外 fp8 侧剩余 108.5M red（dK/dV 跨 mblk/hkv 竞争）可做 O7b；MLA 降 smem / wgmma+TMA 亦在列。
 > 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
 
 - [x] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms。
