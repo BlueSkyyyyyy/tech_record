@@ -285,10 +285,15 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --launch-count 1 \
 - `TE fused_attn` 报 `Invalid combination of data type and sequence length`（训练口径反向不支持 head_dim=512，
   与 `te-perf/results_summary.md` 一致：TE bwd 训练最大 head_dim=256，MLA qk≤192/v≤128 附近）。
 
-因此这三个形状**目前只有 fp32 ref**（已 dump 输入与 `ref_dq/dk/dv`），**没有 FA/TE 基线**。
-要给出性能数字，必须用**我们自己的 kernel**——但当前 ours 三版本均为 `head_dim=128`、MHA，
-尚不支持 `head_dim=512` 与 GQA。这是下一阶段任务（见 ROADMAP「下一步」）：
+因此这三个形状只有 fp32 ref（输入与 `ref_dq/dk/dv` 已 dump），**没有 FA/TE 基线**。
 
-- [ ] 让 fp16/bf16/fp8 反向支持 **GQA/MQA**（K/V 头数 = `Hkv`，Q 头共享 KV）；
-- [ ] 支持 **head_dim=512（MLA 主注意力）**，重点解决 smem/寄存器容量与 K/V 在 smem 的占用；
-- [ ] 用 dump 的 MLA 输入/ref 输出做对拍，补上 MLA 的性能数字（对标 FlashMLA 思路）。
+**P5-1/P5-2 之后 ours(fp16) 已支持 GQA/MQA 与 head_dim=512**（`HD`/`BM` 模板化，`docs/01` §9）：
+
+| MLA case (B1, D=Dv=512, causal, fp16) | ours-vs-ref dq/dk/dv max_abs | ours preprocess/main/total | TFLOPS | 峰值占比 |
+|---|---|---|---|---|
+| S=256 H=2 | 1.638 / 1.582 / 1.753e-3 | 0.211 / 1.058 / 1.278 ms | 0.21 | 0.02% |
+| S=512 H=4 | 2.324 / 2.916 / 1.724e-3 | 1.291 / 2.080 / 3.491 ms | 0.62 | 0.06% |
+| S=1024 H=2 | 1.250 / 1.454 / 2.058e-3 | 2.463 / 4.143 / 6.789 ms | 0.63 | 0.06% |
+
+数值均在 fp16 噪声量级；ncu bound = smem bank conflict + 1 CTA/SM 低 occupancy（135KB smem）。
+后续待办看 ROADMAP「下一步」：bf16/fp8 复用同改造、MLA 优化（冲 2 CTA/SM / 张量核 / 对标 FlashMLA）。

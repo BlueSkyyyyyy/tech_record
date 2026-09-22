@@ -256,8 +256,93 @@ docker exec kernel_lab python "$PWD/harness/fa_bwd_bench.py" bench --requested -
 
 ---
 
-## 9. 下一步
+## 9. MLA head_dim=512 支持（P5-2）
 
-见 `../ROADMAP.md`：P1~P4 已完成；P5-1（本节，fp16 GQA/MQA）完成，其后
-**P5-2 MLA head_dim=512**、**P5-3 bf16/fp8 复用 GQA 改造**、P5-4 fp8 GQA/MQA 对拍。
-性能优化（消 bank conflict / 提 occupancy / 张量核）列入 backlog。
+生产 MLA 的**主注意力** head_dim 远大于 128（这里按 `REQUESTED_SHAPES` 用 `D=512` 建模；
+`FA2/FA3` 与 `TE` 的训练反向都只支持到 `head_dim≤256`，所以这三个 case **只有 fp32 ref 可对**，
+性能数字也只能由 ours 提供）。把 `fa_bwd_fp16` 的 `head_dim` 从编译期常量改成**模板参数**即可，
+算法、数学口径、线程映射全部不变。
+
+### 9.1 改动：`HD` 模板化 + `BM` 随容量选择
+
+- 新增 `template <int HD, int BM> struct BwdTraits`：`WM_ROWS=BM/4`、`WN_ROWS=BN/4`、
+  `NCH=HD/32`（lane 覆盖 head_dim 的分段数），以及 `smem_bytes`（随 `HD`、`BM` 编译期求出）。
+- `fa_bwd_fp16_kernel` 改为 `template <int HD, int BM>`；`preprocess_kernel` 增加运行时 `HD` 入参；
+  三处 `for (int kk = 0; kk < 4; ++kk)` 的 head-dim 分段循环统一改成 `kk < NCH`、`acc[4]→acc[NCH]`。
+- **容量约束决定 `BM`**：`dQs[BM*HD]` 是 fp32，占 smem 大头。`HD=512` 时若沿用 `BM=64`，
+  仅 `dQs` 就 128KB、总 smem 336KB > 227KB 上限。故：
+  - **`HD=128` → `BM=64`**：与 P1/P5-1 的实例**逐字等价**，MHA/GQA 回归逐位不变；
+  - **`HD=512` → `BM=16`**：`Qs/dOs` 各 16KB、`Ks/Vs` 各 32KB、`dQs` 32KB、`Ss/Ps` 各 2KB，
+    总 **135.17KB**（`BM=16,BN=32`），1 CTA/SM。
+- host 用 `launch_bwd_main<HD,BM>` 分派（`D==128` / `D==512`，其余报错），并对每个模板实例
+  分别 `cudaFuncSetAttribute(MaxDynamicSharedMemorySize)`；单文件与两文件 device 代码同源。
+
+### 9.2 数值对拍（三个 MLA dump case，ours-vs-ref，fp16 causal）
+
+FA/TE 无反向（`fa=NA`、`te=NA`），只能对 fp32 ref：
+
+| case (B1 D=512 causal) | dq max_abs | dk max_abs | dv max_abs |
+|---|---|---|---|
+| S=256, H=2 | 1.638e-3 | 1.582e-3 | 1.753e-3 |
+| S=512, H=4 | 2.324e-3 | 2.916e-3 | 1.724e-3 |
+| S=1024, H=2 | 1.250e-3 | 1.454e-3 | 2.058e-3 |
+
+**结论**：全部在 fp16 噪声量级（~1–3e-3），与 D=128 路径同量级、无系统误差。
+单文件与两文件结果**逐位一致**（如 S=1024H2 均为 1.250/1.454/2.058e-3）。原始输出：
+`src/fp16/fa_bwd_fp16_main_p52_mla_{s256,s512h4,s1024h2}.out.txt`、
+`src/fp16/fa_bwd_fp16_onefile_p52_mla_*.out.txt`。
+
+MHA `D=128` 回归（两文件/单文件）：S=512 `1.671/1.680/1.899e-3`、S=4096 `1.499/1.572/2.225e-3`，
+与 P1 记录**逐位相同**，证明模板化未改动 D=128 路径。
+
+### 9.3 ncu（main kernel，S=1024 H=2 D=512，`--set full`）
+
+```
+Duration                 ms    5.06       L1/TEX Cache Throughput  %  53.21  <- 最高
+DRAM Throughput          %    0.10       L2 Cache Throughput      %   1.74
+Compute (SM) Throughput  %    7.16       No Eligible              %  85.50
+Theoretical Occupancy    %    6.25       Achieved Occupancy       %   6.25
+Waves Per SM                  0.97       Registers Per Thread            48
+Dynamic Shared Mem/block  Kbyte  135.17  Block Limit Shared Mem   block  1
+```
+
+stall 表：`MIO scoreboard ≈36%`（等 smem）、shared load **76.5% 多余 wavefront**（bank conflict）。
+bound 与 D=128 标量版完全同类：**smem 访问（bank conflict）+ 被 135KB smem 卡住的 1 CTA/SM 低
+occupancy**，DRAM/算力都不是墙。原始输出
+`src/fp16/fa_bwd_fp16_main_p52_ncu_main_s1024h2.out.txt`。
+
+### 9.4 性能（CUPTI/CUDA-event，H100 FP16 峰值 ≈989 TFLOPS）
+
+FLOPs 口径 `4·B·S·H·S·(D+Dv)`，`D=Dv=512`。MLA 反向无 FA/TE 基线可比：
+
+| shape | preprocess | main | total | TFLOPS | 峰值占比 |
+|---|---|---|---|---|---|
+| S=256 H=2 | 0.211 ms | 1.058 ms | 1.278 ms | 0.21 | 0.02% |
+| S=512 H=4 | 1.291 ms | 2.080 ms | 3.491 ms | 0.62 | 0.06% |
+| S=1024 H=2 | 2.463 ms | 4.143 ms | 6.789 ms | 0.63 | 0.06% |
+
+同进程 GQA/MQA FP16 基线（`fa_bwd_bench.py bench --requested --dtype fp16`）：
+FA 155–187 TF、TE 240–278 TF（MLA 三行均 `NA`）。ours 是**标量 CUDA-core + 1 CTA/SM**，
+仅为峰值的 ~0.06%，符合预期；后续 fp8 张量核路径（P5-3/P5-4）才是性能目标。原始输出
+`src/fa_bwd_bench_requested_fp16_p52.out.txt`。
+
+### 9.5 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+scripts/run.sh src/fp16/fa_bwd_fp16_main.cu \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16 --iters=50
+scripts/run.sh src/fp16/fa_bwd_fp16_onefile.cu \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp16 --iters=50
+scripts/ncu.sh src/fp16/fa_bwd_fp16_main.cu --set full --kernel-name regex:fa_bwd_fp16_kernel \
+    --launch-count 1 -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16 --iters=1
+docker exec kernel_lab python "$PWD/harness/fa_bwd_bench.py" bench --requested --dtype fp16
+```
+
+---
+
+## 10. 下一步
+
+见 `../ROADMAP.md`：P1~P4 已完成；P5-1（fp16 GQA/MQA）与 **P5-2（本节，MLA head_dim=512）** 完成；
+其后 **P5-3 bf16/fp8 复用 GQA/MLA 改造**、P5-4 fp8 GQA/MQA 对拍；MLA 的性能优化（更小 smem
+冲 2 CTA/SM、张量核）与其余消 bank conflict / 提 occupancy 一并列入 backlog。

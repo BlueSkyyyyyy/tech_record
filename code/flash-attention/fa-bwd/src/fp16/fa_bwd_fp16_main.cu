@@ -107,6 +107,20 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // =============================================================================
 // host / launcher / self-test
 // =============================================================================
+// P5-2：按 head_dim 分派到模板实例。HD=128 用 BM=64（MHA，回归逐位不变），
+// HD=512 用 BM=16（MLA 主注意力，smem 容量所限）。
+template <int HD, int BM>
+static void launch_bwd_main(dim3 mg, const __half* q, const __half* k, const __half* v,
+                            const __half* do_, const float* delta, const float* lse,
+                            float* dq_acc, float* dk_acc, float* dv_acc, int S, int H, int Hkv,
+                            float scale, int causal) {
+  constexpr int smem = BwdTraits<HD, BM>::smem_bytes;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_kernel<HD, BM>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  fa_bwd_fp16_kernel<HD, BM><<<mg, THREADS, smem>>>(q, k, v, do_, delta, lse, dq_acc, dk_acc,
+                                                    dv_acc, S, H, Hkv, scale, causal);
+}
+
 int main(int argc, char** argv) {
   std::string dir = "/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16";
   std::string o_name = "ref_o";
@@ -142,8 +156,8 @@ int main(int argc, char** argv) {
   const int B = (int)q_np.shape[0], S = (int)q_np.shape[1];
   const int H = (int)q_np.shape[2], D = (int)q_np.shape[3];
   const int Hkv = (int)k_np.shape[2];   // GQA/MQA：KV 头数（MHA 时 Hkv==H）
-  if (D != kHeadDim) {
-    fprintf(stderr, "本版本仅支持 head_dim=%d（当前 %d）\n", kHeadDim, D);
+  if (D != 128 && D != 512) {
+    fprintf(stderr, "本版本支持 head_dim=128（MHA/GQA）或 512（MLA）；当前 %d\n", D);
     return 1;
   }
   if ((int)v_np.shape[2] != Hkv || (int)v_np.shape[3] != D) {
@@ -192,11 +206,7 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemcpy(d_v, vh.data(), nkv * sizeof(__half), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_o, oh.data(), n * sizeof(__half), cudaMemcpyHostToDevice));
 
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_kernel,
-                                  cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES));
-
   dim3 pg(S, H, B);
-  dim3 mg((S + BM - 1) / BM, H, B);
   const int cvt_threads = 256;
   const int cvt_blocks =
       (int)std::min<size_t>((std::max(n, nkv) + cvt_threads - 1) / cvt_threads, 65535);
@@ -205,6 +215,23 @@ int main(int argc, char** argv) {
   __half* d_do = nullptr;
   CUDA_CHECK(cudaMalloc(&d_do, n * sizeof(__half)));
   CUDA_CHECK(cudaMemcpy(d_do, doh.data(), n * sizeof(__half), cudaMemcpyHostToDevice));
+
+  // 按 head_dim 选择 BM 并分派 main kernel。
+  auto run_main = [&]() {
+    if (D == 128) {
+      dim3 mg((S + 63) / 64, H, B);
+      launch_bwd_main<128, 64>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                               d_dv_acc, S, H, Hkv, scale, (int)causal);
+    } else {
+      dim3 mg((S + 15) / 16, H, B);
+      launch_bwd_main<512, 16>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                               d_dv_acc, S, H, Hkv, scale, (int)causal);
+    }
+  };
+  auto run_pre = [&]() {
+    preprocess_kernel<<<pg, THREADS>>>(d_q, d_k, d_o, d_do, d_delta, d_lse, S, H, Hkv, scale,
+                                       (int)causal, D);
+  };
 
   cudaEvent_t ev0, ev1, ev2;
   CUDA_CHECK(cudaEventCreate(&ev0));
@@ -215,11 +242,8 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
-    preprocess_kernel<<<pg, THREADS>>>(d_q, d_k, d_o, d_do, d_delta, d_lse, S, H, Hkv, scale,
-                                       (int)causal);
-    fa_bwd_fp16_kernel<<<mg, THREADS, SMEM_BYTES>>>(d_q, d_k, d_v, d_do, d_delta, d_lse,
-                                                    d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
-                                                    scale, (int)causal);
+    run_pre();
+    run_main();
     convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, dq, dk, dv, n,
                                                 nkv);
   };
@@ -240,9 +264,7 @@ int main(int argc, char** argv) {
 
   // 单独测 preprocess / main
   CUDA_CHECK(cudaEventRecord(ev0));
-  for (int i = 0; i < iters; ++i)
-    preprocess_kernel<<<pg, THREADS>>>(d_q, d_k, d_o, d_do, d_delta, d_lse, S, H, Hkv, scale,
-                                       (int)causal);
+  for (int i = 0; i < iters; ++i) run_pre();
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
   float ms_pre = 0.f;
@@ -253,10 +275,7 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
   CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
   CUDA_CHECK(cudaEventRecord(ev0));
-  for (int i = 0; i < iters; ++i)
-    fa_bwd_fp16_kernel<<<mg, THREADS, SMEM_BYTES>>>(d_q, d_k, d_v, d_do, d_delta, d_lse,
-                                                    d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
-                                                    scale, (int)causal);
+  for (int i = 0; i < iters; ++i) run_main();
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
   float ms_main = 0.f;

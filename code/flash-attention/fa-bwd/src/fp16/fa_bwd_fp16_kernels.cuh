@@ -21,21 +21,26 @@
 #include <cstdint>
 
 // ----------------------------- 编译期常量 -----------------------------
-static constexpr int kHeadDim = 128;   // 本版本固定 head_dim=128
-static constexpr int BM       = 64;    // Q 块行数
-static constexpr int BN       = 32;    // K/V 块行数
+static constexpr int BN       = 32;    // K/V 块行数（= warpSize，lane 即列号）
 static constexpr int THREADS  = 128;   // 4 warps
-static constexpr int WM_ROWS  = BM / 4;  // 每个 warp 负责的 Q 行数 = 16
-static constexpr int WN_ROWS  = BN / 4;  // 每个 warp 负责的 K/V 行数 = 8
 
+// P5-2：head_dim 作为模板参数 HD（运行时可选 128 / 512）。
+//   * HD=128 → BM=64：与 P1/P5-1 的 MHA 路径逐位一致（回归不变）。
+//   * HD=512 → BM=16：MLA 主注意力（smem 装不下 BM=64 的 dQs[BM*HD] fp32）。
 // 动态 smem 布局（字节）：
 //   Qs[BM*HD] + Ks[BN*HD] + Vs[BN*HD] + dOs[BM*HD]   （half）
 //   Ss[BM*BN] + Ps[BM*BN]                             （float）
 //   dQs[BM*HD]                                        （float）
-static constexpr int SMEM_BYTES =
-    (BM * kHeadDim + BN * kHeadDim + BN * kHeadDim + BM * kHeadDim) * (int)sizeof(__half) +
-    (BM * BN + BM * BN) * (int)sizeof(float) +
-    (BM * kHeadDim) * (int)sizeof(float);
+template <int HD, int BM>
+struct BwdTraits {
+  static constexpr int WM_ROWS = BM / 4;   // 每个 warp 负责的 Q 行数
+  static constexpr int WN_ROWS = BN / 4;   // 每个 warp 负责的 K/V 行数
+  static constexpr int NCH     = HD / 32;  // lane 覆盖 head_dim 的分段数
+  static constexpr int smem_bytes =
+      (BM * HD + BN * HD + BN * HD + BM * HD) * (int)sizeof(__half) +
+      (BM * BN + BM * BN) * (int)sizeof(float) +
+      (BM * HD) * (int)sizeof(float);
+};
 
 // =============================================================================
 // 1) preprocess：逐行算 LSE 与 delta=rowsum(dO∘O)
@@ -48,24 +53,24 @@ __global__ void preprocess_kernel(const __half* __restrict__ q,
                                   const __half* __restrict__ do_,
                                   float* __restrict__ delta,   // [B*S*H]
                                   float* __restrict__ lse,     // [B*S*H]
-                                  int S, int H, int Hkv, float scale, int causal) {
+                                  int S, int H, int Hkv, float scale, int causal, int HD) {
   const int s = blockIdx.x;
   const int h = blockIdx.y;
   const int b = blockIdx.z;
   const int tid = threadIdx.x;
   const int hkv = h / (H / Hkv);   // Q 头 -> KV 头
   const size_t row = ((size_t)(b * S + s)) * H + h;
-  const __half* qr = q + row * kHeadDim;
+  const __half* qr = q + row * HD;
 
   // --- online softmax：单趟求 (m, l)，无需物化整行 S ---
   float m = -INFINITY;
   float l = 0.f;
   const int jmax = causal ? (s + 1) : S;   // causal：只算 j <= s
   for (int j = tid; j < jmax; j += blockDim.x) {
-    const __half* kr = k + (((size_t)(b * S + j)) * Hkv + hkv) * kHeadDim;
+    const __half* kr = k + (((size_t)(b * S + j)) * Hkv + hkv) * HD;
     float dot = 0.f;
 #pragma unroll 8
-    for (int d = 0; d < kHeadDim; ++d)
+    for (int d = 0; d < HD; ++d)
       dot += __half2float(qr[d]) * __half2float(kr[d]);
     dot *= scale;
     float mn = fmaxf(m, dot);
@@ -94,9 +99,9 @@ __global__ void preprocess_kernel(const __half* __restrict__ q,
 
   // --- delta = sum_d O∘dO ---
   float dp = 0.f;
-  const __half* orow = o + row * kHeadDim;
-  const __half* dorow = do_ + row * kHeadDim;
-  for (int d = tid; d < kHeadDim; d += blockDim.x)
+  const __half* orow = o + row * HD;
+  const __half* dorow = do_ + row * HD;
+  for (int d = tid; d < HD; d += blockDim.x)
     dp += __half2float(orow[d]) * __half2float(dorow[d]);
   __shared__ float sh_delta[THREADS];
   sh_delta[tid] = dp;
@@ -117,6 +122,7 @@ __global__ void preprocess_kernel(const __half* __restrict__ q,
 //   grid = (ceil(S/BM), H, B)，block = THREADS
 //   dq_acc 直接写（每个 Q 块独占行）；dk_acc/dv_acc 用 atomicAdd。
 // =============================================================================
+template <int HD, int BM>
 __global__ void __launch_bounds__(THREADS)
 fa_bwd_fp16_kernel(const __half* __restrict__ q,
                    const __half* __restrict__ k,
@@ -128,14 +134,18 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
                    float* __restrict__ dk_acc,
                    float* __restrict__ dv_acc,
                    int S, int H, int Hkv, float scale, int causal) {
+  using T = BwdTraits<HD, BM>;
+  constexpr int WM_ROWS = T::WM_ROWS;
+  constexpr int WN_ROWS = T::WN_ROWS;
+  constexpr int NCH     = T::NCH;
   extern __shared__ char smem[];
   __half* Qs  = reinterpret_cast<__half*>(smem);
-  __half* Ks  = Qs + BM * kHeadDim;
-  __half* Vs  = Ks + BN * kHeadDim;
-  __half* dOs = Vs + BN * kHeadDim;
-  float* Ss = reinterpret_cast<float*>(dOs + BM * kHeadDim);  // 先存 S，后覆盖为 dS
+  __half* Ks  = Qs + BM * HD;
+  __half* Vs  = Ks + BN * HD;
+  __half* dOs = Vs + BN * HD;
+  float* Ss = reinterpret_cast<float*>(dOs + BM * HD);  // 先存 S，后覆盖为 dS
   float* Ps = Ss + BM * BN;
-  float* dQs = Ps + BM * BN;                                   // dQ 的 smem 累加器
+  float* dQs = Ps + BM * BN;                            // dQ 的 smem 累加器
 
   const int mblk = blockIdx.x;
   const int h = blockIdx.y;
@@ -147,19 +157,19 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
   const int hkv = h / (H / Hkv);   // Q 头 -> KV 头（GQA/MQA）
 
   // ---- 载入本 Q 块的 Q 与 dO（越界补 0）----
-  for (int i = tid; i < BM * kHeadDim; i += THREADS) {
-    int r = i / kHeadDim, d = i % kHeadDim;
+  for (int i = tid; i < BM * HD; i += THREADS) {
+    int r = i / HD, d = i % HD;
     int qi = m0 + r;
     __half qv = __float2half(0.f), ov = __float2half(0.f);
     if (qi < S) {
-      size_t idx = (((size_t)(b * S + qi)) * H + h) * kHeadDim + d;
+      size_t idx = (((size_t)(b * S + qi)) * H + h) * HD + d;
       qv = q[idx];
       ov = do_[idx];
     }
     Qs[i] = qv;
     dOs[i] = ov;
   }
-  for (int i = tid; i < BM * kHeadDim; i += THREADS) dQs[i] = 0.f;
+  for (int i = tid; i < BM * HD; i += THREADS) dQs[i] = 0.f;
   __syncthreads();
 
   // causal：只需处理到本 Q 块最后一行的列；否则到 S。
@@ -170,12 +180,12 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
     const int j0 = nt * BN;
 
     // ---- 载入 K/V 块 ----
-    for (int i = tid; i < BN * kHeadDim; i += THREADS) {
-      int j = i / kHeadDim, d = i % kHeadDim;
+    for (int i = tid; i < BN * HD; i += THREADS) {
+      int j = i / HD, d = i % HD;
       int jg = j0 + j;
       __half kv = __float2half(0.f), vv = __float2half(0.f);
       if (jg < S) {
-        size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + d;
+        size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d;
         kv = k[idx];
         vv = v[idx];
       }
@@ -192,10 +202,10 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
       int qi = m0 + r;
       float dot = 0.f;
       if (qi < S) {
-        const __half* qrow = Qs + r * kHeadDim;
-        const __half* krow = Ks + lane * kHeadDim;
+        const __half* qrow = Qs + r * HD;
+        const __half* krow = Ks + lane * HD;
 #pragma unroll 8
-        for (int d = 0; d < kHeadDim; ++d)
+        for (int d = 0; d < HD; ++d)
           dot += __half2float(qrow[d]) * __half2float(krow[d]);
         dot *= scale;
       }
@@ -214,10 +224,10 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
       int qi = m0 + r;
       float dp = 0.f;
       if (qi < S) {
-        const __half* drow = dOs + r * kHeadDim;
-        const __half* vrow = Vs + lane * kHeadDim;
+        const __half* drow = dOs + r * HD;
+        const __half* vrow = Vs + lane * HD;
 #pragma unroll 8
-        for (int d = 0; d < kHeadDim; ++d)
+        for (int d = 0; d < HD; ++d)
           dp += __half2float(drow[d]) * __half2float(vrow[d]);
       }
       float del = (qi < S) ? delta[((size_t)(b * S + qi)) * H + h] : 0.f;
@@ -231,21 +241,21 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
       int j = warp * WN_ROWS + jj;
       int jg = j0 + j;
       if (jg >= S) continue;
-      float acc[4] = {0.f, 0.f, 0.f, 0.f};
+      float acc[NCH] = {};
 #pragma unroll 4
       for (int i = 0; i < BM; ++i) {
         float p = Ps[i * BN + j];          // 同一列，warp 内广播
         if (p == 0.f) continue;
-        const __half* drow = dOs + i * kHeadDim;
+        const __half* drow = dOs + i * HD;
 #pragma unroll
-        for (int kk = 0; kk < 4; ++kk) {
+        for (int kk = 0; kk < NCH; ++kk) {
           int d = lane + 32 * kk;
           acc[kk] += p * __half2float(drow[d]);
         }
       }
-      float* base = dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim;
+      float* base = dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD;
 #pragma unroll
-      for (int kk = 0; kk < 4; ++kk) atomicAdd(base + lane + 32 * kk, acc[kk]);
+      for (int kk = 0; kk < NCH; ++kk) atomicAdd(base + lane + 32 * kk, acc[kk]);
     }
 
     // ---- dK = scale·dSᵀ Q（dS 在 Ss）----
@@ -254,21 +264,21 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
       int j = warp * WN_ROWS + jj;
       int jg = j0 + j;
       if (jg >= S) continue;
-      float acc[4] = {0.f, 0.f, 0.f, 0.f};
+      float acc[NCH] = {};
 #pragma unroll 4
       for (int i = 0; i < BM; ++i) {
         float ds = Ss[i * BN + j];
         if (ds == 0.f) continue;
-        const __half* qrow = Qs + i * kHeadDim;
+        const __half* qrow = Qs + i * HD;
 #pragma unroll
-        for (int kk = 0; kk < 4; ++kk) {
+        for (int kk = 0; kk < NCH; ++kk) {
           int d = lane + 32 * kk;
           acc[kk] += ds * __half2float(qrow[d]);
         }
       }
-      float* base = dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim;
+      float* base = dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD;
 #pragma unroll
-      for (int kk = 0; kk < 4; ++kk)
+      for (int kk = 0; kk < NCH; ++kk)
         atomicAdd(base + lane + 32 * kk, acc[kk] * scale);
     }
 
@@ -278,32 +288,32 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
       int r = warp * WM_ROWS + rr;
       int qi = m0 + r;
       if (qi >= S) continue;
-      float acc[4] = {0.f, 0.f, 0.f, 0.f};
+      float acc[NCH] = {};
 #pragma unroll 4
       for (int j = 0; j < BN; ++j) {
         float ds = Ss[r * BN + j];
         if (ds == 0.f) continue;
-        const __half* krow = Ks + j * kHeadDim;
+        const __half* krow = Ks + j * HD;
 #pragma unroll
-        for (int kk = 0; kk < 4; ++kk) {
+        for (int kk = 0; kk < NCH; ++kk) {
           int d = lane + 32 * kk;
           acc[kk] += ds * __half2float(krow[d]);
         }
       }
-      float* dqr = dQs + r * kHeadDim;
+      float* dqr = dQs + r * HD;
 #pragma unroll
-      for (int kk = 0; kk < 4; ++kk)
+      for (int kk = 0; kk < NCH; ++kk)
         dqr[lane + 32 * kk] += acc[kk] * scale;
     }
     __syncthreads();
   }
 
   // ---- 写回 dQ（fp32 缓冲，稍后 convert）----
-  for (int i = tid; i < BM * kHeadDim; i += THREADS) {
-    int r = i / kHeadDim;
+  for (int i = tid; i < BM * HD; i += THREADS) {
+    int r = i / HD;
     int qi = m0 + r;
     if (qi < S)
-      dq_acc[(((size_t)(b * S + qi)) * H + h) * kHeadDim + (i % kHeadDim)] = dQs[i];
+      dq_acc[(((size_t)(b * S + qi)) * H + h) * HD + (i % HD)] = dQs[i];
   }
 }
 

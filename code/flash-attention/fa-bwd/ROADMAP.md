@@ -103,7 +103,11 @@
       → **已完成（第十六轮）**：fp16 单/两文件均支持 `Hkv`（Q 头 `h`→KV 头 `h/(H/Hkv)`），
       4 个形状 dq/dk/dv vs ref 同 fp16 噪声量级（dk/dv 与 FA/TE 同量级或更小）；MHA 回归逐位不变。
       `docs/01-fp16-bwd-impl.md` §8。
-- [ ] **P5-2** ours 支持 **head_dim=512（MLA 主注意力）**：解决 smem/寄存器容量（K/V 分块变小、Q 常驻等）
+- [x] **P5-2** ours 支持 **head_dim=512（MLA 主注意力）**：解决 smem/寄存器容量（K/V 分块变小、Q 常驻等）
+      → **已完成（第十七轮）**：head_dim 改为模板参数 `HD` + `BM` 随容量选择（`HD=128→BM=64` 逐位回归；
+      `HD=512→BM=16`，smem 135.17KB，1 CTA/SM），单/两文件同步。3 个 MLA case 对拍 ref 全部 fp16 噪声
+      （1.3–2.9e-3），ncu bound = smem+bank conflict+低 occupancy；MLA 反向 FA/TE 均不支持，性能数字
+      仅 ours（0.21–0.63 TF）。`docs/01-fp16-bwd-impl.md` §9。
 - [ ] **P5-3** MLA 对拍（只有 fp32 ref 可对）与性能数字；对标 FlashMLA 思路
 - [ ] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能
 
@@ -359,6 +363,28 @@
     `..._p51_ncu_gqa_kv4.out.txt`、`src/fa_bwd_bench_requested_fp16_p51.out.txt`；
     文档 `docs/01-fp16-bwd-impl.md` §8。
 
+- 2026-09-22（第十七轮）：**P5-2 完成（fp16 反向支持 MLA head_dim=512，单/两文件）**。
+  - `fa_bwd_fp16` 的 head_dim 改为模板参数：新增 `BwdTraits<HD,BM>`（`WM_ROWS/WN_ROWS/NCH=HD/32`、
+    `smem_bytes`），`fa_bwd_fp16_kernel<HD,BM>`；`preprocess_kernel` 增加运行时 `HD`；三处 head-dim
+    分段循环 `kk<4`→`kk<NCH`、`acc[4]`→`acc[NCH]`。单/两文件 device 代码同源，逐位一致。
+  - **容量决定 `BM`**：`dQs[BM*HD]` fp32 是大头，`HD=512,BM=64` 总 smem 336KB 超限；故
+    **`HD=128→BM=64`（回归逐位不变）**、**`HD=512→BM=16`（smem 135.17KB，1 CTA/SM）**。
+    host 按 `D` 分派模板实例并各自设 `MaxDynamicSharedMemorySize`。
+  - **对拍（ours-vs-ref，fp16 causal，D=Dv=512）**：S=256H2 1.638/1.582/1.753e-3；
+    S=512H4 2.324/2.916/1.724e-3；S=1024H2 1.250/1.454/2.058e-3——均 fp16 噪声量级。
+    FA/TE 反向不支持 head_dim=512（`fa=NA`/`te=NA`），只有 fp32 ref 可对。
+    MHA D=128 回归逐位不变（S=512 1.671/1.680/1.899e-3；S=4096 1.499/1.572/2.225e-3）。
+  - ncu（main, S=1024H2 D=512）：DRAM 0.10% / **L1TEX 53.21%** / L2 1.74% / Compute 7.16% /
+    occ 6.25%（理论 6.25%，135.17KB smem 卡 1 CTA/SM）/ Waves 0.97 / 48 regs / No Eligible 85.5% /
+    MIO scoreboard 36%、shared load 76.5% 多余 wavefront ⇒ bound 与 D=128 标量版同：
+    **smem bank conflict + 低 occupancy**。
+  - 性能（CUDA event）：preprocess/main/total = 0.211/1.058/1.278 ms（S256H2，0.21 TF）、
+    1.291/2.080/3.491 ms（S512H4，0.62 TF）、2.463/4.143/6.789 ms（S1024H2，0.63 TF），
+    峰值占比 ~0.02–0.06%（标量 + 1 CTA/SM）。同 session GQA/MQA FP16 基线 FA 155–187 TF、TE 240–278 TF。
+  - 原始输出 `src/fp16/fa_bwd_fp16_{main,onefile}_p52_mla_*.out.txt`、
+    `..._p52_reg_*.out.txt`、`..._p52_ncu_main_s1024h2.out.txt`、`src/fa_bwd_bench_requested_fp16_p52.out.txt`；
+    文档 `docs/01-fp16-bwd-impl.md` §9。
+
 ## 下一步（明确到可执行）
 
 > **用户新增需求（优先）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
@@ -368,12 +394,17 @@
       K/V 索引 `h/(H/Hkv)` 映射到 KV 头；对拍 4 个 GQA/MQA dump case 的 `ref_dq/dk/dv.npy`，
       再用 `harness/fa_bwd_bench.py bench --requested` 对标 FA/TE（目标 ≥ FA）。
       **已完成（第十六轮）**，详见 `docs/01-fp16-bwd-impl.md` §8。
-- [ ] **P5-2（优先）MLA head_dim=512**：fp16 反向支持 D=512（smem/寄存器容量、
+- [x] **P5-2（优先）MLA head_dim=512**：fp16 反向支持 D=512（smem/寄存器容量、
       Q 常驻 / 更小 K/V 分块 / 可能需 split-K 或 KV 分片），对拍 3 个 MLA case 的 ref；给出性能数字。
-- [ ] **P5-3**：bf16/fp8 复用同一改造；fp8 GQA/MQA 对拍 vs TE FP8。
-      （P5-1 的 fp16 改造已完成：`Hkv` 入参 + `hkv=h/(H/Hkv)` 映射 + `dk/dv` 按 `B*S*Hkv*D` 分配、
-      `convert` 收 `n_q/n_kv`；bf16 可直接照搬，fp8 在已优化的 mma 路径上加同一映射。）
-
+      **已完成（第十七轮）**：`HD` 模板化 + `BM` 随容量选择（128→64 / 512→16），单/两文件；详见
+      `docs/01-fp16-bwd-impl.md` §9。
+- [ ] **P5-3**：bf16/fp8 复用同一 `Hkv`/`HD` 改造；fp8 GQA/MQA 对拍 vs TE FP8。
+      （P5-1/P5-2 的 fp16 改造已完成：`Hkv` 入参 + `hkv=h/(H/Hkv)` 映射 + `dk/dv` 按 `B*S*Hkv*D`
+      分配、`convert` 收 `n_q/n_kv`；`HD`/`BM` 模板。bf16 可直接照搬，fp8 在已优化的 mma 路径上
+      加同一映射与更大 head_dim 的分块。）
+- [ ] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能
+- [ ] **MLA 优化（backlog）**：P5-2 已给出 fp16 的 ref 对拍与 ours 性能数字；下一步是**优化**——
+      把 MLA smem 降下来冲 2 CTA/SM、张量核版本，对标 FlashMLA 的分块/流水。
 > 以下为既有 fp8 优化 backlog（可与 P5 并行/穿插）。
 
 > P4-2 完成后，ROADMAP 里的「P 项」已全部收口，后续为**优化 backlog**（按回报排序）。

@@ -31,6 +31,7 @@
 //   * causal：整块跳过（j0 >= q_block_end 的 tile 不算），对角 tile 逐元素 mask。
 //   * 动态 smem：96KB > 48KB 静态上限，需要 cudaFuncSetAttribute。
 //
+// P5-2：head_dim 参数化（128 走 BM=64 的 MHA/GQA；512 走 BM=16 的 MLA）。
 // 本版本是**正确性优先的 CUDA-core（标量）实现**；张量核/流水优化留待 P1-3 之后。
 // =============================================================================
 
@@ -47,31 +48,26 @@
 #include <vector>
 
 // ----------------------------- 编译期常量 -----------------------------
-static constexpr int kHeadDim = 128;   // 本版本固定 head_dim=128
-static constexpr int BM       = 64;    // Q 块行数
-static constexpr int BN       = 32;    // K/V 块行数
+static constexpr int BN       = 32;    // K/V 块行数（= warpSize，lane 即列号）
 static constexpr int THREADS  = 128;   // 4 warps
-static constexpr int WM_ROWS  = BM / 4;  // 每个 warp 负责的 Q 行数 = 16
-static constexpr int WN_ROWS  = BN / 4;  // 每个 warp 负责的 K/V 行数 = 8
 
+// P5-2：head_dim 作为模板参数 HD（运行时可选 128 / 512）。
+//   * HD=128 → BM=64：与 P1/P5-1 的 MHA 路径逐位一致（回归不变）。
+//   * HD=512 → BM=16：MLA 主注意力（smem 装不下 BM=64 的 dQs[BM*HD] fp32）。
 // 动态 smem 布局（字节）：
 //   Qs[BM*HD] + Ks[BN*HD] + Vs[BN*HD] + dOs[BM*HD]   （half）
 //   Ss[BM*BN] + Ps[BM*BN]                             （float）
 //   dQs[BM*HD]                                        （float）
-static constexpr int SMEM_BYTES =
-    (BM * kHeadDim + BN * kHeadDim + BN * kHeadDim + BM * kHeadDim) * (int)sizeof(__half) +
-    (BM * BN + BM * BN) * (int)sizeof(float) +
-    (BM * kHeadDim) * (int)sizeof(float);
-
-#define CUDA_CHECK(call)                                                        \
-  do {                                                                          \
-    cudaError_t _e = (call);                                                    \
-    if (_e != cudaSuccess) {                                                    \
-      fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(_e),       \
-              __FILE__, __LINE__);                                              \
-      std::exit(1);                                                             \
-    }                                                                           \
-  } while (0)
+template <int HD, int BM>
+struct BwdTraits {
+  static constexpr int WM_ROWS = BM / 4;   // 每个 warp 负责的 Q 行数
+  static constexpr int WN_ROWS = BN / 4;   // 每个 warp 负责的 K/V 行数
+  static constexpr int NCH     = HD / 32;  // lane 覆盖 head_dim 的分段数
+  static constexpr int smem_bytes =
+      (BM * HD + BN * HD + BN * HD + BM * HD) * (int)sizeof(__half) +
+      (BM * BN + BM * BN) * (int)sizeof(float) +
+      (BM * HD) * (int)sizeof(float);
+};
 
 // =============================================================================
 // 1) preprocess：逐行算 LSE 与 delta=rowsum(dO∘O)
@@ -84,24 +80,24 @@ __global__ void preprocess_kernel(const __half* __restrict__ q,
                                   const __half* __restrict__ do_,
                                   float* __restrict__ delta,   // [B*S*H]
                                   float* __restrict__ lse,     // [B*S*H]
-                                  int S, int H, int Hkv, float scale, int causal) {
+                                  int S, int H, int Hkv, float scale, int causal, int HD) {
   const int s = blockIdx.x;
   const int h = blockIdx.y;
   const int b = blockIdx.z;
   const int tid = threadIdx.x;
   const int hkv = h / (H / Hkv);   // Q 头 -> KV 头
   const size_t row = ((size_t)(b * S + s)) * H + h;
-  const __half* qr = q + row * kHeadDim;
+  const __half* qr = q + row * HD;
 
   // --- online softmax：单趟求 (m, l)，无需物化整行 S ---
   float m = -INFINITY;
   float l = 0.f;
   const int jmax = causal ? (s + 1) : S;   // causal：只算 j <= s
   for (int j = tid; j < jmax; j += blockDim.x) {
-    const __half* kr = k + (((size_t)(b * S + j)) * Hkv + hkv) * kHeadDim;
+    const __half* kr = k + (((size_t)(b * S + j)) * Hkv + hkv) * HD;
     float dot = 0.f;
 #pragma unroll 8
-    for (int d = 0; d < kHeadDim; ++d)
+    for (int d = 0; d < HD; ++d)
       dot += __half2float(qr[d]) * __half2float(kr[d]);
     dot *= scale;
     float mn = fmaxf(m, dot);
@@ -130,9 +126,9 @@ __global__ void preprocess_kernel(const __half* __restrict__ q,
 
   // --- delta = sum_d O∘dO ---
   float dp = 0.f;
-  const __half* orow = o + row * kHeadDim;
-  const __half* dorow = do_ + row * kHeadDim;
-  for (int d = tid; d < kHeadDim; d += blockDim.x)
+  const __half* orow = o + row * HD;
+  const __half* dorow = do_ + row * HD;
+  for (int d = tid; d < HD; d += blockDim.x)
     dp += __half2float(orow[d]) * __half2float(dorow[d]);
   __shared__ float sh_delta[THREADS];
   sh_delta[tid] = dp;
@@ -153,6 +149,7 @@ __global__ void preprocess_kernel(const __half* __restrict__ q,
 //   grid = (ceil(S/BM), H, B)，block = THREADS
 //   dq_acc 直接写（每个 Q 块独占行）；dk_acc/dv_acc 用 atomicAdd。
 // =============================================================================
+template <int HD, int BM>
 __global__ void __launch_bounds__(THREADS)
 fa_bwd_fp16_kernel(const __half* __restrict__ q,
                    const __half* __restrict__ k,
@@ -164,14 +161,18 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
                    float* __restrict__ dk_acc,
                    float* __restrict__ dv_acc,
                    int S, int H, int Hkv, float scale, int causal) {
+  using T = BwdTraits<HD, BM>;
+  constexpr int WM_ROWS = T::WM_ROWS;
+  constexpr int WN_ROWS = T::WN_ROWS;
+  constexpr int NCH     = T::NCH;
   extern __shared__ char smem[];
   __half* Qs  = reinterpret_cast<__half*>(smem);
-  __half* Ks  = Qs + BM * kHeadDim;
-  __half* Vs  = Ks + BN * kHeadDim;
-  __half* dOs = Vs + BN * kHeadDim;
-  float* Ss = reinterpret_cast<float*>(dOs + BM * kHeadDim);  // 先存 S，后覆盖为 dS
+  __half* Ks  = Qs + BM * HD;
+  __half* Vs  = Ks + BN * HD;
+  __half* dOs = Vs + BN * HD;
+  float* Ss = reinterpret_cast<float*>(dOs + BM * HD);  // 先存 S，后覆盖为 dS
   float* Ps = Ss + BM * BN;
-  float* dQs = Ps + BM * BN;                                   // dQ 的 smem 累加器
+  float* dQs = Ps + BM * BN;                            // dQ 的 smem 累加器
 
   const int mblk = blockIdx.x;
   const int h = blockIdx.y;
@@ -183,19 +184,19 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
   const int hkv = h / (H / Hkv);   // Q 头 -> KV 头（GQA/MQA）
 
   // ---- 载入本 Q 块的 Q 与 dO（越界补 0）----
-  for (int i = tid; i < BM * kHeadDim; i += THREADS) {
-    int r = i / kHeadDim, d = i % kHeadDim;
+  for (int i = tid; i < BM * HD; i += THREADS) {
+    int r = i / HD, d = i % HD;
     int qi = m0 + r;
     __half qv = __float2half(0.f), ov = __float2half(0.f);
     if (qi < S) {
-      size_t idx = (((size_t)(b * S + qi)) * H + h) * kHeadDim + d;
+      size_t idx = (((size_t)(b * S + qi)) * H + h) * HD + d;
       qv = q[idx];
       ov = do_[idx];
     }
     Qs[i] = qv;
     dOs[i] = ov;
   }
-  for (int i = tid; i < BM * kHeadDim; i += THREADS) dQs[i] = 0.f;
+  for (int i = tid; i < BM * HD; i += THREADS) dQs[i] = 0.f;
   __syncthreads();
 
   // causal：只需处理到本 Q 块最后一行的列；否则到 S。
@@ -206,12 +207,12 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
     const int j0 = nt * BN;
 
     // ---- 载入 K/V 块 ----
-    for (int i = tid; i < BN * kHeadDim; i += THREADS) {
-      int j = i / kHeadDim, d = i % kHeadDim;
+    for (int i = tid; i < BN * HD; i += THREADS) {
+      int j = i / HD, d = i % HD;
       int jg = j0 + j;
       __half kv = __float2half(0.f), vv = __float2half(0.f);
       if (jg < S) {
-        size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + d;
+        size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d;
         kv = k[idx];
         vv = v[idx];
       }
@@ -228,10 +229,10 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
       int qi = m0 + r;
       float dot = 0.f;
       if (qi < S) {
-        const __half* qrow = Qs + r * kHeadDim;
-        const __half* krow = Ks + lane * kHeadDim;
+        const __half* qrow = Qs + r * HD;
+        const __half* krow = Ks + lane * HD;
 #pragma unroll 8
-        for (int d = 0; d < kHeadDim; ++d)
+        for (int d = 0; d < HD; ++d)
           dot += __half2float(qrow[d]) * __half2float(krow[d]);
         dot *= scale;
       }
@@ -250,10 +251,10 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
       int qi = m0 + r;
       float dp = 0.f;
       if (qi < S) {
-        const __half* drow = dOs + r * kHeadDim;
-        const __half* vrow = Vs + lane * kHeadDim;
+        const __half* drow = dOs + r * HD;
+        const __half* vrow = Vs + lane * HD;
 #pragma unroll 8
-        for (int d = 0; d < kHeadDim; ++d)
+        for (int d = 0; d < HD; ++d)
           dp += __half2float(drow[d]) * __half2float(vrow[d]);
       }
       float del = (qi < S) ? delta[((size_t)(b * S + qi)) * H + h] : 0.f;
@@ -267,21 +268,21 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
       int j = warp * WN_ROWS + jj;
       int jg = j0 + j;
       if (jg >= S) continue;
-      float acc[4] = {0.f, 0.f, 0.f, 0.f};
+      float acc[NCH] = {};
 #pragma unroll 4
       for (int i = 0; i < BM; ++i) {
         float p = Ps[i * BN + j];          // 同一列，warp 内广播
         if (p == 0.f) continue;
-        const __half* drow = dOs + i * kHeadDim;
+        const __half* drow = dOs + i * HD;
 #pragma unroll
-        for (int kk = 0; kk < 4; ++kk) {
+        for (int kk = 0; kk < NCH; ++kk) {
           int d = lane + 32 * kk;
           acc[kk] += p * __half2float(drow[d]);
         }
       }
-      float* base = dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim;
+      float* base = dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD;
 #pragma unroll
-      for (int kk = 0; kk < 4; ++kk) atomicAdd(base + lane + 32 * kk, acc[kk]);
+      for (int kk = 0; kk < NCH; ++kk) atomicAdd(base + lane + 32 * kk, acc[kk]);
     }
 
     // ---- dK = scale·dSᵀ Q（dS 在 Ss）----
@@ -290,21 +291,21 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
       int j = warp * WN_ROWS + jj;
       int jg = j0 + j;
       if (jg >= S) continue;
-      float acc[4] = {0.f, 0.f, 0.f, 0.f};
+      float acc[NCH] = {};
 #pragma unroll 4
       for (int i = 0; i < BM; ++i) {
         float ds = Ss[i * BN + j];
         if (ds == 0.f) continue;
-        const __half* qrow = Qs + i * kHeadDim;
+        const __half* qrow = Qs + i * HD;
 #pragma unroll
-        for (int kk = 0; kk < 4; ++kk) {
+        for (int kk = 0; kk < NCH; ++kk) {
           int d = lane + 32 * kk;
           acc[kk] += ds * __half2float(qrow[d]);
         }
       }
-      float* base = dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim;
+      float* base = dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD;
 #pragma unroll
-      for (int kk = 0; kk < 4; ++kk)
+      for (int kk = 0; kk < NCH; ++kk)
         atomicAdd(base + lane + 32 * kk, acc[kk] * scale);
     }
 
@@ -314,32 +315,32 @@ fa_bwd_fp16_kernel(const __half* __restrict__ q,
       int r = warp * WM_ROWS + rr;
       int qi = m0 + r;
       if (qi >= S) continue;
-      float acc[4] = {0.f, 0.f, 0.f, 0.f};
+      float acc[NCH] = {};
 #pragma unroll 4
       for (int j = 0; j < BN; ++j) {
         float ds = Ss[r * BN + j];
         if (ds == 0.f) continue;
-        const __half* krow = Ks + j * kHeadDim;
+        const __half* krow = Ks + j * HD;
 #pragma unroll
-        for (int kk = 0; kk < 4; ++kk) {
+        for (int kk = 0; kk < NCH; ++kk) {
           int d = lane + 32 * kk;
           acc[kk] += ds * __half2float(krow[d]);
         }
       }
-      float* dqr = dQs + r * kHeadDim;
+      float* dqr = dQs + r * HD;
 #pragma unroll
-      for (int kk = 0; kk < 4; ++kk)
+      for (int kk = 0; kk < NCH; ++kk)
         dqr[lane + 32 * kk] += acc[kk] * scale;
     }
     __syncthreads();
   }
 
   // ---- 写回 dQ（fp32 缓冲，稍后 convert）----
-  for (int i = tid; i < BM * kHeadDim; i += THREADS) {
-    int r = i / kHeadDim;
+  for (int i = tid; i < BM * HD; i += THREADS) {
+    int r = i / HD;
     int qi = m0 + r;
     if (qi < S)
-      dq_acc[(((size_t)(b * S + qi)) * H + h) * kHeadDim + (i % kHeadDim)] = dQs[i];
+      dq_acc[(((size_t)(b * S + qi)) * H + h) * HD + (i % HD)] = dQs[i];
   }
 }
 
@@ -363,6 +364,16 @@ __global__ void convert_kernel(const float* __restrict__ dq_acc,
     dv[i] = __float2half(dv_acc[i]);
   }
 }
+
+#define CUDA_CHECK(call)                                                        \
+  do {                                                                          \
+    cudaError_t _e = (call);                                                    \
+    if (_e != cudaSuccess) {                                                    \
+      fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(_e),       \
+              __FILE__, __LINE__);                                              \
+      std::exit(1);                                                             \
+    }                                                                           \
+  } while (0)
 
 // =============================================================================
 // 极简 npy 读取（只支持 little-endian C-contiguous float32）
@@ -442,6 +453,20 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // =============================================================================
 // host / launcher / self-test
 // =============================================================================
+// P5-2：按 head_dim 分派到模板实例。HD=128 用 BM=64（MHA，回归逐位不变），
+// HD=512 用 BM=16（MLA 主注意力，smem 容量所限）。
+template <int HD, int BM>
+static void launch_bwd_main(dim3 mg, const __half* q, const __half* k, const __half* v,
+                            const __half* do_, const float* delta, const float* lse,
+                            float* dq_acc, float* dk_acc, float* dv_acc, int S, int H, int Hkv,
+                            float scale, int causal) {
+  constexpr int smem = BwdTraits<HD, BM>::smem_bytes;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_kernel<HD, BM>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  fa_bwd_fp16_kernel<HD, BM><<<mg, THREADS, smem>>>(q, k, v, do_, delta, lse, dq_acc, dk_acc,
+                                                    dv_acc, S, H, Hkv, scale, causal);
+}
+
 int main(int argc, char** argv) {
   std::string dir = "/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16";
   std::string o_name = "ref_o";
@@ -477,8 +502,8 @@ int main(int argc, char** argv) {
   const int B = (int)q_np.shape[0], S = (int)q_np.shape[1];
   const int H = (int)q_np.shape[2], D = (int)q_np.shape[3];
   const int Hkv = (int)k_np.shape[2];   // GQA/MQA：KV 头数（MHA 时 Hkv==H）
-  if (D != kHeadDim) {
-    fprintf(stderr, "本版本仅支持 head_dim=%d（当前 %d）\n", kHeadDim, D);
+  if (D != 128 && D != 512) {
+    fprintf(stderr, "本版本支持 head_dim=128（MHA/GQA）或 512（MLA）；当前 %d\n", D);
     return 1;
   }
   if ((int)v_np.shape[2] != Hkv || (int)v_np.shape[3] != D) {
@@ -527,11 +552,7 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemcpy(d_v, vh.data(), nkv * sizeof(__half), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_o, oh.data(), n * sizeof(__half), cudaMemcpyHostToDevice));
 
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_kernel,
-                                  cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM_BYTES));
-
   dim3 pg(S, H, B);
-  dim3 mg((S + BM - 1) / BM, H, B);
   const int cvt_threads = 256;
   const int cvt_blocks =
       (int)std::min<size_t>((std::max(n, nkv) + cvt_threads - 1) / cvt_threads, 65535);
@@ -540,6 +561,23 @@ int main(int argc, char** argv) {
   __half* d_do = nullptr;
   CUDA_CHECK(cudaMalloc(&d_do, n * sizeof(__half)));
   CUDA_CHECK(cudaMemcpy(d_do, doh.data(), n * sizeof(__half), cudaMemcpyHostToDevice));
+
+  // 按 head_dim 选择 BM 并分派 main kernel。
+  auto run_main = [&]() {
+    if (D == 128) {
+      dim3 mg((S + 63) / 64, H, B);
+      launch_bwd_main<128, 64>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                               d_dv_acc, S, H, Hkv, scale, (int)causal);
+    } else {
+      dim3 mg((S + 15) / 16, H, B);
+      launch_bwd_main<512, 16>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                               d_dv_acc, S, H, Hkv, scale, (int)causal);
+    }
+  };
+  auto run_pre = [&]() {
+    preprocess_kernel<<<pg, THREADS>>>(d_q, d_k, d_o, d_do, d_delta, d_lse, S, H, Hkv, scale,
+                                       (int)causal, D);
+  };
 
   cudaEvent_t ev0, ev1, ev2;
   CUDA_CHECK(cudaEventCreate(&ev0));
@@ -550,11 +588,8 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
-    preprocess_kernel<<<pg, THREADS>>>(d_q, d_k, d_o, d_do, d_delta, d_lse, S, H, Hkv, scale,
-                                       (int)causal);
-    fa_bwd_fp16_kernel<<<mg, THREADS, SMEM_BYTES>>>(d_q, d_k, d_v, d_do, d_delta, d_lse,
-                                                    d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
-                                                    scale, (int)causal);
+    run_pre();
+    run_main();
     convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, dq, dk, dv, n,
                                                 nkv);
   };
@@ -575,9 +610,7 @@ int main(int argc, char** argv) {
 
   // 单独测 preprocess / main
   CUDA_CHECK(cudaEventRecord(ev0));
-  for (int i = 0; i < iters; ++i)
-    preprocess_kernel<<<pg, THREADS>>>(d_q, d_k, d_o, d_do, d_delta, d_lse, S, H, Hkv, scale,
-                                       (int)causal);
+  for (int i = 0; i < iters; ++i) run_pre();
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
   float ms_pre = 0.f;
@@ -588,10 +621,7 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
   CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
   CUDA_CHECK(cudaEventRecord(ev0));
-  for (int i = 0; i < iters; ++i)
-    fa_bwd_fp16_kernel<<<mg, THREADS, SMEM_BYTES>>>(d_q, d_k, d_v, d_do, d_delta, d_lse,
-                                                    d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
-                                                    scale, (int)causal);
+  for (int i = 0; i < iters; ++i) run_main();
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
   float ms_main = 0.f;
