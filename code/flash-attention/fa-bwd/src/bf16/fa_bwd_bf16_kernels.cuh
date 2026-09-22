@@ -13,6 +13,9 @@
 //
 // bf16 专属优化（P2-1）：K/V 的 smem 行距 +2 元素（256→260B），消 9.5-way bank
 // conflict（89% 多余 wavefront）。详见 ROADMAP P2-1 与 docs/01b-bf16-bwd-impl.md。
+//
+// P5-3（GQA/MQA）：新增 `Hkv`（KV 头数），Q 头 `h` 映射到 KV 头 `hkv=h/(H/Hkv)`；
+// MHA（Hkv==H）时逐式退化，行为与 P2 逐位一致。
 // =============================================================================
 
 #ifndef FA_BWD_BF16_KERNELS_CUH_
@@ -53,6 +56,7 @@ static constexpr int SMEM_BYTES =
 // =============================================================================
 // 1) preprocess：逐行算 LSE 与 delta=rowsum(dO∘O)
 //   grid = (S, H, B)，block = THREADS
+//   GQA/MQA（P5-3）：K 的第 h 个 Q 头映射到 KV 头 h/(H/Hkv)（repeat_interleave）。
 // =============================================================================
 __global__ void preprocess_kernel(const bf16* __restrict__ q,
                                   const bf16* __restrict__ k,
@@ -60,11 +64,12 @@ __global__ void preprocess_kernel(const bf16* __restrict__ q,
                                   const bf16* __restrict__ do_,
                                   float* __restrict__ delta,   // [B*S*H]
                                   float* __restrict__ lse,     // [B*S*H]
-                                  int S, int H, float scale, int causal) {
+                                  int S, int H, int Hkv, float scale, int causal) {
   const int s = blockIdx.x;
   const int h = blockIdx.y;
   const int b = blockIdx.z;
   const int tid = threadIdx.x;
+  const int hkv = h / (H / Hkv);   // Q 头 -> KV 头
   const size_t row = ((size_t)(b * S + s)) * H + h;
   const bf16* qr = q + row * kHeadDim;
 
@@ -73,7 +78,7 @@ __global__ void preprocess_kernel(const bf16* __restrict__ q,
   float l = 0.f;
   const int jmax = causal ? (s + 1) : S;   // causal：只算 j <= s
   for (int j = tid; j < jmax; j += blockDim.x) {
-    const bf16* kr = k + (((size_t)(b * S + j)) * H + h) * kHeadDim;
+    const bf16* kr = k + (((size_t)(b * S + j)) * Hkv + hkv) * kHeadDim;
     float dot = 0.f;
 #pragma unroll 8
     for (int d = 0; d < kHeadDim; ++d)
@@ -138,7 +143,7 @@ fa_bwd_bf16_kernel(const bf16* __restrict__ q,
                    float* __restrict__ dq_acc,
                    float* __restrict__ dk_acc,
                    float* __restrict__ dv_acc,
-                   int S, int H, float scale, int causal) {
+                   int S, int H, int Hkv, float scale, int causal) {
   extern __shared__ char smem[];
   bf16* Qs  = reinterpret_cast<bf16*>(smem);
   bf16* Ks  = Qs + BM * kHeadDim;
@@ -155,6 +160,7 @@ fa_bwd_bf16_kernel(const bf16* __restrict__ q,
   const int warp = tid >> 5;
   const int lane = tid & 31;
   const int m0 = mblk * BM;
+  const int hkv = h / (H / Hkv);   // Q 头 -> KV 头（GQA/MQA）
 
   // ---- 载入本 Q 块的 Q 与 dO（越界补 0）----
   for (int i = tid; i < BM * kHeadDim; i += THREADS) {
@@ -185,7 +191,7 @@ fa_bwd_bf16_kernel(const bf16* __restrict__ q,
       int jg = j0 + j;
       bf16 kv = __float2bfloat16(0.f), vv = __float2bfloat16(0.f);
       if (jg < S) {
-        size_t idx = (((size_t)(b * S + jg)) * H + h) * kHeadDim + d;
+        size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim + d;
         kv = k[idx];
         vv = v[idx];
       }
@@ -253,7 +259,7 @@ fa_bwd_bf16_kernel(const bf16* __restrict__ q,
           acc[kk] += p * __bfloat162float(drow[d]);
         }
       }
-      float* base = dv_acc + (((size_t)(b * S + jg)) * H + h) * kHeadDim;
+      float* base = dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim;
 #pragma unroll
       for (int kk = 0; kk < 4; ++kk) atomicAdd(base + lane + 32 * kk, acc[kk]);
     }
@@ -276,7 +282,7 @@ fa_bwd_bf16_kernel(const bf16* __restrict__ q,
           acc[kk] += ds * __bfloat162float(qrow[d]);
         }
       }
-      float* base = dk_acc + (((size_t)(b * S + jg)) * H + h) * kHeadDim;
+      float* base = dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * kHeadDim;
 #pragma unroll
       for (int kk = 0; kk < 4; ++kk)
         atomicAdd(base + lane + 32 * kk, acc[kk] * scale);
@@ -319,6 +325,7 @@ fa_bwd_bf16_kernel(const bf16* __restrict__ q,
 
 // =============================================================================
 // 3) convert：fp32 累加缓冲 → bf16 输出
+//   dq 为 [B*S*H*D]，dk/dv 为 [B*S*Hkv*D]（GQA/MQA 时两者不等长）。
 // =============================================================================
 __global__ void convert_kernel(const float* __restrict__ dq_acc,
                                const float* __restrict__ dk_acc,
@@ -326,10 +333,12 @@ __global__ void convert_kernel(const float* __restrict__ dq_acc,
                                bf16* __restrict__ dq,
                                bf16* __restrict__ dk,
                                bf16* __restrict__ dv,
-                               size_t n) {
-  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n;
-       i += (size_t)gridDim.x * blockDim.x) {
+                               size_t n_q, size_t n_kv) {
+  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n_q;
+       i += (size_t)gridDim.x * blockDim.x)
     dq[i] = __float2bfloat16(dq_acc[i]);
+  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < n_kv;
+       i += (size_t)gridDim.x * blockDim.x) {
     dk[i] = __float2bfloat16(dk_acc[i]);
     dv[i] = __float2bfloat16(dv_acc[i]);
   }

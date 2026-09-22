@@ -5,9 +5,11 @@
 > 由 fp16 单文件 `src/fp16/fa_bwd_fp16_onefile.cu` **dtype 参数化**而来（`__half`→`__nv_bfloat16`，
 > `__half2float`→`__bfloat162float`，`__float2half`→`__float2bfloat16`），算法/三段式/线程映射完全一致。
 > 在此基础上加了一处 **bf16 专属优化：K/V smem 行距 padding**（见第 3 节）。
+> 后续新增 **GQA/MQA 支持**（P5-3，见第 6c 节；`Hkv` 映射同 fp16）。
 >
 > 实测原始输出：`fa_bwd_bf16_onefile_s512.out.txt`、`..._s4096.out.txt`、
-> `..._ncu_main.out.txt`（ncu `--set full`）、`..._refbench.out.txt`（FA/TE 基线）。
+> `..._ncu_main.out.txt`（ncu `--set full`）、`..._refbench.out.txt`（FA/TE 基线）、
+> `fa_bwd_bf16_{main,onefile}_p53_gqa.out.txt`（P5-3 数值）、`..._p53_ncu_*.out.txt`。
 > 对照：`docs/01-fp16-bwd-impl.md`、`docs/00-fa-bwd-optimization-catalog.md`、`../ROADMAP.md`。
 
 ---
@@ -193,6 +195,62 @@ kernel 代码与单文件**逐字一致**（仅移入 `.cuh` 并加 include guar
 | Executed Instructions | 247,182,666 | 247,182,666 |
 
 原始输出：`fa_bwd_bf16_main_s512.out.txt`、`..._s4096.out.txt`、`..._ncu_main.out.txt`。
+
+---
+
+## 6c. GQA / MQA（P5-3）
+
+**改动**（单/两文件同源）：与 fp16（`docs/01` §8）完全同一口径——把 KV 头数 `Hkv` 作为运行参数，
+第 `h` 个 Q 头映射到 KV 头 `hkv = h/(H/Hkv)`（对齐 `ref_attn` 的 `repeat_interleave`）。
+
+- `preprocess_kernel` / `fa_bwd_bf16_kernel`：新增 `int Hkv` 入参，K/V 行索引
+  `(((b*S+j)*H + h)*D)` → `(((b*S+j)*Hkv + hkv)*D)`；`dk_acc/dv_acc` 的基址同样换用 `Hkv/hkv`；
+  Q/dO/dQ 仍用 `H/h`（Q 头数）。
+- `convert_kernel`：收 `(n_q, n_kv)` 两个长度，`dk/dv` 按 `B*S*Hkv*D` 转换。
+- host：从 `k.npy` 的 shape[2] 读 `Hkv`，按 `n`/`nkv` 分配与对拍；`Hkv==H` 时逐式退化为 MHA，
+  **MHA 回归逐位不变**（S512 6.892/8.110/1.365e-2；S4096 8.895/8.078/1.494e-2，与第 4 节一致）。
+
+**数值对拍（ours-vs-ref，bf16 causal，B1 S1024 D128）**：
+
+| case | dq | dk | dv | FA vs ref (dq/dk/dv) | TE vs ref (dq/dk/dv) |
+|---|---|---|---|---|---|
+| h40 kv8 | 1.011e-2 | 1.885e-2 | 3.150e-2 | 1.233e-2 / 2.491e-2 / 3.411e-2 | 1.303e-2 / 2.491e-2 / 3.411e-2 |
+| h32 kv4 | 9.631e-3 | 2.019e-2 | 3.094e-2 | 1.163e-2 / 3.110e-2 / 3.627e-2 | 1.238e-2 / 3.140e-2 / 3.627e-2 |
+| h64 kv4 | 1.319e-2 | 2.716e-2 | 3.152e-2 | 1.710e-2 / 3.543e-2 / 6.511e-2 | 1.710e-2 / 3.534e-2 / 6.511e-2 |
+| h64 kv1 (MQA) | 1.066e-2 | 3.385e-2 | 5.891e-2 | 1.793e-2 / 4.933e-2 / 8.386e-2 | 1.300e-2 / 6.018e-2 / 8.386e-2 |
+
+**结论**：全部为 bf16 噪声量级（~1e-2），且 **ours 的 dq/dk/dv 均 ≤ FA/TE 同量级**（多数直接更小），
+无系统误差。单文件与两文件**逐位相同**。原始输出 `src/bf16/fa_bwd_bf16_{main,onefile}_p53_gqa.out.txt`、
+`src/bf16/fa_bwd_bf16_p53_reg.out.txt`。
+
+**性能对标**（CUPTI，FLOPs 口径同文档 `4·B·S·H·S·D`；FA/TE 的 TFLOPS 由 harness 按 `(D+Dv)` 计）：
+
+| case | ours total | ours pre / main | FA 2.7.4 | TE 2.14 | ours 峰值占比 |
+|---|---|---|---|---|---|
+| h40 kv8 | 18.816 ms / 1.14 TF | 10.949 / 7.886 ms | 0.2618 ms / 164.1 TF | 0.1687 ms / 254.6 TF | 0.12% |
+| h32 kv4 | 15.539 ms / 1.11 TF | 8.784 / 6.748 ms | 0.2211 ms / 155.4 TF | 0.1427 ms / 240.7 TF | 0.11% |
+| h64 kv4 | 28.443 ms / 1.21 TF | 17.432 / 10.963 ms | 0.3654 ms / 188.1 TF | 0.2448 ms / 280.8 TF | 0.12% |
+| h64 kv1 | 28.394 ms / 1.21 TF | 17.430 / 10.895 ms | 0.3627 ms / 189.5 TF | 0.2655 ms / 258.8 TF | 0.12% |
+
+> FA/TE 基线原始输出 `src/fa_bwd_bench_requested_bf16_p53.out.txt`（MLA d=512 两者均 NA）。
+
+**ncu（main，h32 kv4 S1024）**：
+
+```
+DRAM Throughput          %    0.12      <- HBM 几乎空闲
+L1/TEX Cache Throughput  %   43.75
+L2  Cache Throughput     %    1.55
+Compute (SM) Throughput  %   30.19
+Achieved / Theoretical Occupancy  %  11.14 / 12.50   <- 98.56KB smem，2 CTA/SM 上限
+Waves Per SM                   1.94
+Registers Per Thread     52
+bank conflicts           375,879 / 534.6M wavefronts（~0.07%，padding 生效）
+stall: wait(fixed-latency) 1.74 | short_scoreboard 1.01 | long_scoreboard 0.39 | barrier 0.02
+```
+
+bound 与 bf16 MHA 同：**低 occupancy（1–2 CTA/SM）+ smem 依赖/固定延迟**，非带宽/算力
+（DRAM 0.12%、Compute 30%）。原始输出 `src/bf16/fa_bwd_bf16_main_p53_ncu_gqa_kv4.out.txt`、
+`..._p53_ncu_stall_kv4.out.txt`。
 
 ---
 

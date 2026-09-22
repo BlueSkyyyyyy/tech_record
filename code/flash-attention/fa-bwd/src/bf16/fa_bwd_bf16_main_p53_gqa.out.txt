@@ -1,0 +1,60 @@
+======== b1_s1024_h40_d128_kv8_causal_bf16 (two-file) ========
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h40_d128_kv8_causal_bf16
+B=1 S=1024 H=40 Hkv=8 D=128 causal=1 scale=0.088388 dtype=bf16
+[timing] total(3 kernels) 18.8160 ms  1.14 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 10.9487 ms | main 7.8863 ms | convert -0.0190 ms
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.011e-02  max_rel=2.701e+00
+  dk   vs ref: max_abs=1.885e-02  max_rel=1.421e+00
+  dv   vs ref: max_abs=3.150e-02  max_rel=3.601e-01
+  fa_dq     vs ref: max_abs=1.233e-02  max_rel=3.683e+00
+  fa_dk     vs ref: max_abs=2.491e-02  max_rel=3.084e+00
+  fa_dv     vs ref: max_abs=3.411e-02  max_rel=4.206e+00
+  te_dq     vs ref: max_abs=1.303e-02  max_rel=3.683e+00
+  te_dk     vs ref: max_abs=2.491e-02  max_rel=3.708e+00
+  te_dv     vs ref: max_abs=3.411e-02  max_rel=4.206e+00
+======== b1_s1024_h32_d128_kv4_causal_bf16 (two-file) ========
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_bf16
+B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388 dtype=bf16
+[timing] total(3 kernels) 15.5390 ms  1.11 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 8.7844 ms | main 6.7483 ms | convert 0.0064 ms
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=9.631e-03  max_rel=1.478e+00
+  dk   vs ref: max_abs=2.019e-02  max_rel=2.199e+00
+  dv   vs ref: max_abs=3.094e-02  max_rel=3.264e-01
+  fa_dq     vs ref: max_abs=1.163e-02  max_rel=1.909e+00
+  fa_dk     vs ref: max_abs=3.110e-02  max_rel=5.365e+00
+  fa_dv     vs ref: max_abs=3.627e-02  max_rel=3.711e+00
+  te_dq     vs ref: max_abs=1.238e-02  max_rel=1.732e+00
+  te_dk     vs ref: max_abs=3.140e-02  max_rel=2.707e+00
+  te_dv     vs ref: max_abs=3.627e-02  max_rel=3.711e+00
+======== b1_s1024_h64_d128_kv4_causal_bf16 (two-file) ========
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv4_causal_bf16
+B=1 S=1024 H=64 Hkv=4 D=128 causal=1 scale=0.088388 dtype=bf16
+[timing] total(3 kernels) 28.4428 ms  1.21 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 17.4324 ms | main 10.9634 ms | convert 0.0470 ms
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.319e-02  max_rel=2.740e+00
+  dk   vs ref: max_abs=2.716e-02  max_rel=1.699e+00
+  dv   vs ref: max_abs=3.152e-02  max_rel=2.838e-01
+  fa_dq     vs ref: max_abs=1.710e-02  max_rel=3.368e+00
+  fa_dk     vs ref: max_abs=3.543e-02  max_rel=8.310e+00
+  fa_dv     vs ref: max_abs=6.511e-02  max_rel=8.543e+00
+  te_dq     vs ref: max_abs=1.710e-02  max_rel=3.317e+00
+  te_dk     vs ref: max_abs=3.534e-02  max_rel=6.200e+00
+  te_dv     vs ref: max_abs=6.511e-02  max_rel=8.543e+00
+======== b1_s1024_h64_d128_kv1_causal_bf16 (two-file) ========
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_bf16
+B=1 S=1024 H=64 Hkv=1 D=128 causal=1 scale=0.088388 dtype=bf16
+[timing] total(3 kernels) 28.3945 ms  1.21 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 17.4301 ms | main 10.8950 ms | convert 0.0694 ms
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.066e-02  max_rel=2.645e+00
+  dk   vs ref: max_abs=3.385e-02  max_rel=9.591e-01
+  dv   vs ref: max_abs=5.891e-02  max_rel=4.178e-01
+  fa_dq     vs ref: max_abs=1.793e-02  max_rel=3.235e+00
+  fa_dk     vs ref: max_abs=4.933e-02  max_rel=3.752e+00
+  fa_dv     vs ref: max_abs=8.386e-02  max_rel=7.231e+00
+  te_dq     vs ref: max_abs=1.300e-02  max_rel=2.289e+00
+  te_dk     vs ref: max_abs=6.018e-02  max_rel=5.845e+00
+  te_dv     vs ref: max_abs=8.386e-02  max_rel=7.231e+00
