@@ -1148,3 +1148,144 @@ smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio \
 原始输出：`src/fp8/fa_bwd_fp8_main_o4c_{s512_h16_d128,s1024_h32_d128,s4096_h16_d128,
 s1024_h2_d512,s1024_h32_d128_kv4}.out.txt`、`src/fp8/fa_bwd_fp8_mma_onefile_o4c_s4096.out.txt`、
 `src/fp8/fa_bwd_fp8_main_o4c_ncu_s4096.out.txt`、`src/fp8/fa_bwd_fp8_main_o4c_tebench.out.txt`。
+
+---
+
+## 17. O4b：`Kt/Qt/dOt` 三个转置副本 → `ldmatrix.x2.trans` + K 配对布局（main 1.17–1.76×）
+
+### 17.1 先纠正 O4b 的前提：fp8 的转置副本**不能直接消掉**
+
+ROADMAP 里 O4b 的原始设想是「用 fp8 `ldmatrix.trans` 从原始 `[K][N]` 布局直接读 B，
+把 `Kt/Qt/dOt` 三个转置副本整个消掉」。**对 fp8 这个前提不成立**，原因是
+`ldmatrix` 以 **b16** 为单位做转置，而 fp8 是「2 个相邻字节 = 1 个 b16」：
+
+* 反向里 mma 的 A、B 需要**相反的主序**（`m16n8k32.row.col`：A 行主序、B 列主序）；
+  Q/dO 既当 A（GEMM1/2）又当 B（GEMM4/3），K 既当 GEMM1 的 B 又当 GEMM5 的 B（收缩维不同），
+  所以每个张量**必然要存两种主序**——这一点即使 `ldmatrix.trans` 免费也消不掉。
+* 若把原始数组按 `[K][N]`（N 为列）存，每个 b16 = **沿 N 的 2 个 fp8**；`ldmatrix.trans`
+  转置后寄存器里的配对方向仍是 N，**不是** mma 需要的「沿 K 的 4 个 fp8」（配错 → 数值全错）。
+  所以 fp8 的 `.trans` **不是 drop-in**（这正是 ROADMAP 要求先做 smoke test 的原因）。
+
+**正确做法（§17.2 已用最小复现逐位验证）**：把操作数改存成 **K 配对布局** `Sp[i][n]`
+（uint16，`i=k/2`，`Sp[i][n] = pack(B[n][2i], B[n][2i+1])`，即每个 b16 装两个**相邻 k**）。
+此时 `ldmatrix.x2.trans` 的输出片段恰好是 `B[n=l/4][k=4(l%4)..+3]`，与从 `[N][K]` 行主序
+用 `ldmatrix.x2` 读到的 B 片段**逐位相同**。所以 O4b 的真实收益不是「消副本」，而是：
+① 把原来**逐字节 scatter 的转置写**换成 **4B 交织写**（`__byte_perm`）；
+② 配对数组比 `[HD][K+16]` 副本更小（无 +16 行距放大），smem 下降；
+③ B 读仍是一次 `ldmatrix.x2`（与 `x2.trans` 同量级），但**写侧的 bank conflict 基本消失**。
+
+### 17.2 smoke test（`fa_bwd_fp8_trans_smoke.cu`，O4b 第一步）
+
+同一批 fp8 B 字节，分别用（1）`[N][K]` + `ldmatrix.x2`（现有路径）、（2）`[K/2][N]` 配对 +
+`ldmatrix.x2.trans`（O4b）喂给同一个 `mma.m16n8k32`，比较输出：
+
+```
+  notrans-vs-ref : max_abs=3.052e-05      （仅 fp32 舍入，mma 内部次序 vs 标量）
+  trans  -vs-ref : max_abs=3.052e-05
+  notrans-vs-trans: max_abs=0.000e+00  bitwise_diff=0/128
+=== PASS（K 配对 + ldmatrix.trans 与现有 ldmatrix.x2 路径逐位一致） ===
+```
+
+结论：**K 配对布局 + `ldmatrix.x2.trans` 与现有 `ldmatrix.x2` 路径逐位一致**，
+可以 drop-in 替换 GEMM3/4/5 的 B。
+
+### 17.3 实现（单/两文件 device 代码同源逐字一致）
+
+* `Fp8Cfg`：`KTS/QTS` 两个转置行距 → `PSLD = HD+8`（配对布局 uint16 行距）；
+  `KVU` → `NPU = (BN/2)*(HD/4)/THREADS`（每线程行对数）；`fp8_bytes` 里
+  `HD*KTS+2*HD*QTS` → `qp_bytes*2 + kp_bytes`（`qp_bytes=(BM/2)*PSLD*2`、
+  `kp_bytes=(BN/2)*PSLD*2`）。**d128**：smem **75520 → 70656 B（69.0KB）**；
+  **MLA d512**：**229120 → 205824 B（200.9KB）**。
+* 新 `ldmatrix_x2_trans` 与 `mma_block_bt`（A 与非转置版逐字相同，B 用
+  `Bp + (koff/2 + (lane&15))*bp_sld + nb0 + wn*WARP_N + j*8`，`nb0` 是 head_dim 的 N-tile 偏移）。
+* Q/dO 载入：从「逐元素 1B 写 `Qs/dOs` + scatter 写 `Qt/dOt`」改成「行对 unit：一次读两行
+  的 4B，写 `Qs/dOs` 两行 + 用 `__byte_perm(q0,q1,0x5140/0x7362)` 交织写 `Qp/dOp`」。
+* K/V 载入（`kv_prefetch_pair`/`kv_commit_pair`/`kv_load_pair`）：同样按「行对 + 4 个连续 d」
+  组织，写 `Ks/Vs` 两行 + 交织写 `Kp`；**O3 寄存器预取保留**（HD=128 每线程预取 NPU=4 个 unit
+  ×4 regs = 16 regs，与 O3 的 8+8 相同；HD=512 NPU=16 关闭预取）。
+* GEMM3/4/5 的 B 从 `mma_block(...dOt/Qt/Kt...)` 换成 `mma_block_bt(...dOp/Qp/Kp...)`。
+
+因为 mma 拿到的操作数**字节与次序完全相同**，数值与 O4c **逐位相同**（见 §17.4）。
+
+### 17.4 数值核对（与 O4c **逐位相同**）
+
+| shape | dq / dk / dv vs ref (max_abs) | O4c | **O4b** |
+|---|---|---|---|
+| (1,512,16,128) | `2.426e-1 / 2.975e-1 / 3.735e-1` | 同 | **同** |
+| (1,1024,32,128) | `2.400e-1 / 4.195e-1 / 3.536e-1` | 同 | **同** |
+| (1,4096,16,128) | `2.635e-1 / 2.643e-1 / 3.216e-1` | 同 | **同** |
+| MLA (1,1024,2,512) | `2.232e-1 / 3.337e-1 / 3.602e-1` | 同 | **同** |
+| MLA (1,256,2,512) | `2.356e-1 / 2.290e-1 / 3.441e-1` | 同 | **同** |
+| GQA h32kv4 | `2.517e-1 / 5.408e-1 / 7.072e-1` | 同 | **同** |
+
+### 17.5 性能（event 纯 device；同 session 先测 O4c=HEAD 基线）
+
+| case | ksplit | main base | **main O4b** | 加速 | total base | total O4b | main TF（峰值占比） | TE FP8(CUPTI) |
+|---|---|---|---|---|---|---|---|---|
+| d128 S=512 H16 | 16 | 0.1091 | **0.0733** | **1.49×** | 0.2575 | **0.2190** | 29.3（1.48%） | 0.1003 |
+| d128 S=1024 H32 | 8 | 0.6765 | **0.4552** | **1.49×** | 1.0591 | **0.8574** | 37.7（1.91%） | 0.2049 |
+| d128 S=4096 H16 | 4 | 3.4553 | **2.9473** | **1.17×** | 5.1196 | **4.6162** | 46.6（2.36%） | 0.5847 |
+| MLA S=1024 H2 D512 | 4 | 0.3896 | **0.3251** | **1.20×** | 0.8499 | **0.7906** | 13.2（0.67%） | NA |
+| MLA S=256 H2 D512 | 16 | 0.0916 | **0.0522** | **1.76×** | 0.2357 | **0.1909** | 5.14（0.26%） | NA |
+| GQA h32kv4 S=1024 | 8 | 0.5923 | **0.4404** | **1.34×** | 0.9259 | **0.7528** | 39.0（1.97%） | 0.2013 |
+
+main-only ours/TE = **73% / 222% / 504% / GQA 219%**（S=512 的 main 已是 TE 整条反向的 ~73%）；
+端到端 ours/TE = **2.18× / 4.18× / 7.90× / GQA 3.74×**（O4c 为 2.52×/5.14×/8.75×）。
+单文件 `fa_bwd_fp8_mma_onefile.cu` 与两文件逐指标一致（S=4096 main 2.96 ms、
+dq/dk/dv vs ref `2.635/2.643/3.216e-1`）。
+
+### 17.6 ncu（main；O4c=HEAD → O4b）
+
+| 指标 | O4c (S4096) | **O4b (S4096)** | 说明 |
+|---|---|---|---|
+| Duration | 3.60 ms | **3.00 ms** | 1.20× |
+| **smem shared store bank conflicts** | **206.4 M** | **69.4 M** | **−66%（逐字节 scatter 写消失）** |
+| smem shared load bank conflicts | 68.4 M | 69.3 M | 基本不变 |
+| **L1/TEX Throughput** | **81.30%** | **69.69%** | 头号墙下降 |
+| L2 Cache Throughput | 57.85% | **69.12%** | **上升，成为并列墙**（残余 red 未动） |
+| Compute (SM) | 29.42% | 34.40% | |
+| DRAM | 1.99% | 2.46% | |
+| short / long scoreboard | 3.50 / 1.44 | **2.73 / 1.16** | smem→mma 依赖缓解 |
+| barrier / wait | 0.30 / 1.58 | 0.35 / 1.53 | |
+| Occupancy（Regs/smem） | 18.20%（168/75.0KB） | 18.21%（**168/70.66KB**） | 仍 3 CTA/SM |
+| L1 red requests / L2 red sectors | 17.0 M / 204.5 M | **17.0 M / 204.5 M** | 不变（O4c 已砍半） |
+
+S=512（ncu 单次）：Duration **78.2µs**、L1/TEX 47.2%、L2 48.1%、short/long 2.13/2.13、
+occ 17.6%（168 regs/70.66KB，3 CTA/SM）。
+MLA S=1024H2（ncu）：Duration **359.8µs**、smem **205.82KB**、regs 255、
+occ **6.25%（1 CTA/SM）**、L1/TEX 11.4%、long/short 1.73/0.93。
+
+**bound 结论**：O4b 把「逐字节转置写」的 **op_st bank conflict 砍掉 66%**、L1/TEX 从 81.3%
+降到 69.7%、short_scoreboard 3.50→2.73，main 提速。**新墙 = L1/TEX 69.7% + L2 69.1%
+（O4c 后残余的 204.5 M red）+ short_scoreboard 2.73**（三者接近）。**MLA 即使 O4b 把三个
+配对数组也去掉（205824−83200=122624 B）仍 > 116224 B（2 CTA/SM 门槛）**，故 MLA 冲 2 CTA/SM
+必须同时动 `Qs/Ks/Vs/dOs/dS2` 的大头，O4b 只是其中一步。下一步候选：**O7（分块 `*_accum`
+替全局 `atomicAdd`，消残余 red）** 或 MLA 的 KV 分片。
+
+### 17.7 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+# O4b 第一步：布局最小复现（必须 PASS）
+scripts/run.sh src/fp8/fa_bwd_fp8_trans_smoke.cu
+for c in b1_s512_h16_d128_causal_fp8 b1_s1024_h32_d128_causal_fp8 \
+         b1_s4096_h16_d128_causal_fp8 b1_s1024_h2_d512_causal_fp8 \
+         b1_s256_h2_d512_causal_fp8 b1_s1024_h32_d128_kv4_causal_fp8; do
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=30 \
+    --dir=/home/xieminglin/proj/output/fa-bwd/$c
+done
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=30 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# ncu：bank conflict + stall + SOL
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma_kernel \
+  --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
+l1tex__throughput.avg.pct_of_peak_sustained_elapsed,lts__throughput.avg.pct_of_peak_sustained_elapsed,\
+smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_trans_smoke.out.txt`、
+`src/fp8/fa_bwd_fp8_main_o4b_{s512_h16_d128,s1024_h32_d128,s4096_h16_d128,s1024_h2_d512,
+s256_h2_d512,s1024_h32_kv4_d128}.out.txt`、`src/fp8/fa_bwd_fp8_mma_onefile_o4b_s4096_h16_d128.out.txt`、
+`src/fp8/fa_bwd_fp8_main_o4b_ncu_{s512,s4096,mla_s1024h2}.out.txt`、
+`src/fp8/fa_bwd_fp8_o4b_tebench.out.txt`。

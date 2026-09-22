@@ -1,0 +1,148 @@
+==PROF== Connected to process 486778 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_main.out)
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 11 passes
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 11 passes
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 11 passes
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 11 passes
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 11 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 128 x 16 x 1  (ksplit=16, base_grid=128)
+[timing] total(quant+pre+main+cvt) 289.8297 ms  0.01 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2512 ms | preprocess 0.1523 ms | main 284.1660 ms | convert 5.2602 ms
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.381e-01  max_rel=2.387e+02
+  dk   vs te_dk: max_abs=4.429e-01  max_rel=2.378e+02
+  dv   vs te_dv: max_abs=8.546e-01  max_rel=6.898e+01
+==PROF== Disconnected from process 486778
+[486778] fa_bwd_fp8_main.out@127.0.0.1
+  void fa_bwd_fp8_mma_kernel<128, 64, 32>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (128, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %         6.51
+    gpu__time_duration.sum                                                                 us        78.18
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                       1065719
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                                       1235395
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                                                294912
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum                                    sector      2359296
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        47.23
+    launch__registers_per_thread                                              register/thread          168
+    launch__shared_mem_per_block_dynamic                                          Kbyte/block        70.66
+    lts__t_sectors_op_red.sum                                                          sector      3538944
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        48.14
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                          %         6.58
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        29.32
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        17.64
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         2.13
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         2.13
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.62
+    ------------------------------------------------------------------------- --------------- ------------
+
+  void fa_bwd_fp8_mma_kernel<128, 64, 32>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (128, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %         6.52
+    gpu__time_duration.sum                                                                 us        78.11
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                       1060944
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                                       1239456
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                                                294912
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum                                    sector      2359296
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        47.76
+    launch__registers_per_thread                                              register/thread          168
+    launch__shared_mem_per_block_dynamic                                          Kbyte/block        70.66
+    lts__t_sectors_op_red.sum                                                          sector      3538944
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        48.30
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                          %         6.61
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        29.64
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        17.65
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         2.12
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         2.14
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.62
+    ------------------------------------------------------------------------- --------------- ------------
+
+  void fa_bwd_fp8_mma_kernel<128, 64, 32>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (128, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %         6.52
+    gpu__time_duration.sum                                                                 us        78.02
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                       1059975
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                                       1238720
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                                                294912
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum                                    sector      2359296
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        47.01
+    launch__registers_per_thread                                              register/thread          168
+    launch__shared_mem_per_block_dynamic                                          Kbyte/block        70.66
+    lts__t_sectors_op_red.sum                                                          sector      3538944
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        48.23
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                          %         6.61
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        29.20
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        17.66
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.33
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         2.11
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         2.11
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.62
+    ------------------------------------------------------------------------- --------------- ------------
+
+  void fa_bwd_fp8_mma_kernel<128, 64, 32>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (128, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %         6.45
+    gpu__time_duration.sum                                                                 us        78.91
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                       1060214
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                                       1231746
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                                                294912
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum                                    sector      2359296
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        47.46
+    launch__registers_per_thread                                              register/thread          168
+    launch__shared_mem_per_block_dynamic                                          Kbyte/block        70.66
+    lts__t_sectors_op_red.sum                                                          sector      3538944
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        47.69
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                          %         6.59
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        29.50
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        17.69
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         2.13
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         2.13
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.62
+    ------------------------------------------------------------------------- --------------- ------------
+
+  void fa_bwd_fp8_mma_kernel<128, 64, 32>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (128, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %         6.50
+    gpu__time_duration.sum                                                                 us        78.37
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                       1063728
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                                       1226988
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                                                294912
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum                                    sector      2359296
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        47.39
+    launch__registers_per_thread                                              register/thread          168
+    launch__shared_mem_per_block_dynamic                                          Kbyte/block        70.66
+    lts__t_sectors_op_red.sum                                                          sector      3538944
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        48.10
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                          %         6.61
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        29.49
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        17.69
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.35
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         2.15
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         2.16
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.62
+    ------------------------------------------------------------------------- --------------- ------------
+
