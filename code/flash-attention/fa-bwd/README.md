@@ -4,7 +4,8 @@
 **flash-attention 反向**整理成 **单文件 / 两文件** 两种形式（fp16 / bf16 / **fp8 最重点**），
 编译、用 ncu 剖析 bound、与 TE 做数值与性能对标，并产出分析文档。
 
-- 目标卡：当前在 **H100 sm90** 上验证（代码尽量抽象，便于移植到目标 AI 卡）。
+- 目标卡：**目标 AI 卡**；当前在 **H100 sm90** 上开发验证，代码按可替换层抽象，便于移植到目标卡。
+- 生产形状（GQA/MQA/MLA，对齐目标卡配置）：见 `harness/fa_bwd_bench.py` 的 `REQUESTED_SHAPES` 与 `docs/04` §7。
 - 控制面板：[ROADMAP.md](ROADMAP.md)｜优化手段梳理：[docs/00-fa-bwd-optimization-catalog.md](docs/00-fa-bwd-optimization-catalog.md)
 - 数值 I/O dump 目录：**`/home/xieminglin/proj/output/fa-bwd/<case>/`**（CPU npy，便于 load 比对）
 
