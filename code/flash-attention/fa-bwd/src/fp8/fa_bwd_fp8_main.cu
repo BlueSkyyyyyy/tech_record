@@ -109,7 +109,8 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // =============================================================================
 // 模板 launcher：按 HD 选择实例并设置动态 smem 上限。
 // =============================================================================
-template <int HD, int BM, int BN>
+// O7：REGDQ 选择是否把 dQ 沿 nt 累加在寄存器里（见 kernels.cuh 主 kernel 说明）。
+template <int HD, int BM, int BN, bool REGDQ>
 static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             const unsigned char* k8, const float* ks,
                             const unsigned char* v8, const float* vs,
@@ -118,10 +119,10 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             float* dk_acc, float* dv_acc, int S, int H, int Hkv,
                             float scale, int causal, int ksplit) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN>,
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
                                   Cfg::smem_bytes));
-  fa_bwd_fp8_mma_kernel<HD, BM, BN><<<mg, THREADS, Cfg::smem_bytes>>>(
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ><<<mg, THREADS, Cfg::smem_bytes>>>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit);
 }
@@ -265,11 +266,16 @@ int main(int argc, char** argv) {
     while (kp * 2 <= k) kp *= 2;  // 向下取 2 的幂，让 grid 对齐到整数个波附近
     ksplit = (int)kp;
   }
+  // O7：只有 HD=128（dQ 一次铺满 N）且「平均每 CTA 的 nt tile 足够多」时才启用寄存器累加。
+  // 因果下每 mblk 的 nt tile 数 ≈ (m0+BM)/BN，三角求和 /(mblk·ksplit) 后平均每 CTA
+  // ≈ (S/BN)/2/ksplit；阈值取 4（实测 S=1024H32 平均=2、启用反而持平/略慢，S=4096=16 明显收益）。
+  const bool use_regdq = (D == 128) && ((long)(S / 32) / 2 / ksplit >= 4);
   dim3 pg(S, H, B);
   dim3 lg((S + LBM - 1) / LBM, H, B);
   dim3 mg((S + BM - 1) / BM * ksplit, H, B);
   printf("grid main = %d x %d x %d  (ksplit=%d, base_grid=%ld)\n", mg.x, mg.y, mg.z,
          ksplit, base_grid);
+  printf("O7: use_regdq=%d (register dQ accumulation)\n", (int)use_regdq);
   const int cvt_threads = 256;
   const int cvt_blocks = (int)std::min<size_t>((nq + cvt_threads - 1) / cvt_threads, 65535);
 
@@ -284,14 +290,19 @@ int main(int argc, char** argv) {
   };
 
   auto run_main = [&]() {
-    if (D == 128)
-      launch_bwd_main<128, 64, 32>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
-                                   d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
-                                   scale, (int)causal, ksplit);
-    else
-      launch_bwd_main<512, 64, 32>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
-                                   d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
-                                   scale, (int)causal, ksplit);
+    if (D == 128) {
+      if (use_regdq)
+        launch_bwd_main<128, 64, 32, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
+                                           d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                           d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      else
+        launch_bwd_main<128, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
+                                            d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                            d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+    } else
+      launch_bwd_main<512, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
+                                          d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                          d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
   };
 
   auto run_all = [&]() {

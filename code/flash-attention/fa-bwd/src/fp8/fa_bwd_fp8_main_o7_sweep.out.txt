@@ -1,0 +1,45 @@
+===== b1_s512_h16_d128_causal_fp8 =====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 128 x 16 x 1  (ksplit=16, base_grid=128)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.2191 ms  9.80 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0306 ms | preprocess 0.0816 ms | main 0.0740 ms | convert 0.0329 ms
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+===== b1_s1024_h32_d128_causal_fp8 =====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 128 x 32 x 1  (ksplit=8, base_grid=512)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.8648 ms  19.86 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1004 ms | preprocess 0.2090 ms | main 0.4604 ms | convert 0.0950 ms
+  dq   vs ref: max_abs=2.400e-01  max_rel=1.887e+02
+  dk   vs ref: max_abs=4.195e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.536e-01  max_rel=8.068e+01
+===== b1_s4096_h16_d128_causal_fp8 =====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+O7: use_regdq=1 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 4.3410 ms  31.66 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1817 ms | preprocess 1.3032 ms | main 2.6736 ms | convert 0.1825 ms
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01
+===== b1_s1024_h32_d128_kv4_causal_fp8 =====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 128 x 32 x 1  (ksplit=8, base_grid=512)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.7569 ms  22.70 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0618 ms | preprocess 0.1956 ms | main 0.4463 ms | convert 0.0532 ms
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.994e+02
+  dk   vs ref: max_abs=5.408e-01  max_rel=1.632e+02
+  dv   vs ref: max_abs=7.072e-01  max_rel=9.226e+01
+===== b1_s1024_h2_d512_causal_fp8 =====
+smem = 205824 bytes (201.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 64 x 2 x 1  (ksplit=4, base_grid=32)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.7910 ms  5.43 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0204 ms | preprocess 0.3720 ms | main 0.3277 ms | convert 0.0709 ms
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01

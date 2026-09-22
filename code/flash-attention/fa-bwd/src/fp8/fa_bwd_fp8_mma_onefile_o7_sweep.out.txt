@@ -1,0 +1,16 @@
+===== ONEFILE b1_s512_h16_d128_causal_fp8 =====
+grid main = 128 x 16 x 1  (ksplit=16, base_grid=128)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.2187 ms  9.82 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0304 ms | preprocess 0.0815 ms | main 0.0736 ms | convert 0.0332 ms
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+===== ONEFILE b1_s4096_h16_d128_causal_fp8 =====
+grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+O7: use_regdq=1 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 4.3083 ms  31.90 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1860 ms | preprocess 1.3089 ms | main 2.6522 ms | convert 0.1612 ms
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01

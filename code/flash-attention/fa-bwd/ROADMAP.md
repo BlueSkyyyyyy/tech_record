@@ -540,6 +540,30 @@
      `src/fp8/fa_bwd_fp8_main_o4b_ncu_{s512,s4096,mla_s1024h2}.out.txt`、
      `src/fp8/fa_bwd_fp8_o4b_tebench.out.txt`；文档 `docs/03` §17、`docs/04` §2.3/§3。
 
+- 2026-09-23（第二十五轮）：**O7（部分）完成（dQ 归约去 RMW：CTA 内寄存器累加 + 单次 flush，main 1.10×）**。
+   - 用 `l1tex/lts__t_sectors_op_red` 拆 O4b 后的 204.5M red：dQ（GEMM5）的 epilogue 每个 nt tile 都
+     对**本 CTA 同一 `(r,c)`**（GEMM5 的 warp/累加器映射与 nt 无关）做一次跨 CTA `atomicAdd`——
+     一个元素被 RMW `ntiles` 次（S=4096 ksplit=4 平均 ~16）；dK/dV 每元素在一个 CTA 内只写一次
+     （每个 nt 覆盖不同 KV 行），其 red 是跨 mblk/hkv 的 CTA 竞争，本轮未动。
+   - **改动**（单/两文件 device 逐字一致）：dQ epilogue 改成**先折算 `sds2[r]*scale`、再累进寄存器
+     `dqacc[2][8][4]`**，nt 循环后每元素只 flush 一次 `red_add2`（dQ 归约 `O(ntiles)→O(1)`）。
+     因为 `sds2[r]` 逐 tile 变化，**必须先折算再累加**。仅 HD=128 启用（HD=512 需 4 份累加器
+     =256 regs，不划算）；`REGDQ` 做成模板参数、host 按 `(S/BN)/2/ksplit ≥ 4` 选择。
+   - 朴素版 168→**254 regs / 2 CTA/SM**（S=512/1024 反慢）；用 `__launch_bounds__(128,3)`
+     压回 **168 regs（+48B spill）/ 3 CTA/SM**（HD=512 用 `,1`，255 regs 不变）。
+   - **数值与 O4b 逐位相同**（S512 2.426/2.975/3.735e-1；S1024H32 2.400/4.195/3.536e-1；
+     S4096 2.635/2.643/3.216e-1；MLA S1024H2 2.232/3.337/3.602e-1；GQA 2.517/5.408/7.072e-1）。
+   - **性能**（event）：main S=4096 2.9473→**2.6736ms（1.10×）**、total 4.6162→**4.3410ms**；
+     S=512 0.0733→0.0740、S=1024H32 0.4552→0.4604、GQA 0.4404→0.4463、MLA 0.3251→0.3277
+     （均走原路，±1% session 噪声）。同 session TE FP8 0.1006/0.2054/0.5863/0.2014ms ⇒
+     端到端 ours/TE = 2.18×/4.21×/**7.41×**（O4b 7.90×）；main-only S=4096 51.4 TF（峰值 2.60%）。
+   - **ncu（main, S=4096）**：Duration 3.00→**2.69ms**、**L1 red 17.0M→9.04M、L2 red
+     204.5M→108.5M（0.53×）**、**L2 69.12%→43.8%**、L1/TEX 69.7→64.4%、Compute 34.4→37.7%、
+     short 2.73→1.89、long 1.16→1.09、barrier 0.35→0.22、occ 18.2%→18.1%（168 regs/70.66KB,
+     3 CTA/SM）。**新墙 = L1/TEX 64.4% + short 1.89 + 残余 L2 43.8%（dK/dV 跨 CTA red）**。
+   - 原始输出 `src/fp8/fa_bwd_fp8_main_o7_sweep.out.txt`、`..._mma_onefile_o7_sweep.out.txt`、
+     `..._main_o7_ncu_s4096.out.txt`、`..._o7_tebench.out.txt`；文档 `docs/03` §18、`docs/04` §2.3/§3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -613,10 +637,13 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 以下为既有 fp8 优化 backlog（P5 已全部收口，现在可与 MLA 优化合并推进）。
 
 > P5-3 已完成，ROADMAP 里的「P 项」全部收口，后续为**优化 backlog**。
-> **O1/O2/O3/O4a/O2b/O4d/O4c/O4b 已完成**。O4c 把 L2 原子流量砍半（L2 81.5%→57.9%）；
-> O4b 把转置副本换成 K 配对 + `ldmatrix.x2.trans`（`op_st` 冲突 −66%、L1/TEX 81.3%→69.7%）。
-> **下一项 = O7**（分块 `*_accum` + convert 替全局 `atomicAdd`：消 O4c 后残余的 204.5M red，
-> 现 L2 并列墙 69.1%；同时得到确定性反向）。
+> **O1/O2/O3/O4a/O2b/O4d/O4c/O4b/O7 已完成**。O4c 把 L2 原子流量砍半（L2 81.5%→57.9%）；
+> O4b 把转置副本换成 K 配对 + `ldmatrix.x2.trans`（`op_st` 冲突 −66%、L1/TEX 81.3%→69.7%）；
+> **O7 把 dQ 的每-tile 归约折成「CTA 内寄存器累加 + 单次 flush」**（残余 red 再砍半：
+> L2 red 204.5M→108.5M、**L2 墙 69.1%→43.8%**、main S=4096 1.10×，且保住 3 CTA/SM）。
+> **下一项候选 = dK/dV 的跨 CTA 归约**（O7 只处理了 dQ；剩余 108.5M red 全是 dK/dV 的跨
+> mblk/hkv 竞争，需分块 `*_accum` + convert 或「按 KV 列块常驻、Q 块累加」改并行结构）；
+> 之后 `cp.async` 双缓冲 / MLA 降 smem / fp16·bf16 上张量核（O5）/ wgmma+TMA（O9）。
 > 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
 
 - [x] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms。
@@ -678,7 +705,23 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       成一次 `atomicAdd(float2*)`（`red.global.add.v2.f32`）。**red 请求/sector 各 0.50×**、
       L2 red 408.9→204.5 M、**L2 81.5%→57.9%（墙被打掉）**；main S=512/1024H32/4096 =
       1.32×/1.19×/1.39×（MLA 1.45×），数值与 O2b+O4d **逐位相同**。新墙 = **L1/TEX 81.3%
-      + short_scoreboard 3.50**。详见 `docs/03` §16。
+       + short_scoreboard 3.50**。详见 `docs/03` §16。
+- [x] **O7（dQ 归约去 RMW）**：**已完成（第二十五轮，部分收口）**。O4c 后残余的 204.5M red 里，
+      dQ（GEMM5）的 epilogue 每个 nt tile 都对**本 CTA 同一 (r,c)**（映射与 nt 无关）做一次跨 CTA
+      `atomicAdd`，一个元素被 RMW `ntiles` 次。O7 把它改成**先折算 `sds2[r]*scale`、再累进寄存器
+      `dqacc[2][8][4]`，nt 循环后每元素只 flush 一次 `red_add2`**（dQ 归约指令 `O(ntiles)→O(1)`）。
+      * 因 `sds2[r]` 逐 tile 变化，必须**先折算再累加**（不能累加裸 mma 输出）。
+      * 只对 **HD=128**（dQ 的 N 一次铺满）启用；HD=512 需 4 份累加器（256 regs）不划算，走原路。
+      * 朴素版 168→**254 regs / 2 CTA/SM**（S=512/1024 反慢）；用 `__launch_bounds__(128,3)`
+        压回 **168 regs（+48B spill）/ 3 CTA/SM**，并做成模板参数 `REGDQ`，host 按「平均每 CTA
+        的 nt tile 数」(`(S/BN)/2/ksplit ≥ 4`) 选择，小 S 高 ksplit 走原路避免回归。
+      * **数值与 O4b 逐位相同**；L1 red 17.0M→**9.0M**、L2 red 204.5M→**108.5M（0.53×）**、
+        **L2 69.1%→43.8%**、short_scoreboard 2.73→1.89；main S=4096 2.9473→**2.6736ms（1.10×）**、
+        端到端 4.6162→**4.3410ms**；其余 shape 走原路（±1% 噪声）。**新墙 = L1/TEX 64.4% +
+        short 1.89 + 残余 L2 43.8%**。**剩余 red（dK/dV 跨 mta/hkv 竞争）转 backlog**。详见
+        `docs/03` §18、`docs/04` §2.3/§3。
+- [ ] （backlog）O7b：dK/dV 的跨 CTA 归约（分块 `*_accum` + convert，或按 KV 列块常驻 / Q 块累加），
+      消剩余 108.5M red 并得到确定性反向。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog
