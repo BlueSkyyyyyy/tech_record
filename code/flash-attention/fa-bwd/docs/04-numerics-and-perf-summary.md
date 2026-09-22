@@ -297,7 +297,8 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --launch-count 1 \
 | (1,1024,2,512) | 1.250 / 1.454 / 2.058e-3 | 2.463 / 4.143 / 6.789 ms | 0.63 | 0.06% |
 
 数值均在 fp16 噪声量级；ncu bound = smem bank conflict + 1 CTA/SM 低 occupancy（135KB smem）。
-后续待办看 ROADMAP「下一步」：bf16/fp8 复用同改造、MLA 优化（冲 2 CTA/SM / 张量核 / 对标 FlashMLA）。
+bf16 的 MLA（同一 `HD/BM` 改造）见 §7.6。后续待办看 ROADMAP「下一步」：fp8 复用同改造、
+MLA 优化（冲 2 CTA/SM / 张量核 / 对标 FlashMLA）。
 
 ### 7.4 ours 的 FP8 GQA/MQA（P5-3/P5-4）
 
@@ -341,3 +342,20 @@ ours 在 bf16 上 dq/dk/dv 全面优于 FA/TE。**性能**：ours 仍是标量�
 「性能差距归因」），如 bf16 kv4(h64) main 10.96 ms / total 28.44 ms（≈1.2 TF，峰值 0.12%），
 远低于 FA/TE；张量核化（O5）是下一步最大杠杆。
 原始输出：`src/fp16/fa_bwd_fp16_main_p51_gqa.out.txt`、`src/bf16/fa_bwd_bf16_main_p53_gqa.out.txt`。
+
+### 7.6 ours 的 bf16 MLA（head_dim=512，P5-3 续）
+
+bf16 反向复用 fp16 的 `HD/BM` 模板改造（`HD=128→BM=64` 回归逐位不变、`HD=512→BM=16`），
+单/两文件同源。FA/TE 反向均不支持 head_dim=512，故只有 fp32 ref 与 ours 性能数字：
+
+| MLA case (B1, D=Dv=512, causal, bf16) | ours-vs-ref dq/dk/dv max_abs | ours preprocess/main/total | TFLOPS | 峰值占比 |
+|---|---|---|---|---|
+| (1,256,2,512) | 8.240 / 7.905 / 15.04e-3 | 0.213 / 0.748 / 0.972 ms | 0.28 | 0.03% |
+| (1,512,4,512) | 10.43 / 10.33 / 13.85e-3 | 1.297 / 1.461 / 2.872 ms | 0.75 | 0.08% |
+| (1,1024,2,512) | 5.152 / 7.742 / 15.57e-3 | 2.471 / 2.905 / 5.522 ms | 0.78 | 0.08% |
+
+数值为 bf16 噪声量级（~1e-2）；bf16 MLA 的 main 比 fp16 MLA 快 1.4–1.6×（padding 消冲突）。
+ncu（main, S=1024 H2）：DRAM 0.14% / L1/TEX 26.68% / Compute 13.07% / occ 6.25%（135.42KB smem,
+1 CTA/SM）/ Waves 0.97 / 48 regs / **bank conflicts ~0（padding 生效）** /
+stall `long_scoreboard 1.71` + `wait 1.35` ⇒ bound = 全局访存延迟 + 低并行度（与 fp16 MLA 的
+「smem 冲突」不同，因为 padding 已消冲突）。详见 `docs/01b` §6d。
