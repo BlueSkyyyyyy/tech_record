@@ -358,6 +358,27 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 - **O7 只改 dQ 的归约方式**（dK/dV 的跨 mblk/hkv 竞争未动，仍是残余 red 的大头），
   端到端 ours/TE FP8 S=4096 = **7.41×**（O4b 7.90×）；S=512 的 main 仍是 TE 整条反向的 ~74%。
 
+> **下表为 O11（第三十八轮）最新值**：把 fp16/bf16 的 **O8b**（LSE 镜像配对负载均衡 +
+> `cp.async` 双缓冲）移植到 fp8 的 `lse_mma_kernel_bal`（fp8 一行 `HD` 字节 = `HD/16` 个
+> 16B unit）。**lse S=4096 0.936→0.345 ms（2.71×）**、preprocess 1.20→0.388 ms；数值与
+> O7 **逐位相同**（单/两文件一致）。另附快速 exp/log（`__expf`/`__logf`，preprocess 再 ~8%）。
+> main 未改。逐项见 `03` §19。
+
+| shape | ksplit | ours total（含 quant） | preprocess | ours main | TE FP8（同 session，纯反向） |
+|---|---|---|---|---|---|
+| d128 (1,512,16,128) | 16 | 0.1797 ms | 0.0465 ms | 0.0725 ms | 0.1005 ms / 42.7 TF |
+| d128 (1,1024,32,128) | 8 | 0.7116 ms / 24.1 TF | 0.1024 ms | 0.4463 ms | 0.1477 ms / 116.3 TF |
+| d128 (1,4096,16,128) | 4 | **3.3104 ms / 41.5 TF** | **0.3878 ms**（1.20→0.388，3.1×） | 2.5591 ms | 0.5908 ms / 465.3 TF |
+| GQA h32kv4 (1,1024,32,128) | 8 | 0.6380 ms | 0.1006 ms | 0.4308 ms | — |
+| MQA h64kv1 (1,1024,64,128) | 8 | 1.1080 ms | 0.1457 ms | 0.8123 ms | — |
+| MLA (1,1024,2,512) | 4 | 0.5390 ms | 0.1388 ms | 0.3250 ms | NA（FA/TE 不支持） |
+
+- 端到端 S=4096 **4.13→3.31 ms（1.25×）**；纯反向（去掉 quant）≈3.13ms，**ours/TE 6.7×→5.3×**。
+- 新墙 = **Compute 61% + 网格不足一个波**（lse_bal ncu：Duration 357µs、Waves 0.65、
+  achieved occ 23.2%），与 fp16/bf16 O8b 一致。
+- 同轮顺带 A/B **证伪**两条 fp16 主 kernel 假设：`(BM=32,BN=64,PIPE=2)`（慢 1.75×）、
+  `cp.async .L2::256B`（无变化）。详见 `03` §19。
+
 ---
 
 ## 3. ncu bound 小结（逐 dtype）
@@ -385,6 +406,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |
 | fp8 | **mma main（O4b 后, S=4096, ksplit=4）** | 2.46% | **69.69%** | 34.40% | 18.21%（**70.66KB**, 3 CTA/SM） | 10.34 | short_scoreboard 2.73、long_scoreboard 1.16 | **L1/TEX 69.7% + L2 69.1%（残余 red）+ short_scoreboard**（`op_st` 冲突 −66%） |
 | fp8 | **mma main（O7 后, S=4096, ksplit=4, REGDQ=true）** | 2.60% | **64.4%** | 37.7% | 18.11%（70.66KB, 3 CTA/SM） | 10.34 | short_scoreboard 1.89、long_scoreboard 1.09 | **L1/TEX 64.4% + short_scoreboard 1.89 + 残余 L2 43.8%（dK/dV 跨 CTA red）**（dQ red 已 O(1)，L2 墙 69.1%→43.8%） |
+| fp8 | **lse_mma_bal<HD,1>（O11, S=4096）** | 1.48% | 28.16% | **61.15%** | 23.24%（~27.7KB, 6 CTA/SM, 77 regs） | **0.65** | — | **Compute 61% + 网格不足一个波**（镜像配对消尾波 + cp.async 消 long_scoreboard；对齐 fp16/bf16 O8b） |
 | fp8 | **mma main（O4b 后, MLA S=1024 H2 D512）** | 1.46% | 11.38% | 7.45% | **6.25%（205.8KB, 1 CTA/SM）** | 0.97 | long_scoreboard 1.73、wait 1.67 | **低 occupancy/并行度**（smem 仍 205.8KB > 116KB 门槛） |
 
 **共同结论**：三种 dtype 的 **main kernel** 都不是 HBM 或算力 bound（DRAM <3%、Compute <38%）；

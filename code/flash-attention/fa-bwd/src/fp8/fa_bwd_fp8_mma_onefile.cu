@@ -23,6 +23,26 @@
 static constexpr int THREADS = 128;
 static constexpr int WN = 2;
 
+// ----------------------------- O11：快速指数/对数 -----------------------------
+// 与两文件版 `fa_bwd_fp8_kernels.cuh` 逐字一致。
+#ifndef FAST_EXP
+#define FAST_EXP 1
+#endif
+__device__ __forceinline__ float fexp(float x) {
+#if FAST_EXP
+  return __expf(x);
+#else
+  return expf(x);
+#endif
+}
+__device__ __forceinline__ float flog(float x) {
+#if FAST_EXP
+  return __logf(x);
+#else
+  return logf(x);
+#endif
+}
+
 static constexpr float kE4M3Max = 448.0f;
 static constexpr float kE5M2Max = 57344.0f;
 
@@ -80,6 +100,11 @@ struct Fp8Cfg {
 
   static constexpr int lse_smem_bytes =
       LBM * ASLD + LBN * ASLD + (LBM + LBN) * (int)sizeof(float);
+  // O11：LSE 的镜像配对 + cp.async 双缓冲版本（PIPE=0 单缓冲 / PIPE=1 双缓冲）smem。
+  static constexpr int lse_smem_bytes_bal0 =
+      LBM * ASLD + LBN * ASLD + (LBM + LBN) * (int)sizeof(float);
+  static constexpr int lse_smem_bytes_bal1 =
+      LBM * ASLD + 2 * LBN * ASLD + (LBM + 2 * LBN) * (int)sizeof(float);
 
   // O3 寄存器预取：pk0/pk1/pv0/pv1 各 NPU 个 uint32。HD=128 时 NPU=4（共 16 regs，可行）；
   // HD=512 时 NPU=16（共 64 regs，会挤掉累加器/地址寄存器）→ 关闭，走直接向量化读。
@@ -131,6 +156,11 @@ __device__ __forceinline__ void mma_e4e5(float c[4], const uint32_t a[4],
 }
 __device__ __forceinline__ uint32_t smem_u32(const void* p) {
   return (uint32_t)__cvta_generic_to_shared(p);
+}
+// O11：16B 异步拷贝（fp8 的 16B = 16 个元素），与两文件版逐字一致。
+__device__ __forceinline__ void cp_async16(void* dst_smem, const void* src_gmem) {
+  uint32_t s = smem_u32(dst_smem);
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(src_gmem));
 }
 __device__ __forceinline__ void ldmatrix_x4(uint32_t addr, uint32_t d[4]) {
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
@@ -442,7 +472,7 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
           sv = acc[0][j][q] * scale * qs_s[r] * ks_s[c];
         if (sv != -INFINITY) {
           float mn = fmaxf(mrow[s], sv);
-          lrow[s] = lrow[s] * expf(mrow[s] - mn) + expf(sv - mn);
+          lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
           mrow[s] = mn;
         }
       }
@@ -458,18 +488,175 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
       float m2 = __shfl_xor_sync(0xffffffffu, m, off);
       float l2 = __shfl_xor_sync(0xffffffffu, l, off);
       float mn = fmaxf(m, m2);
-      float ca = (m == -INFINITY) ? 0.f : l * expf(m - mn);
-      float cb = (m2 == -INFINITY) ? 0.f : l2 * expf(m2 - mn);
+      float ca = (m == -INFINITY) ? 0.f : l * fexp(m - mn);
+      float cb = (m2 == -INFINITY) ? 0.f : l2 * fexp(m2 - mn);
       l = ca + cb;
       m = mn;
     }
     if (c2 == 0) {
       int r = wid * 16 + g + (s ? 8 : 0);
       int qi = m0 + r;
-      if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + logf(l);
+      if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
     }
   }
 }
+
+// =============================================================================
+// 2a') lse_mma_kernel_bal【O11】：把 fp16/bf16 的 O8b 负载均衡 + cp.async 移植到 fp8
+// =============================================================================
+// 动机：fp8 的 `lse_mma_kernel`（O1）每个 m 块一个 CTA，因果下第 m 块要做 m+1 个 K tile，
+// 重块排最后（尾波），且每个 tile 的 K 是「同步逐字节标量读」。fp16/bf16 的 O8b 证明：
+//   ① **镜像配对**（每 CTA 处理 m 与 nblk-1-m，工作量恒 nblk+1，grid.x 减半）；
+//   ② **K/Q 的 `cp.async.cg` 16B 双缓冲**再叠加。
+// fp8 的 K/Q 是 1B/元素、一行 HD 字节，16B = 16 个 fp8，故 unit 数 = HD/16。
+// 数学与 O1 完全一致（同 E4E4 mma、同 online-softmax、同 4-lane shfl 归约、同 rowwise
+// scale 相乘顺序），数值应逐位相同。仅用于 causal；非 causal 走 O1 原版。
+// smem：Qs[LBM*ASLD] +（PIPE=1 双缓冲 / PIPE=0 单缓冲）Ks[LBN*ASLD] + qs/ks 标量。
+template <int HD, int PIPE>
+__global__ void __launch_bounds__(THREADS)
+lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
+                   const unsigned char* __restrict__ k8, const float* __restrict__ ks,
+                   float* __restrict__ lse, int S, int H, int Hkv, float scale) {
+  using Cfg = Fp8Cfg<HD, 64, 32>;
+  constexpr int ASLD = Cfg::ASLD;
+  constexpr int KVL  = LBN * ASLD;
+  constexpr int HDV  = HD / 16;   // 每行 16B（16 个 fp8）unit 数
+  extern __shared__ __align__(16) char smem[];
+  unsigned char* Qs = reinterpret_cast<unsigned char*>(smem);
+  unsigned char* Ks = Qs + LBM * ASLD;                               // PIPE=1：2×KVL
+  float* qs_s = reinterpret_cast<float*>(Ks + (PIPE ? 2 : 1) * KVL);  // [LBM]
+  float* ks_s = qs_s + LBM;                                          // PIPE=1：2×LBN
+
+  const int nblk = (S + LBM - 1) / LBM;
+  const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  const int hkv = h / (H / Hkv);
+  const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  const int g = lane >> 2, c2 = (lane & 3) * 2;
+
+  // 发本 m 块的 Q（PIPE=1 用 16B cp.async，行越界写 0=cvt_e4m3(0)）与 rowwise scale。
+  auto issue_q = [&](int m0) {
+#pragma unroll
+    for (int u = tid; u < LBM * HDV; u += THREADS) {
+      const int row = u / HDV, c16 = u % HDV;
+      const int qi = m0 + row;
+      unsigned char* d = Qs + row * ASLD + c16 * 16;
+      if (qi < S) {
+        const unsigned char* s = q8 + (((size_t)(b * S + qi)) * H + h) * HD + c16 * 16;
+        if constexpr (PIPE) cp_async16(d, s);
+        else {
+#pragma unroll
+          for (int e = 0; e < 16; ++e) d[e] = s[e];
+        }
+      } else {
+        *reinterpret_cast<uint4*>(d) = make_uint4(0, 0, 0, 0);
+      }
+    }
+    if (tid < LBM) qs_s[tid] = (m0 + tid < S) ? qs[((size_t)(b * S + m0 + tid)) * H + h] : 1.f;
+    if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
+  };
+
+  // 发一个 K tile（j0 起 LBN 行）到 Kd，并写本 tile 的 rowwise scale 到 KdS。
+  auto issue_k = [&](unsigned char* Kd, float* KdS, int j0) {
+#pragma unroll
+    for (int u = tid; u < LBN * HDV; u += THREADS) {
+      const int row = u / HDV, c16 = u % HDV;
+      const int jg = j0 + row;
+      unsigned char* d = Kd + row * ASLD + c16 * 16;
+      if (jg < S) {
+        const unsigned char* s = k8 + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c16 * 16;
+        if constexpr (PIPE) cp_async16(d, s);
+        else {
+#pragma unroll
+          for (int e = 0; e < 16; ++e) d[e] = s[e];
+        }
+      } else {
+        *reinterpret_cast<uint4*>(d) = make_uint4(0, 0, 0, 0);
+      }
+    }
+    if (tid < LBN)
+      KdS[tid] = (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * Hkv + hkv] : 1.f;
+    if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
+  };
+
+#pragma unroll
+  for (int t = 0; t < 2; ++t) {
+    const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
+    if (t == 1 && pair == nblk - 1 - pair) continue;  // 奇数 nblk 的中心块只做一次
+    const int m0 = mblk * LBM;
+    issue_q(m0);
+
+    const int ncols = min(S, m0 + LBM);
+    const int ntiles = (ncols + LBN - 1) / LBN;
+    if constexpr (PIPE) {
+      if (ntiles > 0) issue_k(Ks, ks_s, 0);
+    }
+    float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
+
+    for (int nt = 0; nt < ntiles; ++nt) {
+      const int j0 = nt * LBN;
+      unsigned char* Kt = Ks + (PIPE ? (nt & 1) * KVL : 0);
+      float* KtS = ks_s + (PIPE ? (nt & 1) * LBN : 0);
+      if constexpr (PIPE) {
+        asm volatile("cp.async.wait_group 0;\n");
+        __syncthreads();
+        if (nt + 1 < ntiles)
+          issue_k(Ks + ((nt + 1) & 1) * KVL, ks_s + ((nt + 1) & 1) * LBN, j0 + LBN);
+      } else {
+        issue_k(Ks, ks_s, j0);
+        __syncthreads();
+      }
+
+      float acc[1][8][4];
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
+      mma_block<16, LBN, HD, E4E4>(Qs, ASLD, Kt, ASLD, acc, wid, 0, lane);
+
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          int s = q >= 2 ? 1 : 0;
+          int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+          int c = j * 8 + c2 + (q & 1);
+          int qi = m0 + r, jg = j0 + c;
+          float sv = -INFINITY;
+          if (qi < S && jg < S && jg <= qi)
+            sv = acc[0][j][q] * scale * qs_s[r] * KtS[c];
+          if (sv != -INFINITY) {
+            float mn = fmaxf(mrow[s], sv);
+            lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
+            mrow[s] = mn;
+          }
+        }
+    }
+
+    // 同一 row 由 4 个 lane（同 g、lane&3=0..3）持有，warp 内 shfl 归约
+#pragma unroll
+    for (int s = 0; s < 2; ++s) {
+      float m = mrow[s], l = lrow[s];
+#pragma unroll
+      for (int off = 1; off <= 2; off <<= 1) {
+        float m2 = __shfl_xor_sync(0xffffffffu, m, off);
+        float l2 = __shfl_xor_sync(0xffffffffu, l, off);
+        float mn = fmaxf(m, m2);
+        float ca = (m == -INFINITY) ? 0.f : l * fexp(m - mn);
+        float cb = (m2 == -INFINITY) ? 0.f : l2 * fexp(m2 - mn);
+        l = ca + cb;
+        m = mn;
+      }
+      if (c2 == 0) {
+        int r = wid * 16 + g + (s ? 8 : 0);
+        int qi = m0 + r;
+        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+      }
+    }
+    // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
+    __syncthreads();
+  }
+}
+
 
 // =============================================================================
 // 2b) delta_kernel：D = rowsum(dO ∘ O)（反量化 e5m2·dos 后与 fp32 O 点积）
@@ -684,7 +871,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
             float p = 0.f;
             if (qi < S && jg < S && !(causal && jg > qi)) {
               float sval = acc[i][j][q] * scale * qs_s[r] * ks_s[c];
-              p = expf(sval - lse[((size_t)(b * S + qi)) * H + h]);
+              p = fexp(sval - lse[((size_t)(b * S + qi)) * H + h]);
             }
             Ps[r * PSS + c] = p;
           }
@@ -1046,6 +1233,18 @@ static void launch_lse(dim3 lg, const unsigned char* q8, const float* qs,
                                                            scale, causal);
 }
 
+// O11：LSE 的镜像配对（+可选 cp.async 双缓冲）版本，仅 causal。
+template <int HD, int PIPE>
+static void launch_lse_bal(dim3 lg, const unsigned char* q8, const float* qs,
+                           const unsigned char* k8, const float* ks, float* lse, int S, int H,
+                           int Hkv, float scale) {
+  using Cfg = Fp8Cfg<HD, 64, 32>;
+  constexpr int kSmem = PIPE ? Cfg::lse_smem_bytes_bal1 : Cfg::lse_smem_bytes_bal0;
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<HD, PIPE>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  lse_mma_kernel_bal<HD, PIPE><<<lg, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv, scale);
+}
+
 // =============================================================================
 // host / launcher / self-test
 // =============================================================================
@@ -1179,6 +1378,7 @@ int main(int argc, char** argv) {
   const bool use_regdq = (D == 128) && ((long)(S / 32) / 2 / ksplit >= 4);
   dim3 pg(S, H, B);
   dim3 lg((S + LBM - 1) / LBM, H, B);
+  dim3 lg_bal((((S + LBM - 1) / LBM) + 1) / 2, H, B);   // O11：镜像配对，grid.x 减半
   dim3 mg((S + BM - 1) / BM * ksplit, H, B);
   printf("grid main = %d x %d x %d  (ksplit=%d, base_grid=%ld)\n", mg.x, mg.y, mg.z,
          ksplit, base_grid);
@@ -1188,10 +1388,16 @@ int main(int argc, char** argv) {
 
   auto run_preprocess = [&]() {
     if (D == 128) {
-      launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
+      if (causal)
+        launch_lse_bal<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+      else
+        launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
       delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
     } else {
-      launch_lse<512>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
+      if (causal)
+        launch_lse_bal<512, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+      else
+        launch_lse<512>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
       delta_kernel<512><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
     }
   };

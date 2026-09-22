@@ -806,11 +806,23 @@ split-KV，留 backlog。
 
 ---
 
+## 6n. O11：快速 exp/log（bf16，与 fp16 同款）
+
+把 softmax 热点的 libdevice 精确 `expf`/`logf` 换成硬件内建 `__expf`/`__logf`
+（MUFU.EX2/LG2，相对误差 ~2^-21），单/两文件 device 代码与 fp16 逐字同源（`FAST_EXP` 宏 A/B）。
+bf16 容差 ~1e-2，无影响：S=512 dq/dk/dv vs ref 仍 9.001/12.61/13.65e-3、S=4096
+15.10/13.40/16.31e-3（与 O5b/O8/O6/O6b/O8b/O6c/O7c/O10 逐位相同）。S=4096 `total` ~1.97ms。
+原始输出 `src/bf16/fa_bwd_bf16_mma_main_o11_{s512,s4096}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o11_s512.out.txt`。fp8 的对应改动见 `docs/03` §19。
+
+---
+
 ## 8. 下一步
 
 见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）、O8（preprocess mma，§6f）、O6（main
 `cp.async` 双缓冲，§6g）、O6b（K/V 降 smem 回 3 CTA/SM + A 转置读，§6h）、O8b（LSE 负载
 均衡 + cp.async，§6i）、O6c（tile 几何参数化 + 小网格自适应，§6j）、O7c（LSE/D 预装 +
-float4 试错，§6k）、MLA 张量核（§6l）、O10（Q/dO 向量化 + cp.async 重叠，§6m）已完成**；
+float4 试错，§6k）、MLA 张量核（§6l）、O10（Q/dO 向量化 + cp.async 重叠，§6m）、
+O11（快速 exp/log，§6n）已完成**；
 接下来是 **O9**（wgmma+TMA 对标 FA3）。backlog：fp8 侧残余 red（O7b）、MLA 降 smem
 冲 2 CTA/SM / split-KV。

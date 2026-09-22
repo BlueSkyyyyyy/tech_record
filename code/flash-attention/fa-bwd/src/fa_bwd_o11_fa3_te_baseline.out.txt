@@ -1,0 +1,30 @@
+=== pure bwd-only FA2/FA3/TE (harness/fa_vs_te_bwd_only.py), same session as O11 ===
+### fp16
+pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype=torch.float16
+shape                                  FA2.7.4             FA3          TE2.14  FA3/FA2
+(1, 1024, 40, 128) kv=8        0.1873/  229 0.1213/  354 0.1319/  326    1.54x
+(1, 1024, 32, 128) kv=4        0.1585/  217 0.0823/  417 0.1123/  306    1.93x
+(1, 1024, 64, 128) kv=4        0.2660/  258 0.1591/  432 0.1940/  354    1.67x
+(1, 1024, 64, 128) kv=1        0.2661/  258 0.1567/  439 0.2151/  319    1.70x
+(1, 256, 2, 512) kv=2             nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 512, 4, 512) kv=4             nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 1024, 2, 512) kv=2            nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 4096, 16, 128) kv=16       0.7321/  375 0.3247/  847 0.4424/  621    2.25x
+### bf16
+pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype=torch.bfloat16
+shape                                  FA2.7.4             FA3          TE2.14  FA3/FA2
+(1, 1024, 40, 128) kv=8        0.1870/  230 0.1207/  356 0.1313/  327    1.55x
+(1, 1024, 32, 128) kv=4        0.1589/  216 0.0823/  418 0.1118/  307    1.93x
+(1, 1024, 64, 128) kv=4        0.2653/  259 0.1591/  432 0.1932/  356    1.67x
+(1, 1024, 64, 128) kv=1        0.2658/  259 0.1568/  438 0.2141/  321    1.70x
+(1, 256, 2, 512) kv=2             nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 512, 4, 512) kv=4             nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 1024, 2, 512) kv=2            nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 4096, 16, 128) kv=16       0.7288/  377 0.3202/  858 0.4367/  629    2.28x
+### fp8 TE bench (fa_bwd_bench.py bench --dtype fp8)
+=== bench CUPTI device time (dtype=fp8) ===
+[b1_s512_h16_d128_causal_fp8] te=0.1005ms/42.73TF
+[b1_s1024_h16_d128_causal_fp8] te=0.1477ms/116.31TF
+[b4_s2048_h16_d128_causal_fp8] te=0.9830ms/279.64TF
+[b2_s2048_h16_d128_full_fp8] te=0.5822ms/236.06TF
+[b1_s4096_h16_d128_causal_fp8] te=0.5908ms/465.30TF

@@ -1,0 +1,27 @@
+=== O11 FAST_EXP A/B (fp16 MHA S4096, same file, sequential builds) ===
+--- FAST_EXP=0 (libdevice precise expf/logf) ---
+[timing] total(3 kernels) 2.0053 ms  68.54 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3712 ms | main 1.5429 ms | convert 0.0912 ms
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.355e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+--- FAST_EXP=1 (__expf/__logf, default) ---
+[timing] total(3 kernels) 1.9697 ms  69.78 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3439 ms | main 1.5400 ms | convert 0.0858 ms
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
