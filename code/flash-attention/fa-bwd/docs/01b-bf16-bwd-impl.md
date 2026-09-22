@@ -1,6 +1,7 @@
 # bf16 反向实现分析（P2-1）
 
-> 代码：**单文件** `src/bf16/fa_bwd_bf16_onefile.cu`（自包含：preprocess + main kernel + launcher + 自测 main）。
+> 代码：**单文件** `src/bf16/fa_bwd_bf16_onefile.cu`（自包含：preprocess + main kernel + launcher + 自测 main）；
+> **两文件** `src/bf16/fa_bwd_bf16_kernels.cuh` + `fa_bwd_bf16_main.cu`（P2-2，见第 6b 节）。
 > 由 fp16 单文件 `src/fp16/fa_bwd_fp16_onefile.cu` **dtype 参数化**而来（`__half`→`__nv_bfloat16`，
 > `__half2float`→`__bfloat162float`，`__float2half`→`__float2bfloat16`），算法/三段式/线程映射完全一致。
 > 在此基础上加了一处 **bf16 专属优化：K/V smem 行距 padding**（见第 3 节）。
@@ -170,6 +171,31 @@ H100 峰值：BF16 Tensor Core dense ≈ 989 TFLOPS。
 
 ---
 
+## 6b. 两文件版（P2-2）
+
+由单文件版 `fa_bwd_bf16_onefile.cu` 拆分为：
+
+- `src/bf16/fa_bwd_bf16_kernels.cuh`：**device** 部分（编译期常量含 `kKVStride` padding、
+  `preprocess_kernel` / `fa_bwd_bf16_kernel` / `convert_kernel`、`SMEM_BYTES`）；
+- `src/bf16/fa_bwd_bf16_main.cu`：**host** 部分（`#include "fa_bwd_bf16_kernels.cuh"` + npy 读取 /
+  launcher / 自测对拍）。
+
+kernel 代码与单文件**逐字一致**（仅移入 `.cuh` 并加 include guard）。逐指标核对与单文件**无差异**：
+
+| 指标 | 单文件 | 两文件 |
+|---|---|---|
+| S=512 dq/dk/dv max_abs | 6.892 / 8.110 / 13.65e-3 | **6.892 / 8.110 / 13.65e-3** |
+| S=4096 dq/dk/dv max_abs | 8.895 / 8.078 / 14.94e-3 | **8.895 / 8.078 / 14.94e-3** |
+| S=512 main | 1.884 ms | 1.898 ms |
+| S=4096 main | 42.17 ms | 42.16 ms |
+| ncu DRAM / L1TEX / Compute | 0.26 / 24.87 / 13.51 % | 0.25 / 24.89 / 13.52 % |
+| ncu occupancy / waves / regs / smem | 6.25% / 0.48 / 52 / 98.56KB | 6.25% / 0.48 / 52 / 98.56KB |
+| Executed Instructions | 247,182,666 | 247,182,666 |
+
+原始输出：`fa_bwd_bf16_main_s512.out.txt`、`..._s4096.out.txt`、`..._ncu_main.out.txt`。
+
+---
+
 ## 7. 复现命令
 
 ```bash
@@ -199,5 +225,5 @@ docker exec kernel_lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py bench
 
 ## 8. 下一步
 
-见 `../ROADMAP.md`：P2-2（bf16 两文件拆分）→ P3 fp8（重点，参考 TE 的 E4M3/E5M2 + rowwise scaling）。
+见 `../ROADMAP.md`：P2-2（bf16 两文件拆分，**已完成**）→ P3 fp8（重点，参考 TE 的 E4M3/E5M2 + rowwise scaling）。
 backlog：降 smem/提 occupancy、张量核 + 流水、preprocess 向量化/摊入前向、fp16 同步 padding。
