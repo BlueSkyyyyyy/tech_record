@@ -469,6 +469,47 @@ Waves Per SM                  1.29       Registers Per Thread         80
 
 ---
 
+## 6g. main 的 `cp.async` 双缓冲（O6，main 2.27–2.40×）
+
+O5b/§6e 的 bf16 main 与 fp16 版**逐字同构**，ncu 同是 **`long_scoreboard` ~63%**
+（全局访存延迟）的墙；O8/§6f 把 preprocess 打下来后 main 成端到端第一瓶颈。
+O6 把 fp16 版的 `cp.async` 双缓冲（见 `01-fp16-bwd-impl.md` §12）**做 dtype 参数化**
+搬到 bf16：`cp_async16` 按字节搬（bf16 位宽同构）、`kv_issue_async` 的 `8 个 bf16=16B`
+unit 划分、`PIPE` 模板、`Ks/Vs` 双缓冲、每 tile 2 个 barrier。
+
+**改动**：`fa_bwd_bf16_mma_kernels.cuh` + `fa_bwd_bf16_mma_onefile.cu`（单/两文件 device
+逐字一致）；host 加 `PIPE` 模板与 `--pipe/--nopipe`、smem 随 `PIPE` 翻 K/V 段。
+smem `66.56→83.97KB`、3→2 CTA/SM（182 regs）。
+
+**实测（同 session A/B，CUDA event，main-only）**：
+
+| shape | nopipe (ms / TF) | **O6 pipe (ms / TF)** | 加速 |
+|---|---|---|---|
+| MHA S=512 | 0.1896 / 11.33 | **0.0837 / 25.66** | **2.27×** |
+| MHA S=4096 | 4.4847 / 30.65 | **1.8718 / 73.43** | **2.40×** |
+| GQA q32/kv4 S=1024 | 0.6377 / 26.94 | **0.3769 / 45.59** | **1.69×** |
+
+端到端：S=512 0.1827ms（11.75 TF）、S=4096 **3.036ms（45.27 TF）**、GQA kv4 0.6006ms。
+单文件与两文件逐指标相同（S512 pipe 0.0842ms、max_abs 逐位一致）。
+
+**数值（与 O5b/O8 逐位相同）**：S=512 9.00/12.6/13.65e-3；S=4096 15.1/13.4/16.3e-3；
+GQA kv4 12.0/21.25/31.56e-3——只改搬运、不改数学，结果 bitwise 不变。
+
+**ncu（main, S=4096, PIPE）**：Duration **1.88ms**、DRAM 3.43% / **L1TEX 64.96%** /
+**L2 62.19%** / Compute 25.49% / 182 regs / occ 12.5%（2 CTA/SM）/ Waves 3.88。
+`long_scoreboard 7.35→1.12`（cp.async 吃掉全局延迟），新墙 = **`wait`（fixed-latency 依赖）
++ `short_scoreboard`（smem→ldmatrix）+ L1/TEX**，与 fp16 版逐项一致。
+
+**对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`）：FA3 MHA S4096
+**0.3210ms/856 TF**、TE 0.4417/622、FA2 0.7347/374；ours total 3.036ms/45.3 TF ⇒
+**FA3 的 5.3%**（时间比 9.5×，O8 时 13.2×）。原始输出
+`src/bf16/fa_bwd_bf16_mma_main_o6_{s512,s4096,gqa_kv4}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o6_s512.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_main_o6_ncu_s4096.out.txt`、
+`src/bf16/fa_bwd_bf16_o6_fa3_te_baseline.out.txt`。
+
+---
+
 ## 7. 复现命令
 
 ```bash
@@ -498,7 +539,7 @@ docker exec kernel_lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py bench
 
 ## 8. 下一步
 
-见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）与 O8（preprocess mma，§6f）已完成**；
-接下来是「当前冲刺」的 **O6**（main 的 `cp.async` 双缓冲/提 occupancy，消 §6e 的
-63% `long_scoreboard`，现已是端到端第一瓶颈）、O7（去 atomic）、O9（wgmma+TMA 对标 FA3）。
+见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）、O8（preprocess mma，§6f）、O6（main
+`cp.async` 双缓冲，§6g）已完成**；接下来是 O6b/降 smem（把 K/V 双缓冲压回 3 CTA/SM）、
+O9（wgmma+TMA 对标 FA3）、O7（去 atomic）、O8b（LSE 尾波/occupancy）。
 backlog：fp8 侧残余 red（O7b）、MLA 降 smem / 张量核。
