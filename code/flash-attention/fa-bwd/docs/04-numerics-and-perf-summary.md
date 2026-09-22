@@ -85,6 +85,11 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 
 `ours total` = 端到端（fp8 含 quant）；`ours main` = 反向主 kernel。峰值占比括号内。
 
+> **口径提醒**：本节的 FA/TE 数字来自 `harness/fa_bwd_bench.py`，其 lambda **包含 forward**（fwd+bwd 合计）。
+> 若要与 `te-perf` 的纯 `fused_attn_bwd` 对齐，请看 `docs/06` §1 的**纯反向**口径
+> （`harness/fa_vs_te_bwd_only.py`）：纯反向下 FA2.7.4 为 217–377 TF、TE2.14 为 305–618 TF
+> （TE 快 1.2–1.6×），FA 慢的根因（FA2=SM80 kernel vs TE=SM90 wgmma）见 `docs/06` §3。
+
 ### 2.1 fp16（峰值 989 TFLOPS）
 
 | shape | ours total | ours main | FA2.7.4 | TE2.14 |

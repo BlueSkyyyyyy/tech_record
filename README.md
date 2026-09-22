@@ -153,6 +153,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 5. [FP8 反向实现与优化](content/posts/fa-bwd-05-fp8-impl/index.md)
 6. [数值与性能汇总（GQA/MQA/MLA）](content/posts/fa-bwd-06-summary/index.md)
 7. [目标卡移植注意事项](content/posts/fa-bwd-07-porting/index.md)
+8. [目标形状重点分析 & FA 为何比 TE 慢（ncu 归因）](content/posts/fa-bwd-08-fa-vs-te/index.md)
 
 配套代码：[code/flash-attention/fa-bwd/](code/flash-attention/fa-bwd/README.md)
 （各篇正文由 `docs/` 下的 Markdown 通过 `fa_include` shortcode 实时内联渲染）。
