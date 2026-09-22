@@ -194,3 +194,101 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --launch-count 1 \
 - `src/fa_bwd_ours_summary.out.txt`：ours 两文件版 fp16/bf16/fp8 三个 shape 的计时与对拍。
 - `src/fa_bwd_refbench_summary.out.txt`：FA2.7.4 / TE2.14 CUPTI 基线（三 dtype × 三 shape）。
 - 各 dtype 目录下的 `*_s512 / *_s4096 / *_ncu_main.out.txt`：单文件/两文件的历史原始输出。
+
+---
+
+## 7. 补充：GQA / MQA / MLA 形状（用户指定）
+
+新增 7 个生产形状（均在 `harness/fa_bwd_bench.py` 的 `REQUESTED_SHAPES`，已 dump 到
+`/home/xieminglin/proj/output/fa-bwd/<slug>/`，含 fp16/bf16/fp8 三份）：
+
+| slug | 语义 |
+|---|---|
+| `b1_s1024_h40_d128_kv8_causal_*` | Qwen3-8B GQA（q=40, kv=8） |
+| `b1_s1024_h32_d128_kv4_causal_*` | Qwen3-30B-A3B GQA（q=32, kv=4） |
+| `b1_s1024_h64_d128_kv4_causal_*` | Qwen3-235B-A22B GQA（q=64, kv=4） |
+| `b1_s1024_h64_d128_kv1_causal_*` | MQA（q=64, kv=1，如 DSA indexer） |
+| `b1_s256_h2_d512_causal_*` | MLA（head_dim=512） |
+| `b1_s512_h4_d512_causal_*` | MLA（head_dim=512） |
+| `b1_s1024_h2_d512_causal_*` | MLA（head_dim=512） |
+
+原始输出：`src/fa_bwd_bench_requested.out.txt`。
+
+### 7.1 数值对拍（max_abs vs fp32 ref）
+
+**fp16**（容差 ~1e-2）：
+
+| shape | fa vs ref (dq/dk/dv) | te vs ref (dq/dk/dv) |
+|---|---|---|
+| kv8 | 1.76e-3 / 3.00e-3 / 4.33e-3 | 1.58e-3 / 2.89e-3 / 4.33e-3 |
+| kv4 (h32) | 1.73e-3 / 3.32e-3 / 5.11e-3 | 2.07e-3 / 3.18e-3 / 5.11e-3 |
+| kv4 (h64) | 1.91e-3 / 4.78e-3 / 5.65e-3 | 2.17e-3 / 3.82e-3 / 5.65e-3 |
+| kv1 (h64) | 1.97e-3 / 7.59e-3 / 1.06e-2 | 2.14e-3 / 6.45e-3 / 1.06e-2 |
+
+**bf16**（容差 ~1e-1）：
+
+| shape | fa vs ref (dq/dk/dv) | te vs ref (dq/dk/dv) |
+|---|---|---|
+| kv8 | 1.23e-2 / 2.49e-2 / 3.41e-2 | 1.30e-2 / 2.49e-2 / 3.41e-2 |
+| kv4 (h32) | 1.16e-2 / 3.11e-2 / 3.63e-2 | 1.24e-2 / 3.14e-2 / 3.63e-2 |
+| kv4 (h64) | 1.71e-2 / 3.54e-2 / 6.51e-2 | 1.71e-2 / 3.53e-2 / 6.51e-2 |
+| kv1 (h64) | 1.79e-2 / 4.93e-2 / 8.39e-2 | 1.30e-2 / 6.02e-2 / 8.39e-2 |
+
+**fp8**（TE，容差 O(1)，见 `03` §2）：
+
+| shape | te vs ref (o/dq/dk/dv) |
+|---|---|
+| kv8 | 2.23e-1 / 8.45e-1 / 6.62e-1 / 1.11 |
+| kv4 (h32) | 2.68e-1 / 5.25e-1 / 7.66e-1 / 1.34 |
+| kv4 (h64) | 2.08e-1 / 3.98e-1 / 1.01 / 1.84 |
+| kv1 (h64) | 2.36e-1 / 4.10e-1 / 2.22 / 2.60 |
+
+> 观察：**GQA/MQA 的 kv 头越少，dk/dv 的误差越大**（kv=1 时 dv 误差 ~2.6，明显高于 kv=8 的 1.11）。
+> 原因是每个 KV 头要承载 `H/Hkv` 个 query 头的梯度，FP8 量化误差在更多累加项上叠加。
+
+### 7.2 性能对标（CUPTI 纯 device 时间，bwd FLOPs=4·B·S·H·S·(D+Dv)）
+
+**fp16（峰值 989 TFLOPS）**
+
+| shape | FA 2.7.4 | TE 2.14 |
+|---|---|---|
+| kv8 | 0.2634 ms / 163.07 TF | 0.1697 ms / 253.12 TF |
+| kv4 (h32) | 0.2225 ms / 154.45 TF | 0.1430 ms / 240.30 TF |
+| kv4 (h64) | 0.3679 ms / 186.78 TF | 0.2462 ms / 279.10 TF |
+| kv1 (h64) | 0.3675 ms / 186.99 TF | 0.2682 ms / 256.26 TF |
+
+**bf16（峰值 989 TFLOPS）**
+
+| shape | FA 2.7.4 | TE 2.14 |
+|---|---|---|
+| kv8 | 0.2639 ms / 162.77 TF | 0.1702 ms / 252.35 TF |
+| kv4 (h32) | 0.2227 ms / 154.30 TF | 0.1432 ms / 239.96 TF |
+| kv4 (h64) | 0.3686 ms / 186.41 TF | 0.2463 ms / 278.99 TF |
+| kv1 (h64) | 0.3680 ms / 186.74 TF | 0.2675 ms / 256.87 TF |
+
+**fp8（TE，峰值 1978.8 TFLOPS；FA 无反向 FP8）**
+
+| shape | TE FP8 |
+|---|---|
+| kv8 | 0.2425 ms / 177.09 TF |
+| kv4 (h32) | 0.2020 ms / 170.10 TF |
+| kv4 (h64) | 0.3639 ms / 188.86 TF |
+| kv1 (h64) | 0.4032 ms / 170.44 TF |
+
+> TE 在 GQA/MQA 上稳定领先 FA 约 **1.4–1.6×**（fp16/bf16）；fp8 因每个 KV 头被更多 Q 头共享，
+> TFLOPS 反而低于同 shape 的 fp16/bf16（kv1: 170 vs 256），是**访存/调度**而非算力问题。
+
+### 7.3 MLA（head_dim=512）：FA / TE 均不支持反向
+
+三个 MLA 形状下：
+- `flash_attn` 报 **`FlashAttention forward only supports head dimension at most 256`**；
+- `TE fused_attn` 报 `Invalid combination of data type and sequence length`（训练口径反向不支持 head_dim=512，
+  与 `te-perf/results_summary.md` 一致：TE bwd 训练最大 head_dim=256，MLA qk≤192/v≤128 附近）。
+
+因此这三个形状**目前只有 fp32 ref**（已 dump 输入与 `ref_dq/dk/dv`），**没有 FA/TE 基线**。
+要给出性能数字，必须用**我们自己的 kernel**——但当前 ours 三版本均为 `head_dim=128`、MHA，
+尚不支持 `head_dim=512` 与 GQA。这是下一阶段任务（见 ROADMAP「下一步」）：
+
+- [ ] 让 fp16/bf16/fp8 反向支持 **GQA/MQA**（K/V 头数 = `Hkv`，Q 头共享 KV）；
+- [ ] 支持 **head_dim=512（MLA 主注意力）**，重点解决 smem/寄存器容量与 K/V 在 smem 的占用；
+- [ ] 用 dump 的 MLA 输入/ref 输出做对拍，补上 MLA 的性能数字（对标 FlashMLA 思路）。

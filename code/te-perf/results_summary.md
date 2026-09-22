@@ -13,6 +13,12 @@
 > - `(1, 4096, 64, 128, 128, 4)` — Qwen3-235B-A22B GQA（q=64，kv=4）
 > - `(1, 4096, 64, 128, 128, 1)` — DeepSeek-V4-Pro DSA indexer（MQA：q=64 共享 1 个压缩 KV 头）
 >
+> **上述模型形状的 seq=1024 短序列版本**（与目标卡的 shape 配置对齐）：
+> - `(1, 1024, 40, 128, 128, 8)` / `(1, 1024, 32, 128, 128, 4)` / `(1, 1024, 64, 128, 128, 4)` — Qwen3-8B / 30B-A3B / 235B-A22B GQA @ seq=1024；
+> - `(1, 1024, 64, 128, 128, 1)` — DeepSeek-V4-Pro DSA indexer @ seq=1024。
+>
+> **MLA head_dim=512 小 shape**（目标卡对标点）：`(1, 256, 2, 512)` / `(1, 512, 4, 512)` / `(1, 1024, 2, 512)`；TE 训练 bwd 拒绝 `head_dim>256`，故仅列入推理 fwd 段。
+>
 > 注：dsv4 / dsv4.1 / DeepSeek-V4-Pro 主 MLA 注意力 `head_dim=512`（qk=448+64，v=512）超出 TE fused_attn 在 H100 上训练 bwd 的支持范围（最大 256），仅推理 fwd 段 `fused_attn_fwd_infer` 可测；其生产实现是自研 CSA/DSA 稀疏注意力 kernel，故这里只测其 DSA indexer / 推理 fwd。
 
 | op name | dtype | shape | device | kernel耗时(µs) |
@@ -244,6 +250,14 @@
 | fused_attn_fwd | torch.float16 | (1, 4096, 64, 128, 128, 4) | H100 | 491.6 |
 | fused_attn_fwd | torch.bfloat16 | (1, 4096, 64, 128, 128, 1) | H100 | 475.9 |
 | fused_attn_fwd | torch.float16 | (1, 4096, 64, 128, 128, 1) | H100 | 487.6 |
+| fused_attn_fwd | torch.bfloat16 | (1, 1024, 40, 128, 128, 8) | H100 | 34.8 |
+| fused_attn_fwd | torch.float16 | (1, 1024, 40, 128, 128, 8) | H100 | 34.4 |
+| fused_attn_fwd | torch.bfloat16 | (1, 1024, 32, 128, 128, 4) | H100 | 30.4 |
+| fused_attn_fwd | torch.float16 | (1, 1024, 32, 128, 128, 4) | H100 | 30.6 |
+| fused_attn_fwd | torch.bfloat16 | (1, 1024, 64, 128, 128, 4) | H100 | 48.0 |
+| fused_attn_fwd | torch.float16 | (1, 1024, 64, 128, 128, 4) | H100 | 48.4 |
+| fused_attn_fwd | torch.bfloat16 | (1, 1024, 64, 128, 128, 1) | H100 | 47.2 |
+| fused_attn_fwd | torch.float16 | (1, 1024, 64, 128, 128, 1) | H100 | 47.0 |
 | fused_attn_fwd | fp8 | (1, 1024, 32, 128) | H100 | 24.4 |
 | fused_attn_bwd | torch.bfloat16 | (1, 512, 16, 128) | H100 | 32.7 |
 | fused_attn_bwd | torch.float16 | (1, 512, 16, 128) | H100 | 32.3 |
@@ -283,6 +297,20 @@
 | fused_attn_bwd | torch.float16 | (1, 4096, 64, 128, 128, 4) | H100 | 1590.5 |
 | fused_attn_bwd | torch.bfloat16 | (1, 4096, 64, 128, 128, 1) | H100 | 1606.2 |
 | fused_attn_bwd | torch.float16 | (1, 4096, 64, 128, 128, 1) | H100 | 1644.7 |
+| fused_attn_bwd | torch.bfloat16 | (1, 1024, 40, 128, 128, 8) | H100 | 133.4 |
+| fused_attn_bwd | torch.float16 | (1, 1024, 40, 128, 128, 8) | H100 | 133.1 |
+| fused_attn_bwd | torch.bfloat16 | (1, 1024, 32, 128, 128, 4) | H100 | 112.0 |
+| fused_attn_bwd | torch.float16 | (1, 1024, 32, 128, 128, 4) | H100 | 112.6 |
+| fused_attn_bwd | torch.bfloat16 | (1, 1024, 64, 128, 128, 4) | H100 | 193.4 |
+| fused_attn_bwd | torch.float16 | (1, 1024, 64, 128, 128, 4) | H100 | 194.7 |
+| fused_attn_bwd | torch.bfloat16 | (1, 1024, 64, 128, 128, 1) | H100 | 214.4 |
+| fused_attn_bwd | torch.float16 | (1, 1024, 64, 128, 128, 1) | H100 | 215.4 |
 | fused_attn_bwd | fp8 | (1, 1024, 32, 128) | H100 | 75.1 |
 | fused_attn_fwd_infer | torch.bfloat16 | (1, 4096, 128, 512, 512, 1) | H100 | 23221.7 |
 | fused_attn_fwd_infer | torch.float16 | (1, 4096, 128, 512, 512, 1) | H100 | 23532.5 |
+| fused_attn_fwd_infer | torch.bfloat16 | (1, 256, 2, 512) | H100 | 19.3 |
+| fused_attn_fwd_infer | torch.float16 | (1, 256, 2, 512) | H100 | 18.7 |
+| fused_attn_fwd_infer | torch.bfloat16 | (1, 512, 4, 512) | H100 | 35.0 |
+| fused_attn_fwd_infer | torch.float16 | (1, 512, 4, 512) | H100 | 35.1 |
+| fused_attn_fwd_infer | torch.bfloat16 | (1, 1024, 2, 512) | H100 | 68.4 |
+| fused_attn_fwd_infer | torch.float16 | (1, 1024, 2, 512) | H100 | 67.8 |

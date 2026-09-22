@@ -95,10 +95,19 @@
       preprocess 瓶颈/无 wgmma-tcgen05）。本轮重跑两文件 fp8 kernel 确认仍可编译运行（数值与
       `04` 表逐位一致），原始输出 `src/fp8/fa_bwd_fp8_main_p42_verify_s512.out.txt`。
 
+### P5 生产形状：GQA / MQA / MLA（用户指定，已 dump 待实现）
+
+- [x] **P5-0** harness 支持 GQA/MQA（`Hkv`）与 MLA（`Dv`），新增 7 个生产形状并 dump（fp16/bf16/fp8）到
+  `/home/xieminglin/proj/output/fa-bwd/`；补数值+性能分析到 `docs/04` §7（FA/TE 基线）
+- [ ] **P5-1** ours 支持 **GQA/MQA**（Q 头共享 KV 头）：fp16 先行，再 bf16/fp8；对拍 dump 的 4 个 GQA/MQA 形状
+- [ ] **P5-2** ours 支持 **head_dim=512（MLA 主注意力）**：解决 smem/寄存器容量（K/V 分块变小、Q 常驻等）
+- [ ] **P5-3** MLA 对拍（只有 fp32 ref 可对）与性能数字；对标 FlashMLA 思路
+- [ ] **P5-4** fp8 GQA/MQA 对拍（vs TE FP8）与性能
+
 ### 可选
 
 - [ ] SM90 TMA+wgmma 版本（对标 FA3）
-- [ ] causal / 非 causal / GQA / 变长（cu_seqlens）覆盖
+- [ ] 变长（cu_seqlens / varlen）覆盖
 
 ## 每项的 Definition of Done
 
@@ -318,7 +327,30 @@
    - 原始输出 `src/fp8/fa_bwd_fp8_main_o4a_{s512,s1024h32,s4096,ncu_main_s4096,ncu_main_s512,stall_s4096,tebench}.out.txt`、
      `src/fp8/fa_bwd_fp8_mma_onefile_o4a_{s512,s4096}.out.txt`；文档 `docs/03-fp8-bwd-impl.md` §12。
 
+- 2026-09-22（第十五轮）：**P5-0 完成（GQA/MQA/MLA 形状接入 + 分析）**。
+  - `harness/fa_bwd_bench.py` 支持 `kv=`（GQA/MQA 的 KV 头数）与 `Dv=`（MLA 的 v 维），
+    ref 走 fp32 autograd（GQA 广播 KV 头）、新增 TE FP8 反向路径（E4M3/E5M2 rowwise）。
+  - 新增 7 个生产形状（`REQUESTED_SHAPES`），dump 到 `/home/xieminglin/proj/output/fa-bwd/`
+    共 **21 个 case（fp16/bf16/fp8）**：4 个 GQA/MQA（d=128）+ 3 个 MLA（d=512）。
+  - 实测：GQA/MQA（d=128）FA≈154–187 TF、TE≈240–279 TF（fp16/bf16），TE FP8≈170–189 TF；
+    **GQA/MQA 数值 FA/TE 均与 ref 同量级**（fp16 ~1e-3、bf16 ~1e-2、fp8 O(1)）。
+  - **MLA（head_dim=512）FA 与 TE 反向均不支持**（FA 限 head_dim≤256；TE 训练 bwd 限 256），
+    只有 fp32 ref；需 ours 支持后才能给 MLA 性能数字。
+  - 分析写入 `docs/04-numerics-and-perf-summary.md` §7；原始输出 `src/fa_bwd_bench_requested.out.txt`。
+
 ## 下一步（明确到可执行）
+
+> **用户新增需求（优先）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
+> 目前 FA/TE 做不了 MLA 反向，ML A 的性能数字只能由 ours 提供。
+
+- [ ] **P5-1（优先）GQA/MQA**：改 fp16 反向（`src/fp16/`）支持 `Hkv`（由 `k.npy` 的 head 维读出），
+      K/V 索引 `h/(H/Hkv)` 映射到 KV 头；对拍 4 个 GQA/MQA dump case 的 `ref_dq/dk/dv.npy`，
+      再用 `harness/fa_bwd_bench.py bench --requested` 对标 FA/TE（目标 ≥ FA）。
+- [ ] **P5-2（优先）MLA head_dim=512**：fp16 反向支持 D=512（smem/寄存器容量、
+      Q 常驻 / 更小 K/V 分块 / 可能需 split-K 或 KV 分片），对拍 3 个 MLA case 的 ref；给出性能数字。
+- [ ] **P5-3**：bf16/fp8 复用同一改造；fp8 GQA/MQA 对拍 vs TE FP8。
+
+> 以下为既有 fp8 优化 backlog（可与 P5 并行/穿插）。
 
 > P4-2 完成后，ROADMAP 里的「P 项」已全部收口，后续为**优化 backlog**（按回报排序）。
 > **O1/O2/O3/O4a 已完成**，下一项从 **O4b（fp8 `ldmatrix.trans` 消转置副本 → 冲 4 CTA/SM）**

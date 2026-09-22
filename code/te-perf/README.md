@@ -57,6 +57,10 @@ python bench_te.py --attn-only --warmup 10 --repeat 100 --csv attn.csv
   - `(1,4096,64,128,128,1)` — DeepSeek-V4-Pro DSA indexer（MQA：q=64，共享压
     缩 KV 1 头，head_dim=128）。
 
+  以上 Qwen3 / DSA indexer 模型的 **seq=1024 短序列版本**也纳入测试（与目标卡
+  的 shape 配置对齐）：`(1,1024,40,128,128,8)`、`(1,1024,32,128,128,4)`、
+  `(1,1024,64,128,128,4)`、`(1,1024,64,128,128,1)`，走常规训练 fwd/bwd 段。
+
   Qwen3 系列 shape 由各自 `config.json` 的 `num_attention_heads / num_key_value_heads /
   head_dim` 推导（qwen3-30B-A3B 与 235B-A22B 的 config 从 ModelScope 单独下载，仅取
   `config.json` 小文件）。
@@ -100,6 +104,8 @@ DeepSeek-V4-Pro 有**两类**注意力：
   **推理段** `fused_attn_fwd_infer`（`is_training=False`）只测 fwd，用于覆盖 `head_dim>256`
   的模型（如 DeepSeek-V4-Pro 主注意力 512 维）。dsv4 / dsv4.1 主注意力 `head_dim=512`
   （qk=448+64，v=512）同样只能在推理段测 fwd；其生产实现是自研 CSA/DSA 稀疏注意力 kernel。
+  另含目标卡的 MLA `head_dim=512` 小 shape `(1,256,2,512)`、`(1,512,4,512)`、
+  `(1,1024,2,512)`（seq=256/512/1024，头数 2/4），同样仅推理 fwd。
 
 ## 指标口径
 
