@@ -112,7 +112,7 @@ template <int HD, int BM, int BN, int PIPE>
 static void launch_bwd_mma(dim3 mg, const __half* q, const __half* k, const __half* v,
                            const __half* do_, const float* delta, const float* lse,
                            float* dq_acc, float* dk_acc, float* dv_acc, int S, int H, int Hkv,
-                           float scale, int causal) {
+                           float scale, int causal, int sched) {
   constexpr int kvn = (PIPE == 0) ? 2 : (PIPE == 1 ? 4 : 3);
   constexpr int pds = (PIPE == 2) ? 2 * BM * (BN + 8) : 2 * BN * (BM + 8) + BM * (BN + 8);
   constexpr int smem =
@@ -120,7 +120,7 @@ static void launch_bwd_mma(dim3 mg, const __half* q, const __half* k, const __ha
   CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_mma_kernel<HD, BM, BN, PIPE>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
   fa_bwd_fp16_mma_kernel<HD, BM, BN, PIPE><<<mg, THREADS, smem>>>(
-      q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal);
+      q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, sched);
 }
 
 int main(int argc, char** argv) {
@@ -129,6 +129,10 @@ int main(int argc, char** argv) {
   bool causal = true;
   // pipe: -1=自动（按网格大小选 1/2）、0=O5、1=O6、2=O6b。
   int pipe = -1;
+  // O6c：causal 下 mblk 重排（0=原样，1=交错，2=逆序）。
+  int sched = 0;
+  // O6c：主 kernel tile 配置覆盖（-1=自动）。
+  int bm_opt = -1, bn_opt = -1;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -137,6 +141,9 @@ int main(int argc, char** argv) {
     else if (a == "--nopipe") pipe = 0;
     else if (a == "--pipe") pipe = 1;
     else if (a == "--pipe2") pipe = 2;
+    else if (a.rfind("--sched=", 0) == 0) sched = atoi(a.c_str() + 8);
+    else if (a.rfind("--bm=", 0) == 0) bm_opt = atoi(a.c_str() + 5);
+    else if (a.rfind("--bn=", 0) == 0) bn_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -225,24 +232,48 @@ int main(int argc, char** argv) {
   const int cvt_blocks =
       (int)std::min<size_t>((std::max(n, nkv) + cvt_threads - 1) / cvt_threads, 65535);
 
-  // O6b 在网格足够大（≥ 一个满波 = 132 SM × 3 CTA/SM）时才占优；S=512 这类
-  // grid=128 的「单波/网格受限」形状 O6（K/V 同时预取）反而更快，故自动选择。
+  // O6c：主 kernel 的 tile/PIPE 自动选择。
+  //  - grid < 132（不到「每 SM 一个 CTA」）且 S 较小时，把 BM 减半到 32 → grid 翻倍、
+  //    并行度翻倍（S=512 MHA：main 0.0876→0.0792ms，1.11×）。大 S 下 BM=32 会让
+  //    dK/dV 的跨 CTA 原子量翻倍，故只在 S≤1024 用。
+  //  - 否则 BM=64：大网格走 O6b（PIPE=2，只双缓冲 K）；小网格走 O6（PIPE=1）。
   const long long grid = (long long)((S + 63) / 64) * H * B;
-  const int auto_pipe = (grid >= 396) ? 2 : 1;
-  printf("[O6b] main grid=%lld auto_pipe=%d (CLI pipe=%d; >=396→O6b/2 else O6/1)\n", grid,
-         auto_pipe, pipe);
-  auto run_main = [&]() {
-    int m = (pipe < 0) ? auto_pipe : pipe;
-    if (m == 2)
-      launch_bwd_mma<128, 64, 32, 2>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
-    else if (m == 1)
-      launch_bwd_mma<128, 64, 32, 1>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
-    else
-      launch_bwd_mma<128, 64, 32, 0>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+  const bool tiny = (grid < 132) && (S <= 1024);
+  const int auto_bm = tiny ? 32 : 64;
+  const int auto_bn = (!tiny && S >= 4096) ? 64 : 32;
+  const int auto_pipe = (!tiny && grid >= 396) ? 2 : 1;
+  const int bm_sel = (bm_opt > 0) ? bm_opt : auto_bm;
+  const int bn_sel = (bn_opt > 0) ? bn_opt : auto_bn;
+  const int pp_sel = (pipe >= 0) ? pipe : auto_pipe;
+  printf("[O6c] main grid=%lld auto=(BM=%d,BN=%d,PIPE=%d) sel=(BM=%d,BN=%d,PIPE=%d)\n", grid,
+         auto_bm, auto_bn, auto_pipe, bm_sel, bn_sel, pp_sel);
+  auto launch_cfg = [&](int bm, int bn, int pp) {
+    dim3 g((S + bm - 1) / bm, H, B);
+    if (bm == 32) {
+      if (pp == 2)
+        launch_bwd_mma<128, 32, 32, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      else if (pp == 1)
+        launch_bwd_mma<128, 32, 32, 1>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      else
+        launch_bwd_mma<128, 32, 32, 0>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    } else if (bn == 64) {
+      launch_bwd_mma<128, 64, 64, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    } else if (pp == 2) {
+      launch_bwd_mma<128, 64, 32, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    } else if (pp == 1) {
+      launch_bwd_mma<128, 64, 32, 1>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    } else {
+      launch_bwd_mma<128, 64, 32, 0>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+    }
   };
+  auto run_main = [&]() { launch_cfg(bm_sel, bn_sel, pp_sel); };
   auto run_pre = [&]() {
     if (causal)
       lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
@@ -335,13 +366,13 @@ int main(int argc, char** argv) {
   auto launch_mode = [&](int m) {
     if (m == 2)
       launch_bwd_mma<128, 64, 32, 2>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
     else if (m == 1)
       launch_bwd_mma<128, 64, 32, 1>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
     else
       launch_bwd_mma<128, 64, 32, 0>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
   };
   auto time_launch = [&](int m, float* out_ms) {
     CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
@@ -367,6 +398,48 @@ int main(int argc, char** argv) {
          main_flops / (ms_pipe * 1e-3) / 1e12, ms_pipe2,
          main_flops / (ms_pipe2 * 1e-3) / 1e12, ms_nopipe / ms_pipe,
          ms_nopipe / ms_pipe2);
+
+  // ---- O6c A/B（仅 causal）：mblk 重排 sched=0/1/2（同一 pipe）----
+  if (causal) {
+    const int mdef = (pipe < 0) ? auto_pipe : pipe;
+    float ms_s[3] = {0.f, 0.f, 0.f};
+    for (int s = 0; s < 3; ++s) {
+      sched = s;
+      time_launch(mdef, &ms_s[s]);
+    }
+    printf("[O6c A/B] main sched0(原样) %.4f ms | sched1(交错) %.4f ms (%.3fx) | "
+           "sched2(逆序) %.4f ms (%.3fx)\n",
+           ms_s[0], ms_s[1], ms_s[0] / ms_s[1], ms_s[2], ms_s[0] / ms_s[2]);
+    sched = 1;
+  }
+
+  // ---- O5c A/B（仅 causal）：不同 (BM,BN,PIPE) tile 配置 ----
+  if (causal) {
+    auto time_cfg = [&](int bm, int bn, int pp, float* out_ms) {
+      auto launch = [&]() { launch_cfg(bm, bn, pp); };
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    float ms0 = 0.f, ms1 = 0.f, ms2 = 0.f, ms3 = 0.f;
+    time_cfg(64, 32, 2, &ms0);
+    time_cfg(64, 64, 2, &ms1);
+    time_cfg(32, 32, 1, &ms2);
+    time_cfg(32, 32, 2, &ms3);
+    printf("[O5c A/B] main (64,32,2) %.4f ms (%.2f TF) | (64,64,2) %.4f (%.2f) | (32,32,1) %.4f "
+           "(%.2f) | (32,32,2) %.4f (%.2f) => best %.3fx\n",
+           ms0, main_flops / (ms0 * 1e-3) / 1e12, ms1, main_flops / (ms1 * 1e-3) / 1e12,
+           ms2, main_flops / (ms2 * 1e-3) / 1e12, ms3, main_flops / (ms3 * 1e-3) / 1e12,
+           ms0 / std::min(std::min(ms0, ms1), std::min(ms2, ms3)));
+  }
 
   // ---- 数值对拍（重新跑一次完整 forward 保证累加缓冲清零）----
   run_all();

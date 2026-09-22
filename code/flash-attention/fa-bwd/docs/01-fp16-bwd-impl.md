@@ -789,9 +789,95 @@ O6b 时为 5.5%（时间比 9.1×）；GQA kv4 total 0.518ms/33.4 TF ⇒ **FA3 �
 
 ---
 
+## 13b. O6c：主 kernel 的 tile 几何参数化 + 小网格并行度自适应（fp16，main 最多 1.13×）
+
+### 13b.1 动机与一次重要的「负结果」
+
+O6b 的 ncu 显示 `fa_bwd_fp16_mma_kernel`（S=4096）有 **Waves 2.59、尾波最多占 33%**，
+且 SM active cycles 最大比均值高 22.8%、最小低 26.5%。据此先做了一个「不改数学、只重排
+`blockIdx.x → mblk` 双射」的负载均衡（`sched=1` 交错 `0,n-1,1,n-2,...` / `sched=2` 逆序）：
+因果下第 `m` 个 Q 块要算 `m+1` 个 K/V tile，把轻/重块混进每个波。**实测只有 0~2%、且不同
+session 正负号不稳定**（`[O6c A/B]` 行）——说明 GPU 的 block 调度本就是动态的，静态重排
+拿不到收益。该开关保留（默认 `sched=0`）但不作为优化。
+
+真正的杠杆来自另一个观察：**小网格时 kernel 是「每 SM 一个 CTA」的**。S=512/H16 时
+`grid=(512/64)·16=128 < 132 SM`，每个 SM 只有 1 个 CTA（4 warp）；此时把 `BM` 从 64 减半到
+32 会让 `grid` 翻倍到 256（每 SM 2 个 CTA），并行度直接翻倍。代价是 dK/dV 的跨 CTA 原子量
+随 `BM` 反比翻倍，所以只在 `S` 较小（S≤1024）时才划算。
+
+### 13b.2 改动（单/两文件 device 代码**逐字一致**）
+
+1. **tile 几何参数化**：`fa_bwd_fp16_mma_kernel<HD,BM,BN,PIPE>` 原本把 `mma_block_f16`
+   的 `WARP_M/N` 和所有 `16/32/64` 字面量写死为 `BM=64,BN=32`。改成由 `(BM,BN)` 派生的
+   2×2 warp 网格几何：
+   ```
+   GM1/ GN1 = BM/2, BN/2   // GEMM1/2（S / dP）每 warp 的 M×N
+   GMV/GNV  = BN/2, HD/2   // GEMM3/4（dV/dK）→ 2 warp 铺 BN、2 warp 铺 HD
+   GMQ/GNQ  = BM/2, HD/2   // GEMM5（dQ）
+   MT*      = (WARP_M/16, WARP_N/8)  // 每个 warp 的 m16/n8 tile 数
+   ```
+   `pval/dqacc/acc` 全部按 `MT*` 定义；`static_assert` 钉死整除关系。`HD=128` 下
+   `BM=64,BN=32` 展开后与 O6b **完全同构**（因此 `BM=64,BN=32` 回归逐位不变）。
+2. **host 自动档**（`launch_cfg` + CLI `--bm/--bn/--pipe` 覆盖）：
+   - `grid < 132 且 S ≤ 1024` ⇒ `(BM=32, BN=32, PIPE=1)`（提并行度）；
+   - 否则 `BM=64`，`grid ≥ 396` 用 `PIPE=2`（O6b），小网格用 `PIPE=1`（O6）；
+   - `S ≥ 4096` 用 `BN=64`（见下）。
+3. **`BN=64` 配置**（大 S）：`S=4096` 时 `BN=64` 把 Q/dO 的 `ldmatrix` 复用翻倍，
+   L1/TEX 从 71.9%→57.3%，但 smem 105KB 使占用从 3→2 CTA/SM；净 +1.5~2%。
+4. 单文件 `fa_bwd_fp16_mma_onefile.cu` 由两文件 device 段 + host 段重新拼接
+   （脚本 `diff` 核对 `device region identical: True`）。
+
+### 13b.3 配置 A/B（同 session，CUDA event，main-only，单位 ms）
+
+| shape (grid) | (64,32,2) | (64,64,2) | (32,32,1) | (32,32,2) | best/原 |
+|---|---|---|---|---|---|
+| S=512 H16 (128)  | 0.0858 | 0.0814 | **0.0776** | 0.0800 | **1.106×** |
+| S=1024 H32 kv4 (512) | **0.3576** | 0.3849 | 0.4562 | 0.4527 | 1.000× |
+| S=1024 H40 kv8 (640) | **0.4305** | 0.4307 | 0.5319 | 0.5322 | 1.000× |
+| S=4096 H16 (1024) | 1.8535 | **1.8220** | 2.6352 | 2.6255 | 1.017× |
+
+自动档选中的配置：S=512⇒(32,32,1)、S=1024⇒(64,32,2)、S=4096⇒(64,64,2)。**端到端**：
+S=512 `preprocess+main+convert` 0.1598→**0.1504ms（1.06×）**、S=4096 2.3472→**2.3495ms
+（持平，main 1.02× 被 session 噪声吃掉）**；GQA/MQA 形状 grid 已 ≥512，配置不变。
+
+### 13b.4 数值（与 O5/O8/O6/O6b/O8b **逐位相同**）
+
+`BM=64,BN=32` 路径展开后与 O6b 同构；`BM=32`/`BN=64` 只改 tile 划分、不改数学口径。
+S=512 dq/dk/dv max_abs = 1.671/1.771/1.899e-3；S=4096 = 1.883/1.734/1.966e-3；
+S=1024 kv4 = 2.134/3.305/3.850e-3；kv8 = 2.008/2.931/3.891e-3（与 §10–§13 记录一致）。
+单/两文件逐指标一致。
+
+### 13b.5 ncu（main）
+
+- **S=512**：原 `(64,32,1)` Duration **99.3µs** / achieved occ **6.24%** / L1TEX 26.3% / L2 24.3%；
+  新 `(32,32,1)` Duration **83.9µs（−15.5%）** / achieved occ **10.99%** / L1TEX 43.5% / L2 47.1%。
+  机制 = **并行度**：grid 128→256，每 SM 1→2 个 CTA，把 SM 从「单 CTA 等延迟」里救出来。
+- **S=4096 `BN=64`**：Duration 1.87ms、**L1/TEX 71.87%→57.27%**、L2 62.65%、Compute 26.9%、
+  achieved occ 18.75%→**12.5%（2 CTA/SM，smem 105KB）**。**结论：`BN=64` 确实降了 L1/TEX
+  访存压力（Q/dO 复用翻倍），但被 occupancy 掉档抵消，净收益只有 ~1.5%；要同时拿到两者
+  必须先把 smem 压到 `≤77.7KB`（BN=64 需砍 ~28KB），留待 O9。**
+
+### 13b.6 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`）
+
+S=4096 MHA：FA2 0.7291ms/377TF、**FA3 0.3240ms/848TF**、TE 0.4440/619。ours total
+2.3495ms/58.5TF ⇒ **FA3 的 6.9%（时间 7.25×）**（O8b 6.9%，基本持平；本项主要赢在小 shape）。
+S=512 MHA：FA2 0.0442/49、**FA3 0.0265/81**、TE 0.0321/67；ours total 0.1504/14.3 ⇒ FA3 的
+17.6%（时间 5.7×），比 O8b 的 12.3× 明显拉近。
+
+### 13b.7 原始输出
+
+`src/fp16/fa_bwd_fp16_mma_main_o6c_{s512_h16,s4096_h16,s1024_h32_kv4,s1024_h40_kv8}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o6c_{s512_h16,s4096_h16}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o6c_ncu_{s512_main,s512_main_bm64,s4096_main}.out.txt`、
+`src/fp16/fa_bwd_o6c_fa3_te_baseline.out.txt`、`src/fp16/fa_bwd_o6c_fa3_te_s512.out.txt`。
+
+---
+
 ## 14. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
-O8b（§13）** 完成。后续按回报排序：**O8b(bf16)**（同款镜像配对+cp.async，代码 dtype 参数化）
-→ **O7**（dK/dV 去 `atomicAdd`；已分析其原子流量与 dQ 对称，单靠换归约维收益有限，需配合
-更大 `BM`/寄存器累加）→ **O9**（`wgmma`+TMA+warp specialization，对标 FA3）→ MLA 张量核。
+O8b（§13）、O6c（§13b）** 完成。后续按回报排序：**O6c(bf16)**（同款 tile 参数化 +
+小网格自适应，代码 dtype 参数化）→ **O7**（dK/dV 去 `atomicAdd`；已分析其原子流量与 dQ
+对称，单靠换归约维收益有限，需配合更大 `BM`/寄存器累加）→ **O9**（`wgmma`+TMA+warp
+specialization，对标 FA3；O6c 已证明 `BN=64` 能降 L1/TEX，但需 wgmma/TMA 才能在不掉
+occupancy 的前提下拿到）→ MLA 张量核。
