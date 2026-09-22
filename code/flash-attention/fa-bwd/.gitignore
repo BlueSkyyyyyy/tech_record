@@ -1,0 +1,8 @@
+*.out
+*.o
+*.cubin
+*.ptx
+autopilot.log
+autopilot.lock
+autopilot.pid
+AUTOPILOT_STOP
