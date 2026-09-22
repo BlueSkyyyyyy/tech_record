@@ -274,10 +274,33 @@
   - 原始输出 `src/fp8/fa_bwd_fp8_main_o2_{s512,s1024h32,s4096,ncu_main_s512,ncu_main_s4096,tebench}.out.txt`、
     `src/fp8/fa_bwd_fp8_mma_onefile_o2_{s512,s1024h32,s4096}.out.txt`；文档 `docs/03-fp8-bwd-impl.md` §10。
 
+- 2026-09-22（第十三轮）：**O3 完成（fp8 main K/V 向量化 + 寄存器预取流水，main 1.15–1.18×）**。
+  - 把 per-tile K/V 的「逐字节标量全局读→sync→算」改成**向量化 4B 读 + 寄存器双缓冲预取**
+    （新增 `kv_prefetch`/`kv_commit`；每线程预取 `KVU=8` 个 `uint32`，落盘时同写 Kt 转置）。
+    关键约束：**不加 smem**（O2 后 3 CTA/SM 已用满 carveout，加双缓冲会掉回 2 CTA），
+    故用寄存器（128→**168**，无 spill，`65536/(3×128)=170` 仍 3 CTA/SM）；barrier 数不变。
+  - **数值与 P3-5/O1/O2 逐位相同**：S=512 2.426/2.975/3.735e-1；S=1024H32 2.400/4.195/3.536e-1；
+    S=4096 2.635/2.643/3.216e-1。单/两文件同步修改、device 代码逐字一致（差异 <1% 噪声）。
+  - **性能**：main S=512 0.4655→**0.3934ms（1.18×）**、S=1024H32 1.5255→**1.3231ms（1.15×）**、
+    S=4096 8.6697→**7.5092ms（1.15×）**；total 0.6214→0.5402 / 1.9214→1.6978 / 10.086→**9.060ms**。
+    main-only 5.46/12.98/18.30 TF（峰值 0.28/0.66/0.93%）；同 session TE 0.0723/0.1377/0.4513ms
+    ⇒ main ours/TE 18.4%/10.4%/6.0%，端到端 13.4%/8.1%/5.0%。
+  - **消融归因**（额外编「只向量化、不流水」版）：向量化贡献 S512/S4096 = 1.16×/1.13×，
+    寄存器预取只再贡献 ~1.02–1.03×。**收益主要来自把标量 K/V 读改成 4B 向量化读。**
+  - ncu（main, S=4096）：Duration 8.85→**7.57ms**、occ 16.85→16.71%（仍 3 CTA/SM）、
+    waves 2.59、L1TEX 51.99→65.59%。**`long_scoreboard` 2.94→2.21（全局延迟被压下）**，
+    新主导变为 **barrier 3.34→5.13（5 个 `__syncthreads`/tile）+ short_scoreboard 3.61→4.12**
+    （smem→mma 的 `ldmatrix` 依赖）⇒ bound = **CTA barrier + smem 依赖**。
+  - 原始输出 `src/fp8/fa_bwd_fp8_{main,mma_onefile}_o3_*.out.txt`、
+    `..._o3_ncu_main_{s512,s4096}.out.txt`、`..._o3_stall_s4096.out.txt`、
+    `..._o2base_stall_s4096.out.txt`、`..._o3_ablation_{s512,s4096}.out.txt`、
+    `..._o3_tebench.out.txt`。文档 `docs/03-fp8-bwd-impl.md` §11。
+
 ## 下一步（明确到可执行）
 
 > P4-2 完成后，ROADMAP 里的「P 项」已全部收口，后续为**优化 backlog**（按回报排序）。
-> **O1/O2 已完成**，下一项从 **O3（fp8 main 加流水）** 起做，或先做小 S 的 grid / 尾波。
+> **O1/O2/O3 已完成**，下一项从 **O4（barrier 合并 + `ldmatrix.trans` 消转置副本）** 起做，
+> 或先做小 S 的 grid / 尾波（O2b）。
 > 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
 
 - [x] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms。
@@ -295,10 +318,16 @@
       ncu Duration 10.27→**8.85 ms**。main：S=1024H32 1.814→**1.526 ms（1.19×）**、
       S=4096 9.924→**8.562 ms（1.16×）**；S=512 不变（grid=128<132 SM，grid-bound）。
       数值与 P3-5/O1 逐位相同；单文件与两文件同步。详见 `docs/03-fp8-bwd-impl.md` §10。
-- [ ] **O3（fp8 main 加流水）**：K/V（及 Q/dO）用 `cp.async` 双缓冲，把「同步载入→算」改成
-      重叠流水；O2 后仍是 `No Eligible 79.6%`（`long_scoreboard`+`barrier` 主导），验证
-      `long_scoreboard` 下降。可顺带做 **O2b**：小 S 的 grid 太小（S=512 grid=128<132 SM）
-      与 3 CTA 下的尾波（waves 2.59，partial 233/396）——考虑小 S 用 BM=32 或 N 方向切块。
+- [x] **O3（fp8 main 加流水）**：**已完成（第十三轮）**。K/V 改成向量化 4B 读 + 寄存器双缓冲
+      预取（不加 smem，保持 3 CTA/SM，regs 128→168）；main 1.15–1.18×。消融显示收益主要来自
+      向量化（1.13–1.16×），预取仅再 ~2–3%。ncu `long_scoreboard` 2.94→2.21，新墙 = CTA barrier
+      （5.13）+ short_scoreboard（4.12）。详见 `docs/03-fp8-bwd-impl.md` §11。
+- [ ] **O4（barrier 合并 + 消转置副本）**：O3 后最大停顿是 per-tile 的 5 个 `__syncthreads`
+      （barrier 5.13）与 smem→mma 依赖（short_scoreboard 4.12）。合并 GEMM 之间的 barrier、
+      或把 `Kt/Qt/dOt` 三个转置副本换成 fp8 `ldmatrix.trans`（需求最小复现验证；既减 barrier 又
+      减 smem，可顺带冲 4 CTA/SM = 原 O2c）。
+- [ ] **O2b**：小 S 的 grid 太小（S=512 grid=128<132 SM，achieved occ 6.25%）与 3 CTA 下的
+      尾波（S=4096 waves 2.59，partial 233/396）——考虑小 S 用 BM=32 或 N 方向切块。
 - [ ] **O2c（fp8 main → 4 CTA/SM）**：需再砍 ~17 KB smem，等价于消除 `Kt/Qt/dOt` 三个转置副本
       （fp8 的 `ldmatrix.trans` 因为「2 字节=1 b16」的配对转置，布局不是 drop-in，需最小复现验证）。
 - [ ] **O4（确定性与归约）**：dK/dV 的 `atomicAdd` 换 `dK/dV_accum` 分块缓冲 + convert

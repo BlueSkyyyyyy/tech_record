@@ -180,6 +180,51 @@ __device__ __forceinline__ void mma_block(const unsigned char* As, int asld,
   }
 }
 
+// ----------------------------- O3：K/V 寄存器预取流水 -----------------------------
+// fp8 main kernel 的 per-tile 全局读（K/V）原本是「载入→同步→算」，ncu 显示
+// No Eligible ~80%、long_scoreboard 为主（全局延迟无处可躲）。这里**不加 smem**（加
+// 双缓冲会把 3 CTA/SM 压回 2 CTA）而是用**寄存器双缓冲**：
+//   * 每个线程按下轮 tile 的地址 (`tid + e*THREADS`)*4 预取 KVU 个 uint32（=4 个连续 fp8，
+//     行内对齐，故可一次 4B 读），结果留在 16 个寄存器里；
+//   * 预取发在本轮 5 个 GEMM 之前，落盘在本轮末尾（GEMM 全部读完 smem 之后），
+//     于是全局/L2 延迟被一整轮计算覆盖，且不占额外 smem、保持 3 CTA/SM。
+static constexpr int KVU = BN * kHeadDim / 4 / THREADS;  // 每线程预取的 uint32 数 = 8
+
+__device__ __forceinline__ void kv_prefetch(const unsigned char* __restrict__ k8,
+                                            const unsigned char* __restrict__ v8,
+                                            int j0, int S, int H, int h, int b, int tid,
+                                            uint32_t pk[KVU], uint32_t pv[KVU]) {
+#pragma unroll
+  for (int e = 0; e < KVU; ++e) {
+    int u = tid + e * THREADS;
+    int i = u * 4, r = i / kHeadDim, d = i % kHeadDim;
+    int jg = j0 + r;
+    uint32_t kv = 0, vv = 0;
+    if (jg < S) {  // 越界写 0 字节（等价 cvt_e4m3(0)=0x00）
+      size_t idx = (((size_t)(b * S + jg)) * H + h) * kHeadDim + d;
+      kv = *reinterpret_cast<const uint32_t*>(k8 + idx);
+      vv = *reinterpret_cast<const uint32_t*>(v8 + idx);
+    }
+    pk[e] = kv;
+    pv[e] = vv;
+  }
+}
+
+__device__ __forceinline__ void kv_commit(unsigned char* Ks, unsigned char* Vs,
+                                          unsigned char* Kt, const uint32_t pk[KVU],
+                                          const uint32_t pv[KVU], int tid) {
+#pragma unroll
+  for (int e = 0; e < KVU; ++e) {
+    int u = tid + e * THREADS;
+    int i = u * 4, r = i / kHeadDim, d = i % kHeadDim;
+    *reinterpret_cast<uint32_t*>(Ks + r * ASLD + d) = pk[e];
+    *reinterpret_cast<uint32_t*>(Vs + r * ASLD + d) = pv[e];
+#pragma unroll
+    for (int kk = 0; kk < 4; ++kk)  // 转置副本 Kt[d][r]（供 GEMM5 的 B 操作数）
+      Kt[(d + kk) * KTS + r] = (pk[e] >> (8 * kk)) & 0xff;
+  }
+}
+
 // =============================================================================
 // 1) quantize_row_kernel（与 golden 相同）：fp32 [rows][D] -> fp8 + rowwise scale
 // =============================================================================
@@ -407,28 +452,21 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   const int ncols = causal ? min(S, m0 + BM) : S;
   const int ntiles = (ncols + BN - 1) / BN;
 
+  // ---- O3 prologue：寄存器预取 tile 0 并落盘 ----
+  uint32_t pk[KVU], pv[KVU];
+  kv_prefetch(k8, v8, 0, S, H, h, b, tid, pk, pv);
+  kv_commit(Ks, Vs, Kt, pk, pv, tid);
+  if (tid < BN) {
+    ks_s[tid] = (tid < S) ? ks[((size_t)(b * S + tid)) * H + h] : 1.f;
+    vs_s[tid] = (tid < S) ? vs[((size_t)(b * S + tid)) * H + h] : 1.f;
+  }
+  __syncthreads();
+
   for (int nt = 0; nt < ntiles; ++nt) {
     const int j0 = nt * BN;
-    // ---- 载入 K/V（Ks/Vs 原布局 + Kt 转置副本，供 dQ 的 B 操作数）----
-    for (int i = tid; i < BN * kHeadDim; i += THREADS) {
-      int r = i / kHeadDim, d = i % kHeadDim;
-      int jg = j0 + r;
-      unsigned char kv = cvt_e4m3(0.f), vv = cvt_e4m3(0.f);
-      if (jg < S) {
-        size_t idx = (((size_t)(b * S + jg)) * H + h) * kHeadDim + d;
-        kv = k8[idx];
-        vv = v8[idx];
-      }
-      Ks[r * ASLD + d] = kv;
-      Kt[d * KTS + r] = kv;
-      Vs[r * ASLD + d] = vv;
-    }
-    if (tid < BN) {
-      int jg = j0 + tid;
-      ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * H + h] : 1.f;
-      vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * H + h] : 1.f;
-    }
-    __syncthreads();
+    // ---- O3：预取下一 tile 的 K/V 到寄存器（延迟被本轮 5 个 GEMM 覆盖）----
+    const int nnt = nt + 1;
+    if (nnt < ntiles) kv_prefetch(k8, v8, nnt * BN, S, H, h, b, tid, pk, pv);
 
     // ---- (1) S = scale·QKᵀ  →  P = exp(S − LSE)，存 fp32 ----
     {
@@ -587,6 +625,16 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
           }
     }
     __syncthreads();
+    // ---- O3：落盘预取的下一 tile 的 K/V（本轮 GEMM 已全部读完 smem），并更新 ks/vs ----
+    if (nnt < ntiles) {
+      kv_commit(Ks, Vs, Kt, pk, pv, tid);
+      if (tid < BN) {
+        int jg = nnt * BN + tid;
+        ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * H + h] : 1.f;
+        vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * H + h] : 1.f;
+      }
+      __syncthreads();
+    }
   }
 }
 
