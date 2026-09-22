@@ -88,7 +88,12 @@
 - [x] **P4-1** `docs/04-numerics-and-perf-summary.md`：数值表 + 性能表（我们/FA/TE，各 shape）
       → 汇总 fp16/bf16/fp8 三 dtype、单/两文件形态：对拍表（vs ref/FA/TE）、性能表（TFLOPS+峰值占比）、
       ncu bound 小结；本轮重跑两文件版与 FA/TE 基线，原始输出 `src/fa_bwd_{ours,refbench}_summary.out.txt`。
-- [ ] **P4-2** `docs/05-porting-notes.md`：目标卡抽象层与移植注意事项
+- [x] **P4-2** `docs/05-porting-notes.md`：目标卡抽象层与移植注意事项
+      → 6 层抽象（L0 数据/口径、L1 host、L2 算法数据流、L3 计算、L4 存储、L5 精度量化、L6 同步）+
+      逐层接口清单（换卡只换 L3 计算指令与被牵连的 L4 smem 布局）+ 正确性锚点 +
+      可执行移植 checklist + 当前实现与目标卡的已知差距（hdim 编译期常量/无流水/非确定性/
+      preprocess 瓶颈/无 wgmma-tcgen05）。本轮重跑两文件 fp8 kernel 确认仍可编译运行（数值与
+      `04` 表逐位一致），原始输出 `src/fp8/fa_bwd_fp8_main_p42_verify_s512.out.txt`。
 
 ### 可选
 
@@ -225,15 +230,35 @@
     fp8 ours 1.70 TF vs TE 302.5（峰值 1978.8）。三 dtype 均非带宽/算力 bound，
     墙是**低 occupancy + 并行度**、端到端墙是 **preprocess**。
 
+- 2026-09-22（第十轮）：**P4-2 完成（目标卡移植说明；P 项全部收口）**。
+   - 新增 `docs/05-porting-notes.md`：把 fp16/bf16/fp8 三套实现切为 6 个可替换层
+     （L0 数据/口径、L1 host/launcher、L2 算法数据流、L3 计算、L4 存储、L5 精度量化、L6 同步），
+     给出逐层接口清单：**换卡只需换 L3 的计算指令（`mma_block`/`mma_e4e4/e5e4/e4e5` 或退回标量）
+     与被牵连的 L4 smem 行距**，L0–L2/L6 骨架复用。
+   - 含「正确性锚点」（累加器清零、rowwise scale 折叠、scale 数组计数、fp8 转换坑、短序列对拍、
+     grid-stride）、可执行移植 checklist（9 步）、以及当前实现与目标卡的差距
+     （`kHeadDim=128` 编译期常量 / 无 cp.async 流水 / 非确定性 atomic / preprocess 瓶颈 /
+     无 wgmma-tcgen05 后端 / 峰值常量是 H100 的）。
+   - 本轮重跑两文件 fp8 kernel（`src/fp8/fa_bwd_fp8_main.cu`，S=512）确认仍可编译运行：
+     `smem=80128 B`、main 0.454 ms、dq/dk/dv vs ref 2.426/2.975/3.735e-1（与 `04` 表逐位一致）。
+     原始输出 `src/fp8/fa_bwd_fp8_main_p42_verify_s512.out.txt`。
+
 ## 下一步（明确到可执行）
 
-- [ ] **P4-2**：`docs/05-porting-notes.md`：目标卡抽象层与移植注意事项（把 preprocess/main/convert、
-      smem 布局、mma/ldmatrix、量化解码、同步抽象成可替换层，列出换卡需改的接口与常量）。
-- [ ] （backlog，fp8 性能）在 mma 版上继续：① pipeline（`cp.async` 双缓冲 K/V）；
-      ② 降寄存器（128）/smem（80KB）提 occupancy（当前 1 CTA/SM、Waves 0.48）；
-      ③ dQ/dK/dV 的 atomicAdd 换 `dQ_accum` 缓冲 + convert。
-- [ ] （backlog，性能）**preprocess 已是端到端瓶颈**（S=4096 70.6ms >> main 10.2ms）：
-      对 LSE 点积分块 + 向量化（`__ldg`/float4），或把 LSE 并入前向摊薄。
+> P4-2 完成后，ROADMAP 里的「P 项」已全部收口，后续为**优化 backlog**（按回报排序）。
+> 每轮挑一项做成完整增量（代码 + 实测 + ncu + 文档 + commit）。
+
+- [ ] **O1（端到端第一瓶颈）preprocess 分块/向量化**：S=4096 时 preprocess ~71ms >> main 10.2ms，
+      当前是 LSE 的 O(S²) 逐元素点积（每行一个 block、标量 `deq_e4m3`）。做法：把每个
+      (s,h) 行的 K 扫描沿 S 分块 + 多行并行（grid 扩维）、`float4`/`__ldg` 向量化、
+      用 mma 做 Q·Kᵀ 复用；目标 preprocess 降到与 main 同量级。
+- [ ] **O2（fp8 main 提 occupancy）**：当前 128 regs / 80KB smem / 1 CTA/SM、Waves 0.48。
+      降 smem（复用 Kt/dOt 与 dV 的 A/B 缓冲）或降寄存器，目标 ≥2 CTA/SM；先算寄存器账
+      （`65536/线程数`）再调，避免 spill。
+- [ ] **O3（fp8 main 加流水）**：K/V（及 Q/dO）用 `cp.async` 双缓冲，把「同步载入→算」改成
+      重叠流水；配合 O2 一起做，ncu 验证 `long_scoreboard` 下降。
+- [ ] **O4（确定性与归约）**：dK/dV 的 `atomicAdd` 换 `dK/dV_accum` 分块缓冲 + convert
+      （对齐 FA2 做法），顺带消 atomic 竞争、便于 deterministic 口径。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog
