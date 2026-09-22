@@ -182,6 +182,23 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
   转置副本**无法整个消掉**（详见 `03` §17.1）。真实收益来自「逐字节 scatter 写 → 4B 交织写」
   与更小的配对数组（无 `+16` 行距放大）。
 
+> **下表为 O7（第二十五轮）最新值**：dQ 沿 nt 循环在**寄存器**里累加（折算后），每 CTA 只 flush
+> 一次跨 CTA `atomicAdd`（dQ 的归约指令数 `O(ntiles)→O(1)`）。残余 red 再砍半
+> （L1 red 17.0M→9.0M、L2 red 204.5M→108.5M），**L2 墙 69.1%→43.8%**；用
+> `__launch_bounds__(128,3)` 把 254→168 regs、保住 3 CTA/SM。**数值与 O4b 逐位相同**；
+> 主收益在 S=4096（REGDQ=true），其余 shape 走原路径。逐项见 `03` §18。
+
+| shape | ksplit | ours total | ours main | main 加速 | main TF（峰值占比） | TE FP8（同 session） | main ours/TE |
+|---|---|---|---|---|---|---|---|
+| d128 (1,512,16,128) | 16 | 0.2191 ms / 9.80 TF | **0.0740 ms** | ~1.00× | 29.0（1.47%） | 0.1006 ms / 42.7 TF | 74% |
+| d128 (1,1024,32,128) | 8 | 0.8648 ms / 19.86 TF | **0.4604 ms** | ~0.99× | 37.3（1.89%） | 0.2054 ms / 167.3 TF | 224% |
+| d128 (1,4096,16,128) | 4 | 4.3410 ms / 31.66 TF | **2.6736 ms** | **1.10×** | 51.4（2.60%） | 0.5863 ms / 468.8 TF | 456% |
+| GQA h32kv4 (1,1024,32,128) | 8 | 0.7569 ms / 22.70 TF | **0.4463 ms** | ~0.99× | 38.5（1.95%） | 0.2014 ms / 170.6 TF | 222% |
+| MLA (1,1024,2,512) | 4 | 0.7910 ms / 5.43 TF | **0.3277 ms** | ~0.99× | 13.1（0.66%） | NA（FA/TE 不支持） | — |
+
+- **O7 只改 dQ 的归约方式**（dK/dV 的跨 mblk/hkv 竞争未动，仍是残余 red 的大头），
+  端到端 ours/TE FP8 S=4096 = **7.41×**（O4b 7.90×）；S=512 的 main 仍是 TE 整条反向的 ~74%。
+
 ---
 
 ## 3. ncu bound 小结（逐 dtype）
@@ -194,6 +211,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp8 | **mma main（O2b+O4d 后, S=4096, ksplit=4）** | 1.41% | 69.91% | 21.70% | **18.27%（73.8KB, 3 CTA/SM）** | 10.34 | No Eligible 76.6%、long_scoreboard 4.46 + short_scoreboard 3.96 | **L2 带宽（81.5%）+ 延迟**（split-K 复读 Q/dO + 全局 atomic） |
 | fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |
 | fp8 | **mma main（O4b 后, S=4096, ksplit=4）** | 2.46% | **69.69%** | 34.40% | 18.21%（**70.66KB**, 3 CTA/SM） | 10.34 | short_scoreboard 2.73、long_scoreboard 1.16 | **L1/TEX 69.7% + L2 69.1%（残余 red）+ short_scoreboard**（`op_st` 冲突 −66%） |
+| fp8 | **mma main（O7 后, S=4096, ksplit=4, REGDQ=true）** | 2.60% | **64.4%** | 37.7% | 18.11%（70.66KB, 3 CTA/SM） | 10.34 | short_scoreboard 1.89、long_scoreboard 1.09 | **L1/TEX 64.4% + short_scoreboard 1.89 + 残余 L2 43.8%（dK/dV 跨 CTA red）**（dQ red 已 O(1)，L2 墙 69.1%→43.8%） |
 | fp8 | **mma main（O4b 后, MLA S=1024 H2 D512）** | 1.46% | 11.38% | 7.45% | **6.25%（205.8KB, 1 CTA/SM）** | 0.97 | long_scoreboard 1.73、wait 1.67 | **低 occupancy/并行度**（smem 仍 205.8KB > 116KB 门槛） |
 
 **共同结论**：三种 dtype 都不是 HBM 或算力 bound（DRAM <1%、Compute <16%）；真正的墙是
@@ -202,10 +220,15 @@ fp8 上 mma 后 bank conflict 已消失（L1/TEX 76%→19%），bound 从「smem
 O2 降 smem 后 fp8 从 2→3 CTA/SM（theoretical 12.5%→18.75%），main 1.16–1.19×。
 **O4b 完成**：`op_st` bank conflict 206.4M→69.4M、L1/TEX 81.3%→69.7%、main 1.17–1.76×，
 但 fp8 的转置副本只能「变小 + 写得更省」而**不能消掉**（`03` §17.1）。
-下一步优先级：**① O7：分块 `*_accum` 替全局 `atomicAdd`（消 O4c 后残余的 204.5 M red，
-现 L2 并列墙 69.1%）；② `cp.async` 双缓冲流水；③ MLA 的 KV 分片/降 smem；④ wgmma/TMA（O9）。**
+**O7 完成**：dQ 的每-tile 归约折成每-CTA 一次寄存器累加 + 单次 flush（`03` §18），
+残余 red **再砍半**（L2 red 204.5M→108.5M）、**L2 墙 69.1%→43.8%**、main S=4096 1.10×，
+且用 `__launch_bounds__(128,3)` 保住 3 CTA/SM。**新墙 = L1/TEX 64.4% + short_scoreboard 1.89
++ 残余 L2 43.8%**；剩余 red 全是 dK/dV 的跨 mblk/hkv 竞争，要动并行结构（或分块 `*_accum` + convert）。
+下一步优先级：**① dK/dV 的跨 CTA 归约（分块 `*_accum` + convert / 按 KV 列块常驻）；② `cp.async`
+双缓冲流水；③ MLA 的 KV 分片/降 smem；④ fp16/bf16 上张量核（O5）；⑤ wgmma/TMA（O9）。**
 
-> O4c（`atomicAdd`→`float2` 向量化 red）+ O4b（转置副本 → `ldmatrix.trans` + K 配对）均已完成。
+> O4c（`atomicAdd`→`float2` 向量化 red）+ O4b（转置副本 → `ldmatrix.trans` + K 配对）+
+> O7（dQ 寄存器累加 + 单次 flush）均已完成。
 
 ---
 

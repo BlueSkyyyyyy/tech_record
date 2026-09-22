@@ -8,6 +8,7 @@
 // 本文件由后者拼接生成。支持 head_dim=128（MHA/GQA）与 512（MLA 主注意力，模板参数 HD）；
 // `HD=128,BM=64,BN=32` 时数值与 P3-5/O1–O4c 逐位相同。device 侧设计说明见 kernels.cuh 顶部注释。
 // O4b：GEMM3/4/5 的 B 操作数改「K 配对布局 + `ldmatrix.x2.trans`」（`Kt/Qt/dOt` → `Kp/Qp/dOp`）。
+// O7：dQ 沿 nt 循环在**寄存器**里累加（折算后），每 CTA 只 flush 一次跨 CTA `atomicAdd`；
 //
 // 用法：run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu [--dir=...] [--full|--causal] [--o=...] [--iters=N]
 // =============================================================================
@@ -501,8 +502,13 @@ __global__ void delta_kernel(const float* __restrict__ o,
 // =============================================================================
 // 3) main kernel：1colblock 反向，5 个 GEMM 全部用 mma.m16n8k32
 // =============================================================================
-template <int HD, int BM, int BN>
-__global__ void __launch_bounds__(THREADS)
+// O7：`REGDQ=true` 时把 dQ 沿 nt 累加在寄存器里（每 CTA 只 flush 一次跨 CTA 归约）。
+//   这会多占用 64 个 fp32 累加器（168→254 regs，2 CTA/SM），故用 `__launch_bounds__(THREADS,3)`
+//   把寄存器压回 168（~0.9KB spill）保住 3 CTA/SM。只有「平均每 CTA 有足够多 nt tile」时
+//   才划算（accumulation 省下的 red ∝ ntiles/CTA，而寄存器/溢出代价固定）；小 S 的高 ksplit
+//   使每 CTA 只有 ~1 个 tile，此时 `REGDQ=false` 退回原 per-tile 归约（168 regs，无溢出）。
+template <int HD, int BM, int BN, bool REGDQ>
+__global__ void __launch_bounds__(THREADS, (HD == 128) ? 3 : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8,
@@ -528,6 +534,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   // GEMM3/4/5 的输出 N 维 = head_dim；每遍处理 NTW = WN*64 = 128 列，共 HD/NTW 遍。
   constexpr int NTW = WN * 64;
   static_assert(HD % NTW == 0, "HD 必须是 128 的整数倍");
+  // O7：本实例是否把 dQ 沿 nt 累加在寄存器里（见 kernel 上方的说明）。
+  constexpr bool kRegDq = REGDQ && (HD / NTW == 1);
 
   extern __shared__ __align__(16) char smem[];
   unsigned char* Qs  = reinterpret_cast<unsigned char*>(smem);
@@ -625,6 +633,25 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
   }
   __syncthreads();
+
+  // ---- O7：dQ 在寄存器里沿 nt 累加，**每个 CTA 只 flush 一次**。----
+  // 现状（O4c 后）：dQ 的 epilogue 每个 nt 都对本 CTA 的 dQ tile 做一次跨 CTA
+  // `atomicAdd`，而 CTA 内同一线程在不同 nt 上写的是**完全相同的 (r,c) 地址**
+  // （GEMM5 的 warp/累加器映射与 nt 无关）→ 同一元素被 RMW 了 ntiles 次。
+  // 这里把 mma 结果就地折算（`sds2[r]*scale`）后累进寄存器 `dqacc`，nt 循环结束后
+  // 每元素只发一次 `atomicAdd`，把 dQ 的全局归约指令数从 O(ntiles) 降到 O(1)。
+  //   * 仅 HD==128（`HD/NTW==1`，dQ 的 N 维一次铺满）时启用；HD=512 的 4 个 N-tile
+  //     需要 4 份独立累加器（4×64=256 regs）不划算，仍走原 per-tile 归约。
+  //   * 因为折算因子 `sds2[r]` 逐 tile 变化，必须先折算再累加（不能累加裸 mma 输出）。
+  float dqacc[kRegDq ? 2 : 1][8][4];
+  if constexpr (kRegDq) {
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) dqacc[i][j][q] = 0.f;
+  }
 
   for (int nt = nt_begin; nt < nt_end; ++nt) {
     const int j0 = nt * BN;
@@ -824,11 +851,17 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
               // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
               int c = c0 + j * 8 + c2;
-              int qi = m0 + r;
-              if (qi < S)
-                red_add2(dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + d0 + c,
-                         acc[i][j][q] * sds2[r] * scale,
-                         acc[i][j][q + 1] * sds2[r] * scale);
+              if constexpr (kRegDq) {
+                // O7：折算后累进寄存器，nt 结束后统一 flush（见下方）。
+                dqacc[i][j][q] += acc[i][j][q] * sds2[r] * scale;
+                dqacc[i][j][q + 1] += acc[i][j][q + 1] * sds2[r] * scale;
+              } else {
+                int qi = m0 + r;
+                if (qi < S)
+                  red_add2(dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + d0 + c,
+                           acc[i][j][q] * sds2[r] * scale,
+                           acc[i][j][q + 1] * sds2[r] * scale);
+              }
             }
       }
     }
@@ -848,6 +881,23 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       }
       __syncthreads();
     }
+  }
+
+  // ---- O7：把寄存器里累加的 dQ flush 出去（每 CTA 每元素一次 `red_add2`）。----
+  if constexpr (kRegDq) {
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; q += 2) {
+          int r = wr * 32 + i * 16 + g + (q >= 2 ? 8 : 0);
+          int c = wc * 64 + j * 8 + c2;
+          int qi = m0 + r;
+          if (qi < S)
+            red_add2(dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c, dqacc[i][j][q],
+                     dqacc[i][j][q + 1]);
+        }
   }
 }
 
@@ -966,7 +1016,8 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // =============================================================================
 // 模板 launcher：按 HD 选择实例并设置动态 smem 上限。
 // =============================================================================
-template <int HD, int BM, int BN>
+// O7：REGDQ 选择是否把 dQ 沿 nt 累加在寄存器里（见主 kernel 说明）。
+template <int HD, int BM, int BN, bool REGDQ>
 static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             const unsigned char* k8, const float* ks,
                             const unsigned char* v8, const float* vs,
@@ -975,10 +1026,10 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             float* dk_acc, float* dv_acc, int S, int H, int Hkv,
                             float scale, int causal, int ksplit) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN>,
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
                                   Cfg::smem_bytes));
-  fa_bwd_fp8_mma_kernel<HD, BM, BN><<<mg, THREADS, Cfg::smem_bytes>>>(
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ><<<mg, THREADS, Cfg::smem_bytes>>>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit);
 }
@@ -1122,11 +1173,16 @@ int main(int argc, char** argv) {
     while (kp * 2 <= k) kp *= 2;  // 向下取 2 的幂，让 grid 对齐到整数个波附近
     ksplit = (int)kp;
   }
+  // O7：只有 HD=128（dQ 一次铺满 N）且「平均每 CTA 的 nt tile 足够多」时才启用寄存器累加。
+  // 因果下每 mblk 的 nt tile 数 ≈ (m0+BM)/BN，三角求和 /(mblk·ksplit) 后平均每 CTA
+  // ≈ (S/BN)/2/ksplit；阈值取 4（实测 S=1024H32 平均=2、启用反而持平/略慢，S=4096=16 明显收益）。
+  const bool use_regdq = (D == 128) && ((long)(S / 32) / 2 / ksplit >= 4);
   dim3 pg(S, H, B);
   dim3 lg((S + LBM - 1) / LBM, H, B);
   dim3 mg((S + BM - 1) / BM * ksplit, H, B);
   printf("grid main = %d x %d x %d  (ksplit=%d, base_grid=%ld)\n", mg.x, mg.y, mg.z,
          ksplit, base_grid);
+  printf("O7: use_regdq=%d (register dQ accumulation)\n", (int)use_regdq);
   const int cvt_threads = 256;
   const int cvt_blocks = (int)std::min<size_t>((nq + cvt_threads - 1) / cvt_threads, 65535);
 
@@ -1141,14 +1197,19 @@ int main(int argc, char** argv) {
   };
 
   auto run_main = [&]() {
-    if (D == 128)
-      launch_bwd_main<128, 64, 32>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
-                                   d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
-                                   scale, (int)causal, ksplit);
-    else
-      launch_bwd_main<512, 64, 32>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
-                                   d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
-                                   scale, (int)causal, ksplit);
+    if (D == 128) {
+      if (use_regdq)
+        launch_bwd_main<128, 64, 32, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
+                                           d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                           d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      else
+        launch_bwd_main<128, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
+                                            d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                            d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+    } else
+      launch_bwd_main<512, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
+                                          d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                          d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
   };
 
   auto run_all = [&]() {

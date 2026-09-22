@@ -1289,3 +1289,126 @@ smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio \
 s256_h2_d512,s1024_h32_kv4_d128}.out.txt`、`src/fp8/fa_bwd_fp8_mma_onefile_o4b_s4096_h16_d128.out.txt`、
 `src/fp8/fa_bwd_fp8_main_o4b_ncu_{s512,s4096,mla_s1024h2}.out.txt`、
 `src/fp8/fa_bwd_fp8_o4b_tebench.out.txt`。
+
+## 18. O7：dQ 沿 nt 在寄存器里累加，每 CTA 只 flush 一次（main 1.10×，残余 red 再砍半）
+
+### 18.1 动机：O4b 后剩两个并列墙，其中一个是「残余 red」
+
+O4b 后 main 的 ncu 是 **L1/TEX 69.7% + L2 69.1%（残余 204.5 M red 扇区）+ short_scoreboard 2.73**。
+用 `l1tex/lts__t_sectors_op_red` 拆开可以看到，red 的账已经只剩 dK/dV/dQ 的 epilogue：
+
+* dQ（GEMM5）的 epilogue 每个 nt tile 都对**本 CTA 的同一个 dQ 元素**做一次跨 CTA `atomicAdd`——
+  但 GEMM5 的 warp/累加器映射与 nt **无关**（`r,c` 只由 `i,j,q` 和 lane 决定），所以同一线程在不同
+  nt 上写的是**完全相同的地址**，一个元素被 RMW 了 `ntiles` 次（因果下平均 ~16，S=4096 ksplit=4）。
+* dK/dV 不同：一个 CTA 的每个 nt 覆盖**不同的 KV 行**（`jg=j0+r`，j0 随 nt 走），所以每个 dK/dV
+  元素在一个 CTA 内本来只写一次；它们的 red 是**跨 mblk/hkv 的 CTA 竞争**，无法靠 CTA 内累加消掉
+  （要动并行结构，转入 backlog）。
+
+因此 O7 的可做部分 = **把 dQ 的每-tile 归约改成 CTA 内寄存器累加，nt 循环结束后每元素只发一次
+`red_add2`**。这会把 dQ 的全局归约指令数从 `O(ntiles)` 降到 `O(1)`。
+
+### 18.2 关键点：折算因子逐 tile 变化，必须先折算再累加
+
+dQ 的 epilogue 是 `acc * sds2[r] * scale`，而 `sds2[m]`（dS2 的 rowwise amax scale）**逐 tile 不同**，
+所以不能把裸 mma 输出直接累加（那样会把不同 tile 的 scale 混在一起）。做法是**先折算、再累进
+寄存器累加器 `dqacc`**：
+
+```cuda
+// GEMM5 epilogue（HD=128，kRegDq=true）
+dqacc[i][j][q]     += acc[i][j][q]     * sds2[r] * scale;
+dqacc[i][j][q + 1] += acc[i][j][q + 1] * sds2[r] * scale;
+// …nt 循环结束后统一 flush（每元素一次 float2 red）：
+red_add2(dq_acc + idx, dqacc[i][j][q], dqacc[i][j][q + 1]);
+```
+
+`dqacc[2][8][4]` 只多 64 个 fp32。因为只有 **HD==128** 时 dQ 的 N 维（head_dim）一次铺满
+（`HD/NTW==1`）；HD=512 的 4 个 N-tile 需要 4 份独立累加器（256 regs）不划算，故 MLA 仍走原
+per-tile 归约（数值/性能不变）。
+
+### 18.3 寄存器账 + `__launch_bounds__`：把 2 CTA/SM 拉回 3 CTA/SM
+
+直接加 `dqacc` 会让 main kernel 从 **168 → 254 regs**，occupancy 3→**2 CTA/SM**（12.3%），
+S=512/1024 反而变慢。取折中：给 kernel 加 `__launch_bounds__(THREADS, (HD==128)?3:1)`——
+`HD=128` 时把寄存器压回 **168（+48B spill）**，保住 **3 CTA/SM**；`HD=512` 用 `,1`（不设上限，
+保持 255 regs，与 O4b 逐一致）。`REGDQ` 做成模板参数，由 host 按「平均每 CTA 的 nt tile 数」选：
+
+```cpp
+const bool use_regdq = (D == 128) && ((long)(S / 32) / 2 / ksplit >= 4);
+```
+
+（因果下平均每 CTA ≈ `(S/BN)/2/ksplit`；S=4096 ksplit=4 → 16，S=1024H32 ksplit=8 → 2，
+S=512 ksplit=16 → 0.5。阈值取 4：S=4096 明显收益、S≤1024 的高 ksplit 情形保持原路径避免回归。）
+
+### 18.4 数值：与 O4b **逐位相同**
+
+| shape | dq / dk / dv vs ref (max_abs) | O4b | **O7** |
+|---|---|---|---|
+| (1,512,16,128) | `2.426e-1 / 2.975e-1 / 3.735e-1` | 同 | **同**（REGDQ=false，路径未变） |
+| (1,1024,32,128) | `2.400e-1 / 4.195e-1 / 3.536e-1` | 同 | **同**（REGDQ=false） |
+| (1,4096,16,128) | `2.635e-1 / 2.643e-1 / 3.216e-1` | 同 | **同**（REGDQ=true） |
+| MLA (1,1024,2,512) | `2.232e-1 / 3.337e-1 / 3.602e-1` | 同 | **同**（未改） |
+| GQA h32kv4 S=1024 | `2.517e-1 / 5.408e-1 / 7.072e-1` | 同 | **同**（REGDQ=false） |
+
+单/两文件 device 代码同源逐字一致；`HD=128/REGDQ=false` 与 `HD=512` 的寄存器数、smem、
+SASS 与 O4b 一致。寄存器和几何：`REGDQ=true` 168 regs + 48B spill、70.66KB smem、3 CTA/SM；
+`REGDQ=false` 168 regs、0 spill；`HD=512` 255 regs、205.82KB smem、1 CTA/SM。
+
+### 18.5 性能（event 纯 device；同 session 先测 O4b=HEAD 基线）
+
+| case | ksplit | **REGDQ** | main O4b | **main O7** | 加速 | total O4b | total O7 | main TF（峰值占比） | TE FP8(CUPTI) |
+|---|---|---|---|---|---|---|---|---|---|
+| d128 S=512 H16 | 16 | false | 0.0733 | **0.0740** | ~1.00× | 0.2190 | **0.2191** | 29.3（1.48%） | 0.1006 |
+| d128 S=1024 H32 | 8 | false | 0.4552 | **0.4604** | ~0.99× | 0.8574 | **0.8648** | 37.3（1.89%） | 0.2054 |
+| **d128 S=4096 H16** | 4 | **true** | 2.9473 | **2.6736** | **1.10×** | 4.6162 | **4.3410** | **51.4（2.60%）** | 0.5863 |
+| GQA h32kv4 S=1024 | 8 | false | 0.4404 | **0.4463** | ~0.99× | 0.7528 | **0.7569** | 38.5（1.95%） | 0.2014 |
+| MLA S=1024 H2 D512 | 4 | false | 0.3251 | **0.3277** | ~0.99× | 0.7906 | **0.7910** | 13.1（0.66%） | NA |
+
+S=1024/GQA/MLA 的 ±1% 是 session 噪声（路径与 O4b 完全相同、数值逐位一致）；唯一真实改动是
+**S=4096（REGDQ=true）main 1.10×、端到端 1.06×**。端到端 ours/TE FP8 = **2.18×/4.21×/7.41×**
+（O4b 为 2.18×/4.18×/7.90×）；main-only ours/TE S=4096 = **456%**（O4b 504%）。
+
+### 18.6 ncu（main, S=4096, ksplit=4, REGDQ=true）
+
+| 指标 | O4b | **O7** | 说明 |
+|---|---|---|---|
+| Duration | 3.00 ms | **2.69 ms** | 1.12× |
+| **L1 red requests** | 17.04 M | **9.04 M** | **0.53×**（dQ 的 O(ntiles) 归约消失） |
+| **L1 red sectors** | 136.3 M | **72.3 M** | 0.53× |
+| **L2 red sectors** | 204.5 M | **108.5 M** | 0.53×（剩下的是 dK/dV 跨 CTA 竞争） |
+| **L2 Cache Throughput** | **69.12%** | **43.8%** | **墙被打掉** |
+| L1/TEX Throughput | 69.69% | **64.4%** | 略降 |
+| Compute (SM) | 34.40% | 37.7% | |
+| DRAM | 2.46% | 2.6% | 远非带宽 bound |
+| short / long scoreboard | 2.73 / 1.16 | **1.89 / 1.09** | smem→mma 依赖缓解 |
+| barrier | 0.35 | **0.22** | |
+| Occupancy（Regs/smem） | 18.21%（168/70.66KB） | **18.11%（168/70.66KB）** | **3 CTA/SM 保住** |
+
+**bound 结论**：O7 把 dQ 的每-tile 归约折成每-CTA 一次，**残余 red 再砍半（L2 204.5M→108.5M）、
+L2 墙 69.1%→43.8%**，且靠 `__launch_bounds__(128,3)` 保住了 3 CTA/SM（区别于朴素版 254 regs /
+2 CTA/SM 的 S=4096 只 1.04×）。**新墙 = L1/TEX 64.4%（`ldmatrix`/smem） + short_scoreboard 1.89
++ 残余 L2 43.8%（剩 dK/dV 的跨 CTA red）**。reduction 的天花板已经很近：dQ 归约已是 O(1)，
+剩下要动 dK/dV 的「跨 mblk/hkv 竞争」必须改并行结构（例如按 KV 列块常驻、Q 块累加）或
+分块 `*_accum` + convert，属 backlog。
+
+### 18.7 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+for c in b1_s512_h16_d128_causal_fp8 b1_s1024_h32_d128_causal_fp8 \
+         b1_s4096_h16_d128_causal_fp8 b1_s1024_h32_d128_kv4_causal_fp8 \
+         b1_s1024_h2_d512_causal_fp8; do
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=20 \
+    --dir=/home/xieminglin/proj/output/fa-bwd/$c
+done
+# ncu：red / L2 / occupancy / stall
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma \
+  --metrics l1tex__t_requests_pipe_lsu_mem_global_op_red.sum,\
+lts__t_sectors_op_red.sum,l1tex__throughput.avg.pct_of_peak_sustained_elapsed,\
+lts__throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_active,\
+launch__registers_per_thread,gpu__time_duration.sum \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o7_sweep.out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_o7_sweep.out.txt`、`src/fp8/fa_bwd_fp8_main_o7_ncu_s4096.out.txt`、
+`src/fp8/fa_bwd_fp8_o7_tebench.out.txt`。
