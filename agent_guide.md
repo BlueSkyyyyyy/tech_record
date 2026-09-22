@@ -28,6 +28,8 @@ static/katex/                   # 自托管 KaTeX，勿删
 2. **PaperMod 是 v8.0 不是最新版**：最新版要求 Hugo ≥ 0.146。且主题打过两处补丁（`themes/PaperMod/layouts/partials/templates/opengraph.html` 和 `twitter_cards.html` 删除了废弃的 `.Site.Social` 回退分支）。**升级主题或 Hugo 前必须重测构建**。
 3. **本机网络下载 GitHub release 资产不稳定**，`codeload.github.com` 的 tar.gz 通常可用；npmmirror 可作 npm 包镜像。
 4. **frontmatter 的 `draft: true` 必须改成 `false`**，否则文章不会发布（本地 `hugo server -D` 能看到但线上没有，极易误判）。
+5. **敏感信息**：目标 AI 卡的**实际代号属于敏感信息**，仓库与博客一律用「目标卡」指代，**不要写代号**（曾因代号被外部 session 强制清除，别再引入）。
+6. **博客内联渲染 `code/` 下的文档**：`layouts/shortcodes/fa_include.html` 用 `readFile` + `markdownify` 把 `code/.../docs/*.md` 实时渲染进文章，docs 更新后博客自动同步、无需复制。注意：**`{{< relref >}}` 必须写在 markdown 链接里**（`[文字]({{< relref "slug" >}})`），裸用只会把 URL 当纯文本输出；且 `readFile`/`markdownify` 内容里的 `{{< >}}` 不会被二次处理。
 5. **frontmatter 的裸 `date: YYYY-MM-DD` 会被解析成当天 00:00 UTC**（= 北京时间 08:00）。如果在**北京时间 08:00 之前**构建/部署，这个日期就落在「未来」，Hugo 会**静默跳过该页**（不打 ERROR，`hugo list all` 也能看到它，但 `public/` 里没有、线上 404）。凌晨发文章要写带时区的时间，例如 `date: 2026-09-22T01:00:00+08:00`。排查方法：`ls public/posts/<slug>/` 是否存在。
 
 ## 内容组织惯例
@@ -53,3 +55,4 @@ static/katex/                   # 自托管 KaTeX，勿删
 | [code-dive](agent_skills/code-dive.md) | 深读某个 kernel/框架仓库，写源码分析文章 |
 | [publish](agent_skills/publish.md) | 构建、推送、验证线上部署 |
 | [kernel-opt](agent_skills/kernel-opt.md) | 推进「CUDA 算子调优」系列（长期自驱：写代码→实测→ncu→写文章→发布） |
+| [fa-bwd](agent_skills/fa-bwd.md) | 推进「FlashAttention 反向工程」项目（GPUkernel 实现/对标 TE/移植目标卡） |

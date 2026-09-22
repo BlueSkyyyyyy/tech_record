@@ -1,0 +1,12 @@
+{{- /*
+  在博客页面里内联渲染仓库中的 Markdown 文件（相对仓库根目录）。
+  用法：{{< fa_include "code/flash-attention/fa-bwd/docs/01-fp16-bwd-impl.md" >}}
+  会跳过文件首行的 H1（避免和文章标题重复）。
+  docs/ 里的内容更新后，博客页面在下次构建时自动同步，无需复制。
+*/ -}}
+{{- $p := .Get 0 -}}
+{{- $raw := readFile $p -}}
+{{- if hasPrefix $raw "# " -}}
+  {{- $raw = delimit (after 1 (split $raw "\n")) "\n" -}}
+{{- end -}}
+{{- $raw | markdownify -}}
