@@ -134,6 +134,16 @@ __device__ __forceinline__ void ldmatrix_x2(uint32_t addr, uint32_t d[2]) {
                : "r"(addr));
 }
 
+// ----------------------------- O4c：向量化归约（red） -----------------------------
+// 反向的 dQ/dK/dV 都靠跨 CTA 的 fp32 `atomicAdd` 汇总（ncu：这些 red 占 L2 扇区的 92%，
+// 是 O2b+O4d 后的头号墙）。mma.m16n8 累加器里 q=0/1 两列相邻、q=2/3 两列相邻，且同一
+// q 对内**行号相同**（row = r0+g 或 r0+g+8）⇒ 该对共用同一个行 scale（sA/sds3/sds2）。
+// 于是把两个标量 `atomicAdd` 打包成一次 `atomicAdd(float2*)`（sm_90 支持），
+// **red 请求数与 L2 扇区数各减半**，数值等价（硬件对 v2 的两个 f32 仍各自原子累加）。
+__device__ __forceinline__ void red_add2(float* p, float a, float b) {
+  atomicAdd(reinterpret_cast<float2*>(p), make_float2(a, b));
+}
+
 // A[M_TILE][K_TILE]、B[N_TILE][K_TILE] 均行主序（行距 asld/bsld，含 padding）。
 // 每 warp 负责 WARP_M×WARP_N 输出块；各 warp 旧 (wm,wn) 由调用方给出。
 template <int WARP_M, int WARP_N, int K_TILE, int KIND>
@@ -663,13 +673,14 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 #pragma unroll
         for (int j = 0; j < 8; ++j)
 #pragma unroll
-          for (int q = 0; q < 4; ++q) {
+          for (int q = 0; q < 4; q += 2) {
+            // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
             int r = r0 + g + (q >= 2 ? 8 : 0);
-            int c = c0 + j * 8 + c2 + (q & 1);
+            int c = c0 + j * 8 + c2;
             int jg = j0 + r;
             if (jg < S)
-              atomicAdd(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
-                        acc[0][j][q] * sA[r]);
+              red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
+                       acc[0][j][q] * sA[r], acc[0][j][q + 1] * sA[r]);
           }
       }
 
@@ -685,13 +696,15 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 #pragma unroll
         for (int j = 0; j < 8; ++j)
 #pragma unroll
-          for (int q = 0; q < 4; ++q) {
+          for (int q = 0; q < 4; q += 2) {
+            // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
             int r = r0 + g + (q >= 2 ? 8 : 0);
-            int c = c0 + j * 8 + c2 + (q & 1);
+            int c = c0 + j * 8 + c2;
             int jg = j0 + r;
             if (jg < S)
-              atomicAdd(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
-                        acc[0][j][q] * sds3[r] * scale);
+              red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
+                       acc[0][j][q] * sds3[r] * scale,
+                       acc[0][j][q + 1] * sds3[r] * scale);
           }
       }
 
@@ -711,13 +724,15 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 #pragma unroll
           for (int j = 0; j < 8; ++j)
 #pragma unroll
-            for (int q = 0; q < 4; ++q) {
+            for (int q = 0; q < 4; q += 2) {
+              // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
-              int c = c0 + j * 8 + c2 + (q & 1);
+              int c = c0 + j * 8 + c2;
               int qi = m0 + r;
               if (qi < S)
-                atomicAdd(dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + d0 + c,
-                          acc[i][j][q] * sds2[r] * scale);
+                red_add2(dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + d0 + c,
+                         acc[i][j][q] * sds2[r] * scale,
+                         acc[i][j][q + 1] * sds2[r] * scale);
             }
       }
     }

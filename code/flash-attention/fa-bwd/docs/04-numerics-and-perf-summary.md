@@ -151,6 +151,19 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
   main 1.05–1.12×；smem 73.2→73.8 KB（仍 3 CTA/SM）。
 - 数值与 P3-5/O1–O4a **逐位相同**；端到端仍受 main 主导（S=4096 main 4.91/6.53 ms）。
 
+> **下表为 O4c（第二十三轮）最新值**：把 dQ/dK/dV 的 `atomicAdd` 向量化为 `float2` red，
+> red 请求/L2 扇区各 **0.50×**，**L2 81.5%→57.9%**（墙被打掉，新墙 L1/TEX 81.3%）。
+> `TE` 为同 session CUPTI 端到端。逐项见 `03` §16。
+
+| shape | ours total | ours main | main TF（峰值占比） | TE FP8（同 session） | main ours/TE |
+|---|---|---|---|---|---|
+| (1,512,16,128) | 0.2556 ms / 8.40 TF (0.42%) | 0.1090 ms | 19.7（1.00%） | 0.1014 ms / 42.4 TF | **93%** |
+| (1,1024,32,128) | 1.0590 ms / 16.22 TF (0.82%) | 0.6772 ms | 25.4（1.28%） | 0.2059 ms / 166.9 TF | 30% |
+| (1,4096,16,128) | 5.1601 ms / 26.64 TF (1.35%) | 3.5330 ms | 38.9（1.97%） | 0.5894 ms / 466.4 TF | 17% |
+| MLA (1,1024,2,512) | 0.8515 ms / 5.04 TF | 0.3933 ms | 10.9（0.55%） | NA（FA/TE 不支持） | — |
+
+- 数值与 O2b+O4d **逐位相同**；S=512 的 **main 已几乎追平 TE 整条反向**（0.1090 vs 0.1014 ms）。
+
 ---
 
 ## 3. ncu bound 小结（逐 dtype）
@@ -161,13 +174,15 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | bf16 | main (padding 后) | 0.26% | 24.9% | 13.5% | 6.25% | 0.48 | fixed-latency 37.3%、No Eligible 78% | **延迟 / 并行度不足** |
 | fp8 | golden main | 0.06% | **75.96%**（90% 多余） | 4.98% | 6.25%（68KB） | 0.32 | MIO scoreboard 69% | **smem 冲突 + FP8 解码 + 低 occ** |
 | fp8 | **mma main（O2b+O4d 后, S=4096, ksplit=4）** | 1.41% | 69.91% | 21.70% | **18.27%（73.8KB, 3 CTA/SM）** | 10.34 | No Eligible 76.6%、long_scoreboard 4.46 + short_scoreboard 3.96 | **L2 带宽（81.5%）+ 延迟**（split-K 复读 Q/dO + 全局 atomic） |
+| fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |
 
 **共同结论**：三种 dtype 都不是 HBM 或算力 bound（DRAM <1%、Compute <16%）；真正的墙是
 **低 occupancy（fp8 已做到 3 CTA/SM）+ 并行度不足**。
 fp8 上 mma 后 bank conflict 已消失（L1/TEX 76%→19%），bound 从「smem 冲突」退化为「延迟受限」；
 O2 降 smem 后 fp8 从 2→3 CTA/SM（theoretical 12.5%→18.75%），main 1.16–1.19×。
-下一步优先级：**① `atomicAdd` → 分块 `dK/dV_accum`/`dQ_accum` + convert（O4c，消 L2 原子流量）；
-② `cp.async` 双缓冲流水；③ 4 CTA/SM 需消转置副本（O4b）；④ wgmma/TMA（O9）。**
+下一步优先级：**① O4b：fp8 `ldmatrix.trans` 消 `Kt/Qt/dOt` 三个转置副本（新墙 L1/TEX 81.3%，
+且是 fp8 MLA 冲 2 CTA/SM 的关键）；② `cp.async` 双缓冲流水；③ wgmma/TMA（O9）。
+（O4c 已完成：`atomicAdd`→`float2` 向量化 red，L2 原子流量减半。）**
 
 ---
 
