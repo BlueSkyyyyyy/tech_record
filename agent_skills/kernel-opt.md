@@ -411,3 +411,14 @@ scripts/lab.sh status
   即可（逐字节搬要慢 3.45×）。
 - **wgmma 是 warpgroup 级**（57 篇）：单 warpgroup 只算 m64；BM=128 要 **2 个 warpgroup**（256 线程）
   各算一半行，A 描述符按 `wg*64*BK` 偏移。最小复现里线程数给够、但行映射只写一半，会静默漏一半输出。
+- **小 N 的 GEMV/decode 先看 `Waves Per SM` 和 `Issued Ipc`，别顺着 ncu 的 bank conflict 就走**（58 篇）：
+  「一行一 warp 收口」把并行度锁死在 `#warp = N/RWW`；`N=3072` 时只有 3072 warp（23/SM、
+  `Waves 0.36~0.48`、occ 32.8%、`Issued Ipc Active 1.08`、Issue Slots Busy 20.9%）→ **并行度不足**。
+  此时去掉 bank conflict（`__byte_perm` 位运算解码）反而慢 29%、split-K 把 waves 抬到 3.88 却慢 30%。
+  判据：`Waves<1 && Ipc<1.5 && Issue Slots Busy<30% && DRAM<80%` ⇒ 改并行粒度（grouped），
+  不是抠指令。唯一有效的是**软件流水深度 1→2**（0.0100→0.0090 ms）。
+- **`__byte_perm`（PRMT）的 selector 是「每个 selector byte 的低 4 位、按 nibble 排布」**（58 篇）：
+  输出 byte `i` 由 selector 第 `4i` 位起的 nibble 决定（0-3 选 `x` 的 byte，4-7 选 `y` 的）。
+  把 4 个 byte 的低 3 位压成 selector 要 `(k&0xF)|((k>>4)&0xF0)|((k>>8)&0xF00)|((k>>12)&0xF000)`；
+  直接拿展开后的 byte 当 selector 会全错。最小复现必须**穷举**（`prmt_test.cu` 扫 2^28）而不是抽点。
+  且 PRMT 解码是 **ALU 密集**（~3 指令/nibble），在 ALU 已被 decode 占满的 kernel 里是负优化。
