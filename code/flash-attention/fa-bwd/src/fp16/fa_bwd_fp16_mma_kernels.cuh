@@ -84,6 +84,45 @@ __device__ __forceinline__ void red_add2(float* p, float a, float b) {
   atomicAdd(reinterpret_cast<float2*>(p), make_float2(a, b));
 }
 
+// ---- O6：cp.async 异步拷贝（16B）----
+// 把「全局→smem」的 K/V 搬运从「同步 LDG + STS」改成硬件异步流水：`cp.async.cg` 走
+// L2-only 路径（流式数据不污染 L1），发起后立即返回、不占寄存器、不阻塞发射；
+// 用 `commit_group` 打组、`wait_group 0` 在消费前统一等待。这是消 `long_scoreboard`
+// （O5 ncu：全局访存延迟占 ~63%）的标准手段（对齐 fp8 的 O3，但 fp8 因字节少用寄存器预取，
+// fp16 字节翻倍 → 改用 cp.async 双缓冲 smem，避免 32 个额外寄存器的代价）。
+__device__ __forceinline__ void cp_async16(void* dst_smem, const void* src_gmem) {
+  uint32_t s = smem_u32(dst_smem);
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(src_gmem));
+}
+
+// O6：把一个 K/V 列块（BN 行 × HD 列，half）用 cp.async 发进 smem。
+// 以 8 个 half（16B）为最小搬运单位 → 每行 HD/8 个 unit，共 BN*HD/8 个，按 THREADS 均分。
+// 行越界（jg>=S）用普通 smem 写 0（cp.async 无谓词，混合写 + 后续 __syncthreads 可见）。
+template <int HD, int BN>
+__device__ __forceinline__ void kv_issue_async(const __half* __restrict__ k,
+                                               const __half* __restrict__ v, int j0, int S,
+                                               int Hkv, int hkv, int b, int tid, __half* Kd,
+                                               __half* Vd, int LD) {
+  constexpr int HDV = HD / 8;    // 每行 uint4(8 half) 数
+  constexpr int NU  = BN * HDV;  // 总 unit 数
+#pragma unroll
+  for (int u = tid; u < NU; u += THREADS) {
+    const int row = u / HDV, c8 = u % HDV;
+    const int jg = j0 + row;
+    __half* kdst = Kd + row * LD + c8 * 8;
+    __half* vdst = Vd + row * LD + c8 * 8;
+    if (jg < S) {
+      const size_t off = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c8 * 8;
+      cp_async16(kdst, k + off);
+      cp_async16(vdst, v + off);
+    } else {
+      *reinterpret_cast<uint4*>(kdst) = make_uint4(0, 0, 0, 0);
+      *reinterpret_cast<uint4*>(vdst) = make_uint4(0, 0, 0, 0);
+    }
+  }
+  asm volatile("cp.async.commit_group;\n");
+}
+
 // A[M_TILE][K_TILE] 行主序（行距 asld，half）；B 两种布局：
 //   BTRANS=false：Bs=[N_TILE][K_TILE] 行主序（行距 bsld，half）→ ldmatrix.x2；
 //   BTRANS=true ：Bs=[K_TILE][N_TILE] 行主序（行距 bsld，half）→ ldmatrix.x2.trans。
@@ -255,8 +294,10 @@ __global__ void delta_kernel(const __half* __restrict__ o,
 //   Qs[BM*LD] + dOs[BM*LD] + Ks[BN*LD] + Vs[BN*LD]
 //   + PsT[BN*LDP]（P 转置，GEMM3 A） + dSs[BM*LDS]（GEMM5 A） + dSsT[BN*LDP]（GEMM4 A）
 //   其中 LD=HD+8、LDP=BM+8、LDS=BN+8（+8 消 ldmatrix bank conflict）。
-template <int HD, int BM, int BN>
-__global__ void __launch_bounds__(THREADS, 3)
+// PIPE=false：O5 原版（同步标量 K/V 载入，3 CTA/SM）。
+// PIPE=true ：O6（cp.async 双缓冲 K/V，消全局访存延迟；smem 翻倍 → 2 CTA/SM）。
+template <int HD, int BM, int BN, bool PIPE>
+__global__ void __launch_bounds__(THREADS, PIPE ? 2 : 3)
 fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
                        const __half* __restrict__ v, const __half* __restrict__ do_,
                        const float* __restrict__ delta, const float* __restrict__ lse,
@@ -267,13 +308,15 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
   constexpr int LD  = HD + 8;    // Q/K/V/dO 行距（half）
   constexpr int LDP = BM + 8;    // PsT/dSsT 行距（half）
   constexpr int LDS = BN + 8;    // dSs 行距（half）
+  constexpr int KVL = BN * LD;                 // 单个 K 或 V 缓冲（half）
+  constexpr int KVSB = PIPE ? 2 * KVL : KVL;   // K/V 各占的 smem（PIPE 时双缓冲）
 
   extern __shared__ __align__(16) char smem[];
   __half* Qs   = reinterpret_cast<__half*>(smem);
   __half* dOs  = Qs + BM * LD;
   __half* Ks   = dOs + BM * LD;
-  __half* Vs   = Ks + BN * LD;
-  __half* PsT  = Vs + BN * LD;
+  __half* Vs   = Ks + KVSB;
+  __half* PsT  = Vs + KVSB;
   __half* dSs  = PsT + BN * LDP;
   __half* dSsT = dSs + BM * LDS;
 
@@ -297,10 +340,18 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
     Qs[r * LD + d] = qv;
     dOs[r * LD + d] = ov;
   }
-  __syncthreads();
 
   const int ncols = causal ? min(S, m0 + BM) : S;
   const int ntiles = (ncols + BN - 1) / BN;
+
+  if constexpr (!PIPE) {
+    __syncthreads();
+  } else {
+    // O6：prologue 直接异步发起 tile0 的 K/V（不占寄存器）；Q/dO 的可见性由
+    // 循环首的 `wait_group + __syncthreads` 一并保证（Q/dO 与 K/V 写不同 smem）。
+    if (ntiles > 0)
+      kv_issue_async<HD, BN>(k, v, 0, S, Hkv, hkv, b, tid, Ks, Vs, LD);
+  }
 
   // dQ 沿 nt 在寄存器里累加（每个 Q 块唯一 CTA，无需跨 CTA atomic）。
   float dqacc[2][8][4];
@@ -313,21 +364,35 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
 
   for (int nt = 0; nt < ntiles; ++nt) {
     const int j0 = nt * BN;
+    // O6：本 tile 用 stage = nt&1；PIPE=false 时 stage 恒 0（布局退化为原版）。
+    const int stage = PIPE ? (nt & 1) : 0;
+    __half* Kt = Ks + stage * KVL;
+    __half* Vt = Vs + stage * KVL;
 
-    // ---- 载入 K/V 块 ----
-    for (int i = tid; i < BN * HD; i += THREADS) {
-      int r = i / HD, d = i % HD;
-      int jg = j0 + r;
-      __half kv = __float2half(0.f), vv = __float2half(0.f);
-      if (jg < S) {
-        size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d;
-        kv = k[idx];
-        vv = v[idx];
+    if constexpr (PIPE) {
+      // 等本 tile 的 cp.async 落地；此 barrier 同时保证「上一 tile 的 GEMM5 已读完
+      // 那个 stage」，故随后把下一 tile 发进该 stage 是安全的。
+      asm volatile("cp.async.wait_group 0;\n");
+      __syncthreads();
+      if (nt + 1 < ntiles)
+        kv_issue_async<HD, BN>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
+                               Ks + ((nt + 1) & 1) * KVL, Vs + ((nt + 1) & 1) * KVL, LD);
+    } else {
+      // ---- 载入 K/V 块（原版：同步标量读）----
+      for (int i = tid; i < BN * HD; i += THREADS) {
+        int r = i / HD, d = i % HD;
+        int jg = j0 + r;
+        __half kv = __float2half(0.f), vv = __float2half(0.f);
+        if (jg < S) {
+          size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d;
+          kv = k[idx];
+          vv = v[idx];
+        }
+        Kt[r * LD + d] = kv;
+        Vt[r * LD + d] = vv;
       }
-      Ks[r * LD + d] = kv;
-      Vs[r * LD + d] = vv;
+      __syncthreads();
     }
-    __syncthreads();
 
     // ---- (1) S = scale·QKᵀ → P = exp(S − LSE) ----
     // 同一线程在 GEMM1/GEMM2 的 (r,c) 映射一致，故用寄存器 pval 保存 P 供 dS 用，
@@ -341,7 +406,7 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
         for (int j = 0; j < 2; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block_f16<32, 16, HD, false>(Qs, LD, Ks, LD, acc, wr, wc, lane);
+      mma_block_f16<32, 16, HD, false>(Qs, LD, Kt, LD, acc, wr, wc, lane);
       const int r0 = wr * 32, c0 = wc * 16;
 #pragma unroll
       for (int i = 0; i < 2; ++i)
@@ -369,7 +434,7 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
         for (int j = 0; j < 2; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block_f16<32, 16, HD, false>(dOs, LD, Vs, LD, acc, wr, wc, lane);
+      mma_block_f16<32, 16, HD, false>(dOs, LD, Vt, LD, acc, wr, wc, lane);
       const int r0 = wr * 32, c0 = wc * 16;
 #pragma unroll
       for (int i = 0; i < 2; ++i)
@@ -441,7 +506,7 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
         for (int j = 0; j < 8; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block_f16<32, 64, BN, true>(dSs, LDS, Ks, LD, acc, wr, wc, lane);
+      mma_block_f16<32, 64, BN, true>(dSs, LDS, Kt, LD, acc, wr, wc, lane);
 #pragma unroll
       for (int i = 0; i < 2; ++i)
 #pragma unroll
@@ -451,7 +516,9 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
             dqacc[i][j][q] += acc[i][j][q] * scale;
           }
     }
-    __syncthreads();
+    // PIPE=false 需要尾 barrier 保护 Ks/Vs/dSs 在下一轮被覆盖；PIPE=true 由下轮
+    // 循环首的 barrier 承担（且写的是另一 stage），故省掉一次同步。
+    if constexpr (!PIPE) __syncthreads();
   }
 
   // ---- 写回 dQ（寄存器累加结果，直接存；每个 Q 块由唯一 CTA 负责）----

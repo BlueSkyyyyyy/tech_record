@@ -524,10 +524,102 @@ Achieved occ 71.9%（17 regs）、Waves 31.0 ⇒ 访存/算力均衡的轻量归
 
 ---
 
-## 12. 下一步
+## 12. O6：main 的 `cp.async` 双缓冲（消 63% `long_scoreboard`，main 2.26–2.41×）
 
-见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）与 O8（§11）** 完成。
-后续按回报排序：**O3/O6**（main 的 K/V `cp.async`/寄存器预取，消 §10.4 的 63%
-`long_scoreboard`；现已是端到端第一瓶颈）→ **O7**（fp16/bf16 的 dK/dV 去 `atomicAdd`，
-移植 fp8 的 O4c/O7）→ **O8b**（LSE 的 occupancy/尾波优化、convert 融合）→
-MLA 张量核 / wgmma+TMA（O9）。
+### 12.1 动机
+
+O5（§10）把 fp16 main 换成 `mma.m16n8k16` 后，ncu 结论是 **`long_scoreboard` 占
+11.64 cycle 的 63.4%**——即每个 tile 先把 K/V 从全局**同步**读进 smem
+（`for i = tid; i < BN*HD; i += THREADS` 标量 `LDG`），`__syncthreads` 后才能开算，
+这段全局访存延迟完全暴露。O8（§11）把 preprocess 从 68.7ms 打到 0.99ms 后，
+端到端瓶颈落回 main（S=4096 main 4.47ms，占 80%）——**O6 就是 main 的下一刀**。
+
+### 12.2 改动（单/两文件 device 代码逐字一致）
+
+1. **`cp.async.cg` + 双缓冲 K/V**：新增 `cp_async16`（`cp.async.cg.shared.global …
+   ,16`，走 L2-only，不占寄存器）与 `kv_issue_async<HD,BN>`——把一个 K/V 列块按
+   **8 个 half（16B）为最小单位**分成 `BN*HD/8 = 512` 个 unit，128 线程每线程 4 个，
+   行越界（`jg>=S`）改用普通 smem 写 0（`cp.async` 无谓词）；发完 `commit_group`。
+2. **两阶段流水**：`Ks/Vs` 各扩成 2 份（`KVSB=2*KVL`），`stage = nt & 1`。
+   prologue 先发 tile0；循环里 `cp.async.wait_group 0` → `__syncthreads`（等本 tile
+   落地，并保证上一 tile 的 GEMM5 已读完那个 stage）→ 发下一 tile 进另一 stage →
+   做 5 个 GEMM。**下一 tile 的全局读延迟被本轮 5 个 GEMM（+ 1 次 mid barrier）覆盖**。
+3. **顺带省掉 1 次 barrier/tile**：原版每 tile 有 3 个 `__syncthreads`
+   （载入后 / GEMM1-2 后 / 收尾），双缓冲后收尾 barrier 由「下一轮循环首的 barrier」
+   承担（写的又是另一 stage），降到 **2 个/tile**（对齐 fp8 的 O4a 思路）。
+4. 用模板参数 `PIPE`（`false`=原版、`true`=O6）在同一 kernel 里共存，便于**同 session
+   A/B**；`__launch_bounds__(THREADS, PIPE?2:3)`。
+
+**代价**：smem `66.56KB → 83.97KB`（K/V 双缓冲 +17.4KB）⇒ 从 **3 CTA/SM 降到 2 CTA/SM**
+（182 regs，S=4096 block limit shared=2）。fp16 张量核只有 128 线程/CTA，2 CTA=8 warp/SM；
+但 O6 的目的正是「不靠堆 warp、靠异步拷贝把访存延迟从 dependency scoreboard 里拿出去」。
+
+### 12.3 实测（同 session A/B，CUDA event，main-only）
+
+| shape | nopipe (ms / TF) | **O6 pipe (ms / TF)** | 加速 |
+|---|---|---|---|
+| MHA S=512 | 0.1912 / 11.23 | **0.0847 / 25.34** | **2.26×** |
+| MHA S=4096 | 4.5097 / 30.48 | **1.8730 / 73.38** | **2.41×** |
+| GQA q32/kv4 S=1024 | 0.6349 / 27.06 | **0.3749 / 45.82** | **1.69×** |
+
+端到端（preprocess + main + convert，CUDA event）：S=512 **0.1868ms（11.50 TF）**、
+S=4096 **3.043ms（45.16 TF）**、GQA kv4 **0.597ms（28.78 TF）**。
+S=4096 的 `preprocess` 现在是 1.007ms、`main` 1.873ms、`convert` 0.098ms——
+**main 仍占 62%**，但已从 4.47ms 的绝对墙降到 1.87ms。
+单文件 `fa_bwd_fp16_mma_onefile.cu` 与两文件逐指标相同（S512 pipe 0.0846ms、
+三个 max_abs 逐位一致）。
+
+### 12.4 数值（与 O5/O8**逐位相同**）
+
+| shape | dq | dk | dv | 对拍 |
+|---|---|---|---|---|
+| MHA S=512 | 1.671e-3 | 1.771e-3 | 1.899e-3 | 与 O5 记录逐位一致 |
+| MHA S=4096 | 1.883e-3 | 1.734e-3 | 1.966e-3 | 与 O5 记录逐位一致 |
+| GQA q32/kv4 S=1024 | 2.134e-3 | 3.305e-3 | 3.850e-3 | 与 O5 记录逐位一致 |
+
+O6 只改**搬运动作**、不改数学与 GEMM 顺序 ⇒ 结果 bitwise 不变（这既是正确性锚点，
+也说明 A/B 的差异纯来自性能）。
+
+### 12.5 ncu（main, S=4096, PIPE）
+
+```
+Duration                 ms    1.95       DRAM Throughput        %   3.31
+L1/TEX Cache Throughput  %   65.19       L2 Cache Throughput    %  60.11
+Compute (SM) Throughput  %   27.07       Registers Per Thread        182
+Theoretical Occupancy    %   12.50       Achieved Occupancy     %  11.83
+Waves Per SM                  3.88       Block Limit Shared Mem  block  2
+```
+
+stall（定向采集，per issue active）：**`wait 1.95`（fixed-latency 依赖）+ `long_scoreboard
+1.12` + `short_scoreboard 0.79` + not_selected 0.17 + barrier 0.10 + mio 0.12**。
+
+**对照 O5**：`long_scoreboard 7.35 → 1.12`（**全局访存延迟被 cp.async 流水吃掉**），
+Duration 4.55→1.95ms，L1/TEX 33.3→65.2%、L2 24.9→60.1%（张量核/搬运变密）、
+Compute 17.4→27.1%、occ 18.75%(3 CTA)→11.8%(2 CTA)。**新墙 = fixed-latency 依赖
+（`wait`）+ `short_scoreboard`（smem→`ldmatrix` 依赖）+ L1/TEX 65%**，不再是全局访存延迟；
+barrier 已接近 0，说明每 tile 2 个 barrier 不再是问题。
+
+### 12.6 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`）
+
+FA3（SM90, 3.0.0）MHA S4096 **0.3253ms / 845 TF**、TE2.14 0.4441/619、FA2.7.4 0.7339/375。
+ours total 3.043ms / 45.2 TF ⇒ **FA3 的 5.4%（O8 时 2.9–4.7%）、时间比 9.3×**
+（O8 时 10.6–17.2×）；main-only 73.4 TF 是 FA3 的 8.7%。
+端到端剩余空间：main 62%（已 latency-hidden，需 O9 wgmma/TMA 或降 smem 回 3 CTA）、
+preprocess 33%（LSE 尾波/occupancy，O8b）。
+
+### 12.7 原始输出
+
+`src/fp16/fa_bwd_fp16_mma_main_o6_{s512,s4096,gqa_kv4}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o6_s512.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o6_ncu_s4096.out.txt`、
+`..._o6_stall_s4096.out.txt`、`src/fp16/fa_bwd_fp16_o6_fa3_te_baseline.out.txt`。
+
+---
+
+## 13. 下一步
+
+见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）** 完成。
+后续按回报排序：**O6b/降 smem**（fp16 main 现 2 CTA/SM，想办法把 K/V 双缓冲压回
+3 CTA/SM，如只双缓冲 K 或更省的转置布局）→ **O9**（`wgmma`+TMA+warp specialization，
+对标 FA3；或先把 `short_scoreboard`/`wait` 依赖压下去）→ **O7**（dK/dV 去 `atomicAdd`，
+移植 fp8 的 O4c/O7）→ **O8b**（LSE 的 occupancy/尾波、convert 融合）→ MLA 张量核。

@@ -114,6 +114,17 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > **~2.9%（TFLOPS；O5 时 ~0.4%）**。数值与 O5 **逐位相同**。ncu（lse,S4096）= 访存延迟 +
 > 低 occ（Compute 39.5%、DRAM 1.1%、occ 28.5%、Waves 1.29）。详见 `01-fp16-bwd-impl.md` §11。
 
+> **O6（main 的 `cp.async` 双缓冲）已完成**：K/V 用 `cp.async.cg`（16B unit）双缓冲，
+> 下一 tile 的全局读延迟被本轮 5 个 GEMM 覆盖，并省掉 1 个 `__syncthreads`/tile。
+> 同 session A/B **main S512 0.1912→0.0847ms（2.26×）、S4096 4.510→1.873ms（2.41×）、
+> GQA kv4 0.635→0.375ms（1.69×）**；端到端 **total S4096 5.581→3.043ms（45.16 TF，峰值 4.57%）**、
+> S512 0.326→0.187ms。同 session 纯反向 FA3 S4096 0.3253ms/845TF ⇒ ours total 为 FA3 的
+> **5.4%**（时间比 9.3×；O8 时 2.9%/13–17×）。数值与 O5/O8 **逐位相同**（只改搬运）。
+> ncu（main,S4096）：Duration 4.55→1.95ms、**L1/TEX 65.2% / L2 60.1% / Compute 27.1% /
+> 182 regs / 2 CTA/SM（smem 84KB）/ Waves 3.88**，**stall `long_scoreboard` 7.35→1.12**
+> ⇒ 新墙 = `wait`（fixed-latency）+ `short_scoreboard`（smem→ldmatrix）+ L1/TEX。
+> 详见 `01-fp16-bwd-impl.md` §12。
+
 ### 2.2 bf16（峰值 989 TFLOPS）
 
 | shape | ours total | ours main | FA2.7.4 | TE2.14 |
@@ -148,6 +159,13 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > S4096 73.43→5.573 ms（13.2×，24.66 TF，峰值 2.49%）**。同 session 纯反向 FA3 S4096
 > **0.3217ms/854TF**、TE 0.4415/623 ⇒ ours total 为 FA3 的 ~2.9%。数值与 O5b 逐位相同；
 > ncu（lse,S4096）与 fp16 逐项一致。详见 `01b-bf16-bwd-impl.md` §6f。
+
+> **O6（main 的 `cp.async` 双缓冲，与 fp16 逐字同构）已完成**：**main S512 0.1896→0.0837ms
+> （2.27×）、S4096 4.485→1.872ms（2.40×）、GQA kv4 0.638→0.377ms（1.69×）**；端到端
+> **total S4096 5.573→3.036ms（45.27 TF，峰值 4.58%）**、S512 0.183ms。同 session 纯反向
+> FA3 S4096 0.3210ms/856TF ⇒ ours total 为 FA3 的 **5.3%**。数值与 O5b/O8 **逐位相同**。
+> ncu（main,S4096）：Duration 1.88ms、L1TEX 64.96% / L2 62.19% / Compute 25.49% /
+> 182 regs / 2 CTA/SM，`long_scoreboard` 63%→~1 成、新墙同 fp16。详见 `01b-bf16-bwd-impl.md` §6g。
 
 ### 2.3 fp8（峰值 1978.8 TFLOPS；FA 无反向 FP8，仅对标 TE）
 
@@ -252,6 +270,8 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp16 | **lse_mma（O8, S=4096）** | 1.06% | 23.42% | 39.53% | 28.49%（80 regs） | 1.29 | long_scoreboard 2.17、wait 1.34、No Eligible 42.9% | **全局访存延迟 + 低 occupancy/尾波** |
 | bf16 | **lse_mma（O8, S=4096）** | 1.13% | 23.37% | 44.70% | 28.41% | 1.29 | long_scoreboard（同 fp16） | 同 fp16 |
 | fp16 | **delta（O8, S=4096）** | 24.80% | 73.50% | 71.91% | 71.90%（17 regs） | 31.03 | — | 访存/算力均衡的轻量归约（<1% 端到端） |
+| fp16 | **mma main（O6, S=4096, cp.async 双缓冲）** | 3.31% | 65.19% | 27.07% | 11.83%（**83.97KB, 2 CTA/SM**, 182 regs） | 3.88 | **long_scoreboard 7.35→1.12**；wait 1.95、short_scoreboard 0.79、barrier 0.10 | **fixed-latency(`wait`) + short_scoreboard(smem→ldmatrix) + L1/TEX**（全局访存延迟已被 cp.async 消掉） |
+| bf16 | **mma main（O6, S=4096, cp.async 双缓冲）** | 3.43% | 64.96% | 25.49% | 11.79%（83.97KB, 2 CTA/SM） | 3.88 | long_scoreboard 同上降到 ~1、wait 主导 | 同 fp16（与 fp16 逐项一致） |
 | fp8 | golden main | 0.06% | **75.96%**（90% 多余） | 4.98% | 6.25%（68KB） | 0.32 | MIO scoreboard 69% | **smem 冲突 + FP8 解码 + 低 occ** |
 | fp8 | **mma main（O2b+O4d 后, S=4096, ksplit=4）** | 1.41% | 69.91% | 21.70% | **18.27%（73.8KB, 3 CTA/SM）** | 10.34 | No Eligible 76.6%、long_scoreboard 4.46 + short_scoreboard 3.96 | **L2 带宽（81.5%）+ 延迟**（split-K 复读 Q/dO + 全局 atomic） |
 | fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |
