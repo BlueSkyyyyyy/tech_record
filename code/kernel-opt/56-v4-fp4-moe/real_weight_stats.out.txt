@@ -1,0 +1,9 @@
+真实 checkpoint 格式（/ssd/models/DeepSeek-V4-Pro, layer0 expert0 实读）:
+  routed experts  w1 [3072,7168] -> int8[3072,3584] + E8M0 scale[3072,224] (block32)
+                  w3 同 w1 ; w2 [7168,3072] -> int8[7168,1536] + scale[7168,96]
+  shared expert   w1 [3072,7168] -> F8_E4M3 + E8M0 scale[24,56] (block128)
+  attention       wq_b [65536,1536] F8_E4M3 scale[512,12]
+  lm_head         head.weight [129280,7168] BF16
+每 expert: fp4=33.03MB + scale 2.06MB | fp8=66.06MB | bf16=132.12MB
+全 routed experts (384exp*61layer): fp4=773.7GB (+scale 48.4GB)  fp8=1547.4GB  bf16=3094.8GB
+无损性: fp4->e4m3 折叠 relRMS = 0.00e+00 (w1/w2/w3, 逐位)

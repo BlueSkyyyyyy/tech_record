@@ -381,3 +381,18 @@ scripts/lab.sh status
   只差 `BK`（64/128）、TMA `rowbytes`（`K*2`/`K`）、wgmma 指令（`m64n128k16`/`m64n128k32`）。
   **但 per-row 激活 scale 必须在 epilogue 乘回**（或折进存进去的 e4m3）：漏掉时 rel-RMS 直接
   到 1.6e4；wgmma `m16n8` 里 `acc[j*4+0/1]` 同行、`acc[j*4+2/3]` 同行，同一行 4 个累加器共用一个 scale。
+- **别只信 `config.json` 的 `quantization_config`，要读真实 tensor 头**（56 篇）：`quantization_config`
+  只描述**默认**方案（`e4m3 + ue8m0 + 128×128`），per-tensor 的 `expert_dtype: fp4` 会把它覆盖。
+  V4-Pro 的 routed experts 实际是 **FP4 e2m1 + E8M0 block-32**（权重存 `int8[I,H/2] + E8M0[I,H/32]`；
+  `7168/2=3584`、`7168/32=224` 就是指纹），shared expert/注意力才是 fp8 block-128、lm_head bf16。
+  写算子前先 `safetensors` 列一遍 dtype/形状，别照抄 config。
+- **`e2m1 ⊂ e4m3` 且 scale 是 2 的幂 ⇒ FP4 可逐位无损折进 FP8**（56 篇，同 37 篇思路）：
+  `e2m1` 的 8 个幅值 $\{0,.5,1,1.5,2,3,4,6\}$ 全是 3 位尾数可表示，乘 $2^e$ 只平移指数；
+  最小 $.5\cdot2^{-8}=2^{-9}$ 恰是 e4m3 最小次正规。真实权重实测折叠 relRMS = **0.00e+00**。
+  于是 34 篇的 fp8 grouped kernel 可原样消费 FP4 专家（host 侧一次预折叠），专家显存/传输减半；
+  per-128×128 block 也能无损折（37 篇）。**只对 2 的幂 scale 精确**。
+- **低比特 decode 的账在解码的 ALU / smem 延迟，不在像素带宽**（44/45/56 篇）：`e2m1` 不是偏置整数，
+  逐 nibble 算术解码 ~7 条/nibble（int4 的 `__vsubss4` 只要 ~1.25 条/权重）→ 直接 compute-bound
+  （ncu Compute 65.5%、DRAM 19.6%）。换成 **256 项 `uint16` smem LUT（一输入 byte → 两个 int8）**
+  后 **1.99×**（0.0199→0.0100 ms，Compute 降到 20.5%）；LUT 的随机 `uint16` 读会撞 bank
+  （59% 多余 wavefront、`short_scoreboard`），下一堵墙是免冲突布局。

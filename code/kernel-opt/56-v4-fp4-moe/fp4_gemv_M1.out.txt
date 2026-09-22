@@ -1,0 +1,29 @@
+Device : NVIDIA H100 80GB HBM3
+  SMs                : 132
+  clock              : 1.980 GHz
+  HBM bandwidth(peak): 3352.3 GB/s
+  memory             : 85.0 GB
+  max threads/SM     : 2048  regs/SM: 65536  smem/SM: 233472 B
+
+V4-Pro routed expert w1 [N=3072, K=7168]  M=1
+weight bytes: fp4=11.01 MB (25.0%)  fp8=22.02 MB  bf16=44.04 MB
+
+[roof] read fp4+scale 0.0041 ms  2885.8 GB/s (86.1% HBM)
+[roof] read fp8       0.0052 ms  4227.9 GB/s (126.1% HBM)
+[roof] read bf16      0.0148 ms  2971.3 GB/s (88.6% HBM)
+[check] fp4 GEMV vs CPU ref: max_rel=9.366e-08 (ref~1.4) OK
+
+[gemv fp4] (B-read = fp4+scale 字节 / 耗时)
+  RWW=8 BN= 64    0.0803 ms    145.6 GB/s fp4-read ( 4.3% HBM)     0.55 TFLOPS-equiv
+  RWW=2 BN= 16    0.0258 ms    453.1 GB/s fp4-read (13.5% HBM)     1.71 TFLOPS-equiv
+  RWW=1 BN=  8    0.0199 ms    587.6 GB/s fp4-read (17.5% HBM)     2.21 TFLOPS-equiv
+
+[gemv fp4 v2: smem LUT decode]
+  RWW=2 BN= 16    0.0111 ms   1057.2 GB/s fp4-read (31.5% HBM)
+  RWW=1 BN=  8    0.0100 ms   1165.6 GB/s fp4-read (34.8% HBM)
+
+[gemv fp8] (34 篇假设的 fp8 权重；B-read = fp8 字节)
+  RWW=8 BN= 64    0.0332 ms    663.6 GB/s fp8-read (19.8% HBM)     1.33 TFLOPS-equiv
+  RWW=4 BN= 32    0.0216 ms   1017.2 GB/s fp8-read (30.3% HBM)     2.03 TFLOPS-equiv
+  RWW=2 BN= 16    0.0346 ms    636.7 GB/s fp8-read (19.0% HBM)     1.27 TFLOPS-equiv
+  RWW=1 BN=  8    0.0488 ms    451.1 GB/s fp8-read (13.5% HBM)     0.90 TFLOPS-equiv
