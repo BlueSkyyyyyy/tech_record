@@ -1405,15 +1405,118 @@ bf16 的 O9b 留作下一步（本版只做 fp16）。
 
 ---
 
+## 14h. O9b-2（第一步）：主 kernel GEMM3/4/5 也上 `wgmma`（MN-major 转置读，fp16；数值逐位正确、性能中性）
+
+### 14h.1 动机
+
+O9b（§14g）只把 GEMM1/2 换成 wgmma，收尾结论是「新墙 = `wait`（GEMM3/4/5 的 `mma`）+
+L2（dK/dV 原子）+ 2 CTA/SM」。O9b-2 要把 GEMM3/4/5（`dV=Pᵀ·dO`、`dK=dSᵀ·Q`、`dQ=dS·K`）
+也上 wgmma。难点：这三个 GEMM 的 A/B 在 1colblock 数据流里是**转置读**，而 P/dS/dO/Q/K
+又同时要被 wgmma 当 K-major 操作数。
+
+### 14h.2 关键手段：`Major::MN` 描述符 = 对 K-major SW128 tile 的「转置读」
+
+FA3 的 `dKV_swapAB` 就是这么做的：**同一份 K-major SW128 tile，用 MN-major 描述符 +
+`trans=1` 读，等价于读它的转置**。对本实现的 `sw128_off` 布局可精确推导（冒烟逐位验证）：
+
+- 描述符：`layout_type=B128`、**LBO=64**（相邻 64 列组的 u128 步长）、
+  **SBO=(W/64)*64**（相邻 8 行组的 u128 步长）；`W` = tile 的连续维宽度（元素）。
+- 转置操作数第 `s` 个 k16 slab（K=行，每次前进 16 行 = 2 个行组）地址 =
+  `base + s*2*SBO*16` 字节（新增 `trans_k16_addr`）。
+- wgmma 指令尾部立即数 `..., scaleA, scaleB, tnspA, tnspB`，K-major 时 `tnsp=0`、
+  MN-major 时 `tnsp=1`（CUTLASS `MMA_64x64x16_F32F16F16_SS` 同形）。
+
+前置冒烟 `src/fp16/fa_bwd_fp16_wgmma_bwd_smoke.cu`（整数输入，CPU fp32 参考）逐位通过：
+
+```
+wgmma S=QKᵀ        vs CPU: max_abs=0.000e+00
+wgmma dV=PᵀdO(trans) vs CPU: max_abs=0.000e+00
+wgmma dK=dSᵀQ(trans) vs CPU: max_abs=0.000e+00
+wgmma dQ=dS·K(B trans) vs CPU: max_abs=0.000e+00
+PASS
+```
+
+于是 Q/K/V/dO 仍是**一份** SW128 K-major（GEMM1/2 直接读；GEMM3/4/5 转置读）；P/dS 也改成
+**一份** SW128 K-major（GEMM3/4 用 MN-major 读，GEMM5 的 A=dS 用 K-major 读）。
+
+### 14h.3 实现（单/两文件 device 代码逐字一致，`scripts/sync_onefile_device.py` 核对 `identical: True`）
+
+`fa_bwd_fp16_wgmma_kernel<HD>`（`#ifdef FA_WGMMA`）改动：
+
+- **P/dS 改 SW128 K-major**（`[BM][BN]`，各 8KB），epilogue 用**相邻两列打包成 4B 直写**
+  `sw128_off`（`pds_store_sw128`；最初用 quad `shfl` 拼 16B，S=4096 反而慢 3%，改 4B 直写后反超）。
+- **5 个 GEMM 全 wgmma**：GEMM1/2 沿用 `wgmma_mn64_issue`；GEMM3/4/5 新增
+  `wgmma_m64n64k16_t<TA,TB>`，按 N 半（`nh=0/1`）分两遍，每遍三条一起发、统一 `wait0`。
+- **dQ 寄存器累加重映射**：wgmma m64n64 的累加器里 warp `wid` 固定持行 `[16w,16w+16)`，
+  故 `dqacc[nh][j][q]`（64 个 fp32/线程）直接对应两条 N 半的寄存器，nt 循环后一次写出。
+- **smem** `101.4→97.3KB`（去掉行主序 P/dS 及其 +8 行距），仍 **2 CTA/SM**；**230 regs、0 spill**。
+
+### 14h.4 数值（与 O5~O13 的 mma / O9b **逐位相同**）
+
+| shape | dq / dk / dv max_abs（ours vs ref） | FA vs ref | TE vs ref |
+|---|---|---|---|
+| MHA S=512 | 1.671 / 1.771 / 1.899e-3 | 1.679 / 1.684 / 1.899e-3 | 1.716 / 2.287 / 1.899e-3 |
+| MHA S=4096 | 1.883 / 1.734 / 1.966e-3 | 1.883 / 1.734 / 1.966e-3 | 1.883 / 1.858 / 1.966e-3 |
+| GQA q32/kv4 S=1024 | 2.134 / 3.305 / 3.850e-3 | 1.727 / 3.321 / 5.107e-3 | 2.075 / 3.175 / 5.107e-3 |
+
+单文件与两文件逐位一致；只换了数据通路（MN-major 描述符 + 全 wgmma），数学口径未动。
+
+### 14h.5 性能（同 session A/B，CUDA event，main-only，ms）—— **中性偏负**
+
+| shape | mma 最优 | O9b（仅 GEMM1/2 wgmma） | **O9b-2 全 wgmma** | 结论 |
+|---|---|---|---|---|
+| MHA S=512 | 0.0584 `(64,64,2)` | 0.0522* | 0.0604 | 比 mma 慢 ~3% |
+| MHA S=4096 | 1.4708–1.4840 `(64,64,2)` | 1.4435* | 1.4996–1.5227 | 与 mma 持平/略慢 |
+| GQA q32/kv4 S=1024 | 0.2482 `(64,32,2)` | —（回退 mma） | 0.2664 | 比 mma 慢 ~7% |
+
+（带 `*` 为 §14g 当时 session 的数，非本轮同 session。）同一 session 内直接对比：全 wgmma
+**没有跑赢 mma 最优档**，也略慢于 O9b。端到端 S=4096 total ≈ **1.91–1.97ms（~72 TF）**。
+
+### 14h.6 ncu（main，`--wgmma=1`，`--launch-count 1`）
+
+| 指标 | O9b wgmma（§14g） | **O9b-2 全 wgmma** |
+|---|---|---|
+| Duration（S=4096） | 1.43 ms | 1.49–1.54 ms |
+| L1/TEX | 55.1% | 38.6–40.3% |
+| **L2** | **74.4%（墙）** | **69.1–71.4%（仍为墙）** |
+| Compute | 26.5% | 22.5–23.5% |
+| Tensor pipe active | — | 11.6–12.1% |
+| regs / smem | 242 / 101.4KB | 230 / **99.33KB** |
+| CTA/SM（occ） | 2（11.88%） | 2（**11.83%**） |
+| stall（S=4096） | `wait 1.50 + long 1.25 + short 0.56` | **`wait 1.43 + long 1.96 + short 0.29`** |
+| stall（S=512） | — | `wait 1.41 + long 0.86 + short 0.28`（grid=128 单波） |
+
+**结论**：全 wgmma 把 GEMM3/4/5 的 `ldmatrix` 也打掉（`short_scoreboard` 0.56→**0.29**），
+但**墙没有移动**：L2 仍 ~70%（dK/dV 跨 CTA `red.global` 原子）、P/dS 的 4B+MN-major 读写
+与跨-tile 串行让 `long_scoreboard` 反升到 ~1.96、occupancy 仍被 ~99KB smem + 230 regs 锁在
+**2 CTA/SM**。即 **O9b-2 的「GEMM3/4/5 上 wgmma」本身不是瓶颈所在**——真正的墙是
+**dK/dV 原子归约 + occupancy**。因此本步收益中性，但其价值是**建立了「MN-major 转置读」的
+数据通路**（后续 TMA 化 + P/dS 双缓冲 + 跨-tile 流水、以及 O7b 去原子都要用它）。
+
+### 14h.7 原始输出
+
+`src/fp16/fa_bwd_fp16_wgmma_bwd_smoke.out.txt`（冒烟 PASS）、
+`src/fp16/fa_bwd_fp16_mma_main_o9b2_{s512,s4096,gqa_kv4}.out.txt`（两文件 wgmma）、
+`src/fp16/fa_bwd_fp16_mma_onefile_o9b2_{s512,s4096,gqa_kv4}.out.txt`（单文件）、
+`src/fp16/fa_bwd_fp16_mma_main_o9b2_ncu_{s512,s4096}.out.txt`、
+`src/fp16/fa_bwd_fp16_o9b2_fa3_te_baseline.out.txt`（同 session 纯反向 FA3/TE）。
+
+---
+
 ## 15. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
 O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）、O11（§14d）、
-**O9a（§14e，LSE 上 wgmma）、O13（§14f，auto tile 重标定）、O9b（§14g，主 kernel GEMM1/2 wgmma）**
+**O9a（§14e）、O13（§14f）、O9b（§14g）、O9b-2 第一步（§14h，全 wgmma，数值逐位正确、性能中性）**
 完成。O7c 已把「减 red 事务数」这条杠杆**证伪**（float4 更慢），O10 又把 Q/dO 的标量载入与 dQ 写回
 向量化（`long_scoreboard` 压下、指令数 −2.5%），O13 修正了 O6c 的过时 auto tile（S=512 main 1.26×、
-端到端 1.12×），O9b 把主 kernel 的 GEMM1/2 换成 Hopper `wgmma`（SW128 + `ldmatrix` 桥接，
-main S512 1.09×/S4096 1.05×，数值逐位不变）。墙进一步收敛到 **`wait`（GEMM3/4/5 的 mma）+ L2
-（dK/dV 原子）+ 2 CTA/SM**。**下一步 O9b-2**：GEMM3/4/5 也上 wgmma（dKV 转置 B 按 FA3 `dKV_swapAB`）
-＋ TMA 化 K/V ＋ 双缓冲 P/dS 做跨-tile 流水；bf16 版的 O9b 也待补。另：MLA 降 smem 冲 2 CTA/SM /
-split-KV 仍在列。
+端到端 1.12×），O9b 把主 kernel 的 GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，
+数值逐位不变）。**O9b-2 第一步（§14h）**把 GEMM3/4/5 也用「MN-major 转置读」上了 wgmma，数值逐位
+不变、`short_scoreboard` 归零，但 **ncu 证实墙不在 GEMM 指令，而在 L2 的 dK/dV 跨 CTA 原子 +
+occupancy**，故性能中性。**下一步（按回报排序）**：
+1. **O7b（fp16/bf16 去 dK/dV 原子）**：现在是第一瓶颈（L2 ~70%）。分块 `*_accum` + convert，
+   或按 KV 列块常驻 / Q 块累加；这是唯一能直接打掉 L2 墙的杠杆。
+2. **O9b-2b**：在 §14h 的 MN-major 通路上加 **TMA 化 Q/K/V/dO** + **P/dS 双缓冲/跨-tile 流水**，
+   同时把 smem 压到 ≤75.7KB 冲 **3 CTA/SM**（需先解决 K 双缓冲 32KB + Q/dO 32KB 的占用）。
+3. **bf16 版**照搬本节（`__half`→`__bfloat16`，SW128/描述符/累加器映射逐字节同构）。
+4. MLA 降 smem 冲 2 CTA/SM / split-KV 仍在列。

@@ -207,6 +207,19 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > （GEMM3/4/5 仍是 mma、dK/dV 仍是跨 CTA 原子）。对标同 session 纯反向 FA3 S4096 0.3255ms/844TF
 > ⇒ ours total 时间 **5.8×**（O13 6.03×）。详见 `01-fp16-bwd-impl.md` §14g。
 
+> **O9b-2 第一步（主 kernel GEMM3/4/5 上 Hopper `wgmma`：MN-major 转置读，fp16，第四十三轮）**：
+> 把「K-major SW128 存储的 tile」用 **MN-major 描述符 + `tnsp=1`** 读 = 读它的转置（FA3
+> `dKV_swapAB` 同思路；LBO=64、SBO=(W/64)*64、转置 k16 slab 地址 `base+s*2*SBO*16`）。
+> 前置冒烟 `fa_bwd_fp16_wgmma_bwd_smoke.cu` 对 `dV=PᵀdO`/`dK=dSᵀQ`/`dQ=dS·K` 逐位 PASS；
+> P/dS 改 **SW128 K-major**（4B 直写），**5 个 GEMM 全 wgmma**，smem 101.4→**99.33KB**、230 regs、
+> 仍 2 CTA/SM。**数值与 O5~O13 逐位相同**（S512 1.671/1.771/1.899e-3、S4096 1.883/1.734/1.966e-3、
+> GQA kv4 2.134/3.305/3.850e-3）。**但性能中性偏负**（同 session main-only：S4096 mma `(64,64,2)`
+> 1.471–1.484 vs 全 wgmma **1.500–1.523ms**；S512 0.0584 vs 0.0604；GQA 0.2482 vs 0.2664）——
+> ncu 证实 `short_scoreboard` 0.56→**0.29**（GEMM3/4/5 的 ldmatrix 也消掉），**但墙不在 GEMM 指令**：
+> **L2 ~70% 的 dK/dV 跨 CTA 原子 + 99KB smem 锁死的 2 CTA/SM** 才是瓶颈（`long_scoreboard` 反升到 ~1.96）。
+> 结论：本步建立了「MN-major 转置读」数据通路（后续 TMA/流水/去原子的地基），但性能杠杆是 **O7b 去原子**。
+> 对标同 session 纯反向 FA3 S4096 0.3241ms/848TF ⇒ ours total ~6.0×。详见 `01-fp16-bwd-impl.md` §14h。
+
 ### 2.2 bf16（峰值 989 TFLOPS）
 
 | shape | ours total | ours main | FA2.7.4 | TE2.14 |
