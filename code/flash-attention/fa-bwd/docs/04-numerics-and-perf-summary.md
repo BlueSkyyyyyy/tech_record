@@ -507,6 +507,17 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 移到 **DRAM 71.3%（已达带宽上限）**、指令数 **−77%**。另证伪 convert 的 `float4`（中性）。
 > 详见 `03` §24。
 
+> **O7e-2（第五十轮）**：修 fp8 main fold 的 **shared-load bank conflict**。ncu Memory Tables
+> 拆出 L1/TEX 第一来源是 **shared load（93.1M 请求、2.1-way、62.8M 冲突）**，根因是 fold 读
+> `Ps/Ss` 列时 4 个 lane 组的 m 间距为 16（`16*PSS≡16 mod32` ⇒ 恒撞）。把每 lane 的 m 从
+> `sub4*16+t` 改成两半 `sub4*8+t+half*32`（bank 铺满 0..31），并用 8B/16B 向量写。
+> **shared load 冲突 62.8M→29.2M（−53.5%）、L1/TEX 64.8%→60.0%、Duration 2.41→2.27ms**；
+> 同 session A/B（main-only）S512 **1.017×** / S1024H32 **1.029×** / GQA kv4 **1.033×** /
+> MQA kv1 **1.040×** / S4096 **1.042×**；端到端 S=4096 **2.8942ms（47.5 TF，ours/TE FP8
+> 4.98×→4.92×）**。数值与 O7/O12/O14 **逐位一致**（A/B 差 1e-7 仅 atomic 次序）。
+> 另**证伪**单独把 fold 写折到 16B（只 1.007×、且增大 spill）⇒ fold 的墙在**读冲突**不在写指令数。
+> 详见 `03` §25。
+
 ---
 
 ## 3. ncu bound 小结（逐 dtype）
@@ -538,6 +549,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp8 | **mma main（O4b 后, S=4096, ksplit=4）** | 2.46% | **69.69%** | 34.40% | 18.21%（**70.66KB**, 3 CTA/SM） | 10.34 | short_scoreboard 2.73、long_scoreboard 1.16 | **L1/TEX 69.7% + L2 69.1%（残余 red）+ short_scoreboard**（`op_st` 冲突 −66%） |
 | fp8 | **mma main（O7 后, S=4096, ksplit=4, REGDQ=true）** | 2.60% | **64.4%** | 37.7% | 18.11%（70.66KB, 3 CTA/SM） | 10.34 | short_scoreboard 1.89、long_scoreboard 1.09 | **L1/TEX 64.4% + short_scoreboard 1.89 + 残余 L2 43.8%（dK/dV 跨 CTA red）**（dQ red 已 O(1)，L2 墙 69.1%→43.8%） |
 | fp8 | **mma main（O12=PREL 后, S=4096, ksplit=4, REGDQ=true）** | 2.60% | 65.92% | 40.94% | 18.10%（70.66KB, 3 CTA/SM） | 10.34 | short_scoreboard、long_scoreboard | **L1/TEX 65.9% + 残余 L2（dK/dV red）**（LSE/D 全局散读已消：uncoalesced global 38.0M→**4.70M（−87.6%）**、Executed Instructions **−8.4%**、Duration 2.60→**2.34ms**；对齐 fp16 O7c-PREL） |
+| fp8 | **mma main（O7e-2 后, S=4096, ksplit=4, REGDQ=true, F16B）** | 3.22% | **59.97%** | 41.81% | 18.08%（70.66KB, 3 CTA/SM） | 10.34 | short/long_scoreboard | **L1/TEX 60.0% + L2 49.9%（dK/dV 跨 CTA red）+ spill(~2.7M local)**；shared load 冲突 **62.8M→29.2M（−53.5%，fold 列读改无冲突映射）**、总多余 wavefronts 79.9M→41.5M、Duration 2.41→**2.27ms** |
 | fp8 | **quant 旧（per-row, S=4096）** | 24.29% | **73.73%** | **71.80%** | 87.82%（Waves 31.03） | 31.03 | —（34.6M inst） | **smem 归约（L1/TEX 73.7%）+ 标量加载（Compute 71.8%）**，DRAM 仅 24% |
 | fp8 | **quant 新（O14 warp-per-row, S=4096）** | **71.31%** | 26.50% | 51.49% | 79.44%（Waves 7.76） | 7.76 | —（**7.93M inst, −77%**） | **DRAM 带宽 71%（elementwise 上限）**；Duration 46.2→**15.4µs** |
 | fp8 | **lse_mma_bal<HD,1>（O11, S=4096）** | 1.48% | 28.16% | **61.15%** | 23.24%（~27.7KB, 6 CTA/SM, 77 regs） | **0.65** | — | **Compute 61% + 网格不足一个波**（镜像配对消尾波 + cp.async 消 long_scoreboard；对齐 fp16/bf16 O8b） |
