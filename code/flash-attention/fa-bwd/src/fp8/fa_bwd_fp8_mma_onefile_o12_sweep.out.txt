@@ -1,0 +1,24 @@
+===== onefile b1_s512_h16_d128_causal_fp8 =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+[timing] total(quant+pre+main+cvt) 0.1775 ms  12.10 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0314 ms | preprocess 0.0475 ms | main 0.0698 ms | convert 0.0289 ms
+[O12 A/B] main LSE/D preload off 0.0720 ms | on 0.0696 ms (1.034x) | max_abs(on-vs-off) dq=4.768e-07
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+===== onefile b1_s4096_h16_d128_causal_fp8 =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+[timing] total(quant+pre+main+cvt) 3.0379 ms  45.24 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1842 ms | preprocess 0.3962 ms | main 2.3171 ms | convert 0.1404 ms
+[O12 A/B] main LSE/D preload off 2.4958 ms | on 2.2708 ms (1.099x) | max_abs(on-vs-off) dq=5.312e-04
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01
+===== onefile b1_s1024_h32_d128_kv4_causal_fp8 =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp8
+[timing] total(quant+pre+main+cvt) 0.5970 ms  28.78 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0620 ms | preprocess 0.1008 ms | main 0.3950 ms | convert 0.0392 ms
+[O12 A/B] main LSE/D preload off 0.4268 ms | on 0.3951 ms (1.080x) | max_abs(on-vs-off) dq=8.856e-04
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.994e+02
+  dk   vs ref: max_abs=5.408e-01  max_rel=1.632e+02
+  dv   vs ref: max_abs=7.072e-01  max_rel=9.228e+01

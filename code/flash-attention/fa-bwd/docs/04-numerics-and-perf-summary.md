@@ -489,6 +489,15 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > ncu：L1/TEX 66.06→**65.19%**、Duration 2.57→**2.46ms**、仍 3 CTA/SM；**第一墙仍是 L1/TEX
 > （GEMM3/4/5 的 `ldmatrix` + fold）** ⇒ O9c-2b。详见 `03` §22。
 
+> **O12（第四十八轮）**：fp8 主 kernel 的 **LSE/D 预装寄存器**（fp16 O7c-PREL 的 fp8 版；
+> 原实现每 tile 每元素 global 读 lse/delta）。新增 `PREL` 开关，main **S512 1.042× / S1024H32
+> 1.078× / S4096 1.100× / GQA 1.079× / MQA 1.108× / MLA 1.01×**；`--wgmma` 路径 S4096
+> **1.125×**、端到端 **2.872ms（47.9 TF）**。ncu：uncoalesced global 38.0M→**4.70M（−87.6%）**、
+> Executed Instructions **−8.4%**、Duration 2.60→**2.34ms**；数值与历史逐位一致。
+> **O9c-2b（fp8 GEMM3/4/5 wgmma）查证为硬件阻塞**：fp8 wgmma 无转置操作数（CUTLASS 全为
+> `_SS_TN`、asm 尾部无 `tnsp`），MN-major 转置读在 fp8 ISA 上不存在 ⇒ 记入 ROADMAP「阻塞」。
+> 详见 `03` §23。
+
 ---
 
 ## 3. ncu bound 小结（逐 dtype）
@@ -519,6 +528,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |
 | fp8 | **mma main（O4b 后, S=4096, ksplit=4）** | 2.46% | **69.69%** | 34.40% | 18.21%（**70.66KB**, 3 CTA/SM） | 10.34 | short_scoreboard 2.73、long_scoreboard 1.16 | **L1/TEX 69.7% + L2 69.1%（残余 red）+ short_scoreboard**（`op_st` 冲突 −66%） |
 | fp8 | **mma main（O7 后, S=4096, ksplit=4, REGDQ=true）** | 2.60% | **64.4%** | 37.7% | 18.11%（70.66KB, 3 CTA/SM） | 10.34 | short_scoreboard 1.89、long_scoreboard 1.09 | **L1/TEX 64.4% + short_scoreboard 1.89 + 残余 L2 43.8%（dK/dV 跨 CTA red）**（dQ red 已 O(1)，L2 墙 69.1%→43.8%） |
+| fp8 | **mma main（O12=PREL 后, S=4096, ksplit=4, REGDQ=true）** | 2.60% | 65.92% | 40.94% | 18.10%（70.66KB, 3 CTA/SM） | 10.34 | short_scoreboard、long_scoreboard | **L1/TEX 65.9% + 残余 L2（dK/dV red）**（LSE/D 全局散读已消：uncoalesced global 38.0M→**4.70M（−87.6%）**、Executed Instructions **−8.4%**、Duration 2.60→**2.34ms**；对齐 fp16 O7c-PREL） |
 | fp8 | **lse_mma_bal<HD,1>（O11, S=4096）** | 1.48% | 28.16% | **61.15%** | 23.24%（~27.7KB, 6 CTA/SM, 77 regs） | **0.65** | — | **Compute 61% + 网格不足一个波**（镜像配对消尾波 + cp.async 消 long_scoreboard；对齐 fp16/bf16 O8b） |
 | fp8 | **mma main（O4b 后, MLA S=1024 H2 D512）** | 1.46% | 11.38% | 7.45% | **6.25%（205.8KB, 1 CTA/SM）** | 0.97 | long_scoreboard 1.73、wait 1.67 | **低 occupancy/并行度**（smem 仍 205.8KB > 116KB 门槛） |
 

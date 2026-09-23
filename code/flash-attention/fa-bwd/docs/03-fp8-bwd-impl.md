@@ -1844,3 +1844,142 @@ MN-major 描述符），这依赖 §17 未解决的 fp8 `.trans` 布局问题。
   `src/fp8/fa_bwd_fp8_main_o9c2_ncu_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_main_o9c2_ncu_stall_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o9c2_tebench.out.txt`、`src/fa_bwd_fp8_o9c2_fa3_te_baseline_fp16.out.txt`。
+
+## 23. O12：主 kernel LSE/D 预装寄存器（O7c-PREL for fp8）＋ O9c-2b 结论
+
+### 23.1 动机：fp8 的 GEMM1/2 epilogue 一直在逐元素 global 读 lse/delta
+
+fp16/bf16 早在 **O7c（`docs/01` §14）** 就发现：`lse`/`delta` 只依赖 CTA 自己的 Q 行、
+与 K tile 无关，而原实现把它放在**每个 tile 的 GEMM1/2 epilogue 里按 `qi` 逐元素 global 读**，
+ncu 报「global load 每 thread 仅用 4.4/32B」。当时改成在 `nt` 循环前一次性装进寄存器
+（`lse_r/del_r`），main **+14–19%**、端到端 S=4096 **1.13×**。但 **fp8 侧一直没有移植**：
+
+```cpp
+// 旧（fp8 fa_bwd_fp8_mma_kernel，每 tile 每元素一次 global 读）
+if (qi < S && jg < S && !(causal && jg > qi)) {
+  float sval = acc[i][j][q] * scale * qs_s[r] * ks_s[c];
+  p = fexp(sval - lse[((size_t)(b * S + qi)) * H + h]);        // ← 逐元素 global
+}
+...
+float del = (qi < S) ? delta[((size_t)(b * S + qi)) * H + h] : 0.f;   // ← 逐元素 global
+```
+
+本机 ncu（S=4096，O9c-2 之后的 mma 路径）实测：**uncoalesced global loads 38.0M 多余扇区
+（占总扇区 23%）**，global load 平均仅 9.8/32 B/sector——正是这两处按 `qi`（同 warp 内 stride
+为 `H`）的散读。
+
+### 23.2 实现（单/两文件 device 代码逐字一致）
+
+新增模板开关 `bool PREL = true`（`--prel=0` 可关，用于同 session A/B）：
+
+```cpp
+float lse_r[4], del_r[4];                  // 索引 = i*2 + (q>=2)：mma 路径每线程 4 个行槽
+if constexpr (PREL) {
+  if constexpr (WGMMA) {                   // wgmma.m64n32：每线程 2 个行槽（wgmma 行映射）
+    for (t=0..1) { r = wid*16 + g + (t?8:0); qi = m0+r; 载入 lse/delta; }
+  } else {                                 // mma.m16n8：r = wr*32 + i*16 + g + (s?8:0)
+    for (i=0..1) for (s=0..1) { ... 载入 ...; }
+  }
+}
+```
+
+epilogue 里 `if constexpr (PREL)` 用 `lse_r[…]`/`del_r[…]`，否则退回旧的逐元素 global 读。
+**行槽与 epilogue 的 `(i, q>=2)` 一一对应**，取的值与原 global 读完全相同 ⇒ 数值不变。
+WGMMA 与 mma 两条路径共用同一份 `lse_r/del_r[4]`（wgmma 只填前 2 个并复制到后 2 个）。
+单文件由 `sync_onefile_device.py` 同步（`device region identical: True`）。
+
+### 23.3 数值（ours-vs-ref，fp8 causal，max_abs）
+
+`PREL` on/off 逐元素对拍 `max_abs` 为 4.8e-7–1.1e-3——这是 dQ **跨 CTA `atomicAdd` 的求和
+次序**造成的（两次独立 launch），不是逻辑差异；关键证据是 **vs fp32 ref 的 max_abs 与历史
+逐位一致**：
+
+| case | dq | dk | dv |
+|---|---|---|---|
+| MHA S=512 | 2.426e-1 | 2.975e-1 | 3.735e-1 |
+| MHA S=1024H32 | 2.400e-1 | 4.195e-1 | 3.536e-1 |
+| MHA S=4096 | 2.635e-1 | 2.643e-1 | 3.216e-1 |
+| GQA q32/kv4 | 2.517e-1 | 5.408e-1 | 7.072e-1 |
+| MQA q64/kv1 | 4.097e-1 | 1.519 | 2.127 |
+| MLA S=1024H2 D=512 | 2.232e-1 | 3.337e-1 | 3.602e-1 |
+
+全部与 O7e/O9c-2 记录相同（含 MLA），单/两文件一致。
+
+### 23.4 性能（同 session A/B，CUDA event，main-only）
+
+| case | off（旧） | on（O12） | 加速 |
+|---|---|---|---|
+| MHA S=512 | 0.0719 ms | **0.0690** | 1.042× |
+| MHA S=1024H32 | 0.4374 | **0.4057** | 1.078× |
+| MHA S=4096 | 2.4950 | **2.2679** | 1.100× |
+| GQA q32/kv4 | 0.4280 | **0.3969** | 1.079× |
+| MQA q64/kv1 | 0.7805 | **0.7042** | 1.108× |
+| MLA S=256H2 D=512 | 0.0514 | 0.0511 | 1.006× |
+| MLA S=1024H2 D=512 | 0.3264 | 0.3233 | 1.010× |
+
+`--wgmma` 路径同样受益：S=4096 off 2.3851 → **on 2.1204ms（1.125×）**、S=512 1.027×、
+S=1024H32 1.075×。端到端（`--wgmma`，总）：S=512 **0.1735ms**（12.4 TF）、S=1024H32 0.6502
+（26.4 TF）、S=4096 **2.8720ms（47.9 TF）**（默认 mma：0.1776 / 0.6737 / 3.0617ms）。
+MLA 收益近 1（`D=512` 只有 H=2、lse/delta 读的绝对量小，且 main 是低并行度/延迟 bound）。
+同 session TE FP8 纯反向（`fa_bwd_bench.py bench --dtype fp8`）：S=512 0.1007ms/42.6TF、
+S=1024H32 0.2048/167.8、S=4096 0.5864/468.7；GQA/MQA 0.2016–0.4012ms/170–190TF；MLA NA。
+⇒ 端到端 ours/TE（`--wgmma`）≈ 1.72× / 3.17× / 4.90×（O9c-2 时 1.74×/…/5.32×）。
+
+### 23.5 ncu（main，S=4096，mma 路径，`--set full -c 1`）
+
+| 指标 | prel=0（旧） | prel=1（O12） |
+|---|---|---|
+| Duration | 2.60 ms | **2.34 ms（−10%）** |
+| Executed Instructions | 1,008,712,416 | **923,662,336（−8.4%）** |
+| uncoalesced global 多余扇区 | 38,048,256（23%） | **4,702,720（5%）（−87.6%）** |
+| L1/TEX | 65.88% | 65.92% |
+| L2 | 44.76% | 48.10% |
+| Compute | 40.72% | 40.94% |
+| regs / occ | 168 / 18.1% | 168 / 18.1% |
+
+**机制确认**：把 lse/delta 的散读（占总扇区 23%）消到 5%，指令数 −8.4%、Duration −10%，
+regs/occupancy 不变。这正是 fp16 O7c-PREL 的复现。**新墙仍 = L1/TEX 66%（GEMM3/4/5 的
+`ldmatrix` + fold 的 smem）+ 残余 L2（dK/dV 跨 CTA red）**。
+
+### 23.6 O9c-2b 结论（fp8 GEMM3/4/5 上 wgmma）——**硬件阻塞**
+
+ROADMAP 的「下一步」原本是 O9c-2b：照 fp16 O9b-2 的做法，用 **MN-major 描述符对 K-major
+SW128 tile 做「转置读」**，把 GEMM3/4/5（`dV=PᵀdO`、`dK=dSᵀQ`、`dQ=dS·K`）也上 wgmma。
+本轮查证后确认**在 fp8 上不可行**：
+
+- **fp8 的 wgmma 指令没有转置操作数形式**。CUTLASS `include/cute/arch/mma_sm90_gmma.hpp` 里
+  所有 fp8 变体（`m64nNk32.f32.e4m3.e4m3` / `e5m2.e4m3` / `e4m3.e5m2`）都只有 `_SS_TN`
+  （A/B 均 K-major），**既无 `.trans_a/.trans_b` 立即数，也无 MN-major 描述符语义**；asm 尾部
+  是 `p, scale_D, scaleA, scaleB`（对照 fp16 是 `p, 1, 1, tnspA, tnspB`，见 kernels.cuh 的
+  `wgmma_m64n32k32_*` 与 fp16 的 `wgmma_m64n64k16_t<TA,TB>`）。也就是说 fp16 O9b-2 的
+  `tnsp=1` 那条路在 fp8 的 ISA 上根本不存在。
+- 要在 fp8 上做 GEMM3/4/5 的 wgmma，只能**物理地把操作数存成转置布局**（Pᵀ/dSᵀ 以及
+  dOᵀ/Qᵀ/Kᵀ 的 K-major tile）。但 fp8 SW128 的 atom 是「8 行 × 128 个 fp8」，要求 tile 的
+  行宽（归约维）≥128，于是 `BM=BN=128`，smem 从 70KB 膨胀到 >110KB、occupancy 掉到 1–2
+  CTA/SM；且 GEMM5 的 A=dS `[BM][BN]` 与 GEMM3/4 的 A=dSᵀ `[BN][BM]` 还要求同时存两种主序。
+- 更关键的是 **fp16 O9b-2/O9b-2b 的实测已证明：GEMM3/4/5 上 wgmma 性能中性偏负**（S=4096
+  1.50–1.52 vs mma 1.47–1.48），因为墙不在 GEMM 指令，而在 L2 的 dK/dV 跨 CTA 原子与低
+  occupancy。fp8 若付出「物理转置 + smem 翻倍」的代价，回报只会更差。
+
+**决定**：O9c-2b（MN-major 转置读）**在 fp8/Hopper 上从硬件层面就不成立，标记为阻塞**；
+不再尝试描述符。fp8 主 kernel 的 L1/TEX 墙改由**非转置**手段解决（fold 向量化、TMA 化
+operand、dK/dV 去原子），已记入 ROADMAP backlog。
+
+### 23.7 复现
+
+```bash
+# 两文件（默认 mma，PREL 自动开）
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# wgmma 构建（需 sm90a）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=.../b1_s4096_h16_d128_causal_fp8 --wgmma
+# ncu A/B
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --launch-count 1 \
+  --kernel-name regex:fa_bwd_fp8_mma_kernel -- --dir=.../b1_s4096_h16_d128_causal_fp8 --prel=0
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o12_sweep.out.txt`（两文件 ×7 shape，含 O12 A/B）、
+`src/fp8/fa_bwd_fp8_mma_onefile_o12_sweep.out.txt`（单文件）、
+`src/fp8/fa_bwd_fp8_main_o12_wgmma_sweep.out.txt`（`--wgmma`）、
+`src/fp8/fa_bwd_fp8_main_o12_ncu_{prel0,prel1}_s4096.out.txt`、
+`src/fp8/fa_bwd_fp8_o12_tebench.out.txt` / `..._tebench_req.out.txt`。
