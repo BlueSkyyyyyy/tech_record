@@ -655,6 +655,62 @@ __global__ void quantize_row_kernel(const float* __restrict__ x,
 }
 
 // =============================================================================
+// 1b) O14：quantize_row_warp_kernel —— 输入量化的「每 warp 一行」向量化版
+// =============================================================================
+// 旧 `quantize_row_kernel` 是**每行一个 CTA**（128 线程）：线程数远超一行元素数（D=128），
+// 且用 `__shared__ float sh[128]` + 7 次 `__syncthreads` 做行 amax。S=4096 时 grid = S·H
+// (=65536) 个 CTA、每个只搬 512B，实测 quant（四个张量 q/k/v/dO 各一遍）0.19ms，
+// 比纯带宽下限（~30µs）慢 ~6.5×，是端到端第三大项（S=1024H32 时占 15%）。
+//
+// 本版改为**每 warp 一行**：lane 用 `float4` 读 `D/32` 个元素（D=128→1 个、D=512→4 个）
+// 进寄存器，`__shfl_xor_sync` 树求行 amax，再就地量化、用 `uchar4` 写回。全程序无 `__shared__`、
+// 无 `__syncthreads`，读/写均 16B/4B 向量化且完全合并。
+//
+// **数值逐位不变**：行 amax 用 `fmaxf`，可交换结合 ⇒ warp 树与旧 smem 树的归约顺序无关；
+// scale 公式、每元素 `cvt_*` 与旧版逐元素一致。故 q8/qs 等与旧 kernel 完全相同（本篇 A/B 验证）。
+// 只实例化 D%4==0 且 D/32 ∈ {4,16}（本项目的 head_dim 128/512）；其它 D 回退旧 kernel。
+template <int VPT, bool E5M2>
+__global__ void __launch_bounds__(128)
+quantize_row_warp_kernel(const float* __restrict__ x, unsigned char* __restrict__ xq,
+                         float* __restrict__ scale, long long nrows) {
+  constexpr int D = VPT * 32;  // 一行元素数（VPT=4→128，16→512）
+  const float fp8_max = E5M2 ? kE5M2Max : kE4M3Max;
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  constexpr int NW = 4;  // 128 线程 = 4 个 warp
+  for (long long row = (long long)blockIdx.x * NW + warp; row < nrows;
+       row += (long long)gridDim.x * NW) {
+    const float4* xr4 = reinterpret_cast<const float4*>(x + row * (long long)D);
+    float v[VPT];
+    float amax = 0.f;
+#pragma unroll
+    for (int t = 0; t < VPT / 4; ++t) {
+      const float4 q = xr4[t * 32 + lane];
+      v[t * 4 + 0] = q.x;
+      v[t * 4 + 1] = q.y;
+      v[t * 4 + 2] = q.z;
+      v[t * 4 + 3] = q.w;
+      amax = fmaxf(amax, fmaxf(fmaxf(fabsf(q.x), fabsf(q.y)), fmaxf(fabsf(q.z), fabsf(q.w))));
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+      amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+    const float s = (amax > 0.f) ? (amax / fp8_max) : 1.f;
+    if (lane == 0) scale[row] = s;
+    unsigned char* out = xq + row * (long long)D;
+#pragma unroll
+    for (int t = 0; t < VPT / 4; ++t) {
+      uchar4 o;
+      o.x = E5M2 ? cvt_e5m2(v[t * 4 + 0] / s) : cvt_e4m3(v[t * 4 + 0] / s);
+      o.y = E5M2 ? cvt_e5m2(v[t * 4 + 1] / s) : cvt_e4m3(v[t * 4 + 1] / s);
+      o.z = E5M2 ? cvt_e5m2(v[t * 4 + 2] / s) : cvt_e4m3(v[t * 4 + 2] / s);
+      o.w = E5M2 ? cvt_e5m2(v[t * 4 + 3] / s) : cvt_e4m3(v[t * 4 + 3] / s);
+      *reinterpret_cast<uchar4*>(out + (t * 32 + lane) * 4) = o;
+    }
+  }
+}
+
+// =============================================================================
 // 2a) lse_mma_kernel【O1 优化】：用 mma 分块 Q·Kᵀ 求 LSE
 // =============================================================================
 // 旧 preprocess 每个 (s,h) 行一个 block、128 线程标量扫 K，每对 (i,j) 反量化
@@ -1640,16 +1696,24 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 // =============================================================================
 // 4) convert：fp32 累加缓冲 -> 输出（本版直接 fp32 拷贝）
 // =============================================================================
+// O14b：fp32→fp32 拷贝向量化 `float4`（旧的逐元素 grid-stride 只 ~1.4TB/s，
+// 远低于 HBM 峰值）。nq/nkv 均为 4 的倍数（B·S·H·D，D∈{128,512}），尾部留标量兜底。
 __global__ void convert_kernel(const float* __restrict__ dq_acc,
                                const float* __restrict__ dk_acc,
                                const float* __restrict__ dv_acc,
                                float* __restrict__ dq, float* __restrict__ dk,
                                float* __restrict__ dv, size_t nq, size_t nkv) {
-  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < nq;
-       i += (size_t)gridDim.x * blockDim.x)
-    dq[i] = dq_acc[i];
-  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < nkv;
-       i += (size_t)gridDim.x * blockDim.x) {
+  const size_t stride = (size_t)gridDim.x * blockDim.x;
+  const size_t tid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t nq4 = nq >> 2, nkv4 = nkv >> 2;
+  for (size_t i = tid; i < nq4; i += stride)
+    reinterpret_cast<float4*>(dq)[i] = reinterpret_cast<const float4*>(dq_acc)[i];
+  for (size_t i = tid; i < nkv4; i += stride) {
+    reinterpret_cast<float4*>(dk)[i] = reinterpret_cast<const float4*>(dk_acc)[i];
+    reinterpret_cast<float4*>(dv)[i] = reinterpret_cast<const float4*>(dv_acc)[i];
+  }
+  for (size_t i = (nq4 << 2) + tid; i < nq; i += stride) dq[i] = dq_acc[i];
+  for (size_t i = (nkv4 << 2) + tid; i < nkv; i += stride) {
     dk[i] = dk_acc[i];
     dv[i] = dv_acc[i];
   }

@@ -1288,8 +1288,40 @@
    - 原始输出 `src/fp8/fa_bwd_fp8_main_o12_sweep.out.txt`、
      `src/fp8/fa_bwd_fp8_mma_onefile_o12_sweep.out.txt`、
      `src/fp8/fa_bwd_fp8_main_o12_wgmma_sweep.out.txt`、
-     `src/fp8/fa_bwd_fp8_main_o12_ncu_{prel0,prel1}_s4096.out.txt`、
-           `src/fp8/fa_bwd_fp8_o12_tebench{,_req}.out.txt`；文档 `docs/03` §23。
+      `src/fp8/fa_bwd_fp8_main_o12_ncu_{prel0,prel1}_s4096.out.txt`、
+            `src/fp8/fa_bwd_fp8_o12_tebench{,_req}.out.txt`；文档 `docs/03` §23。
+
+- 2026-09-23（第四十九轮）：**O14 完成（fp8 输入量化 warp-per-row 向量化 + convert float4；
+  端到端 1.05–1.09×）**。
+   - 动机：O12 后端到端（S=4096）分解 main 76% / preprocess 13% / **quant 6%** / convert 5%；
+     S=1024H32 时 quant(0.10) + convert(0.06) 占 **~24%**。旧 `quantize_row_kernel` 是
+     **每行一个 CTA**（128 线程扫 D=128/512 个元素 + `__shared__ sh[128]` + 7 次
+     `__syncthreads`），S=4096 grid=65536、每 CTA 只搬 512B，比带宽下限慢 ~6.5×。
+   - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+     新增 `quantize_row_warp_kernel<VPT,E5M2>`——**每 warp 一行**、lane `float4` 读
+     `D/32` 个元素进寄存器、`__shfl_xor_sync` 树求 amax、`uchar4` 写回，**无 smem/无 barrier**；
+     只实例化 `D%4==0 && D/32∈{4,16}`（128/512），其它回退旧 kernel。行 amax 用 `fmaxf`
+     （可交换结合）⇒ **8 个量化输出逐字节 bitwise mismatch=0**。另把 `convert_kernel` 改
+     `float4`（**中性**，S4096 0.146→0.138ms，session 噪声内，留作负结果）。
+   - **性能（同 session A/B，event）**：quant（q/k/v/dO 一组）**S512 0.0324→0.0151（2.15×）**、
+     **S1024H32 0.1006→0.0413（2.44×）**、**S4096 0.1825→0.0689（2.65×）**、GQA kv4
+     0.0623→0.0281（2.22×）、MQA kv1 0.1002→0.0410（2.44×）、MLA S256H2 0.0140→0.0115（1.22×）、
+     MLA S1024H2 0.0206→0.0142（1.46×）。端到端 total **S512 0.1776→0.1642（1.082×，13.1 TF）**、
+     **S1024H32 0.6737→0.6180（1.090×，27.8 TF）**、**S4096 3.0617→2.9210ms（1.048×，47.1 TF）**、
+     GQA kv4 0.5969→0.5660（1.055×）、MQA kv1 1.0137→0.9564；MLA 持平。同 session TE FP8
+     0.1006/0.2056/0.5861/0.2021/0.4024 ⇒ 端到端 ours/TE = **1.63×/3.01×/4.98×/2.80×/2.38×**
+     （O12 S4096 为 5.22×）。
+   - **ncu（quant，S=4096，单 launch）**：Duration 46.18→**15.42µs**、**DRAM 24.29→71.31%**、
+     L1/TEX 73.73→26.50%、Compute 71.80→51.49%、**Executed Instructions 34.6M→7.93M（−77%）**、
+     Waves 31.03→7.76 ⇒ 墙从 **smem 归约 + 标量加载** 移到 **DRAM 带宽（已到 elementwise 上限）**。
+   - **数值与 O12 逐位相同**（S512 2.426/2.975/3.735e-1；S1024H32 2.400/4.195/3.536e-1；
+     S4096 2.635/2.643/3.216e-1；GQA kv4 2.517/5.408/7.072e-1；MQA kv1 4.097e-1/1.519/2.127；
+     MLA S1024H2 2.232/3.337/3.602e-1），单/两文件一致。
+   - 原始输出 `src/fp8/fa_bwd_fp8_main_o14_sweep.out.txt`、
+     `src/fp8/fa_bwd_fp8_mma_onefile_o14_sweep.out.txt`、
+     `src/fp8/fa_bwd_fp8_main_o14_ncu_quant_{old,new}_s4096.out.txt`、
+     `src/fp8/fa_bwd_fp8_o14_tebench{,_base3,_req}.out.txt`、
+     `src/fp8/fa_bwd_fp8_o14_fa3_te_baseline_fp16.out.txt`；文档 `docs/03` §24、`docs/04` §2.3。
 
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
@@ -1404,6 +1436,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       **O12 已完成（第四十八轮）**：主 kernel LSE/D 预装寄存器（fp16 O7c-PREL 的 fp8 版），
       main **1.04–1.13×**、uncoalesced global −87.6%，数值与历史逐位一致（`docs/03` §23）。
       详见 `docs/03` §22。
+- [x] **O14（第四十九轮）** fp8 输入量化向量化（warp-per-row）。`quantize_row_kernel` 每行一个
+      CTA（smem 归约 + 7×`__syncthreads`）改为 **warp-per-row `float4` + `__shfl_xor` 树 +
+      `uchar4`**；quant **1.22–2.65×**、端到端 S=4096 **1.048×**（ours/TE FP8 5.22×→4.98×）、
+      S=1024H32 1.090×、S512 1.082×；8 个量化输出**逐字节 mismatch=0**；ncu 墙移到 DRAM 71%
+      （带宽上限）、指令数 −77%。另证伪 convert `float4`（中性）。详见 `docs/03` §24、`docs/04` §2.3。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
 
@@ -1479,8 +1516,15 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    uncoalesced global −87.6%，数值逐位一致（`docs/03` §23）。fp8 后续的 L1/TEX 墙改走
 >    **fold 向量化 / TMA 化 operand / dK/dV 去原子**（非转置手段）。fp16/bf16 的 **O9b-2b**
 >    （TMA + P/dS 双缓冲跨-tile 流水 + 压 smem 冲 3 CTA/SM）仍按原计划。
->    **bf16 版 O9b-2 已完成（第四十四轮）**：
+ >    **bf16 版 O9b-2 已完成（第四十四轮）**：
 >    逐字 dtype 参数化，数值逐位相同、main S4096 0.979×/S512 0.960×、ncu 与 fp16 逐项一致（`docs/01b` §6r）。详见 `docs/01` §14g/§14h。
+>
+> **旁支已完成（第四十九轮 O14）**：fp8 **输入量化**改 **warp-per-row `float4` + `__shfl_xor`
+> 树 + `uchar4`**（`quantize_row_warp_kernel`，无 smem/无 barrier），8 个量化输出**逐字节
+> bitwise mismatch=0**；quant **1.22–2.65×**、端到端 **S4096 3.0617→2.9210ms（47.1 TF，
+> ours/TE 5.22×→4.98×）/ S1024H32 1.090× / S512 1.082×**；ncu 墙从 **L1/TEX 73.7%+Compute
+> 71.8%（DRAM 24%）** 移到 **DRAM 71.3%（带宽上限）**、指令数 −77%。另证伪 convert `float4`（中性）。
+> 详见 `docs/03` §24、`docs/04` §2.3。
 >
 > **旁支已完成（第三十六轮 O5c）**：把 fp16/bf16 的 **MLA（head_dim=512）反向从标量升级为张量核**
 > （`HD` 模板 128/512、GEMM3/4/5 N-tile 循环、dQ 全局累加），main 5.2–5.8×（fp16）/3.7–4.1×（bf16），

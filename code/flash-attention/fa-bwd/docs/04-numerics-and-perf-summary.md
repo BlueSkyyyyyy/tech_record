@@ -498,6 +498,15 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > `_SS_TN`、asm 尾部无 `tnsp`），MN-major 转置读在 fp8 ISA 上不存在 ⇒ 记入 ROADMAP「阻塞」。
 > 详见 `03` §23。
 
+> **O14（第四十九轮）**：fp8 **输入量化**从「每行一个 CTA（smem 归约 + 7×`__syncthreads`）」
+> 改为 **warp-per-row `float4` + `__shfl_xor` 树 + `uchar4` 写**（`quantize_row_warp_kernel`）。
+> quant（q/k/v/dO 一组）**2.15×（S512）/ 2.44×（S1024H32）/ 2.65×（S4096）/ 2.22×（GQA kv4）
+> / 1.22×（MLA S256H2）**，8 个量化输出**逐字节 bitwise mismatch=0**；端到端 total S=4096
+> **3.0617→2.9210ms（47.1 TF，ours/TE FP8 5.22×→4.98×）**、S=1024H32 1.090×、S512 1.082×。
+> ncu：量化 kernel Duration 46.2→**15.4µs**、墙从 **L1/TEX 73.7%+Compute 71.8%（DRAM 仅 24%）**
+> 移到 **DRAM 71.3%（已达带宽上限）**、指令数 **−77%**。另证伪 convert 的 `float4`（中性）。
+> 详见 `03` §24。
+
 ---
 
 ## 3. ncu bound 小结（逐 dtype）
@@ -529,6 +538,8 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp8 | **mma main（O4b 后, S=4096, ksplit=4）** | 2.46% | **69.69%** | 34.40% | 18.21%（**70.66KB**, 3 CTA/SM） | 10.34 | short_scoreboard 2.73、long_scoreboard 1.16 | **L1/TEX 69.7% + L2 69.1%（残余 red）+ short_scoreboard**（`op_st` 冲突 −66%） |
 | fp8 | **mma main（O7 后, S=4096, ksplit=4, REGDQ=true）** | 2.60% | **64.4%** | 37.7% | 18.11%（70.66KB, 3 CTA/SM） | 10.34 | short_scoreboard 1.89、long_scoreboard 1.09 | **L1/TEX 64.4% + short_scoreboard 1.89 + 残余 L2 43.8%（dK/dV 跨 CTA red）**（dQ red 已 O(1)，L2 墙 69.1%→43.8%） |
 | fp8 | **mma main（O12=PREL 后, S=4096, ksplit=4, REGDQ=true）** | 2.60% | 65.92% | 40.94% | 18.10%（70.66KB, 3 CTA/SM） | 10.34 | short_scoreboard、long_scoreboard | **L1/TEX 65.9% + 残余 L2（dK/dV red）**（LSE/D 全局散读已消：uncoalesced global 38.0M→**4.70M（−87.6%）**、Executed Instructions **−8.4%**、Duration 2.60→**2.34ms**；对齐 fp16 O7c-PREL） |
+| fp8 | **quant 旧（per-row, S=4096）** | 24.29% | **73.73%** | **71.80%** | 87.82%（Waves 31.03） | 31.03 | —（34.6M inst） | **smem 归约（L1/TEX 73.7%）+ 标量加载（Compute 71.8%）**，DRAM 仅 24% |
+| fp8 | **quant 新（O14 warp-per-row, S=4096）** | **71.31%** | 26.50% | 51.49% | 79.44%（Waves 7.76） | 7.76 | —（**7.93M inst, −77%**） | **DRAM 带宽 71%（elementwise 上限）**；Duration 46.2→**15.4µs** |
 | fp8 | **lse_mma_bal<HD,1>（O11, S=4096）** | 1.48% | 28.16% | **61.15%** | 23.24%（~27.7KB, 6 CTA/SM, 77 regs） | **0.65** | — | **Compute 61% + 网格不足一个波**（镜像配对消尾波 + cp.async 消 long_scoreboard；对齐 fp16/bf16 O8b） |
 | fp8 | **mma main（O4b 后, MLA S=1024 H2 D512）** | 1.46% | 11.38% | 7.45% | **6.25%（205.8KB, 1 CTA/SM）** | 0.97 | long_scoreboard 1.73、wait 1.67 | **低 occupancy/并行度**（smem 仍 205.8KB > 116KB 门槛） |
 

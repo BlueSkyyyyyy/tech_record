@@ -615,6 +615,62 @@ __global__ void quantize_row_kernel(const float* __restrict__ x,
 }
 
 // =============================================================================
+// 1b) O14：quantize_row_warp_kernel —— 输入量化的「每 warp 一行」向量化版
+// =============================================================================
+// 旧 `quantize_row_kernel` 是**每行一个 CTA**（128 线程）：线程数远超一行元素数（D=128），
+// 且用 `__shared__ float sh[128]` + 7 次 `__syncthreads` 做行 amax。S=4096 时 grid = S·H
+// (=65536) 个 CTA、每个只搬 512B，实测 quant（四个张量 q/k/v/dO 各一遍）0.19ms，
+// 比纯带宽下限（~30µs）慢 ~6.5×，是端到端第三大项（S=1024H32 时占 15%）。
+//
+// 本版改为**每 warp 一行**：lane 用 `float4` 读 `D/32` 个元素（D=128→1 个、D=512→4 个）
+// 进寄存器，`__shfl_xor_sync` 树求行 amax，再就地量化、用 `uchar4` 写回。全程序无 `__shared__`、
+// 无 `__syncthreads`，读/写均 16B/4B 向量化且完全合并。
+//
+// **数值逐位不变**：行 amax 用 `fmaxf`，可交换结合 ⇒ warp 树与旧 smem 树的归约顺序无关；
+// scale 公式、每元素 `cvt_*` 与旧版逐元素一致。故 q8/qs 等与旧 kernel 完全相同（本篇 A/B 验证）。
+// 只实例化 D%4==0 且 D/32 ∈ {4,16}（本项目的 head_dim 128/512）；其它 D 回退旧 kernel。
+template <int VPT, bool E5M2>
+__global__ void __launch_bounds__(128)
+quantize_row_warp_kernel(const float* __restrict__ x, unsigned char* __restrict__ xq,
+                         float* __restrict__ scale, long long nrows) {
+  constexpr int D = VPT * 32;  // 一行元素数（VPT=4→128，16→512）
+  const float fp8_max = E5M2 ? kE5M2Max : kE4M3Max;
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  constexpr int NW = 4;  // 128 线程 = 4 个 warp
+  for (long long row = (long long)blockIdx.x * NW + warp; row < nrows;
+       row += (long long)gridDim.x * NW) {
+    const float4* xr4 = reinterpret_cast<const float4*>(x + row * (long long)D);
+    float v[VPT];
+    float amax = 0.f;
+#pragma unroll
+    for (int t = 0; t < VPT / 4; ++t) {
+      const float4 q = xr4[t * 32 + lane];
+      v[t * 4 + 0] = q.x;
+      v[t * 4 + 1] = q.y;
+      v[t * 4 + 2] = q.z;
+      v[t * 4 + 3] = q.w;
+      amax = fmaxf(amax, fmaxf(fmaxf(fabsf(q.x), fabsf(q.y)), fmaxf(fabsf(q.z), fabsf(q.w))));
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+      amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+    const float s = (amax > 0.f) ? (amax / fp8_max) : 1.f;
+    if (lane == 0) scale[row] = s;
+    unsigned char* out = xq + row * (long long)D;
+#pragma unroll
+    for (int t = 0; t < VPT / 4; ++t) {
+      uchar4 o;
+      o.x = E5M2 ? cvt_e5m2(v[t * 4 + 0] / s) : cvt_e4m3(v[t * 4 + 0] / s);
+      o.y = E5M2 ? cvt_e5m2(v[t * 4 + 1] / s) : cvt_e4m3(v[t * 4 + 1] / s);
+      o.z = E5M2 ? cvt_e5m2(v[t * 4 + 2] / s) : cvt_e4m3(v[t * 4 + 2] / s);
+      o.w = E5M2 ? cvt_e5m2(v[t * 4 + 3] / s) : cvt_e4m3(v[t * 4 + 3] / s);
+      *reinterpret_cast<uchar4*>(out + (t * 32 + lane) * 4) = o;
+    }
+  }
+}
+
+// =============================================================================
 // 2a) lse_mma_kernel【O1 优化】：用 mma 分块 Q·Kᵀ 求 LSE
 // =============================================================================
 // 旧 preprocess 每个 (s,h) 行一个 block、128 线程标量扫 K，每对 (i,j) 反量化
@@ -1600,16 +1656,24 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 // =============================================================================
 // 4) convert：fp32 累加缓冲 -> 输出（本版直接 fp32 拷贝）
 // =============================================================================
+// O14b：fp32→fp32 拷贝向量化 `float4`（旧的逐元素 grid-stride 只 ~1.4TB/s，
+// 远低于 HBM 峰值）。nq/nkv 均为 4 的倍数（B·S·H·D，D∈{128,512}），尾部留标量兜底。
 __global__ void convert_kernel(const float* __restrict__ dq_acc,
                                const float* __restrict__ dk_acc,
                                const float* __restrict__ dv_acc,
                                float* __restrict__ dq, float* __restrict__ dk,
                                float* __restrict__ dv, size_t nq, size_t nkv) {
-  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < nq;
-       i += (size_t)gridDim.x * blockDim.x)
-    dq[i] = dq_acc[i];
-  for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < nkv;
-       i += (size_t)gridDim.x * blockDim.x) {
+  const size_t stride = (size_t)gridDim.x * blockDim.x;
+  const size_t tid = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t nq4 = nq >> 2, nkv4 = nkv >> 2;
+  for (size_t i = tid; i < nq4; i += stride)
+    reinterpret_cast<float4*>(dq)[i] = reinterpret_cast<const float4*>(dq_acc)[i];
+  for (size_t i = tid; i < nkv4; i += stride) {
+    reinterpret_cast<float4*>(dk)[i] = reinterpret_cast<const float4*>(dk_acc)[i];
+    reinterpret_cast<float4*>(dv)[i] = reinterpret_cast<const float4*>(dv_acc)[i];
+  }
+  for (size_t i = (nq4 << 2) + tid; i < nq; i += stride) dq[i] = dq_acc[i];
+  for (size_t i = (nkv4 << 2) + tid; i < nkv; i += stride) {
     dk[i] = dk_acc[i];
     dv[i] = dv_acc[i];
   }
@@ -1782,12 +1846,14 @@ int main(int argc, char** argv) {
   int lsewgm = 0;   // O9c：1 = LSE 走 wgmma（需 -DFA_WGMMA 构建），0 = O11 mma 版
   int wgmma = 0;    // O9c-2：1 = 主 kernel GEMM1/2 走 wgmma（需 -DFA_WGMMA 构建）
   int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
+  int qfast = 1;      // O14：1 = warp-per-row 向量化量化，0 = 旧 per-row 标量量化（A/B）
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
     else if (a == "--lsewgm") lsewgm = 1;
     else if (a == "--wgmma") wgmma = 1;
+    else if (a.rfind("--qfast=", 0) == 0) qfast = atoi(a.c_str() + 8);
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
@@ -1882,12 +1948,30 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemcpy(d_do_f, do_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_o_f, o_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
 
-  auto quant = [&]() {
+  // O14：量化输入（q/k/v=E4M3、dO=E5M2，rowwise）。`qfast` 选 warp-per-row 向量化版。
+  auto quant_old = [&]() {
     quantize_row_kernel<<<(int)rows_q, 128>>>(d_q_f, d_q8, d_qs, D, 0);
     quantize_row_kernel<<<(int)rows_kv, 128>>>(d_k_f, d_k8, d_ks, D, 0);
     quantize_row_kernel<<<(int)rows_kv, 128>>>(d_v_f, d_v8, d_vs, D, 0);
     quantize_row_kernel<<<(int)rows_q, 128>>>(d_do_f, d_do8, d_dos, D, 1);
   };
+  auto quant_new = [&]() {
+    const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
+    const int gq = (int)std::min<long long>((rq + 3) / 4, 65535);
+    const int gkv = (int)std::min<long long>((rkv + 3) / 4, 65535);
+    if (D == 128) {
+      quantize_row_warp_kernel<4, false><<<gq, 128>>>(d_q_f, d_q8, d_qs, rq);
+      quantize_row_warp_kernel<4, false><<<gkv, 128>>>(d_k_f, d_k8, d_ks, rkv);
+      quantize_row_warp_kernel<4, false><<<gkv, 128>>>(d_v_f, d_v8, d_vs, rkv);
+      quantize_row_warp_kernel<4, true><<<gq, 128>>>(d_do_f, d_do8, d_dos, rq);
+    } else {
+      quantize_row_warp_kernel<16, false><<<gq, 128>>>(d_q_f, d_q8, d_qs, rq);
+      quantize_row_warp_kernel<16, false><<<gkv, 128>>>(d_k_f, d_k8, d_ks, rkv);
+      quantize_row_warp_kernel<16, false><<<gkv, 128>>>(d_v_f, d_v8, d_vs, rkv);
+      quantize_row_warp_kernel<16, true><<<gq, 128>>>(d_do_f, d_do8, d_dos, rq);
+    }
+  };
+  auto quant = [&]() { if (qfast) quant_new(); else quant_old(); };
 
   // ---- O2b：自动选择 N 方向切块数 ksplit。base = 未切块时的 CTA 数；切块把小 S 时
   //      不足一个波、或大 S 的尾波（partial wave）用更细的 CTA 补满并发槽。
@@ -2162,6 +2246,7 @@ int main(int argc, char** argv) {
   }
 
   // ---- O12 A/B（D=128/512）：主 kernel 的 LSE/D 预装寄存器 ON vs OFF（同 session 计时）。----
+  //  OFF 版就是旧的「GEMM1/2 epilogue 里逐元素 global 读 lse/delta」。数值应逐位相同。
   if (D == 128 || D == 512) {
 #ifdef FA_WGMMA
     const bool wg_ab = (wgmma != 0);
@@ -2197,6 +2282,7 @@ int main(int argc, char** argv) {
     float m_off = 0.f, m_on = 0.f;
     bench_prel(false, &m_off);
     bench_prel(true, &m_on);
+    // 逐元素对拍（应逐位相同）
     std::vector<float> p_off_dq(nq), p_on_dq(nq);
     CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
     launch_sel(false);
@@ -2210,7 +2296,57 @@ int main(int argc, char** argv) {
     printf("[O12 A/B] main LSE/D preload off %.4f ms | on %.4f ms (%.3fx) | "
            "max_abs(on-vs-off) dq=%.3e\n",
            m_off, m_on, m_off / m_on, pd);
-    run_main();
+    run_main();  // 恢复 CLI 选中路径（写回 d_dq_acc，不影响 d_dq）
+  }
+
+  // ---- O14 A/B：输入量化 旧 per-row 标量 vs 新 warp-per-row 向量化（同 session 计时 + 逐位对拍）----
+  {
+    auto bench_q = [&](bool fast, float* out) {
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) { if (fast) quant_new(); else quant_old(); }
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float qo = 0.f, qn = 0.f;
+    bench_q(false, &qo);
+    bench_q(true, &qn);
+    // 逐字节对拍（q8/qs/k8/ks/v8/vs/do8/dos 应完全相同）。
+    std::vector<unsigned char> o_q8(nq), o_k8(nkv), o_v8(nkv), o_do8(nq);
+    std::vector<float> o_qs(rows_q), o_ks(rows_kv), o_vs(rows_kv), o_dos(rows_q);
+    quant_old();
+    CUDA_CHECK(cudaMemcpy(o_q8.data(), d_q8, nq, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(o_k8.data(), d_k8, nkv, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(o_v8.data(), d_v8, nkv, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(o_do8.data(), d_do8, nq, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(o_qs.data(), d_qs, rows_q * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(o_ks.data(), d_ks, rows_kv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(o_vs.data(), d_vs, rows_kv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(o_dos.data(), d_dos, rows_q * 4, cudaMemcpyDeviceToHost));
+    quant_new();
+    std::vector<unsigned char> n_q8(nq), n_k8(nkv), n_v8(nkv), n_do8(nq);
+    std::vector<float> n_qs(rows_q), n_ks(rows_kv), n_vs(rows_kv), n_dos(rows_q);
+    CUDA_CHECK(cudaMemcpy(n_q8.data(), d_q8, nq, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(n_k8.data(), d_k8, nkv, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(n_v8.data(), d_v8, nkv, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(n_do8.data(), d_do8, nq, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(n_qs.data(), d_qs, rows_q * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(n_ks.data(), d_ks, rows_kv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(n_vs.data(), d_vs, rows_kv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(n_dos.data(), d_dos, rows_q * 4, cudaMemcpyDeviceToHost));
+    long long mismatch = 0;
+    auto cmp_u8 = [&](const std::vector<unsigned char>& a, const std::vector<unsigned char>& c) {
+      for (size_t i = 0; i < a.size(); ++i) if (a[i] != c[i]) ++mismatch;
+    };
+    auto cmp_f = [&](const std::vector<float>& a, const std::vector<float>& c) {
+      for (size_t i = 0; i < a.size(); ++i) if (a[i] != c[i]) ++mismatch;
+    };
+    cmp_u8(o_q8, n_q8); cmp_u8(o_k8, n_k8); cmp_u8(o_v8, n_v8); cmp_u8(o_do8, n_do8);
+    cmp_f(o_qs, n_qs); cmp_f(o_ks, n_ks); cmp_f(o_vs, n_vs); cmp_f(o_dos, n_dos);
+    printf("[O14 A/B] quant old(per-row) %.4f ms | new(warp-per-row) %.4f ms (%.3fx) | "
+           "bitwise mismatch=%lld\n", qo, qn, qo / qn, mismatch);
+    run_all();  // 恢复 CLI 选中路径的完整输出
   }
 
   std::vector<float> mdq(nq), mdk(nkv), mdv(nkv);

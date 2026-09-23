@@ -1983,3 +1983,98 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --launch-count 1 \
 `src/fp8/fa_bwd_fp8_main_o12_wgmma_sweep.out.txt`（`--wgmma`）、
 `src/fp8/fa_bwd_fp8_main_o12_ncu_{prel0,prel1}_s4096.out.txt`、
 `src/fp8/fa_bwd_fp8_o12_tebench.out.txt` / `..._tebench_req.out.txt`。
+
+---
+
+## 24. O14：fp8 输入量化的向量化（warp-per-row）＋ convert 向量化
+
+### 24.1 动机：量化是端到端第三大项，且比带宽下限慢 ~6.5×
+
+O12 之后，fp8 端到端（S=4096）分解为 **main 2.32ms（76%）/ preprocess 0.40ms（13%）/
+quant 0.19ms（6%）/ convert 0.15ms（5%）**；S=1024H32 时 quant 0.10ms + convert 0.06ms
+占端到端 **~24%**。其中 `quantize_row_kernel`（旧版）是**每行一个 CTA**：一行只有 `D`
+（128/512）个元素，却开 128 个线程 + `__shared__ float sh[128]` + **7 次 `__syncthreads`**
+做行 amax；S=4096 时 grid = S·H = 65536 个 CTA、每个只搬 512B。实测四个张量（q/k/v/dO）
+合计 0.19ms，而纯带宽下限（~96MB / 3.35TB/s）只有 ~30µs ⇒ 慢约 **6.5×**。
+
+### 24.2 实现（单/两文件 device 代码逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+新增 **`quantize_row_warp_kernel<VPT, E5M2>`**（`src/fp8/fa_bwd_fp8_kernels.cuh`）：
+
+- **每 warp 一行**（128 线程 = 4 warp，grid-stride over rows）；lane 用 **`float4`** 读
+  `VPT=D/32` 个元素（D=128→4 个、D=512→16 个）进寄存器；
+- 行 amax 用 **`__shfl_xor_sync` 树**（16/8/4/2/1）归约，**全程无 `__shared__`、无任何
+  `__syncthreads`**；scale 由 lane0 写；
+- 量化从寄存器直接做、**`uchar4` 写回**（16B 读 / 4B 写，完全合并）。
+- 只实例化 `D%4==0 && D/32∈{4,16}`（本项目的 128/512）；其它 D 回退旧 kernel。
+
+**数值逐位不变**：行 amax 用 `fmaxf`，可交换结合 ⇒ warp 树与旧 smem 树归约顺序无关；
+scale 公式与每元素 `cvt_*` 与旧版逐元素一致。A/B 里对 q8/qs/k8/ks/v8/vs/dO8/dos **逐字节
+比较，`bitwise mismatch=0`**（全部 7 个 shape）。
+
+另把 `convert_kernel`（fp32→fp32 拷贝）改成 **`float4`**（`O14b`）：实测 **中性**
+（S=4096 0.146→0.138ms，session 噪声内）——它本就接近带宽（~1.4TB/s）而非标量瓶颈，
+保留但不计入收益（负结果留存）。
+
+### 24.3 数值（ours-vs-ref，fp8 causal，max_abs，单/两文件逐位一致）
+
+与 O12 **完全相同**：S=512 2.426/2.975/3.735e-1；S=1024H32 2.400/4.195/3.536e-1；
+S=4096 2.635/2.643/3.216e-1；GQA kv4 2.517/5.408/7.072e-1；MQA kv1 4.097e-1/1.519/2.127；
+MLA S1024H2 2.232/3.337/3.602e-1。量化 kernel 的字节级对拍 mismatch=0 ⇒ 数学口径未变。
+
+### 24.4 性能（同 session A/B，CUDA event）
+
+**quant（四个张量一组）**：
+
+| shape | old per-row (ms) | new warp-per-row (ms) | 加速 | bitwise mismatch |
+|---|---|---|---|---|
+| S=512 | 0.0324 | 0.0151 | **2.15×** | 0 |
+| S=1024 H32 | 0.1006 | 0.0413 | **2.44×** | 0 |
+| S=4096 | 0.1825 | 0.0689 | **2.65×** | 0 |
+| GQA kv4 | 0.0623 | 0.0281 | **2.22×** | 0 |
+| MQA kv1 | 0.1002 | 0.0410 | **2.44×** | 0 |
+| MLA S256H2 | 0.0140 | 0.0115 | **1.22×** | 0 |
+| MLA S1024H2 | 0.0206 | 0.0142 | **1.46×** | 0 |
+
+**端到端 total**：S=512 0.1776→**0.1642ms（1.082×，13.1 TF）**、S=1024H32 0.6737→
+**0.6180（1.090×，27.8 TF）**、S=4096 3.0617→**2.9210（1.048×，47.1 TF）**、
+GQA kv4 0.5969→**0.5660（1.055×）**、MQA kv1 1.0137→0.9564、MLA S1024H2 0.5368→0.5339。
+**对标 TE FP8**（同 session `fa_bwd_bench.py bench --dtype fp8`）：TE S=512 0.1006、
+S=1024H32 0.2056、S=4096 0.5861、GQA kv4 0.2021、MQA kv1 0.4024 ⇒ 端到端 ours/TE =
+**1.63× / 3.01× / 4.98× / 2.80× / 2.38×**（O12 S=4096 为 5.22×）。同 session 纯反向
+FA3 MHA S=4096 fp16 0.3247ms/847TF、TE 0.4414/623、FA2 0.7294/377（fp8 无 FA 基线）。
+
+### 24.5 ncu（quant kernel，S=4096，单次 launch，`--set full -c 1`）
+
+| 指标 | old `quantize_row_kernel` | new `quantize_row_warp_kernel` |
+|---|---|---|
+| Duration | 46.18 µs | **15.42 µs** |
+| DRAM Throughput | 24.29% | **71.31%** |
+| L1/TEX Cache Throughput | **73.73%** | 26.50% |
+| L2 Cache Throughput | 28.91% | 74.00% |
+| Compute (SM) Throughput | **71.80%** | 51.49% |
+| Executed Instructions | 34,603,008 | **7,929,856（−77%）** |
+| Waves Per SM | 31.03 | 7.76 |
+| Achieved Occupancy | 87.82% | 79.44% |
+
+**结论**：旧 kernel 的墙是 **L1/TEX 73.7%（smem 归约）+ Compute 71.8%（标量地址/加载）**，
+DRAM 只有 24%；新 kernel 把墙移到 **DRAM 71.3%（纯带宽）**——即已到该 elementwise
+算子的带宽上限。指令数 −77% 与「无 smem、无 barrier、float4/uchar4」一致。
+
+### 24.6 复现
+
+```bash
+# 两文件（默认 qfast=1）；--qfast=0 退回旧 per-row 量化做 A/B
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# ncu：新旧量化 kernel
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --launch-count 1 \
+  --kernel-name-base demangled --kernel-name "regex:quantize_row_warp_kernel" \
+  -- --dir=.../b1_s4096_h16_d128_causal_fp8 --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o14_sweep.out.txt`（两文件 ×7 shape，含 O14 A/B）、
+`src/fp8/fa_bwd_fp8_mma_onefile_o14_sweep.out.txt`（单文件 ×4 shape）、
+`src/fp8/fa_bwd_fp8_main_o14_ncu_quant_{old,new}_s4096.out.txt`、
+`src/fp8/fa_bwd_fp8_o14_tebench{,_base3,_req}.out.txt`、
+`src/fp8/fa_bwd_fp8_o14_fa3_te_baseline_fp16.out.txt`。
