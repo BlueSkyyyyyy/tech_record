@@ -27,6 +27,7 @@ categories: ["算子开发"]
 7. [目标卡移植注意事项]({{< relref "fa-bwd-07-porting" >}}) —— 可替换层与移植 checklist
 8. [目标形状重点分析 & FA 为何比 TE 慢（ncu 归因）]({{< relref "fa-bwd-08-fa-vs-te" >}}) —— 纯反向口径、kernel/SASS/SOL 对照
 9. [用 SM90 的 FA3 重测：更正「FA 比 TE 慢」]({{< relref "fa-bwd-09-fa3-sm90" >}}) —— FA3 编译 + FA3/FA2/TE 三方对比
+10. [性能调优历程与方法论：从 138 ms 到 1.95 ms]({{< relref "fa-bwd-10-optimization-journey" >}}) —— 逐轮记录、墙迁移总表、可复用经验
 
 > 说明：以上各篇正文由仓库 `code/flash-attention/fa-bwd/docs/` 下的 Markdown **实时内联**渲染，
 > 随代码与实测一起更新，不另行复制。

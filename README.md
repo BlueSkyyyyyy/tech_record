@@ -155,6 +155,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 7. [目标卡移植注意事项](content/posts/fa-bwd-07-porting/index.md)
 8. [目标形状重点分析 & FA 为何比 TE 慢（ncu 归因）](content/posts/fa-bwd-08-fa-vs-te/index.md)
 9. [用 SM90 的 FA3 重测：更正「FA 比 TE 慢」](content/posts/fa-bwd-09-fa3-sm90/index.md)
+10. [性能调优历程与方法论](content/posts/fa-bwd-10-optimization-journey/index.md)
 
 配套代码：[code/flash-attention/fa-bwd/](code/flash-attention/fa-bwd/README.md)
 （各篇正文由 `docs/` 下的 Markdown 通过 `fa_include` shortcode 实时内联渲染）。
