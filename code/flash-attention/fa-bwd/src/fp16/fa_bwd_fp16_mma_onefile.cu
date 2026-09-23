@@ -170,6 +170,15 @@ __device__ __forceinline__ void wgmma_wait0() {
   asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory");
 #endif
 }
+// O16：等「未完成的 wgmma group 数 ≤ N」。N=1/2 时允许后面已 issue 的 wgmma 继续在
+// 张量核上飞，从而把前面 group 的 epilogue（exp/red/量化）与它们重叠 —— 只改等待时机，
+// 不改任何累加次序 ⇒ 数值逐位不变。
+template <int N>
+__device__ __forceinline__ void wgmma_wait_group() {
+#if FA_HAS_WGMMA
+  asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(N) : "memory");
+#endif
+}
 __device__ __forceinline__ void wgmma_m64n64k16_f16(float (&d)[32], uint64_t da,
                                                     uint64_t db) {
 #if FA_HAS_WGMMA
@@ -984,7 +993,7 @@ __device__ __forceinline__ void qdo_issue_async_sw(const __half* __restrict__ q,
   asm volatile("cp.async.commit_group;\n");
 }
 
-template <int HD>
+template <int HD, bool OW = false>
 __global__ void __launch_bounds__(THREADS, 2)
 fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
                          const __half* __restrict__ v, const __half* __restrict__ do_,
@@ -1073,7 +1082,9 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
     float sacc[32], dpacc[32];
     wgmma_mn64_issue(Qs, Kt, HD, sacc);
     wgmma_mn64_issue(dOs, Vs, HD, dpacc);
-    wgmma_wait0();
+    // O16：`wait_group<1>` 只等 S=QKᵀ 那个 group 完成，dP=dO·Vᵀ 继续在张量核上飞；
+    // P 的 exp/写 smem 与 dP 重叠，随后再 wait0 等 dP（数值与顺序无关，逐位不变）。
+    if constexpr (OW) wgmma_wait_group<1>(); else wgmma_wait0();
     // (1) epilogue：P = exp(scale·S − LSE)，按 SW128 16B 分块写 Ps
     float pval[8][4];
 #pragma unroll
@@ -1090,8 +1101,9 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
 #pragma unroll
     for (int j = 0; j < 8; ++j)
       pds_store_sw128(Ps, j, r0, lane, c2, BN,
-                      __float2half(pval[j][0]), __float2half(pval[j][1]),
-                      __float2half(pval[j][2]), __float2half(pval[j][3]));
+                       __float2half(pval[j][0]), __float2half(pval[j][1]),
+                       __float2half(pval[j][2]), __float2half(pval[j][3]));
+    if constexpr (OW) wgmma_wait0();  // 现在才需要 dP 累加器
     // (2) epilogue：dS = P∘(dP−D)，按 SW128 16B 分块写 dSs
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
@@ -1132,7 +1144,9 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
       for (int s = 0; s < BN / 16; ++s)
         wgmma_m64n64k16_t<0, 1>(accq, desc_k16_k(DSa, s, BN), desc_k16_mn(Kn, s, HD));
       wgmma_commit();
-      wgmma_wait0();
+      // O16：三条 GEMM 已 issue，按「dV→dK→dQ」顺序用 `wait_group<2>/<1>/wait0` 逐个收，
+      // 让 dV 的 red / dK 的 red 与前一条仍在飞的 wgmma 重叠（只改等待时机 ⇒ 数值逐位不变）。
+      if constexpr (OW) wgmma_wait_group<2>(); else wgmma_wait0();
       // (3) dV = Pᵀ·dO epilogue
 #pragma unroll
       for (int j = 0; j < 8; ++j)
@@ -1145,6 +1159,7 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
             red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
                      accv[j * 4 + qq], accv[j * 4 + qq + 1]);
         }
+      if constexpr (OW) wgmma_wait_group<1>();  // dK 累加器就绪
       // (4) dK = scale·dSᵀ·Q epilogue
 #pragma unroll
       for (int j = 0; j < 8; ++j)
@@ -1157,6 +1172,7 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
             red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
                      acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
         }
+      wgmma_wait0();  // dQ 累加器就绪
       // (5) dQ += scale·dS·K（寄存器累加，循环结束后一次写出）
 #pragma unroll
       for (int j = 0; j < 8; ++j)

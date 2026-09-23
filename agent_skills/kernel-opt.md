@@ -151,6 +151,18 @@ scripts/lab.sh status
   会把数组推到 **local memory**，ncu 报 local memory 占 L1TEX 47.5% sector、`long_scoreboard` 8.1，只有 988 TFLOPS；
   相位就是「该 stage 第 n 次使用」的奇偶，直接算 `(kb/STAGES)&1`（full）/`(kb/STAGES-1)&1`（empty）→ 1217。
   **注意别只看 `Local Memory Spilling Requests=0`，要看 `Memory Workload Analysis` 里的 local memory 占比。**
+- **TMA 的 box 内维固定 128B（fp16=64 元素）⇒ HD=128 的 K-major tile 必须拆成 2×K=64 chunk**（fa-bwd 51 轮）：
+  SW128 canonical 布局是 `[rg][kg][rr][kk]`（`kg` 夹在 `rg` 的 atom 之间），而 TMA 只能把 box **连续**
+  写进 smem，2D box 无法一次产生这种交织（想用 4D box 把 `kg` 排进去会违反「stride 非递减 / 维度不重叠」）。
+  正解：每个 k-chunk 各搬一块 8KB 连续 SW128，wgmma 侧用**两个 `SBO=1024` 的描述符**读（而非一个 `SBO=2048`）。
+  实测 TMA 写出的字节与手写 `sw128_off` **逐字节相同**、`wgmma QKᵀ` 对拍 `max_abs=0`。
+- **`wgmma.wait_group N` 只是「等待时机」开关，不是「减 stall」的杠杆**（fa-bwd 51 轮）：把 epilogue
+  拆成 `wait_group<2>/<1>/wait0` 让 red/exp 与仍在飞的 wgmma 重叠，数值逐位不变（只改 atomic 次序），
+  但实测 **0.99–1.00× 中性**——`wait` 是症状，当墙在 L2 原子/访存时错开等待拿不到收益。
+- **attention 反向的墙常常是 dK/dV 的跨 CTA `atomicAdd` 字节数**（fa-bwd 51 轮）：别只看 `L2 Cache
+  Throughput`，用 `lts__t_sectors_op_red/read/write` 拆开——实测 fp16 main 的 red 占 L2 扇区 **73%**、
+  DRAM 仅 4%，此时 float4 归约（减事务数）无效、`wait_group` 无效，**唯一杠杆是减少每个元素被多少个
+  CTA 贡献**（更大 BM / 跨 warpgroup 合并偏和）。
 - **warp specialization 的 empty barrier count = 所有消费者线程数**：只让每 WG 的 lane0 `arrive` 会与同 WG
   另一 warp 的 `wgmma.wait_group` 竞争（不确定对方读完了），实测会偶发错；让每个消费者线程都 arrive 才稳。
 - **算力受限 GEMM：降 L2 流量（大 BM）> 堆 occupancy**：23 篇 128×128 s3 有 2 CTA/SM 但 L2 80%、1097 TFLOPS；

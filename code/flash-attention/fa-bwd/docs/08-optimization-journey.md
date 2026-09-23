@@ -121,12 +121,19 @@ smem 冲突 + 低 occ
 
 ## 5. 当前仍未解决的（下一步）
 
-1. **O9（wgmma + TMA + warp specialization）**：当前 main 的墙是「L2 吞吐 + 2 CTA/SM」，
-   而 smem 已 >100KB，只用 `mma.sync` 的数据通路降不下来。只有换 Hopper 的
-   `wgmma`（寄存器操作数、更省 smem）+ TMA（省地址/搬运指令），才能同时降 smem、提 occupancy。
-   O9a（LSE 上 wgmma）已完成，main 的 wgmma 化进行中。
-2. **O7b**：dK/dV 的跨 CTA 残余 red（108 M）→ 分块 `*_accum`+convert，顺带拿到**确定性反向**。
-3. **MLA（head_dim=512）**：已是张量核，但 1 CTA/SM（smem/寄存器大），需继续降 smem 或 persistent。
+> 第 51 轮（O15a/O16）把 fp16 main 的墙**定量钉死**：ncu 拆 L2 扇区，**`red`（dK/dV 的
+> 跨 CTA `atomicAdd`）占 73.1%**、DRAM 仅 4.2% ⇒ main 是 **L2 原子字节数 bound**。
+> 同一轮：TMA+SW128 冒烟逐位 PASS（建好 Hopper bulk-tensor 通路，并发现 HD=128 的 K-major
+> tile 必须拆成 2×K=64 chunk 才能喂 TMA），而「分段 `wait_group` 重叠 epilogue」实测**中性**
+> （0.99–1.00×）——证明动搬运/等待打不动原子墙。详见 `docs/01` §14i。
+
+1. **跨 warpgroup 归约（BM=128，2 warpgroups）**：**唯一能直接砍 half dK/dV 原子字节**的杠杆
+   （一个 KV 元素由 `nblk/2` 个 CTA 贡献，两组的 dV/dK 偏和在 smem 合并一次再写）。
+   代价 smem≈176KB→1 CTA/SM。这是 O9b-2b 的正解，替代原先「TMA 就能降 smem 提 occupancy」的判断。
+2. **O7b**：dK/dV 的跨 CTA red → 分块 `*_accum`+convert（顺带拿到**确定性反向**）；会多一趟
+   读回、字节不减，只在需要确定性时值得。
+3. **TMA 化 operand（O15a 通路已就绪）**：压 `long_scoreboard`/指令数，但动不了 L2 red。
+4. **MLA（head_dim=512）**：已是张量核，但 1 CTA/SM（smem/寄存器大），需继续降 smem 或 persistent。
 
 ---
 
