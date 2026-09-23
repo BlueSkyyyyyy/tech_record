@@ -1,0 +1,74 @@
+######## src/fp8/fa_bwd_fp8_main.cu ########
+==== b1_s512_h16_d128_causal_fp8 ====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 128 x 16 x 1  (ksplit=16, base_grid=128)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.1799 ms  11.94 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0311 ms | preprocess 0.0474 ms | main 0.0720 ms | convert 0.0294 ms
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+==== b1_s1024_h32_d128_causal_fp8 ====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 128 x 32 x 1  (ksplit=8, base_grid=512)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.7099 ms  24.20 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1004 ms | preprocess 0.1032 ms | main 0.4414 ms | convert 0.0648 ms
+  dq   vs ref: max_abs=2.400e-01  max_rel=1.887e+02
+  dk   vs ref: max_abs=4.195e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.536e-01  max_rel=8.068e+01
+==== b1_s4096_h16_d128_causal_fp8 ====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+O7: use_regdq=1 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 3.2661 ms  42.08 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1846 ms | preprocess 0.3960 ms | main 2.5215 ms | convert 0.1640 ms
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01
+==== b1_s1024_h2_d512_causal_fp8 ====
+smem = 205824 bytes (201.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 64 x 2 x 1  (ksplit=4, base_grid=32)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.5385 ms  7.98 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0196 ms | preprocess 0.1389 ms | main 0.3243 ms | convert 0.0557 ms
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+######## src/fp8/fa_bwd_fp8_mma_onefile.cu ########
+==== b1_s512_h16_d128_causal_fp8 ====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 128 x 16 x 1  (ksplit=16, base_grid=128)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.1777 ms  12.09 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0302 ms | preprocess 0.0469 ms | main 0.0716 ms | convert 0.0290 ms
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+==== b1_s1024_h32_d128_causal_fp8 ====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 128 x 32 x 1  (ksplit=8, base_grid=512)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.7080 ms  24.26 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1000 ms | preprocess 0.1031 ms | main 0.4429 ms | convert 0.0620 ms
+  dq   vs ref: max_abs=2.400e-01  max_rel=1.887e+02
+  dk   vs ref: max_abs=4.195e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.536e-01  max_rel=8.068e+01
+==== b1_s4096_h16_d128_causal_fp8 ====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+O7: use_regdq=1 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 3.2779 ms  41.93 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1832 ms | preprocess 0.3953 ms | main 2.5265 ms | convert 0.1729 ms
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01
+==== b1_s1024_h2_d512_causal_fp8 ====
+smem = 205824 bytes (201.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 64 x 2 x 1  (ksplit=4, base_grid=32)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.5386 ms  7.97 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0190 ms | preprocess 0.1377 ms | main 0.3245 ms | convert 0.0575 ms
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01

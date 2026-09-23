@@ -446,6 +446,30 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 - 同轮顺带 A/B **证伪**两条 fp16 主 kernel 假设：`(BM=32,BN=64,PIPE=2)`（慢 1.75×）、
   `cp.async .L2::256B`（无变化）。详见 `03` §19。
 
+> **下表为 O7e（第四十五轮）最新值**：先用 `MemoryWorkloadAnalysis_Tables` 重新定位——
+> O7 后 fp8 main 的**第一墙是 L1/TEX 66–71%**（L2 已降到 43.7%），其中 **register spill 占
+> L1TEX sector 12%**（REGDQ 的 `dqacc` + O3 寄存器预取抢 168-reg 预算）、**shared store
+> bank conflict 3.5-way/69.8%**（fold 段逐字节写）。① fold 的 `Ap/dS3/dS2` 改 **4B 向量化写**
+> （store 指令 ÷4，store 冲突 68.6M→36.3M）；② `REGDQ` 生效时**关 O3 预取**（让出 16 regs）。
+> **数值与 O7/O4b/O11 逐位相同**；收益集中在 S=4096（`REGDQ` 生效）。逐项见 `03` §20。
+
+| shape | ksplit | ours total（含 quant） | ours main | main vs O7 | main TF（峰值占比） | TE FP8（同 session，纯反向） |
+|---|---|---|---|---|---|---|
+| d128 (1,512,16,128) | 16 | 0.180 ms | 0.0720 ms | ~1.00× | 29.0（1.47%） | 0.1011 ms / 42.5 TF |
+| d128 (1,1024,32,128) | 8 | 0.710 ms / 24.2 TF | 0.4414 ms | **~1.04×** | 37.4（1.89%） | 0.2059 ms / 166.9 TF |
+| d128 (1,4096,16,128) | 4 | **3.266 ms / 42.1 TF** | **2.5215 ms** | **1.036×** | 54.5（2.76%） | 0.5899 ms / 466.0 TF |
+| MLA (1,1024,2,512) | 4 | 0.539 ms | 0.3243 ms | ~1.00× | 13.2（0.67%） | NA（FA/TE 不支持） |
+
+- ncu（main, S=4096）：Duration 2.66→**2.57ms**、**L1/TEX 71.07→66.06%**、
+  spill 占 L1TEX sector 12.09→**5.74%**、store 冲突 **68.6M→36.3M**；数值逐位不变、
+  168 regs / 70.66KB / 3 CTA/SM 不变。
+- **重要结论：O7b（去 dK/dV 跨 CTA red）已不是头号杠杆**（L2 43.7% < L1/TEX 66%）；
+  下一步应转向 **fp8 main 的 Hopper `wgmma`（O9c）**。
+- 同 session 纯反向基线（`fa_vs_te_bwd_only.py`，FA2/FA3/TE 三列）：MHA S=4096 FA3
+  fp16 **0.3245ms/847TF**、TE fp16 0.4441/619、FA2 0.7286/377；bf16 FA3 0.3201/859；
+  TE FP8 0.5899ms/466TF。ours fp8 main 2.5215ms ⇒ TE FP8 整条反向的 **~4.3×**
+  （S=512 main 0.072ms 已快过 TE FP8 0.101ms）。
+
 ---
 
 ## 3. ncu bound 小结（逐 dtype）

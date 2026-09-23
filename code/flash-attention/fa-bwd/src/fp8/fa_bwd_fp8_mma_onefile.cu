@@ -24,7 +24,8 @@ static constexpr int THREADS = 128;
 static constexpr int WN = 2;
 
 // ----------------------------- O11：快速指数/对数 -----------------------------
-// 与两文件版 `fa_bwd_fp8_kernels.cuh` 逐字一致。
+// softmax 热点的 libdevice 精确 `expf`/`logf` 换成硬件内建 `__expf`/`__logf`
+// （MUFU.EX2/LG2）。fp8 容差 O(1)，无影响；`FAST_EXP=0` 退回精确版做 A/B。
 #ifndef FAST_EXP
 #define FAST_EXP 1
 #endif
@@ -157,7 +158,8 @@ __device__ __forceinline__ void mma_e4e5(float c[4], const uint32_t a[4],
 __device__ __forceinline__ uint32_t smem_u32(const void* p) {
   return (uint32_t)__cvta_generic_to_shared(p);
 }
-// O11：16B 异步拷贝（fp8 的 16B = 16 个元素），与两文件版逐字一致。
+// O11：16B 异步拷贝（fp8 的 16B = 16 个元素）。fp8 主 kernel 用的是 O3 寄存器预取，
+// 但 LSE 里 K/Q 只读一次、不需要留寄存器，用 `cp.async.cg`（L2-only）双缓冲更省。
 __device__ __forceinline__ void cp_async16(void* dst_smem, const void* src_gmem) {
   uint32_t s = smem_u32(dst_smem);
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(src_gmem));
@@ -723,6 +725,12 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   static_assert(HD % NTW == 0, "HD 必须是 128 的整数倍");
   // O7：本实例是否把 dQ 沿 nt 累加在寄存器里（见 kernel 上方的说明）。
   constexpr bool kRegDq = REGDQ && (HD / NTW == 1);
+  // O7e：`REGDQ` 的 `dqacc[2][8][4]`（64 个 fp32）把寄存器预算占满，再叠上 O3 的
+  //   寄存器预取（pk0/pk1/pv0/pv1，16 个 uint32）会让 ptxas 强制 spill（ncu：局部内存
+  //   占 L1TEX sector 的 ~12%、Est. 27.6%）。这里在 REGDQ 生效时**关掉 O3 预取**，退回
+  //   O4b 的 4B 向量化同步读（K/V 只占一小段，延迟被 5 个 GEMM 盖住），把寄存器让给 dqacc。
+  //   实测（S=4096 ksplit=4）prefetch off 2.55→2.52ms；小 S（use_regdq=false）维持预取。
+  constexpr bool kPrefetch = Cfg::use_prefetch && !kRegDq;
 
   extern __shared__ __align__(16) char smem[];
   unsigned char* Qs  = reinterpret_cast<unsigned char*>(smem);
@@ -806,7 +814,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   // ---- O4a：Q/dO 载入与 tile 的 K/V 落盘写的是互不重叠的 smem（Qs/Qp/dOs/dOp vs
   //            Ks/Vs/Kp），故把原来 prologue 的两处 __syncthreads 合并为一处。----
   uint32_t pk0[NPU], pk1[NPU], pv0[NPU], pv1[NPU];
-  if (Cfg::use_prefetch) {
+  if (kPrefetch) {
     kv_prefetch_pair<NPU, HD>(k8, v8, nt_begin * BN, S, Hkv, hkv, b, tid, pk0, pk1, pv0,
                               pv1);
     kv_commit_pair<NPU, HD>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
@@ -844,7 +852,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     const int j0 = nt * BN;
     // ---- O3：预取下一 tile 的 K/V 到寄存器（延迟被本轮 5 个 GEMM 覆盖）----
     const int nnt = nt + 1;
-    if (Cfg::use_prefetch && nnt < nt_end)
+    if (kPrefetch && nnt < nt_end)
       kv_prefetch_pair<NPU, HD>(k8, v8, nnt * BN, S, Hkv, hkv, b, tid, pk0, pk1, pv0,
                                 pv1);
 
@@ -935,11 +943,21 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       }
       scA = __shfl_sync(0xffffffffu, scA, jl * 4);
       sc3 = __shfl_sync(0xffffffffu, sc3, jl * 4);
+      // O7e：每线程的 16 个 m 是连续的（`m = sub4*16+t`，t 递增）⇒ Ap/dS3 地址连续。
+      //   把 16 次 1B 的 `st.shared.u8` 折成 4 次 4B `st.shared.u32`（QTS=BM+16 是 4 的倍数、
+      //   `sub4*16+t4*4` 也 4 对齐），store 指令数 ÷4，消掉 fold 段的大部分 shared store
+      //   请求（ncu：fold 曾占 store 指令 ~60%、store 冲突 69.8% 波前）。数值逐位不变。
 #pragma unroll
-      for (int t = 0; t < 16; ++t) {
-        int m = sub4 * 16 + t;
-        Ap[j * QTS + m] = cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA);
-        dS3[j * QTS + m] = cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3);
+      for (int t4 = 0; t4 < 4; ++t4) {
+        uint32_t pa = 0, d3 = 0;
+#pragma unroll
+        for (int tt = 0; tt < 4; ++tt) {
+          int m = sub4 * 16 + t4 * 4 + tt;
+          pa |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
+          d3 |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
+        }
+        *reinterpret_cast<uint32_t*>(Ap + j * QTS + sub4 * 16 + t4 * 4) = pa;
+        *reinterpret_cast<uint32_t*>(dS3 + j * QTS + sub4 * 16 + t4 * 4) = d3;
       }
     }
     {
@@ -956,10 +974,16 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       float sc2 = (amax2 > 0.f) ? amax2 / kE5M2Max : 1.f;
       if (sub2 == 0) sds2[m] = sc2;
       sc2 = __shfl_sync(0xffffffffu, sc2, ml * 2);
+      // O7e：`j = sub2*16+t` 连续 ⇒ dS2[m][j] 的 16 个 j 也连续，同样折成 4 次 4B 写。
 #pragma unroll
-      for (int t = 0; t < 16; ++t) {
-        int j = sub2 * 16 + t;
-        dS2[m * DSS2 + j] = cvt_e5m2(Ss[m * PSS + j] * ks_s[j] / sc2);
+      for (int t4 = 0; t4 < 4; ++t4) {
+        uint32_t d2 = 0;
+#pragma unroll
+        for (int tt = 0; tt < 4; ++tt) {
+          int j = sub2 * 16 + t4 * 4 + tt;
+          d2 |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * ks_s[j] / sc2) << (8 * tt);
+        }
+        *reinterpret_cast<uint32_t*>(dS2 + m * DSS2 + sub2 * 16 + t4 * 4) = d2;
       }
     }
     __syncthreads();
@@ -1055,7 +1079,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     __syncthreads();
     // ---- O3：落盘预取的下一 tile 的 K/V（本轮 GEMM 已全部读完 smem），并更新 ks/vs ----
     if (nt + 1 < nt_end) {
-      if (Cfg::use_prefetch) {
+      if (kPrefetch) {
         kv_commit_pair<NPU, HD>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
       } else {
         kv_load_pair<HD, BN>(k8, v8, (nt + 1) * BN, S, Hkv, hkv, b, tid, Ks, Vs, Kp, ASLD,
@@ -1105,7 +1129,6 @@ __global__ void convert_kernel(const float* __restrict__ dq_acc,
     dv[i] = dv_acc[i];
   }
 }
-
 
 #include <algorithm>
 #include <cmath>
