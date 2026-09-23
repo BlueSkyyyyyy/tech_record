@@ -839,12 +839,29 @@ bf16 容差 ~1e-2，无影响：S=512 dq/dk/dv vs ref 仍 9.001/12.61/13.65e-3�
 
 ---
 
+## 6p. O13-bf16：主 kernel auto tile 重新标定 + memset/convert 冗余（与 fp16 同款）
+
+O6c 的 auto tile 启发式在 O7c-PREL 之后过时：S=512 MHA 上 `(64,64,2)` 的主 kernel 比自动档
+`(32,32,1)` **快 1.27×**（bf16 O5c A/B 0.0703→0.0576ms）。本轮与 fp16 **逐字同款**改动：
+1. 取消 `BM=32` 分支（`--bm=32` 仍可覆盖）；`BN=64` 判据改为 `S≥4096 || grid≤256 || grid>600`
+   （`256<grid≤600` 保留 BN=32 以避开 2 CTA/SM 的 2-波坏量化点）。
+2. HD=128 时 dQ 由主 kernel 覆盖写 ⇒ 省掉 `d_dq_acc` 的 memset（仅 HD=512 保留）。
+3. `convert_kernel` 改 `float4` 读 + `bf162` 写。
+
+**数值与 O5b~O10 逐位相同**（S512 9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3）；
+单/两文件一致。**性能**：S512 main 0.0727→**0.0572（1.27×）**、total 0.1267→**0.1112（1.14×）**；
+S1024 kv1 main 0.4611→**0.4362（1.06×）**、kv4(h64) 0.4921→**0.4525（1.09×）**；S4096 不变。
+convert 桶 S512 0.0157→0.0132、S4096 0.1037→0.0939ms。原始输出
+`src/bf16/fa_bwd_bf16_mma_{main,onefile}_o13_*.out.txt`。（ncu 与 fp16 逐项同构。）
+
+---
+
 ## 8. 下一步
 
 见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）、O8（preprocess mma，§6f）、O6（main
 `cp.async` 双缓冲，§6g）、O6b（K/V 降 smem 回 3 CTA/SM + A 转置读，§6h）、O8b（LSE 负载
 均衡 + cp.async，§6i）、O6c（tile 几何参数化 + 小网格自适应，§6j）、O7c（LSE/D 预装 +
 float4 试错，§6k）、MLA 张量核（§6l）、O10（Q/dO 向量化 + cp.async 重叠，§6m）、
-O11（快速 exp/log，§6n）、O9a（LSE wgmma，§6o）已完成**；
+O11（快速 exp/log，§6n）、O9a（LSE wgmma，§6o）、O13（auto tile 重标定，§6p）已完成**；
 接下来是 **O9b**（把 wgmma 推到主 kernel 的 5 个 GEMM，对标 FA3）。backlog：fp8 侧残余
 red（O7b）、MLA 降 smem 冲 2 CTA/SM / split-KV。
