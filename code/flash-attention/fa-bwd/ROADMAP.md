@@ -1320,8 +1320,45 @@
    - 原始输出 `src/fp8/fa_bwd_fp8_main_o14_sweep.out.txt`、
      `src/fp8/fa_bwd_fp8_mma_onefile_o14_sweep.out.txt`、
      `src/fp8/fa_bwd_fp8_main_o14_ncu_quant_{old,new}_s4096.out.txt`、
-     `src/fp8/fa_bwd_fp8_o14_tebench{,_base3,_req}.out.txt`、
-     `src/fp8/fa_bwd_fp8_o14_fa3_te_baseline_fp16.out.txt`；文档 `docs/03` §24、`docs/04` §2.3。
+      `src/fp8/fa_bwd_fp8_o14_tebench{,_base3,_req}.out.txt`、
+      `src/fp8/fa_bwd_fp8_o14_fa3_te_baseline_fp16.out.txt`；文档 `docs/03` §24、`docs/04` §2.3。
+
+- 2026-09-23（第五十轮）：**O7e-2 完成（fp8 main fold 的 shared-load bank conflict 修复，
+  单/两文件；main 1.02–1.04×、shared load 冲突 −53.5%）**。
+   - 动机：O7e/O9c-2/O12 之后 fp8 main 第一墙仍是 **L1/TEX ~65%**，但一直没拆开「读」与「写」。
+     本轮用 `--set full` 的 `Memory Workload Analysis Tables` 拆开：**shared loads 93.1M 请求、
+     62.8M bank conflict（2.1-way，占 load 波前 32%）** 才是第一来源（shared store 冲突 35.9M
+     是第二）。**先证伪**「写指令数」这条路：只把 fold 写从 4B 折成 16B（`st.shared.v4.u32`）
+     仅 1.007×（S4096）、S512 持平、且增大 spill ⇒ 墙在**读冲突**。
+   - **根因**：fold 的 Ap/dS3 段读 `Ps[m*PSS+j]`（`PSS=33`）的 bank = `(m+j) mod 32`，原按
+     `m=sub4*16+t` 分工 ⇒ 4 个 lane 组的 m 相差 16、`16*PSS≡16 (mod32)` ⇒ `sub4=0/2`、`1/3`
+     两两同 bank，**恒 2-way conflict**。数学上 `16*PSS mod32 ∈ {0,16}`，改 padding 消不掉，
+     必须改 lane→m 映射。
+   - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+     把每 lane 的 16 个 m 从「`sub4*16+t`」改成「两半 `sub4*8 + t + half*32`」⇒ 固定 `t` 时
+     4 组 lane 起始 m 相差 8、bank `{0,8,16,24}+{0..7}` 恰铺满 0..31 ⇒ **无冲突**；`fmaxf`
+     可交换结合 ⇒ amax 与量化结果**逐位不变**。输出：每 lane 两段各 8 个连续 m 用
+     **8B `st.shared.v2.u32`**、dS2 段用 **16B `st.shared.v4.u32`**。模板开关 `F16B`、
+     CLI `--f16b=0` 做同 session A/B。
+   - **性能（同 session A/B，event，main-only）**：S512 0.0690→**0.0679（1.017×）**、
+     S1024H32 0.4036→**0.3921（1.029×）**、GQA kv4 0.3916→**0.3792（1.033×）**、
+     MQA kv1 0.7109→**0.6834（1.040×）**、S4096 2.3115→**2.2180（1.042×）**。端到端 total
+     S=4096 **2.8942ms（47.5 TF，ours/TE FP8 4.98×→4.92×）**、S=1024H32 0.6056、S512 0.1632、
+     GQA kv4 0.5617、MLA S1024H2 0.5298。同 session 纯反向 FA3 MHA S4096 fp16 0.3242ms/848TF、
+     TE 0.4429/621（fp8 无 FA 基线）。
+   - **ncu（main, S=4096，同 binary `--f16b` 0/1）**：**shared load 冲突 62.77M→29.18M
+     （−53.5%）**、总多余 wavefronts 79.87M→**41.53M**、**L1/TEX 64.80→59.97%**、
+     Duration 2.41→**2.27ms（−5.8%）**；L2 47.0→49.9%、Compute 40.6→41.8%、regs 168 / occ 18.08%
+     / Waves 10.34 不变；shared load 请求数不变（证明是映射而非请求数）。**新墙 = L1/TEX 60%
+     （`ldmatrix` 读 + fold 残余）+ L2 50%（dK/dV 跨 CTA red）+ 寄存器 spill（~2.7M local）**。
+   - **数值与 O7/O12/O14 逐位一致**（S512 2.426/2.975/3.735e-1；S1024H32 2.400/4.195/3.536e-1；
+     S4096 2.635/2.643/3.216e-1；GQA kv4 2.517/5.408/7.072e-1；MQA kv1 4.097e-1/1.519/2.127；
+     MLA S1024H2 2.232/3.337/3.602e-1；A/B max_abs 仅 1e-7 量级，atomic 次序），单/两文件一致。
+   - 原始输出 `src/fp8/fa_bwd_fp8_main_o7e2_sweep.out.txt`、
+     `src/fp8/fa_bwd_fp8_mma_onefile_o7e2_sweep.out.txt`、
+     `src/fp8/fa_bwd_fp8_main_o7e2_ncu_s4096{,_f16b0}.out.txt`、
+     `src/fp8/fa_bwd_fp8_o7e2_tebench.out.txt`、`src/fa_bwd_o7e2_fa3_te_baseline_fp16.out.txt`；
+     文档 `docs/03` §25、`docs/04` §2.3/§3。
 
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
@@ -1516,6 +1553,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    uncoalesced global −87.6%，数值逐位一致（`docs/03` §23）。fp8 后续的 L1/TEX 墙改走
 >    **fold 向量化 / TMA 化 operand / dK/dV 去原子**（非转置手段）。fp16/bf16 的 **O9b-2b**
 >    （TMA + P/dS 双缓冲跨-tile 流水 + 压 smem 冲 3 CTA/SM）仍按原计划。
+>    **O7e-2 已完成（第五十轮）**：用 ncu Memory Tables 把 fp8 main 的 L1/TEX 拆开，第一来源是
+>    **shared load 冲突（93.1M 请求、2.1-way、62.8M 冲突）**——fold 读 `Ps/Ss` 列时 4 lane 组
+>    m 间距 16（`16*PSS≡16`）恒撞。改 lane→m 映射为 `sub4*8+t+half*32`（bank 铺满 0..31）+ 8B/16B
+>    向量写：**shared load 冲突 −53.5%、L1/TEX 64.8→60.0%、main 1.02–1.04×**，数值逐位不变。
+>    同时证伪「fold 写折到 16B」（仅 1.007×、增大 spill）⇒ 墙在**读冲突**。`docs/03` §25。
+>    fp8 剩余可动：**TMA 化 operand / dK/dV 去原子**（L1/TEX 60% + L2 50%）。
  >    **bf16 版 O9b-2 已完成（第四十四轮）**：
 >    逐字 dtype 参数化，数值逐位相同、main S4096 0.979×/S512 0.960×、ncu 与 fp16 逐项一致（`docs/01b` §6r）。详见 `docs/01` §14g/§14h。
 >
@@ -1680,9 +1723,15 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 - [x] **O7e（第四十五轮）** fp8 main：fold 4B 向量化写 + `REGDQ` 下关 O3 预取。
       重定位 fp8 第一墙为 **L1/TEX**（见任务清单 O9c），register spill 与 store 冲突各压掉约一半，
       main S=4096 **1.036×**、数值逐位不变。详见 `docs/03` §20、`docs/04` §2.3。
+- [x] **O7e-2（第五十轮）** fp8 main fold 的 shared-load bank conflict 修复：lane→m 映射
+      `sub4*16+t`→`sub4*8+t+half*32`（消 `Ps/Ss` 列读的恒 2-way 冲突）+ 8B/16B 向量写；
+      shared load 冲突 **−53.5%**、L1/TEX 64.8→60.0%、main 1.02–1.04×、数值逐位不变。
+      另证伪「fold 写折 16B」（1.007×、增大 spill）。详见 `docs/03` §25、`docs/04` §2.3。
 - [ ] （backlog，**已降优先级**）O7b：dK/dV 的跨 CTA 归约（分块 `*_accum` + convert，或按 KV
       列块常驻 / Q 块累加），消剩余 108.5M red 并得到确定性反向。**O7e 已证明 O7b 针对的 L2 墙
-      只剩 43.7% < L1/TEX 66%，回报低于 fp8 `wgmma`（O9c）**，故排到 O9c 之后。
+      只剩 43.7% < L1/TEX 66%，回报低于 fp8 `wgmma`（O9c）**，故排到 O9c 之后。**O7e-2 后
+      fp8 main 的 L1/TEX 仍 60%、L2 50%（red），且 O9c-2b 已硬件阻塞 ⇒ 下一步只剩
+      `TMA 化 operand` / `dK/dV 去原子`；或转 fp16/bf16 的 O9b-2b**。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog

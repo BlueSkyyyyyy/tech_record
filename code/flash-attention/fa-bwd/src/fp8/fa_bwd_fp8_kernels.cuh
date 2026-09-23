@@ -1171,7 +1171,11 @@ __global__ void delta_kernel(const float* __restrict__ o,
 //   零 global 读。fp16/bf16 早在 O7c（第三十五轮）就做了这一步（main +14–19%），但 fp8 的
 //   GEMM1/2 epilogue 一直按 (qi) 逐元素 global 读 lse/delta（ncu：global load 仅 9.8/32B/thread、
 //   38M 多余扇区）。`PREL=false` 退回逐元素 global 读，便于同 session A/B。
-template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true>
+// O7e-2：`F16B=true` 时修 fold 的 shared-load bank conflict（Ap/dS3 的 `Ps/Ss` 列读从
+//   `sub4*16` 起始改成 `sub4*8` 起始，4 组 lane 的 bank 铺满 0..31 无冲突）并把每 lane
+//   两段各 8 个连续 m 用 8B `st.shared.v2.u32` 落盘；dS2 用 16B `st.shared.v4.u32`。
+//   `F16B=false` 退回 O7e 的「`sub4*16` 起始 + 4×4B 写」，便于同 session A/B。数值逐位不变。
+template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? 3 : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
@@ -1506,12 +1510,20 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       const int jl = lane >> 2, sub4 = lane & 3;  // 每 warp 8 行 × 4 lane 分工
       const int j = wid * 8 + jl;
       float amaxA = 0.f, amax3 = 0.f;
+      // O7e-2：把每个 lane 负责的 16 个 m 从「一整块 `sub4*16+t`」改成「两半 `sub4*8+t+
+      //   half*32`」。原因是 `Ps[m*PSS+j]` 的 bank=(m*PSS+j) mod32=(m+j) mod32（PSS=33）
+      //   在原映射下 sub4=0/2、1/3 的起始 m 相差 16 ⇒ bank 恒撞（16*PSS≡16 mod32），
+      //   ncu 实测 fold 读是 shared load 2.1-way conflict（占 load 波前 32%）的主要来源。
+      //   改成起始差 8 后 4 组 lane 的 bank 恰为 {0,8,16,24}+{0..7} = 0..31 各一次 ⇒ 无冲突。
+      //   amax 的 `fmaxf` 可交换结合 ⇒ 归约结果与原映射逐位相同（数值不变）。
 #pragma unroll
-      for (int t = 0; t < 16; ++t) {
-        int m = sub4 * 16 + t;
-        amaxA = fmaxf(amaxA, fabsf(Ps[m * PSS + j] * dos_s[m]));
-        amax3 = fmaxf(amax3, fabsf(Ss[m * PSS + j] * qs_s[m]));
-      }
+      for (int half = 0; half < 2; ++half)
+#pragma unroll
+        for (int t = 0; t < 8; ++t) {
+          int m = F16B ? (sub4 * 8 + t + half * 32) : (sub4 * 16 + half * 8 + t);
+          amaxA = fmaxf(amaxA, fabsf(Ps[m * PSS + j] * dos_s[m]));
+          amax3 = fmaxf(amax3, fabsf(Ss[m * PSS + j] * qs_s[m]));
+        }
       amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 1));
       amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 2));
       amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 1));
@@ -1524,21 +1536,43 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       }
       scA = __shfl_sync(0xffffffffu, scA, jl * 4);
       sc3 = __shfl_sync(0xffffffffu, sc3, jl * 4);
-      // O7e：每线程的 16 个 m 是连续的（`m = sub4*16+t`，t 递增）⇒ Ap/dS3 地址连续。
-      //   把 16 次 1B 的 `st.shared.u8` 折成 4 次 4B `st.shared.u32`（QTS=BM+16 是 4 的倍数、
-      //   `sub4*16+t4*4` 也 4 对齐），store 指令数 ÷4，消掉 fold 段的大部分 shared store
-      //   请求（ncu：fold 曾占 store 指令 ~60%、store 冲突 69.8% 波前）。数值逐位不变。
+      // O7e：把逐 1B 的 `st.shared.u8` 折成向量写。`F16B=true` 用新映射（每 lane 两段
+      //   各 8 个连续 m）⇒ 每段一次 8B `st.shared.v2.u32`；`false` 退回原映射的 4×4B。
+      //   QTS=BM+16=80（16 与 8 的倍数）、数组基址 16B 对齐 ⇒ 合法。数值逐位不变。
+      if constexpr (F16B) {
 #pragma unroll
-      for (int t4 = 0; t4 < 4; ++t4) {
-        uint32_t pa = 0, d3 = 0;
+        for (int half = 0; half < 2; ++half) {
+          uint32_t pa2[2] = {0, 0}, d32[2] = {0, 0};
 #pragma unroll
-        for (int tt = 0; tt < 4; ++tt) {
-          int m = sub4 * 16 + t4 * 4 + tt;
-          pa |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
-          d3 |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
+          for (int t4 = 0; t4 < 2; ++t4) {
+#pragma unroll
+            for (int tt = 0; tt < 4; ++tt) {
+              int m = sub4 * 8 + t4 * 4 + tt + half * 32;
+              pa2[t4] |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
+              d32[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
+            }
+          }
+          *reinterpret_cast<uint2*>(Ap + j * QTS + sub4 * 8 + half * 32) =
+              make_uint2(pa2[0], pa2[1]);
+          *reinterpret_cast<uint2*>(dS3 + j * QTS + sub4 * 8 + half * 32) =
+              make_uint2(d32[0], d32[1]);
         }
-        *reinterpret_cast<uint32_t*>(Ap + j * QTS + sub4 * 16 + t4 * 4) = pa;
-        *reinterpret_cast<uint32_t*>(dS3 + j * QTS + sub4 * 16 + t4 * 4) = d3;
+      } else {
+        uint32_t pa4[4] = {0, 0, 0, 0}, d34[4] = {0, 0, 0, 0};
+#pragma unroll
+        for (int t4 = 0; t4 < 4; ++t4) {
+#pragma unroll
+          for (int tt = 0; tt < 4; ++tt) {
+            int m = sub4 * 16 + t4 * 4 + tt;
+            pa4[t4] |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
+            d34[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
+          }
+        }
+#pragma unroll
+        for (int t4 = 0; t4 < 4; ++t4) {
+          *reinterpret_cast<uint32_t*>(Ap + j * QTS + sub4 * 16 + t4 * 4) = pa4[t4];
+          *reinterpret_cast<uint32_t*>(dS3 + j * QTS + sub4 * 16 + t4 * 4) = d34[t4];
+        }
       }
     }
     {
@@ -1556,15 +1590,24 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       if (sub2 == 0) sds2[m] = sc2;
       sc2 = __shfl_sync(0xffffffffu, sc2, ml * 2);
       // O7e：`j = sub2*16+t` 连续 ⇒ dS2[m][j] 的 16 个 j 也连续，同样折成 4 次 4B 写。
+      // O7e-2：16 个连续 j 一次 16B `st.shared.v4.u32`（DSS2=48 是 16 的倍数、基址对齐）。
+      uint32_t d2_4[4] = {0, 0, 0, 0};
 #pragma unroll
       for (int t4 = 0; t4 < 4; ++t4) {
-        uint32_t d2 = 0;
 #pragma unroll
         for (int tt = 0; tt < 4; ++tt) {
           int j = sub2 * 16 + t4 * 4 + tt;
-          d2 |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * ks_s[j] / sc2) << (8 * tt);
+          d2_4[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * ks_s[j] / sc2) << (8 * tt);
         }
-        *reinterpret_cast<uint32_t*>(dS2 + m * DSS2 + sub2 * 16 + t4 * 4) = d2;
+      }
+      if constexpr (F16B) {
+        *reinterpret_cast<uint4*>(dS2 + m * DSS2 + sub2 * 16) =
+            make_uint4(d2_4[0], d2_4[1], d2_4[2], d2_4[3]);
+      } else {
+#pragma unroll
+        for (int t4 = 0; t4 < 4; ++t4) {
+          *reinterpret_cast<uint32_t*>(dS2 + m * DSS2 + sub2 * 16 + t4 * 4) = d2_4[t4];
+        }
       }
     }
     __syncthreads();

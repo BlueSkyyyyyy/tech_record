@@ -1,0 +1,176 @@
+===== b1_s512_h16_d128_causal_fp8 (two-file) =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 68608 bytes (67.0 KB)
+grid main = 128 x 16 x 1  (ksplit=16, base_grid=128)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.1632 ms  13.16 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0155 ms | preprocess 0.0475 ms | main 0.0681 ms | convert 0.0322 ms
+[O9c-2 A/B] main mma(regdq=0) 0.0769 ms | wgmma(m64n32) 0.0746 ms (1.031x) | max_abs(wg-vs-mma) dq/dk/dv=4.539e-02/3.058e-02/5.639e-02
+[O11 A/B] lse O1 0.0679 ms | bal(单缓冲) 0.0602 ms (1.127x) | bal+cpasync 0.0395 ms (1.717x)
+[O9c A/B] lse mma(bal+cpasync) 0.0395 ms | wgmma(单缓冲) 0.0546 ms | wgmma(双缓冲) 0.0380 ms (1.040x) | LSE max_abs(vs mma)=6.895e-04
+[O12 A/B] main LSE/D preload off 0.0704 ms | on 0.0675 ms (1.043x) | max_abs(on-vs-off) dq=2.384e-07
+[O7e-2 A/B] main fold 4B 0.0690 ms | 16B 0.0679 ms (1.017x) | max_abs(16B-vs-4B) dq/dk/dv=1.192e-07/2.384e-07/4.768e-07
+[O14 A/B] quant old(per-row) 0.0323 ms | new(warp-per-row) 0.0151 ms (2.131x) | bitwise mismatch=0
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.381e-01  max_rel=2.387e+02
+  dk   vs te_dk: max_abs=4.429e-01  max_rel=2.378e+02
+  dv   vs te_dv: max_abs=8.546e-01  max_rel=6.898e+01
+===== b1_s1024_h32_d128_causal_fp8 (two-file) =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_causal_fp8
+B=1 S=1024 H=32 Hkv=32 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 68608 bytes (67.0 KB)
+grid main = 128 x 32 x 1  (ksplit=8, base_grid=512)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.6056 ms  28.37 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0412 ms | preprocess 0.1022 ms | main 0.3942 ms | convert 0.0680 ms
+[O9c-2 A/B] main mma(regdq=0) 0.4158 ms | wgmma(m64n32) 0.3943 ms (1.055x) | max_abs(wg-vs-mma) dq/dk/dv=5.310e-02/4.079e-02/6.301e-02
+[O11 A/B] lse O1 0.1665 ms | bal(单缓冲) 0.1118 ms (1.489x) | bal+cpasync 0.0795 ms (2.093x)
+[O9c A/B] lse mma(bal+cpasync) 0.0795 ms | wgmma(单缓冲) 0.1113 ms | wgmma(双缓冲) 0.0696 ms (1.142x) | LSE max_abs(vs mma)=5.771e-04
+[O12 A/B] main LSE/D preload off 0.4223 ms | on 0.3931 ms (1.074x) | max_abs(on-vs-off) dq=1.134e-05
+[O7e-2 A/B] main fold 4B 0.4036 ms | 16B 0.3921 ms (1.029x) | max_abs(16B-vs-4B) dq/dk/dv=1.192e-07/4.768e-07/7.153e-07
+[O14 A/B] quant old(per-row) 0.0996 ms | new(warp-per-row) 0.0411 ms (2.426x) | bitwise mismatch=0
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.400e-01  max_rel=1.887e+02
+  dk   vs ref: max_abs=4.195e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.536e-01  max_rel=8.068e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=4.652e-01  max_rel=1.714e+02
+  dk   vs te_dk: max_abs=5.701e-01  max_rel=1.501e+02
+  dv   vs te_dv: max_abs=9.432e-01  max_rel=1.436e+02
+===== b1_s1024_h32_d128_kv4_causal_fp8 (two-file) =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp8
+B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 68608 bytes (67.0 KB)
+grid main = 128 x 32 x 1  (ksplit=8, base_grid=512)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.5617 ms  30.59 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0282 ms | preprocess 0.1010 ms | main 0.3846 ms | convert 0.0479 ms
+[O9c-2 A/B] main mma(regdq=0) 0.3974 ms | wgmma(m64n32) 0.3756 ms (1.058x) | max_abs(wg-vs-mma) dq/dk/dv=7.022e-02/2.030e-01/1.014e-01
+[O11 A/B] lse O1 0.1600 ms | bal(单缓冲) 0.1076 ms (1.487x) | bal+cpasync 0.0770 ms (2.078x)
+[O9c A/B] lse mma(bal+cpasync) 0.0770 ms | wgmma(单缓冲) 0.1094 ms | wgmma(双缓冲) 0.0676 ms (1.140x) | LSE max_abs(vs mma)=7.265e-04
+[O12 A/B] main LSE/D preload off 0.4080 ms | on 0.3787 ms (1.077x) | max_abs(on-vs-off) dq=2.750e-04
+[O7e-2 A/B] main fold 4B 0.3916 ms | 16B 0.3792 ms (1.033x) | max_abs(16B-vs-4B) dq/dk/dv=1.192e-07/1.669e-06/2.861e-06
+[O14 A/B] quant old(per-row) 0.0623 ms | new(warp-per-row) 0.0284 ms (2.192x) | bitwise mismatch=0
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.994e+02
+  dk   vs ref: max_abs=5.408e-01  max_rel=1.632e+02
+  dv   vs ref: max_abs=7.072e-01  max_rel=9.228e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.050e-01  max_rel=1.879e+02
+  dk   vs te_dk: max_abs=9.572e-01  max_rel=2.488e+02
+  dv   vs te_dv: max_abs=1.432e+00  max_rel=1.645e+02
+===== b1_s1024_h64_d128_kv1_causal_fp8 (two-file) =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp8
+B=1 S=1024 H=64 Hkv=1 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 68608 bytes (67.0 KB)
+grid main = 64 x 64 x 1  (ksplit=4, base_grid=1024)
+O7: use_regdq=1 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.9450 ms  36.36 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0407 ms | preprocess 0.1466 ms | main 0.6983 ms | convert 0.0595 ms
+[O9c-2 A/B] main mma(regdq=1) 0.7159 ms | wgmma(m64n32) 0.6514 ms (1.099x) | max_abs(wg-vs-mma) dq/dk/dv=5.971e-02/2.231e-01/2.254e-01
+[O11 A/B] lse O1 0.2472 ms | bal(单缓冲) 0.1262 ms (1.958x) | bal+cpasync 0.1000 ms (2.472x)
+[O9c A/B] lse mma(bal+cpasync) 0.1000 ms | wgmma(单缓冲) 0.1403 ms | wgmma(双缓冲) 0.0779 ms (1.285x) | LSE max_abs(vs mma)=7.370e-04
+[O12 A/B] main LSE/D preload off 0.7526 ms | on 0.6862 ms (1.097x) | max_abs(on-vs-off) dq=3.784e-04
+[O7e-2 A/B] main fold 4B 0.7109 ms | 16B 0.6834 ms (1.040x) | max_abs(16B-vs-4B) dq/dk/dv=1.192e-07/5.722e-06/1.049e-05
+[O14 A/B] quant old(per-row) 0.0995 ms | new(warp-per-row) 0.0408 ms (2.436x) | bitwise mismatch=0
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=4.097e-01  max_rel=1.536e+02
+  dk   vs ref: max_abs=1.519e+00  max_rel=2.333e+02
+  dv   vs ref: max_abs=2.127e+00  max_rel=2.814e+02
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.473e-01  max_rel=1.237e+02
+  dk   vs te_dk: max_abs=2.699e+00  max_rel=3.613e+02
+  dv   vs te_dv: max_abs=3.385e+00  max_rel=2.641e+02
+===== b1_s4096_h16_d128_causal_fp8 (two-file) =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 68608 bytes (67.0 KB)
+grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+O7: use_regdq=1 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 2.8942 ms  47.49 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0692 ms | preprocess 0.4024 ms | main 2.2665 ms | convert 0.1561 ms
+[O9c-2 A/B] main mma(regdq=1) 2.2916 ms | wgmma(m64n32) 2.0695 ms (1.107x) | max_abs(wg-vs-mma) dq/dk/dv=3.985e-02/1.500e-01/2.576e-02
+[O11 A/B] lse O1 0.9699 ms | bal(单缓冲) 0.4343 ms (2.233x) | bal+cpasync 0.3498 ms (2.773x)
+[O9c A/B] lse mma(bal+cpasync) 0.3498 ms | wgmma(单缓冲) 0.4841 ms | wgmma(双缓冲) 0.2756 ms (1.269x) | LSE max_abs(vs mma)=5.605e-04
+[O12 A/B] main LSE/D preload off 2.4383 ms | on 2.2447 ms (1.086x) | max_abs(on-vs-off) dq=5.406e-04
+[O7e-2 A/B] main fold 4B 2.3115 ms | 16B 2.2180 ms (1.042x) | max_abs(16B-vs-4B) dq/dk/dv=1.192e-07/4.172e-07/4.768e-07
+[O14 A/B] quant old(per-row) 0.1828 ms | new(warp-per-row) 0.0686 ms (2.667x) | bitwise mismatch=0
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=4.525e-01  max_rel=1.054e+02
+  dk   vs te_dk: max_abs=5.324e-01  max_rel=1.158e+02
+  dv   vs te_dv: max_abs=6.807e-01  max_rel=1.077e+02
+===== b1_s256_h2_d512_causal_fp8 (two-file) =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s256_h2_d512_causal_fp8
+B=1 S=256 H=2 Hkv=2 D=512 causal=1 scale=0.044194
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 205824 bytes (201.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 64 x 2 x 1  (ksplit=16, base_grid=8)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.1195 ms  2.25 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0113 ms | preprocess 0.0456 ms | main 0.0506 ms | convert 0.0119 ms
+[O12 A/B] main LSE/D preload off 0.0501 ms | on 0.0505 ms (0.994x) | max_abs(on-vs-off) dq=4.768e-07
+[O14 A/B] quant old(per-row) 0.0139 ms | new(warp-per-row) 0.0113 ms (1.229x) | bitwise mismatch=0
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.356e-01  max_rel=8.127e+01
+  dk   vs ref: max_abs=2.290e-01  max_rel=6.894e+01
+  dv   vs ref: max_abs=3.441e-01  max_rel=4.412e+01
+    dq[d   0..127] max_abs=1.997e-01
+    dq[d 128..255] max_abs=1.908e-01
+    dq[d 256..383] max_abs=2.138e-01
+    dq[d 384..511] max_abs=2.356e-01
+    dk[d   0..127] max_abs=1.958e-01
+    dk[d 128..255] max_abs=2.290e-01
+    dk[d 256..383] max_abs=1.729e-01
+    dk[d 384..511] max_abs=2.181e-01
+    dv[d   0..127] max_abs=3.441e-01
+    dv[d 128..255] max_abs=2.751e-01
+    dv[d 256..383] max_abs=2.387e-01
+    dv[d 384..511] max_abs=2.669e-01
+[compare] ours vs TE FP8
+===== b1_s1024_h2_d512_causal_fp8 (two-file) =====
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8
+B=1 S=1024 H=2 Hkv=2 D=512 causal=1 scale=0.044194
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 205824 bytes (201.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 64 x 2 x 1  (ksplit=4, base_grid=32)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.5298 ms  8.11 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0142 ms | preprocess 0.1395 ms | main 0.3248 ms | convert 0.0513 ms
+[O12 A/B] main LSE/D preload off 0.3256 ms | on 0.3210 ms (1.014x) | max_abs(on-vs-off) dq=2.251e-04
+[O14 A/B] quant old(per-row) 0.0205 ms | new(warp-per-row) 0.0140 ms (1.467x) | bitwise mismatch=0
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+    dq[d   0..127] max_abs=1.801e-01
+    dq[d 128..255] max_abs=1.420e-01
+    dq[d 256..383] max_abs=1.629e-01
+    dq[d 384..511] max_abs=2.232e-01
+    dk[d   0..127] max_abs=2.844e-01
+    dk[d 128..255] max_abs=3.337e-01
+    dk[d 256..383] max_abs=2.273e-01
+    dk[d 384..511] max_abs=2.713e-01
+    dv[d   0..127] max_abs=2.472e-01
+    dv[d 128..255] max_abs=2.419e-01
+    dv[d 256..383] max_abs=3.602e-01
+    dv[d 384..511] max_abs=2.730e-01
+[compare] ours vs TE FP8

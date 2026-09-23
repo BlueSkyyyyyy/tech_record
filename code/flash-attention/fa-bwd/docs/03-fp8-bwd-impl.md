@@ -2078,3 +2078,109 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --launch-count 1 \
 `src/fp8/fa_bwd_fp8_main_o14_ncu_quant_{old,new}_s4096.out.txt`、
 `src/fp8/fa_bwd_fp8_o14_tebench{,_base3,_req}.out.txt`、
 `src/fp8/fa_bwd_fp8_o14_fa3_te_baseline_fp16.out.txt`。
+
+## 25. O7e-2：fold 的 shared-load bank conflict 修复（Ap/dS3 列读无冲突映射）＋ 向量化写
+
+### 25.1 动机：用 ncu 的 Memory Tables 重新定位 L1/TEX 的第一来源
+
+O7e（§20）把 fp8 main 的第一墙定位为 **L1/TEX ~66%**（L2 已被 O4c/O7 压到 43.7%），
+并顺势把 fold 的**写**从逐字节折到 4B。但 O7e 没有拆开 L1/TEX 里**读**与**写**各占多少。
+本轮先用 `--set full` 的 `Memory Workload Analysis Tables` 拆开 O12 之后的 main（S=4096）：
+
+- **shared loads：93.07M 请求、62.80M bank conflict（2.1-way，占 store… 占 load 波前 32%）**，
+  是 L1/TEX 的第一来源；
+- shared stores：18.77M 请求、35.91M conflict（3.0-way，占 store 波前 64%）；
+- local memory（`REGDQ` 的寄存器 spill）：占 L1TEX sector 的 ~9.6%。
+
+**先证伪一条路**：只把 fold 的 Ap/dS3/dS2 从 4B 折成 16B `st.shared.v4.u32`（store 指令再 ÷4），
+S=4096 main 只 **1.007×**、S=512 持平，且 ptxas spill 反而增大 ⇒ **fold 的瓶颈不在 store
+指令数**（ncu 对 shared store 的 42% Est. Speedup 是上界、未兑现）。
+
+### 25.2 根因：fold 读 `Ps/Ss` 的列访问恒撞 bank
+
+fold 的 Ap/dS3 段（`Ap[j][m]=P[m][j]·dos[m]`）按「4 个 lane 各负责 16 个 m」分工：
+`jl=lane>>2`（输出行 j）、`sub4=lane&3`，原映射 `m = sub4*16 + t`（`t=0..15`）。
+`Ps[m*PSS+j]`（`PSS=BN+1=33`）的 bank = `(m*33+j) mod 32 = (m+j) mod 32`；固定 `t` 时
+4 个 `sub4` 的起始 m 相差 **16**，而 `16*33 ≡ 16 (mod 32)`，于是 `sub4=0/2`、`1/3` 两两同 bank
+⇒ **恒 2-way conflict**（这正是 62.8M conflict 的主项）。
+
+> 数学上 `16*PSS mod 32 ∈ {0,16}`（PSS 为任意整数），所以只要 lane 组的 m 间距是 16，
+> 这个冲突在「列读 + 该 PSS」组合下**无法靠改 padding 消除**；必须改 lane→m 的映射。
+
+### 25.3 改动（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+把每个 lane 负责的 16 个 m 从「一整块 `sub4*16+t`」改成「两半 `sub4*8 + t + half*32`」
+（`half∈{0,1}`、`t=0..7`）。此时固定 `t` 的 4 组 lane 起始 m 相差 **8**：
+
+```
+bank(m=sub4*8+t+half*32, j=wid*8+jl) = (sub4*8 + jl + const) mod 32
+  sub4*8 ∈ {0,8,16,24},  jl ∈ {0..7}  ⇒ 4×8 = 0..31 各一次 ⇒ 无冲突
+```
+
+- `amax` 的 `fmaxf` 可交换结合、且每 lane 仍覆盖全部 16 个 m ⇒ 归约结果与原映射**逐位相同**；
+- 输出落盘：每 lane 变成两段各 8 个连续 m ⇒ 用 **8B `st.shared.v2.u32`**（`QTS=80`、`sub4*8+
+  half*32` 均 8 对齐）；dS2 段（ncu 显示无冲突）保持 16 个连续 j 的 **16B `st.shared.v4.u32`**。
+- 模板开关 `F16B`（`--f16b=0` 退回原 `sub4*16` + 4×4B），用于同 session A/B。
+
+### 25.4 数值（ours-vs-ref，fp8 causal，max_abs，单/两文件逐位一致）
+
+| case | dq | dk | dv |
+|---|---|---|---|
+| MHA S=512 | 2.426e-1 | 2.975e-1 | 3.735e-1 |
+| MHA S=1024H32 | 2.400e-1 | 4.195e-1 | 3.536e-1 |
+| MHA S=4096 | 2.635e-1 | 2.643e-1 | 3.216e-1 |
+| GQA q32/kv4 | 2.517e-1 | 5.408e-1 | 7.072e-1 |
+| MQA q64/kv1 | 4.097e-1 | 1.519 | 2.127 |
+| MLA S=1024H2 D=512 | 2.232e-1 | 3.337e-1 | 3.602e-1 |
+
+全部与 O7/O12/O14 记录相同。A/B 的 `max_abs(16B-vs-4B)` 仅 1e-7 量级（dQ 跨 CTA `atomicAdd`
+求和次序），即**只改访存布局、未改数学口径**。
+
+### 25.5 性能（同 session A/B，CUDA event，main-only）
+
+| case | 4B（旧） | F16B（新） | 加速 |
+|---|---|---|---|
+| MHA S=512 | 0.0690 ms | **0.0679** | 1.017× |
+| MHA S=1024H32 | 0.4036 | **0.3921** | 1.029× |
+| GQA q32/kv4 | 0.3916 | **0.3792** | 1.033× |
+| MQA q64/kv1 | 0.7109 | **0.6834** | 1.040× |
+| MHA S=4096 | 2.3115 | **2.2180** | 1.042× |
+
+端到端 total：S=512 0.1632ms（13.2 TF）、S=1024H32 0.6056（28.4）、GQA kv4 0.5617（30.6）、
+S=4096 **2.8942ms（47.5 TF）**、MLA S=1024H2 0.5298。S=4096 ours/TE FP8 = **4.92×**
+（O14 4.98×）。同 session 纯反向 FA3 MHA S=4096 fp16 0.3242ms/848TF、TE 0.4429/621（fp8 无 FA 基线）。
+
+### 25.6 ncu（main, S=4096，同 session `--set full -c 1`，`--f16b` 0/1）
+
+| 指标 | `--f16b=0`（旧映射） | `--f16b=1`（O7e-2） |
+|---|---|---|
+| Duration | 2.41 ms | **2.27 ms（−5.8%）** |
+| **shared load bank conflict** | 62,766,668（67% 波前） | **29,180,259（−53.5%）** |
+| shared load 请求 | 93,069,312 | 93,069,312（不变） |
+| 总多余 wavefronts | 79,872,000（34%） | **41,533,440（21%）** |
+| L1/TEX | 64.80% | **59.97%** |
+| L2 | 47.00% | 49.89% |
+| Compute | 40.56% | 41.81% |
+| shared store 冲突 | 33,796,044 | 29,464,683 |
+| regs / occ / Waves | 168 / 18.08% / 10.34 | 168 / 18.08% / 10.34 |
+
+**机制确认**：只改 lane→m 映射（请求数不变）就把 shared load 冲突砍掉一半、L1/TEX 降到 60%、
+Duration −5.8%。**新墙仍是 L1/TEX 60%（`ldmatrix` 的 shared 读 + fold 残余）+ L2 50%
+（dK/dV 跨 CTA red）+ 寄存器 spill（~2.7M local 请求）**；fold 这一路的 bank conflict 已基本收口。
+
+### 25.7 复现
+
+```bash
+# 两文件（默认 F16B=1）；--f16b=0 退回旧映射做 A/B
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# ncu A/B
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --launch-count 1 \
+  --kernel-name regex:fa_bwd_fp8_mma_kernel -- --dir=.../b1_s4096_h16_d128_causal_fp8 --f16b=0
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o7e2_sweep.out.txt`（两文件 ×7 shape，含 O7e-2 A/B）、
+`src/fp8/fa_bwd_fp8_mma_onefile_o7e2_sweep.out.txt`（单文件 ×5 shape）、
+`src/fp8/fa_bwd_fp8_main_o7e2_ncu_s4096{,_f16b0}.out.txt`、
+`src/fp8/fa_bwd_fp8_o7e2_tebench.out.txt`、`src/fa_bwd_o7e2_fa3_te_baseline_fp16.out.txt`。
