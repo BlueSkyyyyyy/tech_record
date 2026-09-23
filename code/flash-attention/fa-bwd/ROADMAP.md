@@ -1171,6 +1171,50 @@
     `src/fp8/fa_bwd_fp8_main_o7b_base_ncu_full_s4096.out.txt`（O7 基线）、
     `src/fa_bwd_o7e_fa3_te_baseline.out.txt`；文档 `docs/03` §20、`docs/04` §2.3。
 
+- 2026-09-23（第四十六轮）：**O9c 第一步完成（fp8 Hopper `wgmma` 数据通路：冒烟 + LSE 上验证）**。
+   - 动机：O7e（第四十五轮）用 ncu 把 fp8 main 第一墙定位为 **L1/TEX 66–71%（`ldmatrix`+smem）**，
+     只有 wgmma 的 SS 直读 smem 能同时消 `ldmatrix` 并压 smem。O9c 与 fp16/bf16 的 O9 系列同构：
+     本步先在**风险最小的 LSE（单 GEMM、无转置、无 scale 折叠）**上建立 fp8 的 SW128 +
+     `wgmma.m64n64k32` 数据通路，主 kernel 上 wgmma 留作 O9c-2。
+   - **前置冒烟 `fa_bwd_fp8_wgmma_smoke.cu`**：最小 `C=Q·Kᵀ`（[64][128] fp8）覆盖
+     `m64n64k32.f32.e4m3.e4m3`（QKᵀ 口径）与 `...e5m2.e4m3`（GEMM2 口径）；用
+     `sw128_off_fp8`/`make_desc_sw128_fp8`/`sw128_k32_addr`，累加器映射与 mma `acc[j][q]` 同构。
+     实测两种组合 **max_abs=0.000e+00（逐位 PASS）**。
+   - **实现**（单/两文件 device 代码同源逐字一致，`sync_onefile_device.py` 核对 `identical: True`；
+     `#ifdef FA_WGMMA` 包裹，默认 sm_90 构建不含、行为不变）：新增 fp8 SW128 布局/描述符、两条
+     `wgmma.m64n64k32` asm（fp8 尾部 `p, scaleA, scaleB`，scale 取 1、rowwise scale 在 epilogue 乘）、
+     `lse_mma_kernel_bal_wgmma<HD,PIPE>`（与 O11 `lse_mma_kernel_bal` 数学完全一致：同 E4E4、
+     online-softmax、4-lane `shfl`、镜像配对 + `cp.async` 双缓冲，只把 4 warp×m16n64 的 mma 换成
+     1 warpgroup 的 4 条 wgmma）；`Fp8Cfg` 加 `lse_smem_bytes_balw0/1`。host 加 `launch_lse_bal_wgmma`
+     + CLI `--lsewgm` + O9c A/B 段（单文件 host 同步改）。
+   - **性能（同 session A/B，event）**：LSE-only mma→wgmma（双缓冲）S=512 0.0389→**0.0365（1.065×）**、
+     S=1024H32 0.0791→**0.0691（1.144×）**、S=4096 0.3437→**0.2697（1.275×）**、GQA kv4
+     0.0779→**0.0677（1.150×）**、MQA kv1 0.1013→**0.0778（1.302×）**。端到端 total S=512
+     0.1780→**0.1690**、S=1024H32 0.7064→0.6902、S=4096 3.2943→**3.1925ms（43.05 TF）**、
+     GQA kv4 0.6295→0.6157。**单缓冲 wgmma 反而慢**（S4096 0.477 vs 0.344）⇒ 必须配 `cp.async`
+     双缓冲（与 fp16 O9a 同）。
+   - **数值**：最终 dq/dk/dv vs ref 与 O7e 同水平（S=512 2.426/2.975/3.736e-1；S=1024H32
+     2.400/4.195/3.535e-1；S=4096 2.634/2.643/3.217e-1；GQA kv4 2.517/5.399/7.065e-1）；LSE 本身
+     vs mma 版 max_abs 5.6–7.4e-4（fp32 求和次序差，远小于 fp8 容差）。单/两文件逐指标一致。
+   - **ncu（lse, S=4096）**：mma Duration 355.87µs / Compute 61.59% / L2 15.05% / 77 regs /
+     Block Limit 6 / 理论 occ 37.5% → wgmma **279.07µs / Compute 59.45% / L2 12.48% / 64 regs /
+     Block Limit 8 / 理论 occ 50%**；主 stall 都是 fixed-latency `wait`（2.4→2.2 cyc）⇒
+     **bound = Compute ~60% + softmax epilogue + 网格不足一个波**（与 fp16 O9a 一致），
+     LSE 端到端收益有限（1.02–1.05×）。
+   - **对标（同 session）**：TE FP8 纯反向（`fa_bwd_bench.py bench --dtype fp8`）S=512 0.1010ms、
+     S=1024H32 0.2059、S=4096 0.5894、GQA kv4 0.2009、MQA kv1 0.4008 ⇒ ours（`--lsewgm`）端到端
+     ours/TE = **1.67× / 3.35× / 5.42× / 3.06× / 2.65×**（S=4096 由 O7e 的 5.56×→5.42×）。
+     FA2/FA3/TE fp16 三列（`fa_vs_te_bwd_only.py fp16`）：MHA S=4096 FA3 **0.3238ms/849TF**、
+     TE 0.4443/619、FA2 0.7251/379。
+   - **局限/下一步**：本步只换 LSE，**主 kernel 仍是 `mma.m16n8k32`（第一墙 L1/TEX 66–71% 未动，
+     main 占端到端 79%）** ⇒ **O9c-2** 把 GEMM1/2（`S=QKᵀ`、`dP=dO·Vᵀ`）上 `wgmma.m64n64k32`
+     （Q/dO/K/V 存 SW128；GEMM3/4/5 的 B 从同一 tile 用 `ldmatrix.x2.trans` 转置读，对齐 fp16 O9b）。
+   - 原始输出 `src/fp8/fa_bwd_fp8_wgmma_smoke.out.txt`、
+     `src/fp8/fa_bwd_fp8_o9c_lse_sweep.out.txt`（两文件 ×5 shape × default/`--lsewgm` + O9c A/B）、
+     `src/fp8/fa_bwd_fp8_main_o9c_ncu_lsewgm_s4096.out.txt`、`..._ncu_lse_mma_s4096.out.txt`、
+     `src/fp8/fa_bwd_fp8_o9c_tebench.out.txt`、`src/fp8/fa_bwd_fp8_o9c_fa3_te_baseline.out.txt`；
+     文档 `docs/03` §21、`docs/04` §2.3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -1262,11 +1306,17 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
           并把 smem 压到 ≤75.7KB 冲 3 CTA/SM。
           > **O7e（第四十五轮）修正了 fp8 侧的优先级**：O7b 针对的 L2 墙已不是头号杠杆
           > （见下），**fp8 应先做 `wgmma`（O9c）**；fp16/bf16 的 O9b-2b 仍按原计划。
-- [ ] **O9c（fp8 main 的 Hopper wgmma）**：把 fp8 `mma.m16n8k32` 换 `wgmma.m64nNk32`
+- [~] **O9c（fp8 main 的 Hopper wgmma）**：把 fp8 `mma.m16n8k32` 换 `wgmma.m64nNk32`
       （SS 直读 smem 描述符，消 `ldmatrix`/配对副本、压 smem 冲更高 occupancy）。
       依据：O7e 定位 fp8 main 第一墙 = **L1/TEX 66–71%（`ldmatrix`+smem）**，只有 wgmma 能同时
       消 L1 访存与降 smem。可复用 fp16/bf16 O9a/O9b 的 SW128 数据通路（fp8 SW128 与 bf16 逐字节同构，
       仅 asm 尾部操作数 `p, scaleA, scaleB` 不同，见 `agent_skills/kernel-opt.md`）。
+      **第一步已完成（第四十六轮）**：`fa_bwd_fp8_mma_smoke` 式冒烟 `fa_bwd_fp8_wgmma_smoke.cu`
+      （`m64n64k32` e4m3×e4m3 / e5m2×e4m3，逐位 PASS）+ **LSE 上验证**
+      `lse_mma_kernel_bal_wgmma<HD,PIPE>`（SW128 + 镜像配对 + `cp.async` 双缓冲）：event LSE
+      S=4096 **1.275×**、ncu Duration 355.87→279.07µs（regs 77→64、理论 occ 37.5→50%）、
+      端到端 S=4096 1.03×，数值与 O7e 同水平。**主 kernel 5 个 GEMM 仍 mma** ⇒ **O9c-2**
+      把 GEMM1/2 上 `wgmma`（对齐 fp16 O9b）。详见 `docs/03` §21。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
 
@@ -1332,10 +1382,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    **bf16 版 O9b 已完成（第四十二轮）**：逐字 dtype 参数化，main S512 1.089× / S4096 1.021×、
 >    数值逐位相同、ncu 逐项一致（`docs/01b` §6q）。构建 wgmma 需 `-gencode=arch=compute_90a,code=sm_90a`（+ `-DFA_WGMMA`）
 >    （`ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh ...`）。
->    **下一步**：**O9b-2b**（fp16/bf16）TMA + P/dS 双缓冲跨-tile 流水 + 压 smem 冲 3 CTA/SM；
->    **fp8 侧转 O9c（`wgmma`）**——O7e（第四十五轮）已用 ncu 证明 fp8 main 第一墙是
->    **L1/TEX 66–71%（`ldmatrix`+smem）**、L2 只剩 43.7%，**O7b（去 dK/dV red）不再是头号杠杆**，
->    应把 O9b 的 wgmma 数据通路扩到 fp8（见任务清单 O9c）。**bf16 版 O9b-2 已完成（第四十四轮）**：
+>    **下一步**：**O9c-2（fp8，当前第一优先级）** 把主 kernel GEMM1/2 上
+>    `wgmma.m64n64k32`（Q/dO/K/V 存 SW128，GEMM3/4/5 的 B 用 `ldmatrix.x2.trans` 从同一 tile
+>    转置读），再逐步上 GEMM3/4/5；**fp8 的 wgmma 数据通路已在 LSE 上跑通（第四十六轮，O9c 第一步，
+>    LSE 1.28×、数值/单两文件一致，见 `docs/03` §21）**。fp16/bf16 的 **O9b-2b**（TMA + P/dS
+>    双缓冲跨-tile 流水 + 压 smem 冲 3 CTA/SM）仍按原计划。**bf16 版 O9b-2 已完成（第四十四轮）**：
 >    逐字 dtype 参数化，数值逐位相同、main S4096 0.979×/S512 0.960×、ncu 与 fp16 逐项一致（`docs/01b` §6r）。详见 `docs/01` §14g/§14h。
 >
 > **旁支已完成（第三十六轮 O5c）**：把 fp16/bf16 的 **MLA（head_dim=512）反向从标量升级为张量核**

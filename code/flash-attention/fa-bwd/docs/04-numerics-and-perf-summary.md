@@ -470,6 +470,17 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
   TE FP8 0.5899ms/466TF。ours fp8 main 2.5215ms ⇒ TE FP8 整条反向的 **~4.3×**
   （S=512 main 0.072ms 已快过 TE FP8 0.101ms）。
 
+> **O9c 第一步（第四十六轮）**：建立 **fp8 Hopper `wgmma.m64n64k32` + SW128** 数据通路，
+> 先在 **LSE** 上落地（对齐 fp16 O9a）。冒烟 `fa_bwd_fp8_wgmma_smoke.cu` 逐位 PASS
+> （e4m3×e4m3 / e5m2×e4m3）。LSE `lse_mma_kernel_bal_wgmma<HD,PIPE>`（镜像配对 + `cp.async`
+> 双缓冲）vs O11 mma：**event S=4096 0.3437→0.2697ms（1.275×）/ S=512 1.065× / MQA 1.302×**
+> （ncu Duration 355.87→**279.07µs**、L1/L2 降、regs 77→64、理论 occ 37.5→50%）；端到端
+> S=4096 3.2943→**3.1925ms（1.03×，43.05 TF）**。数值：最终 dq/dk/dv 与 ref 同 O7e 水平
+> （S=4096 2.634/2.643/3.217e-1），LSE vs mma max_abs 5.6–7.4e-4（fp32 求和次序差）。
+> ncu 结论：LSE 仍是 **Compute ~60%（softmax epilogue）+ 网格不足一个波**。ours/TE FP8
+> S=4096 **5.42×**（O7e 5.56×）。**主 kernel 仍是 `mma.m16n8k32`（第一墙 L1/TEX 未动）**
+> ⇒ O9c-2 把主 kernel GEMM1/2 上 `wgmma`。构建需 `-DFA_WGMMA` + `sm_90a`。详见 `03` §21。
+
 ---
 
 ## 3. ncu bound 小结（逐 dtype）
