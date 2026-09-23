@@ -1046,6 +1046,36 @@
      `src/fp16/fa_bwd_fp16_mma_main_o9b_ncu_s4096.out.txt`、`src/fa_bwd_o9b_fa3_te_baseline.out.txt`；
      文档 `docs/01` §14g、`docs/04` §2.1/§3。
 
+- 2026-09-23（第四十二轮）：**O9b-bf16 完成（bf16 主 kernel GEMM1/2 上 Hopper wgmma，单/两文件）**。
+   - 动机：O9b 第四十一轮只补了 fp16 的「主 kernel GEMM1/2 → wgmma」；bf16 侧此前只有 **O9a**
+     （LSE 的单个 QKᵀ 上 wgmma，§6o），主 kernel 5 个 GEMM 仍全是 `mma.m16n8k16`。本轮把 fp16
+     O9b 逐字 dtype 参数化到 bf16（同为 2 字节，SW128/描述符/`m64n64k16` 累加器映射逐字节同构，
+     仅 `f16.f16`→`bf16.bf16`）。
+   - **改动**（单/两文件 device 逐字同源，脚本核对 `device O9b block identical: True`）：新增
+     `fa_bwd_bf16_wgmma_kernel<HD>` + `wgmma_mn64_issue`/`mma_block_swb`/`kv_issue_async_sw`/
+     `qdo_issue_async_sw`（`#ifdef FA_WGMMA`）；Q/dO/K/V 存 **SW128 K-major**、GEMM1/2 两组
+     `wgmma.m64n64k16` 一起 issue/统一 `wait0`；GEMM3/4/5 仍 mma、其转置 B 用 `ldmatrix.x2.trans`
+     从同一 SW128 tile 读；host 加 `--wgmma=0/1`，自动档仅 `D==128 && sel==(64,64)` 走 wgmma
+     （GQA 的 BN=32 自动回退 mma）。构建：`ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a
+     -DFA_WGMMA"`。
+   - **数值与 O5b~O13 逐位相同**：MHA S512 9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3、
+     GQA kv4 12.01/21.25/31.56e-3；单/两文件逐指标一致。
+   - **性能**（同 session `[O9b A/B]`，CUDA event，main-only）：MHA S=512 mma 0.0571–0.0573→
+     **wgmma 0.0524–0.0526ms（1.088–1.089×）**、S=4096 1.4861→**1.4515–1.4552ms（1.021–1.024×）**；
+     GQA kv4 S1024 走 BN=32 原 mma 路径（`--wgmma` 不生效）。端到端 bf16 total S=4096 **1.880ms
+     （73.1 TF）**、S=512 **0.1085ms（19.8 TF）**、GQA kv4 **0.376ms（45.7 TF）**。
+   - **ncu（main, S=4096）**：Duration **1.46ms**、DRAM 4.44% / **L2 72.99%** / L1/TEX 54.26% /
+     Compute 26.51%、242 regs / 101.38KB smem → **2 CTA/SM**（occ 11.86%）、Waves 3.88；stall
+     `wait` 1.50 + `long_scoreboard` 1.24 + short 0.56，与 fp16 O9b 逐项一致。**bound = L2（残余
+     dK/dV 跨 CTA 原子）+ `wait` + 2 CTA/SM**，与 fp16 结论相同。
+   - **对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`）：MHA S=4096 FA3
+     0.3191ms/861TF、TE 0.4418/622、FA2 0.7307/376 ⇒ ours total 时间 **5.89×**；GQA kv4 S1024
+     FA3 0.0823ms/417TF。
+   - 原始输出 `src/bf16/fa_bwd_bf16_mma_main_o9b_{s512,s4096,gqa_kv4}.out.txt`、
+     `..._mma_onefile_o9b_{s512,s4096}.out.txt`、`..._o9b_ncu_s4096.out.txt`、
+     `..._o9b_stall_s4096.out.txt`、`src/bf16/fa_bwd_bf16_o9b_fa3_te_baseline.out.txt`；
+     文档 `docs/01b` §6q、`docs/04` §2.2/§3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -1123,9 +1153,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       换成 `wgmma.m64n64k16`（Q/dO/K/V 存 SW128；GEMM3/4/5 的转置 B 用 `ldmatrix.x2.trans` 从
       同一 SW128 tile 读；冒烟逐位 PASS）。main **S512 1.092×、S4096 1.046×**（数值与 O13 逐位相同）；
       ncu `wait` 1.94→1.50、smem 105.5→101.4KB，但 **GEMM3/4/5 仍 mma、dK/dV 仍跨 CTA 原子 ⇒
-      L2 74% 与 2 CTA/SM 没变**，收益有限。**O9b-2（下一步）**：GEMM3/4/5 也上 wgmma
-      （P/dS 进 smem/SW128、dKV 转置 B 按 FA3 `dKV_swapAB`）＋ TMA 化 K/V ＋ 双缓冲 P/dS
-      做跨-tile 流水；bf16 版待补。详见 `docs/01` §14g。
+       L2 74% 与 2 CTA/SM 没变**，收益有限。**bf16 版已完成（第四十二轮）**：把 fp16 O9b
+       逐字 dtype 参数化到 bf16（同为 2 字节，SW128/描述符/累加器映射逐字节同构），main
+       **S512 1.089× / S4096 1.021×**、数值与 O5b~O13 逐位相同、ncu 逐项一致（详见 `docs/01b` §6q）。
+       **O9b-2（下一步）**：GEMM3/4/5 也上 wgmma（P/dS 进 smem/SW128、dKV 转置 B 按 FA3
+       `dKV_swapAB`）＋ TMA 化 K/V ＋ 双缓冲 P/dS 做跨-tile 流水。详见 `docs/01` §14g。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
 
@@ -1184,8 +1216,9 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    换成 wgmma（Q/dO/K/V 存 SW128；GEMM3/4/5 的转置 B 用 `ldmatrix.x2.trans` 从同一 SW128 tile 读，
 >    冒烟逐位 PASS）；main S512 1.092× / S4096 1.046×、数值逐位不变，但 **GEMM3/4/5 仍 mma、
 >    dK/dV 仍跨 CTA 原子 ⇒ L2 74% 与 2 CTA/SM 没变**。**O9b-2（下一步）**：GEMM3/4/5 也上 wgmma
->    （P/dS 进 smem/SW128、dKV 转置 B 按 FA3 `dKV_swapAB`）＋ TMA 化 K/V ＋ 双缓冲 P/dS 跨-tile 流水；
->    bf16 版待补。构建 wgmma 需 `-gencode=arch=compute_90a,code=sm_90a`（+ `-DFA_WGMMA`）
+>    （P/dS 进 smem/SW128、dKV 转置 B 按 FA3 `dKV_swapAB`）＋ TMA 化 K/V ＋ 双缓冲 P/dS 跨-tile 流水。
+>    **bf16 版已完成（第四十二轮）**：逐字 dtype 参数化，main S512 1.089× / S4096 1.021×、
+>    数值逐位相同、ncu 逐项一致（`docs/01b` §6q）。构建 wgmma 需 `-gencode=arch=compute_90a,code=sm_90a`（+ `-DFA_WGMMA`）
 >    （`ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh ...`）。
 >    详见 `docs/01` §14g。
 >

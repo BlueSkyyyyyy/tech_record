@@ -311,6 +311,17 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > S1024 kv1 total 0.6354→0.6109、kv4(h64) 0.6635→0.6261；S4096 不变。
 > 详见 `01b-bf16-bwd-impl.md` §6p。
 
+> **O9b-bf16：主 kernel GEMM1/2 上 Hopper `wgmma`（第四十二轮，单/两文件）**：把 fp16 O9b
+> （§2.1）逐字 dtype 参数化到 bf16（同为 2 字节，SW128/描述符/`m64n64k16` 累加器映射逐字节同构）。
+> Q/dO/K/V 存 SW128、GEMM1/2 两组 wgmma 统一 `wait0` 重叠；GEMM3/4/5 仍 mma、转置 B 用
+> `ldmatrix.x2.trans` 从同一 SW128 tile 读。**数值与 O5b~O13 逐位相同**（S512 9.001/12.61/13.65e-3、
+> S4096 15.10/13.40/16.31e-3、GQA kv4 12.01/21.25/31.56e-3）。**同 session A/B（main-only）**：
+> S512 0.0571–0.0573→**0.0524–0.0526ms（1.089×）**、S4096 1.4861→**1.4515–1.4552ms（1.021×）**；
+> 端到端 total S4096 **1.880ms（73.1 TF）**、S512 **0.1085ms**、GQA kv4 0.376ms。ncu（main,S4096）：
+> Duration 1.46ms、**L2 72.99%** / L1/TEX 54.26% / Compute 26.51% / 242 regs / 101.38KB（2 CTA/SM）、
+> stall `wait 1.50 + long 1.24 + short 0.56`，与 fp16 O9b 逐项一致。对标纯反向 FA3 S=4096
+> 0.3191ms/861TF ⇒ ours total 时间 **5.89×**。详见 `01b-bf16-bwd-impl.md` §6q。
+
 ### 2.3 fp8（峰值 1978.8 TFLOPS；FA 无反向 FP8，仅对标 TE）
 
 | shape | ours total | ours main | TE FP8 |
