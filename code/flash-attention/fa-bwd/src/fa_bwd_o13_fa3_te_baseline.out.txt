@@ -1,0 +1,42 @@
+===== fp16 =====
+  _warn_once(
+pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype=torch.float16
+shape                                  FA2.7.4             FA3          TE2.14  FA3/FA2
+(1, 1024, 40, 128) kv=8        0.1887/  228 0.1217/  353 0.1323/  325    1.55x
+(1, 1024, 32, 128) kv=4        0.1588/  216 0.0830/  414 0.1125/  305    1.91x
+(1, 1024, 64, 128) kv=4        0.2678/  257 0.1601/  429 0.1942/  354    1.67x
+(1, 1024, 64, 128) kv=1        0.2671/  257 0.1569/  438 0.2159/  318    1.70x
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 256, 2, 512) kv=2             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 512, 4, 512) kv=4             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 1024, 2, 512) kv=2            nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 4096, 16, 128) kv=16       0.7347/  374 0.3255/  845 0.4442/  619    2.26x
+===== bf16 =====
+  _warn_once(
+pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype=torch.bfloat16
+shape                                  FA2.7.4             FA3          TE2.14  FA3/FA2
+(1, 1024, 40, 128) kv=8        0.1865/  230 0.1204/  357 0.1310/  328    1.55x
+(1, 1024, 32, 128) kv=4        0.1578/  218 0.0822/  418 0.1116/  308    1.92x
+(1, 1024, 64, 128) kv=4        0.2655/  259 0.1590/  432 0.1923/  357    1.67x
+(1, 1024, 64, 128) kv=1        0.2649/  259 0.1561/  440 0.2135/  322    1.70x
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 256, 2, 512) kv=2             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 512, 4, 512) kv=4             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 1024, 2, 512) kv=2            nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 4096, 16, 128) kv=16       0.7260/  379 0.3193/  861 0.4368/  629    2.27x

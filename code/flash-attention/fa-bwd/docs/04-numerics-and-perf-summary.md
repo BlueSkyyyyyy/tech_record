@@ -181,6 +181,20 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > S=4096 0.3242ms/848TF ⇒ ours total 时间 6.18×（O7c 6.47×）。详见 `01-fp16-bwd-impl.md` §14c、
 > `01b` §6m。bf16 同构：total S512 1.15×、S4096 1.04×、GQA kv4 1.15×、MLA S256H2 1.31×。
 
+> **O13（主 kernel auto tile 重新标定 + memset/convert 冗余）已完成（fp16/bf16，第四十轮）**：
+> O6c 的 auto tile 启发式在 O7c-PREL 之后过时——S=512 MHA 的 `(64,64,2)` 比自动档
+> `(32,32,1)` 主 kernel **快 1.23×**。改动：取消 `BM=32` 分支；`BN=64` 判据改为
+> `S≥4096 || grid≤256 || grid>600`（`256<grid≤600` 保留 `BN=32` 以避开 2-波坏量化点，
+> 如 S1024/GQA-kv4）；HD=128 时 dQ 覆盖写 ⇒ 省掉 `d_dq_acc` 的 memset；`convert_kernel` 改
+> `float4` 读 + `half2` 写。**数值与 O5~O10 逐位相同**（S512 1.671/1.771/1.899e-3、
+> S4096 1.883/1.734/1.966e-3）。**同 session A/B（old auto vs O13）**：fp16 total
+> S512 0.1255→**0.1121（1.12×）**、main 0.0721→**0.0574（1.26×）**；S1024 kv8 total
+> 0.4555→0.4414、kv1 0.6354→0.6109、kv4(h64) 0.6635→0.6261；S4096 不变。bf16 同构
+> （S512 total 0.1267→**0.1112（1.14×）**、main 1.27×）。ncu（main,S512）：Duration 83.9→**59.7µs**、
+> L1/TEX 43.5→**20.2%**、occ 10.99→6.23%（grid=128<132 SM，尾波/grid-bound）。
+> 对标同 session 纯反向 FA3 S4096 **0.3255ms/845TF** ⇒ ours total 时间 6.03×（O10 6.18×）。
+> 详见 `01-fp16-bwd-impl.md` §14f、`01b` §6p。
+
 ### 2.2 bf16（峰值 989 TFLOPS）
 
 | shape | ours total | ours main | FA2.7.4 | TE2.14 |
@@ -277,6 +291,13 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > Executed Ipc 2.36→2.52。**数值与 O8b 逐位相同**；端到端 total S=4096 1.95ms（70 TF）。
 > 结论：wgmma 把 LSE 的访存那一半打掉，但 LSE 是 softmax epilogue/发射 bound（Compute 60%、
 > Waves 0.97），故总收益有限 ⇒ 下一步 **O9b 主 kernel wgmma**。详见 `01` §14e、`01b` §6o。
+
+> **O13：主 kernel auto tile 重标定（bf16，第四十轮）**：与 fp16 逐字同款（取消 `BM=32`、
+> `BN=64` 判据 `S≥4096||grid≤256||grid>600`、HD=128 去 dQ memset、convert 向量化）。
+> **数值与 O5b~O10 逐位相同**（S512 9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3）。
+> **同 session A/B**：total S512 0.1267→**0.1112（1.14×）**、main 0.0727→**0.0572（1.27×）**；
+> S1024 kv1 total 0.6354→0.6109、kv4(h64) 0.6635→0.6261；S4096 不变。
+> 详见 `01b-bf16-bwd-impl.md` §6p。
 
 ### 2.3 fp8（峰值 1978.8 TFLOPS；FA 无反向 FP8，仅对标 TE）
 
@@ -412,6 +433,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp16 | **mma main（O6c, S=4096, (64,64,2)）** | 3.24% | 57.47% | 27.04% | 11.78%（**105.47KB, 2 CTA/SM**, 242 regs） | 3.88 | wait 1.88、long_scoreboard 1.79、short 0.81 | **L1/L2 吞吐 + `wait`**（BN=64 降 L1 但掉 occ） |
 | fp16 | **mma main（O7c=PREL, S=4096, (64,64,2)）** | 4.01% | 55.73% | 23.37% | 11.84%（105.47KB, 2 CTA/SM, 250 regs） | 3.88 | wait 2.00、**long 1.79→1.38**、short 0.88、mio 0.49 | **L2 71.6%（新墙，残余 red）+ `wait` + 低 occupancy**（LSE/D 全局读已消；float4 red 更慢 ⇒ 非事务数 bound） |
 | bf16 | **mma main（O7c=PREL, S=4096, (64,64,2)）** | 3.95% | 55.69% | 23.38% | 11.81%（105.47KB, 2 CTA/SM, 250 regs） | 3.88 | wait 2.00、long 1.39、short 0.88、mio 0.50 | 同 fp16（与 fp16 逐项一致） |
+| fp16 | **mma main（O13, S=512, (64,64,2)）** | 8.5% | **20.2%** | 10.7% | 6.23%（grid=128<132 SM，1 CTA/SM） | — | wait 2.00、long 1.01、short 0.46 | **尾波/grid-bound + fixed-latency(`wait`)**（O6c 旧 auto `(32,32,1)` 同点 83.9µs→**59.7µs**、L1/TEX 43.5→20.2%） |
 | fp8 | golden main | 0.06% | **75.96%**（90% 多余） | 4.98% | 6.25%（68KB） | 0.32 | MIO scoreboard 69% | **smem 冲突 + FP8 解码 + 低 occ** |
 | fp8 | **mma main（O2b+O4d 后, S=4096, ksplit=4）** | 1.41% | 69.91% | 21.70% | **18.27%（73.8KB, 3 CTA/SM）** | 10.34 | No Eligible 76.6%、long_scoreboard 4.46 + short_scoreboard 3.96 | **L2 带宽（81.5%）+ 延迟**（split-K 复读 Q/dO + 全局 atomic） |
 | fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |
@@ -457,6 +479,11 @@ O2 降 smem 后 fp8 从 2→3 CTA/SM（theoretical 12.5%→18.75%），main 1.16
 > 锁死 2 CTA/SM）**。要同时拿低 L1/L2 与高 occupancy，只有**更低 smem 的数据通路（O9：wgmma+TMA）**
 > 这条路；继续抠 red 宽度或 tile 几何的边际收益已很小。
 
+> **O13（第四十轮，fp16/bf16）**：修正了 O6c 的过时 auto tile——S=512 MHA 改用 `(64,64,2)`
+> （旧 `(32,32,1)`）；`BN=64` 判据改为 `S≥4096||grid≤256||grid>600`（`256<grid≤600` 用 BN=32
+> 避开 2-波坏量化点）；HD=128 去掉 dQ 的 memset、`convert` 向量化。端到端 S512 **1.12×**
+> （fp16）/ **1.14×**（bf16），S1024 部分 shape 1.03–1.06×，数值逐位不变。
+>
 > **下一步优先级**：**① O9（wgmma+TMA+warp specialization，对标 FA3）——当前唯一能同时
 > 降 smem 与提 occupancy 的杠杆；② fp8 侧残余 dK/dV 跨 CTA red（O7b，分块 `*_accum`+convert）；
 > ③ MLA 的 KV 分片/降 smem + 张量核。**

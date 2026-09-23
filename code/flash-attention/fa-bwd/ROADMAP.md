@@ -989,6 +989,33 @@
     `src/{fp16,bf16}/fa_bwd_*_o9_fa3_te_baseline.out.txt`；文档 `docs/01` §14e、`docs/01b` §6o、
     `docs/04` §2.1/§2.2/§3。
 
+- 2026-09-23（第四十轮）：**O13 完成（fp16/bf16 主 kernel auto tile 重新标定 + 端到端 memset/convert 冗余）**。
+  - 动机：O6c 的 auto tile 是**在 O7c-PREL 之前**定的（`grid<132 且 S≤1024` → `(32,32,1)`）；
+    PREL/O10 之后每 CTA 固定开销下降、`BM=64` 反超。复测 S=512 MHA：`(64,64,2)` 主 kernel
+    **0.0695→0.0566ms（1.23×）**，端到端 1.09–1.12×。
+  - **改动（单/两文件 device 与 host 逐字一致）**：① 取消 `BM=32` 分支（`--bm=32` 仍可覆盖）；
+    `BN=64` 判据改为 `S≥4096 || grid≤256 || grid>600`（`256<grid≤600` 保留 `BN=32`，避开
+    `BN=64` 105KB smem→2 CTA/SM 的「2 个波」坏量化点，实测 grid=512 的 S1024/GQA-kv4：
+    BN=32 0.2534 vs BN=64 0.2706ms）；② HD=128 时 dQ 是覆盖写 ⇒ `cudaMemset(d_dq_acc)` 加
+    `if (D==512)` 守卫（仅 MLA 的 GEMM5 RMW 需要）；③ `convert_kernel` 改 **`float4` 读 + `half2` 写**。
+  - **数值与 O5~O10 逐位相同**（fp16 S512 1.671/1.771/1.899e-3、S4096 1.883/1.734/1.966e-3、
+    GQA kv8 2.008/2.931/3.891e-3、MLA S512H4 2.516/2.916/1.724e-3；bf16 S512 9.001/12.61/13.65e-3、
+    S4096 15.10/13.40/16.31e-3）；单/两文件一致。
+  - **性能（同 session A/B，event）**：fp16 total S512 0.1255→**0.1121（1.12×）**、main 0.0721→
+    **0.0574（1.26×）**；S1024 kv8 0.4555→0.4414、kv1 0.6354→0.6109、kv4(h64) 0.6635→0.6261；
+    kv4(h32) 与 S4096 不变。bf16 S512 total 0.1267→**0.1112（1.14×）**、main 1.27×。convert 桶
+    S512 0.0157→0.0132、S4096 0.1037→0.0939ms。
+  - **ncu（main, S512）**：旧 `(32,32,1)` Duration 83.9µs/occ 10.99%/L1TEX 43.5% → 新 `(64,64,2)`
+    **59.7µs / occ 6.23% / L1TEX 20.2% / L2 36.1% / wait 2.00 + long 1.01 + short 0.46**；
+    `grid=128<132 SM` ⇒ **尾波/grid-bound**。S=4096（不变）：1.54ms、occ 11.85%、L1TEX 46.6%、
+    **L2 73.7%**、Compute 22.5% ⇒ 墙仍是 **L2（dK/dV 原子）+ `wait`**。
+  - **对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py`）：FA3 MHA S4096 fp16 **0.3255ms/845TF**、
+    bf16 0.3193/861；GQA kv8 FA3 0.1217/353 ⇒ ours total 时间 **6.03×**（O10 6.18×）。
+  - 原始输出 `src/fp16/fa_bwd_fp16_mma_main_o13_{s512,s4096,gqa_kv8}.out.txt`、
+    `..._mma_onefile_o13_s512.out.txt`、`..._o13_ncu_main_{s512,s4096}.out.txt`、
+    `src/bf16/fa_bwd_bf16_mma_{main,onefile}_o13_*.out.txt`、`src/fa_bwd_o13_fa3_te_baseline.out.txt`；
+    文档 `docs/01` §14f、`docs/01b` §6p、`docs/04` §2.1/§2.2/§3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -1036,6 +1063,9 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       **bf16 同款改造已完成（第三十四轮，单/两文件 device 逐字同构）**：S=512 main 0.0886→0.0800ms
       （1.11×，另一 session 1.18×）、端到端 1.06×，S=4096 1.018×、GQA 不变；数值逐位相同。
       详见 `docs/01` §13b、`docs/01b` §6j。
+      > **O13（第四十轮）已修正本项的过时 auto 档**：O7c-PREL 之后 `(BM=32,BN=32,PIPE=1)` 不再最快
+      > （S=512 MHA `(64,64,2)` 快 1.23×），改为取消 `BM=32` + `BN=64` 判据 `S≥4096||grid≤256||grid>600`。
+      > 详见 `docs/01` §14f。
 - [~] **O7** dQ/dK/dV 去 `atomicAdd`，改分块 `*_accum` + convert（确定性 + 消竞争）。
       **fp16/bf16 侧已做 O7c（第三十五轮）并证伪「减 red 事务数」**：float4 归约全几何变慢 1–7%
       （非事务数 bound）；真正有效的是 **LSE/D 预装寄存器**（main +14–19%、端到端 S4096 1.13×），
@@ -1135,6 +1165,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > （3.1×）**、端到端 **4.13→3.31ms（1.25×）**，数值与 O7 逐位相同；另把 fp16/bf16/fp8 的
 > `expf/logf` 换 `__expf/__logf`（preprocess 再 ~8%）。同轮证伪两条主 kernel 假设
 > （`(BM=32,BN=64,PIPE=2)` 慢 1.75×、`cp.async .L2::256B` 无变化）。详见 `docs/03` §19。
+>
+> **旁支已完成（第四十轮 O13）**：修正 O6c 的过时 auto tile（O7c-PREL 之后 `(32,32,1)` 不再最优）
+> + 去掉 HD=128 的 dQ memset + `convert` 向量化。端到端 S512 fp16 **1.12×** / bf16 **1.14×**，
+> S1024 部分 shape 1.03–1.06×，数值逐位不变；详见 `docs/01` §14f、`docs/01b` §6p、`docs/04` §2.1/§2.2/§3。
 
 > **用户新增需求（已完成）**：让 ours 支持 P5 的生产形状（GQA/MQA + MLA head_dim=512）——
 > 目前 FA/TE 做不了 MLA 反向，ML A 的性能数字只能由 ours 提供。

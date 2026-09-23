@@ -1242,16 +1242,86 @@ ours total 1.95ms ⇒ 仍为 FA3 的 ~6.0×（与 O8b/O10 持平；LSE 不是差
 `wait`（mma 依赖）+ L2（dK/dV 原子）双墙，wgmma 的异步 mma 允许把 tile i+1 的 mma 和 tile i 的
 epilogue 重叠、并免掉 ldmatrix；转置操作数（dK/dV 的 `B`）需要按 FA3 的 `dKV_swapAB` 思路处理。
 
+## 14f. O13：主 kernel auto tile 重新标定 + fix 端到端 memset/convert 冗余（fp16/bf16）
+
+### 动机
+
+O6c 给主 kernel 加的自动 tile 选择是**基于当时的实验**（还没有 O7c-PREL）：
+> `grid<132 且 S≤1024` → `(BM=32,BN=32,PIPE=1)`「保并行度」，否则 `BM=64`、`S≥4096→BN=64`。
+
+但 O7c 的 LSE/D 预装寄存器、O10 的 Q/dO 向量化之后，**每个 CTA 的固定开销占比下降、BM=64 的
+每 CTA 效率反超 BM=32**。本轮复测发现：S=512 MHA 上 `(64,64,2)` 的主 kernel 比自动档
+`(32,32,1)` **快 1.23×**（O5c A/B：0.0695→0.0566ms），说明旧启发式已过时。
+
+另外两处端到端冗余：
+1. **dQ 的 memset 在 HD=128 时完全多余**——dQ 由主 kernel 寄存器累加后**覆盖写**（不是 RMW），
+   只有 MLA（HD=512）的 GEMM5 才是全局 RMW 累加、需要清零。
+2. `convert_kernel` 逐元素 `LDG.32 + STG.16`，改成 **`float4` 读 + `half2` 写**（4 元素/次）。
+
+### 改动（单/两文件 device 与 host 逐字一致）
+
+- **auto tile 重标定**：
+  - 取消 `BM=32` 分支（实测 BM=64 全面更优；`--bm=32` 仍可手动覆盖）。
+  - `BN=64` 的判据改为 `S≥4096 || grid≤256 || grid>600`；其中 `256<grid≤600` 保留 `BN=32`：
+    该区间 `BN=64` 的 105KB smem 把 occupancy 压到 2 CTA/SM、恰好落进「2 个波」的坏量化点
+    （实测 `grid=512` 的 S1024/GQA-kv4：`BN=32` 0.2534 vs `BN=64` 0.2706ms）。
+  - `auto_pipe` 仅对 `BN=32` 路径生效；`BN=64` 路径固定走 PIPE=2（只双缓冲 K）。
+- **dQ memset**：`cudaMemset(d_dq_acc,…)` 加 `if (D==512)` 守卫（HD=128 时省一趟 `n` 个 float）。
+- **convert 向量化**：`float4` 读 d*_acc、`half2` 打包写 dq/dk/dv（基址 256B 对齐），尾元素标量兜底。
+
+### 数值（全部逐位不变）
+
+fp16 S512 1.671/1.771/1.899e-3、S4096 1.883/1.734/1.966e-3、GQA kv8 2.008/2.931/3.891e-3、
+MLA S512H4 2.516/2.916/1.724e-3；bf16 S512 9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3。
+只改「选哪个 tile」与「搬运方式」，不改数学 ⇒ 与 O5~O10 逐位相同；单/两文件一致。
+
+### 性能（同 session A/B，CUDA event）
+
+| shape | 配置(旧→新) | main 旧→新 | total 旧→新 |
+|---|---|---|---|
+| S512 H16 (fp16) | (32,32,1)→(64,64,2) | 0.0721→**0.0574 (1.26×)** | 0.1255→**0.1121 (1.12×)** |
+| S512 H16 (bf16) | 同上 | 0.0727→**0.0572 (1.27×)** | 0.1267→**0.1112 (1.14×)** |
+| S1024 h40 kv8 | (64,32,2)→(64,64,2) | 0.3203→**0.3060 (1.05×)** | 0.4555→**0.4414 (1.03×)** |
+| S1024 h64 kv1 | (64,32,2)→(64,64,2) | 0.4611→**0.4362 (1.06×)** | 0.6354→**0.6109 (1.04×)** |
+| S1024 h64 kv4 | (64,32,2)→(64,64,2) | 0.4921→**0.4525 (1.09×)** | 0.6635→**0.6261 (1.06×)** |
+| S1024 h32 kv4 | 保持 (64,32,2) | 0.2635（不变） | 0.3800（不变） |
+| S4096 H16 | 保持 (64,64,2) | 1.5247（不变） | 1.9614（不变） |
+
+`convert` 桶（含 3 个 memset）：S512 0.0157→**0.0132ms**、S4096 0.1037→**0.0939ms**。
+
+同 session 纯反向基线（`harness/fa_vs_te_bwd_only.py`）：S4096 MHA FP16 FA3 0.3255ms/845TF、
+TE 0.4442/619 ⇒ ours total 时间 **6.03×**（O10 6.18×）；GQA kv8 FA3 0.1217/353 ⇒ 3.63×。
+
+### ncu（main, S=512, 旧 `(32,32,1)` vs 新 `(64,64,2)`）
+
+| 指标 | 旧 `(32,32,1)` | 新 `(64,64,2)` |
+|---|---|---|
+| Duration | 83.9 µs | **59.7 µs（−29%）** |
+| L1/TEX | 43.5% | **20.2%** |
+| L2 | — | 36.1% |
+| Compute | 11.9% | 10.7% |
+| achieved occ | 10.99% | 6.23%（grid=128<132 SM，1 CTA/SM） |
+| stall | — | `wait 2.00 + long 1.01 + short 0.46` |
+
+S=512 的 `grid=128` 不足 132 SM，是**尾波/grid-bound**；`(64,64,2)` 用更大的每-CTA tile 把
+L1/TEX 砍半，故仍更快。S=4096（`grid=1024`）：Duration 1.54ms、occ 11.85%（2 CTA/SM）、
+L1/TEX 46.6%、**L2 73.7%**、Compute 22.5% —— 与 O7c 一致，**墙仍是 L2（dK/dV 原子）+ `wait`**。
+
+原始输出：`src/fp16/fa_bwd_fp16_mma_main_o13_{s512,s4096,gqa_kv8}.out.txt`、
+`..._mma_onefile_o13_s512.out.txt`、`..._o13_ncu_main_{s512,s4096}.out.txt`、`src/fa_bwd_o13_fa3_te_baseline.out.txt`；
+bf16 同构（`src/bf16/..._o13_*`）。
+
 ---
 
 ## 15. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
 O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）、O11（§14d）、
-**O9a（§14e，LSE 上 wgmma）** 完成。O7c 已把「减 red 事务数」这条杠杆**证伪**（float4 更慢），
-O10 又把 Q/dO 的标量载入与 dQ 写回向量化（`long_scoreboard` 压下、指令数 −2.5%），把墙进一步
-收敛到 **`wait`（mma 依赖）+ L2 + 2 CTA/SM**。O9a 建立了 Hopper `wgmma + SW128` 数据通路并先在
-LSE 上验证（L1/TEX 37.6%→18.1%、Duration −6%、数值逐位相同），但 LSE 是 epilogue/发射 bound，
-收益有限 ⇒ **下一步 O9b**：把 wgmma 推到主 kernel 的 5 个 GEMM（那里才是 `wait`+L2 双墙）。
-另：MLA 降 smem 冲 2 CTA/SM / split-KV 仍在列。
-**O7c(bf16)、MLA 张量核(bf16)、O10(bf16)、O9a(bf16) 见 `01b` §6k/§6l/§6m/§6o**。
+**O9a（§14e，LSE 上 wgmma）、O13（§14f，auto tile 重标定）** 完成。O7c 已把「减 red 事务数」
+这条杠杆**证伪**（float4 更慢），O10 又把 Q/dO 的标量载入与 dQ 写回向量化（`long_scoreboard`
+压下、指令数 −2.5%），O13 修正了 O6c 的过时 auto tile（S=512 main 1.26×、端到端 1.12×），
+墙进一步收敛到 **`wait`（mma 依赖）+ L2 + 2 CTA/SM**。O9a 建立了 Hopper `wgmma + SW128`
+数据通路并先在 LSE 上验证（L1/TEX 37.6%→18.1%、Duration −6%、数值逐位相同），但 LSE 是
+epilogue/发射 bound，收益有限 ⇒ **下一步 O9b**：把 wgmma 推到主 kernel 的 5 个 GEMM
+（那里才是 `wait`+L2 双墙）。另：MLA 降 smem 冲 2 CTA/SM / split-KV 仍在列。
+**O7c(bf16)、MLA 张量核(bf16)、O10(bf16)、O9a(bf16) 见 `01b` §6k/§6l/§6m/§6o；O13(bf16) 见 §6p。**

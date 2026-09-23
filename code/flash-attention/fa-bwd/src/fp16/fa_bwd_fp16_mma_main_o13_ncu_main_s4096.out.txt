@@ -1,0 +1,42 @@
+==PROF== Connected to process 597907 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "fa_bwd_fp16_mma_kernel": 0%....50%....100% - 10 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[timing] total(3 kernels) 1.9766 ms  69.53 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3552 ms | main 1.5390 ms | convert 0.0824 ms
+[O8b A/B] lse O8 0.8507 ms | bal(单缓冲) 0.4487 ms (1.896x) | bal+cpasync(双缓冲) 0.2981 ms (2.853x)
+[O6 A/B] main nopipe 2.2442 ms (61.24 TF) | pipe(KV both) 1.5838 ms (86.78 TF) | pipe2(K only) 1.6246 ms (84.60 TF) => nopipe/pipe 1.417x, nopipe/pipe2 1.381x
+[O6c A/B] main sched0(原样) 1.5365 ms | sched1(交错) 1.5467 ms (0.993x) | sched2(逆序) 1.5662 ms (0.981x)
+[O5c A/B] main (64,32,2) 1.5272 ms (89.99 TF) | (64,64,2) 1.4741 (93.24) | (32,32,1) 2.5725 (53.43) | (32,32,2) 2.5780 (53.31) => best 1.036x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.7195 (79.93) | f4 1.8296 (75.12,-6.0%) | f2+PREL 1.5619 (88.00,+10.1%) | f4+PREL 1.5929 (86.28,+8.0%)
+  (BM=64,BN=64,PIPE=2): base 1.6957 (81.05) | f4 1.7645 (77.89,-3.9%) | f2+PREL 1.4765 (93.09,+14.8%) | f4+PREL 1.5088 (91.09,+12.4%)
+  (BM=32,BN=32,PIPE=1): base 2.5941 (52.98) | f4 2.6215 (52.43,-1.0%) | f2+PREL 2.5836 (53.20,+0.4%) | f4+PREL 2.6050 (52.76,-0.4%)
+  (BM=32,BN=32,PIPE=2): base 2.6334 (52.19) | f4 2.6445 (51.97,-0.4%) | f2+PREL 2.5650 (53.58,+2.7%) | f4+PREL 2.5758 (53.36,+2.2%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+==PROF== Disconnected from process 597907
+[597907] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void fa_bwd_fp16_mma_kernel<128, 64, 64, 2, 0, 1>(const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (64, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------- ----------- ------------
+    Metric Name                                         Metric Unit Metric Value
+    --------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %         4.15
+    gpu__time_duration.sum                                       ms         1.55
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %        46.71
+    lts__throughput.avg.pct_of_peak_sustained_elapsed             %        73.23
+    sm__ctas_launched.sum                                     block         1024
+    sm__throughput.avg.pct_of_peak_sustained_elapsed              %        22.50
+    sm__warps_active.avg.pct_of_peak_sustained_active             %        11.85
+    --------------------------------------------------- ----------- ------------
+

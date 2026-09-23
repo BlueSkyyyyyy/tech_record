@@ -272,11 +272,12 @@ int main(int argc, char** argv) {
   //    并行度翻倍（S=512 MHA：main 0.0876→0.0792ms，1.11×）。大 S 下 BM=32 会让
   //    dK/dV 的跨 CTA 原子量翻倍，故只在 S≤1024 用。
   //  - 否则 BM=64：大网格走 O6b（PIPE=2，只双缓冲 K）；小网格走 O6（PIPE=1）。
+  // O13：auto tile 重新标定（O7c-PREL 之后，见 fp16 版注释）。
   const long long grid = (long long)((S + 63) / 64) * H * B;
-  const bool tiny = (grid < 132) && (S <= 1024);
-  int auto_bm = tiny ? 32 : 64;
-  int auto_bn = (!tiny && S >= 4096) ? 64 : 32;
-  int auto_pipe = (!tiny && grid >= 396) ? 2 : 1;
+  const bool bn64 = (S >= 4096) || (grid <= 256) || (grid > 600);
+  int auto_bm = 64;
+  int auto_bn = bn64 ? 64 : 32;
+  int auto_pipe = (grid >= 396) ? 2 : 1;
   if (D == 512) {
     // MLA（HD=512）：BM=64 时 K/V 双缓冲会超 smem；BM=32 + PIPE=1 仍 ≤232KB 且最快。
     auto_bm = 32;
@@ -373,7 +374,8 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaEventCreate(&ev1));
 
   auto run_all = [&]() {
-    CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+    // O13：HD=128（NDT==1）时 dQ 由主 kernel 覆盖写，无需清零；只有 MLA（HD=512）走 RMW 累加才 memset。
+    if (D == 512) CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
     run_pre();
@@ -403,7 +405,7 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaEventElapsedTime(&ms_pre, ev0, ev1));
   ms_pre /= iters;
 
-  CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+  if (D == 512) CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
   CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
   CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
   CUDA_CHECK(cudaEventRecord(ev0));
@@ -471,7 +473,7 @@ int main(int argc, char** argv) {
                                      d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
   };
   auto time_launch = [&](int m, float* out_ms) {
-    CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+    if (D == 512) CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
     for (int i = 0; i < 3; ++i) launch_mode(m);
@@ -513,7 +515,7 @@ int main(int argc, char** argv) {
   if (D == 128 && causal) {
     auto time_cfg = [&](int bm, int bn, int pp, float* out_ms) {
       auto launch = [&]() { launch_cfg(bm, bn, pp, false, true); };
-      CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      if (D == 512) CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
       for (int i = 0; i < 3; ++i) launch();
@@ -541,7 +543,7 @@ int main(int argc, char** argv) {
   if (D == 128 && causal) {
     auto time_r4 = [&](int bm, int bn, int pp, bool r4, bool prel, float* out_ms) {
       auto launch = [&]() { launch_cfg(bm, bn, pp, r4, prel); };
-      CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      if (D == 512) CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
       for (int i = 0; i < 3; ++i) launch();
@@ -574,7 +576,7 @@ int main(int argc, char** argv) {
   if (D == 512 && causal) {
     auto time_cfg2 = [&](int bm, int bn, int pp, float* out_ms) {
       auto launch = [&]() { launch_cfg(bm, bn, pp, false, true); };
-      CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      if (D == 512) CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
       for (int i = 0; i < 3; ++i) launch();
