@@ -195,6 +195,18 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 对标同 session 纯反向 FA3 S4096 **0.3255ms/845TF** ⇒ ours total 时间 6.03×（O10 6.18×）。
 > 详见 `01-fp16-bwd-impl.md` §14f、`01b` §6p。
 
+> **O9b（主 kernel GEMM1/2 上 Hopper `wgmma`，fp16，第四十一轮）**：把 `S=QKᵀ`、`dP=dO·Vᵀ`
+> 换成 `wgmma.m64n64k16`（Q/dO/K/V 存 **SW128 K-major**；GEMM3/4/5 的转置 B 用 `ldmatrix.x2.trans`
+> 从同一 SW128 tile 读，冒烟 `fa_bwd_fp16_wgmma_main_smoke.cu` 逐位 PASS）；两条 wgmma 一起发、
+> 统一 `wait0` 重叠。由 `#ifdef FA_WGMMA` 包裹、默认 `sm_90` 构建不变。**数值与 O13 逐位相同**
+> （S512 1.671/1.771/1.899e-3、S4096 1.883/1.734/1.966e-3；GQA 回退 mma 不变）。
+> **同 session A/B（main-only）**：mma `(64,64,2)` vs wgmma = S4096 1.5103→**1.4435ms（1.046×）**、
+> S512 0.0570→**0.0522ms（1.092×）**；两文件端到端 S4096 **1.8822ms**（真反向 FLOPs ≈146 TF）。
+> ncu（main,S4096）：Duration 1.54→**1.43ms**、smem 105.5→**101.4KB**、`wait` 1.94→**1.50**、
+> `long_scoreboard` 1.45→1.25，**L2 74.4% 仍封顶、occ 仍 2 CTA/SM** ⇒ 收益真实但有限
+> （GEMM3/4/5 仍是 mma、dK/dV 仍是跨 CTA 原子）。对标同 session 纯反向 FA3 S4096 0.3255ms/844TF
+> ⇒ ours total 时间 **5.8×**（O13 6.03×）。详见 `01-fp16-bwd-impl.md` §14g。
+
 ### 2.2 bf16（峰值 989 TFLOPS）
 
 | shape | ours total | ours main | FA2.7.4 | TE2.14 |
@@ -434,6 +446,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp16 | **mma main（O7c=PREL, S=4096, (64,64,2)）** | 4.01% | 55.73% | 23.37% | 11.84%（105.47KB, 2 CTA/SM, 250 regs） | 3.88 | wait 2.00、**long 1.79→1.38**、short 0.88、mio 0.49 | **L2 71.6%（新墙，残余 red）+ `wait` + 低 occupancy**（LSE/D 全局读已消；float4 red 更慢 ⇒ 非事务数 bound） |
 | bf16 | **mma main（O7c=PREL, S=4096, (64,64,2)）** | 3.95% | 55.69% | 23.38% | 11.81%（105.47KB, 2 CTA/SM, 250 regs） | 3.88 | wait 2.00、long 1.39、short 0.88、mio 0.50 | 同 fp16（与 fp16 逐项一致） |
 | fp16 | **mma main（O13, S=512, (64,64,2)）** | 8.5% | **20.2%** | 10.7% | 6.23%（grid=128<132 SM，1 CTA/SM） | — | wait 2.00、long 1.01、short 0.46 | **尾波/grid-bound + fixed-latency(`wait`)**（O6c 旧 auto `(32,32,1)` 同点 83.9µs→**59.7µs**、L1/TEX 43.5→20.2%） |
+| fp16 | **wgmma main（O9b, S=4096, GEMM1/2 wgmma）** | 4.55% | 55.08% | 26.48% | 11.88%（**101.38KB, 2 CTA/SM**, 242 regs） | 3.88 | **wait 1.94→1.50**、long 1.45→1.25、short 0.56 | **L2 74.4%（dK/dV 原子，仍为墙）+ `wait` + 低 occupancy**（GEMM1/2 的 wgmma 打掉 ldmatrix/依赖，但 GEMM3/4/5 仍 mma） |
 | fp8 | golden main | 0.06% | **75.96%**（90% 多余） | 4.98% | 6.25%（68KB） | 0.32 | MIO scoreboard 69% | **smem 冲突 + FP8 解码 + 低 occ** |
 | fp8 | **mma main（O2b+O4d 后, S=4096, ksplit=4）** | 1.41% | 69.91% | 21.70% | **18.27%（73.8KB, 3 CTA/SM）** | 10.34 | No Eligible 76.6%、long_scoreboard 4.46 + short_scoreboard 3.96 | **L2 带宽（81.5%）+ 延迟**（split-K 复读 Q/dO + 全局 atomic） |
 | fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |

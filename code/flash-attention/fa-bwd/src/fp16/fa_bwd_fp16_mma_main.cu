@@ -123,6 +123,25 @@ static void launch_bwd_mma(dim3 mg, const __half* q, const __half* k, const __ha
       q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, sched);
 }
 
+#ifdef FA_WGMMA
+// O9b：wgmma 主 kernel（只 HD=128 / BM=BN=64）。smem 见 kernel 内注释（≈98KB，2 CTA/SM）。
+template <int HD>
+static void launch_bwd_wgmma(dim3 mg, const __half* q, const __half* k, const __half* v,
+                             const __half* do_, const float* delta, const float* lse,
+                             float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
+                             int Hkv, float scale, int causal, int sched) {
+  constexpr int BM = 64, BN = 64, LDS = BN + 8;
+  constexpr int TILE  = (BM / 8) * (HD / 64) * 1024;
+  constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
+  constexpr int smem = 1024 + TILE * 2 + KTILE * 3 + 2 * BM * LDS * (int)sizeof(__half);
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma_kernel<HD>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  fa_bwd_fp16_wgmma_kernel<HD><<<mg, THREADS, smem>>>(q, k, v, do_, delta, lse, dq_acc,
+                                                      dk_acc, dv_acc, S, H, Hkv, scale, causal,
+                                                      sched);
+}
+#endif
+
 int main(int argc, char** argv) {
   std::string dir = "/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16";
   std::string o_name = "ref_o";
@@ -139,6 +158,8 @@ int main(int argc, char** argv) {
   int prel_opt = -1;
   // O9：LSE 是否用 wgmma（仅 D==128 且 causal；0=用 O8b 的 mma 版，1=wgmma 版）。
   int lse_wgm = 0;
+  // O9b：主 kernel 是否用 wgmma（仅 FA_WGMMA 构建、D==128 且 sel=(64,64) 时生效）。
+  int wgmma_sel = 0;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -154,6 +175,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--lsewgm=", 0) == 0) lse_wgm = atoi(a.c_str() + 9);
     else if (a == "--lsewgm") lse_wgm = 1;
+    else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
+    else if (a == "--wgmma") wgmma_sel = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -351,7 +374,17 @@ int main(int argc, char** argv) {
 #undef LAUNCH_CFG
   const bool r4_sel = (r4_opt > 0);
   const bool prel_sel = (prel_opt >= 0) ? (prel_opt != 0) : true;
-  auto run_main = [&]() { launch_cfg(bm_sel, bn_sel, pp_sel, r4_sel, prel_sel); };
+  auto run_main = [&]() {
+#ifdef FA_WGMMA
+    if (wgmma_sel && D == 128 && bm_sel == 64 && bn_sel == 64) {
+      dim3 g((S + 63) / 64, H, B);
+      launch_bwd_wgmma<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                            d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      return;
+    }
+#endif
+    launch_cfg(bm_sel, bn_sel, pp_sel, r4_sel, prel_sel);
+  };
   auto run_pre = [&]() {
     if (D == 512) {
       if (causal)

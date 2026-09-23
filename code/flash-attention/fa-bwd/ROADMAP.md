@@ -1016,6 +1016,36 @@
     `src/bf16/fa_bwd_bf16_mma_{main,onefile}_o13_*.out.txt`、`src/fa_bwd_o13_fa3_te_baseline.out.txt`；
     文档 `docs/01` §14f、`docs/01b` §6p、`docs/04` §2.1/§2.2/§3。
 
+- 2026-09-23（第四十一轮）：**O9b（第一步）完成（fp16 主 kernel 的 GEMM1/GEMM2 上 Hopper `wgmma`）**。
+   - 动机：O9a 把 LSE 的单个 QKᵀ 换成 wgmma，但 LSE 是 epilogue bound、收益有限；主 kernel 的
+     墙是 **`wait`（mma 依赖）+ L2（dK/dV 原子）+ 2 CTA/SM**。O9b 把主 kernel 的 `S=QKᵀ`、`dP=dO·Vᵀ`
+     （两个最大、最热的 GEMM，A/B 都 K-major、天然 SS）换成 `wgmma.m64n64k16`。
+   - **前置冒烟** `src/fp16/fa_bwd_fp16_wgmma_main_smoke.cu`（**PASS，max_abs=0**）：验证把 Q/dO/K/V
+     存成 **SW128 K-major** 后，① wgmma QKᵀ；② `dV=Pᵀ·dO` 的 A=P（ATRANS）+ B=dO 从 SW128 转置读；
+     ③ `dQ=P·K` 的 B=K 从 SW128 转置读——**`ldmatrix.x2.trans` 能从 SW128 tile 逐位读出转置数据**
+     （SW128 只在 16B 粒度置换），于是 GEMM3/4/5 可与 GEMM1/2 共用同一份 SW128 布局。
+   - **实现**（单/两文件 device 逐字一致，`diff` 核对 `WGMMA DEVICE BLOCK IDENTICAL`；`#ifdef FA_WGMMA`
+     包裹，默认 `sm_90` 构建不编译、行为不变）：新增 `fa_bwd_fp16_wgmma_kernel<HD>`（仅 HD=128/BM=BN=64/
+     fp16）——Q/dO/K/V 全 SW128（K 双缓冲、V 单缓冲后段预取）+ 手动 1024B 对齐；`wgmma_mn64_issue` 把
+     GEMM1/2 两组异步 mma 一起发、统一 `wait0` 重叠；GEMM3/4/5 仍 mma、B 用新 helper `mma_block_swb`
+     从 SW128 读。host 加 `--wgmma=0/1`，自动档 `sel=(64,64)` 且 D=128 才走 wgmma（GQA `BN=32` 回退）。
+   - **数值与 O5~O13 逐位相同**：MHA S512 1.671/1.771/1.899e-3、S4096 1.883/1.734/1.966e-3；
+     GQA kv4（回退 mma）2.134/3.305/3.850e-3。
+   - **性能（同 session A/B，main-only，event）**：mma `(64,64,2)` vs wgmma——S4096 1.5103→
+     **1.4435ms（1.046×）**、S512 0.0570→**0.0522ms（1.092×）**；两文件端到端 S4096 total
+     **1.8822ms**（`4BS²HD` 口径 73.0 TF，真反向 FLOPs ≈146 TF）。同 session 纯反向 FA3 S4096
+     **0.3255ms/844TF**、TE 0.4449/618 ⇒ ours total 时间 **5.8×**（O13 6.03×）。
+   - **ncu（main, S4096）**：Duration 1.54→**1.43ms**、**smem 105.5→101.4KB**、**`wait` 1.94→1.50**、
+     `long_scoreboard` 1.45→1.25、short 0.46→0.56、**L2 74.4% 仍封顶**、occ 11.88%（仍 2 CTA/SM）。
+     **结论**：wgmma 打掉 GEMM1/2 的 `wait`/ldmatrix，但 **GEMM3/4/5 仍是 mma、dK/dV 仍是跨 CTA 原子**，
+     L2 与 occupancy 没变 ⇒ 收益真实但有限。**下一步 O9b-2**：GEMM3/4/5 也上 wgmma（P/dS 进 smem/SW128、
+     dKV 转置 B 按 FA3 `dKV_swapAB`）＋ TMA 化 K/V ＋ 双缓冲 P/dS 做跨-tile 流水；另补 bf16 版。
+   - 原始输出 `src/fp16/fa_bwd_fp16_wgmma_main_smoke.out.txt`、
+     `src/fp16/fa_bwd_fp16_mma_main_o9b_{s512,s4096}.out.txt`、
+     `src/fp16/fa_bwd_fp16_mma_onefile_o9b_{s512,s4096}.out.txt`、
+     `src/fp16/fa_bwd_fp16_mma_main_o9b_ncu_s4096.out.txt`、`src/fa_bwd_o9b_fa3_te_baseline.out.txt`；
+     文档 `docs/01` §14g、`docs/04` §2.1/§3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -1088,9 +1118,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 - [~] **O9**（对标 FA3）TMA + `wgmma` + warp specialization 多级流水。
       **O9a 已完成（第三十九轮）**：建立 Hopper `wgmma + SW128` 数据通路（冒烟 PASS +
       `lse_mma_kernel_bal_wgmma`，L1/TEX 37.6→18.1%、LSE 1.05×、数值逐位相同）；
-      但 LSE 是 softmax epilogue bound，收益有限 ⇒ **O9b = 把 wgmma 推到主 kernel 的 5 个 GEMM**
-      （那里是 `wait`+L2 双墙，异步 mma 可让 tile i+1 的 mma 与 tile i 的 epilogue 重叠；
-      dK/dV 的转置 B 需按 FA3 `dKV_swapAB` 思路处理）。
+      但 LSE 是 softmax epilogue bound，收益有限 ⇒ **O9b**。
+      **O9b 第一步已完成（第四十一轮，fp16）**：主 kernel 的 **GEMM1/2（`S=QKᵀ`、`dP=dO·Vᵀ`）**
+      换成 `wgmma.m64n64k16`（Q/dO/K/V 存 SW128；GEMM3/4/5 的转置 B 用 `ldmatrix.x2.trans` 从
+      同一 SW128 tile 读；冒烟逐位 PASS）。main **S512 1.092×、S4096 1.046×**（数值与 O13 逐位相同）；
+      ncu `wait` 1.94→1.50、smem 105.5→101.4KB，但 **GEMM3/4/5 仍 mma、dK/dV 仍跨 CTA 原子 ⇒
+      L2 74% 与 2 CTA/SM 没变**，收益有限。**O9b-2（下一步）**：GEMM3/4/5 也上 wgmma
+      （P/dS 进 smem/SW128、dKV 转置 B 按 FA3 `dKV_swapAB`）＋ TMA 化 K/V ＋ 双缓冲 P/dS
+      做跨-tile 流水；bf16 版待补。详见 `docs/01` §14g。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
 
@@ -1145,9 +1180,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 目标：fp16/bf16 main 先到 FA2 水平，再逼近 FA3/TE；每步用 `harness/fa_vs_te_bwd_only.py`（纯反向、三列）验收。
 >    **O9a 已完成（第三十九轮）**：先在 LSE（单 GEMM、无转置）上跑通 `wgmma.m64n64k16 + SW128`——
 >    冒烟逐位 PASS、LSE L1/TEX 37.6→18.1%、1.05×、数值逐位不变；但 LSE 是 softmax epilogue bound，
->    收益有限。**O9b（下一步）= 把 wgmma 推到主 kernel 的 5 个 GEMM**（`wait`+L2 才是主墙）；
->    转置 B（dK/dV）按 FA3 `dKV_swapAB` 处理。构建 wgmma 需 `-gencode=arch=compute_90a,code=sm_90a`
->    （`ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a" scripts/run.sh ...`）。
+>    收益有限。**O9b 第一步已完成（第四十一轮，fp16）**：主 kernel 的 GEMM1/2（`S=QKᵀ`、`dP=dO·Vᵀ`）
+>    换成 wgmma（Q/dO/K/V 存 SW128；GEMM3/4/5 的转置 B 用 `ldmatrix.x2.trans` 从同一 SW128 tile 读，
+>    冒烟逐位 PASS）；main S512 1.092× / S4096 1.046×、数值逐位不变，但 **GEMM3/4/5 仍 mma、
+>    dK/dV 仍跨 CTA 原子 ⇒ L2 74% 与 2 CTA/SM 没变**。**O9b-2（下一步）**：GEMM3/4/5 也上 wgmma
+>    （P/dS 进 smem/SW128、dKV 转置 B 按 FA3 `dKV_swapAB`）＋ TMA 化 K/V ＋ 双缓冲 P/dS 跨-tile 流水；
+>    bf16 版待补。构建 wgmma 需 `-gencode=arch=compute_90a,code=sm_90a`（+ `-DFA_WGMMA`）
+>    （`ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh ...`）。
+>    详见 `docs/01` §14g。
 >
 > **旁支已完成（第三十六轮 O5c）**：把 fp16/bf16 的 **MLA（head_dim=512）反向从标量升级为张量核**
 > （`HD` 模板 128/512、GEMM3/4/5 N-tile 循环、dQ 全局累加），main 5.2–5.8×（fp16）/3.7–4.1×（bf16），

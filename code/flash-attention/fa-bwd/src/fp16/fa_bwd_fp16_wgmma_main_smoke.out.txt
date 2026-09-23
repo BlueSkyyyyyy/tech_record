@@ -1,0 +1,4 @@
+wgmma QKᵀ     vs CPU: max_abs=0.000e+00
+mma dV=PᵀdO   vs CPU: max_abs=0.000e+00  (B from SW128)
+mma dQ=P·K    vs CPU: max_abs=0.000e+00  (B from SW128)
+PASS
