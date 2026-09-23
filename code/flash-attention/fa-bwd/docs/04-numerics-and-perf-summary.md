@@ -481,6 +481,14 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > S=4096 **5.42×**（O7e 5.56×）。**主 kernel 仍是 `mma.m16n8k32`（第一墙 L1/TEX 未动）**
 > ⇒ O9c-2 把主 kernel GEMM1/2 上 `wgmma`。构建需 `-DFA_WGMMA` + `sm_90a`。详见 `03` §21。
 
+> **O9c-2 第一步（第四十七轮）**：fp8 主 kernel 的 **GEMM1/2（`S=QKᵀ`、`dP=dO·Vᵀ`）上
+> `wgmma.m64n32k32`**（Q/dO/K/V 存 **SW128**；fold + GEMM3/4/5 + dQ 归约逐字复用 mma 版；
+> `smem 70.66→68.61KB`）。同 session A/B（main-only，event）：S512 **1.038×** / S1024H32
+> **1.052×** / GQA kv4 **1.057×** / S4096 **1.056×**；端到端 total S=4096 **3.1374ms（43.8 TF）**、
+> ours/TE FP8 **5.32×**（O7e 5.56×）。数值 vs ref 与 mma 版同量级（S4096 2.635/2.644/3.216e-1）。
+> ncu：L1/TEX 66.06→**65.19%**、Duration 2.57→**2.46ms**、仍 3 CTA/SM；**第一墙仍是 L1/TEX
+> （GEMM3/4/5 的 `ldmatrix` + fold）** ⇒ O9c-2b。详见 `03` §22。
+
 ---
 
 ## 3. ncu bound 小结（逐 dtype）

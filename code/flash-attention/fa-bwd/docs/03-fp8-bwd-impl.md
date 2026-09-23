@@ -1765,3 +1765,82 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
 `src/fp8/fa_bwd_fp8_main_o9c_ncu_lsewgm_s4096.out.txt` / `..._ncu_lse_mma_s4096.out.txt`（ncu）、
 `src/fp8/fa_bwd_fp8_o9c_tebench.out.txt`（TE FP8 基线）、
 `src/fp8/fa_bwd_fp8_o9c_fa3_te_baseline.out.txt`（FA2/FA3/TE fp16 纯反向）。
+
+---
+
+## 22. O9c-2：主 kernel GEMM1/2 上 Hopper `wgmma.m64n32k32`（SW128 存储）
+
+### 22.1 动机
+
+O9c（§21）只在 **LSE** 上把 `mma.m16n8k32` 换成了 `wgmma.m64n64k32`，收益有限（1.02–1.05×），
+因为第一墙（ncu：**L1/TEX 66–71%**，来自 `ldmatrix`+smem）在**主 kernel**，而 main 占端到端 ~79%。
+O9c-2 把 wgmma 推到主 kernel 的 **GEMM1/2（`S=scale·QKᵀ`、`dP=dO·Vᵀ`）**——这两个 GEMM 是 A/B
+都 K-major 的 SS 操作数（Q/K/V/dO 存 **SW128** 后 wgmma 直读，免 `ldmatrix`）。
+
+### 22.2 实现（单/两文件 device 代码逐字一致）
+
+- `fa_bwd_fp8_mma_kernel` 增加模板开关 `bool WGMMA=false`（默认行为完全不变）。WGMMA 模式下
+  `Fp8Cfg::qs_sw_bytes/ks_sw_bytes = (rows/8)*(HD/128)*1024`，Q/dO/K/V 从行主序 `ASLD` 改为
+  **SW128 K-major tile**（`sw128_off_fp8` 4B 写入；动态 smem 基址手动 1024B 对齐，宿主多给
+  1024B slack）。`Fp8Cfg::smem_bytes_wgmma` = **68.6KB（O9c-2） vs 70.7KB（mma）**。
+- 新增 `wgmma.m64n32k32.f32.{e4m3,e5m2}.e4m3` asm（主 kernel BN=32，用 n32 少一半累加器）与
+  issue-only 版 `wgmma_mn32_issue<KIND>`（两条异步 mma 一起发、统一 `wait0` 重叠）。累加器
+  布局与 m64n64/mma.m16n8 同构（`d[j*4+q]`，warp w 行 `[16w,16w+16)`）。
+- **fold + GEMM3/4/5 + dQ(O7 寄存器累加/跨 CTA red) 全部逐字复用 mma 版**：GEMM3/4/5 的 B
+  仍是 O4b 的 **K 配对布局 + `ldmatrix.x2.trans`**（fp8 的 `.trans` 需要沿 K 配对，无法直接从
+  SW128 的 16B（沿 K 连续）读出——见 §17 与 `trans_smoke`，故本轮不动 GEMM3/4/5）。
+- 仅 `-DFA_WGMMA` 构建可实例化；默认 `sm_90` 构建不含、行为不变。host 加 `--wgmma`（HD=128
+  且 `use_regdq` 两档都支持），并加 `[O9c-2 A/B]` 同 session 计时 + 逐元素对拍。
+
+### 22.3 数值（ours-vs-ref，fp8 causal，max_abs）
+
+| case | dq | dk | dv | 与 O4c/O7e mma 版 |
+|---|---|---|---|---|
+| MHA S=512 | 2.426e-1 | 2.976e-1 | 3.732e-1 | 逐位同量级（2.426/2.975/3.735） |
+| MHA S=1024H32 | 2.399e-1 | 4.176e-1 | 3.535e-1 | 同 |
+| GQA q32/kv4 | 2.517e-1 | 5.338e-1 | 7.178e-1 | 同 |
+| MHA S=4096 | 2.635e-1 | 2.644e-1 | 3.216e-1 | 同 |
+
+`[O9c-2 A/B]` 的 `max_abs(wgmma-vs-mma)` dq/dk/dv = 4.0e-2 / 1.5e-1 / 2.6e-2（S=4096）。差异
+来自 wgmma 与 mma 的**累加次序**改变了 fp32 的 S/dP，进而使 fold 的逐行 amax/量化偶有跨档
+（下游放大到 ~1e-1），**但 vs fp32 ref 的误差与 mma 版完全相同**（上表），无系统误差。
+
+### 22.4 性能（同 session A/B，CUDA event；main-only）
+
+| case | mma | wgmma(m64n32) | 加速 |
+|---|---|---|---|
+| MHA S=512 | 0.0803 ms | **0.0773 ms** | 1.038× |
+| MHA S=1024H32 | 0.4553 | **0.4326** | 1.052× |
+| GQA q32/kv4 | 0.4365 | **0.4130** | 1.057× |
+| MHA S=4096 | 2.5891 | **2.4508** | 1.056× |
+
+端到端（`--wgmma`，含 quant+pre+main+cvt）：S=512 **0.1757ms**（12.2 TF）、S=1024H32
+0.6799（25.3 TF）、GQA kv4 0.6024（28.5 TF）、S=4096 **3.1374ms（43.8 TF）**。
+同 session TE FP8 纯反向（`fa_bwd_bench.py bench --dtype fp8`）：S=512 0.1009ms/42.6TF、
+S=4096 0.5893/466.5 ⇒ 端到端 ours/TE = **1.74× / 5.32×**（O7e 5.56×、O9c 5.42×）。
+同 session FA2/FA3/TE fp16 纯反向（`fa_vs_te_bwd_only.py`）：MHA S=4096 FA3 0.3237ms/849TF、
+TE 0.4397/625、FA2 0.7290/377。
+
+### 22.5 ncu（main，S=4096，`--wgmma`，REGDQ=1）
+
+Duration **2.46ms**、DRAM 2.82% / **L1/TEX 65.19%** / L2 48.03% / Compute 40.23%、
+168 regs（`__launch_bounds__(_,3)`）、smem **68.61KB → 3 CTA/SM**、theoretical occ 18.75%、
+achieved 18.11%、Waves 10.34、Executed Ipc 1.73；stall `wait 1.51 + short_scoreboard 1.49 +
+long 1.18 + not_selected 0.35 + barrier 0.28`；shared load bank conflict 49.4M、store 39.0M。
+（O7e mma：Duration 2.57ms、L1/TEX 66.06%、L2 45.28%、Compute 40.86%。）
+**结论**：wgmma 只打掉 GEMM1/2 的 `ldmatrix`，**第一墙仍是 L1/TEX（GEMM3/4/5 的 `ldmatrix` +
+fold 的 smem 访存）**；要再降必须把 GEMM3/4/5 也上 wgmma（fp8 需「SW128 直读转置」或
+MN-major 描述符），这依赖 §17 未解决的 fp8 `.trans` 布局问题。
+
+### 22.6 局限与下一步
+
+- 本轮只换 **GEMM1/2**，收益 **1.04–1.06×**（与 fp16 O9b 的 1.05–1.09× 同量级）。
+- fp8 的 GEMM3/4/5 若要上 wgmma：**B 是转置操作数**。fp16 可用 `ldmatrix.x2.trans` 从 SW128
+  直读，但 fp8 的 `.trans` 要求「沿 K 配对」（§17），而 SW128 的 16B 是「沿 K 连续的 16 个
+  fp8」——两者不兼容。可选路径：① 用 MN-major 描述符做「K-major SW128 tile 的转置读」
+  （fp16 O9b-2 已验证，fp8 的 k32 slab 步进待推导/冒烟）；② 为 GEMM3/4/5 保留配对布局、
+  只把 GEMM1/2 上 wgmma（即本轮）。③ TMA 化 Q/K/V/dO 直写 SW128（省掉寄存器预取与地址运算）。
+- 原始输出：`src/fp8/fa_bwd_fp8_main_o9c2_sweep.out.txt`（两文件 ×4 shape × `--wgmma`，含 A/B）、
+  `src/fp8/fa_bwd_fp8_main_o9c2_ncu_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_main_o9c2_ncu_stall_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o9c2_tebench.out.txt`、`src/fa_bwd_fp8_o9c2_fa3_te_baseline_fp16.out.txt`。

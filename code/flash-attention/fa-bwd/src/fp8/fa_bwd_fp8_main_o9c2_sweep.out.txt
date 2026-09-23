@@ -1,0 +1,63 @@
+########## b1_s512_h16_d128_causal_fp8
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 68608 bytes (67.0 KB)
+grid main = 128 x 16 x 1  (ksplit=16, base_grid=128)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.1757 ms  12.23 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0304 ms | preprocess 0.0468 ms | main 0.0688 ms | convert 0.0296 ms
+[O9c-2 A/B] main mma(regdq=0) 0.0803 ms | wgmma(m64n32) 0.0773 ms (1.038x) | max_abs(wg-vs-mma) dq/dk/dv=4.539e-02/3.058e-02/5.639e-02
+[O11 A/B] lse O1 0.0657 ms | bal(单缓冲) 0.0541 ms (1.214x) | bal+cpasync 0.0393 ms (1.671x)
+[O9c A/B] lse mma(bal+cpasync) 0.0393 ms | wgmma(单缓冲) 0.0525 ms | wgmma(双缓冲) 0.0352 ms (1.119x) | LSE max_abs(vs mma)=6.895e-04
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.938e+02
+  dk   vs ref: max_abs=2.976e-01  max_rel=7.598e+01
+  dv   vs ref: max_abs=3.732e-01  max_rel=1.002e+02
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.377e-01  max_rel=2.386e+02
+  dk   vs te_dk: max_abs=4.427e-01  max_rel=2.377e+02
+  dv   vs te_dv: max_abs=8.542e-01  max_rel=6.892e+01
+########## b1_s1024_h32_d128_causal_fp8
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_causal_fp8
+B=1 S=1024 H=32 Hkv=32 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 68608 bytes (67.0 KB)
+grid main = 128 x 32 x 1  (ksplit=8, base_grid=512)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.6799 ms  25.27 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0994 ms | preprocess 0.1021 ms | main 0.4148 ms | convert 0.0637 ms
+[O9c-2 A/B] main mma(regdq=0) 0.4553 ms | wgmma(m64n32) 0.4326 ms (1.052x) | max_abs(wg-vs-mma) dq/dk/dv=5.310e-02/4.079e-02/6.301e-02
+[O11 A/B] lse O1 0.1623 ms | bal(单缓冲) 0.1031 ms (1.575x) | bal+cpasync 0.0781 ms (2.079x)
+[O9c A/B] lse mma(bal+cpasync) 0.0781 ms | wgmma(单缓冲) 0.1082 ms | wgmma(双缓冲) 0.0667 ms (1.171x) | LSE max_abs(vs mma)=5.771e-04
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.399e-01  max_rel=1.884e+02
+  dk   vs ref: max_abs=4.176e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.535e-01  max_rel=8.086e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=4.637e-01  max_rel=1.714e+02
+  dk   vs te_dk: max_abs=5.707e-01  max_rel=1.502e+02
+  dv   vs te_dv: max_abs=9.428e-01  max_rel=1.436e+02
+########## b1_s1024_h32_d128_kv4_causal_fp8
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp8
+B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 68608 bytes (67.0 KB)
+grid main = 128 x 32 x 1  (ksplit=8, base_grid=512)
+O7: use_regdq=0 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 0.6024 ms  28.52 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0614 ms | preprocess 0.1001 ms | main 0.4021 ms | convert 0.0388 ms
+[O9c-2 A/B] main mma(regdq=0) 0.4365 ms | wgmma(m64n32) 0.4130 ms (1.057x) | max_abs(wg-vs-mma) dq/dk/dv=7.022e-02/2.030e-01/1.014e-01
+[O11 A/B] lse O1 0.1579 ms | bal(单缓冲) 0.1008 ms (1.566x) | bal+cpasync 0.0765 ms (2.064x)
+[O9c A/B] lse mma(bal+cpasync) 0.0765 ms | wgmma(单缓冲) 0.1073 ms | wgmma(双缓冲) 0.0654 ms (1.170x) | LSE max_abs(vs mma)=7.265e-04
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.987e+02
+  dk   vs ref: max_abs=5.338e-01  max_rel=1.413e+02
+  dv   vs ref: max_abs=7.178e-01  max_rel=9.173e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.054e-01  max_rel=1.872e+02
+  dk   vs te_dk: max_abs=9.556e-01  max_rel=2.473e+02
+  dv   vs te_dv: max_abs=1.430e+00  max_rel=1.653e+02
