@@ -1356,9 +1356,35 @@
      MLA S1024H2 2.232/3.337/3.602e-1；A/B max_abs 仅 1e-7 量级，atomic 次序），单/两文件一致。
    - 原始输出 `src/fp8/fa_bwd_fp8_main_o7e2_sweep.out.txt`、
      `src/fp8/fa_bwd_fp8_mma_onefile_o7e2_sweep.out.txt`、
-     `src/fp8/fa_bwd_fp8_main_o7e2_ncu_s4096{,_f16b0}.out.txt`、
-     `src/fp8/fa_bwd_fp8_o7e2_tebench.out.txt`、`src/fa_bwd_o7e2_fa3_te_baseline_fp16.out.txt`；
-     文档 `docs/03` §25、`docs/04` §2.3/§3。
+      `src/fp8/fa_bwd_fp8_main_o7e2_ncu_s4096{,_f16b0}.out.txt`、
+      `src/fp8/fa_bwd_fp8_o7e2_tebench.out.txt`、`src/fa_bwd_o7e2_fa3_te_baseline_fp16.out.txt`；
+      文档 `docs/03` §25、`docs/04` §2.3/§3。
+
+- 2026-09-23（第五十一轮）：**O15a 完成（TMA+SW128 数据通路冒烟，逐位 PASS）+ O16 负结果
+  （分段 `wgmma.wait_group` 重叠 epilogue，实测中性）；把 fp16 main 的墙定量钉在 L2 原子**。
+   - **先量化墙**：ncu 拆 S=4096 主 kernel（`fa_bwd_fp16_wgmma_kernel<128>`，1.54ms）的 L2 扇区：
+     **`red`（dK/dV 跨 CTA `atomicAdd`）= 102,236,160 / 139,841,608 = 73.1%**、`read` 25.6%、
+     `write` 1.1%；`L2 Hit 96.2%`、DRAM 4.19%、L1/TEX 48.0%、Compute 23.7%、occ 11.9%（230 regs /
+     99.33KB / 2 CTA/SM）、Waves 3.88；stall `long 2.01 + wait 1.43 + barrier 0.84 + short 0.29`。
+     ⇒ **main 是 L2 原子字节数 bound**，任何只改「搬运/等待」的优化都动不了它。
+   - **O15a（TMA 通路）**：新增 `src/fp16/fa_bwd_fp16_tma_smoke.cu`——`cuTensorMapEncodeTiled`
+     (`CU_TENSOR_MAP_SWIZZLE_128B`) + `cp.async.bulk.tensor.2d` + mbarrier 把 [64][128] fp16
+     tile 搬进 smem，**逐字节比对 == kernel 的 `sw128_off` K-major SW128**，再用 `wgmma.m64n64k16`
+     消费算 `QKᵀ`。实测 `byte-mismatch=0`、`max_abs=0.000e+00`、**PASS**。
+     **关键发现**：TMA box 内维 128B = fp16 的 **64 元素** ⇒ **HD=128 的 K-major tile 必须拆成
+     2 个 K=64 chunk**（两块独立 8KB、wgmma 用两个 `SBO=1024` 描述符），因为 SW128 canonical
+     `[rg][kg][rr][kk]` 无法由 TMA 的连续 box 一次写出（同 kernel-opt 23/28 篇「BK 锁 64」）。
+   - **O16（负结果）**：给 wgmma 主 kernel 加模板开关 `OW` + CLI `--ow=`，用 `wait_group<1>`
+     （S=QKᵀ 完成即做 P epilogue，与仍在飞的 dP 重叠）和 `wait_group<2>/<1>/wait0`（dV/dK/dQ
+     逐个收，red 与后一条 wgmma 重叠）；**只改等待时机**。同 session A/B：S=4096 `wait0` 1.5124
+     → `wait_group` 1.5064（1.004×）/ 另一 session 1.5062→1.5193（0.991×）⇒ **中性**；
+     `max|diff| dq=0`（逐位）、`dk/dv ~9e-5~1.4e-4`（仅 atomic 次序）。**`--ow=` 默认关**、保留 A/B。
+   - **结论/下一步**：这轮把 fp16/bf16 main 的路线收敛——**唯一真杠杆 = 跨 warpgroup 归约
+     （BM=128、2 warpgroups：一个 KV 元素只被 `nblk/2` 个 CTA 贡献，dK/dV red 字节砍半）**；
+     TMA 通路已建好但需先把 HD=128 tile 改成 2×K=64 chunk 才能落进主 kernel。见 `docs/01` §14i。
+   - 原始输出 `src/fp16/fa_bwd_fp16_tma_smoke.out.txt`、
+     `src/fp16/fa_bwd_fp16_mma_main_o16_s4096.out.txt`、`/tmp` ncu 拆解（L2 扇区、stall）；
+     文档 `docs/01` §14i、`docs/04` §3、`docs/08` §5。
 
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
@@ -1448,8 +1474,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
         而是 **L2 的 dK/dV 跨 CTA 原子（~70%）+ 99KB smem 锁死的 2 CTA/SM**。详见 `docs/01` §14h。
          **bf16 版 O9b-2 已完成（第四十四轮）**：把 fp16 O9b-2 逐字 dtype 参数化到 bf16，数值与
          O5b~O13 逐位相同、main S4096 0.979×/S512 0.960×、ncu 与 fp16 逐项一致（详见 `docs/01b` §6r）。
-          **O9b-2b（下一步）**：在此通路上加 **TMA 化 Q/K/V/dO** + **P/dS 双缓冲跨-tile 流水**，
-          并把 smem 压到 ≤75.7KB 冲 3 CTA/SM。
+          **O9b-2b（下一步，第五十一轮已重定）**：**先做跨 warpgroup 归约（BM=128、2 warpgroups，
+          dK/dV red 字节砍半）**——这是打掉 L2 原子墙的唯一真杠杆（`docs/01` §14i）。TMA 化
+          Q/K/V/dO 通路已由 **O15a** 建好（冒烟逐位 PASS），但要落进主 kernel 需先把 HD=128 的
+          K-major tile 改成 **2×K=64 chunk**（TMA box 内维 128B=64 元素，`docs/01` §14i.2）。
           > **O7e（第四十五轮）修正了 fp8 侧的优先级**：O7b 针对的 L2 墙已不是头号杠杆
           > （见下），**fp8 应先做 `wgmma`（O9c）**；fp16/bf16 的 O9b-2b 仍按原计划。
 - [~] **O9c（fp8 main 的 Hopper wgmma）**：把 fp8 `mma.m16n8k32` 换 `wgmma.m64nNk32`
@@ -1727,11 +1755,16 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `sub4*16+t`→`sub4*8+t+half*32`（消 `Ps/Ss` 列读的恒 2-way 冲突）+ 8B/16B 向量写；
       shared load 冲突 **−53.5%**、L1/TEX 64.8→60.0%、main 1.02–1.04×、数值逐位不变。
       另证伪「fold 写折 16B」（1.007×、增大 spill）。详见 `docs/03` §25、`docs/04` §2.3。
-- [ ] （backlog，**已降优先级**）O7b：dK/dV 的跨 CTA 归约（分块 `*_accum` + convert，或按 KV
-      列块常驻 / Q 块累加），消剩余 108.5M red 并得到确定性反向。**O7e 已证明 O7b 针对的 L2 墙
-      只剩 43.7% < L1/TEX 66%，回报低于 fp8 `wgmma`（O9c）**，故排到 O9c 之后。**O7e-2 后
-      fp8 main 的 L1/TEX 仍 60%、L2 50%（red），且 O9c-2b 已硬件阻塞 ⇒ 下一步只剩
-      `TMA 化 operand` / `dK/dV 去原子`；或转 fp16/bf16 的 O9b-2b**。
+- [ ] **（第五十一轮新列，最高优先级）O17：fp16/bf16 跨 warpgroup 归约（BM=128、2 warpgroups）**。
+      动机（量化证据）：ncu 拆 S=4096 主 kernel 的 L2 扇区——**`red`（dK/dV 跨 CTA `atomicAdd`）
+      占 73.1%**、DRAM 仅 4.2% ⇒ main 是 **L2 原子字节数 bound**；O16（重叠 epilogue）与 O7c
+      （float4 归约）都证明「动等待/事务数」无效。**一个 KV 元素被 `nblk` 个 CTA 贡献，BM=128 后
+      只被 `nblk/2` 个 ⇒ red 字节直接砍半**。实现：2 warpgroups 各算 64 行 Q 的 dV/dK 偏和，
+      在 smem（≈32KB）合并一次再 `red`；dQ 各 wg 寄存器累加互不干扰。代价 smem≈176KB→1 CTA/SM
+      （256 线程=8 warps/SM，与现状相同）。TMA 通路（O15a）可随后接入压 `long_scoreboard`。
+- [ ] （backlog）O7b：dK/dV 的跨 CTA 归约（分块 `*_accum` + convert）→ **确定性反向**；字节不减、
+      多一趟读回，只在需要确定性时做。**O7e 已证明 fp8 侧该 L2 墙只剩 43.7% < L1/TEX 66%**；
+      fp16/bf16 侧见上 O17（跨 wg 归约才是真杠杆）。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog

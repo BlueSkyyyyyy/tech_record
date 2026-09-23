@@ -125,7 +125,7 @@ static void launch_bwd_mma(dim3 mg, const __half* q, const __half* k, const __ha
 
 #ifdef FA_WGMMA
 // O9b/O9b-2：wgmma 主 kernel（只 HD=128 / BM=BN=64）。Q/dO/K/V SW128 + P/dS SW128，≈97KB。
-template <int HD>
+template <int HD, bool OW = false>
 static void launch_bwd_wgmma(dim3 mg, const __half* q, const __half* k, const __half* v,
                              const __half* do_, const float* delta, const float* lse,
                              float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
@@ -134,11 +134,11 @@ static void launch_bwd_wgmma(dim3 mg, const __half* q, const __half* k, const __
   constexpr int TILE  = (BM / 8) * (HD / 64) * 1024;
   constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
   constexpr int smem = 1024 + TILE * 2 + KTILE * 3 + 2 * BM * BN * (int)sizeof(__half);
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma_kernel<HD>,
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma_kernel<HD, OW>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-  fa_bwd_fp16_wgmma_kernel<HD><<<mg, THREADS, smem>>>(q, k, v, do_, delta, lse, dq_acc,
-                                                      dk_acc, dv_acc, S, H, Hkv, scale, causal,
-                                                      sched);
+  fa_bwd_fp16_wgmma_kernel<HD, OW><<<mg, THREADS, smem>>>(q, k, v, do_, delta, lse, dq_acc,
+                                                          dk_acc, dv_acc, S, H, Hkv, scale,
+                                                          causal, sched);
 }
 #endif
 
@@ -160,6 +160,8 @@ int main(int argc, char** argv) {
   int lse_wgm = 0;
   // O9b：主 kernel 是否用 wgmma（仅 FA_WGMMA 构建、D==128 且 sel=(64,64) 时生效）。
   int wgmma_sel = 0;
+  // O16：wgmma 主 kernel 是否用「分段 wait_group」重叠 epilogue（-1=自动/开，0=关，1=开）。
+  int ow_opt = -1;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -177,6 +179,7 @@ int main(int argc, char** argv) {
     else if (a == "--lsewgm") lse_wgm = 1;
     else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
     else if (a == "--wgmma") wgmma_sel = 1;
+    else if (a.rfind("--ow=", 0) == 0) ow_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -374,12 +377,18 @@ int main(int argc, char** argv) {
 #undef LAUNCH_CFG
   const bool r4_sel = (r4_opt > 0);
   const bool prel_sel = (prel_opt >= 0) ? (prel_opt != 0) : true;
+  // O16：默认关（实测中性 1.004×，且会改 dK/dV 的 atomic 次序、破坏历史逐位值）；保留 A/B。
+  const bool ow_sel = (ow_opt > 0);
   auto run_main = [&]() {
 #ifdef FA_WGMMA
     if (wgmma_sel && D == 128 && bm_sel == 64 && bn_sel == 64) {
       dim3 g((S + 63) / 64, H, B);
-      launch_bwd_wgmma<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
-                            d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      if (ow_sel)
+        launch_bwd_wgmma<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                    d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      else
+        launch_bwd_wgmma<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
       return;
     }
 #endif
@@ -535,6 +544,50 @@ int main(int argc, char** argv) {
          main_flops / (ms_pipe * 1e-3) / 1e12, ms_pipe2,
          main_flops / (ms_pipe2 * 1e-3) / 1e12, ms_nopipe / ms_pipe,
          ms_nopipe / ms_pipe2);
+
+  // ---- O16 A/B（仅 FA_WGMMA 构建）：wgmma 主 kernel 分段 wait_group（重叠 epilogue）0 vs 1 ----
+#ifdef FA_WGMMA
+  if (wgmma_sel && D == 128 && bm_sel == 64 && bn_sel == 64) {
+    auto time_wgm = [&](bool ow, float* out_ms, float* dq_c, float* dk_c, float* dv_c) {
+      dim3 g((S + 63) / 64, H, B);
+      auto launch = [&]() {
+        if (ow)
+          launch_bwd_wgmma<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                      d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, 0);
+        else
+          launch_bwd_wgmma<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, 0);
+      };
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+      CUDA_CHECK(cudaMemcpy(dq_c, d_dq_acc, n * sizeof(float), cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dk_c, d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dv_c, d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    };
+    std::vector<float> q0(n), k0(nkv), v0(nkv), q1(n), k1(nkv), v1(nkv);
+    float ms_ow0 = 0.f, ms_ow1 = 0.f;
+    time_wgm(false, &ms_ow0, q0.data(), k0.data(), v0.data());
+    time_wgm(true, &ms_ow1, q1.data(), k1.data(), v1.data());
+    double dq_d = 0, dk_d = 0, dv_d = 0;
+    for (size_t i = 0; i < n; ++i) dq_d = std::max(dq_d, (double)std::fabs(q0[i] - q1[i]));
+    for (size_t i = 0; i < nkv; ++i) {
+      dk_d = std::max(dk_d, (double)std::fabs(k0[i] - k1[i]));
+      dv_d = std::max(dv_d, (double)std::fabs(v0[i] - v1[i]));
+    }
+    printf("[O16 A/B] main wgmma wait0 %.4f ms | wait_group(重叠) %.4f ms (%.3fx) | "
+           "max|diff| dq/dk/dv=%.2e/%.2e/%.2e\n",
+           ms_ow0, ms_ow1, ms_ow0 / ms_ow1, dq_d, dk_d, dv_d);
+  }
+#endif
 
   // ---- O6c A/B（仅 causal，仍在 HD=128 块内）：mblk 重排 sched=0/1/2（同一 pipe）----
   if (causal) {
