@@ -151,6 +151,21 @@ static void launch_lse_bal(dim3 lg, const unsigned char* q8, const float* qs,
   lse_mma_kernel_bal<HD, PIPE><<<lg, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv, scale);
 }
 
+// O9c：fp8 wgmma 版 LSE（SW128 + wgmma.m64n64k32），仅 `-DFA_WGMMA` 构建存在。
+#ifdef FA_WGMMA
+template <int HD, int PIPE>
+static void launch_lse_bal_wgmma(dim3 lg, const unsigned char* q8, const float* qs,
+                                 const unsigned char* k8, const float* ks, float* lse, int S,
+                                 int H, int Hkv, float scale) {
+  using Cfg = Fp8Cfg<HD, 64, 32>;
+  constexpr int kSmem = PIPE ? Cfg::lse_smem_bytes_balw1 : Cfg::lse_smem_bytes_balw0;
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<HD, PIPE>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  lse_mma_kernel_bal_wgmma<HD, PIPE><<<lg, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv,
+                                                             scale);
+}
+#endif
+
 // =============================================================================
 // host / launcher / self-test
 // =============================================================================
@@ -160,10 +175,12 @@ int main(int argc, char** argv) {
   bool causal = true;
   int iters = 20;
   int ksplit = -1;  // -1 = 自动
+  int lsewgm = 0;   // O9c：1 = LSE 走 wgmma（需 -DFA_WGMMA 构建），0 = O11 mma 版
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
+    else if (a == "--lsewgm") lsewgm = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--ksplit=", 0) == 0) ksplit = atoi(a.c_str() + 9);
@@ -295,9 +312,16 @@ int main(int argc, char** argv) {
   auto run_preprocess = [&]() {
     if (D == 128) {
       // O11：causal 走镜像配对 + cp.async 双缓冲（非 causal 各块工作量相同，走 O1 原版）。
-      if (causal)
-        launch_lse_bal<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
-      else
+      // O9c：`--lsewgm` 且以 `-DFA_WGMMA` 构建时，causal 走 wgmma.m64n64k32（SW128）。
+      if (causal) {
+#ifdef FA_WGMMA
+        if (lsewgm)
+          launch_lse_bal_wgmma<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv,
+                                       scale);
+        else
+#endif
+          launch_lse_bal<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+      } else
         launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
       delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
     } else {
@@ -406,6 +430,39 @@ int main(int argc, char** argv) {
     printf("[O11 A/B] lse O1 %.4f ms | bal(单缓冲) %.4f ms (%.3fx) | bal+cpasync %.4f ms "
            "(%.3fx)\n",
            a, b, a / b, c, a / c);
+#ifdef FA_WGMMA
+    // O9c A/B：wgmma（SW128 + m64n64k32）vs O11 mma 版（同 PIPE=1）。同时核对 LSE 数值。
+    auto bench_lse_wgm = [&](int which, float* ms_out) {
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) {
+        if (which == 3)
+          launch_lse_bal_wgmma<128, 0>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+        else
+          launch_lse_bal_wgmma<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+      }
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(ms_out, ev0, ev1));
+      *ms_out /= iters;
+    };
+    float w0 = 0.f, w1 = 0.f;
+    std::vector<float> lse_wgm((size_t)B * S * H), lse_ref((size_t)B * S * H);
+    bench_lse_wgm(3, &w0);
+    bench_lse_wgm(4, &w1);
+    // 与 O11 mma 版 LSE 对拍（应逐位相同：同数学、同 rowwise scale 顺序）。
+    launch_lse_bal<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+    CUDA_CHECK(cudaMemcpy(lse_ref.data(), d_lse, lse_ref.size() * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    launch_lse_bal_wgmma<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+    CUDA_CHECK(cudaMemcpy(lse_wgm.data(), d_lse, lse_wgm.size() * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    double le = 0.0;
+    for (size_t i = 0; i < lse_ref.size(); ++i)
+      le = std::max(le, (double)std::fabs((double)lse_wgm[i] - (double)lse_ref[i]));
+    printf("[O9c A/B] lse mma(bal+cpasync) %.4f ms | wgmma(单缓冲) %.4f ms | wgmma(双缓冲) "
+           "%.4f ms (%.3fx) | LSE max_abs(vs mma)=%.3e\n",
+           c, w0, w1, c / w1, le);
+#endif
   }
 
   std::vector<float> mdq(nq), mdk(nkv), mdv(nkv);

@@ -1622,3 +1622,146 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
 `src/fp8/fa_bwd_fp8_main_o7e_ncu_tables_s4096.out.txt`（ncu）、
 `src/fp8/fa_bwd_fp8_main_o7b_base_ncu_full_s4096.out.txt`（O7 基线 ncu）、
 `src/fa_bwd_o7e_fa3_te_baseline.out.txt`（FA2/FA3/TE fp16/bf16 纯反向）。
+
+---
+
+## 21. O9c（第一步）：fp8 Hopper `wgmma` 数据通路（冒烟 + LSE 上验证）
+
+> O7e（§20）用 ncu 把 fp8 main 的第一墙定位为 **L1/TEX 66–71%（`ldmatrix` + smem 访存）**，
+> 并判定「只有 wgmma 的 SS 直读 smem 能同时消掉 `ldmatrix`/转置副本并压 smem」，故把
+> `O7b`（去 dK/dV 跨 dK/dV red）降优先级、转做 **O9c**。O9c 与 fp16/bf16 的 O9 系列同构，
+> 分多步：**本步先在风险最小的 LSE（单个 QKᵀ）上建立 fp8 的 SW128 + `wgmma.m64n64k32`
+> 数据通路**，主 kernel 的 5 个 GEMM 上 wgmma 留作 O9c 后续（对齐 fp16 的 O9a → O9b → O9b-2）。
+
+### 21.1 为什么先做 LSE
+
+- LSE 是「单 GEMM、无转置、无 rowwise scale 折叠」的最小场景，用来验证 **fp8 的 SW128
+  K-major 布局 + 描述符 + `m64n64k32` 累加器映射** 三个最容易出错的点，风险最低。
+- fp8 的 SW128 与 bf16 **逐字节同构**（atom 恒 8 行 × 128B），只差「一行 128B = **128 个
+  fp8**」（bf16 是 64 个）⇒ 16B chunk 下标是 `k/16`（bf16 是 `k/8`）、描述符 `SBO=(K/128)*1024`、
+  k32 步进地址仍是 `(s>>2)*1024 + (s&3)*32`（每步 32B = 32 个 fp8）。这让 fp16/bf16 的
+  `sw128_off`/描述符公式只需把「行元素数」从 `K/64` 改成 `K/128`。
+
+### 21.2 前置冒烟（`fa_bwd_fp8_wgmma_smoke.cu`）
+
+最小 GEMM `C = Q·Kᵀ`（Q/K 都是 [64][128] fp8，K-major 归约维 128），覆盖两种 wgmma 组合：
+
+- `wgmma.mma_async.sync.aligned.m64n64k32.f32.e4m3.e4m3`（QKᵀ 口径）；
+- `...f32.e5m2.e4m3`（GEMM2 `dP=dO·Vᵀ` 口径）。
+
+Q/K 以 `sw128_off_fp8` 存进 SW128 tile，用 `make_desc_sw128_fp8` + `sw128_k32_addr` 生成
+描述符；累加器按 `d[j*4+q] ↔ row=16w+g+(q>=2?8:0)、col=j*8+2*(lane%4)+(q&1)` 写回。
+取 `{-4..4}` 的整数（e4m3/e5m2 都能精确表示）做 CPU 参考，避免 host 端 fp8 反量化坑。
+
+实测 `max_abs = 0.000e+00`（两种组合，**逐位一致**）⇒ SW128 存 + 描述符 + 累加器映射自洽。
+
+### 21.3 实现（单/两文件 device 代码同源逐字一致）
+
+**device 侧**（`fa_bwd_fp8_kernels.cuh`，单文件由 `sync_onefile_device.py` 同步）：
+
+- 新增 `sw128_off_fp8` / `sw128_k32_addr` / `make_desc_sw128_fp8`；
+- 新增 `wgmma.m64n64k32` 的 `e4m3×e4m3` / `e5m2×e4m3` 两条 asm（fp8 尾部操作数是
+  `p, scaleA, scaleB` 三个，与 bf16 的 `p,1,1,0,0` 不同；rowwise scale 在 epilogue 乘，故
+  scaleA/scaleB 立即数取 1）；
+- 新增 `lse_mma_kernel_bal_wgmma<HD,PIPE>`：与 O11 的 `lse_mma_kernel_bal` **数学完全一致**
+  （同 E4M3×E4M3、同 online-softmax、同 4-lane `shfl` 归约、同 rowwise scale 相乘顺序、
+  同镜像配对 + `cp.async` 双缓冲），只把「4 warp × m16n64 × 4 k-step 的 mma+ldmatrix」换成
+  1 个 warpgroup 的 4 条 `wgmma.m64n64k32`。
+- 全部用 `#ifdef FA_WGMMA` 包住：**默认 `sm_90` 构建完全不含本块**（行为/数值逐位不变）。
+- `Fp8Cfg` 新增 `lse_smem_bytes_balw0/1`（SW128 tile 2×/3× + scale + 1024B 对齐 slack）。
+
+**host 侧**（`fa_bwd_fp8_main.cu` 与单文件各自的 host 段）：新增 `launch_lse_bal_wgmma`、
+CLI `--lsewgm`、`run_preprocess` 里 D==128 且 causal 时可选走 wgmma、以及 O9c A/B 计时段。
+构建：`ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh ...`。
+
+### 21.4 数值（ours-vs-ref，fp8 causal，max_abs，单/两文件一致）
+
+LSE 本身与 mma 版对拍 max_abs **5.6–7.4e-4**（S=4096 5.605e-4；GQA kv4 7.265e-4；
+MQA kv1 7.370e-4）——不是逐位相同，但这是 **fp32 求和次序**（wgmma 与 mma 的累加器在
+硬件内部的累加顺序不同）导致，远小于 fp8 容差 O(1)。
+
+最终 `dq/dk/dv` 与 ref 的 max_abs 与 O7e **同一水平**（S=512 2.426/2.975/3.736e-1；
+S=1024H32 2.400/4.195/3.535e-1；S=4096 2.634/2.643/3.217e-1；GQA kv4 2.517/5.399/7.065e-1），
+即 **LSE 的这点差异在端到端被主 kernel 的 fp8 噪声淹没**，无系统误差。
+
+### 21.5 性能（CUDA event 纯 device；同 session A/B）
+
+LSE-only（两文件版 A/B 段直接测，ms）：
+
+| shape | mma（bal+cp.async） | **wgmma（双缓冲）** | 加速 |
+|---|---|---|---|
+| S=512 H16 | 0.0389 | **0.0365** | 1.065× |
+| S=1024 H32 | 0.0791 | **0.0691** | 1.144× |
+| S=4096 H16 | 0.3437 | **0.2697** | **1.275×** |
+| S=1024 H32 kv4 | 0.0779 | **0.0677** | 1.150× |
+| S=1024 H64 kv1 | 0.1013 | **0.0778** | 1.302× |
+
+端到端（单/两文件一致；preprocess 桶含 lse+delta）：
+
+| shape | default total / preprocess | **--lsewgm total / preprocess** | total 加速 |
+|---|---|---|---|
+| S=512 | 0.1780 / 0.0467 | **0.1690 / 0.0405** | 1.05× |
+| S=1024 H32 | 0.7064 / 0.1026 | **0.6902 / 0.0890** | 1.02× |
+| S=4096 H16 | 3.2943 / 0.3952 | **3.1925 / 0.3176** | 1.03× |
+| GQA kv4 | 0.6295 / 0.1007 | **0.6157 / 0.0876** | 1.02× |
+
+LSE wgmma 单缓冲反而比 mma 慢（S=4096 0.477 vs 0.344）⇒ **必须配 `cp.async` 双缓冲**（SW128
+tile 的全局读延迟靠双缓冲盖住），与 fp16/bf16 的 O9a 结论一致。
+
+### 21.6 ncu（lse，S=4096，`--set full -c 1`；mma vs wgmma）
+
+| 指标 | mma（`lse_mma_kernel_bal`） | **wgmma（`..._wgmma`）** |
+|---|---|---|
+| Duration | 355.87 µs | **279.07 µs**（1.275×） |
+| Compute (SM) | 61.59% | **59.45%** |
+| DRAM Throughput | 1.48% | 1.88% |
+| L2 Cache Throughput | 15.05% | **12.48%** |
+| Registers / thread | 77 | **64** |
+| Block Limit Shared Mem | 6 | **8** |
+| Theoretical Occupancy | 37.5% | **50%** |
+| Achieved Occupancy | 23.24% | 23.27% |
+| Waves Per SM | 0.65 | 0.48 |
+| 主 stall | fixed-latency wait 2.4 cyc | **wait 2.2 cyc** |
+
+**bound = Compute ~60% + softmax epilogue**（`No Eligible` 36–38%），与 fp16 O9a 的结论一致：
+wgmma 只打掉访存那一半（L2 15.0→12.5%、regs 77→64、smem 变小使理论 occupancy 37.5→50%），
+**LSE 的墙其实在 `fe`/`flog` 的 softmax epilogue 与行归约**，所以 LSE 端到端收益有限（1.02–1.05×）。
+
+### 21.7 对标与下一步
+
+- ours fp8 端到端（`--lsewgm`）vs 同 session TE FP8 纯反向（`fa_bwd_bench.py bench --dtype fp8`）：
+  S=512 **0.1690 / 0.1010 = 1.67×**、S=1024H32 0.6902/0.2059 = 3.35×、
+  S=4096 3.1925/0.5894 = **5.42×**、GQA kv4 0.6157/0.2009 = 3.06×、MQA kv1 1.0606/0.4008 = 2.65×。
+  （O7e 同口径 S=4096 为 5.56× ⇒ 本步 1.03×。）同 session FP16 `harness/fa_vs_te_bwd_only.py`
+  （FA2/FA3/TE 三列）：MHA S=4096 FA3 0.3238ms/849TF、TE 0.4443/619、FA2 0.7251/379。
+- **局限**：O9c 本步只把 LSE 换成 wgmma，**主 kernel 仍是 `mma.m16n8k32`**（第一墙 L1/TEX
+  66–71% 未动）。真正的大头是 main（S=4096 main 2.53ms 占端到端 79%）。
+- **下一步（O9c-2）**：把主 kernel 的 **GEMM1/2（`S=QKᵀ`、`dP=dO·Vᵀ`）** 换成
+  `wgmma.m64n64k32`（Q/dO/K/V 存 SW128；GEMM3/4/5 的 B 从同一 SW128 tile 用 `ldmatrix.x2.trans`
+  转置读，对齐 fp16 O9b 的 `mma_block_swb`），再逐步上 GEMM3/4/5（对齐 O9b-2）；最终靠
+  TMA + P/dS 双缓冲跨-tile 流水 + 压 smem 冲更高 occupancy。
+
+### 21.8 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+# 冒烟（需 sm_90a）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_wgmma_smoke.cu
+# LSE wgmma（默认 sm_90 构建不含；需 -DFA_WGMMA）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=30 --lsewgm \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# 单文件同命令换 src/fp8/fa_bwd_fp8_mma_onefile.cu；去掉 --lsewgm 即 O11 mma 基线
+# ncu（注意进程参数放在 `--` 之后）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:lse_mma_kernel_bal_wgmma -c 1 -- \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=1 --lsewgm
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_wgmma_smoke.out.txt`（冒烟）、
+`src/fp8/fa_bwd_fp8_o9c_lse_sweep.out.txt`（两文件 ×5 shape × default/`--lsewgm`，含 O9c A/B）、
+`src/fp8/fa_bwd_fp8_main_o9c_ncu_lsewgm_s4096.out.txt` / `..._ncu_lse_mma_s4096.out.txt`（ncu）、
+`src/fp8/fa_bwd_fp8_o9c_tebench.out.txt`（TE FP8 基线）、
+`src/fp8/fa_bwd_fp8_o9c_fa3_te_baseline.out.txt`（FA2/FA3/TE fp16 纯反向）。
