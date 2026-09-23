@@ -111,7 +111,8 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // =============================================================================
 // O7：REGDQ 选择是否把 dQ 沿 nt 累加在寄存器里（见 kernels.cuh 主 kernel 说明）。
 // O9c-2：WGMMA=true 时 GEMM1/2 走 wgmma（Q/dO/K/V 存 SW128），smem 用 wgmma 布局。
-template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false>
+// O12：PREL=true 时把本线程负责的 LSE/D 预装寄存器（见 kernels.cuh），默认开。
+template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true>
 static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             const unsigned char* k8, const float* ks,
                             const unsigned char* v8, const float* vs,
@@ -121,9 +122,9 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             float scale, int causal, int ksplit) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = WGMMA ? Cfg::smem_bytes_wgmma : Cfg::smem_bytes;
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA>,
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA><<<mg, THREADS, kSmem>>>(
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL><<<mg, THREADS, kSmem>>>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit);
 }
@@ -178,12 +179,14 @@ int main(int argc, char** argv) {
   int ksplit = -1;  // -1 = 自动
   int lsewgm = 0;   // O9c：1 = LSE 走 wgmma（需 -DFA_WGMMA 构建），0 = O11 mma 版
   int wgmma = 0;    // O9c-2：1 = 主 kernel GEMM1/2 走 wgmma（需 -DFA_WGMMA 构建）
+  int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
     else if (a == "--lsewgm") lsewgm = 1;
     else if (a == "--wgmma") wgmma = 1;
+    else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--ksplit=", 0) == 0) ksplit = atoi(a.c_str() + 9);
@@ -339,39 +342,37 @@ int main(int argc, char** argv) {
     }
   };
 
+  // O12：LSE/D 预装寄存器（默认开），`--prel=0` 关；为同 session A/B 派发到两个模板实例。
+  const bool prel_sel = (prel_opt < 0) ? true : (prel_opt != 0);
+  auto launch128 = [&](bool reg, bool wg, bool prel) {
+#define GO(REG_, WG_, PREL_)                                                                 \
+    launch_bwd_main<128, 64, 32, REG_, WG_, PREL_>(                                          \
+        mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,      \
+        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit)
+    if (reg) {
+      if (wg) { if (prel) GO(true, true, true); else GO(true, true, false); }
+      else    { if (prel) GO(true, false, true); else GO(true, false, false); }
+    } else {
+      if (wg) { if (prel) GO(false, true, true); else GO(false, true, false); }
+      else    { if (prel) GO(false, false, true); else GO(false, false, false); }
+    }
+#undef GO
+  };
   auto run_main = [&]() {
-    if (D == 128) {
-      if (use_regdq) {
 #ifdef FA_WGMMA
-        if (wgmma) {
-          launch_bwd_main<128, 64, 32, true, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
-                                                   d_vs, d_do8, d_dos, d_delta, d_lse,
-                                                   d_dq_acc, d_dk_acc, d_dv_acc, S, H,
-                                                   Hkv, scale, (int)causal, ksplit);
-          return;
-        }
+    if (D == 128 && wgmma) { launch128(use_regdq, true, prel_sel); return; }
 #endif
-        launch_bwd_main<128, 64, 32, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
-                                           d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
-                                           d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
-      } else {
-#ifdef FA_WGMMA
-        if (wgmma) {
-          launch_bwd_main<128, 64, 32, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
-                                                    d_vs, d_do8, d_dos, d_delta, d_lse,
-                                                    d_dq_acc, d_dk_acc, d_dv_acc, S, H,
-                                                    Hkv, scale, (int)causal, ksplit);
-          return;
-        }
-#endif
-        launch_bwd_main<128, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
-                                            d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
-                                            d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
-      }
-    } else
-      launch_bwd_main<512, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
-                                          d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
-                                          d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+    if (D == 128) { launch128(use_regdq, false, prel_sel); return; }
+    if (prel_sel)
+      launch_bwd_main<512, 64, 32, false, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
+                                                       d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+                                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                                       (int)causal, ksplit);
+    else
+      launch_bwd_main<512, 64, 32, false, false, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
+                                                        d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+                                                        d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                                        (int)causal, ksplit);
   };
 
   auto run_all = [&]() {
@@ -556,6 +557,60 @@ int main(int argc, char** argv) {
            "%.4f ms (%.3fx) | LSE max_abs(vs mma)=%.3e\n",
            c, w0, w1, c / w1, le);
 #endif
+  }
+
+  // ---- O12 A/B（D=128/512）：主 kernel 的 LSE/D 预装寄存器 ON vs OFF（同 session 计时）。----
+  //  OFF 版就是旧的「GEMM1/2 epilogue 里逐元素 global 读 lse/delta」。数值应逐位相同。
+  if (D == 128 || D == 512) {
+#ifdef FA_WGMMA
+    const bool wg_ab = (wgmma != 0);
+#else
+    const bool wg_ab = false;
+#endif
+    auto launch_sel = [&](bool prel) {
+      if (D == 128) {
+        launch128(use_regdq, wg_ab, prel);
+      } else {
+        if (prel)
+          launch_bwd_main<512, 64, 32, false, false, true>(
+              mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+        else
+          launch_bwd_main<512, 64, 32, false, false, false>(
+              mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      }
+    };
+    auto bench_prel = [&](bool prel, float* out) {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      launch_sel(prel);
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch_sel(prel);
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float m_off = 0.f, m_on = 0.f;
+    bench_prel(false, &m_off);
+    bench_prel(true, &m_on);
+    // 逐元素对拍（应逐位相同）
+    std::vector<float> p_off_dq(nq), p_on_dq(nq);
+    CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+    launch_sel(false);
+    CUDA_CHECK(cudaMemcpy(p_off_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+    launch_sel(true);
+    CUDA_CHECK(cudaMemcpy(p_on_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    double pd = 0.0;
+    for (size_t i = 0; i < p_on_dq.size(); ++i)
+      pd = std::max(pd, (double)std::fabs((double)p_off_dq[i] - (double)p_on_dq[i]));
+    printf("[O12 A/B] main LSE/D preload off %.4f ms | on %.4f ms (%.3fx) | "
+           "max_abs(on-vs-off) dq=%.3e\n",
+           m_off, m_on, m_off / m_on, pd);
+    run_main();  // 恢复 CLI 选中路径（写回 d_dq_acc，不影响 d_dq）
   }
 
   std::vector<float> mdq(nq), mdk(nkv), mdv(nkv);

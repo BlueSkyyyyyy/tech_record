@@ -142,7 +142,15 @@
 
 ## 阻塞
 
-（当前无）
+- **fp8 GEMM3/4/5 的 Hopper `wgmma`（O9c-2b，MN-major 描述符转置读）——硬件层面不成立。**
+  查证 CUTLASS `include/cute/arch/mma_sm90_gmma.hpp`：**所有 fp8 wgmma 变体只有 `_SS_TN`
+  （A/B 均 K-major），没有 `.trans_a/.trans_b` 立即数**（asm 尾部是 `p, scale_D, scaleA, scaleB`，
+  对照 fp16 是 `p,1,1,tnspA,tnspB`）。即 fp16 O9b-2 靠 `tnsp=1` 做的「K-major tile 转置读」
+  在 fp8 ISA 上不存在；只能物理存转置布局，而 fp8 SW128 atom（8 行×128 fp8）要求归约维≥128
+  ⇒ `BM=BN=128`、smem >110KB、1–2 CTA/SM，且 GEMM5 与 GEMM3/4 需两种主序。加之 fp16 O9b-2
+  已实测 GEMM3/4/5 上 wgmma **中性偏负**（墙在 L2 原子/occupancy，不在 GEMM 指令），
+  **决定不再尝试**；fp8 主 kernel 的 L1/TEX 墙改走非转置手段（fold 向量化 / TMA operand /
+  dK/dV 去原子）。详见 `docs/03` §23.6。
 
 ## 当前进度
 
@@ -1255,6 +1263,35 @@
      `src/fp8/fa_bwd_fp8_o9c2_tebench.out.txt`、`src/fa_bwd_fp8_o9c2_fa3_te_baseline_fp16.out.txt`；
      文档 `docs/03` §22。
 
+- 2026-09-23（第四十八轮）：**O12 完成（fp8 主 kernel LSE/D 预装寄存器，main 1.04–1.13×）；
+  并查证 O9c-2b 为硬件阻塞**。
+   - **O12（O7c-PREL for fp8）**：fp16/bf16 早在 O7c（第三十五轮）就把 `lse`/`delta` 预装寄存器，
+     但 fp8 的 GEMM1/2 epilogue 一直**按 `qi` 逐元素 global 读**（ncu：S=4096 uncoalesced global
+     多余扇区 38.0M / 23%、global load 仅 9.8/32 B/sector）。新增模板开关 `PREL=true`（`--prel=0`
+     可关），在 `nt` 循环前把本线程行槽（mma 4 个 / wgmma 2 个）的 LSE/D 装进 `lse_r[4]/del_r[4]`，
+     epilogue 用寄存器；WGMMA 与 mma 两路径共用。单/两文件 device 逐字一致（`sync_onefile_device.py`
+     核对 `identical: True`）。
+   - **数值**：`PREL` on/off 逐元素 dq 差 4.8e-7–1.1e-3（dQ 跨 CTA `atomicAdd` 次序，非逻辑差）；
+     **vs fp32 ref 与历史逐位一致**（S512 2.426/2.975/3.735e-1；S1024H32 2.400/4.195/3.536e-1；
+     S4096 2.635/2.643/3.216e-1；GQA kv4 2.517/5.408/7.072e-1；MQA kv1 4.097e-1/1.519/2.127；
+     MLA S1024H2 2.232/3.337/3.602e-1）。单/两文件一致。
+   - **性能（同 session A/B，main-only）**：S512 0.0719→**0.0690（1.042×）**、S1024H32
+     0.4374→**0.4057（1.078×）**、S4096 2.4950→**2.2679（1.100×）**、GQA kv4 1.079×、
+     MQA kv1 1.108×、MLA S1024H2 1.010×；`--wgmma` 路径 S4096 2.3851→**2.1204（1.125×）**。
+     `--wgmma` 端到端 S4096 **2.872ms（47.9 TF）**、S1024H32 0.6502（26.4）、S512 0.1735（12.4）。
+   - **ncu（main,S=4096,mma）**：Duration 2.60→**2.34ms**、Executed Instructions 1008.7→**923.7M
+     （−8.4%）**、**uncoalesced global 38.0M→4.70M（−87.6%，23%→5%）**、L1/TEX 65.9%/L2 48.1%/
+     Compute 40.9%、regs 168/occ 18.1% 不变。新墙仍 = **L1/TEX 66% + 残余 L2（dK/dV red）**。
+   - **O9c-2b 阻塞**：查证 fp8 wgmma 无转置操作数（CUTLASS 全为 `_SS_TN`、无 `tnsp`），
+     MN-major 转置读在 fp8 上不存在；物理转置需 `BM=BN=128`、smem >110KB。加之 fp16 O9b-2
+     实测 GEMM3/4/5 wgmma 中性偏负 ⇒ **不再尝试**（写入「阻塞」，`docs/03` §23.6）。
+   - 原始输出 `src/fp8/fa_bwd_fp8_main_o12_sweep.out.txt`、
+     `src/fp8/fa_bwd_fp8_mma_onefile_o12_sweep.out.txt`、
+     `src/fp8/fa_bwd_fp8_main_o12_wgmma_sweep.out.txt`、
+     `src/fp8/fa_bwd_fp8_main_o12_ncu_{prel0,prel1}_s4096.out.txt`、
+           `src/fp8/fa_bwd_fp8_o12_tebench{,_req}.out.txt`；文档 `docs/03` §23。
+
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -1360,8 +1397,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       **O9c-2 第一步已完成（第四十七轮）**：主 kernel GEMM1/2 换 `wgmma.m64n32k32`
       （Q/dO/K/V 存 SW128、fold 与 GEMM3/4/5 逐字复用 mma 版），main **S512 1.038× /
       S1024H32 1.052× / GQA 1.057× / S4096 1.056×**，数值与 mma 版同量级；ncu 第一墙仍是
-      **L1/TEX 65%（GEMM3/4/5 的 `ldmatrix` + fold）**。**剩余 O9c-2b**：GEMM3/4/5 上 wgmma
-      （fp8 需 MN-major 描述符转置读，fp8 `.trans` 与 SW128 的 16B 不兼容）+ TMA 化 operand。
+      **L1/TEX 65%（GEMM3/4/5 的 `ldmatrix` + fold）**。**O9c-2b（GEMM3/4/5 上 wgmma）已确认
+      硬件阻塞（第四十八轮）**：fp8 wgmma 无转置操作数（CUTLASS 全为 `_SS_TN`、无 `tnsp`），
+      MN-major 转置读在 fp8 ISA 上不存在；物理转置需 `BM=BN=128`、smem >110KB，且 fp16 O9b-2
+      已实测该路中性偏负 ⇒ 不再尝试，见「阻塞」与 `docs/03` §23.6。
+      **O12 已完成（第四十八轮）**：主 kernel LSE/D 预装寄存器（fp16 O7c-PREL 的 fp8 版），
+      main **1.04–1.13×**、uncoalesced global −87.6%，数值与历史逐位一致（`docs/03` §23）。
       详见 `docs/03` §22。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
@@ -1431,10 +1472,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    **O9c-2 第一步已完成（第四十七轮）**：fp8 主 kernel GEMM1/2 已上 `wgmma.m64n32k32`
 >    （Q/dO/K/V 存 SW128；`smem 70.7→68.6KB`；fold + GEMM3/4/5 逐字复用 mma 版），
 >    main **1.038–1.057×**、数值与 mma 版同量级；ncu 第一墙仍是 L1/TEX 65%。
->    **下一步**：**O9c-2b** 把 GEMM3/4/5 也上 wgmma——注意 fp8 的 `ldmatrix.x2.trans` 要求
->    「沿 K 配对」与 SW128 的「沿 K 连续 16B」不兼容，需推导/冒烟 fp8 的 **MN-major 描述符
->    转置读**（fp16 O9b-2 已验证），或 TMA 化 operand 直写 SW128。fp16/bf16 的 **O9b-2b**（TMA + P/dS
->    双缓冲跨-tile 流水 + 压 smem 冲 3 CTA/SM）仍按原计划。**bf16 版 O9b-2 已完成（第四十四轮）**：
+>    **O9c-2b 已判为硬件阻塞（第四十八轮）**：fp8 wgmma 无转置操作数（CUTLASS 全 `_SS_TN`、
+>    无 `tnsp`），MN-major 转置读在 fp8 ISA 上不存在；物理转置需 `BM=BN=128`、smem >110KB，
+>    且 fp16 O9b-2 实测该路中性偏负 ⇒ **不再尝试**（见「阻塞」）。**O12 已完成（第四十八轮）**：
+>    fp8 主 kernel LSE/D 预装寄存器（fp16 O7c-PREL 的 fp8 版），main **1.04–1.13×**、
+>    uncoalesced global −87.6%，数值逐位一致（`docs/03` §23）。fp8 后续的 L1/TEX 墙改走
+>    **fold 向量化 / TMA 化 operand / dK/dV 去原子**（非转置手段）。fp16/bf16 的 **O9b-2b**
+>    （TMA + P/dS 双缓冲跨-tile 流水 + 压 smem 冲 3 CTA/SM）仍按原计划。
+>    **bf16 版 O9b-2 已完成（第四十四轮）**：
 >    逐字 dtype 参数化，数值逐位相同、main S4096 0.979×/S512 0.960×、ncu 与 fp16 逐项一致（`docs/01b` §6r）。详见 `docs/01` §14g/§14h。
 >
 > **旁支已完成（第三十六轮 O5c）**：把 fp16/bf16 的 **MLA（head_dim=512）反向从标量升级为张量核**
