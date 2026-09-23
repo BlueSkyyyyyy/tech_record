@@ -1,0 +1,60 @@
+########## b1_s512_h16_d128_causal_fp16 ##########
+[timing] total(3 kernels) 0.1073 ms  20.01 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0419 ms | main 0.0522 ms | convert 0.0133 ms
+[O17 A/B] main mma(64,64,1) 0.0578 ms | O9b wgmma 0.0599 (0.965x) | O17 wgmma2(BM128) 0.0521 (1.109x) TF 41.2
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/8.77e-05/1.56e-04 | wg2-vs-O9b dq/dk/dv=0.00e+00/8.77e-05/1.64e-04
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
+  dk   vs ref: max_abs=1.771e-03  max_rel=2.996e-01
+  dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+  fa_dq     vs ref: max_abs=1.679e-03  max_rel=2.666e-01
+  fa_dk     vs ref: max_abs=1.684e-03  max_rel=5.121e-01
+  fa_dv     vs ref: max_abs=1.899e-03  max_rel=2.719e-02
+  te_dq     vs ref: max_abs=1.716e-03  max_rel=2.439e-01
+  te_dk     vs ref: max_abs=2.287e-03  max_rel=5.140e-01
+  te_dv     vs ref: max_abs=1.899e-03  max_rel=3.699e-02
+########## b1_s4096_h16_d128_causal_fp16 ##########
+[timing] total(3 kernels) 1.4334 ms  95.89 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3448 ms | main 1.0018 ms | convert 0.0868 ms
+[O17 A/B] main mma(64,64,2) 1.5126 ms | O9b wgmma 1.4876 (1.017x) | O17 wgmma2(BM128) 0.9817 (1.541x) TF 140.0
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/3.51e-04/4.12e-04 | wg2-vs-O9b dq/dk/dv=0.00e+00/3.51e-04/4.27e-04
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+########## b1_s1024_h32_d128_kv4_causal_fp16 ##########
+[timing] total(3 kernels) 0.2924 ms  58.74 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0906 ms | main 0.1796 ms | convert 0.0222 ms
+[O17 A/B] main mma(64,32,2) 0.2667 ms | O9b wgmma 0.2722 (0.980x) | O17 wgmma2(BM128) 0.1801 (1.481x) TF 95.4
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=3.58e-07/6.18e-04/1.02e-03 | wg2-vs-O9b dq/dk/dv=0.00e+00/6.33e-04/1.07e-03
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.134e-03  max_rel=5.101e-01
+  dk   vs ref: max_abs=3.305e-03  max_rel=1.044e+00
+  dv   vs ref: max_abs=3.850e-03  max_rel=3.711e-02
+  fa_dq     vs ref: max_abs=1.727e-03  max_rel=3.091e-01
+  fa_dk     vs ref: max_abs=3.321e-03  max_rel=8.086e-01
+  fa_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
+  te_dq     vs ref: max_abs=2.075e-03  max_rel=2.991e-01
+  te_dk     vs ref: max_abs=3.175e-03  max_rel=4.837e-01
+  te_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
+########## b1_s1024_h64_d128_kv1_causal_fp16 ##########
+[timing] total(3 kernels) 0.4523 ms  75.96 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1301 ms | main 0.2841 ms | convert 0.0381 ms
+[O17 A/B] main mma(64,64,2) 0.4348 ms | O9b wgmma 0.4246 (1.024x) | O17 wgmma2(BM128) 0.2851 (1.525x) TF 120.5
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/5.04e-03/5.86e-03 | wg2-vs-O9b dq/dk/dv=0.00e+00/5.13e-03/5.83e-03
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.292e-03  max_rel=4.022e-01
+  dk   vs ref: max_abs=7.934e-03  max_rel=3.849e-01
+  dv   vs ref: max_abs=7.517e-03  max_rel=3.239e-02
+  fa_dq     vs ref: max_abs=1.971e-03  max_rel=3.588e-01
+  fa_dk     vs ref: max_abs=7.586e-03  max_rel=5.690e-01
+  fa_dv     vs ref: max_abs=1.057e-02  max_rel=9.507e-01
+  te_dq     vs ref: max_abs=2.141e-03  max_rel=3.596e-01
+  te_dk     vs ref: max_abs=6.452e-03  max_rel=4.311e-01
+  te_dv     vs ref: max_abs=1.057e-02  max_rel=8.528e-01

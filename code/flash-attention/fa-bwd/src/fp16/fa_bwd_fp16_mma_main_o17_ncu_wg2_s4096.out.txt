@@ -1,0 +1,59 @@
+fa_bwd_fp16_mma_kernels.cuh(1248): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma2<HD>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) [with HD=128]" at line 409 of fa_bwd_fp16_mma_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb0EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 391904
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb1EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 386595
+==PROF== Connected to process 652754 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "fa_bwd_fp16_wgmma2_kernel": 0%....50%....100% - 10 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[timing] total(3 kernels) 1.4716 ms  93.39 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3965 ms | main 1.0450 ms | convert 0.0301 ms
+[O8b A/B] lse O8 0.8431 ms | bal(单缓冲) 0.4530 ms (1.861x) | bal+cpasync(双缓冲) 0.3029 ms (2.783x)
+[O6 A/B] main nopipe 2.2917 ms (59.97 TF) | pipe(KV both) 1.5973 ms (86.04 TF) | pipe2(K only) 1.6342 ms (84.10 TF) => nopipe/pipe 1.435x, nopipe/pipe2 1.402x
+[O17 A/B] main mma(64,64,2) 1.5314 ms | O9b wgmma 1.5449 (0.991x) | O17 wgmma2(BM128) 0.9967 (1.536x) TF 137.9
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/9.06e-06/1.62e-05 | wg2-vs-O9b dq/dk/dv=0.00e+00/9.54e-06/1.62e-05
+[O6c A/B] main sched0(原样) 1.6216 ms | sched1(交错) 1.5764 ms (1.029x) | sched2(逆序) 1.6072 ms (1.009x)
+[O5c A/B] main (64,32,2) 1.5283 ms (89.93 TF) | (64,64,2) 1.4820 (92.74) | (32,32,1) 2.5872 (53.12) | (32,32,2) 2.6039 (52.78) => best 1.031x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.7022 (80.74) | f4 1.8936 (72.58,-10.1%) | f2+PREL 1.6294 (84.35,+4.5%) | f4+PREL 1.5602 (88.09,+9.1%)
+  (BM=64,BN=64,PIPE=2): base 1.6917 (81.24) | f4 1.7123 (80.27,-1.2%) | f2+PREL 1.4869 (92.43,+13.8%) | f4+PREL 1.5062 (91.25,+12.3%)
+  (BM=32,BN=32,PIPE=1): base 2.6444 (51.97) | f4 2.6686 (51.50,-0.9%) | f2+PREL 2.6269 (52.32,+0.7%) | f4+PREL 2.5844 (53.18,+2.3%)
+  (BM=32,BN=32,PIPE=2): base 2.6349 (52.16) | f4 2.6270 (52.32,+0.3%) | f2+PREL 2.5654 (53.57,+2.7%) | f4+PREL 2.5790 (53.29,+2.2%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+==PROF== Disconnected from process 652754
+[652754] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void fa_bwd_fp16_wgmma2_kernel<128>(const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) (32, 16, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    -------------------------------------------------------- --------------- ------------
+    Metric Name                                                  Metric Unit Metric Value
+    -------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                     %         6.47
+    gpu__time_duration.sum                                                us       996.19
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                            0
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                            0
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                    %        36.85
+    launch__registers_per_thread                             register/thread          200
+    launch__shared_mem_per_block_allocated                       Kbyte/block       149.50
+    lts__t_sectors_op_read.sum                                        sector     17952433
+    lts__t_sectors_op_red.sum                                         sector     51904512
+    lts__t_sectors_op_write.sum                                       sector      1575847
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                      %        54.72
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                       %        27.48
+    sm__warps_active.avg.pct_of_peak_sustained_active                      %        12.41
+    -------------------------------------------------------- --------------- ------------
+

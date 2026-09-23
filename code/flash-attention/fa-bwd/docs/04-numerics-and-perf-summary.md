@@ -220,6 +220,19 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 结论：本步建立了「MN-major 转置读」数据通路（后续 TMA/流水/去原子的地基），但性能杠杆是 **O7b 去原子**。
 > 对标同 session 纯反向 FA3 S4096 0.3241ms/848TF ⇒ ours total ~6.0×。详见 `01-fp16-bwd-impl.md` §14h。
 
+> **O17（跨 warpgroup 归约：BM=128、2 warpgroups，fp16，第五十二轮）**：§14i 已把墙钉在
+> **L2 的 dK/dV 跨 CTA `atomicAdd`（占 L2 扇区 73.1%）**。O17 用 2 个 warpgroup 各算 64 行 Q，
+> **dK/dV 只由 wg0 对全 BM=128 归约**（两个 m64 半进同一 `wgmma.m64n64k16` 累加器 = 两半之和），
+> 于是每个 KV 元素被 `nblk/2` 个 CTA 贡献 ⇒ **red 字节砍半**。前置冒烟
+> `fa_bwd_fp16_wgmma2_smoke.cu` 对 128 行转置读逐位 PASS。**ncu 精确验证**：
+> `lts__t_sectors_op_red` **102.2M→51.9M（0.508×）**、`read` 也 0.50×、L2 71.8%→**54.7%**、
+> Duration 1.48→**1.00ms**；regs 200 / smem 149.5KB / 1 CTA/SM（8 warps）。
+> **main-only S=4096 1.57×（140.5 TF）、GQA kv4 1.47×、MQA kv1 1.54×、S=512 1.11×**；
+> 端到端 S=4096 **1.427ms（96.3 TF）**、为 FA3 的 **4.4×**（O9b ~6.0×）。数值 vs ref 历史逐位一致
+> （dq 无跨 CTA 原子，MHA 下逐位相同；dk/dv 仅 atomic 次序差 ~1e-4）。需 `--wg2` 开启
+> （`sm_90a` + `-DFA_WGMMA`），默认行为不变。**新墙仍是 L2**（red 占 ~72.6%）⇒ 下一步 O17b（BM=256）。
+> 详见 `01-fp16-bwd-impl.md` §14j。
+
 ### 2.2 bf16（峰值 989 TFLOPS）
 
 | shape | ours total | ours main | FA2.7.4 | TE2.14 |
@@ -544,6 +557,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp16 | **mma main（O13, S=512, (64,64,2)）** | 8.5% | **20.2%** | 10.7% | 6.23%（grid=128<132 SM，1 CTA/SM） | — | wait 2.00、long 1.01、short 0.46 | **尾波/grid-bound + fixed-latency(`wait`)**（O6c 旧 auto `(32,32,1)` 同点 83.9µs→**59.7µs**、L1/TEX 43.5→20.2%） |
 | fp16 | **wgmma main（O9b, S=4096, GEMM1/2 wgmma）** | 4.55% | 55.08% | 26.48% | 11.88%（**101.38KB, 2 CTA/SM**, 242 regs） | 3.88 | **wait 1.94→1.50**、long 1.45→1.25、short 0.56 | **L2 74.4%（dK/dV 原子，仍为墙）+ `wait` + 低 occupancy**（GEMM1/2 的 wgmma 打掉 ldmatrix/依赖，但 GEMM3/4/5 仍 mma） |
  | fp16 | **wgmma main（O9b-2, S=4096, 5 GEMM 全 wgmma）** | 4.35% | 40.05% | 23.37% | 11.86%（**99.33KB, 2 CTA/SM**, 230 regs） | 3.88 | short 0.29（ldmatrix 消）、long 2.01、wait 1.43、barrier 0.84 | **L2 68.8%：`red`（dK/dV `atomicAdd`）占 102.2M/139.8M=73.1% 扇区、DRAM 4.2%** ⇒ **L2 原子字节数 bound**（见下） |
+ | fp16 | **wgmma2 main（O17, BM=128, 2 wg, S=4096）** | 6.47% | 36.85% | 27.48% | 12.41%（**149.5KB, 1 CTA/SM**, 200 regs, 256 thr） | — | Duration 1.48→**0.996ms** | **L2 54.7%（red 51.9M=0.508×/O9b、read 也 0.50×）**：跨 wg 归约把 dK/dV 的 red 字节精确砍半，但仍是第一墙（red 占 L2 扇区 ~72.6%）；bank conflict 0 |
  | fp8 | golden main | 0.06% | **75.96%**（90% 多余） | 4.98% | 6.25%（68KB） | 0.32 | MIO scoreboard 69% | **smem 冲突 + FP8 解码 + 低 occ** |
 | fp8 | **mma main（O2b+O4d 后, S=4096, ksplit=4）** | 1.41% | 69.91% | 21.70% | **18.27%（73.8KB, 3 CTA/SM）** | 10.34 | No Eligible 76.6%、long_scoreboard 4.46 + short_scoreboard 3.96 | **L2 带宽（81.5%）+ 延迟**（split-K 复读 Q/dO + 全局 atomic） |
 | fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |
@@ -611,6 +625,15 @@ O2 降 smem 后 fp8 从 2→3 CTA/SM（theoretical 12.5%→18.75%），main 1.16
 > 另做 **O16**（分段 `wgmma.wait_group` 重叠 epilogue）**实测中性 0.99–1.00×**（`dq` 逐位相同，
 > `dk/dv` 仅 atomic 次序差 ~1e-4）⇒ 动搬运/等待打不动原子墙。**唯一真杠杆 = 跨 warpgroup 归约
 > （BM=128，一个 KV 元素被 nblk/2 个 CTA 贡献，red 字节砍半）**；详见 `docs/01` §14i。
+
+> **O17（第五十二轮）——把这个「唯一真杠杆」落地并再次用 ncu 证实**：`fa_bwd_fp16_wgmma2_kernel`
+> （BM=128、2 warpgroups、256 线程、仅 HD=128）：两组各算自己 64 行 Q 的 P/dS，**dK/dV 只由 wg0
+> 对全 BM=128 归约**（两个 m64 半进同一 wgmma 累加器 = 两半之和），每个 KV 元素只 `red` 一次。
+> ncu：`red` 102.2M→**51.9M（0.508×）**、`read` 0.50×、L2 71.8%→**54.7%**、Duration 1.48→
+> **1.00ms**；main-only S=4096 **1.57×（140.5 TF）**、GQA kv4 1.47×、MQA kv1 1.54×、S=512 1.11×；
+> 端到端 S=4096 1.427ms、为 FA3 的 **4.4×**（O9b ~6.0×）。数值 vs ref 历史逐位一致。**新墙仍是
+> L2（red 占 ~72.6%）** ⇒ 下一步 O17b（BM=256/4 wg）。需 `--wg2`（`sm_90a`+`-DFA_WGMMA`）。
+> 详见 `docs/01` §14j。
 
 ---
 

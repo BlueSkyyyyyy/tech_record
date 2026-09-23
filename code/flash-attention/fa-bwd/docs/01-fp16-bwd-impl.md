@@ -1602,31 +1602,129 @@ ours 端到端（fp16，S=4096，mma 默认档）≈ **1.93ms**（preprocess 0.3
 | **跨 warpgroup 归约（BM=128）** | 一个 KV 元素被 **nblk/2** 个 CTA 贡献 | **唯一真杠杆**：直接把 red 字节砍半；代价是 smem 176KB→1 CTA/SM + smem 合并 |
 | KV-outer 重排（FA2 式） | dK/dV 存 smem 顺序累加、改 dQ 原子 | MHA 下原子字节减半，但 **GQA/MQA 会放大**（dQ 是 H 维、dK/dV 是 Hkv 维），不通用 |
 
+## 14j. O17：跨 warpgroup 归约（BM=128、2 warpgroups），dK/dV 的 red 字节砍半
+
+### 14j.1 动机（§14i 已把墙钉死）
+
+§14i 用 ncu 拆开 S=4096 主 kernel 的 L2 扇区：**`red`（dK/dV 跨 CTA `atomicAdd`）
+= 102,236,160 / 139,841,608 = 73.1%**、`read` 25.6%、`write` 1.1%，DRAM 仅 4.2% ⇒ main 是
+**L2 原子字节数 bound**。O16（错开 `wait_group`）与 O7c（float4 归约）都已证明「动等待 / 动事务数」
+无效。**唯一杠杆**是让每个 KV 元素被更少的 CTA 贡献：`1colblock` 下每个 CTA 覆盖 BM 行 Q，
+dK/dV 沿 M 维归约 ⇒ 一个 KV 元素被 `nblk = S/BM` 个 CTA 各贡献一次。把 **BM 从 64 翻到 128**，
+贡献它的 CTA 数直接减半 ⇒ red 字节砍半。
+
+难点是 BM=128 后寄存器/并行度：GEMM1/2 的 S/dP 累加器、GEMM5 的 dQ 累加器都随 BM 翻倍。
+解法是 **2 个 warpgroup（256 线程），各算自己 64 行 Q**，把 BM=128 摊到两组上；dK/dV 的跨 wg
+合并则用一个技巧（下节）。
+
+### 14j.2 关键手段：dK/dV 让**一个** warpgroup 对全 BM 归约
+
+若两组各自算 `dV_wg = P_wgᵀ·dO_wg`（[BN][HD]），再把两组偏和合并，就要一次 smem 暂存。
+更省的做法是：**只让 wg0 做 GEMM3/4，并把两个 m64 半（Q 行 0–63 与 64–127，即 s=0..7 共 128 行）
+连续喂给同一个 `wgmma.m64n64k16` 累加器**——两次 m64 的输出形状都是 `[BN][HD]`，累加器天然相加，
+得到的**就是整个 BM 的 dV/dK**，于是每个 KV 元素只 `red` 一次。wg1 在并行做自己的 GEMM5（dQ 只依赖
+本 wg 的 Q 行，互不干扰）。
+
+这套「对 [128][*] 的 K-major SW128 tile，用 MN-major 描述符按 `s=0..7` 读转置」是新的、也是本项
+唯一的数据通路风险，故先写最小冒烟 **`fa_bwd_fp16_wgmma2_smoke.cu`** 逐位验证：
+- `dV=PᵀdO`（A=P[128][BN] 转置、B=dO[128][HD] 转置，K=BM=128）；
+- `dK=dSᵀQ` 同构；
+- `dQ=dS·K`（两个 m64 半，A=dS 的对应 64 行块）。
+  实测三项 **max_abs=0.000e+00（逐位 PASS）**，确认 MN-major 描述符的 `trans_k16_addr`
+  （每 k16 slab 前进 16 行 = 2 rowgroup）对 128 行依然成立。
+
+### 14j.3 实现（单/两文件 device 代码逐字一致，`scripts/sync_onefile_device.py` 核对 `identical: True`）
+
+新增 `fa_bwd_fp16_wgmma2_kernel<HD>`（`#ifdef FA_WGMMA`，仅 HD=128）：
+- **2×2→2 wg**：`wg = tid>>7`，`wid = (tid>>5)&3`；本 wg 的 Q/dO/P/dS tile 基址按「64 行 =
+  8 rowgroup」偏移（`wg * 8 * (HD/64) * 1024` / `wg * 8 * (BN/64) * 1024`）；
+- GEMM1/2 各 wg 用 `wgmma_mn64_issue`（m64n64）算自己的 64×BN 的 S/dP；P/dS 按 SW128
+  `pds_store_sw128` 写进**共享**的 `Ps/dSs[128][64]`（wg 写自己 64 行）；
+- 中段 `__syncthreads` 后 **wg0** 做 GEMM3/4：`for nh: for s in 0..7` 用
+  `desc_k16_mn(Ps/dSs, s, BN)`、`desc_k16_mn(dO/Q + nh*1024, s, HD)`，全 BM 归约 + `red_add2`；
+  **wg1** 只做 GEMM5；
+- GEMM5 各 wg 算自己 64 行（A=本 wg 的 dS 行块 `desc_k16_k(dSw,s,BN)`、B=K 转置
+  `desc_k16_mn(Kt+nh*1024,s,HD)`），寄存器累加、循环后一次 `float2` 写回（每 Q 块唯一 CTA）；
+- K/V 用 **256 线程** `cp.async`（`kv_issue_async_sw`/`qdo_issue_async_sw` 加模板参数
+  `NT=256`；K 双缓冲、V 单缓冲后段预取，同 O6b/O9b）；Q/dO 也 256 线程一次发。
+- smem：Q 32KB + dO 32KB + K 2×16KB + V 16KB + P 16KB + dS 16KB ≈ **149.5KB → 1 CTA/SM**
+  （256 线程 = 8 warps/SM，与 O9b 的 2 CTA/SM × 4 warps 相同）。寄存器 **200**、0 spill。
+
+单/两文件：`launch_bwd_wgmma2<HD>` + CLI `--wg2`；`run_main` 优先走 wg2；`[O17 A/B]` 段同 session
+对比 mma 最优档 / O9b wgmma / O17 wgmma2，并打印 `max|diff|`。**没有**改默认行为（需 `--wg2`）。
+
+### 14j.4 数值（ours-vs-ref，fp16 causal，max_abs）
+
+| shape | dq | dk | dv | `max\|diff\|` wg2-vs-mma (dq/dk/dv) |
+|---|---|---|---|---|
+| MHA S=512 | 1.671e-3 | 1.771e-3 | 1.899e-3 | 0 / 8.8e-5 / 1.6e-4 |
+| MHA S=4096 | 1.883e-3 | 1.734e-3 | 1.966e-3 | 0 / 3.6e-4 / 4.3e-4 |
+| GQA h32kv4 S=1024 | 2.134e-3 | 3.305e-3 | 3.850e-3 | 3.6e-7 / 6.1e-4 / 1.1e-3 |
+| MQA h64kv1 S=1024 | 2.292e-3 | 7.934e-3 | 7.517e-3 | 0 / 5.1e-3 / 5.9e-3 |
+
+**vs ref 与历史逐位一致**（fp16 误差由舍入主导，非原子次序）；`dq` 在 MHA 下 **逐位相同**
+（dQ 无跨 CTA 原子），dk/dv 只差 atomic 累加次序。单/两文件逐指标一致。
+
+### 14j.5 性能（同 session A/B，CUDA event，main-only，ms）
+
+| shape | mma 最优档 | O9b wgmma | **O17 wgmma2(BM128)** | vs mma |
+|---|---|---|---|---|
+| MHA S=512 (64,64,1) | 0.0573 | 0.0591 | **0.0517** | **1.11×** |
+| MHA S=4096 (64,64,2) | 1.5310 | 1.5165 | **0.9784** | **1.57×** |
+| GQA kv4 S=1024 (64,32,2) | 0.2636 | 0.2671 | **0.1789** | **1.47×** |
+| MQA kv1 S=1024 (64,64,2) | 0.4326 | 0.4217 | **0.2812** | **1.54×** |
+
+端到端（preprocess+main+convert）fp16：S=4096 **1.4268ms（96.3 TF，`4BS²HD` 口径）**、
+S=512 0.1071ms、GQA kv4 0.2925ms、MQA kv1 0.4555ms。**main-only S=4096 140.5 TF**（O9b 90.2 TF）。
+
+### 14j.6 ncu（main，S=4096，同 session，O9b vs O17）
+
+| 指标 | O9b wgmma (BM=64) | **O17 wgmma2 (BM=128)** |
+|---|---|---|
+| `lts__t_sectors_op_red` | 102,236,160 | **51,904,512（0.508×）** |
+| `lts__t_sectors_op_read` | 35,887,831 | 17,952,433（0.50×，Q/dO 少读一遍） |
+| `lts__t_sectors_op_write` | 1,576,222 | 1,575,847 |
+| Duration | 1.48 ms | **0.996 ms** |
+| L2 Throughput | 71.76% | **54.72%** |
+| L1/TEX | 40.40% | 36.85% |
+| DRAM | 4.36% | 6.47% |
+| Compute (SM) | 23.58% | 27.48% |
+| regs / smem | 230 / 100.35KB | 200 / 149.5KB |
+| achieved occ | 11.89%（2 CTA/SM） | 12.41%（1 CTA/SM） |
+
+**red 字节精确减半、read 也减半**（BM=128 让 Q/dO 只读一遍），L2 从 71.8% 降到 54.7%、
+Duration 1.48→1.00ms——**O17 的机制假设被 ncu 完全证实**。shared bank conflict 仍为 **0**
+（SW128 + padding）。**新墙仍是 L2**（red 51.9M 占 L2 扇区 ~72.6%），故进一步路线是
+**BM=256 / 4 warpgroups**（再砍半）或 `dK/dV` 分块累加（O7b）；TMA 化 Q/K/V 仍排在后面。
+
+### 14j.7 原始输出
+
+`src/fp16/fa_bwd_fp16_wgmma2_smoke.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o17_{s4096}.out.txt`、`..._mma_onefile_o17_s512.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o17_ncu_wg2_s4096.out.txt`、`..._o17_ncu_o9b_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_o17_fa3_te_baseline.out.txt`。
+
 ---
 
 ## 15. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
 O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）、O11（§14d）、
-**O9a（§14e）、O13（§14f）、O9b（§14g）、O9b-2 第一步（§14h）、O15a TMA 通路 + O16 负结果（§14i）**
-完成。O7c 已把「减 red 事务数」这条杠杆**证伪**（float4 更慢），O10 又把 Q/dO 的标量载入与 dQ 写回
-向量化（`long_scoreboard` 压下、指令数 −2.5%），O13 修正了 O6c 的过时 auto tile（S=512 main 1.26×、
-端到端 1.12×），O9b 把主 kernel 的 GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，
-数值逐位不变）。**O9b-2 第一步（§14h）**把 GEMM3/4/5 也用「MN-major 转置读」上了 wgmma，数值逐位
-不变、`short_scoreboard` 归零，但 **ncu 证实墙不在 GEMM 指令，而在 L2 的 dK/dV 跨 CTA 原子 +
-occupancy**，故性能中性。
+O9a（§14e）、O13（§14f）、O9b（§14g）、O9b-2 第一步（§14h）、O15a TMA 通路 + O16 负结果（§14i）、
+**O17 跨 wg 归约（§14j）** 完成。O7c 已把「减 red 事务数」这条杠杆**证伪**（float4 更慢），
+O10 又把 Q/dO 的标量载入与 dQ 写回向量化（`long_scoreboard` 压下、指令数 −2.5%），
+O13 修正了 O6c 的过时 auto tile（S=512 main 1.26×、端到端 1.12×），O9b 把主 kernel 的
+GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，数值逐位不变）。
 
-**§14i（O15a/O16）这一步把这个结论钉死了**：ncu 拆开 L2 扇区——**`red`（dK/dV `atomicAdd`）占
-73.1%**、DRAM 仅 4.2%，即 main 是 **L2 原子字节数 bound**；同时 TMA+SW128 冒烟逐位 PASS（建好
-Hopper bulk-tensor 数据通路），并用 `wait_group` 分段重叠 epilogue **实测中性**（0.99–1.00×）——
-再次证明「动搬运/等待」打不动 L2 原子墙。**下一步（按回报排序）**：
-1. **跨 warpgroup 归约（BM=128，2 warpgroups）**：一个 KV 元素只被 `nblk/2` 个 CTA 贡献，
-   **直接把 dK/dV 的 red 字节砍半**（`docs/01` §14i.5 已论证这是唯一真杠杆）。代价：smem≈176KB→
-   1 CTA/SM、需要把两组的 dV/dK 偏和在 smem 里合并一次再写。这是 O9b-2b 的正解。
-2. **O7b（fp16/bf16 去 dK/dV 原子）**：分块 `*_accum` + convert（确定性）；会多一趟读回、字节不减，
-   仅当需要确定性时值得。
+**§14i（O15a/O16）把墙钉在 L2 的 dK/dV 跨 CTA 原子**；**§14j 的 O17 用 BM=128 + 2 warpgroups
+把 red 字节精确砍半**（ncu 102.2M→51.9M），main S=4096 **1.57×**（140.5 TF）、
+端到端为 FA3 的 **4.4×**（时间；O9b/O13 时 ~6.0×）。**下一步（按回报排序）**：
+1. **O17b（BM=256，4 warpgroups）**：同一机制再砍半（red → ~26M），但 smem ≈ 270KB 需
+   先把 Q/dO 改「按 wg 只存自己 64 行」或 TMA 直供、或把 P/dS 用 8-bit 存；
+   先做寄存器/smem 账再上。
+2. **O7b（去 dK/dV 原子）**：分块 `*_accum` + convert（确定性）；字节不减、多一趟读回，
+   但可与 O17 的「CTA 内归约」叠加。
 3. **TMA 化 Q/K/V/dO（O15a 通路已就绪）**：需把 K-major HD=128 tile 改成 **2×K=64 chunk**
-   （§14i.2），能压 `long_scoreboard`/指令数，但动不了 L2 red——排在跨-wg 归约之后。
+   （§14i.2），压 `long_scoreboard`/指令数；动不了 L2 red，排在后面。
 4. **bf16 版**照搬（`__half`→`__bfloat16`，SW128/描述符/累加器映射逐字节同构）。
-   **O9b-2 已完成（第四十四轮）**：`docs/01b` §6r——数值与 O5b~O13/O9b 逐位相同，性能中性偏负。
 5. MLA 降 smem 冲 2 CTA/SM / split-KV 仍在列。
