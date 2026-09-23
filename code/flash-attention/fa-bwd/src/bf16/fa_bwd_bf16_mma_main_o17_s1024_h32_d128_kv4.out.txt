@@ -1,0 +1,27 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_bf16
+B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388
+[O6c] main grid=512 auto=(BM=64,BN=32,PIPE=2) sel=(BM=64,BN=32,PIPE=2)
+[timing] total(3 kernels) 0.2892 ms  59.40 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0890 ms | main 0.1783 ms | convert 0.0219 ms
+[O8b A/B] lse O8 0.1496 ms | bal(单缓冲) 0.1046 ms (1.430x) | bal+cpasync(双缓冲) 0.0669 ms (2.237x)
+[O6 A/B] main nopipe 0.3967 ms (43.30 TF) | pipe(KV both) 0.2786 ms (61.67 TF) | pipe2(K only) 0.2620 ms (65.58 TF) => nopipe/pipe 1.424x, nopipe/pipe2 1.515x
+[O6c A/B] main sched0(原样) 0.2648 ms | sched1(交错) 0.2556 ms (1.036x) | sched2(逆序) 0.2604 ms (1.017x)
+[O9b A/B] main mma(64,64,2) 0.2696 ms (63.72 TF) | wgmma(GEMM1/2) 0.2713 ms (63.33 TF) => 0.994x
+[O17 A/B] main mma(64,64,2) 0.2657 ms | O9b wgmma 0.2639 (1.007x) | O17 wgmma2(BM128) 0.1764 (1.506x) TF 97.4
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/8.39e-04/1.33e-03 | wg2-vs-O9b dq/dk/dv=0.00e+00/8.47e-04/1.31e-03
+[O5c A/B] main (64,32,2) 0.2492 ms (68.93 TF) | (64,64,2) 0.2661 (64.56) | (32,32,1) 0.4381 (39.22) | (32,32,2) 0.4334 (39.64) => best 1.000x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 0.2899 (59.26) | f4 0.3064 (56.07,-5.4%) | f2+PREL 0.2532 (67.84,+14.5%) | f4+PREL 0.2519 (68.21,+15.1%)
+  (BM=64,BN=64,PIPE=2): base 0.3276 (52.43) | f4 0.3349 (51.29,-2.2%) | f2+PREL 0.2679 (64.13,+22.3%) | f4+PREL 0.2733 (62.87,+19.9%)
+  (BM=32,BN=32,PIPE=1): base 0.4491 (38.25) | f4 0.4567 (37.62,-1.7%) | f2+PREL 0.4376 (39.26,+2.6%) | f4+PREL 0.4467 (38.46,+0.5%)
+  (BM=32,BN=32,PIPE=2): base 0.4511 (38.08) | f4 0.4626 (37.14,-2.5%) | f2+PREL 0.4405 (39.00,+2.4%) | f4+PREL 0.4439 (38.70,+1.6%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.201e-02  max_rel=1.712e+00
+  dk   vs ref: max_abs=2.125e-02  max_rel=3.799e+00
+  dv   vs ref: max_abs=3.156e-02  max_rel=3.637e+00
+  fa_dq     vs ref: max_abs=1.163e-02  max_rel=1.909e+00
+  fa_dk     vs ref: max_abs=3.110e-02  max_rel=5.365e+00
+  fa_dv     vs ref: max_abs=3.627e-02  max_rel=3.711e+00
+  te_dq     vs ref: max_abs=1.238e-02  max_rel=1.732e+00
+  te_dk     vs ref: max_abs=3.140e-02  max_rel=2.707e+00
+  te_dv     vs ref: max_abs=3.627e-02  max_rel=3.711e+00

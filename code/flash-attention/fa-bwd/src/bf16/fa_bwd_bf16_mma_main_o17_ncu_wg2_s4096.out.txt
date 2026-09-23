@@ -1,0 +1,51 @@
+==PROF== Connected to process 655600 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/bf16/fa_bwd_bf16_mma_main.out)
+==PROF== Profiling "fa_bwd_bf16_wgmma2_kernel": 0%....50%....100% - 10 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_bf16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[timing] total(3 kernels) 1.4461 ms  95.04 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3622 ms | main 1.0127 ms | convert 0.0712 ms
+[O8b A/B] lse O8 0.8568 ms | bal(单缓冲) 0.4506 ms (1.901x) | bal+cpasync(双缓冲) 0.2995 ms (2.861x)
+[O6 A/B] main nopipe 2.2402 ms (61.35 TF) | pipe(KV both) 1.5831 ms (86.81 TF) | pipe2(K only) 1.5385 ms (89.33 TF) => nopipe/pipe 1.415x, nopipe/pipe2 1.456x
+[O6c A/B] main sched0(原样) 1.6318 ms | sched1(交错) 1.5220 ms (1.072x) | sched2(逆序) 1.5778 ms (1.034x)
+[O9b A/B] main mma(64,64,2) 1.4778 ms (93.00 TF) | wgmma(GEMM1/2) 1.5273 ms (89.99 TF) => 0.968x
+[O17 A/B] main mma(64,64,2) 1.4725 ms | O9b wgmma 1.5082 (0.976x) | O17 wgmma2(BM128) 0.9991 (1.474x) TF 137.6
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/1.81e-05/2.29e-05 | wg2-vs-O9b dq/dk/dv=0.00e+00/2.00e-05/2.29e-05
+[O5c A/B] main (64,32,2) 1.5636 ms (87.90 TF) | (64,64,2) 1.4798 (92.87) | (32,32,1) 2.5539 (53.82) | (32,32,2) 2.5587 (53.72) => best 1.057x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.7150 (80.14) | f4 1.7839 (77.05,-3.9%) | f2+PREL 1.5628 (87.94,+9.7%) | f4+PREL 1.5583 (88.20,+10.1%)
+  (BM=64,BN=64,PIPE=2): base 1.6625 (82.67) | f4 1.7240 (79.72,-3.6%) | f2+PREL 1.5036 (91.40,+10.6%) | f4+PREL 1.5090 (91.08,+10.2%)
+  (BM=32,BN=32,PIPE=1): base 2.5957 (52.95) | f4 2.6331 (52.20,-1.4%) | f2+PREL 2.5793 (53.29,+0.6%) | f4+PREL 2.5754 (53.37,+0.8%)
+  (BM=32,BN=32,PIPE=2): base 2.6203 (52.45) | f4 2.6351 (52.16,-0.6%) | f2+PREL 2.5808 (53.25,+1.5%) | f4+PREL 2.5881 (53.10,+1.2%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  fa_dq     vs ref: max_abs=1.441e-02  max_rel=1.630e+00
+  fa_dk     vs ref: max_abs=1.332e-02  max_rel=1.612e+00
+  fa_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  te_dq     vs ref: max_abs=1.524e-02  max_rel=3.641e+00
+  te_dk     vs ref: max_abs=1.763e-02  max_rel=2.718e+00
+  te_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+==PROF== Disconnected from process 655600
+[655600] fa_bwd_bf16_mma_main.out@127.0.0.1
+  void fa_bwd_bf16_wgmma2_kernel<128>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, const float *, float *, float *, float *, int, int, int, float, int) (32, 16, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    -------------------------------------------------------- --------------- ------------
+    Metric Name                                                  Metric Unit Metric Value
+    -------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                     %         6.47
+    gpu__time_duration.sum                                                us       997.41
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                            0
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                            0
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                    %        36.68
+    launch__registers_per_thread                             register/thread          200
+    launch__shared_mem_per_block_allocated                       Kbyte/block       149.50
+    lts__t_sectors_op_read.sum                                        sector     18005333
+    lts__t_sectors_op_red.sum                                         sector     51904512
+    lts__t_sectors_op_write.sum                                       sector      1575919
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                      %        54.63
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                       %        27.36
+    sm__warps_active.avg.pct_of_peak_sustained_active                      %        12.41
+    -------------------------------------------------------- --------------- ------------
+

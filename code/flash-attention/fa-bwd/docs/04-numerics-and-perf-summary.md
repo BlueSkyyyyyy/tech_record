@@ -348,6 +348,20 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > stall `wait 1.50 + long 1.24 + short 0.56`，与 fp16 O9b 逐项一致。对标纯反向 FA3 S=4096
 > 0.3191ms/861TF ⇒ ours total 时间 **5.89×**。详见 `01b-bf16-bwd-impl.md` §6q。
 
+> **O17-bf16：跨 warpgroup 归约（BM=128、2 warpgroups，第五十三轮，单/两文件）**：把 fp16
+> O17（§2.1）逐字 dtype 参数化到 bf16。**只让 wg0 做 GEMM3/4**、把两个 m64 半（128 行）连续
+> 喂同一 `wgmma.m64n64k16` 累加器 ⇒ 每个 KV 元素只 `red` 一次；wg1 并行做自己的 GEMM5。
+> **数值与 O5b~O13 逐位一致**（S512 9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3、
+> GQA kv8 12.33/19.30/31.50e-3、GQA kv4 12.01/21.25/31.56e-3、MQA kv1 11.90/45.58/71.96e-3）。
+> **同 session A/B（main-only）**：S512 0.0577→**0.0521（1.109×）**、S4096 1.4892→**0.9821
+> （1.516×，139.9 TF）**、GQA kv8 1.504×、GQA kv4 1.506×、MQA kv1 1.531×。端到端 S=4096
+> **1.4309ms（96.05 TF）**、为 FA3 的 **4.45×**（O9b ~6.0×）。ncu（main,S4096，同 session
+> O9b vs O17）：**`lts__t_sectors_op_red` 102,236,160→51,904,512（0.508×）**、`read` 0.50×、
+> Duration 1.48→**0.997ms**、**L2 71.61→54.63%**、L1/TEX 40.25→36.68%、regs 230→200 /
+> smem 100.35→149.50KB / occ 11.89→12.41%，bank conflict 0；**机制假设被 ncu 完全证实，
+> 与 fp16 O17 逐项一致**。需 `--wg2`（`sm_90a`+`-DFA_WGMMA`），默认行为不变；D=512 时忽略。
+> 详见 `01b-bf16-bwd-impl.md` §6s。
+
 ### 2.3 fp8（峰值 1978.8 TFLOPS；FA 无反向 FP8，仅对标 TE）
 
 | shape | ours total | ours main | TE FP8 |
@@ -557,7 +571,8 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp16 | **mma main（O13, S=512, (64,64,2)）** | 8.5% | **20.2%** | 10.7% | 6.23%（grid=128<132 SM，1 CTA/SM） | — | wait 2.00、long 1.01、short 0.46 | **尾波/grid-bound + fixed-latency(`wait`)**（O6c 旧 auto `(32,32,1)` 同点 83.9µs→**59.7µs**、L1/TEX 43.5→20.2%） |
 | fp16 | **wgmma main（O9b, S=4096, GEMM1/2 wgmma）** | 4.55% | 55.08% | 26.48% | 11.88%（**101.38KB, 2 CTA/SM**, 242 regs） | 3.88 | **wait 1.94→1.50**、long 1.45→1.25、short 0.56 | **L2 74.4%（dK/dV 原子，仍为墙）+ `wait` + 低 occupancy**（GEMM1/2 的 wgmma 打掉 ldmatrix/依赖，但 GEMM3/4/5 仍 mma） |
  | fp16 | **wgmma main（O9b-2, S=4096, 5 GEMM 全 wgmma）** | 4.35% | 40.05% | 23.37% | 11.86%（**99.33KB, 2 CTA/SM**, 230 regs） | 3.88 | short 0.29（ldmatrix 消）、long 2.01、wait 1.43、barrier 0.84 | **L2 68.8%：`red`（dK/dV `atomicAdd`）占 102.2M/139.8M=73.1% 扇区、DRAM 4.2%** ⇒ **L2 原子字节数 bound**（见下） |
- | fp16 | **wgmma2 main（O17, BM=128, 2 wg, S=4096）** | 6.47% | 36.85% | 27.48% | 12.41%（**149.5KB, 1 CTA/SM**, 200 regs, 256 thr） | — | Duration 1.48→**0.996ms** | **L2 54.7%（red 51.9M=0.508×/O9b、read 也 0.50×）**：跨 wg 归约把 dK/dV 的 red 字节精确砍半，但仍是第一墙（red 占 L2 扇区 ~72.6%）；bank conflict 0 |
+  | fp16 | **wgmma2 main（O17, BM=128, 2 wg, S=4096）** | 6.47% | 36.85% | 27.48% | 12.41%（**149.5KB, 1 CTA/SM**, 200 regs, 256 thr） | — | Duration 1.48→**0.996ms** | **L2 54.7%（red 51.9M=0.508×/O9b、read 也 0.50×）**：跨 wg 归约把 dK/dV 的 red 字节精确砍半，但仍是第一墙（red 占 L2 扇区 ~72.6%）；bank conflict 0 |
+  | bf16 | **wgmma2 main（O17-bf16, BM=128, 2 wg, S=4096）** | 6.47% | 36.68% | 27.36% | 12.41%（**149.50KB, 1 CTA/SM**, 200 regs, 256 thr） | — | Duration 1.48→**0.997ms** | **L2 54.63%（`red` 102,236,160→51,904,512=0.508×、`read` 0.50×）**：与 fp16 O17 逐项一致；新墙仍是 L2（red 占 ~72.6%）；bank conflict 0 |
  | fp8 | golden main | 0.06% | **75.96%**（90% 多余） | 4.98% | 6.25%（68KB） | 0.32 | MIO scoreboard 69% | **smem 冲突 + FP8 解码 + 低 occ** |
 | fp8 | **mma main（O2b+O4d 后, S=4096, ksplit=4）** | 1.41% | 69.91% | 21.70% | **18.27%（73.8KB, 3 CTA/SM）** | 10.34 | No Eligible 76.6%、long_scoreboard 4.46 + short_scoreboard 3.96 | **L2 带宽（81.5%）+ 延迟**（split-K 复读 Q/dO + 全局 atomic） |
 | fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |
@@ -634,6 +649,13 @@ O2 降 smem 后 fp8 从 2→3 CTA/SM（theoretical 12.5%→18.75%），main 1.16
 > 端到端 S=4096 1.427ms、为 FA3 的 **4.4×**（O9b ~6.0×）。数值 vs ref 历史逐位一致。**新墙仍是
 > L2（red 占 ~72.6%）** ⇒ 下一步 O17b（BM=256/4 wg）。需 `--wg2`（`sm_90a`+`-DFA_WGMMA`）。
 > 详见 `docs/01` §14j。
+
+> **O17-bf16（第五十三轮）——逐字 dtype 参数化**：`fa_bwd_bf16_wgmma2_kernel`（同为 2 字节，
+> SW128/描述符/`m64n64k16` 累加器映射逐字节同构）。ncu 与 fp16 O17 **逐项一致**：`red`
+> 102,236,160→**51,904,512（0.508×）**、`read` 0.50×、L2 71.61%→**54.63%**、Duration 1.48→
+> **0.997ms**；main-only S=4096 **1.516×（139.9 TF）**、GQA kv8 1.504×、GQA kv4 1.506×、
+> MQA kv1 1.531×、S=512 1.109×；端到端 S=4096 **1.4309ms（96.05 TF）**、为 FA3 的 **4.45×**。
+> 数值 vs ref 历史逐位一致。详见 `docs/01b` §6s。
 
 ---
 
