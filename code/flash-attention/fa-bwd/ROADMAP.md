@@ -1107,6 +1107,37 @@
     `src/fp16/fa_bwd_fp16_mma_main_o9b2_ncu_{s512,s4096}.out.txt`、
     `src/fp16/fa_bwd_fp16_o9b2_fa3_te_baseline.out.txt`；文档 `docs/01` §14h。
 
+- 2026-09-23（第四十四轮）：**O9b-2-bf16 完成（bf16 主 kernel GEMM3/4/5 也上 wgmma：MN-major
+  转置读；数值逐位正确、性能中性）**。
+  - 动机：第四十三轮只把 **fp16** 的 GEMM3/4/5（`dV=Pᵀ·dO`、`dK=dSᵀ·Q`、`dQ=dS·K`）用
+    **MN-major 描述符（对 K-major SW128 tile 的转置读，FA3 `dKV_swapAB` 同思路）** 上了 wgmma；
+    **bf16** 侧此前只到 **O9b**（§6q，GPU1/2 用 wgmma，其余仍 mma）。本轮把 fp16 O9b-2 逐字
+    dtype 参数化到 bf16（同为 2 字节，SW128/描述符/u128 步长 `LBO=64`/`SBO=(W/64)*64`
+    逐字节同构，仅 `f16.f16`→`bf16.bf16`）。
+  - **改动**（单/两文件 device 逐字一致，`scripts/sync_onefile_device.py` 核对 `identical: True`）：
+    新增 `wgmma_m64n64k16_bf16_t<TA,TB>` + `trans_k16_addr`/`desc_k16_mn`/`desc_k16_k` +
+    `pds_store_sw128`（bf16）；P/dS 改 **SW128 K-major**；5 个 GEMM 全 wgmma（GEMM3/4/5 按 N 半
+    `nh=0/1` 分两遍、每遍三条一起发统一 `wait0`）；`dqacc[nh][j][qq]` 寄存器累加；smem
+    **99.33KB→2 CTA/SM**（`launch_bwd_wgmma` smem 公式改 `2*BM*BN*sizeof(bf16)`）。
+  - **数值与 O5b~O13 的 mma / O9b 逐位相同**（MHA S=512 9.001/12.61/13.65e-3、S=4096
+    15.10/13.40/16.31e-3、GQA kv4 12.01/21.25/31.56e-3），单/两文件逐指标一致。
+  - **性能（同 session `[O9b A/B]`，event，main-only）**：S=512 mma 0.0568→全 wgmma 0.0592ms
+    （0.960×）、S=4096 1.4896→**1.5221ms（0.979×）**、GQA kv4（BN=32 回退）0.2697→0.2698；
+    端到端 total S=4096 **1.9239ms（71.4 TF）**、S=512 0.1148ms、GQA kv4 0.3734ms（46.0 TF）。
+    **全 wgmma 未跑赢 mma 最优档**（与 fp16 O9b-2 结论一致）。
+  - **ncu（main, S=4096）**：Duration **1.48ms**、DRAM 4.35% / L1TEX 40.05% / **L2 71.60%** /
+    Tensor 12.03% / Compute 23.37%、230 regs / 99.33KB / occ 11.86%（**2 CTA/SM**）；
+    `short_scoreboard` **0.29**（O9b 的 0.56→0.29，GEMM3/4/5 的 ldmatrix 被打掉），
+    但 **L2 仍 ~70%、occupancy 仍 2 CTA/SM** ⇒ 墙 = **dK/dV 跨 CTA 原子 + 99.33KB smem**，
+    不在 GEMM 指令。**与 fp16 O9b-2 ncu 逐项一致**（Duration 1.49ms、L1TEX 40.25%、L2 71.38%、
+    Tensor 12.09%、short 0.29）。
+  - **对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`）：MHA S=4096 FA3
+    **0.3206ms/858TF**、TE 0.4368/629、FA2 0.7307/376 ⇒ ours total 时间 **6.00×**（FA3）；
+    GQA kv4 S=1024 FA3 0.0823ms/417TF ⇒ 4.54×。
+  - 原始输出 `src/bf16/fa_bwd_bf16_mma_main_o9b2_{s512,s4096,gqa_kv4}.out.txt`、
+    `..._mma_onefile_o9b2_{s512,s4096}.out.txt`、`..._o9b2_ncu_{s512,s4096}.out.txt`、
+    `src/bf16/fa_bwd_bf16_o9b2_fa3_te_baseline.out.txt`；文档 `docs/01b` §6r。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -1192,8 +1223,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
         `fa_bwd_fp16_wgmma_bwd_smoke.cu` 逐位 PASS、数值与 O5~O13 逐位相同；**但性能中性偏负**
         （S4096 1.50–1.52 vs mma 1.47–1.48），ncu 证实**墙不在 GEMM 指令**（short_scoreboard 0.56→0.29），
         而是 **L2 的 dK/dV 跨 CTA 原子（~70%）+ 99KB smem 锁死的 2 CTA/SM**。详见 `docs/01` §14h。
-        **O9b-2b（下一步）**：在此通路上加 **TMA 化 Q/K/V/dO** + **P/dS 双缓冲跨-tile 流水**，
-        并把 smem 压到 ≤75.7KB 冲 3 CTA/SM；**O7b（去 dK/dV 原子）回报更高，优先级第一**。
+         **bf16 版 O9b-2 已完成（第四十四轮）**：把 fp16 O9b-2 逐字 dtype 参数化到 bf16，数值与
+         O5b~O13 逐位相同、main S4096 0.979×/S512 0.960×、ncu 与 fp16 逐项一致（详见 `docs/01b` §6r）。
+         **O9b-2b（下一步）**：在此通路上加 **TMA 化 Q/K/V/dO** + **P/dS 双缓冲跨-tile 流水**，
+         并把 smem 压到 ≤75.7KB 冲 3 CTA/SM；**O7b（去 dK/dV 原子）回报更高，优先级第一**。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
 
@@ -1260,7 +1293,8 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    数值逐位相同、ncu 逐项一致（`docs/01b` §6q）。构建 wgmma 需 `-gencode=arch=compute_90a,code=sm_90a`（+ `-DFA_WGMMA`）
 >    （`ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh ...`）。
 >    **下一步**：**O7b 去 dK/dV 原子（第一优先，唯一直接打掉 L2 墙的杠杆）**；O9b-2b TMA + P/dS 双缓冲
->    跨-tile 流水 + 压 smem 冲 3 CTA/SM；bf16 版 O9b-2。详见 `docs/01` §14g/§14h。
+>    跨-tile 流水 + 压 smem 冲 3 CTA/SM。**bf16 版 O9b-2 已完成（第四十四轮）**：逐字 dtype 参数化，
+>    数值逐位相同、main S4096 0.979×/S512 0.960×、ncu 与 fp16 逐项一致（`docs/01b` §6r）。详见 `docs/01` §14g/§14h。
 >
 > **旁支已完成（第三十六轮 O5c）**：把 fp16/bf16 的 **MLA（head_dim=512）反向从标量升级为张量核**
 > （`HD` 模板 128/512、GEMM3/4/5 N-tile 循环、dQ 全局累加），main 5.2–5.8×（fp16）/3.7–4.1×（bf16），

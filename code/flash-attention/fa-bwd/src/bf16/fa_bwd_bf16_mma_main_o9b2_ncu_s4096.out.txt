@@ -1,0 +1,53 @@
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 380913
+==PROF== Connected to process 613267 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/bf16/fa_bwd_bf16_mma_main.out)
+==PROF== Profiling "fa_bwd_bf16_wgmma_kernel": 0%....50%....100% - 11 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_bf16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[timing] total(3 kernels) 1.9321 ms  71.13 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3405 ms | main 1.4989 ms | convert 0.0928 ms
+[O8b A/B] lse O8 0.8708 ms | bal(单缓冲) 0.4480 ms (1.944x) | bal+cpasync(双缓冲) 0.3003 ms (2.900x)
+[O6 A/B] main nopipe 2.2543 ms (60.97 TF) | pipe(KV both) 1.5565 ms (88.30 TF) | pipe2(K only) 1.6056 ms (85.60 TF) => nopipe/pipe 1.448x, nopipe/pipe2 1.404x
+[O6c A/B] main sched0(原样) 1.5921 ms | sched1(交错) 1.5680 ms (1.015x) | sched2(逆序) 1.5836 ms (1.005x)
+[O9b A/B] main mma(64,64,2) 1.4888 ms (92.32 TF) | wgmma(GEMM1/2) 1.5150 ms (90.72 TF) => 0.983x
+[O5c A/B] main (64,32,2) 1.5715 ms (87.46 TF) | (64,64,2) 1.4832 (92.67) | (32,32,1) 2.5819 (53.23) | (32,32,2) 2.5690 (53.50) => best 1.060x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.7077 (80.48) | f4 1.8252 (75.30,-6.4%) | f2+PREL 1.5700 (87.54,+8.8%) | f4+PREL 1.5637 (87.90,+9.2%)
+  (BM=64,BN=64,PIPE=2): base 1.6935 (81.16) | f4 1.7630 (77.96,-3.9%) | f2+PREL 1.4845 (92.58,+14.1%) | f4+PREL 1.5166 (90.62,+11.7%)
+  (BM=32,BN=32,PIPE=1): base 2.6053 (52.75) | f4 2.6189 (52.48,-0.5%) | f2+PREL 2.5711 (53.46,+1.3%) | f4+PREL 2.5842 (53.19,+0.8%)
+  (BM=32,BN=32,PIPE=2): base 2.6073 (52.71) | f4 2.6344 (52.17,-1.0%) | f2+PREL 2.5676 (53.53,+1.5%) | f4+PREL 2.5794 (53.28,+1.1%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  fa_dq     vs ref: max_abs=1.441e-02  max_rel=1.630e+00
+  fa_dk     vs ref: max_abs=1.332e-02  max_rel=1.612e+00
+  fa_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  te_dq     vs ref: max_abs=1.524e-02  max_rel=3.641e+00
+  te_dk     vs ref: max_abs=1.763e-02  max_rel=2.718e+00
+  te_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+==PROF== Disconnected from process 613267
+[613267] fa_bwd_bf16_mma_main.out@127.0.0.1
+  void fa_bwd_bf16_wgmma_kernel<128>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (64, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %         4.35
+    gpu__time_duration.sum                                                                 ms         1.48
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                             0
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                                           638
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        40.05
+    launch__occupancy_limit_shared_mem                                                  block            2
+    launch__registers_per_thread                                              register/thread          230
+    launch__shared_mem_per_block_dynamic                                          Kbyte/block        99.33
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        71.60
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed                         %        12.03
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        23.37
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        11.86
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.84
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         1.99
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         0.29
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.43
+    ------------------------------------------------------------------------- --------------- ------------
+
