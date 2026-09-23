@@ -739,13 +739,15 @@ __global__ void delta_kernel(const bf16* __restrict__ o,
 }
 
 // =============================================================================
-// O9b：主 kernel 的 wgmma 版（bf16，与 fp16 版 `fa_bwd_fp16_mma_kernels.cuh` 逐字同构）
-//   GEMM1/2（S=QKᵀ、dP=dO·Vᵀ）用 `wgmma.m64n64k16` + SW128；GEMM3/4/5 仍 mma，
-//   其转置 B 从同一块 SW128 tile 用 `ldmatrix.x2.trans` 读；只做 bf16 / HD=128 / BM=BN=64。
+// O9b / O9b-2：主 kernel 的 wgmma 版（bf16，与 fp16 版 `fa_bwd_fp16_mma_kernels.cuh` 逐字同构）
+//   O9b：GEMM1/2（S=QKᵀ、dP=dO·Vᵀ）用 `wgmma.m64n64k16` + SW128；
+//   O9b-2：GEMM3/4/5（dV=Pᵀ·dO、dK=dSᵀ·Q、dQ=dS·K）也用 `wgmma.m64n64k16`，
+//          对 K-major SW128 tile 用 **MN-major 描述符（转置读）**；P/dS 存 SW128 K-major。
+//   只做 bf16 / HD=128 / BM=BN=64。
 // =============================================================================
-// 说明见 fp16 版同段注释与 `docs/01` §14g。bf16 与 fp16 同为 2 字节，SW128 布局/描述符/
-// 累加器映射逐字节同构，只差 wgmma 指令 dtype（`f16.f16`→`bf16.bf16`）。构建需
-// `-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA`。
+// 说明见 fp16 版同段注释与 `docs/01` §14g/§14h、`docs/01b` §6r。bf16 与 fp16 同为 2 字节，
+// SW128 布局/描述符/累加器映射逐字节同构，只差 wgmma 指令 dtype（`f16.f16`→`bf16.bf16`）。
+// 构建需 `-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA`。
 #ifdef FA_WGMMA
 
 // issue-only 版（不 wait）：GEMM1/GEMM2 两个 wgmma group 一起发、最后统一 wait0，
@@ -856,6 +858,62 @@ __device__ __forceinline__ void qdo_issue_async_sw(const bf16* __restrict__ q,
   asm volatile("cp.async.commit_group;\n");
 }
 
+// ---- O9b-2：MN-major（转置）描述符（bf16，与 fp16 版逐字同构；dtype 无关）----
+// 同一份 **K-major SW128** 存储的 tile，用 `Major::MN` 描述符 + `tnsp=1` 读，等于读它的转置
+// （FA3 `dKV_swapAB` 的做法）。逐位验证见 fp16 的 `fa_bwd_fp16_wgmma_bwd_smoke.cu`：
+//   * LBO=64（相邻 64 列组的 u128 步长）；SBO=(W/64)*64（相邻 8 行组的 u128 步长）；
+//   * trans 操作数第 s 个 k16 slab（K=行，前进 16 行=2 行组）地址 = base + s*2*SBO*16 字节。
+__device__ __forceinline__ uint32_t trans_k16_addr(uint32_t base, int s, uint32_t W) {
+  return base + (uint32_t)(s * 2 * ((W >> 6) * 64) * 16);
+}
+__device__ __forceinline__ uint64_t desc_k16_mn(uint32_t base, int s, uint32_t W) {
+  uint64_t d = 0;
+  d |= (uint64_t)((trans_k16_addr(base, s, W) >> 4) & 0x3FFF);
+  d |= (uint64_t)(64u & 0x3FFF) << 16;  // LBO = 64
+  d |= (uint64_t)((((W >> 6) * 64)) & 0x3FFF) << 32;
+  d |= (uint64_t)1 << 62;  // B128
+  return d;
+}
+__device__ __forceinline__ uint64_t desc_k16_k(uint32_t base, int s, uint32_t W) {
+  return make_desc_sw128(sw128_k16_addr(base, s), (W >> 6) * 1024);
+}
+// wgmma m64n64k16，TA/TB = 0(K-major) / 1(MN-major)。
+template <int TA, int TB>
+__device__ __forceinline__ void wgmma_m64n64k16_bf16_t(float (&d)[32], uint64_t da,
+                                                       uint64_t db) {
+#if FA_HAS_WGMMA
+  asm volatile(
+      "{\n.reg .pred p;\nsetp.ne.b32 p, %34, 0;\n"
+      "wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 "
+      "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31},\n"
+      "%32, %33, p, 1, 1, %35, %36;\n}\n"
+      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]),
+        "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]),
+        "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]),
+        "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]),
+        "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]),
+        "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
+      : "l"(da), "l"(db), "r"(1), "n"(TA), "n"(TB));
+#else
+  (void)da; (void)db;
+  for (int i = 0; i < 32; ++i) d[i] = 0.f;
+#endif
+}
+// P/dS 的 16B 分块 SW128 存储：一个 quad（lane%4）覆盖同 row 的 8 个连续列（每个 lane 贡献
+// 相邻 2 列）。`a` 为 row r0、`b` 为 row r0+8。
+__device__ __forceinline__ void pds_store_sw128(char* tile, int j, int r0, int lane,
+                                                 int c2, int W, bf16 a0, bf16 a1,
+                                                 bf16 b0, bf16 b1) {
+  const uint32_t h2a = (uint32_t)__bfloat16_as_ushort(a0) |
+                       ((uint32_t)__bfloat16_as_ushort(a1) << 16);
+  const uint32_t h2b = (uint32_t)__bfloat16_as_ushort(b0) |
+                       ((uint32_t)__bfloat16_as_ushort(b1) << 16);
+  const int c = j * 8 + c2;
+  *reinterpret_cast<uint32_t*>(tile + sw128_off(r0, c, W)) = h2a;
+  *reinterpret_cast<uint32_t*>(tile + sw128_off(r0 + 8, c, W)) = h2b;
+  (void)lane;
+}
+
 template <int HD>
 __global__ void __launch_bounds__(THREADS, 2)
 fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
@@ -866,9 +924,9 @@ fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
                          int causal, int sched) {
   static_assert(HD == 128, "wgmma 主 kernel 目前只做 HD=128");
   constexpr int BM = 64, BN = 64;
-  constexpr int LDS = BN + 8;
   constexpr int TILE  = (BM / 8) * (HD / 64) * 1024;   // Q/dO SW128 tile（16KB）
   constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;   // K/V SW128 tile（16KB）
+  constexpr int PSZ   = BM * BN * 2;                   // P/dS SW128 tile 字节数（8KB）
 
   extern __shared__ char smem_raw[];
   // SW128 描述符 base_offset=0 要求 tile 1024B 对齐 → 手动对齐动态 smem 基址。
@@ -879,8 +937,8 @@ fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
   char* dOs = Qs + TILE;
   char* Ks  = dOs + TILE;                 // 双缓冲 2*KTILE
   char* Vs  = Ks + 2 * KTILE;             // 单缓冲 KTILE
-  bf16* Ps  = reinterpret_cast<bf16*>(Vs + KTILE);   // [BM][LDS]
-  bf16* dSs = Ps + BM * LDS;                         // [BM][LDS]
+  char* Ps  = Vs + KTILE;                 // P  [BM][BN] SW128 K-major（8KB）
+  char* dSs = Ps + PSZ;                   // dS [BM][BN] SW128 K-major（8KB）
 
   const int bx = blockIdx.x;
   const int nblk = (S + BM - 1) / BM;
@@ -928,7 +986,9 @@ fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
 #pragma unroll
       for (int qq = 0; qq < 4; ++qq) dqacc[i][j][qq] = 0.f;
 
-  const int wr = wid / 2, wc = wid % 2;  // GEMM3/4/5 的 2×2 warp 网格
+  const uint32_t Qa = smem_u32(Qs), dOa = smem_u32(dOs);
+  const uint32_t Pa = smem_u32(Ps), DSa = smem_u32(dSs);
+  const int r0 = wid * 16 + g;
   for (int nt = 0; nt < ntiles; ++nt) {
     const int j0 = nt * BN;
     char* Kt = Ks + (nt & 1) * KTILE;
@@ -943,117 +1003,110 @@ fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
     wgmma_mn64_issue(Qs, Kt, HD, sacc);
     wgmma_mn64_issue(dOs, Vs, HD, dpacc);
     wgmma_wait0();
-    // (1) epilogue：P = exp(scale·S − LSE)
+    // (1) epilogue：P = exp(scale·S − LSE)，按 SW128 16B 分块写 Ps
     float pval[8][4];
 #pragma unroll
     for (int j = 0; j < 8; ++j)
 #pragma unroll
       for (int qq = 0; qq < 4; ++qq) {
-        const int r = wid * 16 + g + (qq >= 2 ? 8 : 0);
-        const int c = j * 8 + c2 + (qq & 1);
-        const int qi = m0 + r, jg = j0 + c;
+        const int qi = m0 + r0 + (qq >= 2 ? 8 : 0);
+        const int jg = j0 + j * 8 + c2 + (qq & 1);
         const float lv = (qq >= 2) ? lse_hi : lse_lo;
         float p = 0.f;
         if (qi < S && jg < S && !(causal && jg > qi)) p = fexp(sacc[j * 4 + qq] * scale - lv);
         pval[j][qq] = p;
-        Ps[r * LDS + c] = __float2bfloat16(p);
       }
-
-    // (2) epilogue：dS = P∘(dP−D)
 #pragma unroll
     for (int j = 0; j < 8; ++j)
+      pds_store_sw128(Ps, j, r0, lane, c2, BN,
+                      __float2bfloat16(pval[j][0]), __float2bfloat16(pval[j][1]),
+                      __float2bfloat16(pval[j][2]), __float2bfloat16(pval[j][3]));
+    // (2) epilogue：dS = P∘(dP−D)，按 SW128 16B 分块写 dSs
 #pragma unroll
-      for (int qq = 0; qq < 4; ++qq) {
-        const int r = wid * 16 + g + (qq >= 2 ? 8 : 0);
-        const int c = j * 8 + c2 + (qq & 1);
-        const float del = (qq >= 2) ? del_hi : del_lo;
-        dSs[r * LDS + c] = __float2bfloat16(pval[j][qq] * (dpacc[j * 4 + qq] - del));
-      }
+    for (int j = 0; j < 8; ++j) {
+      const float d0 = pval[j][0] * (dpacc[j * 4 + 0] - del_lo);
+      const float d1 = pval[j][1] * (dpacc[j * 4 + 1] - del_lo);
+      const float d2 = pval[j][2] * (dpacc[j * 4 + 2] - del_hi);
+      const float d3 = pval[j][3] * (dpacc[j * 4 + 3] - del_hi);
+      pds_store_sw128(dSs, j, r0, lane, c2, BN,
+                      __float2bfloat16(d0), __float2bfloat16(d1),
+                      __float2bfloat16(d2), __float2bfloat16(d3));
+    }
     // barrier：P/dS 对所有 warp 可见；同时保证 GEMM2 已读完 V[nt]，可覆盖 V。
     __syncthreads();
     if (nt + 1 < ntiles)
       kv_issue_async_sw<HD, BN, false, true>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid, Ks, Vs);
 
-    // ---- (3) dV = Pᵀ·dO（A=Ps ATRANS，B=dOs SW128）----
-    {
-      float acc[2][8][4];
+    // ---- O9b-2：(3) dV=Pᵀ·dO、(4) dK=scale·dSᵀ·Q、(5) dQ+=scale·dS·K 全上 wgmma ----
+    // 三条 GEMM 的 A/B 均为「K-major 存储 + MN-major 描述符（转置读）」，唯一例外是 (5) 的
+    // A=dS 用 K-major。按 N 半（nh=0/1）分两遍，每遍三条一起发、统一 wait0。
+    wgmma_fence();
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+    for (int nh = 0; nh < 2; ++nh) {
+      const uint32_t dOn = dOa + (uint32_t)(nh * 1024);
+      const uint32_t Qn  = Qa  + (uint32_t)(nh * 1024);
+      const uint32_t Kn  = smem_u32(Kt) + (uint32_t)(nh * 1024);
+      float accv[32], acck[32], accq[32];
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+      for (int i = 0; i < 32; ++i) { accv[i] = 0.f; acck[i] = 0.f; accq[i] = 0.f; }
 #pragma unroll
-          for (int qq = 0; qq < 4; ++qq) acc[i][j][qq] = 0.f;
-      mma_block_swb<32, 64, BM, true, HD>(Ps, LDS, dOs, acc, wr, wc, lane);
+      for (int s = 0; s < BM / 16; ++s)
+        wgmma_m64n64k16_bf16_t<1, 1>(accv, desc_k16_mn(Pa, s, BN), desc_k16_mn(dOn, s, HD));
+      wgmma_commit();
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int s = 0; s < BM / 16; ++s)
+        wgmma_m64n64k16_bf16_t<1, 1>(acck, desc_k16_mn(DSa, s, BN), desc_k16_mn(Qn, s, HD));
+      wgmma_commit();
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+      for (int s = 0; s < BN / 16; ++s)
+        wgmma_m64n64k16_bf16_t<0, 1>(accq, desc_k16_k(DSa, s, BN), desc_k16_mn(Kn, s, HD));
+      wgmma_commit();
+      wgmma_wait0();
+      // (3) dV = Pᵀ·dO epilogue
 #pragma unroll
-          for (int qq = 0; qq < 4; qq += 2) {
-            const int r = wr * 32 + i * 16 + g + (qq >= 2 ? 8 : 0);
-            const int c = wc * 64 + j * 8 + c2;
-            const int jg = j0 + r;
-            float* dst = dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
-            if (jg < S) red_add2(dst, acc[i][j][qq], acc[i][j][qq + 1]);
-          }
-    }
-
-    // ---- (4) dK = scale·dSᵀ·Q（A=dSs ATRANS，B=Qs SW128）----
-    {
-      float acc[2][8][4];
+      for (int j = 0; j < 8; ++j)
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+        for (int qq = 0; qq < 4; qq += 2) {
+          const int rr = r0 + (qq >= 2 ? 8 : 0);
+          const int jg = j0 + rr;
+          const int c = nh * 64 + j * 8 + c2;
+          if (jg < S)
+            red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                     accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+        }
+      // (4) dK = scale·dSᵀ·Q epilogue
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+      for (int j = 0; j < 8; ++j)
 #pragma unroll
-          for (int qq = 0; qq < 4; ++qq) acc[i][j][qq] = 0.f;
-      mma_block_swb<32, 64, BM, true, HD>(dSs, LDS, Qs, acc, wr, wc, lane);
+        for (int qq = 0; qq < 4; qq += 2) {
+          const int rr = r0 + (qq >= 2 ? 8 : 0);
+          const int jg = j0 + rr;
+          const int c = nh * 64 + j * 8 + c2;
+          if (jg < S)
+            red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                     acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+        }
+      // (5) dQ += scale·dS·K（寄存器累加，循环结束后一次写出）
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int j = 0; j < 8; ++j)
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
-#pragma unroll
-          for (int qq = 0; qq < 4; qq += 2) {
-            const int r = wr * 32 + i * 16 + g + (qq >= 2 ? 8 : 0);
-            const int c = wc * 64 + j * 8 + c2;
-            const int jg = j0 + r;
-            float* dst = dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
-            if (jg < S)
-              red_add2(dst, acc[i][j][qq] * scale, acc[i][j][qq + 1] * scale);
-          }
-    }
-
-    // ---- (5) dQ += scale·dS·K（A=dSs 普通，B=Kt SW128）----
-    {
-      float acc[2][8][4];
-#pragma unroll
-      for (int i = 0; i < 2; ++i)
-#pragma unroll
-        for (int j = 0; j < 8; ++j)
-#pragma unroll
-          for (int qq = 0; qq < 4; ++qq) acc[i][j][qq] = 0.f;
-      mma_block_swb<32, 64, BN, false, HD>(dSs, LDS, Kt, acc, wr, wc, lane);
-#pragma unroll
-      for (int i = 0; i < 2; ++i)
-#pragma unroll
-        for (int j = 0; j < 8; ++j)
-#pragma unroll
-          for (int qq = 0; qq < 4; ++qq) dqacc[i][j][qq] += acc[i][j][qq] * scale;
+        for (int qq = 0; qq < 4; ++qq) dqacc[nh][j][qq] += accq[j * 4 + qq] * scale;
     }
   }
 
 #pragma unroll
-  for (int i = 0; i < 2; ++i)
+  for (int nh = 0; nh < 2; ++nh)
 #pragma unroll
     for (int j = 0; j < 8; ++j)
 #pragma unroll
       for (int qq = 0; qq < 4; qq += 2) {
-        const int r = wr * 32 + i * 16 + g + (qq >= 2 ? 8 : 0);
-        const int c = wc * 64 + j * 8 + c2;
-        const int qi = m0 + r;
+        const int rr = r0 + (qq >= 2 ? 8 : 0);
+        const int qi = m0 + rr;
+        const int c = nh * 64 + j * 8 + c2;
         if (qi < S) {
           float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
-          *reinterpret_cast<float2*>(base) = make_float2(dqacc[i][j][qq], dqacc[i][j][qq + 1]);
+          *reinterpret_cast<float2*>(base) =
+              make_float2(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
         }
       }
 }
