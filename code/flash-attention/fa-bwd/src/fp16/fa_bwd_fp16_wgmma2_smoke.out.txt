@@ -1,0 +1,4 @@
+wgmma2 dV=PᵀdO (BM=128 trans) vs CPU: max_abs=0.000e+00
+wgmma2 dK=dSᵀQ (BM=128 trans) vs CPU: max_abs=0.000e+00
+wgmma2 dQ=dS·K (2x m64)         vs CPU: max_abs=0.000e+00
+PASS

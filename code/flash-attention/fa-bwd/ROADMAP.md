@@ -1382,9 +1382,45 @@
    - **结论/下一步**：这轮把 fp16/bf16 main 的路线收敛——**唯一真杠杆 = 跨 warpgroup 归约
      （BM=128、2 warpgroups：一个 KV 元素只被 `nblk/2` 个 CTA 贡献，dK/dV red 字节砍半）**；
      TMA 通路已建好但需先把 HD=128 tile 改成 2×K=64 chunk 才能落进主 kernel。见 `docs/01` §14i。
-   - 原始输出 `src/fp16/fa_bwd_fp16_tma_smoke.out.txt`、
-     `src/fp16/fa_bwd_fp16_mma_main_o16_s4096.out.txt`、`/tmp` ncu 拆解（L2 扇区、stall）；
-     文档 `docs/01` §14i、`docs/04` §3、`docs/08` §5。
+    - 原始输出 `src/fp16/fa_bwd_fp16_tma_smoke.out.txt`、
+      `src/fp16/fa_bwd_fp16_mma_main_o16_s4096.out.txt`、`/tmp` ncu 拆解（L2 扇区、stall）；
+      文档 `docs/01` §14i、`docs/04` §3、`docs/08` §5。
+
+- 2026-09-23（第五十二轮）：**O17 完成（fp16 跨 warpgroup 归约：BM=128 + 2 warpgroups，
+  dK/dV 的 red 字节砍半；main S4096 1.57×）**。
+   - 动机：第五十一轮用 ncu 把 fp16 main 的墙钉死——**`red`（dK/dV 跨 CTA `atomicAdd`）占 L2
+     扇区 73.1%、DRAM 仅 4.2%** ⇒ L2 原子字节数 bound；O16（错开 wait）与 O7c（float4 归约）
+     均证明「动等待/事务数」无效。**唯一杠杆 = 减少每个 KV 元素的贡献 CTA 数**：BM 64→128 后
+     `nblk=S/BM` 减半 ⇒ red 字节砍半。
+   - **前置冒烟** `src/fp16/fa_bwd_fp16_wgmma2_smoke.cu`：验证对 **[128][*] K-major SW128 tile
+     用 MN-major 描述符按 `s=0..7` 读转置**（dV=PᵀdO / dK=dSᵀQ / dQ=dS·K 两个 m64 半），
+     三项 **max_abs=0.000e+00（逐位 PASS）**。
+   - **实现**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+     新增 `fa_bwd_fp16_wgmma2_kernel<HD>`（`#ifdef FA_WGMMA`，仅 HD=128，`__launch_bounds__(256,1)`）。
+     `wg=tid>>7`，两组各持自己 64 行 Q/dO/P/dS（SW128 tile 按 8-rowgroup 偏移）；GEMM1/2 各 wg
+     `wgmma.m64n64`；中段 barrier 后 **wg0** 做 GEMM3/4——`for nh: for s in 0..7` 把两个 m64 半
+     连续喂**同一累加器**（= 全 BM 之和）再 `red_add2`，**wg1 同时做自己的 GEMM5**；GEMM5 各 wg
+     寄存器累加后一次 `float2` 写回。`kv_issue_async_sw`/`qdo_issue_async_sw` 加模板 `NT=256`。
+     host 加 `launch_bwd_wgmma2` + CLI `--wg2` + `[O17 A/B]`（mma/O9b/wg2 同 session + 逐元素差）。
+     smem **149.5KB → 1 CTA/SM**（256 线程=8 warps，与 O9b 的 2×4 相同），regs 200、0 spill。
+   - **数值 vs ref 与历史逐位一致**（fp16 causal）：S512 1.671/1.771/1.899e-3；S4096
+     1.883/1.734/1.966e-3；GQA h32kv4 S1024 2.134/3.305/3.850e-3；MQA h64kv1 2.292/7.934/7.517e-3。
+     `max|diff|` wg2-vs-mma：dq **0**（无跨 CTA 原子）/ dk/dv 8.8e-5–5.9e-3（仅 atomic 次序）。
+     单/两文件逐指标一致。
+   - **性能（同 session A/B，CUDA event，main-only）**：S512 0.0573→**0.0517（1.11×）**、
+     S4096 1.5310→**0.9784（1.57×）**、GQA kv4 0.2636→**0.1789（1.47×）**、
+     MQA kv1 0.4326→**0.2812（1.54×）**。端到端 S4096 **1.4268ms（96.3 TF）**、S512 0.1071、
+     GQA 0.2925、MQA 0.4555。**main-only S4096 140.5 TF**。同 session 纯反向 FA3 MHA S4096
+     0.3241ms/848TF、TE 0.4458/617、FA2 0.7285/377 ⇒ ours 端到端为 FA3 的 **4.4×**（O9b ~6.0×）。
+   - **ncu（main, S=4096，同 session O9b vs O17）**：`lts__t_sectors_op_red`
+     **102,236,160 → 51,904,512（0.508×）**、`read` 35.9M→17.95M（0.50×）、`write` 1.576M 不变、
+     Duration **1.48→0.996ms**、**L2 71.76→54.72%**、L1/TEX 40.40→36.85%、DRAM 4.36→6.47%、
+     Compute 23.58→27.48%、regs 230→200、smem 100.35→149.5KB、occ 11.89→12.41%；bank conflict 0。
+     **机制假设被 ncu 完全证实**；新墙仍是 L2（red 占余下 L2 扇区 ~72.6%）⇒ 下一步 O17b（BM=256）。
+   - 原始输出 `src/fp16/fa_bwd_fp16_wgmma2_smoke.out.txt`、
+     `src/fp16/fa_bwd_fp16_mma_main_o17_s4096.out.txt`、`..._mma_onefile_o17_s512.out.txt`、
+     `src/fp16/fa_bwd_fp16_mma_main_o17_ncu_wg2_s4096.out.txt`、`..._o17_ncu_o9b_s4096.out.txt`、
+      `src/fp16/fa_bwd_fp16_o17_fa3_te_baseline.out.txt`；文档 `docs/01` §14j、`docs/04` §2.1/§3。
 
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
@@ -1520,6 +1556,16 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 ## 下一步（明确到可执行）
 
 > **当前冲刺（按序，把 ours 性能推到 FA3/TE 水平；这是最高优先级，别再被其它任务打断）**：
+>
+> **O17 已完成（第五十二轮，fp16）——唯一真杠杆落地**：`fa_bwd_fp16_wgmma2_kernel<HD>`
+> （BM=128、2 warpgroups、256 线程，`--wg2`，`sm_90a`+`-DFA_WGMMA`）：两组各算自己 64 行 Q 的
+> P/dS，**dK/dV 只由 wg0 对全 BM=128 归约**（两个 m64 半进同一 wgmma 累加器），每个 KV 元素只
+> `red` 一次 ⇒ **ncu 实测 `red` 102.2M→51.9M（0.508×）、`read` 0.50×、L2 71.8%→54.7%、
+> Duration 1.48→1.00ms**；main S4096 **1.57×（140.5 TF）**、GQA 1.47×、MQA 1.54×、S512 1.11×，
+> 端到端 S4096 1.427ms、**为 FA3 的 4.4×**（O9b ~6.0×）；数值 vs ref 逐位一致。前置冒烟
+> `fa_bwd_fp16_wgmma2_smoke.cu` 逐位 PASS。**下一步（O17b）**：BM=256 / 4 warpgroups 再砍半
+> （需先做 smem/寄存器账：Q/dO 按 wg 只存自己 64 行或 TMA 直供、P/dS 可能需 8-bit 存）；
+> 同时把 O17 逐字 dtype 参数化到 **bf16**（O17-bf16）。详见 `docs/01` §14j、`docs/04` §2.1/§3。
 > 1. **O5 收尾**：fp16/bf16 反向用 `mma.m16n8k16`+`ldmatrix` 张量核后端。
 >    进度：fp16 主 kernel **2.28→0.19 ms（512）/ 67.6→4.55 ms（4096），11.8–14.9×**；
 >    **bf16 主 kernel 1.88→0.190 ms（512）/ 42.2→4.51 ms（4096），9.4–9.9×**（第二十七轮，单/两文件、
@@ -1755,13 +1801,19 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `sub4*16+t`→`sub4*8+t+half*32`（消 `Ps/Ss` 列读的恒 2-way 冲突）+ 8B/16B 向量写；
       shared load 冲突 **−53.5%**、L1/TEX 64.8→60.0%、main 1.02–1.04×、数值逐位不变。
       另证伪「fold 写折 16B」（1.007×、增大 spill）。详见 `docs/03` §25、`docs/04` §2.3。
-- [ ] **（第五十一轮新列，最高优先级）O17：fp16/bf16 跨 warpgroup 归约（BM=128、2 warpgroups）**。
+- [x] **（第五十一轮新列，最高优先级）O17：fp16 跨 warpgroup 归约（BM=128、2 warpgroups）**。
       动机（量化证据）：ncu 拆 S=4096 主 kernel 的 L2 扇区——**`red`（dK/dV 跨 CTA `atomicAdd`）
       占 73.1%**、DRAM 仅 4.2% ⇒ main 是 **L2 原子字节数 bound**；O16（重叠 epilogue）与 O7c
       （float4 归约）都证明「动等待/事务数」无效。**一个 KV 元素被 `nblk` 个 CTA 贡献，BM=128 后
-      只被 `nblk/2` 个 ⇒ red 字节直接砍半**。实现：2 warpgroups 各算 64 行 Q 的 dV/dK 偏和，
-      在 smem（≈32KB）合并一次再 `red`；dQ 各 wg 寄存器累加互不干扰。代价 smem≈176KB→1 CTA/SM
-      （256 线程=8 warps/SM，与现状相同）。TMA 通路（O15a）可随后接入压 `long_scoreboard`。
+      只被 `nblk/2` 个 ⇒ red 字节直接砍半**。**已完成（第五十二轮）**：
+      `fa_bwd_fp16_wgmma2_kernel<HD>`（单/两文件，`#ifdef FA_WGMMA`，仅 HD=128、256 线程）——
+      2 个 wg 各算自己 64 行 Q 的 P/dS；**dK/dV 只由 wg0 对全 BM=128 归约**（两个 m64 半进同一
+      `wgmma.m64n64k16` 累加器 = 两半之和），每个 KV 元素只 `red` 一次；dQ 各 wg 寄存器累加。
+      前置冒烟 `fa_bwd_fp16_wgmma2_smoke.cu` 验证 128 行 MN-major 转置读**逐位 PASS**。
+      ncu：`red` **102.2M→51.9M（0.508×）**、`read` 也 0.50×、L2 71.8%→**54.7%**、Duration
+      1.48→**1.00ms**；main-only **S4096 1.57×（140.5 TF）/ GQA 1.47× / MQA 1.54× / S512 1.11×**，
+      端到端 S=4096 **1.427ms（96.3 TF，FA3 的 4.4×，O9b 时 ~6.0×）**；数值 vs ref 历史逐位一致。
+      regs 200 / smem 149.5KB / 1 CTA/SM。TMA 通路（O15a）与 bf16 版（O17-bf16）留后续。
 - [ ] （backlog）O7b：dK/dV 的跨 CTA 归约（分块 `*_accum` + convert）→ **确定性反向**；字节不减、
       多一趟读回，只在需要确定性时做。**O7e 已证明 fp8 侧该 L2 墙只剩 43.7% < L1/TEX 66%**；
       fp16/bf16 侧见上 O17（跨 wg 归约才是真杠杆）。
