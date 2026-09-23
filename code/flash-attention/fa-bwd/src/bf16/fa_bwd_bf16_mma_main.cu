@@ -126,6 +126,25 @@ static void launch_bwd_mma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
       q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, sched);
 }
 
+#ifdef FA_WGMMA
+// O9b：wgmma 主 kernel（只 HD=128 / BM=BN=64）。smem 见 kernel 内注释（≈99KB，2 CTA/SM）。
+template <int HD>
+static void launch_bwd_wgmma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
+                             const bf16* do_, const float* delta, const float* lse,
+                             float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
+                             int Hkv, float scale, int causal, int sched) {
+  constexpr int BM = 64, BN = 64, LDS = BN + 8;
+  constexpr int TILE  = (BM / 8) * (HD / 64) * 1024;
+  constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
+  constexpr int smem = 1024 + TILE * 2 + KTILE * 3 + 2 * BM * LDS * (int)sizeof(bf16);
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_wgmma_kernel<HD>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  fa_bwd_bf16_wgmma_kernel<HD><<<mg, THREADS, smem>>>(q, k, v, do_, delta, lse, dq_acc,
+                                                      dk_acc, dv_acc, S, H, Hkv, scale, causal,
+                                                      sched);
+}
+#endif
+
 int main(int argc, char** argv) {
   std::string dir = "/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16";
   std::string o_name = "ref_o";
@@ -142,6 +161,8 @@ int main(int argc, char** argv) {
   int prel_opt = -1;
   // O9：LSE 是否用 wgmma（仅 D==128 且 causal；0=用 O8b 的 mma 版，1=wgmma 版）。
   int lse_wgm = 0;
+  // O9b：主 kernel 是否用 wgmma（仅 FA_WGMMA 构建、D==128 且 sel=(64,64) 时生效）。
+  int wgmma_sel = 0;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -157,6 +178,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--lsewgm=", 0) == 0) lse_wgm = atoi(a.c_str() + 9);
     else if (a == "--lsewgm") lse_wgm = 1;
+    else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
+    else if (a == "--wgmma") wgmma_sel = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -345,7 +368,17 @@ int main(int argc, char** argv) {
 #undef LAUNCH_CFG
   const bool r4_sel = (r4_opt > 0);
   const bool prel_sel = (prel_opt >= 0) ? (prel_opt != 0) : true;
-  auto run_main = [&]() { launch_cfg(bm_sel, bn_sel, pp_sel, r4_sel, prel_sel); };
+  auto run_main = [&]() {
+#ifdef FA_WGMMA
+    if (wgmma_sel && D == 128 && bm_sel == 64 && bn_sel == 64) {
+      dim3 g((S + 63) / 64, H, B);
+      launch_bwd_wgmma<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                            d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      return;
+    }
+#endif
+    launch_cfg(bm_sel, bn_sel, pp_sel, r4_sel, prel_sel);
+  };
   auto run_pre = [&]() {
     if (D == 512) {
       if (causal)
@@ -509,6 +542,38 @@ int main(int argc, char** argv) {
            ms_s[0], ms_s[1], ms_s[0] / ms_s[1], ms_s[2], ms_s[0] / ms_s[2]);
     sched = 1;
   }
+
+  // ---- O9b A/B（仅 FA_WGMMA 且 causal）：主 kernel mma(64,64,2) vs wgmma(GEMM1/2 用 wgmma) ----
+#ifdef FA_WGMMA
+  if (causal) {
+    auto time_wg = [&](bool use_wg, float* out_ms) {
+      auto launch = [&]() {
+        if (use_wg)
+          launch_bwd_wgmma<128>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                d_dk_acc, d_dv_acc, S, H, Hkv, scale, 1, 0);
+        else
+          launch_cfg(64, 64, 2, false, true);
+      };
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    float ms_mma = 0.f, ms_wg = 0.f;
+    time_wg(false, &ms_mma);
+    time_wg(true, &ms_wg);
+    auto tf = [&](float ms) { return main_flops / (ms * 1e-3) / 1e12; };
+    printf("[O9b A/B] main mma(64,64,2) %.4f ms (%.2f TF) | wgmma(GEMM1/2) %.4f ms "
+           "(%.2f TF) => %.3fx\n",
+           ms_mma, tf(ms_mma), ms_wg, tf(ms_wg), ms_mma / ms_wg);
+  }
+#endif
   }  // end if (D == 128)
 
   // ---- O5c A/B（仅 HD=128 且 causal）：不同 (BM,BN,PIPE) tile 配置 ----
