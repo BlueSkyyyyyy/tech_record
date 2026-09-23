@@ -124,16 +124,16 @@ static void launch_bwd_mma(dim3 mg, const __half* q, const __half* k, const __ha
 }
 
 #ifdef FA_WGMMA
-// O9b：wgmma 主 kernel（只 HD=128 / BM=BN=64）。smem 见 kernel 内注释（≈98KB，2 CTA/SM）。
+// O9b/O9b-2：wgmma 主 kernel（只 HD=128 / BM=BN=64）。Q/dO/K/V SW128 + P/dS SW128，≈97KB。
 template <int HD>
 static void launch_bwd_wgmma(dim3 mg, const __half* q, const __half* k, const __half* v,
                              const __half* do_, const float* delta, const float* lse,
                              float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
                              int Hkv, float scale, int causal, int sched) {
-  constexpr int BM = 64, BN = 64, LDS = BN + 8;
+  constexpr int BM = 64, BN = 64;
   constexpr int TILE  = (BM / 8) * (HD / 64) * 1024;
   constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
-  constexpr int smem = 1024 + TILE * 2 + KTILE * 3 + 2 * BM * LDS * (int)sizeof(__half);
+  constexpr int smem = 1024 + TILE * 2 + KTILE * 3 + 2 * BM * BN * (int)sizeof(__half);
   CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma_kernel<HD>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
   fa_bwd_fp16_wgmma_kernel<HD><<<mg, THREADS, smem>>>(q, k, v, do_, delta, lse, dq_acc,

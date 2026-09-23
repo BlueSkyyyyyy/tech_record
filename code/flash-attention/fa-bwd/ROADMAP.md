@@ -1076,6 +1076,37 @@
      `..._o9b_stall_s4096.out.txt`、`src/bf16/fa_bwd_bf16_o9b_fa3_te_baseline.out.txt`；
      文档 `docs/01b` §6q、`docs/04` §2.2/§3。
 
+- 2026-09-23（第四十三轮）：**O9b-2 第一步完成（fp16 主 kernel GEMM3/4/5 上 wgmma：MN-major 转置读；
+  数值逐位正确、性能中性）**。
+  - 动机：O9b（第四十一轮）只把 GEMM1/2 上 wgmma，收尾墙 = `wait`（GEMM3/4/5 的 mma）+ L2（dK/dV 原子）
+    + 2 CTA/SM。O9b-2 要把 GEMM3/4/5（dV=PᵀdO、dK=dSᵀQ、dQ=dS·K）也上 wgmma。
+  - **关键手段（本步最大收获）**：把「K-major SW128 存储的 tile」用 **MN-major 描述符 + `tnsp=1`**
+    读 = **读它的转置**（FA3 `dKV_swapAB` 同思路）。对手写 `sw128_off` 布局精确推导：LBO=64、
+    SBO=(W/64)*64、转置 k16 slab 地址 = `base + s*2*SBO*16`；wgmma 尾部立即数 `p,1,1,tnspA,tnspB`。
+    前置冒烟 **`src/fp16/fa_bwd_fp16_wgmma_bwd_smoke.cu`** 对 4 种转置组合逐位 PASS（`max_abs=0`）。
+  - **实现**（单/两文件 device 逐字一致，`scripts/sync_onefile_device.py` 核对 `identical: True`）：
+    P/dS 改 **SW128 K-major**（4B 直写 `pds_store_sw128`）；5 个 GEMM 全 wgmma（GEMM3/4 用 A=Pᵀ/dSᵀ
+    的 MN 描述符、B=dO/Q 的 MN 描述符；GEMM5 的 A=dS 用 K-major、B=K 的 MN 描述符），按 N 半分两遍、
+    每遍三条一起发 `wait0`；dQ 寄存器累加重映射 `dqacc[nh][j][q]`。smem **101.4→99.33KB**、230 regs、
+    0 spill、仍 2 CTA/SM。host `--wgmma=1`（默认 sm_90 构建不编译，行为不变）。
+  - **数值与 O5~O13/O9b 逐位相同**：S=512 1.671/1.771/1.899e-3；S=4096 1.883/1.734/1.966e-3；
+    GQA kv4 2.134/3.305/3.850e-3；单/两文件一致。
+  - **性能（同 session A/B，main-only，ms）—— 中性偏负**：S=512 mma `(64,64,2)` 0.0584 vs 全 wgmma
+    0.0604；S=4096 mma 1.471–1.484 vs 全 wgmma **1.500–1.523**；GQA kv4 mma 0.2482 vs 0.2664。
+    **全 wgmma 没有跑赢 mma 最优档，也略慢于 O9b**；端到端 S=4096 total ≈1.91–1.97ms（~72 TF）。
+    同 session 纯反向 FA3 S=4096 0.3241ms/848TF、TE 0.4396/625 ⇒ ours total ~6.0×。
+  - **ncu（main，`--launch-count 1`）**：S=4096 Duration 1.49–1.54ms、L1/TEX 38.6–40.3%、
+    **L2 69.1–71.4%（仍为墙）**、Compute 22.5–23.5%、Tensor 11.6–12.1%、230 regs/99.33KB、occ 11.83%
+    （2 CTA/SM）；stall **`wait 1.43 + long 1.96 + short 0.29`**（O9b：`wait 1.50 + long 1.25 + short 0.56`）。
+    即全 wgmma 把 GEMM3/4/5 的 `ldmatrix` 也消了（short→0.29），但 **墙不在 GEMM 指令**：L2 的 dK/dV
+    跨 CTA 原子 + ~99KB smem 锁死的 2 CTA/SM 才是瓶颈。**结论：O9b-2 的 GEMM3/4/5 wgmma 本身不是杠杆**
+    （中性），但它建立了「MN-major 转置读」数据通路，是后续 TMA/流水/去原子的地基。
+  - 原始输出 `src/fp16/fa_bwd_fp16_wgmma_bwd_smoke.out.txt`、
+    `src/fp16/fa_bwd_fp16_mma_main_o9b2_{s512,s4096,gqa_kv4}.out.txt`、
+    `src/fp16/fa_bwd_fp16_mma_onefile_o9b2_{s512,s4096,gqa_kv4}.out.txt`、
+    `src/fp16/fa_bwd_fp16_mma_main_o9b2_ncu_{s512,s4096}.out.txt`、
+    `src/fp16/fa_bwd_fp16_o9b2_fa3_te_baseline.out.txt`；文档 `docs/01` §14h。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -1156,8 +1187,13 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
        L2 74% 与 2 CTA/SM 没变**，收益有限。**bf16 版已完成（第四十二轮）**：把 fp16 O9b
        逐字 dtype 参数化到 bf16（同为 2 字节，SW128/描述符/累加器映射逐字节同构），main
        **S512 1.089× / S4096 1.021×**、数值与 O5b~O13 逐位相同、ncu 逐项一致（详见 `docs/01b` §6q）。
-       **O9b-2（下一步）**：GEMM3/4/5 也上 wgmma（P/dS 进 smem/SW128、dKV 转置 B 按 FA3
-       `dKV_swapAB`）＋ TMA 化 K/V ＋ 双缓冲 P/dS 做跨-tile 流水。详见 `docs/01` §14g。
+        **O9b-2（第一步已完成，第四十三轮）**：GEMM3/4/5 用 **MN-major 描述符（对 K-major SW128 tile
+        转置读，FA3 `dKV_swapAB` 同思路）** 上了 wgmma，5 个 GEMM 全 wgmma；冒烟
+        `fa_bwd_fp16_wgmma_bwd_smoke.cu` 逐位 PASS、数值与 O5~O13 逐位相同；**但性能中性偏负**
+        （S4096 1.50–1.52 vs mma 1.47–1.48），ncu 证实**墙不在 GEMM 指令**（short_scoreboard 0.56→0.29），
+        而是 **L2 的 dK/dV 跨 CTA 原子（~70%）+ 99KB smem 锁死的 2 CTA/SM**。详见 `docs/01` §14h。
+        **O9b-2b（下一步）**：在此通路上加 **TMA 化 Q/K/V/dO** + **P/dS 双缓冲跨-tile 流水**，
+        并把 smem 压到 ≤75.7KB 冲 3 CTA/SM；**O7b（去 dK/dV 原子）回报更高，优先级第一**。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
 
@@ -1215,12 +1251,16 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    收益有限。**O9b 第一步已完成（第四十一轮，fp16）**：主 kernel 的 GEMM1/2（`S=QKᵀ`、`dP=dO·Vᵀ`）
 >    换成 wgmma（Q/dO/K/V 存 SW128；GEMM3/4/5 的转置 B 用 `ldmatrix.x2.trans` 从同一 SW128 tile 读，
 >    冒烟逐位 PASS）；main S512 1.092× / S4096 1.046×、数值逐位不变，但 **GEMM3/4/5 仍 mma、
->    dK/dV 仍跨 CTA 原子 ⇒ L2 74% 与 2 CTA/SM 没变**。**O9b-2（下一步）**：GEMM3/4/5 也上 wgmma
->    （P/dS 进 smem/SW128、dKV 转置 B 按 FA3 `dKV_swapAB`）＋ TMA 化 K/V ＋ 双缓冲 P/dS 跨-tile 流水。
->    **bf16 版已完成（第四十二轮）**：逐字 dtype 参数化，main S512 1.089× / S4096 1.021×、
+>    dK/dV 仍跨 CTA 原子 ⇒ L2 74% 与 2 CTA/SM 没变**。**O9b-2 第一步已完成（第四十三轮，fp16）**：
+>    GEMM3/4/5 用 **MN-major 描述符（对 K-major SW128 tile 的转置读，FA3 `dKV_swapAB` 同思路）**
+>    上了 wgmma，5 个 GEMM 全 wgmma；冒烟逐位 PASS、数值与 O5~O13 逐位相同；**但性能中性偏负**
+>    （S4096 1.50–1.52 vs mma 1.47–1.48），ncu 证实 **short_scoreboard 0.56→0.29（ldmatrix 消掉）
+>    而 L2 仍 ~70%，墙是 dK/dV 跨 CTA 原子 + 99KB smem 锁死的 2 CTA/SM**，不在 GEMM 指令。
+>    **bf16 版 O9b 已完成（第四十二轮）**：逐字 dtype 参数化，main S512 1.089× / S4096 1.021×、
 >    数值逐位相同、ncu 逐项一致（`docs/01b` §6q）。构建 wgmma 需 `-gencode=arch=compute_90a,code=sm_90a`（+ `-DFA_WGMMA`）
 >    （`ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh ...`）。
->    详见 `docs/01` §14g。
+>    **下一步**：**O7b 去 dK/dV 原子（第一优先，唯一直接打掉 L2 墙的杠杆）**；O9b-2b TMA + P/dS 双缓冲
+>    跨-tile 流水 + 压 smem 冲 3 CTA/SM；bf16 版 O9b-2。详见 `docs/01` §14g/§14h。
 >
 > **旁支已完成（第三十六轮 O5c）**：把 fp16/bf16 的 **MLA（head_dim=512）反向从标量升级为张量核**
 > （`HD` 模板 128/512、GEMM3/4/5 N-tile 循环、dQ 全局累加），main 5.2–5.8×（fp16）/3.7–4.1×（bf16），

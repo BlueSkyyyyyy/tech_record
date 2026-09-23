@@ -1,0 +1,5 @@
+wgmma S=QKᵀ       vs CPU: max_abs=0.000e+00
+wgmma dV=PᵀdO(trans) vs CPU: max_abs=0.000e+00
+wgmma dK=dSᵀQ(trans) vs CPU: max_abs=0.000e+00
+wgmma dQ=dS·K(B trans) vs CPU: max_abs=0.000e+00
+PASS

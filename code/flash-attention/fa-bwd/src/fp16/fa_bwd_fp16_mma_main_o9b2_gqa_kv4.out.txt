@@ -1,0 +1,25 @@
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 380911
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp16
+B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388
+[O6c] main grid=512 auto=(BM=64,BN=32,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[timing] total(3 kernels) 0.3837 ms  44.77 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0917 ms | main 0.2720 ms | convert 0.0201 ms
+[O8b A/B] lse O8 0.1531 ms | bal(单缓冲) 0.1064 ms (1.439x) | bal+cpasync(双缓冲) 0.0677 ms (2.261x)
+[O6 A/B] main nopipe 0.3951 ms (43.48 TF) | pipe(KV both) 0.2812 ms (61.10 TF) | pipe2(K only) 0.2575 ms (66.72 TF) => nopipe/pipe 1.405x, nopipe/pipe2 1.535x
+[O6c A/B] main sched0(原样) 0.2631 ms | sched1(交错) 0.2630 ms (1.000x) | sched2(逆序) 0.2608 ms (1.009x)
+[O5c A/B] main (64,32,2) 0.2597 ms (66.16 TF) | (64,64,2) 0.2687 (63.95) | (32,32,1) 0.4408 (38.98) | (32,32,2) 0.4420 (38.87) => best 1.000x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 0.2905 (59.14) | f4 0.2974 (57.77,-2.3%) | f2+PREL 0.2511 (68.42,+15.7%) | f4+PREL 0.2580 (66.60,+12.6%)
+  (BM=64,BN=64,PIPE=2): base 0.3316 (51.81) | f4 0.3462 (49.63,-4.2%) | f2+PREL 0.2657 (64.65,+24.8%) | f4+PREL 0.2688 (63.91,+23.3%)
+  (BM=32,BN=32,PIPE=1): base 0.4459 (38.53) | f4 0.4601 (37.34,-3.1%) | f2+PREL 0.4451 (38.60,+0.2%) | f4+PREL 0.4338 (39.61,+2.8%)
+  (BM=32,BN=32,PIPE=2): base 0.4545 (37.80) | f4 0.4595 (37.39,-1.1%) | f2+PREL 0.4429 (38.79,+2.6%) | f4+PREL 0.4405 (39.00,+3.2%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.134e-03  max_rel=5.101e-01
+  dk   vs ref: max_abs=3.305e-03  max_rel=1.044e+00
+  dv   vs ref: max_abs=3.850e-03  max_rel=3.711e-02
+  fa_dq     vs ref: max_abs=1.727e-03  max_rel=3.091e-01
+  fa_dk     vs ref: max_abs=3.321e-03  max_rel=8.086e-01
+  fa_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
+  te_dq     vs ref: max_abs=2.075e-03  max_rel=2.991e-01
+  te_dk     vs ref: max_abs=3.175e-03  max_rel=4.837e-01
+  te_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
