@@ -99,6 +99,19 @@ struct Fp8Cfg {
   static constexpr int smem_bytes =
       fp8_bytes + (kNScale + 2 * BM * PSS) * (int)sizeof(float);
 
+  // O9c-2：WGMMA 模式下 Q/dO/K/V 存 SW128（tile 字节数 = (rows/8)*(HD/128)*1024），
+  // 取代行主序的 ASLD 布局。+1024 是动态 smem 基址到 1024B 对齐的 slack（描述符 base_offset=0）。
+  static constexpr int qs_sw_bytes = (BM / 8) * (HD / 128) * 1024;
+  static constexpr int ks_sw_bytes = (BN / 8) * (HD / 128) * 1024;
+  static constexpr int fp8_bytes_wgmma = qs_sw_bytes   // Qs
+                                       + ks_sw_bytes   // Ks（dS3 复用尾部）
+                                       + ks_sw_bytes   // Vs（Ap 复用尾部）
+                                       + qs_sw_bytes   // dOs
+                                       + BM * DSS2     // dS2
+                                       + qp_bytes + qp_bytes + kp_bytes;
+  static constexpr int smem_bytes_wgmma =
+      fp8_bytes_wgmma + (kNScale + 2 * BM * PSS) * (int)sizeof(float) + 1024;
+
   static constexpr int lse_smem_bytes =
       LBM * ASLD + LBN * ASLD + (LBM + LBN) * (int)sizeof(float);
   // O11：LSE 的镜像配对 + cp.async 双缓冲版本（PIPE=0 单缓冲 / PIPE=1 双缓冲）smem。
@@ -206,7 +219,9 @@ __device__ __forceinline__ void ldmatrix_x2_trans(uint32_t addr, uint32_t d[2]) 
 //
 // 仅 `-DFA_WGMMA` 构建时编译（默认 sm_90 构建完全不含本块，行为/数值不变）；wgmma 需
 // `-gencode=arch=compute_90a,code=sm_90a`（CUDA 13 的 `-arch=sm_90a` 会静默退化）。
-#ifdef FA_WGMMA
+// O9c-2：SW128 的三个纯整数 helper 移出 `#ifdef FA_WGMMA`，好让主 kernel 的
+//   `if constexpr (WGMMA)` 存储分支在任意构建下都能做地址运算（wgmma asm 仍只在
+//   `-DFA_WGMMA` 下编译）。它们在非 wgmma 构建里不会被实例化调用。
 // SW128 K-major：元素 (row,k) 的字节偏移；K = 行宽（元素数，须为 128 的倍数）。
 __device__ __forceinline__ int sw128_off_fp8(int row, int k, int K) {
   const int rg = row >> 3, rr = row & 7;
@@ -228,6 +243,8 @@ __device__ __forceinline__ uint64_t make_desc_sw128_fp8(uint32_t addr,
   d |= (uint64_t)1 << 62;  // layout_type = B128
   return d;
 }
+
+#ifdef FA_WGMMA
 #if defined(__CUDA_ARCH__) && defined(__CUDA_ARCH_FEAT_SM90_ALL)
 #define FA_FP8_HAS_WGMMA 1
 #else
@@ -293,6 +310,66 @@ __device__ __forceinline__ void wgmma_m64n64k32_e5e4(float (&d)[32], uint64_t da
   for (int i = 0; i < 32; ++i) d[i] = 0.f;
 #endif
 }
+// O9c-2：主 kernel 的 GEMM1/2 用 **m64n32k32**（主 kernel 的 BN=32，正好 n32；比 n64
+//   少一半累加器，128 线程每线程 16 个 fp32）。累加器映射与 m64n64 同构，只是 j<4：
+//   warp w 持行 [16w,16w+16)，`d[j*4+q]` ↔ row=16w+g+(q>=2?8:0)、col=j*8+c2+(q&1)。
+//   （与 mma.m16n8 的 `acc[j][q]` 同构，方便直接套现用 epilogue 的 (r,c) 公式。）
+__device__ __forceinline__ void wgmma_m64n32k32_e4e4(float (&d)[16], uint64_t da,
+                                                     uint64_t db) {
+#if FA_FP8_HAS_WGMMA
+  asm volatile(
+      "{\n.reg .pred p;\nsetp.ne.b32 p, %18, 0;\n"
+      "wgmma.mma_async.sync.aligned.m64n32k32.f32.e4m3.e4m3 "
+      "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15},\n"
+      "%16, %17, p, %19, %20;\n}\n"
+      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]),
+        "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]),
+        "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15])
+      : "l"(da), "l"(db), "r"(1), "n"(1), "n"(1));
+#else
+  (void)da; (void)db;
+  for (int i = 0; i < 16; ++i) d[i] = 0.f;
+#endif
+}
+__device__ __forceinline__ void wgmma_m64n32k32_e5e4(float (&d)[16], uint64_t da,
+                                                     uint64_t db) {
+#if FA_FP8_HAS_WGMMA
+  asm volatile(
+      "{\n.reg .pred p;\nsetp.ne.b32 p, %18, 0;\n"
+      "wgmma.mma_async.sync.aligned.m64n32k32.f32.e5m2.e4m3 "
+      "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15},\n"
+      "%16, %17, p, %19, %20;\n}\n"
+      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]),
+        "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]),
+        "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15])
+      : "l"(da), "l"(db), "r"(1), "n"(1), "n"(1));
+#else
+  (void)da; (void)db;
+  for (int i = 0; i < 16; ++i) d[i] = 0.f;
+#endif
+}
+// 发 GEMM1/2 的 wgmma（A/B 均 SW128 K-major，K 归约维 HD），只 commit 不 wait，方便两条
+// 异步 mma 重叠（与 fp16 O9b 的 `wgmma_mn64_issue` 同）。KIND=0 e4m3×e4m3，1 e5m2×e4m3。
+template <int KIND>
+__device__ __forceinline__ void wgmma_mn32_issue(const char* Asw, const char* Bsw, int HD,
+                                                 float (&d)[16]) {
+#pragma unroll
+  for (int i = 0; i < 16; ++i) d[i] = 0.f;
+  wgmma_fence_fp8();
+  const uint32_t aa = smem_u32(Asw), ba = smem_u32(Bsw);
+  const uint32_t sbo = (uint32_t)((HD / 128) * 1024);
+#pragma unroll
+  for (int s = 0; s < HD / 32; ++s) {
+    uint64_t da = make_desc_sw128_fp8(sw128_k32_addr(aa, s), sbo);
+    uint64_t db = make_desc_sw128_fp8(sw128_k32_addr(ba, s), sbo);
+    if (KIND == 0)
+      wgmma_m64n32k32_e4e4(d, da, db);
+    else
+      wgmma_m64n32k32_e5e4(d, da, db);
+  }
+  wgmma_commit_fp8();
+}
+
 // Q[64][HD]·Kᵀ[HD][64]（Q/K 存成 SW128 K-major，K 归约维 HD，HD 须为 128 的倍数）。
 __device__ __forceinline__ void wgmma_qkt64_fp8(const char* Qsw, const char* Ksw,
                                                 int HD, float (&d)[32]) {
@@ -441,7 +518,8 @@ __device__ __forceinline__ void kv_prefetch_pair(const unsigned char* __restrict
   }
 }
 
-template <int NPU, int HD>
+// O9c-2：`SW=true` 时 Ks/Vs 写 SW128（供 wgmma GEMM1/2 直读），否则写行主序。Kp 恒定。
+template <int NPU, int HD, bool SW = false>
 __device__ __forceinline__ void kv_commit_pair(unsigned char* Ks, unsigned char* Vs,
                                                uint16_t* Kp, const uint32_t* pk0,
                                                const uint32_t* pk1, const uint32_t* pv0,
@@ -452,10 +530,17 @@ __device__ __forceinline__ void kv_commit_pair(unsigned char* Ks, unsigned char*
   for (int e = 0; e < NPU; ++e) {
     int u = tid + e * THREADS;
     int rp = u / nd4, dq = (u % nd4) * 4;
-    *reinterpret_cast<uint32_t*>(Ks + (rp * 2) * asld + dq) = pk0[e];
-    *reinterpret_cast<uint32_t*>(Ks + (rp * 2 + 1) * asld + dq) = pk1[e];
-    *reinterpret_cast<uint32_t*>(Vs + (rp * 2) * asld + dq) = pv0[e];
-    *reinterpret_cast<uint32_t*>(Vs + (rp * 2 + 1) * asld + dq) = pv1[e];
+    if constexpr (SW) {
+      *reinterpret_cast<uint32_t*>(Ks + sw128_off_fp8(rp * 2, dq, HD)) = pk0[e];
+      *reinterpret_cast<uint32_t*>(Ks + sw128_off_fp8(rp * 2 + 1, dq, HD)) = pk1[e];
+      *reinterpret_cast<uint32_t*>(Vs + sw128_off_fp8(rp * 2, dq, HD)) = pv0[e];
+      *reinterpret_cast<uint32_t*>(Vs + sw128_off_fp8(rp * 2 + 1, dq, HD)) = pv1[e];
+    } else {
+      *reinterpret_cast<uint32_t*>(Ks + (rp * 2) * asld + dq) = pk0[e];
+      *reinterpret_cast<uint32_t*>(Ks + (rp * 2 + 1) * asld + dq) = pk1[e];
+      *reinterpret_cast<uint32_t*>(Vs + (rp * 2) * asld + dq) = pv0[e];
+      *reinterpret_cast<uint32_t*>(Vs + (rp * 2 + 1) * asld + dq) = pv1[e];
+    }
     uint32_t* kpw = reinterpret_cast<uint32_t*>(Kp + rp * psld + dq);
     kpw[0] = __byte_perm(pk0[e], pk1[e], 0x5140);
     kpw[1] = __byte_perm(pk0[e], pk1[e], 0x7362);
@@ -463,7 +548,7 @@ __device__ __forceinline__ void kv_commit_pair(unsigned char* Ks, unsigned char*
 }
 
 // HD>128（MLA）时的直接向量化载入（无寄存器预取）。NDQ 个 unit grid-stride。
-template <int HD, int BN>
+template <int HD, int BN, bool SW = false>
 __device__ __forceinline__ void kv_load_pair(const unsigned char* __restrict__ k8,
                                              const unsigned char* __restrict__ v8,
                                              int j0, int S, int Hkv, int hkv, int b, int tid,
@@ -485,10 +570,17 @@ __device__ __forceinline__ void kv_load_pair(const unsigned char* __restrict__ k
       k1 = *reinterpret_cast<const uint32_t*>(k8 + i1);
       v1 = *reinterpret_cast<const uint32_t*>(v8 + i1);
     }
-    *reinterpret_cast<uint32_t*>(Ks + (rp * 2) * asld + dq) = k0;
-    *reinterpret_cast<uint32_t*>(Ks + (rp * 2 + 1) * asld + dq) = k1;
-    *reinterpret_cast<uint32_t*>(Vs + (rp * 2) * asld + dq) = v0;
-    *reinterpret_cast<uint32_t*>(Vs + (rp * 2 + 1) * asld + dq) = v1;
+    if constexpr (SW) {
+      *reinterpret_cast<uint32_t*>(Ks + sw128_off_fp8(rp * 2, dq, HD)) = k0;
+      *reinterpret_cast<uint32_t*>(Ks + sw128_off_fp8(rp * 2 + 1, dq, HD)) = k1;
+      *reinterpret_cast<uint32_t*>(Vs + sw128_off_fp8(rp * 2, dq, HD)) = v0;
+      *reinterpret_cast<uint32_t*>(Vs + sw128_off_fp8(rp * 2 + 1, dq, HD)) = v1;
+    } else {
+      *reinterpret_cast<uint32_t*>(Ks + (rp * 2) * asld + dq) = k0;
+      *reinterpret_cast<uint32_t*>(Ks + (rp * 2 + 1) * asld + dq) = k1;
+      *reinterpret_cast<uint32_t*>(Vs + (rp * 2) * asld + dq) = v0;
+      *reinterpret_cast<uint32_t*>(Vs + (rp * 2 + 1) * asld + dq) = v1;
+    }
     uint32_t* kpw = reinterpret_cast<uint32_t*>(Kp + rp * psld + dq);
     kpw[0] = __byte_perm(k0, k1, 0x5140);
     kpw[1] = __byte_perm(k0, k1, 0x7362);
@@ -977,7 +1069,9 @@ __global__ void delta_kernel(const float* __restrict__ o,
 //   把寄存器压回 168（~0.9KB spill）保住 3 CTA/SM。只有「平均每 CTA 有足够多 nt tile」时
 //   才划算（accumulation 省下的 red ∝ ntiles/CTA，而寄存器/溢出代价固定）；小 S 的高 ksplit
 //   使每 CTA 只有 ~1 个 tile，此时 `REGDQ=false` 退回原 per-tile 归约（168 regs，无溢出）。
-template <int HD, int BM, int BN, bool REGDQ>
+// O9c-2：`WGMMA=true` 时 GEMM1/2 换 `wgmma.m64n32k32`（A/B 存 SW128 K-major），其余
+//   （fold + GEMM3/4/5 + dQ 归约）与 mma 版**逐字相同**。仅 `-DFA_WGMMA` 构建可实例化。
+template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? 3 : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
@@ -1000,7 +1094,10 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   constexpr int NPU = Cfg::NPU;
   constexpr int kNScale = Cfg::kNScale;
   constexpr int PSS = Cfg::PSS;
-  constexpr int kFp8Bytes = Cfg::fp8_bytes;
+  // O9c-2：WGMMA 模式下 Q/dO/K/V 是 SW128 tile（1024B 对齐），否则是行主序 ASLD 布局。
+  constexpr int QS_SZ = WGMMA ? Cfg::qs_sw_bytes : BM * ASLD;
+  constexpr int KS_SZ = WGMMA ? Cfg::ks_sw_bytes : BN * ASLD;
+  static_assert(!WGMMA || (HD == 128), "WGMMA 主 kernel 目前只做 HD=128");
   // GEMM3/4/5 的输出 N 维 = head_dim；每遍处理 NTW = WN*64 = 128 列，共 HD/NTW 遍。
   constexpr int NTW = WN * 64;
   static_assert(HD % NTW == 0, "HD 必须是 128 的整数倍");
@@ -1014,18 +1111,25 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   constexpr bool kPrefetch = Cfg::use_prefetch && !kRegDq;
 
   extern __shared__ __align__(16) char smem[];
-  unsigned char* Qs  = reinterpret_cast<unsigned char*>(smem);
-  unsigned char* Ks  = Qs + BM * ASLD;
-  unsigned char* Vs  = Ks + BN * ASLD;
-  unsigned char* dOs = Vs + BN * ASLD;
+  // WGMMA 的 SW128 描述符要求 tile 1024B 对齐（base_offset=0）→ 手动对齐动态 smem 基址
+  // （宿主为 WGMMA 模式多给 1024B slack，见 `Fp8Cfg::smem_bytes_wgmma`）。
+  char* base = smem;
+  if constexpr (WGMMA) {
+    const uint32_t a0 = smem_u32(smem);
+    base = smem + ((1024u - (a0 & 1023u)) & 1023u);
+  }
+  unsigned char* Qs  = reinterpret_cast<unsigned char*>(base);
+  unsigned char* Ks  = Qs + QS_SZ;
+  unsigned char* Vs  = Ks + KS_SZ;
+  unsigned char* dOs = Vs + KS_SZ;
   // O4b：Kt/Qt/dOt 三个转置副本 -> Qp/dOp/Kp 三个 K 配对布局（uint16，行距 PSLD）。
-  uint16_t* Qp  = reinterpret_cast<uint16_t*>(dOs + BM * ASLD);
+  uint16_t* Qp  = reinterpret_cast<uint16_t*>(dOs + QS_SZ);
   uint16_t* dOp = reinterpret_cast<uint16_t*>(reinterpret_cast<unsigned char*>(Qp) + Cfg::qp_bytes);
   uint16_t* Kp  = reinterpret_cast<uint16_t*>(reinterpret_cast<unsigned char*>(dOp) + Cfg::qp_bytes);
   unsigned char* dS2 = reinterpret_cast<unsigned char*>(Kp) + Cfg::kp_bytes;
   unsigned char* Ap  = Vs;                   // O2：复用 GEMM2 后死亡的 Vs
   unsigned char* dS3 = Ks;                   // O2：复用 GEMM1 后死亡的 Ks
-  float* scales = reinterpret_cast<float*>(smem + kFp8Bytes);
+  float* scales = reinterpret_cast<float*>(dS2 + BM * DSS2);
   float* Ps = scales + kNScale;              // P fp32 [BM][PSS]
   float* Ss = Ps + BM * PSS;                 // dS fp32 [BM][PSS]
   float* qs_s = scales;
@@ -1073,10 +1177,17 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
         q1 = *reinterpret_cast<const uint32_t*>(q8 + idx);
         o1 = *reinterpret_cast<const uint32_t*>(do8 + idx);
       }
-      *reinterpret_cast<uint32_t*>(Qs + (rp * 2) * ASLD + dq) = q0;
-      *reinterpret_cast<uint32_t*>(Qs + (rp * 2 + 1) * ASLD + dq) = q1;
-      *reinterpret_cast<uint32_t*>(dOs + (rp * 2) * ASLD + dq) = o0;
-      *reinterpret_cast<uint32_t*>(dOs + (rp * 2 + 1) * ASLD + dq) = o1;
+      if constexpr (WGMMA) {  // SW128：行对同一 dq 落 4B（dq 是 4 的倍数，4B 对齐）
+        *reinterpret_cast<uint32_t*>(Qs + sw128_off_fp8(rp * 2, dq, HD)) = q0;
+        *reinterpret_cast<uint32_t*>(Qs + sw128_off_fp8(rp * 2 + 1, dq, HD)) = q1;
+        *reinterpret_cast<uint32_t*>(dOs + sw128_off_fp8(rp * 2, dq, HD)) = o0;
+        *reinterpret_cast<uint32_t*>(dOs + sw128_off_fp8(rp * 2 + 1, dq, HD)) = o1;
+      } else {
+        *reinterpret_cast<uint32_t*>(Qs + (rp * 2) * ASLD + dq) = q0;
+        *reinterpret_cast<uint32_t*>(Qs + (rp * 2 + 1) * ASLD + dq) = q1;
+        *reinterpret_cast<uint32_t*>(dOs + (rp * 2) * ASLD + dq) = o0;
+        *reinterpret_cast<uint32_t*>(dOs + (rp * 2 + 1) * ASLD + dq) = o1;
+      }
       uint32_t* qpw = reinterpret_cast<uint32_t*>(Qp + rp * PSLD + dq);
       qpw[0] = __byte_perm(q0, q1, 0x5140);
       qpw[1] = __byte_perm(q0, q1, 0x7362);
@@ -1098,9 +1209,9 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   if (kPrefetch) {
     kv_prefetch_pair<NPU, HD>(k8, v8, nt_begin * BN, S, Hkv, hkv, b, tid, pk0, pk1, pv0,
                               pv1);
-    kv_commit_pair<NPU, HD>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
+    kv_commit_pair<NPU, HD, WGMMA>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
   } else {
-    kv_load_pair<HD, BN>(k8, v8, nt_begin * BN, S, Hkv, hkv, b, tid, Ks, Vs, Kp, ASLD,
+    kv_load_pair<HD, BN, WGMMA>(k8, v8, nt_begin * BN, S, Hkv, hkv, b, tid, Ks, Vs, Kp, ASLD,
                          PSLD);
   }
   if (tid < BN) {
@@ -1138,6 +1249,47 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                                 pv1);
 
     // ---- (1) S = scale·QKᵀ  →  P = exp(S − LSE)，存 fp32 ----
+    // ---- (2) dP = dO·Vᵀ    →  dS = P∘(dP − D)，存 fp32 ----
+#ifdef FA_WGMMA
+    if constexpr (WGMMA) {
+      // O9c-2：GEMM1/2 换 wgmma.m64n32k32（A/B 都从 SW128 直读 smem）。两条异步 mma 一起
+      //   发、统一 wait0 重叠；累加器 wgmma 映射下 warp w 持行 [16w,16w+16)，同一线程在
+      //   两条 GEMM 里拥有同一个 (r,c) ⇒ dS 直接用寄存器里的 P（pval）即可，无需读回 smem。
+      float sacc[16], dpacc[16];
+      wgmma_mn32_issue<0>(reinterpret_cast<const char*>(Qs),
+                          reinterpret_cast<const char*>(Ks), HD, sacc);
+      wgmma_mn32_issue<1>(reinterpret_cast<const char*>(dOs),
+                          reinterpret_cast<const char*>(Vs), HD, dpacc);
+      wgmma_wait0_fp8();
+      float pval[16];
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+          int c = j * 8 + c2 + (q & 1);
+          int qi = m0 + r, jg = j0 + c;
+          float p = 0.f;
+          if (qi < S && jg < S && !(causal && jg > qi)) {
+            float sval = sacc[j * 4 + q] * scale * qs_s[r] * ks_s[c];
+            p = fexp(sval - lse[((size_t)(b * S + qi)) * H + h]);
+          }
+          pval[j * 4 + q] = p;
+          Ps[r * PSS + c] = p;
+        }
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+          int c = j * 8 + c2 + (q & 1);
+          int qi = m0 + r;
+          float dpv = dpacc[j * 4 + q] * dos_s[r] * vs_s[c];
+          float del = (qi < S) ? delta[((size_t)(b * S + qi)) * H + h] : 0.f;
+          Ss[r * PSS + c] = pval[j * 4 + q] * (dpv - del);
+        }
+    } else
+#endif
     {
       float acc[2][2][4];
 #pragma unroll
@@ -1164,36 +1316,35 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
             }
             Ps[r * PSS + c] = p;
           }
-    }
-    // ---- O4a：GEMM1 与 GEMM2 之间**不需要** barrier。GEMM2 只读 dOs/Vs（本 tile 前已
-    //      就绪），其 epilogue 读回的 Ps[r*PSS+c] 正是**本线程**刚写入的同一地址（两次
-    //      mma_block 的 (wm=wr, wn=wc) 与累加器映射完全一致），无线程间依赖。----
-
-    // ---- (2) dP = dO·Vᵀ  →  dS = P∘(dP − D)，存 fp32 ----
-    {
-      float acc[2][2][4];
+      // ---- (2) dP = dO·Vᵀ  →  dS = P∘(dP − D)，存 fp32 ----
+      // ---- O4a：GEMM1 与 GEMM2 之间**不需要** barrier。GEMM2 只读 dOs/Vs（本 tile 前已
+      //      就绪），其 epilogue 读回的 Ps[r*PSS+c] 正是**本线程**刚写入的同一地址（两次
+      //      mma_block 的 (wm=wr, wn=wc) 与累加器映射完全一致），无线程间依赖。----
+      {
+        float acc[2][2][4];
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+        for (int i = 0; i < 2; ++i)
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+          for (int j = 0; j < 2; ++j)
 #pragma unroll
-          for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block<32, 16, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc, wr, wc, lane);
-      const int r0 = wr * 32, c0 = wc * 16;
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+        mma_block<32, 16, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc, wr, wc, lane);
+        const int r0 = wr * 32, c0 = wc * 16;
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+        for (int i = 0; i < 2; ++i)
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+          for (int j = 0; j < 2; ++j)
 #pragma unroll
-          for (int q = 0; q < 4; ++q) {
-            int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
-            int c = c0 + j * 8 + c2 + (q & 1);
-            int qi = m0 + r;
-            float dpv = acc[i][j][q] * dos_s[r] * vs_s[c];
-            float del = (qi < S) ? delta[((size_t)(b * S + qi)) * H + h] : 0.f;
-            Ss[r * PSS + c] = Ps[r * PSS + c] * (dpv - del);
-          }
-    }
+            for (int q = 0; q < 4; ++q) {
+              int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              int c = c0 + j * 8 + c2 + (q & 1);
+              int qi = m0 + r;
+              float dpv = acc[i][j][q] * dos_s[r] * vs_s[c];
+              float del = (qi < S) ? delta[((size_t)(b * S + qi)) * H + h] : 0.f;
+              Ss[r * PSS + c] = Ps[r * PSS + c] * (dpv - del);
+            }
+      }
+    }  // end else (mma path)
     __syncthreads();
 
     // ---- 构造 dV/dK/dQ 的 fp8 操作数（fold 归约维上的 rowwise scale）----
@@ -1361,9 +1512,9 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     // ---- O3：落盘预取的下一 tile 的 K/V（本轮 GEMM 已全部读完 smem），并更新 ks/vs ----
     if (nt + 1 < nt_end) {
       if (kPrefetch) {
-        kv_commit_pair<NPU, HD>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
+        kv_commit_pair<NPU, HD, WGMMA>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
       } else {
-        kv_load_pair<HD, BN>(k8, v8, (nt + 1) * BN, S, Hkv, hkv, b, tid, Ks, Vs, Kp, ASLD,
+        kv_load_pair<HD, BN, WGMMA>(k8, v8, (nt + 1) * BN, S, Hkv, hkv, b, tid, Ks, Vs, Kp, ASLD,
                              PSLD);
       }
       if (tid < BN) {
@@ -1507,8 +1658,9 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // =============================================================================
 // 模板 launcher：按 HD 选择实例并设置动态 smem 上限。
 // =============================================================================
-// O7：REGDQ 选择是否把 dQ 沿 nt 累加在寄存器里（见主 kernel 说明）。
-template <int HD, int BM, int BN, bool REGDQ>
+// O7：REGDQ 选择是否把 dQ 沿 nt 累加在寄存器里（见 kernels.cuh 主 kernel 说明）。
+// O9c-2：WGMMA=true 时 GEMM1/2 走 wgmma（Q/dO/K/V 存 SW128），smem 用 wgmma 布局。
+template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false>
 static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             const unsigned char* k8, const float* ks,
                             const unsigned char* v8, const float* vs,
@@ -1517,10 +1669,10 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             float* dk_acc, float* dv_acc, int S, int H, int Hkv,
                             float scale, int causal, int ksplit) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ>,
-                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                  Cfg::smem_bytes));
-  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ><<<mg, THREADS, Cfg::smem_bytes>>>(
+  constexpr int kSmem = WGMMA ? Cfg::smem_bytes_wgmma : Cfg::smem_bytes;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA><<<mg, THREADS, kSmem>>>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit);
 }
@@ -1574,11 +1726,13 @@ int main(int argc, char** argv) {
   int iters = 20;
   int ksplit = -1;  // -1 = 自动
   int lsewgm = 0;   // O9c：1 = LSE 走 wgmma（需 -DFA_WGMMA 构建），0 = O11 mma 版
+  int wgmma = 0;    // O9c-2：1 = 主 kernel GEMM1/2 走 wgmma（需 -DFA_WGMMA 构建）
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
     else if (a == "--lsewgm") lsewgm = 1;
+    else if (a == "--wgmma") wgmma = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--ksplit=", 0) == 0) ksplit = atoi(a.c_str() + 9);
@@ -1636,6 +1790,9 @@ int main(int argc, char** argv) {
   printf("FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32\n");
   printf("smem = %d bytes (%.1f KB); lse smem = %d bytes (%.1f KB)\n", smem_bytes,
          smem_bytes / 1024.0, lse_smem, lse_smem / 1024.0);
+  if (D == 128)
+    printf("main wgmma smem = %d bytes (%.1f KB)\n",
+           Fp8Cfg<128, 64, 32>::smem_bytes_wgmma, Fp8Cfg<128, 64, 32>::smem_bytes_wgmma / 1024.0);
 
   float *d_q_f, *d_k_f, *d_v_f, *d_do_f, *d_o_f;
   unsigned char *d_q8, *d_k8, *d_v8, *d_do8;
@@ -1709,6 +1866,7 @@ int main(int argc, char** argv) {
 
   auto run_preprocess = [&]() {
     if (D == 128) {
+      // O11：causal 走镜像配对 + cp.async 双缓冲（非 causal 各块工作量相同，走 O1 原版）。
       // O9c：`--lsewgm` 且以 `-DFA_WGMMA` 构建时，causal 走 wgmma.m64n64k32（SW128）。
       if (causal) {
 #ifdef FA_WGMMA
@@ -1732,14 +1890,33 @@ int main(int argc, char** argv) {
 
   auto run_main = [&]() {
     if (D == 128) {
-      if (use_regdq)
+      if (use_regdq) {
+#ifdef FA_WGMMA
+        if (wgmma) {
+          launch_bwd_main<128, 64, 32, true, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                   d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                   d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                   Hkv, scale, (int)causal, ksplit);
+          return;
+        }
+#endif
         launch_bwd_main<128, 64, 32, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
                                            d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
                                            d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
-      else
+      } else {
+#ifdef FA_WGMMA
+        if (wgmma) {
+          launch_bwd_main<128, 64, 32, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                    d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                    d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                    Hkv, scale, (int)causal, ksplit);
+          return;
+        }
+#endif
         launch_bwd_main<128, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
                                             d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
                                             d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      }
     } else
       launch_bwd_main<512, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
                                           d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
@@ -1802,6 +1979,133 @@ int main(int argc, char** argv) {
   ms_main /= iters;
   printf("[timing] quant %.4f ms | preprocess %.4f ms | main %.4f ms | convert %.4f ms\n",
          ms_quant, ms_pre, ms_main, ms - ms_quant - ms_pre - ms_main);
+
+#ifdef FA_WGMMA
+  // ---- O9c-2 A/B（D=128）：主 kernel GEMM1/2 的 mma.m16n8k32 vs wgmma.m64n32k32。----
+  //      同一 session 计时 + 逐元素对拍（证明只换计算后端、数学口径未变）。
+  if (D == 128) {
+    auto run_main_wg = [&](bool wg) {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      if (use_regdq) {
+        if (wg)
+          launch_bwd_main<128, 64, 32, true, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                   d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                   d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                   Hkv, scale, (int)causal, ksplit);
+        else
+          launch_bwd_main<128, 64, 32, true, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                    d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                    d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                    Hkv, scale, (int)causal, ksplit);
+      } else {
+        if (wg)
+          launch_bwd_main<128, 64, 32, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                    d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                    d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                    Hkv, scale, (int)causal, ksplit);
+        else
+          launch_bwd_main<128, 64, 32, false, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                     d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                     d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                     Hkv, scale, (int)causal, ksplit);
+      }
+    };
+    auto bench_main_wg = [&](bool wg, float* out) {
+      run_main_wg(wg);
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) run_main_wg(wg);
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float mmma = 0.f, mwgm = 0.f;
+    bench_main_wg(false, &mmma);
+    bench_main_wg(true, &mwgm);
+    std::vector<float> a_dq(nq), a_dk(nkv), a_dv(nkv), b_dq(nq), b_dk(nkv), b_dv(nkv);
+    run_main_wg(false);
+    CUDA_CHECK(cudaMemcpy(a_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    run_main_wg(true);
+    CUDA_CHECK(cudaMemcpy(b_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    auto maxd = [](const std::vector<float>& x, const std::vector<float>& y) {
+      double m = 0.0;
+      for (size_t i = 0; i < x.size(); ++i)
+        m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
+      return m;
+    };
+    printf("[O9c-2 A/B] main mma(regdq=%d) %.4f ms | wgmma(m64n32) %.4f ms (%.3fx) | "
+           "max_abs(wg-vs-mma) dq/dk/dv=%.3e/%.3e/%.3e\n",
+           (int)use_regdq, mmma, mwgm, mmma / mwgm, maxd(b_dq, a_dq), maxd(b_dk, a_dk),
+           maxd(b_dv, a_dv));
+    // 恢复最终输出为 CLI 选中的路径（上面 A/B 最后一次跑的是 wgmma）。
+    run_main_wg(wgmma != 0);
+  }
+#endif
+
+  // ---- O11 A/B（仅 causal, D=128）：LSE O1 原版 vs 镜像配对(单缓冲) vs 镜像配对+cp.async ----
+  if (causal && D == 128) {
+    auto bench_lse = [&](int which, float* out) {
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) {
+        if (which == 0)
+          launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, 1);
+        else if (which == 1)
+          launch_lse_bal<128, 0>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+        else
+          launch_lse_bal<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+      }
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float a = 0.f, b = 0.f, c = 0.f;
+    bench_lse(0, &a);
+    bench_lse(1, &b);
+    bench_lse(2, &c);
+    printf("[O11 A/B] lse O1 %.4f ms | bal(单缓冲) %.4f ms (%.3fx) | bal+cpasync %.4f ms "
+           "(%.3fx)\n",
+           a, b, a / b, c, a / c);
+#ifdef FA_WGMMA
+    // O9c A/B：wgmma（SW128 + m64n64k32）vs O11 mma 版（同 PIPE=1）。同时核对 LSE 数值。
+    auto bench_lse_wgm = [&](int which, float* ms_out) {
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) {
+        if (which == 3)
+          launch_lse_bal_wgmma<128, 0>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+        else
+          launch_lse_bal_wgmma<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+      }
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(ms_out, ev0, ev1));
+      *ms_out /= iters;
+    };
+    float w0 = 0.f, w1 = 0.f;
+    std::vector<float> lse_wgm((size_t)B * S * H), lse_ref((size_t)B * S * H);
+    bench_lse_wgm(3, &w0);
+    bench_lse_wgm(4, &w1);
+    // 与 O11 mma 版 LSE 对拍（应逐位相同：同数学、同 rowwise scale 顺序）。
+    launch_lse_bal<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+    CUDA_CHECK(cudaMemcpy(lse_ref.data(), d_lse, lse_ref.size() * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    launch_lse_bal_wgmma<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+    CUDA_CHECK(cudaMemcpy(lse_wgm.data(), d_lse, lse_wgm.size() * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    double le = 0.0;
+    for (size_t i = 0; i < lse_ref.size(); ++i)
+      le = std::max(le, (double)std::fabs((double)lse_wgm[i] - (double)lse_ref[i]));
+    printf("[O9c A/B] lse mma(bal+cpasync) %.4f ms | wgmma(单缓冲) %.4f ms | wgmma(双缓冲) "
+           "%.4f ms (%.3fx) | LSE max_abs(vs mma)=%.3e\n",
+           c, w0, w1, c / w1, le);
+#endif
+  }
 
   std::vector<float> mdq(nq), mdk(nkv), mdv(nkv);
   CUDA_CHECK(cudaMemcpy(mdq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));

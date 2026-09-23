@@ -110,7 +110,8 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // 模板 launcher：按 HD 选择实例并设置动态 smem 上限。
 // =============================================================================
 // O7：REGDQ 选择是否把 dQ 沿 nt 累加在寄存器里（见 kernels.cuh 主 kernel 说明）。
-template <int HD, int BM, int BN, bool REGDQ>
+// O9c-2：WGMMA=true 时 GEMM1/2 走 wgmma（Q/dO/K/V 存 SW128），smem 用 wgmma 布局。
+template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false>
 static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             const unsigned char* k8, const float* ks,
                             const unsigned char* v8, const float* vs,
@@ -119,10 +120,10 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             float* dk_acc, float* dv_acc, int S, int H, int Hkv,
                             float scale, int causal, int ksplit) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ>,
-                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                  Cfg::smem_bytes));
-  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ><<<mg, THREADS, Cfg::smem_bytes>>>(
+  constexpr int kSmem = WGMMA ? Cfg::smem_bytes_wgmma : Cfg::smem_bytes;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA><<<mg, THREADS, kSmem>>>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit);
 }
@@ -176,11 +177,13 @@ int main(int argc, char** argv) {
   int iters = 20;
   int ksplit = -1;  // -1 = 自动
   int lsewgm = 0;   // O9c：1 = LSE 走 wgmma（需 -DFA_WGMMA 构建），0 = O11 mma 版
+  int wgmma = 0;    // O9c-2：1 = 主 kernel GEMM1/2 走 wgmma（需 -DFA_WGMMA 构建）
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
     else if (a == "--lsewgm") lsewgm = 1;
+    else if (a == "--wgmma") wgmma = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--ksplit=", 0) == 0) ksplit = atoi(a.c_str() + 9);
@@ -238,6 +241,9 @@ int main(int argc, char** argv) {
   printf("FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32\n");
   printf("smem = %d bytes (%.1f KB); lse smem = %d bytes (%.1f KB)\n", smem_bytes,
          smem_bytes / 1024.0, lse_smem, lse_smem / 1024.0);
+  if (D == 128)
+    printf("main wgmma smem = %d bytes (%.1f KB)\n",
+           Fp8Cfg<128, 64, 32>::smem_bytes_wgmma, Fp8Cfg<128, 64, 32>::smem_bytes_wgmma / 1024.0);
 
   float *d_q_f, *d_k_f, *d_v_f, *d_do_f, *d_o_f;
   unsigned char *d_q8, *d_k8, *d_v8, *d_do8;
@@ -335,14 +341,33 @@ int main(int argc, char** argv) {
 
   auto run_main = [&]() {
     if (D == 128) {
-      if (use_regdq)
+      if (use_regdq) {
+#ifdef FA_WGMMA
+        if (wgmma) {
+          launch_bwd_main<128, 64, 32, true, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                   d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                   d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                   Hkv, scale, (int)causal, ksplit);
+          return;
+        }
+#endif
         launch_bwd_main<128, 64, 32, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
                                            d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
                                            d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
-      else
+      } else {
+#ifdef FA_WGMMA
+        if (wgmma) {
+          launch_bwd_main<128, 64, 32, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                    d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                    d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                    Hkv, scale, (int)causal, ksplit);
+          return;
+        }
+#endif
         launch_bwd_main<128, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
                                             d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
                                             d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      }
     } else
       launch_bwd_main<512, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
                                           d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
@@ -405,6 +430,74 @@ int main(int argc, char** argv) {
   ms_main /= iters;
   printf("[timing] quant %.4f ms | preprocess %.4f ms | main %.4f ms | convert %.4f ms\n",
          ms_quant, ms_pre, ms_main, ms - ms_quant - ms_pre - ms_main);
+
+#ifdef FA_WGMMA
+  // ---- O9c-2 A/B（D=128）：主 kernel GEMM1/2 的 mma.m16n8k32 vs wgmma.m64n32k32。----
+  //      同一 session 计时 + 逐元素对拍（证明只换计算后端、数学口径未变）。
+  if (D == 128) {
+    auto run_main_wg = [&](bool wg) {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      if (use_regdq) {
+        if (wg)
+          launch_bwd_main<128, 64, 32, true, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                   d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                   d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                   Hkv, scale, (int)causal, ksplit);
+        else
+          launch_bwd_main<128, 64, 32, true, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                    d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                    d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                    Hkv, scale, (int)causal, ksplit);
+      } else {
+        if (wg)
+          launch_bwd_main<128, 64, 32, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                    d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                    d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                    Hkv, scale, (int)causal, ksplit);
+        else
+          launch_bwd_main<128, 64, 32, false, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                     d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                     d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                     Hkv, scale, (int)causal, ksplit);
+      }
+    };
+    auto bench_main_wg = [&](bool wg, float* out) {
+      run_main_wg(wg);
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) run_main_wg(wg);
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float mmma = 0.f, mwgm = 0.f;
+    bench_main_wg(false, &mmma);
+    bench_main_wg(true, &mwgm);
+    std::vector<float> a_dq(nq), a_dk(nkv), a_dv(nkv), b_dq(nq), b_dk(nkv), b_dv(nkv);
+    run_main_wg(false);
+    CUDA_CHECK(cudaMemcpy(a_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    run_main_wg(true);
+    CUDA_CHECK(cudaMemcpy(b_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    auto maxd = [](const std::vector<float>& x, const std::vector<float>& y) {
+      double m = 0.0;
+      for (size_t i = 0; i < x.size(); ++i)
+        m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
+      return m;
+    };
+    printf("[O9c-2 A/B] main mma(regdq=%d) %.4f ms | wgmma(m64n32) %.4f ms (%.3fx) | "
+           "max_abs(wg-vs-mma) dq/dk/dv=%.3e/%.3e/%.3e\n",
+           (int)use_regdq, mmma, mwgm, mmma / mwgm, maxd(b_dq, a_dq), maxd(b_dk, a_dk),
+           maxd(b_dv, a_dv));
+    // 恢复最终输出为 CLI 选中的路径（上面 A/B 最后一次跑的是 wgmma）。
+    run_main_wg(wgmma != 0);
+  }
+#endif
 
   // ---- O11 A/B（仅 causal, D=128）：LSE O1 原版 vs 镜像配对(单缓冲) vs 镜像配对+cp.async ----
   if (causal && D == 128) {

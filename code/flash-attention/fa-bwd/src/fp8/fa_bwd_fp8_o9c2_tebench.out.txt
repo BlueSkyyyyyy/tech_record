@@ -1,0 +1,7 @@
+  _warn_once(
+=== bench CUPTI device time (dtype=fp8) ===
+[b1_s512_h16_d128_causal_fp8] te=0.1009ms/42.58TF
+[b1_s1024_h16_d128_causal_fp8] te=0.1483ms/115.82TF
+[b4_s2048_h16_d128_causal_fp8] te=0.9841ms/279.33TF
+[b2_s2048_h16_d128_full_fp8] te=0.5810ms/236.57TF
+[b1_s4096_h16_d128_causal_fp8] te=0.5893ms/466.46TF
