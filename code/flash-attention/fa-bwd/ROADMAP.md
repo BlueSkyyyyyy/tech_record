@@ -1138,6 +1138,39 @@
     `..._mma_onefile_o9b2_{s512,s4096}.out.txt`、`..._o9b2_ncu_{s512,s4096}.out.txt`、
     `src/bf16/fa_bwd_bf16_o9b2_fa3_te_baseline.out.txt`；文档 `docs/01b` §6r。
 
+- 2026-09-23（第四十五轮）：**O7e 完成（fp8 main：fold 4B 向量化写 + REGDQ 下关 O3 预取；
+  重定位瓶颈：L1/TEX 才是墙、O7b 不再是头号杠杆）**。
+  - **先重新定位瓶颈**（本轮最大价值）：用 `MemoryWorkloadAnalysis_Tables` 拆 O7 后的 fp8 main，
+    发现 **L1/TEX 71.07% 才是第一墙**（L2 已被 O4c/O7 从 81%/69% 压到 **43.74%**、Compute 39.1%、
+    DRAM 2.6%）。两项最突出：① **register spill 占 L1TEX sector 12.09%**（`REGDQ` 的
+    `dqacc[2][8][4]`=64 fp32 + O3 寄存器预取 16 uint32 抢 168-reg/3-CTA 预算，ptxas 强制 spill）；
+    ② **shared store bank conflict 3.5-way / 占 store wavefront 69.8%**（fold 段 `Ap/dS3/dS2`
+    全是逐 1 字节 `st.shared.u8`）。⇒ **O7b（去 dK/dV 跨 CTA red）针对的 L2 墙已不是头号杠杆**，
+    真正的杠杆是 L1/TEX 的数据通路（`ldmatrix`/转置副本/smem 访存）⇒ 下一步转 **fp8 `wgmma`（O9c）**。
+  - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+    ① fold 里每线程的 16 个元素在 smem 中连续（`Ap/dS3`：`m=sub4*16+t`；`dS2[m][j]`：
+    `j=sub2*16+t`），**16 次 1B 写折成 4 次 4B `st.shared.u32`**（`QTS/DSS2` 均 4 对齐），
+    store 指令 ÷4、**store 冲突 68.6M→36.3M（−47%）**；② 新增 `kPrefetch = use_prefetch && !kRegDq`，
+    **`REGDQ` 生效时关 O3 预取**（退回 O4b 的 4B 同步读，让出 16 regs）；小 S 仍保留预取。
+  - **数值与 O7/O4b/O11 逐位相同**（S512 2.426/2.975/3.735e-1；S1024H32 2.400/4.195/3.536e-1；
+    S4096 2.635/2.643/3.216e-1；MLA S1024H2 2.232/3.337/3.602e-1），单/两文件逐指标一致。
+  - **性能（event，同 session A/B）**：main **S=4096 2.6135→2.5215ms（1.036×）**、端到端
+    3.3687→**3.2661ms（42.1 TF）**；S=1024H32 0.4604→0.4414（~1.04×）、S=512/MLA 持平
+    （走原路）。main-only S=4096 54.5 TF（峰值 2.76%）。
+  - **ncu（main, S=4096）**：Duration 2.66→**2.57ms**、**L1/TEX 71.07→66.06%**、spill 占 L1TEX
+    sector 12.09→**5.74%**、shared store 冲突 **68.6→36.3M**；L2 43.74→45.28%、Compute 39.1→40.9%、
+    168 regs / 70.66KB / 3 CTA/SM 不变。**墙仍是 L1/TEX（`ldmatrix`+smem）**。
+  - **对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py`，FA2/FA3/TE 三列）：MHA S=4096
+    FA3 fp16 0.3245ms/847TF、TE fp16 0.4441/619、FA2 0.7286/377；bf16 FA3 0.3201/859；
+    TE FP8 0.5899ms/466TF ⇒ ours fp8 main 2.5215ms = TE FP8 整条反向的 ~4.3×
+    （S=512 main 0.072ms 已快过 TE FP8 0.101ms）。
+  - 顺带修 `scripts/sync_onefile_device.py` 的单文件 device 区**结束边界**（fp8 的 host 头
+    `#include <algorithm>` 在 `struct NpyF32` 之前，旧脚本会误覆盖导致单文件编译失败）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_o7e_sweep.out.txt`（单/两文件 ×4 shape 计时+对拍）、
+    `src/fp8/fa_bwd_fp8_main_o7e_ncu_tables_s4096.out.txt`、
+    `src/fp8/fa_bwd_fp8_main_o7b_base_ncu_full_s4096.out.txt`（O7 基线）、
+    `src/fa_bwd_o7e_fa3_te_baseline.out.txt`；文档 `docs/03` §20、`docs/04` §2.3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -1225,8 +1258,15 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
         而是 **L2 的 dK/dV 跨 CTA 原子（~70%）+ 99KB smem 锁死的 2 CTA/SM**。详见 `docs/01` §14h。
          **bf16 版 O9b-2 已完成（第四十四轮）**：把 fp16 O9b-2 逐字 dtype 参数化到 bf16，数值与
          O5b~O13 逐位相同、main S4096 0.979×/S512 0.960×、ncu 与 fp16 逐项一致（详见 `docs/01b` §6r）。
-         **O9b-2b（下一步）**：在此通路上加 **TMA 化 Q/K/V/dO** + **P/dS 双缓冲跨-tile 流水**，
-         并把 smem 压到 ≤75.7KB 冲 3 CTA/SM；**O7b（去 dK/dV 原子）回报更高，优先级第一**。
+          **O9b-2b（下一步）**：在此通路上加 **TMA 化 Q/K/V/dO** + **P/dS 双缓冲跨-tile 流水**，
+          并把 smem 压到 ≤75.7KB 冲 3 CTA/SM。
+          > **O7e（第四十五轮）修正了 fp8 侧的优先级**：O7b 针对的 L2 墙已不是头号杠杆
+          > （见下），**fp8 应先做 `wgmma`（O9c）**；fp16/bf16 的 O9b-2b 仍按原计划。
+- [ ] **O9c（fp8 main 的 Hopper wgmma）**：把 fp8 `mma.m16n8k32` 换 `wgmma.m64nNk32`
+      （SS 直读 smem 描述符，消 `ldmatrix`/配对副本、压 smem 冲更高 occupancy）。
+      依据：O7e 定位 fp8 main 第一墙 = **L1/TEX 66–71%（`ldmatrix`+smem）**，只有 wgmma 能同时
+      消 L1 访存与降 smem。可复用 fp16/bf16 O9a/O9b 的 SW128 数据通路（fp8 SW128 与 bf16 逐字节同构，
+      仅 asm 尾部操作数 `p, scaleA, scaleB` 不同，见 `agent_skills/kernel-opt.md`）。
 - [ ] 目标：fp16/bf16 main ≥ 0.5× FA2 → 逐步逼近 FA2/TE。
 
 
@@ -1292,9 +1332,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 >    **bf16 版 O9b 已完成（第四十二轮）**：逐字 dtype 参数化，main S512 1.089× / S4096 1.021×、
 >    数值逐位相同、ncu 逐项一致（`docs/01b` §6q）。构建 wgmma 需 `-gencode=arch=compute_90a,code=sm_90a`（+ `-DFA_WGMMA`）
 >    （`ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh ...`）。
->    **下一步**：**O7b 去 dK/dV 原子（第一优先，唯一直接打掉 L2 墙的杠杆）**；O9b-2b TMA + P/dS 双缓冲
->    跨-tile 流水 + 压 smem 冲 3 CTA/SM。**bf16 版 O9b-2 已完成（第四十四轮）**：逐字 dtype 参数化，
->    数值逐位相同、main S4096 0.979×/S512 0.960×、ncu 与 fp16 逐项一致（`docs/01b` §6r）。详见 `docs/01` §14g/§14h。
+>    **下一步**：**O9b-2b**（fp16/bf16）TMA + P/dS 双缓冲跨-tile 流水 + 压 smem 冲 3 CTA/SM；
+>    **fp8 侧转 O9c（`wgmma`）**——O7e（第四十五轮）已用 ncu 证明 fp8 main 第一墙是
+>    **L1/TEX 66–71%（`ldmatrix`+smem）**、L2 只剩 43.7%，**O7b（去 dK/dV red）不再是头号杠杆**，
+>    应把 O9b 的 wgmma 数据通路扩到 fp8（见任务清单 O9c）。**bf16 版 O9b-2 已完成（第四十四轮）**：
+>    逐字 dtype 参数化，数值逐位相同、main S4096 0.979×/S512 0.960×、ncu 与 fp16 逐项一致（`docs/01b` §6r）。详见 `docs/01` §14g/§14h。
 >
 > **旁支已完成（第三十六轮 O5c）**：把 fp16/bf16 的 **MLA（head_dim=512）反向从标量升级为张量核**
 > （`HD` 模板 128/512、GEMM3/4/5 N-tile 循环、dQ 全局累加），main 5.2–5.8×（fp16）/3.7–4.1×（bf16），
@@ -1447,8 +1489,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
         端到端 4.6162→**4.3410ms**；其余 shape 走原路（±1% 噪声）。**新墙 = L1/TEX 64.4% +
         short 1.89 + 残余 L2 43.8%**。**剩余 red（dK/dV 跨 mta/hkv 竞争）转 backlog**。详见
         `docs/03` §18、`docs/04` §2.3/§3。
-- [ ] （backlog）O7b：dK/dV 的跨 CTA 归约（分块 `*_accum` + convert，或按 KV 列块常驻 / Q 块累加），
-      消剩余 108.5M red 并得到确定性反向。
+- [x] **O7e（第四十五轮）** fp8 main：fold 4B 向量化写 + `REGDQ` 下关 O3 预取。
+      重定位 fp8 第一墙为 **L1/TEX**（见任务清单 O9c），register spill 与 store 冲突各压掉约一半，
+      main S=4096 **1.036×**、数值逐位不变。详见 `docs/03` §20、`docs/04` §2.3。
+- [ ] （backlog，**已降优先级**）O7b：dK/dV 的跨 CTA 归约（分块 `*_accum` + convert，或按 KV
+      列块常驻 / Q 块累加），消剩余 108.5M red 并得到确定性反向。**O7e 已证明 O7b 针对的 L2 墙
+      只剩 43.7% < L1/TEX 66%，回报低于 fp8 `wgmma`（O9c）**，故排到 O9c 之后。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog

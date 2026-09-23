@@ -23,7 +23,12 @@ def main():
     dev = cuh[ci:ce]
 
     oi = next(i for i, l in enumerate(one) if l.startswith(marker))
-    oe = next(i for i, l in enumerate(one) if l.startswith('struct NpyF32 {'))
+    # device 区结束于「host 段」开始处。不同文件的 host 段起始行不同（fp16/bf16 是
+    # `struct NpyF32 {`，fp8 在它之前还有一段 `#include <algorithm>` 的 host 头），
+    # 取 oi 之后最先出现的那个作为边界，避免把 host 头一并覆盖掉（历史踩坑）。
+    ends = [i for i, l in enumerate(one)
+            if i > oi and (l.startswith('struct NpyF32 {') or l.startswith('#include <algorithm>'))]
+    oe = min(ends)
     out = one[:oi] + dev + one[oe:]
     open(one_path, 'w').writelines(out)
     print(f"synced {len(dev)} device lines into {one_path}")

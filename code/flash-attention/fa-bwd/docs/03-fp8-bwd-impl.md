@@ -1523,3 +1523,102 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
 `src/fp8/fa_bwd_fp8_main_o11_ncu_lsebal_s4096.out.txt`、
 `src/fp8/fa_bwd_fp8_mma_onefile_o11_s4096.out.txt`、
 `src/fp16/fa_bwd_fp16_mma_main_o11_ab_fastexp.out.txt`、`src/fa_bwd_o11_fa3_te_baseline.out.txt`。
+
+---
+
+## 20. O7e：fold 写回向量化 + REGDQ 下关 O3 预取（消 shared store 冲突与寄存器 spill）
+
+### 20.1 动机（先重新定位瓶颈）
+
+O7 之后 fp8 main 的 ncu 显示 **L1/TEX 71.07%** 才是第一墙（L2 已从 O4c/O7 的 81%/69%
+降到 **43.74%**，Compute 39.1%、DRAM 2.6%）。也就是说 **ROADMAP/docs 里「O7b 去 dK/dV 原子」
+针对的 L2 墙已经被 O4c/O7 基本打掉，不再是头号杠杆**。用 `MemoryWorkloadAnalysis_Tables`
+把 L1/TEX 拆开，两项最突出：
+
+- **register spill**：`REGDQ`（O7）把 dQ 沿 nt 累加在寄存器，`dqacc[2][8][4]`（64 fp32）+
+  O3 的寄存器预取（`pk0/pk1/pv0/pv1`，16 个 uint32）把 168-reg/3-CTA 预算占满，
+  ptxas 强制 spill。局部内存占 **L1TEX sector 的 12.09%**、Est. Speedup 27.6%。
+- **shared store bank conflict**：3.5-way、占 store wavefront 的 **69.8%**。其中 fold 段
+  （`Ap/dS3/dS2`）是逐 **1 字节** 的 `st.shared.u8`，指令数与冲突都最多。
+
+### 20.2 改动（单/两文件 device 逐字一致）
+
+1. **fold 写回向量化**：fold 里每个线程负责的 16 个元素在 smem 里是**连续的**
+   （`Ap/dS3`：`m = sub4*16+t`，t 递增；`dS2[m][j]`：`j = sub2*16+t`，t 递增），
+   把 16 次 1B 写折成 **4 次 4B `st.shared.u32`**（`QTS=BM+16`、`DSS2=BN+16` 都是 4 的倍数，
+   `sub4*16+t4*4`、`sub2*16+t4*4` 也 4 对齐）。数值逐位不变，store 指令数 ÷4。
+   实测 shared **store bank conflict 68.6M→36.3M（−47%）**。
+2. **`REGDQ` 生效时关掉 O3 寄存器预取**：新增 `kPrefetch = Cfg::use_prefetch && !kRegDq`，
+   在 `REGDQ`（仅 `HD=128` 且每 CTA nt tile 足够多时）为真时退回 O4b 的 4B 向量化同步读，
+   把 16 个预取寄存器让给 `dqacc`。小 S（`use_regdq=false`，如 S=512/S=1024）仍保留预取。
+   实测 **spill 占 L1TEX sector 12.09%→5.74%**、L1/TEX **71.07%→66.06%**、
+   Duration **2.66→2.57ms**。
+
+> 顺带修 `scripts/sync_onefile_device.py` 的单文件 device 区**结束边界**：fp8 的 host 段在
+> `struct NpyF32 {` 之前还有一段 `#include <algorithm>` 的 host 头，旧脚本会把 host 头一起
+> 覆盖导致单文件编译失败；现取 `struct NpyF32 {` 与 `#include <algorithm>` 的**较早者**为界。
+
+### 20.3 数值（ours-vs-ref，max_abs，causal，单/两文件逐位一致）
+
+| case | dq | dk | dv |
+|---|---|---|---|
+| S=512 H16 | 2.426e-1 | 2.975e-1 | 3.735e-1 |
+| S=1024 H32 | 2.400e-1 | 4.195e-1 | 3.536e-1 |
+| S=4096 H16 | 2.635e-1 | 2.643e-1 | 3.216e-1 |
+| MLA S=1024 H2 D=512 | 2.232e-1 | 3.337e-1 | 3.602e-1 |
+
+与 O7/O4b/O11 **逐位相同**（只改搬运与寄存器分配，不改数学口径）。
+
+### 20.4 性能（CUDA event；同 session A/B）
+
+| shape | main 基线（git） | **O7e** | 端到端 total（O7e） |
+|---|---|---|---|
+| S=512 H16 | 0.0740 ms | 0.0720 ms（持平） | 0.180 ms |
+| S=1024 H32 | 0.4604 ms | 0.4414 ms（~4%） | 0.710 ms |
+| **S=4096 H16** | **2.6135 ms** | **2.5215 ms（1.036×）** | **3.266 ms（42.1 TF）** |
+| MLA S=1024 H2 | 0.3277 ms | 0.3243 ms（持平） | 0.539 ms |
+
+收益集中在 **`REGDQ` 生效的大 S**（S=4096）：fold 向量化 + 关预取合计 **main 1.036×**、
+端到端 3.37→3.27ms。小 S 不受影响（走原路）。
+
+### 20.5 ncu（main，S=4096，`--set full`）
+
+| 指标 | O7 基线 | **O7e** |
+|---|---|---|
+| Duration | 2.66 ms | **2.57 ms** |
+| **L1/TEX Cache Throughput** | 71.07% | **66.06%** |
+| L2 Cache Throughput | 43.74% | 45.28% |
+| Compute (SM) | 39.11% | 40.86% |
+| local memory 占 L1TEX sector | 12.09% | **5.74%** |
+| shared store bank conflicts | 68.6M | **36.3M** |
+| regs / smem / occ | 168 / 70.66KB / 18.1% | 168 / 70.66KB / **18.1%**（3 CTA/SM） |
+
+**结论**：墙仍是 **L1/TEX（ldmatrix + smem）**，register spill 与 store 冲突各被压掉约一半。
+**O7b（去 dK/dV 跨 CTA red）已不是头号杠杆**（L2 43.7% < L1/TEX 66%），下一步应转向
+**fp8 main 的 Hopper `wgmma` 数据通路（O9c）**——只有 wgmma 的 SS 直读 smem 能同时消掉
+`ldmatrix`/转置副本并压 smem（对齐 fp16/bf16 的 O9a/O9b）。
+
+### 20.6 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py`，FA2/FA3/TE 三列）
+
+MHA S=4096：FA3 fp16 **0.3245ms/847TF**、TE fp16 0.4441/619、FA2 0.7286/377；
+bf16 FA3 0.3201ms/859TF；TE FP8 纯反向（`fa_bwd_bench.py bench --dtype fp8`）
+**0.5899ms/466TF**。ours fp8 main 2.52ms ⇒ 约 TE FP8 整条反向的 **4.3×**（S=512 main 0.072ms
+已快过 TE FP8 0.101ms）。
+
+### 20.7 复现
+
+```bash
+cd code/flash-attention/fa-bwd
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=30 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=30 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:fa_bwd_fp8_mma_kernel -c 1 -- \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o7e_sweep.out.txt`（单/两文件 × 4 shape 的计时+对拍）、
+`src/fp8/fa_bwd_fp8_main_o7e_ncu_tables_s4096.out.txt`（ncu）、
+`src/fp8/fa_bwd_fp8_main_o7b_base_ncu_full_s4096.out.txt`（O7 基线 ncu）、
+`src/fa_bwd_o7e_fa3_te_baseline.out.txt`（FA2/FA3/TE fp16/bf16 纯反向）。
