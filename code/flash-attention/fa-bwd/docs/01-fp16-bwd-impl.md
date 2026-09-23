@@ -1313,15 +1313,107 @@ bf16 同构（`src/bf16/..._o13_*`）。
 
 ---
 
+## 14g. O9b：主 kernel GEMM1/GEMM2 上 Hopper `wgmma`（SW128 + `ldmatrix` 桥接，fp16）
+
+### 14g.1 动机
+
+O13 之后 fp16 main 的墙是 **`wait`（`mma.m16n8k16` 的依赖）+ L2（dK/dV 跨 CTA 原子）+ 2 CTA/SM**。
+O9a 已建立 Hopper `wgmma.m64n64k16 + SW128` 数据通路并在 LSE 上验证，但 LSE 是 epilogue bound。
+O9b 把 wgmma 推到主 kernel 的 GEMM1/2（`S=QKᵀ`、`dP=dO·Vᵀ`，A/B 都 K-major、可直接 SS），
+这是主 kernel 两个最大、最热的 GEMM。
+
+### 14g.2 冒烟：`fa_bwd_fp16_wgmma_main_smoke.cu`（逐位 PASS）
+
+难点在于 GEMM3/4/5 的 B（dO/Q/K）在主 kernel 里是**转置读**，与 wgmma 的 K-major 布局冲突。
+冒烟把三件事拼在一起、与 CPU fp32 参考逐位比对（整数输入，`max_abs=0.000e+00`）：
+
+1. `wgmma.m64n64k16` 的 `S=Q·Kᵀ`（Q/K 存 SW128 K-major）；
+2. `dV=Pᵀ·dO`：A=P（`ldmatrix.x4.trans`，ATRANS）＋ B=dO 从 **SW128 tile** 转置读；
+3. `dQ=P·K`：A=P（普通 `ldmatrix.x4`）＋ B=K 从 **SW128 tile** 转置读。
+
+关键结论：**`ldmatrix` 能从 SW128 tile 直接读「转置」数据**——SW128 只在 **16B 粒度**做
+`c' = c ^ r` 置换，每个 16B chunk（8 个 fp16）完好，`ldmatrix` 每个 lane 只需一个 16B 地址；
+用 `sw128_off(row=token, k=hd, HD)` 算出地址喂 `ldmatrix.x2.trans`，与行主序 `[K][N]` 转置读
+**逐位一致**。于是 Q/K/V/dO 只需要一份 SW128 布局，GEMM1/2 给 wgmma、GEMM3/4/5 给 mma。
+
+### 14g.3 实现（单/两文件 device 代码逐字一致，`diff` 核对 `WGMMA DEVICE BLOCK IDENTICAL`）
+
+新增 `fa_bwd_fp16_wgmma_kernel<HD>`（仅 HD=128 / BM=BN=64 / fp16），由 `#ifdef FA_WGMMA` 包裹
+（默认 `sm_90` 构建不编译、行为不变；wgmma 构建需 `-gencode=arch=compute_90a,code=sm_90a`）：
+
+- **smem**：Q/dO/K/V 全部 **SW128 K-major**（各 16KB；K 双缓冲、V 单缓冲后段预取），P/dS 仍
+  `[BM][BN]` 行主序 +8 行距（GEMM3/4 用 ATRANS）。总 ≈ **101KB / 2 CTA/SM**（与 O13 的
+  `(64,64,2)` 同 occupancy）。SW128 描述符要求 tile 1024B 对齐 ⇒ 手动对齐动态 smem 基址
+  （与 O9a 的 LSE wgmma 同做法）。
+- **GEMM1/2**：`wgmma_mn64_issue` 把两组异步 mma 一起发出（8 步 k16 各一条），最后统一
+  `wgmma.wait_group 0` ⇒ **两条 wgmma 重叠**（相比每次内部 wait 的初版，S512 A/B 1.043×→1.09×）。
+- **GEMM3/4/5**：仍 `mma.m16n8k16`，但 B 用新 helper `mma_block_swb` 从 SW128 tile
+  `ldmatrix.x2.trans` 读；A（P/dS）用 `ldmatrix.x4` / `x4.trans`（O6b）。
+- **epilogue**：wgmma m64n64 的累加器布局与 `mma.m16n8` 同构（`d[j*4+q]` ↔ 行 `wid*16+g+(q≥2?8:0)`、
+  列 `j*8+2*(lane%4)+(q&1)`），softmax 的 `p=exp(scale·S−LSE)`、`dS=P∘(dP−D)` 直接沿用；
+  LSE/D 仍是 O7c 的预装寄存器版。
+- host 加 `--wgmma=0/1`，自动档 `sel=(BM=64,BN=64)` 且 D=128 时走 wgmma，否则回退原 mma 路径
+  （GQA 的 `BN=32` 自动回退，回归不变）。
+
+### 14g.4 数值（与 O13 的 mma 路径**逐位相同**）
+
+| shape | dq / dk / dv max_abs（ours vs ref） | FA vs ref | TE vs ref |
+|---|---|---|---|
+| MHA S=512 | 1.671 / 1.771 / 1.899e-3 | 1.679 / 1.684 / 1.899e-3 | 1.716 / 2.287 / 1.899e-3 |
+| MHA S=4096 | 1.883 / 1.734 / 1.966e-3 | 1.883 / 1.734 / 1.966e-3 | 1.883 / 1.858 / 1.966e-3 |
+| GQA q32/kv4 S=1024（回退 mma） | 2.134 / 3.305 / 3.850e-3 | 1.727 / 3.321 / 5.107e-3 | 2.075 / 3.175 / 5.107e-3 |
+
+与 O5~O13 记录**逐位一致**：只换数据通路（SW128 + wgmma），不改数学口径。
+
+### 14g.5 性能（同 session A/B，CUDA event，main-only，ms）
+
+| shape | mma `(64,64,2)` | **wgmma** | 加速 |
+|---|---|---|---|
+| MHA S=4096 | 1.5103 | **1.4435** | **1.046×** |
+| MHA S=512 | 0.0570 | **0.0522** | **1.092×** |
+
+端到端（两文件，`--wgmma=1`）：S=512 total 0.1091ms、main 0.0527ms；S=4096 total **1.8822ms
+（真反向 FLOPs 口径 ≈146 TF）**、main 1.4477ms。同 session 纯反向 FA3 S=4096 **0.3255ms/844TF**、
+TE 0.4449/618 ⇒ ours total **5.8×** FA3（O13 6.03×）、真反向 TF 约 FA3 的 **17%**。
+
+### 14g.6 ncu（main，S=4096，wgmma，`--launch-count 1`）
+
+| 指标 | O13 mma `(64,64,2)` | O9b wgmma |
+|---|---|---|
+| Duration | 1.54 ms | **1.43 ms** |
+| L1/TEX | 46.6% | 55.1% |
+| **L2** | 73.7% | **74.4%（仍为墙）** |
+| Compute | 22.5% | 26.5% |
+| DRAM | 4.0% | 4.6% |
+| regs / smem | 250 / 105.5KB | 242 / **101.4KB** |
+| CTA/SM（occ） | 2（11.85%） | 2（**11.88%**） |
+| stall | `wait 1.94 + long 1.45 + short 0.46` | **`wait 1.50 + long 1.25 + short 0.56`** |
+
+**结论**：wgmma 把 GEMM1/2 的 `wait` 与 ldmatrix 打掉（`wait` 1.94→1.50），但 **GEMM3/4/5
+仍是 mma、dK/dV 仍是跨 CTA 原子**，L2 74% 依旧封顶、occupancy 仍被 101KB smem 锁在 2 CTA/SM。
+故收益是**真实但有限**（main 4.6–9.2%）。要再进一步必须 **O9b-2**：把 GEMM3/4/5 也上 wgmma
+（A=P/dS 得进 smem/SW128；dKV 转置 B 按 FA3 `dKV_swapAB` 处理），并 **TMA 化 K/V**、双缓冲
+P/dS 让 tile nt+1 的 GEMM1/2 与 tile nt 的 GEMM3/4/5 重叠；以及 O7b 的 dK/dV 去原子。
+
+### 14g.7 原始输出
+
+`src/fp16/fa_bwd_fp16_wgmma_main_smoke.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o9b_{s512,s4096}.out.txt`（两文件 wgmma）、
+`src/fp16/fa_bwd_fp16_mma_onefile_o9b_{s512,s4096}.out.txt`（单文件 + `[O9b A/B]`）、
+`src/fp16/fa_bwd_fp16_mma_main_o9b_ncu_s4096.out.txt`、`src/fa_bwd_o9b_fa3_te_baseline.out.txt`。
+bf16 的 O9b 留作下一步（本版只做 fp16）。
+
+---
+
 ## 15. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
 O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）、O11（§14d）、
-**O9a（§14e，LSE 上 wgmma）、O13（§14f，auto tile 重标定）** 完成。O7c 已把「减 red 事务数」
-这条杠杆**证伪**（float4 更慢），O10 又把 Q/dO 的标量载入与 dQ 写回向量化（`long_scoreboard`
-压下、指令数 −2.5%），O13 修正了 O6c 的过时 auto tile（S=512 main 1.26×、端到端 1.12×），
-墙进一步收敛到 **`wait`（mma 依赖）+ L2 + 2 CTA/SM**。O9a 建立了 Hopper `wgmma + SW128`
-数据通路并先在 LSE 上验证（L1/TEX 37.6%→18.1%、Duration −6%、数值逐位相同），但 LSE 是
-epilogue/发射 bound，收益有限 ⇒ **下一步 O9b**：把 wgmma 推到主 kernel 的 5 个 GEMM
-（那里才是 `wait`+L2 双墙）。另：MLA 降 smem 冲 2 CTA/SM / split-KV 仍在列。
-**O7c(bf16)、MLA 张量核(bf16)、O10(bf16)、O9a(bf16) 见 `01b` §6k/§6l/§6m/§6o；O13(bf16) 见 §6p。**
+**O9a（§14e，LSE 上 wgmma）、O13（§14f，auto tile 重标定）、O9b（§14g，主 kernel GEMM1/2 wgmma）**
+完成。O7c 已把「减 red 事务数」这条杠杆**证伪**（float4 更慢），O10 又把 Q/dO 的标量载入与 dQ 写回
+向量化（`long_scoreboard` 压下、指令数 −2.5%），O13 修正了 O6c 的过时 auto tile（S=512 main 1.26×、
+端到端 1.12×），O9b 把主 kernel 的 GEMM1/2 换成 Hopper `wgmma`（SW128 + `ldmatrix` 桥接，
+main S512 1.09×/S4096 1.05×，数值逐位不变）。墙进一步收敛到 **`wait`（GEMM3/4/5 的 mma）+ L2
+（dK/dV 原子）+ 2 CTA/SM**。**下一步 O9b-2**：GEMM3/4/5 也上 wgmma（dKV 转置 B 按 FA3 `dKV_swapAB`）
+＋ TMA 化 K/V ＋ 双缓冲 P/dS 做跨-tile 流水；bf16 版的 O9b 也待补。另：MLA 降 smem 冲 2 CTA/SM /
+split-KV 仍在列。
