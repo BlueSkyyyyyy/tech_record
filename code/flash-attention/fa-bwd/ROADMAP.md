@@ -1420,7 +1420,39 @@
    - 原始输出 `src/fp16/fa_bwd_fp16_wgmma2_smoke.out.txt`、
      `src/fp16/fa_bwd_fp16_mma_main_o17_s4096.out.txt`、`..._mma_onefile_o17_s512.out.txt`、
      `src/fp16/fa_bwd_fp16_mma_main_o17_ncu_wg2_s4096.out.txt`、`..._o17_ncu_o9b_s4096.out.txt`、
-      `src/fp16/fa_bwd_fp16_o17_fa3_te_baseline.out.txt`；文档 `docs/01` §14j、`docs/04` §2.1/§3。
+       `src/fp16/fa_bwd_fp16_o17_fa3_te_baseline.out.txt`；文档 `docs/01` §14j、`docs/04` §2.1/§3。
+
+- 2026-09-23（第五十三轮）：**O17-bf16 完成（bf16 跨 warpgroup 归约，BM=128 + 2 warpgroups，
+  dK/dV 的 red 字节砍半；单/两文件）**。
+   - 把第五十二轮的 fp16 O17 **逐字 dtype 参数化**到 bf16（同为 2 字节，SW128 布局/描述符/
+     `wgmma.m64n64k16` 累加器映射逐字节同构，只差 `f16.f16`→`bf16.bf16`）。新增
+     `fa_bwd_bf16_wgmma2_kernel<HD>`；给 `kv_issue_async_sw`/`qdo_issue_async_sw` 加模板参数
+     `NT=THREADS`（2-wg 版传 256）；**只让 wg0 做 GEMM3/4**，把两个 m64 半（128 行）连续喂同一
+     `wgmma.m64n64k16` 累加器 ⇒ 每个 KV 元素只 `red` 一次；wg1 并行做自己的 GEMM5。单/两文件
+     device 代码逐字一致（`sync_onefile_device.py` 核对 `identical: True`）；host 加
+     `launch_bwd_wgmma2` + CLI `--wg2` + `[O17 A/B]`；默认不变（需 `--wg2`，D=512 忽略）。
+   - **数值与 O5b~O13 历史值逐位一致**：MHA S512 9.001/12.61/13.65e-3、S4096
+     15.10/13.40/16.31e-3、GQA kv8 12.33/19.30/31.50e-3、GQA kv4 12.01/21.25/31.56e-3、
+     MQA kv1 11.90/45.58/71.96e-3；`dq` 逐位相同（无跨 CTA 原子）、dk/dv 仅 atomic 次序
+     （max|diff| ~1e-4~6e-3）。单/两文件逐指标一致。
+   - **性能（同 session A/B，event，main-only）**：S512 mma 0.0577→**wg2 0.0521（1.109×）**、
+     S4096 1.4892→**0.9821（1.516×，139.9 TF）**、GQA kv8 1.504×、GQA kv4 1.506×、
+     MQA kv1 1.531×。端到端（`--wg2`）S=4096 **1.4309ms（96.05 TF）**、S512 0.1075ms、
+     GQA kv8 0.3334 / kv4 0.2892 / MQA kv1 0.4519ms。
+   - **ncu（main, S=4096，同 session O9b vs O17）**：**`lts__t_sectors_op_red`
+     102,236,160→51,904,512（0.508×）**、`read` 0.50×、Duration 1.48→**0.997ms**、
+     **L2 71.61%→54.63%**、L1/TEX 40.25→36.68%、Compute 23.49→27.36%、regs 230→200 /
+     smem 100.35→149.50KB / occ 11.89→12.41%、bank conflict 0 ⇒ **与 fp16 O17 逐项一致，
+     机制假设被 ncu 完全证实**；新墙仍是 L2（red 占 ~72.6%）。
+   - **对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`）：MHA S4096 FA3
+     **0.3217ms/855TF**、TE 0.4422/622、FA2 0.7343/374 ⇒ ours total 时间 **4.45×**；
+     GQA kv8 FA3 0.1214/354 ⇒ 2.75×；GQA kv4 FA3 0.0825/417 ⇒ 3.51×；MQA kv1 FA3
+     0.1567/439 ⇒ 2.88×。
+   - 原始输出 `src/bf16/fa_bwd_bf16_mma_main_o17_{s512_h16_d128,s4096_h16_d128,
+     s1024_h32_d128_kv4,s1024_h40_d128_kv8,s1024_h64_d128_kv1}.out.txt`、
+     `src/bf16/fa_bwd_bf16_mma_onefile_o17_{s512,s4096}.out.txt`、
+     `..._o17_ncu_{wg2,o9b}_s4096.out.txt`、`src/bf16/fa_bwd_bf16_o17_fa3_te_baseline.out.txt`；
+     文档 `docs/01b` §6s、`docs/04` §2.2/§3。
 
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
@@ -1563,9 +1595,15 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > `red` 一次 ⇒ **ncu 实测 `red` 102.2M→51.9M（0.508×）、`read` 0.50×、L2 71.8%→54.7%、
 > Duration 1.48→1.00ms**；main S4096 **1.57×（140.5 TF）**、GQA 1.47×、MQA 1.54×、S512 1.11×，
 > 端到端 S4096 1.427ms、**为 FA3 的 4.4×**（O9b ~6.0×）；数值 vs ref 逐位一致。前置冒烟
-> `fa_bwd_fp16_wgmma2_smoke.cu` 逐位 PASS。**下一步（O17b）**：BM=256 / 4 warpgroups 再砍半
-> （需先做 smem/寄存器账：Q/dO 按 wg 只存自己 64 行或 TMA 直供、P/dS 可能需 8-bit 存）；
-> 同时把 O17 逐字 dtype 参数化到 **bf16**（O17-bf16）。详见 `docs/01` §14j、`docs/04` §2.1/§3。
+> `fa_bwd_fp16_wgmma2_smoke.cu` 逐位 PASS。
+> **O17-bf16 已完成（第五十三轮）**：把 fp16 O17 逐字 dtype 参数化到 bf16
+> `fa_bwd_bf16_wgmma2_kernel<HD>`（`--wg2`）：单/两文件 device 逐字一致、数值 vs ref 历史逐位
+> 一致；ncu 与 fp16 逐项一致（`red` 102.2M→51.9M=0.508×、`read` 0.50×、L2 71.6%→54.6%、
+> Duration 1.48→1.00ms）；main S4096 **1.516×（139.9 TF）**、GQA/MQA 1.50–1.53×、S512 1.11×，
+> 端到端 S4096 **1.4309ms（96.05 TF）、为 FA3 的 4.45×**。详见 `docs/01b` §6s、`docs/04` §2.2/§3。
+> **下一步（O17b）**：BM=256 / 4 warpgroups 再砍半（需先做 smem/寄存器账：Q/dO 按 wg 只存自己
+> 64 行或 TMA 直供、P/dS 可能需 8-bit 存）；或 fp8 侧的同构跨 wg 归约（fp8 main 的 L2 red 亦是墙）。
+> 详见 `docs/01` §14j、`docs/01b` §6s、`docs/04` §2.1/§2.2/§3。
 > 1. **O5 收尾**：fp16/bf16 反向用 `mma.m16n8k16`+`ldmatrix` 张量核后端。
 >    进度：fp16 主 kernel **2.28→0.19 ms（512）/ 67.6→4.55 ms（4096），11.8–14.9×**；
 >    **bf16 主 kernel 1.88→0.190 ms（512）/ 42.2→4.51 ms（4096），9.4–9.9×**（第二十七轮，单/两文件、
@@ -1813,7 +1851,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       ncu：`red` **102.2M→51.9M（0.508×）**、`read` 也 0.50×、L2 71.8%→**54.7%**、Duration
       1.48→**1.00ms**；main-only **S4096 1.57×（140.5 TF）/ GQA 1.47× / MQA 1.54× / S512 1.11×**，
       端到端 S=4096 **1.427ms（96.3 TF，FA3 的 4.4×，O9b 时 ~6.0×）**；数值 vs ref 历史逐位一致。
-      regs 200 / smem 149.5KB / 1 CTA/SM。TMA 通路（O15a）与 bf16 版（O17-bf16）留后续。
+       regs 200 / smem 149.5KB / 1 CTA/SM。**bf16 版（O17-bf16）已完成（第五十三轮）**：
+       `fa_bwd_bf16_wgmma2_kernel<HD>` 逐字 dtype 参数化，main S4096 1.516×（139.9 TF）、
+       GQA/MQA 1.50–1.53×、S512 1.11×、ncu 与 fp16 逐项一致（`docs/01b` §6s）。TMA 通路（O15a）
+       与 O17b（BM=256）留后续。
 - [ ] （backlog）O7b：dK/dV 的跨 CTA 归约（分块 `*_accum` + convert）→ **确定性反向**；字节不减、
       多一趟读回，只在需要确定性时做。**O7e 已证明 fp8 侧该 L2 墙只剩 43.7% < L1/TEX 66%**；
       fp16/bf16 侧见上 O17（跨 wg 归约才是真杠杆）。

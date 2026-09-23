@@ -143,6 +143,25 @@ static void launch_bwd_wgmma(dim3 mg, const bf16* q, const bf16* k, const bf16* 
                                                       dk_acc, dv_acc, S, H, Hkv, scale, causal,
                                                       sched);
 }
+
+// O17-bf16：2 warpgroup（BM=128）wgmma 主 kernel（只 HD=128）。Q/dO/K/V + P/dS 全 SW128。
+// smem = 1024(对齐) + Q 32KB + dO 32KB + K 2×16KB + V 16KB + P 16KB + dS 16KB ≈ 145KB。
+template <int HD>
+static void launch_bwd_wgmma2(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
+                              const bf16* do_, const float* delta, const float* lse,
+                              float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
+                              int Hkv, float scale, int causal) {
+  static_assert(HD == 128, "wgmma2 只做 HD=128");
+  constexpr int BM = 128, BN = 64;
+  constexpr int QTILE = (BM / 8) * (HD / 64) * 1024;
+  constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
+  constexpr int PTILE = (BM / 8) * (BN / 64) * 1024;
+  constexpr int smem = 1024 + QTILE * 2 + KTILE * 3 + PTILE * 2;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_wgmma2_kernel<HD>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  fa_bwd_bf16_wgmma2_kernel<HD><<<mg, 256, smem>>>(q, k, v, do_, delta, lse, dq_acc,
+                                                   dk_acc, dv_acc, S, H, Hkv, scale, causal);
+}
 #endif
 
 int main(int argc, char** argv) {
@@ -163,6 +182,8 @@ int main(int argc, char** argv) {
   int lse_wgm = 0;
   // O9b：主 kernel 是否用 wgmma（仅 FA_WGMMA 构建、D==128 且 sel=(64,64) 时生效）。
   int wgmma_sel = 0;
+  // O17：2 warpgroup（BM=128，跨 wg 归约）wgmma 主 kernel（仅 FA_WGMMA 构建、D==128）。
+  int wg2_sel = 0;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -180,6 +201,8 @@ int main(int argc, char** argv) {
     else if (a == "--lsewgm") lse_wgm = 1;
     else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
     else if (a == "--wgmma") wgmma_sel = 1;
+    else if (a.rfind("--wg2=", 0) == 0) wg2_sel = atoi(a.c_str() + 6);
+    else if (a == "--wg2") wg2_sel = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -370,6 +393,12 @@ int main(int argc, char** argv) {
   const bool prel_sel = (prel_opt >= 0) ? (prel_opt != 0) : true;
   auto run_main = [&]() {
 #ifdef FA_WGMMA
+    if (wg2_sel && D == 128) {
+      dim3 g((S + 127) / 128, H, B);
+      launch_bwd_wgmma2<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                             d_dv_acc, S, H, Hkv, scale, (int)causal);
+      return;
+    }
     if (wgmma_sel && D == 128 && bm_sel == 64 && bn_sel == 64) {
       dim3 g((S + 63) / 64, H, B);
       launch_bwd_wgmma<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
@@ -572,6 +601,54 @@ int main(int argc, char** argv) {
     printf("[O9b A/B] main mma(64,64,2) %.4f ms (%.2f TF) | wgmma(GEMM1/2) %.4f ms "
            "(%.2f TF) => %.3fx\n",
            ms_mma, tf(ms_mma), ms_wg, tf(ms_wg), ms_mma / ms_wg);
+  }
+
+  // ---- O17 A/B（仅 FA_WGMMA 构建，HD=128）：mma 最优档 vs O9b wgmma vs O17 wgmma2(BM=128) ----
+  {
+    auto time_o17 = [&](int mode, float* out_ms, float* dq_c, float* dk_c, float* dv_c) {
+      auto launch = [&]() {
+        if (mode == 2) {
+          dim3 g((S + 127) / 128, H, B);
+          launch_bwd_wgmma2<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                 d_dv_acc, S, H, Hkv, scale, (int)causal);
+        } else if (mode == 1) {
+          dim3 g((S + 63) / 64, H, B);
+          launch_bwd_wgmma<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                d_dv_acc, S, H, Hkv, scale, (int)causal, 0);
+        } else {
+          launch_cfg(64, 64, 2, false, true);
+        }
+      };
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+      if (dq_c) CUDA_CHECK(cudaMemcpy(dq_c, d_dq_acc, n * sizeof(float), cudaMemcpyDeviceToHost));
+      if (dk_c) CUDA_CHECK(cudaMemcpy(dk_c, d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+      if (dv_c) CUDA_CHECK(cudaMemcpy(dv_c, d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    };
+    std::vector<float> q0(n), k0(nkv), v0(nkv), q1(n), k1(nkv), v1(nkv), q2(n), k2(nkv),
+        v2(nkv);
+    float ms_mma = 0.f, ms_wgm = 0.f, ms_wg2 = 0.f;
+    time_o17(0, &ms_mma, q0.data(), k0.data(), v0.data());
+    time_o17(1, &ms_wgm, q1.data(), k1.data(), v1.data());
+    time_o17(2, &ms_wg2, q2.data(), k2.data(), v2.data());
+    auto mad = [](const std::vector<float>& a, const std::vector<float>& b) {
+      double d = 0; for (size_t i = 0; i < a.size(); ++i) d = std::max(d, (double)std::fabs(a[i]-b[i])); return d;
+    };
+    printf("[O17 A/B] main mma(64,64,2) %.4f ms | O9b wgmma %.4f (%.3fx) | O17 wgmma2(BM128) "
+           "%.4f (%.3fx) TF %.1f\n",
+           ms_mma, ms_wgm, ms_mma / ms_wgm, ms_wg2, ms_mma / ms_wg2,
+           main_flops / (ms_wg2 * 1e-3) / 1e12);
+    printf("[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=%.2e/%.2e/%.2e | wg2-vs-O9b "
+           "dq/dk/dv=%.2e/%.2e/%.2e\n",
+           mad(q2, q0), mad(k2, k0), mad(v2, v0), mad(q2, q1), mad(k2, k1), mad(v2, v1));
   }
 #endif
   }  // end if (D == 128)
