@@ -1069,7 +1069,7 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 - [x] 纯反向口径基准 `harness/fa_vs_te_bwd_only.py`：FA2.7.4 217–377 TF vs TE2.14 305–618 TF（TE 1.2–1.6×）
 - [x] kernel/SASS/SOL 归因：FA2.7.4=SM80 `HMMA/LDSM/LDGSTS`，TE=cuDNN SM90 `UTMALDG/WARPGROUP`(wgmma+TMA)；
       FA 对 GQA/MQA 多一个 `reduce` kernel。详见 `docs/06`。
-- [x] FA3（SM90）编译并三方对比：**FA3 > TE > FA2**（详见 docs/07）：GQA/MQA FA3 355–438TF vs TE 307–356TF；MHA S4096 FA3 850TF vs TE 618TF。
+- [x] FA3（SM90）编译并三方对比：**FA3 > TE > FA2**（详见 docs/06）：GQA/MQA FA3 355–438TF vs TE 307–356TF；MHA S4096 FA3 850TF vs TE 618TF。
 - [ ] 后续：ours 对标升级为 Hopper 路线（O5 mma → O9 wgmma+TMA）；GQA KV 归约放进 kernel。
 
 ## 下一步（明确到可执行）

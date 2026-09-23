@@ -1,8 +1,8 @@
 ---
-title: "FlashAttention 反向（十）：性能调优历程与方法论（从 138 ms 到 1.95 ms）"
+title: "FlashAttention 反向（八）：性能调优历程与方法论（从 138 ms 到 1.95 ms）"
 date: 2026-09-22
 draft: false
-weight: 11
+weight: 9
 series: ["fa-bwd"]
 tags: ["flash-attention", "反向", "CUDA", "性能调优", "ncu", "算子优化", "系列"]
 categories: ["算子开发"]
