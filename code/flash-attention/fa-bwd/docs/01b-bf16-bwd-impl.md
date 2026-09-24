@@ -1643,6 +1643,35 @@ lse = Waves<1 的并行度 bound）。原始输出 `src/bf16/fa_bwd_bf16_varlen_
   b1_s1024_h64_d128_kv1_causal_bf16}.out.txt`、`src/bf16/fa_bwd_bf16_mma_onefile_o38_s512.out.txt`、
   `src/fa_bwd_o38_split1_baseline.out.txt`、`src/fa_bwd_o38_fa3_te_baseline_fp16_bf16.out.txt`。
 
+## 6ad. O39-bf16：MLA（head_dim=512）LSE 的 K 维 split + 二次归约（第八十六轮）—— **正结果，默认 auto**
+
+把 O39-fp16（`docs/01` §14v）逐字 dtype 参数化到 bf16：`lse_mma_kernel_bal<HD,PIPE>` 加
+`float* lse_part,int ksplit`（`grid.z: B→B*ksplit`、`b=z/ksplit`、每 CTA 扫 K tile 切片
+`[nt0,nt1)`、stage 用相对下标 `rnt&1`、`ksplit==1` 逐位退回 O8b）；host `--lsesplit=N`
+（`0=auto`：D=512 目标 `grid*split≈132`（smem ~202KB ⇒ 1 CTA/SM）、上限 16，按
+`nblk=ceil(S/64)` 封顶）；D=128 的 TMA/非 TMA mma 路径与 fp16 同构。单/两文件 device
+逐字一致（`sync_onefile_device.py` 核对 `identical: True`）。
+
+**数值**（vs fp32 ref，bf16 causal，max_abs dq/dk/dv）：S256H2 1.230e-2/9.875e-3/1.686e-2；
+S512H4 8.753e-3/1.082e-2/1.740e-2；S1024H2 5.838e-3/9.519e-3/1.568e-2 —— 与 §6l 历史逐位
+一致；`max_abs(split-auto vs split1) ≤ 9.5e-7`。MHA D=128 回归逐位不变（S512
+9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3、GQA kv4 12.01/21.25/31.56e-3）。
+
+**性能**（CUDA event，同 session `--lsesplit=1` vs auto）：
+
+| case | LSE split1 | LSE auto | LSE 倍数 | total split1 | total auto | total 倍数 |
+|---|---|---|---|---|---|---|
+| MLA S256H2 | 0.0350 ms | **0.0202** (split4) | **1.73×** | 0.2179 | **0.2025** | **1.08×** |
+| MLA S512H4 | 0.0585 ms | **0.0221** (split8) | **2.65×** | 0.4182 | **0.3816** | **1.10×** |
+| MLA S1024H2 | 0.1006 ms | **0.0276** (split8) | **3.64×** | 0.7855 | **0.7116** | **1.10×** |
+
+**ncu** 与 fp16 逐项一致（LSE smem ~202KB ⇒ 1 CTA/SM）；split1 Waves 0.12 →
+split8 Waves 0.97、Duration 4.2×，墙 = 并行度 → 1 CTA/SM 的 `mma wait` + smem 依赖。
+
+原始输出：`src/bf16/fa_bwd_bf16_main_o39_b1_s{256_h2,512_h4,1024_h2}_d512_causal.out.txt`、
+`..._o39_split1_*`、`..._o39_reg_*`、`..._o39_mmafallback_s512.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o39_*`、`..._o39_varlen_*`。
+
 ## 8. 下一步
 
 > **O36-bf16（§6z）已完成**：把 O34 的逐 atom 4D-TMA 从 BN=128 的 `wgmma2b` 补到 **BN=64 的
