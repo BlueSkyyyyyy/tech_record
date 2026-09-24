@@ -1,0 +1,19 @@
+  void delta_warp_kernel<128>(const float *, const unsigned char *, const float *, float *, int) (16384, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Elapsed Cycles                cycle        34169
+    Memory Throughput                 %        77.01
+    DRAM Throughput                   %        77.01
+    Duration                         us        17.34
+    Compute (SM) Throughput           %        27.14
+    Executed Ipc Active   inst/cycle         1.27
+    Executed Ipc Elapsed  inst/cycle         1.08
+    Memory Throughput                           Tbyte/s         2.57
+    Block Size                                                   128
+    Grid Size                                                  16384
+    Registers Per Thread             register/thread              18
+    Waves Per SM                                                7.76
+    Achieved Occupancy                        %        83.77
+    Total DRAM Elapsed Cycles        cycle      1811968
+    Total L1 Elapsed Cycles          cycle      4316782
+    Total L2 Elapsed Cycles          cycle      2356240
+    Total SM Elapsed Cycles          cycle      4316782
+    Total SMSP Elapsed Cycles        cycle     17267128

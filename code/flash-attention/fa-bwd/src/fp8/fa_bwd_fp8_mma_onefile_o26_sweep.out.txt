@@ -1,0 +1,23 @@
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 2732
+
+===== b1_s512_h16_d128_causal_fp8
+[timing] total(quant+pre+main+cvt) 0.1307 ms  16.43 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0144 ms | preprocess 0.0370 ms | main 0.0654 ms | convert 0.0139 ms
+[O26 A/B] delta old(per-row) 0.0085 ms | new(warp-per-row) 0.0036 ms (2.343x) | max_abs=1.907e-06 max_rel=2.113e-03
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.938e+02
+  dk   vs ref: max_abs=2.972e-01  max_rel=7.598e+01
+  dv   vs ref: max_abs=3.733e-01  max_rel=1.002e+02
+===== b1_s4096_h16_d128_causal_fp8
+[timing] total(quant+pre+main+cvt) 2.4636 ms  55.79 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0683 ms | preprocess 0.2962 ms | main 2.0729 ms | convert 0.0262 ms
+[O26 A/B] delta old(per-row) 0.0444 ms | new(warp-per-row) 0.0150 ms (2.951x) | max_abs=3.815e-06 max_rel=1.157e-03
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+===== b1_s1024_h32_d128_kv4_causal_fp8
+[timing] total(quant+pre+main+cvt) 0.4857 ms  35.37 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0276 ms | preprocess 0.0720 ms | main 0.3593 ms | convert 0.0268 ms
+[O26 A/B] delta old(per-row) 0.0227 ms | new(warp-per-row) 0.0072 ms (3.138x) | max_abs=2.861e-06 max_rel=2.580e-03
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.987e+02
+  dk   vs ref: max_abs=5.339e-01  max_rel=1.396e+02
+  dv   vs ref: max_abs=7.173e-01  max_rel=9.160e+01
