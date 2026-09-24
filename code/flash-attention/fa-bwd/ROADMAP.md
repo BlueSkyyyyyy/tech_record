@@ -2161,8 +2161,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > ② **fp8/主 kernel 跨-tile 软流水**（K/V 单缓冲被 dS3/Ap 复用，需先腾 smem）；
 > ③ **TMA 化 operand** —— **O30 已完成 fp16 LSE 的第一步（第七十一轮）**：4D-TMA 载入 LSE 的
 > Q/K（2×K=64 chunk、`SBO=1024`），LSE-only **1.30–1.36×**、指令数 −28.7%、数值逐位不变；
-> 但墙不变（Compute ~58% + `wait`）。**剩余**：主 kernel 的 Q/K/V/dO TMA 化（需改 GEMM3/4/5 的
-> 转置描述符）、bf16/fp8 的 TMA（dtype 参数化 / fp8 SW128 的 `k/16` chunk 下标）。
+> 但墙不变（Compute ~58% + `wait`）。**O31 已完成 bf16 LSE 的 dtype 参数化（第七十二轮）**：
+> 与 fp16 O30 逐字节同构（仅 `wgmma...bf16` + tensormap `BFLOAT16`），LSE-only **1.32–1.35×**、
+> 指令数 **−28.7%**、端到端 **1.065–1.071×**（MHA S4096 1.3390→**1.2577ms**，109.3 TF，
+> FA3 的 3.94×），`max_abs(tma-vs-wgmma)=0` 逐位一致；纯 `sm_90`/仅 `-DFA_WGMMA` 构建不变。
+> 详见 `docs/01b` §6x。**剩余**：主 kernel 的 Q/K/V/dO TMA 化（需改 GEMM3/4/5 的
+> 转置描述符）、fp8 的 TMA（fp8 SW128 的 `k/16` chunk 下标 + UINT8 tensormap）。
 > **④（O27 新增，O28 已作废）fp16/bf16 的 fold 同理含逐元素精确除法**——**误记**：逐字核对
 > `src/fp16,bf16/fa_bwd_*_kernels.cuh` 后确认 fp16/bf16 **没有 rowwise scale fold**（无量化），
 > 逐元素除法只在 fp8。fp8 的 fold 除法 O27 已收口，转换指令 O28 也已向量化（MLA 1.03×、d128 中性）。

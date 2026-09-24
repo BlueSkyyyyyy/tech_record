@@ -1,0 +1,34 @@
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 411632
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16
+B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=128 auto=(BM=64,BN=64,PIPE=1) sel=(BM=64,BN=64,PIPE=1)
+[O23] main backend = wgmma2(BN=64) | lse = tma (D=128 S=512)
+[timing] total(3 kernels) 0.0941 ms  22.83 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0289 ms | main 0.0530 ms | convert 0.0122 ms
+[O24 A/B] delta old 0.0078 ms | warp 0.0038 ms (2.05x)
+[O8b A/B] lse O8 0.0643 ms | bal(单缓冲) 0.0549 ms (1.171x) | bal+cpasync(双缓冲) 0.0341 ms (1.886x)
+[O9 A/B] lse wgmma+SW128 0.0332 ms (vs bal+cpasync 1.028x, vs O8 1.940x)
+[O31 A/B] lse tma 0.0252 ms | wgmma 0.0331 ms (wgmma/tma 1.314x) | max_abs(tma-vs-wgmma)=0.000e+00
+[O6 A/B] main nopipe 0.1130 ms (19.00 TF) | pipe(KV both) 0.0614 ms (34.99 TF) | pipe2(K only) 0.0627 ms (34.23 TF) => nopipe/pipe 1.842x, nopipe/pipe2 1.802x
+[O6c A/B] main sched0(原样) 0.0615 ms | sched1(交错) 0.0614 ms (1.002x) | sched2(逆序) 0.0616 ms (0.999x)
+[O9b A/B] main mma(64,64,2) 0.0577 ms (37.22 TF) | wgmma(GEMM1/2) 0.0595 ms (36.08 TF) => 0.969x
+[O17 A/B] main mma(64,64,2) 0.0573 ms | O9b wgmma 0.0588 (0.974x) | O17 wgmma2(BM128) 0.0512 (1.120x) TF 42.0
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 0.0512 ms (41.9 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.0512 ms (42.0 TF) => 1.001x | max|diff| dq/dk/dv=0.00e+00/2.29e-05/2.29e-05
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/8.77e-05/1.22e-04 | wg2-vs-O9b dq/dk/dv=0.00e+00/8.77e-05/1.22e-04
+[O18 A/B] main O17 wg2(BN64) 0.0512 ms (42.0 TF) | O18 wg2b(BN128,split) 0.0497 ms (43.2 TF) => 1.029x | O18 wg2b(BN128,串行) 0.0501 ms => 1.021x | max|diff| wg2b-vs-wg2 dq/dk/dv=2.38e-07/1.91e-05/2.29e-05 | wg2bns-vs-wg2b 0.00e+00/1.14e-05/1.53e-05
+[O5c A/B] main (64,32,2) 0.0619 ms (34.68 TF) | (64,64,2) 0.0569 (37.74) | (32,32,1) 0.0692 (31.03) | (32,32,2) 0.0699 (30.74) => best 1.088x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 0.0690 (31.11) | f4 0.0762 (28.18,-9.4%) | f2+PREL 0.0619 (34.69,+11.5%) | f4+PREL 0.0613 (35.04,+12.6%)
+  (BM=64,BN=64,PIPE=2): base 0.0670 (32.06) | f4 0.0716 (30.01,-6.4%) | f2+PREL 0.0569 (37.74,+17.7%) | f4+PREL 0.0593 (36.20,+12.9%)
+  (BM=32,BN=32,PIPE=1): base 0.0722 (29.74) | f4 0.0775 (27.73,-6.8%) | f2+PREL 0.0686 (31.29,+5.2%) | f4+PREL 0.0718 (29.92,+0.6%)
+  (BM=32,BN=32,PIPE=2): base 0.0774 (27.75) | f4 0.0798 (26.91,-3.0%) | f2+PREL 0.0702 (30.61,+10.3%) | f4+PREL 0.0726 (29.60,+6.7%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=9.001e-03  max_rel=1.490e+00
+  dk   vs ref: max_abs=1.261e-02  max_rel=1.784e+00
+  dv   vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+  fa_dq     vs ref: max_abs=1.040e-02  max_rel=1.490e+00
+  fa_dk     vs ref: max_abs=1.261e-02  max_rel=2.248e+00
+  fa_dv     vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+  te_dq     vs ref: max_abs=1.374e-02  max_rel=1.169e+00
+  te_dk     vs ref: max_abs=1.068e-02  max_rel=2.089e+00
+  te_dv     vs ref: max_abs=1.365e-02  max_rel=1.875e+00

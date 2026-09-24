@@ -1,0 +1,28 @@
+### O31 same-session A/B: LSE TMA (--lsetma=1, default) vs wgmma+cp.async (--lsetma=0)
+# cmd: ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" scripts/run.sh src/bf16/fa_bwd_bf16_mma_main.cu --dir=... --causal --iters=20
+
+=== S512 --lsetma=1 ===
+[O23] main backend = wgmma2(BN=64) | lse = tma (D=128 S=512)
+[timing] total(3 kernels) 0.0936 ms  22.94 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0288 ms | main 0.0527 ms | convert 0.0121 ms
+[O9 A/B] lse wgmma+SW128 0.0332 ms (vs bal+cpasync 1.024x, vs O8 1.942x)
+[O31 A/B] lse tma 0.0251 ms | wgmma 0.0331 ms (wgmma/tma 1.318x) | max_abs(tma-vs-wgmma)=0.000e+00
+
+=== S512 --lsetma=0 ===
+[O23] main backend = wgmma2(BN=64) | lse = wgmma (D=128 S=512)
+[timing] total(3 kernels) 0.1002 ms  21.43 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0363 ms | main 0.0523 ms | convert 0.0116 ms
+[O9 A/B] lse wgmma+SW128 0.0328 ms (vs bal+cpasync 1.029x, vs O8 1.946x)
+
+=== S4096 --lsetma=1 ===
+=== S4096 --lsetma=1 ===
+[O23] main backend = wgmma2b(BN=128) | lse = tma (D=128 S=4096)
+[timing] total(3 kernels) 1.2577 ms  109.28 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2276 ms | main 0.9503 ms | convert 0.0797 ms
+[O9 A/B] lse wgmma+SW128 0.2818 ms (vs bal+cpasync 1.047x, vs O8 3.050x)
+[O31 A/B] lse tma 0.2087 ms | wgmma 0.2819 ms (wgmma/tma 1.351x) | max_abs(tma-vs-wgmma)=0.000e+00
+=== S4096 --lsetma=0 ===
+[O23] main backend = wgmma2b(BN=128) | lse = wgmma (D=128 S=4096)
+[timing] total(3 kernels) 1.3390 ms  102.64 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3025 ms | main 0.9640 ms | convert 0.0725 ms
+[O9 A/B] lse wgmma+SW128 0.2764 ms (vs bal+cpasync 1.085x, vs O8 3.139x)

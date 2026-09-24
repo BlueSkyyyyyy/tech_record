@@ -1320,8 +1320,81 @@ MHA S=4096 FA3 **0.3202ms/859TF**、TE 0.4359/631、FA2 0.7271/378 ⇒ ours tota
 
 ---
 
+## 6x. O31-bf16：LSE 4D-TMA（把 fp16 O30 逐字 dtype 参数化）
+
+> fp16 侧见 `01` §14s（O30）。bf16 与 fp16 同为 2 字节、SW128 布局 / 描述符 / TMA box 内维
+> （128B = 64 元素）/ 两个 `SBO=1024` 的 `2×K=64` chunk 拆分**逐字节同构**，仅把
+> `wgmma.m64n64k16.f16` → `wgmma.m64n64k16.bf16`、tensormap 的 `CU_TENSOR_MAP_DATA_TYPE_FLOAT16`
+> → `..._BFLOAT16`。因此 O30 的全部结论原样成立：LSE 的 Q/K 由「逐 16B `cp.async` + 地址运算」
+> 换成 **4D TMA**（坐标 `{k0,row,head,batch}`，一条 bulk 指令搬一个 8KB chunk），复用同一份
+> SW128 tile 供 wgmma 直读。
+
+### 6x.1 实现（单/两文件 device 代码逐字一致）
+
+* device（`fa_bwd_bf16_mma_kernels.cuh`）：新增 `mbar_init/arrive_expect/wait`、`tma_load_4d`、
+  `wgmma_qkt64_tma`（bf16 版）与 `lse_mma_kernel_bal_tma<HD,PIPE>`（`static_assert(HD==128)`，
+  镜像配对 + online-softmax + 4-lane `shfl` 归约与 `lse_mma_kernel_bal_wgmma` 相同）。
+* host（`..._main.cu`）：`make_lse_map`（dtype=BFLOAT16）、`--lsetma=0/1`、`kLseSmemTma1`、
+  `cudaFuncSetAttribute` + tensormap 建立、`run_pre` 里 D==128/causal 默认走 TMA，以及同 session
+  `[O31 A/B]` 数值对拍。整体用 `-DFA_WGMMA -DFA_TMA -lcuda` 包裹；纯 `sm_90` 或仅 `-DFA_WGMMA`
+  构建**完全不编译/不引用驱动符号**（已验证仍分别落回 `lse=mma` / `lse=wgmma`）。
+* 单文件：device 区由同步脚本核对 `device region identical: True`，host 段与两文件同步重建。
+  > 注：bf16 单文件的 `#include <algorithm>` 位于 device 区**之前**，`sync_onefile_device.py`
+  > 的边界假定不成立；本轮改用「以 `using bf16 = ...` 到 `#endif` 为 device 区」的等价同步，
+  > 并单独给单文件补 `#include <cuda.h>`（`CUtensorMap`）。
+
+### 6x.2 数值（ours-vs-ref bf16 causal max_abs；`[O31 A/B]`）
+
+* `[O31 A/B] max_abs(tma-vs-wgmma) = 0.000e+00`（S512/S4096 **逐位相同**）。
+* ours-vs-ref 与历史逐位一致：S512 9.001/12.61/13.65e-3；S4096 15.10/13.40/16.31e-3。
+
+### 6x.3 性能（同 session A/B，CUDA event）
+
+| shape | LSE wgmma+cp.async | **LSE 4D-TMA** | LSE 加速 | 端到端 total（wgmma→TMA） | 端到端加速 |
+|---|---|---|---|---|---|
+| MHA S=4096 | 0.2819 ms | **0.2087 ms** | **1.351×** | 1.3390→**1.2577 ms**（102.6→109.3 TF） | 1.065× |
+| MHA S=512 | 0.0331 ms | **0.0251 ms** | **1.318×** | 0.1002→**0.0936 ms**（21.4→22.9 TF） | 1.071× |
+
+（TF 为 `4BS²HD` 口径；换算到 `fa_vs_te` 的 `4BS²H(D+Dv)` 口径，S4096 total ≈ **218.5 TF**。）
+
+### 6x.4 ncu（S=4096，`--set full --launch-count 1`，同 binary）
+
+| 指标 | LSE wgmma+cp.async | **LSE 4D-TMA** |
+|---|---|---|
+| Duration | 285.60 µs | **214.24 µs（1.333×）** |
+| Executed Instructions | 165.30 M | **117.87 M（0.713×，−28.7%）** |
+| Compute (SM) Throughput | 60.64 % | 57.85 % |
+| L1/TEX / L2 | 18.03 / 20.27 % | 18.28 / 26.82 % |
+| DRAM Throughput | 3.78 % | 5.05 % |
+| Registers / thread | 62 | 58 |
+| Waves Per SM / Occupancy | 0.97 / 23.0 % | 0.97 / 23.1 % |
+
+结论与 fp16 O30 逐项一致：TMA 把 load 指令/地址运算压掉（**指令数 −28.7%**），LSE 仍由
+**softmax epilogue 的 Compute（~58%）** 限速（非访存），故收益是「少发指令」而非「提带宽」；
+`Duration 1.33×` 与 event 的 `1.35×` 同向。
+
+### 6x.5 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`，FA2/FA3/TE 三列）
+
+MHA S=4096：FA2 **0.7264ms/378TF**、FA3 **0.3194/861**、TE **0.4424/621**。ours total
+1.2577ms（218.5 TF 同口径）= **FA3 的 3.94×**（O24 时 4.18×、O23 时 4.20×）。峰值占比：
+bf16 dense 峰值 ~989 TF ⇒ main-only 144.6 TF ≈ **14.6% 峰值**（total 109.3/989 ≈ 11.0%）。
+
+### 6x.6 原始输出
+
+`src/bf16/fa_bwd_bf16_o31_lsetma_ab.out.txt`（同 session 4 跑 A/B）、
+`src/bf16/fa_bwd_bf16_o31_lse_tma_s4096.out.txt` / `_s512.out.txt`、
+`src/bf16/fa_bwd_bf16_o31_lse_tma_onefile_s4096.out.txt`（单文件）、
+`src/bf16/fa_bwd_bf16_lse_tma_ncu_s4096.out.txt` / `fa_bwd_bf16_lse_wgmma_ncu_s4096.out.txt`、
+`src/bf16/fa_bwd_bf16_o31_fa3_te_baseline.out.txt`。
+
+---
+
 ## 8. 下一步
 
+> **O31-bf16（§6x）已完成**：LSE 改 4D-TMA（对齐 fp16 O30），LSE-only **1.32–1.35×**、指令数
+> **−28.7%**、端到端 **1.065–1.071×**（MHA S4096 1.3390→1.2577ms），`max_abs(tma-vs-wgmma)=0`
+> 逐位一致；纯 `sm_90`/仅 `-DFA_WGMMA` 构建行为不变。
+>
 > **O24-bf16（§6w）已完成**：preprocess `delta` 改 warp-per-row 向量化（3.36×）+ dQ 直写 bf16，
 > 端到端 1.02–1.07×，数值与历史逐位一致。
 >
