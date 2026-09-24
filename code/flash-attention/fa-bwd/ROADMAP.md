@@ -1770,6 +1770,38 @@
      `src/fa_bwd_o24_fa3_te_baseline_{fp16,bf16}.out.txt`；文档 `docs/01` §14p、`docs/01b` §6w、
      `docs/04` §2.1/§2.2/§3、`docs/08` §5。
 
+- 2026-09-24（第六十六轮）：**O25 完成（fp16：cluster 分布式归约 dK/dV）——机制成立、数值逐位
+  正确，但净负（S4096 main 0.13×）；「消 red」三条路至此全部证伪**。
+   - 动机：O7b（§14o）留下明确结论——真正消 red 只能上 **cluster 分布式归约**（SM 间 smem 内
+     合并偏和、不落全局 partial、不做二次 DRAM 扫描）。O25 实现并判决这条路。
+   - **机制冒烟** `src/fp16/fa_bwd_fp16_cluster_reduce_smoke.cu`（cluster=2、
+     `red.shared::cluster.add.f32` + `mapa.shared::cluster` + `barrier.cluster`，多 tile 复用
+     累加器）：`cluster-vs-ref max_abs=1.4e-06`（仅 fp32 加法次序）⇒ **PASS**。
+   - **实现**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+     `fa_bwd_fp16_wgmma2_kernel` 加 `int CL=1`（默认逐字不变）；cluster 沿 bx 配对相邻 mblk，
+     leader 的 smem 加两个 `[BN][HD]` fp32 合并累加器（+64KB）；6 处 dK/dV red 经 `dkv_red`
+     分流到 `red.shared::cluster.add.f32`；每 tile 尾 `cluster_sync → leader flush(一次全局
+     red) → cluster_sync`；host `--cluster[=2]`（`cudaLaunchKernelEx`），开启时强制
+     `wgmma2(BN=64)`（BN=128 的 2b 放不下合并累加器）。
+   - **数值**：S512 `1.671/1.771/1.899e-3`、S4096 `1.883/1.734/1.966e-3`——与 O17~O24 **逐位
+     一致**；单/两文件一致。
+   - **性能（同 session A/B，event，main/total ms）**：S512 main 0.0528→**0.3443（6.5×）**、
+     S4096 0.9855→**7.3178（7.4×）**；total 0.1002→0.3924 / 1.3597→7.8881。同 session 纯反向
+     FA3 MHA S4096 **0.3238ms/849TF**、TE 0.4407/624、FA2 0.7253/379 ⇒ 默认 total 为 FA3 4.2×，
+     cluster 版退化到 24×。
+   - **ncu（main, S4096，同 session/同 binary，`-c 1`）**：`lts__t_sectors_op_red`
+     **51,904,512→26,738,688（0.515×，精确减半）**、`read` 0.645×（机制被证实），而
+     Duration 989.7µs→**7.64ms（7.7×）**、**stall `long_scoreboard` 0.75→5.83、`short` 0.41→4.19**
+     ——逐元素远程 smem 原子延迟极高 + 每 tile leader flush 串行（另一 SM 在 `cluster_sync` 空等）。
+   - **结论**：非原子 DSM（`st.async` + leader 求和）可避延迟但需 `CL×[BN][HD]` smem（CL=2
+     +128KB，放不下）；逐元素先 CTA 内合并再 cluster 又退回 O7b 结构。**保留 `--cluster` opt-in**
+     （默认关）。**fp16/bf16 main 的 L2 red 墙在本卡暂无便宜解法**（「放大 BM」§14k、
+     partial/reduce §14o、cluster §14q 三条路全证伪）。
+   - 原始输出 `src/fp16/fa_bwd_fp16_cluster_reduce_smoke.out.txt`、
+     `src/fp16/fa_bwd_fp16_o25_s512_ab.out.txt`、`..._o25_s4096_ab.out.txt`、
+     `..._mma_onefile_o25_s512.out.txt`、`..._mma_main_o25_ncu_s4096.out.txt`、
+     `..._o25_fa3_te_baseline.out.txt`；文档 `docs/01` §14q。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -1947,13 +1979,18 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 42.5→**14.5µs，3.35×**、DRAM 74% bound）+ D=128 wgmma2/2b 主 kernel 直写 fp16 dQ、convert
 > 跳过 dQ；端到端 fp16/bf16 S4096 1.037×/1.020×、S512 1.05×、GQA 1.05–1.08×，数值逐位不变。
 > 详见 `docs/01` §14p、`docs/01b` §6w。**main 的墙（L2 red）+ 1 CTA/SM 仍未动。**
-> **下一步（按回报）**：① **cluster 分布式归约**——把 dK/dV 的偏和在 SM 间 smem 内合并后再
-> 落全局（既不落 partial 大缓冲、也不做跨 CTA 原子），是 O7b 数据的直接延续；② **fp8 侧同构
-> 跨 wg 归约**（fp8 是 1 字节 operand、4wg 寄存器压力小一档；但 O19 已示 fp8 墙是 occupancy）；
+> **O25 已完成（第六十六轮）——cluster 分布式归约，负结果**：`red.shared::cluster.add.f32`
+> （mapa 到 leader smem）+ 每 tile leader flush，`red` 精确减半（51.9M→26.7M）且数值逐位一致，
+> 但逐元素远程原子延迟 + 每 tile 串行 flush ⇒ S4096 main **0.13×**（0.99→7.64ms）、
+> `long_scoreboard` 0.75→5.83。**至此「放大 BM」（§14k）/partial+reduce（§14o）/cluster（§14q）
+> 三条消 red 路全部证伪**；`--cluster` 保留 opt-in。详见 `docs/01` §14q。
+> **下一步（按回报）**：① **fp8 侧「提 occupancy」**（O19/O21/O22 一致：墙 = mma 依赖延迟 +
+> 3 CTA/SM，须把 168 regs→≤128、72.7KB smem→≤58KB 才到 4 CTA/SM）——这是 fp8（最重点）唯一
+> 还没被证伪的杠杆；② **fp8/主 kernel 跨-tile 软流水**（K/V 单缓冲被 dS3/Ap 复用，需先腾 smem）；
 > ③ TMA 化 Q/K/V/dO（O15a 通路已就绪，需把 HD=128 的 K-major tile 拆成 2×K=64 chunk）。
-> **当前真正的墙仍是 L2 red（占 ~72%，BN/MB 都动不了它）+ 1 CTA/SM**，只有「跨 CTA 归约
-> （不落全局内存）/提 occupancy」能再推进。fp8 侧墙是 **mma 依赖延迟 + occupancy**（O19/O21）。
-> 详见 `docs/01` §14j/§14k/§14l/§14m/§14o、`docs/01b` §6s/§6t、`docs/04` §2.1/§2.2/§3。
+> **fp16/bf16 侧：L2 red（~72%）+ 1 CTA/SM 在本卡暂无便宜解法**（三条路已证伪），可转 TMA/软流水
+> 或直接冲 fp8；fp8 侧墙是 **mma 依赖延迟 + occupancy**（O19/O21）。
+> 详见 `docs/01` §14j/§14k/§14l/§14m/§14o/§14q、`docs/01b` §6s/§6t、`docs/04` §2.1/§2.2/§3。
 >
 > **O7e-3 已完成（第五十八轮）修正了 fp8 的瓶颈判断**：把 fp8 main 的 `Ps/Ss` epilogue
 > store/回读 bank conflict 从 4-way 降到 2-way（PSS 33→37），shared store 冲突 −58%、
@@ -2293,8 +2330,9 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 - [x] **O7b（第六十四轮）**：dK/dV 跨 CTA 归约 → **确定性反向**。fp16 `--det=1`（partial +
       `dkv_reduce_kernel`）：`red` 51.9M→0、主 kernel 1.20×、逐位可复现，但二次归约 DRAM bound
       ⇒ S4096 `main+reduce` 0.810×；保留 opt-in，详见 `docs/01` §14o。
-      **剩余（backlog）**：① **cluster 分布式归约**（SM 间 smem 合并偏和再落全局，免 partial 大缓冲
-      与跨 CTA 原子）；② 把确定性做成**默认**（当集群/归约成本可接受时）。
+      **① cluster 分布式归约** 已由 **O25（第六十六轮）** 做掉、并证伪（`red` 精确减半但 main
+      0.13×，远程原子延迟 + 串行 flush，见 §14q）。**剩余（backlog）**：把确定性做成**默认**
+      （当归约成本可接受时）——但 O7b 已示 reduce 是 DRAM bound，故暂不做。
       **O7e 已证明 fp8 侧该 L2 墙只剩 43.7% < L1/TEX 66%**；**O19/O21 又证伪 fp8 的「减 red/放大
       tile」**⇒ fp8 下一步只剩「提 occupancy（168→≤128 regs + 72.7→≤58KB smem）或减 mma 依赖
       stall」；fp16/bf16 侧见上 O17（跨 wg 归约才是真杠杆）。

@@ -2233,6 +2233,88 @@ MHA S=4096 FA3 **0.3246ms/847TF**、TE 0.4405/624、FA2 0.7293/377 ⇒ ours tota
 `src/fp16/fa_bwd_fp16_main_o24_ncu_delta_{old,warp}_s4096.out.txt`、
 `src/fa_bwd_o24_fa3_te_baseline_fp16.out.txt`。
 
+## 14q. O25：cluster 分布式归约（Hopper thread block cluster）——机制成立、数值正确，但净负（S4096 main 0.13×）
+
+### 14q.1 动机
+
+O7b（§14o）把 dK/dV 的跨 CTA `atomicAdd` 换成「partial 覆盖写 + 二次归约 kernel」，`red`
+51.9M→0、主 kernel 快 1.20×，但二次归约是一整趟 DRAM 扫描（90.4% 带宽 bound、384.9µs），
+`main+reduce` 净负。其结论明确写下：「要真正消 red 只能上 **cluster 分布式归约**——在 SM 间
+smem 内合并偏和、不落全局内存」。O25 就是这条路的实现与判决。目标：**不落全局 partial、
+不做二次扫描**，用 thread block cluster 把「相邻 mblk 的 CTA 对同一 KV 行的偏和」在 leader
+的 smem 里合并，leader 每 tile 只发一次全局 `red_add2` ⇒ 跨 CTA red 字节砍半。
+
+### 14q.2 机制冒烟（先验证 DSM 原语再合入）
+
+`src/fp16/fa_bwd_fp16_cluster_reduce_smoke.cu`：cluster=2（`__cluster_dims__(2,1,1)`），
+每个 rank 把自己的偏和用 `red.shared::cluster.add.f32`（地址经 `mapa.shared::cluster` 映射到
+leader rank 0 的 smem）推进 leader 的累加器；`barrier.cluster.arrive/wait` 同步后 leader
+flush 到全局。多 tile 复用累加器（flush→barrier→清零→barrier）。实测
+`ref-vs-expected max_abs=1.2e-06, cluster-vs-ref max_abs=1.4e-06`（仅 fp32 加法次序）⇒ **PASS**。
+
+### 14q.3 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+给 `fa_bwd_fp16_wgmma2_kernel` 增加模板参数 `int CL = 1`（默认 1 ⇒ 行为逐字不变）：
+- **cluster 沿 bx**（`__cluster_ctarank`，配对相邻两个 mblk 2c / 2c+1）；
+- leader 的 smem 里加两个 `[BN][HD]` fp32 合并累加器（`dvacc/dkacc`，+64KB，214KB 仍 1 CTA/SM）；
+- 6 处 dK/dV red（SPLIT 与非 SPLIT 各 2/4 处）经 lambda `dkv_red` 分流：`CL==1` 走原
+  `red_add2`，`CL>1` 走 `red.shared::cluster.add.f32`（非 leader 远程、leader 本地）；
+- crate 高的（rank1）恒多做 `BM/BN=2` 个 KV tile，故低 mblk 的 rank0 把循环延到 rank1 的
+  tile 数（多出的 tile 因 causal mask 使 P=0、偏和为 0，只参与 barrier），两 CTA 锁步；
+- 每 tile 尾：`cluster_sync` → leader flush（一次全局 `red_add2` 并清零）→ `cluster_sync`；
+- host 新增 `--cluster[=2]`（`cudaLaunchKernelEx` + `cudaLaunchAttributeClusterDimension`），
+  开启时强制 `wgmma2(BN=64)`（BN=128 的 2b 放不下合并累加器），`nblk%2!=0` 自动回退。
+
+### 14q.4 数值（ours-vs-ref，fp16 causal，max_abs）—— 与历史逐位一致
+
+S=512 `1.671/1.771/1.899e-3`；S=4096 `1.883/1.734/1.966e-3`——**与 O17/O18/O23/O24 完全相同**，
+单/两文件逐指标一致。证明 cluster 只改归约次序，不改数学（`red` 合并的是同一批偏和）。
+
+### 14q.5 性能（同 session A/B，CUDA event，ms）—— 显著净负
+
+| shape | main 默认 | main +cluster2 | 时间比 | 端到端 total 默认 | total +cluster2 |
+|---|---|---|---|---|---|
+| S=512 | 0.0528 | 0.3443 | **6.5×** | 0.1002 | 0.3924 |
+| S=4096 | 0.9855 | 7.3178 | **7.4×** | 1.3597 | 7.8881 |
+
+同 session 纯反向基线：FA3 MHA S4096 `0.3238ms/849TF`、TE `0.4407/624`、FA2 `0.7253/379`
+⇒ 默认 ours total 为 FA3 的 4.2×，cluster 版退化到 24×。
+
+### 14q.6 ncu（main，S=4096，同 session、同 binary，`-c 1`）
+
+| 指标 | wg2 默认 | wg2 +cluster2 |
+|---|---|---|
+| `lts__t_sectors_op_red` | 51,904,512 | **26,738,688（0.515×，精确减半）** |
+| `lts__t_sectors_op_read` | 18,158,517 | 11,717,044（0.645×） |
+| Duration | 989.7µs | **7.64ms（7.7×）** |
+| stall long_scoreboard | 0.75 | **5.83（7.8×）** |
+| stall short_scoreboard | 0.41 | **4.19（10×）** |
+| warps_active | 12.46% | 12.50% |
+
+**机制假设被 ncu 完全证实**（`red` 精确减半），**但代价是灾难性的**：`red.shared::cluster.add.f32`
+是**逐元素远程原子**（每个 CTA 每 tile 8192 个 dV + 8192 个 dK），跨 SM 互连延迟极高，
+`long_scoreboard` 从 0.75 飙到 5.83；同时每 tile 的 leader flush 是**串行段**（另一 SM 在
+`cluster_sync` 空等），把原本分散在 512 个 CTA 上、与计算重叠的全局 red 集中到 leader 的
+non-overlapped epilogue。二者叠加 ⇒ 7.4×。
+
+### 14q.7 结论
+
+**cluster 分布式归约在 fp16 wgmma2 上不是可行杠杆**：机制正确（数值逐位一致、red 精确减半），
+但「逐元素远程 smem 原子 + 每 tile leader 串行 flush」的成本远超省下的全局 red。
+非原子 DSM（`st.async.shared::cluster` + leader 求和）可避免远程原子延迟，但需要
+`CL×[BN][HD]` 的 smem（CL=2 时 +128KB，214→342KB）**放不下**；把每元素偏和先在 CTA 内
+`red` 合并再做 cluster 又会退回 O7b 的 partial/reduce 结构。因此**保留 `--cluster` 为
+opt-in A/B（默认关）**，O7b 的确定性 `--det=1` 仍是唯一可用选项；fp16/bf16 main 的 L2 red 墙
+在本卡上暂无便宜的解法（与 §14k 的寄存器墙、§14o 的 reduce 带宽墙合起来，三条路都被证伪）。
+
+### 14q.8 原始输出
+
+`src/fp16/fa_bwd_fp16_cluster_reduce_smoke.out.txt`、
+`src/fp16/fa_bwd_fp16_o25_s512_ab.out.txt`、`src/fp16/fa_bwd_fp16_o25_s4096_ab.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o25_s512.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o25_ncu_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_o25_fa3_te_baseline.out.txt`。
+
 ## 15. 下一步
 
 > **O23（§14n）已完成**：把 O17/O18 的主 kernel + O9a 的 LSE 在 `-DFA_WGMMA` 构建下**默认打开**
@@ -2263,7 +2345,10 @@ GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，数值逐位不�
    `atomicAdd` 换成 per-(b,h,mblk) partial 覆盖写 + `dkv_reduce_kernel` 二次归约；`red`
    51.9M→**0**、主 kernel 快 **1.20×**、**结果逐位可复现**，但二次归约是纯 DRAM 带宽 bound
    （90.4%、384.9µs）⇒ `main+reduce` S4096 **0.810×**（S512 1.02×）。保留 `--det=1` opt-in。
-   **要再推进只能上 cluster 分布式归约**（在 SM 间 smem 内合并偏和、不落全局内存）——转 backlog。
+   - ~~**O25（cluster 分布式归约，§14q）**~~ **已做，负结果**：`red` 精确减半（51.9M→26.7M）
+     且数值逐位一致，但逐元素远程 `red.shared::cluster.add.f32` 延迟 + 每 tile leader 串行
+     flush ⇒ S4096 main **0.13×**（0.99→7.64ms）。保留 `--cluster` opt-in。**至此
+     「放大 BM」（§14k）、partial/reduce（§14o）、cluster（§14q）三条消 red 路全部证伪。**
    - **O17-2（§14l）**（已做）：把 O17 的 GEMM3/GEMM4 拆分到两个 wg，消 wg1 的 barrier 空等：
      `barrier` 1.61→0.46、main S4096 1.013×、GQA kv4 1.021×，数值逐位不变。red 字节不变。
 3. **fp8 侧的跨 wg 归约**：fp8 是 1 字节 operand、smem 更省，4wg 的寄存器压力比 fp16 小一档，
