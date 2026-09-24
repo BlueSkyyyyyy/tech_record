@@ -1,0 +1,55 @@
+### fa_vs_te_bwd_only fp16
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype=torch.float16
+shape                                  FA2.7.4             FA3          TE2.14  FA3/FA2
+(1, 1024, 40, 128) kv=8        0.1873/  229 0.1212/  354 0.1317/  326    1.55x
+(1, 1024, 32, 128) kv=4        0.1575/  218 0.0824/  417 0.1120/  307    1.91x
+(1, 1024, 64, 128) kv=4        0.2662/  258 0.1591/  432 0.1939/  354    1.67x
+(1, 1024, 64, 128) kv=1        0.2653/  259 0.1564/  439 0.2148/  320    1.70x
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 256, 2, 512) kv=2             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 512, 4, 512) kv=4             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 1024, 2, 512) kv=2            nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 4096, 16, 128) kv=16       0.7282/  377 0.3242/  848 0.4398/  625    2.25x
+
+### fa_vs_te_bwd_only bf16
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype=torch.bfloat16
+shape                                  FA2.7.4             FA3          TE2.14  FA3/FA2
+(1, 1024, 40, 128) kv=8        0.1879/  229 0.1214/  354 0.1322/  325    1.55x
+(1, 1024, 32, 128) kv=4        0.1596/  215 0.0828/  415 0.1122/  306    1.93x
+(1, 1024, 64, 128) kv=4        0.2661/  258 0.1588/  433 0.1939/  354    1.68x
+(1, 1024, 64, 128) kv=1        0.2663/  258 0.1566/  439 0.2144/  321    1.70x
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 256, 2, 512) kv=2             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 512, 4, 512) kv=4             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 1024, 2, 512) kv=2            nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 4096, 16, 128) kv=16       0.7291/  377 0.3200/  859 0.4424/  621    2.28x
+
+### fa_bwd_bench bench --dtype fp8
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== bench CUPTI device time (dtype=fp8) ===
+[b1_s512_h16_d128_causal_fp8] te=0.1011ms/42.50TF
+[b1_s1024_h16_d128_causal_fp8] te=0.1485ms/115.69TF
+[b4_s2048_h16_d128_causal_fp8] te=0.9801ms/280.47TF
+[b2_s2048_h16_d128_full_fp8] te=0.5792ms/237.27TF
+[b1_s4096_h16_d128_causal_fp8] te=0.5917ms/464.59TF
