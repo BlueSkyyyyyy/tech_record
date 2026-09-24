@@ -1,0 +1,4 @@
+b1_s512_h16_d128_causal_bf16               [timing] total(3 kernels) 0.1058 ms  20.29 TFLOPS (bwd FLOPs=4BS^2HD) 
+b1_s1024_h32_d128_kv4_causal_bf16          [timing] total(3 kernels) 0.2875 ms  59.76 TFLOPS (bwd FLOPs=4BS^2HD) 
+b1_s1024_h64_d128_kv1_causal_bf16          [timing] total(3 kernels) 0.4438 ms  77.43 TFLOPS (bwd FLOPs=4BS^2HD) 
+b1_s512_h4_d512_causal_bf16                [timing] total(3 kernels) 0.4366 ms  4.92 TFLOPS (bwd FLOPs=4BS^2HD) 
