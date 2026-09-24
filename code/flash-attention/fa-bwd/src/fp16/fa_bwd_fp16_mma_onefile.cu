@@ -29,27 +29,12 @@
 // =============================================================================
 
 #include <cuda_runtime.h>
+#include <cuda.h>
 #include <cuda_fp16.h>
 
-#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <fstream>
-#include <string>
-#include <vector>
-
-#define CUDA_CHECK(call)                                                        \
-  do {                                                                          \
-    cudaError_t _e = (call);                                                    \
-    if (_e != cudaSuccess) {                                                    \
-      fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(_e),       \
-              __FILE__, __LINE__);                                              \
-      std::exit(1);                                                             \
-    }                                                                           \
-  } while (0)
-
 
 // ----------------------------- 编译期常量 -----------------------------
 static constexpr int THREADS = 128;   // 4 warps
@@ -821,6 +806,202 @@ lse_mma_kernel_bal_wgmma(const __half* __restrict__ q, const __half* __restrict_
             mrow[s] = mn;
           }
         }
+    }
+#pragma unroll
+    for (int s = 0; s < 2; ++s) {
+      float m = mrow[s], l = lrow[s];
+#pragma unroll
+      for (int off = 1; off <= 2; off <<= 1) {
+        float m2 = __shfl_xor_sync(0xffffffffu, m, off);
+        float l2 = __shfl_xor_sync(0xffffffffu, l, off);
+        float mn = fmaxf(m, m2);
+        float ca = (m == -INFINITY) ? 0.f : l * fexp(m - mn);
+        float cb = (m2 == -INFINITY) ? 0.f : l2 * fexp(m2 - mn);
+        l = ca + cb;
+        m = mn;
+      }
+      if (c2 == 0) {
+        int r = wid * 16 + g + (s ? 8 : 0);
+        int qi = m0 + r;
+        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+      }
+    }
+    __syncthreads();
+  }
+}
+
+// =============================================================================
+// O30：TMA 版 LSE（N5 计划「TMA 化 operand」的第一步落地）
+// =============================================================================
+// 动机：O15a（第 51 轮）已用 `fa_bwd_fp16_tma_smoke.cu` 证明 `cuTensorMapEncodeTiled`
+//   (SWIZZLE_128B) 写出的 smem 布局与 kernel 的 `sw128_off` **逐字节相同**，并发现
+//   **HD=128 的 K-major tile 必须拆成 2 个 K=64 chunk**（TMA box 内维 128B = 64 个 fp16），
+//   wgmma 侧用两个 `SBO=1024` 描述符读。但那条通路一直只停在冒烟，没落进真 kernel。
+//   本 kernel 把 LSE 的 Q/K 载入从「逐 16B `cp.async` + 地址运算」换成 **4D TMA**
+//   （坐标 {k0, row, head, batch}），省掉 load 指令/地址运算（1 条 bulk 指令搬一个 8KB
+//   chunk），并复用同一份 SW128 tile 供 `wgmma.m64n64k16` 直读。
+//   * 数学与 `lse_mma_kernel_bal_wgmma` **完全一致**（镜像配对、online-softmax、4-lane
+//     `shfl` 归约），只换搬运方式 ⇒ 数值应在 fp32 求和次序内一致。
+//   * 仅 HD=128、causal（由 host 控制）。TMA asm 需 sm_90a，用 `FA_HAS_WGMMA` 包裹，
+//     `sm_90` 构建时退化为空实现（且 host 不会 launch 它）。
+// =============================================================================
+__device__ __forceinline__ void mbar_init(uint64_t* bar, uint32_t count) {
+#if FA_HAS_WGMMA
+  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(smem_u32(bar)),
+               "r"(count));
+#else
+  (void)bar; (void)count;
+#endif
+}
+__device__ __forceinline__ void mbar_arrive_expect(uint64_t* bar, uint32_t bytes) {
+#if FA_HAS_WGMMA
+  asm volatile(
+      "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(smem_u32(bar)),
+      "r"(bytes));
+#else
+  (void)bar; (void)bytes;
+#endif
+}
+__device__ __forceinline__ void mbar_wait(uint64_t* bar, uint32_t phase) {
+#if FA_HAS_WGMMA
+  uint32_t done = 0;
+  while (!done) {
+    asm volatile(
+        "{\n.reg .pred p;\nmbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\n"
+        "selp.b32 %0, 1, 0, p;\n}\n"
+        : "=r"(done)
+        : "r"(smem_u32(bar)), "r"(phase));
+  }
+#else
+  (void)bar; (void)phase;
+#endif
+}
+// 一条 4D TMA：全局张量 dims={D,S,H,B}，把坐标 {k0,row,head,batch} 起的 [64 行][64 列]
+// 搬进 dst（SW128 K-major，box 内维 64 fp16 = 128B）。
+__device__ __forceinline__ void tma_load_4d(void* dst, const CUtensorMap* map, int k0,
+                                            int r0, int hd, int b, uint64_t* bar) {
+#if FA_HAS_WGMMA
+  asm volatile(
+      "cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes"
+      " [%0], [%1, {%2, %3, %4, %5}], [%6];\n" ::"r"(smem_u32(dst)),
+      "l"((uint64_t)map), "r"(k0), "r"(r0), "r"(hd), "r"(b), "r"(smem_u32(bar)));
+#else
+  (void)dst; (void)map; (void)k0; (void)r0; (void)hd; (void)b; (void)bar;
+#endif
+}
+// 消费两个 K=64 chunk 的 QKᵀ：每个 chunk 用 `SBO=1024` 的描述符（见 O15a 冒烟）。
+__device__ __forceinline__ void wgmma_qkt64_tma(const char* Q0, const char* Q1,
+                                                const char* K0, const char* K1,
+                                                float (&d)[32]) {
+#pragma unroll
+  for (int i = 0; i < 32; ++i) d[i] = 0.f;
+  wgmma_fence();
+  const uint32_t q0 = smem_u32(Q0), q1 = smem_u32(Q1);
+  const uint32_t k0 = smem_u32(K0), k1 = smem_u32(K1);
+#pragma unroll
+  for (int s = 0; s < 4; ++s) {
+    wgmma_m64n64k16_f16(d, make_desc_sw128(sw128_k16_addr(q0, s), 1024),
+                        make_desc_sw128(sw128_k16_addr(k0, s), 1024));
+  }
+#pragma unroll
+  for (int s = 0; s < 4; ++s) {
+    wgmma_m64n64k16_f16(d, make_desc_sw128(sw128_k16_addr(q1, s), 1024),
+                        make_desc_sw128(sw128_k16_addr(k1, s), 1024));
+  }
+  wgmma_commit();
+  wgmma_wait0();
+}
+
+template <int HD, int PIPE = 1>
+__global__ void __launch_bounds__(THREADS)
+lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
+                       const __grid_constant__ CUtensorMap kmap,
+                       float* __restrict__ lse, int S, int H, int Hkv, float scale) {
+  static_assert(HD == 128, "wgmma LSE TMA 目前只做 HD=128");
+  constexpr int CH = (LBM / 8) * 1024;   // 单个 K=64 chunk 的 SW128 字节数（8KB）
+  constexpr int TILE = 2 * CH;           // [LBM][HD] K-major tile（16KB）
+  extern __shared__ char smem_raw[];
+  const uint32_t a0 = smem_u32(smem_raw);
+  const uint32_t pad = (1024u - (a0 & 1023u)) & 1023u;
+  char* Qs = smem_raw + pad;
+  char* Ks = Qs + TILE;
+  uint64_t* qbar = reinterpret_cast<uint64_t*>(Ks + (PIPE ? 2 : 1) * TILE);
+  uint64_t* kbar = qbar + 1;
+
+  const int nblk = (S + LBM - 1) / LBM;
+  const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  const int hkv = h / (H / Hkv);
+  const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  const int g = lane >> 2, c2 = (lane & 3) * 2;
+
+  if (tid == 0) {
+    mbar_init(qbar, 1);
+    mbar_init(kbar, 1);
+    if (PIPE) mbar_init(kbar + 1, 1);
+  }
+  __syncthreads();
+
+  auto issue_q = [&](int m0) {
+    if (tid == 0) {
+      mbar_arrive_expect(qbar, TILE);
+      tma_load_4d(Qs, &qmap, 0, m0, h, b, qbar);
+      tma_load_4d(Qs + CH, &qmap, 64, m0, h, b, qbar);
+    }
+  };
+  auto issue_k = [&](int stage, int j0) {
+    if (tid == 0) {
+      char* Kd = Ks + stage * TILE;
+      mbar_arrive_expect(kbar + stage, TILE);
+      tma_load_4d(Kd, &kmap, 0, j0, hkv, b, kbar + stage);
+      tma_load_4d(Kd + CH, &kmap, 64, j0, hkv, b, kbar + stage);
+    }
+  };
+
+  int quse = 0;
+  int kuse[2] = {0, 0};
+#pragma unroll 1
+  for (int t = 0; t < 2; ++t) {
+    const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
+    if (t == 1 && pair == nblk - 1 - pair) break;
+    const int m0 = mblk * LBM;
+    const int ncols = min(S, m0 + LBM);
+    const int ntiles = (ncols + LBN - 1) / LBN;
+    issue_q(m0);
+    if (ntiles > 0) issue_k(0, 0);
+    mbar_wait(qbar, (uint32_t)(quse & 1)); quse++;
+
+    float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
+    for (int nt = 0; nt < ntiles; ++nt) {
+      const int st = PIPE ? (nt & 1) : 0;
+      mbar_wait(kbar + st, (uint32_t)(kuse[st] & 1)); kuse[st]++;
+      __syncthreads();
+      const int j0 = nt * LBN;
+      char* Kt = Ks + st * TILE;
+      if (PIPE) {
+        if (nt + 1 < ntiles) issue_k(st ^ 1, j0 + LBN);
+      }
+
+      float d[32];
+      wgmma_qkt64_tma(Qs, Qs + CH, Kt, Kt + CH, d);
+
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          int s = q >= 2 ? 1 : 0;
+          int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+          int c = j * 8 + c2 + (q & 1);
+          int qi = m0 + r, jg = j0 + c;
+          float sv = -INFINITY;
+          if (qi < S && jg < S && jg <= qi) sv = d[j * 4 + q] * scale;
+          if (sv != -INFINITY) {
+            float mn = fmaxf(mrow[s], sv);
+            lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
+            mrow[s] = mn;
+          }
+        }
+      __syncthreads();  // 所有 warp 读完本 tile 后才能覆盖该 stage / 下一轮 Q
+      if (!PIPE && nt + 1 < ntiles) issue_k(0, j0 + LBN);
     }
 #pragma unroll
     for (int s = 0; s < 2; ++s) {
@@ -2745,6 +2926,54 @@ __global__ void convert_kernel(const float* __restrict__ dq_acc,
 }
 
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <string>
+#include <vector>
+
+#define CUDA_CHECK(call)                                                        \
+  do {                                                                          \
+    cudaError_t _e = (call);                                                    \
+    if (_e != cudaSuccess) {                                                    \
+      fprintf(stderr, "CUDA error %s at %s:%d\n", cudaGetErrorString(_e),       \
+              __FILE__, __LINE__);                                              \
+      std::exit(1);                                                             \
+    }                                                                           \
+  } while (0)
+
+#if defined(FA_WGMMA) && defined(FA_TMA)
+// O30：为 LSE 的 Q/K 建 4D TMA 描述符（dims={D,S,H,B}，SW128，box={64,64,1,1}）。
+// globalStride（字节）：dim1(S) 的行距 = H*D*2，dim2(H) 的头距 = D*2，dim3(B) 的批距。
+// 要求 16B 对齐（D=128 时 256 的整数倍，恒成立）。坐标 {k0,row,head,batch}。
+static CUtensorMap make_lse_map(const void* ptr, long long H, long long S, long long D,
+                                long long B) {
+  CUtensorMap map;
+  uint64_t dims[4] = {(uint64_t)D, (uint64_t)S, (uint64_t)H, (uint64_t)B};
+  uint64_t strides[3] = {(uint64_t)(H * D * 2), (uint64_t)(D * 2),
+                         (uint64_t)(S * H * D * 2)};
+  uint32_t box[4] = {64, 64, 1, 1};
+  uint32_t estr[4] = {1, 1, 1, 1};
+  CUresult r = cuTensorMapEncodeTiled(
+      &map, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, 4, (void*)ptr, dims, strides, box, estr,
+      CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+      CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  if (r != CUDA_SUCCESS) {
+    const char* s = "?";
+    cuGetErrorString(r, &s);
+    fprintf(stderr, "cuTensorMapEncodeTiled failed: %s\n", s);
+    std::exit(1);
+  }
+  return map;
+}
+#endif
+
+// =============================================================================
+// 极简 npy 读取（little-endian C-contiguous float32）
+// =============================================================================
 struct NpyF32 {
   std::vector<float> data;
   std::vector<long> shape;
@@ -2955,6 +3184,9 @@ int main(int argc, char** argv) {
   int lse_wgm = 0;
   // O23：lse_wgm 是否被用户显式指定（--lsewgm=0/1）。未指定时在 FA_WGMMA 构建下默认开。
   bool lse_forced = false;
+  // O30：LSE 是否用 TMA 版（仅 FA_TMA 构建、D==128、causal；1=用 4D TMA 载入 Q/K）。
+  //   -1=自动（FA_TMA 构建下 D==128/causal 默认开），0/1 由 `--lsetma=` 强制。
+  int lse_tma = -1;
   // O9b：主 kernel 是否用 wgmma（仅 FA_WGMMA 构建、D==128 且 sel=(64,64) 时生效）。
   int wgmma_sel = 0;
   // O16：wgmma 主 kernel 是否用「分段 wait_group」重叠 epilogue（-1=自动/开，0=关，1=开）。
@@ -2995,6 +3227,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--lsewgm=", 0) == 0) { lse_wgm = atoi(a.c_str() + 9); lse_forced = true; }
     else if (a == "--lsewgm") { lse_wgm = 1; lse_forced = true; }
+    else if (a.rfind("--lsetma=", 0) == 0) lse_tma = atoi(a.c_str() + 9);
+    else if (a == "--lsetma") lse_tma = 1;
     else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
     else if (a == "--wgmma") wgmma_sel = 1;
     else if (a.rfind("--ow=", 0) == 0) ow_opt = atoi(a.c_str() + 5);
@@ -3096,6 +3330,8 @@ int main(int argc, char** argv) {
   const int kLseTileWgm = (LBM / 8) * (D / 64) * 1024;
   const int kLseSmemWgm0 = 1024 + kLseTileWgm * 2;  // Q + K（单缓冲）
   const int kLseSmemWgm1 = 1024 + kLseTileWgm * 3;  // Q + 2×K
+  // O30：TMA 版与 wgmma 版同布局（Q + 2×K）+ 3 个 mbarrier（24B，取 64B 余量）。
+  const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
   if (D == 128) {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<128, 0>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -3103,7 +3339,20 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<128, 1>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     kLseSmemWgm1));
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<128, 1>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    kLseSmemTma1));
+#endif
   }
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  // O30：建 LSE 的 Q/K 4D TMA 描述符（一次，供所有 (h,b) CTA 用坐标选择）。
+  CUtensorMap qmap_lse, kmap_lse;
+  if (D == 128) {
+    qmap_lse = make_lse_map(d_q, H, S, D, B);
+    kmap_lse = make_lse_map(d_k, Hkv, S, D, B);
+  }
+#endif
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<128>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 0>,
@@ -3231,6 +3480,13 @@ int main(int argc, char** argv) {
   // O23：LSE 预处理也默认走 Hopper wgmma 版（仅 causal / D==128；非 causal 自动落回 O8 原版）。
   if (!lse_forced && D == 128 && causal) lse_wgm = 1;
 #endif
+  // O30：TMA 版 LSE 需驱动 API（`cuTensorMapEncodeTiled`）⇒ 只有 `-DFA_TMA -lcuda` 构建才编译
+  //   该路径；此时 D==128/causal 默认开（1.30–1.36× 于 wgmma+cp.async，且逐位相同）。
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  if (lse_tma < 0) lse_tma = (D == 128 && causal) ? 1 : 0;
+#else
+  if (lse_tma < 0) lse_tma = 0;
+#endif
   printf("[O23] main backend = %s | lse = %s (D=%d S=%d)%s\n",
          wg2bn_sel ? "wgmma2b(BN=128)" : (wg2_sel ? "wgmma2(BN=64)" : "mma"),
          (D == 128 && causal && lse_wgm) ? "wgmma" : "mma", D, S,
@@ -3317,6 +3573,13 @@ int main(int argc, char** argv) {
       else
         delta_kernel<512><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
     } else {
+#if defined(FA_WGMMA) && defined(FA_TMA)
+      if (causal && lse_tma)
+        lse_mma_kernel_bal_tma<128, 1><<<lg_bal, THREADS, kLseSmemTma1>>>(qmap_lse, kmap_lse,
+                                                                         d_lse, S, H, Hkv,
+                                                                         scale);
+      else
+#endif
       if (causal && lse_wgm)
         lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse,
                                                                             S, H, Hkv, scale);
@@ -3447,6 +3710,44 @@ int main(int argc, char** argv) {
       printf("[O9 A/B] lse wgmma+SW128 %.4f ms (vs bal+cpasync %.3fx, vs O8 %.3fx)\n", ms_wgm,
              ms_balp / ms_wgm, ms_o8 / ms_wgm);
     }
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    // ---- O30 A/B：LSE 的 wgmma+cp.async 版 vs 4D-TMA 版（同 session + 数值对拍）----
+    if (lse_tma) {
+      float* d_lse2 = nullptr;
+      CUDA_CHECK(cudaMalloc(&d_lse2, (size_t)B * S * H * sizeof(float)));
+      auto launch_w = [&]() {
+        lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse2,
+                                                                            S, H, Hkv, scale);
+      };
+      auto launch_t = [&]() {
+        lse_mma_kernel_bal_tma<128, 1><<<lg_bal, THREADS, kLseSmemTma1>>>(qmap_lse, kmap_lse,
+                                                                         d_lse, S, H, Hkv,
+                                                                         scale);
+      };
+      auto time_one = [&](auto launch, float* out_ms) {
+        for (int i = 0; i < 3; ++i) launch();
+        CUDA_CHECK(cudaEventRecord(ev0));
+        for (int i = 0; i < iters; ++i) launch();
+        CUDA_CHECK(cudaEventRecord(ev1));
+        CUDA_CHECK(cudaEventSynchronize(ev1));
+        float t = 0.f;
+        CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+        *out_ms = t / iters;
+      };
+      float ms_w = 0.f, ms_t = 0.f;
+      time_one(launch_w, &ms_w);
+      time_one(launch_t, &ms_t);
+      CUDA_CHECK(cudaDeviceSynchronize());
+      std::vector<float> l1((size_t)B * S * H), l2((size_t)B * S * H);
+      CUDA_CHECK(cudaMemcpy(l1.data(), d_lse, l1.size() * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(l2.data(), d_lse2, l2.size() * 4, cudaMemcpyDeviceToHost));
+      double e = 0;
+      for (size_t i = 0; i < l1.size(); ++i) e = std::max(e, (double)fabs(l1[i] - l2[i]));
+      printf("[O30 A/B] lse tma %.4f ms | wgmma %.4f ms (wgmma/tma %.3fx) | "
+             "max_abs(tma-vs-wgmma)=%.3e\n", ms_t, ms_w, ms_w / ms_t, e);
+      cudaFree(d_lse2);
+    }
+#endif
   }
 
   double main_flops = 4.0 * (double)B * S * H * S * D;

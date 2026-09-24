@@ -2315,6 +2315,114 @@ opt-in A/B（默认关）**，O7b 的确定性 `--det=1` 仍是唯一可用选�
 `src/fp16/fa_bwd_fp16_mma_main_o25_ncu_s4096.out.txt`、
 `src/fp16/fa_bwd_fp16_o25_fa3_te_baseline.out.txt`。
 
+## 14r. O30：LSE 预处理改用 4D-TMA 载入 Q/K（唯一能压指令数的搬运杠杆，1.30–1.36×；数值逐位不变）
+
+### 14r.1 动机
+
+O15a（第 51 轮，§14i）已用 `fa_bwd_fp16_tma_smoke.cu` 证明 `cuTensorMapEncodeTiled`
+(`SWIZZLE_128B`) 写出的 smem 布局与 kernel 的 `sw128_off` **逐字节相同**，并指出
+**HD=128 的 K-major tile 必须拆成 2 个 K=64 chunk**（TMA box 内维 128B = 64 个 fp16），
+wgmma 侧用两个 `SBO=1024` 描述符读。但那条通路一直只停在冒烟，没落进真 kernel。
+O23 把 fp16/bf16 的 Hopper 主 kernel + LSE 默认化后，端到端里剩下最大的、还没上 TMA 的
+搬运就是 **LSE 的 Q/K 载入**：它每 tile 用「逐 16B `cp.async` + 一手地址运算」搬
+`LBM×HD = 64×128` 个 half（= 8 个 unit/线程/tile），S=4096 时最多 64 个 K tile/CTA。
+本项把 LSE 的 Q/K 换成 **4D TMA**（坐标 `{k0,row,head,batch}`），一条 bulk 指令搬一个
+8KB chunk，省掉 load 指令与地址运算，并复用同一份 SW128 tile 供 `wgmma.m64n64k16` 直读。
+**数学与 `lse_mma_kernel_bal_wgmma` 完全一致**（镜像配对、online-softmax、4-lane `shfl`），
+只换搬运方式 ⇒ 数值应逐位相同。
+
+### 14r.2 实现（单/两文件 device 代码逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+device 侧（`fa_bwd_fp16_mma_kernels.cuh`，紧随 `lse_mma_kernel_bal_wgmma` 之后）：
+
+* 新增 TMA 原语 `mbar_init`/`mbar_arrive_expect`/`mbar_wait`/
+  `tma_load_4d`（`cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes`）
+  与 `wgmma_qkt64_tma`（两个 K=64 chunk、各自 `SBO=1024` 的 4+4 条 `wgmma.m64n64k16`）。
+  全部用 `FA_HAS_WGMMA` 包裹 ⇒ `sm_90` 构建下退化为空实现，行为不变。
+* 新增 `lse_mma_kernel_bal_tma<HD,PIPE=1>`：smem = `Q(16KB) + 2×K(各 16KB)` + 3 个
+  mbarrier；`issue_q`/`issue_k` 各发 2 条 4D TMA（chunk 0/1），K 双缓冲用两个 barrier +
+  逐 barrier 的相位计数；prologue 发 Q + tile0，循环内 `mbar_wait → __syncthreads → 发下一
+  tile(st^1) → wgmma`，与 `lse_mma_kernel_bal_wgmma` 的流水结构对应。
+
+host 侧（`fa_bwd_fp16_mma_main.cu`）：新增 `make_lse_map(ptr,H,S,D,B)`（4D 描述符，
+`dims={D,S,H,B}`、stride `{H*D*2, D*2, S*H*D*2}`、box `{64,64,1,1}`）与 CLI `--lsetma=0/1`；
+TMA 路径需驱动 API，故整体用 **`-DFA_TMA`** 编译开关（隐含 `-DFA_WGMMA`）包裹：
+`-DFA_WGMMA -DFA_TMA -lcuda` 构建下，D==128/causal 默认开 TMA（`--lsetma=0` 可退回 wgmma）；
+仅 `-DFA_WGMMA` 或纯 `sm_90` 构建**完全不编译/不引用驱动符号**，无需 `-lcuda`。
+
+### 14r.3 数值（ours-vs-ref，fp16 causal，max_abs）—— 与历史逐位一致
+
+TMA-vs-wgmma 的 LSE **`max_abs = 0.000e+00`（逐位相同）**，5 个 shape × 单/两文件全部如此。
+最终 `dq/dk/dv vs ref` 与 O5–O24 历史值一致：
+
+| shape | dq | dk | dv |
+|---|---|---|---|
+| MHA S=512 | 1.671e-3 | 1.771e-3 | 1.899e-3 |
+| MHA S=4096 | 1.883e-3 | 1.734e-3 | 1.966e-3 |
+| GQA kv4 S=1024 | 2.134e-3 | 3.305e-3 | 3.850e-3 |
+| GQA kv8 S=1024 | 2.008e-3 | 2.931e-3 | 3.891e-3 |
+| MQA kv1 S=1024 | 2.292e-3 | 7.934e-3 | 7.517e-3 |
+
+### 14r.4 性能（同 session A/B，CUDA event，单/两文件）
+
+LSE-only（`[O30 A/B]`）与端到端 total：
+
+| shape | lse wgmma (ms) | lse tma (ms) | 加速 | total (tma) | TFLOPS |
+|---|---|---|---|---|---|
+| MHA S=512 | 0.0328 | **0.0249** | **1.32×** | 0.0942 | 22.8 |
+| MHA S=4096 | 0.2878 | **0.2128** | **1.35×** | 1.2553 | 109.5 |
+| GQA kv4 S=1024 | 0.0640 | **0.0488** | **1.31×** | 0.2575 | 66.7 |
+| GQA kv8 S=1024 | 0.0684 | **0.0528** | **1.30×** | 0.2905 | 73.9 |
+| MQA kv1 S=1024 | 0.0777 | **0.0590** | **1.32×** | 0.3945 | 87.1 |
+
+单文件与两文件逐指标一致（差异 <1% session 噪声）。端到端 S=4096 **1.2553ms（O24 1.3309ms，
+1.06×）**；preprocess S=4096 0.2271ms（O24 0.3002ms）。
+
+### 14r.5 ncu（lse，S=4096，同 session，`-c 1`）
+
+| 指标 | wgmma+cp.async | **4D TMA** |
+|---|---|---|
+| Duration | 286.30 µs | **214.56 µs（1.33×）** |
+| Executed Instructions | 165.30 M | **117.87 M（−28.7%）** |
+| registers/thread | 62 | **58** |
+| shared mem/block | 50.18 KB | 50.24 KB |
+| achieved occupancy | 23.02 % | 23.11 % |
+| DRAM / L1TEX / L2 | 3.77 / 17.43 / 20.27 % | 5.05 / 17.69 / 26.77 % |
+| Compute (SM) | 60.93 % | 58.30 % |
+| stall `wait` / `short` / `long` | 2.26 / 0.77 / 0.04 | 2.33 / 0.86 / 0.17 |
+
+结论：收益来源是 **指令数 −28.7%**（8 个 `cp.async`+地址运算/tile/线程 → 1 条 bulk 指令/lane），
+Duration 随之 1.33×；**墙没有变**——仍是 **Compute ~58% + `wait`（softmax/mma 固定延迟）**，
+与 O8b/O9 的判断一致。即 TMA 只把「搬运那半」压掉，**LSE 的真正天花板是每元素 softmax epilogue**。
+
+### 14r.6 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`，FA2/FA3/TE 三列）
+
+FA3 MHA S4096 **0.3244ms/847TF**、GQA kv4 0.0825/417、kv8 0.1212/354、MQA kv1 0.1562/440；
+TE MHA 0.4406/624。ours total 时间比 FA3：MHA S4096 **3.87×**（O24 4.10×）、GQA kv4 **3.12×**
+（O24 3.28×）、kv8 2.40×、MQA kv1 2.53×。**全 shape 小幅改善**。
+
+### 14r.7 复现
+
+```bash
+# 构建（TMA 需驱动 API：-DFA_TMA -lcuda；不带 FA_TMA 则只需 -DFA_WGMMA）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16 --iters=50
+# A/B：--lsetma=0 退回 wgmma+cp.async（程序内 [O30 A/B] 同时计时两者 + max_abs 对拍）
+# ncu
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/ncu.sh src/fp16/fa_bwd_fp16_mma_main.cu -c 1 \
+  --kernel-name regex:lse_mma_kernel_bal_tma --set full \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16 --iters=1
+```
+
+### 14r.8 原始输出
+
+`src/fp16/fa_bwd_fp16_o30_lse_tma_sweep.out.txt`（单/两文件 ×5 shape × `[O30 A/B]` + 对拍）、
+`src/fp16/fa_bwd_fp16_lse_tma_ncu_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_lse_wgmma_ncu_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_o30_fa3_te_baseline.out.txt`。
+
 ## 15. 下一步
 
 > **O23（§14n）已完成**：把 O17/O18 的主 kernel + O9a 的 LSE 在 `-DFA_WGMMA` 构建下**默认打开**
@@ -2356,6 +2464,8 @@ GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，数值逐位不�
 4. ~~**O17 的 `BN=128` 微优化**~~ **已做（§14m）**：MHA main **1.029×**（S=4096 0.9895→0.9618ms，
    142.9 TF），GQA/MQA 中性（保持 O17）；`red` 逐字节不变（证实 BN 不动归约结构），
    收益来自 tile 数减半摊薄 barrier/wgmma 固定开销。
-5. **TMA 化 Q/K/V/dO（O15a 通路已就绪）**：需把 K-major HD=128 tile 改成 **2×K=64 chunk**
-   （§14i.2），压 `long_scoreboard`/指令数；动不了 L2 red，排在后面。
+5. **TMA 化 operand**：**LSE 的 Q/K 已落地（§14r，O30，第七十一轮）**——4D-TMA + 2×K=64 chunk，
+   LSE-only **1.30–1.36×**、指令数 −28.7%、数值逐位不变；但墙不变（Compute ~58% + `wait`）。
+   **剩余**：主 kernel 的 Q/K/V/dO TMA 化（需把 GEMM3/4/5 的转置 B 从 SW128 的读法一起改，
+   动不了 L2 red）、bf16/fp8 的 TMA（dtype 参数化 / fp8 SW128 的 `k/16` chunk 下标）。
 6. MLA 降 smem 冲 2 CTA/SM / split-KV 仍在列。
