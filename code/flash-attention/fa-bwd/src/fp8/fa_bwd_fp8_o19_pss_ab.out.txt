@@ -1,0 +1,78 @@
+===== b1_s512_h16_d128_causal_fp8  FA_PSS_EXTRA=1 =====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 68608 bytes (67.0 KB)
+[timing] total(quant+pre+main+cvt) 0.1621 ms  13.24 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0146 ms | preprocess 0.0471 ms | main 0.0681 ms | convert 0.0323 ms
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+===== b1_s512_h16_d128_causal_fp8  FA_PSS_EXTRA=5 =====
+smem = 72704 bytes (71.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 70656 bytes (69.0 KB)
+[timing] total(quant+pre+main+cvt) 0.1597 ms  13.45 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0144 ms | preprocess 0.0467 ms | main 0.0670 ms | convert 0.0316 ms
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+===== b1_s1024_h32_d128_causal_fp8  FA_PSS_EXTRA=1 =====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 68608 bytes (67.0 KB)
+[timing] total(quant+pre+main+cvt) 0.6061 ms  28.34 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0414 ms | preprocess 0.1025 ms | main 0.3968 ms | convert 0.0655 ms
+  dq   vs ref: max_abs=2.400e-01  max_rel=1.887e+02
+  dk   vs ref: max_abs=4.195e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.536e-01  max_rel=8.068e+01
+===== b1_s1024_h32_d128_causal_fp8  FA_PSS_EXTRA=5 =====
+smem = 72704 bytes (71.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 70656 bytes (69.0 KB)
+[timing] total(quant+pre+main+cvt) 0.6028 ms  28.50 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0413 ms | preprocess 0.1030 ms | main 0.3929 ms | convert 0.0656 ms
+  dq   vs ref: max_abs=2.400e-01  max_rel=1.887e+02
+  dk   vs ref: max_abs=4.195e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.536e-01  max_rel=8.068e+01
+===== b1_s4096_h16_d128_causal_fp8  FA_PSS_EXTRA=1 =====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 68608 bytes (67.0 KB)
+[timing] total(quant+pre+main+cvt) 2.8585 ms  48.08 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0684 ms | preprocess 0.3956 ms | main 2.2626 ms | convert 0.1319 ms
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01
+===== b1_s4096_h16_d128_causal_fp8  FA_PSS_EXTRA=5 =====
+smem = 72704 bytes (71.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 70656 bytes (69.0 KB)
+[timing] total(quant+pre+main+cvt) 2.8375 ms  48.44 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0683 ms | preprocess 0.3961 ms | main 2.2373 ms | convert 0.1358 ms
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01
+===== b1_s1024_h32_d128_kv4_causal_fp8  FA_PSS_EXTRA=1 =====
+smem = 70656 bytes (69.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 68608 bytes (67.0 KB)
+[timing] total(quant+pre+main+cvt) 0.5591 ms  30.73 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0290 ms | preprocess 0.1012 ms | main 0.3834 ms | convert 0.0455 ms
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.994e+02
+  dk   vs ref: max_abs=5.408e-01  max_rel=1.632e+02
+  dv   vs ref: max_abs=7.072e-01  max_rel=9.228e+01
+===== b1_s1024_h32_d128_kv4_causal_fp8  FA_PSS_EXTRA=5 =====
+smem = 72704 bytes (71.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 70656 bytes (69.0 KB)
+[timing] total(quant+pre+main+cvt) 0.5527 ms  31.08 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0275 ms | preprocess 0.1006 ms | main 0.3806 ms | convert 0.0440 ms
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.994e+02
+  dk   vs ref: max_abs=5.408e-01  max_rel=1.632e+02
+  dv   vs ref: max_abs=7.072e-01  max_rel=9.228e+01
+===== b1_s1024_h2_d512_causal_fp8  FA_PSS_EXTRA=1 =====
+smem = 205824 bytes (201.0 KB); lse smem = 68096 bytes (66.5 KB)
+[timing] total(quant+pre+main+cvt) 0.5293 ms  8.11 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0148 ms | preprocess 0.1383 ms | main 0.3274 ms | convert 0.0487 ms
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+===== b1_s1024_h2_d512_causal_fp8  FA_PSS_EXTRA=5 =====
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+[timing] total(quant+pre+main+cvt) 0.5265 ms  8.16 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0145 ms | preprocess 0.1382 ms | main 0.3196 ms | convert 0.0541 ms
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
