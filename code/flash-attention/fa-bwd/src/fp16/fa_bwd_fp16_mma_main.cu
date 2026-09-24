@@ -276,6 +276,27 @@ static void launch_bwd_wgmma2b_tma(dim3 mg, CUtensorMap qmap, CUtensorMap kmap,
       qmap, kmap, vmap, dmap, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
       dq_h);
 }
+
+// O35：把 **BN=64** 的 wgmma2 主 kernel 的 Q/K/V/dO 换成逐 atom 4D-TMA（布局逐字节不变）。
+// smem 与 cp.async 版 wgmma2 同（+ 4 个 mbarrier 32B），故 1 CTA/SM 不变。
+template <int HD, bool SPLIT = true>
+static void launch_bwd_wgmma2_tma(dim3 mg, CUtensorMap qmap, CUtensorMap kmap,
+                                  CUtensorMap vmap, CUtensorMap dmap, const float* delta,
+                                  const float* lse, float* dq_acc, float* dk_acc,
+                                  float* dv_acc, int S, int H, int Hkv, float scale,
+                                  int causal, __half* dq_h = nullptr) {
+  static_assert(HD == 128, "wgmma2 TMA 只做 HD=128");
+  constexpr int BM = 128, BN = 64;
+  constexpr int QTILE = (BM / 8) * (HD / 64) * 1024;
+  constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
+  constexpr int PTILE = (BM / 8) * (BN / 64) * 1024;
+  constexpr int smem = 1024 + QTILE * 2 + KTILE * 3 + PTILE * 2 + 128;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma2_tma_kernel<HD, SPLIT>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  fa_bwd_fp16_wgmma2_tma_kernel<HD, SPLIT><<<mg, 256, smem>>>(
+      qmap, kmap, vmap, dmap, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
+      dq_h);
+}
 #endif
 
 // O17b：4 warpgroup（BM=256）wgmma 主 kernel（只 HD=128）。Q/dO/P/dS SW128，K/V 单缓冲 + 后段预取。
@@ -640,7 +661,7 @@ int main(int argc, char** argv) {
 #else
          "",
 #endif
-         (wg2bn_sel && maintma_sel) ? " +maintma" : "");
+         ((wg2bn_sel || wg2_sel) && maintma_sel) ? " +maintma" : "");
   // O24：D==128 的 wgmma2/wgmma2b 路径里 dQ 唯一拥有 ⇒ 主 kernel 直接写 fp16 `dq`，
   // `convert_kernel` 跳过 dQ（n_q 传 0）。其它路径（mma/wgmma/wgmma4/MLA）仍写 fp32 dq_acc。
   bool dq_direct = false;
@@ -693,6 +714,20 @@ int main(int argc, char** argv) {
                                         d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, dqo);
         return;
       }
+#if defined(FA_WGMMA) && defined(FA_TMA)
+      // O35：BN=64 的 wgmma2 也走逐 atom 4D-TMA（`--maintma`）。
+      if (maintma_sel) {
+        if (wg2split_sel)
+          launch_bwd_wgmma2_tma<128, true>(g, qmap_m, kmap_m, vmap_m, dmap_m, d_delta, d_lse,
+                                           d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                           (int)causal, dqo);
+        else
+          launch_bwd_wgmma2_tma<128, false>(g, qmap_m, kmap_m, vmap_m, dmap_m, d_delta, d_lse,
+                                            d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                            (int)causal, dqo);
+        return;
+      }
+#endif
       if (wg2split_sel)
         launch_bwd_wgmma2<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
                                      d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, dqo);
@@ -1025,6 +1060,12 @@ int main(int argc, char** argv) {
           launch_bwd_wgmma2b_tma<128, true>(g, qmap_m, kmap_m, vmap_m, dmap_m, d_delta, d_lse,
                                             d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
                                             (int)causal);
+        } else if (mode == 9) {
+          // O35：BN=64 的 wgmma2 走 TMA。
+          dim3 g((S + 127) / 128, H, B);
+          launch_bwd_wgmma2_tma<128, true>(g, qmap_m, kmap_m, vmap_m, dmap_m, d_delta, d_lse,
+                                           d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                           (int)causal);
 #endif
         } else if (mode == 1) {
           dim3 g((S + 63) / 64, H, B);
@@ -1054,7 +1095,8 @@ int main(int argc, char** argv) {
     std::vector<float> q6(n), k6(nkv), v6(nkv), q7(n), k7(nkv), v7(nkv);
 #if defined(FA_WGMMA) && defined(FA_TMA)
     std::vector<float> q8(n), k8(nkv), v8(nkv);
-    float ms_wg2bt = 0.f;
+    std::vector<float> q9(n), k9(nkv), v9(nkv);
+    float ms_wg2bt = 0.f, ms_wg2t = 0.f;
 #endif
     float ms_mma = 0.f, ms_wgm = 0.f, ms_wg2 = 0.f, ms_wg4 = 0.f, ms_wg4s = 0.f;
     float ms_wg2ns = 0.f, ms_wg2b = 0.f, ms_wg2bns = 0.f;
@@ -1068,6 +1110,7 @@ int main(int argc, char** argv) {
     time_o17(7, &ms_wg2bns, q7.data(), k7.data(), v7.data());
 #if defined(FA_WGMMA) && defined(FA_TMA)
     time_o17(8, &ms_wg2bt, q8.data(), k8.data(), v8.data());
+    time_o17(9, &ms_wg2t, q9.data(), k9.data(), v9.data());
 #endif
     auto mad = [](const std::vector<float>& a, const std::vector<float>& b) {
       double d = 0; for (size_t i = 0; i < a.size(); ++i) d = std::max(d, (double)std::fabs(a[i]-b[i])); return d;
@@ -1096,6 +1139,11 @@ int main(int argc, char** argv) {
            ms_wg2b, main_flops / (ms_wg2b * 1e-3) / 1e12, ms_wg2bt,
            main_flops / (ms_wg2bt * 1e-3) / 1e12, ms_wg2b / ms_wg2bt, mad(q8, q6), mad(k8, k6),
            mad(v8, v6));
+    printf("[O35 A/B] main wg2(BN64,cp.async) %.4f ms (%.1f TF) | wg2(BN64)+TMA %.4f ms "
+           "(%.1f TF) => %.3fx | max|diff| tma-vs-wg2 dq/dk/dv=%.2e/%.2e/%.2e\n",
+           ms_wg2, main_flops / (ms_wg2 * 1e-3) / 1e12, ms_wg2t,
+           main_flops / (ms_wg2t * 1e-3) / 1e12, ms_wg2 / ms_wg2t, mad(q9, q2), mad(k9, k2),
+           mad(v9, v2));
 #endif
     printf("[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) %.4f ms (%.1f TF) | O17-2 拆分(wg0=dV,"
            "wg1=dK) %.4f ms (%.1f TF) => %.3fx | max|diff| dq/dk/dv=%.2e/%.2e/%.2e\n",

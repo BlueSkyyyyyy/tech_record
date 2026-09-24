@@ -297,6 +297,14 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 搬运那一半，动不了主墙（dK/dV 的 L2 `red`）**。`max|diff|`：dq `0`（逐位）、dk/dv ~2e-5
 > （仅 atomic 次序）。对标同 session FA3 MHA S4096 0.3263/842、TE 0.4443/619 ⇒ ours total
 > 时间 **3.77×**（O30 3.87×）。详见 `01` §14s。
+>
+> **O35（BN=64 的 `wgmma2` 也改用逐 atom 4D-TMA，fp16，第七十五轮）**：补全 O33 未覆盖的
+> **BN=64 几何**（O23 默认档在 S<4096 / GQA/MQA 走它）。同 session A/B（main-only）：
+> S=512 **0.992×**、S=1024 GQA kv4 **0.996×**、S=4096 强制 BN=64 **1.021×**（0.9884→0.9685ms）。
+> ncu：TMA 把指令数砍 **−24%**、regs 200→184，但 S=512/1024 是 **延迟/grid bound**
+> （Waves 0.48 / grid=128<132 SM）⇒ Duration 持平；S=4096（grid=512、tile 数 4×）才体现
+> 1.02×。`max|diff|`：dq `0`（逐位）、dk/dv ~1e-4（仅 atomic 次序）。**S≥4096 默认仍是
+> BN=128 的 wgmma2b（O33），O35 仅补几何覆盖、不改默认端到端。** 详见 `01` §14t。
 
 ### 2.2 bf16（峰值 989 TFLOPS）
 
@@ -766,7 +774,8 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
    | bf16 | **wgmma2 main（O17-bf16, BM=128, 2 wg, S=4096）** | 6.47% | 36.68% | 27.36% | 12.41%（**149.50KB, 1 CTA/SM**, 200 regs, 256 thr） | — | Duration 1.48→**0.997ms** | **L2 54.63%（`red` 102,236,160→51,904,512=0.508×、`read` 0.50×）**：与 fp16 O17 逐项一致；新墙仍是 L2（red 占 ~72.6%）；bank conflict 0 |
    | fp16 | **wgmma2 main（O17-2, GEMM3/4 拆分, S=4096）** | 6.57% | 49.46% | 27.75% | 12.48%（148.48KB, 1 CTA/SM, 200 regs, 256 thr） | 3.88 | **`barrier` 1.61→0.46（−3.5×）**、wait 1.19、long 0.75、short 0.40 | **L2 red 完全不变（51,904,512）** ⇒ 收益来自消 wg1 在 GEMM3/4 的 barrier 空等（张量工作量 3:1→1:1）；Duration 997.7→**982.4µs**，墙仍是 **L2 red + `wait`** |
    | fp16 | **wgmma2b main（O18, BN=128, S=4096）** | 6.77% | **44.34%** | 23.60% | 12.50%（**224.0KB, 1 CTA/SM**, 230 regs, 256 thr） | 3.88 | wait 1.25、**barrier 0.46→0.93**、long 0.60、short 0.43 | **Duration 982.4→951.1µs（1.033×）**：tile 数减半摊薄 barrier/wgmma 序列；**`red` 51,904,512 逐字节不变**（BN 不动归约结构）；墙仍是 **L2 57.2%（red 占 ~72%）+ `wait` + 低 occ** |
-   | fp16 | **wgmma2b+tma main（O33, Q/K/V/dO 逐 atom TMA, S=4096）** | 6.46% | 34.78% | 19.73% | 12.46%（230.5KB, 1 CTA/SM, 255 regs, 256 thr） | — | long 0.61→1.37、wait 1.23→1.33、barrier 0.94→1.47 | **Duration 968.96→923.87µs（ncu 1.049×、event main 1.042×）**；**`red` 51,904,512 逐字节不变**、occ/regs/smem 不变 ⇒ **TMA 只省搬运（发射/地址运算），主墙仍是 L2 red** |
+    | fp16 | **wgmma2b+tma main（O33, Q/K/V/dO 逐 atom TMA, S=4096）** | 6.46% | 34.78% | 19.73% | 12.46%（230.5KB, 1 CTA/SM, 255 regs, 256 thr） | — | long 0.61→1.37、wait 1.23→1.33、barrier 0.94→1.47 | **Duration 968.96→923.87µs（ncu 1.049×、event main 1.042×）**；**`red` 51,904,512 逐字节不变**、occ/regs/smem 不变 ⇒ **TMA 只省搬运（发射/地址运算），主墙仍是 L2 red** |
+    | fp16 | **wgmma2+tma main（O35, BN=64, S=512）** | 9.56% | 44.74% | 7.94% | 12.39%（148.6KB, 1 CTA/SM, 184 regs, 256 thr） | 0.48 | — | **指令数 5,259,008→3,976,256（−24.4%）、regs 200→184，但 Duration 53.02→52.96µs（持平）**：S=512 `grid=128<132 SM` 是**延迟/grid bound**，省发射换不到时间；S=4096 强制 BN=64 时 989.95→959.20µs（1.032×）。墙 = 低并行度/延迟，TMA 动不了 |
  | fp8 | golden main | 0.06% | **75.96%**（90% 多余） | 4.98% | 6.25%（68KB） | 0.32 | MIO scoreboard 69% | **smem 冲突 + FP8 解码 + 低 occ** |
 | fp8 | **mma main（O2b+O4d 后, S=4096, ksplit=4）** | 1.41% | 69.91% | 21.70% | **18.27%（73.8KB, 3 CTA/SM）** | 10.34 | No Eligible 76.6%、long_scoreboard 4.46 + short_scoreboard 3.96 | **L2 带宽（81.5%）+ 延迟**（split-K 复读 Q/dO + 全局 atomic） |
 | fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |
