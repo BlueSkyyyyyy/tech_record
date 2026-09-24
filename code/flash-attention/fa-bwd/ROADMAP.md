@@ -1800,7 +1800,36 @@
    - 原始输出 `src/fp16/fa_bwd_fp16_cluster_reduce_smoke.out.txt`、
      `src/fp16/fa_bwd_fp16_o25_s512_ab.out.txt`、`..._o25_s4096_ab.out.txt`、
      `..._mma_onefile_o25_s512.out.txt`、`..._mma_main_o25_ncu_s4096.out.txt`、
-     `..._o25_fa3_te_baseline.out.txt`；文档 `docs/01` §14q。
+       `..._o25_fa3_te_baseline.out.txt`；文档 `docs/01` §14q。
+
+- 2026-09-24（第六十七轮）：**O26 完成（fp8 `delta_kernel` → warp-per-row 向量化，对齐 fp16/bf16 O24）**。
+   - 动机：fp16/bf16 在 **O24（第六十五轮）** 已把 `delta_kernel`（D=rowsum(dO∘O)）改成
+     **warp-per-row 向量化**（S=4096 42.5→14.5µs，3.35×），但 **fp8 的 delta 一直是旧版**
+     （每行一个 128 线程 CTA + `__shared__` 树归约 + 7×`__syncthreads`）——O11（fp8 LSE）/
+     O14（fp8 quant）都漏了它。ncu S=4096：旧 delta `Duration 42.94µs`、`Compute 74.93%`、
+     `Waves 31.03`、grid 65536（一行仅 128 个乘加，固定开销远大于计算）。
+   - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+     新增 `delta_warp_kernel<HD>`——每 warp 一行，lane 沿 HD 以 `float4`(O)/`uchar4`(dO)
+     各读 4 个元素，`__shfl_xor_sync` 树归约，**无 smem / 无 barrier**、grid-stride；逐元素
+     同式 `O[d]*(deq_e5m2(dO[d])*dos[row])`。host 加 `--deltawarp=0/1`（默认 1）与 `[O26 A/B]`。
+   - **数值**：`max_abs(new-vs-old) = 1.9e-6~8.6e-6`、`max_rel ~1e-3`（仅 fp32 求和次序，
+     warp 树 vs smem 树）；**vs fp32 ref 与历史同水平**（S512 2.426/2.972/3.733e-1；S4096
+     2.635/2.644/3.216e-1；GQA kv4 2.517/5.339/7.173e-1；kv8 2.869/5.367/7.032e-1；
+     MQA kv1 4.101e-1/1.572/2.126；MLA S1024H2 2.232/3.337/3.602e-1）。单/两文件逐指标一致。
+   - **性能（同 session A/B，event，`-DFA_WGMMA` 默认构建）**：delta **S512 2.39× / S1024H32
+     3.22× / S4096 0.0433→0.0151ms（2.87×）** / GQA kv4 3.05× / kv8 3.16× / MQA kv1 3.18× /
+     MLA 1.33–1.51×；**preprocess S=4096 0.3176→0.2946ms（1.078×）**；端到端 S4096
+     **2.4837→2.4637ms（1.008×，55.8 TF）**、S512 0.1284（16.7 TF）、S1024H32 0.5218（32.9）。
+     同 session TE FP8 S512 0.1007 / S4096 **0.5904ms/465.6TF** ⇒ 端到端 ours/TE S4096 **4.17×**
+     （O22 4.21×）。同 session 纯反向 fp16：MHA S4096 FA3 0.3237ms/849TF、TE 0.4419/622、FA2 0.7233/380。
+   - **ncu（delta，S=4096，同 binary `--deltawarp` 0/1，`--set full -c 1`）**：Duration
+     42.94→**17.34µs**、**DRAM 31.13→77.01%**、Compute 74.93→27.14%、Waves 31.03→7.76、
+     grid 65536→16384 ⇒ 墙从 **smem 归约 + Compute 75%** 移到 **DRAM 带宽 77%（elementwise 上限）**，
+     与 fp16 O24 的 delta（72.87%）/ fp8 O14 的 quant（71.31%）结论一致。
+   - 原始输出 `src/fp8/fa_bwd_fp8_main_o26_sweep.out.txt`（两文件 ×9 shape × `[O26 A/B]` + 对拍）、
+     `src/fp8/fa_bwd_fp8_mma_onefile_o26_sweep.out.txt`（单文件）、
+     `src/fp8/o26_ncu_delta_{old,new}_s4096.out.txt`、`src/fp8/o26_te_fp8_bench.out.txt`、
+     `src/fa_bwd_o26_fa3_te_baseline_fp16.out.txt`；文档 `docs/03` §31、`docs/04` §2.3/§3。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -1984,6 +2013,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 但逐元素远程原子延迟 + 每 tile 串行 flush ⇒ S4096 main **0.13×**（0.99→7.64ms）、
 > `long_scoreboard` 0.75→5.83。**至此「放大 BM」（§14k）/partial+reduce（§14o）/cluster（§14q）
 > 三条消 red 路全部证伪**；`--cluster` 保留 opt-in。详见 `docs/01` §14q。
+> **O26 已完成（第六十七轮）**：fp8 `delta_kernel` 补上 fp16/bf16 O24 的 **warp-per-row 向量化**
+> （`delta_warp_kernel<HD>`，2.39–3.22×，端到端 S4096 1.008×、55.8 TF，为 TE FP8 的 4.17×）；
+> ncu 墙从 smem 归约（Compute 75%）移到 DRAM 带宽 77%（elementwise 上限）。**fp8 的 preprocess
+> 三个子 kernel（quant/LSE/delta）至此全部向量化**；`docs/03` §31。剩余第一墙仍是 main 的
+> **mma 依赖延迟 + 3 CTA/SM**。
 > **下一步（按回报）**：① **fp8 侧「提 occupancy」**（O19/O21/O22 一致：墙 = mma 依赖延迟 +
 > 3 CTA/SM，须把 168 regs→≤128、72.7KB smem→≤58KB 才到 4 CTA/SM）——这是 fp8（最重点）唯一
 > 还没被证伪的杠杆；② **fp8/主 kernel 跨-tile 软流水**（K/V 单缓冲被 dS3/Ap 复用，需先腾 smem）；

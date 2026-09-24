@@ -2681,3 +2681,81 @@ NVCC_FLAGS="-DFA_ILV=1" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=...
 `o22_regdq_ab_s4096.out.txt`、`o22_ilv_ab_s4096.out.txt`、`o22_ksplit_s4096.out.txt`、
 `o22_ncu_stall_s4096.out.txt`（mma）、`o22_ncu_stall_wgmma_s4096.out.txt`（wgmma）、
 `o22_fa3_te_baseline_fp16.out.txt`、`o22_te_fp8_bench.out.txt`。
+
+---
+
+## 31. O26：fp8 `delta_kernel` → warp-per-row 向量化（对齐 fp16/bf16 O24）
+
+### 31.1 动机
+
+fp16/bf16 早在 **O24（第六十五轮）** 就把 `delta_kernel`（D=rowsum(dO∘O)）从「每 (s,h,b) 行
+一个 128 线程 CTA + `__shared__` 树归约 + log2(THREADS) 次 `__syncthreads`」改成
+**warp-per-row 向量化**（S=4096 delta 42.5→14.5µs，3.35×，ncu 墙从 smem 归约移到 DRAM 带宽）。
+但 **fp8 的 delta 一直是旧版**——O11（fp8 LSE 负载均衡）、O14（fp8 quant 向量化）都只覆盖了
+LSE 与 quant，delta 漏了。本轮把它补上，使 fp8 的 preprocess 三个子 kernel 与 fp16/bf16 对齐。
+
+旧 `delta_kernel` 对 HD=128 一行只有 128 个乘加，却要付 1 个 CTA + 7 次 barrier 的固定开销
+（ncu S=4096：`Duration 42.9µs`、`Compute 74.9%`、`Waves 31.03`、grid 65536），是纯浪费。
+
+### 31.2 改动（单/两文件 device 代码逐字一致）
+
+新增 `delta_warp_kernel<HD>`（`fa_bwd_fp8_kernels.cuh`，单文件由 `sync_onefile_device.py` 同步）：
+
+* **每 warp 一行**：lane 沿 HD 以 `float4`（O，fp32）与 `uchar4`（dO，e5m2）各读 4 个元素
+  （warp 每步 32×4=128 个 d），`__shfl_xor_sync` 树归约，**无 smem / 无 barrier**；
+* grid-stride 覆盖 `B*S*H` 行；
+* 逐元素数学与旧版同式 `O[d]*(deq_e5m2(dO[d])*dos[row])`，只有 fp32 求和次序不同
+  （warp 树 vs 128 线程 smem 树）⇒ `max_abs(new-vs-old) = 1.9e-6 ~ 8.6e-6`、`max_rel ~1e-3`，
+  对 fp8 容差 O(1) 无影响；vs fp32 ref 的 dq/dk/dv 仍与历史同水平。
+
+host 加 `--deltawarp=0/1`（默认 1，0 退回旧版做同 session A/B）与 `[O26 A/B]` 段。
+
+### 31.3 性能（同 session A/B，CUDA event；`-DFA_WGMMA` wgmma 默认构建）
+
+| shape | delta 旧(per-row) | delta 新(warp-per-row) | 加速 | preprocess（O22→O26） | ours total |
+|---|---|---|---|---|---|
+| MHA (1,512,16,128) | 0.0084 ms | **0.0035 ms** | 2.39× | 0.0392→0.0368 | **0.1284 ms / 16.7 TF** |
+| MHA (1,1024,32,128) | 0.0235 ms | **0.0073 ms** | 3.22× | — | **0.5218 ms / 32.9 TF** |
+| MHA (1,4096,16,128) | 0.0433 ms | **0.0151 ms** | 2.87× | 0.3176→**0.2946** | **2.4637 ms / 55.8 TF** |
+| GQA h32kv4 (1,1024,32,128) | 0.0229 ms | **0.0075 ms** | 3.05× | — | **0.4875 ms / 35.2 TF** |
+| GQA h40kv8 (1,1024,40,128) | 0.0282 ms | **0.0089 ms** | 3.16× | — | **0.5606 ms / 38.3 TF** |
+| MQA h64kv1 (1,1024,64,128) | 0.0438 ms | **0.0138 ms** | 3.18× | — | **0.7926 ms / 43.4 TF** |
+| MLA (1,256,2,512) | 0.0037 ms | **0.0028 ms** | 1.33× | — | 0.1169 ms / 2.3 TF |
+| MLA (1,512,4,512) | 0.0050 ms | **0.0033 ms** | 1.50× | — | 0.2972 ms / 7.2 TF |
+| MLA (1,1024,2,512) | 0.0050 ms | **0.0033 ms** | 1.51× | — | 0.5175 ms / 8.3 TF |
+
+* S=4096 端到端 **2.4837（O22）→ 2.4637 ms（1.008×）**、preprocess **1.078×**；小 S 的 delta
+  绝对量小（3–9µs），收益 ~1% 量级。收益与 fp16/bf16 O24 同源（都是把 smem 归约换成 warp 树 + 向量读）。
+* 对标：同 session TE FP8（`fa_bwd_bench.py bench --dtype fp8`）S512 0.1007ms / S4096
+  0.5904ms / 465.6TF；同 session 纯反向 fp16（`fa_vs_te_bwd_only.py`）MHA S4096 FA3
+  0.3237ms/849TF、TE 0.4419/622、FA2 0.7233/380；GQA kv4 FA3 0.0828ms/415TF。
+  ours fp8 total S4096 为 TE FP8 的 **4.17×**（O22 4.21×）。
+
+### 31.4 ncu（delta，S=4096，同 binary `--deltawarp` 0/1，`--set full -c 1`）
+
+| | grid | Duration | DRAM | Compute | Occ | Waves | Regs |
+|---|---|---|---|---|---|---|---|
+| 旧 per-row | 65536×128 | **42.94 µs** | 31.13% | **74.93%** | 83.09% | 31.03 | 17 |
+| 新 warp-per-row | 16384×128 | **17.34 µs** | **77.01%** | 27.14% | 83.77% | 7.76 | 18 |
+
+⇒ 墙从 **smem 归约 + Compute 75%** 移到 **DRAM 带宽 77%（elementwise 上限）**，与
+fp16 O24 的 delta（72.87%）和 fp8 O14 的 quant（71.31%）结论一致。
+
+### 31.5 复现
+
+```bash
+# wgmma 默认构建（两文件 / 单文件）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=.../b1_s4096_h16_d128_causal_fp8
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --dir=.../b1_s4096_h16_d128_causal_fp8
+# A/B：--deltawarp=0 退回旧版（[O26 A/B] 打印两版计时 + max_abs/max_rel）
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full -c 1 -k regex:delta_kernel -- --dir=...
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full -c 1 -k regex:delta_warp_kernel -- --dir=...
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o26_sweep.out.txt`（两文件 ×9 shape × `[O26 A/B]` + 对拍）、
+`src/fp8/fa_bwd_fp8_mma_onefile_o26_sweep.out.txt`（单文件）、
+`src/fp8/o26_ncu_delta_old_s4096.out.txt` / `o26_ncu_delta_new_s4096.out.txt`、
+`src/fp8/o26_te_fp8_bench.out.txt`、`src/fa_bwd_o26_fa3_te_baseline_fp16.out.txt`。

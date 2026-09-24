@@ -6,6 +6,7 @@
 //   * quantize_row_kernel：fp32 [rows][D] -> fp8 + rowwise scale（P5-3 起支持 D>128）
 //   * lse_mma_kernel（O1）：mma 分块 Q·Kᵀ + online-softmax 求 LSE
 //   * delta_kernel：反量化 dO 与 fp32 O 逐行点积求 D=rowsum(dO∘O)
+//   * delta_warp_kernel（O26）：上者的 warp-per-row 向量化版（对齐 fp16/bf16 O24）
 //   * fa_bwd_fp8_mma_kernel：1colblock 反向主 kernel，5 个 GEMM 全部 mma.m16n8k32
 //   * convert_kernel：fp32 累加缓冲 -> fp32 输出
 // host 侧（npy 读取 / launcher / 自测）见 `fa_bwd_fp8_main.cu`。
@@ -1217,6 +1218,48 @@ __global__ void delta_kernel(const float* __restrict__ o,
     __syncthreads();
   }
   if (tid == 0) delta[row] = sh_delta[0];
+}
+
+// =============================================================================
+// 2c) O26：`delta_kernel` 的 warp-per-row 向量化版（对齐 fp16/bf16 的 O24）。
+// =============================================================================
+// 旧 `delta_kernel` 每个 (s,h,b) 行一个 128 线程 CTA + `__shared__` 树归约 +
+// log2(THREADS)=7 次 `__syncthreads`。HD=128 时一行只有 128 个乘加，block/同步开销
+// 远大于计算；fp16/bf16 在 O24 已改成 warp-per-row（S=4096 42.5→14.5µs，3.35×），
+// 但 fp8 的 delta 一直是旧版。这里照搬同一数据通路：
+//   * **每 warp 一行**：lane 沿 HD 以 `float4`（O，fp32）与 `uchar4`（dO，e5m2）各读 4 个
+//     元素（warp 每步 32×4=128 个 d），`__shfl_xor_sync` 树归约，**无 smem / 无 barrier**；
+//   * grid-stride 覆盖任意行数（行 input 数 = B*S*H）。
+// 数学与旧版逐元素同式 `O[d]*(deq_e5m2(dO[d])*dos[row])`；只有 fp32 求和次序不同
+// （warp 树 vs 128 线程 smem 树），对 fp8 容差 O(1) 无影响。`--deltawarp=0` 退回旧版 A/B。
+template <int HD>
+__global__ void delta_warp_kernel(const float* __restrict__ o,
+                                  const unsigned char* __restrict__ do8,
+                                  const float* __restrict__ dos, float* __restrict__ delta,
+                                  int rows) {
+  static_assert(HD % 4 == 0, "delta_warp 需要 HD 为 4 的倍数（按 float4/uchar4 读）");
+  const int lane = threadIdx.x & 31;
+  const int wpb = blockDim.x >> 5;
+  const int gwarp0 = blockIdx.x * wpb + (threadIdx.x >> 5);
+  const int nwarp = gridDim.x * wpb;
+  for (int row = gwarp0; row < rows; row += nwarp) {
+    const float* orow = o + (size_t)row * HD;
+    const unsigned char* dorow = do8 + (size_t)row * HD;
+    const float do_scale = dos[row];
+    float acc = 0.f;
+#pragma unroll
+    for (int k = lane * 4; k < HD; k += 128) {
+      const float4 a = *reinterpret_cast<const float4*>(orow + k);
+      const uchar4 b = *reinterpret_cast<const uchar4*>(dorow + k);
+      acc += a.x * (deq_e5m2(b.x) * do_scale);
+      acc += a.y * (deq_e5m2(b.y) * do_scale);
+      acc += a.z * (deq_e5m2(b.z) * do_scale);
+      acc += a.w * (deq_e5m2(b.w) * do_scale);
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+    if (lane == 0) delta[row] = acc;
+  }
 }
 
 // =============================================================================

@@ -1,0 +1,19 @@
+  void delta_kernel<128>(const float *, const unsigned char *, const float *, float *, int, int) (4096, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Elapsed Cycles                cycle        85363
+    Memory Throughput                 %        70.44
+    DRAM Throughput                   %        31.13
+    Duration                         us        42.94
+    Compute (SM) Throughput           %        74.93
+    Executed Ipc Active   inst/cycle         2.25
+    Executed Ipc Elapsed  inst/cycle         2.11
+    Memory Throughput                           Tbyte/s         1.04
+    Block Size                                                   128
+    Grid Size                                                  65536
+    Registers Per Thread             register/thread              17
+    Waves Per SM                                               31.03
+    Achieved Occupancy                        %        83.09
+    Total DRAM Elapsed Cycles        cycle      4494848
+    Total L1 Elapsed Cycles          cycle     11382920
+    Total L2 Elapsed Cycles          cycle      5863520
+    Total SM Elapsed Cycles          cycle     11382920
+    Total SMSP Elapsed Cycles        cycle     45531680

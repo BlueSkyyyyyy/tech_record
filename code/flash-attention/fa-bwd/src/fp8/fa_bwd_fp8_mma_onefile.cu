@@ -1180,6 +1180,48 @@ __global__ void delta_kernel(const float* __restrict__ o,
 }
 
 // =============================================================================
+// 2c) O26：`delta_kernel` 的 warp-per-row 向量化版（对齐 fp16/bf16 的 O24）。
+// =============================================================================
+// 旧 `delta_kernel` 每个 (s,h,b) 行一个 128 线程 CTA + `__shared__` 树归约 +
+// log2(THREADS)=7 次 `__syncthreads`。HD=128 时一行只有 128 个乘加，block/同步开销
+// 远大于计算；fp16/bf16 在 O24 已改成 warp-per-row（S=4096 42.5→14.5µs，3.35×），
+// 但 fp8 的 delta 一直是旧版。这里照搬同一数据通路：
+//   * **每 warp 一行**：lane 沿 HD 以 `float4`（O，fp32）与 `uchar4`（dO，e5m2）各读 4 个
+//     元素（warp 每步 32×4=128 个 d），`__shfl_xor_sync` 树归约，**无 smem / 无 barrier**；
+//   * grid-stride 覆盖任意行数（行 input 数 = B*S*H）。
+// 数学与旧版逐元素同式 `O[d]*(deq_e5m2(dO[d])*dos[row])`；只有 fp32 求和次序不同
+// （warp 树 vs 128 线程 smem 树），对 fp8 容差 O(1) 无影响。`--deltawarp=0` 退回旧版 A/B。
+template <int HD>
+__global__ void delta_warp_kernel(const float* __restrict__ o,
+                                  const unsigned char* __restrict__ do8,
+                                  const float* __restrict__ dos, float* __restrict__ delta,
+                                  int rows) {
+  static_assert(HD % 4 == 0, "delta_warp 需要 HD 为 4 的倍数（按 float4/uchar4 读）");
+  const int lane = threadIdx.x & 31;
+  const int wpb = blockDim.x >> 5;
+  const int gwarp0 = blockIdx.x * wpb + (threadIdx.x >> 5);
+  const int nwarp = gridDim.x * wpb;
+  for (int row = gwarp0; row < rows; row += nwarp) {
+    const float* orow = o + (size_t)row * HD;
+    const unsigned char* dorow = do8 + (size_t)row * HD;
+    const float do_scale = dos[row];
+    float acc = 0.f;
+#pragma unroll
+    for (int k = lane * 4; k < HD; k += 128) {
+      const float4 a = *reinterpret_cast<const float4*>(orow + k);
+      const uchar4 b = *reinterpret_cast<const uchar4*>(dorow + k);
+      acc += a.x * (deq_e5m2(b.x) * do_scale);
+      acc += a.y * (deq_e5m2(b.y) * do_scale);
+      acc += a.z * (deq_e5m2(b.z) * do_scale);
+      acc += a.w * (deq_e5m2(b.w) * do_scale);
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+    if (lane == 0) delta[row] = acc;
+  }
+}
+
+// =============================================================================
 // 3) main kernel：1colblock 反向，5 个 GEMM 全部用 mma.m16n8k32
 // =============================================================================
 // O7：`REGDQ=true` 时把 dQ 沿 nt 累加在寄存器里（每 CTA 只 flush 一次跨 CTA 归约）。
@@ -2447,6 +2489,7 @@ int main(int argc, char** argv) {
   int cvt_on = 0;   // O21b：1 = 保留冗余 fp32→fp32 convert 拷贝（默认 0：直接累加进输出）
   int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
   int qfast = 1;      // O14：1 = warp-per-row 向量化量化，0 = 旧 per-row 标量量化（A/B）
+  int delta_warp_opt = 1;  // O26：1 = warp-per-row 向量化 delta（默认），0 = 旧 per-row smem 归约（A/B）
   int regdq_opt = -1; // O22：-1 自动；0/1 强制关/开寄存器 dQ 累加（同 session A/B）
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -2459,6 +2502,7 @@ int main(int argc, char** argv) {
     else if (a == "--wg2") wg2 = 1;
     else if (a.rfind("--cvt=", 0) == 0) cvt_on = atoi(a.c_str() + 6);
     else if (a.rfind("--qfast=", 0) == 0) qfast = atoi(a.c_str() + 8);
+    else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_opt = atoi(a.c_str() + 12);
     else if (a.rfind("--regdq=", 0) == 0) regdq_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
@@ -2609,6 +2653,11 @@ int main(int argc, char** argv) {
   // O22：`--regdq=0/1` 强制开关（仅同 session A/B 用）；-1 = 用上面的启发式。
   if (regdq_opt >= 0) use_regdq = (D == 128) && (regdq_opt != 0);
   dim3 pg(S, H, B);
+  // O26：delta 的 warp-per-row 版 grid-stride 覆盖 B*S*H 行（每 warp 一行）。
+  const bool delta_warp_sel = (delta_warp_opt != 0);
+  const int d_rows = (int)((size_t)B * S * H);
+  const int d_wpb = THREADS / 32;
+  const int d_blocks = (d_rows + d_wpb - 1) / d_wpb;
   dim3 lg((S + LBM - 1) / LBM, H, B);
   dim3 lg_bal((((S + LBM - 1) / LBM) + 1) / 2, H, B);   // O11：镜像配对，grid.x 减半
   dim3 mg((S + BM - 1) / BM * ksplit, H, B);
@@ -2646,13 +2695,19 @@ int main(int argc, char** argv) {
           launch_lse_bal<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
       } else
         launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
-      delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+      if (delta_warp_sel)
+        delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+      else
+        delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
     } else {
       if (causal)
         launch_lse_bal<512, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
       else
         launch_lse<512>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
-      delta_kernel<512><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+      if (delta_warp_sel)
+        delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+      else
+        delta_kernel<512><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
     }
   };
 
@@ -2981,6 +3036,51 @@ int main(int argc, char** argv) {
     cmp_f(o_qs, n_qs); cmp_f(o_ks, n_ks); cmp_f(o_vs, n_vs); cmp_f(o_dos, n_dos);
     printf("[O14 A/B] quant old(per-row) %.4f ms | new(warp-per-row) %.4f ms (%.3fx) | "
            "bitwise mismatch=%lld\n", qo, qn, qo / qn, mismatch);
+    run_all();  // 恢复 CLI 选中路径的完整输出
+  }
+
+  // ---- O26 A/B：delta 旧 per-row(smem 归约) vs 新 warp-per-row 向量化（同 session 计时 + 对拍）----
+  {
+    auto bench_delta = [&](bool warp, float* out) {
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) {
+        if (warp) {
+          if (D == 128)
+            delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+          else
+            delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+        } else {
+          if (D == 128) delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+          else delta_kernel<512><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+        }
+      }
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float do_ms = 0.f, dw_ms = 0.f;
+    bench_delta(false, &do_ms);
+    bench_delta(true, &dw_ms);
+    if (D == 128) delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+    else delta_kernel<512><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+    std::vector<float> d_old(rows_q);
+    CUDA_CHECK(cudaMemcpy(d_old.data(), d_delta, rows_q * 4, cudaMemcpyDeviceToHost));
+    if (D == 128)
+      delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+    else
+      delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+    std::vector<float> d_new(rows_q);
+    CUDA_CHECK(cudaMemcpy(d_new.data(), d_delta, rows_q * 4, cudaMemcpyDeviceToHost));
+    float md = 0.f, mr = 0.f;
+    for (size_t i = 0; i < d_old.size(); ++i) {
+      float ad = fabsf(d_old[i] - d_new[i]);
+      if (ad > md) md = ad;
+      float den = fmaxf(fabsf(d_old[i]), 1e-6f);
+      mr = fmaxf(mr, ad / den);
+    }
+    printf("[O26 A/B] delta old(per-row) %.4f ms | new(warp-per-row) %.4f ms (%.3fx) | "
+           "max_abs=%.3e max_rel=%.3e\n", do_ms, dw_ms, do_ms / dw_ms, md, mr);
     run_all();  // 恢复 CLI 选中路径的完整输出
   }
 
