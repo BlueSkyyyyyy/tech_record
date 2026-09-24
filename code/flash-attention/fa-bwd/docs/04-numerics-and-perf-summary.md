@@ -1280,3 +1280,24 @@ fp16 `5.603/6.841/2.338e-4` 与第 79 轮逐位相同。FA3/TE 反向不支持 h
 ncu（fp16 b3 causal）：main Duration 784µs / **1 CTA/SM、occ 6.25%** / No Eligible 89.0% /
 DRAM 1.6% / Compute 4.4% / L1TEX 38.7% ⇒ **低 occupancy + smem→mma 依赖**；lse `Waves 0.36`
 （grid 48<132 SM）⇒ **并行度 bound**。详见 `docs/01` §16.9、`docs/01b` §6ab。
+
+## 12. 变长（VARLEN）主 kernel 的 TMA 化 —— fp16，第 83 轮（判决：中性/偏负）
+
+第 82 轮后 varlen 的两条候选之一。做法：packed 布局描述符按 `dims={D,T,H,1}`（`S=T,B=1`）
+建，kernel 用行坐标 `cu_seqlens[b]+row`、batch 坐标 0，复用 O33/O35 的逐 atom TMA；仅 fp16、
+`--varlentma` opt-in（默认 0）。**数值与 cp.async 逐位一致**（5 个 case 的 max_abs 及 @index 全同）。
+
+| case（fp16） | cp.async ms | TMA ms | 比值 |
+|---|---|---|---|
+| b4_t3840 causal | 0.7761 | 0.7641 | 1.016× |
+| b4_t4096 等长 causal | 0.4484 | 0.4461 | 1.005× |
+| b5_t3968 GQA kv8 causal | 1.4102 | 1.4085 | 1.001× |
+| b4_t3840 full | 1.2822 | 1.2746 | 1.006× |
+| **b8_t2904 强倾斜 causal** | 0.5785 | 0.6073 | **0.953×** |
+
+ncu（main, b4_t3840 causal）：指令数 163.7M→**125.9M（−23.1%）** 但 Duration 546.2→**543.6µs**，
+occ 12.43%（1 CTA/SM）、Warp Cycles/Issued 5.45→7.06 ⇒ **延迟/occupancy bound**，非发射指令 bound
+（同 O35 的 BN=64 定长 TMA）。**结论：varlen TMA 不成立**，保留 opt-in；剩余杠杆 = LSE 的 K 维
+split + occupancy。对标（等长 `[1024]×4` == 定长 B=4,S=1024,H=16,D=128）：ours 0.446ms（真反向
+~153TF）= FA3 0.1457/471.7 的 **3.06×**、TE 0.1760/390.6 的 2.53×、FA2 0.2507/274.1 的 1.78×。
+详见 `docs/01` §16.10。

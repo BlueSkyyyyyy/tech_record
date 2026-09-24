@@ -3624,4 +3624,6 @@ SM 里提供了额外的在飞 warp 来遮盖延迟；把它们删掉后 Waves 2
 代码保留为 opt-in（`--compact` / `--lsecompact`，默认关）以便复现。
 varlen 若还要再上台阶，只剩两条真杠杆：**① 把 LSE 的 K 维 split 开 + 二次归约**
 （当前镜像配对的临界路径是每 CTA 串行 33 个 K-tile，只有切 K 才能降下来）；
-**② varlen 的 TMA 化**（packed 布局的 4D 描述符）——列 backlog。
+**② varlen 的 TMA 化**（packed 布局的 4D 描述符）——**第八十三轮已在 fp16 上判决为中性/
+偏负**（`docs/01` §16.10：指令 −23% 但 Duration 持平、强倾斜 −4.7%），该条杠杆作废；
+varlen 唯一剩余真杠杆是 **① LSE 的 K 维 split + 二次归约**（fp8 侧同理，待续）。

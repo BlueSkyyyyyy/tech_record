@@ -2825,6 +2825,85 @@ scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu --varlen=1 [--full] --dir=...`�
 原始输出 `src/fp16/fa_bwd_fp16_varlen_mla_sweep.out.txt`、`..._varlen_mla_perf.out.txt`、
 `..._varlen_mla_ncu_{main,lse}_b3.out.txt`。
 
+### 16.10 VARLEN 主 kernel 的 TMA 化 —— 第 83 轮（判决：中性 / 偏负，opt-in）
+
+第 82 轮把「按 `cu_seqlens` 均衡分块」判为负结果后，剩下两条 varlen 候选是 **LSE 的 K 维
+split** 和 **varlen TMA 化**。本轮先把后者做完（fp16 先行；`docs/03` §40）。
+
+**动机/直觉**：定长的 fp16/bf16 主 kernel 已全面 TMA 化（O33–O36）：**逐 atom 4D-TMA 复现
+SW128 交织布局**（一个 `[8 行][64 列]` box = 一个 1024B atom，描述符零改动），把每 tile 的
+上千条 `cp.async` 合成几十条 TMA，指令数 **−24%**。varlen 的 packed 布局 `[T,H,D]` 只是少了
+batch 维，**描述符按 `dims={D,T,H,1}`（`S=T, B=1`）建、kernel 用行坐标 `cu_seqlens[b]+row`、
+batch 坐标 0** 即可复用同一套 TMA 循环——看起来是 O33/O35 的直接延伸。
+
+**实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）**：
+
+* `fa_bwd_fp16_wgmma2_tma_kernel<HD,SPLIT>`（BN=64，O35 的 kernel）加默认参数
+  `const int* cu_seqlens = nullptr`：新增 `qbase/len` 与 `rowbase/tbatch`（`nullptr` 时
+  `rowbase=0,tbatch=b` ⇒ **定长坐标 `(row,b)` 逐字不变**）；全局下标 `b*S→qbase`、边界
+  `S→len`；4 处 `tma_fill_sw128`（Q/dO、K0/V0、K 预取、V 预取）的行坐标改 `rowbase+…`、
+  batch 改 `tbatch`。
+* host `run_varlen`：`--varlentma[=0/1]`（**默认 0，opt-in**，同 binary A/B）；建 4 张
+  varlen 描述符复用 `make_main_map(d_q,H,T,D,1)`；`D==128` 且开启时走 TMA 壳。
+  定长默认档（cp.async）路径**逐位不变**。
+
+**数值（ours vs fp32 ref，fp16，max_abs dq/dk/dv）—— TMA 与 cp.async 完全一致**
+（TMA 只换搬运；本例跨 CTA `atomicAdd` 次序也恰好未变）：
+
+| case | cp.async | TMA |
+|---|---|---|
+| b4_t3840 causal | 3.163/2.158/1.966e-3 | 3.163/2.158/1.966e-3 |
+| b4_t4096 等长 causal | 2.112/2.252/1.915e-3 | 2.112/2.252/1.915e-3 |
+| b8_t2904 强倾斜 causal | 2.624/2.158/2.139e-3 | 2.624/2.158/2.139e-3 |
+| b5_t3968 GQA kv8 causal | 2.438/3.433/3.843e-3 | 2.438/3.433/3.843e-3 |
+| b4_t3840 full | 5.603/6.841/2.338e-4 | 5.603/6.841/2.338e-4 |
+
+**性能（同 binary A/B，event，`Σ_b 4HL²D` 口径，iters=200）—— 中性，强倾斜反而变慢**：
+
+| case | cp.async ms | TMA ms | TMA/cp |
+|---|---|---|---|
+| b4_t3840 causal | 0.7761 | **0.7641** | 1.016× |
+| b4_t4096 等长 causal | 0.4484 | 0.4461 | 1.005× |
+| b5_t3968 GQA kv8 causal | 1.4102 | 1.4085 | 1.001× |
+| b4_t3840 full | 1.2822 | 1.2746 | 1.006× |
+| **b8_t2904 强倾斜 causal** | 0.5785 | **0.6073** | **0.953×（−4.7%）** |
+
+强倾斜变慢的机制：TMA 的 box 行数固定（Q/dO 各 16 个 8 行 atom），**越界行也被 TMA「搬」
+（只是不写 smem）**，而长序列少的 case（len=8/16/32…）里 `cp.async` 版对越界行是**直接不发**。
+即 TMA 省的是长序列的发射指令，短序列反而多了固定发射开销。
+
+**ncu（main，b4_t3840 causal，`--set full -c 1`，同 binary）**：
+
+| backend | Duration | Executed Inst | L1/TEX | L2 | Compute | Occupancy | Waves |
+|---|---|---|---|---|---|---|---|
+| cp.async | 546.2 µs | 163.7 M | 48.8% | 63.5% | 31.0% | 12.43% | 7.76 |
+| **TMA** | **543.6 µs** | **125.9 M（−23.1%）** | 46.8% | 65.2% | 24.4% | 12.44% | 7.76 |
+
+指令数确实按预期降了 23%，但 **Duration 不变**：kernel 是 **1 CTA/SM（动/静态 smem ~148KB）
++ 延迟受限**（achieved occupancy 12.4%，Warp Cycles/Issued 7.06 vs 5.45——指令少了但每条
+等得更久）。这与 O35（BN=64 定长 TMA 也基本中性）的结论一致：**BN=64 的 varlen 主 kernel
+不是发射/访存指令 bound，TMA 打不动真正的墙**。
+
+**对标（等长 `[1024]×4` 落回定长 B=4,S=1024,H=16,D=128；纯反向 CUPTI，三列）**：
+ours varlen total **0.446 ms / 真反向 ~153 TF** vs **FA3 0.1457ms/471.7TF、TE 0.1760/390.6、
+FA2 0.2507/274.1** ⇒ ours 为 FA3 的 **3.06×**（时间）、TE 的 2.53×、FA2 的 1.78×（与第 78 轮
+的 3.09× 一致）。full：FA3 0.1953/351.9、TE 0.2143/320.7、FA2 0.3294/208.6。
+
+**结论**：varlen TMA 化**判为中性/偏负**——保留 `--varlentma` opt-in 复现，**不作为默认**。
+与第 82 轮的「均衡分块」一样，varlen 的真正墙是 **L1/L2 吞吐 + 低 occupancy 的延迟隐藏**，
+而非发射指令；剩下的 varlen 杠杆只有 **LSE 的 K 维 split + 二次归约**（降镜像配对的
+`nblk+1` 串行临界路径）与 **并行度/occupancy**。
+
+**复现**：
+```
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu --varlen --varlentma=1 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b4_t3840_h16_d128_causal_fp16 --iters=200
+```
+原始输出 `src/fp16/fa_bwd_fp16_varlen_tma_ab.out.txt`、
+`..._varlen_{tma,cpasync}_ncu_main_b4_t3840.out.txt`、
+`..._varlen_fa3_te_baseline.out.txt`。
+
 ## 15. 下一步
 
 > **O23（§14n）已完成**：把 O17/O18 的主 kernel + O9a 的 LSE 在 `-DFA_WGMMA` 构建下**默认打开**

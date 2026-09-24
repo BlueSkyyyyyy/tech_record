@@ -288,7 +288,8 @@ static void launch_bwd_wgmma2_tma(dim3 mg, CUtensorMap qmap, CUtensorMap kmap,
                                   CUtensorMap vmap, CUtensorMap dmap, const float* delta,
                                   const float* lse, float* dq_acc, float* dk_acc,
                                   float* dv_acc, int S, int H, int Hkv, float scale,
-                                  int causal, __half* dq_h = nullptr) {
+                                  int causal, __half* dq_h = nullptr,
+                                  const int* cu_seqlens = nullptr) {
   static_assert(HD == 128, "wgmma2 TMA 只做 HD=128");
   constexpr int BM = 128, BN = 64;
   constexpr int QTILE = (BM / 8) * (HD / 64) * 1024;
@@ -299,7 +300,7 @@ static void launch_bwd_wgmma2_tma(dim3 mg, CUtensorMap qmap, CUtensorMap kmap,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
   fa_bwd_fp16_wgmma2_tma_kernel<HD, SPLIT><<<mg, 256, smem>>>(
       qmap, kmap, vmap, dmap, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
-      dq_h);
+      dq_h, cu_seqlens);
 }
 #endif
 
@@ -332,7 +333,7 @@ static void launch_bwd_wgmma4(dim3 mg, const __half* q, const __half* k, const _
 // HD=128 走 wgmma2 路径（causal 镜像配对 wgmma LSE，非 causal 走 O8 mma LSE）；HD=512（MLA）
 // 走 mma 主 kernel（BM=32/BN=32/PIPE=1，与定长 D=512 同几何）。FA/TE 变长在本机不可用 ⇒ 仅对 ref。
 #ifdef FA_WGMMA
-static int run_varlen(const std::string& dir, bool causal, int iters) {
+static int run_varlen(const std::string& dir, bool causal, int iters, int varlen_tma = 0) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -403,6 +404,24 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   CUDA_CHECK(cudaMemcpy(d_do, doh.data(), nq * sizeof(__half), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_o, oh.data(), nq * sizeof(__half), cudaMemcpyHostToDevice));
 
+  // VARLEN TMA（本轮）：packed 布局 [T,H,D] 没有 batch 维，故描述符按 dims={D,T,H,1} 建
+  //   （复用 make_main_map，令 S=T、B=1，strides 自动为 {H*D*2, D*2, T*H*D*2}）。kernel 侧
+  //   用行坐标 `cu_seqlens[b]+row`、batch 坐标 0 选择序列。仅 fp16/HD=128。
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  const int varlen_tma_use = (D == 128) ? varlen_tma : 0;
+  CUtensorMap vqmap, vkmap, vvmap, vdmap;
+  if (varlen_tma_use) {
+    vqmap = make_main_map(d_q, H, T, D, 1);
+    vkmap = make_main_map(d_k, Hkv, T, D, 1);
+    vvmap = make_main_map(d_v, Hkv, T, D, 1);
+    vdmap = make_main_map(d_do, H, T, D, 1);
+  }
+#else
+  const int varlen_tma_use = 0;
+#endif
+  printf("VARLEN main backend = %s\n",
+         varlen_tma_use ? "wgmma2 TMA (Q/K/V/dO 4D-TMA)" : "wgmma2 cp.async");
+
   const int lse_nblk = (maxlen + LBM - 1) / LBM;
   dim3 lg_bal((lse_nblk + 1) / 2, H, B);
   // non-causal 用 O8 的 mma `lse_mma_kernel<HD>`（Q/K 行距 D+8）；causal D=512 用
@@ -446,9 +465,16 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
                                                                          0, d_cu);
       delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
       // O24：dQ 由主 kernel 直接写 fp16（dq_h），convert 跳过 dQ（n_q=0）。
-      launch_bwd_wgmma2<128, true, 1>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                      d_dk_acc, d_dv_acc, maxlen, H, Hkv, scale, (int)causal, dq,
-                                      d_cu);
+#if defined(FA_WGMMA) && defined(FA_TMA)
+      if (varlen_tma_use)
+        launch_bwd_wgmma2_tma<128, true>(mg, vqmap, vkmap, vvmap, vdmap, d_delta, d_lse,
+                                         d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H, Hkv, scale,
+                                         (int)causal, dq, d_cu);
+      else
+#endif
+        launch_bwd_wgmma2<128, true, 1>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                        d_dk_acc, d_dv_acc, maxlen, H, Hkv, scale, (int)causal,
+                                        dq, d_cu);
       convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, dq, dk, dv, 0,
                                                   nkv);
     } else {
@@ -573,11 +599,17 @@ int main(int argc, char** argv) {
   //   BN=128 的 wgmma2b 几何）。1=用 TMA，0=cp.async（默认）。同 binary A/B。
   int maintma_sel = 0;
   int varlen = 0;   // VARLEN：packed [T,H,D] + cu_seqlens.npy（fp16/HD=128/causal/wgmma2）
+  // 本轮：VARLEN 主 kernel 是否用 4D-TMA 载入 Q/K/V/dO（仅 FA_WGMMA+FA_TMA 构建、HD=128）。
+  //   默认 0（opt-in）：本轮实测 varlen 的 BN=64 主 kernel 用 TMA 中性/偏负（同 O35），
+  //   与 cp.async 版做同 binary A/B 用 `--varlentma=1`。
+  int varlen_tma = -1;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--varlen") varlen = 1;
     else if (a.rfind("--varlen=", 0) == 0) varlen = atoi(a.c_str() + 9);
+    else if (a.rfind("--varlentma=", 0) == 0) varlen_tma = atoi(a.c_str() + 12);
+    else if (a == "--varlentma") varlen_tma = 1;
     else if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
     else if (a == "--nopipe") pipe = 0;
@@ -619,7 +651,8 @@ int main(int argc, char** argv) {
 
   if (varlen) {
 #ifdef FA_WGMMA
-    return run_varlen(dir, causal, iters);
+    if (varlen_tma < 0) varlen_tma = 0;   // 本轮判决：varlen TMA 中性/偏负 ⇒ opt-in
+    return run_varlen(dir, causal, iters, varlen_tma);
 #else
     fprintf(stderr, "VARLEN 需要 -DFA_WGMMA（sm_90a）构建\n");
     return 1;

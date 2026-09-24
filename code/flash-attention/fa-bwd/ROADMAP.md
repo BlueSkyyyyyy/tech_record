@@ -157,7 +157,8 @@
   `fa_bwd_{fp16,bf16}_mma_kernel` 各加 `cu_seqlens` 默认参数、`run_varlen` 按 D 分派；2 个 MLA
   varlen case 对拍 fp32 ref 同 dtype 噪声、**单/两文件逐位一致**，定长 D=512 / HD=128 varlen
   回归逐位不变；详见 `docs/01` §16.9、`docs/01b` §6ab、`docs/04` §11。
-  **剩余：varlen TMA 化、MLA 降 smem（1 CTA/SM）** 留后续。**「按 `cu_seqlens` 的均衡分块」
+  **varlen TMA 化已于第八十三轮判决为中性/偏负**（fp16，`docs/01` §16.10）；
+  **剩余：MLA 降 smem（1 CTA/SM）、LSE 的 K 维 split** 留后续。**「按 `cu_seqlens` 的均衡分块」
   已于第八十二轮判决为负结果**（紧凑网格不省时间、反而 −3.4%；死 CTA 免费，墙在 L1/L2 吞吐 +
   低 occupancy；见 `docs/03` §40），新的 varlen 杠杆是 **LSE 的 K 维 split + 二次归约**。
 
@@ -2280,6 +2281,30 @@
   - 原始输出 `src/fp8/fa_bwd_fp8_varlen_bal_ab.out.txt`、`..._varlen_skew_base.out.txt`、
     `..._varlen_skew_base_ncu.out.txt`、`..._varlen_bal_ncu_main_compact.out.txt`；文档 `docs/03` §40。
 
+- 2026-09-25（第八十三轮）：**VARLEN 主 kernel 的 TMA 化判决——中性/偏负**（fp16 先行，单/两文件 opt-in）。
+  - 动机：第 82 轮后 varlen 剩两条候选，先把「varlen TMA 化」做完。定长主 kernel 已全面 TMA 化
+    （O33–O36，逐 atom 复现 SW128、指令 −24%）；packed 布局只少 batch 维，把描述符按
+    `dims={D,T,H,1}`（`S=T,B=1`）建、kernel 用行坐标 `cu_seqlens[b]+row`/batch 0 即可复用。
+  - **改动（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）**：
+    `fa_bwd_fp16_wgmma2_tma_kernel`（BN=64）加默认 `cu_seqlens`——`qbase/len` + `rowbase/tbatch`
+    （`nullptr` 时逐式退化 ⇒ 定长坐标/数值逐位不变）、4 处 `tma_fill_sw128` 坐标改；host
+    `run_varlen` 加 `--varlentma[=0/1]`（**默认 0 opt-in**），建 varlen 描述符复用 `make_main_map(.,T,D,1)`。
+  - **数值**：TMA 与 cp.async **完全一致**（5 个 case 的 dq/dk/dv max_abs 及 @index 全同）。
+  - **性能（同 binary A/B，iters=200）**：b4_t3840 causal 0.7761→**0.7641（1.016×）**、
+    b4_t4096 等长 1.005×、b5_t3968 GQA 1.001×、b4_t3840 full 1.006×，**b8_t2904 强倾斜
+    0.5785→0.6073（0.953×，−4.7%）**。强倾斜变慢的机制：TMA box 行数固定、越界行也发
+    （只是不写 smem），cp.async 版对越界行直接不发。
+  - **ncu（main, b4_t3840 causal, `--set full -c 1`）**：指令数 163.7M→**125.9M（−23.1%）**
+    但 Duration 546.2→**543.6µs（持平）**，occ 12.43%（**1 CTA/SM**、smem ~148KB）、Warp
+    Cycles/Issued 5.45→7.06 ⇒ **延迟/occupancy bound，不是发射指令 bound**（与 O35 的 BN=64
+    定长 TMA 中性的结论一致）。**结论：varlen TMA 不成立，保留 opt-in；剩余杠杆 = LSE 的
+    K 维 split + occupancy。** 详见 `docs/01` §16.10。
+  - 对标（等长 `[1024]×4` == 定长 B=4,S=1024,H=16,D=128，纯反向 CUPTI）：ours total 0.446ms
+    （真反向 ~153TF）= **FA3 0.1457ms/471.7TF 的 3.06×**、TE 0.1760/390.6 的 2.53×、FA2
+    0.2507/274.1 的 1.78×（与第 78 轮 3.09× 一致）。
+  - 原始输出 `src/fp16/fa_bwd_fp16_varlen_tma_ab.out.txt`、
+    `..._varlen_{tma,cpasync}_ncu_main_b4_t3840.out.txt`、`..._varlen_fa3_te_baseline.out.txt`。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -2412,7 +2437,16 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第八十二轮）**：**VARLEN「按 `cu_seqlens` 均衡分块」判决——负结果**（fp8，单/两文件
+> **最新（第八十三轮）**：**VARLEN 主 kernel 的 TMA 化判决——中性/偏负**（fp16，单/两文件 opt-in）。
+> packed 布局描述符按 `dims={D,T,H,1}`（`S=T,B=1`）+ 行坐标 `cu_seqlens[b]+row` 复用 O33/O35 的
+> 逐 atom TMA；`fa_bwd_fp16_wgmma2_tma_kernel` 加 `cu_seqlens`（`nullptr` 逐式退化 ⇒ 定长逐位
+> 不变），host `--varlentma[=0/1]`（默认 0）。**数值与 cp.async 完全一致；性能 b4_t3840 1.016×、
+> 等长 1.005×、GQA 1.001×、full 1.006×，强倾斜 b8_t2904 0.953×（−4.7%）**。ncu：指令数
+> **−23.1%** 但 Duration 持平（occ 12.4%、1 CTA/SM、Warp Cycles/Issued 5.45→7.06）⇒ **延迟/
+> occupancy bound，不是发射指令 bound**（同 O35）。**⇒ varlen TMA 不成立**；剩下唯一杠杆 =
+> **LSE 的 K 维 split + 二次归约**（降镜像配对 `nblk+1` 串行临界路径）+ occupancy。详见 `docs/01` §16.10、`docs/03` §40。
+>
+> **（第八十二轮）**：**VARLEN「按 `cu_seqlens` 均衡分块」判决——负结果**（fp8，单/两文件
 > opt-in）。把「只发有效 tile 的紧凑网格」做到主 kernel（`--compact`：按 `cu_seqlens` 枚举
 > `(b,mblk)` 查表、`grid=(total_mt*ksplit,H,1)`）与 causal LSE（`--lsecompact`：枚举有效镜像对）。
 > **实测偏负**：skew `b8_t2904` 默认 0.836ms → compact 0.864（−3.4%）/ lsecompact 0.848（−1.4%）/
@@ -2442,8 +2476,9 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > causal/full × {HD=128 MHA/GQA, HD=512 MLA} 齐备**（非 TMA）。**下一步候选**：
 > ① ~~**按 `cu_seqlens` 的均衡分块**（短序列 CTA 早退 / 负载均衡）~~——**第八十二轮已判决：
 > 负结果**（紧凑网格 −3.4%，死 CTA 免费，墙在 L1/L2+低 occupancy；见 `docs/03` §40）。
-> **改为：LSE 的 K 维 split + 二次归约**（降镜像配对的 33-tile 串行临界路径）；② varlen 的 **TMA 化**
-> （为 packed 布局重建 `[D,T,H,1]` 描述符）；③ **MLA 降 smem 冲 2 CTA/SM**（主 kernel ~202KB
+> **改为：LSE 的 K 维 split + 二次归约**（降镜像配对的 33-tile 串行临界路径）；② ~~varlen 的 **TMA 化**
+> （为 packed 布局重建 `[D,T,H,1]` 描述符）~~——**第八十三轮已判决：中性/偏负**（fp16，指令 −23% 但
+> Duration 持平、强倾斜 −4.7%；见 `docs/01` §16.10）；③ **MLA 降 smem 冲 2 CTA/SM**（主 kernel ~202KB
 > smem、1 CTA/SM + smem→mma 依赖是四 dtype 的共同墙）或 **split-KV 提 grid**；④ 回到 fp8 K/V
 > TMA（需先腾 ~10KB smem）或 fp16/bf16 的 `L2 red`（三条消 red 路已证伪，转 TMA/软流水）。
 >
@@ -2464,7 +2499,8 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > fp8 × causal/full × {HD=128 MHA/GQA, HD=512 MLA} 齐备**（非 TMA）。**下一步候选**：
 > ① **fp16/bf16 的 varlen MLA**（需给 `fa_bwd_{fp16,bf16}_mma_kernel` 与 `lse_mma_kernel_bal`
 > 加 `cu_seqlens`）；② 按 `cu_seqlens` 的**均衡分块**（短序列 CTA 早退）；
-> ③ varlen 的 **TMA 化**（为 packed 布局重建 `[D,T,H,1]` 描述符）；④ 回到 fp8 K/V TMA
+> ③ ~~varlen 的 **TMA 化**（为 packed 布局重建 `[D,T,H,1]` 描述符）~~——**第八十三轮 fp16 判决：
+> 中性/偏负**（`docs/01` §16.10），bf16/fp8 同理大概率不成立；④ 回到 fp8 K/V TMA
 > （需先腾 ~10KB smem）或 fp16/bf16 的 `L2 red`（三条消 red 路已证伪，转 TMA/软流水）。
 >
 > **当前冲刺（按序，把 ours 性能推到 FA3/TE 水平；这是最高优先级，别再被其它任务打断）**：

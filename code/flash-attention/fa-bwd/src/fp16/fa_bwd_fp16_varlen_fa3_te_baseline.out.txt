@@ -1,0 +1,10 @@
+### equal-length varlen [1024]x4 == fixed B=4,S=1024,H=16,D=128 (pure bwd, CUPTI)
+### Thu Sep 24 07:59:29 PM UTC 2026
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+causal FA2.7.4 0.2507 ms  274.1 TF
+causal FA3 0.1457 ms  471.7 TF
+causal TE2.14 0.1760 ms  390.6 TF
+full  FA2.7.4 0.3294 ms  208.6 TF
+full  FA3 0.1953 ms  351.9 TF
+full  TE2.14 0.2143 ms  320.7 TF
