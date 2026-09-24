@@ -1811,12 +1811,87 @@ spill 的 local 流量（uncoalesced）反而比省下的 red 更贵。**继续�
 
 ---
 
+## 14l. O17-2：把 O17 的 GEMM3/GEMM4 拆分到两个 warpgroup（负载再平衡）
+
+### 14l.1 动机（O17 的张量工作量是 3:1 失衡的）
+
+O17（§14j）用 BM=128 + 2 warpgroups 把 dK/dV 的跨 CTA `red` 砍半，但它的 phase B 里
+**只有 wg0 串行做 GEMM3(dV) 和 GEMM4(dK)**（各 `nh=0,1` 两遍、每遍 `commit/wait0` + 一次
+`red_add2` epilogue，共 4 条串行 red 链），而 **wg1 在 phase B 只做自己的 GEMM5(dQ)**。
+按每 tile 的 wgmma 条数记：wg0 = GEMM3(2×8) + GEMM4(2×8) + GEMM5(2×8) = **48**，
+wg1 = GEMM5 一路 = **16** ⇒ **张量工作量 3:1**，wg1 在 GEMM3/GEMM4 期间基本空等（ncu
+`barrier` stall 高）。这正是 O17b（BM=256）里已经采用、但 BM=128 版没做的「dV/dK 分给两个 wg」。
+
+### 14l.2 关键手段：按输出拆分，归约语义不变
+
+dV 与 dK 是**两个独立的输出**（不同张量），但都沿 m（Q 行）方向对全 BM=128 归约。
+把 **GEMM3→wg0、GEMM4→wg1**，各自仍把两个 m64 半（`s=0..7`）连续喂进**同一个**
+`wgmma.m64n64k16` 累加器 ⇒ **每个 KV 元素仍只 `red` 一次**（red 字节不变），只是发射的
+warpgroup 不同。GEMM5（dQ）仍由每个 wg 算自己 64 行（A=本 wg 的 dS 行块），无法也不需拆分。
+
+- **正确性**：dV/dK 的 wgmma 归约次序（`s=0..7` 的顺序、累加器布局）与 O17 完全相同，
+  只是换了发射方；`red_add2` 的 (r,c) 映射与 O17 逐字相同。故**结果值逐位相同**，
+  仅跨 CTA `atomicAdd` 的交错次序可能微变（`max|diff|` dk/dv ~3e-5~9e-4、dq = 0）。
+- **实现**：`fa_bwd_fp16_wgmma2_kernel<HD, bool SPLIT=true>`，`if constexpr (SPLIT)` 分支里
+  `if (wg==0) {dK...} else {dV...}`；`SPLIT=false` 保留 O17 原版用于同 session A/B。host 加
+  `--wg2split=0/1`（默认 1）。单/两文件 device 代码逐字一致（`sync_onefile_device.py` 核对
+  `identical: True`），bf16 逐字 dtype 同构。
+
+### 14l.3 性能（同 session A/B，CUDA event，main-only，ms）
+
+| shape | O17（wg0 串行 dV+dK） | **O17-2（wg0=dV,wg1=dK）** | 比 |
+|---|---|---|---|
+| MHA S=512 | 0.0520 | **0.0518** | 1.004× |
+| MHA S=4096 | 1.0026 | **0.9895** | **1.013×**（138.9 TF） |
+| GQA kv4 S1024 | 0.1800 | **0.1764** | **1.021×**（97.4 TF） |
+| GQA kv8 S1024 | 0.2050 | **0.2035** | 1.007× |
+| MQA kv1 S1024 | 0.2856 | **0.2843** | 1.005× |
+
+端到端（O17-2）：S=512 **0.113 ms（19.0 TF）**、S=4096 **1.946 ms（70.6 TF）**。
+数值与 O5~O17 历史值**逐位一致**（S512 1.671/1.771/1.899e-3、S4096 1.883/1.734/1.966e-3、
+GQA kv4 2.134/3.305/3.850e-3、kv8 2.008/2.931/3.891e-3、MQA kv1 2.292/7.934/7.517e-3）。
+
+### 14l.4 ncu（main，S=4096，同 binary `--wg2split` 0/1）
+
+| 指标 | O17（no-split） | **O17-2（split）** |
+|---|---|---|
+| `gpu__time_duration` | 997.7 µs | **982.4 µs** |
+| `lts__t_sectors_op_red` | 51,904,512 | **51,904,512（不变）** |
+| `read` 扇区 | 17,967,585 | 18,014,141 |
+| stall `barrier` | **1.61** | **0.46（−3.5×）** |
+| stall `wait` | 1.18 | 1.19 |
+| stall `long_scoreboard` | 0.40 | 0.75 |
+| stall `short_scoreboard` | 0.26 | 0.40 |
+| regs / smem / occ / Waves | 200 / 149.5KB / 12.4% / 3.88 | 200 / 148.5KB / 12.5% / 3.88 |
+
+**机制结论**：`red` 字节完全不变（51.9M）——说明收益**不是**来自减少原子，而是来自
+**把 wg0 的 4 条串行 red 链拆到两个 wg、消掉 wg1 在 GEMM3/GEMM4 期间的 barrier 空等**
+（`barrier` 1.61→0.46）。代价是两 wg 并发发 red 让 `long/short_scoreboard` 略升，净收益
+1.3%（S4096）。墙仍是 **L2 red（~55%）+ `wait`**，与本项正交。
+
+### 14l.5 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`）
+
+FA3 MHA S=4096 **0.3247ms/846TF**、TE 0.4451/618、FA2 0.7275/378；GQA kv4 FA3 0.0826/416。
+ours 端到端 S=4096 1.946ms ⇒ 时间为 FA3 的 **5.99×**（O17 5.97×，ncu 单 kernel 1.5% 已在
+端到端被 preprocess/convert 稀释）。
+
+### 14l.6 原始输出
+
+`src/fp16/fa_bwd_fp16_mma_main_o17_2_sweep.out.txt`（两文件 ×5 shape A/B + 对拍）、
+`src/fp16/fa_bwd_fp16_mma_onefile_o17_2_s4096.out.txt`（单文件）、
+`src/fp16/fa_bwd_fp16_mma_main_o17_2_ncu_wg2_s4096.out.txt`（`--set full`）、
+`src/fp16/fa_bwd_fp16_mma_main_o17_2_ncu_red_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o17_nosplit_ncu_red_s4096.out.txt`（A/B 基线）、
+`src/fa_bwd_o17_2_fa3_te_baseline_fp16.out.txt`。
+
+---
+
 ## 15. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
 O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）、O11（§14d）、
 O9a（§14e）、O13（§14f）、O9b（§14g）、O9b-2 第一步（§14h）、O15a TMA 通路 + O16 负结果（§14i）、
-**O17 跨 wg 归约（§14j）** 完成。O7c 已把「减 red 事务数」这条杠杆**证伪**（float4 更慢），
+**O17 跨 wg 归约（§14j）、O17-2 GEMM3/4 拆分再平衡（§14l）** 完成。O7c 已把「减 red 事务数」这条杠杆**证伪**（float4 更慢），
 O10 又把 Q/dO 的标量载入与 dQ 写回向量化（`long_scoreboard` 压下、指令数 −2.5%），
 O13 修正了 O6c 的过时 auto tile（S=512 main 1.26×、端到端 1.12×），O9b 把主 kernel 的
 GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，数值逐位不变）。
@@ -1831,8 +1906,11 @@ GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，数值逐位不�
 2. **O7b（去 dK/dV 原子）**：分块 `*_accum` + convert（确定性）；把跨 CTA `red` 换成
    「CTA 局部累加 + 非原子写 + 二次归约」，直接消 L2 原子（red 字节不减但不再是 RMW）；
    可与 O17 的「CTA 内归约」叠加。**当前第一优先级**。
+   - **补充（§14l，已完成）**：在动 O7b 之前先做了一版 **O17-2**（把 O17 的 GEMM3/GEMM4
+     拆分到两个 wg，消 wg1 的 barrier 空等）：`barrier` 1.61→0.46、main S4096 1.013×、
+     GQA kv4 1.021×，数值逐位不变。red 字节不变 ⇒ 与 O7b 正交。
 3. **fp8 侧的跨 wg 归约**：fp8 是 1 字节 operand、smem 更省，4wg 的寄存器压力比 fp16 小一档，
-   同样对 fp8 main 的 L2 red 有效。
+    同样对 fp8 main 的 L2 red 有效。
 4. **O17 的 `BN=128` 微优化**：tile 数/barrier 减半（smem 恰好 224KB、2 wg 寄存器够用）。
 5. **TMA 化 Q/K/V/dO（O15a 通路已就绪）**：需把 K-major HD=128 tile 改成 **2×K=64 chunk**
    （§14i.2），压 `long_scoreboard`/指令数；动不了 L2 red，排在后面。

@@ -1230,7 +1230,7 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
 // smem（HD=128）：Q 32KB + dO 32KB + K 双缓冲 32KB + V 16KB + P 16KB + dS 16KB ≈ 145KB
 // → 1 CTA/SM（256 线程 = 8 warps/SM，与 O9b 的 2 CTA/SM × 4 warps 相同）。数值只改
 // 归约次序（atomic 顺序），与 O9b 在 fp16 噪声内一致。
-template <int HD>
+template <int HD, bool SPLIT = true>
 __global__ void __launch_bounds__(256, 1)
 fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
                           const __half* __restrict__ v, const __half* __restrict__ do_,
@@ -1356,6 +1356,66 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
       kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
                                                   Ks, Vs);
 
+    if constexpr (SPLIT) {
+      // ---- O17-2：把 GEMM3(dV) 交给 wg0、GEMM4(dK) 交给 wg1，两者都仍对全 BM=128 归约
+      //      （s=0..7 两个 m64 半进同一 wgmma 累加器）⇒ 每个 KV 元素仍只 `red` 一次，但
+      //      张量工作量从「wg0:wg1 = 3:1」变成 1:1（原版 wg0 串行做 dV+dK，wg1 只做 dQ），
+      //      且 wg0 原本 4 条串行 red epilogue 链被拆到两个 wg 并发 ⇒ 关键路径缩短。
+      //      数值：dV/dK 的 wgmma 归约次序与 O17 完全相同，只是换了个 wg 发射，值逐位相同。----
+      if (wg == 0) {
+        // ---- (3) dV = Pᵀ·dO（wg0，全 BM）----
+        wgmma_fence();
+#pragma unroll
+        for (int nh = 0; nh < 2; ++nh) {
+          float accv[32];
+#pragma unroll
+          for (int i = 0; i < 32; ++i) accv[i] = 0.f;
+          const uint32_t dOn = dOa + (uint32_t)(nh * 1024);
+#pragma unroll
+          for (int s = 0; s < BM / 16; ++s)
+            wgmma_m64n64k16_t<1, 1>(accv, desc_k16_mn(Pa, s, BN), desc_k16_mn(dOn, s, HD));
+          wgmma_commit();
+          wgmma_wait0();
+#pragma unroll
+          for (int j = 0; j < 8; ++j)
+#pragma unroll
+            for (int qq = 0; qq < 4; qq += 2) {
+              const int rr = r0 + (qq >= 2 ? 8 : 0);
+              const int jg = j0 + rr;
+              const int c = nh * 64 + j * 8 + c2;
+              if (jg < S)
+                red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                         accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+            }
+        }
+      } else {
+        // ---- (4) dK = scale·dSᵀ·Q（wg1，全 BM）----
+        wgmma_fence();
+#pragma unroll
+        for (int nh = 0; nh < 2; ++nh) {
+          float acck[32];
+#pragma unroll
+          for (int i = 0; i < 32; ++i) acck[i] = 0.f;
+          const uint32_t Qn = Qa + (uint32_t)(nh * 1024);
+#pragma unroll
+          for (int s = 0; s < BM / 16; ++s)
+            wgmma_m64n64k16_t<1, 1>(acck, desc_k16_mn(DSa, s, BN), desc_k16_mn(Qn, s, HD));
+          wgmma_commit();
+          wgmma_wait0();
+#pragma unroll
+          for (int j = 0; j < 8; ++j)
+#pragma unroll
+            for (int qq = 0; qq < 4; qq += 2) {
+              const int rr = r0 + (qq >= 2 ? 8 : 0);
+              const int jg = j0 + rr;
+              const int c = nh * 64 + j * 8 + c2;
+              if (jg < S)
+                red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                         acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+            }
+        }
+      }
+    } else {
     if (wg == 0) {
       // ---- (3) dV = Pᵀ·dO：wg0 对全 BM=128 归约（s=0..7 两个 m64 半进同一累加器）----
       wgmma_fence();
@@ -1406,6 +1466,7 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
                        acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
           }
       }
+    }
     }
 
     // ---- (5) dQ += scale·dS·K：每个 wg 算自己 64 行（A=本 wg 的 dS 行块）----

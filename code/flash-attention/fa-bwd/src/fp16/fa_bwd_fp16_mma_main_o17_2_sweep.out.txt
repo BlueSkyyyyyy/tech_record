@@ -1,0 +1,35 @@
+=== b1_s512_h16_d128_causal_fp16 ===
+[timing] total(3 kernels) 0.1130 ms  19.00 TFLOPS (bwd FLOPs=4BS^2HD)
+[O17 A/B] main mma(64,64,1) 0.0578 ms | O9b wgmma 0.0593 (0.974x) | O17 wgmma2(BM128) 0.0518 (1.116x) TF 41.5
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 0.0520 ms (41.3 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.0518 ms (41.5 TF) => 1.004x | max|diff| dq/dk/dv=0.00e+00/5.72e-05/6.10e-05
+  dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
+  dk   vs ref: max_abs=1.771e-03  max_rel=2.996e-01
+  dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+=== b1_s4096_h16_d128_causal_fp16 ===
+[timing] total(3 kernels) 1.9457 ms  70.64 TFLOPS (bwd FLOPs=4BS^2HD)
+[O17 A/B] main mma(64,64,2) 1.5108 ms | O9b wgmma 1.5041 (1.004x) | O17 wgmma2(BM128) 0.9895 (1.527x) TF 138.9
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 1.0026 ms (137.1 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.9895 ms (138.9 TF) => 1.013x | max|diff| dq/dk/dv=0.00e+00/4.58e-05/6.10e-05
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.408e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+=== b1_s1024_h32_d128_kv4_causal_fp16 ===
+[timing] total(3 kernels) 0.3728 ms  46.09 TFLOPS (bwd FLOPs=4BS^2HD)
+[O17 A/B] main mma(64,32,2) 0.2620 ms | O9b wgmma 0.2662 (0.984x) | O17 wgmma2(BM128) 0.1764 (1.486x) TF 97.4
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 0.1800 ms (95.5 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.1764 ms (97.4 TF) => 1.021x | max|diff| dq/dk/dv=0.00e+00/2.14e-04/2.14e-04
+  dq   vs ref: max_abs=2.134e-03  max_rel=5.101e-01
+  dk   vs ref: max_abs=3.305e-03  max_rel=1.044e+00
+  dv   vs ref: max_abs=3.850e-03  max_rel=3.711e-02
+=== b1_s1024_h40_d128_kv8_causal_fp16 ===
+[timing] total(3 kernels) 0.4375 ms  49.09 TFLOPS (bwd FLOPs=4BS^2HD)
+[O17 A/B] main mma(64,64,2) 0.3064 ms | O9b wgmma 0.3030 (1.011x) | O17 wgmma2(BM128) 0.2035 (1.506x) TF 105.5
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 0.2050 ms (104.8 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.2035 ms (105.5 TF) => 1.007x | max|diff| dq/dk/dv=0.00e+00/9.16e-05/1.83e-04
+  dq   vs ref: max_abs=2.008e-03  max_rel=5.284e-01
+  dk   vs ref: max_abs=2.931e-03  max_rel=5.105e-01
+  dv   vs ref: max_abs=3.891e-03  max_rel=3.167e-02
+=== b1_s1024_h64_d128_kv1_causal_fp16 ===
+[timing] total(3 kernels) 0.5996 ms  57.30 TFLOPS (bwd FLOPs=4BS^2HD)
+[O17 A/B] main mma(64,64,2) 0.4357 ms | O9b wgmma 0.4322 (1.008x) | O17 wgmma2(BM128) 0.2843 (1.533x) TF 120.9
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 0.2856 ms (120.3 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.2843 ms (120.9 TF) => 1.005x | max|diff| dq/dk/dv=0.00e+00/3.05e-04/8.54e-04
+  dq   vs ref: max_abs=2.292e-03  max_rel=4.022e-01
+  dk   vs ref: max_abs=7.934e-03  max_rel=3.853e-01
+  dv   vs ref: max_abs=7.517e-03  max_rel=3.239e-02
