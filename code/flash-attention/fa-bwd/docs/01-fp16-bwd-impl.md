@@ -2000,7 +2000,93 @@ O18 main S=4096 = **0.9618ms / 142.9 TF**；端到端（preprocess 0.343 + main 
 
 ---
 
+## 14n. O23：Hopper 路径默认化（主 kernel wgmma2/wgmma2b + LSE wgmma，端到端 1.08–1.43×）
+
+### 14n.1 动机（最便宜的一步：最优路径一直是 opt-in）
+
+O9a/O9b/O17/O18 把 fp16 反向的 Hopper 快路做到了 main S=4096 **142.9 TF**（§14g/§14j/§14m），
+但它一直是**显式开关**——必须传 `--wg2`/`--wg2bn` 才生效；不传就退回慢 1.5× 的 `mma` 路径
+（`run_main` 里 `wg2_sel` 默认 0）。fp8 侧早在 **O22** 就把 `-DFA_WGMMA` 构建下的 LSE + 主 kernel
+GEMM1/2 的 wgmma **默认打开**（ROADMAP 第六十二轮），fp16/bf16 一直没做这一步。本项补齐，
+让「用 Hopper 快路」成为默认行为，`--wg2=0 --wg2bn=0` 仍可退回 mma 做同 session A/B。
+
+### 14n.2 改动（单/两文件 host 逐字一致；device 代码未动）
+
+`fa_bwd_fp16_mma_{main.cu, onefile.cu}`（bf16 同构）：
+
+- 把 `--wg2`/`--wg2bn`/`--lsewgm` 的解析加一个 `wg_forced`/`lse_forced` 标记（用户显式指定则
+  尊重），并在 `run_main` 前加自动段：
+
+```cpp
+#ifdef FA_WGMMA
+  if (!wg_forced && D == 128) { if (S >= 4096) wg2bn_sel = 1; else wg2_sel = 1; }
+  if (!lse_forced && D == 128 && causal) lse_wgm = 1;   // LSE 也走 wgmma
+#endif
+```
+
+  * `S>=4096` 选 **BN=128（O18）**，其余选 **BN=64（O17）**——与 O18 实测一致（wg2b 的明确收益
+    只在大 S；GQA/MQA 中性，保持 O17 不引入回归）。
+  * `lse_wgm` 只在 causal 生效（`run_pre` 里 `causal && lse_wgm`）；非 causal 自动落回 O8 原版。
+  * **非 `FA_WGMMA`（纯 `sm_90`）构建完全不变**：`wg2_sel/wg2bn_sel` 恒 0、`lse_wgm` 恒 0，
+    `--wg2=0 --wg2bn=0`、`--lsewgm=0` 提供回归对照。
+  * 新增 `[O23] main backend = … | lse = …` 打印，便于日志确认默认档。
+
+### 14n.3 数值（ours-vs-ref，fp16 causal，max_abs）—— 与历史逐位一致
+
+S512 1.671/1.771/1.899e-3；S4096 1.883/1.734/1.966e-3；GQA kv4 S1024 2.134/3.305/3.850e-3；
+MQA kv1 S1024 2.292/7.934/7.517e-3；MLA S512H4 2.516/2.916/1.724e-3。单文件与两文件**逐指标一致**
+（S4096 total 1.3609 vs 1.3641ms）。`--wg2=0 --wg2bn=0` 的 mma 结果与历史 mma 逐位相同。
+
+### 14n.4 性能（同 session 端到端 total，CUDA event，ms）
+
+| shape | 旧默认（mma） | **新默认** | × | 主 kernel 后端 | LSE |
+|---|---|---|---|---|---|
+| MHA S512 | 0.1132 | **0.1045** | 1.08 | wgmma2(BN=64) | wgmma |
+| GQA kv4 S1024 | 0.3751 | **0.2864** | 1.31 | wgmma2 | wgmma |
+| MQA kv1 S1024 | 0.6024 | **0.4425** | 1.36 | wgmma2 | wgmma |
+| MHA S4096 | 1.9450 | **1.3641** | **1.43** | wgmma2b(BN=128) | wgmma |
+| MLA S512 D512 | 0.4367 | 0.4349 | 1.00 | mma（D=512 无 wgmma2） | mma |
+
+main-only 的 A/B（程序内 `[O17 A/B]`/`[O18 A/B]`）：S4096 mma 1.5111 vs O17 0.9959（1.52×）vs
+O18 0.9601（**144.1 TF**）；S512 mma 0.0568 vs O17 0.0506（1.12×）；GQA kv4 mma 0.2656 vs
+O17 0.1806（1.47×）；MQA kv1 mma 0.4337 vs O17 0.2831（1.53×）。LSE wgmma 再叠加约 1.3%
+（S4096 preprocess 0.3446→0.3270）。
+
+### 14n.5 ncu（默认路径 = `fa_bwd_fp16_wgmma2b_kernel<128,1>`，S=4096，`-c 1`）
+
+`lts__t_sectors_op_red=51,904,512`（与 O18 逐字节相同）、255 regs、231.42KB smem、achieved occ
+12.48%、L2 56.58%、L1/TEX 33.41%、Compute 23.55%、DRAM 6.70%；stall `wait 1.25 +
+long_scoreboard 0.60 + barrier 0.93`。即 **默认档就是 O17/O18 的墙：L2 的 dK/dV 跨 CTA `red`
+（占 L2 扇区 ~72%）+ 1 CTA/SM**，与 §14j/§14m 结论一致——本项只改「默认选谁」，未改机制。
+
+### 14n.6 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`，FA2/FA3/TE 三列）
+
+| shape | FA2.7.4 | **FA3（SM90）** | TE2.14 | ours total | ours/FA3 | ours/TE |
+|---|---|---|---|---|---|---|
+| MHA S=4096 | 0.7301ms / 376 | **0.3251 / 846** | 0.4444 / 619 | 1.3641ms | **4.20×** | 3.07× |
+| GQA kv4 S=1024 | 0.1600 / 215 | **0.0831 / 413** | 0.1124 / 306 | 0.2864 | 3.45× | 2.55× |
+| MQA kv1 S=1024 | 0.2659 / 258 | **0.1566 / 439** | 0.2150 / 320 | 0.4425 | 2.83× | 2.06× |
+
+（ours total 的 TFLOPS 用 harness 的 `4BS²H(D+Dv)` 口径：S4096 201.5 TF、GQA 120 TF、MQA 155 TF
+⇒ 为 FA3 的 23.8%/29.0%/35.4%。）O18 时 ours/FA3 是 4.30×，本项默认化后为 **4.20×**（同时把
+「不传 flag 的用户」从 593%（mma）直接带到默认快路）。
+
+### 14n.7 原始输出
+
+`src/fp16/fa_bwd_fp16_mma_main_o23_{s4096,shapes}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o23b_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o23b_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o23_ncu_default_s4096.out.txt`、
+`src/fa_bwd_o23_default_ab.out.txt`（`--wg2=0 --wg2bn=0` 的旧默认端到端）、
+`src/fa_bwd_o23_shapes_final.out.txt`、`src/fa_bwd_o23_fa3_te_baseline_{fp16,bf16}.out.txt`。
+
+---
+
 ## 15. 下一步
+
+> **O23（§14n）已完成**：把 O17/O18 的主 kernel + O9a 的 LSE 在 `-DFA_WGMMA` 构建下**默认打开**
+> （对齐 fp8 O22），端到端 **1.08–1.43×**（MHA S4096 1.945→1.364ms），数值与历史逐位一致；
+> `--wg2=0 --wg2bn=0`/`--lsewgm=0` 保留 A/B。默认档的墙仍是 **L2 red + 1 CTA/SM**。
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
 O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）、O11（§14d）、

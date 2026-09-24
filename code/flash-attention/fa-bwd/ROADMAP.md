@@ -117,7 +117,9 @@
 
 ### 可选
 
-- [ ] SM90 TMA+wgmma 版本（对标 FA3）
+- [~] SM90 TMA+wgmma 版本（对标 FA3）：**wgmma 部分已完成**（O9a/O9b/O9b-2/O17/O18，
+  fp16/bf16/fp8，且 **O22/O23 已把 Hopper 路径默认化**）；**TMA 化 Q/K/V/dO 尚未落进主 kernel**
+  （O15a 冒烟已逐位 PASS，需把 HD=128 的 K-major tile 拆成 2×K=64 chunk）。见 backlog。
 - [ ] 变长（cu_seqlens / varlen）覆盖
 
 ## 每项的 Definition of Done
@@ -1666,8 +1668,42 @@
   - 原始输出 `src/fp8/o22_wgmma_default_{s4096,shapes,onefile}.out.txt`、
     `o22_mma_baseline_shapes.out.txt`、`o22_regdq_ab_s4096.out.txt`、`o22_ilv_ab_s4096.out.txt`、
     `o22_ksplit_s4096.out.txt`、`o22_ncu_stall_{s4096,wgmma_s4096}.out.txt`、
-    `o22_fa3_te_baseline_fp16.out.txt`、`o22_te_fp8_bench.out.txt`；
-    详见 `docs/03` §30、`docs/04` §2.3。
+     `o22_fa3_te_baseline_fp16.out.txt`、`o22_te_fp8_bench.out.txt`；
+     详见 `docs/03` §30、`docs/04` §2.3。
+
+- 2026-09-24（第六十三轮）：**O23 完成（fp16/bf16 Hopper 快路默认化：主 kernel wgmma2/wgmma2b +
+  LSE wgmma；端到端 1.08–1.43×）**。
+   - 动机：O9a/O17/O18 的 fp16/bf16 Hopper 快路全是 **opt-in**（要传 `--wg2`/`--wg2bn`/`--lsewgm`），
+     `run_main` 里 `wg2_sel` 默认 0 ⇒ 不传 flag 就退回慢 1.4–1.5× 的 mma。fp8 早在 **O22**
+     就把 `-DFA_WGMMA` 构建下的 LSE + 主 kernel GEMM1/2 wgmma 默认化，fp16/bf16 一直没做。
+   - **改动**（单/两文件 host 逐字一致，device 代码未动）：`--wg2=`/`--wg2bn=`/`--lsewgm=` 解析加
+     `wg_forced`/`lse_forced` 标记（用户显式指定则尊重）；`run_main` 前加自动段——`#ifdef FA_WGMMA`
+     且 D==128 时，`S>=4096`→`wg2bn`（BN=128，O18）否则 `wg2`（BN=64，O17）；`causal && D==128`
+     →`lse_wgm=1`（非 causal 自动落回 O8 原版）。新增 `[O23] main backend = … | lse = …` 打印。
+     纯 `sm_90` 构建行为**完全不变**（恒选 mma）；`--wg2=0 --wg2bn=0`/`--lsewgm=0` 保留回归对照。
+   - **数值与历史逐位一致**：fp16 S512 1.671/1.771/1.899e-3、S4096 1.883/1.734/1.966e-3、
+     GQA kv4 2.134/3.305/3.850e-3、MQA kv1 2.292/7.934/7.517e-3；bf16 S512 9.001/12.61/13.65e-3、
+     S4096 15.10/13.40/16.31e-3、GQA kv4 12.01/21.25/31.56e-3；单/两文件逐指标一致。
+   - **性能（同 session 端到端 total A/B，CUDA event，ms；旧默认=mma）**：fp16 MHA S512
+     0.1132→**0.1045（1.08×）**、GQA kv4 S1024 0.3751→**0.2864（1.31×）**、MQA kv1
+     0.6024→**0.4425（1.36×）**、MHA S4096 1.9450→**1.3641（1.43×）**；bf16 MHA S512
+     0.1119→**0.1058**、GQA kv4 0.3763→**0.2875**、MQA kv1 0.6022→**0.4438**、MHA S4096
+     1.9429→**1.3666（1.42×）**；MLA（D=512）不变。main-only：fp16 S4096 mma 1.5111 vs O18
+     0.9601（**144.1 TF**）；bf16 同构 143.1 TF。LSE wgmma 再叠加 ~1.3%（S4096 preprocess
+     0.3446→0.3270）。
+   - **ncu（默认路径=`wgmma2b`，S=4096，`-c 1`）**：`lts__t_sectors_op_red=51,904,512`（与 O18
+     逐字节相同）、255 regs / 231.42KB smem / achieved occ 12.48% / L2 56.58% / Compute 23.55%；
+     stall `wait 1.25 + long 0.60 + barrier 0.93` ⇒ **墙仍是 L2 的 dK/dV 跨 CTA `red` + 1 CTA/SM**。
+   - **对标**（同 session 纯反向 `fa_vs_te_bwd_only.py`，FA2/FA3/TE）：fp16 MHA S4096 FA3
+     0.3251ms/846TF、TE 0.4444/619 ⇒ ours total 1.3641ms = **FA3 4.20× / TE 3.07×**（O18 4.30×）；
+     GQA kv4 FA3 0.0831/413 ⇒ 3.45×；MQA kv1 FA3 0.1566/439 ⇒ 2.83×。bf16 MHA S4096 FA3
+     0.3210/856 ⇒ 4.26×；GQA kv4 3.48×；MQA kv1 2.83×。
+   - 原始输出 `src/fp16/fa_bwd_fp16_mma_main_o23_{s4096,shapes}.out.txt`、
+     `..._mma_main_o23b_s4096.out.txt`、`..._mma_onefile_o23b_s4096.out.txt`、
+     `..._o23_ncu_default_s4096.out.txt`、`src/bf16/fa_bwd_bf16_mma_*_o23*`、
+     `src/fa_bwd_o23_default_ab.out.txt`、`src/fa_bwd_o23_shapes_final.out.txt`、
+     `src/fa_bwd_o23_fa3_te_baseline_{fp16,bf16}.out.txt`；文档 `docs/01` §14n、`docs/01b` §6v、
+     `docs/04` §2.1/§2.2、`docs/08` §5。
 
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
@@ -1834,6 +1870,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > （`fa_bwd_bf16_wgmma2b_kernel`，`--wg2bn`），数值与历史逐位一致；**main MHA S4096
 > 1.025–1.029×（143.8 TF）/ S512 1.030×**，GQA/MQA 中性；ncu `red` 逐字节不变、Duration
 > 982.2→952.5µs。详见 `docs/01b` §6u、`docs/04` §2.2/§3。
+> **O23 已完成（第六十三轮）**：fp16/bf16 的 Hopper 快路（主 kernel wgmma2/wgmma2b + LSE wgmma）
+> 在 `-DFA_WGMMA` 构建下**默认打开**（对齐 fp8 O22），端到端 **1.08–1.43×**（MHA S4096
+> 1.9450→1.3641ms），`--wg2=0 --wg2bn=0`/`--lsewgm=0` 保留 mma 对照，纯 `sm_90` 不变；
+> 数值逐位一致，默认档墙仍是 L2 red + 1 CTA/SM。详见 `docs/01` §14n、`docs/01b` §6v。
 > **下一步（按回报）**：① **O7b**——把 dK/dV 的跨 CTA `red` 换成「CTA 局部累加 + 非原子写
 > + 二次归约」（消 L2 原子、顺带确定性反向；注意字节可能反增，需实测）；② **fp8 侧同构跨 wg
 > 归约**（fp8 是 1 字节 operand、4wg 寄存器压力小一档）；③ TMA 化 Q/K/V/dO（O15a 通路已就绪，

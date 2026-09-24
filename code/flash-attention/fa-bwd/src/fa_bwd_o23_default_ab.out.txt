@@ -1,0 +1,8 @@
+b1_s512_h16_d128_causal_bf16             [O23] main backend = mma (D=128 S=512)
+[timing] total(3 kernels) 0.1119 ms  19.19 TFLOPS (bwd FLOPs=4BS^2HD)
+b1_s4096_h16_d128_causal_bf16            [O23] main backend = mma (D=128 S=4096)
+[timing] total(3 kernels) 1.9429 ms  70.74 TFLOPS (bwd FLOPs=4BS^2HD)
+b1_s1024_h32_d128_kv4_causal_bf16        [O23] main backend = mma (D=128 S=1024)
+[timing] total(3 kernels) 0.3763 ms  45.65 TFLOPS (bwd FLOPs=4BS^2HD)
+b1_s1024_h64_d128_kv1_causal_bf16        [O23] main backend = mma (D=128 S=1024)
+[timing] total(3 kernels) 0.6022 ms  57.05 TFLOPS (bwd FLOPs=4BS^2HD)

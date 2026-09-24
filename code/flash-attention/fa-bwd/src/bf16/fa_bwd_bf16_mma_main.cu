@@ -201,12 +201,16 @@ int main(int argc, char** argv) {
   int prel_opt = -1;
   // O9：LSE 是否用 wgmma（仅 D==128 且 causal；0=用 O8b 的 mma 版，1=wgmma 版）。
   int lse_wgm = 0;
+  // O23：lse_wgm 是否被用户显式指定（--lsewgm=0/1）。未指定时在 FA_WGMMA 构建下默认开。
+  bool lse_forced = false;
   // O9b：主 kernel 是否用 wgmma（仅 FA_WGMMA 构建、D==128 且 sel=(64,64) 时生效）。
   int wgmma_sel = 0;
   // O17：2 warpgroup（BM=128，跨 wg 归约）wgmma 主 kernel（仅 FA_WGMMA 构建、D==128）。
+  // O23：默认自动选择（见下方 auto 段）；`--wg2=0/1` 可强制。wg_forced=用户显式指定。
   int wg2_sel = 0;
-  // O18：BN=128 版 wgmma2（仅 FA_WGMMA 构建、D==128）。
+  // O18：BN=128 版 wgmma2（仅 FA_WGMMA 构建、D==128）。O23：默认自动选择。
   int wg2bn_sel = 0;
+  bool wg_forced = false;
   // O17-2：wgmma2 的 GEMM3/GEMM4 是否拆分到两个 warpgroup（1=拆，0=原版 wg0 串行）。
   int wg2split_sel = 1;
   int iters = 50;
@@ -222,15 +226,15 @@ int main(int argc, char** argv) {
     else if (a.rfind("--bn=", 0) == 0) bn_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--r4=", 0) == 0) r4_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
-    else if (a.rfind("--lsewgm=", 0) == 0) lse_wgm = atoi(a.c_str() + 9);
-    else if (a == "--lsewgm") lse_wgm = 1;
+    else if (a.rfind("--lsewgm=", 0) == 0) { lse_wgm = atoi(a.c_str() + 9); lse_forced = true; }
+    else if (a == "--lsewgm") { lse_wgm = 1; lse_forced = true; }
     else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
     else if (a == "--wgmma") wgmma_sel = 1;
-    else if (a.rfind("--wg2=", 0) == 0) wg2_sel = atoi(a.c_str() + 6);
+    else if (a.rfind("--wg2=", 0) == 0) { wg2_sel = atoi(a.c_str() + 6); wg_forced = true; }
     else if (a.rfind("--wg2split=", 0) == 0) wg2split_sel = atoi(a.c_str() + 11);
-    else if (a == "--wg2") wg2_sel = 1;
-    else if (a.rfind("--wg2bn=", 0) == 0) wg2bn_sel = atoi(a.c_str() + 8);
-    else if (a == "--wg2bn") wg2bn_sel = 1;
+    else if (a == "--wg2") { wg2_sel = 1; wg_forced = true; }
+    else if (a.rfind("--wg2bn=", 0) == 0) { wg2bn_sel = atoi(a.c_str() + 8); wg_forced = true; }
+    else if (a == "--wg2bn") { wg2bn_sel = 1; wg_forced = true; }
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -419,6 +423,20 @@ int main(int argc, char** argv) {
 #undef LAUNCH_CFG
   const bool r4_sel = (r4_opt > 0);
   const bool prel_sel = (prel_opt >= 0) ? (prel_opt != 0) : true;
+  // O23：把 O17/O18 的 Hopper wgmma2 主 kernel 在 `-DFA_WGMMA`（sm_90a）构建下**默认打开**
+  //   （对齐 fp8 的 O22）。仅 D==128：S>=4096 用 BN=128（O18，tile 数减半），否则 BN=64（O17）。
+  //   用户显式传 `--wg2=`/`--wg2bn=` 时不做自动选择；`--wg2=0 --wg2bn=0` 退回 mma 路径做 A/B。
+  //   非 FA_WGMMA 构建行为完全不变（wg2_sel/wg2bn_sel 恒 0）。
+#ifdef FA_WGMMA
+  if (!wg_forced && D == 128) {
+    if (S >= 4096) wg2bn_sel = 1; else wg2_sel = 1;
+  }
+  // O23：LSE 预处理也默认走 Hopper wgmma 版（仅 causal / D==128；非 causal 自动落回 O8 原版）。
+  if (!lse_forced && D == 128 && causal) lse_wgm = 1;
+#endif
+  printf("[O23] main backend = %s | lse = %s (D=%d S=%d)\n",
+         wg2bn_sel ? "wgmma2b(BN=128)" : (wg2_sel ? "wgmma2(BN=64)" : "mma"),
+         (D == 128 && causal && lse_wgm) ? "wgmma" : "mma", D, S);
   auto run_main = [&]() {
 #ifdef FA_WGMMA
     if (wg2bn_sel && D == 128) {

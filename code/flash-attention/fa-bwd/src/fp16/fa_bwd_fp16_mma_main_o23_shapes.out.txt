@@ -1,0 +1,30 @@
+########## b1_s512_h16_d128_causal_fp16
+[O23] main backend = wgmma2(BN=64) (D=128 S=512)
+[timing] total(3 kernels) 0.1061 ms  20.24 TFLOPS (bwd FLOPs=4BS^2HD)
+[O17 A/B] main mma(64,64,1) 0.0568 ms | O9b wgmma 0.0586 (0.970x) | O17 wgmma2(BM128) 0.0506 (1.123x) TF 42.4
+[O18 A/B] main O17 wg2(BN64) 0.0506 ms (42.4 TF) | O18 wg2b(BN128,split) 0.0490 ms (43.8 TF) => 1.032x | O18 wg2b(BN128,串行) 0.0497 ms => 1.018x | max|diff| wg2b-vs-wg2 dq/dk/dv=2.98e-07/3.05e-04/2.90e-04 | wg2bns-vs-wg2b 0.00e+00/1.45e-04/1.22e-04
+  dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
+  dk   vs ref: max_abs=1.771e-03  max_rel=2.996e-01
+  dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+########## b1_s1024_h32_d128_kv4_causal_fp16
+[O23] main backend = wgmma2(BN=64) (D=128 S=1024)
+[timing] total(3 kernels) 0.2905 ms  59.13 TFLOPS (bwd FLOPs=4BS^2HD)
+[O17 A/B] main mma(64,32,2) 0.2656 ms | O9b wgmma 0.2689 (0.988x) | O17 wgmma2(BM128) 0.1806 (1.470x) TF 95.1
+[O18 A/B] main O17 wg2(BN64) 0.1806 ms (95.1 TF) | O18 wg2b(BN128,split) 0.1812 ms (94.8 TF) => 0.997x | O18 wg2b(BN128,串行) 0.1852 ms => 0.975x | max|diff| wg2b-vs-wg2 dq/dk/dv=2.98e-07/2.75e-04/9.16e-04 | wg2bns-vs-wg2b 0.00e+00/2.29e-04/3.66e-04
+  dq   vs ref: max_abs=2.134e-03  max_rel=5.101e-01
+  dk   vs ref: max_abs=3.305e-03  max_rel=1.044e+00
+  dv   vs ref: max_abs=3.850e-03  max_rel=3.711e-02
+########## b1_s1024_h64_d128_kv1_causal_fp16
+[O23] main backend = wgmma2(BN=64) (D=128 S=1024)
+[timing] total(3 kernels) 0.4513 ms  76.14 TFLOPS (bwd FLOPs=4BS^2HD)
+[O17 A/B] main mma(64,64,2) 0.4337 ms | O9b wgmma 0.4313 (1.006x) | O17 wgmma2(BM128) 0.2831 (1.532x) TF 121.4
+[O18 A/B] main O17 wg2(BN64) 0.2831 ms (121.4 TF) | O18 wg2b(BN128,split) 0.2798 ms (122.8 TF) => 1.012x | O18 wg2b(BN128,串行) 0.2835 ms => 0.999x | max|diff| wg2b-vs-wg2 dq/dk/dv=3.58e-07/8.54e-04/2.93e-03 | wg2bns-vs-wg2b 0.00e+00/7.32e-04/1.22e-03
+  dq   vs ref: max_abs=2.292e-03  max_rel=4.022e-01
+  dk   vs ref: max_abs=7.934e-03  max_rel=3.849e-01
+  dv   vs ref: max_abs=7.517e-03  max_rel=3.239e-02
+########## b1_s512_h4_d512_causal_fp16
+[O23] main backend = mma (D=512 S=512)
+[timing] total(3 kernels) 0.4367 ms  4.92 TFLOPS (bwd FLOPs=4BS^2HD)
+  dq   vs ref: max_abs=2.516e-03  max_rel=5.182e-01
+  dk   vs ref: max_abs=2.916e-03  max_rel=4.260e-01
+  dv   vs ref: max_abs=1.724e-03  max_rel=4.151e-02

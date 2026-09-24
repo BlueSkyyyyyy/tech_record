@@ -1235,7 +1235,58 @@ ours 端到端相对 O17-bf16（S4096 4.45×、kv8 2.75×、kv4 3.51×、MQA 2.8
 
 ---
 
+## 6v. O23-bf16：Hopper 路径默认化（主 kernel wgmma2/wgmma2b + LSE wgmma）
+
+### 6v.1 动机 / 改动
+
+与 fp16（`docs/01` §14n）**逐字同构**：O17-bf16/O18-bf16 的主 kernel 与 O9a 的 LSE wgmma 一直
+是 `--wg2`/`--wg2bn`/`--lsewgm` 显式开关，默认仍是 mma。本项在 `-DFA_WGMMA`（sm_90a）构建下
+把它们**默认打开**（`wg_forced`/`lse_forced` 标记 + 自动段：D==128 且 S>=4096→BN=128，否则
+BN=64；causal D==128→LSE wgmma），`--wg2=0 --wg2bn=0`/`--lsewgm=0` 保留 mma 对照；非
+`FA_WGMMA` 构建不变。单/两文件 host 逐字一致，device 代码未动。
+
+### 6v.2 数值（ours-vs-ref，bf16 causal，max_abs）—— 与历史逐位一致
+
+S512 9.001/12.61/13.65e-3；S4096 15.10/13.40/16.31e-3；GQA kv4 12.01/21.25/31.56e-3；
+MQA kv1 11.90/45.58/71.96e-3；MLA S512H4 8.753/10.82/17.40e-3。单/两文件逐指标一致
+（S4096 total 1.3677 vs 1.3666ms）。
+
+### 6v.3 性能（同 session 端到端 total，CUDA event，ms）
+
+| shape | 旧默认（mma） | **新默认** | × | 主 kernel 后端 |
+|---|---|---|---|---|
+| MHA S512 | 0.1119 | **0.1058** | 1.06 | wgmma2(BN=64) |
+| GQA kv4 S1024 | 0.3763 | **0.2875** | 1.31 | wgmma2 |
+| MQA kv1 S1024 | 0.6022 | **0.4438** | 1.36 | wgmma2 |
+| MHA S4096 | 1.9429 | **1.3666** | **1.42** | wgmma2b(BN=128) |
+| MLA S512 D512 | 0.4321 | 0.4366 | 1.00 | mma（D=512） |
+
+main-only A/B：S4096 mma 1.4643 vs O17 0.9912（1.48×）vs O18 0.9607（**143.1 TF**）；S512 mma
+0.0562 vs O17 0.0502（1.12×）；GQA kv4 mma 0.2714 vs O17 0.1806（1.50×）；MQA kv1 mma 0.4311 vs
+O17 0.2848（1.51×）。
+
+### 6v.4 ncu / 对标
+
+默认路径即 `fa_bwd_bf16_wgmma2b_kernel`；ncu 与 fp16 O18-bf16 逐项一致（`red=51,904,512` 逐字节
+不变、255 regs / 230.4KB smem / occ 12.5% / L2 ~57%），墙仍是 **L2 的 dK/dV 跨 CTA `red` +
+1 CTA/SM**。同 session 纯反向基线（`harness/fa_vs_te_bwd_only.py bf16`）：MHA S4096 FA3
+0.3210ms/856TF、TE 0.4410/623 ⇒ ours total 1.3666ms = **FA3 的 4.26× / TE 的 3.10×**；
+GQA kv4 S1024 FA3 0.0826/416、TE 0.1121/307 ⇒ 3.48× / 2.56×；MQA kv1 FA3 0.1567/439、
+TE 0.2140/321 ⇒ 2.83× / 2.07×。
+
+### 6v.5 原始输出
+
+`src/bf16/fa_bwd_bf16_mma_main_o23_{s4096,shapes}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_main_o23b_s4096.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o23b_s4096.out.txt`、`src/fa_bwd_o23_default_ab.out.txt`、
+`src/fa_bwd_o23_shapes_final.out.txt`、`src/fa_bwd_o23_fa3_te_baseline_bf16.out.txt`。
+
+---
+
 ## 8. 下一步
+
+> **O23-bf16（§6v）已完成**：Hopper 快路默认化（主 kernel wgmma2/wgmma2b + LSE wgmma），
+> 端到端 **1.06–1.42×**（MHA S4096 1.943→1.367ms），数值与历史逐位一致。
 
 见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）、O8（preprocess mma，§6f）、O6（main
 `cp.async` 双缓冲，§6g）、O6b（K/V 降 smem 回 3 CTA/SM + A 转置读，§6h）、O8b（LSE 负载
