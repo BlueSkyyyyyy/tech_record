@@ -30,6 +30,32 @@
     }                                                                           \
   } while (0)
 
+#if defined(FA_WGMMA) && defined(FA_TMA)
+// O30：为 LSE 的 Q/K 建 4D TMA 描述符（dims={D,S,H,B}，SW128，box={64,64,1,1}）。
+// globalStride（字节）：dim1(S) 的行距 = H*D*2，dim2(H) 的头距 = D*2，dim3(B) 的批距。
+// 要求 16B 对齐（D=128 时 256 的整数倍，恒成立）。坐标 {k0,row,head,batch}。
+static CUtensorMap make_lse_map(const void* ptr, long long H, long long S, long long D,
+                                long long B) {
+  CUtensorMap map;
+  uint64_t dims[4] = {(uint64_t)D, (uint64_t)S, (uint64_t)H, (uint64_t)B};
+  uint64_t strides[3] = {(uint64_t)(H * D * 2), (uint64_t)(D * 2),
+                         (uint64_t)(S * H * D * 2)};
+  uint32_t box[4] = {64, 64, 1, 1};
+  uint32_t estr[4] = {1, 1, 1, 1};
+  CUresult r = cuTensorMapEncodeTiled(
+      &map, CU_TENSOR_MAP_DATA_TYPE_FLOAT16, 4, (void*)ptr, dims, strides, box, estr,
+      CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+      CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  if (r != CUDA_SUCCESS) {
+    const char* s = "?";
+    cuGetErrorString(r, &s);
+    fprintf(stderr, "cuTensorMapEncodeTiled failed: %s\n", s);
+    std::exit(1);
+  }
+  return map;
+}
+#endif
+
 // =============================================================================
 // 极简 npy 读取（little-endian C-contiguous float32）
 // =============================================================================
@@ -243,6 +269,9 @@ int main(int argc, char** argv) {
   int lse_wgm = 0;
   // O23：lse_wgm 是否被用户显式指定（--lsewgm=0/1）。未指定时在 FA_WGMMA 构建下默认开。
   bool lse_forced = false;
+  // O30：LSE 是否用 TMA 版（仅 FA_TMA 构建、D==128、causal；1=用 4D TMA 载入 Q/K）。
+  //   -1=自动（FA_TMA 构建下 D==128/causal 默认开），0/1 由 `--lsetma=` 强制。
+  int lse_tma = -1;
   // O9b：主 kernel 是否用 wgmma（仅 FA_WGMMA 构建、D==128 且 sel=(64,64) 时生效）。
   int wgmma_sel = 0;
   // O16：wgmma 主 kernel 是否用「分段 wait_group」重叠 epilogue（-1=自动/开，0=关，1=开）。
@@ -283,6 +312,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--lsewgm=", 0) == 0) { lse_wgm = atoi(a.c_str() + 9); lse_forced = true; }
     else if (a == "--lsewgm") { lse_wgm = 1; lse_forced = true; }
+    else if (a.rfind("--lsetma=", 0) == 0) lse_tma = atoi(a.c_str() + 9);
+    else if (a == "--lsetma") lse_tma = 1;
     else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
     else if (a == "--wgmma") wgmma_sel = 1;
     else if (a.rfind("--ow=", 0) == 0) ow_opt = atoi(a.c_str() + 5);
@@ -384,6 +415,8 @@ int main(int argc, char** argv) {
   const int kLseTileWgm = (LBM / 8) * (D / 64) * 1024;
   const int kLseSmemWgm0 = 1024 + kLseTileWgm * 2;  // Q + K（单缓冲）
   const int kLseSmemWgm1 = 1024 + kLseTileWgm * 3;  // Q + 2×K
+  // O30：TMA 版与 wgmma 版同布局（Q + 2×K）+ 3 个 mbarrier（24B，取 64B 余量）。
+  const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
   if (D == 128) {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<128, 0>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -391,7 +424,20 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<128, 1>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     kLseSmemWgm1));
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<128, 1>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    kLseSmemTma1));
+#endif
   }
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  // O30：建 LSE 的 Q/K 4D TMA 描述符（一次，供所有 (h,b) CTA 用坐标选择）。
+  CUtensorMap qmap_lse, kmap_lse;
+  if (D == 128) {
+    qmap_lse = make_lse_map(d_q, H, S, D, B);
+    kmap_lse = make_lse_map(d_k, Hkv, S, D, B);
+  }
+#endif
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<128>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 0>,
@@ -519,6 +565,13 @@ int main(int argc, char** argv) {
   // O23：LSE 预处理也默认走 Hopper wgmma 版（仅 causal / D==128；非 causal 自动落回 O8 原版）。
   if (!lse_forced && D == 128 && causal) lse_wgm = 1;
 #endif
+  // O30：TMA 版 LSE 需驱动 API（`cuTensorMapEncodeTiled`）⇒ 只有 `-DFA_TMA -lcuda` 构建才编译
+  //   该路径；此时 D==128/causal 默认开（1.30–1.36× 于 wgmma+cp.async，且逐位相同）。
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  if (lse_tma < 0) lse_tma = (D == 128 && causal) ? 1 : 0;
+#else
+  if (lse_tma < 0) lse_tma = 0;
+#endif
   printf("[O23] main backend = %s | lse = %s (D=%d S=%d)%s\n",
          wg2bn_sel ? "wgmma2b(BN=128)" : (wg2_sel ? "wgmma2(BN=64)" : "mma"),
          (D == 128 && causal && lse_wgm) ? "wgmma" : "mma", D, S,
@@ -605,6 +658,13 @@ int main(int argc, char** argv) {
       else
         delta_kernel<512><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
     } else {
+#if defined(FA_WGMMA) && defined(FA_TMA)
+      if (causal && lse_tma)
+        lse_mma_kernel_bal_tma<128, 1><<<lg_bal, THREADS, kLseSmemTma1>>>(qmap_lse, kmap_lse,
+                                                                         d_lse, S, H, Hkv,
+                                                                         scale);
+      else
+#endif
       if (causal && lse_wgm)
         lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse,
                                                                             S, H, Hkv, scale);
@@ -735,6 +795,44 @@ int main(int argc, char** argv) {
       printf("[O9 A/B] lse wgmma+SW128 %.4f ms (vs bal+cpasync %.3fx, vs O8 %.3fx)\n", ms_wgm,
              ms_balp / ms_wgm, ms_o8 / ms_wgm);
     }
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    // ---- O30 A/B：LSE 的 wgmma+cp.async 版 vs 4D-TMA 版（同 session + 数值对拍）----
+    if (lse_tma) {
+      float* d_lse2 = nullptr;
+      CUDA_CHECK(cudaMalloc(&d_lse2, (size_t)B * S * H * sizeof(float)));
+      auto launch_w = [&]() {
+        lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse2,
+                                                                            S, H, Hkv, scale);
+      };
+      auto launch_t = [&]() {
+        lse_mma_kernel_bal_tma<128, 1><<<lg_bal, THREADS, kLseSmemTma1>>>(qmap_lse, kmap_lse,
+                                                                         d_lse, S, H, Hkv,
+                                                                         scale);
+      };
+      auto time_one = [&](auto launch, float* out_ms) {
+        for (int i = 0; i < 3; ++i) launch();
+        CUDA_CHECK(cudaEventRecord(ev0));
+        for (int i = 0; i < iters; ++i) launch();
+        CUDA_CHECK(cudaEventRecord(ev1));
+        CUDA_CHECK(cudaEventSynchronize(ev1));
+        float t = 0.f;
+        CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+        *out_ms = t / iters;
+      };
+      float ms_w = 0.f, ms_t = 0.f;
+      time_one(launch_w, &ms_w);
+      time_one(launch_t, &ms_t);
+      CUDA_CHECK(cudaDeviceSynchronize());
+      std::vector<float> l1((size_t)B * S * H), l2((size_t)B * S * H);
+      CUDA_CHECK(cudaMemcpy(l1.data(), d_lse, l1.size() * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(l2.data(), d_lse2, l2.size() * 4, cudaMemcpyDeviceToHost));
+      double e = 0;
+      for (size_t i = 0; i < l1.size(); ++i) e = std::max(e, (double)fabs(l1[i] - l2[i]));
+      printf("[O30 A/B] lse tma %.4f ms | wgmma %.4f ms (wgmma/tma %.3fx) | "
+             "max_abs(tma-vs-wgmma)=%.3e\n", ms_t, ms_w, ms_w / ms_t, e);
+      cudaFree(d_lse2);
+    }
+#endif
   }
 
   double main_flops = 4.0 * (double)B * S * H * S * D;

@@ -276,6 +276,17 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > （同 session A/B）：fp16 S4096 1.3802→**1.3309ms（1.037×）**、S512 1.051×、GQA kv4 1.066×、
 > MQA kv1 1.077×；bf16 S4096 1.3650→**1.3388（1.020×）**、S512 1.053×、GQA kv4 1.053×、
 > MQA kv1 1.069×。数值与历史**逐位一致**。详见 `01` §14p、`01b` §6w。
+>
+> **O30（LSE 的 4D-TMA 载入 Q/K，fp16，第七十一轮）**：O15a 的 TMA 通路（冒烟逐位 PASS）落进
+> 真 kernel 的第一步。新增 `lse_mma_kernel_bal_tma<128,1>`（4D 描述符 `dims={D,S,H,B}`、
+> 坐标 `{k0,row,head,batch}`、2×K=64 chunk、`SBO=1024`），数学与 `lse_mma_kernel_bal_wgmma`
+> **完全一致**。**LSE-only 1.30–1.36×**（S512 0.0328→0.0249、S4096 0.2878→0.2128、
+> GQA kv4 0.0640→0.0488、MQA kv1 0.0777→0.0590ms），**TMA-vs-wgmma `max_abs=0`（逐位相同）**，
+> 端到端 S4096 total **1.2553ms（O24 1.3309，1.06×）/ 109.5 TF**。ncu：Duration 286.3→**214.6µs**、
+> 指令数 165.3M→**117.9M（−28.7%）**、regs 62→58；墙不变（**Compute ~58% + `wait`**，softmax
+> epilogue）。需 `-DFA_WGMMA -DFA_TMA -lcuda` 构建（否则不编译/不引用驱动符号）。对标同 session
+> 纯反向 FA3 MHA S4096 0.3244ms/847TF ⇒ ours total 时间 **3.87×**（O24 4.10×）、GQA kv4 3.12×。
+> 详见 `01` §14r。bf16/fp8 的 TMA 与主 kernel 的 Q/K/V/dO TMA 化列 backlog。
 
 ### 2.2 bf16（峰值 989 TFLOPS）
 

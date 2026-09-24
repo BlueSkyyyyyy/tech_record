@@ -118,8 +118,9 @@
 ### 可选
 
 - [~] SM90 TMA+wgmma 版本（对标 FA3）：**wgmma 部分已完成**（O9a/O9b/O9b-2/O17/O18，
-  fp16/bf16/fp8，且 **O22/O23 已把 Hopper 路径默认化**）；**TMA 化 Q/K/V/dO 尚未落进主 kernel**
-  （O15a 冒烟已逐位 PASS，需把 HD=128 的 K-major tile 拆成 2×K=64 chunk）。见 backlog。
+  fp16/bf16/fp8，且 **O22/O23 已把 Hopper 路径默认化**）；**TMA 部分已落地 fp16 LSE**
+  （**O30**，4D-TMA + 2×K=64 chunk，1.30–1.36×、数值逐位不变）；**主 kernel 的 Q/K/V/dO TMA 化
+  与 bf16/fp8 版仍待做**（需改 GEMM3/4/5 的转置描述符）。见 backlog。
 - [ ] 变长（cu_seqlens / varlen）覆盖
 
 ## 每项的 Definition of Done
@@ -1918,6 +1919,40 @@
       `o29_fa3_te_baseline_fp16.out.txt`、`fa_bwd_fp8_o29_ilv34_s4096.out.txt`；
       文档 `docs/03` §34、`docs/04` §2.3。
 
+- 2026-09-24（第七十一轮）：**O30 完成（fp16：LSE 的 4D-TMA 载入 Q/K；LSE-only 1.30–1.36×、
+  指令数 −28.7%、数值逐位不变；O15a 的 TMA 通路首次落进真 kernel）**。
+  - 动机：O15a（第 51 轮）已证 `cuTensorMapEncodeTiled(SWIZZLE_128B)` 写出的 smem 与
+    `sw128_off` **逐字节相同**，且 **HD=128 的 K-major tile 必须拆成 2×K=64 chunk**（TMA box
+    内维 128B=64 个 fp16），但那条通路一直只停在冒烟。O23 把 Hopper 快路默认化后，端到端里
+    剩下最大的、还没上 TMA 的搬运就是 **LSE 的 Q/K 载入**（逐 16B `cp.async` + 地址运算）。
+  - **改动**（单/两文件 device 逐字一致，手工重建单文件并核对 `device identical: True`）：
+    新增 `mbar_init/arrive_expect/wait`、`tma_load_4d`（`cp.async.bulk.tensor.4d`）与
+    `wgmma_qkt64_tma`（两 chunk 各 `SBO=1024` 的 4+4 条 `wgmma.m64n64k16`），全部 `FA_HAS_WGMMA`
+    包裹；新增 `lse_mma_kernel_bal_tma<HD,PIPE=1>`（smem = Q + 2×K + 3 mbarrier；K 双缓冲、
+    逐 barrier 相位计数），数学与 `lse_mma_kernel_bal_wgmma` **完全一致**。host 加
+    `make_lse_map`（4D 描述符 `dims={D,S,H,B}`、box `{64,64,1,1}`）、CLI `--lsetma=0/1`。
+    TMA 路径需驱动 API ⇒ 用 **`-DFA_TMA`** 开关整体包裹：`-DFA_WGMMA -DFA_TMA -lcuda` 构建下
+    D==128/causal 默认开；纯 `-DFA_WGMMA` 或 `sm_90` 构建**不引用驱动符号、无需 `-lcuda`**。
+  - **数值**：TMA-vs-wgmma 的 LSE **`max_abs=0.000e+00`（逐位相同）**，5 shape × 单/两文件全部；
+    `dq/dk/dv vs ref` 与历史逐位一致（S512 1.671/1.771/1.899e-3；S4096 1.883/1.734/1.966e-3；
+    GQA kv4 2.134/3.305/3.850e-3；kv8 2.008/2.931/3.891e-3；MQA kv1 2.292/7.934/7.517e-3）。
+  - **性能（同 session A/B，CUDA event）**：LSE-only **S512 0.0328→0.0249（1.32×）、S4096
+    0.2878→0.2128（1.35×）、GQA kv4 1.31×、kv8 1.30×、MQA kv1 1.32×**；端到端 total
+    S4096 **1.2553ms（109.5 TF）**、S512 0.0942、GQA kv4 0.2575、kv8 0.2905、MQA 0.3945
+    （单/两文件一致）。preprocess S4096 0.2271ms（O24 0.3002）。
+  - **ncu（lse, S=4096，同 session，`-c 1`）**：Duration 286.30→**214.56µs（1.33×）**、
+    **Executed Instructions 165.30M→117.87M（−28.7%）**、regs 62→58、smem 50.18→50.24KB、
+    occ 23.02→23.11%、DRAM 3.77→5.05%、L1TEX 17.43→17.69%、L2 20.27→26.77%、Compute
+    60.93→58.30%；stall `wait 2.26→2.33 + short 0.77→0.86 + long 0.04→0.17` ⇒ 收益纯来自
+    **指令数**，**墙不变 = Compute ~58% + `wait`（softmax/mma 固定延迟）**。
+  - **对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`）：FA3 MHA S4096
+    **0.3244ms/847TF**、GQA kv4 0.0825/417、kv8 0.1212/354、MQA kv1 0.1562/440 ⇒ ours total
+    时间比 **3.87×**（O24 4.10×）/ GQA kv4 3.12× / kv8 2.40× / MQA 2.53×，**全 shape 小幅改善**。
+  - 原始输出 `src/fp16/fa_bwd_fp16_o30_lse_tma_sweep.out.txt`（单/两文件 ×5 shape ×
+    `[O30 A/B]` + 对拍）、`src/fp16/fa_bwd_fp16_lse_tma_ncu_s4096.out.txt`、
+    `src/fp16/fa_bwd_fp16_lse_wgmma_ncu_s4096.out.txt`、`src/fp16/fa_bwd_fp16_o30_fa3_te_baseline.out.txt`；
+    文档 `docs/01` §14r、`docs/04` §2.1、`docs/08` §5。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -2124,7 +2159,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 3 CTA/SM；**新查证：Qp/dOp 转置副本 17.4KB + Ps/Ss 18.9KB 使 WGMMA 版 smem 已达 68.6KB，
 > 4×68.6=274KB > 232KB 上限 ⇒ 4 CTA/SM 在本卡 smem 与 168-reg 双重不可达**，此杠杆基本封死）；
 > ② **fp8/主 kernel 跨-tile 软流水**（K/V 单缓冲被 dS3/Ap 复用，需先腾 smem）；
-> ③ TMA 化 Q/K/V/dO（O15a 通路已就绪，需把 HD=128 的 K-major tile 拆成 2×K=64 chunk）。
+> ③ **TMA 化 operand** —— **O30 已完成 fp16 LSE 的第一步（第七十一轮）**：4D-TMA 载入 LSE 的
+> Q/K（2×K=64 chunk、`SBO=1024`），LSE-only **1.30–1.36×**、指令数 −28.7%、数值逐位不变；
+> 但墙不变（Compute ~58% + `wait`）。**剩余**：主 kernel 的 Q/K/V/dO TMA 化（需改 GEMM3/4/5 的
+> 转置描述符）、bf16/fp8 的 TMA（dtype 参数化 / fp8 SW128 的 `k/16` chunk 下标）。
 > **④（O27 新增，O28 已作废）fp16/bf16 的 fold 同理含逐元素精确除法**——**误记**：逐字核对
 > `src/fp16,bf16/fa_bwd_*_kernels.cuh` 后确认 fp16/bf16 **没有 rowwise scale fold**（无量化），
 > 逐元素除法只在 fp8。fp8 的 fold 除法 O27 已收口，转换指令 O28 也已向量化（MLA 1.03×、d128 中性）。
