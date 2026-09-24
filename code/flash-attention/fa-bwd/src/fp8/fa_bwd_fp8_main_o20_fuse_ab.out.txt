@@ -1,0 +1,66 @@
+# O20 FA_FUSE_EPI A/B（两文件 fa_bwd_fp8_main.cu，同 session 先后编译两个二进制）
+# FUSE=0 退回 Ps smem 回读；FUSE=1 融合 epilogue（P 留寄存器）
+Thu Sep 24 06:04:22 PM CST 2026
+##### b1_s512_h16_d128_causal_fp8 #####
+FUSE=0  [timing] quant 0.0150 ms | preprocess 0.0469 ms | main 0.0670 ms | convert 0.0327 ms
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+FUSE=1  [timing] quant 0.0144 ms | preprocess 0.0470 ms | main 0.0671 ms | convert 0.0321 ms
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+##### b1_s1024_h32_d128_causal_fp8 #####
+FUSE=0  [timing] quant 0.0411 ms | preprocess 0.1030 ms | main 0.3942 ms | convert 0.0670 ms
+  dq   vs ref: max_abs=2.400e-01  max_rel=1.887e+02
+  dk   vs ref: max_abs=4.195e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.536e-01  max_rel=8.068e+01
+FUSE=1  [timing] quant 0.0405 ms | preprocess 0.1018 ms | main 0.3882 ms | convert 0.0700 ms
+  dq   vs ref: max_abs=2.400e-01  max_rel=1.887e+02
+  dk   vs ref: max_abs=4.195e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.536e-01  max_rel=8.068e+01
+##### b1_s1024_h32_d128_kv4_causal_fp8 #####
+FUSE=0  [timing] quant 0.0289 ms | preprocess 0.1008 ms | main 0.3799 ms | convert 0.0461 ms
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.994e+02
+  dk   vs ref: max_abs=5.408e-01  max_rel=1.632e+02
+  dv   vs ref: max_abs=7.072e-01  max_rel=9.228e+01
+FUSE=1  [timing] quant 0.0282 ms | preprocess 0.1005 ms | main 0.3794 ms | convert 0.0445 ms
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.994e+02
+  dk   vs ref: max_abs=5.408e-01  max_rel=1.632e+02
+  dv   vs ref: max_abs=7.072e-01  max_rel=9.228e+01
+##### b1_s1024_h40_d128_kv8_causal_fp8 #####
+FUSE=0  [timing] quant 0.0335 ms | preprocess 0.1133 ms | main 0.4530 ms | convert 0.0522 ms
+  dq   vs ref: max_abs=2.869e-01  max_rel=1.859e+02
+  dk   vs ref: max_abs=5.390e-01  max_rel=1.523e+02
+  dv   vs ref: max_abs=7.107e-01  max_rel=9.354e+01
+FUSE=1  [timing] quant 0.0343 ms | preprocess 0.1140 ms | main 0.4456 ms | convert 0.0524 ms
+  dq   vs ref: max_abs=2.869e-01  max_rel=1.859e+02
+  dk   vs ref: max_abs=5.390e-01  max_rel=1.523e+02
+  dv   vs ref: max_abs=7.108e-01  max_rel=9.354e+01
+##### b1_s1024_h2_d512_causal_fp8 #####
+FUSE=0  [timing] quant 0.0142 ms | preprocess 0.1393 ms | main 0.3183 ms | convert 0.0596 ms
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+FUSE=1  [timing] quant 0.0137 ms | preprocess 0.1388 ms | main 0.3212 ms | convert 0.0535 ms
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+##### b1_s512_h4_d512_causal_fp8 #####
+FUSE=0  [timing] quant 0.0137 ms | preprocess 0.0776 ms | main 0.1663 ms | convert 0.0538 ms
+  dq   vs ref: max_abs=2.415e-01  max_rel=1.802e+02
+  dk   vs ref: max_abs=2.992e-01  max_rel=6.416e+01
+  dv   vs ref: max_abs=4.481e-01  max_rel=9.164e+01
+FUSE=1  [timing] quant 0.0139 ms | preprocess 0.0778 ms | main 0.1650 ms | convert 0.0560 ms
+  dq   vs ref: max_abs=2.415e-01  max_rel=1.802e+02
+  dk   vs ref: max_abs=2.992e-01  max_rel=6.416e+01
+  dv   vs ref: max_abs=4.481e-01  max_rel=9.164e+01
+##### b1_s4096_h16_d128_causal_fp8 #####
+FUSE=0  [timing] quant 0.0687 ms | preprocess 0.3932 ms | main 2.1997 ms | convert 0.1679 ms
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01
+FUSE=1  [timing] quant 0.0685 ms | preprocess 0.3922 ms | main 2.1433 ms | convert 0.1684 ms
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01

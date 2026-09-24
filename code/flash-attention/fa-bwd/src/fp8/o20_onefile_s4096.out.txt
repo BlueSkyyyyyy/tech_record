@@ -1,0 +1,5 @@
+[timing] total(quant+pre+main+cvt) 2.7695 ms  49.63 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0687 ms | preprocess 0.3957 ms | main 2.1633 ms | convert 0.1418 ms
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01

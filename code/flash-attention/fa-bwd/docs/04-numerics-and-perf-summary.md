@@ -602,6 +602,14 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > ⇒ **判决：fp8 main 的墙不是 L2 `red`，而是 mma 依赖延迟 + occupancy**；减 red/放大 BM 对 fp8
 > 无收益，真正杠杆是提 occupancy（168 regs→≤128、72.7KB→≤58KB 才 4 CTA/SM）或减 mma stall。
 > 详见 `03` §27、原始输出 `src/fp8/o19_wg2_ab_sweep.out.txt` / `o19_ncu_{wg2,mma}_red_s4096.out.txt`。
+>
+> **O20（第六十轮）——fp8 mma 路径 GEMM1/GEMM2 epilogue 融合（消 `Ps` 回读）**：O7e-3 遗留的
+> 12.78M `Ps` 回读 wavefronts 被消掉（`FA_FUSE_EPI`，P 留 `preg[2][2][4]`，**数值逐位不变**）。
+> ncu：shared 总 wavefronts 169.07→160.55M、`op_ld` 冲突 20.55→16.54M（−19.5%）、
+> `short_scoreboard` 1.50→1.41、Duration 2.25→2.21ms；**main S4096 1.026×（2.1997→2.1433ms）、
+> S1024H32 1.015×、kv8 1.017×**，小 S/MLA 中性。端到端 S4096 **total 2.77ms（49.6 TF）**、
+> 同 session TE FP8 0.5909ms/465TF ⇒ ~4.7× TE。墙仍 = `wait`+3 CTA/SM + 残余 L2 red。
+> 详见 `03` §28、原始输出 `src/fp8/fa_bwd_fp8_main_o20_fuse_ab.out.txt`。
 
 ---
 
