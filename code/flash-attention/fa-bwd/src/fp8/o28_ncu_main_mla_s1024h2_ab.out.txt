@@ -1,0 +1,23 @@
+=== O28 ncu main MLA S1024H2 D=512 ===
+-- CVT2=0 --
+    gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed                    %        21.01
+    gpu__time_duration.sum                                                             us       326.75
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        11.45
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        21.13
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %         7.62
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %         6.25
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.82
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.91
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.58
+    smsp__inst_executed.sum                                                          inst     24715632
+-- CVT2=1 --
+    gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed                    %        21.42
+    gpu__time_duration.sum                                                             us       320.54
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        11.65
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        21.49
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %         7.67
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %         6.25
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.85
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.91
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.59
+    smsp__inst_executed.sum                                                          inst     24454512

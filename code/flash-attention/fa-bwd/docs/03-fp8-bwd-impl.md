@@ -2840,3 +2840,82 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu -c 1 -k regex:fa_bwd_fp8_mma_kernel --
 `src/fp8/o27_ncu_main_s4096.out.txt`（O26 基线 `--set full`）、`src/fp8/o27_ncu_rcp_s4096.out.txt`、
 `src/fp8/o27_ncu_stall_s4096.out.txt`、
 `src/fp8/o27_te_fp8_bench.out.txt`、`src/fp8/o27_fa3_te_baseline_fp16.out.txt`。
+
+---
+
+## 33. O28：fold 的 fp8 转换向量化（`cvt ... x2` + `PACK_AB_MERGE_C`）——MLA 1.03×、d128 中性
+
+### 33.1 动机
+
+O27 把 fold 的「逐元素精确除法」换成「每行 `rcp` + 乘法」后，main 拿到 **1.08–1.18×**、ncu
+`executed inst` −13.7%——说明 fold 段（纯 CUDA-core、夹在 GEMM1/2 与 GEMM3/4/5 之间、张量核
+空转）的指令数**确实**在 main 的关键路径上。fold 里除了除法，每个 `(m,j)` 元素还要做 **3 次
+fp8 转换**（`Ap=E4M3`、`dS3=E5M2`、`dS2=E5M2`）：旧实现逐个元素调 `__nv_cvt_float_to_fp8`
+（SASS 一条 `F2FP.SATFINITE`）再用 `<< 8*tt` + `|` 拼成 4B（额外的 `LOP3/PRMT`）。
+
+Hopper 提供 `cvt.rn.satfinite.{e4m3,e5m2}x2.f32`（一次转 2 个），SASS 走
+`F2FP.SATFINITE.E4M3.F32.PACK_AB_MERGE_C`，可直接把两条结果拼进一个 32 位寄存器。CUDA 头
+`cuda_fp8.h` 的 `__nv_cvt_float2_to_fp8x2` 正是这条指令，且与两次标量转换**同 RN + SATFINITE
+⇒ 逐位相同**。
+
+### 33.2 改动（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+* 新增 `cvt2_e4m3/cvt2_e5m2`（封装 `__nv_cvt_float2_to_fp8x2`）与
+  `foldpack4<RCP,E5>(x0..x3, sc, inv)`：先把 4 个待量化浮点经 `folddiv` 折算，再做
+  `lo=cvt2(x0,x1)`、`hi=cvt2(x2,x3)`，返回 `lo | (hi<<16)`（低字节对应 x0）。
+* fold 的三处量化（`Ap/dS3` 的 F16B 两段与旧 4×4B 两分支、`dS2`）**全部改走 `foldpack4`**；
+  新增编译开关 `FA_CVT2`（默认 1），`-DFA_CVT2=0` 退回逐元素标量 + shift/OR 做同 binary A/B。
+* 数值：同一批 fp32 折算 + 同舍入 ⇒ 输出的 fp8 字节**逐位相同**，**vs fp32 ref 与历史逐位一致**。
+
+### 33.3 性能（同 session A/B，CUDA event，main-only，ms；`-DFA_WGMMA` 默认构建）
+
+| shape | CVT2=0（标量 cvt） | CVT2=1（cvt x2） | 加速 |
+|---|---|---|---|
+| d128 (1,512,16,128) | 0.0602 | 0.0596 | 1.01× |
+| d128 (1,1024,32,128) | 0.3423 | 0.3414 | 1.00× |
+| d128 (1,4096,16,128) | 1.7526 | 1.7499 | 1.00× |
+| GQA h32kv4 | 0.3284 | 0.3273 | 1.00× |
+| GQA h40kv8 | 0.3549 | 0.3512 | 1.01× |
+| MQA h64kv1 | 0.5302 | 0.5276 | 1.00× |
+| MLA (1,256,2,512) | 0.0432 | 0.0430 | 1.00× |
+| MLA (1,512,4,512) | 0.1423 | **0.1386** | **1.027×** |
+| MLA (1,1024,2,512) | 0.2727 | **0.2653** | **1.028×** |
+
+* **d128（MHA/GQA/MQA）全部中性**：这些东西的 `fold` 每 tile 只量化一遍（`HD/NTW=1`），
+  指令被张量核依赖延迟完全掩盖——与 O7e-3/O19/O20/O22/O27 的结论一致（第一墙是
+  `wait`+`short_scoreboard` 的 mma 依赖延迟，不是 fold 的指令数）。
+* **MLA（`HD=512`，`NDT=HD/128=4`）有 1.03× 的小正收益**：每 tile 的 fold 要跑 4 遍，
+  fold 占比大、不再被完全掩盖；ncu Duration 326.75→**320.54µs**。
+* **vs fp32 ref 与历史逐位一致**：S4096 `2.635/2.644/3.216e-1`；MLA S1024H2
+  `2.232/3.337/3.602e-1`；单/两文件逐指标一致。
+
+### 33.4 ncu（main，同 binary `FA_CVT2` 0/1，`-c 1`）
+
+| | Duration | executed inst | L1/TEX | L2 | Compute | occ | stall wait/short/long |
+|---|---|---|---|---|---|---|---|
+| d128 S4096 CVT2=0 | 1.80 ms | 735,418,304 | 60.21% | 62.24% | 42.61% | 18.11% | 1.48/1.42/0.85 |
+| d128 S4096 CVT2=1 | **1.77 ms** | **703,469,504（−4.3%）** | 60.98% | 63.22% | 41.34% | 18.11% | 1.55/1.58/1.02 |
+| MLA S1024H2 CVT2=0 | 326.75 µs | 24,715,632 | 11.45% | 21.13% | 7.62% | 6.25% | 1.58/0.91/1.82 |
+| MLA S1024H2 CVT2=1 | **320.54 µs** | **24,454,512（−1.1%）** | 11.65% | 21.49% | 7.67% | 6.25% | 1.59/0.91/1.85 |
+
+**结论**：`cvt x2` 把 fold 的转换指令再砍一刀（d128 全局 inst −4.3%），但 **d128 是纯 mma 依赖
+延迟 bound**，省下的指令无处兑现（中性）；只有 fold 占比较大的 **MLA 拿到 ~1.03×**。与 O27 并排
+看，fold 的优化只在它有足够权重时（大 `NDT` / O27 的除法）才体现为墙。数值逐位不变、无回退，
+保留为默认。
+
+### 33.5 复现
+
+```bash
+# 默认（FA_CVT2=1）+ A/B（-DFA_CVT2=0）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=.../b1_s4096_h16_d128_causal_fp8
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_CVT2=0" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=.../b1_s4096_h16_d128_causal_fp8
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu -c 1 -k regex:fa_bwd_fp8_mma_kernel -- --dir=...
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o28_ab.out.txt`（9 shape × CVT2 0/1）、
+`src/fp8/o28_ncu_main_s4096_ab.out.txt`、`o28_ncu_main_mla_s1024h2_ab.out.txt`、
+`o28_main_s4096_full.out.txt`、`o28_main_mla_s1024h2_full.out.txt`、
+`o28_te_fp8_bench.out.txt`、`o28_fa3_te_baseline_fp16.out.txt`。

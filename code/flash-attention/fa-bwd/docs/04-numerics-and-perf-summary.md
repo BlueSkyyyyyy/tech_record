@@ -680,6 +680,17 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > executed inst 852.6M→735.2M（−13.7%）**，墙仍是 mma 依赖延迟（wait+short）+ 3 CTA/SM。
 > 为 TE FP8（同 session 0.5904ms/465.6TF）的 **3.69×**（O26 4.17×）。详见 `03` §32、原始输出
 > `src/fp8/o27_main_sweep.out.txt`、`o27_ncu_rcp_s4096.out.txt`、`o27_te_fp8_bench.out.txt`。
+>
+> **O28（第六十九轮）——fp8 fold 的转换指令向量化（`cvt ... x2` + `PACK_AB_MERGE_C`）**：
+> O27 证明 fold 的指令数在关键路径上；本轮把 fold 里每个元素的 3 次 fp8 转换从「逐元素标量
+> `__nv_cvt_float_to_fp8` + shift/OR」换成 **`__nv_cvt_float2_to_fp8x2`**（一次转 2 个，硬件
+> `PACK_AB_MERGE_C` 直拼 32 位），新增 `foldpack4` + 开关 `FA_CVT2`（默认 1）。**数值与两次
+> 标量转换逐位相同 ⇒ vs fp32 ref 与历史逐位一致**（S4096 `2.635/2.644/3.216e-1`、MLA S1024H2
+> `2.232/3.337/3.602e-1`）。性能：**d128（MHA/GQA/MQA）全部中性**（fold 每 tile 只 1 遍，被 mma
+> 依赖延迟掩盖），**MLA（`NDT=4`）main 1.03×**（S512H4 0.1423→0.1386、S1024H2 0.2727→0.2653ms）。
+> ncu：d128 S4096 inst **735.4M→703.5M（−4.3%）**但 Duration 仅 1.80→1.77ms；MLA S1024H2
+> 326.75→320.54µs。**再次确认 d128 的墙是 mma 依赖延迟、不是 fold 指令数**。详见 `03` §33、
+> 原始输出 `src/fp8/fa_bwd_fp8_o28_ab.out.txt`、`o28_ncu_main_{s4096,mla_s1024h2}_ab.out.txt`。
 
 ---
 

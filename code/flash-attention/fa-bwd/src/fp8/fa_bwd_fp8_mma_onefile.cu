@@ -187,6 +187,42 @@ __device__ __forceinline__ float folddiv(float x, float sc, float inv) {
   }
 }
 
+// O28：一次转换 2 个 float→fp8（`cvt.rn.satfinite.{e4m3,e5m2}x2.f32`）。与两次标量
+//   `__nv_cvt_float_to_fp8`（同 RN + SATFINITE）**逐位相同**，但硬件 `PACK_AB_MERGE_C`
+//   直接把两条结果拼成 4B，省掉标量路径的 shift/OR（见 `cuda_fp8.hpp`）。fold 是纯
+//   CUDA-core 段（夹在 GEMM1/2 与 GEMM3/4/5 之间、张量核空转），减指令直接缩短关键路径。
+__device__ __forceinline__ uint32_t cvt2_e4m3(float a, float b) {
+  return (uint32_t)__nv_cvt_float2_to_fp8x2(make_float2(a, b), __NV_SATFINITE, __NV_E4M3);
+}
+__device__ __forceinline__ uint32_t cvt2_e5m2(float a, float b) {
+  return (uint32_t)__nv_cvt_float2_to_fp8x2(make_float2(a, b), __NV_SATFINITE, __NV_E5M2);
+}
+// O28：把 4 个待量化浮点（已乘 rowwise 因子）折成 4 个连续 fp8 字节（低字节对应 x0）。
+//   `E5=true` 用 E5M2、否则 E4M3；`folddiv` 负责 RCP/除法折算。与逐元素标量版逐位相同。
+#ifndef FA_CVT2
+#define FA_CVT2 1
+#endif
+template <bool RCP, bool E5>
+__device__ __forceinline__ uint32_t foldpack4(float x0, float x1, float x2, float x3,
+                                              float sc, float inv) {
+  const float a = folddiv<RCP>(x0, sc, inv), b = folddiv<RCP>(x1, sc, inv);
+  const float c = folddiv<RCP>(x2, sc, inv), d = folddiv<RCP>(x3, sc, inv);
+#if FA_CVT2
+  uint32_t lo, hi;
+  if constexpr (E5) { lo = cvt2_e5m2(a, b); hi = cvt2_e5m2(c, d); }
+  else              { lo = cvt2_e4m3(a, b); hi = cvt2_e4m3(c, d); }
+  return lo | (hi << 16);
+#else
+  // O28 A/B：`-DFA_CVT2=0` 退回逐元素标量 cvt + shift/OR（结果逐位相同）。
+  if constexpr (E5)
+    return (uint32_t)cvt_e5m2(a) | ((uint32_t)cvt_e5m2(b) << 8) |
+           ((uint32_t)cvt_e5m2(c) << 16) | ((uint32_t)cvt_e5m2(d) << 24);
+  else
+    return (uint32_t)cvt_e4m3(a) | ((uint32_t)cvt_e4m3(b) << 8) |
+           ((uint32_t)cvt_e4m3(c) << 16) | ((uint32_t)cvt_e4m3(d) << 24);
+#endif
+}
+
 // ----------------------------- mma / ldmatrix -----------------------------
 enum MmaKind { E4E4 = 0, E5E4 = 1, E4E5 = 2 };
 
@@ -1701,20 +1737,23 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
         // O7e：把逐 1B 的 `st.shared.u8` 折成向量写。`F16B=true` 用新映射（每 lane 两段
         //   各 8 个连续 m）⇒ 每段一次 8B `st.shared.v2.u32`；`false` 退回原映射的 4×4B。
         //   QTS=BM+16=80（16 与 8 的倍数）、数组基址 16B 对齐 ⇒ 合法。数值逐位不变。
+        // O28：用 `cvt...x2` + `PACK_AB_MERGE_C` 把「4 元素 → 4 字节」从标量路径的
+        //   ~4 cvt + shift/OR 折成 2 cvt（逐位相同）；见 `foldpack4`。
         if constexpr (F16B) {
 #pragma unroll
           for (int half = 0; half < 2; ++half) {
-            uint32_t pa2[2] = {0, 0}, d32[2] = {0, 0};
+            uint32_t pa2[2], d32[2];
 #pragma unroll
             for (int t4 = 0; t4 < 2; ++t4) {
-#pragma unroll
-              for (int tt = 0; tt < 4; ++tt) {
-                int m = sub4 * 8 + t4 * 4 + tt + half * 32;
-                pa2[t4] |= (uint32_t)cvt_e4m3(folddiv<RCP>(Ps[m * PSS + j] * dos_s[m], scA, invA))
-                           << (8 * tt);
-                d32[t4] |= (uint32_t)cvt_e5m2(folddiv<RCP>(Ss[m * PSS + j] * qs_s[m], sc3, inv3))
-                           << (8 * tt);
-              }
+              const int m = sub4 * 8 + t4 * 4 + half * 32;
+              pa2[t4] = foldpack4<RCP, false>(
+                  Ps[(m + 0) * PSS + j] * dos_s[m + 0], Ps[(m + 1) * PSS + j] * dos_s[m + 1],
+                  Ps[(m + 2) * PSS + j] * dos_s[m + 2], Ps[(m + 3) * PSS + j] * dos_s[m + 3],
+                  scA, invA);
+              d32[t4] = foldpack4<RCP, true>(
+                  Ss[(m + 0) * PSS + j] * qs_s[m + 0], Ss[(m + 1) * PSS + j] * qs_s[m + 1],
+                  Ss[(m + 2) * PSS + j] * qs_s[m + 2], Ss[(m + 3) * PSS + j] * qs_s[m + 3],
+                  sc3, inv3);
             }
             *reinterpret_cast<uint2*>(Ap + j * QTS + sub4 * 8 + half * 32) =
                 make_uint2(pa2[0], pa2[1]);
@@ -1722,17 +1761,18 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                 make_uint2(d32[0], d32[1]);
           }
         } else {
-          uint32_t pa4[4] = {0, 0, 0, 0}, d34[4] = {0, 0, 0, 0};
+          uint32_t pa4[4], d34[4];
 #pragma unroll
           for (int t4 = 0; t4 < 4; ++t4) {
-#pragma unroll
-            for (int tt = 0; tt < 4; ++tt) {
-              int m = sub4 * 16 + t4 * 4 + tt;
-              pa4[t4] |= (uint32_t)cvt_e4m3(folddiv<RCP>(Ps[m * PSS + j] * dos_s[m], scA, invA))
-                         << (8 * tt);
-              d34[t4] |= (uint32_t)cvt_e5m2(folddiv<RCP>(Ss[m * PSS + j] * qs_s[m], sc3, inv3))
-                         << (8 * tt);
-            }
+            const int m = sub4 * 16 + t4 * 4;
+            pa4[t4] = foldpack4<RCP, false>(
+                Ps[(m + 0) * PSS + j] * dos_s[m + 0], Ps[(m + 1) * PSS + j] * dos_s[m + 1],
+                Ps[(m + 2) * PSS + j] * dos_s[m + 2], Ps[(m + 3) * PSS + j] * dos_s[m + 3],
+                scA, invA);
+            d34[t4] = foldpack4<RCP, true>(
+                Ss[(m + 0) * PSS + j] * qs_s[m + 0], Ss[(m + 1) * PSS + j] * qs_s[m + 1],
+                Ss[(m + 2) * PSS + j] * qs_s[m + 2], Ss[(m + 3) * PSS + j] * qs_s[m + 3],
+                sc3, inv3);
           }
 #pragma unroll
           for (int t4 = 0; t4 < 4; ++t4) {
@@ -1765,15 +1805,14 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       // O7e-2：16 个连续 j 一次 16B `st.shared.v4.u32`（DSS2 是 16 的倍数、基址对齐）。
 #pragma unroll
       for (int jh = 0; jh < NTFOLD; ++jh) {
-        uint32_t d2_4[4] = {0, 0, 0, 0};
+        uint32_t d2_4[4];
 #pragma unroll
         for (int t4 = 0; t4 < 4; ++t4) {
-#pragma unroll
-          for (int tt = 0; tt < 4; ++tt) {
-            int j = sub2 * 16 + t4 * 4 + tt + jh * 32;
-            d2_4[t4] |= (uint32_t)cvt_e5m2(folddiv<RCP>(Ss[m * PSS + j] * ks_s[j], sc2, inv2))
-                        << (8 * tt);
-          }
+          const int j = sub2 * 16 + t4 * 4 + jh * 32;
+          d2_4[t4] = foldpack4<RCP, true>(
+              Ss[m * PSS + j + 0] * ks_s[j + 0], Ss[m * PSS + j + 1] * ks_s[j + 1],
+              Ss[m * PSS + j + 2] * ks_s[j + 2], Ss[m * PSS + j + 3] * ks_s[j + 3],
+              sc2, inv2);
         }
         if constexpr (F16B) {
           *reinterpret_cast<uint4*>(dS2 + m * DSS2 + sub2 * 16 + jh * 32) =
