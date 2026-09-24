@@ -1,0 +1,56 @@
+==PROF== Connected to process 658787 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "fa_bwd_fp16_wgmma2_kernel": 0%....50%....100% - 1 pass
+==PROF== Profiling "fa_bwd_fp16_wgmma2_kernel": 0%....50%....100% - 1 pass
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[timing] total(3 kernels) 2.0327 ms  67.61 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.4030 ms | main 1.5623 ms | convert 0.0674 ms
+[O8b A/B] lse O8 0.8257 ms | bal(单缓冲) 0.4525 ms (1.825x) | bal+cpasync(双缓冲) 0.3036 ms (2.720x)
+[O6 A/B] main nopipe 2.2307 ms (61.61 TF) | pipe(KV both) 1.5228 ms (90.26 TF) | pipe2(K only) 1.5509 ms (88.62 TF) => nopipe/pipe 1.465x, nopipe/pipe2 1.438x
+[O17 A/B] main mma(64,64,2) 1.5518 ms | O9b wgmma 1.4883 (1.043x) | O17 wgmma2(BM128) 0.9945 (1.560x) TF 138.2
+[O17b A/B] main O17(BM128) 0.9945 ms | O17b wgmma4(BM256,ovlp) 1.1948 ms (0.832x) | wgmma4(BM256,seq) 1.0522 ms (0.945x) TF 130.6
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/9.54e-06/1.62e-05 | wg2-vs-O9b dq/dk/dv=0.00e+00/9.06e-06/1.62e-05
+[O17b A/B] max|diff| wg4-vs-wg2 dq/dk/dv=0.00e+00/8.11e-06/1.91e-05 | wg4-vs-mma dq/dk/dv=0.00e+00/1.14e-05/1.91e-05
+[O17b A/B] max|diff| wg4seq-vs-wg4 dq/dk/dv=2.01e-03/8.95e-03/3.81e-06 | wg4seq-vs-wg2 dq/dk/dv=2.01e-03/8.95e-03/1.91e-05
+[O6c A/B] main sched0(原样) 1.5954 ms | sched1(交错) 1.5599 ms (1.023x) | sched2(逆序) 1.5528 ms (1.027x)
+[O5c A/B] main (64,32,2) 1.5347 ms (89.55 TF) | (64,64,2) 1.4750 (93.18) | (32,32,1) 2.5784 (53.30) | (32,32,2) 2.5672 (53.54) => best 1.040x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.6609 (82.75) | f4 1.8478 (74.38,-10.1%) | f2+PREL 1.5291 (89.88,+8.6%) | f4+PREL 1.5553 (88.37,+6.8%)
+  (BM=64,BN=64,PIPE=2): base 1.6545 (83.07) | f4 1.7344 (79.24,-4.6%) | f2+PREL 1.4820 (92.74,+11.6%) | f4+PREL 1.4648 (93.83,+13.0%)
+  (BM=32,BN=32,PIPE=1): base 2.6016 (52.83) | f4 2.6267 (52.32,-1.0%) | f2+PREL 2.5443 (54.02,+2.3%) | f4+PREL 2.6429 (52.00,-1.6%)
+  (BM=32,BN=32,PIPE=2): base 2.6231 (52.39) | f4 2.6152 (52.55,+0.3%) | f2+PREL 2.5910 (53.05,+1.2%) | f4+PREL 2.6065 (52.73,+0.6%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.408e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+==PROF== Disconnected from process 658787
+[658787] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void fa_bwd_fp16_wgmma2_kernel<128>(const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) (32, 16, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------- ----------- ------------
+    Metric Name                 Metric Unit Metric Value
+    --------------------------- ----------- ------------
+    lts__t_sectors_op_read.sum       sector     18029563
+    lts__t_sectors_op_red.sum        sector     51904512
+    lts__t_sectors_op_write.sum      sector      1573993
+    sm__inst_executed.sum              inst    260540416
+    --------------------------- ----------- ------------
+
+  void fa_bwd_fp16_wgmma2_kernel<128>(const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) (32, 16, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------- ----------- ------------
+    Metric Name                 Metric Unit Metric Value
+    --------------------------- ----------- ------------
+    lts__t_sectors_op_read.sum       sector     18011716
+    lts__t_sectors_op_red.sum        sector     51904512
+    lts__t_sectors_op_write.sum      sector      1582137
+    sm__inst_executed.sum              inst    260540416
+    --------------------------- ----------- ------------
+

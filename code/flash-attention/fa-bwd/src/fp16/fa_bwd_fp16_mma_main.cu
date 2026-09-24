@@ -159,6 +159,25 @@ static void launch_bwd_wgmma2(dim3 mg, const __half* q, const __half* k, const _
   fa_bwd_fp16_wgmma2_kernel<HD><<<mg, 256, smem>>>(q, k, v, do_, delta, lse, dq_acc,
                                                    dk_acc, dv_acc, S, H, Hkv, scale, causal);
 }
+
+// O17b：4 warpgroup（BM=256）wgmma 主 kernel（只 HD=128）。Q/dO/P/dS SW128，K/V 单缓冲 + 后段预取。
+// smem = 1024(对齐) + Q 64KB + dO 64KB + K 16KB + V 16KB + P 32KB + dS 32KB = 224KB（1 CTA/SM）。
+template <int HD, bool SEQ = false>
+static void launch_bwd_wgmma4(dim3 mg, const __half* q, const __half* k, const __half* v,
+                              const __half* do_, const float* delta, const float* lse,
+                              float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
+                              int Hkv, float scale, int causal) {
+  static_assert(HD == 128, "wgmma4 只做 HD=128");
+  constexpr int BM = 256, BN = 64;
+  constexpr int QTILE = (BM / 8) * (HD / 64) * 1024;
+  constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
+  constexpr int PTILE = (BM / 8) * (BN / 64) * 1024;
+  constexpr int smem = 1024 + QTILE * 2 + KTILE * 2 + PTILE * 2;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma4_kernel<HD, SEQ>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  fa_bwd_fp16_wgmma4_kernel<HD, SEQ><<<mg, 512, smem>>>(q, k, v, do_, delta, lse, dq_acc,
+                                                        dk_acc, dv_acc, S, H, Hkv, scale, causal);
+}
 #endif
 
 int main(int argc, char** argv) {
@@ -183,6 +202,10 @@ int main(int argc, char** argv) {
   int ow_opt = -1;
   // O17：2 warpgroup（BM=128，跨 wg 归约）wgmma 主 kernel（仅 FA_WGMMA 构建、D==128）。
   int wg2_sel = 0;
+  // O17b：4 warpgroup（BM=256，跨 wg 归约再砍半）wgmma 主 kernel（仅 FA_WGMMA 构建、D==128）。
+  int wg4_sel = 0;
+  // O17b：是否用「串行 GEMM1/2 + 读回 P」版（消 spill）；-1=自动（SEQ=1）。
+  int wg4seq_opt = -1;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -203,6 +226,9 @@ int main(int argc, char** argv) {
     else if (a.rfind("--ow=", 0) == 0) ow_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--wg2=", 0) == 0) wg2_sel = atoi(a.c_str() + 6);
     else if (a == "--wg2") wg2_sel = 1;
+    else if (a.rfind("--wg4=", 0) == 0) wg4_sel = atoi(a.c_str() + 6);
+    else if (a == "--wg4") wg4_sel = 1;
+    else if (a.rfind("--wg4seq=", 0) == 0) wg4seq_opt = atoi(a.c_str() + 9);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -402,8 +428,20 @@ int main(int argc, char** argv) {
   const bool prel_sel = (prel_opt >= 0) ? (prel_opt != 0) : true;
   // O16：默认关（实测中性 1.004×，且会改 dK/dV 的 atomic 次序、破坏历史逐位值）；保留 A/B。
   const bool ow_sel = (ow_opt > 0);
+  // O17b：SEQ（串行 GEMM1/2 + 读回 half P）默认关（有 fp16 精度损失）；默认走合并版。
+  const bool wg4seq_sel = (wg4seq_opt > 0);
   auto run_main = [&]() {
 #ifdef FA_WGMMA
+    if (wg4_sel && D == 128) {
+      dim3 g((S + 255) / 256, H, B);
+      if (wg4seq_sel)
+        launch_bwd_wgmma4<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+      else
+        launch_bwd_wgmma4<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                      d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+      return;
+    }
     if (wg2_sel && D == 128) {
       dim3 g((S + 127) / 128, H, B);
       launch_bwd_wgmma2<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
@@ -623,7 +661,15 @@ int main(int argc, char** argv) {
   if (D == 128) {
     auto time_o17 = [&](int mode, float* out_ms, float* dq_c, float* dk_c, float* dv_c) {
       auto launch = [&]() {
-        if (mode == 2) {
+        if (mode == 4) {
+          dim3 g((S + 255) / 256, H, B);
+          launch_bwd_wgmma4<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+        } else if (mode == 3) {
+          dim3 g((S + 255) / 256, H, B);
+          launch_bwd_wgmma4<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+        } else if (mode == 2) {
           dim3 g((S + 127) / 128, H, B);
           launch_bwd_wgmma2<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
                                  d_dv_acc, S, H, Hkv, scale, (int)causal);
@@ -651,11 +697,13 @@ int main(int argc, char** argv) {
       CUDA_CHECK(cudaMemcpy(dv_c, d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
     };
     std::vector<float> q0(n), k0(nkv), v0(nkv), q1(n), k1(nkv), v1(nkv), q2(n), k2(nkv),
-        v2(nkv);
-    float ms_mma = 0.f, ms_wgm = 0.f, ms_wg2 = 0.f;
+        v2(nkv), q3(n), k3(nkv), v3(nkv), q4(n), k4(nkv), v4(nkv);
+    float ms_mma = 0.f, ms_wgm = 0.f, ms_wg2 = 0.f, ms_wg4 = 0.f, ms_wg4s = 0.f;
     time_o17(0, &ms_mma, q0.data(), k0.data(), v0.data());
     time_o17(1, &ms_wgm, q1.data(), k1.data(), v1.data());
     time_o17(2, &ms_wg2, q2.data(), k2.data(), v2.data());
+    time_o17(3, &ms_wg4, q3.data(), k3.data(), v3.data());
+    time_o17(4, &ms_wg4s, q4.data(), k4.data(), v4.data());
     auto mad = [](const std::vector<float>& a, const std::vector<float>& b) {
       double d = 0; for (size_t i = 0; i < a.size(); ++i) d = std::max(d, (double)std::fabs(a[i]-b[i])); return d;
     };
@@ -663,9 +711,19 @@ int main(int argc, char** argv) {
            "%.4f (%.3fx) TF %.1f\n",
            bm_sel, bn_sel, pp_sel, ms_mma, ms_wgm, ms_mma / ms_wgm, ms_wg2, ms_mma / ms_wg2,
            main_flops / (ms_wg2 * 1e-3) / 1e12);
+    printf("[O17b A/B] main O17(BM128) %.4f ms | O17b wgmma4(BM256,ovlp) %.4f ms (%.3fx) "
+           "| wgmma4(BM256,seq) %.4f ms (%.3fx) TF %.1f\n",
+           ms_wg2, ms_wg4, ms_wg2 / ms_wg4, ms_wg4s, ms_wg2 / ms_wg4s,
+           main_flops / (ms_wg4s * 1e-3) / 1e12);
     printf("[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=%.2e/%.2e/%.2e | wg2-vs-O9b "
            "dq/dk/dv=%.2e/%.2e/%.2e\n",
            mad(q2, q0), mad(k2, k0), mad(v2, v0), mad(q2, q1), mad(k2, k1), mad(v2, v1));
+    printf("[O17b A/B] max|diff| wg4-vs-wg2 dq/dk/dv=%.2e/%.2e/%.2e | wg4-vs-mma "
+           "dq/dk/dv=%.2e/%.2e/%.2e\n",
+           mad(q3, q2), mad(k3, k2), mad(v3, v2), mad(q3, q0), mad(k3, k0), mad(v3, v0));
+    printf("[O17b A/B] max|diff| wg4seq-vs-wg4 dq/dk/dv=%.2e/%.2e/%.2e | wg4seq-vs-wg2 "
+           "dq/dk/dv=%.2e/%.2e/%.2e\n",
+           mad(q4, q3), mad(k4, k3), mad(v4, v3), mad(q4, q2), mad(k4, k2), mad(v4, v2));
   }
 #endif
 

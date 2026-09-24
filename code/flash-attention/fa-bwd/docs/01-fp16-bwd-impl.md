@@ -1706,6 +1706,111 @@ Duration 1.48→1.00ms——**O17 的机制假设被 ncu 完全证实**。shared
 
 ---
 
+## 14k. O17b：BM=256 / 4 warpgroups（跨 wg 归约再砍半）—— **负结果 + 资源墙**
+
+### 14k.1 动机
+
+O17（§14j）把 BM 从 64 提到 128、用 2 个 warpgroup 把 dK/dV 的跨 CTA `red` 精确砍半
+（ncu `lts__t_sectors_op_red` 102.2M→51.9M），但仍占 L2 扇区 ~72.6% ⇒ main 仍是 L2 原子
+字节数 bound。自然下一步是把 **BM 再翻倍到 256**：每个 KV 元素只被 `nblk/4` 个 CTA 贡献
+⇒ red 预期再砍半。O17b = `fa_bwd_fp16_wgmma4_kernel<HD,SEQ>`（4 个 warpgroup = 512 线程）。
+
+### 14k.2 先做资源账（本项的关键，结论是墙）
+
+| 资源 | 预算 | O17b 需求 | 结果 |
+|---|---|---|---|
+| 寄存器 | 512 线程 @1 CTA/SM ⇒ `65536/512 = **128 regs/线程**` | `dqacc[2][8][4]=64` + `sacc/dpacc` 各 32（m64n64 累加器，必须同时存活到 wait0）| **128 碰顶 + spill** |
+| smem | 本卡上限 227KB | Q 64KB + dO 64KB + K 16KB + V 16KB + P 32KB + dS 32KB = **224KB（K/V 只能单缓冲）** | 1 CTA/SM，丢掉 K/V 流水 |
+
+* **寄存器墙是硬约束**：`dqacc`（dQ 寄存器累加，O7 起的必要手段，砍掉它会让 dQ 的 red
+  按 ntile 爆炸）就占 64；GEMM1/2 的两条 wgmma 累加器在 `wait0` 后都要读，占 64；
+  两者相加已经等于 128 的上限，寻址/循环变量必然溢出到 local memory。
+* **smem 墙**：BM=256 要求 Q/dO 各 64KB、P/dS 各 32KB；K/T 的 SW128 tile 只 16KB，
+  但 K/V 双缓冲 +16KB 就 240KB 超限 ⇒ 只能单缓冲，靠「V 在 GEMM2 后、K 在 GEMM5 后
+  各自 cp.async 预取下一 tile」部分弥补流水。
+
+### 14k.3 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+新增 `fa_bwd_fp16_wgmma4_kernel<HD,SEQ>`（`#ifdef FA_WGMMA`，仅 HD=128）：
+* 4 个 wg 各持自己 64 行 Q/dO，各自算 GEMM1/2 并把 P/dS 写进共享 `[256][BN=64]` SW128 tile；
+* **GEMM3（dV）只由 wg0、GEMM4（dK）只由 wg1 对全 BM=256 归约**（s=0..15 进同一累加器）；
+  GEMM5（dQ）4 个 wg 各自寄存器累加、无跨 CTA 原子；K/V 单缓冲 + 后段 cp.async 预取；
+* 两档：**ovlp**（默认，GEMM1/2 一起发、`sacc/dpacc` 同时存活）与 **SEQ**（串行 GEMM1/2、
+  把 half P 写 smem 后**读回**再算 dS，省掉 `sacc`/`dpacc` 的共存）。SEQ 的读回是
+  `__half` 精度 ⇒ 会让 dS 多一层 fp16 舍入（见 §14k.4），**默认用 ovlp**。
+* host 加 `--wg4` / `--wg4seq=1` 与 `[O17b A/B]`（同 session 对比 mma/O17/O17b-ovlp/O17b-seq）。
+  默认路径完全不变。
+
+### 14k.4 数值（ours-vs-ref，fp16 causal）
+
+* **ovlp 版与 O17/O9b 在 fp16 噪声内**：`max|diff|` wg4-vs-wg2 dq/dk/dv =
+  0 / 6.1e-5 / 8.8e-5（S=4096；仅 atomic 次序），vs mma 0 / 6.5e-5 / 9.5e-5。
+* **SEQ 版有系统性偏差**：wg4seq-vs-wg4 dk ≈ **2.6e-2～7.3e-2**（S=512/S4096），
+  dq ≈ 2.0e-3 —— 因为 dS 改用了「读回的 half P」。**结论：SEQ 不能作为正确路径**。
+* 默认（mma）路径 `vs ref` 逐位不变（S512 1.671/1.771/1.899e-3、S4096 1.883/1.734/1.966e-3）。
+
+### 14k.5 性能（同 session A/B，CUDA event，main-only，ms）
+
+| shape | O17 (BM128) | O17b ovlp | O17b seq | vs O17 |
+|---|---|---|---|---|
+| MHA S=512 | 0.0522 | 0.0958 | 0.0851 | **0.55× / 0.61×** |
+| GQA kv4 S1024 | 0.1779 | 0.1919 | 0.1710 | 0.93× / **1.04×** |
+| MQA kv1 S1024 | 0.2869 | 0.3429 | 0.3046 | 0.84× / 0.94× |
+| MHA S=4096 | 0.9946 | 1.1956 | 1.0528 | 0.83× / 0.95× |
+
+**O17b 在所有 shape 上都没有跑赢 O17**（S=512 因 grid 减半最差；大 S 上 red 虽减半，
+但 spill/单缓冲把收益吃光）。唯一 >1 的是 SEQ 在 GQA kv4 的 1.04×，但它有 §14k.4 的精度损失。
+
+### 14k.6 ncu（main，S=4096，同 session，O17 vs O17b）
+
+| 指标 | O17 (wgmma2) | O17b merged | O17b seq |
+|---|---|---|---|
+| Duration | 0.997 ms | 1.20 ms | 1.05 ms |
+| **`lts__t_sectors_op_red`** | 51.90 M | **26.74 M（0.515×）** | **26.74 M（0.515×）** |
+| `..._op_read` | 18.03 M | 35.14 M | 28.70 M |
+| `..._op_write` | 1.57 M | **34.04 M（21.6×）** | 14.53 M |
+| `sm__inst_executed` | 260.5 M | 231.2 M | 229.6 M |
+| L2 Cache Throughput | 54.66% | 40.74% | — |
+| L1/TEX Throughput | 48.78% | 51.76% | — |
+| Compute (SM) | 27.48% | 20.29% | — |
+| regs / smem | 200 / 149.5KB | 128 / 224KB | 128 / 224KB |
+| achieved occ | 12.41% (2CTA/SM) | 24.88% (1CTA/SM) | — |
+| Waves | 3.88 | 1.94 | — |
+
+**机制假设被证实、代价也被量化**：
+1. `red` **精确减半**（51.90M→26.74M = 0.515×），与「每个 KV 元素贡献 CTA 数减半」完全一致；
+2. 但 **`write` 扇区从 1.57M 暴涨到 14.5–34M** —— ptxas 报 `fa_bwd_fp16_wgmma4_kernel`
+   用了 **128 regs + 溢出**（merged 468B/376B、seq 148B/156B spill stores/loads），
+   ncu 显示 **local memory 占 L2 扇区 ~48%**（每次 spill 只用到 1/32 B/sector，极不划算）；
+3. `pds_load_sw128`（seq）虽把静态 spill 从 468B 降到 148B，但**动态** spill 流量仍高
+   （write 14.5M），说明 `dqacc`/累加器在循环里的活跃压力本身就撑爆 128-reg 预算；
+4. 叠加 K/V 单缓冲与「GEMM3/4 只有 2 个 wg 在算」的欠并行，净效果是 Duration 变长。
+
+### 14k.7 结论与下一步
+
+**O17b（BM=256/4wg）在本卡上是负结果，根因是寄存器文件墙**：512 线程把每线程上限压到
+128 regs，而 dQ 寄存器累加器（64）+ 两条 GEMM 的 wgmma 累加器（64）已经吃满，必然 spill，
+spill 的 local 流量（uncoalesced）反而比省下的 red 更贵。**继续沿「放大 BM」这条路走不通**，
+除非先解决「dQ 累加器不占寄存器」或「用 TMA/更深的算子融合把 Q/dO 与 P/dS 的驻留量压下来」。
+
+据此把 fp16/bf16 main 的下一步调整为：
+1. **O7b（dK/dV 确定性分块累加）**：把跨 CTA `red` 换成「CTA 局部累加 + 非原子写 + 二次归约」，
+   直接消掉 L2 原子而不是靠放大 BM；顺带拿到确定性反向。red 字节不减，但原子 RMW 换成
+   普通写，且可让每次只写一次。
+2. fp8 侧同构的跨 wg 归约（fp8 main 的 L2 red 亦是墙，且 fp8 是 1 字节 operand，smem 更省，
+   4wg 的寄存器压力也小一档）。
+3. 也可回到 O17（BM=128）做**微优化**：`BN=128` 减半 tile 数/barrier（smem 恰好 224KB、2 wg
+   寄存器够用），收益待测。
+
+### 14k.8 原始输出
+
+`src/fp16/fa_bwd_fp16_o17b_sweep.out.txt`（单/两文件 ×5 shape 计时+逐元素对拍）、
+`src/fp16/fa_bwd_fp16_main_o17_ncu_s4096_samesession.out.txt`、
+`src/fp16/fa_bwd_fp16_main_o17b_ncu_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_main_o17_o17b_ncu_red_s4096.out.txt`。
+
+---
+
 ## 15. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
@@ -1719,12 +1824,16 @@ GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，数值逐位不�
 **§14i（O15a/O16）把墙钉在 L2 的 dK/dV 跨 CTA 原子**；**§14j 的 O17 用 BM=128 + 2 warpgroups
 把 red 字节精确砍半**（ncu 102.2M→51.9M），main S=4096 **1.57×**（140.5 TF）、
 端到端为 FA3 的 **4.4×**（时间；O9b/O13 时 ~6.0×）。**下一步（按回报排序）**：
-1. **O17b（BM=256，4 warpgroups）**：同一机制再砍半（red → ~26M），但 smem ≈ 270KB 需
-   先把 Q/dO 改「按 wg 只存自己 64 行」或 TMA 直供、或把 P/dS 用 8-bit 存；
-   先做寄存器/smem 账再上。
-2. **O7b（去 dK/dV 原子）**：分块 `*_accum` + convert（确定性）；字节不减、多一趟读回，
-   但可与 O17 的「CTA 内归约」叠加。
-3. **TMA 化 Q/K/V/dO（O15a 通路已就绪）**：需把 K-major HD=128 tile 改成 **2×K=64 chunk**
+1. ~~**O17b（BM=256，4 warpgroups）**~~ **已做，负结果（§14k）**：red 确实精确减半
+   （51.9M→26.7M），但 512 线程 ⇒ 每线程只有 128 regs，dQ 累加器 64 + 两条 wgmma 累加器 64
+   吃满后必然 spill，local 流量占 L2 ~48%，净 Duration 反而 +21%（S4096）/+83%（S512）。
+   ⇒ **「放大 BM」这条路在本卡走不通**，转为下面的 O7b。
+2. **O7b（去 dK/dV 原子）**：分块 `*_accum` + convert（确定性）；把跨 CTA `red` 换成
+   「CTA 局部累加 + 非原子写 + 二次归约」，直接消 L2 原子（red 字节不减但不再是 RMW）；
+   可与 O17 的「CTA 内归约」叠加。**当前第一优先级**。
+3. **fp8 侧的跨 wg 归约**：fp8 是 1 字节 operand、smem 更省，4wg 的寄存器压力比 fp16 小一档，
+   同样对 fp8 main 的 L2 red 有效。
+4. **O17 的 `BN=128` 微优化**：tile 数/barrier 减半（smem 恰好 224KB、2 wg 寄存器够用）。
+5. **TMA 化 Q/K/V/dO（O15a 通路已就绪）**：需把 K-major HD=128 tile 改成 **2×K=64 chunk**
    （§14i.2），压 `long_scoreboard`/指令数；动不了 L2 red，排在后面。
-4. **bf16 版**照搬（`__half`→`__bfloat16`，SW128/描述符/累加器映射逐字节同构）。
-5. MLA 降 smem 冲 2 CTA/SM / split-KV 仍在列。
+6. MLA 降 smem 冲 2 CTA/SM / split-KV 仍在列。

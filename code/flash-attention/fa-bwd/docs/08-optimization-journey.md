@@ -127,13 +127,18 @@ smem 冲突 + 低 occ
 > tile 必须拆成 2×K=64 chunk 才能喂 TMA），而「分段 `wait_group` 重叠 epilogue」实测**中性**
 > （0.99–1.00×）——证明动搬运/等待打不动原子墙。详见 `docs/01` §14i。
 
-1. **跨 warpgroup 归约（BM=128，2 warpgroups）**：**唯一能直接砍 half dK/dV 原子字节**的杠杆
-   （一个 KV 元素由 `nblk/2` 个 CTA 贡献，两组的 dV/dK 偏和在 smem 合并一次再写）。
-   代价 smem≈176KB→1 CTA/SM。这是 O9b-2b 的正解，替代原先「TMA 就能降 smem 提 occupancy」的判断。
-2. **O7b**：dK/dV 的跨 CTA red → 分块 `*_accum`+convert（顺带拿到**确定性反向**）；会多一趟
-   读回、字节不减，只在需要确定性时值得。
-3. **TMA 化 operand（O15a 通路已就绪）**：压 `long_scoreboard`/指令数，但动不了 L2 red。
-4. **MLA（head_dim=512）**：已是张量核，但 1 CTA/SM（smem/寄存器大），需继续降 smem 或 persistent。
+1. **跨 warpgroup 归约（BM=128，2 warpgroups）→ 已完成（O17，第 52/53 轮）**：唯一能直接砍
+   half dK/dV 原子字节的杠杆（一个 KV 元素由 `nblk/2` 个 CTA 贡献，两组的 dV/dK 偏和在 smem
+   合并一次再写）。实测 `red` 102.2M→51.9M（0.508×）、main S4096 1.56×。
+   **再翻倍到 BM=256/4wg（O17b，第 54 轮）是负结果**：red 确实再减半（→26.7M），但 512 线程
+   把每线程寄存器上限压到 128，dQ 累加器 + 两条 wgmma 累加器必然 spill，local 占 L2 ~48%，
+   净 Duration +21%。**结论：寄存器文件是硬墙，「放大 BM」走不通**（详见 `docs/01` §14k）。
+2. **O7b（当前第一优先级）**：dK/dV 的跨 CTA red → 分块 `*_accum`+convert（顺带拿到**确定性反向**）；
+   把原子 RMW 换成「CTA 局部累加 + 非原子写 + 二次归约」，直接消 L2 原子。会多一趟读回、字节不减。
+3. **fp8 侧同构跨 wg 归约**：fp8 是 1 字节 operand、smem 更省，4wg 的寄存器压力比 fp16 小一档。
+4. **O17 的 `BN=128` 微优化**：tile 数/barrier 减半（smem 恰好 224KB、2 wg 寄存器够用）。
+5. **TMA 化 operand（O15a 通路已就绪）**：压 `long_scoreboard`/指令数，但动不了 L2 red。
+6. **MLA（head_dim=512）**：已是张量核，但 1 CTA/SM（smem/寄存器大），需继续降 smem 或 persistent。
 
 ---
 

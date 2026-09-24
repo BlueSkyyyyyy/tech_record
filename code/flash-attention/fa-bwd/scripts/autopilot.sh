@@ -30,7 +30,8 @@ PROMPT='你是 tech_record 仓库的长期自驱 agent，负责推进「flash-at
 全程不要请求人工确认、不要用 question 类工具。GPU 用 kernel_lab 容器，ncu 必须在该容器里跑，git push 需要代理（NO_PROXY 已含本地 vLLM）。
 **安全**：不要在仓库任何文件（文章/代码/注释/commit message）里出现目标 AI 卡的实际代号，一律用「目标卡」指代。
 **对标**：与 FA 对比时一律用 **FA3（flash_attn_3，SM90，本机已编译好 3.0.0）**，不要用 flash_attn 2.7.4（那是 FA2/SM80）；基准统一用纯反向口径 `harness/fa_vs_te_bwd_only.py`（FA2/FA3/TE 三列）。
-**博客**：code/flash-attention/fa-bwd/docs/*.md 会通过 fa_include shortcode 自动内联到博客专题，改 docs 即等于更新博客。'
+**博客**：code/flash-attention/fa-bwd/docs/*.md 会通过 fa_include shortcode 自动内联到博客专题，改 docs 即等于更新博客。
+**网络容错**：若 `git push`（或线上 200 验证）因网络失败，先 `git commit` 到本地并继续本轮其它工作，不要因此阻塞或反复重试；在 ROADMAP 记一句“待推送”，网络恢复后补推即可。'
 
 start() {
   if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
