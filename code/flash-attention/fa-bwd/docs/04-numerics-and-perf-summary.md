@@ -386,6 +386,20 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 与 fp16 O17 逐项一致**。需 `--wg2`（`sm_90a`+`-DFA_WGMMA`），默认行为不变；D=512 时忽略。
 > 详见 `01b-bf16-bwd-impl.md` §6s。
 
+> **O18-bf16：BN=128 版 wgmma2（第五十七轮，单/两文件）**：把 fp16 O18（§2.1）逐字 dtype
+> 参数化到 bf16（kv-tile `BN=64→128`、`m64n128k16`，per-CTA tile 数减半 ⇒ barrier/commit-wait
+> 序列减半；新增 `wgmma_m64n128k16_bf16_t`/`wgmma_mn128_issue`/`fa_bwd_bf16_wgmma2b_kernel`，
+> host `--wg2bn`）。**数值与 O5b~O17 历史逐位一致**（S512 9.001/12.61/13.65e-3、S4096
+> 15.10/13.40/16.31e-3、GQA kv4 12.01/21.25/31.56e-3、kv8 12.33/19.30/31.50e-3、kv4(h64)
+> 13.51/30.91/44.20e-3、MQA kv1 11.90/45.58/71.96e-3）。**同 session A/B（main-only）**：
+> MHA S512 0.0507→**0.0492（1.030×）**、S4096 0.9799–0.9836→**0.9558–0.9560（1.025–1.029×，
+> 143.8 TF）**；GQA/MQA 中性（0.996–1.007×）；串行版普遍更慢（0.97–1.00×）。端到端 S4096
+> **1.381ms（99.5 TF，FA3 的 4.30×，O17 4.45×）**、S512 0.104、GQA kv4 0.291 / kv8 0.332 /
+> kv4(h64) 0.447 / MQA kv1 0.447ms。ncu（main,S4096，同 binary `--wg2bn` vs `--wg2`）：
+> Duration 982.2→**952.5µs（1.031×）**、**`red` 51,904,512 逐字节不变**、regs 200→255 /
+> smem 148.5→230.4KB / occ 12.5%（1 CTA/SM）；墙仍是 **L2 red（~72%）+ 1 CTA/SM**。
+> 详见 `01b-bf16-bwd-impl.md` §6u。
+
 ### 2.3 fp8（峰值 1978.8 TFLOPS；FA 无反向 FP8，仅对标 TE）
 
 | shape | ours total | ours main | TE FP8 |

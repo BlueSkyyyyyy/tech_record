@@ -1,0 +1,9 @@
+    gpu__time_duration.sum                                                             us       982.21
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                         0
+    lts__t_sectors_op_read.sum                                                     sector     18072559
+    lts__t_sectors_op_red.sum                                                      sector     51904512
+    lts__t_sectors_op_write.sum                                                    sector      1575831
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.46
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.75
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.40
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.19

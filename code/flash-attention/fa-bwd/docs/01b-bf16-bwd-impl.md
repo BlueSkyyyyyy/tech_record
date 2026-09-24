@@ -1144,6 +1144,97 @@ ours 端到端 S=4096 1.942ms ⇒ 时间为 FA3 的 **6.06×**（与 fp16 O17-2 
 
 ---
 
+## 6u. O18-bf16：BN=128 版 wgmma2（kv-tile 翻倍，tile 数减半）
+
+与 fp16 §14m **逐字 dtype 同构**（`__half`→bf16、`f16.f16`→`bf16.bf16`）。O17/O17-2（BM=128、
+BN=64）后 main 仍 **1 CTA/SM（12.5%）+ 延迟受限**；把 per-CTA 的 KV-tile 从 `BN=64` 翻到
+**`BN=128`**（`docs/01` §14k.7 item 3），per-CTA 的 tile 数减半 ⇒ `__syncthreads`、
+`cp.async.wait_group`、wgmma `commit_group`+`wait0` 序列都减半；GEMM1/2 用
+`wgmma.mma_async.m64n128k16`（一条指令算两倍、发射/依赖链减半）。代价是 smem
+`148.5→230.4KB`（仍 1 CTA/SM）。
+
+结构（HD=128、BM=128、BN=128、256 线程 = 2 warpgroup）与 O17 完全同构，仅：
+① GEMM1/2 用 `wgmma_mn128_issue`（A/B 均 K-major SW128）；
+② P/dS tile 变 `[128][128]`，softmax epilogue 列组 `j=0..15`；
+③ GEMM3/4 输出 `[BN=128][HD=128]` ⇒ 分 2 个 m64 半（`mh=0/1`、转置描述符基址 `+mh*1024`）；
+④ GEMM5 输出 `[64][HD=128]`（每 wg 自己 64 行）⇒ 一条 `m64n128`、`dqacc[16][4]`。
+新增 `wgmma_m64n128k16_bf16_t<TA,TB>` + `wgmma_mn128_issue`；`fa_bwd_bf16_wgmma2b_kernel<HD,SPLIT>`。
+host 加 `--wg2bn`（默认 `SPLIT=1`，与 O17-2 同：GEMM3(dV)→wg0、GEMM4(dK)→wg1，都对全 BM=128
+归约）。单/两文件 device 代码逐字一致（`sync_onefile_device.py` 核对 `identical: True`）。
+
+### 6u.1 数值（ours-vs-ref，bf16 causal，max_abs）—— 与历史**逐位一致**
+
+| shape | dq | dk | dv |
+|---|---|---|---|
+| MHA S=512 | 9.001e-3 | 1.261e-2 | 1.365e-2 |
+| MHA S=4096 | 1.510e-2 | 1.340e-2 | 1.631e-2 |
+| GQA kv4 S1024 | 1.201e-2 | 2.125e-2 | 3.156e-2 |
+| GQA kv8 S1024 | 1.233e-2 | 1.930e-2 | 3.150e-2 |
+| GQA kv4(h64) S1024 | 1.351e-2 | 3.091e-2 | 4.420e-2 |
+| MQA kv1 S1024 | 1.190e-2 | 4.558e-2 | 7.196e-2 |
+
+与 O5b~O17 历史值**逐位相同**；单文件与两文件逐指标一致。`max|diff|` wg2b-vs-wg2：
+dq `1.8–3.6e-7`、dk/dv `6e-5–8.2e-4`（仅跨 CTA `atomicAdd` 次序）。
+
+### 6u.2 性能（同 session A/B，CUDA event，main-only，ms）
+
+| shape | O17 wg2(BN64) | **O18 wg2b(BN128,split)** | 比 | O18 串行(BN128) | 比 |
+|---|---|---|---|---|---|
+| MHA S=512 | 0.0507 | **0.0492** | **1.030×**（43.6 TF） | 0.0497 | 1.019× |
+| MHA S=4096 | 0.9799–0.9836 | **0.9558–0.9560** | **1.025–1.029×**（143.8 TF） | 0.984–0.985 | 0.995–1.000× |
+| GQA kv4 S1024 | 0.1800 | 0.1806 | 0.996×（中性） | 0.1851 | 0.972× |
+| GQA kv8 S1024 | 0.2037 | 0.2028 | 1.005× | 0.2080 | 0.980× |
+| GQA kv4(h64) | 0.2846 | 0.2839 | 1.002× | 0.2896 | 0.983× |
+| MQA kv1 S1024 | 0.2836 | 0.2816 | 1.007× | 0.2857 | 0.993× |
+
+**结论**：MHA（大 tile、tile 数多）稳定 +2.5–3.0%；GQA/MQA（grid 小、tile 数本就少）中性。
+串行版（wg0 串行 dV+dK）在 BN=128 下普遍更慢 ⇒ 保留 O17-2 的 SPLIT。
+
+端到端（`--wg2bn`）：S=4096 **1.381 ms（99.5 TF）**、S=512 0.104 ms（20.6 TF）、
+GQA kv4 0.291（59.1 TF）/ kv8 0.332（64.7）/ kv4(h64) 0.447（76.8）/ MQA kv1 0.447（76.8）。
+O17-bf16 时 S=4096 为 1.431ms ⇒ 端到端 **1.036×**。
+
+### 6u.3 ncu（main，S=4096，同 binary `--wg2bn` vs `--wg2`）
+
+| 指标 | O17 wg2(BN64) | **O18 wg2b(BN128)** |
+|---|---|---|
+| Duration | 982.2 µs | **952.5 µs（1.031×）** |
+| `lts__t_sectors_op_red` | 51,904,512 | **51,904,512（逐字节不变）** |
+| `read` / `write` | 18.073M / 1.576M | 18.373M / 1.574M |
+| L1/TEX / L2 / DRAM | 44.2% / 54.6% / 4.4% | 44.2% / 56.9% / 6.7% |
+| Compute (SM) | 27.4% | 23.5% |
+| regs / smem / occ | 200 / 148.5KB / 12.5% | **255 / 230.4KB / 12.5%（1 CTA/SM）** |
+| Waves | 3.88 | 3.88 |
+| stall barrier / wait / long / short | 0.46 / 1.19 / 0.75 / 0.40 | 0.93 / 1.25 / 0.60 / 0.43 |
+| bank conflict (`op_ld`) | 0 | 0 |
+
+`red` 逐字节不变（BN 不动归约结构）；收益来自 tile 数减半后 barrier/commit-wait 序列减半
+（`barrier` 每-tile 占比升但总数降、`long_scoreboard` 0.75→0.60）。墙仍是 **L2（red 占 L2
+扇区 ~72%）+ 1 CTA/SM**；BN 翻倍不再降 red，只有跨 CTA 归约（O7b）或提 occupancy 能再推进。
+
+### 6u.4 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`，FA2/FA3/TE 三列）
+
+| shape | FA3 (ms/TF) | TE (ms/TF) | ours total (ms/TF) | ours/FA3 时间 |
+|---|---|---|---|---|
+| MHA S=4096 | 0.3209 / 857 | 0.4423 / 621 | 1.381 / 99.5 | **4.30×** |
+| GQA kv4 S1024 | 0.0826 / 416 | 0.1128 / 305 | 0.291 / 59.1 | 3.52× |
+| GQA kv8 S1024 | 0.1214 / 354 | 0.1323 / 325 | 0.332 / 64.7 | 2.73× |
+| GQA kv4(h64) | 0.1602 / 429 | 0.1940 / 354 | 0.447 / 76.8 | 2.79× |
+| MQA kv1 S1024 | 0.1571 / 437 | 0.2136 / 322 | 0.447 / 76.8 | 2.85× |
+
+ours 端到端相对 O17-bf16（S4096 4.45×、kv8 2.75×、kv4 3.51×、MQA 2.88×）**全 shape 小幅改善**。
+
+### 6u.5 原始输出
+
+`src/bf16/fa_bwd_bf16_mma_main_o18_{s512,s4096}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_main_o18_gqa_{kv4,kv8,kv4h64,kv1}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o18_{s512,s4096}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_main_o18_ncu_s4096.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_main_o18_ncu_red_{s4096,o17_s4096}.out.txt`、
+`src/fa_bwd_o18_fa3_te_baseline_bf16.out.txt`。
+
+---
+
 ## 8. 下一步
 
 见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）、O8（preprocess mma，§6f）、O6（main
@@ -1155,7 +1246,8 @@ O9b（主 kernel GEMM1/2 上 wgmma，§6q）、O9b-2（主 kernel GEMM3/4/5 也�
 wgmma，数值逐位正确、性能中性，§6r）、**O17-bf16（跨 warpgroup 归约：BM=128、2 warpgroups，
 dK/dV 的 red 字节砍半，main S=4096 1.52×、GQA/MQA 1.50–1.53×，§6s）已完成**、
 **O17-2-bf16（GEMM3/GEMM4 拆分到两个 wg，消 barrier 空等，main S=4096 1.038×、GQA kv4 1.051×，
-§6t）已完成**；
-接下来是 **O17b（BM=256 / 4 warpgroups 再砍半）**、**O15 TMA 化 Q/K/V/dO + P/dS 双缓冲
-跨-tile 流水 + 压 smem 冲更高 occupancy** 与 **O7b（去 dK/dV 跨 CTA 原子 → 确定性反向）**。
-backlog：fp8 侧残余 red（O7b）、MLA 降 smem 冲 2 CTA/SM / split-KV。
+§6t）已完成**、**O18-bf16（BN=128 版 wgmma2，tile 数减半，MHA main 1.025–1.030×、GQA/MQA
+中性，red 逐字节不变，§6u）已完成**；
+接下来是 **O7b（去 dK/dV 跨 CTA 原子 → 确定性反向）**、**fp8 侧同构跨 wg 归约**、
+**O15 TMA 化 Q/K/V/dO + P/dS 双缓冲跨-tile 流水 + 压 smem 冲更高 occupancy**。
+backlog：MLA 降 smem 冲 2 CTA/SM / split-KV。
