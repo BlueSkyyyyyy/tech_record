@@ -1571,6 +1571,28 @@ TE2.14 0.1755ms/391.6TF ⇒ ours 时间 = FA3 的 **3.10×**、TFLOPS 为 FA3 �
 `..._onefile_b4_t3840.out.txt`（单文件）、`..._ncu_main_b4_t3840.out.txt`（ncu）、
 `src/fa_bwd_varlen_fa3_te_baseline_bf16.out.txt`（FA2/FA3/TE 基线）。
 
+### 6aa.6 非 causal（full attention）——第 79 轮
+
+把 fp16 §16.8 **逐字 dtype 参数化**到 bf16：`lse_mma_kernel<HD>` 加默认参数
+`const int* cu_seqlens = nullptr`（`qbase/len`、`if (m0>=len) return;`），`nullptr` 逐式退化、
+定长逐位不变；host `run_varlen` 去掉「只做 causal」限制（causal→镜像配对 wgmma LSE，
+非 causal→`lse_mma_kernel<128>` + `d_cu`）。单/两文件 device 逐字一致
+（`sync_onefile_device.py` 核对 `identical: True`）。
+
+**数值（ours vs fp32 ref，bf16 full，max_abs dq/dk/dv）**：b4_t3840 不齐
+`5.764e-3/3.851e-3/3.031e-3`；b4_t4096 等长 `3.237e-3/2.392e-3/2.013e-3`；b5_t3968 GQA kv8
+`5.324e-3/5.454e-3/5.881e-3`；b8_t2904 强倾斜 `1.153e-2/9.529e-3/1.083e-2` —— 全 bf16 噪声、
+无 padding 泄漏；单/两文件逐位一致。**定长回归逐位不变**（causal S512
+`9.001/12.61/13.65e-3`；fixed full S1024 `1.94/1.68/1.45e-3`）。
+
+**性能（total，event，`Σ_b 4HL²D` 口径）**：b4_t3840 1.2874ms/35.45TF、b4_t4096（等长）
+0.9088ms/37.81TF、b5_t3968 GQA 2.4621ms/37.18TF、b8_t2904 1.0547ms/34.85TF。
+按定长口径 `4BS²H(D+Dv)` 乘 2 ⇒ 等长 **75.6 TF**；同 session TE bf16 定长 full
+`0.2787ms/246.6TF`、FA2.7.4 `0.4663ms/147.4TF` ⇒ ours 为 TE 的 3.26×。
+
+**ncu**：与 fp16 §16.8 同构（L2 red + 1 CTA/SM 延迟受限）。原始输出
+`src/bf16/fa_bwd_bf16_varlen_full_sweep.out.txt`、`src/fa_bwd_varlen_full_regression.out.txt`。
+
 ## 8. 下一步
 
 > **O36-bf16（§6z）已完成**：把 O34 的逐 atom 4D-TMA 从 BN=128 的 `wgmma2b` 补到 **BN=64 的

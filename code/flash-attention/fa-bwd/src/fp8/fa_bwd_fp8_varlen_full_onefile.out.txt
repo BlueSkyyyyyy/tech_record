@@ -1,0 +1,8 @@
+VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=0
+cu_seqlens = 0 512 1536 3584 3840
+[timing] VARLEN total 1.9587 ms  23.30 TFLOPS (sum_b 4HL^2D)
+grid main = 128 x 16 x 4 (ksplit=4) | use_regdq=1 | T=3840
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.010e-01  max_rel=4.889e+01  (ours_amax=1.465e+00 ref_amax=1.457e+00 @7843226)
+  dk  vs ref: max_abs=9.651e-02  max_rel=3.795e+01  (ours_amax=1.154e+00 ref_amax=1.190e+00 @7626189)
+  dv  vs ref: max_abs=7.036e-02  max_rel=3.408e+01  (ours_amax=8.595e-01 ref_amax=8.556e-01 @7572341)

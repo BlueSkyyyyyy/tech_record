@@ -2727,9 +2727,43 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
 
 ### 16.7 限制 / 后续
 
-* 只做 **fp16 / HD=128 / causal / MHA+GQA**；非 causal、MLA、负载均衡留后续。
+* 只做 **fp16 / HD=128 / MHA+GQA**；非 causal 见 §16.8；MLA、负载均衡留后续。
 * 用 **非 TMA** 主 kernel（wgmma2 + cp.async）；TMA 需为 packed 布局重建描述符。
 * 短序列的 CTA 早退，强倾斜 case 并行度浪费；可引入按 `cu_seqlens` 的均衡分块。
+
+### 16.8 非 causal（full attention）——第 79 轮
+
+非 causal 与 causal 的区别：**每个 m 块的 K 列数恒为 `len`**（不再随 `mblk` 递增），工作天然
+均衡、不需要镜像配对。**device 改动只 1 处**（单/两文件逐字一致，`sync_onefile_device.py`
+核对 `identical: True`）：`lse_mma_kernel<HD>`（O8 通用 mma 版）加默认参数
+`const int* cu_seqlens = nullptr`——`qbase/len`，Q/K 行下标与边界由 `b*S`/`S` 改为
+`qbase`/`len`，加 `if (m0 >= len) return;`。`nullptr` 时逐式退化，**定长逐位不变**。
+host `run_varlen` 去掉「只做 causal」限制：causal 走 `lse_mma_kernel_bal_wgmma`，非 causal
+走 `lse_mma_kernel<128>`（`grid.x=nblk`，传 `d_cu`）；主 kernel `fa_bwd_fp16_wgmma2_kernel`
+本就带 `causal` 参数，无需改。
+
+**数值（ours vs fp32 ref，fp16 full，max_abs dq/dk/dv）**：b4_t3840 不齐
+`5.603/6.841/2.338e-4`；b4_t4096 等长 `4.094/4.953/1.234e-4`；b5_t3968 GQA kv8
+`7.341/7.906/4.880e-4`；b8_t2904 强倾斜 `1.486/1.555/1.582e-3` —— 全 fp16 噪声、无 padding
+泄漏；单/两文件逐位一致。**定长回归逐位不变**（causal S512 `1.671/1.771/1.899e-3`；
+fixed full S1024 `3.27/2.52/1.23e-4`）。
+
+**性能（total，event，`Σ_b 4HL²D` 口径）**：b4_t3840 1.2870ms/35.46TF、b4_t4096（等长）
+0.9090ms/37.80TF、b5_t3968 GQA 2.4577ms/37.25TF、b8_t2904 1.0616ms/34.63TF。非 causal 的
+总量约为 causal 的 2×，故时间是 causal 的 ~2×（等长 0.909 vs causal 0.450）。按定长对标口径
+`4BS²H(D+Dv)` 乘 2（`D=Dv=128`）⇒ 等长 **75.6 TF**；同 session TE fp16 定长 full
+`0.2805ms/245.0TF`、FA2.7.4 `0.4740ms/145.0TF` ⇒ ours 为 TE 的 3.24×。
+
+**ncu（main，b4_t3840，`--set full -c 1`）**：Duration **705.4µs**、DRAM 7.89% /
+L1/TEX 49.03% / **L2 70.31%** / Compute 35.79%、202 regs、**Block Limit Shared Mem=1
+（occ 12.45%）**、Waves 7.76、No Eligible 63.35% ⇒ bound 与定长 wgmma2 一致：
+**L2（dK/dV 跨 CTA red）+ 1 CTA/SM 延迟受限**，非带宽。
+
+**复现**：`python harness/fa_bwd_bench.py dump --varlen-all --dtype fp16 --full`；
+`ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh
+src/fp16/fa_bwd_fp16_mma_main.cu --varlen=1 --full --iters=50 --dir=...full_fp16`。
+原始输出 `src/fp16/fa_bwd_fp16_varlen_full_sweep.out.txt`、`..._varlen_full_onefile.out.txt`、
+`..._varlen_full_ncu_main_s3840.out.txt`；`src/fa_bwd_varlen_full_regression.out.txt`。
 
 ## 15. 下一步
 

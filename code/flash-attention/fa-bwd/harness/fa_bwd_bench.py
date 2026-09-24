@@ -62,8 +62,9 @@ VARLEN_SHAPES = [
 ]
 
 
-def varlen_slug(lengths, H, D, dtype):
-    return f"varlen_b{len(lengths)}_t{sum(lengths)}_h{H}_d{D}_causal_{dtype}"
+def varlen_slug(lengths, H, D, dtype, causal=True):
+    mask = "causal" if causal else "full"
+    return f"varlen_b{len(lengths)}_t{sum(lengths)}_h{H}_d{D}_{mask}_{dtype}"
 
 
 def norm_spec(B, S, H, D, causal, Hkv=None, Dv=None):
@@ -338,7 +339,7 @@ def dump_case_varlen(lengths, H, D, Hkv, Dv, dtype_name, causal=True):
         except Exception as e:  # noqa
             print(f"  [te] failed: {str(e)[:200]}")
 
-    slug = varlen_slug(lengths, H, D, dtype_name)
+    slug = varlen_slug(lengths, H, D, dtype_name, causal)
     d = OUT_ROOT / slug
     d.mkdir(parents=True, exist_ok=True)
 
@@ -411,7 +412,7 @@ def bench_case(sh, dtype_name, timer):
 def bench_case_varlen(lengths, H, D, Hkv, Dv, dtype_name, timer, causal=True):
     """VARLEN 性能对标：等长时与 TE FP8 定长同 shape 完全等价，直接对比；
     不等长时 TE 2.14 的 FP8 变长路径在本容器 segfault，故只报 ours（自测给出）。"""
-    tag = varlen_slug(lengths, H, D, dtype_name)
+    tag = varlen_slug(lengths, H, D, dtype_name, causal)
     if dtype_name != "fp8":
         print(f"[{tag}] only fp8 baseline (TE FP8)")
         return
@@ -482,6 +483,11 @@ def main():
     ap.add_argument("--lengths", nargs="+", type=int, default=None,
                     help="变长：各序列长度，如 --lengths 512 1024 256")
     ap.add_argument("--varlen-all", action="store_true", help="跑内置 VARLEN_SHAPES")
+    # VARLEN：--full 跑非 causal（各块工作量相同）；默认 causal。
+    ap.add_argument("--causal", dest="vl_causal", action="store_true", default=None,
+                    help="varlen: causal（默认）")
+    ap.add_argument("--full", dest="vl_causal", action="store_false",
+                    help="varlen: 非 causal")
     ap.add_argument("--H", type=int, default=16)
     ap.add_argument("--D", type=int, default=128)
     ap.add_argument("--kv", type=int, default=None)
@@ -494,17 +500,19 @@ def main():
         Dv = args.Dv if args.Dv else args.D
         vspecs = ([ (list(args.lengths), args.H, args.D, Hkv, Dv) ] if args.lengths
                   else VARLEN_SHAPES)
+        vl_causal = True if args.vl_causal is None else args.vl_causal
         dtypes = args.dtypes or [args.dtype]
         for dt in dtypes:
             if args.cmd in ("dump", "all"):
-                print(f"=== dump VARLEN to {OUT_ROOT} (dtype={dt}) ===")
+                print(f"=== dump VARLEN({'causal' if vl_causal else 'full'}) to {OUT_ROOT} "
+                      f"(dtype={dt}) ===")
                 for lengths, H, D, hkv, dv in vspecs:
-                    dump_case_varlen(lengths, H, D, hkv, dv, dt)
+                    dump_case_varlen(lengths, H, D, hkv, dv, dt, vl_causal)
             if args.cmd in ("bench", "all"):
                 print("=== VARLEN bench（TE FP8 基线，CUPTI device time）===")
                 timer = CudaTimer(args.warmup, args.repeat)
                 for lengths, H, D, hkv, dv in vspecs:
-                    bench_case_varlen(lengths, H, D, hkv, dv, dt, timer)
+                    bench_case_varlen(lengths, H, D, hkv, dv, dt, timer, vl_causal)
         return
 
     if args.shape:

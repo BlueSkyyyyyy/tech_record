@@ -455,7 +455,8 @@ static constexpr int LBN = 64;   // LSE 一次吃的 K 列数
 template <int HD>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
-               float* __restrict__ lse, int S, int H, int Hkv, float scale, int causal) {
+               float* __restrict__ lse, int S, int H, int Hkv, float scale, int causal,
+               const int* __restrict__ cu_seqlens = nullptr) {
   constexpr int LD = HD + 8;
   extern __shared__ __align__(16) char smem[];
   __half* Qs = reinterpret_cast<__half*>(smem);
@@ -466,16 +467,21 @@ lse_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * LBM;
+  // VARLEN：cu_seqlens 给出本序列在 packed [T,H,D] 的 token 基址与长度；nullptr 退化为
+  //   定长 b*S/S。非 causal 的 varlen 走本 kernel（工作均衡，无需镜像配对）。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
+  if (m0 >= len) return;  // VARLEN：超出本序列长度的 m 块直接退出
 
   for (int i = tid; i < LBM * HD; i += THREADS) {
     int r = i / HD, d = i % HD;
     int qi = m0 + r;
     Qs[r * LD + d] =
-        (qi < S) ? q[(((size_t)(b * S + qi)) * H + h) * HD + d] : __float2half(0.f);
+        (qi < len) ? q[(((size_t)(qbase + qi)) * H + h) * HD + d] : __float2half(0.f);
   }
   __syncthreads();
 
-  const int ncols = causal ? min(S, m0 + LBM) : S;
+  const int ncols = causal ? min(len, m0 + LBM) : len;
   const int ntiles = (ncols + LBN - 1) / LBN;
   float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
 
@@ -485,7 +491,7 @@ lse_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
       int r = i / HD, d = i % HD;
       int jg = j0 + r;
       Ks[r * LD + d] =
-          (jg < S) ? k[(((size_t)(b * S + jg)) * Hkv + hkv) * HD + d] : __float2half(0.f);
+          (jg < len) ? k[(((size_t)(qbase + jg)) * Hkv + hkv) * HD + d] : __float2half(0.f);
     }
     __syncthreads();
 
@@ -507,7 +513,7 @@ lse_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
         int c = j * 8 + c2 + (q & 1);
         int qi = m0 + r, jg = j0 + c;
         float sv = -INFINITY;
-        if (qi < S && jg < S && !(causal && jg > qi)) sv = acc[0][j][q] * scale;
+        if (qi < len && jg < len && !(causal && jg > qi)) sv = acc[0][j][q] * scale;
         if (sv != -INFINITY) {
           float mn = fmaxf(mrow[s], sv);
           lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
@@ -534,7 +540,7 @@ lse_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
     if (c2 == 0) {
       int r = wid * 16 + g + (s ? 8 : 0);
       int qi = m0 + r;
-      if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+      if (qi < len) lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
     }
   }
 }
@@ -3868,7 +3874,6 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   const int Hkv = (int)k_np.shape[1];
   const int B = (int)cu_np.data.size() - 1;
   if (D != 128) { fprintf(stderr, "VARLEN 目前只做 HD=128；当前 %d\n", D); return 1; }
-  if (!causal) { fprintf(stderr, "VARLEN 目前只做 causal\n"); return 1; }
   int maxlen = 0;
   for (int b = 0; b < B; ++b) {
     int L = (int)cu_np.data[b + 1] - (int)cu_np.data[b];
@@ -3925,6 +3930,10 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   const int kLseSmemWgm1 = 1024 + kLseTileWgm * 3;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<128, 1>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemWgm1));
+  // 非 causal varlen：各 m 块工作量相同 ⇒ O8 的 mma `lse_mma_kernel`（无需负载均衡）。
+  const int kLseSmem = (LBM + LBN) * (D + 8) * (int)sizeof(__half);
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<128>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
   const int d_rows = (int)rows_q;
   const int d_wpb = THREADS / 32;
   const int d_blocks = (d_rows + d_wpb - 1) / d_wpb;
@@ -3936,8 +3945,13 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   auto run_all = [&]() {
     CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
-    lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse, maxlen,
-                                                                        H, Hkv, scale, d_cu);
+    if (causal)
+      lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse,
+                                                                          maxlen, H, Hkv,
+                                                                          scale, d_cu);
+    else
+      lse_mma_kernel<128><<<dim3(lse_nblk, H, B), THREADS, kLseSmem>>>(d_q, d_k, d_lse, maxlen,
+                                                                       H, Hkv, scale, 0, d_cu);
     delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
     // O24：dQ 由主 kernel 直接写 fp16（dq_h），convert 跳过 dQ（n_q=0）。
     launch_bwd_wgmma2<128, true, 1>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,

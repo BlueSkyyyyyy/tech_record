@@ -1179,3 +1179,38 @@ H16 D128，统一 `8BS²HD`）**：
 ours 时间 = FA3 的 **3.09×**、TFLOPS 32%。ncu（main，b4_t3840）：Duration 549µs、
 DRAM 10.1% / **L1/TEX 48.7% / L2 63.2%** / Compute 31.0%、202 regs、**1 CTA/SM（occ 12.4%）**、
 Waves 7.76 ⇒ bound = **L2 red + L1/TEX + 低 occupancy**，与定长 wgmma2 一致。
+
+## 9. 变长（VARLEN）的非 causal（full attention）——fp8 / fp16 / bf16
+
+第 77/78 轮的 varlen 只做 causal。本轮补 **非 causal（full）**：每个 m 块的 K 列数恒为 `len`
+（不再随 `mblk` 递增）⇒ 工作天然均衡、无需镜像配对，LSE 从「causal 专用镜像配对 wgmma 版」
+切到通用 mma `lse_mma_kernel`（加 `cu_seqlens` 默认参数，`nullptr` 时定长逐位不变）。
+主 kernel 本就带 `causal`，无需改。三 dtype 单/两文件均完成，device 逐字一致。
+
+**数值对拍（ours vs fp32 ref，full，max_abs dq/dk/dv）**：
+
+| varlen case | lengths | fp16 | bf16 | fp8 |
+|---|---|---|---|---|
+| b4_t3840 不齐 | `[512,1024,2048,256]` | 5.60/6.84/2.34e-4 | 5.76/3.85/3.03e-3 | 1.01/0.97/0.70e-1 |
+| b4_t4096 等长 | `[1024]×4` | 4.09/4.95/1.23e-4 | 3.24/2.39/2.01e-3 | 0.89/0.70/0.57e-1 |
+| b5_t3968 GQA kv8 | `[128,256,512,1024,2048]` | 7.34/7.91/4.88e-4 | 5.32/5.45/5.88e-3 | 1.43/1.60/1.08e-1 |
+| b8_t2904 强倾斜 | `[2048,512,…,8]` | 1.49/1.56/1.58e-3 | 11.5/9.53/10.8e-3 | 2.41/2.06/2.51e-1 |
+
+全部对应 dtype 噪声量级、无 padding 泄漏；单/两文件逐位一致；定长回归逐位不变
+（fp16 S512 `1.671/1.771/1.899e-3`、bf16 `9.001/12.61/13.65e-3`、fp8 `2.426/2.972/3.733e-1`）。
+
+**性能（ours total，event，`Σ_b 4HL²D` 口径）与等长对标**：非 causal 总量约为 causal 的 2×，
+故时间是 causal 的 ~2×。等长 `[1024]×4` ≡ 定长 B4 S1024 full H16 D128，按 `4BS²H(D+Dv)`：
+
+| dtype | ours total ms | ours TF（口径换算） | TE 定长 full | FA2.7.4 定长 full |
+|---|---|---|---|---|
+| fp16 | 0.9090（0.450 causal 的 2.02×） | 75.6 | 0.2805 / 245.0TF | 0.4740 / 145.0TF |
+| bf16 | 0.9088 | 75.6 | 0.2787 / 246.6TF | 0.4663 / 147.4TF |
+| fp8 | 1.5800 | 43.5 | 0.4316 / 159.2TF（含 forward） | — |
+
+ncu（main，b4_t3840）：fp16 Duration 705µs / DRAM 7.9% / L1TEX 49% / **L2 70.3%** /
+Compute 35.8% / 1 CTA/SM（occ 12.5%）；fp8 Duration 1.20ms / DRAM 5.1% / L1TEX 62.5% /
+L2 64.0% / Compute 40.9% / 3 CTA/SM（occ 18.4%）⇒ bound 与各 dtype 定长 main 一致
+（fp16/bf16 = L2 red + 1 CTA/SM；fp8 = L1/L2 吞吐 + 3 CTA/SM），非带宽。
+
+详见 `docs/03` §38（fp8）、`docs/01` §16.8（fp16）、`docs/01b` §6aa.6（bf16）。

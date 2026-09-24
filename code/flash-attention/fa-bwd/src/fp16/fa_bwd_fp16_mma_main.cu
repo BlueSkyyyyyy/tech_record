@@ -322,12 +322,13 @@ static void launch_bwd_wgmma4(dim3 mg, const __half* q, const __half* k, const _
 #endif
 
 // =============================================================================
-// VARLEN（变长 / cu_seqlens）自测入口（fp16，HD=128，causal，wgmma2 路径）
+// VARLEN（变长 / cu_seqlens）自测入口（fp16，HD=128，causal/full，wgmma2 路径）
 // =============================================================================
 // packed 布局：q/dO/dQ `[T,H,D]`；k/v/dK/dV `[T,Hkv,D]`；`cu_seqlens.npy`（fp32，B+1 个
 // token 前缀和）。LSE/主 kernel 用 `cu_seqlens[b]` 作 token 基址、`maxlen` 传 S；每个
 // `(b,h,mblk)` 只处理本序列内的 tile。ref_dq/dk/dv 也是 packed，逐元素比对。
-// 只做 causal / HD=128 / MHA+GQA；FA/TE 变长在本机不可用 ⇒ 仅对 fp32 ref。
+// 只做 HD=128 / MHA+GQA；causal / 非 causal 均支持（causal 走镜像配对 wgmma LSE，非 causal
+// 各块工作量相同，走 O8 的 mma `lse_mma_kernel`）。FA/TE 变长在本机不可用 ⇒ 仅对 fp32 ref。
 #ifdef FA_WGMMA
 static int run_varlen(const std::string& dir, bool causal, int iters) {
   auto q_np = load_npy_f32(dir + "/q.npy");
@@ -347,7 +348,6 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   const int Hkv = (int)k_np.shape[1];
   const int B = (int)cu_np.data.size() - 1;
   if (D != 128) { fprintf(stderr, "VARLEN 目前只做 HD=128；当前 %d\n", D); return 1; }
-  if (!causal) { fprintf(stderr, "VARLEN 目前只做 causal\n"); return 1; }
   int maxlen = 0;
   for (int b = 0; b < B; ++b) {
     int L = (int)cu_np.data[b + 1] - (int)cu_np.data[b];
@@ -404,6 +404,10 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   const int kLseSmemWgm1 = 1024 + kLseTileWgm * 3;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<128, 1>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemWgm1));
+  // 非 causal varlen：各 m 块工作量相同 ⇒ O8 的 mma `lse_mma_kernel`（无需负载均衡）。
+  const int kLseSmem = (LBM + LBN) * (D + 8) * (int)sizeof(__half);
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<128>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
   const int d_rows = (int)rows_q;
   const int d_wpb = THREADS / 32;
   const int d_blocks = (d_rows + d_wpb - 1) / d_wpb;
@@ -415,8 +419,13 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   auto run_all = [&]() {
     CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
-    lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse, maxlen,
-                                                                        H, Hkv, scale, d_cu);
+    if (causal)
+      lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse,
+                                                                          maxlen, H, Hkv,
+                                                                          scale, d_cu);
+    else
+      lse_mma_kernel<128><<<dim3(lse_nblk, H, B), THREADS, kLseSmem>>>(d_q, d_k, d_lse, maxlen,
+                                                                       H, Hkv, scale, 0, d_cu);
     delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
     // O24：dQ 由主 kernel 直接写 fp16（dq_h），convert 跳过 dQ（n_q=0）。
     launch_bwd_wgmma2<128, true, 1>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
