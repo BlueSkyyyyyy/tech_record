@@ -1,0 +1,27 @@
+### O25 S4096 两文件：default(wg2) vs --cluster（数值应逐位相同）
+--- default ---
+[O23] main backend = wgmma2(BN=64) | lse = wgmma (D=128 S=4096)
+[timing] total(3 kernels) 1.3597 ms  101.08 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3002 ms | main 0.9855 ms | convert 0.0739 ms
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+--- cluster2 ---
+[O23] main backend = wgmma2(BN=64) | lse = wgmma (D=128 S=4096) +cluster2
+[timing] total(3 kernels) 7.8881 ms  17.42 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2928 ms | main 7.3178 ms | convert 0.2775 ms
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02

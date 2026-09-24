@@ -251,6 +251,57 @@ __device__ __forceinline__ void red_add2(float* p, float a, float b) {
   atomicAdd(reinterpret_cast<float2*>(p), make_float2(a, b));
 }
 
+// =============================================================================
+// O25：cluster 分布式归约（Hopper thread block cluster，只在 CL>1 的 wgmma2 路径用）
+// -----------------------------------------------------------------------------
+// 目标（ROADMAP「下一步」①，O7b 的直接延续）：fp16/bf16 main 的墙是 dK/dV 的跨 CTA
+// `atomicAdd`（`red` 占 L2 扇区 ~72%）。O7b 的「partial 覆盖写 + 二次归约 kernel」消掉了
+// 原子，但二次归约是一整趟 DRAM 扫描（90% 带宽 bound）⇒ 净负。本方案把「不同 mblk 的
+// CTA 对同一 KV 行的偏和」**在 SM 间 smem 内合并**：
+//   * cluster 沿 bx（`__cluster_ctarank` = blockIdx.x & 1，配对相邻两个 mblk）；
+//   * 每个 CTA 仍算自己 mblk 的 dK/dV 偏和 [BN][HD]；
+//   * 所有 rank 用 `red.shared::cluster.add.f32`（mapa 到 leader 的 smem 累加器）把偏和
+//     推进 leader；leader 每 tile 只发**一次**全局 `red_add2` ⇒ 全局 red 字节减半，
+//     且不落全局 partial 缓冲、不做二次归约。
+// 见 `fa_bwd_fp16_cluster_reduce_smoke.cu`（机制逐位 PASS）。
+// =============================================================================
+__device__ __forceinline__ unsigned fa_cluster_rank() {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  unsigned r;
+  asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(r));
+  return r;
+#else
+  return 0u;
+#endif
+}
+__device__ __forceinline__ void fa_cluster_sync() {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  asm volatile("barrier.cluster.arrive.aligned;\n" ::: "memory");
+  asm volatile("barrier.cluster.wait.aligned;\n" ::: "memory");
+#endif
+}
+__device__ __forceinline__ unsigned fa_map_shared(unsigned local_addr, unsigned rank) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  unsigned r;
+  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;\n"
+               : "=r"(r)
+               : "r"(local_addr), "r"(rank));
+  return r;
+#else
+  (void)rank;
+  return local_addr;
+#endif
+}
+__device__ __forceinline__ void fa_red_cluster_add(unsigned addr, float v) {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  asm volatile("red.shared::cluster.add.f32 [%0], %1;\n" ::"r"(addr), "f"(v)
+               : "memory");
+#else
+  (void)addr;
+  (void)v;
+#endif
+}
+
 // O7c：dK/dV 归约再把 float2 提升到 float4。mma.m16n8 里一个 quad（lane&3=0..3）的
 // `c2=(lane&3)*2` 分别是 0/2/4/6，即同 row 的连续 8 列；把 quad 的 float2 用 `shfl_down 1`
 // 拼成两个 float4（列 0-3 由 lane0 写、列 4-7 由 lane2 写），`red.global.add.v4.f32` 的
@@ -1318,7 +1369,7 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
 // smem（HD=128）：Q 32KB + dO 32KB + K 双缓冲 32KB + V 16KB + P 16KB + dS 16KB ≈ 145KB
 // → 1 CTA/SM（256 线程 = 8 warps/SM，与 O9b 的 2 CTA/SM × 4 warps 相同）。数值只改
 // 归约次序（atomic 顺序），与 O9b 在 fp16 噪声内一致。
-template <int HD, bool SPLIT = true>
+template <int HD, bool SPLIT = true, int CL = 1>
 __global__ void __launch_bounds__(256, 1)
 fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
                           const __half* __restrict__ v, const __half* __restrict__ do_,
@@ -1343,10 +1394,20 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
   char* Vs  = Ks + 2 * KTILE;              // 单缓冲 KTILE
   char* Ps  = Vs + KTILE;                  // [128][64] SW128（16KB）
   char* dSs = Ps + PTILE;                  // [128][64] SW128（16KB）
+  // O25：cluster 版在 leader 的 smem 里维护本 tile 的 dK/dV 合并累加器 [BN][HD] fp32。
+  float* dvacc = reinterpret_cast<float*>(dSs + PTILE);
+  float* dkacc = reinterpret_cast<float*>(dSs + PTILE) + (CL > 1 ? BN * HD : 0);
 
   const int bx = blockIdx.x;
   const int nblk = (S + BM - 1) / BM;
   const int mblk = bx;
+  // O25：cluster 沿 bx（clusterDim.x=CL），leader = cluster 内 rank 0（mblk 较小的那个）。
+  const int crank = (CL > 1) ? (int)fa_cluster_rank() : 0;
+  unsigned leader_dv = 0, leader_dk = 0;
+  if constexpr (CL > 1) {
+    leader_dv = fa_map_shared(smem_u32(dvacc), 0u);
+    leader_dk = fa_map_shared(smem_u32(dkacc), 0u);
+  }
   const int h = blockIdx.y, b = blockIdx.z;
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x;
@@ -1360,7 +1421,12 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
 
   const int ncols = causal ? min(S, m0 + BM) : S;
   const int ntiles = (ncols + BN - 1) / BN;
-  if (ntiles > 0) {
+  // O25：cluster 配对「相邻两个 mblk」——高的那个（rank1）恒多做 BM/BN 个（=2）KV tile。
+  //   低 mblk 的 rank0 把循环延到 rank1 的 tile 数；多出的 tile 因 causal mask 使 P=0、
+  //   dK/dV 偏和为 0，只贡献 barrier 参与与 0 累加（不改数值）。这样 cluster 内两个 CTA
+  //   锁步，per-tile 的 DSM 合并才有确定的同步点。
+  const int nt_loop = ntiles + ((CL > 1 && causal && crank == 0) ? (BM / BN) : 0);
+  if (nt_loop > 0) {
     kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, 0, S, Hkv, hkv, b, tid, Ks, Vs);
     kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, 0, S, Hkv, hkv, b, tid, Ks, Vs);
   }
@@ -1397,12 +1463,27 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
   const uint32_t Pa = smem_u32(Ps), DSa = smem_u32(dSs);
   const int r0 = wid * 16 + g;
 
-  for (int nt = 0; nt < ntiles; ++nt) {
+  // O25：把 dK/dV 的偏和推进 cluster leader（CL==1 时退化为原来的全局 red_add2）。
+  auto dkv_red = [&](float* gdst, unsigned lb, int rr, int c, float a, float b) {
+    if constexpr (CL > 1) {
+      const unsigned off = (unsigned)(rr * HD + c) * 4u;
+      fa_red_cluster_add(lb + off, a);
+      fa_red_cluster_add(lb + off + 4u, b);
+    } else {
+      red_add2(gdst, a, b);
+    }
+  };
+  if constexpr (CL > 1) {
+    for (int t2 = tid; t2 < BN * HD; t2 += NTH) { dvacc[t2] = 0.f; dkacc[t2] = 0.f; }
+    fa_cluster_sync();   // leader 的累加器清零先于任何 rank 的第一次累加
+  }
+
+  for (int nt = 0; nt < nt_loop; ++nt) {
     const int j0 = nt * BN;
     char* Kt = Ks + (nt & 1) * KTILE;
     asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
-    if (nt + 1 < ntiles)
+    if (nt + 1 < nt_loop)
       kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
                                                   Ks + ((nt + 1) & 1) * KTILE, Vs);
 
@@ -1440,7 +1521,7 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
     }
     // 两个 wg 的 P/dS 都写好；同时 GEMM2 已读完 V[nt]，可覆盖 V。
     __syncthreads();
-    if (nt + 1 < ntiles)
+    if (nt + 1 < nt_loop)
       kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
                                                   Ks, Vs);
 
@@ -1472,8 +1553,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
               const int jg = j0 + rr;
               const int c = nh * 64 + j * 8 + c2;
               if (jg < S)
-                red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                         accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+                dkv_red(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c, leader_dv,
+                        rr, c, accv[j * 4 + qq], accv[j * 4 + qq + 1]);
             }
         }
       } else {
@@ -1498,8 +1579,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
               const int jg = j0 + rr;
               const int c = nh * 64 + j * 8 + c2;
               if (jg < S)
-                red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                         acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+                dkv_red(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c, leader_dk,
+                        rr, c, acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
             }
         }
       }
@@ -1526,8 +1607,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
             const int jg = j0 + rr;
             const int c = nh * 64 + j * 8 + c2;
             if (jg < S)
-              red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                       accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+              dkv_red(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c, leader_dv,
+                      rr, c, accv[j * 4 + qq], accv[j * 4 + qq + 1]);
           }
       }
       // ---- (4) dK = scale·dSᵀ·Q：同构 ----
@@ -1550,8 +1631,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
             const int jg = j0 + rr;
             const int c = nh * 64 + j * 8 + c2;
             if (jg < S)
-              red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                       acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+              dkv_red(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c, leader_dk,
+                      rr, c, acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
           }
       }
     }
@@ -1575,6 +1656,26 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
       for (int j = 0; j < 8; ++j)
 #pragma unroll
         for (int qq = 0; qq < 4; ++qq) dqacc[nh][j][qq] += accq[j * 4 + qq] * scale;
+    }
+
+    // ---- O25：cluster 合并——本 tile 所有 rank 的 dK/dV 偏和都已在 leader 的 smem 里，
+    //      leader 只发一次全局 `red_add2`（≈把跨 CTA red 字节砍半），然后清零复用。----
+    if constexpr (CL > 1) {
+      fa_cluster_sync();                 // (A) 所有 remote/local add 已落地
+      if (crank == 0) {
+        for (int t2 = tid; t2 < BN * (HD / 2); t2 += NTH) {
+          const int rr2 = t2 / (HD / 2);
+          const int cc2 = (t2 % (HD / 2)) * 2;
+          const int jgf = j0 + rr2;
+          if (jgf < S) {
+            const size_t gb = (((size_t)(b * S + jgf)) * Hkv + hkv) * HD + cc2;
+            red_add2(dv_acc + gb, dvacc[rr2 * HD + cc2], dvacc[rr2 * HD + cc2 + 1]);
+            red_add2(dk_acc + gb, dkacc[rr2 * HD + cc2], dkacc[rr2 * HD + cc2 + 1]);
+          }
+        }
+        for (int t2 = tid; t2 < BN * HD; t2 += NTH) { dvacc[t2] = 0.f; dkacc[t2] = 0.f; }
+      }
+      fa_cluster_sync();                 // (B) 所有 rank 都看到 leader flush+清零完成
     }
   }
 

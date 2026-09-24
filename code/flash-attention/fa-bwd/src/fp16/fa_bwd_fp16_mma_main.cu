@@ -143,7 +143,7 @@ static void launch_bwd_wgmma(dim3 mg, const __half* q, const __half* k, const __
 
 // O17：2 warpgroup（BM=128）wgmma 主 kernel（只 HD=128）。Q/dO/K/V + P/dS 全 SW128。
 // smem = 1024(对齐) + Q 32KB + dO 32KB + K 2×16KB + V 16KB + P 16KB + dS 16KB ≈ 145KB。
-template <int HD, bool SPLIT = true>
+template <int HD, bool SPLIT = true, int CL = 1>
 static void launch_bwd_wgmma2(dim3 mg, const __half* q, const __half* k, const __half* v,
                               const __half* do_, const float* delta, const float* lse,
                               float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
@@ -154,12 +154,33 @@ static void launch_bwd_wgmma2(dim3 mg, const __half* q, const __half* k, const _
   constexpr int QTILE = (BM / 8) * (HD / 64) * 1024;
   constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
   constexpr int PTILE = (BM / 8) * (BN / 64) * 1024;
-  constexpr int smem = 1024 + QTILE * 2 + KTILE * 3 + PTILE * 2;
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma2_kernel<HD, SPLIT>,
+  // O25：CL>1 时 leader 的 smem 里多两个 [BN][HD] fp32 合并累加器（dK/dV）。
+  constexpr int smem = 1024 + QTILE * 2 + KTILE * 3 + PTILE * 2 +
+                       (CL > 1 ? 2 * BN * HD * (int)sizeof(float) : 0);
+  static_assert(CL == 1 || CL == 2, "cluster 只做 2");
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma2_kernel<HD, SPLIT, CL>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-  fa_bwd_fp16_wgmma2_kernel<HD, SPLIT><<<mg, 256, smem>>>(q, k, v, do_, delta, lse, dq_acc,
-                                                          dk_acc, dv_acc, S, H, Hkv, scale,
-                                                          causal, dq_h);
+  if constexpr (CL > 1) {
+    // O25：用 cudaLaunchKernelEx 指定 cluster 维度（沿 x，相邻两个 mblk 配对）。
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = mg;
+    cfg.blockDim = dim3(256);
+    cfg.dynamicSmemBytes = smem;
+    cfg.stream = nullptr;
+    cudaLaunchAttribute attr[1];
+    attr[0].id = cudaLaunchAttributeClusterDimension;
+    attr[0].val.clusterDim.x = CL;
+    attr[0].val.clusterDim.y = 1;
+    attr[0].val.clusterDim.z = 1;
+    cfg.attrs = attr;
+    cfg.numAttrs = 1;
+    CUDA_CHECK(cudaLaunchKernelEx(&cfg, fa_bwd_fp16_wgmma2_kernel<HD, SPLIT, CL>, q, k, v,
+                                  do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale,
+                                  causal, dq_h));
+  } else {
+    fa_bwd_fp16_wgmma2_kernel<HD, SPLIT, CL><<<mg, 256, smem>>>(
+        q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, dq_h);
+  }
 }
 
 // O18：BN=128 版 wgmma2（只 HD=128）。tile 数减半；smem = 1024 + Q32 + dO32 + K 2×32 + V32 + P32 + dS32
@@ -244,6 +265,9 @@ int main(int argc, char** argv) {
   int delta_warp_sel = 1;
   // O24：D==128 wgmma2/2b 路径直接用 fp16 写 dQ、convert 跳过 dQ（1，默认；0=A/B）。
   int dq_direct_sel = 1;
+  // O25：cluster 分布式归约（仅 HD=128、BN=64 的 wgmma2；cluster 沿 bx 配对相邻 mblk）。
+  //   0=关（默认），2=开。开了会强制走 wgmma2(BN=64)（BN=128 的 2b 放不下合并累加器）。
+  int cluster_sel = 0;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -274,6 +298,8 @@ int main(int argc, char** argv) {
     else if (a == "--det") det_ab = 1;
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_sel = atoi(a.c_str() + 12);
     else if (a.rfind("--dqdirect=", 0) == 0) dq_direct_sel = atoi(a.c_str() + 11);
+    else if (a.rfind("--cluster=", 0) == 0) cluster_sel = atoi(a.c_str() + 10);
+    else if (a == "--cluster") cluster_sel = 2;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -483,12 +509,25 @@ int main(int argc, char** argv) {
   if (!wg_forced && D == 128) {
     if (S >= 4096) wg2bn_sel = 1; else wg2_sel = 1;
   }
+  // O25：cluster 版只存在于 BN=64 的 wgmma2（BN=128 的 2b 放不下 [BN][HD]×2 合并累加器），
+  //   故 --cluster 开启时强制走 wgmma2；grid.x=nblk 须能被 cluster 整除，否则退回普通 wg2。
+  int cluster_use = 0;
+  if (cluster_sel > 1 && D == 128) {
+    const int nblk = (S + 127) / 128;
+    if (nblk % cluster_sel == 0) { wg2_sel = 1; wg2bn_sel = 0; cluster_use = cluster_sel; }
+  }
   // O23：LSE 预处理也默认走 Hopper wgmma 版（仅 causal / D==128；非 causal 自动落回 O8 原版）。
   if (!lse_forced && D == 128 && causal) lse_wgm = 1;
 #endif
-  printf("[O23] main backend = %s | lse = %s (D=%d S=%d)\n",
+  printf("[O23] main backend = %s | lse = %s (D=%d S=%d)%s\n",
          wg2bn_sel ? "wgmma2b(BN=128)" : (wg2_sel ? "wgmma2(BN=64)" : "mma"),
-         (D == 128 && causal && lse_wgm) ? "wgmma" : "mma", D, S);
+         (D == 128 && causal && lse_wgm) ? "wgmma" : "mma", D, S,
+#ifdef FA_WGMMA
+         cluster_use ? " +cluster2" : ""
+#else
+         ""
+#endif
+  );
   // O24：D==128 的 wgmma2/wgmma2b 路径里 dQ 唯一拥有 ⇒ 主 kernel 直接写 fp16 `dq`，
   // `convert_kernel` 跳过 dQ（n_q 传 0）。其它路径（mma/wgmma/wgmma4/MLA）仍写 fp32 dq_acc。
   bool dq_direct = false;
@@ -522,6 +561,12 @@ int main(int argc, char** argv) {
       dim3 g((S + 127) / 128, H, B);
       dq_direct = dq_direct_sel;
       __half* dqo = dq_direct_sel ? dq : nullptr;
+      if (cluster_use == 2) {
+        // O25：cluster 分布式归约（仅 SPLIT 版）。
+        launch_bwd_wgmma2<128, true, 2>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, dqo);
+        return;
+      }
       if (wg2split_sel)
         launch_bwd_wgmma2<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
                                      d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, dqo);
