@@ -1389,8 +1389,74 @@ bf16 dense 峰值 ~989 TF ⇒ main-only 144.6 TF ≈ **14.6% 峰值**（total 10
 
 ---
 
+## 6y. O34-bf16：主 kernel 的 Q/K/V/dO 逐 atom 4D-TMA（把 fp16 O33 逐字 dtype 参数化）
+
+### 6y.1 动机 / 改动
+
+O31（§6x）只把 **LSE** 的 Q/K 换成了 4D-TMA。主 kernel 的 Q/dO（prologue）与 K/V（每个 KV
+tile）仍用逐 16B `cp.async` + `sw128_off` 地址运算。HD=128 的 K-major tile 的交织布局无法用
+**一个 2D TMA box** 复现（O15a），因此照搬 fp16 O33 的做法：**逐 atom 发 TMA** —— 一个
+`[8 行][64 列]` 的 box 恰好等于一个 1024B SW128 atom，dst 放到 `sw128_off(rg*8, kg*64, HD)`，
+**原样复现交织布局** ⇒ 所有 wgmma 描述符零改动，搬的字节与 `cp.async` 逐字节相同。
+
+实现（单/两文件 device 区逐字一致，均 `-DFA_WGMMA -DFA_TMA -lcuda` / `sm_90a` 构建）：
+
+- `tma_fill_sw128<R,HD>`：逐 `(rg,kg)` 发 `tma_load_4d`（`cp.async.bulk.tensor.4d`），
+  Q/dO 各 32 atom、K/V 各 32 atom，由 `tid0` 串行发射（异步、不占寄存器/不记 scoreboard）；
+  同步改 mbarrier：Q/dO 一次性，K 双缓冲两 barrier（phase 每 `nt` 翻），V 单缓冲后段预取。
+- `fa_bwd_bf16_wgmma2b_tma_kernel<HD,SPLIT>`：与 `fa_bwd_bf16_wgmma2b_kernel` 几何/数据流/
+  描述符逐字相同，只换载入；仅 `HD=128`、BN=128（wgmma2b 几何）。
+- host：`make_main_map`（4D 描述符 box `{64,8}`、`BFLOAT16`）+ `launch_bwd_wgmma2b_tma` +
+  CLI `--maintma=0/1`（opt-in，与 cp.async 版同 binary A/B）；`make_main_map` 与 fp16 O33
+  逐字节同构（同样 2B，字节 stride 不变）。
+
+### 6y.2 数值（bf16 causal，max_abs）—— 与历史一致
+
+`[O34 A/B] max|diff| tma-vs-cpasync`：**dq `0.00e+00`（逐位）**、dk/dv ~5e-5–1.4e-4
+（仅跨 CTA `atomicAdd` 次序）；`ours vs ref`：dq 1.510e-2 / dk 1.340e-2 / dv 1.631e-2
+（与 O18/O23/O24/O31 **逐位一致**）。
+
+### 6y.3 性能（同 session A/B，CUDA event）
+
+| 形态 | main O18 wg2b(cp.async) | main O34 wg2b(TMA) | main 比 | 端到端 total cp.async → TMA | 比 |
+|---|---|---|---|---|---|
+| 两文件 S4096 | 0.9644 ms / 142.5 TF | **0.9223 ms / 149.0 TF** | **1.046×** | 1.2581 → **1.2106 ms** (109.2→113.5 TF) | **1.039×** |
+| 单文件 S4096 | 0.9599 ms / 143.2 TF | **0.9170 ms / 149.9 TF** | **1.047×** | 1.2591 → **1.2187 ms** (109.2→112.8 TF) | **1.033×** |
+
+### 6y.4 ncu（S=4096，同 binary，`--launch-count 1`）
+
+| 指标 | cp.async (O18) | TMA (O34) |
+|---|---|---|
+| Duration | 958.98 µs | **922.02 µs（1.040×）** |
+| Executed Instructions | 214,705,152 | **161,438,720（−24.8%）** |
+| `lts__t_sectors_op_red` | 51,904,512 | **51,904,512（逐字节不变）** |
+| regs / smem / occ | 254 / 230.53KB / 12.46% | 255 / 230.53KB / 12.46% |
+| L1/TEX / L2 / Compute / DRAM | 44.01 / 57.62 / 23.29 / 6.21 % | 45.84 / 60.26 / 19.52 / 6.48 % |
+| stall long / short / wait / barrier | 0.61 / 0.44 / 1.23 / 0.94 | 1.37 / 0.47 / 1.33 / 1.47 |
+
+⇒ **TMA 只省搬运（指令数 −24.8%）**，动不了主墙（dK/dV 的 L2 `red` 占 L2 ~72%）；1 CTA/SM
+与 regs/smem 全不变。
+
+### 6y.5 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`，FA2/FA3/TE 三列）
+
+FA3 MHA S4096 **0.3194 ms / 861 TF**、TE 0.4420 / 622 ⇒ ours total（maintma）
+**3.79×**（两文件）/ 3.82×（单文件）（O31 为 3.94×）。
+
+### 6y.6 原始输出
+
+`src/bf16/fa_bwd_bf16_o34_maintma{0,1}_s4096.out.txt`（两文件）、
+`fa_bwd_bf16_o34_onefile_maintma{0,1}_s4096.out.txt`（单文件）、
+`fa_bwd_bf16_o34_ncu_cpasync_s4096.out.txt` / `fa_bwd_bf16_o34_ncu_maintma_s4096.out.txt`（`--set full`）、
+`fa_bwd_bf16_o34_ncu_red_stall_s4096.out.txt`、`fa_bwd_bf16_o34_fa3_te_baseline.out.txt`。
+
+---
+
 ## 8. 下一步
 
+> **O34-bf16（§6y）已完成**：主 kernel Q/K/V/dO 逐 atom 4D-TMA（对齐 fp16 O33），
+> main **1.046–1.047×**（142.5→149.0 TF）、端到端 **1.033–1.039×**（MHA S4096 1.2581→1.2106ms）、
+> 指令数 **−24.8%**、`red` 逐字节不变，数值与历史逐位一致。
+>
 > **O31-bf16（§6x）已完成**：LSE 改 4D-TMA（对齐 fp16 O30），LSE-only **1.32–1.35×**、指令数
 > **−28.7%**、端到端 **1.065–1.071×**（MHA S4096 1.3390→1.2577ms），`max_abs(tma-vs-wgmma)=0`
 > 逐位一致；纯 `sm_90`/仅 `-DFA_WGMMA` 构建行为不变。

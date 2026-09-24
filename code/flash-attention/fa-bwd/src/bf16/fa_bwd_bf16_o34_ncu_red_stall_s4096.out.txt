@@ -1,0 +1,18 @@
+### cp.async (O18 wgmma2b) ###
+    lts__t_sectors_op_read.sum                                                     sector     18730424
+    lts__t_sectors_op_red.sum                                                      sector     51904512
+    lts__t_sectors_op_write.sum                                                    sector      1580770
+    sm__inst_executed.sum                                                            inst    214705152
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.94
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.61
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.44
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.23
+### TMA (O34 wgmma2b_tma) ###
+    lts__t_sectors_op_read.sum                                                     sector     19186867
+    lts__t_sectors_op_red.sum                                                      sector     51904512
+    lts__t_sectors_op_write.sum                                                    sector      2030461
+    sm__inst_executed.sum                                                            inst    161438720
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         1.47
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.37
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.47
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.33

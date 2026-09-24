@@ -57,6 +57,31 @@ static CUtensorMap make_lse_map(const void* ptr, long long H, long long S, long 
   }
   return map;
 }
+
+// O34：主 kernel 用的大张量描述符（dims={D,S,H,B}，SW128）。box={64,8,1,1} —— 内维 128B
+// （64 个 bf16）= SW128 跨距，8 行 = 一个 1024B atom；逐 atom TMA 即可原样写出 `sw128_off`
+// 的交织布局（见 `tma_fill_sw128`）。与 fp16 O33 的 `make_main_map` 逐字节同构，仅 dtype
+// 换成 `BFLOAT16`（同样 2B，字节 stride 不变）。
+static CUtensorMap make_main_map(const void* ptr, long long H, long long S, long long D,
+                                 long long B) {
+  CUtensorMap map;
+  uint64_t dims[4] = {(uint64_t)D, (uint64_t)S, (uint64_t)H, (uint64_t)B};
+  uint64_t strides[3] = {(uint64_t)(H * D * 2), (uint64_t)(D * 2),
+                         (uint64_t)(S * H * D * 2)};
+  uint32_t box[4] = {64, 8, 1, 1};
+  uint32_t estr[4] = {1, 1, 1, 1};
+  CUresult r = cuTensorMapEncodeTiled(
+      &map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 4, (void*)ptr, dims, strides, box, estr,
+      CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+      CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  if (r != CUDA_SUCCESS) {
+    const char* s = "?";
+    cuGetErrorString(r, &s);
+    fprintf(stderr, "cuTensorMapEncodeTiled(main) failed: %s\n", s);
+    std::exit(1);
+  }
+  return map;
+}
 #endif
 
 // =============================================================================
@@ -209,7 +234,30 @@ static void launch_bwd_wgmma2b(dim3 mg, const bf16* q, const bf16* k, const bf16
                                                            dk_acc, dv_acc, S, H, Hkv, scale,
                                                            causal, dq_h);
 }
-#endif
+
+#if defined(FA_TMA)
+// O34：把 wgmma2b 的 Q/K/V/dO 载入换成逐 atom 4D-TMA（布局逐字节不变）。smem 与 wgmma2b 同
+// （+ 4 个 mbarrier 32B），故 1 CTA/SM 不变。与 fp16 O33 的 launcher 逐字同构。
+template <int HD, bool SPLIT = true>
+static void launch_bwd_wgmma2b_tma(dim3 mg, CUtensorMap qmap, CUtensorMap kmap,
+                                   CUtensorMap vmap, CUtensorMap dmap, const float* delta,
+                                   const float* lse, float* dq_acc, float* dk_acc,
+                                   float* dv_acc, int S, int H, int Hkv, float scale,
+                                   int causal, bf16* dq_h = nullptr) {
+  static_assert(HD == 128, "wgmma2b TMA 只做 HD=128");
+  constexpr int BM = 128, BN = 128;
+  constexpr int QTILE = (BM / 8) * (HD / 64) * 1024;
+  constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
+  constexpr int PTILE = (BM / 8) * (BN / 64) * 1024;
+  constexpr int smem = 1024 + QTILE * 2 + KTILE * 3 + PTILE * 2 + 128;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_wgmma2b_tma_kernel<HD, SPLIT>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  fa_bwd_bf16_wgmma2b_tma_kernel<HD, SPLIT><<<mg, 256, smem>>>(
+      qmap, kmap, vmap, dmap, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
+      dq_h);
+}
+#endif  // FA_TMA
+#endif  // FA_WGMMA
 
 int main(int argc, char** argv) {
   std::string dir = "/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16";
@@ -240,6 +288,9 @@ int main(int argc, char** argv) {
   // O18：BN=128 版 wgmma2（仅 FA_WGMMA 构建、D==128）。O23：默认自动选择。
   int wg2bn_sel = 0;
   bool wg_forced = false;
+  // O34：主 kernel（wgmma2b 几何）是否用逐 atom 4D-TMA 载入 Q/K/V/dO（仅 FA_TMA 构建、
+  //   D==128、wg2bn 路径）。opt-in（`--maintma=0/1`），与 cp.async 版同 binary A/B。
+  int maintma_sel = 0;
   // O17-2：wgmma2 的 GEMM3/GEMM4 是否拆分到两个 warpgroup（1=拆，0=原版 wg0 串行）。
   int wg2split_sel = 1;
   // O24：delta 用 warp-per-row 向量化版（1，默认）还是旧 block-per-row smem 版（0，A/B）。
@@ -270,6 +321,8 @@ int main(int argc, char** argv) {
     else if (a == "--wg2") { wg2_sel = 1; wg_forced = true; }
     else if (a.rfind("--wg2bn=", 0) == 0) { wg2bn_sel = atoi(a.c_str() + 8); wg_forced = true; }
     else if (a == "--wg2bn") { wg2bn_sel = 1; wg_forced = true; }
+    else if (a.rfind("--maintma=", 0) == 0) maintma_sel = atoi(a.c_str() + 10);
+    else if (a == "--maintma") maintma_sel = 1;
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_sel = atoi(a.c_str() + 12);
     else if (a.rfind("--dqdirect=", 0) == 0) dq_direct_sel = atoi(a.c_str() + 11);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
@@ -376,6 +429,14 @@ int main(int argc, char** argv) {
   if (D == 128) {
     qmap_lse = make_lse_map(d_q, H, S, D, B);
     kmap_lse = make_lse_map(d_k, Hkv, S, D, B);
+  }
+  // O34：主 kernel 的 Q/K/V/dO 描述符（box={64,8}，逐 atom）。
+  CUtensorMap qmap_m, kmap_m, vmap_m, dmap_m;
+  if (D == 128) {
+    qmap_m = make_main_map(d_q, H, S, D, B);
+    kmap_m = make_main_map(d_k, Hkv, S, D, B);
+    vmap_m = make_main_map(d_v, Hkv, S, D, B);
+    dmap_m = make_main_map(d_do, H, S, D, B);
   }
 #endif
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<128>,
@@ -503,6 +564,19 @@ int main(int argc, char** argv) {
       dim3 g((S + 127) / 128, H, B);
       dq_direct = dq_direct_sel;
       bf16* dqo = dq_direct_sel ? dq : nullptr;
+#if defined(FA_TMA)
+      if (maintma_sel) {
+        if (wg2split_sel)
+          launch_bwd_wgmma2b_tma<128, true>(g, qmap_m, kmap_m, vmap_m, dmap_m, d_delta, d_lse,
+                                            d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                            (int)causal, dqo);
+        else
+          launch_bwd_wgmma2b_tma<128, false>(g, qmap_m, kmap_m, vmap_m, dmap_m, d_delta, d_lse,
+                                             d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                             (int)causal, dqo);
+        return;
+      }
+#endif
       if (wg2split_sel)
         launch_bwd_wgmma2b<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, dqo);
@@ -828,6 +902,18 @@ int main(int argc, char** argv) {
           dim3 g((S + 127) / 128, H, B);
           launch_bwd_wgmma2b<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
                                          d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+#if defined(FA_TMA)
+        } else if (mode == 8) {
+          dim3 g((S + 127) / 128, H, B);
+          launch_bwd_wgmma2b_tma<128, true>(g, qmap_m, kmap_m, vmap_m, dmap_m, d_delta, d_lse,
+                                            d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                            (int)causal);
+        } else if (mode == 9) {
+          dim3 g((S + 127) / 128, H, B);
+          launch_bwd_wgmma2b_tma<128, false>(g, qmap_m, kmap_m, vmap_m, dmap_m, d_delta, d_lse,
+                                             d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                             (int)causal);
+#endif
         } else if (mode == 1) {
           dim3 g((S + 63) / 64, H, B);
           launch_bwd_wgmma<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
@@ -852,6 +938,9 @@ int main(int argc, char** argv) {
     };
     std::vector<float> q0(n), k0(nkv), v0(nkv), q1(n), k1(nkv), v1(nkv), q2(n), k2(nkv),
         v2(nkv), q5(n), k5(nkv), v5(nkv), q6(n), k6(nkv), v6(nkv), q7(n), k7(nkv), v7(nkv);
+#if defined(FA_TMA)
+    std::vector<float> q8(n), k8(nkv), v8(nkv);
+#endif
     float ms_mma = 0.f, ms_wgm = 0.f, ms_wg2 = 0.f, ms_wg2ns = 0.f, ms_wg2b = 0.f, ms_wg2bns = 0.f;
     time_o17(0, &ms_mma, q0.data(), k0.data(), v0.data());
     time_o17(1, &ms_wgm, q1.data(), k1.data(), v1.data());
@@ -859,6 +948,10 @@ int main(int argc, char** argv) {
     time_o17(5, &ms_wg2ns, q5.data(), k5.data(), v5.data());
     time_o17(6, &ms_wg2b, q6.data(), k6.data(), v6.data());
     time_o17(7, &ms_wg2bns, q7.data(), k7.data(), v7.data());
+#if defined(FA_TMA)
+    float ms_wg2btma = 0.f;
+    time_o17(8, &ms_wg2btma, q8.data(), k8.data(), v8.data());
+#endif
     auto mad = [](const std::vector<float>& a, const std::vector<float>& b) {
       double d = 0; for (size_t i = 0; i < a.size(); ++i) d = std::max(d, (double)std::fabs(a[i]-b[i])); return d;
     };
@@ -881,6 +974,13 @@ int main(int argc, char** argv) {
            main_flops / (ms_wg2b * 1e-3) / 1e12, ms_wg2 / ms_wg2b, ms_wg2bns,
            ms_wg2 / ms_wg2bns, mad(q6, q2), mad(k6, k2), mad(v6, v2), mad(q7, q6), mad(k7, k6),
            mad(v7, v6));
+#if defined(FA_TMA)
+    printf("[O34 A/B] main O18 wg2b(cp.async) %.4f ms (%.1f TF) | O34 wg2b(TMA,split) %.4f ms "
+           "(%.1f TF) => %.3fx | max|diff| tma-vs-cpasync dq/dk/dv=%.2e/%.2e/%.2e\n",
+           ms_wg2b, main_flops / (ms_wg2b * 1e-3) / 1e12, ms_wg2btma,
+           main_flops / (ms_wg2btma * 1e-3) / 1e12, ms_wg2b / ms_wg2btma, mad(q8, q6),
+           mad(k8, k6), mad(v8, v6));
+#endif
   }
 #endif
   }  // end if (D == 128)

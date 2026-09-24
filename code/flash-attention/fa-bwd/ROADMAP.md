@@ -119,11 +119,12 @@
 
 - [~] SM90 TMA+wgmma 版本（对标 FA3）：**wgmma 部分已完成**（O9a/O9b/O9b-2/O17/O18，
   fp16/bf16/fp8，且 **O22/O23 已把 Hopper 路径默认化**）；**TMA 部分已落地三种 dtype 的 LSE**
-  （**O30 fp16** 4D-TMA + 2×K=64 chunk，**O31 bf16** dtype 参数化，**O32 fp8** 单 chunk/UINT8，
-  均 1.06–1.36×、数值逐位不变）；**主 kernel 的 Q/K/V/dO TMA 化：fp16 已完成（O33，第七十四轮）**
-  ——**逐 atom TMA 复现 SW128 交织布局**（描述符零改动），`--maintma`、main **1.04×**、`red`
-  逐字节不变、端到端为 FA3 的 3.77×（见 `docs/01` §14s）。**剩余**：bf16/fp8 的对应 dtype
-  参数化（fp8 SW128 的 `k/16` atom 下标）与 BN=64 的 `wgmma2` 几何；fp8 尚有 dS3-Ap smem 复用。见 backlog。
+  （**O30 fp16** 4D-TMA + 2×K=64 chunk，  **O31 bf16** dtype 参数化，**O32 fp8** 单 chunk/UINT8，
+  均 1.06–1.36×、数值逐位不变）；**主 kernel 的 Q/K/V/dO TMA 化：fp16 已完成（O33，第七十四轮）、
+  bf16 已完成（O34，第七十五轮）**——**逐 atom TMA 复现 SW128 交织布局**（描述符零改动），
+  `--maintma`、main **1.04×**、`red` 逐字节不变、端到端为 FA3 的 **3.77×（fp16）/3.79×（bf16）**
+  （见 `docs/01` §14s、`docs/01b` §6y）。**剩余**：fp8 的对应 dtype 参数化（fp8 SW128 的 `k/16`
+  atom 下标）与 BN=64 的 `wgmma2` 几何；fp8 尚有 dS3-Ap smem 复用。见 backlog。
 - [ ] 变长（cu_seqlens / varlen）覆盖
 
 ## 每项的 Definition of Done
@@ -2003,8 +2004,26 @@
     ⇒ **TMA 只省搬运，动不了主墙（dK/dV 的 L2 `red`）**。
   - **对标**（同 session 纯反向 FA2/FA3/TE）：FA3 MHA S4096 0.3263ms/842TF、TE 0.4443/619
     ⇒ ours total **3.77×**（O30 3.87×）。原始输出 `src/fp16/fa_bwd_fp16_o33_*`；`docs/01` §14s。
-  - **限制/下一步**：只挂到 BN=128 的 wgmma2b（S≥4096 默认快路）；bf16/fp8 的对应 TMA 与
-    BN=64 的 `wgmma2` 几何待做；fp16 main 的墙仍是 L2 red（三条消 red 路已证伪）。
+   - **限制/下一步**：只挂到 BN=128 的 wgmma2b（S≥4096 默认快路）；bf16/fp8 的对应 TMA 与
+     BN=64 的 `wgmma2` 几何待做；fp16 main 的墙仍是 L2 red（三条消 red 路已证伪）。
+
+- 2026-09-25（第七十五轮）：**O34 完成（bf16：主 kernel 的 Q/K/V/dO 改用逐 atom 4D-TMA，
+  把 fp16 O33 逐字 dtype 参数化）**。
+  - **改动**：`tma_fill_sw128<R,HD>` + `fa_bwd_bf16_wgmma2b_tma_kernel<HD,SPLIT>`
+    （与 `fa_bwd_bf16_wgmma2b_kernel` 几何/数据流/描述符逐字相同，只换载入为 TMA + mbarrier；
+    仅 HD=128/BN=128 的 wgmma2b 几何）；host `make_main_map`（box `{64,8}`、`BFLOAT16`）+
+    `launch_bwd_wgmma2b_tma` + `--maintma` opt-in；单/两文件 device 区逐字一致。
+  - **数值**：`[O34 A/B] max|diff|` **dq `0.00e+00`（逐位）**、dk/dv ~5e-5–1.4e-4（仅跨 CTA
+    `atomicAdd` 次序）；`ours vs ref` dq 1.510e-2 / dk 1.340e-2 / dv 1.631e-2，与 O18/O23/O24/O31
+    **逐位一致**。
+  - **性能（同 session event）**：main **0.9644→0.9223ms（142.5→149.0 TF，1.046×）/ 单文件
+    1.047×**；端到端 total **1.2581→1.2106ms（109.2→113.5 TF，1.039×）/ 单文件 1.033×**。
+  - **ncu**：Duration 958.98→**922.02µs（1.040×）**、**Executed Instructions 214.7M→161.4M
+    （−24.8%）**、**`red` 51,904,512 逐字节不变**、regs 254→255 / smem 230.53KB / occ 12.46%
+    （1 CTA/SM）全不变；stall long/barrier 因 mbarrier 等待上升（0.61→1.37 / 0.94→1.47）
+    ⇒ **TMA 只省搬运，动不了主墙（dK/dV 的 L2 `red`）**。
+  - **对标**（同 session 纯反向 FA2/FA3/TE）：FA3 MHA S4096 0.3194ms/861TF、TE 0.4420/622
+    ⇒ ours total **3.79×**（O31 3.94×）。原始输出 `src/bf16/fa_bwd_bf16_o34_*`；`docs/01b` §6y。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -2224,7 +2243,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > **O33 已完成 fp16 主 kernel 的 Q/K/V/dO TMA（第七十四轮）**：**逐 atom TMA 复现交织布局**
 > （一个 `[8,64]` box = 一个 SW128 atom ⇒ 描述符零改动），`--maintma`、main **1.042×**
 > （142.6→148.6 TF）、`red` 逐字节不变、端到端为 FA3 的 3.77×；详见 `docs/01` §14s。
-> **剩余**：bf16/fp8 的对应 dtype 参数化（fp8 SW128 为一整行 128B，逐 atom 更简单；fp8 尚需
+> **O34 已完成 bf16 主 kernel 的 Q/K/V/dO TMA（第七十五轮）**：把 O33 逐字 dtype 参数化
+> （`BFLOAT16` tensormap + `wgmma...bf16`），`--maintma`、main **1.046×**（142.5→149.0 TF）、
+> 指令数 **−24.8%**、`red` 逐字节不变、端到端为 FA3 的 **3.79×**（1.2581→1.2106ms）；
+> 数值与历史逐位一致；详见 `docs/01b` §6y。
+> **剩余**：fp8 主 kernel 的对应 dtype 参数化（fp8 SW128 为一整行 128B，逐 atom 更简单；fp8 尚需
 > 处理 K/V 的 dS3/Ap smem 复用与 32 regs 寄存器预取）、BN=64 的 `wgmma2` 几何。
 > **④（O27 新增，O28 已作废）fp16/bf16 的 fold 同理含逐元素精确除法**——**误记**：逐字核对
 > `src/fp16,bf16/fa_bwd_*_kernels.cuh` 后确认 fp16/bf16 **没有 rowwise scale fold**（无量化），
