@@ -266,6 +266,15 @@ __device__ __forceinline__ void red_add4(float* p, float a, float b, float c, fl
   atomicAdd(reinterpret_cast<float4*>(p), make_float4(a, b, c, d));
 }
 
+// O7b：确定性 dK/dV 归约（可选，`DET`）。跨 CTA 的 `atomicAdd` 换成「每个 (Q-block, KV 行)
+//   的贡献写进独立 partial 缓冲」——partial 下标含 `mblk`，每个元素**只被本 CTA 写一次**
+//   （非原子覆盖写），因此无竞争、无浮点加法的乱序；再由 `dkv_reduce_kernel` 按 `mblk`
+//   升序求和 ⇒ 结果与执行/调度顺序无关（可复现）。代价：partial 多一趟写 + 一趟读，
+//   全局字节数上升（见 docs/01 §15）。`DET=false` 仍走 O4c 的 float2 `atomicAdd`。
+__device__ __forceinline__ void dkv_det_store(float* part, float a, float b) {
+  *reinterpret_cast<float2*>(part) = make_float2(a, b);
+}
+
 // ---- O6：cp.async 异步拷贝（16B）----
 // 把「全局→smem」的 K/V 搬运从「同步 LDG + STS」改成硬件异步流水：`cp.async.cg` 走
 // L2-only 路径（流式数据不污染 L1），发起后立即返回、不占寄存器、不阻塞发射；
@@ -1577,14 +1586,15 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
 //     （存储列 64 的 SW128 kg=1 atom；smoke `fa_bwd_fp16_wgmma2b_smoke.cu` 逐位 PASS）；
 //   * GEMM5 输出 [64][HD=128]（每 wg 自己 64 行）⇒ 一条 m64n128，`dqacc[16][4]`。
 // 数值只改跨 CTA `atomicAdd` 次序，与 O17 在 fp16 噪声内一致。
-template <int HD, bool SPLIT = true>
+template <int HD, bool SPLIT = true, bool DET = false>
 __global__ void __launch_bounds__(256, 1)
 fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
                            const __half* __restrict__ v, const __half* __restrict__ do_,
                            const float* __restrict__ delta, const float* __restrict__ lse,
                            float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                            float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                           int causal) {
+                           int causal, float* __restrict__ dk_part = nullptr,
+                           float* __restrict__ dv_part = nullptr, int nblk = 0) {
   static_assert(HD == 128, "wgmma2b 主 kernel 目前只做 HD=128");
   constexpr int NTH = 256;
   constexpr int BM = 128, BN = 128;
@@ -1709,8 +1719,14 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int rr = r0 + (qq >= 2 ? 8 : 0);
               const int jg = j0 + mh * 64 + rr;
               const int c = j * 8 + c2;
-              if (jg < S) red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                                   accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+              if (jg < S) {
+                if constexpr (DET)
+                  dkv_det_store(dv_part + (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                                accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+                else
+                  red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                           accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+              }
             }
         }
       } else {
@@ -1730,8 +1746,14 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int rr = r0 + (qq >= 2 ? 8 : 0);
               const int jg = j0 + mh * 64 + rr;
               const int c = j * 8 + c2;
-              if (jg < S) red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                                   acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+              if (jg < S) {
+                if constexpr (DET)
+                  dkv_det_store(dk_part + (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                                acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+                else
+                  red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                           acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+              }
             }
         }
       }
@@ -1754,8 +1776,14 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int rr = r0 + (qq >= 2 ? 8 : 0);
               const int jg = j0 + mh * 64 + rr;
               const int c = j * 8 + c2;
-              if (jg < S) red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                                   accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+              if (jg < S) {
+                if constexpr (DET)
+                  dkv_det_store(dv_part + (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                                accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+                else
+                  red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                           accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+              }
             }
         }
 #pragma unroll
@@ -1773,8 +1801,14 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int rr = r0 + (qq >= 2 ? 8 : 0);
               const int jg = j0 + mh * 64 + rr;
               const int c = j * 8 + c2;
-              if (jg < S) red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                                   acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+              if (jg < S) {
+                if constexpr (DET)
+                  dkv_det_store(dk_part + (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                                acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+                else
+                  red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                           acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+              }
             }
         }
       }
@@ -2492,6 +2526,44 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
 }
 
 // =============================================================================
+// 2b) O7b：确定性 dK/dV 归约 —— 把 per-(Q-block) 的 partial 按 mblk 升序求和
+// =============================================================================
+// partial 布局：`part[((b*Hkv+hkv)*nblk + mblk) * S * HD + jg*HD + c]`（每个 CTA 一份）。
+// 输出布局：`dk_acc[((b*S+jg)*Hkv + hkv)*HD + c]`。
+// causal 下 KV 行 `jg` 只被 `mblk >= jg/BM`（BM=128）的 CTA 写 ⇒ 直接从 `jg/BM` 起求和；
+// 非 causal 从 0 起。**求和顺序固定**（mblk 升序）⇒ 与调度无关，可复现（deterministic）。
+// partial 按 **Q 头 h**（不是 KV 头）分片：GQA/MQA 下多个 Q 头 `h` 共享同一 KV 头 `hkv`，
+// 它们对 dK/dV 的贡献要**求和**；若 partial 只用 hkv 索引，同 (mblk, hkv) 的多个 h 会互相
+// 覆盖（race，实测 GQA 对拍错 O(1)）。这里 partial 按 `(b*H + h)*nblk + mblk` 分片，归约时
+// 对每个 KV 头 `hkv` 把其 head group `[hkv*G, (hkv+1)*G)`（G=H/Hkv）与 mblk 一起求和。
+template <int HD>
+__global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
+                                  const float* __restrict__ dv_part,
+                                  float* __restrict__ dk_acc, float* __restrict__ dv_acc,
+                                  int S, int H, int Hkv, int nblk, int causal) {
+  const int hb = blockIdx.x;   // b*Hkv + hkv
+  const int jg = blockIdx.y;
+  const int c = threadIdx.x;
+  if (c >= HD || jg >= S) return;
+  const int b = hb / Hkv, hkv = hb % Hkv;
+  const int G = H / Hkv;                    // 每 KV 头对应的 Q 头数（GQA 广播组）
+  const int h0 = hkv * G;
+  const int mblk0 = causal ? (jg / 128) : 0;
+  float sk = 0.f, sv = 0.f;
+  for (int hh = 0; hh < G; ++hh) {
+    const size_t prow = (size_t)(b * H + h0 + hh);
+    for (int m = mblk0; m < nblk; ++m) {
+      const size_t base = ((prow * nblk + m) * (size_t)S + jg) * HD + c;
+      sk += dk_part[base];
+      sv += dv_part[base];
+    }
+  }
+  const size_t o = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
+  dk_acc[o] = sk;
+  dv_acc[o] = sv;
+}
+
+// =============================================================================
 // 3) convert：fp32 累加缓冲 → fp16 输出
 // =============================================================================
 __global__ void convert_kernel(const float* __restrict__ dq_acc,
@@ -2659,22 +2731,24 @@ static void launch_bwd_wgmma2(dim3 mg, const __half* q, const __half* k, const _
 
 // O18：BN=128 版 wgmma2（只 HD=128）。tile 数减半；smem = 1024 + Q32 + dO32 + K 2×32 + V32 + P32 + dS32
 // ≈ 230400B（仍 1 CTA/SM）。
-template <int HD, bool SPLIT = true>
+template <int HD, bool SPLIT = true, bool DET = false>
 static void launch_bwd_wgmma2b(dim3 mg, const __half* q, const __half* k, const __half* v,
                                const __half* do_, const float* delta, const float* lse,
                                float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
-                               int Hkv, float scale, int causal) {
+                               int Hkv, float scale, int causal,
+                               float* dk_part = nullptr, float* dv_part = nullptr,
+                               int nblk = 0) {
   static_assert(HD == 128, "wgmma2b 只做 HD=128");
   constexpr int BM = 128, BN = 128;
   constexpr int QTILE = (BM / 8) * (HD / 64) * 1024;
   constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
   constexpr int PTILE = (BM / 8) * (BN / 64) * 1024;
   constexpr int smem = 1024 + QTILE * 2 + KTILE * 3 + PTILE * 2;
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma2b_kernel<HD, SPLIT>,
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma2b_kernel<HD, SPLIT, DET>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-  fa_bwd_fp16_wgmma2b_kernel<HD, SPLIT><<<mg, 256, smem>>>(q, k, v, do_, delta, lse, dq_acc,
-                                                           dk_acc, dv_acc, S, H, Hkv, scale,
-                                                           causal);
+  fa_bwd_fp16_wgmma2b_kernel<HD, SPLIT, DET><<<mg, 256, smem>>>(
+      q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, dk_part,
+      dv_part, nblk);
 }
 
 // O17b：4 warpgroup（BM=256）wgmma 主 kernel（只 HD=128）。Q/dO/P/dS SW128，K/V 单缓冲 + 后段预取。
@@ -2731,6 +2805,8 @@ int main(int argc, char** argv) {
   int wg4_sel = 0;
   // O17b：是否用「串行 GEMM1/2 + 读回 P」版（消 spill）；>0=开，默认关（有 fp16 精度损失）。
   int wg4seq_opt = -1;
+  // O7b：是否跑「确定性 dK/dV（partial + 二次归约）」A/B（仅 FA_WGMMA 构建、D==128）。
+  int det_ab = 0;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -2757,6 +2833,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--wg4=", 0) == 0) wg4_sel = atoi(a.c_str() + 6);
     else if (a == "--wg4") wg4_sel = 1;
     else if (a.rfind("--wg4seq=", 0) == 0) wg4seq_opt = atoi(a.c_str() + 9);
+    else if (a.rfind("--det=", 0) == 0) det_ab = atoi(a.c_str() + 6);
+    else if (a == "--det") det_ab = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -3413,6 +3491,69 @@ int main(int argc, char** argv) {
            "(64,32,0) %.4f (%.2f) => best %.3fx\n",
            a, tf(a), b, tf(b), c, tf(c), a / std::min(a, std::min(b, c)));
   }
+
+  // ---- O7b A/B（仅 FA_WGMMA 构建、HD=128，`--det` 开启）：跨 CTA `atomicAdd` vs
+  //      确定性 partial 缓冲 + 二次归约。跑两遍 DET 验证逐位可复现，再与 atomic 比 max|diff|。
+#ifdef FA_WGMMA
+  if (det_ab && D == 128) {
+    const int nblk = (S + 127) / 128;
+    const size_t part_elems = (size_t)B * H * nblk * S * D;
+    float* d_dk_part = nullptr;
+    float* d_dv_part = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_dk_part, part_elems * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_dv_part, part_elems * sizeof(float)));
+    dim3 g((S + 127) / 128, H, B);
+    auto run_atomic = [&]() {
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      launch_bwd_wgmma2b<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                    d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+    };
+    auto run_det = [&]() {
+      launch_bwd_wgmma2b<128, true, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                          d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                                          d_dk_part, d_dv_part, nblk);
+      dim3 rg(B * Hkv, S);
+      dkv_reduce_kernel<128><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                          nblk, (int)causal);
+    };
+    auto time_fn = [&](auto fn, float* out_ms) {
+      for (int i = 0; i < 3; ++i) fn();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) fn();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    float ms_at = 0.f, ms_det = 0.f;
+    time_fn(run_atomic, &ms_at);
+    std::vector<float> ak(nkv), av(nkv);
+    CUDA_CHECK(cudaMemcpy(ak.data(), d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(av.data(), d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    time_fn(run_det, &ms_det);
+    std::vector<float> dk1(nkv), dv1(nkv);
+    CUDA_CHECK(cudaMemcpy(dk1.data(), d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dv1.data(), d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    run_det();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<float> dk2(nkv), dv2(nkv);
+    CUDA_CHECK(cudaMemcpy(dk2.data(), d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dv2.data(), d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    auto mad = [](const std::vector<float>& a, const std::vector<float>& b) {
+      double d = 0;
+      for (size_t i = 0; i < a.size(); ++i) d = std::max(d, (double)std::fabs(a[i] - b[i]));
+      return d;
+    };
+    printf("[O7b A/B] main wgmma2b atomic %.4f ms (%.1f TF) | DET(partial+reduce) %.4f ms (%.3fx) "
+           "| runs[1-2] bitwise-diff dk/dv=%.2e/%.2e | DET-vs-atomic dk/dv=%.2e/%.2e\n",
+           ms_at, main_flops / (ms_at * 1e-3) / 1e12, ms_det, ms_at / ms_det, mad(dk1, dk2),
+           mad(dv1, dv2), mad(dk1, ak), mad(dv1, av));
+    cudaFree(d_dk_part);
+    cudaFree(d_dv_part);
+  }
+#endif
 
   // ---- 数值对拍（重新跑一次完整 forward 保证累加缓冲清零）----
   run_all();

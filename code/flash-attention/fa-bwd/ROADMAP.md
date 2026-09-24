@@ -1705,6 +1705,34 @@
      `src/fa_bwd_o23_fa3_te_baseline_{fp16,bf16}.out.txt`；文档 `docs/01` §14n、`docs/01b` §6v、
      `docs/04` §2.1/§2.2、`docs/08` §5。
 
+- 2026-09-24（第六十四轮）：**O7b 完成（fp16 确定性 dK/dV：partial + 二次归约）——机制成立、
+  逐位可复现，但净负（S4096 main+reduce 0.810×）；`red` 51.9M→0**。
+   - 动机：O17 后 fp16 main 仍是 **L2 的 dK/dV 跨 CTA `atomicAdd`** bound（`red` = 51,904,512，
+     占余下 L2 扇区 ~72.6%）；O17b（放大 BM）/O7c（float4）已证伪「减事务数/放大宽度」。O7b 直接
+     **不用原子**：每个 (Q 块, KV 行) 的贡献写进带 `mblk` 下标的 partial（非原子覆盖写，每元素本
+     CTA 只写一次），再由 `dkv_reduce_kernel` 按 `mblk` 升序 + Q 头广播组求和 ⇒ **确定性反向**。
+   - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+     `fa_bwd_fp16_wgmma2b_kernel<HD,SPLIT,DET=false>` 加 `DET` 开关 + `dk_part/dv_part/nblk`
+     参数；四处 dK/dV epilogue 从 `red_add2` 改 `dkv_det_store`（float2 覆盖写）；新增
+     `dkv_reduce_kernel<HD>`；host `--det=1` opt-in A/B（仅 `FA_WGMMA && D==128`）。默认路径不变。
+   - **踩坑**：partial 初版按 `hkv` 索引，GQA/MQA 下同一 KV 头的多个 Q 头互相覆盖（race），
+     GQA kv4 `max|diff|=6.3`（错）；改按 Q 头 `h` 分片、reduce 对广播组 `G=H/Hkv` 求和后修复。
+   - **数值（fp16 causal）**：DET 两次运行 **bitwise-diff=0**（可复现）；DET-vs-atomic dk/dv
+     2.38e-7/4.77e-7（S512）、7.15e-7/9.54e-7（S4096）、2.86e-6/3.81e-6（GQA kv4，仅加法次序）；
+     ours-vs-ref 与历史逐位同级（S4096 1.883/1.734/1.966e-3）。
+   - **性能（同 session A/B，event，main[+reduce]）**：S512 0.0551→**0.0538（1.023×）**、
+     S1024 GQA kv4 0.1865→0.2100（0.888×）、S4096 0.9598→**1.1849ms（0.810×）**。
+   - **ncu（S=4096）**：atomic main `red=51,904,512`/write 1.574M/Duration 958.6µs →
+     **DET main `red=0`**/write 53.48M/**Duration 802.0µs（1.20×）**；reduce Duration **384.9µs**、
+     **DRAM Throughput 90.4%（带宽 bound）**、read 51.9M 扇区 ⇒ **主 kernel 去掉原子 RMW 反而快
+     1.20×，但二次归约是一趟 DRAM 扫描，把收益吃回**。⇒ 保留 `--det=1` opt-in（确定性），
+     **不作为性能杠杆**；真正消 red 需 **cluster 分布式归约**（SM 间 smem 合并、不落全局内存）。
+   - 对标（同 session 纯反向 `fa_vs_te_bwd_only.py fp16`）：MHA S4096 FA3 0.3249ms/846TF、
+     TE 0.4449/618、FA2 0.7292/377；默认端到端仍为 FA3 ~4.2×（O23，不受 O7b 影响）。
+   - 原始输出 `src/fp16/fa_bwd_fp16_main_o7b_det_{s512,s4096,gqa_kv4}.out.txt`、
+     `src/fp16/fa_bwd_fp16_mma_onefile_o7b_det_{s512,s4096}.out.txt`、
+     `src/fp16/fa_bwd_fp16_main_o7b_ncu_{atomic_s4096,det_s4096,reduce_s4096}.out.txt`、
+     `src/fa_bwd_o7b_fa3_te_baseline_fp16.out.txt`；文档 `docs/01` §14o。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -1874,12 +1902,18 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 在 `-DFA_WGMMA` 构建下**默认打开**（对齐 fp8 O22），端到端 **1.08–1.43×**（MHA S4096
 > 1.9450→1.3641ms），`--wg2=0 --wg2bn=0`/`--lsewgm=0` 保留 mma 对照，纯 `sm_90` 不变；
 > 数值逐位一致，默认档墙仍是 L2 red + 1 CTA/SM。详见 `docs/01` §14n、`docs/01b` §6v。
-> **下一步（按回报）**：① **O7b**——把 dK/dV 的跨 CTA `red` 换成「CTA 局部累加 + 非原子写
-> + 二次归约」（消 L2 原子、顺带确定性反向；注意字节可能反增，需实测）；② **fp8 侧同构跨 wg
-> 归约**（fp8 是 1 字节 operand、4wg 寄存器压力小一档）；③ TMA 化 Q/K/V/dO（O15a 通路已就绪，
-> 需把 HD=128 的 K-major tile 拆成 2×K=64 chunk）。**当前真正的墙仍是 L2 red（占 ~72%，
-> BN/MB 都动不了它）+ 1 CTA/SM**，只有「跨 CTA 归约/提 occupancy」能再推进。
-> 详见 `docs/01` §14j/§14k/§14l/§14m、`docs/01b` §6s/§6t、`docs/04` §2.1/§2.2/§3。
+> **O7b 已完成（第六十四轮）——负结果 + 确定性能力**：把 dK/dV 的跨 CTA `red` 换成
+> per-(b,h,mblk) partial 覆盖写 + `dkv_reduce_kernel` 二次归约（`--det=1` opt-in）。`red`
+> 51.9M→**0**、主 kernel **1.20×**（958.6→802.0µs）、**结果逐位可复现**；但二次归约是纯 DRAM
+> 带宽 bound（90.4%、384.9µs）⇒ `main+reduce` S4096 **0.810×**（S512 1.02×）。
+> 详见 `docs/01` §14o。
+> **下一步（按回报）**：① **cluster 分布式归约**——把 dK/dV 的偏和在 SM 间 smem 内合并后再
+> 落全局（既不落 partial 大缓冲、也不做跨 CTA 原子），是 O7b 数据的直接延续；② **fp8 侧同构
+> 跨 wg 归约**（fp8 是 1 字节 operand、4wg 寄存器压力小一档；但 O19 已示 fp8 墙是 occupancy）；
+> ③ TMA 化 Q/K/V/dO（O15a 通路已就绪，需把 HD=128 的 K-major tile 拆成 2×K=64 chunk）。
+> **当前真正的墙仍是 L2 red（占 ~72%，BN/MB 都动不了它）+ 1 CTA/SM**，只有「跨 CTA 归约
+> （不落全局内存）/提 occupancy」能再推进。fp8 侧墙是 **mma 依赖延迟 + occupancy**（O19/O21）。
+> 详见 `docs/01` §14j/§14k/§14l/§14m/§14o、`docs/01b` §6s/§6t、`docs/04` §2.1/§2.2/§3。
 >
 > **O7e-3 已完成（第五十八轮）修正了 fp8 的瓶颈判断**：把 fp8 main 的 `Ps/Ss` epilogue
 > store/回读 bank conflict 从 4-way 降到 2-way（PSS 33→37），shared store 冲突 −58%、
@@ -2216,10 +2250,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       同轮否决：`--regdq=0`（main 2.136 vs 2.480ms，保留 REGDQ）、`FA_ILV`（中性偏负）、
       ksplit 重标定（维持 k=4）、`PSS` 扫描（37 近最优）。墙仍 = **mma 依赖延迟 + 3 CTA/SM**。
       详见 `docs/03` §30、`docs/04` §2.3。
-- [ ] （backlog）O7b：dK/dV 的跨 CTA 归约（分块 `*_accum` + convert）→ **确定性反向**；字节不减、
-      多一趟读回，只在需要确定性时做。**O7e 已证明 fp8 侧该 L2 墙只剩 43.7% < L1/TEX 66%**；
-      **O19/O21 又证伪 fp8 的「减 red/放大 tile」**⇒ fp8 下一步只剩「提 occupancy（168→≤128 regs +
-      72.7→≤58KB smem）或减 mma 依赖 stall」；fp16/bf16 侧见上 O17（跨 wg 归约才是真杠杆）。
+- [x] **O7b（第六十四轮）**：dK/dV 跨 CTA 归约 → **确定性反向**。fp16 `--det=1`（partial +
+      `dkv_reduce_kernel`）：`red` 51.9M→0、主 kernel 1.20×、逐位可复现，但二次归约 DRAM bound
+      ⇒ S4096 `main+reduce` 0.810×；保留 opt-in，详见 `docs/01` §14o。
+      **剩余（backlog）**：① **cluster 分布式归约**（SM 间 smem 合并偏和再落全局，免 partial 大缓冲
+      与跨 CTA 原子）；② 把确定性做成**默认**（当集群/归约成本可接受时）。
+      **O7e 已证明 fp8 侧该 L2 墙只剩 43.7% < L1/TEX 66%**；**O19/O21 又证伪 fp8 的「减 red/放大
+      tile」**⇒ fp8 下一步只剩「提 occupancy（168→≤128 regs + 72.7→≤58KB smem）或减 mma 依赖
+      stall」；fp16/bf16 侧见上 O17（跨 wg 归约才是真杠杆）。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog
