@@ -1229,7 +1229,7 @@ __global__ void delta_kernel(const float* __restrict__ o,
 //   两段各 8 个连续 m 用 8B `st.shared.v2.u32` 落盘；dS2 用 16B `st.shared.v4.u32`。
 //   `F16B=false` 退回 O7e 的「`sub4*16` 起始 + 4×4B 写」，便于同 session A/B。数值逐位不变。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true>
-__global__ void __launch_bounds__(THREADS, (HD == 128) ? 3 : 1)
+__global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8,
@@ -1258,6 +1258,13 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   // GEMM3/4/5 的输出 N 维 = head_dim；每遍处理 NTW = WN*64 = 128 列，共 HD/NTW 遍。
   constexpr int NTW = WN * 64;
   static_assert(HD % NTW == 0, "HD 必须是 128 的整数倍");
+  // O21：主 kernel 的 KV tile BN 参数化（原写死 BN=32）。4 个 warp 按 2×2 排布：
+  //   GEMM1/2 的 warp 块 = (BM/2, BN/2)；GEMM3/4 输出 M=BN（KV 行），warp 块 = (BN/2, NTW)；
+  //   GEMM5 输出 M=BM，warp 块 = (BM/2, NTW)。这里把 mma 累加器的 m/n-tile 数派生出来。
+  constexpr int MTM = (BM / 2) / 16;   // GEMM1/2 每 warp 的 m-tile 数（BM=64→2）
+  constexpr int MTN = (BN / 2) / 8;    // GEMM1/2 每 warp 的 n-tile 数（BN=32→2，BN=64→4）
+  constexpr int MTM34 = (BN / 2) / 16; // GEMM3/4 每 warp 的 m-tile 数（BN=32→1，BN=64→2）
+  constexpr int NTFOLD = BN / 32;      // fold 时每 warp 负责的 j 行份数（BN=32→1，BN=64→2）
   // O7：本实例是否把 dQ 沿 nt 累加在寄存器里（见 kernel 上方的说明）。
   constexpr bool kRegDq = REGDQ && (HD / NTW == 1);
   // O7e：`REGDQ` 的 `dqacc[2][8][4]`（64 个 fp32）把寄存器预算占满，再叠上 O3 的
@@ -1265,7 +1272,9 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   //   占 L1TEX sector 的 ~12%、Est. 27.6%）。这里在 REGDQ 生效时**关掉 O3 预取**，退回
   //   O4b 的 4B 向量化同步读（K/V 只占一小段，延迟被 5 个 GEMM 盖住），把寄存器让给 dqacc。
   //   实测（S=4096 ksplit=4）prefetch off 2.55→2.52ms；小 S（use_regdq=false）维持预取。
-  constexpr bool kPrefetch = Cfg::use_prefetch && !kRegDq;
+  // O21：BN=64 时 NPU=8（预取 32 regs），此时 kernel 用 `__launch_bounds__(...,2)`（2 CTA/SM）
+  //   寄存器预算更宽，恢复 O3 预取以盖住 K/V 全局延迟。
+  constexpr bool kPrefetch = (NPU * 4 <= (BN > 32 ? 32 : 16)) && !kRegDq;
 
   extern __shared__ __align__(16) char smem[];
   // WGMMA 的 SW128 描述符要求 tile 1024B 对齐（base_offset=0）→ 手动对齐动态 smem 基址
@@ -1494,21 +1503,21 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     {
 #if FA_FUSE_EPI
       // O20：P 留在寄存器，供 GEMM2 epilogue 直接用，免去 Ps 的 smem 回读。
-      float preg[2][2][4];
+      float preg[MTM][MTN][4];
 #endif
-      float acc[2][2][4];
+      float acc[MTM][MTN][4];
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTM; ++i)
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+        for (int j = 0; j < MTN; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block<32, 16, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
-      const int r0 = wr * 32, c0 = wc * 16;
+      mma_block<BM / 2, BN / 2, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
+      const int r0 = wr * (BM / 2), c0 = wc * (BN / 2);
 #pragma unroll
-      for (int i = 0; i < 2; ++i)
+      for (int i = 0; i < MTM; ++i)
 #pragma unroll
-        for (int j = 0; j < 2; ++j)
+        for (int j = 0; j < MTN; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) {
             int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
@@ -1532,19 +1541,19 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       //      就绪），其 epilogue 读回的 Ps[r*PSS+c] 正是**本线程**刚写入的同一地址（两次
       //      mma_block 的 (wm=wr, wn=wc) 与累加器映射完全一致），无线程间依赖。----
       {
-        float acc[2][2][4];
+        float acc[MTM][MTN][4];
 #pragma unroll
-        for (int i = 0; i < 2; ++i)
+        for (int i = 0; i < MTM; ++i)
 #pragma unroll
-          for (int j = 0; j < 2; ++j)
+          for (int j = 0; j < MTN; ++j)
 #pragma unroll
             for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-        mma_block<32, 16, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc, wr, wc, lane);
-        const int r0 = wr * 32, c0 = wc * 16;
+        mma_block<BM / 2, BN / 2, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc, wr, wc, lane);
+        const int r0 = wr * (BM / 2), c0 = wc * (BN / 2);
 #pragma unroll
-        for (int i = 0; i < 2; ++i)
+        for (int i = 0; i < MTM; ++i)
 #pragma unroll
-          for (int j = 0; j < 2; ++j)
+          for (int j = 0; j < MTN; ++j)
 #pragma unroll
             for (int q = 0; q < 4; ++q) {
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
@@ -1572,9 +1581,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     // 也逐元素一致，故数值仍与 O3 逐位相同；但这一段的墙钟缩短约 4×（Amax/写入都并行）。
     {
       // Ap[j][m]=P[m][j]*dos[m] (e4m3, per-j) 与 dS3[j][m]=dS[m][j]*qs[m] (e5m2, per-j)
+      // O21：BN 参数化——每 warp 负责 NTFOLD 份 j 行（每份 8 行），j = wid*8 + jl + jh*32。
       const int jl = lane >> 2, sub4 = lane & 3;  // 每 warp 8 行 × 4 lane 分工
-      const int j = wid * 8 + jl;
-      float amaxA = 0.f, amax3 = 0.f;
       // O7e-2：把每个 lane 负责的 16 个 m 从「一整块 `sub4*16+t`」改成「两半 `sub4*8+t+
       //   half*32`」。原因是 `Ps[m*PSS+j]` 的 bank=(m*PSS+j) mod32=(m+j) mod32（PSS=33）
       //   在原映射下 sub4=0/2、1/3 的起始 m 相差 16 ⇒ bank 恒撞（16*PSS≡16 mod32），
@@ -1582,96 +1590,109 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       //   改成起始差 8 后 4 组 lane 的 bank 恰为 {0,8,16,24}+{0..7} = 0..31 各一次 ⇒ 无冲突。
       //   amax 的 `fmaxf` 可交换结合 ⇒ 归约结果与原映射逐位相同（数值不变）。
 #pragma unroll
-      for (int half = 0; half < 2; ++half)
+      for (int jh = 0; jh < NTFOLD; ++jh) {
+        const int j = wid * 8 + jl + jh * 32;
+        float amaxA = 0.f, amax3 = 0.f;
 #pragma unroll
-        for (int t = 0; t < 8; ++t) {
-          int m = F16B ? (sub4 * 8 + t + half * 32) : (sub4 * 16 + half * 8 + t);
-          amaxA = fmaxf(amaxA, fabsf(Ps[m * PSS + j] * dos_s[m]));
-          amax3 = fmaxf(amax3, fabsf(Ss[m * PSS + j] * qs_s[m]));
+        for (int half = 0; half < 2; ++half)
+#pragma unroll
+          for (int t = 0; t < 8; ++t) {
+            int m = F16B ? (sub4 * 8 + t + half * 32) : (sub4 * 16 + half * 8 + t);
+            amaxA = fmaxf(amaxA, fabsf(Ps[m * PSS + j] * dos_s[m]));
+            amax3 = fmaxf(amax3, fabsf(Ss[m * PSS + j] * qs_s[m]));
+          }
+        amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 1));
+        amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 2));
+        amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 1));
+        amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 2));
+        float scA = (amaxA > 0.f) ? amaxA / kE4M3Max : 1.f;
+        float sc3 = (amax3 > 0.f) ? amax3 / kE5M2Max : 1.f;
+        if (sub4 == 0) {
+          sA[j] = scA;
+          sds3[j] = sc3;
         }
-      amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 1));
-      amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 2));
-      amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 1));
-      amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 2));
-      float scA = (amaxA > 0.f) ? amaxA / kE4M3Max : 1.f;
-      float sc3 = (amax3 > 0.f) ? amax3 / kE5M2Max : 1.f;
-      if (sub4 == 0) {
-        sA[j] = scA;
-        sds3[j] = sc3;
-      }
-      scA = __shfl_sync(0xffffffffu, scA, jl * 4);
-      sc3 = __shfl_sync(0xffffffffu, sc3, jl * 4);
-      // O7e：把逐 1B 的 `st.shared.u8` 折成向量写。`F16B=true` 用新映射（每 lane 两段
-      //   各 8 个连续 m）⇒ 每段一次 8B `st.shared.v2.u32`；`false` 退回原映射的 4×4B。
-      //   QTS=BM+16=80（16 与 8 的倍数）、数组基址 16B 对齐 ⇒ 合法。数值逐位不变。
-      if constexpr (F16B) {
+        scA = __shfl_sync(0xffffffffu, scA, jl * 4);
+        sc3 = __shfl_sync(0xffffffffu, sc3, jl * 4);
+        // O7e：把逐 1B 的 `st.shared.u8` 折成向量写。`F16B=true` 用新映射（每 lane 两段
+        //   各 8 个连续 m）⇒ 每段一次 8B `st.shared.v2.u32`；`false` 退回原映射的 4×4B。
+        //   QTS=BM+16=80（16 与 8 的倍数）、数组基址 16B 对齐 ⇒ 合法。数值逐位不变。
+        if constexpr (F16B) {
 #pragma unroll
-        for (int half = 0; half < 2; ++half) {
-          uint32_t pa2[2] = {0, 0}, d32[2] = {0, 0};
+          for (int half = 0; half < 2; ++half) {
+            uint32_t pa2[2] = {0, 0}, d32[2] = {0, 0};
 #pragma unroll
-          for (int t4 = 0; t4 < 2; ++t4) {
+            for (int t4 = 0; t4 < 2; ++t4) {
+#pragma unroll
+              for (int tt = 0; tt < 4; ++tt) {
+                int m = sub4 * 8 + t4 * 4 + tt + half * 32;
+                pa2[t4] |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
+                d32[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
+              }
+            }
+            *reinterpret_cast<uint2*>(Ap + j * QTS + sub4 * 8 + half * 32) =
+                make_uint2(pa2[0], pa2[1]);
+            *reinterpret_cast<uint2*>(dS3 + j * QTS + sub4 * 8 + half * 32) =
+                make_uint2(d32[0], d32[1]);
+          }
+        } else {
+          uint32_t pa4[4] = {0, 0, 0, 0}, d34[4] = {0, 0, 0, 0};
+#pragma unroll
+          for (int t4 = 0; t4 < 4; ++t4) {
 #pragma unroll
             for (int tt = 0; tt < 4; ++tt) {
-              int m = sub4 * 8 + t4 * 4 + tt + half * 32;
-              pa2[t4] |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
-              d32[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
+              int m = sub4 * 16 + t4 * 4 + tt;
+              pa4[t4] |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
+              d34[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
             }
           }
-          *reinterpret_cast<uint2*>(Ap + j * QTS + sub4 * 8 + half * 32) =
-              make_uint2(pa2[0], pa2[1]);
-          *reinterpret_cast<uint2*>(dS3 + j * QTS + sub4 * 8 + half * 32) =
-              make_uint2(d32[0], d32[1]);
-        }
-      } else {
-        uint32_t pa4[4] = {0, 0, 0, 0}, d34[4] = {0, 0, 0, 0};
 #pragma unroll
-        for (int t4 = 0; t4 < 4; ++t4) {
-#pragma unroll
-          for (int tt = 0; tt < 4; ++tt) {
-            int m = sub4 * 16 + t4 * 4 + tt;
-            pa4[t4] |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
-            d34[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
+          for (int t4 = 0; t4 < 4; ++t4) {
+            *reinterpret_cast<uint32_t*>(Ap + j * QTS + sub4 * 16 + t4 * 4) = pa4[t4];
+            *reinterpret_cast<uint32_t*>(dS3 + j * QTS + sub4 * 16 + t4 * 4) = d34[t4];
           }
-        }
-#pragma unroll
-        for (int t4 = 0; t4 < 4; ++t4) {
-          *reinterpret_cast<uint32_t*>(Ap + j * QTS + sub4 * 16 + t4 * 4) = pa4[t4];
-          *reinterpret_cast<uint32_t*>(dS3 + j * QTS + sub4 * 16 + t4 * 4) = d34[t4];
         }
       }
     }
     {
-      // dS2[m][j] = dS[m][j]*ks[j] (e5m2, per-m)：每 warp 16 行 × 2 lane 分工
+      // dS2[m][j] = dS[m][j]*ks[j] (e5m2, per-m)：每 warp 16 行 × 2 lane 分工。
+      // O21：BN 参数化——amax2 需覆盖全部 BN 个 j（NTFOLD 份，j 跨 jh*32），
+      //   dS2 的 16B 向量写每份落在 `sub2*16 + jh*32`。
       const int ml = lane >> 1, sub2 = lane & 1;
       const int m = wid * 16 + ml;
       float amax2 = 0.f;
 #pragma unroll
-      for (int t = 0; t < 16; ++t) {
-        int j = sub2 * 16 + t;
-        amax2 = fmaxf(amax2, fabsf(Ss[m * PSS + j] * ks_s[j]));
-      }
+      for (int jh = 0; jh < NTFOLD; ++jh)
+#pragma unroll
+        for (int t = 0; t < 16; ++t) {
+          int j = sub2 * 16 + t + jh * 32;
+          amax2 = fmaxf(amax2, fabsf(Ss[m * PSS + j] * ks_s[j]));
+        }
       amax2 = fmaxf(amax2, __shfl_xor_sync(0xffffffffu, amax2, 1));
       float sc2 = (amax2 > 0.f) ? amax2 / kE5M2Max : 1.f;
       if (sub2 == 0) sds2[m] = sc2;
       sc2 = __shfl_sync(0xffffffffu, sc2, ml * 2);
       // O7e：`j = sub2*16+t` 连续 ⇒ dS2[m][j] 的 16 个 j 也连续，同样折成 4 次 4B 写。
-      // O7e-2：16 个连续 j 一次 16B `st.shared.v4.u32`（DSS2=48 是 16 的倍数、基址对齐）。
-      uint32_t d2_4[4] = {0, 0, 0, 0};
+      // O7e-2：16 个连续 j 一次 16B `st.shared.v4.u32`（DSS2 是 16 的倍数、基址对齐）。
 #pragma unroll
-      for (int t4 = 0; t4 < 4; ++t4) {
-#pragma unroll
-        for (int tt = 0; tt < 4; ++tt) {
-          int j = sub2 * 16 + t4 * 4 + tt;
-          d2_4[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * ks_s[j] / sc2) << (8 * tt);
-        }
-      }
-      if constexpr (F16B) {
-        *reinterpret_cast<uint4*>(dS2 + m * DSS2 + sub2 * 16) =
-            make_uint4(d2_4[0], d2_4[1], d2_4[2], d2_4[3]);
-      } else {
+      for (int jh = 0; jh < NTFOLD; ++jh) {
+        uint32_t d2_4[4] = {0, 0, 0, 0};
 #pragma unroll
         for (int t4 = 0; t4 < 4; ++t4) {
-          *reinterpret_cast<uint32_t*>(dS2 + m * DSS2 + sub2 * 16 + t4 * 4) = d2_4[t4];
+#pragma unroll
+          for (int tt = 0; tt < 4; ++tt) {
+            int j = sub2 * 16 + t4 * 4 + tt + jh * 32;
+            d2_4[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * ks_s[j] / sc2) << (8 * tt);
+          }
+        }
+        if constexpr (F16B) {
+          *reinterpret_cast<uint4*>(dS2 + m * DSS2 + sub2 * 16 + jh * 32) =
+              make_uint4(d2_4[0], d2_4[1], d2_4[2], d2_4[3]);
+        } else {
+#pragma unroll
+          for (int t4 = 0; t4 < 4; ++t4) {
+            *reinterpret_cast<uint32_t*>(dS2 + m * DSS2 + sub2 * 16 + jh * 32 + t4 * 4) =
+                d2_4[t4];
+          }
         }
       }
     }
@@ -1686,49 +1707,57 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 
       // ---- (3) dV = Pᵀ·dO  : A=Ap[j][m] (e4m3), B=dOp[m/2][d0+..] (e5m2, ldmatrix.trans) ----
       {
-        float acc[1][8][4];
+        float acc[MTM34][8][4];
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+        for (int i = 0; i < MTM34; ++i)
 #pragma unroll
-          for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
-        mma_block_bt<16, 64, BM, E4E5>(Ap, QTS, dOp, PSLD, acc, wr, wc, lane, d0);
-        const int r0 = wr * 16, c0 = wc * 64;
+          for (int j = 0; j < 8; ++j)
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+        mma_block_bt<BN / 2, 64, BM, E4E5>(Ap, QTS, dOp, PSLD, acc, wr, wc, lane, d0);
+        const int r0 = wr * (BN / 2), c0 = wc * 64;
 #pragma unroll
-          for (int q = 0; q < 4; q += 2) {
-            // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
-            int r = r0 + g + (q >= 2 ? 8 : 0);
-            int c = c0 + j * 8 + c2;
-            int jg = j0 + r;
-            if (jg < S)
-              red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
-                       acc[0][j][q] * sA[r], acc[0][j][q + 1] * sA[r]);
-          }
+        for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+          for (int j = 0; j < 8; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; q += 2) {
+              // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
+              int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              int c = c0 + j * 8 + c2;
+              int jg = j0 + r;
+              if (jg < S)
+                red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
+                         acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r]);
+            }
       }
 
       // ---- (4) dK = scale·dSᵀ·Q : A=dS3[j][m] (e5m2), B=Qp[m/2][d0+..] (e4m3, ldmatrix.trans) ----
       {
-        float acc[1][8][4];
+        float acc[MTM34][8][4];
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+        for (int i = 0; i < MTM34; ++i)
 #pragma unroll
-          for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
-        mma_block_bt<16, 64, BM, E5E4>(dS3, QTS, Qp, PSLD, acc, wr, wc, lane, d0);
-        const int r0 = wr * 16, c0 = wc * 64;
+          for (int j = 0; j < 8; ++j)
 #pragma unroll
-        for (int j = 0; j < 8; ++j)
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+        mma_block_bt<BN / 2, 64, BM, E5E4>(dS3, QTS, Qp, PSLD, acc, wr, wc, lane, d0);
+        const int r0 = wr * (BN / 2), c0 = wc * 64;
 #pragma unroll
-          for (int q = 0; q < 4; q += 2) {
-            // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
-            int r = r0 + g + (q >= 2 ? 8 : 0);
-            int c = c0 + j * 8 + c2;
-            int jg = j0 + r;
-            if (jg < S)
-              red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
-                       acc[0][j][q] * sds3[r] * scale,
-                       acc[0][j][q + 1] * sds3[r] * scale);
-          }
+        for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+          for (int j = 0; j < 8; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; q += 2) {
+              // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
+              int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              int c = c0 + j * 8 + c2;
+              int jg = j0 + r;
+              if (jg < S)
+                red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
+                         acc[i][j][q] * sds3[r] * scale,
+                         acc[i][j][q + 1] * sds3[r] * scale);
+            }
       }
 
       // ---- (5) dQ += scale·dS·K : A=dS2[m][j] (e5m2), B=Kp[j/2][d0+..] (e4m3, ldmatrix.trans) ----

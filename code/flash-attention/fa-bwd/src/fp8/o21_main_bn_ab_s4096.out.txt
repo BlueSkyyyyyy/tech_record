@@ -1,0 +1,45 @@
+fa_bwd_fp8_main.cu(208): warning #550-D: variable "lsewgm" was set but never used
+    int lsewgm = 0;
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_main.cu(209): warning #550-D: variable "wgmma" was set but never used
+    int wgmma = 0;
+        ^
+
+fa_bwd_fp8_kernels.cuh(2160): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 447 of fa_bwd_fp8_main.cu
+
+fa_bwd_fp8_kernels.cuh(1868): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 447 of fa_bwd_fp8_main.cu
+
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 72704 bytes (71.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 70656 bytes (69.0 KB)
+grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+O19: wg2 grid = 128 x 16 x 1 (ksplit2=4, base_grid2=512)
+O7: use_regdq=1 (register dQ accumulation)
+[timing] total(quant+pre+main+cvt) 2.6903 ms  51.09 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0689 ms | preprocess 0.3955 ms | main 2.1544 ms | convert 0.0716 ms (cvt_on=0)
+[O11 A/B] lse O1 0.9390 ms | bal(单缓冲) 0.4287 ms (2.190x) | bal+cpasync 0.3443 ms (2.727x)
+[O12 A/B] main LSE/D preload off 2.3714 ms | on 2.1272 ms (1.115x) | max_abs(on-vs-off) dq=5.312e-04
+[O7e-2 A/B] main fold 4B 2.2224 ms | 16B 2.1295 ms (1.044x) | max_abs(16B-vs-4B) dq/dk/dv=1.192e-07/4.768e-07/4.768e-07
+[O14 A/B] quant old(per-row) 0.1846 ms | new(warp-per-row) 0.0688 ms (2.684x) | bitwise mismatch=0
+[O19 A/B] main mma(BM64,grid=256) 2.2141 ms | wg2(BM128,grid=128) 2.9135 ms (0.760x) | max_abs(wg2-vs-mma) dq/dk/dv=1.192e-07/8.858e-02/4.308e-02
+[O21 A/B] main BN=32 2.2036 ms | BN=64 2.6852 ms (0.821x) | max_abs(BN64-vs-BN32) dq/dk/dv=5.900e-02/1.192e-06/9.537e-07
+[O21b A/B] end2end 保留convert 2.7578 ms | 直写输出(消convert) 2.6332 ms (1.0473x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.393e+02
+  dk   vs ref: max_abs=2.643e-01  max_rel=8.541e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.233e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=4.525e-01  max_rel=1.054e+02
+  dk   vs te_dk: max_abs=5.324e-01  max_rel=1.158e+02
+  dv   vs te_dv: max_abs=6.807e-01  max_rel=1.077e+02

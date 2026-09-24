@@ -2490,3 +2490,112 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --launch-count 1 \
 `src/fp8/o20_ncu_fuse0_s4096.out.txt` / `o20_ncu_fuse1_s4096.out.txt`（`--set full`）、
 `src/fp8/o20_onefile_s4096.out.txt`、`src/fp8/o20_tebench_fp8.out.txt`、
 `src/fp8/o20_fa3_te_baseline_fp16.out.txt`。
+
+---
+
+## 29. O21：fp8 主 kernel KV tile BN=32→64（负结果）+ O21b：消冗余 fp32→fp32 convert（端到端 1.037×）
+
+### 29.1 动机
+
+O18 把 fp16/bf16 `wgmma2` 的 KV-tile 从 BN=64 翻到 128，每 CTA 的 tile 数减半 ⇒ `__syncthreads` /
+`cp.async.wait` / wgmma commit-wait 序列减半，main +2.9%。fp8 mma 路径主 kernel 仍是 **BN=32**
+（tile 数最多），且 O7e-3/O19 判定其墙是「**mma 依赖延迟（`wait`）+ occupancy**」。于是把同一个
+「**翻倍 KV-tile 以减半串行相位**」的假设搬到 fp8 mma 路径上验证：BN=32→64。
+
+顺带清理端到端：fp8 的 dQ/dK/dV 输出本就是 **fp32**，与 fp32 累加缓冲同 dtype，`convert_kernel`
+只是一趟纯 fp32→fp32 拷贝（O14b 已向量化但依然多一遍读写），可让 main 的 `atomicAdd` 直接累加进
+输出、彻底消掉这一趟（记为 **O21b**）。
+
+### 29.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+**O21（BN 参数化）**：主 kernel 原来把 4-warp 几何写死成 BN=32（`mma_block<32,16,…>`、
+fold 的 `j=wid*8+jl`、dS2 的 32 个 j 等）。改为按 `(BM,BN)` 派生：
+
+- `MTM=(BM/2)/16`、`MTN=(BN/2)/8`（GEMM1/2 warp 块 = `BM/2 × BN/2`）；
+  `MTM34=(BN/2)/16`（GEMM3/4 输出 M=BN，warp 块 = `BN/2 × NTW`）；`NTFOLD=BN/32`（fold 份数）。
+- GEMM1/2：累加器 `[MTM][MTN][4]`、`preg[MTM][MTN][4]`，`mma_block<BM/2,BN/2,…>`，
+  `r0=wr*(BM/2)`、`c0=wc*(BN/2)`。
+- GEMM3/4：累加器 `[MTM34][8][4]`、`mma_block_bt<BN/2,64,BM,…>`、`r0=wr*(BN/2)`。
+- fold Ap/dS3：`for jh<NTFOLD: j = wid*8 + jl + jh*32`（每 warp 覆盖 `NTFOLD` 份 j 行）。
+- fold dS2：amax 跨 `NTFOLD` 份累计（per-m 的 rowwise scale 覆盖全部 BN 个 K），16B 向量写落在
+  `sub2*16 + jh*32`。
+- `Fp8Cfg`：`NPU=(BN/2)*(HD/4)/THREADS`（BN=64→8），预取开关放宽到 `NPU*4<=32`；
+  `__launch_bounds__(128, BN<=32?3:2)`。
+
+**O21b（消 convert）**：host 里把 `d_dq_acc/d_dk_acc/d_dv_acc` 指针**别名**到 `d_dq/d_dk/d_dv`
+（free 掉独立缓冲），main 直接对输出做 `atomicAdd`；`run_all` 里 `if (cvt_on) convert_kernel(...)`，
+默认 `cvt_on=0` 不跑 convert。`--cvt=1` 恢复旧行为（自拷贝）供 A/B。
+
+### 29.3 数值
+
+O21：BN=64 与 BN=32 的 **dk/dv 逐位一致**（dk/dv `max_abs` ≤ 9.5e-7，S=4096；GQA ≤ 3.8e-6），
+**dq 有 ~6e-2 的差**——根因是 dS2 的 rowwise scale 是 **per-m 沿 K(BN) 求 amax**，BN 从 32 变到 64
+会改变该 scale 的量化粒度（dS2 的量化值本身变了），属预期、非 bug；dq vs ref 仍与历史同量级
+（S=4096：2.635e-1 / 2.643e-1 / 3.216e-1，逐位不变）。
+
+O21b：输出与旧路径**逐位相同**（convert 是纯拷贝）；S=4096 ours vs ref dq/dk/dv =
+2.635e-1 / 2.643e-1 / 3.216e-1（与 O20 历史逐位一致）。
+
+### 29.4 性能（CUDA event；同 session A/B）
+
+**O21（main-only）**：
+
+| shape | BN=32 | BN=64 | 比 |
+|---|---|---|---|
+| S512 H16 | 0.0754 ms | 0.0837 ms | **0.900×** |
+| S1024 H32 | 0.4090 ms | 0.4447 ms | **0.920×** |
+| S1024 H32 kv4 (GQA) | 0.3828 ms | 0.4160 ms | **0.920×** |
+| S4096 H16 | 2.2061 ms | 2.7033 ms | **0.816×** |
+
+**O21b（end2end，同 session）**：S4096 保留 convert 2.7469 → **直写输出 2.6497 ms（1.0367×）**；
+单文件 2.7562 → 2.6340 ms（1.0464×）；S1024H32 kv4 0.5349 → 0.5161 ms（1.0365×）。
+S4096 端到端 **2.65 ms / 52.2 TF**（FA3 fp16 848TF 的 6.2%；TE FP8 0.5909ms/465TF ⇒ ours 仍 **4.5×**
+于 TE FP8，O20 时 4.7×）。
+
+### 29.5 ncu（main，S=4096，同 session，`--set full -c 1`）
+
+| 指标 | BN=32 | BN=64 | 说明 |
+|---|---|---|---|
+| Duration | 2.19 ms | 2.74 ms | 慢 25% |
+| regs/thread | 168 | **255** | launch_bounds(…,2) 让 ptxas 用满 |
+| smem/block | 72.70 KB | **105.22 KB** | Ks/Vs/Ps/Ss/Kp/dS2 全变宽 |
+| Block Limit（reg/smem） | 3 / 3 | **2 / 2** | — |
+| Achieved occupancy | **18.05%**（12 warp/SM） | **12.28%**（8 warp/SM） | 主因 |
+| L1/TEX / L2 / Compute | 55.07 / 51.29 / 43.64% | 39.77 / 40.96 / 31.55% | 全线下移 |
+| Warp Cycles/Issued | 6.19 | 5.92 | 单 warp 略好，但 warp 数少 |
+
+### 29.6 结论
+
+**O21 负结果**：fp8 mma 路径翻倍 KV-tile 虽把每 CTA 的串行 tile 相位砍半（`Warp Cycles/Issued`
+6.19→5.92），但 smem 72.7→105.2KB、regs 168→255 把 occupancy 从 **3→2 CTA/SM（12→8 warp/SM）**；
+本 kernel 是**延迟受限**（O19/O20 已判），少掉 1/3 的在飞 warp 比省下的相位更贵 ⇒ 全线 0.82–0.92×。
+这与 fp16 O18（从 1 CTA/SM 出发、翻倍后仍 1 CTA/SM）相反：**fp8 已经在 3 CTA/SM，翻倍 tile 必掉
+occupancy**，所以此路对 fp8 不成立。**再次确认 fp8 main 的唯一真杠杆是「提 occupancy」**（需
+168→≤128 regs 且 72.7→≤58KB smem 才 4 CTA/SM）或「减 mma 依赖 stall」；「放大 tile / 减 red」对
+fp8 无效（O19+O21 双重证伪）。
+
+**O21b 正结果**：消掉冗余 convert 是**零风险、纯收益**——main 直接累加进 fp32 输出，端到端
+**1.037×**（S4096 2.75→2.65ms），数值逐位不变。已设为 fp8 两文件/单文件的默认路径。
+
+### 29.7 复现
+
+```bash
+# O21 A/B：程序内对 BN=32/64 同 session 计时 + 对拍（默认 BN=32）
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=30
+# O21b：默认 cvt_on=0（消 convert）；--cvt=1 恢复旧路径
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --cvt=1
+# 单文件（device 由 sync_onefile_device.py 同步，逐字一致）
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# ncu（BN=32 / BN=64）
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full -c 1 --kernel-name regex:fa_bwd_fp8_mma_kernel \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=5
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full -c 1 --kernel-name regex:fa_bwd_fp8_mma_kernel \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=5 --bn64
+```
+
+原始输出：`src/fp8/o21_main_bn_ab_s4096.out.txt`、`src/fp8/o21_main_bn_ab_gqa_kv4.out.txt`、
+`src/fp8/o21_onefile_s4096.out.txt`、`src/fp8/o21_ncu_bn32_s4096.out.txt`、
+`src/fp8/o21_ncu_bn64_s4096.out.txt`。

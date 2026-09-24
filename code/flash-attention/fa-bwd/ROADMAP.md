@@ -1834,6 +1834,18 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > **S4096 main 1.026×**、S1024H32 1.015×、kv8 1.017×，小 S/MLA 中性。墙仍是 `wait`+3 CTA/SM，
 > 详见 `docs/03` §28。**fp8 若还要再上台阶，仍须解 occupancy 或做跨-tile 软流水**
 > （K/V 单缓冲被 dS3/Ap 复用，跨-tile 重叠需先给 K/V 双缓冲腾 smem）。
+> **O21 已完成（第六十一轮）——BN=64 负结果 + O21b 正结果**：① 先验证 fp16 O18 的「翻倍 KV-tile
+> 减半串行相位」假设在 fp8 mma 路径是否成立：把主 kernel 的 BN 从 32 参数化到 64（GEMM1/2/3/4
+> warp 块与 fold 的 j 覆盖全部由 `(BM,BN)` 派生；单/两文件 device 逐字一致）。**结果负**：
+> S512 0.900×、S1024H32 0.920×、GQA kv4 0.920×、S4096 **0.816×**。ncu（S4096 同 session）：
+> BN=32→64 把 regs 168→255、smem 72.70→**105.22KB**、occupancy **3→2 CTA/SM（18.05→12.28%）**；
+> 虽 `Warp Cycles/Issued` 6.19→5.92（相位减半生效），但延迟受限 kernel 少 1/3 在飞 warp 更亏。
+> ⇒ **fp16 O18 成立的前提是它从 1 CTA/SM 出发；fp8 已在 3 CTA/SM，翻倍 tile 必掉 occupancy**，
+> 此路对 fp8 不成立（与 O19 一起双重证伪「放大 tile/减 red」）。② **O21b**：fp8 的 dQ/dK/dV 输出
+> 本是 fp32、与累加缓冲同 dtype，`convert_kernel` 只是一趟纯拷贝 ⇒ 把 acc 指针别名到输出、main
+> 直接 `atomicAdd`，消掉 convert。**端到端 S4096 2.7469→2.6497ms（1.037×）**、单文件 1.046×、
+> GQA 1.037×，**数值逐位不变**；已设为默认路径（`--cvt=1` 供 A/B）。S4096 端到端 **2.65ms/52.2TF**、
+> 为 TE FP8（0.5909ms/465TF）的 **4.5×**（O20 4.7×）。详见 `docs/03` §29。
 > 1. **O5 收尾**：fp16/bf16 反向用 `mma.m16n8k16`+`ldmatrix` 张量核后端。
 >    进度：fp16 主 kernel **2.28→0.19 ms（512）/ 67.6→4.55 ms（4096），11.8–14.9×**；
 >    **bf16 主 kernel 1.88→0.190 ms（512）/ 42.2→4.51 ms（4096），9.4–9.9×**（第二十七轮，单/两文件、
@@ -2114,10 +2126,17 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
        host `--wg2bn`；单/两文件 device 逐字一致）。**main MHA S4096 1.025–1.029×（143.8 TF）/
        S512 1.030×**，GQA/MQA 中性；数值与 O5b~O17 历史逐位一致；ncu Duration 982.2→**952.5µs**、
        **`red` 51,904,512 逐字节不变**、regs 200→255 / smem 148.5→230.4KB / occ 12.5%（1 CTA/SM）。
-       端到端 S4096 **1.381ms（99.5 TF，FA3 的 4.30×）**。详见 `docs/01b` §6u、`docs/04` §2.2/§3。
+        端到端 S4096 **1.381ms（99.5 TF，FA3 的 4.30×）**。详见 `docs/01b` §6u、`docs/04` §2.2/§3。
+- [x] **O21（第六十一轮）fp8 主 kernel BN=32→64（负结果）+ 消冗余 convert（O21b，正结果）**。
+      BN 全参数化（单/两文件 device 逐字一致）：**S512 0.900×、S1024H32 0.920×、GQA 0.920×、
+      S4096 0.816×**；ncu 证实 regs 168→255、smem 72.7→105.2KB、occ 3→2 CTA/SM ⇒ 延迟受限下
+      少 1/3 在飞 warp 更亏（与 O19 一起证伪 fp8 的「放大 tile/减 red」）。O21b 把 acc 别名到 fp32
+      输出、消掉纯 fp32→fp32 的 `convert_kernel`：端到端 **S4096 1.037× / 单文件 1.046× / GQA 1.037×**，
+      **数值逐位不变**，已设为默认。详见 `docs/03` §29。
 - [ ] （backlog）O7b：dK/dV 的跨 CTA 归约（分块 `*_accum` + convert）→ **确定性反向**；字节不减、
       多一趟读回，只在需要确定性时做。**O7e 已证明 fp8 侧该 L2 墙只剩 43.7% < L1/TEX 66%**；
-      fp16/bf16 侧见上 O17（跨 wg 归约才是真杠杆）。
+      **O19/O21 又证伪 fp8 的「减 red/放大 tile」**⇒ fp8 下一步只剩「提 occupancy（168→≤128 regs +
+      72.7→≤58KB smem）或减 mma 依赖 stall」；fp16/bf16 侧见上 O17（跨 wg 归约才是真杠杆）。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog
