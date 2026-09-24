@@ -2816,6 +2816,86 @@ ARCH="" ... scripts/run.sh src/fp16/fa_bwd_fp16_mma_onefile.cu --dir=... --lsesp
 `..._o39_ncu_lse_split{1,8}_s1024h2.out.txt`、`src/fp16/fa_bwd_fp16_mma_onefile_o39_*`、
 `..._o39_varlen_*`。
 
+## 14w. O40-fp16：非 TMA wgmma LSE 的 K 维 split + varlen 接入（第八十七轮）—— **正结果，默认 auto**
+
+### 14w.1 动机
+
+O38-fp16（§14u）把 split 做进 **D=128 的 TMA LSE**，O39-fp16（§14v）做进 **mma 版 LSE**
+（D=512 MLA）。但 **非 TMA 的 wgmma 版 `lse_mma_kernel_bal_wgmma`**（O9a/O9b）从未有 split，
+而它是：① 定长 D=128/causal 的 `--lsetma=0` 回退（S512 grid=64、Waves 0.12、occ 6.25%）；
+② **VARLEN D=128/causal 的默认 LSE**（`run_varlen` 直接 launch wgmma 版）。O40 把 O39 的切片
++ merge 机制移植到它，并把 split 接进 `run_varlen`（含 D=512 的 mma LSE）。fp8 同轮见
+`docs/03` §43。
+
+### 14w.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+- `lse_mma_kernel_bal_wgmma<HD,PIPE>` 加尾部默认参数 `float* lse_part = nullptr, int ksplit = 1`；
+  `b = blockIdx.z/ksplit`、`ksp = blockIdx.z%ksplit`；每 `(pair,ksp)` 只扫本 m 块 K tile 的连续切片
+  `[nt0,nt1)`，流水 stage 用切片内相对下标 `rnt&1`；`ksplit==1` **逐位退化为 O9b 原路径**。
+- 部分 `(m,l)` 写 `lse_part[(row*ksplit+ksp)*2+{0,1}]`，由 `lse_split_merge_kernel`（O38 已有）
+  合并。**varlen 的 merge 行数是 `T*H`**（`d_lse` 只分配 `T*H`），故 host 加 `merge_rows` 参数。
+- `run_varlen` 加 `--lsesplit=N`（0=auto）：D=128 目标 `grid*split≈528`（= 4 CTA/SM × 132 = 一个波）、
+  D=512 `≈132`，上限 8/16，再按最大序列 `nblk` 封顶；D=128 causal 走 wgmma 版、D=512 causal 走
+  O39 的 mma 版；各新增 `d_lse_part`（`T*H*16*2` fp32）缓冲。定长 `--lsetma=0` 回退路径接入
+  `lse_split_eff`（沿用 O38 的 auto）。单文件 host 同步。
+
+### 14w.3 数值（ours-vs-ref，fp16 causal，max_abs）
+
+| case | dq | dk | dv | max_abs(split vs split1) |
+|---|---|---|---|---|
+| MHA S512 H16（定长 `--lsetma=0`） | 1.671e-3 | 1.771e-3 | 1.899e-3 | 0（auto=8） |
+| varlen b4_t3840_h16 D128 | 3.163e-3 | 2.158e-3 | 1.966e-3 | 0（auto=1） |
+| varlen b4_t4096_h16 D128 | — | — | — | 0（auto=1） |
+| varlen b1_t512_h2 D512 | 1.303e-3 | 1.537e-3 | 1.557e-3 | 0（auto=8） |
+| varlen b3_t1792_h2 D512 | 2.415e-3 | 1.834e-3 | 1.856e-3 | 0（auto=4） |
+
+全形状与 O5–O39 历史**逐位一致到打印精度**；`max_abs(split vs split1)=0`。单/两文件逐指标一致；
+D=128 MHA/GQA 默认 TMA 路径回归不受影响（S512 1.671/1.771/1.899e-3、D512 1.987/1.712/1.848e-3）。
+
+### 14w.4 性能（CUDA event；same-session `--lsesplit=1` vs auto）
+
+| case | split1 | auto | 倍数 |
+|---|---|---|---|
+| MHA S512（定长 `--lsetma=0`，preprocess） | 0.0364 ms | **0.0211 ms** | **1.73×** |
+| MHA S512（端到端 total） | 0.1011 ms | **0.0847 ms** | **1.19×** |
+| varlen b1_t512_h2 D512（total） | 0.4098 ms | **0.3737 ms** | **1.10×** |
+| varlen b3_t1792_h2 D512（total） | 0.9112 ms | **0.8607 ms** | **1.06×** |
+
+fp16 的 D=128 varlen case（b4_t3840 / b4_t4096 / b5_t3968 / b8_t2904）base 已 ≥ 目标 528，auto=1、
+**中性**（与大 S 的 D=128 TMA 一致）；D=512 的 MLA varlen（base=8/48，严重 under-filled）受益
+1.06–1.10×。单文件 total 同量级（S512 0.0857 vs 两文件 0.0847）。
+
+### 14w.5 ncu（LSE `lse_mma_kernel_bal_wgmma`，`--launch-count 1`，定长 S512）
+
+| | split1 | split8 |
+|---|---|---|
+| Duration | 33.66 µs | **14.85 µs** |
+| Waves Per SM | 0.12 | **0.97** |
+| Achieved Occupancy | 6.25% | **19.27%** |
+| Compute (SM) | 9.32% | **36.67%** |
+| Memory Throughput | 3.85% | 18.10% |
+| No Eligible | 79.1% | 48.6% |
+
+**墙 = 网格不足一个波**（Waves 0.12）；split 填满一波后回到 LSE 固有 `mma wait` + smem 依赖。
+
+### 14w.6 复现 / 原始输出
+
+```bash
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16 --lsetma=0 --lsesplit=0
+ARCH="" ... scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu --varlen \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp16 --lsesplit=0
+ARCH="" ... scripts/ncu.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --kernel-name regex:lse_mma_kernel_bal_wgmma --launch-count 1 --set full -- --lsetma=0 --lsesplit=8
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_mma_main_o40_fixed_s512_split{1,0}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o40_varlen_{b1_t512_h2_d512,b3_t1792_h2_d512,b4_t3840_h16_d128,
+b4_t4096_h16_d128}_split{1,0}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o40_ncu_lse_wgmma_split{1,8}_s512.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o40_fixed_s512_auto.out.txt`。
+
 ## 16. VARLEN：fp16 反向支持变长 / `cu_seqlens`（单/两文件）
 
 > O37 之后 ROADMAP「可选·变长」的 fp16 补全（fp8 已在第 77 轮完成，`docs/03` §37）。

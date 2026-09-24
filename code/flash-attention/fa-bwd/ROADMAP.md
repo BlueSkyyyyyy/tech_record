@@ -160,7 +160,9 @@
   **varlen TMA 化已于第八十三轮判决为中性/偏负**（fp16，`docs/01` §16.10）；
   **剩余：MLA 降 smem（1 CTA/SM）、LSE 的 K 维 split** 留后续。**「按 `cu_seqlens` 的均衡分块」
   已于第八十二轮判决为负结果**（紧凑网格不省时间、反而 −3.4%；死 CTA 免费，墙在 L1/L2 吞吐 +
-  低 occupancy；见 `docs/03` §40），新的 varlen 杠杆是 **LSE 的 K 维 split + 二次归约**。
+  低 occupancy；见 `docs/03` §40），新的 varlen 杠杆是 **LSE 的 K 维 split + 二次归约**
+  （**O40 第八十七轮已完成**：三 dtype 的 varlen LSE 接入 split，fp8 b1_t512_h16 1.17×、
+  D512 varlen 最多 1.39×；见 `docs/03` §43）。
 
 ## 每项的 Definition of Done
 
@@ -2421,6 +2423,44 @@
     `..._o39_varlen_*`（varlen MLA 回归）；文档 `docs/03` §42、`docs/01` §14v、`docs/01b` §6ad、
     `docs/04` §15。
 
+- 2026-09-25（第八十七轮）：**O40 完成（把 LSE 的 K 维 split 移植到非 TMA 的 wgmma LSE
+  `lse_mma_kernel_bal_wgmma`，并把 split 接进 varlen；三 dtype 单/两文件；正结果，默认 auto）**。
+  - 动机：O38/O39 覆盖了 TMA LSE（D=128）与 mma LSE（D=512），但 **非 TMA wgmma LSE** 从未有
+    split，而它正是 ① 定长 D=128/causal 的 `--lsetma=0` 回退（S512 grid=64、ncu Waves 0.07 /
+    occ 6.25% / Compute 8.2%）；② **VARLEN D=128/causal 的默认 LSE**（`run_varlen` 直接 launch）。
+    「下一步候选 ①」的「非 TMA wgmma LSE 与 varlen LSE 的 split」即本项。
+  - **改动**（三 dtype 单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+    `lse_mma_kernel_bal_wgmma` 加尾部 `float* lse_part, int ksplit`（`b=blockIdx.z/ksplit`、
+    每 CTA 扫 K tile 切片 `[nt0,nt1)`、stage 用切片内相对下标 `rnt&1`、`ksplit==1` 逐位退化为
+    O9b）；host `launch_lse_bal_wgmma`/`launch_lse_bal` 加 `lse_part/ksplit/merge_rows`；
+    **`run_varlen` 加 `--lsesplit=N`（0=auto）**：D=128 目标 `grid*split≈2048`（定长）/
+    `≈528`（varlen，一个波）、D=512 `≈256`（fp8）/`≈132`（fp16/bf16），按 `nblk` 封顶；D=128
+    causal 走 wgmma 版、D=512 causal 走 O39 的 mma 版，**merge 行数用 packed 的 `T*H`**
+    （`d_lse` 只分配 `T*H`，不能沿用 `B*S*H`）；各新增 `d_lse_part` 缓冲。顺带**修单文件 bug**：
+    单文件 `--lsetma=0` 时 `qmap_lse/kmap_lse` 未初始化却被 O32 A/B 段使用 ⇒ `illegal
+    instruction`；描述符构建条件改回与两文件一致的 `if (D == 128)`。
+  - **数值**：全 shape 与历史**逐位一致**（定长 fp8 2.426/2.972/3.733e-1、fp16
+    1.671/1.771/1.899e-3、bf16 9.001/12.61/13.65e-3；varlen fp8 b1_t512_h16 2.280e-1/3.108e-1/
+    3.422e-1、b1_t512_h2 D512 1.613e-1/2.238e-1/3.864e-1；fp16/bf16 D512 varlen 同 dtype 噪声）；
+    `max_abs(split-auto vs split1)=0`；D=128 MHA/GQA 默认 TMA 路径回归不变。
+  - **性能**（同 session `--lsesplit=1` vs auto，event）：**定长 `--lsetma=0` preprocess**
+    fp8 S512 0.0367→**0.0207ms（1.77×）**、S4096 0.2958→0.2673（1.11×）；fp16 0.0364→**0.0211
+    （1.73×）**；bf16 0.0368→**0.0215（1.71×）**。**端到端 total** fp8 S512 0.1205→**0.1054
+    （1.14×）**、fp16 0.1011→**0.0847（1.19×）**、bf16 0.1015→**0.0861（1.18×）**。
+    **VARLEN**：fp8 b1_t512_h16 0.1255→**0.1072（1.17×，auto=8）**、b4_t3840_h16 0.9646→
+    **0.9285（1.04×，auto=2）**、**b1_t512_h2 D512 0.1954→0.1401（1.39×）**、b3_t1792_h2 D512
+    0.6067→0.4979（1.22×）；fp16/bf16 的 D512 varlen 1.05–1.10×；D=128 varlen（base≥528）auto=1
+    中性（不回归）。
+  - **ncu**（LSE `lse_mma_kernel_bal_wgmma`，S512，同 binary）：fp8 split1 Duration 37.22µs /
+    Waves 0.07 / occ 6.25% / Compute 8.21% → split8 **14.56µs / Waves 0.55 / occ 20.26% /
+    Compute 33.32%**；fp16 33.66→14.85µs、bf16 33.50→14.91µs（Waves 0.12→0.97、occ
+    6.25%→19.27%）。**墙 = 网格不足一个波；split 填满后回到 LSE 固有的 `mma wait` + smem 依赖**。
+  - 原始输出 `src/fp8/fa_bwd_fp8_main_o40_fixed_s{512,4096}_split{1,0}.out.txt`、
+    `src/fp8/fa_bwd_fp8_main_o40_varlen_*`（7 varlen case ×2）、
+    `..._o40_ncu_lse_wgmma_split{1,8}_s512.out.txt`、`src/fp8/fa_bwd_fp8_mma_onefile_o40_*`；
+    `src/fp16/`、`src/bf16/` 同构文件（`..._o40_*`）；文档 `docs/03` §43、`docs/01` §14w、
+    `docs/01b` §6ae、`docs/04` §16。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -2553,7 +2593,28 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第八十六轮）**：**O39——把 LSE 的 K 维 split 移植到 mma 版 `lse_mma_kernel_bal`
+> **最新（第八十七轮）**：**O40——把 LSE 的 K 维 split 移植到非 TMA 的 wgmma LSE
+> `lse_mma_kernel_bal_wgmma`，并把 split 接进 varlen（三 dtype 单/两文件；正结果，默认 auto）**。
+> 补上 O38/O39 未覆盖的最后一条 LSE：非 TMA wgmma 版（定长 `--lsetma=0` 回退 + **varlen
+> D=128/causal 的默认 LSE**）。`lse_mma_kernel_bal_wgmma` 加 `lse_part/ksplit`（切片 `[nt0,nt1)`、
+> stage 用 `rnt&1`、`ksplit==1` 逐位退化）；`launch_lse_bal{,_wgmma}` 加 `merge_rows`；
+> **`run_varlen` 加 `--lsesplit=N`（0=auto）**，D=128 走 wgmma 版、D=512 走 O39 的 mma 版，
+> **merge 行数用 packed `T*H`**；各加 `d_lse_part`。顺带修单文件 `--lsetma=0` 未初始化 tensormap
+> 的 `illegal instruction`。**定长 preprocess fp8 S512 1.77× / fp16 1.73× / bf16 1.71×**、
+> 端到端 1.14–1.19×；**varlen** fp8 b1_t512_h16 1.17×、b1_t512_h2 D512 **1.39×**、b3 1.22×，
+> fp16/bf16 D512 1.05–1.10×，D=128（base≥528）中性。ncu：Waves 0.07→0.55、occ 6.25%→20.3%、
+> Compute 8.2%→33.3%，墙从「网格不足」回到 `mma wait` + smem 依赖。数值与历史**逐位一致**。
+> 详见 `docs/03` §43、`docs/01` §14w、`docs/01b` §6ae、`docs/04` §16。
+> **下一步候选**（按回报）：① **回到 fp8 主 kernel 的 K/V TMA**——fp8 一行 128B = 一个 SW128
+> atom 整行，K/V 的无转置副本比 fp16/bf16 简单，但需先腾 ~10KB smem 以放双缓冲（O37 留的坑）；
+> ② **MLA 降 smem 冲 2 CTA/SM**（主 kernel ~202KB smem、1 CTA/SM 是四 dtype 共同墙；dQ 缓冲 /
+> Kt/Qt/dOt 转置副本是抓手）；③ **fp16/bf16 的 `L2 red`**（三条消 red 路已证伪，转 TMA/软流水）；
+> ④ **varlen 主 kernel 的 K 维 split**（本轮只做了 LSE；主 kernel 的 `(b,mblk)` 网格在短序列时
+> 也可切 K，但第八十二轮已判「紧凑网格」负，需另找形态）。
+> **已知（非本轮引入）**：fp8 `fa_bwd_fp8_main.cu` 的 varlen 路径无条件调 `launch_lse_bal_wgmma`，
+> 故纯 `sm_90`（无 `-DFA_WGMMA`）构建 fp8 main 失败（fp16/bf16 的 sm_90 构建正常）。
+>
+> **（第八十六轮）**：**O39——把 LSE 的 K 维 split 移植到 mma 版 `lse_mma_kernel_bal`
 > （从而覆盖 MLA（D=512）反向，三 dtype 单/两文件；正结果，默认 auto）**。`lse_mma_kernel_bal`
 > 加 `lse_part/ksplit`（`grid.z=B*ksplit`、每 CTA 只扫 K tile 切片 `[nt0,nt1)`、stage 用切片内
 > 相对下标 `rnt&1`、`ksplit==1` 逐位退化）、`lse_split_merge_kernel` 移出 TMA 守卫；host

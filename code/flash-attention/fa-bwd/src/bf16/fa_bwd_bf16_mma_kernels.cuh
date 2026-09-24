@@ -661,7 +661,8 @@ template <int HD, int PIPE>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal_wgmma(const bf16* __restrict__ q, const bf16* __restrict__ k,
                          float* __restrict__ lse, int S, int H, int Hkv, float scale,
-                         const int* __restrict__ cu_seqlens = nullptr) {
+                         const int* __restrict__ cu_seqlens = nullptr,
+                         float* __restrict__ lse_part = nullptr, int ksplit = 1) {
   static_assert(HD == 128, "wgmma LSE 目前只做 HD=128");
   constexpr int HDV = HD / 8;
   constexpr int TILE = (LBM / 8) * (HD / 64) * 1024;  // 单个 SW128 tile 字节数（HD=128→16KB）
@@ -671,7 +672,10 @@ lse_mma_kernel_bal_wgmma(const bf16* __restrict__ q, const bf16* __restrict__ k,
   char* Qs = smem_raw + pad;
   char* Ks = Qs + TILE;  // PIPE=1：2*TILE；PIPE=0：TILE
 
-  const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // O40：K 维 split（对齐 O38/O39/O40-fp8）。`ksplit>1` 时每个 (pair,mblk) 只扫本 m 块 K
+  //   范围的第 `ksp` 个连续 tile 切片，部分 (m,l) 写 `lse_part`，由 `lse_split_merge_kernel` 汇总。
+  const int pair = blockIdx.x, h = blockIdx.y;
+  const int b = blockIdx.z / ksplit, ksp = blockIdx.z % ksplit;
   const int hkv = h / (H / Hkv);
   // VARLEN：cu_seqlens 给本序列 token 基址与长度；nullptr 退化为定长 b*S/S。
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
@@ -726,18 +730,23 @@ lse_mma_kernel_bal_wgmma(const bf16* __restrict__ q, const bf16* __restrict__ k,
     issue_q(Qs, m0);
     const int ncols = min(len, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
+    // O40：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
+    const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
+    const int nt1 = (int)(((long)ntiles * (ksp + 1)) / ksplit);
+    const int nuse = nt1 - nt0;
     if constexpr (PIPE) {
-      if (ntiles > 0) issue_k(Ks, 0);
+      if (nuse > 0) issue_k(Ks, nt0 * LBN);
     }
 
     float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
-    for (int nt = 0; nt < ntiles; ++nt) {
+    for (int rnt = 0; rnt < nuse; ++rnt) {
+      const int nt = nt0 + rnt;
       const int j0 = nt * LBN;
-      char* Kt = Ks + (PIPE ? (nt & 1) * TILE : 0);
+      char* Kt = Ks + (PIPE ? (rnt & 1) * TILE : 0);
       if constexpr (PIPE) {
         asm volatile("cp.async.wait_group 0;\n");
         __syncthreads();
-        if (nt + 1 < ntiles) issue_k(Ks + ((nt + 1) & 1) * TILE, j0 + LBN);
+        if (rnt + 1 < nuse) issue_k(Ks + ((rnt + 1) & 1) * TILE, j0 + LBN);
       } else {
         issue_k(Ks, j0);
         __syncthreads();
@@ -779,7 +788,15 @@ lse_mma_kernel_bal_wgmma(const bf16* __restrict__ q, const bf16* __restrict__ k,
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < len) lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
+        if (qi < len) {
+          if (ksplit == 1) {
+            lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
+          } else {
+            size_t row = ((size_t)(qbase + qi)) * H + h;
+            lse_part[(row * ksplit + ksp) * 2 + 0] = m;
+            lse_part[(row * ksplit + ksp) * 2 + 1] = l;
+          }
+        }
       }
     }
     __syncthreads();

@@ -1672,6 +1672,43 @@ split8 Waves 0.97、Duration 4.2×，墙 = 并行度 → 1 CTA/SM 的 `mma wait`
 `..._o39_split1_*`、`..._o39_reg_*`、`..._o39_mmafallback_s512.out.txt`、
 `src/bf16/fa_bwd_bf16_mma_onefile_o39_*`、`..._o39_varlen_*`。
 
+## 6ae. O40-bf16：非 TMA wgmma LSE 的 K 维 split + varlen 接入（第八十七轮）—— **正结果，默认 auto**
+
+把 O40-fp16（`docs/01` §14w）逐字 dtype 参数化到 bf16：`lse_mma_kernel_bal_wgmma<HD,PIPE>` 加
+`float* lse_part,int ksplit`（`b=blockIdx.z/ksplit`、每 `(pair,ksp)` 只扫本 m 块 K tile 切片
+`[nt0,nt1)`、stage 用相对下标 `rnt&1`、`ksplit==1` 逐位退回 O9a/O9b）；`run_varlen` 加
+`--lsesplit=N`（0=auto：D=128 目标 `grid*split≈528`（= 一个波）、D=512 `≈132`，上限 8/16，
+按最大序列 `nblk` 封顶），D=128 causal 走 wgmma 版、D=512 causal 走 O39 的 mma 版，merge 行数
+传 `T*H`；各加 `d_lse_part` 缓冲。单/两文件 device 逐字一致（`sync_onefile_device.py` 核对
+`identical: True`）。
+
+**数值**（vs fp32 ref，bf16 causal，max_abs dq/dk/dv）：定长 S512 `--lsetma=0`
+9.001/12.61/13.65e-3；varlen b4_t3840_h16 D128 1.340e-2/1.276e-2/1.911e-2；varlen b1_t512_h2 D512
+8.042e-3/1.097e-2/1.391e-2；b3_t1792_h2 D512 1.267e-2/1.217e-2/1.796e-2 —— 与 §6l/§6ab 历史
+逐位一致；`max_abs(split vs split1)=0`。D=128 MHA 默认 TMA 路径回归逐位不变。
+
+**性能**（CUDA event，同 session `--lsesplit=1` vs auto）：
+
+| case | split1 | auto | 倍数 |
+|---|---|---|---|
+| MHA S512（定长 `--lsetma=0`，preprocess） | 0.0368 ms | **0.0215 ms** | **1.71×** |
+| MHA S512（total） | 0.1015 ms | **0.0861 ms** | **1.18×** |
+| varlen b1_t512_h2 D512（total） | 0.4100 ms | **0.3737 ms** | **1.10×** |
+| varlen b3_t1792_h2 D512（total） | 0.9100 ms | **0.8630 ms** | **1.05×** |
+
+bf16 的 D=128 varlen case base 已 ≥ 528 ⇒ auto=1、中性；D=512 MLA varlen 受益 1.05–1.10×。
+单文件与两文件同量级（S512 0.0845 vs 0.0861）。
+
+**ncu**（LSE `lse_mma_kernel_bal_wgmma`，S512）：split1 Waves 0.12 / occ 6.25% / Compute 9.31% /
+Duration 33.50µs → split8 **Waves 0.97 / occ 19.27% / Compute 36.24% / Duration 14.91µs**，
+与 fp16 逐项一致；墙 = 网格不足 → 填满后回到 `mma wait` + smem 依赖。
+
+原始输出：`src/bf16/fa_bwd_bf16_mma_main_o40_fixed_s512_split{1,0}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_main_o40_varlen_{b1_t512_h2_d512,b3_t1792_h2_d512,b4_t3840_h16_d128,
+b4_t4096_h16_d128}_split{1,0}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_main_o40_ncu_lse_wgmma_split{1,8}_s512.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o40_fixed_s512_auto.out.txt`。
+
 ## 8. 下一步
 
 > **O36-bf16（§6z）已完成**：把 O34 的逐 atom 4D-TMA 从 BN=128 的 `wgmma2b` 补到 **BN=64 的
