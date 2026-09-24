@@ -1,0 +1,6 @@
+===== [fixed] b1_s512_h2_d512_causal_fp8 =====
+[timing] total(quant+pre+main+cvt) 0.1836 ms  5.85 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0115 ms | preprocess 0.0758 ms | main 0.0882 ms | convert 0.0080 ms (cvt_on=0)
+===== [fixed] b1_s1024_h2_d512_causal_fp8 =====
+[timing] total(quant+pre+main+cvt) 0.3919 ms  10.96 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0142 ms | preprocess 0.1383 ms | main 0.1998 ms | convert 0.0396 ms (cvt_on=0)

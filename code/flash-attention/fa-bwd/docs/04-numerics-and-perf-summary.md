@@ -1214,3 +1214,35 @@ L2 64.0% / Compute 40.9% / 3 CTA/SM（occ 18.4%）⇒ bound 与各 dtype 定长 
 （fp16/bf16 = L2 red + 1 CTA/SM；fp8 = L1/L2 吞吐 + 3 CTA/SM），非带宽。
 
 详见 `docs/03` §38（fp8）、`docs/01` §16.8（fp16）、`docs/01b` §6aa.6（bf16）。
+
+## 10. 变长（VARLEN）的 MLA（head_dim=512）——fp8（本节新增，第 80 轮）
+
+第 77–79 轮的 varlen 覆盖 fp8/fp16/bf16 × causal/full，但都限 **HD=128（MHA/GQA）**。
+本轮把 **fp8 的 packed varlen 扩到 MLA（HD=512）**：`lse_mma_kernel_bal<HD>` 加 `cu_seqlens`，
+`run_varlen` 按 D 分派（含 `quantize_row_warp_kernel` 的 `VPT=D/32` 必须随 D 切：512→16）。
+主 kernel `fp8_mma_body` 已是 HD 参数化且第 77 轮带 cu ⇒ 无需改。单/两文件逐位一致。
+
+**数值对拍（ours vs fp32 ref，fp8，max_abs dq/dk/dv）**：
+
+| MLA varlen case | lengths | causal | full |
+|---|---|---|---|
+| b1_t512（H2 D512） | `[512]` | 1.61/2.24/3.86e-1 | 5.26/5.22/4.22e-2 |
+| b3_t1792（H2 D512） | `[256,512,1024]` | 3.40/3.44/3.51e-1 | 7.99/9.63/4.15e-2 |
+
+fp8 噪声量级；定长 D=512 回归逐位不变（MLA S1024H2 `2.232/3.337/3.602e-1`）。
+FA/TE 反向均不支持 head_dim=512 ⇒ **无外部基线**，只能对 fp32 ref。
+
+**性能（ours total，event，`Σ_b 4HL²D` 口径；MLA 的 `D=Dv=512`，×2 才是 `4BS²H(D+Dv)`）**：
+
+| 形态 | case | total ms | TF（×2 口径） |
+|---|---|---|---|
+| varlen | b1_t512 causal | 0.1866 | 11.5 |
+| varlen | b3_t1792 causal | 0.5875 | 19.2 |
+| **定长对照** | S512 H2 D512 causal | 0.1836 | 11.7 |
+| **定长对照** | S1024 H2 D512 causal | 0.3919 | 21.9 |
+
+**varlen b1 与同 shape 定长仅差 1.6%** ⇒ varlen kernel 无额外固定开销。
+ncu（main，b3 causal）：255 regs / **1 CTA/SM、occ 6.25%** / No Eligible 84.7% /
+short_scoreboard ~30% / DRAM 2.6% / Compute 8.0% / L1TEX 22.8% ⇒ bound =
+**低 occupancy + smem→mma 依赖**（非带宽/算力）；LSE `Waves 0.18`（grid 48<132 SM）⇒ 并行度 bound。
+详见 `docs/03` §39。

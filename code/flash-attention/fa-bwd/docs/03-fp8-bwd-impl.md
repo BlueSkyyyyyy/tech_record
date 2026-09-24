@@ -3453,3 +3453,120 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
   scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --varlen=1 --full --iters=50 \
   --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b4_t3840_h16_d128_full_fp8
 ```
+
+## 39. VARLEN 的 MLA（head_dim=512）——fp8 反向（第 80 轮）
+
+### 39.1 动机与口径
+
+第 77/78/79 轮的 varlen 覆盖了 fp8/fp16/bf16 × causal/full，但都限 **HD=128（MHA/GQA）**。
+MLA 的 `head_dim=512`（`Fp8Cfg<512,64,32>`、GEMM1/2 的 k-loop 16 步、GEMM3/4/5 的 4 遍 N-tile）
+在定长路径早已上张量核（第二十一轮），但 **packed `[T,H,D]` + `cu_seqlens` 从未在 D=512 上验证**。
+本轮把两者接起来：fp8 反向直接吃 MLA 的变长输入。
+
+口径同 §37/§38：`q/dO/dQ` 为 `[T,H,D]`，`k/v/dK/dV` 为 `[T,Hkv,D]`，`cu_seqlens`（B+1 个
+token 前缀和），`S=maxlen` 仅供 grid/分块启发式，逐 `b` 用 `qbase=cu[b]`、`len=cu[b+1]-qbase`。
+MLA 的 `Dv=D=512`（FA/TE 反向都不支持 MLA，只能对 fp32 ref）。
+
+### 39.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+fp8 的 `fp8_mma_body<...,cu_seqlens>` 早已是 HD 参数化的（第 77 轮），**主 kernel 无需改动**；
+本轮只补两处：
+
+1. **device `lse_mma_kernel_bal<HD>` 增加 `cu_seqlens`**（`fa_bwd_fp8_kernels.cuh`）。
+   定长 D=512 的 causal LSE 走的是 **mma 版**的镜像配对 `lse_mma_kernel_bal<512,1>`（HD>128 没有
+   SW128 wgmma 快路），而它此前没有 varlen 支持。改动与 §38 给 `lse_mma_kernel<HD>` 加
+   `cu_seqlens` 完全同构：`qbase/len` 替代 `b*S/S`、`nblk` 由 `len` 计算（镜像配对在**本序列内**
+   进行）、`if (pair >= (nblk+1)/2) return;` 让短序列多余 CTA 退出、mask/边界判定用 `len`。
+   `cu=nullptr` 时逐式退化为定长路径 ⇒ 定长 D=512 数值**逐位不变**。
+2. **host `run_varlen` 按 D 分派**（`fa_bwd_fp8_main.cu` + 单文件）：
+   - **量化** `quantize_row_warp_kernel<VPT,ISDO>` 的 `VPT=D/32`（D=128→4、**D=512→16**）。
+     这是一处真实的坑：varlen 原来硬编码 `<4>`，D=512 时会把行距当 128 ⇒ **整行错位**，
+     症状是 dq/dk/dv max_abs O(1)（看似数值错乱）。
+   - **ksplit 自动档**：`D==128` 用 `S>=2048?8192:max(2048,4*base_grid)`；`D==512` 用 `maxlen/2`
+     （O29 标定）。`use_regdq` 仅 D==128 开（HD=512 的 dQ 一次铺不满 N）。
+   - **LSE**：causal 时 D=128 仍走 `lse_mma_kernel_bal_wgmma<128>`、D=512 走
+     `lse_mma_kernel_bal<512>`（新加 `cu`）；非 causal 走 `lse_mma_kernel<128|512>`。
+   - **delta**：`delta_warp_kernel<128|512>`。
+   - **主 kernel**：`launch_bwd_main<128,64,32,REGDQ,/*WGMMA=*/true,...>`（D=128）/
+     `launch_bwd_main<512,64,32,false,/*WGMMA=*/false,true,true>`（D=512，与定长一致）。
+
+### 39.3 harness
+
+`VARLEN_SHAPES` 新增 MLA 形状 `([256,512,1024], 2, 512, 2, 512)`（也可用
+`--lengths "256 512 1024" --H 2 --D 512 --kv 2 --Dv 512` 直接 dump）。共 dump **2 个 MLA
+varlen case**（causal / full）。TE 2.14 的 FP8 MLA 训练反向不支持 ⇒ 无 TE 基线。
+
+### 39.4 数值（ours vs fp32 ref，fp8；max_abs dq/dk/dv）
+
+| case | lengths | causal | dq | dk | dv |
+|---|---|---|---|---|---|
+| b1_t512 | `[512]` | causal | 1.613e-1 | 2.238e-1 | 3.864e-1 |
+| b1_t512 | `[512]` | full | 5.260e-2 | 5.222e-2 | 4.218e-2 |
+| b3_t1792 | `[256,512,1024]` | causal | 3.404e-1 | 3.436e-1 | 3.508e-1 |
+| b3_t1792 | `[256,512,1024]` | full | 7.994e-2 | 9.629e-2 | 4.148e-2 |
+
+全部落在 fp8 噪声量级（0.04–0.39），与定长 fp8 MLA（0.22–0.36）同水平，无 padding 泄漏。
+**单文件与两文件逐位相同**（四个 case 的 max_abs 完全相同）。
+定长回归（`nullptr` 路径）逐位不变：S512 `2.426/2.972/3.733e-1`、S4096 `2.635/2.644/3.216e-1`、
+MLA S1024H2 `2.232/3.337/3.602e-1`。
+
+### 39.5 性能（ours total=quant+preprocess+main，event，`Σ_b 4HL²D` 口径）
+
+| case | causal | total ms | TFLOPS |
+|---|---|---|---|
+| varlen b1_t512（H2 D512） | causal | 0.1866 | 5.75 |
+| varlen b1_t512 | full | 0.3168 | 3.39 |
+| varlen b3_t1792 `[256,512,1024]` | causal | 0.5875 | 9.60 |
+| varlen b3_t1792 | full | 1.0587 | 5.32 |
+| **定长** S512 H2 D512（对照） | causal | 0.1836 | 5.85 |
+| **定长** S1024 H2 D512（对照） | causal | 0.3919 | 10.96 |
+
+* `D=Dv=512`，按 harness 定长口径 `4BS²H(D+Dv)` 需把上表 TF **×2**（MLA 的 varlen 约 19 TF）。
+* **varlen b1 与同 shape 定长几乎相同（0.1866 vs 0.1836ms，慢 1.6%）** ⇒ varlen kernel 没有额外
+  固定开销，差异来自 `lse`/`delta` 的 grid 形状与 quant 的 packed 索引。
+* FA/TE 反向均不支持 head_dim=512 ⇒ **无外部基线**；MLA 的绝对算力受 1 CTA/SM 限制。
+
+### 39.6 ncu（`--set full -c 1`，b3_t1792 causal）
+
+**主 kernel `fa_bwd_fp8_mma_kernel`**：Duration **429.2µs**、DRAM 2.58% / L1/TEX 22.81% /
+L2 21.70% / Compute **7.95%**、**255 regs、Block Limit Shared Mem=1 ⇒ occ 6.25%（1 CTA/SM）**、
+Waves 2.91、No Eligible **84.67%**、active warps/sched **1.01**、stall **short_scoreboard ~30%**、
+shared load/store 冲突各 ~17% ⇒ **bound = 低 occupancy（1 CTA/SM）+ smem→mma 依赖延迟**，
+与定长 MLA 张量核版结论一致（非带宽/算力）。
+
+**LSE `lse_mma_kernel_bal<512>`**：Duration 140.2µs、**Waves 0.18**（grid=`(nblk+1)/2·H·B=48`
+< 132 SM）、occ 6.25%、No Eligible 75.6%、DRAM 0.80% ⇒ **grid 不足一个波（并行度 bound）**。
+这是小 H/B 的 MLA 固有问题（每序列只需 `nblk` 个 CTA）。
+
+### 39.7 限制 / 后续
+
+* 本轮只做 **fp8**；**fp16/bf16 的 varlen MLA 仍需给 mma 主 kernel（`fa_bwd_{fp16,bf16}_mma_kernel`）
+  与 `lse_mma_kernel_bal` 加 `cu_seqlens`**（fp8 的主 kernel 天然可用，因为 `fp8_mma_body` 已是
+  HD 参数化且第 77 轮已加 cu；fp16/bf16 的 varlen 目前只覆盖 wgmma2 的 HD=128）。
+* **按 `cu_seqlens` 的均衡分块**仍未做（强倾斜 / 多序列时短序列 CTA 早退）。
+* **varlen 的 TMA 化**：TMA 描述符按定长 `[D,S,H,B]` 建，packed 布局需重建（或逐序列建 map）。
+* MLA 的 1 CTA/SM 是本卡硬约束（`Kt/Qt/dOt` 转置副本 + `Ps/Ss` 使 smem 顶格），要冲 2 CTA/SM
+  须继续降 smem（对齐 O4b 思路）。
+
+### 39.8 复现
+
+```bash
+# dump MLA varlen（causal + full）
+python harness/fa_bwd_bench.py dump --dtype fp8 --lengths 256 512 1024 --H 2 --D 512 --kv 2 --Dv 512
+python harness/fa_bwd_bench.py dump --dtype fp8 --lengths 256 512 1024 --H 2 --D 512 --kv 2 --Dv 512 --full
+# 两文件 / 单文件自测（默认 WGMMA+TMA 构建；varlen 内部走非 TMA 路径）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --varlen=1 --iters=50 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp8
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --varlen=1 --iters=50 --dir=...
+# ncu
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:fa_bwd_fp8_mma_kernel --launch-count 1 -- --varlen=1 --iters=1 --dir=...
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_varlen_mla_sweep.out.txt`（两文件 4 case）、
+`..._varlen_mla_onefile_sweep.out.txt`（单文件 4 case，逐位一致）、
+`..._varlen_mla_fixed_regression.out.txt`（定长回归）、`..._varlen_mla_perf.out.txt`（定长对照计时）、
+`..._varlen_mla_ncu_main_b3.out.txt`（main ncu）、`..._varlen_mla_ncu_lse_b3.out.txt`（LSE ncu）。
