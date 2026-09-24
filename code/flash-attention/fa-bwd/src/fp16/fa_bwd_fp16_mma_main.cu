@@ -143,7 +143,7 @@ static void launch_bwd_wgmma(dim3 mg, const __half* q, const __half* k, const __
 
 // O17：2 warpgroup（BM=128）wgmma 主 kernel（只 HD=128）。Q/dO/K/V + P/dS 全 SW128。
 // smem = 1024(对齐) + Q 32KB + dO 32KB + K 2×16KB + V 16KB + P 16KB + dS 16KB ≈ 145KB。
-template <int HD>
+template <int HD, bool SPLIT = true>
 static void launch_bwd_wgmma2(dim3 mg, const __half* q, const __half* k, const __half* v,
                               const __half* do_, const float* delta, const float* lse,
                               float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
@@ -154,10 +154,11 @@ static void launch_bwd_wgmma2(dim3 mg, const __half* q, const __half* k, const _
   constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
   constexpr int PTILE = (BM / 8) * (BN / 64) * 1024;
   constexpr int smem = 1024 + QTILE * 2 + KTILE * 3 + PTILE * 2;
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma2_kernel<HD>,
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma2_kernel<HD, SPLIT>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-  fa_bwd_fp16_wgmma2_kernel<HD><<<mg, 256, smem>>>(q, k, v, do_, delta, lse, dq_acc,
-                                                   dk_acc, dv_acc, S, H, Hkv, scale, causal);
+  fa_bwd_fp16_wgmma2_kernel<HD, SPLIT><<<mg, 256, smem>>>(q, k, v, do_, delta, lse, dq_acc,
+                                                          dk_acc, dv_acc, S, H, Hkv, scale,
+                                                          causal);
 }
 
 // O17b：4 warpgroup（BM=256）wgmma 主 kernel（只 HD=128）。Q/dO/P/dS SW128，K/V 单缓冲 + 后段预取。
@@ -202,6 +203,8 @@ int main(int argc, char** argv) {
   int ow_opt = -1;
   // O17：2 warpgroup（BM=128，跨 wg 归约）wgmma 主 kernel（仅 FA_WGMMA 构建、D==128）。
   int wg2_sel = 0;
+  // O17-2：wgmma2 的 GEMM3/GEMM4 是否拆分到两个 warpgroup（1=拆，0=原版 wg0 串行）。
+  int wg2split_sel = 1;
   // O17b：4 warpgroup（BM=256，跨 wg 归约再砍半）wgmma 主 kernel（仅 FA_WGMMA 构建、D==128）。
   int wg4_sel = 0;
   // O17b：是否用「串行 GEMM1/2 + 读回 P」版（消 spill）；-1=自动（SEQ=1）。
@@ -225,6 +228,7 @@ int main(int argc, char** argv) {
     else if (a == "--wgmma") wgmma_sel = 1;
     else if (a.rfind("--ow=", 0) == 0) ow_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--wg2=", 0) == 0) wg2_sel = atoi(a.c_str() + 6);
+    else if (a.rfind("--wg2split=", 0) == 0) wg2split_sel = atoi(a.c_str() + 11);
     else if (a == "--wg2") wg2_sel = 1;
     else if (a.rfind("--wg4=", 0) == 0) wg4_sel = atoi(a.c_str() + 6);
     else if (a == "--wg4") wg4_sel = 1;
@@ -444,8 +448,12 @@ int main(int argc, char** argv) {
     }
     if (wg2_sel && D == 128) {
       dim3 g((S + 127) / 128, H, B);
-      launch_bwd_wgmma2<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
-                             d_dv_acc, S, H, Hkv, scale, (int)causal);
+      if (wg2split_sel)
+        launch_bwd_wgmma2<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+      else
+        launch_bwd_wgmma2<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                      d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
       return;
     }
     if (wgmma_sel && D == 128 && bm_sel == 64 && bn_sel == 64) {
@@ -671,8 +679,12 @@ int main(int argc, char** argv) {
                                         d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
         } else if (mode == 2) {
           dim3 g((S + 127) / 128, H, B);
-          launch_bwd_wgmma2<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
-                                 d_dv_acc, S, H, Hkv, scale, (int)causal);
+          launch_bwd_wgmma2<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+        } else if (mode == 5) {
+          dim3 g((S + 127) / 128, H, B);
+          launch_bwd_wgmma2<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
         } else if (mode == 1) {
           dim3 g((S + 63) / 64, H, B);
           launch_bwd_wgmma<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
@@ -697,13 +709,15 @@ int main(int argc, char** argv) {
       CUDA_CHECK(cudaMemcpy(dv_c, d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
     };
     std::vector<float> q0(n), k0(nkv), v0(nkv), q1(n), k1(nkv), v1(nkv), q2(n), k2(nkv),
-        v2(nkv), q3(n), k3(nkv), v3(nkv), q4(n), k4(nkv), v4(nkv);
+        v2(nkv), q3(n), k3(nkv), v3(nkv), q4(n), k4(nkv), v4(nkv), q5(n), k5(nkv), v5(nkv);
     float ms_mma = 0.f, ms_wgm = 0.f, ms_wg2 = 0.f, ms_wg4 = 0.f, ms_wg4s = 0.f;
+    float ms_wg2ns = 0.f;
     time_o17(0, &ms_mma, q0.data(), k0.data(), v0.data());
     time_o17(1, &ms_wgm, q1.data(), k1.data(), v1.data());
     time_o17(2, &ms_wg2, q2.data(), k2.data(), v2.data());
     time_o17(3, &ms_wg4, q3.data(), k3.data(), v3.data());
     time_o17(4, &ms_wg4s, q4.data(), k4.data(), v4.data());
+    time_o17(5, &ms_wg2ns, q5.data(), k5.data(), v5.data());
     auto mad = [](const std::vector<float>& a, const std::vector<float>& b) {
       double d = 0; for (size_t i = 0; i < a.size(); ++i) d = std::max(d, (double)std::fabs(a[i]-b[i])); return d;
     };
@@ -718,6 +732,11 @@ int main(int argc, char** argv) {
     printf("[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=%.2e/%.2e/%.2e | wg2-vs-O9b "
            "dq/dk/dv=%.2e/%.2e/%.2e\n",
            mad(q2, q0), mad(k2, k0), mad(v2, v0), mad(q2, q1), mad(k2, k1), mad(v2, v1));
+    printf("[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) %.4f ms (%.1f TF) | O17-2 拆分(wg0=dV,"
+           "wg1=dK) %.4f ms (%.1f TF) => %.3fx | max|diff| dq/dk/dv=%.2e/%.2e/%.2e\n",
+           ms_wg2ns, main_flops / (ms_wg2ns * 1e-3) / 1e12, ms_wg2,
+           main_flops / (ms_wg2 * 1e-3) / 1e12, ms_wg2ns / ms_wg2, mad(q2, q5), mad(k2, k5),
+           mad(v2, v5));
     printf("[O17b A/B] max|diff| wg4-vs-wg2 dq/dk/dv=%.2e/%.2e/%.2e | wg4-vs-mma "
            "dq/dk/dv=%.2e/%.2e/%.2e\n",
            mad(q3, q2), mad(k3, k2), mad(v3, v2), mad(q3, q0), mad(k3, k0), mad(v3, v0));

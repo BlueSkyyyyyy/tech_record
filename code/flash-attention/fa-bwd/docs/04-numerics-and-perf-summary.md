@@ -240,6 +240,13 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > （S4096 0.995→1.20ms=0.83×、S512 0.052→0.096=0.55×）。**结论：寄存器文件是硬墙，
 > 「放大 BM」走不通**，下一步转 **O7b**（把跨 CTA `red` 换成 CTA 局部累加 + 非原子写 + 二次归约）。
 > 详见 `01-fp16-bwd-impl.md` §14k。
+>
+> **O17-2（GEMM3/GEMM4 拆分到两个 wg，fp16/bf16，第五十五轮）**：O17 的 phase B 只有 wg0
+> 串行做 dV+dK（张量工作量 wg0:wg1=3:1，wg1 在 GEMM3/4 期间 barrier 空等）。把 **GEMM3→wg0、
+> GEMM4→wg1**（各自仍对全 BM=128 归约、每 KV 元素仍只 `red` 一次）后两 wg 各一条 GEMM+red 链。
+> ncu（S4096，同 binary `--wg2split` 0/1）：**`red` 51,904,512 完全不变**、stall `barrier`
+> **1.61→0.46（−3.5×）**、Duration 997.7→**982.4µs**；main S4096 **1.013×（fp16）/1.038×（bf16）**、
+> GQA kv4 1.021×/1.051×，数值与历史**逐位一致**。red 不变 ⇒ 与 O7b 正交。详见 `01` §14l、`01b` §6t。
 
 ### 2.2 bf16（峰值 989 TFLOPS）
 
@@ -580,7 +587,8 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp16 | **wgmma main（O9b, S=4096, GEMM1/2 wgmma）** | 4.55% | 55.08% | 26.48% | 11.88%（**101.38KB, 2 CTA/SM**, 242 regs） | 3.88 | **wait 1.94→1.50**、long 1.45→1.25、short 0.56 | **L2 74.4%（dK/dV 原子，仍为墙）+ `wait` + 低 occupancy**（GEMM1/2 的 wgmma 打掉 ldmatrix/依赖，但 GEMM3/4/5 仍 mma） |
  | fp16 | **wgmma main（O9b-2, S=4096, 5 GEMM 全 wgmma）** | 4.35% | 40.05% | 23.37% | 11.86%（**99.33KB, 2 CTA/SM**, 230 regs） | 3.88 | short 0.29（ldmatrix 消）、long 2.01、wait 1.43、barrier 0.84 | **L2 68.8%：`red`（dK/dV `atomicAdd`）占 102.2M/139.8M=73.1% 扇区、DRAM 4.2%** ⇒ **L2 原子字节数 bound**（见下） |
   | fp16 | **wgmma2 main（O17, BM=128, 2 wg, S=4096）** | 6.47% | 36.85% | 27.48% | 12.41%（**149.5KB, 1 CTA/SM**, 200 regs, 256 thr） | — | Duration 1.48→**0.996ms** | **L2 54.7%（red 51.9M=0.508×/O9b、read 也 0.50×）**：跨 wg 归约把 dK/dV 的 red 字节精确砍半，但仍是第一墙（red 占 L2 扇区 ~72.6%）；bank conflict 0 |
-  | bf16 | **wgmma2 main（O17-bf16, BM=128, 2 wg, S=4096）** | 6.47% | 36.68% | 27.36% | 12.41%（**149.50KB, 1 CTA/SM**, 200 regs, 256 thr） | — | Duration 1.48→**0.997ms** | **L2 54.63%（`red` 102,236,160→51,904,512=0.508×、`read` 0.50×）**：与 fp16 O17 逐项一致；新墙仍是 L2（red 占 ~72.6%）；bank conflict 0 |
+   | bf16 | **wgmma2 main（O17-bf16, BM=128, 2 wg, S=4096）** | 6.47% | 36.68% | 27.36% | 12.41%（**149.50KB, 1 CTA/SM**, 200 regs, 256 thr） | — | Duration 1.48→**0.997ms** | **L2 54.63%（`red` 102,236,160→51,904,512=0.508×、`read` 0.50×）**：与 fp16 O17 逐项一致；新墙仍是 L2（red 占 ~72.6%）；bank conflict 0 |
+   | fp16 | **wgmma2 main（O17-2, GEMM3/4 拆分, S=4096）** | 6.57% | 49.46% | 27.75% | 12.48%（148.48KB, 1 CTA/SM, 200 regs, 256 thr） | 3.88 | **`barrier` 1.61→0.46（−3.5×）**、wait 1.19、long 0.75、short 0.40 | **L2 red 完全不变（51,904,512）** ⇒ 收益来自消 wg1 在 GEMM3/4 的 barrier 空等（张量工作量 3:1→1:1）；Duration 997.7→**982.4µs**，墙仍是 **L2 red + `wait`** |
  | fp8 | golden main | 0.06% | **75.96%**（90% 多余） | 4.98% | 6.25%（68KB） | 0.32 | MIO scoreboard 69% | **smem 冲突 + FP8 解码 + 低 occ** |
 | fp8 | **mma main（O2b+O4d 后, S=4096, ksplit=4）** | 1.41% | 69.91% | 21.70% | **18.27%（73.8KB, 3 CTA/SM）** | 10.34 | No Eligible 76.6%、long_scoreboard 4.46 + short_scoreboard 3.96 | **L2 带宽（81.5%）+ 延迟**（split-K 复读 Q/dO + 全局 atomic） |
 | fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |

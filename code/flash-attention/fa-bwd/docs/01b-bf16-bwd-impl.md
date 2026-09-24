@@ -1106,6 +1106,44 @@ s1024_h40_d128_kv8,s1024_h64_d128_kv1}.out.txt`、
 
 ---
 
+## 6t. O17-2-bf16：把 O17 的 GEMM3/GEMM4 拆分到两个 warpgroup（负载再平衡）
+
+与 fp16 §14l **逐字 dtype 同构**（`__half`→bf16、`f16.f16`→`bf16.bf16`）。O17 的 phase B
+里只有 wg0 串行做 GEMM3(dV)+GEMM4(dK)（4 条串行 red 链），wg1 只做 GEMM5 ⇒ 张量工作量 3:1、
+wg1 在 GEMM3/4 期间 barrier 空等。把 **GEMM3→wg0、GEMM4→wg1**（各自仍对全 BM=128 归约、
+每个 KV 元素仍只 `red` 一次）后，两 wg 各一条 GEMM+red 链，工作量 1:1。
+
+`fa_bwd_bf16_wgmma2_kernel<HD, bool SPLIT=true>`；host `--wg2split=0/1`（默认 1）可同 session
+A/B。单/两文件 device 代码逐字一致（`sync_onefile_device.py` 核对 `identical: True`）。
+
+### 6t.1 性能（同 session A/B，CUDA event，main-only，ms）
+
+| shape | O17（wg0 串行 dV+dK） | **O17-2（wg0=dV,wg1=dK）** | 比 |
+|---|---|---|---|
+| MHA S=512 | 0.0518 | 0.0520 | 0.996×（噪声） |
+| MHA S=4096 | 1.0014 | **0.9647** | **1.038×**（142.5 TF） |
+| GQA kv4 S1024 | 0.1859 | **0.1769** | **1.051×**（97.1 TF） |
+| GQA kv8 S1024 | 0.2048 | **0.2023** | 1.012× |
+| MQA kv1 S1024 | 0.2844 | **0.2837** | 1.003× |
+
+端到端 S=4096 **1.942 ms（70.8 TF）**、S=512 0.112、GQA kv4 0.409、kv8 0.439、MQA 0.598 ms。
+数值与 O5b~O17 历史值**逐位一致**（S512 9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3、
+GQA kv4 12.01/21.25/31.56e-3、kv8 12.33/19.30/31.50e-3、MQA kv1 11.90/45.58/71.96e-3），
+`max|diff|` dk/dv ~5e-5~2e-4（仅 atomic 次序）、dq = 0。
+
+### 6t.2 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`）
+
+FA3 MHA S=4096 **0.3204ms/858TF**、TE 0.4437/620、FA2 0.7283/377；GQA kv4 FA3 0.0829/414。
+ours 端到端 S=4096 1.942ms ⇒ 时间为 FA3 的 **6.06×**（与 fp16 O17-2 同量级）。
+
+### 6t.3 原始输出
+
+`src/bf16/fa_bwd_bf16_mma_main_o17_2_sweep.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o17_2_s4096.out.txt`、
+`src/fa_bwd_o17_2_fa3_te_baseline_bf16.out.txt`。
+
+---
+
 ## 8. 下一步
 
 见 `../ROADMAP.md`。**O5b（bf16 张量核，§6e）、O8（preprocess mma，§6f）、O6（main
@@ -1115,7 +1153,9 @@ float4 试错，§6k）、MLA 张量核（§6l）、O10（Q/dO 向量化 + cp.as
 O11（快速 exp/log，§6n）、O9a（LSE wgmma，§6o）、O13（auto tile 重标定，§6p）、
 O9b（主 kernel GEMM1/2 上 wgmma，§6q）、O9b-2（主 kernel GEMM3/4/5 也用 MN-major 转置读上
 wgmma，数值逐位正确、性能中性，§6r）、**O17-bf16（跨 warpgroup 归约：BM=128、2 warpgroups，
-dK/dV 的 red 字节砍半，main S=4096 1.52×、GQA/MQA 1.50–1.53×，§6s）已完成**；
+dK/dV 的 red 字节砍半，main S=4096 1.52×、GQA/MQA 1.50–1.53×，§6s）已完成**、
+**O17-2-bf16（GEMM3/GEMM4 拆分到两个 wg，消 barrier 空等，main S=4096 1.038×、GQA kv4 1.051×，
+§6t）已完成**；
 接下来是 **O17b（BM=256 / 4 warpgroups 再砍半）**、**O15 TMA 化 Q/K/V/dO + P/dS 双缓冲
 跨-tile 流水 + 压 smem 冲更高 occupancy** 与 **O7b（去 dK/dV 跨 CTA 原子 → 确定性反向）**。
 backlog：fp8 侧残余 red（O7b）、MLA 降 smem 冲 2 CTA/SM / split-KV。
