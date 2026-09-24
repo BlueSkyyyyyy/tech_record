@@ -80,7 +80,18 @@ struct Fp8Cfg {
   //   199.9M→77.3M（−61%）、`op_st` 231.6M→198.4M（−14%）、总多余 wavefronts
   //   613.6M→456.0M（−26%），main 6.56→5.85 ms（1.12×）。奇数才能保证
   //   m 步进 16 时 `16*33 mod 32 = 16 != 0`（+4/+8 的偶数 padding 无效）。
-  static constexpr int PSS = BN + 1;     // P/S fp32 行距（=33）
+  //
+  // O7e-3：PSS=33（=BN+1）仍让 **GEMM1/2 epilogue** 的 `Ps/Ss[r*PSS+c]` 4-way bank
+  //   conflict：mma 累加器里同一 store 指令内 `r=R0+g`（g=lane>>2∈0..7）、`c=C0+2l`
+  //   （l=lane&3），bank=(g*PSS+2l) mod32；PSS=33（≡1）时 `{g+2l}` 有大量重合 ⇒ 实测
+  //   `Ss` 写 25.6M、`Ps` 写 12.8M、`Ps` 回读 12.8M 多余 wavefronts（占全 kernel shared
+  //   多余 wavefronts 的 ~98%）。把 padding 改成 `+5`（37，仍 ≡1 mod 4）后
+  //   `bank=(5g+2l) mod32` 最大重合降到 2-way，而 fold 的掩码读（`sub4*8+t+half*32`）
+  //   仍无冲突（`37 mod 4 = 1`）。数值逐位不变（只改 smem 地址）。
+#ifndef FA_PSS_EXTRA
+#define FA_PSS_EXTRA 5
+#endif
+  static constexpr int PSS = BN + FA_PSS_EXTRA;   // P/S fp32 行距（默认 37；1=旧值 33，供 A/B）
 
   // O4b：Kt/Qt/dOt 三个「逐字节 scatter 写的转置副本」→ Kp/Qp/dOp 三个 **K 配对布局**
   //   （uint16：[K/2][HD]，元素 = 2 个相邻 K 值），用 `ldmatrix.x2.trans` 读 B 片段。

@@ -1557,7 +1557,33 @@
     `src/bf16/fa_bwd_bf16_mma_onefile_o18_{s512,s4096}.out.txt`、
     `src/bf16/fa_bwd_bf16_mma_main_o18_ncu_s4096.out.txt`、
     `src/bf16/fa_bwd_bf16_mma_main_o18_ncu_red_{s4096,o17_s4096}.out.txt`、
-    `src/fa_bwd_o18_fa3_te_baseline_bf16.out.txt`；文档 `docs/01b` §6u、`docs/04` §2.2/§3。
+     `src/fa_bwd_o18_fa3_te_baseline_bf16.out.txt`；文档 `docs/01b` §6u、`docs/04` §2.2/§3。
+
+- 2026-09-24（第五十八轮）：**O7e-3 完成（fp8 main GEMM1/2 epilogue `Ps/Ss` 的 store/回读
+  bank conflict 修复；单/两文件；main 1.007–1.024×，数值逐位不变）**。
+  - **先拆**：用 `--page source --csv` 按 CUDA 源码行聚合 `L1 Wavefronts Shared Excessive`，
+    发现 shared-store 多余 wavefronts 的 **~98%** 来自 GEMM1/2 epilogue 的
+    `Ps/Ss[r*PSS+c]` 标量写（25.56M + 12.78M）与 `Ss` 里对 `Ps` 的同模式回读（12.78M，进 LDS）。
+    根因：`r=R0+g`（`g=lane>>2`）、`c=C0+2l`（`l=lane&3`），bank=`(g·PSS+2l) mod32`；
+    PSS=33（≡1）时 `{g+2l}` 大量重合 ⇒ **4-way**。
+  - **改**：`Fp8Cfg::PSS = BN + FA_PSS_EXTRA`（默认 5 ⇒ 37；`FA_PSS_EXTRA=1` 为旧 33，供 A/B）。
+    37 仍 ≡1 mod4 ⇒ O7e-2 的 fold 掩码读沿用、无冲突；`bank=(5g+2l)` 降到 **2-way**。
+    smem 70.7→72.7KB（仍 3 CTA/SM）；**只改 smem 地址，数值逐位不变**。单文件由
+    `sync_onefile_device.py` 同步（`device region identical: True`）。
+  - **性能（同 session A/B，event，main/total ×）**：S512 1.016/1.015、S1024H32 1.010/1.005、
+    S4096 1.011/1.007、GQA kv4 1.007/1.012、MLA S1024H2 **1.024/1.005**（另一次首测 S4096
+    main 2.2832→2.2269 = 1.025）。端到端 S4096 total 2.8585→**2.8375ms（48.4 TF，峰值 2.4%）**。
+  - **ncu（S=4096）**：shared store 冲突 29.46M→**12.33M（−58%）**、load 冲突 29.18M→**20.59M
+    （−29%）**、L1/TEX 59.97%→**55.83%**、L2 49.8%、Compute 43.1%、DRAM 3.2%、occ 18.1%
+    （168 regs / 72.7KB / 3 CTA/SM）、Waves 10.34。**但 Duration 2.27→2.28ms 持平**，
+    stall = `wait` **1.56** + `short_scoreboard` **1.50** + `long` 0.77（issue 45.9%）
+    ⇒ **证伪「L1/TEX 是限速器」**：真正的墙是 **mma 依赖延迟 + 3 CTA/SM**。
+  - 对标（同 session）：TE FP8 S512 0.1008 / S1024H32 0.2061 / S4096 0.5887 / GQA kv4
+    0.2013ms；FA3 fp16 MHA S4096 0.3251ms/846TF、GQA kv4 0.0827/415（fp8 无 FA 基线）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_o19_pss_ab.out.txt`（2 文件 ×5 shape × PSS 33/37）、
+    `src/fp8/fa_bwd_fp8_main_o19_ncu_s4096.out.txt`（`--set full`）、
+    `src/fp8/fa_bwd_fp8_o19_tebench.out.txt`、`src/fp8/fa_bwd_fp8_o19_fa3_te_baseline_fp16.out.txt`；
+    详见 `docs/03` §26。
 
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
@@ -1730,6 +1756,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 需把 HD=128 的 K-major tile 拆成 2×K=64 chunk）。**当前真正的墙仍是 L2 red（占 ~72%，
 > BN/MB 都动不了它）+ 1 CTA/SM**，只有「跨 CTA 归约/提 occupancy」能再推进。
 > 详见 `docs/01` §14j/§14k/§14l/§14m、`docs/01b` §6s/§6t、`docs/04` §2.1/§2.2/§3。
+>
+> **O7e-3 已完成（第五十八轮）修正了 fp8 的瓶颈判断**：把 fp8 main 的 `Ps/Ss` epilogue
+> store/回读 bank conflict 从 4-way 降到 2-way（PSS 33→37），shared store 冲突 −58%、
+> L1/TEX 59.97→55.83%，**但 Duration 持平** ⇒ **fp8 main 的 L1/TEX 不是限速器**，真正的墙是
+> **mma 依赖延迟（`wait` 1.56 + `short_scoreboard` 1.50，issue 45.9%）+ 3 CTA/SM**。
+> 故 fp8 右侧的下一优先级应改为「**降 L2 的 dK/dV `red`（跨 CTA，49.8%）**」或
+> 「**提 occupancy（须先砍 168 regs / 72.7KB smem）**」，而非继续抠 smem 冲突；
+> `docs/03` §26。
 > 1. **O5 收尾**：fp16/bf16 反向用 `mma.m16n8k16`+`ldmatrix` 张量核后端。
 >    进度：fp16 主 kernel **2.28→0.19 ms（512）/ 67.6→4.55 ms（4096），11.8–14.9×**；
 >    **bf16 主 kernel 1.88→0.190 ms（512）/ 42.2→4.51 ms（4096），9.4–9.9×**（第二十七轮，单/两文件、
@@ -1963,8 +1997,17 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       main S=4096 **1.036×**、数值逐位不变。详见 `docs/03` §20、`docs/04` §2.3。
 - [x] **O7e-2（第五十轮）** fp8 main fold 的 shared-load bank conflict 修复：lane→m 映射
       `sub4*16+t`→`sub4*8+t+half*32`（消 `Ps/Ss` 列读的恒 2-way 冲突）+ 8B/16B 向量写；
-      shared load 冲突 **−53.5%**、L1/TEX 64.8→60.0%、main 1.02–1.04×、数值逐位不变。
-      另证伪「fold 写折 16B」（1.007×、增大 spill）。详见 `docs/03` §25、`docs/04` §2.3。
+       shared load 冲突 **−53.5%**、L1/TEX 64.8→60.0%、main 1.02–1.04×、数值逐位不变。
+       另证伪「fold 写折 16B」（1.007×、增大 spill）。详见 `docs/03` §25、`docs/04` §2.3。
+- [x] **O7e-3（第五十八轮）** fp8 main **GEMM1/2 epilogue `Ps/Ss` 的 store/回读 bank conflict 修复**：
+       用 `--page source --csv` 按源码行把 shared-store 多余 wavefronts 拆开，发现 **~98% 来自
+       `Ps/Ss[r*PSS+c]` 写（25.6M+12.8M）及其同模式回读（12.8M）**，根因 PSS=33（≡1）使
+       `(g·PSS+2l) mod 32` 大量重合（4-way）。改 **`PSS=BN+5=37`**（仍 ≡1 mod 4 ⇒ fold 掩码读不冲突；
+       bank=(5g+2l) ⇒ 2-way）；smem 70.7→72.7KB 仍 3 CTA/SM，**数值逐位不变**。同 session A/B
+       main 1.007–1.024×、端到端 1.005–1.015×；ncu：store 冲突 29.46M→12.33M（−58%）、
+       load 冲突 29.18M→20.59M（−29%）、L1/TEX 59.97→55.83%。**但 Duration 持平** ⇒ 证伪
+       「L1/TEX 是限速器」：真正墙是 `wait`(1.56)+`short_scoreboard`(1.50) 的 mma 依赖延迟 +
+       3 CTA/SM（issue 仅 45.9%）。详见 `docs/03` §26。
 - [x] **（第五十一轮新列，最高优先级）O17：fp16 跨 warpgroup 归约（BM=128、2 warpgroups）**。
       动机（量化证据）：ncu 拆 S=4096 主 kernel 的 L2 扇区——**`red`（dK/dV 跨 CTA `atomicAdd`）
       占 73.1%**、DRAM 仅 4.2% ⇒ main 是 **L2 原子字节数 bound**；O16（重叠 epilogue）与 O7c

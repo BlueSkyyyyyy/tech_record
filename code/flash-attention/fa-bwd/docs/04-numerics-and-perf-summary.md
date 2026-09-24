@@ -583,6 +583,18 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 另**证伪**单独把 fold 写折到 16B（只 1.007×、且增大 spill）⇒ fold 的墙在**读冲突**不在写指令数。
 > 详见 `03` §25。
 
+> **O7e-3（第五十八轮）**：fp8 main **GEMM1/2 epilogue `Ps/Ss` 的 store/回读 bank conflict**。
+> 用 `--page source --csv` 按源码行拆开：shared-store 多余 wavefronts 的 **~98%** 来自
+> `Ps/Ss[r*PSS+c]` 标量写（25.6M+12.8M）及其同模式回读（12.8M）；根因 `PSS=33`（≡1）使
+> `(g·PSS+2l) mod32` 重合 ⇒ 4-way。改 **`PSS=BN+5=37`**（仍 ≡1 mod4，fold 掩码读无冲突；
+> bank=(5g+2l) ⇒ 2-way）。**数值逐位不变**；smem 70.7→72.7KB 仍 3 CTA/SM。同 session A/B main
+> S512 1.016× / S1024H32 1.010× / S4096 1.011× / GQA kv4 1.007× / MLA S1024H2 1.024×，
+> 端到端 1.005–1.015×（S4096 total **2.8375ms，48.4 TF**）。ncu：store 冲突 29.46M→**12.33M
+> （−58%）**、load 冲突 29.18M→**20.59M（−29%）**、L1/TEX 59.97→**55.83%**，**但 Duration 持平**
+> ⇒ **证伪「L1/TEX 是 fp8 main 的限速器」**：墙是 `wait`(1.56)+`short_scoreboard`(1.50) 的
+> mma 依赖延迟 + 3 CTA/SM（issue 45.9%）。对标：TE FP8 S4096 0.5887ms；FA3 fp16 MHA S4096
+> 0.3251ms/846TF（fp8 无 FA 基线）。详见 `03` §26。
+
 ---
 
 ## 3. ncu bound 小结（逐 dtype）

@@ -2184,3 +2184,100 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --launch-count 1 \
 `src/fp8/fa_bwd_fp8_mma_onefile_o7e2_sweep.out.txt`（单文件 ×5 shape）、
 `src/fp8/fa_bwd_fp8_main_o7e2_ncu_s4096{,_f16b0}.out.txt`、
 `src/fp8/fa_bwd_fp8_o7e2_tebench.out.txt`、`src/fa_bwd_o7e2_fa3_te_baseline_fp16.out.txt`。
+
+---
+
+## 26. O7e-3：GEMM1/2 epilogue `Ps/Ss` 的 store/回读 bank conflict 修复（PSS 33→37）
+
+### 26.1 动机与 ncu 定位
+
+O7e-2（第 25 节）把 fp8 main 第一墙记为「L1/TEX 60%」，并修了 **fold** 段的 shared-load
+冲突。但一直没拆开「读」与「写」。本轮用 `--page source --csv` 把 `L1 Wavefronts Shared
+Excessive` 按 **CUDA 源码行** 聚合（`fa_bwd_fp8_mma_kernel<128,64,32,1,0,1,1>`，S=4096）：
+
+| CUDA 源行 | 多余 wavefronts（excessive） |
+|---|---|
+| `Ss[r * PSS + c] = Ps[r * PSS + c] * (dpv - del);` | **25,559,040** |
+| `Ps[r * PSS + c] = p;` | **12,779,520** |
+| `Ap/dS3/dS2` fold 向量写（O7e-2） | 1,064,960 ×3 |
+| `LDSM`（ldmatrix） | 0 |
+| 载入 Q/K/V 配对写（prologue） | ≤ 2,129,920 |
+
+即 **~98% 的 shared-store 多余 wavefronts 来自 GEMM1/2 epilogue 的 `Ps/Ss` 标量 fp32 写**，
+外加 `Ss` 计算里对 `Ps` 的同模式**回读**（进了 `LDS` 一栏）。两者都是 4-way。
+
+### 26.2 根因：PSS≡1 让 `{g·PSS + 2l}` 大量重合
+
+mma `m16n8` 累加器里，同一条 store 指令内 `r = R0 + g`（`g = lane>>2 ∈ 0..7`）、
+`c = C0 + 2l`（`l = lane&3`，`c2 = 2l ∈ {0,2,4,6}`），4 字节 store 的 bank
+= `(r·PSS + c) mod 32 = (g·PSS + 2l + const) mod 32`。PSS=33（≡1 mod 32）时
+`{g + 2l}` 有大量重合 ⇒ 4-way（实测 `Ss` 25.56M / 理想 8.5M ≈ 3.0× 多余，与 4-way 吻合）。
+`Ss` 的回读 `Ps[r*PSS+c]` 同一模式，故 load 侧也 4-way。
+
+### 26.3 修复：`PSS = BN + 5`（37）
+
+PSS 必须满足「fold 的掩码读（O7e-2 的 `m = sub4*8 + t + half*32`）无冲突」——那要求
+`PSS mod 4 = 1`（使 `8·PSS·sub4 mod 32` 取到 `{0,8,16,24}`）。在此约束下穷举 PSS：
+
+| PSS | epilogue store/回读 wavefronts | fold 读 wavefronts |
+|---|---|---|
+| 33（旧） | 4-way | 1（无冲突）|
+| **37（新）** | **2-way** | **1** |
+
+37 使 `bank = (5g + 2l) mod 32`，重合降为 2-way。改动极小（`Fp8Cfg::PSS = BN + FA_PSS_EXTRA`，
+默认 `FA_PSS_EXTRA=5`；`=1` 即旧值 33，供 A/B）。smem 只 +2 KB（70.66→72.70 KB），仍 3 CTA/SM。
+**只改 smem 地址，数学与量化完全相同 ⇒ 数值逐位不变。**
+
+### 26.4 实测（同 session A/B，CUDA event，ms）
+
+| shape | main 33 | main 37 | main ×| total 33 | total 37 | total ×|
+|---|---|---|---|---|---|---|
+| S512 H16 | 0.0681 | **0.0670** | 1.016 | 0.1621 | **0.1597** | 1.015 |
+| S1024 H32 | 0.3968 | **0.3929** | 1.010 | 0.6061 | **0.6028** | 1.005 |
+| S4096 H16 | 2.2626 | **2.2373** | 1.011 | 2.8585 | **2.8375** | 1.007 |
+| S1024 kv4 | 0.3834 | **0.3806** | 1.007 | 0.5591 | **0.5527** | 1.012 |
+| MLA S1024 H2 D512 | 0.3274 | **0.3196** | 1.024 | 0.5293 | **0.5265** | 1.005 |
+
+数值：5 个 shape 的 dq/dk/dv vs ref **逐位不变**（S512 2.426/2.975/3.735e-1；
+S1024H32 2.400/4.195/3.536e-1；S4096 2.635/2.643/3.216e-1；GQA kv4 2.517/5.408/7.072e-1；
+MLA S1024H2 2.232/3.337/3.602e-1）。另一次同 session 首测 S4096 main 2.2832→2.2269（1.025×）。
+
+### 26.5 ncu（S=4096，`--set full`）与 bound 结论
+
+| 指标 | PSS=33（O7e-2） | PSS=37（本轮） |
+|---|---|---|
+| shared store `bank_conflicts` | 29,464,683 | **12,329,835（−58%）** |
+| shared load `bank_conflicts` | 29,180,259 | **20,593,271（−29%）** |
+| L1/TEX Cache Throughput | 59.97% | **55.83%**（指标单跑 51.6%）|
+| Duration | 2.27 ms | 2.28 ms（**持平**）|
+| L2 / Compute / DRAM | 49.9 / 42.5 / 3.2% | 49.8 / 43.1 / 3.2% |
+| occupancy / regs / smem | 18.1% / 168 / 70.7KB | 18.1% / 168 / 72.7KB |
+| stall | — | `wait` **1.56** + `short_scoreboard` **1.50** + `long` 0.77，issue 45.9% |
+
+**结论（修正 O7e-2 的判断）**：bank conflict 与 L1/TEX 吞吐**不是** fp8 main 的限速器——
+把 store 冲突砍 58%、L1/TEX 59.97→55.83%，Duration 几乎不动。kernel 是 **mma 依赖延迟受限**
+（`wait`（fixed-latency）+ `short_scoreboard`（smem→mma）合计 ~3.06 cycle/issue，issue active
+仅 45.9%），且在 3 CTA/SM（168 regs / 72.7KB smem）下无法靠堆 warp 隐藏。真正剩下的杠杆是
+**减少跨 CTA 的 dK/dV `red`（L2 49.8%）** 或 **提 occupancy（须先砍寄存器/smem）**，而非再抠 smem 冲突。
+
+### 26.6 复现
+
+```bash
+# 两文件（默认 FA_PSS_EXTRA=5 → PSS=37）；A/B 用 =1 退回 PSS=33
+ARCH=sm_90 NVCC_FLAGS="-DFA_PSS_EXTRA=5" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# 按源码行拆 bank conflict
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:fa_bwd_fp8_mma_kernel --launch-count 1 \
+  --page source --print-source cuda,sass --csv \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# 单文件（device 由 sync_onefile_device.py 同步，逐字一致）
+python3 scripts/sync_onefile_device.py src/fp8/fa_bwd_fp8_kernels.cuh \
+  src/fp8/fa_bwd_fp8_mma_onefile.cu '#include <cuda_runtime.h>'
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o19_pss_ab.out.txt`（两文件 ×5 shape × PSS 33/37，
+数值+计时）、`src/fp8/fa_bwd_fp8_main_o19_ncu_s4096.out.txt`（`--set full`）、
+`src/fp8/fa_bwd_fp8_o19_tebench.out.txt`（TE FP8）、
+`src/fp8/fa_bwd_fp8_o19_fa3_te_baseline_fp16.out.txt`（FA2/FA3/TE fp16 三列）。
