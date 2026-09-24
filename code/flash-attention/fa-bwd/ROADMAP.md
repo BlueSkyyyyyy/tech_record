@@ -1674,11 +1674,19 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > （原版只有 wg0 串行做 dV+dK，张量工作量 3:1、wg1 空等）。**red 字节完全不变**（51.9M），
 > **stall `barrier` 1.61→0.46（−3.5×）**、Duration 997.7→**982.4µs**；main S4096 **1.013×（fp16）/
 > 1.038×（bf16）**、GQA kv4 1.021×/1.051×，数值与历史**逐位一致**。详见 `docs/01` §14l、`01b` §6t。
-> **下一步（按回报）**：① **O7b**——把 dK/dV 的跨 CTA `red` 换成「CTA 局部累加 + 非原子写 +
-> 二次归约」（消 L2 原子、顺带确定性反向，当前第一优先级）；② **fp8 侧同构跨 wg 归约**
-> （fp8 是 1 字节 operand、4wg 寄存器压力小一档）；③ O17 的 `BN=128` 微优化；
-> ④ TMA 化 Q/K/V/dO（O15a 通路已就绪，需把 HD=128 的 K-major tile 拆成 2×K=64 chunk）。
-> 详见 `docs/01` §14j/§14k/§14l、`docs/01b` §6s/§6t、`docs/04` §2.1/§2.2/§3。
+> **O18 已完成（第五十六轮，fp16）**：把 O17/O17-2 的 kv-tile 从 BN=64 翻到 **BN=128**
+> （`m64n128k16`，§14k.7 item 3）——tile 数减半 ⇒ barrier/`cp.async.wait`/wgmma commit-wait
+> 序列减半。冒烟 `fa_bwd_fp16_wgmma2b_smoke.cu` 逐位 PASS；`fa_bwd_fp16_wgmma2b_kernel`
+> （单/两文件，`--wg2bn`，230 regs/224KB/1 CTA/SM）。**main MHA S4096 1.029×（142.9 TF）、
+> S512 1.028×**，GQA/MQA 中性（保持 O17）；ncu Duration 982.4→**951.1µs**、**`red` 逐字节不变**
+> （BN 不动归约结构）。详见 `docs/01` §14m、`docs/04` §2.1/§3。
+> **下一步（按回报）**：① **O18-bf16**——把 O18 逐字 dtype 参数化到 bf16（机械、低风险）；
+> ② **O7b**——把 dK/dV 的跨 CTA `red` 换成「CTA 局部累加 + 非原子写 + 二次归约」
+> （消 L2 原子、顺带确定性反向；注意字节可能反增，需实测）；③ **fp8 侧同构跨 wg 归约**
+> （fp8 是 1 字节 operand、4wg 寄存器压力小一档）；④ TMA 化 Q/K/V/dO（O15a 通路已就绪，
+> 需把 HD=128 的 K-major tile 拆成 2×K=64 chunk）。**当前真正的墙仍是 L2 red（占 ~72%，
+> BN/MB 都动不了它）+ 1 CTA/SM**，只有「跨 CTA 归约/提 occupancy」能再推进。
+> 详见 `docs/01` §14j/§14k/§14l/§14m、`docs/01b` §6s/§6t、`docs/04` §2.1/§2.2/§3。
 > 1. **O5 收尾**：fp16/bf16 反向用 `mma.m16n8k16`+`ldmatrix` 张量核后端。
 >    进度：fp16 主 kernel **2.28→0.19 ms（512）/ 67.6→4.55 ms（4096），11.8–14.9×**；
 >    **bf16 主 kernel 1.88→0.190 ms（512）/ 42.2→4.51 ms（4096），9.4–9.9×**（第二十七轮，单/两文件、
@@ -1934,6 +1942,17 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
        做 dV+dK，张量工作量 3:1），red 字节不变但 **`barrier` stall 1.61→0.46（−3.5×）**、
        main S4096 **1.013×（fp16）/1.038×（bf16）**、GQA kv4 1.021×/1.051×，数值逐位不变
        （`SPLIT` 模板 + `--wg2split=0/1` A/B）。详见 `docs/01` §14l、`docs/01b` §6t。
+- [x] **O18：BN=128 版 wgmma2（fp16，第五十六轮）**。O17/O17-2 后 main 仍 **1 CTA/SM（12.5%）+
+       延迟受限**；§14k.7 item 3 提出把 KV-tile 从 BN=64 翻到 **128**：每 CTA 的 tile 数减半 ⇒
+       `__syncthreads`/`cp.async.wait`/wgmma `commit_group`+`wait0` 序列减半；GEMM1/2 用
+       `m64n128k16`（一条算两倍）。先冒烟 `fa_bwd_fp16_wgmma2b_smoke.cu` 逐位验证 m64n128 的
+       累加器布局与转置描述符（dV/dK/dQ/S 四项 **max_abs=0**，含 GEMM3/4 的 m64 半基址 = 存储列
+       64 的 `+1024B`）。新增 `fa_bwd_fp16_wgmma2b_kernel<128,SPLIT>`（单/两文件 device 逐字一致，
+       `--wg2bn`，230 regs/0 spill/224KB smem/1 CTA/SM）。**ncu（S4096）**：Duration 982.4→
+       **951.1µs**、L1/TEX 49.5→44.3%、**`red` 51,904,512 逐字节不变**（BN 不动归约结构）、
+       `barrier` 0.46→0.93。**main MHA S4096 0.9895→0.9618ms（142.9 TF，1.029×）/ S512 1.028×**；
+       GQA/MQA 中性（0.994–0.995×，保持 O17）；数值 vs ref 逐位一致。墙仍是 **L2（red 占 ~72%）+
+       `wait` + 低 occ**。详见 `docs/01` §14m、`docs/04` §2.1/§3。
 - [ ] （backlog）O7b：dK/dV 的跨 CTA 归约（分块 `*_accum` + convert）→ **确定性反向**；字节不减、
       多一趟读回，只在需要确定性时做。**O7e 已证明 fp8 侧该 L2 墙只剩 43.7% < L1/TEX 66%**；
       fp16/bf16 侧见上 O17（跨 wg 归约才是真杠杆）。
