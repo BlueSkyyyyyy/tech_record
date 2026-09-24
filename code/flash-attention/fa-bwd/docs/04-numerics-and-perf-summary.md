@@ -621,6 +621,16 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > GQA 1.037×，数值逐位不变**，已设为默认。S4096 端到端 **2.65ms / 52.2 TF**、为 TE FP8（465TF）的
 > **4.5×**。详见 `03` §29、原始输出 `src/fp8/o21_main_bn_ab_{s4096,gqa_kv4}.out.txt`、
 > `o21_onefile_s4096.out.txt`、`o21_ncu_bn{32,64}_s4096.out.txt`。
+>
+> **O22（第六十二轮）——fp8 Hopper 路径（wgmma LSE + 主 kernel GEMM1/2）默认化**：`-DFA_WGMMA`
+> （`sm_90a`）构建下 `lsewgm`/`wgmma` 默认开（`sm_90` 构建不变）。同 binary、同 session A/B
+> （CUDA event，端到端 total）：**S512 0.1421→0.1341（1.060×）/ S1024H32 0.5623→0.5308（1.059×）/
+> S4096 2.6937→2.4837（1.085×）/ GQA kv4 0.5296→0.4947（1.071×）**；S4096 **2.48ms / 55.3 TF**
+> （main-only 67.3 TF，峰值 3.4%），为 TE FP8（同 session 0.5899ms/465.9TF）的 **4.21×**（O21b 4.5×）。
+> 收益 = LSE `wgmma`（preprocess 1.246×）+ 主 kernel `wgmma`（main 1.065×）；数值 vs ref 逐位同级。
+> 同轮量测并**否决**：`--regdq=0`（main 2.136 vs 2.480ms，保留 REGDQ——local spill 比多发 dQ red
+> 便宜）、`FA_ILV`（GEMM1/2 交错，中性偏负）、ksplit 重标定（维持 k=4）、`PSS` 扫描（37 近最优）。
+> 详见 `03` §30、原始输出 `src/fp8/o22_*`。
 
 ---
 

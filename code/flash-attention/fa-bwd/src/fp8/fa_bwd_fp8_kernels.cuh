@@ -141,6 +141,15 @@ struct Fp8Cfg {
 #define FA_FUSE_EPI 1
 #endif
 
+  // O22：mma 主路径的 GEMM1/GEMM2 **指令级交错**开关（需 FA_FUSE_EPI=1）。默认 0：保持原顺序
+  //   （GEMM1 mma → GEMM1 epilogue → GEMM2 mma → GEMM2 epilogue）。置 1：先连发两条独立 GEMM
+  //   的 mma（acc/acc2 两个累加器），再依次做 epilogue——让 GEMM2 的 8 条 mma 填在 GEMM1
+  //   epilogue（exp/量化）之前，掩盖 mma 依赖延迟（O20 ncu：`wait` 1.55 是头号 stall）。数学
+  //   与数值逐位不变（同一批 mma、同一 (r,c) 映射、同一次序的 fp32 累加），只改指令发射顺序。
+#ifndef FA_ILV
+#define FA_ILV 0
+#endif
+
   // O4b：Kt/Qt/dOt 三个「逐字节 scatter 写的转置副本」→ Kp/Qp/dOp 三个 **K 配对布局**
   //   （uint16：[K/2][HD]，元素 = 2 个相邻 K 值），用 `ldmatrix.x2.trans` 读 B 片段。
   //   * Qp（[BM/2][HD]）供 GEMM4 的 B=Qᵀ；dOp 供 GEMM3 的 B=dOᵀ；Kp（[BN/2][HD]）供 GEMM5。
@@ -1505,6 +1514,58 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       // O20：P 留在寄存器，供 GEMM2 epilogue 直接用，免去 Ps 的 smem 回读。
       float preg[MTM][MTN][4];
 #endif
+#if FA_ILV && FA_FUSE_EPI
+      // ---- O22：GEMM1/GEMM2 指令级交错：两条独立 GEMM 的 mma 先连发（各自累加器），
+      //      再做 epilogue。GEMM2 只读 dOs/Vs（本 tile 已就绪），与 GEMM1 的 epilogue 无依赖，
+      //      故顺序交换在数学上等价、数值逐位不变（fp32 累加次序未动）。----
+      {
+        float acc[MTM][MTN][4], acc2[MTM][MTN][4];
+#pragma unroll
+        for (int i = 0; i < MTM; ++i)
+#pragma unroll
+          for (int j = 0; j < MTN; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) { acc[i][j][q] = 0.f; acc2[i][j][q] = 0.f; }
+        mma_block<BM / 2, BN / 2, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
+        mma_block<BM / 2, BN / 2, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc2, wr, wc, lane);
+        const int r0 = wr * (BM / 2), c0 = wc * (BN / 2);
+#pragma unroll
+        for (int i = 0; i < MTM; ++i)
+#pragma unroll
+          for (int j = 0; j < MTN; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              int c = c0 + j * 8 + c2 + (q & 1);
+              int qi = m0 + r, jg = j0 + c;
+              float p = 0.f;
+              if (qi < S && jg < S && !(causal && jg > qi)) {
+                float sval = acc[i][j][q] * scale * qs_s[r] * ks_s[c];
+                float lv = 0.f;
+                if constexpr (PREL) lv = lse_r[i * 2 + (q >= 2 ? 1 : 0)];
+                else lv = lse[((size_t)(b * S + qi)) * H + h];
+                p = fexp(sval - lv);
+              }
+              Ps[r * PSS + c] = p;
+              preg[i][j][q] = p;
+            }
+#pragma unroll
+        for (int i = 0; i < MTM; ++i)
+#pragma unroll
+          for (int j = 0; j < MTN; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              int c = c0 + j * 8 + c2 + (q & 1);
+              int qi = m0 + r;
+              float dpv = acc2[i][j][q] * dos_s[r] * vs_s[c];
+              float del = 0.f;
+              if constexpr (PREL) del = del_r[i * 2 + (q >= 2 ? 1 : 0)];
+              else if (qi < S) del = delta[((size_t)(b * S + qi)) * H + h];
+              Ss[r * PSS + c] = preg[i][j][q] * (dpv - del);
+            }
+      }
+#else
       float acc[MTM][MTN][4];
 #pragma unroll
       for (int i = 0; i < MTM; ++i)
@@ -1571,6 +1632,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 #endif
             }
       }
+#endif  // FA_ILV
     }  // end else (mma path)
     __syncthreads();
 

@@ -1642,6 +1642,33 @@
     `src/fp8/o20_tebench_fp8.out.txt`、`src/fp8/o20_fa3_te_baseline_fp16.out.txt`；
     详见 `docs/03` §28、`docs/04` §2.3。
 
+- 2026-09-24（第六十二轮）：**O22 完成（fp8 Hopper 路径默认化：LSE + 主 kernel GEMM1/2 的 wgmma；
+  端到端 1.06–1.09×）** + 三组候选杠杆判决（负结果）。
+  - 动机：fp8 main 的墙（O7e-3/O19/O20/O21 一致）是 **mma 依赖延迟（`wait`+`short_scoreboard`）+
+    3 CTA/SM**；而 O9c（LSE）/O9c-2（主 kernel GEMM1/2）早已实现 Hopper `wgmma`，只是默认关。
+    本轮把 **`-DFA_WGMMA` 构建下 `lsewgm`/`wgmma` 默认开**（新增 `--lsewgm=0/1`、`--wgmma=0/1`
+    同 binary A/B；`sm_90` 构建行为不变）。单/两文件 device 逐字一致（脚本核对 `DETACHED...`
+    `DEVICE REGION IDENTICAL`）。
+  - **性能（同 session A/B，event，端到端 total）**：S512 0.1421→**0.1341（1.060×）**、
+    S1024H32 0.5623→**0.5308（1.059×）**、S4096 2.6937→**2.4837（1.085×）**、GQA kv4
+    0.5296→**0.4947（1.071×）**。收益 = LSE wgmma（S4096 preprocess 0.3957→0.3176，1.246×）
+    + 主 kernel wgmma（main 2.1752→2.0432，1.065×）。S4096 **2.48ms / 55.3 TF**（main-only
+    67.3 TF，峰值 3.4%），为 TE FP8（同 session 0.5899ms/465.9TF）的 **4.21×**（O21b 4.5×）。
+    数值 vs ref 与历史逐位同级（S512 2.426/2.972/3.733e-1；S4096 2.635/2.644/3.216e-1；
+    GQA kv4 2.517/5.339/7.173e-1；MLA S1024H2 2.232/3.337/3.602e-1）；单/两文件一致。
+  - **同轮否决的三组杠杆**：① `--regdq=0`——O21 ncu 的 local spill（68B st/380B ld、占 L1TEX
+    9.57%）来自 `dqacc[2][8][4]`，但关掉后 dQ 每 nt tile 发一次跨 CTA `atomicAdd`，main
+    **on 2.136 vs off 2.480ms（on 快 1.16×）** ⇒ **保留 REGDQ**；② `FA_ILV`（GEMM1/2 mma 交错，
+    数值逐位不变）三次 A/B 2.180 vs 2.185ms ⇒ 中性偏负，默认 0；③ ksplit 重标定（S4096
+    k=2/4/8/16=2.341/2.175/2.157/2.256）与 `PSS` 扫描（32–64 无法消 2-way store 冲突）⇒ 均维持原值。
+  - **ncu（main, S=4096, wgmma 默认）**：Duration 2.05ms；stall `wait 1.53 + short 1.57 + long 0.66`
+    ⇒ 仍是 **mma 依赖延迟（GEMM3/4/5 仍 mma，fp8 wgmma 无转置操作数）+ 3 CTA/SM**。
+  - 原始输出 `src/fp8/o22_wgmma_default_{s4096,shapes,onefile}.out.txt`、
+    `o22_mma_baseline_shapes.out.txt`、`o22_regdq_ab_s4096.out.txt`、`o22_ilv_ab_s4096.out.txt`、
+    `o22_ksplit_s4096.out.txt`、`o22_ncu_stall_{s4096,wgmma_s4096}.out.txt`、
+    `o22_fa3_te_baseline_fp16.out.txt`、`o22_te_fp8_bench.out.txt`；
+    详见 `docs/03` §30、`docs/04` §2.3。
+
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -1846,6 +1873,15 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 直接 `atomicAdd`，消掉 convert。**端到端 S4096 2.7469→2.6497ms（1.037×）**、单文件 1.046×、
 > GQA 1.037×，**数值逐位不变**；已设为默认路径（`--cvt=1` 供 A/B）。S4096 端到端 **2.65ms/52.2TF**、
 > 为 TE FP8（0.5909ms/465TF）的 **4.5×**（O20 4.7×）。详见 `docs/03` §29。
+> **O22 已完成（第六十二轮）——fp8 Hopper 路径默认化（正结果）+ 三组负结果判决**：把 fp8 早已实现、
+> 却默认关的 Hopper `wgmma`（O9c 的 LSE + O9c-2 的主 kernel GEMM1/2）在 `-DFA_WGMMA`（`sm_90a`）
+> 构建下**默认开**（新增 `--lsewgm=0/1`、`--wgmma=0/1` 同 binary A/B；`sm_90` 构建不变，device 逐字
+> 一致）。同 session 端到端 total：**S512 1.060× / S1024H32 1.059× / S4096 1.085× / GQA kv4 1.071×**；
+> S4096 **2.48ms / 55.3 TF**，为 TE FP8（0.5899ms/465.9TF）的 **4.21×**。同轮**否决**：`--regdq=0`
+> （main 2.136 vs 2.480ms ⇒ 保留 REGDQ，local spill 比多发 dQ red 便宜）、`FA_ILV`（GEMM1/2 mma
+> 交错，中性偏负）、ksplit 重标定（维持 k=4）、`PSS` 扫描（37 近最优）。**fp8 main 的墙仍 = mma 依赖
+> 延迟（GEMM3/4/5 仍 mma，fp8 wgmma 无转置操作数=O9c-2b 硬件阻塞）+ 3 CTA/SM**，下一步仍是 occupancy
+> （168→≤128 regs、72.7→≤58KB smem）或跨-tile 软流水。详见 `docs/03` §30、`docs/04` §2.3。
 > 1. **O5 收尾**：fp16/bf16 反向用 `mma.m16n8k16`+`ldmatrix` 张量核后端。
 >    进度：fp16 主 kernel **2.28→0.19 ms（512）/ 67.6→4.55 ms（4096），11.8–14.9×**；
 >    **bf16 主 kernel 1.88→0.190 ms（512）/ 42.2→4.51 ms（4096），9.4–9.9×**（第二十七轮，单/两文件、
@@ -2132,7 +2168,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       S4096 0.816×**；ncu 证实 regs 168→255、smem 72.7→105.2KB、occ 3→2 CTA/SM ⇒ 延迟受限下
       少 1/3 在飞 warp 更亏（与 O19 一起证伪 fp8 的「放大 tile/减 red」）。O21b 把 acc 别名到 fp32
       输出、消掉纯 fp32→fp32 的 `convert_kernel`：端到端 **S4096 1.037× / 单文件 1.046× / GQA 1.037×**，
-      **数值逐位不变**，已设为默认。详见 `docs/03` §29。
+       **数值逐位不变**，已设为默认。详见 `docs/03` §29。
+- [x] **O22（第六十二轮）fp8 Hopper 路径默认化（正结果）+ REGDQ/ILV/ksplit/PSS 判决（负结果）**。
+      `-DFA_WGMMA` 构建下 `lsewgm`/`wgmma` 默认开（`--lsewgm=0/1`、`--wgmma=0/1` 供 A/B；`sm_90`
+      构建不变、device 逐字一致）：同 session 端到端 **S512 1.060× / S1024H32 1.059× / S4096 1.085× /
+      GQA kv4 1.071×**；S4096 **2.48ms / 55.3 TF**（main-only 67.3 TF），为 TE FP8 的 **4.21×**。
+      同轮否决：`--regdq=0`（main 2.136 vs 2.480ms，保留 REGDQ）、`FA_ILV`（中性偏负）、
+      ksplit 重标定（维持 k=4）、`PSS` 扫描（37 近最优）。墙仍 = **mma 依赖延迟 + 3 CTA/SM**。
+      详见 `docs/03` §30、`docs/04` §2.3。
 - [ ] （backlog）O7b：dK/dV 的跨 CTA 归约（分块 `*_accum` + convert）→ **确定性反向**；字节不减、
       多一趟读回，只在需要确定性时做。**O7e 已证明 fp8 侧该 L2 墙只剩 43.7% < L1/TEX 66%**；
       **O19/O21 又证伪 fp8 的「减 red/放大 tile」**⇒ fp8 下一步只剩「提 occupancy（168→≤128 regs +

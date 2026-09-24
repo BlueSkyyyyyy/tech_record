@@ -1,0 +1,12 @@
+===== b1_s512_h16_d128_causal_fp8 (two-file, sm_90a mma baseline) =====
+[timing] total(quant+pre+main+cvt) 0.1421 ms  15.11 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0141 ms | preprocess 0.0467 ms | main 0.0670 ms | convert 0.0142 ms (cvt_on=0)
+===== b1_s1024_h32_d128_causal_fp8 (two-file, sm_90a mma baseline) =====
+[timing] total(quant+pre+main+cvt) 0.5623 ms  30.56 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0405 ms | preprocess 0.1021 ms | main 0.3912 ms | convert 0.0285 ms (cvt_on=0)
+===== b1_s4096_h16_d128_causal_fp8 (two-file, sm_90a mma baseline) =====
+[timing] total(quant+pre+main+cvt) 2.6937 ms  51.02 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0689 ms | preprocess 0.3957 ms | main 2.1752 ms | convert 0.0538 ms (cvt_on=0)
+===== b1_s1024_h32_d128_kv4_causal_fp8 (two-file, sm_90a mma baseline) =====
+[timing] total(quant+pre+main+cvt) 0.5296 ms  32.44 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0282 ms | preprocess 0.1001 ms | main 0.3768 ms | convert 0.0245 ms (cvt_on=0)
