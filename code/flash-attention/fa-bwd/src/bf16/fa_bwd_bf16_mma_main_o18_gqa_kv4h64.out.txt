@@ -1,0 +1,29 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv4_causal_bf16
+B=1 S=1024 H=64 Hkv=4 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[timing] total(3 kernels) 0.4469 ms  76.89 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1279 ms | main 0.2803 ms | convert 0.0386 ms
+[O8b A/B] lse O8 0.2210 ms | bal(单缓冲) 0.1235 ms (1.790x) | bal+cpasync(双缓冲) 0.0824 ms (2.682x)
+[O6 A/B] main nopipe 0.6949 ms (49.44 TF) | pipe(KV both) 0.4593 ms (74.81 TF) | pipe2(K only) 0.4891 ms (70.26 TF) => nopipe/pipe 1.513x, nopipe/pipe2 1.421x
+[O6c A/B] main sched0(原样) 0.4887 ms | sched1(交错) 0.4869 ms (1.004x) | sched2(逆序) 0.4870 ms (1.004x)
+[O9b A/B] main mma(64,64,2) 0.4484 ms (76.62 TF) | wgmma(GEMM1/2) 0.4488 ms (76.56 TF) => 0.999x
+[O17 A/B] main mma(64,64,2) 0.4471 ms | O9b wgmma 0.4463 (1.002x) | O17 wgmma2(BM128) 0.2799 (1.597x) TF 122.8
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 0.2854 ms (120.4 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.2799 ms (122.8 TF) => 1.020x | max|diff| dq/dk/dv=0.00e+00/2.14e-04/2.75e-04
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/8.33e-03/1.09e-02 | wg2-vs-O9b dq/dk/dv=0.00e+00/8.36e-03/1.07e-02
+[O18 A/B] main O17 wg2(BN64) 0.2799 ms (122.8 TF) | O18 wg2b(BN128,split) 0.2822 ms (121.8 TF) => 0.992x | O18 wg2b(BN128,串行) 0.2875 ms => 0.973x | max|diff| wg2b-vs-wg2 dq/dk/dv=3.58e-07/2.06e-04/5.49e-04 | wg2bns-vs-wg2b 0.00e+00/1.83e-04/3.66e-04
+[O5c A/B] main (64,32,2) 0.4899 ms (70.14 TF) | (64,64,2) 0.4498 (76.39) | (32,32,1) 0.7576 (45.36) | (32,32,2) 0.7567 (45.41) => best 1.089x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 0.5758 (59.67) | f4 0.6038 (56.90,-4.6%) | f2+PREL 0.4890 (70.27,+17.8%) | f4+PREL 0.4882 (70.38,+18.0%)
+  (BM=64,BN=64,PIPE=2): base 0.5392 (63.73) | f4 0.5638 (60.94,-4.4%) | f2+PREL 0.4491 (76.52,+20.1%) | f4+PREL 0.4542 (75.65,+18.7%)
+  (BM=32,BN=32,PIPE=1): base 0.7665 (44.83) | f4 0.7742 (44.38,-1.0%) | f2+PREL 0.7562 (45.44,+1.4%) | f4+PREL 0.7595 (45.24,+0.9%)
+  (BM=32,BN=32,PIPE=2): base 0.7660 (44.85) | f4 0.7749 (44.34,-1.1%) | f2+PREL 0.7555 (45.48,+1.4%) | f4+PREL 0.7570 (45.39,+1.2%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.351e-02  max_rel=2.563e+00
+  dk   vs ref: max_abs=3.091e-02  max_rel=2.097e+00
+  dv   vs ref: max_abs=4.420e-02  max_rel=4.348e+00
+  fa_dq     vs ref: max_abs=1.710e-02  max_rel=3.368e+00
+  fa_dk     vs ref: max_abs=3.543e-02  max_rel=8.310e+00
+  fa_dv     vs ref: max_abs=6.511e-02  max_rel=8.543e+00
+  te_dq     vs ref: max_abs=1.710e-02  max_rel=3.317e+00
+  te_dk     vs ref: max_abs=3.534e-02  max_rel=6.200e+00
+  te_dv     vs ref: max_abs=6.511e-02  max_rel=8.543e+00

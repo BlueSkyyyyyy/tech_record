@@ -163,6 +163,26 @@ static void launch_bwd_wgmma2(dim3 mg, const bf16* q, const bf16* k, const bf16*
                                                           dk_acc, dv_acc, S, H, Hkv, scale,
                                                           causal);
 }
+
+// O18-bf16：BN=128 版 wgmma2（只 HD=128）。tile 数减半；smem = 1024 + Q32 + dO32 + K 2×32 +
+// V32 + P32 + dS32 ≈ 230400B（仍 1 CTA/SM）。
+template <int HD, bool SPLIT = true>
+static void launch_bwd_wgmma2b(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
+                               const bf16* do_, const float* delta, const float* lse,
+                               float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
+                               int Hkv, float scale, int causal) {
+  static_assert(HD == 128, "wgmma2b 只做 HD=128");
+  constexpr int BM = 128, BN = 128;
+  constexpr int QTILE = (BM / 8) * (HD / 64) * 1024;
+  constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
+  constexpr int PTILE = (BM / 8) * (BN / 64) * 1024;
+  constexpr int smem = 1024 + QTILE * 2 + KTILE * 3 + PTILE * 2;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_wgmma2b_kernel<HD, SPLIT>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  fa_bwd_bf16_wgmma2b_kernel<HD, SPLIT><<<mg, 256, smem>>>(q, k, v, do_, delta, lse, dq_acc,
+                                                           dk_acc, dv_acc, S, H, Hkv, scale,
+                                                           causal);
+}
 #endif
 
 int main(int argc, char** argv) {
@@ -185,6 +205,8 @@ int main(int argc, char** argv) {
   int wgmma_sel = 0;
   // O17：2 warpgroup（BM=128，跨 wg 归约）wgmma 主 kernel（仅 FA_WGMMA 构建、D==128）。
   int wg2_sel = 0;
+  // O18：BN=128 版 wgmma2（仅 FA_WGMMA 构建、D==128）。
+  int wg2bn_sel = 0;
   // O17-2：wgmma2 的 GEMM3/GEMM4 是否拆分到两个 warpgroup（1=拆，0=原版 wg0 串行）。
   int wg2split_sel = 1;
   int iters = 50;
@@ -207,6 +229,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--wg2=", 0) == 0) wg2_sel = atoi(a.c_str() + 6);
     else if (a.rfind("--wg2split=", 0) == 0) wg2split_sel = atoi(a.c_str() + 11);
     else if (a == "--wg2") wg2_sel = 1;
+    else if (a.rfind("--wg2bn=", 0) == 0) wg2bn_sel = atoi(a.c_str() + 8);
+    else if (a == "--wg2bn") wg2bn_sel = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -397,6 +421,16 @@ int main(int argc, char** argv) {
   const bool prel_sel = (prel_opt >= 0) ? (prel_opt != 0) : true;
   auto run_main = [&]() {
 #ifdef FA_WGMMA
+    if (wg2bn_sel && D == 128) {
+      dim3 g((S + 127) / 128, H, B);
+      if (wg2split_sel)
+        launch_bwd_wgmma2b<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                      d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+      else
+        launch_bwd_wgmma2b<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+      return;
+    }
     if (wg2_sel && D == 128) {
       dim3 g((S + 127) / 128, H, B);
       if (wg2split_sel)
@@ -623,6 +657,14 @@ int main(int argc, char** argv) {
           dim3 g((S + 127) / 128, H, B);
           launch_bwd_wgmma2<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
                                         d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+        } else if (mode == 6) {
+          dim3 g((S + 127) / 128, H, B);
+          launch_bwd_wgmma2b<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+        } else if (mode == 7) {
+          dim3 g((S + 127) / 128, H, B);
+          launch_bwd_wgmma2b<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                         d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
         } else if (mode == 1) {
           dim3 g((S + 63) / 64, H, B);
           launch_bwd_wgmma<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
@@ -646,12 +688,14 @@ int main(int argc, char** argv) {
       if (dv_c) CUDA_CHECK(cudaMemcpy(dv_c, d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
     };
     std::vector<float> q0(n), k0(nkv), v0(nkv), q1(n), k1(nkv), v1(nkv), q2(n), k2(nkv),
-        v2(nkv), q5(n), k5(nkv), v5(nkv);
-    float ms_mma = 0.f, ms_wgm = 0.f, ms_wg2 = 0.f, ms_wg2ns = 0.f;
+        v2(nkv), q5(n), k5(nkv), v5(nkv), q6(n), k6(nkv), v6(nkv), q7(n), k7(nkv), v7(nkv);
+    float ms_mma = 0.f, ms_wgm = 0.f, ms_wg2 = 0.f, ms_wg2ns = 0.f, ms_wg2b = 0.f, ms_wg2bns = 0.f;
     time_o17(0, &ms_mma, q0.data(), k0.data(), v0.data());
     time_o17(1, &ms_wgm, q1.data(), k1.data(), v1.data());
     time_o17(2, &ms_wg2, q2.data(), k2.data(), v2.data());
     time_o17(5, &ms_wg2ns, q5.data(), k5.data(), v5.data());
+    time_o17(6, &ms_wg2b, q6.data(), k6.data(), v6.data());
+    time_o17(7, &ms_wg2bns, q7.data(), k7.data(), v7.data());
     auto mad = [](const std::vector<float>& a, const std::vector<float>& b) {
       double d = 0; for (size_t i = 0; i < a.size(); ++i) d = std::max(d, (double)std::fabs(a[i]-b[i])); return d;
     };
@@ -667,6 +711,13 @@ int main(int argc, char** argv) {
     printf("[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=%.2e/%.2e/%.2e | wg2-vs-O9b "
            "dq/dk/dv=%.2e/%.2e/%.2e\n",
            mad(q2, q0), mad(k2, k0), mad(v2, v0), mad(q2, q1), mad(k2, k1), mad(v2, v1));
+    printf("[O18 A/B] main O17 wg2(BN64) %.4f ms (%.1f TF) | O18 wg2b(BN128,split) %.4f ms "
+           "(%.1f TF) => %.3fx | O18 wg2b(BN128,串行) %.4f ms => %.3fx | "
+           "max|diff| wg2b-vs-wg2 dq/dk/dv=%.2e/%.2e/%.2e | wg2bns-vs-wg2b %.2e/%.2e/%.2e\n",
+           ms_wg2, main_flops / (ms_wg2 * 1e-3) / 1e12, ms_wg2b,
+           main_flops / (ms_wg2b * 1e-3) / 1e12, ms_wg2 / ms_wg2b, ms_wg2bns,
+           ms_wg2 / ms_wg2bns, mad(q6, q2), mad(k6, k2), mad(v6, v2), mad(q7, q6), mad(k7, k6),
+           mad(v7, v6));
   }
 #endif
   }  // end if (D == 128)
