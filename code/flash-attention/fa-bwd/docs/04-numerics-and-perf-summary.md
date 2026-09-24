@@ -796,6 +796,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp8 | **mma main（O7e-2 后, S=4096, ksplit=4, REGDQ=true, F16B）** | 3.22% | **59.97%** | 41.81% | 18.08%（70.66KB, 3 CTA/SM） | 10.34 | short/long_scoreboard | **L1/TEX 60.0% + L2 49.9%（dK/dV 跨 CTA red）+ spill(~2.7M local)**；shared load 冲突 **62.8M→29.2M（−53.5%，fold 列读改无冲突映射）**、总多余 wavefronts 79.9M→41.5M、Duration 2.41→**2.27ms** |
 | fp8 | **mma main（O21, S=4096, BN=64）** | 2.45% | 39.77% | 31.55% | **12.28%（105.22KB, 2 CTA/SM, 255 regs）** | — | —（Warp Cyc/Inst 5.92） | **负结果**：tile 相位减半但 occupancy 3→2 CTA/SM ⇒ Duration 2.19→**2.74ms**（0.816×）；与 O19 一起证伪 fp8「放大 tile/减 red」 |
 | fp8 | **mma main（O27 fold rcp-mul, S=4096, ksplit=4）** | — | 61.64% | 43.65% | 18.1%（70.66KB, 3 CTA/SM, 168 regs） | 10.34 | wait 1.48、short_scoreboard 1.43、long 0.87、barrier 0.27 | **Duration 2.06→1.78ms、executed inst 852.6M→735.2M（−13.7%）**；墙仍是 **mma 依赖延迟（wait+short）+ 3 CTA/SM**（O7e-3/O19/O20/O22 结论未变），但 fold 的精确除法（~10+ 指令/元素）换成每行一次 `__frcp_rn`+乘法 |
+| fp8 | **mma main（O41 K/V-TMA, S=4096, ksplit=4）** | 4.24% | 69.18% | 47.25% | 18.35%（**74.82KB, 3 CTA/SM**, 168 regs） | 20.69 | wait 1.53、short 1.30、long **0.55**、barrier 0.42 | **mma 依赖延迟（wait+short）+ L2 77.9%**；K/V TMA 消掉 K/V 全局读地址运算（long 0.80→0.55、short 1.61→1.30），`red` 逐字节不变，3 CTA/SM 保住（smem 74816B）；O37 的 Q/dO-TMA 对照 Duration 1.67→**1.61ms** |
 | fp8 | **quant 旧（per-row, S=4096）** | 24.29% | **73.73%** | **71.80%** | 87.82%（Waves 31.03） | 31.03 | —（34.6M inst） | **smem 归约（L1/TEX 73.7%）+ 标量加载（Compute 71.8%）**，DRAM 仅 24% |
 | fp8 | **quant 新（O14 warp-per-row, S=4096）** | **71.31%** | 26.50% | 51.49% | 79.44%（Waves 7.76） | 7.76 | —（**7.93M inst, −77%**） | **DRAM 带宽 71%（elementwise 上限）**；Duration 46.2→**15.4µs** |
 | fp8 | **delta 旧（per-row, S=4096）** | 31.13% | — | **74.93%** | 83.09%（17 regs） | 31.03 | smem 树归约 7×barrier | **smem 归约 + Compute 75%**；Duration **42.94µs** |
@@ -1464,3 +1465,37 @@ occ 6.25%→19.27%）。**墙 = 网格不足一个波；split 填满后回到 LS
 **对标**：varlen / D=512 无 FA/TE 基线（仅 ours）；定长 D=128 默认 TMA 路径逐位回归、
 对标不受影响（MHA S4096 ours total 约 FA3 的 3.9×）。原始输出见 `src/{fp8,fp16,bf16}/fa_bwd_*_o40_*`
 与各 dtype 文档 §43/§14w/§6ae。
+
+## 17. fp8 主 kernel 的 K/V 4D-TMA（O41，第八十八轮）—— **正结果，默认 auto**
+
+> roadmap「下一步候选 ①」。O37 只把 fp8 主 kernel 的 Q/dO 改 4D-TMA；O41 把 **K/V 也 TMA 化**
+> （K 双缓冲、V 单缓冲），K 双缓冲靠 `dS3` 复用当前 K stage、`Ap` 复用 `Vs` 实现零成本折叠，
+> `smem 70656→74816B`（≤ 76800 的 3-CTA/SM 上限）⇒ 仍 3 CTA/SM。
+
+**数值**（vs fp32 ref，max_abs dq/dk/dv）与历史**逐位一致**：S512 2.426/2.972/3.733e-1、
+S4096 2.635/2.644/3.216e-1、GQA kv4 2.517/5.339/7.173e-1、MQA kv1 4.101e-1/1.572/2.126、
+full S1024 5.520/5.312/4.024e-2；`max_abs(kvtma-vs-qdtma)≤1.2e-5`（仅 atomic 次序）。
+
+**性能**（同 session A/B，CUDA event；`--kvtma` 0→1，main-only）：
+
+| shape | Q/dO-TMA | **Q/dO/K/V-TMA** | 比 | ours total | TE FP8（同 session） |
+|---|---|---|---|---|---|
+| MHA S512 | 0.0734 ms | **0.0643** | **1.141×** | 0.1033 ms / 20.78 TF | 0.1008 ms / 42.60 TF |
+| MHA S1024 H32 | 0.3188 | **0.2825** | **1.128×** | 0.3894 ms / 44.12 TF | 0.2063 ms / 166.54 TF |
+| MHA S4096 | 1.7131 | **1.6056** | **1.067×** | **1.9215 ms / 71.53 TF** | 0.5905 ms / 465.48 TF |
+| GQA q32/kv4 | 0.2856 | **0.2654** | **1.076×** | 0.3547 ms / 48.44 TF | — |
+| MQA q64/kv1 | 0.5204 | **0.4930** | **1.056×** | 0.6280 ms / 54.71 TF | — |
+| full S1024 H16 | 0.3384 | **0.3193** | **1.060×** | 0.5675 ms / 15.14 TF | — |
+
+端到端 S4096 **2.0508→1.9215 ms**，为 TE FP8 的 **3.25×**（O37 3.49×）；S512 的 main
+0.0643 ms 已快过 TE FP8 整条反向 0.1008 ms。单/两文件 device 逐字一致（单文件 total 1.934 ms）。
+
+**ncu**（S=4096，同 binary `--kvtma` 0/1）：Duration 1.67→**1.61 ms**；`long_scoreboard`
+0.80→**0.55**、`short_scoreboard` 1.61→**1.30**、`wait` 1.58→1.53、`barrier` 0.28→0.42；
+**`lts__t_sectors_op_red` 114,524,160 逐字节不变**；lts throughput 70.9→**77.9%**；
+168 regs / 74.82KB smem / **3 CTA/SM（Block Limit Shared Mem=3）**。**墙仍是 mma 依赖延迟
+（`wait`+`short_scoreboard`）+ 抬头的 L2**；K/V 搬运这条路已到上限。
+
+**对标**：fp8 无 FA 基线，仅 TE；同 session 纯反向 FA3 fp16 MHA S4096 0.3243ms/848TF
+（ours fp8 total 距之仍量级差距）。详见 `docs/03` §44。原始输出
+`src/fp8/fa_bwd_fp8_o41_sweep.out.txt`、`..._o41_ncu_ab_s4096.out.txt`。

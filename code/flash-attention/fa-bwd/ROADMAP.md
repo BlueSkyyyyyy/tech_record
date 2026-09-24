@@ -127,6 +127,10 @@
   **剩余（下一步首选）**：fp8 主 kernel 的对应 TMA 化——fp8 一行 128B = 一个 SW128 atom 的整行
   （`UINT8` tensormap、一个 box 搬整块，O32 的 LSE 已示范），但 Kp/Qp/dOp 配对副本需在 smem 上
   重建、并处理 dS3/Ap 对 Ks/Vs 的复用。见 backlog。
+  **O41（第八十八轮，已完成）**：fp8 主 kernel 的 **K/V 也改 4D-TMA**（K 双缓冲、V 单缓冲；
+  `dS3` 复用当前 K stage、`Ap` 复用 `Vs` ⇒ smem 74816B 仍 3 CTA/SM；Kp 由 SW128 K tile 重建）。
+  **main A/B 1.056–1.141×，端到端 S4096 2.0508→1.9215ms（TE FP8 的 3.49×→3.25×）**，数值逐位
+  一致，`red` 逐字节不变。**fp8 主 kernel 的 TMA 家族至此覆盖 Q/K/V/dO。** 见 `docs/03` §44。
   **O37（第七十六轮，fp16/bf16 O33–O36 的 fp8 版第一步）**：fp8 主 kernel 的 **Q/dO** 改用
   4D-TMA（`fp8_mma_body<...,TMA>` 抽公共体 + 两个薄壳；TMA 搬入 SW128 后再从 smem 重建
   Qp/dOp）；**main 同 binary A/B S512 1.075× / S4096 1.050× / GQA 1.045× / MQA 1.074×**、
@@ -2593,7 +2597,25 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第八十七轮）**：**O40——把 LSE 的 K 维 split 移植到非 TMA 的 wgmma LSE
+> **最新（第八十八轮）**：**O41——fp8 主 kernel 的 K/V 也改 4D-TMA（K 双缓冲、V 单缓冲），
+> 正结果、默认 auto**。补上 roadmap「下一步候选 ①」：O37 只做了 Q/dO，本节把 K/V 也 TMA 化。
+> O37 §36.6 曾判「K/V 双缓冲 smem 顶格」；本轮用两处**零成本折叠**解决——`dS3` 复用当前
+> K stage、`Ap` 复用 `Vs` ⇒ 只多一个 `ks_sw_bytes`(4096B)+64B mbar，`smem 70656→74816B`
+> （≤ 实测 3-CTA/SM 上限 76800）⇒ **仍 3 CTA/SM**。Kp 由 SW128 K tile 逐字节重建；mbarrier
+> 相位：K 两 stage 各一、V 一个。新增壳 `fa_bwd_fp8_mma_kvtma_kernel` + `launch_bwd_main_kvtma`
+> + CLI `--kvtma=0/1`（默认 1）；单/两文件 device 逐字一致（`sync_onefile_device.py`）。
+> **数值 vs fp32 ref 与历史逐位一致**，`max_abs(kvtma-vs-qdtma)≤1.2e-5`（仅 atomic 次序），
+> varlen/MLA 回归不变。**同 session main A/B：S512 1.141× / S1024H32 1.128× / S4096 1.067× /
+> GQA kv4 1.076× / MQA kv1 1.056× / full 1.060×**；端到端 S4096 **2.0508→1.9215ms（71.53 TF，
+> 为 TE FP8 3.49×→3.25×）**，S512 main 0.0643ms 已快过 TE FP8 整条反向 0.1008ms。ncu：
+> `long_scoreboard 0.80→0.55`、`short 1.61→1.30`、Duration 1.67→**1.61ms**、`red` 逐字节不变、
+> lts 70.9→77.9%、168 regs/74.82KB/**3 CTA/SM**；墙仍是 mma 依赖延迟（wait+short）+ L2。
+> 详见 `docs/03` §44、`docs/04` §17。**下一步候选**（按回报）：① **fp8 侧「减 mma 依赖 /
+> 提 occupancy」**（O19/O21/O22/O41 一致：墙 = `wait`+`short_scoreboard`+3 CTA/SM；K/V 搬运
+> 这条路已到上限）；② **MLA（D=512）降 smem 冲 2 CTA/SM**（四 dtype 共同墙）；③ **fp16/bf16
+> 的 L2 red**（三条消 red 路已证伪，转软流水/重排）；④ **varlen 主 kernel 的 K 维 split**。
+>
+> **（第八十七轮）**：**O40——把 LSE 的 K 维 split 移植到非 TMA 的 wgmma LSE
 > `lse_mma_kernel_bal_wgmma`，并把 split 接进 varlen（三 dtype 单/两文件；正结果，默认 auto）**。
 > 补上 O38/O39 未覆盖的最后一条 LSE：非 TMA wgmma 版（定长 `--lsetma=0` 回退 + **varlen
 > D=128/causal 的默认 LSE**）。`lse_mma_kernel_bal_wgmma` 加 `lse_part/ksplit`（切片 `[nt0,nt1)`、
@@ -2823,6 +2845,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > Duration 1.77→1.66ms，墙仍是 `short_scoreboard`+`wait`+3 CTA/SM。端到端 S4096 2.0508ms/
 > 67.02 TF、为 TE FP8 的 **3.49×**（O27 3.69×）。`--qdtma=0` A/B、默认开。**K/V TMA 未做**
 > （单缓冲无重叠 + 双缓冲 smem 在 3 CTA/SM 顶格）⇒ backlog。详见 `docs/03` §36、`docs/04` §2.3。
+> **O41 已完成（第八十八轮）fp8 主 kernel 的 K/V TMA（正结果）**：K 双缓冲 + V 单缓冲，
+> `dS3` 复用当前 K stage、`Ap` 复用 `Vs` ⇒ smem 74816B **仍 3 CTA/SM**；Kp 由 SW128 K tile
+> 重建、V 的 TMA 与 Kp 重建重叠。**main A/B S512 1.141× / S1024H32 1.128× / S4096 1.067× /
+> GQA kv4 1.076× / MQA kv1 1.056× / full 1.060×**；端到端 S4096 **1.9215ms/71.53 TF、为 TE FP8
+> 的 3.25×**；数值逐位一致、`red` 逐字节不变、3 CTA/SM 保住。**fp8 主 kernel 的 TMA 家族
+> （Q/K/V/dO）至此收口**；详见 `docs/03` §44、`docs/04` §17。
 > **④（O27 新增，O28 已作废）fp16/bf16 的 fold 同理含逐元素精确除法**——**误记**：逐字核对
 > `src/fp16,bf16/fa_bwd_*_kernels.cuh` 后确认 fp16/bf16 **没有 rowwise scale fold**（无量化），
 > 逐元素除法只在 fp8。fp8 的 fold 除法 O27 已收口，转换指令 O28 也已向量化（MLA 1.03×、d128 中性）。

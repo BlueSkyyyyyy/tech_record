@@ -3989,3 +3989,141 @@ ARCH="" NVCC_FLAGS="..." scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu \
 b1_t512_h16 / b4_t3840_h16 / b4_t4096_h16 / b5_t3968_h32 / b8_t2904_h16 / b1_t512_h2 D512 /
 b3_t1792_h2 D512）、`src/fp8/fa_bwd_fp8_main_o40_ncu_lse_wgmma_split{1,8}_s512.out.txt`、
 `src/fp8/fa_bwd_fp8_mma_onefile_o40_*`（单文件；含 `--lsetma=0` 修复验证）。
+
+---
+
+## 44. O41：fp8 主 kernel 的 K/V 4D-TMA（K 双缓冲、V 单缓冲）—— 正结果，默认 auto
+
+> roadmap「下一步候选 ①」（O37 §36.6 留的「K/V TMA」）。O33–O36 已给 fp16/bf16 主 kernel 的
+> Q/K/V/dO 全部 TMA 化，O37 只做了 fp8 的 Q/dO；本节把 **K/V 也改 4D-TMA**，并把
+> 「K/V 双缓冲 smem 账算不过来」的结论用**零成本折叠**解决。
+
+### 44.1 动机
+
+O37 后端到端 S=4096 main 1.66ms，ncu 头号 stall 是 `short_scoreboard`(1.58) + `wait`(1.53)
+（mma 依赖），但 `long_scoreboard` 仍有 **0.80**——一部分来自**每 tile 同步搬的 K/V**
+（REGDQ 档下 `kPrefetch=false`，K/V 是逐 4B 全局读 + 逐 4B smem 写 + 逐 4B Kp 交织写）。
+把 K/V 换成 TMA，硬件直接写 SW128 smem，省掉全局地址运算与大量 `LDG/STS`。
+
+O37 §36.6 判断「K/V true overlap 必须双缓冲，而双缓冲 K/V 在 3 CTA/SM 下 smem 顶格」。
+本节找到两处**零成本折叠**：
+
+* **`dS3` 复用当前 K stage**——K 只被 GEMM1 读，fold 在 GEMM1/2 之后才写 `dS3`；K 双缓冲
+  时 `dS3` 指到**当前** stage（另一个 stage 正被 TMA 写）。
+* **`Ap` 复用 `Vs`**——V 只被 GEMM2 读，fold 之后才写 `Ap`。
+
+于是只需多一个 K stage 的 `ks_sw_bytes`(4096B) + 64B mbarrier：
+`smem = 70656 + 4096 + 64 = 74816B ≤ 76800`（本卡 3-CTA/SM 的动态 smem 实测上限，见下）
+⇒ **仍 3 CTA/SM**。（探测：`sharedMemPerMultiprocessor=233472`、`reservedSharedMemPerBlock=1024`；
+`cudaOccupancyMaxActiveBlocksPerMultiprocessor` 实测 76800→3、77000→2。）
+
+### 44.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+新增 `Fp8Cfg::smem_bytes_wgmma_kvtma = smem_bytes_wgmma + ks_sw_bytes + 64`；`fp8_mma_body`
+加模板参数 `bool KVTMA=false`（要求 `TMA && WGMMA && HD==128`）、入参 `kmap/vmap`；新增壳
+`fa_bwd_fp8_mma_kvtma_kernel`（4 个 `__grid_constant__` 描述符）与 host launcher
+`launch_bwd_main_kvtma`、CLI `--kvtma=0/1`（**默认 1**，对齐 O37 的 qdtma）。
+
+**描述符**：`kmap/vmap` 与 Q/dO 同构——`make_lse_map_fp8(ptr, Hkv, S, D, B, boxR=32)`，
+`dims={D,S,Hkv,B}`、`strides={Hkv*D, D, S*Hkv*D}`、box `{128,32,1,1}`、UINT8 + SWIZZLE_128B。
+（fp8 一行 128B = 一个 SW128 atom 的整行；非 varlen 路径专用。）
+
+**数据流**：
+1. prologue 由 `tid==0` 发 K[nt_begin]→`Ks[stage0]`、K[nt_begin+1]→`Ks[stage1]`、V[nt_begin]→`Vs`
+   三条 4D-TMA；等 Q/dO/K/V 到齐后，**从 SW128 K tile 重建 `Kp`**（`__byte_perm` 交织，与
+   `kv_load_pair` 的 Kp 逐字节相同）。
+2. 循环内 GEMM1 读 `Ks[stg]`（`stg=(nt-nt_begin)&1`）；fold 把 `dS3` 写回当前 K stage、`Ap`
+   写回 `Vs`（两处折叠）。
+3. 迭代末（本 tile 的 `dS3`/`Ap` 均已读完）：发 K[nt+2]→`Ks[stg]`、发 V[nt+1]→`Vs`，
+   等 K[nt+1] 并重建下一 tile 的 `Kp`（**V 的在飞 TMA 与 Kp 重建重叠**），最后等 V[nt+1]。
+   mbarrier 相位：K 两个 stage 各一个计数、V 一个（`(nt-nt_begin)&1` 做 stage）。
+
+**数值口径**：K/V 的字节与 cp.async 版完全相同，`Kp` 也逐字节相同 ⇒ 与 Q/dO-TMA 版
+逐位一致（只差跨 CTA `atomicAdd` 的加法次序）。默认路径 `sm_90` 构建完全不变。
+
+### 44.3 数值（vs fp32 ref / TE FP8，逐元素）
+
+九 shape 的 `dq/dk/dv vs fp32 ref` 与历史（O37/O27）**逐位一致**：
+
+| case | dq | dk | dv |
+|---|---|---|---|
+| b1_s512_h16_d128_causal | 2.426e-01 | 2.972e-01 | 3.733e-01 |
+| b1_s1024_h32_d128_causal | 2.399e-01 | 4.177e-01 | 3.535e-01 |
+| b1_s4096_h16_d128_causal | 2.635e-01 | 2.644e-01 | 3.216e-01 |
+| b1_s1024_h32_d128_kv4 | 2.517e-01 | 5.339e-01 | 7.173e-01 |
+| b1_s1024_h64_d128_kv1 | 4.101e-01 | 1.572e+00 | 2.126e+00 |
+| b1_s1024_h16_d128_full | 5.520e-02 | 5.312e-02 | 4.024e-02 |
+
+同 session A/B 的 `max_abs(kvtma-vs-qdtma)`：dq `~1.2e-7`、dk/dv `~1e-6–1e-5`（仅 atomic 次序）。
+`varlen` 与 `MLA(D=512)` 路径不经此分支，回归逐位不变（varlen b1_t512_h16 `2.280/3.108/3.422e-1`、
+MLA S1024H2 `2.232/3.337/3.602e-1`，与 §16/§39 一致）。
+
+### 44.4 性能（同 binary、同 session A/B；CUDA event，main-only，ms）
+
+| shape | Q/dO-TMA | **Q/dO/K/V-TMA** | 比 | total（ours） |
+|---|---|---|---|---|
+| MHA S512 | 0.0734 | **0.0643** | **1.141×** | 0.1033 ms / 20.78 TF |
+| MHA S1024 H32 | 0.3188 | **0.2825** | **1.128×** | 0.3894 ms / 44.12 TF |
+| MHA S4096 | 1.7131 | **1.6056** | **1.067×** | **1.9215 ms / 71.53 TF** |
+| GQA q32/kv4 | 0.2856 | **0.2654** | **1.076×** | 0.3547 ms / 48.44 TF |
+| MQA q64/kv1 | 0.5204 | **0.4930** | **1.056×** | 0.6280 ms / 54.71 TF |
+| full S1024 H16 | 0.3384 | **0.3193** | **1.060×** | 0.5675 ms / 15.14 TF |
+
+端到端 S4096 **2.0508→1.9215 ms（71.53 TF）**，为 **TE FP8（同 session 0.5905 ms / 465.5 TF）
+的 3.25×**（O37 3.49×；O27 3.69×）。单文件与两文件数字一致（`..._onefile_s4096` total 1.934 ms，
+device 逐字一致）。S512 的 **main 0.0643 ms 已快过 TE FP8 整条反向 0.1008 ms**。
+
+### 44.5 ncu（主 kernel，S=4096，`--launch-count 1`，同 binary `--kvtma` 0/1）
+
+| 指标 | Q/dO-TMA | K/V-TMA |
+|---|---|---|
+| `gpu__time_duration.sum` | 1.67 ms | **1.61 ms** |
+| `sm__inst_executed.sum` | 709.2 M | 722.4 M（+1.9%） |
+| stall `long_scoreboard` | 0.80 | **0.55（−31%）** |
+| stall `short_scoreboard` | 1.61 | **1.30（−19%）** |
+| stall `wait` | 1.58 | 1.53 |
+| stall `barrier` | 0.28 | 0.42 |
+| `lts__t_sectors_op_red` | 114,524,160 | **114,524,160（逐字节不变）** |
+| `lts__throughput` | 70.90% | **77.94%** |
+| L1/TEX / SM throughput | 66.46% / 44.61% | 69.18% / 47.25% |
+| regs / occ / Block Limit Shared Mem | 168 / — / 3 | **168 / 18.35% / 3**（smem 74.82KB） |
+
+**结论**：K/V TMA 消掉 K/V 全局读的地址运算与 `LDG/STS`，`long_scoreboard` 0.80→0.55、
+`short_scoreboard` 1.61→1.30；代价是 Kp 从 SW128 重建带来的少量额外指令（+1.9%）与 barrier
+（0.28→0.42），**净 Duration −3.6%**。**`red` 逐字节不变**（归约结构未动）。
+新墙仍是 **mma 依赖延迟（`wait` 1.53 + `short_scoreboard` 1.30）**，且 L2 升到 ~78%；
+3 CTA/SM 由 74.82KB smem 保住。**这条路已到 K/V 搬运的收益上限**——Kp 的配对副本无法随
+K-major SW128 自动得到，重建是必要的税；再要前进只剩「减 mma 依赖 / 提 occupancy」。
+
+### 44.6 对标
+
+fp8 无 FA 反向基线，仅 TE FP8（同 session，`harness/fa_bwd_bench.py bench --dtype fp8`）：
+S512 0.1008 ms / 42.60 TF、S1024H32 0.2063 / 166.54、S4096 0.5905 / 465.48。
+同 session 纯反向 FA2/FA3/TE（fp16，`harness/fa_vs_te_bwd_only.py fp16`）：MHA S4096
+FA3 **0.3243 ms / 848 TF**、TE 0.4442 / 619、FA2 0.7259 / 379；GQA kv4 FA3 0.0826 / 416；
+MQA kv1 FA3 0.1566 / 439。ours fp8 total 距 FA3 fp16 仍是量级差距，但已在 fp8 口径上把
+端到端压到 TE 的 3.25×。
+
+### 44.7 复现 / 原始输出
+
+```bash
+# 两文件（K/V TMA 默认开）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# 同 binary 退回 Q/dO-only TMA（A/B）
+... scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=... --kvtma=0
+# 单文件（device 由 sync_onefile_device.py 同步，逐字一致）
+python3 scripts/sync_onefile_device.py src/fp8/fa_bwd_fp8_kernels.cuh \
+  src/fp8/fa_bwd_fp8_mma_onefile.cu '#include <cuda_runtime.h>'
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --dir=...
+# ncu A/B
+ARCH="" NVCC_FLAGS="..." scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu \
+  --metrics "gpu__time_duration.sum,smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,..." \
+  --launch-count 1 --kernel-name regex:fa_bwd_fp8_mma_kvtma -- --kvtma=1 --dir=...
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o41_sweep.out.txt`（两文件 ×5 shape：timing + O41 A/B + 对拍）、
+`src/fp8/fa_bwd_fp8_o41_ncu_ab_s4096.out.txt`（qdtma vs kvtma 的 stall/扇区/吞吐）、
+`src/fp8/fa_bwd_fp8_o41_ncu_kvtma_s4096.out.txt`（`--set full`，3 CTA/SM 证据）。

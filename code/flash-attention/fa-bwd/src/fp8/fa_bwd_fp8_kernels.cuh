@@ -194,6 +194,14 @@ struct Fp8Cfg {
       fp8_bytes_wgmma + (kNScale + 2 * BM * PSS) * (int)sizeof(float) + 1024;
   // O37：Q/dO 4D-TMA 版在 wgmma 布局后再加 64B 放两个 mbarrier（qbar/dbar）。
   static constexpr int smem_bytes_wgmma_tma = smem_bytes_wgmma + 64;
+  // O41：K/V 也走 4D-TMA（roadmap「下一步候选 ①」）。为让 K 双缓冲（TMA 的异步搬运能跨
+  //   tile 重叠）而不掉出 3 CTA/SM（实测本卡 3-CTA 动态 smem 上限 = 76800B），布局做两处
+  //   零成本折叠：**dS3 复用当前 K stage**（K 只被 GEMM1 读，fold 之后才写 dS3）、
+  //   **Ap 复用 Vs**（V 只被 GEMM2 读，fold 之后才写 Ap）。于是只多一个 K stage 的
+  //   `ks_sw_bytes`（4096B）× 1 + 64B mbarrier（qbar/dbar/kbar[2]/vbar）。
+  //   合计 = 70656 + 4096 + 64 = 74816B ≤ 76800 ⇒ 仍 3 CTA/SM。数值与 cp.async 版只差
+  //   跨 CTA `atomicAdd` 次序（K/V 的字节完全相同，Kp 由 SW128 K tile 逐字节重建）。
+  static constexpr int smem_bytes_wgmma_kvtma = smem_bytes_wgmma + ks_sw_bytes + 64;
 
   static constexpr int lse_smem_bytes =
       LBM * ASLD + LBN * ASLD + (LBM + LBN) * (int)sizeof(float);
@@ -1657,7 +1665,7 @@ __global__ void delta_warp_kernel(const float* __restrict__ o,
 //   壳复用同一份逻辑（避免 700 行重复）。`TMA=true` 时 Q/dO 用 4D-TMA 一次性搬进 SW128 tile
 //   （`qmap`/`dmap` 为描述符，仅 WGMMA/HD=128 路径实例化），K/V 仍走原路径。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
-          bool RCP = true, bool TMA = false>
+          bool RCP = true, bool TMA = false, bool KVTMA = false>
 __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8,
@@ -1672,6 +1680,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                       float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                       int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
                       const CUtensorMap* qmap = nullptr, const CUtensorMap* dmap = nullptr,
+                      const CUtensorMap* kmap = nullptr, const CUtensorMap* vmap = nullptr,
                       const int* __restrict__ mt_b = nullptr,
                       const int* __restrict__ mt_m = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
@@ -1685,7 +1694,11 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   // O9c-2：WGMMA 模式下 Q/dO/K/V 是 SW128 tile（1024B 对齐），否则是行主序 ASLD 布局。
   constexpr int QS_SZ = WGMMA ? Cfg::qs_sw_bytes : BM * ASLD;
   constexpr int KS_SZ = WGMMA ? Cfg::ks_sw_bytes : BN * ASLD;
+  // O41：K/V TMA 时 K 双缓冲（2 个 SW128 stage），V 单缓冲。
+  constexpr int KSTAGES = KVTMA ? 2 : 1;
   static_assert(!WGMMA || (HD == 128), "WGMMA 主 kernel 目前只做 HD=128");
+  static_assert(!KVTMA || (TMA && WGMMA && HD == 128),
+                "K/V TMA 只在 Q/dO-TMA + WGMMA + HD=128 路径");
   // GEMM3/4/5 的输出 N 维 = head_dim；每遍处理 NTW = WN*64 = 128 列，共 HD/NTW 遍。
   constexpr int NTW = WN * 64;
   static_assert(HD % NTW == 0, "HD 必须是 128 的整数倍");
@@ -1717,7 +1730,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   }
   unsigned char* Qs  = reinterpret_cast<unsigned char*>(base);
   unsigned char* Ks  = Qs + QS_SZ;
-  unsigned char* Vs  = Ks + KS_SZ;
+  unsigned char* Vs  = Ks + KSTAGES * KS_SZ;
   unsigned char* dOs = Vs + KS_SZ;
   // O4b：Kt/Qt/dOt 三个转置副本 -> Qp/dOp/Kp 三个 K 配对布局（uint16，行距 PSLD）。
   uint16_t* Qp  = reinterpret_cast<uint16_t*>(dOs + QS_SZ);
@@ -1725,7 +1738,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   uint16_t* Kp  = reinterpret_cast<uint16_t*>(reinterpret_cast<unsigned char*>(dOp) + Cfg::qp_bytes);
   unsigned char* dS2 = reinterpret_cast<unsigned char*>(Kp) + Cfg::kp_bytes;
   unsigned char* Ap  = Vs;                   // O2：复用 GEMM2 后死亡的 Vs
-  unsigned char* dS3 = Ks;                   // O2：复用 GEMM1 后死亡的 Ks
+  unsigned char* dS3 = Ks;                   // O2：复用 GEMM1 后死亡的 Ks（KVTMA 时按 stage 重指）
   float* scales = reinterpret_cast<float*>(dS2 + BM * DSS2);
   float* Ps = scales + kNScale;              // P fp32 [BM][PSS]
   float* Ss = Ps + BM * PSS;                 // dS fp32 [BM][PSS]
@@ -1772,17 +1785,38 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 
   // ---- 载入 Q/dO：原始行 [m][d] 写 Qs/dOs（供 GEMM1/2 的 A）+ 打包行对写 Qp/dOp
   //      （供 GEMM4/3 的 B，ldmatrix.trans）。行对用 __byte_perm 交织，4B 一次。----
+  // O41：K/V TMA 的 mbarrier 相位计数器（K 两个 stage 各一个、V 一个）。非 KVTMA 不用。
+  int kuse[2] = {0, 0};
+  int vuse = 0;
+  (void)kuse;
+  (void)vuse;
   if constexpr (TMA) {
     static_assert(WGMMA, "fp8 Q/dO TMA 只在 WGMMA(SW128) 路径");
     // O37：4D-TMA 一次性把 Q/dO 搬进 SW128 tile（fp8 一行 128B = 一个 SW128 atom 的整行），
-    //   再从 smem 重建 Qp/dOp 的 K 配对布局（供 GEMM3/4 的 `ldmatrix.x2.trans`）。K/V 仍走原路径。
-    if (tid == 0) { mbar_init(qbars + 0, 1); mbar_init(qbars + 1, 1); }
+    //   再从 smem 重建 Qp/dOp 的 K 配对布局（供 GEMM3/4 的 `ldmatrix.x2.trans`）。
+    // O41：KVTMA 时 K/V 也由 4D-TMA 搬入（K 双缓冲、V 单缓冲），Kp 从 SW128 K tile 重建。
+    if (tid == 0) {
+      mbar_init(qbars + 0, 1);
+      mbar_init(qbars + 1, 1);
+      if (KVTMA) { mbar_init(qbars + 2, 1); mbar_init(qbars + 3, 1); mbar_init(qbars + 4, 1); }
+    }
     __syncthreads();
     if (tid == 0) {
       mbar_arrive_expect(qbars + 0, QS_SZ);
       tma_load_4d(Qs, qmap, 0, m0, h, b, qbars + 0);
       mbar_arrive_expect(qbars + 1, QS_SZ);
       tma_load_4d(dOs, dmap, 0, m0, h, b, qbars + 1);
+      if (KVTMA) {
+        // K[nt_begin] -> stage 0；K[nt_begin+1] -> stage 1（如有）；V[nt_begin] -> Vs。
+        mbar_arrive_expect(qbars + 2, KS_SZ);
+        tma_load_4d(Ks, kmap, 0, nt_begin * BN, hkv, b, qbars + 2);
+        if (nt_begin + 1 < nt_end) {
+          mbar_arrive_expect(qbars + 3, KS_SZ);
+          tma_load_4d(Ks + KS_SZ, kmap, 0, (nt_begin + 1) * BN, hkv, b, qbars + 3);
+        }
+        mbar_arrive_expect(qbars + 4, KS_SZ);
+        tma_load_4d(Vs, vmap, 0, nt_begin * BN, hkv, b, qbars + 4);
+      }
     }
     if (tid < BM) {
       int qi = m0 + tid;
@@ -1791,6 +1825,10 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     }
     mbar_wait(qbars + 0, 0);
     mbar_wait(qbars + 1, 0);
+    if (KVTMA) {
+      mbar_wait(qbars + 2, (uint32_t)(kuse[0] & 1)); kuse[0]++;
+      mbar_wait(qbars + 4, (uint32_t)(vuse & 1)); vuse++;
+    }
     __syncthreads();
     const int nd4t = HD / 4;
     for (int u = tid; u < (BM / 2) * nd4t; u += THREADS) {
@@ -1805,6 +1843,17 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       uint32_t* opw = reinterpret_cast<uint32_t*>(dOp + rp * PSLD + dq);
       opw[0] = __byte_perm(o0, o1, 0x5140);
       opw[1] = __byte_perm(o0, o1, 0x7362);
+    }
+    if (KVTMA) {
+      // 从 SW128 K[0] 重建 Kp（K 配对布局，供 GEMM5 的 ldmatrix.x2.trans）。
+      for (int u = tid; u < (BN / 2) * nd4t; u += THREADS) {
+        int rp = u / nd4t, dq = (u % nd4t) * 4;
+        uint32_t k0 = *reinterpret_cast<const uint32_t*>(Ks + sw128_off_fp8(rp * 2, dq, HD));
+        uint32_t k1 = *reinterpret_cast<const uint32_t*>(Ks + sw128_off_fp8(rp * 2 + 1, dq, HD));
+        uint32_t* kpw = reinterpret_cast<uint32_t*>(Kp + rp * PSLD + dq);
+        kpw[0] = __byte_perm(k0, k1, 0x5140);
+        kpw[1] = __byte_perm(k0, k1, 0x7362);
+      }
     }
   } else {
   {
@@ -1853,7 +1902,15 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   // ---- O4a：Q/dO 载入与 tile 的 K/V 落盘写的是互不重叠的 smem（Qs/Qp/dOs/dOp vs
   //            Ks/Vs/Kp），故把原来 prologue 的两处 __syncthreads 合并为一处。----
   uint32_t pk0[NPU], pk1[NPU], pv0[NPU], pv1[NPU];
-  if (kPrefetch) {
+  if constexpr (KVTMA) {
+    // K/V 已由 4D-TMA 搬入 smem（Kp 也已在上面重建），这里只装本 tile 的 rowwise scale。
+    (void)pk0; (void)pk1; (void)pv0; (void)pv1;
+    if (tid < BN) {
+      int jg = nt_begin * BN + tid;
+      ks_s[tid] = (jg < len) ? ks[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
+      vs_s[tid] = (jg < len) ? vs[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
+    }
+  } else if (kPrefetch) {
     kv_prefetch_pair<NPU, HD>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
                               pv1);
     kv_commit_pair<NPU, HD, WGMMA>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
@@ -1861,7 +1918,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     kv_load_pair<HD, BN, WGMMA>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, Ks, Vs, Kp, ASLD,
                          PSLD);
   }
-  if (tid < BN) {
+  if (!KVTMA && tid < BN) {
     int jg = nt_begin * BN + tid;
     ks_s[tid] = (jg < len) ? ks[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
     vs_s[tid] = (jg < len) ? vs[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
@@ -1928,9 +1985,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 
   for (int nt = nt_begin; nt < nt_end; ++nt) {
     const int j0 = nt * BN;
+    // O41：K/V TMA 时本 tile 的 K 在 Ks[stg]（stg = 相对 nt_begin 的奇偶），dS3 复用它。
+    const int stg = (nt - nt_begin) & 1;
+    if constexpr (KVTMA) dS3 = Ks + stg * KS_SZ;
     // ---- O3：预取下一 tile 的 K/V 到寄存器（延迟被本轮 5 个 GEMM 覆盖）----
     const int nnt = nt + 1;
-    if (kPrefetch && nnt < nt_end)
+    if (!KVTMA && kPrefetch && nnt < nt_end)
       kv_prefetch_pair<NPU, HD>(k8, v8, nnt * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
                                 pv1);
 
@@ -1941,9 +2001,11 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       // O9c-2：GEMM1/2 换 wgmma.m64n32k32（A/B 都从 SW128 直读 smem）。两条异步 mma 一起
       //   发、统一 wait0 重叠；累加器 wgmma 映射下 warp w 持行 [16w,16w+16)，同一线程在
       //   两条 GEMM 里拥有同一个 (r,c) ⇒ dS 直接用寄存器里的 P（pval）即可，无需读回 smem。
+      // O41：KVTMA 时 K 从当前 stage 缓冲读。
+      const unsigned char* Kcur = KVTMA ? (Ks + stg * KS_SZ) : Ks;
       float sacc[16], dpacc[16];
       wgmma_mn32_issue<0>(reinterpret_cast<const char*>(Qs),
-                          reinterpret_cast<const char*>(Ks), HD, sacc);
+                          reinterpret_cast<const char*>(Kcur), HD, sacc);
       wgmma_mn32_issue<1>(reinterpret_cast<const char*>(dOs),
                           reinterpret_cast<const char*>(Vs), HD, dpacc);
       wgmma_wait0_fp8();
@@ -2358,7 +2420,44 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     }
     __syncthreads();
     // ---- O3：落盘预取的下一 tile 的 K/V（本轮 GEMM 已全部读完 smem），并更新 ks/vs ----
-    if (nt + 1 < nt_end) {
+    // ---- O41：KVTMA 时改为「发 K[nt+2] → Ks[stg]（本迭代 dS3 已读完）、发 V[nt+1] → Vs
+    //       （本迭代 Ap 已读完）」，再等 K[nt+1]（上一迭代已发）并重建 Kp；V 的 TMA 与
+    //       Kp 重建重叠。----
+    if constexpr (KVTMA) {
+      if (tid == 0) {
+        if (nt + 2 < nt_end) {
+          mbar_arrive_expect(qbars + 2 + stg, KS_SZ);
+          tma_load_4d(Ks + stg * KS_SZ, kmap, 0, (nt + 2) * BN, hkv, b, qbars + 2 + stg);
+        }
+        if (nt + 1 < nt_end) {
+          mbar_arrive_expect(qbars + 4, KS_SZ);
+          tma_load_4d(Vs, vmap, 0, (nt + 1) * BN, hkv, b, qbars + 4);
+        }
+      }
+      if (nt + 1 < nt_end) {
+        if (tid < BN) {
+          int jg = (nt + 1) * BN + tid;
+          ks_s[tid] = (jg < len) ? ks[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
+          vs_s[tid] = (jg < len) ? vs[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
+        }
+        mbar_wait(qbars + 2 + (stg ^ 1), (uint32_t)(kuse[stg ^ 1] & 1));
+        kuse[stg ^ 1]++;
+        __syncthreads();
+        const unsigned char* Kb = Ks + (stg ^ 1) * KS_SZ;
+        const int nd4k = HD / 4;
+        for (int u = tid; u < (BN / 2) * nd4k; u += THREADS) {
+          int rp = u / nd4k, dq = (u % nd4k) * 4;
+          uint32_t k0 = *reinterpret_cast<const uint32_t*>(Kb + sw128_off_fp8(rp * 2, dq, HD));
+          uint32_t k1 = *reinterpret_cast<const uint32_t*>(Kb + sw128_off_fp8(rp * 2 + 1, dq, HD));
+          uint32_t* kpw = reinterpret_cast<uint32_t*>(Kp + rp * PSLD + dq);
+          kpw[0] = __byte_perm(k0, k1, 0x5140);
+          kpw[1] = __byte_perm(k0, k1, 0x7362);
+        }
+        __syncthreads();
+        mbar_wait(qbars + 4, (uint32_t)(vuse & 1));
+        vuse++;
+      }
+    } else if (nt + 1 < nt_end) {
       if (kPrefetch) {
         kv_commit_pair<NPU, HD, WGMMA>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
       } else {
@@ -2409,7 +2508,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       const int* __restrict__ mt_m = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit, cu_seqlens, nullptr, nullptr, mt_b, mt_m);
+      scale, causal, ksplit, cu_seqlens, nullptr, nullptr, nullptr, nullptr, mt_b, mt_m);
 }
 
 // O37：Q/dO 4D-TMA 版（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA 路径实例化）。
@@ -2427,7 +2526,28 @@ fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit, cu_seqlens, &qmap, &dmap);
+      scale, causal, ksplit, cu_seqlens, &qmap, &dmap, nullptr, nullptr);
+}
+
+// O41：Q/dO/K/V 全 4D-TMA 版（roadmap「下一步候选 ①」）。K 双缓冲、V 单缓冲；Kp 从 SW128
+//   K tile 重建。仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA（BN=32）路径实例化。
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true>
+__global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
+fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
+                            const __grid_constant__ CUtensorMap dmap,
+                            const __grid_constant__ CUtensorMap kmap,
+                            const __grid_constant__ CUtensorMap vmap,
+                            const unsigned char* __restrict__ q8, const float* __restrict__ qs,
+                            const unsigned char* __restrict__ k8, const float* __restrict__ ks,
+                            const unsigned char* __restrict__ v8, const float* __restrict__ vs,
+                            const unsigned char* __restrict__ do8, const float* __restrict__ dos,
+                            const float* __restrict__ delta, const float* __restrict__ lse,
+                            float* __restrict__ dq_acc, float* __restrict__ dk_acc,
+                            float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
+                            int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr) {
+  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true>(
+      q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
+      scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap);
 }
 
 // =============================================================================
