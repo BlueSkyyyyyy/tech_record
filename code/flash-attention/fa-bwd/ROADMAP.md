@@ -2025,6 +2025,30 @@
   - **对标**（同 session 纯反向 FA2/FA3/TE）：FA3 MHA S4096 0.3194ms/861TF、TE 0.4420/622
     ⇒ ours total **3.79×**（O31 3.94×）。原始输出 `src/bf16/fa_bwd_bf16_o34_*`；`docs/01b` §6y。
 
+- 2026-09-25（第七十五轮）：**O35 完成（fp16：BN=64 的 `wgmma2` 主 kernel 也改用逐 atom 4D-TMA）**。
+  - 动机：O33（fp16）/O34（bf16）只把 **BN=128** 的 `wgmma2b` 上 TMA；而 **O23 默认档在
+    S<4096 与 GQA/MQA 走 BN=64 的 `wgmma2`**（`-DFA_WGMMA` 自动选），这条更常用的路仍用
+    `cp.async` + `sw128_off` 地址运算。本项补全 backlog「BN=64 的 `wgmma2` 几何待做」。
+  - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+    新增 `fa_bwd_fp16_wgmma2_tma_kernel<HD,SPLIT>`——与 `fa_bwd_fp16_wgmma2_kernel` 的
+    几何/数据流/描述符逐字相同，只换 TMA + mbarrier（Q/dO 各 32 atom、K/V 各 16 atom；
+    K 双缓冲两 barrier、V 单缓冲后段预取）。host 新增 `launch_bwd_wgmma2_tma<HD,SPLIT>`、
+    让 `--maintma` 在 BN=64 的 `wg2` 分支也生效、新增 `[O35 A/B]`（mode 9）。
+  - **数值与 O5–O34 逐位一致**（S512 1.671/1.771/1.899e-3；S1024 GQA kv4 2.134/3.305/3.850e-3；
+    S4096 1.883/1.734/1.966e-3）；`max|diff|`（TMA-vs-cp.async）**dq 逐位 0**、dk/dv ~1e-4
+    （仅跨 CTA atomic 次序）。
+  - **性能（同 session A/B，event，main-only）**：S=512 **0.992×**（两文件）/0.987×（单文件）、
+    S=1024 GQA kv4 **0.996×**、S=4096 强制 BN=64 **1.021×**（0.9884→0.9685ms）。
+  - **ncu（main）**：S=512 TMA 指令数 5.259M→**3.976M（−24.4%）**、regs 200→184，但
+    Duration 53.02→**52.96µs 持平**（`grid=128<132 SM`、Waves 0.48、occ 12.4% ⇒
+    **延迟/grid bound**）；S=4096 强制 BN=64：989.95→**959.20µs（1.032×）**、inst 260.7M→200.8M。
+    ⇒ **TMA 只省搬运指令，动不了延迟/grid 墙**（与 O33 结论一致）。
+  - **对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`）：FA3 MHA S4096
+    0.3233ms/850TF、TE 0.4435/620 ⇒ ours 默认 total 1.2566ms **3.89×**（同量级）。
+  - 原始输出 `src/fp16/fa_bwd_fp16_mma_main_o35_{s512,gqa_kv4,s4096}.out.txt`、
+    `..._mma_onefile_o35_s512.out.txt`、`..._o35_ncu_main_{tma,cpasync}_{s512,s4096}.out.txt`、
+    `src/fa_bwd_o35_fa3_te_baseline_fp16.out.txt`；文档 `docs/01` §14t、`docs/04` §2.1/§3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -2247,8 +2271,13 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > （`BFLOAT16` tensormap + `wgmma...bf16`），`--maintma`、main **1.046×**（142.5→149.0 TF）、
 > 指令数 **−24.8%**、`red` 逐字节不变、端到端为 FA3 的 **3.79×**（1.2581→1.2106ms）；
 > 数值与历史逐位一致；详见 `docs/01b` §6y。
+> **BN=64 的 `wgmma2` 几何已完成（O35，第七十五轮）**：把 O33 的逐 atom TMA 搬到 BN=64 的
+> `wgmma2`（O23 默认档在 S<4096 / GQA/MQA 走它）。指令数 −24%、regs 200→184，但
+> S=512/1024 是延迟/grid bound ⇒ Duration 持平（0.99–1.00×），S=4096 强制 BN=64 才 1.02×。
+> 详见 `docs/01` §14t、`docs/04` §2.1/§3。
 > **剩余**：fp8 主 kernel 的对应 dtype 参数化（fp8 SW128 为一整行 128B，逐 atom 更简单；fp8 尚需
-> 处理 K/V 的 dS3/Ap smem 复用与 32 regs 寄存器预取）、BN=64 的 `wgmma2` 几何。
+> 处理 K/V 的 dS3/Ap smem 复用与 32 regs 寄存器预取——这是**下一步首选**）；
+> bf16 的 BN=64 `wgmma2` TMA 与 fp16 同构（可顺手做，回报同样有限）。
 > **④（O27 新增，O28 已作废）fp16/bf16 的 fold 同理含逐元素精确除法**——**误记**：逐字核对
 > `src/fp16,bf16/fa_bwd_*_kernels.cuh` 后确认 fp16/bf16 **没有 rowwise scale fold**（无量化），
 > 逐元素除法只在 fp8。fp8 的 fold 除法 O27 已收口，转换指令 O28 也已向量化（MLA 1.03×、d128 中性）。
