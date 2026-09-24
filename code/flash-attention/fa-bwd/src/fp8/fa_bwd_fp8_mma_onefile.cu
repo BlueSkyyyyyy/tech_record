@@ -151,6 +151,8 @@ struct Fp8Cfg {
                                        + qp_bytes + qp_bytes + kp_bytes;
   static constexpr int smem_bytes_wgmma =
       fp8_bytes_wgmma + (kNScale + 2 * BM * PSS) * (int)sizeof(float) + 1024;
+  // O37：Q/dO 4D-TMA 版在 wgmma 布局后再加 64B 放两个 mbarrier（qbar/dbar）。
+  static constexpr int smem_bytes_wgmma_tma = smem_bytes_wgmma + 64;
 
   static constexpr int lse_smem_bytes =
       LBM * ASLD + LBN * ASLD + (LBM + LBN) * (int)sizeof(float);
@@ -1231,8 +1233,10 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
 //   仅 HD=128、causal（由 host 控制）。TMA asm 需 sm_90a，用 `FA_FP8_HAS_TMA` 包裹，
 //   纯 `sm_90`（或仅 `-DFA_WGMMA`）构建时退化为空实现、host 不会 launch。
 // =============================================================================
-#if defined(FA_WGMMA) && defined(FA_TMA)
-#if defined(__CUDA_ARCH__) && defined(__CUDA_ARCH_FEAT_SM90_ALL)
+// O37：mbar/TMA helper 不再整体包在 `FA_WGMMA && FA_TMA` 里——主 kernel 的 TMA 版需要这些
+//   名字在**非 TMA 构建**中也可见（body 里是 `if constexpr(TMA)` 的「名字可见但被丢弃」代码，
+//   否则 ptxas 前的名字查找会失败）。asm 仍以 `FA_FP8_HAS_TMA`（= sm90a 且 FA_TMA）守卫。
+#if defined(__CUDA_ARCH__) && defined(__CUDA_ARCH_FEAT_SM90_ALL) && defined(FA_TMA)
 #define FA_FP8_HAS_TMA 1
 #else
 #define FA_FP8_HAS_TMA 0
@@ -1282,6 +1286,7 @@ __device__ __forceinline__ void tma_load_4d(void* dst, const CUtensorMap* map, i
 #endif
 }
 
+#if defined(FA_WGMMA) && defined(FA_TMA)
 template <int HD, int PIPE = 1>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
@@ -1503,10 +1508,12 @@ __global__ void delta_warp_kernel(const float* __restrict__ o,
 //   改成 sub4==0/sub2==0 lane 算一次 `1/scX`（`__frcp_rn`）再经 `__shfl` 广播，元素处用乘法。
 //   数学等价；fp32 舍入偶有 1 ULP 差，而 fp8 只有 3 位尾数，cvt 结果几乎不变（实测 vs-ref 数值
 //   与 RCP=false 完全一致）。`RCP=false` 保留精确除法作同 binary A/B；默认 true。
+// O37：把主 kernel 的**函数体**抽成 device 函数，好让「cp.async 版」与「TMA 版」两个 `__global__`
+//   壳复用同一份逻辑（避免 700 行重复）。`TMA=true` 时 Q/dO 用 4D-TMA 一次性搬进 SW128 tile
+//   （`qmap`/`dmap` 为描述符，仅 WGMMA/HD=128 路径实例化），K/V 仍走原路径。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
-          bool RCP = true>
-__global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
-fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
+          bool RCP = true, bool TMA = false>
+__device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8,
                       const float* __restrict__ ks,
@@ -1518,7 +1525,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                       const float* __restrict__ lse,
                       float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                       float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                      int causal, int ksplit) {
+                      int causal, int ksplit,
+                      const CUtensorMap* qmap = nullptr, const CUtensorMap* dmap = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int ASLD = Cfg::ASLD;
   constexpr int PSLD = Cfg::PSLD;
@@ -1581,6 +1589,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   float* sA = dos_s + BM;
   float* sds2 = sA + BN;
   float* sds3 = sds2 + BM;
+  // O37：TMA 版 Q/dO 的两个 mbarrier，落在 `smem_bytes_wgmma` 之外额外分配的 64B 区。
+  uint64_t* qbars = reinterpret_cast<uint64_t*>(Ss + BM * PSS);
 
   // ---- O2b：N 方向切块（split-K）。同一 (mblk,h,b) 的 K/V 列块 [0,ntiles) 被均分给
   //      ksplit 个 CTA；各自只算自己那一段，dQ/dK/dV 仍用跨 CTA 的 fp32 atomicAdd 汇总。
@@ -1603,6 +1613,41 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 
   // ---- 载入 Q/dO：原始行 [m][d] 写 Qs/dOs（供 GEMM1/2 的 A）+ 打包行对写 Qp/dOp
   //      （供 GEMM4/3 的 B，ldmatrix.trans）。行对用 __byte_perm 交织，4B 一次。----
+  if constexpr (TMA) {
+    static_assert(WGMMA, "fp8 Q/dO TMA 只在 WGMMA(SW128) 路径");
+    // O37：4D-TMA 一次性把 Q/dO 搬进 SW128 tile（fp8 一行 128B = 一个 SW128 atom 的整行），
+    //   再从 smem 重建 Qp/dOp 的 K 配对布局（供 GEMM3/4 的 `ldmatrix.x2.trans`）。K/V 仍走原路径。
+    if (tid == 0) { mbar_init(qbars + 0, 1); mbar_init(qbars + 1, 1); }
+    __syncthreads();
+    if (tid == 0) {
+      mbar_arrive_expect(qbars + 0, QS_SZ);
+      tma_load_4d(Qs, qmap, 0, m0, h, b, qbars + 0);
+      mbar_arrive_expect(qbars + 1, QS_SZ);
+      tma_load_4d(dOs, dmap, 0, m0, h, b, qbars + 1);
+    }
+    if (tid < BM) {
+      int qi = m0 + tid;
+      qs_s[tid] = (qi < S) ? qs[((size_t)(b * S + qi)) * H + h] : 1.f;
+      dos_s[tid] = (qi < S) ? dos[((size_t)(b * S + qi)) * H + h] : 1.f;
+    }
+    mbar_wait(qbars + 0, 0);
+    mbar_wait(qbars + 1, 0);
+    __syncthreads();
+    const int nd4t = HD / 4;
+    for (int u = tid; u < (BM / 2) * nd4t; u += THREADS) {
+      int rp = u / nd4t, dq = (u % nd4t) * 4;
+      uint32_t q0 = *reinterpret_cast<const uint32_t*>(Qs + sw128_off_fp8(rp * 2, dq, HD));
+      uint32_t q1 = *reinterpret_cast<const uint32_t*>(Qs + sw128_off_fp8(rp * 2 + 1, dq, HD));
+      uint32_t o0 = *reinterpret_cast<const uint32_t*>(dOs + sw128_off_fp8(rp * 2, dq, HD));
+      uint32_t o1 = *reinterpret_cast<const uint32_t*>(dOs + sw128_off_fp8(rp * 2 + 1, dq, HD));
+      uint32_t* qpw = reinterpret_cast<uint32_t*>(Qp + rp * PSLD + dq);
+      qpw[0] = __byte_perm(q0, q1, 0x5140);
+      qpw[1] = __byte_perm(q0, q1, 0x7362);
+      uint32_t* opw = reinterpret_cast<uint32_t*>(dOp + rp * PSLD + dq);
+      opw[0] = __byte_perm(o0, o1, 0x5140);
+      opw[1] = __byte_perm(o0, o1, 0x7362);
+    }
+  } else {
   {
     const int nd4 = HD / 4;
     for (int u = tid; u < (BM / 2) * nd4; u += THREADS) {
@@ -1642,6 +1687,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     int qi = m0 + tid;
     qs_s[tid] = (qi < S) ? qs[((size_t)(b * S + qi)) * H + h] : 1.f;
     dos_s[tid] = (qi < S) ? dos[((size_t)(b * S + qi)) * H + h] : 1.f;
+  }
   }
 
   // ---- O3 prologue：寄存器预取本 part 首个 tile 并落盘；HD>128 时直接向量化读。----
@@ -2187,6 +2233,42 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
   }
 }
 
+// O37：两个薄 `__global__` 壳复用同一 `fp8_mma_body`。cp.async 版与 TMA 版签名只差两个
+//   `__grid_constant__` 描述符（`TMA=true` 才用到）。
+template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
+          bool RCP = true>
+__global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
+fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
+                      const unsigned char* __restrict__ k8, const float* __restrict__ ks,
+                      const unsigned char* __restrict__ v8, const float* __restrict__ vs,
+                      const unsigned char* __restrict__ do8, const float* __restrict__ dos,
+                      const float* __restrict__ delta, const float* __restrict__ lse,
+                      float* __restrict__ dq_acc, float* __restrict__ dk_acc,
+                      float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
+                      int causal, int ksplit) {
+  fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false>(
+      q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
+      scale, causal, ksplit, nullptr, nullptr);
+}
+
+// O37：Q/dO 4D-TMA 版（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA 路径实例化）。
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true>
+__global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
+fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
+                            const __grid_constant__ CUtensorMap dmap,
+                            const unsigned char* __restrict__ q8, const float* __restrict__ qs,
+                            const unsigned char* __restrict__ k8, const float* __restrict__ ks,
+                            const unsigned char* __restrict__ v8, const float* __restrict__ vs,
+                            const unsigned char* __restrict__ do8, const float* __restrict__ dos,
+                            const float* __restrict__ delta, const float* __restrict__ lse,
+                            float* __restrict__ dq_acc, float* __restrict__ dk_acc,
+                            float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
+                            int causal, int ksplit) {
+  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true>(
+      q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
+      scale, causal, ksplit, &qmap, &dmap);
+}
+
 // =============================================================================
 // 3b) fa_bwd_fp8_wg2_kernel —— fp8 跨 warpgroup 归约（BM=128, 2 warpgroups, 256 线程）
 // =============================================================================
@@ -2720,6 +2802,27 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
       scale, causal, ksplit);
 }
 
+// O37：Q/dO 4D-TMA 版主 kernel（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128、WGMMA 路径）。
+#if defined(FA_WGMMA) && defined(FA_TMA)
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true>
+static void launch_bwd_main_qdtma(dim3 mg, const CUtensorMap& qmap, const CUtensorMap& dmap,
+                                  const unsigned char* q8, const float* qs,
+                                  const unsigned char* k8, const float* ks,
+                                  const unsigned char* v8, const float* vs,
+                                  const unsigned char* do8, const float* dos,
+                                  const float* delta, const float* lse, float* dq_acc,
+                                  float* dk_acc, float* dv_acc, int S, int H, int Hkv,
+                                  float scale, int causal, int ksplit) {
+  using Cfg = Fp8Cfg<HD, BM, BN>;
+  constexpr int kSmem = Cfg::smem_bytes_wgmma_tma;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_qdtma_kernel<HD, BM, BN, REGDQ, PREL>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  fa_bwd_fp8_mma_qdtma_kernel<HD, BM, BN, REGDQ, PREL><<<mg, THREADS, kSmem>>>(
+      qmap, dmap, q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H,
+      Hkv, scale, causal, ksplit);
+}
+#endif
+
 // O19：跨 warpgroup 归约版主 kernel（BM=128, 2 wg, 256 线程）。
 template <int HD>
 static constexpr int wg2_smem_bytes() {
@@ -2828,6 +2931,9 @@ int main(int argc, char** argv) {
   // O32：LSE 是否用 TMA 版（仅 FA_TMA 构建、D==128、causal）。-1=自动（默认开），0/1 由
   //   `--lsetma=` 强制。
   int lse_tma = -1;
+  // O37：主 kernel 的 Q/dO 是否用 4D-TMA（仅 FA_WGMMA+FA_TMA、D==128）。-1=自动（默认开），
+  //   0/1 由 `--qdtma=` 强制。
+  int qd_tma = -1;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
@@ -2838,6 +2944,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--lsewgm=", 0) == 0) lsewgm = atoi(a.c_str() + 9);
     else if (a.rfind("--wgmma=", 0) == 0) wgmma = atoi(a.c_str() + 8);
     else if (a.rfind("--lsetma=", 0) == 0) lse_tma = atoi(a.c_str() + 9);
+    else if (a.rfind("--qdtma=", 0) == 0) qd_tma = atoi(a.c_str() + 8);
     else if (a == "--wg2") wg2 = 1;
     else if (a.rfind("--cvt=", 0) == 0) cvt_on = atoi(a.c_str() + 6);
     else if (a.rfind("--qfast=", 0) == 0) qfast = atoi(a.c_str() + 8);
@@ -3046,7 +3153,17 @@ int main(int argc, char** argv) {
     qmap_lse = make_lse_map_fp8(d_q8, H, S, D, B);
     kmap_lse = make_lse_map_fp8(d_k8, Hkv, S, D, B);
   }
+  // O37：主 kernel 的 Q/dO TMA 描述符（box={128,BM=64}，与 LSE 同一 dims={D,S,H,B}）。
+  if (qd_tma < 0) qd_tma = 1;   // 默认开（对齐 O32 的 lsetma；`--qdtma=0` 供 A/B）
+  CUtensorMap qmap_main, dmap_main;
+  if (D == 128 && qd_tma) {
+    qmap_main = make_lse_map_fp8(d_q8, H, S, D, B);
+    dmap_main = make_lse_map_fp8(d_do8, H, S, D, B);
+  }
+#else
+  if (qd_tma < 0) qd_tma = 0;
 #endif
+  printf("O37: main qd-tma = %s\n", qd_tma ? "on" : "off");
 
   auto run_preprocess = [&]() {
     if (D == 128) {
@@ -3107,6 +3224,22 @@ int main(int argc, char** argv) {
                           ksplit2);
       return;
     }
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    // O37：Q/dO TMA 版（仅默认 fold 选项下启用；其它组合回退 cp.async 版）。
+    if (D == 128 && wgmma && qd_tma && prel_sel) {
+      if (use_regdq)
+        launch_bwd_main_qdtma<128, 64, 32, true>(mg, qmap_main, dmap_main, d_q8, d_qs, d_k8,
+                                                 d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
+                                                 d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                 Hkv, scale, (int)causal, ksplit);
+      else
+        launch_bwd_main_qdtma<128, 64, 32, false>(mg, qmap_main, dmap_main, d_q8, d_qs, d_k8,
+                                                  d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
+                                                  d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                  Hkv, scale, (int)causal, ksplit);
+      return;
+    }
+#endif
 #ifdef FA_WGMMA
     if (D == 128 && wgmma) { launch128(use_regdq, true, prel_sel); return; }
 #endif
