@@ -595,6 +595,14 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > mma 依赖延迟 + 3 CTA/SM（issue 45.9%）。对标：TE FP8 S4096 0.5887ms；FA3 fp16 MHA S4096
 > 0.3251ms/846TF（fp8 无 FA 基线）。详见 `03` §26。
 
+> **O19（第五十九轮）——fp8 跨 warpgroup 归约（BM=128、2 wg、256 线程）＝负结果**：`fa_bwd_fp8_wg2_kernel`
+> 把 dK/dV 的跨 CTA `red` 砍到 **0.593×**（108.48M→64.29M）、`read` 0.537×、L2 49.9%→**22.6%**，
+> 但 **1 CTA/SM（8 warp/SM，mma 为 3 CTA/SM、12 warp）**，issue 43→34%、No Eligible 54→64%，
+> 同 session main 反而 **0.67–0.78×**（S4096 2.27→2.90ms）。数值仍为 fp8 噪声（dq 逐位级一致）。
+> ⇒ **判决：fp8 main 的墙不是 L2 `red`，而是 mma 依赖延迟 + occupancy**；减 red/放大 BM 对 fp8
+> 无收益，真正杠杆是提 occupancy（168 regs→≤128、72.7KB→≤58KB 才 4 CTA/SM）或减 mma stall。
+> 详见 `03` §27、原始输出 `src/fp8/o19_wg2_ab_sweep.out.txt` / `o19_ncu_{wg2,mma}_red_s4096.out.txt`。
+
 ---
 
 ## 3. ncu bound 小结（逐 dtype）
