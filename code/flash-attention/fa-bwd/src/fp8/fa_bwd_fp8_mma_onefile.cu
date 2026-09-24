@@ -930,7 +930,8 @@ template <int HD, int PIPE>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                    const unsigned char* __restrict__ k8, const float* __restrict__ ks,
-                   float* __restrict__ lse, int S, int H, int Hkv, float scale) {
+                   float* __restrict__ lse, int S, int H, int Hkv, float scale,
+                   const int* __restrict__ cu_seqlens = nullptr) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int ASLD = Cfg::ASLD;
   constexpr int KVL  = LBN * ASLD;
@@ -941,8 +942,13 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
   float* qs_s = reinterpret_cast<float*>(Ks + (PIPE ? 2 : 1) * KVL);  // [LBM]
   float* ks_s = qs_s + LBM;                                          // PIPE=1：2×LBN
 
-  const int nblk = (S + LBM - 1) / LBM;
   const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // VARLEN（第 80 轮）：cu_seqlens 给出本序列在 packed [T,H,D] 的 token 基址与长度；
+  // nullptr 逐式退化为定长（qbase=b*S、len=S），定长路径逐位不变。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
+  const int nblk  = (len + LBM - 1) / LBM;
+  if (pair >= (nblk + 1) / 2) return;   // 短序列多余的对 CTA 直接退出
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -954,8 +960,8 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
       const int row = u / HDV, c16 = u % HDV;
       const int qi = m0 + row;
       unsigned char* d = Qs + row * ASLD + c16 * 16;
-      if (qi < S) {
-        const unsigned char* s = q8 + (((size_t)(b * S + qi)) * H + h) * HD + c16 * 16;
+      if (qi < len) {
+        const unsigned char* s = q8 + (((size_t)(qbase + qi)) * H + h) * HD + c16 * 16;
         if constexpr (PIPE) cp_async16(d, s);
         else {
 #pragma unroll
@@ -965,7 +971,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
         *reinterpret_cast<uint4*>(d) = make_uint4(0, 0, 0, 0);
       }
     }
-    if (tid < LBM) qs_s[tid] = (m0 + tid < S) ? qs[((size_t)(b * S + m0 + tid)) * H + h] : 1.f;
+    if (tid < LBM) qs_s[tid] = (m0 + tid < len) ? qs[((size_t)(qbase + m0 + tid)) * H + h] : 1.f;
     if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
   };
 
@@ -976,8 +982,8 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
       const int row = u / HDV, c16 = u % HDV;
       const int jg = j0 + row;
       unsigned char* d = Kd + row * ASLD + c16 * 16;
-      if (jg < S) {
-        const unsigned char* s = k8 + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c16 * 16;
+      if (jg < len) {
+        const unsigned char* s = k8 + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c16 * 16;
         if constexpr (PIPE) cp_async16(d, s);
         else {
 #pragma unroll
@@ -988,7 +994,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
       }
     }
     if (tid < LBN)
-      KdS[tid] = (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * Hkv + hkv] : 1.f;
+      KdS[tid] = (j0 + tid < len) ? ks[((size_t)(qbase + j0 + tid)) * Hkv + hkv] : 1.f;
     if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
   };
 
@@ -999,7 +1005,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
     const int m0 = mblk * LBM;
     issue_q(m0);
 
-    const int ncols = min(S, m0 + LBM);
+    const int ncols = min(len, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
     if constexpr (PIPE) {
       if (ntiles > 0) issue_k(Ks, ks_s, 0);
@@ -1036,7 +1042,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
           int c = j * 8 + c2 + (q & 1);
           int qi = m0 + r, jg = j0 + c;
           float sv = -INFINITY;
-          if (qi < S && jg < S && jg <= qi)
+          if (qi < len && jg < len && jg <= qi)
             sv = acc[0][j][q] * scale * qs_s[r] * KtS[c];
           if (sv != -INFINITY) {
             float mn = fmaxf(mrow[s], sv);
@@ -1063,7 +1069,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+        if (qi < len) lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
       }
     }
     // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
@@ -2883,12 +2889,13 @@ static void launch_lse(dim3 lg, const unsigned char* q8, const float* qs,
 template <int HD, int PIPE>
 static void launch_lse_bal(dim3 lg, const unsigned char* q8, const float* qs,
                            const unsigned char* k8, const float* ks, float* lse, int S, int H,
-                           int Hkv, float scale) {
+                           int Hkv, float scale, const int* cu = nullptr) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = PIPE ? Cfg::lse_smem_bytes_bal1 : Cfg::lse_smem_bytes_bal0;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<HD, PIPE>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  lse_mma_kernel_bal<HD, PIPE><<<lg, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv, scale);
+  lse_mma_kernel_bal<HD, PIPE><<<lg, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv, scale,
+                                                       cu);
 }
 
 // O9c：fp8 wgmma 版 LSE（SW128 + wgmma.m64n64k32），仅 `-DFA_WGMMA` 构建存在。
@@ -2947,7 +2954,10 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   const int T = (int)q_np.shape[0], H = (int)q_np.shape[1], D = (int)q_np.shape[2];
   const int Hkv = (int)k_np.shape[1];
   const int B = (int)cu_np.data.size() - 1;
-  if (D != 128) { fprintf(stderr, "VARLEN 目前只做 HD=128；当前 %d\n", D); return 1; }
+  if (D != 128 && D != 512) {
+    fprintf(stderr, "VARLEN 目前只做 HD=128/512；当前 %d\n", D);
+    return 1;
+  }
   int maxlen = 0;
   for (int b = 0; b < B; ++b) {
     int L = (int)cu_np.data[b + 1] - (int)cu_np.data[b];
@@ -2998,23 +3008,35 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   CUDA_CHECK(cudaMalloc(&d_o_f, nq * 4));
   CUDA_CHECK(cudaMemcpy(d_o_f, o_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
 
-  // ksplit / REGDQ 自动档：与定长路径同公式，用 maxlen 作为串长。
+  // ksplit / REGDQ 自动档：与定长路径同公式（O29），用 maxlen 作为串长。
+  //   D==128：S>=2048 → 8192，否则 max(2048, 4*base_grid)；
+  //   D==512（MLA）：target = len/2（O29 标定），regdq 恒关（HD=512 的 dQ 一次铺不满 N）。
   constexpr int BM = 64;
   const long base_grid = (long)((maxlen + BM - 1) / BM) * H * B;
-  const long target_ctas = (maxlen >= 2048) ? 8192L : std::max(2048L, 4L * base_grid);
+  const long target_ctas = (D == 128)
+                               ? ((maxlen >= 2048) ? 8192L : std::max(2048L, 4L * base_grid))
+                               : (long)(maxlen / 2);
   long kk = target_ctas / base_grid; if (kk < 1) kk = 1; if (kk > 16) kk = 16;
   long kp = 1; while (kp * 2 <= kk) kp *= 2;
   const int ksplit = (int)kp;
-  const bool use_regdq = ((long)(maxlen / 32) / 2 / ksplit >= 4);
+  const bool use_regdq = (D == 128) && ((long)(maxlen / 32) / 2 / ksplit >= 4);
 
   auto run_all = [&]() {
     const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
     const int gq = (int)std::min<long long>((rq + 3) / 4, 65535);
     const int gkv = (int)std::min<long long>((rkv + 3) / 4, 65535);
-    quantize_row_warp_kernel<4, false><<<gq, 128>>>(d_q_f, d_q8, d_qs, rq);
-    quantize_row_warp_kernel<4, false><<<gkv, 128>>>(d_k_f, d_k8, d_ks, rkv);
-    quantize_row_warp_kernel<4, false><<<gkv, 128>>>(d_v_f, d_v8, d_vs, rkv);
-    quantize_row_warp_kernel<4, true><<<gq, 128>>>(d_do_f, d_do8, d_dos, rq);
+    // VPT = D/32：D=128→4、D=512→16（与定长路径一致；写错会把行距当 128 ⇒ 整行错位）。
+    if (D == 128) {
+      quantize_row_warp_kernel<4, false><<<gq, 128>>>(d_q_f, d_q8, d_qs, rq);
+      quantize_row_warp_kernel<4, false><<<gkv, 128>>>(d_k_f, d_k8, d_ks, rkv);
+      quantize_row_warp_kernel<4, false><<<gkv, 128>>>(d_v_f, d_v8, d_vs, rkv);
+      quantize_row_warp_kernel<4, true><<<gq, 128>>>(d_do_f, d_do8, d_dos, rq);
+    } else {
+      quantize_row_warp_kernel<16, false><<<gq, 128>>>(d_q_f, d_q8, d_qs, rq);
+      quantize_row_warp_kernel<16, false><<<gkv, 128>>>(d_k_f, d_k8, d_ks, rkv);
+      quantize_row_warp_kernel<16, false><<<gkv, 128>>>(d_v_f, d_v8, d_vs, rkv);
+      quantize_row_warp_kernel<16, true><<<gq, 128>>>(d_do_f, d_do8, d_dos, rq);
+    }
     CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
     CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
     CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
@@ -3024,18 +3046,33 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
     const int nblk = (maxlen + LBM - 1) / LBM;
     if (causal) {
       dim3 lg((nblk + 1) / 2, H, B);
-      launch_lse_bal_wgmma<128, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
-                                   d_cu);
+      // D==128 走 wgmma 版（SW128 + wgmma）；D==512（MLA）只有 mma 版（HD>128 无 SW128 快路）。
+      if (D == 128)
+        launch_lse_bal_wgmma<128, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
+                                     d_cu);
+      else
+        launch_lse_bal<512, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu);
     } else {
       dim3 lg(nblk, H, B);
-      launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
+      if (D == 128)
+        launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
+      else
+        launch_lse<512>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
     }
     const int d_rows = (int)rows_q;
     const int d_wpb = THREADS / 32;
     const int d_blocks = (d_rows + d_wpb - 1) / d_wpb;
-    delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+    if (D == 128)
+      delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+    else
+      delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
     dim3 mg((maxlen + BM - 1) / BM * ksplit, H, B);
-    if (use_regdq)
+    if (D == 512) {
+      // MLA：非 wgmma / 非 regdq（与定长 D=512 路径一致）。
+      launch_bwd_main<512, 64, 32, false, false, true>(
+          mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
+          d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
+    } else if (use_regdq)
       launch_bwd_main<128, 64, 32, true, true, true>(
           mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
           d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);

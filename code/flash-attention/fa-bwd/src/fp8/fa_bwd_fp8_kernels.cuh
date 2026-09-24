@@ -971,7 +971,8 @@ template <int HD, int PIPE>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                    const unsigned char* __restrict__ k8, const float* __restrict__ ks,
-                   float* __restrict__ lse, int S, int H, int Hkv, float scale) {
+                   float* __restrict__ lse, int S, int H, int Hkv, float scale,
+                   const int* __restrict__ cu_seqlens = nullptr) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int ASLD = Cfg::ASLD;
   constexpr int KVL  = LBN * ASLD;
@@ -982,8 +983,13 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
   float* qs_s = reinterpret_cast<float*>(Ks + (PIPE ? 2 : 1) * KVL);  // [LBM]
   float* ks_s = qs_s + LBM;                                          // PIPE=1：2×LBN
 
-  const int nblk = (S + LBM - 1) / LBM;
   const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // VARLEN（第 80 轮）：cu_seqlens 给出本序列在 packed [T,H,D] 的 token 基址与长度；
+  // nullptr 逐式退化为定长（qbase=b*S、len=S），定长路径逐位不变。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
+  const int nblk  = (len + LBM - 1) / LBM;
+  if (pair >= (nblk + 1) / 2) return;   // 短序列多余的对 CTA 直接退出
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -995,8 +1001,8 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
       const int row = u / HDV, c16 = u % HDV;
       const int qi = m0 + row;
       unsigned char* d = Qs + row * ASLD + c16 * 16;
-      if (qi < S) {
-        const unsigned char* s = q8 + (((size_t)(b * S + qi)) * H + h) * HD + c16 * 16;
+      if (qi < len) {
+        const unsigned char* s = q8 + (((size_t)(qbase + qi)) * H + h) * HD + c16 * 16;
         if constexpr (PIPE) cp_async16(d, s);
         else {
 #pragma unroll
@@ -1006,7 +1012,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
         *reinterpret_cast<uint4*>(d) = make_uint4(0, 0, 0, 0);
       }
     }
-    if (tid < LBM) qs_s[tid] = (m0 + tid < S) ? qs[((size_t)(b * S + m0 + tid)) * H + h] : 1.f;
+    if (tid < LBM) qs_s[tid] = (m0 + tid < len) ? qs[((size_t)(qbase + m0 + tid)) * H + h] : 1.f;
     if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
   };
 
@@ -1017,8 +1023,8 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
       const int row = u / HDV, c16 = u % HDV;
       const int jg = j0 + row;
       unsigned char* d = Kd + row * ASLD + c16 * 16;
-      if (jg < S) {
-        const unsigned char* s = k8 + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c16 * 16;
+      if (jg < len) {
+        const unsigned char* s = k8 + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c16 * 16;
         if constexpr (PIPE) cp_async16(d, s);
         else {
 #pragma unroll
@@ -1029,7 +1035,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
       }
     }
     if (tid < LBN)
-      KdS[tid] = (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * Hkv + hkv] : 1.f;
+      KdS[tid] = (j0 + tid < len) ? ks[((size_t)(qbase + j0 + tid)) * Hkv + hkv] : 1.f;
     if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
   };
 
@@ -1040,7 +1046,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
     const int m0 = mblk * LBM;
     issue_q(m0);
 
-    const int ncols = min(S, m0 + LBM);
+    const int ncols = min(len, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
     if constexpr (PIPE) {
       if (ntiles > 0) issue_k(Ks, ks_s, 0);
@@ -1077,7 +1083,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
           int c = j * 8 + c2 + (q & 1);
           int qi = m0 + r, jg = j0 + c;
           float sv = -INFINITY;
-          if (qi < S && jg < S && jg <= qi)
+          if (qi < len && jg < len && jg <= qi)
             sv = acc[0][j][q] * scale * qs_s[r] * KtS[c];
           if (sv != -INFINITY) {
             float mn = fmaxf(mrow[s], sv);
@@ -1104,7 +1110,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+        if (qi < len) lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
       }
     }
     // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）

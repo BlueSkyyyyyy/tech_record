@@ -149,7 +149,11 @@
   非 causal 各 m 块工作量相同 ⇒ LSE 从镜像配对 wgmma 版切到通用 mma `lse_mma_kernel`
   （加 `cu_seqlens` 默认参数，`nullptr` 定长逐位不变）。4 个 full case 对拍 fp32 ref 全噪声、
   单/两文件逐位一致；等长 `[1024]×4` ours 0.909ms（fp16/bf16，时间约为 causal 的 2×）。
-  详见 `docs/03` §38、`docs/01` §16.8、`docs/01b` §6aa.6。**MLA、负载均衡、TMA 化**留后续。
+  详见 `docs/03` §38、`docs/01` §16.8、`docs/01b` §6aa.6。
+  **fp8 的 MLA（HD=512）已完成（第八十轮）**：`lse_mma_kernel_bal<HD>` 加 `cu_seqlens` +
+  `run_varlen` 按 D 分派（含 `quantize VPT=D/32` 的坑），2 个 MLA varlen case 对拍 fp32 ref
+  fp8 噪声、单/两文件逐位一致，定长 D=512 回归逐位不变；详见 `docs/03` §39。
+  **剩余：fp16/bf16 的 varlen MLA、负载均衡、TMA 化**留后续。
 
 ## 每项的 Definition of Done
 
@@ -2355,15 +2359,24 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第七十九轮）**：VARLEN 的**非 causal（full attention）**——fp8/fp16/bf16 三 dtype
-> 单/两文件均支持。非 causal 各 m 块工作量相同 ⇒ LSE 从 causal 专用镜像配对 wgmma 版切到
-> 通用 mma `lse_mma_kernel`（加 `cu_seqlens` 默认参数，`nullptr` 定长逐位不变）；主 kernel
-> 本就带 `causal`。4 个 full case 对拍 fp32 ref 全噪声、单/两文件逐位一致；等长 `[1024]×4`
-> ours fp16/bf16 0.909ms（约为 causal 的 2×，符合 full 总计算量 2×）。详见 `docs/03` §38、
-> `docs/01` §16.8、`docs/01b` §6aa.6、`docs/04` §9。**varlen 现在 fp8/fp16/bf16 × causal/full
-> 齐备**（仍限 HD=128/MHA+GQA、非 TMA）。**下一步候选**：① varlen 的 **MLA**（HD=512）；
-> ② 按 `cu_seqlens` 的**均衡分块**（当前强倾斜 case 短序列 CTA 早退、并行度浪费）；
-> ③ varlen 的 **TMA 化**（需为 packed 布局重建 `[D,T,H,1]` 描述符）；④ 回到 fp8 K/V TMA
+> **最新（第八十轮）**：**VARLEN 的 MLA（head_dim=512）——fp8 反向**（单/两文件）。fp8 的
+> `fp8_mma_body` 本已是 HD 参数化且第 77 轮已带 `cu_seqlens`，故只补两处：① device
+> `lse_mma_kernel_bal<HD>` 加 `cu_seqlens`（D=512 的 causal LSE 走 mma 镜像配对版，此前无
+> varlen 支持；改动与 §38 给 `lse_mma_kernel<HD>` 加 cu 同构，`nullptr` 定长逐位不变）；
+> ② host `run_varlen` 按 D 分派（**坑：`quantize_row_warp_kernel` 的 `VPT=D/32`（512→16）
+> 必须随 D 切，原来硬编码 `<4>` 会把行距当 128 ⇒ 整行错位、误差 O(1)**；ksplit D=512 用
+> `maxlen/2`、LSE/delta/主 kernel 各按 D 分派）。新增 MLA varlen case（`[256,512,1024]`
+> H2 D512 causal/full）：vs fp32 ref max_abs 0.04–0.39（fp8 噪声）、**单/两文件逐位一致**；
+> 定长 D=512 回归逐位不变（S512 2.426/2.972/3.733e-1、S4096 2.635/2.644/3.216e-1、
+> MLA S1024H2 2.232/3.337/3.602e-1）。性能：varlen b1 `[512]` causal 0.1866ms/5.75TF，
+> **与同 shape 定长 0.1836ms 仅差 1.6%**；b3 `[256,512,1024]` causal 0.5875ms/9.60TF
+> （×2 的 `(D+Dv)` 口径≈19TF）。ncu：main **255 regs / 1 CTA/SM、occ 6.25%、No Eligible 84.7%、
+> short_scoreboard ~30%、DRAM 2.6%、Compute 8%** ⇒ bound = **低 occupancy + smem→mma 依赖**；
+> LSE **Waves 0.18**（grid=48<132 SM）⇒ 并行度 bound。详见 `docs/03` §39。**varlen 现在
+> fp8 × causal/full × {HD=128 MHA/GQA, HD=512 MLA} 齐备**（非 TMA）。**下一步候选**：
+> ① **fp16/bf16 的 varlen MLA**（需给 `fa_bwd_{fp16,bf16}_mma_kernel` 与 `lse_mma_kernel_bal`
+> 加 `cu_seqlens`）；② 按 `cu_seqlens` 的**均衡分块**（短序列 CTA 早退）；
+> ③ varlen 的 **TMA 化**（为 packed 布局重建 `[D,T,H,1]` 描述符）；④ 回到 fp8 K/V TMA
 > （需先腾 ~10KB smem）或 fp16/bf16 的 `L2 red`（三条消 red 路已证伪，转 TMA/软流水）。
 >
 > **当前冲刺（按序，把 ours 性能推到 FA3/TE 水平；这是最高优先级，别再被其它任务打断）**：
