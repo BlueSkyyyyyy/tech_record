@@ -972,7 +972,8 @@ __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                    const unsigned char* __restrict__ k8, const float* __restrict__ ks,
                    float* __restrict__ lse, int S, int H, int Hkv, float scale,
-                   const int* __restrict__ cu_seqlens = nullptr) {
+                   const int* __restrict__ cu_seqlens = nullptr,
+                   float* __restrict__ lse_part = nullptr, int ksplit = 1) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int ASLD = Cfg::ASLD;
   constexpr int KVL  = LBN * ASLD;
@@ -983,7 +984,11 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
   float* qs_s = reinterpret_cast<float*>(Ks + (PIPE ? 2 : 1) * KVL);  // [LBM]
   float* ks_s = qs_s + LBM;                                          // PIPE=1：2×LBN
 
-  const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // O39：K 维 split。`ksplit>1` 时 grid.z = B*ksplit，每个 (pair,ks) CTA 只扫本 m 块 K 范围
+  //   的第 ks 个连续 tile 切片，部分 (m,l) 写 `lse_part`，由 `lse_split_merge_kernel` 汇总。
+  //   `ksplit==1` 时 b=blockIdx.z、ksp=0，逐位退化为 O11 原路径。
+  const int pair = blockIdx.x, h = blockIdx.y;
+  const int b = blockIdx.z / ksplit, ksp = blockIdx.z % ksplit;
   // VARLEN（第 80 轮）：cu_seqlens 给出本序列在 packed [T,H,D] 的 token 基址与长度；
   // nullptr 逐式退化为定长（qbase=b*S、len=S），定长路径逐位不变。
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
@@ -1048,20 +1053,25 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
 
     const int ncols = min(len, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
+    // O39：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
+    const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
+    const int nt1 = (int)(((long)ntiles * (ksp + 1)) / ksplit);
+    const int nuse = nt1 - nt0;
     if constexpr (PIPE) {
-      if (ntiles > 0) issue_k(Ks, ks_s, 0);
+      if (nuse > 0) issue_k(Ks, ks_s, nt0 * LBN);
     }
     float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
 
-    for (int nt = 0; nt < ntiles; ++nt) {
+    for (int rnt = 0; rnt < nuse; ++rnt) {
+      const int nt = nt0 + rnt;
       const int j0 = nt * LBN;
-      unsigned char* Kt = Ks + (PIPE ? (nt & 1) * KVL : 0);
-      float* KtS = ks_s + (PIPE ? (nt & 1) * LBN : 0);
+      unsigned char* Kt = Ks + (PIPE ? (rnt & 1) * KVL : 0);
+      float* KtS = ks_s + (PIPE ? (rnt & 1) * LBN : 0);
       if constexpr (PIPE) {
         asm volatile("cp.async.wait_group 0;\n");
         __syncthreads();
-        if (nt + 1 < ntiles)
-          issue_k(Ks + ((nt + 1) & 1) * KVL, ks_s + ((nt + 1) & 1) * LBN, j0 + LBN);
+        if (rnt + 1 < nuse)
+          issue_k(Ks + ((rnt + 1) & 1) * KVL, ks_s + ((rnt + 1) & 1) * LBN, j0 + LBN);
       } else {
         issue_k(Ks, ks_s, j0);
         __syncthreads();
@@ -1110,7 +1120,15 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < len) lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
+        if (qi < len) {
+          if (ksplit == 1) {
+            lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
+          } else {
+            size_t row = ((size_t)(qbase + qi)) * H + h;
+            lse_part[(row * ksplit + ksp) * 2 + 0] = m;
+            lse_part[(row * ksplit + ksp) * 2 + 1] = l;
+          }
+        }
       }
     }
     // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
@@ -1351,11 +1369,12 @@ __device__ __forceinline__ void tma_load_4d(void* dst, const CUtensorMap* map, i
 #endif
 }
 
-#if defined(FA_WGMMA) && defined(FA_TMA)
-// O38：把 K 维 split 的 LSE 部分结果 `(m_ks, l_ks)` 沿 `ks` 二次归约成最终 LSE。
+// O38/O39：把 K 维 split 的 LSE 部分结果 `(m_ks, l_ks)` 沿 `ks` 二次归约成最终 LSE。
 //   `part` 布局 `[row][ks] -> (m,l)`（每行 `2*ksplit` 个 fp32），输出 `lse[row]=m+log(l)`。
 //   online-softmax 合并（max 取大、sum 按 exp 重标定），`-inf/0` 安全（空 split 得 -inf/0）。
 //   数学上与「单 CTA 顺序扫全部 K tile」完全等价，只差 fp32 求和次序。
+//   放在 `FA_WGMMA && FA_TMA` 守卫**之外**：O39 起 mma 版 `lse_mma_kernel_bal`（D=512 MLA 与
+//   `sm_90` 构建）也用 K 维 split，需要这个 merge kernel。
 __global__ void lse_split_merge_kernel(const float* __restrict__ part,
                                        float* __restrict__ lse, long long nrows, int ksplit) {
   long long row = (long long)blockIdx.x * blockDim.x + threadIdx.x;
@@ -1374,6 +1393,7 @@ __global__ void lse_split_merge_kernel(const float* __restrict__ part,
   lse[row] = m + flog(l);
 }
 
+#if defined(FA_WGMMA) && defined(FA_TMA)
 template <int HD, int PIPE = 1>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,

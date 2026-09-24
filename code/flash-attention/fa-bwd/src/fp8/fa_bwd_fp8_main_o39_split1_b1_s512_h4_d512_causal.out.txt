@@ -1,0 +1,33 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp8
+B=1 S=512 H=4 Hkv=4 D=512 causal=1 scale=0.044194
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 64 x 4 x 1  (ksplit=8, base_grid=32)
+O19: wg2 grid = 64 x 4 x 1 (ksplit2=16, base_grid2=16)
+O7: use_regdq=0 (register dQ accumulation)
+O32: lse backend = wgmma/mma
+O37: main qd-tma = on
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 0.2601 ms  8.26 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0140 ms | preprocess 0.0826 ms | main 0.1216 ms | convert 0.0420 ms (cvt_on=0)
+[O39 A/B] lse(D=512) split=1 0.0793 ms (1.000x vs split1) | max_abs vs split1=0.000e+00\n[O39 A/B] lse(D=512) split=2 0.0489 ms (1.621x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=4 0.0329 ms (2.411x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=8 0.0259 ms (3.061x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=16 0.0314 ms (2.528x vs split1) | max_abs vs split1=4.768e-07\n[O39] best lse split=8 0.0259 ms (3.061x)\n[O12 A/B] main LSE/D preload off 0.1211 ms | on 0.1209 ms (1.002x) | max_abs(on-vs-off) dq=2.384e-07
+[O14 A/B] quant old(per-row) 0.0195 ms | new(warp-per-row) 0.0139 ms (1.408x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0046 ms | new(warp-per-row) 0.0032 ms (1.440x) | max_abs=8.583e-06 max_rel=1.586e-04
+[O21b A/B] end2end 保留convert 0.2644 ms | 直写输出(消convert) 0.2550 ms (1.0371x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.415e-01  max_rel=1.803e+02
+  dk   vs ref: max_abs=2.992e-01  max_rel=6.416e+01
+  dv   vs ref: max_abs=4.481e-01  max_rel=9.164e+01
+    dq[d   0..127] max_abs=2.361e-01
+    dq[d 128..255] max_abs=2.415e-01
+    dq[d 256..383] max_abs=1.690e-01
+    dq[d 384..511] max_abs=1.784e-01
+    dk[d   0..127] max_abs=2.532e-01
+    dk[d 128..255] max_abs=2.566e-01
+    dk[d 256..383] max_abs=2.992e-01
+    dk[d 384..511] max_abs=2.525e-01
+    dv[d   0..127] max_abs=4.481e-01
+    dv[d 128..255] max_abs=3.640e-01
+    dv[d 256..383] max_abs=2.988e-01
+    dv[d 384..511] max_abs=2.960e-01
+[compare] ours vs TE FP8

@@ -564,7 +564,8 @@ template <int HD, int PIPE>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
                    float* __restrict__ lse, int S, int H, int Hkv, float scale,
-                   const int* __restrict__ cu_seqlens = nullptr) {
+                   const int* __restrict__ cu_seqlens = nullptr,
+                   float* __restrict__ lse_part = nullptr, int ksplit = 1) {
   constexpr int LD  = HD + 8;
   constexpr int KVL = LBN * LD;
   constexpr int HDV = HD / 8;   // 每行 uint4(8 half) 数
@@ -572,7 +573,11 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
   __half* Qs = reinterpret_cast<__half*>(smem);
   __half* Ks = Qs + LBM * LD;   // PIPE=1：2 × LBN × LD；PIPE=0：1 × LBN × LD
 
-  const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // O39：K 维 split（对齐 fp8 §41 与 fp16 TMA LSE 的 O38）。`ksplit>1` 时 grid.z = B*ksplit，
+  //   每个 (pair,ks) CTA 只扫本 m 块 K 范围的第 ks 个连续 tile 切片，部分 (m,l) 写 `lse_part`，
+  //   由 `lse_split_merge_kernel` 汇总。`ksplit==1` 时 b=blockIdx.z、ksp=0，逐位退回 O8b。
+  const int pair = blockIdx.x, h = blockIdx.y;
+  const int b = blockIdx.z / ksplit, ksp = blockIdx.z % ksplit;
   // VARLEN（第 81 轮）：cu_seqlens 给出本序列在 packed [T,H,D] 的 token 基址与长度；
   // nullptr 逐式退化为定长（qbase=b*S、len=S），定长路径逐位不变。
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
@@ -638,21 +643,26 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
 
     const int ncols = min(len, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
+    // O39：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
+    const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
+    const int nt1 = (int)(((long)ntiles * (ksp + 1)) / ksplit);
+    const int nuse = nt1 - nt0;
 
     // prologue：PIPE=1 时发 tile0 进 stage0（Q 与 K 写不同 smem，由循环首 wait+sync 保证可见）
     if constexpr (PIPE) {
-      if (ntiles > 0) issue_k(Ks, 0);
+      if (nuse > 0) issue_k(Ks, nt0 * LBN);
     }
 
     float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
-    for (int nt = 0; nt < ntiles; ++nt) {
+    for (int rnt = 0; rnt < nuse; ++rnt) {
+      const int nt = nt0 + rnt;
       const int j0 = nt * LBN;
-      __half* Kt = Ks + (PIPE ? (nt & 1) * KVL : 0);
+      __half* Kt = Ks + (PIPE ? (rnt & 1) * KVL : 0);
       if constexpr (PIPE) {
         // 等本 tile 落地；此 barrier 同时证明「上一 tile 的 mma 已读完其 stage」，故可复用。
         asm volatile("cp.async.wait_group 0;\n");
         __syncthreads();
-        if (nt + 1 < ntiles) issue_k(Ks + ((nt + 1) & 1) * KVL, j0 + LBN);
+        if (rnt + 1 < nuse) issue_k(Ks + ((rnt + 1) & 1) * KVL, j0 + LBN);
       } else {
         issue_k(Ks, j0);
         __syncthreads();
@@ -700,7 +710,15 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < len) lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
+        if (qi < len) {
+          if (ksplit == 1) {
+            lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
+          } else {
+            size_t row = ((size_t)(qbase + qi)) * H + h;
+            lse_part[(row * ksplit + ksp) * 2 + 0] = m;
+            lse_part[(row * ksplit + ksp) * 2 + 1] = l;
+          }
+        }
       }
     }
     // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
@@ -4499,8 +4517,15 @@ int main(int argc, char** argv) {
   int lse_split_eff = lse_split;
   if (lse_split_eff <= 0) {
     long lg_grid = (long)lg_bal.x * H * B;
+    // O39：D=512（MLA，mma LSE，smem ~202KB ⇒ 1 CTA/SM）目标 `grid*split ≈ 132`（一个波）、
+    //   上限 16；D=128 的 TMA LSE 维持 O38 的「一波」目标 528、上限 8。
+    const int target = (D == 512) ? 132 : 528;
+    const int cap = (D == 512) ? 16 : 8;
     int sp = 1;
-    while (sp < 8 && lg_grid * (sp * 2) <= 528) sp *= 2;
+    while (sp < cap && lg_grid * (sp * 2) <= target) sp *= 2;
+    // 再按 `nblk=ceil(S/64)` 封顶：切得比 K tile 数还细只会产生空切片 + 每 CTA 的 Q 载入开销。
+    int nblk_cap = (S + 63) / 64;
+    while (sp > nblk_cap) sp >>= 1;
     lse_split_eff = sp;
   }
   printf("[O38] lse k-split = %d%s\n", lse_split_eff, (lse_split <= 0 ? " (auto)" : ""));
@@ -4606,10 +4631,21 @@ int main(int argc, char** argv) {
   const int d_blocks = (d_rows + d_wpb - 1) / d_wpb;
   auto run_pre = [&]() {
     if (D == 512) {
-      if (causal)
-        lse_mma_kernel_bal<512, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
-                                                                      Hkv, scale);
-      else
+      // O39：MLA（D=512）causal LSE 也用 K 维 split（此前只有 D=128/TMA 有 O38）。
+      if (causal) {
+        if (lse_split_eff > 1) {
+          dim3 gsp(lg_bal.x, lg_bal.y, (unsigned)(B * lse_split_eff));
+          lse_mma_kernel_bal<512, 1><<<gsp, THREADS, kLseSmemBal1>>>(
+              d_q, d_k, d_lse, S, H, Hkv, scale, nullptr, d_lse_part, lse_split_eff);
+          const long long nrows = (long long)B * S * H;
+          const int th = 256;
+          const long long bl = (nrows + th - 1) / th;
+          lse_split_merge_kernel<<<(unsigned)bl, th>>>(d_lse_part, d_lse, nrows, lse_split_eff);
+        } else {
+          lse_mma_kernel_bal<512, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
+                                                                        Hkv, scale);
+        }
+      } else
         lse_mma_kernel<512><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
                                                        (int)causal);
       if (delta_warp_sel)
@@ -4638,10 +4674,20 @@ int main(int argc, char** argv) {
       if (causal && lse_wgm)
         lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse,
                                                                             S, H, Hkv, scale);
-      else if (causal)
-        lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
-                                                                      Hkv, scale);
-      else
+      else if (causal) {
+        if (lse_split_eff > 1) {
+          dim3 gsp(lg_bal.x, lg_bal.y, (unsigned)(B * lse_split_eff));
+          lse_mma_kernel_bal<128, 1><<<gsp, THREADS, kLseSmemBal1>>>(
+              d_q, d_k, d_lse, S, H, Hkv, scale, nullptr, d_lse_part, lse_split_eff);
+          const long long nrows = (long long)B * S * H;
+          const int th = 256;
+          const long long bl = (nrows + th - 1) / th;
+          lse_split_merge_kernel<<<(unsigned)bl, th>>>(d_lse_part, d_lse, nrows, lse_split_eff);
+        } else {
+          lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
+                                                                        Hkv, scale);
+        }
+      } else
         lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
                                                        (int)causal);
       if (delta_warp_sel)

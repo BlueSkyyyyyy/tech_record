@@ -3768,3 +3768,101 @@ python3 scripts/sync_onefile_device.py src/fp8/fa_bwd_fp8_kernels.cuh \
 `src/fp8/fa_bwd_fp8_o38_ncu_lse_split{1,8}_s512.out.txt`、
 `src/fp8/fa_bwd_fp8_o38_ncu_lse_s4096.out.txt`、`src/fp8/fa_bwd_fp8_o38_ncu_merge_s4096.out.txt`、
 `src/fp8/fa_bwd_fp8_o38_te_fa3_baseline.out.txt`。
+
+## 42. MLA（head_dim=512）LSE 的 K 维 split + 二次归约（O39，第八十六轮）—— **正结果，默认 auto**
+
+### 42.1 动机
+
+O38（§41）只把「K 维 split + 二次归约」做进了 **D=128 的 TMA LSE**（`lse_mma_kernel_bal_tma`）。
+fp8 的 **MLA（D=512）反向** causal LSE 走的是 **mma 版** `lse_mma_kernel_bal<512,1>`（HD>128 无
+SW128/TMA 快路）。S1024H2 时 `nblk=16,pairs=8`，grid 只有 `8×2×1=16` 个 CTA，ncu 实测
+**Waves 0.06 / Achieved Occupancy 6.25% / Compute 2.65%** —— 是**纯并行度/临界路径**墙，
+与 fp8 O38 的 S512 情形同构。O39 把同一套切片 + merge 机制移植到 mma 版 LSE。
+
+### 42.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+`src/fp8/fa_bwd_fp8_kernels.cuh` 的 `lse_mma_kernel_bal<HD,PIPE>`：
+
+- 新增两个尾部默认参数 `float* __restrict__ lse_part = nullptr, int ksplit = 1`；
+  `grid.z` 由 `B` 扩成 `B*ksplit`，`b = blockIdx.z/ksplit`、`ksp = blockIdx.z%ksplit`。
+- 每个 `(pair,ksp)` CTA 只扫本 m 块 K tile 的连续切片
+  `[nt0,nt1) = [ntiles*ksp/ksplit, ntiles*(ksp+1)/ksplit)`；流水 stage 用**切片内相对下标
+  `rnt&1`**（避免 `nt0` 奇偶错位）。
+- `ksplit==1` 时 `b=blockIdx.z`、`ksp=0`、`nuse=ntiles`，**逐位退化为 O11 原路径**。
+- 部分结果 `(m,l)` 写 `lse_part[(row*ksplit+ksp)*2 + {0,1}]`，由 `lse_split_merge_kernel`
+  沿 `ksp` 做 online-softmax 合并成 `lse = m + log(l)`。
+- `lse_split_merge_kernel` 从 `#if defined(FA_WGMMA) && defined(FA_TMA)` 守卫**移出**（mma
+  版 LSE 也要用；kernel 本身是纯 fp32 代码，与 TMA/wgmma 无关）。
+- host：`launch_lse_bal` 加 `lse_part/ksplit` 并在 `ksplit>1` 时补 launch merge；
+  `--lsesplit=N`（`0=auto`）。**auto 目标**：`D==512 → grid*split ≈ 256`（fp8 LSE smem
+  ~102KB ⇒ 2 CTA/SM，故 ≈ `2×132`）、上限 16；再按 `nblk=ceil(S/64)` **封顶**（切得比 K tile
+  数还细只会产生空切片 + 每 CTA 的 Q 载入开销）。D=128 的 TMA LSE 维持 O38 的 `≈2048/8`。
+- 顺带把 D=128 的 **非 TMA mma 回退路径**（`sm_90` 构建 / `--lsetma=0 --lsewgm=0`）也接上
+  split（此前回退路径永远 split=1）；D=128 的 wgmma 回退路径不支持 split（保持原样）。
+
+### 42.3 数值（vs fp32 ref，fp8 causal，max_abs dq/dk/dv；split-vs-split1）
+
+| case (B1 D=Dv=512) | dq | dk | dv | max_abs(split-auto vs split1) |
+|---|---|---|---|---|
+| S256 H2 | 2.356e-1 | 2.290e-1 | 3.441e-1 | 4.8e-7 |
+| S512 H4 | 2.415e-1 | 2.992e-1 | 4.481e-1 | 4.8e-7 |
+| S1024 H2 | 2.232e-1 | 3.337e-1 | 3.602e-1 | 9.5e-7 |
+
+全形状与 O27/O28/O32/O37/O38 历史**逐位一致到打印精度**；`max_abs(split-vs-split1) ≤ 9.5e-7`
+（纯 fp32 求和次序）。单/两文件逐指标一致；varlen MLA（§39）与 D=128 MHA/GQA（S512
+2.426/2.972/3.733e-1、S4096 2.635/2.644/3.216e-1、kv4 2.517/5.339/7.173e-1）回归不变。
+
+### 42.4 性能（CUDA event；same-session `--lsesplit=1`（基线）vs auto）
+
+| case | LSE split1 (ms) | LSE auto (ms) | LSE 倍数 | total split1 (ms) | total auto (ms) | total 倍数 |
+|---|---|---|---|---|---|---|
+| MLA S256H2 | 0.0458 | **0.0237** (split4) | **1.93×** | 0.1110 | **0.0921** | **1.21×** |
+| MLA S512H4 | 0.0780 | **0.0254** (split8) | **3.07×** | 0.2601 | **0.2009** | **1.29×** |
+| MLA S1024H2 | 0.1447 | **0.0310** (split16) | **4.67×** | 0.4036 | **0.2851** | **1.42×** |
+
+auto 在三个 shape 上分别选 4/8/16，均命中 per-shape 最优（`--lsesplit` 全扫见 §42.7）。
+merge kernel 每 case 仅数 µs（S1024 split16）。单文件与两文件 total 同量级。
+
+### 42.5 ncu（LSE 主 kernel，`--launch-count 1`，同 binary split 1 vs 16，S1024H2）
+
+| | split1 | split16 |
+|---|---|---|
+| Duration | 152.42 µs | **26.11 µs** |
+| Waves Per SM | 0.06 | **0.97** |
+| Achieved Occupancy | 6.25% | **10.77%** |
+| Compute (SM) | 2.65% | **22.02%** |
+| L2 Cache | 1.31% | 18.61% |
+| DRAM | 0.43% | 2.52% |
+| Registers / Dynamic smem | 85 / 102.14 KB（Block Limit Shared Mem = 2） | 同 |
+
+stall（per-issue-active）：split1 `wait 2.38 + short_sb 0.50 + long_sb 0.08`（**mma fixed-latency
+依赖主导**）→ split16 `wait 2.07 + short_sb 0.51 + long_sb 0.49 + barrier 0.36`。
+**结论：此前的墙是网格不足（Waves 0.06）；split 把并发槽填满一个波后，墙回到 LSE 固有的
+`mma wait`（fixed-latency）+ smem 依赖，且只到 2 CTA/SM**（smem 102KB 封顶）——与 fp8 O38 的
+「并行度 → Compute/wait」结论一致。
+
+### 42.6 对标
+
+FA3/TE/FA2 反向均**不支持 head_dim=512（MLA 主注意力）**，只有 fp32 ref 可对；故 MLA 的性能
+数字仅 ours 提供（对标见 `docs/04` §15）。D=128 的 MHA/GQA 对标不受影响（O39 只改 D=512 LSE；
+D=128 TMA 路径逐位回归）。
+
+### 42.7 复现 / 原始输出
+
+```bash
+# 两文件：默认 auto（0）；--lsesplit=1 关闭做 A/B
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8 --o=ref_o --iters=100
+# 单文件
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --dir=... --lsesplit=16
+# ncu
+ARCH="" NVCC_FLAGS="..." scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu \
+  --kernel-name regex:lse_mma_kernel_bal --launch-count 1 --set full -- --lsesplit=16
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o39_b1_s{256_h2,512_h4,1024_h2}_d512_causal.out.txt`（auto）、
+`..._o39_split1_b1_*_d512_causal.out.txt`（基线）、`..._o39_reg_b1_*`（D=128/GQA 回归）、
+`..._o39_mmafallback_s512.out.txt`、`..._o39_ncu_lse_split{1,16}_s1024h2.out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_o39_*`（单文件）、`..._o39_varlen_*`（varlen MLA 回归）。

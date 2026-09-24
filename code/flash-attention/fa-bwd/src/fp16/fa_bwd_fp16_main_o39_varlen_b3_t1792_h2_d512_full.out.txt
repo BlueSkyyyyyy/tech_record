@@ -1,0 +1,10 @@
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_full_fp16
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=0
+cu_seqlens = 0 256 768 1792
+VARLEN main backend = wgmma2 cp.async
+[timing] VARLEN total 1.4617 ms  3.86 TFLOPS (sum_b 4HL^2D)
+grid main = 32 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
+  dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
+  dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)
