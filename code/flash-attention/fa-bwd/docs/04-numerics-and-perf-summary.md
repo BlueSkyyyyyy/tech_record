@@ -668,6 +668,18 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > ncu：Duration 42.94→**17.34µs**、墙从 smem 归约（Compute 74.9%）移到 **DRAM 带宽 77%**
 > （elementwise 上限）。详见 `03` §31、原始输出 `src/fp8/fa_bwd_fp8_main_o26_sweep.out.txt`、
 > `o26_ncu_delta_{old,new}_s4096.out.txt`、`o26_te_fp8_bench.out.txt`。
+>
+> **O27（第六十八轮）——fp8 fold 量化「逐元素精确除法」→「每行 rcp + 乘法」**：fold 里每个
+> (m,j) 元素都算一次 `Ps*[dos] / scA`（`scX` 是每输出行一个的常量），ptxas 默认 `prec-div`
+> ⇒ ~10+ 指令/元素的精确除法。改成每行 `__frcp_rn` 一次 + `__shfl` 广播 + 乘法（新模板参数
+> `RCP`，默认 true；`--foldrcp=0` 供同 binary A/B）。**main 1.08–1.18×**（S4096 2.043→
+> **1.758ms**、MQA 1.178×、kv8 1.152×）；**端到端 S4096 2.4637→2.1770ms（63.1 TF）**、S512
+> 0.1284→0.1246、S1024H32 0.5218→0.4895、GQA kv4 0.4875→0.4566、kv8 0.5606→0.5010、MQA
+> 0.7926→0.6956、MLA（S256/S512/S1024）0.1169/0.2972/0.5175→0.1094/0.2688/0.4653。
+> **vs fp32 ref 的 dq/dk/dv 与历史逐位一致**（9 shape 全部）；ncu main **Duration 2.06→1.78ms、
+> executed inst 852.6M→735.2M（−13.7%）**，墙仍是 mma 依赖延迟（wait+short）+ 3 CTA/SM。
+> 为 TE FP8（同 session 0.5904ms/465.6TF）的 **3.69×**（O26 4.17×）。详见 `03` §32、原始输出
+> `src/fp8/o27_main_sweep.out.txt`、`o27_ncu_rcp_s4096.out.txt`、`o27_te_fp8_bench.out.txt`。
 
 ---
 
@@ -708,6 +720,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp8 | **mma main（O12=PREL 后, S=4096, ksplit=4, REGDQ=true）** | 2.60% | 65.92% | 40.94% | 18.10%（70.66KB, 3 CTA/SM） | 10.34 | short_scoreboard、long_scoreboard | **L1/TEX 65.9% + 残余 L2（dK/dV red）**（LSE/D 全局散读已消：uncoalesced global 38.0M→**4.70M（−87.6%）**、Executed Instructions **−8.4%**、Duration 2.60→**2.34ms**；对齐 fp16 O7c-PREL） |
 | fp8 | **mma main（O7e-2 后, S=4096, ksplit=4, REGDQ=true, F16B）** | 3.22% | **59.97%** | 41.81% | 18.08%（70.66KB, 3 CTA/SM） | 10.34 | short/long_scoreboard | **L1/TEX 60.0% + L2 49.9%（dK/dV 跨 CTA red）+ spill(~2.7M local)**；shared load 冲突 **62.8M→29.2M（−53.5%，fold 列读改无冲突映射）**、总多余 wavefronts 79.9M→41.5M、Duration 2.41→**2.27ms** |
 | fp8 | **mma main（O21, S=4096, BN=64）** | 2.45% | 39.77% | 31.55% | **12.28%（105.22KB, 2 CTA/SM, 255 regs）** | — | —（Warp Cyc/Inst 5.92） | **负结果**：tile 相位减半但 occupancy 3→2 CTA/SM ⇒ Duration 2.19→**2.74ms**（0.816×）；与 O19 一起证伪 fp8「放大 tile/减 red」 |
+| fp8 | **mma main（O27 fold rcp-mul, S=4096, ksplit=4）** | — | 61.64% | 43.65% | 18.1%（70.66KB, 3 CTA/SM, 168 regs） | 10.34 | wait 1.48、short_scoreboard 1.43、long 0.87、barrier 0.27 | **Duration 2.06→1.78ms、executed inst 852.6M→735.2M（−13.7%）**；墙仍是 **mma 依赖延迟（wait+short）+ 3 CTA/SM**（O7e-3/O19/O20/O22 结论未变），但 fold 的精确除法（~10+ 指令/元素）换成每行一次 `__frcp_rn`+乘法 |
 | fp8 | **quant 旧（per-row, S=4096）** | 24.29% | **73.73%** | **71.80%** | 87.82%（Waves 31.03） | 31.03 | —（34.6M inst） | **smem 归约（L1/TEX 73.7%）+ 标量加载（Compute 71.8%）**，DRAM 仅 24% |
 | fp8 | **quant 新（O14 warp-per-row, S=4096）** | **71.31%** | 26.50% | 51.49% | 79.44%（Waves 7.76） | 7.76 | —（**7.93M inst, −77%**） | **DRAM 带宽 71%（elementwise 上限）**；Duration 46.2→**15.4µs** |
 | fp8 | **delta 旧（per-row, S=4096）** | 31.13% | — | **74.93%** | 83.09%（17 regs） | 31.03 | smem 树归约 7×barrier | **smem 归约 + Compute 75%**；Duration **42.94µs** |
