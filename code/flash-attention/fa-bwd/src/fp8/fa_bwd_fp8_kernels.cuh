@@ -151,6 +151,17 @@ struct Fp8Cfg {
 #define FA_ILV 0
 #endif
 
+  // O29：GEMM3(dV)/GEMM4(dK) 的**指令级交错**开关。默认 0：保持原顺序（GEMM3 mma →
+  //   GEMM3 epilogue(red) → GEMM4 mma → GEMM4 epilogue(red)）。置 1：先连发两条独立 GEMM 的
+  //   mma（acc3/acc4 两个累加器），再做各自的 epilogue——让 GEMM4 的 mma 填在 GEMM3 的依赖
+  //   延迟之前，掩盖 `wait`（O7e-3/O28 一致确认 fp8 main 第一墙是 mma 依赖延迟）。
+  //   数学与数值逐位不变（同一批 mma、同一 (r,c) 映射、同一次序的 fp32 累加），只改发射顺序。
+  //   代价：两个 MTM34×8×4 累加器同时存活（HD=128 时各 32 个 fp32），可能挤占 3 CTA/SM 的
+  //   寄存器预算；用 `-DFA_ILV34=0/1` 同 session A/B，默认 0（不改现状）。
+#ifndef FA_ILV34
+#define FA_ILV34 0
+#endif
+
   // O4b：Kt/Qt/dOt 三个「逐字节 scatter 写的转置副本」→ Kp/Qp/dOp 三个 **K 配对布局**
   //   （uint16：[K/2][HD]，元素 = 2 个相邻 K 值），用 `ldmatrix.x2.trans` 读 B 片段。
   //   * Qp（[BM/2][HD]）供 GEMM4 的 B=Qᵀ；dOp 供 GEMM3 的 B=dOᵀ；Kp（[BN/2][HD]）供 GEMM5。
@@ -1877,15 +1888,17 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       const int d0 = nd * NTW;
 
       // ---- (3) dV = Pᵀ·dO  : A=Ap[j][m] (e4m3), B=dOp[m/2][d0+..] (e5m2, ldmatrix.trans) ----
-      {
-        float acc[MTM34][8][4];
+      // ---- (4) dK = scale·dSᵀ·Q : A=dS3[j][m] (e5m2), B=Qp[m/2][d0+..] (e4m3, ldmatrix.trans) ----
+      // O29：把两段 epilogue 抽成 lambda，`FA_ILV34` 时先连发两条 mma 再做 epilogue（见宏说明）。
+      auto zero34 = [&](float (&acc)[MTM34][8][4]) {
 #pragma unroll
         for (int i = 0; i < MTM34; ++i)
 #pragma unroll
           for (int j = 0; j < 8; ++j)
 #pragma unroll
             for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-        mma_block_bt<BN / 2, 64, BM, E4E5>(Ap, QTS, dOp, PSLD, acc, wr, wc, lane, d0);
+      };
+      auto epi_dv = [&](float (&acc)[MTM34][8][4]) {
         const int r0 = wr * (BN / 2), c0 = wc * 64;
 #pragma unroll
         for (int i = 0; i < MTM34; ++i)
@@ -1901,18 +1914,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                 red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
                          acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r]);
             }
-      }
-
-      // ---- (4) dK = scale·dSᵀ·Q : A=dS3[j][m] (e5m2), B=Qp[m/2][d0+..] (e4m3, ldmatrix.trans) ----
-      {
-        float acc[MTM34][8][4];
-#pragma unroll
-        for (int i = 0; i < MTM34; ++i)
-#pragma unroll
-          for (int j = 0; j < 8; ++j)
-#pragma unroll
-            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-        mma_block_bt<BN / 2, 64, BM, E5E4>(dS3, QTS, Qp, PSLD, acc, wr, wc, lane, d0);
+      };
+      auto epi_dk = [&](float (&acc)[MTM34][8][4]) {
         const int r0 = wr * (BN / 2), c0 = wc * 64;
 #pragma unroll
         for (int i = 0; i < MTM34; ++i)
@@ -1929,7 +1932,31 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                          acc[i][j][q] * sds3[r] * scale,
                          acc[i][j][q + 1] * sds3[r] * scale);
             }
+      };
+#if FA_ILV34
+      {
+        float a3[MTM34][8][4], a4[MTM34][8][4];
+        zero34(a3);
+        zero34(a4);
+        mma_block_bt<BN / 2, 64, BM, E4E5>(Ap, QTS, dOp, PSLD, a3, wr, wc, lane, d0);
+        mma_block_bt<BN / 2, 64, BM, E5E4>(dS3, QTS, Qp, PSLD, a4, wr, wc, lane, d0);
+        epi_dv(a3);
+        epi_dk(a4);
       }
+#else
+      {
+        float acc[MTM34][8][4];
+        zero34(acc);
+        mma_block_bt<BN / 2, 64, BM, E4E5>(Ap, QTS, dOp, PSLD, acc, wr, wc, lane, d0);
+        epi_dv(acc);
+      }
+      {
+        float acc[MTM34][8][4];
+        zero34(acc);
+        mma_block_bt<BN / 2, 64, BM, E5E4>(dS3, QTS, Qp, PSLD, acc, wr, wc, lane, d0);
+        epi_dk(acc);
+      }
+#endif
 
       // ---- (5) dQ += scale·dS·K : A=dS2[m][j] (e5m2), B=Kp[j/2][d0+..] (e4m3, ldmatrix.trans) ----
       {

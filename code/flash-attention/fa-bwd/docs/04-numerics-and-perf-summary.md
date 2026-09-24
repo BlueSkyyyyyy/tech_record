@@ -691,6 +691,19 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > ncu：d128 S4096 inst **735.4M→703.5M（−4.3%）**但 Duration 仅 1.80→1.77ms；MLA S1024H2
 > 326.75→320.54µs。**再次确认 d128 的墙是 mma 依赖延迟、不是 fold 指令数**。详见 `03` §33、
 > 原始输出 `src/fp8/fa_bwd_fp8_o28_ab.out.txt`、`o28_ncu_main_{s4096,mla_s1024h2}_ab.out.txt`。
+>
+> **O29（第七十轮）——fp8 自动 split-K 重新标定（正结果）+ GEMM3/4 交错（负结果）**：
+> O2b 的固定 `ksplit` 目标 `(D==128)?4096:132` 在后续数据通路改动后已漂移（d128 base 小时
+> 过切、S4096 欠切、MLA 严重欠切）。新标定 `D==128 → S>=2048?8192:max(2048,4*base_grid)`、
+> `D==512 → S/2`（仅 host 自动档，`--ksplit=N` 可覆盖；不改 device/数学，只改 fp32 加法次序）。
+> **main 最多 1.20×（GQA kv4 0.329→0.274ms）、MLA S1024H2 1.32×（0.265→0.200ms）、
+> S1024H32 1.14×、S4096 1.01×**；端到端 total S4096 2.177→**2.148ms**、S1024H32 0.4895→
+> **0.4464**、GQA kv4 0.4566→**0.4056**、MLA S1024H2 0.4653→**0.3900ms**，全 shape 不回退。
+> ncu（S1024H32 k=8→4）：`red` 扇区 **26.74M→16.42M（0.61×）**、**L2 83.1%→57.6%**、
+> `short_scoreboard` 2.40→1.50、Duration 332→305µs（收益 = 少切 + 自动开 `use_regdq`）。
+> **`FA_ILV34`（先发 GEMM3/4 两条 mma 再 epilogue）负结果**：两个累加器同时存活使 spill 增加，
+> 0.95–0.96×。详见 `03` §34、原始输出 `src/fp8/fa_bwd_fp8_o29_ksplit_sweep.out.txt`、
+> `fa_bwd_fp8_o29_ncu_s1024h32.out.txt`、`o29_te_fp8_bench.out.txt`。
 
 ---
 

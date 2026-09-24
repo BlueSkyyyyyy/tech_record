@@ -2919,3 +2919,98 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu -c 1 -k regex:fa_bwd_fp8_mma_kernel --
 `src/fp8/o28_ncu_main_s4096_ab.out.txt`、`o28_ncu_main_mla_s1024h2_ab.out.txt`、
 `o28_main_s4096_full.out.txt`、`o28_main_mla_s1024h2_full.out.txt`、
 `o28_te_fp8_bench.out.txt`、`o28_fa3_te_baseline_fp16.out.txt`。
+
+---
+
+## 34. O29：fp8 自动 split-K 重新标定（端到端 1.01–1.32×，主 kernel 最多 1.20×）
++ GEMM3/4 指令级交错判决（负结果）
+
+### 34.1 动机
+
+`fa_bwd_fp8_mma_kernel` 的 N 方向切块数 `ksplit` 一直是 **O2b（第二十二轮）** 定的固定目标
+`TARGET = (D==128) ? 4096 : 132`（d128 铺约 10 个波、MLA 铺 1 个波）。但 O2b 之后主 kernel 的
+数据通路被反复改过（O3 寄存器预取、O4b K 配对 + `ldmatrix.x2.trans`、O9c-2 Hopper wgmma、
+O20 epilogue 融合、O22 wgmma 默认开、O27/O28 fold 折叠），**`ksplit` 的最优点已经漂移**：
+
+* d128 固定 4096 在 **base 小**（S=1024，`base_grid = (S/64)·H` = 512）时**过切**——每个 CTA
+  只有 ~2 个 tile，且此时 `ksplit` 大 ⇒ `use_regdq`（寄存器 dQ 累加）被判为关，dQ 逐 tile 发
+  跨 CTA `red`，切得越细原子越多、L2 越堵。
+* S=4096 时 4096 又**欠切**（k=4 略慢于 k=8）。
+* MLA（D=512，1 CTA/SM）固定 132（≈1 个波）**严重欠切**——grid 太小、并行度不足。
+
+### 34.2 改动（仅 host 自动档；单/两文件 host 同步）
+
+`sweep` 了全部 10 个 fp8 case（`--ksplit=1/2/4/8/16/32`），规律清晰，新标定：
+
+```
+D == 128:  S >= 2048  → 8192
+           否则         → max(2048, 4 * base_grid)     # base∈{128,512,640,1024}
+D == 512:  S / 2                                     # S256H2→128 / S512H4→256 / S1024H2→512
+```
+
+只需改 `fa_bwd_fp8_main.cu` / `fa_bwd_fp8_mma_onefile.cu` 的自动 `ksplit` 分支（`--ksplit=N`
+仍可强制覆盖，做 A/B）。因为 `use_regdq` 由 `ksplit` 派生，新 `ksplit` 会让 S1024 的
+GQA/MHA 形状自动打开寄存器 dQ 累加（这也是收益的一部分）。**不改 device 代码、不改数学口径**
+（只改 fp32 加法次序）。
+
+### 34.3 sweep（main-only，CUDA event，`-DFA_WGMMA` 默认构建；单位 ms）
+
+| case | base | auto(旧) | 旧 main | 最优 k | 最优 main | 新 auto main | 新/旧 |
+|---|---|---|---|---|---|---|---|
+| S512 MHA | 128 | 16 | 0.0600 | 16 | 0.0600 | 0.0602 | 1.00 |
+| S4096 MHA | 1024 | 4 | 1.7579 | 8 | 1.7366 | **1.7370** | **1.012** |
+| S1024 H32 | 512 | 8 | 0.3404 | 4 | 0.3021 | **0.2988** | **1.139** |
+| S1024 H32 kv4 | 512 | 8 | 0.3286 | 4 | 0.2736 | **0.2742** | **1.198** |
+| S1024 H40 kv8 | 640 | 4 | 0.3534 | 4 | 0.3534 | 0.3531 | 1.00 |
+| S1024 H64 kv4 | 1024 | 4 | 0.5319 | 4 | 0.5319 | 0.5285 | 1.006 |
+| S1024 H64 kv1(MQA) | 1024 | 4 | 0.5238 | 4 | 0.5238 | 0.5234 | 1.00 |
+| MLA S256 H2 | 8 | 16 | 0.0437 | 8–32 | 0.0431 | 0.0437 | 1.00 |
+| MLA S512 H4 | 32 | 4 | 0.1402 | 8 | 0.1216 | **0.1215** | **1.154** |
+| MLA S1024 H2 | 32 | 4 | 0.2652 | 16 | 0.2005 | **0.2004** | **1.324** |
+
+端到端 total（quant+preprocess+main+convert，ms）：S4096 `2.1770→2.1481（1.013×）`、
+S1024H32 `0.4895→0.4464（1.096×）`、GQA kv4 `0.4566→0.4056（1.126×）`、kv8 `0.5010→0.4965`、
+MQA `0.6956→0.6820`、MLA S512H4 `0.2688→0.2489（1.080×）`、MLA S1024H2
+`0.4653→0.3900（1.193×）`。**全 shape 不回退。**
+
+### 34.4 ncu（main，S1024H32，同 binary `--ksplit` 8 vs 4，`--launch-count 1`）
+
+| | Duration | red sectors | L2 吞吐 | occ | stall wait/short/long |
+|---|---|---|---|---|---|
+| 旧 auto k=8 | 332.4 µs | 26,738,688 | **83.09%** | 18.18% | 1.60/**2.40**/1.71 |
+| 新 auto k=4 | **304.9 µs** | **16,416,768（0.614×）** | **57.61%** | 17.68% | 1.55/**1.50**/1.69 |
+
+机制：k 从 8→4 + `use_regdq` 自动打开 ⇒ dQ 的跨 CTA `red` 扇区降到 **0.61×**、L2 从 **83%→58%**，
+`short_scoreboard` 2.40→1.50 ⇒ Duration −8.3%。**再次印证 fp8 main 的墙是访存/原子 + 依赖延迟，
+而非算力**。
+
+### 34.5 同轮负结果：GEMM3/4 指令级交错（`FA_ILV34`）
+
+按 O22 `FA_ILV`（GEMM1/2 交错）的思路，新增 `-DFA_ILV34=1`：先连发 GEMM3(dV)/GEMM4(dK) 两条
+独立 mma（各自累加器），再做 epilogue，让一条 mma 填另一条的依赖延迟。**数值逐位不变**，但
+两个 `MTM34×8×4`（各 32 fp32）累加器同时存活，ptxas 在 `__launch_bounds__(128,3)` 的 170-reg
+预算下**溢出增加**：S4096 main 1.812→1.903ms（0.95×）、S1024H32 0.341→0.355（0.96×）。
+⇒ 与 O7c/O17b 一致，**在本卡 3 CTA/SM 的寄存器预算内「加 ILP」会被 spill 吃掉**；
+`FA_ILV34` 保留为默认关的 A/B 开关。原始输出 `src/fp8/fa_bwd_fp8_o29_ilv34_s4096.out.txt`。
+
+### 34.6 复现
+
+```bash
+# 新自动档（默认）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_causal_fp8
+# 旧自动档（同 binary 强制 k=8）做 A/B
+... scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=... --ksplit=8
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --launch-count 1 -k regex:fa_bwd_fp8_mma_kernel -- --dir=... --ksplit=4
+# ILV34 负结果
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_ILV34=1" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=.../b1_s4096_h16_d128_causal_fp8
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o29_ksplit_sweep.out.txt`（两文件版 ×10 shape × 新自动档：
+ksplit/timing/对拍）、`src/fp8/fa_bwd_fp8_o29_onefile_sweep.out.txt`（单文件版 ×5 shape，
+数值与两文件逐位一致、计时差 <1%）、
+`src/fp8/fa_bwd_fp8_o29_ncu_s1024h32.out.txt`（k=8 vs k=4 的 ncu 指标）、
+`src/fp8/o29_te_fp8_bench.out.txt`、`src/fp8/o29_fa3_te_baseline_fp16.out.txt`、
+`src/fp8/fa_bwd_fp8_o29_ilv34_s4096.out.txt`。

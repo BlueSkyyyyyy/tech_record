@@ -377,7 +377,21 @@ int main(int argc, char** argv) {
   constexpr int BM = 64;
   const long base_grid = (long)((S + BM - 1) / BM) * H * B;
   if (ksplit < 1) {
-    const long target_ctas = (D == 128) ? 4096L : 132L;
+    // O29：自动切块数重新标定。原公式 `target=(D==128)?4096:132` 是早期（O2b）在
+    //   「d128=3 CTA/SM、MLA=1 CTA/SM」下测的，随后的 O3/O4b/O9c-2/O22 等把数据通路改过之后
+    //   已明显次优：
+    //   * d128 固定 4096 在 base 小（S=1024，base=512）时**过切**——每个 CTA 只有 ~2 个 tile，
+    //     且此时 `use_regdq=false`、dQ 逐 tile 跨 CTA red，多切反而慢。实测 S1024H32 auto k=8
+    //     0.340 ms vs k=4 **0.302 ms（1.13×）**；GQA kv4 0.329→0.274（1.20×）。
+    //   * S=4096 时 4096 又**欠切**（k=4 1.758 vs k=8 1.737，1.01×）。
+    //   * MLA（D=512，1 CTA/SM）固定 132（≈1 个波）**欠切**——S1024H2 auto k=4 0.265 ms vs
+    //     k=16 **0.201 ms（1.32×）**；S512H4 k=4 0.140 vs k=8 0.122。
+    //   新标定（sweep 见 src/fp8/fa_bwd_fp8_o29_ksplit_sweep.out.txt）：
+    //     D==128: S>=2048 → 8192；否则 max(2048, 4*base_grid)（覆盖 base∈{128,512,640,1024}）
+    //     D==512: S/2（S256H2→128 / S512H4→256 / S1024H2→512，三者都取到各自最优）
+    const long target_ctas = (D == 128)
+                                 ? ((S >= 2048) ? 8192L : std::max(2048L, 4L * base_grid))
+                                 : (long)(S / 2);
     long k = target_ctas / base_grid;
     if (k < 1) k = 1;
     if (k > 16) k = 16;

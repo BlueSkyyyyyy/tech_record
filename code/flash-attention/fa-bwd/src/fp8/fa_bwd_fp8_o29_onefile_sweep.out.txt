@@ -1,0 +1,35 @@
+########## b1_s4096_h16_d128_causal_fp8 ##########
+grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 2.1522 ms  63.86 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0689 ms | preprocess 0.2944 ms | main 1.7386 ms | convert 0.0502 ms
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+########## b1_s1024_h32_d128_causal_fp8 ##########
+grid main = 64 x 32 x 1  (ksplit=4, base_grid=512)
+[timing] total(quant+pre+main+cvt) 0.4484 ms  38.32 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0414 ms | preprocess 0.0747 ms | main 0.3008 ms | convert 0.0314 ms
+  dq   vs ref: max_abs=2.399e-01  max_rel=1.884e+02
+  dk   vs ref: max_abs=4.177e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.535e-01  max_rel=8.062e+01
+########## b1_s1024_h32_d128_kv4_causal_fp8 ##########
+grid main = 64 x 32 x 1  (ksplit=4, base_grid=512)
+[timing] total(quant+pre+main+cvt) 0.4074 ms  42.17 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0285 ms | preprocess 0.0716 ms | main 0.2756 ms | convert 0.0317 ms
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.987e+02
+  dk   vs ref: max_abs=5.339e-01  max_rel=1.396e+02
+  dv   vs ref: max_abs=7.173e-01  max_rel=9.159e+01
+########## b1_s1024_h2_d512_causal_fp8 ##########
+grid main = 256 x 2 x 1  (ksplit=16, base_grid=32)
+[timing] total(quant+pre+main+cvt) 0.3946 ms  10.88 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0142 ms | preprocess 0.1383 ms | main 0.2013 ms | convert 0.0408 ms
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+########## b1_s512_h4_d512_causal_fp8 ##########
+grid main = 64 x 4 x 1  (ksplit=8, base_grid=32)
+[timing] total(quant+pre+main+cvt) 0.2514 ms  8.54 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0144 ms | preprocess 0.0769 ms | main 0.1226 ms | convert 0.0375 ms
+  dq   vs ref: max_abs=2.415e-01  max_rel=1.803e+02
+  dk   vs ref: max_abs=2.992e-01  max_rel=6.416e+01
+  dv   vs ref: max_abs=4.481e-01  max_rel=9.164e+01

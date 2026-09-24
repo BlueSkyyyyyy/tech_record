@@ -1,0 +1,8 @@
+=== bench CUPTI device time (dtype=fp8) ===
+[b1_s1024_h40_d128_kv8_causal_fp8] te=0.2424ms/177.22TF
+[b1_s1024_h32_d128_kv4_causal_fp8] te=0.2018ms/170.27TF
+[b1_s1024_h64_d128_kv4_causal_fp8] te=0.3627ms/189.49TF
+[b1_s1024_h64_d128_kv1_causal_fp8] te=0.4014ms/171.18TF
+[b1_s256_h2_d512_causal_fp8] te=NA(/workspace/TransformerEngine/transformer)
+[b1_s512_h4_d512_causal_fp8] te=NA(/workspace/TransformerEngine/transformer)
+[b1_s1024_h2_d512_causal_fp8] te=NA(/workspace/TransformerEngine/transformer)
