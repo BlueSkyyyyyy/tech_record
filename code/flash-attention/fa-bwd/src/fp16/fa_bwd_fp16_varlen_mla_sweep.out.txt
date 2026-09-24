@@ -1,0 +1,31 @@
+### fp16 two-file (main) varlen MLA + regressions
+== MLA varlen causal ==
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+[timing] VARLEN total 0.9382 ms  6.01 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=2.415e-03  max_rel=5.241e-01  (ours_amax=3.986e+00 ref_amax=3.986e+00 @1240)
+  dk  vs ref: max_abs=1.834e-03  max_rel=3.483e-01  (ours_amax=3.363e+00 ref_amax=3.363e+00 @17)
+  dv  vs ref: max_abs=1.856e-03  max_rel=6.791e-02  (ours_amax=5.152e+00 ref_amax=5.151e+00 @499)
+== MLA varlen full ==
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=0
+[timing] VARLEN total 1.4652 ms  3.85 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
+  dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
+  dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)
+== HD=128 varlen full regression ==
+VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=0
+[timing] VARLEN total 1.2862 ms  35.48 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=5.603e-04  max_rel=1.414e-01  (ours_amax=1.457e+00 ref_amax=1.457e+00 @367083)
+  dk  vs ref: max_abs=6.841e-04  max_rel=1.631e-01  (ours_amax=1.187e+00 ref_amax=1.187e+00 @7413782)
+  dv  vs ref: max_abs=2.338e-04  max_rel=7.147e-02  (ours_amax=8.560e-01 ref_amax=8.559e-01 @7501204)
+== fixed D=512 causal regression ==
+[timing] total(3 kernels) 0.8143 ms  5.27 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1345 ms | main 0.6661 ms | convert 0.0137 ms
+  dq   vs ref: max_abs=1.987e-03  max_rel=2.120e-01
+  dk   vs ref: max_abs=1.712e-03  max_rel=3.190e-01
+  dv   vs ref: max_abs=1.848e-03  max_rel=4.306e-02
+== fixed D=512 full regression ==
+[timing] total(3 kernels) 0.5508 ms  1.95 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1971 ms | main 0.3388 ms | convert 0.0149 ms
+  dq   vs ref: max_abs=2.861e-04  max_rel=7.772e-02
+  dk   vs ref: max_abs=3.331e-04  max_rel=8.710e-02
+  dv   vs ref: max_abs=1.241e-04  max_rel=1.993e-02

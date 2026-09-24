@@ -491,7 +491,8 @@ lse_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
 template <int HD, int PIPE>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
-                   float* __restrict__ lse, int S, int H, int Hkv, float scale) {
+                   float* __restrict__ lse, int S, int H, int Hkv, float scale,
+                   const int* __restrict__ cu_seqlens = nullptr) {
   constexpr int LD  = HD + 8;
   constexpr int KVL = LBN * LD;
   constexpr int HDV = HD / 8;   // 每行 uint4(8 bf16) 数
@@ -499,8 +500,13 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
   bf16* Qs = reinterpret_cast<bf16*>(smem);
   bf16* Ks = Qs + LBM * LD;   // PIPE=1：2 × LBN × LD；PIPE=0：1 × LBN × LD
 
-  const int nblk = (S + LBM - 1) / LBM;
   const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // VARLEN（第 81 轮）：cu_seqlens 给出本序列在 packed [T,H,D] 的 token 基址与长度；
+  // nullptr 逐式退化为定长（qbase=b*S、len=S），定长路径逐位不变。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
+  const int nblk  = (len + LBM - 1) / LBM;
+  if (pair >= (nblk + 1) / 2) return;   // 短序列多余的对 CTA 直接退出
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -512,8 +518,8 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
     for (int u = tid; u < LBN * HDV; u += THREADS) {
       const int row = u / HDV, c8 = u % HDV;
       const int jg = j0 + row;
-      if (jg < S) {
-        const size_t off = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c8 * 8;
+      if (jg < len) {
+        const size_t off = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c8 * 8;
         if constexpr (PIPE) {
           cp_async16(Kd + row * LD + c8 * 8, k + off);
         } else {
@@ -533,8 +539,8 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
     for (int u = tid; u < LBM * HDV; u += THREADS) {
       const int row = u / HDV, c8 = u % HDV;
       const int qi = m0 + row;
-      if (qi < S) {
-        const size_t off = (((size_t)(b * S + qi)) * H + h) * HD + c8 * 8;
+      if (qi < len) {
+        const size_t off = (((size_t)(qbase + qi)) * H + h) * HD + c8 * 8;
         if constexpr (PIPE) {
           cp_async16(Qd + row * LD + c8 * 8, q + off);
         } else {
@@ -557,7 +563,7 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
     // ---- 载入本 m 块的 Q（越界补 0）----
     issue_q(Qs, m0);
 
-    const int ncols = min(S, m0 + LBM);
+    const int ncols = min(len, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
 
     // prologue：PIPE=1 时发 tile0 进 stage0（Q 与 K 写不同 smem，由循环首 wait+sync 保证可见）
@@ -595,7 +601,7 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
           int c = j * 8 + c2 + (q & 1);
           int qi = m0 + r, jg = j0 + c;
           float sv = -INFINITY;
-          if (qi < S && jg < S && jg <= qi) sv = acc[0][j][q] * scale;
+          if (qi < len && jg < len && jg <= qi) sv = acc[0][j][q] * scale;
           if (sv != -INFINITY) {
             float mn = fmaxf(mrow[s], sv);
             lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
@@ -621,7 +627,7 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+        if (qi < len) lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
       }
     }
     // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
@@ -2587,7 +2593,7 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
                        const float* __restrict__ delta, const float* __restrict__ lse,
                        float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                        float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                       int causal, int sched) {
+                       int causal, int sched, const int* __restrict__ cu_seqlens = nullptr) {
   // O5c：head_dim 从「只 128」扩到 128/512（MLA）。HD>128 时 GEMM1/2（S/dP）的归约维是 HD，
   // 只是 k-loop 变长；GEMM3/4/5 的输出 N 维是 HD，需加一层 **N-tile 循环**（每遍 NTW=128 列），
   // 否则 `GNV=HD/2` 会让累加器/寄存器爆炸。HD=128 时 NDT=1，路径与 O5b/O6/O6b/O6c 逐字等价。
@@ -2645,6 +2651,10 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
   }
   const int h = blockIdx.y, b = blockIdx.z;
   const int hkv = h / (H / Hkv);
+  // VARLEN（第 81 轮）：cu_seqlens 给出本序列 packed [T,H,D] 的 token 基址与长度；nullptr
+  // 退化为定长（qbase=b*S、len=S），定长路径逐位不变。sched 仅定长 causal 用（varlen 传 0）。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int wr = wid / WN, wc = wid % WN;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -2654,14 +2664,14 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
   // O10：PIPE>=1 用 16B cp.async 异步发 Q/dO（与 K/V 一起在循环首 wait_group 等待）；
   // PIPE==0 保持同步标量读。
   if constexpr (PIPE >= 1) {
-    qdo_issue_async<HD, BM>(q, do_, m0, S, H, h, b, tid, Qs, dOs, LD);
+    qdo_issue_async<HD, BM>(q, do_, m0, len, H, h, b, tid, Qs, dOs, LD, qbase);
   } else {
     for (int i = tid; i < BM * HD; i += THREADS) {
       int r = i / HD, d = i % HD;
       int qi = m0 + r;
       bf16 qv = __float2bfloat16(0.f), ov = __float2bfloat16(0.f);
-      if (qi < S) {
-        size_t idx = (((size_t)(b * S + qi)) * H + h) * HD + d;
+      if (qi < len) {
+        size_t idx = (((size_t)(qbase + qi)) * H + h) * HD + d;
         qv = q[idx];
         ov = do_[idx];
       }
@@ -2670,7 +2680,7 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
     }
   }
 
-  const int ncols = causal ? min(S, m0 + BM) : S;
+  const int ncols = causal ? min(len, m0 + BM) : len;
   const int ntiles = (ncols + BN - 1) / BN;
 
   if constexpr (PIPE == 0) {
@@ -2679,12 +2689,12 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
     // O6：prologue 直接异步发起 tile0 的 K/V（不占寄存器）；Q/dO 的可见性由
     // 循环首的 `wait_group + __syncthreads` 一并保证（Q/dO 与 K/V 写不同 smem）。
     if (ntiles > 0)
-      kv_issue_async<HD, BN, true, true>(k, v, 0, S, Hkv, hkv, b, tid, Ks, Vs, LD);
+      kv_issue_async<HD, BN, true, true>(k, v, 0, len, Hkv, hkv, b, tid, Ks, Vs, LD, qbase);
   } else {
     // O6b：tile0 的 K 发进双缓冲 stage0、V 发进单缓冲 Vs（两个独立 commit_group）。
     if (ntiles > 0) {
-      kv_issue_async<HD, BN, true, false>(k, v, 0, S, Hkv, hkv, b, tid, Ks, Vs, LD);
-      kv_issue_async<HD, BN, false, true>(k, v, 0, S, Hkv, hkv, b, tid, Ks, Vs, LD);
+      kv_issue_async<HD, BN, true, false>(k, v, 0, len, Hkv, hkv, b, tid, Ks, Vs, LD, qbase);
+      kv_issue_async<HD, BN, false, true>(k, v, 0, len, Hkv, hkv, b, tid, Ks, Vs, LD, qbase);
     }
   }
 
@@ -2709,8 +2719,8 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
       for (int s = 0; s < 2; ++s) {
         const int r = wr * GM1 + i * 16 + g + (s ? 8 : 0);
         const int qi = m0 + r;
-        const size_t idx = ((size_t)(b * S + qi)) * H + h;
-        const bool ok = qi < S;
+        const size_t idx = ((size_t)(qbase + qi)) * H + h;
+        const bool ok = qi < len;
         lse_r[i][s] = ok ? lse[idx] : 0.f;
         del_r[i][s] = ok ? delta[idx] : 0.f;
       }
@@ -2729,8 +2739,8 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
       asm volatile("cp.async.wait_group 0;\n");
       __syncthreads();
       if (nt + 1 < ntiles)
-        kv_issue_async<HD, BN, true, true>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
-                               Ks + ((nt + 1) & 1) * KVL, Vs + ((nt + 1) & 1) * KVL, LD);
+        kv_issue_async<HD, BN, true, true>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
+                               Ks + ((nt + 1) & 1) * KVL, Vs + ((nt + 1) & 1) * KVL, LD, qbase);
     } else if constexpr (PIPE == 2) {
       // O6b：等本 tile 的 K[nt] 与上一轮发出的 V[nt] 落地（同一个 wait_group 0 覆盖）。
       // 此 barrier 同时证明「上一 tile 的 GEMM5 已读完 Ks 的另一 stage」，故可把 K[nt+1]
@@ -2738,16 +2748,16 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
       asm volatile("cp.async.wait_group 0;\n");
       __syncthreads();
       if (nt + 1 < ntiles)
-        kv_issue_async<HD, BN, true, false>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
-                               Ks + ((nt + 1) & 1) * KVL, Vs, LD);
+        kv_issue_async<HD, BN, true, false>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
+                               Ks + ((nt + 1) & 1) * KVL, Vs, LD, qbase);
     } else {
       // ---- 载入 K/V 块（原版：同步标量读）----
       for (int i = tid; i < BN * HD; i += THREADS) {
         int r = i / HD, d = i % HD;
         int jg = j0 + r;
         bf16 kv = __float2bfloat16(0.f), vv = __float2bfloat16(0.f);
-        if (jg < S) {
-          size_t idx = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d;
+        if (jg < len) {
+          size_t idx = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d;
           kv = k[idx];
           vv = v[idx];
         }
@@ -2783,10 +2793,10 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
             float lv = 0.f;
             if constexpr (PREL)
               lv = lse_r[i][q >= 2 ? 1 : 0];
-            else if (qi < S)
-              lv = lse[((size_t)(b * S + qi)) * H + h];
+            else if (qi < len)
+              lv = lse[((size_t)(qbase + qi)) * H + h];
             float p = 0.f;
-            if (qi < S && jg < S && !(causal && jg > qi))
+            if (qi < len && jg < len && !(causal && jg > qi))
               p = fexp(acc[i][j][q] * scale - lv);
             pval[i][j][q] = p;
             if constexpr (PIPE == 2)
@@ -2819,8 +2829,8 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
             float del = 0.f;
             if constexpr (PREL)
               del = del_r[i][q >= 2 ? 1 : 0];
-            else if (qi < S)
-              del = delta[((size_t)(b * S + qi)) * H + h];
+            else if (qi < len)
+              del = delta[((size_t)(qbase + qi)) * H + h];
             float ds = pval[i][j][q] * (acc[i][j][q] - del);
             dSs[r * LDS + c] = __float2bfloat16(ds);   // GEMM5 A（普通）
             if constexpr (PIPE != 2)
@@ -2867,14 +2877,14 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
               int c = hd0 + c0 + j * 8 + c2;
               int jg = j0 + r;
-              float* dst = dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
+              float* dst = dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c;
               if constexpr (R4) {
                 float a2 = __shfl_down_sync(0xffffffffu, acc[i][j][q], 1);
                 float b2 = __shfl_down_sync(0xffffffffu, acc[i][j][q + 1], 1);
-                if (jg < S && (lane & 1) == 0)
+                if (jg < len && (lane & 1) == 0)
                   red_add4(dst, acc[i][j][q], acc[i][j][q + 1], a2, b2);
               } else {
-                if (jg < S) red_add2(dst, acc[i][j][q], acc[i][j][q + 1]);
+                if (jg < len) red_add2(dst, acc[i][j][q], acc[i][j][q + 1]);
               }
             }
       }
@@ -2902,14 +2912,14 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
               int c = hd0 + c0 + j * 8 + c2;
               int jg = j0 + r;
-              float* dst = dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
+              float* dst = dk_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c;
               if constexpr (R4) {
                 float a = acc[i][j][q] * scale, b = acc[i][j][q + 1] * scale;
                 float a2 = __shfl_down_sync(0xffffffffu, a, 1);
                 float b2 = __shfl_down_sync(0xffffffffu, b, 1);
-                if (jg < S && (lane & 1) == 0) red_add4(dst, a, b, a2, b2);
+                if (jg < len && (lane & 1) == 0) red_add4(dst, a, b, a2, b2);
               } else {
-                if (jg < S) red_add2(dst, acc[i][j][q] * scale, acc[i][j][q + 1] * scale);
+                if (jg < len) red_add2(dst, acc[i][j][q] * scale, acc[i][j][q + 1] * scale);
               }
             }
       }
@@ -2939,8 +2949,8 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
                 int r = wr * GMQ + i * 16 + g + (q >= 2 ? 8 : 0);
                 int c = hd0 + wc * GNQ + j * 8 + c2;
                 int qi = m0 + r;
-                if (qi < S) {
-                  float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
+                if (qi < len) {
+                  float* base = dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c;
                   float2 old = *reinterpret_cast<float2*>(base);
                   old.x += acc[i][j][q] * scale;
                   old.y += acc[i][j][q + 1] * scale;
@@ -2969,8 +2979,8 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
           int r = wr * GMQ + i * 16 + g + (q >= 2 ? 8 : 0);
           int c = wc * GNQ + j * 8 + c2;
           int qi = m0 + r;
-          if (qi < S) {
-            float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
+          if (qi < len) {
+            float* base = dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c;
             *reinterpret_cast<float2*>(base) =
                 make_float2(dqacc[i][j][q], dqacc[i][j][q + 1]);
           }

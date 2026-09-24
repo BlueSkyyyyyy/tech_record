@@ -1593,6 +1593,26 @@ TE2.14 0.1755ms/391.6TF ⇒ ours 时间 = FA3 的 **3.10×**、TFLOPS 为 FA3 �
 **ncu**：与 fp16 §16.8 同构（L2 red + 1 CTA/SM 延迟受限）。原始输出
 `src/bf16/fa_bwd_bf16_varlen_full_sweep.out.txt`、`src/fa_bwd_varlen_full_regression.out.txt`。
 
+### 6ab VARLEN 的 MLA（head_dim=512）——第 81 轮
+
+把 fp16 §16.9 **逐字 dtype 参数化**到 bf16：`lse_mma_kernel_bal<HD>` 与 `fa_bwd_bf16_mma_kernel`
+各加默认参数 `const int* cu_seqlens = nullptr`（`qbase/len`、短序列配对 CTA 早退、EV/边界全改），
+`nullptr` 逐式退化、**定长逐位不变**；host `run_varlen` 按 D 分派（D=512 走 mma 主 kernel
+`launch_bwd_mma<512,32,32,1,false,true>` + `lse_mma_kernel_bal<512,1>`/`lse_mma_kernel<512>`）。
+单/两文件 device 逐字一致（`sync_onefile_device.py` 核对 `identical: True`）。
+
+**数值（ours vs fp32 ref，max_abs dq/dk/dv）**：b3_t1792 `[256,512,1024]` H2 D512 causal
+`1.267/1.217/1.796e-2`、full `3.100/3.526/2.316e-3`；**单/两文件逐位一致**；定长 D=512 回归
+逐位不变（S1024H2 causal `5.838/9.519/1.568e-2`，与历史文件相同）；HD=128 varlen full 回归
+b4_t3840 `5.764/3.851/3.031e-3` 与第 79 轮逐位相同。
+
+**性能（total，event，`Σ_b 4HL²D` 口径）**：b3_t1792 causal **0.9347ms/6.03TF**、
+full 1.4690ms/3.84TF；b1_t512 causal **0.4258ms/2.52TF**、full 0.5471ms/1.96TF，
+同 shape 定长 causal 0.4247ms/2.53TF ⇒ **varlen 开销 +0.3%**。MLA 反向 FA3/TE 均不支持。
+
+**ncu**：与 fp16 §16.9 同构（main = 1 CTA/SM + smem→mma 依赖，No Eligible 89%；
+lse = Waves<1 的并行度 bound）。原始输出 `src/bf16/fa_bwd_bf16_varlen_mla_sweep.out.txt`。
+
 ## 8. 下一步
 
 > **O36-bf16（§6z）已完成**：把 O34 的逐 atom 4D-TMA 从 BN=128 的 `wgmma2b` 补到 **BN=64 的

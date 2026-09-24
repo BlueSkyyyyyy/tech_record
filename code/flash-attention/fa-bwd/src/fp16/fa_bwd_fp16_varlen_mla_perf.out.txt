@@ -1,0 +1,9 @@
+### varlen MLA vs fixed MLA (fp16/bf16, same shape [512] / S512 H2 D512)
+-- fp16 ===
+varlen causal: [timing] VARLEN total 0.4264 ms  2.52 TFLOPS (sum_b 4HL^2D)
+fixed causal : [timing] total(3 kernels) 0.4232 ms  2.54 TFLOPS (bwd FLOPs=4BS^2HD)
+varlen full  : [timing] VARLEN total 0.5511 ms  1.95 TFLOPS (sum_b 4HL^2D)
+-- bf16 ===
+varlen causal: [timing] VARLEN total 0.4258 ms  2.52 TFLOPS (sum_b 4HL^2D)
+fixed causal : [timing] total(3 kernels) 0.4247 ms  2.53 TFLOPS (bwd FLOPs=4BS^2HD)
+varlen full  : [timing] VARLEN total 0.5471 ms  1.96 TFLOPS (sum_b 4HL^2D)

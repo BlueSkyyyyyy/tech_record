@@ -1246,3 +1246,37 @@ ncu（main，b3 causal）：255 regs / **1 CTA/SM、occ 6.25%** / No Eligible 84
 short_scoreboard ~30% / DRAM 2.6% / Compute 8.0% / L1TEX 22.8% ⇒ bound =
 **低 occupancy + smem→mma 依赖**（非带宽/算力）；LSE `Waves 0.18`（grid 48<132 SM）⇒ 并行度 bound。
 详见 `docs/03` §39。
+
+## 11. 变长（VARLEN）的 MLA（head_dim=512）——fp16 / bf16（本节新增，第 81 轮）
+
+把第 80 轮 fp8 的 varlen MLA 补到 **fp16/bf16**。device 改动 2 处：`lse_mma_kernel_bal<HD>`
+（O8b mma 镜像配对 LSE，D=512 的 causal 无 wgmma 快路）与 `fa_bwd_{fp16,bf16}_mma_kernel`
+（HD=128/512 通用 mma 主 kernel）各加默认参数 `const int* cu_seqlens`；`nullptr` 逐式退化 ⇒
+**定长逐位不变**。host `run_varlen` 按 D 分派（D=512 走 `launch_bwd_mma<512,32,32,1,false,true>`
++ `lse_mma_kernel_bal<512,1>`/`lse_mma_kernel<512>`）。单/两文件 device 逐字一致。
+
+**数值对拍（ours vs fp32 ref，max_abs dq/dk/dv）**：
+
+| MLA varlen case（H2 D512） | dtype | causal | full |
+|---|---|---|---|
+| b3_t1792 `[256,512,1024]` | fp16 | 2.42/1.83/1.86e-3 | 5.52/4.45/2.39e-4 |
+| b3_t1792 `[256,512,1024]` | bf16 | 1.27/1.22/1.80e-2 | 3.10/3.53/2.32e-3 |
+
+同 dtype 噪声量级；**单/两文件逐位一致**。定长 D=512 回归逐位不变（S1024H2 causal fp16
+`1.987/1.712/1.848e-3`、bf16 `5.838/9.519/1.568e-2`）；HD=128 varlen full 回归 b4_t3840
+fp16 `5.603/6.841/2.338e-4` 与第 79 轮逐位相同。FA3/TE 反向不支持 head_dim=512 ⇒ 无外部基线。
+
+**性能（ours total，event，`Σ_b 4HL²D` 口径）**：
+
+| 形态 | case | fp16 ms/TF | bf16 ms/TF |
+|---|---|---|---|
+| varlen causal | b3_t1792 `[256,512,1024]` | 0.9382 / 6.01 | 0.9347 / 6.03 |
+| varlen full | b3_t1792 | 1.4652 / 3.85 | 1.4690 / 3.84 |
+| varlen causal | b1_t512 `[512]` | 0.4264 / 2.52 | 0.4258 / 2.52 |
+| varlen full | b1_t512 | 0.5511 / 1.95 | 0.5471 / 1.96 |
+| **定长对照 causal** | S512 H2 D512 | 0.4232 / 2.54 | 0.4247 / 2.53 |
+
+**varlen b1 与同 shape 定长仅差 +0.8%（fp16）/ +0.3%（bf16）** ⇒ 无额外固定开销。
+ncu（fp16 b3 causal）：main Duration 784µs / **1 CTA/SM、occ 6.25%** / No Eligible 89.0% /
+DRAM 1.6% / Compute 4.4% / L1TEX 38.7% ⇒ **低 occupancy + smem→mma 依赖**；lse `Waves 0.36`
+（grid 48<132 SM）⇒ **并行度 bound**。详见 `docs/01` §16.9、`docs/01b` §6ab。
