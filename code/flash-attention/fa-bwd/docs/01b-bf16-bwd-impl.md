@@ -1530,6 +1530,47 @@ FA3 0.0825ms/416TF、TE 0.1118ms/307TF。默认端到端 ours（O36 不改默认
 
 ---
 
+## 6aa. VARLEN：bf16 反向支持变长 / `cu_seqlens`（单/两文件）
+
+> 把 fp16 VARLEN（`docs/01` §16）**逐字 dtype 参数化**到 bf16（`__half`→`bf16`、
+> `__float2half`→`__float2bfloat16`、`__half2float`→`__bfloat162float`）。算法数据流、
+> smem 布局、cu_seqlens 语义完全同构；FA/TE 变长在本机不可用 ⇒ 只对 fp32 ref。
+
+### 6aa.1 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+与 fp16 §16.2 相同的 3 处：4 个搬运 helper 的默认参数 `qbase`、`lse_mma_kernel_bal_wgmma`
+与 `fa_bwd_bf16_wgmma2_kernel` 加 `cu_seqlens`（`qbase/len`、镜像配对早退）。host 加
+`--varlen` 分支 `run_varlen`（`launch_bwd_wgmma2<128,true>`，non-TMA）。
+
+### 6aa.2 数值（ours vs fp32 ref，bf16 causal；max_abs）
+
+| case | lengths | dq | dk | dv | total (ms) | TFLOPS（Σ_b 4HL²D） |
+|---|---|---|---|---|---|---|
+| b4_t3840 不齐 | `[512,1024,2048,256]` | 1.340e-2 | 1.276e-2 | 1.911e-2 | 0.7756 | 58.84 |
+| b4_t4096 等长 | `[1024]×4` | 1.355e-2 | 1.207e-2 | 1.772e-2 | 0.4507 | 76.24 |
+| b5_t3968 GQA kv8 | `[128,256,512,1024,2048]` | 1.398e-2 | 2.396e-2 | 3.131e-2 | 1.4279 | 64.10 |
+| b8_t2904 强倾斜 | `[2048,512,…,8]` | 1.464e-2 | 1.566e-2 | 1.863e-2 | 0.5835 | 63.00 |
+
+全部 bf16 噪声量级（~1–3e-2），无 system error；单/两文件**逐位相同**（b4_t3840：
+1.340e-2/1.276e-2/1.911e-2）。定长回归 `nullptr` **逐位不变**：S512 `9.001/12.61/13.65e-3`。
+
+### 6aa.3 ncu（主 kernel，b4_t3840，`--set full --launch-count 1`）
+
+Duration 551.55 µs、DRAM 10.02% / **L1/TEX 48.77% / L2 62.90%** / Compute 31.22%、
+202 regs、Block Limit Shared Mem 1、**occ 12.43%**、Waves 7.76、No Eligible 63.46% ——
+与 fp16 varlen（`docs/01` §16.5）逐项一致，bound = **L2 red + L1/TEX + 1 CTA/SM 延迟受限**。
+
+### 6aa.4 对标（同口径 `8BS²HD`，等长 `[1024]×4` = B4 S1024 H16 D128）
+
+ours total **0.4507 ms / 152.5 TF**；FA2.7.4 0.2504ms/274.4TF、**FA3 0.1454ms/472.7TF**、
+TE2.14 0.1755ms/391.6TF ⇒ ours 时间 = FA3 的 **3.10×**、TFLOPS 为 FA3 的 **32%**。
+
+### 6aa.5 原始输出
+
+`src/bf16/fa_bwd_bf16_varlen_b{4_t3840,4_t4096,5_t3968,8_t2904}*.out.txt`（两文件）、
+`..._onefile_b4_t3840.out.txt`（单文件）、`..._ncu_main_b4_t3840.out.txt`（ncu）、
+`src/fa_bwd_varlen_fa3_te_baseline_bf16.out.txt`（FA2/FA3/TE 基线）。
+
 ## 8. 下一步
 
 > **O36-bf16（§6z）已完成**：把 O34 的逐 atom 4D-TMA 从 BN=128 的 `wgmma2b` 补到 **BN=64 的

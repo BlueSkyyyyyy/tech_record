@@ -139,8 +139,13 @@
   `cu_seqlens`，device 侧只改 `fp8_mma_body` / `lse_mma_kernel_bal_wgmma`（`b*S→qbase`、
   `S→len`；`delta/quantize` 扁平天然可用），定长路径 `nullptr` 逐位不变。4 个 varlen case
   （等长/不齐/GQA kv8/强倾斜）对拍 fp32 ref 全 fp8 噪声（0.26–0.62）、单/两文件逐位一致；
-  等长 case 对标 TE FP8 定长同 shape `0.3785ms/90.77TF`（时间比 2.03×）。仅 fp8/HD=128/causal/
-  MHA+GQA、非 TMA；**fp16/bf16、非 causal、MLA、负载均衡**留后续。详见 `docs/03` §37。
+  等长 case 对标 TE FP8 定长同 shape `0.3785ms/90.77TF`（时间比 2.03×）。详见 `docs/03` §37。
+  **fp16/bf16 已完成（第七十八轮）**：把同一 device 改造逐字 dtype 参数化到 fp16/bf16
+  （默认 D=128 的 `wgmma2` 主 kernel + wgmma LSE；4 个搬运 helper 加默认参数 `qbase`，
+  定长调用不传 ⇒ 逐位不变）。4 个 varlen case 对拍 fp32 ref 全 fp16/bf16 噪声、单/两文件
+  逐位一致；等长 `[1024]×4` 对标 FA2/FA3/TE（ours 0.450ms/152.8TF，为 FA3 的 3.09×）。
+  详见 `docs/01` §16、`docs/01b` §6aa。仅 fp16/bf16/HD=128/causal/MHA+GQA、非 TMA；
+  **非 causal、MLA、负载均衡**留后续。
 
 ## 每项的 Definition of Done
 
@@ -2143,9 +2148,38 @@
   - **限制/后续**：只 fp8/HD=128/causal/MHA+GQA、非 TMA；fp16/bf16、非 causal、MLA、
     按 `cu_seqlens` 的均衡调度（当前短序列 CTA 早退，强倾斜并行度浪费）留后续。
     详见 `docs/03` §37。
-  - 原始输出 `src/fp8/fa_bwd_fp8_varlen_sweep.out.txt`（两文件 5 case）、
-    `..._varlen_onefile_sweep.out.txt`（单文件，逐位一致）、`..._varlen_tebench.out.txt`、
-    `..._varlen_ncu_main_b4_t4096.out.txt`、`..._varlen_fixed_regression.out.txt`。
+   - 原始输出 `src/fp8/fa_bwd_fp8_varlen_sweep.out.txt`（两文件 5 case）、
+     `..._varlen_onefile_sweep.out.txt`（单文件，逐位一致）、`..._varlen_tebench.out.txt`、
+     `..._varlen_ncu_main_b4_t4096.out.txt`、`..._varlen_fixed_regression.out.txt`。
+
+- 2026-09-25（第七十八轮）：**VARLEN 补全 fp16 + bf16（默认 wgmma2 路径，单/两文件）**。
+  - 动机：ROADMAP「可选·变长」第七十七轮只做了 fp8；本轮把同一 device 改造 dtype 参数化到
+    fp16/bf16，覆盖默认 D=128 的 Hopper 快路（wgmma2 主 kernel + wgmma LSE）。
+  - **device 改动只 3 处**（单/两文件逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+    ① 4 个搬运 helper（`kv_issue_async`/`qdo_issue_async`/`kv_issue_async_sw`/`qdo_issue_async_sw`）
+    加**默认参数** `int qbase = -1`，内部 `b*S`→`qbase>=0?qbase:b*S`（既有 ~30 处调用不传 ⇒
+    定长逐位不变）；② `lse_mma_kernel_bal_wgmma` 加 `cu_seqlens`（`qbase/len`、镜像配对
+    `if (pair >= (nblk+1)/2) return;`）；③ `fa_bwd_{fp16,bf16}_wgmma2_kernel` 加 `cu_seqlens`
+    （长度/地址全改 `len`/`qbase`）。`delta_warp_kernel` 扁平天然可用。host 加 `--varlen`
+    分支 `run_varlen`（非 TMA，`launch_bwd_wgmma2<128,true>`）。
+  - **数值（ours vs fp32 ref，causal，max_abs）**：fp16 b4_t3840 3.163/2.158/1.966e-3、
+    b4_t4096（等长）2.112/2.252/1.915e-3、b5_t3968 GQA kv8 2.438/3.433/3.843e-3、
+    b8_t2904 强倾斜 2.624/2.158/2.139e-3；bf16 同构 1.340e-2/1.276e-2/1.911e-2 等——
+    均对应 dtype 噪声量级、无 padding 泄漏；**单/两文件逐位一致**。
+    定长回归 `nullptr` 逐位不变：fp16 S512 1.671/1.771/1.899e-3、bf16 9.001/12.61/13.65e-3。
+  - **性能（event，total；`Σ_b 4HL²D`）**：fp16 0.7764/0.4497/1.4388/0.5839 ms
+    （58.77/76.40/63.62/62.96 TF）；bf16 0.7756/0.4507/1.4279/0.5835 ms（58.84/76.24/64.10/63.00）。
+    等长 `[1024]×4` ≡ 定长 B4 S1024 H16 D128，同口径 `8BS²HD`：ours **152.8 TF**，
+    FA2.7.4 274.7 / **FA3 471.5** / TE 390.2 ⇒ ours 时间 = FA3 的 **3.09×**、TFLOPS 32%。
+  - **ncu（main，b4_t3840）**：Duration 549µs、DRAM 10.1% / **L1/TEX 48.7% / L2 63.2%** /
+    Compute 31.0%、202 regs、**Block Limit Shared Mem 1 → occ 12.4%**、Waves 7.76、
+    No Eligible 63.5% ⇒ bound 与定长 wgmma2 一致：**L2 red + L1/TEX + 1 CTA/SM 延迟受限**。
+  - **限制/后续**：只 fp16/bf16/HD=128/causal/MHA+GQA、非 TMA；非 causal、MLA、按 `cu_seqlens`
+    的均衡分块留后续。
+  - 原始输出 `src/fp16/fa_bwd_fp16_varlen_b{4_t3840,4_t4096,5_t3968,8_t2904}*.out.txt`、
+    `..._varlen_onefile_b4_t3840.out.txt`、`..._varlen_ncu_main_b4_t3840.out.txt`、
+    `src/bf16/` 同构文件、`src/fa_bwd_varlen_fa3_te_baseline_{fp16,bf16}.out.txt`；
+    文档 `docs/01` §16、`docs/01b` §6aa、`docs/04` §8。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -2279,6 +2313,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
+> **最新（第七十八轮）**：VARLEN 覆盖补全 **fp16/bf16**（默认 wgmma2 路径，单/两文件）——
+> 4 个 varlen case 对拍 fp32 ref 全噪声、单/两文件逐位一致，等长 case 为 FA3 的 3.09×；
+> 详见 `docs/01` §16、`docs/01b` §6aa、`docs/04` §8。**varlen 现在 fp8/fp16/bf16 三 dtype 齐备**
+> （仍限 HD=128/causal/MHA+GQA、非 TMA）。**下一步候选**：① varlen 的**非 causal / MLA**；
+> ② 按 `cu_seqlens` 的**均衡分块**（当前强倾斜 case 短序列 CTA 早退、并行度浪费）；
+> ③ varlen 的 **TMA 化**（需为 packed 布局重建 `[D,T,H,1]` 描述符）；④ 回到 fp8 K/V TMA
+> （需先腾 ~10KB smem）或 fp16/bf16 的 `L2 red`（三条消 red 路已证伪，转 TMA/软流水）。
+>
 > **当前冲刺（按序，把 ours 性能推到 FA3/TE 水平；这是最高优先级，别再被其它任务打断）**：
 >
 > **O17 已完成（第五十二轮，fp16）——唯一真杠杆落地**：`fa_bwd_fp16_wgmma2_kernel<HD>`
