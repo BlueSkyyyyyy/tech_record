@@ -2423,6 +2423,116 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 `src/fp16/fa_bwd_fp16_lse_wgmma_ncu_s4096.out.txt`、
 `src/fp16/fa_bwd_fp16_o30_fa3_te_baseline.out.txt`。
 
+## 14s. O33：主 kernel 的 Q/K/V/dO 改用 4D-TMA 载入（逐 atom，布局逐字节不变；main 1.04×）
+
+### 14s.1 动机
+
+O30–O32（§14r / `docs/01b` §6x / `docs/03` §35）已把 **LSE 的 Q/K 载入**从逐 16B `cp.async`
+换成 4D-TMA。主 kernel（`fa_bwd_fp16_wgmma2b_kernel`，S≥4096 的默认快路）的 Q/dO（prologue）
+与 K/V（每个 KV tile）仍用「逐 16B `cp.async` + `sw128_off` 地址运算」，是本轮要收掉的搬运开销。
+
+难点：wgmma 的 5 个 GEMM 都从同一块 **SW128 K-major** tile 直读（描述符地址与 atom 交织次序
+绑定），而 TMA 一个 box 内维只有 128B（fp16 = 64 元素）。O15a 已证「HD=128 的 K-major tile 的
+交织布局无法用一个 2D box 复现」。本项走**第三条路**：
+
+* 一个 `[8 行][64 列]` 的 2D box 恰好 = 一个 1024B SW128 atom；
+* **逐 atom 发 TMA**（每个 `(rg,kg)` 一条），dst = `sw128_off(rg*8, kg*64, HD)`
+  = `(rg*(HD/64)+kg)*1024`，于是**原样复现交织布局**（atom 次序 `rg*(HD/64)+kg`）；
+* ⇒ **所有 wgmma 描述符完全不用改**，TMA 搬的是与 `cp.async` 逐字节相同的 smem。
+
+代价：Q/dO 各 32 atom、K/V 各 32 atom，但每条 TMA 只占一条指令、**不占寄存器、不记
+scoreboard**，且由 tid0 串行发射（异步）；比 4096 条 `cp.async` 摊到 256 线程更省发射与地址运算。
+OOB 行由 TMA 自动补 0，与 `cp.async` 的显式零写一致。
+
+### 14s.2 实现（单/两文件 device 代码逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+device（`fa_bwd_fp16_mma_kernels.cuh`）：
+
+* 新增 `tma_fill_sw128<R,HD>`：对 `(rg,kg)` 逐 atom 发 `tma_load_4d`（复用 O30 的原语）。
+* 新增 `fa_bwd_fp16_wgmma2b_tma_kernel<HD,SPLIT>`：与 `fa_bwd_fp16_wgmma2b_kernel` **几何/
+  数据流/描述符逐字相同**，只把载入与同步换成 TMA + mbarrier——
+  * prologue：`mbar_init` 4 个 barrier（`qbar,kbar0,kbar1,vbar`），tid0 发 Q/dO（expect
+    `2*QTILE`）与 K0/V0（各 `KTILE`）；
+  * 循环：`mbar_wait(Q 首轮) → mbar_wait(kbar[st]) → mbar_wait(vbar) → __syncthreads →
+    发 K[nt+1](st^1) → GEMM1/2 → P/dS → __syncthreads → 发 V[nt+1] → GEMM3/4/5`；
+    K 双缓冲两个 barrier（相位每 `nt` 翻一次），V 单缓冲后段预取（同 O6b）。
+  * smem = `1024(对齐) + Q32K + dO32K + K 2×32K + V32K + P32K + dS32K + 128(barrier)`，
+    仍 1 CTA/SM。
+* TMA asm / `__grid_constant__` 由 `FA_HAS_WGMMA` / `FA_WGMMA+FA_TMA` 包裹，`sm_90` 构建不变。
+
+host（`fa_bwd_fp16_mma_main.cu`）：新增 `make_main_map(ptr,H,S,D,B)`（box `{64,8,1,1}`）、
+`launch_bwd_wgmma2b_tma<HD,SPLIT>` 与 CLI `--maintma[=0/1]`（默认 0，**opt-in**，与 cp.async
+版同 binary A/B；程序内 `[O33 A/B]` 同时计时两者并给 `max|diff|`）。仅 `wgmma2b` 几何
+（`S≥4096` 自动选，或 `--wg2bn=1`）生效。
+
+### 14s.3 数值（ours-vs-ref，fp16 causal，max_abs）—— 与 O5–O32 历史一致
+
+| shape | dq | dk | dv |
+|---|---|---|---|
+| MHA S=4096 | 1.883e-3 | 1.734e-3 | 1.966e-3 |
+
+`[O33 A/B] max|diff| tma-vs-cp.async`：**dq `0.00e+00`（逐位）**、dk/dv ~`2e-5`——
+差异**仅来自 dK/dV 的跨 CTA `atomicAdd` 次序**（TMA 改变发射时序，其它 A/B 如 O18 同样有
+`1e-5` 量级差异），smem 字节与 wgmma 完全一致 ⇒ 布局正确。vs-ref 与历史**数值相同**。
+
+### 14s.4 性能（同 session A/B，CUDA event，main-only，S=4096）
+
+| 版本 | main ms | TFLOPS |
+|---|---|---|
+| wg2b + cp.async | 0.9638 | 142.6 |
+| **wg2b + TMA** | **0.9249** | **148.6** (1.042×) |
+
+单文件版同量级（0.9647→0.9237，1.044×）。端到端 total **1.2289ms / 111.8 TF**
+（cp.async 1.2553ms）——main 占端到端 ~75%，故 total ~1.021×。
+限制：`--maintma` 只挂到 BN=128 的 `wgmma2b`（S≥4096 默认快路）；BN=64 的 `wgmma2` 未加
+TMA，小 S/GQA 不受影响。
+
+### 14s.5 ncu（main，S=4096，同 session，`-c 1`）
+
+| 指标 | cp.async | **TMA** |
+|---|---|---|
+| Duration | 968.96 µs | **923.87 µs** |
+| L1/TEX | 33.27% | 34.78% |
+| L2 | 56.99% | 60.13% |
+| `lts__t_sectors_op_red` | 51,904,512 | **51,904,512（逐字节不变）** |
+| `read` / `write` | 18.71M / 1.57M | 19.09M / 2.03M |
+| `long_scoreboard` / `wait` / `barrier` | 0.61 / 1.23 / 0.94 | 1.37 / 1.33 / 1.47 |
+| regs / smem / occupancy | 255 / 230.5KB / 12.5% | 255 / 230.5KB / 12.5% |
+
+结论：**TMA 不改 red（仍占 L2 ~72%）、不改 occupancy**，与预期一致；它省的是「搬运那半」的
+发射/地址运算，ncu Duration 与 event 同向 **~1.05×**。stall 计数（long_scoreboard/wait/barrier）
+反而升，但那是**更少 warp 在更短时间里等同一批 wgmma/barrier** 的归一化假象——净 duration
+下降。**main 的第一墙仍是 dK/dV 的 L2 `red`（三条消 red 路已在 §14k/§14o/§14q 证伪），
+TMA 动不了它**。
+
+### 14s.6 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`，FA2/FA3/TE 三列）
+
+FA3 MHA S4096 **0.3263ms/842TF**、TE **0.4443/619**；ours total 1.2289ms ⇒ **为 FA3 的
+3.77×**（O30 时 3.87×）、main-only 148.6 vs 842 = 5.66×。
+
+### 14s.7 复现
+
+```bash
+# 构建（TMA 需 -DFA_WGMMA -DFA_TMA -lcuda）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16 --iters=50 --maintma
+# A/B：--maintma=0 退回 cp.async（程序内 [O33 A/B]）
+# ncu
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/ncu.sh src/fp16/fa_bwd_fp16_mma_main.cu --kernel-name regex:wgmma2b_tma -c 1 --set full \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16 --maintma --iters=1
+```
+
+### 14s.8 原始输出
+
+`src/fp16/fa_bwd_fp16_o33_maintma{0,1}_fa_bwd_fp16_mma_main_s4096.out.txt`（A/B + 对拍）、
+`src/fp16/fa_bwd_fp16_o33_onefile_s4096.out.txt`（单文件 `[O33 A/B]`）、
+`src/fp16/fa_bwd_fp16_o33_ncu_cpasync_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_o33_ncu_maintma_metrics_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_o33_ncu_maintma_s4096.out.txt`（`--set full`）、
+`src/fp16/fa_bwd_fp16_o33_fa3_te_baseline.out.txt`。
+
 ## 15. 下一步
 
 > **O23（§14n）已完成**：把 O17/O18 的主 kernel + O9a 的 LSE 在 `-DFA_WGMMA` 构建下**默认打开**
@@ -2466,6 +2576,8 @@ GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，数值逐位不�
    收益来自 tile 数减半摊薄 barrier/wgmma 固定开销。
 5. **TMA 化 operand**：**LSE 的 Q/K 已落地（§14r，O30，第七十一轮）**——4D-TMA + 2×K=64 chunk，
    LSE-only **1.30–1.36×**、指令数 −28.7%、数值逐位不变；但墙不变（Compute ~58% + `wait`）。
-   **剩余**：主 kernel 的 Q/K/V/dO TMA 化（需把 GEMM3/4/5 的转置 B 从 SW128 的读法一起改，
-   动不了 L2 red）、bf16/fp8 的 TMA（dtype 参数化 / fp8 SW128 的 `k/16` chunk 下标）。
+   **主 kernel 的 Q/K/V/dO 也已落地（§14s，O33，第七十四轮）**——**逐 atom TMA 复现交织布局**
+   （描述符零改动）：`--maintma` opt-in，main **1.04×**（142.6→148.6 TF），`red` 逐字节不变、
+   occupancy 不变，端到端为 FA3 的 3.77×（O30 3.87×）。**剩余**：bf16/fp8 的对应 dtype 参数化
+   （fp8 SW128 的 `k/16` atom 下标）与 BN=64 的 `wgmma2` 几何。
 6. MLA 降 smem 冲 2 CTA/SM / split-KV 仍在列。

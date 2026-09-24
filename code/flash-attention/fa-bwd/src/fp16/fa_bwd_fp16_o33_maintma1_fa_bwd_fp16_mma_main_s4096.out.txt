@@ -1,0 +1,55 @@
+fa_bwd_fp16_mma_kernels.cuh(2532): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma4<HD,SEQ>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) [with HD=128, SEQ=true]" at line 652 of fa_bwd_fp16_mma_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp16_mma_kernels.cuh(2229): warning #177-D: variable "NTH" was declared but never referenced
+    constexpr int NTH = 256;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2b_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *) [with HD=128, SPLIT=true]" at line 666 of fa_bwd_fp16_mma_main.cu
+
+fa_bwd_fp16_mma_kernels.cuh(1599): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma2<HD,SPLIT,CL>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *) [with HD=128, SPLIT=true, CL=2]" at line 692 of fa_bwd_fp16_mma_main.cu
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb0EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 452762
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb1EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 447453
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[O23] main backend = wgmma2b(BN=128) | lse = wgmma (D=128 S=4096) +maintma
+[timing] total(3 kernels) 1.2182 ms  112.82 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2260 ms | main 0.9097 ms | convert 0.0825 ms
+[O24 A/B] delta old 0.0425 ms | warp 0.0127 ms (3.34x)
+[O8b A/B] lse O8 0.8635 ms | bal(单缓冲) 0.4514 ms (1.913x) | bal+cpasync(双缓冲) 0.3000 ms (2.878x)
+[O9 A/B] lse wgmma+SW128 0.2858 ms (vs bal+cpasync 1.049x, vs O8 3.021x)
+[O30 A/B] lse tma 0.2119 ms | wgmma 0.2858 ms (wgmma/tma 1.349x) | max_abs(tma-vs-wgmma)=0.000e+00
+[O6 A/B] main nopipe 2.2082 ms (62.24 TF) | pipe(KV both) 1.5881 ms (86.54 TF) | pipe2(K only) 1.5808 ms (86.94 TF) => nopipe/pipe 1.390x, nopipe/pipe2 1.397x
+[O17 A/B] main mma(64,64,2) 1.5254 ms | O9b wgmma 1.5084 (1.011x) | O17 wgmma2(BM128) 0.9851 (1.549x) TF 139.5
+[O17b A/B] main O17(BM128) 0.9851 ms | O17b wgmma4(BM256,ovlp) 1.2062 ms (0.817x) | wgmma4(BM256,seq) 1.0604 ms (0.929x) TF 129.6
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/1.39e-03/1.71e-03 | wg2-vs-O9b dq/dk/dv=0.00e+00/1.39e-03/1.71e-03
+[O18 A/B] main O17 wg2(BN64) 0.9851 ms (139.5 TF) | O18 wg2b(BN128,split) 0.9658 ms (142.3 TF) => 1.020x | O18 wg2b(BN128,串行) 0.9912 ms => 0.994x | max|diff| wg2b-vs-wg2 dq/dk/dv=2.38e-07/9.16e-05/9.16e-05 | wg2bns-vs-wg2b 0.00e+00/8.39e-05/4.39e-05
+[O33 A/B] main wg2b(cp.async) 0.9658 ms (142.3 TF) | wg2b+TMA 0.9254 ms (148.5 TF) => 1.044x | max|diff| tma-vs-wg2b dq/dk/dv=0.00e+00/7.63e-05/9.92e-05
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 1.0024 ms (137.1 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.9851 ms (139.5 TF) => 1.018x | max|diff| dq/dk/dv=0.00e+00/4.58e-05/7.63e-05
+[O17b A/B] max|diff| wg4-vs-wg2 dq/dk/dv=0.00e+00/9.23e-04/1.98e-03 | wg4-vs-mma dq/dk/dv=0.00e+00/1.07e-03/1.72e-03
+[O17b A/B] max|diff| wg4seq-vs-wg4 dq/dk/dv=2.01e-03/1.19e-01/7.63e-05 | wg4seq-vs-wg2 dq/dk/dv=2.01e-03/1.19e-01/1.98e-03
+[O6c A/B] main sched0(原样) 1.5832 ms | sched1(交错) 1.5532 ms (1.019x) | sched2(逆序) 1.5675 ms (1.010x)
+[O5c A/B] main (64,32,2) 1.5458 ms (88.91 TF) | (64,64,2) 1.4878 (92.38) | (32,32,1) 2.5956 (52.95) | (32,32,2) 2.5914 (53.04) => best 1.039x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.6817 (81.72) | f4 1.8230 (75.39,-7.7%) | f2+PREL 1.5556 (88.35,+8.1%) | f4+PREL 1.5513 (88.60,+8.4%)
+  (BM=64,BN=64,PIPE=2): base 1.6933 (81.17) | f4 1.7613 (78.03,-3.9%) | f2+PREL 1.4855 (92.52,+14.0%) | f4+PREL 1.5193 (90.46,+11.4%)
+  (BM=32,BN=32,PIPE=1): base 2.6272 (52.31) | f4 2.6371 (52.12,-0.4%) | f2+PREL 2.5824 (53.22,+1.7%) | f4+PREL 2.6088 (52.68,+0.7%)
+  (BM=32,BN=32,PIPE=2): base 2.6232 (52.39) | f4 2.6457 (51.95,-0.9%) | f2+PREL 2.5872 (53.12,+1.4%) | f4+PREL 2.6050 (52.76,+0.7%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
