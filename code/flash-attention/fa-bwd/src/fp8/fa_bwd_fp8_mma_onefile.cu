@@ -93,6 +93,14 @@ struct Fp8Cfg {
 #endif
   static constexpr int PSS = BN + FA_PSS_EXTRA;   // P/S fp32 行距（默认 37；1=旧值 33，供 A/B）
 
+  // O20：mma 主路径的 GEMM1/GEMM2 epilogue 融合开关。默认 1：GEMM1 算出的 P 直接留在寄存器
+  //   `preg[2][2][4]`（16 个 fp32）里给 GEMM2 的 epilogue 用，省掉原实现对 `Ps[r*PSS+c]` 的
+  //   smem 回读（O7e-3 ncu：该回读贡献 12.78M 多余 wavefronts）。`-DFA_FUSE_EPI=0` 供同 shape A/B
+  //   （退回「写 Ps 再读回」）。只影响 smem 访问路径，数学与数值逐位不变。
+#ifndef FA_FUSE_EPI
+#define FA_FUSE_EPI 1
+#endif
+
   // O4b：Kt/Qt/dOt 三个「逐字节 scatter 写的转置副本」→ Kp/Qp/dOp 三个 **K 配对布局**
   //   （uint16：[K/2][HD]，元素 = 2 个相邻 K 值），用 `ldmatrix.x2.trans` 读 B 片段。
   //   * Qp（[BM/2][HD]）供 GEMM4 的 B=Qᵀ；dOp 供 GEMM3 的 B=dOᵀ；Kp（[BN/2][HD]）供 GEMM5。
@@ -1444,6 +1452,10 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
     } else
 #endif
     {
+#if FA_FUSE_EPI
+      // O20：P 留在寄存器，供 GEMM2 epilogue 直接用，免去 Ps 的 smem 回读。
+      float preg[2][2][4];
+#endif
       float acc[2][2][4];
 #pragma unroll
       for (int i = 0; i < 2; ++i)
@@ -1471,6 +1483,9 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
               p = fexp(sval - lv);
             }
             Ps[r * PSS + c] = p;
+#if FA_FUSE_EPI
+            preg[i][j][q] = p;
+#endif
           }
       // ---- (2) dP = dO·Vᵀ  →  dS = P∘(dP − D)，存 fp32 ----
       // ---- O4a：GEMM1 与 GEMM2 之间**不需要** barrier。GEMM2 只读 dOs/Vs（本 tile 前已
@@ -1499,7 +1514,12 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
               float del = 0.f;
               if constexpr (PREL) del = del_r[i * 2 + (q >= 2 ? 1 : 0)];
               else if (qi < S) del = delta[((size_t)(b * S + qi)) * H + h];
+#if FA_FUSE_EPI
+              // O20：用寄存器里的 P（本线程刚算的同一 (r,c)），不再读回 Ps。
+              Ss[r * PSS + c] = preg[i][j][q] * (dpv - del);
+#else
               Ss[r * PSS + c] = Ps[r * PSS + c] * (dpv - del);
+#endif
             }
       }
     }  // end else (mma path)

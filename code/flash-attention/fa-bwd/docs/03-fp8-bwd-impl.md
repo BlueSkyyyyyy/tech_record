@@ -2382,3 +2382,111 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu \
 原始输出：`src/fp8/o19_wg2_ab_sweep.out.txt`（同 session A/B ×4 shape + 数值）、
 `src/fp8/o19_ncu_wg2_s4096.out.txt`（wg2 `--set full`）、
 `src/fp8/o19_ncu_wg2_red_s4096.out.txt` / `src/fp8/o19_ncu_mma_red_s4096.out.txt`（red 扇区 + stall 对照）。
+
+---
+
+## 28. O20：mma 主路径 GEMM1/GEMM2 epilogue 融合（P 留寄存器，消 `Ps` 回读）
+
+### 28.1 动机与 ncu 定位
+
+O7e-3（§26）用 `--page source --csv` 按源码行聚合 `L1 Wavefronts Shared Excessive` 时，
+发现 shared-store 多余 wavefronts 的 ~98% 来自 GEMM1/2 epilogue 的 `Ps/Ss[r*PSS+c]` 写
+（25.56M + 12.78M）**以及 `Ss` 里对 `Ps` 的同模式回读（12.78M）**。当时只把 bank conflict 从
+4-way 降到 2-way（`PSS 33→37`），**没有消掉这次 smem 回读本身**。
+
+回读的根因：**mma 路径**里 GEMM1 的 epilogue 算完 `P` 后写 `Ps`，GEMM2 的 epilogue 又
+`Ss[r*PSS+c] = Ps[r*PSS+c] * (dpv - del)` 把它读回来。而两次 `mma_block` 的
+`(wm=wr, wn=wc)` 和累加器映射**完全一致**（O4a 注释已指出），所以这个 `P` 本来就在**同一线程的
+寄存器**里，根本不需要绕一趟 smem。对照：**wgmma 路径（O9c-2）早已把 P 留在 `pval[16]` 里**，
+只有 mma 路径还在回读。
+
+### 28.2 改动（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+新增编译开关 `FA_FUSE_EPI`（默认 1，`-DFA_FUSE_EPI=0` 供 A/B）：
+
+- mma 分支在 GEMM1 前声明 `float preg[2][2][4]`；
+- GEMM1 epilogue 算出 `p` 后 `Ps[r*PSS+c]=p;` **同时** `preg[i][j][q]=p;`；
+- GEMM2 epilogue 用 `preg[i][j][q]`（本线程刚算的同一 `(r,c)`）代替 `Ps[r*PSS+c]`。
+
+只改 smem 访问路径，**数学与数值逐位不变**（同一线程、同一 `(r,c)`、同一个 `p`）。
+代价是 `preg`（16 个 fp32）要在 GEMM2 的 `mma_block` 期间保活（ptxas：该实例
+`b1b0b1b1` 栈帧 8→72B）；收益是每个 tile 少一次全 tile 的 `Ps` 回读（12.78M wavefronts）。
+
+### 28.3 数值（ours-vs-ref，fp8 causal，max_abs）
+
+`FA_FUSE_EPI` on/off 的 dq/dk/dv 对拍表**逐位相同**（打印到 3 位有效数字完全一致）：
+
+| shape（causal, B1） | dq | dk | dv |
+|---|---|---|---|
+| S512 H16 D128 | 2.426e-1 | 2.975e-1 | 3.735e-1 |
+| S1024 H32 D128 | 2.400e-1 | 4.195e-1 | 3.536e-1 |
+| S1024 H32 D128 kv4 | 2.517e-1 | 5.408e-1 | 7.072e-1 |
+| S1024 H40 D128 kv8 | 2.869e-1 | 5.390e-1 | 7.108e-1 |
+| S1024 H2 D512 | 2.232e-1 | 3.337e-1 | 3.602e-1 |
+| S512 H4 D512 | 2.415e-1 | 2.992e-1 | 4.481e-1 |
+| S4096 H16 D128 | 2.635e-1 | 2.643e-1 | 3.216e-1 |
+
+### 28.4 性能（同 session A/B，CUDA event，main-only）
+
+| shape | FUSE=0 (ms) | FUSE=1 (ms) | 比 |
+|---|---|---|---|
+| S512 H16 D128 | 0.0670 | 0.0671 | 1.00× |
+| S1024 H32 D128 | 0.3942 | **0.3882** | **1.015×** |
+| S1024 kv4 | 0.3799 | 0.3794 | 1.00× |
+| S1024 kv8 | 0.4530 | **0.4456** | **1.017×** |
+| S1024 H2 D512 | 0.3183 | 0.3212 | 0.99× |
+| S512 H4 D512 | 0.1663 | 0.1650 | 1.008× |
+| **S4096 H16 D128** | 2.1997 | **2.1433** | **1.026×** |
+
+端到端（S4096，FUSE=1）**total 2.77ms（49.6 TF）**、main-only 64.1 TF（FP8 峰值 1978.8 的 3.2%）；
+同 session TE FP8 纯反向 0.5909ms/465 TF ⇒ ours 端到端时间约 **4.7× TE**（O7e-3 时 4.85×）。
+收益集中在 **S=4096**（`REGDQ=1` 走寄存器累加、`kPrefetch` 关闭，寄存器余量最大），
+小 S/GQA/MLA 因每 tile 回读占比小、且 `preg` 保活增加 spill，基本中性。
+（fp8 无 FA 基线；FA3 fp16 MHA S4096 0.3241ms/848TF 仅作口径参照。）
+
+### 28.5 ncu（main, S=4096，同 session，`--set full -c 1` + 定向 metrics）
+
+| 指标 | FUSE=0 | FUSE=1 | 变化 |
+|---|---|---|---|
+| Duration | 2.25 ms | **2.21 ms** | −1.8% |
+| shared 多余 wavefronts | 15.97M（9%） | **11.71M（7%）** | **−4.26M** |
+| shared 总 wavefronts | 169.07M | 160.55M | −8.5M |
+| bank conflict `op_ld` | 20.55M | **16.54M** | −19.5% |
+| bank conflict `op_st` | 12.35M | 12.33M | 不变 |
+| `short_scoreboard` stall | 1.50 | **1.41** | −6% |
+| `long_scoreboard` stall | 0.76 | 0.68 | −11% |
+| `wait` stall | 1.56 | 1.55 | 不变 |
+| L1/TEX / L2 / Compute | 55.75 / 50.18 / 42.69% | 55.19 / 50.93 / 43.62% | — |
+| regs / smem / occ | 168 / 72.70KB / 18.75% | 168 / 72.70KB / 18.75% | 不变 |
+
+### 28.6 结论
+
+`short_scoreboard`（`ldmatrix`/smem 依赖）下降、shared 总 wavefronts 与 `op_ld` 冲突同步下降，
+**证实收益来自消掉 `Ps` 回读**。墙仍是 **`wait`（1.55，mma 依赖延迟）+ 3 CTA/SM**、L2 ~50%
+（残余 `red`），与 O7e-3/O19 的判决一致：**这条改动只是把 L1/TEX 数据通路再清掉一个已知来源，
+不改变「fp8 main 的限速器是 mma 依赖延迟 + occupancy」**。真正再上一个台阶仍需 O19 §27.6 列的
+「提 occupancy（168→≤128 regs、72.7→≤58KB smem）或减 mma 依赖 stall」。
+
+### 28.7 复现
+
+```bash
+# A/B（同 shape 先后编两个二进制）
+docker exec kernel_lab bash -lc "cd <...>/src/fp8 && \
+  nvcc -O3 -arch=sm_90 -DFA_FUSE_EPI=0 fa_bwd_fp8_main.cu -o /tmp/fp8_fuse0.out && \
+  nvcc -O3 -arch=sm_90 -DFA_FUSE_EPI=1 fa_bwd_fp8_main.cu -o /tmp/fp8_fuse1.out"
+# 默认（FUSE=1）跑
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# 单文件（device 由 sync_onefile_device.py 同步，逐字一致）
+ARCH=sm_90 scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# ncu（定向 metrics）
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --launch-count 1 \
+  --kernel-name regex:fa_bwd_fp8_mma_kernel \
+  --metrics smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o20_fuse_ab.out.txt`（两文件 ×7 shape × FUSE 0/1，计时+数值）、
+`src/fp8/o20_ncu_fuse0_s4096.out.txt` / `o20_ncu_fuse1_s4096.out.txt`（`--set full`）、
+`src/fp8/o20_onefile_s4096.out.txt`、`src/fp8/o20_tebench_fp8.out.txt`、
+`src/fp8/o20_fa3_te_baseline_fp16.out.txt`。

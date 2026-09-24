@@ -1,0 +1,21 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype=torch.float16
+shape                                  FA2.7.4             FA3          TE2.14  FA3/FA2
+(1, 1024, 40, 128) kv=8        0.1885/  228 0.1212/  354 0.1322/  325    1.56x
+(1, 1024, 32, 128) kv=4        0.1587/  216 0.0828/  415 0.1127/  305    1.92x
+(1, 1024, 64, 128) kv=4        0.2676/  257 0.1593/  431 0.1950/  352    1.68x
+(1, 1024, 64, 128) kv=1        0.2673/  257 0.1567/  439 0.2142/  321    1.71x
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 256, 2, 512) kv=2             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 512, 4, 512) kv=4             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 1024, 2, 512) kv=2            nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 4096, 16, 128) kv=16       0.7223/  381 0.3241/  848 0.4451/  618    2.23x

@@ -1607,10 +1607,40 @@
     把 L2 打掉一半也补不回 1 CTA/SM 的并行度损失。fp8 右侧**不应再走「减 red / 放大 BM」**，真正杠杆是
     **提 occupancy**（168 regs→≤128、72.7KB smem→≤58KB 才 4 CTA/SM）或**减 mma 依赖 stall**（softmax/fold
     与 mma 的重叠）。`red` 减半只在 fp16/bf16（red 占 L2 73%、且 2→1 CTA/SM 换得回来）成立。
-  - 原始输出 `src/fp8/o19_wg2_ab_sweep.out.txt`（同 session A/B ×4 shape + 数值）、
-    `src/fp8/o19_ncu_wg2_s4096.out.txt`（wg2 `--set full`）、
-    `src/fp8/o19_ncu_wg2_red_s4096.out.txt` / `src/fp8/o19_ncu_mma_red_s4096.out.txt`（red/stall 对照）；
-    详见 `docs/03` §27、`docs/04` §2.3。
+   - 原始输出 `src/fp8/o19_wg2_ab_sweep.out.txt`（同 session A/B ×4 shape + 数值）、
+     `src/fp8/o19_ncu_wg2_s4096.out.txt`（wg2 `--set full`）、
+     `src/fp8/o19_ncu_wg2_red_s4096.out.txt` / `src/fp8/o19_ncu_mma_red_s4096.out.txt`（red/stall 对照）；
+     详见 `docs/03` §27、`docs/04` §2.3。
+
+- 2026-09-24（第六十轮）：**O20 完成（fp8 mma 主路径 GEMM1/GEMM2 epilogue 融合，消 `Ps` 回读；
+  S4096 main 1.026×）**。
+  - 动机：O7e-3（§26）把 fp8 main 的 shared-store 多余 wavefronts 拆到源码行时发现，除了
+    `Ps/Ss` 写的 4-way 冲突外，**`Ss` 对 `Ps` 的回读（12.78M 多余 wavefronts）本身没被消掉**。
+    mma 路径里 GEMM1 epilogue 写 `Ps`、GEMM2 epilogue 又读回同一 `(r,c)`——而两次 `mma_block` 的
+    线程/累加器映射完全一致（O4a 已证），这个 `P` 本就在**本线程寄存器**里。wgmma 路径（O9c-2）
+    早已用 `pval[16]`，只有 mma 路径还在绕 smem。
+  - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：新增编译
+    开关 `FA_FUSE_EPI`（默认 1，`-DFA_FUSE_EPI=0` 供 A/B）——mma 分支 GEMM1 前声明
+    `preg[2][2][4]`，GEMM1 epilogue 写 `Ps` 的同时存 `preg`，GEMM2 epilogue 直接用 `preg`。
+    只改 smem 访问路径，**数值逐位不变**（同线程、同 `(r,c)`、同 `p`）。
+  - **数值**：FUSE on/off 的 dq/dk/dv **逐位相同**（S512 2.426/2.975/3.735e-1；S1024H32
+    2.400/4.195/3.536e-1；GQA kv4 2.517/5.408/7.072e-1；kv8 2.869/5.390/7.108e-1；
+    MLA S1024H2 2.232/3.337/3.602e-1；S512H4 2.415/2.992/4.481e-1；S4096 2.635/2.643/3.216e-1）。
+  - **性能**（同 session A/B，event，main-only）：**S4096 2.1997→2.1433ms（1.026×）**、
+    S1024H32 1.015×、kv8 1.017×；S512/kv4/MLA 中性（0.99–1.01×，`preg` 保活略增 spill）。
+    端到端 S4096 **total 2.77ms（49.6 TF，峰值 3.2% 口径按 main-only 64.1 TF）**；同 session
+    TE FP8 0.5909ms/465TF ⇒ 端到端时间约 **4.7× TE**（O7e-3 4.85×）。
+  - **ncu（main, S=4096，同 session，`--set full -c 1` + 定向 metrics）**：Duration 2.25→**2.21ms**、
+    **shared 多余 wavefronts 15.97M→11.71M、总 wavefronts 169.07→160.55M**、
+    **`op_ld` bank conflict 20.55M→16.54M（−19.5%）**、**`short_scoreboard` 1.50→1.41**、
+    long 0.76→0.68；regs/smem/occ 不变（168/72.70KB/18.75%）。**证实收益来自消 `Ps` 回读**；
+    墙仍是 **`wait` 1.55（mma 依赖延迟）+ 3 CTA/SM + 残余 L2 red**，与 O7e-3/O19 判决一致。
+  - **对标**（同 session）：FA3 fp16 MHA S4096 0.3241ms/848TF、TE fp16 0.4451/618（fp8 无 FA 基线，
+    仅口径参照）；TE FP8 0.5909ms/465TF。
+  - 原始输出 `src/fp8/fa_bwd_fp8_main_o20_fuse_ab.out.txt`（两文件 ×7 shape × FUSE 0/1）、
+    `src/fp8/o20_ncu_fuse{0,1}_s4096.out.txt`、`src/fp8/o20_onefile_s4096.out.txt`、
+    `src/fp8/o20_tebench_fp8.out.txt`、`src/fp8/o20_fa3_te_baseline_fp16.out.txt`；
+    详见 `docs/03` §28、`docs/04` §2.3。
 
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
@@ -1797,6 +1827,13 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > L2 red，而是「mma 依赖延迟 + occupancy」**；**fp8 右侧不要再走「减 red / 放大 BM」**，下一杠杆是
 > **提 occupancy（168 regs→≤128、72.7KB→≤58KB 才 4 CTA/SM）** 或 **减 mma 依赖 stall**。
 > `red` 减半只对 fp16/bf16（red 占 L2 73%、且 2→1 CTA/SM 换得回来）成立。详见 `docs/03` §27。
+> **O20 已完成（第六十轮）**：把「减 mma 依赖 stall」这条先做了一小步——**融合 mma 路径的
+> GEMM1/GEMM2 epilogue**，`P` 留寄存器（`preg[2][2][4]`）不再回读 `Ps`（O7e-3 遗留的 12.78M
+> wavefronts）。编译开关 `FA_FUSE_EPI`（默认 1）；**数值逐位不变**；ncu shared 总 wavefronts
+> 169.07→160.55M、`op_ld` 冲突 −19.5%、`short_scoreboard` 1.50→1.41、Duration 2.25→2.21ms；
+> **S4096 main 1.026×**、S1024H32 1.015×、kv8 1.017×，小 S/MLA 中性。墙仍是 `wait`+3 CTA/SM，
+> 详见 `docs/03` §28。**fp8 若还要再上台阶，仍须解 occupancy 或做跨-tile 软流水**
+> （K/V 单缓冲被 dS3/Ap 复用，跨-tile 重叠需先给 K/V 双缓冲腾 smem）。
 > 1. **O5 收尾**：fp16/bf16 反向用 `mma.m16n8k16`+`ldmatrix` 张量核后端。
 >    进度：fp16 主 kernel **2.28→0.19 ms（512）/ 67.6→4.55 ms（4096），11.8–14.9×**；
 >    **bf16 主 kernel 1.88→0.190 ms（512）/ 42.2→4.51 ms（4096），9.4–9.9×**（第二十七轮，单/两文件、
