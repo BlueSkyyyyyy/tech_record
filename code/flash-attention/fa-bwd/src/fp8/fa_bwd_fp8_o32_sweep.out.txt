@@ -1,0 +1,107 @@
+### O32: fp8 LSE 4D-TMA vs wgmma+cp.async —— 同 session event A/B（-DFA_WGMMA -DFA_TMA -lcuda）
+### 日期 2026-09-24T23:03:47+08:00
+
+=== b1_s512_h16_d128_causal_fp8 ===
+O32: lse backend = tma
+[timing] total(quant+pre+main+cvt) 0.1219 ms  17.62 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0147 ms | preprocess 0.0344 ms | main 0.0605 ms | convert 0.0123 ms (cvt_on=0)
+[O32 A/B] lse tma 0.0312 ms | wgmma 0.0335 ms (wgmma/tma 1.076x) | max_abs(tma-vs-wgmma)=0.000e+00
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.938e+02
+  dk   vs ref: max_abs=2.972e-01  max_rel=7.598e+01
+  dv   vs ref: max_abs=3.733e-01  max_rel=1.002e+02
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.379e-01  max_rel=2.386e+02
+  dk   vs te_dk: max_abs=4.428e-01  max_rel=2.377e+02
+  dv   vs te_dv: max_abs=8.544e-01  max_rel=6.892e+01
+
+=== b1_s4096_h16_d128_causal_fp8 ===
+O32: lse backend = tma
+[timing] total(quant+pre+main+cvt) 2.1303 ms  64.52 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0694 ms | preprocess 0.2692 ms | main 1.7440 ms | convert 0.0477 ms (cvt_on=0)
+[O32 A/B] lse tma 0.2475 ms | wgmma 0.2726 ms (wgmma/tma 1.101x) | max_abs(tma-vs-wgmma)=0.000e+00
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=4.525e-01  max_rel=1.051e+02
+  dk   vs te_dk: max_abs=5.325e-01  max_rel=1.158e+02
+  dv   vs te_dv: max_abs=6.806e-01  max_rel=1.078e+02
+
+=== b1_s1024_h32_d128_causal_fp8 ===
+O32: lse backend = tma
+[timing] total(quant+pre+main+cvt) 0.4468 ms  38.45 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0414 ms | preprocess 0.0708 ms | main 0.3022 ms | convert 0.0324 ms (cvt_on=0)
+[O32 A/B] lse tma 0.0615 ms | wgmma 0.0661 ms (wgmma/tma 1.075x) | max_abs(tma-vs-wgmma)=0.000e+00
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.399e-01  max_rel=1.884e+02
+  dk   vs ref: max_abs=4.177e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.535e-01  max_rel=8.062e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=4.639e-01  max_rel=1.714e+02
+  dk   vs te_dk: max_abs=5.706e-01  max_rel=1.501e+02
+  dv   vs te_dv: max_abs=9.432e-01  max_rel=1.437e+02
+
+=== b1_s1024_h32_d128_kv4_causal_fp8 ===
+O32: lse backend = tma
+[timing] total(quant+pre+main+cvt) 0.4035 ms  42.58 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0277 ms | preprocess 0.0676 ms | main 0.2771 ms | convert 0.0310 ms (cvt_on=0)
+[O32 A/B] lse tma 0.0597 ms | wgmma 0.0643 ms (wgmma/tma 1.077x) | max_abs(tma-vs-wgmma)=0.000e+00
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.987e+02
+  dk   vs ref: max_abs=5.339e-01  max_rel=1.396e+02
+  dv   vs ref: max_abs=7.173e-01  max_rel=9.160e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.052e-01  max_rel=1.872e+02
+  dk   vs te_dk: max_abs=9.555e-01  max_rel=2.486e+02
+  dv   vs te_dv: max_abs=1.429e+00  max_rel=1.654e+02
+
+=== b1_s1024_h40_d128_kv8_causal_fp8 ===
+O32: lse backend = tma
+[timing] total(quant+pre+main+cvt) 0.4891 ms  43.90 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0339 ms | preprocess 0.0737 ms | main 0.3554 ms | convert 0.0261 ms (cvt_on=0)
+[O32 A/B] lse tma 0.0627 ms | wgmma 0.0676 ms (wgmma/tma 1.079x) | max_abs(tma-vs-wgmma)=0.000e+00
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.869e-01  max_rel=1.861e+02
+  dk   vs ref: max_abs=5.367e-01  max_rel=1.528e+02
+  dv   vs ref: max_abs=7.032e-01  max_rel=9.361e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=1.008e+00  max_rel=1.654e+02
+  dk   vs te_dk: max_abs=8.891e-01  max_rel=1.966e+02
+  dv   vs te_dv: max_abs=1.101e+00  max_rel=3.281e+02
+
+=== b1_s1024_h64_d128_kv1_causal_fp8 ===
+O32: lse backend = tma
+[timing] total(quant+pre+main+cvt) 0.6839 ms  50.24 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0419 ms | preprocess 0.0881 ms | main 0.5261 ms | convert 0.0278 ms (cvt_on=0)
+[O32 A/B] lse tma 0.0682 ms | wgmma 0.0744 ms (wgmma/tma 1.091x) | max_abs(tma-vs-wgmma)=0.000e+00
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=4.101e-01  max_rel=1.537e+02
+  dk   vs ref: max_abs=1.572e+00  max_rel=2.272e+02
+  dv   vs ref: max_abs=2.126e+00  max_rel=2.830e+02
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.475e-01  max_rel=1.237e+02
+  dk   vs te_dk: max_abs=2.707e+00  max_rel=3.656e+02
+  dv   vs te_dv: max_abs=3.378e+00  max_rel=2.663e+02
+
+=== b1_s1024_h2_d512_causal_fp8 ===
+O32: lse backend = wgmma/mma
+[timing] total(quant+pre+main+cvt) 0.3916 ms  10.97 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0148 ms | preprocess 0.1386 ms | main 0.2024 ms | convert 0.0359 ms (cvt_on=0)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+[compare] ours vs TE FP8
+
+=== b1_s512_h4_d512_causal_fp8 ===
+O32: lse backend = wgmma/mma
+[timing] total(quant+pre+main+cvt) 0.2510 ms  8.56 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0148 ms | preprocess 0.0767 ms | main 0.1232 ms | convert 0.0364 ms (cvt_on=0)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.415e-01  max_rel=1.803e+02
+  dk   vs ref: max_abs=2.992e-01  max_rel=6.416e+01
+  dv   vs ref: max_abs=4.481e-01  max_rel=9.164e+01
+[compare] ours vs TE FP8
+
