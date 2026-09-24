@@ -130,6 +130,32 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
       scale, causal, ksplit);
 }
 
+// O19：跨 warpgroup 归约版主 kernel（BM=128, 2 wg, 256 线程）的 smem 与 launcher。
+template <int HD>
+static constexpr int wg2_smem_bytes() {
+  constexpr int BM = 128, BN = 32;
+  constexpr int ASLD = HD + 16, PSLD = HD + 8, DSS2 = BN + 16, PSS = BN + 5;
+  constexpr int kNScale = 3 * BM + 4 * BN;
+  return (2 * BM * ASLD + 2 * BN * ASLD) + 2 * (BM / 2) * PSLD * 2 + (BN / 2) * PSLD * 2 +
+         BM * DSS2 + (kNScale + 2 * BM * PSS) * (int)sizeof(float);
+}
+
+template <int HD>
+static void launch_bwd_wg2(dim3 mg, const unsigned char* q8, const float* qs,
+                           const unsigned char* k8, const float* ks,
+                           const unsigned char* v8, const float* vs,
+                           const unsigned char* do8, const float* dos,
+                           const float* delta, const float* lse, float* dq_acc,
+                           float* dk_acc, float* dv_acc, int S, int H, int Hkv,
+                           float scale, int causal, int ksplit) {
+  constexpr int kSmem = wg2_smem_bytes<HD>();
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_wg2_kernel<HD, 128, 32>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  fa_bwd_fp8_wg2_kernel<HD, 128, 32><<<mg, 256, kSmem>>>(
+      q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
+      scale, causal, ksplit);
+}
+
 template <int HD>
 static void launch_lse(dim3 lg, const unsigned char* q8, const float* qs,
                        const unsigned char* k8, const float* ks, float* lse, int S, int H,
@@ -178,8 +204,10 @@ int main(int argc, char** argv) {
   bool causal = true;
   int iters = 20;
   int ksplit = -1;  // -1 = 自动
+  int ksplit2_opt = -1;  // O19：wg2 的 ksplit（-1 自动）
   int lsewgm = 0;   // O9c：1 = LSE 走 wgmma（需 -DFA_WGMMA 构建），0 = O11 mma 版
   int wgmma = 0;    // O9c-2：1 = 主 kernel GEMM1/2 走 wgmma（需 -DFA_WGMMA 构建）
+  int wg2 = 0;      // O19：1 = 主 kernel 走跨 warpgroup 归约版（BM=128, 2 wg, 256 线程）
   int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
   int qfast = 1;      // O14：1 = warp-per-row 向量化量化，0 = 旧 per-row 标量量化（A/B）
   int f16b_opt = 1;   // O7e-2：1 = fold 16B 向量化写（默认），0 = 退回 O7e 的 4B 写（A/B）
@@ -189,12 +217,14 @@ int main(int argc, char** argv) {
     else if (a == "--causal") causal = true;
     else if (a == "--lsewgm") lsewgm = 1;
     else if (a == "--wgmma") wgmma = 1;
+    else if (a == "--wg2") wg2 = 1;
     else if (a.rfind("--qfast=", 0) == 0) qfast = atoi(a.c_str() + 8);
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--f16b=", 0) == 0) f16b_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--ksplit=", 0) == 0) ksplit = atoi(a.c_str() + 9);
+    else if (a.rfind("--ksplit2=", 0) == 0) ksplit2_opt = atoi(a.c_str() + 10);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
     else if (!a.empty() && a[0] != '-') dir = a;
   }
@@ -335,8 +365,26 @@ int main(int argc, char** argv) {
   dim3 lg((S + LBM - 1) / LBM, H, B);
   dim3 lg_bal((((S + LBM - 1) / LBM) + 1) / 2, H, B);   // O11：镜像配对，grid.x 减半
   dim3 mg((S + BM - 1) / BM * ksplit, H, B);
+  // O19：wg2（BM=128）的自动 ksplit 与 grid（base 减半）。同样以 grid≈4096（3 CTA/SM
+  //   的 d128 目标）为准；1 CTA/SM 时用更细的 grid 不利，故对 wg2 用 target=2048。
+  const long base_grid2 = (long)((S + 127) / 128) * H * B;
+  int ksplit2 = ksplit;
+  if (ksplit2 < 1) ksplit2 = 1;
+  if (ksplit2_opt >= 1) ksplit2 = ksplit2_opt;
+  else {
+    const long target_ctas = 2048L;
+    long k = target_ctas / (base_grid2 > 0 ? base_grid2 : 1);
+    if (k < 1) k = 1;
+    if (k > 16) k = 16;
+    long kp = 1;
+    while (kp * 2 <= k) kp *= 2;
+    ksplit2 = (int)kp;
+  }
+  dim3 mg2((S + 127) / 128 * ksplit2, H, B);
   printf("grid main = %d x %d x %d  (ksplit=%d, base_grid=%ld)\n", mg.x, mg.y, mg.z,
          ksplit, base_grid);
+  printf("O19: wg2 grid = %d x %d x %d (ksplit2=%d, base_grid2=%ld)\n", mg2.x, mg2.y, mg2.z,
+         ksplit2, base_grid2);
   printf("O7: use_regdq=%d (register dQ accumulation)\n", (int)use_regdq);
   const int cvt_threads = 256;
   const int cvt_blocks = (int)std::min<size_t>((nq + cvt_threads - 1) / cvt_threads, 65535);
@@ -385,6 +433,12 @@ int main(int argc, char** argv) {
 #undef GO2
   };
   auto run_main = [&]() {
+    if (D == 128 && wg2) {
+      launch_bwd_wg2<128>(mg2, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
+                          d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                          ksplit2);
+      return;
+    }
 #ifdef FA_WGMMA
     if (D == 128 && wgmma) { launch128(use_regdq, true, prel_sel, f16b_sel); return; }
 #endif
@@ -739,6 +793,64 @@ int main(int argc, char** argv) {
     printf("[O14 A/B] quant old(per-row) %.4f ms | new(warp-per-row) %.4f ms (%.3fx) | "
            "bitwise mismatch=%lld\n", qo, qn, qo / qn, mismatch);
     run_all();  // 恢复 CLI 选中路径的完整输出
+  }
+
+  // ---- O19 A/B（D=128）：主 kernel mma(BM=64,3 CTA/SM) vs wg2(BM=128,2 wg,256 线程,1 CTA/SM)
+  //      同一 session 计时 + 逐元素对拍（只改归约结构/几何，数学口径不变）。----
+  if (D == 128) {
+    auto run_mma_sel = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      if (use_regdq)
+        launch_bwd_main<128, 64, 32, true, false, true, true>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      else
+        launch_bwd_main<128, 64, 32, false, false, true, true>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+    };
+    auto run_wg2_sel = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      launch_bwd_wg2<128>(mg2, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
+                          d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                          ksplit2);
+    };
+    auto bench_sel = [&](auto&& fn, float* out) {
+      fn();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) fn();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float t_mma = 0.f, t_wg2 = 0.f;
+    bench_sel(run_mma_sel, &t_mma);
+    bench_sel(run_wg2_sel, &t_wg2);
+    std::vector<float> a_dq(nq), a_dk(nkv), a_dv(nkv), b_dq(nq), b_dk(nkv), b_dv(nkv);
+    run_mma_sel();
+    CUDA_CHECK(cudaMemcpy(a_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    run_wg2_sel();
+    CUDA_CHECK(cudaMemcpy(b_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    auto maxd = [](const std::vector<float>& x, const std::vector<float>& y) {
+      double m = 0.0;
+      for (size_t i = 0; i < x.size(); ++i)
+        m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
+      return m;
+    };
+    printf("[O19 A/B] main mma(BM64,grid=%d) %.4f ms | wg2(BM128,grid=%d) %.4f ms (%.3fx) | "
+           "max_abs(wg2-vs-mma) dq/dk/dv=%.3e/%.3e/%.3e\n",
+           mg.x, t_mma, mg2.x, t_wg2, t_mma / t_wg2, maxd(b_dq, a_dq), maxd(b_dk, a_dk),
+           maxd(b_dv, a_dv));
+    run_main();  // 恢复 CLI 选中路径
   }
 
   std::vector<float> mdq(nq), mdk(nkv), mdv(nkv);

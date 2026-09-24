@@ -2281,3 +2281,103 @@ python3 scripts/sync_onefile_device.py src/fp8/fa_bwd_fp8_kernels.cuh \
 数值+计时）、`src/fp8/fa_bwd_fp8_main_o19_ncu_s4096.out.txt`（`--set full`）、
 `src/fp8/fa_bwd_fp8_o19_tebench.out.txt`（TE FP8）、
 `src/fp8/fa_bwd_fp8_o19_fa3_te_baseline_fp16.out.txt`（FA2/FA3/TE fp16 三列）。
+
+---
+
+## 27. O19：fp8 跨 warpgroup 归约（BM=128、2 warpgroups）——**负结果 + 机制判决**
+
+> 目的：O7e-3（§26）把 fp8 main 的第一墙定位为 **mma 依赖延迟（`wait`+`short_scoreboard`）+ 3 CTA/SM**，
+> 并把候选杠杆列为「**降 L2 的 dK/dV `red`（49.8%）**」或「**提 occupancy**」。fp16/bf16 的 O17（跨
+> warpgroup 归约，BM=128）实测把 `red` 精确砍半、main 1.5×，所以本轮把同一机制移植到 fp8 做**判决**。
+
+### 27.1 动机与假设
+
+fp8 main 的 `dK/dV` 用跨 CTA 的 `atomicAdd` 汇总，一个 KV 元素被 `S/BM` 个 CTA（每个 query 块一个）
+贡献。**BM 64→128 后贡献 CTA 数减半 ⇒ `red` 字节砍半**（O17 在 fp16/bf16 上成立）。
+
+### 27.2 实现（单/两文件 device 代码逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+新增 `fa_bwd_fp8_wg2_kernel<HD,BM=128,BN=32>`（`__launch_bounds__(256,1)`，**256 线程 = 2 warpgroup**）：
+
+* **phase A**：每个 wg（4 warp，2×2 几何）算自己 64 行 Q 的 `S=scale·QKᵀ` 与 `dP=dO·Vᵀ`，P/dS 写
+  `Ps/Ss`（全 BM=128 行，`PSS=BN+5=37` 与 mma 版一致）；LSE/D 仍预装寄存器（PREL）。
+* **fold**：8 个 warp 协同把全 128 行量化成 `Ap`（e4m3, per-j）、`dS3`（e5m2, per-j）、`dS2`（e5m2,
+  per-m）；`fmaxf` 可交换结合 ⇒ amax 与 mma 版逐位相同。
+* **phase B**：`dV=Pᵀ·dO`、`dK=dSᵀ·Q`、`dQ=dS·K` 的重叠维都从 smem **整块 128 行**读
+  （`mma_block_bt<16,32,128>` / `<32,64,32>`），8 个 warp 各占一块互不重叠的输出 ⇒ **每个 dV/dK/dQ
+  元素在本 CTA 内只被一个 warp `red` 一次**；dQ 仍走寄存器累加（REGDQ）后单次 flush。
+* host 加 `--wg2` / `--ksplit2=` 与 `[O19 A/B]`（同 session 计时 + 逐元素对拍）；单文件同源。
+
+smem **131.33KB → 1 CTA/SM**（256 线程 = 8 warp/SM）；regs 217；无 O3 寄存器预取（`kv_load_pair_nt` 直读）。
+
+### 27.3 数值（fp8 causal，ours-vs-ref，max_abs，单/两文件逐位一致）
+
+| case | dq | dk | dv | `max_abs`(wg2-vs-mma) dq/dk/dv |
+|---|---|---|---|---|
+| S=4096 H16 | 2.635e-1 | 2.767e-1 | 3.313e-1 | 1.19e-7 / 8.86e-2 / 4.31e-2 |
+| S=1024 H32 | 2.400e-1 | 4.334e-1 | 3.633e-1 | 2.38e-7 / 1.11e-1 / 5.98e-2 |
+| S=512 H16 | 2.426e-1 | 2.995e-1 | 3.713e-1 | 1.19e-7 / 1.11e-1 / 4.15e-2 |
+| GQA h32kv4 S=1024 | 2.517e-1 | 5.273e-1 | 7.226e-1 | 1.19e-7 / 1.17e-1 / 9.26e-2 |
+
+**与 mma 版同为 fp8 噪声量级**（vs ref 的 dq 完全一致；dk/dv 差 ~0.1 是**原子归约次序 + 贡献 CTA 数
+不同**在近抵消元素上的放大，dq 无跨 mblk 重叠故只差 1.2e-7）。**数学口径未变**。
+
+### 27.4 性能（同 session A/B，CUDA event，main-only，ms）
+
+| case | mma (BM64) | wg2 (BM128) | 比 |
+|---|---|---|---|
+| S=4096 H16 | 2.2662 | 2.9014 | **0.781×** |
+| S=1024 H32 | 0.4096 | 0.5661 | 0.724× |
+| S=512 H16 | 0.0761 | 0.1130 | 0.673× |
+| GQA h32kv4 S=1024 | 0.3869 | 0.5254 | 0.736× |
+
+**wg2 在所有 shape 都更慢（0.67–0.78×）**；调 `ksplit2`（1/2/4/8/16）最好也只有 2.886ms（mma 2.27ms）。
+
+### 27.5 ncu（main, S=4096，同 session，`--set full` / 定向 metrics）
+
+| 指标 | mma (BM64, 3 CTA/SM) | wg2 (BM128, 1 CTA/SM) | 变化 |
+|---|---|---|---|
+| Duration | 2.28 ms | **2.92 ms** | ↑ |
+| `lts__t_sectors_op_red` | 108,478,464 | **64,290,816** | **0.593×** |
+| `lts__t_sectors_op_read` | 32,188,735 | **17,286,751** | **0.537×** |
+| L2 Throughput | 49.91% | **22.61%** | ↓ |
+| Compute (SM) | 42.34% | 34.13% | ↓ |
+| DRAM | 3.22% | 2.20% | — |
+| Achieved occupancy | 18.09%（12 warp/SM） | **12.49%（8 warp/SM）** | ↓ |
+| regs / smem | 168 / 72.70KB | 217 / **131.33KB** | — |
+| Waves / SM | 10.34 | 31.03 | — |
+| Issue Slots Busy | 43.06% | **34.13%** | ↓ |
+| No Eligible | 54.10% | **64.40%** | ↑ |
+| stall `wait` / `short` / `long` | 1.56 / 1.50 / 0.77 | 1.27 / 1.21 / 0.40 | 均↓ |
+
+**机制被完全证实**：`red` 砍到 0.593×、`read` 0.537×、**L2 从 ~50% 掉到 22.6%**——跨 warpgroup
+归约确实打掉了 L2 那一半。但 **1 CTA/SM 只有 8 warp/SM（mma 有 12）**，每 warp 的 stall 虽更低却
+不足以覆盖；issue 从 43% 掉到 34%、No Eligible 升到 64%，Duration 反而 +28%。
+
+### 27.6 结论（O7e-3 的判决）
+
+**fp8 main 的限速器不是 L2 `red`，而是「mma 依赖延迟 + occupancy」**：把 L2 打掉一半都不够补
+1 CTA/SM 的并行度损失（与 fp16 O17b「BM=256 寄存器墙」是同一类结论的另一面）。故 fp8 右侧
+**不应再走「减 red / 放大 BM」**，真正的杠杆是 **提 occupancy**（需把 168 regs 砍到 ≤128、
+72.7KB smem 砍到 ≤58KB 才能 4 CTA/SM）或 **减少 mma 依赖 stall**（softmax/fold 与 mma 的重叠）。
+`red` 减半的收益只在 fp16/bf16（其 `red` 占 L2 73%、且 2 CTA/SM→1 CTA/SM 换得回来）成立。
+
+### 27.7 复现
+
+```bash
+# 两文件：默认 mma；--wg2 切跨 warpgroup 版（--ksplit2=1..16 可扫）
+ARCH=sm_90 scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --wg2
+# 单文件（device 由 sync_onefile_device.py 同步，逐字一致）
+ARCH=sm_90 scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8 --wg2
+# ncu：red 扇区/stall 定向指标
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu \
+  --metrics lts__t_sectors_op_red.sum,lts__t_sectors_op_read.sum,smsp__average_warps_issue_stalled_wait_per_issue_active.ratio \
+  --kernel-name regex:fa_bwd_fp8_wg2 --launch-count 1 \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --wg2 --ksplit2=8
+```
+
+原始输出：`src/fp8/o19_wg2_ab_sweep.out.txt`（同 session A/B ×4 shape + 数值）、
+`src/fp8/o19_ncu_wg2_s4096.out.txt`（wg2 `--set full`）、
+`src/fp8/o19_ncu_wg2_red_s4096.out.txt` / `src/fp8/o19_ncu_mma_red_s4096.out.txt`（red 扇区 + stall 对照）。

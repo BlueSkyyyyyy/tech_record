@@ -1585,6 +1585,33 @@
     `src/fp8/fa_bwd_fp8_o19_tebench.out.txt`、`src/fp8/fa_bwd_fp8_o19_fa3_te_baseline_fp16.out.txt`；
     详见 `docs/03` §26。
 
+- 2026-09-24（第五十九轮）：**O19 完成（fp8 跨 warpgroup 归约，BM=128、2 wg、256 线程）——负结果 + 机制判决**。
+  - 动机：O7e-3（§26）把 fp8 main 第一墙定位为 **mma 依赖延迟（`wait`+`short_scoreboard`）+ 3 CTA/SM**，
+    候选杠杆列为「降 L2 的 dK/dV red（49.8%）」或「提 occupancy」。fp16/bf16 的 O17 已证明跨 wg 归约能
+    把 red 精确砍半、main 1.5×，故把同一机制移植到 fp8 做**判决**。
+  - 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：新增
+    `fa_bwd_fp8_wg2_kernel<HD,128,32>`（`__launch_bounds__(256,1)`，256 线程 = 2 wg）。phase A 每 wg 算
+    自己 64 行 Q 的 S/dP（几何与 BM=64 版同构）；fold 后 GEMM3/4/5 的重叠维**整块 128 行**从 smem 读，
+    每个输出元素在本 CTA 内只被一个 warp `red` 一次 ⇒ **跨 CTA red 减半**；dQ 仍走 REGDQ。host 加
+    `--wg2`/`--ksplit2=` 与 `[O19 A/B]`。smem **131.33KB → 1 CTA/SM**、regs 217、无 O3 预取（`kv_load_pair_nt`）。
+  - **数值**：与 mma 版同为 fp8 噪声（S4096 vs ref dq/dk/dv 2.635/2.767/3.313e-1；dq 的
+    `max_abs(wg2-vs-mma)=1.2e-7`，dk/dv 0.04–0.12 仅原子归约次序+贡献 CTA 数不同）。单/两文件逐位一致。
+  - **性能（同 session A/B，main-only，ms）**：S4096 mma 2.2662 vs **wg2 2.9014（0.781×）**、
+    S1024H32 0.4096→0.5661（0.724×）、S512 0.0761→0.1130（0.673×）、GQA kv4 0.3869→0.5254（0.736×）；
+    `ksplit2` sweep 最好 2.886ms，**全线更慢**。
+  - **ncu（main, S4096，同 session）**：`lts__t_sectors_op_red` **108.48M→64.29M（0.593×）**、
+    `read` 32.19M→17.29M（0.537×）、**L2 49.91%→22.61%**（L2 那一半确实被打掉），**但** achieved occ
+    18.09%→**12.49%（8 vs 12 warp/SM）**、Compute 42.34→34.13%、issue 43→34%、No Eligible 54→64%、
+    Duration 2.28→**2.92ms**；stall wait/short/long 1.56/1.50/0.77→1.27/1.21/0.40。
+  - **结论（判决 O7e-3 的开放问题）**：**fp8 main 的墙不是 L2 red，而是「mma 依赖延迟 + occupancy」**——
+    把 L2 打掉一半也补不回 1 CTA/SM 的并行度损失。fp8 右侧**不应再走「减 red / 放大 BM」**，真正杠杆是
+    **提 occupancy**（168 regs→≤128、72.7KB smem→≤58KB 才 4 CTA/SM）或**减 mma 依赖 stall**（softmax/fold
+    与 mma 的重叠）。`red` 减半只在 fp16/bf16（red 占 L2 73%、且 2→1 CTA/SM 换得回来）成立。
+  - 原始输出 `src/fp8/o19_wg2_ab_sweep.out.txt`（同 session A/B ×4 shape + 数值）、
+    `src/fp8/o19_ncu_wg2_s4096.out.txt`（wg2 `--set full`）、
+    `src/fp8/o19_ncu_wg2_red_s4096.out.txt` / `src/fp8/o19_ncu_mma_red_s4096.out.txt`（red/stall 对照）；
+    详见 `docs/03` §27、`docs/04` §2.3。
+
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -1764,6 +1791,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 故 fp8 右侧的下一优先级应改为「**降 L2 的 dK/dV `red`（跨 CTA，49.8%）**」或
 > 「**提 occupancy（须先砍 168 regs / 72.7KB smem）**」，而非继续抠 smem 冲突；
 > `docs/03` §26。
+> **O19 已完成（第五十九轮）对这两条做了判决——负结果**：fp8 跨 wg 归约版（BM=128、2 wg、256 线程）
+> 把 dK/dV 的 `red` 砍到 **0.593×**、`read` 0.537×、**L2 49.9%→22.6%**，但代价是 **3→1 CTA/SM**
+> （8 vs 12 warp/SM），同 session main **0.67–0.78×**（S4096 2.27→2.90ms）。⇒ **fp8 main 的墙不是
+> L2 red，而是「mma 依赖延迟 + occupancy」**；**fp8 右侧不要再走「减 red / 放大 BM」**，下一杠杆是
+> **提 occupancy（168 regs→≤128、72.7KB→≤58KB 才 4 CTA/SM）** 或 **减 mma 依赖 stall**。
+> `red` 减半只对 fp16/bf16（red 占 L2 73%、且 2→1 CTA/SM 换得回来）成立。详见 `docs/03` §27。
 > 1. **O5 收尾**：fp16/bf16 反向用 `mma.m16n8k16`+`ldmatrix` 张量核后端。
 >    进度：fp16 主 kernel **2.28→0.19 ms（512）/ 67.6→4.55 ms（4096），11.8–14.9×**；
 >    **bf16 主 kernel 1.88→0.190 ms（512）/ 42.2→4.51 ms（4096），9.4–9.9×**（第二十七轮，单/两文件、
