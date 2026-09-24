@@ -142,6 +142,13 @@
 
 ## 阻塞
 
+- **fp16/bf16 main 的「放大 BM 到 256」被寄存器文件卡死（O17b，第五十四轮）。**
+  512 线程 @1 CTA/SM 时每线程寄存器上限 = `65536/512 = 128`，而本算法必须持有
+  dQ 寄存器累加器 `dqacc[2][8][4]=64` + GEMM1/2 两条 wgmma 累加器（各 32，wait0 后同时读）
+  = 128，必然 spill；spill 的 local 流量（uncoalesced、占 L2 ~48%）比省下的 red 更贵。
+  实测 red 精确减半（51.9M→26.7M）但 main S4096 反而 0.83×。**除非先把 dQ 累加器
+  「搬出寄存器」或把 Q/dO+P/dS 的驻留量压下来，否则 BM>128 的 wgmma 反向在本卡不可行。**
+  详见 `docs/01` §14k、原始输出 `src/fp16/fa_bwd_fp16_o17b_sweep.out.txt`。
 - **fp8 GEMM3/4/5 的 Hopper `wgmma`（O9c-2b，MN-major 描述符转置读）——硬件层面不成立。**
   查证 CUTLASS `include/cute/arch/mma_sm90_gmma.hpp`：**所有 fp8 wgmma 变体只有 `_SS_TN`
   （A/B 均 K-major），没有 `.trans_a/.trans_b` 立即数**（asm 尾部是 `p, scale_D, scaleA, scaleB`，
@@ -1454,6 +1461,29 @@
      `..._o17_ncu_{wg2,o9b}_s4096.out.txt`、`src/bf16/fa_bwd_bf16_o17_fa3_te_baseline.out.txt`；
      文档 `docs/01b` §6s、`docs/04` §2.2/§3。
 
+- 2026-09-23（第五十四轮）：**O17b 尝试完成（BM=256 / 4 warpgroups）—— 负结果 + 寄存器墙**。
+   - 动机：O17 的 red 仍占 L2 ~72.6%（O17 ncu），BM 再翻倍应让 red 再砍半。
+     新增 `fa_bwd_fp16_wgmma4_kernel<HD,SEQ>`（单/两文件，`#ifdef FA_WGMMA`，仅 HD=128，
+     512 线程 = 4 wg）；host `--wg4`/`--wg4seq` + `[O17b A/B]`，默认路径不变。
+   - **资源账（先算后做，本项关键结论）**：512 线程 @1 CTA/SM ⇒ `65536/512 = **128 regs/线程**`；
+     而 dQ 寄存器累加器（`dqacc[2][8][4]=64`）+ GEMM1/2 两条 wgmma 累加器（各 32，wait0 后都在用）
+     已 = 128，必然 spill。smem：Q64+dO64+K16+V16+P32+dS32 = **224KB**（K/V 只能单缓冲）。
+   - **机制被证实**：ncu `lts__t_sectors_op_red` **51.90M→26.74M（0.515×，精确减半）**。
+     但 **`write` 扇区 1.57M→14.5–34M**（ptxas 报 128 regs + 溢出；ncu：local 占 L2 ~48%，
+     每次 spill 只用 1/32 B/sector），read 也 18.0M→28.7–35.1M。
+   - **性能（同 session A/B，main-only，ms）**：S512 0.0522→0.0958（0.55×）、GQA kv4 S1024
+     0.1779→0.1919（0.93×）、MQA kv1 0.2869→0.3429（0.84×）、S4096 0.9946→1.1956（0.83×）；
+     SEQ 版（串行 GEMM1/2 + 读回 half P）消了部分静态 spill、S4096 回到 0.95×，但**读回 half P
+     使 dS 多一层 fp16 舍入（dk 差 2.6e-2～7.3e-2）⇒ 不能作正确路径**。ovlp 版数值与 O17 在
+     fp16 噪声内（dk/dv 6–9e-5，仅 atomic 次序）。
+   - **结论**：BM=256 在本卡上被**寄存器文件**卡死（不是 smem）；「放大 BM」这条路走不通。
+     ncu 同时把 O17 与 O17b 同 session 对照（Duration 0.997 vs 1.20ms、L1TEX 48.8 vs 51.8%、
+     L2 54.7 vs 40.7%、regs 200 vs 128、occ 12.4 vs 24.9%、Waves 3.88 vs 1.94）。
+   - 原始输出 `src/fp16/fa_bwd_fp16_o17b_sweep.out.txt`、
+     `src/fp16/fa_bwd_fp16_main_o17_ncu_s4096_samesession.out.txt`、
+     `src/fp16/fa_bwd_fp16_main_o17b_ncu_s4096.out.txt`、
+     `src/fp16/fa_bwd_fp16_main_o17_o17b_ncu_red_s4096.out.txt`；文档 `docs/01` §14k。
+
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -1601,9 +1631,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 一致；ncu 与 fp16 逐项一致（`red` 102.2M→51.9M=0.508×、`read` 0.50×、L2 71.6%→54.6%、
 > Duration 1.48→1.00ms）；main S4096 **1.516×（139.9 TF）**、GQA/MQA 1.50–1.53×、S512 1.11×，
 > 端到端 S4096 **1.4309ms（96.05 TF）、为 FA3 的 4.45×**。详见 `docs/01b` §6s、`docs/04` §2.2/§3。
-> **下一步（O17b）**：BM=256 / 4 warpgroups 再砍半（需先做 smem/寄存器账：Q/dO 按 wg 只存自己
-> 64 行或 TMA 直供、P/dS 可能需 8-bit 存）；或 fp8 侧的同构跨 wg 归约（fp8 main 的 L2 red 亦是墙）。
-> 详见 `docs/01` §14j、`docs/01b` §6s、`docs/04` §2.1/§2.2/§3。
+> **O17b 已做（第五十四轮）—— 负结果**：BM=256 / 4 warpgroups 把 red 精确再砍半
+> （51.90M→26.74M），但 **512 线程把每线程寄存器上限压到 128**，dQ 累加器（64）+ 两条 wgmma
+> 累加器（64）就吃满、必然 spill；local 流量占 L2 ~48%，净 Duration 反而 +21%（S4096）。
+> ⇒ **「放大 BM」在本卡走不通**，寄存器文件是硬墙（不是 smem）。详见 `docs/01` §14k。
+> **下一步（按回报）**：① **O7b**——把 dK/dV 的跨 CTA `red` 换成「CTA 局部累加 + 非原子写 +
+> 二次归约」（消 L2 原子、顺带确定性反向，当前第一优先级）；② **fp8 侧同构跨 wg 归约**
+> （fp8 是 1 字节 operand、4wg 寄存器压力小一档）；③ O17 的 `BN=128` 微优化。
+> 详见 `docs/01` §14j/§14k、`docs/01b` §6s、`docs/04` §2.1/§2.2/§3。
 > 1. **O5 收尾**：fp16/bf16 反向用 `mma.m16n8k16`+`ldmatrix` 张量核后端。
 >    进度：fp16 主 kernel **2.28→0.19 ms（512）/ 67.6→4.55 ms（4096），11.8–14.9×**；
 >    **bf16 主 kernel 1.88→0.190 ms（512）/ 42.2→4.51 ms（4096），9.4–9.9×**（第二十七轮，单/两文件、

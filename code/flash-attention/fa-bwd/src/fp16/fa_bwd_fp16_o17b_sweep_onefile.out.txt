@@ -1,0 +1,16 @@
+===== onefile b1_s512_h16_d128_causal_fp16 =====
+[timing] total(3 kernels) 0.1126 ms  19.08 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0415 ms | main 0.0574 ms | convert 0.0137 ms
+[O17 A/B] main mma(64,64,1) 0.0574 ms | O9b wgmma 0.0591 (0.971x) | O17 wgmma2(BM128) 0.0516 (1.113x) TF 41.6
+[O17b A/B] main O17(BM128) 0.0516 ms | O17b wgmma4(BM256,ovlp) 0.0951 ms (0.543x) | wgmma4(BM256,seq) 0.0841 ms (0.613x) TF 25.5
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/3.81e-05/6.48e-05 | wg2-vs-O9b dq/dk/dv=0.00e+00/3.81e-05/6.10e-05
+[O17b A/B] max|diff| wg4-vs-wg2 dq/dk/dv=0.00e+00/2.67e-05/6.87e-05 | wg4-vs-mma dq/dk/dv=0.00e+00/4.39e-05/8.39e-05
+[O17b A/B] max|diff| wg4seq-vs-wg4 dq/dk/dv=2.14e-03/2.58e-02/1.14e-05 | wg4seq-vs-wg2 dq/dk/dv=2.14e-03/2.57e-02/6.87e-05
+===== onefile b1_s4096_h16_d128_causal_fp16 =====
+[timing] total(3 kernels) 1.9554 ms  70.29 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3424 ms | main 1.5301 ms | convert 0.0829 ms
+[O17 A/B] main mma(64,64,2) 1.5347 ms | O9b wgmma 1.5244 (1.007x) | O17 wgmma2(BM128) 0.9827 (1.562x) TF 139.9
+[O17b A/B] main O17(BM128) 0.9827 ms | O17b wgmma4(BM256,ovlp) 1.1781 ms (0.834x) | wgmma4(BM256,seq) 1.0409 ms (0.944x) TF 132.0
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/8.39e-05/1.22e-04 | wg2-vs-O9b dq/dk/dv=0.00e+00/8.39e-05/1.22e-04
+[O17b A/B] max|diff| wg4-vs-wg2 dq/dk/dv=0.00e+00/5.53e-05/8.77e-05 | wg4-vs-mma dq/dk/dv=0.00e+00/6.10e-05/1.14e-04
+[O17b A/B] max|diff| wg4seq-vs-wg4 dq/dk/dv=2.01e-03/2.91e-02/1.53e-05 | wg4seq-vs-wg2 dq/dk/dv=2.01e-03/2.91e-02/8.77e-05
