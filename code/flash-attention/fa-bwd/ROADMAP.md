@@ -1887,6 +1887,37 @@
       `src/fp8/o28_main_{s4096,mla_s1024h2}_full.out.txt`、`o28_te_fp8_bench.out.txt`、
       `o28_fa3_te_baseline_fp16.out.txt`；文档 `docs/03` §33、`docs/04` §2.3。
 
+- 2026-09-24（第七十轮）：**O29 完成（fp8 自动 split-K 重新标定，端到端 1.01–1.32×；主 kernel
+  最多 1.20×）+ GEMM3/4 指令级交错判决（负结果）**。
+    - 动机：`ksplit` 自动档一直是 **O2b（第二十二轮）** 的固定 `TARGET=(D==128)?4096:132`；
+      但 O2b 之后主 kernel 数据通路被改过多次（O3/O4b/O9c-2/O20/O22/O27/O28），最优点已漂移：
+      d128 在 `base_grid` 小时**过切**（S1024 base=512，`use_regdq` 因此被关、dQ 逐 tile red 更多），
+      S=4096 **欠切**，MLA **严重欠切**。
+    - **改动**（仅 host 自动档，单/两文件 host 同步；device 代码与数学口径不变，只改 fp32 加法次序）：
+      `D==128 → S>=2048 ? 8192 : max(2048, 4*base_grid)`；`D==512 → S/2`。`--ksplit=N` 仍可强制。
+    - **sweep（10 个 fp8 case，main-only，event）**：最优 k 与新 auto 一致/紧邻。main：
+      **S4096 1.7579→1.7370（1.012×）**、**S1024H32 0.3404→0.2988（1.139×）**、
+      **kv4 0.3286→0.2742（1.198×）**、**MLA S512H4 0.1402→0.1215（1.154×）**、
+      **MLA S1024H2 0.2652→0.2004（1.324×）**；kv8/MQA/h64kv4/S512/S256H2 持平。
+      端到端 total 同向：S4096 2.1770→**2.1481ms**、S1024H32 0.4895→**0.4464**、
+      GQA kv4 0.4566→**0.4056**、MLA S1024H2 0.4653→**0.3900ms**，**全 shape 不回退**。
+    - **ncu（main，S1024H32，同 binary k=8 vs k=4）**：Duration 332.4→**304.9µs**、
+      `lts__t_sectors_op_red` **26.74M→16.42M（0.61×）**、**L2 83.09%→57.61%**、
+      `short_scoreboard` 2.40→**1.50** ⇒ 收益来自「少切 + 自动开 `use_regdq`」把 dQ 原子扇区
+      降到 0.61×、L2 压力解除。**数值 vs ref 与历史逐位同级**（S512 2.426/2.972/3.733e-1；
+      S4096 2.635/2.644/3.216e-1；S1024H32 2.399/4.177/3.535e-1；kv4 2.517/5.339/7.173e-1；
+      kv8 2.869/5.367/7.032e-1；h64kv4 2.761/8.427/1.233；MQA 4.101e-1/1.572/2.126；
+      MLA S256H2 2.356/2.290/3.441e-1；S512H4 2.415/2.992/4.481e-1；S1024H2 2.232/3.337/3.602e-1），
+      单/两文件逐指标一致。
+    - **同轮负结果（`FA_ILV34`）**：先连发 GEMM3(dV)/GEMM4(dK) 两条独立 mma 再 epilogue
+      （对齐 O22 `FA_ILV` 思路、数值逐位不变），但两个 `MTM34×8×4` 累加器同时存活使 ptxas 在
+      170-reg 预算下**溢出增加** ⇒ S4096 0.95×、S1024H32 0.96×。**再次证明「在 3 CTA/SM 的寄存器
+      预算内加 ILP」会被 spill 吃掉**（与 O7c/O17b 一致）；开关保留默认关。
+    - 原始输出 `src/fp8/fa_bwd_fp8_o29_ksplit_sweep.out.txt`、
+      `src/fp8/fa_bwd_fp8_o29_ncu_s1024h32.out.txt`、`o29_te_fp8_bench.out.txt`、
+      `o29_fa3_te_baseline_fp16.out.txt`、`fa_bwd_fp8_o29_ilv34_s4096.out.txt`；
+      文档 `docs/03` §34、`docs/04` §2.3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -2082,9 +2113,17 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > **vs fp32 ref 的 dq/dk/dv 与历史逐位一致**（9 shape）；ncu Duration 2.06→1.78ms、
 > executed inst 852.6M→**735.2M（−13.7%）**。为 TE FP8（同 session 0.5904ms/465.6TF）的
 > **3.69×**（O26 4.17×）。详见 `docs/03` §32、`docs/04` §2.3/§3。
+> **O29 已完成（第七十轮）**：fp8 自动 split-K **重新标定**——`ksplit` 目标由早期固定的
+> `(D==128)?4096:132` 改为 `D==128 → S>=2048?8192:max(2048,4*base_grid)`、`D==512 → S/2`；
+> 主 kernel **S4096 1.012× / S1024H32 1.139× / GQA kv4 1.198× / MLA S512H4 1.154× /
+> MLA S1024H2 1.324×**，端到端全 shape 不回退。ncu（S1024H32 k=8→4）：`red` 扇区
+> **26.74M→16.42M（0.61×）**、**L2 83.1%→57.6%**、Duration 332→305µs ⇒ 收益来自「少切 +
+> 自动开 `use_regdq`」。同轮 `FA_ILV34`（GEMM3/4 交错）**负结果**（spill，0.95–0.96×）。
+> 详见 `docs/03` §34、`docs/04` §2.3。
 > **下一步（按回报）**：① **fp8 侧「提 occupancy」**（O19/O21/O22 一致：墙 = mma 依赖延迟 +
-> 3 CTA/SM，须把 168 regs→≤128、72.7KB smem→≤58KB 才到 4 CTA/SM）——这是 fp8（最重点）唯一
-> 还没被证伪的杠杆；② **fp8/主 kernel 跨-tile 软流水**（K/V 单缓冲被 dS3/Ap 复用，需先腾 smem）；
+> 3 CTA/SM；**新查证：Qp/dOp 转置副本 17.4KB + Ps/Ss 18.9KB 使 WGMMA 版 smem 已达 68.6KB，
+> 4×68.6=274KB > 232KB 上限 ⇒ 4 CTA/SM 在本卡 smem 与 168-reg 双重不可达**，此杠杆基本封死）；
+> ② **fp8/主 kernel 跨-tile 软流水**（K/V 单缓冲被 dS3/Ap 复用，需先腾 smem）；
 > ③ TMA 化 Q/K/V/dO（O15a 通路已就绪，需把 HD=128 的 K-major tile 拆成 2×K=64 chunk）。
 > **④（O27 新增，O28 已作废）fp16/bf16 的 fold 同理含逐元素精确除法**——**误记**：逐字核对
 > `src/fp16,bf16/fa_bwd_*_kernels.cuh` 后确认 fp16/bf16 **没有 rowwise scale fold**（无量化），

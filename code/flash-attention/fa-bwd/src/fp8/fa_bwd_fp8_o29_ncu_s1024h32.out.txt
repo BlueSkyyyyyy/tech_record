@@ -1,0 +1,24 @@
+########## ksplit=8 ##########
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 10 passes
+  void fa_bwd_fp8_mma_kernel<128, 64, 32, 0, 1, 1, 1, 1>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (128, 32, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                                             us       332.38
+    lts__t_sectors_op_read.sum                                                     sector      5571816
+    lts__t_sectors_op_red.sum                                                      sector     26738688
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        83.09
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        32.50
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        18.18
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.71
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         2.40
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.60
+########## ksplit=4 ##########
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 10 passes
+  void fa_bwd_fp8_mma_kernel<128, 64, 32, 1, 1, 1, 1, 1>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (64, 32, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                                             us       304.86
+    lts__t_sectors_op_read.sum                                                     sector      4973521
+    lts__t_sectors_op_red.sum                                                      sector     16416768
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        57.61
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        34.26
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        17.68
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.69
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         1.50
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.55
