@@ -2332,6 +2332,7 @@ smem **131.33KB → 1 CTA/SM**（256 线程 = 8 warp/SM）；regs 217；无 O3 �
 | GQA h32kv4 S=1024 | 0.3869 | 0.5254 | 0.736× |
 
 **wg2 在所有 shape 都更慢（0.67–0.78×）**；调 `ksplit2`（1/2/4/8/16）最好也只有 2.886ms（mma 2.27ms）。
+按 `4·B·S²·H·D`：S=4096 mma main 60.6 TF（fp8 峰值 1978.8 的 3.1%）vs wg2 **47.4 TF（2.4%）**。
 
 ### 27.5 ncu（main, S=4096，同 session，`--set full` / 定向 metrics）
 
