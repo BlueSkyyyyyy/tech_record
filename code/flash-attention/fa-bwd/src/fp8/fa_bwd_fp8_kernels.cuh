@@ -625,7 +625,7 @@ __device__ __forceinline__ void mma_block_bt(const unsigned char* As, int asld,
 template <int NPU, int HD>
 __device__ __forceinline__ void kv_prefetch_pair(const unsigned char* __restrict__ k8,
                                                  const unsigned char* __restrict__ v8,
-                                                 int j0, int S, int Hkv, int hkv, int b,
+                                                 int j0, int S, int Hkv, int hkv, int qbase,
                                                  int tid, uint32_t* pk0, uint32_t* pk1,
                                                  uint32_t* pv0, uint32_t* pv1) {
   const int nd4 = HD / 4;
@@ -636,12 +636,12 @@ __device__ __forceinline__ void kv_prefetch_pair(const unsigned char* __restrict
     int jr = j0 + rp * 2;
     uint32_t k0 = 0, k1 = 0, v0 = 0, v1 = 0;
     if (jr < S) {  // 越界写 0 字节（等价 cvt_e4m3(0)=0x00）
-      size_t i0 = (((size_t)(b * S + jr)) * Hkv + hkv) * HD + dq;
+      size_t i0 = (((size_t)(qbase + jr)) * Hkv + hkv) * HD + dq;
       k0 = *reinterpret_cast<const uint32_t*>(k8 + i0);
       v0 = *reinterpret_cast<const uint32_t*>(v8 + i0);
     }
     if (jr + 1 < S) {
-      size_t i1 = (((size_t)(b * S + jr + 1)) * Hkv + hkv) * HD + dq;
+      size_t i1 = (((size_t)(qbase + jr + 1)) * Hkv + hkv) * HD + dq;
       k1 = *reinterpret_cast<const uint32_t*>(k8 + i1);
       v1 = *reinterpret_cast<const uint32_t*>(v8 + i1);
     }
@@ -685,7 +685,7 @@ __device__ __forceinline__ void kv_commit_pair(unsigned char* Ks, unsigned char*
 template <int HD, int BN, bool SW = false>
 __device__ __forceinline__ void kv_load_pair(const unsigned char* __restrict__ k8,
                                              const unsigned char* __restrict__ v8,
-                                             int j0, int S, int Hkv, int hkv, int b, int tid,
+                                             int j0, int S, int Hkv, int hkv, int qbase, int tid,
                                              unsigned char* Ks, unsigned char* Vs,
                                              uint16_t* Kp, int asld, int psld) {
   const int nd4 = HD / 4;
@@ -695,12 +695,12 @@ __device__ __forceinline__ void kv_load_pair(const unsigned char* __restrict__ k
     int jr = j0 + rp * 2;
     uint32_t k0 = 0, k1 = 0, v0 = 0, v1 = 0;
     if (jr < S) {
-      size_t i0 = (((size_t)(b * S + jr)) * Hkv + hkv) * HD + dq;
+      size_t i0 = (((size_t)(qbase + jr)) * Hkv + hkv) * HD + dq;
       k0 = *reinterpret_cast<const uint32_t*>(k8 + i0);
       v0 = *reinterpret_cast<const uint32_t*>(v8 + i0);
     }
     if (jr + 1 < S) {
-      size_t i1 = (((size_t)(b * S + jr + 1)) * Hkv + hkv) * HD + dq;
+      size_t i1 = (((size_t)(qbase + jr + 1)) * Hkv + hkv) * HD + dq;
       k1 = *reinterpret_cast<const uint32_t*>(k8 + i1);
       v1 = *reinterpret_cast<const uint32_t*>(v8 + i1);
     }
@@ -1117,7 +1117,8 @@ template <int HD, int PIPE>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                          const unsigned char* __restrict__ k8, const float* __restrict__ ks,
-                         float* __restrict__ lse, int S, int H, int Hkv, float scale) {
+                         float* __restrict__ lse, int S, int H, int Hkv, float scale,
+                         const int* __restrict__ cu_seqlens = nullptr) {
   static_assert(HD == 128, "wgmma LSE 目前只做 HD=128");
   constexpr int HDV = HD / 16;                         // 每行 16B（16 个 fp8）unit 数
   constexpr int TILE = (LBM / 8) * (HD / 128) * 1024;  // 单个 SW128 tile 字节数（HD=128→8KB）
@@ -1130,8 +1131,12 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
   float* qs_s = reinterpret_cast<float*>(Ks + (PIPE ? 2 : 1) * TILE);
   float* ks_s = qs_s + LBM;  // PIPE=1：2*LBN
 
-  const int nblk = (S + LBM - 1) / LBM;
   const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // VARLEN：cu_seqlens 给出每个序列在 packed [T,H,D] 里的 token 基址与长度。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
+  const int nblk = (len + LBM - 1) / LBM;
+  if (pair >= (nblk + 1) / 2) return;
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -1143,8 +1148,8 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
       const int row = u / HDV, c16 = u % HDV;
       const int qi = m0 + row;
       char* d = Qs + sw128_off_fp8(row, c16 * 16, HD);
-      if (qi < S) {
-        const unsigned char* s = q8 + (((size_t)(b * S + qi)) * H + h) * HD + c16 * 16;
+      if (qi < len) {
+        const unsigned char* s = q8 + (((size_t)(qbase + qi)) * H + h) * HD + c16 * 16;
         if constexpr (PIPE) cp_async16(d, s);
         else {
 #pragma unroll
@@ -1155,7 +1160,7 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
       }
     }
     if (tid < LBM)
-      qs_s[tid] = (m0 + tid < S) ? qs[((size_t)(b * S + m0 + tid)) * H + h] : 1.f;
+      qs_s[tid] = (m0 + tid < len) ? qs[((size_t)(qbase + m0 + tid)) * H + h] : 1.f;
     if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
   };
   // 发一个 K tile（j0 起 LBN 行）到 SW128 tile Kd，并写本 tile 的 rowwise scale。
@@ -1165,8 +1170,8 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
       const int row = u / HDV, c16 = u % HDV;
       const int jg = j0 + row;
       char* d = Kd + sw128_off_fp8(row, c16 * 16, HD);
-      if (jg < S) {
-        const unsigned char* s = k8 + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c16 * 16;
+      if (jg < len) {
+        const unsigned char* s = k8 + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c16 * 16;
         if constexpr (PIPE) cp_async16(d, s);
         else {
 #pragma unroll
@@ -1177,7 +1182,7 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
       }
     }
     if (tid < LBN)
-      KdS[tid] = (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * Hkv + hkv] : 1.f;
+      KdS[tid] = (j0 + tid < len) ? ks[((size_t)(qbase + j0 + tid)) * Hkv + hkv] : 1.f;
     if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
   };
 
@@ -1188,7 +1193,7 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
     const int m0 = mblk * LBM;
     issue_q(m0);
 
-    const int ncols = min(S, m0 + LBM);
+    const int ncols = min(len, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
     if constexpr (PIPE) {
       if (ntiles > 0) issue_k(Ks, ks_s, 0);
@@ -1221,7 +1226,7 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
           int c = j * 8 + c2 + (q & 1);
           int qi = m0 + r, jg = j0 + c;
           float sv = -INFINITY;
-          if (qi < S && jg < S && jg <= qi) sv = d[j * 4 + q] * scale * qs_s[r] * KtS[c];
+          if (qi < len && jg < len && jg <= qi) sv = d[j * 4 + q] * scale * qs_s[r] * KtS[c];
           if (sv != -INFINITY) {
             float mn = fmaxf(mrow[s], sv);
             lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
@@ -1247,7 +1252,7 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+        if (qi < len) lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
       }
     }
     // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
@@ -1566,7 +1571,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                       const float* __restrict__ lse,
                       float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                       float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                      int causal, int ksplit,
+                      int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
                       const CUtensorMap* qmap = nullptr, const CUtensorMap* dmap = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int ASLD = Cfg::ASLD;
@@ -1639,14 +1644,18 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   //      大 S 时用来削尾波（partial wave）。各部分数学上仍是同一个和，只是 fp 加法次序略变。----
   const int mblk = blockIdx.x / ksplit, part = blockIdx.x % ksplit;
   const int h = blockIdx.y, b = blockIdx.z;
+  // VARLEN：cu_seqlens 给出每个序列在 packed [T,H,D] 的 token 基址与长度。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
   // P5-3：GQA/MQA——Q 头 h 对应 KV 头 hkv；Q/dO/dQ 用 H，K/V/dK/dV 用 Hkv。
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int wr = wid / WN, wc = wid % WN;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * BM;
+  if (m0 >= len) return;  // VARLEN：超出本序列长度的 m 块直接退出
 
-  const int ncols = causal ? min(S, m0 + BM) : S;
+  const int ncols = causal ? min(len, m0 + BM) : len;
   const int ntiles = (ncols + BN - 1) / BN;
   const int nt_begin = part * ntiles / ksplit;
   const int nt_end = (part + 1) * ntiles / ksplit;
@@ -1668,8 +1677,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     }
     if (tid < BM) {
       int qi = m0 + tid;
-      qs_s[tid] = (qi < S) ? qs[((size_t)(b * S + qi)) * H + h] : 1.f;
-      dos_s[tid] = (qi < S) ? dos[((size_t)(b * S + qi)) * H + h] : 1.f;
+      qs_s[tid] = (qi < len) ? qs[((size_t)(qbase + qi)) * H + h] : 1.f;
+      dos_s[tid] = (qi < len) ? dos[((size_t)(qbase + qi)) * H + h] : 1.f;
     }
     mbar_wait(qbars + 0, 0);
     mbar_wait(qbars + 1, 0);
@@ -1695,13 +1704,13 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       int rp = u / nd4, dq = (u % nd4) * 4;
       int qa = m0 + rp * 2, qb = m0 + rp * 2 + 1;
       uint32_t q0 = 0, q1 = 0, o0 = 0, o1 = 0;
-      if (qa < S) {
-        size_t idx = (((size_t)(b * S + qa)) * H + h) * HD + dq;
+      if (qa < len) {
+        size_t idx = (((size_t)(qbase + qa)) * H + h) * HD + dq;
         q0 = *reinterpret_cast<const uint32_t*>(q8 + idx);
         o0 = *reinterpret_cast<const uint32_t*>(do8 + idx);
       }
-      if (qb < S) {
-        size_t idx = (((size_t)(b * S + qb)) * H + h) * HD + dq;
+      if (qb < len) {
+        size_t idx = (((size_t)(qbase + qb)) * H + h) * HD + dq;
         q1 = *reinterpret_cast<const uint32_t*>(q8 + idx);
         o1 = *reinterpret_cast<const uint32_t*>(do8 + idx);
       }
@@ -1726,8 +1735,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   }
   if (tid < BM) {
     int qi = m0 + tid;
-    qs_s[tid] = (qi < S) ? qs[((size_t)(b * S + qi)) * H + h] : 1.f;
-    dos_s[tid] = (qi < S) ? dos[((size_t)(b * S + qi)) * H + h] : 1.f;
+    qs_s[tid] = (qi < len) ? qs[((size_t)(qbase + qi)) * H + h] : 1.f;
+    dos_s[tid] = (qi < len) ? dos[((size_t)(qbase + qi)) * H + h] : 1.f;
   }
   }
 
@@ -1736,17 +1745,17 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   //            Ks/Vs/Kp），故把原来 prologue 的两处 __syncthreads 合并为一处。----
   uint32_t pk0[NPU], pk1[NPU], pv0[NPU], pv1[NPU];
   if (kPrefetch) {
-    kv_prefetch_pair<NPU, HD>(k8, v8, nt_begin * BN, S, Hkv, hkv, b, tid, pk0, pk1, pv0,
+    kv_prefetch_pair<NPU, HD>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
                               pv1);
     kv_commit_pair<NPU, HD, WGMMA>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
   } else {
-    kv_load_pair<HD, BN, WGMMA>(k8, v8, nt_begin * BN, S, Hkv, hkv, b, tid, Ks, Vs, Kp, ASLD,
+    kv_load_pair<HD, BN, WGMMA>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, Ks, Vs, Kp, ASLD,
                          PSLD);
   }
   if (tid < BN) {
     int jg = nt_begin * BN + tid;
-    ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
-    vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
+    ks_s[tid] = (jg < len) ? ks[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
+    vs_s[tid] = (jg < len) ? vs[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
   }
   __syncthreads();
 
@@ -1763,8 +1772,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       for (int t = 0; t < 2; ++t) {
         const int r = wid * 16 + g + (t ? 8 : 0);
         const int qi = m0 + r;
-        const size_t idx = ((size_t)(b * S + qi)) * H + h;
-        const bool ok = qi < S;
+        const size_t idx = ((size_t)(qbase + qi)) * H + h;
+        const bool ok = qi < len;
         lse_r[t] = ok ? lse[idx] : 0.f;
         del_r[t] = ok ? delta[idx] : 0.f;
       }
@@ -1781,8 +1790,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
         for (int s = 0; s < 2; ++s) {
           const int r = wr * 32 + i * 16 + g + (s ? 8 : 0);
           const int qi = m0 + r;
-          const size_t idx = ((size_t)(b * S + qi)) * H + h;
-          const bool ok = qi < S;
+          const size_t idx = ((size_t)(qbase + qi)) * H + h;
+          const bool ok = qi < len;
           lse_r[i * 2 + s] = ok ? lse[idx] : 0.f;
           del_r[i * 2 + s] = ok ? delta[idx] : 0.f;
         }
@@ -1813,7 +1822,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     // ---- O3：预取下一 tile 的 K/V 到寄存器（延迟被本轮 5 个 GEMM 覆盖）----
     const int nnt = nt + 1;
     if (kPrefetch && nnt < nt_end)
-      kv_prefetch_pair<NPU, HD>(k8, v8, nnt * BN, S, Hkv, hkv, b, tid, pk0, pk1, pv0,
+      kv_prefetch_pair<NPU, HD>(k8, v8, nnt * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
                                 pv1);
 
     // ---- (1) S = scale·QKᵀ  →  P = exp(S − LSE)，存 fp32 ----
@@ -1838,11 +1847,11 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
           int c = j * 8 + c2 + (q & 1);
           int qi = m0 + r, jg = j0 + c;
           float p = 0.f;
-          if (qi < S && jg < S && !(causal && jg > qi)) {
+          if (qi < len && jg < len && !(causal && jg > qi)) {
             float sval = sacc[j * 4 + q] * scale * qs_s[r] * ks_s[c];
             float lv = 0.f;
             if constexpr (PREL) lv = lse_r[q >= 2 ? 1 : 0];
-            else lv = lse[((size_t)(b * S + qi)) * H + h];
+            else lv = lse[((size_t)(qbase + qi)) * H + h];
             p = fexp(sval - lv);
           }
           pval[j * 4 + q] = p;
@@ -1858,7 +1867,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
           float dpv = dpacc[j * 4 + q] * dos_s[r] * vs_s[c];
           float del = 0.f;
           if constexpr (PREL) del = del_r[q >= 2 ? 1 : 0];
-          else if (qi < S) del = delta[((size_t)(b * S + qi)) * H + h];
+          else if (qi < len) del = delta[((size_t)(qbase + qi)) * H + h];
           Ss[r * PSS + c] = pval[j * 4 + q] * (dpv - del);
         }
     } else
@@ -1893,11 +1902,11 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
               int c = c0 + j * 8 + c2 + (q & 1);
               int qi = m0 + r, jg = j0 + c;
               float p = 0.f;
-              if (qi < S && jg < S && !(causal && jg > qi)) {
+              if (qi < len && jg < len && !(causal && jg > qi)) {
                 float sval = acc[i][j][q] * scale * qs_s[r] * ks_s[c];
                 float lv = 0.f;
                 if constexpr (PREL) lv = lse_r[i * 2 + (q >= 2 ? 1 : 0)];
-                else lv = lse[((size_t)(b * S + qi)) * H + h];
+                else lv = lse[((size_t)(qbase + qi)) * H + h];
                 p = fexp(sval - lv);
               }
               Ps[r * PSS + c] = p;
@@ -1915,7 +1924,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
               float dpv = acc2[i][j][q] * dos_s[r] * vs_s[c];
               float del = 0.f;
               if constexpr (PREL) del = del_r[i * 2 + (q >= 2 ? 1 : 0)];
-              else if (qi < S) del = delta[((size_t)(b * S + qi)) * H + h];
+              else if (qi < len) del = delta[((size_t)(qbase + qi)) * H + h];
               Ss[r * PSS + c] = preg[i][j][q] * (dpv - del);
             }
       }
@@ -1939,11 +1948,11 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
             int c = c0 + j * 8 + c2 + (q & 1);
             int qi = m0 + r, jg = j0 + c;
             float p = 0.f;
-            if (qi < S && jg < S && !(causal && jg > qi)) {
+            if (qi < len && jg < len && !(causal && jg > qi)) {
               float sval = acc[i][j][q] * scale * qs_s[r] * ks_s[c];
               float lv = 0.f;
               if constexpr (PREL) lv = lse_r[i * 2 + (q >= 2 ? 1 : 0)];
-              else lv = lse[((size_t)(b * S + qi)) * H + h];
+              else lv = lse[((size_t)(qbase + qi)) * H + h];
               p = fexp(sval - lv);
             }
             Ps[r * PSS + c] = p;
@@ -1977,7 +1986,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
               float dpv = acc[i][j][q] * dos_s[r] * vs_s[c];
               float del = 0.f;
               if constexpr (PREL) del = del_r[i * 2 + (q >= 2 ? 1 : 0)];
-              else if (qi < S) del = delta[((size_t)(b * S + qi)) * H + h];
+              else if (qi < len) del = delta[((size_t)(qbase + qi)) * H + h];
 #if FA_FUSE_EPI
               // O20：用寄存器里的 P（本线程刚算的同一 (r,c)），不再读回 Ps。
               Ss[r * PSS + c] = preg[i][j][q] * (dpv - del);
@@ -2156,8 +2165,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
               int c = c0 + j * 8 + c2;
               int jg = j0 + r;
-              if (jg < S)
-                red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
+              if (jg < len)
+                red_add2(dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
                          acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r]);
             }
       };
@@ -2173,8 +2182,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
               int c = c0 + j * 8 + c2;
               int jg = j0 + r;
-              if (jg < S)
-                red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + d0 + c,
+              if (jg < len)
+                red_add2(dk_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
                          acc[i][j][q] * sds3[r] * scale,
                          acc[i][j][q + 1] * sds3[r] * scale);
             }
@@ -2230,8 +2239,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                 dqacc[i][j][q + 1] += acc[i][j][q + 1] * sds2[r] * scale;
               } else {
                 int qi = m0 + r;
-                if (qi < S)
-                  red_add2(dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + d0 + c,
+                if (qi < len)
+                  red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + d0 + c,
                            acc[i][j][q] * sds2[r] * scale,
                            acc[i][j][q + 1] * sds2[r] * scale);
               }
@@ -2244,13 +2253,13 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       if (kPrefetch) {
         kv_commit_pair<NPU, HD, WGMMA>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
       } else {
-        kv_load_pair<HD, BN, WGMMA>(k8, v8, (nt + 1) * BN, S, Hkv, hkv, b, tid, Ks, Vs, Kp, ASLD,
+        kv_load_pair<HD, BN, WGMMA>(k8, v8, (nt + 1) * BN, len, Hkv, hkv, qbase, tid, Ks, Vs, Kp, ASLD,
                              PSLD);
       }
       if (tid < BN) {
         int jg = (nt + 1) * BN + tid;
-        ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
-        vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
+        ks_s[tid] = (jg < len) ? ks[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
+        vs_s[tid] = (jg < len) ? vs[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
       }
       __syncthreads();
     }
@@ -2267,8 +2276,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
           int r = wr * 32 + i * 16 + g + (q >= 2 ? 8 : 0);
           int c = wc * 64 + j * 8 + c2;
           int qi = m0 + r;
-          if (qi < S)
-            red_add2(dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c, dqacc[i][j][q],
+          if (qi < len)
+            red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c, dqacc[i][j][q],
                      dqacc[i][j][q + 1]);
         }
   }
@@ -2286,10 +2295,10 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       const float* __restrict__ delta, const float* __restrict__ lse,
                       float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                       float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                      int causal, int ksplit) {
+                      int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit, nullptr, nullptr);
+      scale, causal, ksplit, cu_seqlens, nullptr, nullptr);
 }
 
 // O37：Q/dO 4D-TMA 版（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA 路径实例化）。
@@ -2304,10 +2313,10 @@ fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const float* __restrict__ delta, const float* __restrict__ lse,
                             float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                             float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                            int causal, int ksplit) {
+                            int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit, &qmap, &dmap);
+      scale, causal, ksplit, cu_seqlens, &qmap, &dmap);
 }
 
 // =============================================================================

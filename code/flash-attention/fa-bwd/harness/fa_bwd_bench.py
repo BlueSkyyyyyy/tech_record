@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -50,6 +51,19 @@ REQUESTED_SHAPES = [
     (1, 512, 4, 512, True, 4, 512),     # MLA head_dim=512
     (1, 1024, 2, 512, True, 2, 512),    # MLA head_dim=512
 ]
+
+
+# VARLEN（变长 / cu_seqlens）：内置生产形状（lengths, H, D, Hkv, Dv）。
+VARLEN_SHAPES = [
+    ([512, 1024, 2048, 256], 16, 128, 16, 128),   # 长度不齐的 MHA
+    ([1024, 1024, 1024, 1024], 16, 128, 16, 128), # 等长（对照定长）
+    ([128, 256, 512, 1024, 2048], 32, 128, 8, 128),  # GQA kv=8
+    ([2048, 512, 128, 96, 64, 32, 16, 8], 16, 128, 16, 128),  # 强倾斜
+]
+
+
+def varlen_slug(lengths, H, D, dtype):
+    return f"varlen_b{len(lengths)}_t{sum(lengths)}_h{H}_d{D}_causal_{dtype}"
 
 
 def norm_spec(B, S, H, D, causal, Hkv=None, Dv=None):
@@ -184,6 +198,64 @@ def te_bwd_fp8(q, k, v, do, causal=True):
             dq_(dqkv[1]).reshape(B, S, Hkv, D), dq_(dqkv[2]).reshape(B, S, Hkv, Dv))
 
 
+# ----------------------------- VARLEN 参考实现 -----------------------------
+def ref_attn_varlen(q, k, v, do, lengths, causal=True):
+    """packed [T,H,D] 的 fp32 autograd 参考：按序列切片，逐段跑 ref_attn 后拼接。"""
+    o, dq, dk, dv = [], [], [], []
+    off = 0
+    for L in lengths:
+        sl = slice(off, off + L)
+        # ref_attn 是 [B,S,H,D] 接口；单序列补 B=1 维，返回后再 squeeze。
+        oo, dqo, dko, dvo = ref_attn(q[sl].unsqueeze(0), k[sl].unsqueeze(0),
+                                     v[sl].unsqueeze(0), do[sl].unsqueeze(0), causal)
+        o.append(oo.squeeze(0)); dq.append(dqo.squeeze(0))
+        dk.append(dko.squeeze(0)); dv.append(dvo.squeeze(0))
+        off += L
+    return torch.cat(o, 0), torch.cat(dq, 0), torch.cat(dk, 0), torch.cat(dv, 0)
+
+
+def _cu(lengths):
+    cu = torch.zeros(len(lengths) + 1, dtype=torch.int32, device=DEV)
+    cu[1:] = torch.tensor(lengths, dtype=torch.int32, device=DEV).cumsum(0)
+    return cu
+
+
+def te_bwd_fp8_varlen(q, k, v, do, lengths, causal=True):
+    """TE FP8 变长反向（cu_seqlens），返回 dequant 后的 fp32 packed 结果。"""
+    import transformer_engine  # noqa: F401
+    import transformer_engine_torch as tex
+    from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+        FusedAttnBackend, fused_attn_bwd, fused_attn_fwd,
+    )
+    T, H, D = q.shape
+    Hkv, Dv = k.shape[1], v.shape[-1]
+    Smax = max(lengths)
+    nominal = torch.bfloat16
+    e4m3, e5m2 = tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2
+    cu = _cu(lengths)
+    qf = q.reshape(T, H, D).to(nominal).contiguous()
+    kf = k.reshape(T, Hkv, D).to(nominal).contiguous()
+    vf = v.reshape(T, Hkv, Dv).to(nominal).contiguous()
+    dof = do.reshape(T, H, Dv).to(nominal).contiguous()
+    qkv_q, s_q, o_q = _fp8_q(e4m3, tex), _fp8_q(e4m3, tex), _fp8_q(e4m3, tex)
+    do_q, dp_q, dqkv_q = _fp8_q(e5m2, tex), _fp8_q(e5m2, tex), _fp8_q(e5m2, tex)
+    q8, k8, v8, do8 = qkv_q(qf), qkv_q(kf), qkv_q(vf), do_q(dof)
+    backend = FusedAttnBackend["FP8"]
+    mask = "causal" if causal else "no_mask"
+    out, aux, *_ = fused_attn_fwd(
+        True, Smax, Smax, cu, cu, q8, k8, v8, nominal, backend, None,
+        s_quantizer=s_q, o_quantizer=o_q, attn_bias_type="no_bias",
+        attn_mask_type=mask, softmax_type="vanilla", qkv_layout="thd_thd_thd",
+        rng_gen=None)
+    dqkv = fused_attn_bwd(
+        Smax, Smax, cu, cu, q8, k8, v8, out, do8, nominal, do8._fp8_dtype, list(aux), backend,
+        qkv_layout="thd_thd_thd", s_quantizer=s_q, dp_quantizer=dp_q, dqkv_quantizer=dqkv_q,
+        attn_bias_type="no_bias", attn_mask_type=mask, softmax_type="vanilla")
+    def dq_(t):
+        return (t.dequantize() if hasattr(t, "dequantize") else t).float()
+    return (dq_(out), dq_(dqkv[0]), dq_(dqkv[1]), dq_(dqkv[2]))
+
+
 def maxdiff(a, b):
     return (a.float() - b.float()).abs().max().item()
 
@@ -245,6 +317,58 @@ def dump_case(sh, dtype_name):
     return slug
 
 
+# ----------------------------- VARLEN dump -----------------------------
+def dump_case_varlen(lengths, H, D, Hkv, Dv, dtype_name, causal=True):
+    dtype = DTYPES[dtype_name]
+    T = sum(lengths)
+    torch.manual_seed(1234 + T * 7 + H * 3 + D)
+    q = torch.randn(T, H, D, device=DEV, dtype=dtype)
+    k = torch.randn(T, Hkv, D, device=DEV, dtype=dtype)
+    v = torch.randn(T, Hkv, Dv, device=DEV, dtype=dtype)
+    do = torch.randn(T, H, Dv, device=DEV, dtype=dtype)
+
+    o_ref, dq_ref, dk_ref, dv_ref = ref_attn_varlen(
+        q.float(), k.float(), v.float(), do.float(), lengths, causal)
+    res = {"ref": (o_ref, dq_ref, dk_ref, dv_ref)}
+    # 注：TE 2.14 的 fused_attn FP8 变长路径在本容器会 segfault（无法 try/except 捕获），
+    # 故 dump 只存 fp32 ref；性能对标另见 bench（TE FP8 按 maxlen padding 的等价口径）。
+    if dtype_name == "fp8" and os.environ.get("FA_BWD_TE_VARLEN") == "1":
+        try:
+            res["te"] = te_bwd_fp8_varlen(q, k, v, do, lengths, causal)
+        except Exception as e:  # noqa
+            print(f"  [te] failed: {str(e)[:200]}")
+
+    slug = varlen_slug(lengths, H, D, dtype_name)
+    d = OUT_ROOT / slug
+    d.mkdir(parents=True, exist_ok=True)
+
+    def save(name, t):
+        np.save(d / f"{name}.npy", t.detach().float().cpu().numpy())
+
+    for name, t in (("q", q), ("k", k), ("v", v), ("do", do)):
+        save(name, t)
+    cu = np.concatenate([[0], np.cumsum(lengths)]).astype(np.float32)
+    np.save(d / "cu_seqlens.npy", cu)   # 用 fp32 保存，便于自测 host 直接 load
+    for who, (o, dq, dk, dv) in res.items():
+        for name, t in (("o", o), ("dq", dq), ("dk", dk), ("dv", dv)):
+            save(f"{who}_{name}", t)
+    (d / "meta.json").write_text(json.dumps({
+        "varlen": True, "lengths": list(lengths), "T": T, "H": H, "D": D, "Hkv": Hkv,
+        "Dv": Dv, "causal": causal, "dtype": dtype_name, "which": list(res.keys()),
+        "slug": slug,
+    }, indent=2, ensure_ascii=False))
+
+    lines = [f"[{slug}] lengths={lengths}"]
+    for who in ("te",):
+        if who in res:
+            lines.append(f"  {who:3s} vs ref: o {maxdiff(res[who][0], o_ref):.2e} "
+                         f"dq {maxdiff(res[who][1], dq_ref):.2e} "
+                         f"dk {maxdiff(res[who][2], dk_ref):.2e} "
+                         f"dv {maxdiff(res[who][3], dv_ref):.2e}")
+    print("\n".join(lines))
+    return slug
+
+
 # ----------------------------- bench -----------------------------
 class CudaTimer:
     def __init__(self, warmup=10, repeat=50):
@@ -282,6 +406,32 @@ def bench_case(sh, dtype_name, timer):
             cells.append(f"{who}=NA({str(e)[:40]})")
     print(f"[{tag}] " + "  ".join(cells))
     return tag, cells
+
+
+def bench_case_varlen(lengths, H, D, Hkv, Dv, dtype_name, timer, causal=True):
+    """VARLEN 性能对标：等长时与 TE FP8 定长同 shape 完全等价，直接对比；
+    不等长时 TE 2.14 的 FP8 变长路径在本容器 segfault，故只报 ours（自测给出）。"""
+    tag = varlen_slug(lengths, H, D, dtype_name)
+    if dtype_name != "fp8":
+        print(f"[{tag}] only fp8 baseline (TE FP8)")
+        return
+    if len(set(lengths)) != 1:
+        print(f"[{tag}] lengths={lengths}  te-varlen=NA(segfault in TE 2.14)；ours 见自测")
+        return
+    B, S = len(lengths), lengths[0]
+    dtype = DTYPES[dtype_name]
+    torch.manual_seed(1234 + B * S * 7 + H * 3 + D)
+    q = torch.randn(B, S, H, D, device=DEV, dtype=dtype)
+    k = torch.randn(B, S, Hkv, D, device=DEV, dtype=dtype)
+    v = torch.randn(B, S, Hkv, Dv, device=DEV, dtype=dtype)
+    do = torch.randn(B, S, H, Dv, device=DEV, dtype=dtype)
+    flops = 4.0 * B * S * H * S * D
+    try:
+        ms = timer.device_time(lambda: te_bwd_fp8(q, k, v, do, causal))
+        print(f"[{tag}] equal-length B={B} S={S}  te-fixed={ms:.4f}ms/"
+              f"{flops / (ms * 1e-3) / 1e12:.2f}TF")
+    except Exception as e:  # noqa
+        print(f"[{tag}] te=NA({str(e)[:120]})")
 
 
 def parse_shape(s):
@@ -328,7 +478,34 @@ def main():
     ap.add_argument("--dtypes", nargs="+", default=None, help="对多个 dtype 依次跑")
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--repeat", type=int, default=50)
+    # VARLEN：--lengths 给出各序列长度；--H/--D/--kv/--Dv 给出其余维度。
+    ap.add_argument("--lengths", nargs="+", type=int, default=None,
+                    help="变长：各序列长度，如 --lengths 512 1024 256")
+    ap.add_argument("--varlen-all", action="store_true", help="跑内置 VARLEN_SHAPES")
+    ap.add_argument("--H", type=int, default=16)
+    ap.add_argument("--D", type=int, default=128)
+    ap.add_argument("--kv", type=int, default=None)
+    ap.add_argument("--Dv", type=int, default=None)
     args = ap.parse_args()
+
+    # VARLEN 分支
+    if args.lengths or args.varlen_all:
+        Hkv = args.kv if args.kv else args.H
+        Dv = args.Dv if args.Dv else args.D
+        vspecs = ([ (list(args.lengths), args.H, args.D, Hkv, Dv) ] if args.lengths
+                  else VARLEN_SHAPES)
+        dtypes = args.dtypes or [args.dtype]
+        for dt in dtypes:
+            if args.cmd in ("dump", "all"):
+                print(f"=== dump VARLEN to {OUT_ROOT} (dtype={dt}) ===")
+                for lengths, H, D, hkv, dv in vspecs:
+                    dump_case_varlen(lengths, H, D, hkv, dv, dt)
+            if args.cmd in ("bench", "all"):
+                print("=== VARLEN bench（TE FP8 基线，CUPTI device time）===")
+                timer = CudaTimer(args.warmup, args.repeat)
+                for lengths, H, D, hkv, dv in vspecs:
+                    bench_case_varlen(lengths, H, D, hkv, dv, dt, timer)
+        return
 
     if args.shape:
         shapes = [parse_shape(" ".join(s)) for s in args.shape]

@@ -148,14 +148,15 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             const unsigned char* do8, const float* dos,
                             const float* delta, const float* lse, float* dq_acc,
                             float* dk_acc, float* dv_acc, int S, int H, int Hkv,
-                            float scale, int causal, int ksplit) {
+                            float scale, int causal, int ksplit,
+                            const int* cu_seqlens = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = WGMMA ? Cfg::smem_bytes_wgmma : Cfg::smem_bytes;
   CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
   fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP><<<mg, THREADS, kSmem>>>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit);
+      scale, causal, ksplit, cu_seqlens);
 }
 
 // O37：Q/dO 4D-TMA 版主 kernel（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128、WGMMA 路径）。
@@ -235,13 +236,14 @@ static void launch_lse_bal(dim3 lg, const unsigned char* q8, const float* qs,
 template <int HD, int PIPE>
 static void launch_lse_bal_wgmma(dim3 lg, const unsigned char* q8, const float* qs,
                                  const unsigned char* k8, const float* ks, float* lse, int S,
-                                 int H, int Hkv, float scale) {
+                                 int H, int Hkv, float scale,
+                                 const int* cu_seqlens = nullptr) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = PIPE ? Cfg::lse_smem_bytes_balw1 : Cfg::lse_smem_bytes_balw0;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<HD, PIPE>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
   lse_mma_kernel_bal_wgmma<HD, PIPE><<<lg, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv,
-                                                             scale);
+                                                             scale, cu_seqlens);
 }
 #endif
 
@@ -259,6 +261,171 @@ static void launch_lse_bal_tma(dim3 lg, const CUtensorMap& qmap, const CUtensorM
                                                            scale);
 }
 #endif
+
+// =============================================================================
+// VARLEN（变长 / cu_seqlens）自测入口（fp8，HD=128，causal，非 TMA 路径）
+// =============================================================================
+// 输入是 **packed** 布局 [T,H,D]（q/dO）与 [T,Hkv,D]（k/v），外加 `cu_seqlens.npy`
+// （float32 保存，值即 token 前缀和，B+1 个）。kernel 侧用 `cu_seqlens[b]` 作 token 基址、
+// `S` 参数传各序列最大长度 maxlen；每个 (b,h,mblk) 只处理自己序列内的 tile。
+// ref 输出 `ref_dq/dk/dv.npy` 也是 packed 布局。FA/TE 不支持变长（本机版本），只对 fp32 ref。
+// 只做 causal（非 causal 留后续）；非 TMA 路径（LSE 用 wgmma，主 kernel Q/dO 用 cp.async）。
+static int run_varlen(const std::string& dir, bool causal, int iters) {
+  auto q_np = load_npy_f32(dir + "/q.npy");
+  auto k_np = load_npy_f32(dir + "/k.npy");
+  auto v_np = load_npy_f32(dir + "/v.npy");
+  auto do_np = load_npy_f32(dir + "/do.npy");
+  auto o_np = load_npy_f32(dir + "/ref_o.npy");
+  auto rdq = load_npy_f32(dir + "/ref_dq.npy");
+  auto rdk = load_npy_f32(dir + "/ref_dk.npy");
+  auto rdv = load_npy_f32(dir + "/ref_dv.npy");
+  auto cu_np = load_npy_f32(dir + "/cu_seqlens.npy");
+  if (q_np.shape.size() != 3 || k_np.shape.size() != 3) {
+    fprintf(stderr, "VARLEN 期望 q 为 [T,H,D]、k 为 [T,Hkv,D]\n");
+    return 1;
+  }
+  const int T = (int)q_np.shape[0], H = (int)q_np.shape[1], D = (int)q_np.shape[2];
+  const int Hkv = (int)k_np.shape[1];
+  const int B = (int)cu_np.data.size() - 1;
+  if (D != 128) { fprintf(stderr, "VARLEN 目前只做 HD=128；当前 %d\n", D); return 1; }
+  if (!causal) { fprintf(stderr, "VARLEN 目前只做 causal\n"); return 1; }
+  int maxlen = 0;
+  for (int b = 0; b < B; ++b) {
+    int L = (int)cu_np.data[b + 1] - (int)cu_np.data[b];
+    if (L > maxlen) maxlen = L;
+  }
+  const size_t nq = (size_t)T * H * D;       // packed q/dO/dq 长度
+  const size_t nkv = (size_t)T * Hkv * D;    // packed k/v/dk/dv 长度
+  const size_t rows_q = (size_t)T * H;
+  const size_t rows_kv = (size_t)T * Hkv;
+  const float scale = 1.0f / sqrtf((float)D);
+  printf("case = %s\n", dir.c_str());
+  printf("VARLEN: B=%d T=%d maxlen=%d H=%d Hkv=%d D=%d causal=%d\n", B, T, maxlen, H, Hkv, D,
+         (int)causal);
+  printf("cu_seqlens =");
+  for (int b = 0; b <= B && b < 12; ++b) printf(" %d", (int)cu_np.data[b]);
+  printf("%s\n", (B > 11) ? " ..." : "");
+
+  float *d_q_f, *d_k_f, *d_v_f, *d_do_f, *d_o_f;
+  unsigned char *d_q8, *d_k8, *d_v8, *d_do8;
+  float *d_qs, *d_ks, *d_vs, *d_dos, *d_delta, *d_lse, *d_dq, *d_dk, *d_dv;
+  int* d_cu;
+  CUDA_CHECK(cudaMalloc(&d_q_f, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_k_f, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_v_f, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_do_f, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_q8, nq));
+  CUDA_CHECK(cudaMalloc(&d_k8, nkv));
+  CUDA_CHECK(cudaMalloc(&d_v8, nkv));
+  CUDA_CHECK(cudaMalloc(&d_do8, nq));
+  CUDA_CHECK(cudaMalloc(&d_qs, rows_q * 4));
+  CUDA_CHECK(cudaMalloc(&d_ks, rows_kv * 4));
+  CUDA_CHECK(cudaMalloc(&d_vs, rows_kv * 4));
+  CUDA_CHECK(cudaMalloc(&d_dos, rows_q * 4));
+  CUDA_CHECK(cudaMalloc(&d_delta, rows_q * 4));
+  CUDA_CHECK(cudaMalloc(&d_lse, rows_q * 4));
+  CUDA_CHECK(cudaMalloc(&d_dq, nq * 4));
+  CUDA_CHECK(cudaMalloc(&d_dk, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_dv, nkv * 4));
+  std::vector<int> cu(B + 1);
+  for (int b = 0; b <= B; ++b) cu[b] = (int)cu_np.data[b];
+  CUDA_CHECK(cudaMalloc(&d_cu, (B + 1) * sizeof(int)));
+  CUDA_CHECK(cudaMemcpy(d_cu, cu.data(), (B + 1) * sizeof(int), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_q_f, q_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_k_f, k_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_v_f, v_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_do_f, do_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
+  // delta = rowsum(dO∘O) 需要前向输出 O（fp32 ref_o，与 dO 同 dtype/布局）。
+  CUDA_CHECK(cudaMalloc(&d_o_f, nq * 4));
+  CUDA_CHECK(cudaMemcpy(d_o_f, o_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
+
+  // ksplit / REGDQ 自动档：与定长路径同公式，用 maxlen 作为串长。
+  constexpr int BM = 64;
+  const long base_grid = (long)((maxlen + BM - 1) / BM) * H * B;
+  const long target_ctas = (maxlen >= 2048) ? 8192L : std::max(2048L, 4L * base_grid);
+  long kk = target_ctas / base_grid; if (kk < 1) kk = 1; if (kk > 16) kk = 16;
+  long kp = 1; while (kp * 2 <= kk) kp *= 2;
+  const int ksplit = (int)kp;
+  const bool use_regdq = ((long)(maxlen / 32) / 2 / ksplit >= 4);
+
+  auto run_all = [&]() {
+    const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
+    const int gq = (int)std::min<long long>((rq + 3) / 4, 65535);
+    const int gkv = (int)std::min<long long>((rkv + 3) / 4, 65535);
+    quantize_row_warp_kernel<4, false><<<gq, 128>>>(d_q_f, d_q8, d_qs, rq);
+    quantize_row_warp_kernel<4, false><<<gkv, 128>>>(d_k_f, d_k8, d_ks, rkv);
+    quantize_row_warp_kernel<4, false><<<gkv, 128>>>(d_v_f, d_v8, d_vs, rkv);
+    quantize_row_warp_kernel<4, true><<<gq, 128>>>(d_do_f, d_do8, d_dos, rq);
+    CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
+    CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+    CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+    // LSE（镜像配对 + cp.async，wgmma）：grid.x 按 maxlen，逐 b 由 cu_seqlens 定界。
+    const int nblk = (maxlen + LBM - 1) / LBM;
+    dim3 lg((nblk + 1) / 2, H, B);
+    launch_lse_bal_wgmma<128, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
+                                 d_cu);
+    const int d_rows = (int)rows_q;
+    const int d_wpb = THREADS / 32;
+    const int d_blocks = (d_rows + d_wpb - 1) / d_wpb;
+    delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+    dim3 mg((maxlen + BM - 1) / BM * ksplit, H, B);
+    if (use_regdq)
+      launch_bwd_main<128, 64, 32, true, true, true, true, true>(
+          mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
+          d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
+    else
+      launch_bwd_main<128, 64, 32, false, true, true, true, true>(
+          mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
+          d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
+  };
+  for (int i = 0; i < 3; ++i) run_all();
+  CUDA_CHECK(cudaDeviceSynchronize());
+  cudaEvent_t ev0, ev1;
+  CUDA_CHECK(cudaEventCreate(&ev0));
+  CUDA_CHECK(cudaEventCreate(&ev1));
+  CUDA_CHECK(cudaEventRecord(ev0));
+  for (int i = 0; i < iters; ++i) run_all();
+  CUDA_CHECK(cudaEventRecord(ev1));
+  CUDA_CHECK(cudaEventSynchronize(ev1));
+  float ms = 0.f;
+  CUDA_CHECK(cudaEventElapsedTime(&ms, ev0, ev1));
+  ms /= iters;
+  double flops = 0.0;
+  for (int b = 0; b < B; ++b) {
+    double L = cu[b + 1] - cu[b];
+    flops += 4.0 * H * L * L * D;  // bwd ≈ 2×fwd，因果只算一半再用系数 2 近似
+  }
+  printf("[timing] VARLEN total %.4f ms  %.2f TFLOPS (sum_b 4HL^2D)\n", ms,
+         flops / (ms * 1e-3) / 1e12);
+  printf("grid main = %d x %d x %d (ksplit=%d) | use_regdq=%d | T=%d\n", 
+         (maxlen + BM - 1) / BM * ksplit, H, B, ksplit, (int)use_regdq, T);
+
+  std::vector<float> h_dq(nq), h_dk(nkv), h_dv(nkv);
+  CUDA_CHECK(cudaMemcpy(h_dq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(h_dk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(h_dv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+  auto report = [](const char* nm, const std::vector<float>& a, const NpyF32& b) {
+    size_t n = std::min(a.size(), b.data.size());
+    double ma = 0.0, mr = 0.0, ao = 0.0, ar = 0.0;
+    size_t arg = 0;
+    for (size_t i = 0; i < n; ++i) {
+      double d = fabs((double)a[i] - (double)b.data[i]);
+      if (d > ma) { ma = d; arg = i; }
+      ao = std::max(ao, fabs((double)a[i]));
+      ar = std::max(ar, fabs((double)b.data[i]));
+      double den = std::max(1e-3, fabs((double)b.data[i]));
+      double r = d / den;
+      if (r > mr) mr = r;
+    }
+    printf("  %-3s vs ref: max_abs=%.3e  max_rel=%.3e  (ours_amax=%.3e ref_amax=%.3e @%zu)\n",
+           nm, ma, mr, ao, ar, arg);
+  };
+  printf("[compare] VARLEN ours vs fp32 ref\n");
+  report("dq", h_dq, rdq);
+  report("dk", h_dk, rdk);
+  report("dv", h_dv, rdv);
+  return 0;
+}
 
 // =============================================================================
 // host / launcher / self-test
@@ -295,9 +462,12 @@ int main(int argc, char** argv) {
   // O37：主 kernel 的 Q/dO 是否用 4D-TMA（仅 FA_WGMMA+FA_TMA、D==128）。-1=自动（默认关，
   //   作 opt-in 与 cp.async 版同 binary A/B），0/1 由 `--qdtma=` 强制。
   int qd_tma = -1;
+  int varlen = 0;   // VARLEN：1 = packed [T,H,D] + cu_seqlens.npy（fp8/HD=128/causal）
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
+    else if (a == "--varlen") varlen = 1;
+    else if (a.rfind("--varlen=", 0) == 0) varlen = atoi(a.c_str() + 9);
     else if (a == "--causal") causal = true;
     else if (a == "--lsewgm") lsewgm = 1;
     else if (a == "--wgmma") wgmma = 1;
@@ -322,6 +492,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
     else if (!a.empty() && a[0] != '-') dir = a;
   }
+
+  if (varlen) return run_varlen(dir, causal, iters);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
@@ -526,14 +698,18 @@ int main(int argc, char** argv) {
 #if defined(FA_WGMMA) && defined(FA_TMA)
   // O32：建 LSE 的 Q/K 4D TMA 描述符（一次，供所有 (h,b) CTA 用坐标选择）。
   CUtensorMap qmap_lse, kmap_lse;
-  if (D == 128 && lse_tma) {
+  // 注：O32/O9c A/B 段无论 `--lsetma` 取值都会跑 TMA 版 LSE，故 D==128 时始终建描述符
+  //     （否则 `--lsetma=0` 会拿未初始化 map 启动 TMA kernel → illegal instruction）。
+  if (D == 128) {
     qmap_lse = make_lse_map_fp8(d_q8, H, S, D, B);
     kmap_lse = make_lse_map_fp8(d_k8, Hkv, S, D, B);
   }
   // O37：主 kernel 的 Q/dO TMA 描述符（box={128,BM=64}，与 LSE 同一 dims={D,S,H,B}）。
   if (qd_tma < 0) qd_tma = 1;   // 默认开（对齐 O32 的 lsetma；`--qdtma=0` 供 A/B）
   CUtensorMap qmap_main, dmap_main;
-  if (D == 128 && qd_tma) {
+  // 注：O37 A/B 段无论 `--qdtma` 取值都会跑 TMA 版，故 D==128 时始终建描述符
+  //     （否则 `--qdtma=0` 会拿未初始化 map 启动 TMA kernel → illegal instruction）。
+  if (D == 128) {
     qmap_main = make_lse_map_fp8(d_q8, H, S, D, B);
     dmap_main = make_lse_map_fp8(d_do8, H, S, D, B);
   }
