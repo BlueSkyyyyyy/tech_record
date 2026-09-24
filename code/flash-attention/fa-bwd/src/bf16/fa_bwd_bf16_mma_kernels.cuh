@@ -844,11 +844,35 @@ __device__ __forceinline__ void wgmma_qkt64_tma(const char* Q0, const char* Q1,
   wgmma_wait0();
 }
 
+// O38（bf16 版，对齐 fp8 §41 / fp16 O38）：把 K 维 split 的 LSE 部分结果 `(m_ks, l_ks)`
+//   沿 `ks` 二次归约成最终 LSE。`part` 布局 `[row][ks] -> (m,l)`（每行 `2*ksplit` 个 fp32），
+//   输出 `lse[row]=m+log(l)`。online-softmax 合并（max 取大、sum 按 exp 重标定），
+//   `-inf/0` 安全（空 split 得 -inf/0）。数学上与「单 CTA 顺序扫全部 K tile」完全等价，
+//   只差 fp32 求和次序。
+__global__ void lse_split_merge_kernel(const float* __restrict__ part,
+                                       float* __restrict__ lse, long long nrows, int ksplit) {
+  long long row = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (row >= nrows) return;
+  const float* p = part + row * (long long)ksplit * 2;
+  float m = -INFINITY, l = 0.f;
+#pragma unroll 1
+  for (int k = 0; k < ksplit; ++k) {
+    float mk = p[2 * k], lk = p[2 * k + 1];
+    float mn = fmaxf(m, mk);
+    float ca = (m == -INFINITY) ? 0.f : l * fexp(m - mn);
+    float cb = (mk == -INFINITY) ? 0.f : lk * fexp(mk - mn);
+    l = ca + cb;
+    m = mn;
+  }
+  lse[row] = m + flog(l);
+}
+
 template <int HD, int PIPE = 1>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
                        const __grid_constant__ CUtensorMap kmap,
-                       float* __restrict__ lse, int S, int H, int Hkv, float scale) {
+                       float* __restrict__ lse, float* __restrict__ lse_part,
+                       int S, int H, int Hkv, float scale, int ksplit) {
   static_assert(HD == 128, "wgmma LSE TMA 目前只做 HD=128");
   constexpr int CH = (LBM / 8) * 1024;   // 单个 K=64 chunk 的 SW128 字节数（8KB）
   constexpr int TILE = 2 * CH;           // [LBM][HD] K-major tile（16KB）
@@ -861,7 +885,11 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   uint64_t* kbar = qbar + 1;
 
   const int nblk = (S + LBM - 1) / LBM;
-  const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // O38：K 维 split。grid = (pairs, H, B*ksplit)；每个 (pair,ks) CTA 只扫本 m 块 K 范围的
+  //   第 ks 个连续切片（按 tile 粒度切分），把部分 (m,l) 写到 `lse_part`，由 merge kernel 汇总。
+  //   ksplit==1 时切片即整段、直接写 `lse`（逐位退化为 O31 原路径）。
+  const int pair = blockIdx.x, h = blockIdx.y;
+  const int b = (int)blockIdx.z / ksplit, ksp = (int)blockIdx.z % ksplit;
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -898,19 +926,24 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
     const int m0 = mblk * LBM;
     const int ncols = min(S, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
+    // O38：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
+    const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
+    const int nt1 = (int)(((long)ntiles * (ksp + 1)) / ksplit);
+    const int nuse = nt1 - nt0;
     issue_q(m0);
-    if (ntiles > 0) issue_k(0, 0);
+    if (nuse > 0) issue_k(0, nt0 * LBN);
     mbar_wait(qbar, (uint32_t)(quse & 1)); quse++;
 
     float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
-    for (int nt = 0; nt < ntiles; ++nt) {
-      const int st = PIPE ? (nt & 1) : 0;
+    for (int rnt = 0; rnt < nuse; ++rnt) {
+      const int nt = nt0 + rnt;
+      const int st = PIPE ? (rnt & 1) : 0;
       mbar_wait(kbar + st, (uint32_t)(kuse[st] & 1)); kuse[st]++;
       __syncthreads();
       const int j0 = nt * LBN;
       char* Kt = Ks + st * TILE;
       if (PIPE) {
-        if (nt + 1 < ntiles) issue_k(st ^ 1, j0 + LBN);
+        if (rnt + 1 < nuse) issue_k(st ^ 1, j0 + LBN);
       }
 
       float d[32];
@@ -933,7 +966,7 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
           }
         }
       __syncthreads();  // 所有 warp 读完本 tile 后才能覆盖该 stage / 下一轮 Q
-      if (!PIPE && nt + 1 < ntiles) issue_k(0, j0 + LBN);
+      if (!PIPE && rnt + 1 < nuse) issue_k(0, j0 + LBN);
     }
 #pragma unroll
     for (int s = 0; s < 2; ++s) {
@@ -951,7 +984,15 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+        if (qi < S) {
+          if (ksplit == 1) {
+            lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+          } else {
+            size_t row = ((size_t)(b * S + qi)) * H + h;
+            lse_part[(row * ksplit + ksp) * 2 + 0] = m;
+            lse_part[(row * ksplit + ksp) * 2 + 1] = l;
+          }
+        }
       }
     }
     __syncthreads();

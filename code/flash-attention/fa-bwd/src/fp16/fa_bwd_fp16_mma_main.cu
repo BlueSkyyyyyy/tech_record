@@ -570,6 +570,8 @@ int main(int argc, char** argv) {
   // O30：LSE 是否用 TMA 版（仅 FA_TMA 构建、D==128、causal；1=用 4D TMA 载入 Q/K）。
   //   -1=自动（FA_TMA 构建下 D==128/causal 默认开），0/1 由 `--lsetma=` 强制。
   int lse_tma = -1;
+  // O38（fp16 版）：LSE 的 K 维 split（0=auto，1=关；>1=切片数）。仅 TMA/causal 路径生效。
+  int lse_split = 0;
   // O9b：主 kernel 是否用 wgmma（仅 FA_WGMMA 构建、D==128 且 sel=(64,64) 时生效）。
   int wgmma_sel = 0;
   // O16：wgmma 主 kernel 是否用「分段 wait_group」重叠 epilogue（-1=自动/开，0=关，1=开）。
@@ -624,6 +626,7 @@ int main(int argc, char** argv) {
     else if (a == "--lsewgm") { lse_wgm = 1; lse_forced = true; }
     else if (a.rfind("--lsetma=", 0) == 0) lse_tma = atoi(a.c_str() + 9);
     else if (a == "--lsetma") lse_tma = 1;
+    else if (a.rfind("--lsesplit=", 0) == 0) lse_split = atoi(a.c_str() + 11);
     else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
     else if (a == "--wgmma") wgmma_sel = 1;
     else if (a.rfind("--ow=", 0) == 0) ow_opt = atoi(a.c_str() + 5);
@@ -702,6 +705,7 @@ int main(int argc, char** argv) {
   __half *dq, *dk, *dv;
   __half *d_q, *d_k, *d_v, *d_o, *d_do;
   float *d_delta, *d_lse, *d_dq_acc, *d_dk_acc, *d_dv_acc;
+  float* d_lse_part = nullptr;
   CUDA_CHECK(cudaMalloc(&dq, n * sizeof(__half)));
   CUDA_CHECK(cudaMalloc(&dk, nkv * sizeof(__half)));
   CUDA_CHECK(cudaMalloc(&dv, nkv * sizeof(__half)));
@@ -712,6 +716,8 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMalloc(&d_do, n * sizeof(__half)));
   CUDA_CHECK(cudaMalloc(&d_delta, (size_t)B * S * H * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_lse, (size_t)B * S * H * sizeof(float)));
+  // O38：LSE K-split 的部分 (m,l)，每行最多 16 个 split × 2 个 fp32。
+  CUDA_CHECK(cudaMalloc(&d_lse_part, (size_t)B * S * H * 16 * 2 * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_dq_acc, n * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_dk_acc, nkv * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_dv_acc, nkv * sizeof(float)));
@@ -902,6 +908,18 @@ int main(int argc, char** argv) {
 #else
   if (lse_tma < 0) lse_tma = 0;
 #endif
+  // O38（fp16 版）：自动 split 档（0=auto）。目标 `grid*split ≈ 528`（= 4 CTA/SM × 132 SM，
+  //   即「填满一个波」；实测 fp16 LSE TMA 的 smem ~50KB ⇒ 4 CTA/SM），上限 8；grid 已达一个
+  //   波则退回 1（逐位）。仅 TMA 路径生效。与 fp8 的 `≈2048` 不同：fp16/bf16 的 LSE 并行度
+  //   更高、且大 S 时 512 CTA 已铺满一个波（S4096 split>1 反而慢 3–7%），故以「一波」为准。
+  int lse_split_eff = lse_split;
+  if (lse_split_eff <= 0) {
+    long lg_grid = (long)lg_bal.x * H * B;
+    int sp = 1;
+    while (sp < 8 && lg_grid * (sp * 2) <= 528) sp *= 2;
+    lse_split_eff = sp;
+  }
+  printf("[O38] lse k-split = %d%s\n", lse_split_eff, (lse_split <= 0 ? " (auto)" : ""));
   printf("[O23] main backend = %s | lse = %s (D=%d S=%d)%s%s\n",
          wg2bn_sel ? "wgmma2b(BN=128)" : (wg2_sel ? "wgmma2(BN=64)" : "mma"),
          (D == 128 && causal && lse_wgm) ? "wgmma" : "mma", D, S,
@@ -1016,11 +1034,22 @@ int main(int argc, char** argv) {
         delta_kernel<512><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
     } else {
 #if defined(FA_WGMMA) && defined(FA_TMA)
-      if (causal && lse_tma)
-        lse_mma_kernel_bal_tma<128, 1><<<lg_bal, THREADS, kLseSmemTma1>>>(qmap_lse, kmap_lse,
-                                                                         d_lse, S, H, Hkv,
-                                                                         scale);
-      else
+      if (causal && lse_tma) {
+        if (lse_split_eff > 1) {
+          // O38：K 维切片 + 二次归约。
+          dim3 gsp(lg_bal.x, lg_bal.y, (unsigned)(B * lse_split_eff));
+          lse_mma_kernel_bal_tma<128, 1><<<gsp, THREADS, kLseSmemTma1>>>(
+              qmap_lse, kmap_lse, d_lse, d_lse_part, S, H, Hkv, scale, lse_split_eff);
+          const long long nrows = (long long)B * S * H;
+          const int th = 256;
+          const long long bl = (nrows + th - 1) / th;
+          lse_split_merge_kernel<<<(unsigned)bl, th>>>(d_lse_part, d_lse, nrows,
+                                                       lse_split_eff);
+        } else {
+          lse_mma_kernel_bal_tma<128, 1><<<lg_bal, THREADS, kLseSmemTma1>>>(
+              qmap_lse, kmap_lse, d_lse, nullptr, S, H, Hkv, scale, 1);
+        }
+      } else
 #endif
       if (causal && lse_wgm)
         lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse,
@@ -1162,9 +1191,8 @@ int main(int argc, char** argv) {
                                                                             S, H, Hkv, scale);
       };
       auto launch_t = [&]() {
-        lse_mma_kernel_bal_tma<128, 1><<<lg_bal, THREADS, kLseSmemTma1>>>(qmap_lse, kmap_lse,
-                                                                         d_lse, S, H, Hkv,
-                                                                         scale);
+        lse_mma_kernel_bal_tma<128, 1><<<lg_bal, THREADS, kLseSmemTma1>>>(
+            qmap_lse, kmap_lse, d_lse, nullptr, S, H, Hkv, scale, 1);
       };
       auto time_one = [&](auto launch, float* out_ms) {
         for (int i = 0; i < 3; ++i) launch();
@@ -1188,6 +1216,52 @@ int main(int argc, char** argv) {
       printf("[O30 A/B] lse tma %.4f ms | wgmma %.4f ms (wgmma/tma %.3fx) | "
              "max_abs(tma-vs-wgmma)=%.3e\n", ms_t, ms_w, ms_w / ms_t, e);
       cudaFree(d_lse2);
+    }
+    // ---- O38 A/B（fp16）：LSE 的 K 维 split + 二次归约（TMA 版，D=128/causal）----
+    //   split=1 逐位退回 O30；split=2/4/8 各扫 1/split 的 K tile 切片后 merge。逐元素对拍
+    //   以 split=1 为基准（理论等价、只差 fp32 求和次序）。
+    if (lse_tma) {
+      std::vector<float> ref_l((size_t)B * S * H, 0.f);
+      float base_ms = 0.f, best = 1e9f;
+      int bestk = 1;
+      for (int sp = 1; sp <= 8; sp *= 2) {
+        auto launch_sp = [&]() {
+          if (sp == 1) {
+            lse_mma_kernel_bal_tma<128, 1><<<lg_bal, THREADS, kLseSmemTma1>>>(
+                qmap_lse, kmap_lse, d_lse, nullptr, S, H, Hkv, scale, 1);
+          } else {
+            dim3 gsp(lg_bal.x, lg_bal.y, (unsigned)(B * sp));
+            lse_mma_kernel_bal_tma<128, 1><<<gsp, THREADS, kLseSmemTma1>>>(
+                qmap_lse, kmap_lse, d_lse, d_lse_part, S, H, Hkv, scale, sp);
+            const long long nrows = (long long)B * S * H;
+            const int th = 256;
+            const long long bl = (nrows + th - 1) / th;
+            lse_split_merge_kernel<<<(unsigned)bl, th>>>(d_lse_part, d_lse, nrows, sp);
+          }
+        };
+        for (int i = 0; i < 3; ++i) launch_sp();
+        CUDA_CHECK(cudaEventRecord(ev0));
+        for (int i = 0; i < iters; ++i) launch_sp();
+        CUDA_CHECK(cudaEventRecord(ev1));
+        CUDA_CHECK(cudaEventSynchronize(ev1));
+        float t = 0.f;
+        CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+        t /= iters;
+        std::vector<float> got((size_t)B * S * H);
+        CUDA_CHECK(cudaMemcpy(got.data(), d_lse, got.size() * 4, cudaMemcpyDeviceToHost));
+        double e = 0.0;
+        if (sp == 1) {
+          ref_l = got;
+          base_ms = t;
+        } else {
+          for (size_t i = 0; i < got.size(); ++i)
+            e = std::max(e, (double)std::fabs((double)got[i] - (double)ref_l[i]));
+        }
+        printf("[O38 A/B] lse split=%d %.4f ms (%.3fx vs split1) | max_abs vs split1=%.3e\n",
+               sp, t, base_ms / t, e);
+        if (t < best) { best = t; bestk = sp; }
+      }
+      printf("[O38] best lse split=%d %.4f ms (%.3fx)\n", bestk, best, base_ms / best);
     }
 #endif
   }

@@ -1,0 +1,31 @@
+### O38 split1 baseline (no LSE K-split) ###
+--- fp16 b1_s512_h16_d128_causal_fp16 ---
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16
+[O38] lse k-split = 1
+[timing] total(3 kernels) 0.0953 ms  22.54 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0298 ms | main 0.0531 ms | convert 0.0124 ms
+--- fp16 b1_s1024_h32_d128_kv4_causal_fp16 ---
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp16
+[O38] lse k-split = 1
+[timing] total(3 kernels) 0.2598 ms  66.12 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0586 ms | main 0.1807 ms | convert 0.0205 ms
+--- fp16 b1_s4096_h16_d128_causal_fp16 ---
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+[O38] lse k-split = 1
+[timing] total(3 kernels) 1.2661 ms  108.55 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2301 ms | main 0.9576 ms | convert 0.0785 ms
+--- bf16 b1_s512_h16_d128_causal_bf16 ---
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16
+[O38] lse k-split = 1
+[timing] total(3 kernels) 0.0938 ms  22.89 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0292 ms | main 0.0523 ms | convert 0.0123 ms
+--- bf16 b1_s1024_h32_d128_kv4_causal_bf16 ---
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_bf16
+[O38] lse k-split = 1
+[timing] total(3 kernels) 0.2581 ms  66.57 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0581 ms | main 0.1793 ms | convert 0.0206 ms
+--- bf16 b1_s4096_h16_d128_causal_bf16 ---
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_bf16
+[O38] lse k-split = 1
+[timing] total(3 kernels) 1.2591 ms  109.15 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2290 ms | main 0.9618 ms | convert 0.0683 ms

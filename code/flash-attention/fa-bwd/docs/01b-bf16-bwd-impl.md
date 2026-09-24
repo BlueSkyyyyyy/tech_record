@@ -1613,6 +1613,36 @@ full 1.4690ms/3.84TF；b1_t512 causal **0.4258ms/2.52TF**、full 0.5471ms/1.96TF
 **ncu**：与 fp16 §16.9 同构（main = 1 CTA/SM + smem→mma 依赖，No Eligible 89%；
 lse = Waves<1 的并行度 bound）。原始输出 `src/bf16/fa_bwd_bf16_varlen_mla_sweep.out.txt`。
 
+## 6ac. O38-bf16：LSE 的 K 维 split + 二次归约（第 85 轮）—— **正结果，默认 auto**
+
+> 把 fp16 **O38**（`docs/01` §14u）逐字 dtype 参数化到 bf16 的 **TMA LSE**
+> （`lse_mma_kernel_bal_tma`，D=128/causal 默认快路）：`b=blockIdx.z/ksplit`、
+> `ksp=blockIdx.z%ksplit`、每 `(pair,ksp)` 只扫 K tile 切片 `[nt0,nt1)`、流水 stage 用切片内
+> 相对下标 `rnt&1`、`ksplit==1` 逐位退回 O31；新增 `lse_split_merge_kernel` 做二次归约。
+> host 加 `--lsesplit=N`（`0=auto`，目标 `grid*split≈528`，上限 8）；单/两文件 device 逐字一致
+> （`sync_onefile_device.py` 核对 `identical: True`）。
+
+* **附修 bug**：bf16 **单文件** `fa_bwd_bf16_mma_onefile.cu` 之前在 `-DFA_TMA` 构建下会因缺
+  `make_lse_map`/`make_main_map`（历次 device 同步把夹在 device 区与 `struct NpyF32` 之间的
+  host 段吞掉）而编译失败；本轮把这俩 host 函数补回并移到 `struct NpyF32` **之后**，使其不在
+  同步区的替换范围内。
+* **数值（ours-vs-ref，bf16 causal，max_abs）** 与历史逐位一致：S512 9.001/12.61/13.65e-3、
+  S4096 15.10/13.40/16.31e-3、GQA kv4 12.01/21.25/31.56e-3、kv8 12.33/19.30/31.50e-3、
+  MQA kv1 11.90/45.58/71.96e-3；`max_abs(split-vs-split1)` ≤ 2e-6（fp32 求和次序）。单/两文件一致。
+* **性能（同 session `[O38 A/B]`，CUDA event）**：LSE-only S512 0.0257→**0.0149ms（1.73×，split8）**、
+  kv4 0.0496→**0.0364ms（1.36×，split2）**、S4096 0.2145（split1，1.00×）、kv8/kv1 1.00×；
+  端到端 total S512 0.0938–0.0948→**0.0842ms（1.13×）**、kv4 0.2581–0.2594→**0.2451ms（1.06×）**、
+  S4096 1.2591→1.2671ms（1.00×）。merge 仅 ~4µs。
+* **ncu** 与 fp16 §14u.4 逐项一致（split1 Waves 0.12 / occ 6.25% → split8 Waves 0.97 / occ 20.61%，
+  墙 = 并行度/临界路径，非指令/访存）。
+* **对标（同 session `harness/fa_vs_te_bwd_only.py bf16`）**：S4096 ours 1.2671 vs FA3 0.3197/860、
+  TE 0.4428/621（3.96×）；kv4 0.2451 vs FA3 0.0827/415（2.96×）；kv8 0.2916 vs 0.1213/354
+  （2.40×）；MQA 0.3966 vs 0.1570/438（2.53×）。
+* 原始输出 `src/bf16/fa_bwd_bf16_mma_main_o38_{b1_s512_h16_d128_causal_bf16,
+  b1_s4096_h16_d128_causal_bf16,b1_s1024_h32_d128_kv4_causal_bf16,b1_s1024_h40_d128_kv8_causal_bf16,
+  b1_s1024_h64_d128_kv1_causal_bf16}.out.txt`、`src/bf16/fa_bwd_bf16_mma_onefile_o38_s512.out.txt`、
+  `src/fa_bwd_o38_split1_baseline.out.txt`、`src/fa_bwd_o38_fa3_te_baseline_fp16_bf16.out.txt`。
+
 ## 8. 下一步
 
 > **O36-bf16（§6z）已完成**：把 O34 的逐 atom 4D-TMA 从 BN=128 的 `wgmma2b` 补到 **BN=64 的
