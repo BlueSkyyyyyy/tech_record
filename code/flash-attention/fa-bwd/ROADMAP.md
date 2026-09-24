@@ -145,7 +145,11 @@
   定长调用不传 ⇒ 逐位不变）。4 个 varlen case 对拍 fp32 ref 全 fp16/bf16 噪声、单/两文件
   逐位一致；等长 `[1024]×4` 对标 FA2/FA3/TE（ours 0.450ms/152.8TF，为 FA3 的 3.09×）。
   详见 `docs/01` §16、`docs/01b` §6aa。仅 fp16/bf16/HD=128/causal/MHA+GQA、非 TMA；
-  **非 causal、MLA、负载均衡**留后续。
+  **非 causal 已完成（第七十九轮）**：三 dtype（fp8/fp16/bf16）varlen 均支持 full attention——
+  非 causal 各 m 块工作量相同 ⇒ LSE 从镜像配对 wgmma 版切到通用 mma `lse_mma_kernel`
+  （加 `cu_seqlens` 默认参数，`nullptr` 定长逐位不变）。4 个 full case 对拍 fp32 ref 全噪声、
+  单/两文件逐位一致；等长 `[1024]×4` ours 0.909ms（fp16/bf16，时间约为 causal 的 2×）。
+  详见 `docs/03` §38、`docs/01` §16.8、`docs/01b` §6aa.6。**MLA、负载均衡、TMA 化**留后续。
 
 ## 每项的 Definition of Done
 
@@ -2178,8 +2182,46 @@
     的均衡分块留后续。
   - 原始输出 `src/fp16/fa_bwd_fp16_varlen_b{4_t3840,4_t4096,5_t3968,8_t2904}*.out.txt`、
     `..._varlen_onefile_b4_t3840.out.txt`、`..._varlen_ncu_main_b4_t3840.out.txt`、
-    `src/bf16/` 同构文件、`src/fa_bwd_varlen_fa3_te_baseline_{fp16,bf16}.out.txt`；
-    文档 `docs/01` §16、`docs/01b` §6aa、`docs/04` §8。
+     `src/bf16/` 同构文件、`src/fa_bwd_varlen_fa3_te_baseline_{fp16,bf16}.out.txt`；
+     文档 `docs/01` §16、`docs/01b` §6aa、`docs/04` §8。
+
+- 2026-09-25（第七十九轮）：**VARLEN 非 causal（full attention）完成，fp8/fp16/bf16 三 dtype
+  单/两文件**。
+  - 动机：第 77/78 轮的 varlen 只做 causal；非 causal（双向/编码器）同样需要变长。非 causal
+    每个 m 块的 K 列数恒为 `len`（不再随 `mblk` 递增）⇒ 工作天然均衡、无需镜像配对。
+  - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+    三 dtype 的 **`lse_mma_kernel<HD>`**（O8/O1 的通用 mma LSE）加默认参数
+    `const int* cu_seqlens = nullptr`（`qbase/len`，Q/K 行下标与边界 `b*S/S→qbase/len`，
+    加 `if (m0>=len) return;`）；`nullptr` 逐式退化，**定长数值逐位不变**。host `run_varlen`
+    去掉「只做 causal」限制：causal 仍走镜像配对 wgmma LSE，**非 causal** 走 `lse_mma_kernel`
+    （`grid.x=nblk`，传 `d_cu`）；主 kernel（`fp8_mma_body`/`fa_bwd_{fp16,bf16}_wgmma2_kernel`）
+    本就带 `causal`，无需改。harness `varlen_slug` 加 `full` 标记、`--full` 选项。
+  - **数值（ours vs fp32 ref，full；max_abs dq/dk/dv）**：fp16 b4_t3840
+    `5.60/6.84/2.34e-4`、b4_t4096 等长 `4.09/4.95/1.23e-4`、b5_t3968 GQA kv8
+    `7.34/7.91/4.88e-4`、b8_t2904 强倾斜 `1.49/1.56/1.58e-3`；bf16 同构
+    （`5.76/3.85/3.03e-3` 等，全 ~1e-2 噪声）；fp8（`1.01/0.97/0.70e-1` 等，全 ≤0.25）。
+    26 个组合全部为对应 dtype 噪声量级、无 padding 泄漏；单/两文件逐位一致。
+  - **定长回归逐位不变**：fp16 causal S512 `1.671/1.771/1.899e-3`、fixed full S1024
+    `3.27/2.52/1.23e-4`；bf16 `9.001/12.61/13.65e-3` / `1.94/1.68/1.45e-3`；fp8
+    `2.426/2.972/3.733e-1` / `5.52/5.31/4.02e-2`。fp16/bf16 causal varlen 回归也与第 78 轮
+    逐位一致（`3.163/2.158/1.966e-3`、`1.340e-2/1.276e-2/1.911e-2`）。
+  - **性能（ours total，event，`Σ_b 4HL²D` 口径）**：fp16 b4_t3840 1.2870ms/35.46TF、
+    b4_t4096（等长）0.9090ms/37.80TF、GQA 2.4577ms/37.25TF、倾斜 1.0616ms/34.63TF；
+    bf16 同构；fp8 1.963/1.580/3.761/1.608ms（21.8–24.3TF）。非 causal 总量约为 causal 的 2×，
+    故时间是 causal 的 ~2×（等长 0.909 vs 0.450）。按定长口径 `4BS²H(D+Dv)`（×2）⇒ 等长
+    fp16/bf16 **75.6 TF** vs 同 session TE 245–247TF、FA2 145–147TF（约 TE 的 3.2×）；
+    fp8 43.5TF vs TE FP8 159TF（含 forward）。
+  - **ncu（main，b4_t3840）**：fp16 Duration 705µs、DRAM 7.9% / L1TEX 49.0% / **L2 70.3%** /
+    Compute 35.8% / 202 regs / **1 CTA/SM（occ 12.5%）** / Waves 7.76；fp8 Duration 1.20ms、
+    DRAM 5.1% / L1TEX 62.5% / L2 64.0% / Compute 40.9% / 168 regs / **3 CTA/SM（occ 18.4%）**。
+    ⇒ bound 与各 dtype 定长 main 一致（fp16/bf16 = L2 red + 1 CTA/SM；fp8 = L1/L2 吞吐 +
+    3 CTA/SM），非带宽。
+  - 原始输出 `src/fp8/fa_bwd_fp8_varlen_full_sweep.out.txt`、`..._varlen_full_onefile.out.txt`、
+    `..._varlen_full_ncu_main_s3840.out.txt`；`src/fp16/fa_bwd_fp16_varlen_full_sweep.out.txt`、
+    `..._varlen_full_onefile.out.txt`、`..._varlen_full_ncu_main_s3840.out.txt`；
+    `src/bf16/fa_bwd_bf16_varlen_full_sweep.out.txt`；`src/fa_bwd_varlen_full_regression.out.txt`、
+    `src/fa_bwd_fixed_full_regression.out.txt`；文档 `docs/03` §38、`docs/01` §16.8、
+    `docs/01b` §6aa.6、`docs/04` §9。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -2313,10 +2355,13 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第七十八轮）**：VARLEN 覆盖补全 **fp16/bf16**（默认 wgmma2 路径，单/两文件）——
-> 4 个 varlen case 对拍 fp32 ref 全噪声、单/两文件逐位一致，等长 case 为 FA3 的 3.09×；
-> 详见 `docs/01` §16、`docs/01b` §6aa、`docs/04` §8。**varlen 现在 fp8/fp16/bf16 三 dtype 齐备**
-> （仍限 HD=128/causal/MHA+GQA、非 TMA）。**下一步候选**：① varlen 的**非 causal / MLA**；
+> **最新（第七十九轮）**：VARLEN 的**非 causal（full attention）**——fp8/fp16/bf16 三 dtype
+> 单/两文件均支持。非 causal 各 m 块工作量相同 ⇒ LSE 从 causal 专用镜像配对 wgmma 版切到
+> 通用 mma `lse_mma_kernel`（加 `cu_seqlens` 默认参数，`nullptr` 定长逐位不变）；主 kernel
+> 本就带 `causal`。4 个 full case 对拍 fp32 ref 全噪声、单/两文件逐位一致；等长 `[1024]×4`
+> ours fp16/bf16 0.909ms（约为 causal 的 2×，符合 full 总计算量 2×）。详见 `docs/03` §38、
+> `docs/01` §16.8、`docs/01b` §6aa.6、`docs/04` §9。**varlen 现在 fp8/fp16/bf16 × causal/full
+> 齐备**（仍限 HD=128/MHA+GQA、非 TMA）。**下一步候选**：① varlen 的 **MLA**（HD=512）；
 > ② 按 `cu_seqlens` 的**均衡分块**（当前强倾斜 case 短序列 CTA 早退、并行度浪费）；
 > ③ varlen 的 **TMA 化**（需为 packed 布局重建 `[D,T,H,1]` 描述符）；④ 回到 fp8 K/V TMA
 > （需先腾 ~10KB smem）或 fp16/bf16 的 `L2 red`（三条消 red 路已证伪，转 TMA/软流水）。

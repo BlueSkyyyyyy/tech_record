@@ -855,7 +855,8 @@ template <int HD>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                const unsigned char* __restrict__ k8, const float* __restrict__ ks,
-               float* __restrict__ lse, int S, int H, int Hkv, float scale, int causal) {
+               float* __restrict__ lse, int S, int H, int Hkv, float scale, int causal,
+               const int* __restrict__ cu_seqlens = nullptr) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int ASLD = Cfg::ASLD;
   extern __shared__ __align__(16) char smem[];
@@ -870,19 +871,25 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * LBM;
+  // VARLEN：cu_seqlens 给出本序列在 packed [T,H,D] 的 token 基址与长度；nullptr 退化为
+  //   定长 b*S/S。非 causal 的 varlen 走本 kernel（因果的负载均衡由 bal_wgmma 承担；
+  //   非 causal 各 m 块工作量恒为 nblk 个 tile，本就均衡）。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
+  if (m0 >= len) return;  // VARLEN：超出本序列长度的 m 块直接退出
 
   // 载入 Q 块（rowwise scale 同步取回）
   for (int i = tid; i < LBM * HD; i += THREADS) {
     int r = i / HD, d = i % HD;
     int qi = m0 + r;
     Qs[r * ASLD + d] =
-        (qi < S) ? q8[(((size_t)(b * S + qi)) * H + h) * HD + d] : cvt_e4m3(0.f);
+        (qi < len) ? q8[(((size_t)(qbase + qi)) * H + h) * HD + d] : cvt_e4m3(0.f);
   }
   if (tid < LBM)
-    qs_s[tid] = (m0 + tid < S) ? qs[((size_t)(b * S + m0 + tid)) * H + h] : 1.f;
+    qs_s[tid] = (m0 + tid < len) ? qs[((size_t)(qbase + m0 + tid)) * H + h] : 1.f;
   __syncthreads();
 
-  const int ncols = causal ? min(S, m0 + LBM) : S;
+  const int ncols = causal ? min(len, m0 + LBM) : len;
   const int ntiles = (ncols + LBN - 1) / LBN;
   float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
 
@@ -892,10 +899,10 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
       int r = i / HD, d = i % HD;
       int jg = j0 + r;
       Ks[r * ASLD + d] =
-          (jg < S) ? k8[(((size_t)(b * S + jg)) * Hkv + hkv) * HD + d] : cvt_e4m3(0.f);
+          (jg < len) ? k8[(((size_t)(qbase + jg)) * Hkv + hkv) * HD + d] : cvt_e4m3(0.f);
     }
     if (tid < LBN)
-      ks_s[tid] = (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * Hkv + hkv] : 1.f;
+      ks_s[tid] = (j0 + tid < len) ? ks[((size_t)(qbase + j0 + tid)) * Hkv + hkv] : 1.f;
     __syncthreads();
 
     // S_tile = Q·Kᵀ（e4m3×e4m3→fp32），每 warp 16×64
@@ -916,7 +923,7 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
         int c = j * 8 + c2 + (q & 1);
         int qi = m0 + r, jg = j0 + c;
         float sv = -INFINITY;
-        if (qi < S && jg < S && !(causal && jg > qi))
+        if (qi < len && jg < len && !(causal && jg > qi))
           sv = acc[0][j][q] * scale * qs_s[r] * ks_s[c];
         if (sv != -INFINITY) {
           float mn = fmaxf(mrow[s], sv);
@@ -944,7 +951,7 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
     if (c2 == 0) {
       int r = wid * 16 + g + (s ? 8 : 0);
       int qi = m0 + r;
-      if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+      if (qi < len) lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
     }
   }
 }

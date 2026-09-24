@@ -3379,3 +3379,77 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 `..._varlen_tebench.out.txt`（TE FP8 定长基线）、
 `..._varlen_ncu_main_b4_t4096.out.txt`（ncu）、
 `..._varlen_fixed_regression.out.txt`（定长回归）。
+
+## 38. VARLEN 的非 causal（full attention）——fp8 反向
+
+### 38.1 动机与口径
+
+第 77 轮的 varlen 只做了 causal。非 causal（full）自注意力在编码器/双向场景同样需要变长
+支持。非 causal 与 causal 的根本区别：**每个 m 块的 K 列数恒为 `len`（不再随 `mblk` 递增）**，
+所以工作天然均衡，不需要镜像配对。主 kernel（`fp8_mma_body`）本就带 `causal` 参数
+（mask 写成 `!(causal && jg > qi)`，`ncols = causal ? min(len, m0+BM) : len`），故只需把
+**LSE** 从「causal 专用的镜像配对 wgmma 版」切到 O1 的通用 mma 版，并让后者认识 `cu_seqlens`。
+
+### 38.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+* **device**（`fa_bwd_fp8_kernels.cuh`）：`lse_mma_kernel<HD>` 增加默认参数
+  `const int* cu_seqlens = nullptr`——`qbase = cu ? cu[b] : b*S`、`len = cu ? cu[b+1]-qbase : S`；
+  Q/K/scale 的行下标与边界判定全部从 `b*S`/`S` 改为 `qbase`/`len`，并加
+  `if (m0 >= len) return;`（短序列多余 m 块直接退出）。`nullptr` 时逐式退化为原定长路径，
+  **定长数值逐位不变**。
+* **host**（`fa_bwd_fp8_main.cu` + 单文件）：`launch_lse` 透传 `cu_seqlens`；`run_varlen` 去掉
+  「只做 causal」的限制——`causal` 仍走 `lse_mma_kernel_bal_wgmma<128,1>`（镜像配对 + cp.async，
+  `grid.x=(nblk+1)/2`），**非 causal** 走 `lse_mma_kernel<128>`（`grid.x=nblk`，`d_cu`）。
+  主 kernel 的 `causal` 参数与 grid/ksplit 自动档不变。
+
+### 38.3 harness
+
+`varlen_slug` 增加 `full` 标记（slug `..._full_<dtype>`），`--full` 跑非 causal；`dump`/`bench`
+均透传 `causal`。新增 4 个 full varlen case（fp8/fp16/bf16 各一）。
+
+### 38.4 数值（ours vs fp32 ref，fp8 full；max_abs dq/dk/dv）
+
+| varlen case | lengths | max_abs dq / dk / dv |
+|---|---|---|
+| b4_t3840 不齐 | `[512,1024,2048,256]` | 1.010e-1 / 9.651e-2 / 7.036e-2 |
+| b4_t4096 等长 | `[1024]×4` | 8.881e-2 / 7.043e-2 / 5.721e-2 |
+| b5_t3968 GQA kv8 | `[128,256,512,1024,2048]` | 1.429e-1 / 1.598e-1 / 1.079e-1 |
+| b8_t2904 强倾斜 | `[2048,512,…,8]` | 2.413e-1 / 2.058e-1 / 2.514e-1 |
+
+全部为 fp8 噪声量级（≤0.25），与 causal fp8（0.26–0.62）同水平或更小；单/两文件逐位一致。
+定长回归逐位不变（S512 `2.426/2.972/3.733e-1`；fixed full S1024 `5.52/5.31/4.02e-2`）。
+
+### 38.5 性能（ours total=quant+preprocess+main，event，`Σ_b 4HL²D` 口径）
+
+| case | total ms / TF |
+|---|---|
+| b4_t3840 | 1.963 / 23.25 |
+| b4_t4096（等长） | 1.580 / 21.75 |
+| b5_t3968 GQA kv8 | 3.761 / 24.34 |
+| b8_t2904 强倾斜 | 1.608 / 22.87 |
+
+非 causal 的总计算量约为 causal 的 **2×**（每块看全部 K），故同 case 时间是 causal 的 ~2×
+（等长 1.58 vs 0.96ms）。口径 `Σ_b 4HL²D` 只计 `D`，按定长对标口径 `4BS²H(D+Dv)` 乘
+`(D+Dv)/D=2` ⇒ 等长 **~43.5 TF**；同 session TE FP8 定长 full `0.4316ms / 159.2TF`（含 forward）
+⇒ ours 约 TE 的 3.7×。FA3 变长非 causal 未接入本 harness，仅 fp32 ref 可对。
+
+### 38.6 ncu（main，b4_t3840，`--set full -c 1`）
+
+Duration **1.20ms**、DRAM 5.12% / **L1/TEX 62.47% / L2 64.03%** / Compute 40.89%、
+168 regs、**Block Limit Shared Mem=3（occ 18.43%）**、Waves 20.69、No Eligible 58.56%、
+Issued Ipc 1.69 ⇒ bound 与定长 fp8 main 一致：**L1/L2 吞吐 + 3 CTA/SM 延迟受限**，非带宽。
+
+### 38.7 限制 / 后续
+
+* fp16/bf16 的对应改动见 `docs/01` §16.8、`docs/01b` §6aa.6。
+* MLA（HD=512）的 varlen 仍未做；TMA 化需为 packed 布局重建描述符。
+* 强倾斜 case 的按 `cu_seqlens` 均衡分块仍待做（当前短序列 CTA 早退）。
+
+### 38.8 复现
+
+```bash
+python harness/fa_bwd_bench.py dump --dtype fp8 --varlen-all --full
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --varlen=1 --full --iters=50 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b4_t3840_h16_d128_full_fp8
+```

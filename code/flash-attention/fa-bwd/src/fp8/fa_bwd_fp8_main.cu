@@ -210,13 +210,14 @@ static void launch_bwd_wg2(dim3 mg, const unsigned char* q8, const float* qs,
 template <int HD>
 static void launch_lse(dim3 lg, const unsigned char* q8, const float* qs,
                        const unsigned char* k8, const float* ks, float* lse, int S, int H,
-                       int Hkv, float scale, int causal) {
+                       int Hkv, float scale, int causal,
+                       const int* cu_seqlens = nullptr) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<HD>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize,
                                   Cfg::lse_smem_bytes));
   lse_mma_kernel<HD><<<lg, THREADS, Cfg::lse_smem_bytes>>>(q8, qs, k8, ks, lse, S, H, Hkv,
-                                                           scale, causal);
+                                                           scale, causal, cu_seqlens);
 }
 
 // O11：LSE 的镜像配对（+可选 cp.async 双缓冲）版本，仅 causal。
@@ -263,13 +264,14 @@ static void launch_lse_bal_tma(dim3 lg, const CUtensorMap& qmap, const CUtensorM
 #endif
 
 // =============================================================================
-// VARLEN（变长 / cu_seqlens）自测入口（fp8，HD=128，causal，非 TMA 路径）
+// VARLEN（变长 / cu_seqlens）自测入口（fp8，HD=128，causal/full，非 TMA 路径）
 // =============================================================================
 // 输入是 **packed** 布局 [T,H,D]（q/dO）与 [T,Hkv,D]（k/v），外加 `cu_seqlens.npy`
 // （float32 保存，值即 token 前缀和，B+1 个）。kernel 侧用 `cu_seqlens[b]` 作 token 基址、
 // `S` 参数传各序列最大长度 maxlen；每个 (b,h,mblk) 只处理自己序列内的 tile。
 // ref 输出 `ref_dq/dk/dv.npy` 也是 packed 布局。FA/TE 不支持变长（本机版本），只对 fp32 ref。
-// 只做 causal（非 causal 留后续）；非 TMA 路径（LSE 用 wgmma，主 kernel Q/dO 用 cp.async）。
+// causal / 非 causal 均支持：causal 走镜像配对的 wgmma LSE，非 causal（各块工作量相同）走
+// O1 的 mma LSE；非 TMA 路径（LSE 用 wgmma/mma，主 kernel Q/dO 用 cp.async）。
 static int run_varlen(const std::string& dir, bool causal, int iters) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
@@ -288,7 +290,6 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   const int Hkv = (int)k_np.shape[1];
   const int B = (int)cu_np.data.size() - 1;
   if (D != 128) { fprintf(stderr, "VARLEN 目前只做 HD=128；当前 %d\n", D); return 1; }
-  if (!causal) { fprintf(stderr, "VARLEN 目前只做 causal\n"); return 1; }
   int maxlen = 0;
   for (int b = 0; b < B; ++b) {
     int L = (int)cu_np.data[b + 1] - (int)cu_np.data[b];
@@ -359,11 +360,18 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
     CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
     CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
     CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
-    // LSE（镜像配对 + cp.async，wgmma）：grid.x 按 maxlen，逐 b 由 cu_seqlens 定界。
+    // LSE：grid.x 按 maxlen，逐 b 由 cu_seqlens 定界。
+    //   causal → 镜像配对 + cp.async 的 wgmma 版（工作量随 mblk 递增，需均衡）；
+    //   非 causal → 各 m 块工作量恒为 nblk 个 tile，本已均衡，走 O1 的 mma `lse_mma_kernel`。
     const int nblk = (maxlen + LBM - 1) / LBM;
-    dim3 lg((nblk + 1) / 2, H, B);
-    launch_lse_bal_wgmma<128, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
-                                 d_cu);
+    if (causal) {
+      dim3 lg((nblk + 1) / 2, H, B);
+      launch_lse_bal_wgmma<128, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
+                                   d_cu);
+    } else {
+      dim3 lg(nblk, H, B);
+      launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
+    }
     const int d_rows = (int)rows_q;
     const int d_wpb = THREADS / 32;
     const int d_blocks = (d_rows + d_wpb - 1) / d_wpb;

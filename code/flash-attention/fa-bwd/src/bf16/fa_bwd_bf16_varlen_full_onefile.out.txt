@@ -1,0 +1,5 @@
+VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=0
+[timing] VARLEN total 1.2880 ms  35.43 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=5.764e-03  max_rel=8.280e-01  (ours_amax=1.461e+00 ref_amax=1.457e+00 @93132)
+  dk  vs ref: max_abs=3.851e-03  max_rel=6.652e-01  (ours_amax=1.188e+00 ref_amax=1.190e+00 @7857475)
+  dv  vs ref: max_abs=3.031e-03  max_rel=7.706e-01  (ours_amax=8.555e-01 ref_amax=8.556e-01 @7501284)

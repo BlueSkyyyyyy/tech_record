@@ -1,0 +1,12 @@
+### fp16 causal regression (two-file)
+VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=1
+[timing] VARLEN total 0.7765 ms  58.77 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=3.163e-03  max_rel=6.210e-01  (ours_amax=3.857e+00 ref_amax=3.858e+00 @1057096)
+  dk  vs ref: max_abs=2.158e-03  max_rel=9.492e-01  (ours_amax=3.920e+00 ref_amax=3.922e+00 @1058571)
+  dv  vs ref: max_abs=1.966e-03  max_rel=6.954e-02  (ours_amax=6.461e+00 ref_amax=6.462e+00 @1050605)
+### bf16 causal regression (two-file)
+VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=1
+[timing] VARLEN total 0.7784 ms  58.62 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=1.340e-02  max_rel=3.805e+00  (ours_amax=3.859e+00 ref_amax=3.849e+00 @1057096)
+  dk  vs ref: max_abs=1.276e-02  max_rel=2.949e+00  (ours_amax=3.922e+00 ref_amax=3.925e+00 @5761)
+  dv  vs ref: max_abs=1.911e-02  max_rel=5.672e+00  (ours_amax=6.469e+00 ref_amax=6.460e+00 @7341839)

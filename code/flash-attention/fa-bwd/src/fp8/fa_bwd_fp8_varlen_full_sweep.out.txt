@@ -1,0 +1,36 @@
+=== varlen_b4_t3840_h16_d128_full_fp8 ===
+VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=0
+cu_seqlens = 0 512 1536 3584 3840
+[timing] VARLEN total 1.9628 ms  23.25 TFLOPS (sum_b 4HL^2D)
+grid main = 128 x 16 x 4 (ksplit=4) | use_regdq=1 | T=3840
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.010e-01  max_rel=4.889e+01  (ours_amax=1.465e+00 ref_amax=1.457e+00 @7843226)
+  dk  vs ref: max_abs=9.651e-02  max_rel=3.795e+01  (ours_amax=1.154e+00 ref_amax=1.190e+00 @7626189)
+  dv  vs ref: max_abs=7.036e-02  max_rel=3.408e+01  (ours_amax=8.595e-01 ref_amax=8.556e-01 @7572341)
+=== varlen_b4_t4096_h16_d128_full_fp8 ===
+VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=0
+cu_seqlens = 0 1024 2048 3072 4096
+[timing] VARLEN total 1.5800 ms  21.75 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 16 x 4 (ksplit=4) | use_regdq=1 | T=4096
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=8.881e-02  max_rel=2.570e+01  (ours_amax=6.648e-01 ref_amax=6.509e-01 @1939770)
+  dk  vs ref: max_abs=7.043e-02  max_rel=2.908e+01  (ours_amax=9.624e-01 ref_amax=9.414e-01 @471383)
+  dv  vs ref: max_abs=5.721e-02  max_rel=2.096e+01  (ours_amax=4.657e-01 ref_amax=4.908e-01 @3312082)
+=== varlen_b5_t3968_h32_d128_full_fp8 ===
+VARLEN: B=5 T=3968 maxlen=2048 H=32 Hkv=8 D=128 causal=0
+cu_seqlens = 0 128 384 896 1920 3968
+[timing] VARLEN total 3.7614 ms  24.34 TFLOPS (sum_b 4HL^2D)
+grid main = 32 x 32 x 5 (ksplit=1) | use_regdq=1 | T=3968
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.429e-01  max_rel=4.626e+01  (ours_amax=1.292e+00 ref_amax=1.383e+00 @163135)
+  dk  vs ref: max_abs=1.598e-01  max_rel=8.360e+01  (ours_amax=1.721e+00 ref_amax=1.627e+00 @106256)
+  dv  vs ref: max_abs=1.079e-01  max_rel=6.101e+01  (ours_amax=1.712e+00 ref_amax=1.753e+00 @108054)
+=== varlen_b8_t2904_h16_d128_full_fp8 ===
+VARLEN: B=8 T=2904 maxlen=2048 H=16 Hkv=16 D=128 causal=0
+cu_seqlens = 0 2048 2560 2688 2784 2848 2880 2896 2904
+[timing] VARLEN total 1.6075 ms  22.87 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 16 x 8 (ksplit=2) | use_regdq=1 | T=2904
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.413e-01  max_rel=7.929e+01  (ours_amax=3.027e+00 ref_amax=3.009e+00 @5939297)
+  dk  vs ref: max_abs=2.058e-01  max_rel=7.744e+01  (ours_amax=3.535e+00 ref_amax=3.563e+00 @5341919)
+  dv  vs ref: max_abs=2.514e-01  max_rel=6.825e+01  (ours_amax=3.230e+00 ref_amax=3.123e+00 @5947209)
