@@ -1422,3 +1422,45 @@ occ 10.77% / Compute 22.02%**；fp16 split1 108.80µs / Waves 0.12 / occ 6.25% �
 **对标**：FA3/TE/FA2 反向均**不支持 head_dim=512**（`fa=NA`/`te=NA`），MLA 性能仅 ours 提供；
 D=128 的 MHA/GQA 对标不受影响（O39 只改 D=512 的 LSE，D=128 TMA 路径逐位回归）。
 原始输出见 `src/{fp8,fp16,bf16}/fa_bwd_*_o39_*` 与各 dtype 文档 §42/§14v/§6ad。
+
+## 16. 非 TMA wgmma LSE 的 K 维 split + varlen 接入（O40，第八十七轮）—— **正结果，默认 auto**
+
+O38/O39 覆盖了 **TMA LSE**（D=128）与 **mma LSE**（D=512），但 **非 TMA 的 wgmma LSE**
+`lse_mma_kernel_bal_wgmma` 未做 split，而它是 ① 定长 D=128/causal 的 `--lsetma=0` 回退、
+② **VARLEN D=128/causal 的默认 LSE**。O40 把 O39 的「K tile 切片 + `lse_split_merge_kernel`
+二次归约」移植到它（三 dtype 单/两文件，device 同步 `identical: True`），并把 split 接进
+`run_varlen`（D=128 wgmma 版 + D=512 mma 版；merge 行数用 packed 的 `T*H`）。auto：D=128
+`grid*split≈2048`（定长）/`≈528`（varlen，一个波）、D=512 `≈256`（fp8）/`≈132`（fp16/bf16），
+再按 `nblk` 封顶。
+
+**定长 `--lsetma=0`（wgmma LSE）与 VARLEN**（同 session，CUDA event；`--lsesplit=1` 基线）：
+
+| case | dtype | split1 | auto | 倍数 | 备注 |
+|---|---|---|---|---|---|
+| MHA S512 preprocess | fp8 | 0.0367 ms | **0.0207** | **1.77×** | total 0.1205→0.1054（1.14×） |
+| MHA S512 preprocess | fp16 | 0.0364 ms | **0.0211** | **1.73×** | total 0.1011→0.0847（1.19×） |
+| MHA S512 preprocess | bf16 | 0.0368 ms | **0.0215** | **1.71×** | total 0.1015→0.0861（1.18×） |
+| MHA S4096 preprocess | fp8 | 0.2958 ms | **0.2673** | **1.11×** | total 2.0804→2.0417（1.02×） |
+| varlen b1_t512_h16 D128 total | fp8 | 0.1255 ms | **0.1072** | **1.17×** | auto=8 |
+| varlen b4_t3840_h16 D128 total | fp8 | 0.9646 ms | **0.9285** | **1.04×** | auto=2 |
+| varlen b1_t512_h2 D512 total | fp8 | 0.1954 ms | **0.1401** | **1.39×** | auto=8 |
+| varlen b3_t1792_h2 D512 total | fp8 | 0.6067 ms | **0.4979** | **1.22×** | auto=4 |
+| varlen b1_t512_h2 D512 total | fp16 | 0.4098 ms | **0.3737** | **1.10×** | auto=8 |
+| varlen b3_t1792_h2 D512 total | fp16 | 0.9112 ms | **0.8607** | **1.06×** | auto=4 |
+| varlen b1_t512_h2 D512 total | bf16 | 0.4100 ms | **0.3737** | **1.10×** | auto=8 |
+| varlen b3_t1792_h2 D512 total | bf16 | 0.9100 ms | **0.8630** | **1.05×** | auto=4 |
+
+**数值**（vs fp32 ref，max_abs dq/dk/dv）：定长 fp8 2.426/2.972/3.733e-1、fp16 1.671/1.771/
+1.899e-3、bf16 9.001/12.61/13.65e-3；varlen fp8 b1_t512_h16 2.280e-1/3.108e-1/3.422e-1、
+b1_t512_h2 D512 1.613e-1/2.238e-1/3.864e-1；fp16 b1_t512_h2 D512 1.303e-3/1.537e-3/1.557e-3；
+bf16 b1_t512_h2 D512 8.042e-3/1.097e-2/1.391e-2 —— 全与历史**逐位一致**；
+`max_abs(split-auto vs split1)=0`。D=128 MHA/GQA 默认 TMA 路径回归不受影响。
+
+**ncu**（LSE `lse_mma_kernel_bal_wgmma`，S512，同 binary split1 vs split8）：fp8 split1
+Duration 37.22µs / Waves 0.07 / occ 6.25% / Compute 8.21% → split8 **14.56µs（2.56×）/ Waves 0.55 /
+occ 20.26% / Compute 33.32%**；fp16 33.66→**14.85µs**、bf16 33.50→**14.91µs**（Waves 0.12→0.97、
+occ 6.25%→19.27%）。**墙 = 网格不足一个波；split 填满后回到 LSE 固有 `mma wait` + smem 依赖**。
+
+**对标**：varlen / D=512 无 FA/TE 基线（仅 ours）；定长 D=128 默认 TMA 路径逐位回归、
+对标不受影响（MHA S4096 ours total 约 FA3 的 3.9×）。原始输出见 `src/{fp8,fp16,bf16}/fa_bwd_*_o40_*`
+与各 dtype 文档 §43/§14w/§6ae。

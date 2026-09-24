@@ -1151,7 +1151,8 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
                          float* __restrict__ lse, int S, int H, int Hkv, float scale,
                          const int* __restrict__ cu_seqlens = nullptr,
                          const int* __restrict__ pt_b = nullptr,
-                         const int* __restrict__ pt_pair = nullptr) {
+                         const int* __restrict__ pt_pair = nullptr,
+                         float* __restrict__ lse_part = nullptr, int ksplit = 1) {
   static_assert(HD == 128, "wgmma LSE 目前只做 HD=128");
   constexpr int HDV = HD / 16;                         // 每行 16B（16 个 fp8）unit 数
   constexpr int TILE = (LBM / 8) * (HD / 128) * 1024;  // 单个 SW128 tile 字节数（HD=128→8KB）
@@ -1164,11 +1165,17 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
   float* qs_s = reinterpret_cast<float*>(Ks + (PIPE ? 2 : 1) * TILE);
   float* ks_s = qs_s + LBM;  // PIPE=1：2*LBN
 
+  // O40：K 维 split（与 O38/O39 的 mma/TMA LSE 同构）。`ksplit>1` 时每个 (pair,mblk) 只扫
+  //   本 m 块 K 范围的第 `ksp` 个连续 tile 切片，部分 (m,l) 写 `lse_part`，由
+  //   `lse_split_merge_kernel` 汇总。非紧凑 varlen 用 blockIdx.z 编 `(b,ksp)`；紧凑网格
+  //   （pt_b/pt_pair 非空）用 blockIdx.z 仅编 `ksp`（b 由表给出）。
   // VARLEN 均衡分块（第八十二轮）：定长/旧 varlen 用 (pair=blockIdx.x, h=blockIdx.y,
   //   b=blockIdx.z)；紧凑表 `pt_b/pt_pair` 只枚举每个序列的有效镜像对（pair < ceil(nblk/2)），
   //   grid = (total_pairs, H, 1)。消掉「以 maxlen 为界」时短序列的越界早退 CTA。
   const int pair = pt_pair ? pt_pair[blockIdx.x] : blockIdx.x;
-  const int h = blockIdx.y, b = pt_b ? pt_b[blockIdx.x] : blockIdx.z;
+  const int h = blockIdx.y;
+  const int b = pt_b ? pt_b[blockIdx.x] : (blockIdx.z / ksplit);
+  const int ksp = pt_b ? blockIdx.z : (blockIdx.z % ksplit);
   // VARLEN：cu_seqlens 给出每个序列在 packed [T,H,D] 里的 token 基址与长度。
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
   const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
@@ -1232,20 +1239,25 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
 
     const int ncols = min(len, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
+    // O40：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
+    const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
+    const int nt1 = (int)(((long)ntiles * (ksp + 1)) / ksplit);
+    const int nuse = nt1 - nt0;
     if constexpr (PIPE) {
-      if (ntiles > 0) issue_k(Ks, ks_s, 0);
+      if (nuse > 0) issue_k(Ks, ks_s, nt0 * LBN);
     }
     float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
 
-    for (int nt = 0; nt < ntiles; ++nt) {
+    for (int rnt = 0; rnt < nuse; ++rnt) {
+      const int nt = nt0 + rnt;
       const int j0 = nt * LBN;
-      char* Kt = Ks + (PIPE ? (nt & 1) * TILE : 0);
-      float* KtS = ks_s + (PIPE ? (nt & 1) * LBN : 0);
+      char* Kt = Ks + (PIPE ? (rnt & 1) * TILE : 0);
+      float* KtS = ks_s + (PIPE ? (rnt & 1) * LBN : 0);
       if constexpr (PIPE) {
         asm volatile("cp.async.wait_group 0;\n");
         __syncthreads();
-        if (nt + 1 < ntiles)
-          issue_k(Ks + ((nt + 1) & 1) * TILE, ks_s + ((nt + 1) & 1) * LBN, j0 + LBN);
+        if (rnt + 1 < nuse)
+          issue_k(Ks + ((rnt + 1) & 1) * TILE, ks_s + ((rnt + 1) & 1) * LBN, j0 + LBN);
       } else {
         issue_k(Ks, ks_s, j0);
         __syncthreads();
@@ -1289,7 +1301,15 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < len) lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
+        if (qi < len) {
+          if (ksplit == 1) {
+            lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
+          } else {
+            size_t row = ((size_t)(qbase + qi)) * H + h;
+            lse_part[(row * ksplit + ksp) * 2 + 0] = m;
+            lse_part[(row * ksplit + ksp) * 2 + 1] = l;
+          }
+        }
       }
     }
     // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）

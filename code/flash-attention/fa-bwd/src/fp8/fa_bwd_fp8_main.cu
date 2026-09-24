@@ -226,7 +226,8 @@ template <int HD, int PIPE>
 static void launch_lse_bal(dim3 lg, const unsigned char* q8, const float* qs,
                            const unsigned char* k8, const float* ks, float* lse, int S, int H,
                            int Hkv, float scale, const int* cu = nullptr,
-                           float* lse_part = nullptr, int ksplit = 1) {
+                           float* lse_part = nullptr, int ksplit = 1,
+                           long long merge_rows = -1) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = PIPE ? Cfg::lse_smem_bytes_bal1 : Cfg::lse_smem_bytes_bal0;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<HD, PIPE>,
@@ -237,7 +238,7 @@ static void launch_lse_bal(dim3 lg, const unsigned char* q8, const float* qs,
   lse_mma_kernel_bal<HD, PIPE><<<g, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv, scale,
                                                        cu, lse_part, ksplit);
   if (ksplit > 1) {
-    const long long nrows = (long long)B * S * H;
+    const long long nrows = (merge_rows >= 0) ? merge_rows : (long long)B * S * H;
     const int th = 256;
     const long long bl = (nrows + th - 1) / th;
     lse_split_merge_kernel<<<(unsigned)bl, th>>>(lse_part, lse, nrows, ksplit);
@@ -251,13 +252,26 @@ static void launch_lse_bal_wgmma(dim3 lg, const unsigned char* q8, const float* 
                                  const unsigned char* k8, const float* ks, float* lse, int S,
                                  int H, int Hkv, float scale,
                                  const int* cu_seqlens = nullptr,
-                                 const int* pt_b = nullptr, const int* pt_pair = nullptr) {
+                                 const int* pt_b = nullptr, const int* pt_pair = nullptr,
+                                 float* lse_part = nullptr, int ksplit = 1,
+                                 long long merge_rows = -1) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = PIPE ? Cfg::lse_smem_bytes_balw1 : Cfg::lse_smem_bytes_balw0;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<HD, PIPE>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  lse_mma_kernel_bal_wgmma<HD, PIPE><<<lg, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv,
-                                                             scale, cu_seqlens, pt_b, pt_pair);
+  // O40：K 维 split（对齐 O38/O39）。紧凑网格（pt_pair 非空）时 grid.z 只编 `ksp`（b 由表给出），
+  //   否则编 `(b,ksp)`。`ksplit==1` 时内核逐位退化为 O9c 原路径、不写 part、不 launch merge。
+  const int B = (int)lg.z;
+  dim3 g(lg.x, lg.y, pt_pair ? (unsigned)ksplit : (unsigned)((size_t)B * ksplit));
+  lse_mma_kernel_bal_wgmma<HD, PIPE><<<g, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv,
+                                                             scale, cu_seqlens, pt_b, pt_pair,
+                                                             lse_part, ksplit);
+  if (ksplit > 1) {
+    const long long nrows = (merge_rows >= 0) ? merge_rows : (long long)B * S * H;
+    const int th = 256;
+    const long long bl = (nrows + th - 1) / th;
+    lse_split_merge_kernel<<<(unsigned)bl, th>>>(lse_part, lse, nrows, ksplit);
+  }
 }
 #endif
 
@@ -313,7 +327,7 @@ static void launch_lse_bal_tma_split(dim3 lg, const CUtensorMap& qmap, const CUt
 // causal / 非 causal 均支持：causal 走镜像配对的 wgmma LSE，非 causal（各块工作量相同）走
 // O1 的 mma LSE；非 TMA 路径（LSE 用 wgmma/mma，主 kernel Q/dO 用 cp.async）。
 static int run_varlen(const std::string& dir, bool causal, int iters, bool compact = false,
-                      bool lse_compact = false) {
+                      bool lse_compact = false, int lse_split = 0) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -354,6 +368,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   float *d_q_f, *d_k_f, *d_v_f, *d_do_f, *d_o_f;
   unsigned char *d_q8, *d_k8, *d_v8, *d_do8;
   float *d_qs, *d_ks, *d_vs, *d_dos, *d_delta, *d_lse, *d_dq, *d_dk, *d_dv;
+  float* d_lse_part = nullptr;   // O40：varlen LSE 的 K 维 split 部分结果（[T*H][ksplit] 个 (m,l)）
   int* d_cu;
   CUDA_CHECK(cudaMalloc(&d_q_f, nq * 4));
   CUDA_CHECK(cudaMalloc(&d_k_f, nkv * 4));
@@ -369,6 +384,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   CUDA_CHECK(cudaMalloc(&d_dos, rows_q * 4));
   CUDA_CHECK(cudaMalloc(&d_delta, rows_q * 4));
   CUDA_CHECK(cudaMalloc(&d_lse, rows_q * 4));
+  // O40：按最大 split=16 预留（与定长路径一致；实际只用到 auto 选出的 ksplit）。
+  CUDA_CHECK(cudaMalloc(&d_lse_part, rows_q * 16 * 2 * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_dq, nq * 4));
   CUDA_CHECK(cudaMalloc(&d_dk, nkv * 4));
   CUDA_CHECK(cudaMalloc(&d_dv, nkv * 4));
@@ -437,6 +454,23 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   const int ksplit = (int)kp;
   const bool use_regdq = (D == 128) && ((long)(maxlen / 32) / 2 / ksplit >= 4);
 
+  // O40：varlen LSE 的 K 维 split auto（D=128 目标 `grid*split≈2048`、cap 8；D=512 `≈256`、
+  //   cap 16，与定长 O38/O39 同标定）；`--lsesplit=N`（>0）直接指定。再按最大序列的 tile 数封顶。
+  const int nblk0 = (maxlen + LBM - 1) / LBM;
+  int lse_split_eff = lse_split;
+  if (lse_split_eff <= 0) {
+    long base = (D == 128 && lse_compact) ? (long)total_pairs * H
+                                          : (long)((nblk0 + 1) / 2) * H * B;
+    const int target = (D == 512) ? 256 : 2048;
+    const int cap = (D == 512) ? 16 : 8;
+    int sp = 1;
+    while (sp < cap && base * (sp * 2) <= target) sp *= 2;
+    while (sp > nblk0 && sp > 1) sp >>= 1;
+    lse_split_eff = sp;
+  }
+  printf("O40: varlen lse k-split = %d (base=%ld)\n", lse_split_eff,
+         (D == 128 && lse_compact) ? (long)total_pairs * H : (long)((nblk0 + 1) / 2) * H * B);
+
   auto run_all = [&]() {
     const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
     const int gq = (int)std::min<long long>((rq + 3) / 4, 65535);
@@ -465,12 +499,15 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       // D==128 走 wgmma 版（SW128 + wgmma）；D==512（MLA）只有 mma 版（HD>128 无 SW128 快路）。
       if (D == 128 && lse_compact)
         launch_lse_bal_wgmma<128, 1>(dim3(total_pairs, H, 1), d_q8, d_qs, d_k8, d_ks, d_lse,
-                                     maxlen, H, Hkv, scale, d_cu, d_ptb, d_ptp);
+                                     maxlen, H, Hkv, scale, d_cu, d_ptb, d_ptp,
+                                     d_lse_part, lse_split_eff, (long long)rows_q);
       else if (D == 128)
         launch_lse_bal_wgmma<128, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
-                                     d_cu);
+                                     d_cu, nullptr, nullptr, d_lse_part, lse_split_eff,
+                                     (long long)rows_q);
       else
-        launch_lse_bal<512, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu);
+        launch_lse_bal<512, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
+                               d_lse_part, lse_split_eff, (long long)rows_q);
     } else {
       dim3 lg(nblk, H, B);
       if (D == 128)
@@ -632,7 +669,7 @@ int main(int argc, char** argv) {
     else if (!a.empty() && a[0] != '-') dir = a;
   }
 
-  if (varlen) return run_varlen(dir, causal, iters, compact_opt, lse_compact_opt);
+  if (varlen) return run_varlen(dir, causal, iters, compact_opt, lse_compact_opt, lse_split);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
@@ -896,7 +933,8 @@ int main(int argc, char** argv) {
 #ifdef FA_WGMMA
         if (lsewgm)
           launch_lse_bal_wgmma<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv,
-                                       scale);
+                                       scale, nullptr, nullptr, nullptr, d_lse_part,
+                                       lse_split_eff);
         else
 #endif
           launch_lse_bal<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale,

@@ -1,0 +1,1 @@
+bash: line 1: ./bf16/fa_bwd_bf16_mma_main.out: No such file or directory

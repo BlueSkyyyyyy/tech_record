@@ -1110,7 +1110,8 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
                          float* __restrict__ lse, int S, int H, int Hkv, float scale,
                          const int* __restrict__ cu_seqlens = nullptr,
                          const int* __restrict__ pt_b = nullptr,
-                         const int* __restrict__ pt_pair = nullptr) {
+                         const int* __restrict__ pt_pair = nullptr,
+                         float* __restrict__ lse_part = nullptr, int ksplit = 1) {
   static_assert(HD == 128, "wgmma LSE 目前只做 HD=128");
   constexpr int HDV = HD / 16;                         // 每行 16B（16 个 fp8）unit 数
   constexpr int TILE = (LBM / 8) * (HD / 128) * 1024;  // 单个 SW128 tile 字节数（HD=128→8KB）
@@ -1123,11 +1124,17 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
   float* qs_s = reinterpret_cast<float*>(Ks + (PIPE ? 2 : 1) * TILE);
   float* ks_s = qs_s + LBM;  // PIPE=1：2*LBN
 
+  // O40：K 维 split（与 O38/O39 的 mma/TMA LSE 同构）。`ksplit>1` 时每个 (pair,mblk) 只扫
+  //   本 m 块 K 范围的第 `ksp` 个连续 tile 切片，部分 (m,l) 写 `lse_part`，由
+  //   `lse_split_merge_kernel` 汇总。非紧凑 varlen 用 blockIdx.z 编 `(b,ksp)`；紧凑网格
+  //   （pt_b/pt_pair 非空）用 blockIdx.z 仅编 `ksp`（b 由表给出）。
   // VARLEN 均衡分块（第八十二轮）：定长/旧 varlen 用 (pair=blockIdx.x, h=blockIdx.y,
   //   b=blockIdx.z)；紧凑表 `pt_b/pt_pair` 只枚举每个序列的有效镜像对（pair < ceil(nblk/2)），
   //   grid = (total_pairs, H, 1)。消掉「以 maxlen 为界」时短序列的越界早退 CTA。
   const int pair = pt_pair ? pt_pair[blockIdx.x] : blockIdx.x;
-  const int h = blockIdx.y, b = pt_b ? pt_b[blockIdx.x] : blockIdx.z;
+  const int h = blockIdx.y;
+  const int b = pt_b ? pt_b[blockIdx.x] : (blockIdx.z / ksplit);
+  const int ksp = pt_b ? blockIdx.z : (blockIdx.z % ksplit);
   // VARLEN：cu_seqlens 给出每个序列在 packed [T,H,D] 里的 token 基址与长度。
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
   const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
@@ -1191,20 +1198,25 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
 
     const int ncols = min(len, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
+    // O40：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
+    const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
+    const int nt1 = (int)(((long)ntiles * (ksp + 1)) / ksplit);
+    const int nuse = nt1 - nt0;
     if constexpr (PIPE) {
-      if (ntiles > 0) issue_k(Ks, ks_s, 0);
+      if (nuse > 0) issue_k(Ks, ks_s, nt0 * LBN);
     }
     float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
 
-    for (int nt = 0; nt < ntiles; ++nt) {
+    for (int rnt = 0; rnt < nuse; ++rnt) {
+      const int nt = nt0 + rnt;
       const int j0 = nt * LBN;
-      char* Kt = Ks + (PIPE ? (nt & 1) * TILE : 0);
-      float* KtS = ks_s + (PIPE ? (nt & 1) * LBN : 0);
+      char* Kt = Ks + (PIPE ? (rnt & 1) * TILE : 0);
+      float* KtS = ks_s + (PIPE ? (rnt & 1) * LBN : 0);
       if constexpr (PIPE) {
         asm volatile("cp.async.wait_group 0;\n");
         __syncthreads();
-        if (nt + 1 < ntiles)
-          issue_k(Ks + ((nt + 1) & 1) * TILE, ks_s + ((nt + 1) & 1) * LBN, j0 + LBN);
+        if (rnt + 1 < nuse)
+          issue_k(Ks + ((rnt + 1) & 1) * TILE, ks_s + ((rnt + 1) & 1) * LBN, j0 + LBN);
       } else {
         issue_k(Ks, ks_s, j0);
         __syncthreads();
@@ -1248,7 +1260,15 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < len) lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
+        if (qi < len) {
+          if (ksplit == 1) {
+            lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
+          } else {
+            size_t row = ((size_t)(qbase + qi)) * H + h;
+            lse_part[(row * ksplit + ksp) * 2 + 0] = m;
+            lse_part[(row * ksplit + ksp) * 2 + 1] = l;
+          }
+        }
       }
     }
     // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
@@ -2968,7 +2988,8 @@ template <int HD, int PIPE>
 static void launch_lse_bal(dim3 lg, const unsigned char* q8, const float* qs,
                            const unsigned char* k8, const float* ks, float* lse, int S, int H,
                            int Hkv, float scale, const int* cu = nullptr,
-                           float* lse_part = nullptr, int ksplit = 1) {
+                           float* lse_part = nullptr, int ksplit = 1,
+                           long long merge_rows = -1) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = PIPE ? Cfg::lse_smem_bytes_bal1 : Cfg::lse_smem_bytes_bal0;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<HD, PIPE>,
@@ -2979,7 +3000,7 @@ static void launch_lse_bal(dim3 lg, const unsigned char* q8, const float* qs,
   lse_mma_kernel_bal<HD, PIPE><<<g, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv, scale,
                                                        cu, lse_part, ksplit);
   if (ksplit > 1) {
-    const long long nrows = (long long)B * S * H;
+    const long long nrows = (merge_rows >= 0) ? merge_rows : (long long)B * S * H;
     const int th = 256;
     const long long bl = (nrows + th - 1) / th;
     lse_split_merge_kernel<<<(unsigned)bl, th>>>(lse_part, lse, nrows, ksplit);
@@ -2992,13 +3013,27 @@ template <int HD, int PIPE>
 static void launch_lse_bal_wgmma(dim3 lg, const unsigned char* q8, const float* qs,
                                  const unsigned char* k8, const float* ks, float* lse, int S,
                                  int H, int Hkv, float scale,
-                                 const int* cu_seqlens = nullptr) {
+                                 const int* cu_seqlens = nullptr,
+                                 const int* pt_b = nullptr, const int* pt_pair = nullptr,
+                                 float* lse_part = nullptr, int ksplit = 1,
+                                 long long merge_rows = -1) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = PIPE ? Cfg::lse_smem_bytes_balw1 : Cfg::lse_smem_bytes_balw0;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<HD, PIPE>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  lse_mma_kernel_bal_wgmma<HD, PIPE><<<lg, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv,
-                                                             scale, cu_seqlens);
+  // O40：K 维 split（对齐 O38/O39）。紧凑网格（pt_pair 非空）时 grid.z 只编 `ksp`（b 由表给出），
+  //   否则编 `(b,ksp)`。`ksplit==1` 时内核逐位退化为 O9c 原路径、不写 part、不 launch merge。
+  const int B = (int)lg.z;
+  dim3 g(lg.x, lg.y, pt_pair ? (unsigned)ksplit : (unsigned)((size_t)B * ksplit));
+  lse_mma_kernel_bal_wgmma<HD, PIPE><<<g, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv,
+                                                             scale, cu_seqlens, pt_b, pt_pair,
+                                                             lse_part, ksplit);
+  if (ksplit > 1) {
+    const long long nrows = (merge_rows >= 0) ? merge_rows : (long long)B * S * H;
+    const int th = 256;
+    const long long bl = (nrows + th - 1) / th;
+    lse_split_merge_kernel<<<(unsigned)bl, th>>>(lse_part, lse, nrows, ksplit);
+  }
 }
 #endif
 
@@ -3050,7 +3085,7 @@ static void launch_lse_bal_tma_split(dim3 lg, const CUtensorMap& qmap, const CUt
 // `S` 参数传各序列最大长度 maxlen；每个 (b,h,mblk) 只处理自己序列内的 tile。
 // ref 输出 `ref_dq/dk/dv.npy` 也是 packed 布局。FA/TE 不支持变长（本机版本），只对 fp32 ref。
 // 只做 causal（非 causal 留后续）；非 TMA 路径（LSE 用 wgmma，主 kernel Q/dO 用 cp.async）。
-static int run_varlen(const std::string& dir, bool causal, int iters) {
+static int run_varlen(const std::string& dir, bool causal, int iters, int lse_split = 0) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -3106,6 +3141,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   CUDA_CHECK(cudaMalloc(&d_dos, rows_q * 4));
   CUDA_CHECK(cudaMalloc(&d_delta, rows_q * 4));
   CUDA_CHECK(cudaMalloc(&d_lse, rows_q * 4));
+  // O40：varlen LSE 的 K 维 split 部分结果（[T*H][ksplit] 个 (m,l)），按最大 split=16 预留。
+  float* d_lse_part = nullptr;
+  CUDA_CHECK(cudaMalloc(&d_lse_part, rows_q * 16 * 2 * sizeof(float)));
   CUDA_CHECK(cudaMalloc(&d_dq, nq * 4));
   CUDA_CHECK(cudaMalloc(&d_dk, nkv * 4));
   CUDA_CHECK(cudaMalloc(&d_dv, nkv * 4));
@@ -3133,6 +3171,22 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   long kp = 1; while (kp * 2 <= kk) kp *= 2;
   const int ksplit = (int)kp;
   const bool use_regdq = (D == 128) && ((long)(maxlen / 32) / 2 / ksplit >= 4);
+
+  // O40：varlen LSE 的 K 维 split auto（D=128 目标 `grid*split≈2048`、cap 8；D=512 `≈256`、
+  //   cap 16，与定长 O38/O39 同标定）；`--lsesplit=N`（>0）直接指定。再按最大序列的 tile 数封顶。
+  const int nblk0 = (maxlen + LBM - 1) / LBM;
+  int lse_split_eff = lse_split;
+  if (lse_split_eff <= 0) {
+    long base = (long)((nblk0 + 1) / 2) * H * B;
+    const int target = (D == 512) ? 256 : 2048;
+    const int cap = (D == 512) ? 16 : 8;
+    int sp = 1;
+    while (sp < cap && base * (sp * 2) <= target) sp *= 2;
+    while (sp > nblk0 && sp > 1) sp >>= 1;
+    lse_split_eff = sp;
+  }
+  printf("O40: varlen lse k-split = %d (base=%ld)\n", lse_split_eff,
+         (long)((nblk0 + 1) / 2) * H * B);
 
   auto run_all = [&]() {
     const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
@@ -3162,9 +3216,11 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
       // D==128 走 wgmma 版（SW128 + wgmma）；D==512（MLA）只有 mma 版（HD>128 无 SW128 快路）。
       if (D == 128)
         launch_lse_bal_wgmma<128, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
-                                     d_cu);
+                                     d_cu, nullptr, nullptr, d_lse_part, lse_split_eff,
+                                     (long long)rows_q);
       else
-        launch_lse_bal<512, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu);
+        launch_lse_bal<512, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
+                               d_lse_part, lse_split_eff, (long long)rows_q);
     } else {
       dim3 lg(nblk, H, B);
       if (D == 128)
@@ -3306,7 +3362,7 @@ int main(int argc, char** argv) {
     else if (!a.empty() && a[0] != '-') dir = a;
   }
 
-  if (varlen) return run_varlen(dir, causal, iters);
+  if (varlen) return run_varlen(dir, causal, iters, lse_split);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
@@ -3517,14 +3573,16 @@ int main(int argc, char** argv) {
 #if defined(FA_WGMMA) && defined(FA_TMA)
   // O32：建 LSE 的 Q/K 4D TMA 描述符（一次，供所有 (h,b) CTA 用坐标选择）。
   CUtensorMap qmap_lse, kmap_lse;
-  if (D == 128 && lse_tma) {
+  // 注：O32/O9c A/B 段无论 `--lsetma` 取值都会跑 TMA 版 LSE，故 D==128 时始终建描述符
+  //     （否则 `--lsetma=0` 会拿未初始化 map 启动 TMA kernel → illegal instruction）。
+  if (D == 128) {
     qmap_lse = make_lse_map_fp8(d_q8, H, S, D, B);
     kmap_lse = make_lse_map_fp8(d_k8, Hkv, S, D, B);
   }
   // O37：主 kernel 的 Q/dO TMA 描述符（box={128,BM=64}，与 LSE 同一 dims={D,S,H,B}）。
   if (qd_tma < 0) qd_tma = 1;   // 默认开（对齐 O32 的 lsetma；`--qdtma=0` 供 A/B）
   CUtensorMap qmap_main, dmap_main;
-  if (D == 128 && qd_tma) {
+  if (D == 128) {
     qmap_main = make_lse_map_fp8(d_q8, H, S, D, B);
     dmap_main = make_lse_map_fp8(d_do8, H, S, D, B);
   }
@@ -3553,7 +3611,8 @@ int main(int argc, char** argv) {
 #ifdef FA_WGMMA
         if (lsewgm)
           launch_lse_bal_wgmma<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv,
-                                       scale);
+                                       scale, nullptr, nullptr, nullptr, d_lse_part,
+                                       lse_split_eff);
         else
 #endif
           launch_lse_bal<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale,
