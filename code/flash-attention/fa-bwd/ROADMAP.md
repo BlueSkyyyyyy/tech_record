@@ -2306,36 +2306,81 @@
      `..._varlen_{tma,cpasync}_ncu_main_b4_t3840.out.txt`、`..._varlen_fa3_te_baseline.out.txt`。
 
 - 2026-09-25（第八十四轮）：**O38 完成（fp8 LSE 的 K 维 split + 二次归约；默认 auto，正结果）**。
-  - 动机：第 82 轮把「均衡分块」判负、第 83 轮把「varlen TMA」判负后，排除了 LSE 的两条旁路，
-    只剩「**把 K 维 split 开 + 二次归约**」这条真杠杆——镜像配对把每 CTA 工作压成常数 `nblk+1`，
-    但小 S/H 下 grid 远小于 SM 数（S512/H16 仅 64 CTA；ncu Compute 7.6%、achieved occ 6.25%），
-    S4096 也只铺 0.48 波。
-  - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
-    `lse_mma_kernel_bal_tma<HD,PIPE>` 加 `float* lse_part, int ksplit`，grid `(pairs,H,B*ksplit)`，
-    每个 `(pair,ksp)` 只扫本 m 块 K tile 的连续切片 `[ntiles·ksp/ksplit, ntiles·(ksp+1)/ksplit)`
-    （流水 stage 用切片内相对下标，避免 `nt0` 奇偶错位）；`ksplit==1` 仍直接写 `lse`（逐位退化为
-    O32）。新增 `lse_split_merge_kernel`（`[row][ksp]->(m,l)` 沿 ksp 做 online-softmax 合并后
-    `lse=m+log(l)`）。host 新增 `launch_lse_bal_tma_split` + CLI `--lsesplit=N`，
-    **默认 `0=auto`**（目标 `grid*split≈2048`、上限 8；`1` 强制关闭）。
-  - **数值**：`auto` vs ref 与历史（O27/O28/O32/O37）**逐位一致到打印精度**（S512
-    2.426/2.972/3.733e-1；S1024H32 2.399/4.177/3.535e-1；kv4 2.517/5.339/7.173e-1；
-    kv8 2.869/5.367/7.032e-1；MQA 4.101e-1/1.572/2.126；S4096 2.635/2.644/3.216e-1；
-    MLA D512 不变）；`max_abs(split-vs-split1)` 4.8e-7–1.9e-6（纯 fp32 求和次序）。
-  - **性能**（同 session A/B，event）：**LSE-only** S512 **2.03×**、S1024H32 1.62×、kv4 1.62×、
-    kv8 1.40×、MQA 1.10×、S4096 1.25×；**端到端** split1→auto：S512 0.1150→**0.1030（1.12×）**、
-    S1024H32 0.4185→0.4010、kv4 0.3879→0.3690、kv8 0.4684→0.4540、MQA 0.6431→0.6395、
-    S4096 2.0474→**1.9970（1.025×）**、MLA 0.3922→0.3908（不生效）。merge（S4096 split8）
-    仅 5.86µs（~2.4%）。单/两文件一致。
-  - **ncu（LSE 主 kernel）**：S512 grid 64→512、Duration 33.41→**13.38µs（2.50×）**、occ
-    6.25%→**19.78%**、Compute 7.57%→**27.69%**、Ipc 0.68→1.55；S4096 grid 512→4096、
-    Duration 250.85→**198.46µs（1.26×）**、occ 23.58%→**45.30%**、Compute 57.01%→**78.25%**、
-    Ipc 2.35→3.24 ⇒ **此前的墙不是指令/访存，而是并行度/临界路径**（O32「已接近下限」指指令侧）。
-  - **对标**（同 session）：TE FP8（`fa_bwd_bench.py bench --dtype fp8`）S512 **0.1011ms/42.50TF**、
-    S4096 **0.5917ms/464.59TF** ⇒ ours total S512 **1.02×（几乎追平 TE FP8；O37 时 1.21×）**、
-    S4096 **3.38×（O37 3.49×）**。FA3 fp16 MHA S4096 0.3242/848、GQA kv4 S1024 0.0824/417（参照）。
-  - 原始输出 `src/fp8/fa_bwd_fp8_o38_default_sweep.out.txt`、`..._o38_main_sweep.out.txt`、
-    `..._o38_ncu_lse_split{1,8}_s512.out.txt`、`..._o38_ncu_lse_s4096.out.txt`、
-    `..._o38_ncu_merge_s4096.out.txt`、`..._o38_te_fa3_baseline.out.txt`；文档 `docs/03` §41、`docs/04` §13。
+   - 动机：第 82 轮把「均衡分块」判负、第 83 轮把「varlen TMA」判负后，排除了 LSE 的两条旁路，
+     只剩「**把 K 维 split 开 + 二次归约**」这条真杠杆——镜像配对把每 CTA 工作压成常数 `nblk+1`，
+     但小 S/H 下 grid 远小于 SM 数（S512/H16 仅 64 CTA；ncu Compute 7.6%、achieved occ 6.25%），
+     S4096 也只铺 0.48 波。
+   - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+     `lse_mma_kernel_bal_tma<HD,PIPE>` 加 `float* lse_part, int ksplit`，grid `(pairs,H,B*ksplit)`，
+     每个 `(pair,ksp)` 只扫本 m 块 K tile 的连续切片 `[ntiles·ksp/ksplit, ntiles·(ksp+1)/ksplit)`
+     （流水 stage 用切片内相对下标，避免 `nt0` 奇偶错位）；`ksplit==1` 仍直接写 `lse`（逐位退化为
+     O32）。新增 `lse_split_merge_kernel`（`[row][ksp]->(m,l)` 沿 ksp 做 online-softmax 合并后
+     `lse=m+log(l)`）。host 新增 `launch_lse_bal_tma_split` + CLI `--lsesplit=N`，
+     **默认 `0=auto`**（目标 `grid*split≈2048`、上限 8；`1` 强制关闭）。
+   - **数值**：`auto` vs ref 与历史（O27/O28/O32/O37）**逐位一致到打印精度**（S512
+     2.426/2.972/3.733e-1；S1024H32 2.399/4.177/3.535e-1；kv4 2.517/5.339/7.173e-1；
+     kv8 2.869/5.367/7.032e-1；MQA 4.101e-1/1.572/2.126；S4096 2.635/2.644/3.216e-1；
+     MLA D512 不变）；`max_abs(split-vs-split1)` 4.8e-7–1.9e-6（纯 fp32 求和次序）。
+   - **性能**（同 session A/B，event）：**LSE-only** S512 **2.03×**、S1024H32 1.62×、kv4 1.62×、
+     kv8 1.40×、MQA 1.10×、S4096 1.25×；**端到端** split1→auto：S512 0.1150→**0.1030（1.12×）**、
+     S1024H32 0.4185→0.4010、kv4 0.3879→0.3690、kv8 0.4684→0.4540、MQA 0.6431→0.6395、
+     S4096 2.0474→**1.9970（1.025×）**、MLA 0.3922→0.3908（不生效）。merge（S4096 split8）
+     仅 5.86µs（~2.4%）。单/两文件一致。
+   - **ncu（LSE 主 kernel）**：S512 grid 64→512、Duration 33.41→**13.38µs（2.50×）**、occ
+     6.25%→**19.78%**、Compute 7.57%→**27.69%**、Ipc 0.68→1.55；S4096 grid 512→4096、
+     Duration 250.85→**198.46µs（1.26×）**、occ 23.58%→**45.30%**、Compute 57.01%→**78.25%**、
+     Ipc 2.35→3.24 ⇒ **此前的墙不是指令/访存，而是并行度/临界路径**（O32「已接近下限」指指令侧）。
+   - **对标**（同 session）：TE FP8（`fa_bwd_bench.py bench --dtype fp8`）S512 **0.1011ms/42.50TF**、
+     S4096 **0.5917ms/464.59TF** ⇒ ours total S512 **1.02×（几乎追平 TE FP8；O37 时 1.21×）**、
+     S4096 **3.38×（O37 3.49×）**。FA3 fp16 MHA S4096 0.3242/848、GQA kv4 S1024 0.0824/417（参照）。
+   - 原始输出 `src/fp8/fa_bwd_fp8_o38_default_sweep.out.txt`、`..._o38_main_sweep.out.txt`、
+     `..._o38_ncu_lse_split{1,8}_s512.out.txt`、`..._o38_ncu_lse_s4096.out.txt`、
+     `..._o38_ncu_merge_s4096.out.txt`、`..._o38_te_fa3_baseline.out.txt`；文档 `docs/03` §41、`docs/04` §13。
+
+- 2026-09-25（第八十五轮）：**O38-fp16/bf16 完成（把 fp8 的 LSE K 维 split + 二次归约移植到
+  fp16/bf16 的 TMA LSE；默认 auto，正结果）**。
+  - 动机：第八十四轮把 fp8 LSE 的并行度/临界路径打掉后（`docs/03` §41），「下一步候选 ①」
+    就是**把同一套做法移植到 fp16/bf16**——`lse_mma_kernel_bal_tma`（D=128/causal 默认快路）
+    仍是「每 CTA 串行扫 `nblk+1` 个 K tile」，S512/H16 时 grid 仅 64、ncu Waves 0.12、occ 6.25%。
+  - **改动**（单/两文件 device 逐字一致，fp16/bf16 各 `sync_onefile_device.py` 核对
+    `identical: True`）：`lse_mma_kernel_bal_tma<HD,PIPE>` 加 `float* lse_part, int ksplit`；
+    grid `(pairs,H,B*ksplit)`、`b=blockIdx.z/ksplit, ksp=blockIdx.z%ksplit`；每 `(pair,ksp)`
+    只扫 K tile 切片 `[nt0,nt1)=[ntiles·ksp/ksplit, ntiles·(ksp+1)/ksplit)`；流水 stage 用
+    **切片内相对下标 `rnt&1`**（避免 `nt0` 奇偶错位）；`ksplit==1` 直接写 `lse`（逐位退化为 O30/O31）。
+    新增 `lse_split_merge_kernel`（`[row][ksp]->(m,l)` online-softmax 合并）。host 加
+    `--lsesplit=N`（`0=auto`），**auto 目标 `grid*split≈528`**（= 4 CTA/SM × 132 SM = 一个波；
+    fp16/bf16 LSE smem ~50KB ⇒ 4 CTA/SM），上限 8；grid 已满一波则退回 1。
+    > **与 fp8 的 auto（`≈2048`）不同**：fp16/bf16 的 LSE 并行度更高，且 S4096 时 512 CTA 已
+    > 铺满一波，`split>1` 实测**反而慢 3–7%**（fp8 则大 S 仍 1.25×），故以「一波」为准。
+  - **附带修 bug**：bf16 **单文件**在 `-DFA_TMA` 构建下缺 `make_lse_map`/`make_main_map`
+    （历次 device 同步把夹在 device 区与 `struct NpyF32` 之间的 host 段吞掉）而无法编译；
+    本轮把这两个 host 函数补回并移到 `struct NpyF32` **之后**，使其不在同步替换区内。
+  - **数值**：全 shape 与 O5–O37 历史**逐位一致**（fp16 S512 1.671/1.771/1.899e-3、
+    S4096 1.883/1.734/1.966e-3、GQA kv4 2.134/3.305/3.850e-3、kv8 2.008/2.931/3.891e-3、
+    MQA 2.292/7.934/7.517e-3；bf16 S512 9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3、
+    GQA kv4 12.01/21.25/31.56e-3）；`max_abs(split-vs-split1)` ≤2e-6（纯 fp32 求和次序）。
+    单/两文件逐指标一致。
+  - **性能**（同 session `[O38 A/B]`，event）：**LSE-only** fp16 S512 0.0259→**0.0150ms（split8，
+    **1.72×**）**、kv4 0.0506→**0.0370（split2，1.37×）**、S4096/kv8/kv1 1.00×（auto=1）；
+    bf16 S512 0.0257→**0.0149（1.73×）**、kv4 0.0496→**0.0364（1.36×）**、S4096 1.00×。
+    **端到端 total** fp16 S512 0.0935–0.0953→**0.0831（1.13–1.15×）**、kv4 0.2572–0.2598→
+    **0.2429（1.06–1.07×）**、S4096 1.261（1.00×）；bf16 S512 0.0938–0.0948→**0.0842（1.13×）**、
+    kv4 0.2581–0.2594→**0.2451（1.06×）**、S4096 1.2671（1.00×）。merge 仅 ~4µs（可忽略）。
+  - **ncu（fp16 LSE，S512，同 binary）**：split1 Duration 27.74µs / **Waves 0.12** / occ 6.25% /
+    Compute 8.22% / Ipc 0.75 / No Eligible 81.3% ⇒ split8 **12.64µs（2.19×）/ Waves 0.97 /
+    occ 20.61% / Compute 26.89% / Ipc 1.50 / No Eligible 61.3%**。**墙 = 并行度/临界路径**（同 fp8）。
+    merge kernel 4.16µs / Compute 1.77% / Waves 0.03。
+  - **对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py`，FA2/FA3/TE 三列）：fp16 MHA S4096
+    ours total 1.261ms vs FA3 0.3250/846、TE 0.4440/619（**3.88×**，O30 3.87×）；GQA kv4 0.2429 vs
+    FA3 0.0823/417（**2.95×**，O30 3.12×）、kv8 0.2894 vs 0.1210/355（**2.39×**）、MQA 0.3957 vs
+    0.1567/439（2.53×）。bf16 S4096 1.2671 vs FA3 0.3197/860（3.96×）、kv4 0.2451 vs 0.0827/415
+    （2.96×）。ours total 打印口径 `4BS²HD`，对标口径 `8BS²HD` ⇒ 真反向 TF 为打印值 ×2。
+  - 原始输出 `src/fp16/fa_bwd_fp16_mma_main_o38_*.out.txt`（5 shape）、
+    `src/fp16/fa_bwd_fp16_mma_onefile_o38_s512.out.txt`、`..._o38_ncu_lse_split{1,8}_s512.out.txt`、
+    `..._o38_ncu_merge_s512.out.txt`；`src/bf16/fa_bwd_bf16_mma_main_o38_*.out.txt`（5 shape）、
+    `src/bf16/fa_bwd_bf16_mma_onefile_o38_s512.out.txt`；`src/fa_bwd_o38_split1_baseline.out.txt`、
+    `src/fa_bwd_o38_fa3_te_baseline_fp16_bf16.out.txt`；文档 `docs/01` §14u、`docs/01b` §6ac、
+    `docs/04` §14。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -2469,24 +2514,21 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第八十四轮）**：**O38 fp8 LSE 的 K 维 split + 二次归约——正结果，已设为默认 auto**。
-> 承接第 82/83 轮的结论（varlen「均衡分块」与 varlen TMA 均负），把剩下的**唯一** LSE 杠杆做完：
-> `lse_mma_kernel_bal_tma` 加 `lse_part/ksplit`（grid.z=B*ksplit，每 CTA 只扫 K tile 的连续切片
-> `[ntiles·ksp/ksplit, ntiles·(ksp+1)/ksplit)`；`ksplit==1` 逐位退回 O32）+ 新增
-> `lse_split_merge_kernel` 做 online-softmax `(m,l)` 二次归约。host `--lsesplit=N`，**默认 0=auto**
-> （目标 `grid*split≈2048`、上限 8；实测距 per-shape 最优 ≤1.2%），单/两文件 device 逐字一致。
-> **数值 vs ref 与历史逐位一致到打印精度**（split-vs-split1 ≤2e-6，纯 fp32 求和次序）。
-> **LSE-only**：S512 **2.03×**、S1024H32 1.62×、kv4 1.62×、kv8 1.40×、MQA 1.10×、S4096 1.25×；
-> **端到端**（同 session split1→auto）：S512 0.1150→**0.1030（1.12×）**、S1024H32 1.04×、kv4 1.05×、
-> kv8 1.03×、MQA 1.006×、S4096 2.0474→**1.9970（1.025×）**、MLA 不变。ncu：S512 grid 64→512、
-> Duration 33.41→**13.38µs**、occ 6.25%→19.78%；S4096 Duration 250.85→198.46µs、occ 23.6%→45.3%、
-> Compute 57→78% ⇒ **墙不是指令/访存而是并行度/临界路径**。对标 TE FP8：S512 ours total
-> **1.02×（几乎追平）**、S4096 3.38×。详见 `docs/03` §41、`docs/04` §13。
-> **下一步候选**：① **把 O38 的 LSE split 移植到 fp16/bf16**（同一套 `lse_mma_kernel_bal_tma`/
-> varlen 的 `lse_mma_kernel_bal_wgmma`，三类 LSE 都还是「每 CTA 串行 nblk+1 tile」）——预期
-> fp16/bf16 端到端 1.03–1.12×、LSE 1.4–2×，与 fp8 同量级；② 回到 fp8 主 kernel 的 **K/V TMA**
-> （需先腾 ~10KB smem；O38 只动了 LSE，主 kernel 的 3 CTA/SM + mma 依赖延迟墙未变）；
-> ③ MLA（D=512）降 smem 冲 2 CTA/SM。
+> **最新（第八十五轮）**：**O38-fp16/bf16——把 fp8 的 LSE K 维 split + 二次归约移植到 fp16/bf16
+> 的 TMA LSE（正结果，默认 auto）**。`lse_mma_kernel_bal_tma` 加 `lse_part/ksplit`（grid.z=B*ksplit、
+> 每 CTA 只扫切片 `[nt0,nt1)`、stage 用切片内相对下标）+ `lse_split_merge_kernel`；`--lsesplit=N`
+> （0=auto，目标 `grid*split≈528`=一个波、上限 8），单/两文件 device 逐字一致。**数值 vs ref 与历史
+> 逐位一致**（split-vs-split1 ≤2e-6）。**LSE-only** fp16/bf16 S512 **1.72×/1.73×**、GQA kv4 1.37×/1.36×、
+> S4096/kv8/MQA 1.00×（大 S 已满一波）；**端到端** S512 **1.13–1.15×**、kv4 **1.06×**、S4096 1.00×。
+> ncu：S512 split1 Waves 0.12/occ 6.25%/Compute 8.2%/Ipc 0.75 ⇒ split8 **Waves 0.97/occ 20.6%/
+> Compute 26.9%/Ipc 1.50** ⇒ **墙 = 并行度/临界路径**（同 fp8）。对标 FA3：GQA kv4 时间比
+> 3.12×→**2.95×**、kv8 2.39×、MQA 2.53×、S4096 3.88×。附修 bf16 单文件 TMA 构建缺 map 函数的 bug。
+> 详见 `docs/01` §14u、`docs/01b` §6ac、`docs/04` §14。
+> **下一步候选**：① ~~把 O38 的 LSE split 移植到 fp16/bf16~~ **第八十五轮已完成**（TMA LSE；**还未做**：
+> 非 TMA 的 `lse_mma_kernel_bal_wgmma` / mma `lse_mma_kernel_bal`、以及 varlen 的 LSE——它们的 grid
+> 形态不同，收益待测）；② **MLA（D=512）降 smem 冲 2 CTA/SM**（主 kernel ~202KB smem、1 CTA/SM +
+> smem→mma 依赖是四 dtype 的共同墙）；③ 回到 fp8 主 kernel 的 **K/V TMA**（需先腾 ~10KB smem）；
+> ④ fp16/bf16 的 `L2 red`（三条消 red 路已证伪，转 TMA/软流水）。
 >
 > **（第八十三轮）**：**VARLEN 主 kernel 的 TMA 化判决——中性/偏负**（fp16，单/两文件 opt-in）。
 > packed 布局描述符按 `dims={D,T,H,1}`（`S=T,B=1`）+ 行坐标 `cu_seqlens[b]+row` 复用 O33/O35 的
