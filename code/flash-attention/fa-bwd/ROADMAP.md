@@ -1858,7 +1858,34 @@
    - 原始输出 `src/fp8/o27_main_sweep.out.txt`、`o27_foldrcp_ab_s4096.out.txt`、
      `o27_ncu_{main,rcp,stall}_s4096.out.txt`、`o27_te_fp8_bench.out.txt`、
      `o27_fa3_te_baseline_fp16.out.txt`；文档 `docs/03` §32、`docs/04` §2.3/§3。
-   - **下一步**：fp16/bf16 的 fold 同样含逐元素精确除法（本轮只改 fp8），可作下一个低风险正收益项。
+    - **下一步修正**：原记「fp16/bf16 的 fold 同样含逐元素精确除法」**有误**——逐字核对
+      `src/fp16/fa_bwd_fp16{mma_,}_kernels.cuh` / `src/bf16/...` 后确认：**fp16/bf16 张量核版没有
+      rowwise scale fold**（`_mma_` 版注释开宗明义「fp16 无量化，也就没有 fold」）；逐元素除法只
+      存在于 **fp8** 的 fold / 输入量化里。故 ④ 这条作废，fp8 的 fold 除法 O27 已收口。
+
+- 2026-09-24（第六十九轮）：**O28 完成（fp8 fold 转换指令向量化 `cvt...x2`，MLA main ~1.03×，
+  d128 中性；同时纠正 O27 的「④ fp16/bf16 fold」误记）**。
+    - 动机：O27 证明 fold 的**指令数**在 main 关键路径上（去掉精确除法得到 1.08–1.18×）。fold 里
+      每元素还有 **3 次 fp8 转换**（Ap=E4M3、dS3/dS2=E5M2），旧实现逐元素
+      `__nv_cvt_float_to_fp8` + `<<`/`|` 拼 4B（SASS 一条 `F2FP` + `LOP3/PRMT`）。
+    - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+      新增 `cvt2_e4m3/cvt2_e5m2`（封装 `__nv_cvt_float2_to_fp8x2`，即 `cvt.rn.satfinite.*x2.f32`，
+      SASS 走 `F2FP...PACK_AB_MERGE_C` 直拼 32 位）与 `foldpack4<RCP,E5>(x0..x3,sc,inv)`；fold 的
+      三处量化（Ap/dS3 的 F16B 及旧 4×4B 两分支、dS2）全部改走它。新增开关 `FA_CVT2`（默认 1），
+      `-DFA_CVT2=0` 退回标量版做同 binary A/B。
+    - **数值**：同批 fp32 折算 + 同舍入 ⇒ fp8 字节逐位相同，**vs fp32 ref 与历史逐位一致**
+      （S4096 2.635/2.644/3.216e-1；MLA S1024H2 2.232/3.337/3.602e-1）；单/两文件一致。
+    - **性能（同 session A/B，event，main-only）**：**d128 全中性**（S512/S1024/S4096/GQA/MQA
+      0.99–1.01×）；**MLA 有正收益**——S512H4 0.1423→**0.1386（1.027×）**、S1024H2
+      0.2727→**0.2653（1.028×）**（`NDT=HD/128=4`，fold 跑 4 遍、占比大不被完全掩盖）。
+    - **ncu（main，`-c 1`，同 binary CVT2 0/1）**：d128 S4096 executed inst **735,418,304→
+      703,469,504（−4.3%）**、Duration 1.80→**1.77ms**、stall `wait` 1.48→1.55/`short` 1.42→1.58、
+      occ 18.11% 不变 ⇒ **指令降了但 d128 是纯 mma 依赖延迟 bound，省下的指令无处兑现**；
+      MLA S1024H2 Duration 326.75→**320.54µs**、inst 24.72M→24.45M（−1.1%）。
+    - 原始输出 `src/fp8/fa_bwd_fp8_o28_ab.out.txt`（9 shape × CVT2 0/1）、
+      `src/fp8/o28_ncu_main_{s4096,mla_s1024h2}_ab.out.txt`、
+      `src/fp8/o28_main_{s4096,mla_s1024h2}_full.out.txt`、`o28_te_fp8_bench.out.txt`、
+      `o28_fa3_te_baseline_fp16.out.txt`；文档 `docs/03` §33、`docs/04` §2.3。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -2059,8 +2086,9 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 3 CTA/SM，须把 168 regs→≤128、72.7KB smem→≤58KB 才到 4 CTA/SM）——这是 fp8（最重点）唯一
 > 还没被证伪的杠杆；② **fp8/主 kernel 跨-tile 软流水**（K/V 单缓冲被 dS3/Ap 复用，需先腾 smem）；
 > ③ TMA 化 Q/K/V/dO（O15a 通路已就绪，需把 HD=128 的 K-major tile 拆成 2×K=64 chunk）。
-> **④（O27 新增）fp16/bf16 的 fold 同理含逐元素精确除法**（本轮只改了 fp8）——可作为下一个
-> 低风险正收益项。
+> **④（O27 新增，O28 已作废）fp16/bf16 的 fold 同理含逐元素精确除法**——**误记**：逐字核对
+> `src/fp16,bf16/fa_bwd_*_kernels.cuh` 后确认 fp16/bf16 **没有 rowwise scale fold**（无量化），
+> 逐元素除法只在 fp8。fp8 的 fold 除法 O27 已收口，转换指令 O28 也已向量化（MLA 1.03×、d128 中性）。
 > **fp16/bf16 侧：L2 red（~72%）+ 1 CTA/SM 在本卡暂无便宜解法**（三条路已证伪），可转 TMA/软流水
 > 或直接冲 fp8；fp8 侧墙是 **mma 依赖延迟 + occupancy**（O19/O21）。
 > 详见 `docs/01` §14j/§14k/§14l/§14m/§14o/§14q、`docs/01b` §6s/§6t、`docs/04` §2.1/§2.2/§3。
@@ -2413,8 +2441,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `RCP`（默认 true）+ `--foldrcp=0` 同 binary A/B；`scX=amax/fp8max` 是每行常量，旧实现每元素
       一次 `prec-div`（~10+ 指令）。**main 1.08–1.18×**（S4096 2.043→**1.758ms**）、端到端 S4096
       2.4637→**2.1770ms（63.1 TF）**；**vs fp32 ref 逐位一致**（9 shape）；ncu executed inst
-      852.6M→735.2M（−13.7%）。详见 `docs/03` §32。**fp16/bf16 的 fold 同样含逐元素除法，留作
-      下一个低风险正收益项**（见「下一步」④）。
+      852.6M→735.2M（−13.7%）。详见 `docs/03` §32。~~fp16/bf16 的 fold 同样含逐元素除法~~（**误记，
+      见「下一步」④；fp16/bf16 无 fold**）。
+- [x] **O28（第六十九轮）**：fp8 fold 转换指令向量化（`__nv_cvt_float2_to_fp8x2` / SASS
+      `F2FP...PACK_AB_MERGE_C`，新 helper `foldpack4` + 开关 `FA_CVT2` 默认 1）。**数值逐位
+      不变**；**d128 全中性**（指令 −4.3% 但纯 mma 依赖延迟 bound）、**MLA main ~1.03×**
+      （S512H4 0.1423→0.1386、S1024H2 0.2727→0.2653ms）。详见 `docs/03` §33、`docs/04` §2.3。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog
