@@ -267,6 +267,15 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > **1.9429→1.3666（1.42×）**；MLA（D=512）不变（无 wgmma2）。数值与历史**逐位一致**。
 > 默认路径 ncu 即 `wgmma2b`：`red=51,904,512`（逐字节同 O18）、255 regs/231.4KB/occ 12.48%、
 > L2 56.58%、stall `wait 1.25` ⇒ 墙仍是 **L2 red + 1 CTA/SM**。详见 `01` §14n、`01b` §6v。
+>
+> **O24（preprocess `delta` 向量化 + dQ 直写 fp16，fp16/bf16，第六十五轮）**：main 已是硬墙
+> （L2 red）后，回头清 `delta_kernel`（旧版每行一个 128 线程 CTA + smem 树归约，S=4096 占 42.5µs、
+> ncu Compute 72%/L1TEX 74%）与 `convert` 的 dQ 一趟。`delta_warp_kernel` 改 **warp-per-row
+> `__half2` + `__shfl_xor`**（无 smem/barrier）⇒ **S4096 42.5→14.5µs（3.35×）、DRAM 74% bound、
+> 指令数 −82%**；D=128 wgmma2/2b 主 kernel **直接写 fp16 dQ**、convert 跳过 dQ。端到端 total
+> （同 session A/B）：fp16 S4096 1.3802→**1.3309ms（1.037×）**、S512 1.051×、GQA kv4 1.066×、
+> MQA kv1 1.077×；bf16 S4096 1.3650→**1.3388（1.020×）**、S512 1.053×、GQA kv4 1.053×、
+> MQA kv1 1.069×。数值与历史**逐位一致**。详见 `01` §14p、`01b` §6w。
 
 ### 2.2 bf16（峰值 989 TFLOPS）
 
@@ -410,6 +419,12 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > Duration 982.2→**952.5µs（1.031×）**、**`red` 51,904,512 逐字节不变**、regs 200→255 /
 > smem 148.5→230.4KB / occ 12.5%（1 CTA/SM）；墙仍是 **L2 red（~72%）+ 1 CTA/SM**。
 > 详见 `01b-bf16-bwd-impl.md` §6u。
+
+> **O24-bf16（preprocess `delta` 向量化 + dQ 直写 bf16，第六十五轮）**：与 fp16 O24 逐字同构
+> （见 §2.1 的 O24 条）。端到端 total 同 session A/B：S4096 1.3650→**1.3388ms（1.020×）**、
+> S512 0.1050→**0.0997（1.053×）**、GQA kv4 0.2877→**0.2733（1.053×）**、MQA kv1
+> 0.4423→**0.4139（1.069×）**；`delta` 单项 0.0424→**0.0126ms（3.36×）**；数值与历史逐位一致。
+> 对标 FA3 MHA S4096 **0.3202ms/859TF** ⇒ ours total 时间 **4.18×**。详见 `01b` §6w。
 
 ### 2.3 fp8（峰值 1978.8 TFLOPS；FA 无反向 FP8，仅对标 TE）
 
@@ -659,6 +674,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | bf16 | **lse_mma_bal<128,1>（O8b, S=4096）** | 3.07% | 32.40% | **60.40%** | 22.91%（52.2KB, 4 CTA/SM, 64 regs） | **0.97** | long 0.34、wait 1.57、short 1.33 | 同 fp16（与 fp16 逐项一致） |
 | fp16 | **lse_mma_bal_wgmma<128,1>（O9a, S=4096）** | 3.77% | **18.05%**（ldmatrix 消失） | **60.66%** | 23.02%（50.2KB, 4 CTA/SM, 62 regs） | 0.97 | Executed Ipc 2.52（O8b 2.36） | **Compute 60% + 发射**（wgmma 打掉访存一半，但 LSE 是 softmax epilogue bound） |
 | fp16 | **delta（O8, S=4096）** | 24.80% | 73.50% | 71.91% | 71.90%（17 regs） | 31.03 | — | 访存/算力均衡的轻量归约（<1% 端到端） |
+| fp16 | **delta_warp（O24 warp-per-row, S=4096）** | **72.87%** | 25.84% | 29.42% | 67.94%（24 regs） | 7.76 | —（**4.19M inst, −82%**） | **DRAM 带宽 73%（elementwise 上限）**；Duration 42.5→**14.5µs（3.35×）**（对齐 fp8 O14 的 quant） |
 | fp16 | **mma main（O6, S=4096, cp.async 双缓冲）** | 3.31% | 65.19% | 27.07% | 11.83%（**83.97KB, 2 CTA/SM**, 182 regs） | 3.88 | **long_scoreboard 7.35→1.12**；wait 1.95、short_scoreboard 0.79、barrier 0.10 | **fixed-latency(`wait`) + short_scoreboard(smem→ldmatrix) + L1/TEX**（全局访存延迟已被 cp.async 消掉） |
 | bf16 | **mma main（O6, S=4096, cp.async 双缓冲）** | 3.43% | 64.96% | 25.49% | 11.79%（83.97KB, 2 CTA/SM） | 3.88 | long_scoreboard 同上降到 ~1、wait 主导 | 同 fp16（与 fp16 逐项一致） |
 | fp16 | **mma main（O6b, S=4096, K 双缓冲+A 转置读）** | 3.47% | 71.87% | 29.77% | 16.90%（**71.17KB, 3 CTA/SM**, 168 regs） | 2.59 | wait 1.88、long_scoreboard 1.79、short 0.81、not_selected 0.37 | **L1/TEX 吞吐 + L2 吞吐 + fixed-latency(`wait`)**（occ 升但吞吐受限） |

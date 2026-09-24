@@ -1283,8 +1283,48 @@ TE 0.2140/321 ⇒ 2.83× / 2.07×。
 
 ---
 
+## 6w. O24-bf16：preprocess `delta` 向量化 + dQ 直写 bf16（与 fp16 逐字同构）
+
+把 fp16 的 O24（见 `01` §14p）逐字 dtype 参数化到 bf16：`delta_warp_kernel<HD>`
+（`__half2`→`__nv_bfloat162`、`__half22float2`→`__bfloat1622float2`）；`wgmma2`/`wgmma2b`
+的 dQ epilogue 加 `bf16* dq_h`（非空时 `__floats2bfloat162_rn` 直写 `dq`，convert 跳过 dQ）。
+单/两文件 device 由 `sync_onefile_device.py` 同步（`device region identical: True`）。
+
+### 6w.1 数值（ours-vs-ref，bf16 causal，max_abs）—— 与历史**逐位一致**
+
+S512 9.001/12.61/13.65e-3；S4096 15.10/13.40/16.31e-3；GQA kv4 12.01/21.25/31.56e-3；
+MQA kv1 11.90/45.58/71.96e-3。
+
+### 6w.2 性能（同 session A/B，CUDA event，端到端 total）
+
+| shape | base(`--deltawarp=0 --dqdirect=0`) | **O24** | 加速 |
+|---|---|---|---|
+| MHA S=4096 | 1.3650 ms | **1.3388 ms** | 1.020× |
+| MHA S=512 | 0.1050 | **0.0997** | 1.053× |
+| GQA kv4 S=1024 | 0.2877 | **0.2733** | 1.053× |
+| MQA kv1 S=1024 | 0.4423 | **0.4139** | 1.069× |
+
+`delta` 单项：S=4096 0.0424→**0.0126ms（3.36×）**、S=512 0.0075→0.0035（2.15×）。
+ncu 与 fp16 逐项一致（新 delta Duration **14.5µs**、DRAM 71% bound、指令数 −82%）。
+
+### 6w.3 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`）
+
+MHA S=4096 FA3 **0.3202ms/859TF**、TE 0.4359/631、FA2 0.7271/378 ⇒ ours total 1.3388ms =
+**FA3 的 4.18×**（时间；O23 4.20×）。
+
+### 6w.4 原始输出
+
+`src/bf16/fa_bwd_bf16_main_o24_sweep.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o24_s4096.out.txt`、
+`src/fa_bwd_o24_fa3_te_baseline_bf16.out.txt`。
+
+---
+
 ## 8. 下一步
 
+> **O24-bf16（§6w）已完成**：preprocess `delta` 改 warp-per-row 向量化（3.36×）+ dQ 直写 bf16，
+> 端到端 1.02–1.07×，数值与历史逐位一致。
+>
 > **O23-bf16（§6v）已完成**：Hopper 快路默认化（主 kernel wgmma2/wgmma2b + LSE wgmma），
 > 端到端 **1.06–1.42×**（MHA S4096 1.943→1.367ms），数值与历史逐位一致。
 

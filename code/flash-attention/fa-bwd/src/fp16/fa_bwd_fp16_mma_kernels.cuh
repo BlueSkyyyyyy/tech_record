@@ -811,6 +811,36 @@ __global__ void delta_kernel(const __half* __restrict__ o,
   if (tid == 0) delta[row] = sh_delta[0];
 }
 
+// O24：`delta_kernel` 的 warp-per-row 向量化版（与 fp8 O14 的 `quantize_row_warp_kernel` 同思路）。
+// 旧版每个 (s,h,b) 行一个 128 线程 CTA + `__shared__` 归约 + log2(THREADS) 次 `__syncthreads`，
+// 对 HD=128 只有 128 个乘加，block/同步开销远大于计算（ncu：S=4096 delta 42.8µs、occ 71.9%）。
+// 新版**每 warp 一行**：lane 沿 HD 以 `__half2`（4B）coalesced 读（每步 warp 读 32×4=128B），
+// `__shfl_xor_sync` 树归约，**无 smem / 无 barrier**。grid-stride 覆盖任意行数。
+template <int HD>
+__global__ void delta_warp_kernel(const __half* __restrict__ o,
+                                  const __half* __restrict__ do_, float* __restrict__ delta,
+                                  int rows) {
+  static_assert(HD % 2 == 0, "delta_warp 需要 HD 为偶数（按 half2 读）");
+  const int lane = threadIdx.x & 31;
+  const int wpb = blockDim.x >> 5;
+  const int gwarp0 = blockIdx.x * wpb + (threadIdx.x >> 5);
+  const int nwarp = gridDim.x * wpb;
+  for (int row = gwarp0; row < rows; row += nwarp) {
+    const __half2* o2 = reinterpret_cast<const __half2*>(o + (size_t)row * HD);
+    const __half2* d2 = reinterpret_cast<const __half2*>(do_ + (size_t)row * HD);
+    float acc = 0.f;
+#pragma unroll
+    for (int k = lane; k < HD / 2; k += 32) {
+      const float2 a = __half22float2(o2[k]);
+      const float2 b = __half22float2(d2[k]);
+      acc += a.x * b.x + a.y * b.y;
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+    if (lane == 0) delta[row] = acc;
+  }
+}
+
 // =============================================================================
 // 2) main kernel（张量核）：1colblock 反向，5 个 GEMM 全 mma.m16n8k16
 // =============================================================================
@@ -1295,7 +1325,7 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
                           const float* __restrict__ delta, const float* __restrict__ lse,
                           float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                           float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                          int causal) {
+                          int causal, __half* __restrict__ dq_h = nullptr) {
   static_assert(HD == 128, "wgmma2 主 kernel 目前只做 HD=128");
   constexpr int NTH = 256;
   constexpr int BM = 128, BN = 64;
@@ -1558,9 +1588,15 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
         const int qi = m0 + wg * 64 + rr;
         const int c = nh * 64 + j * 8 + c2;
         if (qi < S) {
-          float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
-          *reinterpret_cast<float2*>(base) =
-              make_float2(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
+          // O24：同 wgmma2b，dQ 唯一拥有 ⇒ 可直接写 fp16，省掉 convert 的 dQ 一趟。
+          if (dq_h)
+            *reinterpret_cast<__half2*>(dq_h + (((size_t)(b * S + qi)) * H + h) * HD + c) =
+                __floats2half2_rn(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
+          else {
+            float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
+            *reinterpret_cast<float2*>(base) =
+                make_float2(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
+          }
         }
       }
 }
@@ -1588,7 +1624,8 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
                            float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                            float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                            int causal, float* __restrict__ dk_part = nullptr,
-                           float* __restrict__ dv_part = nullptr, int nblk = 0) {
+                           float* __restrict__ dv_part = nullptr, int nblk = 0,
+                           __half* __restrict__ dq_h = nullptr) {
   static_assert(HD == 128, "wgmma2b 主 kernel 目前只做 HD=128");
   constexpr int NTH = 256;
   constexpr int BM = 128, BN = 128;
@@ -1835,8 +1872,14 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
       const int qi = m0 + wg * 64 + rr;
       const int c = j * 8 + c2;
       if (qi < S) {
-        float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
-        *reinterpret_cast<float2*>(base) = make_float2(dqacc[j][qq], dqacc[j][qq + 1]);
+        // O24：dQ 由本 CTA 唯一拥有（无跨 CTA 原子）⇒ 可直接写 fp16 输出，省掉 convert 的 dQ 一趟。
+        if (dq_h)
+          *reinterpret_cast<__half2*>(dq_h + (((size_t)(b * S + qi)) * H + h) * HD + c) =
+              __floats2half2_rn(dqacc[j][qq], dqacc[j][qq + 1]);
+        else {
+          float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
+          *reinterpret_cast<float2*>(base) = make_float2(dqacc[j][qq], dqacc[j][qq + 1]);
+        }
       }
     }
 }

@@ -771,6 +771,33 @@ __global__ void delta_kernel(const bf16* __restrict__ o,
   if (tid == 0) delta[row] = sh_delta[0];
 }
 
+// O24：warp-per-row 向量化版（与 fp16 版逐字同构，仅 `__half2`→`__nv_bfloat162`）。
+// 详见 fp16 `fa_bwd_fp16_mma_kernels.cuh` 的 `delta_warp_kernel` 注释。
+template <int HD>
+__global__ void delta_warp_kernel(const bf16* __restrict__ o,
+                                  const bf16* __restrict__ do_, float* __restrict__ delta,
+                                  int rows) {
+  static_assert(HD % 2 == 0, "delta_warp 需要 HD 为偶数（按 bf162 读）");
+  const int lane = threadIdx.x & 31;
+  const int wpb = blockDim.x >> 5;
+  const int gwarp0 = blockIdx.x * wpb + (threadIdx.x >> 5);
+  const int nwarp = gridDim.x * wpb;
+  for (int row = gwarp0; row < rows; row += nwarp) {
+    const __nv_bfloat162* o2 = reinterpret_cast<const __nv_bfloat162*>(o + (size_t)row * HD);
+    const __nv_bfloat162* d2 = reinterpret_cast<const __nv_bfloat162*>(do_ + (size_t)row * HD);
+    float acc = 0.f;
+#pragma unroll
+    for (int k = lane; k < HD / 2; k += 32) {
+      const float2 a = __bfloat1622float2(o2[k]);
+      const float2 b = __bfloat1622float2(d2[k]);
+      acc += a.x * b.x + a.y * b.y;
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+    if (lane == 0) delta[row] = acc;
+  }
+}
+
 // =============================================================================
 // O9b / O9b-2：主 kernel 的 wgmma 版（bf16，与 fp16 版 `fa_bwd_fp16_mma_kernels.cuh` 逐字同构）
 //   O9b：GEMM1/2（S=QKᵀ、dP=dO·Vᵀ）用 `wgmma.m64n64k16` + SW128；
@@ -1194,7 +1221,7 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
                           const float* __restrict__ delta, const float* __restrict__ lse,
                           float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                           float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                          int causal) {
+                          int causal, bf16* __restrict__ dq_h = nullptr) {
   static_assert(HD == 128, "wgmma2 主 kernel 目前只做 HD=128");
   constexpr int NTH = 256;
   constexpr int BM = 128, BN = 64;
@@ -1454,9 +1481,15 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
         const int qi = m0 + wg * 64 + rr;
         const int c = nh * 64 + j * 8 + c2;
         if (qi < S) {
-          float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
-          *reinterpret_cast<float2*>(base) =
-              make_float2(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
+          // O24：dQ 唯一拥有 ⇒ 可直接写 bf16，省掉 convert 的 dQ 一趟。
+          if (dq_h)
+            *reinterpret_cast<__nv_bfloat162*>(dq_h + (((size_t)(b * S + qi)) * H + h) * HD + c) =
+                __floats2bfloat162_rn(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
+          else {
+            float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
+            *reinterpret_cast<float2*>(base) =
+                make_float2(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
+          }
         }
       }
 }
@@ -1485,7 +1518,7 @@ fa_bwd_bf16_wgmma2b_kernel(const bf16* __restrict__ q, const bf16* __restrict__ 
                            const float* __restrict__ delta, const float* __restrict__ lse,
                            float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                            float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                           int causal) {
+                           int causal, bf16* __restrict__ dq_h = nullptr) {
   static_assert(HD == 128, "wgmma2b 主 kernel 目前只做 HD=128");
   constexpr int NTH = 256;
   constexpr int BM = 128, BN = 128;
@@ -1708,8 +1741,14 @@ fa_bwd_bf16_wgmma2b_kernel(const bf16* __restrict__ q, const bf16* __restrict__ 
       const int qi = m0 + wg * 64 + rr;
       const int c = j * 8 + c2;
       if (qi < S) {
-        float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
-        *reinterpret_cast<float2*>(base) = make_float2(dqacc[j][qq], dqacc[j][qq + 1]);
+        // O24：dQ 唯一拥有 ⇒ 可直接写 bf16，省掉 convert 的 dQ 一趟。
+        if (dq_h)
+          *reinterpret_cast<__nv_bfloat162*>(dq_h + (((size_t)(b * S + qi)) * H + h) * HD + c) =
+              __floats2bfloat162_rn(dqacc[j][qq], dqacc[j][qq + 1]);
+        else {
+          float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
+          *reinterpret_cast<float2*>(base) = make_float2(dqacc[j][qq], dqacc[j][qq + 1]);
+        }
       }
     }
 }
