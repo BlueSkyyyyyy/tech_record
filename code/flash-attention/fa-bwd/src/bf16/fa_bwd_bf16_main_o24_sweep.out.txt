@@ -1,0 +1,112 @@
+### b1_s4096_h16_d128_causal_bf16 []
+[timing] total(3 kernels) 1.3388 ms  102.66 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3021 ms | main 0.9427 ms | convert 0.0941 ms
+[O24 A/B] delta old 0.0423 ms | warp 0.0126 ms (3.36x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  fa_dq     vs ref: max_abs=1.441e-02  max_rel=1.630e+00
+  fa_dk     vs ref: max_abs=1.332e-02  max_rel=1.612e+00
+  fa_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  te_dq     vs ref: max_abs=1.524e-02  max_rel=3.641e+00
+  te_dk     vs ref: max_abs=1.763e-02  max_rel=2.718e+00
+  te_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+### b1_s4096_h16_d128_causal_bf16 [--deltawarp=0 --dqdirect=0]
+[timing] total(3 kernels) 1.3650 ms  100.69 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3266 ms | main 0.9466 ms | convert 0.0918 ms
+[O24 A/B] delta old 0.0424 ms | warp 0.0126 ms (3.37x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  fa_dq     vs ref: max_abs=1.441e-02  max_rel=1.630e+00
+  fa_dk     vs ref: max_abs=1.332e-02  max_rel=1.612e+00
+  fa_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  te_dq     vs ref: max_abs=1.524e-02  max_rel=3.641e+00
+  te_dk     vs ref: max_abs=1.763e-02  max_rel=2.718e+00
+  te_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+### b1_s512_h16_d128_causal_bf16 []
+[timing] total(3 kernels) 0.0997 ms  21.54 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0362 ms | main 0.0523 ms | convert 0.0112 ms
+[O24 A/B] delta old 0.0075 ms | warp 0.0035 ms (2.15x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=9.001e-03  max_rel=1.490e+00
+  dk   vs ref: max_abs=1.261e-02  max_rel=1.784e+00
+  dv   vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+  fa_dq     vs ref: max_abs=1.040e-02  max_rel=1.490e+00
+  fa_dk     vs ref: max_abs=1.261e-02  max_rel=2.248e+00
+  fa_dv     vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+  te_dq     vs ref: max_abs=1.374e-02  max_rel=1.169e+00
+  te_dk     vs ref: max_abs=1.068e-02  max_rel=2.089e+00
+  te_dv     vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+### b1_s512_h16_d128_causal_bf16 [--deltawarp=0 --dqdirect=0]
+[timing] total(3 kernels) 0.1050 ms  20.45 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0405 ms | main 0.0516 ms | convert 0.0129 ms
+[O24 A/B] delta old 0.0075 ms | warp 0.0035 ms (2.14x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=9.001e-03  max_rel=1.490e+00
+  dk   vs ref: max_abs=1.261e-02  max_rel=1.784e+00
+  dv   vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+  fa_dq     vs ref: max_abs=1.040e-02  max_rel=1.490e+00
+  fa_dk     vs ref: max_abs=1.261e-02  max_rel=2.248e+00
+  fa_dv     vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+  te_dq     vs ref: max_abs=1.374e-02  max_rel=1.169e+00
+  te_dk     vs ref: max_abs=1.068e-02  max_rel=2.089e+00
+  te_dv     vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+### b1_s1024_h32_d128_kv4_causal_bf16 []
+[timing] total(3 kernels) 0.2733 ms  62.87 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0720 ms | main 0.1806 ms | convert 0.0207 ms
+[O24 A/B] delta old 0.0223 ms | warp 0.0072 ms (3.08x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.201e-02  max_rel=1.712e+00
+  dk   vs ref: max_abs=2.125e-02  max_rel=3.799e+00
+  dv   vs ref: max_abs=3.156e-02  max_rel=3.637e+00
+  fa_dq     vs ref: max_abs=1.163e-02  max_rel=1.909e+00
+  fa_dk     vs ref: max_abs=3.110e-02  max_rel=5.365e+00
+  fa_dv     vs ref: max_abs=3.627e-02  max_rel=3.711e+00
+  te_dq     vs ref: max_abs=1.238e-02  max_rel=1.732e+00
+  te_dk     vs ref: max_abs=3.140e-02  max_rel=2.707e+00
+  te_dv     vs ref: max_abs=3.627e-02  max_rel=3.711e+00
+### b1_s1024_h32_d128_kv4_causal_bf16 [--deltawarp=0 --dqdirect=0]
+[timing] total(3 kernels) 0.2877 ms  59.72 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0872 ms | main 0.1797 ms | convert 0.0209 ms
+[O24 A/B] delta old 0.0223 ms | warp 0.0072 ms (3.11x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.201e-02  max_rel=1.712e+00
+  dk   vs ref: max_abs=2.125e-02  max_rel=3.799e+00
+  dv   vs ref: max_abs=3.156e-02  max_rel=3.637e+00
+  fa_dq     vs ref: max_abs=1.163e-02  max_rel=1.909e+00
+  fa_dk     vs ref: max_abs=3.110e-02  max_rel=5.365e+00
+  fa_dv     vs ref: max_abs=3.627e-02  max_rel=3.711e+00
+  te_dq     vs ref: max_abs=1.238e-02  max_rel=1.732e+00
+  te_dk     vs ref: max_abs=3.140e-02  max_rel=2.707e+00
+  te_dv     vs ref: max_abs=3.627e-02  max_rel=3.711e+00
+### b1_s1024_h64_d128_kv1_causal_bf16 []
+[timing] total(3 kernels) 0.4139 ms  83.01 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0953 ms | main 0.2880 ms | convert 0.0307 ms
+[O24 A/B] delta old 0.0426 ms | warp 0.0128 ms (3.33x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.190e-02  max_rel=2.645e+00
+  dk   vs ref: max_abs=4.558e-02  max_rel=2.815e+00
+  dv   vs ref: max_abs=7.196e-02  max_rel=1.218e+01
+  fa_dq     vs ref: max_abs=1.793e-02  max_rel=3.235e+00
+  fa_dk     vs ref: max_abs=4.933e-02  max_rel=3.752e+00
+  fa_dv     vs ref: max_abs=8.386e-02  max_rel=7.231e+00
+  te_dq     vs ref: max_abs=1.300e-02  max_rel=2.289e+00
+  te_dk     vs ref: max_abs=6.018e-02  max_rel=5.845e+00
+  te_dv     vs ref: max_abs=8.386e-02  max_rel=7.231e+00
+### b1_s1024_h64_d128_kv1_causal_bf16 [--deltawarp=0 --dqdirect=0]
+[timing] total(3 kernels) 0.4423 ms  77.68 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1234 ms | main 0.2816 ms | convert 0.0373 ms
+[O24 A/B] delta old 0.0426 ms | warp 0.0128 ms (3.34x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.190e-02  max_rel=2.645e+00
+  dk   vs ref: max_abs=4.558e-02  max_rel=2.815e+00
+  dv   vs ref: max_abs=7.196e-02  max_rel=1.218e+01
+  fa_dq     vs ref: max_abs=1.793e-02  max_rel=3.235e+00
+  fa_dk     vs ref: max_abs=4.933e-02  max_rel=3.752e+00
+  fa_dv     vs ref: max_abs=8.386e-02  max_rel=7.231e+00
+  te_dq     vs ref: max_abs=1.300e-02  max_rel=2.289e+00
+  te_dk     vs ref: max_abs=6.018e-02  max_rel=5.845e+00
+  te_dv     vs ref: max_abs=8.386e-02  max_rel=7.231e+00

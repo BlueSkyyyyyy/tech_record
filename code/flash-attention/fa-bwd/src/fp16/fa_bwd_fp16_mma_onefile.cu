@@ -817,6 +817,36 @@ __global__ void delta_kernel(const __half* __restrict__ o,
   if (tid == 0) delta[row] = sh_delta[0];
 }
 
+// O24：`delta_kernel` 的 warp-per-row 向量化版（与 fp8 O14 的 `quantize_row_warp_kernel` 同思路）。
+// 旧版每个 (s,h,b) 行一个 128 线程 CTA + `__shared__` 归约 + log2(THREADS) 次 `__syncthreads`，
+// 对 HD=128 只有 128 个乘加，block/同步开销远大于计算（ncu：S=4096 delta 42.8µs、occ 71.9%）。
+// 新版**每 warp 一行**：lane 沿 HD 以 `__half2`（4B）coalesced 读（每步 warp 读 32×4=128B），
+// `__shfl_xor_sync` 树归约，**无 smem / 无 barrier**。grid-stride 覆盖任意行数。
+template <int HD>
+__global__ void delta_warp_kernel(const __half* __restrict__ o,
+                                  const __half* __restrict__ do_, float* __restrict__ delta,
+                                  int rows) {
+  static_assert(HD % 2 == 0, "delta_warp 需要 HD 为偶数（按 half2 读）");
+  const int lane = threadIdx.x & 31;
+  const int wpb = blockDim.x >> 5;
+  const int gwarp0 = blockIdx.x * wpb + (threadIdx.x >> 5);
+  const int nwarp = gridDim.x * wpb;
+  for (int row = gwarp0; row < rows; row += nwarp) {
+    const __half2* o2 = reinterpret_cast<const __half2*>(o + (size_t)row * HD);
+    const __half2* d2 = reinterpret_cast<const __half2*>(do_ + (size_t)row * HD);
+    float acc = 0.f;
+#pragma unroll
+    for (int k = lane; k < HD / 2; k += 32) {
+      const float2 a = __half22float2(o2[k]);
+      const float2 b = __half22float2(d2[k]);
+      acc += a.x * b.x + a.y * b.y;
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+    if (lane == 0) delta[row] = acc;
+  }
+}
+
 // =============================================================================
 // 2) main kernel（张量核）：1colblock 反向，5 个 GEMM 全 mma.m16n8k16
 // =============================================================================
@@ -1301,7 +1331,7 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
                           const float* __restrict__ delta, const float* __restrict__ lse,
                           float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                           float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                          int causal) {
+                          int causal, __half* __restrict__ dq_h = nullptr) {
   static_assert(HD == 128, "wgmma2 主 kernel 目前只做 HD=128");
   constexpr int NTH = 256;
   constexpr int BM = 128, BN = 64;
@@ -1564,9 +1594,15 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
         const int qi = m0 + wg * 64 + rr;
         const int c = nh * 64 + j * 8 + c2;
         if (qi < S) {
-          float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
-          *reinterpret_cast<float2*>(base) =
-              make_float2(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
+          // O24：同 wgmma2b，dQ 唯一拥有 ⇒ 可直接写 fp16，省掉 convert 的 dQ 一趟。
+          if (dq_h)
+            *reinterpret_cast<__half2*>(dq_h + (((size_t)(b * S + qi)) * H + h) * HD + c) =
+                __floats2half2_rn(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
+          else {
+            float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
+            *reinterpret_cast<float2*>(base) =
+                make_float2(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
+          }
         }
       }
 }
@@ -1594,7 +1630,8 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
                            float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                            float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                            int causal, float* __restrict__ dk_part = nullptr,
-                           float* __restrict__ dv_part = nullptr, int nblk = 0) {
+                           float* __restrict__ dv_part = nullptr, int nblk = 0,
+                           __half* __restrict__ dq_h = nullptr) {
   static_assert(HD == 128, "wgmma2b 主 kernel 目前只做 HD=128");
   constexpr int NTH = 256;
   constexpr int BM = 128, BN = 128;
@@ -1841,8 +1878,14 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
       const int qi = m0 + wg * 64 + rr;
       const int c = j * 8 + c2;
       if (qi < S) {
-        float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
-        *reinterpret_cast<float2*>(base) = make_float2(dqacc[j][qq], dqacc[j][qq + 1]);
+        // O24：dQ 由本 CTA 唯一拥有（无跨 CTA 原子）⇒ 可直接写 fp16 输出，省掉 convert 的 dQ 一趟。
+        if (dq_h)
+          *reinterpret_cast<__half2*>(dq_h + (((size_t)(b * S + qi)) * H + h) * HD + c) =
+              __floats2half2_rn(dqacc[j][qq], dqacc[j][qq + 1]);
+        else {
+          float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
+          *reinterpret_cast<float2*>(base) = make_float2(dqacc[j][qq], dqacc[j][qq + 1]);
+        }
       }
     }
 }
@@ -2715,7 +2758,8 @@ template <int HD, bool SPLIT = true>
 static void launch_bwd_wgmma2(dim3 mg, const __half* q, const __half* k, const __half* v,
                               const __half* do_, const float* delta, const float* lse,
                               float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
-                              int Hkv, float scale, int causal) {
+                              int Hkv, float scale, int causal,
+                              __half* dq_h = nullptr) {
   static_assert(HD == 128, "wgmma2 只做 HD=128");
   constexpr int BM = 128, BN = 64;
   constexpr int QTILE = (BM / 8) * (HD / 64) * 1024;
@@ -2726,7 +2770,7 @@ static void launch_bwd_wgmma2(dim3 mg, const __half* q, const __half* k, const _
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
   fa_bwd_fp16_wgmma2_kernel<HD, SPLIT><<<mg, 256, smem>>>(q, k, v, do_, delta, lse, dq_acc,
                                                           dk_acc, dv_acc, S, H, Hkv, scale,
-                                                          causal);
+                                                          causal, dq_h);
 }
 
 // O18：BN=128 版 wgmma2（只 HD=128）。tile 数减半；smem = 1024 + Q32 + dO32 + K 2×32 + V32 + P32 + dS32
@@ -2737,7 +2781,7 @@ static void launch_bwd_wgmma2b(dim3 mg, const __half* q, const __half* k, const 
                                float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
                                int Hkv, float scale, int causal,
                                float* dk_part = nullptr, float* dv_part = nullptr,
-                               int nblk = 0) {
+                               int nblk = 0, __half* dq_h = nullptr) {
   static_assert(HD == 128, "wgmma2b 只做 HD=128");
   constexpr int BM = 128, BN = 128;
   constexpr int QTILE = (BM / 8) * (HD / 64) * 1024;
@@ -2748,7 +2792,7 @@ static void launch_bwd_wgmma2b(dim3 mg, const __half* q, const __half* k, const 
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
   fa_bwd_fp16_wgmma2b_kernel<HD, SPLIT, DET><<<mg, 256, smem>>>(
       q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, dk_part,
-      dv_part, nblk);
+      dv_part, nblk, dq_h);
 }
 
 // O17b：4 warpgroup（BM=256）wgmma 主 kernel（只 HD=128）。Q/dO/P/dS SW128，K/V 单缓冲 + 后段预取。
@@ -2803,10 +2847,14 @@ int main(int argc, char** argv) {
   int wg2split_sel = 1;
   // O17b：4 warpgroup（BM=256，跨 wg 归约再砍半）wgmma 主 kernel（仅 FA_WGMMA 构建、D==128）。
   int wg4_sel = 0;
-  // O17b：是否用「串行 GEMM1/2 + 读回 P」版（消 spill）；>0=开，默认关（有 fp16 精度损失）。
+  // O17b：是否用「串行 GEMM1/2 + 读回 P」版（消 spill）；-1=自动（SEQ=1）。
   int wg4seq_opt = -1;
   // O7b：是否跑「确定性 dK/dV（partial + 二次归约）」A/B（仅 FA_WGMMA 构建、D==128）。
   int det_ab = 0;
+  // O24：delta 用 warp-per-row 向量化版（1，默认）还是旧 block-per-row smem 版（0，A/B）。
+  int delta_warp_sel = 1;
+  // O24：D==128 wgmma2/2b 路径直接用 fp16 写 dQ、convert 跳过 dQ（1，默认；0=A/B）。
+  int dq_direct_sel = 1;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -2835,6 +2883,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--wg4seq=", 0) == 0) wg4seq_opt = atoi(a.c_str() + 9);
     else if (a.rfind("--det=", 0) == 0) det_ab = atoi(a.c_str() + 6);
     else if (a == "--det") det_ab = 1;
+    else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_sel = atoi(a.c_str() + 12);
+    else if (a.rfind("--dqdirect=", 0) == 0) dq_direct_sel = atoi(a.c_str() + 11);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -3050,6 +3100,9 @@ int main(int argc, char** argv) {
   printf("[O23] main backend = %s | lse = %s (D=%d S=%d)\n",
          wg2bn_sel ? "wgmma2b(BN=128)" : (wg2_sel ? "wgmma2(BN=64)" : "mma"),
          (D == 128 && causal && lse_wgm) ? "wgmma" : "mma", D, S);
+  // O24：D==128 的 wgmma2/wgmma2b 路径里 dQ 唯一拥有 ⇒ 主 kernel 直接写 fp16 `dq`，
+  // `convert_kernel` 跳过 dQ（n_q 传 0）。其它路径（mma/wgmma/wgmma4/MLA）仍写 fp32 dq_acc。
+  bool dq_direct = false;
   auto run_main = [&]() {
 #ifdef FA_WGMMA
     if (wg4_sel && D == 128) {
@@ -3064,22 +3117,28 @@ int main(int argc, char** argv) {
     }
     if (wg2bn_sel && D == 128) {
       dim3 g((S + 127) / 128, H, B);
+      dq_direct = dq_direct_sel;
+      __half* dqo = dq_direct_sel ? dq : nullptr;
       if (wg2split_sel)
         launch_bwd_wgmma2b<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                      d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                      d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, nullptr,
+                                      nullptr, 0, dqo);
       else
         launch_bwd_wgmma2b<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, nullptr,
+                                       nullptr, 0, dqo);
       return;
     }
     if (wg2_sel && D == 128) {
       dim3 g((S + 127) / 128, H, B);
+      dq_direct = dq_direct_sel;
+      __half* dqo = dq_direct_sel ? dq : nullptr;
       if (wg2split_sel)
         launch_bwd_wgmma2<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                     d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, dqo);
       else
         launch_bwd_wgmma2<128, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
-                                      d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal);
+                                      d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, dqo);
       return;
     }
     if (wgmma_sel && D == 128 && bm_sel == 64 && bn_sel == 64) {
@@ -3095,6 +3154,10 @@ int main(int argc, char** argv) {
 #endif
     launch_cfg(bm_sel, bn_sel, pp_sel, r4_sel, prel_sel);
   };
+  // O24：delta 的 warp-per-row 版；`--deltawarp=0` 回旧版 A/B。行数 = B*S*H。
+  const int d_rows = S * H * B;
+  const int d_wpb = THREADS / 32;
+  const int d_blocks = (d_rows + d_wpb - 1) / d_wpb;
   auto run_pre = [&]() {
     if (D == 512) {
       if (causal)
@@ -3103,7 +3166,10 @@ int main(int argc, char** argv) {
       else
         lse_mma_kernel<512><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
                                                        (int)causal);
-      delta_kernel<512><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
+      if (delta_warp_sel)
+        delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
+      else
+        delta_kernel<512><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
     } else {
       if (causal && lse_wgm)
         lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse,
@@ -3114,7 +3180,10 @@ int main(int argc, char** argv) {
       else
         lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
                                                        (int)causal);
-      delta_kernel<128><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
+      if (delta_warp_sel)
+        delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
+      else
+        delta_kernel<128><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
     }
   };
 
@@ -3130,8 +3199,9 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
     run_pre();
     run_main();
-    convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, dq, dk, dv, n,
-                                                nkv);
+    // O24：dq_direct 时主 kernel 已直接写 fp16 dq ⇒ convert 跳过 dQ（n_q=0）。
+    convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, dq, dk, dv,
+                                                dq_direct ? 0 : n, nkv);
   };
   for (int i = 0; i < 3; ++i) run_all();
   CUDA_CHECK(cudaDeviceSynchronize());
@@ -3167,6 +3237,31 @@ int main(int argc, char** argv) {
   ms_main /= iters;
   printf("[timing] preprocess %.4f ms | main %.4f ms | convert %.4f ms\n", ms_pre, ms_main,
          ms - ms_pre - ms_main);
+
+  // ---- O24 A/B：delta 旧 block-per-row(smem 归约) vs 新 warp-per-row(向量化) ----
+  if (D == 128) {
+    auto time_delta = [&](int mode, float* out_ms) {
+      auto launch = [&]() {
+        if (mode)
+          delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
+        else
+          delta_kernel<128><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
+      };
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    float d_old = 0.f, d_new = 0.f;
+    time_delta(0, &d_old);
+    time_delta(1, &d_new);
+    printf("[O24 A/B] delta old %.4f ms | warp %.4f ms (%.2fx)\n", d_old, d_new,
+           d_old / d_new);
+  }
 
   // ---- O8b A/B（仅 causal，HD=128）：LSE 原版(O8) vs 镜像配对 vs 镜像配对+cp.async ----
   if (D == 128 && causal) {

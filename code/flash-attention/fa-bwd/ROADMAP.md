@@ -1729,10 +1729,46 @@
      **不作为性能杠杆**；真正消 red 需 **cluster 分布式归约**（SM 间 smem 合并、不落全局内存）。
    - 对标（同 session 纯反向 `fa_vs_te_bwd_only.py fp16`）：MHA S4096 FA3 0.3249ms/846TF、
      TE 0.4449/618、FA2 0.7292/377；默认端到端仍为 FA3 ~4.2×（O23，不受 O7b 影响）。
-   - 原始输出 `src/fp16/fa_bwd_fp16_main_o7b_det_{s512,s4096,gqa_kv4}.out.txt`、
-     `src/fp16/fa_bwd_fp16_mma_onefile_o7b_det_{s512,s4096}.out.txt`、
-     `src/fp16/fa_bwd_fp16_main_o7b_ncu_{atomic_s4096,det_s4096,reduce_s4096}.out.txt`、
-     `src/fa_bwd_o7b_fa3_te_baseline_fp16.out.txt`；文档 `docs/01` §14o。
+    - 原始输出 `src/fp16/fa_bwd_fp16_main_o7b_det_{s512,s4096,gqa_kv4}.out.txt`、
+      `src/fp16/fa_bwd_fp16_mma_onefile_o7b_det_{s512,s4096}.out.txt`、
+      `src/fp16/fa_bwd_fp16_main_o7b_ncu_{atomic_s4096,det_s4096,reduce_s4096}.out.txt`、
+      `src/fa_bwd_o7b_fa3_te_baseline_fp16.out.txt`；文档 `docs/01` §14o。
+
+- 2026-09-24（第六十五轮）：**O24 完成（fp16/bf16：preprocess `delta` 向量化 + dQ 直写 fp16，
+  端到端 1.02–1.08×）**。
+   - 动机：O23 后 fp16 MHA S=4096 端到端 = preprocess 0.327 + main 0.943 + convert 0.096 ≈ 1.366ms。
+     main 的墙是 **L2 的 dK/dV 跨 CTA `red`**（已无搬运/等待类杠杆），但 preprocess(24%) 与
+     convert(7%) 里还有两处纯工程浪费：① `delta_kernel` 旧版**每 (s,h,b) 行一个 128 线程 CTA +
+     `__shared__` 树归约 + log2(THREADS) 次 `__syncthreads`**（ncu S=4096：Compute 72% / L1TEX 74%、
+     42.5µs）；② D=128 的 dQ 由主 kernel 寄存器累加后**唯一拥有**（无跨 CTA 原子），却仍写 fp32
+     `dq_acc` 再由 convert 读回转 fp16。
+   - **改动**（单/两文件 device 与 host 逐字一致）：① **`delta_warp_kernel<HD>`** 改 **warp-per-row**、
+     lane 沿 HD 以 `__half2`（4B）coalesced 读、`__shfl_xor_sync` 树归约，**无 smem/无 barrier**、
+     grid-stride；② `fa_bwd_fp16_wgmma2/2b_kernel` 加 `__half* dq_h`，非空时 dQ 直接
+     `__floats2half2_rn` 写 `dq`（与 convert 的 RN 相同 ⇒ **逐位不变**），host 在 D==128 且选中
+     wgmma2/wgmma2b 时令 `convert` 的 `n_q=0`；其余路径（mma/wgmma/wgmma4/MLA RMW）不变。
+     `--deltawarp=0`/`--dqdirect=0` 做同 binary A/B。
+   - **数值与历史逐位一致**（fp16 S512 1.671/1.771/1.899e-3；S4096 1.883/1.734/1.966e-3；
+     GQA kv4 2.134/3.305/3.850e-3；MQA kv1 2.292/7.934/7.517e-3；bf16 S512 9.001/12.61/13.65e-3、
+     S4096 15.10/13.40/16.31e-3），单/两文件一致。
+   - **性能（同 session A/B，event，端到端 total）**：fp16 MHA S4096 1.3802→**1.3309ms（1.037×）**、
+     S512 0.1052→**0.1001（1.051×）**、GQA kv4 S1024 0.2892→**0.2712（1.066×）**、MQA kv1
+     0.4436→**0.4119（1.077×）**；bf16 S4096 1.3650→**1.3388（1.020×）**、S512 1.053×、
+     GQA kv4 1.053×、MQA kv1 1.069×。`delta` 单项 S4096 0.0425→**0.0127ms（3.35×）**。
+   - **ncu（S=4096）**：旧 delta Duration 42.53µs / DRAM 24.94% / L1TEX 73.68% / Compute 72.16% /
+     inst 23.2M / Waves 31.03 → 新 **14.50µs / DRAM 72.87%（带宽 bound）/ L1TEX 25.84% /
+     Compute 29.42% / inst 4.19M（−82%）/ Waves 7.76** ⇒ 墙从 smem 归约+标量加载移到 **DRAM 带宽**
+     （elementwise 上限），与 fp8 O14 的 `quantize_row_warp_kernel` 结论一致。
+   - **对标**（同 session 纯反向 `fa_vs_te_bwd_only.py`）：fp16 MHA S4096 FA3 **0.3246ms/847TF**、
+     TE 0.4405/624、FA2 0.7293/377 ⇒ ours total 时间 **4.10×**（O23 4.20×）；GQA kv4 3.28×；
+     bf16 FA3 0.3202/859 ⇒ 4.18×。
+   - 原始输出 `src/fp16/fa_bwd_fp16_main_o24_sweep.out.txt`、
+     `src/fp16/fa_bwd_fp16_mma_onefile_o24_s4096.out.txt`、
+     `src/fp16/fa_bwd_fp16_main_o24_ncu_delta_{old,warp}_s4096.out.txt`、
+     `src/bf16/fa_bwd_bf16_main_o24_sweep.out.txt`、
+     `src/bf16/fa_bwd_bf16_mma_onefile_o24_s4096.out.txt`、
+     `src/fa_bwd_o24_fa3_te_baseline_{fp16,bf16}.out.txt`；文档 `docs/01` §14p、`docs/01b` §6w、
+     `docs/04` §2.1/§2.2/§3、`docs/08` §5。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -1907,6 +1943,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 51.9M→**0**、主 kernel **1.20×**（958.6→802.0µs）、**结果逐位可复现**；但二次归约是纯 DRAM
 > 带宽 bound（90.4%、384.9µs）⇒ `main+reduce` S4096 **0.810×**（S512 1.02×）。
 > 详见 `docs/01` §14o。
+> **O24 已完成（第六十五轮）**：清非-main 开销——`delta_kernel`→warp-per-row（S4096
+> 42.5→**14.5µs，3.35×**、DRAM 74% bound）+ D=128 wgmma2/2b 主 kernel 直写 fp16 dQ、convert
+> 跳过 dQ；端到端 fp16/bf16 S4096 1.037×/1.020×、S512 1.05×、GQA 1.05–1.08×，数值逐位不变。
+> 详见 `docs/01` §14p、`docs/01b` §6w。**main 的墙（L2 red）+ 1 CTA/SM 仍未动。**
 > **下一步（按回报）**：① **cluster 分布式归约**——把 dK/dV 的偏和在 SM 间 smem 内合并后再
 > 落全局（既不落 partial 大缓冲、也不做跨 CTA 原子），是 O7b 数据的直接延续；② **fp8 侧同构
 > 跨 wg 归约**（fp8 是 1 字节 operand、4wg 寄存器压力小一档；但 O19 已示 fp8 墙是 occupancy）；

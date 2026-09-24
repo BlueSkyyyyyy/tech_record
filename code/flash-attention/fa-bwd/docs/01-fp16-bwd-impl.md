@@ -2159,6 +2159,80 @@ MHA S4096：FA3 **0.3249ms/846TF**、TE 0.4449/618、FA2 0.7292/377；GQA kv4 S1
 `src/fp16/fa_bwd_fp16_main_o7b_ncu_{atomic_s4096,det_s4096,reduce_s4096}.out.txt`、
 `src/fa_bwd_o7b_fa3_te_baseline_fp16.out.txt`。
 
+## 14p. O24：preprocess `delta` 向量化 + dQ 直写 fp16（消 convert 的 dQ 一趟）
+
+### 14p.1 动机（main 已是硬墙，回头清「非 main」的固定开销）
+
+O23 把 Hopper 快路默认化后，fp16 MHA S=4096 端到端 = **preprocess 0.327 + main 0.943 +
+convert 0.096 ≈ 1.366 ms**。main 的墙是 L2 的 dK/dV 跨 CTA `red`（~72%，见 §14j/§14k），
+已无「搬运/等待」类杠杆；但 **preprocess（24%）与 convert（7%）里还有两处纯工程浪费**：
+
+1. **`delta_kernel`（D = rowsum(dO∘O)）**：旧实现**每个 (s,h,b) 一行一个 128 线程 CTA**，
+   用 `__shared__` 树归约 + `log2(THREADS)` 次 `__syncthreads`。对 HD=128 每行只有 128 个乘加，
+   block/同步开销远大于计算（ncu：S=4096 **Compute 72% / L1TEX 74% / DRAM 25%、42.5µs**）。
+2. **`convert_kernel` 的 dQ 一趟**：D=128 时 dQ 由主 kernel **寄存器累加后唯一拥有**
+   （无跨 CTA 原子，见 §10），却仍先写 fp32 `dq_acc`、再由 convert 读回转 fp16 写 `dq`——
+   多一趟 `n` 个 float 的读 + `n` 个 half 的写。
+
+### 14p.2 改动（单/两文件 device 与 host 逐字一致）
+
+* **`delta_warp_kernel<HD>`**（对齐 fp8 O14 的 `quantize_row_warp_kernel` 思路）：
+  **每 warp 一行**，lane 沿 HD 以 `__half2`（4B）coalesced 读（每步 warp 读 32×4=128B），
+  `__shfl_xor_sync` 五级树归约，**无 smem / 无 barrier**；grid-stride 覆盖任意行数。
+  `delta_warp_sel`（`--deltawarp=0/1`，默认 1）做同 binary A/B；HD=512（MLA）同样走新版。
+* **dQ 直写 fp16**：给 `fa_bwd_fp16_wgmma2_kernel` / `wgmma2b_kernel` 加 `__half* dq_h=nullptr`；
+  非空时 dQ epilogue 直接 `__floats2half2_rn` 写 `dq`（与 convert 的 `__float2half` 同为 RN，
+  **数值逐位不变**）。host 在 D==128 且选中 wgmma2/wgmma2b 时传 `dq` 并令 `convert` 的 `n_q=0`
+  （`--dqdirect=0` 关）。其余路径（mma/wgmma/wgmma4/MLA RMW）仍写 `fp32 dq_acc`、convert 照旧。
+* 单文件由 `sync_onefile_device.py` 同步 device、host 段与两文件同步重建。
+* **数值**：新旧 `dq/dk/dv` vs ref **逐位相同**（S512 1.671/1.771/1.899e-3；S4096
+  1.883/1.734/1.966e-3；GQA kv4 2.134/3.305/3.850e-3；MQA kv1 2.292/7.934/7.517e-3），
+  因为只改「delta 的求和次序」与「dQ 的写入位置/宽度」，数学口径不变。
+
+### 14p.3 性能（同 session A/B，CUDA event）
+
+| shape | 版本 | total | preprocess | main | convert |
+|---|---|---|---|---|---|
+| MHA S=4096 | base(`--deltawarp=0 --dqdirect=0`) | 1.3802 | 0.3260 | 0.9441 | 0.1101 |
+| MHA S=4096 | **O24** | **1.3309 (1.037×)** | **0.3002** | 0.9521 | **0.0786** |
+| MHA S=512 | base | 0.1052 | 0.0407 | 0.0515 | 0.0130 |
+| MHA S=512 | **O24** | **0.1001 (1.051×)** | **0.0362** | 0.0523 | **0.0117** |
+| GQA kv4 S=1024 | base | 0.2892 | 0.0876 | 0.1797 | 0.0220 |
+| GQA kv4 S=1024 | **O24** | **0.2712 (1.066×)** | **0.0717** | 0.1790 | 0.0205 |
+| MQA kv1 S=1024 | base | 0.4436 | 0.1235 | 0.2833 | 0.0369 |
+| MQA kv1 S=1024 | **O24** | **0.4119 (1.077×)** | **0.0945** | 0.2858 | 0.0316 |
+| MLA D=512 S=1024H2 | base | 0.8263 | 0.1360 | 0.6496 | 0.0407 |
+| MLA D=512 S=1024H2 | **O24** | 0.8211 (1.006×) | 0.1356 | 0.6639 | 0.0217 |
+
+`delta` 单项（同 session）：S=4096 0.0425→**0.0127ms（3.35×）**、S=512 0.0075→**0.0035（2.1×）**、
+GQA kv4 0.0223→0.0072（3.1×）；**收益主要来自 `delta`，dQ 直写再叠加 convert 的一小段**。
+
+### 14p.4 ncu（S=4096，`--set full`，`-c 1`）
+
+| 指标 | 旧 `delta_kernel` | 新 `delta_warp_kernel` |
+|---|---|---|
+| Duration | 42.53 µs | **14.50 µs** |
+| DRAM Throughput | 24.94 % | **72.87 %（带宽 bound）** |
+| L1/TEX | 73.68 % | 25.84 % |
+| Compute (SM) | 72.16 % | 29.42 % |
+| Executed Instructions | 23,199,744 | **4,194,304（−82%）** |
+| Waves/SM | 31.03 | 7.76 |
+
+⇒ 墙从 **smem 归约 + 标量加载**（Compute/L1TEX 双高）移到 **DRAM 带宽**（elementwise 上限），
+与 fp8 O14 的 `quantize_row_warp_kernel` 结论一致。
+
+### 14p.5 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`，FA2/FA3/TE 三列）
+
+MHA S=4096 FA3 **0.3246ms/847TF**、TE 0.4405/624、FA2 0.7293/377 ⇒ ours total 1.3309ms =
+**FA3 的 4.10×**（时间；O23 4.20×）。GQA kv4 S=1024 FA3 0.0827/416 ⇒ 3.28×（O23 3.45×）。
+
+### 14p.6 原始输出
+
+`src/fp16/fa_bwd_fp16_main_o24_sweep.out.txt`（两文件 ×5 shape × base/O24）、
+`src/fp16/fa_bwd_fp16_mma_onefile_o24_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_main_o24_ncu_delta_{old,warp}_s4096.out.txt`、
+`src/fa_bwd_o24_fa3_te_baseline_fp16.out.txt`。
+
 ## 15. 下一步
 
 > **O23（§14n）已完成**：把 O17/O18 的主 kernel + O9a 的 LSE 在 `-DFA_WGMMA` 构建下**默认打开**
