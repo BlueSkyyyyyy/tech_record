@@ -610,6 +610,17 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > S1024H32 1.015×、kv8 1.017×**，小 S/MLA 中性。端到端 S4096 **total 2.77ms（49.6 TF）**、
 > 同 session TE FP8 0.5909ms/465TF ⇒ ~4.7× TE。墙仍 = `wait`+3 CTA/SM + 残余 L2 red。
 > 详见 `03` §28、原始输出 `src/fp8/fa_bwd_fp8_main_o20_fuse_ab.out.txt`。
+>
+> **O21（第六十一轮）——fp8 BN=64 负结果 + 消冗余 convert（O21b）**：① 把 O18 的「翻倍 KV-tile
+> 减半串行相位」假设搬到 fp8 mma 路径（BN 全参数化，单/两文件 device 逐字一致）：**S512 0.900×、
+> S1024H32 0.920×、GQA kv4 0.920×、S4096 0.816×**。ncu 证实 regs 168→255、smem 72.7→105.2KB、
+> **occupancy 3→2 CTA/SM（18.05→12.28%）**；相位确实减半（Warp Cyc/Inst 6.19→5.92）但延迟受限下
+> 少 1/3 在飞 warp 更亏 ⇒ **与 O19 一起双重证伪 fp8 的「放大 tile/减 red」**（fp16 O18 成立是因为
+> 它从 1 CTA/SM 出发）。② **O21b**：fp8 输出本是 fp32，`convert_kernel` 是纯 fp32→fp32 拷贝 ⇒ 把
+> acc 别名到输出、main 直接 `atomicAdd`，**端到端 S4096 2.7469→2.6497ms（1.037×）/ 单文件 1.046× /
+> GQA 1.037×，数值逐位不变**，已设为默认。S4096 端到端 **2.65ms / 52.2 TF**、为 TE FP8（465TF）的
+> **4.5×**。详见 `03` §29、原始输出 `src/fp8/o21_main_bn_ab_{s4096,gqa_kv4}.out.txt`、
+> `o21_onefile_s4096.out.txt`、`o21_ncu_bn{32,64}_s4096.out.txt`。
 
 ---
 
@@ -648,6 +659,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp8 | **mma main（O7 后, S=4096, ksplit=4, REGDQ=true）** | 2.60% | **64.4%** | 37.7% | 18.11%（70.66KB, 3 CTA/SM） | 10.34 | short_scoreboard 1.89、long_scoreboard 1.09 | **L1/TEX 64.4% + short_scoreboard 1.89 + 残余 L2 43.8%（dK/dV 跨 CTA red）**（dQ red 已 O(1)，L2 墙 69.1%→43.8%） |
 | fp8 | **mma main（O12=PREL 后, S=4096, ksplit=4, REGDQ=true）** | 2.60% | 65.92% | 40.94% | 18.10%（70.66KB, 3 CTA/SM） | 10.34 | short_scoreboard、long_scoreboard | **L1/TEX 65.9% + 残余 L2（dK/dV red）**（LSE/D 全局散读已消：uncoalesced global 38.0M→**4.70M（−87.6%）**、Executed Instructions **−8.4%**、Duration 2.60→**2.34ms**；对齐 fp16 O7c-PREL） |
 | fp8 | **mma main（O7e-2 后, S=4096, ksplit=4, REGDQ=true, F16B）** | 3.22% | **59.97%** | 41.81% | 18.08%（70.66KB, 3 CTA/SM） | 10.34 | short/long_scoreboard | **L1/TEX 60.0% + L2 49.9%（dK/dV 跨 CTA red）+ spill(~2.7M local)**；shared load 冲突 **62.8M→29.2M（−53.5%，fold 列读改无冲突映射）**、总多余 wavefronts 79.9M→41.5M、Duration 2.41→**2.27ms** |
+| fp8 | **mma main（O21, S=4096, BN=64）** | 2.45% | 39.77% | 31.55% | **12.28%（105.22KB, 2 CTA/SM, 255 regs）** | — | —（Warp Cyc/Inst 5.92） | **负结果**：tile 相位减半但 occupancy 3→2 CTA/SM ⇒ Duration 2.19→**2.74ms**（0.816×）；与 O19 一起证伪 fp8「放大 tile/减 red」 |
 | fp8 | **quant 旧（per-row, S=4096）** | 24.29% | **73.73%** | **71.80%** | 87.82%（Waves 31.03） | 31.03 | —（34.6M inst） | **smem 归约（L1/TEX 73.7%）+ 标量加载（Compute 71.8%）**，DRAM 仅 24% |
 | fp8 | **quant 新（O14 warp-per-row, S=4096）** | **71.31%** | 26.50% | 51.49% | 79.44%（Waves 7.76） | 7.76 | —（**7.93M inst, −77%**） | **DRAM 带宽 71%（elementwise 上限）**；Duration 46.2→**15.4µs** |
 | fp8 | **lse_mma_bal<HD,1>（O11, S=4096）** | 1.48% | 28.16% | **61.15%** | 23.24%（~27.7KB, 6 CTA/SM, 77 regs） | **0.65** | — | **Compute 61% + 网格不足一个波**（镜像配对消尾波 + cp.async 消 long_scoreboard；对齐 fp16/bf16 O8b） |

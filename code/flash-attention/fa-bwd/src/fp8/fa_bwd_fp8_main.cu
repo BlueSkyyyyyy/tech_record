@@ -211,6 +211,8 @@ int main(int argc, char** argv) {
   int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
   int qfast = 1;      // O14：1 = warp-per-row 向量化量化，0 = 旧 per-row 标量量化（A/B）
   int f16b_opt = 1;   // O7e-2：1 = fold 16B 向量化写（默认），0 = 退回 O7e 的 4B 写（A/B）
+  int bn64_opt = 0;   // O21：1 = 主 kernel KV tile BN=64（mma 路径，D=128）
+  int cvt_on = 0;     // O21b：1 = 保留冗余的 fp32→fp32 convert 拷贝（默认 0：直接累加进输出）
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
@@ -218,6 +220,8 @@ int main(int argc, char** argv) {
     else if (a == "--lsewgm") lsewgm = 1;
     else if (a == "--wgmma") wgmma = 1;
     else if (a == "--wg2") wg2 = 1;
+    else if (a == "--bn64") bn64_opt = 1;
+    else if (a.rfind("--cvt=", 0) == 0) cvt_on = atoi(a.c_str() + 6);
     else if (a.rfind("--qfast=", 0) == 0) qfast = atoi(a.c_str() + 8);
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--f16b=", 0) == 0) f16b_opt = atoi(a.c_str() + 7);
@@ -308,6 +312,12 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMalloc(&d_dq, nq * 4));
   CUDA_CHECK(cudaMalloc(&d_dk, nkv * 4));
   CUDA_CHECK(cudaMalloc(&d_dv, nkv * 4));
+  // O21b：输出本就是 fp32，与 fp32 累加缓冲同 dtype ⇒ 让 main 的 atomicAdd 直接累加到输出，
+  //   消掉 `convert_kernel` 这一趟纯 fp32→fp32 拷贝（S=4096 约 0.145ms / 端到端 ~5%）。
+  //   把 acc 指针别名到输出即可（所有自测 A/B 仍读写同一份，结果不变）。
+  CUDA_CHECK(cudaFree(d_dq_acc)); d_dq_acc = d_dq;
+  CUDA_CHECK(cudaFree(d_dk_acc)); d_dk_acc = d_dk;
+  CUDA_CHECK(cudaFree(d_dv_acc)); d_dv_acc = d_dv;
 
   CUDA_CHECK(cudaMemcpy(d_q_f, q_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_k_f, k_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
@@ -439,6 +449,18 @@ int main(int argc, char** argv) {
                           ksplit2);
       return;
     }
+    if (D == 128 && bn64_opt) {
+      // O21：KV tile BN=64（mma 路径），其余与 BN=32 版逐字同构。grid 不变（BM 仍 64）。
+      if (use_regdq)
+        launch_bwd_main<128, 64, 64, true, false, true, true>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      else
+        launch_bwd_main<128, 64, 64, false, false, true, true>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      return;
+    }
 #ifdef FA_WGMMA
     if (D == 128 && wgmma) { launch128(use_regdq, true, prel_sel, f16b_sel); return; }
 #endif
@@ -462,8 +484,9 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
     run_preprocess();
     run_main();
-    convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
-                                                d_dv, nq, nkv);
+    if (cvt_on)
+      convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
+                                                  d_dv, nq, nkv);
   };
 
   for (int i = 0; i < 3; ++i) run_all();
@@ -509,8 +532,8 @@ int main(int argc, char** argv) {
   float ms_main = 0.f;
   CUDA_CHECK(cudaEventElapsedTime(&ms_main, ev0, ev1));
   ms_main /= iters;
-  printf("[timing] quant %.4f ms | preprocess %.4f ms | main %.4f ms | convert %.4f ms\n",
-         ms_quant, ms_pre, ms_main, ms - ms_quant - ms_pre - ms_main);
+  printf("[timing] quant %.4f ms | preprocess %.4f ms | main %.4f ms | convert %.4f ms (cvt_on=%d)\n",
+         ms_quant, ms_pre, ms_main, ms - ms_quant - ms_pre - ms_main, cvt_on);
 
 #ifdef FA_WGMMA
   // ---- O9c-2 A/B（D=128）：主 kernel GEMM1/2 的 mma.m16n8k32 vs wgmma.m64n32k32。----
@@ -853,6 +876,97 @@ int main(int argc, char** argv) {
     run_main();  // 恢复 CLI 选中路径
   }
 
+  // ---- O21 A/B（D=128）：主 kernel KV tile BN=32（3 CTA/SM）vs BN=64（2 CTA/SM，tile 数减半）。
+  //      同一 session 计时 + 逐元素对拍（只改 KV 分块宽度，数学口径不变）。----
+  if (D == 128) {
+    auto run_bn = [&](int bn) {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      if (bn == 64) {
+        if (use_regdq)
+          launch_bwd_main<128, 64, 64, true, false, true, true>(
+              mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+        else
+          launch_bwd_main<128, 64, 64, false, false, true, true>(
+              mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      } else {
+        if (use_regdq)
+          launch_bwd_main<128, 64, 32, true, false, true, true>(
+              mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+        else
+          launch_bwd_main<128, 64, 32, false, false, true, true>(
+              mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      }
+    };
+    auto bench_bn = [&](int bn, float* out) {
+      run_bn(bn);
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) run_bn(bn);
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float t32 = 0.f, t64 = 0.f;
+    bench_bn(32, &t32);
+    bench_bn(64, &t64);
+    std::vector<float> a_dq(nq), a_dk(nkv), a_dv(nkv), b_dq(nq), b_dk(nkv), b_dv(nkv);
+    run_bn(32);
+    CUDA_CHECK(cudaMemcpy(a_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    run_bn(64);
+    CUDA_CHECK(cudaMemcpy(b_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    auto maxd = [](const std::vector<float>& x, const std::vector<float>& y) {
+      double m = 0.0;
+      for (size_t i = 0; i < x.size(); ++i)
+        m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
+      return m;
+    };
+    printf("[O21 A/B] main BN=32 %.4f ms | BN=64 %.4f ms (%.3fx) | "
+           "max_abs(BN64-vs-BN32) dq/dk/dv=%.3e/%.3e/%.3e\n",
+           t32, t64, t32 / t64, maxd(b_dq, a_dq), maxd(b_dk, a_dk), maxd(b_dv, a_dv));
+    run_main();  // 恢复 CLI 选中路径
+  }
+
+  // ---- O21b A/B：冗余 fp32→fp32 convert 的代价（默认 cvt_on=0 已消掉）。acc 已别名到输出，
+  //      `do_cvt=true` 即对同一缓冲做一次自拷贝 ⇒ 时间差就是 convert 的真实成本。----
+  {
+    auto run_pipe = [&](bool do_cvt) {
+      quant();
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      run_preprocess();
+      run_main();
+      if (do_cvt)
+        convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
+                                                    d_dv, nq, nkv);
+    };
+    auto bench_pipe = [&](bool do_cvt, float* out) {
+      run_pipe(do_cvt);
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) run_pipe(do_cvt);
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float tt_on = 0.f, tt_off = 0.f;
+    bench_pipe(true, &tt_on);
+    bench_pipe(false, &tt_off);
+    printf("[O21b A/B] end2end 保留convert %.4f ms | 直写输出(消convert) %.4f ms (%.4fx)\n",
+           tt_on, tt_off, tt_on / tt_off);
+    run_all();  // 恢复 CLI 选中路径
+  }
+
   std::vector<float> mdq(nq), mdk(nkv), mdv(nkv);
   CUDA_CHECK(cudaMemcpy(mdq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(mdk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
@@ -902,7 +1016,7 @@ int main(int argc, char** argv) {
   cudaFree(d_q8); cudaFree(d_k8); cudaFree(d_v8); cudaFree(d_do8);
   cudaFree(d_qs); cudaFree(d_ks); cudaFree(d_vs); cudaFree(d_dos);
   cudaFree(d_delta); cudaFree(d_lse);
-  cudaFree(d_dq_acc); cudaFree(d_dk_acc); cudaFree(d_dv_acc);
+  // O21b：acc 指针已别名到 dq/dk/dv，不能重复 free。
   cudaFree(d_dq); cudaFree(d_dk); cudaFree(d_dv);
   return 0;
 }
