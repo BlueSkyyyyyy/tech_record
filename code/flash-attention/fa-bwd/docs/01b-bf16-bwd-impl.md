@@ -1451,8 +1451,95 @@ FA3 MHA S4096 **0.3194 ms / 861 TF**、TE 0.4420 / 622 ⇒ ours total（maintma�
 
 ---
 
+## 6z. O36-bf16：BN=64 版 `wgmma2` 主 kernel 的 Q/K/V/dO 也改用逐 atom 4D-TMA（补全 O34 的几何）
+
+### 6z.1 动机 / 改动
+
+O34（§6y）只把 **BN=128** 的 `wgmma2b` 主 kernel 的 Q/K/V/dO 换成 4D-TMA；而 **O23 的默认档
+在 S<4096 与 GQA/MQA 走的是 BN=64 的 `wgmma2`**——这条更常用的路仍用逐 16B `cp.async` +
+`sw128_off` 地址运算。本项把 O34 的做法搬到 BN=64 几何（对齐 fp16 O35，`docs/01` §14t），
+补全 backlog 里「BN=64 的 `wgmma2` 几何待做」这一条，并量化它在不同 S 下的收益。
+
+实现（单/两文件 device 区逐字一致，`scripts/sync_onefile_device.py` 核对 `identical: True`，
+均 `-DFA_WGMMA -DFA_TMA -lcuda` / `sm_90a` 构建）：
+
+- 新增 `fa_bwd_bf16_wgmma2_tma_kernel<HD,SPLIT>`：与 `fa_bwd_bf16_wgmma2_kernel` 的
+  **几何/数据流/描述符逐字相同**（BM=128、BN=64、2 warpgroup，GEMM1/2 `wgmma_mn64_issue`、
+  GEMM3/4/5 `wgmma_m64n64k16_bf16_t` + MN-major 转置描述符、GEMM5 的 `dqacc[2][8][4]` 寄存器
+  累加），只把载入与同步换成 TMA + mbarrier：prologue `mbar_init` 4 barrier（`qbar,kbar0,kbar1,
+  vbar`），tid0 发 Q/dO（`tma_fill_sw128<128,HD>`，expect `2*QTILE`）与 K0/V0
+  （`tma_fill_sw128<64,HD>`，各 `KTILE`，共 8×2=16 atom）；循环内 K 双缓冲两 barrier、
+  V 单缓冲后段预取；smem 与 cp.async 版同（+4 个 mbarrier），仍 **1 CTA/SM**。
+- host：`launch_bwd_wgmma2_tma<HD,SPLIT>`（复用 O34 已建的 `make_main_map`，box `{64,8}`、
+  `BFLOAT16`，无需新描述符），并让 `--maintma` 在 **BN=64 的 `wg2` 分支**也生效（此前只在
+  `wg2b`/BN=128 生效）；新增 `[O36 A/B]`（mode 10）与 cp.async 版（mode 2）做同 session
+  head-to-head + `max|diff|`。
+
+### 6z.2 数值（bf16 causal，max_abs）—— 与历史一致
+
+| shape | dq | dk | dv | `max|diff|`(TMA-vs-cp.async) dq/dk/dv |
+|---|---|---|---|
+| S=512 H16 | 9.001e-03 | 1.261e-02 | 1.365e-02 | `0.00e+00 / 4.20e-05 / 5.34e-05` |
+| S=1024 H32 kv4 (GQA) | —（同 O18） | — | — | `0.00e+00 / 2.44e-04 / 1.83e-04` |
+| S=4096 H16 | 1.510e-02 | 1.340e-02 | 1.631e-02 | `0.00e+00 / 9.16e-05 / 7.63e-05` |
+
+**dq 逐位相同**；dk/dv 差异只来自跨 CTA `atomicAdd` 次序（搬的是与 `cp.async` 逐字节相同的
+smem），不构成精度问题。`ours vs ref` 与 O18/O23/O24/O31/O34 **逐位一致**。
+
+### 6z.3 性能（同 session A/B，CUDA event，main-only）
+
+| shape | wg2(BN64, cp.async) | wg2(BN64)+TMA | 比 |
+|---|---|---|---|
+| S=512 H16（两文件） | 0.0507 ms (42.4 TF) | 0.0513 ms (41.8 TF) | **0.987×** |
+| S=512 H16（单文件） | 0.0507 ms (42.4 TF) | 0.0513 ms (41.9 TF) | **0.989×** |
+| S=1024 H32 kv4 | 0.1797 ms (95.6 TF) | 0.1803 ms (95.3 TF) | **0.997×** |
+| S=4096 H16（强制 BN=64） | 0.9889 ms (139.0 TF) | 0.9654 ms (142.4 TF) | **1.024×** |
+
+与 fp16 O35 的 0.992× / 0.996× / 1.021× 同量级：小 S/中等 S 是**延迟/grid bound**（S=512
+`grid=128<132 SM`、Waves 0.48），省发射换不到时间；S=4096（强制 BN=64）才体现在 Duration。
+
+> 注：S≥4096 的默认档是 **BN=128 的 `wgmma2b`**（O34，§6y），O36 只在用户显式
+> `--wg2=1 --maintma=1` 或用 BN=64 几何时生效；故它主要价值是**补全几何覆盖、确认机制**，
+> 不改变默认端到端数字（默认 S4096 total 仍 1.2676 ms / 108.4 TF）。
+
+### 6z.4 ncu（main，S=512，同 session、同 binary，`-c 1`）
+
+| 指标 | cp.async（BN64） | **+TMA** |
+|---|---|---|
+| Executed Instructions | 5,259,008 | **3,976,256（−24.4%）** |
+| Registers/thread | 200 | **184** |
+| Duration | 53.54 µs | **53.02 µs（持平）** |
+| Waves Per SM / occ | 0.48 / 12.27% | 0.48 / 12.39% |
+| L2 / Compute / DRAM | 25.89 / 10.62 / 9.46 % | 26.58 / 8.01 / 9.55 % |
+
+结论：**TMA 只省「搬运的指令/地址运算」（−24.4%）**，动不了 BN=64 小 S 的延迟/grid 墙；
+与 O33/O34/O35 完全一致。
+
+### 6z.5 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`，FA2/FA3/TE 三列）
+
+S=4096 MHA：FA2 0.7277ms/378TF、**FA3 0.3191ms/861TF**、TE 0.4426ms/621TF；GQA kv4 S=1024：
+FA3 0.0825ms/416TF、TE 0.1118ms/307TF。默认端到端 ours（O36 不改默认）S=4096 total
+1.2676ms（108.4 TF）⇒ **FA3/ours = 3.97×**；GQA kv4 S1024 total 0.2582ms（66.6 TF）⇒ 3.13×。
+
+### 6z.6 原始输出
+
+`src/bf16/fa_bwd_bf16_mma_main_o36_{s512,gqa_kv4,s4096}.out.txt`（两文件 A/B + 对拍）、
+`fa_bwd_bf16_mma_onefile_o36_s512.out.txt`（单文件 `[O36 A/B]`）、
+`fa_bwd_bf16_o36_ncu_main_{tma,cpasync}_s512.out.txt`（`--set full`）、
+`fa_bwd_bf16_o36_fa3_te_baseline.out.txt`。
+
+---
+
 ## 8. 下一步
 
+> **O36-bf16（§6z）已完成**：把 O34 的逐 atom 4D-TMA 从 BN=128 的 `wgmma2b` 补到 **BN=64 的
+> `wgmma2`**（对齐 fp16 O35）：S4096（强制 BN=64）main **1.024×**（139.0→142.4 TF）、
+> S=512/GQA 中性（0.987–0.997×），指令数 **−24.4%**、regs 200→184、`dq` 逐位不变，
+> 数值与历史一致。默认端到端数字不变（S≥4096 走 BN=128）。bf16 的 TMA 几何至此全覆盖。
+> fp16/bf16 主 kernel 的 TMA 化家族（O30–O36）收口；**下一步首选 = fp8 主 kernel 的
+> Q/K/V/dO TMA**（fp8 一行 128B = 一个 SW128 atom 的整行，TMA 更简单；但需处理 Kp/Qp/dOp
+> 配对副本的 smem 重建与 dS3/Ap 复用）。
+>
 > **O34-bf16（§6y）已完成**：主 kernel Q/K/V/dO 逐 atom 4D-TMA（对齐 fp16 O33），
 > main **1.046–1.047×**（142.5→149.0 TF）、端到端 **1.033–1.039×**（MHA S4096 1.2581→1.2106ms）、
 > 指令数 **−24.8%**、`red` 逐字节不变，数值与历史逐位一致。

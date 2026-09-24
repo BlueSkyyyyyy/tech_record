@@ -1,0 +1,320 @@
+fa_bwd_bf16_mma_kernels.cuh(1991): warning #177-D: variable "NTH" was declared but never referenced
+    constexpr int NTH = 256;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2b_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 591 of fa_bwd_bf16_mma_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_bf16_mma_kernels.cuh(2268): warning #177-D: variable "NTH" was declared but never referenced
+    constexpr int NTH = 256;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 617 of fa_bwd_bf16_mma_main.cu
+
+fa_bwd_bf16_mma_kernels.cuh(2270): warning #177-D: variable "NG" was declared but never referenced
+    constexpr int NG = BN / 8;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 617 of fa_bwd_bf16_mma_main.cu
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 438326
+==PROF== Connected to process 756175 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/bf16/fa_bwd_bf16_mma_main.out)
+==WARNING== Unable to access the following 6 metrics: ctc__rx_bytes_data_user.sum, ctc__rx_bytes_data_user.sum.pct_of_peak_sustained_elapsed, ctc__rx_bytes_data_user.sum.per_second, ctc__tx_bytes_data_user.sum, ctc__tx_bytes_data_user.sum.pct_of_peak_sustained_elapsed, ctc__tx_bytes_data_user.sum.per_second.
+
+
+==PROF== Profiling "fa_bwd_bf16_wgmma2_tma_kernel": 0%....50%....100% - 39 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16
+B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=128 auto=(BM=64,BN=64,PIPE=1) sel=(BM=64,BN=64,PIPE=1)
+[O23] main backend = wgmma2(BN=64) | lse = tma (D=128 S=512)
+[timing] total(3 kernels) 0.2619 ms  8.20 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1263 ms | main 0.0876 ms | convert 0.0480 ms
+[O24 A/B] delta old 0.0612 ms | warp 0.0638 ms (0.96x)
+[O8b A/B] lse O8 0.0657 ms | bal(单缓冲) 0.0595 ms (1.105x) | bal+cpasync(双缓冲) 0.0625 ms (1.050x)
+[O9 A/B] lse wgmma+SW128 0.0621 ms (vs bal+cpasync 1.007x, vs O8 1.058x)
+[O31 A/B] lse tma 0.0624 ms | wgmma 0.0651 ms (wgmma/tma 1.044x) | max_abs(tma-vs-wgmma)=0.000e+00
+[O6 A/B] main nopipe 0.1162 ms (18.47 TF) | pipe(KV both) 0.0651 ms (33.00 TF) | pipe2(K only) 0.0664 ms (32.33 TF) => nopipe/pipe 1.786x, nopipe/pipe2 1.750x
+[O6c A/B] main sched0(原样) 0.0648 ms | sched1(交错) 0.0642 ms (1.008x) | sched2(逆序) 0.0639 ms (1.014x)
+[O9b A/B] main mma(64,64,2) 0.0652 ms (32.95 TF) | wgmma(GEMM1/2) 0.0669 ms (32.10 TF) => 0.974x
+[O17 A/B] main mma(64,64,2) 0.0667 ms | O9b wgmma 0.0658 (1.013x) | O17 wgmma2(BM128) 0.0649 (1.028x) TF 33.1
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 0.0658 ms (32.6 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.0649 ms (33.1 TF) => 1.014x | max|diff| dq/dk/dv=0.00e+00/1.91e-06/3.81e-06
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/5.72e-06/9.54e-06 | wg2-vs-O9b dq/dk/dv=0.00e+00/6.68e-06/9.54e-06
+[O18 A/B] main O17 wg2(BN64) 0.0649 ms (33.1 TF) | O18 wg2b(BN128,split) 0.0649 ms (33.1 TF) => 1.000x | O18 wg2b(BN128,串行) 0.0656 ms => 0.988x | max|diff| wg2b-vs-wg2 dq/dk/dv=2.38e-07/2.86e-06/3.81e-06 | wg2bns-vs-wg2b 0.00e+00/9.54e-07/1.91e-06
+[O34 A/B] main O18 wg2b(cp.async) 0.0649 ms (33.1 TF) | O34 wg2b(TMA,split) 0.0653 ms (32.9 TF) => 0.993x | max|diff| tma-vs-cpasync dq/dk/dv=0.00e+00/1.91e-06/1.91e-06
+[O36 A/B] main O17 wg2(BN64,cp.async) 0.0649 ms (33.1 TF) | O36 wg2(BN64,TMA,split) 0.1044 ms (20.6 TF) => 0.622x | max|diff| tma-vs-cpasync dq/dk/dv=0.00e+00/1.91e-06/5.72e-06
+[O5c A/B] main (64,32,2) 0.0745 ms (28.84 TF) | (64,64,2) 0.0657 (32.70) | (32,32,1) 0.0729 (29.47) | (32,32,2) 0.0750 (28.62) => best 1.134x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 0.0713 (30.13) | f4 0.0785 (27.36,-9.2%) | f2+PREL 0.0658 (32.65,+8.3%) | f4+PREL 0.0649 (33.07,+9.8%)
+  (BM=64,BN=64,PIPE=2): base 0.0697 (30.82) | f4 0.0745 (28.81,-6.5%) | f2+PREL 0.0665 (32.31,+4.8%) | f4+PREL 0.0671 (31.99,+3.8%)
+  (BM=32,BN=32,PIPE=1): base 0.0758 (28.34) | f4 0.0812 (26.44,-6.7%) | f2+PREL 0.0722 (29.73,+4.9%) | f4+PREL 0.0769 (27.91,-1.5%)
+  (BM=32,BN=32,PIPE=2): base 0.0841 (25.54) | f4 0.0840 (25.56,+0.1%) | f2+PREL 0.0749 (28.68,+12.3%) | f4+PREL 0.0765 (28.08,+10.0%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=9.001e-03  max_rel=1.490e+00
+  dk   vs ref: max_abs=1.261e-02  max_rel=1.784e+00
+  dv   vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+  fa_dq     vs ref: max_abs=1.040e-02  max_rel=1.490e+00
+  fa_dk     vs ref: max_abs=1.261e-02  max_rel=2.248e+00
+  fa_dv     vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+  te_dq     vs ref: max_abs=1.374e-02  max_rel=1.169e+00
+  te_dk     vs ref: max_abs=1.068e-02  max_rel=2.089e+00
+  te_dv     vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+==PROF== Disconnected from process 756175
+[756175] fa_bwd_bf16_mma_main.out@127.0.0.1
+  void fa_bwd_bf16_wgmma2_tma_kernel<128, 1>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, float *, float *, float *, int, int, int, float, int, __nv_bfloat16 *) (4, 16, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.77
+    Elapsed Cycles                cycle        95737
+    Memory Throughput                 %        21.61
+    DRAM Throughput                   %         9.55
+    Duration                         us        53.02
+    L1/TEX Cache Throughput           %        44.66
+    L2 Cache Throughput               %        26.58
+    SM Active Cycles              cycle     29009.52
+    Compute (SM) Throughput           %         8.01
+    ----------------------- ----------- ------------
+
+    OPT   This kernel grid is too small to fill the available resources on this device, resulting in only 0.48 full     
+          waves across all SMs. Look at Launch Statistics for more details.                                             
+
+    Section: GPU Speed Of Light Roofline Chart (Overview)
+    INF   The ratio of peak float (FP32) to double (FP64) performance on this device is 2:1. The workload achieved      
+          close to 1% of this device's FP32 peak performance and 0% of its FP64 peak performance. See the Profiling     
+          Guide (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#roofline) for more details on         
+          roofline analysis.                                                                                            
+
+    Section: PM Sampling
+    ------------------------- ----------- ------------
+    Metric Name               Metric Unit Metric Value
+    ------------------------- ----------- ------------
+    Maximum Buffer Size             Mbyte        29.75
+    Maximum Sampling Interval          us         1.50
+    # Pass Groups                                    2
+    ------------------------- ----------- ------------
+
+    Section: Compute Workload Analysis
+    -------------------- ----------- ------------
+    Metric Name          Metric Unit Metric Value
+    -------------------- ----------- ------------
+    Executed Ipc Active   inst/cycle         1.04
+    Executed Ipc Elapsed  inst/cycle         0.32
+    Issue Slots Busy               %         8.01
+    Issued Ipc Active     inst/cycle         1.04
+    SM Busy                        %         8.01
+    -------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 93.41%                                                                                    
+          All compute pipelines are under-utilized. Either this workload is very small or it doesn't issue enough warps 
+          per scheduler. Check the Launch Statistics and Scheduler Statistics sections for further details.             
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %        10.23
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Gbyte/s       319.82
+    Mem Busy                                          %        18.94
+    Max Bandwidth                                     %        21.61
+    L1/TEX Hit Rate                                   %        14.31
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector       147083
+    L2 Hit Rate                                       %        65.27
+    Mem Pipes Busy                                    %         4.28
+    --------------------------------------- ----------- ------------
+
+    Section: Memory Workload Analysis Chart
+    OPT   Est. Speedup: 8.704%                                                                                          
+          Out of the 4706656.0 bytes sent to the L2 Compression unit only 0.00% were successfully compressed. To        
+          increase this success rate, consider marking only those memory regions as compressible that contain the most  
+          zero values and/or expose the most homogeneous values.                                                        
+
+    Section: Memory Workload Analysis Tables
+    OPT   Est. Speedup: 20.19%                                                                                          
+          This workload accesses local memory                                                                           
+          (https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#device-memory-accesses), accounting for     
+          2.97% of all sectors requested in L1TEX. Local memory refers to a memory space that is private to each        
+          thread. Although it is logically distinct, local memory resides in global memory. This can lead to higher     
+          memory latency compared to the usage of registers or shared memory, a decrease in available bandwidth to      
+          global memory, and an increase in executed instructions.                                                      
+          0.00% of all local loads and 28.57% of all local stores spill into the L2 cache, accounting for 0.24% of all  
+          sectors requested in L2.                                                                                      
+          One common reason for the use of local memory is arrays being too large to fit into registers or not being    
+          indexed using compile time constants (see the "Local Memory" section of the CUDA Programming Guide            
+          (https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#device-memory-accesses). For more advice    
+          on how to reduce the usage of local memory refer to the documentation                                         
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-hw-memory).                         
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 23.26%                                                                                          
+          The memory access pattern for global loads from L2 might not be optimal. On average, only 4.0 of the 32 bytes 
+          transmitted per sector are utilized by each thread. This applies to the 100.0% of sectors missed in L1TEX.    
+          This could possibly be caused by a stride between threads. Check the Source Counters section for uncoalesced  
+          global loads.                                                                                                 
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 25.75%                                                                                          
+          The memory access pattern for local loads from L2 might not be optimal. On average, only 1.0 of the 32 bytes  
+          transmitted per sector are utilized by each thread. This applies to the 0.0% of sectors missed in L1TEX.      
+          This could possibly be caused by a stride between threads. Check the Source Counters section for uncoalesced  
+          local loads.                                                                                                  
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 13.34%                                                                                          
+          The memory access pattern for local stores to L1TEX might not be optimal. On average, only 1.0 of the 32      
+          bytes transmitted per sector are utilized by each thread. This could possibly be caused by a stride between   
+          threads. Check the Source Counters section for uncoalesced local stores.                                      
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        25.97
+    Issued Warp Per Scheduler                        0.26
+    No Eligible                            %        74.03
+    Active Warps Per Scheduler          warp         1.98
+    Eligible Warps Per Scheduler        warp         0.31
+    ---------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 74.03%                                                                                    
+          Every scheduler is capable of issuing one instruction per cycle, but for this workload each scheduler only    
+          issues an instruction every 3.9 cycles. This might leave hardware resources underutilized and may lead to     
+          less optimal performance. Out of the maximum of 16 warps per scheduler, this workload allocates an average    
+          of 1.98 active warps per scheduler, but only an average of 0.31 warps were eligible per cycle. Eligible       
+          warps are the subset of active warps that are ready to issue their next instruction. Every cycle with no      
+          eligible warp results in no instruction being issued and the issue slot remains unused. To increase the       
+          number of eligible warps, avoid possible load imbalances due to highly different execution durations per      
+          warp. Reducing stalls indicated on the Warp State Statistics and Source Counters sections can help, too.      
+
+    Section: Warp State Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Warp Cycles Per Issued Instruction             cycle         7.62
+    Warp Cycles Per Executed Instruction           cycle         7.63
+    Avg. Active Threads Per Warp                                30.46
+    Avg. Not Predicated Off Threads Per Warp                    27.46
+    ---------------------------------------- ----------- ------------
+
+    Section: Instruction Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                  byte            0
+    Shared Memory Spilling Requests                 byte            0
+    Avg. Executed Instructions Per Scheduler        inst      7530.79
+    Executed Instructions                           inst      3976256
+    Avg. Issued Instructions Per Scheduler          inst      7541.08
+    Issued Instructions                             inst      3981689
+    ---------------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 0.9209%                                                                                         
+          This workload executes 245760 fused and 491520 non-fused FP32 instructions. By converting pairs of non-fused  
+          instructions to their fused (https://docs.nvidia.com/cuda/floating-point/#cuda-and-floating-point),           
+          higher-throughput equivalent, the achieved FP32 performance could be increased by up to 33% (relative to its  
+          current performance).                                                                                         
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   256
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                     64
+    Registers Per Thread             register/thread             184
+    Shared Memory Configuration Size           Kbyte          167.94
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block      Kbyte/block          148.61
+    Static Shared Memory Per Block        byte/block               0
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread           16384
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                                0.48
+    -------------------------------- --------------- ---------------
+
+    OPT   Est. Speedup: 51.52%                                                                                          
+          The grid for this launch is configured to execute only 64 blocks, which is less than the 132 multiprocessors  
+          used. This can underutilize some multiprocessors. If you do not intend to execute this kernel concurrently    
+          with other workloads, consider reducing the block size to have at least one block per multiprocessor or       
+          increase the size of the grid to fully utilize the available hardware resources. See the Hardware Model       
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-hw-model) description for more      
+          details on launch configurations.                                                                             
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            1
+    Block Limit Shared Mem                block            1
+    Block Limit Warps                     block            8
+    Theoretical Active Warps per SM        warp            8
+    Theoretical Occupancy                     %        12.50
+    Achieved Occupancy                        %        12.39
+    Achieved Active Warps Per SM           warp         7.93
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 74.03%                                                                                          
+          The 2.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (12.5%) is limited by the number of required      
+          registers, and the required amount of shared memory.                                                          
+
+    Section: GPU and Memory Workload Distribution
+    -------------------------- ----------- ------------
+    Metric Name                Metric Unit Metric Value
+    -------------------------- ----------- ------------
+    Average DRAM Active Cycles       cycle     13248.60
+    Total DRAM Elapsed Cycles        cycle      5549952
+    Average L1 Active Cycles         cycle     29009.52
+    Total L1 Elapsed Cycles          cycle     12421940
+    Average L2 Active Cycles         cycle     74788.35
+    Total L2 Elapsed Cycles          cycle      7226000
+    Average SM Active Cycles         cycle     29009.52
+    Total SM Elapsed Cycles          cycle     12421940
+    Average SMSP Active Cycles       cycle     29034.38
+    Total SMSP Elapsed Cycles        cycle     49687760
+    -------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 20.89%                                                                                          
+          One or more SMs have a much lower number of active cycles than the average number of active cycles. Maximum   
+          instance value is 67.78% above the average, while the minimum instance value is 100.00% below the average.    
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 20.94%                                                                                          
+          One or more SMSPs have a much lower number of active cycles than the average number of active cycles. Maximum 
+          instance value is 67.86% above the average, while the minimum instance value is 100.00% below the average.    
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 20.89%                                                                                          
+          One or more L1 Slices have a much lower number of active cycles than the average number of active cycles.     
+          Maximum instance value is 67.78% above the average, while the minimum instance value is 100.00% below the     
+          average.                                                                                                      
+
+    Section: Source Counters
+    ------------------------- ----------- ------------
+    Metric Name               Metric Unit Metric Value
+    ------------------------- ----------- ------------
+    Branch Instructions Ratio           %         0.05
+    Branch Instructions              inst       212416
+    Branch Efficiency                   %        99.44
+    Avg. Divergent Branches      branches         1.33
+    ------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 0.8449%                                                                                         
+          This workload has uncoalesced global accesses resulting in a total of 8192 excessive sectors (1% of the total 
+          802816 sectors). Check the L2 Theoretical Sectors Global Excessive table for the primary source locations.    
+          The CUDA Programming Guide                                                                                    
+          (https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#device-memory-accesses) has additional      
+          information on reducing uncoalesced device memory accesses.                                                   
+

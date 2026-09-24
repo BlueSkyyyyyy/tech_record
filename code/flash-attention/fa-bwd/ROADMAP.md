@@ -120,11 +120,13 @@
 - [~] SM90 TMA+wgmma 版本（对标 FA3）：**wgmma 部分已完成**（O9a/O9b/O9b-2/O17/O18，
   fp16/bf16/fp8，且 **O22/O23 已把 Hopper 路径默认化**）；**TMA 部分已落地三种 dtype 的 LSE**
   （**O30 fp16** 4D-TMA + 2×K=64 chunk，  **O31 bf16** dtype 参数化，**O32 fp8** 单 chunk/UINT8，
-  均 1.06–1.36×、数值逐位不变）；**主 kernel 的 Q/K/V/dO TMA 化：fp16 已完成（O33，第七十四轮）、
-  bf16 已完成（O34，第七十五轮）**——**逐 atom TMA 复现 SW128 交织布局**（描述符零改动），
-  `--maintma`、main **1.04×**、`red` 逐字节不变、端到端为 FA3 的 **3.77×（fp16）/3.79×（bf16）**
-  （见 `docs/01` §14s、`docs/01b` §6y）。**剩余**：fp8 的对应 dtype 参数化（fp8 SW128 的 `k/16`
-  atom 下标）与 BN=64 的 `wgmma2` 几何；fp8 尚有 dS3-Ap smem 复用。见 backlog。
+  均 1.06–1.36×、数值逐位不变）；**主 kernel 的 Q/K/V/dO TMA 化：fp16 已完成（O33 第七十四轮 /
+  O35 第七十五轮补 BN=64）、bf16 已完成（O34 / O36 第七十五轮）**——**逐 atom TMA 复现 SW128
+  交织布局**（描述符零改动），`--maintma`、main **1.04×**、`red` 逐字节不变、端到端为 FA3 的
+  **3.77×（fp16）/3.79×（bf16）**（见 `docs/01` §14s/§14t、`docs/01b` §6y/§6z）。
+  **剩余（下一步首选）**：fp8 主 kernel 的对应 TMA 化——fp8 一行 128B = 一个 SW128 atom 的整行
+  （`UINT8` tensormap、一个 box 搬整块，O32 的 LSE 已示范），但 Kp/Qp/dOp 配对副本需在 smem 上
+  重建、并处理 dS3/Ap 对 Ks/Vs 的复用。见 backlog。
 - [ ] 变长（cu_seqlens / varlen）覆盖
 
 ## 每项的 Definition of Done
@@ -2049,6 +2051,28 @@
     `..._mma_onefile_o35_s512.out.txt`、`..._o35_ncu_main_{tma,cpasync}_{s512,s4096}.out.txt`、
     `src/fa_bwd_o35_fa3_te_baseline_fp16.out.txt`；文档 `docs/01` §14t、`docs/04` §2.1/§3。
 
+- 2026-09-25（第七十五轮）：**O36-bf16 完成（BN=64 的 `wgmma2` 主 kernel 也改用逐 atom 4D-TMA，补全 O34 几何）**。
+  - 动机：O34（bf16）只把 BN=128 的 `wgmma2b` 上 TMA；O23 默认档在 S<4096 / GQA/MQA 走
+    BN=64 的 `wgmma2` 仍用 `cp.async`。本项把 O34 的做法搬到 BN=64（对齐 fp16 O35）。
+  - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+    新增 `fa_bwd_bf16_wgmma2_tma_kernel<HD,SPLIT>`（几何/数据流/描述符与
+    `fa_bwd_bf16_wgmma2_kernel` 逐字相同，Q/dO 各 32 atom、K/V 各 16 atom，K 双缓冲 +
+    V 单缓冲后段预取）；host 新增 `launch_bwd_wgmma2_tma`（复用 O34 的 `make_main_map`，
+    无需新描述符）、让 `--maintma` 在 BN=64 `wg2` 分支生效、新增 `[O36 A/B]`（mode 10）。
+  - **数值与 O5–O34 逐位一致**（S512 9.001/1.261/1.365e-3；S4096 1.510/1.340/1.631e-2）；
+    `max|diff|`（TMA-vs-cp.async）**dq 逐位 0**、dk/dv ~4e-5–2e-4（仅跨 CTA atomic 次序）。
+  - **性能（同 session A/B，event，main-only）**：S=512 **0.987×**（两文件）/0.989×（单文件）、
+    S=1024 GQA kv4 **0.997×**、S=4096 强制 BN=64 **1.024×**（0.9889→0.9654ms，139.0→142.4 TF）。
+    与 fp16 O35（0.992/0.996/1.021×）同量级。
+  - **ncu（main S=512）**：指令数 5.259M→**3.976M（−24.4%）**、regs 200→184、Duration
+    53.54→**53.02µs 持平**（Waves 0.48、occ 12.3% ⇒ 延迟/grid bound）。⇒ **TMA 只省搬运**。
+  - **对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`）：FA3 MHA S4096
+    0.3191ms/861TF、TE 0.4426/621；默认端到端 ours total 1.2676ms（108.4 TF）**3.97×**、
+    GQA kv4 S1024 total 0.2582ms（66.6 TF）3.13×（O36 不改默认档）。bf16 的 TMA 几何至此全覆盖。
+  - 原始输出 `src/bf16/fa_bwd_bf16_mma_main_o36_{s512,gqa_kv4,s4096}.out.txt`、
+    `..._mma_onefile_o36_s512.out.txt`、`..._o36_ncu_main_{tma,cpasync}_s512.out.txt`、
+    `..._o36_fa3_te_baseline.out.txt`；文档 `docs/01b` §6z、`docs/04` §2.2/§3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -2275,9 +2299,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > `wgmma2`（O23 默认档在 S<4096 / GQA/MQA 走它）。指令数 −24%、regs 200→184，但
 > S=512/1024 是延迟/grid bound ⇒ Duration 持平（0.99–1.00×），S=4096 强制 BN=64 才 1.02×。
 > 详见 `docs/01` §14t、`docs/04` §2.1/§3。
-> **剩余**：fp8 主 kernel 的对应 dtype 参数化（fp8 SW128 为一整行 128B，逐 atom 更简单；fp8 尚需
-> 处理 K/V 的 dS3/Ap smem 复用与 32 regs 寄存器预取——这是**下一步首选**）；
-> bf16 的 BN=64 `wgmma2` TMA 与 fp16 同构（可顺手做，回报同样有限）。
+> **O36-bf16 已完成（第七十五轮）**：把 O35 逐字 dtype 参数化到 bf16
+> （`fa_bwd_bf16_wgmma2_tma_kernel`、`--maintma` 的 BN=64 `wg2` 分支），数值与历史逐位一致，
+> S=512/GQA 中性（0.987–0.997×）、S=4096 强制 BN=64 **1.024×**、指令数 −24.4%、regs 200→184；
+> **bf16 的 TMA 几何至此全覆盖**。详见 `docs/01b` §6z、`docs/04` §2.2/§3。
+> **剩余（下一步首选）**：**fp8 主 kernel 的 Q/K/V/dO TMA**——fp8 一行 128B = 一个 SW128 atom
+> 的整行 ⇒ TMA 比 fp16/bf16 更简单（一个 box 搬整块，`UINT8` tensormap，O32 的 LSE 已示范）；
+> 但主 kernel 的 Kp/Qp/dOp 配对副本仍需在 smem 上重建，并处理 dS3/Ap 对 Ks/Vs 的复用与
+> O3 的 32 regs 寄存器预取。fp16/bf16 主 kernel 的 TMA 家族（O30–O36）已收口。
 > **④（O27 新增，O28 已作废）fp16/bf16 的 fold 同理含逐元素精确除法**——**误记**：逐字核对
 > `src/fp16,bf16/fa_bwd_*_kernels.cuh` 后确认 fp16/bf16 **没有 rowwise scale fold**（无量化），
 > 逐元素除法只在 fp8。fp8 的 fold 除法 O27 已收口，转换指令 O28 也已向量化（MLA 1.03×、d128 中性）。
