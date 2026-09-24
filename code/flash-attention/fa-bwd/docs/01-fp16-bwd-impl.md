@@ -2082,11 +2082,93 @@ long_scoreboard 0.60 + barrier 0.93`。即 **默认档就是 O17/O18 的墙：L2
 
 ---
 
+## 14o. O7b：确定性 dK/dV（partial + 二次归约）——机制成立、数值可复现，但净负（S4096 0.81×）
+
+### 14o.1 动机
+
+§14i/§14j 把 fp16 main 的墙钉在 **dK/dV 的跨 CTA `atomicAdd`**：O17 后 `lts__t_sectors_op_red`
+仍 = 51,904,512（S=4096，占余下 L2 扇区 ~72.6%）。atomicAdd 在 L2 是 **read-modify-write**；
+O17b（放大 BM）与 O7c（float4 归约）都已证伪「减 red 事务数/放大归约宽度」。O7b 换一条路：
+**完全不用原子**——每个 (Q 块, KV 行) 的贡献写进带 `mblk` 下标的独立 partial 缓冲（每元素只被
+本 CTA 写一次，非原子覆盖写），再由一个 reduce kernel 按 `mblk` 升序求和。副作用：结果与执行
+顺序无关 ⇒ **确定性反向**（同输入同输出逐位可复现）。
+
+### 14o.2 实现（单/两文件 device 代码逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+- `fa_bwd_fp16_wgmma2b_kernel<HD, SPLIT, DET=false>` 加 `DET` 模板开关与 `dk_part/dv_part/nblk`
+  参数（默认 `nullptr`，`DET=false` 时行为不变）。`DET=true` 时四处 dK/dV epilogue 从
+  `red_add2(...)` 改为 `dkv_det_store(part, a, b)`（一次 `float2` 覆盖写）：
+  `part[((b*H + h)*nblk + mblk)*S*HD + jg*HD + c]`。
+- 新增 `dkv_reduce_kernel<HD>`：对每个输出元素 `(b,hkv,jg,c)` 求和 `mblk ∈ [jg/128, nblk)`
+  与 **Q 头广播组** `h ∈ [hkv*G, (hkv+1)*G)`（`G=H/Hkv`），写入 `dk_acc/dv_acc`。
+- **踩坑（GQA race）**：partial 初版按 `hkv` 索引；GQA/MQA 下同一 KV 头有 `H/Hkv` 个 Q 头，
+  同 `(mblk,hkv)` 的多个 `h` 会互相覆盖 ⇒ S=4096（MHA）对、**GQA kv4 实测 `max|diff|=6.3`（错）**。
+  改成按 Q 头 `h` 分片、reduce 里对广播组求和后修复（MHA 时 `G=1` 退化，逐位不变）。
+- host：`--det=1` 开 A/B（仅 `#ifdef FA_WGMMA && D==128`）；分配 `B*H*nblk*S*D` 的 partial（S4096
+  ≈ 2.15GB，跑完释放），不 memset dk/dv（reduce 全覆盖），只计时 main+reduce。默认路径不受影响。
+
+### 14o.3 数值（fp16 causal，ours-vs-ref max_abs；DET 可复现性）
+
+| shape | ours-vs-ref dq/dk/dv | DET 跑两遍 bitwise-diff dk/dv | DET-vs-atomic dk/dv |
+|---|---|---|---|
+| S512 MHA | 1.671/1.771/1.899e-3 | **0 / 0** | 2.38e-7 / 4.77e-7 |
+| S1024 GQA kv4 | 2.134/3.305/3.850e-3 | **0 / 0** | 2.86e-6 / 3.81e-6 |
+| S4096 MHA | 1.883/1.734/1.966e-3 | **0 / 0** | 7.15e-7 / 9.54e-7 |
+
+- **DET 逐位可复现**（两次运行差 = 0），与 atomic 路径只差浮点加法次序（≤3e-6），与历史对拍值一致。
+- 默认路径（DET 关）数值不变（S4096 1.883/1.734/1.966e-3）。
+
+### 14o.4 性能（同 session A/B，CUDA event，main[+reduce] ms）
+
+| shape | atomic（默认） | DET（main+reduce） | 比值 |
+|---|---|---|---|
+| S512 MHA | 0.0551 | **0.0538** | **1.023×** |
+| S1024 GQA kv4 | 0.1865 | 0.2100 | 0.888× |
+| S4096 MHA | 0.9598（143.2 TF） | 1.1849 | **0.810×** |
+
+**机制成立但净负**：S=512 时 partial（~67MB）基本落在 L2，DET 反而略快；S=4096 partial 达
+1.66GB，二次归约变成一趟纯 DRAM 带宽扫描，把收益吃回去。
+
+### 14o.5 ncu（S=4096，同 session，`-c 1`）
+
+| 指标 | atomic main | DET main | reduce |
+|---|---|---|---|
+| `lts__t_sectors_op_red` | 51,904,512 | **0** | — |
+| `lts__t_sectors_op_read` | 18.36 M | 18.83 M | 51.91 M |
+| `lts__t_sectors_op_write` | 1.574 M | 53.48 M | 3.15 M |
+| Duration | 958.6 µs | **802.0 µs** | 384.9 µs |
+| DRAM Throughput | — | — | **90.4%（带宽上限）** |
+| occupancy | 12.48% | 12.47% | — |
+
+- **主 kernel 因为去掉 atomic RMW 反而快 1.20×**（958.6→802.0µs；red 51.9M→0，write 1.57M→53.5M）。
+- **reduce 是纯 DRAM 带宽 bound（90.4%）**，384.9µs；`main+reduce=1.185ms > atomic 0.960ms` ⇒ 净负。
+- 结论：**O7b 的确定性值得保留（`--det=1` opt-in），但作为性能杠杆无效**——它把 L2 原子墙换成
+  一趟 DRAM 归约墙。要真正消 red 只能靠 **减少每个 KV 元素的贡献 CTA 数**（BM 放大已证伪 §14k）
+  或 **cluster 分布式归约**（不落全局内存），转 backlog。
+
+### 14o.6 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`）
+
+MHA S4096：FA3 **0.3249ms/846TF**、TE 0.4449/618、FA2 0.7292/377；GQA kv4 S1024 FA3 0.0825/416。
+默认路径端到端仍为 FA3 的 ~4.2×（O23）；O7b（DET）在主 kernel 上更接近（main 802µs），
+但被二次归约拖回。**默认路径不受影响**。
+
+### 14o.7 原始输出
+
+`src/fp16/fa_bwd_fp16_main_o7b_det_{s512,s4096,gqa_kv4}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o7b_det_{s512,s4096}.out.txt`、
+`src/fp16/fa_bwd_fp16_main_o7b_ncu_{atomic_s4096,det_s4096,reduce_s4096}.out.txt`、
+`src/fa_bwd_o7b_fa3_te_baseline_fp16.out.txt`。
+
 ## 15. 下一步
 
 > **O23（§14n）已完成**：把 O17/O18 的主 kernel + O9a 的 LSE 在 `-DFA_WGMMA` 构建下**默认打开**
 > （对齐 fp8 O22），端到端 **1.08–1.43×**（MHA S4096 1.945→1.364ms），数值与历史逐位一致；
 > `--wg2=0 --wg2bn=0`/`--lsewgm=0` 保留 A/B。默认档的墙仍是 **L2 red + 1 CTA/SM**。
+>
+> **O7b（§14o）已完成（负结果 + 确定性能力）**：DET=partial+二次归约把 `red` 51.9M→**0**、
+> 主 kernel 快 **1.20×**（958.6→802.0µs），且**逐位可复现**；但二次归约是纯 DRAM 带宽 bound
+> （90.4%、384.9µs），`main+reduce` 在 S=4096 反而 **0.810×**（S=512 时 1.02×）。⇒ 保留
+> `--det=1` opt-in，**不作为性能杠杆**；真正消 red 需 cluster 分布式归约（转 backlog）。
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
 O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）、O11（§14d）、
@@ -2103,12 +2185,13 @@ GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，数值逐位不�
    （51.9M→26.7M），但 512 线程 ⇒ 每线程只有 128 regs，dQ 累加器 64 + 两条 wgmma 累加器 64
    吃满后必然 spill，local 流量占 L2 ~48%，净 Duration 反而 +21%（S4096）/+83%（S512）。
    ⇒ **「放大 BM」这条路在本卡走不通**，转为下面的 O7b。
-2. **O7b（去 dK/dV 原子）**：分块 `*_accum` + convert（确定性）；把跨 CTA `red` 换成
-   「CTA 局部累加 + 非原子写 + 二次归约」，直接消 L2 原子（red 字节不减但不再是 RMW）；
-   可与 O17 的「CTA 内归约」叠加。**当前第一优先级**。
-   - **补充（§14l，已完成）**：在动 O7b 之前先做了一版 **O17-2**（把 O17 的 GEMM3/GEMM4
-     拆分到两个 wg，消 wg1 的 barrier 空等）：`barrier` 1.61→0.46、main S4096 1.013×、
-     GQA kv4 1.021×，数值逐位不变。red 字节不变 ⇒ 与 O7b 正交。
+2. ~~**O7b（去 dK/dV 原子）**~~ **已做（§14o）——负结果 + 确定性能力**：`DET` 模板把跨 CTA
+   `atomicAdd` 换成 per-(b,h,mblk) partial 覆盖写 + `dkv_reduce_kernel` 二次归约；`red`
+   51.9M→**0**、主 kernel 快 **1.20×**、**结果逐位可复现**，但二次归约是纯 DRAM 带宽 bound
+   （90.4%、384.9µs）⇒ `main+reduce` S4096 **0.810×**（S512 1.02×）。保留 `--det=1` opt-in。
+   **要再推进只能上 cluster 分布式归约**（在 SM 间 smem 内合并偏和、不落全局内存）——转 backlog。
+   - **O17-2（§14l）**（已做）：把 O17 的 GEMM3/GEMM4 拆分到两个 wg，消 wg1 的 barrier 空等：
+     `barrier` 1.61→0.46、main S4096 1.013×、GQA kv4 1.021×，数值逐位不变。red 字节不变。
 3. **fp8 侧的跨 wg 归约**：fp8 是 1 字节 operand、smem 更省，4wg 的寄存器压力比 fp16 小一档，
     同样对 fp8 main 的 L2 red 有效。
 4. ~~**O17 的 `BN=128` 微优化**~~ **已做（§14m）**：MHA main **1.029×**（S=4096 0.9895→0.9618ms，
