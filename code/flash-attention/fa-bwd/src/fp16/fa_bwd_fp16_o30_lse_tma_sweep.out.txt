@@ -1,0 +1,162 @@
+### O30: fp16 LSE 4D-TMA vs wgmma+cp.async —— 同 session event A/B（-DFA_WGMMA -DFA_TMA -lcuda）
+
+=== [两文件] b1_s512_h16_d128_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16
+[O23] main backend = wgmma2(BN=64) | lse = wgmma (D=128 S=512)
+[timing] total(3 kernels) 0.0942 ms  22.79 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0285 ms | main 0.0527 ms | convert 0.0130 ms
+[O30 A/B] lse tma 0.0249 ms | wgmma 0.0328 ms (wgmma/tma 1.317x) | max_abs(tma-vs-wgmma)=0.000e+00
+  dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
+  dk   vs ref: max_abs=1.771e-03  max_rel=2.997e-01
+  dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+  fa_dq     vs ref: max_abs=1.679e-03  max_rel=2.666e-01
+  fa_dk     vs ref: max_abs=1.684e-03  max_rel=5.121e-01
+  fa_dv     vs ref: max_abs=1.899e-03  max_rel=2.719e-02
+  te_dq     vs ref: max_abs=1.716e-03  max_rel=2.439e-01
+  te_dk     vs ref: max_abs=2.287e-03  max_rel=5.140e-01
+  te_dv     vs ref: max_abs=1.899e-03  max_rel=3.699e-02
+
+=== [两文件] b1_s4096_h16_d128_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+[O23] main backend = wgmma2b(BN=128) | lse = wgmma (D=128 S=4096)
+[timing] total(3 kernels) 1.2553 ms  109.49 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2255 ms | main 0.9506 ms | convert 0.0792 ms
+[O30 A/B] lse tma 0.2128 ms | wgmma 0.2878 ms (wgmma/tma 1.352x) | max_abs(tma-vs-wgmma)=0.000e+00
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+
+=== [两文件] b1_s1024_h32_d128_kv4_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp16
+[O23] main backend = wgmma2(BN=64) | lse = wgmma (D=128 S=1024)
+[timing] total(3 kernels) 0.2575 ms  66.73 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0566 ms | main 0.1791 ms | convert 0.0218 ms
+[O30 A/B] lse tma 0.0488 ms | wgmma 0.0640 ms (wgmma/tma 1.311x) | max_abs(tma-vs-wgmma)=0.000e+00
+  dq   vs ref: max_abs=2.134e-03  max_rel=5.101e-01
+  dk   vs ref: max_abs=3.305e-03  max_rel=1.044e+00
+  dv   vs ref: max_abs=3.850e-03  max_rel=3.711e-02
+  fa_dq     vs ref: max_abs=1.727e-03  max_rel=3.091e-01
+  fa_dk     vs ref: max_abs=3.321e-03  max_rel=8.086e-01
+  fa_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
+  te_dq     vs ref: max_abs=2.075e-03  max_rel=2.991e-01
+  te_dk     vs ref: max_abs=3.175e-03  max_rel=4.837e-01
+  te_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
+
+=== [两文件] b1_s1024_h40_d128_kv8_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h40_d128_kv8_causal_fp16
+[O23] main backend = wgmma2(BN=64) | lse = wgmma (D=128 S=1024)
+[timing] total(3 kernels) 0.2905 ms  73.92 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0629 ms | main 0.2024 ms | convert 0.0252 ms
+[O30 A/B] lse tma 0.0528 ms | wgmma 0.0684 ms (wgmma/tma 1.296x) | max_abs(tma-vs-wgmma)=0.000e+00
+  dq   vs ref: max_abs=2.008e-03  max_rel=5.284e-01
+  dk   vs ref: max_abs=2.931e-03  max_rel=5.104e-01
+  dv   vs ref: max_abs=3.891e-03  max_rel=3.167e-02
+  fa_dq     vs ref: max_abs=1.757e-03  max_rel=3.464e-01
+  fa_dk     vs ref: max_abs=2.996e-03  max_rel=5.725e-01
+  fa_dv     vs ref: max_abs=4.326e-03  max_rel=4.869e-01
+  te_dq     vs ref: max_abs=1.580e-03  max_rel=3.944e-01
+  te_dk     vs ref: max_abs=2.893e-03  max_rel=3.941e-01
+  te_dv     vs ref: max_abs=4.326e-03  max_rel=4.573e-01
+
+=== [两文件] b1_s1024_h64_d128_kv1_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp16
+[O23] main backend = wgmma2(BN=64) | lse = wgmma (D=128 S=1024)
+[timing] total(3 kernels) 0.3945 ms  87.10 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0764 ms | main 0.2852 ms | convert 0.0329 ms
+[O30 A/B] lse tma 0.0590 ms | wgmma 0.0777 ms (wgmma/tma 1.319x) | max_abs(tma-vs-wgmma)=0.000e+00
+  dq   vs ref: max_abs=2.292e-03  max_rel=4.022e-01
+  dk   vs ref: max_abs=7.934e-03  max_rel=3.853e-01
+  dv   vs ref: max_abs=7.517e-03  max_rel=3.239e-02
+  fa_dq     vs ref: max_abs=1.971e-03  max_rel=3.588e-01
+  fa_dk     vs ref: max_abs=7.586e-03  max_rel=5.690e-01
+  fa_dv     vs ref: max_abs=1.057e-02  max_rel=9.507e-01
+  te_dq     vs ref: max_abs=2.141e-03  max_rel=3.596e-01
+  te_dk     vs ref: max_abs=6.452e-03  max_rel=4.311e-01
+  te_dv     vs ref: max_abs=1.057e-02  max_rel=8.528e-01
+
+=== [单文件] b1_s512_h16_d128_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16
+[O23] main backend = wgmma2(BN=64) | lse = wgmma (D=128 S=512)
+[timing] total(3 kernels) 0.0930 ms  23.10 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0284 ms | main 0.0526 ms | convert 0.0120 ms
+[O30 A/B] lse tma 0.0249 ms | wgmma 0.0330 ms (wgmma/tma 1.323x) | max_abs(tma-vs-wgmma)=0.000e+00
+  dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
+  dk   vs ref: max_abs=1.771e-03  max_rel=2.997e-01
+  dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+  fa_dq     vs ref: max_abs=1.679e-03  max_rel=2.666e-01
+  fa_dk     vs ref: max_abs=1.684e-03  max_rel=5.121e-01
+  fa_dv     vs ref: max_abs=1.899e-03  max_rel=2.719e-02
+  te_dq     vs ref: max_abs=1.716e-03  max_rel=2.439e-01
+  te_dk     vs ref: max_abs=2.287e-03  max_rel=5.140e-01
+  te_dv     vs ref: max_abs=1.899e-03  max_rel=3.699e-02
+
+=== [单文件] b1_s4096_h16_d128_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+[O23] main backend = wgmma2b(BN=128) | lse = wgmma (D=128 S=4096)
+[timing] total(3 kernels) 1.2608 ms  109.01 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2280 ms | main 0.9623 ms | convert 0.0705 ms
+[O30 A/B] lse tma 0.2049 ms | wgmma 0.2777 ms (wgmma/tma 1.355x) | max_abs(tma-vs-wgmma)=0.000e+00
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+
+=== [单文件] b1_s1024_h32_d128_kv4_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp16
+[O23] main backend = wgmma2(BN=64) | lse = wgmma (D=128 S=1024)
+[timing] total(3 kernels) 0.2569 ms  66.87 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0570 ms | main 0.1796 ms | convert 0.0203 ms
+[O30 A/B] lse tma 0.0495 ms | wgmma 0.0641 ms (wgmma/tma 1.296x) | max_abs(tma-vs-wgmma)=0.000e+00
+  dq   vs ref: max_abs=2.134e-03  max_rel=5.101e-01
+  dk   vs ref: max_abs=3.305e-03  max_rel=1.044e+00
+  dv   vs ref: max_abs=3.850e-03  max_rel=3.711e-02
+  fa_dq     vs ref: max_abs=1.727e-03  max_rel=3.091e-01
+  fa_dk     vs ref: max_abs=3.321e-03  max_rel=8.086e-01
+  fa_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
+  te_dq     vs ref: max_abs=2.075e-03  max_rel=2.991e-01
+  te_dk     vs ref: max_abs=3.175e-03  max_rel=4.837e-01
+  te_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
+
+=== [单文件] b1_s1024_h40_d128_kv8_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h40_d128_kv8_causal_fp16
+[O23] main backend = wgmma2(BN=64) | lse = wgmma (D=128 S=1024)
+[timing] total(3 kernels) 0.2916 ms  73.64 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0629 ms | main 0.2041 ms | convert 0.0246 ms
+[O30 A/B] lse tma 0.0534 ms | wgmma 0.0693 ms (wgmma/tma 1.298x) | max_abs(tma-vs-wgmma)=0.000e+00
+  dq   vs ref: max_abs=2.008e-03  max_rel=5.284e-01
+  dk   vs ref: max_abs=2.931e-03  max_rel=5.104e-01
+  dv   vs ref: max_abs=3.891e-03  max_rel=3.167e-02
+  fa_dq     vs ref: max_abs=1.757e-03  max_rel=3.464e-01
+  fa_dk     vs ref: max_abs=2.996e-03  max_rel=5.725e-01
+  fa_dv     vs ref: max_abs=4.326e-03  max_rel=4.869e-01
+  te_dq     vs ref: max_abs=1.580e-03  max_rel=3.944e-01
+  te_dk     vs ref: max_abs=2.893e-03  max_rel=3.941e-01
+  te_dv     vs ref: max_abs=4.326e-03  max_rel=4.573e-01
+
+=== [单文件] b1_s1024_h64_d128_kv1_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp16
+[O23] main backend = wgmma2(BN=64) | lse = wgmma (D=128 S=1024)
+[timing] total(3 kernels) 0.3927 ms  87.51 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0764 ms | main 0.2865 ms | convert 0.0298 ms
+[O30 A/B] lse tma 0.0588 ms | wgmma 0.0778 ms (wgmma/tma 1.322x) | max_abs(tma-vs-wgmma)=0.000e+00
+  dq   vs ref: max_abs=2.292e-03  max_rel=4.022e-01
+  dk   vs ref: max_abs=7.934e-03  max_rel=3.853e-01
+  dv   vs ref: max_abs=7.517e-03  max_rel=3.239e-02
+  fa_dq     vs ref: max_abs=1.971e-03  max_rel=3.588e-01
+  fa_dk     vs ref: max_abs=7.586e-03  max_rel=5.690e-01
+  fa_dv     vs ref: max_abs=1.057e-02  max_rel=9.507e-01
+  te_dq     vs ref: max_abs=2.141e-03  max_rel=3.596e-01
+  te_dk     vs ref: max_abs=6.452e-03  max_rel=4.311e-01
+  te_dv     vs ref: max_abs=1.057e-02  max_rel=8.528e-01
+

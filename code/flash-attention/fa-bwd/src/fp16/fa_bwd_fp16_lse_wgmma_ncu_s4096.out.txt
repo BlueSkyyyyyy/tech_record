@@ -1,0 +1,71 @@
+fa_bwd_fp16_mma_kernels.cuh(2234): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma4<HD,SEQ>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) [with HD=128, SEQ=true]" at line 592 of fa_bwd_fp16_mma_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp16_mma_kernels.cuh(1599): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma2<HD,SPLIT,CL>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *) [with HD=128, SPLIT=true, CL=2]" at line 619 of fa_bwd_fp16_mma_main.cu
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb0EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 436991
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb1EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 431682
+==PROF== Connected to process 735246 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "lse_mma_kernel_bal_wgmma": 0%....50%....100% - 11 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[O23] main backend = wgmma2b(BN=128) | lse = wgmma (D=128 S=4096)
+[timing] total(3 kernels) 1.3790 ms  99.67 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3542 ms | main 1.0108 ms | convert 0.0140 ms
+[O24 A/B] delta old 0.0600 ms | warp 0.0599 ms (1.00x)
+[O8b A/B] lse O8 0.8631 ms | bal(单缓冲) 0.4555 ms (1.895x) | bal+cpasync(双缓冲) 0.3026 ms (2.852x)
+[O9 A/B] lse wgmma+SW128 0.2894 ms (vs bal+cpasync 1.046x, vs O8 2.982x)
+[O6 A/B] main nopipe 2.2435 ms (61.26 TF) | pipe(KV both) 1.6161 ms (85.04 TF) | pipe2(K only) 1.5524 ms (88.53 TF) => nopipe/pipe 1.388x, nopipe/pipe2 1.445x
+[O17 A/B] main mma(64,64,2) 1.5043 ms | O9b wgmma 1.5051 (0.999x) | O17 wgmma2(BM128) 0.9804 (1.534x) TF 140.2
+[O17b A/B] main O17(BM128) 0.9804 ms | O17b wgmma4(BM256,ovlp) 1.2017 ms (0.816x) | wgmma4(BM256,seq) 1.0421 ms (0.941x) TF 131.9
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/8.58e-06/1.62e-05 | wg2-vs-O9b dq/dk/dv=0.00e+00/9.06e-06/1.62e-05
+[O18 A/B] main O17 wg2(BN64) 0.9804 ms (140.2 TF) | O18 wg2b(BN128,split) 0.9530 ms (144.2 TF) => 1.029x | O18 wg2b(BN128,串行) 0.9800 ms => 1.000x | max|diff| wg2b-vs-wg2 dq/dk/dv=2.38e-07/2.86e-06/3.81e-06 | wg2bns-vs-wg2b 0.00e+00/2.38e-06/2.86e-06
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 0.9938 ms (138.3 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.9804 ms (140.2 TF) => 1.014x | max|diff| dq/dk/dv=0.00e+00/3.81e-06/3.81e-06
+[O17b A/B] max|diff| wg4-vs-wg2 dq/dk/dv=0.00e+00/9.54e-06/1.91e-05 | wg4-vs-mma dq/dk/dv=0.00e+00/1.24e-05/1.91e-05
+[O17b A/B] max|diff| wg4seq-vs-wg4 dq/dk/dv=2.01e-03/8.95e-03/3.81e-06 | wg4seq-vs-wg2 dq/dk/dv=2.01e-03/8.95e-03/1.91e-05
+[O6c A/B] main sched0(原样) 1.6339 ms | sched1(交错) 1.5244 ms (1.072x) | sched2(逆序) 1.5028 ms (1.087x)
+[O5c A/B] main (64,32,2) 1.5494 ms (88.70 TF) | (64,64,2) 1.4951 (91.93) | (32,32,1) 2.5697 (53.48) | (32,32,2) 2.5979 (52.90) => best 1.036x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.7832 (77.08) | f4 1.8136 (75.78,-1.7%) | f2+PREL 1.5095 (91.05,+18.1%) | f4+PREL 1.5376 (89.38,+16.0%)
+  (BM=64,BN=64,PIPE=2): base 1.6797 (81.82) | f4 1.6921 (81.22,-0.7%) | f2+PREL 1.4803 (92.84,+13.5%) | f4+PREL 1.4858 (92.50,+13.1%)
+  (BM=32,BN=32,PIPE=1): base 2.6303 (52.25) | f4 2.6255 (52.35,+0.2%) | f2+PREL 2.5681 (53.52,+2.4%) | f4+PREL 2.6061 (52.74,+0.9%)
+  (BM=32,BN=32,PIPE=2): base 2.6635 (51.60) | f4 2.6490 (51.88,+0.5%) | f2+PREL 2.5659 (53.56,+3.8%) | f4+PREL 2.5493 (53.91,+4.5%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+==PROF== Disconnected from process 735246
+[735246] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void lse_mma_kernel_bal_wgmma<128, 1>(const __half *, const __half *, float *, int, int, int, float) (32, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %         3.77
+    gpu__time_duration.sum                                                                 us       286.30
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        17.43
+    launch__registers_per_thread                                              register/thread           62
+    launch__shared_mem_per_block_dynamic                                          Kbyte/block        50.18
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        20.27
+    sm__inst_executed.sum                                                                inst    165299200
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        60.93
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        23.02
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         0.04
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         0.77
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         2.26
+    ------------------------------------------------------------------------- --------------- ------------
+
