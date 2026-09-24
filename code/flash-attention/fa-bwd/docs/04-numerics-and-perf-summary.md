@@ -715,6 +715,15 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > **`FA_ILV34`（先发 GEMM3/4 两条 mma 再 epilogue）负结果**：两个累加器同时存活使 spill 增加，
 > 0.95–0.96×。详见 `03` §34、原始输出 `src/fp8/fa_bwd_fp8_o29_ksplit_sweep.out.txt`、
 > `fa_bwd_fp8_o29_ncu_s1024h32.out.txt`、`o29_te_fp8_bench.out.txt`。
+>
+> **O32（第七十三轮）——fp8 LSE 的 4D-TMA 载入（对齐 fp16 O30/bf16 O31；正结果）**：
+> fp8 一行 128B = SW128 atom 整行 ⇒ Q/K 各只需**一次** 4D-TMA（box `{128,64,1,1}`、UINT8
+> tensormap；fp16 需 2×K=64 chunk）。LSE-only **1.06–1.10×**（S4096 0.2726→**0.2475ms**），
+> `max_abs(tma-vs-wgmma)=0` 逐位不变、`dq/dk/dv vs ref` 与历史逐位一致；端到端 S4096
+> **2.1303ms/64.52 TF**、S512 0.1219、S1024H32 0.4468，同一 session TE FP8
+> 0.1009/0.2059/0.5876 ⇒ ours/TE **1.21×/2.17×/3.63×**。ncu：`long_scoreboard 2.20→0.37`、
+> `short 2.25→1.05`、`mio 0.67→0.03`，新墙 = Compute ~57% + `wait`。详见 `03` §35、
+> 原始输出 `src/fp8/fa_bwd_fp8_o32_sweep.out.txt`、`..._o32_ncu_stall_lse_{tma,wgmma}_s4096.out.txt`。
 
 ---
 
@@ -761,6 +770,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 | fp8 | **delta 旧（per-row, S=4096）** | 31.13% | — | **74.93%** | 83.09%（17 regs） | 31.03 | smem 树归约 7×barrier | **smem 归约 + Compute 75%**；Duration **42.94µs** |
 | fp8 | **delta_warp（O26 warp-per-row, S=4096）** | **77.01%** | — | 27.14% | 83.77%（18 regs） | 7.76 | — | **DRAM 带宽 77%（elementwise 上限）**；Duration 42.94→**17.34µs（2.48×）**（对齐 fp16 O24） |
 | fp8 | **lse_mma_bal<HD,1>（O11, S=4096）** | 1.48% | 28.16% | **61.15%** | 23.24%（~27.7KB, 6 CTA/SM, 77 regs） | **0.65** | — | **Compute 61% + 网格不足一个波**（镜像配对消尾波 + cp.async 消 long_scoreboard；对齐 fp16/bf16 O8b） |
+| fp8 | **lse_mma_kernel_bal_tma<128,1>（O32, S=4096）** | 2.08% | 25.00% | **56.79%** | 23.55%（26.43KB, 61 regs） | 0.48 | long 2.20→**0.37**、short 2.25→**1.05**、wait 2.34、mio 0.03 | **Compute ~57% + `wait`**（4D-TMA 消 cp.async 地址运算，对齐 fp16 O30/bf16 O31；Duration 251.97µs） |
 | fp8 | **mma main（O4b 后, MLA S=1024 H2 D512）** | 1.46% | 11.38% | 7.45% | **6.25%（205.8KB, 1 CTA/SM）** | 0.97 | long_scoreboard 1.73、wait 1.67 | **低 occupancy/并行度**（smem 仍 205.8KB > 116KB 门槛） |
 
 **共同结论**：三种 dtype 的 **main kernel** 都不是 HBM 或算力 bound（DRAM <3%、Compute <38%）；

@@ -118,9 +118,10 @@
 ### 可选
 
 - [~] SM90 TMA+wgmma 版本（对标 FA3）：**wgmma 部分已完成**（O9a/O9b/O9b-2/O17/O18，
-  fp16/bf16/fp8，且 **O22/O23 已把 Hopper 路径默认化**）；**TMA 部分已落地 fp16 LSE**
-  （**O30**，4D-TMA + 2×K=64 chunk，1.30–1.36×、数值逐位不变）；**主 kernel 的 Q/K/V/dO TMA 化
-  与 bf16/fp8 版仍待做**（需改 GEMM3/4/5 的转置描述符）。见 backlog。
+  fp16/bf16/fp8，且 **O22/O23 已把 Hopper 路径默认化**）；**TMA 部分已落地三种 dtype 的 LSE**
+  （**O30 fp16** 4D-TMA + 2×K=64 chunk，**O31 bf16** dtype 参数化，**O32 fp8** 单 chunk/UINT8，
+  均 1.06–1.36×、数值逐位不变）；**主 kernel 的 Q/K/V/dO TMA 化仍待做**
+  （需改 GEMM3/4/5 的转置描述符 / fp8 的 dS3-Ap smem 复用）。见 backlog。
 - [ ] 变长（cu_seqlens / varlen）覆盖
 
 ## 每项的 Definition of Done
@@ -1953,6 +1954,36 @@
     `src/fp16/fa_bwd_fp16_lse_wgmma_ncu_s4096.out.txt`、`src/fp16/fa_bwd_fp16_o30_fa3_te_baseline.out.txt`；
     文档 `docs/01` §14r、`docs/04` §2.1、`docs/08` §5。
 
+- 2026-09-24（第七十二轮）：**O31 完成（bf16：LSE 的 4D-TMA 载入，对齐 fp16 O30）**。
+  把 fp16 O30 逐字节 dtype 参数化到 bf16（`wgmma...bf16` + tensormap `BFLOAT16`），
+  LSE-only **1.32–1.35×**、指令数 **−28.7%**、端到端 **1.065–1.071×**（MHA S4096
+  1.3390→**1.2577ms**，109.3 TF，FA3 的 3.94×），`max_abs(tma-vs-wgmma)=0` 逐位一致。
+  详见 `docs/01b` §6x。
+
+- 2026-09-24（第七十三轮）：**O32 完成（fp8：LSE 的 4D-TMA 载入，对齐 fp16 O30 / bf16 O31）**。
+  - **fp8 与 fp16 的关键差异**：fp8 一行 128 元素 = **128B = SW128 atom 整行** ⇒ Q/K 各只需
+    **一次** 4D-TMA（box `{128,64,1,1}`，dtype=`UINT8`；fp16 需 2×K=64 chunk）。新增
+    `lse_mma_kernel_bal_tma<HD,PIPE=1>`（单/两文件 device 逐字一致，`sync_onefile_device.py`
+    核对 `identical: True`）+ `mbar_*`/`tma_load_4d` 封装；`Fp8Cfg::lse_smem_bytes_tma1`；
+    host `make_lse_map_fp8` + `--lsetma=0/1`（`-DFA_TMA` 构建下 D==128/causal 默认开）。
+    rowwise scale 仍走标量 global 读（TMA 带不了标量数组）。
+  - **数值**：TMA-vs-wgmma 的 LSE **`max_abs=0.000e+00`（逐位相同）**，6 shape × 单/两文件；
+    `dq/dk/dv vs ref` 与历史（O9c/O22/O27/O29）**逐位一致**（S512 2.426/2.972/3.733e-1、
+    S4096 2.635/2.644/3.216e-1、S1024H32 2.399/4.177/3.535e-1、kv4 2.517/5.339/7.173e-1）。
+  - **性能（同 session A/B，event）**：LSE-only **S512 1.076× / S1024H32 1.075× / kv4 1.077× /
+    kv8 1.079× / MQA 1.091× / S4096 1.101×**；端到端 total S4096 **2.1303ms（64.52 TF）**、
+    S512 0.1219、S1024H32 0.4468、kv4 0.4035、kv8 0.4891、MQA 0.6839。同 session TE FP8
+    0.1009/0.2059/0.5876 ⇒ ours/TE **1.21×/2.17×/3.63×**（kv4 1.99×、kv8 2.02×、MQA 1.70×）。
+    收益小于 fp16 O30（1.3×）：fp8 LSE 本来就用 `cp.async` 且每元素 1B，地址运算占比小。
+  - **ncu（LSE, S4096）**：Duration **251.97µs**、Compute **56.79%** / L1TEX 25.00% / L2 14.60% /
+    DRAM 2.08%、occ 23.55%（61 regs/26.43KB）、Waves 0.48；stall TMA-vs-wgmma：
+    `long_scoreboard 2.20→0.37`、`short_scoreboard 2.25→1.05`、`wait 2.68→2.34`、
+    `barrier 0.53→0.32`、`mio 0.67→0.03` ⇒ **新墙 = Compute ~57% + `wait`（softmax/mma 固定
+    延迟）**，与 fp16 O30/bf16 O31 一致。第一墙仍是主 kernel（mma 依赖延迟 + 3 CTA/SM）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_o32_sweep.out.txt`、`..._o32_onefile_sweep.out.txt`、
+    `..._o32_ncu_lse_tma_s4096.out.txt`、`..._o32_ncu_stall_lse_{tma,wgmma}_s4096.out.txt`、
+    `src/fp8/fa_bwd_fp8_o32_tebench.out.txt`；文档 `docs/03` §35。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -2165,8 +2196,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 与 fp16 O30 逐字节同构（仅 `wgmma...bf16` + tensormap `BFLOAT16`），LSE-only **1.32–1.35×**、
 > 指令数 **−28.7%**、端到端 **1.065–1.071×**（MHA S4096 1.3390→**1.2577ms**，109.3 TF，
 > FA3 的 3.94×），`max_abs(tma-vs-wgmma)=0` 逐位一致；纯 `sm_90`/仅 `-DFA_WGMMA` 构建不变。
-> 详见 `docs/01b` §6x。**剩余**：主 kernel 的 Q/K/V/dO TMA 化（需改 GEMM3/4/5 的
-> 转置描述符）、fp8 的 TMA（fp8 SW128 的 `k/16` chunk 下标 + UINT8 tensormap）。
+> 详见 `docs/01b` §6x。**O32 已完成 fp8 LSE 的 TMA（第七十三轮）**：fp8 一行 128B = SW128
+> atom 整行 ⇒ Q/K 各一次 4D-TMA（UINT8 tensormap），LSE-only **1.06–1.10×**、`max_abs=0`、
+> ncu `long_scoreboard 2.20→0.37`、新墙 = Compute ~57% + `wait`；详见 `docs/03` §35。
+> **剩余**：主 kernel 的 Q/K/V/dO TMA 化（fp16/bf16 需改 GEMM3/4/5 的转置描述符；fp8 需
+> 处理 K/V 的 dS3/Ap 复用与 32 regs 的寄存器预取）。
 > **④（O27 新增，O28 已作废）fp16/bf16 的 fold 同理含逐元素精确除法**——**误记**：逐字核对
 > `src/fp16,bf16/fa_bwd_*_kernels.cuh` 后确认 fp16/bf16 **没有 rowwise scale fold**（无量化），
 > 逐元素除法只在 fp8。fp8 的 fold 除法 O27 已收口，转换指令 O28 也已向量化（MLA 1.03×、d128 中性）。

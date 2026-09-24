@@ -3014,3 +3014,112 @@ ksplit/timing/对拍）、`src/fp8/fa_bwd_fp8_o29_onefile_sweep.out.txt`（单�
 `src/fp8/fa_bwd_fp8_o29_ncu_s1024h32.out.txt`（k=8 vs k=4 的 ncu 指标）、
 `src/fp8/o29_te_fp8_bench.out.txt`、`src/fp8/o29_fa3_te_baseline_fp16.out.txt`、
 `src/fp8/fa_bwd_fp8_o29_ilv34_s4096.out.txt`。
+
+## 35. O32：fp8 LSE 的 4D-TMA 载入（对齐 fp16 O30 / bf16 O31；LSE-only 1.06–1.10×）
+
+### 35.1 动机
+
+fp16/bf16 在 O30（`docs/01` §14r）/ O31（`docs/01b` §6x）已把 **LSE 的 Q/K 载入**从「逐 16B
+`cp.async` + 地址运算」换成 **4D-TMA**（`cuTensorMapEncodeTiled` + `cp.async.bulk.tensor.4d`），
+LSE-only 1.30–1.36×、指令数 −28.7%、数值逐位不变。**fp8 侧一直没做**：O9c 起 fp8 LSE 的
+`issue_q`/`issue_k` 仍逐元素算 `sw128_off_fp8` 再 `cp_async16`（`docs/03` §22）。本轮补齐。
+
+fp8 与 fp16 O30 的**关键差异**：TMA `SWIZZLE_128B` 的 box 内维固定 128B。fp16 一行 128 元素
+= 256B，必须拆成 **2 个 K=64 chunk**（O15a 的坑）；而 **fp8 一行 128 元素恰好 = 128B = SW128
+atom 的整行**，所以 **Q/K 各只需一次 4D-TMA**（box `{128,64,1,1}`，dtype=`UINT8`，见 23 篇坑
+「CUDA 13 无 `FLOAT8_E4M3` 枚举，用 UINT8 搬字节」）。
+
+### 35.2 改动（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+* `src/fp8/fa_bwd_fp8_kernels.cuh` 新增（`#if defined(FA_WGMMA) && defined(FA_TMA)`，
+  asm 用 `FA_FP8_HAS_TMA` = `__CUDA_ARCH_FEAT_SM90_ALL` 包裹，纯 `sm_90` 构建退化为空实现）：
+  * `mbar_init` / `mbar_arrive_expect` / `mbar_wait`（`mbarrier.*`）与 `tma_load_4d`
+    （`cp.async.bulk.tensor.4d...mbarrier::complete_tx::bytes`），与 fp16 O30 同构。
+  * `lse_mma_kernel_bal_tma<HD,PIPE=1>`：镜像配对 + online-softmax + 4-lane `shfl` 归约、
+    rowwise scale `qs*ks` 相乘顺序与 `lse_mma_kernel_bal_wgmma` **完全一致**；只把 Q/K 的
+    SW128 tile 改由 TMA 填充（K 双缓冲 + 2 个 mbarrier，相位按 `use&1`），**rowwise scale
+    仍走标量 global 读**（TMA 带不了标量数组）。`Fp8Cfg::lse_smem_bytes_tma1 =
+    3*lse_tile_wgmma + (LBM+2*LBN)*4 + 1024 + 64`（= fp16 TMA 同款 + fp8 的 768B 双 scale）。
+* `fa_bwd_fp8_main.cu`：`make_lse_map_fp8`（4D dims={D,S,H,B}、strides 字节、UINT8、SW128）；
+  CLI `--lsetma=0/1`（`-1` 自动：`-DFA_TMA` 构建下 D==128/causal 默认开）；`run_preprocess`
+  分派 TMA/wgmma/mma；新增 `[O32 A/B]` 同 session 计时 + LSE 数值对拍。`#include <cuda.h>`。
+* 单文件 `fa_bwd_fp8_mma_onefile.cu`：device 段由脚本同步，host 段镜像同样改动。
+* `-lcuda` 链接 `cuTensorMapEncodeTiled`；纯 `-DFA_WGMMA` 或 `sm_90` 构建不引用驱动符号。
+
+### 35.3 数值
+
+* **TMA-vs-wgmma 的 LSE `max_abs=0.000e+00`（逐位相同）**：6 个 d128 shape × 单/两文件全部。
+* `dq/dk/dv vs ref` 与历史（O9c/O22/O27/O29）**逐位一致**（见下表）——只换搬运、不改数学。
+
+### 35.4 性能（同 session A/B，CUDA event；`-DFA_WGMMA -DFA_TMA -lcuda`）
+
+**LSE-only**（两文件，ms）：
+
+| shape | wgmma+cp.async | **TMA** | 加速 |
+|---|---|---|---|
+| S512 H16 | 0.0335 | **0.0312** | 1.076× |
+| S1024 H32 | 0.0661 | **0.0615** | 1.075× |
+| S1024 H32 kv4 | 0.0643 | **0.0597** | 1.077× |
+| S1024 H40 kv8 | 0.0676 | **0.0627** | 1.079× |
+| S1024 H64 kv1 (MQA) | 0.0744 | **0.0682** | 1.091× |
+| S4096 H16 | 0.2726 | **0.2475** | 1.101× |
+
+**端到端**（quant+preprocess+main，两文件；ours / TE FP8 同 session / 比值）：
+
+| shape | ours total (ms) | ours TF | TE FP8 (ms) | TE TF | ours/TE |
+|---|---|---|---|---|---|
+| S512 H16 | 0.1219 | 17.62 | 0.1009 | 42.56 | 1.21× |
+| S1024 H32 | 0.4468 | 38.45 | 0.2059 | 166.88 | 2.17× |
+| S1024 H32 kv4 | 0.4035 | 42.58 | 0.2025 | 169.65 | 1.99× |
+| S1024 H40 kv8 | 0.4891 | 43.90 | 0.2422 | 177.30 | 2.02× |
+| S1024 H64 kv1 | 0.6839 | 50.24 | 0.4021 | 170.91 | 1.70× |
+| S4096 H16 | 2.1303 | 64.52 | 0.5876 | 467.83 | 3.63× |
+
+单/两文件逐指标一致（S4096 total 2.1301 vs 2.1303ms，差 <0.1%）；MLA（D=512）走 wgmma/mma
+不受影响（S1024H2 total 0.3916ms，数值不变）。收益幅度小于 fp16 O30（1.3×）——因为 fp8 的 LSE
+本来就用 `cp.async` 且每元素 1B（地址运算占比小），TMA 主要省的是 load 指令/地址算术。
+
+### 35.5 ncu（LSE, S=4096，`--launch-count 1`）
+
+| 指标 | wgmma+cp.async | **TMA** |
+|---|---|---|
+| Duration | — | **251.97 µs** |
+| Compute (SM) | ~61% | **56.79%** |
+| L1/TEX | ~28% | **25.00%** |
+| L2 | ~15% | **14.60%** |
+| DRAM | ~1.5% | **2.08%** |
+| achieved occ | ~23% | 23.55%（理论 50%，61 regs / 26.43KB）|
+| Waves / SM | 0.65 | 0.48 |
+| stall `long_scoreboard` | **2.20** | **0.37** |
+| stall `short_scoreboard` | **2.25** | **1.05** |
+| stall `wait` | 2.68 | **2.34** |
+| stall `barrier` | 0.53 | **0.32** |
+| stall `mio_throttle` | 0.67 | 0.03 |
+
+TMA 把 cp.async 的地址运算与 smem 写冲突整个消掉（`long_scoreboard` 2.20→0.37、
+`short_scoreboard` 2.25→1.05），**新墙 = Compute ~57% + `wait`（softmax/mma 固定延迟）**，
+与 fp16 O30 / bf16 O31 的结论一致。第一墙仍是主 kernel（mma 依赖延迟 + 3 CTA/SM），
+LSE 已接近下限。
+
+### 35.6 复现
+
+```bash
+# 两文件（TMA 默认开）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# 同 binary 退回 wgmma（A/B）
+... scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=... --lsetma=0
+# 单文件
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --dir=...
+# ncu
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:lse_mma_kernel_bal_tma --launch-count 1 -- --dir=...
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o32_sweep.out.txt`（两文件 ×8 shape：backend/timing/O32 A/B/
+对拍）、`src/fp8/fa_bwd_fp8_o32_onefile_sweep.out.txt`（单文件 ×4 shape，与两文件逐位一致）、
+`src/fp8/fa_bwd_fp8_o32_ncu_lse_tma_s4096.out.txt`（TMA ncu full）、
+`src/fp8/fa_bwd_fp8_o32_ncu_stall_lse_{tma,wgmma}_s4096.out.txt`（stall 对比）、
+`src/fp8/fa_bwd_fp8_o32_tebench.out.txt`（同 session TE FP8 基线）。

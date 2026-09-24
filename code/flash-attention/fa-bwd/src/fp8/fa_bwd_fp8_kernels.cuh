@@ -55,6 +55,7 @@
 #define FA_BWD_FP8_KERNELS_CUH_
 
 #include <cuda_runtime.h>
+#include <cuda.h>  // O32：LSE 的 4D TMA 需要驱动 API（cuTensorMapEncodeTiled / CUtensorMap）
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
 
@@ -206,6 +207,10 @@ struct Fp8Cfg {
       2 * lse_tile_wgmma + (LBM + LBN) * (int)sizeof(float) + 1024;
   static constexpr int lse_smem_bytes_balw1 =
       3 * lse_tile_wgmma + (LBM + 2 * LBN) * (int)sizeof(float) + 1024;
+  // O32：TMA 版 LSE（Q + 2×K tile + rowwise scale + 3 个 mbarrier）。fp8 一行 128B = 一个
+  //   SW128 atom 的整行 ⇒ **一个 TMA 搬完整块**（不需要 fp16 的 2×K=64 chunk 拆分）。
+  static constexpr int lse_smem_bytes_tma1 =
+      3 * lse_tile_wgmma + (LBM + 2 * LBN) * (int)sizeof(float) + 1024 + 64;
 
   // O3 寄存器预取：pk0/pk1/pv0/pv1 各 NPU 个 uint32。HD=128 时 NPU=4（共 16 regs，可行）；
   // HD=512 时 NPU=16（共 64 regs，会挤掉累加器/地址寄存器）→ 关闭，走直接向量化读。
@@ -1248,6 +1253,201 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
   }
 }
 #endif  // FA_WGMMA
+
+// =============================================================================
+// 2a''') O32：TMA 版 LSE（fp8）—— 对齐 fp16 O30 / bf16 O31，4D-TMA 载入 Q/K
+// =============================================================================
+// 动机：fp8 LSE 的 Q/K 载入从 O9c 起一直是「逐 16B `cp.async` + 地址运算」（`issue_q`/
+//   `issue_k` 里对每个 `u` 算 `sw128_off_fp8` 再 `cp_async16`）。换成 **4D TMA** 后一条
+//   bulk 指令搬完整块 [64 行][128 列]（1024B），省掉全部 load 指令与地址运算。
+//
+// fp8 与 fp16 O30 的关键差异：fp8 一行 128B = **一个 SW128 atom 的整行**（fp16 一行 128
+//   个元素是 256B，必须拆成 2 个 K=64 chunk）。所以 fp8 的 Q/K tile 各**只需一次 4D TMA**
+//   （box 内维 128 个 UINT8 = 128B），描述符仍是 `SBO=(HD/128)*1024=1024`、`layout_type=B128`。
+//   `cuTensorMapEncodeTiled` 的 dtype 用 `CU_TENSOR_MAP_DATA_TYPE_UINT8`（CUDA 13 无
+//   `FLOAT8_E4M3` 枚举；字节搬运与 wgmma 的 e4m3 解释互不影响，见 23 篇坑）。
+//
+// 数学与 `lse_mma_kernel_bal_wgmma` **完全一致**（镜像配对、online-softmax、4-lane `shfl`
+//   归约、rowwise scale `qs*ks` 相乘顺序），只换搬运方式 ⇒ 数值应逐位相同。
+//   仅 HD=128、causal（由 host 控制）。TMA asm 需 sm_90a，用 `FA_FP8_HAS_TMA` 包裹，
+//   纯 `sm_90`（或仅 `-DFA_WGMMA`）构建时退化为空实现、host 不会 launch。
+// =============================================================================
+#if defined(FA_WGMMA) && defined(FA_TMA)
+#if defined(__CUDA_ARCH__) && defined(__CUDA_ARCH_FEAT_SM90_ALL)
+#define FA_FP8_HAS_TMA 1
+#else
+#define FA_FP8_HAS_TMA 0
+#endif
+__device__ __forceinline__ void mbar_init(uint64_t* bar, uint32_t count) {
+#if FA_FP8_HAS_TMA
+  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(smem_u32(bar)),
+               "r"(count));
+#else
+  (void)bar; (void)count;
+#endif
+}
+__device__ __forceinline__ void mbar_arrive_expect(uint64_t* bar, uint32_t bytes) {
+#if FA_FP8_HAS_TMA
+  asm volatile(
+      "mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(smem_u32(bar)),
+      "r"(bytes));
+#else
+  (void)bar; (void)bytes;
+#endif
+}
+__device__ __forceinline__ void mbar_wait(uint64_t* bar, uint32_t phase) {
+#if FA_FP8_HAS_TMA
+  uint32_t done = 0;
+  while (!done) {
+    asm volatile(
+        "{\n.reg .pred p;\nmbarrier.try_wait.parity.shared::cta.b64 p, [%1], %2;\n"
+        "selp.b32 %0, 1, 0, p;\n}\n"
+        : "=r"(done)
+        : "r"(smem_u32(bar)), "r"(phase));
+  }
+#else
+  (void)bar; (void)phase;
+#endif
+}
+// 一条 4D TMA：全局张量 UINT8 dims={D,S,H,B}，把坐标 {k0,row,head,batch} 起的
+// [64 行][128 列]（128 列 = 128B）搬进 dst（SW128 K-major）。
+__device__ __forceinline__ void tma_load_4d(void* dst, const CUtensorMap* map, int k0,
+                                            int r0, int hd, int b, uint64_t* bar) {
+#if FA_FP8_HAS_TMA
+  asm volatile(
+      "cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes"
+      " [%0], [%1, {%2, %3, %4, %5}], [%6];\n" ::"r"(smem_u32(dst)),
+      "l"((uint64_t)map), "r"(k0), "r"(r0), "r"(hd), "r"(b), "r"(smem_u32(bar)));
+#else
+  (void)dst; (void)map; (void)k0; (void)r0; (void)hd; (void)b; (void)bar;
+#endif
+}
+
+template <int HD, int PIPE = 1>
+__global__ void __launch_bounds__(THREADS)
+lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
+                       const __grid_constant__ CUtensorMap kmap,
+                       const float* __restrict__ qs, const float* __restrict__ ks,
+                       float* __restrict__ lse, int S, int H, int Hkv, float scale) {
+  static_assert(HD == 128, "fp8 wgmma LSE TMA 目前只做 HD=128");
+  constexpr int TILE = (LBM / 8) * (HD / 128) * 1024;  // 单个 [LBM][HD] SW128 tile（8KB）
+  extern __shared__ char smem_raw[];
+  // SW128 描述符 base_offset=0 要求 tile 1024B 对齐 → 手动对齐动态 smem 基址。
+  const uint32_t a0 = smem_u32(smem_raw);
+  const uint32_t pad = (1024u - (a0 & 1023u)) & 1023u;
+  char* Qs = smem_raw + pad;
+  char* Ks = Qs + TILE;  // PIPE=1：2*TILE；PIPE=0：TILE
+  float* qs_s = reinterpret_cast<float*>(Ks + (PIPE ? 2 : 1) * TILE);
+  float* ks_s = qs_s + LBM;  // PIPE=1：2*LBN
+  uint64_t* qbar = reinterpret_cast<uint64_t*>(ks_s + (PIPE ? 2 : 1) * LBN);
+  uint64_t* kbar = qbar + 1;
+
+  const int nblk = (S + LBM - 1) / LBM;
+  const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  const int hkv = h / (H / Hkv);
+  const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  const int g = lane >> 2, c2 = (lane & 3) * 2;
+
+  if (tid == 0) {
+    mbar_init(qbar, 1);
+    mbar_init(kbar, 1);
+    if (PIPE) mbar_init(kbar + 1, 1);
+  }
+  __syncthreads();
+
+  // 发本 m 块的 Q（一次 4D TMA 搬整块）+ rowwise scale（标量 global 读，TMA 带不了）。
+  auto issue_q = [&](int m0) {
+    if (tid < LBM)
+      qs_s[tid] = (m0 + tid < S) ? qs[((size_t)(b * S + m0 + tid)) * H + h] : 1.f;
+    if (tid == 0) {
+      mbar_arrive_expect(qbar, TILE);
+      tma_load_4d(Qs, &qmap, 0, m0, h, b, qbar);
+    }
+  };
+  // 发一个 K tile（j0 起 LBN 行）+ 本 tile 的 rowwise scale。
+  auto issue_k = [&](int stage, int j0) {
+    if (tid < LBN)
+      ks_s[stage * LBN + tid] =
+          (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * Hkv + hkv] : 1.f;
+    if (tid == 0) {
+      char* Kd = Ks + stage * TILE;
+      mbar_arrive_expect(kbar + stage, TILE);
+      tma_load_4d(Kd, &kmap, 0, j0, hkv, b, kbar + stage);
+    }
+  };
+
+  int quse = 0;
+  int kuse[2] = {0, 0};
+#pragma unroll 1
+  for (int t = 0; t < 2; ++t) {
+    const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
+    if (t == 1 && pair == nblk - 1 - pair) break;
+    const int m0 = mblk * LBM;
+    const int ncols = min(S, m0 + LBM);
+    const int ntiles = (ncols + LBN - 1) / LBN;
+    issue_q(m0);
+    if (ntiles > 0) issue_k(0, 0);
+    mbar_wait(qbar, (uint32_t)(quse & 1)); quse++;
+
+    float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
+#pragma unroll 1
+    for (int nt = 0; nt < ntiles; ++nt) {
+      const int st = PIPE ? (nt & 1) : 0;
+      mbar_wait(kbar + st, (uint32_t)(kuse[st] & 1)); kuse[st]++;
+      __syncthreads();
+      const int j0 = nt * LBN;
+      char* Kt = Ks + st * TILE;
+      float* KtS = ks_s + st * LBN;
+      if (PIPE) {
+        if (nt + 1 < ntiles) issue_k(st ^ 1, j0 + LBN);
+      }
+
+      float d[32];
+      wgmma_qkt64_fp8(Qs, Kt, HD, d);
+
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          int s = q >= 2 ? 1 : 0;
+          int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+          int c = j * 8 + c2 + (q & 1);
+          int qi = m0 + r, jg = j0 + c;
+          float sv = -INFINITY;
+          if (qi < S && jg < S && jg <= qi) sv = d[j * 4 + q] * scale * qs_s[r] * KtS[c];
+          if (sv != -INFINITY) {
+            float mn = fmaxf(mrow[s], sv);
+            lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
+            mrow[s] = mn;
+          }
+        }
+      __syncthreads();  // 所有 warp 读完本 tile 后才能覆盖该 stage / 下一轮 Q
+      if (!PIPE && nt + 1 < ntiles) issue_k(0, j0 + LBN);
+    }
+    // 同一 row 由 4 个 lane（同 g、lane&3=0..3）持有，warp 内 shfl 归约
+#pragma unroll
+    for (int s = 0; s < 2; ++s) {
+      float m = mrow[s], l = lrow[s];
+#pragma unroll
+      for (int off = 1; off <= 2; off <<= 1) {
+        float m2 = __shfl_xor_sync(0xffffffffu, m, off);
+        float l2 = __shfl_xor_sync(0xffffffffu, l, off);
+        float mn = fmaxf(m, m2);
+        float ca = (m == -INFINITY) ? 0.f : l * fexp(m - mn);
+        float cb = (m2 == -INFINITY) ? 0.f : l2 * fexp(m2 - mn);
+        l = ca + cb;
+        m = mn;
+      }
+      if (c2 == 0) {
+        int r = wid * 16 + g + (s ? 8 : 0);
+        int qi = m0 + r;
+        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+      }
+    }
+    __syncthreads();
+  }
+}
+#endif  // defined(FA_WGMMA) && defined(FA_TMA)
 
 
 // =============================================================================
