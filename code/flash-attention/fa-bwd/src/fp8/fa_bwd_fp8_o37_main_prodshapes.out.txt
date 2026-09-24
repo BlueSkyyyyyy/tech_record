@@ -1,0 +1,30 @@
+######## b1_s1024_h40_d128_kv8_causal_fp8 ########
+[timing] total(quant+pre+main+cvt) 0.4692 ms  45.77 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0348 ms | preprocess 0.0736 ms | main 0.3341 ms | convert 0.0268 ms (cvt_on=0)
+[O37 A/B] main Q/dO cp.async 0.3732 ms | tma 0.3531 ms (1.057x) | max_abs(tma-vs-cp) dq/dk/dv=1.192e-07/1.431e-06/2.623e-06
+  dq   vs ref: max_abs=2.869e-01  max_rel=1.861e+02
+  dk   vs ref: max_abs=5.367e-01  max_rel=1.528e+02
+  dv   vs ref: max_abs=7.032e-01  max_rel=9.361e+01
+  dq   vs te_dq: max_abs=1.008e+00  max_rel=1.654e+02
+  dk   vs te_dk: max_abs=8.891e-01  max_rel=1.966e+02
+  dv   vs te_dv: max_abs=1.101e+00  max_rel=3.281e+02
+######## b1_s1024_h32_d128_kv4_causal_fp8 ########
+[timing] total(quant+pre+main+cvt) 0.3853 ms  44.59 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0276 ms | preprocess 0.0671 ms | main 0.2657 ms | convert 0.0248 ms (cvt_on=0)
+[O37 A/B] main Q/dO cp.async 0.2911 ms | tma 0.2787 ms (1.045x) | max_abs(tma-vs-cp) dq/dk/dv=1.192e-07/2.146e-06/4.768e-06
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.987e+02
+  dk   vs ref: max_abs=5.339e-01  max_rel=1.396e+02
+  dv   vs ref: max_abs=7.173e-01  max_rel=9.160e+01
+  dq   vs te_dq: max_abs=5.052e-01  max_rel=1.872e+02
+  dk   vs te_dk: max_abs=9.555e-01  max_rel=2.486e+02
+  dv   vs te_dv: max_abs=1.429e+00  max_rel=1.654e+02
+######## b1_s1024_h64_d128_kv1_causal_fp8 ########
+[timing] total(quant+pre+main+cvt) 0.6465 ms  53.15 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0423 ms | preprocess 0.0879 ms | main 0.4866 ms | convert 0.0298 ms (cvt_on=0)
+[O37 A/B] main Q/dO cp.async 0.5415 ms | tma 0.5042 ms (1.074x) | max_abs(tma-vs-cp) dq/dk/dv=1.192e-07/5.245e-06/9.537e-06
+  dq   vs ref: max_abs=4.101e-01  max_rel=1.537e+02
+  dk   vs ref: max_abs=1.572e+00  max_rel=2.272e+02
+  dv   vs ref: max_abs=2.126e+00  max_rel=2.830e+02
+  dq   vs te_dq: max_abs=5.475e-01  max_rel=1.237e+02
+  dk   vs te_dk: max_abs=2.707e+00  max_rel=3.656e+02
+  dv   vs te_dv: max_abs=3.378e+00  max_rel=2.663e+02

@@ -3123,3 +3123,112 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 `src/fp8/fa_bwd_fp8_o32_ncu_lse_tma_s4096.out.txt`（TMA ncu full）、
 `src/fp8/fa_bwd_fp8_o32_ncu_stall_lse_{tma,wgmma}_s4096.out.txt`（stall 对比）、
 `src/fp8/fa_bwd_fp8_o32_tebench.out.txt`（同 session TE FP8 基线）。
+
+## 36. O37：fp8 主 kernel 的 Q/dO 改用 4D-TMA（对齐 fp16 O33 / bf16 O34；main 1.04–1.08×）
+
+### 36.1 动机
+
+O30/O31/O32 已把三种 dtype 的 **LSE** 换成 4D-TMA，但 **主 kernel 的 operand 仍是逐 16B
+`cp.async` + `sw128_off_fp8` 地址运算**（fp16/bf16 的对应改造是 O33–O36）。ncu（O22/O32）显示
+主 kernel 头号 stall 是 `wait`(1.53)+`short_scoreboard`(1.57)，但 `long_scoreboard` 也还有
+~0.66–1.1，其中一部分来自 **prologue 的 Q/dO 一次性 global 读**（默认 HD=128/REGDQ 档下
+`kPrefetch=false`，K/V 也是同步读；Q/dO 则完全暴露）。Q/dO 与 K/V 不同：**只读一次、与 tile
+循环无关**，是 TMA 化风险最低的一步。
+
+fp8 比 fp16/bf16 更简单：**一行 128B = 一个 SW128 atom 的整行**，一个 `box={128, BM}` 就能把
+整块 Q/dO 搬成 K-major SW128（O32 的 LSE 已示范），不需要 fp16 的 2×K=64 chunk 拆分。
+
+### 36.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+为不重复 700 行主 kernel，先把主 kernel 的**函数体抽成 device 函数** `fp8_mma_body<..., TMA>`，
+再加两个薄 `__global__` 壳：
+* `fa_bwd_fp8_mma_kernel`（原 cp.async 版，`TMA=false`，签名不变）；
+* `fa_bwd_fp8_mma_qdtma_kernel`（`TMA=true`，多两个 `const __grid_constant__ CUtensorMap qmap/dmap`）。
+
+`if constexpr (TMA)` 只改 Q/dO 的载入：
+1. `tid==0` 发两条 `cp.async.bulk.tensor.4d`（box `{128,64}`，坐标 `{0, m0, h, b}`）把 Q/dO
+   搬进 SW128 tile `Qs/dOs`，用两个 mbarrier（`qbars`，放在 smem 末尾额外 64B；
+   `smem_bytes_wgmma_tma = smem_bytes_wgmma + 64`）同步；
+2. 再从 `Qs/dOs` 的 SW128 地址（`sw128_off_fp8`）读回 Qp/dOp 所需的「行对」4B，
+   `__byte_perm(0x5140/0x7362)` 重建 **K 配对布局**（供 GEMM3/4 的 `ldmatrix.x2.trans`）。
+
+K/V、fold、GEMM3/4/5、dQ 归约**逐字未动** ⇒ 数值与 cp.async 版只差跨 CTA `atomicAdd` 次序。
+`qd_tma` 默认开（对齐 O32 的 `lsetma`），`--qdtma=0` 供同 binary A/B；仅 `-DFA_WGMMA -DFA_TMA`
+构建、D==128、WGMMA 路径启用，sm_90 构建完全不变。
+
+### 36.3 数值（vs fp32 ref / TE FP8，逐元素）
+
+九 shape 的 `dq/dk/dv vs fp32 ref` 与历史（O27/O28/O32）**逐位一致**（系统只差归约次序）：
+
+| case | dq vs ref | dk vs ref | dv vs ref |
+|---|---|---|---|
+| b1_s512_h16_d128_causal | 2.426e-01 | 2.972e-01 | 3.733e-01 |
+| b1_s4096_h16_d128_causal | 2.635e-01 | 2.644e-01 | 3.216e-01 |
+| b1_s1024_h32_d128_kv4 | 2.517e-01 | 5.339e-01 | 7.173e-01 |
+| b1_s1024_h40_d128_kv8 | 2.869e-01 | 5.367e-01 | 7.032e-01 |
+
+同 session A/B 的 `max_abs(tma-vs-cp)`：dq ~1e-7、dk/dv ~1e-6 —— 与 fp16 O33「只换搬运方式」
+的结论一致（差异仅原子累加次序）。
+
+### 36.4 性能（同 binary、同 session A/B；CUDA event，main-only，ms）
+
+| shape | cp.async | TMA | 比 |
+|---|---|---|---|
+| MHA S512 | 0.0686 | 0.0638 | **1.075×** |
+| MHA S4096 | 1.7785 | 1.6940 | **1.050×** |
+| GQA q32/kv4 | 0.2911 | 0.2787 | **1.045×** |
+| MQA q64/kv1 | 0.5415 | 0.5042 | **1.074×** |
+
+端到端（quant+preprocess+main，CUDA event）S4096 **2.0508 ms / 67.02 TF**（O32 时 2.177 ms），
+为 **TE FP8（同 session 0.5903 ms / 465.6 TF）的 3.49×**（O27 时 3.69×）。GQA/MQA 端到端
+0.39–0.65 ms，为 TE FP8 的 1.60–1.92×。单文件与两文件数字一致（`..._onefile_s4096.out.txt`：
+total 2.0509 ms）。
+
+### 36.5 ncu（主 kernel，S=4096，`--launch-count 1`；同 binary `--qdtma` 0/1）
+
+| 指标 | cp.async | TMA |
+|---|---|---|
+| `gpu__time_duration.sum` | 1.77 ms | **1.66 ms** |
+| `sm__inst_executed.sum` | 726.3 M | **710.2 M（−2.2%）** |
+| stall `long_scoreboard` | 1.10 | **0.81（−26%）** |
+| stall `short_scoreboard` | 1.54 | 1.58 |
+| stall `wait` | 1.56 | 1.53 |
+| regs / occupancy | 168 / 3 CTA/SM | 168 / 3 CTA/SM |
+| `sm__throughput` | 43.3% | **44.6%** |
+
+TMA 消掉了 Q/dO 载入的 global 地址运算与 `long_scoreboard`，指令数 −2.2%、main −4.8%（A/B）。
+**墙仍不变**：`short_scoreboard`(1.58) + `wait`(1.53) 的 mma/smem 依赖延迟 + 3 CTA/SM —— 即
+O22/O32 一贯的结论，TMA 只是把 Q/dO 这段的访存税拿掉。
+
+### 36.6 剩余（K/V TMA）与判断
+
+K/V 每 tile 都要搬，是更大的 `long_scoreboard` 来源。但**单缓冲 TMA 无收益**：Ks/Vs 在同一
+迭代内被 `dS3/Ap`（fold）覆写，buffer 全程被占用，TMA 只能在上一次 GEMM 读完、fold 之前
+「不可用」；若在迭代末发 TMA、下迭代初等待，则和现在的同步 `kv_load_pair` 一样把延迟暴露在
+关键路径上。要真正重叠必须 **K/V 双缓冲**，而 smem 账算不过来：
+wgmma 布局 `smem_bytes_wgmma=70656B`，3 CTA/SM 上限 `232448/3=77482B`，余量 ~6.8KB；双缓冲 K
+需要 `+ks_sw_bytes(4096B)` 且不能再把 `dS3` 别进 Ks（`+BN*QTS=2560B`），共 ~6.7KB，几乎顶格；
+再叠加 V、以及 O3 寄存器预取，**在 3 CTA/SM 下不可行**，掉到 2 CTA/SM 在延迟受限 kernel 上
+是负优化（O19/O21 已双重证伪）。故 O37 到 Q/dO 为止；K/V TMA 需要先腾出 ~10KB smem
+（例如 Ps/Ss 改存 fp16，但会改数值），列入 backlog。
+
+### 36.7 复现
+
+```bash
+# 两文件（Q/dO TMA 默认开）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# 同 binary 退回 cp.async（A/B）
+... scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=... --qdtma=0
+# 单文件
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --dir=...
+# ncu
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma_qdtma \
+  --launch-count 1 --set full -- --qdtma=1 --dir=...
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o37_main_{s4096,s512,prodshapes}.out.txt`（A/B + 对拍 + timing）、
+`src/fp8/fa_bwd_fp8_o37_onefile_s4096.out.txt`、`src/fp8/fa_bwd_fp8_o37_ncu_main_{tma,cpasync}_s4096.out.txt`、
+`src/fp8/fa_bwd_fp8_o37_tebench{,_requested}.out.txt`（同 session TE FP8 基线）。

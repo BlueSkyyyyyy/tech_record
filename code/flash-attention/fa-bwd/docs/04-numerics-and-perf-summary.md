@@ -742,6 +742,16 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > 0.1009/0.2059/0.5876 ⇒ ours/TE **1.21×/2.17×/3.63×**。ncu：`long_scoreboard 2.20→0.37`、
 > `short 2.25→1.05`、`mio 0.67→0.03`，新墙 = Compute ~57% + `wait`。详见 `03` §35、
 > 原始输出 `src/fp8/fa_bwd_fp8_o32_sweep.out.txt`、`..._o32_ncu_stall_lse_{tma,wgmma}_s4096.out.txt`。
+>
+> **O37（第七十六轮）——fp8 主 kernel 的 Q/dO 改用 4D-TMA（对齐 fp16 O33 / bf16 O34；正结果）**：
+> 把主 kernel 函数体抽成 `fp8_mma_body<...,TMA>`，两个薄壳复用；TMA 版 `cp.async.bulk.tensor.4d`
+> 一次性把 Q/dO（box `{128,64}`）搬进 SW128 tile，再从 smem 重建 Qp/dOp 的 K 配对布局。
+> K/V/fold/GEMM3/4/5 逐字未动 ⇒ 数值 vs ref 与历史逐位一致、同 session `max_abs(tma-vs-cp)~1e-6`
+> （仅原子次序）。**同 binary A/B：main S512 1.075× / S4096 1.050× / GQA 1.045× / MQA 1.074×**；
+> 端到端 S4096 **2.0508ms/67.02 TF**，为 **TE FP8（0.5903ms/465.6TF）的 3.49×**（O27 3.69×）；
+> ncu：指令数 −2.2%、`long_scoreboard 1.10→0.81`、Duration 1.77→1.66ms，墙仍是
+> `short_scoreboard`+`wait`+3 CTA/SM。K/V TMA 因**单缓冲无重叠 + 双缓冲 smem 在 3 CTA/SM 下
+> 顶格**，列入 backlog。详见 `03` §36、原始输出 `src/fp8/fa_bwd_fp8_o37_*.out.txt`。
 
 ---
 

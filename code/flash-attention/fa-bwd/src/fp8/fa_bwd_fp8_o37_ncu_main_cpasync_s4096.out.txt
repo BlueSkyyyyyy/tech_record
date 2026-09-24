@@ -1,0 +1,47 @@
+fa_bwd_fp8_kernels.cuh(2640): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 609 of fa_bwd_fp8_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kernels.cuh(2348): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 609 of fa_bwd_fp8_main.cu
+
+==PROF== Connected to process 764296 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_main.out)
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 10 passes
+CUDA error an illegal instruction was encountered at fa_bwd_fp8_main.cu:817
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 72704 bytes (71.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 70656 bytes (69.0 KB)
+grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+O19: wg2 grid = 128 x 16 x 1 (ksplit2=4, base_grid2=512)
+O7: use_regdq=1 (register dQ accumulation)
+O32: lse backend = tma
+O37: main qd-tma = off
+[timing] total(quant+pre+main+cvt) 2.2333 ms  61.54 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2403 ms | preprocess 0.2968 ms | main 1.7755 ms | convert -0.0792 ms (cvt_on=0)
+[O9c-2 A/B] main mma(regdq=1) 1.9027 ms | wgmma(m64n32) 1.7958 ms (1.060x) | max_abs(wg-vs-mma) dq/dk/dv=3.985e-02/1.500e-01/2.576e-02
+==PROF== Disconnected from process 764296
+==ERROR== The application returned an error code (1).
+[764296] fa_bwd_fp8_main.out@127.0.0.1
+  void fa_bwd_fp8_mma_kernel<128, 64, 32, 1, 1, 1, 1, 1>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (512, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    gpu__time_duration.sum                                                                 ms         1.77
+    launch__occupancy_limit_shared_mem                                                  block            3
+    launch__registers_per_thread                                              register/thread          168
+    sm__inst_executed.sum                                                                inst    726323840
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        43.34
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         1.10
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         1.54
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.56
+    smsp__inst_executed.avg.per_cycle_active                                       inst/cycle         0.44
+    ------------------------------------------------------------------------- --------------- ------------
+

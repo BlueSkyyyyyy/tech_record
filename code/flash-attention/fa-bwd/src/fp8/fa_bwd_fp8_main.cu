@@ -158,6 +158,28 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
       scale, causal, ksplit);
 }
 
+// O37：Q/dO 4D-TMA 版主 kernel（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128、WGMMA 路径）。
+#if defined(FA_WGMMA) && defined(FA_TMA)
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true>
+static void launch_bwd_main_qdtma(dim3 mg, const CUtensorMap& qmap, const CUtensorMap& dmap,
+                                  const unsigned char* q8, const float* qs,
+                                  const unsigned char* k8, const float* ks,
+                                  const unsigned char* v8, const float* vs,
+                                  const unsigned char* do8, const float* dos,
+                                  const float* delta, const float* lse, float* dq_acc,
+                                  float* dk_acc, float* dv_acc, int S, int H, int Hkv,
+                                  float scale, int causal, int ksplit) {
+  using Cfg = Fp8Cfg<HD, BM, BN>;
+  constexpr int kSmem = Cfg::smem_bytes_wgmma_tma;
+  CUDA_CHECK(cudaFuncSetAttribute(
+      fa_bwd_fp8_mma_qdtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  fa_bwd_fp8_mma_qdtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP>
+      <<<mg, THREADS, kSmem>>>(qmap, dmap, q8, qs, k8, ks, v8, vs, do8, dos, delta, lse,
+                               dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, ksplit);
+}
+#endif
+
 // O19：跨 warpgroup 归约版主 kernel（BM=128, 2 wg, 256 线程）的 smem 与 launcher。
 template <int HD>
 static constexpr int wg2_smem_bytes() {
@@ -270,6 +292,9 @@ int main(int argc, char** argv) {
   // O32：LSE 是否用 TMA 版（仅 FA_TMA 构建、D==128、causal）。-1=自动（默认开），0/1 由
   //   `--lsetma=` 强制。
   int lse_tma = -1;
+  // O37：主 kernel 的 Q/dO 是否用 4D-TMA（仅 FA_WGMMA+FA_TMA、D==128）。-1=自动（默认关，
+  //   作 opt-in 与 cp.async 版同 binary A/B），0/1 由 `--qdtma=` 强制。
+  int qd_tma = -1;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
@@ -280,6 +305,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--lsewgm=", 0) == 0) lsewgm = atoi(a.c_str() + 9);
     else if (a.rfind("--wgmma=", 0) == 0) wgmma = atoi(a.c_str() + 8);
     else if (a.rfind("--lsetma=", 0) == 0) lse_tma = atoi(a.c_str() + 9);
+    else if (a.rfind("--qdtma=", 0) == 0) qd_tma = atoi(a.c_str() + 8);
     else if (a == "--wg2") wg2 = 1;
     else if (a == "--bn64") bn64_opt = 1;
     else if (a.rfind("--cvt=", 0) == 0) cvt_on = atoi(a.c_str() + 6);
@@ -504,7 +530,17 @@ int main(int argc, char** argv) {
     qmap_lse = make_lse_map_fp8(d_q8, H, S, D, B);
     kmap_lse = make_lse_map_fp8(d_k8, Hkv, S, D, B);
   }
+  // O37：主 kernel 的 Q/dO TMA 描述符（box={128,BM=64}，与 LSE 同一 dims={D,S,H,B}）。
+  if (qd_tma < 0) qd_tma = 1;   // 默认开（对齐 O32 的 lsetma；`--qdtma=0` 供 A/B）
+  CUtensorMap qmap_main, dmap_main;
+  if (D == 128 && qd_tma) {
+    qmap_main = make_lse_map_fp8(d_q8, H, S, D, B);
+    dmap_main = make_lse_map_fp8(d_do8, H, S, D, B);
+  }
+#else
+  if (qd_tma < 0) qd_tma = 0;
 #endif
+  printf("O37: main qd-tma = %s\n", qd_tma ? "on" : "off");
 
   auto run_preprocess = [&]() {
     if (D == 128) {
@@ -588,6 +624,22 @@ int main(int argc, char** argv) {
       return;
     }
     const bool rcp_sel = (foldrcp_opt != 0);
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    // O37：Q/dO TMA 版（仅在默认 fold 选项下启用；其它组合回退 cp.async 版）。
+    if (D == 128 && wgmma && qd_tma && prel_sel && f16b_sel && rcp_sel) {
+      if (use_regdq)
+        launch_bwd_main_qdtma<128, 64, 32, true>(
+            mg, qmap_main, dmap_main, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
+            d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+            ksplit);
+      else
+        launch_bwd_main_qdtma<128, 64, 32, false>(
+            mg, qmap_main, dmap_main, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
+            d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+            ksplit);
+      return;
+    }
+#endif
 #ifdef FA_WGMMA
     if (D == 128 && wgmma) { launch128(use_regdq, true, prel_sel, f16b_sel, rcp_sel); return; }
 #endif
@@ -727,6 +779,61 @@ int main(int argc, char** argv) {
            maxd(b_dv, a_dv));
     // 恢复最终输出为 CLI 选中的路径（上面 A/B 最后一次跑的是 wgmma）。
     run_main_wg(wgmma != 0);
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    // ---- O37 A/B（D=128）：主 kernel Q/dO cp.async vs 4D-TMA（WGMMA 路径，其余逐字相同）。----
+    auto run_main_qd = [&](bool tma) {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      if (tma) {
+        if (use_regdq)
+          launch_bwd_main_qdtma<128, 64, 32, true>(mg, qmap_main, dmap_main, d_q8, d_qs, d_k8,
+                                                   d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
+                                                   d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                   Hkv, scale, (int)causal, ksplit);
+        else
+          launch_bwd_main_qdtma<128, 64, 32, false>(mg, qmap_main, dmap_main, d_q8, d_qs, d_k8,
+                                                    d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
+                                                    d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                                    Hkv, scale, (int)causal, ksplit);
+      } else {
+        if (use_regdq)
+          launch_bwd_main<128, 64, 32, true, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
+                                                   d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+                                                   d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                                   (int)causal, ksplit);
+        else
+          launch_bwd_main<128, 64, 32, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
+                                                    d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+                                                    d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                                    (int)causal, ksplit);
+      }
+    };
+    auto bench_main_qd = [&](bool tma, float* out) {
+      run_main_qd(tma);
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) run_main_qd(tma);
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float mcp = 0.f, mtma = 0.f;
+    bench_main_qd(false, &mcp);
+    bench_main_qd(true, &mtma);
+    run_main_qd(false);
+    CUDA_CHECK(cudaMemcpy(a_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    run_main_qd(true);
+    CUDA_CHECK(cudaMemcpy(b_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    printf("[O37 A/B] main Q/dO cp.async %.4f ms | tma %.4f ms (%.3fx) | "
+           "max_abs(tma-vs-cp) dq/dk/dv=%.3e/%.3e/%.3e\n",
+           mcp, mtma, mcp / mtma, maxd(b_dq, a_dq), maxd(b_dk, a_dk), maxd(b_dv, a_dv));
+    run_main_wg(wgmma != 0);
+#endif
   }
 #endif
 

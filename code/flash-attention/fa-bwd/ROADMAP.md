@@ -127,6 +127,14 @@
   **剩余（下一步首选）**：fp8 主 kernel 的对应 TMA 化——fp8 一行 128B = 一个 SW128 atom 的整行
   （`UINT8` tensormap、一个 box 搬整块，O32 的 LSE 已示范），但 Kp/Qp/dOp 配对副本需在 smem 上
   重建、并处理 dS3/Ap 对 Ks/Vs 的复用。见 backlog。
+  **O37（第七十六轮，fp16/bf16 O33–O36 的 fp8 版第一步）**：fp8 主 kernel 的 **Q/dO** 改用
+  4D-TMA（`fp8_mma_body<...,TMA>` 抽公共体 + 两个薄壳；TMA 搬入 SW128 后再从 smem 重建
+  Qp/dOp）；**main 同 binary A/B S512 1.075× / S4096 1.050× / GQA 1.045× / MQA 1.074×**、
+  数值 vs ref 逐位一致、ncu 指令数 −2.2% / `long_scoreboard 1.10→0.81`；端到端 S4096
+  2.0508ms/67.02 TF、为 TE FP8 的 **3.49×**（O27 3.69×）。`--qdtma=0` 供 A/B，默认开
+  （`-DFA_WGMMA -DFA_TMA` 构建）。**K/V TMA 未做**：单缓冲 TMA 无重叠（Ks/Vs 同迭代被
+  dS3/Ap 覆写），双缓冲在 3 CTA/SM 下 smem 顶格（余量 ~6.8KB < 双缓冲 K + 独立 dS3 ~6.7KB，
+  再要 V/预取即超），⇒ backlog（需先腾 ~10KB smem）。详见 `docs/03` §36。
 - [ ] 变长（cu_seqlens / varlen）覆盖
 
 ## 每项的 Definition of Done
@@ -2073,6 +2081,32 @@
     `..._mma_onefile_o36_s512.out.txt`、`..._o36_ncu_main_{tma,cpasync}_s512.out.txt`、
     `..._o36_fa3_te_baseline.out.txt`；文档 `docs/01b` §6z、`docs/04` §2.2/§3。
 
+- 2026-09-25（第七十六轮）：**O37 完成（fp8 主 kernel 的 Q/dO 改用 4D-TMA，第一步）**。
+  - 动机：fp8 主 kernel 的 operand 一直用逐 16B `cp.async` + `sw128_off_fp8` 地址运算；
+    Q/dO 只读一次、与 tile 循环无关，是 TMA 化风险最低的一步（ncu `long_scoreboard` ~1.1）。
+  - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+    把主 kernel 函数体抽成 `fp8_mma_body<...,TMA>`，加两个薄 `__global__` 壳
+    （`fa_bwd_fp8_mma_kernel` 不变 / `fa_bwd_fp8_mma_qdtma_kernel` 多两个 `__grid_constant__`
+    `CUtensorMap`）；TMA 版 `cp.async.bulk.tensor.4d`（box `{128,64}`）一次搬 Q/dO 进 SW128，
+    再从 smem 用 `sw128_off_fp8` + `__byte_perm` 重建 Qp/dOp 的 K 配对布局；K/V/fold/GEMM3/4/5
+    逐字未动。`QD_SMEM = smem_bytes_wgmma_tma = 70656+64`（放两个 mbarrier）。`--qdtma=0/1`
+    同 binary A/B，默认开（`-DFA_WGMMA -DFA_TMA`、D=128、WGMMA 路径）。
+  - **数值**：九 shape vs fp32 ref 与历史（O27/O28/O32）逐位一致；同 session
+    `max_abs(tma-vs-cp)` dq ~1e-7、dk/dv ~1e-6（仅 atomic 次序）。
+  - **性能（同 session A/B，event，main-only）**：S512 **1.075×**、S4096 **1.050×**、
+    GQA kv4 **1.045×**、MQA kv1 **1.074×**；端到端 S4096 **2.0508ms/67.02 TF**（O32 2.177ms）、
+    为 TE FP8（同 session 0.5903ms/465.6TF）的 **3.49×**（O27 3.69×）。
+  - **ncu（main S=4096，同 binary `--qdtma` 0/1）**：`sm__inst_executed` 726.3M→**710.2M（−2.2%）**、
+    `long_scoreboard` 1.10→**0.79**、Duration 1.74→**1.68ms**、`sm__throughput` 43.6→44.6%；
+    `short_scoreboard` 1.53→1.58、`wait` 1.56→1.53、regs 168、3 CTA/SM（墙未变）。
+  - **K/V TMA 的判决（backlog）**：Ks/Vs 同迭代内被 dS3/Ap（fold）覆写 ⇒ 单缓冲 TMA 只能在
+    迭代末发、下迭代初等，与现在的同步读一样暴露延迟；双缓冲 K 需 +4KB 且 dS3 不能再别进 Ks
+    （+2.5KB），而 3 CTA/SM 的 smem 余量仅 ~6.8KB ⇒ 顶格，加上 V/预取即超；掉 2 CTA/SM 是
+    负优化（O19/O21 证伪）。故 K/V TMA 需先腾 ~10KB smem（如 Ps/Ss 存 fp16，但改数值）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_o37_main_{s4096,s512,prodshapes}.out.txt`、
+    `..._o37_onefile_s4096.out.txt`、`..._o37_ncu_main_{tma,cpasync}_s4096.out.txt`、
+    `..._o37_tebench{,_requested}.out.txt`；文档 `docs/03` §36、`docs/04` §2.3。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -2307,6 +2341,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 的整行 ⇒ TMA 比 fp16/bf16 更简单（一个 box 搬整块，`UINT8` tensormap，O32 的 LSE 已示范）；
 > 但主 kernel 的 Kp/Qp/dOp 配对副本仍需在 smem 上重建，并处理 dS3/Ap 对 Ks/Vs 的复用与
 > O3 的 32 regs 寄存器预取。fp16/bf16 主 kernel 的 TMA 家族（O30–O36）已收口。
+> **O37 已完成（第七十六轮）fp8 主 kernel 的 Q/dO TMA（第一步，正结果）**：把主 kernel 函数体
+> 抽成 `fp8_mma_body<...,TMA>`（两个薄壳复用）——TMA 一次性把 Q/dO（box `{128,64}`）搬进 SW128
+> tile，再从 smem 重建 Qp/dOp 的 K 配对布局；K/V/fold/GEMM3/4/5 逐字未动。**同 binary A/B：
+> main S512 1.075× / S4096 1.050× / GQA 1.045× / MQA 1.074×**；数值 vs ref 逐位一致、
+> `max_abs(tma-vs-cp)~1e-6`（仅原子次序）；ncu 指令数 −2.2%、`long_scoreboard 1.10→0.81`、
+> Duration 1.77→1.66ms，墙仍是 `short_scoreboard`+`wait`+3 CTA/SM。端到端 S4096 2.0508ms/
+> 67.02 TF、为 TE FP8 的 **3.49×**（O27 3.69×）。`--qdtma=0` A/B、默认开。**K/V TMA 未做**
+> （单缓冲无重叠 + 双缓冲 smem 在 3 CTA/SM 顶格）⇒ backlog。详见 `docs/03` §36、`docs/04` §2.3。
 > **④（O27 新增，O28 已作废）fp16/bf16 的 fold 同理含逐元素精确除法**——**误记**：逐字核对
 > `src/fp16,bf16/fa_bwd_*_kernels.cuh` 后确认 fp16/bf16 **没有 rowwise scale fold**（无量化），
 > 逐元素除法只在 fp8。fp8 的 fold 除法 O27 已收口，转换指令 O28 也已向量化（MLA 1.03×、d128 中性）。
