@@ -1,0 +1,72 @@
+### fp16 varlen TMA A/B (two-file, same binary -DFA_WGMMA -DFA_TMA -lcuda)
+### Thu Sep 24 07:59:00 PM UTC 2026
+
+==== varlen_b4_t3840_h16_d128_causal_fp16 ====
+-- varlentma=0 --
+VARLEN main backend = wgmma2 cp.async
+[timing] VARLEN total 0.7761 ms  58.80 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=3.163e-03  max_rel=6.210e-01  (ours_amax=3.857e+00 ref_amax=3.858e+00 @1057096)
+  dk  vs ref: max_abs=2.158e-03  max_rel=9.492e-01  (ours_amax=3.920e+00 ref_amax=3.922e+00 @1058571)
+  dv  vs ref: max_abs=1.966e-03  max_rel=6.954e-02  (ours_amax=6.461e+00 ref_amax=6.462e+00 @1050605)
+-- varlentma=1 --
+VARLEN main backend = wgmma2 TMA (Q/K/V/dO 4D-TMA)
+[timing] VARLEN total 0.7641 ms  59.72 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=3.163e-03  max_rel=6.210e-01  (ours_amax=3.857e+00 ref_amax=3.858e+00 @1057096)
+  dk  vs ref: max_abs=2.158e-03  max_rel=9.492e-01  (ours_amax=3.920e+00 ref_amax=3.922e+00 @1058571)
+  dv  vs ref: max_abs=1.966e-03  max_rel=6.954e-02  (ours_amax=6.461e+00 ref_amax=6.462e+00 @1050605)
+
+==== varlen_b4_t4096_h16_d128_causal_fp16 ====
+-- varlentma=0 --
+VARLEN main backend = wgmma2 cp.async
+[timing] VARLEN total 0.4484 ms  76.63 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=2.112e-03  max_rel=6.328e-01  (ours_amax=3.455e+00 ref_amax=3.455e+00 @19270)
+  dk  vs ref: max_abs=2.252e-03  max_rel=9.803e-01  (ours_amax=3.441e+00 ref_amax=3.442e+00 @13126)
+  dv  vs ref: max_abs=1.915e-03  max_rel=1.093e-01  (ours_amax=7.105e+00 ref_amax=7.106e+00 @2099167)
+-- varlentma=1 --
+VARLEN main backend = wgmma2 TMA (Q/K/V/dO 4D-TMA)
+[timing] VARLEN total 0.4461 ms  77.03 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=2.112e-03  max_rel=6.328e-01  (ours_amax=3.455e+00 ref_amax=3.455e+00 @19270)
+  dk  vs ref: max_abs=2.252e-03  max_rel=9.803e-01  (ours_amax=3.441e+00 ref_amax=3.442e+00 @13126)
+  dv  vs ref: max_abs=1.915e-03  max_rel=1.093e-01  (ours_amax=7.105e+00 ref_amax=7.106e+00 @2099167)
+
+==== varlen_b8_t2904_h16_d128_causal_fp16 ====
+-- varlentma=0 --
+VARLEN main backend = wgmma2 cp.async
+[timing] VARLEN total 0.5785 ms  63.55 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=2.624e-03  max_rel=6.553e-01  (ours_amax=3.531e+00 ref_amax=3.532e+00 @22951)
+  dk  vs ref: max_abs=2.158e-03  max_rel=4.732e-01  (ours_amax=3.670e+00 ref_amax=3.670e+00 @4563)
+  dv  vs ref: max_abs=2.139e-03  max_rel=4.073e-01  (ours_amax=6.438e+00 ref_amax=6.437e+00 @5931759)
+-- varlentma=1 --
+VARLEN main backend = wgmma2 TMA (Q/K/V/dO 4D-TMA)
+[timing] VARLEN total 0.6073 ms  60.53 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=2.624e-03  max_rel=6.553e-01  (ours_amax=3.531e+00 ref_amax=3.532e+00 @22951)
+  dk  vs ref: max_abs=2.158e-03  max_rel=4.732e-01  (ours_amax=3.670e+00 ref_amax=3.670e+00 @4563)
+  dv  vs ref: max_abs=2.139e-03  max_rel=4.073e-01  (ours_amax=6.438e+00 ref_amax=6.437e+00 @5931759)
+
+==== varlen_b5_t3968_h32_d128_causal_fp16 ====
+-- varlentma=0 --
+VARLEN main backend = wgmma2 cp.async
+[timing] VARLEN total 1.4102 ms  64.91 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=2.438e-03  max_rel=7.964e-01  (ours_amax=4.371e+00 ref_amax=4.373e+00 @7868799)
+  dk  vs ref: max_abs=3.433e-03  max_rel=9.938e-01  (ours_amax=6.766e+00 ref_amax=6.765e+00 @918668)
+  dv  vs ref: max_abs=3.843e-03  max_rel=1.208e-01  (ours_amax=1.075e+01 ref_amax=1.075e+01 @131977)
+-- varlentma=1 --
+VARLEN main backend = wgmma2 TMA (Q/K/V/dO 4D-TMA)
+[timing] VARLEN total 1.4085 ms  64.99 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=2.438e-03  max_rel=7.964e-01  (ours_amax=4.371e+00 ref_amax=4.373e+00 @7868799)
+  dk  vs ref: max_abs=3.433e-03  max_rel=9.938e-01  (ours_amax=6.766e+00 ref_amax=6.765e+00 @918668)
+  dv  vs ref: max_abs=3.843e-03  max_rel=1.208e-01  (ours_amax=1.075e+01 ref_amax=1.075e+01 @131977)
+
+==== varlen_b4_t3840_h16_d128_full_fp16 (--full) ====
+-- varlentma=0 --full --
+VARLEN main backend = wgmma2 cp.async
+[timing] VARLEN total 1.2822 ms  35.59 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=5.603e-04  max_rel=1.414e-01  (ours_amax=1.457e+00 ref_amax=1.457e+00 @367083)
+  dk  vs ref: max_abs=6.841e-04  max_rel=1.631e-01  (ours_amax=1.187e+00 ref_amax=1.187e+00 @7413782)
+  dv  vs ref: max_abs=2.338e-04  max_rel=7.147e-02  (ours_amax=8.560e-01 ref_amax=8.559e-01 @7501204)
+-- varlentma=1 --full --
+VARLEN main backend = wgmma2 TMA (Q/K/V/dO 4D-TMA)
+[timing] VARLEN total 1.2746 ms  35.80 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=5.603e-04  max_rel=1.414e-01  (ours_amax=1.457e+00 ref_amax=1.457e+00 @367083)
+  dk  vs ref: max_abs=6.841e-04  max_rel=1.631e-01  (ours_amax=1.187e+00 ref_amax=1.187e+00 @7413782)
+  dv  vs ref: max_abs=2.338e-04  max_rel=7.147e-02  (ours_amax=8.560e-01 ref_amax=8.559e-01 @7501204)
