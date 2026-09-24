@@ -247,6 +247,15 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 > ncu（S4096，同 binary `--wg2split` 0/1）：**`red` 51,904,512 完全不变**、stall `barrier`
 > **1.61→0.46（−3.5×）**、Duration 997.7→**982.4µs**；main S4096 **1.013×（fp16）/1.038×（bf16）**、
 > GQA kv4 1.021×/1.051×，数值与历史**逐位一致**。red 不变 ⇒ 与 O7b 正交。详见 `01` §14l、`01b` §6t。
+>
+> **O18（BN=128 版 wgmma2，fp16，第五十六轮）**：O17/O17-2 后 main 仍 1 CTA/SM（12.5%）+
+> 延迟受限。把 KV-tile 从 BN=64 翻到 **128**（`m64n128k16`）⇒ 每 CTA 的 tile 数减半、
+> barrier/`cp.async.wait`/wgmma commit-wait 序列减半。先冒烟逐位验证 `m64n128` 布局
+> （`max_abs=0`）。**ncu（S4096）**：Duration 982.4→**951.1µs**、**`red` 51,904,512 逐字节不变**
+> （BN 不动归约结构）、L1/TEX 49.5→**44.3%**、L2 55.4→57.2%、smem 148.5→**224KB**、230 regs
+> （0 spill），仍 1 CTA/SM。**main MHA S=4096 0.9895→0.9618ms（142.9 TF，1.029×）、S=512 1.028×**；
+> GQA/MQA 中性（0.994–0.995×，保持 O17）；数值与历史逐位一致。墙仍是 **L2（red 占 ~72%）+
+> `wait` + 低 occupancy**。详见 `01` §14m。
 
 ### 2.2 bf16（峰值 989 TFLOPS）
 
@@ -589,6 +598,7 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
   | fp16 | **wgmma2 main（O17, BM=128, 2 wg, S=4096）** | 6.47% | 36.85% | 27.48% | 12.41%（**149.5KB, 1 CTA/SM**, 200 regs, 256 thr） | — | Duration 1.48→**0.996ms** | **L2 54.7%（red 51.9M=0.508×/O9b、read 也 0.50×）**：跨 wg 归约把 dK/dV 的 red 字节精确砍半，但仍是第一墙（red 占 L2 扇区 ~72.6%）；bank conflict 0 |
    | bf16 | **wgmma2 main（O17-bf16, BM=128, 2 wg, S=4096）** | 6.47% | 36.68% | 27.36% | 12.41%（**149.50KB, 1 CTA/SM**, 200 regs, 256 thr） | — | Duration 1.48→**0.997ms** | **L2 54.63%（`red` 102,236,160→51,904,512=0.508×、`read` 0.50×）**：与 fp16 O17 逐项一致；新墙仍是 L2（red 占 ~72.6%）；bank conflict 0 |
    | fp16 | **wgmma2 main（O17-2, GEMM3/4 拆分, S=4096）** | 6.57% | 49.46% | 27.75% | 12.48%（148.48KB, 1 CTA/SM, 200 regs, 256 thr） | 3.88 | **`barrier` 1.61→0.46（−3.5×）**、wait 1.19、long 0.75、short 0.40 | **L2 red 完全不变（51,904,512）** ⇒ 收益来自消 wg1 在 GEMM3/4 的 barrier 空等（张量工作量 3:1→1:1）；Duration 997.7→**982.4µs**，墙仍是 **L2 red + `wait`** |
+   | fp16 | **wgmma2b main（O18, BN=128, S=4096）** | 6.77% | **44.34%** | 23.60% | 12.50%（**224.0KB, 1 CTA/SM**, 230 regs, 256 thr） | 3.88 | wait 1.25、**barrier 0.46→0.93**、long 0.60、short 0.43 | **Duration 982.4→951.1µs（1.033×）**：tile 数减半摊薄 barrier/wgmma 序列；**`red` 51,904,512 逐字节不变**（BN 不动归约结构）；墙仍是 **L2 57.2%（red 占 ~72%）+ `wait` + 低 occ** |
  | fp8 | golden main | 0.06% | **75.96%**（90% 多余） | 4.98% | 6.25%（68KB） | 0.32 | MIO scoreboard 69% | **smem 冲突 + FP8 解码 + 低 occ** |
 | fp8 | **mma main（O2b+O4d 后, S=4096, ksplit=4）** | 1.41% | 69.91% | 21.70% | **18.27%（73.8KB, 3 CTA/SM）** | 10.34 | No Eligible 76.6%、long_scoreboard 4.46 + short_scoreboard 3.96 | **L2 带宽（81.5%）+ 延迟**（split-K 复读 Q/dO + 全局 atomic） |
 | fp8 | **mma main（O4c 后, S=4096, ksplit=4）** | 1.99% | **81.30%** | 29.42% | 18.20%（73.8KB, 3 CTA/SM） | 10.34 | short_scoreboard 3.50、long_scoreboard 1.44 | **L1/TEX 81.3% + short_scoreboard**（全局 red 流量已减半，L2 退到 57.9%） |

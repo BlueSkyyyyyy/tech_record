@@ -1886,12 +1886,126 @@ ours 端到端 S=4096 1.946ms ⇒ 时间为 FA3 的 **5.99×**（O17 5.97×，nc
 
 ---
 
+## 14m. O18：BN=128 版 wgmma2（tile 数减半，MHA main 1.029×；GQA/MQA 中性）
+
+### 14m.1 动机（§14k.7 列出的「BN=128 微优化」）
+
+O17（§14j）/O17-2（§14l）后，`fa_bwd_fp16_wgmma2_kernel`（BM=128、BN=64、2 warpgroups）把 dK/dV
+的跨 CTA `red` 砍半（102.2M→51.9M 扇区），但 ncu 仍显示 **1 CTA/SM（8 warps、occupancy 12.5%）、
+`sms__` 无饱和资源、`wait`/`barrier` 主导 ⇒ 延迟受限**；`red` 仍占 L2 扇区 ~72.6%（字节未再减）。
+「放大 BM」（O17b）已被寄存器墙证伪。§14k.7 item 3 留下的实验是 **BN 64→128**：
+
+* 每个 CTA 的 KV-tile 数**减半** ⇒ `__syncthreads` / `cp.async.wait_group` / wgmma
+  `commit_group`+`wait0` 的**固定序列减半**（延迟受限下这直接摊薄每单位工作的串行开销）；
+* GEMM1/2 从 `m64n64k16` 换成 **`m64n128k16`**（一条指令算两倍），发射/依赖链减半；
+* 代价是 smem 145→**225KB**（P/dS 各 32KB、K/V 各 32KB），仍 **1 CTA/SM**；寄存器 200→230（0 spill）。
+* **注意（预期管理）**：BN 不改变 dK/dV 的归约结构 ⇒ **`red` 字节完全不变**，故这不是「打掉
+  L2 原子墙」的杠杆，而是把每-tile 的固定开销摊薄。
+
+### 14m.2 先冒烟（新增 `fa_bwd_fp16_wgmma2b_smoke.cu`，逐位 PASS）
+
+`m64n128k16` 的累加器布局（每线程 64 个 fp32：行 `wid*16+lane/4 (+8)`、列 `j*8+(lane&3)*2 (+1)`、
+`j=0..15`）与转置描述符是新的风险点，先写最小冒烟逐位验证四条 GEMM：
+
+| 冒烟项 | GEMM | 描述符 | `max_abs` |
+|---|---|---|---|
+| (1) `dV=Pᵀ·dO` | m64n128（M=BN=128 分 2 个 m64 半） | A=P¹转置(MN)、B=dO 转置(MN) | **0.000e+00** |
+| (2) `dK=dSᵀ·Q` | 同上 | A=dS 转置(MN)、B=Q 转置(MN) | **0.000e+00** |
+| (3) `dQ=dS·K` | m64n128（每 wg 64 行） | A=dS K-major、B=K 转置(MN) | **0.000e+00** |
+| (4) `S=Q·Kᵀ` | m64n128 | A/B 均 K-major | **0.000e+00** |
+
+关键推导：GEMM3/4 的输出 M = **BN（KV 行）= 存储列**，故 m64 半 `mh=1` 的转置描述符基址偏移是
+**存储列 64 的 SW128 字节（W=128 时为 `kg=1` 的 atom，`+1024B`）**，而不是行方向的
+`mh*(64/8)*(BN/64)*1024`（后者是 GEMM5 的 K-major A 用）。冒烟确认 `+1024B` 正确。
+原始输出 `src/fp16/fa_bwd_fp16_wgmma2b_smoke.out.txt`。
+
+### 14m.3 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+新增 `fa_bwd_fp16_wgmma2b_kernel<HD=128, SPLIT>`（`#ifdef FA_WGMMA`，仅 HD=128、256 线程）：
+
+* 新增 `wgmma_m64n128k16_t<TA,TB>`（64 累加器）与 `wgmma_mn128_issue`（GEMM1/2，A/B K-major）；
+* P/dS tile 变 `[128][128]`，softmax epilogue 列组 `j=0..15`（`pval[16][4]`）；
+* GEMM3(dV)→wg0、GEMM4(dK)→wg1（同 O17-2），各自对全 BM=128 归约（`s=0..7`），每个输出
+  `[BN=128][HD=128]` 分 2 个 m64 半 `mh`（描述符 `+mh*1024`），每 KV 元素仍只 `red` 一次；
+* GEMM5(dQ) 每 wg 一条 `m64n128`，寄存器累加 `dqacc[16][4]`；
+* K 双缓冲、V 单缓冲后段预取（同 O17）；host 加 `--wg2bn[=0/1]` 与 `[O18 A/B]`（含 `max|diff|`）。
+
+`ptxas`：**230 regs、0 spill**；动态 smem **230400B（225KB）**，1 CTA/SM。默认路径不变（需 `--wg2bn`）。
+
+### 14m.4 数值（ours-vs-ref，fp16 causal，max_abs）
+
+| shape | dq | dk | dv | `max\|diff\|` wg2b-vs-wg2 (dq/dk/dv) |
+|---|---|---|---|---|
+| MHA S=512 | 1.671e-3 | 1.771e-3 | 1.899e-3 | 2.98e-7 / 2.10e-5 / 3.05e-5 |
+| MHA S=4096 | 1.883e-3 | 1.734e-3 | 1.966e-3 | 2.38e-7 / 3.05e-5 / 3.05e-5 |
+| GQA h32kv4 S=1024 | 2.134e-3 | 3.305e-3 | 3.850e-3 | 2.98e-7 / 5.34e-5 / 1.07e-4 |
+| MQA h64kv1 S=1024 | 2.292e-3 | 7.934e-3 | 7.517e-3 | 3.58e-7 / 1.37e-4 / 2.44e-4 |
+
+**vs ref 与 O5~O17-2 历史逐位一致**；`dq` 近逐位（dQ 无跨 CTA 原子），dk/dv 只差 atomic 次序。
+单/两文件逐指标一致。
+
+### 14m.5 性能（同 session A/B，CUDA event，main-only，ms）
+
+| shape | O17 wg2(BN64) | **O18 wg2b(BN128,split)** | vs O17 | wg2b 串行 |
+|---|---|---|---|---|
+| MHA S=512 | 0.0513（41.8 TF） | **0.0499（43.0 TF）** | **1.028×** | 0.0505（1.017×） |
+| MHA S=4096 | 0.9895（138.9 TF） | **0.9618（142.9 TF）** | **1.029×** | 0.9888（1.001×） |
+| GQA h32kv4 S=1024 | 0.1773（96.9 TF） | 0.1782（96.4 TF） | 0.995× | 0.1819（0.975×） |
+| MQA h64kv1 S=1024 | 0.2797（122.9 TF） | 0.2812（122.2 TF） | 0.994× | 0.2853（0.980×） |
+
+⇒ **MHA（S=512/4096）稳定 +2.8~2.9%**；GQA/MQA 略负（-0.5~-0.6%，小网格、Hkv 广播下
+tile 变大反而降低并行度余量）。单文件版本 S=4096 同测 **1.021×**（session 噪声内一致）。
+**结论：BN=128 是 MHA 的小杠杆，GQA/MQA 保持 O17。**
+
+### 14m.6 ncu（main，S=4096，同 session A/B：O17-2 vs O18）
+
+| 指标 | O17-2 (BN=64) | **O18 (BN=128)** |
+|---|---|---|
+| Duration | 982.4 µs | **951.1 µs** |
+| `lts__t_sectors_op_red` | 51,904,512 | **51,904,512（不变）** |
+| `lts__t_sectors_op_read` | 18,012,681 | 18,281,020 |
+| `lts__t_sectors_op_write` | 1,576,020 | 1,576,566 |
+| L2 Cache Throughput | 55.44% | **57.21%** |
+| L1/TEX Throughput | 49.46% | **44.34%** |
+| DRAM | 6.57% | 6.77% |
+| Compute (SM) | 27.75% | 23.60% |
+| regs / smem | 200 / 148.48KB | **230 / 224.0KB** |
+| achieved occ | 12.48%（1 CTA/SM） | **12.50%（1 CTA/SM）** |
+| stall（wait/barrier/long/short） | 1.19 / 0.46 / 0.75 / 0.40 | **1.25 / 0.93 / 0.60 / 0.43** |
+| No Eligible | 63.0% | 68.9% |
+
+**机制核对**：`red` **逐字节不变**（证实 BN 不改归约结构）；Duration −3.2% 来自 tile 数减半（L1/TEX
+44.3%↓、Compute 23.6%↓），而 **`barrier` 反而 0.46→0.93**（tile 内 two-wg 同步的相对权重变大）。
+墙仍是 **L2（57.2%，red 占 ~72%）+ `wait` + 1 CTA/SM 低 occupancy** ⇒ **真正的杠杆只有
+「减 red 字节」或「提 occupancy」**，二者分别对应 O7b/跨 wg 再合（BM 受限）与 TMA/降 smem。
+
+### 14m.7 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`）
+
+| shape | FA2.7.4 | **FA3（SM90）** | TE2.14 |
+|---|---|---|---|
+| MHA S=4096 | 0.7295ms / 377 TF | **0.3253ms / 845 TF** | 0.4457ms / 617 TF |
+| GQA kv4 S=1024 | 0.1584 / 217 | **0.0825 / 416** | 0.1127 / 305 |
+| MQA kv1 S=1024 | 0.2666 / 258 | **0.1566 / 439** | 0.2149 / 320 |
+
+O18 main S=4096 = **0.9618ms / 142.9 TF**；端到端（preprocess 0.343 + main 0.962 + convert
+0.108 ≈ 1.41ms）≈ FA3 整条反向的 **4.35×**（时间；O17-2 时 4.4×）。
+
+### 14m.8 原始输出
+
+`src/fp16/fa_bwd_fp16_wgmma2b_smoke.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o18_s512.out.txt`、`..._o18_sweep.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o18_s512.out.txt`、`..._mma_onefile_o18_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_main_o18_ncu_wg2b_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_o18_fa3_te_baseline.out.txt`。
+
+---
+
 ## 15. 下一步
 
 见 `../ROADMAP.md`：P1~P4/P5 已收口；**O5（§10）、O8（§11）、O6（§12）、O6b（§12b）、
 O8b（§13）、O6c（§13b）、O7c（§14）、MLA 张量核（§14b）、O10（§14c）、O11（§14d）、
 O9a（§14e）、O13（§14f）、O9b（§14g）、O9b-2 第一步（§14h）、O15a TMA 通路 + O16 负结果（§14i）、
-**O17 跨 wg 归约（§14j）、O17-2 GEMM3/4 拆分再平衡（§14l）** 完成。O7c 已把「减 red 事务数」这条杠杆**证伪**（float4 更慢），
+**O17 跨 wg 归约（§14j）、O17-2 GEMM3/4 拆分再平衡（§14l）、O18 BN=128（§14m）** 完成。O7c 已把「减 red 事务数」这条杠杆**证伪**（float4 更慢），
 O10 又把 Q/dO 的标量载入与 dQ 写回向量化（`long_scoreboard` 压下、指令数 −2.5%），
 O13 修正了 O6c 的过时 auto tile（S=512 main 1.26×、端到端 1.12×），O9b 把主 kernel 的
 GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，数值逐位不变）。
@@ -1911,7 +2025,9 @@ GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，数值逐位不�
      GQA kv4 1.021×，数值逐位不变。red 字节不变 ⇒ 与 O7b 正交。
 3. **fp8 侧的跨 wg 归约**：fp8 是 1 字节 operand、smem 更省，4wg 的寄存器压力比 fp16 小一档，
     同样对 fp8 main 的 L2 red 有效。
-4. **O17 的 `BN=128` 微优化**：tile 数/barrier 减半（smem 恰好 224KB、2 wg 寄存器够用）。
+4. ~~**O17 的 `BN=128` 微优化**~~ **已做（§14m）**：MHA main **1.029×**（S=4096 0.9895→0.9618ms，
+   142.9 TF），GQA/MQA 中性（保持 O17）；`red` 逐字节不变（证实 BN 不动归约结构），
+   收益来自 tile 数减半摊薄 barrier/wgmma 固定开销。
 5. **TMA 化 Q/K/V/dO（O15a 通路已就绪）**：需把 K-major HD=128 tile 改成 **2×K=64 chunk**
    （§14i.2），压 `long_scoreboard`/指令数；动不了 L2 red，排在后面。
 6. MLA 降 smem 冲 2 CTA/SM / split-KV 仍在列。
