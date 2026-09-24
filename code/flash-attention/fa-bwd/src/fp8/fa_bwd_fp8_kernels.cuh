@@ -216,6 +216,17 @@ __device__ __forceinline__ float deq_e5m2(unsigned char q) {
   __half_raw h = __nv_cvt_fp8_to_halfraw(q, __NV_E5M2);
   return __half2float(__half(h));
 }
+// O27：fold 量化的除数折算。`RCP=true` 时用每行预算的 `inv`（乘法），否则精确除法。
+template <bool RCP>
+__device__ __forceinline__ float folddiv(float x, float sc, float inv) {
+  if constexpr (RCP) {
+    (void)sc;
+    return x * inv;
+  } else {
+    (void)inv;
+    return x / sc;
+  }
+}
 
 // ----------------------------- mma / ldmatrix -----------------------------
 enum MmaKind { E4E4 = 0, E5E4 = 1, E4E5 = 2 };
@@ -1280,7 +1291,14 @@ __global__ void delta_warp_kernel(const float* __restrict__ o,
 //   `sub4*16` 起始改成 `sub4*8` 起始，4 组 lane 的 bank 铺满 0..31 无冲突）并把每 lane
 //   两段各 8 个连续 m 用 8B `st.shared.v2.u32` 落盘；dS2 用 16B `st.shared.v4.u32`。
 //   `F16B=false` 退回 O7e 的「`sub4*16` 起始 + 4×4B 写」，便于同 session A/B。数值逐位不变。
-template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true>
+// O27：`RCP=true` 时 fold 量化把「逐元素 fp32 精确除法」换成「每行一次 `__frcp_rn` + 乘法」。
+//   fold 对每个 (m,j) 元素都算 `Ps*[dos] / scA`（dS2 用 `*[ks] / sc2`）；`scX` 是每输出行
+//   （j / m）一个的常量，却让每个元素都发一条精确除法（ptxas 默认 prec-div，~10+ 指令）。
+//   改成 sub4==0/sub2==0 lane 算一次 `1/scX`（`__frcp_rn`）再经 `__shfl` 广播，元素处用乘法。
+//   数学等价；fp32 舍入偶有 1 ULP 差，而 fp8 只有 3 位尾数，cvt 结果几乎不变（实测 vs-ref 数值
+//   与 RCP=false 完全一致）。`RCP=false` 保留精确除法作同 binary A/B；默认 true。
+template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
+          bool RCP = true>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
@@ -1718,6 +1736,9 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
         }
         scA = __shfl_sync(0xffffffffu, scA, jl * 4);
         sc3 = __shfl_sync(0xffffffffu, sc3, jl * 4);
+        // O27：每行一次 rcp，元素处用乘法（`RCP=true`）。RCP=false 时 inv 为占位。
+        const float invA = RCP ? __frcp_rn(scA) : 0.f;
+        const float inv3 = RCP ? __frcp_rn(sc3) : 0.f;
         // O7e：把逐 1B 的 `st.shared.u8` 折成向量写。`F16B=true` 用新映射（每 lane 两段
         //   各 8 个连续 m）⇒ 每段一次 8B `st.shared.v2.u32`；`false` 退回原映射的 4×4B。
         //   QTS=BM+16=80（16 与 8 的倍数）、数组基址 16B 对齐 ⇒ 合法。数值逐位不变。
@@ -1730,8 +1751,10 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 #pragma unroll
               for (int tt = 0; tt < 4; ++tt) {
                 int m = sub4 * 8 + t4 * 4 + tt + half * 32;
-                pa2[t4] |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
-                d32[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
+                pa2[t4] |= (uint32_t)cvt_e4m3(folddiv<RCP>(Ps[m * PSS + j] * dos_s[m], scA, invA))
+                           << (8 * tt);
+                d32[t4] |= (uint32_t)cvt_e5m2(folddiv<RCP>(Ss[m * PSS + j] * qs_s[m], sc3, inv3))
+                           << (8 * tt);
               }
             }
             *reinterpret_cast<uint2*>(Ap + j * QTS + sub4 * 8 + half * 32) =
@@ -1746,8 +1769,10 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 #pragma unroll
             for (int tt = 0; tt < 4; ++tt) {
               int m = sub4 * 16 + t4 * 4 + tt;
-              pa4[t4] |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
-              d34[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
+              pa4[t4] |= (uint32_t)cvt_e4m3(folddiv<RCP>(Ps[m * PSS + j] * dos_s[m], scA, invA))
+                         << (8 * tt);
+              d34[t4] |= (uint32_t)cvt_e5m2(folddiv<RCP>(Ss[m * PSS + j] * qs_s[m], sc3, inv3))
+                         << (8 * tt);
             }
           }
 #pragma unroll
@@ -1776,6 +1801,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       float sc2 = (amax2 > 0.f) ? amax2 / kE5M2Max : 1.f;
       if (sub2 == 0) sds2[m] = sc2;
       sc2 = __shfl_sync(0xffffffffu, sc2, ml * 2);
+      const float inv2 = RCP ? __frcp_rn(sc2) : 0.f;
       // O7e：`j = sub2*16+t` 连续 ⇒ dS2[m][j] 的 16 个 j 也连续，同样折成 4 次 4B 写。
       // O7e-2：16 个连续 j 一次 16B `st.shared.v4.u32`（DSS2 是 16 的倍数、基址对齐）。
 #pragma unroll
@@ -1786,7 +1812,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 #pragma unroll
           for (int tt = 0; tt < 4; ++tt) {
             int j = sub2 * 16 + t4 * 4 + tt + jh * 32;
-            d2_4[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * ks_s[j] / sc2) << (8 * tt);
+            d2_4[t4] |= (uint32_t)cvt_e5m2(folddiv<RCP>(Ss[m * PSS + j] * ks_s[j], sc2, inv2))
+                        << (8 * tt);
           }
         }
         if constexpr (F16B) {

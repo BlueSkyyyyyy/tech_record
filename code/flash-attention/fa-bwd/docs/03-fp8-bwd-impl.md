@@ -2759,3 +2759,84 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full -c 1 -k regex:delta_warp_ke
 `src/fp8/fa_bwd_fp8_mma_onefile_o26_sweep.out.txt`（单文件）、
 `src/fp8/o26_ncu_delta_old_s4096.out.txt` / `o26_ncu_delta_new_s4096.out.txt`、
 `src/fp8/o26_te_fp8_bench.out.txt`、`src/fa_bwd_o26_fa3_te_baseline_fp16.out.txt`。
+
+---
+
+## 32. O27：fold 量化的「逐元素精确除法」→「每行一次 rcp + 乘法」（main 1.08–1.18×）
+
+### 32.1 动机
+
+`fold`（把 fp32 的 `P`/`dS` 按 rowwise amax 量化成 fp8 的 `Ap`/`dS3`/`dS2`，供 GEMM3/4/5 的
+A 操作数）对**每一个 (m,j) 元素**都算一次 `Ps*[dos] / scA`（`dS3` 用 `Ss*[qs] / sc3`、`dS2`
+用 `Ss*[ks] / sc2`）。而 `scX` 是**每输出行一个**的常量（`scX = amax / fp8max`）：`Ap/dS3` 里
+`scX` 沿 `j`（每 warp 8 行）不变、`dS2` 里 `sc2` 沿 `m` 不变。ptxas 默认 `-prec-div=true`，
+`a/b` 是 IEEE 精确除法（~10+ 条指令，含 `MUFU.RCP` + Newton 迭代），所以这里每个元素都付一次
+精确除法，是 fold 段（CUDA-core 工作，正处在 GEMM1/2 与 GEMM3/4/5 之间、张量核空转）的主要
+纯浪费。ncu（S=4096）此前报「non-fused FP32 148.8M vs fused 93.4M，Est. 4.68%」，正对应这里。
+
+### 32.2 改动（单/两文件 device 代码逐字一致）
+
+`fa_bwd_fp8_mma_kernel<..., bool RCP>` 新增模板参数（默认 `true`）：
+
+* 每行的 `sub4==0` / `sub2==0` lane 已算出 `scX` 并经 `__shfl` 广播；**紧接广播后**再算
+  一次 `invX = __frcp_rn(scX)`（1 条 MUFU）并同样广播；
+* 元素处用新 helper `folddiv<RCP>(x, sc, inv)`：`RCP=true` 返回 `x * inv`，`false` 退回
+  `x / sc`（供同 binary A/B）。`scX` 本身仍原样存进 `sA/sds3/sds2`（供 GEMM3/4/5 反量化），
+  只有量化路径改用倒数。
+
+数学等价；`a/sc` 与 `a*rcp(sc)` 在 fp32 下偶有 1 ULP 差，而 fp8 只有 3 位尾数 ⇒ 绝大多数元素
+的 `cvt` 结果不变，少数在舍入边界上翻 1 个 fp8 码（`max_abs(rcp-vs-div)` 见下表，远小于
+fp8 容差 O(1)）。**vs fp32 ref 的 dq/dk/dv 与历史逐位一致**（下表，9 个 shape 全部相同）。
+host 加 `--foldrcp=0/1`（默认 1）+ `[O27 A/B]` 段。
+
+### 32.3 性能（同 session A/B，CUDA event，main-only；`-DFA_WGMMA` 默认构建）
+
+| shape | fold div | fold rcp-mul | 加速 | total（O26→O27） |
+|---|---|---|---|---|
+| MHA (1,512,16,128) | 0.0652 ms | **0.0604 ms** | 1.077× | 0.1284→**0.1246** |
+| MHA (1,1024,32,128) | 0.3722 ms | **0.3408 ms** | 1.092× | 0.5218→**0.4895** |
+| MHA (1,4096,16,128) | 2.0431 ms | **1.7580 ms** | **1.162×** | 2.4637→**2.1770**（63.1 TF） |
+| GQA h32kv4 (1,1024,32,128) | 0.3553 ms | **0.3282 ms** | 1.083× | 0.4875→**0.4566** |
+| GQA h40kv8 (1,1024,40,128) | 0.4115 ms | **0.3572 ms** | 1.152× | 0.5606→**0.5010** |
+| MQA h64kv1 (1,1024,64,128) | 0.6212 ms | **0.5274 ms** | 1.178× | 0.7926→**0.6956** |
+| MLA (1,256,2,512) | — | — | — | 0.1169→**0.1094** |
+| MLA (1,512,4,512) | — | — | — | 0.2972→**0.2688** |
+| MLA (1,1024,2,512) | — | — | — | 0.5175→**0.4653** |
+
+* `[O27 A/B] max_abs(rcp-vs-div)`：S512 1.99e-3/4.8e-7/5.7e-4；S4096 4.6e-4/6.0e-4/6.5e-4；
+  kv4 3.4e-3/1.9e-6/7.0e-4；kv8 1.2e-4/2.0e-3/9.9e-4；MQA 4.0e-4/1.7e-3/1.2e-3
+  （dk/dv 的较大值是 `atomicAdd` 归约次序 + 边界舍入的组合，均在 fp8 容差内）。
+* **vs fp32 ref 与历史逐位一致**：S512 2.426/2.972/3.733e-1；S1024H32 2.399/4.177/3.535e-1；
+  S4096 2.635/2.644/3.216e-1；GQA kv4 2.517/5.339/7.173e-1；kv8 2.869/5.367/7.032e-1；
+  MQA 4.101e-1/1.572/2.126；MLA S256H2 2.356/2.290/3.441e-1；S512H4 2.415/2.992/4.481e-1；
+  S1024H2 2.232/3.337/3.602e-1。单文件（host 用默认 `RCP=true`）与两文件一致。
+* **对标**：同 session TE FP8（`fa_bwd_bench.py bench --dtype fp8`）S=4096 **0.5904ms/465.6TF**
+  ⇒ ours total 为 TE FP8 的 **3.69×**（O26 4.17×）；同 session 纯反向 fp16 MHA S4096 FA3
+  0.3245ms/847TF、TE 0.4401/625、FA2 0.7295/377。9 个 shape 全部同向改善。
+
+### 32.4 ncu（main，S=4096，同 binary `--foldrcp` 1/0，`-c 1`）
+
+| | Duration | executed inst | L1/TEX | L2 | Compute | stall wait/short/long/barrier |
+|---|---|---|---|---|---|---|
+| div（O26 基线） | 2.06 ms | 852.6 M | 57.0% | 54.5% | 43.4% | 1.53/1.57/0.67/0.23 |
+| rcp-mul（O27） | **1.78 ms** | **735.2 M（−13.7%）** | 61.6% | 63.2% | 43.7% | 1.48/1.43/0.87/0.27 |
+
+⇒ 精确除法换乘法后**指令数 −13.7%**、Duration 同步 −13.6%；第一墙仍是 **mma 依赖延迟
+（`wait`+`short_scoreboard`）+ 3 CTA/SM**（O7e-3/O19/O20/O22 的结论未变），但 fold 段本身被
+显著削短。regs/smem/occupancy 不变（168 / 70.66KB / 3 CTA/SM）。
+
+### 32.5 复现
+
+```bash
+# 默认（RCP=true）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=.../b1_s4096_h16_d128_causal_fp8
+# A/B（同 binary）：--foldrcp=1 默认 / --foldrcp=0 退回精确除法
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu -c 1 -k regex:fa_bwd_fp8_mma_kernel -- --dir=...
+```
+
+原始输出：`src/fp8/o27_main_sweep.out.txt`（两文件 ×9 shape × `[O27 A/B]` + vs ref/TE）、
+`src/fp8/o27_ncu_main_s4096.out.txt`（O26 基线 `--set full`）、`src/fp8/o27_ncu_rcp_s4096.out.txt`、
+`src/fp8/o27_ncu_stall_s4096.out.txt`、
+`src/fp8/o27_te_fp8_bench.out.txt`、`src/fp8/o27_fa3_te_baseline_fp16.out.txt`。

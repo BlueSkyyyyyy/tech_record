@@ -113,7 +113,9 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // O9c-2：WGMMA=true 时 GEMM1/2 走 wgmma（Q/dO/K/V 存 SW128），smem 用 wgmma 布局。
 // O12：PREL=true 时把本线程负责的 LSE/D 预装寄存器（见 kernels.cuh），默认开。
 // O7e-2：F16B=true 时 fold 的 Ap/dS3/dS2 用 16B 向量化写（见 kernels.cuh），默认开。
-template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true>
+// O27：RCP=true 时 fold 量化用「每行 rcp + 乘法」代替逐元素精确除法（见 kernels.cuh）。
+template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
+          bool RCP = true>
 static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             const unsigned char* k8, const float* ks,
                             const unsigned char* v8, const float* vs,
@@ -123,9 +125,9 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             float scale, int causal, int ksplit) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = WGMMA ? Cfg::smem_bytes_wgmma : Cfg::smem_bytes;
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B>,
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B><<<mg, THREADS, kSmem>>>(
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP><<<mg, THREADS, kSmem>>>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit);
 }
@@ -222,6 +224,7 @@ int main(int argc, char** argv) {
   int f16b_opt = 1;   // O7e-2：1 = fold 16B 向量化写（默认），0 = 退回 O7e 的 4B 写（A/B）
   int bn64_opt = 0;   // O21：1 = 主 kernel KV tile BN=64（mma 路径，D=128）
   int cvt_on = 0;     // O21b：1 = 保留冗余的 fp32→fp32 convert 拷贝（默认 0：直接累加进输出）
+  int foldrcp_opt = 1;  // O27：1 = fold 量化用「每行 rcp + 乘法」（默认），0 = 精确除法（A/B）
   int regdq_opt = -1; // O22：-1 自动；0/1 强制关/开寄存器 dQ 累加（同 session A/B）
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -234,6 +237,7 @@ int main(int argc, char** argv) {
     else if (a == "--wg2") wg2 = 1;
     else if (a == "--bn64") bn64_opt = 1;
     else if (a.rfind("--cvt=", 0) == 0) cvt_on = atoi(a.c_str() + 6);
+    else if (a.rfind("--foldrcp=", 0) == 0) foldrcp_opt = atoi(a.c_str() + 10);
     else if (a.rfind("--qfast=", 0) == 0) qfast = atoi(a.c_str() + 8);
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_opt = atoi(a.c_str() + 12);
     else if (a.rfind("--regdq=", 0) == 0) regdq_opt = atoi(a.c_str() + 8);
@@ -454,11 +458,18 @@ int main(int argc, char** argv) {
   const bool prel_sel = (prel_opt < 0) ? true : (prel_opt != 0);
   // O7e-2：fold 16B 向量化写（默认开），`--f16b=0` 退回 O7e 的 4B 写（仅作 A/B）。
   const bool f16b_sel = (f16b_opt != 0);
-  auto launch128 = [&](bool reg, bool wg, bool prel, bool f16) {
+  // O27：第 5 个开关 rcp 选 fold 量化用乘法（true，默认）还是精确除法（false，A/B）。
+  auto launch128 = [&](bool reg, bool wg, bool prel, bool f16, bool rcp = true) {
 #define GO2(REG_, WG_, PREL_, F16_)                                                          \
-    launch_bwd_main<128, 64, 32, REG_, WG_, PREL_, F16_>(                                    \
-        mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,      \
-        d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit)
+    if (rcp) {                                                                               \
+      launch_bwd_main<128, 64, 32, REG_, WG_, PREL_, F16_, true>(                            \
+          mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,    \
+          d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);                         \
+    } else {                                                                                 \
+      launch_bwd_main<128, 64, 32, REG_, WG_, PREL_, F16_, false>(                           \
+          mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,    \
+          d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);                         \
+    }
 #define GO1(REG_, WG_, PREL_)                                                                \
     if (f16) { GO2(REG_, WG_, PREL_, true); } else { GO2(REG_, WG_, PREL_, false); }
 #define GO0(REG_, WG_)                                                                       \
@@ -488,10 +499,11 @@ int main(int argc, char** argv) {
             d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
       return;
     }
+    const bool rcp_sel = (foldrcp_opt != 0);
 #ifdef FA_WGMMA
-    if (D == 128 && wgmma) { launch128(use_regdq, true, prel_sel, f16b_sel); return; }
+    if (D == 128 && wgmma) { launch128(use_regdq, true, prel_sel, f16b_sel, rcp_sel); return; }
 #endif
-    if (D == 128) { launch128(use_regdq, false, prel_sel, f16b_sel); return; }
+    if (D == 128) { launch128(use_regdq, false, prel_sel, f16b_sel, rcp_sel); return; }
     if (prel_sel)
       launch_bwd_main<512, 64, 32, false, false, true, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
                                                        d_do8, d_dos, d_delta, d_lse, d_dq_acc,
@@ -792,6 +804,59 @@ int main(int argc, char** argv) {
     printf("[O7e-2 A/B] main fold 4B %.4f ms | 16B %.4f ms (%.3fx) | "
            "max_abs(16B-vs-4B) dq/dk/dv=%.3e/%.3e/%.3e\n",
            b4, b16, b4 / b16, maxd2(y_dq, x_dq), maxd2(y_dk, x_dk), maxd2(y_dv, x_dv));
+    run_main();  // 恢复 CLI 选中路径
+  }
+
+  // ---- O27 A/B（D=128）：fold 量化 逐元素精确除法 vs 每行 rcp+乘法 ----
+  //   `scA/sc3/sc2` 是每输出行一个的常量，原实现让每个元素都发一条精确 fp32 除法
+  //   （prec-div，~10+ 指令）；改成每行一次 `__frcp_rn` + 乘法。数学等价，fp8 只有 3 位
+  //   尾数 ⇒ cvt 结果几乎不变。同 session 计时 + 逐元素对拍。
+  if (D == 128) {
+#ifdef FA_WGMMA
+    const bool wg_ab = (wgmma != 0);
+#else
+    const bool wg_ab = false;
+#endif
+    auto launch_rcp = [&](bool rcp) { launch128(use_regdq, wg_ab, prel_sel, f16b_sel, rcp); };
+    auto bench_rcp = [&](bool rcp, float* out) {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      launch_rcp(rcp);
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch_rcp(rcp);
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float bdiv = 0.f, brcp = 0.f;
+    bench_rcp(false, &bdiv);
+    bench_rcp(true, &brcp);
+    std::vector<float> x_dq(nq), x_dk(nkv), x_dv(nkv), y_dq(nq), y_dk(nkv), y_dv(nkv);
+    CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+    CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+    CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+    launch_rcp(false);
+    CUDA_CHECK(cudaMemcpy(x_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(x_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(x_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+    CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+    CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+    launch_rcp(true);
+    CUDA_CHECK(cudaMemcpy(y_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(y_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(y_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    auto maxd2 = [](const std::vector<float>& x, const std::vector<float>& y) {
+      double m = 0.0;
+      for (size_t i = 0; i < x.size(); ++i)
+        m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
+      return m;
+    };
+    printf("[O27 A/B] main fold div %.4f ms | rcp-mul %.4f ms (%.3fx) | "
+           "max_abs(rcp-vs-div) dq/dk/dv=%.3e/%.3e/%.3e\n",
+           bdiv, brcp, bdiv / brcp, maxd2(y_dq, x_dq), maxd2(y_dk, x_dk), maxd2(y_dv, x_dv));
     run_main();  // 恢复 CLI 选中路径
   }
 

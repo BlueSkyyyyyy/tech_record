@@ -1826,10 +1826,39 @@
      42.94→**17.34µs**、**DRAM 31.13→77.01%**、Compute 74.93→27.14%、Waves 31.03→7.76、
      grid 65536→16384 ⇒ 墙从 **smem 归约 + Compute 75%** 移到 **DRAM 带宽 77%（elementwise 上限）**，
      与 fp16 O24 的 delta（72.87%）/ fp8 O14 的 quant（71.31%）结论一致。
-   - 原始输出 `src/fp8/fa_bwd_fp8_main_o26_sweep.out.txt`（两文件 ×9 shape × `[O26 A/B]` + 对拍）、
-     `src/fp8/fa_bwd_fp8_mma_onefile_o26_sweep.out.txt`（单文件）、
-     `src/fp8/o26_ncu_delta_{old,new}_s4096.out.txt`、`src/fp8/o26_te_fp8_bench.out.txt`、
-     `src/fa_bwd_o26_fa3_te_baseline_fp16.out.txt`；文档 `docs/03` §31、`docs/04` §2.3/§3。
+    - 原始输出 `src/fp8/fa_bwd_fp8_main_o26_sweep.out.txt`（两文件 ×9 shape × `[O26 A/B]` + 对拍）、
+      `src/fp8/fa_bwd_fp8_mma_onefile_o26_sweep.out.txt`（单文件）、
+      `src/fp8/o26_ncu_delta_{old,new}_s4096.out.txt`、`src/fp8/o26_te_fp8_bench.out.txt`、
+      `src/fa_bwd_o26_fa3_te_baseline_fp16.out.txt`；文档 `docs/03` §31、`docs/04` §2.3/§3。
+
+- 2026-09-24（第六十八轮）：**O27 完成（fp8 fold 量化「逐元素精确除法」→「每行 rcp + 乘法」，
+  main 1.08–1.18×）**。
+   - 动机：fold 把 fp32 的 `P`/`dS` 按 rowwise amax 量化成 fp8 的 `Ap`/`dS3`/`dS2`，对**每个
+     `(m,j)` 元素**都算一次 `Ps*[dos] / scA`（`dS3` 用 `/sc3`、`dS2` 用 `/sc2`），而 `scX=amax/fp8max`
+     是**每输出行一个**的常量。ptxas 默认 `-prec-div` ⇒ 每个元素一条精确除法（~10+ 指令），
+     fold 段（CUDA-core，夹在 GEMM1/2 与 GEMM3/4/5 之间、张量核空转）是纯浪费。
+   - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+     `fa_bwd_fp8_mma_kernel<..., bool RCP>` 新增模板参数（默认 true）——每行广播 `scX` 后再算一次
+     `__frcp_rn(scX)` 并广播，元素处用新 helper `folddiv<RCP>(x, sc, inv)`（`true`→乘法、`false`→除法）；
+     `scX` 仍原样存 `sA/sds3/sds2` 供反量化。host 加 `--foldrcp=0/1` + `[O27 A/B]`。
+   - **数值**：vs fp32 ref 与历史**逐位一致**（S512 2.426/2.972/3.733e-1；S1024H32 2.399/4.177/3.535e-1；
+     S4096 2.635/2.644/3.216e-1；GQA kv4 2.517/5.339/7.173e-1；kv8 2.869/5.367/7.032e-1；MQA
+     4.101e-1/1.572/2.126；MLA S256H2 2.356/2.290/3.441e-1 等 9 shape 全部相同）；
+     `[O27 A/B] max_abs(rcp-vs-div)` ~1e-4–2e-3（fp8 cvt 边界舍入 + dk/dv atomic 次序）。
+   - **性能（同 session A/B，event，main-only）**：**S4096 2.043→1.758ms（1.162×）**、
+     S512 1.077×、S1024H32 1.092×、GQA kv4 1.083×、kv8 1.152×、MQA 1.178×；端到端 S4096
+     2.4637→**2.1770ms（63.1 TF）**、S512 0.1284→**0.1246**、S1024H32 0.5218→**0.4895**、
+     GQA kv4 0.4875→**0.4566**、kv8 0.5606→**0.5010**、MQA 0.7926→**0.6956**、MLA S256/S512/S1024
+     0.1169/0.2972/0.5175→**0.1094/0.2688/0.4653**。同 session TE FP8 0.5904ms/465.6TF ⇒ 端到端
+     ours/TE **3.69×**（O26 4.17×）。
+   - **ncu（main, S=4096, `-c 1`）**：Duration 2.06→**1.78ms**、**executed inst 852.6M→735.2M
+     （−13.7%）**、L1/TEX 57→61.6%、L2 54.5→63.2%、Compute 43.4→43.7%、168 regs/70.66KB/3 CTA/SM；
+     stall wait 1.53→1.48、short 1.57→1.43、long 0.67→0.87 ⇒ 第一墙仍是 **mma 依赖延迟 + 3 CTA/SM**
+     （O7e-3/O19/O20/O22 结论未变），但 fold 段被显著削短。
+   - 原始输出 `src/fp8/o27_main_sweep.out.txt`、`o27_foldrcp_ab_s4096.out.txt`、
+     `o27_ncu_{main,rcp,stall}_s4096.out.txt`、`o27_te_fp8_bench.out.txt`、
+     `o27_fa3_te_baseline_fp16.out.txt`；文档 `docs/03` §32、`docs/04` §2.3/§3。
+   - **下一步**：fp16/bf16 的 fold 同样含逐元素精确除法（本轮只改 fp8），可作下一个低风险正收益项。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -2018,10 +2047,20 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > ncu 墙从 smem 归约（Compute 75%）移到 DRAM 带宽 77%（elementwise 上限）。**fp8 的 preprocess
 > 三个子 kernel（quant/LSE/delta）至此全部向量化**；`docs/03` §31。剩余第一墙仍是 main 的
 > **mma 依赖延迟 + 3 CTA/SM**。
+> **O27 已完成（第六十八轮）**：fp8 fold 量化的「逐元素精确 fp32 除法」→「每行一次 `__frcp_rn`
+> + 乘法」（新模板参数 `RCP`，默认 true；`--foldrcp=0` 供同 binary A/B）。`scX=amax/fp8max`
+> 本是每输出行一个的常量，旧实现却让每个 `(m,j)` 元素都发一条精确除法（ptxas `prec-div`，
+> ~10+ 指令）。**main 1.08–1.18×**（S4096 2.043→**1.758ms**、MQA 1.178×、kv8 1.152×）；
+> 端到端 S4096 2.4637→**2.1770ms（63.1 TF）**，S512/S1024H32/GQA/MLA 全同向改善；
+> **vs fp32 ref 的 dq/dk/dv 与历史逐位一致**（9 shape）；ncu Duration 2.06→1.78ms、
+> executed inst 852.6M→**735.2M（−13.7%）**。为 TE FP8（同 session 0.5904ms/465.6TF）的
+> **3.69×**（O26 4.17×）。详见 `docs/03` §32、`docs/04` §2.3/§3。
 > **下一步（按回报）**：① **fp8 侧「提 occupancy」**（O19/O21/O22 一致：墙 = mma 依赖延迟 +
 > 3 CTA/SM，须把 168 regs→≤128、72.7KB smem→≤58KB 才到 4 CTA/SM）——这是 fp8（最重点）唯一
 > 还没被证伪的杠杆；② **fp8/主 kernel 跨-tile 软流水**（K/V 单缓冲被 dS3/Ap 复用，需先腾 smem）；
 > ③ TMA 化 Q/K/V/dO（O15a 通路已就绪，需把 HD=128 的 K-major tile 拆成 2×K=64 chunk）。
+> **④（O27 新增）fp16/bf16 的 fold 同理含逐元素精确除法**（本轮只改了 fp8）——可作为下一个
+> 低风险正收益项。
 > **fp16/bf16 侧：L2 red（~72%）+ 1 CTA/SM 在本卡暂无便宜解法**（三条路已证伪），可转 TMA/软流水
 > 或直接冲 fp8；fp8 侧墙是 **mma 依赖延迟 + occupancy**（O19/O21）。
 > 详见 `docs/01` §14j/§14k/§14l/§14m/§14o/§14q、`docs/01b` §6s/§6t、`docs/04` §2.1/§2.2/§3。
@@ -2370,6 +2409,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       **O7e 已证明 fp8 侧该 L2 墙只剩 43.7% < L1/TEX 66%**；**O19/O21 又证伪 fp8 的「减 red/放大
       tile」**⇒ fp8 下一步只剩「提 occupancy（168→≤128 regs + 72.7→≤58KB smem）或减 mma 依赖
       stall」；fp16/bf16 侧见上 O17（跨 wg 归约才是真杠杆）。
+- [x] **O27（第六十八轮）**：fp8 fold 量化「逐元素精确除法」→「每行 `rcp` + 乘法」。新增模板参数
+      `RCP`（默认 true）+ `--foldrcp=0` 同 binary A/B；`scX=amax/fp8max` 是每行常量，旧实现每元素
+      一次 `prec-div`（~10+ 指令）。**main 1.08–1.18×**（S4096 2.043→**1.758ms**）、端到端 S4096
+      2.4637→**2.1770ms（63.1 TF）**；**vs fp32 ref 逐位一致**（9 shape）；ncu executed inst
+      852.6M→735.2M（−13.7%）。详见 `docs/03` §32。**fp16/bf16 的 fold 同样含逐元素除法，留作
+      下一个低风险正收益项**（见「下一步」④）。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog
