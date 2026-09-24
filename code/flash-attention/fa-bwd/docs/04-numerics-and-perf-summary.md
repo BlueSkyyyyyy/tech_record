@@ -1143,7 +1143,39 @@ bf16 S=512 9.001/12.61/13.65e-3）。
 
 最优配置 `(BM=32,BN=32,PIPE=1)`（K 双缓冲），比 `(32,32,0)` 快 1.67×。ncu（S=1024H2，fp16/bf16
 逐项相同）：Duration **769µs**、DRAM 0.83% / L1/TEX 40.1% / L2 13.9% / Compute 2.2%、
-168 regs / **207.36KB smem → 1 CTA/SM**、occ 6.25%、**Waves 0.48**、No Eligible 91.6%、
+ 168 regs / **207.36KB smem → 1 CTA/SM**、occ 6.25%、**Waves 0.48**、No Eligible 91.6%、
 stall `long_scoreboard 7.68 + wait 2.23` ⇒ **bound = 全局访存延迟 + 低并行度**（grid=64 < 132 SM、
 1 CTA/SM），非带宽/算力；进一步提速需降 smem 冲 2 CTA/SM 或 split-KV（backlog）。
 详见 `docs/01` §14b、`docs/01b` §6l。
+
+## 8. 变长（VARLEN / `cu_seqlens`）：fp8 → fp16 → bf16（本节新增）
+
+packed `[T,H,D]` + `cu_seqlens` 逐序列只算 `len_b×len_b` 因果注意力，避免 padding 到
+`max_b len_b`。fp8 已在第 77 轮完成（`docs/03` §37）；本轮补 **fp16（`docs/01` §16）与
+bf16（`docs/01b` §6aa）**，均为默认 D=128 的 wgmma2 主 kernel + wgmma LSE，非 TMA。
+
+**数值对拍（ours vs fp32 ref，causal，max_abs dq/dk/dv）**：
+
+| varlen case | lengths | fp16 | bf16 |
+|---|---|---|---|
+| b4_t3840 不齐 | `[512,1024,2048,256]` | 3.163 / 2.158 / 1.966e-3 | 1.340 / 1.276 / 1.911e-2 |
+| b4_t4096 等长 | `[1024]×4` | 2.112 / 2.252 / 1.915e-3 | 1.355 / 1.207 / 1.772e-2 |
+| b5_t3968 GQA kv8 | `[128,256,512,1024,2048]` | 2.438 / 3.433 / 3.843e-3 | 1.398 / 2.396 / 3.131e-2 |
+| b8_t2904 强倾斜 | `[2048,512,…,8]` | 2.624 / 2.158 / 2.139e-3 | 1.464 / 1.566 / 1.863e-2 |
+
+全部落在对应 dtype 噪声量级、无 padding 泄漏；单/两文件**逐位相同**，定长回归逐位不变。
+
+**性能（ours 端到端 total，event；`Σ_b 4HL²D` 口径）与对标（等长 `[1024]×4` ≡ 定长 B4 S1024
+H16 D128，统一 `8BS²HD`）**：
+
+| case | fp16 ms / TF | bf16 ms / TF |
+|---|---|---|
+| b4_t3840 | 0.7764 / 58.77 | 0.7756 / 58.84 |
+| b4_t4096（等长） | **0.4497 / 76.40** | **0.4507 / 76.24** |
+| b5_t3968 GQA | 1.4388 / 63.62 | 1.4279 / 64.10 |
+| b8_t2904 倾斜 | 0.5839 / 62.96 | 0.5835 / 63.00 |
+
+等长 case 同口径：ours **152.8 TF**（fp16）; FA2.7.4 274.7、**FA3 471.5**、TE 390.2 ⇒
+ours 时间 = FA3 的 **3.09×**、TFLOPS 32%。ncu（main，b4_t3840）：Duration 549µs、
+DRAM 10.1% / **L1/TEX 48.7% / L2 63.2%** / Compute 31.0%、202 regs、**1 CTA/SM（occ 12.4%）**、
+Waves 7.76 ⇒ bound = **L2 red + L1/TEX + 低 occupancy**，与定长 wgmma2 一致。

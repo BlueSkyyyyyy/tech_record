@@ -201,7 +201,8 @@ template <int HD, bool SPLIT = true>
 static void launch_bwd_wgmma2(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
                               const bf16* do_, const float* delta, const float* lse,
                               float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
-                              int Hkv, float scale, int causal, bf16* dq_h = nullptr) {
+                              int Hkv, float scale, int causal, bf16* dq_h = nullptr,
+                              const int* cu_seqlens = nullptr) {
   static_assert(HD == 128, "wgmma2 只做 HD=128");
   constexpr int BM = 128, BN = 64;
   constexpr int QTILE = (BM / 8) * (HD / 64) * 1024;
@@ -212,7 +213,7 @@ static void launch_bwd_wgmma2(dim3 mg, const bf16* q, const bf16* k, const bf16*
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
   fa_bwd_bf16_wgmma2_kernel<HD, SPLIT><<<mg, 256, smem>>>(q, k, v, do_, delta, lse, dq_acc,
                                                           dk_acc, dv_acc, S, H, Hkv, scale,
-                                                          causal, dq_h);
+                                                          causal, dq_h, cu_seqlens);
 }
 
 // O18-bf16：BN=128 版 wgmma2（只 HD=128）。tile 数减半；smem = 1024 + Q32 + dO32 + K 2×32 +
@@ -280,6 +281,155 @@ static void launch_bwd_wgmma2_tma(dim3 mg, CUtensorMap qmap, CUtensorMap kmap,
 #endif  // FA_TMA
 #endif  // FA_WGMMA
 
+#ifdef FA_WGMMA
+static int run_varlen(const std::string& dir, bool causal, int iters) {
+  auto q_np = load_npy_f32(dir + "/q.npy");
+  auto k_np = load_npy_f32(dir + "/k.npy");
+  auto v_np = load_npy_f32(dir + "/v.npy");
+  auto do_np = load_npy_f32(dir + "/do.npy");
+  auto o_np = load_npy_f32(dir + "/ref_o.npy");
+  auto rdq = load_npy_f32(dir + "/ref_dq.npy");
+  auto rdk = load_npy_f32(dir + "/ref_dk.npy");
+  auto rdv = load_npy_f32(dir + "/ref_dv.npy");
+  auto cu_np = load_npy_f32(dir + "/cu_seqlens.npy");
+  if (q_np.shape.size() != 3 || k_np.shape.size() != 3) {
+    fprintf(stderr, "VARLEN 期望 q 为 [T,H,D]、k 为 [T,Hkv,D]\n");
+    return 1;
+  }
+  const int T = (int)q_np.shape[0], H = (int)q_np.shape[1], D = (int)q_np.shape[2];
+  const int Hkv = (int)k_np.shape[1];
+  const int B = (int)cu_np.data.size() - 1;
+  if (D != 128) { fprintf(stderr, "VARLEN 目前只做 HD=128；当前 %d\n", D); return 1; }
+  if (!causal) { fprintf(stderr, "VARLEN 目前只做 causal\n"); return 1; }
+  int maxlen = 0;
+  for (int b = 0; b < B; ++b) {
+    int L = (int)cu_np.data[b + 1] - (int)cu_np.data[b];
+    if (L > maxlen) maxlen = L;
+  }
+  const size_t nq = (size_t)T * H * D;
+  const size_t nkv = (size_t)T * Hkv * D;
+  const size_t rows_q = (size_t)T * H;
+  const float scale = 1.0f / sqrtf((float)D);
+  printf("case = %s\n", dir.c_str());
+  printf("VARLEN: B=%d T=%d maxlen=%d H=%d Hkv=%d D=%d causal=%d\n", B, T, maxlen, H, Hkv, D,
+         (int)causal);
+  printf("cu_seqlens =");
+  for (int b = 0; b <= B && b < 12; ++b) printf(" %d", (int)cu_np.data[b]);
+  printf("%s\n", (B > 11) ? " ..." : "");
+
+  auto to_half = [&](const std::vector<float>& src) {
+    std::vector<bf16> h(src.size());
+    for (size_t i = 0; i < src.size(); ++i) h[i] = __float2bfloat16(src[i]);
+    return h;
+  };
+  auto qh = to_half(q_np.data), kh = to_half(k_np.data), vh = to_half(v_np.data),
+       doh = to_half(do_np.data), oh = to_half(o_np.data);
+
+  bf16 *dq, *dk, *dv, *d_q, *d_k, *d_v, *d_o, *d_do;
+  float *d_delta, *d_lse, *d_dq_acc, *d_dk_acc, *d_dv_acc;
+  int* d_cu;
+  CUDA_CHECK(cudaMalloc(&dq, nq * sizeof(bf16)));
+  CUDA_CHECK(cudaMalloc(&dk, nkv * sizeof(bf16)));
+  CUDA_CHECK(cudaMalloc(&dv, nkv * sizeof(bf16)));
+  CUDA_CHECK(cudaMalloc(&d_q, nq * sizeof(bf16)));
+  CUDA_CHECK(cudaMalloc(&d_k, nkv * sizeof(bf16)));
+  CUDA_CHECK(cudaMalloc(&d_v, nkv * sizeof(bf16)));
+  CUDA_CHECK(cudaMalloc(&d_o, nq * sizeof(bf16)));
+  CUDA_CHECK(cudaMalloc(&d_do, nq * sizeof(bf16)));
+  CUDA_CHECK(cudaMalloc(&d_delta, rows_q * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_lse, rows_q * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dq_acc, nq * sizeof(float)));   // dq_h 路径下不用，占位
+  CUDA_CHECK(cudaMalloc(&d_dk_acc, nkv * sizeof(float)));
+  CUDA_CHECK(cudaMalloc(&d_dv_acc, nkv * sizeof(float)));
+  std::vector<int> cu(B + 1);
+  for (int b = 0; b <= B; ++b) cu[b] = (int)cu_np.data[b];
+  CUDA_CHECK(cudaMalloc(&d_cu, (B + 1) * sizeof(int)));
+  CUDA_CHECK(cudaMemcpy(d_cu, cu.data(), (B + 1) * sizeof(int), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_q, qh.data(), nq * sizeof(bf16), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_k, kh.data(), nkv * sizeof(bf16), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_v, vh.data(), nkv * sizeof(bf16), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_do, doh.data(), nq * sizeof(bf16), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_o, oh.data(), nq * sizeof(bf16), cudaMemcpyHostToDevice));
+
+  const int lse_nblk = (maxlen + LBM - 1) / LBM;
+  dim3 lg_bal((lse_nblk + 1) / 2, H, B);
+  const int kLseTileWgm = (LBM / 8) * (D / 64) * 1024;
+  const int kLseSmemWgm1 = 1024 + kLseTileWgm * 3;
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<128, 1>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemWgm1));
+  const int d_rows = (int)rows_q;
+  const int d_wpb = THREADS / 32;
+  const int d_blocks = (d_rows + d_wpb - 1) / d_wpb;
+  dim3 mg((maxlen + 127) / 128, H, B);
+  const int cvt_threads = 256;
+  const int cvt_blocks =
+      (int)std::min<size_t>((std::max(nq, nkv) + cvt_threads - 1) / cvt_threads, 65535);
+
+  auto run_all = [&]() {
+    CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+    CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+    lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(d_q, d_k, d_lse, maxlen,
+                                                                        H, Hkv, scale, d_cu);
+    delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
+    // O24：dQ 由主 kernel 直接写 fp16（dq_h），convert 跳过 dQ（n_q=0）。
+    launch_bwd_wgmma2<128, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                    d_dv_acc, maxlen, H, Hkv, scale, (int)causal, dq, d_cu);
+    convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, dq, dk, dv, 0,
+                                                nkv);
+  };
+  for (int i = 0; i < 3; ++i) run_all();
+  CUDA_CHECK(cudaDeviceSynchronize());
+  cudaEvent_t ev0, ev1;
+  CUDA_CHECK(cudaEventCreate(&ev0));
+  CUDA_CHECK(cudaEventCreate(&ev1));
+  CUDA_CHECK(cudaEventRecord(ev0));
+  for (int i = 0; i < iters; ++i) run_all();
+  CUDA_CHECK(cudaEventRecord(ev1));
+  CUDA_CHECK(cudaEventSynchronize(ev1));
+  float ms = 0.f;
+  CUDA_CHECK(cudaEventElapsedTime(&ms, ev0, ev1));
+  ms /= iters;
+  double flops = 0.0;
+  for (int b = 0; b < B; ++b) {
+    double L = cu[b + 1] - cu[b];
+    flops += 4.0 * H * L * L * D;  // 反向 ≈ 2×fwd，因果再乘系数（口径同 fp8 varlen）
+  }
+  printf("[timing] VARLEN total %.4f ms  %.2f TFLOPS (sum_b 4HL^2D)\n", ms,
+         flops / (ms * 1e-3) / 1e12);
+  printf("grid main = %d x %d x %d | lse grid = %d x %d x %d | T=%d\n",
+         (maxlen + 127) / 128, H, B, (lse_nblk + 1) / 2, H, B, T);
+
+  std::vector<float> h_dq(nq), h_dk(nkv), h_dv(nkv);
+  std::vector<bf16> h_dq_h(nq), h_dk_h(nkv), h_dv_h(nkv);
+  CUDA_CHECK(cudaMemcpy(h_dq_h.data(), dq, nq * sizeof(bf16), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(h_dk_h.data(), dk, nkv * sizeof(bf16), cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(h_dv_h.data(), dv, nkv * sizeof(bf16), cudaMemcpyDeviceToHost));
+  for (size_t i = 0; i < nq; ++i) h_dq[i] = __bfloat162float(h_dq_h[i]);
+  for (size_t i = 0; i < nkv; ++i) { h_dk[i] = __bfloat162float(h_dk_h[i]); h_dv[i] = __bfloat162float(h_dv_h[i]); }
+  auto report = [](const char* nm, const std::vector<float>& a, const NpyF32& b) {
+    size_t n = std::min(a.size(), b.data.size());
+    double ma = 0.0, mr = 0.0, ao = 0.0, ar = 0.0;
+    size_t arg = 0;
+    for (size_t i = 0; i < n; ++i) {
+      double d = fabs((double)a[i] - (double)b.data[i]);
+      if (d > ma) { ma = d; arg = i; }
+      ao = std::max(ao, fabs((double)a[i]));
+      ar = std::max(ar, fabs((double)b.data[i]));
+      double den = std::max(1e-3, fabs((double)b.data[i]));
+      double r = d / den;
+      if (r > mr) mr = r;
+    }
+    printf("  %-3s vs ref: max_abs=%.3e  max_rel=%.3e  (ours_amax=%.3e ref_amax=%.3e @%zu)\n",
+           nm, ma, mr, ao, ar, arg);
+  };
+  printf("[compare] VARLEN ours vs fp32 ref\n");
+  report("dq", h_dq, rdq);
+  report("dk", h_dk, rdk);
+  report("dv", h_dv, rdv);
+  return 0;
+}
+#endif  // FA_WGMMA
+
 int main(int argc, char** argv) {
   std::string dir = "/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16";
   std::string o_name = "ref_o";
@@ -318,10 +468,13 @@ int main(int argc, char** argv) {
   int delta_warp_sel = 1;
   // O24：D==128 wgmma2/2b 路径直接用 bf16 写 dQ、convert 跳过 dQ（1，默认；0=A/B）。
   int dq_direct_sel = 1;
+  int varlen = 0;   // VARLEN：packed [T,H,D] + cu_seqlens.npy（bf16/HD=128/causal/wgmma2）
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
-    if (a == "--full") causal = false;
+    if (a == "--varlen") varlen = 1;
+    else if (a.rfind("--varlen=", 0) == 0) varlen = atoi(a.c_str() + 9);
+    else if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
     else if (a == "--nopipe") pipe = 0;
     else if (a == "--pipe") pipe = 1;
@@ -350,6 +503,15 @@ int main(int argc, char** argv) {
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
     else if (!a.empty() && a[0] != '-') dir = a;
+  }
+
+  if (varlen) {
+#ifdef FA_WGMMA
+    return run_varlen(dir, causal, iters);
+#else
+    fprintf(stderr, "VARLEN 需要 -DFA_WGMMA（sm_90a）构建\n");
+    return 1;
+#endif
   }
 
   auto q_np  = load_npy_f32(dir + "/q.npy");

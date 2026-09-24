@@ -1,0 +1,9 @@
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_causal_fp16
+VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=1
+cu_seqlens = 0 1024 2048 3072 4096
+[timing] VARLEN total 0.4497 ms  76.40 TFLOPS (sum_b 4HL^2D)
+grid main = 8 x 16 x 4 | lse grid = 8 x 16 x 4 | T=4096
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.112e-03  max_rel=6.328e-01  (ours_amax=3.455e+00 ref_amax=3.455e+00 @19270)
+  dk  vs ref: max_abs=2.252e-03  max_rel=9.803e-01  (ours_amax=3.441e+00 ref_amax=3.442e+00 @13126)
+  dv  vs ref: max_abs=1.915e-03  max_rel=1.093e-01  (ours_amax=7.105e+00 ref_amax=7.106e+00 @2099167)

@@ -2634,6 +2634,103 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 `src/fp16/fa_bwd_fp16_o35_ncu_main_{tma,cpasync}_s4096.out.txt`（关键指标）、
 `src/fa_bwd_o35_fa3_te_baseline_fp16.out.txt`。
 
+## 16. VARLEN：fp16 反向支持变长 / `cu_seqlens`（单/两文件）
+
+> O37 之后 ROADMAP「可选·变长」的 fp16 补全（fp8 已在第 77 轮完成，`docs/03` §37）。
+> 目标：让 fp16 反向直接吃 **packed** `[T,H,D]` + `cu_seqlens`，逐序列只算 `len_b` 的因果
+> 注意力，避免 padding 到 `max_b len_b`。
+
+### 16.1 动机与口径
+
+* `q`/`dO`/`dQ`：`[T,H,D]`；`k`/`v`/`dK`/`dV`：`[T,Hkv,D]`；`cu_seqlens`：`B+1` 个 int 前缀和。
+* kernel 用 `qbase=cu_seqlens[b]`、`len=cu_seqlens[b+1]-qbase` 取代定长 `b*S`/`S`；
+  `S` 参数传 `maxlen`（仅用于 grid / 镜像配对计数），每个 `(b,h,mblk)` 只处理本序列内 tile。
+* ref 的 `ref_dq/dk/dv.npy` 也是 packed，逐元素比对。FA/TE 变长在本机不可用 ⇒ 只对 fp32 ref。
+
+### 16.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+改动收敛在 **3 处 device 代码**（5 个 GEMM 的数学/数据流完全不动）：
+
+1. **4 个搬运 helper** 加一个**默认参数** `int qbase = -1`：
+   `kv_issue_async`/`qdo_issue_async`/`kv_issue_async_sw`/`qdo_issue_async_sw` 内部把
+   `b*S` 换成 `(qbase>=0 ? qbase : b*S)`。定长调用不传该参 ⇒ **逐位不变**；变长传
+   `cu_seqlens[b]`、`S` 传 `len`。这样不改动约 30 处既有调用点。
+2. **`lse_mma_kernel_bal_wgmma`**（默认 Hopper LSE）加 `const int* cu_seqlens`：
+   `qbase/len`、`nblk=(len+LBM-1)/LBM`、越界判定 `<len`、地址 `qbase+…`；并加
+   `if (pair >= (nblk+1)/2) return;` 让短序列多余的镜像配对 CTA 直接退出（定长恒不触发）。
+3. **`fa_bwd_fp16_wgmma2_kernel`**（默认 D=128 主 kernel）加 `const int* cu_seqlens`：
+   同样 `qbase/len`，`qdo/kv_issue_async_sw` 传 `qbase`，P mask/LSE/D 读/dK/dV red/dQ 写回
+   的长度与地址全改 `len`/`qbase`；`nblk` 仅 cluster/DET 用（变长不走），保持定长语义。
+
+`delta_warp_kernel` 本就是「每 warp 一行」的扁平实现，packed 天然可用，无需改。
+host 新增 `--varlen` 分支 `run_varlen`（读 packed 输入 + `cu_seqlens.npy`，LSE 用
+`lse_mma_kernel_bal_wgmma`、主 kernel 用 `launch_bwd_wgmma2<128,true,1>`，均传 `d_cu`）。
+
+### 16.3 数值（ours vs fp32 ref，fp16 causal；max_abs）
+
+| case | lengths | dq | dk | dv | total (ms) | TFLOPS（Σ_b 4HL²D） |
+|---|---|---|---|---|---|---|
+| b4_t3840 不齐 | `[512,1024,2048,256]` | 3.163e-3 | 2.158e-3 | 1.966e-3 | 0.7764 | 58.77 |
+| b4_t4096 等长 | `[1024]×4` | 2.112e-3 | 2.252e-3 | 1.915e-3 | 0.4497 | 76.40 |
+| b5_t3968 GQA kv8 | `[128,256,512,1024,2048]` | 2.438e-3 | 3.433e-3 | 3.843e-3 | 1.4388 | 63.62 |
+| b8_t2904 强倾斜 | `[2048,512,…,8]` | 2.624e-3 | 2.158e-3 | 2.139e-3 | 0.5839 | 62.96 |
+
+全部 fp16 噪声量级（~2–4e-3），**无 system error、无 padding 泄漏**；单文件与两文件**逐位相同**
+（b4_t3840：3.163/2.158/1.966e-3）。
+定长回归（`nullptr`）**逐位不变**：S512 `1.671/1.771/1.899e-3`。
+
+### 16.4 性能与对标
+
+等长 case `[1024]×4` 等价定长 B4 S1024 H16 D128，同口径（`4BS²H(D+Dv)` = `8BS²HD`）对标：
+
+| 实现 | ms | TFLOPS |
+|---|---|---|
+| **ours total（varlen 等长）** | **0.4497** | **152.8** |
+| FA2.7.4（定长） | 0.2502 | 274.7 |
+| **FA3（SM90，定长）** | 0.1457 | **471.5** |
+| TE2.14（定长） | 0.1761 | 390.2 |
+
+ours 时间 = FA3 的 **3.09×**、TFLOPS 为 FA3 的 **32%**（同 shape S4096 时约 26%，小 S 相对好）。
+
+### 16.5 ncu（主 kernel，b4_t3840，`--set full --launch-count 1`）
+
+| 指标 | 值 |
+|---|---|
+| Duration | 549.44 µs |
+| DRAM / L1/TEX / L2 | 10.05% / **48.74% / 63.18%** |
+| Compute (SM) | 31.03% |
+| regs / Block Limit Shared Mem | 202 / 1 |
+| Achieved / Theoretical Occupancy | 12.43% / 12.50% |
+| Waves Per SM / No Eligible | 7.76 / 63.49% |
+| Issued Ipc Active / Warp Cycles Per Issued Inst | 1.46 / 5.44 |
+
+bound 与定长 fp16 wgmma2 完全一致：**L2（dK/dV 跨 CTA red）+ L1/TEX 吞吐 + 1 CTA/SM 的
+延迟受限**，DRAM 仅 10% ⇒ 非带宽 bound。
+
+### 16.6 复现
+
+```bash
+# dump fp16 varlen cases
+python harness/fa_bwd_bench.py dump --varlen-all --dtype fp16
+# 两文件（wgmma2 + wgmma LSE）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu --varlen --iters=50 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b4_t3840_h16_d128_causal_fp16
+# 单文件
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_onefile.cu --varlen --iters=50 --dir=...
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_varlen_b{4_t3840,4_t4096,5_t3968,8_t2904}*.out.txt`
+（两文件）、`..._onefile_b4_t3840.out.txt`（单文件）、`..._ncu_main_b4_t3840.out.txt`（ncu）、
+`src/fa_bwd_varlen_fa3_te_baseline_fp16.out.txt`（FA2/FA3/TE 基线）。
+
+### 16.7 限制 / 后续
+
+* 只做 **fp16 / HD=128 / causal / MHA+GQA**；非 causal、MLA、负载均衡留后续。
+* 用 **非 TMA** 主 kernel（wgmma2 + cp.async）；TMA 需为 packed 布局重建描述符。
+* 短序列的 CTA 早退，强倾斜 case 并行度浪费；可引入按 `cu_seqlens` 的均衡分块。
+
 ## 15. 下一步
 
 > **O23（§14n）已完成**：把 O17/O18 的主 kernel + O9a 的 LSE 在 `-DFA_WGMMA` 构建下**默认打开**

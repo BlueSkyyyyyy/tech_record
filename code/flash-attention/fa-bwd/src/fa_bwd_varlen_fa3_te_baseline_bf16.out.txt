@@ -1,0 +1,10 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+--- eqlen B4 S1024 [1024]x4: B=4 S=1024 H=16 D=128 (4BS^2H(D+Dv))
+  FA2: 0.2504 ms  274.4 TF
+  FA3: 0.1454 ms  472.7 TF
+  TE : 0.1755 ms  391.6 TF
+--- skew maxlen S2048: B=1 S=2048 H=16 D=128 (4BS^2H(D+Dv))
+  FA2: 0.2532 ms  271.4 TF
+  FA3: 0.1020 ms  673.4 TF
+  TE : 0.1624 ms  423.0 TF

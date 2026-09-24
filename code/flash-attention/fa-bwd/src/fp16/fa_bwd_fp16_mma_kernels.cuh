@@ -343,15 +343,16 @@ template <int HD, int BN, bool DOK = true, bool DOV = true>
 __device__ __forceinline__ void kv_issue_async(const __half* __restrict__ k,
                                                const __half* __restrict__ v, int j0, int S,
                                                int Hkv, int hkv, int b, int tid, __half* Kd,
-                                               __half* Vd, int LD) {
+                                               __half* Vd, int LD, int qbase = -1) {
   constexpr int HDV = HD / 8;    // 每行 uint4(8 half) 数
   constexpr int NU  = BN * HDV;  // 总 unit 数
+  const int tk = (qbase >= 0) ? qbase : b * S;   // VARLEN：token 基址
 #pragma unroll
   for (int u = tid; u < NU; u += THREADS) {
     const int row = u / HDV, c8 = u % HDV;
     const int jg = j0 + row;
     if (jg < S) {
-      const size_t off = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c8 * 8;
+      const size_t off = (((size_t)(tk + jg)) * Hkv + hkv) * HD + c8 * 8;
       if (DOK) cp_async16(Kd + row * LD + c8 * 8, k + off);
       if (DOV) cp_async16(Vd + row * LD + c8 * 8, v + off);
     } else {
@@ -373,15 +374,16 @@ template <int HD, int BM>
 __device__ __forceinline__ void qdo_issue_async(const __half* __restrict__ q,
                                                 const __half* __restrict__ do_, int m0, int S,
                                                 int H, int h, int b, int tid, __half* Qd,
-                                                __half* dOd, int LD) {
+                                                __half* dOd, int LD, int qbase = -1) {
   constexpr int HDV = HD / 8;    // 每行 uint4(8 half) 数
   constexpr int NU  = BM * HDV;  // 总 unit 数
+  const int tk = (qbase >= 0) ? qbase : b * S;   // VARLEN：token 基址
 #pragma unroll
   for (int u = tid; u < NU; u += THREADS) {
     const int row = u / HDV, c8 = u % HDV;
     const int qi = m0 + row;
     if (qi < S) {
-      const size_t off = (((size_t)(b * S + qi)) * H + h) * HD + c8 * 8;
+      const size_t off = (((size_t)(tk + qi)) * H + h) * HD + c8 * 8;
       cp_async16(Qd + row * LD + c8 * 8, q + off);
       cp_async16(dOd + row * LD + c8 * 8, do_ + off);
     } else {
@@ -717,7 +719,8 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
 template <int HD, int PIPE>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal_wgmma(const __half* __restrict__ q, const __half* __restrict__ k,
-                         float* __restrict__ lse, int S, int H, int Hkv, float scale) {
+                         float* __restrict__ lse, int S, int H, int Hkv, float scale,
+                         const int* __restrict__ cu_seqlens = nullptr) {
   static_assert(HD == 128, "wgmma LSE 目前只做 HD=128");
   constexpr int HDV = HD / 8;
   constexpr int TILE = (LBM / 8) * (HD / 64) * 1024;  // 单个 SW128 tile 字节数（HD=128→16KB）
@@ -728,9 +731,13 @@ lse_mma_kernel_bal_wgmma(const __half* __restrict__ q, const __half* __restrict_
   char* Qs = smem_raw + pad;
   char* Ks = Qs + TILE;  // PIPE=1：2*TILE；PIPE=0：TILE
 
-  const int nblk = (S + LBM - 1) / LBM;
   const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
   const int hkv = h / (H / Hkv);
+  // VARLEN：cu_seqlens 给本序列 token 基址与长度；nullptr 退化为定长 b*S/S。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
+  const int nblk = (len + LBM - 1) / LBM;
+  if (pair >= (nblk + 1) / 2) return;  // VARLEN：短序列多余配对 CTA 退出
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
 
@@ -741,8 +748,8 @@ lse_mma_kernel_bal_wgmma(const __half* __restrict__ q, const __half* __restrict_
       const int row = u / HDV, c8 = u % HDV;
       const int jg = j0 + row;
       uint4 v = make_uint4(0, 0, 0, 0);
-      if (jg < S) {
-        const size_t off = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c8 * 8;
+      if (jg < len) {
+        const size_t off = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c8 * 8;
         if constexpr (PIPE) {
           cp_async16(Kd + sw128_off(row, c8 * 8, HD), k + off);
           continue;
@@ -759,8 +766,8 @@ lse_mma_kernel_bal_wgmma(const __half* __restrict__ q, const __half* __restrict_
       const int row = u / HDV, c8 = u % HDV;
       const int qi = m0 + row;
       uint4 v = make_uint4(0, 0, 0, 0);
-      if (qi < S) {
-        const size_t off = (((size_t)(b * S + qi)) * H + h) * HD + c8 * 8;
+      if (qi < len) {
+        const size_t off = (((size_t)(qbase + qi)) * H + h) * HD + c8 * 8;
         if constexpr (PIPE) {
           cp_async16(Qd + sw128_off(row, c8 * 8, HD), q + off);
           continue;
@@ -778,7 +785,7 @@ lse_mma_kernel_bal_wgmma(const __half* __restrict__ q, const __half* __restrict_
     if (t == 1 && pair == nblk - 1 - pair) continue;
     const int m0 = mblk * LBM;
     issue_q(Qs, m0);
-    const int ncols = min(S, m0 + LBM);
+    const int ncols = min(len, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
     if constexpr (PIPE) {
       if (ntiles > 0) issue_k(Ks, 0);
@@ -809,7 +816,7 @@ lse_mma_kernel_bal_wgmma(const __half* __restrict__ q, const __half* __restrict_
           int c = j * 8 + c2 + (q & 1);
           int qi = m0 + r, jg = j0 + c;
           float sv = -INFINITY;
-          if (qi < S && jg < S && jg <= qi) sv = d[j * 4 + q] * scale;
+          if (qi < len && jg < len && jg <= qi) sv = d[j * 4 + q] * scale;
           if (sv != -INFINITY) {
             float mn = fmaxf(mrow[s], sv);
             lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
@@ -833,7 +840,7 @@ lse_mma_kernel_bal_wgmma(const __half* __restrict__ q, const __half* __restrict_
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < S) lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+        if (qi < len) lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
       }
     }
     __syncthreads();
@@ -1293,15 +1300,16 @@ template <int HD, int BN, bool DOK, bool DOV, int NT = THREADS>
 __device__ __forceinline__ void kv_issue_async_sw(const __half* __restrict__ k,
                                                   const __half* __restrict__ v, int j0, int S,
                                                   int Hkv, int hkv, int b, int tid, char* Kd,
-                                                  char* Vd) {
+                                                  char* Vd, int qbase = -1) {
   constexpr int HDV = HD / 8;
   constexpr int NU  = BN * HDV;
+  const int tk = (qbase >= 0) ? qbase : b * S;   // VARLEN：token 基址
 #pragma unroll
   for (int u = tid; u < NU; u += NT) {
     const int row = u / HDV, c8 = u % HDV;
     const int jg = j0 + row;
     if (jg < S) {
-      const size_t off = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c8 * 8;
+      const size_t off = (((size_t)(tk + jg)) * Hkv + hkv) * HD + c8 * 8;
       if (DOK) cp_async16(Kd + sw128_off(row, c8 * 8, HD), k + off);
       if (DOV) cp_async16(Vd + sw128_off(row, c8 * 8, HD), v + off);
     } else {
@@ -1318,15 +1326,16 @@ template <int HD, int BM, int NT = THREADS>
 __device__ __forceinline__ void qdo_issue_async_sw(const __half* __restrict__ q,
                                                    const __half* __restrict__ do_, int m0,
                                                    int S, int H, int h, int b, int tid,
-                                                   char* Qd, char* dOd) {
+                                                   char* Qd, char* dOd, int qbase = -1) {
   constexpr int HDV = HD / 8;
   constexpr int NU  = BM * HDV;
+  const int tk = (qbase >= 0) ? qbase : b * S;   // VARLEN：token 基址
 #pragma unroll
   for (int u = tid; u < NU; u += NT) {
     const int row = u / HDV, c8 = u % HDV;
     const int qi = m0 + row;
     if (qi < S) {
-      const size_t off = (((size_t)(b * S + qi)) * H + h) * HD + c8 * 8;
+      const size_t off = (((size_t)(tk + qi)) * H + h) * HD + c8 * 8;
       cp_async16(Qd + sw128_off(row, c8 * 8, HD), q + off);
       cp_async16(dOd + sw128_off(row, c8 * 8, HD), do_ + off);
     } else {
@@ -1573,7 +1582,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
                           const float* __restrict__ delta, const float* __restrict__ lse,
                           float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                           float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                          int causal, __half* __restrict__ dq_h = nullptr) {
+                          int causal, __half* __restrict__ dq_h = nullptr,
+                          const int* __restrict__ cu_seqlens = nullptr) {
   static_assert(HD == 128, "wgmma2 主 kernel 目前只做 HD=128");
   constexpr int NTH = 256;
   constexpr int BM = 128, BN = 64;
@@ -1596,6 +1606,7 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
   float* dkacc = reinterpret_cast<float*>(dSs + PTILE) + (CL > 1 ? BN * HD : 0);
 
   const int bx = blockIdx.x;
+  // nblk 仅用于 DET/cluster 路径（varlen 不走），保持定长语义。
   const int nblk = (S + BM - 1) / BM;
   const int mblk = bx;
   // O25：cluster 沿 bx（clusterDim.x=CL），leader = cluster 内 rank 0（mblk 较小的那个）。
@@ -1607,6 +1618,9 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
   }
   const int h = blockIdx.y, b = blockIdx.z;
   const int hkv = h / (H / Hkv);
+  // VARLEN：cu_seqlens 给本序列 token 基址与长度；nullptr 退化为定长 b*S/S。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
   const int tid = threadIdx.x;
   const int wg = tid >> 7;                 // warpgroup id（0/1）
   const int wid = (tid >> 5) & 3;          // warpgroup 内 warp id（0..3）
@@ -1614,9 +1628,9 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * BM;
 
-  qdo_issue_async_sw<HD, BM, NTH>(q, do_, m0, S, H, h, b, tid, Qs, dOs);
+  qdo_issue_async_sw<HD, BM, NTH>(q, do_, m0, len, H, h, b, tid, Qs, dOs, qbase);
 
-  const int ncols = causal ? min(S, m0 + BM) : S;
+  const int ncols = causal ? min(len, m0 + BM) : len;
   const int ntiles = (ncols + BN - 1) / BN;
   // O25：cluster 配对「相邻两个 mblk」——高的那个（rank1）恒多做 BM/BN 个（=2）KV tile。
   //   低 mblk 的 rank0 把循环延到 rank1 的 tile 数；多出的 tile 因 causal mask 使 P=0、
@@ -1624,20 +1638,20 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
   //   锁步，per-tile 的 DSM 合并才有确定的同步点。
   const int nt_loop = ntiles + ((CL > 1 && causal && crank == 0) ? (BM / BN) : 0);
   if (nt_loop > 0) {
-    kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, 0, S, Hkv, hkv, b, tid, Ks, Vs);
-    kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, 0, S, Hkv, hkv, b, tid, Ks, Vs);
+    kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, 0, len, Hkv, hkv, b, tid, Ks, Vs, qbase);
+    kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, 0, len, Hkv, hkv, b, tid, Ks, Vs, qbase);
   }
 
   // 本 wg 的 Q 行 = wg*64 + [0,64)。每线程两行（r_lo / r_hi）。
   const int r_lo = wg * 64 + wid * 16 + g;
   const int qi_lo = m0 + r_lo, qi_hi = qi_lo + 8;
   float lse_lo = 0.f, lse_hi = 0.f, del_lo = 0.f, del_hi = 0.f;
-  if (qi_lo < S) {
-    const size_t idx = ((size_t)(b * S + qi_lo)) * H + h;
+  if (qi_lo < len) {
+    const size_t idx = ((size_t)(qbase + qi_lo)) * H + h;
     lse_lo = lse[idx]; del_lo = delta[idx];
   }
-  if (qi_hi < S) {
-    const size_t idx = ((size_t)(b * S + qi_hi)) * H + h;
+  if (qi_hi < len) {
+    const size_t idx = ((size_t)(qbase + qi_hi)) * H + h;
     lse_hi = lse[idx]; del_hi = delta[idx];
   }
 
@@ -1681,8 +1695,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
     asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
     if (nt + 1 < nt_loop)
-      kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
-                                                  Ks + ((nt + 1) & 1) * KTILE, Vs);
+      kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
+                                                  Ks + ((nt + 1) & 1) * KTILE, Vs, qbase);
 
     // ---- (1)(2) 本 wg 的 S=QKᵀ 与 dP=dO·Vᵀ（m64n64），统一 wait0 ----
     float sacc[32], dpacc[32];
@@ -1698,7 +1712,7 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
         const int jg = j0 + j * 8 + c2 + (qq & 1);
         const float lv = (qq >= 2) ? lse_hi : lse_lo;
         float p = 0.f;
-        if (qi < S && jg < S && !(causal && jg > qi)) p = fexp(sacc[j * 4 + qq] * scale - lv);
+        if (qi < len && jg < len && !(causal && jg > qi)) p = fexp(sacc[j * 4 + qq] * scale - lv);
         pval[j][qq] = p;
       }
 #pragma unroll
@@ -1719,8 +1733,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
     // 两个 wg 的 P/dS 都写好；同时 GEMM2 已读完 V[nt]，可覆盖 V。
     __syncthreads();
     if (nt + 1 < nt_loop)
-      kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
-                                                  Ks, Vs);
+      kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
+                                                  Ks, Vs, qbase);
 
     if constexpr (SPLIT) {
       // ---- O17-2：把 GEMM3(dV) 交给 wg0、GEMM4(dK) 交给 wg1，两者都仍对全 BM=128 归约
@@ -1749,8 +1763,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
               const int rr = r0 + (qq >= 2 ? 8 : 0);
               const int jg = j0 + rr;
               const int c = nh * 64 + j * 8 + c2;
-              if (jg < S)
-                dkv_red(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c, leader_dv,
+              if (jg < len)
+                dkv_red(dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c, leader_dv,
                         rr, c, accv[j * 4 + qq], accv[j * 4 + qq + 1]);
             }
         }
@@ -1775,8 +1789,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
               const int rr = r0 + (qq >= 2 ? 8 : 0);
               const int jg = j0 + rr;
               const int c = nh * 64 + j * 8 + c2;
-              if (jg < S)
-                dkv_red(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c, leader_dk,
+              if (jg < len)
+                dkv_red(dk_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c, leader_dk,
                         rr, c, acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
             }
         }
@@ -1803,8 +1817,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
             const int rr = r0 + (qq >= 2 ? 8 : 0);
             const int jg = j0 + rr;
             const int c = nh * 64 + j * 8 + c2;
-            if (jg < S)
-              dkv_red(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c, leader_dv,
+            if (jg < len)
+              dkv_red(dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c, leader_dv,
                       rr, c, accv[j * 4 + qq], accv[j * 4 + qq + 1]);
           }
       }
@@ -1827,8 +1841,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
             const int rr = r0 + (qq >= 2 ? 8 : 0);
             const int jg = j0 + rr;
             const int c = nh * 64 + j * 8 + c2;
-            if (jg < S)
-              dkv_red(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c, leader_dk,
+            if (jg < len)
+              dkv_red(dk_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c, leader_dk,
                       rr, c, acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
           }
       }
@@ -1865,7 +1879,7 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
           const int cc2 = (t2 % (HD / 2)) * 2;
           const int jgf = j0 + rr2;
           if (jgf < S) {
-            const size_t gb = (((size_t)(b * S + jgf)) * Hkv + hkv) * HD + cc2;
+            const size_t gb = (((size_t)(qbase + jgf)) * Hkv + hkv) * HD + cc2;
             red_add2(dv_acc + gb, dvacc[rr2 * HD + cc2], dvacc[rr2 * HD + cc2 + 1]);
             red_add2(dk_acc + gb, dkacc[rr2 * HD + cc2], dkacc[rr2 * HD + cc2 + 1]);
           }
@@ -1885,13 +1899,13 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
         const int rr = r0 + (qq >= 2 ? 8 : 0);
         const int qi = m0 + wg * 64 + rr;
         const int c = nh * 64 + j * 8 + c2;
-        if (qi < S) {
+        if (qi < len) {
           // O24：同 wgmma2b，dQ 唯一拥有 ⇒ 可直接写 fp16，省掉 convert 的 dQ 一趟。
           if (dq_h)
-            *reinterpret_cast<__half2*>(dq_h + (((size_t)(b * S + qi)) * H + h) * HD + c) =
+            *reinterpret_cast<__half2*>(dq_h + (((size_t)(qbase + qi)) * H + h) * HD + c) =
                 __floats2half2_rn(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
           else {
-            float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
+            float* base = dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c;
             *reinterpret_cast<float2*>(base) =
                 make_float2(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
           }
