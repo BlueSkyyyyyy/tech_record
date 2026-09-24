@@ -1,0 +1,6 @@
+opts=''
+[timing] total(quant+pre+main+cvt) 2.6960 ms  50.98 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0685 ms | preprocess 0.3988 ms | main 2.1858 ms | convert 0.0429 ms (cvt_on=0)
+opts='--wgmma --lsewgm'
+[timing] total(quant+pre+main+cvt) 2.4885 ms  55.23 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0689 ms | preprocess 0.3179 ms | main 2.0413 ms | convert 0.0603 ms (cvt_on=0)

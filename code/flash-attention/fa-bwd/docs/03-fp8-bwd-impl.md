@@ -2599,3 +2599,85 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full -c 1 --kernel-name regex:fa
 原始输出：`src/fp8/o21_main_bn_ab_s4096.out.txt`、`src/fp8/o21_main_bn_ab_gqa_kv4.out.txt`、
 `src/fp8/o21_onefile_s4096.out.txt`、`src/fp8/o21_ncu_bn32_s4096.out.txt`、
 `src/fp8/o21_ncu_bn64_s4096.out.txt`。
+
+---
+
+## 30. O22：fp8 Hopper 路径（wgmma）默认化 + 寄存器压力/stall 审计（三组负结果）
+
+### 30.1 动机
+
+fp8 主 kernel 的墙，从 O7e-3（§26）、O19（§27）、O20（§28）、O21（§29）一路被 ncu 定位为
+**mma 依赖延迟（`wait` + `short_scoreboard`）+ 3 CTA/SM 的 occupancy**。而 O9c（§21，LSE 的
+`qkᵀ`）与 O9c-2（§22，主 kernel 的 GEMM1/2）早已把 fp8 这两段换成 Hopper `wgmma`，只是**默认关**
+（需 `--lsewgm --wgmma` + `-DFA_WGMMA` 的 `sm_90a` 构建）。本轮把「**Hopper 路径默认化**」作为增量，
+并把此前几组候选杠杆一次性量测判决（负结果照记）。
+
+### 30.2 实现（单/两文件 device 逐字一致，host 同步）
+
+- `-DFA_WGMMA`（`sm_90a`）构建下，`lsewgm`/`wgmma` **默认 1**；`sm_90` 构建无该路径、保持 mma。
+  新增 `--lsewgm=0/1`、`--wgmma=0/1`，可在**同一 binary** 内退回 mma 做 A/B（`--wgmma`/`--lsewgm` 仍保留）。
+- 新增 `--regdq=0/1`（强制关/开寄存器 dQ 累加，O22 A/B）与编译开关 `FA_ILV`（默认 0，见 §30.4）。
+- 单文件 `fa_bwd_fp8_mma_onefile.cu` 由同一处修改同步（device 区从 `fexp` 起逐字一致，脚本核对
+  `DEVICE REGION IDENTICAL`）。
+
+构建/运行（Hopper 路径）：
+```bash
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=20
+```
+
+### 30.3 性能（同 binary、同 session A/B；CUDA event 端到端 total，ms）
+
+| shape | mma（lse+main） | **Hopper 默认** | 比 | preprocess mma→wgm | main mma→wgm |
+|---|---|---|---|---|---|
+| S512 H16 | 0.1421 | **0.1341** | **1.060×** | 0.0467→0.0412 | 0.0670→0.0655 |
+| S1024 H32 | 0.5623 | **0.5308** | **1.059×** | 0.1021→0.0890 | 0.3912→0.3736 |
+| S4096 H16 | 2.6937 | **2.4837** | **1.085×** | 0.3957→0.3176 | 2.1752→2.0432 |
+| GQA kv4 S1024 | 0.5296 | **0.4947** | **1.071×** | 0.1001→0.0865 | 0.3768→0.3581 |
+
+- 收益来自两处：**LSE 的 `wgmma`**（S4096 preprocess 1.246×）+ **主 kernel GEMM1/2 的 `wgmma`**
+  （S4096 main 1.065×）。S=4096 端到端 **2.48 ms / 55.3 TF**（main-only 2.0432 ms / 67.3 TF，峰值 3.4%）。
+- 数值 vs fp32 ref 与历史逐位同级（S512 2.426/2.972/3.733e-1；S1024H32 2.399/4.177/3.535e-1；
+  S4096 2.635/2.644/3.216e-1；GQA kv4 2.517/5.339/7.173e-1；MLA S1024H2 2.232/3.337/3.602e-1）。
+  单文件与两文件一致（S512 total 0.1346 / GQA 0.4972 ms）。
+- MLA（D=512）不走 wgmma（仅 D=128），保持 O21b 路径（S1024H2 total 0.5195 ms）。
+
+### 30.4 同轮量测的候选杠杆（结论：均不采纳）
+
+1. **`--regdq=0`（关寄存器 dQ 累加）**：O21 ncu 显示 `dqacc[2][8][4]`（64 fp32）把 168-reg
+   预算挤爆——PTXAS 报 **68B spill stores / 380B spill loads**，local 占 L1TEX sector **9.57%**
+   （Est 28–50%）。但关掉 REGDQ 后 dQ 每个 nt tile 发一次跨 CTA `atomicAdd`（归约 O(1)→O(ntiles)）：
+   同 session main **on 2.136 ms vs off 2.480 ms（on 快 1.16×）**。⇒ **保留 REGDQ**，local spill
+   比多发的 dQ red 便宜（与 O19「fp8 不是 L2 red bound」不矛盾——这里差的是 dQ 专属的 RMW 次数）。
+2. **`FA_ILV=1`（GEMM1/2 mma 指令级交错）**：把两条独立 GEMM 的 mma 连发（`acc`/`acc2` 双累加器）
+   再做 epilogue，数学/数值逐位不变。三次 A/B：ILV=0 均值 2.180 ms vs ILV=1 均值 2.185 ms
+   ⇒ **中性偏负**（`wait` 未被填掉；ptxas 对 mma inline asm 的调度空间有限）。默认 0。
+3. **ksplit 重标定**：S=4096 k=2/4/8/16 = 2.341/2.175/2.157/2.256 ms ⇒ 维持 O2b 的
+   `TARGET=4096→k=4`（k=8 仅 ~1%，session 噪声内）。
+4. **`PSS` padding 扫描**：穷举 32–64 无法把 GEMM1/2 epilogue 的 store 冲突降到 0（最小恒 1.9-way），
+   O7e-3 选的 `37` 已近最优 ⇒ 不动。
+
+### 30.5 ncu（主 kernel，S=4096，Hopper 默认，`-c 1`）
+
+`Duration 2.05 ms`（mma 2.19 ms）；stall `wait 1.53 + short_scoreboard 1.57 + long_scoreboard 0.66 +
+not_selected 0.36 + barrier 0.23` ⇒ **仍是 mma 依赖延迟（GEMM3/4/5 仍 mma，fp8 wgmma 无转置操作数，
+O9c-2b 已判硬件阻塞）+ 3 CTA/SM**；与 mma 路径同质，只是 GEMM1/2 的 ldmatrix 被 SS 直读取代。
+
+### 30.6 复现
+
+```bash
+# Hopper 默认（-DFA_WGMMA 构建）vs mma（同 binary 退回）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=.../b1_s4096_h16_d128_causal_fp8 --iters=20
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=... --iters=20 --wgmma=0 --lsewgm=0
+# REGDQ / ILV / ksplit 判决
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=... --regdq=0     # 见 [O22 A/B]
+NVCC_FLAGS="-DFA_ILV=1" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=...
+```
+
+原始输出：`src/fp8/o22_wgmma_default_s4096.out.txt`、`o22_wgmma_default_shapes.out.txt`、
+`o22_mma_baseline_shapes.out.txt`、`o22_wgmma_default_onefile.out.txt`、
+`o22_regdq_ab_s4096.out.txt`、`o22_ilv_ab_s4096.out.txt`、`o22_ksplit_s4096.out.txt`、
+`o22_ncu_stall_s4096.out.txt`（mma）、`o22_ncu_stall_wgmma_s4096.out.txt`（wgmma）、
+`o22_fa3_te_baseline_fp16.out.txt`、`o22_te_fp8_bench.out.txt`。

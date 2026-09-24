@@ -205,24 +205,36 @@ int main(int argc, char** argv) {
   int iters = 20;
   int ksplit = -1;  // -1 = 自动
   int ksplit2_opt = -1;  // O19：wg2 的 ksplit（-1 自动）
-  int lsewgm = 0;   // O9c：1 = LSE 走 wgmma（需 -DFA_WGMMA 构建），0 = O11 mma 版
-  int wgmma = 0;    // O9c-2：1 = 主 kernel GEMM1/2 走 wgmma（需 -DFA_WGMMA 构建）
+  // O22：在 `-DFA_WGMMA`（sm_90a）构建下，默认启用 Hopper 路径（LSE + 主 kernel GEMM1/2 的
+  //   wgmma）；sm_90 构建下这两个宏路径不存在，保持 mma。`--lsewgm=0/--wgmma=0` 可显式退回 mma
+  //   做 A/B（S=4096 端到端 wgmma 比 mma 快 ~8%：2.70→2.49ms，preprocess 0.40→0.32、main 2.19→2.04）。
+#ifdef FA_WGMMA
+  int lsewgm = 1;
+  int wgmma = 1;
+#else
+  int lsewgm = 0;
+  int wgmma = 0;
+#endif
   int wg2 = 0;      // O19：1 = 主 kernel 走跨 warpgroup 归约版（BM=128, 2 wg, 256 线程）
   int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
   int qfast = 1;      // O14：1 = warp-per-row 向量化量化，0 = 旧 per-row 标量量化（A/B）
   int f16b_opt = 1;   // O7e-2：1 = fold 16B 向量化写（默认），0 = 退回 O7e 的 4B 写（A/B）
   int bn64_opt = 0;   // O21：1 = 主 kernel KV tile BN=64（mma 路径，D=128）
   int cvt_on = 0;     // O21b：1 = 保留冗余的 fp32→fp32 convert 拷贝（默认 0：直接累加进输出）
+  int regdq_opt = -1; // O22：-1 自动；0/1 强制关/开寄存器 dQ 累加（同 session A/B）
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
     else if (a == "--lsewgm") lsewgm = 1;
     else if (a == "--wgmma") wgmma = 1;
+    else if (a.rfind("--lsewgm=", 0) == 0) lsewgm = atoi(a.c_str() + 9);
+    else if (a.rfind("--wgmma=", 0) == 0) wgmma = atoi(a.c_str() + 8);
     else if (a == "--wg2") wg2 = 1;
     else if (a == "--bn64") bn64_opt = 1;
     else if (a.rfind("--cvt=", 0) == 0) cvt_on = atoi(a.c_str() + 6);
     else if (a.rfind("--qfast=", 0) == 0) qfast = atoi(a.c_str() + 8);
+    else if (a.rfind("--regdq=", 0) == 0) regdq_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--f16b=", 0) == 0) f16b_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
@@ -370,7 +382,9 @@ int main(int argc, char** argv) {
   // O7：只有 HD=128（dQ 一次铺满 N）且「平均每 CTA 的 nt tile 足够多」时才启用寄存器累加。
   // 因果下每 mblk 的 nt tile 数 ≈ (m0+BM)/BN，三角求和 /(mblk·ksplit) 后平均每 CTA
   // ≈ (S/BN)/2/ksplit；阈值取 4（实测 S=1024H32 平均=2、启用反而持平/略慢，S=4096=16 明显收益）。
-  const bool use_regdq = (D == 128) && ((long)(S / 32) / 2 / ksplit >= 4);
+  bool use_regdq = (D == 128) && ((long)(S / 32) / 2 / ksplit >= 4);
+  // O22：`--regdq=0/1` 强制开关（仅同 session A/B 用）；-1 = 用上面的启发式。
+  if (regdq_opt >= 0) use_regdq = (D == 128) && (regdq_opt != 0);
   dim3 pg(S, H, B);
   dim3 lg((S + LBM - 1) / LBM, H, B);
   dim3 lg_bal((((S + LBM - 1) / LBM) + 1) / 2, H, B);   // O11：镜像配对，grid.x 减半
@@ -765,6 +779,48 @@ int main(int argc, char** argv) {
     printf("[O7e-2 A/B] main fold 4B %.4f ms | 16B %.4f ms (%.3fx) | "
            "max_abs(16B-vs-4B) dq/dk/dv=%.3e/%.3e/%.3e\n",
            b4, b16, b4 / b16, maxd2(y_dq, x_dq), maxd2(y_dk, x_dk), maxd2(y_dv, x_dv));
+    run_main();  // 恢复 CLI 选中路径
+  }
+
+  // ---- O22 A/B（D=128）：主 kernel 的寄存器 dQ 累加（REGDQ）ON vs OFF（mma 路径）----
+  //   O21 的 ncu 显示：REGDQ 的 `dqacc[2][8][4]`（64 个 fp32）把 168-reg 预算挤爆，PTXAS 报
+  //   68B spill stores / 380B spill loads，local 占 L1TEX sector 9.57%（Est. 28–50%）。关掉
+  //   REGDQ 则 0 spill、且恢复 O3 寄存器预取，代价是 dQ 每个 nt tile 发一次跨 CTA atomicAdd
+  //   （归约指令 O(1)→O(ntiles)）。这里同 session 计时 + 逐元素对拍（数学口径相同，仅 dQ 归约
+  //   指令数/次序不同；dk/dv 不受影响）。
+  if (D == 128) {
+    auto launch_reg = [&](bool reg) { launch128(reg, false, prel_sel, f16b_sel); };
+    auto bench_reg = [&](bool reg, float* out) {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      launch_reg(reg);
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch_reg(reg);
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float ron = 0.f, roff = 0.f;
+    bench_reg(true, &ron);
+    bench_reg(false, &roff);
+    std::vector<float> x_dq(nq), y_dq(nq);
+    CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+    CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+    CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+    launch_reg(true);
+    CUDA_CHECK(cudaMemcpy(x_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+    CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+    CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+    launch_reg(false);
+    CUDA_CHECK(cudaMemcpy(y_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    double dqdiff = 0.0;
+    for (size_t i = 0; i < nq; ++i)
+      dqdiff = std::max(dqdiff, std::fabs((double)x_dq[i] - (double)y_dq[i]));
+    printf("[O22 A/B] main REGDQ on %.4f ms | off %.4f ms (%.3fx) | max_abs(on-vs-off) dq=%.3e\n",
+           ron, roff, ron / roff, dqdiff);
     run_main();  // 恢复 CLI 选中路径
   }
 

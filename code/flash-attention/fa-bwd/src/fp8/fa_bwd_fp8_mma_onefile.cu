@@ -101,6 +101,15 @@ struct Fp8Cfg {
 #define FA_FUSE_EPI 1
 #endif
 
+  // O22：mma 主路径的 GEMM1/GEMM2 **指令级交错**开关（需 FA_FUSE_EPI=1）。默认 0：保持原顺序
+  //   （GEMM1 mma → GEMM1 epilogue → GEMM2 mma → GEMM2 epilogue）。置 1：先连发两条独立 GEMM
+  //   的 mma（acc/acc2 两个累加器），再依次做 epilogue——让 GEMM2 的 8 条 mma 填在 GEMM1
+  //   epilogue（exp/量化）之前，掩盖 mma 依赖延迟（O20 ncu：`wait` 1.55 是头号 stall）。数学
+  //   与数值逐位不变（同一批 mma、同一 (r,c) 映射、同一次序的 fp32 累加），只改指令发射顺序。
+#ifndef FA_ILV
+#define FA_ILV 0
+#endif
+
   // O4b：Kt/Qt/dOt 三个「逐字节 scatter 写的转置副本」→ Kp/Qp/dOp 三个 **K 配对布局**
   //   （uint16：[K/2][HD]，元素 = 2 个相邻 K 值），用 `ldmatrix.x2.trans` 读 B 片段。
   //   * Qp（[BM/2][HD]）供 GEMM4 的 B=Qᵀ；dOp 供 GEMM3 的 B=dOᵀ；Kp（[BN/2][HD]）供 GEMM5。
@@ -1465,6 +1474,58 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
       // O20：P 留在寄存器，供 GEMM2 epilogue 直接用，免去 Ps 的 smem 回读。
       float preg[MTM][MTN][4];
 #endif
+#if FA_ILV && FA_FUSE_EPI
+      // ---- O22：GEMM1/GEMM2 指令级交错：两条独立 GEMM 的 mma 先连发（各自累加器），
+      //      再做 epilogue。GEMM2 只读 dOs/Vs（本 tile 已就绪），与 GEMM1 的 epilogue 无依赖，
+      //      故顺序交换在数学上等价、数值逐位不变（fp32 累加次序未动）。----
+      {
+        float acc[MTM][MTN][4], acc2[MTM][MTN][4];
+#pragma unroll
+        for (int i = 0; i < MTM; ++i)
+#pragma unroll
+          for (int j = 0; j < MTN; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) { acc[i][j][q] = 0.f; acc2[i][j][q] = 0.f; }
+        mma_block<BM / 2, BN / 2, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
+        mma_block<BM / 2, BN / 2, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc2, wr, wc, lane);
+        const int r0 = wr * (BM / 2), c0 = wc * (BN / 2);
+#pragma unroll
+        for (int i = 0; i < MTM; ++i)
+#pragma unroll
+          for (int j = 0; j < MTN; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              int c = c0 + j * 8 + c2 + (q & 1);
+              int qi = m0 + r, jg = j0 + c;
+              float p = 0.f;
+              if (qi < S && jg < S && !(causal && jg > qi)) {
+                float sval = acc[i][j][q] * scale * qs_s[r] * ks_s[c];
+                float lv = 0.f;
+                if constexpr (PREL) lv = lse_r[i * 2 + (q >= 2 ? 1 : 0)];
+                else lv = lse[((size_t)(b * S + qi)) * H + h];
+                p = fexp(sval - lv);
+              }
+              Ps[r * PSS + c] = p;
+              preg[i][j][q] = p;
+            }
+#pragma unroll
+        for (int i = 0; i < MTM; ++i)
+#pragma unroll
+          for (int j = 0; j < MTN; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              int c = c0 + j * 8 + c2 + (q & 1);
+              int qi = m0 + r;
+              float dpv = acc2[i][j][q] * dos_s[r] * vs_s[c];
+              float del = 0.f;
+              if constexpr (PREL) del = del_r[i * 2 + (q >= 2 ? 1 : 0)];
+              else if (qi < S) del = delta[((size_t)(b * S + qi)) * H + h];
+              Ss[r * PSS + c] = preg[i][j][q] * (dpv - del);
+            }
+      }
+#else
       float acc[MTM][MTN][4];
 #pragma unroll
       for (int i = 0; i < MTM; ++i)
@@ -1531,6 +1592,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8,
 #endif
             }
       }
+#endif  // FA_ILV
     }  // end else (mma path)
     __syncthreads();
 
@@ -2372,21 +2434,32 @@ int main(int argc, char** argv) {
   int iters = 20;
   int ksplit = -1;  // -1 = 自动
   int ksplit2_opt = -1;  // O19：wg2 的 ksplit（-1 自动）
-  int lsewgm = 0;   // O9c：1 = LSE 走 wgmma（需 -DFA_WGMMA 构建），0 = O11 mma 版
-  int wgmma = 0;    // O9c-2：1 = 主 kernel GEMM1/2 走 wgmma（需 -DFA_WGMMA 构建）
+  // O22：`-DFA_WGMMA`（sm_90a）构建下默认启用 Hopper 路径（LSE + 主 kernel GEMM1/2 wgmma）；
+  //   sm_90 构建无此路径，保持 mma。`--lsewgm=0/--wgmma=0` 可退回 mma 做 A/B。
+#ifdef FA_WGMMA
+  int lsewgm = 1;
+  int wgmma = 1;
+#else
+  int lsewgm = 0;
+  int wgmma = 0;
+#endif
   int wg2 = 0;      // O19：1 = 主 kernel 走跨 warpgroup 归约版（BM=128, 2 wg, 256 线程）
   int cvt_on = 0;   // O21b：1 = 保留冗余 fp32→fp32 convert 拷贝（默认 0：直接累加进输出）
   int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
   int qfast = 1;      // O14：1 = warp-per-row 向量化量化，0 = 旧 per-row 标量量化（A/B）
+  int regdq_opt = -1; // O22：-1 自动；0/1 强制关/开寄存器 dQ 累加（同 session A/B）
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
     else if (a == "--lsewgm") lsewgm = 1;
     else if (a == "--wgmma") wgmma = 1;
+    else if (a.rfind("--lsewgm=", 0) == 0) lsewgm = atoi(a.c_str() + 9);
+    else if (a.rfind("--wgmma=", 0) == 0) wgmma = atoi(a.c_str() + 8);
     else if (a == "--wg2") wg2 = 1;
     else if (a.rfind("--cvt=", 0) == 0) cvt_on = atoi(a.c_str() + 6);
     else if (a.rfind("--qfast=", 0) == 0) qfast = atoi(a.c_str() + 8);
+    else if (a.rfind("--regdq=", 0) == 0) regdq_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
@@ -2532,7 +2605,9 @@ int main(int argc, char** argv) {
   // O7：只有 HD=128（dQ 一次铺满 N）且「平均每 CTA 的 nt tile 足够多」时才启用寄存器累加。
   // 因果下每 mblk 的 nt tile 数 ≈ (m0+BM)/BN，三角求和 /(mblk·ksplit) 后平均每 CTA
   // ≈ (S/BN)/2/ksplit；阈值取 4（实测 S=1024H32 平均=2、启用反而持平/略慢，S=4096=16 明显收益）。
-  const bool use_regdq = (D == 128) && ((long)(S / 32) / 2 / ksplit >= 4);
+  bool use_regdq = (D == 128) && ((long)(S / 32) / 2 / ksplit >= 4);
+  // O22：`--regdq=0/1` 强制开关（仅同 session A/B 用）；-1 = 用上面的启发式。
+  if (regdq_opt >= 0) use_regdq = (D == 128) && (regdq_opt != 0);
   dim3 pg(S, H, B);
   dim3 lg((S + LBM - 1) / LBM, H, B);
   dim3 lg_bal((((S + LBM - 1) / LBM) + 1) / 2, H, B);   // O11：镜像配对，grid.x 减半
