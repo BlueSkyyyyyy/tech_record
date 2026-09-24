@@ -149,14 +149,15 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             const float* delta, const float* lse, float* dq_acc,
                             float* dk_acc, float* dv_acc, int S, int H, int Hkv,
                             float scale, int causal, int ksplit,
-                            const int* cu_seqlens = nullptr) {
+                            const int* cu_seqlens = nullptr,
+                            const int* mt_b = nullptr, const int* mt_m = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = WGMMA ? Cfg::smem_bytes_wgmma : Cfg::smem_bytes;
   CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
   fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP><<<mg, THREADS, kSmem>>>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit, cu_seqlens);
+      scale, causal, ksplit, cu_seqlens, mt_b, mt_m);
 }
 
 // O37：Q/dO 4D-TMA 版主 kernel（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128、WGMMA 路径）。
@@ -239,13 +240,14 @@ template <int HD, int PIPE>
 static void launch_lse_bal_wgmma(dim3 lg, const unsigned char* q8, const float* qs,
                                  const unsigned char* k8, const float* ks, float* lse, int S,
                                  int H, int Hkv, float scale,
-                                 const int* cu_seqlens = nullptr) {
+                                 const int* cu_seqlens = nullptr,
+                                 const int* pt_b = nullptr, const int* pt_pair = nullptr) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = PIPE ? Cfg::lse_smem_bytes_balw1 : Cfg::lse_smem_bytes_balw0;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<HD, PIPE>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
   lse_mma_kernel_bal_wgmma<HD, PIPE><<<lg, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv,
-                                                             scale, cu_seqlens);
+                                                             scale, cu_seqlens, pt_b, pt_pair);
 }
 #endif
 
@@ -273,7 +275,8 @@ static void launch_lse_bal_tma(dim3 lg, const CUtensorMap& qmap, const CUtensorM
 // ref 输出 `ref_dq/dk/dv.npy` 也是 packed 布局。FA/TE 不支持变长（本机版本），只对 fp32 ref。
 // causal / 非 causal 均支持：causal 走镜像配对的 wgmma LSE，非 causal（各块工作量相同）走
 // O1 的 mma LSE；非 TMA 路径（LSE 用 wgmma/mma，主 kernel Q/dO 用 cp.async）。
-static int run_varlen(const std::string& dir, bool causal, int iters) {
+static int run_varlen(const std::string& dir, bool causal, int iters, bool compact = false,
+                      bool lse_compact = false) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -336,6 +339,46 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   for (int b = 0; b <= B; ++b) cu[b] = (int)cu_np.data[b];
   CUDA_CHECK(cudaMalloc(&d_cu, (B + 1) * sizeof(int)));
   CUDA_CHECK(cudaMemcpy(d_cu, cu.data(), (B + 1) * sizeof(int), cudaMemcpyHostToDevice));
+  // 均衡分块表：把每个 b 的有效 m 块 (mblk, b) 按 (b,mblk) 主序写进一维表，主 kernel 用
+  //   blockIdx.x 查表得到 (b, mblk)（见 fp8_mma_body 顶部注释）。只发有效 tile，消死 CTA。
+  constexpr int BV = 64;
+  std::vector<std::pair<int,int>> tiles;   // (mblk, b)
+  for (int b = 0; b < B; ++b) {
+    int nb = (cu[b + 1] - cu[b] + BV - 1) / BV;
+    for (int mb = 0; mb < nb; ++mb) tiles.push_back({mb, b});
+  }
+  // 保持「b 主序、mblk 次序」以复用同序列 K/V 的 L2 局部性（按 mblk 排序会把不同
+  // 序列交错，实测反而慢 —— 见文档）。
+  const int total_mt = (int)tiles.size();
+  std::vector<int> h_mtb(total_mt), h_mtm(total_mt);
+  for (int i = 0; i < total_mt; ++i) { h_mtm[i] = tiles[i].first; h_mtb[i] = tiles[i].second; }
+  int *d_mtb = nullptr, *d_mtm = nullptr;
+  CUDA_CHECK(cudaMalloc(&d_mtb, std::max(1, total_mt) * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_mtm, std::max(1, total_mt) * sizeof(int)));
+  CUDA_CHECK(cudaMemcpy(d_mtb, h_mtb.data(), total_mt * sizeof(int), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_mtm, h_mtm.data(), total_mt * sizeof(int), cudaMemcpyHostToDevice));
+  // LSE 的镜像对表：每个 b 的有效对 = ceil(nblk_b/2)（nblk_b 按 LBM=64），按工作量降序。
+  constexpr int LBMH = 64;
+  std::vector<std::pair<int,int>> pairs;   // (pair, b)
+  for (int b = 0; b < B; ++b) {
+    int nb = (cu[b + 1] - cu[b] + LBMH - 1) / LBMH;
+    int np = (nb + 1) / 2;
+    for (int p = 0; p < np; ++p) pairs.push_back({p, b});
+  }
+  std::stable_sort(pairs.begin(), pairs.end(),
+                   [&](const std::pair<int,int>& x, const std::pair<int,int>& y) {
+                     int nx = (cu[x.second + 1] - cu[x.second] + LBMH - 1) / LBMH;
+                     int ny = (cu[y.second + 1] - cu[y.second] + LBMH - 1) / LBMH;
+                     return nx > ny;
+                   });
+  const int total_pairs = (int)pairs.size();
+  std::vector<int> h_ptb(total_pairs), h_ptp(total_pairs);
+  for (int i = 0; i < total_pairs; ++i) { h_ptp[i] = pairs[i].first; h_ptb[i] = pairs[i].second; }
+  int *d_ptb = nullptr, *d_ptp = nullptr;
+  CUDA_CHECK(cudaMalloc(&d_ptb, std::max(1, total_pairs) * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_ptp, std::max(1, total_pairs) * sizeof(int)));
+  CUDA_CHECK(cudaMemcpy(d_ptb, h_ptb.data(), total_pairs * sizeof(int), cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_ptp, h_ptp.data(), total_pairs * sizeof(int), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_q_f, q_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_k_f, k_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_v_f, v_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
@@ -383,7 +426,10 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
     if (causal) {
       dim3 lg((nblk + 1) / 2, H, B);
       // D==128 走 wgmma 版（SW128 + wgmma）；D==512（MLA）只有 mma 版（HD>128 无 SW128 快路）。
-      if (D == 128)
+      if (D == 128 && lse_compact)
+        launch_lse_bal_wgmma<128, 1>(dim3(total_pairs, H, 1), d_q8, d_qs, d_k8, d_ks, d_lse,
+                                     maxlen, H, Hkv, scale, d_cu, d_ptb, d_ptp);
+      else if (D == 128)
         launch_lse_bal_wgmma<128, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
                                      d_cu);
       else
@@ -402,20 +448,25 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
       delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
     else
       delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
-    dim3 mg((maxlen + BM - 1) / BM * ksplit, H, B);
+    // 均衡分块：`--compact` 走紧凑一维 m-tile 网格（grid.z=1，由 mt_b/mt_m 查表解出 (b, mblk)）；
+    //   默认走旧的 maxlen 网格（含早退死 CTA，实测反而更快，见 docs/03 §40）。
+    dim3 mg = compact ? dim3(total_mt * ksplit, H, 1)
+                      : dim3((maxlen + BM - 1) / BM * ksplit, H, B);
+    const int* mtb = compact ? d_mtb : nullptr;
+    const int* mtm = compact ? d_mtm : nullptr;
     if (D == 512) {
       // MLA：非 wgmma / 非 regdq（与定长 D=512 路径一致）。
       launch_bwd_main<512, 64, 32, false, false, true, true>(
           mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
-          d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
+          d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu, mtb, mtm);
     } else if (use_regdq)
       launch_bwd_main<128, 64, 32, true, true, true, true, true>(
           mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
-          d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
+          d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu, mtb, mtm);
     else
       launch_bwd_main<128, 64, 32, false, true, true, true, true>(
           mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
-          d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
+          d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu, mtb, mtm);
   };
   for (int i = 0; i < 3; ++i) run_all();
   CUDA_CHECK(cudaDeviceSynchronize());
@@ -436,8 +487,12 @@ static int run_varlen(const std::string& dir, bool causal, int iters) {
   }
   printf("[timing] VARLEN total %.4f ms  %.2f TFLOPS (sum_b 4HL^2D)\n", ms,
          flops / (ms * 1e-3) / 1e12);
-  printf("grid main = %d x %d x %d (ksplit=%d) | use_regdq=%d | T=%d\n", 
-         (maxlen + BM - 1) / BM * ksplit, H, B, ksplit, (int)use_regdq, T);
+  if (compact)
+    printf("grid main = %d x %d x %d (compact, ksplit=%d, total_mt=%d, old-grid=%d) | use_regdq=%d | T=%d\n",
+           total_mt * ksplit, H, 1, ksplit, total_mt, (maxlen + BM - 1) / BM * B, (int)use_regdq, T);
+  else
+    printf("grid main = %d x %d x %d (nocompact, ksplit=%d, total_mt=%d) | use_regdq=%d | T=%d\n",
+           (maxlen + BM - 1) / BM * ksplit, H, B, ksplit, total_mt, (int)use_regdq, T);
 
   std::vector<float> h_dq(nq), h_dk(nkv), h_dv(nkv);
   CUDA_CHECK(cudaMemcpy(h_dq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
@@ -502,10 +557,14 @@ int main(int argc, char** argv) {
   //   作 opt-in 与 cp.async 版同 binary A/B），0/1 由 `--qdtma=` 强制。
   int qd_tma = -1;
   int varlen = 0;   // VARLEN：1 = packed [T,H,D] + cu_seqlens.npy（fp8/HD=128/causal）
+  int compact_opt = 0;  // 第八十二轮：1 = varlen 主 kernel 紧凑均衡网格（opt-in；实测中性偏负）
+  int lse_compact_opt = 0;  // 第八十二轮：1 = varlen causal LSE 紧凑对网格（opt-in，A/B）
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
     else if (a == "--varlen") varlen = 1;
+    else if (a == "--compact") compact_opt = 1;
+    else if (a == "--lsecompact") lse_compact_opt = 1;
     else if (a.rfind("--varlen=", 0) == 0) varlen = atoi(a.c_str() + 9);
     else if (a == "--causal") causal = true;
     else if (a == "--lsewgm") lsewgm = 1;
@@ -532,7 +591,7 @@ int main(int argc, char** argv) {
     else if (!a.empty() && a[0] != '-') dir = a;
   }
 
-  if (varlen) return run_varlen(dir, causal, iters);
+  if (varlen) return run_varlen(dir, causal, iters, compact_opt, lse_compact_opt);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");

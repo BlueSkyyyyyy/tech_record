@@ -1131,7 +1131,9 @@ __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                          const unsigned char* __restrict__ k8, const float* __restrict__ ks,
                          float* __restrict__ lse, int S, int H, int Hkv, float scale,
-                         const int* __restrict__ cu_seqlens = nullptr) {
+                         const int* __restrict__ cu_seqlens = nullptr,
+                         const int* __restrict__ pt_b = nullptr,
+                         const int* __restrict__ pt_pair = nullptr) {
   static_assert(HD == 128, "wgmma LSE 目前只做 HD=128");
   constexpr int HDV = HD / 16;                         // 每行 16B（16 个 fp8）unit 数
   constexpr int TILE = (LBM / 8) * (HD / 128) * 1024;  // 单个 SW128 tile 字节数（HD=128→8KB）
@@ -1144,7 +1146,11 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
   float* qs_s = reinterpret_cast<float*>(Ks + (PIPE ? 2 : 1) * TILE);
   float* ks_s = qs_s + LBM;  // PIPE=1：2*LBN
 
-  const int pair = blockIdx.x, h = blockIdx.y, b = blockIdx.z;
+  // VARLEN 均衡分块（第八十二轮）：定长/旧 varlen 用 (pair=blockIdx.x, h=blockIdx.y,
+  //   b=blockIdx.z)；紧凑表 `pt_b/pt_pair` 只枚举每个序列的有效镜像对（pair < ceil(nblk/2)），
+  //   grid = (total_pairs, H, 1)。消掉「以 maxlen 为界」时短序列的越界早退 CTA。
+  const int pair = pt_pair ? pt_pair[blockIdx.x] : blockIdx.x;
+  const int h = blockIdx.y, b = pt_b ? pt_b[blockIdx.x] : blockIdx.z;
   // VARLEN：cu_seqlens 给出每个序列在 packed [T,H,D] 里的 token 基址与长度。
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
   const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
@@ -1585,7 +1591,9 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                       float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                       float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                       int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
-                      const CUtensorMap* qmap = nullptr, const CUtensorMap* dmap = nullptr) {
+                      const CUtensorMap* qmap = nullptr, const CUtensorMap* dmap = nullptr,
+                      const int* __restrict__ mt_b = nullptr,
+                      const int* __restrict__ mt_m = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int ASLD = Cfg::ASLD;
   constexpr int PSLD = Cfg::PSLD;
@@ -1655,8 +1663,16 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   //      ksplit 个 CTA；各自只算自己那一段，dQ/dK/dV 仍用跨 CTA 的 fp32 atomicAdd 汇总。
   //      小 S 时把 grid 从 S/BM×H 抬到 ksplit 倍，消「grid 不足一整个波」的空 SM；
   //      大 S 时用来削尾波（partial wave）。各部分数学上仍是同一个和，只是 fp 加法次序略变。----
-  const int mblk = blockIdx.x / ksplit, part = blockIdx.x % ksplit;
-  const int h = blockIdx.y, b = blockIdx.z;
+  // VARLEN 均衡分块（第八十二轮）：定长路径用 (mblk = blockIdx.x/ksplit, h = blockIdx.y,
+  //   b = blockIdx.z)；varlen 路径改为「只发有效 tile」的**紧凑一维网格**——宿主按
+  //   cu_seqlens 枚举每个 b 的 nblk_b = ceil(len_b/BM) 个 m 块，按 (b,mblk) 主序写进
+  //   `mt_b/mt_m`（保持同序列 K/V 的 L2 局部性），grid.x = total_mt*ksplit、grid.y = H、grid.z = 1。
+  //   这消掉了「以 maxlen 为界」时短序列大量越界早退的死 CTA（强倾斜 b8 实测 8192→~1376），
+  //   并让最贵的 m 块先调度（削尾波）。`mt_b==nullptr` 时逐式退化为定长/旧 varlen 行为。
+  const int part = blockIdx.x % ksplit;
+  const int mt = blockIdx.x / ksplit;
+  const int mblk = mt_m ? mt_m[mt] : mt;
+  const int h = blockIdx.y, b = mt_b ? mt_b[mt] : blockIdx.z;
   // VARLEN：cu_seqlens 给出每个序列在 packed [T,H,D] 的 token 基址与长度。
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
   const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
@@ -2308,10 +2324,12 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       const float* __restrict__ delta, const float* __restrict__ lse,
                       float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                       float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                      int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr) {
+                      int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
+                      const int* __restrict__ mt_b = nullptr,
+                      const int* __restrict__ mt_m = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit, cu_seqlens, nullptr, nullptr);
+      scale, causal, ksplit, cu_seqlens, nullptr, nullptr, mt_b, mt_m);
 }
 
 // O37：Q/dO 4D-TMA 版（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA 路径实例化）。

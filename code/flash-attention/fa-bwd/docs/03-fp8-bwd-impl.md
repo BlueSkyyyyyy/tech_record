@@ -3570,3 +3570,58 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 `..._varlen_mla_onefile_sweep.out.txt`（单文件 4 case，逐位一致）、
 `..._varlen_mla_fixed_regression.out.txt`（定长回归）、`..._varlen_mla_perf.out.txt`（定长对照计时）、
 `..._varlen_mla_ncu_main_b3.out.txt`（main ncu）、`..._varlen_mla_ncu_lse_b3.out.txt`（LSE ncu）。
+
+## 40. VARLEN 均衡分块（按 `cu_seqlens` 只发有效 tile 的紧凑网格）——**负结果**（第八十二轮）
+
+动机（对齐 ROADMAP「下一步候选 ①」）：varlen 的 kernel 仍以 `S = maxlen` 为界发网格——
+主 kernel `grid = (ceil(maxlen/BM)*ksplit, H, B)`、causal LSE `grid = (ceil(nblk/2), H, B)`。
+短序列的绝大多数 CTA 一进来就 `if (m0 >= len) return` / `pair >= (nblk+1)/2` 早退，
+强倾斜 `b8_t2904=[2048,512,128,96,64,32,16,8]` 时主 kernel 发了 **8192** 个 CTA，
+其中有效仅 **48 个 m-tile ×16 头 = 768**（每个再 ×ksplit），死 CTA 占 **~83%**。
+假设「消掉死 CTA + 让贵块先跑」能提速，做了如下两台改动（单/两文件同步，新增开关默认关）：
+
+1. **主 kernel 紧凑网格**：宿主枚举每个 `b` 的 `nblk_b = ceil(len_b/BM)` 个 m 块，
+   按 `(b, mblk)` 写进两张一维表 `mt_b/mt_m`；`fp8_mma_body` 里把
+   `(mblk=blockIdx.x/ksplit, b=blockIdx.z)` 改成 `blockIdx.x/ksplit → mt` 查表得 `(b, mblk)`，
+   网格变 `(total_mt*ksplit, H, 1)`。`mt_*==nullptr` 时逐式退化为旧路径（定长不受影响）。
+   开关 `--compact`。
+2. **causal LSE 紧凑对网格**：同理枚举每个 `b` 的有效镜像对 `pair < ceil(nblk_b/2)`，
+   写表 `pt_b/pt_pair`，网格 `(total_pairs, H, 1)`；开关 `--lsecompact`。
+
+**实测（同 binary A/B，event，iters=50；原始输出 `src/fp8/fa_bwd_fp8_varlen_bal_ab.out.txt`）**：
+
+| case | 默认（maxlen 网格） | `--compact` | `--lsecompact` | 两者 |
+|---|---|---|---|---|
+| skew `b8_t2904` causal | **0.836 / 0.836 ms** | 0.865 / 0.864 ms（**−3.4%**） | 0.846 / 0.850 ms（**−1.4%**） | 0.871 / 0.875 ms（−4.4%） |
+| 等长 `b4_t4096` causal | 0.767 / 0.770 ms | 0.770 / 0.769 ms（±0.2%） | — | — |
+
+`ksplit` 扫描（默认网格，skew）：1/2/4/8 = 0.837/0.836/0.836/0.836 ms —— 与 split 无关。
+数值：紧凑档与默认档的 `dq/dk/dv vs ref` max_abs **完全一致**（如 skew 3.136/3.584/4.030e-1），
+说明 fp8 量化噪声远大于 atomic 次序差异；定长与其余 5 个 varlen case 回归逐位不变
+（第 77/80 轮数值原样）。
+
+**ncu（main，S=2904 skew，同 binary）**：
+
+| 指标 | 默认网格 | `--compact` |
+|---|---|---|
+| Duration | **588.96 µs** | 624.13 µs |
+| Waves Per SM | **20.69** | **3.88** |
+| Achieved Occupancy | 17.74% | 16.85% |
+| L1/TEX | 61.51% | 60.75% |
+| L2 | 54.54% | 51.26% |
+| Compute (SM) | 34.72% | 32.79% |
+| DRAM | 8.18% | 7.60% |
+
+**结论（为什么负）**：死 CTA 是**免费**的——它们只做几次整数比较就退出，几乎不占 SM 时间；
+真正的限速器是 **L1/TEX 61% + L2 55% 的吞吐 + 17.7% 低 occupancy 下的延迟隐藏**
+（DRAM 仅 8%、Compute 仅 35%，既非带宽也非算力）。原网格里那些「多余」CTA 反而在
+SM 里提供了额外的在飞 warp 来遮盖延迟；把它们删掉后 Waves 20.69→3.88、
+在飞 CTA 变少，Duration 反而 +6%。LSE 侧同理：镜像配对已把每 CTA 的**最大**工作
+压到常数 `nblk+1` 个 n-tile（长序列 16 对 × 33 tile），紧凑化只删死对、不降临界路径，
+实测 +1.4% 亦是噪声级负向。
+
+**判决**：ROADMAP「按 `cu_seqlens` 的均衡分块」在 fp8 上**不成立**（负结果）；
+代码保留为 opt-in（`--compact` / `--lsecompact`，默认关）以便复现。
+varlen 若还要再上台阶，只剩两条真杠杆：**① 把 LSE 的 K 维 split 开 + 二次归约**
+（当前镜像配对的临界路径是每 CTA 串行 33 个 K-tile，只有切 K 才能降下来）；
+**② varlen 的 TMA 化**（packed 布局的 4D 描述符）——列 backlog。

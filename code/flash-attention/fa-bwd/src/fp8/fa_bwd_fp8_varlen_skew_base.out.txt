@@ -1,0 +1,21 @@
+fa_bwd_fp8_kernels.cuh(2662): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 824 of fa_bwd_fp8_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kernels.cuh(2370): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 824 of fa_bwd_fp8_main.cu
+
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b8_t2904_h16_d128_causal_fp8
+VARLEN: B=8 T=2904 maxlen=2048 H=16 Hkv=16 D=128 causal=1
+cu_seqlens = 0 2048 2560 2688 2784 2848 2880 2896 2904
+[timing] VARLEN total 0.8330 ms  44.13 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 16 x 8 (ksplit=2) | use_regdq=1 | T=2904
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.136e-01  max_rel=2.985e+02  (ours_amax=3.461e+00 ref_amax=3.531e+00 @5717083)
+  dk  vs ref: max_abs=3.584e-01  max_rel=1.371e+02  (ours_amax=3.545e+00 ref_amax=3.669e+00 @4194480)
+  dv  vs ref: max_abs=4.030e-01  max_rel=1.053e+02  (ours_amax=6.529e+00 ref_amax=6.434e+00 @5703070)
