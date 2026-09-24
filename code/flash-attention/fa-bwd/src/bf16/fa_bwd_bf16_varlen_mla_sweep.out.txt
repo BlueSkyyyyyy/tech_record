@@ -1,0 +1,43 @@
+### bf16 two-file (main) varlen MLA + regressions
+== MLA varlen causal ==
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+[timing] VARLEN total 0.9347 ms  6.03 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=1.267e-02  max_rel=2.693e+00  (ours_amax=3.984e+00 ref_amax=3.983e+00 @791160)
+  dk  vs ref: max_abs=1.217e-02  max_rel=4.767e+00  (ours_amax=3.359e+00 ref_amax=3.354e+00 @1041)
+  dv  vs ref: max_abs=1.796e-02  max_rel=5.158e+00  (ours_amax=5.156e+00 ref_amax=5.148e+00 @786761)
+== MLA varlen full ==
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=0
+[timing] VARLEN total 1.4690 ms  3.84 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=3.100e-03  max_rel=6.355e-01  (ours_amax=1.266e+00 ref_amax=1.267e+00 @100975)
+  dk  vs ref: max_abs=3.526e-03  max_rel=6.618e-01  (ours_amax=1.109e+00 ref_amax=1.108e+00 @108185)
+  dv  vs ref: max_abs=2.316e-03  max_rel=6.903e-01  (ours_amax=6.484e-01 ref_amax=6.485e-01 @552982)
+== HD=128 varlen full regression ==
+VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=0
+[timing] VARLEN total 1.2962 ms  35.21 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=5.764e-03  max_rel=8.280e-01  (ours_amax=1.461e+00 ref_amax=1.457e+00 @93132)
+  dk  vs ref: max_abs=3.851e-03  max_rel=6.652e-01  (ours_amax=1.188e+00 ref_amax=1.190e+00 @7857475)
+  dv  vs ref: max_abs=3.031e-03  max_rel=7.706e-01  (ours_amax=8.555e-01 ref_amax=8.556e-01 @7501284)
+== fixed D=512 causal regression ==
+[timing] total(3 kernels) 0.8134 ms  5.28 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1341 ms | main 0.6664 ms | convert 0.0129 ms
+  dq   vs ref: max_abs=5.838e-03  max_rel=2.319e+00
+  dk   vs ref: max_abs=9.519e-03  max_rel=1.571e+00
+  dv   vs ref: max_abs=1.568e-02  max_rel=1.199e+00
+== fixed D=512 full regression ==
+### bf16 onefile (FA_WGMMA only)
+== MLA varlen causal ==
+[timing] VARLEN total 0.9335 ms  6.04 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=1.267e-02  max_rel=2.693e+00  (ours_amax=3.984e+00 ref_amax=3.983e+00 @791160)
+  dk  vs ref: max_abs=1.217e-02  max_rel=4.767e+00  (ours_amax=3.359e+00 ref_amax=3.354e+00 @1041)
+  dv  vs ref: max_abs=1.796e-02  max_rel=5.158e+00  (ours_amax=5.156e+00 ref_amax=5.148e+00 @786761)
+== MLA varlen full ==
+[timing] VARLEN total 1.4691 ms  3.84 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=3.100e-03  max_rel=6.355e-01  (ours_amax=1.266e+00 ref_amax=1.267e+00 @100975)
+  dk  vs ref: max_abs=3.526e-03  max_rel=6.618e-01  (ours_amax=1.109e+00 ref_amax=1.108e+00 @108185)
+  dv  vs ref: max_abs=2.316e-03  max_rel=6.903e-01  (ours_amax=6.484e-01 ref_amax=6.485e-01 @552982)
+== fixed D=512 causal regression ==
+[timing] total(3 kernels) 0.8185 ms  5.25 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1356 ms | main 0.6507 ms | convert 0.0321 ms
+  dq   vs ref: max_abs=5.838e-03  max_rel=2.319e+00
+  dk   vs ref: max_abs=9.519e-03  max_rel=1.571e+00
+  dv   vs ref: max_abs=1.568e-02  max_rel=1.199e+00
