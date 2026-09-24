@@ -159,6 +159,12 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 配套代码：[code/flash-attention/fa-bwd/](code/flash-attention/fa-bwd/README.md)
 （各篇正文由 `docs/` 下的 Markdown 通过 `fa_include` shortcode 实时内联渲染）。
 
+### paper阅读（专题，连载中）
+
+逐篇精读值得读的系统/算法论文：讲清真实问题、设计取舍背后的物理约束、以及能迁移的经验。
+
+1. [DSec 精读：DeepSeek 的 Agentic RL 沙箱平台，为什么不是「一个容器运行时」](content/posts/paper-reading-01-dsec/index.md)
+
 ### 其他
 
 - [开篇：为什么写这个博客](content/posts/hello-world/index.md)
