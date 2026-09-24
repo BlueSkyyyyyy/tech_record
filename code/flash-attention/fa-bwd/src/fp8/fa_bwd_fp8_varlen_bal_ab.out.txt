@@ -1,0 +1,32 @@
+=== 第八十二轮 varlen 均衡分块 A/B（fp8, 同 binary, event, iters=50） ===
+--- skew b8_t2904 causal: default / --compact / --lsecompact / both ---
+[rep1 opt=''] [timing] VARLEN total 0.8371 ms  43.92 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 16 x 8 (nocompact, ksplit=2, total_mt=48) | use_regdq=1 | T=2904
+[rep1 opt='--compact'] [timing] VARLEN total 0.8653 ms  42.48 TFLOPS (sum_b 4HL^2D)
+grid main = 96 x 16 x 1 (compact, ksplit=2, total_mt=48, old-grid=256) | use_regdq=1 | T=2904
+[rep1 opt='--lsecompact'] [timing] VARLEN total 0.8463 ms  43.44 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 16 x 8 (nocompact, ksplit=2, total_mt=48) | use_regdq=1 | T=2904
+[rep1 opt='--compact --lsecompact'] [timing] VARLEN total 0.8708 ms  42.22 TFLOPS (sum_b 4HL^2D)
+grid main = 96 x 16 x 1 (compact, ksplit=2, total_mt=48, old-grid=256) | use_regdq=1 | T=2904
+[rep2 opt=''] [timing] VARLEN total 0.8356 ms  43.99 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 16 x 8 (nocompact, ksplit=2, total_mt=48) | use_regdq=1 | T=2904
+[rep2 opt='--compact'] [timing] VARLEN total 0.8638 ms  42.56 TFLOPS (sum_b 4HL^2D)
+grid main = 96 x 16 x 1 (compact, ksplit=2, total_mt=48, old-grid=256) | use_regdq=1 | T=2904
+[rep2 opt='--lsecompact'] [timing] VARLEN total 0.8504 ms  43.23 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 16 x 8 (nocompact, ksplit=2, total_mt=48) | use_regdq=1 | T=2904
+[rep2 opt='--compact --lsecompact'] [timing] VARLEN total 0.8751 ms  42.01 TFLOPS (sum_b 4HL^2D)
+grid main = 96 x 16 x 1 (compact, ksplit=2, total_mt=48, old-grid=256) | use_regdq=1 | T=2904
+--- equal b4_t4096 causal: default / --compact ---
+[rep1 opt=''] [timing] VARLEN total 0.7668 ms  44.81 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 16 x 4 (nocompact, ksplit=4, total_mt=64) | use_regdq=1 | T=4096
+[rep1 opt='--compact'] [timing] VARLEN total 0.7698 ms  44.64 TFLOPS (sum_b 4HL^2D)
+grid main = 256 x 16 x 1 (compact, ksplit=4, total_mt=64, old-grid=64) | use_regdq=1 | T=4096
+[rep2 opt=''] [timing] VARLEN total 0.7699 ms  44.63 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 16 x 4 (nocompact, ksplit=4, total_mt=64) | use_regdq=1 | T=4096
+[rep2 opt='--compact'] [timing] VARLEN total 0.7694 ms  44.66 TFLOPS (sum_b 4HL^2D)
+grid main = 256 x 16 x 1 (compact, ksplit=4, total_mt=64, old-grid=64) | use_regdq=1 | T=4096
+--- skew ksplit sweep (default grid) ---
+[ksplit=1] [timing] VARLEN total 0.8372 ms  43.91 TFLOPS (sum_b 4HL^2D)
+[ksplit=2] [timing] VARLEN total 0.8356 ms  44.00 TFLOPS (sum_b 4HL^2D)
+[ksplit=4] [timing] VARLEN total 0.8358 ms  43.98 TFLOPS (sum_b 4HL^2D)
+[ksplit=8] [timing] VARLEN total 0.8357 ms  43.99 TFLOPS (sum_b 4HL^2D)

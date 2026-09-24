@@ -157,7 +157,9 @@
   `fa_bwd_{fp16,bf16}_mma_kernel` 各加 `cu_seqlens` 默认参数、`run_varlen` 按 D 分派；2 个 MLA
   varlen case 对拍 fp32 ref 同 dtype 噪声、**单/两文件逐位一致**，定长 D=512 / HD=128 varlen
   回归逐位不变；详见 `docs/01` §16.9、`docs/01b` §6ab、`docs/04` §11。
-  **剩余：按 `cu_seqlens` 的负载均衡、varlen TMA 化、MLA 降 smem（1 CTA/SM）** 留后续。
+  **剩余：varlen TMA 化、MLA 降 smem（1 CTA/SM）** 留后续。**「按 `cu_seqlens` 的均衡分块」
+  已于第八十二轮判决为负结果**（紧凑网格不省时间、反而 −3.4%；死 CTA 免费，墙在 L1/L2 吞吐 +
+  低 occupancy；见 `docs/03` §40），新的 varlen 杠杆是 **LSE 的 K 维 split + 二次归约**。
 
 ## 每项的 Definition of Done
 
@@ -2253,6 +2255,31 @@
   - 文档 `docs/01` §16.9、`docs/01b` §6ab、`docs/04` §11；原始输出 `src/fp16/fa_bwd_fp16_varlen_mla_*.out.txt`、
     `src/bf16/fa_bwd_bf16_varlen_mla_sweep.out.txt`。
 
+- 2026-09-25（第八十二轮）：**VARLEN「按 `cu_seqlens` 均衡分块」判决——负结果**。
+  - 动机（ROADMAP「下一步候选 ①」）：varlen 仍以 `S=maxlen` 为界发网格，短序列大量 CTA
+    进来即早退。强倾斜 `b8_t2904=[2048,512,128,96,64,32,16,8]` 主 kernel 发 **8192** CTA，
+    有效仅 **48 m-tile ×16 头 = 768**（ksplit 另乘），死 CTA ~83%。
+  - **改动（单/两文件 device 逐字一致，默认关、opt-in）**：① 主 kernel 紧凑网格——
+    宿主按 `cu_seqlens` 枚举有效 `(b,mblk)` 写表 `mt_b/mt_m`，`fp8_mma_body` 由 `blockIdx.x`
+    查表定 `(b,mblk)`、网格 `(total_mt*ksplit,H,1)`（`--compact`）；② causal LSE 紧凑对网格
+    ——枚举有效镜像对写表 `pt_b/pt_pair`（`--lsecompact`）。`nullptr` 逐式退化，定长/旧 varlen
+    路径逐位不变。
+  - **实测（同 binary event，iters=50）**：skew 默认 **0.836ms** → `--compact` 0.864–0.865
+    （**−3.4%**）、`--lsecompact` 0.846–0.850（−1.4%）、两者 0.871–0.875（−4.4%）；
+    等长 `b4_t4096` 默认 0.767–0.770 → `--compact` 0.769–0.770（±0.2%）；`ksplit` 1/2/4/8
+    全 0.836–0.837（与 split 无关）。数值 max_abs 与默认档完全一致（如 skew 3.136/3.584/4.030e-1），
+    定长与其余 5 个 varlen case 回归逐位不变。
+  - **ncu（main，skew）**：默认 Duration **588.96µs** / Waves **20.69** / occ 17.74% /
+    L1/TEX 61.51% / L2 54.54% / Compute 34.72% / DRAM 8.18%；`--compact` 624.13µs /
+    Waves **3.88** / occ 16.85% / L1/TEX 60.75% / L2 51.26%。
+  - **结论**：死 CTA **免费**（几次整数比较即退），限速器是 **L1/TEX 61% + L2 55% 吞吐 +
+    17.7% 低 occupancy 的延迟隐藏**（非带宽/算力）；原网格的多余 CTA 反而提供在飞 warp
+    遮盖延迟，删掉后 Waves 20.69→3.88、Duration +6%。LSE 镜像配对已把每 CTA 最大工作压到
+    常数 `nblk+1`，紧凑化不降临界路径。⇒ 「均衡分块」在 fp8 不成立。代码留 opt-in 复现。
+    真正剩余的 varlen 杠杆：**LSE 的 K 维 split + 二次归约**、**varlen TMA 化**（见下一步）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_varlen_bal_ab.out.txt`、`..._varlen_skew_base.out.txt`、
+    `..._varlen_skew_base_ncu.out.txt`、`..._varlen_bal_ncu_main_compact.out.txt`；文档 `docs/03` §40。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -2385,7 +2412,17 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第八十一轮）**：**VARLEN 的 MLA（head_dim=512）——fp16/bf16 反向**（单/两文件）。
+> **最新（第八十二轮）**：**VARLEN「按 `cu_seqlens` 均衡分块」判决——负结果**（fp8，单/两文件
+> opt-in）。把「只发有效 tile 的紧凑网格」做到主 kernel（`--compact`：按 `cu_seqlens` 枚举
+> `(b,mblk)` 查表、`grid=(total_mt*ksplit,H,1)`）与 causal LSE（`--lsecompact`：枚举有效镜像对）。
+> **实测偏负**：skew `b8_t2904` 默认 0.836ms → compact 0.864（−3.4%）/ lsecompact 0.848（−1.4%）/
+> 两者 0.871（−4.4%）；等长 `b4_t4096` 中性（±0.2%）；数值与默认档一致、定长回归逐位不变。
+> **ncu 判决**：死 CTA 免费，墙是 **L1/TEX 61% + L2 55% + 17.7% 低 occupancy 的延迟隐藏**
+> （非带宽/算力）；删死 CTA 使 Waves 20.69→3.88、在飞 warp 变少 ⇒ 反而慢 6%。镜像配对已把 LSE
+> 每 CTA 最大工作压到常数。⇒ 此候选不成立；**varlen 真正剩余的杠杆 = ① LSE 的 K 维 split +
+> 二次归约（降 33-tile 串行临界路径）② varlen TMA 化（packed 描述符）**。详见 `docs/03` §40。
+>
+> **（第八十一轮）**：**VARLEN 的 MLA（head_dim=512）——fp16/bf16 反向**（单/两文件）。
 > 把第 80 轮 fp8 的 varlen MLA 补到 fp16/bf16：① `lse_mma_kernel_bal<HD>`（O8b mma 镜像配对
 > LSE；D=512 的 causal 无 wgmma/SW128 快路，tile 过大）与 ② `fa_bwd_{fp16,bf16}_mma_kernel`
 > （HD=128/512 通用 mma 主 kernel）各加默认参数 `const int* cu_seqlens`（`qbase/len`、短序列
@@ -2403,7 +2440,9 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > bound = **低 occupancy + smem→mma 依赖**；LSE **Waves 0.36**（grid=48<132 SM）⇒ 并行度 bound。
 > 详见 `docs/01` §16.9、`docs/01b` §6ab、`docs/04` §11。**varlen 现在 fp16/bf16/fp8 ×
 > causal/full × {HD=128 MHA/GQA, HD=512 MLA} 齐备**（非 TMA）。**下一步候选**：
-> ① **按 `cu_seqlens` 的均衡分块**（短序列 CTA 早退 / 负载均衡）；② varlen 的 **TMA 化**
+> ① ~~**按 `cu_seqlens` 的均衡分块**（短序列 CTA 早退 / 负载均衡）~~——**第八十二轮已判决：
+> 负结果**（紧凑网格 −3.4%，死 CTA 免费，墙在 L1/L2+低 occupancy；见 `docs/03` §40）。
+> **改为：LSE 的 K 维 split + 二次归约**（降镜像配对的 33-tile 串行临界路径）；② varlen 的 **TMA 化**
 > （为 packed 布局重建 `[D,T,H,1]` 描述符）；③ **MLA 降 smem 冲 2 CTA/SM**（主 kernel ~202KB
 > smem、1 CTA/SM + smem→mma 依赖是四 dtype 的共同墙）或 **split-KV 提 grid**；④ 回到 fp8 K/V
 > TMA（需先腾 ~10KB smem）或 fp16/bf16 的 `L2 red`（三条消 red 路已证伪，转 TMA/软流水）。
