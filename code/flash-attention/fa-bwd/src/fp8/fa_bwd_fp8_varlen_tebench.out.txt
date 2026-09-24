@@ -1,0 +1,7 @@
+=== VARLEN bench（TE FP8 基线，CUPTI device time）===
+[varlen_b4_t3840_h16_d128_causal_fp8] lengths=[512, 1024, 2048, 256]  te-varlen=NA(segfault in TE 2.14)；ours 见自测
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+[varlen_b4_t4096_h16_d128_causal_fp8] equal-length B=4 S=1024  te-fixed=0.3785ms/90.77TF
+[varlen_b5_t3968_h32_d128_causal_fp8] lengths=[128, 256, 512, 1024, 2048]  te-varlen=NA(segfault in TE 2.14)；ours 见自测
+[varlen_b8_t2904_h16_d128_causal_fp8] lengths=[2048, 512, 128, 96, 64, 32, 16, 8]  te-varlen=NA(segfault in TE 2.14)；ours 见自测

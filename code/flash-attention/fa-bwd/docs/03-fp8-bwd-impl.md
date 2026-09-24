@@ -3232,3 +3232,150 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 原始输出：`src/fp8/fa_bwd_fp8_o37_main_{s4096,s512,prodshapes}.out.txt`（A/B + 对拍 + timing）、
 `src/fp8/fa_bwd_fp8_o37_onefile_s4096.out.txt`、`src/fp8/fa_bwd_fp8_o37_ncu_main_{tma,cpasync}_s4096.out.txt`、
 `src/fp8/fa_bwd_fp8_o37_tebench{,_requested}.out.txt`（同 session TE FP8 基线）。
+
+---
+
+## 37. VARLEN：fp8 反向支持变长 / `cu_seqlens`（packed `[T,H,D]`）
+
+> 这是 ROADMAP「可选」里唯一未完成的 `[ ] 变长（cu_seqlens / varlen）覆盖` 的第一块
+> （fp8，MHA/GQA，causal，HD=128）。fp16/bf16 复用同一 device 改造留后续。
+
+### 37.1 动机与口径
+
+生产推理/训练里 batch 内的序列长度常常不齐（packed `[T,H,D]`，`T=sum_b len_b`），
+用定长 `[B,S,H,D]` 跑必须 padding 到 `max_b len_b`，浪费 `O(B·maxlen)` 的计算与显存。
+本项让 fp8 反向直接吃 **packed** 输入 + `cu_seqlens`（长度前缀和，`B+1` 个），每个序列
+只算 `len_b×len_b` 的因果注意力，不碰 padding。
+
+接口约定：
+
+* `q`/`dO`/`dQ`：`[T,H,D]`；`k`/`v`/`dK`/`dV`：`[T,Hkv,D]`（GQA/MQA 的 `Hkv` 同前）。
+* `cu_seqlens`：`B+1` 个 int，`cu[0]=0`、`cu[b+1]=cu[b]+len_b`。
+* kernel 收到 `S=maxlen` 作为 grid/分块启发式的基准长度，逐 `b` 用
+  `qbase=cu[b]`、`len=cu[b+1]-cu[b]` 代替原来的 `b*S`/`S`。
+* `ref_dq/dk/dv.npy` 也是 packed 布局，直接逐元素比对。
+
+### 37.2 实现（device 单/两文件逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+改动收敛在 **3 处 device 代码**（其余 5 个 GEMM 的数学/数据流完全不动）：
+
+1. **`fp8_mma_body<...,cu_seqlens>`**（主 kernel，单/两文件共用 body + 两个薄壳）：
+   在 `b=blockIdx.z` 后算 `qbase/len`，把 `b*S+{qi,jg,qa,qb}` 全部换成 `qbase+…`、
+   长度判定 `<S` 换成 `<len`、`ncols=min(S,…)` 换成 `min(len,…)`，并加
+   `if (m0>=len) return;`（短序列的尾部 m 块直接退出）。
+   `kv_prefetch_pair`/`kv_load_pair` 的 `b` 形参改名为 `qbase`（语义从「批号」变成「token 基址」，
+   内部 `(b*S+jr)` → `(qbase+jr)`）。`nullptr` 时逐式退化为原定长路径 ⇒ 定长回归**逐位不变**。
+2. **`lse_mma_kernel_bal_wgmma<...,cu_seqlens>`**（默认 Hopper LSE）：
+   同样算 `qbase/len`，`nblk` 用 `len`，镜像配对的 `if (pair >= (nblk+1)/2) return;`
+   让短序列的多余 CTA 退出；`issue_q/issue_k` 的全局地址用 `qbase`、越界判定用 `len`。
+3. **`delta_warp_kernel`** 本就是「每 warp 一行」的扁平实现（`rows=T*H`），
+   packed 布局下天然可用，**无需改动**（host 传 `rows=T*H` 即可）。
+
+`quantize_row_warp_kernel` 同样按行处理，packed 下把 `[T,H,D]` 视作 `[T*H,D]` 即可，无需改。
+
+host 侧新增 `--varlen` 分支（`run_varlen`）：读 packed q/k/v/dO + `ref_o` + `cu_seqlens.npy`，
+建 packed 的 q8/scale/lse/delta/dq/dk/dv，按 `maxlen` 选 `ksplit`/`REGDQ` 自动档，
+LSE 用 `launch_lse_bal_wgmma`、主 kernel 用 `launch_bwd_main<128,64,32,…,WGMMA=true>`
+（**非 TMA**：TMA 描述符是按定长 `[D,S,H,B]` 建的，varlen 用 wgmma+cp.async 路径即可）。
+非 causal / fp16 / bf16 / TMA 化留后续。
+
+### 37.3 harness：dump + fp32 ref
+
+`harness/fa_bwd_bench.py` 扩展：
+
+* `--lengths "512 1024 2048 256" --H 16 --D 128 [--kv 8]`（或 `--varlen-all` 跑内置
+  `VARLEN_SHAPES`）→ `dump` 出 packed `q/k/v/do.npy`、`cu_seqlens.npy`（fp32，便于 host 直读）、
+  `ref_o/dq/dk/dv.npy` + `meta.json`（含 `lengths`）。
+* `ref_attn_varlen`：逐序列切片喂给原 fp32 autograd `ref_attn` 再拼接。
+* 共 dump **4 个 varlen case**：等长 `[1024]×4`、不齐 `[512,1024,2048,256]`、
+  GQA `[128,256,512,1024,2048] kv=8`、强倾斜 `[2048,512,128,96,64,32,16,8]`。
+* **注**：TE 2.14 的 fused_attn **FP8 变长**路径在本容器会 segfault（`thd_thd_thd`，
+  无法 try/except 捕获），故 TE 变长基线缺失；等长 case 用 TE FP8 定长同 shape 对比。
+
+### 37.4 数值（ours vs fp32 ref，fp8 causal；max_abs）
+
+| case | lengths | dq | dk | dv |
+|---|---|---|---|---|
+| b1_t512（等价定长 S512） | `[512]` | 2.280e-1 | 3.108e-1 | 3.422e-1 |
+| b4_t3840 不齐 | `[512,1024,2048,256]` | 2.935e-1 | 2.938e-1 | 4.179e-1 |
+| b4_t4096 等长 | `[1024]×4` | 2.651e-1 | 3.026e-1 | 3.920e-1 |
+| b5_t3968 GQA kv8 | `[128,256,512,1024,2048]` | 3.094e-1 | 5.567e-1 | 6.203e-1 |
+| b8_t2904 强倾斜 | `[2048,512,…,8]` | 3.136e-1 | 3.584e-1 | 4.030e-1 |
+
+全部落在 fp8 噪声量级（0.24–0.62），与定长 fp8 一致，**无系统误差、无 padding 泄漏**。
+单文件输出与两文件**逐位相同**（如 b4_t3840：2.935/2.938/4.179e-1）。
+
+### 37.5 性能（ours 端到端 total：quant+preprocess+main；CUDA event）
+
+| case | lengths | total (ms) | TFLOPS（Σ_b 4HL²D） |
+|---|---|---|---|
+| b1_t512 | `[512]` | 0.126 | 17.0 |
+| b4_t3840 不齐 | `[512,1024,2048,256]` | 0.954 | 47.8 |
+| b4_t4096 等长 | `[1024]×4` | 0.767 | 44.8 |
+| b5_t3968 GQA kv8 | `[128,256,512,1024,2048]` | 1.852 | 49.4 |
+| b8_t2904 强倾斜 | `[2048,512,…,8]` | 0.839 | 43.8 |
+
+**对标**（同 session，`harness/fa_bwd_bench.py bench --dtype fp8 --varlen-all`）：
+等长 b4_t4096 用 TE FP8 定长同 shape 为 **0.3785 ms / 90.77 TF**（TE 口径含 forward，
+ours 为纯反向 total）⇒ 时间比 **2.03×**。不齐/GQA/倾斜 case TE 变长 segfault，无基线。
+
+注意：强倾斜 case（`[2048,512,…]`）虽然 padding 浪费大，但 `maxlen=2048` 让 grid 只有
+`64×16×8`，短序列的 CTA 大量空转（`m0>=len` 提前 return），故 TF 仍只有 43.8 —— 真正的
+「按序列变长分块」的负载均衡（如 FlashAttention 的均衡调度）留 backlog。
+
+### 37.6 ncu（主 kernel，等长 b4_t4096，`--launch-count 1`）
+
+| 指标 | 值 |
+|---|---|
+| Duration | 557.2 µs |
+| DRAM Throughput | 12.0% |
+| L1/TEX / L2 | **60.4% / 63.2%** |
+| Compute (SM) | 37.7% |
+| Achieved / Theoretical Occupancy | 18.1% / 18.8%（168 regs，Block Limit Shared Mem=3） |
+| Waves Per SM | 10.34 |
+| No Eligible | 59.4% |
+
+bound 与定长 fp8 main 完全一致：**L1/TEX + L2 吞吐 + 3 CTA/SM 的延迟受限**，
+DRAM 仅 12% ⇒ 非带宽 bound。原始输出 `src/fp8/fa_bwd_fp8_varlen_ncu_main_b4_t4096.out.txt`。
+
+### 37.7 定长回归（nullptr 路径）
+
+S512/S4096/GQA/MLA 四 shape 逐位不变：
+S512 `2.426/2.972/3.733e-1`、S4096 `2.635/2.644/3.216e-1`、
+GQA kv4 `2.517/5.339/7.173e-1`、MLA S1024H2 `2.232/3.337/3.602e-1`。
+原始输出 `src/fp8/fa_bwd_fp8_varlen_fixed_regression.out.txt`。
+
+### 37.8 限制 / 后续
+
+* 只做 **fp8 / HD=128 / causal / MHA+GQA**；非 causal、fp16/bf16、MLA 留后续。
+* 用 **非 TMA** 主 kernel 路径（wgmma + cp.async）；TMA 需要为 packed 布局重建描述符
+  （扁平 `[D,T,H,1]`）或在 host 侧逐序列建 map。
+* **负载均衡**：当前用 `maxlen` 决定 grid，短序列 CTA 早退，强倾斜 case 并行度浪费；
+  可引入按 `cu_seqlens` 的均衡分块（FA2 的 `num_m_blocks` 调度）。
+* TE 2.14 FP8 变长 segfault，性能基线只能对等长 case。
+
+### 37.9 复现
+
+```bash
+# dump varlen（ref + cu_seqlens）
+python harness/fa_bwd_bench.py dump --dtype fp8 --varlen-all
+# 两文件 varlen 自测（默认 WGMMA+TMA 构建；varlen 内部走非 TMA 路径）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --varlen=1 --iters=50 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b4_t3840_h16_d128_causal_fp8
+# 单文件
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --varlen=1 --iters=50 --dir=...
+# TE 定长基线（等长 case）
+python harness/fa_bwd_bench.py bench --dtype fp8 --varlen-all
+# ncu
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:fa_bwd_fp8_mma_kernel --launch-count 1 -- --varlen=1 --iters=1 --dir=...
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_varlen_sweep.out.txt`（两文件 5 case）、
+`..._varlen_onefile_sweep.out.txt`（单文件 4 case，逐位一致）、
+`..._varlen_tebench.out.txt`（TE FP8 定长基线）、
+`..._varlen_ncu_main_b4_t4096.out.txt`（ncu）、
+`..._varlen_fixed_regression.out.txt`（定长回归）。

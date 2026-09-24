@@ -135,7 +135,12 @@
   （`-DFA_WGMMA -DFA_TMA` 构建）。**K/V TMA 未做**：单缓冲 TMA 无重叠（Ks/Vs 同迭代被
   dS3/Ap 覆写），双缓冲在 3 CTA/SM 下 smem 顶格（余量 ~6.8KB < 双缓冲 K + 独立 dS3 ~6.7KB，
   再要 V/预取即超），⇒ backlog（需先腾 ~10KB smem）。详见 `docs/03` §36。
-- [ ] 变长（cu_seqlens / varlen）覆盖
+- [~] 变长（cu_seqlens / varlen）覆盖：**fp8 已完成（第七十七轮）**——packed `[T,H,D]` +
+  `cu_seqlens`，device 侧只改 `fp8_mma_body` / `lse_mma_kernel_bal_wgmma`（`b*S→qbase`、
+  `S→len`；`delta/quantize` 扁平天然可用），定长路径 `nullptr` 逐位不变。4 个 varlen case
+  （等长/不齐/GQA kv8/强倾斜）对拍 fp32 ref 全 fp8 噪声（0.26–0.62）、单/两文件逐位一致；
+  等长 case 对标 TE FP8 定长同 shape `0.3785ms/90.77TF`（时间比 2.03×）。仅 fp8/HD=128/causal/
+  MHA+GQA、非 TMA；**fp16/bf16、非 causal、MLA、负载均衡**留后续。详见 `docs/03` §37。
 
 ## 每项的 Definition of Done
 
@@ -2106,6 +2111,41 @@
   - 原始输出 `src/fp8/fa_bwd_fp8_o37_main_{s4096,s512,prodshapes}.out.txt`、
     `..._o37_onefile_s4096.out.txt`、`..._o37_ncu_main_{tma,cpasync}_s4096.out.txt`、
     `..._o37_tebench{,_requested}.out.txt`；文档 `docs/03` §36、`docs/04` §2.3。
+
+- 2026-09-25（第七十七轮）：**VARLEN 完成第一步（fp8 反向支持变长 / `cu_seqlens`，单/两文件）**。
+  - 动机：ROADMAP「可选」里唯一未完成的 `[ ]`。生产形状 batch 内序列长度不齐，定长必须
+    padding 到 `max_b len_b`，浪费算力/显存。让 fp8 反向直接吃 **packed** `[T,H,D]` +
+    `cu_seqlens`（长度前缀和），逐序列只算 `len_b×len_b` 因果注意力。
+  - **device 改动只 3 处**（单/两文件逐字一致，`sync_onefile_device.py` 核对 `identical: True`）：
+    ① `fp8_mma_body`（主 kernel 公共体）加 `const int* cu_seqlens`，`qbase=cu[b]`、
+    `len=cu[b+1]-qbase`，把 `b*S+{qi,jg,qa,qb}`→`qbase+…`、长度判定 `S`→`len`、
+    `ncols=min(S,..)`→`min(len,..)`，并加 `if (m0>=len) return;`；`kv_prefetch_pair/kv_load_pair`
+    形参 `b`→`qbase`（`(b*S+jr)`→`(qbase+jr)`）。`nullptr` 时逐式退化，定长路径**逐位不变**。
+    ② `lse_mma_kernel_bal_wgmma` 同理，`nblk` 用 `len`，镜像配对 `if (pair>=(nblk+1)/2) return;`。
+    ③ `delta_warp_kernel`/`quantize_row` 本就是扁平「每行」实现，packed 天然可用，无需改。
+  - **host**：新增 `--varlen` 分支 `run_varlen`（packed q/k/v/dO + `ref_o` + `cu_seqlens.npy`），
+    按 `maxlen` 选 `ksplit`/`REGDQ`；走**非 TMA** 主 kernel（wgmma + cp.async）。单/两文件同步。
+  - **harness**：`fa_bwd_bench.py` 支持 `--lengths/--varlen-all`，`ref_attn_varlen`（逐序列拼接），
+    dump packed 输入 + `cu_seqlens.npy` + ref；4 个 varlen case。TE 2.14 FP8 变长路径
+    **segfault**，仅等长 case 用 TE FP8 定长同 shape 对标。
+  - **数值（ours vs fp32 ref，fp8 causal，max_abs）**：`[512]` 2.280/3.108/3.422e-1；
+    `[512,1024,2048,256]` 2.935/2.938/4.179e-1；`[1024]×4` 2.651/3.026/3.920e-1；
+    GQA kv8 `[128,256,512,1024,2048]` 3.094/5.567/6.203e-1；强倾斜
+    `[2048,512,…,8]` 3.136/3.584/4.030e-1 —— 全 fp8 噪声、无 padding 泄漏；单/两文件逐位一致。
+  - **性能（ours total=quant+preprocess+main，event）**：0.126 / 0.957 / 0.769 / 1.852 / 0.833 ms
+    （17.0 / 47.8 / 44.8 / 49.4 / 43.8 TF）；等长 case vs **TE FP8 定长 0.3785ms/90.77TF**
+    ⇒ 时间比 **2.03×**（TE 口径含 forward，ours 纯反向）。
+  - **ncu（main，等长 b4_t4096）**：Duration 557µs、DRAM 12.0% / **L1/TEX 60.4% / L2 63.2%** /
+    Compute 37.7%、occ 18.1%（168 regs，Block Limit Shared Mem=3）、Waves 10.34 ⇒ bound 与定长
+    fp8 main 一致（L1/L2 吞吐 + 3 CTA/SM 延迟受限），非带宽。
+  - **定长回归逐位不变**：S512 2.426/2.972/3.733e-1、S4096 2.635/2.644/3.216e-1、
+    GQA kv4 2.517/5.339/7.173e-1、MLA S1024H2 2.232/3.337/3.602e-1。
+  - **限制/后续**：只 fp8/HD=128/causal/MHA+GQA、非 TMA；fp16/bf16、非 causal、MLA、
+    按 `cu_seqlens` 的均衡调度（当前短序列 CTA 早退，强倾斜并行度浪费）留后续。
+    详见 `docs/03` §37。
+  - 原始输出 `src/fp8/fa_bwd_fp8_varlen_sweep.out.txt`（两文件 5 case）、
+    `..._varlen_onefile_sweep.out.txt`（单文件，逐位一致）、`..._varlen_tebench.out.txt`、
+    `..._varlen_ncu_main_b4_t4096.out.txt`、`..._varlen_fixed_regression.out.txt`。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
