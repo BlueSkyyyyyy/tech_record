@@ -1510,7 +1510,8 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
                           float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                           float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                           int causal, bf16* __restrict__ dq_h = nullptr,
-                          const int* __restrict__ cu_seqlens = nullptr) {
+                          const int* __restrict__ cu_seqlens = nullptr,
+                          int ksplit = 1) {
   static_assert(HD == 128, "wgmma2 主 kernel 目前只做 HD=128");
   constexpr int NTH = 256;
   constexpr int BM = 128, BN = 64;
@@ -1530,7 +1531,11 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
   char* dSs = Ps + PTILE;                  // [128][64] SW128（16KB）
 
   const int bx = blockIdx.x;
-  const int mblk = bx;
+  // O43：N 方向 split-K。同一 mblk 的 KV tile [0,ntiles) 均分给 ksplit 个 CTA；dQ 改走跨
+  //   CTA fp32 `atomicAdd`（ksplit==1 时逐式退化，数值与原路径逐位相同）。小 S（grid 不足
+  //   一个波）时把 grid 抬 ksplit 倍填满空 SM。
+  const int ksp = (ksplit > 1) ? (bx % ksplit) : 0;
+  const int mblk = (ksplit > 1) ? (bx / ksplit) : bx;
   const int h = blockIdx.y, b = blockIdx.z;
   const int hkv = h / (H / Hkv);
   // VARLEN：cu_seqlens 给本序列 token 基址与长度；nullptr 退化为定长 b*S/S。
@@ -1543,13 +1548,20 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * BM;
 
-  qdo_issue_async_sw<HD, BM, NTH>(q, do_, m0, len, H, h, b, tid, Qs, dOs, qbase);
-
   const int ncols = causal ? min(len, m0 + BM) : len;
   const int ntiles = (ncols + BN - 1) / BN;
-  if (ntiles > 0) {
-    kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, 0, len, Hkv, hkv, b, tid, Ks, Vs, qbase);
-    kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, 0, len, Hkv, hkv, b, tid, Ks, Vs, qbase);
+  // O43：本 CTA 负责的 KV tile 切片 [nt_begin, nt_end)。ksplit==1 时即 [0,ntiles)。
+  const int nt_begin = (ksplit > 1) ? (int)(((long)ntiles * ksp) / ksplit) : 0;
+  const int nt_end = (ksplit > 1) ? (int)(((long)ntiles * (ksp + 1)) / ksplit) : ntiles;
+  if (ksplit > 1 && nt_end <= nt_begin) return;
+
+  qdo_issue_async_sw<HD, BM, NTH>(q, do_, m0, len, H, h, b, tid, Qs, dOs, qbase);
+
+  if (nt_end > nt_begin) {
+    kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, nt_begin * BN, len, Hkv, hkv, b, tid, Ks,
+                                                Vs, qbase);
+    kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, nt_begin * BN, len, Hkv, hkv, b, tid, Ks,
+                                                Vs, qbase);
   }
 
   // 本 wg 的 Q 行 = wg*64 + [0,64)。每线程两行（r_lo / r_hi）。
@@ -1584,14 +1596,14 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
   const uint32_t Pa = smem_u32(Ps), DSa = smem_u32(dSs);
   const int r0 = wid * 16 + g;
 
-  for (int nt = 0; nt < ntiles; ++nt) {
-    const int j0 = nt * BN;
+  for (int nt = 0; nt < nt_end - nt_begin; ++nt) {
+    const int j0 = (nt_begin + nt) * BN;   // O43：tile 的全局列偏移
     char* Kt = Ks + (nt & 1) * KTILE;
     asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
-    if (nt + 1 < ntiles)
-      kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
-                                                  Ks + ((nt + 1) & 1) * KTILE, Vs, qbase);
+    if (nt_begin + nt + 1 < nt_end)
+      kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, (nt_begin + nt + 1) * BN, len, Hkv, hkv,
+                                                  b, tid, Ks + ((nt + 1) & 1) * KTILE, Vs, qbase);
 
     // ---- (1)(2) 本 wg 的 S=QKᵀ 与 dP=dO·Vᵀ（m64n64），统一 wait0 ----
     float sacc[32], dpacc[32];
@@ -1627,9 +1639,9 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
     }
     // 两个 wg 的 P/dS 都写好；同时 GEMM2 已读完 V[nt]，可覆盖 V。
     __syncthreads();
-    if (nt + 1 < ntiles)
-      kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
-                                                  Ks, Vs, qbase);
+    if (nt_begin + nt + 1 < nt_end)
+      kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, (nt_begin + nt + 1) * BN, len, Hkv, hkv,
+                                                  b, tid, Ks, Vs, qbase);
 
     if constexpr (SPLIT) {
       // ---- O17-2：GEMM3(dV)→wg0、GEMM4(dK)→wg1，两者都仍对全 BM=128 归约。原版只有
@@ -1773,8 +1785,13 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
         const int qi = m0 + wg * 64 + rr;
         const int c = nh * 64 + j * 8 + c2;
         if (qi < len) {
+          // O43：ksplit>1 时同一 Q 行由多个 CTA 贡献 ⇒ dQ 必须跨 CTA 原子累加（dq_acc）。
+          if (ksplit > 1) {
+            float* base = dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c;
+            red_add2(base, dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
+          }
           // O24：dQ 唯一拥有 ⇒ 可直接写 bf16，省掉 convert 的 dQ 一趟。
-          if (dq_h)
+          else if (dq_h)
             *reinterpret_cast<__nv_bfloat162*>(dq_h + (((size_t)(qbase + qi)) * H + h) * HD + c) =
                 __floats2bfloat162_rn(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
           else {

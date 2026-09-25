@@ -1499,3 +1499,29 @@ full S1024 5.520/5.312/4.024e-2；`max_abs(kvtma-vs-qdtma)≤1.2e-5`（仅 atomi
 **对标**：fp8 无 FA 基线，仅 TE；同 session 纯反向 FA3 fp16 MHA S4096 0.3243ms/848TF
 （ours fp8 total 距之仍量级差距）。详见 `docs/03` §44。原始输出
 `src/fp8/fa_bwd_fp8_o41_sweep.out.txt`、`..._o41_ncu_ab_s4096.out.txt`。
+
+## 18. fp16/bf16 `wgmma2` 主 kernel 的 N 方向 split-K（O43，第九十轮）—— **正结果，默认 auto（仅小 grid）**
+
+> fp8 的 mma 主 kernel 早有 `ksplit`；fp16/bf16 默认档的 `wgmma2`（BM=128/BN=64、1 CTA/SM）
+> 没有，**S=512 MHA grid=64 CTA < 132 SM**（ncu Waves 0.48，half-SM 空转）。O43 给它加运行时
+> `ksplit`：KV tile 切片 + dQ 跨 CTA `atomicAdd`（`ksplit==1` 逐位退化）。**auto 仅在小 grid**，
+> 大 S / wgmma2b 恒 1。varlen 切 K 反慢（opt-in）。
+
+**数值**（vs fp32 ref，causal，max_abs）与 ksplit=1 **逐位一致**：fp16 S512 `1.671/1.771/1.899e-3`、
+bf16 S512 `9.001/1.261e-2/1.365e-2`；回归 S1024 full / S4096 causal 不变。
+
+**性能**（同 binary、同 session，S=512 MHA）：
+
+| dtype | ksplit=1 main/total | **ksplit=2 main/total** | main 比 | total 比 | ours/FA3（时间） |
+|---|---|---|---|---|---|
+| fp16 | 0.0529 / 0.0871 ms | **0.0317 / 0.0687 ms** | **1.67×** | **1.27×** | 3.34×→**2.63×** |
+| bf16 | 0.0538 / 0.0869 ms | **0.0320 / 0.0692 ms** | **1.68×** | **1.26×** | 3.32×→**2.64×** |
+
+同 session 纯反向基线（`fa_vs_te_bwd_only.py`，S=512 MHA）：fp16 FA3 0.0261ms/164TF、
+TE 0.0320ms/134TF（FA2 0.0437ms/98TF）；bf16 FA3 0.0262ms/164TF、TE 0.0323ms/133TF。
+
+**ncu**（fp16 `wgmma2`，S=512）：ksplit 1→2 Duration 54.08→**33.50µs**、**Waves 0.48→0.97**、
+Executed Ipc Elapsed 0.42→**0.77**、DRAM 9.4→18.8%、L2 25.6→49.8%；per-SM occupancy 恒 12.5%
+（1 CTA/SM）。⇒ **墙是 grid 不足一个波、不是 per-SM occupancy**。详见 `docs/01` §14x、`docs/01b` §6af。
+原始输出 `src/fp16/fa_bwd_fp16_o43_sweep.out.txt`、`..._o43_ncu_wg2_s512_ks{1,2}.out.txt`、
+`src/bf16/fa_bwd_bf16_o43_sweep.out.txt`。

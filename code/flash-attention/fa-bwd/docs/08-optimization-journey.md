@@ -164,6 +164,12 @@ smem 冲突 + 低 occ
    顶在已经 71.8% 的 L1/TEX 上。⇒ red 只能靠**减少每元素贡献数（放大 BM，撞寄存器墙）**或
    **提 occupancy（smem 74.8 KB + regs 168 双卡 3 CTA/SM）**解决，两者都是硬件资源硬约束。
    详见 `docs/03` §45。
+8. **小 grid 的 N 方向 split-K（O43，第 90 轮，正结果）**：fp16/bf16 默认档下 **S=512 MHA 的
+   `wgmma2` grid 只有 64 CTA < 132 SM**（ncu `Waves 0.48`，half-SM 空转）。给 `wgmma2` 加
+   运行时的 `ksplit`（KV tile 切片 + dQ 跨 CTA 原子累加，`ksplit==1` 逐位退化）：S=512
+   main **1.67–1.68×**、端到端 **1.26–1.27×**（0.087→0.069ms），Waves **0.48→0.97**、
+   elapsed IPC 0.42→0.77，per-SM occupancy 不变（12.5%）。⇒ **打掉的是「SM 空转」而非延迟隐藏**；
+   varlen 短序列切 K 反慢（opt-in）。详见 `docs/01` §14x、`docs/01b` §6af。
 
 ---
 

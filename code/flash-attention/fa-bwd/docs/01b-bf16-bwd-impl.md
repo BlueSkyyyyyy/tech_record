@@ -1709,6 +1709,26 @@ b4_t4096_h16_d128}_split{1,0}.out.txt`、
 `src/bf16/fa_bwd_bf16_mma_main_o40_ncu_lse_wgmma_split{1,8}_s512.out.txt`、
 `src/bf16/fa_bwd_bf16_mma_onefile_o40_fixed_s512_auto.out.txt`。
 
+## 6af. O43-bf16：wgmma2 主 kernel 的 N 方向 split-K（第九十轮）—— **正结果，默认 auto（仅小 grid）**
+
+把 fp16 O43（`docs/01` §14x）**逐字 dtype 参数化**到 bf16：`fa_bwd_bf16_wgmma2_kernel` 加
+`int ksplit = 1`（`ksp=bx%ksplit`/`mblk=bx/ksplit`、KV tile 切片 `[nt_begin,nt_end)`、切片为空
+早退、预取/列偏移改全局 tile 号），dQ 在 `ksplit>1` 时改 `red_add2(dq_acc)` 跨 CTA 原子累加；
+`launch_bwd_wgmma2`/host 同步加 `--wg2ksplit=N`（默认 -1=auto：仅 D==128/BN=64/非 TMA 且
+`ceil(S/128)*H*B<132` 时切到「填满一个波」，cap 8）；varlen 不做 auto（同 fp16 负结果）。
+单/两文件 device 逐字一致（`sync_onefile_device.py` 核对 `identical: True`）。
+
+**数值**（ours-vs-ref，bf16 causal，max_abs）：S=512 MHA ksplit=1/2/4 全为
+`9.001/1.261e-2/1.365e-2`（逐位一致）；S=4096 causal `1.51/1.34/1.63e-2` 与旧一致。
+
+**性能**（同 binary、同 session）：S=512 MHA main 0.0538→**0.0320ms（1.68×）**、
+total 0.0869→**0.0692ms（1.26×，31.1 TF，单文件 0.0698 一致）**；ksplit=4 略差（0.0735）。
+同 session 纯反向对标：FA2 0.0438 / **FA3 0.0262ms（164 TF）** / TE 0.0323 ⇒ ours/FA3
+**3.32×→2.64×**。S=1024 / S=4096 走 wgmma2b，auto=1、不变。ncu 与 fp16 逐项同构
+（Waves 0.48→0.97，墙 = grid 不足一个波、非 per-SM occupancy）。
+
+原始输出：`src/bf16/fa_bwd_bf16_o43_sweep.out.txt`。
+
 ## 8. 下一步
 
 > **O36-bf16（§6z）已完成**：把 O34 的逐 atom 4D-TMA 从 BN=128 的 `wgmma2b` 补到 **BN=64 的
