@@ -520,6 +520,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     if (causal) {
       dim3 lg((nblk + 1) / 2, H, B);
       // D==128 走 wgmma 版（SW128 + wgmma）；D==512（MLA）只有 mma 版（HD>128 无 SW128 快路）。
+      // O42：纯 `sm_90`（无 `-DFA_WGMMA`）构建下没有 wgmma 版 ⇒ D==128 退回 mma 镜像配对版
+      //   （此前无条件调用导致 fp8 main 的 `-arch=sm_90` 构建失败，fp16/bf16 无此问题）。
+#ifdef FA_WGMMA
       if (D == 128 && lse_compact)
         launch_lse_bal_wgmma<128, 1>(dim3(total_pairs, H, 1), d_q8, d_qs, d_k8, d_ks, d_lse,
                                      maxlen, H, Hkv, scale, d_cu, d_ptb, d_ptp,
@@ -528,6 +531,11 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
         launch_lse_bal_wgmma<128, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
                                      d_cu, nullptr, nullptr, d_lse_part, lse_split_eff,
                                      (long long)rows_q);
+      else
+#endif
+      if (D == 128)
+        launch_lse_bal<128, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
+                               d_lse_part, lse_split_eff, (long long)rows_q);
       else
         launch_lse_bal<512, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
                                d_lse_part, lse_split_eff, (long long)rows_q);

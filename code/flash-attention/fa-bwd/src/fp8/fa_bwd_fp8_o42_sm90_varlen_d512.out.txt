@@ -1,0 +1,30 @@
+fa_bwd_fp8_main.cu(646): warning #550-D: variable "lsewgm" was set but never used
+    int lsewgm = 0;
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_main.cu(647): warning #550-D: variable "wgmma" was set but never used
+    int wgmma = 0;
+        ^
+
+fa_bwd_fp8_kernels.cuh(2980): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1038 of fa_bwd_fp8_main.cu
+
+fa_bwd_fp8_kernels.cuh(2688): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1038 of fa_bwd_fp8_main.cu
+
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp8
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 512
+O40: varlen lse k-split = 8 (base=8)
+[timing] VARLEN total 0.1391 ms  7.72 TFLOPS (sum_b 4HL^2D)
+grid main = 128 x 2 x 1 (nocompact, ksplit=16, total_mt=8) | use_regdq=0 | T=512
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.613e-01  max_rel=8.119e+01  (ours_amax=1.811e+00 ref_amax=1.786e+00 @28675)
+  dk  vs ref: max_abs=2.238e-01  max_rel=1.136e+02  (ours_amax=2.700e+00 ref_amax=2.650e+00 @1228)
+  dv  vs ref: max_abs=3.864e-01  max_rel=7.430e+01  (ours_amax=4.658e+00 ref_amax=4.646e+00 @241)

@@ -2459,11 +2459,39 @@
     Waves 0.07 / occ 6.25% / Compute 8.21% → split8 **14.56µs / Waves 0.55 / occ 20.26% /
     Compute 33.32%**；fp16 33.66→14.85µs、bf16 33.50→14.91µs（Waves 0.12→0.97、occ
     6.25%→19.27%）。**墙 = 网格不足一个波；split 填满后回到 LSE 固有的 `mma wait` + smem 依赖**。
-  - 原始输出 `src/fp8/fa_bwd_fp8_main_o40_fixed_s{512,4096}_split{1,0}.out.txt`、
-    `src/fp8/fa_bwd_fp8_main_o40_varlen_*`（7 varlen case ×2）、
-    `..._o40_ncu_lse_wgmma_split{1,8}_s512.out.txt`、`src/fp8/fa_bwd_fp8_mma_onefile_o40_*`；
-    `src/fp16/`、`src/bf16/` 同构文件（`..._o40_*`）；文档 `docs/03` §43、`docs/01` §14w、
-    `docs/01b` §6ae、`docs/04` §16。
+   - 原始输出 `src/fp8/fa_bwd_fp8_main_o40_fixed_s{512,4096}_split{1,0}.out.txt`、
+     `src/fp8/fa_bwd_fp8_main_o40_varlen_*`（7 varlen case ×2）、
+     `..._o40_ncu_lse_wgmma_split{1,8}_s512.out.txt`、`src/fp8/fa_bwd_fp8_mma_onefile_o40_*`；
+     `src/fp16/`、`src/bf16/` 同构文件（`..._o40_*`）；文档 `docs/03` §43、`docs/01` §14w、
+     `docs/01b` §6ae、`docs/04` §16。
+   （第八十八轮 O41 见「可选 / TMA」段与「下一步」首条：fp8 主 kernel 的 K/V 4D-TMA，
+     main 1.056–1.141×、端到端 S4096 2.05→1.92ms。）
+
+- 2026-09-25（第八十九轮）：**O42——fp8 主 kernel「dK/dV 归约改 Hopper bulk-reduce」判决：
+  负结果 + 墙的定量重测 + 纯 `sm_90` 构建修复**。
+  - **墙重测**（`fa_bwd_fp8_mma_kvtma<128,64,32>`，S4096，1.59ms）：`lts__t_sectors_op_red=114.5M`
+    （L2 扇区 ~70.5%）、`l1tex...op_red` 9.54M requests/8 扇区（**已 coalesced、无扇区浪费**）、
+    stall `wait 1.53`+`short 1.30`、74.82KB smem / 168 regs / **3 CTA/SM**（smem 与 regs 双卡）。
+  - **天花板探针**：短路 dK/dV 的 `red` ⇒ main **1.60→0.94ms（1.70×）**、total 1.93→1.25ms
+    （1.53×）⇒ red 值 0.66ms，是头号成本。
+  - **机制**：`cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32`（SM90 1D，无需
+    tensormap；坑：global 目的用 `"l"` 64 位、写 smem 后要 `fence.proxy.async`）。冒烟
+    `fa_bwd_fp8_bulkred_smoke.cu` 多 CTA 并发 reduce **PASS（max_abs=0）**。
+  - **实现（`-DFA_BULKRED=1`，opt-in）**：`epi_dv/epi_dk` 改为 per-warp smem staging（复用
+    `Ps`/`Ss` 死区 17.4KB）+ 每 warp lane<16 各发一行 256B bulk reduce，与 GEMM4/5 重叠
+    （仅 `__syncwarp`，无 `__syncthreads`）；单/两文件 device 逐字一致。
+  - **结果**：数值与历史逐位一致，但 main **1.60→1.80ms（0.89×，负结果）**——staging 的
+    smem 往返（每 tile 32KB 写 + 32KB TMA 读、128 条 256B op）压在已 71.8% 的 L1/TEX 上，
+    净亏于 coalesced 的 `red`。代码保留 opt-in。**判定：red 不可用 smem+TMA 替换；只剩
+    「放大 BM（寄存器墙）」或「提 occupancy（smem/regs 双卡）」两条硬约束路。**
+  - **附带修复**：fp8 main 的 `run_varlen` causal 分支原无条件调 `launch_lse_bal_wgmma`
+    ⇒ `-arch=sm_90`（无 `-DFA_WGMMA`）构建失败；加 `#ifdef FA_WGMMA`，D=128 纯 sm_90 退回
+    mma 镜像配对 LSE。验证 `--varlen` MLA D512 构建通过、数值逐位一致（1.613e-1/2.238e-1/3.864e-1）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_o42_ncu_default_s4096.out.txt`、
+    `..._o42_ceiling_skipdkdvred_s4096.out.txt`、`..._o42_default_s4096.out.txt`、
+    `..._o42_bulkred_s4096.out.txt`、`..._bulkred_smoke.out.txt`、
+    `..._o42_sm90_varlen_d512.out.txt`、`..._mma_onefile_o42_s512.out.txt`；文档 `docs/03` §45、
+    `docs/08` §5.7。
 
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
@@ -2597,7 +2625,22 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第八十八轮）**：**O41——fp8 主 kernel 的 K/V 也改 4D-TMA（K 双缓冲、V 单缓冲），
+> **最新（第八十九轮）**：**O42——fp8 主 kernel「dK/dV 归约改 Hopper bulk-reduce」：负结果 +
+> 墙的定量重测 + 纯 `sm_90` 构建修复**。ncu 重测：`red` 占 L2 扇区 **70.5%（114.5M）**、
+> `wait 1.53`+`short 1.30`、smem 74.8KB/regs 168 **双卡 3 CTA/SM**；**短路 dK/dV 的 red ⇒
+> main 1.60→0.94ms（天花板 1.70×）** ⇒ red 是头号成本。用 `cp.reduce.async.bulk`（SM90 1D，
+> 冒烟 PASS）把逐元素 red 换成 per-warp smem staging + TMA 归约：数值逐位一致，但 main
+> **1.60→1.80ms（0.89×）**——staging 的 smem 往返压在已 71.8% 的 L1/TEX 上，净亏。**判定：
+> coalesced red 不可用 smem+TMA 替换；候选 ① 只剩「放大 BM（寄存器墙）」/「提 occupancy
+> （smem/regs 双卡）」两条硬约束路**；候选 ②（MLA 2 CTA/SM）经核算单轮不可行（需 FlashMLA
+> 式重构）。代码 `-DFA_BULKRED=1` opt-in。详见 `docs/03` §45、`docs/08` §5.7。
+> **下一步候选**（如实说：硬件资源已锁死单轮正结果）：① **fp8 的 BM>64 / occupancy** 需先
+> 解决寄存器墙（O17b/O19 已证伪），可试「dQ 累加分片到 smem 或减半寄存器」；② **MLA（D=512）
+> 的 FlashMLA 式重构**（Q/dO 驻寄存器、K/V 分块流水、2 CTA/SM）——多轮；③ **fp16/bf16 的
+> `red`**（同 fp8 结论，别再试 smem/TMA 替换）；④ **varlen 主 kernel 的 K 维 split**（已有
+> ksplit，收益待另测）。
+>
+> **（第八十八轮）**：**O41——fp8 主 kernel 的 K/V 也改 4D-TMA（K 双缓冲、V 单缓冲），
 > 正结果、默认 auto**。补上 roadmap「下一步候选 ①」：O37 只做了 Q/dO，本节把 K/V 也 TMA 化。
 > O37 §36.6 曾判「K/V 双缓冲 smem 顶格」；本轮用两处**零成本折叠**解决——`dS3` 复用当前
 > K stage、`Ap` 复用 `Vs` ⇒ 只多一个 `ks_sw_bytes`(4096B)+64B mbar，`smem 70656→74816B`

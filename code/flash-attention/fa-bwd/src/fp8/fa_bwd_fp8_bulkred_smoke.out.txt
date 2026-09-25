@@ -1,0 +1,2 @@
+1D bulk-reduce smoke: max_abs=0.000e+00 (expect 28.0)
+=== PASS ===
