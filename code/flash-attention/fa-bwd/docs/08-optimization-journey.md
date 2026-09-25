@@ -170,6 +170,15 @@ smem 冲突 + 低 occ
    main **1.67–1.68×**、端到端 **1.26–1.27×**（0.087→0.069ms），Waves **0.48→0.97**、
    elapsed IPC 0.42→0.77，per-SM occupancy 不变（12.5%）。⇒ **打掉的是「SM 空转」而非延迟隐藏**；
    varlen 短序列切 K 反慢（opt-in）。详见 `docs/01` §14x、`docs/01b` §6af。
+9. **MLA（D=512）主 kernel 的 split-KV（O44，第 91 轮，正结果）**：O43 只覆盖 D=128 的
+   `wgmma2`；**MLA 走 mma 主 kernel（`fa_bwd_{fp16,bf16}_mma_kernel`, BM=32/BN=32/PIPE=1）
+   没有 ksplit**，S1024H2 / S512H4 / S256H2 的 grid 只有 64/64/16（Waves 0.48、occ 6.25%、
+   207KB smem）。把 O43 的机制扩到 mma 主 kernel（KV tile 切片 + 空切片早退 + prologue stage
+   对齐 `nt_begin&1`，dQ 在 split>1 时改 `red_add2`）：main **4.4–8.4×**、端到端 **4.2–5.4×**
+   （S1024H2 fp16 total 0.939→0.201ms），Waves 0.48→0.97、Ipc 0.33→0.57、per-SM occ 不变。
+   ⇒ **fp16/bf16 MLA total 现已比 fp8 MLA 快 ~5×**。详见 `docs/01` §14y、`docs/01b` §6ag、
+   `docs/04` §19。**教训：split-K 的 auto 目标别只填「一个波」——MLA（1 CTA/SM）实测 4 个波
+   （`grid*sp≈528`）更优**（同 O29 对 fp8 MLA 用 `S/2` 的有效目标）。
 
 ---
 

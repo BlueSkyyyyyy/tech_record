@@ -1,0 +1,24 @@
+########## b1_s256_h2_d512_causal_bf16 ##########
+[O44] MLA main k-split = 8 (auto)
+[timing] total(3 kernels) 0.0548 ms  4.90 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0230 ms | main 0.0220 ms | convert 0.0097 ms
+[O44 A/B] MLA main ksplit: 1 0.1852 (1.45) | 2 0.0513 (5.24, 3.61x) | 4 0.0279 (9.63, 6.64x)
+  dq   vs ref: max_abs=1.230e-02  max_rel=1.198e+00
+  dk   vs ref: max_abs=9.875e-03  max_rel=1.414e+00
+  dv   vs ref: max_abs=1.686e-02  max_rel=1.513e+00
+########## b1_s512_h4_d512_causal_bf16 ##########
+[O44] MLA main k-split = 8 (auto)
+[timing] total(3 kernels) 0.1283 ms  16.74 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0256 ms | main 0.0842 ms | convert 0.0185 ms
+[O44 A/B] MLA main ksplit: 1 0.3624 (5.93) | 2 0.1094 (19.64, 3.31x) | 4 0.0932 (23.05, 3.89x)
+  dq   vs ref: max_abs=8.753e-03  max_rel=1.212e+00
+  dk   vs ref: max_abs=1.082e-02  max_rel=1.699e+00
+  dv   vs ref: max_abs=1.740e-02  max_rel=1.701e+00
+########## b1_s1024_h2_d512_causal_bf16 ##########
+[O44] MLA main k-split = 8 (auto)
+[timing] total(3 kernels) 0.2000 ms  21.47 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0311 ms | main 0.1518 ms | convert 0.0172 ms
+[O44 A/B] MLA main ksplit: 1 0.7136 (6.02) | 2 0.2121 (20.25, 3.37x) | 4 0.1738 (24.72, 4.11x)
+  dq   vs ref: max_abs=5.838e-03  max_rel=2.319e+00
+  dk   vs ref: max_abs=9.519e-03  max_rel=1.571e+00
+  dv   vs ref: max_abs=1.568e-02  max_rel=1.199e+00

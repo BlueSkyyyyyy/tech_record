@@ -1,0 +1,7 @@
+[O44] MLA main k-split = 8 (auto)
+[timing] total(3 kernels) 0.2029 ms  21.17 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0314 ms | main 0.1516 ms | convert 0.0199 ms
+[O44 A/B] MLA main ksplit: 1 0.7261 (5.92) | 2 0.2088 (20.57, 3.48x) | 4 0.1741 (24.67, 4.17x)
+  dq   vs ref: max_abs=5.838e-03  max_rel=2.319e+00
+  dk   vs ref: max_abs=9.519e-03  max_rel=1.571e+00
+  dv   vs ref: max_abs=1.568e-02  max_rel=1.199e+00

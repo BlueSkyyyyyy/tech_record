@@ -1729,6 +1729,37 @@ total 0.0869→**0.0692ms（1.26×，31.1 TF，单文件 0.0698 一致）**；ks
 
 原始输出：`src/bf16/fa_bwd_bf16_o43_sweep.out.txt`。
 
+## 6ag. O44-bf16：MLA（D=512）mma 主 kernel 的 N 方向 split-K（第九十一轮）—— **正结果，默认 auto**
+
+把 fp16 O44（`docs/01` §14y）**逐字 dtype 参数化**到 bf16。MLA（head_dim=512）走的是
+`fa_bwd_bf16_mma_kernel<512,32,32,1>`，其 `grid=ceil(S/32)·H·B` 在 S1024H2=64 / S512H4=64 /
+S256H2=16，ncu `Waves 0.48`、occ 6.25%（207KB smem→1 CTA/SM）⇒ 并行度不足。改动同 fp16：
+kernel 加 `int ksplit=1`（`ksp=bx%ksplit`/`mblk=bx/ksplit`、KV tile 切片、空切片早退、
+**prologue stage 用 `(nt_begin&1)` 对齐循环首 `nt&1`**）；`ksplit>1` 时 HD>128 的 GEMM5 dQ
+从非原子 RMW 改 `red_add2`；host `launch_bwd_mma` 加 `ksplit`、`--mlaksplit=N`（auto 目标
+`grid*sp≈528`、上限 16、按 `nblk` 封顶，仅 D==512）。单/两文件 device 逐字一致
+（`sync_onefile_device.py` 核对 `identical: True`）。
+
+**数值**（ours-vs-ref，bf16 causal，max_abs dq/dk/dv）与 O5c/§7.8 **逐位一致**：
+(1,256,2,512) `1.230e-2/9.875e-3/1.686e-2`；(1,512,4,512) `8.753e-3/1.082e-2/1.740e-2`；
+(1,1024,2,512) `5.838e-3/9.519e-3/1.568e-2`。MHA D=128 回归逐位不变。
+
+**性能**（CUDA event，Hopper 构建，同 binary/同 session；`[O44 A/B]` main-only ksplit=1/2/4）：
+
+| MLA case | ksplit=1 | 2 | 4 | **auto（=8）** | total（auto） | total 比 |
+|---|---|---|---|---|---|---|
+| (1,256,2,512) | 0.1852 | 0.0513 | 0.0279 | **0.0220 ms** | 0.0548 ms（4.90 TF） | 5.4× |
+| (1,512,4,512) | 0.3624 | 0.1094 | 0.0932 | **0.0842 ms** | 0.1283 ms（16.74 TF） | 4.2× |
+| (1,1024,2,512) | 0.7136 | 0.2121 | 0.1738 | **0.1518 ms** | 0.2000 ms（21.47 TF） | 4.7× |
+
+对比 O5c 的 total 0.300/0.536/0.939ms ⇒ **4.2–5.4×**；ncu 与 fp16 O44 逐项同构（Waves
+0.48→0.97、per-SM occ 不变 6.23%、Issue Ipc 0.33→0.57、头号 stall 从 long_scoreboard 变
+fixed-latency `wait`）。FA/TE 反向后端不支持 D=512，无第三方对标；bf16 MLA total 已比
+fp8 MLA（`docs/04` §7.7）快 ~5×。
+
+原始输出：`src/bf16/fa_bwd_bf16_o44_mla_sweep.out.txt`；单文件
+`src/bf16/fa_bwd_bf16_mma_onefile.cu` 同源。
+
 ## 8. 下一步
 
 > **O36-bf16（§6z）已完成**：把 O34 的逐 atom 4D-TMA 从 BN=128 的 `wgmma2b` 补到 **BN=64 的

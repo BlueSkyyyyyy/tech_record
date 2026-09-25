@@ -167,7 +167,7 @@ static void launch_bwd_mma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
                            const bf16* do_, const float* delta, const float* lse,
                            float* dq_acc, float* dk_acc, float* dv_acc, int S, int H, int Hkv,
                            float scale, int causal, int sched,
-                           const int* cu_seqlens = nullptr) {
+                           const int* cu_seqlens = nullptr, int ksplit = 1) {
   constexpr int kvn = (PIPE == 0) ? 2 : (PIPE == 1 ? 4 : 3);
   constexpr int pds = (PIPE == 2) ? 2 * BM * (BN + 8) : 2 * BN * (BM + 8) + BM * (BN + 8);
   constexpr int smem =
@@ -176,7 +176,7 @@ static void launch_bwd_mma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
   fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE, R4, PREL><<<mg, THREADS, smem>>>(
       q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, sched,
-      cu_seqlens);
+      cu_seqlens, ksplit);
 }
 
 #ifdef FA_WGMMA
@@ -563,6 +563,9 @@ int main(int argc, char** argv) {
   // O43：wgmma2（BN=64）主 kernel 的 N 方向 split-K。`-1`=自动（仅 D==128、非 maintma、未切块
   //   grid 不足一个波时按需切）；`1`=关（A/B）；`>=2`=强制。
   int wg2ksplit = -1;
+  // O44：MLA（HD=512）mma 主 kernel 的 N 方向 split-K（split-KV）。`-1`=自动（D==512 时按
+  //   「填满 4 个波」切，D==128 恒 1）；`1`=关（A/B）；`>=2`=强制。
+  int mlaksplit = -1;
   // O17-2：wgmma2 的 GEMM3/GEMM4 是否拆分到两个 warpgroup（1=拆，0=原版 wg0 串行）。
   int wg2split_sel = 1;
   // O24：delta 用 warp-per-row 向量化版（1，默认）还是旧 block-per-row smem 版（0，A/B）。
@@ -600,6 +603,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--maintma=", 0) == 0) maintma_sel = atoi(a.c_str() + 10);
     else if (a == "--maintma") maintma_sel = 1;
     else if (a.rfind("--wg2ksplit=", 0) == 0) wg2ksplit = atoi(a.c_str() + 12);
+    else if (a.rfind("--mlaksplit=", 0) == 0) mlaksplit = atoi(a.c_str() + 12);
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_sel = atoi(a.c_str() + 12);
     else if (a.rfind("--dqdirect=", 0) == 0) dq_direct_sel = atoi(a.c_str() + 11);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
@@ -768,6 +772,25 @@ int main(int argc, char** argv) {
   const int pp_sel = (pipe >= 0) ? pipe : auto_pipe;
   printf("[O6c] main grid=%lld auto=(BM=%d,BN=%d,PIPE=%d) sel=(BM=%d,BN=%d,PIPE=%d)\n", grid,
          auto_bm, auto_bn, auto_pipe, bm_sel, bn_sel, pp_sel);
+
+  // O44：MLA（D=512）主 kernel 的 N 方向 split-K 生效值（fp16 O44 的 bf16 参数化）。目标
+  //   `grid*sp ≈ 528`（1 CTA/SM 的 4 个波）、上限 16，再按 `nblk=ceil(S/BN)` 封顶。
+  //   `--mlaksplit=N` 可强制/关；D!=512 恒 1（HD=128 的 wgmma2 走 O43 的 opt-in ksplit）。
+  int mlaksplit_eff = 1;
+  if (D == 512) {
+    if (mlaksplit >= 1) mlaksplit_eff = mlaksplit;
+    else {
+      const int base_m = (S + bm_sel - 1) / bm_sel;
+      const long base = (long)base_m * H * B;
+      int sp = 1;
+      while (sp < 16 && base * (sp * 2) <= 528) sp *= 2;
+      const int nt_cap = (S + bn_sel - 1) / bn_sel;
+      while (sp > nt_cap && sp > 1) sp >>= 1;
+      mlaksplit_eff = sp;
+    }
+  }
+  if (D == 512)
+    printf("[O44] MLA main k-split = %d (auto)\n", mlaksplit_eff);
 #define LAUNCH_CFG(HD_, BM_, BN_, PIPE_)                                                   \
   do {                                                                                     \
     if (r4) {                                                                              \
@@ -775,27 +798,28 @@ int main(int argc, char** argv) {
         launch_bwd_mma<HD_, BM_, BN_, PIPE_, true, true>(g, d_q, d_k, d_v, d_do, d_delta,  \
                                                          d_lse, d_dq_acc, d_dk_acc,        \
                                                          d_dv_acc, S, H, Hkv, scale,       \
-                                                         (int)causal, sched);              \
+                                                         (int)causal, sched, nullptr, mlaksplit_eff); \
       else                                                                                 \
         launch_bwd_mma<HD_, BM_, BN_, PIPE_, true, false>(g, d_q, d_k, d_v, d_do, d_delta, \
                                                           d_lse, d_dq_acc, d_dk_acc,       \
                                                           d_dv_acc, S, H, Hkv, scale,      \
-                                                          (int)causal, sched);             \
+                                                          (int)causal, sched, nullptr, mlaksplit_eff); \
     } else {                                                                               \
       if (prel)                                                                            \
         launch_bwd_mma<HD_, BM_, BN_, PIPE_, false, true>(g, d_q, d_k, d_v, d_do, d_delta, \
                                                           d_lse, d_dq_acc, d_dk_acc,       \
                                                           d_dv_acc, S, H, Hkv, scale,      \
-                                                          (int)causal, sched);             \
+                                                          (int)causal, sched, nullptr, mlaksplit_eff); \
       else                                                                                 \
         launch_bwd_mma<HD_, BM_, BN_, PIPE_, false, false>(                            \
             g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,    \
-            Hkv, scale, (int)causal, sched);                                              \
+            Hkv, scale, (int)causal, sched, nullptr, mlaksplit_eff);                      \
     }                                                                                      \
   } while (0)
 
   auto launch_cfg = [&](int bm, int bn, int pp, bool r4, bool prel) {
     dim3 g((S + bm - 1) / bm, H, B);
+    if (D == 512 && mlaksplit_eff > 1) g.x *= (unsigned)mlaksplit_eff;   // O44：split-KV 抬 grid
     if (D == 512) {
       // MLA：BN=32；BM 可 32/64；只支持 PIPE=0/1。
       if (bm == 64) {
@@ -1556,6 +1580,38 @@ int main(int argc, char** argv) {
     printf("[MLA512 A/B] main: (32,32,0) %.4f (%.2f TF) | (32,32,1) %.4f (%.2f) | "
            "(64,32,0) %.4f (%.2f) => best %.3fx\n",
            a, tf(a), b, tf(b), c, tf(c), a / std::min(a, std::min(b, c)));
+  }
+
+  // ---- O44 A/B：MLA（D=512）主 kernel 的 N 方向 split-K（同 binary、同 session）----
+  if (D == 512 && causal) {
+    auto time_ks = [&](int ks, float* out_ms) {
+      dim3 g((S + 31) / 32, H, B);
+      g.x *= (unsigned)ks;
+      auto launch = [&]() {
+        launch_bwd_mma<512, 32, 32, 1, false, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse,
+                                                    d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                                    scale, (int)causal, 0, nullptr, ks);
+      };
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    float k1 = 0.f, k2 = 0.f, k4 = 0.f;
+    time_ks(1, &k1);
+    time_ks(2, &k2);
+    time_ks(4, &k4);
+    auto tf = [&](float ms) { return main_flops / (ms * 1e-3) / 1e12; };
+    printf("[O44 A/B] MLA main ksplit: 1 %.4f (%.2f) | 2 %.4f (%.2f, %.2fx) | "
+           "4 %.4f (%.2f, %.2fx)\n",
+           k1, tf(k1), k2, tf(k2), k1 / k2, k4, tf(k4), k1 / k4);
   }
 
   // ---- 数值对拍（重新跑一次完整 forward 保证累加缓冲清零）----

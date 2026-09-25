@@ -2649,7 +2649,25 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第九十轮）**：**O43——fp16/bf16 `wgmma2` 主 kernel 的 N 方向 split-K（正结果、默认 auto
+> **最新（第九十一轮）**：**O44——fp16/bf16 MLA（D=512）mma 主 kernel 的 N 方向 split-K
+> （split-KV；正结果、默认 auto）**。补上「P5 backlog：MLA split-KV 提高 grid / 下一步候选
+> ②③」：O43 只覆盖 D=128 的 `wgmma2`，**MLA 走 mma 主 kernel（`fa_bwd_{fp16,bf16}_mma_kernel`
+> BM=32/BN=32/PIPE=1）没有 ksplit**，base grid 只有 64/64/16 CTA（S1024H2/S512H4/S256H2，
+> ncu Waves 0.48、occ 6.25%、207KB smem→1 CTA/SM）⇒ 并行度不足。给 mma 主 kernel 加运行时
+> `ksplit`（KV tile 切片 + 空切片早退 + prologue stage 用 `nt_begin&1` 对齐；dQ 在 split>1 时
+> 从非原子 RMW 改跨 CTA `red_add2`，`ksplit==1` 逐位退化），host `--mlaksplit=N`、auto 仅
+> D==512 目标 **`grid*sp≈528`（1 CTA/SM 的 4 个波，别只填一个波）、上限 16、按 `nblk` 封顶**。
+> **main 4.4–8.4×、端到端 4.2–5.4×**（fp16 total 0.300/0.536/0.939→**0.0566/0.1284/0.2009ms**），
+> **Waves 0.48→0.97、Issued Ipc 0.33→0.57、per-SM occ 不变 6.25%、头号 stall 从 long_scoreboard
+> 变 fixed-latency `wait`**；数值与 O5c 逐位一致、MHA D=128/varlen 回归不变，单/两文件同源
+> （`sync_onefile_device.py` 核对）。**fp16/bf16 MLA total 现已比 fp8 MLA（§7.7）快 4.9–5.4×**。
+> 详见 `docs/01` §14y、`docs/01b` §6ag、`docs/04` §19、`docs/08` §5.9。
+> **下一步候选**：① **fp8 MLA 也吃这条 split（或对齐 `S/2` 目标）**——fp8 MLA 1 CTA/SM 且
+> 目标仍是「一个波」，本次证明偏保守；② **MLA 降 smem 冲 2 CTA/SM**（四 dtype 共同墙，dQ 缓冲/
+> `Kt/Qt/dOt` 转置副本是抓手）；③ **fp8 侧「减 mma 依赖 / 提 occupancy」**（O42 硬约束）；
+> ④ **varlen 主 kernel K 维 split**（O43 varlen 负结果，需另找形态）。
+>
+> **（第九十轮）**：**O43——fp16/bf16 `wgmma2` 主 kernel 的 N 方向 split-K（正结果、默认 auto
 > 仅小 grid）**。补上「下一步候选 ④ / 小 S grid 不足」：**S=512 MHA 的 wgmma2 grid=64 < 132 SM**
 > （ncu Waves 0.48）。加运行时 `ksplit`（KV tile 切片 + dQ 跨 CTA 原子累加，`ksplit==1` 逐位
 > 退化），auto 只在 `D==128/BN=64/非 cluster·TMA 且 base<132` 时切到「填满一个波」。
@@ -3104,8 +3122,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `HD` 模板扩到 128/512、GEMM3/4/5 N-tile 循环、dQ 全局累加；main 5.2–5.8×（fp16）/
       3.7–4.1×（bf16），数值同噪声、MHA 回归逐位不变。fp8 MLA 早在第二十一轮即为张量核。
       **剩余**：三者都是 1 CTA/SM、grid 不足一个波（ncu Waves 0.48、bound=延迟+低并行度）⇒
-      下一步**降 smem 冲 2 CTA/SM** 与 **split-KV 提高 grid**；fp8 侧最大障碍是 `Kt/Qt/dOt`
-      转置副本（O4b 已把 fp8 MLA smem 223→201KB，仍需 >116KB）。对标 FlashMLA 的分块/流水/persistent。
+      ~~**split-KV 提高 grid**~~ **已完成（第九十一轮 O44）**：fp16/bf16 MLA mma 主 kernel 加
+      `ksplit`（KV tile 切片 + 跨 CTA dQ `red_add2`），auto 目标 `grid*sp≈528`（4 个波），
+      main 4.4–8.4×、端到端 4.2–5.4×、Waves 0.48→0.97，数值与 O5c 逐位一致（`docs/01` §14y、
+      `docs/01b` §6ag、`docs/04` §19）。**剩余：降 smem 冲 2 CTA/SM**（fp8 MLA 仍 1 CTA/SM 且
+      split 目标偏保守，可先对齐 `S/2`）；fp8 侧最大障碍是 `Kt/Qt/dOt` 转置副本（O4b 已把 fp8 MLA
+      smem 223→201KB，仍需 >116KB）。对标 FlashMLA 的分块/流水/persistent。
 > 以下为既有 fp8 优化 backlog（P5 已全部收口，现在可与 MLA 优化合并推进）。
 
 > P5-3 已完成，ROADMAP 里的「P 项」全部收口，后续为**优化 backlog**。
@@ -3295,6 +3317,15 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       加运行时 `ksplit`（KV tile 切片 + dQ 跨 CTA 原子累加，`ksplit==1` 逐位退化），auto 仅
       `D==128/BN=64/非 cluster·TMA 且 base<132`；**S=512 main 1.67–1.68×、端到端 1.26–1.27×、
       Waves 0.48→0.97**，数值逐位一致；varlen 负结果（opt-in）。详见 `docs/01` §14x、`docs/01b` §6af。
+- [x] **O44（第九十一轮）fp16/bf16 MLA（D=512）mma 主 kernel 的 N 方向 split-K（正结果，默认 auto）**：
+      MLA 走 mma 主 kernel（BM=32/BN=32/PIPE=1）没有 ksplit，base grid 只有 64/64/16（S1024H2/
+      S512H4/S256H2），ncu Waves 0.48、occ 6.25%。扩 O43 的机制到 mma 主 kernel（KV tile 切片 +
+      空切片早退 + prologue stage 对齐 `nt_begin&1`；split>1 时 dQ 改跨 CTA `red_add2`），
+      auto 仅 D==512、目标 **`grid*sp≈528`（4 个波）**、上限 16、按 `nblk` 封顶。**main 4.4–8.4×、
+      端到端 4.2–5.4×**（fp16 total 0.300/0.536/0.939→**0.0566/0.1284/0.2009ms**，4.74/16.73/21.38 TF），
+      **Waves 0.48→0.97、Ipc 0.33→0.57**，数值与 O5c 逐位一致、MHA D=128/varlen 回归不变，单/两文件
+      同源。**fp16/bf16 MLA total 已比 fp8 MLA 快 4.9–5.4×**。详见 `docs/01` §14y、`docs/01b` §6ag、
+      `docs/04` §19、`docs/08` §5.9。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog
