@@ -1,0 +1,40 @@
+### fp16 O43 wgmma2 ksplit sweep (S=512 MHA) + regression + varlen negative
+--- S512 MHA ksplit=1 ---
+[O43] wgmma2 k-split = 1
+[timing] total(3 kernels) 0.0871 ms  24.65 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0214 ms | main 0.0529 ms | convert 0.0129 ms
+  dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
+  dk   vs ref: max_abs=1.771e-03  max_rel=2.997e-01
+  dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+--- S512 MHA ksplit=2 ---
+[O43] wgmma2 k-split = 2
+[timing] total(3 kernels) 0.0687 ms  31.26 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0208 ms | main 0.0317 ms | convert 0.0163 ms
+  dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
+  dk   vs ref: max_abs=1.771e-03  max_rel=2.997e-01
+  dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+--- S512 MHA ksplit=4 ---
+[O43] wgmma2 k-split = 4
+[timing] total(3 kernels) 0.0732 ms  29.34 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0212 ms | main 0.0342 ms | convert 0.0178 ms
+  dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
+  dk   vs ref: max_abs=1.771e-03  max_rel=2.997e-01
+  dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+--- regress S1024 full (auto) ---
+[O43] wgmma2 k-split = 1
+[timing] total(3 kernels) 0.3309 ms  25.96 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1364 ms | main 0.1081 ms | convert 0.0865 ms
+  dq   vs ref: max_abs=3.268e-04  max_rel=8.146e-02
+  dk   vs ref: max_abs=2.523e-04  max_rel=8.022e-02
+  dv   vs ref: max_abs=1.225e-04  max_rel=1.830e-02
+--- regress S4096 causal (auto) ---
+[O43] wgmma2 k-split = 1
+[timing] total(3 kernels) 1.3147 ms  104.54 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2860 ms | main 0.9568 ms | convert 0.0719 ms
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+--- varlen b2_t500 ksplit=1 ---
+[timing] VARLEN total 0.0684 ms  15.57 TFLOPS (sum_b 4HL^2D)
+--- varlen b2_t500 ksplit=2 ---
+[timing] VARLEN total 0.0696 ms  15.30 TFLOPS (sum_b 4HL^2D)

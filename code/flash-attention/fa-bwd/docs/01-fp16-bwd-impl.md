@@ -3166,6 +3166,78 @@ scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu --varlen --varlentma=1 \
 `..._varlen_{tma,cpasync}_ncu_main_b4_t3840.out.txt`、
 `..._varlen_fa3_te_baseline.out.txt`。
 
+## 14x. O43-fp16：wgmma2 主 kernel 的 N 方向 split-K（第九十轮）—— **正结果，默认 auto（仅小 grid）**
+
+### 14x.1 动机
+
+O23 默认档下 D=128 的小 S 走 `wgmma2`（BM=128/BN=64、2 warpgroups、256 线程、1 CTA/SM）。
+其 grid = `ceil(S/128) × H × B`：**S=512 MHA（H=16,B=1）= 64 CTA < 132 SM**，即 ncu
+`Waves Per SM = 0.48`——**一半 SM 空转**（O17 之后 S≥1024 已满波，故只有 S≤512 受影响；
+fp8 的 mma 主 kernel 早有 `ksplit`，fp16/bf16 的 wgmma2 一直没有）。
+
+fp16/bf16 的 wgmma2 之前不做 split-K 的**直接障碍**是 O24：dQ 由本 CTA 唯一拥有 ⇒ 主 kernel
+**直接写 fp16 `dq`**、convert 跳过 dQ。切 K 后同一 Q 行由多个 CTA 贡献 ⇒ dQ 必须跨 CTA 原子累加。
+
+### 14x.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+`fa_bwd_fp16_wgmma2_kernel` 加运行时参数 `int ksplit = 1`（只走 cp.async 路径；cluster / TMA
+分支的生效值恒 1，不参与）：
+- **网格分解**：`ksp = bx % ksplit`、`mblk = bx / ksplit`（`ksplit==1` 时逐式退回 `mblk=bx`）；
+- **KV tile 切片**：`nt_begin = ntiles*ksp/ksplit`、`nt_end = ntiles*(ksp+1)/ksplit`，
+  切片为空则整 CTA 早退；K/V 预取从 `nt_begin*BN` 起，循环用全局列偏移 `(nt_begin+nt)*BN`；
+- **dQ 归约**：`ksplit>1` 时末段 epilogue 改 `red_add2(dq_acc, ...)`（跨 CTA `atomicAdd`），
+  host 传 `dq_h=nullptr` 并 `memset(dq_acc)`、`convert` 补回 dQ 一趟。
+
+**默认 auto**（`--wg2ksplit=-1`）：仅 `D==128 && wgmma2(BN=64) && 非 cluster/TMA` 且未切块
+`base = ceil(S/128)*H*B < 132` 时，取「填满一个波」的 2 的幂（cap 8、按 `ceil(S/64)` 封顶）；
+其它 shape（S≥1024、GQA/MQA、S≥4096 的 wgmma2b）恒 1 ⇒ 逐位回归。`--wg2ksplit=N` 可强制/关闭。
+
+### 14x.3 数值（ours-vs-fp32-ref，fp16 causal，max_abs dq/dk/dv）
+
+S=512 MHA：ksplit=1/2/4 三者 **完全相同** `1.671/1.771/1.899e-3`（与 O5 以来历史逐位一致；
+切 K 只改 fp32 原子求和次序，落在 fp16 噪声内）。回归：S=1024 full `3.27/2.52/1.23e-4`、
+S=4096 causal `1.88/1.73/1.97e-3` 均与 ksplit=1 一致。**单/两文件逐位一致**。
+
+### 14x.4 性能（CUDA event；同 binary、同 session）
+
+| S=512 MHA fp16 | main (ms) | total (ms) |
+|---|---|---|
+| ksplit=1（旧） | 0.0529 | 0.0871 |
+| **ksplit=2（auto）** | **0.0317（1.67×）** | **0.0687（1.27×）** |
+| ksplit=4 | 0.0342 | 0.0732 |
+
+即端到端 0.0871→**0.0687ms / 31.3 TF**。同 session 纯反向对标（`fa_vs_te_bwd_only.py`）：
+FA2 0.0437ms/98 TF、**FA3 0.0261ms/164 TF**、TE 0.0320ms/134 TF ⇒ ours/FA3 时间比
+**3.34×→2.63×**。S=1024 / S=4096 因 `base≥132`、走 wgmma2b，auto=1、数值与时间均不变。
+
+### 14x.5 ncu（`fa_bwd_fp16_wgmma2_kernel`，`--set full --launch-count 1`，S=512）
+
+| 指标 | ksplit=1 | ksplit=2 |
+|---|---|---|
+| Duration | 54.08 µs | **33.50 µs（1.61×）** |
+| Waves Per SM | **0.48** | **0.97** |
+| Achieved Occupancy | 12.47% | 12.46% |
+| Executed Ipc Elapsed | 0.42 | **0.77** |
+| DRAM / L2 Throughput | 9.4% / 25.6% | 18.8% / 49.8% |
+
+**结论：墙 = grid 不足一个波（Waves 0.48，half-SM 空转），与 per-SM occupancy（1 CTA/SM）无关。**
+切 K=2 把 wave 填到 0.97、elapsed IPC 近翻倍；per-SM 仍 12.5%（smem/regs 卡 1 CTA/SM），
+`No Eligible` 65%→69%——即**打掉的是「SM 空转」，不是「延迟隐藏」**。
+
+### 14x.6 复现 / 原始输出
+
+```
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16 --iters=300 [--wg2ksplit=N]
+```
+原始输出：`src/fp16/fa_bwd_fp16_o43_sweep.out.txt`、
+`..._o43_ncu_wg2_s512_ks{1,2}.out.txt`。
+
+**VARLEN（负结果，opt-in）**：短序列 varlen（如 `[300,200]` H16，base≈96<132）切 K=2
+实测 total 0.0684→0.0696ms（**−1.8%**）——Q/dO 重载 + 额外 convert 抵不过填 SM（mblk 少、
+tile 切片过细）。**故 varlen 不做 auto，仅 `--wg2ksplit=N>=2` 显式开启**。
+
 ## 15. 下一步
 
 > **O23（§14n）已完成**：把 O17/O18 的主 kernel + O9a 的 LSE 在 `-DFA_WGMMA` 构建下**默认打开**

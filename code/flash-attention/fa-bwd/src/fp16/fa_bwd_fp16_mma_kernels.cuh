@@ -1671,7 +1671,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
                           float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                           float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                           int causal, __half* __restrict__ dq_h = nullptr,
-                          const int* __restrict__ cu_seqlens = nullptr) {
+                          const int* __restrict__ cu_seqlens = nullptr,
+                          int ksplit = 1) {
   static_assert(HD == 128, "wgmma2 主 kernel 目前只做 HD=128");
   constexpr int NTH = 256;
   constexpr int BM = 128, BN = 64;
@@ -1696,7 +1697,12 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
   const int bx = blockIdx.x;
   // nblk 仅用于 DET/cluster 路径（varlen 不走），保持定长语义。
   const int nblk = (S + BM - 1) / BM;
-  const int mblk = bx;
+  // O43：N 方向 split-K（仅 CL==1 使用）。同一 mblk 的 KV tile [0,ntiles) 被均分给
+  //   ksplit 个 CTA；每个 CTA 只扫自己那一段，dQ 改走跨 CTA fp32 `atomicAdd`（ksplit==1
+  //   时逐式退化：ksp=0/mblk=bx/nt_begin=0/nt_end=ntiles，数值与原路径逐位相同）。
+  //   小 S（grid 不足一个波）时把 grid 从 S/BM×H 抬到 ksplit 倍，填满空 SM。
+  const int ksp = (ksplit > 1) ? (bx % ksplit) : 0;
+  const int mblk = (ksplit > 1) ? (bx / ksplit) : bx;
   // O25：cluster 沿 bx（clusterDim.x=CL），leader = cluster 内 rank 0（mblk 较小的那个）。
   const int crank = (CL > 1) ? (int)fa_cluster_rank() : 0;
   unsigned leader_dv = 0, leader_dk = 0;
@@ -1716,18 +1722,26 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * BM;
 
-  qdo_issue_async_sw<HD, BM, NTH>(q, do_, m0, len, H, h, b, tid, Qs, dOs, qbase);
-
   const int ncols = causal ? min(len, m0 + BM) : len;
   const int ntiles = (ncols + BN - 1) / BN;
+  // O43：本 CTA 负责的 KV tile 切片 [nt_begin, nt_end)。ksplit==1 时即 [0,ntiles)。
+  const int nt_begin = (ksplit > 1) ? (int)(((long)ntiles * ksp) / ksplit) : 0;
+  const int nt_end = (ksplit > 1) ? (int)(((long)ntiles * (ksp + 1)) / ksplit) : ntiles;
+  if (ksplit > 1 && nt_end <= nt_begin) return;   // 该切片无 tile（causal 小 mblk 可能被切空）
+
+  qdo_issue_async_sw<HD, BM, NTH>(q, do_, m0, len, H, h, b, tid, Qs, dOs, qbase);
+
   // O25：cluster 配对「相邻两个 mblk」——高的那个（rank1）恒多做 BM/BN 个（=2）KV tile。
   //   低 mblk 的 rank0 把循环延到 rank1 的 tile 数；多出的 tile 因 causal mask 使 P=0、
   //   dK/dV 偏和为 0，只贡献 barrier 参与与 0 累加（不改数值）。这样 cluster 内两个 CTA
   //   锁步，per-tile 的 DSM 合并才有确定的同步点。
-  const int nt_loop = ntiles + ((CL > 1 && causal && crank == 0) ? (BM / BN) : 0);
+  const int nt_loop = (nt_end - nt_begin) +
+                      ((CL > 1 && causal && crank == 0) ? (BM / BN) : 0);
   if (nt_loop > 0) {
-    kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, 0, len, Hkv, hkv, b, tid, Ks, Vs, qbase);
-    kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, 0, len, Hkv, hkv, b, tid, Ks, Vs, qbase);
+    kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, nt_begin * BN, len, Hkv, hkv, b, tid, Ks,
+                                                Vs, qbase);
+    kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, nt_begin * BN, len, Hkv, hkv, b, tid, Ks,
+                                                Vs, qbase);
   }
 
   // 本 wg 的 Q 行 = wg*64 + [0,64)。每线程两行（r_lo / r_hi）。
@@ -1778,13 +1792,13 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
   }
 
   for (int nt = 0; nt < nt_loop; ++nt) {
-    const int j0 = nt * BN;
+    const int j0 = (nt_begin + nt) * BN;   // O43：tile 的全局列偏移
     char* Kt = Ks + (nt & 1) * KTILE;
     asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
     if (nt + 1 < nt_loop)
-      kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
-                                                  Ks + ((nt + 1) & 1) * KTILE, Vs, qbase);
+      kv_issue_async_sw<HD, BN, true, false, NTH>(k, v, (nt_begin + nt + 1) * BN, len, Hkv, hkv,
+                                                  b, tid, Ks + ((nt + 1) & 1) * KTILE, Vs, qbase);
 
     // ---- (1)(2) 本 wg 的 S=QKᵀ 与 dP=dO·Vᵀ（m64n64），统一 wait0 ----
     float sacc[32], dpacc[32];
@@ -1821,8 +1835,8 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
     // 两个 wg 的 P/dS 都写好；同时 GEMM2 已读完 V[nt]，可覆盖 V。
     __syncthreads();
     if (nt + 1 < nt_loop)
-      kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
-                                                  Ks, Vs, qbase);
+      kv_issue_async_sw<HD, BN, false, true, NTH>(k, v, (nt_begin + nt + 1) * BN, len, Hkv, hkv,
+                                                  b, tid, Ks, Vs, qbase);
 
     if constexpr (SPLIT) {
       // ---- O17-2：把 GEMM3(dV) 交给 wg0、GEMM4(dK) 交给 wg1，两者都仍对全 BM=128 归约
@@ -1988,8 +2002,13 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
         const int qi = m0 + wg * 64 + rr;
         const int c = nh * 64 + j * 8 + c2;
         if (qi < len) {
+          // O43：ksplit>1 时同一 Q 行由多个 CTA 贡献 ⇒ dQ 必须跨 CTA 原子累加（dq_acc）。
+          if (ksplit > 1) {
+            float* base = dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c;
+            red_add2(base, dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
+          }
           // O24：同 wgmma2b，dQ 唯一拥有 ⇒ 可直接写 fp16，省掉 convert 的 dQ 一趟。
-          if (dq_h)
+          else if (dq_h)
             *reinterpret_cast<__half2*>(dq_h + (((size_t)(qbase + qi)) * H + h) * HD + c) =
                 __floats2half2_rn(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
           else {

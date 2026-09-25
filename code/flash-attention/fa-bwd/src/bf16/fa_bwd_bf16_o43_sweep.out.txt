@@ -1,0 +1,36 @@
+### bf16 O43 wgmma2 ksplit sweep (S=512 MHA) + regression
+--- S512 MHA ksplit=1 ---
+[O43] wgmma2 k-split = 1
+[timing] total(3 kernels) 0.0869 ms  24.70 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0212 ms | main 0.0538 ms | convert 0.0119 ms
+  dq   vs ref: max_abs=9.001e-03  max_rel=1.490e+00
+  dk   vs ref: max_abs=1.261e-02  max_rel=1.784e+00
+  dv   vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+--- S512 MHA ksplit=2 ---
+[O43] wgmma2 k-split = 2
+[timing] total(3 kernels) 0.0692 ms  31.05 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0209 ms | main 0.0320 ms | convert 0.0162 ms
+  dq   vs ref: max_abs=9.001e-03  max_rel=1.490e+00
+  dk   vs ref: max_abs=1.261e-02  max_rel=1.784e+00
+  dv   vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+--- S512 MHA ksplit=4 ---
+[O43] wgmma2 k-split = 4
+[timing] total(3 kernels) 0.0735 ms  29.21 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0214 ms | main 0.0350 ms | convert 0.0171 ms
+  dq   vs ref: max_abs=9.001e-03  max_rel=1.490e+00
+  dk   vs ref: max_abs=1.261e-02  max_rel=1.784e+00
+  dv   vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+--- onefile S512 ksplit=2 ---
+[O43] wgmma2 k-split = 2
+[timing] total(3 kernels) 0.0698 ms  30.75 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0208 ms | main 0.0323 ms | convert 0.0167 ms
+  dq   vs ref: max_abs=9.001e-03  max_rel=1.490e+00
+  dk   vs ref: max_abs=1.261e-02  max_rel=1.784e+00
+  dv   vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+--- regress S4096 causal (auto) ---
+[O43] wgmma2 k-split = 1
+[timing] total(3 kernels) 1.3165 ms  104.40 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2842 ms | main 0.9496 ms | convert 0.0827 ms
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00

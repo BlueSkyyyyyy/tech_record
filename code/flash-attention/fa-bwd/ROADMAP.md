@@ -2493,6 +2493,30 @@
     `..._o42_sm90_varlen_d512.out.txt`、`..._mma_onefile_o42_s512.out.txt`；文档 `docs/03` §45、
     `docs/08` §5.7。
 
+- 2026-09-25（第九十轮）：**O43 完成（fp16/bf16 `wgmma2` 主 kernel 的 N 方向 split-K）——
+  正结果、默认 auto（仅小 grid）**。补上「下一步候选 ④ / 小 S grid 不足」：fp8 的 mma 主 kernel
+  早有 `ksplit`，fp16/bf16 默认档的 `wgmma2`（BM=128/BN=64、1 CTA/SM）没有，**S=512 MHA
+  grid=64 < 132 SM**（ncu Waves 0.48，half-SM 空转）。
+  - **实现**：`fa_bwd_{fp16,bf16}_wgmma2_kernel` 加运行时 `int ksplit=1`（只走 cp.async 路径；
+    cluster/TMA 恒 1）：`ksp=bx%ksplit`/`mblk=bx/ksplit`、KV tile 切片 `[nt_begin,nt_end)`、
+    空切片整 CTA 早退、预取/列偏移用全局 tile 号；`ksplit>1` 时 dQ 改 `red_add2(dq_acc)` 跨 CTA
+    原子累加（host 传 `dq_h=nullptr` + `memset` + `convert` 补 dQ）。**auto 仅 `D==128 && BN=64
+    && 非 cluster/TMA && ceil(S/128)*H*B < 132`** 时取「填满一个波」的 2 的幂（cap 8）；
+    `--wg2ksplit=N` 强制/关闭。单/两文件 device 逐字一致（`sync_onefile_device.py` identical）。
+  - **数值**：S=512 ksplit=1/2/4 **逐位一致**（fp16 `1.671/1.771/1.899e-3`、bf16
+    `9.001/1.261e-2/1.365e-2`）；S=1024 full / S=4096 causal 回归不变。
+  - **性能**（同 binary、同 session，S=512 MHA）：**fp16 main 0.0529→0.0317ms（1.67×）、
+    total 0.0871→0.0687ms（1.27×，31.3 TF）；bf16 main 1.68×、total 0.0869→0.0692ms**；
+    ksplit=4 略差。同 session 纯反向 FA3 S512 0.0261ms/164TF ⇒ ours/FA3 **3.34×→2.63×**。
+  - **ncu**（fp16 wgmma2 S512）：Duration 54.08→**33.50µs**、**Waves 0.48→0.97**、
+    Executed Ipc Elapsed 0.42→**0.77**、DRAM 9.4→18.8%、L2 25.6→49.8%；per-SM occ 恒 12.5%
+    （1 CTA/SM）⇒ **墙是 grid 不足一个波、非 per-SM occupancy**。
+  - **VARLEN 负结果**：短序列（`[300,200]` H16）切 K=2 total 0.0684→0.0696ms（−1.8%）
+    ⇒ varlen **不做 auto**，仅 `--wg2ksplit=N` opt-in。
+  - 原始输出 `src/fp16/fa_bwd_fp16_o43_sweep.out.txt`、`..._o43_ncu_wg2_s512_ks{1,2}.out.txt`、
+    `src/bf16/fa_bwd_bf16_o43_sweep.out.txt`；文档 `docs/01` §14x、`docs/01b` §6af、`docs/04` §18、
+    `docs/08` §5.8。
+
 ## 为什么 ours 比 FA/TE 慢这么多（归因）
 
 「按 flash-attention 实现」指的是**算法与数据流照 FA**（preprocess 求 D、1colblock、recompute P、
@@ -2625,7 +2649,18 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第八十九轮）**：**O42——fp8 主 kernel「dK/dV 归约改 Hopper bulk-reduce」：负结果 +
+> **最新（第九十轮）**：**O43——fp16/bf16 `wgmma2` 主 kernel 的 N 方向 split-K（正结果、默认 auto
+> 仅小 grid）**。补上「下一步候选 ④ / 小 S grid 不足」：**S=512 MHA 的 wgmma2 grid=64 < 132 SM**
+> （ncu Waves 0.48）。加运行时 `ksplit`（KV tile 切片 + dQ 跨 CTA 原子累加，`ksplit==1` 逐位
+> 退化），auto 只在 `D==128/BN=64/非 cluster·TMA 且 base<132` 时切到「填满一个波」。
+> **S=512 MHA：main 1.67–1.68×、端到端 1.26–1.27×（0.087→0.069ms），Waves 0.48→0.97、
+> elapsed IPC 0.42→0.77（per-SM occ 恒 12.5%）**；数值逐位一致；S=1024/S=4096 回归不变；
+> varlen 短序列切 K 反慢（opt-in）。ours/FA3 时间比 **3.34×→2.63×**（fp16）。详见 `docs/01` §14x、
+> `docs/01b` §6af、`docs/04` §18、`docs/08` §5.8。**下一步候选**：① fp8 侧「减 mma 依赖 /
+> 提 occupancy」（同 O42，硬约束）；② MLA（D=512）FlashMLA 式重构；③ varlen 的 LSE 再挖 / 主
+> kernel K 维 split（本轮 varlen 负结果，需另找形态）；④ fp16/bf16 的 `L2 red`（三条路已证伪）。
+>
+> **（第八十九轮）**：**O42——fp8 主 kernel「dK/dV 归约改 Hopper bulk-reduce」：负结果 +
 > 墙的定量重测 + 纯 `sm_90` 构建修复**。ncu 重测：`red` 占 L2 扇区 **70.5%（114.5M）**、
 > `wait 1.53`+`short 1.30`、smem 74.8KB/regs 168 **双卡 3 CTA/SM**；**短路 dK/dV 的 red ⇒
 > main 1.60→0.94ms（天花板 1.70×）** ⇒ red 是头号成本。用 `cp.reduce.async.bulk`（SM90 1D，
@@ -3255,6 +3290,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `F2FP...PACK_AB_MERGE_C`，新 helper `foldpack4` + 开关 `FA_CVT2` 默认 1）。**数值逐位
       不变**；**d128 全中性**（指令 −4.3% 但纯 mma 依赖延迟 bound）、**MLA main ~1.03×**
       （S512H4 0.1423→0.1386、S1024H2 0.2727→0.2653ms）。详见 `docs/03` §33、`docs/04` §2.3。
+- [x] **O43（第九十轮）fp16/bf16 `wgmma2` 主 kernel 的 N 方向 split-K（正结果，默认 auto 仅小 grid）**：
+      fp8 的 mma 主 kernel 早有 `ksplit`，fp16/bf16 默认档 `wgmma2` 没有，S=512 MHA grid=64<132 SM。
+      加运行时 `ksplit`（KV tile 切片 + dQ 跨 CTA 原子累加，`ksplit==1` 逐位退化），auto 仅
+      `D==128/BN=64/非 cluster·TMA 且 base<132`；**S=512 main 1.67–1.68×、端到端 1.26–1.27×、
+      Waves 0.48→0.97**，数值逐位一致；varlen 负结果（opt-in）。详见 `docs/01` §14x、`docs/01b` §6af。
 - [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 ## 灵感 / backlog
