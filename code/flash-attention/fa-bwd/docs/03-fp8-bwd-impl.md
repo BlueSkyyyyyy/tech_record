@@ -4127,3 +4127,118 @@ ARCH="" NVCC_FLAGS="..." scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu \
 原始输出：`src/fp8/fa_bwd_fp8_o41_sweep.out.txt`（两文件 ×5 shape：timing + O41 A/B + 对拍）、
 `src/fp8/fa_bwd_fp8_o41_ncu_ab_s4096.out.txt`（qdtma vs kvtma 的 stall/扇区/吞吐）、
 `src/fp8/fa_bwd_fp8_o41_ncu_kvtma_s4096.out.txt`（`--set full`，3 CTA/SM 证据）。
+
+## 45. O42：fp8 主 kernel「dK/dV 归约改 Hopper bulk-reduce」——**负结果** + 墙的定量重测（第八十九轮）
+
+> 动机：第 88 轮（O41）把 Q/K/V/dO 全部 TMA 化后，roadmap 的「下一步候选 ①」是
+> **fp8 侧「减 mma 依赖 / 提 occupancy」**，并断言「K/V 搬运这条路已到上限」。本轮先
+> 用 ncu 把 fp8 主 kernel 的墙**重新量准**，再针对头号项做一次新机制的判决。
+
+### 45.1 墙的定量重测（`fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>`，S=4096，1.59ms）
+
+| 指标 | 值 | 占比/说明 |
+|---|---|---|
+| `lts__t_sectors_op_red` | **114.5 M** | 占 L2 扇区 ~70.5%（read 34.0 M + write 14.0 M） |
+| `lts__t_sectors_op_read/write` | 34.0 M / 14.0 M | |
+| `l1tex__t_requests_pipe_lsu_mem_global_op_red` | 9.54 M | 每 warp-request 8 扇区 = 32 lane × float2 **已完全 coalesced** |
+| `l1tex__t_sectors_pipe_lsu_mem_global_op_red` | 76.3 M | 76.3 M / 9.54 M = 8（无扇区浪费） |
+| stall `wait` / `short_scoreboard` | **1.53** / **1.30** | 每 issued-inst 平均周期；mma/smem 依赖 |
+| stall `long_scoreboard`/`not_selected`/`barrier` | 0.56 / 0.41 / 0.42 | |
+| Dynamic smem / regs / occupancy | 74.82 KB / 168 / **3 CTA/SM**（occ 18.4%） | smem 与 regs **双卡** 3 |
+
+结论：dK/dV 的跨 CTA `red` 是**头号成本**（L2 的 ~70%），且**已是 coalesced**（无扇区
+浪费，O4c 的 float2 向量化已到位）。
+
+### 45.2 天花板：短路 dK/dV 的 red（探针，结果无意义）
+
+按 `agent_skills/kernel-opt.md`「怀疑某段 global 重载是墙，就把它短路掉看天花板」，
+用临时 `-DFA_SKIP_RED` 把 `epi_dv`/`epi_dk` 的 `red_add2` 关掉（dQ red 保留）：
+
+| S=4096 | 正常 | 短路 dK/dV red | 倍数 |
+|---|---|---|---|
+| main（Q/dO/K/V-TMA） | 1.6015 ms | **0.9364–0.9422 ms** | **1.70×** |
+| total（quant+pre+main+cvt） | 1.9253 ms | **1.2526 ms** | 1.53× |
+
+⇒ dK/dV 的 red 操作（不是字节浪费）就值 **0.66 ms**；这是本轮唯一真实的杠杆，
+也是「减 mma 依赖 / 提 occupancy」之外被 ncu 证实的第一顺位。
+
+### 45.3 新机制：Hopper `cp.reduce.async.bulk`（1D，无需 tensormap）
+
+逐元素 `red.global.add.f32` 虽 coalesced，但每 tile 要发 ~2048 条、占满 LSU/L2 流水。
+Hopper 提供 **`cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32`**（PTX 8.0 /
+SM90，1D，直接对 global 做加法归约，多 CTA 并发原子）。冒烟
+`src/fp8/fa_bwd_fp8_bulkred_smoke.cu`：多 CTA 并发 reduce 到同一 global 区域，`max_abs=0.0`
+**PASS**。两个坑：① `.global` 目的地址必须用 **64 位寄存器**（`"l"` 约束），否则 illegal
+instruction；② generic 写 smem 后必须 **`fence.proxy.async.shared::cta`** 才能被 async
+proxy 读到。
+
+### 45.4 实现（`-DFA_BULKRED=1`，opt-in；单/两文件 device 逐字一致）
+
+`fp8_mma_body` 的 `epi_dv`/`epi_dk` 增加 staging 分支：把 `acc[i][j][q]*scale` 写进
+**per-warp smem staging**（每 warp [BN/2=16][64]，行距 `STGS=68`，复用在 fold 之后死亡的
+`Ps`/`Ss` 区，17.4 KB ≤ 2·BM·PSS·4 = 18.9 KB），随后每 warp 的 lane<16 各发一行
+256 B 的 `cp.reduce.async.bulk`（`bulk_issue`），**不等**，与 GEMM4/GEMM5 重叠；只有要覆盖
+staging 时才 `bulk_waitread()`（`cp.async.bulk.wait_group.read 0`）。不引入 `__syncthreads`
+（per-warp staging 私有，仅 `__syncwarp`）。
+
+### 45.5 数值（S=4096 fp8 causal）
+
+步骤元件与历史**逐位一致**（`dq/dk/dv vs ref = 2.635e-01/2.644e-01/3.216e-01`，
+与 §41/§44 完全相同）；bulk 版与 red 版只差跨 CTA atomic 加次序（≤1.7e-6）。
+
+### 45.6 性能（同 session，event，ms）
+
+| S=4096 | 默认（red） | `-DFA_BULKRED=1` | 比 |
+|---|---|---|---|
+| main（Q/dO/K/V-TMA） | 1.6015 | **1.8048** | **0.89×** |
+| total | 1.9253 | 2.1409 | 0.90× |
+
+**负结果**：bulk-reduce 比逐元素 red **慢 11%**。机制：每 tile 需要 32 KB 的 smem staging
+写 + 32 KB 的 TMA 读（共 128 条 256 B 的 TMA op），而 fp8 main 的 **L1/TEX 已 71.8%**；
+把便宜且 coalesced 的 `red` 换成 smem 往返 + 小粒度 TMA，净亏。此即「L1/TEX 墙把 L2 墙的
+解顶回去」。代码保留为 **opt-in（默认关）**，供未来在更低 L1 压力的数据通路上复测。
+
+### 45.7 判定与下一步
+
+- **`red` 是 fp8 main 的头号成本（0.66 ms / 1.70×），但不可用 smem staging + TMA bulk
+  替换**（L1/TEX 已满）。
+- 真正可行的方向仍是**降低每元素的跨 CTA 贡献数**（= 放大 BM ⇒ 撞寄存器墙，O17b/O19 已证伪）
+  或**提 occupancy**（smem 74.8 KB + regs 168 双卡 3 CTA/SM；到 4 CTA/SM 需 ≤58 KB 且
+  ≤128 regs，非本轮可行）——即 roadmap 候选 ① 的两条都受硬件资源硬约束。
+- 候选 ②（MLA 降 smem 冲 2 CTA/SM）经本轮核算：fp8 MLA `Fp8Cfg<512,64,32>` 的 smem
+  203 KB 中，四个 operand（Q/dO/K/V）101 KB + 三个配对副本（Qp/dOp/Kp）83 KB + Ps/Ss 19 KB；
+  即使省掉 Q/dO 的 smem（改寄存器/流式）也只降到 ~140 KB，且 regs 255 同样卡 1 CTA/SM ⇒
+  **单轮不可行**，需 FlashMLA 式重构（Q/dO 驻寄存器、K/V 分块流水）。
+
+### 45.8 附带修复：fp8 main 的纯 `sm_90` 构建
+
+`run_varlen` 的 causal 分支原来**无条件**调 `launch_lse_bal_wgmma`（仅 `-DFA_WGMMA` 构建
+存在）⇒ fp8 main 的 `-arch=sm_90` 构建失败（fp16/bf16 无此问题）。本轮加 `#ifdef FA_WGMMA`
+守卫，D==128 在纯 sm_90 下退回 mma 镜像配对 LSE `launch_lse_bal<128,1>`。验证：
+`ARCH=sm_90 scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --varlen --dir=.../varlen_b1_t512_h2_d512_causal_fp8`
+**编译通过、数值与历史逐位一致**（`1.613e-1/2.238e-1/3.864e-1`）。
+
+### 45.9 复现
+
+```bash
+# 墙的定量重测（red 扇区 / stall）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma_kvtma \
+  --launch-count 1 --metrics lts__t_sectors_op_red.sum,... -- --iters=1 --dir=...
+# bulk-reduce 冒烟
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_bulkred_smoke.cu          # PASS, max_abs=0
+# 主 kernel A/B（默认 red vs -DFA_BULKRED=1）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -DFA_BULKRED=1 -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=100 --dir=.../b1_s4096_h16_d128_causal_fp8
+# 纯 sm_90（无 FA_WGMMA）构建
+ARCH=sm_90 scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --varlen --dir=.../varlen_b1_t512_h2_d512_causal_fp8
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o42_ncu_default_s4096.out.txt`（red 扇区 + stall + duration）、
+`src/fp8/fa_bwd_fp8_o42_ceiling_skipdkdvred_s4096.out.txt`（短路 dK/dV red 的天花板）、
+`src/fp8/fa_bwd_fp8_o42_default_s4096.out.txt`（默认档 timing + 对拍）、
+`src/fp8/fa_bwd_fp8_o42_bulkred_s4096.out.txt`（bulk 档 timing + 对拍）、
+`src/fp8/fa_bwd_fp8_bulkred_smoke.out.txt`（机制冒烟）、
+`src/fp8/fa_bwd_fp8_o42_sm90_varlen_d512.out.txt`（纯 sm_90 构建修复验证）、
+`src/fp8/fa_bwd_fp8_mma_onefile_o42_s512.out.txt`（单文件默认档）。

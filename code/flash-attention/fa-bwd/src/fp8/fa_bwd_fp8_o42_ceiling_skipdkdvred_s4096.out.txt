@@ -1,0 +1,3 @@
+[timing] total(quant+pre+main+cvt) 1.2526 ms  109.72 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0686 ms | preprocess 0.2190 ms | main 0.9197 ms | convert 0.0453 ms (cvt_on=0)
+[O41 A/B] main Q/dO-TMA 1.0263 ms | Q/dO/K/V-TMA 0.9364 ms (1.096x) | max_abs(kvtma-vs-qdtma) dq/dk/dv=1.192e-07/0.000e+00/0.000e+00

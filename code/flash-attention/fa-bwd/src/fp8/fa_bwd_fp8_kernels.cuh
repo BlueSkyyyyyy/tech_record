@@ -163,6 +163,15 @@ struct Fp8Cfg {
 #define FA_ILV34 0
 #endif
 
+  // O42：dK/dV 的跨 CTA 归约从「逐元素 `red_add2`」改成「per-warp smem staging +
+  //   `cp.reduce.async.bulk...add.f32`」。O42 实测 dK/dV 的 red 是 fp8 main 头号成本
+  //   （短路掉 main 1.60→0.94ms，天花板 1.70×），但 bulk 版因 staging 的 smem 流量 +
+  //   TMA 归约延迟，实测 **1.80ms（0.89×）——负结果**。故默认 0（opt-in），
+  //   `-DFA_BULKRED=1` 复现；仅 TMA+WGMMA+HD=128+BN=32 的路径生效。
+#ifndef FA_BULKRED
+#define FA_BULKRED 0
+#endif
+
   // O4b：Kt/Qt/dOt 三个「逐字节 scatter 写的转置副本」→ Kp/Qp/dOp 三个 **K 配对布局**
   //   （uint16：[K/2][HD]，元素 = 2 个相邻 K 值），用 `ldmatrix.x2.trans` 读 B 片段。
   //   * Qp（[BM/2][HD]）供 GEMM4 的 B=Qᵀ；dOp 供 GEMM3 的 B=dOᵀ；Kp（[BN/2][HD]）供 GEMM5。
@@ -539,6 +548,40 @@ __device__ __forceinline__ void wgmma_qkt64_fp8(const char* Qsw, const char* Ksw
 // **red 请求数与 L2 扇区数各减半**，数值等价（硬件对 v2 的两个 f32 仍各自原子累加）。
 __device__ __forceinline__ void red_add2(float* p, float a, float b) {
   atomicAdd(reinterpret_cast<float2*>(p), make_float2(a, b));
+}
+
+// ------------------- O42：Hopper bulk reduce（`cp.reduce.async.bulk`） -------------------
+// 动机：dK/dV 的逐元素 `red_add2` 虽是 coalesced，但每 tile 要发 2048 条、占满 LSU/L2
+//   流水（O42 实测：把 dK/dV 的 red 短路掉 main 1.60→0.94ms，天花板 1.70×）。改成
+//   「累加器先写 per-warp smem staging，再由 `cp.reduce.async.bulk...add.f32` 一次性
+//   coalesced 归约回 global」可把每 tile 的归约指令从 ~2048 条降到 64 条、且完全异步。
+// 语义：dst 是 global [rows][HD] 里的连续 256B 行；src 是 smem 里 16B 对齐、256B 的段。
+//   多 CTA 并发 reduce 到同一 global 行由硬件做原子加（冒烟 `fa_bwd_fp8_bulkred_smoke.cu`
+//   逐位 PASS）。**generic 写 smem 后必须 `fence.proxy.async.shared::cta`** 才能被 async
+//   proxy 读到。
+__device__ __forceinline__ void bulk_reduce_fence() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void bulk_reduce_add_f32(float* gdst, const float* ssrc, int nbytes) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  unsigned s = (unsigned)__cvta_generic_to_shared(ssrc);
+  asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32 [%0], [%1], %2;\n"
+               ::"l"(gdst), "r"(s), "r"(nbytes) : "memory");
+#else
+  (void)gdst; (void)ssrc; (void)nbytes;
+#endif
+}
+__device__ __forceinline__ void bulk_reduce_commit() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("cp.async.bulk.commit_group;\n" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void bulk_reduce_wait0() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("cp.async.bulk.wait_group.read 0;\n" ::: "memory");
+#endif
 }
 
 // A[M_TILE][K_TILE]、B[N_TILE][K_TILE] 均行主序（行距 asld/bsld，含 padding）。
@@ -1719,6 +1762,9 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   // O21：BN=64 时 NPU=8（预取 32 regs），此时 kernel 用 `__launch_bounds__(...,2)`（2 CTA/SM）
   //   寄存器预算更宽，恢复 O3 预取以盖住 K/V 全局延迟。
   constexpr bool kPrefetch = (NPU * 4 <= (BN > 32 ? 32 : 16)) && !kRegDq;
+  // O42：bulk-reduce 路径（见 Fp8Cfg 上方 FA_BULKRED 说明）。仅 kvtma 快路 + BN=32
+  //   （per-warp staging 行映射要求 MTM34==1、每 warp 16 行 × 64 列）。
+  constexpr bool kBulkRed = FA_BULKRED && TMA && WGMMA && (HD == 128) && (BN == 32) && !FA_ILV34;
 
   extern __shared__ __align__(16) char smem[];
   // WGMMA 的 SW128 描述符要求 tile 1024B 对齐（base_offset=0）→ 手动对齐动态 smem 基址
@@ -1751,6 +1797,16 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   float* sds3 = sds2 + BM;
   // O37：TMA 版 Q/dO 的两个 mbarrier，落在 `smem_bytes_wgmma` 之外额外分配的 64B 区。
   uint64_t* qbars = reinterpret_cast<uint64_t*>(Ss + BM * PSS);
+
+  // O42：per-warp smem staging（复用在 fold 之后死亡的 `Ps`/`Ss` 区，共 2*BM*PSS 个 float）。
+  //   每 warp 一块 [BN/2][STGS]，STGS=68（64+4 padding）消写冲突；行 16B 对齐、每行 64 float。
+  constexpr int STGR = BN / 2, STGC = 64, STGS = STGC + 4;
+  float* pstg = reinterpret_cast<float*>(
+      (reinterpret_cast<uintptr_t>(Ps) + 15u) & ~(uintptr_t)15u);
+  static_assert(!kBulkRed ||
+                    (MTM34 == 1 &&
+                     4 * STGR * STGS * (int)sizeof(float) + 16 <= 2 * BM * PSS * (int)sizeof(float)),
+                "O42 bulkred staging 放不下 Ps/Ss（需 ≤ 2*BM*PSS 字节）");
 
   // ---- O2b：N 方向切块（split-K）。同一 (mblk,h,b) 的 K/V 列块 [0,ntiles) 被均分给
   //      ksplit 个 CTA；各自只算自己那一段，dQ/dK/dV 仍用跨 CTA 的 fp32 atomicAdd 汇总。
@@ -2326,38 +2382,75 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       };
       auto epi_dv = [&](float (&acc)[MTM34][8][4]) {
         const int r0 = wr * (BN / 2), c0 = wc * 64;
+        float* wstg = pstg + wid * (STGR * STGS);
 #pragma unroll
         for (int i = 0; i < MTM34; ++i)
 #pragma unroll
           for (int j = 0; j < 8; ++j)
 #pragma unroll
-            for (int q = 0; q < 4; q += 2) {
-              // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
+            for (int q = 0; q < 4; ++q) {
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
               int c = c0 + j * 8 + c2;
               int jg = j0 + r;
-              if (jg < len)
-                red_add2(dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
-                         acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r]);
+              if (jg < len) {
+                if constexpr (kBulkRed) {
+                  // O42：写 per-warp staging（行=warp 内 KV 行，列=warp 内 64 列），
+                  //   随后由 `bulk_flush` 一次性 coalesced 归约回 global。
+                  wstg[(i * 16 + g + (q >= 2 ? 8 : 0)) * STGS + (j * 8 + c2 + (q & 1))] =
+                      acc[i][j][q] * sA[r];
+                } else if ((q & 1) == 0) {
+                  // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
+                  red_add2(dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
+                           acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r]);
+                }
+              }
             }
       };
       auto epi_dk = [&](float (&acc)[MTM34][8][4]) {
         const int r0 = wr * (BN / 2), c0 = wc * 64;
+        float* wstg = pstg + wid * (STGR * STGS);
 #pragma unroll
         for (int i = 0; i < MTM34; ++i)
 #pragma unroll
           for (int j = 0; j < 8; ++j)
 #pragma unroll
-            for (int q = 0; q < 4; q += 2) {
-              // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
+            for (int q = 0; q < 4; ++q) {
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
               int c = c0 + j * 8 + c2;
               int jg = j0 + r;
-              if (jg < len)
-                red_add2(dk_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
-                         acc[i][j][q] * sds3[r] * scale,
-                         acc[i][j][q + 1] * sds3[r] * scale);
+              if (jg < len) {
+                if constexpr (kBulkRed) {
+                  wstg[(i * 16 + g + (q >= 2 ? 8 : 0)) * STGS + (j * 8 + c2 + (q & 1))] =
+                      acc[i][j][q] * sds3[r] * scale;
+                } else if ((q & 1) == 0) {
+                  red_add2(dk_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
+                           acc[i][j][q] * sds3[r] * scale,
+                           acc[i][j][q + 1] * sds3[r] * scale);
+                }
+              }
             }
+      };
+      // O42：per-warp staging → `cp.reduce.async.bulk`。每 warp 的 staging 区私有 ⇒
+      //   只用 `__syncwarp`（廉价），不用 `__syncthreads`；`bulk_issue` 发出后**不等**，
+      //   让 TMA 归约与 GEMM4/GEMM5 重叠；只有要覆盖 staging 时才 `bulk_waitread`。
+      auto bulk_issue = [&](float* acc_dst) {
+        __syncwarp();
+        if (lane < STGR) {
+          const int jg = j0 + wr * STGR + lane;
+          if (jg < len) {
+            bulk_reduce_fence();
+            float* src = pstg + wid * (STGR * STGS) + lane * STGS;
+            float* gdst = acc_dst + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + wc * 64 + d0;
+            bulk_reduce_add_f32(gdst, src, STGC * (int)sizeof(float));
+            bulk_reduce_commit();
+          }
+        }
+        __syncwarp();
+      };
+      auto bulk_waitread = [&]() {
+        __syncwarp();
+        if (lane < STGR) bulk_reduce_wait0();
+        __syncwarp();
       };
 #if FA_ILV34
       {
@@ -2376,12 +2469,16 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
         mma_block_bt<BN / 2, 64, BM, E4E5>(Ap, QTS, dOp, PSLD, acc, wr, wc, lane, d0);
         epi_dv(acc);
       }
+      if constexpr (kBulkRed) bulk_issue(dv_acc);
       {
         float acc[MTM34][8][4];
         zero34(acc);
         mma_block_bt<BN / 2, 64, BM, E5E4>(dS3, QTS, Qp, PSLD, acc, wr, wc, lane, d0);
+        // O42：GEMM4 mma 与 dV 的 TMA 归约重叠；覆盖 staging 前再等它读完。
+        if constexpr (kBulkRed) bulk_waitread();
         epi_dk(acc);
       }
+      if constexpr (kBulkRed) bulk_issue(dk_acc);
 #endif
 
       // ---- (5) dQ += scale·dS·K : A=dS2[m][j] (e5m2), B=Kp[j/2][d0+..] (e4m3, ldmatrix.trans) ----
@@ -2417,6 +2514,9 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
               }
             }
       }
+      // O42：离开本 tile 前等 dK 的 TMA 归约读完 staging（下一 tile 的 GEMM1/2 epilogue
+      //   会覆写 Ps/Ss）。与 GEMM5 重叠。
+      if constexpr (kBulkRed) bulk_waitread();
     }
     __syncthreads();
     // ---- O3：落盘预取的下一 tile 的 K/V（本轮 GEMM 已全部读完 smem），并更新 ks/vs ----
