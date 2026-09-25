@@ -1525,3 +1525,40 @@ Executed Ipc Elapsed 0.42→**0.77**、DRAM 9.4→18.8%、L2 25.6→49.8%；per-
 （1 CTA/SM）。⇒ **墙是 grid 不足一个波、不是 per-SM occupancy**。详见 `docs/01` §14x、`docs/01b` §6af。
 原始输出 `src/fp16/fa_bwd_fp16_o43_sweep.out.txt`、`..._o43_ncu_wg2_s512_ks{1,2}.out.txt`、
 `src/bf16/fa_bwd_bf16_o43_sweep.out.txt`。
+
+## 19. fp16/bf16 MLA（D=512）主 kernel 的 N 方向 split-K（O44，第九十一轮）—— **正结果，默认 auto**
+
+> O43 只覆盖了 fp16/bf16 D=128 默认档 `wgmma2`；**MLA 走 mma 主 kernel（BM=32/BN=32/PIPE=1）
+> 没有 ksplit**：S1024H2 / S512H4 / S256H2 的 base grid 只有 64 / 64 / 16 CTA，ncu Waves 0.48、
+> occ 6.25%（207KB smem、1 CTA/SM）⇒ 并行度不足。O44 把 O43 的机制扩到 mma 主 kernel：
+> `fa_bwd_{fp16,bf16}_mma_kernel` 加 `int ksplit=1`（KV tile 切片 + 空切片早退 + prologue stage
+> 用 `nt_begin&1` 对齐），dQ 在 `ksplit>1` 时改跨 CTA `red_add2`；host `--mlaksplit=N`，auto 仅
+> D==512、目标 `grid*sp≈528`（1 CTA/SM 的 4 个波）、上限 16。D!=512 逐位退化。
+
+**数值**（ours-vs-ref，causal，max_abs dq/dk/dv）与 O5c（§7.8）**逐位一致**：
+
+| MLA case (B1, D=Dv=512) | fp16 | bf16 |
+|---|---|---|
+| (1,256,2,512) | 1.638 / 1.582 / 1.753e-3 | 1.230e-2 / 9.875e-3 / 1.686e-2 |
+| (1,512,4,512) | 2.516 / 2.916 / 1.724e-3 | 8.753e-3 / 1.082e-2 / 1.740e-2 |
+| (1,1024,2,512) | 1.987 / 1.712 / 1.848e-3 | 5.838e-3 / 9.519e-3 / 1.568e-2 |
+
+**性能**（CUDA event，Hopper 构建，同 binary/同 session；main 与 total，ms）：
+
+| MLA case | dtype | ksplit=1 main | **auto main** | main 比 | **auto total** | total 比（vs O5c） | TFLOPS |
+|---|---|---|---|---|---|---|---|
+| (1,256,2,512) | fp16 | 0.1854 | **0.0222** | 8.4× | **0.0566** | 5.3× | 4.74 |
+| (1,512,4,512) | fp16 | 0.3685 | **0.0840** | 4.4× | **0.1284** | 4.2× | 16.73 |
+| (1,1024,2,512) | fp16 | 0.7171 | **0.1524** | 4.7× | **0.2009** | 4.7× | 21.38 |
+| (1,256,2,512) | bf16 | 0.1852 | **0.0220** | 8.4× | **0.0548** | 5.4× | 4.90 |
+| (1,512,4,512) | bf16 | 0.3624 | **0.0842** | 4.3× | **0.1283** | 4.2× | 16.74 |
+| (1,1024,2,512) | bf16 | 0.7136 | **0.1518** | 4.7× | **0.2000** | 4.7× | 21.47 |
+
+**ncu**（fp16 `fa_bwd_fp16_mma_kernel`，S=1024H2，`--set full --launch-count 1`）：ksplit 1→2
+Duration 764.5→**228.7µs**、**Waves 0.48→0.97**、Issued Ipc 0.33→0.57、achieved occ 恒 ~6.25%
+（1 CTA/SM）、No Eligible 91.8→85.7%、DRAM 0.83→2.78%、L1TEX 33.3→52.7%、L2 14.0→45.9%；
+头号 stall 从 long scoreboard（7.4 cyc）变 fixed-latency `wait`（2.2 cyc）。⇒ **打掉的是
+「SM 空转」而非延迟隐藏**（同 O43）。FA/TE 反向后端均不支持 D=512，无第三方对标；
+**fp16/bf16 MLA total 已比 fp8 MLA（§7.7 0.308/0.591/1.022ms）快 4.9–5.4×**。
+详见 `docs/01` §14y、`docs/01b` §6ag。原始输出 `src/{fp16,bf16}/fa_bwd_*_o44_mla_sweep.out.txt`、
+`src/fp16/fa_bwd_fp16_o44_ncu_main_ks{1,2}_s1024h2.out.txt`。

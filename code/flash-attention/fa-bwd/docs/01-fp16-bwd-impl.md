@@ -3238,6 +3238,89 @@ scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
 实测 total 0.0684→0.0696ms（**−1.8%**）——Q/dO 重载 + 额外 convert 抵不过填 SM（mblk 少、
 tile 切片过细）。**故 varlen 不做 auto，仅 `--wg2ksplit=N>=2` 显式开启**。
 
+## 14y. O44-fp16：MLA（D=512）mma 主 kernel 的 N 方向 split-K（第九十一轮）—— **正结果，默认 auto**
+
+### 14y.1 动机
+
+O43（§14x）已给 fp16 默认档的 `wgmma2`（D=128）加了 N 方向 split-K，解决「S=512 MHA
+grid=64 < 132 SM」。但 **MLA（head_dim=512）走的是 mma 主 kernel（`fa_bwd_fp16_mma_kernel`，
+`BM=32/BN=32/PIPE=1`），它没有 ksplit**：`grid = ceil(S/32)·H·B`，S=1024H2 只有 **64 CTA**、
+S=512H4 64、S=256H2 **16**，ncu 全部 `Waves 0.48`（半个波都不到）、achieved occ 6.25%
+（207KB smem → 1 CTA/SM）、No Eligible 91.8%（§7.8）。即 **MLA 的墙是并行度不足、不是带宽/算力**。
+本轮把 O43 的机制扩到 mma 主 kernel（从而覆盖 MLA），并保留 HD=128 fallback 的逐位退化。
+
+### 14y.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+`fa_bwd_fp16_mma_kernel<HD,BM,BN,PIPE,...>` 新增运行时 `int ksplit=1`：
+
+1. **Q 块与 K 片**：`ksp=bx%ksplit`、`mblk=bx/ksplit`（同一 mblk 的 ksplit 个 CTA 共享同一份
+   Q/dO，均分 KV tile）；`nt_begin=ntiles*ksp/ksplit`、`nt_end=ntiles*(ksp+1)/ksplit`，循环从
+   `nt_begin` 起、只发本切片的 K/V；空切片（causal 小 mblk）直接 `return`。
+2. **pipeline stage 对齐（第一个坑）**：`stage = nt&1`，所以 prologue 必须把首 tile 发进
+   `Ks/Vs + (nt_begin&1)*KVL`；只改数据偏移、忘改 stage 会让首个 tile 读空 buffer——症状是
+   split>1 时 dq/dk/dv 误差 O(1)（本轮实测踩到、已修）。
+3. **dQ 归约**：`ksplit==1` 时 HD>128 的 GEMM5 是「唯一 CTA + 唯一 warp + 唯一 N-tile」的非原子
+   RMW；`ksplit>1` 时同一 `(qi,列)` 被 ksplit 个 CTA 各加一次 ⇒ 改 `red_add2`（`atomicAdd(float2*)`），
+   `d_dq_acc` 由 host `memset(0)`。dK/dV 本来就是跨 CTA `red_add2`，不变。
+4. **host**：`launch_bwd_mma` 加 `ksplit` 透传；`--mlaksplit=N`（`-1`=auto/`1`=关/`>=2`=强制）；
+   auto 仅 `D==512`，目标 **`grid*sp ≈ 528`**（1 CTA/SM 的 4 个波）、上限 16，再按
+   `nblk=ceil(S/BN)` 封顶。D!=512 恒 1 ⇒ D=128 路径（wgmma2/mma）逐位不变。
+
+### 14y.3 数值（ours-vs-fp32-ref，fp16 causal，max_abs dq/dk/dv）
+
+与 O5c/§7.8 **逐位一致**（split>1 只改 atomic 次序）：
+
+| MLA case | ours-vs-ref（O44） | 历史（O5c） |
+|---|---|---|
+| (1,256,2,512) | 1.638 / 1.582 / 1.753e-3 | 同 |
+| (1,512,4,512) | 2.516 / 2.916 / 1.724e-3 | 同 |
+| (1,1024,2,512) | 1.987 / 1.712 / 1.848e-3 | 同 |
+
+MHA D=128 回归**逐位不变**（S=512 1.671/1.771/1.899e-3，Hopper 构建下 `wgmma2` + O43 ksplit=2
+仍为同值）；varlen MLA 走 `ksplit=1`、逐位不变。
+
+### 14y.4 性能（CUDA event；Hopper 构建 `-DFA_WGMMA -DFA_TMA`，同一 binary/同 session）
+
+**split sweep**（`[O44 A/B]`：同一 config `(32,32,1)` 的 ksplit=1/2/4，main-only）：
+
+| MLA case | base grid | ksplit=1 | 2 | 4 | **auto（=8）** | main 比 | total 比 |
+|---|---|---|---|---|---|---|---|
+| (1,256,2,512) | 16 | 0.1854 | 0.0515 | 0.0281 | **0.0222 ms** | 8.4× | 5.3× |
+| (1,512,4,512) | 64 | 0.3685 | 0.1063 | 0.0930 | **0.0840 ms** | 4.4× | 4.2× |
+| (1,1024,2,512) | 64 | 0.7171 | 0.2102 | 0.1736 | **0.1524 ms** | 4.7× | 4.7× |
+
+端到端 total：**0.0566 / 0.1284 / 0.2009 ms（4.74 / 16.73 / 21.38 TF）**，对比 O5c
+0.300 / 0.536 / 0.939 ms ⇒ **4.2–5.3×**。**auto 比「只填一个波（132）」更激进是实测结论**：
+S512H4/S1024H2 在 sp=8（≈512）优于 sp=2/4（§「下一步」候选②的 split-KV 就此落地）。
+MLA 的 FA/TE 反向后端均不支持，无第三方对标；但 **fp16 MLA total 已比 fp8 MLA（§7.7
+0.308/0.591/1.022ms）快 4.9–5.1×**（fp8 MLA 仍 1 CTA/SM 且没吃到这条 split）。
+
+### 14y.5 ncu（`fa_bwd_fp16_mma_kernel`，S=1024H2，`--set full --launch-count 1`）
+
+| 指标 | ksplit=1 | ksplit=2 |
+|---|---|---|
+| Duration | 764.5 µs | **228.7 µs** |
+| Waves Per SM | 0.48 | **0.97** |
+| Issued Ipc Active | 0.33 | **0.57** |
+| Achieved Occupancy | 6.25% | 6.23%（仍 1 CTA/SM） |
+| Issue Slots Busy / No Eligible | 2.01% / 91.78% | **6.70% / 85.67%** |
+| DRAM / L1TEX / L2 / Compute | 0.83 / 33.3 / 14.0 / 2.0 % | 2.78 / 52.7 / 45.9 / 6.7 % |
+| 头号 stall | long scoreboard（7.4 cyc） | fixed-latency `wait`（2.2 cyc） |
+
+⇒ **O44 打掉的是「SM 空转」**（Waves 0.48→0.97、每 SM 的 occ 不变），与 O43 同一机制；
+填满波后墙回到 **mma 依赖延迟（`wait`）+ L1/L2 吞吐**。
+
+### 14y.6 复现 / 原始输出
+
+```
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16 --iters=200 [--mlaksplit=N]
+```
+原始输出：`src/fp16/fa_bwd_fp16_o44_mla_sweep.out.txt`、
+`..._o44_ncu_main_ks{1,2}_s1024h2.out.txt`、`..._o44_reg_s512_h16.out.txt`；
+单文件 `src/fp16/fa_bwd_fp16_mma_onefile.cu` 同源。
+
 ## 15. 下一步
 
 > **O23（§14n）已完成**：把 O17/O18 的主 kernel + O9a 的 LSE 在 `-DFA_WGMMA` 构建下**默认打开**
