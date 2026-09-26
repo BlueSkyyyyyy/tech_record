@@ -1732,3 +1732,34 @@ ncu（S1024 H2，同 session A/B）：`long_scoreboard` **1.97→1.72**、`short
 指令数 **−2.0%**、`lts__t_sectors_op_red` **逐字节不变**（6,684,672）、occ 恒 12.48%（1 CTA/SM）。
 D=128（MHA/GQA）与 varlen 路径**逐位不变**；单/两文件 device 逐字一致。
 **MLA 反向 FA2/FA3/TE 均不支持（`fa=NA`/`te=NA`），只有 ours 数字**；详见 `docs/03` §51。
+
+## 25. fp16/bf16 MLA（D=512）**varlen** 主 kernel 的 N 方向 split-K（O53，第 100 轮）—— **正结果，varlen MLA 默认 auto**
+
+承接 O52（把 O46 的 8-warp 几何搬进 varlen MLA）：varlen 主 kernel 仍是「单 CTA 扫整条 K」，
+`D=512/BM=32` 的 base grid 在 `b1_t512_h2` 只有 16 CTA（`b3_t1792_h2` 192），smem 207.36KB
+锁死 1 CTA/SM ⇒ ncu `Waves 0.48`、SM 空转。本轮把定长 O44/O50 的 **split-KV** 搬进 varlen
+（host-only；device 早已支持，`ksplit==1` 逐式退化）：`run_varlen` 加 `mlaksplit`，`D==512`
+按 auto（target `grid*sp≈528` + 每 m 块 K 切 ≈2 份、cap 16）选 `mla_ks_eff`，`mg.x *= mla_ks_eff`，
+dQ 走跨 CTA `red_add2`。
+
+| fp16 varlen case (D=Dv=512) | dq / dk / dv vs fp32 ref | total O52→O53 | 加速 |
+|---|---|---|---|
+| b1_t512 causal | 1.303 / 1.537 / 1.557e-3 | 0.2740→**0.0819ms / 13.11 TF** | **3.35×** |
+| b3_t1792 causal | 2.415 / 1.834 / 1.856e-3 | 0.6523→**0.3518ms / 16.02 TF** | **1.85×** |
+| b1_t512 full | 3.046 / 4.449 / 1.327e-4 | — / 0.2853ms / 3.76 TF | — |
+| b3_t1792 full | 5.516 / 4.451 / 2.385e-4 | — / 1.0093ms / 5.59 TF | — |
+
+bf16 逐值同构（causal total 0.0830 / 0.3499ms，12.93 / 16.11 TF）。主 kernel-only sweep
+（8-warp，`[O53 A/B]`）：causal b1 `0.2350→0.0455ms`（**5.17×**）、b3 `0.5540→0.2543ms`（2.18×，
+auto 即最优）；full auto 偏大（b1 最优 k=4、b3 k=8），但相对 k=1 仍 3.6×/1.6×。
+**单/两文件逐指标一致**；`max_abs(8w-vs-4w)` dq ≤2e-7、dk/dv ≤1e-6（仅 atomic 次序）。
+MLA 反向 FA2/FA3/TE 均不支持 ⇒ 无外部基线。
+
+**ncu**（fp16/bf16 b3_t1792 H2 D512 causal，逐项一致）：Duration **259µs**、DRAM 4.7% /
+L1TEX ~50% / **L2 ~81%** / Compute 19%、occ 12.2%（1 CTA/SM）、stall **long 2.73 + wait 2.28 +
+short 1.58**、L2 `op_red`/`op_read` = 18.41M/12.91M（red 占 **58.8%**）。**bound = L2（跨 CTA
+dQ 归约）+ 访存延迟**（O52 的「grid 不足一个波」已消除）。详见 `docs/01` §14ae、`docs/01b` §6am。
+
+**「非 causal full MLA varlen HEAD 偏差」更正**：O52 所记偏差实为**对拍脚本漏传 `--full`**
+（按 causal 比 full ref）；显式 `--full` 后 fp16/bf16/fp8 三 dtype full 全部对拍通过
+（fp16 3.0e-4–5.5e-4、bf16 1.6e-3–3.5e-3、fp8 ~5e-2），**不是回归、无需修复**。

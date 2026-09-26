@@ -2649,7 +2649,27 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第九十九轮）**：**O52——把 MLA 的 8-warp（+ fp8 K/V 回填流水）推广到 varlen
+> **最新（第一百轮）**：**O53——把 MLA 的 N 方向 split-K（split-KV）搬进 fp16/bf16 varlen
+> （正结果，varlen MLA 默认 auto）**。补上 O52 的遗漏：O52 只搬了 warp 几何，varlen MLA 主
+> kernel 仍是「单 CTA 扫整条 K」，`D=512/BM=32` 的 base grid 在 b1_t512_h2 只有 16 CTA、
+> smem 207.36KB 锁死 1 CTA/SM（Waves 0.48）。**只改 host**：`run_varlen` 加 `mlaksplit`，
+> `D==512` 按定长 O44/O50 同款 auto（target `grid*sp≈528` + 每 m 块 K 切 ≈2 份、cap 16）选
+> `mla_ks_eff`，`mg.x *= mla_ks_eff`，两处 `launch_bwd_mma<512,32,32,1,...>` 传 `mla_ks_eff`
+> （device 早由 O44 支持，`ksplit==1` 逐式退化），`main` 透传 `--mlaksplit=`，末尾加
+> `[O53 A/B]` sweep。**main causal b1 0.2350→0.0455ms（5.17×）、b3 0.5540→0.2543ms（2.18×）；
+> 端到端 fp16 total 3.35×/1.85×（0.0819/0.3518ms，13.11/16.02 TF）、bf16 3.31×/1.87×**；
+> 数值 vs ref 同量级、单/两文件逐指标一致、D=128 varlen 回归逐位不变。ncu（b3 causal）：
+> Duration 259µs、**L2 81%**（red 占 58.8%）+ stall `long 2.73/wait 2.28`，bound 从「grid 不足
+> 一个波」变为「L2 跨 CTA dQ 归约 + 访存延迟」。**同轮更正**：O52 记的「非 causal full MLA
+> varlen HEAD 偏差」实为**对拍脚本漏传 `--full`**（显式 `--full` 后三 dtype 全部通过），
+> 非回归。详见 `docs/01` §14ae、`docs/01b` §6am、`docs/04` §25、`docs/08` §5.18。
+> **下一步候选**：① **非 causal MLA varlen 的 LSE**（`lse_mma_kernel<512>` 无镜像配对/split，
+> b3 full 占端到端 ~60%）——接 O8b + O40；② **fp8 MLA varlen 的 8-warp+kvpipe 已由 O52 落地，
+> 但 fp8 的 split-KV 早在 O29/O45 有，可核对 varlen fp8 与 fp16 的 auto 是否一致**；
+> ③ **MLA 降 smem 冲 2 CTA/SM**（smem 207.36KB，需消 ~100KB；四 dtype 共同墙）；
+> ④ **降 dQ 跨 CTA 归约**（更大 BM / 跨 warpgroup 部分和；causal b3 的 k=8/16 已接近平台）。
+>
+> **（第九十九轮）**：**O52——把 MLA 的 8-warp（+ fp8 K/V 回填流水）推广到 varlen
 > （正结果，varlen MLA 默认）**。落实 O46/O47/O51 的一个**共同遗漏**：8-warp（`NTH=256,NWAR=4`）
 > 与 fp8 的 K/V `cp.async` 回填（O51）此前**只落在定长 `D=512` 路径**，`run_varlen` 的 MLA 主
 > kernel 仍是 4-warp/2×2。**只改 host**（device 一行未改，早由 O46/O47/O51 参数化）：
@@ -3584,18 +3604,58 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
        Ipc 0.11→**0.23**、stall long 3.13→**2.23**、`lts__t_sectors_op_red` **1,769,472 逐字节不变**；
        数值 vs ref 同量级、`max_abs(8w-vs-4w)` dq~1e-7/dk,dv~1e-6，D=128 varlen 回归逐位不变。
        **附带发现（非本轮引入）**：三 dtype 非 causal（full）MLA varlen 在 HEAD 已是偏差
-       （回退 O51 提交 `056b316` 复现一致）——记 backlog。详见 `docs/03` §52、`docs/01` §14ad、
-       `docs/01b` §6al、`docs/04` §11.1、`docs/08` §5.17。原始输出
+       （回退 O51 提交 `056b316` 复现一致）——**O53 已更正为假警报**（对拍脚本漏传 `--full`）。
+       详见 `docs/03` §52、`docs/01` §14ad、`docs/01b` §6al、`docs/04` §11.1、`docs/08` §5.17。原始输出
        `src/fp8/fa_bwd_fp8_main_o52_varlen.out.txt`、`..._main_o52_ncu_varlen*.out.txt`、
        `src/{fp8,fp16,bf16}/fa_bwd_*_o52_varlen.out.txt`。
 
+- 2026-09-24（第一百轮）：**O53 完成（把 MLA 的 N 方向 split-K/split-KV 搬进 fp16/bf16 varlen）**
+  - 动机：O52 把 8-warp 几何搬进 varlen MLA 主 kernel 后，它仍是「单 CTA 扫整条 K」；
+    `D=512/BM=32` 的 base grid = `ceil(maxlen/32)·H·B` 在 `b1_t512_h2` 只有 16 CTA、
+    `b3_t1792_h2` 192，而 smem 207.36KB 锁死 1 CTA/SM ⇒ ncu `Waves 0.48`、大量 SM 空转。
+    定长侧 O44/O50 早有「N 方向 split-K」，varlen 的 `run_varlen` 一直传 `ksplit=1`。
+  - **改动（host-only；device 一行未改）**：`run_varlen` 加 `mlaksplit`；`D==512` 时按定长
+    同款 auto（target `base*sp≈528`=4 个波 + 每 m 块 K 切 ≈2 份、cap 16）选 `mla_ks_eff`，
+    `mg.x *= mla_ks_eff`，两处 `launch_bwd_mma<512,32,32,1,...>` 传 `mla_ks_eff`（device 侧 O44
+    早已支持切片 + 空切片早退 + dQ 跨 CTA `red_add2`，`ksplit==1` 逐式退化）；`main` 透传
+    `--mlaksplit=`；varlen grid 打印改用实际 `mg`；末尾加 `[O53 A/B]` sweep（8-warp、main-only、
+    `ksplit=1/2/4/8/16`）。单/两文件 host 同步、device 仍一致。
+  - **数值（ours-vs-ref，max_abs dq/dk/dv）**：fp16 causal b1 1.303/1.537/1.557e-3、
+    b3 2.415/1.834/1.856e-3；full b1 3.046/4.449/1.327e-4、b3 5.516/4.451/2.385e-4；
+    bf16 同量级（8.0/11.0/13.9e-3 等）。单/两文件**逐指标一致**；`max_abs(8w-vs-4w)` dq≤2e-7、
+    dk/dv≤1e-6，D=128 varlen 回归逐位不变。
+  - **性能（event，`Σ_b 4HL²D`）**：main causal b1 0.2350→**0.0455ms（5.17×）**、b3
+    0.5540→**0.2543ms（2.18×）**（auto 即最优）；**端到端 fp16 total b1 0.2740→0.0819ms
+    （3.35×，13.11 TF）、b3 0.6523→0.3518ms（1.85×，16.02 TF）；bf16 0.2747→0.0830ms（3.31×）/
+    0.6552→0.3499ms（1.87×）**。full auto 偏大（b1 最优 k=4、b3 k=8），但相对 k=1 仍 3.6×/1.6×。
+    MLA 反向 FA2/FA3/TE 均不支持 ⇒ 无外部基线。
+  - **ncu（fp16/bf16 b3_t1792 H2 D512 causal，逐项一致）**：Duration **259µs**、DRAM 4.7% /
+    L1TEX ~50% / **L2 ~81%** / Compute 19%、occ 12.2%（1 CTA/SM，smem 207.36KB）、stall
+    `long 2.73 + wait 2.28 + short 1.58 + barrier 0.14`、L2 `op_red`/`op_read`=18.41M/12.91M
+    （red 占 **58.8%**）。**bound 从 O52 的「grid 不足一个波」变为「L2 跨 CTA dQ 归约 + 访存
+    延迟」**（与定长 O44 结论一致）。下一步：降 smem 冲 2 CTA/SM、或降 dQ 归约（更大 BM/跨
+    warpgroup）；另非 causal LSE（`lse_mma_kernel<512>`，未做镜像配对）是 full 端到端新瓶颈。
+  - **更正「HEAD 偏差」**：O52 记的非 causal full MLA varlen 偏差实为**对拍脚本漏传 `--full`**
+    （按 causal 比 full ref，输出头 `causal=1`）；显式 `--full` 后 fp16/bf16/fp8 三 dtype full
+    全部对拍通过（fp16 3e-4–5.5e-4、bf16 1.6e-3–3.5e-3、fp8 ~5e-2），**不是回归、无需修复**。
+  - 原始输出 `src/fp16/fa_bwd_fp16_o53_varlen.out.txt`、`..._o53_ncu_varlen_b3.out.txt`、
+    `..._o53_ncu_stall_varlen_b3.out.txt`、`src/bf16/fa_bwd_bf16_o53_varlen.out.txt`、
+    `..._o53_ncu_varlen_b3.out.txt`；文档 `docs/01` §14ae、`docs/01b` §6am、`docs/04` §25、
+    `docs/08` §5.18。
+
 ## 灵感 / backlog
 
-- [ ] **（第九十九轮新发现）三 dtype 非 causal（full）MLA varlen 在 HEAD 已偏差**：
-      第 80/81 轮 §39/§16.9 曾通过（full `~5e-2`），现在 `max_abs≈7`（ref_amax 0.57）；
-      `--mla8w=0`（历史 4-warp）与回到 O51 提交 `056b316` 重编**都复现完全相同错误值**，
-      故是第 80/81 轮之后某轮的回归（嫌疑：非 causal 的 `lse_mma_kernel<512>` 路径或全序列
-      `ncols`/ksplit 组合）。不影响 causal（本轮 O52 的主题），待单独一轮排查。
+- [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
+      实为 O52 对拍脚本**漏传 `--full`**（按 causal 比 full ref）；显式 `--full` 后 fp16/bf16/fp8
+      三 dtype full 全部对拍通过（fp16 3e-4–5.5e-4、bf16 1.6e-3–3.5e-3、fp8 ~5e-2）。
+      **非回归、无需修复**。教训：跑 full 用例先核对输出头 `causal=` 字段。
+- [ ] **（第一百轮 O53 新发现）非 causal（full）MLA varlen 的 LSE 是端到端新瓶颈**：
+      `lse_mma_kernel<512>`（O1 版，grid=(nblk,H,B)、无镜像配对/无 split）在 b3_t1792 full
+      约占 total 60%（~0.62ms / total 1.01ms），而 causal 早已用 `lse_mma_kernel_bal<512,1>` +
+      O40 K 维 split。可把 O8b 的镜像配对 + O40 split 接到非 causal MLA LSE。
+- [ ] **（第一百轮 O53 可选微调）varlen MLA full 的 split-KV auto 偏大**：causal 最优 k=16、
+      full 最优 k=4/8；auto 现统一取 16。可在 `D==512 && !causal` 时改用更小 target（但 full
+      是次要路径，相对 k=1 仍 3.2–3.6×）。
 
 - [ ] P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 

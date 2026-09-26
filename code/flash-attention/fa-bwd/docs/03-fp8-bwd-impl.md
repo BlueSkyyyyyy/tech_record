@@ -4741,8 +4741,8 @@ O47（fp8 MLA 主 kernel 的 256 线程 / 8-warp 几何）与 O51（K/V `cp.asyn
 | b3_t1792 causal | 3.404e-1 | 3.436e-1 | 3.508e-1 | 0.3520→0.2002ms (**1.76×**) | 0.2002→0.1890ms (1.06×) |
 | b1_t512 full | N/A* | N/A* | N/A* | 0.0890→0.0512ms (1.74×) | 0.0512→0.0498ms (1.03×) |
 
-*（full 行数值 `N/A`：本轮复测发现一个**与本改动无关、HEAD 已存在**的偏差，见 §52.6；其 A/B 计时
-仍有效，4w/8w 逐元素一致到 1e-7。）**单文件与两文件逐指标一致**。D=128 varlen（MHA/GQA）回归**逐位不变**
+*（full 行数值当时记 N/A：以为是 HEAD 偏差，**O53 已更正为「漏传 `--full`」的假警报**，见 §52.6；
+ 正确值应与 §39 一致 ~5e-2。其 A/B 计时仍有效，4w/8w 逐元素一致到 1e-7。）**单文件与两文件逐指标一致**。D=128 varlen（MHA/GQA）回归**逐位不变**
 （b1_t512_h16 causal fp8 `2.280/3.108/3.422e-1`），定长回归不动（device 未改）。
 
 ### 52.4 性能（event，`Σ_b 4HL²D` 口径，同 session）
@@ -4775,14 +4775,22 @@ MLA 反向 FA2/FA3/TE **均不支持 head_dim=512** ⇒ 无外部基线，只有
 路径**逐字节相同**，提升完全来自「并行度/延迟隐藏」。墙仍是 `long_scoreboard + short + wait`
 的 mma/全局依赖 + 1 CTA/SM（smem 硬约束，2 CTA/SM 不可达）。
 
-### 52.6 附带发现：fp8 varlen MLA **非 causal（full）** 在 HEAD 已是偏差（预存在，非本改动引入）
+### 52.6 附带发现（第一百轮**更正为假警报**）：fp8 varlen MLA 非 causal（full）的偏差
 
-复测 `varlen_*_d512_full`（causal=0）时，ours 的 dq/dk/dv `max_abs≈7.3/7.0/4.6`（ours_amax 7.3，
-ref_amax 0.57），而 §39 第 80 轮记录的是通过值（5.3e-2/5.2e-2/4.2e-2）。
-**用 `--mla8w=0`（退到历史 4-warp）复跑得到完全相同的错误值**，且用 `git stash` 回到 O51 提交
-（`056b316`）重新编译也**一模一样** ⇒ **是本改动之前就存在的回归**（第 80 轮之后某轮引入，
-嫌疑在 varlen 非 causal 的 LSE 路径或全序列 `ncols`/`ksplit` 组合）。fp16/bf16 的 full MLA
-varlen 同样偏差（同 HEAD 复现）。本轮**未修**（超出 O52 范围），已记入 ROADMAP backlog。
+> **更正（O53，第 100 轮）**：当时复测 `varlen_*_d512_full` 得到 `max_abs≈7.3/7.0/4.6`、
+> 并以为「HEAD 已存在的回归」。实际原因是**那条复测命令漏传 `--full`**：`run_varlen` 的输出头
+> 写的是 `causal=1`（可在 `src/fp8/fa_bwd_fp8_main_o52_varlen.out.txt` 第 27/39 行核对），
+> 即**按 causal 去比 full 的 ref**，误差自然是 O(1)。本轮显式加 `--full` 复跑
+> `varlen_b1_t512_h2_d512_full_fp8`：输出头 `causal=0`，ours-vs-ref `max_abs`
+> **5.26/5.22/4.22e-2**，与第 80 轮 §39 记录（5.3e-2/5.2e-2/4.2e-2）一致。
+> fp16/bf16 的 full 同样通过（fp16 3e-4–5.5e-4、bf16 1.6e-3–3.5e-3，见 `docs/01` §14ae、
+> `docs/01b` §6am）。**结论：不是回归、不是 kernel bug、无需修复。教训：跑 full 用例先核对
+> 输出头 `causal=` 字段。**
+
+（原记录已作废，保留经过去：~~复测 `varlen_*_d512_full`（causal=0）时，ours 的 dq/dk/dv
+`max_abs≈7.3/7.0/4.6`（ours_amax 7.3，ref_amax 0.57），而 §39 第 80 轮记录的是通过值
+（5.3e-2/5.2e-2/4.2e-2）。用 `--mla8w=0` 复跑得到完全相同的错误值，且用 `git stash` 回到 O51
+提交（`056b316`）重新编译也一模一样 ⇒ 以为是本改动之前就存在的回归。~~）
 
 ### 52.7 复现 / 原始输出
 

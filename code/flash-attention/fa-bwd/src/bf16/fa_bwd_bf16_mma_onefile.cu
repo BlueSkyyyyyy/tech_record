@@ -3412,7 +3412,7 @@ static void launch_bwd_wgmma2_tma(dim3 mg, CUtensorMap qmap, CUtensorMap kmap,
 
 #ifdef FA_WGMMA
 static int run_varlen(const std::string& dir, bool causal, int iters, int lse_split = 0,
-                      int wg2ksplit = -1, int mla8w = -1) {
+                      int wg2ksplit = -1, int mla8w = -1, int mlaksplit = -1) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -3534,6 +3534,29 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
   printf("[O40] varlen lse k-split = %d (base=%ld)\n", lse_split_eff,
          (long)((lse_nblk0 + 1) / 2) * H * B);
 
+  // O53：把定长 MLA 的 O44/O50「N 方向 split-K（split-KV）」搬进 varlen（fp16 同款）。
+  //   D=512 的主 kernel（mma、BM=32）base grid = ceil(maxlen/BM)·H·B 太小（1 CTA/SM 下 SM 空转），
+  //   切 K 均分到 ksplit 个 CTA；device 侧 O44 早已支持（切片 + 空切片早退 + dQ 跨 CTA red_add2，
+  //   `ksplit==1` 逐式退化）。auto 与定长一致：target `base*sp≈528`（4 个波）+ 每 m 块 K 切 ≈2 份。
+  int mla_ks_eff = 1;
+  if (D == 512) {
+    if (mlaksplit >= 1) mla_ks_eff = mlaksplit;
+    else {
+      const int base_m = (maxlen + main_bm - 1) / main_bm;
+      const long base = (long)base_m * H * B;
+      const int nt_cap = (maxlen + 31) / 32;   // BN=32
+      int sp = 1;
+      while (sp < 16 && base * (sp * 2) <= 528) sp *= 2;
+      int sp_min = 1;
+      while (sp_min < 16 && sp_min * 2 <= (nt_cap + 1) / 2) sp_min *= 2;
+      if (sp_min > sp) sp = sp_min;
+      mla_ks_eff = sp;
+    }
+    mg.x *= (unsigned)mla_ks_eff;   // O53：split-KV 抬 grid
+    printf("[O53] varlen MLA main k-split = %d (%s)\n", mla_ks_eff,
+           (mlaksplit >= 1) ? "forced" : "auto");
+  }
+
   const int cvt_threads = 256;
   const int cvt_blocks =
       (int)std::min<size_t>((std::max(nq, nkv) + cvt_threads - 1) / cvt_threads, 65535);
@@ -3596,11 +3619,11 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
       if (mla8w != 0)
         launch_bwd_mma<512, 32, 32, 1, false, true, 256, 4>(
             mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H,
-            Hkv, scale, (int)causal, 0, d_cu);
+            Hkv, scale, (int)causal, 0, d_cu, mla_ks_eff);
       else
         launch_bwd_mma<512, 32, 32, 1, false, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse,
                                                     d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H, Hkv,
-                                                    scale, (int)causal, 0, d_cu);
+                                                    scale, (int)causal, 0, d_cu, mla_ks_eff);
       convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, dq, dk, dv, nq,
                                                   nkv);
     }
@@ -3625,7 +3648,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
   printf("[timing] VARLEN total %.4f ms  %.2f TFLOPS (sum_b 4HL^2D)\n", ms,
          flops / (ms * 1e-3) / 1e12);
   printf("grid main = %d x %d x %d | lse grid = %d x %d x %d | T=%d\n",
-         (maxlen + main_bm - 1) / main_bm, H, B, (lse_nblk + 1) / 2, H, B, T);
+         mg.x, mg.y, mg.z, (lse_nblk + 1) / 2, H, B, T);
 
   // ---- O52 A/B（D=512/MLA/varlen）：主 kernel 4-warp vs 8-warp 同 session 计时 ----
   if (D == 512) {
@@ -3633,11 +3656,11 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
       if (w8)
         launch_bwd_mma<512, 32, 32, 1, false, true, 256, 4>(
             mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H,
-            Hkv, scale, (int)causal, 0, d_cu);
+            Hkv, scale, (int)causal, 0, d_cu, mla_ks_eff);
       else
         launch_bwd_mma<512, 32, 32, 1, false, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse,
                                                     d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H, Hkv,
-                                                    scale, (int)causal, 0, d_cu);
+                                                    scale, (int)causal, 0, d_cu, mla_ks_eff);
     };
     auto zero52 = [&]() {
       CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * sizeof(float)));
@@ -3679,6 +3702,45 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
     printf("[O52 A/B] varlen MLA main-only 4w %.4f ms | 8w %.4f ms (%.3fx) | "
            "max_abs(8w-vs-4w) dq=%.3e dk=%.3e dv=%.3e\n",
            m4, m8, m4 / m8, maxd(a4, a8), maxd(b4, b8), maxd(c4, c8));
+    run_all();  // 恢复 CLI 选中路径
+
+    // O53 A/B：varlen MLA 主 kernel 的 split-KV sweep（同 session、当前 warp 几何、main-only）
+    auto zero53 = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+    };
+    auto go53 = [&](int sp) {
+      dim3 gk((maxlen + main_bm - 1) / main_bm * (unsigned)sp, H, B);
+      if (mla8w != 0)
+        launch_bwd_mma<512, 32, 32, 1, false, true, 256, 4>(
+            gk, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H,
+            Hkv, scale, (int)causal, 0, d_cu, sp);
+      else
+        launch_bwd_mma<512, 32, 32, 1, false, true>(
+            gk, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H,
+            Hkv, scale, (int)causal, 0, d_cu, sp);
+    };
+    cudaEvent_t ea, eb;
+    CUDA_CHECK(cudaEventCreate(&ea));
+    CUDA_CHECK(cudaEventCreate(&eb));
+    auto bench53 = [&](int sp, float* out) {
+      zero53();
+      go53(sp);
+      CUDA_CHECK(cudaEventRecord(ea));
+      for (int i = 0; i < iters; ++i) go53(sp);
+      CUDA_CHECK(cudaEventRecord(eb));
+      CUDA_CHECK(cudaEventSynchronize(eb));
+      CUDA_CHECK(cudaEventElapsedTime(out, ea, eb));
+      *out /= iters;
+    };
+    printf("[O53 A/B] varlen MLA main-only ksplit sweep:");
+    for (int sp : {1, 2, 4, 8, 16}) {
+      float t = 0.f;
+      bench53(sp, &t);
+      printf(" %d %.4f", sp, t);
+    }
+    printf(" ms (auto=%d)\n", mla_ks_eff);
     run_all();  // 恢复 CLI 选中路径
   }
 
@@ -3812,7 +3874,7 @@ int main(int argc, char** argv) {
 
   if (varlen) {
 #ifdef FA_WGMMA
-    return run_varlen(dir, causal, iters, lse_split, wg2ksplit, mla8w);
+    return run_varlen(dir, causal, iters, lse_split, wg2ksplit, mla8w, mlaksplit);
 #else
     fprintf(stderr, "VARLEN 需要 -DFA_WGMMA（sm_90a）构建\n");
     return 1;

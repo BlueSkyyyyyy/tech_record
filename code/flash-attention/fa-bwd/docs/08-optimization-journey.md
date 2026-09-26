@@ -266,9 +266,30 @@ smem 冲突 + 低 occ
      Duration 116.6→59.5µs、warps_active 6.20%→12.39%、Ipc 0.11→0.23、`red` 扇区**逐字节不变**；
      数值 vs ref 同量级，`max_abs(8w-vs-4w)` dq~1e-7/dk,dv~1e-6（仅 atomic 次序），D=128 varlen
      回归逐位不变。**教训：一个只在定长路径落地的优化（8-warp / cp.async 回填）要显式检查
-     varlen 分支是否也吃到——O46/O47/O51 连续三轮都漏了 `run_varlen`。** 附带发现 fp8/fp16/bf16
-     的 **非 causal（full）MLA varlen 在 HEAD 已是偏差**（`git stash` 回 O51 提交复现一致，
-     与本改动无关，记 backlog）。详见 `docs/03` §52、`docs/01` §14ad、`docs/01b` §6al。
+     varlen 分支是否也吃到——O46/O47/O51 连续三轮都漏了 `run_varlen`。** 附带「发现」非 causal
+     （full）MLA varlen 偏差——**O53 已更正为对拍脚本漏传 `--full` 的假警报**（见下条）。详见
+     `docs/03` §52、`docs/01` §14ad、`docs/01b` §6al。
+
+18. **O53（第 100 轮，正结果，varlen MLA 默认 auto）**：**把定长 MLA 的 N 方向 split-K
+     搬进 varlen**（fp16/bf16，host-only）。O52 把 8-warp 搬进 varlen 后，主 kernel 仍是「单
+     CTA 扫整条 K」；`D=512/BM=32` 的 base grid 在 `b1_t512_h2` 只有 16 CTA、`b3_t1792_h2`
+     192，而 smem 207.36KB 锁死 1 CTA/SM ⇒ `Waves 0.48`、SM 空转。`run_varlen` 加
+     `mlaksplit`，`D==512` 按定长 O44/O50 同款 auto（target `grid*sp≈528` + 每 m 块 K 切 ≈2 份、
+     cap 16）选 `mla_ks_eff`，`mg.x *= mla_ks_eff`，两处 `launch_bwd_mma<512,32,32,1,...>` 传
+     `mla_ks_eff`（dQ 走跨 CTA `red_add2`）；`main` 透传 `--mlaksplit=`，末尾加 `[O53 A/B]` sweep。
+     **device 一行未改**（O44 早已支持，`ksplit==1` 逐式退化）。**main：causal b1
+     0.2350→0.0455ms（5.17×）、b3 0.5540→0.2543ms（2.18×）；端到端 fp16 3.35×/1.85×、
+     bf16 3.31×/1.87×**（total 0.2740→0.0819 / 0.6523→0.3518ms，13.11/16.02 TF）；full auto
+     偏大（最优 k=4/8），但相对 k=1 仍 3.6×/1.6×。ncu（fp16/bf16 b3 causal，逐项一致）：
+     Duration **259µs**、**L2 81.0%** / DRAM 4.7% / Compute 19%、occ 12.2%（1 CTA/SM）、
+     stall `long 2.73 + wait 2.28 + short 1.58`、L2 `red` 占 58.8% ⇒ **bound 从 O52 的「grid
+     不足一个波」变为「L2 跨 CTA dQ 归约 + 访存延迟」**（与定长 O44 同结论）。数值与历史同量级、
+     单/两文件逐指标一致。**教训：把一个机制从一个路径搬到另一个路径时，「数据流改造」（O52）
+     与「并行度改造」（O53）要分两步、分别验证——O52 只搬了 warp 几何，grid 仍不足一个波。**
+     另：**O52 记的「非 causal full MLA varlen 偏差」经查是对拍脚本漏传 `--full` 的假警报**
+     （显式 `--full` 后三 dtype full 全部通过：fp16 3e-4–5.5e-4、bf16 1.6e-3–3.5e-3、
+     fp8 ~5e-2）——**教训：跑 full 用例时先核对输出头的 `causal=` 字段**。详见 `docs/01`
+     §14ae、`docs/01b` §6am、`docs/04` §25。
 
 ---
 

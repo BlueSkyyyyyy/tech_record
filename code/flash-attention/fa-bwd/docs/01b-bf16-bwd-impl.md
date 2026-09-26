@@ -1940,10 +1940,57 @@ ARCH="" NVCC_FLAGS="$F" scripts/run.sh src/bf16/fa_bwd_bf16_mma_onefile.cu ...  
 | b3_t1792 causal | 1.267e-2 | 1.217e-2 | 1.796e-2 | 0.8522→0.5563ms (**1.53×**) |
 
 `max_abs(8w-vs-4w)` dq=0、dk/dv ≤1e-6（仅 dK/dV atomic 次序）。**单/两文件逐指标一致**；
-D=128 varlen 回归逐位不变。（非 causal full MLA varlen 的 HEAD 偏差见 `docs/03` §52.6。）
+D=128 varlen 回归逐位不变。（非 causal full MLA varlen：**更正**——并非 HEAD 偏差，而是 §6al
+对拍脚本漏传 `--full`；显式 `--full` 后 bf16 full 的 max_abs 仅 1.7–3.5e-3，见 §6am。）
 
 **性能（event，`Σ_b 4HL²D`）**：b1_t512 causal total 0.4258→**0.2747ms**（1.55×，3.91 TF）、
 b3_t1792 causal 0.9347→**0.6552ms**（1.43×，8.60 TF）。MLA 反向 FA3/TE 均不支持 ⇒ 无外部基线。
 
 原始输出：`src/bf16/fa_bwd_bf16_mma_main_o52_varlen.out.txt`、
 `src/bf16/fa_bwd_bf16_mma_onefile_o52_varlen.out.txt`。
+
+## 6am. O53-bf16：把 MLA 的 **N 方向 split-K（split-KV）** 推广到 **bf16 varlen**（第 100 轮）—— **正结果，varlen MLA 默认 auto**
+
+把 fp16 §14ae 的改动**逐字 dtype 参数化**到 bf16（仅 host）：`run_varlen` 加 `mlaksplit` 入参，
+`D==512` 时按定长 O44/O50 同款 auto 选 `mla_ks_eff`（target `base*sp≈528` + 每 m 块 K 切 ≈2 份，
+cap 16；`--mlaksplit=N` 强制/关），`mg.x *= mla_ks_eff`，两处 `launch_bwd_mma<512,32,32,1,...>`
+末尾传 `mla_ks_eff`；`main` 透传 `--mlaksplit=`；末尾加 `[O53 A/B]` sweep（8-warp、main-only、
+`ksplit=1/2/4/8/16`）。**device 代码一行未改**（O44 早已支持），单/两文件仅 host 有差异，
+device 保持既有 parity（bf16 单文件 host 结构不适用 `sync_onefile_device.py`，手工同步）。
+
+**「HEAD 偏差」更正**：O52 记的「bf16 非 causal full MLA varlen 偏差」为**对拍脚本漏传 `--full`**
+所致（输出头 `causal=1`）；显式 `--full` 后 bf16 full max_abs 仅 **1.7e-3 / 1.7e-3 / 1.6e-3**
+（b1_t512）与 **3.1e-3 / 3.5e-3 / 2.3e-3**（b3_t1792），均 bf16 噪声。
+
+**数值（ours vs fp32 ref，bf16 varlen；max_abs dq/dk/dv）**：
+
+| case (D=Dv=512) | dq | dk | dv |
+|---|---|---|---|
+| b1_t512 causal | 8.042e-3 | 1.097e-2 | 1.391e-2 |
+| b3_t1792 causal | 1.267e-2 | 1.217e-2 | 1.796e-2 |
+| b1_t512 full | 1.730e-3 | 1.692e-3 | 1.556e-3 |
+| b3_t1792 full | 3.100e-3 | 3.526e-3 | 2.316e-3 |
+
+**单/两文件逐指标一致**（与 fp16 同款、上表单/两文件完全相同）。D=128 varlen 回归逐位不变。
+
+**性能（CUDA event，`Σ_b 4HL²D`，同 session）**：
+
+| case | O52（8-warp，ksplit=1） | O53（8-warp，auto split-KV） | 端到端加速 |
+|---|---|---|---|
+| b1_t512 causal total | 0.2747 ms | **0.0830 ms / 12.93 TF** | **3.31×** |
+| b3_t1792 causal total | 0.6552 ms | **0.3499 ms / 16.11 TF** | **1.87×** |
+| b1_t512 full total | — | 0.2847 ms / 3.77 TF | — |
+| b3_t1792 full total | — | 1.0104 ms / 5.58 TF | — |
+
+主 kernel-only（`[O53 A/B]`）：causal b1 `0.2350→0.0455ms`（**5.17×**，auto=16）、
+b3 `0.5540→0.2543ms`（2.18×，auto=16）；full b1 最优 k=4 `0.0667`（auto=16 为 0.0748，偏大 12%）、
+b3 最优 k=8 `0.3865`。与 fp16 逐值一致（bf16 同构）。
+
+**ncu（`fa_bwd_bf16_mma_kernel`，varlen b3_t1792 H2 D512 causal，`--launch-count 1`）**：
+Duration **259.1 µs**、DRAM 4.70% / L1TEX 49.19% / **L2 81.02%** / Compute 19.37%、
+occ 12.21%（1 CTA/SM，smem 207.36KB）、regs 151、stall **long 2.75 + wait 2.28 + short 1.58**、
+L2 `op_red`/`op_read` = **18.407M / 12.900M**（red 占 58.8%）——**与 fp16 逐项一致**。
+bound = **L2（跨 CTA dQ red）+ 访存延迟**，不再是 O52 的「grid 不足一个波」。
+
+原始输出：`src/bf16/fa_bwd_bf16_o53_varlen.out.txt`（两文件 4 case + 单文件 2 case）、
+`src/bf16/fa_bwd_bf16_o53_ncu_varlen_b3.out.txt`。
