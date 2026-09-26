@@ -2649,7 +2649,28 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百零三轮）**：**O56——full MLA varlen 的 LSE 8-warp（LBM=128）几何
+> **最新（第一百零四轮）**：**O57——full MLA varlen 的 LSE「真正冲 2 CTA/SM」（混合结果，
+> 默认 opt-in）**。落实 O54/O56「下一步候选 ①」。O54/O56 的 FULL LSE smem 恒 199,680B（1 CTA/SM）。
+> 本轮把 smem 压到 99,840B（`≤232448/2`）让**两个 CTA 同驻一个 SM**：4-warp 固定 LBM=64，
+> 可行的只有 **cfg6 `<512,1,true,128,16>`**（PIPE=1/LBN=16，保留 cp.async）与
+> **cfg5 `<512,0,true,128,32>`**（PIPE=0/LBN=32，丢双缓冲）；host-only（`--lseocc=5/6`，
+> O56 已把 `<HD,PIPE,FULL,NTH,LBN_>` 参数化），`[O57 A/B]` 同 binary 扫 cfg4/7/5/6 × split。
+> **丢 cp.async 灾难性**（cfg4/5：b3 0.041→0.104/0.068ms）；**保留双缓冲的 cfg6 occupancy
+> 精确翻倍**（ncu `sm__warps_active` 6.25%→**10.51%**、Duration 40.9→44.0µs），但 LBN=16 把
+> tile/barrier 变 4×、`short_scoreboard` 0.89→**1.56**、`wait` 1.44→1.86 ⇒ **长 K 小幅正
+> （b3 0.0410→0.0394，1.04×）、短 K 负（b1 0.0135→0.0149，0.91×），且长 K 仍不及 O56 的
+> 8-warp（0.0378，1.08×）**。⇒ **LSE 的墙是 compute/softmax + smem→mma 的 tile 级依赖，不是
+> 可被 CTA occupancy 掩盖的访存延迟；「压 smem 换 2 CTA/SM」在 LSE 上不成立**。数值 vs ref
+> 与 O54–O56 **逐位相同**、默认路径 `--lseocc=0` 逐位不变。详见 `docs/01` §15d、`docs/01b`
+> §6aq、`docs/04` §29、`docs/08` §5.22。
+> **下一步候选**：① **MLA 主 kernel 降 smem 冲 2 CTA/SM**（四 dtype 共同墙；O46/O47 只提了
+> warp 数、O51/O57 只碰了 smem 边角；主 kernel 207–230KB 要消 ~100KB，需先消 Q/dO 常驻或
+> 分块 Q/KV——多轮）；② **fp8 MLA 的 `short_scoreboard`（smem→mma 的 `ldmatrix`）**（O47/O51/O57
+> 一致：它是并列头号；O57 反证「减 LBN / 压 smem」会加重它）；③ **causal MLA varlen 的 LSE
+> 2 CTA/SM**（O57 只做了 full；causal 是镜像配对版，未试）；④ **fp8 侧同构复现 O57 的判决**
+> （刻意未做，与 O56 一致）。
+>
+> **（第一百零三轮）**：**O56——full MLA varlen 的 LSE 8-warp（LBM=128）几何
 > （混合/负结果，默认 opt-in）**。落实上一版「候选 ①」：O54 后 full MLA varlen 的 LSE
 > `lse_mma_kernel_bal<512,1,true>` 仍是 1 CTA/SM、`sm__warps_active` 6.25%（1 warp/scheduler）。
 > 把 O46/O47 的「1 CTA/SM 时 4→8 warp」杠杆搬来：`lse_mma_kernel_bal` 模板参数化
@@ -3776,6 +3797,33 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     `docs/01b` §6ap、`docs/04` §28、`docs/08` §5.21。
   - **未扩展 fp8**：fp8 full MLA varlen LSE 同为 `lse_mma_kernel_bal<512,1,true>`（q8/qs 版），
     本可同构参数化；因 fp16/bf16 已判该杠杆为混合/负，**刻意不扩到 fp8**。
+
+- 2026-09-27（第一百零四轮）：**O57 完成（full MLA varlen 的 LSE 真正冲 2 CTA/SM；混合结果，
+  默认 opt-in）**。
+  - 动机（落实 O54/O56「下一步候选 ①」）：O54/O56 的 FULL LSE smem 恒 199,680B ⇒ 1 CTA/SM。
+    本轮换方向：**把 smem 压到 99,840B（≤232448/2）让两个 CTA 同驻一个 SM**（CTA 级并行度，
+    而非 O56 的 warp 级）。4-warp 固定 LBM=64，`smem=(LBM+(PIPE?2:1)·LBN)·(512+8)·2`，要
+    `≤116,224B` 必须 `LBN+P·LBN≤111`：只有 **cfg6 `PIPE=1/LBN=16`**（保留 cp.async）与
+    **cfg5 `PIPE=0/LBN=32`**（丢双缓冲）可达；另设两组同-1 CTA/SM 消融（cfg4 `P0/LBN64`、
+    cfg7 `P1/LBN32`）。
+  - **改动（host-only；device 一行未改）**：O56 已把 `lse_mma_kernel_bal` 参数化为
+    `<HD,PIPE,FULL,NTH,LBN_>`，故只加 `--lseocc=5/6`、四个实例的 `cudaFuncSetAttribute`
+    与 `[O57 A/B]`（同 binary 扫 cfg4/7/5/6 × split∈{1,2,4,8,16}，LSE-only）。默认 `--lseocc=0`
+    逐位不变；单/两文件 host 同步。
+  - **结果（同 session event，LSE-only ms）**：默认 `P1/LBN64` b3 split4 **0.0410** / b1 split8
+    **0.0135**；cfg4 0.1043/0.0277；cfg7 0.0563/0.0159；cfg5 0.0675/0.0283；**cfg6
+    0.0394（1.04×）/0.0149（0.91×）**；O56 8-warp（参考）0.0378（1.08×）/0.0171（0.79×）。
+    ⇒ **丢 cp.async 灾难性；保留双缓冲的 2 CTA/SM 长 K 小胜、短 K 反负，且长 K 仍不及 8-warp。**
+  - **ncu（fp16 b3 full，split4，(16,2,12)，`-c 1`）**：默认 vs cfg6 —— `sm__warps_active`
+    **6.25%→10.51%（精确翻倍）**、`gpu__time_duration` 40.90→44.03µs、`short_scoreboard`
+    0.89→**1.56**、`wait` 1.44→1.86、`l1tex` 22.9→30.9%。**occupancy 确实翻倍，但 LBN=16 让
+    tile/barrier 变 4×，`short_scoreboard`+`wait` 上升抵消之**。⇒ 结论：**LSE 的墙是
+    compute/softmax + smem→mma 的 tile 级依赖，不是可被 CTA occupancy 掩盖的访存延迟。**
+  - 数值 vs fp32 ref 与 O54–O56 **逐位相同**（fp16 b3 full 5.516/4.451/2.385e-4、b1
+    3.046/4.449/1.327e-4；bf16 b3 3.100/3.526/2.316e-3、b1 1.730/1.692/1.556e-3）。
+  - 原始输出 `src/fp16/fa_bwd_fp16_o57_{varlen_full_b3_auto,varlen_full_b3,varlen_full_b3_onefile,varlen_full_b1,ncu_lse}.out.txt`、
+    `src/bf16/fa_bwd_bf16_o57_{varlen_full_b3,varlen_full_b3_onefile,varlen_full_b1}.out.txt`；文档 `docs/01` §15d、
+    `docs/01b` §6aq、`docs/04` §29、`docs/08` §5.22。fp8 刻意未扩展（同 O56）。
 
 ## 灵感 / backlog
 
