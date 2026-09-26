@@ -1792,3 +1792,25 @@ occ 6.25%、**Waves 2.91**、No Eligible 74.1%、Warps/Sched 1.00、fixed-latenc
 「full 各块工作量相同、无需镜像配对」，**缺少 K 维 split/异步载入仍是并行度与延迟的墙**——
 一个 `bool FULL` 模板参数就够，且默认档编译出逐位相同的代码。详见 `docs/01` §15、`docs/01b` §6an、
 `docs/03` §53、`docs/08` §5.19。
+
+## 27. varlen MLA full 的 split-KV auto 重新标定（O55，第 102 轮）—— **正结果，full varlen 默认**
+
+O53 给 varlen MLA（D=512）主 kernel 的 split-KV auto 对 causal/full 用了同一目标（`base*sp≈528`，
+4 个波 + 每 m 块 K 切 ≈2 份）。`[O53 A/B]` sweep 显示 **full 的最优 split 更小**：full 主 kernel 每
+m 块工作量相同，base grid 靠少量切分即可铺满「一个波」（b1 base=32，k=4→128 CTA≈132 SM），
+再切到 16 只是**重复读 Q/dO + 增加 dQ 跨 CTA atomic**（纯亏）。host-only 改动：full 分支
+`target=132`（1 个波）、`sp_min=2`；**causal 分支逐字不变以保回归**。
+
+| case (D=512, fp16=bf16) | O53 auto | O55 auto | main（同 binary sweep） | total old→new |
+|---|---|---|---|---|
+| b1_t512 full | 16 | **4** | 0.0745→**0.0681ms**；sweep k4 **0.0647** vs k16 0.0748 | 0.1030→**0.0958ms**（1.075×） |
+| b3_t1792 full | 16 | **2** | 0.3888→**0.3873ms**；sweep k2 0.3873 vs k8 0.3868 | 0.4680→**0.4636ms**（1.009×） |
+| b1_t512 causal | 16 | 16 | 不变 | 0.0815ms（回归） |
+| b3_t1792 causal | 16 | 16 | 不变 | 0.3512ms（回归） |
+
+**数值 vs fp32 ref**：full b1 3.05/4.45/1.33e-4、b3 5.52/4.45/2.39e-4（与 O53/O54 逐位相同）；
+causal 回归逐位不变（split 只改 dQ 的 fp32 atomic 次序）。单/两文件逐指标一致。
+**ncu（fp16 b1 full main，`-c 1`）**：O53 k=16 grid 256×2、**Waves 3.88**、Duration **77.54µs**、
+L2 67.95% → O55 k=4 grid 64×2、**Waves 0.97**、Duration **68.00µs（1.14×）**、L2 73.24%、occ ~12.4%。
+**bound 仍是 L2（dK/dV 跨 CTA red）+ 1 CTA/SM 低 occupancy**；本次是**去过度切分**。
+详见 `docs/01` §15b、`docs/01b` §6ao、`docs/08` §5.20。

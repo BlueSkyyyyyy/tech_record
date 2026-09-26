@@ -3698,6 +3698,38 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
      `..._o54_varlen_causal_reg_b3.out.txt`；文档 `docs/01` §15、`docs/01b` §6an、`docs/03` §53、
      `docs/04` §26、`docs/08` §5.19。
 
+- 2026-09-27（第一百零二轮）：**O55 完成（varlen MLA full 的 split-KV auto 重新标定，正结果）**。
+   - 动机（落实 O53 backlog 的「可选微调」）：O53 给 varlen MLA（D=512）主 kernel 的 N 方向
+     split-KV，其 auto 对 **causal 与 full 用同一目标**（`base*sp≈528`=1 CTA/SM 的 4 个波 +
+     「每 m 块 K 切 `nt_cap/2`」）。但 `[O53 A/B]` sweep 显示 **full 的最优 split 明显更小**：
+     b1_t512 full 的 k=4 **0.0647ms** 而 k=16 **0.0748ms（1.16×）**；原因是 full 主 kernel 每
+     m 块工作量相同，`base=32` 靠 k=4 即可铺满一个波（128 CTA≈132 SM），再切到 16 只是
+     **重复读 Q/dO + 增加 dQ 跨 CTA atomic**（纯亏）。causal 因镜像配对每 CTA 工作量随 m 变化，
+     仍需多切几个波（b1/b3 最优 16/8）。
+   - **改动（host-only；单/两文件 device 一行未改）**：`run_varlen` 的 O53 auto 分支
+     `target = causal ? 528 : 132`、`sp_min`：causal 保持原 `(nt_cap+1)/2` 循环**逐字不变**，
+     full 改为 **2**（b3 的 base=192 已 >132、target 给 1，实测 k=2 最优）。得到 b1 full→4、
+     b3 full→2；causal 仍 16。
+   - **数值（ours-vs-ref，max_abs dq/dk/dv）**：fp16 full b1 3.046/4.449/1.327e-4、
+     b3 5.516/4.451/2.385e-4（与 O53/O54 **逐位相同**）；bf16 full b1 1.730/1.692/1.556e-3、
+     b3 3.100/3.526/2.316e-3。**causal b1/b3 逐位回归**（fp16 1.303/1.537/1.557e-3、
+     2.415/1.834/1.856e-3；bf16 8.042e-3/1.097e-2/1.391e-2、1.267e-2/1.217e-2/1.796e-2）。
+     单/两文件逐指标一致。
+   - **性能（同 session event）**：fp16 **b1 full main 0.0745→0.0681ms（1.094×）**、端到端
+     **total 0.1030→0.0958ms（1.075×，11.20 TF）**；b3 full total 0.4680→**0.4636ms（1.009×）**。
+     bf16 b1 full main **1.14×**、total 0.1030→**0.0944ms（1.09×）**；b3 total →0.4620ms。
+     causal b1/b3 total 持平（fp16 0.0815/0.3512），回归。
+   - **ncu（fp16 b1 full main，`-c 1`，同 session A/B）**：O53 k=16 grid 256×2×1、**Waves 3.88**、
+     Duration **77.54µs**、L1TEX 44.11% / L2 67.95% / occ 12.27% → O55 k=4 grid 64×2×1、
+     **Waves 0.97**、Duration **68.00µs（1.14×）**、L1TEX 49.06% / L2 73.24% / occ 12.44%。
+     **bound 仍是 L2（dK/dV 跨 CTA `red`）+ 1 CTA/SM 低 occupancy**；本次是**去过度切分**
+     （k=4 恰好一个波；k=16 跑 3.88 个波、冗余读/原子）。b3 full（auto=2）Duration 387µs、
+     L2 83.79%、Waves 2.91。
+   - 原始输出 `src/fp16/fa_bwd_fp16_o55_varlen.out.txt`、`..._o55_varlen_onefile.out.txt`、
+     `..._o55_ncu_varlen_full_b1_t512.out.txt`、`..._o55_ncu_varlen_full_b1_ks16.out.txt`、
+     `..._o55_ncu_varlen_full_b3_t1792.out.txt`；`src/bf16/fa_bwd_bf16_o55_varlen{,_onefile}.out.txt`；
+     文档 `docs/01` §15b、`docs/01b` §6ao、`docs/04` §27、`docs/08` §5.20。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
@@ -3709,9 +3741,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       约占 total 60%（~0.62ms / total 1.01ms）。O54 给 `lse_mma_kernel_bal` 加 `bool FULL`
       模式（一个 CTA 一个 m 块 + `cp.async` 双缓冲 + O40 K 维 split），full 各块均衡故无需镜像
       配对。**LSE 9–14×、端到端 fp16/bf16 2.17×、fp8 ~2.1×**。见「当前进度」第一百零一轮。
-- [ ] **（第一百轮 O53 可选微调）varlen MLA full 的 split-KV auto 偏大**：causal 最优 k=16、
-      full 最优 k=4/8；auto 现统一取 16。可在 `D==512 && !causal` 时改用更小 target（但 full
-      是次要路径，相对 k=1 仍 3.2–3.6×）。
+- [x] **（第一百轮 O53 可选微调）varlen MLA full 的 split-KV auto 偏大** → **已完成（O55，第一百零二轮）**：
+      causal 最优 k=16、full 最优 k=4/8（b1 full），auto 原统一取 16。host-only 改 `D==512 && !causal`
+      分支用 `target=132`（1 个波）+ `sp_min=2`（causal 分支逐字不变）；b1 full auto 16→4
+      main **1.09–1.16×**、端到端 **1.075×**，b3 full 1.009×，causal 回归逐位不变。详见「第一百零二轮」。
 
 - [ ] P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 

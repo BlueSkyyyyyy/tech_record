@@ -3543,7 +3543,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
   // O53：把定长 MLA 的 O44/O50「N 方向 split-K（split-KV）」搬进 varlen（fp16 同款）。
   //   D=512 的主 kernel（mma、BM=32）base grid = ceil(maxlen/BM)·H·B 太小（1 CTA/SM 下 SM 空转），
   //   切 K 均分到 ksplit 个 CTA；device 侧 O44 早已支持（切片 + 空切片早退 + dQ 跨 CTA red_add2，
-  //   `ksplit==1` 逐式退化）。auto 与定长一致：target `base*sp≈528`（4 个波）+ 每 m 块 K 切 ≈2 份。
+  //   `ksplit==1` 逐式退化）。auto：causal target `base*sp≈528`（4 个波）+ 每 m 块 K 切 ≈2 份；
+  //   **full target `≈132`（1 个波，O55）+ 至少 2 份**（full 与 causal 最优 split 不同）。
   int mla_ks_eff = 1;
   if (D == 512) {
     if (mlaksplit >= 1) mla_ks_eff = mlaksplit;
@@ -3552,9 +3553,16 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
       const long base = (long)base_m * H * B;
       const int nt_cap = (maxlen + 31) / 32;   // BN=32
       int sp = 1;
-      while (sp < 16 && base * (sp * 2) <= 528) sp *= 2;
+      // O55（第一百零二轮）：full 最优 split 比 causal 小——causal `base*sp≈528`、full `≈132`
+      //   （实测 b1_t512_h2 auto 16→4 main 1.12×）；full 至少 2 份（b3 base=192 时 target 给 1、
+      //   实测 k=2 最优）。causal 分支逐字保持 O53 口径以保逐位回归。
+      const int target = causal ? 528 : 132;
+      while (sp < 16 && base * (sp * 2) <= target) sp *= 2;
       int sp_min = 1;
-      while (sp_min < 16 && sp_min * 2 <= (nt_cap + 1) / 2) sp_min *= 2;
+      if (causal)
+        while (sp_min < 16 && sp_min * 2 <= (nt_cap + 1) / 2) sp_min *= 2;
+      else
+        sp_min = 2;
       if (sp_min > sp) sp = sp_min;
       mla_ks_eff = sp;
     }

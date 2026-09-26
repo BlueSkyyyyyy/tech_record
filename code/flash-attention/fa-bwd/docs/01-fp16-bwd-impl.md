@@ -3901,3 +3901,83 @@ ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
 原始输出：`src/fp16/fa_bwd_fp16_o54_varlen_full_b3.out.txt`（两文件）、
 `..._o54_varlen_full_b3_onefile.out.txt`（单文件）、`..._o54_varlen_full_b1.out.txt`、
 `src/fp16/fa_bwd_fp16_o54_ncu_lse_full_b3.out.txt`（ncu）。
+
+## 15b. O55-fp16：varlen MLA full 的 split-KV auto 重新标定（第 102 轮）—— 正结果，full varlen 默认
+
+### 15b.1 动机
+
+O53 给 varlen MLA（D=512）主 kernel 加的 N 方向 split-KV，其 auto 对 **causal 与 full 用了同一个
+目标**（`base*sp ≈ 528`，即 1 CTA/SM 的 4 个波）+ 「每 m 块 K 切 ≈2 份（`nt_cap/2`）」。但 `[O53 A/B]`
+的 sweep 显示 **full 的最优 split 明显更小**：
+
+| case | k=1 | k=2 | k=4 | k=8 | k=16 | O53 auto |
+|---|---|---|---|---|---|---|
+| b1_t512 causal | 0.2350 | 0.0835 | 0.0544 | 0.0463 | **0.0455** | 16 ✓ |
+| b3_t1792 causal | 0.5543 | 0.3014 | 0.2642 | **0.2535** | 0.2543 | 16（≈最优） |
+| b1_t512 **full** | 0.2394 | 0.0918 | **0.0647** | 0.0709 | 0.0748 | **16（偏大 1.16×）** |
+| b3_t1792 **full** | 0.6022 | **0.3873** | 0.3903 | 0.3868 | 0.3909 | 16（≈最优） |
+
+即 full b1 的 auto 给出 k=16（0.0748 ms），最优却是 k=4（0.0647 ms，**1.16×**）。原因：full 主 kernel
+每 m 块工作量相同、base grid 已能靠少量切分铺到「一个波」（`base=32`，k=4 → 128 CTA ≈ 1×132 SM）；
+再往 16 切只是在**重复读 Q/dO + 增加 dQ 跨 CTA atomic**，纯亏。
+
+### 15b.2 实现（host-only；单/两文件 device 逐字一致）
+
+`run_varlen` 的 O53 auto 分支：**causal 分支逐字保持 O53 口径**（`target=528` + `sp_min=(nt_cap+1)/2`）
+以保逐位回归；**full 分支改用 `target=132`（1 个波）、`sp_min=2`**（b3 的 base=192 已超 132、
+target 会给 1，实测 k=2 最优）：
+
+```cpp
+const int target = causal ? 528 : 132;
+while (sp < 16 && base * (sp * 2) <= target) sp *= 2;
+int sp_min = 1;
+if (causal) while (sp_min < 16 && sp_min * 2 <= (nt_cap + 1) / 2) sp_min *= 2;
+else        sp_min = 2;                 // full：至少 2 份
+if (sp_min > sp) sp = sp_min;
+```
+
+`D==512` 时 `mg.x *= mla_ks_eff` 照旧。device 一行未改（O44 早已支持切片 + 空切片早退 +
+dQ 跨 CTA `red_add2`，`ksplit==1` 逐式退化）。得到 **b1 full→4、b3 full→2**。
+
+### 15b.3 数值（ours vs fp32 ref，fp16 varlen，max_abs dq/dk/dv）
+
+| case | O55 auto | dq / dk / dv | 与 O53/O54 |
+|---|---|---|---|
+| b1_t512 full | 4 | 3.046 / 4.449 / 1.327e-4 | 逐位相同 |
+| b3_t1792 full | 2 | 5.516 / 4.451 / 2.385e-4 | 逐位相同 |
+| b1_t512 causal | 16 | 1.303 / 1.537 / 1.557e-3 | 逐位相同（causal 分支未动） |
+| b3_t1792 causal | 16 | 2.415 / 1.834 / 1.856e-3 | 逐位相同 |
+
+split 只改 `dQ` 跨 CTA atomic 次序（fp32 累加），max_abs 不变；单/两文件逐指标一致。
+
+### 15b.4 性能（CUDA event，同 session；`[O53 A/B]` 是同一 binary 内的 A/B）
+
+* **b1_t512 full**：main（auto 选中）**0.0745 → 0.0681 ms（1.094×）**；同 binary sweep
+  k=4 **0.0647** vs k=16 0.0748（**1.16×**）；**端到端 total 0.1030 → 0.0958 ms（1.075×，11.20 TF）**。
+* **b3_t1792 full**：main 0.3888 → **0.3873**（≈1.004×）；total 0.4680 → **0.4636 ms（1.009×）**。
+* **causal b1/b3**：auto 仍 16、total 0.0820/0.3512 与 O53 持平（回归）。
+
+### 15b.5 ncu（fp16 b1 full main，`-c 1`，同 session A/B）
+
+| auto | grid | Waves | Duration | L1TEX | L2 | Compute | occ |
+|---|---|---|---|---|---|---|---|
+| O53 k=16 | 256×2×1 | 3.88 | 77.54 µs | 44.11% | 67.95% | 14.69% | 12.27% |
+| **O55 k=4** | 64×2×1 | **0.97** | **68.00 µs（1.14×）** | 49.06% | 73.24% | 12.49% | 12.44% |
+
+**读法**：k=4 恰好填满一个波（`Waves 0.97`），而 k=16 要跑 3.88 个波；虽然 k=4 的 L2% 更高
+（每元素 dQ 归约次数少、Q/dO 重读少，单位时间 L2 占用更集中），Duration 反而短 14%。
+**bound 仍是 L2（dK/dV 跨 CTA `red`）+ 1 CTA/SM 的低 occupancy**；本次是**去掉过切**而非改结构。
+b3 full（auto=2，grid 64×2×3=384）Duration 387 µs、L2 83.79%、Waves 2.91、occ 12.46%。
+
+### 15b.6 复现 / 原始输出
+
+```bash
+FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA'
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --varlen --full /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_full_fp16
+# 同 binary A/B：--mlaksplit=4 / 16；[O53 A/B] 打印 1/2/4/8/16
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_o55_varlen.out.txt`（两文件，full+causal b1/b3）、
+`..._o55_varlen_onefile.out.txt`（单文件）、`..._o55_ncu_varlen_full_b1_t512.out.txt`（ncu k=4）、
+`..._o55_ncu_varlen_full_b1_ks16.out.txt`（ncu k=16 对照）、`..._o55_ncu_varlen_full_b3_t1792.out.txt`。
