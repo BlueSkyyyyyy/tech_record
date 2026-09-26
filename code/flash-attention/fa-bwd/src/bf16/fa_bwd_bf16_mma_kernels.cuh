@@ -502,18 +502,20 @@ lse_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
 // O54：`FULL=true` 时本 kernel 也服务 **非 causal（full）** 路径——每个 CTA 只处理一个 m 块
 //   （grid.x = nblk，不做镜像配对），`ncols=len` 且不做因果掩码，其余逐字复用。
 //   `FULL=false`（默认）编译出与原版逐位相同的代码。
-template <int HD, int PIPE, bool FULL = false>
-__global__ void __launch_bounds__(THREADS)
+template <int HD, int PIPE, bool FULL = false, int NTH = THREADS, int LBN_ = LBN>
+__global__ void __launch_bounds__(NTH)
 lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
                    float* __restrict__ lse, int S, int H, int Hkv, float scale,
                    const int* __restrict__ cu_seqlens = nullptr,
                    float* __restrict__ lse_part = nullptr, int ksplit = 1) {
   constexpr int LD  = HD + 8;
-  constexpr int KVL = LBN * LD;
+  constexpr int KVL = LBN_ * LD;
+  constexpr int LBM_ = (NTH / 32) * 16;   // warp 数×16 行（128→64, 256→128）
+  constexpr int MTN = LBN_ / 8;             // 每 warp 的 n8 tile 数
   constexpr int HDV = HD / 8;   // 每行 uint4(8 bf16) 数
   extern __shared__ __align__(16) char smem[];
   bf16* Qs = reinterpret_cast<bf16*>(smem);
-  bf16* Ks = Qs + LBM * LD;   // PIPE=1：2 × LBN × LD；PIPE=0：1 × LBN × LD
+  bf16* Ks = Qs + LBM_ * LD;   // PIPE=1：2 × LBN_ × LD；PIPE=0：1 × LBN_ × LD
 
   // O39：K 维 split（对齐 fp8 §41 与 fp16 TMA LSE 的 O38）。`ksplit>1` 时 grid.z = B*ksplit，
   //   每个 (pair,ks) CTA 只扫本 m 块 K 范围的第 ks 个连续 tile 切片，部分 (m,l) 写 `lse_part`，
@@ -524,7 +526,7 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
   // nullptr 逐式退化为定长（qbase=b*S、len=S），定长路径逐位不变。
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
   const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
-  const int nblk  = (len + LBM - 1) / LBM;
+  const int nblk  = (len + LBM_ - 1) / LBM_;
   // O54：FULL 一个 CTA 一个 m 块；causal 一行镜像对。
   if constexpr (FULL) { if (pair >= nblk) return; }
   else { if (pair >= (nblk + 1) / 2) return; }   // 短序列多余的对 CTA 直接退出
@@ -532,11 +534,11 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
 
-  // 把 K 的一个 tile（j0 起 LBN 行）写进 Kd：PIPE=1 用 16B cp.async（行越界写 0）；
+  // 把 K 的一个 tile（j0 起 LBN_ 行）写进 Kd：PIPE=1 用 16B cp.async（行越界写 0）；
   // PIPE=0 用普通标量 smem 写（随后由调用处的 __syncthreads 保证可见）。
   auto issue_k = [&](bf16* Kd, int j0) {
 #pragma unroll
-    for (int u = tid; u < LBN * HDV; u += THREADS) {
+    for (int u = tid; u < LBN_ * HDV; u += NTH) {
       const int row = u / HDV, c8 = u % HDV;
       const int jg = j0 + row;
       if (jg < len) {
@@ -557,7 +559,7 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
   // O10：Q 的载入向量化（与 fp16 版逐字同构）。
   auto issue_q = [&](bf16* Qd, int m0) {
 #pragma unroll
-    for (int u = tid; u < LBM * HDV; u += THREADS) {
+    for (int u = tid; u < LBM_ * HDV; u += NTH) {
       const int row = u / HDV, c8 = u % HDV;
       const int qi = m0 + row;
       if (qi < len) {
@@ -580,13 +582,13 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
     if constexpr (FULL) { if (t == 1) continue; }   // O54：full 无镜像配对，只做 t=0
     const int mblk = FULL ? pair : ((t == 0) ? pair : (nblk - 1 - pair));
     if (!FULL && t == 1 && pair == nblk - 1 - pair) continue;  // 奇数 nblk 的中心块只做一次
-    const int m0 = mblk * LBM;
+    const int m0 = mblk * LBM_;
 
     // ---- 载入本 m 块的 Q（越界补 0）----
     issue_q(Qs, m0);
 
-    const int ncols = FULL ? len : min(len, m0 + LBM);
-    const int ntiles = (ncols + LBN - 1) / LBN;
+    const int ncols = FULL ? len : min(len, m0 + LBM_);
+    const int ntiles = (ncols + LBN_ - 1) / LBN_;
     // O39：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
     const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
     const int nt1 = (int)(((long)ntiles * (ksp + 1)) / ksplit);
@@ -594,33 +596,33 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
 
     // prologue：PIPE=1 时发 tile0 进 stage0（Q 与 K 写不同 smem，由循环首 wait+sync 保证可见）
     if constexpr (PIPE) {
-      if (nuse > 0) issue_k(Ks, nt0 * LBN);
+      if (nuse > 0) issue_k(Ks, nt0 * LBN_);
     }
 
     float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
     for (int rnt = 0; rnt < nuse; ++rnt) {
       const int nt = nt0 + rnt;
-      const int j0 = nt * LBN;
+      const int j0 = nt * LBN_;
       bf16* Kt = Ks + (PIPE ? (rnt & 1) * KVL : 0);
       if constexpr (PIPE) {
         // 等本 tile 落地；此 barrier 同时证明「上一 tile 的 mma 已读完其 stage」，故可复用。
         asm volatile("cp.async.wait_group 0;\n");
         __syncthreads();
-        if (rnt + 1 < nuse) issue_k(Ks + ((rnt + 1) & 1) * KVL, j0 + LBN);
+        if (rnt + 1 < nuse) issue_k(Ks + ((rnt + 1) & 1) * KVL, j0 + LBN_);
       } else {
         issue_k(Ks, j0);
         __syncthreads();
       }
 
-      float acc[1][8][4];
+      float acc[1][MTN][4];
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int j = 0; j < MTN; ++j)
 #pragma unroll
         for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
-      mma_block_bf16<16, LBN, HD, false>(Qs, LD, Kt, LD, acc, wid, 0, lane);
+      mma_block_bf16<16, LBN_, HD, false>(Qs, LD, Kt, LD, acc, wid, 0, lane);
 
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int j = 0; j < MTN; ++j)
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
           int s = q >= 2 ? 1 : 0;

@@ -571,18 +571,20 @@ lse_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
 //   （grid.x = nblk，不做镜像配对，因为 full 下所有 m 块工作量相同、本已均衡），`ncols=len`
 //   且不做 `jg<=qi` 因果掩码，其余（cp.async 双缓冲、O40 的 K 维 split + 二次归约）逐字复用。
 //   `FULL=false`（默认）编译出与原版逐位相同的代码，定长/causal 路径不受影响。
-template <int HD, int PIPE, bool FULL = false>
-__global__ void __launch_bounds__(THREADS)
+template <int HD, int PIPE, bool FULL = false, int NTH = THREADS, int LBN_ = LBN>
+__global__ void __launch_bounds__(NTH)
 lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
                    float* __restrict__ lse, int S, int H, int Hkv, float scale,
                    const int* __restrict__ cu_seqlens = nullptr,
                    float* __restrict__ lse_part = nullptr, int ksplit = 1) {
   constexpr int LD  = HD + 8;
-  constexpr int KVL = LBN * LD;
+  constexpr int KVL = LBN_ * LD;
+  constexpr int LBM_ = (NTH / 32) * 16;   // warp 数×16 行（128→64, 256→128）
+  constexpr int MTN = LBN_ / 8;             // 每 warp 的 n8 tile 数
   constexpr int HDV = HD / 8;   // 每行 uint4(8 half) 数
   extern __shared__ __align__(16) char smem[];
   __half* Qs = reinterpret_cast<__half*>(smem);
-  __half* Ks = Qs + LBM * LD;   // PIPE=1：2 × LBN × LD；PIPE=0：1 × LBN × LD
+  __half* Ks = Qs + LBM_ * LD;   // PIPE=1：2 × LBN_ × LD；PIPE=0：1 × LBN_ × LD
 
   // O39：K 维 split（对齐 fp8 §41 与 fp16 TMA LSE 的 O38）。`ksplit>1` 时 grid.z = B*ksplit，
   //   每个 (pair,ks) CTA 只扫本 m 块 K 范围的第 ks 个连续 tile 切片，部分 (m,l) 写 `lse_part`，
@@ -593,7 +595,7 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
   // nullptr 逐式退化为定长（qbase=b*S、len=S），定长路径逐位不变。
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
   const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
-  const int nblk  = (len + LBM - 1) / LBM;
+  const int nblk  = (len + LBM_ - 1) / LBM_;
   // O54：FULL 一个 CTA 一个 m 块；causal 一行镜像对。
   if constexpr (FULL) { if (pair >= nblk) return; }
   else { if (pair >= (nblk + 1) / 2) return; }   // 短序列多余的对 CTA 直接退出
@@ -601,11 +603,11 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
 
-  // 把 K 的一个 tile（j0 起 LBN 行）写进 Kd：PIPE=1 用 16B cp.async（行越界写 0）；
+  // 把 K 的一个 tile（j0 起 LBN_ 行）写进 Kd：PIPE=1 用 16B cp.async（行越界写 0）；
   // PIPE=0 用普通标量 smem 写（随后由调用处的 __syncthreads 保证可见）。
   auto issue_k = [&](__half* Kd, int j0) {
 #pragma unroll
-    for (int u = tid; u < LBN * HDV; u += THREADS) {
+    for (int u = tid; u < LBN_ * HDV; u += NTH) {
       const int row = u / HDV, c8 = u % HDV;
       const int jg = j0 + row;
       if (jg < len) {
@@ -627,7 +629,7 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
   // PIPE=0 用标量写）。Q 只依赖本 CTA 的 m 块，行越界写 0。
   auto issue_q = [&](__half* Qd, int m0) {
 #pragma unroll
-    for (int u = tid; u < LBM * HDV; u += THREADS) {
+    for (int u = tid; u < LBM_ * HDV; u += NTH) {
       const int row = u / HDV, c8 = u % HDV;
       const int qi = m0 + row;
       if (qi < len) {
@@ -650,13 +652,13 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
     if constexpr (FULL) { if (t == 1) continue; }   // O54：full 无镜像配对，只做 t=0
     const int mblk = FULL ? pair : ((t == 0) ? pair : (nblk - 1 - pair));
     if (!FULL && t == 1 && pair == nblk - 1 - pair) continue;  // 奇数 nblk 的中心块只做一次
-    const int m0 = mblk * LBM;
+    const int m0 = mblk * LBM_;
 
     // ---- 载入本 m 块的 Q（越界补 0）----
     issue_q(Qs, m0);
 
-    const int ncols = FULL ? len : min(len, m0 + LBM);
-    const int ntiles = (ncols + LBN - 1) / LBN;
+    const int ncols = FULL ? len : min(len, m0 + LBM_);
+    const int ntiles = (ncols + LBN_ - 1) / LBN_;
     // O39：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
     const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
     const int nt1 = (int)(((long)ntiles * (ksp + 1)) / ksplit);
@@ -664,33 +666,33 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
 
     // prologue：PIPE=1 时发 tile0 进 stage0（Q 与 K 写不同 smem，由循环首 wait+sync 保证可见）
     if constexpr (PIPE) {
-      if (nuse > 0) issue_k(Ks, nt0 * LBN);
+      if (nuse > 0) issue_k(Ks, nt0 * LBN_);
     }
 
     float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
     for (int rnt = 0; rnt < nuse; ++rnt) {
       const int nt = nt0 + rnt;
-      const int j0 = nt * LBN;
+      const int j0 = nt * LBN_;
       __half* Kt = Ks + (PIPE ? (rnt & 1) * KVL : 0);
       if constexpr (PIPE) {
         // 等本 tile 落地；此 barrier 同时证明「上一 tile 的 mma 已读完其 stage」，故可复用。
         asm volatile("cp.async.wait_group 0;\n");
         __syncthreads();
-        if (rnt + 1 < nuse) issue_k(Ks + ((rnt + 1) & 1) * KVL, j0 + LBN);
+        if (rnt + 1 < nuse) issue_k(Ks + ((rnt + 1) & 1) * KVL, j0 + LBN_);
       } else {
         issue_k(Ks, j0);
         __syncthreads();
       }
 
-      float acc[1][8][4];
+      float acc[1][MTN][4];
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int j = 0; j < MTN; ++j)
 #pragma unroll
         for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
-      mma_block_f16<16, LBN, HD, false>(Qs, LD, Kt, LD, acc, wid, 0, lane);
+      mma_block_f16<16, LBN_, HD, false>(Qs, LD, Kt, LD, acc, wid, 0, lane);
 
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int j = 0; j < MTN; ++j)
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
           int s = q >= 2 ? 1 : 0;
@@ -4049,7 +4051,7 @@ static void launch_bwd_wgmma4(dim3 mg, const __half* q, const __half* k, const _
 #ifdef FA_WGMMA
 static int run_varlen(const std::string& dir, bool causal, int iters, int varlen_tma = 0,
                       int lse_split = 0, int wg2ksplit = -1, int mla8w = -1,
-                      int mlaksplit = -1) {
+                      int mlaksplit = -1, int lse8w = 0) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -4142,11 +4144,17 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
          varlen_tma_use ? "wgmma2 TMA (Q/K/V/dO 4D-TMA)" : "wgmma2 cp.async");
 
   const int lse_nblk = (maxlen + LBM - 1) / LBM;
+  // O56：full MLA varlen 的 LSE 用 8-warp/256 线程（LBM=128、LBN=32）几何——同 1 CTA/SM 下
+  //   每 scheduler warp 数 1→2（对齐 O46/O47 的通用杠杆），且 grid 与「每-C 读 K 次数」减半。
+  //   仅服务 D=512 && 非 causal（O54 FULL 路径）；`--lse8w=0/1` 同 binary A/B。
+  const bool lse8w_use = (lse8w != 0) && (D == 512) && !causal;
+  const int lse_nblk8 = (maxlen + 127) / 128;   // 8-warp 版 LBM=128 的 m 块数
   dim3 lg_bal((lse_nblk + 1) / 2, H, B);
   // non-causal 用 O8 的 mma `lse_mma_kernel<HD>`（Q/K 行距 D+8）；causal D=512 用
   // `lse_mma_kernel_bal<512,1>`（镜像配对 + cu_seqlens，PIPE=1 双缓冲）。
   const int kLseSmem = (LBM + LBN) * (D + 8) * (int)sizeof(__half);
   const int kLseSmemBal1 = (LBM + 2 * LBN) * (D + 8) * (int)sizeof(__half);
+  const int kLseSmemBal1_8 = (128 + 2 * 32) * (D + 8) * (int)sizeof(__half);
   const int kLseTileWgm = (D == 128) ? (LBM / 8) * (D / 64) * 1024 : 0;
   const int kLseSmemWgm1 = 1024 + kLseTileWgm * 3;
   if (D == 128) {
@@ -4163,6 +4171,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
     // O54：非 causal（full）MLA varlen 也走 bal 的 FULL 版（一个 CTA 一个 m 块 + K 维 split）。
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<512, 1, true>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
+    // O56：full 的 8-warp（256 线程 / LBM=128 / LBN=32）几何。
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<512, 1, true, 256, 32>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1_8));
   }
   const int d_rows = (int)rows_q;
   const int d_wpb = THREADS / 32;
@@ -4184,7 +4195,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
 
   // O40：varlen LSE 的 K 维 split auto（D=128 目标 `grid*split≈528`=一个波、cap 8；D=512
   //   `≈132`、cap 16，与 O38/O39 同标定）；`--lsesplit=N`（>0）直接指定。再按最大序列 tile 数封顶。
-  const int lse_nblk0 = (maxlen + LBM - 1) / LBM;
+  const int lse_nblk0 = lse8w_use ? lse_nblk8 : lse_nblk;
   int lse_split_eff = lse_split;
   if (lse_split_eff <= 0) {
     // O54：full 的 bal FULL 版每 CTA 一个 m 块 ⇒ base = nblk0·H·B；目标提到 ≈3 个波(384)。
@@ -4292,6 +4303,22 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
         } else {
           lse_mma_kernel_bal<512, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(
               d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
+        }
+      } else if (lse8w_use) {
+        // O56：full MLA varlen 的 LSE 走 8-warp（256 线程 / LBM=128 / LBN=32）几何——每
+        //   scheduler warp 数 1→2、grid/每-C 读 K 减半；仍带 O54 的 K 维 split。
+        if (lse_split_eff > 1) {
+          dim3 gsp((unsigned)lse_nblk8, H, (unsigned)(B * lse_split_eff));
+          lse_mma_kernel_bal<512, 1, true, 256, 32><<<gsp, 256, kLseSmemBal1_8>>>(
+              d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part, lse_split_eff);
+          const long long nrows = (long long)rows_q;
+          const int th = 256;
+          const long long bl = (nrows + th - 1) / th;
+          lse_split_merge_kernel<<<(unsigned)bl, th>>>(d_lse_part, d_lse, nrows, lse_split_eff);
+        } else {
+          lse_mma_kernel_bal<512, 1, true, 256, 32>
+              <<<dim3(lse_nblk8, H, B), 256, kLseSmemBal1_8>>>(d_q, d_k, d_lse, maxlen, H, Hkv,
+                                                               scale, d_cu);
         }
       } else if (lse_split_eff > 1) {
         // O54：full MLA varlen 的 LSE 走 K 维 split（bal 的 FULL 版：一个 CTA 一个 m 块）。
@@ -4442,6 +4469,21 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
       if (which == 0) {
         lse_mma_kernel<512><<<dim3(lse_nblk, H, B), THREADS, kLseSmem>>>(
             d_q, d_k, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
+      } else if (which == 2) {
+        // O56：8-warp（256 线程 / LBM=128 / LBN=32）FULL 版。
+        if (sp <= 1) {
+          lse_mma_kernel_bal<512, 1, true, 256, 32>
+              <<<dim3(lse_nblk8, H, B), 256, kLseSmemBal1_8>>>(d_q, d_k, d_lse, maxlen, H, Hkv,
+                                                               scale, d_cu);
+        } else {
+          dim3 gsp((unsigned)lse_nblk8, H, (unsigned)(B * sp));
+          lse_mma_kernel_bal<512, 1, true, 256, 32><<<gsp, 256, kLseSmemBal1_8>>>(
+              d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part, sp);
+          const long long nrows = (long long)rows_q;
+          const int th = 256;
+          lse_split_merge_kernel<<<(unsigned)((nrows + th - 1) / th), th>>>(d_lse_part, d_lse,
+                                                                            nrows, sp);
+        }
       } else if (sp <= 1) {
         lse_mma_kernel_bal<512, 1, true><<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1>>>(
             d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
@@ -4476,6 +4518,14 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
       printf(" balFULL/split%d %.4f", sp, t);
     }
     printf(" ms (auto=%d)\n", lse_split_eff);
+    // O56 A/B：8-warp（256 线程/LBM=128/LBN=32）FULL LSE 同 session sweep。
+    printf("[O56 A/B] varlen MLA full LSE 8-warp:");
+    for (int sp : {1, 2, 4, 8, 16}) {
+      float t = 0.f;
+      bench_lse(2, sp, &t);
+      printf(" split%d %.4f", sp, t);
+    }
+    printf(" ms (lse8w=%d nblk8=%d)\n", (int)lse8w_use, lse_nblk8);
     run_all();  // 恢复 CLI 选中路径
   }
 
@@ -4572,6 +4622,10 @@ int main(int argc, char** argv) {
   //   实测 main 1.075–1.109×、端到端 1.03–1.07×，且 8-warp 实例 148–151 regs/0 spill
   //   （4-warp 是 168 regs + spill）。`--mla8w=0` 供同 binary A/B。
   int mla8w = 1;
+  // O56：full MLA（D=512）varlen 的 LSE 是否用 8-warp（256 线程/LBM=128/LBN=32）几何。
+  //   **实测为混合/负结果**（长 K 的 b3 LSE 1.09×、短 K 的 b1 0.80×；端到端 +0.8%/−9.7%）
+  //   ⇒ 默认 0（opt-in），`--lse8w=0/1` 供同 binary A/B。
+  int lse8w = 0;
   // O48（候选 ①）：D=128 mma 主 kernel 是否用 8-warp（256 线程 / 2×4 网格）几何。仅 mma 路径
   //   （wgmma2 已是 256 线程、结构不同）。O49：默认改为 **-1=自动**——判据是「4-warp 的每
   //   scheduler warp 数是否 <2」= 逻辑 grid ≤ SM 数（与 O43 的 split-K「填满一个波」同思路，
@@ -4617,6 +4671,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--wg2ksplit=", 0) == 0) wg2ksplit = atoi(a.c_str() + 12);
     else if (a.rfind("--mlaksplit=", 0) == 0) mlaksplit = atoi(a.c_str() + 12);
     else if (a.rfind("--mla8w=", 0) == 0) mla8w = atoi(a.c_str() + 8);
+    else if (a.rfind("--lse8w=", 0) == 0) lse8w = atoi(a.c_str() + 8);
+    else if (a == "--lse8w") lse8w = 1;
     else if (a == "--mla8w") mla8w = 1;
     else if (a.rfind("--d128w=", 0) == 0) d128w = atoi(a.c_str() + 8);
     else if (a == "--d128w") d128w = 1;
@@ -4638,7 +4694,8 @@ int main(int argc, char** argv) {
   if (varlen) {
 #ifdef FA_WGMMA
     if (varlen_tma < 0) varlen_tma = 0;   // 本轮判决：varlen TMA 中性/偏负 ⇒ opt-in
-    return run_varlen(dir, causal, iters, varlen_tma, lse_split, wg2ksplit, mla8w, mlaksplit);
+    return run_varlen(dir, causal, iters, varlen_tma, lse_split, wg2ksplit, mla8w, mlaksplit,
+                      lse8w);
 #else
     fprintf(stderr, "VARLEN 需要 -DFA_WGMMA（sm_90a）构建\n");
     return 1;

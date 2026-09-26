@@ -2030,3 +2030,17 @@ bound = **L2（跨 CTA dQ red）+ 访存延迟**，不再是 O52 的「grid 不�
 
 原始输出：`src/bf16/fa_bwd_bf16_o55_varlen.out.txt`（两文件，full+causal b1/b3）、
 `..._o55_varlen_onefile.out.txt`（单文件）。
+
+## 6ap. O56（第一百零三轮，混合/负结果）：full MLA varlen 的 LSE 8-warp（LBM=128）几何
+
+把 fp16 O56（`docs/01` §15c）逐字 dtype 参数化到 bf16：`lse_mma_kernel_bal` 加模板参数
+`<HD, PIPE, FULL, NTH=THREADS, LBN_=LBN>`（`LBM_=(NTH/32)*16`、`MTN=LBN_/8`），默认档逐位等价；
+host 为「D=512 && 非 causal」加 `lse_mma_kernel_bal<512,1,true,256,32>`（256 线程 / LBM=128 /
+LBN=32），`--lse8w=0/1` 同 binary A/B。
+
+**结果（同 session event，b3_t1792 full）**：LSE-only 4-warp split4 **0.0407 ms** → 8-warp split8
+**0.0373 ms（1.09×）**；端到端 total 0.4657 ms（默认 4-warp 时 ≈0.469，与 O55 一致）。与 fp16 逐项
+一致（长 K 胜、短 K 负）。**默认 `--lse8w=0`（opt-in）**。
+
+原始输出：`src/bf16/fa_bwd_bf16_o56_varlen_full_b3.out.txt`（两文件）、
+`..._o56_varlen_full_b3_onefile.out.txt`（单文件）。

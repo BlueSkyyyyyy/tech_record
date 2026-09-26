@@ -1,0 +1,28 @@
+=== varlen_b1_t512_h2_d512_full_fp16 lse8w=0 ===
+[timing] VARLEN total 0.0957 ms  11.22 TFLOPS (sum_b 4HL^2D)
+[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.1924 ms | balFULL/split1 0.0443 balFULL/split2 0.0269 balFULL/split4 0.0173 balFULL/split8 0.0139 balFULL/split16 0.0241 ms (auto=8)
+[O56 A/B] varlen MLA full LSE 8-warp: split1 0.0695 split2 0.0399 split4 0.0243 split8 0.0175 split16 0.0177 ms (lse8w=0 nblk8=4)
+  dq  vs ref: max_abs=3.046e-04  max_rel=1.265e-01  (ours_amax=5.679e-01 ref_amax=5.679e-01 @148752)
+  dk  vs ref: max_abs=4.449e-04  max_rel=1.074e-01  (ours_amax=6.313e-01 ref_amax=6.316e-01 @479635)
+  dv  vs ref: max_abs=1.327e-04  max_rel=3.917e-02  (ours_amax=4.888e-01 ref_amax=4.887e-01 @335071)
+=== varlen_b1_t512_h2_d512_full_fp16 lse8w=1 ===
+[timing] VARLEN total 0.1049 ms  10.24 TFLOPS (sum_b 4HL^2D)
+[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.1922 ms | balFULL/split1 0.0441 balFULL/split2 0.0266 balFULL/split4 0.0170 balFULL/split8 0.0137 balFULL/split16 0.0238 ms (auto=4)
+[O56 A/B] varlen MLA full LSE 8-warp: split1 0.0694 split2 0.0396 split4 0.0241 split8 0.0171 split16 0.0174 ms (lse8w=1 nblk8=4)
+  dq  vs ref: max_abs=3.046e-04  max_rel=1.265e-01  (ours_amax=5.679e-01 ref_amax=5.679e-01 @148752)
+  dk  vs ref: max_abs=4.449e-04  max_rel=1.074e-01  (ours_amax=6.313e-01 ref_amax=6.316e-01 @479635)
+  dv  vs ref: max_abs=1.327e-04  max_rel=3.917e-02  (ours_amax=4.888e-01 ref_amax=4.887e-01 @335071)
+=== varlen_b3_t1792_h2_d512_full_fp16 lse8w=0 ===
+[timing] VARLEN total 0.4639 ms  12.15 TFLOPS (sum_b 4HL^2D)
+[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.3790 ms | balFULL/split1 0.0836 balFULL/split2 0.0467 balFULL/split4 0.0410 balFULL/split8 0.0473 balFULL/split16 0.0575 ms (auto=4)
+[O56 A/B] varlen MLA full LSE 8-warp: split1 0.1303 split2 0.0710 split4 0.0410 split8 0.0377 split16 0.0475 ms (lse8w=0 nblk8=8)
+  dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
+  dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
+  dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)
+=== varlen_b3_t1792_h2_d512_full_fp16 lse8w=1 ===
+[timing] VARLEN total 0.4601 ms  12.25 TFLOPS (sum_b 4HL^2D)
+[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.3799 ms | balFULL/split1 0.0828 balFULL/split2 0.0470 balFULL/split4 0.0409 balFULL/split8 0.0470 balFULL/split16 0.0572 ms (auto=8)
+[O56 A/B] varlen MLA full LSE 8-warp: split1 0.1301 split2 0.0707 split4 0.0407 split8 0.0374 split16 0.0472 ms (lse8w=1 nblk8=8)
+  dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
+  dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
+  dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)

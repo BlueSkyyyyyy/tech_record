@@ -1,0 +1,50 @@
+=== lse8w=0 ===
+==PROF== Connected to process 918208 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "lse_mma_kernel_bal": 0%....50%....100% - 11 passes
+==PROF== Profiling "lse_mma_kernel_bal": 0%....50%....100% - 11 passes
+==PROF== Disconnected from process 918208
+  void lse_mma_kernel_bal<512, 1, 1, 128, 64>(const __half *, const __half *, float *, int, int, int, float, const int *, float *, int) (16, 2, 12)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                                             us        41.12
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        22.71
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        23.87
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        20.60
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %         6.25
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.02
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.22
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.90
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.44
+  void lse_mma_kernel_bal<512, 1, 1, 128, 64>(const __half *, const __half *, float *, int, int, int, float, const int *, float *, int) (16, 2, 12)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                                             us        40.77
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        22.91
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        24.18
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        20.78
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %         6.25
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.02
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.22
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.90
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.44
+=== lse8w=1 ===
+==PROF== Connected to process 918288 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "lse_mma_kernel_bal": 0%....50%....100% - 11 passes
+==PROF== Profiling "lse_mma_kernel_bal": 0%....50%....100% - 11 passes
+==PROF== Disconnected from process 918288
+  void lse_mma_kernel_bal<512, 1, 1, 256, 32>(const __half *, const __half *, float *, int, int, int, float, const int *, float *, int) (8, 2, 24)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                                             us        37.38
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        29.59
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        24.13
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        23.30
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        12.49
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.10
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.64
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         2.59
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.60
+  void lse_mma_kernel_bal<512, 1, 1, 256, 32>(const __half *, const __half *, float *, int, int, int, float, const int *, float *, int) (8, 2, 24)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                                             us        37.15
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        29.75
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        24.27
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        23.43
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        12.49
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.10
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.62
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         2.58
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.60

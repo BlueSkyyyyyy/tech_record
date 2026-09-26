@@ -3981,3 +3981,55 @@ ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
 原始输出：`src/fp16/fa_bwd_fp16_o55_varlen.out.txt`（两文件，full+causal b1/b3）、
 `..._o55_varlen_onefile.out.txt`（单文件）、`..._o55_ncu_varlen_full_b1_t512.out.txt`（ncu k=4）、
 `..._o55_ncu_varlen_full_b1_ks16.out.txt`（ncu k=16 对照）、`..._o55_ncu_varlen_full_b3_t1792.out.txt`。
+
+## 15c. O56（第一百零三轮，混合/负结果）：full MLA varlen 的 LSE 8-warp（LBM=128）几何
+
+**动机（落实 O54「下一步候选 ①」）**：O54 把 full MLA varlen 的 LSE 从 O1 的
+`lse_mma_kernel<512>`（无 split、标量 K 载入）换成 `lse_mma_kernel_bal<512,1,true>`（FULL 模式 +
+cp.async 双缓冲 + K 维 split）后，LSE-only 9–14×、端到端 2.17×。O54 ncu 显示 FULL LSE 仍是
+**1 CTA/SM、`sm__warps_active` 6.25%（= 1 warp/scheduler）**、`Waves` 数个波、
+fixed-latency stall 37% ⇒ bound = 低 occupancy + fixed-latency。O46/O47 在 MLA **主 kernel** 上
+证明过「1 CTA/SM 时把 warp 数从 4 提到 8（每 scheduler 1→2 warp）」是通用杠杆（fp16 1.07–1.11× /
+fp8 1.6–1.84×）。本轮把同一杠杆搬到 **LSE**。
+
+**改动（单/两文件 device 逐字一致；`--lse8w=0/1` 同 binary A/B）**：
+- `lse_mma_kernel_bal` 模板参数化为 `<HD, PIPE, FULL, NTH=THREADS, LBN_=LBN>`：
+  `LBM_ = (NTH/32)*16`（128 → 64，256 → 128）、`MTN = LBN_/8`；`issue_q/issue_k` 的步长用 `NTH`、
+  `acc[1][MTN][4]`、j 循环上界 `MTN`。默认 `<HD,PIPE,FULL,128,64>` 与原版**逐位等价**。
+- host 为「D=512 && 非 causal」增加 8-warp 路径：`lse_mma_kernel_bal<512,1,true,256,32>`
+  （256 线程 / LBM=128 / LBN=32 / PIPE=1，smem `(128+2·32)·(D+8)·2 = 199,680 B`），
+  grid 由 `lse_nblk8=ceil(maxlen/128)` 给出，K 维 split auto 仍走 O54 口径。
+
+**结果（同 session CUDA-event，varlen D=512 full）——混合/负**：
+
+| case (maxlen) | 4-warp 最优 | 8-warp 最优 | 比值 | 端到端 `--lse8w=0`→`=1` |
+|---|---|---|---|---|
+| b3_t1792 (1024) | split4 **0.0410 ms** | split8 **0.0374 ms** | **1.09×** | 0.4639 → **0.4601 ms（1.008×）** |
+| b1_t512 (512) | split8 **0.0137 ms** | split8 0.0171 ms | **0.80×** | 0.0957 → 0.1049 ms（0.91×） |
+
+即：**长 K 时 8-warp 小胜（LSE 1.09×、端到端 +0.8%），短 K 时明显更慢（LSE 0.80×、端到端 −9.7%）**。
+bf16 逐项一致（b3 4w 0.0407 → 8w 0.0373，1.09×；端到端 0.4657 ms）。备选几何 8-warp/LBN=64/PIPE=0
+（无预取）更差（b3 最优 0.0547 ms），故 **K 双缓冲不能丢**。
+
+**ncu（fp16 b3 full，`--lse8w=0/1`，同 session）**：
+| | 4-warp `<512,1,1,128,64>` | 8-warp `<512,1,1,256,32>` |
+|---|---|---|
+| `gpu__time_duration` | 41.1 µs | **37.2 µs（1.10×）** |
+| `sm__warps_active` | 6.25% | **12.49%**（1→2 warp/scheduler） |
+| `sm__throughput` | 20.6% | 23.3% |
+| `l1tex__throughput` | 22.7% | 29.6% |
+| `short_scoreboard` stall | 0.90 | **2.59** |
+| `wait` stall | 1.44 | 1.60 |
+| `long_scoreboard` stall | 0.22 | 0.64 |
+
+8-warp 精确把 occupancy 翻倍、Duration 1.10×；但 `LBN=32` 让 tile/barrier 数翻倍、
+`short_scoreboard`（smem→mma 的 `ldmatrix` 依赖）从 0.90 涨到 2.59 —— 短序列时这个开销压过
+「多一个 warp/scheduler」的收益，只有 K 足够长（tile 多）时才回本。
+
+**结论**：O46/O47 的「8-warp」杠杆**不能无条件搬到 LSE**——主 kernel 的 8-warp 省的是
+wgmma/ldmatrix 的访存并行度，而 LSE 已经偏 compute/softmax epilogue，且 LBN 减半会引入额外
+barrier。故 **默认 `--lse8w=0`（opt-in）**，代码与 A/B 保留，待更多 shape 校准「长度阈值」后再定。
+
+**原始输出**：`src/fp16/fa_bwd_fp16_o56_varlen_full_b3.out.txt`（两文件）、
+`..._o56_varlen_full_b3_onefile.out.txt`（单文件）、`..._o56_ab_e2e.out.txt`（b1/b3 × lse8w 0/1）、
+`..._o56_ncu_lse.out.txt`（ncu 4w/8w）；bf16 对应 `src/bf16/fa_bwd_bf16_o56_*`。

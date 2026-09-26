@@ -1,0 +1,30 @@
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp16_mma_kernels.cuh(1715): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma2<HD,SPLIT,CL>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *, const int *, int) [with HD=128, SPLIT=true, CL=1]" at line 573 of fa_bwd_fp16_mma_main.cu
+
+fa_bwd_fp16_mma_kernels.cuh(2993): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma4<HD,SEQ>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) [with HD=128, SEQ=true]" at line 1381 of fa_bwd_fp16_mma_main.cu
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb0EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 620380
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb1EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 615072
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_full_fp16
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=0
+cu_seqlens = 0 256 768 1792
+VARLEN main backend = wgmma2 cp.async
+[O40] varlen lse k-split = 8 (base=24)
+[O53] varlen MLA main k-split = 2 (auto)
+[timing] VARLEN total 0.4603 ms  12.25 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.4034 ms | 8w 0.3869 ms (1.043x) | max_abs(8w-vs-4w) dq=5.960e-08 dk=2.384e-07 dv=8.941e-08
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.6043 2 0.3862 4 0.3899 8 0.3862 16 0.3891 ms (auto=2)
+[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.3746 ms | balFULL/split1 0.0823 balFULL/split2 0.0469 balFULL/split4 0.0413 balFULL/split8 0.0476 balFULL/split16 0.0578 ms (auto=8)
+[O56 A/B] varlen MLA full LSE 8-warp: split1 0.1311 split2 0.0715 split4 0.0413 split8 0.0379 split16 0.0478 ms (lse8w=1 nblk8=8)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
+  dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
+  dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)
