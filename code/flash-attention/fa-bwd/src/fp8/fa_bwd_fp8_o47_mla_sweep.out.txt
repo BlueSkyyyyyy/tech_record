@@ -1,0 +1,105 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s256_h2_d512_causal_fp8
+B=1 S=256 H=2 Hkv=2 D=512 causal=1 scale=0.044194
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 64 x 2 x 1  (ksplit=16, base_grid=8)
+O19: wg2 grid = 32 x 2 x 1 (ksplit2=16, base_grid2=4)
+O7: use_regdq=0 (register dQ accumulation)
+O32: lse backend = wgmma/mma
+O37: main qd-tma = on
+O41: main kv-tma = on
+O38: lse k-split = auto(4)
+[timing] total(quant+pre+main+cvt) 0.0694 ms  3.87 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0112 ms | preprocess 0.0261 ms | main 0.0237 ms | convert 0.0084 ms (cvt_on=0)
+[O39 A/B] lse(D=512) split=1 0.0454 ms (1.000x vs split1) | max_abs vs split1=0.000e+00\n[O39 A/B] lse(D=512) split=2 0.0313 ms (1.452x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=4 0.0235 ms (1.930x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=8 0.0244 ms (1.862x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=16 0.0275 ms (1.651x vs split1) | max_abs vs split1=4.768e-07\n[O39] best lse split=4 0.0235 ms (1.930x)\n[O12 A/B] main LSE/D preload off 0.0423 ms | on 0.0435 ms (0.972x) | max_abs(on-vs-off) dq=4.768e-07
+[O47 A/B] main MLA 4-warp 0.0435 ms | 8-warp 0.0237 ms (1.839x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=2.384e-07 dv=2.384e-07
+[O14 A/B] quant old(per-row) 0.0142 ms | new(warp-per-row) 0.0111 ms (1.277x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0033 ms | new(warp-per-row) 0.0026 ms (1.293x) | max_abs=3.815e-06 max_rel=5.227e-05
+[O21b A/B] end2end 保留convert 0.0731 ms | 直写输出(消convert) 0.0693 ms (1.0553x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.356e-01  max_rel=8.127e+01
+  dk   vs ref: max_abs=2.290e-01  max_rel=6.894e+01
+  dv   vs ref: max_abs=3.441e-01  max_rel=4.412e+01
+    dq[d   0..127] max_abs=1.997e-01
+    dq[d 128..255] max_abs=1.908e-01
+    dq[d 256..383] max_abs=2.138e-01
+    dq[d 384..511] max_abs=2.356e-01
+    dk[d   0..127] max_abs=1.958e-01
+    dk[d 128..255] max_abs=2.290e-01
+    dk[d 256..383] max_abs=1.729e-01
+    dk[d 384..511] max_abs=2.181e-01
+    dv[d   0..127] max_abs=3.441e-01
+    dv[d 128..255] max_abs=2.751e-01
+    dv[d 256..383] max_abs=2.387e-01
+    dv[d 384..511] max_abs=2.669e-01
+[compare] ours vs TE FP8
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp8
+B=1 S=512 H=4 Hkv=4 D=512 causal=1 scale=0.044194
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 64 x 4 x 1  (ksplit=8, base_grid=32)
+O19: wg2 grid = 64 x 4 x 1 (ksplit2=16, base_grid2=16)
+O7: use_regdq=0 (register dQ accumulation)
+O32: lse backend = wgmma/mma
+O37: main qd-tma = on
+O41: main kv-tma = on
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.1332 ms  16.12 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0143 ms | preprocess 0.0290 ms | main 0.0742 ms | convert 0.0157 ms (cvt_on=0)
+[O39 A/B] lse(D=512) split=1 0.0787 ms (1.000x vs split1) | max_abs vs split1=0.000e+00\n[O39 A/B] lse(D=512) split=2 0.0486 ms (1.618x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=4 0.0324 ms (2.429x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=8 0.0256 ms (3.079x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=16 0.0308 ms (2.553x vs split1) | max_abs vs split1=4.768e-07\n[O39] best lse split=8 0.0256 ms (3.079x)\n[O12 A/B] main LSE/D preload off 0.1188 ms | on 0.1197 ms (0.993x) | max_abs(on-vs-off) dq=2.384e-07
+[O47 A/B] main MLA 4-warp 0.1192 ms | 8-warp 0.0737 ms (1.617x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07
+[O14 A/B] quant old(per-row) 0.0203 ms | new(warp-per-row) 0.0142 ms (1.429x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0051 ms | new(warp-per-row) 0.0032 ms (1.598x) | max_abs=8.583e-06 max_rel=1.586e-04
+[O21b A/B] end2end 保留convert 0.1443 ms | 直写输出(消convert) 0.1335 ms (1.0809x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.415e-01  max_rel=1.803e+02
+  dk   vs ref: max_abs=2.992e-01  max_rel=6.416e+01
+  dv   vs ref: max_abs=4.481e-01  max_rel=9.164e+01
+    dq[d   0..127] max_abs=2.361e-01
+    dq[d 128..255] max_abs=2.415e-01
+    dq[d 256..383] max_abs=1.690e-01
+    dq[d 384..511] max_abs=1.784e-01
+    dk[d   0..127] max_abs=2.532e-01
+    dk[d 128..255] max_abs=2.566e-01
+    dk[d 256..383] max_abs=2.992e-01
+    dk[d 384..511] max_abs=2.525e-01
+    dv[d   0..127] max_abs=4.481e-01
+    dv[d 128..255] max_abs=3.640e-01
+    dv[d 256..383] max_abs=2.988e-01
+    dv[d 384..511] max_abs=2.960e-01
+[compare] ours vs TE FP8
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8
+B=1 S=1024 H=2 Hkv=2 D=512 causal=1 scale=0.044194
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 256 x 2 x 1  (ksplit=16, base_grid=32)
+O19: wg2 grid = 128 x 2 x 1 (ksplit2=16, base_grid2=16)
+O7: use_regdq=0 (register dQ accumulation)
+O32: lse backend = wgmma/mma
+O37: main qd-tma = on
+O41: main kv-tma = on
+O38: lse k-split = auto(16)
+[timing] total(quant+pre+main+cvt) 0.1927 ms  22.29 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0141 ms | preprocess 0.0350 ms | main 0.1246 ms | convert 0.0190 ms (cvt_on=0)
+[O39 A/B] lse(D=512) split=1 0.1456 ms (1.000x vs split1) | max_abs vs split1=0.000e+00\n[O39 A/B] lse(D=512) split=2 0.0822 ms (1.772x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=4 0.0493 ms (2.953x vs split1) | max_abs vs split1=9.537e-07\n[O39 A/B] lse(D=512) split=8 0.0341 ms (4.272x vs split1) | max_abs vs split1=9.537e-07\n[O39 A/B] lse(D=512) split=16 0.0315 ms (4.625x vs split1) | max_abs vs split1=9.537e-07\n[O39] best lse split=16 0.0315 ms (4.625x)\n[O12 A/B] main LSE/D preload off 0.1986 ms | on 0.1996 ms (0.995x) | max_abs(on-vs-off) dq=2.251e-04
+[O47 A/B] main MLA 4-warp 0.1998 ms | 8-warp 0.1243 ms (1.608x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07
+[O14 A/B] quant old(per-row) 0.0201 ms | new(warp-per-row) 0.0141 ms (1.427x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0052 ms | new(warp-per-row) 0.0032 ms (1.608x) | max_abs=2.861e-06 max_rel=4.161e-04
+[O21b A/B] end2end 保留convert 0.2011 ms | 直写输出(消convert) 0.1895 ms (1.0614x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+    dq[d   0..127] max_abs=1.801e-01
+    dq[d 128..255] max_abs=1.420e-01
+    dq[d 256..383] max_abs=1.629e-01
+    dq[d 384..511] max_abs=2.232e-01
+    dk[d   0..127] max_abs=2.844e-01
+    dk[d 128..255] max_abs=3.337e-01
+    dk[d 256..383] max_abs=2.273e-01
+    dk[d 384..511] max_abs=2.713e-01
+    dv[d   0..127] max_abs=2.472e-01
+    dv[d 128..255] max_abs=2.419e-01
+    dv[d 256..383] max_abs=3.602e-01
+    dv[d 384..511] max_abs=2.730e-01
+[compare] ours vs TE FP8

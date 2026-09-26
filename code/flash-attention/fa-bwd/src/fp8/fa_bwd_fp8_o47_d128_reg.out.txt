@@ -1,0 +1,164 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 72704 bytes (71.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 70656 bytes (69.0 KB)
+grid main = 128 x 16 x 1  (ksplit=16, base_grid=128)
+O19: wg2 grid = 64 x 16 x 1 (ksplit2=16, base_grid2=64)
+O7: use_regdq=0 (register dQ accumulation)
+O32: lse backend = tma
+O37: main qd-tma = on
+O41: main kv-tma = on
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.1016 ms  21.14 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0146 ms | preprocess 0.0194 ms | main 0.0551 ms | convert 0.0126 ms (cvt_on=0)
+[O9c-2 A/B] main mma(regdq=0) 0.0709 ms | wgmma(m64n32) 0.0691 ms (1.025x) | max_abs(wg-vs-mma) dq/dk/dv=4.539e-02/5.382e-02/5.660e-02
+[O37 A/B] main Q/dO cp.async 0.0690 ms | tma 0.0645 ms (1.070x) | max_abs(tma-vs-cp) dq/dk/dv=1.192e-07/4.768e-07/4.768e-07
+[O41 A/B] main Q/dO-TMA 0.0732 ms | Q/dO/K/V-TMA 0.0639 ms (1.147x) | max_abs(kvtma-vs-qdtma) dq/dk/dv=1.192e-07/2.384e-07/4.768e-07
+[O11 A/B] lse O1 0.0736 ms | bal(单缓冲) 0.0534 ms (1.378x) | bal+cpasync 0.0418 ms (1.759x)
+[O9c A/B] lse mma(bal+cpasync) 0.0418 ms | wgmma(单缓冲) 0.0501 ms | wgmma(双缓冲) 0.0363 ms (1.151x) | LSE max_abs(vs mma)=6.895e-04
+[O32 A/B] lse tma 0.0314 ms | wgmma 0.0330 ms (wgmma/tma 1.051x) | max_abs(tma-vs-wgmma)=0.000e+00
+[O38 A/B] lse split=1 0.0314 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O38 A/B] lse split=2 0.0219 ms (1.432x vs split1) | max_abs vs split1=4.768e-07
+[O38 A/B] lse split=4 0.0170 ms (1.843x vs split1) | max_abs vs split1=4.768e-07
+[O38 A/B] lse split=8 0.0156 ms (2.011x vs split1) | max_abs vs split1=4.768e-07
+[O38] best lse split=8 0.0156 ms (2.011x)\n[O12 A/B] main LSE/D preload off 0.0620 ms | on 0.0600 ms (1.033x) | max_abs(on-vs-off) dq=3.576e-07
+[O7e-2 A/B] main fold 4B 0.0620 ms | 16B 0.0600 ms (1.034x) | max_abs(16B-vs-4B) dq/dk/dv=1.192e-07/4.768e-07/4.768e-07
+[O27 A/B] main fold div 0.0642 ms | rcp-mul 0.0599 ms (1.071x) | max_abs(rcp-vs-div) dq/dk/dv=1.985e-03/4.768e-07/4.768e-07
+[O22 A/B] main REGDQ on 0.0669 ms | off 0.0617 ms (1.084x) | max_abs(on-vs-off) dq=1.788e-07
+[O14 A/B] quant old(per-row) 0.0317 ms | new(warp-per-row) 0.0146 ms (2.164x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0083 ms | new(warp-per-row) 0.0037 ms (2.261x) | max_abs=1.907e-06 max_rel=2.113e-03
+[O19 A/B] main mma(BM64,grid=128) 0.0706 ms | wg2(BM128,grid=64) 0.1092 ms (0.647x) | max_abs(wg2-vs-mma) dq/dk/dv=1.788e-07/1.105e-01/4.156e-02
+[O21 A/B] main BN=32 0.0707 ms | BN=64 0.0708 ms (0.999x) | max_abs(BN64-vs-BN32) dq/dk/dv=5.947e-02/2.384e-07/4.768e-07
+[O21b A/B] end2end 保留convert 0.1123 ms | 直写输出(消convert) 0.1012 ms (1.1101x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.938e+02
+  dk   vs ref: max_abs=2.972e-01  max_rel=7.598e+01
+  dv   vs ref: max_abs=3.733e-01  max_rel=1.002e+02
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.379e-01  max_rel=2.386e+02
+  dk   vs te_dk: max_abs=4.428e-01  max_rel=2.377e+02
+  dv   vs te_dv: max_abs=8.544e-01  max_rel=6.892e+01
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 72704 bytes (71.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 70656 bytes (69.0 KB)
+grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+O19: wg2 grid = 128 x 16 x 1 (ksplit2=4, base_grid2=512)
+O7: use_regdq=1 (register dQ accumulation)
+O32: lse backend = tma
+O37: main qd-tma = on
+O41: main kv-tma = on
+O38: lse k-split = auto(4)
+[timing] total(quant+pre+main+cvt) 1.9462 ms  70.62 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0690 ms | preprocess 0.2234 ms | main 1.5947 ms | convert 0.0591 ms (cvt_on=0)
+[O9c-2 A/B] main mma(regdq=1) 1.9148 ms | wgmma(m64n32) 1.8016 ms (1.063x) | max_abs(wg-vs-mma) dq/dk/dv=3.985e-02/1.500e-01/2.576e-02
+[O37 A/B] main Q/dO cp.async 1.8118 ms | tma 1.7013 ms (1.065x) | max_abs(tma-vs-cp) dq/dk/dv=1.192e-07/5.960e-07/9.537e-07
+[O41 A/B] main Q/dO-TMA 1.7297 ms | Q/dO/K/V-TMA 1.6069 ms (1.076x) | max_abs(kvtma-vs-qdtma) dq/dk/dv=2.384e-07/4.768e-07/7.153e-07
+[O11 A/B] lse O1 0.9546 ms | bal(单缓冲) 0.4351 ms (2.194x) | bal+cpasync 0.3475 ms (2.747x)
+[O9c A/B] lse mma(bal+cpasync) 0.3475 ms | wgmma(单缓冲) 0.4662 ms | wgmma(双缓冲) 0.2756 ms (1.261x) | LSE max_abs(vs mma)=5.605e-04
+[O32 A/B] lse tma 0.2448 ms | wgmma 0.2716 ms (wgmma/tma 1.110x) | max_abs(tma-vs-wgmma)=0.000e+00
+[O38 A/B] lse split=1 0.2416 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O38 A/B] lse split=2 0.2034 ms (1.187x vs split1) | max_abs vs split1=1.907e-06
+[O38 A/B] lse split=4 0.1960 ms (1.232x vs split1) | max_abs vs split1=1.907e-06
+[O38 A/B] lse split=8 0.1931 ms (1.251x vs split1) | max_abs vs split1=1.907e-06
+[O38] best lse split=8 0.1931 ms (1.251x)\n[O12 A/B] main LSE/D preload off 1.9164 ms | on 1.7861 ms (1.073x) | max_abs(on-vs-off) dq=1.569e-03
+[O7e-2 A/B] main fold 4B 1.8959 ms | 16B 1.7752 ms (1.068x) | max_abs(16B-vs-4B) dq/dk/dv=1.192e-07/4.768e-07/1.192e-06
+[O27 A/B] main fold div 1.9468 ms | rcp-mul 1.7698 ms (1.100x) | max_abs(rcp-vs-div) dq/dk/dv=4.639e-04/5.805e-04/4.883e-04
+[O22 A/B] main REGDQ on 1.8891 ms | off 2.3994 ms (0.787x) | max_abs(on-vs-off) dq=1.192e-07
+[O14 A/B] quant old(per-row) 0.1820 ms | new(warp-per-row) 0.0691 ms (2.634x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0440 ms | new(warp-per-row) 0.0154 ms (2.865x) | max_abs=3.815e-06 max_rel=1.157e-03
+[O19 A/B] main mma(BM64,grid=512) 1.9105 ms | wg2(BM128,grid=128) 2.9210 ms (0.654x) | max_abs(wg2-vs-mma) dq/dk/dv=1.918e-03/8.858e-02/4.434e-02
+[O21 A/B] main BN=32 1.9277 ms | BN=64 2.1421 ms (0.900x) | max_abs(BN64-vs-BN32) dq/dk/dv=5.901e-02/5.960e-07/1.192e-06
+[O21b A/B] end2end 保留convert 2.0015 ms | 直写输出(消convert) 1.9236 ms (1.0405x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=4.525e-01  max_rel=1.051e+02
+  dk   vs te_dk: max_abs=5.325e-01  max_rel=1.158e+02
+  dv   vs te_dv: max_abs=6.806e-01  max_rel=1.078e+02
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp8
+B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 72704 bytes (71.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 70656 bytes (69.0 KB)
+grid main = 64 x 32 x 1  (ksplit=4, base_grid=512)
+O19: wg2 grid = 64 x 32 x 1 (ksplit2=8, base_grid2=256)
+O7: use_regdq=1 (register dQ accumulation)
+O32: lse backend = tma
+O37: main qd-tma = on
+O41: main kv-tma = on
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.3581 ms  47.97 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0290 ms | preprocess 0.0503 ms | main 0.2551 ms | convert 0.0237 ms (cvt_on=0)
+[O9c-2 A/B] main mma(regdq=1) 0.3236 ms | wgmma(m64n32) 0.3050 ms (1.061x) | max_abs(wg-vs-mma) dq/dk/dv=7.022e-02/2.075e-01/7.879e-02
+[O37 A/B] main Q/dO cp.async 0.3045 ms | tma 0.2776 ms (1.097x) | max_abs(tma-vs-cp) dq/dk/dv=1.192e-07/2.027e-06/3.576e-06
+[O41 A/B] main Q/dO-TMA 0.2892 ms | Q/dO/K/V-TMA 0.2662 ms (1.087x) | max_abs(kvtma-vs-qdtma) dq/dk/dv=1.192e-07/1.907e-06/2.861e-06
+[O11 A/B] lse O1 0.1659 ms | bal(单缓冲) 0.0991 ms (1.675x) | bal+cpasync 0.0775 ms (2.142x)
+[O9c A/B] lse mma(bal+cpasync) 0.0775 ms | wgmma(单缓冲) 0.1038 ms | wgmma(双缓冲) 0.0665 ms (1.165x) | LSE max_abs(vs mma)=7.265e-04
+[O32 A/B] lse tma 0.0598 ms | wgmma 0.0639 ms (wgmma/tma 1.068x) | max_abs(tma-vs-wgmma)=0.000e+00
+[O38 A/B] lse split=1 0.0598 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O38 A/B] lse split=2 0.0413 ms (1.450x vs split1) | max_abs vs split1=9.537e-07
+[O38 A/B] lse split=4 0.0371 ms (1.611x vs split1) | max_abs vs split1=9.537e-07
+[O38 A/B] lse split=8 0.0416 ms (1.437x vs split1) | max_abs vs split1=9.537e-07
+[O38] best lse split=4 0.0371 ms (1.611x)\n[O12 A/B] main LSE/D preload off 0.3272 ms | on 0.2938 ms (1.114x) | max_abs(on-vs-off) dq=1.554e-04
+[O7e-2 A/B] main fold 4B 0.3085 ms | 16B 0.2945 ms (1.047x) | max_abs(16B-vs-4B) dq/dk/dv=1.192e-07/1.907e-06/3.338e-06
+[O27 A/B] main fold div 0.3271 ms | rcp-mul 0.2909 ms (1.124x) | max_abs(rcp-vs-div) dq/dk/dv=3.446e-03/1.643e-04/6.986e-04
+[O22 A/B] main REGDQ on 0.3059 ms | off 0.3656 ms (0.837x) | max_abs(on-vs-off) dq=1.192e-07
+[O14 A/B] quant old(per-row) 0.0621 ms | new(warp-per-row) 0.0286 ms (2.172x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0230 ms | new(warp-per-row) 0.0076 ms (3.020x) | max_abs=2.861e-06 max_rel=2.580e-03
+[O19 A/B] main mma(BM64,grid=64) 0.3231 ms | wg2(BM128,grid=64) 0.5288 ms (0.611x) | max_abs(wg2-vs-mma) dq/dk/dv=2.750e-04/1.168e-01/9.227e-02
+[O21 A/B] main BN=32 0.3231 ms | BN=64 0.3465 ms (0.932x) | max_abs(BN64-vs-BN32) dq/dk/dv=5.839e-02/2.027e-06/3.815e-06
+[O21b A/B] end2end 保留convert 0.3729 ms | 直写输出(消convert) 0.3538 ms (1.0542x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.987e+02
+  dk   vs ref: max_abs=5.339e-01  max_rel=1.396e+02
+  dv   vs ref: max_abs=7.173e-01  max_rel=9.160e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.052e-01  max_rel=1.872e+02
+  dk   vs te_dk: max_abs=9.555e-01  max_rel=2.486e+02
+  dv   vs te_dv: max_abs=1.429e+00  max_rel=1.654e+02
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp8
+B=1 S=1024 H=64 Hkv=1 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 72704 bytes (71.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 70656 bytes (69.0 KB)
+grid main = 64 x 64 x 1  (ksplit=4, base_grid=1024)
+O19: wg2 grid = 32 x 64 x 1 (ksplit2=4, base_grid2=512)
+O7: use_regdq=1 (register dQ accumulation)
+O32: lse backend = tma
+O37: main qd-tma = on
+O41: main kv-tma = on
+O38: lse k-split = auto(4)
+[timing] total(quant+pre+main+cvt) 0.6271 ms  54.79 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0420 ms | preprocess 0.0841 ms | main 0.4778 ms | convert 0.0233 ms (cvt_on=0)
+[O9c-2 A/B] main mma(regdq=1) 0.5895 ms | wgmma(m64n32) 0.5634 ms (1.046x) | max_abs(wg-vs-mma) dq/dk/dv=5.971e-02/1.419e-01/1.103e-01
+[O37 A/B] main Q/dO cp.async 0.5623 ms | tma 0.5019 ms (1.121x) | max_abs(tma-vs-cp) dq/dk/dv=1.192e-07/9.060e-06/8.583e-06
+[O41 A/B] main Q/dO-TMA 0.5178 ms | Q/dO/K/V-TMA 0.4908 ms (1.055x) | max_abs(kvtma-vs-qdtma) dq/dk/dv=1.192e-07/7.153e-06/6.676e-06
+[O11 A/B] lse O1 0.2422 ms | bal(单缓冲) 0.1239 ms (1.954x) | bal+cpasync 0.1027 ms (2.360x)
+[O9c A/B] lse mma(bal+cpasync) 0.1027 ms | wgmma(单缓冲) 0.1349 ms | wgmma(双缓冲) 0.0768 ms (1.336x) | LSE max_abs(vs mma)=7.370e-04
+[O32 A/B] lse tma 0.0676 ms | wgmma 0.0743 ms (wgmma/tma 1.098x) | max_abs(tma-vs-wgmma)=0.000e+00
+[O38 A/B] lse split=1 0.0677 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O38 A/B] lse split=2 0.0618 ms (1.095x vs split1) | max_abs vs split1=9.537e-07
+[O38 A/B] lse split=4 0.0627 ms (1.079x vs split1) | max_abs vs split1=9.537e-07
+[O38 A/B] lse split=8 0.0684 ms (0.989x vs split1) | max_abs vs split1=9.537e-07
+[O38] best lse split=2 0.0618 ms (1.095x)\n[O12 A/B] main LSE/D preload off 0.6123 ms | on 0.5407 ms (1.132x) | max_abs(on-vs-off) dq=2.169e-03
+[O7e-2 A/B] main fold 4B 0.5714 ms | 16B 0.5522 ms (1.035x) | max_abs(16B-vs-4B) dq/dk/dv=1.192e-07/8.106e-06/7.629e-06
+[O27 A/B] main fold div 0.6130 ms | rcp-mul 0.5511 ms (1.112x) | max_abs(rcp-vs-div) dq/dk/dv=3.989e-04/1.745e-03/6.183e-04
+[O22 A/B] main REGDQ on 0.5671 ms | off 0.6867 ms (0.826x) | max_abs(on-vs-off) dq=1.192e-07
+[O14 A/B] quant old(per-row) 0.1004 ms | new(warp-per-row) 0.0417 ms (2.408x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0436 ms | new(warp-per-row) 0.0148 ms (2.938x) | max_abs=3.815e-06 max_rel=4.559e-03
+[O19 A/B] main mma(BM64,grid=64) 0.5868 ms | wg2(BM128,grid=32) 0.9640 ms (0.609x) | max_abs(wg2-vs-mma) dq/dk/dv=1.671e-04/3.095e-01/1.754e-01
+[O21 A/B] main BN=32 0.5871 ms | BN=64 0.6529 ms (0.899x) | max_abs(BN64-vs-BN32) dq/dk/dv=6.978e-02/1.049e-05/7.629e-06
+[O21b A/B] end2end 保留convert 0.6531 ms | 直写输出(消convert) 0.6199 ms (1.0534x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=4.101e-01  max_rel=1.537e+02
+  dk   vs ref: max_abs=1.572e+00  max_rel=2.272e+02
+  dv   vs ref: max_abs=2.126e+00  max_rel=2.830e+02
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.475e-01  max_rel=1.237e+02
+  dk   vs te_dk: max_abs=2.707e+00  max_rel=3.656e+02
+  dv   vs te_dv: max_abs=3.378e+00  max_rel=2.663e+02

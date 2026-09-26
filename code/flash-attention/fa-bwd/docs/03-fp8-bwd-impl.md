@@ -4355,3 +4355,105 @@ ARCH="" NVCC_FLAGS="$FLAGS" scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full
 bulkred + ILV/ILV34 + SKIPKVL 探针）、`..._o45_ncu_mla_s1024h2.out.txt`（`--set full`）、
 `..._o45_ncu_stall_mla_s1024h2.out.txt`（stall 比例）。单文件 `fa_bwd_fp8_mma_onefile.cu`
 经 `sync_onefile_device.py` 同步（device 逐字一致），S1024H2 main 0.2001ms、数值逐位相同。
+
+## 47. O47：fp8 MLA（D=512）主 kernel 的「256 线程 / 8-warp 几何」（第九十四轮）—— **正结果，D=512 默认**
+
+### 47.1 动机（承接 O46 / O45）
+
+O46 已把 **fp16/bf16 MLA（D=512）的 mma 主 kernel** 从写死 2×2 warp 网格改成由 `NTH/NWAR`
+派生，MLA 用 **256 线程 / 8 warp（2×4）**：同 1 CTA/SM 下每 scheduler 的 warp 数 1→2，
+occ 6.1%→12.4%、main 1.07–1.11×。O45 对 **fp8 MLA** 的诊断完全一致：主 kernel 是
+**1 CTA/SM（smem 207.9KB 锁死）× 4 warp ⇒ 1 warp/scheduler**（`Active Warps/Sched 1.00`、
+`No Eligible 85.7%`、`long 2.33 + wait 1.54 + short 0.76`），墙 = **并行度/延迟**；
+2 CTA/SM 因 smem 不可达、bulkred / ILV / split 均已证伪。**「256 线程 / 8-warp 几何」是唯一
+未证伪的杠杆**（O45 §46.7 列 backlog，多轮）。本轮把它落地到 fp8。
+
+### 47.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+把 `fp8_mma_body` 与 `fa_bwd_fp8_mma_kernel` 的 warp 网格从写死 2×2 改成由
+**新模板参数 `NTH`（线程数）+ `NWAR`（N 方向 warp 数）派生**（默认 `NTH=128/NWAR=2`，
+即历史档）：
+
+* `NWM = NTH/32/NWAR`（M 方向 warp 数）；`wr = wid/NWAR`、`wc = wid%NWAR`；`__launch_bounds__(NTH,…)`。
+* warp tile 由 NWM/NWAR 派生：`GM1=BM/NWM, GN1=BN/NWAR`（GEMM1/2）、
+  `GM34=BN/NWM, GN34=NTW/NWAR`（GEMM3/4）、`GM5=BM/NWM, GN5=NTW/NWAR`（GEMM5）——
+  `NTW=128` 与 warp 数解耦；相应 m/n-tile 数 `MTM/MTN/MTM34/NTM34/MTM5/NTM5` 与
+  `r0/c0` 偏移、累加器数组维度全部同步参数化。
+* `kv_prefetch_pair`/`kv_commit_pair`/`kv_load_pair` 加默认模板参数 `NT=THREADS`，body 内所有
+  prologue/搬运循环的 `THREADS` 换成 `NTH`。
+* **fold 只由前 4 个 warp 执行**（`if (wid < 4)`）：`BN≤64` 时 4 个 warp（各 8 行 × `NTFOLD`）
+  即可覆盖全部 j / m，`NTH=256` 时余下 warp 空等（fold 本就不是瓶颈）；`NTH=128` 时 `wid<4`
+  恒真 ⇒ **逐字等价**。
+* `WGMMA` 分支是 warpgroup 级（1 个 warpgroup），加 `static_assert` 限制其只用默认档。
+
+**默认 `NTH=128/NWAR=2` 与历史逐字等价**（`NWM=2`、所有 warp tile/映射与 2×2 完全相同）；
+MLA（D=512）用 `NTH=256/NWAR=4`（2×4 网格）⇒ 1 CTA/SM 下 **8 warp、每 scheduler 2 warp**。
+smem（207872 B）与 grid 不变、dK/dV 归约字节不变。host 加 CLI `--mla8w=0/1`（D=512 默认 1）
+与 A/B 段；`run_varlen` 的 D=512 路径保持 4-warp（对齐 fp16 O46）。
+
+### 47.3 数值（ours-vs-fp32-ref，fp8 causal，max_abs dq/dk/dv）
+
+| shape（D=Dv=512） | 4-warp（=历史） | 8-warp（默认） | max_abs(8w-vs-4w) |
+|---|---|---|---|
+| S256H2 | 2.356 / 2.290 / 3.441e-1 | **同**（2.356/2.290/3.441e-1） | 1.2/2.4/2.4e-7 |
+| S512H4 | 2.415 / 2.992 / 4.481e-1 | **同** | 1.2/4.8/4.8e-7 |
+| S1024H2 | 2.232 / 3.337 / 3.602e-1 | **同** | 1.2/4.8/4.8e-7 |
+
+⇒ vs ref 与历史 P5-3/O45 **逐值一致**（FA/TE 反向不支持 D=512，只有 fp32 ref 可对）；
+8w-vs-4w 仅跨 CTA atomic 次序差异（≤5e-7）。**D=128 回归逐位不变**（S512 d128
+2.426/2.97/3.73e-1、S4096 2.635/2.644/3.216e-1、GQA kv4 2.517/5.34/7.17e-1、MQA kv1
+4.10e-1/1.57/2.13，与历史同量级/同值）。
+
+### 47.4 性能（CUDA event，同 binary、同 session 的 `[O47 A/B]`）
+
+| shape | main 4-warp | main 8-warp | 加速 | total 4w→8w | main-only TF（8w，峰值 1978.8） |
+|---|---|---|---|---|---|
+| S256H2 | 0.0435 | **0.0237** | **1.84×** | 0.0896→**0.0694** | 11.3（0.57%） |
+| S512H4 | 0.1192 | **0.0737** | **1.62×** | 0.1996→**0.1332** | 29.1（1.47%） |
+| S1024H2 | 0.1998 | **0.1243** | **1.61×** | 0.2835→**0.1927** | 34.6（1.75%） |
+
+端到端 total 1.29–1.50×。**fp8 MLA 的 main 比 fp16/bf16 MLA（O46）快**（fp16 S1024H2 main
+0.1409ms vs fp8 0.1243ms）；FA/TE 反向不支持 D=512，故只有 ours 数字。
+
+### 47.5 ncu（`fa_bwd_fp8_mma_kernel`，S1024H2，`--set full -c 1`）
+
+| 指标 | 4-warp（`--mla8w=0`） | 8-warp（默认） |
+|---|---|---|
+| Duration | 238.8 µs | **132.4 µs** |
+| Achieved Occupancy | 6.25% | **12.49%** |
+| Achieved Active Warps/SM | 4.00 | **7.99** |
+| Issued Ipc Active | 0.57 | **1.13** |
+| `sm__issue_active` | 14.39% | **28.07%** |
+| No Eligible | 85.66% | **71.95%** |
+| Registers Per Thread | 255 | **245**（无 spill） |
+| Block Limit Registers / Shared Mem | 2 / **1** | 1 / **1** |
+| DRAM / L1TEX / L2 / Compute | 2.25 / 19.90 / 30.11 / 12.29 % | 3.78 / 39.85 / 51.19 / 22.52 % |
+| stall `long / wait / short / barrier` | 2.35 / 1.54 / 0.72 / 0.06 | 1.99 / 1.20 / **1.55** / 0.32 |
+| `lts__t_sectors_op_red` | 6,684,672 | 6,684,672（**不变**） |
+
+⇒ **每 scheduler 的 warp 数 1→2，occ 翻倍、Ipc 翻倍、issue_active 翻倍**，墙仍是
+**`long_scoreboard`（L2/全局）+ `wait`（mma 依赖）+ `short_scoreboard`（smem→mma）**，
+与 O45 的诊断一致（不是带宽/算力；DRAM 仍 <4%）。`red` 扇区逐字节不变 ⇒ 提升完全来自
+「延迟隐藏/并行度」，与 fp16 O46 同机制。
+
+### 47.6 复现 / 原始输出
+
+```bash
+FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8 --causal --iters=30
+# A/B（同 binary 退回 4-warp）
+... scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=... --causal --mla8w=0
+# 单文件（device 由 sync_onefile_device.py 同步，逐字一致）
+python3 scripts/sync_onefile_device.py src/fp8/fa_bwd_fp8_kernels.cuh \
+  src/fp8/fa_bwd_fp8_mma_onefile.cu '#include <cuda_runtime.h>'
+# ncu A/B
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full -c 1 \
+  --kernel-name regex:fa_bwd_fp8_mma_kernel -- --dir=... --causal --iters=1 [--mla8w=0]
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o47_baseline_s1024h2.out.txt`（改前 4-warp 基线）、
+`..._o47_mla_sweep.out.txt`（3 MLA shape：timing + A/B + 对拍）、
+`..._o47_d128_reg.out.txt`（D=128/GQA/MQA 回归）、
+`..._o47_ncu_mla{4,8}w_s1024h2.out.txt`（`--set full`）、
+`..._o47_ncu_stall_mla_s1024h2.out.txt`（stall 比例 + red 扇区）。
