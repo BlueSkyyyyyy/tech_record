@@ -4626,3 +4626,84 @@ ARCH="" NVCC_FLAGS="$FLAGS -DFA_WS1=1" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu
 ```
 
 原始输出：`src/fp8/fa_bwd_fp8_o50_wait_split_ab.out.txt`、`src/fp8/fa_bwd_fp8_o50_ncu_main_s4096.out.txt`。
+
+---
+
+## 51. O51：fp8 MLA（D=512）主 kernel 的 K/V `cp.async` 回填流水（第九十八轮）—— **正结果，D=512 默认**
+
+### 51.1 动机（O45/O47 的墙）
+
+O47 把 fp8 MLA 主 kernel 换成 8-warp（256 线程 / 2×4 网格）后，ncu 的**头号 stall 仍是
+`long_scoreboard`**（O45：long 2.33 + wait 1.54 + short 0.76；O47 后 long 仍最高）。fp8 MLA
+走 **mma 后端**（`HD=512` 不满足 SW128/wgmma 的 `HD==128` 约束，也没有 TMA），K/V 在每 tile
+末尾由 `kv_load_pair` **同步**载入（`NPU=16` ⇒ O3 寄存器预取被禁用），全局载入延迟直接暴露。
+O45 用 `-DFA_SKIPKVL` 探针量出「K/V 全局载入」的天花板是 **1.16×**。
+
+### 51.2 改动（单/两文件 device 逐字一致，`sync_device` 核对 `identical: True`）
+
+**只改搬运、不改数学**：把每 tile 的 K/V 同步载入换成 **`cp.async.cg` 回填流水**，且不牺牲
+1 CTA/SM 的 smem 预算（MLA 主 kernel smem 207.9KB，1 CTA/SM 上限 232.4KB，余 ~24KB）：
+
+1. **K 双缓冲**（多 `BN*ASLD=16,896B`）：本 tile 的 K 在 `Ks[stg]`；在**本轮 GEMM1 之前**用
+   `cp.async` 发起下一 tile 的 K 到 `Ks[stg^1]`（该 stage 上一轮的 K 早被消费），延迟被整轮
+   5 个 GEMM 覆盖。tile 末尾 `wait_group 0` 后由 `kp_build_rows` 从行主序 `Ks[stg^1]`
+   **重建 Kp**（供 GEMM5 的 `ldmatrix.x2.trans`；`byte_perm` 0x5140/0x7362，与原配对逐位一致）。
+2. **V 单缓冲 + 后段回填**：为让 `Vs` 在 GEMM2 后即可覆写，把原「**Ap 复用 Vs**」拆成独立
+   缓冲（多 `BN*QTS=2,560B`）；于是 GEMM1/2 之后立即 `cp.async` 发起下一 tile 的 V，延迟被
+   fold + GEMM3/4/5 覆盖。同理 dS3 也给了独立缓冲（`+BN*QTS`），使 `Ks[stg]` 在 GEMM1 后
+   即被 `dS3` 之外的空间占用、K 双缓冲可安全复用。
+3. 新增 `cp_async16_z`（带 src-size 的 16B `cp.async.cg`，越界零填充）、`k_issue_async`/
+   `v_issue_async`（行主序，`HD/16` 个 chunk/行）、`kp_build_rows`；`Fp8Cfg::smem_bytes_kvpipe
+   = smem_bytes + BN*ASLD + 2*BN*QTS`（MLA 下 229,888B ≤ 232,448B，仍 1 CTA/SM）。
+4. 新增模板开关 `KVPIPE`（`fp8_mma_body`/`fa_bwd_fp8_mma_kernel`）与 launcher
+   `launch_bwd_main_kvpipe`；host `--mlakvp=0/1`（默认 -1=自动开，仅 D=512 + 8-warp + PREL）。
+   非 MLA 路径（D=128 的 wgmma/KVTMA、`run_varlen` 的 MLA）**不实例化**，逐位不变。
+
+### 51.3 数值（ours-vs-fp32-ref，fp8 causal，max_abs dq/dk/dv）
+
+与历史（P5-3/O45/O47）**同量级/逐值一致**（差异仅跨 CTA `atomicAdd` 次序，`max_abs(kvp-vs-sync)
+≤1e-6`，`red` 扇区逐字节不变）：
+
+| case (D=Dv=512) | dq | dk | dv | O51 A/B（sync→kvpipe） |
+|---|---|---|---|---|
+| S256 H2 | 2.356e-1 | 2.290e-1 | 3.441e-1 | 0.0239→0.0234ms (1.020×) |
+| S512 H4 | 2.415e-1 | 2.992e-1 | 4.481e-1 | 0.0739→0.0716ms (1.032×) |
+| S512 H2 | 2.286e-1 | 2.252e-1 | 3.343e-1 | 0.0508→0.0495ms (1.026×) |
+| S1024 H2 | 2.232e-1 | 3.337e-1 | 3.602e-1 | 0.1228→0.1183ms (1.038×) |
+
+D=128 回归（MHA/GQA）**逐位不变**：S512 2.426/2.972/3.733e-1、S4096 2.635/2.644/3.216e-1、
+GQA kv4 2.517/5.339/7.173e-1；varlen MLA 正常（dq/dk/dv 1.61/2.24/3.46e-1）。
+单/两文件 device 逐字一致、数值逐指标一致（S1024H2 total 0.1854 vs 0.1863ms，session 噪声）。
+
+### 51.4 ncu（`fa_bwd_fp8_mma_kernel<512,64,32,...>`，S1024 H2，同 session A/B）
+
+| 指标 | sync（`--mlakvp=0`） | kvpipe（默认） |
+|---|---|---|
+| stall `long_scoreboard` | **1.97** | **1.72** |
+| stall `short_scoreboard` / `wait` / barrier | 1.57 / 1.20 / 0.32 | 1.40 / 1.18 / 0.37 |
+| `smsp__inst_executed.sum` | 29,950,416 | **29,337,696（−2.0%）** |
+| `lts__t_sectors_op_red` | 6,684,672 | **6,684,672（逐字节不变）** |
+| DRAM / L1TEX / L2 / tensor | 3.72% / 31.9% / 50.4% / 6.35% | 3.76% / 32.4% / 51.0% / 6.43% |
+| regs / smem / CTA/SM · occ | 246 / 207.9KB / 1 · 12.48% | ~246 / 229.9KB / 1 · 12.48% |
+
+**结论**：`cp.async` 把暴露的 K/V 全局延迟部分藏进计算（`long_scoreboard` 17%↓、指令 −2%），
+`red` 结构完全不动。墙随之变为 **`long_scoreboard`(1.72) + `short_scoreboard`(1.40) +
+`wait`(1.18) 的 mma 依赖延迟 + 1 CTA/SM（12.5% occ）**——与 O45/O47 的定性一致，仅余量更小。
+**教训**：fp8 MLA 是 mma 后端 + 1 CTA/SM，K/V 载入的「零成本重叠」（不改 smem/occupancy）
+只值 ~2–4%；再往上要靠 2 CTA/SM 或 FlashMLA 式驻留，仍受 smem 硬约束。
+
+### 51.5 对标 / 复现
+
+FA2/FA3/TE 反向**均不支持 head_dim=512**（`fa=NA`/`te=NA`），MLA 反向只有 ours 数字，
+沿用 P5-3/O47 的口径（`4·B·S²·H·D`）：O51 后 ours total S1024H2 **22.68 TF**
+（0.1894ms）、S512H4 16.30 TF、S256H2 3.83 TF，main-only 分别 ~45/37/… （1 CTA/SM 硬约束）。
+
+```bash
+FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8 --iters=50
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu ... --mlakvp=0   # A/B
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o51_kvp_mla.out.txt`、`..._o51_kvp_reg.out.txt`、
+`..._o51_ncu_mla.out.txt`、`..._mma_onefile_o51_mla_s1024h2.out.txt`。

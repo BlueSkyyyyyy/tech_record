@@ -162,6 +162,29 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
       scale, causal, ksplit, cu_seqlens, mt_b, mt_m);
 }
 
+// O51：K/V `cp.async` 回填流水版主 kernel（mma 后端，MLA/HD=512）。smem 比 `launch_bwd_main`
+//   多 `2*BN*QTS`（Ap/dS3 独立缓冲），K/V 在 GEMM1/2 后异步回填下一 tile。数值与旧路径逐位相同。
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
+          int NTH = THREADS, int NWAR = WN>
+static void launch_bwd_main_kvpipe(dim3 mg, const unsigned char* q8, const float* qs,
+                                   const unsigned char* k8, const float* ks,
+                                   const unsigned char* v8, const float* vs,
+                                   const unsigned char* do8, const float* dos,
+                                   const float* delta, const float* lse, float* dq_acc,
+                                   float* dk_acc, float* dv_acc, int S, int H, int Hkv,
+                                   float scale, int causal, int ksplit,
+                                   const int* cu_seqlens = nullptr,
+                                   const int* mt_b = nullptr, const int* mt_m = nullptr) {
+  using Cfg = Fp8Cfg<HD, BM, BN>;
+  constexpr int kSmem = Cfg::smem_bytes_kvpipe;
+  CUDA_CHECK(cudaFuncSetAttribute(
+      fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, false, PREL, F16B, RCP, NTH, NWAR, true>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, false, PREL, F16B, RCP, NTH, NWAR, true>
+      <<<mg, NTH, kSmem>>>(q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
+                           dv_acc, S, H, Hkv, scale, causal, ksplit, cu_seqlens, mt_b, mt_m);
+}
+
 // O37：Q/dO 4D-TMA 版主 kernel（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128、WGMMA 路径）。
 #if defined(FA_WGMMA) && defined(FA_TMA)
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true>
@@ -672,6 +695,9 @@ int main(int argc, char** argv) {
   // O47：MLA（D=512）主 kernel 的 warp 网格。-1=自动（D=512 默认开 8-warp/256 线程），
   //   0/1 由 `--mla8w=` 强制（同 session A/B）。默认 128/2 与历史逐字等价。
   int mla8w_opt = -1;
+  // O51：MLA（D=512）主 kernel 的 K/V cp.async 回填流水。-1=自动（默认开），0/1 由 `--mlakvp=`
+  //   强制（同 binary A/B；需 8-warp 几何）。
+  int mla_kvp_opt = -1;
   // O48（候选 ①）：D=128 主 kernel 是否也用 8-warp（256 线程 / 2×4 网格）几何。0=默认
   //   4-warp（128/2），1=8-warp。仅 mma 路径（WGMMA 版 GEMM1/2 是 warpgroup 级、结构上锁死
   //   2 warp）；用 `--d128w=0/1` 做同 binary A/B。见 docs/03 §48。O49：默认 **-1=自动**
@@ -697,6 +723,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--lsetma=", 0) == 0) lse_tma = atoi(a.c_str() + 9);
     else if (a.rfind("--lsesplit=", 0) == 0) lse_split = atoi(a.c_str() + 11);
     else if (a.rfind("--mla8w=", 0) == 0) mla8w_opt = atoi(a.c_str() + 8);
+    else if (a.rfind("--mlakvp=", 0) == 0) mla_kvp_opt = atoi(a.c_str() + 9);
+    else if (a == "--mlakvp") mla_kvp_opt = 1;
     else if (a.rfind("--d128w=", 0) == 0) d128w_opt = atoi(a.c_str() + 8);
     else if (a == "--d128w") d128w_opt = 1;
     else if (a.rfind("--qdtma=", 0) == 0) qd_tma = atoi(a.c_str() + 8);
@@ -1140,8 +1168,14 @@ int main(int argc, char** argv) {
 #endif
     if (D == 128) { launch128(use_regdq, false, prel_sel, f16b_sel, rcp_sel); return; }
     // O47：MLA（D=512）默认走 8-warp/256 线程几何（`--mla8w=0` 退回 4-warp 供 A/B）。
+    // O51：8-warp 档下 K/V 默认走 cp.async 回填流水（`--mlakvp=0` 退回同步载入 A/B）。
+    const bool mla_kvp_sel = (mla_kvp_opt < 0) ? true : (mla_kvp_opt != 0);
     if (mla8w_sel) {
-      if (prel_sel)
+      if (prel_sel && mla_kvp_sel)
+        launch_bwd_main_kvpipe<512, 64, 32, false, true, true, true, 256, 4>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      else if (prel_sel)
         launch_bwd_main<512, 64, 32, false, false, true, true, true, 256, 4>(
             mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
             d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
@@ -1717,6 +1751,60 @@ int main(int argc, char** argv) {
     printf("[O47 A/B] main MLA 4-warp %.4f ms | 8-warp %.4f ms (%.3fx) | "
            "max_abs(8w-vs-4w) dq=%.3e dk=%.3e dv=%.3e\n",
            m4, m8, m4 / m8, dqd, dkd, dvd);
+    run_main();  // 恢复 CLI 选中路径
+  }
+
+  // ---- O51 A/B（D=512/MLA）：8-warp 主 kernel 的 K/V 同步载入 vs cp.async 回填流水 ----
+  //   只改搬运（行主序 cp.async + 从 Ks 重建 Kp），数学/K/V 字节完全相同 ⇒ 应逐位相同。
+  if (D == 512) {
+    auto go51 = [&](bool kvp) {
+      if (kvp)
+        launch_bwd_main_kvpipe<512, 64, 32, false, true, true, true, 256, 4>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      else
+        launch_bwd_main<512, 64, 32, false, false, true, true, true, 256, 4>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+    };
+    auto zero_acc = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+    };
+    auto bench51 = [&](bool kvp, float* out) {
+      zero_acc();
+      go51(kvp);
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) go51(kvp);
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float s_sync = 0.f, s_kvp = 0.f;
+    bench51(false, &s_sync);
+    bench51(true, &s_kvp);
+    std::vector<float> a_dq(nq), b_dq(nq), a_dk(nkv), b_dk(nkv), a_dv(nkv), b_dv(nkv);
+    auto grab51 = [&](bool kvp, std::vector<float>& dq, std::vector<float>& dk,
+                      std::vector<float>& dv) {
+      zero_acc();
+      go51(kvp);
+      CUDA_CHECK(cudaMemcpy(dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    };
+    grab51(false, a_dq, a_dk, a_dv);
+    grab51(true, b_dq, b_dk, b_dv);
+    auto md51 = [](const std::vector<float>& a, const std::vector<float>& b) {
+      double d = 0;
+      for (size_t i = 0; i < a.size(); ++i)
+        d = std::max(d, (double)std::fabs((double)a[i] - (double)b[i]));
+      return d;
+    };
+    printf("[O51 A/B] main MLA 8w sync %.4f ms | kvpipe %.4f ms (%.3fx) | "
+           "max_abs(kvp-vs-sync) dq=%.3e dk=%.3e dv=%.3e\n",
+           s_sync, s_kvp, s_sync / s_kvp, md51(a_dq, b_dq), md51(a_dk, b_dk), md51(a_dv, b_dv));
     run_main();  // 恢复 CLI 选中路径
   }
 

@@ -1,0 +1,37 @@
+### O51 ncu: fp8 MLA main, kvpipe ON
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %         3.76
+    gpu__time_duration.sum                                                             us       134.59
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        32.42
+    lts__t_sectors_op_red.sum                                                      sector      6684672
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        51.03
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed             %         6.43
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        22.59
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        12.48
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.37
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.72
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         1.40
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.18
+    smsp__inst_executed.sum                                                          inst     29337696
+    ------------------------------------------------------------------------- ----------- ------------
+
+
+### O51 ncu: fp8 MLA main, sync (--mlakvp=0)
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %         3.72
+    gpu__time_duration.sum                                                             us       135.74
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        31.89
+    lts__t_sectors_op_red.sum                                                      sector      6684672
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        50.39
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed             %         6.35
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        22.76
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        12.48
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.32
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.97
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         1.57
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.20
+    smsp__inst_executed.sum                                                          inst     29950416
+    ------------------------------------------------------------------------- ----------- ------------
+

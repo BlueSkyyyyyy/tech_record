@@ -245,6 +245,17 @@ smem 冲突 + 低 occ
     自 fp16）⇒ 重新可编译、数值逐位一致。详见 `docs/01` §14ac、`docs/01b` §6ak、`docs/03` §50、
     `docs/04` §23。
 
+16. **O51（第九十八轮，正结果，D=512 默认）**：fp8 MLA（D=512）主 kernel 的 **K/V `cp.async`
+    回填流水**。fp8 MLA 走 mma 后端、K/V 每 tile 同步载入（`NPU=16` 禁用了 O3 寄存器预取），
+    ncu 头号 stall 是 `long_scoreboard`。改动只碰搬运：**K 双缓冲**（GEMM1 前发下一 tile 的 K）、
+    **V 单缓冲 + 后段回填**（GEMM1/2 后发，把 `Ap` 从 `Vs` 拆开）、`kp_build_rows` 从行主序 Ks
+    重建 Kp；smem 207.9→229.9KB，仍 1 CTA/SM。**main 1.02–1.04×**（S256H2/S512H2/S512H4/
+    S1024H2），`long_scoreboard` 1.97→1.72、指令 −2.0%、`red` 扇区逐字节不变、数值 vs ref
+    与历史同量级（差异仅 atomic 次序）；D=128 与 varlen 回归逐位不变。**教训：fp8 MLA 是
+    mma+1 CTA/SM，K/V 载入的「零成本重叠」只值 ~2–4%；上面是 `short_scoreboard`/`wait` 的
+    mma 依赖延迟 + 1 CTA/SM，仍受 smem 硬约束（2 CTA/SM 不可达）。** 详见 `docs/03` §51、
+    `docs/04` §24。
+
 ---
 
 

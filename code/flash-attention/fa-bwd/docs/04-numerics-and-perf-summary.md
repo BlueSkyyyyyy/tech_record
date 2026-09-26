@@ -1691,3 +1691,23 @@ ours 1.2559（3.93×）。**MLA（D=512）FA/TE 均不支持，仅 fp32 ref**。
 
 `fa_bwd_bf16_mma_onefile.cu` 自 O35/O36 加主 kernel TMA 后缺 host 侧 `make_lse_map`/
 `make_main_map`、**编译不过**；补回（dtype 参数化自 fp16）后 `bf16_one_ok`，数值逐位一致。
+
+---
+
+## 24. fp8 MLA（D=512）主 kernel 的 K/V `cp.async` 回填流水（O51，第九十八轮）—— **正结果，D=512 默认**
+
+承接 O45/O47 的头号 stall `long_scoreboard`（fp8 MLA 走 mma 后端、K/V 同步载入、1 CTA/SM）。
+把每 tile 的 K/V 同步载入换成 `cp.async` 回填流水（K 双缓冲、V 单缓冲 + 后段回填；Ap/dS3
+拆成独立缓冲），**只改搬运**，smem 207.9→229.9KB 仍 1 CTA/SM。
+
+| MLA case (D=Dv=512) | dq / dk / dv vs fp32 ref | main sync→kvpipe | total（`4BS²HD`）|
+|---|---|---|---|
+| S256 H2 | 2.356 / 2.290 / 3.441e-1 | 0.0239→**0.0234ms (1.020×)** | 0.0701ms / 3.83 TF |
+| S512 H4 | 2.415 / 2.992 / 4.481e-1 | 0.0739→**0.0716ms (1.032×)** | 0.1317ms / 16.30 TF |
+| S512 H2 | 2.286 / 2.252 / 3.343e-1 | 0.0508→**0.0495ms (1.026×)** | 0.0985ms / 10.90 TF |
+| S1024 H2 | 2.232 / 3.337 / 3.602e-1 | 0.1228→**0.1183ms (1.038×)** | 0.1894ms / 22.68 TF |
+
+ncu（S1024 H2，同 session A/B）：`long_scoreboard` **1.97→1.72**、`short` 1.57→1.40、
+指令数 **−2.0%**、`lts__t_sectors_op_red` **逐字节不变**（6,684,672）、occ 恒 12.48%（1 CTA/SM）。
+D=128（MHA/GQA）与 varlen 路径**逐位不变**；单/两文件 device 逐字一致。
+**MLA 反向 FA2/FA3/TE 均不支持（`fa=NA`/`te=NA`），只有 ours 数字**；详见 `docs/03` §51。

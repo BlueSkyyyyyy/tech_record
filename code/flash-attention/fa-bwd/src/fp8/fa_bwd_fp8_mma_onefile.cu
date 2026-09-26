@@ -158,6 +158,17 @@ struct Fp8Cfg {
   static constexpr int smem_bytes =
       fp8_bytes + (kNScale + 2 * BM * PSS) * (int)sizeof(float);
 
+  // O51：MLA（D=512）主 kernel 的 K/V `cp.async` 回填流水。fp8 MLA 走 mma 主 kernel
+  //   （无 TMA），原先 K/V 在每 tile 末尾**同步**载入 ⇒ ncu 头号 stall 是 `long_scoreboard`
+  //   （O45：long 2.33）。这里不改数学、只改搬运：用 `cp.async.cg` 提前发起**下一 tile** 的
+  //   K/V，延迟被本轮计算覆盖；tile 末尾 `wait_group 0` 后从 Ks 重建 Kp。
+  //   代价：① **K 双缓冲**（`Ks` 两个 stage）⇒ 下一 tile 的 K 可在**本轮 GEMM1 之前**发起、
+  //   与整轮计算重叠；② 为让 Vs 在 GEMM2 后即可覆写，把「Ap 复用 Vs、dS3 复用 Ks」两处
+  //   smem 别名拆开（各给独立缓冲，于是 V 在 GEMM1/2 后即可回填）。合计多
+  //   `BN*ASLD + 2*BN*QTS` 字节（MLA 下 16896+5120=22016B；207872+22016=229888 ≤ 232448，
+  //   仍 1 CTA/SM）。
+  static constexpr int smem_bytes_kvpipe = smem_bytes + BN * ASLD + 2 * BN * QTS;
+
   // O9c-2：WGMMA 模式下 Q/dO/K/V 存 SW128（tile 字节数 = (rows/8)*(HD/128)*1024），
   // 取代行主序的 ASLD 布局。+1024 是动态 smem 基址到 1024B 对齐的 slack（描述符 base_offset=0）。
   static constexpr int qs_sw_bytes = (BM / 8) * (HD / 128) * 1024;
@@ -303,6 +314,19 @@ __device__ __forceinline__ uint32_t smem_u32(const void* p) {
 __device__ __forceinline__ void cp_async16(void* dst_smem, const void* src_gmem) {
   uint32_t s = smem_u32(dst_smem);
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(src_gmem));
+}
+// O51：带源字节数的 16B `cp.async.cg`（src-size=0 时零填充、不读 global），用于行越界时
+//   给 smem 写 0（与 `kv_load_pair` 的「越界写 0 字节」语义一致）。
+__device__ __forceinline__ void cp_async16_z(void* dst_smem, const void* src_gmem, int nbytes) {
+  uint32_t s = smem_u32(dst_smem);
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(s), "l"(src_gmem),
+               "r"(nbytes));
+}
+__device__ __forceinline__ void cp_async_commit() {
+  asm volatile("cp.async.commit_group;\n");
+}
+__device__ __forceinline__ void cp_async_wait0() {
+  asm volatile("cp.async.wait_group 0;\n");
 }
 __device__ __forceinline__ void ldmatrix_x4(uint32_t addr, uint32_t d[4]) {
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
@@ -791,6 +815,41 @@ __device__ __forceinline__ void kv_load_pair_nt(const unsigned char* __restrict_
     *reinterpret_cast<uint32_t*>(Ks + (rp * 2 + 1) * asld + dq) = k1;
     *reinterpret_cast<uint32_t*>(Vs + (rp * 2) * asld + dq) = v0;
     *reinterpret_cast<uint32_t*>(Vs + (rp * 2 + 1) * asld + dq) = v1;
+    uint32_t* kpw = reinterpret_cast<uint32_t*>(Kp + rp * psld + dq);
+    kpw[0] = __byte_perm(k0, k1, 0x5140);
+    kpw[1] = __byte_perm(k0, k1, 0x7362);
+  }
+}
+
+// O51：K/V 的 `cp.async` 单缓冲回填（MLA/mma 路径）。把下一 tile 的 K/V 按 16B chunk
+//   异步搬进行主序 `Ks/Vs`（HD 行 = HD/16 个 chunk，行距 asld）。行越界时零填充。
+template <int HD, int BN, int NT>
+__device__ __forceinline__ void kv_issue_async(const unsigned char* __restrict__ k8, int j0,
+                                               int len, int Hkv, int hkv, int qbase, int tid,
+                                               unsigned char* Dst, int asld) {
+  const int nch = HD / 16;
+  const int units = BN * nch;
+  for (int u = tid; u < units; u += NT) {
+    int jr = u / nch, cc = (u % nch) * 16;
+    int jg = j0 + jr;
+    bool ok = jg < len;
+    size_t off = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + cc;
+    cp_async16_z(Dst + jr * asld + cc, k8 + off, ok ? 16 : 0);
+  }
+}
+
+// O51：从行主序 Ks 重建 Kp（K 配对布局 [BN/2][PSLD] uint16），与 `kv_load_pair` 的配对
+//   字节顺序逐位一致（`byte_perm` 0x5140/0x7362）。
+template <int HD, int BN, int NT>
+__device__ __forceinline__ void kp_build_rows(const unsigned char* __restrict__ Ks,
+                                              uint16_t* __restrict__ Kp, int asld, int psld,
+                                              int tid) {
+  const int nd4 = HD / 4;
+  const int units = (BN / 2) * nd4;
+  for (int u = tid; u < units; u += NT) {
+    int rp = u / nd4, dq = (u % nd4) * 4;
+    uint32_t k0 = *reinterpret_cast<const uint32_t*>(Ks + (rp * 2) * asld + dq);
+    uint32_t k1 = *reinterpret_cast<const uint32_t*>(Ks + (rp * 2 + 1) * asld + dq);
     uint32_t* kpw = reinterpret_cast<uint32_t*>(Kp + rp * psld + dq);
     kpw[0] = __byte_perm(k0, k1, 0x5140);
     kpw[1] = __byte_perm(k0, k1, 0x7362);
@@ -1704,7 +1763,7 @@ __global__ void delta_warp_kernel(const float* __restrict__ o,
 //   `NWM=NTH/32/NWAR` 为 M 方向 warp 数。各 warp tile 由 NWM/NWAR 派生（见下方 GM*/GN*）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
            bool RCP = true, bool TMA = false, bool KVTMA = false, int NTH = THREADS,
-           int NWAR = WN>
+           int NWAR = WN, bool KVPIPE = false>
 __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8,
@@ -1738,11 +1797,13 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   // O9c-2：WGMMA 模式下 Q/dO/K/V 是 SW128 tile（1024B 对齐），否则是行主序 ASLD 布局。
   constexpr int QS_SZ = WGMMA ? Cfg::qs_sw_bytes : BM * ASLD;
   constexpr int KS_SZ = WGMMA ? Cfg::ks_sw_bytes : BN * ASLD;
-  // O41：K/V TMA 时 K 双缓冲（2 个 SW128 stage），V 单缓冲。
-  constexpr int KSTAGES = KVTMA ? 2 : 1;
+  // O41：K/V TMA 时 K 双缓冲（2 个 SW128 stage），V 单缓冲。O51：KVPIPE（mma）同样 K 双缓冲。
+  constexpr int KSTAGES = (KVTMA || KVPIPE) ? 2 : 1;
   static_assert(!WGMMA || (HD == 128), "WGMMA 主 kernel 目前只做 HD=128");
   static_assert(!KVTMA || (TMA && WGMMA && HD == 128),
                 "K/V TMA 只在 Q/dO-TMA + WGMMA + HD=128 路径");
+  // O51：K/V cp.async 回填流水只用于 mma 后端（非 WGMMA/TMA），目前实例化于 MLA（HD=512）。
+  static_assert(!KVPIPE || (!WGMMA && !TMA && !KVTMA), "KVPIPE 只用于 mma 后端");
   // GEMM3/4/5 的输出 N 维 = head_dim；每遍处理 NTW = WN*64 = 128 列，共 HD/NTW 遍。
   constexpr int NTW = WN * 64;
   static_assert(HD % NTW == 0, "HD 必须是 128 的整数倍");
@@ -1798,6 +1859,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   float* scales = reinterpret_cast<float*>(dS2 + BM * DSS2);
   float* Ps = scales + kNScale;              // P fp32 [BM][PSS]
   float* Ss = Ps + BM * PSS;                 // dS fp32 [BM][PSS]
+  // O51：KVPIPE 时把 Ap/dS3 的 smem 别名拆开（各给独立缓冲，落在 Ss 之后），于是 Ks/Vs 在
+  //   GEMM1/2 结束后即可被 cp.async 覆写。`Ap` 8B 对齐（上面所有区段尺寸均为 8 的倍数）。
+  if constexpr (KVPIPE) {
+    Ap = reinterpret_cast<unsigned char*>(Ss + BM * PSS);
+    dS3 = Ap + BN * QTS;
+  }
   float* qs_s = scales;
   float* ks_s = qs_s + BM;
   float* vs_s = ks_s + BN;
@@ -1976,6 +2043,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       ks_s[tid] = (jg < len) ? ks[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
       vs_s[tid] = (jg < len) ? vs[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
     }
+  } else if constexpr (KVPIPE) {
+    // O51：首个 tile 的 K（stage 0）与 V 用 cp.async 搬入，稍后（本段末尾）wait + 重建 Kp。
+    (void)pk0; (void)pk1; (void)pv0; (void)pv1;
+    kv_issue_async<HD, BN, NTH>(k8, nt_begin * BN, len, Hkv, hkv, qbase, tid, Ks, ASLD);
+    kv_issue_async<HD, BN, NTH>(v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, Vs, ASLD);
+    cp_async_commit();
   } else if (kPrefetch) {
     kv_prefetch_pair<NPU, HD, BN, NTH>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
                               pv1);
@@ -1990,6 +2063,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     vs_s[tid] = (jg < len) ? vs[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
   }
   __syncthreads();
+  if constexpr (KVPIPE) {
+    cp_async_wait0();
+    __syncthreads();
+    kp_build_rows<HD, BN, NTH>(Ks, Kp, ASLD, PSLD, tid);
+    __syncthreads();
+  }
 
   // ---- O12（O7c-PREL for fp8）：把本线程负责的行的 LSE/D 预装进寄存器。----
   // lse/delta 只依赖 (m0+r, h)，与 nt tile 无关。mma 路径每线程最多 4 个行槽
@@ -2051,9 +2130,20 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 
   for (int nt = nt_begin; nt < nt_end; ++nt) {
     const int j0 = nt * BN;
-    // O41：K/V TMA 时本 tile 的 K 在 Ks[stg]（stg = 相对 nt_begin 的奇偶），dS3 复用它。
+    // O41/O51：K/V TMA 或 KVPIPE 时本 tile 的 K 在 Ks[stg]（stg = 相对 nt_begin 的奇偶），
+    //   dS3 复用它（KVPIPE 下 dS3 已是独立缓冲，这里不改写它）。
     const int stg = (nt - nt_begin) & 1;
     if constexpr (KVTMA) dS3 = Ks + stg * KS_SZ;
+    if constexpr (KVPIPE) {
+      // O51：K 双缓冲 ⇒ 本 tile 的 K 在 Ks[stg]；在本轮 GEMM1 之前发起下一 tile 的 K 到
+      //   Ks[stg^1]（该 stage 的上一个 K 已被上一轮 GEMM4/dS3 消费）。V 单缓冲，等 GEMM1/2
+      //   读完 Vs 后再发起（见下方 2287 之后）。两者延迟均被本轮计算覆盖。
+      if (nt + 1 < nt_end) {
+        kv_issue_async<HD, BN, NTH>(k8, (nt + 1) * BN, len, Hkv, hkv, qbase, tid,
+                                    Ks + (stg ^ 1) * KS_SZ, ASLD);
+        cp_async_commit();
+      }
+    }
     // ---- O3：预取下一 tile 的 K/V 到寄存器（延迟被本轮 5 个 GEMM 覆盖）----
     const int nnt = nt + 1;
     if (!KVTMA && kPrefetch && nnt < nt_end)
@@ -2062,6 +2152,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 
     // ---- (1) S = scale·QKᵀ  →  P = exp(S − LSE)，存 fp32 ----
     // ---- (2) dP = dO·Vᵀ    →  dS = P∘(dP − D)，存 fp32 ----
+    // O51：KVPIPE 时本 tile 的 K 在 stage stg（K 双缓冲）。
+    const unsigned char* Km = KVPIPE ? (Ks + stg * KS_SZ) : Ks;
 #ifdef FA_WGMMA
     if constexpr (WGMMA) {
       // O9c-2：GEMM1/2 换 wgmma.m64n32k32（A/B 都从 SW128 直读 smem）。两条异步 mma 一起
@@ -2135,7 +2227,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
           for (int j = 0; j < MTN; ++j)
 #pragma unroll
             for (int q = 0; q < 4; ++q) { acc[i][j][q] = 0.f; acc2[i][j][q] = 0.f; }
-        mma_block<GM1, GN1, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
+        mma_block<GM1, GN1, HD, E4E4>(Qs, ASLD, Km, ASLD, acc, wr, wc, lane);
         mma_block<GM1, GN1, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc2, wr, wc, lane);
         const int r0 = wr * GM1, c0 = wc * GN1;
 #pragma unroll
@@ -2182,7 +2274,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
         for (int j = 0; j < MTN; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block<GM1, GN1, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
+      mma_block<GM1, GN1, HD, E4E4>(Qs, ASLD, Km, ASLD, acc, wr, wc, lane);
       const int r0 = wr * GM1, c0 = wc * GN1;
 #pragma unroll
       for (int i = 0; i < MTM; ++i)
@@ -2244,6 +2336,15 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 #endif  // FA_ILV
     }  // end else (mma path)
     __syncthreads();
+    // O51：GEMM2 已读完 Vs（且 Ap 已拆成独立缓冲）⇒ 立即用 cp.async 发起下一 tile 的 V，
+    //   延迟被随后的 fold + GEMM3/4/5 覆盖。K 已在循环开头发起。tile 末尾 `wait_group 0`
+    //   后从 Ks[stg^1] 重建 Kp。
+    if constexpr (KVPIPE) {
+      if (nt + 1 < nt_end) {
+        kv_issue_async<HD, BN, NTH>(v8, (nt + 1) * BN, len, Hkv, hkv, qbase, tid, Vs, ASLD);
+        cp_async_commit();
+      }
+    }
 
     // ---- 构造 dV/dK/dQ 的 fp8 操作数（fold 归约维上的 rowwise scale）----
     // O4a：原来 fold 只让 `tid<BN`（32 线程）算 Ap/dS3、`tid<BM`（64 线程）算 dS2，其余
@@ -2576,6 +2677,20 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
         mbar_wait(qbars + 4, (uint32_t)(vuse & 1));
         vuse++;
       }
+    } else if constexpr (KVPIPE) {
+      // O51：本 tile 的 K/V 已在 GEMM1/2 后由 cp.async 发起；这里等它落地并从行主序 Ks
+      //   重建下一 tile 的 Kp（供 GEMM5）。数值与原同步 `kv_load_pair` 逐位相同。
+      if (nt + 1 < nt_end) {
+        if (tid < BN) {
+          int jg = (nt + 1) * BN + tid;
+          ks_s[tid] = (jg < len) ? ks[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
+          vs_s[tid] = (jg < len) ? vs[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
+        }
+        cp_async_wait0();
+        __syncthreads();
+        kp_build_rows<HD, BN, NTH>(Ks + (stg ^ 1) * KS_SZ, Kp, ASLD, PSLD, tid);
+        __syncthreads();
+      }
     } else if (nt + 1 < nt_end) {
       if (kPrefetch) {
         kv_commit_pair<NPU, HD, BN, WGMMA, NTH>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
@@ -2617,7 +2732,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 //   `__grid_constant__` 描述符（`TMA=true` 才用到）。
 // O47：`NTH`/`NWAR` 同 `fp8_mma_body`（默认 128/2 与历史逐字等价；MLA 用 256/4）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
-          bool RCP = true, int NTH = THREADS, int NWAR = WN>
+          bool RCP = true, int NTH = THREADS, int NWAR = WN, bool KVPIPE = false>
 __global__ void __launch_bounds__(NTH, (NTH == THREADS && HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8, const float* __restrict__ ks,
@@ -2629,7 +2744,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
                       const int* __restrict__ mt_b = nullptr,
                       const int* __restrict__ mt_m = nullptr) {
-  fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR>(
+  fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR, KVPIPE>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, nullptr, nullptr, nullptr, nullptr, mt_b, mt_m);
 }
@@ -3210,6 +3325,26 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
       scale, causal, ksplit, cu_seqlens);
 }
 
+// O51：K/V `cp.async` 回填流水版主 kernel（mma 后端，MLA/HD=512）。数值与旧路径逐位相同。
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, int NTH = THREADS, int NWAR = WN>
+static void launch_bwd_main_kvpipe(dim3 mg, const unsigned char* q8, const float* qs,
+                                   const unsigned char* k8, const float* ks,
+                                   const unsigned char* v8, const float* vs,
+                                   const unsigned char* do8, const float* dos,
+                                   const float* delta, const float* lse, float* dq_acc,
+                                   float* dk_acc, float* dv_acc, int S, int H, int Hkv,
+                                   float scale, int causal, int ksplit,
+                                   const int* cu_seqlens = nullptr) {
+  using Cfg = Fp8Cfg<HD, BM, BN>;
+  constexpr int kSmem = Cfg::smem_bytes_kvpipe;
+  CUDA_CHECK(cudaFuncSetAttribute(
+      fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, false, PREL, true, true, NTH, NWAR, true>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, false, PREL, true, true, NTH, NWAR, true>
+      <<<mg, NTH, kSmem>>>(q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
+                           dv_acc, S, H, Hkv, scale, causal, ksplit, cu_seqlens);
+}
+
 // O37：Q/dO 4D-TMA 版主 kernel（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128、WGMMA 路径）。
 #if defined(FA_WGMMA) && defined(FA_TMA)
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true>
@@ -3637,6 +3772,7 @@ int main(int argc, char** argv) {
   int cvt_on = 0;   // O21b：1 = 保留冗余 fp32→fp32 convert 拷贝（默认 0：直接累加进输出）
   int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
   int mla8w_opt = -1;  // O47：MLA（D=512）主 kernel -1=自动(8w)/0/1 强制（同 session A/B）
+  int mla_kvp_opt = -1;  // O51：MLA 主 kernel 的 K/V cp.async 回填流水 -1=自动/0/1 强制
   // O48：D=128 mma 主 kernel 0=4w(128/2) / 1=8w(256/4)。O49：默认 -1=自动（仅 mma 后端、
   //   有效 grid ≤ SM 数时开；fp8 的 auto split-K 通常已把小 S 的 grid 抬到 ≫132，故不触发）。
   int d128w_opt = -1;
@@ -3679,6 +3815,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--regdq=", 0) == 0) regdq_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--mla8w=", 0) == 0) mla8w_opt = atoi(a.c_str() + 8);
+    else if (a.rfind("--mlakvp=", 0) == 0) mla_kvp_opt = atoi(a.c_str() + 9);
+    else if (a == "--mlakvp") mla_kvp_opt = 1;
     else if (a.rfind("--d128w=", 0) == 0) d128w_opt = atoi(a.c_str() + 8);
     else if (a == "--d128w") d128w_opt = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
@@ -4052,8 +4190,14 @@ int main(int argc, char** argv) {
       return;
     }
     if (D == 128) { launch128(use_regdq, false, prel_sel); return; }
+    // O51：MLA（D=512）8-warp 档默认 K/V cp.async 回填流水（`--mlakvp=0` 退回同步载入 A/B）。
+    const bool mla_kvp_sel = (mla_kvp_opt < 0) ? true : (mla_kvp_opt != 0);
     if (mla8w_sel) {
-      if (prel_sel)
+      if (prel_sel && mla_kvp_sel)
+        launch_bwd_main_kvpipe<512, 64, 32, false, true, 256, 4>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      else if (prel_sel)
         launch_bwd_main<512, 64, 32, false, false, true, 256, 4>(
             mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
             d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);

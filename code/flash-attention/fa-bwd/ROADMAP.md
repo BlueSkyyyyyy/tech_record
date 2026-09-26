@@ -2649,7 +2649,33 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第九十七轮）**：**O50——wgmma2 的 GEMM1/2 等待拆分（`FA_WS1`，中性偏正）
+> **最新（第九十八轮）**：**O51——fp8 MLA（D=512）主 kernel 的 K/V `cp.async` 回填流水
+> （正结果，D=512 默认）**。落实 O45/O47 记录的头号 stall：fp8 MLA 走 **mma 后端**（`HD=512`
+> 不满足 SW128/wgmma 的 `HD==128`，也无 TMA）、K/V 每 tile 由 `kv_load_pair` 同步载入
+> （`NPU=16` 禁用 O3 寄存器预取），ncu `long_scoreboard` 最高（O45 2.33 / O47 后仍最高）。
+> 改动**只碰搬运**：① **K 双缓冲**（`+BN*ASLD`）——本轮 GEMM1 之前用 `cp.async` 发起下一 tile
+> 的 K 到 `Ks[stg^1]`，末尾 `wait_group 0` 后由 `kp_build_rows` 从行主序 Ks **重建 Kp**
+> （`byte_perm` 与原配对逐位一致）；② **V 单缓冲 + 后段回填**——把「`Ap` 复用 `Vs`」拆成独立
+> 缓冲（`+BN*QTS`，dS3 同理），GEMM1/2 后立即发起下一 tile 的 V，延迟被 fold+GEMM3/4/5 覆盖；
+> ③ 新增 `cp_async16_z`（带 src-size 零填充）/`kp_build_rows`、`Fp8Cfg::smem_bytes_kvpipe`、
+> `KVPIPE` 模板开关与 `launch_bwd_main_kvpipe` 壳、host `--mlakvp=0/1`（默认 -1=自动开，
+> 仅 D=512+8-warp+PREL）。smem **207.9→229.9KB**（≤232.4KB），**仍 1 CTA/SM**。
+> **main 1.02–1.04×**（S256H2 1.020、S512H2 1.026、S512H4 1.032、S1024H2 **1.038**），
+> ncu：`long_scoreboard` **1.97→1.72**、`short` 1.57→1.40、指令数 **−2.0%**、
+> `lts__t_sectors_op_red` **逐字节不变**（6,684,672）、occ 恒 12.48%；数值 vs fp32 ref 与
+> 历史同量级（差异仅跨 CTA atomic 次序，`max_abs(kvp-vs-sync)≤1e-6`）；**D=128（MHA/GQA）
+> 与 varlen 回归逐位不变**，单/两文件 device 逐字一致。**教训：fp8 MLA 是 mma + 1 CTA/SM，
+> K/V 载入的「零成本重叠」只值 ~2–4%；再上面是 `short_scoreboard`/`wait` 的 mma 依赖延迟 +
+> 1 CTA/SM，仍受 smem 硬约束（2 CTA/SM 不可达）。** 详见 `docs/03` §51、`docs/04` §24、
+> `docs/08` §5.16。原始输出 `src/fp8/fa_bwd_fp8_main_o51_kvp_{mla,reg}.out.txt`、
+> `..._o51_ncu_mla.out.txt`、`..._mma_onefile_o51_mla_s1024h2.out.txt`。
+> **下一步候选**：① **fp8 MLA 的 `short_scoreboard`（smem→mma 的 `ldmatrix`）**——O51 后它
+> 升为并列头号（1.40），抓手是 `Qp/dOp/Kp` 的读冲突/向量化（O4b 同族，但 MLA 的 `PSLD=520`）；
+> ② **fp8 MLA 降 smem 冲 2 CTA/SM**（需消 `Qp/dOp` ~66KB，S1024H2 的 1 CTA/SM 是通用墙）；
+> ③ **把 KVPIPE 推广到 fp8 MLA 的 varlen / D=128 的 mma fallback**（本步只实例化 D=512 定长）；
+> ④ **fp8 D=128 主 kernel 的 4 CTA/SM**（regs 168→≤128 + smem 74.8→≤56.8KB，多轮）。
+>
+> **（第九十七轮）**：**O50——wgmma2 的 GEMM1/2 等待拆分（`FA_WS1`，中性偏正）
 > + fp16/bf16 MLA split-KV auto 重标定（正结果）+ 修复 bf16 单文件版**。① `FA_WS1`：两条
 > wgmma 各自 commit 后先 `wait_group<1>`（只等 GEMM1 的 S）算 P、再 `wait0` 取 GEMM2 的 dP 算
 > dS，用 CUDA-core 的 exp/量化掩盖 GEMM2，**数值逐位不变**。fp16/bf16 main 方向一致非负
@@ -3509,6 +3535,18 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       数值逐位一致。对标 FA3（同 session 纯反向）：fp16 S512 时间比 **2.58×**、S4096 3.87×、
       GQA kv4 2.96×；bf16 S4096 **3.93×**。单/两文件 device 逐字一致。详见 `docs/01` §14ac、
       `docs/01b` §6ak、`docs/03` §50、`docs/04` §23、`docs/08` §5.15。
+- [x] **O51（第九十八轮）fp8 MLA（D=512）主 kernel 的 K/V `cp.async` 回填流水（正结果，D=512 默认）**：
+      fp8 MLA 走 mma 后端、K/V 同步载入（`NPU=16` 禁用 O3 预取），ncu 头号 stall 是
+      `long_scoreboard`。**只改搬运**：K 双缓冲（GEMM1 前发下一 tile 的 K）+ V 单缓冲后段回填
+      （把 `Ap` 从 `Vs` 拆开、dS3 也从 `Ks` 拆开），`kp_build_rows` 从行主序 Ks 重建 Kp，
+      `cp.async` 越界零填充；新增 `KVPIPE` 开关 + `launch_bwd_main_kvpipe` + `--mlakvp=0/1`。
+      smem 207.9→229.9KB（仍 1 CTA/SM）。**main 1.02–1.04×**（S1024H2 1.038、S512H4 1.032、
+      S512H2 1.026、S256H2 1.020）；ncu `long_scoreboard` 1.97→1.72、`short` 1.57→1.40、指令
+      −2.0%、`red` 扇区逐字节不变、occ 恒 12.48%；数值 vs ref 与历史同量级（差异仅 atomic
+      次序），**D=128/varlen 回归逐位不变**，单/两文件 device 逐字一致。ML A 反向 FA2/FA3/TE
+      均不支持，仅 ours。详见 `docs/03` §51、`docs/04` §24、`docs/08` §5.16。原始输出
+      `src/fp8/fa_bwd_fp8_main_o51_kvp_{mla,reg}.out.txt`、`..._o51_ncu_mla.out.txt`、
+      `..._mma_onefile_o51_mla_s1024h2.out.txt`。
 
 ## 灵感 / backlog
 
