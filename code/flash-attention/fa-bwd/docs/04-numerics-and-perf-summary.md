@@ -2019,3 +2019,70 @@ python3 harness/fa_bwd_compare.py --glob 'varlen_*' --out <out.txt>
 
 （可选）§32 候选 ② 仍未做：让 `fa_bwd_compare.py` 直接驱动 `run.sh` 一键「跑 ours + 汇总」，
 以及把 FA/TE 的 varlen 列接进 harness（本机 FA2.7.4/TE2.14 反向不支持 varlen，故暂无列）。
+
+## 34. P3-3c：`fa_bwd_run.py` 一键「跑 ours + 汇总」（本轮新增）
+
+**动机**：§32/§33 把 ours 的 `--dump` 与 `fa_bwd_compare.py` 接进了 harness，但每次仍要手写
+`scripts/run.sh <host> --dir=<case> --dump=ours [--full] [--varlen]`（还要区分单/两文件、定长/
+varlen 两套构建），再把 case 名喂给 `fa_bwd_compare.py`。选取的 case 一多就极易漏项、无法
+一键复现。本轮落实 §33 结尾的候选 ①：把这两步收敛成**一个命令**。
+
+### 34.1 新增物 `harness/fa_bwd_run.py`
+
+- **自动发现**：扫描 `/home/xieminglin/proj/output/fa-bwd/<case>/`，按 `meta.json` 的
+  `dtype` / `varlen` / `causal` 过滤并选 host；要求存在 `ref_{dq,dk,dv}.npy`。
+- **host 映射**（两文件=`ours`，单文件=`ours_sf`，与 §32/§33 口径一致）：
+
+  | dtype | 两文件 host | 单文件 host |
+  |---|---|---|
+  | fp16 | `src/fp16/fa_bwd_fp16_mma_main.cu` | `src/fp16/fa_bwd_fp16_mma_onefile.cu` |
+  | bf16 | `src/bf16/fa_bwd_bf16_mma_main.cu` | `src/bf16/fa_bwd_bf16_mma_onefile.cu` |
+  | fp8  | `src/fp8/fa_bwd_fp8_main.cu` | `src/fp8/fa_bwd_fp8_mma_onefile.cu` |
+
+- **构建/运行**：定长走 `scripts/run.sh` 默认 `sm_90`（mma，与 §32 表一致）；varlen 入口在
+  `#ifdef FA_WGMMA` 内，改用 `ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA"`。
+  **同一 (host, 构建配置) 只编译一次**，其余 case 直接复用已产出的可执行文件（`docker exec`）。
+- **落盘**：每个 case 的原始输出写 `src/<dtype>/fa_bwd_<dtype>_p33c_run.out.txt`；运行清单
+  `src/fa_bwd_run_p33c_summary.out.txt`；最后调用 `fa_bwd_compare.py` 写
+  `src/fa_bwd_compare_p33c_summary.out.txt`。
+- CLI：`--dtype/--glob/--case/--impls {twofile,singlefile,both}/--fixed-only/--varlen-only/
+  --iters/--no-run/--dry-run`；可从任意 cwd 运行，内部用绝对路径与 `kernel_lab` 容器。
+
+### 34.2 实测（**全部 73 个 case × 单/两文件 = 146 次运行**；原始输出
+`src/{fp16,bf16,fp8}/fa_bwd_<dtype>_p33c_run.out.txt`，汇总 `src/fa_bwd_run_p33c_summary.out.txt`、
+`src/fa_bwd_compare_p33c_summary.out.txt`）
+
+- **146 次运行、0 失败**；只编译 **12 次**（6 host × 定长/varlen 两配置），其余 **134 次**复用二进制。
+- **判据 `max_abs`（baseline = fp32 ref）**，按 dtype × 定长/varlen × causal/full 的区间：
+
+  | dtype | 定长 causal | 定长 full | varlen causal | varlen full | 量级 |
+  |---|---|---|---|---|---|
+  | fp16 | 1.6e-3 – 7.9e-3 | 1.2e-4 – 3.3e-4 | 1.3e-3 – 3.8e-3 | 1.2e-4 – 1.6e-3 | fp16 噪声 |
+  | bf16 | 5.8e-3 – 7.2e-2 | 1.5e-3 – 1.9e-3 | 8.0e-3 – 3.1e-2 | 1.6e-3 – 1.2e-2 | bf16 噪声 |
+  | fp8  | 2.2e-1 – 2.13 | 4.0e-2 – 5.5e-2 | 1.6e-1 – 6.2e-1 | 4.2e-2 – 2.5e-1 | fp8 噪声 |
+
+  各区间的上界都落在 **GQA/MQA（`kv1`/`kv4`）**（多 Q 头共享 KV 头、amax 更大）：fp16 MQA
+  `b1_s1024_h64_d128_kv1_causal_fp16` `2.29/7.93/7.52e-3`、bf16 同 case `1.19e-2/4.56e-2/7.20e-2`、
+  fp8 同 case `4.10e-1/1.52/2.13`——与 §7.4/§7.5/§7.6 历史同量级。
+- **与历史逐位/同量级一致**：fp16 S512 `1.671/1.771/1.899e-3`、S4096 `1.883/1.734/1.966e-3`
+  （= §32）；fp8 S512 `0.2426/0.2975/0.3735`（= §32）；varlen 三 dtype causal/full 区间
+  与 §33 完全一致。
+- **单文件 vs 两文件**：全 73 case 的 `{dq,dk,dv}` 逐元素比对，最大差 **fp16 3.91e-3 /
+  bf16 7.81e-3 / fp8 7.63e-6**（均 1–2 个 dtype ulp，来自跨 CTA `atomicAdd` 求和次序；GQA/MQA
+  的 amax 更大故 ulp 略大于 §32 的 MHA 值），**非实现差异**；`dq` 基本逐位相同。
+
+### 34.3 复现
+
+```bash
+# 一键跑全部（或 --dtype fp8 / --varlen-only / --impls twofile 等收窄）
+python3 harness/fa_bwd_run.py
+# 只重新汇总已有 npy（不编译）
+python3 harness/fa_bwd_run.py --no-run
+# 预览将执行的命令
+python3 harness/fa_bwd_run.py --case b1_s512_h16_d128_causal_fp8 --dry-run
+```
+
+工具本身是纯 host 编排（不碰 device 代码）；数值与 §32/§33 的 kernel 完全一致，只是把
+「选 case → 选 host → 编译 → 跑 → 落盘 → 汇总」自动化。**下一步候选**：① 把 FA/TE 的
+varlen 列接进 harness（本机 FA2.7.4/TE2.14 反向不支持 varlen，暂无列）；② 让
+`fa_bwd_compare.py --markdown` 直接产出 `docs/04` 的表格片段（文档与实测同步）。

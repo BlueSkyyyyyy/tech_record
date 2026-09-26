@@ -2649,7 +2649,24 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百零八轮）**：**P3-3b——把 varlen（含 full / MLA）纳入同一 dump/汇总**。
+> **最新（第一百零九轮）**：**P3-3c——`harness/fa_bwd_run.py` 一键「跑 ours + 汇总」**。
+> 落实上轮下一步候选 ①：新增 `harness/fa_bwd_run.py`——自动扫 dump 目录、按 `meta.json`
+> （`dtype`/`varlen`/`causal`）选 host（fp16/bf16/fp8 × 单/两文件）、调 `scripts/run.sh`
+> 在 `kernel_lab` 编译运行 `--dump`、最后调 `fa_bwd_compare.py` 汇总。定长走默认 `sm_90`、
+> varlen 走 `sm_90a + -DFA_WGMMA`；**同一 (host, 构建配置) 只编译一次、其余复用二进制**。
+> **实测：全部 73 个 case × 单/两文件 = 146 次运行、0 失败，仅编译 12 次（134 次复用）**；
+> 数值与 §32/§33 逐位/同量级一致（fp16 S512 `1.671/1.771/1.899e-3`、S4096
+> `1.883/1.734/1.966e-3`；fp8 S512 `0.2426/0.2975/0.3735`；varlen 区间与 P3-3b 一致）；
+> 单/两文件最大差 fp16 3.91e-3 / bf16 7.81e-3 / fp8 7.63e-6（跨 CTA `atomicAdd` 次序）。
+> 详见「当前进度 第一百零九轮」、`docs/04` §34、`docs/08` §5.25；原始输出
+> `src/{fp16,bf16,fp8}/fa_bwd_<dtype>_p33c_run.out.txt`、`src/fa_bwd_run_p33c_summary.out.txt`、
+> `src/fa_bwd_compare_p33c_summary.out.txt`。
+> **下一步候选**：① 把 FA/TE 的 varlen 列接进 harness（本机 FA2.7.4/TE2.14 反向不支持 varlen）；
+> ② 让 `fa_bwd_compare.py --markdown` 直接产出 `docs/04` 表格片段（文档与实测同步）；
+> ③（继续）O59 候选：**MLA 主 kernel 降 smem 冲 2 CTA/SM**（四 dtype 共同墙，主 kernel
+> 207–230KB、需消 ~100KB）、**fp8 MLA 的 `short_scoreboard`**、其它 LSE 版本的竞争审计。
+>
+> **（第一百零八轮）**：**P3-3b——把 varlen（含 full / MLA）纳入同一 dump/汇总**。
 > 落实上轮下一步候选 ①：§32 的 harness 只覆盖定长三 dtype；本轮给 **6 个 host 的
 > `run_varlen`**（fp16/bf16/fp8 × 单/两文件）加 `--dump=<prefix>`（默认关、既有行为逐位不变，
 > 构建需 `-DFA_WGMMA`），跑遍全部 **38 个 varlen case** 落 `ours_*`/`ours_sf_*` npy，再用
@@ -2660,8 +2677,8 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 详见「当前进度 第一百零八轮」、`docs/04` §33；原始输出
 > `src/{fp16,bf16,fp8}/fa_bwd_<dtype>_p33b_varlen_dump.out.txt`、
 > `src/fa_bwd_compare_p33b_varlen_summary.out.txt`。
-> **下一步候选**：① 让 `fa_bwd_compare.py` 直接驱动 `run.sh` 一键「跑 ours + 汇总」（省去手写
-> `--dir/--dump`）；②（继续）O59 候选：**MLA 主 kernel 降 smem 冲 2 CTA/SM**（四 dtype 共同墙，
+> **下一步候选**：① ~~让 `fa_bwd_compare.py` 直接驱动 `run.sh` 一键「跑 ours + 汇总」~~——
+> **第一百零九轮 P3-3c 已完成**（`harness/fa_bwd_run.py`，见上）；②（继续）O59 候选：**MLA 主 kernel 降 smem 冲 2 CTA/SM**（四 dtype 共同墙，
 > 主 kernel 207–230KB、需消 ~100KB）、**fp8 MLA 的 `short_scoreboard`**、其它 LSE 版本的竞争审计；
 > ③ 把 FA/TE 的 varlen 列接进 harness（本机 FA2.7.4/TE2.14 反向不支持 varlen，暂无列）。
 >
@@ -4011,9 +4028,34 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       fp8 2.86e-6**（均一两个 dtype ulp，来自跨 CTA `atomicAdd` 求和次序；varlen 的 amax 较大
       故 ulp 略大于定长 §32 的值），**非实现差异**；dQ 在两文件/单文件间逐位相同。
   - 文档 `docs/04` §33；原始输出见上（汇总 out 含每个 case 的 `dq/dk/dv max_abs/max_rel`）。
-  - **下一步候选**：① 让 `fa_bwd_compare.py` 直接驱动 `scripts/run.sh` 一键「跑 ours + 汇总」；
-    ② FA/TE 的 varlen 列（本机两实现反向不支持 varlen，暂无列）；③（继续）O59 候选的
-    MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`。
+  - **下一步候选**：① ~~让 `fa_bwd_compare.py` 直接驱动 `scripts/run.sh` 一键「跑 ours + 汇总」~~
+    **已完成（第一百零九轮 P3-3c）**；② FA/TE 的 varlen 列（本机两实现反向不支持 varlen，
+    暂无列）；③（继续）O59 候选的 MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`。
+
+- 2026-09-27（第一百零九轮）：**P3-3c 完成（`harness/fa_bwd_run.py` 一键「跑 ours + 汇总」）**。
+  - 动机（落实上轮候选 ①）：§32/§33 把 ours 的 `--dump` 与 `fa_bwd_compare.py` 接进 harness，
+    但每次仍要手写 `scripts/run.sh <host> --dir=<case> --dump=ours [--full] [--varlen]`（区分
+    单/两文件、定长/varlen 两套构建），再把 case 名喂给 compare；case 一多易漏项、无法一键复现。
+  - **新增 `harness/fa_bwd_run.py`（纯 host 编排，device 一行未改）**：自动扫 dump 目录、按
+    `meta.json`（`dtype`/`varlen`/`causal`）选 host（fp16/bf16/fp8 × 单/两文件，两文件=`ours`、
+    单文件=`ours_sf`）、调 `scripts/run.sh` 在 `kernel_lab` 编译运行 `--dump`、最后调
+    `fa_bwd_compare.py` 汇总。定长走默认 `sm_90`；varlen 走 `ARCH="" NVCC_FLAGS=
+    "-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA"`。**同一 (host, 构建配置) 只编译一次，
+    其余 case 复用已产出的可执行文件**。CLI：`--dtype/--glob/--case/--impls/--fixed-only/
+    --varlen-only/--iters/--no-run/--dry-run`。
+  - **实测**（全部 **73 个 case × 单/两文件 = 146 次运行**；原始输出
+    `src/{fp16,bf16,fp8}/fa_bwd_<dtype>_p33c_run.out.txt`、`src/fa_bwd_run_p33c_summary.out.txt`、
+    汇总 `src/fa_bwd_compare_p33c_summary.out.txt`）：**146 次运行、0 失败，仅编译 12 次
+    （134 次复用）**。数值与 §32/§33 **逐位/同量级一致**：fp16 S512 `1.671/1.771/1.899e-3`、
+    S4096 `1.883/1.734/1.966e-3`；fp8 S512 `0.2426/0.2975/0.3735`；varlen 三 dtype causal/full
+    区间与 P3-3b 完全一致（fp16 1.3e-3–3.8e-3、bf16 8.0e-3–3.1e-2、fp8 1.6e-1–6.2e-1 causal）。
+    各区间的上界都落在 GQA/MQA（`kv1`/`kv4`，amax 更大）。**单 vs 两文件**全 73 case 逐元素
+    比对最大差 **fp16 3.91e-3 / bf16 7.81e-3 / fp8 7.63e-6**（1–2 个 dtype ulp，来自跨 CTA
+    `atomicAdd` 求和次序，非实现差异）。
+  - 文档 `docs/04` §34、`docs/08` §5.25；原始输出见上。
+  - **下一步候选**：① FA/TE 的 varlen 列接进 harness（本机两实现反向不支持 varlen，暂无列）；
+    ② 让 `fa_bwd_compare.py --markdown` 直接产出 `docs/04` 表格片段（文档与实测同步）；
+    ③（继续）O59 候选：MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`。
 
 ## 灵感 / backlog
 
@@ -4042,7 +4084,9 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       → **已完成（第一百零八轮 P3-3b）**：6 个 host 的 `run_varlen` 加 `--dump`（默认关），
       跑遍 38 个 varlen case 落 `ours_*`/`ours_sf_*`，汇总 `fa_bwd_compare_p33b_varlen_summary.out.txt`；
       三 dtype causal/full 全部 dtype 噪声、单/两文件仅差 atomic 次序。详见「第一百零八轮」、`docs/04` §33。
-      **仍待**：让 `fa_bwd_compare.py` 驱动 `run.sh` 一键化；FA/TE 的 varlen 列（本机两实现不支持）。
+      ~~**仍待：让 `fa_bwd_compare.py` 驱动 `run.sh` 一键化**~~ → **已完成（第一百零九轮 P3-3c）**：
+      `harness/fa_bwd_run.py`，146 次运行仅编译 12 次，数值与历史逐位/同量级一致。**仍待**：
+      FA/TE 的 varlen 列（本机两实现反向不支持）。
 
 - 用 `nsys` 看 preprocess + main + convert 的端到端重叠。
 - 把 FA2 的 `dQ_accum` 累加缓冲 vs 纯 atomic 做对比实验。
