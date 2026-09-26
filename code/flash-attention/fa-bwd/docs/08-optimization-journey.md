@@ -409,6 +409,21 @@ smem 冲突 + 低 occ
      **教训：文档与实测之间不该有手抄环节——把「产出表」做进 harness，文档的陈旧值会自动暴露
      并收敛。** 详见 `docs/04` §35。本节为纯 harness 增量，无新 kernel/性能/ncu 数字。
 
+27. **P3-4-lite（第 111 轮，harness + 基线，正结果）**：**接入 FA3（SM90）变长反向基线 +
+    FA 口径切到 FA3**——落实 §33/§35 候选 ①（「FA/TE 反向不支持 varlen，暂无列」）。核查发现
+    本机 `flash_attn_3` 3.0.0 的**反向支持 varlen**（`flash_attn_varlen_func` 可 autograd，
+    fp16/bf16、MHA/GQA、causal/full；head_dim≤128，fp8 与 D=512 不支持），而 FA2.7.4/TE2.14
+    确实不支持。故 `fa_bwd_bench.py` 加 `fa3_bwd` / `fa3_bwd_varlen`（dump 落 `fa3_*`、bench 出
+    纯反向 device time），`fa_bwd_compare.py` 的 `--doc-table` 默认口径改为 `fa3/TE/ours`。
+    **数值**：17 个 D≤128 的 varlen case 补齐 `fa3_*`，dq/dk/dv 全在 dtype 噪声内、与 ours
+    同量级或更小（定长 MHA/GQA 的 FA3 列多数也 ≤ FA2.7.4）。**性能**：varlen causal 的
+    ours/FA3 = **1.87–2.95×**、full = **2.90–3.52×**，明显好于定长 MHA S4096 的 ~7×
+    （FA3 变长在短序列效率低，分母小）。**教训：别把「某实现不支持」当永久结论——同代的不同
+    版本（FA2 vs FA3）能力边界不同；补一条基线列，往往就能让此前「只有 ours」的对照变得完整。**
+    详见 `docs/04` §36；原始输出 `src/fa_bwd_p111_varlen_fa3_perf.out.txt`、
+    `src/fa_bwd_compare_p111_doc_table.md`、`src/fa_bwd_fa3_varlen_bench_p111.out.txt`。
+    本轮为 harness 增量，无新 kernel/ncu 数字。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。

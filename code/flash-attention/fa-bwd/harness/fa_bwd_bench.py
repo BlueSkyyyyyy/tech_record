@@ -14,7 +14,8 @@ shape 语法（空白或逗号分隔，逗号/括号会被忽略）：
 - 输入用固定 seed 生成，张量以 fp32 CPU npy 保存（fp16/bf16 可被 fp32 无损表示），
   方便自己的 kernel 直接 load 同一份输入、和同一份 ref 输出逐元素比对。
 - ref = 纯 PyTorch fp32（autograd，支持 GQA/MQA + MLA 的 Dv≠D）；
-  fa = flash_attn 2.7.4；te = TransformerEngine 2.14。
+  fa = flash_attn 2.7.4（FA2/SM80，仅供历史对照）；fa3 = flash_attn_3 3.0.0（FA3/SM90，
+  **当前对标口径**，不支持 head_dim>256 / fp8）；te = TransformerEngine 2.14。
 - 输出目录：/home/xieminglin/proj/output/fa-bwd/<case>/ ；meta.json 记录 shape/dtype/causal/seed。
 """
 from __future__ import annotations
@@ -123,6 +124,18 @@ def fa_bwd(q, k, v, do, causal=True):
     k2 = k.detach().clone().requires_grad_(True)
     v2 = v.detach().clone().requires_grad_(True)
     o = flash_attn_func(q2, k2, v2, causal=causal)
+    o.backward(do)
+    return o.detach(), q2.grad, k2.grad, v2.grad
+
+
+def fa3_bwd(q, k, v, do, causal=True):
+    """flash_attn_3 3.0.0（FA3/SM90）反向，autograd。支持 GQA/MQA；
+    head_dim>256（MLA D=512）与 fp8 不支持（由调用方 try/except 兜住）。"""
+    from flash_attn_3 import flash_attn_interface as f3
+    q2 = q.detach().clone().requires_grad_(True)
+    k2 = k.detach().clone().requires_grad_(True)
+    v2 = v.detach().clone().requires_grad_(True)
+    o = f3.flash_attn_func(q2, k2, v2, causal=causal)
     o.backward(do)
     return o.detach(), q2.grad, k2.grad, v2.grad
 
@@ -258,6 +271,20 @@ def te_bwd_fp8_varlen(q, k, v, do, lengths, causal=True):
     return (dq_(out), dq_(dqkv[0]), dq_(dqkv[1]), dq_(dqkv[2]))
 
 
+def fa3_bwd_varlen(q, k, v, do, lengths, causal=True):
+    """FA3 变长反向：packed [T,H,D] + cu_seqlens，autograd。
+    支持 GQA/MQA 与 causal/full；head_dim>256（MLA）与 fp8 不支持。"""
+    from flash_attn_3 import flash_attn_interface as f3
+    q2 = q.detach().clone().requires_grad_(True)
+    k2 = k.detach().clone().requires_grad_(True)
+    v2 = v.detach().clone().requires_grad_(True)
+    cu = _cu(lengths)
+    smax = max(lengths)
+    o = f3.flash_attn_varlen_func(q2, k2, v2, cu, cu, smax, smax, causal=causal)
+    o.backward(do)
+    return o.detach(), q2.grad, k2.grad, v2.grad
+
+
 def maxdiff(a, b):
     return (a.float() - b.float()).abs().max().item()
 
@@ -284,7 +311,9 @@ def dump_case(sh, dtype_name):
     if dtype_name == "fp8":          # FP8 只有 TE（FA 无反向 FP8）
         backends = [("te", te_bwd_fp8)]
     else:
-        backends = [("fa", fa_bwd), ("te", te_bwd)]
+        # fa3（FA3/SM90）是当前对标口径；fa（FA2.7.4）保留作历史对照。
+        # head_dim>256（MLA）FA3 会抛错，由 try/except 兜住、该 case 无 fa3 列。
+        backends = [("fa3", fa3_bwd), ("fa", fa_bwd), ("te", te_bwd)]
     for who, fn in backends:
         try:
             res[who] = fn(q, k, v, do, sh["causal"])
@@ -309,7 +338,7 @@ def dump_case(sh, dtype_name):
     }, indent=2, ensure_ascii=False))
 
     lines = [f"[{slug}]"]
-    for who in ("fa", "te"):
+    for who in ("fa3", "fa", "te"):
         if who in res:
             lines.append(f"  {who:3s} vs ref: o {maxdiff(res[who][0], o_ref):.2e} "
                          f"dq {maxdiff(res[who][1], dq_ref):.2e} "
@@ -339,6 +368,12 @@ def dump_case_varlen(lengths, H, D, Hkv, Dv, dtype_name, causal=True):
             res["te"] = te_bwd_fp8_varlen(q, k, v, do, lengths, causal)
         except Exception as e:  # noqa
             print(f"  [te] failed: {str(e)[:200]}")
+    # FA3 变长反向（本机 FA2.7.4/TE2.14 均不支持 bwd varlen，FA3 支持 D≤256）。
+    if dtype_name != "fp8":
+        try:
+            res["fa3"] = fa3_bwd_varlen(q, k, v, do, lengths, causal)
+        except Exception as e:  # noqa
+            print(f"  [fa3] failed: {str(e)[:200]}")
 
     slug = varlen_slug(lengths, H, D, dtype_name, causal)
     d = OUT_ROOT / slug
@@ -361,7 +396,7 @@ def dump_case_varlen(lengths, H, D, Hkv, Dv, dtype_name, causal=True):
     }, indent=2, ensure_ascii=False))
 
     lines = [f"[{slug}] lengths={lengths}"]
-    for who in ("te",):
+    for who in ("fa3", "te"):
         if who in res:
             lines.append(f"  {who:3s} vs ref: o {maxdiff(res[who][0], o_ref):.2e} "
                          f"dq {maxdiff(res[who][1], dq_ref):.2e} "
@@ -399,7 +434,8 @@ def bench_case(sh, dtype_name, timer):
     flops = 4.0 * B * S * H * S * (D + Dv)  # bwd ≈ 2x fwd
     tag = case_slug(sh, dtype_name)
     cells = []
-    pairs = [("te", te_bwd_fp8)] if dtype_name == "fp8" else [("fa", fa_bwd), ("te", te_bwd)]
+    pairs = ([("te", te_bwd_fp8)] if dtype_name == "fp8"
+             else [("fa3", fa3_bwd), ("fa", fa_bwd), ("te", te_bwd)])
     for who, fn in pairs:
         try:
             ms = timer.device_time(lambda: fn(q, k, v, do, sh["causal"]))
@@ -411,29 +447,41 @@ def bench_case(sh, dtype_name, timer):
 
 
 def bench_case_varlen(lengths, H, D, Hkv, Dv, dtype_name, timer, causal=True):
-    """VARLEN 性能对标：等长时与 TE FP8 定长同 shape 完全等价，直接对比；
-    不等长时 TE 2.14 的 FP8 变长路径在本容器 segfault，故只报 ours（自测给出）。"""
+    """VARLEN 性能对标（纯反向 device time）。
+    * fp16/bf16：FA3 支持变长反向 → 直接给出 fa3 列（任意 lengths）。
+    * fp8：FA3 无反向 fp8；等长时与 TE FP8 定长同 shape 等价，列 te-fixed；
+      不等长时 TE 2.14 FP8 变长在本容器 segfault，只报 ours（见各轮自测）。
+    flops = 4·H·D·Σ_b L_b²（bwd ≈ 2×fwd）。"""
     tag = varlen_slug(lengths, H, D, dtype_name, causal)
-    if dtype_name != "fp8":
-        print(f"[{tag}] only fp8 baseline (TE FP8)")
-        return
-    if len(set(lengths)) != 1:
-        print(f"[{tag}] lengths={lengths}  te-varlen=NA(segfault in TE 2.14)；ours 见自测")
-        return
-    B, S = len(lengths), lengths[0]
     dtype = DTYPES[dtype_name]
-    torch.manual_seed(1234 + B * S * 7 + H * 3 + D)
-    q = torch.randn(B, S, H, D, device=DEV, dtype=dtype)
-    k = torch.randn(B, S, Hkv, D, device=DEV, dtype=dtype)
-    v = torch.randn(B, S, Hkv, Dv, device=DEV, dtype=dtype)
-    do = torch.randn(B, S, H, Dv, device=DEV, dtype=dtype)
-    flops = 4.0 * B * S * H * S * D
-    try:
-        ms = timer.device_time(lambda: te_bwd_fp8(q, k, v, do, causal))
-        print(f"[{tag}] equal-length B={B} S={S}  te-fixed={ms:.4f}ms/"
-              f"{flops / (ms * 1e-3) / 1e12:.2f}TF")
-    except Exception as e:  # noqa
-        print(f"[{tag}] te=NA({str(e)[:120]})")
+    T = sum(lengths)
+    torch.manual_seed(1234 + T * 7 + H * 3 + D)
+    q = torch.randn(T, H, D, device=DEV, dtype=dtype)
+    k = torch.randn(T, Hkv, D, device=DEV, dtype=dtype)
+    v = torch.randn(T, Hkv, Dv, device=DEV, dtype=dtype)
+    do = torch.randn(T, H, Dv, device=DEV, dtype=dtype)
+    flops = 4.0 * H * D * sum(L * L for L in lengths)
+    cells = []
+    if dtype_name != "fp8":
+        try:
+            ms = timer.device_time(lambda: fa3_bwd_varlen(q, k, v, do, lengths, causal))
+            cells.append(f"fa3={ms:.4f}ms/{flops / (ms * 1e-3) / 1e12:.2f}TF")
+        except Exception as e:  # noqa
+            cells.append(f"fa3=NA({str(e)[:40]})")
+    elif len(set(lengths)) == 1:
+        B, S = len(lengths), lengths[0]
+        qb = q.reshape(B, S, H, D)
+        kb = k.reshape(B, S, Hkv, D)
+        vb = v.reshape(B, S, Hkv, Dv)
+        dob = do.reshape(B, S, H, Dv)
+        try:
+            ms = timer.device_time(lambda: te_bwd_fp8(qb, kb, vb, dob, causal))
+            cells.append(f"te-fixed={ms:.4f}ms/{flops / (ms * 1e-3) / 1e12:.2f}TF")
+        except Exception as e:  # noqa
+            cells.append(f"te=NA({str(e)[:40]})")
+    else:
+        cells.append("te-varlen=NA(segfault in TE 2.14)")
+    print(f"[{tag}] lengths={lengths}  " + "  ".join(cells))
 
 
 def parse_shape(s):

@@ -31,7 +31,7 @@ import numpy as np
 
 OUT_ROOT = Path("/home/xieminglin/proj/output/fa-bwd")
 VEC = ("dq", "dk", "dv")
-IMPL_ORDER = ("fa", "te", "ours")
+IMPL_ORDER = ("fa3", "fa", "te", "ours")
 
 
 def maxdiff(a: np.ndarray, b: np.ndarray):
@@ -206,7 +206,8 @@ def main():
     lines = []
     if args.doc_table:
         # 默认不重复列单文件版（ours_sf），要列就显式 --impls ours_sf。
-        impl_filter = args.impls if args.impls else ("fa", "te", "ours")
+        # FA 基线用 FA3（SM90，当前口径；fa2.7.4 可显式 --impls fa）。
+        impl_filter = args.impls if args.impls else ("fa3", "te", "ours")
         lines = doc_tables(rows, impl_filter)
     elif args.markdown:
         lines.append("| case | dtype | impl | dq max_abs | dq max_rel | dk max_abs | dk max_rel | "

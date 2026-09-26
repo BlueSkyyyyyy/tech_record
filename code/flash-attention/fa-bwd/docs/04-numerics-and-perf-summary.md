@@ -2183,3 +2183,70 @@ S512H4 `2.415/2.992/4.481e-1`、S1024H2 `2.232/3.337/3.602e-1`。
 > 注：本节是**纯 harness 增量**（不碰 device 代码），没有新的 kernel/性能数字与 ncu 度量；
 > §2/§3 的性能与 bound 结论仍适用。**下一步候选**：①（若本机版本将来支持）把 FA/TE 的
 > varlen 列接进 harness；② 让 `--doc-table` 直接改写 docs/04 的对应小节（含自动 diff 校验）。
+
+## 36. FA3（SM90）变长反向基线接入 + FA 口径切到 FA3（第 111 轮）
+
+**动机**：§33/§35 的候选 ① 一直记「FA/TE 的 varlen 列：本机 FA2.7.4/TE2.14 反向不支持 varlen，
+暂无列」。但**本机 `flash_attn_3` 3.0.0（FA3/SM90）的反向支持 varlen**（`flash_attn_varlen_func`
+可 autograd，已验证 fp16/bf16、MHA 与 GQA、causal 与 full 均可；head_dim ≤ 128，fp8/D=512 不支持）。
+同时用户要求「与 FA 对比一律用 FA3、不要用 FA2.7.4」——故本轮：
+
+1. `harness/fa_bwd_bench.py` 新增 `fa3_bwd`（定长）与 `fa3_bwd_varlen`（packed + `cu_seqlens`），
+   接入 `dump`（落 `fa3_{o,dq,dk,dv}.npy`，D≤128 的非 fp8 case）与 `bench`（纯反向 CUPTI device time）。
+   `fa`（FA2.7.4）保留为历史对照列，不再作为默认口径。
+2. `harness/fa_bwd_compare.py` 的 `IMPL_ORDER` 加 `fa3`，`--doc-table` 默认口径改为
+   **`fa3 / TE / ours`**（要 FA2 需显式 `--impls fa`）。
+3. 重跑 17 个 D≤128 的（定长 + varlen）fp16/bf16 case 补齐 `fa3_*`（固定 shape 沿用原 `seed`
+   以保证输入不变、既有 `ours_*` 依旧有效），并生成 `src/fa_bwd_compare_p111_doc_table.md`。
+
+### 36.1 数值对拍（max_abs vs fp32 ref）
+
+FA3 变长反向的 `dq/dk/dv` 与 fp32 ref 全部落在对应 dtype 噪声量级，**与我们同量级或更小**；
+代表值（`ours` / `fa3`）：
+
+| case | dtype | dq | dk | dv |
+|---|---|---|---|---|
+| varlen [1024]×4 H16 D128 causal | fp16 | 2.112e-03 / 2.149e-03 | 2.252e-03 / 1.970e-03 | 1.915e-03 / 1.915e-03 |
+| varlen [512,1024,2048,256] H16 D128 causal | fp16 | 3.163e-03 / 1.938e-03 | 2.158e-03 / 2.158e-03 | 1.966e-03 / 1.940e-03 |
+| varlen [128..2048] H32 kv8 D128 causal | fp16 | 2.438e-03 / 2.146e-03 | 3.433e-03 / 3.392e-03 | 3.843e-03 / 3.843e-03 |
+| varlen [2048..8] H16 D128 causal | bf16 | 1.464e-02 / 1.214e-02 | 1.566e-02 / 1.519e-02 | 1.863e-02 / 1.863e-02 |
+| varlen [1024]×4 H16 D128 full | fp16 | 4.094e-04 / 4.094e-04 | 4.953e-04 / 4.953e-04 | 1.234e-04 / 1.213e-04 |
+| MHA S512 causal | fp16 | 1.671e-03 / 1.679e-03 | 1.771e-03 / 1.684e-03 | 1.899e-03 / 1.899e-03 |
+| MHA S4096 causal | fp16 | 1.883e-03 / 1.883e-03 | 1.734e-03 / 1.734e-03 | 1.966e-03 / 1.966e-03 |
+
+定长 MHA 与 GQA/MQA 的 FA3 列与 §35 的 FA2.7.4 列**多数一致或更优**（如 fp16 kv1 dv：
+FA3 `7.517e-3` vs FA2 `1.057e-2`；bf16 kv4 dv：FA3 `4.420e-2` vs FA2 `6.511e-2`）；
+唯一系统性差异是 FA3/SM90 与 FA2/SM80 的 fp32 累加次序不同（都 ≤ TE）。完整分组表见
+`src/fa_bwd_compare_p111_doc_table.md`（由 `--doc-table` 直出，判据以它为准）。
+
+### 36.2 性能对标（纯反向 device time；`4·H·D·Σ_b L_b²` 口径）
+
+ours = 两文件 `fa_bwd_{fp16,bf16}_mma_main` 端到端（preprocess+main+convert，CUDA event，iters=200）；
+FA3 = `fa3_bwd_varlen`（CUPTI device time）。原始输出 `src/fa_bwd_p111_varlen_fa3_perf.out.txt`。
+
+| varlen case（H=16 D=128） | ours ms/TF | FA3 ms/TF | ours/FA3 |
+|---|---|---|---|
+| causal [1024]×4 fp16 | 0.4502 / 76.3 | 0.2409 / 142.6 | **1.87×** |
+| causal [512,1024,2048,256] fp16 | 0.7756 / 58.8 | 0.2632 / 173.4 | 2.95× |
+| causal [128..2048] H32 kv8 fp16 | 1.4283 / 64.1 | 0.5272 / 173.6 | 2.71× |
+| causal [2048..8] tilt fp16 | 0.5904 / 62.3 | 0.2237 / 164.4 | 2.64× |
+| full [1024]×4 fp16 | 0.9054 / 38.0 | 0.3127 / 109.9 | 2.90× |
+| full [512,1024,2048,256] fp16 | 1.2818 / 35.6 | 0.3677 / 124.1 | 3.49× |
+| full [128..2048] H32 kv8 fp16 | 2.4158 / 37.9 | 0.7402 / 123.7 | 3.26× |
+| full [2048..8] tilt fp16 | 1.0671 / 34.5 | 0.3094 / 118.8 | 3.45× |
+
+bf16 与 fp16 逐项几乎相同（见原始输出）。**判读**：
+
+- **varlen 的 ours/FA3 比值（1.87–3.55×）明显好于定长 MHA S4096 的 ~7×**——原因是
+  FA3 的变长反向在**短序列**（S≤2048）上效率本就下降（[1024]×4 只 142.6 TF，而定长 S4096
+  约 845 TF），分母变小；这也说明「单序列长 S」才是 FA3 的主场。
+- full（非 causal）的 ours 吞吐 ~35–38 TF，约为 causal 的一半（工作量翻倍），符合预期。
+- **fp8 与 MLA（D=512）：FA3 反向不支持**（分别受 dtype / head_dim≤128 限制），
+  这两类仍只有 ours + fp32 ref（fp8 另有 TE-vs-ref 数值列，见 §33）；**FA3 无法覆盖最重点的
+  fp8**，故 fp8 的口径仍以 ours/TE/ref 三者为准。
+
+> 本轮为**harness + 基线增量**，未改任何 device 代码；我们 kernel 的 bound 结论（§2/§3、
+> §26–§31）不变，本条只补齐「FA3 varlen 数值 + 性能」这一此前缺失的对照列。
+> **下一步候选**：① 把 FA3（含 varlen）接入 `harness/fa_vs_te_bwd_only.py` 的纯反向基线；
+> ② 继续 O59 候选（MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`）；
+> ③ 让 `--doc-table` 直接改写 docs/04 的对应小节（含自动 diff 校验）。
