@@ -12,6 +12,7 @@
 // =============================================================================
 
 #include "fa_bwd_fp8_kernels.cuh"
+#include "../fa_bwd_dump.h"   // P3-3：ours 输出落 npy，供 harness/fa_bwd_compare.py
 
 #include <algorithm>
 #include <cmath>
@@ -882,6 +883,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
 int main(int argc, char** argv) {
   std::string dir = "/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8";
   std::string o_name = "ref_o";
+  // P3-3：`--dump=<prefix>` 让 ours 的 dq/dk/dv 落成 `<prefix>_{dq,dk,dv}.npy`，
+  //   供 harness/fa_bwd_compare.py 统一对拍（默认不落盘，行为逐位不变）。
+  std::string dump_prefix;
   bool causal = true;
   int iters = 20;
   int ksplit = -1;  // -1 = 自动
@@ -973,6 +977,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--f16b=", 0) == 0) f16b_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
+    else if (a.rfind("--dump=", 0) == 0) dump_prefix = a.substr(7);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--ksplit=", 0) == 0) ksplit = atoi(a.c_str() + 9);
     else if (a.rfind("--ksplit2=", 0) == 0) ksplit2_opt = atoi(a.c_str() + 10);
@@ -2495,6 +2500,14 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMemcpy(mdq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(mdk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(mdv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+
+  // P3-3：落盘 ours 输出（默认关，行为逐位不变）。
+  if (!dump_prefix.empty()) {
+    fa_bwd_save_npy_f32(dir + "/" + dump_prefix + "_dq.npy", mdq.data(), (long long)mdq.size());
+    fa_bwd_save_npy_f32(dir + "/" + dump_prefix + "_dk.npy", mdk.data(), (long long)mdk.size());
+    fa_bwd_save_npy_f32(dir + "/" + dump_prefix + "_dv.npy", mdv.data(), (long long)mdv.size());
+    printf("[dump] ours -> %s/%s_{dq,dk,dv}.npy\n", dir.c_str(), dump_prefix.c_str());
+  }
 
   auto print_cmp = [&](const char* name, const std::vector<float>& mine,
                        const std::vector<float>& ref) {

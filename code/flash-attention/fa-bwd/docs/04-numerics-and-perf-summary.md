@@ -1909,3 +1909,61 @@ O58 的 `cfg6`（PIPE1/LBN16，压 smem 换 CTA 级并行度）只落在 **varle
 `2.356e-1/2.290e-1/3.441e-1`、S512H4 `2.415e-1/2.992e-1/4.481e-1`、S1024H2
 `2.232e-1/3.337e-1/3.602e-1`；fp16 1.6–2.9e-3；bf16 ~1e-2）；**D=128 回归逐位不变**。
 单/两文件逐指标一致。详见 `docs/01` §15f、`docs/01b` §6as、`docs/03` §55、`docs/08` §5.24。
+
+---
+
+## 32. P3-3：把「ours vs ref vs FA/TE」对拍收敛成统一 harness（本轮新增）
+
+**动机**：此前数值对拍散落在各 dtype 的 kernel 自测输出（`src/**/*.out.txt`）与
+`harness/fa_bwd_bench.py`（只算 FA/TE 两列）里，`docs/04` §1/§7 的表格靠人工誊抄，
+更新一处要重跑多份 out。P3-3 的目标是：**一个可复现的 harness 直接产出数值表**，
+作为本文档数值节的唯一来源。
+
+### 32.1 新增物
+
+- **`harness/fa_bwd_compare.py`**：纯 numpy（不需 torch/GPU）。扫描
+  `/home/xieminglin/proj/output/fa-bwd/<case>/`，以 `ref_{dq,dk,dv}.npy` 为 baseline，
+  对目录里存在的 `<impl>_{dq,dk,dv}.npy`（`impl ∈ {fa, te, ours, ours_sf, ...}`）逐元素算
+  `max_abs` 与 `max_rel`（`max_rel = max(|a-b|/(|b|+1e-3))`，与 kernel 内 `diff_stat` 一致）。
+  支持 `--dtype/--glob/--case/--impls/--markdown/--out`；varlen 的 packed `[T,H,D]` 天然适用。
+- **ours 输出落盘**：6 个 host（fp16/bf16/fp8 × 单文件/两文件）新增 `--dump=<prefix>`，
+  把 ours 的 dq/dk/dv 写成 `<prefix>_{dq,dk,dv}.npy`（`src/fa_bwd_dump.h`，默认关，
+  不影响任何既有行为/数值）。此前 kernel 只把 `[compare]` 打到 stdout、无法被 harness 复用。
+
+### 32.2 实测（`scripts/run.sh` 默认 sm_90 构建、mma 路径；原始输出
+`src/fa_bwd_compare_p33_summary.out.txt`，markdown `src/fa_bwd_compare_p33_markdown.md`）
+
+**causal MHA 核心表（ours / FA / TE vs fp32 ref，max_abs；FA 仅 fp16/bf16，fp8 无 FA）**：
+
+| shape | dtype | ours dq/dk/dv | FA dq/dk/dv | TE dq/dk/dv |
+|---|---|---|---|---|
+| (1,512,16,128) | fp16 | 1.671/1.771/1.899e-3 | 1.679/1.684/1.899e-3 | 1.716/2.287/1.899e-3 |
+| (1,4096,16,128) | fp16 | 1.883/1.734/1.966e-3 | 1.883/1.734/1.966e-3 | 1.883/1.858/1.966e-3 |
+| (1,512,16,128) | bf16 | 9.00/12.61/13.65e-3 | 10.40/12.61/13.65e-3 | 13.74/10.68/13.65e-3 |
+| (1,4096,16,128) | bf16 | 15.10/13.40/16.31e-3 | 14.41/13.32/16.31e-3 | 15.24/17.63/16.31e-3 |
+| (1,512,16,128) | fp8 | 0.2426/0.2975/0.3735 | — | 0.4859/0.4038/0.5906 |
+| (1,1024,32,128) | fp8 | 0.2400/0.4195/0.3536 | — | 0.4360/0.4498/0.8558 |
+| (1,4096,16,128) | fp8 | 0.2635/0.2643/0.3216 | — | 0.3763/0.3686/0.6688 |
+
+**GQA/MQA（fp8，ours vs ref）**：h32kv4 `0.2517/0.5408/0.7072`、h40kv8
+`0.2869/0.5390/0.7107`、h64kv4 `0.2760/0.8456/1.226`、h64kv1(MQA) `0.4097/1.519/2.127`
+（均 ≤ TE-vs-ref，与 §7.4 历史一致）。
+
+**MLA（head_dim=512，fp8，ours vs ref；FA/TE 反向均不支持）**：S256H2
+`0.2356/0.2290/0.3441`、S512H4 `0.2415/0.2992/0.4481`、S1024H2 `0.2232/0.3337/0.3602`
+（与 §14 逐位一致）。
+
+**单文件 vs 两文件（同一 case、各跑一次）**：`dq` 逐位相同；`dk/dv` 差异仅来自跨 CTA
+`atomicAdd` 的 fp32 求和次序（fp16 ≤2.44e-4、bf16 ≤1.95e-3、fp8 ≤4.77e-7），属既有
+非确定性、非实现差异。
+
+### 32.3 判读与对旧表的说明
+
+- **一致**：fp8 全部 shape（MHA/GQA/MQA/MLA）与历史表**逐位/同量级一致**；bf16 一致。
+- **一处需要注意**：`§1.1` 里 fp16 S4096 的 ours 旧值 `1.499/1.572/2.225e-3` 来自更早的
+  混合构建/路径，本轮默认 sm_90 **mma** 构建实测为 `1.883/1.734/1.966e-3`（≈FA）。
+  两者都在 fp16 噪声内、且都 ≤ TE；差异来自不同 kernel 路径的 fp32 累加次序。
+  今后以 **`fa_bwd_compare.py` 的实测输出**为准（构建可复现）。
+- 复现命令：
+  `scripts/run.sh src/<dtype>/fa_bwd_<dtype>_mma_{main.cu,onefile.cu} --dir=<case> --dump=ours`；
+  再 `python3 harness/fa_bwd_compare.py --markdown`。

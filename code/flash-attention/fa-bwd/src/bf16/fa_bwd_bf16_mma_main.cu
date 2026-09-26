@@ -13,6 +13,7 @@
 // =============================================================================
 
 #include "fa_bwd_bf16_mma_kernels.cuh"
+#include "../fa_bwd_dump.h"   // P3-3：ours 输出落 npy，供 harness/fa_bwd_compare.py
 
 #include <algorithm>
 #include <cmath>
@@ -1016,6 +1017,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
 int main(int argc, char** argv) {
   std::string dir = "/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16";
   std::string o_name = "ref_o";
+  // P3-3：`--dump=<prefix>` 让 ours 的 dq/dk/dv 落成 `<prefix>_{dq,dk,dv}.npy`（默认关）。
+  std::string dump_prefix;
   bool causal = true;
   // pipe: -1=自动（按网格大小选 1/2）、0=O5、1=O6、2=O6b。
   int pipe = -1;
@@ -1115,6 +1118,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_sel = atoi(a.c_str() + 12);
     else if (a.rfind("--dqdirect=", 0) == 0) dq_direct_sel = atoi(a.c_str() + 11);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
+    else if (a.rfind("--dump=", 0) == 0) dump_prefix = a.substr(7);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
     else if (!a.empty() && a[0] != '-') dir = a;
@@ -2348,6 +2352,14 @@ int main(int argc, char** argv) {
   for (size_t i = 0; i < nkv; ++i) {
     mdk[i] = __bfloat162float(hdk[i]);
     mdv[i] = __bfloat162float(hdv[i]);
+  }
+
+  // P3-3：落盘 ours 输出（默认关）。
+  if (!dump_prefix.empty()) {
+    fa_bwd_save_npy_f32(dir + "/" + dump_prefix + "_dq.npy", mdq.data(), (long long)mdq.size());
+    fa_bwd_save_npy_f32(dir + "/" + dump_prefix + "_dk.npy", mdk.data(), (long long)mdk.size());
+    fa_bwd_save_npy_f32(dir + "/" + dump_prefix + "_dv.npy", mdv.data(), (long long)mdv.size());
+    printf("[dump] ours -> %s/%s_{dq,dk,dv}.npy\n", dir.c_str(), dump_prefix.c_str());
   }
 
   auto print_cmp = [&](const char* name, const std::vector<float>& mine,

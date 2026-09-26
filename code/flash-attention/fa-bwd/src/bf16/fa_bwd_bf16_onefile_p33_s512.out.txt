@@ -1,0 +1,69 @@
+fa_bwd_bf16_mma_onefile.cu(4171): warning #550-D: variable "lse_forced" was set but never used
+    bool lse_forced = false;
+         ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_bf16_mma_onefile.cu(4178): warning #550-D: variable "wgmma_sel" was set but never used
+    int wgmma_sel = 0;
+        ^
+
+fa_bwd_bf16_mma_onefile.cu(4184): warning #550-D: variable "wg_forced" was set but never used
+    bool wg_forced = false;
+         ^
+
+fa_bwd_bf16_mma_onefile.cu(4187): warning #550-D: variable "maintma_sel" was set but never used
+    int maintma_sel = 0;
+        ^
+
+fa_bwd_bf16_mma_onefile.cu(4190): warning #550-D: variable "wg2ksplit" was set but never used
+    int wg2ksplit = -1;
+        ^
+
+fa_bwd_bf16_mma_onefile.cu(4201): warning #550-D: variable "lse8w" was set but never used
+    int lse8w = 0;
+        ^
+
+fa_bwd_bf16_mma_onefile.cu(4209): warning #550-D: variable "wg2split_sel" was set but never used
+    int wg2split_sel = 1;
+        ^
+
+fa_bwd_bf16_mma_onefile.cu(4213): warning #550-D: variable "dq_direct_sel" was set but never used
+    int dq_direct_sel = 1;
+        ^
+
+fa_bwd_bf16_mma_onefile.cu(4356): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
+    const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
+              ^
+
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16
+B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=128 auto=(BM=64,BN=64,PIPE=1) sel=(BM=64,BN=64,PIPE=1)
+[O49] d128 8-warp = 1 (d128w=-1, grid=128, sm=132)
+[O38] lse k-split = 8 (auto)
+[O23] main backend = mma | lse = mma (D=128 S=512)
+[O43] wgmma2 k-split = 1
+[timing] total(3 kernels) 0.0891 ms  24.11 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0242 ms | main 0.0514 ms | convert 0.0135 ms
+[O24 A/B] delta old 0.0079 ms | warp 0.0040 ms (2.00x)
+[O8b A/B] lse O8 0.0647 ms | bal(单缓冲) 0.0513 ms (1.261x) | bal+cpasync(双缓冲) 0.0370 ms (1.748x)
+[O6 A/B] main nopipe 0.1058 ms (20.30 TF) | pipe(KV both) 0.0565 ms (38.04 TF) | pipe2(K only) 0.0606 ms (35.41 TF) => nopipe/pipe 1.874x, nopipe/pipe2 1.744x
+[O48 A/B] main D=128 4w(128/2) 0.0623 ms | 8w(256/4) 0.0592 ms (1.053x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.384e-07/4.768e-07
+[O6c A/B] main sched0(原样) 0.0564 ms | sched1(交错) 0.0565 ms (0.999x) | sched2(逆序) 0.0565 ms (0.998x)
+[O5c A/B] main (64,32,2) 0.0604 ms (35.57 TF) | (64,64,2) 0.0564 (38.07) | (32,32,1) 0.0665 (32.30) | (32,32,2) 0.0684 (31.40) => best 1.070x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 0.0747 (28.74) | f4 0.0760 (28.24,-1.7%) | f2+PREL 0.0604 (35.57,+23.8%) | f4+PREL 0.0657 (32.67,+13.7%)
+  (BM=64,BN=64,PIPE=2): base 0.0681 (31.52) | f4 0.0699 (30.70,-2.6%) | f2+PREL 0.0565 (38.03,+20.7%) | f4+PREL 0.0589 (36.43,+15.6%)
+  (BM=32,BN=32,PIPE=1): base 0.0712 (30.17) | f4 0.0742 (28.92,-4.1%) | f2+PREL 0.0663 (32.37,+7.3%) | f4+PREL 0.0699 (30.74,+1.9%)
+  (BM=32,BN=32,PIPE=2): base 0.0733 (29.29) | f4 0.0764 (28.12,-4.0%) | f2+PREL 0.0679 (31.62,+8.0%) | f4+PREL 0.0712 (30.15,+3.0%)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16/ours_sf_{dq,dk,dv}.npy
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=9.001e-03  max_rel=1.490e+00
+  dk   vs ref: max_abs=1.261e-02  max_rel=1.784e+00
+  dv   vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+  fa_dq     vs ref: max_abs=1.040e-02  max_rel=1.490e+00
+  fa_dk     vs ref: max_abs=1.261e-02  max_rel=2.248e+00
+  fa_dv     vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+  te_dq     vs ref: max_abs=1.374e-02  max_rel=1.169e+00
+  te_dk     vs ref: max_abs=1.068e-02  max_rel=2.089e+00
+  te_dv     vs ref: max_abs=1.365e-02  max_rel=1.875e+00

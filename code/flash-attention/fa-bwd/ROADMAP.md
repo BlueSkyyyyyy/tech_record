@@ -2649,7 +2649,18 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百零六轮）**：**O59——把 causal MLA 的 LSE `cfg6` 从 varlen 推广到定长
+> **最新（第一百零七轮）**：**P3-3——把「ours vs ref vs FA/TE」对拍正式化进 `harness/`（单/两文件）**。
+> 新增 `harness/fa_bwd_compare.py`（纯 numpy 扫 dump 目录，按 impl 算 max_abs/max_rel，支持
+> markdown/过滤）+ 6 个 host 的 `--dump=<prefix>`（`src/fa_bwd_dump.h`，默认关、行为逐位不变）。
+> 重跑 17 个 case（fp16/bf16/fp8 × MHA/GQA/MQA/MLA，单/两文件）得到 `src/fa_bwd_compare_p33_summary.out.txt`，
+> 与 `docs/04` §32 一致：fp8 全 shape 与历史逐位/同量级；fp16 S4096 本轮默认 mma 构建
+> `1.883/1.734/1.966e-3`（≈FA，旧表 1.499e-3 来自更早混合构建，均在 fp16 噪声内）。
+> `dq` 单/两文件逐位相同，`dk/dv` 仅差跨 CTA `atomicAdd` 次序。详见「当前进度 第一百零七轮」。
+> **下一步候选**：① 把 varlen（含 full / MLA）也纳入同一 dump/汇总；② 让 harness 直接驱动
+> `scripts/run.sh` 一键跑 ours+汇总；③（继续）O59 候选：MLA 主 kernel 降 smem 冲 2 CTA/SM、
+> fp8 MLA 的 `short_scoreboard`、其它 LSE 版本的竞争审计。
+>
+> **（第一百零六轮）**：**O59——把 causal MLA 的 LSE `cfg6` 从 varlen 推广到定长
 > （fp16/bf16/fp8；正结果，定长 MLA 默认；含一处 device 竞争修复）**。落实 O58 留下的缺口：
 > O58 的 `cfg6`（PIPE1/LBN16，压 smem 换 CTA 级并行度）只在 `run_varlen`，定长 causal MLA 的 LSE
 > 一直用旧默认 `<512,1>`（1 CTA/SM）。O59 把它接到定长 `run_pre` 并默认化（`--lseocc=4` 退旧、
@@ -3931,6 +3942,35 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     `src/fp16/fa_bwd_fp16_o59_*`、`src/bf16/fa_bwd_bf16_o59_*`；文档 `docs/01` §15f、`docs/01b`
     §6as、`docs/03` §55、`docs/04` §31、`docs/08` §5.24。
 
+- 2026-09-27（第一百零七轮）：**P3-3 完成（数值对拍 harness 正式化；单/两文件均接入）**。
+  - 动机：`docs/04` 的数值表此前靠人工从 `src/**/*.out.txt` 誊抄，`fa_bwd_bench.py` 只算 FA/TE 两列；
+    且我们的 kernel 只把 ours-vs-ref 打到 stdout，无法被 harness 复用。
+  - **新增 `harness/fa_bwd_compare.py`**（纯 numpy，无需 torch/GPU）：扫描
+    `/home/xieminglin/proj/output/fa-bwd/<case>/`，以 `ref_{dq,dk,dv}.npy` 为 baseline，对目录内
+    存在的 `<impl>_{dq,dk,dv}.npy`（`fa`/`te`/`ours`/`ours_sf`/…）逐元素算 max_abs 与 max_rel
+    （`max_rel=max(|a-b|/(|b|+1e-3))`，与 kernel `diff_stat` 一致）；支持
+    `--dtype/--glob/--case/--impls/--markdown/--out`，varlen packed 天然适用。
+  - **ours 落盘**：6 个 host（fp16/bf16/fp8 × 单文件/两文件）新增 `--dump=<prefix>` + 共享头
+    `src/fa_bwd_dump.h`（写 1D `<f4` npy；默认关 ⇒ 既有行为/数值逐位不变）。
+  - **实测**（`scripts/run.sh` 默认 sm_90、mma 路径，重跑 17 个 case；原始输出
+    `src/fa_bwd_compare_p33_summary.out.txt`、markdown `src/fa_bwd_compare_p33_markdown.md`）：
+    * 核心 MHA 表（ours/FA/TE vs ref，max_abs）：fp16 S512 `1.671/1.771/1.899e-3`、
+      fp16 S4096 `1.883/1.734/1.966e-3`（≈FA）、bf16 S512 `9.00/12.61/13.65e-3`、
+      bf16 S4096 `15.10/13.40/16.31e-3`；fp8 S512 `0.2426/0.2975/0.3735`、S1024H32
+      `0.2400/0.4195/0.3536`、S4096 `0.2635/0.2643/0.3216`（均优于 TE-vs-ref）。
+    * fp8 GQA/MQA（ours）：h32kv4 `0.2517/0.5408/0.7072`、h40kv8 `0.2869/0.5390/0.7107`、
+      h64kv4 `0.2760/0.8456/1.226`、h64kv1 `0.4097/1.519/2.127`；fp8 MLA（ours，FA/TE 不支持）：
+      S256H2 `0.2356/0.2290/0.3441`、S512H4 `0.2415/0.2992/0.4481`、S1024H2 `0.2232/0.3377/0.3602`。
+      与 `docs/04` §7.4/§14 历史**逐位/同量级一致**。
+    * **单 vs 两文件**：`dq` 逐位相同；`dk/dv` 仅差跨 CTA `atomicAdd` 次序（≤2.44e-4 fp16 /
+      1.95e-3 bf16 / 4.77e-7 fp8），属既有非确定性。
+    * **一处修正**：fp16 S4096 旧表 `1.499/1.572/2.225e-3` 来自更早混合构建，本轮默认 mma 为
+      `1.883/1.734/1.966e-3`（≈FA，均在 fp16 噪声内）；今后以 `fa_bwd_compare.py` 实测为准。
+  - 文档 `docs/04` §32；原始输出 `src/fa_bwd_compare_p33_summary.out.txt`、
+    `src/{fp16,bf16,fp8}/fa_bwd_*_p33_*.out.txt`。
+  - **下一步候选**：① 把 varlen（含 full / MLA）case 也纳入同一 dump（现仅 3 个 dtype 的定长）；
+    ② 让 `fa_bwd_compare.py` 直接驱动 `scripts/run.sh` 一键「跑 ours + 汇总」（省去手写 `--dir/--dump`）。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
@@ -3947,7 +3987,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       分支用 `target=132`（1 个波）+ `sp_min=2`（causal 分支逐字不变）；b1 full auto 16→4
       main **1.09–1.16×**、端到端 **1.075×**，b3 full 1.009×，causal 回归逐位不变。详见「第一百零二轮」。
 
-- [ ] P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
+- [x] **P3-3 正式化**：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用
+      → **已完成（第一百零七轮）**：新增 `harness/fa_bwd_compare.py`（纯 numpy，扫 dump 目录按 impl
+      算 max_abs/max_rel，支持 markdown/json/过滤）；6 个 host 加 `--dump=<prefix>` 把 ours 落成
+      npy（`src/fa_bwd_dump.h`，默认关）。重跑 fp16/bf16/fp8 × MHA/GQA/MQA/MLA 共 17 个 case
+      （单/两文件）生成 `src/fa_bwd_compare_p33_summary.out.txt`，与 `docs/04` §32 表格一致；
+      fp16 S4096 ours 本轮默认 mma 构建为 1.883/1.734/1.966e-3（≈FA，旧表 1.499e-3 来自更早混合构建）。
 
 - 用 `nsys` 看 preprocess + main + convert 的端到端重叠。
 - 把 FA2 的 `dQ_accum` 累加缓冲 vs 纯 atomic 做对比实验。

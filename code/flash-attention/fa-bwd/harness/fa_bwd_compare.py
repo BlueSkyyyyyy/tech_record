@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""fa_bwd_compare.py —— FA 反向「ours vs ref vs FA vs TE」数值对拍汇总（P3-3）。
+
+背景（ROADMAP P3-3）：把散落在各 dtype 文档/`*.out.txt` 里的数值对拍收敛成
+**一个可复现的 harness**，作为 `docs/04-numerics-and-perf-summary.md` 数值表的唯一来源。
+
+用法（宿主机直接跑，只需 numpy；dump 目录在本机可直接读）：
+  python harness/fa_bwd_compare.py                       # 扫描全部 case
+  python harness/fa_bwd_compare.py --dtype fp8           # 只看 fp8
+  python harness/fa_bwd_compare.py --glob 'b1_s*_fp16'   # 按 slug 过滤
+  python harness/fa_bwd_compare.py --case b1_s512_h16_d128_causal_fp16
+  python harness/fa_bwd_compare.py --markdown            # 输出 markdown 表（贴文档）
+  python harness/fa_bwd_compare.py --out /tmp/cmp.txt     # 落盘
+
+口径：
+  * baseline = `ref_{dq,dk,dv}.npy`（PyTorch fp32 autograd，见 fa_bwd_bench.py dump）；
+  * 被比较实现 = 每个 case 目录里存在的 `<impl>_{dq,dk,dv}.npy`，impl ∈ {fa, te, ours, ...}；
+  * `ours_*` 由我们的 kernel 以 `--dump=ours` 生成（fp16/bf16/fp8 × 单文件/两文件 host 均支持）；
+  * max_abs = max|a-b|；max_rel = max(|a-b| / (|b| + 1e-3))（与 kernel 内 `diff_stat` 一致，
+    近零元素会被放大，仅作参考，判据用 max_abs）；
+  * 所有数组按 C-order flatten 后逐元素比较（varlen 的 packed [T,H,D] 天然适用）。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+
+OUT_ROOT = Path("/home/xieminglin/proj/output/fa-bwd")
+VEC = ("dq", "dk", "dv")
+IMPL_ORDER = ("fa", "te", "ours")
+
+
+def maxdiff(a: np.ndarray, b: np.ndarray):
+    a = a.reshape(-1).astype(np.float64)
+    b = b.reshape(-1).astype(np.float64)
+    if a.shape != b.shape:
+        raise ValueError(f"shape mismatch: {a.shape} vs {b.shape}")
+    d = np.abs(a - b)
+    r = d / (np.abs(b) + 1e-3)
+    return float(d.max()), float(r.max())
+
+
+def load(case: Path, name: str):
+    p = case / f"{name}.npy"
+    if not p.exists():
+        return None
+    return np.load(p)
+
+
+def discover(args):
+    cases = sorted(p for p in OUT_ROOT.iterdir() if p.is_dir())
+    out = []
+    for c in cases:
+        if args.case and c.name not in args.case:
+            continue
+        import fnmatch
+        if args.glob and not any(fnmatch.fnmatch(c.name, g) for g in args.glob):
+            continue
+        meta = {}
+        mp = c / "meta.json"
+        if mp.exists():
+            meta = json.loads(mp.read_text())
+        dt = meta.get("dtype", "")
+        if args.dtype and dt not in args.dtype:
+            continue
+        out.append((c, meta))
+    return out
+
+
+def impl_of(case: Path):
+    found = []
+    for impl in IMPL_ORDER:
+        if (case / f"{impl}_dq.npy").exists():
+            found.append(impl)
+    # 目录里其它可能的 <impl>_dq.npy（自定义前缀）也纳入，放在 ours 之后
+    for p in sorted(case.glob("*_dq.npy")):
+        impl = p.name[: -len("_dq.npy")]
+        if impl not in found and impl != "ref":
+            found.append(impl)
+    return found
+
+
+def fmt(v):
+    return "  NA  " if v is None else f"{v:.3e}"
+
+
+def main():
+    ap = argparse.ArgumentParser(description="fa-bwd numeric comparison (ours vs ref vs FA/TE)")
+    ap.add_argument("--dtype", nargs="+", default=None, help="过滤 dtype：fp16/bf16/fp8")
+    ap.add_argument("--glob", nargs="+", default=None, help="按 case slug 通配过滤")
+    ap.add_argument("--case", nargs="+", default=None, help="精确 case 名称（可多个）")
+    ap.add_argument("--impls", nargs="+", default=None, help="只报这些 impl（默认自动发现）")
+    ap.add_argument("--markdown", action="store_true", help="输出 markdown 表格")
+    ap.add_argument("--out", default=None, help="把结果同时写到文件")
+    args = ap.parse_args()
+
+    rows = []   # (case, meta, impl, {vec: (abs, rel)})
+    for case, meta in discover(args):
+        ref = {v: load(case, f"ref_{v}") for v in VEC}
+        if any(x is None for x in ref.values()):
+            continue
+        impls = impl_of(case)
+        if args.impls:
+            impls = [i for i in impls if i in args.impls]
+        if not impls:
+            continue
+        for impl in impls:
+            stats = {}
+            ok = True
+            for v in VEC:
+                a = load(case, f"{impl}_{v}")
+                if a is None:
+                    ok = False
+                    break
+                stats[v] = maxdiff(a, ref[v])
+            if ok:
+                rows.append((case.name, meta, impl, stats))
+
+    lines = []
+    if args.markdown:
+        lines.append("| case | dtype | impl | dq max_abs | dq max_rel | dk max_abs | dk max_rel | "
+                     "dv max_abs | dv max_rel |")
+        lines.append("|---|---|---|---|---|---|---|---|---|")
+        for name, meta, impl, st in rows:
+            lines.append(f"| {name} | {meta.get('dtype','')} | {impl} | "
+                         + " | ".join(f"{st[v][0]:.3e} | {st[v][1]:.3e}" for v in VEC) + " |")
+    else:
+        lines.append("=== fa-bwd numeric comparison (baseline = ref; max_abs / max_rel) ===")
+        hdr = f"{'case':<46} {'impl':<5} " + " ".join(f"{v}_abs    {v}_rel   " for v in VEC)
+        lines.append(hdr)
+        lines.append("-" * len(hdr))
+        last = None
+        for name, meta, impl, st in rows:
+            if name != last:
+                lines.append(f"[{name}]  ({meta.get('dtype','')})")
+                last = name
+            cells = " ".join(f"{fmt(st[v][0])} {fmt(st[v][1])}" for v in VEC)
+            lines.append(f"  {impl:<5} {cells}")
+
+    # 分组小结：每个 dtype 下的 ours-vs-ref
+    lines.append("")
+    lines.append("=== ours vs ref 小结（判据 max_abs）===")
+    by_dt = {}
+    for name, meta, impl, st in rows:
+        if impl != "ours":
+            continue
+        by_dt.setdefault(meta.get("dtype", "?"), []).append((name, st))
+    for dt in sorted(by_dt):
+        for name, st in by_dt[dt]:
+            lines.append(f"  {dt:5s} {name:<46} dq={st['dq'][0]:.3e} "
+                         f"dk={st['dk'][0]:.3e} dv={st['dv'][0]:.3e}")
+
+    text = "\n".join(lines)
+    print(text)
+    if args.out:
+        Path(args.out).write_text(text + "\n")
+        print(f"\n[written] {args.out}")
+
+
+if __name__ == "__main__":
+    main()
