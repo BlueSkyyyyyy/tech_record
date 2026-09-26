@@ -1,0 +1,41 @@
+### O51 two-file fp8 MLA kvpipe (default auto on)
+=== b1_s256_h2_d512_causal_fp8 ===
+[timing] total(quant+pre+main+cvt) 0.0701 ms  3.83 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0114 ms | preprocess 0.0263 ms | main 0.0235 ms | convert 0.0089 ms (cvt_on=0)
+[O47 A/B] main MLA 4-warp 0.0439 ms | 8-warp 0.0239 ms (1.840x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=2.384e-07
+[O51 A/B] main MLA 8w sync 0.0239 ms | kvpipe 0.0234 ms (1.020x) | max_abs(kvp-vs-sync) dq=1.192e-07 dk=2.384e-07 dv=4.768e-07
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.356e-01  max_rel=8.127e+01
+  dk   vs ref: max_abs=2.290e-01  max_rel=6.894e+01
+  dv   vs ref: max_abs=3.441e-01  max_rel=4.412e+01
+[compare] ours vs TE FP8
+=== b1_s512_h4_d512_causal_fp8 ===
+[timing] total(quant+pre+main+cvt) 0.1317 ms  16.30 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0134 ms | preprocess 0.0285 ms | main 0.0718 ms | convert 0.0180 ms (cvt_on=0)
+[O47 A/B] main MLA 4-warp 0.1200 ms | 8-warp 0.0742 ms (1.617x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=2.384e-07 dv=4.768e-07
+[O51 A/B] main MLA 8w sync 0.0739 ms | kvpipe 0.0716 ms (1.032x) | max_abs(kvp-vs-sync) dq=1.192e-07 dk=2.980e-07 dv=9.537e-07
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.415e-01  max_rel=1.803e+02
+  dk   vs ref: max_abs=2.992e-01  max_rel=6.416e+01
+  dv   vs ref: max_abs=4.481e-01  max_rel=9.164e+01
+[compare] ours vs TE FP8
+=== b1_s1024_h2_d512_causal_fp8 ===
+[timing] total(quant+pre+main+cvt) 0.1894 ms  22.68 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0144 ms | preprocess 0.0353 ms | main 0.1200 ms | convert 0.0198 ms (cvt_on=0)
+[O47 A/B] main MLA 4-warp 0.1977 ms | 8-warp 0.1229 ms (1.609x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=7.153e-07 dv=4.768e-07
+[O51 A/B] main MLA 8w sync 0.1228 ms | kvpipe 0.1183 ms (1.038x) | max_abs(kvp-vs-sync) dq=1.192e-07 dk=3.576e-07 dv=4.768e-07
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+[compare] ours vs TE FP8
+=== b1_s512_h2_d512_causal_fp8 ===
+[timing] total(quant+pre+main+cvt) 0.0985 ms  10.90 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0117 ms | preprocess 0.0276 ms | main 0.0499 ms | convert 0.0094 ms (cvt_on=0)
+[O47 A/B] main MLA 4-warp 0.0890 ms | 8-warp 0.0510 ms (1.745x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=3.576e-07 dv=4.768e-07
+[O51 A/B] main MLA 8w sync 0.0508 ms | kvpipe 0.0495 ms (1.026x) | max_abs(kvp-vs-sync) dq=8.941e-08 dk=3.576e-07 dv=4.768e-07
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.286e-01  max_rel=1.154e+02
+  dk   vs ref: max_abs=2.252e-01  max_rel=7.679e+01
+  dv   vs ref: max_abs=3.343e-01  max_rel=5.819e+01
+[compare] ours vs TE FP8
