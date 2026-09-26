@@ -1,0 +1,13 @@
+=== fp8 S512 --ksplit=1 --d128w=0 ===
+[O49] d128 8-warp = 0 (d128w=0, grid=128, sm=132, wgmma=0)
+[timing] total(quant+pre+main+cvt) 0.1705 ms  12.59 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0149 ms | preprocess 0.0232 ms | main 0.1188 ms | convert 0.0135 ms (cvt_on=0)
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+=== fp8 S512 --ksplit=1 --d128w=1 ===
+[O49] d128 8-warp = 1 (d128w=1, grid=128, sm=132, wgmma=0)
+[timing] total(quant+pre+main+cvt) 0.1375 ms  15.62 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0140 ms | preprocess 0.0227 ms | main 0.0885 ms | convert 0.0123 ms (cvt_on=0)
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+[O49] d128 8-warp = 1 (d128w=-1, grid=128, sm=132, wgmma=0)
+[timing] total(quant+pre+main+cvt) 0.1368 ms  15.69 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0145 ms | preprocess 0.0227 ms | main 0.0885 ms | convert 0.0112 ms (cvt_on=0)

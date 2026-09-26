@@ -1618,3 +1618,29 @@ atomic 次序），vs ref 与历史逐位不变。
 `D==128 && mma 路径 && grid < 132`。顺带修掉 O47 参数化留下的两个 `NTH>128` 才触发的
 correctness bug（`kv_prefetch/commit_pair` 越界、`kRegDq` flush 硬编码几何），默认 `128/2`
 路径逐位不变。详见 `docs/01` §14aa、`docs/01b` §6ai、`docs/03` §48。
+
+## 22. D=128 mma fallback 8-warp 几何的自动档默认化（O49，第九十六轮）—— 正结果
+
+O48 判明 8-warp 只在 `grid ≤ SM 数`（每 scheduler 4-warp 仅 1 warp）时赢，并留成 opt-in。
+O49 把它**默认化**：auto 条件 `D==128 && mma 路径 && grid ≤ sm_count(132)`，`--d128w=0/1`
+仍可强制。对 fp8 额外要求 `!wgmma`（不覆盖 Hopper 生产路径）且用**总网格** `mg.x·mg.y·mg.z`
+判据（fp8 `mg.x` 已含 ksplit，单看 x 维会误开）。
+
+**fp16/bf16（plain sm_90 mma，同 session）**：
+
+| dtype | shape（grid） | main 4w | **main auto(8w)** | 比 | total 4w → auto | 比 |
+|---|---|---|---|---|---|---|
+| fp16 | S=512 MHA（128，auto on） | 0.0567 | **0.0509** | **1.114×** | 0.0960 → **0.0880** | 1.091× |
+| bf16 | S=512 MHA（128，auto on） | 0.0570 | **0.0515** | **1.107×** | 0.0942 → **0.0899** | 1.048× |
+| fp16 | S=4096 MHA（1024，auto off） | 1.5059 | 同（逐位） | 1.00× | 1.9288 | 1.00× |
+| fp16 | S=1024 GQA kv4（512，auto off） | 0.2612 | 同 | 1.00× | 0.3457 | 1.00× |
+| fp8 | S=512 MHA（2048，auto off） | 0.0630 | 同（逐位） | 1.00× | 0.1165 | 1.00× |
+| fp8 | S=512 **`--ksplit=1`**（128，auto on） | 0.1188 | **0.0885** | **1.34×** | 0.1705 → 0.1368 | 1.25× |
+
+**对标**（同 session 纯反向 `harness/fa_vs_te_bwd_only.py`）：fp16/bf16 S=512 MHA
+**FA3 0.0263ms/163TF**、TE fp16 0.0319/135、TE bf16 0.0324/133 ⇒ ours total 时间比
+fp16 **3.65×→3.35×**、bf16 **3.58×→3.42×**。
+
+**数值**：auto on 只在 S=512 改 dK/dV 的 atomic 次序（`max_abs(8w-vs-4w)` ≤ 5e-7，dq 逐位），
+vs ref 与历史同量级；auto off 的 shape **逐位不变**。详见 `docs/01` §14ab、`docs/01b` §6aj、
+`docs/03` §49。

@@ -3611,7 +3611,9 @@ int main(int argc, char** argv) {
   int cvt_on = 0;   // O21b：1 = 保留冗余 fp32→fp32 convert 拷贝（默认 0：直接累加进输出）
   int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
   int mla8w_opt = -1;  // O47：MLA（D=512）主 kernel -1=自动(8w)/0/1 强制（同 session A/B）
-  int d128w_opt = 0;   // O48：D=128 mma 主 kernel 0=4w(128/2) / 1=8w(256/4)（opt-in，候选 ①）
+  // O48：D=128 mma 主 kernel 0=4w(128/2) / 1=8w(256/4)。O49：默认 -1=自动（仅 mma 后端、
+  //   有效 grid ≤ SM 数时开；fp8 的 auto split-K 通常已把小 S 的 grid 抬到 ≫132，故不触发）。
+  int d128w_opt = -1;
   int qfast = 1;      // O14：1 = warp-per-row 向量化量化，0 = 旧 per-row 标量量化（A/B）
   int delta_warp_opt = 1;  // O26：1 = warp-per-row 向量化 delta（默认），0 = 旧 per-row smem 归约（A/B）
   int regdq_opt = -1; // O22：-1 自动；0/1 强制关/开寄存器 dQ 累加（同 session A/B）
@@ -3947,6 +3949,16 @@ int main(int argc, char** argv) {
   // O12：LSE/D 预装寄存器（默认开），`--prel=0` 关；为同 session A/B 派发到两个模板实例。
   const bool prel_sel = (prel_opt < 0) ? true : (prel_opt != 0);
   const bool mla8w_sel = (mla8w_opt < 0) ? true : (mla8w_opt != 0);  // O47
+  // O49：D=128 mma 路径的 8-warp 自动档（判据 = mma 后端且有效 grid ≤ SM 数；见两文件版）。
+  int sm_count = 0;
+  CUDA_CHECK(cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0));
+  const long fp8_grid = (long)mg.x * mg.y * mg.z;
+  const bool d128w_sel =
+      (d128w_opt > 0) ? true
+                      : ((d128w_opt < 0) ? (D == 128 && !wgmma && fp8_grid <= sm_count)
+                                         : false);
+  if (D == 128) printf("[O49] d128 8-warp = %d (d128w=%d, grid=%ld, sm=%d, wgmma=%d)\n",
+                       (int)d128w_sel, d128w_opt, fp8_grid, sm_count, wgmma);
   auto launch128 = [&](bool reg, bool wg, bool prel) {
 #define GO(REG_, WG_, PREL_)                                                                 \
     launch_bwd_main<128, 64, 32, REG_, WG_, PREL_>(                                          \
@@ -4002,7 +4014,7 @@ int main(int argc, char** argv) {
     if (D == 128 && wgmma) { launch128(use_regdq, true, prel_sel); return; }
 #endif
     // O48（候选 ①）：D=128 mma 路径的 8-warp（256 线程 / 2×4 网格）几何（opt-in）。
-    if (D == 128 && d128w_opt) {
+    if (D == 128 && d128w_sel) {
       if (use_regdq)
         launch_bwd_main<128, 64, 32, true, false, true, 256, 4>(
             mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,

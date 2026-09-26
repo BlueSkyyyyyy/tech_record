@@ -1,0 +1,6 @@
+[O49] d128 8-warp = 0 (d128w=-1, grid=2048, sm=132, wgmma=0)
+[timing] total(quant+pre+main+cvt) 0.4757 ms  36.12 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0406 ms | preprocess 0.0803 ms | main 0.3227 ms | convert 0.0320 ms (cvt_on=0)
+  dq   vs ref: max_abs=2.400e-01  max_rel=1.887e+02
+  dk   vs ref: max_abs=4.195e-01  max_rel=6.614e+01
+  dv   vs ref: max_abs=3.536e-01  max_rel=8.068e+01

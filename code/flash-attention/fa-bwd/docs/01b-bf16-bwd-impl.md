@@ -1809,6 +1809,25 @@ S=4096 1.5673→1.7851（**0.878×**）。结论与 fp16 逐条一致：8-warp �
 
 原始输出：`src/bf16/fa_bwd_bf16_o48_d128_{s512,s4096}.out.txt`、`..._o48_onefile_s512.out.txt`。
 
+## 6aj. O49-bf16：D=128 mma 路径 8-warp 几何的 **自动档默认化**（第九十六轮）
+
+把 fp16 O49（`docs/01` §14ab）逐字 dtype 参数化到 bf16，仅改 host：`d128w` 默认 `0`→`-1`
+（auto：`D==128 && grid ≤ sm_count`），`launch_cfg` 加 `w8` 形参（A/B 段传 `false`），
+BN=64 固定 `PIPE=2`。单/两文件 device 区逐字一致。
+
+**数值**（ours-vs-ref，bf16 causal，max_abs）：S512 `9.001/12.61/13.65e-3`、S4096
+`15.10/13.40/16.31e-3`，与历史一致；auto 只在 S=512（grid=128）改 dK/dV 求和次序
+（`max_abs(8w-vs-4w) ~1e-6`），S=4096/GQA（grid>132）**逐位不变**。
+
+**性能**（同 session event，plain sm_90 mma，ms）：S=512 main **0.0570→0.0515（1.107×）**、
+total **0.0942→0.0899（1.048×，23.88 TF）**；单文件 auto main **0.0514** / total **0.0888ms**。
+S=4096 auto off：main 1.5018 / total 1.9181ms（1.00×）。同 session 纯反向
+`harness/fa_vs_te_bwd_only.py bf16`：S=512 MHA **FA3 0.0263ms/163TF**、TE 0.0324/133
+⇒ ours total 时间比 3.58×→**3.42×**。
+
+原始输出：`src/bf16/fa_bwd_bf16_o49_{auto,4w}_s512.out.txt`、`..._o49_reg_s4096.out.txt`、
+`..._o49_onefile_s512.out.txt`；机制/ncu 同 `docs/01` §14ab.5。
+
 ## 8. 下一步
 
 > **O36-bf16（§6z）已完成**：把 O34 的逐 atom 4D-TMA 从 BN=128 的 `wgmma2b` 补到 **BN=64 的

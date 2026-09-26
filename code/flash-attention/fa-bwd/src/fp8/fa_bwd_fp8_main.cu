@@ -674,8 +674,10 @@ int main(int argc, char** argv) {
   int mla8w_opt = -1;
   // O48（候选 ①）：D=128 主 kernel 是否也用 8-warp（256 线程 / 2×4 网格）几何。0=默认
   //   4-warp（128/2），1=8-warp。仅 mma 路径（WGMMA 版 GEMM1/2 是 warpgroup 级、结构上锁死
-  //   2 warp）；用 `--d128w=0/1` 做同 binary A/B。见 docs/03 §48。
-  int d128w_opt = 0;
+  //   2 warp）；用 `--d128w=0/1` 做同 binary A/B。见 docs/03 §48。O49：默认 **-1=自动**
+  //   （仅 `!wgmma` 的 mma 路径、且含 ksplit 的有效 grid ≤ SM 数时开；fp8 的 auto split-K
+  //   通常已把小 S 的 grid 抬到 ≫132，故自动档在默认 shape 下不触发、保持逐位）。
+  int d128w_opt = -1;
   int varlen = 0;   // VARLEN：1 = packed [T,H,D] + cu_seqlens.npy（fp8/HD=128/causal）
   int compact_opt = 0;  // 第八十二轮：1 = varlen 主 kernel 紧凑均衡网格（opt-in；实测中性偏负）
   int lse_compact_opt = 0;  // 第八十二轮：1 = varlen causal LSE 紧凑对网格（opt-in，A/B）
@@ -1025,8 +1027,17 @@ int main(int argc, char** argv) {
   const bool f16b_sel = (f16b_opt != 0);
   // O47：MLA（D=512）8-warp 几何（默认开；`--mla8w=0` 退回 4-warp A/B）。
   const bool mla8w_sel = (mla8w_opt < 0) ? true : (mla8w_opt != 0);
-  // O48：D=128 mma 路径的 8-warp 几何（opt-in；默认 4-warp 与历史逐字相同）。
-  const bool d128w_sel = (d128w_opt != 0);
+  // O48/O49：D=128 mma 路径的 8-warp 几何（opt-in / 自动）。默认 4-warp 与历史逐字相同。
+  //   O49 自动档判据 = 「mma 后端（!wgmma）且有效 grid ≤ SM 数」；`--d128w=1` 仍可强制。
+  int sm_count = 0;
+  CUDA_CHECK(cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0));
+  const long fp8_grid = (long)mg.x * mg.y * mg.z;
+  const bool d128w_sel =
+      (d128w_opt > 0) ? true
+                      : ((d128w_opt < 0) ? (D == 128 && !wgmma && fp8_grid <= sm_count)
+                                         : false);
+  if (D == 128) printf("[O49] d128 8-warp = %d (d128w=%d, grid=%ld, sm=%d, wgmma=%d)\n",
+                       (int)d128w_sel, d128w_opt, fp8_grid, sm_count, wgmma);
   // O27：第 5 个开关 rcp 选 fold 量化用乘法（true，默认）还是精确除法（false，A/B）。
   auto launch128 = [&](bool reg, bool wg, bool prel, bool f16, bool rcp = true) {
 #define GO2(REG_, WG_, PREL_, F16_)                                                          \

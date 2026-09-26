@@ -1,0 +1,15 @@
+    Memory Throughput                 %        39.46
+    Duration                         us        52.96
+    Compute (SM) Throughput           %        13.38
+    One or More Eligible                   %        24.52
+    Issued Warp Per Scheduler                        0.25
+    No Eligible                            %        75.48
+    Active Warps Per Scheduler          warp         1.99
+    Eligible Warps Per Scheduler        warp         0.31
+          of 1.99 active warps per scheduler, but only an average of 0.31 warps were eligible per cycle. Eligible       
+    Warp Cycles Per Issued Instruction             cycle         8.13
+    Warp Cycles Per Executed Instruction           cycle         8.14
+    Block Limit Registers                 block            1
+    Theoretical Active Warps per SM        warp            8
+    Achieved Occupancy                        %        12.40
+    Achieved Active Warps Per SM           warp         7.94

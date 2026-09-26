@@ -2649,7 +2649,24 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第九十五轮）**：**O48——D=128 mma fallback 主 kernel 的「256 线程 / 8-warp 几何」
+> **最新（第九十六轮）**：**O49——把 O48 的 8-warp 几何按它推荐的 auto 条件「默认化」**
+> （`D==128 && mma 路径 && grid ≤ SM 数`；`--d128w=0/1` 仍可强制）。fp16/bf16 的 `d128w`
+> 默认 `0`→`-1`（自动），只用 `cudaDeviceGetAttribute` 查到的 `sm_count` 与逻辑 grid 比较；
+> fp8 额外要求 `!wgmma`（不覆盖 Hopper 生产路径）且判据用**总网格** `mg.x·mg.y·mg.z`
+> （fp8 的 `mg.x` 已含 auto split-K，单看 x 维会把 S=512 误开成 128⇒实测 main 0.0815 而非
+> 0.0630）。**fp16 S=512 MHA（grid=128<132）默认拿到 8-warp：main 0.0567→0.0509（1.114×）、
+> total 0.0960→0.0880ms（1.091×，24.40 TF）；bf16 main 1.107×/total 1.048×**；大 grid
+> （S=4096/GQA）auto off、**逐位不变**；fp8 默认 grid=2048 auto off、逐位不变，`--ksplit=1`
+> 的 128 网格探针下 8-warp main 1.34×。数值 auto on 只改 dK/dV atomic 次序（≤5e-7、dq 逐位），
+> vs ref 与历史同量级。对标 FA3 S512 0.0263ms/163TF ⇒ ours total 时间比 fp16 3.65×→**3.35×**、
+> bf16 3.58×→**3.42×**。单/两文件同源。详见 `docs/01` §14ab、`docs/01b` §6aj、`docs/03` §49、
+> `docs/04` §22、`docs/08` §5.14。
+> **下一步候选**：① **把 8-warp 几何也用于 fp16/bf16 `wgmma2`（BN=64）的小 grid**（它已是
+> 256 线程，但 2 个 warpgroup 的 GEMM3/4 拆分可再平衡；O15/O18 时代未测 8-warp 等价物）；
+> ② **fp8 D=128 主 kernel 的 wait+short**（O42/O48 一致：硬件资源锁死）；③ **MLA 降 smem
+> 冲 2 CTA/SM**（四 dtype 共同墙）；④ **varlen 主 kernel K 维 split**（O43 varlen 负结果）。
+>
+> **（第九十五轮）**：**O48——D=128 mma fallback 主 kernel 的「256 线程 / 8-warp 几何」
 > 判决（正结果仅 grid ≤ SM；大 grid 负结果）**。落实 O47 的「下一步候选 ①」。对象是
 > **mma fallback**（纯 `sm_90` / `--wg2=0`；生产 `wgmma2` 已 256 线程且 fp8 wgmma 的 GEMM1/2
 > 是 warpgroup 级、`static_assert` 锁死 `128/2`）。`fp16/bf16` 只需 host `--d128w=0/1`（`NTH/NWAR`
@@ -3441,6 +3458,19 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       unit 越界（越界写坏 Kp，dq/dv 爆到 1e34）、`kRegDq` flush 硬编码几何（越界读 `dqacc`）。
       单/两文件 device 逐字一致（`sync_onefile_device.py`）。
       详见 `docs/01` §14aa、`docs/01b` §6ai、`docs/03` §48、`docs/04` §21、`docs/08` §5.13。
+- [x] **O49（第九十六轮）D=128 mma 路径 8-warp 几何的**自动档默认化**（正结果）**：落实 O48
+      推荐若默认化则用的 auto 条件 `D==128 && mma 路径 && grid ≤ SM 数`。fp16/bf16 的 `d128w`
+      默认 `0`→`-1`（`cudaDeviceGetAttribute` 查 `sm_count` 与逻辑 grid 比较）；`launch_cfg` 加
+      `w8` 形参（所有 A/B 段传 `false`，对照仍 4-warp）。fp8 额外要求 `!wgmma`（不覆盖 Hopper 生产
+      路径）且用**总网格** `mg.x·mg.y·mg.z`（`mg.x` 已含 auto ksplit，单看 x 维会把 S=512 误开成
+      128⇒main 0.0815 而非 0.0630）。**fp16 S=512 MHA（grid=128）main 0.0567→0.0509（1.114×）、
+      total 0.0960→0.0880ms（1.091×，24.40 TF）；bf16 main 1.107×/total 1.048×**；大 grid
+      （S=4096/grid=1024、GQA kv4/grid=512）auto off、**逐位不变**；fp8 默认 grid=2048 auto off、
+      逐位不变，`--ksplit=1`（grid=128）探针下 8-warp main 1.34×。数值 auto on 只改 dK/dV atomic
+      次序（`max_abs(8w-vs-4w)`≤5e-7、dq 逐位），vs ref 与历史同量级。对标 FA3 S512
+      0.0263ms/163TF ⇒ ours total 时间比 fp16 3.65×→**3.35×**、bf16 3.58×→**3.42×**。
+      单/两文件 device 逐字一致。详见 `docs/01` §14ab、`docs/01b` §6aj、`docs/03` §49、`docs/04` §22、
+      `docs/08` §5.14。
 
 ## 灵感 / backlog
 
