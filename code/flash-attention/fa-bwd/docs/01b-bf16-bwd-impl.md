@@ -1866,3 +1866,60 @@ dK/dV 的 red 字节砍半，main S=4096 1.52×、GQA/MQA 1.50–1.53×，§6s�
 接下来是 **O7b（去 dK/dV 跨 CTA 原子 → 确定性反向）**、**fp8 侧同构跨 wg 归约**、
 **O15 TMA 化 Q/K/V/dO + P/dS 双缓冲跨-tile 流水 + 压 smem 冲更高 occupancy**。
 backlog：MLA 降 smem 冲 2 CTA/SM / split-KV。
+
+## 6ak. O50-bf16：wgmma2 等待拆分 + MLA ksplit 重标定 + **修复单文件版缺失的 TMA 描述符 helper**（第九十七轮）
+
+> 与 `docs/01` §14ac 的 fp16 逐字 dtype 参数化。本轮另发现并修复一个**既有 bug**：
+> `bf16` 的**单文件版** `fa_bwd_bf16_mma_onefile.cu` 缺少 host 侧的 `make_lse_map`/
+> `make_main_map`（`-DFA_WGMMA -DFA_TMA` 下 TMA 路径用），**在 O35/O36 给 bf16 加主 kernel TMA
+> 后就没同步过，一直编译不过**（`identifier "make_lse_map" is undefined`）。
+
+### 6ak.1 改动
+
+- **`FA_WS1`（默认 1）**：`fa_bwd_bf16_wgmma2_kernel`（及 `wgmma2b`）的 GEMM1/2 由统一 `wait0`
+  改成 `wgmma_wait_group<1>()`（只等 GEMM1）算 P、`wait0()` 取 dP，数值**逐位不变**。
+  单/两文件 device 逐字一致（`sync_onefile_device.py` `identical: True`）。
+- **MLA ksplit auto**：`D==512` 由「528 目标 + `nblk` 封顶」改成 `max(528 目标, ≤ceil(nblk/2))`、
+  去封顶（与 fp16 同）。
+- **单文件 bug 修复**：把 fp16 §14s/O33 的 `make_lse_map`/`make_main_map` 逐字节 dtype 参数化
+  到 bf16（`CU_TENSOR_MAP_DATA_TYPE_BFLOAT16`，strides 同为 `*2`）补回 onefile，重新可编译。
+
+### 6ak.2 数值（ours-vs-fp32-ref，bf16 causal，max_abs dq/dk/dv）
+
+完全不变：S512 MHA 9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3、GQA kv4
+12.01/21.25/31.56e-3、MLA S1024H2 5.838/9.519/15.68e-3、MLA S256H2 12.30/9.875/16.86e-3。
+单/两文件逐值一致。
+
+### 6ak.3 性能
+
+**`FA_WS1` A/B（同 binary，300 iters，main-only ms）**：
+
+| shape | ws0 | ws1 | 比 |
+|---|---|---|---|
+| S512 MHA | 0.0319 | **0.0316** | 1.009× |
+| S4096 MHA | 0.9561 | **0.9538** | 1.002× |
+| GQA kv4 S1024 | 0.1824 | **0.1807** | 1.009× |
+| MQA kv1 S1024 | 0.2915 | 0.2919 | 1.00× |
+
+⇒ 与 fp16 同：方向非负、幅度 ≤1%。
+
+**MLA ksplit auto 重标定（main-only ms）**：S1024H2 8→**16**：0.1408→**0.1365（1.031×）**；
+S512H4 恒 8（0.0757）；S256H2 8→**16**：0.0204→**0.0192（1.063×）**。端到端 total：
+S1024H2 0.1845ms、S256H2 0.0534ms。
+
+### 6ak.4 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py bf16`）
+
+FA3 MHA S4096 0.3193ms/861TF、TE 0.4377/628；ours total S4096 1.2559ms ⇒ **FA3 的 3.93×**。
+原始输出 `src/fa_bwd_o50_fa3_te_bf16.out.txt`。
+
+### 6ak.5 复现 / 原始输出
+
+```bash
+F='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+ARCH="" NVCC_FLAGS="$F" scripts/run.sh src/bf16/fa_bwd_bf16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_bf16 --iters=200
+ARCH="" NVCC_FLAGS="$F" scripts/run.sh src/bf16/fa_bwd_bf16_mma_onefile.cu ...   # 修复后编译通过
+```
+
+原始输出：`src/bf16/fa_bwd_bf16_mma_o50_*.out.txt`、`..._mma_onefile_o50_*.out.txt`、
+`..._o50_mlaksplit_sweep.out.txt`、`..._o50_ws_ab.out.txt`、`src/fa_bwd_o50_fa3_te_bf16.out.txt`。

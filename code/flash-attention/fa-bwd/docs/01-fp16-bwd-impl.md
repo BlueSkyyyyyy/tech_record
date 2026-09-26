@@ -3608,3 +3608,77 @@ GEMM1/2 换成 Hopper `wgmma`（main S512 1.09×/S4096 1.05×，数值逐位不�
    occupancy 不变，端到端为 FA3 的 3.77×（O30 3.87×）。**剩余**：bf16/fp8 的对应 dtype 参数化
    （fp8 SW128 的 `k/16` atom 下标）与 BN=64 的 `wgmma2` 几何。
 6. MLA 降 smem 冲 2 CTA/SM / split-KV 仍在列。
+
+## 14ac. O50-fp16：wgmma2 的 GEMM1/2 等待拆分（中性偏正）+ MLA ksplit auto 重标定（正结果，第九十七轮）
+
+> 第九十六轮（O49）把 D=128 的 8-warp 几何默认化后，ROADMAP「下一步候选」的剩余几条都以
+> 「mma 依赖延迟 + occupancy 硬件锁死」为由列 backlog。本轮换两个**尚未试过**的、不触
+> occupancy/red 结构的角度：① 把 wgmma2 里 GEMM1(S=QKᵀ)/GEMM2(dP=dO·Vᵀ) 的**统一 `wait0`
+> 拆开**，用算 P 的 CUDA-core 工作掩盖 GEMM2；② 对 fp16/bf16 的 MLA 主 kernel，把 O44 的
+> split-KV **auto 目标重标定**（O46 把几何换成 8-warp 后没重标）。
+
+### 14ac.1 改动（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+- **`FA_WS1`（默认 1）**：`fa_bwd_fp16_wgmma2_kernel`（及 `wgmma2b`）里两条 wgmma 各自 commit
+  后，原先是 `wgmma.wait_group 0`（等两条）再 fold；改成先 `wgmma_wait_group<1>()`（只等
+  GEMM1 的 `sacc`）算 P、`pds_store_sw128(Pw,...)`，**再** `wgmma_wait0()` 取 GEMM2 的 `dpacc`
+  算 dS。数学/数值**逐位不变**（同一批 wgmma、同一累加器、同一 fold 表达式，只改 wait 时机）。
+  `-DFA_WS1=0` 退回原路径做 A/B。
+- **MLA ksplit auto**：`D==512` 的自动档原为「`grid*sp≈528` 的 2 的幂、再用 `nblk` 封顶」。
+  改为 `sp = max(528 目标, 2^k ≤ ceil(nblk/2))`，**去掉 `nblk` 封顶**（切得比 K tile 细只产生
+  空切片，kernel 内 `early-exit`）。即「至少把每个 m 块的 K 范围切成 ≈2 份」。`--mlaksplit=N`
+  仍可强制。
+
+### 14ac.2 数值（ours-vs-fp32-ref，fp16 causal，max_abs dq/dk/dv）
+
+完全不变：S512 MHA 1.671/1.771/1.899e-3、S4096 1.883/1.734/1.966e-3、GQA kv4
+2.134/3.305/3.850e-3、MLA S1024H2 1.987/1.712/1.848e-3、MLA S256H2 1.638/1.582/1.753e-3、
+MLA S512H4 2.516/2.916/1.724e-3。单/两文件逐值一致。
+
+### 14ac.3 性能
+
+**`FA_WS1` A/B（同 binary，300 iters，main-only ms）**：
+
+| shape | ws0（原 wait0） | ws1（拆分） | 比 |
+|---|---|---|---|
+| S512 MHA | 0.0315 | 0.0315 | 1.00× |
+| S4096 MHA | 0.9558 | **0.9543** | 1.002× |
+| GQA kv4 S1024 | 0.1801 | **0.1782** | 1.011× |
+| MQA kv1 S1024 | 0.2868 | 0.2865 | 1.001× |
+
+⇒ 方向一致**非负**，但幅度 ≤1%（多数在噪声内）。ncu（S512）只见 `barrier` 0.39→0.25、
+Duration 33.57→33.47µs；`red`/指令数逐字节不变。**故 fp16/bf16 默认开（小幅非负），fp8 默认关**
+（见 `docs/03` §50）。
+
+**MLA ksplit auto 重标定（main-only ms，`--mlaksplit` sweep）**：
+
+| MLA shape | 旧 auto | 新 auto | k=8 | k=16 | 结果 |
+|---|---|---|---|---|---|
+| S1024H2 | 8 | **16** | 0.1411 | **0.1366** | **1.033×** |
+| S512H4 | 8 | 8 | **0.0756** | 0.0801 | 不变 |
+| S512H2 | 16 | 16 | 0.0465 | 0.0454 | 不变 |
+| S256H2 | 8 | **16** | 0.0204 | **0.0192** | **1.063×** |
+
+端到端 total：MLA S1024H2 0.1911→**0.1855ms（1.030×）**、S256H2 0.0544→**0.0533ms（1.021×）**。
+根因：O46 把 MLA 几何从 4-warp 换成 8-warp（1 CTA/SM 下每 scheduler 2 warp），split-KV 的
+最优粒度随之变大——旧的 `528`（4 个波）对 S1024H2 只切到 8，实测 16（≈8 个波）更快。
+
+### 14ac.4 对标（同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`）
+
+FA3 MHA S512 0.0265ms/162TF、S4096 0.3240/848、GQA kv4 0.0826/416（TE 见原始输出）。
+ours total：S512 0.0684ms（**FA3 的 2.58×**，O43 后 2.63×）、S4096 1.2532ms（**3.87×**）、
+GQA kv4 0.2446ms（2.96×）。原始输出 `src/fa_bwd_o50_fa3_te_fp16.out.txt`。
+
+### 14ac.5 复现 / 原始输出
+
+```bash
+F='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+ARCH="" NVCC_FLAGS="$F" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16 --iters=300
+ARCH="" NVCC_FLAGS="$F -DFA_WS1=0" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu ...   # A/B
+# MLA ksplit sweep：--mlaksplit=4/8/16/32
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_mma_o50_*.out.txt`（6 shape 对拍+计时）、
+`..._mma_onefile_o50_*.out.txt`（单文件）、`..._o50_mlaksplit_sweep.out.txt`、
+`..._o50_ws_ab.out.txt`、`..._o50_ncu_wg2_s512.out.txt`、`src/fa_bwd_o50_fa3_te_fp16.out.txt`。

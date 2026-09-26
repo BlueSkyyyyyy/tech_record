@@ -140,6 +140,13 @@ __device__ __forceinline__ uint64_t make_desc_sw128(uint32_t addr, uint32_t sbo_
 #else
 #define FA_HAS_WGMMA 0
 #endif
+// O50：wgmma2 的 GEMM1(S=QKᵀ)/GEMM2(dP=dO·Vᵀ) 等待拆分。原实现两条 wgmma 各自 commit
+//   后统一 `wait0` 再做 fold。但 fold 的 **P 段只依赖 GEMM1 的 sacc**、dS 段才依赖 GEMM2 的
+//   dpacc；故先 `wait_group 1`（只等 GEMM1）用算 P 的 CUDA-core 工作掩盖 GEMM2 的执行，
+//   算完 P 再 `wait0`。数值逐位不变（只改 wait 时机）。`-DFA_WS1=0` 退回原单次 wait0。
+#ifndef FA_WS1
+#define FA_WS1 1
+#endif
 __device__ __forceinline__ void wgmma_fence() {
 #if FA_HAS_WGMMA
   asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
@@ -1794,7 +1801,11 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
     float sacc[32], dpacc[32];
     wgmma_mn64_issue(Qw, Kt, HD, sacc);
     wgmma_mn64_issue(dOw, Vs, HD, dpacc);
+#if FA_WS1
+    wgmma_wait_group<1>();   // O50：只等 GEMM1（S），GEMM2（dP）与下面算 P 重叠
+#else
     wgmma_wait0();
+#endif
     float pval[8][4];
 #pragma unroll
     for (int j = 0; j < 8; ++j)
@@ -1812,6 +1823,9 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
       pds_store_sw128(Pw, j, r0, lane, c2, BN,
                       __float2half(pval[j][0]), __float2half(pval[j][1]),
                       __float2half(pval[j][2]), __float2half(pval[j][3]));
+#if FA_WS1
+    wgmma_wait0();   // O50：P 段已掩盖 GEMM2 的部分执行，这里等 dP 就绪
+#endif
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
       const float d0 = pval[j][0] * (dpacc[j * 4 + 0] - del_lo);
@@ -2718,7 +2732,11 @@ fa_bwd_fp16_wgmma2_tma_kernel(
     float sacc[32], dpacc[32];
     wgmma_mn64_issue(Qw, Kt, HD, sacc);
     wgmma_mn64_issue(dOw, Vs, HD, dpacc);
+#if FA_WS1
+    wgmma_wait_group<1>();   // O50：只等 GEMM1（S），GEMM2（dP）与下面算 P 重叠
+#else
     wgmma_wait0();
+#endif
     float pval[8][4];
 #pragma unroll
     for (int j = 0; j < 8; ++j)
@@ -2736,6 +2754,9 @@ fa_bwd_fp16_wgmma2_tma_kernel(
       pds_store_sw128(Pw, j, r0, lane, c2, BN,
                       __float2half(pval[j][0]), __float2half(pval[j][1]),
                       __float2half(pval[j][2]), __float2half(pval[j][3]));
+#if FA_WS1
+    wgmma_wait0();   // O50：P 段已掩盖 GEMM2 的部分执行，这里等 dP 就绪
+#endif
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
       const float d0 = pval[j][0] * (dpacc[j * 4 + 0] - del_lo);
@@ -4607,10 +4628,16 @@ int main(int argc, char** argv) {
     else {
       const int base_m = (S + bm_sel - 1) / bm_sel;
       const long base = (long)base_m * H * B;
+      const int nt_cap = (S + bn_sel - 1) / bn_sel;
       int sp = 1;
       while (sp < 16 && base * (sp * 2) <= 528) sp *= 2;
-      const int nt_cap = (S + bn_sel - 1) / bn_sel;
-      while (sp > nt_cap && sp > 1) sp >>= 1;
+      // O50：至少把每个 m 块的 K 范围切成 ≈ 2 份（nt_cap/2），让 1 CTA/SM 的 MLA 有足够并发。
+      //   实测（`--mlaksplit` sweep）S1024H2 需 16（旧 target 只给 8）、S256H2 需 16（旧 `nblk`
+      //   封顶给 8）、S512H4 仍 8、S512H2 仍 16 ⇒ 四 shape 都取到各自最优；去掉封顶安全——
+      //   切得比 K tile 细只产生空切片（kernel 内 early-exit）。
+      int sp_min = 1;
+      while (sp_min < 16 && sp_min * 2 <= (nt_cap + 1) / 2) sp_min *= 2;
+      if (sp_min > sp) sp = sp_min;
       mlaksplit_eff = sp;
     }
   }

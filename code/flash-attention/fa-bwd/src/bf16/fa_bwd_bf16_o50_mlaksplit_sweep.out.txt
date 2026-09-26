@@ -1,0 +1,13 @@
+## O50 bf16 MLA main-only ksplit sweep (--mlaksplit), 200 iters
+=== b1_s1024_h2_d512_causal_bf16 ===
+  k=8   main 0.1408 ms
+  k=16  main 0.1365 ms
+  k=32  main 0.1417 ms
+=== b1_s512_h4_d512_causal_bf16 ===
+  k=8   main 0.0757 ms
+  k=16  main 0.0800 ms
+  k=32  main 0.0874 ms
+=== b1_s256_h2_d512_causal_bf16 ===
+  k=8   main 0.0204 ms
+  k=16  main 0.0192 ms
+  k=32  main 0.0233 ms

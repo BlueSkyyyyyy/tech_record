@@ -1,0 +1,10 @@
+## O50 fp16 wgmma2 GEMM1/2 wait-split A/B (same binaries, 300 iters, main ms)
+# ws1 = FA_WS1=1 (wait_group<1> then wait0), ws0 = original single wait0
+b1_s512_h16_d128_causal_fp16                  ws0 main 0.0315 ms
+b1_s512_h16_d128_causal_fp16                  ws1 main 0.0315 ms
+b1_s4096_h16_d128_causal_fp16                 ws0 main 0.9558 ms
+b1_s4096_h16_d128_causal_fp16                 ws1 main 0.9543 ms
+b1_s1024_h32_d128_kv4_causal_fp16             ws0 main 0.1801 ms
+b1_s1024_h32_d128_kv4_causal_fp16             ws1 main 0.1782 ms
+b1_s1024_h64_d128_kv1_causal_fp16             ws0 main 0.2868 ms
+b1_s1024_h64_d128_kv1_causal_fp16             ws1 main 0.2865 ms

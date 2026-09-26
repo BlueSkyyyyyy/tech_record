@@ -1,0 +1,46 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16
+B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=128 auto=(BM=64,BN=64,PIPE=1) sel=(BM=64,BN=64,PIPE=1)
+[O49] d128 8-warp = 1 (d128w=-1, grid=128, sm=132)
+[O38] lse k-split = 8 (auto)
+[O23] main backend = wgmma2(BN=64) | lse = wgmma (D=128 S=512) +ksplit
+[O43] wgmma2 k-split = 2
+[timing] total(3 kernels) 0.0684 ms  31.41 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0184 ms | main 0.0316 ms | convert 0.0183 ms
+[O24 A/B] delta old 0.0075 ms | warp 0.0035 ms (2.14x)
+[O8b A/B] lse O8 0.0640 ms | bal(单缓冲) 0.0504 ms (1.270x) | bal+cpasync(双缓冲) 0.0363 ms (1.762x)
+[O9 A/B] lse wgmma+SW128 0.0323 ms (vs bal+cpasync 1.124x, vs O8 1.981x)
+[O30 A/B] lse tma 0.0252 ms | wgmma 0.0323 ms (wgmma/tma 1.283x) | max_abs(tma-vs-wgmma)=0.000e+00
+[O38 A/B] lse split=1 0.0252 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O38 A/B] lse split=2 0.0185 ms (1.364x vs split1) | max_abs vs split1=9.537e-07
+[O38 A/B] lse split=4 0.0155 ms (1.628x vs split1) | max_abs vs split1=4.768e-07
+[O38 A/B] lse split=8 0.0149 ms (1.691x vs split1) | max_abs vs split1=4.768e-07
+[O38] best lse split=8 0.0149 ms (1.691x)
+[O6 A/B] main nopipe 0.1043 ms (20.60 TF) | pipe(KV both) 0.0555 ms (38.72 TF) | pipe2(K only) 0.0596 ms (36.04 TF) => nopipe/pipe 1.880x, nopipe/pipe2 1.749x
+[O48 A/B] main D=128 4w(128/2) 0.0611 ms | 8w(256/4) 0.0573 ms (1.067x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.384e-07/4.768e-07
+[O17 A/B] main mma(64,64,1) 0.0547 ms | O9b wgmma 0.0573 (0.954x) | O17 wgmma2(BM128) 0.0498 (1.099x) TF 43.2
+[O17b A/B] main O17(BM128) 0.0498 ms | O17b wgmma4(BM256,ovlp) 0.0913 ms (0.545x) | wgmma4(BM256,seq) 0.0831 ms (0.599x) TF 25.8
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/6.32e-03/9.46e-03 | wg2-vs-O9b dq/dk/dv=0.00e+00/6.32e-03/9.46e-03
+[O18 A/B] main O17 wg2(BN64) 0.0498 ms (43.2 TF) | O18 wg2b(BN128,split) 0.0480 ms (44.8 TF) => 1.037x | O18 wg2b(BN128,串行) 0.0486 ms => 1.025x | max|diff| wg2b-vs-wg2 dq/dk/dv=2.98e-07/1.22e-03/1.07e-03 | wg2bns-vs-wg2b 0.00e+00/3.05e-04/3.97e-04
+[O33 A/B] main wg2b(cp.async) 0.0480 ms (44.8 TF) | wg2b+TMA 0.0480 ms (44.7 TF) => 0.999x | max|diff| tma-vs-wg2b dq/dk/dv=0.00e+00/3.97e-04/3.05e-04
+[O35 A/B] main wg2(BN64,cp.async) 0.0498 ms (43.2 TF) | wg2(BN64)+TMA 0.0492 ms (43.6 TF) => 1.011x | max|diff| tma-vs-wg2 dq/dk/dv=0.00e+00/7.02e-04/6.41e-04
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 0.0506 ms (42.4 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.0498 ms (43.2 TF) => 1.018x | max|diff| dq/dk/dv=0.00e+00/7.63e-04/5.49e-04
+[O17b A/B] max|diff| wg4-vs-wg2 dq/dk/dv=0.00e+00/4.88e-03/8.67e-03 | wg4-vs-mma dq/dk/dv=0.00e+00/6.99e-03/1.10e-02
+[O17b A/B] max|diff| wg4seq-vs-wg4 dq/dk/dv=2.14e-03/4.03e-01/5.34e-04 | wg4seq-vs-wg2 dq/dk/dv=2.14e-03/4.02e-01/8.67e-03
+[O6c A/B] main sched0(原样) 0.0543 ms | sched1(交错) 0.0544 ms (0.999x) | sched2(逆序) 0.0546 ms (0.995x)
+[O5c A/B] main (64,32,2) 0.0583 ms (36.87 TF) | (64,64,2) 0.0544 (39.46) | (32,32,1) 0.0661 (32.51) | (32,32,2) 0.0675 (31.80) => best 1.070x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 0.0721 (29.80) | f4 0.0733 (29.29,-1.7%) | f2+PREL 0.0582 (36.87,+23.7%) | f4+PREL 0.0633 (33.91,+13.8%)
+  (BM=64,BN=64,PIPE=2): base 0.0659 (32.60) | f4 0.0676 (31.75,-2.6%) | f2+PREL 0.0544 (39.44,+21.0%) | f4+PREL 0.0569 (37.73,+15.7%)
+  (BM=32,BN=32,PIPE=1): base 0.0728 (29.52) | f4 0.0737 (29.15,-1.3%) | f2+PREL 0.0664 (32.33,+9.5%) | f4+PREL 0.0686 (31.31,+6.1%)
+  (BM=32,BN=32,PIPE=2): base 0.0737 (29.15) | f4 0.0754 (28.48,-2.3%) | f2+PREL 0.0675 (31.82,+9.1%) | f4+PREL 0.0711 (30.21,+3.6%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
+  dk   vs ref: max_abs=1.771e-03  max_rel=2.997e-01
+  dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+  fa_dq     vs ref: max_abs=1.679e-03  max_rel=2.666e-01
+  fa_dk     vs ref: max_abs=1.684e-03  max_rel=5.121e-01
+  fa_dv     vs ref: max_abs=1.899e-03  max_rel=2.719e-02
+  te_dq     vs ref: max_abs=1.716e-03  max_rel=2.439e-01
+  te_dk     vs ref: max_abs=2.287e-03  max_rel=5.140e-01
+  te_dv     vs ref: max_abs=1.899e-03  max_rel=3.699e-02

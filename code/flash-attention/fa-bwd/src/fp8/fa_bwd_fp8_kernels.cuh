@@ -172,6 +172,16 @@ struct Fp8Cfg {
 #define FA_BULKRED 0
 #endif
 
+  // O50：WGMMA 路径的 GEMM1(S=QKᵀ)/GEMM2(dP=dO·Vᵀ) 等待拆分。原实现两条 wgmma 各自
+  //   commit 后统一 `wait_group 0`，再一起做 fold（P 与 dS）。但 fold 的 **P 段只依赖
+  //   GEMM1 的累加器 sacc**、dS 段才依赖 GEMM2 的 dpacc；故改成提交后先 `wait_group 1`
+  //   （只等 GEMM1），用算 P 的那段 CUDA-core 工作（`fexp`/量化）**掩盖 GEMM2 的剩余执行**，
+  //   算完 P 再 `wait_group 0` 取 dP。数学/数值逐位不变（同一批 wgmma、同一累加器、
+  //   同一 fold 表达式，只改 wait 时机）。`-DFA_WS1=0` 退回原「单次 wait0」做 A/B。
+#ifndef FA_WS1
+#define FA_WS1 0
+#endif
+
   // O4b：Kt/Qt/dOt 三个「逐字节 scatter 写的转置副本」→ Kp/Qp/dOp 三个 **K 配对布局**
   //   （uint16：[K/2][HD]，元素 = 2 个相邻 K 值），用 `ldmatrix.x2.trans` 读 B 片段。
   //   * Qp（[BM/2][HD]）供 GEMM4 的 B=Qᵀ；dOp 供 GEMM3 的 B=dOᵀ；Kp（[BN/2][HD]）供 GEMM5。
@@ -414,6 +424,13 @@ __device__ __forceinline__ void wgmma_commit_fp8() {
 __device__ __forceinline__ void wgmma_wait0_fp8() {
 #if FA_FP8_HAS_WGMMA
   asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory");
+#endif
+}
+// O50：只等「最老的那组」wgmma 完成（pending ≤ N）。用于拆开 GEMM1/GEMM2 的等待。
+template <int N>
+__device__ __forceinline__ void wgmma_wait_group_fp8() {
+#if FA_FP8_HAS_WGMMA
+  asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(N) : "memory");
 #endif
 }
 // wgmma.m64n64k32 E4M3×E4M3（fp8 尾部操作数与 bf16 不同：`p, scaleA, scaleB` 三个；
@@ -2098,7 +2115,13 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                           reinterpret_cast<const char*>(Kcur), HD, sacc);
       wgmma_mn32_issue<1>(reinterpret_cast<const char*>(dOs),
                           reinterpret_cast<const char*>(Vs), HD, dpacc);
+#if FA_WS1
+      // O50：只等 GEMM1（S），让 GEMM2（dP）与下面算 P（P 段只读 sacc）的 CUDA-core
+      //   工作重叠；P 算完再 `wait0` 取 dP。`-DFA_WS1=0` 退回原单次 wait0。
+      wgmma_wait_group_fp8<1>();
+#else
       wgmma_wait0_fp8();
+#endif
       float pval[16];
 #pragma unroll
       for (int j = 0; j < 4; ++j)
@@ -2118,6 +2141,9 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
           pval[j * 4 + q] = p;
           Ps[r * PSS + c] = p;
         }
+#if FA_WS1
+      wgmma_wait0_fp8();   // O50：P 段已掩盖 GEMM2 的部分执行，这里等 dP 就绪
+#endif
 #pragma unroll
       for (int j = 0; j < 4; ++j)
 #pragma unroll

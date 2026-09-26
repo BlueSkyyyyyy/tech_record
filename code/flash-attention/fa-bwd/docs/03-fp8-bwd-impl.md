@@ -4571,3 +4571,58 @@ scripts/run.sh ... --causal --ksplit=1 [--d128w=0/1]                            
 
 原始输出：`src/fp8/fa_bwd_fp8_o49_auto_s512.out.txt`、`..._o49_ksplit1_s512.out.txt`、
 `..._o49_reg_s1024h32.out.txt`、`..._o49_onefile_s512.out.txt`；`docs/01` §14ab、`docs/01b` §6aj。
+
+## 50. O50-fp8：wgmma 主 kernel 的 GEMM1/2 等待拆分（**中性，默认关**）+ 墙的定向重测（第九十七轮）
+
+> 第九十六轮（O49）后，fp8 的「下一步候选 ②（wait+short）」一直被记为「硬件锁死」。本轮按
+> `docs/01` §14ac 的同一角度，给 fp8 的 `fa_bwd_fp8_mma_kernel`/`kvtma`/`qdtma` 加
+> `FA_WS1`（GEMM1(S)/GEMM2(dP) 等待拆分），并重测当前数据通路下 fp8 D=128 主 kernel 的墙。
+
+### 50.1 改动
+
+`fp8_mma_body` 的 WGMMA 分支里，GEMM1(`wgmma_mn32_issue<0>`, sacc) 与 GEMM2(`<1>`, dpacc) 各自
+commit 后，原为统一 `wgmma_wait0_fp8()` 再 fold；改成 `wgmma_wait_group_fp8<1>()`（只等 GEMM1）
+算 P/写 `Ps`，再 `wgmma_wait0_fp8()` 取 dP 算 dS。**数值逐位不变**。因实测中性，
+**fp8 默认 `FA_WS1=0`**（保持旗舰路径逐位不变；`-DFA_WS1=1` 可复现）。单/两文件 device
+逐字一致（`sync_onefile_device.py`）。
+
+### 50.2 性能（同 binary A/B，300 iters，total ms）
+
+| fp8 shape | ws0 | ws1 | 比 |
+|---|---|---|---|
+| S4096 H16 | 1.9029 | 1.9051 | 0.999× |
+| S512 H16 | 0.0995 | 0.1019 | 0.976× |
+| S1024 H32 | 0.3884 | 0.3852 | 1.008× |
+| GQA kv4 S1024 | 0.3578 | 0.3560 | 1.005× |
+| MLA d512 S1024H2 | 0.1897 | 0.1916 | 0.990× |
+
+⇒ **中性（±2% 噪声）**，与 O22/O29/O45 的「`wait` 不是靠指令重排/错开能解的、根因是 warp 数」
+一致：3 CTA/SM（12 warp/SM）下其它 warp 已能填掉 GEMM2 的执行，提前算 P 拿不到额外重叠。
+
+### 50.3 墙的定向重测（`fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>`，S=4096）
+
+| 指标 | 值 |
+|---|---|
+| Duration / DRAM / L1TEX / **L2** / Compute | 1.61ms / 4.26% / 70.40% / **78.05%** / 47.22% |
+| regs / smem / CTA/SM · Achieved Occ | 168 / 74.82KB / **3** · 18.35% |
+| Waves / Issued Ipc / Active Warps per Sched / No Eligible | 20.69 / 1.95 / 2.94 / 51.35% |
+| `lts__t_sectors_op_red`（占 L2 的 70.5%） | **114,524,160** |
+| `lts__t_sectors_op_read` / `op_write` | 33,817,369 / 13,951,898 |
+| stall `wait` 1.59 + `short_scoreboard` 1.29 + long 0.57 + barrier 0.42 | — |
+| smem 多余 wavefronts（op_ld 15.1M + op_st 15.5M，占 10%） | 14.9M |
+
+**结论不变**：墙 = **L2 的 dK/dV `red`（70.5%）+ `wait`/`short` 的 mma 依赖延迟 + 3 CTA/SM**；
+`red` 的 smem+TMA 替换（O42）、放大 BM（O19）、8-warp（O48/O49）、等待拆分（本轮）**全部中性/负**。
+要进一步只剩「4 CTA/SM（需 regs≤128 且 smem≤56.8KB，当前 168/74.8KB）」或「跨-tile 软流水
+（需 double-buffer P/dS，smem 无余量）」两条硬约束路。
+
+### 50.4 复现 / 原始输出
+
+```bash
+FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=300
+ARCH="" NVCC_FLAGS="$FLAGS -DFA_WS1=1" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu ...   # A/B
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o50_wait_split_ab.out.txt`、`src/fp8/fa_bwd_fp8_o50_ncu_main_s4096.out.txt`。

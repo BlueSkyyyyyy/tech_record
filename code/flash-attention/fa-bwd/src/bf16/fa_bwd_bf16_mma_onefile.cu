@@ -136,6 +136,10 @@ __device__ __forceinline__ uint64_t make_desc_sw128(uint32_t addr, uint32_t sbo_
 #else
 #define FA_HAS_WGMMA 0
 #endif
+// O50：wgmma2 的 GEMM1(S=QKᵀ)/GEMM2(dP=dO·Vᵀ) 等待拆分（见 fp16 同名开关）。
+#ifndef FA_WS1
+#define FA_WS1 1
+#endif
 __device__ __forceinline__ void wgmma_fence() {
 #if FA_HAS_WGMMA
   asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
@@ -149,6 +153,13 @@ __device__ __forceinline__ void wgmma_commit() {
 __device__ __forceinline__ void wgmma_wait0() {
 #if FA_HAS_WGMMA
   asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory");
+#endif
+}
+// O50：等「未完成 wgmma group 数 ≤ N」，用于拆开 GEMM1/GEMM2 的等待。
+template <int N>
+__device__ __forceinline__ void wgmma_wait_group() {
+#if FA_HAS_WGMMA
+  asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(N) : "memory");
 #endif
 }
 __device__ __forceinline__ void wgmma_m64n64k16_bf16(float (&d)[32], uint64_t da,
@@ -1600,7 +1611,11 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
     float sacc[32], dpacc[32];
     wgmma_mn64_issue(Qw, Kt, HD, sacc);
     wgmma_mn64_issue(dOw, Vs, HD, dpacc);
+#if FA_WS1
+    wgmma_wait_group<1>();   // O50：只等 GEMM1（S），GEMM2（dP）与下面算 P 重叠
+#else
     wgmma_wait0();
+#endif
     float pval[8][4];
 #pragma unroll
     for (int j = 0; j < 8; ++j)
@@ -1618,6 +1633,9 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
       pds_store_sw128(Pw, j, r0, lane, c2, BN,
                       __float2bfloat16(pval[j][0]), __float2bfloat16(pval[j][1]),
                       __float2bfloat16(pval[j][2]), __float2bfloat16(pval[j][3]));
+#if FA_WS1
+    wgmma_wait0();   // O50：P 段已掩盖 GEMM2 的部分执行，这里等 dP 就绪
+#endif
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
       const float d0 = pval[j][0] * (dpacc[j * 4 + 0] - del_lo);
@@ -3144,6 +3162,56 @@ __global__ void convert_kernel(const float* __restrict__ dq_acc,
 }
 
 
+#if defined(FA_WGMMA) && defined(FA_TMA)
+// O30/O34：为 LSE 的 Q/K 建 4D TMA 描述符（dims={D,S,H,B}，SW128，box={64,64,1,1}）。
+// globalStride（字节）：dim1(S) 的行距 = H*D*2，dim2(H) 的头距 = D*2，dim3(B) 的批距。
+// 与 fp16 的 `make_lse_map` 逐字节同构，仅 dtype 换成 BFLOAT16（同为 2B）。
+static CUtensorMap make_lse_map(const void* ptr, long long H, long long S, long long D,
+                                long long B) {
+  CUtensorMap map;
+  uint64_t dims[4] = {(uint64_t)D, (uint64_t)S, (uint64_t)H, (uint64_t)B};
+  uint64_t strides[3] = {(uint64_t)(H * D * 2), (uint64_t)(D * 2),
+                         (uint64_t)(S * H * D * 2)};
+  uint32_t box[4] = {64, 64, 1, 1};
+  uint32_t estr[4] = {1, 1, 1, 1};
+  CUresult r = cuTensorMapEncodeTiled(
+      &map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 4, (void*)ptr, dims, strides, box, estr,
+      CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+      CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  if (r != CUDA_SUCCESS) {
+    const char* s = "?";
+    cuGetErrorString(r, &s);
+    fprintf(stderr, "cuTensorMapEncodeTiled failed: %s\n", s);
+    std::exit(1);
+  }
+  return map;
+}
+
+// O34：主 kernel 用的大张量描述符（dims={D,S,H,B}，SW128）。box={64,8,1,1} —— 内维 128B
+// （64 个 bf16）= SW128 跨距，8 行 = 一个 1024B atom；逐 atom TMA 即可原样写出
+// `sw128_off` 的交织布局。与 fp16 的 `make_main_map` 逐字节同构，仅 dtype=BFLOAT16。
+static CUtensorMap make_main_map(const void* ptr, long long H, long long S, long long D,
+                                 long long B) {
+  CUtensorMap map;
+  uint64_t dims[4] = {(uint64_t)D, (uint64_t)S, (uint64_t)H, (uint64_t)B};
+  uint64_t strides[3] = {(uint64_t)(H * D * 2), (uint64_t)(D * 2),
+                         (uint64_t)(S * H * D * 2)};
+  uint32_t box[4] = {64, 8, 1, 1};
+  uint32_t estr[4] = {1, 1, 1, 1};
+  CUresult r = cuTensorMapEncodeTiled(
+      &map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 4, (void*)ptr, dims, strides, box, estr,
+      CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+      CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  if (r != CUDA_SUCCESS) {
+    const char* s = "?";
+    cuGetErrorString(r, &s);
+    fprintf(stderr, "cuTensorMapEncodeTiled(main) failed: %s\n", s);
+    std::exit(1);
+  }
+  return map;
+}
+#endif
+
 struct NpyF32 {
   std::vector<float> data;
   std::vector<long> shape;
@@ -3858,10 +3926,16 @@ int main(int argc, char** argv) {
     else {
       const int base_m = (S + bm_sel - 1) / bm_sel;
       const long base = (long)base_m * H * B;
+      const int nt_cap = (S + bn_sel - 1) / bn_sel;
       int sp = 1;
       while (sp < 16 && base * (sp * 2) <= 528) sp *= 2;
-      const int nt_cap = (S + bn_sel - 1) / bn_sel;
-      while (sp > nt_cap && sp > 1) sp >>= 1;
+      // O50：至少把每个 m 块的 K 范围切成 ≈ 2 份（nt_cap/2），让 1 CTA/SM 的 MLA 有足够并发。
+      //   实测（`--mlaksplit` sweep）S1024H2 需 16（旧 target 只给 8）、S256H2 需 16（旧 `nblk`
+      //   封顶给 8）、S512H4 仍 8、S512H2 仍 16 ⇒ 四 shape 都取到各自最优；去掉封顶安全——
+      //   切得比 K tile 细只产生空切片（kernel 内 early-exit）。
+      int sp_min = 1;
+      while (sp_min < 16 && sp_min * 2 <= (nt_cap + 1) / 2) sp_min *= 2;
+      if (sp_min > sp) sp = sp_min;
       mlaksplit_eff = sp;
     }
   }
