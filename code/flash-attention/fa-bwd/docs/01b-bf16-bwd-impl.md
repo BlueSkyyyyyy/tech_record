@@ -1760,6 +1760,38 @@ fp8 MLA（`docs/04` §7.7）快 ~5×。
 原始输出：`src/bf16/fa_bwd_bf16_o44_mla_sweep.out.txt`；单文件
 `src/bf16/fa_bwd_bf16_mma_onefile.cu` 同源。
 
+## 6ah. O46-bf16：MLA（D=512）mma 主 kernel 的「256 线程 / 8-warp 几何」（第九十三轮）—— **正结果，D=512 默认**
+
+把 fp16 O46（`docs/01` §14z）**逐字 dtype 参数化**到 bf16。O45 指出 MLA 主 kernel 是
+**1 CTA/SM（207KB smem）× 4 warp ⇒ 每 scheduler 1 warp**（ncu `No Eligible 85.7%`、
+`long 2.33 + wait 1.54 + short 0.76`），墙 = 并行度/延迟；唯一杠杆是 8-warp。
+
+改动同 fp16：`fa_bwd_bf16_mma_kernel<…>` 加模板参数 `NTH`（线程数）/`NWAR`（N 方向 warp 数），
+几何 `NWM=NTH/32/NWAR`、`GM1=BM/NWM, GN1=BN/NWAR, GMV=BN/NWM, GNV=NTW/NWAR, GMQ=BM/NWM,
+GNQ=NTW/NWAR`（`NTW≡128`），`wr=wid/NWAR`、`wc=wid%NWAR`；`kv_issue_async`/`qdo_issue_async`
+加默认 `NTH` 模板参数；kernel 内 `THREADS`→`NTH`。默认 `128/2` 与 O5b/O5c 逐字等价；MLA 走
+`256/4`。host 加 `--mla8w=0/1`（D=512/BM=32/PIPE=1 默认 1）与 `LAUNCH_CFG_W`；`run_varlen`
+保持 4-warp。单/两文件 device 逐字一致。
+
+**数值**（ours-vs-ref，bf16 causal，max_abs）与 O5c/§6ag **一致**：(256,2,512)
+`1.230e-2/9.875e-3/1.686e-2`；(512,4,512) `8.753e-3/1.082e-2/1.740e-2`；(1024,2,512)
+`5.838e-3/9.519e-3/1.568e-2`。MHA D=128 回归逐位不变（S512 9.001/12.61/13.65e-3、
+S4096 15.10/13.40/16.31e-3、GQA kv4 12.01/21.25/31.56e-3）。
+
+**性能**（CUDA event，同 binary/同 session `[O46 A/B]`，main-only）：
+
+| MLA case | 4-warp | 8-warp | 加速 | total 4w→8w |
+|---|---|---|---|---|
+| (1,256,2,512) | 0.0224 | **0.0205 ms** | 1.093× | 0.0534→0.0534 |
+| (1,512,4,512) | 0.0843 | **0.0761 ms** | 1.108× | 0.1287→0.1196 |
+| (1,1024,2,512) | 0.1514 | **0.1415 ms** | 1.070× | 0.1912→0.1898 |
+
+ncu 与 fp16 O46 同构（occ 6.1→12.4%、Ipc 0.57→0.65、regs 168→151、0 spill、墙仍 L2 red+延迟）。
+FA/TE 反向后端不支持 D=512。
+
+原始输出：`src/bf16/fa_bwd_bf16_o46_sweep.out.txt`；单文件
+`src/bf16/fa_bwd_bf16_mma_onefile.cu` 同源。
+
 ## 8. 下一步
 
 > **O36-bf16（§6z）已完成**：把 O34 的逐 atom 4D-TMA 从 BN=128 的 `wgmma2b` 补到 **BN=64 的

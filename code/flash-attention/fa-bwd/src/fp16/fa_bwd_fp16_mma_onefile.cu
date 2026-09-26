@@ -329,7 +329,7 @@ __device__ __forceinline__ void cp_async16(void* dst_smem, const void* src_gmem)
 //   * O6  ：DOK=DOV=true（一次发 K+V）。
 //   * O6b ：K 用双缓冲、在循环首预取（DOK=true,DOV=false）；V 只单缓冲，在 GEMM2 之后
 //            （V 的最后一次使用）才发下一 tile（DOK=false,DOV=true），省下一整个 V 缓冲。
-template <int HD, int BN, bool DOK = true, bool DOV = true>
+template <int HD, int BN, bool DOK = true, bool DOV = true, int NTH = THREADS>
 __device__ __forceinline__ void kv_issue_async(const __half* __restrict__ k,
                                                const __half* __restrict__ v, int j0, int S,
                                                int Hkv, int hkv, int b, int tid, __half* Kd,
@@ -338,7 +338,7 @@ __device__ __forceinline__ void kv_issue_async(const __half* __restrict__ k,
   constexpr int NU  = BN * HDV;  // 总 unit 数
   const int tk = (qbase >= 0) ? qbase : b * S;   // VARLEN：token 基址
 #pragma unroll
-  for (int u = tid; u < NU; u += THREADS) {
+  for (int u = tid; u < NU; u += NTH) {
     const int row = u / HDV, c8 = u % HDV;
     const int jg = j0 + row;
     if (jg < S) {
@@ -360,7 +360,7 @@ __device__ __forceinline__ void kv_issue_async(const __half* __restrict__ k,
 //   * 行越界（qi>=S）用普通 smem 写 0（与 K/V 一样，由后续 barrier 保证可见）。
 // 数值与标量路径**逐位相同**（搬的是同样的 half）。PIPE>=1 时 Q/dO 与 K/V 各提交一个
 // commit_group，循环首的 `cp.async.wait_group 0` 一并等待，从而让 Q/dO 的全局延迟与 K/V 重叠。
-template <int HD, int BM>
+template <int HD, int BM, int NTH = THREADS>
 __device__ __forceinline__ void qdo_issue_async(const __half* __restrict__ q,
                                                 const __half* __restrict__ do_, int m0, int S,
                                                 int H, int h, int b, int tid, __half* Qd,
@@ -369,7 +369,7 @@ __device__ __forceinline__ void qdo_issue_async(const __half* __restrict__ q,
   constexpr int NU  = BM * HDV;  // 总 unit 数
   const int tk = (qbase >= 0) ? qbase : b * S;   // VARLEN：token 基址
 #pragma unroll
-  for (int u = tid; u < NU; u += THREADS) {
+  for (int u = tid; u < NU; u += NTH) {
     const int row = u / HDV, c8 = u % HDV;
     const int qi = m0 + row;
     if (qi < S) {
@@ -3177,8 +3177,9 @@ fa_bwd_fp16_wgmma4_kernel(const __half* __restrict__ q, const __half* __restrict
 
 #endif  // FA_WGMMA
 
-template <int HD, int BM, int BN, int PIPE, bool R4 = false, bool PREL = true>
-__global__ void __launch_bounds__(THREADS, (BN > 32) ? 2 : 3)
+template <int HD, int BM, int BN, int PIPE, bool R4 = false, bool PREL = true,
+          int NTH = THREADS, int NWAR = WN>
+__global__ void __launch_bounds__(NTH, (NTH == 128) ? ((BN > 32) ? 2 : 3) : 1)
 fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
                        const __half* __restrict__ v, const __half* __restrict__ do_,
                        const float* __restrict__ delta, const float* __restrict__ lse,
@@ -3199,20 +3200,25 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
   constexpr int VSB = PIPE == 1 ? 2 * KVL : KVL;   // V 缓冲（只有 O6 双缓冲）
   constexpr int PSZ = (PIPE == 2) ? BM * LDS : BN * LDP;  // P 存储大小
 
-  // ---- 由 (BM,BN) 派生的 2×2 warp 网格几何（O5c：支持 BN=64 等更大 tile）----
-  // GEMM1/2（S/dP，输出 [BM][BN]）：每个 warp 吃 (BM/2)×(BN/2)
-  // GEMM3/4（dV/dK，输出 [BN][HD]）：每个 warp 吃 (BN/2)×(NTW/2)，NTW=WN*64=128（N-tile 宽）
-  // GEMM5（dQ，输出 [BM][HD]）：每个 warp 吃 (BM/2)×(NTW/2)
-  // 记 MT* 为每个 warp 的 m16/n8 tile 数。HD=128 时 NTW=HD ⇒ 与 O5c 逐字一致。
-  constexpr int NTW = WN * 64;                // N-tile 宽（GEMM3/4/5 每遍覆盖的 head_dim 列）
+  // ---- 由 (BM,BN) 派生的 warp 网格几何（O5c：支持 BN=64 等更大 tile；O46：warp 几何参数化）----
+  // GEMM1/2（S/dP，输出 [BM][BN]）：每个 warp 吃 (BM/NWM)×(BN/NWAR)
+  // GEMM3/4（dV/dK，输出 [BN][HD]）：每个 warp 吃 (BN/NWM)×(NTW/NWAR)，NTW=128（N-tile 宽）
+  // GEMM5（dQ，输出 [BM][HD]）：每个 warp 吃 (BM/NWM)×(NTW/NWAR)
+  // 记 MT* 为每个 warp 的 m16/n8 tile 数。默认 NTH=128/NWAR=2（2×2 网格）与 O5c 逐字一致。
+  // O46：MLA（HD=512）用 NTH=256/NWAR=4（2×4 网格）⇒ 同 1 CTA/SM 下每 scheduler 的 warp 数
+  //   从 1 翻到 2（O45 的墙），改善延迟隐藏；smem 与 grid 不变、dK/dV 归约字节不变。
+  constexpr int NWM = NTH / 32 / NWAR;        // warp 行数（M 方向）
+  static_assert(NWM * NWAR * 32 == NTH, "NTH 必须 = NWM×NWAR×32");
+  constexpr int NTW = 128;                    // N-tile 宽（GEMM3/4/5 每遍覆盖的 head_dim 列）
   constexpr int NDT = HD / NTW;               // N-tile 遍数（HD=128→1，HD=512→4）
-  constexpr int GM1 = BM / 2, GN1 = BN / 2;   // GEMM1/2 warp tile
-  constexpr int GMV = BN / 2, GNV = NTW / 2;  // GEMM3/4 warp tile（N-tile 内）
-  constexpr int GMQ = BM / 2, GNQ = NTW / 2;  // GEMM5 warp tile（N-tile 内）
+  constexpr int GM1 = BM / NWM, GN1 = BN / NWAR;   // GEMM1/2 warp tile
+  constexpr int GMV = BN / NWM, GNV = NTW / NWAR;  // GEMM3/4 warp tile（N-tile 内）
+  constexpr int GMQ = BM / NWM, GNQ = NTW / NWAR;  // GEMM5 warp tile（N-tile 内）
   constexpr int MTM1 = GM1 / 16, MTN1 = GN1 / 8;
   constexpr int MTMV = GMV / 16, MTNV = GNV / 8;
   constexpr int MTMQ = GMQ / 16, MTNQ = GNQ / 8;
-  static_assert(GM1 % 16 == 0 && GN1 % 8 == 0 && GMV % 16 == 0 && GMQ % 16 == 0,
+  static_assert(GM1 % 16 == 0 && GN1 % 8 == 0 && GMV % 16 == 0 && GNV % 8 == 0 &&
+                    GMQ % 16 == 0 && GNQ % 8 == 0,
                 "warp 几何需为 mma tile 的整数倍");
 
   extern __shared__ __align__(16) char smem[];
@@ -3257,7 +3263,7 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
   const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
-  const int wr = wid / WN, wc = wid % WN;
+  const int wr = wid / NWAR, wc = wid % NWAR;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * BM;
 
@@ -3265,9 +3271,9 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
   // O10：PIPE>=1 时用 16B `cp.async` 异步发 Q/dO（与 K/V 一起在循环首 `wait_group 0` 等待），
   // 让 Q/dO 的全局延迟与 K/V 重叠；PIPE==0 无流水语义，保持同步标量读。
   if constexpr (PIPE >= 1) {
-    qdo_issue_async<HD, BM>(q, do_, m0, len, H, h, b, tid, Qs, dOs, LD, qbase);
+    qdo_issue_async<HD, BM, NTH>(q, do_, m0, len, H, h, b, tid, Qs, dOs, LD, qbase);
   } else {
-    for (int i = tid; i < BM * HD; i += THREADS) {
+    for (int i = tid; i < BM * HD; i += NTH) {
       int r = i / HD, d = i % HD;
       int qi = m0 + r;
       __half qv = __float2half(0.f), ov = __float2half(0.f);
@@ -3297,14 +3303,14 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
     // O6：prologue 直接异步发起本切片首个 tile 的 K/V（不占寄存器）；Q/dO 的可见性由
     // 循环首的 `wait_group + __syncthreads` 一并保证（Q/dO 与 K/V 写不同 smem）。
     if (nt_end > nt_begin)
-      kv_issue_async<HD, BN, true, true>(k, v, nt_begin * BN, len, Hkv, hkv, b, tid,
+      kv_issue_async<HD, BN, true, true, NTH>(k, v, nt_begin * BN, len, Hkv, hkv, b, tid,
                                          Ks + st0 * KVL, Vs + st0 * KVL, LD, qbase);
   } else {
     // O6b：切片首 tile 的 K 发进双缓冲 stage、V 发进单缓冲 Vs（两个独立 commit_group）。
     if (nt_end > nt_begin) {
-      kv_issue_async<HD, BN, true, false>(k, v, nt_begin * BN, len, Hkv, hkv, b, tid,
+      kv_issue_async<HD, BN, true, false, NTH>(k, v, nt_begin * BN, len, Hkv, hkv, b, tid,
                                           Ks + st0 * KVL, Vs, LD, qbase);
-      kv_issue_async<HD, BN, false, true>(k, v, nt_begin * BN, len, Hkv, hkv, b, tid,
+      kv_issue_async<HD, BN, false, true, NTH>(k, v, nt_begin * BN, len, Hkv, hkv, b, tid,
                                           Ks + st0 * KVL, Vs, LD, qbase);
     }
   }
@@ -3350,7 +3356,7 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
       asm volatile("cp.async.wait_group 0;\n");
       __syncthreads();
       if (nt + 1 < nt_end)
-        kv_issue_async<HD, BN, true, true>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
+        kv_issue_async<HD, BN, true, true, NTH>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
                                Ks + ((nt + 1) & 1) * KVL, Vs + ((nt + 1) & 1) * KVL, LD, qbase);
     } else if constexpr (PIPE == 2) {
       // O6b：等本 tile 的 K[nt] 与上一轮发出的 V[nt] 落地（同一个 wait_group 0 覆盖）。
@@ -3359,11 +3365,11 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
       asm volatile("cp.async.wait_group 0;\n");
       __syncthreads();
       if (nt + 1 < nt_end)
-        kv_issue_async<HD, BN, true, false>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
+        kv_issue_async<HD, BN, true, false, NTH>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
                                Ks + ((nt + 1) & 1) * KVL, Vs, LD, qbase);
     } else {
       // ---- 载入 K/V 块（原版：同步标量读）----
-      for (int i = tid; i < BN * HD; i += THREADS) {
+      for (int i = tid; i < BN * HD; i += NTH) {
         int r = i / HD, d = i % HD;
         int jg = j0 + r;
         __half kv = __float2half(0.f), vv = __float2half(0.f);
@@ -3453,7 +3459,7 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
       // GEMM2 是 V 的唯一消费者；上面的 barrier 保证所有 warp 已读完 V[nt]，
       // 于是把 V[nt+1] 发进同一个单缓冲，其延迟由随后的 GEMM3/4/5 盖住。
       if (nt + 1 < nt_end)
-        kv_issue_async<HD, BN, false, true>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
+        kv_issue_async<HD, BN, false, true, NTH>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
                                             Ks, Vs, LD);
     }
 
@@ -3836,7 +3842,8 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // =============================================================================
 // PIPE=0：K/V 都不双缓冲；PIPE=1：K/V 都双缓冲；PIPE=2：只 K 双缓冲（V 单缓冲 + 后段预取）。
 // K/V 的 smem 份数：0→2（各 1）、1→4（各 2）、2→3（K 2 + V 1）。
-template <int HD, int BM, int BN, int PIPE, bool R4 = false, bool PREL = true>
+template <int HD, int BM, int BN, int PIPE, bool R4 = false, bool PREL = true,
+          int NTH = THREADS, int NWAR = WN>
 static void launch_bwd_mma(dim3 mg, const __half* q, const __half* k, const __half* v,
                            const __half* do_, const float* delta, const float* lse,
                            float* dq_acc, float* dk_acc, float* dv_acc, int S, int H, int Hkv,
@@ -3846,9 +3853,9 @@ static void launch_bwd_mma(dim3 mg, const __half* q, const __half* k, const __ha
   constexpr int pds = (PIPE == 2) ? 2 * BM * (BN + 8) : 2 * BN * (BM + 8) + BM * (BN + 8);
   constexpr int smem =
       (2 * BM * (HD + 8) + kvn * BN * (HD + 8) + pds) * (int)sizeof(__half);
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_mma_kernel<HD, BM, BN, PIPE, R4, PREL>,
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_mma_kernel<HD, BM, BN, PIPE, R4, PREL, NTH, NWAR>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-  fa_bwd_fp16_mma_kernel<HD, BM, BN, PIPE, R4, PREL><<<mg, THREADS, smem>>>(
+  fa_bwd_fp16_mma_kernel<HD, BM, BN, PIPE, R4, PREL, NTH, NWAR><<<mg, NTH, smem>>>(
       q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, sched,
       cu_seqlens, ksplit);
 }
@@ -4003,6 +4010,14 @@ static void launch_bwd_wgmma4(dim3 mg, const __half* q, const __half* k, const _
 }
 #endif
 
+// =============================================================================
+// VARLEN（变长 / cu_seqlens）自测入口（fp16，HD=128/512，causal/full）
+// =============================================================================
+// packed 布局：q/dO/dQ `[T,H,D]`；k/v/dK/dV `[T,Hkv,D]`；`cu_seqlens.npy`（fp32，B+1 个
+// token 前缀和）。LSE/主 kernel 用 `cu_seqlens[b]` 作 token 基址、`maxlen` 传 S；每个
+// `(b,h,mblk)` 只处理本序列内的 tile。ref_dq/dk/dv 也是 packed，逐元素比对。
+// HD=128 走 wgmma2 路径（causal 镜像配对 wgmma LSE，非 causal 走 O8 mma LSE）；HD=512（MLA）
+// 走 mma 主 kernel（BM=32/BN=32/PIPE=1，与定长 D=512 同几何）。FA/TE 变长在本机不可用 ⇒ 仅对 ref。
 #ifdef FA_WGMMA
 static int run_varlen(const std::string& dir, bool causal, int iters, int varlen_tma = 0,
                       int lse_split = 0, int wg2ksplit = -1) {
@@ -4080,7 +4095,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
   CUDA_CHECK(cudaMemcpy(d_o, oh.data(), nq * sizeof(__half), cudaMemcpyHostToDevice));
 
   // VARLEN TMA（本轮）：packed 布局 [T,H,D] 没有 batch 维，故描述符按 dims={D,T,H,1} 建
-  //   （复用 make_main_map，令 S=T、B=1）。kernel 侧用行坐标 `cu_seqlens[b]+row`、batch 0。
+  //   （复用 make_main_map，令 S=T、B=1，strides 自动为 {H*D*2, D*2, T*H*D*2}）。kernel 侧
+  //   用行坐标 `cu_seqlens[b]+row`、batch 坐标 0 选择序列。仅 fp16/HD=128。
 #if defined(FA_WGMMA) && defined(FA_TMA)
   const int varlen_tma_use = (D == 128) ? varlen_tma : 0;
   CUtensorMap vqmap, vkmap, vvmap, vdmap;
@@ -4332,9 +4348,15 @@ int main(int argc, char** argv) {
   // O44：MLA（HD=512）mma 主 kernel 的 N 方向 split-K（split-KV）。`-1`=自动（D==512 时按
   //   「填满一个波」切，D==128 恒 1）；`1`=关（A/B）；`>=2`=强制。
   int mlaksplit = -1;
-  int varlen = 0;   // VARLEN：packed [T,H,D] + cu_seqlens.npy（fp16/HD==128/causal/wgmma2）
-  // 本轮：VARLEN 主 kernel 是否用 4D-TMA 载入 Q/K/V/dO（仅 FA_WGMMA+FA_TMA、HD=128；
-  //   默认 0 opt-in：实测 varlen BN=64 主 kernel 用 TMA 中性/偏负，`--varlentma=1` 做 A/B）。
+  // O46：MLA（HD=512）mma 主 kernel 的 warp 几何。0=4 warp/128 线程（2×2 网格）；
+  //   1=8 warp/256 线程（2×4 网格，默认）——同 1 CTA/SM 下每 scheduler 的 warp 数 1→2，
+  //   实测 main 1.075–1.109×、端到端 1.03–1.07×，且 8-warp 实例 148–151 regs/0 spill
+  //   （4-warp 是 168 regs + spill）。`--mla8w=0` 供同 binary A/B。
+  int mla8w = 1;
+  int varlen = 0;   // VARLEN：packed [T,H,D] + cu_seqlens.npy（fp16/HD=128/causal/wgmma2）
+  // 本轮：VARLEN 主 kernel 是否用 4D-TMA 载入 Q/K/V/dO（仅 FA_WGMMA+FA_TMA 构建、HD=128）。
+  //   默认 0（opt-in）：本轮实测 varlen 的 BN=64 主 kernel 用 TMA 中性/偏负（同 O35），
+  //   与 cp.async 版做同 binary A/B 用 `--varlentma=1`。
   int varlen_tma = -1;
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
@@ -4370,6 +4392,8 @@ int main(int argc, char** argv) {
     else if (a == "--maintma") maintma_sel = 1;
     else if (a.rfind("--wg2ksplit=", 0) == 0) wg2ksplit = atoi(a.c_str() + 12);
     else if (a.rfind("--mlaksplit=", 0) == 0) mlaksplit = atoi(a.c_str() + 12);
+    else if (a.rfind("--mla8w=", 0) == 0) mla8w = atoi(a.c_str() + 8);
+    else if (a == "--mla8w") mla8w = 1;
     else if (a.rfind("--wg4=", 0) == 0) wg4_sel = atoi(a.c_str() + 6);
     else if (a == "--wg4") wg4_sel = 1;
     else if (a.rfind("--wg4seq=", 0) == 0) wg4seq_opt = atoi(a.c_str() + 9);
@@ -4604,6 +4628,31 @@ int main(int argc, char** argv) {
     }                                                                                      \
   } while (0)
 
+  // O46：8-warp（256 线程 / 2×4 网格）变体。仅 MLA D==512/BM=32/PIPE=1 使用（`--mla8w`）；
+  //   其余几何回退 4-warp 的 LAUNCH_CFG。同 binary A/B 用 `--mla8w=0/1`。
+#define LAUNCH_CFG_W(HD_, BM_, BN_, PIPE_, NTH_, NW_)                                      \
+  do {                                                                                     \
+    if (r4) {                                                                              \
+      if (prel)                                                                            \
+        launch_bwd_mma<HD_, BM_, BN_, PIPE_, true, true, NTH_, NW_>(                       \
+            g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,    \
+            Hkv, scale, (int)causal, sched, nullptr, mlaksplit_eff);                       \
+      else                                                                                 \
+        launch_bwd_mma<HD_, BM_, BN_, PIPE_, true, false, NTH_, NW_>(                      \
+            g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,    \
+            Hkv, scale, (int)causal, sched, nullptr, mlaksplit_eff);                       \
+    } else {                                                                               \
+      if (prel)                                                                            \
+        launch_bwd_mma<HD_, BM_, BN_, PIPE_, false, true, NTH_, NW_>(                      \
+            g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,    \
+            Hkv, scale, (int)causal, sched, nullptr, mlaksplit_eff);                       \
+      else                                                                                 \
+        launch_bwd_mma<HD_, BM_, BN_, PIPE_, false, false, NTH_, NW_>(                     \
+            g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,    \
+            Hkv, scale, (int)causal, sched, nullptr, mlaksplit_eff);                       \
+    }                                                                                      \
+  } while (0)
+
   auto launch_cfg = [&](int bm, int bn, int pp, bool r4, bool prel) {
     dim3 g((S + bm - 1) / bm, H, B);
     if (D == 512 && mlaksplit_eff > 1) g.x *= (unsigned)mlaksplit_eff;   // O44：split-KV 抬 grid
@@ -4613,8 +4662,12 @@ int main(int argc, char** argv) {
         if (pp == 1) LAUNCH_CFG(512, 64, 32, 1);
         else LAUNCH_CFG(512, 64, 32, 0);
       } else {
-        if (pp == 1) LAUNCH_CFG(512, 32, 32, 1);
-        else LAUNCH_CFG(512, 32, 32, 0);
+        if (pp == 1) {
+          if (mla8w) LAUNCH_CFG_W(512, 32, 32, 1, 256, 4);
+          else LAUNCH_CFG(512, 32, 32, 1);
+        } else {
+          LAUNCH_CFG(512, 32, 32, 0);
+        }
       }
       return;
     }
@@ -4633,6 +4686,7 @@ int main(int argc, char** argv) {
     }
   };
 #undef LAUNCH_CFG
+#undef LAUNCH_CFG_W
   const bool r4_sel = (r4_opt > 0);
   const bool prel_sel = (prel_opt >= 0) ? (prel_opt != 0) : true;
   // O16：默认关（实测中性 1.004×，且会改 dK/dV 的 atomic 次序、破坏历史逐位值）；保留 A/B。
@@ -4686,8 +4740,8 @@ int main(int argc, char** argv) {
   int lse_split_eff = lse_split;
   if (lse_split_eff <= 0) {
     long lg_grid = (long)lg_bal.x * H * B;
-    // O39：D=512（MLA，mma LSE，smem ~202KB ⇒ 1 CTA/SM）目标 `grid*split ≈ 132`（一个波）、
-    //   上限 16；D=128 的 TMA LSE 维持 O38 的「一波」目标 528、上限 8。
+    // O39：D=512（MLA，mma LSE，全 dtype 适用）目标 `grid*split ≈ 256`、上限 16；D=128 的
+    //   TMA LSE 维持 O38 的「一波」目标 528、上限 8。两者都只在小 grid 时生效。
     const int target = (D == 512) ? 132 : 528;
     const int cap = (D == 512) ? 16 : 8;
     int sp = 1;
@@ -5083,6 +5137,50 @@ int main(int argc, char** argv) {
 #endif
   }
 
+  // ---- O39 A/B（D=512/MLA/causal）：`lse_mma_kernel_bal<512>` 的 K 维 split + 二次归约 ----
+  //   split=1 逐位退回 O8b 原路径；split>1 各扫 1/split 的 K tile 切片后 merge。逐元素对拍
+  //   以 split=1 为基准（理论等价、只差 fp32 求和次序）。仅 causal（非 causal 走 O8 原版）。
+  if (causal && D == 512) {
+    std::vector<float> ref_l((size_t)B * S * H, 0.f);
+    float base_ms = 0.f, best = 1e9f;
+    int bestk = 1;
+    for (int sp = 1; sp <= 16; sp *= 2) {
+      auto launch_sp = [&]() {
+        if (sp == 1) {
+          lse_mma_kernel_bal<512, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
+                                                                        Hkv, scale);
+        } else {
+          dim3 gsp(lg_bal.x, lg_bal.y, (unsigned)(B * sp));
+          lse_mma_kernel_bal<512, 1><<<gsp, THREADS, kLseSmemBal1>>>(
+              d_q, d_k, d_lse, S, H, Hkv, scale, nullptr, d_lse_part, sp);
+          const long long nrows = (long long)B * S * H;
+          const int th = 256;
+          const long long bl = (nrows + th - 1) / th;
+          lse_split_merge_kernel<<<(unsigned)bl, th>>>(d_lse_part, d_lse, nrows, sp);
+        }
+      };
+      for (int i = 0; i < 3; ++i) launch_sp();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch_sp();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      t /= iters;
+      std::vector<float> got((size_t)B * S * H);
+      CUDA_CHECK(cudaMemcpy(got.data(), d_lse, got.size() * 4, cudaMemcpyDeviceToHost));
+      double e = 0.0;
+      if (sp == 1) { ref_l = got; base_ms = t; }
+      else
+        for (size_t i = 0; i < got.size(); ++i)
+          e = std::max(e, (double)std::fabs((double)got[i] - (double)ref_l[i]));
+      printf("[O39 A/B] lse(D=512) split=%d %.4f ms (%.3fx vs split1) | max_abs vs split1=%.3e\n",
+             sp, t, base_ms / t, e);
+      if (t < best) { best = t; bestk = sp; }
+    }
+    printf("[O39] best lse split=%d %.4f ms (%.3fx)\n", bestk, best, base_ms / best);
+  }
+
   double main_flops = 4.0 * (double)B * S * H * S * D;
   // ---- O6 A/B（仅 HD=128）：同 session 对比原版（PIPE=0）、K/V 双缓冲（PIPE=1）、只 K 双缓冲（PIPE=2）----
   if (D == 128) {
@@ -5431,6 +5529,41 @@ int main(int argc, char** argv) {
     printf("[O44 A/B] MLA main ksplit: 1 %.4f (%.2f) | 2 %.4f (%.2f, %.2fx) | "
            "4 %.4f (%.2f, %.2fx)\n",
            k1, tf(k1), k2, tf(k2), k1 / k2, k4, tf(k4), k1 / k4);
+  }
+
+  // ---- O46 A/B：MLA（D=512）主 kernel 的 warp 几何（4-warp 2×2 vs 8-warp 2×4，同 binary/session）----
+  if (D == 512 && causal) {
+    auto time_w = [&](bool w8, float* out_ms) {
+      dim3 g((S + 31) / 32, H, B);
+      g.x *= (unsigned)mlaksplit_eff;
+      auto launch = [&]() {
+        if (w8)
+          launch_bwd_mma<512, 32, 32, 1, false, true, 256, 4>(
+              g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+              Hkv, scale, (int)causal, 0, nullptr, mlaksplit_eff);
+        else
+          launch_bwd_mma<512, 32, 32, 1, false, true>(
+              g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+              Hkv, scale, (int)causal, 0, nullptr, mlaksplit_eff);
+      };
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    float w4 = 0.f, w8 = 0.f;
+    time_w(false, &w4);
+    time_w(true, &w8);
+    auto tf = [&](float ms) { return main_flops / (ms * 1e-3) / 1e12; };
+    printf("[O46 A/B] MLA main warp: 4w %.4f (%.2f) | 8w %.4f (%.2f, %.3fx)\n",
+           w4, tf(w4), w8, tf(w8), w4 / w8);
   }
 
   // ---- O7b A/B（仅 FA_WGMMA 构建、HD=128，`--det` 开启）：跨 CTA `atomicAdd` vs

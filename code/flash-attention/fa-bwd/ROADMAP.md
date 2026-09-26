@@ -2649,7 +2649,24 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第九十二轮）**：**O45——fp8 MLA（D=512）主 kernel 的墙复核 + bulkred/ILV 判决
+> **最新（第九十三轮）**：**O46——MLA（D=512）mma 主 kernel 的「256 线程 / 8-warp 几何」
+> （正结果，D=512 默认）**。落实 O45 判决的「唯一剩余杠杆」：把 `fa_bwd_{fp16,bf16}_mma_kernel`
+> 的 warp 网格从写死 2×2 改成由 **模板参数 `NTH`/`NWAR` 派生**（`NWM=NTH/32/NWAR`；
+> `NTW≡128` 与 warp 数解耦；`kv/qdo_issue_async` 加默认 `NTH`；kernel 内 `THREADS`→`NTH`）。
+> 默认 `128/2` 与 O5c **逐位等价**，MLA 走 `256/4`（2×4 网格）⇒ 同 1 CTA/SM 下每 scheduler 的
+> warp 数 **1→2**。ncu（S1024H2 main）：**occ 6.10%→12.36%、Ipc 0.57→0.65、
+> Duration 155.1→145.4µs**，regs 168（+152–296B spill）→**151（0 spill）**；墙仍是
+> **L2 red + 延迟**。main **1.070–1.108×**（S256H2 0.0221→0.0204、S512H4 0.0839→0.0757、
+> S1024H2 0.1512→0.1409ms）、total 1.00–1.07×；**数值 vs ref 与 4-warp 档逐值一致**
+> （fp16 MLA 1.638/2.516/1.987e-3；bf16 对应同值），D=128 MHA/GQA 回归**逐位不变**。
+> `--mla8w=0/1` 同 binary A/B；单/两文件 device 逐字一致（`sync_onefile_device.py`）。
+> 详见 `docs/01` §14z、`docs/01b` §6ah、`docs/08` §5.11。
+> **下一步候选**：① **把 8-warp 几何搬到 fp8 MLA**（fp8 是最重点且同为 128 线程/4 warp；
+> 需重排 `fp8_mma_body` 的 2×2 几何与 fold，多轮）；② fp16/bf16/fp8 **D=128** 主 kernel
+> 是否也能吃 8-warp（wgmma 已 256 线程；mma fallback / GQA 待测）；③ fp8 MLA 其余杠杆
+> （O42/O45：硬件资源锁死）。
+>
+> **（第九十二轮）**：**O45——fp8 MLA（D=512）主 kernel 的墙复核 + bulkred/ILV 判决
 > （负结果 + 文档更正）**。先核实 O44 的「下一步候选 ①」：**fp8 MLA 并没有漏掉 split**——
 > fp8 的 `D==512` auto ksplit 早在 **O29（第 70 轮）** 就设为 `target=S/2`，本轮实测
 > S1024H2 auto ksplit=16（grid 256×2）、main 0.2003ms；ksplit sweep 1/2/4/8/16/32 =
@@ -3354,6 +3371,13 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       short 0.76）⇒ 墙 = 并行度/延迟。判决：**bulkred 开放到 D=512 仍 0.839×**（与 O42 一致）、
       **`FA_ILV` 中性/`FA_ILV34` 0.966×**；K/V 载入天花板（探针）1.16×；2 CTA/SM 因 smem 207.9KB
       不可达。**剩余唯一杠杆 = 256 线程/8-warp 几何**（backlog）。详见 `docs/03` §46、`docs/08` §5.10。
+- [x] **O46（第九十三轮）fp16/bf16 MLA（D=512）mma 主 kernel 的「256 线程 / 8-warp 几何」
+      （正结果，D=512 默认）**：把 `fa_bwd_{fp16,bf16}_mma_kernel` 的 2×2 warp 网格改成由模板参数
+      `NTH`/`NWAR` 派生（`NWM=NTH/32/NWAR`、`NTW≡128` 解耦、`kv/qdo_issue_async` 加默认 `NTH`、
+      kernel 内 `THREADS`→`NTH`）；默认 `128/2` 逐位等价，MLA 用 `256/4`。ncu（S1024H2 main）：
+      **occ 6.10%→12.36%、Ipc 0.57→0.65、Duration 155.1→145.4µs**、regs 168（+spill）→**151（0 spill）**；
+      main 1.070–1.108×、total 1.00–1.07×，数值 vs ref 与 4-warp 逐值一致、D=128 回归逐位不变。
+      `--mla8w=0/1` A/B；单/两文件 device 逐字一致。详见 `docs/01` §14z、`docs/01b` §6ah。
 
 ## 灵感 / backlog
 
