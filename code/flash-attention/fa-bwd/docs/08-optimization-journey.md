@@ -397,6 +397,18 @@ smem 冲突 + 低 occ
      选 case / 选构建 / 编译复用 / 落盘 / 汇总 里任何一处靠手抄，都会随 case 数增长变成错误源。**
      详见 `docs/04` §34。
 
+26. **P3-3d（第 110 轮，工具链，正结果）**：**`fa_bwd_compare.py --doc-table` 直出 docs/04 分组表**
+     ——落实 §34 候选 ②。§1/§7 的数值表此前靠人工誊抄，已出现与实测脱节（§1.1 的 fp16 S4096
+     旧值来自更早混合构建）。新 `--doc-table` 把 `ours/FA/TE` 的 `max_abs` 按
+     **dtype × 家族（MHA / GQA-MQA / MLA / varlen）** 分组渲染成可直接内联的 markdown；
+     家族判定由 `meta.json`（`varlen`/`D≠128`/`Hkv≠H`）自动完成，`shape_str` 带 `Hkv`/`Dv`/
+     `causal|full`；默认只列两文件版、避免单文件重复列。`fa_bwd_run.py --doc-table` 顺手接上，
+     一键「跑 ours + 出表」。**实测全部 73 个 case**：fp8 全部 shape、bf16 MHA、fp16 MHA S512
+     与 §1/§7 **逐位一致**；唯一差异是 fp16 S4096 的 ours（旧 `1.499/1.572/2.225e-3` vs 现
+     `1.883/1.734/1.966e-3`，都在 fp16 噪声内、都 ≤ TE），**今后判据以 `--doc-table` 为准**。
+     **教训：文档与实测之间不该有手抄环节——把「产出表」做进 harness，文档的陈旧值会自动暴露
+     并收敛。** 详见 `docs/04` §35。本节为纯 harness 增量，无新 kernel/性能/ncu 数字。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。
