@@ -2097,3 +2097,22 @@ b3 total `0.4624 ms` 不变。单/两文件逐指标一致。
 
 **原始输出**：`src/bf16/fa_bwd_bf16_o58_varlen_causal_b{1,3}.out.txt`（默认）、
 `..._b{1,3}_legacy.out.txt`、`..._b3_onefile.out.txt`、`..._o58_varlen_full_b3.out.txt`。
+
+## 6as. O59-bf16（第一百零六轮，**正结果，定长 causal MLA 默认；含一处 device 竞争修复**）：把 O58 的 causal MLA LSE `cfg6` 推广到**定长**
+
+与 fp16 §15f / fp8 `docs/03` §55 同源（bf16 host 手工同步，device 经 `sync_onefile_device.py`
+核对 `identical: True`）：
+
+- 定长 `run_pre` 的 `D==512 && causal` 默认切 `lse_mma_kernel_bal<512,1,false,128,16>`
+  （PIPE1/LBN16，2 CTA/SM），拆分 auto 目标 132→**528**；`--lseocc=4` 旧默认、5=PIPE0/LBN32。
+- 修复镜像配对循环里 `nuse==0` 时 Q `cp.async` 不被 drain 的竞争（`lse_mma_kernel_bal` +
+  `..._wgmma`）：每 m 块末尾补 `cp.async.wait_group 0`。
+
+**结果（同 session A/B）**：LSE-only S256H2 0.0210→**0.0178（1.18×）**、S512H4 0.0223→
+**0.0185（1.20×）**、S1024H2 0.0282→**0.0272（1.04×）**；端到端 total 0.0535→**0.0504**、
+0.1188→**0.1162**、0.1874→**0.1832 ms**（1.02–1.06×）。数值 cfg6-vs-legacy 4.768e-7、
+ours-vs-ref 与历史同量级（S256H2 1.230e-2/9.875e-3/1.686e-2、S512H4 8.753e-3/1.082e-2/1.740e-2），
+**D=128 S4096 回归逐位不变**（1.510/1.340/1.631e-2）。单/两文件逐指标一致。
+
+原始输出 `src/bf16/fa_bwd_bf16_o59_{fixed_s1024h2,onefile_s1024h2}.out.txt`，
+汇总 `src/fa_bwd_o59_fixed_mla_shapes.out.txt`。

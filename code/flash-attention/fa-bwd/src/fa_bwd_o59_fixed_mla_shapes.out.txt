@@ -1,0 +1,80 @@
+==== O59 fixed-shape causal MLA: legacy (--lseocc=4) totals ====
+== fp16 b1_s256_h2_d512_causal_fp16 legacy ==
+[timing] total(3 kernels) 0.0534 ms  5.02 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0235 ms | main 0.0195 ms | convert 0.0103 ms
+== fp16 b1_s512_h4_d512_causal_fp16 legacy ==
+[timing] total(3 kernels) 0.1180 ms  18.20 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0252 ms | main 0.0759 ms | convert 0.0170 ms
+== fp16 b1_s1024_h2_d512_causal_fp16 legacy ==
+[timing] total(3 kernels) 0.1884 ms  22.79 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0322 ms | main 0.1373 ms | convert 0.0189 ms
+== bf16 b1_s256_h2_d512_causal_bf16 legacy ==
+[timing] total(3 kernels) 0.0535 ms  5.02 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0237 ms | main 0.0194 ms | convert 0.0103 ms
+== bf16 b1_s512_h4_d512_causal_bf16 legacy ==
+[timing] total(3 kernels) 0.1188 ms  18.08 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0254 ms | main 0.0758 ms | convert 0.0176 ms
+== bf16 b1_s1024_h2_d512_causal_bf16 legacy ==
+[timing] total(3 kernels) 0.1874 ms  22.92 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0320 ms | main 0.1375 ms | convert 0.0178 ms
+== fp8 b1_s256_h2_d512_causal_fp8 legacy ==
+[timing] total(quant+pre+main+cvt) 0.0720 ms  3.73 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0121 ms | preprocess 0.0268 ms | main 0.0237 ms | convert 0.0095 ms (cvt_on=0)
+== fp8 b1_s512_h4_d512_causal_fp8 legacy ==
+[timing] total(quant+pre+main+cvt) 0.1340 ms  16.03 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0144 ms | preprocess 0.0291 ms | main 0.0721 ms | convert 0.0184 ms (cvt_on=0)
+== fp8 b1_s1024_h2_d512_causal_fp8 legacy ==
+[timing] total(quant+pre+main+cvt) 0.1882 ms  22.83 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0145 ms | preprocess 0.0352 ms | main 0.1200 ms | convert 0.0184 ms (cvt_on=0)
+
+==== O59 fixed-shape causal MLA: cfg6 (default) totals + LSE A/B ====
+== fp16 b1_s256_h2_d512_causal_fp16 cfg6 ==
+[timing] total(3 kernels) 0.0502 ms  5.35 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0204 ms | main 0.0193 ms | convert 0.0105 ms
+[O59 A/B] LSE MLA legacy(sp=4) 0.0211 ms | cfg6(sp=4) 0.0179 ms (1.184x) | max_abs(cfg6-vs-legacy)=4.768e-07
+== fp16 b1_s512_h4_d512_causal_fp16 cfg6 ==
+[timing] total(3 kernels) 0.1146 ms  18.73 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0216 ms | main 0.0757 ms | convert 0.0174 ms
+[O59 A/B] LSE MLA legacy(sp=8) 0.0222 ms | cfg6(sp=8) 0.0185 ms (1.197x) | max_abs(cfg6-vs-legacy)=4.768e-07
+== fp16 b1_s1024_h2_d512_causal_fp16 cfg6 ==
+[timing] total(3 kernels) 0.1836 ms  23.39 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0301 ms | main 0.1364 ms | convert 0.0172 ms
+[O59 A/B] LSE MLA legacy(sp=8) 0.0283 ms | cfg6(sp=16) 0.0272 ms (1.040x) | max_abs(cfg6-vs-legacy)=4.768e-07
+== bf16 b1_s256_h2_d512_causal_bf16 cfg6 ==
+[timing] total(3 kernels) 0.0504 ms  5.33 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0206 ms | main 0.0194 ms | convert 0.0104 ms
+[O59 A/B] LSE MLA legacy(sp=4) 0.0210 ms | cfg6(sp=4) 0.0178 ms (1.183x) | max_abs(cfg6-vs-legacy)=4.768e-07
+== bf16 b1_s512_h4_d512_causal_bf16 cfg6 ==
+[timing] total(3 kernels) 0.1162 ms  18.48 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0215 ms | main 0.0758 ms | convert 0.0189 ms
+[O59 A/B] LSE MLA legacy(sp=8) 0.0223 ms | cfg6(sp=8) 0.0185 ms (1.204x) | max_abs(cfg6-vs-legacy)=4.768e-07
+== bf16 b1_s1024_h2_d512_causal_bf16 cfg6 ==
+[timing] total(3 kernels) 0.1832 ms  23.45 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0300 ms | main 0.1366 ms | convert 0.0166 ms
+[O59 A/B] LSE MLA legacy(sp=8) 0.0282 ms | cfg6(sp=16) 0.0272 ms (1.037x) | max_abs(cfg6-vs-legacy)=4.768e-07
+== fp8 b1_s256_h2_d512_causal_fp8 cfg6 ==
+[timing] total(quant+pre+main+cvt) 0.0649 ms  4.14 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0112 ms | preprocess 0.0221 ms | main 0.0234 ms | convert 0.0082 ms (cvt_on=0)
+[O39 A/B] lse(D=512) split=1 0.0455 ms (1.000x vs split1) | max_abs vs split1=0.000e+00\n[O39 A/B] lse(D=512) split=2 0.0314 ms (1.450x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=4 0.0236 ms (1.931x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=8 0.0243 ms (1.869x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=16 0.0275 ms (1.655x vs split1) | max_abs vs split1=4.768e-07\n[O39] best lse split=4 0.0236 ms (1.931x)\n[O59 A/B] LSE MLA legacy(sp=4) 0.0236 ms | cfg6(sp=4) 0.0197 ms (1.195x) | max_abs(cfg6-vs-legacy)=4.768e-07
+== fp8 b1_s512_h4_d512_causal_fp8 cfg6 ==
+[timing] total(quant+pre+main+cvt) 0.1280 ms  16.77 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0143 ms | preprocess 0.0247 ms | main 0.0717 ms | convert 0.0174 ms (cvt_on=0)
+[O39 A/B] lse(D=512) split=1 0.0787 ms (1.000x vs split1) | max_abs vs split1=0.000e+00\n[O39 A/B] lse(D=512) split=2 0.0487 ms (1.618x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=4 0.0325 ms (2.423x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=8 0.0255 ms (3.084x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=16 0.0308 ms (2.559x vs split1) | max_abs vs split1=4.768e-07\n[O39] best lse split=8 0.0255 ms (3.084x)\n[O59 A/B] LSE MLA legacy(sp=8) 0.0256 ms | cfg6(sp=8) 0.0212 ms (1.206x) | max_abs(cfg6-vs-legacy)=4.768e-07
+== fp8 b1_s1024_h2_d512_causal_fp8 cfg6 ==
+[timing] total(quant+pre+main+cvt) 0.1808 ms  23.76 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0135 ms | preprocess 0.0294 ms | main 0.1192 ms | convert 0.0187 ms (cvt_on=0)
+[O39 A/B] lse(D=512) split=1 0.1443 ms (1.000x vs split1) | max_abs vs split1=0.000e+00\n[O39 A/B] lse(D=512) split=2 0.0812 ms (1.776x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=4 0.0487 ms (2.963x vs split1) | max_abs vs split1=9.537e-07\n[O39 A/B] lse(D=512) split=8 0.0335 ms (4.303x vs split1) | max_abs vs split1=9.537e-07\n[O39 A/B] lse(D=512) split=16 0.0312 ms (4.621x vs split1) | max_abs vs split1=9.537e-07\n[O39] best lse split=16 0.0312 ms (4.621x)\n[O59 A/B] LSE MLA legacy(sp=16) 0.0312 ms | cfg6(sp=16) 0.0261 ms (1.196x) | max_abs(cfg6-vs-legacy)=4.768e-07
+
+==== fp8 onefile verification (S512H4 / S1024H2) ====
+src/fp8/fa_bwd_fp8_o59_onefile_s512h4.out.txt:[timing] total(quant+pre+main+cvt) 0.1246 ms  17.24 TFLOPS (bwd FLOPs=4BS^2HD)
+src/fp8/fa_bwd_fp8_o59_onefile_s512h4.out.txt:[timing] quant 0.0136 ms | preprocess 0.0241 ms | main 0.0717 ms | convert 0.0151 ms
+src/fp8/fa_bwd_fp8_o59_onefile_s512h4.out.txt:[O59 A/B] LSE MLA legacy(sp=8) 0.0255 ms | cfg6(sp=8) 0.0209 ms (1.219x) | max_abs(cfg6-vs-legacy)=4.768e-07
+src/fp8/fa_bwd_fp8_o59_onefile_s512h4.out.txt:  dq   vs ref: max_abs=2.415e-01  max_rel=1.803e+02
+src/fp8/fa_bwd_fp8_o59_onefile_s512h4.out.txt:  dk   vs ref: max_abs=2.992e-01  max_rel=6.416e+01
+src/fp8/fa_bwd_fp8_o59_onefile_s512h4.out.txt:  dv   vs ref: max_abs=4.481e-01  max_rel=9.164e+01
+src/fp8/fa_bwd_fp8_o59_onefile_s1024h2.out.txt:[timing] total(quant+pre+main+cvt) 0.1803 ms  23.83 TFLOPS (bwd FLOPs=4BS^2HD)
+src/fp8/fa_bwd_fp8_o59_onefile_s1024h2.out.txt:[timing] quant 0.0135 ms | preprocess 0.0293 ms | main 0.1191 ms | convert 0.0182 ms
+src/fp8/fa_bwd_fp8_o59_onefile_s1024h2.out.txt:[O59 A/B] LSE MLA legacy(sp=16) 0.0312 ms | cfg6(sp=16) 0.0263 ms (1.187x) | max_abs(cfg6-vs-legacy)=4.768e-07
+src/fp8/fa_bwd_fp8_o59_onefile_s1024h2.out.txt:  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+src/fp8/fa_bwd_fp8_o59_onefile_s1024h2.out.txt:  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+src/fp8/fa_bwd_fp8_o59_onefile_s1024h2.out.txt:  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01

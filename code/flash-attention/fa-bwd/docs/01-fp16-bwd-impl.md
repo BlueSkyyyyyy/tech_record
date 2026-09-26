@@ -4178,3 +4178,32 @@ ARCH="" NVCC_FLAGS="$F" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
 `..._b{1,3}_legacy.out.txt`（旧默认）、`..._b3_onefile.out.txt`（单文件）、
 `..._o58_varlen_full_b3.out.txt`（full 回归）、`..._o58_ncu_lse_{cfg6,legacy}_b3.out.txt`；
 bf16 对应 `src/bf16/fa_bwd_bf16_o58_*`。
+
+## 15f. O59-fp16（第一百零六轮，**正结果，定长 causal MLA 默认；含一处 device 竞争修复**）：把 O58 的 causal MLA LSE `cfg6` 推广到**定长**
+
+O58 的 cfg6 只落在 varlen 的 `D==512 && causal` 分支；**定长** `run_pre` 一直用旧默认
+`<512,1>`（PIPE1/LBN64，1 CTA/SM）。本项把定长 causal MLA 也默认切到
+`<512,1,false,128,16>`（PIPE1/LBN16，2 CTA/SM），拆分 auto 目标由 132 抬到 528，
+`--lseocc=4` 退回旧默认、5=PIPE0/LBN32。
+
+**附带修复一处 latent `cp.async` 竞争**（device，三 dtype 同修）：镜像配对循环里当某切片
+`nuse==0` 时，循环体的 `cp.async.wait_group 0` 不执行 ⇒ 本 m 块发出的 Q 拷贝从不被 drain，
+下一 m 块的 `issue_q` 又写同一 `Qs`，两异步拷贝竞争 ⇒ cfg6（LBN=16 + 大 ksplit，空切片多）
+出现 ~1e-2 的 LSE 非确定性抖动。在每个 m 块末尾切块前补
+`if constexpr (PIPE) asm volatile("cp.async.wait_group 0;\n");` 后，`cfg6 vs cfg6` 逐位为 0、
+`cfg6 vs legacy` = 4.768e-7。`lse_mma_kernel_bal` 与 `..._wgmma` 两个 kernel 同修，单文件经
+`sync_onefile_device.py` 同步。
+
+**结果（同 session，同 binary A/B）**：LSE-only S256H2 0.0211→**0.0179（1.18×）**、
+S512H4 0.0222→**0.0185（1.20×）**、S1024H2 0.0283→**0.0272（1.04×）**；端到端 total
+0.0534→**0.0502**、0.1180→**0.1146**、0.1884→**0.1836 ms**（1.02–1.06×）。
+ncu（S512H4）：legacy 199.68KB / 1 CTA/SM / Duration 19.97µs → cfg6 99.84KB / **2 CTA/SM** /
+**16.19µs（1.23×）**、Compute 14.5→20.1%。
+
+**数值**：cfg6-vs-legacy LSE 4.768e-7；ours-vs-ref 与历史逐位一致（S256H2 1.638/1.582/1.753e-3、
+S512H4 2.516/2.916/1.724e-3、S1024H2 1.987/1.712/1.848e-3）；**D=128 S4096 回归逐位不变**
+（1.883/1.734/1.966e-3）。单/两文件逐指标一致。
+
+实现/证据与 fp8 版同源，详见 `docs/03` §55。原始输出
+`src/fp16/fa_bwd_fp16_o59_{fixed_s1024h2,onefile_s1024h2}.out.txt`、
+`..._o59_ncu_lse_{cfg6,legacy}_s512h4.out.txt`，汇总 `src/fa_bwd_o59_fixed_mla_shapes.out.txt`。
