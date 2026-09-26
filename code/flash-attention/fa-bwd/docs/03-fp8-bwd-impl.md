@@ -4242,3 +4242,116 @@ ARCH=sm_90 scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --varlen --dir=.../varlen_b
 `src/fp8/fa_bwd_fp8_bulkred_smoke.out.txt`（机制冒烟）、
 `src/fp8/fa_bwd_fp8_o42_sm90_varlen_d512.out.txt`（纯 sm_90 构建修复验证）、
 `src/fp8/fa_bwd_fp8_mma_onefile_o42_s512.out.txt`（单文件默认档）。
+
+## 46. O45：fp8 MLA（D=512）主 kernel 的墙复核 + bulkred/ILV 判决（第九十二轮）—— **负结果 + 文档更正**
+
+> 第 91 轮（O44）的 roadmap「下一步候选 ①」称：**fp8 MLA 仍 1 CTA/SM 且没吃到 split**、
+> fp16 MLA total 比 fp8 MLA 快 4.9–5.1×。本轮先把这个说法核实，再把候选 ①/②/③ 里
+> 能在单轮内做的两条（bulkred 开放到 D=512、mma 交错）判决掉。
+
+### 46.1 复核：fp8 MLA 早已吃到 split-KV（更正 §7.7/§14y 的旧结论）
+
+fp8 的 `D==512` 主 kernel（`fa_bwd_fp8_mma_kernel<512,64,32,false,false,true,true>`）在 **O29
+（第 70 轮）** 就把 auto ksplit 标成 **`target=S/2`**；本轮实测确认它确实生效：
+
+| MLA case | base grid | auto ksplit | grid | main (ms) | total (ms) | vs ref dq/dk/dv (max_abs) |
+|---|---|---|---|---|---|---|
+| (1,256,2,512) | 8 | 16 | 64×2 | 0.0436 | 0.0896 | 2.36/2.29/3.44e-1 |
+| (1,512,4,512) | 32 | 8 | 64×4 | 0.1217 | 0.1996 | 2.42/2.99/4.48e-1 |
+| (1,1024,2,512) | 32 | 16 | 256×2 | 0.2003 | 0.2835 | 2.23/3.34/3.60e-1 |
+
+ksplit sweep（S1024H2，main）：k=1/2/4/8/16/32 = 1.016/0.517/0.264/0.242/**0.201**/0.229 ms ⇒
+**auto=16 就是最优**（与 O44 的 `grid*sp≈528` 结论同源）。对比 fp16 MLA（§14y：0.0222/0.0840/0.1524），
+fp8 MLA 仅慢 **1.3–2.0×**，并非旧文档写的 4.9–5.1×——那处是拿 O44 去比 **P5-3 时代（第 21 轮）**
+的旧数字（`§7.7` 0.308/0.591/1.022ms，当时还没 O29 的 D=512 标定、也没 O39/O41）。
+**修正：候选项 ①「fp8 MLA 吃 split」= 已完成（O29）；fp8/fp16 MLA 的差距是 1.3–2×。**
+
+### 46.2 ncu 复核：bound = **1 warp/scheduler 的延迟**，不是带宽/算力
+
+`fa_bwd_fp8_mma_kernel<512,64,32,...>`，S1024H2，`--set full -c 1`：
+
+| 指标 | 值 | 指标 | 值 |
+|---|---|---|---|
+| Duration | 245.5 µs | DRAM / L1TEX / L2 / Compute | **2.18 / 19.83 / 29.20 / 11.90 %** |
+| Dynamic smem / regs | **207.87 KB / 255** | Achieved Occupancy | **6.25%**（1 CTA/SM × 4 warp） |
+| Waves Per SM | 3.88 | Active Warps / Scheduler | **1.00** |
+| No Eligible | **85.67%** | Executed Ipc Active | 0.57 |
+
+每 issued-inst 的 stall（同 session，default 档）：**`long_scoreboard` 2.33** + `wait` 1.54 +
+`short_scoreboard` 0.76，其余 ≈0（barrier 0.07、mio/lg/math 0）。⇒ 4 个 warp 分到 4 个
+scheduler（每人 1 warp），任何 stall 都无其它 warp 可填；**墙是每个 scheduler 只有 1 个 warp**，
+而 smem 207.9KB 把 CTA/SM 锁死为 1，唯一的杠杆是**每个 CTA 放更多 warp（256 线程）**。
+
+### 46.3 天花板（探针）：K/V 全局载入值 ~16%
+
+见 `agent_skills/kernel-opt.md`「短路某段重载看天花板」。新增 `-DFA_SKIPKVL=1`（探针，结果
+无意义）跳过 per-tile 的 K/V 全局读 + 配对重建（GEMM 仍读 smem ⇒ 不会被 DCE）：
+
+| S1024H2 | 正常 | SKIPKVL | 倍数 |
+|---|---|---|---|
+| main | 0.2006 ms | **0.1729 ms** | **1.160×** |
+| total | 0.2850 ms | 0.2574 ms | 1.107× |
+
+fp8 D=512 的 K/V 目前是**循环末同步载入**（`kv_load_pair`，因为 HD=512 的寄存器预取需
+`NPU=16×4=64` regs、`kPrefetch=false`），没有 fp16 O6/O6b 那样的 `cp.async` 流水。天花板
+1.16× 不大，且加 **V 双缓冲**放不下（K 双缓冲 +16.9KB 后仅剩 7.7KB，见 `Fp8Cfg` 的 203KB 构成），
+故 cp.async K/V 流水**列 backlog**，不作为本轮增量。
+
+### 46.4 判决 A：bulk-reduce 开放到 D=512 —— **仍是负结果（0.84×）**
+
+把 O42 的 `kBulkRed` 条件从 `TMA && WGMMA && HD==128` 放宽到 **HD=512 的 mma 路径**
+（D=512 的 L1/TEX 只有 19.8%，staging 的 smem 往返看似有空间）：
+
+| S1024H2 | 默认（red） | `-DFA_BULKRED=1` | 比 |
+|---|---|---|---|
+| main | 0.2003 ms | **0.2386 ms** | **0.839×** |
+| total | 0.2835 ms | 0.3237 ms | 0.876× |
+
+数值逐位不变（2.232/3.337/3.602e-1）。⇒ **即使 L1/TEX 有大量余量，bulkred 依旧慢 16%**，
+说明 O42 的失败不只是「L1/TEX 墙」——把便宜且已 coalesced 的 `red` 换成
+「逐元素 smem staging 写 + 128 条 256B 的 `cp.reduce.async.bulk`」本身就是净亏（staging 的
+smem 往返 + 小粒度 TMA 的固定开销）。默认仍 `FA_BULKRED=0`（opt-in）。
+
+### 46.5 判决 B：`FA_ILV` / `FA_ILV34`（mma 指令级交错）—— **中性 / 负**
+
+| S1024H2 main | 默认 | `-DFA_ILV=1`（GEMM1/2） | `-DFA_ILV34=1`（GEMM3/4） |
+|---|---|---|---|
+| ms | 0.2003 | 0.1996（1.004×） | 0.2074（**0.966×**） |
+
+1 warp/scheduler 下，把一个 warp 里的两条 mma 交错也不能换来延迟隐藏（`wait` 不是靠指令
+重排能解的，根因是 warp 数不够）。与 D=128 的 O22/O29 结论一致。
+
+### 46.6 剩余杠杆核算：2 CTA/SM 不可达，唯一未证伪的是 8-warp 几何
+
+`Fp8Cfg<512,64,32>::smem_bytes = 207872 B` 构成：Qs/dOs `64×528`×2 = 67.6 KB、
+Qp/dOp `32×520×2`×2 = 66.6 KB、Ks/Vs `32×528`×2 = 33.8 KB、Kp `16×520×2` = 16.6 KB、
+dS2 3.1 KB、Ps/Ss `2×64×37×4` = 18.9 KB、scales 1.3 KB。要 2 CTA/SM 需 ≤ 116.2 KB，**即使把
+Qp/dOp/Kp 三个配对副本（83 KB）全消也仍 >124 KB**（且 O4b 已证 fp8 里消不掉）⇒
+候选 ②「MLA 冲 2 CTA/SM」单轮不可行（同 O42 §45.7 的核算）。
+
+**唯一未证伪的杠杆 = 256 线程 / 8 warp（每 scheduler 2 warp）**：把当前 2×2 的 warp 几何
+（GEMM1/2 `wr*(BM/2)`、GEMM3/4 `wr*(BN/2)`、PREL 行映射 `r=wr*32+…`）按 fp16 O6c 的方式
+参数化、改成 4×2 之类。它触及 GEMM1–5 的全部 epilogue 映射，**列 backlog**（多轮）。
+
+### 46.7 复现 / 原始输出
+
+```bash
+FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+# 默认档（3 MLA shape + ksplit/lsesplit sweep）
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8 --iters=50
+# bulkred 判决（开放到 D=512）
+ARCH="" NVCC_FLAGS="$FLAGS -DFA_BULKRED=1" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=...
+# ILV / ILV34 判决
+ARCH="" NVCC_FLAGS="$FLAGS -DFA_ILV=1"    scripts/run.sh ...     # 或 -DFA_ILV34=1
+# K/V 天花板探针（结果无意义）
+ARCH="" NVCC_FLAGS="$FLAGS -DFA_SKIPKVL=1" scripts/run.sh ... --dir=...
+# ncu：full + stall 比例
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --launch-count 1 --kernel-name regex:fa_bwd_fp8_mma_kernel -- --dir=... --iters=5
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o45_sweep.out.txt`（3 shape + ksplit/lsesplit sweep +
+bulkred + ILV/ILV34 + SKIPKVL 探针）、`..._o45_ncu_mla_s1024h2.out.txt`（`--set full`）、
+`..._o45_ncu_stall_mla_s1024h2.out.txt`（stall 比例）。单文件 `fa_bwd_fp8_mma_onefile.cu`
+经 `sync_onefile_device.py` 同步（device 逐字一致），S1024H2 main 0.2001ms、数值逐位相同。

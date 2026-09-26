@@ -1,0 +1,59 @@
+=== O45 sweep: fp8 MLA (D=512) main-kernel wall re-check + bulkred/ILV negatives ===
+date: 2026-09-26T22:10:55+08:00
+
+--- 1) baseline default (3 MLA shapes) + ksplit sweep (S1024H2) + lsesplit sweep ---
+### b1_s256_h2_d512_causal_fp8
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 64 x 2 x 1  (ksplit=16, base_grid=8)
+[timing] total(quant+pre+main+cvt) 0.0896 ms  3.00 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0112 ms | preprocess 0.0260 ms | main 0.0436 ms | convert 0.0088 ms (cvt_on=0)
+  dq   vs ref: max_abs=2.356e-01  max_rel=8.127e+01
+  dk   vs ref: max_abs=2.290e-01  max_rel=6.894e+01
+  dv   vs ref: max_abs=3.441e-01  max_rel=4.412e+01
+
+### b1_s512_h4_d512_causal_fp8
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 64 x 4 x 1  (ksplit=8, base_grid=32)
+[timing] total(quant+pre+main+cvt) 0.1996 ms  10.76 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0135 ms | preprocess 0.0285 ms | main 0.1217 ms | convert 0.0359 ms (cvt_on=0)
+  dq   vs ref: max_abs=2.415e-01  max_rel=1.803e+02
+  dk   vs ref: max_abs=2.992e-01  max_rel=6.416e+01
+  dv   vs ref: max_abs=4.481e-01  max_rel=9.164e+01
+
+### b1_s1024_h2_d512_causal_fp8
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 256 x 2 x 1  (ksplit=16, base_grid=32)
+[timing] total(quant+pre+main+cvt) 0.2835 ms  15.15 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0139 ms | preprocess 0.0347 ms | main 0.2003 ms | convert 0.0346 ms (cvt_on=0)
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+
+### ksplit sweep S1024H2
+ksplit=1   [timing] total(quant+pre+main+cvt) 1.1191 ms  3.84 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0135 ms | preprocess 0.0346 ms | main 1.0161 ms | convert 0.0549 ms (cvt_on=0) 
+ksplit=2   [timing] total(quant+pre+main+cvt) 0.5947 ms  7.22 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0141 ms | preprocess 0.0352 ms | main 0.5172 ms | convert 0.0282 ms (cvt_on=0) 
+ksplit=4   [timing] total(quant+pre+main+cvt) 0.3455 ms  12.43 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0142 ms | preprocess 0.0351 ms | main 0.2637 ms | convert 0.0325 ms (cvt_on=0) 
+ksplit=8   [timing] total(quant+pre+main+cvt) 0.3260 ms  13.17 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0137 ms | preprocess 0.0346 ms | main 0.2415 ms | convert 0.0362 ms (cvt_on=0) 
+ksplit=16  [timing] total(quant+pre+main+cvt) 0.2848 ms  15.08 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0133 ms | preprocess 0.0342 ms | main 0.2009 ms | convert 0.0364 ms (cvt_on=0) 
+ksplit=32  [timing] total(quant+pre+main+cvt) 0.3152 ms  13.62 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0135 ms | preprocess 0.0345 ms | main 0.2285 ms | convert 0.0387 ms (cvt_on=0) 
+### lsesplit sweep S1024H2
+lsesplit=1   [timing] total(quant+pre+main+cvt) 0.4044 ms  10.62 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0141 ms | preprocess 0.1487 ms | main 0.2010 ms | convert 0.0406 ms (cvt_on=0) 
+lsesplit=4   [timing] total(quant+pre+main+cvt) 0.3005 ms  14.29 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0138 ms | preprocess 0.0519 ms | main 0.2002 ms | convert 0.0346 ms (cvt_on=0) 
+lsesplit=8   [timing] total(quant+pre+main+cvt) 0.2870 ms  14.96 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0140 ms | preprocess 0.0374 ms | main 0.2010 ms | convert 0.0346 ms (cvt_on=0) 
+lsesplit=16  [timing] total(quant+pre+main+cvt) 0.2847 ms  15.08 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0141 ms | preprocess 0.0350 ms | main 0.2007 ms | convert 0.0348 ms (cvt_on=0) 
+lsesplit=32  [timing] total(quant+pre+main+cvt) 0.2994 ms  14.34 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0136 ms | preprocess 0.0497 ms | main 0.2006 ms | convert 0.0355 ms (cvt_on=0) 
+
+--- 2) bulkred (dK/dV -> cp.reduce.async.bulk) S1024H2 ---
+[timing] total(quant+pre+main+cvt) 0.3237 ms  13.27 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0136 ms | preprocess 0.0345 ms | main 0.2386 ms | convert 0.0370 ms (cvt_on=0)
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+
+--- 3) FA_ILV (GEMM1/2 interleave) / FA_ILV34 (GEMM3/4) S1024H2 ---
+ilv [timing] total(quant+pre+main+cvt) 0.2819 ms  15.24 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0135 ms | preprocess 0.0345 ms | main 0.1996 ms | convert 0.0342 ms (cvt_on=0) 
+ilv34 [timing] total(quant+pre+main+cvt) 0.2933 ms  14.64 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0141 ms | preprocess 0.0348 ms | main 0.2074 ms | convert 0.0371 ms (cvt_on=0) 
+
+--- 4) diagnostic: FA_SKIPKVL probe (K/V global load ceiling; result meaningless) S1024H2 ---
+default  [timing] total(quant+pre+main+cvt) 0.2850 ms  15.07 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0141 ms | preprocess 0.0350 ms | main 0.2006 ms | convert 0.0353 ms (cvt_on=0) 
+skipkvl  [timing] total(quant+pre+main+cvt) 0.2574 ms  16.68 TFLOPS (bwd FLOPs=4BS^2HD) [timing] quant 0.0141 ms | preprocess 0.0351 ms | main 0.1729 ms | convert 0.0354 ms (cvt_on=0) 

@@ -179,6 +179,16 @@ smem 冲突 + 低 occ
    ⇒ **fp16/bf16 MLA total 现已比 fp8 MLA 快 ~5×**。详见 `docs/01` §14y、`docs/01b` §6ag、
    `docs/04` §19。**教训：split-K 的 auto 目标别只填「一个波」——MLA（1 CTA/SM）实测 4 个波
    （`grid*sp≈528`）更优**（同 O29 对 fp8 MLA 用 `S/2` 的有效目标）。
+10. **fp8 MLA（D=512）主 kernel 的墙复核（O45，第 92 轮，负结果 + 更正）**：先更正一条**错记**——
+   上面第 9 条「fp16 比 fp8 MLA 快 ~5×」是拿 O44 去比 **P5-3 时代（第 21 轮）** 的旧数字；
+    fp8 MLA 早在 **O29** 就有 auto ksplit（`target=S/2`），实测 total 仅比 fp16 慢 **1.4–1.9×**。
+    ncu 复核：fp8 MLA main 是 **1 CTA/SM × 4 warp = 1 warp/scheduler**（No Eligible 85.7%、
+    Active Warps/Sched 1.00、stall `long 2.33 + wait 1.54 + short 0.76`），墙是**并行度/延迟**，
+    不是带宽/算力（DRAM 2.2% / L1TEX 19.8% / Compute 11.9%）。判决两条新机制：把 O42 的
+    **bulkred 开放到 D=512 仍 0.84×**（即使 L1/TEX 有余量，staging+小粒度 TMA 本身净亏）、
+    **`FA_ILV/ILV34` 中性/负**；K/V 全局载入的天花板只有 **1.16×**（探针）。⇒ 2 CTA/SM 因
+    smem 207.9KB 不可达（消掉全部配对副本仍 >124KB），唯一剩余杠杆是 **256 线程/8-warp 几何**
+    （fp16 O6c 式参数化，多轮，backlog）。详见 `docs/03` §46。
 
 ---
 

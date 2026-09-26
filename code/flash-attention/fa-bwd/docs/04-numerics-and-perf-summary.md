@@ -1558,7 +1558,13 @@ Executed Ipc Elapsed 0.42→**0.77**、DRAM 9.4→18.8%、L2 25.6→49.8%；per-
 Duration 764.5→**228.7µs**、**Waves 0.48→0.97**、Issued Ipc 0.33→0.57、achieved occ 恒 ~6.25%
 （1 CTA/SM）、No Eligible 91.8→85.7%、DRAM 0.83→2.78%、L1TEX 33.3→52.7%、L2 14.0→45.9%；
 头号 stall 从 long scoreboard（7.4 cyc）变 fixed-latency `wait`（2.2 cyc）。⇒ **打掉的是
-「SM 空转」而非延迟隐藏**（同 O43）。FA/TE 反向后端均不支持 D=512，无第三方对标；
-**fp16/bf16 MLA total 已比 fp8 MLA（§7.7 0.308/0.591/1.022ms）快 4.9–5.4×**。
-详见 `docs/01` §14y、`docs/01b` §6ag。原始输出 `src/{fp16,bf16}/fa_bwd_*_o44_mla_sweep.out.txt`、
-`src/fp16/fa_bwd_fp16_o44_ncu_main_ks{1,2}_s1024h2.out.txt`。
+「SM 空转」而非延迟隐藏**（同 O43）。FA/TE 反向后端均不支持 D=512，无第三方对标。
+~~**fp16/bf16 MLA total 已比 fp8 MLA（§7.7 0.308/0.591/1.022ms）快 4.9–5.4×**~~
+—— **已由 O45（第 92 轮，`docs/03` §46）更正**：§7.7 是 P5-3 时代旧数字；fp8 MLA 早在
+**O29** 就有同样的 auto ksplit（`target=S/2`）。实测 fp8 MLA total = 0.0896 / 0.1996 / 0.2835 ms
+（vs 上面 fp16 的 0.0566 / 0.1284 / 0.2009），**fp16 仅快 1.4–1.9×**。O45 同时判决：
+把 bulkred 开放到 D=512 仍 **0.84×**（负），`FA_ILV/ILV34` 中性/负；fp8 MLA 的墙是
+**1 warp/scheduler 的延迟**（1 CTA/SM × 4 warp、No Eligible 85.7%），2 CTA/SM 因 smem 207.9KB
+不可达，唯一剩余杠杆是 256 线程/8-warp 几何（backlog）。
+详见 `docs/01` §14y、`docs/01b` §6ag、`docs/03` §46。原始输出 `src/{fp16,bf16}/fa_bwd_*_o44_mla_sweep.out.txt`、
+`src/fp16/fa_bwd_fp16_o44_ncu_main_ks{1,2}_s1024h2.out.txt`、`src/fp8/fa_bwd_fp8_main_o45_sweep.out.txt`。

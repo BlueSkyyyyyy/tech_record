@@ -1,0 +1,53 @@
+==PROF== Connected to process 869937 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_main_default.out)
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 4 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8
+B=1 S=1024 H=2 Hkv=2 D=512 causal=1 scale=0.044194
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 256 x 2 x 1  (ksplit=16, base_grid=32)
+O19: wg2 grid = 128 x 2 x 1 (ksplit2=16, base_grid2=16)
+O7: use_regdq=0 (register dQ accumulation)
+O32: lse backend = wgmma/mma
+O37: main qd-tma = on
+O41: main kv-tma = on
+O38: lse k-split = auto(16)
+[timing] total(quant+pre+main+cvt) 0.5442 ms  7.89 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2340 ms | preprocess 0.1824 ms | main 0.2168 ms | convert -0.0890 ms (cvt_on=0)
+[O39 A/B] lse(D=512) split=1 0.1460 ms (1.000x vs split1) | max_abs vs split1=0.000e+00\n[O39 A/B] lse(D=512) split=2 0.1245 ms (1.172x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=4 0.1235 ms (1.182x vs split1) | max_abs vs split1=9.537e-07\n[O39 A/B] lse(D=512) split=8 0.1236 ms (1.181x vs split1) | max_abs vs split1=9.537e-07\n[O39 A/B] lse(D=512) split=16 0.1253 ms (1.165x vs split1) | max_abs vs split1=9.537e-07\n[O39] best lse split=4 0.1235 ms (1.182x)\n[O12 A/B] main LSE/D preload off 0.2005 ms | on 0.2018 ms (0.994x) | max_abs(on-vs-off) dq=2.251e-04
+[O14 A/B] quant old(per-row) 0.2113 ms | new(warp-per-row) 0.2373 ms (0.891x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0274 ms | new(warp-per-row) 0.0603 ms (0.455x) | max_abs=2.861e-06 max_rel=4.161e-04
+[O21b A/B] end2end 保留convert 0.5765 ms | 直写输出(消convert) 0.5072 ms (1.1366x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+    dq[d   0..127] max_abs=1.801e-01
+    dq[d 128..255] max_abs=1.420e-01
+    dq[d 256..383] max_abs=1.629e-01
+    dq[d 384..511] max_abs=2.232e-01
+    dk[d   0..127] max_abs=2.844e-01
+    dk[d 128..255] max_abs=3.337e-01
+    dk[d 256..383] max_abs=2.273e-01
+    dk[d 384..511] max_abs=2.713e-01
+    dv[d   0..127] max_abs=2.472e-01
+    dv[d 128..255] max_abs=2.419e-01
+    dv[d 256..383] max_abs=3.602e-01
+    dv[d 384..511] max_abs=2.730e-01
+[compare] ours vs TE FP8
+==PROF== Disconnected from process 869937
+[869937] fa_bwd_fp8_main_default.out@127.0.0.1
+  void fa_bwd_fp8_mma_kernel<512, 64, 32, 0, 0, 1, 1, 1>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, const int *, const int *) (256, 2, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    --------------------------------------------------------------------------- ----------- ------------
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                   inst         0.07
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio               inst            0
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio           inst         2.33
+    smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio        inst            0
+    smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio              inst         0.00
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio              inst            0
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio          inst         0.76
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                      inst         1.54
+    --------------------------------------------------------------------------- ----------- ------------
+

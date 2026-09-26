@@ -2649,7 +2649,27 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第九十一轮）**：**O44——fp16/bf16 MLA（D=512）mma 主 kernel 的 N 方向 split-K
+> **最新（第九十二轮）**：**O45——fp8 MLA（D=512）主 kernel 的墙复核 + bulkred/ILV 判决
+> （负结果 + 文档更正）**。先核实 O44 的「下一步候选 ①」：**fp8 MLA 并没有漏掉 split**——
+> fp8 的 `D==512` auto ksplit 早在 **O29（第 70 轮）** 就设为 `target=S/2`，本轮实测
+> S1024H2 auto ksplit=16（grid 256×2）、main 0.2003ms；ksplit sweep 1/2/4/8/16/32 =
+> 1.016/0.517/0.264/0.242/**0.201**/0.229 ⇒ auto 即最优。**更正**：旧文档拿 O44 去比 P5-3
+> 时代（第 21 轮）的 `§7.7` 数字，得出「fp16 比 fp8 MLA 快 4.9–5.1×」是**错的**；实测 fp8 MLA
+> total = 0.0896/0.1996/0.2835ms，落后 fp16 仅 **1.4–1.9×**（main 1.3–2.0×）。
+> ncu 复核：fp8 MLA main **1 CTA/SM × 4 warp = 1 warp/scheduler**（No Eligible 85.67%、
+> Active Warps/Sched 1.00、stall `long 2.33 + wait 1.54 + short 0.76`；DRAM 2.2%/L1TEX 19.8%/
+> Compute 11.9%）⇒ 墙 = **并行度/延迟**。判决两条新机制：**bulkred 开放到 D=512 仍 0.839×**
+> （即使 L1/TEX 有余量，staging+小粒度 TMA 本身净亏）、**`FA_ILV` 中性 / `FA_ILV34` 0.966×**；
+> K/V 全局载入天花板（探针）仅 **1.16×**。⇒ 候选 ① 已完成、候选 ②（2 CTA/SM）因 smem
+> 207.9KB 不可达（消掉 Qp/dOp/Kp 83KB 仍 >124KB）、候选 ③ 的 bulkred 路再证伪。
+> **剩余唯一未证伪杠杆 = 256 线程 / 8-warp 几何重排（每 scheduler 2 warp）**，列 backlog。
+> 详见 `docs/03` §46、`docs/01` §14y 更正、`docs/04` §19 更正、`docs/08` §5.10。
+> **下一步候选**：① **fp16/bf16/fp8 MLA 的 256 线程/8-warp 几何**（fp16 O6c 式 warp-geometry
+> 参数化；唯一能提「每 scheduler warp 数」的路，多轮）；② **fp8 MLA 的 `cp.async` K/V 流水**
+> （天花板 1.16×，但 V 双缓冲放不下，需先腾 smem）；③ **fp8 侧「减 mma 依赖」**（O42/O45 一致：
+> 硬件资源锁死）；④ **varlen 主 kernel K 维 split**（O43 varlen 负结果，需另找形态）。
+>
+> **（第九十一轮）**：**O44——fp16/bf16 MLA（D=512）mma 主 kernel 的 N 方向 split-K
 > （split-KV；正结果、默认 auto）**。补上「P5 backlog：MLA split-KV 提高 grid / 下一步候选
 > ②③」：O43 只覆盖 D=128 的 `wgmma2`，**MLA 走 mma 主 kernel（`fa_bwd_{fp16,bf16}_mma_kernel`
 > BM=32/BN=32/PIPE=1）没有 ksplit**，base grid 只有 64/64/16 CTA（S1024H2/S512H4/S256H2，
@@ -3324,11 +3344,20 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       auto 仅 D==512、目标 **`grid*sp≈528`（4 个波）**、上限 16、按 `nblk` 封顶。**main 4.4–8.4×、
       端到端 4.2–5.4×**（fp16 total 0.300/0.536/0.939→**0.0566/0.1284/0.2009ms**，4.74/16.73/21.38 TF），
       **Waves 0.48→0.97、Ipc 0.33→0.57**，数值与 O5c 逐位一致、MHA D=128/varlen 回归不变，单/两文件
-      同源。**fp16/bf16 MLA total 已比 fp8 MLA 快 4.9–5.4×**。详见 `docs/01` §14y、`docs/01b` §6ag、
-      `docs/04` §19、`docs/08` §5.9。
-- [ ] （backlog）P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
+      同源。~~**fp16/bf16 MLA total 已比 fp8 MLA 快 4.9–5.4×**~~（**O45 已更正为 1.4–1.9×**）。
+      详见 `docs/01` §14y、`docs/01b` §6ag、`docs/04` §19、`docs/08` §5.9。
+- [x] **O45（第九十二轮）fp8 MLA（D=512）主 kernel 的墙复核 + bulkred/ILV 判决（负结果 + 文档更正）**：
+      核实 O44「下一步候选 ①」——**fp8 MLA 早在 O29 就有 auto ksplit（`target=S/2`）**，实测 S1024H2
+      ksplit=16、main 0.2003ms，sweep 确认 auto 最优；旧文档「fp16 比 fp8 MLA 快 4.9–5.1×」是拿
+      O44 比 P5-3 时代旧数字，**实为 1.4–1.9×**。ncu：fp8 MLA main **1 CTA/SM × 4 warp =
+      1 warp/scheduler**（No Eligible 85.67%、Active Warps/Sched 1.00、stall long 2.33/wait 1.54/
+      short 0.76）⇒ 墙 = 并行度/延迟。判决：**bulkred 开放到 D=512 仍 0.839×**（与 O42 一致）、
+      **`FA_ILV` 中性/`FA_ILV34` 0.966×**；K/V 载入天花板（探针）1.16×；2 CTA/SM 因 smem 207.9KB
+      不可达。**剩余唯一杠杆 = 256 线程/8-warp 几何**（backlog）。详见 `docs/03` §46、`docs/08` §5.10。
 
 ## 灵感 / backlog
+
+- [ ] P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 
 - 用 `nsys` 看 preprocess + main + convert 的端到端重叠。
 - 把 FA2 的 `dQ_accum` 累加缓冲 vs 纯 atomic 做对比实验。
