@@ -1,0 +1,90 @@
+=== twofile varlen_b1_t512_h2_d512_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp16
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 512
+VARLEN main backend = wgmma2 cp.async
+[O40] varlen lse k-split = 8 (base=8)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 0.0819 ms  13.11 TFLOPS (sum_b 4HL^2D)
+grid main = 256 x 2 x 1 | lse grid = 4 x 2 x 1 | T=512
+[O52 A/B] varlen MLA main-only 4w 0.0517 ms | 8w 0.0456 ms (1.134x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=3.576e-07 dv=4.768e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2353 2 0.0829 4 0.0546 8 0.0459 16 0.0451 ms (auto=16)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.303e-03  max_rel=3.391e-01  (ours_amax=1.782e+00 ref_amax=1.783e+00 @1240)
+  dk  vs ref: max_abs=1.537e-03  max_rel=3.567e-01  (ours_amax=2.648e+00 ref_amax=2.649e+00 @1529)
+  dv  vs ref: max_abs=1.557e-03  max_rel=2.646e-02  (ours_amax=4.641e+00 ref_amax=4.641e+00 @725)
+=== twofile varlen_b3_t1792_h2_d512_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp16
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 256 768 1792
+VARLEN main backend = wgmma2 cp.async
+[O40] varlen lse k-split = 2 (base=48)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 0.3518 ms  16.02 TFLOPS (sum_b 4HL^2D)
+grid main = 512 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.2855 ms | 8w 0.2560 ms (1.115x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.5576 2 0.3013 4 0.2644 8 0.2534 16 0.2545 ms (auto=16)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.415e-03  max_rel=5.241e-01  (ours_amax=3.986e+00 ref_amax=3.986e+00 @1240)
+  dk  vs ref: max_abs=1.834e-03  max_rel=3.483e-01  (ours_amax=3.363e+00 ref_amax=3.363e+00 @17)
+  dv  vs ref: max_abs=1.856e-03  max_rel=6.815e-02  (ours_amax=5.152e+00 ref_amax=5.151e+00 @499)
+=== twofile varlen_b1_t512_h2_d512_full_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_full_fp16
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=0
+cu_seqlens = 0 512
+VARLEN main backend = wgmma2 cp.async
+[O40] varlen lse k-split = 8 (base=8)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 0.2853 ms  3.76 TFLOPS (sum_b 4HL^2D)
+grid main = 256 x 2 x 1 | lse grid = 4 x 2 x 1 | T=512
+[O52 A/B] varlen MLA main-only 4w 0.0786 ms | 8w 0.0747 ms (1.052x) | max_abs(8w-vs-4w) dq=8.941e-08 dk=7.451e-08 dv=5.960e-08
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2414 2 0.0934 4 0.0652 8 0.0710 16 0.0748 ms (auto=16)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.046e-04  max_rel=1.266e-01  (ours_amax=5.679e-01 ref_amax=5.679e-01 @148752)
+  dk  vs ref: max_abs=4.449e-04  max_rel=1.074e-01  (ours_amax=6.313e-01 ref_amax=6.316e-01 @479635)
+  dv  vs ref: max_abs=1.327e-04  max_rel=3.917e-02  (ours_amax=4.888e-01 ref_amax=4.887e-01 @335071)
+=== twofile varlen_b3_t1792_h2_d512_full_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_full_fp16
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=0
+cu_seqlens = 0 256 768 1792
+VARLEN main backend = wgmma2 cp.async
+[O40] varlen lse k-split = 2 (base=48)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 1.0093 ms  5.59 TFLOPS (sum_b 4HL^2D)
+grid main = 512 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.4263 ms | 8w 0.3915 ms (1.089x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=1.192e-07 dv=1.192e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.6007 2 0.3870 4 0.3903 8 0.3869 16 0.3892 ms (auto=16)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
+  dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
+  dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)
+=== onefile varlen_b1_t512_h2_d512_causal_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp16
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 512
+VARLEN main backend = wgmma2 cp.async
+[O40] varlen lse k-split = 8 (base=8)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 0.0821 ms  13.08 TFLOPS (sum_b 4HL^2D)
+grid main = 256 x 2 x 1 | lse grid = 4 x 2 x 1 | T=512
+[O52 A/B] varlen MLA main-only 4w 0.0517 ms | 8w 0.0456 ms (1.134x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=3.576e-07 dv=4.768e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2347 2 0.0835 4 0.0550 8 0.0462 16 0.0455 ms (auto=16)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.303e-03  max_rel=3.391e-01  (ours_amax=1.782e+00 ref_amax=1.783e+00 @1240)
+  dk  vs ref: max_abs=1.537e-03  max_rel=3.567e-01  (ours_amax=2.648e+00 ref_amax=2.649e+00 @1529)
+  dv  vs ref: max_abs=1.557e-03  max_rel=2.646e-02  (ours_amax=4.641e+00 ref_amax=4.641e+00 @725)
+=== onefile varlen_b1_t512_h2_d512_full_fp16 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_full_fp16
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=0
+cu_seqlens = 0 512
+VARLEN main backend = wgmma2 cp.async
+[O40] varlen lse k-split = 8 (base=8)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 0.2836 ms  3.79 TFLOPS (sum_b 4HL^2D)
+grid main = 256 x 2 x 1 | lse grid = 4 x 2 x 1 | T=512
+[O52 A/B] varlen MLA main-only 4w 0.0785 ms | 8w 0.0747 ms (1.051x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=8.941e-08 dv=5.960e-08
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2401 2 0.0954 4 0.0669 8 0.0708 16 0.0748 ms (auto=16)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.046e-04  max_rel=1.266e-01  (ours_amax=5.679e-01 ref_amax=5.679e-01 @148752)
+  dk  vs ref: max_abs=4.449e-04  max_rel=1.074e-01  (ours_amax=6.313e-01 ref_amax=6.316e-01 @479635)
+  dv  vs ref: max_abs=1.327e-04  max_rel=3.917e-02  (ours_amax=4.888e-01 ref_amax=4.887e-01 @335071)

@@ -3706,7 +3706,8 @@ dq=0、dk/dv ≤1e-6）：
 | b3_t1792 causal | 2.415e-3 | 1.834e-3 | 1.856e-3 | 0.8495→0.5586ms (**1.52×**) |
 
 **单文件与两文件逐指标一致**。D=128 varlen 回归**逐位不变**（只改 `D==512` 分支）。
-（非 causal full 的 MLA varlen 在 HEAD 已是偏差，见 `docs/03` §52.6，与本改动无关。）
+（非 causal full 的 MLA varlen：**更正**——并非 HEAD 偏差，而是 §14ad 的对拍脚本漏传 `--full`
+导致按 causal 跑（见 §14ae.2）；显式 `--full` 后 fp16 full 的 max_abs 仅 3.0e-4/4.4e-4/1.3e-4。）
 
 ### 14ad.3 性能（event，`Σ_b 4HL²D` 口径，同 session）
 
@@ -3729,3 +3730,99 @@ ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
 
 原始输出：`src/fp16/fa_bwd_fp16_mma_main_o52_varlen.out.txt`、
 `src/fp16/fa_bwd_fp16_mma_onefile_o52_varlen.out.txt`。
+
+## 14ae. O53-fp16：把 MLA 的 **N 方向 split-K（split-KV）** 推广到 **fp16 varlen**（第 100 轮）—— **正结果，varlen MLA 默认 auto**
+
+### 14ae.1 动机 / 改动（host-only；device 逐字不变）
+
+O52 把 O46 的 8-warp 几何搬进 varlen 后，MLA varlen 主 kernel 只剩 **单个 CTA 做整条 K**：
+`D=512`、`BM=32`，base grid = `ceil(maxlen/32)·H·B` 在 `b1_t512_h2` 只有 **16 CTA**
+（`b3_t1792_h2` 也只 32×2×3=192），而 smem 207.36KB 锁死 **1 CTA/SM** ⇒ ncu `Waves 0.48`、
+大量 SM 空转。定长侧 O44/O50 早已用「N 方向 split-K」解决（把每个 m 块的 KV tile 均分给
+`ksplit` 个 CTA，dQ 改跨 CTA `red_add2`）；**varlen 的 `run_varlen` 一直传 `ksplit=1`**。
+
+本轮把该机制搬进 varlen：`run_varlen` 加 `mlaksplit` 入参，`D==512` 时按定长同款 auto 选
+`mla_ks_eff`（`--mlaksplit=N` 可强制/关），`mg.x *= mla_ks_eff`，并把 `mla_ks_eff` 传给两处
+`launch_bwd_mma<512,32,32,1,...>`。auto 口径与定长完全一致：① target `base*sp≈528`（1 CTA/SM
+的 4 个波）、cap 16；② 至少把每个 m 块的 K 范围切成 ≈2 份（`nt_cap/2`）。`main` 透传
+`--mlaksplit=`。**device 代码一行未改**（O44 早已支持切片、空切片早退、跨 CTA dQ `red_add2`，
+`ksplit==1` 逐式退化），单/两文件 host 同步。
+
+顺带在 `run_varlen` 末尾加 `[O53 A/B]`（固定 8-warp 几何、main-only，sweep `ksplit=1/2/4/8/16`），
+并把 varlen 的 grid 打印从「未乘 ksplit 的 base」改成实际 `mg`。
+
+### 14ae.2 「HEAD 偏差」更正（非本改动引入）
+
+O52 曾记「三 dtype 非 causal（full）MLA varlen 在 HEAD 已偏差（max_abs≈7）」——本轮定位为
+**对拍脚本漏传 `--full`**（输出头 `causal=1`），即按 causal 去比 full 的 ref，误差自然 O(1)。
+显式 `--full` 后 fp16 full 的 max_abs 仅 **3.0e-4 / 4.4e-4 / 1.3e-4**（b1_t512，
+`[timing]` 头 `causal=0`），fp8 full ≈5e-2（与第 80/81 轮记录一致），bf16 full ≈1.7e-3。
+**不是回归、不是 kernel bug**，无需修复。
+
+### 14ae.3 数值（ours vs fp32 ref，fp16 varlen；max_abs dq/dk/dv）
+
+| case (D=Dv=512) | dq | dk | dv |
+|---|---|---|---|
+| b1_t512 causal | 1.303e-3 | 1.537e-3 | 1.557e-3 |
+| b3_t1792 causal | 2.415e-3 | 1.834e-3 | 1.856e-3 |
+| b1_t512 full | 3.046e-4 | 4.449e-4 | 1.327e-4 |
+| b3_t1792 full | 5.516e-4 | 4.451e-4 | 2.385e-4 |
+
+均 fp16 噪声量级。**单文件与两文件逐指标一致**（上表两文件/单文件完全相同）；`max_abs(8w-vs-4w)`
+dq ≤2e-7、dk/dv ≤1e-6（仅跨 CTA atomic 次序），`max_abs(ksplit=16-vs-1)` 同量级。MLA 反向
+FA2/FA3/TE 均不支持 `head_dim=512` ⇒ 无外部基线；D=128 varlen 回归逐位不变。
+
+### 14ae.4 性能（CUDA event，`Σ_b 4HL²D` 口径，同 session）
+
+| case | O52（8-warp，ksplit=1） | O53（8-warp，auto split-KV） | 端到端加速 |
+|---|---|---|---|
+| b1_t512 causal total | 0.2740 ms | **0.0819 ms / 13.11 TF** | **3.35×** |
+| b3_t1792 causal total | 0.6523 ms | **0.3518 ms / 16.02 TF** | **1.85×** |
+| b1_t512 full total | — | 0.2853 ms / 3.76 TF | — |
+| b3_t1792 full total | — | 1.0093 ms / 5.59 TF | — |
+
+**主 kernel-only（同 session `[O53 A/B]`，8-warp）**：
+
+| case | ksplit=1 | 2 | 4 | 8 | 16（auto） | split 加速 |
+|---|---|---|---|---|---|---|
+| b1_t512 causal | 0.2363 | 0.0833 | 0.0549 | 0.0464 | **0.0454** | **5.21×** |
+| b3_t1792 causal | 0.5532 | 0.3007 | 0.2649 | 0.2530 | **0.2544** | 2.18× |
+| b1_t512 full | 0.2401 | 0.0945 | **0.0665** | 0.0709 | 0.0743 | 3.61×（最优 k=4） |
+| b3_t1792 full | 0.6049 | 0.3864 | 0.3898 | **0.3863** | 0.3903 | 1.57×（最优 k=8） |
+
+**结论**：causal auto 即最优（b1 选 16、b3 选 16 与最优 8 差 0.6%）；**非 causal full 的 auto
+偏大**（b1 最优 k=4、auto=16 落后 12%），因为 full 的每个 m 块都扫满 K、不像 causal 那样随
+mblk 递增，故「把每块 K 切 ≈2 份」的 `sp_min` 启发式偏激进。full 是次要路径（性能主场是
+causal），且相对 k=1 仍 3.2×/1.6×，本轮不改 auto，`--mlaksplit=4` 可选最优。
+端到端 total 还含非 causal 的 LSE（`lse_mma_kernel<512>`，未做负载均衡，是 full 端到端的新瓶颈，
+约占 b3 full total 的 60%）——留 backlog。
+
+### 14ae.5 ncu（`fa_bwd_fp16_mma_kernel`，varlen b3_t1792 H2 D512 causal，`--launch-count 1`）
+
+| 指标 | 值 |
+|---|---|
+| Duration | **259.4 µs**（split-KV 后；k=1 时每 CTA 串行扫整条 K，见 `[O53 A/B]` 的 0.553ms） |
+| DRAM / L1TEX / **L2** / Compute | 4.69% / 52.74% / **80.90%** / 19.33% |
+| regs / smem / occ（theoretical→achieved） | 151 / 207.36KB / 12.50%→**12.21%** |
+| Block Limit | **Registers=1、Shared Mem=1**（1 CTA/SM）；Waves **23.27** |
+| stall ratio | **long 2.73** + wait 2.28 + short 1.58 + barrier 0.14 |
+| L2 `op_red` / `op_read` sectors | **18.41M / 12.91M**（red 占 L2 扇区 **58.8%**） |
+
+bf16 同 shape **逐项一致**（Duration 259.1µs、L2 81.02%、occ 12.21%、red 18.407M）；
+`Block Limit Registers=1`（151 regs）与 `Shared Mem=1`（207.36KB）双卡 1 CTA/SM。
+**bound = L2（跨 CTA dQ `red_add2`，58.8% 扇区）+ 全局/共享访存延迟（long 2.73 + wait 2.28）**，
+不再是 O52 的「grid 不足一个波」。这与定长 MLA 的 O44 结论（split-KV 后墙移到 L2 red + 延迟）
+一致；下一步要么降红（更大 BM/跨 warpgroup 归约），要么降 smem 冲 2 CTA/SM。
+
+### 14ae.6 复现 / 原始输出
+
+```bash
+FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA'
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --varlen --causal /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp16
+# --full 走非 causal；--mlaksplit=1 关 split / =4 强制
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_o53_varlen.out.txt`（两文件 4 case + 单文件 2 case）、
+`src/fp16/fa_bwd_fp16_o53_ncu_varlen_b3.out.txt`、`..._o53_ncu_stall_varlen_b3.out.txt`；
+bf16 同构 `src/bf16/fa_bwd_bf16_o53_varlen.out.txt`、`..._o53_ncu_varlen_b3.out.txt`。

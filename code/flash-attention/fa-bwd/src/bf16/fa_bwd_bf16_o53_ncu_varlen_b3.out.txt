@@ -1,0 +1,43 @@
+fa_bwd_bf16_mma_main.cu(840): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
+    const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
+              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 584017
+==PROF== Connected to process 906048 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/bf16/fa_bwd_bf16_mma_main.out)
+==PROF== Profiling "fa_bwd_bf16_mma_kernel": 0%....50%....100% - 11 passes
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_bf16
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 256 768 1792
+[O40] varlen lse k-split = 2 (base=48)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 0.3560 ms  15.84 TFLOPS (sum_b 4HL^2D)
+grid main = 512 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.2861 ms | 8w 0.2575 ms (1.111x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.5594 2 0.2999 4 0.2622 8 0.2532 16 0.2560 ms (auto=16)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.267e-02  max_rel=2.693e+00  (ours_amax=3.984e+00 ref_amax=3.983e+00 @791160)
+  dk  vs ref: max_abs=1.217e-02  max_rel=4.767e+00  (ours_amax=3.359e+00 ref_amax=3.354e+00 @1041)
+  dv  vs ref: max_abs=1.796e-02  max_rel=5.158e+00  (ours_amax=5.156e+00 ref_amax=5.148e+00 @786761)
+==PROF== Disconnected from process 906048
+[906048] fa_bwd_bf16_mma_main.out@127.0.0.1
+  void fa_bwd_bf16_mma_kernel<512, 32, 32, 1, 0, 1, 256, 4>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, int) (512, 2, 3)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %         4.70
+    gpu__time_duration.sum                                                             us       259.07
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        49.19
+    lts__t_sectors_op_read.sum                                                     sector     12899723
+    lts__t_sectors_op_red.sum                                                      sector     18407424
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        81.02
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        19.37
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        12.21
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.14
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         2.75
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         1.58
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         2.28
+    ------------------------------------------------------------------------- ----------- ------------
+
