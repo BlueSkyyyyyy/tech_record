@@ -1,0 +1,208 @@
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b1_t512_h2_d512_causal_fp16 ours ===
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+[timing] VARLEN total 0.0784 ms  13.70 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.303e-03  max_rel=3.391e-01  (ours_amax=1.782e+00 ref_amax=1.783e+00 @1240)
+  dk  vs ref: max_abs=1.537e-03  max_rel=3.567e-01  (ours_amax=2.648e+00 ref_amax=2.649e+00 @1529)
+  dv  vs ref: max_abs=1.557e-03  max_rel=1.063e-01  (ours_amax=4.641e+00 ref_amax=4.641e+00 @725)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b1_t512_h2_d512_causal_fp16 ours_sf ===
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+[timing] VARLEN total 0.0796 ms  13.48 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.303e-03  max_rel=3.391e-01  (ours_amax=1.782e+00 ref_amax=1.783e+00 @1240)
+  dk  vs ref: max_abs=1.537e-03  max_rel=3.567e-01  (ours_amax=2.648e+00 ref_amax=2.649e+00 @1529)
+  dv  vs ref: max_abs=1.557e-03  max_rel=1.063e-01  (ours_amax=4.641e+00 ref_amax=4.641e+00 @725)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp16/ours_sf_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b1_t512_h2_d512_full_fp16 ours ===
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=0
+[timing] VARLEN total 0.0960 ms  11.18 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.046e-04  max_rel=1.265e-01  (ours_amax=5.679e-01 ref_amax=5.679e-01 @148752)
+  dk  vs ref: max_abs=4.449e-04  max_rel=1.074e-01  (ours_amax=6.313e-01 ref_amax=6.316e-01 @479635)
+  dv  vs ref: max_abs=1.327e-04  max_rel=3.917e-02  (ours_amax=4.888e-01 ref_amax=4.887e-01 @335071)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_full_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b1_t512_h2_d512_full_fp16 ours_sf ===
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=0
+[timing] VARLEN total 0.0960 ms  11.19 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.046e-04  max_rel=1.265e-01  (ours_amax=5.679e-01 ref_amax=5.679e-01 @148752)
+  dk  vs ref: max_abs=4.449e-04  max_rel=1.074e-01  (ours_amax=6.313e-01 ref_amax=6.316e-01 @479635)
+  dv  vs ref: max_abs=1.327e-04  max_rel=3.917e-02  (ours_amax=4.888e-01 ref_amax=4.887e-01 @335071)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_full_fp16/ours_sf_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b2_t500_h16_d128_causal_fp16 ours ===
+VARLEN: B=2 T=500 maxlen=300 H=16 Hkv=16 D=128 causal=1
+[timing] VARLEN total 0.0684 ms  15.56 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.832e-03  max_rel=8.652e-01  (ours_amax=3.363e+00 ref_amax=3.364e+00 @620105)
+  dk  vs ref: max_abs=1.593e-03  max_rel=4.088e-01  (ours_amax=3.262e+00 ref_amax=3.262e+00 @12326)
+  dv  vs ref: max_abs=2.055e-03  max_rel=1.573e-01  (ours_amax=5.477e+00 ref_amax=5.477e+00 @1122)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b2_t500_h16_d128_causal_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b2_t500_h16_d128_causal_fp16 ours_sf ===
+VARLEN: B=2 T=500 maxlen=300 H=16 Hkv=16 D=128 causal=1
+[timing] VARLEN total 0.0675 ms  15.77 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.832e-03  max_rel=8.652e-01  (ours_amax=3.363e+00 ref_amax=3.364e+00 @620105)
+  dk  vs ref: max_abs=1.593e-03  max_rel=4.088e-01  (ours_amax=3.262e+00 ref_amax=3.262e+00 @12326)
+  dv  vs ref: max_abs=2.055e-03  max_rel=1.573e-01  (ours_amax=5.477e+00 ref_amax=5.477e+00 @1122)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b2_t500_h16_d128_causal_fp16/ours_sf_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b3_t1792_h2_d512_causal_fp16 ours ===
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+[timing] VARLEN total 0.3209 ms  17.57 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.415e-03  max_rel=5.241e-01  (ours_amax=3.986e+00 ref_amax=3.986e+00 @1240)
+  dk  vs ref: max_abs=1.834e-03  max_rel=3.483e-01  (ours_amax=3.363e+00 ref_amax=3.363e+00 @17)
+  dv  vs ref: max_abs=1.856e-03  max_rel=6.845e-02  (ours_amax=5.152e+00 ref_amax=5.151e+00 @499)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b3_t1792_h2_d512_causal_fp16 ours_sf ===
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+[timing] VARLEN total 0.3223 ms  17.49 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.415e-03  max_rel=5.241e-01  (ours_amax=3.986e+00 ref_amax=3.986e+00 @1240)
+  dk  vs ref: max_abs=1.834e-03  max_rel=3.483e-01  (ours_amax=3.363e+00 ref_amax=3.363e+00 @17)
+  dv  vs ref: max_abs=1.856e-03  max_rel=6.845e-02  (ours_amax=5.152e+00 ref_amax=5.151e+00 @499)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp16/ours_sf_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b3_t1792_h2_d512_full_fp16 ours ===
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=0
+[timing] VARLEN total 0.4620 ms  12.20 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
+  dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
+  dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_full_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b3_t1792_h2_d512_full_fp16 ours_sf ===
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=0
+[timing] VARLEN total 0.4628 ms  12.18 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
+  dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
+  dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_full_fp16/ours_sf_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b4_t3840_h16_d128_causal_fp16 ours ===
+VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=1
+[timing] VARLEN total 0.7808 ms  58.45 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.163e-03  max_rel=6.210e-01  (ours_amax=3.857e+00 ref_amax=3.858e+00 @1057096)
+  dk  vs ref: max_abs=2.158e-03  max_rel=9.492e-01  (ours_amax=3.920e+00 ref_amax=3.922e+00 @1058571)
+  dv  vs ref: max_abs=1.966e-03  max_rel=6.954e-02  (ours_amax=6.461e+00 ref_amax=6.462e+00 @1050605)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b4_t3840_h16_d128_causal_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b4_t3840_h16_d128_causal_fp16 ours_sf ===
+VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=1
+[timing] VARLEN total 0.7850 ms  58.13 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.163e-03  max_rel=6.210e-01  (ours_amax=3.857e+00 ref_amax=3.858e+00 @1057096)
+  dk  vs ref: max_abs=2.158e-03  max_rel=9.492e-01  (ours_amax=3.920e+00 ref_amax=3.922e+00 @1058571)
+  dv  vs ref: max_abs=1.966e-03  max_rel=6.954e-02  (ours_amax=6.461e+00 ref_amax=6.462e+00 @1050605)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b4_t3840_h16_d128_causal_fp16/ours_sf_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b4_t3840_h16_d128_full_fp16 ours ===
+VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=0
+[timing] VARLEN total 1.2890 ms  35.40 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=5.603e-04  max_rel=1.414e-01  (ours_amax=1.457e+00 ref_amax=1.457e+00 @367083)
+  dk  vs ref: max_abs=6.841e-04  max_rel=1.631e-01  (ours_amax=1.187e+00 ref_amax=1.187e+00 @7413782)
+  dv  vs ref: max_abs=2.338e-04  max_rel=7.147e-02  (ours_amax=8.560e-01 ref_amax=8.559e-01 @7501204)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b4_t3840_h16_d128_full_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b4_t3840_h16_d128_full_fp16 ours_sf ===
+VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=0
+[timing] VARLEN total 1.2942 ms  35.26 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=5.603e-04  max_rel=1.414e-01  (ours_amax=1.457e+00 ref_amax=1.457e+00 @367083)
+  dk  vs ref: max_abs=6.841e-04  max_rel=1.631e-01  (ours_amax=1.187e+00 ref_amax=1.187e+00 @7413782)
+  dv  vs ref: max_abs=2.338e-04  max_rel=7.147e-02  (ours_amax=8.560e-01 ref_amax=8.559e-01 @7501204)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b4_t3840_h16_d128_full_fp16/ours_sf_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b4_t4096_h16_d128_causal_fp16 ours ===
+VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=1
+[timing] VARLEN total 0.4514 ms  76.12 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.112e-03  max_rel=6.328e-01  (ours_amax=3.455e+00 ref_amax=3.455e+00 @19270)
+  dk  vs ref: max_abs=2.252e-03  max_rel=9.803e-01  (ours_amax=3.441e+00 ref_amax=3.442e+00 @13126)
+  dv  vs ref: max_abs=1.915e-03  max_rel=1.093e-01  (ours_amax=7.105e+00 ref_amax=7.106e+00 @2099167)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_causal_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b4_t4096_h16_d128_causal_fp16 ours_sf ===
+VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=1
+[timing] VARLEN total 0.4539 ms  75.70 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.112e-03  max_rel=6.328e-01  (ours_amax=3.455e+00 ref_amax=3.455e+00 @19270)
+  dk  vs ref: max_abs=2.252e-03  max_rel=9.803e-01  (ours_amax=3.441e+00 ref_amax=3.442e+00 @13126)
+  dv  vs ref: max_abs=1.915e-03  max_rel=1.093e-01  (ours_amax=7.105e+00 ref_amax=7.106e+00 @2099167)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_causal_fp16/ours_sf_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b4_t4096_h16_d128_full_fp16 ours ===
+VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=0
+[timing] VARLEN total 0.9075 ms  37.86 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=4.094e-04  max_rel=9.879e-02  (ours_amax=6.499e-01 ref_amax=6.495e-01 @3415108)
+  dk  vs ref: max_abs=4.953e-04  max_rel=1.020e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
+  dv  vs ref: max_abs=1.234e-04  max_rel=3.416e-02  (ours_amax=4.905e-01 ref_amax=4.906e-01 @7991790)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_full_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b4_t4096_h16_d128_full_fp16 ours_sf ===
+VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=0
+[timing] VARLEN total 0.9093 ms  37.79 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=4.094e-04  max_rel=9.879e-02  (ours_amax=6.499e-01 ref_amax=6.495e-01 @3415108)
+  dk  vs ref: max_abs=4.953e-04  max_rel=1.020e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
+  dv  vs ref: max_abs=1.234e-04  max_rel=3.416e-02  (ours_amax=4.905e-01 ref_amax=4.906e-01 @7991790)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_full_fp16/ours_sf_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b5_t3968_h32_d128_causal_fp16 ours ===
+VARLEN: B=5 T=3968 maxlen=2048 H=32 Hkv=8 D=128 causal=1
+[timing] VARLEN total 1.4335 ms  63.86 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.438e-03  max_rel=7.964e-01  (ours_amax=4.371e+00 ref_amax=4.373e+00 @7868799)
+  dk  vs ref: max_abs=3.433e-03  max_rel=9.938e-01  (ours_amax=6.766e+00 ref_amax=6.765e+00 @918668)
+  dv  vs ref: max_abs=3.843e-03  max_rel=1.208e-01  (ours_amax=1.075e+01 ref_amax=1.075e+01 @131977)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b5_t3968_h32_d128_causal_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b5_t3968_h32_d128_causal_fp16 ours_sf ===
+VARLEN: B=5 T=3968 maxlen=2048 H=32 Hkv=8 D=128 causal=1
+[timing] VARLEN total 1.4309 ms  63.97 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.438e-03  max_rel=7.964e-01  (ours_amax=4.371e+00 ref_amax=4.373e+00 @7868799)
+  dk  vs ref: max_abs=3.433e-03  max_rel=9.943e-01  (ours_amax=6.766e+00 ref_amax=6.765e+00 @918668)
+  dv  vs ref: max_abs=3.843e-03  max_rel=1.208e-01  (ours_amax=1.075e+01 ref_amax=1.075e+01 @131977)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b5_t3968_h32_d128_causal_fp16/ours_sf_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b5_t3968_h32_d128_full_fp16 ours ===
+VARLEN: B=5 T=3968 maxlen=2048 H=32 Hkv=8 D=128 causal=0
+[timing] VARLEN total 2.4405 ms  37.51 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=7.341e-04  max_rel=1.790e-01  (ours_amax=1.382e+00 ref_amax=1.382e+00 @45553)
+  dk  vs ref: max_abs=7.906e-04  max_rel=2.968e-01  (ours_amax=1.630e+00 ref_amax=1.630e+00 @358633)
+  dv  vs ref: max_abs=4.880e-04  max_rel=5.486e-02  (ours_amax=1.758e+00 ref_amax=1.758e+00 @50850)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b5_t3968_h32_d128_full_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b5_t3968_h32_d128_full_fp16 ours_sf ===
+VARLEN: B=5 T=3968 maxlen=2048 H=32 Hkv=8 D=128 causal=0
+[timing] VARLEN total 2.4517 ms  37.34 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=7.341e-04  max_rel=1.790e-01  (ours_amax=1.382e+00 ref_amax=1.382e+00 @45553)
+  dk  vs ref: max_abs=7.906e-04  max_rel=2.968e-01  (ours_amax=1.630e+00 ref_amax=1.630e+00 @358633)
+  dv  vs ref: max_abs=4.880e-04  max_rel=5.486e-02  (ours_amax=1.758e+00 ref_amax=1.758e+00 @50850)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b5_t3968_h32_d128_full_fp16/ours_sf_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b8_t2904_h16_d128_causal_fp16 ours ===
+VARLEN: B=8 T=2904 maxlen=2048 H=16 Hkv=16 D=128 causal=1
+[timing] VARLEN total 0.5919 ms  62.11 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.624e-03  max_rel=6.553e-01  (ours_amax=3.531e+00 ref_amax=3.532e+00 @22951)
+  dk  vs ref: max_abs=2.158e-03  max_rel=4.732e-01  (ours_amax=3.670e+00 ref_amax=3.670e+00 @4563)
+  dv  vs ref: max_abs=2.139e-03  max_rel=4.073e-01  (ours_amax=6.438e+00 ref_amax=6.437e+00 @5931759)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b8_t2904_h16_d128_causal_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b8_t2904_h16_d128_causal_fp16 ours_sf ===
+VARLEN: B=8 T=2904 maxlen=2048 H=16 Hkv=16 D=128 causal=1
+[timing] VARLEN total 0.5929 ms  62.00 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.624e-03  max_rel=6.553e-01  (ours_amax=3.531e+00 ref_amax=3.532e+00 @22951)
+  dk  vs ref: max_abs=2.158e-03  max_rel=4.732e-01  (ours_amax=3.670e+00 ref_amax=3.670e+00 @4563)
+  dv  vs ref: max_abs=2.139e-03  max_rel=4.073e-01  (ours_amax=6.438e+00 ref_amax=6.437e+00 @5931759)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b8_t2904_h16_d128_causal_fp16/ours_sf_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_main.out varlen_b8_t2904_h16_d128_full_fp16 ours ===
+VARLEN: B=8 T=2904 maxlen=2048 H=16 Hkv=16 D=128 causal=0
+[timing] VARLEN total 1.0720 ms  34.29 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.486e-03  max_rel=3.120e-01  (ours_amax=3.012e+00 ref_amax=3.013e+00 @5929661)
+  dk  vs ref: max_abs=1.555e-03  max_rel=3.978e-01  (ours_amax=3.566e+00 ref_amax=3.568e+00 @5925621)
+  dv  vs ref: max_abs=1.582e-03  max_rel=2.505e-01  (ours_amax=3.123e+00 ref_amax=3.123e+00 @5935806)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b8_t2904_h16_d128_full_fp16/ours_{dq,dk,dv}.npy
+=== [P3-3b] fp16 fa_bwd_fp16_mma_onefile.out varlen_b8_t2904_h16_d128_full_fp16 ours_sf ===
+VARLEN: B=8 T=2904 maxlen=2048 H=16 Hkv=16 D=128 causal=0
+[timing] VARLEN total 1.0694 ms  34.38 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.486e-03  max_rel=3.120e-01  (ours_amax=3.012e+00 ref_amax=3.013e+00 @5929661)
+  dk  vs ref: max_abs=1.555e-03  max_rel=3.978e-01  (ours_amax=3.566e+00 ref_amax=3.568e+00 @5925621)
+  dv  vs ref: max_abs=1.582e-03  max_rel=2.505e-01  (ours_amax=3.123e+00 ref_amax=3.123e+00 @5935806)
+[dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b8_t2904_h16_d128_full_fp16/ours_sf_{dq,dk,dv}.npy

@@ -383,7 +383,8 @@ static void launch_lse_bal_tma_split(dim3 lg, const CUtensorMap& qmap, const CUt
 // O1 的 mma LSE；非 TMA 路径（LSE 用 wgmma/mma，主 kernel Q/dO 用 cp.async）。
 static int run_varlen(const std::string& dir, bool causal, int iters, bool compact = false,
                       bool lse_compact = false, int lse_split = 0, int mla8w = -1,
-                      int mla_kvp = -1, int lseocc = 0, int lse8w = 0) {
+                      int mla_kvp = -1, int lseocc = 0, int lse8w = 0,
+                      const std::string& dump = "") {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -874,6 +875,13 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   report("dq", h_dq, rdq);
   report("dk", h_dk, rdk);
   report("dv", h_dv, rdv);
+  // P3-3 varlen：`--dump=<prefix>` 把 packed 的 dq/dk/dv 落成 npy，供 fa_bwd_compare.py 汇总。
+  if (!dump.empty()) {
+    fa_bwd_save_npy_f32(dir + "/" + dump + "_dq.npy", h_dq.data(), (long long)h_dq.size());
+    fa_bwd_save_npy_f32(dir + "/" + dump + "_dk.npy", h_dk.data(), (long long)h_dk.size());
+    fa_bwd_save_npy_f32(dir + "/" + dump + "_dv.npy", h_dv.data(), (long long)h_dv.size());
+    printf("[dump] ours -> %s/%s_{dq,dk,dv}.npy\n", dir.c_str(), dump.c_str());
+  }
   return 0;
 }
 
@@ -987,7 +995,7 @@ int main(int argc, char** argv) {
 
   if (varlen)
     return run_varlen(dir, causal, iters, compact_opt, lse_compact_opt, lse_split, mla8w_opt,
-                      mla_kvp_opt, lseocc_opt, lse8w_opt);
+                      mla_kvp_opt, lseocc_opt, lse8w_opt, dump_prefix);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
