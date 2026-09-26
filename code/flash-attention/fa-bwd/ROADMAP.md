@@ -2649,7 +2649,28 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第九十六轮）**：**O49——把 O48 的 8-warp 几何按它推荐的 auto 条件「默认化」**
+> **最新（第九十七轮）**：**O50——wgmma2 的 GEMM1/2 等待拆分（`FA_WS1`，中性偏正）
+> + fp16/bf16 MLA split-KV auto 重标定（正结果）+ 修复 bf16 单文件版**。① `FA_WS1`：两条
+> wgmma 各自 commit 后先 `wait_group<1>`（只等 GEMM1 的 S）算 P、再 `wait0` 取 GEMM2 的 dP 算
+> dS，用 CUDA-core 的 exp/量化掩盖 GEMM2，**数值逐位不变**。fp16/bf16 main 方向一致非负
+> （≤1%），ncu（fp16 S512）Duration 33.57→33.47µs、`red`/指令数逐字节不变；**fp8 中性（±2%）
+> 故默认关**（`-DFA_WS1=1` 可复现）。教训：**3 CTA/SM（12 warp/SM）下「提前算依赖较轻的那半」
+> 拿不到额外重叠——`wait` 是 warp 数不足的症状，不是发射顺序问题**。② fp16/bf16 MLA 的
+> `D==512` split-KV auto 由「`grid*sp≈528`+`nblk` 封顶」改成 `max(528 目标, ≤ceil(nblk/2))`、
+> 去封顶 ⇒ S1024H2 main **1.033×**、S256H2 **1.063×**、S512H4/S512H2 不变，端到端 1.02–1.03×，
+> 数值逐位不变（根因：O46 换 8-warp 后旧目标欠切）。③ **修复 bf16 单文件版**（缺 host 侧
+> `make_lse_map`/`make_main_map`、自 O35/O36 起编译不过）。对标 FA3 同 session 纯反向：fp16
+> S512 时间比 2.58×、S4096 3.87×、GQA kv4 2.96×；bf16 S4096 3.93×。详见 `docs/01` §14ac、
+> `docs/01b` §6ak、`docs/03` §50、`docs/04` §23、`docs/08` §5.15。
+> **下一步候选**：① **fp8 D=128 主 kernel 的 4 CTA/SM**——需 regs 168→≤128 且 smem 74.8→
+> ≤56.8KB（当前双卡 3 CTA/SM）；smem 大头是 `Ps/Ss` fp32 20KB + `Qp/dOp` 17KB + Qs/dOs 16KB，
+> 唯一的低风险抓手是把 dQ 寄存器累加器（64 regs）搬 smem/换 flush 粒度（O7 已证 REGDQ 更优，
+> 需重新权衡）——多轮；② **跨-tile 软流水**（double-buffer P/dS 让 fold 与 GEMM3/4/5 重叠），
+> 需先腾 ~19KB smem；③ **GQA/MQA 的 K/V 头复用**（`H/Hkv` 个 Q 头共享同一 KV tile 的
+> TMA/量化，MQA kv1 冗余 64×）——大重构，但 GQA/MQA 是生产形状且当前 L1TEX/L2 各占 ~70/50%；
+> ④ **MLA 降 smem 冲 2 CTA/SM**（四 dtype 共同墙，需 FlashMLA 式 Q/dO 驻寄存器）。
+>
+> **（第九十六轮）**：**O49——把 O48 的 8-warp 几何按它推荐的 auto 条件「默认化」**
 > （`D==128 && mma 路径 && grid ≤ SM 数`；`--d128w=0/1` 仍可强制）。fp16/bf16 的 `d128w`
 > 默认 `0`→`-1`（自动），只用 `cudaDeviceGetAttribute` 查到的 `sm_count` 与逻辑 grid 比较；
 > fp8 额外要求 `!wgmma`（不覆盖 Hopper 生产路径）且判据用**总网格** `mg.x·mg.y·mg.z`
@@ -3471,6 +3492,23 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       0.0263ms/163TF ⇒ ours total 时间比 fp16 3.65×→**3.35×**、bf16 3.58×→**3.42×**。
       单/两文件 device 逐字一致。详见 `docs/01` §14ab、`docs/01b` §6aj、`docs/03` §49、`docs/04` §22、
       `docs/08` §5.14。
+- [x] **O50（第九十七轮）wgmma2 的 GEMM1/2 等待拆分（中性偏正，fp16/bf16 默认开、fp8 默认关）
+      + fp16/bf16 MLA split-KV auto 重标定（正结果）+ 修复 bf16 单文件版**：
+      ① `FA_WS1`：两条 wgmma 各自 commit 后先 `wait_group<1>`（只等 GEMM1 的 S）算 P、再
+      `wait0` 取 GEMM2 的 dP 算 dS——用 CUDA-core 的 exp/量化掩盖 GEMM2，**数值逐位不变**。
+      fp16/bf16 main 方向一致非负（≤1%：S4096 0.9558→0.9543、GQA kv4 0.1801→0.1782、bf16 S512
+      0.0319→0.0316），ncu（S512）Duration 33.57→33.47µs、`red`/指令数逐字节不变；**fp8 中性
+      （±2%）故默认关**（保持旗舰路径逐位不变）。教训：3 CTA/SM/12 warp 下「提前算依赖较轻的
+      那半」拿不到额外重叠——`wait` 是 warp 数不足的症状，不是发射顺序。
+      ② fp16/bf16 MLA 的 `D==512` split-KV auto 由「`grid*sp≈528` + `nblk` 封顶」改成
+      `sp=max(528 目标, ≤ceil(nblk/2))`、**去封顶** ⇒ S1024H2 main **1.033×**（0.1411→0.1366）、
+      S256H2 **1.063×**（0.0204→0.0192）、S512H4/S512H2 不变，端到端 1.02–1.03×，数值 vs ref 逐位
+      不变。根因：O46 换 8-warp 后旧目标欠切。
+      ③ **修复既有 bug**：`fa_bwd_bf16_mma_onefile.cu` 自 O35/O36 加主 kernel TMA 后缺 host 侧
+      `make_lse_map`/`make_main_map`、**一直编译不过**；补回（dtype 参数化自 fp16）⇒ 重新可编译、
+      数值逐位一致。对标 FA3（同 session 纯反向）：fp16 S512 时间比 **2.58×**、S4096 3.87×、
+      GQA kv4 2.96×；bf16 S4096 **3.93×**。单/两文件 device 逐字一致。详见 `docs/01` §14ac、
+      `docs/01b` §6ak、`docs/03` §50、`docs/04` §23、`docs/08` §5.15。
 
 ## 灵感 / backlog
 

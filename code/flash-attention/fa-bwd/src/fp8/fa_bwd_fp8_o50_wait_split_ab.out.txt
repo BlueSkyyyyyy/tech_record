@@ -1,0 +1,11 @@
+## O50 fp8 wgmma main GEMM1/2 wait-split A/B (same binaries, 300 iters, total ms)
+b1_s4096_h16_d128_causal_fp8                  ws0 total(quant+pre+main+cvt) 1.9029 ms
+b1_s4096_h16_d128_causal_fp8                  ws1 total(quant+pre+main+cvt) 1.9051 ms
+b1_s512_h16_d128_causal_fp8                   ws0 total(quant+pre+main+cvt) 0.0995 ms
+b1_s512_h16_d128_causal_fp8                   ws1 total(quant+pre+main+cvt) 0.1019 ms
+b1_s1024_h32_d128_causal_fp8                  ws0 total(quant+pre+main+cvt) 0.3884 ms
+b1_s1024_h32_d128_causal_fp8                  ws1 total(quant+pre+main+cvt) 0.3852 ms
+b1_s1024_h32_d128_kv4_causal_fp8              ws0 total(quant+pre+main+cvt) 0.3578 ms
+b1_s1024_h32_d128_kv4_causal_fp8              ws1 total(quant+pre+main+cvt) 0.3560 ms
+b1_s1024_h2_d512_causal_fp8                   ws0 total(quant+pre+main+cvt) 0.1897 ms
+b1_s1024_h2_d512_causal_fp8                   ws1 total(quant+pre+main+cvt) 0.1916 ms

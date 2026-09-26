@@ -1,0 +1,21 @@
+## O50 fp16 MLA main-only ksplit sweep (--mlaksplit), 200 iters
+=== b1_s1024_h2_d512_causal_fp16 ===
+  k=4   main 0.1611 ms
+  k=8   main 0.1411 ms
+  k=16  main 0.1366 ms
+  k=32  main 0.1419 ms
+=== b1_s512_h4_d512_causal_fp16 ===
+  k=4   main 0.0832 ms
+  k=8   main 0.0756 ms
+  k=16  main 0.0801 ms
+  k=32  main 0.0878 ms
+=== b1_s512_h2_d512_causal_fp16 ===
+  k=4   main 0.0574 ms
+  k=8   main 0.0465 ms
+  k=16  main 0.0454 ms
+  k=32  main 0.0489 ms
+=== b1_s256_h2_d512_causal_fp16 ===
+  k=4   main 0.0234 ms
+  k=8   main 0.0204 ms
+  k=16  main 0.0191 ms
+  k=32  main 0.0233 ms

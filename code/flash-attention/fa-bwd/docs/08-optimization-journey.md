@@ -229,9 +229,24 @@ smem 冲突 + 低 occ
     8-warp main **1.34×**。教训：**「4-warp 每 scheduler warp 数 <2」是比「grid < 132」更本质的
     判据**——fp8 的 `mg.x` 已含 split-K、必须用**总网格**判据（单看 x 维会误开）。原始输出
     `src/{fp16,bf16}/fa_bwd_*_o49_*`、`src/fp8/fa_bwd_fp8_o49_*`；详见 `docs/01` §14ab、
-    `docs/01b` §6aj、`docs/03` §49、`docs/04` §22。
+     `docs/01b` §6aj、`docs/03` §49、`docs/04` §22。
+
+15. **O50（第九十七轮，中性 + 正结果 + bug 修复）**：换两个不碰 occupancy/red 结构的角度。
+    ① **wgmma2 的 GEMM1/2 等待拆分**（`FA_WS1`）：`wait0` → 先 `wait_group<1>` 算 P、再
+    `wait0` 取 dP，用 CUDA-core 的 exp/量化掩盖 GEMM2。**fp16/bf16 小幅非负（≤1%、方向一致）、
+    fp8 中性**（ncu S512 fp16：Duration 33.57→33.47µs、`red`/指令数逐字节不变）⇒ fp16/bf16 默认
+    开、fp8 默认关。**教训：3 CTA/SM/8 warp 下「提前算依赖较轻的那半」拿不到额外重叠——
+    `wait` 是 warp 数不足的症状，不是发射顺序问题。** ② **fp16/bf16 MLA 的 split-KV auto
+    重标定**：O46 把 MLA 换成 8-warp 后，旧的「`grid*sp≈528` + `nblk` 封顶」对 S1024H2 只切到 8、
+    S256H2 被 `nblk=8` 封顶到 8；改成 `max(528 目标, ≤ceil(nblk/2))`、去封顶 ⇒ S1024H2 main
+    **1.033×**、S256H2 **1.063×**、S512H4/S512H2 不变，端到端 1.02–1.03×，数值逐位不变。
+    ③ **修复 bf16 单文件版**：`fa_bwd_bf16_mma_onefile.cu` 自 O35/O36 加主 kernel TMA 后
+    一直缺 host 侧 `make_lse_map`/`make_main_map`、**编译不过**；本轮补回（逐字节 dtype 参数化
+    自 fp16）⇒ 重新可编译、数值逐位一致。详见 `docs/01` §14ac、`docs/01b` §6ak、`docs/03` §50、
+    `docs/04` §23。
 
 ---
+
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 

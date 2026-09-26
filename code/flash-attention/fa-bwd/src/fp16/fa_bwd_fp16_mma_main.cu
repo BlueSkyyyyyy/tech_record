@@ -923,10 +923,16 @@ int main(int argc, char** argv) {
     else {
       const int base_m = (S + bm_sel - 1) / bm_sel;
       const long base = (long)base_m * H * B;
+      const int nt_cap = (S + bn_sel - 1) / bn_sel;
       int sp = 1;
       while (sp < 16 && base * (sp * 2) <= 528) sp *= 2;
-      const int nt_cap = (S + bn_sel - 1) / bn_sel;
-      while (sp > nt_cap && sp > 1) sp >>= 1;
+      // O50：至少把每个 m 块的 K 范围切成 ≈ 2 份（nt_cap/2），让 1 CTA/SM 的 MLA 有足够并发。
+      //   实测（`--mlaksplit` sweep，fp16=bf16）S1024H2 需 16（旧 target 只给 8）、S256H2 需 16
+      //   （旧 `nblk` 封顶给 8）、S512H4 仍 8、S512H2 仍 16 ⇒ 四 shape 都取到各自最优；
+      //   去掉 `nt_cap` 封顶安全——切得比 K tile 细只产生空切片（kernel 内 early-exit）。
+      int sp_min = 1;
+      while (sp_min < 16 && sp_min * 2 <= (nt_cap + 1) / 2) sp_min *= 2;
+      if (sp_min > sp) sp = sp_min;
       mlaksplit_eff = sp;
     }
   }

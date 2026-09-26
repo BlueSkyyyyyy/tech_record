@@ -145,6 +145,10 @@ __device__ __forceinline__ uint64_t make_desc_sw128(uint32_t addr, uint32_t sbo_
 #else
 #define FA_HAS_WGMMA 0
 #endif
+// O50：wgmma2 的 GEMM1(S=QKᵀ)/GEMM2(dP=dO·Vᵀ) 等待拆分（见 fp16 同名开关）。
+#ifndef FA_WS1
+#define FA_WS1 1
+#endif
 __device__ __forceinline__ void wgmma_fence() {
 #if FA_HAS_WGMMA
   asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
@@ -158,6 +162,13 @@ __device__ __forceinline__ void wgmma_commit() {
 __device__ __forceinline__ void wgmma_wait0() {
 #if FA_HAS_WGMMA
   asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory");
+#endif
+}
+// O50：等「未完成 wgmma group 数 ≤ N」，用于拆开 GEMM1/GEMM2 的等待。
+template <int N>
+__device__ __forceinline__ void wgmma_wait_group() {
+#if FA_HAS_WGMMA
+  asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(N) : "memory");
 #endif
 }
 __device__ __forceinline__ void wgmma_m64n64k16_bf16(float (&d)[32], uint64_t da,
@@ -1609,7 +1620,11 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
     float sacc[32], dpacc[32];
     wgmma_mn64_issue(Qw, Kt, HD, sacc);
     wgmma_mn64_issue(dOw, Vs, HD, dpacc);
+#if FA_WS1
+    wgmma_wait_group<1>();   // O50：只等 GEMM1（S），GEMM2（dP）与下面算 P 重叠
+#else
     wgmma_wait0();
+#endif
     float pval[8][4];
 #pragma unroll
     for (int j = 0; j < 8; ++j)
@@ -1627,6 +1642,9 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
       pds_store_sw128(Pw, j, r0, lane, c2, BN,
                       __float2bfloat16(pval[j][0]), __float2bfloat16(pval[j][1]),
                       __float2bfloat16(pval[j][2]), __float2bfloat16(pval[j][3]));
+#if FA_WS1
+    wgmma_wait0();   // O50：P 段已掩盖 GEMM2 的部分执行，这里等 dP 就绪
+#endif
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
       const float d0 = pval[j][0] * (dpacc[j * 4 + 0] - del_lo);

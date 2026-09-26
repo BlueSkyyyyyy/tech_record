@@ -1,0 +1,23 @@
+## O50 fp16 wgmma2 S512 ncu: ws0 vs ws1 (--launch-count 1)
+===== ws0 =====
+    Metric Name                                                               Metric Unit Metric Value
+    gpu__time_duration.sum                                                             us        33.57
+    lts__t_sectors_op_read.sum                                                     sector       557418
+    lts__t_sectors_op_red.sum                                                      sector      1376256
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        12.46
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.39
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.29
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.43
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.50
+    smsp__inst_executed.sum                                                          inst      6150400
+===== ws1 =====
+    Metric Name                                                               Metric Unit Metric Value
+    gpu__time_duration.sum                                                             us        33.47
+    lts__t_sectors_op_read.sum                                                     sector       556265
+    lts__t_sectors_op_red.sum                                                      sector      1376256
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        12.46
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.25
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.29
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.46
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.56
+    smsp__inst_executed.sum                                                          inst      6150400
