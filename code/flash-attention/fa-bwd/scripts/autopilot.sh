@@ -64,7 +64,8 @@ run_loop() {
   echo $$ > "$LOCK"; trap 'rm -f "$LOCK"' EXIT
   export NO_PROXY="192.168.36.3,localhost,127.0.0.1" no_proxy="192.168.36.3,localhost,127.0.0.1"
   export OPENAI_BASE_URL="http://192.168.36.3:8005/v1" OPENAI_API_KEY="EMPTY"
-  export http_proxy="socks5://127.0.0.1:12345" https_proxy="socks5://127.0.0.1:12345"
+  # 本机 socks5 代理可能已失效；直连可用，故不设 http(s)_proxy（git/opencode 直连）
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
   cd "$REPO" || exit 1
   local fail=0
   for round in $(seq 1 "$MAX_ROUNDS"); do
