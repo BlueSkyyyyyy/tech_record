@@ -567,7 +567,11 @@ lse_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
 // 数学与 O8 完全一致（同一 QKᵀ mma、online-softmax、同 row 4-lane `shfl_xor` 归约），
 // 数值应逐位相同。仅用于 causal；非 causal 各块工作量相同，无需配对（host 走 O8 原版）。
 // smem：Qs[LBM*LD] +（PIPE=1 时 2 份 / PIPE=0 时 1 份）Ks[LBN*LD]。
-template <int HD, int PIPE>
+// O54：`FULL=true` 时本 kernel 也服务 **非 causal（full）** 路径——每个 CTA 只处理一个 m 块
+//   （grid.x = nblk，不做镜像配对，因为 full 下所有 m 块工作量相同、本已均衡），`ncols=len`
+//   且不做 `jg<=qi` 因果掩码，其余（cp.async 双缓冲、O40 的 K 维 split + 二次归约）逐字复用。
+//   `FULL=false`（默认）编译出与原版逐位相同的代码，定长/causal 路径不受影响。
+template <int HD, int PIPE, bool FULL = false>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
                    float* __restrict__ lse, int S, int H, int Hkv, float scale,
@@ -590,7 +594,9 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
   const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
   const int nblk  = (len + LBM - 1) / LBM;
-  if (pair >= (nblk + 1) / 2) return;   // 短序列多余的对 CTA 直接退出
+  // O54：FULL 一个 CTA 一个 m 块；causal 一行镜像对。
+  if constexpr (FULL) { if (pair >= nblk) return; }
+  else { if (pair >= (nblk + 1) / 2) return; }   // 短序列多余的对 CTA 直接退出
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -641,14 +647,15 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
 
 #pragma unroll
   for (int t = 0; t < 2; ++t) {
-    const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
-    if (t == 1 && pair == nblk - 1 - pair) continue;  // 奇数 nblk 的中心块只做一次
+    if constexpr (FULL) { if (t == 1) continue; }   // O54：full 无镜像配对，只做 t=0
+    const int mblk = FULL ? pair : ((t == 0) ? pair : (nblk - 1 - pair));
+    if (!FULL && t == 1 && pair == nblk - 1 - pair) continue;  // 奇数 nblk 的中心块只做一次
     const int m0 = mblk * LBM;
 
     // ---- 载入本 m 块的 Q（越界补 0）----
     issue_q(Qs, m0);
 
-    const int ncols = min(len, m0 + LBM);
+    const int ncols = FULL ? len : min(len, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
     // O39：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
     const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
@@ -691,7 +698,7 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
           int c = j * 8 + c2 + (q & 1);
           int qi = m0 + r, jg = j0 + c;
           float sv = -INFINITY;
-          if (qi < len && jg < len && jg <= qi) sv = acc[0][j][q] * scale;
+          if (qi < len && jg < len && (FULL || jg <= qi)) sv = acc[0][j][q] * scale;
           if (sv != -INFINITY) {
             float mn = fmaxf(mrow[s], sv);
             lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
@@ -4153,6 +4160,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<512, 1>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
+    // O54：非 causal（full）MLA varlen 也走 bal 的 FULL 版（一个 CTA 一个 m 块 + K 维 split）。
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<512, 1, true>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
   }
   const int d_rows = (int)rows_q;
   const int d_wpb = THREADS / 32;
@@ -4177,8 +4187,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
   const int lse_nblk0 = (maxlen + LBM - 1) / LBM;
   int lse_split_eff = lse_split;
   if (lse_split_eff <= 0) {
-    long base = (long)((lse_nblk0 + 1) / 2) * H * B;
-    const int target = (D == 512) ? 132 : 528;
+    // O54：full 的 bal FULL 版每 CTA 一个 m 块 ⇒ base = nblk0·H·B；目标提到 ≈3 个波(384)。
+    long base = causal ? (long)((lse_nblk0 + 1) / 2) * H * B : (long)lse_nblk0 * H * B;
+    const int target = (D == 512) ? (causal ? 132 : 384) : 528;
     const int cap = (D == 512) ? 16 : 8;
     int sp = 1;
     while (sp < cap && base * (sp * 2) <= target) sp *= 2;
@@ -4274,6 +4285,15 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
           lse_mma_kernel_bal<512, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(
               d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
         }
+      } else if (lse_split_eff > 1) {
+        // O54：full MLA varlen 的 LSE 走 K 维 split（bal 的 FULL 版：一个 CTA 一个 m 块）。
+        dim3 gsp((unsigned)lse_nblk, H, (unsigned)(B * lse_split_eff));
+        lse_mma_kernel_bal<512, 1, true><<<gsp, THREADS, kLseSmemBal1>>>(
+            d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part, lse_split_eff);
+        const long long nrows = (long long)rows_q;
+        const int th = 256;
+        const long long bl = (nrows + th - 1) / th;
+        lse_split_merge_kernel<<<(unsigned)bl, th>>>(d_lse_part, d_lse, nrows, lse_split_eff);
       } else
         lse_mma_kernel<512><<<dim3(lse_nblk, H, B), THREADS, kLseSmem>>>(d_q, d_k, d_lse,
                                                                          maxlen, H, Hkv, scale,
@@ -4405,6 +4425,49 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
       printf(" %d %.4f", sp, t);
     }
     printf(" ms (auto=%d)\n", mla_ks_eff);
+    run_all();  // 恢复 CLI 选中路径
+  }
+
+  // ---- O54 A/B（D=512/MLA/varlen/full）：非 causal LSE 的「bal FULL + K 维 split」vs 旧版。
+  if (D == 512 && !causal) {
+    auto go_lse = [&](int which, int sp) {
+      if (which == 0) {
+        lse_mma_kernel<512><<<dim3(lse_nblk, H, B), THREADS, kLseSmem>>>(
+            d_q, d_k, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
+      } else if (sp <= 1) {
+        lse_mma_kernel_bal<512, 1, true><<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1>>>(
+            d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
+      } else {
+        dim3 gsp((unsigned)lse_nblk, H, (unsigned)(B * sp));
+        lse_mma_kernel_bal<512, 1, true><<<gsp, THREADS, kLseSmemBal1>>>(
+            d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part, sp);
+        const long long nrows = (long long)rows_q;
+        const int th = 256;
+        lse_split_merge_kernel<<<(unsigned)((nrows + th - 1) / th), th>>>(d_lse_part, d_lse,
+                                                                          nrows, sp);
+      }
+    };
+    cudaEvent_t ela, elb;
+    CUDA_CHECK(cudaEventCreate(&ela));
+    CUDA_CHECK(cudaEventCreate(&elb));
+    auto bench_lse = [&](int which, int sp, float* out) {
+      go_lse(which, sp);
+      CUDA_CHECK(cudaEventRecord(ela));
+      for (int i = 0; i < iters; ++i) go_lse(which, sp);
+      CUDA_CHECK(cudaEventRecord(elb));
+      CUDA_CHECK(cudaEventSynchronize(elb));
+      CUDA_CHECK(cudaEventElapsedTime(out, ela, elb));
+      *out /= iters;
+    };
+    float t0 = 0.f;
+    bench_lse(0, 1, &t0);
+    printf("[O54 A/B] varlen MLA full LSE: old(O8 mma) %.4f ms |", t0);
+    for (int sp : {1, 2, 4, 8, 16}) {
+      float t = 0.f;
+      bench_lse(1, sp, &t);
+      printf(" balFULL/split%d %.4f", sp, t);
+    }
+    printf(" ms (auto=%d)\n", lse_split_eff);
     run_all();  // 恢复 CLI 选中路径
   }
 

@@ -1,0 +1,24 @@
+fa_bwd_fp8_kernels.cuh(3165): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1222 of fa_bwd_fp8_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kernels.cuh(2873): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1222 of fa_bwd_fp8_main.cu
+
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_full_fp8
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=0
+cu_seqlens = 0 256 768 1792
+O40: varlen lse k-split = 8 (base=48)
+[timing] VARLEN total 0.3458 ms  16.30 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 2 x 3 (nocompact, ksplit=4, total_mt=28) | use_regdq=0 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.3987 ms | 8w 0.2640 ms (1.510x) | 8w+kvpipe 0.2490 ms (1.601x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=8.941e-08 dv=5.960e-08 | max_abs(kvp-vs-8w) dq=8.941e-08 dk=5.960e-08 dv=5.960e-08
+[O54 A/B] varlen MLA full LSE: old(O1 mma) 0.3763 ms | balFULL/split1 0.1289 balFULL/split2 0.0741 balFULL/split4 0.0431 balFULL/split8 0.0377 balFULL/split16 0.0436 ms (auto=8)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=7.994e-02  max_rel=3.578e+01  (ours_amax=1.271e+00 ref_amax=1.267e+00 @297035)
+  dk  vs ref: max_abs=9.629e-02  max_rel=4.391e+01  (ours_amax=1.160e+00 ref_amax=1.108e+00 @553104)
+  dv  vs ref: max_abs=4.148e-02  max_rel=3.162e+01  (ours_amax=6.405e-01 ref_amax=6.485e-01 @201373)

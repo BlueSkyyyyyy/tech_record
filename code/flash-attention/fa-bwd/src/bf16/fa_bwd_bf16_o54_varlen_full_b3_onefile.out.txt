@@ -1,0 +1,32 @@
+fa_bwd_bf16_mma_onefile.cu(2124): warning #177-D: variable "NTH" was declared but never referenced
+    constexpr int NTH = 256;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2b_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 4297
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_bf16_mma_onefile.cu(2401): warning #177-D: variable "NTH" was declared but never referenced
+    constexpr int NTH = 256;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 4324
+
+fa_bwd_bf16_mma_onefile.cu(2403): warning #177-D: variable "NG" was declared but never referenced
+    constexpr int NG = BN / 8;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 4324
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 618750
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_full_bf16
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=0
+cu_seqlens = 0 256 768 1792
+[O40] varlen lse k-split = 4 (base=48)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 0.4685 ms  12.03 TFLOPS (sum_b 4HL^2D)
+grid main = 512 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.4279 ms | 8w 0.3904 ms (1.096x) | max_abs(8w-vs-4w) dq=2.384e-07 dk=1.192e-07 dv=1.192e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.6034 2 0.3856 4 0.3889 8 0.3862 16 0.3891 ms (auto=16)
+[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.3747 ms | balFULL/split1 0.0824 balFULL/split2 0.0470 balFULL/split4 0.0413 balFULL/split8 0.0476 balFULL/split16 0.0577 ms (auto=4)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.100e-03  max_rel=6.355e-01  (ours_amax=1.266e+00 ref_amax=1.267e+00 @100975)
+  dk  vs ref: max_abs=3.526e-03  max_rel=6.618e-01  (ours_amax=1.109e+00 ref_amax=1.108e+00 @108185)
+  dv  vs ref: max_abs=2.316e-03  max_rel=6.903e-01  (ours_amax=6.484e-01 ref_amax=6.485e-01 @552982)

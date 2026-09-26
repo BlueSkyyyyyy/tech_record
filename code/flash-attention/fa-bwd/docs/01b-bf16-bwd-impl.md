@@ -1994,3 +1994,23 @@ bound = **L2（跨 CTA dQ red）+ 访存延迟**，不再是 O52 的「grid 不�
 
 原始输出：`src/bf16/fa_bwd_bf16_o53_varlen.out.txt`（两文件 4 case + 单文件 2 case）、
 `src/bf16/fa_bwd_bf16_o53_ncu_varlen_b3.out.txt`。
+
+---
+
+## 6an. O54-bf16：非 causal（full）MLA varlen 的 LSE 走 K 维 split（第 101 轮）—— 正结果，full varlen 默认 auto
+
+与 fp16 §15 逐字同构（`lse_mma_kernel_bal<HD,PIPE,bool FULL>`，host `run_varlen` 的
+`D==512 && !causal` 分支；auto 目标 384、cap 16）。bf16 device 代码同源、单/两文件 device
+逐字一致（`sync_onefile_device.py` 核对 `identical: True`）。
+
+* **LSE-only（b3_t1792 full，`[O54 A/B]`）**：old 0.3747 ms → split1 0.0824 / split2 0.0470 /
+  **split4 0.0413** / split8 0.0476 / split16 0.0577（auto=4）⇒ **9.1×**。
+* **端到端**：total **1.013→0.468 ms（2.17×）**（5.56→12.03 TFLOPS）。
+* **数值 vs fp32 ref**：dq/dk/dv = 3.100/3.526/2.316e-3（bf16 噪声，与 old 路径同量级）。
+* **causal b3 回归**：total 0.3508 ms（O53 0.3499），数值同量级。
+* **顺带修复既有 bug**：单文件 `fa_bwd_bf16_mma_onefile.cu` 缺 host 侧 `make_lse_map`/
+  `make_main_map`（O50 只在两文件版补过），`-DFA_TMA` 构建一直编译不过；本轮补回并重编译通过，
+  与两文件版数值逐指标一致。
+
+原始输出：`src/bf16/fa_bwd_bf16_o54_varlen_full_b3.out.txt`（两文件）、
+`..._o54_varlen_full_b3_onefile.out.txt`（单文件）、`..._o54_varlen_causal_reg_b3.out.txt`（回归）。

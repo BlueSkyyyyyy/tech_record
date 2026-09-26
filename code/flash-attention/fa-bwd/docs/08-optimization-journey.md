@@ -291,6 +291,27 @@ smem 冲突 + 低 occ
      fp8 ~5e-2）——**教训：跑 full 用例时先核对输出头的 `causal=` 字段**。详见 `docs/01`
      §14ae、`docs/01b` §6am、`docs/04` §25。
 
+19. **O54（第 101 轮，正结果，full varlen 默认 auto）**：**非 causal（full）MLA varlen 的 LSE
+     走 K 维 split**。O53 把 split-KV 搬进 varlen **主 kernel** 后，`b3_t1792` full 端到端仍是
+     1.013 ms，而 main-only 只有 0.392 ms —— **LSE 占 60%**。原因：非 causal 的 MLA LSE 一直走
+     O1 的 `lse_mma_kernel<512>`（一个 CTA 一个 m 块、**无 K 维 split、标量 K 载入**），而 causal
+     早已用带 **镜像配对 + `cp.async` 双缓冲 + O40 split** 的 `lse_mma_kernel_bal`。full 下各 m
+     块工作量相同（无需配对），但缺 split/双缓冲 ⇒ `b3` base grid 仅 `16·2·3=96 < 132 SM`、
+     单 CTA 顺序扫 16 tile。改动：给三 dtype 的 `lse_mma_kernel_bal` 加模板 **`bool FULL=false`**
+     （`FULL=true`：`grid.x=nblk`、一个 CTA 一个 m 块、`ncols=len`、无因果掩码；`FULL=false`
+     经 `if constexpr` 化简出与历史**逐位相同**的代码）；host `run_varlen` 的 `D==512&&!causal`
+     分支在 `lse_split_eff>1` 时走它 + `lse_split_merge_kernel`。auto：fp16/bf16 目标 384
+     （b1→8、b3→4），fp8 目标 768（b1/b3→8）。**LSE 9–14×、端到端 fp16/bf16 2.17×、fp8 ~2.1×**：
+     fp16 total 1.013→**0.468ms/12.05TF**、b1 ~0.28→**0.102ms**；bf16 同；fp8 **0.346ms/16.30TF**。
+     数值 vs ref 与 old 同量级（split 只改 fp32 求和次序）；causal b3 与 D=128 full varlen 回归
+     **逐位/同量级不变**，单/两文件逐指标一致。ncu（fp16 FULL 版 LSE，b3 split4）：Duration
+     40.99µs、**L2 24% / Compute 20.6% / DRAM 5.4%**、smem 199.68KB → 1 CTA/SM、**Waves 2.91**、
+     No Eligible 74.1%、fixed-latency stall 37.3% ⇒ **bound = 低 occupancy + fixed-latency**。
+     **教训：把一个路径已有的优化（split+双缓冲）补到另一路径（full）时，别被「full 工作均衡、
+     无需镜像配对」迷惑——`bool FULL` 一个模板参数就够，且默认档必须编译出逐位相同的代码以保回归。**
+     顺带修复单文件 `fa_bwd_bf16_mma_onefile.cu` 缺 `make_lse_map`/`make_main_map`（`-DFA_TMA`
+     构建一直编译不过）的既有 bug。详见 `docs/01` §15、`docs/01b` §6an、`docs/03` §53、`docs/04` §26。
+
 ---
 
 

@@ -1,0 +1,31 @@
+fa_bwd_bf16_mma_kernels.cuh(2133): warning #177-D: variable "NTH" was declared but never referenced
+    constexpr int NTH = 256;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2b_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 1170 of fa_bwd_bf16_mma_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_bf16_mma_kernels.cuh(2410): warning #177-D: variable "NTH" was declared but never referenced
+    constexpr int NTH = 256;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 1197 of fa_bwd_bf16_mma_main.cu
+
+fa_bwd_bf16_mma_kernels.cuh(2412): warning #177-D: variable "NG" was declared but never referenced
+    constexpr int NG = BN / 8;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 1197 of fa_bwd_bf16_mma_main.cu
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 618750
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_bf16
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 256 768 1792
+[O40] varlen lse k-split = 2 (base=48)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 0.3508 ms  16.07 TFLOPS (sum_b 4HL^2D)
+grid main = 512 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.2851 ms | 8w 0.2557 ms (1.115x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=2.384e-07 dv=4.768e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.5541 2 0.3010 4 0.2644 8 0.2537 16 0.2535 ms (auto=16)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.267e-02  max_rel=2.693e+00  (ours_amax=3.984e+00 ref_amax=3.983e+00 @791160)
+  dk  vs ref: max_abs=1.217e-02  max_rel=4.767e+00  (ours_amax=3.359e+00 ref_amax=3.354e+00 @1041)
+  dv  vs ref: max_abs=1.796e-02  max_rel=5.158e+00  (ours_amax=5.156e+00 ref_amax=5.148e+00 @786761)

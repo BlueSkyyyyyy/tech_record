@@ -3826,3 +3826,78 @@ ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
 原始输出：`src/fp16/fa_bwd_fp16_o53_varlen.out.txt`（两文件 4 case + 单文件 2 case）、
 `src/fp16/fa_bwd_fp16_o53_ncu_varlen_b3.out.txt`、`..._o53_ncu_stall_varlen_b3.out.txt`；
 bf16 同构 `src/bf16/fa_bwd_bf16_o53_varlen.out.txt`、`..._o53_ncu_varlen_b3.out.txt`。
+
+---
+
+## 15. O54-fp16：非 causal（full）MLA varlen 的 LSE 走 K 维 split（第 101 轮）—— 正结果，full varlen 默认 auto
+
+### 15.1 动机
+
+O53 把 split-KV 搬进 varlen **主 kernel** 后，`b3_t1792` full 的端到端仍是 **1.013 ms**，其中
+主 kernel-only 仅 0.392 ms —— **LSE 占 ~0.62 ms（60%）**。原因：非 causal 的 MLA LSE 一直走
+O1 的 `lse_mma_kernel<512>`（**每个 m 块一个 CTA、无 K 维 split、标量 K 载入**），而 causal
+早已用带 **镜像配对 + `cp.async` 双缓冲 + O40 split** 的 `lse_mma_kernel_bal<512,1>`。full 下
+所有 m 块工作量相同（无需镜像配对），但**缺少 split/双缓冲**，`b3` 的 base grid 只有
+`nblk0·H·B = 16·2·3 = 96 < 132 SM`、单 CTA 顺序扫 16 个 K tile ⇒ 并行度不足 + 延迟受限。
+
+### 15.2 实现（单/两文件 device 逐字一致）
+
+给 `lse_mma_kernel_bal` 加模板参数 **`bool FULL = false`**（`docs/01b`/`docs/03` 同款）：
+* `FULL=true`：`grid.x=nblk`，**一个 CTA 一个 m 块**（不做镜像配对，`t==1` 用 `if constexpr` 删掉，
+  `mblk=pair`）；`ncols = len`（不是 `min(len, m0+LBM)`）；掩码去掉 `jg<=qi`。
+* `FULL=false`（默认）经 `if constexpr` 化简后**编译出与原版逐位相同的代码**，causal/定长不受影响。
+* 复用同一套 `issue_q/issue_k`（`cp.async` 双缓冲）、online-softmax、4-lane `shfl` 归约、
+  O40 的连续 K tile 切片 + `lse_split_merge_kernel` 二次归约。
+
+host 侧（`run_varlen`，`D==512 && !causal`）：`lse_split_eff > 1` 时 launch
+`lse_mma_kernel_bal<512,1,true>`，`grid=(nblk,H,B*split)`，再跑 merge；否则退回原
+`lse_mma_kernel<512>`（历史路径）。auto：`base = nblk0·H·B`、目标 **≈3 个波（384）**、cap 16，
+再按 `nblk0` 封顶——`b1` 得 8、`b3` 得 4（都是 sweep 最优）。末尾加 `[O54 A/B]`（LSE-only）。
+
+### 15.3 数值（ours vs fp32 ref，fp16 full varlen，max_abs dq/dk/dv）
+
+| case | dq / dk / dv | 与 old 路径 |
+|---|---|---|
+| b3_t1792 full | 5.516 / 4.451 / 2.385e-4 | **逐位相同**（仅 fp32 求和次序，split 亦然） |
+| b1_t512 full | 3.046 / 4.449 / 1.327e-4 | 逐位相同 |
+
+`[O54 A/B]` 的 `balFULL/split1` 与 old 值一致；split>1 只改 `lse_part` 的 fp32 归约次序，
+max_abs 不变。单/两文件逐指标一致。
+
+### 15.4 性能（CUDA event，LSE-only 同 session；total 端到端）
+
+| case | old O8 LSE | split1 | split2 | **split4** | split8 | split16 | auto | total old→new |
+|---|---|---|---|---|---|---|---|---|
+| b3_t1792 full | 0.3791 | 0.0826 | 0.0468 | **0.0411** | 0.0474 | 0.0577 | 4 | **1.013→0.468 ms（2.17×）** |
+| b1_t512 full | 0.1933 | 0.0445 | 0.0266 | 0.0168 | **0.0135** | 0.0236 | 8 | ~0.28→**0.102 ms** |
+
+LSE 本身 **9.2×（b3）/ 14.3×（b1）**；`split1` 也已有 4.6× —— 主要来自 **`cp.async` 双缓冲 +
+一个 CTA 一个 m 块**（old 是标量逐字节载入）。
+
+### 15.5 ncu（`lse_mma_kernel_bal<512,1,true>`，b3 full，split4，`-c 1`）
+
+Duration **40.99 µs**、DRAM 5.38% / L1TEX 28.52% / L2 24.00% / Compute 20.55%、
+regs 63、smem **199.68 KB → 1 CTA/SM**、occ 6.25%、**Waves 2.91**、
+No Eligible **74.1%**、Active Warps/Sched **1.00**、fixed-latency stall **37.3%**。
+**bound = 低 occupancy（1 CTA/SM，smem 硬约束）+ fixed-latency 依赖**，非带宽/算力。
+split 已把 `Waves` 从 old 的不足一波抬到 2.91；再往上要降 smem（去 `Qs`/单缓冲）才能冲 2 CTA/SM。
+
+### 15.6 回归
+
+* **causal b3（D=512）逐位不变**：dq/dk/dv = 2.415/1.834/1.856e-3（与 O53 完全一致），
+  main 8-warp 0.2558 ms。
+* **D=128 full varlen（`varlen_b4_t4096_h16_d128_full_fp16`）逐位不变**：total 0.9075 ms
+  （O53 记 0.909），dq/dk/dv = 4.094/4.953/1.234e-4。
+
+### 15.7 复现 / 原始输出
+
+```bash
+FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --varlen --full /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_full_fp16
+# --lsesplit=1 关 split；[O54 A/B] 会打印 old 与 split1/2/4/8/16
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_o54_varlen_full_b3.out.txt`（两文件）、
+`..._o54_varlen_full_b3_onefile.out.txt`（单文件）、`..._o54_varlen_full_b1.out.txt`、
+`src/fp16/fa_bwd_fp16_o54_ncu_lse_full_b3.out.txt`（ncu）。
