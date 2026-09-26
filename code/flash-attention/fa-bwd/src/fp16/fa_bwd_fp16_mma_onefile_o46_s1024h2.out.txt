@@ -1,0 +1,22 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16
+B=1 S=1024 H=2 Hkv=2 D=512 causal=1 scale=0.044194
+[O6c] main grid=32 auto=(BM=32,BN=32,PIPE=1) sel=(BM=32,BN=32,PIPE=1)
+[O44] MLA main k-split = 8 (auto)
+[O38] lse k-split = 8 (auto)
+[O23] main backend = mma | lse = mma (D=512 S=1024)
+[O43] wgmma2 k-split = 1
+[timing] total(3 kernels) 0.1921 ms  22.35 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0318 ms | main 0.1414 ms | convert 0.0190 ms
+[O39 A/B] lse(D=512) split=1 0.1032 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O39 A/B] lse(D=512) split=2 0.0606 ms (1.703x vs split1) | max_abs vs split1=9.537e-07
+[O39 A/B] lse(D=512) split=4 0.0387 ms (2.669x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=8 0.0285 ms (3.615x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=16 0.0405 ms (2.549x vs split1) | max_abs vs split1=4.768e-07
+[O39] best lse split=8 0.0285 ms (3.615x)
+[MLA512 A/B] main: (32,32,0) 0.4366 (9.84 TF) | (32,32,1) 0.1413 (30.40) | (64,32,0) 0.4897 (8.77) => best 3.090x
+[O44 A/B] MLA main ksplit: 1 0.7315 (5.87) | 2 0.2146 (20.02, 3.41x) | 4 0.1770 (24.27, 4.13x)
+[O46 A/B] MLA main warp: 4w 0.1513 (28.38) | 8w 0.1410 (30.46, 1.073x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.987e-03  max_rel=2.120e-01
+  dk   vs ref: max_abs=1.712e-03  max_rel=3.190e-01
+  dv   vs ref: max_abs=1.848e-03  max_rel=4.306e-02

@@ -3324,6 +3324,85 @@ scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
 `..._o44_ncu_main_ks{1,2}_s1024h2.out.txt`、`..._o44_reg_s512_h16.out.txt`；
 单文件 `src/fp16/fa_bwd_fp16_mma_onefile.cu` 同源。
 
+## 14z. O46-fp16：MLA（D=512）mma 主 kernel 的「256 线程 / 8-warp 几何」（第九十三轮）—— **正结果，D=512 默认**
+
+### 14z.1 动机
+
+O45（第 92 轮）把 fp8 MLA 的墙复核后给出结论：MLA 主 kernel 是 **1 CTA/SM（smem ~207KB 锁死）
+× 4 warp ⇒ 每个 scheduler 只有 1 个 warp**（ncu `Active Warps/Sched 1.00`、`No Eligible 85.7%`、
+`long 2.33 + wait 1.54 + short 0.76`），墙 = **并行度 / 延迟**；`2 CTA/SM` 因 smem 不可达、
+`bulkred`/`ILV`/`split` 均已证伪。**「256 线程 / 8-warp 几何」是唯一能提「每 scheduler warp 数」
+的杠杆**（fp16/bf16 的 MLA mma 主 kernel 同样 4 warp/1 CTA ⇒ 同一问题）。
+
+### 14z.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对）
+
+把 `fa_bwd_fp16_mma_kernel<HD,BM,BN,PIPE,R4,PREL>` 的 warp 网格从写死的 2×2 改成由
+**新模板参数 `NTH`（线程数）+ `NWAR`（N 方向 warp 数）派生**：
+
+* `NWM = NTH/32/NWAR`（M 方向 warp 数）；`wr = wid/NWAR`、`wc = wid%NWAR`；
+* warp tile：`GM1=BM/NWM, GN1=BN/NWAR, GMV=BN/NWM, GNV=NTW/NWAR, GMQ=BM/NWM, GNQ=NTW/NWAR`
+  （`NTW` 固定 128，与 warp 数解耦）；`__launch_bounds__(NTH, …)`。
+* `kv_issue_async`/`qdo_issue_async` 加默认模板参数 `NTH`（默认 `THREADS`），kernel 内
+  所有 `THREADS` 换成 `NTH`。
+
+**默认 `NTH=128/NWAR=2` 与 O5c 逐字等价**（`NWM=2`、`NTW=128`、几何全同）；MLA（D=512）用
+`NTH=256/NWAR=4`（2×4 网格）⇒ 同 1 CTA/SM 下 **8 warp、每 scheduler 2 warp**。smem 与 grid
+不变、dK/dV 归约字节不变。host 加 CLI `--mla8w=0/1`（D=512/BM=32/PIPE=1 默认 1）与
+`LAUNCH_CFG_W`；`run_varlen` 保持 4-warp。
+
+### 14z.3 数值（ours-vs-fp32-ref，fp16 causal，max_abs dq/dk/dv）
+
+| shape | 4-warp（=历史） | 8-warp |
+|---|---|---|
+| S256H2 D512 | 1.638 / 1.582 / 1.753e-3 | **同**（1.638 / 1.582 / 1.753e-3） |
+| S512H4 D512 | 2.516 / 2.916 / 1.724e-3 | **同** |
+| S1024H2 D512 | 1.987 / 1.712 / 1.848e-3 | **同** |
+| MHA S512 D128（未走 8w） | 1.671 / 1.771 / 1.899e-3 | 回归逐位不变 |
+| MHA S4096 D128 | 1.883 / 1.734 / 1.966e-3 | 回归逐位不变 |
+| GQA kv4 S1024 | 2.134 / 3.305 / 3.850e-3 | 回归逐位不变 |
+
+⇒ 8-warp 档 vs ref 的 max_abs 与 4-warp 档**逐值一致**；D=128 默认路径（`NWAR=2`）与历史
+**逐位不变**。
+
+### 14z.4 性能（CUDA event；同 binary、同 session 的 `[O46 A/B]`，main-only，ms）
+
+| shape | 4-warp | 8-warp | 加速 | total 4w→8w |
+|---|---|---|---|---|
+| S256H2 D512 | 0.0221 | **0.0204** | 1.083× | 0.0549→**0.0534** |
+| S512H4 D512 | 0.0839 | **0.0757** | 1.108× | 0.1287→**0.1196** |
+| S1024H2 D512 | 0.1512 | **0.1409** | 1.073× | 0.2044→**0.1898** |
+
+main-only 12.2→13.2 TF（S256）/ 25.6→28.4（S512）/ 28.4→30.5（S1024）。**8-warp 实例
+148–151 regs、0 spill；4-warp 是 168 regs + 152–296B spill**（每线程累加器更小）。
+
+### 14z.5 ncu（`fa_bwd_fp16_mma_kernel`，S1024H2，`--set full --launch-count 1`）
+
+| 指标 | 4-warp（`--mla8w=0`） | 8-warp（默认） |
+|---|---|---|
+| Duration | 155.1 µs | **145.4 µs** |
+| Achieved Occupancy | 6.10% | **12.36%** |
+| Issued Ipc Active | 0.57 | **0.65** |
+| Registers Per Thread | 168（+spill） | **151（0 spill）** |
+| Waves Per SM | 3.88 | 3.88 |
+| DRAM / L1TEX / L2 / Compute | 4.1 / 48.1 / 70.6 / 11.5 % | 4.3 / 50.3 / **73.3** / 13.0 % |
+| Warp Cycles / Issued | 6.84 | 12.26（每 warp 等更久，但总吞吐更高） |
+| No Eligible | 85.41% | 83.51% |
+
+⇒ **占用率翻倍（6.1→12.4%）、Ipc +14%**，墙仍是 **L2（dK/dV 跨 CTA red）+ 延迟**；提升来自
+「每 scheduler 从 1 warp 到 2 warp」，与 O45 的诊断一致（不是带宽/算力）。
+
+### 14z.6 复现 / 原始输出
+
+```
+scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16 --causal --iters=30 [--mla8w=0]
+scripts/ncu.sh src/fp16/fa_bwd_fp16_mma_main.cu --set full -c 1 \
+  --kernel-name regex:fa_bwd_fp16_mma_kernel -- \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16 --causal --iters=1 [--mla8w=0]
+```
+原始输出：`src/fp16/fa_bwd_fp16_o46_sweep.out.txt`、
+`..._o46_ncu_mla{4,8}w_s1024h2.out.txt`；单文件 `src/fp16/fa_bwd_fp16_mma_onefile.cu` 同源。
+
 ## 15. 下一步
 
 > **O23（§14n）已完成**：把 O17/O18 的主 kernel + O9a 的 LSE 在 `-DFA_WGMMA` 构建下**默认打开**

@@ -162,7 +162,8 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // =============================================================================
 // PIPE=0：K/V 都不双缓冲；PIPE=1：K/V 都双缓冲；PIPE=2：只 K 双缓冲（V 单缓冲 + 后段预取）。
 // K/V 的 smem 份数：0→2（各 1）、1→4（各 2）、2→3（K 2 + V 1）。
-template <int HD, int BM, int BN, int PIPE, bool R4 = false, bool PREL = true>
+template <int HD, int BM, int BN, int PIPE, bool R4 = false, bool PREL = true,
+          int NTH = THREADS, int NWAR = WN>
 static void launch_bwd_mma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
                            const bf16* do_, const float* delta, const float* lse,
                            float* dq_acc, float* dk_acc, float* dv_acc, int S, int H, int Hkv,
@@ -172,9 +173,9 @@ static void launch_bwd_mma(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
   constexpr int pds = (PIPE == 2) ? 2 * BM * (BN + 8) : 2 * BN * (BM + 8) + BM * (BN + 8);
   constexpr int smem =
       (2 * BM * (HD + 8) + kvn * BN * (HD + 8) + pds) * (int)sizeof(bf16);
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE, R4, PREL>,
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE, R4, PREL, NTH, NWAR>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-  fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE, R4, PREL><<<mg, THREADS, smem>>>(
+  fa_bwd_bf16_mma_kernel<HD, BM, BN, PIPE, R4, PREL, NTH, NWAR><<<mg, NTH, smem>>>(
       q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, sched,
       cu_seqlens, ksplit);
 }
@@ -566,6 +567,10 @@ int main(int argc, char** argv) {
   // O44：MLA（HD=512）mma 主 kernel 的 N 方向 split-K（split-KV）。`-1`=自动（D==512 时按
   //   「填满 4 个波」切，D==128 恒 1）；`1`=关（A/B）；`>=2`=强制。
   int mlaksplit = -1;
+  // O46：MLA（HD=512）mma 主 kernel 的 warp 几何。0=4 warp/128 线程（2×2 网格）；
+  //   1=8 warp/256 线程（2×4 网格，默认）——1 CTA/SM 下每 scheduler 的 warp 数 1→2。
+  //   `--mla8w=0` 供同 binary A/B。
+  int mla8w = 1;
   // O17-2：wgmma2 的 GEMM3/GEMM4 是否拆分到两个 warpgroup（1=拆，0=原版 wg0 串行）。
   int wg2split_sel = 1;
   // O24：delta 用 warp-per-row 向量化版（1，默认）还是旧 block-per-row smem 版（0，A/B）。
@@ -604,6 +609,8 @@ int main(int argc, char** argv) {
     else if (a == "--maintma") maintma_sel = 1;
     else if (a.rfind("--wg2ksplit=", 0) == 0) wg2ksplit = atoi(a.c_str() + 12);
     else if (a.rfind("--mlaksplit=", 0) == 0) mlaksplit = atoi(a.c_str() + 12);
+    else if (a.rfind("--mla8w=", 0) == 0) mla8w = atoi(a.c_str() + 8);
+    else if (a == "--mla8w") mla8w = 1;
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_sel = atoi(a.c_str() + 12);
     else if (a.rfind("--dqdirect=", 0) == 0) dq_direct_sel = atoi(a.c_str() + 11);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
@@ -817,6 +824,31 @@ int main(int argc, char** argv) {
     }                                                                                      \
   } while (0)
 
+  // O46：8-warp（256 线程 / 2×4 网格）变体。仅 MLA D==512/BM=32/PIPE=1 使用（`--mla8w`）；
+  //   其余几何回退 4-warp 的 LAUNCH_CFG。同 binary A/B 用 `--mla8w=0/1`。
+#define LAUNCH_CFG_W(HD_, BM_, BN_, PIPE_, NTH_, NW_)                                      \
+  do {                                                                                     \
+    if (r4) {                                                                              \
+      if (prel)                                                                            \
+        launch_bwd_mma<HD_, BM_, BN_, PIPE_, true, true, NTH_, NW_>(                       \
+            g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,    \
+            Hkv, scale, (int)causal, sched, nullptr, mlaksplit_eff);                       \
+      else                                                                                 \
+        launch_bwd_mma<HD_, BM_, BN_, PIPE_, true, false, NTH_, NW_>(                      \
+            g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,    \
+            Hkv, scale, (int)causal, sched, nullptr, mlaksplit_eff);                       \
+    } else {                                                                               \
+      if (prel)                                                                            \
+        launch_bwd_mma<HD_, BM_, BN_, PIPE_, false, true, NTH_, NW_>(                      \
+            g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,    \
+            Hkv, scale, (int)causal, sched, nullptr, mlaksplit_eff);                       \
+      else                                                                                 \
+        launch_bwd_mma<HD_, BM_, BN_, PIPE_, false, false, NTH_, NW_>(                     \
+            g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,    \
+            Hkv, scale, (int)causal, sched, nullptr, mlaksplit_eff);                       \
+    }                                                                                      \
+  } while (0)
+
   auto launch_cfg = [&](int bm, int bn, int pp, bool r4, bool prel) {
     dim3 g((S + bm - 1) / bm, H, B);
     if (D == 512 && mlaksplit_eff > 1) g.x *= (unsigned)mlaksplit_eff;   // O44：split-KV 抬 grid
@@ -826,8 +858,12 @@ int main(int argc, char** argv) {
         if (pp == 1) LAUNCH_CFG(512, 64, 32, 1);
         else LAUNCH_CFG(512, 64, 32, 0);
       } else {
-        if (pp == 1) LAUNCH_CFG(512, 32, 32, 1);
-        else LAUNCH_CFG(512, 32, 32, 0);
+        if (pp == 1) {
+          if (mla8w) LAUNCH_CFG_W(512, 32, 32, 1, 256, 4);
+          else LAUNCH_CFG(512, 32, 32, 1);
+        } else {
+          LAUNCH_CFG(512, 32, 32, 0);
+        }
       }
       return;
     }
@@ -846,6 +882,7 @@ int main(int argc, char** argv) {
     }
   };
 #undef LAUNCH_CFG
+#undef LAUNCH_CFG_W
   const bool r4_sel = (r4_opt > 0);
   const bool prel_sel = (prel_opt >= 0) ? (prel_opt != 0) : true;
   // O23：把 O17/O18 的 Hopper wgmma2 主 kernel 在 `-DFA_WGMMA`（sm_90a）构建下**默认打开**
@@ -1612,6 +1649,41 @@ int main(int argc, char** argv) {
     printf("[O44 A/B] MLA main ksplit: 1 %.4f (%.2f) | 2 %.4f (%.2f, %.2fx) | "
            "4 %.4f (%.2f, %.2fx)\n",
            k1, tf(k1), k2, tf(k2), k1 / k2, k4, tf(k4), k1 / k4);
+  }
+
+  // ---- O46 A/B：MLA（D=512）主 kernel 的 warp 几何（4-warp 2×2 vs 8-warp 2×4，同 binary/session）----
+  if (D == 512 && causal) {
+    auto time_w = [&](bool w8, float* out_ms) {
+      dim3 g((S + 31) / 32, H, B);
+      g.x *= (unsigned)mlaksplit_eff;
+      auto launch = [&]() {
+        if (w8)
+          launch_bwd_mma<512, 32, 32, 1, false, true, 256, 4>(
+              g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+              Hkv, scale, (int)causal, 0, nullptr, mlaksplit_eff);
+        else
+          launch_bwd_mma<512, 32, 32, 1, false, true>(
+              g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+              Hkv, scale, (int)causal, 0, nullptr, mlaksplit_eff);
+      };
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      for (int i = 0; i < 3; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) launch();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    float w4 = 0.f, w8 = 0.f;
+    time_w(false, &w4);
+    time_w(true, &w8);
+    auto tf = [&](float ms) { return main_flops / (ms * 1e-3) / 1e12; };
+    printf("[O46 A/B] MLA main warp: 4w %.4f (%.2f) | 8w %.4f (%.2f, %.3fx)\n",
+           w4, tf(w4), w8, tf(w8), w4 / w8);
   }
 
   // ---- 数值对拍（重新跑一次完整 forward 保证累加缓冲清零）----

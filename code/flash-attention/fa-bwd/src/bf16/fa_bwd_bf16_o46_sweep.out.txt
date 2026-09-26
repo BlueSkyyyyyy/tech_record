@@ -1,0 +1,62 @@
+### O46 sweep: bf16 MLA (D=512) 8-warp geometry (default) + MHA regression
+date: 2026-09-26T22:31:50+08:00
+--- b1_s256_h2_d512 ---
+[O6c] main grid=8 auto=(BM=32,BN=32,PIPE=1) sel=(BM=32,BN=32,PIPE=1)
+[O44] MLA main k-split = 8 (auto)
+[timing] total(3 kernels) 0.0550 ms  4.88 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0237 ms | main 0.0205 ms | convert 0.0108 ms
+[O44 A/B] MLA main ksplit: 1 0.1878 (1.43) | 2 0.0524 (5.12, 3.58x) | 4 0.0287 (9.36, 6.55x)
+[O46 A/B] MLA main warp: 4w 0.0224 (11.98) | 8w 0.0205 (13.09, 1.093x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.230e-02  max_rel=1.198e+00
+  dk   vs ref: max_abs=9.875e-03  max_rel=1.414e+00
+  dv   vs ref: max_abs=1.686e-02  max_rel=1.513e+00
+--- b1_s512_h4_d512 ---
+[O6c] main grid=32 auto=(BM=32,BN=32,PIPE=1) sel=(BM=32,BN=32,PIPE=1)
+[O44] MLA main k-split = 8 (auto)
+[timing] total(3 kernels) 0.1198 ms  17.93 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0259 ms | main 0.0762 ms | convert 0.0177 ms
+[O44 A/B] MLA main ksplit: 1 0.3773 (5.69) | 2 0.1077 (19.94, 3.50x) | 4 0.0960 (22.37, 3.93x)
+[O46 A/B] MLA main warp: 4w 0.0843 (25.48) | 8w 0.0761 (28.23, 1.108x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=8.753e-03  max_rel=1.212e+00
+  dk   vs ref: max_abs=1.082e-02  max_rel=1.699e+00
+  dv   vs ref: max_abs=1.740e-02  max_rel=1.701e+00
+--- b1_s1024_h2_d512 ---
+[O6c] main grid=32 auto=(BM=32,BN=32,PIPE=1) sel=(BM=32,BN=32,PIPE=1)
+[O44] MLA main k-split = 8 (auto)
+[timing] total(3 kernels) 0.1905 ms  22.54 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0317 ms | main 0.1416 ms | convert 0.0173 ms
+[O44 A/B] MLA main ksplit: 1 0.7634 (5.63) | 2 0.2208 (19.45, 3.46x) | 4 0.1767 (24.30, 4.32x)
+[O46 A/B] MLA main warp: 4w 0.1514 (28.37) | 8w 0.1415 (30.35, 1.070x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=5.838e-03  max_rel=2.319e+00
+  dk   vs ref: max_abs=9.519e-03  max_rel=1.571e+00
+  dv   vs ref: max_abs=1.568e-02  max_rel=1.199e+00
+--- b1_s512_h16_d128 ---
+[O6c] main grid=128 auto=(BM=64,BN=64,PIPE=1) sel=(BM=64,BN=64,PIPE=1)
+[timing] total(3 kernels) 0.0925 ms  23.21 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0231 ms | main 0.0562 ms | convert 0.0132 ms
+[O6c A/B] main sched0(原样) 0.0560 ms | sched1(交错) 0.0561 ms (0.998x) | sched2(逆序) 0.0561 ms (0.999x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=9.001e-03  max_rel=1.490e+00
+  dk   vs ref: max_abs=1.261e-02  max_rel=1.784e+00
+  dv   vs ref: max_abs=1.365e-02  max_rel=1.875e+00
+--- b1_s4096_h16_d128 ---
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[timing] total(3 kernels) 1.9269 ms  71.33 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3241 ms | main 1.5194 ms | convert 0.0834 ms
+[O6c A/B] main sched0(原样) 1.5808 ms | sched1(交错) 1.5413 ms (1.026x) | sched2(逆序) 1.5499 ms (1.020x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+--- b1_s1024_h32_d128_kv4 ---
+[O6c] main grid=512 auto=(BM=64,BN=32,PIPE=2) sel=(BM=64,BN=32,PIPE=2)
+[timing] total(3 kernels) 0.3483 ms  49.32 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0602 ms | main 0.2629 ms | convert 0.0253 ms
+[O6c A/B] main sched0(原样) 0.2579 ms | sched1(交错) 0.2488 ms (1.037x) | sched2(逆序) 0.2575 ms (1.002x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.201e-02  max_rel=1.712e+00
+  dk   vs ref: max_abs=2.125e-02  max_rel=3.799e+00
+  dv   vs ref: max_abs=3.156e-02  max_rel=3.637e+00
