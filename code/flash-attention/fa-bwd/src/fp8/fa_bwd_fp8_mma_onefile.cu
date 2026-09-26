@@ -698,6 +698,13 @@ __device__ __forceinline__ void kv_load_pair(const unsigned char* __restrict__ k
                                              int j0, int S, int Hkv, int hkv, int qbase, int tid,
                                              unsigned char* Ks, unsigned char* Vs,
                                              uint16_t* Kp, int asld, int psld) {
+  // O45：诊断探针（仅用于量「K/V 全局载入」的天花板；结果无意义，勿用于正确性）。
+  //   `-DFA_SKIPKVL=1` 时跳过本 tile 的 K/V 全局读与配对重建，只保留骨架供计时。
+#ifdef FA_SKIPKVL
+  (void)k8; (void)v8; (void)j0; (void)S; (void)Hkv; (void)hkv; (void)qbase; (void)tid;
+  (void)Ks; (void)Vs; (void)Kp; (void)asld; (void)psld;
+  return;
+#endif
   const int nd4 = HD / 4;
   const int units = (BN / 2) * nd4;
   for (int u = tid; u < units; u += THREADS) {
@@ -1723,7 +1730,11 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   constexpr bool kPrefetch = (NPU * 4 <= (BN > 32 ? 32 : 16)) && !kRegDq;
   // O42：bulk-reduce 路径（见 Fp8Cfg 上方 FA_BULKRED 说明）。仅 kvtma 快路 + BN=32
   //   （per-warp staging 行映射要求 MTM34==1、每 warp 16 行 × 64 列）。
-  constexpr bool kBulkRed = FA_BULKRED && TMA && WGMMA && (HD == 128) && (BN == 32) && !FA_ILV34;
+  // O45：本条件曾开放到 HD=512 的 mma 路径再测一次（D=512 的 L1/TEX 仅 ~20%，staging 的
+  //   smem 往返看似有空间）——**实测仍是负结果**：S1024H2 main 0.2004→0.2400ms（0.835×），
+  //   与 O42 在 D=128 的结论一致。故默认仍关；`-DFA_BULKRED=1` 复现。
+  constexpr bool kBulkRed = FA_BULKRED && (BN == 32) && !FA_ILV34 &&
+                            ((HD == 128) ? (TMA && WGMMA) : true);
 
   extern __shared__ __align__(16) char smem[];
   // WGMMA 的 SW128 描述符要求 tile 1024B 对齐（base_offset=0）→ 手动对齐动态 smem 基址
