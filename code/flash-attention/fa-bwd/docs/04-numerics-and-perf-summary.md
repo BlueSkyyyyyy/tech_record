@@ -1967,3 +1967,55 @@ O58 的 `cfg6`（PIPE1/LBN16，压 smem 换 CTA 级并行度）只落在 **varle
 - 复现命令：
   `scripts/run.sh src/<dtype>/fa_bwd_<dtype>_mma_{main.cu,onefile.cu} --dir=<case> --dump=ours`；
   再 `python3 harness/fa_bwd_compare.py --markdown`。
+
+## 33. P3-3b：把 varlen（含 full / MLA）纳入同一 dump/汇总（本轮新增）
+
+**动机**：§32 的 harness 只覆盖定长三 dtype 的 17 个 case（FA/TE 列也在），**varlen
+（`cu_seqlens` packed）与其中的 full / MLA 从未进入统一对拍**——它们的 ours 输出只在
+各轮 kernel 自测 stdout 里，无法被 `fa_bwd_compare.py` 复用。本轮落实 §32 的下一步候选 ①：
+把 varlen 也接入 `--dump` + 统一汇总。
+
+### 33.1 新增物
+
+- **`run_varlen` 支持 `--dump=<prefix>`**：6 个 host（fp16/bf16/fp8 × 单/两文件）的 varlen
+  自测入口在算完 packed `h_dq/h_dk/h_dv` 后，按前缀落 `npy`（复用 `src/fa_bwd_dump.h`；
+  默认关 ⇒ 既有 varlen 行为逐位不变）。两文件用 `--dump=ours`、单文件 `--dump=ours_sf`。
+- 构建需 `-DFA_WGMMA`（fp16/bf16 的 varlen 入口包在 `#ifdef FA_WGMMA` 内）：
+  `ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh <host> ...`。
+
+### 33.2 实测（全部 **38 个 varlen case** × 单/两文件；原始输出
+`src/{fp16,bf16,fp8}/fa_bwd_<dtype>_p33b_varlen_dump.out.txt`，
+汇总 `src/fa_bwd_compare_p33b_varlen_summary.out.txt`）
+
+**判据用 `max_abs`（baseline = fp32 ref）；FA/TE 本机版本不支持 varlen，仅 ours-vs-ref。**
+按 dtype × causal/full 的区间归纳（完整逐 case 表见汇总 out）：
+
+| dtype | causal varlen max_abs 区间 | full varlen max_abs 区间 | 量级判读 |
+|---|---|---|---|
+| fp16 | 4.1e-4 – 3.4e-3 | 3.0e-4 – 1.6e-3 | fp16 噪声（~1e-3） |
+| bf16 | 5.3e-3 – 3.1e-2 | 1.6e-3 – 1.2e-2 | bf16 噪声（~1e-2） |
+| fp8 | 1.6e-1 – 6.2e-1 | 4.1e-2 – 2.5e-1 | fp8 噪声（O(0.1–0.6)） |
+
+代表性逐项（dq/dk/dv max_abs）：
+- fp8 MLA causal `b1_t512_h2_d512` `1.613e-1/2.238e-1/3.864e-1`、`b3_t1792_h2_d512`
+  `3.404e-1/3.436e-1/3.508e-1`（与 §30/O58 历史一致）；
+- fp8 MLA full `b1` `5.26/5.22/4.22e-2`、`b3` `7.99/9.63/4.15e-2`；
+- fp8 D=128 causal `b5_h32` 最大（`5.57/6.20e-1`，amax ~10，属 fp8 相对噪声）；
+- fp16 full `b4_t4096_h16_d128` `4.09e-4/4.95e-4/1.23e-4`、bf16 full `b3_t1792_h2_d512`
+  `3.10e-3/3.53e-3/2.32e-3`。
+
+**单文件 vs 两文件（同一 case）**：114 个向量对逐元素比对，最大差
+`fp16 9.77e-4 / bf16 3.91e-3 / fp8 2.86e-6`——均为一两个 dtype ulp，来自跨 CTA `atomicAdd`
+求和次序（varlen 的 amax 大于定长，故 ulp 也略大），**非实现差异**；dQ 在两文件/单文件间
+逐位相同（寄存器累加 + 唯一 CTA 写）。
+
+### 33.3 复现
+
+```bash
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/<dtype>/fa_bwd_<dtype>_mma_main.cu --varlen --dir=<case> [--full] --dump=ours
+python3 harness/fa_bwd_compare.py --glob 'varlen_*' --out <out.txt>
+```
+
+（可选）§32 候选 ② 仍未做：让 `fa_bwd_compare.py` 直接驱动 `run.sh` 一键「跑 ours + 汇总」，
+以及把 FA/TE 的 varlen 列接进 harness（本机 FA2.7.4/TE2.14 反向不支持 varlen，故暂无列）。

@@ -3425,7 +3425,7 @@ static void launch_bwd_wgmma2_tma(dim3 mg, CUtensorMap qmap, CUtensorMap kmap,
 #ifdef FA_WGMMA
 static int run_varlen(const std::string& dir, bool causal, int iters, int lse_split = 0,
                       int wg2ksplit = -1, int mla8w = -1, int mlaksplit = -1,
-                      int lse8w = 0, int lseocc = 0) {
+                      int lse8w = 0, int lseocc = 0, const std::string& dump = "") {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -4146,6 +4146,13 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
   report("dq", h_dq, rdq);
   report("dk", h_dk, rdk);
   report("dv", h_dv, rdv);
+  // P3-3 varlen：`--dump=<prefix>` 把 packed 的 dq/dk/dv 落成 npy，供 fa_bwd_compare.py 汇总。
+  if (!dump.empty()) {
+    fa_bwd_save_npy_f32(dir + "/" + dump + "_dq.npy", h_dq.data(), (long long)h_dq.size());
+    fa_bwd_save_npy_f32(dir + "/" + dump + "_dk.npy", h_dk.data(), (long long)h_dk.size());
+    fa_bwd_save_npy_f32(dir + "/" + dump + "_dv.npy", h_dv.data(), (long long)h_dv.size());
+    printf("[dump] ours -> %s/%s_{dq,dk,dv}.npy\n", dir.c_str(), dump.c_str());
+  }
   return 0;
 }
 #endif  // FA_WGMMA
@@ -4261,7 +4268,8 @@ int main(int argc, char** argv) {
 
   if (varlen) {
 #ifdef FA_WGMMA
-    return run_varlen(dir, causal, iters, lse_split, wg2ksplit, mla8w, mlaksplit, lse8w, lseocc);
+    return run_varlen(dir, causal, iters, lse_split, wg2ksplit, mla8w, mlaksplit, lse8w, lseocc,
+                      dump_prefix);
 #else
     fprintf(stderr, "VARLEN 需要 -DFA_WGMMA（sm_90a）构建\n");
     return 1;
