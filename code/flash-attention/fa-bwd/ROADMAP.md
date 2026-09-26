@@ -4053,8 +4053,30 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     比对最大差 **fp16 3.91e-3 / bf16 7.81e-3 / fp8 7.63e-6**（1–2 个 dtype ulp，来自跨 CTA
     `atomicAdd` 求和次序，非实现差异）。
   - 文档 `docs/04` §34、`docs/08` §5.25；原始输出见上。
-  - **下一步候选**：① FA/TE 的 varlen 列接进 harness（本机两实现反向不支持 varlen，暂无列）；
-    ② 让 `fa_bwd_compare.py --markdown` 直接产出 `docs/04` 表格片段（文档与实测同步）；
+   - **下一步候选**：① FA/TE 的 varlen 列接进 harness（本机两实现反向不支持 varlen，暂无列）；
+     ② ~~让 `fa_bwd_compare.py --markdown` 直接产出 `docs/04` 表格片段~~ **已完成（第 110 轮 P3-3d）**；
+     ③（继续）O59 候选：MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`。
+
+- 2026-09-27（第一百一十轮）：**P3-3d 完成（`fa_bwd_compare.py --doc-table` 直出 docs/04 分组表）**。
+  - 动机（落实第 109 轮下一步候选 ②）：§1/§7 的数值表一直**人工誊抄**，与实测易脱节
+    （§32.3 已发现 §1.1 fp16 S4096 旧值来自更早混合构建）。给 harness 加 `--doc-table`：
+    把已算好的 `ours/FA2.7.4/TE2.14` 的 `max_abs` 直接渲染成「按 dtype × 家族
+    （MHA / GQA-MQA / MLA / varlen）分组」的 markdown，供 docs/04 直接内联。
+  - **改动（纯 harness，device 一行未改）**：`fa_bwd_compare.py` 新增 `--doc-table` +
+    家族判定（`varlen`/`D≠128→MLA`/`Hkv≠H→GQA-MQA`/其余 MHA）、`shape_str`（带 `Hkv`/`Dv`/
+    `causal|full`）、组内按 `causal→S→B→H` 排序；默认**只列两文件版**（`--impls ours_sf` 可加回）。
+    `fa_bwd_run.py` 新增 `--doc-table [--doc-table-out <path>]`，一键「跑 ours + 出表」。
+  - **实测**（全部 **73 个 case**；产物 `src/fa_bwd_compare_p33d_table.md`（176 行分组表）、
+    `src/fa_bwd_compare_p33d_summary.out.txt`）：fp8 全部 shape、bf16 MHA、fp16 MHA S512 与
+    §1/§7 **逐位一致**；**唯一差异**是 fp16 S4096 的 ours（旧 `1.499/1.572/2.225e-3` vs 现
+    `1.883/1.734/1.966e-3`，≈FA，均在 fp16 噪声内）——**今后判据以 `--doc-table` 实测为准**。
+    fp8 MHA causal S512/S1024/S4096 `2.426/2.975/3.735e-1`、`2.400/4.195/3.536e-1`、
+    `2.635/2.643/3.216e-1`（均优于 TE-vs-ref）；GQA/MQA/MLA 与 §7/§32 **同量级一致**。
+  - 本轮**没有新 kernel/性能/ncu 数字**（harness 增量）；§2/§3 的性能与 bound 结论仍适用。
+  - 原始输出 `src/fa_bwd_compare_p33d_table.md`、`src/fa_bwd_compare_p33d_summary.out.txt`；
+    文档 `docs/04` §35、`docs/08` §5.26。
+  - **下一步候选**：① 把 FA/TE 的 varlen 列接进 harness（本机两实现反向不支持 varlen，暂无列）；
+    ② `--doc-table` 直接改写 docs/04 对应小节（含自动 diff 校验）；
     ③（继续）O59 候选：MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`。
 
 ## 灵感 / backlog

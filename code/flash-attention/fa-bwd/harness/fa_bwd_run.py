@@ -19,6 +19,7 @@
   python harness/fa_bwd_run.py --impls twofile         # 只跑两文件版
   python harness/fa_bwd_run.py --case b1_s512_h16_d128_causal_fp16 --impls both
   python harness/fa_bwd_run.py --no-run                # 只用已有 npy 重新汇总
+  python harness/fa_bwd_run.py --doc-table             # 额外产出 docs/04 分组表（P3-3d）
   python harness/fa_bwd_run.py --dry-run               # 只打印将执行的命令
 
 产物：
@@ -131,6 +132,9 @@ def main():
     ap.add_argument("--iters", type=int, default=5)
     ap.add_argument("--no-run", action="store_true", help="跳过 kernel，只重新汇总")
     ap.add_argument("--no-compare", action="store_true")
+    ap.add_argument("--doc-table", action="store_true",
+                    help="额外产出 docs/04 可内联的分组表（P3-3d）")
+    ap.add_argument("--doc-table-out", default=str(ROOT / "src" / "fa_bwd_compare_p33d_table.md"))
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -207,6 +211,15 @@ def main():
     if r.returncode != 0:
         print(r.stderr, file=sys.stderr)
         return r.returncode
+
+    if args.doc_table:
+        cmd2 = [sys.executable, str(ROOT / "harness" / "fa_bwd_compare.py"),
+                "--doc-table", "--case", *compare_cases, "--out", str(args.doc_table_out)]
+        print("\n[compare --doc-table] " + " ".join(cmd2))
+        r2 = subprocess.run(cmd2, capture_output=True, text=True)
+        if r2.returncode != 0:
+            print(r2.stderr, file=sys.stderr)
+            return r2.returncode
     return 0
 
 
