@@ -2649,7 +2649,23 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百零九轮）**：**P3-3c——`harness/fa_bwd_run.py` 一键「跑 ours + 汇总」**。
+> **最新（第一百一十一轮）**：**P3-4-lite——接入 FA3（SM90）变长反向基线 + FA 口径切到 FA3**。
+> 落实第 110 轮候选 ①：roadmap 原记「FA/TE 反向不支持 varlen，暂无列」，但 **`flash_attn_3`
+> 3.0.0 的反向支持 varlen**（`flash_attn_varlen_func` 可 autograd；fp16/bf16、MHA/GQA、
+> causal/full；head_dim≤128，fp8/D=512 不支持），与用户「对标一律用 FA3」一致。
+> `fa_bwd_bench.py` 加 `fa3_bwd`/`fa3_bwd_varlen`（dump 落 `fa3_*` + bench 纯反向 device time），
+> `fa_bwd_compare.py --doc-table` 默认口径改为 `fa3/TE/ours`。**数值**：17 个 D≤128 varlen case
+> 补齐 `fa3_*`，dq/dk/dv 全在 dtype 噪声内、与 ours 同量级或更小。**性能**：varlen causal
+> ours/FA3 = **1.87–2.95×**、full = **2.90–3.52×**（等长 [1024]×4 0.4502 vs 0.2409ms/142.6TF），
+> 明显好于定长 MHA S4096 的 ~7×。**fp8/MLA 的 FA3 反向不支持**，仍 ours+ref。
+> 详见「当前进度 第一百一十一轮」、`docs/04` §36、`docs/08` §5.27；原始输出
+> `src/fa_bwd_p111_varlen_fa3_perf.out.txt`、`src/fa_bwd_compare_p111_doc_table.md`。
+> **下一步候选**：① 把 FA3（含 varlen）接入 `harness/fa_vs_te_bwd_only.py` 的纯反向基线；
+> ② `--doc-table` 直接改写 docs/04 对应小节（含自动 diff 校验）；
+> ③（继续）O59 候选：**MLA 主 kernel 降 smem 冲 2 CTA/SM**（四 dtype 共同墙）、
+> **fp8 MLA 的 `short_scoreboard`**、其它 LSE 版本的竞争审计。
+>
+> **（第一百零九轮）**：**P3-3c——`harness/fa_bwd_run.py` 一键「跑 ours + 汇总」**。
 > 落实上轮下一步候选 ①：新增 `harness/fa_bwd_run.py`——自动扫 dump 目录、按 `meta.json`
 > （`dtype`/`varlen`/`causal`）选 host（fp16/bf16/fp8 × 单/两文件）、调 `scripts/run.sh`
 > 在 `kernel_lab` 编译运行 `--dump`、最后调 `fa_bwd_compare.py` 汇总。定长走默认 `sm_90`、
@@ -4079,6 +4095,33 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     ② `--doc-table` 直接改写 docs/04 对应小节（含自动 diff 校验）；
     ③（继续）O59 候选：MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`。
 
+- 2026-09-27（第一百一十一轮）：**P3-4-lite 完成（接入 FA3（SM90）变长反向基线；FA 口径切到 FA3）**。
+  - 动机（落实第 110 轮候选 ①）：roadmap 长期记「FA/TE 的 varlen 列：本机 FA2.7.4/TE2.14 反向
+    不支持 varlen，暂无列」。核查发现 **`flash_attn_3` 3.0.0（FA3/SM90）反向支持 varlen**
+    （`flash_attn_varlen_func` 可 autograd，fp16/bf16、MHA/GQA、causal/full；head_dim≤128，
+    fp8 与 D=512 不支持）——与用户「对标一律用 FA3」一致。
+  - **改动（纯 harness，device 一行未改）**：`fa_bwd_bench.py` 新增 `fa3_bwd`（定长）与
+    `fa3_bwd_varlen`（packed + `cu_seqlens`），接入 `dump`（落 `fa3_{o,dq,dk,dv}.npy`，D≤128
+    非 fp8）与 `bench`（纯反向 CUPTI device time）；`fa`（FA2.7.4）保留为历史对照列。
+    `fa_bwd_compare.py` 的 `IMPL_ORDER` 加 `fa3`、`--doc-table` 默认口径改为 `fa3/TE/ours`。
+    固定 shape 沿用原 `meta.seed` 重落（输入不变 ⇒ 既有 `ours_*` 依旧有效）。
+  - **实测数值**（17 个 D≤128 的 varlen case 补齐 `fa3_*`；全在 dtype 噪声内，与 ours 同量级
+    或更小）：varlen [1024]×4 fp16 ours/fa3 `2.112/2.149e-3`(dq)、`2.252/1.970e-3`(dk)、
+    `1.915e-3/1.915e-3`(dv)；[512,1024,2048,256] `3.163/1.938e-3`；h32kv8 `2.438/2.146e-3`；
+    full [1024]×4 `4.094e-4/4.094e-4`。定长 MHA/GQA 的 FA3 列多数 ≤ FA2.7.4（fp16 kv1 dv
+    `7.517e-3` vs `1.057e-2`）——差异仅 fp32 累加次序。
+  - **实测性能**（纯反向：ours 两文件端到端 event，FA3 CUPTI；`4·H·D·ΣL²`）：varlen causal
+    ours/FA3 = **1.87–2.95×**（等长 [1024]×4 0.4502 vs 0.2409ms/142.6TF 仅 1.87×）、full =
+    **2.90–3.52×**；明显好于定长 MHA S4096 的 ~7×（FA3 变长短序列效率低、分母小）。
+    **fp8 与 MLA（D=512）FA3 反向不支持**，仍只有 ours + fp32 ref（fp8 另有 TE-vs-ref）。
+  - 本轮为 **harness + 基线增量**，无新 kernel/ncu 数字；§2/§3 的 bound 结论不变。
+  - 原始输出 `src/fa_bwd_p111_varlen_fa3_perf.out.txt`、`src/fa_bwd_compare_p111_doc_table.md`、
+    `src/fa_bwd_compare_p111_fa3.out.txt`、`src/fa_bwd_fa3_varlen_bench_p111.out.txt`、
+    `src/fa_bwd_fa3_varlen_bench_full_p111.out.txt`；文档 `docs/04` §36、`docs/08` §5.27。
+  - **下一步候选**：① 把 FA3（含 varlen）接入 `harness/fa_vs_te_bwd_only.py` 的纯反向基线；
+    ② `--doc-table` 直接改写 docs/04 对应小节（含自动 diff 校验）；
+    ③（继续）O59 候选：MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
@@ -4107,8 +4150,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       跑遍 38 个 varlen case 落 `ours_*`/`ours_sf_*`，汇总 `fa_bwd_compare_p33b_varlen_summary.out.txt`；
       三 dtype causal/full 全部 dtype 噪声、单/两文件仅差 atomic 次序。详见「第一百零八轮」、`docs/04` §33。
       ~~**仍待：让 `fa_bwd_compare.py` 驱动 `run.sh` 一键化**~~ → **已完成（第一百零九轮 P3-3c）**：
-      `harness/fa_bwd_run.py`，146 次运行仅编译 12 次，数值与历史逐位/同量级一致。**仍待**：
-      FA/TE 的 varlen 列（本机两实现反向不支持）。
+      `harness/fa_bwd_run.py`，146 次运行仅编译 12 次，数值与历史逐位/同量级一致。
+      ~~**仍待：FA/TE 的 varlen 列（本机两实现反向不支持）**~~ → **已完成（第一百一十一轮
+      P3-4-lite）**：FA2.7.4/TE2.14 确实不支持，但 **FA3（flash_attn_3 3.0.0）反向支持 varlen**，
+      已接进 `fa_bwd_bench.py`（dump + bench）与 `--doc-table` 默认口径；varlen causal
+      ours/FA3 1.87–2.95×、full 2.90–3.52×；fp8/MLA FA3 不支持。详见「第一百一十一轮」、`docs/04` §36。
 
 - 用 `nsys` 看 preprocess + main + convert 的端到端重叠。
 - 把 FA2 的 `dQ_accum` 累加缓冲 vs 纯 atomic 做对比实验。
