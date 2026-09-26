@@ -673,28 +673,34 @@ __device__ __forceinline__ void mma_block_bt(const unsigned char* As, int asld,
 //   * 打包写 Kp[rp][dq..]（uint16，元素 = 相邻两行的同一 d），供 GEMM5 用 `ldmatrix.x2.trans`。
 //   * 打包用 `__byte_perm(a, b, 0x5140/0x7362)` 做字节交织（一次 4B 写两个 uint16）。
 // 与 O3 一致仍用**寄存器双缓冲预取**（不额外占 smem），只是每线程预取的是 NPU 个 unit。
-template <int NPU, int HD, int NT = THREADS>
+template <int NPU, int HD, int BN, int NT = THREADS>
 __device__ __forceinline__ void kv_prefetch_pair(const unsigned char* __restrict__ k8,
                                                  const unsigned char* __restrict__ v8,
                                                  int j0, int S, int Hkv, int hkv, int qbase,
                                                  int tid, uint32_t* pk0, uint32_t* pk1,
                                                  uint32_t* pv0, uint32_t* pv1) {
   const int nd4 = HD / 4;
+  const int units = (BN / 2) * nd4;  // 本 tile 的 (行对, 4B) unit 数（O48 上界）
 #pragma unroll
   for (int e = 0; e < NPU; ++e) {
     int u = tid + e * NT;
     int rp = u / nd4, dq = (u % nd4) * 4;
     int jr = j0 + rp * 2;
     uint32_t k0 = 0, k1 = 0, v0 = 0, v1 = 0;
-    if (jr < S) {  // 越界写 0 字节（等价 cvt_e4m3(0)=0x00）
-      size_t i0 = (((size_t)(qbase + jr)) * Hkv + hkv) * HD + dq;
-      k0 = *reinterpret_cast<const uint32_t*>(k8 + i0);
-      v0 = *reinterpret_cast<const uint32_t*>(v8 + i0);
-    }
-    if (jr + 1 < S) {
-      size_t i1 = (((size_t)(qbase + jr + 1)) * Hkv + hkv) * HD + dq;
-      k1 = *reinterpret_cast<const uint32_t*>(k8 + i1);
-      v1 = *reinterpret_cast<const uint32_t*>(v8 + i1);
+    // O48：NTH 可 >128（D=128 的 8-warp 几何），此时 NPU*NT 会超过本 tile 的 unit 数
+    //   `(BN/2)*nd4`，原实现无上界检查会越界读并写坏 Kp。加运行期上界守卫：越界 unit 读 0、
+    //   由 `kv_commit_pair` 跳过写。NT=128（历史路径）时恒满足 u<units，逐字不变。
+    if (u < units) {
+      if (jr < S) {  // 越界写 0 字节（等价 cvt_e4m3(0)=0x00）
+        size_t i0 = (((size_t)(qbase + jr)) * Hkv + hkv) * HD + dq;
+        k0 = *reinterpret_cast<const uint32_t*>(k8 + i0);
+        v0 = *reinterpret_cast<const uint32_t*>(v8 + i0);
+      }
+      if (jr + 1 < S) {
+        size_t i1 = (((size_t)(qbase + jr + 1)) * Hkv + hkv) * HD + dq;
+        k1 = *reinterpret_cast<const uint32_t*>(k8 + i1);
+        v1 = *reinterpret_cast<const uint32_t*>(v8 + i1);
+      }
     }
     pk0[e] = k0;
     pk1[e] = k1;
@@ -704,16 +710,18 @@ __device__ __forceinline__ void kv_prefetch_pair(const unsigned char* __restrict
 }
 
 // O9c-2：`SW=true` 时 Ks/Vs 写 SW128（供 wgmma GEMM1/2 直读），否则写行主序。Kp 恒定。
-template <int NPU, int HD, bool SW = false, int NT = THREADS>
+template <int NPU, int HD, int BN, bool SW = false, int NT = THREADS>
 __device__ __forceinline__ void kv_commit_pair(unsigned char* Ks, unsigned char* Vs,
                                                uint16_t* Kp, const uint32_t* pk0,
                                                const uint32_t* pk1, const uint32_t* pv0,
                                                const uint32_t* pv1, int tid, int asld,
                                                int psld) {
   const int nd4 = HD / 4;
+  const int units = (BN / 2) * nd4;  // O48：与 prefetch 一致的上界（NTH>128 时避免越界写）
 #pragma unroll
   for (int e = 0; e < NPU; ++e) {
     int u = tid + e * NT;
+    if (u >= units) continue;   // 越界 unit 不落盘
     int rp = u / nd4, dq = (u % nd4) * 4;
     if constexpr (SW) {
       *reinterpret_cast<uint32_t*>(Ks + sw128_off_fp8(rp * 2, dq, HD)) = pk0[e];
@@ -1993,9 +2001,9 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       vs_s[tid] = (jg < len) ? vs[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
     }
   } else if (kPrefetch) {
-    kv_prefetch_pair<NPU, HD, NTH>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
+    kv_prefetch_pair<NPU, HD, BN, NTH>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
                               pv1);
-    kv_commit_pair<NPU, HD, WGMMA, NTH>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
+    kv_commit_pair<NPU, HD, BN, WGMMA, NTH>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
   } else {
     kv_load_pair<HD, BN, WGMMA, NTH>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, Ks, Vs, Kp, ASLD,
                          PSLD);
@@ -2073,7 +2081,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     // ---- O3：预取下一 tile 的 K/V 到寄存器（延迟被本轮 5 个 GEMM 覆盖）----
     const int nnt = nt + 1;
     if (!KVTMA && kPrefetch && nnt < nt_end)
-      kv_prefetch_pair<NPU, HD, NTH>(k8, v8, nnt * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
+      kv_prefetch_pair<NPU, HD, BN, NTH>(k8, v8, nnt * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
                                 pv1);
 
     // ---- (1) S = scale·QKᵀ  →  P = exp(S − LSE)，存 fp32 ----
@@ -2585,7 +2593,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       }
     } else if (nt + 1 < nt_end) {
       if (kPrefetch) {
-        kv_commit_pair<NPU, HD, WGMMA, NTH>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
+        kv_commit_pair<NPU, HD, BN, WGMMA, NTH>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
       } else {
         kv_load_pair<HD, BN, WGMMA, NTH>(k8, v8, (nt + 1) * BN, len, Hkv, hkv, qbase, tid, Ks, Vs, Kp, ASLD,
                              PSLD);
@@ -2601,14 +2609,17 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 
   // ---- O7：把寄存器里累加的 dQ flush 出去（每 CTA 每元素一次 `red_add2`）。----
   if constexpr (kRegDq) {
+    // O48：flush 的 warp 几何由 GM5/GN5/MTM5/NTM5 派生（原写死 `wr*32/wc*64`、i<2/j<8，
+    //   只对默认 2×2/128 线程成立；D=128 的 8-warp 实例 NTM5=4 会越界读 dqacc 并写错列）。
+    //   默认 128/2 时 GM5=32/GN5=64/MTM5=2/NTM5=8 ⇒ 与原式逐字等价。
 #pragma unroll
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < MTM5; ++i)
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int j = 0; j < NTM5; ++j)
 #pragma unroll
         for (int q = 0; q < 4; q += 2) {
-          int r = wr * 32 + i * 16 + g + (q >= 2 ? 8 : 0);
-          int c = wc * 64 + j * 8 + c2;
+          int r = wr * GM5 + i * 16 + g + (q >= 2 ? 8 : 0);
+          int c = wc * GN5 + j * 8 + c2;
           int qi = m0 + r;
           if (qi < len)
             red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c, dqacc[i][j][q],

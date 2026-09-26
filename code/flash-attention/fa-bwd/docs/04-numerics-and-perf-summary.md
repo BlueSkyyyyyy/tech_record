@@ -1592,3 +1592,29 @@ D=512，仅 ours 数字。
 `long_scoreboard`（L2/全局）主导 + `wait`（mma 依赖）+ `short_scoreboard`（smem→mma）。
 ⇒ 提升来自**延迟隐藏/并行度**（每 scheduler 1→2 warp），非带宽/算力。详见 `docs/03` §47、
 `docs/08` §5.12。
+
+## 21. D=128 mma fallback 的 8-warp 几何（O48，第九十五轮）—— grid ≤ SM 时正、大 grid 负
+
+承接 O47 的「下一步候选 ①」。对象是 **D=128 的 mma fallback**（纯 `sm_90` 构建 / `--wg2=0`；
+生产 `wgmma2`/fp8 wgmma 已是 256 线程，结构不同）。同一 binary `--d128w=0/1` A/B：
+
+| dtype | shape（grid） | main 4w | **main 8w** | 比 | 说明 |
+|---|---|---|---|---|---|
+| fp16 | S=512 MHA（128 < 132 SM） | 0.0622 | **0.0589** | **1.056×** | + 生产 `(64,64,2)`：main 1.105× / total 1.077× |
+| bf16 | S=512 MHA（128） | 0.0618 | **0.0586** | **1.054×** | 同 |
+| fp16 | S=1024 GQA kv4（512） | 0.2810 | 0.2744 | 1.024× | 接近中性 |
+| fp16 | S=4096 MHA（1024） | 1.5842 | 1.7972 | 0.881× | occupancy 掉半 |
+| bf16 | S=4096 MHA（1024） | 1.5673 | 1.7851 | 0.878× | 同 |
+| fp8 | S=512 MHA（ksplit=16→2048） | 0.0718 | 0.0907 | 0.791× | 已有 split-K、机器本就填满 |
+| fp8 | S=4096 MHA | 1.9139 | 2.7273 | 0.702× | 同 |
+
+**判据 / ncu**：8-warp 只在「4-warp 的每 scheduler warp 数 <2」（即 grid ≲ SM 数）时赢——
+fp16 S512 ncu：4w `Active Warps/Sched 1.00`、occ 6.24%、Duration 58.3µs →
+8w `1.99`、occ 12.3%、**52.5µs**。fp8 因 auto split-K 把 grid 抬到 2048，4w 已有
+`2.87 warp/sched`，8w 反降到 1.99 ⇒ 负。**数值**：`max_abs(8w-vs-4w)` ≤ ~2e-6（仅 dK/dV
+atomic 次序），vs ref 与历史逐位不变。
+
+**结论**：默认保持 4-warp（opt-in `--d128w`，不动历史逐位值）；若默认化，推荐
+`D==128 && mma 路径 && grid < 132`。顺带修掉 O47 参数化留下的两个 `NTH>128` 才触发的
+correctness bug（`kv_prefetch/commit_pair` 越界、`kRegDq` flush 硬编码几何），默认 `128/2`
+路径逐位不变。详见 `docs/01` §14aa、`docs/01b` §6ai、`docs/03` §48。
