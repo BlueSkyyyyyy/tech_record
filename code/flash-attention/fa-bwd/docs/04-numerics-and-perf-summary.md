@@ -1763,3 +1763,32 @@ dQ 归约）+ 访存延迟**（O52 的「grid 不足一个波」已消除）。�
 **「非 causal full MLA varlen HEAD 偏差」更正**：O52 所记偏差实为**对拍脚本漏传 `--full`**
 （按 causal 比 full ref）；显式 `--full` 后 fp16/bf16/fp8 三 dtype full 全部对拍通过
 （fp16 3.0e-4–5.5e-4、bf16 1.6e-3–3.5e-3、fp8 ~5e-2），**不是回归、无需修复**。
+
+## 26. 非 causal（full）MLA varlen 的 LSE 走 K 维 split（O54，第 101 轮）—— **正结果，full varlen 默认 auto**
+
+承接 O53：full varlen 的主 kernel 已 split-KV，但端到端仍被 **LSE** 主导（b3 full：total 1.013ms、
+main-only 0.392ms ⇒ LSE ~0.62ms = **60%**）——非 causal MLA 的 LSE 一直走 O1 的
+`lse_mma_kernel<512>`（一个 CTA 一个 m 块、无 split、标量 K 载入）。本轮给三 dtype 的
+`lse_mma_kernel_bal` 加 **FULL 模式**（一个 CTA 一个 m 块 + `cp.async` 双缓冲 + O40 K 维 split），
+`run_varlen` 的 `D==512 && !causal` 分支改走它（`FULL=false` 编译出与历史逐位相同的代码）。
+auto：fp16/bf16 目标 384（b1→8、b3→4）、fp8 目标 768（b1/b3→8）。
+
+| dtype / case (D=Dv=512) | LSE old → new (split auto) | LSE 加速 | total old → new | 数值 vs ref (dq/dk/dv) |
+|---|---|---|---|---|
+| fp16 b3_t1792 full | 0.3791→**0.0411ms** (4) | **9.2×** | 1.013→**0.468ms / 12.05 TF** | 5.52/4.45/2.39e-4 |
+| fp16 b1_t512 full | 0.1933→**0.0135ms** (8) | **14.3×** | ~0.28→**0.102ms** | 3.05/4.45/1.33e-4 |
+| bf16 b3_t1792 full | 0.3747→**0.0413ms** (4) | **9.1×** | 1.013→**0.468ms / 12.03 TF** | 3.10/3.53/2.32e-3 |
+| fp8 b3_t1792 full | 0.3753→**0.0374ms** (8) | **10.0×** | ~0.72→**0.346ms / 16.30 TF** | 7.99e-2/9.63e-2/4.15e-2 |
+| fp8 b1_t512 full | 0.1899→**0.0156ms** (8) | **12.2×** | — | — |
+
+**ncu（fp16 `lse_mma_kernel_bal<512,1,true>`，b3 full，split4）**：Duration 40.99µs、
+DRAM 5.38% / L1TEX 28.52% / L2 24.00% / Compute 20.55%、regs 63、smem **199.68KB → 1 CTA/SM**、
+occ 6.25%、**Waves 2.91**、No Eligible 74.1%、Warps/Sched 1.00、fixed-latency stall 37.3%（主导）。
+**bound = 低 occupancy（1 CTA/SM，smem 硬约束）+ fixed-latency 依赖**，非带宽/算力。
+
+**回归**：causal b3（fp16 2.415/1.834/1.856e-3、bf16 total 0.3508ms、fp8 3.40/3.44/3.51e-1）
+与 D=128 full varlen（fp16 b4_t4096 total 0.9075ms）**逐位/同量级不变**；单/两文件逐指标一致。
+**教训**：把一个路径（causal）已有的优化（split + 双缓冲）补到另一路径（full）时，即使
+「full 各块工作量相同、无需镜像配对」，**缺少 K 维 split/异步载入仍是并行度与延迟的墙**——
+一个 `bool FULL` 模板参数就够，且默认档编译出逐位相同的代码。详见 `docs/01` §15、`docs/01b` §6an、
+`docs/03` §53、`docs/08` §5.19。

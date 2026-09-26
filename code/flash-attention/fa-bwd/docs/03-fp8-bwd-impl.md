@@ -4804,3 +4804,26 @@ ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
 
 原始输出：`src/fp8/fa_bwd_fp8_main_o52_varlen.out.txt`、`..._main_o52_ncu_varlen*out.txt`、
 `src/fp8/fa_bwd_fp8_mma_onefile_o52_varlen.out.txt`。
+
+---
+
+## 53. O54-fp8：非 causal（full）MLA varlen 的 LSE 走 K 维 split（第 101 轮）—— 正结果，full varlen 默认 auto
+
+与 fp16 §15 / bf16 §6an 逐字同构：给 fp8 的 `lse_mma_kernel_bal<HD,PIPE,bool FULL=false>`
+加 FULL 模式（一个 CTA 一个 m 块、`ncols=len`、无因果掩码），host `run_varlen` 的
+`D==512 && !causal` 分支在 `lse_split_eff>1` 时走 `launch_lse_bal<512,1,true>`（内部把
+`grid.z` 扩成 `B*split` 并跑 `lse_split_merge_kernel`）。fp8 的 auto 目标为 **768**（比
+fp16/bf16 的 384 更大——实测 b3 最优 k=8、b1 k=8，故取 768 让 b3 也到 8）。device 代码同源、
+单/两文件 device 逐字一致。
+
+* **LSE-only（b3_t1792 full，`[O54 A/B]`）**：old(O1 mma) 0.3753 ms → split1 0.1291 /
+  split2 0.0743 / split4 0.0429 / **split8 0.0374** / split16 0.0435（auto=8）⇒ **10.0×**。
+* **端到端**：total **0.349→0.346→（old 约 0.72）** ⇒ 相对 old 路径 ~2.1×；
+  现 total **0.346 ms / 16.30 TFLOPS**。
+* **数值 vs fp32 ref**：dq/dk/dv = 7.994e-2 / 9.629e-2 / 4.148e-2（fp8 噪声，与 old 同量级）。
+* **b1_t512 full**：old 0.1899 → auto=8 split8 **0.0156 ms**（12.2×）。
+* **causal b3 回归**：total 0.2974 ms、数值 3.404/3.436/3.508e-1（与历史同量级，FULL=false
+  路径逐位不变）。
+
+原始输出：`src/fp8/fa_bwd_fp8_o54_varlen_full_b3.out.txt`（两文件）、
+`..._o54_varlen_full_b3_onefile.out.txt`（单文件）、`..._o54_varlen_causal_reg_b3.out.txt`（回归）。

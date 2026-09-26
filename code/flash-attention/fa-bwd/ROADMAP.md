@@ -2649,7 +2649,26 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百轮）**：**O53——把 MLA 的 N 方向 split-K（split-KV）搬进 fp16/bf16 varlen
+> **最新（第一百零一轮）**：**O54——非 causal（full）MLA varlen 的 LSE 走 K 维 split
+> （正结果，full varlen 默认 auto）**。O53 后 full MLA varlen 端到端仍被 **LSE** 主导
+> （b3_t1792：total 1.013ms、main-only 0.392ms ⇒ LSE ~0.62ms=60%）——非 causal 一直走 O1 的
+> `lse_mma_kernel<512>`（一个 CTA 一个 m 块、**无 split、标量 K 载入**）。给三 dtype 的
+> `lse_mma_kernel_bal` 加模板 **`bool FULL=false`**（`FULL=true`：`grid.x=nblk`、一个 CTA
+> 一个 m 块、`ncols=len`、无因果掩码；`FULL=false` 经 `if constexpr` 化简出与历史逐位相同的
+> 代码），`run_varlen` 的 `D==512 && !causal` 分支改走 FULL + O40 split（auto：fp16/bf16 目标
+> 384、fp8 768）。**LSE 9–14×、端到端 fp16/bf16 1.013→0.468ms（2.17×）、fp8 ~0.72→0.346ms**；
+> 数值 vs ref 与 old 同量级、causal/D=128 full 回归逐位/同量级不变、单/两文件逐指标一致。
+> ncu（fp16 FULL LSE，b3 split4）：Duration 40.99µs、L2 24% / Compute 20.6% / DRAM 5.4%、
+> smem 199.68KB→1 CTA/SM、**Waves 2.91**、fixed-latency stall 37.3% ⇒ **bound = 低 occupancy +
+> fixed-latency**。顺带修单文件 bf16 缺 `make_lse_map`/`make_main_map` 的既有 bug。详见
+> `docs/01` §15、`docs/01b` §6an、`docs/03` §53、`docs/04` §26、`docs/08` §5.19。
+> **下一步候选**：① **full MLA varlen 的 LSE 降 smem 冲 2 CTA/SM**（现 199.68KB=Qs 单缓冲 +
+> Ks 双缓冲，1 CTA/SM、occ 6.25%；可试单缓冲/分块 Q/去 `cp.async`）；② **fp8 MLA 的
+> `short_scoreboard`（smem→mma 的 `ldmatrix`）**（O47/O51 后并列头号）；③ **MLA 主 kernel 降
+> smem 冲 2 CTA/SM**（四 dtype 共同墙，需消 ~100KB）；④ **非 causal MLA varlen 主 kernel 的
+> split-KV auto 偏大**（O53 backlog：full 最优 k=4/8 而 auto=16）。
+>
+> **（第一百轮）**：**O53——把 MLA 的 N 方向 split-K（split-KV）搬进 fp16/bf16 varlen
 > （正结果，varlen MLA 默认 auto）**。补上 O52 的遗漏：O52 只搬了 warp 几何，varlen MLA 主
 > kernel 仍是「单 CTA 扫整条 K」，`D=512/BM=32` 的 base grid 在 b1_t512_h2 只有 16 CTA、
 > smem 207.36KB 锁死 1 CTA/SM（Waves 0.48）。**只改 host**：`run_varlen` 加 `mlaksplit`，
@@ -3640,8 +3659,44 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     全部对拍通过（fp16 3e-4–5.5e-4、bf16 1.6e-3–3.5e-3、fp8 ~5e-2），**不是回归、无需修复**。
   - 原始输出 `src/fp16/fa_bwd_fp16_o53_varlen.out.txt`、`..._o53_ncu_varlen_b3.out.txt`、
     `..._o53_ncu_stall_varlen_b3.out.txt`、`src/bf16/fa_bwd_bf16_o53_varlen.out.txt`、
-    `..._o53_ncu_varlen_b3.out.txt`；文档 `docs/01` §14ae、`docs/01b` §6am、`docs/04` §25、
-    `docs/08` §5.18。
+     `..._o53_ncu_varlen_b3.out.txt`；文档 `docs/01` §14ae、`docs/01b` §6am、`docs/04` §25、
+     `docs/08` §5.18。
+
+- 2026-09-27（第一百零一轮）：**O54 完成（非 causal/full MLA varlen 的 LSE 走 K 维 split）**
+   - 动机：O53 把 split-KV 搬进 varlen 主 kernel 后，`b3_t1792` full 端到端仍 1.013 ms，而
+     main-only 只 0.392 ms ⇒ **LSE 占 ~0.62 ms（60%）**。非 causal 的 MLA LSE 一直走 O1 的
+     `lse_mma_kernel<512>`（一个 CTA 一个 m 块、**无 K 维 split、标量 K 载入**）；causal 早已用
+     `lse_mma_kernel_bal`（镜像配对 + `cp.async` 双缓冲 + O40 split）。full 各 m 块工作量相同
+     （无需镜像配对），但缺 split/双缓冲 ⇒ `b3` base grid 仅 `nblk0·H·B=16·2·3=96 < 132 SM`、
+     单 CTA 顺序扫 16 tile。
+   - **改动**：三 dtype 的 `lse_mma_kernel_bal` 加模板 **`bool FULL=false`**（`FULL=true`：
+     `grid.x=nblk`、一个 CTA 一个 m 块、`ncols=len`、无因果掩码；`FULL=false` 经 `if constexpr`
+     化简出与历史**逐位相同**的代码，causal/定长不受影响）；`run_varlen` 的 `D==512 && !causal`
+     分支在 `lse_split_eff>1` 时走 `lse_mma_kernel_bal<512,1,true>` + `lse_split_merge_kernel`，
+     否则退回原 `lse_mma_kernel<512>`。auto：**fp16/bf16 目标 384**（b1→8、b3→4）、
+     **fp8 目标 768**（b1/b3→8），cap 16、按 `nblk0` 封顶。末尾加 `[O54 A/B]`（LSE-only）。
+     单/两文件 device 与 host 同步（`sync_onefile_device.py` 核对 `identical: True`）。
+   - **性能（event）**：LSE-only b3 full old→new：fp16 0.3791→**0.0411ms（9.2×）**、
+     bf16 0.3747→**0.0413（9.1×）**、fp8 0.3753→**0.0374（10.0×）**；b1 full fp16 0.1933→
+     **0.0135（14.3×）**、fp8 0.1899→**0.0156（12.2×）**。**端到端 total：fp16/bf16
+     1.013→0.468 ms（2.17×，12.05/12.03 TF）**、fp8 ~0.72→**0.346 ms（16.30 TF）**。
+   - **数值 vs fp32 ref**（max_abs dq/dk/dv）：fp16 b3 5.516/4.451/2.385e-4、b1 3.046/4.449/
+     1.327e-4；bf16 b3 3.100/3.526/2.316e-3；fp8 b3 7.994e-2/9.629e-2/4.148e-2 —— 与 old 路径
+     同量级（split 只改 `lse_part` 的 fp32 求和次序）、单/两文件逐指标一致。
+   - **ncu（fp16 FULL 版 LSE，b3 full，split4，`-c 1`）**：Duration **40.99µs**、DRAM 5.38% /
+     L1TEX 28.52% / L2 24.00% / Compute 20.55%、regs 63、smem **199.68KB → 1 CTA/SM**、
+     occ 6.25%、**Waves 2.91**（old 不足一波）、No Eligible 74.1%、Warps/Sched 1.00、
+     fixed-latency stall 37.3% ⇒ **bound = 低 occupancy + fixed-latency 依赖**，非带宽/算力。
+   - **回归**：causal b3（fp16 2.415/1.834/1.856e-3、bf16 total 0.3508ms、fp8 3.404/3.436/
+     3.508e-1）与 D=128 full varlen（fp16 b4_t4096 total 0.9075ms）**逐位/同量级不变**。
+   - **顺带修复既有 bug**：单文件 `fa_bwd_bf16_mma_onefile.cu` 缺 host 侧 `make_lse_map`/
+     `make_main_map`（O50 只在两文件版补过），`-DFA_TMA` 构建一直编译不过；补回后重编译通过、
+     与两文件版数值逐指标一致。
+   - 原始输出 `src/fp16/fa_bwd_fp16_o54_varlen_full_b3{,_onefile}.out.txt`、`..._full_b1.out.txt`、
+     `..._o54_ncu_lse_full_b3.out.txt`、`src/bf16/fa_bwd_bf16_o54_varlen_full_b3{,_onefile}.out.txt`、
+     `..._o54_varlen_causal_reg_b3.out.txt`、`src/fp8/fa_bwd_fp8_o54_varlen_full_b3{,_onefile}.out.txt`、
+     `..._o54_varlen_causal_reg_b3.out.txt`；文档 `docs/01` §15、`docs/01b` §6an、`docs/03` §53、
+     `docs/04` §26、`docs/08` §5.19。
 
 ## 灵感 / backlog
 
@@ -3649,10 +3704,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       实为 O52 对拍脚本**漏传 `--full`**（按 causal 比 full ref）；显式 `--full` 后 fp16/bf16/fp8
       三 dtype full 全部对拍通过（fp16 3e-4–5.5e-4、bf16 1.6e-3–3.5e-3、fp8 ~5e-2）。
       **非回归、无需修复**。教训：跑 full 用例先核对输出头 `causal=` 字段。
-- [ ] **（第一百轮 O53 新发现）非 causal（full）MLA varlen 的 LSE 是端到端新瓶颈**：
+- [x] **（第一百零一轮 O54 已完成）非 causal（full）MLA varlen 的 LSE 是端到端新瓶颈**：
       `lse_mma_kernel<512>`（O1 版，grid=(nblk,H,B)、无镜像配对/无 split）在 b3_t1792 full
-      约占 total 60%（~0.62ms / total 1.01ms），而 causal 早已用 `lse_mma_kernel_bal<512,1>` +
-      O40 K 维 split。可把 O8b 的镜像配对 + O40 split 接到非 causal MLA LSE。
+      约占 total 60%（~0.62ms / total 1.01ms）。O54 给 `lse_mma_kernel_bal` 加 `bool FULL`
+      模式（一个 CTA 一个 m 块 + `cp.async` 双缓冲 + O40 K 维 split），full 各块均衡故无需镜像
+      配对。**LSE 9–14×、端到端 fp16/bf16 2.17×、fp8 ~2.1×**。见「当前进度」第一百零一轮。
 - [ ] **（第一百轮 O53 可选微调）varlen MLA full 的 split-KV auto 偏大**：causal 最优 k=16、
       full 最优 k=4/8；auto 现统一取 16。可在 `D==512 && !causal` 时改用更小 target（但 full
       是次要路径，相对 k=1 仍 3.2–3.6×）。

@@ -499,7 +499,10 @@ lse_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
 // 数学与 O8 完全一致（同一 QKᵀ mma、online-softmax、同 row 4-lane `shfl_xor` 归约），
 // 数值应逐位相同。仅用于 causal；非 causal 各块工作量相同，无需配对（host 走 O8 原版）。
 // smem：Qs[LBM*LD] +（PIPE=1 时 2 份 / PIPE=0 时 1 份）Ks[LBN*LD]。
-template <int HD, int PIPE>
+// O54：`FULL=true` 时本 kernel 也服务 **非 causal（full）** 路径——每个 CTA 只处理一个 m 块
+//   （grid.x = nblk，不做镜像配对），`ncols=len` 且不做因果掩码，其余逐字复用。
+//   `FULL=false`（默认）编译出与原版逐位相同的代码。
+template <int HD, int PIPE, bool FULL = false>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
                    float* __restrict__ lse, int S, int H, int Hkv, float scale,
@@ -522,7 +525,9 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
   const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
   const int nblk  = (len + LBM - 1) / LBM;
-  if (pair >= (nblk + 1) / 2) return;   // 短序列多余的对 CTA 直接退出
+  // O54：FULL 一个 CTA 一个 m 块；causal 一行镜像对。
+  if constexpr (FULL) { if (pair >= nblk) return; }
+  else { if (pair >= (nblk + 1) / 2) return; }   // 短序列多余的对 CTA 直接退出
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -572,14 +577,15 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
 
 #pragma unroll
   for (int t = 0; t < 2; ++t) {
-    const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
-    if (t == 1 && pair == nblk - 1 - pair) continue;  // 奇数 nblk 的中心块只做一次
+    if constexpr (FULL) { if (t == 1) continue; }   // O54：full 无镜像配对，只做 t=0
+    const int mblk = FULL ? pair : ((t == 0) ? pair : (nblk - 1 - pair));
+    if (!FULL && t == 1 && pair == nblk - 1 - pair) continue;  // 奇数 nblk 的中心块只做一次
     const int m0 = mblk * LBM;
 
     // ---- 载入本 m 块的 Q（越界补 0）----
     issue_q(Qs, m0);
 
-    const int ncols = min(len, m0 + LBM);
+    const int ncols = FULL ? len : min(len, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
     // O39：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
     const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
@@ -622,7 +628,7 @@ lse_mma_kernel_bal(const bf16* __restrict__ q, const bf16* __restrict__ k,
           int c = j * 8 + c2 + (q & 1);
           int qi = m0 + r, jg = j0 + c;
           float sv = -INFINITY;
-          if (qi < len && jg < len && jg <= qi) sv = acc[0][j][q] * scale;
+          if (qi < len && jg < len && (FULL || jg <= qi)) sv = acc[0][j][q] * scale;
           if (sv != -INFINITY) {
             float mn = fmaxf(mrow[s], sv);
             lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
