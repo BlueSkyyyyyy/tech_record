@@ -4522,3 +4522,52 @@ python3 scripts/sync_onefile_device.py src/fp8/fa_bwd_fp8_kernels.cuh \
 原始输出：`src/fp8/fa_bwd_fp8_o48_d128_{s512,s4096}.out.txt`、
 `..._o48_ncu_d128_{0,1}w_s512.out.txt`、`..._o48_onefile_s512.out.txt`；
 `docs/01` §14aa、`docs/01b` §6ai。
+
+## 49. O49：D=128 mma 路径 8-warp 几何的 **自动档默认化**（第九十六轮）—— fp8 默认不触发
+
+### 49.1 动机 / 改动
+
+对齐 fp16/bf16 的 O49（`docs/01` §14ab、`docs/01b` §6aj）：把 O48 的 `--d128w` opt-in 改为
+**默认 `-1`（自动）**。fp8 的判据多两重约束：
+
+- 必须 `!wgmma`（fp8 的 Hopper `wgmma` 主路径是生产默认，`#ifdef FA_WGMMA` 下 `wgmma=1`；
+  自动档**绝不能覆盖**它）；
+- 有效网格要用 **`mg.x * mg.y * mg.z`**（fp8 的 `mg.x` 已含 auto `ksplit`，但 x 维只是
+  网格的一维——O48 早期误用 `mg.x` 会让 S=512 误判成 128 而打开 8-warp，实测 main 0.0815ms
+  vs 正确 0.0630ms，故必须乘上 H、B）。
+
+`launch_bwd_main` 的 `NTH/NWAR` 派生是 O47 已有的。单/两文件同源。
+
+### 49.2 结果：默认 shape 下 auto = off（逐位不变）
+
+fp8 D=128 的 auto `ksplit`（O29 标定，目标 `max(2048, 4·base)`）把小 S 的 grid 抬到 ≫132：
+
+| shape | base grid | auto ksplit | 有效 grid | `[O49] d128 8-warp` | vs ref（max_abs dq/dk/dv） |
+|---|---|---|---|---|---|
+| S=512 H16 | 128 | 16 | 2048 | **0（auto off）** | 2.426/2.975/3.735e-1（逐位） |
+| S=1024 H32 | 512 | 4 | 2048 | 0 | 2.400/4.195/3.536e-1（逐位） |
+
+main S=512 = 0.0630ms / total 0.1165ms；单文件同（main 0.0628 / total 0.1128）。
+⇒ **fp8 的默认路径逐位不变**；O48 已判 fp8 在该 grid 下 8-warp 是负结果，故 auto 关门正确。
+
+### 49.3 自动档在「真小网格」上仍然有效（`--ksplit=1` 探针）
+
+强制 `--ksplit=1`（grid=128 ≤132 ⇒ auto 触发），验证实现正确且收益与 fp16 一致：
+
+| S=512 fp8，`--ksplit=1` | 4-warp | auto（8-warp） | 比 |
+|---|---|---|---|
+| main | 0.1188ms | **0.0885ms** | **1.34×** |
+| total | 0.1705ms | **0.1368ms** | 1.25× |
+
+数值与 4-warp 一致（vs ref 2.426/2.975/3.735e-1）。
+
+### 49.4 复现 / 原始输出
+
+```bash
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8 --causal          # auto off
+scripts/run.sh ... --causal --ksplit=1 [--d128w=0/1]                                      # auto on 探针
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o49_auto_s512.out.txt`、`..._o49_ksplit1_s512.out.txt`、
+`..._o49_reg_s1024h32.out.txt`、`..._o49_onefile_s512.out.txt`；`docs/01` §14ab、`docs/01b` §6aj。

@@ -3484,6 +3484,82 @@ warp**（`No Eligible 80%`），8-warp 把它翻到 2 ⇒ Duration −10%。S=40
   `..._o48_ncu_d128_{0,1}w_{s512,s4096}.out.txt`、`..._o48_onefile_s512.out.txt`；
   单文件 `src/fp16/fa_bwd_fp16_mma_onefile.cu` 同源。
 
+## 14ab. O49-fp16：D=128 mma 路径 8-warp 几何的 **自动档默认化**（第九十六轮）
+
+### 14ab.1 动机
+
+O48（§14aa）实测：**grid ≤ SM 数**时（每 SM 仅 1 个 CTA，4-warp 的每 scheduler 只有 1 个
+warp）8-warp 几何有 1.05–1.10× 收益；大 grid 负结果。但 O48 把开关留成 opt-in（`--d128w=1`），
+理由是「会改 dK/dV 的 atomic 次序、破坏历史逐位值」。O49 落实 O48 §14aa.6 推荐的 auto 条件
+`D==128 && mma 路径 && grid ≤ SM 数`，把它**默认化**。
+
+**为什么可以接受非逐位**：8-warp 只改 warp 网格，dQ 无 atomic（逐位相等），差异全部来自
+**dK/dV 跨 CTA `atomicAdd` 的次序**（本就是非确定性、run-to-run 都会变），量级 ≤ 5e-7（见
+§14ab.3）。历史「逐位值」只是同一 grid 下的一个采样；`--d128w=0` 可随时取回 4-warp 逐位档。
+
+### 14ab.2 改动（单/两文件 device 逐字一致，仅改 host）
+
+- `d128w` 默认 `0` → **`-1`（自动）**：`d128w_eff = (d128w>0) ? true : (d128w<0 ? (D==128 &&
+  grid <= sm_count) : false)`，`sm_count` 用 `cudaDeviceGetAttribute(cudaDevAttrMultiProcessorCount)`
+  查询（本机 132）。`grid` 是 `(S+63)/64 * H * B`（fp16/bf16 的 mma 路径逻辑网格）。
+- `launch_cfg` 增加 `w8` 形参：run_main 传 `d128w_eff`，所有 A/B 段（O5c/O7c/O6c 等）传
+  `false` ⇒ 这些对照仍是 4-warp，不受自动档影响。BN=64 分支与 4-warp 路径一致固定 `PIPE=2`。
+- 打印 `[O49] d128 8-warp = ...`；auto 触发时同时打印 `[O49]` 与 `[O6c]`。
+- D=512（MLA）走 O46 的 `mla8w`，不经此路；`-DFA_WGMMA` 生产构建走 `wgmma2`（已 256 线程），
+  `launch_cfg` 不被调用 ⇒ 自动档只在**纯 sm_90 的 mma 可移植路径**上生效。
+
+### 14ab.3 数值（fp16 causal，ours-vs-fp32-ref max_abs dq/dk/dv）
+
+| shape（grid） | 4-warp（`--d128w=0`） | auto（8-warp） | `max_abs(8w-vs-4w)` |
+|---|---|---|---|
+| S=512 MHA（128） | 1.671/1.771/1.899e-3 | 1.671/1.771/1.899e-3 | 0 / 2.4e-7 / 4.8e-7 |
+| S=4096 MHA（1024，auto off） | 1.883/1.734/1.966e-3 | 同（逐位） | 0 / 0 / 0 |
+| S=1024 GQA kv4（512，auto off） | 2.134/3.305/3.850e-3 | 同（逐位） | 0 / 0 / 0 |
+
+与 ref 的误差量级不变；auto 只在 grid=128 的 S=512 MHA 上改 dK/dV 的求和次序。
+
+### 14ab.4 性能（同 session CUDA event，plain sm_90 mma 路径，ms）
+
+| 口径 | 4-warp | auto（8-warp） | 比 |
+|---|---|---|---|
+| S=512 MHA main | 0.0567 | **0.0509** | **1.114×** |
+| S=512 MHA total（pre+main+convert） | 0.0960（22.37 TF） | **0.0880（24.40 TF）** | **1.091×** |
+| S=4096 main / total | 1.5059 / 1.9288 | 同（auto off） | 1.00× |
+| S=1024 GQA kv4 main / total | 0.2612 / 0.3457 | 同（auto off） | 1.00× |
+
+单文件 `fa_bwd_fp16_mma_onefile.cu` auto：main **0.0515** / total **0.0899ms**（与两文件一致）。
+同 session 纯反向 `harness/fa_vs_te_bwd_only.py fp16`：S=512 MHA **FA3 0.0263ms/163TF**、
+TE 0.0319/135、FA2 0.0439/98 ⇒ ours total 时间比 **3.65×→3.35×**。
+
+### 14ab.5 ncu（`fa_bwd_fp16_mma_kernel`，S=512，auto `(64,64,2)`，`--launch-count 1`）
+
+| 指标 | 4-warp | auto（8-warp） |
+|---|---|---|
+| Duration | 57.89µs | **52.96µs** |
+| Active Warps / Scheduler | **1.00** | **1.99** |
+| Achieved Occupancy | 6.24% | **12.40%** |
+| No Eligible | 80.21% | **75.48%** |
+| Compute (SM) Throughput | 10.91% | 13.38% |
+
+机制同 O48：grid=128 < 132 SM ⇒ 每 SM 1 个 CTA，4-warp 每 scheduler 仅 1 个 warp；8-warp
+把它翻到 2 ⇒ Duration −8.5%。大 grid（如 S=4096 grid=1024）4-warp 已有 ≈2 warps/scheduler，
+8-warp 无便宜可占且每 CTA 覆盖的 m 更多、L1 复用变差，故**自动档用 `grid ≤ sm_count` 关门**。
+
+### 14ab.6 结论 / 复现
+
+- **正结果**：S=512 MHA（及任何 `grid ≤ 132` 的 D=128 mma 小网格）默认拿到 8-warp，main
+  **1.11×**、端到端 **1.09×**；大 grid 逐位不变、零代价。默认 `-1`（auto），`--d128w=0/1`
+  可强制回 4-warp / 强制 8-warp 做同 binary A/B。
+- 复现：
+  ```
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+    --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16 --causal
+  scripts/run.sh ... --causal --d128w=0        # 4-warp 对照
+  ```
+  原始输出：`src/fp16/fa_bwd_fp16_o49_{auto,4w}_s512.out.txt`、
+  `..._o49_reg_{s4096,kv4}.out.txt`、`..._o49_onefile_s512.out.txt`、
+  `..._o49_ncu_{8w,4w}_s512.out.txt`；单文件与两文件 device 区逐字一致。
+
 ## 15. 下一步
 
 > **O23（§14n）已完成**：把 O17/O18 的主 kernel + O9a 的 LSE 在 `-DFA_WGMMA` 构建下**默认打开**

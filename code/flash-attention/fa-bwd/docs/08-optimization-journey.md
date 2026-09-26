@@ -221,6 +221,15 @@ smem 冲突 + 低 occ
     （4w 已 2.87 warp/sched）**0.79×**。默认保持 4-warp（opt-in `--d128w`）。顺带修掉
     O47 参数化留下、只在 `NTH>128` 触发的两个 correctness bug（`kv_prefetch/commit_pair`
     越界、`kRegDq` flush 硬编码几何）。详见 `docs/01` §14aa、`docs/01b` §6ai、`docs/03` §48。
+14. **D=128 mma 8-warp 自动档默认化（O49，第 96 轮，正结果）**：把 O48 的 opt-in 按它自己
+    推荐的 auto 条件落地——`D==128 && mma 路径 && grid ≤ SM 数`（每 scheduler 4-warp 仅 1 warp）
+    默认开 8-warp；`--d128w=0/1` 仍可强制。fp16/bf16 S=512 MHA main **1.11×**、端到端
+    **1.05–1.09×**（total 0.0960→0.0880ms），大 grid（S=4096/GQA）**逐位不变**；fp8 因 auto
+    split-K 把 grid 抬到 2048，auto **不触发**（逐位不变），但 `--ksplit=1` 的 128 网格探针下
+    8-warp main **1.34×**。教训：**「4-warp 每 scheduler warp 数 <2」是比「grid < 132」更本质的
+    判据**——fp8 的 `mg.x` 已含 split-K、必须用**总网格**判据（单看 x 维会误开）。原始输出
+    `src/{fp16,bf16}/fa_bwd_*_o49_*`、`src/fp8/fa_bwd_fp8_o49_*`；详见 `docs/01` §14ab、
+    `docs/01b` §6aj、`docs/03` §49、`docs/04` §22。
 
 ---
 

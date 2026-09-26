@@ -571,9 +571,9 @@ int main(int argc, char** argv) {
   //   1=8 warp/256 线程（2×4 网格，默认）——1 CTA/SM 下每 scheduler 的 warp 数 1→2。
   //   `--mla8w=0` 供同 binary A/B。
   int mla8w = 1;
-  // O48（候选 ①）：D=128 mma 主 kernel 是否用 8-warp（256 线程 / 2×4 网格）几何。0=默认
-  //   4-warp（128/2），1=8-warp。仅 mma 路径。`--d128w=`。
-  int d128w = 0;
+  // O48（候选 ①）：D=128 mma 主 kernel 是否用 8-warp（256 线程 / 2×4 网格）几何。O49：默认
+  //   改为 **-1=自动**（grid ≤ SM 数）；0=强制 4-warp，1=强制 8-warp。仅 mma 路径。`--d128w=`。
+  int d128w = -1;
   // O17-2：wgmma2 的 GEMM3/GEMM4 是否拆分到两个 warpgroup（1=拆，0=原版 wg0 串行）。
   int wg2split_sel = 1;
   // O24：delta 用 warp-per-row 向量化版（1，默认）还是旧 block-per-row smem 版（0，A/B）。
@@ -784,6 +784,13 @@ int main(int argc, char** argv) {
   const int pp_sel = (pipe >= 0) ? pipe : auto_pipe;
   printf("[O6c] main grid=%lld auto=(BM=%d,BN=%d,PIPE=%d) sel=(BM=%d,BN=%d,PIPE=%d)\n", grid,
          auto_bm, auto_bn, auto_pipe, bm_sel, bn_sel, pp_sel);
+  // O49：D=128 mma 路径的 8-warp **自动档**（判据 = 逻辑 grid ≤ SM 数，对齐 fp16）。
+  int sm_count = 0;
+  CUDA_CHECK(cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, 0));
+  const bool d128w_eff =
+      (d128w > 0) ? true : ((d128w < 0) ? (D == 128 && grid <= (long long)sm_count) : false);
+  printf("[O49] d128 8-warp = %d (d128w=%d, grid=%lld, sm=%d)\n", (int)d128w_eff, d128w, grid,
+         sm_count);
 
   // O44：MLA（D=512）主 kernel 的 N 方向 split-K 生效值（fp16 O44 的 bf16 参数化）。目标
   //   `grid*sp ≈ 528`（1 CTA/SM 的 4 个波）、上限 16，再按 `nblk=ceil(S/BN)` 封顶。
@@ -854,7 +861,7 @@ int main(int argc, char** argv) {
     }                                                                                      \
   } while (0)
 
-  auto launch_cfg = [&](int bm, int bn, int pp, bool r4, bool prel) {
+  auto launch_cfg = [&](int bm, int bn, int pp, bool r4, bool prel, bool w8) {
     dim3 g((S + bm - 1) / bm, H, B);
     if (D == 512 && mlaksplit_eff > 1) g.x *= (unsigned)mlaksplit_eff;   // O44：split-KV 抬 grid
     if (D == 512) {
@@ -872,8 +879,9 @@ int main(int argc, char** argv) {
       }
       return;
     }
-    // O48（候选 ①）：D=128 mma 路径的 8-warp（256 线程 / 2×4 网格）几何（opt-in）。
-    if (d128w) {
+    // O48/O49：D=128 mma 路径的 8-warp（256 线程 / 2×4 网格）几何（`w8` = 自动档或强制）。
+    //   BN=64 与 4-warp 路径一致地固定 PIPE=2。
+    if (w8) {
       if (bm == 32) {
         if (pp == 2) LAUNCH_CFG_W(128, 32, 32, 2, 256, 4);
         else if (pp == 1) LAUNCH_CFG_W(128, 32, 32, 1, 256, 4);
@@ -1029,7 +1037,7 @@ int main(int argc, char** argv) {
       return;
     }
 #endif
-    launch_cfg(bm_sel, bn_sel, pp_sel, r4_sel, prel_sel);
+    launch_cfg(bm_sel, bn_sel, pp_sel, r4_sel, prel_sel, d128w_eff);
   };
   // O24：delta 的 warp-per-row 版；`--deltawarp=0` 回旧版 A/B。行数 = B*S*H。
   const int d_rows = S * H * B;
@@ -1463,7 +1471,7 @@ int main(int argc, char** argv) {
           launch_bwd_wgmma<128>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
                                 d_dk_acc, d_dv_acc, S, H, Hkv, scale, 1, 0);
         else
-          launch_cfg(64, 64, 2, false, true);
+          launch_cfg(64, 64, 2, false, true, false);
       };
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
@@ -1528,7 +1536,7 @@ int main(int argc, char** argv) {
           launch_bwd_wgmma<128>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
                                 d_dv_acc, S, H, Hkv, scale, (int)causal, 0);
         } else {
-          launch_cfg(64, 64, 2, false, true);
+          launch_cfg(64, 64, 2, false, true, false);
         }
       };
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
@@ -1603,7 +1611,7 @@ int main(int argc, char** argv) {
   // ---- O5c A/B（仅 HD=128 且 causal）：不同 (BM,BN,PIPE) tile 配置 ----
   if (D == 128 && causal) {
     auto time_cfg = [&](int bm, int bn, int pp, float* out_ms) {
-      auto launch = [&]() { launch_cfg(bm, bn, pp, false, true); };
+      auto launch = [&]() { launch_cfg(bm, bn, pp, false, true, false); };
       if (D == 512 || wg2_ksplit_eff > 1) CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
@@ -1631,7 +1639,7 @@ int main(int argc, char** argv) {
   // ---- O7c A/B（仅 HD=128 且 causal）：4 个几何 × {float2/float4} × {无/有 LSE-D 预装} ----
   if (D == 128 && causal) {
     auto time_r4 = [&](int bm, int bn, int pp, bool r4, bool prel, float* out_ms) {
-      auto launch = [&]() { launch_cfg(bm, bn, pp, r4, prel); };
+      auto launch = [&]() { launch_cfg(bm, bn, pp, r4, prel, false); };
       if (D == 512 || wg2_ksplit_eff > 1) CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
@@ -1664,7 +1672,7 @@ int main(int argc, char** argv) {
   // ---- MLA（HD=512）配置 A/B：BM=32/64 × PIPE=0/1 ----
   if (D == 512 && causal) {
     auto time_cfg2 = [&](int bm, int bn, int pp, float* out_ms) {
-      auto launch = [&]() { launch_cfg(bm, bn, pp, false, true); };
+      auto launch = [&]() { launch_cfg(bm, bn, pp, false, true, false); };
       if (D == 512 || wg2_ksplit_eff > 1) CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));

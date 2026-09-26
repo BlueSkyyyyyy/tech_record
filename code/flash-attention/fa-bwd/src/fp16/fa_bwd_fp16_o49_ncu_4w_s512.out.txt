@@ -1,0 +1,5 @@
+    Duration                         us        57.89
+    Compute (SM) Throughput           %        10.91
+    No Eligible                            %        80.21
+    Active Warps Per Scheduler          warp            1
+    Achieved Occupancy                        %         6.24
