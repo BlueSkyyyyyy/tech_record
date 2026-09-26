@@ -211,8 +211,16 @@ smem 冲突 + 低 occ
     **main 1.84×/1.62×/1.61×**、total **0.0694/0.1332/0.1927ms**（0.0896/0.1996/0.2835），
     fp8 MLA main 现比 fp16/bf16 MLA（O46）更快。数值 vs ref 与历史逐值一致、`max_abs(8w-vs-4w)≤5e-7`，
     D=128/GQA/MQA 回归逐位不变。`--mla8w=0` 供 A/B。详见 `docs/03` §47。
-    **教训：把「每 scheduler warp 数」从 1 提到 2 在 1 CTA/SM 的 MLA 上是通用杠杆**——
+     **教训：把「每 scheduler warp 数」从 1 提到 2 在 1 CTA/SM 的 MLA 上是通用杠杆**——
     fp16/bf16（O46 1.07–1.11×）与 fp8（O47 1.6–1.84×，因 fp8 的 4-warp 档寄存器 255 更死）。
+13. **D=128 mma fallback 的 8-warp（O48，第 95 轮，正/负取决于 grid）**：把 O46/O47 的
+    `NTH`/`NWAR` 几何用到 D=128 的 **mma fallback**（生产 `wgmma2` 已 256 线程）。判据是
+    **「4-warp 的每 scheduler warp 数是否 <2」= grid 是否 ≲ SM 数**：fp16/bf16 MHA S=512
+    （grid=128 < 132 SM，ncu `Active Warps/Sched 1.00`）**main 1.05×、端到端 1.08×**；
+    S=4096（grid=1024）**0.88×**；fp8 因 auto split-K 把 S=512 的 grid 抬到 2048
+    （4w 已 2.87 warp/sched）**0.79×**。默认保持 4-warp（opt-in `--d128w`）。顺带修掉
+    O47 参数化留下、只在 `NTH>128` 触发的两个 correctness bug（`kv_prefetch/commit_pair`
+    越界、`kRegDq` flush 硬编码几何）。详见 `docs/01` §14aa、`docs/01b` §6ai、`docs/03` §48。
 
 ---
 

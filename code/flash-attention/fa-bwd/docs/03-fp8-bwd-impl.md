@@ -4457,3 +4457,68 @@ ARCH="" NVCC_FLAGS="$FLAGS" scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full
 `..._o47_d128_reg.out.txt`（D=128/GQA/MQA 回归）、
 `..._o47_ncu_mla{4,8}w_s1024h2.out.txt`（`--set full`）、
 `..._o47_ncu_stall_mla_s1024h2.out.txt`（stall 比例 + red 扇区）。
+
+## 48. O48：fp8 D=128 **mma fallback** 主 kernel 的「256 线程 / 8-warp 几何」判决（第九十五轮）—— **负结果 + 两处 correctness 修复**
+
+### 48.1 动机
+
+O47 的「下一步候选 ①」：D=128 主 kernel 是否也能吃 8-warp。O46/O47 在 MLA（D=512、
+1 CTA/SM）上证明「每 scheduler 的 warp 数 1→2」是通用杠杆。fp8 的 `fp8_mma_body` 在 O47
+已把 warp 网格参数化为 `NTH`/`NWAR`，故只需 host 侧 `--d128w=0/1` 并把 D=128 派发到
+`<128,64,32,REGDQ,false,PREL,true,true,256,4>`。**注意**：`WGMMA=true`（生产 TMA 路径）
+的 GEMM1/2 是 warpgroup 级、`static_assert` 锁死 `NTH==128/NWAR==2`，故本项只能测 **mma
+后端**（纯 `sm_90` 构建、或 `--wgmma=0`）。
+
+### 48.2 结果：D=128 8-warp —— 负结果，且**根因与 fp16 相反**
+
+| shape | 4w(128/2) | 8w(256/4) | 比 |
+|---|---|---|---|
+| S=512 MHA | 0.0718 ms | 0.0907 ms | **0.79×** |
+| S=4096 MHA | 1.9139 ms | 2.7273 ms | **0.70×** |
+
+数值 `max_abs(8w-vs-4w)` ≤ `1.2e-7/4.8e-7/1.4e-6`（仅 atomic 次序）；vs ref 与历史逐位不变
+（S512 2.426/2.975/3.735e-1；S4096 2.635/2.643/3.216e-1）。
+
+**为什么 fp16 在 S=512 赢（`docs/01` §14aa）而 fp8 输？** ncu（S=512）：
+- fp8 4-warp：`Active Warps/Scheduler 2.87`、3 CTA/SM、`Waves 5.17`、Duration 67.7µs；
+- fp8 8-warp：`Active Warps/Scheduler 1.99`、1 CTA/SM、`Waves 15.52`、Duration 89.7µs。
+
+根因是 **fp8 的 D=128 主 kernel 早有 auto split-K（O2b/O29：S512 时 ksplit=16）**，grid 被抬到
+`128×16=2048` 个 CTA，机器本来就被填满（2.87 warp/scheduler）。8-warp 只会把 3 CTA/SM 压成
+1 CTA/SM、每 scheduler 反而降到 2，纯亏。fp16/bf16 的 **mma fallback 没有 ksplit**（O43 的
+split-K 只加在 `wgmma2`），S=512 grid=128<132 SM、每 scheduler 只有 1 warp，8-warp 才成为杠杆。
+⇒ **候选 ① 对 fp8 D=128 不成立**；`--d128w` 保持 opt-in（默认 0），并**不进入生产路径**
+（生产是 `wgmma`+TMA，结构上无法 8-warp）。
+
+### 48.3 附带修复（任何 `NTH>128` 的 mma 路径都需要的 correctness 修复）
+
+为支持 `NTH=256`，发现并修掉 O47 参数化时留下的两个只在 `NTH≠128` 才触发的 bug：
+
+1. **`kv_prefetch_pair`/`kv_commit_pair` 的越界**：两者按 `u = tid + e*NT`（`e<NPU`）遍历
+   `(BN/2)*(HD/4)` 个 unit，**原实现无上界检查**。`NTH=128` 时 `NPU*NT` 恰好等于 unit 数；
+   `NTH=256` 时 `u` 越界，越界读全局、并把 `Kp`/`Ks`/`Vs` 写到 tile 之外（实测 dq/dv 爆到
+   ~1e34/~1e38）。加 `units=(BN/2)*nd4` 上界：prefetch 越界读 0、commit 越界跳过写；
+   `NTH=128` 时恒满足、逐字不变。模板加 `int BN`（campaign 调用点同步）。
+2. **`kRegDq` 的 flush 硬编码几何**：`for i<2 / j<8` + `wr*32/wc*64` 只对默认 2×2/128 成立；
+   D=128 的 8-warp 实例 `NTM5=4` 会越界读 `dqacc` 并写错列。改成由 `MTM5/NTM5/GM5/GN5`
+   派生（`128/2` 时与原式逐字等价）。
+
+**默认 128/2 路径逐位不变**（回归：S512 2.426/2.975/3.735e-1；S4096 2.635/2.643/3.216e-1）。
+
+### 48.4 复现 / 原始输出
+
+```bash
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8 --causal [--d128w=1]
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma_kernel \
+  --launch-count 1 --section Occupancy --section SchedulerStats -- \
+  --dir=.../b1_s512_h16_d128_causal_fp8 --causal [--d128w=1]
+# 单文件（device 由 sync_onefile_device.py 同步）
+python3 scripts/sync_onefile_device.py src/fp8/fa_bwd_fp8_kernels.cuh \
+  src/fp8/fa_bwd_fp8_mma_onefile.cu \
+  '// ----------------------------- 编译期常量 -----------------------------'
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o48_d128_{s512,s4096}.out.txt`、
+`..._o48_ncu_d128_{0,1}w_s512.out.txt`、`..._o48_onefile_s512.out.txt`；
+`docs/01` §14aa、`docs/01b` §6ai。

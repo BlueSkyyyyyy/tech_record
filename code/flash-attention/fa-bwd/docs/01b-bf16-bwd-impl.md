@@ -1792,6 +1792,23 @@ FA/TE 反向后端不支持 D=512。
 原始输出：`src/bf16/fa_bwd_bf16_o46_sweep.out.txt`；单文件
 `src/bf16/fa_bwd_bf16_mma_onefile.cu` 同源。
 
+## 6ai. O48-bf16：D=128 **mma fallback** 主 kernel 的「256 线程 / 8-warp 几何」（第九十五轮）—— **正结果仅 grid ≤ SM；大 grid 负结果**
+
+把 fp16 O48（`docs/01` §14aa）**逐字 dtype 参数化**到 bf16（`fa_bwd_bf16_mma_kernel` 的
+`NTH/NWAR` 派生是 O46 已有的，只需 host 加 `--d128w=0/1` 与 `[O48 A/B]`；单/两文件同源）。
+对象是 **mma fallback**（纯 `sm_90` 构建 / `--wg2=0`），生产 `wgmma2` 已 256 线程、不动。
+
+**数值**（ours-vs-ref，bf16 causal，max_abs）与历史**一致**：S512 `9.001/12.61/13.65e-3`、
+S4096 `15.10/13.40/16.31e-3`；`max_abs(8w-vs-4w)` S512 `0/2.4e-7/7.2e-7`、
+S4096 `0/1.2e-6/1.4e-6`（仅 dK/dV atomic 次序）。
+
+**性能**（同 session `[O48 A/B]`，main-only，ms）：S=512 **0.0618→0.0586（1.054×）**、
+S=4096 1.5673→1.7851（**0.878×**）。结论与 fp16 逐条一致：8-warp 只在 `grid ≤ SM 数`
+（每 scheduler 4-warp 仅 1 warp）时赢，大 grid 掉 occupancy 反亏。ncu 机制同 `docs/01` §14aa.5
+（S512 4w `Active Warps/Sched 1.00` / Duration 58.3µs → 8w `1.99` / 52.5µs）。
+
+原始输出：`src/bf16/fa_bwd_bf16_o48_d128_{s512,s4096}.out.txt`、`..._o48_onefile_s512.out.txt`。
+
 ## 8. 下一步
 
 > **O36-bf16（§6z）已完成**：把 O34 的逐 atom 4D-TMA 从 BN=128 的 `wgmma2b` 补到 **BN=64 的

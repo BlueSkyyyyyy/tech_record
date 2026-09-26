@@ -669,6 +669,9 @@ int main(int argc, char** argv) {
   //   实测 main 1.075–1.109×、端到端 1.03–1.07×，且 8-warp 实例 148–151 regs/0 spill
   //   （4-warp 是 168 regs + spill）。`--mla8w=0` 供同 binary A/B。
   int mla8w = 1;
+  // O48（候选 ①）：D=128 mma 主 kernel 是否用 8-warp（256 线程 / 2×4 网格）几何。0=默认
+  //   4-warp（128/2），1=8-warp。仅 mma 路径（wgmma2 已是 256 线程、结构不同）。`--d128w=`。
+  int d128w = 0;
   int varlen = 0;   // VARLEN：packed [T,H,D] + cu_seqlens.npy（fp16/HD=128/causal/wgmma2）
   // 本轮：VARLEN 主 kernel 是否用 4D-TMA 载入 Q/K/V/dO（仅 FA_WGMMA+FA_TMA 构建、HD=128）。
   //   默认 0（opt-in）：本轮实测 varlen 的 BN=64 主 kernel 用 TMA 中性/偏负（同 O35），
@@ -710,6 +713,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--mlaksplit=", 0) == 0) mlaksplit = atoi(a.c_str() + 12);
     else if (a.rfind("--mla8w=", 0) == 0) mla8w = atoi(a.c_str() + 8);
     else if (a == "--mla8w") mla8w = 1;
+    else if (a.rfind("--d128w=", 0) == 0) d128w = atoi(a.c_str() + 8);
+    else if (a == "--d128w") d128w = 1;
     else if (a.rfind("--wg4=", 0) == 0) wg4_sel = atoi(a.c_str() + 6);
     else if (a == "--wg4") wg4_sel = 1;
     else if (a.rfind("--wg4seq=", 0) == 0) wg4seq_opt = atoi(a.c_str() + 9);
@@ -984,6 +989,24 @@ int main(int argc, char** argv) {
         } else {
           LAUNCH_CFG(512, 32, 32, 0);
         }
+      }
+      return;
+    }
+    // O48（候选 ①）：D=128 mma 路径的 8-warp（256 线程 / 2×4 网格）几何（opt-in）。仅当
+    //   `--d128w=1`；默认 0 与历史 4-warp 逐字相同。wgmma 路径不走这里（wgmma2 已 256 线程）。
+    if (d128w) {
+      if (bm == 32) {
+        if (pp == 2) LAUNCH_CFG_W(128, 32, 32, 2, 256, 4);
+        else if (pp == 1) LAUNCH_CFG_W(128, 32, 32, 1, 256, 4);
+        else LAUNCH_CFG_W(128, 32, 32, 0, 256, 4);
+      } else if (bn == 64) {
+        LAUNCH_CFG_W(128, 64, 64, 2, 256, 4);
+      } else if (pp == 2) {
+        LAUNCH_CFG_W(128, 64, 32, 2, 256, 4);
+      } else if (pp == 1) {
+        LAUNCH_CFG_W(128, 64, 32, 1, 256, 4);
+      } else {
+        LAUNCH_CFG_W(128, 64, 32, 0, 256, 4);
       }
       return;
     }
@@ -1534,6 +1557,53 @@ int main(int argc, char** argv) {
          main_flops / (ms_pipe * 1e-3) / 1e12, ms_pipe2,
          main_flops / (ms_pipe2 * 1e-3) / 1e12, ms_nopipe / ms_pipe,
          ms_nopipe / ms_pipe2);
+
+  // ---- O48 A/B（D=128，仅 mma 路径）：主 kernel 4-warp（128/2）vs 8-warp（256/4 网格）。
+  //      同 session 计时 + 逐元素对拍（只换 warp 网格，数学/数据流不变）。候选 ①（O47）。
+  {
+    dim3 g48((S + 63) / 64, H, B);
+    auto run_d128w = [&](int nth) {
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      if (nth == 256)
+        launch_bwd_mma<128, 64, 32, 1, false, true, 256, 4>(
+            g48, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+            scale, (int)causal, sched);
+      else
+        launch_bwd_mma<128, 64, 32, 1, false, true>(
+            g48, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+            scale, (int)causal, sched);
+    };
+    auto bench_d128w = [&](int nth, float* out) {
+      run_d128w(nth);
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) run_d128w(nth);
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float m4w = 0.f, m8w = 0.f;
+    bench_d128w(128, &m4w);
+    bench_d128w(256, &m8w);
+    std::vector<float> a4_dq(n), a4_dk(nkv), a4_dv(nkv), b8_dq(n), b8_dk(nkv), b8_dv(nkv);
+    run_d128w(128);
+    CUDA_CHECK(cudaMemcpy(a4_dq.data(), d_dq_acc, n * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a4_dk.data(), d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a4_dv.data(), d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    run_d128w(256);
+    CUDA_CHECK(cudaMemcpy(b8_dq.data(), d_dq_acc, n * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b8_dk.data(), d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b8_dv.data(), d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    auto md = [](const std::vector<float>& x, const std::vector<float>& y) {
+      double m = 0.0;
+      for (size_t i = 0; i < x.size(); ++i) m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
+      return m;
+    };
+    printf("[O48 A/B] main D=128 4w(128/2) %.4f ms | 8w(256/4) %.4f ms (%.3fx) | "
+           "max_abs(8w-vs-4w) dq/dk/dv=%.3e/%.3e/%.3e\n",
+           m4w, m8w, m4w / m8w, md(b8_dq, a4_dq), md(b8_dk, a4_dk), md(b8_dv, a4_dv));
+  }
 
   // ---- O16 A/B（仅 FA_WGMMA 构建）：wgmma 主 kernel 分段 wait_group（重叠 epilogue）0 vs 1 ----
 #ifdef FA_WGMMA

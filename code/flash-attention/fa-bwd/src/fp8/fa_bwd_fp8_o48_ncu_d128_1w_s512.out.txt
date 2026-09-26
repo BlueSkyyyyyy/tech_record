@@ -1,0 +1,196 @@
+fa_bwd_fp8_main.cu(648): warning #550-D: variable "lsewgm" was set but never used
+    int lsewgm = 0;
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_main.cu(649): warning #550-D: variable "wgmma" was set but never used
+    int wgmma = 0;
+        ^
+
+fa_bwd_fp8_kernels.cuh(3018): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1054 of fa_bwd_fp8_main.cu
+
+fa_bwd_fp8_kernels.cuh(2726): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1054 of fa_bwd_fp8_main.cu
+
+==PROF== Connected to process 880662 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_main.out)
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 20 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 72704 bytes (71.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 70656 bytes (69.0 KB)
+grid main = 128 x 16 x 1  (ksplit=16, base_grid=128)
+O19: wg2 grid = 64 x 16 x 1 (ksplit2=16, base_grid2=64)
+O7: use_regdq=0 (register dQ accumulation)
+O32: lse backend = wgmma/mma
+O37: main qd-tma = off
+O41: main kv-tma = off
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.5109 ms  4.20 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2377 ms | preprocess 0.1851 ms | main 0.0851 ms | convert 0.0030 ms (cvt_on=0)
+[O48 A/B] main D=128 4w(128/2) 0.0833 ms | 8w(256/4) 0.0912 ms (0.914x) | max_abs(8w-vs-4w) dq/dk/dv=1.788e-07/4.768e-07/4.768e-07
+[O11 A/B] lse O1 0.0760 ms | bal(单缓冲) 0.0695 ms (1.093x) | bal+cpasync 0.0659 ms (1.153x)
+[O12 A/B] main LSE/D preload off 0.0657 ms | on 0.0640 ms (1.027x) | max_abs(on-vs-off) dq=3.137e-03
+[O7e-2 A/B] main fold 4B 0.0656 ms | 16B 0.0648 ms (1.012x) | max_abs(16B-vs-4B) dq/dk/dv=1.490e-07/3.576e-07/4.768e-07
+[O27 A/B] main fold div 0.0675 ms | rcp-mul 0.0650 ms (1.039x) | max_abs(rcp-vs-div) dq/dk/dv=1.490e-07/2.083e-04/2.646e-04
+[O22 A/B] main REGDQ on 0.0672 ms | off 0.0652 ms (1.031x) | max_abs(on-vs-off) dq=1.192e-07
+[O14 A/B] quant old(per-row) 0.2359 ms | new(warp-per-row) 0.2388 ms (0.988x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0577 ms | new(warp-per-row) 0.0606 ms (0.951x) | max_abs=1.907e-06 max_rel=2.113e-03
+[O19 A/B] main mma(BM64,grid=128) 0.0823 ms | wg2(BM128,grid=64) 0.1105 ms (0.745x) | max_abs(wg2-vs-mma) dq/dk/dv=1.788e-07/1.105e-01/4.149e-02
+[O21 A/B] main BN=32 0.0821 ms | BN=64 0.0818 ms (1.004x) | max_abs(BN64-vs-BN32) dq/dk/dv=5.947e-02/4.768e-07/4.768e-07
+[O21b A/B] end2end 保留convert 0.5609 ms | 直写输出(消convert) 0.5024 ms (1.1164x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.426e-01  max_rel=1.939e+02
+  dk   vs ref: max_abs=2.975e-01  max_rel=7.596e+01
+  dv   vs ref: max_abs=3.735e-01  max_rel=1.004e+02
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.381e-01  max_rel=2.387e+02
+  dk   vs te_dk: max_abs=4.429e-01  max_rel=2.378e+02
+  dv   vs te_dv: max_abs=8.546e-01  max_rel=6.898e+01
+==PROF== Disconnected from process 880662
+[880662] fa_bwd_fp8_main.out@127.0.0.1
+  void fa_bwd_fp8_mma_kernel<128, 64, 32, 0, 0, 1, 1, 1, 256, 4>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, const int *, const int *) (128, 16, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.80
+    Elapsed Cycles                cycle       162487
+    Memory Throughput                 %        41.25
+    DRAM Throughput                   %         5.66
+    Duration                         us        89.70
+    L1/TEX Cache Throughput           %        34.94
+    L2 Cache Throughput               %        42.15
+    SM Active Cycles              cycle    148292.22
+    Compute (SM) Throughput           %        25.33
+    ----------------------- ----------- ------------
+
+    OPT   This workload exhibits low compute throughput and memory bandwidth utilization relative to the peak           
+          performance of this device. Achieved compute throughput and/or memory bandwidth below 60.0% of peak           
+          typically indicate latency issues. Look at Scheduler Statistics and Warp State Statistics for potential       
+          reasons.                                                                                                      
+
+    Section: Compute Workload Analysis
+    -------------------- ----------- ------------
+    Metric Name          Metric Unit Metric Value
+    -------------------- ----------- ------------
+    Executed Ipc Active   inst/cycle         1.11
+    Executed Ipc Elapsed  inst/cycle         1.01
+    Issue Slots Busy               %        25.33
+    Issued Ipc Active     inst/cycle         1.11
+    SM Busy                        %        25.33
+    -------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 81.3%                                                                                     
+          All compute pipelines are under-utilized. Either this workload is very small or it doesn't issue enough warps 
+          per scheduler. Check the Launch Statistics and Scheduler Statistics sections for further details.             
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %        17.29
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Gbyte/s       189.84
+    Mem Busy                                          %        32.22
+    Max Bandwidth                                     %        41.25
+    L1/TEX Hit Rate                                   %        12.49
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector         1569
+    L2 Hit Rate                                       %        88.28
+    Mem Pipes Busy                                    %        13.59
+    --------------------------------------- ----------- ------------
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        28.05
+    Issued Warp Per Scheduler                        0.28
+    No Eligible                            %        71.95
+    Active Warps Per Scheduler          warp         1.99
+    Eligible Warps Per Scheduler        warp         0.34
+    ---------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 58.75%                                                                                    
+          Every scheduler is capable of issuing one instruction per cycle, but for this workload each scheduler only    
+          issues an instruction every 3.6 cycles. This might leave hardware resources underutilized and may lead to     
+          less optimal performance. Out of the maximum of 16 warps per scheduler, this workload allocates an average    
+          of 1.99 active warps per scheduler, but only an average of 0.34 warps were eligible per cycle. Eligible       
+          warps are the subset of active warps that are ready to issue their next instruction. Every cycle with no      
+          eligible warp results in no instruction being issued and the issue slot remains unused. To increase the       
+          number of eligible warps, avoid possible load imbalances due to highly different execution durations per      
+          warp. Reducing stalls indicated on the Warp State Statistics and Source Counters sections can help, too.      
+
+    Section: Warp State Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Warp Cycles Per Issued Instruction             cycle         7.11
+    Warp Cycles Per Executed Instruction           cycle         7.11
+    Avg. Active Threads Per Warp                                31.98
+    Avg. Not Predicated Off Threads Per Warp                    30.18
+    ---------------------------------------- ----------- ------------
+
+    WRN   The optional metric smsp__pcsamp_sample_count could not be found. Collecting it as an additional metric could 
+          enable the rule to provide more guidance.                                                                     
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   256
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                   2048
+    Registers Per Thread             register/thread             188
+    Shared Memory Configuration Size           Kbyte          102.40
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block      Kbyte/block           72.70
+    Static Shared Memory Per Block        byte/block               0
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread          524288
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                               15.52
+    -------------------------------- --------------- ---------------
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            1
+    Block Limit Shared Mem                block            1
+    Block Limit Warps                     block            8
+    Theoretical Active Warps per SM        warp            8
+    Theoretical Occupancy                     %        12.50
+    Achieved Occupancy                        %        12.34
+    Achieved Active Warps Per SM           warp         7.90
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 58.75%                                                                                          
+          The 2.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (12.5%) is limited by the number of required      
+          registers, and the required amount of shared memory.                                                          
+

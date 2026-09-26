@@ -2649,7 +2649,26 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第九十四轮）**：**O47——fp8 MLA（D=512）主 kernel 的「256 线程 / 8-warp 几何」
+> **最新（第九十五轮）**：**O48——D=128 mma fallback 主 kernel 的「256 线程 / 8-warp 几何」
+> 判决（正结果仅 grid ≤ SM；大 grid 负结果）**。落实 O47 的「下一步候选 ①」。对象是
+> **mma fallback**（纯 `sm_90` / `--wg2=0`；生产 `wgmma2` 已 256 线程且 fp8 wgmma 的 GEMM1/2
+> 是 warpgroup 级、`static_assert` 锁死 `128/2`）。`fp16/bf16` 只需 host `--d128w=0/1`（`NTH/NWAR`
+> 派生 O46 已就绪）；fp8 同（O47）。**判据 = 「4-warp 的每 scheduler warp 数是否 <2」= grid ≲ SM 数**：
+> fp16/bf16 MHA S=512（grid=128<132 SM，ncu 4w `Active Warps/Sched 1.00`、58.3µs）**main 1.05×
+> （8w 1.99、52.5µs）；生产 (64,64,2) main 1.105×/端到端 1.077×**；S=4096（grid=1024）**0.88×**；
+> GQA kv4 S1024（512）1.024×；**fp8 S=512 0.79× / S=4096 0.70×**（fp8 的 auto split-K 把 S=512
+> 的 grid 抬到 2048，4w 已 2.87 warp/sched，8w 反降到 1.99）。数值 `max_abs(8w-vs-4w)≤2e-6`
+> （仅 dK/dV atomic 次序），vs ref 与历史逐位不变、默认 `128/2` 逐位不变。**默认保持 4-warp
+> （opt-in `--d128w`）**。顺带修掉 O47 参数化留下、只在 `NTH>128` 触发的两个 correctness bug：
+> `kv_prefetch/commit_pair` 的 unit 越界（越界写坏 Kp，dq/dv 爆到 1e34）、`kRegDq` flush 硬编码
+> 几何（越界读 `dqacc`）。单/两文件 device 逐字一致（`sync_onefile_device.py`）。详见 `docs/01`
+> §14aa、`docs/01b` §6ai、`docs/03` §48、`docs/04` §21、`docs/08` §5.13。
+> **下一步候选**：① **把 8-warp 默认化到 `grid < 132` 的 mma fallback**（当前 opt-in；会改
+> dK/dV atomic 次序，需用户确认是否可接受非逐位）；② **fp8 D=128 主 kernel 的 wait+short**
+> （O42/O45 一致：硬件资源锁死）；③ **MLA 降 smem 冲 2 CTA/SM**（四 dtype 共同墙）；④ **varlen
+> 主 kernel K 维 split**（O43 varlen 负结果，需另找形态）。
+>
+> **（第九十四轮）**：**O47——fp8 MLA（D=512）主 kernel 的「256 线程 / 8-warp 几何」
 > （正结果，D=512 默认）**。落实 O45/O46 的唯一未证伪杠杆：把 `fp8_mma_body` +
 > `fa_bwd_fp8_mma_kernel` 的 warp 网格从写死 2×2 改成由模板参数 `NTH`/`NWAR` 派生
 > （`NWM=NTH/32/NWAR`、warp tile `GM1/GN1/GM34/GN34/GM5/GN5` 与 m/n-tile 全部派生、
@@ -3407,6 +3426,21 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       total 0.0896/0.1996/0.2835→**0.0694/0.1332/0.1927ms**，数值 vs ref 与历史逐值一致、
       D=128/GQA/MQA 回归逐位不变。`--mla8w=0/1` A/B；单/两文件 device 逐字一致。
       详见 `docs/03` §47。
+- [x] **O48（第九十五轮）D=128 mma fallback 主 kernel 的「256 线程 / 8-warp 几何」判决
+      （正结果仅 grid ≤ SM；大 grid 负结果；另修两个 `NTH>128` correctness bug）**：落实 O47
+      「下一步候选 ①」。`fp16/bf16 mma 主 kernel` 的 `NTH/NWAR` 派生（O46）已就绪，只需 host
+      `--d128w=0/1` 与 `[O48 A/B]`；fp8 `fp8_mma_body` 同（O47），但 `WGMMA=true`（生产 TMA 路径）
+      的 GEMM1/2 是 warpgroup 级、`static_assert` 锁死 `128/2`，故只能测 **mma 后端**。
+      **判据 = 「4-warp 的每 scheduler warp 数是否 <2」= grid ≲ SM 数**：fp16/bf16 MHA S=512
+      （grid=128<132 SM，ncu 4w `Active Warps/Sched 1.00`、58.3µs）**main 1.05×（8w 1.99、52.5µs）、
+      生产 (64,64,2) main 1.105×/端到端 1.077×**；S=4096（grid=1024）**0.88×**；GQA kv4 S1024
+      （512）1.024×；**fp8 S=512 0.79× / S=4096 0.70×**（fp8 早有 auto split-K 把 grid 抬到 2048、
+      4w 已 2.87 warp/sched，8w 反降到 1.99）。数值 `max_abs(8w-vs-4w)≤2e-6`（仅 dK/dV atomic
+      次序），vs ref 与历史逐位不变、默认 `128/2` 逐位不变。**默认保持 4-warp（opt-in `--d128w`）**；
+      顺带修掉 O47 参数化留下、只在 `NTH>128` 触发的两个 bug：`kv_prefetch/commit_pair` 的
+      unit 越界（越界写坏 Kp，dq/dv 爆到 1e34）、`kRegDq` flush 硬编码几何（越界读 `dqacc`）。
+      单/两文件 device 逐字一致（`sync_onefile_device.py`）。
+      详见 `docs/01` §14aa、`docs/01b` §6ai、`docs/03` §48、`docs/04` §21、`docs/08` §5.13。
 
 ## 灵感 / backlog
 

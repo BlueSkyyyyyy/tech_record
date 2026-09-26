@@ -632,28 +632,34 @@ __device__ __forceinline__ void mma_block_bt(const unsigned char* As, int asld,
 //   * 打包写 Kp[rp][dq..]（uint16，元素 = 相邻两行的同一 d），供 GEMM5 用 `ldmatrix.x2.trans`。
 //   * 打包用 `__byte_perm(a, b, 0x5140/0x7362)` 做字节交织（一次 4B 写两个 uint16）。
 // 与 O3 一致仍用**寄存器双缓冲预取**（不额外占 smem），只是每线程预取的是 NPU 个 unit。
-template <int NPU, int HD, int NT = THREADS>
+template <int NPU, int HD, int BN, int NT = THREADS>
 __device__ __forceinline__ void kv_prefetch_pair(const unsigned char* __restrict__ k8,
                                                  const unsigned char* __restrict__ v8,
                                                  int j0, int S, int Hkv, int hkv, int qbase,
                                                  int tid, uint32_t* pk0, uint32_t* pk1,
                                                  uint32_t* pv0, uint32_t* pv1) {
   const int nd4 = HD / 4;
+  const int units = (BN / 2) * nd4;  // 本 tile 的 (行对, 4B) unit 数（O48 上界）
 #pragma unroll
   for (int e = 0; e < NPU; ++e) {
     int u = tid + e * NT;
     int rp = u / nd4, dq = (u % nd4) * 4;
     int jr = j0 + rp * 2;
     uint32_t k0 = 0, k1 = 0, v0 = 0, v1 = 0;
-    if (jr < S) {  // 越界写 0 字节（等价 cvt_e4m3(0)=0x00）
-      size_t i0 = (((size_t)(qbase + jr)) * Hkv + hkv) * HD + dq;
-      k0 = *reinterpret_cast<const uint32_t*>(k8 + i0);
-      v0 = *reinterpret_cast<const uint32_t*>(v8 + i0);
-    }
-    if (jr + 1 < S) {
-      size_t i1 = (((size_t)(qbase + jr + 1)) * Hkv + hkv) * HD + dq;
-      k1 = *reinterpret_cast<const uint32_t*>(k8 + i1);
-      v1 = *reinterpret_cast<const uint32_t*>(v8 + i1);
+    // O48：NTH 可 >128（D=128 的 8-warp 几何），此时 NPU*NT 会超过本 tile 的 unit 数
+    //   `(BN/2)*nd4`，原实现无上界检查会越界读并写坏 Kp。加运行期上界守卫：越界 unit 读 0、
+    //   由 `kv_commit_pair` 跳过写。NT=128（历史路径）时恒满足 u<units，逐字不变。
+    if (u < units) {
+      if (jr < S) {  // 越界写 0 字节（等价 cvt_e4m3(0)=0x00）
+        size_t i0 = (((size_t)(qbase + jr)) * Hkv + hkv) * HD + dq;
+        k0 = *reinterpret_cast<const uint32_t*>(k8 + i0);
+        v0 = *reinterpret_cast<const uint32_t*>(v8 + i0);
+      }
+      if (jr + 1 < S) {
+        size_t i1 = (((size_t)(qbase + jr + 1)) * Hkv + hkv) * HD + dq;
+        k1 = *reinterpret_cast<const uint32_t*>(k8 + i1);
+        v1 = *reinterpret_cast<const uint32_t*>(v8 + i1);
+      }
     }
     pk0[e] = k0;
     pk1[e] = k1;
@@ -663,16 +669,18 @@ __device__ __forceinline__ void kv_prefetch_pair(const unsigned char* __restrict
 }
 
 // O9c-2：`SW=true` 时 Ks/Vs 写 SW128（供 wgmma GEMM1/2 直读），否则写行主序。Kp 恒定。
-template <int NPU, int HD, bool SW = false, int NT = THREADS>
+template <int NPU, int HD, int BN, bool SW = false, int NT = THREADS>
 __device__ __forceinline__ void kv_commit_pair(unsigned char* Ks, unsigned char* Vs,
                                                uint16_t* Kp, const uint32_t* pk0,
                                                const uint32_t* pk1, const uint32_t* pv0,
                                                const uint32_t* pv1, int tid, int asld,
                                                int psld) {
   const int nd4 = HD / 4;
+  const int units = (BN / 2) * nd4;  // O48：与 prefetch 一致的上界（NTH>128 时避免越界写）
 #pragma unroll
   for (int e = 0; e < NPU; ++e) {
     int u = tid + e * NT;
+    if (u >= units) continue;   // 越界 unit 不落盘
     int rp = u / nd4, dq = (u % nd4) * 4;
     if constexpr (SW) {
       *reinterpret_cast<uint32_t*>(Ks + sw128_off_fp8(rp * 2, dq, HD)) = pk0[e];
@@ -1952,9 +1960,9 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       vs_s[tid] = (jg < len) ? vs[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
     }
   } else if (kPrefetch) {
-    kv_prefetch_pair<NPU, HD, NTH>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
+    kv_prefetch_pair<NPU, HD, BN, NTH>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
                               pv1);
-    kv_commit_pair<NPU, HD, WGMMA, NTH>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
+    kv_commit_pair<NPU, HD, BN, WGMMA, NTH>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
   } else {
     kv_load_pair<HD, BN, WGMMA, NTH>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, Ks, Vs, Kp, ASLD,
                          PSLD);
@@ -2032,7 +2040,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     // ---- O3：预取下一 tile 的 K/V 到寄存器（延迟被本轮 5 个 GEMM 覆盖）----
     const int nnt = nt + 1;
     if (!KVTMA && kPrefetch && nnt < nt_end)
-      kv_prefetch_pair<NPU, HD, NTH>(k8, v8, nnt * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
+      kv_prefetch_pair<NPU, HD, BN, NTH>(k8, v8, nnt * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
                                 pv1);
 
     // ---- (1) S = scale·QKᵀ  →  P = exp(S − LSE)，存 fp32 ----
@@ -2544,7 +2552,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       }
     } else if (nt + 1 < nt_end) {
       if (kPrefetch) {
-        kv_commit_pair<NPU, HD, WGMMA, NTH>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
+        kv_commit_pair<NPU, HD, BN, WGMMA, NTH>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
       } else {
         kv_load_pair<HD, BN, WGMMA, NTH>(k8, v8, (nt + 1) * BN, len, Hkv, hkv, qbase, tid, Ks, Vs, Kp, ASLD,
                              PSLD);
@@ -2560,14 +2568,17 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 
   // ---- O7：把寄存器里累加的 dQ flush 出去（每 CTA 每元素一次 `red_add2`）。----
   if constexpr (kRegDq) {
+    // O48：flush 的 warp 几何由 GM5/GN5/MTM5/NTM5 派生（原写死 `wr*32/wc*64`、i<2/j<8，
+    //   只对默认 2×2/128 线程成立；D=128 的 8-warp 实例 NTM5=4 会越界读 dqacc 并写错列）。
+    //   默认 128/2 时 GM5=32/GN5=64/MTM5=2/NTM5=8 ⇒ 与原式逐字等价。
 #pragma unroll
-    for (int i = 0; i < 2; ++i)
+    for (int i = 0; i < MTM5; ++i)
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int j = 0; j < NTM5; ++j)
 #pragma unroll
         for (int q = 0; q < 4; q += 2) {
-          int r = wr * 32 + i * 16 + g + (q >= 2 ? 8 : 0);
-          int c = wc * 64 + j * 8 + c2;
+          int r = wr * GM5 + i * 16 + g + (q >= 2 ? 8 : 0);
+          int c = wc * GN5 + j * 8 + c2;
           int qi = m0 + r;
           if (qi < len)
             red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c, dqacc[i][j][q],
@@ -3600,6 +3611,7 @@ int main(int argc, char** argv) {
   int cvt_on = 0;   // O21b：1 = 保留冗余 fp32→fp32 convert 拷贝（默认 0：直接累加进输出）
   int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
   int mla8w_opt = -1;  // O47：MLA（D=512）主 kernel -1=自动(8w)/0/1 强制（同 session A/B）
+  int d128w_opt = 0;   // O48：D=128 mma 主 kernel 0=4w(128/2) / 1=8w(256/4)（opt-in，候选 ①）
   int qfast = 1;      // O14：1 = warp-per-row 向量化量化，0 = 旧 per-row 标量量化（A/B）
   int delta_warp_opt = 1;  // O26：1 = warp-per-row 向量化 delta（默认），0 = 旧 per-row smem 归约（A/B）
   int regdq_opt = -1; // O22：-1 自动；0/1 强制关/开寄存器 dQ 累加（同 session A/B）
@@ -3639,6 +3651,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--regdq=", 0) == 0) regdq_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--mla8w=", 0) == 0) mla8w_opt = atoi(a.c_str() + 8);
+    else if (a.rfind("--d128w=", 0) == 0) d128w_opt = atoi(a.c_str() + 8);
+    else if (a == "--d128w") d128w_opt = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--ksplit=", 0) == 0) ksplit = atoi(a.c_str() + 9);
@@ -3987,6 +4001,18 @@ int main(int argc, char** argv) {
 #ifdef FA_WGMMA
     if (D == 128 && wgmma) { launch128(use_regdq, true, prel_sel); return; }
 #endif
+    // O48（候选 ①）：D=128 mma 路径的 8-warp（256 线程 / 2×4 网格）几何（opt-in）。
+    if (D == 128 && d128w_opt) {
+      if (use_regdq)
+        launch_bwd_main<128, 64, 32, true, false, true, 256, 4>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      else
+        launch_bwd_main<128, 64, 32, false, false, true, 256, 4>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      return;
+    }
     if (D == 128) { launch128(use_regdq, false, prel_sel); return; }
     if (mla8w_sel) {
       if (prel_sel)
@@ -4066,6 +4092,64 @@ int main(int argc, char** argv) {
   ms_main /= iters;
   printf("[timing] quant %.4f ms | preprocess %.4f ms | main %.4f ms | convert %.4f ms\n",
          ms_quant, ms_pre, ms_main, ms - ms_quant - ms_pre - ms_main);
+
+  // ---- O48 A/B（D=128，仅 mma 路径）：主 kernel 4-warp（128/2）vs 8-warp（256/4 网格）。----
+  if (D == 128) {
+    auto run_d128w = [&](int nth) {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      if (nth == 256) {
+        if (use_regdq)
+          launch_bwd_main<128, 64, 32, true, false, true, 256, 4>(
+              mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+        else
+          launch_bwd_main<128, 64, 32, false, false, true, 256, 4>(
+              mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      } else {
+        if (use_regdq)
+          launch_bwd_main<128, 64, 32, true, false, true>(
+              mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+        else
+          launch_bwd_main<128, 64, 32, false, false, true>(
+              mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      }
+    };
+    auto bench_d128w = [&](int nth, float* out) {
+      run_d128w(nth);
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) run_d128w(nth);
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float m4w = 0.f, m8w = 0.f;
+    bench_d128w(128, &m4w);
+    bench_d128w(256, &m8w);
+    std::vector<float> a4_dq(nq), a4_dk(nkv), a4_dv(nkv), b8_dq(nq), b8_dk(nkv), b8_dv(nkv);
+    run_d128w(128);
+    CUDA_CHECK(cudaMemcpy(a4_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a4_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a4_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    run_d128w(256);
+    CUDA_CHECK(cudaMemcpy(b8_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b8_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b8_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    auto md = [](const std::vector<float>& x, const std::vector<float>& y) {
+      double m = 0.0;
+      for (size_t i = 0; i < x.size(); ++i) m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
+      return m;
+    };
+    printf("[O48 A/B] main D=128 4w(128/2) %.4f ms | 8w(256/4) %.4f ms (%.3fx) | "
+           "max_abs(8w-vs-4w) dq/dk/dv=%.3e/%.3e/%.3e\n",
+           m4w, m8w, m4w / m8w, md(b8_dq, a4_dq), md(b8_dk, a4_dk), md(b8_dv, a4_dv));
+    run_main();   // 恢复最终输出为 CLI 选中的路径
+  }
 
 #ifdef FA_WGMMA
   // ---- O9c-2 A/B（D=128）：主 kernel GEMM1/2 的 mma.m16n8k32 vs wgmma.m64n32k32。----
