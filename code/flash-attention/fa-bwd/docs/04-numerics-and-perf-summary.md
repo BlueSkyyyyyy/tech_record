@@ -1814,3 +1814,19 @@ causal 回归逐位不变（split 只改 dQ 的 fp32 atomic 次序）。单/两�
 L2 67.95% → O55 k=4 grid 64×2、**Waves 0.97**、Duration **68.00µs（1.14×）**、L2 73.24%、occ ~12.4%。
 **bound 仍是 L2（dK/dV 跨 CTA red）+ 1 CTA/SM 低 occupancy**；本次是**去过度切分**。
 详见 `docs/01` §15b、`docs/01b` §6ao、`docs/08` §5.20。
+
+## 28. O56（第一百零三轮）：full MLA varlen 的 LSE 8-warp（LBM=128）几何——混合/负结果
+
+把 O46/O47 的「1 CTA/SM 时 4→8 warp（每 scheduler 1→2）」杠杆搬到 full MLA varlen 的 LSE
+（`lse_mma_kernel_bal<512,1,true>`，O54）：模板参数化 `<...,NTH,LBN_>`，8-warp 用
+`<512,1,true,256,32>`（LBM=128/LBN=32/PIPE=1，smem 199,680 B）。
+
+| case (D=512 full) | LSE 4-warp 最优 | LSE 8-warp 最优 | 端到端 lse8w 0→1 |
+|---|---|---|---|
+| b3_t1792 (maxlen 1024) | 0.0410 ms (split4) | **0.0374 ms (split8, 1.09×)** | 0.4639 → **0.4601 ms（1.008×）** |
+| b1_t512 (maxlen 512) | **0.0137 ms (split8)** | 0.0171 ms (0.80×) | 0.0957 → 0.1049 ms（0.91×） |
+
+ncu（fp16 b3 full）：4w→8w `gpu__time_duration` 41.1→**37.2 µs**、`sm__warps_active` 6.25%→**12.49%**，
+但 `short_scoreboard` 0.90→**2.59**（LBN=32 使 tile/barrier 翻倍）⇒ **短序列净负、长序列小正**。
+**默认 `--lse8w=0`（opt-in）**；数值 vs ref 与历史同量级、单/两文件逐指标一致。
+详见 `docs/01` §15c、`docs/01b` §6ap、`docs/08` §5.21。

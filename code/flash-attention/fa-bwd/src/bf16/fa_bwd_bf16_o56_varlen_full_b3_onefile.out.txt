@@ -1,0 +1,5 @@
+[timing] VARLEN total 0.4669 ms  12.07 TFLOPS (sum_b 4HL^2D)
+[O56 A/B] varlen MLA full LSE 8-warp: split1 0.1303 split2 0.0708 split4 0.0411 split8 0.0377 split16 0.0477 ms (lse8w=0 nblk8=8)
+  dq  vs ref: max_abs=3.100e-03  max_rel=6.355e-01  (ours_amax=1.266e+00 ref_amax=1.267e+00 @100975)
+  dk  vs ref: max_abs=3.526e-03  max_rel=6.618e-01  (ours_amax=1.109e+00 ref_amax=1.108e+00 @108185)
+  dv  vs ref: max_abs=2.316e-03  max_rel=6.903e-01  (ours_amax=6.484e-01 ref_amax=6.485e-01 @552982)

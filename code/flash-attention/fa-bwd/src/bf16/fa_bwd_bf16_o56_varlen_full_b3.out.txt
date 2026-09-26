@@ -1,0 +1,6 @@
+[timing] VARLEN total 0.4657 ms  12.11 TFLOPS (sum_b 4HL^2D)
+[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.3671 ms | balFULL/split1 0.0815 balFULL/split2 0.0463 balFULL/split4 0.0407 balFULL/split8 0.0471 balFULL/split16 0.0571 ms (auto=4)
+[O56 A/B] varlen MLA full LSE 8-warp: split1 0.1301 split2 0.0707 split4 0.0407 split8 0.0373 split16 0.0472 ms (lse8w=0 nblk8=8)
+  dq  vs ref: max_abs=3.100e-03  max_rel=6.355e-01  (ours_amax=1.266e+00 ref_amax=1.267e+00 @100975)
+  dk  vs ref: max_abs=3.526e-03  max_rel=6.618e-01  (ours_amax=1.109e+00 ref_amax=1.108e+00 @108185)
+  dv  vs ref: max_abs=2.316e-03  max_rel=6.903e-01  (ours_amax=6.484e-01 ref_amax=6.485e-01 @552982)

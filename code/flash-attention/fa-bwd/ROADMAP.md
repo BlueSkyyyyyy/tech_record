@@ -2649,7 +2649,25 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百零一轮）**：**O54——非 causal（full）MLA varlen 的 LSE 走 K 维 split
+> **最新（第一百零三轮）**：**O56——full MLA varlen 的 LSE 8-warp（LBM=128）几何
+> （混合/负结果，默认 opt-in）**。落实上一版「候选 ①」：O54 后 full MLA varlen 的 LSE
+> `lse_mma_kernel_bal<512,1,true>` 仍是 1 CTA/SM、`sm__warps_active` 6.25%（1 warp/scheduler）。
+> 把 O46/O47 的「1 CTA/SM 时 4→8 warp」杠杆搬来：`lse_mma_kernel_bal` 模板参数化
+> `<HD,PIPE,FULL,NTH,LBN_>`（默认档逐位等价），host 加 `<512,1,true,256,32>`
+> （256 线程 / LBM=128 / LBN=32 / PIPE=1，smem 199,680B）。**同 session A/B：长 K 的
+> b3_t1792 LSE 1.09×（0.0410→0.0374ms）/ 端到端 +0.8%；短 K 的 b1_t512 LSE 0.80× /
+> 端到端 −9.7%**；ncu 证明 occupancy 精确翻倍（6.25%→12.49%）、Duration 41.1→37.2µs，
+> 但 LBN=32 使 tile/barrier 翻倍、`short_scoreboard` 0.90→2.59。⇒ **主 kernel 的 8-warp
+> 不无条件适用于 compute/softmax-bound 的 LSE**；默认 `--lse8w=0`。数值与历史同量级、
+> 单/两文件一致。详见 `docs/01` §15c、`docs/01b` §6ap、`docs/04` §28、`docs/08` §5.21。
+> **下一步候选**：① **full MLA varlen 的 LSE 真正冲 2 CTA/SM**（8-warp 只到 1 CTA/SM；
+> 现 199.68KB，若做 LBN=16/PIPE=1（`(128+32)·520·2=166.4KB` 仍 > 116KB）或 **分块 Q**/
+> **ldmatrix 直读 Q（免 Qs smem）** 才能到 ≤116KB——多轮）；② **主 kernel 的 8-warp/几何
+> 深挖**（fp16/bf16 MLA varlen 主 kernel 已 8-warp，但 1 CTA/SM 的墙未动）；③ **fp8 MLA 的
+> `short_scoreboard`**（O47/O51 后并列头号；本轮证明 LBN 减半会加重它，反证「别再抠
+> ldmatrix 粒度」）；④ **MLA 降 smem 冲 2 CTA/SM**（四 dtype 共同墙）。
+>
+> **（第一百零一轮）**：**O54——非 causal（full）MLA varlen 的 LSE 走 K 维 split
 > （正结果，full varlen 默认 auto）**。O53 后 full MLA varlen 端到端仍被 **LSE** 主导
 > （b3_t1792：total 1.013ms、main-only 0.392ms ⇒ LSE ~0.62ms=60%）——非 causal 一直走 O1 的
 > `lse_mma_kernel<512>`（一个 CTA 一个 m 块、**无 split、标量 K 载入**）。给三 dtype 的
@@ -3729,6 +3747,33 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
      `..._o55_ncu_varlen_full_b1_t512.out.txt`、`..._o55_ncu_varlen_full_b1_ks16.out.txt`、
      `..._o55_ncu_varlen_full_b3_t1792.out.txt`；`src/bf16/fa_bwd_bf16_o55_varlen{,_onefile}.out.txt`；
      文档 `docs/01` §15b、`docs/01b` §6ao、`docs/04` §27、`docs/08` §5.20。
+
+- 2026-09-27（第一百零三轮）：**O56 完成（full MLA varlen 的 LSE 8-warp（LBM=128）几何；
+  **混合/负结果**，默认 opt-in）**。
+  - 动机（落实 O54「下一步候选 ①」）：O54 后 full MLA varlen 的 LSE 是
+    `lse_mma_kernel_bal<512,1,true>`（FULL + cp.async 双缓冲 + K 维 split），ncu 显示
+    **1 CTA/SM、`sm__warps_active` 6.25%（1 warp/scheduler）**、fixed-latency stall 37%。
+    O46/O47 在 MLA 主 kernel 上证明「1 CTA/SM 时 4→8 warp（每 scheduler 1→2）」是通用杠杆，
+    本轮把它搬到 LSE。
+  - **改动（单/两文件 device 逐字一致；`--lse8w=0/1` 同 binary A/B）**：`lse_mma_kernel_bal`
+    模板参数化 `<HD,PIPE,FULL,NTH=THREADS,LBN_=LBN>`（`LBM_=(NTH/32)*16`、`MTN=LBN_/8`，
+    默认档与原版**逐位等价**）；host 为「D=512 && 非 causal」加
+    `lse_mma_kernel_bal<512,1,true,256,32>`（256 线程 / LBM=128 / LBN=32 / PIPE=1，
+    smem `(128+2·32)·(D+8)·2 = 199,680 B`），grid 用 `lse_nblk8=ceil(maxlen/128)`。
+  - **结果（同 session event，D=512 full）**：**长 K** b3_t1792（maxlen 1024）LSE 4w split4
+    0.0410→8w split8 **0.0374ms（1.09×）**、端到端 0.4639→**0.4601ms（1.008×）**；
+    **短 K** b1_t512 LSE 4w split8 **0.0137** → 8w split8 0.0171（**0.80×**）、端到端
+    0.0957→0.1049ms（0.91×）。bf16 逐项一致（b3 4w 0.0407→8w 0.0373，1.09×）。备选
+    8-warp/LBN=64/PIPE=0 更差（0.0547ms）⇒ K 双缓冲不可丢。
+  - **ncu（fp16 b3 full，4w→8w）**：`gpu__time_duration` 41.1→**37.2µs**、
+    `sm__warps_active` 6.25%→**12.49%**、`sm__throughput` 20.6→23.3%、`l1tex` 22.7→29.6%，
+    但 `short_scoreboard` 0.90→**2.59**（LBN=32 使 tile/barrier 翻倍）。⇒ **短序列净负、
+    长序列小正**；默认 `--lse8w=0`（opt-in），代码与 A/B 留档。
+  - 数值 vs fp32 ref 与历史同量级（b3 full fp16 5.516/4.451/2.385e-4；bf16 3.100/3.526/
+    2.316e-3），单/两文件逐指标一致；MHA D=128 默认路径逐位不变。
+  - 原始输出 `src/fp16/fa_bwd_fp16_o56_{varlen_full_b3,varlen_full_b3_onefile,ab_e2e,ncu_lse}.out.txt`、
+    `src/bf16/fa_bwd_bf16_o56_{varlen_full_b3,varlen_full_b3_onefile}.out.txt`；文档 `docs/01` §15c、
+    `docs/01b` §6ap、`docs/04` §28、`docs/08` §5.21。
 
 ## 灵感 / backlog
 

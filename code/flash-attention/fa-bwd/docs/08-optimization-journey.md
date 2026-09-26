@@ -329,6 +329,17 @@ smem 冲突 + 低 occ
 ---
 
 
+21. **O56（第 103 轮，混合/负结果，opt-in）**：把 O46/O47 的「1 CTA/SM 时 4→8 warp」杠杆
+     搬到 **full MLA varlen 的 LSE**（O54 的 `lse_mma_kernel_bal<512,1,true>`）——模板参数化
+     `<HD,PIPE,FULL,NTH,LBN_>`，8-warp 用 `<512,1,true,256,32>`（LBM=128/LBN=32/PIPE=1，
+     smem 199,680B）。**同 session A/B：长 K 的 b3_t1792 LSE 1.09×（0.0410→0.0374ms）、端到端
+     +0.8%；短 K 的 b1_t512 LSE 0.80×、端到端 −9.7%**。ncu：8-warp 把 `sm__warps_active`
+     6.25%→12.49%（精确 2 warp/scheduler）、Duration 41.1→37.2µs，但 `LBN=32` 使 tile/barrier
+     翻倍、`short_scoreboard` 0.90→2.59。**教训：主 kernel 的「8-warp」靠的是 wgmma/ldmatrix
+     的访存并行度，LSE 已偏 compute/softmax epilogue，减半 LBN 又引入额外 barrier ⇒ 该杠杆
+     **不能无条件移植**；只有 K 足够长（tile 多）才回本。** 默认 opt-in（`--lse8w=0`），
+     代码与 A/B 留档。详见 `docs/01` §15c、`docs/01b` §6ap、`docs/04` §28。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。
