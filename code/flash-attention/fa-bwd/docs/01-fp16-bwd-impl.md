@@ -4036,3 +4036,76 @@ barrier。故 **默认 `--lse8w=0`（opt-in）**，代码与 A/B 保留，待更
 **原始输出**：`src/fp16/fa_bwd_fp16_o56_varlen_full_b3.out.txt`（两文件）、
 `..._o56_varlen_full_b3_onefile.out.txt`（单文件）、`..._o56_ab_e2e.out.txt`（b1/b3 × lse8w 0/1）、
 `..._o56_ncu_lse.out.txt`（ncu 4w/8w）；bf16 对应 `src/bf16/fa_bwd_bf16_o56_*`。
+
+## 15d. O57（第一百零四轮，混合结果，opt-in）：full MLA varlen 的 LSE 真正冲 2 CTA/SM（减半 Q/K smem）
+
+**动机（落实 O54/O56「下一步候选 ①」）**：O54 的 `lse_mma_kernel_bal<512,1,true>`（4-warp /
+LBM=64 / LBN=64 / PIPE=1）smem = `(64 + 2·64)·(512+8)·2 = 199,680 B`，恰好卡在
+`232448/2 < 199680` ⇒ **1 CTA/SM**（O56 ncu：`sm__warps_active` 6.25%）。O56 用 8-warp 把每
+scheduler 的 warp 数 1→2，但 smem 仍 199,680B、仍 1 CTA/SM，且 LBN 减半让 barrier 翻倍，只在长
+K 回本。本轮换一个方向：**把 smem 压到 ≤116,224B（= 232448/2），让两个 CTA 真正同驻一个 SM**
+（CTA 级并行度，而非 warp 级），看能否盖住 O54/O56 的 `fixed-latency` 墙。
+
+**smem 账（HD=512, LD=520, half=2B；`smem = (LBM + (PIPE?2:1)·LBN)·LD·2`）**：4-warp 固定
+LBM=64，要 2 CTA 必须把 `LBM + P·LBN ≤ 111`。可行的只有：
+- **cfg5** `PIPE=0 / LBN=32`：`(64+32)·520·2 = 99,840 B` → 2 CTA/SM（丢掉 K 双缓冲 cp.async）；
+- **cfg6** `PIPE=1 / LBN=16`：`(64+2·16)·520·2 = 99,840 B` → 2 CTA/SM（保留 cp.async 双缓冲）。
+另外两个「同-1 CTA/SM」的消融档用于分离变量：
+- **cfg4** `PIPE=0 / LBN=64`：`(64+64)=133,120 B`（只丢 cp.async，tile 数与默认相同）；
+- **cfg7** `PIPE=1 / LBN=32`：`(64+64)=133,120 B`（只减半 tile，保留 cp.async）。
+
+**改动（host-only；device 一行未改）**：这四个几何都落在 O56 已参数化的
+`lse_mma_kernel_bal<HD,PIPE,FULL,NTH,LBN_>`（LBM_ 由 NTH 派生）里，故**只需 host**：在
+`run_varlen` 的 `D==512 && !causal` 分支加 `lseocc`（`--lseocc=5/6` 为可选默认档），
+`cudaFuncSetAttribute` 为四个新实例设 smem 上限，`[O57 A/B]` 在同 binary 内扫 cfg4/7/5/6 ×
+`split∈{1,2,4,8,16}`（LSE-only）。单/两文件 host 同步；默认路径（`--lseocc=0`）逐位不变。
+
+**结果（同 session CUDA-event，LSE-only ms；自动 split 见 case）**：
+
+| 几何 | b3_t1792 (maxlen1024) 最优 | b1_t512 (maxlen512) 最优 | smem | CTA/SM |
+|---|---|---|---|---|
+| 默认 `P1/LBN64` | split4 **0.0410** | split8 **0.0135** | 199.7KB | 1 |
+| cfg4 `P0/LBN64` | split4 0.1043 | split8 0.0277 | 133.1KB | 1 |
+| cfg7 `P1/LBN32` | split4 0.0563 | split8 0.0159 | 133.1KB | 1 |
+| cfg5 `P0/LBN32` | split8 0.0675 | split8 0.0283 | 99.8KB | **2** |
+| **cfg6 `P1/LBN16`** | split8 **0.0394（1.04×）** | split8 0.0149（**0.91×**） | 99.8KB | **2** |
+| O56 8-warp `P1/LBN32`（参考） | split8 0.0378（1.08×） | split8 0.0171（0.79×） | 199.7KB | 1 |
+
+**结论（混合）**：
+- **丢掉 cp.async 双缓冲是灾难**（cfg4 vs 默认：b3 0.0410→0.1043，0.39×；cfg5 也慢）——LSE 的
+  K 载入延迟必须用双缓冲盖住，与 O56 的「LBN=64/PIPE=0 更差」一致。**2 CTA/SM 的好处不足以
+  补偿单缓冲 K**。
+- **保留双缓冲的 2 CTA/SM（cfg6）确实把 occupancy 翻倍**（ncu 10.51% vs 6.25%），长 K 上
+  小胜（b3 1.04×），但**短 K 反而 0.91×**：LBN=16 把 tile/barrier 数变 4×，`short_scoreboard`
+  从 0.89 涨到 1.56，在 tile 少时占比过大。**且 cfg6 的长 K 成绩（0.0394）仍不及 O56 的
+  8-warp（0.0378）。**
+- ⇒ **「1 CTA/SM + 减半 LBN 换 2 CTA/SM」不是一个净正杠杆**；LSE 的墙是 compute/softmax +
+  tile 级 smem→mma 依赖（`short_scoreboard`），不是纯粹可被 occupancy 掩盖的访存延迟。
+  **默认保持 `--lseocc=0`**，cfg5/6 作为 opt-in 与证据保留。
+
+**ncu（fp16 b3 full，split4，grid (16,2,12)，`-c 1`，同 metric 集）**：
+
+| | 默认 `<512,1,1,128,64>`（1 CTA） | cfg6 `<512,1,1,128,16>`（2 CTA） |
+|---|---|---|
+| `gpu__time_duration` | **40.90 µs** | 44.03 µs |
+| `sm__warps_active` | 6.25% | **10.51%**（≈2 CTA×4warp） |
+| `sm__throughput` | 20.78% | 21.36% |
+| `l1tex__throughput` | 22.90% | 30.92% |
+| `lts__throughput` | 24.07% | 22.68% |
+| `short_scoreboard` stall | 0.89 | **1.56** |
+| `wait` stall | 1.44 | **1.86** |
+| `long_scoreboard` stall | 0.23 | 0.40 |
+
+ncu 在 **auto split4** 上采（cfg6 的最优 split8 不被 auto 命中），故 Duration 显示 cfg6 更慢；
+同 session 的 `[O57 A/B]` sweep（cfg6 split8 = 0.0394 vs 默认 split4 = 0.0410）才是公平比较。
+ncu 的价值是**证实 occupancy 精确翻倍**（6.25%→10.51%）与 **`short_scoreboard`/`wait` 上升**
+（tile/barrier 翻倍的代价），即「2 CTA/SM 成立、但 LBN 减半的税抵消了它」。
+
+**数值**：`--lseocc=6` 路径 vs fp32 ref：b3 full fp16 `dq/dk/dv = 5.516/4.451/2.385e-4`、
+b1 full `3.046/4.449/1.327e-4`，与 O54/O55/O56 **逐位相同**（PIPE 只改搬运、LBN 只改 tile 划分，
+LSE 数学与归约次序不变）；bf16 `3.100/3.526/2.316e-3`（b3）、`1.730/1.692/1.556e-3`（b1）
+亦与历史逐位相同。
+
+**原始输出**：`src/fp16/fa_bwd_fp16_o57_varlen_full_b3_auto.out.txt`（默认 A/B）、
+`..._o57_varlen_full_b3.out.txt`（`--lseocc=6`）、`..._o57_varlen_full_b1.out.txt`（b1）、
+`..._o57_ncu_lse.out.txt`（ncu 默认 vs cfg6）；bf16 对应 `src/bf16/fa_bwd_bf16_o57_*`。

@@ -2044,3 +2044,30 @@ LBN=32），`--lse8w=0/1` 同 binary A/B。
 
 原始输出：`src/bf16/fa_bwd_bf16_o56_varlen_full_b3.out.txt`（两文件）、
 `..._o56_varlen_full_b3_onefile.out.txt`（单文件）。
+
+## 6aq. O57（第一百零四轮，混合结果，opt-in）：full MLA varlen 的 LSE 2 CTA/SM 几何（bf16）
+
+把 fp16 O57（`docs/01` §15d）逐字 dtype 参数化到 bf16：`lse_mma_kernel_bal` 的模板
+`<HD,PIPE,FULL,NTH,LBN_>` 早由 O56 参数化，故**只改 host**——`run_varlen` 加 `lseocc`，
+为 `lse_mma_kernel_bal<512,0,true,128,{64,32}>`（cfg4/cfg5）与
+`<512,1,true,128,{32,16}>`（cfg7/cfg6）设 smem 上限（99,840B 的两档 → 2 CTA/SM），
+`[O57 A/B]` 同 binary 扫四个几何 × split。`--lseocc=5/6` 可选，默认 `0` 逐位不变。
+
+**结果（同 session event，bf16 full varlen，LSE-only）**：
+
+| 几何 | b3_t1792 (1024) | b1_t512 (512) | CTA/SM |
+|---|---|---|---|
+| 默认 `P1/LBN64` | split4 **0.0410** | split8 **0.0136** | 1 |
+| cfg4 `P0/LBN64` | split4 0.1044 | split8 0.0277 | 1 |
+| cfg7 `P1/LBN32` | split4 0.0562 | split8 0.0161 | 1 |
+| cfg5 `P0/LBN32` | split8 0.0673 | split8 0.0283 | **2** |
+| **cfg6 `P1/LBN16`** | split8 **0.0393（1.04×）** | split8 0.0149（**0.91×**） | **2** |
+| O56 8-warp（参考） | split8 0.0375（1.09×） | split8 0.0173（0.79×） | 1 |
+
+与 fp16 **逐项一致**：丢 cp.async（cfg4/5）灾难性变慢；保留双缓冲的 2 CTA/SM（cfg6）长 K 小胜、
+短 K 变慢，且长 K 仍不及 8-warp。数值 `--lseocc=6` 路径 vs fp32 ref b3 full
+`3.100/3.526/2.316e-3`、b1 full `1.730/1.692/1.556e-3`，与 O54–O56 **逐位相同**。
+默认 `--lseocc=0`。
+
+原始输出：`src/bf16/fa_bwd_bf16_o57_varlen_full_b3.out.txt`、`..._o57_varlen_full_b3_onefile.out.txt`
+（单文件，数值逐位一致）、`..._o57_varlen_full_b1.out.txt`。

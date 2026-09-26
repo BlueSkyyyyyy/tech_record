@@ -340,6 +340,19 @@ smem 冲突 + 低 occ
      **不能无条件移植**；只有 K 足够长（tile 多）才回本。** 默认 opt-in（`--lse8w=0`），
      代码与 A/B 留档。详见 `docs/01` §15c、`docs/01b` §6ap、`docs/04` §28。
 
+22. **O57（第 104 轮，混合结果，opt-in）**：**full MLA varlen 的 LSE 真正冲 2 CTA/SM**（O56
+     的姊妹实验）。O54/O56 的 FULL LSE smem 恒 199,680B ⇒ 1 CTA/SM。本轮把 smem 压到
+     99,840B（`≤232448/2`）让**两个 CTA 同驻一个 SM**：4-warp 固定 LBM=64，唯一可行的是
+     **cfg6 `P1/LBN16`**（保留 cp.async）与 **cfg5 `P0/LBN32`**（丢双缓冲）。host-only
+     （`--lseocc=5/6`，O56 已把 `<HD,PIPE,FULL,NTH,LBN_>` 参数化），`[O57 A/B]` 同 binary 扫参。
+     **丢 cp.async 灾难性**（cfg4/5：b3 0.041→0.104/0.068）；**保留双缓冲的 cfg6 occupancy
+     精确翻倍**（ncu `sm__warps_active` 6.25%→10.51%），但 LBN=16 把 tile/barrier 变 4×，
+     `short_scoreboard` 0.89→1.56 ⇒ **长 K 小胜（b3 1.04×）、短 K 反负（b1 0.91×），且长 K 仍
+     不及 O56 的 8-warp（1.08×）**。**教训：LSE 的墙是 compute/softmax + smem→mma 的 tile 级
+     依赖，不是可被 CTA occupancy 掩盖的访存延迟——「压 smem 换 2 CTA/SM」在 LSE 上不成立。**
+     默认 `--lseocc=0`，数值 vs ref 与 O54–O56 逐位相同。详见 `docs/01` §15d、`docs/01b` §6aq、
+     `docs/04` §29。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。

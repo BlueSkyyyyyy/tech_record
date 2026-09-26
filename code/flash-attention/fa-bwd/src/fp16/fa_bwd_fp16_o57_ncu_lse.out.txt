@@ -1,0 +1,22 @@
+=== default PIPE1/LBN64 (1 CTA) ===
+  void lse_mma_kernel_bal<512, 1, 1, 128, 64>(const __half *, const __half *, float *, int, int, int, float, const int *, float *, int) (16, 2, 12)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Metric Name                                                               Metric Unit Metric Value
+    gpu__time_duration.sum                                                             us        40.90
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        22.90
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        24.07
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        20.78
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %         6.25
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.23
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.89
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.44
+=== cfg6 PIPE1/LBN16 (2 CTA) ===
+  void lse_mma_kernel_bal<512, 1, 1, 128, 16>(const __half *, const __half *, float *, int, int, int, float, const int *, float *, int) (16, 2, 12)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Metric Name                                                               Metric Unit Metric Value
+    gpu__time_duration.sum                                                             us        44.03
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        30.92
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        22.68
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        21.36
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        10.51
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.40
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         1.56
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.86

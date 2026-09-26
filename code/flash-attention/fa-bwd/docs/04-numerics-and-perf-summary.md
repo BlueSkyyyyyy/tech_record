@@ -1830,3 +1830,27 @@ ncu（fp16 b3 full）：4w→8w `gpu__time_duration` 41.1→**37.2 µs**、`sm__
 但 `short_scoreboard` 0.90→**2.59**（LBN=32 使 tile/barrier 翻倍）⇒ **短序列净负、长序列小正**。
 **默认 `--lse8w=0`（opt-in）**；数值 vs ref 与历史同量级、单/两文件逐指标一致。
 详见 `docs/01` §15c、`docs/01b` §6ap、`docs/08` §5.21。
+
+## 29. O57（第一百零四轮）：full MLA varlen 的 LSE 真正冲 2 CTA/SM——混合结果
+
+落实 O54/O56「下一步候选 ①」。O54/O56 的 FULL LSE 恒 smem 199,680 B（1 CTA/SM）。本轮把 smem
+压到 99,840 B（`=232448/2` 以内）让**两个 CTA 同驻一个 SM**：4-warp 固定 LBM=64，取
+**cfg6 `<512,1,true,128,16>`**（PIPE=1/LBN=16，保留 cp.async）与 **cfg5 `<512,0,true,128,32>`**
+（PIPE=0/LBN=32，丢双缓冲）。`--lseocc=5/6` opt-in、默认 0 逐位不变；`[O57 A/B]` 同 binary 扫参。
+
+| LSE 几何（D=512 full） | b3_t1792 (1024) | b1_t512 (512) | smem | CTA/SM |
+|---|---|---|---|---|
+| 默认 `P1/LBN64` | **0.0410 (split4)** | **0.0135 (split8)** | 199.7KB | 1 |
+| cfg4 `P0/LBN64` | 0.1043 | 0.0277 | 133.1KB | 1 |
+| cfg7 `P1/LBN32` | 0.0563 | 0.0159 | 133.1KB | 1 |
+| cfg5 `P0/LBN32` | 0.0675 | 0.0283 | 99.8KB | **2** |
+| **cfg6 `P1/LBN16`** | **0.0394（1.04×）** | 0.0149（**0.91×**） | 99.8KB | **2** |
+| O56 8-warp（参考） | 0.0378（1.08×） | 0.0171（0.79×） | 199.7KB | 1 |
+
+ncu（fp16 b3 full，split4）：默认 1 CTA `sm__warps_active` **6.25%** / `short_scoreboard` 0.89 /
+Duration 40.9µs → cfg6 2 CTA **10.51%** / 1.56 / 44.0µs ⇒ **occupancy 精确翻倍**，但 LBN=16 让
+tile/barrier 变 4×，`short_scoreboard`+`wait` 上升抵消之；只有长 K（tile 多）小胜，且仍不及
+8-warp。**丢 cp.async（cfg4/5）灾难性变慢**。⇒ **LSE 的墙是 compute/softmax + smem→mma 的
+tile 依赖，不是可被 CTA occupancy 掩盖的访存延迟；默认 `--lseocc=0`。**
+数值 vs fp32 ref 与 O54–O56 **逐位相同**（fp16 b3 5.516/4.451/2.385e-4；bf16 3.100/3.526/2.316e-3）。
+详见 `docs/01` §15d、`docs/01b` §6aq。

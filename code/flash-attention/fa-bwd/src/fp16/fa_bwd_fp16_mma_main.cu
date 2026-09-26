@@ -337,7 +337,7 @@ static void launch_bwd_wgmma4(dim3 mg, const __half* q, const __half* k, const _
 #ifdef FA_WGMMA
 static int run_varlen(const std::string& dir, bool causal, int iters, int varlen_tma = 0,
                       int lse_split = 0, int wg2ksplit = -1, int mla8w = -1,
-                      int mlaksplit = -1, int lse8w = 0) {
+                      int mlaksplit = -1, int lse8w = 0, int lseocc = 0) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -442,6 +442,13 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
   const int kLseSmemBal1 = (LBM + 2 * LBN) * (D + 8) * (int)sizeof(__half);
   const int kLseSmemBal1_8 = (128 + 2 * 32) * (D + 8) * (int)sizeof(__half);
   const int kLseSmemBal1_8c = (128 + 64) * (D + 8) * (int)sizeof(__half);   // 8-warp, LBN=64, PIPE=0
+  // O57：full MLA varlen LSE 的同-1 CTA/SM 消融 + 2 CTA/SM 新几何（4-warp/NTH=128/LBM=64）。
+  //   cfg4: PIPE=0 LBN=64（只丢 cp.async）；cfg7: PIPE=1 LBN=32（只减半 tile）；
+  //   cfg5: PIPE=0 LBN=32（99.8KB → 2 CTA/SM）；cfg6: PIPE=1 LBN=16（99.8KB → 2 CTA/SM）。
+  const int kLseSmemBal1_4 = (64 + 64) * (D + 8) * (int)sizeof(__half);
+  const int kLseSmemBal1_7 = (64 + 2 * 32) * (D + 8) * (int)sizeof(__half);
+  const int kLseSmemBal1_5 = (64 + 32) * (D + 8) * (int)sizeof(__half);
+  const int kLseSmemBal1_6 = (64 + 2 * 16) * (D + 8) * (int)sizeof(__half);
   const int kLseTileWgm = (D == 128) ? (LBM / 8) * (D / 64) * 1024 : 0;
   const int kLseSmemWgm1 = 1024 + kLseTileWgm * 3;
   if (D == 128) {
@@ -463,6 +470,15 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1_8));
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<512, 0, true, 256, 64>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1_8c));
+    // O57：full MLA varlen LSE 的同-1 CTA/SM 消融 + 2 CTA/SM 新几何。
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<512, 0, true>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1_4));
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<512, 1, true, 128, 32>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1_7));
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<512, 0, true, 128, 32>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1_5));
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<512, 1, true, 128, 16>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1_6));
   }
   const int d_rows = (int)rows_q;
   const int d_wpb = THREADS / 32;
@@ -594,6 +610,38 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
         } else {
           lse_mma_kernel_bal<512, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(
               d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
+        }
+      } else if (lseocc == 5 || lseocc == 6) {
+        // O57：full MLA varlen 的 LSE 走「2 CTA/SM」几何（4-warp/NTH=128/LBM=64，smem =
+        //   Qs[64×520] + 1×或2×Ks[LBN×520] = 99,840B，恰好 ≤ 232448/2）——让两个 CTA 同驻
+        //   一个 SM，以 CTA 级并行度盖住 L1/固定延迟（O54/O56 的墙）。cfg5=PIPE=0/LBN=32
+        //   （单缓冲 K）；cfg6=PIPE=1/LBN=16（双缓冲 K）。
+        if (lseocc == 5) {
+          if (lse_split_eff <= 1)
+            lse_mma_kernel_bal<512, 0, true, 128, 32>
+                <<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1_5>>>(d_q, d_k, d_lse, maxlen, H,
+                                                                    Hkv, scale, d_cu);
+          else
+            lse_mma_kernel_bal<512, 0, true, 128, 32>
+                <<<dim3((unsigned)lse_nblk, H, (unsigned)(B * lse_split_eff)), THREADS,
+                   kLseSmemBal1_5>>>(d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part,
+                                     lse_split_eff);
+        } else {
+          if (lse_split_eff <= 1)
+            lse_mma_kernel_bal<512, 1, true, 128, 16>
+                <<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1_6>>>(d_q, d_k, d_lse, maxlen, H,
+                                                                    Hkv, scale, d_cu);
+          else
+            lse_mma_kernel_bal<512, 1, true, 128, 16>
+                <<<dim3((unsigned)lse_nblk, H, (unsigned)(B * lse_split_eff)), THREADS,
+                   kLseSmemBal1_6>>>(d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part,
+                                     lse_split_eff);
+        }
+        if (lse_split_eff > 1) {
+          const long long nrows = (long long)rows_q;
+          const int th = 256;
+          lse_split_merge_kernel<<<(unsigned)((nrows + th - 1) / th), th>>>(d_lse_part, d_lse,
+                                                                            nrows, lse_split_eff);
         }
       } else if (lse8w_use) {
         // O56：full MLA varlen 的 LSE 走 8-warp（256 线程 / LBM=128 / LBN=32）几何——每
@@ -792,6 +840,65 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
           lse_split_merge_kernel<<<(unsigned)((nrows + th - 1) / th), th>>>(d_lse_part, d_lse,
                                                                             nrows, sp);
         }
+      } else if (which == 4) {
+        // O57：PIPE=0 / LBN=64（只丢 cp.async，tile 数与默认相同；smem 133.1KB，1 CTA/SM）。
+        if (sp <= 1)
+          lse_mma_kernel_bal<512, 0, true><<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1_4>>>(
+              d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
+        else {
+          lse_mma_kernel_bal<512, 0, true>
+              <<<dim3((unsigned)lse_nblk, H, (unsigned)(B * sp)), THREADS, kLseSmemBal1_4>>>(
+                  d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part, sp);
+          const long long nrows = (long long)rows_q;
+          const int th = 256;
+          lse_split_merge_kernel<<<(unsigned)((nrows + th - 1) / th), th>>>(d_lse_part, d_lse,
+                                                                            nrows, sp);
+        }
+      } else if (which == 5) {
+        // O57：PIPE=0 / LBN=32（99.8KB → 2 CTA/SM）。
+        if (sp <= 1)
+          lse_mma_kernel_bal<512, 0, true, 128, 32>
+              <<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1_5>>>(d_q, d_k, d_lse, maxlen, H, Hkv,
+                                                                  scale, d_cu);
+        else {
+          lse_mma_kernel_bal<512, 0, true, 128, 32>
+              <<<dim3((unsigned)lse_nblk, H, (unsigned)(B * sp)), THREADS, kLseSmemBal1_5>>>(
+                  d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part, sp);
+          const long long nrows = (long long)rows_q;
+          const int th = 256;
+          lse_split_merge_kernel<<<(unsigned)((nrows + th - 1) / th), th>>>(d_lse_part, d_lse,
+                                                                            nrows, sp);
+        }
+      } else if (which == 6) {
+        // O57：PIPE=1 / LBN=16（99.8KB → 2 CTA/SM，保留 cp.async 双缓冲）。
+        if (sp <= 1)
+          lse_mma_kernel_bal<512, 1, true, 128, 16>
+              <<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1_6>>>(d_q, d_k, d_lse, maxlen, H, Hkv,
+                                                                  scale, d_cu);
+        else {
+          lse_mma_kernel_bal<512, 1, true, 128, 16>
+              <<<dim3((unsigned)lse_nblk, H, (unsigned)(B * sp)), THREADS, kLseSmemBal1_6>>>(
+                  d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part, sp);
+          const long long nrows = (long long)rows_q;
+          const int th = 256;
+          lse_split_merge_kernel<<<(unsigned)((nrows + th - 1) / th), th>>>(d_lse_part, d_lse,
+                                                                            nrows, sp);
+        }
+      } else if (which == 7) {
+        // O57：PIPE=1 / LBN=32（只减半 tile，保留 cp.async；smem 133.1KB，1 CTA/SM）。
+        if (sp <= 1)
+          lse_mma_kernel_bal<512, 1, true, 128, 32>
+              <<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1_7>>>(d_q, d_k, d_lse, maxlen, H, Hkv,
+                                                                  scale, d_cu);
+        else {
+          lse_mma_kernel_bal<512, 1, true, 128, 32>
+              <<<dim3((unsigned)lse_nblk, H, (unsigned)(B * sp)), THREADS, kLseSmemBal1_7>>>(
+                  d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part, sp);
+          const long long nrows = (long long)rows_q;
+          const int th = 256;
+          lse_split_merge_kernel<<<(unsigned)((nrows + th - 1) / th), th>>>(d_lse_part, d_lse,
+                                                                            nrows, sp);
+        }
       } else if (sp <= 1) {
         lse_mma_kernel_bal<512, 1, true><<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1>>>(
             d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
@@ -841,6 +948,21 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
       printf(" split%d %.4f", sp, t);
     }
     printf(" ms\n");
+    // O57 A/B：4-warp/NTH=128/LBM=64 的几何消融——cfg4/7 同-1 CTA/SM（只丢 cp.async / 只减半
+    //   tile），cfg5/6 为 99.8KB 的 2 CTA/SM（PIPE=0/LBN=32 与 PIPE=1/LBN=16）。
+    auto sweep57 = [&](int which, const char* tag) {
+      printf("[O57 A/B] %s:", tag);
+      for (int sp : {1, 2, 4, 8, 16}) {
+        float t = 0.f;
+        bench_lse(which, sp, &t);
+        printf(" split%d %.4f", sp, t);
+      }
+      printf(" ms\n");
+    };
+    sweep57(4, "PIPE0/LBN64 (1 CTA)");
+    sweep57(7, "PIPE1/LBN32 (1 CTA)");
+    sweep57(5, "PIPE0/LBN32 (2 CTA)");
+    sweep57(6, "PIPE1/LBN16 (2 CTA)");
     run_all();  // 恢复 CLI 选中路径
   }
 
@@ -942,6 +1064,9 @@ int main(int argc, char** argv) {
   //   **实测为混合/负结果**（LSE-only：长 K 的 b3 1.09×、短 K 的 b1 0.80×；端到端 +0.8%/−9.7%）
   //   ⇒ **默认 0（opt-in）**，`--lse8w=1` 开启、`--lse8w=0` 关（同 binary A/B）。
   int lse8w = 0;
+  // O57：full MLA（D=512）varlen 的 LSE 是否用「2 CTA/SM」几何（4-warp/LBM=64/LBN=32，smem
+  //   99.8KB）。0=默认（PIPE=1/LBN=64）；5=PIPE0/LBN32；6=PIPE1/LBN16。`--lseocc=`。
+  int lseocc = 0;
   // O48（候选 ①）：D=128 mma 主 kernel 是否用 8-warp（256 线程 / 2×4 网格）几何。仅 mma 路径
   //   （wgmma2 已是 256 线程、结构不同）。O49：默认改为 **-1=自动**——判据是「4-warp 的每
   //   scheduler warp 数是否 <2」= 逻辑 grid ≤ SM 数（与 O43 的 split-K「填满一个波」同思路，
@@ -990,6 +1115,7 @@ int main(int argc, char** argv) {
     else if (a == "--mla8w") mla8w = 1;
     else if (a.rfind("--lse8w=", 0) == 0) lse8w = atoi(a.c_str() + 8);
     else if (a == "--lse8w") lse8w = 1;
+    else if (a.rfind("--lseocc=", 0) == 0) lseocc = atoi(a.c_str() + 9);
     else if (a.rfind("--d128w=", 0) == 0) d128w = atoi(a.c_str() + 8);
     else if (a == "--d128w") d128w = 1;
     else if (a.rfind("--wg4=", 0) == 0) wg4_sel = atoi(a.c_str() + 6);
@@ -1011,7 +1137,7 @@ int main(int argc, char** argv) {
 #ifdef FA_WGMMA
     if (varlen_tma < 0) varlen_tma = 0;   // 本轮判决：varlen TMA 中性/偏负 ⇒ opt-in
     return run_varlen(dir, causal, iters, varlen_tma, lse_split, wg2ksplit, mla8w, mlaksplit,
-                      lse8w);
+                      lse8w, lseocc);
 #else
     fprintf(stderr, "VARLEN 需要 -DFA_WGMMA（sm_90a）构建\n");
     return 1;
