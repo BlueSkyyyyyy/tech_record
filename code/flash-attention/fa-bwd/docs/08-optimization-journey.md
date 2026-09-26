@@ -253,8 +253,22 @@ smem 冲突 + 低 occ
     S1024H2），`long_scoreboard` 1.97→1.72、指令 −2.0%、`red` 扇区逐字节不变、数值 vs ref
     与历史同量级（差异仅 atomic 次序）；D=128 与 varlen 回归逐位不变。**教训：fp8 MLA 是
     mma+1 CTA/SM，K/V 载入的「零成本重叠」只值 ~2–4%；上面是 `short_scoreboard`/`wait` 的
-    mma 依赖延迟 + 1 CTA/SM，仍受 smem 硬约束（2 CTA/SM 不可达）。** 详见 `docs/03` §51、
-    `docs/04` §24。
+     mma 依赖延迟 + 1 CTA/SM，仍受 smem 硬约束（2 CTA/SM 不可达）。** 详见 `docs/03` §51、
+     `docs/04` §24。
+
+17. **O52（第九十九轮，正结果，varlen MLA 默认）**：**把 O46/O47/O51 的 MLA 优化搬进 varlen**。
+     O46（8-warp）与 O47（fp8 8-warp）/O51（fp8 K/V 回填）此前只落在**定长** `D=512` 路径，
+     `run_varlen` 的 MLA 主 kernel 仍是 4-warp/2×2。O52 只改 host（`run_varlen` 加 `mla8w`/
+     `mla_kvp`，`D==512` 分支三档选择 4w / 8w / 8w+kvpipe，主函数透传 `--mla8w=`/`--mlakvp=`，
+     末尾加 `[O52 A/B]`），**device 一行未改**（早由 O46/O47/O51 参数化）⇒ 单/两文件 device
+     仍逐字一致。**main 1.5–1.9×（fp8 b1_t512 1.78× / b3_t1792 1.86×；fp16/bf16 1.5–1.6×）；
+     端到端 fp8 1.86×/1.97×、fp16 1.56×/1.44×、bf16 1.55×/1.43×**；ncu（fp8 b1_t512）
+     Duration 116.6→59.5µs、warps_active 6.20%→12.39%、Ipc 0.11→0.23、`red` 扇区**逐字节不变**；
+     数值 vs ref 同量级，`max_abs(8w-vs-4w)` dq~1e-7/dk,dv~1e-6（仅 atomic 次序），D=128 varlen
+     回归逐位不变。**教训：一个只在定长路径落地的优化（8-warp / cp.async 回填）要显式检查
+     varlen 分支是否也吃到——O46/O47/O51 连续三轮都漏了 `run_varlen`。** 附带发现 fp8/fp16/bf16
+     的 **非 causal（full）MLA varlen 在 HEAD 已是偏差**（`git stash` 回 O51 提交复现一致，
+     与本改动无关，记 backlog）。详见 `docs/03` §52、`docs/01` §14ad、`docs/01b` §6al。
 
 ---
 

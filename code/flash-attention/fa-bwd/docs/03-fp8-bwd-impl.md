@@ -4707,3 +4707,92 @@ ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu ... --mlak
 
 原始输出：`src/fp8/fa_bwd_fp8_main_o51_kvp_mla.out.txt`、`..._o51_kvp_reg.out.txt`、
 `..._o51_ncu_mla.out.txt`、`..._mma_onefile_o51_mla_s1024h2.out.txt`。
+
+## 52. O52：把 MLA 的 8-warp + K/V 回填流水推广到 **fp8 varlen**（第九十九轮）—— **正结果，varlen MLA 默认**
+
+### 52.1 动机（O47/O51 只在定长路径生效）
+
+O47（fp8 MLA 主 kernel 的 256 线程 / 8-warp 几何）与 O51（K/V `cp.async` 回填流水）都只落在
+**定长** `D=512` 路径。`run_varlen` 里的 MLA 主 kernel 仍是历史几何
+`launch_bwd_main<512,64,32,false,false,true,true>`（默认 `NTH=128,NWAR=2`，即 4-warp/2×2），
+**既没有 8-warp、也没有 K/V 回填流水**。于是 varlen MLA 的 main 仍停在「1 CTA/SM × 4 warp =
+每 scheduler 1 warp」的低并行度档（O45/O46/O47 一致认定的墙）。本轮把 O47/O51 原样搬过来。
+
+### 52.2 改动（host-only；单/两文件 device 逐字不变）
+
+**不碰 device 代码**（`fp8_mma_body` / `fa_bwd_fp8_mma_kernel` 早已由 O47/O51 参数化）：
+
+* `run_varlen` 增加 `mla8w`/`mla_kvp` 入参（`-1`=自动，默认行为与定长一致：**8-warp + kvpipe**）；
+  `D==512` 分支三档选择：`launch_bwd_main_kvpipe<512,64,32,false,true,true,true,256,4>`（默认）/
+  `launch_bwd_main<512,64,32,false,false,true,true,true,256,4>`（8-warp，同步 K/V）/
+  `launch_bwd_main<512,64,32,false,false,true,true>`（历史 4-warp，`--mla8w=0 --mlakvp=0`）。
+* `main` 把已解析的 `--mla8w=`/`--mlakvp=` 透传给 `run_varlen`；`run_varlen` 末尾加
+  `[O52 A/B]` 段（同 binary 对 4w / 8w / 8w+kvpipe 三种主 kernel 计时 + 逐元素比对）。
+* 单文件版同步改 host（`sync_onefile_device.py` 核对 device 仍 `identical: True`，device 未动）。
+
+### 52.3 数值（ours vs fp32 ref，fp8 causal varlen；max_abs dq/dk/dv）
+
+与历史（§39）**同量级/逐值一致**；8-warp 相对 4-warp 只改 dK/dV 的跨 CTA `atomicAdd` 次序
+（`max_abs(8w-vs-4w)` dq=1.2e-7、dk/dv ≤ 1e-6），kvpipe 相对 8-warp 同量级：
+
+| case (D=Dv=512) | dq | dk | dv | main 4w→8w | 8w→8w+kvpipe |
+|---|---|---|---|---|---|
+| b1_t512 causal | 1.613e-1 | 2.238e-1 | 3.864e-1 | 0.0899→0.0516ms (**1.74×**) | 0.0516→0.0504ms (1.02×) |
+| b3_t1792 causal | 3.404e-1 | 3.436e-1 | 3.508e-1 | 0.3520→0.2002ms (**1.76×**) | 0.2002→0.1890ms (1.06×) |
+| b1_t512 full | N/A* | N/A* | N/A* | 0.0890→0.0512ms (1.74×) | 0.0512→0.0498ms (1.03×) |
+
+*（full 行数值 `N/A`：本轮复测发现一个**与本改动无关、HEAD 已存在**的偏差，见 §52.6；其 A/B 计时
+仍有效，4w/8w 逐元素一致到 1e-7。）**单文件与两文件逐指标一致**。D=128 varlen（MHA/GQA）回归**逐位不变**
+（b1_t512_h16 causal fp8 `2.280/3.108/3.422e-1`），定长回归不动（device 未改）。
+
+### 52.4 性能（event，`Σ_b 4HL²D` 口径，同 session）
+
+**端到端 total**（quant+LSE+delta+main+convert）：
+
+| case | O52 前（§39，4-warp） | O52（8-warp+kvpipe） | 加速 |
+|---|---|---|---|
+| b1_t512 causal | 0.1866 ms | **0.1006 ms** | 1.86× |
+| b3_t1792 causal | 0.5875 ms | **0.2987 ms** | 1.97× |
+| b1_t512 causal（TF） | 5.75 TF | **10.68 TF** | — |
+| b3_t1792 causal（TF） | 9.60 TF | **18.87 TF** | — |
+
+main-only：b1_t512 0.0899→0.0504ms、b3_t1792 0.3520→0.1890ms（分别 **1.78×/1.86×**，含 kvpipe）。
+MLA 反向 FA2/FA3/TE **均不支持 head_dim=512** ⇒ 无外部基线，只有 ours 数字（口径 `4BS²HD`；
+按 harness 定长口径 `4BS²H(D+Dv)` 需 ×2）。
+
+### 52.5 ncu（`fa_bwd_fp8_mma_kernel`，b1_t512 causal varlen，`-c 1`，同 binary A/B）
+
+| 指标 | 4-warp | 8-warp+kvpipe（默认） |
+|---|---|---|
+| Duration | 116.6 µs | **59.5 µs** |
+| `sm__warps_active` | 6.20% | **12.39%** |
+| Issued Ipc Active | 0.11 | **0.23** |
+| stall `long / short / wait` | 3.13 / 0.67 / 1.51 | **2.23 / 1.30 / 1.19** |
+| `lts__t_sectors_op_red` | 1,769,472 | **1,769,472（逐字节不变）** |
+| DRAM / L1TEX / L2 / tensor | 2.21 / 9.01 / 17.4 / 1.90% | 4.27 / 18.98 / 32.1 / 3.74% |
+
+**结论**：与 O47/O51 同机制——1 CTA/SM 下把每 scheduler 的 warp 数 1→2，`red` 扇区与原同步
+路径**逐字节相同**，提升完全来自「并行度/延迟隐藏」。墙仍是 `long_scoreboard + short + wait`
+的 mma/全局依赖 + 1 CTA/SM（smem 硬约束，2 CTA/SM 不可达）。
+
+### 52.6 附带发现：fp8 varlen MLA **非 causal（full）** 在 HEAD 已是偏差（预存在，非本改动引入）
+
+复测 `varlen_*_d512_full`（causal=0）时，ours 的 dq/dk/dv `max_abs≈7.3/7.0/4.6`（ours_amax 7.3，
+ref_amax 0.57），而 §39 第 80 轮记录的是通过值（5.3e-2/5.2e-2/4.2e-2）。
+**用 `--mla8w=0`（退到历史 4-warp）复跑得到完全相同的错误值**，且用 `git stash` 回到 O51 提交
+（`056b316`）重新编译也**一模一样** ⇒ **是本改动之前就存在的回归**（第 80 轮之后某轮引入，
+嫌疑在 varlen 非 causal 的 LSE 路径或全序列 `ncols`/`ksplit` 组合）。fp16/bf16 的 full MLA
+varlen 同样偏差（同 HEAD 复现）。本轮**未修**（超出 O52 范围），已记入 ROADMAP backlog。
+
+### 52.7 复现 / 原始输出
+
+```bash
+FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp8 --varlen --iters=30
+# A/B（同 binary 退回 4-warp / 8-warp 同步）
+... scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --varlen --mla8w=0 --mlakvp=0
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_o52_varlen.out.txt`、`..._main_o52_ncu_varlen*out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_o52_varlen.out.txt`。

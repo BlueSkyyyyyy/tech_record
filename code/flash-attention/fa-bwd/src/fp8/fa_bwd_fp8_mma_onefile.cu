@@ -3527,7 +3527,8 @@ static void launch_lse_bal_tma_split(dim3 lg, const CUtensorMap& qmap, const CUt
 // `S` 参数传各序列最大长度 maxlen；每个 (b,h,mblk) 只处理自己序列内的 tile。
 // ref 输出 `ref_dq/dk/dv.npy` 也是 packed 布局。FA/TE 不支持变长（本机版本），只对 fp32 ref。
 // 只做 causal（非 causal 留后续）；非 TMA 路径（LSE 用 wgmma，主 kernel Q/dO 用 cp.async）。
-static int run_varlen(const std::string& dir, bool causal, int iters, int lse_split = 0) {
+static int run_varlen(const std::string& dir, bool causal, int iters, int lse_split = 0,
+                      int mla8w = -1, int mla_kvp = -1) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -3688,9 +3689,21 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
     dim3 mg((maxlen + BM - 1) / BM * ksplit, H, B);
     if (D == 512) {
       // MLA：非 wgmma / 非 regdq（与定长 D=512 路径一致）。
-      launch_bwd_main<512, 64, 32, false, false, true>(
-          mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
-          d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
+      // O52：把定长 O47（8-warp/256 线程）+ O51（K/V cp.async 回填流水）搬进 varlen MLA。
+      const bool w8 = (mla8w != 0);
+      const bool kvp = w8 && (mla_kvp != 0);
+      if (kvp)
+        launch_bwd_main_kvpipe<512, 64, 32, false, true, 256, 4>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
+            d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
+      else if (w8)
+        launch_bwd_main<512, 64, 32, false, false, true, 256, 4>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
+            d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
+      else
+        launch_bwd_main<512, 64, 32, false, false, true>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
+            d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
     } else if (use_regdq)
       launch_bwd_main<128, 64, 32, true, true, true>(
           mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
@@ -3721,6 +3734,70 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
          flops / (ms * 1e-3) / 1e12);
   printf("grid main = %d x %d x %d (ksplit=%d) | use_regdq=%d | T=%d\n", 
          (maxlen + BM - 1) / BM * ksplit, H, B, ksplit, (int)use_regdq, T);
+
+  // ---- O52 A/B（D=512/MLA/varlen）：主 kernel 4-warp vs 8-warp(+kvpipe) 同 session 计时 ----
+  if (D == 512) {
+    dim3 mgab((maxlen + BM - 1) / BM * ksplit, H, B);
+    auto go52 = [&](int mode) {
+      if (mode == 2)
+        launch_bwd_main_kvpipe<512, 64, 32, false, true, 256, 4>(
+            mgab, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
+            d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
+      else if (mode == 1)
+        launch_bwd_main<512, 64, 32, false, false, true, 256, 4>(
+            mgab, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
+            d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
+      else
+        launch_bwd_main<512, 64, 32, false, false, true>(
+            mgab, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
+            d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu);
+    };
+    auto zero52 = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+    };
+    cudaEvent_t eva, evb;
+    CUDA_CHECK(cudaEventCreate(&eva));
+    CUDA_CHECK(cudaEventCreate(&evb));
+    auto bench52 = [&](int mode, float* out) {
+      zero52();
+      go52(mode);
+      CUDA_CHECK(cudaEventRecord(eva));
+      for (int i = 0; i < iters; ++i) go52(mode);
+      CUDA_CHECK(cudaEventRecord(evb));
+      CUDA_CHECK(cudaEventSynchronize(evb));
+      CUDA_CHECK(cudaEventElapsedTime(out, eva, evb));
+      *out /= iters;
+    };
+    float m4 = 0.f, m8 = 0.f, mkv = 0.f;
+    bench52(0, &m4);
+    bench52(1, &m8);
+    bench52(2, &mkv);
+    std::vector<float> a4(nq), b4(nkv), c4(nkv), a8(nq), b8(nkv), c8(nkv), ak(nq), bk(nkv), ck(nkv);
+    auto grab52 = [&](int mode, std::vector<float>& dq, std::vector<float>& dk,
+                      std::vector<float>& dv) {
+      zero52();
+      go52(mode);
+      CUDA_CHECK(cudaMemcpy(dq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+    };
+    grab52(0, a4, b4, c4);
+    grab52(1, a8, b8, c8);
+    grab52(2, ak, bk, ck);
+    auto maxd = [](const std::vector<float>& x, const std::vector<float>& y) {
+      double e = 0.0;
+      for (size_t i = 0; i < x.size(); ++i) e = std::max(e, (double)fabs((double)x[i] - (double)y[i]));
+      return e;
+    };
+    printf("[O52 A/B] varlen MLA main-only 4w %.4f ms | 8w %.4f ms (%.3fx) | 8w+kvpipe %.4f ms "
+           "(%.3fx) | max_abs(8w-vs-4w) dq=%.3e dk=%.3e dv=%.3e | max_abs(kvp-vs-8w) dq=%.3e "
+           "dk=%.3e dv=%.3e\n",
+           m4, m8, m4 / m8, mkv, m4 / mkv, maxd(a4, a8), maxd(b4, b8), maxd(c4, c8),
+           maxd(a8, ak), maxd(b8, bk), maxd(c8, ck));
+    run_all();  // 恢复 CLI 选中路径
+  }
 
   std::vector<float> h_dq(nq), h_dk(nkv), h_dv(nkv);
   CUDA_CHECK(cudaMemcpy(h_dq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
@@ -3827,7 +3904,7 @@ int main(int argc, char** argv) {
     else if (!a.empty() && a[0] != '-') dir = a;
   }
 
-  if (varlen) return run_varlen(dir, causal, iters, lse_split);
+  if (varlen) return run_varlen(dir, causal, iters, lse_split, mla8w_opt, mla_kvp_opt);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");

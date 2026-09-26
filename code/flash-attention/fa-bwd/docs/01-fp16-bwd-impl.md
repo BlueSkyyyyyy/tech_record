@@ -3682,3 +3682,50 @@ ARCH="" NVCC_FLAGS="$F -DFA_WS1=0" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.
 原始输出：`src/fp16/fa_bwd_fp16_mma_o50_*.out.txt`（6 shape 对拍+计时）、
 `..._mma_onefile_o50_*.out.txt`（单文件）、`..._o50_mlaksplit_sweep.out.txt`、
 `..._o50_ws_ab.out.txt`、`..._o50_ncu_wg2_s512.out.txt`、`src/fa_bwd_o50_fa3_te_fp16.out.txt`。
+
+## 14ad. O52-fp16：把 MLA 的 8-warp 几何推广到 **fp16 varlen**（第九十九轮）—— **正结果，varlen MLA 默认**
+
+### 14ad.1 动机 / 改动（host-only；device 逐字不变）
+
+O46（fp16/bf16 MLA 主 kernel 的 256 线程 / 8-warp 几何）只落在**定长** `D=512` 路径；
+`run_varlen` 的 MLA 主 kernel 仍是历史 `launch_bwd_mma<512,32,32,1,false,true>`（默认
+`NTH=128,NWAR=2`）。本轮把 O46 的几何搬进 varlen：`run_varlen` 加 `mla8w` 入参，`D==512`
+分支在 8-warp `<512,32,32,1,false,true,256,4>` 与历史 4-warp 之间按 `--mla8w` 选择；`main`
+把已解析的 `--mla8w=` 透传；`run_varlen` 末尾加 `[O52 A/B]` 段（同 binary 计时 + 逐元素比对）。
+**device 代码一行未改**（`fa_bwd_fp16_mma_kernel` 早由 O46 参数化），单/两文件 host 同步、
+device 仍 `identical: True`。
+
+### 14ad.2 数值（ours vs fp32 ref，fp16 causal varlen；max_abs dq/dk/dv）
+
+与 §16.9 历史**同量级/逐值一致**；8-warp 只改 dK/dV 的 atomic 次序（`max_abs(8w-vs-4w)`
+dq=0、dk/dv ≤1e-6）：
+
+| case (D=Dv=512) | dq | dk | dv | main 4w→8w |
+|---|---|---|---|---|
+| b1_t512 causal | 1.303e-3 | 1.537e-3 | 1.557e-3 | 0.3885→0.2379ms (**1.63×**) |
+| b3_t1792 causal | 2.415e-3 | 1.834e-3 | 1.856e-3 | 0.8495→0.5586ms (**1.52×**) |
+
+**单文件与两文件逐指标一致**。D=128 varlen 回归**逐位不变**（只改 `D==512` 分支）。
+（非 causal full 的 MLA varlen 在 HEAD 已是偏差，见 `docs/03` §52.6，与本改动无关。）
+
+### 14ad.3 性能（event，`Σ_b 4HL²D` 口径，同 session）
+
+| case | O52 前（§16.9，4-warp） | O52（8-warp） | 加速 |
+|---|---|---|---|
+| b1_t512 causal total | 0.4264 ms / 2.52 TF | **0.2740 ms / 3.92 TF** | 1.56× |
+| b3_t1792 causal total | 0.9382 ms / 6.01 TF | **0.6523 ms / 8.64 TF** | 1.44× |
+
+MLA 反向 FA2/FA3/TE 均不支持 head_dim=512 ⇒ 无外部基线。墙仍是 1 CTA/SM（smem 硬约束）+
+smem→mma 依赖；8-warp 把每 scheduler 的 warp 数 1→2（与 O46 同机制）。
+
+### 14ad.4 复现 / 原始输出
+
+```bash
+FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp16 --varlen --iters=30
+... --mla8w=0    # A/B 退回 4-warp
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_mma_main_o52_varlen.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o52_varlen.out.txt`。

@@ -1,0 +1,32 @@
+=== ncu varlen MLA b1_t512 mode='--mla8w=0 --mlakvp=0' ===
+    Metric Name                                                               Metric Unit Metric Value
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %         2.21
+    gpu__time_duration.sum                                                             us       116.61
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %         9.01
+    lts__t_sectors_op_red.sum                                                      sector      1769472
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        17.38
+    sm__ctas_active.avg.pct_of_peak_sustained_active                                    %         3.13
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed             %         1.90
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %         6.81
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %         6.20
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         3.13
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.67
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.51
+    smsp__inst_executed.avg.per_cycle_active                                   inst/cycle         0.11
+    smsp__inst_executed.sum                                                          inst      7926752
+=== ncu varlen MLA b1_t512 mode='' ===
+    Metric Name                                                               Metric Unit Metric Value
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %         4.27
+    gpu__time_duration.sum                                                             us        59.49
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        18.98
+    lts__t_sectors_op_red.sum                                                      sector      1769472
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        32.13
+    sm__ctas_active.avg.pct_of_peak_sustained_active                                    %         3.13
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed             %         3.74
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        14.20
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        12.39
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         2.23
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         1.30
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.19
+    smsp__inst_executed.avg.per_cycle_active                                   inst/cycle         0.23
+    smsp__inst_executed.sum                                                          inst      8380000

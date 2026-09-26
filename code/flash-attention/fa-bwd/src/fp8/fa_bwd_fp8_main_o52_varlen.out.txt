@@ -1,0 +1,59 @@
+=== varlen_b1_t512_h2_d512_causal_fp8 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp8
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 512
+O40: varlen lse k-split = 8 (base=8)
+[timing] VARLEN total 0.1006 ms  10.68 TFLOPS (sum_b 4HL^2D)
+grid main = 128 x 2 x 1 (nocompact, ksplit=16, total_mt=8) | use_regdq=0 | T=512
+[O52 A/B] varlen MLA main-only 4w 0.0899 ms | 8w 0.0516 ms (1.742x) | 8w+kvpipe 0.0504 ms (1.782x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=2.384e-07 dv=4.768e-07 | max_abs(kvp-vs-8w) dq=1.192e-07 dk=2.384e-07 dv=4.768e-07
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.613e-01  max_rel=8.119e+01  (ours_amax=1.811e+00 ref_amax=1.786e+00 @28675)
+  dk  vs ref: max_abs=2.238e-01  max_rel=1.136e+02  (ours_amax=2.700e+00 ref_amax=2.650e+00 @1228)
+  dv  vs ref: max_abs=3.864e-01  max_rel=7.430e+01  (ours_amax=4.658e+00 ref_amax=4.646e+00 @241)
+=== varlen_b3_t1792_h2_d512_causal_fp8 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp8
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 256 768 1792
+O40: varlen lse k-split = 4 (base=48)
+[timing] VARLEN total 0.2987 ms  18.87 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 2 x 3 (nocompact, ksplit=4, total_mt=28) | use_regdq=0 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.3520 ms | 8w 0.2002 ms (1.759x) | 8w+kvpipe 0.1890 ms (1.862x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=7.153e-07 | max_abs(kvp-vs-8w) dq=1.192e-07 dk=4.768e-07 dv=7.153e-07
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.404e-01  max_rel=3.292e+02  (ours_amax=3.980e+00 ref_amax=3.983e+00 @1230)
+  dk  vs ref: max_abs=3.436e-01  max_rel=9.549e+01  (ours_amax=3.468e+00 ref_amax=3.354e+00 @787007)
+  dv  vs ref: max_abs=3.508e-01  max_rel=1.678e+02  (ours_amax=5.212e+00 ref_amax=5.148e+00 @262845)
+=== varlen_b1_t512_h2_d512_full_fp8 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_full_fp8
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 512
+O40: varlen lse k-split = 8 (base=8)
+[timing] VARLEN total 0.0977 ms  10.99 TFLOPS (sum_b 4HL^2D)
+grid main = 128 x 2 x 1 (nocompact, ksplit=16, total_mt=8) | use_regdq=0 | T=512
+[O52 A/B] varlen MLA main-only 4w 0.0890 ms | 8w 0.0512 ms (1.740x) | 8w+kvpipe 0.0498 ms (1.787x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07 | max_abs(kvp-vs-8w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=7.270e+00  max_rel=7.270e+03  (ours_amax=7.270e+00 ref_amax=5.663e-01 @981)
+  dk  vs ref: max_abs=6.951e+00  max_rel=3.492e+03  (ours_amax=7.084e+00 ref_amax=6.290e-01 @963)
+  dv  vs ref: max_abs=4.615e+00  max_rel=2.739e+03  (ours_amax=4.658e+00 ref_amax=4.881e-01 @495)
+=== varlen_b3_t1792_h2_d512_full_fp8 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_full_fp8
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 256 768 1792
+O40: varlen lse k-split = 4 (base=48)
+[timing] VARLEN total 0.2959 ms  19.05 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 2 x 3 (nocompact, ksplit=4, total_mt=28) | use_regdq=0 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.3480 ms | 8w 0.1983 ms (1.755x) | 8w+kvpipe 0.1889 ms (1.842x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=9.537e-07 dv=7.153e-07 | max_abs(kvp-vs-8w) dq=1.192e-07 dk=9.537e-07 dv=7.153e-07
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=4.643e+00  max_rel=2.982e+03  (ours_amax=4.700e+00 ref_amax=1.267e+00 @1258)
+  dk  vs ref: max_abs=5.910e+00  max_rel=3.903e+03  (ours_amax=6.058e+00 ref_amax=1.108e+00 @1041)
+  dv  vs ref: max_abs=5.070e+00  max_rel=3.131e+03  (ours_amax=5.212e+00 ref_amax=6.485e-01 @786971)
+=== varlen_b1_t512_h16_d128_causal_fp8 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h16_d128_causal_fp8
+VARLEN: B=1 T=512 maxlen=512 H=16 Hkv=16 D=128 causal=1
+cu_seqlens = 0 512
+O40: varlen lse k-split = 8 (base=64)
+[timing] VARLEN total 0.1112 ms  19.32 TFLOPS (sum_b 4HL^2D)
+grid main = 128 x 16 x 1 (nocompact, ksplit=16, total_mt=8) | use_regdq=0 | T=512
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.280e-01  max_rel=2.191e+02  (ours_amax=2.763e+00 ref_amax=2.847e+00 @5250)
+  dk  vs ref: max_abs=3.108e-01  max_rel=8.968e+01  (ours_amax=3.927e+00 ref_amax=3.976e+00 @1312)
+  dv  vs ref: max_abs=3.422e-01  max_rel=9.400e+01  (ours_amax=5.141e+00 ref_amax=5.194e+00 @907)

@@ -1,0 +1,51 @@
+=== ncu varlen MLA b1_t512 mode='--mla8w=0 --mlakvp=0' ===
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 11 passes
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp8
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+grid main = 128 x 2 x 1 (nocompact, ksplit=16, total_mt=8) | use_regdq=0 | T=512
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %         2.21
+    gpu__time_duration.sum                                                             us       116.70
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %         9.02
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        17.46
+    sm__ctas_active.avg.pct_of_peak_sustained_active                                    %         3.13
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed             %         1.90
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %         6.82
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %         6.31
+    ------------------------------------------------------------------------- ----------- ------------
+=== ncu varlen MLA b1_t512 mode='--mla8w=1 --mlakvp=0' ===
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 11 passes
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp8
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+grid main = 128 x 2 x 1 (nocompact, ksplit=16, total_mt=8) | use_regdq=0 | T=512
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %         4.10
+    gpu__time_duration.sum                                                             us        61.95
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        18.10
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        30.80
+    sm__ctas_active.avg.pct_of_peak_sustained_active                                    %         3.13
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed             %         3.63
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        14.02
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        12.49
+    ------------------------------------------------------------------------- ----------- ------------
+=== ncu varlen MLA b1_t512 mode='' ===
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 11 passes
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp8
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+grid main = 128 x 2 x 1 (nocompact, ksplit=16, total_mt=8) | use_regdq=0 | T=512
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %         4.24
+    gpu__time_duration.sum                                                             us        59.94
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        19.12
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        31.95
+    sm__ctas_active.avg.pct_of_peak_sustained_active                                    %         3.13
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed             %         3.74
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        14.19
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        12.51
+    ------------------------------------------------------------------------- ----------- ------------

@@ -1,0 +1,24 @@
+=== varlen_b1_t512_h2_d512_causal_fp8 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp8
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 512
+O40: varlen lse k-split = 8 (base=8)
+[timing] VARLEN total 0.0990 ms  10.84 TFLOPS (sum_b 4HL^2D)
+grid main = 128 x 2 x 1 (ksplit=16) | use_regdq=0 | T=512
+[O52 A/B] varlen MLA main-only 4w 0.0888 ms | 8w 0.0511 ms (1.736x) | 8w+kvpipe 0.0501 ms (1.774x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=2.384e-07 dv=4.768e-07 | max_abs(kvp-vs-8w) dq=1.192e-07 dk=2.384e-07 dv=4.768e-07
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.613e-01  max_rel=8.119e+01  (ours_amax=1.811e+00 ref_amax=1.786e+00 @28675)
+  dk  vs ref: max_abs=2.238e-01  max_rel=1.136e+02  (ours_amax=2.700e+00 ref_amax=2.650e+00 @1228)
+  dv  vs ref: max_abs=3.864e-01  max_rel=7.430e+01  (ours_amax=4.658e+00 ref_amax=4.646e+00 @241)
+=== varlen_b3_t1792_h2_d512_causal_fp8 ===
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp8
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 256 768 1792
+O40: varlen lse k-split = 4 (base=48)
+[timing] VARLEN total 0.2969 ms  18.99 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 2 x 3 (ksplit=4) | use_regdq=0 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.3495 ms | 8w 0.1986 ms (1.760x) | 8w+kvpipe 0.1891 ms (1.849x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07 | max_abs(kvp-vs-8w) dq=1.192e-07 dk=2.384e-07 dv=4.768e-07
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.404e-01  max_rel=3.292e+02  (ours_amax=3.980e+00 ref_amax=3.983e+00 @1230)
+  dk  vs ref: max_abs=3.436e-01  max_rel=9.549e+01  (ours_amax=3.468e+00 ref_amax=3.354e+00 @787007)
+  dv  vs ref: max_abs=3.508e-01  max_rel=1.678e+02  (ours_amax=5.212e+00 ref_amax=5.148e+00 @262845)
