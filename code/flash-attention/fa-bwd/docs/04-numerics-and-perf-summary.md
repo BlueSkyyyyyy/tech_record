@@ -2250,3 +2250,66 @@ bf16 与 fp16 逐项几乎相同（见原始输出）。**判读**：
 > **下一步候选**：① 把 FA3（含 varlen）接入 `harness/fa_vs_te_bwd_only.py` 的纯反向基线；
 > ② 继续 O59 候选（MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`）；
 > ③ 让 `--doc-table` 直接改写 docs/04 的对应小节（含自动 diff 校验）。
+
+## 37. P3-4b：`fa_vs_te_bwd_only.py` 补齐 varlen 纯反向基线（第 112 轮，harness + 基线）
+
+**动机**：落实 §36 的候选 ①。`harness/fa_vs_te_bwd_only.py` 是用户指定的**纯反向口径**基准
+（forward 建图一次放在计时区之外，只对 `autograd.grad` 计时），此前只有定长 `SHAPES`；
+而 `harness/fa_bwd_bench.py` 的 varlen `bench` 把 `fa3_bwd_varlen()`（**含 forward**）
+整段放在 `device_time` 里，所以 §36.2 里 FA3 的 varlen 数字其实混入了前向。
+
+### 37.1 变更（纯 harness，device 一行未改）
+
+`harness/fa_vs_te_bwd_only.py` 新增：
+
+- `VARLEN_SHAPES`（5 个：MHA 不齐 / MHA 等长 / GQA q32-kv8 / 强倾斜 / MHA 等长 full）；
+- `bench_fa_varlen`（FA2.7.4 `flash_attn_varlen_func` 反向）与 `bench_fa3_varlen`
+  （FA3.0.0 变长），**forward 在计时区外建图**，只对 `autograd.grad` 计时；
+- `ref_varlen`（逐序列切片 fp32 autograd）与 `--verify`：对一只小 shape 打印两列 vs ref 的
+  `max_abs`，证明新列可信；
+- main 末尾固定输出「定长表 + varlen 表」。**TE2.14 变长反向在本容器报错/非法访存**
+  （`Ragged QKV input requires padding or padding_causal mask` → cuDNN err 700），故 varlen
+  表只有 FA2/FA3 两个有效列、TE 列标 `NA`。
+
+**重要更正（推翻旧记）**：ROADMAP 长期记「本机 FA2.7.4/TE2.14 反向不支持 varlen」——
+本轮实测 **FA2.7.4 的 `flash_attn_varlen_func` 反向是可用的**（causal/full、MHA/GQA 均可
+autograd），且数值与 FA3 逐点一致（§37.2）。不支持的是 **TE2.14** 的 ragged 反向。
+
+### 37.2 数值校验（`--verify`，causal，lengths=[128,256,64] H4 D128）
+
+| dtype | FA2 dq/dk/dv (max_abs vs fp32 ref) | FA3 dq/dk/dv |
+|---|---|---|
+| fp16 | 1.56e-03 / 1.38e-03 / 1.78e-03 | 1.56e-03 / 1.38e-03 / 1.78e-03 |
+| bf16 | 9.41e-03 / 1.13e-02 / 1.82e-02 | 9.41e-03 / 1.13e-02 / 1.82e-02 |
+
+两列逐位相同、均在 dtype 噪声内 ⇒ 新增的 FA2/FA3 varlen 列可信。
+
+### 37.3 性能（纯反向 device time；`4·H·D·Σ_b L_b²`；原始输出
+`src/fa_bwd_p112_varlen_fa2_fa3_te.out.txt`）
+
+fp16（bf16 逐项几乎相同）：
+
+| varlen case | FA2.7.4 ms/TF | FA3 ms/TF | FA3/FA2 |
+|---|---|---|---|
+| causal [512,1024,2048,256] H16 kv16 | 0.3356 / 136 | **0.1625 / 281** | 2.07× |
+| causal [1024]×4 H16 kv16 | 0.2516 / 137 | **0.1480 / 232** | 1.70× |
+| causal [128..2048] H32 kv8 | 0.6321 / 145 | **0.3750 / 244** | 1.69× |
+| causal [2048..8] H16 kv16 tilt | 0.3009 / 122 | **0.1412 / 260** | 2.13× |
+| full [1024]×4 H16 kv16 | 0.3443 / 100 | **0.2002 / 172** | 1.72× |
+
+**判读**：
+
+- **FA3 变长反向稳定快 FA2 1.69–2.13×**（TMA+wgmma+更深流水），与定长趋势一致。
+- **纯反向口径下 FA3 比 §36.2 快约 1.6–1.7×**（如 [1024]×4 causal：`0.1480` vs 之前 `0.2409`ms）
+  ——差额正是被 §36.2 误计入的**前向**。因此用 §36.2 的 FA3 数字算 ours/FA3 会**偏乐观**；
+  按本表纯反向后重算，ours（两文件端到端 event 时间，沿用 §36.2）对 FA3 为
+  [1024]×4 causal `0.4502/0.1480=`**3.04×**、full **4.52×**、不齐 causal **4.77×**，
+  即 §36.2 的「1.87–3.5×」应更正为 **3.0–4.8×**。**教训：`device_time(fn)` 里若 `fn` 同时
+  包含 forward+backward，得到的就不是纯反向——同一口径的两条曲线不能省掉建图位置这个细节。**
+- TE2.14 的变长反向不可用（本容器），故 varlen 仍无 TE 列；fp8 与 MLA（D=512）FA3 不支持
+  （§36），最重点的 fp8 口径仍以 ours/TE/ref 三者为准。
+
+> 本轮为 **harness + 基线增量**，未改 device 代码；我们 kernel 的 bound 结论不变。
+> **下一步候选**：① ~~把 FA3（含 varlen）接入 `fa_vs_te_bwd_only.py`~~ **本轮已完成**；
+> ② 用同一纯反向口径重测 `fa_bwd_bench.py` 里定长/变长的 FA/TE 列（现 `bench_case*` 也含 forward），
+> 让全站基线统一；③ 继续 O59 候选（MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`）。
