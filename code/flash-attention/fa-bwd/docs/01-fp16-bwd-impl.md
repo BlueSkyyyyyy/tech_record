@@ -4026,6 +4026,9 @@ bf16 逐项一致（b3 4w 0.0407 → 8w 0.0373，1.09×；端到端 0.4657 ms）
 `short_scoreboard`（smem→mma 的 `ldmatrix` 依赖）从 0.90 涨到 2.59 —— 短序列时这个开销压过
 「多一个 warp/scheduler」的收益，只有 K 足够长（tile 多）时才回本。
 
+**未扩展 fp8**：fp8 的 full MLA varlen LSE 同样是 `lse_mma_kernel_bal<512,1,true>`（q8/qs 版），
+本可同构参数化；但因 fp16/bf16 已判定该杠杆为混合/负，**刻意不扩到 fp8**（避免无收益的移植）。
+
 **结论**：O46/O47 的「8-warp」杠杆**不能无条件搬到 LSE**——主 kernel 的 8-warp 省的是
 wgmma/ldmatrix 的访存并行度，而 LSE 已经偏 compute/softmax epilogue，且 LBN 减半会引入额外
 barrier。故 **默认 `--lse8w=0`（opt-in）**，代码与 A/B 保留，待更多 shape 校准「长度阈值」后再定。

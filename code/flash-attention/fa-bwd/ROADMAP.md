@@ -3774,6 +3774,8 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   - 原始输出 `src/fp16/fa_bwd_fp16_o56_{varlen_full_b3,varlen_full_b3_onefile,ab_e2e,ncu_lse}.out.txt`、
     `src/bf16/fa_bwd_bf16_o56_{varlen_full_b3,varlen_full_b3_onefile}.out.txt`；文档 `docs/01` §15c、
     `docs/01b` §6ap、`docs/04` §28、`docs/08` §5.21。
+  - **未扩展 fp8**：fp8 full MLA varlen LSE 同为 `lse_mma_kernel_bal<512,1,true>`（q8/qs 版），
+    本可同构参数化；因 fp16/bf16 已判该杠杆为混合/负，**刻意不扩到 fp8**。
 
 ## 灵感 / backlog
 
