@@ -1282,6 +1282,27 @@ ncu（fp16 b3 causal）：main Duration 784µs / **1 CTA/SM、occ 6.25%** / No E
 DRAM 1.6% / Compute 4.4% / L1TEX 38.7% ⇒ **低 occupancy + smem→mma 依赖**；lse `Waves 0.36`
 （grid 48<132 SM）⇒ **并行度 bound**。详见 `docs/01` §16.9、`docs/01b` §6ab。
 
+### 11.1 O52（第 99 轮）：varlen MLA 补上 8-warp（+ fp8 K/V 回填流水）
+
+O46/O47/O51 的 MLA 优化此前只在**定长** `D=512` 路径生效，`run_varlen` 的 MLA 主 kernel
+仍是 4-warp/2×2。O52 只改 host（`run_varlen` 的 `D==512` 分支选 8-warp/256 线程，fp8 再加
+O51 的 K/V `cp.async` 回填），device 未改 ⇒ 单/两文件 device 逐字一致、数值与历史同量级
+（`max_abs(8w-vs-4w)` ≤1e-6，仅 dK/dV atomic 次序）。
+
+| varlen causal（H2 D512） | O52 前 total | O52 total | 加速 |
+|---|---|---|---|
+| b1_t512（fp8，TF） | 0.1866 / 5.75 | **0.1006 / 10.68** | 1.86× |
+| b3_t1792（fp8） | 0.5875 / 9.60 | **0.2987 / 18.87** | 1.97× |
+| b1_t512（fp16） | 0.4264 / 2.52 | **0.2740 / 3.92** | 1.56× |
+| b3_t1792（fp16） | 0.9382 / 6.01 | **0.6523 / 8.64** | 1.44× |
+| b1_t512（bf16） | 0.4258 / 2.52 | **0.2747 / 3.91** | 1.55× |
+| b3_t1792（bf16） | 0.9347 / 6.03 | **0.6552 / 8.60** | 1.43× |
+
+ncu（fp8 b1_t512 causal）：Duration 116.6→**59.5µs**、warps_active 6.20%→**12.39%**、
+Ipc 0.11→**0.23**、`lts__t_sectors_op_red` **逐字节不变**（1,769,472）。详见 `docs/03` §52。
+**附带发现（非本轮引入）**：三 dtype 的 **非 causal（full）MLA varlen 在 HEAD 已是偏差**
+（退回 O51 提交复现一致）——记入 ROADMAP backlog。
+
 ## 12. 变长（VARLEN）主 kernel 的 TMA 化 —— fp16，第 83 轮（判决：中性/偏负）
 
 第 82 轮后 varlen 的两条候选之一。做法：packed 布局描述符按 `dims={D,T,H,1}`（`S=T,B=1`）

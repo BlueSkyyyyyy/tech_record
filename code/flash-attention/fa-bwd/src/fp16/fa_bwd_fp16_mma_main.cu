@@ -336,7 +336,7 @@ static void launch_bwd_wgmma4(dim3 mg, const __half* q, const __half* k, const _
 // 走 mma 主 kernel（BM=32/BN=32/PIPE=1，与定长 D=512 同几何）。FA/TE 变长在本机不可用 ⇒ 仅对 ref。
 #ifdef FA_WGMMA
 static int run_varlen(const std::string& dir, bool causal, int iters, int varlen_tma = 0,
-                      int lse_split = 0, int wg2ksplit = -1) {
+                      int lse_split = 0, int wg2ksplit = -1, int mla8w = -1) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -547,9 +547,15 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
                                                                          maxlen, H, Hkv, scale,
                                                                          0, d_cu);
       delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
-      launch_bwd_mma<512, 32, 32, 1, false, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse,
-                                                  d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H, Hkv,
-                                                  scale, (int)causal, 0, d_cu);
+      // O52：把定长 MLA 的 O46（8-warp/256 线程）搬进 varlen。`--mla8w=0/1` 供同 binary A/B。
+      if (mla8w != 0)
+        launch_bwd_mma<512, 32, 32, 1, false, true, 256, 4>(
+            mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H,
+            Hkv, scale, (int)causal, 0, d_cu);
+      else
+        launch_bwd_mma<512, 32, 32, 1, false, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse,
+                                                    d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H, Hkv,
+                                                    scale, (int)causal, 0, d_cu);
       convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, dq, dk, dv, nq,
                                                   nkv);
     }
@@ -575,6 +581,61 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
          flops / (ms * 1e-3) / 1e12);
   printf("grid main = %d x %d x %d | lse grid = %d x %d x %d | T=%d\n",
          (maxlen + main_bm - 1) / main_bm, H, B, (lse_nblk + 1) / 2, H, B, T);
+
+  // ---- O52 A/B（D=512/MLA/varlen）：主 kernel 4-warp vs 8-warp 同 session 计时 ----
+  if (D == 512) {
+    auto go52 = [&](bool w8) {
+      if (w8)
+        launch_bwd_mma<512, 32, 32, 1, false, true, 256, 4>(
+            mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H,
+            Hkv, scale, (int)causal, 0, d_cu);
+      else
+        launch_bwd_mma<512, 32, 32, 1, false, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse,
+                                                    d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H, Hkv,
+                                                    scale, (int)causal, 0, d_cu);
+    };
+    auto zero52 = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+    };
+    cudaEvent_t eva, evb;
+    CUDA_CHECK(cudaEventCreate(&eva));
+    CUDA_CHECK(cudaEventCreate(&evb));
+    auto bench52 = [&](bool w8, float* out) {
+      zero52();
+      go52(w8);
+      CUDA_CHECK(cudaEventRecord(eva));
+      for (int i = 0; i < iters; ++i) go52(w8);
+      CUDA_CHECK(cudaEventRecord(evb));
+      CUDA_CHECK(cudaEventSynchronize(evb));
+      CUDA_CHECK(cudaEventElapsedTime(out, eva, evb));
+      *out /= iters;
+    };
+    float m4 = 0.f, m8 = 0.f;
+    bench52(false, &m4);
+    bench52(true, &m8);
+    std::vector<float> a4(nq), b4(nkv), c4(nkv), a8(nq), b8(nkv), c8(nkv);
+    auto grab52 = [&](bool w8, std::vector<float>& dq, std::vector<float>& dk,
+                      std::vector<float>& dv) {
+      zero52();
+      go52(w8);
+      CUDA_CHECK(cudaMemcpy(dq.data(), d_dq_acc, nq * sizeof(float), cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dk.data(), d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dv.data(), d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    };
+    grab52(false, a4, b4, c4);
+    grab52(true, a8, b8, c8);
+    auto maxd = [](const std::vector<float>& x, const std::vector<float>& y) {
+      double e = 0.0;
+      for (size_t i = 0; i < x.size(); ++i) e = std::max(e, (double)fabs((double)x[i] - (double)y[i]));
+      return e;
+    };
+    printf("[O52 A/B] varlen MLA main-only 4w %.4f ms | 8w %.4f ms (%.3fx) | "
+           "max_abs(8w-vs-4w) dq=%.3e dk=%.3e dv=%.3e\n",
+           m4, m8, m4 / m8, maxd(a4, a8), maxd(b4, b8), maxd(c4, c8));
+    run_all();  // 恢复 CLI 选中路径（写回 dq/dk/dv）
+  }
 
   std::vector<float> h_dq(nq), h_dk(nkv), h_dv(nkv);
   std::vector<__half> h_dq_h(nq), h_dk_h(nkv), h_dv_h(nkv);
@@ -735,7 +796,7 @@ int main(int argc, char** argv) {
   if (varlen) {
 #ifdef FA_WGMMA
     if (varlen_tma < 0) varlen_tma = 0;   // 本轮判决：varlen TMA 中性/偏负 ⇒ opt-in
-    return run_varlen(dir, causal, iters, varlen_tma, lse_split, wg2ksplit);
+    return run_varlen(dir, causal, iters, varlen_tma, lse_split, wg2ksplit, mla8w);
 #else
     fprintf(stderr, "VARLEN 需要 -DFA_WGMMA（sm_90a）构建\n");
     return 1;

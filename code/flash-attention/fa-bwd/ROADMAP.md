@@ -2649,7 +2649,30 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第九十八轮）**：**O51——fp8 MLA（D=512）主 kernel 的 K/V `cp.async` 回填流水
+> **最新（第九十九轮）**：**O52——把 MLA 的 8-warp（+ fp8 K/V 回填流水）推广到 varlen
+> （正结果，varlen MLA 默认）**。落实 O46/O47/O51 的一个**共同遗漏**：8-warp（`NTH=256,NWAR=4`）
+> 与 fp8 的 K/V `cp.async` 回填（O51）此前**只落在定长 `D=512` 路径**，`run_varlen` 的 MLA 主
+> kernel 仍是 4-warp/2×2。**只改 host**（device 一行未改，早由 O46/O47/O51 参数化）：
+> `run_varlen` 加 `mla8w`/`mla_kvp`（`-1`=自动），`D==512` 分支三档选择 4w / 8w / 8w+kvpipe
+> （默认 8w+kvpipe），`main` 透传 `--mla8w=`/`--mlakvp=`，末尾加 `[O52 A/B]`；fp16/bf16 同
+> （无 kvpipe），单/两文件 host 同步、device 仍 `identical: True`。**main 1.5–1.9×、端到端**：
+> fp8 b1_t512 0.1866→**0.1006ms（1.86×）/ b3_t1792 0.5875→0.2987（1.97×）**；fp16 1.56×/1.44×；
+> bf16 1.55×/1.43×。ncu（fp8 b1_t512 varlen）：Duration **116.6→59.5µs**、warps_active
+> 6.20%→**12.39%**、Ipc 0.11→**0.23**、`red` 扇区**逐字节不变**；数值 vs ref 同量级、
+> `max_abs(8w-vs-4w)` dq~1e-7 / dk,dv~1e-6（仅 atomic 次序），D=128 varlen 回归逐位不变。
+> **附带发现（非本轮引入）**：三 dtype 的**非 causal（full）MLA varlen 在 HEAD 已是偏差**
+> （`git stash` 回退到 O51 提交 `056b316` 复现完全相同的错误值）——见「阻塞/backlog」。
+> 详见 `docs/03` §52、`docs/01` §14ad、`docs/01b` §6al、`docs/04` §11.1、`docs/08` §5.17。
+> 原始输出 `src/fp8/fa_bwd_fp8_main_o52_varlen.out.txt`、`..._main_o52_ncu_varlen*.out.txt`、
+> `src/{fp8,fp16,bf16}/fa_bwd_*_o52_varlen.out.txt`。
+> **下一步候选**：① **修 fp8/fp16/bf16 非 causal（full）MLA varlen 的 HEAD 偏差**
+> （第 80/81 轮曾通过，之后某轮回归；嫌疑在非 causal LSE 路径或全序列 `ncols`/ksplit 组合）；
+> ② **fp8 MLA 的 `short_scoreboard`（smem→mma 的 `ldmatrix`）**（O51 后并列头号；L1 shared
+> 多余 wavefront 仅 2%，**已证「消 bank conflict」不是杠杆**，需从 mma 依赖入手）；
+> ③ **fp8 MLA 降 smem 冲 2 CTA/SM**（需消 `Qp/dOp` ~66KB，S1024H2 的 1 CTA/SM 是通用墙）；
+> ④ **fp16/bf16 MLA varlen 也吃 split-KV**（O44 定长有、varlen 目前 ksplit=1）。
+>
+> **（第九十八轮）**：**O51——fp8 MLA（D=512）主 kernel 的 K/V `cp.async` 回填流水
 > （正结果，D=512 默认）**。落实 O45/O47 记录的头号 stall：fp8 MLA 走 **mma 后端**（`HD=512`
 > 不满足 SW128/wgmma 的 `HD==128`，也无 TMA）、K/V 每 tile 由 `kv_load_pair` 同步载入
 > （`NPU=16` 禁用 O3 寄存器预取），ncu `long_scoreboard` 最高（O45 2.33 / O47 后仍最高）。
@@ -3545,10 +3568,34 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       −2.0%、`red` 扇区逐字节不变、occ 恒 12.48%；数值 vs ref 与历史同量级（差异仅 atomic
       次序），**D=128/varlen 回归逐位不变**，单/两文件 device 逐字一致。ML A 反向 FA2/FA3/TE
       均不支持，仅 ours。详见 `docs/03` §51、`docs/04` §24、`docs/08` §5.16。原始输出
-      `src/fp8/fa_bwd_fp8_main_o51_kvp_{mla,reg}.out.txt`、`..._o51_ncu_mla.out.txt`、
-      `..._mma_onefile_o51_mla_s1024h2.out.txt`。
+       `src/fp8/fa_bwd_fp8_main_o51_kvp_{mla,reg}.out.txt`、`..._o51_ncu_mla.out.txt`、
+       `..._mma_onefile_o51_mla_s1024h2.out.txt`。
+- [x] **O52（第九十九轮）把 MLA 的 8-warp（+ fp8 K/V 回填流水）推广到 varlen（正结果，varlen MLA 默认）**：
+       O46（8-warp）/O47（fp8 8-warp）/O51（fp8 K/V 回填）此前**只落在定长 `D=512`**，
+       `run_varlen` 的 MLA 主 kernel 仍是 4-warp/2×2。**只改 host**（device 一行未改，早由
+       O46/O47/O51 参数化）：`run_varlen` 加 `mla8w`/`mla_kvp`（`-1`=自动），`D==512` 分支三档
+       （默认 8w+kvpipe；`--mla8w=0 --mlakvp=0` 退回历史 4w），`main` 透传、末尾加 `[O52 A/B]`；
+       fp16/bf16 同（无 kvpipe），单/两文件仅 host 有差异、device 一条未改（fp8/fp16 由
+       `sync_onefile_device.py` 核对、bf16 单文件 host 结构不适用该脚本故手工同步）。**main 1.5–1.9×**：
+       fp8 b1_t512 0.0899→**0.0504**、b3_t1792 0.3520→**0.1890**；fp16 1.63×/1.52×；bf16 1.63×/1.53×。
+       **端到端**：fp8 0.1866→**0.1006（1.86×，10.68 TF）**/0.5875→**0.2987（1.97×，18.87 TF）**；
+       fp16 0.4264→**0.2740**/0.9382→**0.6523**；bf16 0.4258→**0.2747**/0.9347→**0.6552**。
+       ncu（fp8 b1_t512 varlen）：Duration **116.6→59.5µs**、warps_active 6.20%→**12.39%**、
+       Ipc 0.11→**0.23**、stall long 3.13→**2.23**、`lts__t_sectors_op_red` **1,769,472 逐字节不变**；
+       数值 vs ref 同量级、`max_abs(8w-vs-4w)` dq~1e-7/dk,dv~1e-6，D=128 varlen 回归逐位不变。
+       **附带发现（非本轮引入）**：三 dtype 非 causal（full）MLA varlen 在 HEAD 已是偏差
+       （回退 O51 提交 `056b316` 复现一致）——记 backlog。详见 `docs/03` §52、`docs/01` §14ad、
+       `docs/01b` §6al、`docs/04` §11.1、`docs/08` §5.17。原始输出
+       `src/fp8/fa_bwd_fp8_main_o52_varlen.out.txt`、`..._main_o52_ncu_varlen*.out.txt`、
+       `src/{fp8,fp16,bf16}/fa_bwd_*_o52_varlen.out.txt`。
 
 ## 灵感 / backlog
+
+- [ ] **（第九十九轮新发现）三 dtype 非 causal（full）MLA varlen 在 HEAD 已偏差**：
+      第 80/81 轮 §39/§16.9 曾通过（full `~5e-2`），现在 `max_abs≈7`（ref_amax 0.57）；
+      `--mla8w=0`（历史 4-warp）与回到 O51 提交 `056b316` 重编**都复现完全相同错误值**，
+      故是第 80/81 轮之后某轮的回归（嫌疑：非 causal 的 `lse_mma_kernel<512>` 路径或全序列
+      `ncols`/ksplit 组合）。不影响 causal（本轮 O52 的主题），待单独一轮排查。
 
 - [ ] P3-3 正式化：把「ours vs ref vs TE」对拍汇总进 `harness/`，供 P4 数值表引用。
 

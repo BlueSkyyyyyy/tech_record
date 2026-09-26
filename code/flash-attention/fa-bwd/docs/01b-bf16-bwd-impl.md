@@ -1923,3 +1923,27 @@ ARCH="" NVCC_FLAGS="$F" scripts/run.sh src/bf16/fa_bwd_bf16_mma_onefile.cu ...  
 
 原始输出：`src/bf16/fa_bwd_bf16_mma_o50_*.out.txt`、`..._mma_onefile_o50_*.out.txt`、
 `..._o50_mlaksplit_sweep.out.txt`、`..._o50_ws_ab.out.txt`、`src/fa_bwd_o50_fa3_te_bf16.out.txt`。
+
+## 6al. O52-bf16：把 MLA 的 8-warp 几何推广到 **bf16 varlen**（第九十九轮）—— **正结果，varlen MLA 默认**
+
+把 fp16 §14ad 的改动**逐字 dtype 参数化**到 bf16：`run_varlen` 加 `mla8w` 入参，`D==512`
+分支在 8-warp `launch_bwd_mma<512,32,32,1,false,true,256,4>` 与历史 4-warp 之间按 `--mla8w`
+选择，`main` 透传，末尾加 `[O52 A/B]` 段。**device 代码一行未改**（早由 O46 参数化），
+单/两文件仅 host 有差异、device 保持既有 parity（bf16 单文件 host 结构不适用 `sync_onefile_device.py`，
+故为手工同步）。
+
+**数值（ours vs fp32 ref，bf16 causal varlen；max_abs dq/dk/dv）**：与 §6ab 历史同量级/逐值一致；
+
+| case (D=Dv=512) | dq | dk | dv | main 4w→8w |
+|---|---|---|---|---|
+| b1_t512 causal | 8.042e-3 | 1.097e-2 | 1.391e-2 | 0.3870→0.2380ms (**1.63×**) |
+| b3_t1792 causal | 1.267e-2 | 1.217e-2 | 1.796e-2 | 0.8522→0.5563ms (**1.53×**) |
+
+`max_abs(8w-vs-4w)` dq=0、dk/dv ≤1e-6（仅 dK/dV atomic 次序）。**单/两文件逐指标一致**；
+D=128 varlen 回归逐位不变。（非 causal full MLA varlen 的 HEAD 偏差见 `docs/03` §52.6。）
+
+**性能（event，`Σ_b 4HL²D`）**：b1_t512 causal total 0.4258→**0.2747ms**（1.55×，3.91 TF）、
+b3_t1792 causal 0.9347→**0.6552ms**（1.43×，8.60 TF）。MLA 反向 FA3/TE 均不支持 ⇒ 无外部基线。
+
+原始输出：`src/bf16/fa_bwd_bf16_mma_main_o52_varlen.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o52_varlen.out.txt`。
