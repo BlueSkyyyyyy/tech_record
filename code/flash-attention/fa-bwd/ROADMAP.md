@@ -2649,7 +2649,25 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百零五轮）**：**O58——causal MLA varlen 的 LSE 冲 2 CTA/SM（fp16/bf16/fp8；
+> **最新（第一百零六轮）**：**O59——把 causal MLA 的 LSE `cfg6` 从 varlen 推广到定长
+> （fp16/bf16/fp8；正结果，定长 MLA 默认；含一处 device 竞争修复）**。落实 O58 留下的缺口：
+> O58 的 `cfg6`（PIPE1/LBN16，压 smem 换 CTA 级并行度）只在 `run_varlen`，定长 causal MLA 的 LSE
+> 一直用旧默认 `<512,1>`（1 CTA/SM）。O59 把它接到定长 `run_pre` 并默认化（`--lseocc=4` 退旧、
+> 5=PIPE0/LBN32），拆分 auto 目标 fp8 256→1024、fp16/bf16 132→528。**顺带修复一处 latent
+> `cp.async` 竞争**（镜像配对切片 `nuse==0` 时 Q 拷贝不被 drain，下一 m 块再写同一 `Qs`；cfg6 的
+> LBN=16+大 ksplit 暴露成 LSE ~1e-2 非确定抖动）：每个 m 块末尾补 `cp.async.wait_group 0`，
+> `lse_mma_kernel_bal` 与 `..._wgmma` 同修、三 dtype。**结果**：LSE 1.04–1.20×、端到端
+> 1.02–1.11×（小 shape 最大）；ncu fp8 102.14KB/2 CTA/SM→51.07KB/**4 CTA/SM**、Duration 1.24×，
+> fp16 199.68KB/1 CTA/SM→99.84KB/**2 CTA/SM**、1.23×。数值 vs ref 与历史逐位一致、D=128 回归
+> 逐位不变、单/两文件逐指标一致。详见 `docs/01` §15f、`docs/01b` §6as、`docs/03` §55、`docs/04`
+> §31、`docs/08` §5.24；原始输出 `src/fa_bwd_o59_fixed_mla_shapes.out.txt` 等。
+> **下一步候选**：① **MLA 主 kernel 降 smem 冲 2 CTA/SM**（四 dtype 共同墙；主 kernel 207–230KB，
+> 需消 ~100KB，先消 Q/dO 常驻或分块 Q/KV——多轮）；② **fp8 MLA 的 `short_scoreboard`
+> （smem→mma 的 `ldmatrix`）**（O47/O51/O57 一致：并列头号）；③ **把 O59 的「竞争修复 + 定长
+> cfg6」判决补到 varlen 的其余几何/其它 LSE 版本**（本轮已顺手修了 `..._wgmma`，可核对
+> `..._tma` 是否也有同类）；④ **把 O58 causal LSE split auto 目标统一重新标定**。
+>
+> **（第一百零五轮）**：**O58——causal MLA varlen 的 LSE 冲 2 CTA/SM（fp16/bf16/fp8；
 > 正结果，causal varlen 默认）**。落实 O57「下一步候选 ③（causal MLA varlen 的 LSE 2 CTA/SM，
 > O57 只做了 full）」+ ④（fp8 侧同构复现 O56/O57）。**关键对照**：O56/O57 在 **full** 上把
 > 「8-warp / 压 smem 换 2 CTA/SM」判为混合/负（默认 opt-in）；本轮把同一几何搬到 **causal 的
@@ -3884,6 +3902,34 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     varlen_causal_b3_legacy,varlen_causal_b3_onefile,varlen_full_b3,ncu_lse_cfg6_b3,ncu_lse_legacy_b3}.out.txt`；
     `src/bf16/fa_bwd_bf16_o58_*`；`src/fp8/fa_bwd_fp8_o58_*`；文档 `docs/01` §15e、`docs/01b`
     §6ar、`docs/03` §54、`docs/04` §30、`docs/08` §5.23。
+
+- 2026-09-27（第一百零六轮）：**O59 完成（把 causal MLA LSE 的 cfg6 从 varlen 推广到定长；
+  **正结果，定长 MLA 默认；含一处 device 竞争修复**）**。
+  - 动机：O58 的 `cfg6 <512,1,false,128,16>`（PIPE1/LBN16，压 smem 换 CTA 级并行度）**只落在
+    `run_varlen`**；4 个**定长** MLA 生产形状（S256H2/S512H4/S1024H2）的 causal LSE 一直用旧默认
+    `<512,1>`（1 CTA/SM）。O59 把它接到定长 `run_pre` 并默认化（`--lseocc=4` 退旧默认、
+    5=PIPE0/LBN32），拆分 auto 目标 fp8 256→**1024**、fp16/bf16 132→**528**。
+  - **附带修复一处 latent `cp.async` 竞争**：`lse_mma_kernel_bal` 的镜像配对循环，当切片
+    `nuse==0` 时循环内 `wait_group 0` 不执行 ⇒ 本 m 块的 Q 拷贝不被 drain，下一 m 块的 `issue_q`
+    又写同一 `Qs`，两异步拷贝竞争（LBN=16+大 ksplit 空切片多 ⇒ 暴露为 LSE ~1e-2 非确定抖动；
+    实测 `cfg6 vs cfg6` 两次跑分别 4.17e-2/3.16e-2，而 `cfg6(sp1) vs legacy(sp1)`=0）。修法：每个
+    m 块末尾补 `if constexpr (PIPE) asm volatile("cp.async.wait_group 0;\n");`，`lse_mma_kernel_bal`
+    与 `..._wgmma` 同修、三 dtype；单文件 device `sync_onefile_device.py`（`identical: True`）。
+    修后 `cfg6 vs cfg6`=0、`cfg6 vs legacy`=**4.768e-7**。
+  - **结果（同 binary A/B）**：LSE-only fp8 1.195/1.206/1.196×、fp16 1.184/1.197/1.040×、
+    bf16 1.183/1.204/1.037×（S256H2/S512H4/S1024H2）；**端到端 total** fp8 0.0720→0.0649、
+    0.1340→0.1280、0.1882→0.1808ms（**1.04–1.11×**）；fp16 0.0534→0.0502、0.1180→0.1146、
+    0.1884→0.1836；bf16 0.0535→0.0504、0.1188→0.1162、0.1874→0.1832。
+  - **ncu（S512H4）**：fp8 legacy 102.14KB/2 CTA/SM、Duration 23.62µs → cfg6 **51.07KB/4 CTA/SM**、
+    **18.98µs（1.24×）**、Compute 12.5→17.4%；fp16 legacy 199.68KB/**1 CTA/SM**、19.97µs → cfg6
+    **99.84KB/2 CTA/SM**、**16.19µs（1.23×）**。bound：低 occupancy/半个波 → compute/softmax+wave。
+  - **数值**：ours-vs-ref 与 P5-3/O58 历史**逐位一致**（fp8 S256H2 2.356/2.290/3.441e-1、S512H4
+    2.415/2.992/4.481e-1、S1024H2 2.232/3.337/3.602e-1；fp16 1.6–2.9e-3；bf16 ~1e-2）；
+    **D=128 S4096 回归逐位不变**（fp16 1.883/1.734/1.966e-3、bf16 15.10/13.40/16.31e-3、fp8
+    2.635/2.643/3.216e-1）。单/两文件逐指标一致。
+  - 原始输出 `src/fa_bwd_o59_fixed_mla_shapes.out.txt`、`src/fp8/fa_bwd_fp8_o59_*`、
+    `src/fp16/fa_bwd_fp16_o59_*`、`src/bf16/fa_bwd_bf16_o59_*`；文档 `docs/01` §15f、`docs/01b`
+    §6as、`docs/03` §55、`docs/04` §31、`docs/08` §5.24。
 
 ## 灵感 / backlog
 

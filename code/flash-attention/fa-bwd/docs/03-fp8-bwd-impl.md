@@ -4900,3 +4900,110 @@ ARCH="" NVCC_FLAGS="$F" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
 原始输出：`src/fp8/fa_bwd_fp8_o58_varlen_causal_b{1,3}.out.txt`、
 `..._b{1,3}_legacy.out.txt`、`..._b3_onefile.out.txt`、`..._o58_varlen_full_b3.out.txt`、
 `..._o58_ncu_lse_{cfg6,legacy}_b3.out.txt`。
+
+## 55. O59（第一百零六轮，**正结果，定长 causal MLA 默认；含一处 device 竞争修复**）：把 O58 的 causal MLA LSE `cfg6` 从 varlen 推广到**定长**路径
+
+### 55.1 动机：O58 只改了 varlen，定长 causal MLA 的 LSE 一直走旧默认
+
+O58（§54）把 causal MLA **varlen** 的 LSE 从旧默认 `<512,1>`（PIPE=1/LBN=64，1 CTA/SM）
+切到 `cfg6 <512,1,false,128,16>`（PIPE=1/LBN=16，2 CTA/SM），LSE 1.18–1.22×。但 `cfg6` 只落在
+`run_varlen` 的 `D==512 && causal` 分支里；**定长**（非 varlen）路径——`main()` 的 `run_pre`
+`D==512` causal 分支——仍然只调 `launch_lse_bal<512,1>`。4 个定长 MLA 生产形状
+（S256H2 / S512H4 / S1024H2，fp16/bf16/fp8）因此没吃到这条杠杆；fp8 定长 MLA 的 LSE 是
+端到端 preprocess 的绝对大头（S1024H2：preprocess 0.0352ms / LSE ~0.031ms，占端到端 17%）。
+
+### 55.2 发现并修复一处 latent 竞争（device，三 dtype）
+
+把 cfg6 接进定长路径后，对拍发现 **LSE 出现 ~1e-2 量级的非确定性抖动**（同一 binary 两次跑
+`cfg6 vs cfg6` 的 max_abs = 4.17e-2 / 3.16e-2 各不相同；`cfg6(sp=1) vs legacy(sp=1)` 却逐位为 0）。
+根因在 `lse_mma_kernel_bal` 的 PIPE=1 镜像配对循环：
+
+- 每进入一个 m 块先 `issue_q(Qs, m0)` 发 Q 的 `cp.async`；循环首 `cp.async.wait_group 0` 才 drain；
+- 但当某切片 `nuse == 0`（`ksplit` 大于该 m 块的 K tile 数时会出现）时，循环体不执行、
+  **本 m 块发出的 Q `cp.async` 从不被 wait**；随后 `t=1` 又 `issue_q(Qs, m0')` 写同一 `Qs`，
+  两个异步拷贝竞争同一 smem 地址 ⇒ 结果取决于谁后落地。
+- LBN=64（legacy）的空切片更少、且旧 timing 常掩盖它；LBN=16 + 大 `ksplit` 让空切片变多，
+  竞争被放大成可观测的非确定抖动。这也解释了 O58 的 cfg6 在某些 varlen 形状下的隐患。
+
+**修复**：在每个 m 块（`t` 循环体）末尾、切换下一 m 块之前，先 drain 本块仍在飞的 `cp.async`
+再 `__syncthreads()`：
+
+```cpp
+if constexpr (PIPE) asm volatile("cp.async.wait_group 0;\n");
+__syncthreads();
+```
+
+三 dtype 的 `lse_mma_kernel_bal` 与 `lse_mma_kernel_bal_wgmma`（fp8 的 wgmma 版也有同样结构）
+同步加；单文件 device 经 `sync_onefile_device.py` 同步（`identical: True`）。修复后
+`cfg6 vs cfg6` 逐位为 0、`cfg6 vs legacy` = **4.768e-7**（只剩 split 求和次序差异）。
+
+### 55.3 改动（host-only + 上面的 device 修复）
+
+- `fa_bwd_fp8_main.cu` / `fa_bwd_fp8_mma_onefile.cu` 定长 `run_pre` 的 `D==512` causal 分支：
+  默认走 `launch_lse_bal<512,1,false,128,16>`（cfg6）；`--lseocc=4` 退回旧默认、
+  `5`=PIPE0/LBN32；split auto 目标由 256 抬到 **1024**（cfg6 的 4 CTA/SM 把并发槽翻倍）。
+- fp16 / bf16 同构（device 早由 O56 参数化；thost 补 `kLseSmemBal1_5/6`、`cudaFuncSetAttribute`
+  与 `run_pre` 分派；单/两文件同步），拆分 auto 目标由 132 抬到 **528**（对齐 O58 varlen）。
+- 定长不支持 8-warp（`--lse8w` 在定长忽略）；数学口径完全不变。
+
+### 55.4 结果（同 session，同 binary A/B：`--lseocc=4` vs 默认 cfg6）
+
+LSE-only（`[O59 A/B]`，三 dtype 一致，仅列 fp8）：
+
+| shape | legacy(sp) | cfg6(sp) | 比 |
+|---|---|---|---|
+| S256H2 | 0.0236 ms (4) | **0.0197 ms (4)** | **1.195×** |
+| S512H4 | 0.0256 ms (8) | **0.0212 ms (8)** | **1.206×** |
+| S1024H2 | 0.0312 ms (16) | **0.0261 ms (16)** | **1.196×** |
+
+端到端 total（三 dtype × 3 shape，`src/fa_bwd_o59_fixed_mla_shapes.out.txt`）：
+
+| dtype | S256H2 | S512H4 | S1024H2 |
+|---|---|---|---|
+| fp8 | 0.0720→**0.0649（1.11×）** | 0.1340→**0.1280（1.05×）** | 0.1882→**0.1808（1.04×）** |
+| fp16 | 0.0534→**0.0502（1.06×）** | 0.1180→**0.1146（1.03×）** | 0.1884→**0.1836（1.03×）** |
+| bf16 | 0.0535→**0.0504（1.06×）** | 0.1188→**0.1162（1.02×）** | 0.1874→**0.1832（1.02×）** |
+
+小 shape 收益最大（LSE 占比高、且 4 CTA/SM 消掉 2 CTA/SM 的半个波）；大 shape 收益收敛到 ~1.03×。
+
+### 55.5 ncu（S512H4，`-c 1`，同 binary）
+
+| | fp8 legacy `<512,1>` | fp8 cfg6 | fp16 legacy | fp16 cfg6 |
+|---|---|---|---|---|
+| `gpu__time_duration` | 23.62 µs | **18.98 µs（1.24×）** | 19.97 µs | **16.19 µs（1.23×）** |
+| `launch__shared_mem_per_block` | 102.14 KB | **51.07 KB** | 199.68 KB | **99.84 KB** |
+| `Block Limit Shared Mem`（CTA/SM） | 2 | **4** | 1 | **2** |
+| theoretical occupancy | 12.50% | **25.0%** | 6.25% | **12.5%** |
+| Waves Per SM | 0.48 | **0.24** | 0.97 | **0.48** |
+| Compute (SM) | 12.53% | **17.36%** | 14.52% | **20.05%** |
+
+**结论**：cfg6 把 LSE smem 精确减半（fp8 4 CTA/SM、fp16 2 CTA/SM），Duration 1.23–1.24×。
+这是把 O58 在 varlen 上验证过的「**压 smem 换 CTA 级并行度**」杠杆复用到定长 causal MLA，
+收益与 O58 同量级。bound 从「低 occupancy / 半个波」转向 **compute/softmax + `wave` 量化**。
+
+### 55.6 数值（ours vs fp32 ref，max_abs dq/dk/dv）
+
+- fp8：S256H2 `2.356e-1/2.290e-1/3.441e-1`、S512H4 `2.415e-1/2.992e-1/4.481e-1`、
+  S1024H2 `2.232e-1/3.337e-1/3.602e-1`——与 P5-3/O58 历史**逐位一致**。
+- fp16：S256H2 `1.638/1.582/1.753e-3`、S512H4 `2.516/2.916/1.724e-3`、
+  S1024H2 `1.987/1.712/1.848e-3`；bf16 同量级（~1e-2）。
+- `cfg6-vs-legacy` 的 LSE max_abs = **4.768e-7**（仅 split 求和次序）。
+- **D=128 回归逐位不变**：fp16 S4096 `1.883/1.734/1.966e-3`、bf16 `15.10/13.40/16.31e-3`、
+  fp8 `2.635/2.643/3.216e-1`（与 `docs/04` 表逐位一致）。
+- 单/两文件逐指标一致（fp8 S512H4 0.1246 vs 0.1280 ms，数值同；O59 A/B 1.219 vs 1.206，session 噪声）。
+
+### 55.7 复现 / 原始输出
+
+```bash
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=20 --lseocc=4 \
+  /home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp8   # 旧默认
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=20 \
+  /home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp8   # cfg6（默认）
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:lse_mma_kernel_bal --launch-count 1 -- --lseocc=4 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp8
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o59_fixed_s1024h2.out.txt`、
+`..._o59_onefile_s{512h4,1024h2}.out.txt`、`..._o59_ncu_lse_{cfg6,legacy}_s512h4.out.txt`；
+`src/fp16/..._o59_*`、`src/bf16/..._o59_*`；汇总 `src/fa_bwd_o59_fixed_mla_shapes.out.txt`。

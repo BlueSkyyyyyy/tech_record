@@ -1244,7 +1244,11 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
         }
       }
     }
-    // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
+    // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）。
+    // O59：还必须 drain 本 m 块仍在飞的 cp.async——当本切片 `nuse==0` 时循环内的
+    //   `wait_group 0` 不执行，t=1 的 issue_q 会与 t=0 的 Q 拷贝写同一 Qs 而竞争
+    //   （实测 cfg6/LBN=16 + ksplit 下 LSE 出现 ~1e-2 的非确定性抖动）。
+    if constexpr (PIPE) asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
   }
 }
@@ -1425,7 +1429,11 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
         }
       }
     }
-    // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
+    // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）。
+    // O59：还必须 drain 本 m 块仍在飞的 cp.async——当本切片 `nuse==0` 时循环内的
+    //   `wait_group 0` 不执行，t=1 的 issue_q 会与 t=0 的 Q 拷贝写同一 Qs 而竞争
+    //   （实测 cfg6/LBN=16 + ksplit 下 LSE 出现 ~1e-2 的非确定性抖动）。
+    if constexpr (PIPE) asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
   }
 }
@@ -4199,12 +4207,20 @@ int main(int argc, char** argv) {
   printf("O32: lse backend = %s\n", lse_tma ? "tma" : "wgmma/mma");
   // O38：自动 split 档（0=auto）。目标 `grid*split ≈ 2048`（≈2 个满波；实测该目标在各 shape
   //   上距 per-shape 最优 ≤1.2%），上限 8；grid 已够大则退回 1（逐位）。
+  // O59：把 O58 的 causal MLA LSE 几何（cfg6 默认，2 CTA/SM）从 varlen 推广到**定长**路径。
+  //   O58 只改了 `run_varlen`，定长 MLA 的 causal LSE 一直用旧默认 `<512,1>`（PIPE1/LBN64）。
+  //   以 `--lseocc=4` 退回旧默认、5=PIPE0/LBN32、6=PIPE1/LBN16；`--lse8w=1` 在定长不启用。
+  const bool lse8w_fixed = (lse8w_opt != 0) && (D == 512);
+  const bool causal_cfg6_fixed =
+      causal && (D == 512) &&
+      (lseocc_opt == 5 || lseocc_opt == 6 || (lseocc_opt == 0 && !lse8w_fixed));
   int lse_split_eff = lse_split;
   if (lse_split_eff <= 0) {
     long lg_grid = (long)lg_bal.x * H * B;
     // O39：D=512（MLA，mma LSE）目标 `grid*split ≈ 256`、上限 16；D=128 的 TMA LSE 维持
-    //   O38 的 `≈2048`、上限 8。
-    const int target = (D == 512) ? 256 : 2048;
+    //   O38 的 `≈2048`、上限 8。O59：cfg6 的 4 CTA/SM 把并发槽翻倍，目标抬到 1024
+    //   （对齐 O58 varlen 的 fp8 档）。
+    const int target = (D == 512) ? (causal_cfg6_fixed ? 1024 : 256) : 2048;
     const int cap = (D == 512) ? 16 : 8;
     int sp = 1;
     while (sp < cap && lg_grid * (sp * 2) <= target) sp *= 2;
@@ -4273,12 +4289,17 @@ int main(int argc, char** argv) {
         delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
     } else {
       // O39：MLA（D=512）causal LSE 也用 K 维 split（此前只有 D=128/TMA 有 O38）。
+      // O59：定长 causal MLA 默认走 O58 的 cfg6（PIPE1/LBN16，4 CTA/SM）；`--lseocc=4` 退回旧默认。
       if (causal) {
-        if (lse_split_eff > 1)
-          launch_lse_bal<512, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale,
-                                 nullptr, d_lse_part, lse_split_eff);
+        if (lseocc_opt == 5)
+          launch_lse_bal<512, 0, false, 128, 32>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv,
+                                                 scale, nullptr, d_lse_part, lse_split_eff);
+        else if (lseocc_opt == 6 || causal_cfg6_fixed)
+          launch_lse_bal<512, 1, false, 128, 16>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv,
+                                                 scale, nullptr, d_lse_part, lse_split_eff);
         else
-          launch_lse_bal<512, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale);
+          launch_lse_bal<512, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, nullptr,
+                                 d_lse_part, lse_split_eff);
       } else
         launch_lse<512>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
       if (delta_warp_sel)
@@ -4672,6 +4693,50 @@ int main(int argc, char** argv) {
       cudaFree(d_lse2);
     }
 #endif
+  }
+
+  // ---- O59 A/B（D=512/MLA/causal/定长）：旧默认 LSE(`<512,1>` PIPE1/LBN64) vs O58 的 cfg6
+  //   (`<512,1,false,128,16>` PIPE1/LBN16，4 CTA/SM)。只改 LSE 的 smem 几何/并行度，数学口径
+  //   不变（split 只改 fp32 求和次序）。同 session、LSE-only 计时 + 逐元素对拍。----
+  if (causal && D == 512) {
+    auto auto_split = [&](int target) {
+      long lg_grid = (long)lg_bal.x * H * B;
+      int sp = 1;
+      while (sp < 16 && lg_grid * (sp * 2) <= target) sp *= 2;
+      int nblk_cap = (S + 63) / 64;
+      while (sp > nblk_cap) sp >>= 1;
+      return sp;
+    };
+    const int sp_leg = auto_split(256), sp_cfg = auto_split(1024);
+    auto bench_lse = [&](bool cfg6, int sp, float* out) {
+      auto go = [&]() {
+        if (cfg6)
+          launch_lse_bal<512, 1, false, 128, 16>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv,
+                                                 scale, nullptr, d_lse_part, sp);
+        else
+          launch_lse_bal<512, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, nullptr,
+                                 d_lse_part, sp);
+      };
+      for (int i = 0; i < 3; ++i) go();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) go();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float t_leg = 0.f, t_cfg = 0.f;
+    std::vector<float> l_leg((size_t)B * S * H), l_cfg((size_t)B * S * H);
+    bench_lse(false, sp_leg, &t_leg);
+    CUDA_CHECK(cudaMemcpy(l_leg.data(), d_lse, l_leg.size() * 4, cudaMemcpyDeviceToHost));
+    bench_lse(true, sp_cfg, &t_cfg);
+    CUDA_CHECK(cudaMemcpy(l_cfg.data(), d_lse, l_cfg.size() * 4, cudaMemcpyDeviceToHost));
+    double e = 0.0;
+    for (size_t i = 0; i < l_leg.size(); ++i)
+      e = std::max(e, (double)std::fabs((double)l_leg[i] - (double)l_cfg[i]));
+    printf("[O59 A/B] LSE MLA legacy(sp=%d) %.4f ms | cfg6(sp=%d) %.4f ms (%.3fx) | "
+           "max_abs(cfg6-vs-legacy)=%.3e\n",
+           sp_leg, t_leg, sp_cfg, t_cfg, t_leg / t_cfg, e);
   }
 
   // ---- O12 A/B（D=128/512）：主 kernel 的 LSE/D 预装寄存器 ON vs OFF（同 session 计时）。----

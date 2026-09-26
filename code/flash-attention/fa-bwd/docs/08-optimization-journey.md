@@ -368,6 +368,23 @@ smem 冲突 + 低 occ
      「compute/softmax + `wait` 固定延迟」。详见 `docs/01` §15e、`docs/01b` §6ar、`docs/03` §54、
      `docs/04` §30。
 
+24. **O59（第 106 轮，正结果，定长 MLA 默认；含一处竞争修复）**：**把 O58 的 causal MLA LSE
+     `cfg6` 从 varlen 推广到定长**。O58 只改了 `run_varlen`；定长 `run_pre` 的 `D==512 && causal`
+     仍用旧默认 `<512,1>`（1 CTA/SM）。本轮把它接上并默认化（fp8/fp16/bf16；`--lseocc=4` 退旧），
+     拆分 auto 目标 fp8 256→1024、fp16/bf16 132→528（cfg6 并发槽翻倍）。
+     **附带修复一处 latent `cp.async` 竞争**：镜像配对循环里当切片 `nuse==0` 时循环内的
+     `wait_group 0` 不执行 ⇒ 本 m 块的 Q 拷贝不被 drain，下一 m 块的 `issue_q` 又写同一 `Qs`，
+     两异步拷贝竞争；LBN=16 + 大 ksplit 让空切片变多，暴露成 LSE ~1e-2 的非确定抖动
+     （`cfg6 vs cfg6` 两次跑各不相同、`cfg6(sp=1) vs legacy(sp=1)` 逐位 0）。修法：每个 m 块
+     末尾补 `if constexpr (PIPE) asm volatile("cp.async.wait_group 0;\n");`（`lse_mma_kernel_bal`
+     与 `..._wgmma` 同修，三 dtype）。修后 `cfg6 vs cfg6` = 0、`cfg6 vs legacy` = 4.768e-7。
+     **结果：LSE 1.04–1.20×、端到端 1.02–1.11×**（小 shape 收益最大）；ncu：fp8 102.14KB/2 CTA/SM
+     →51.07KB/**4 CTA/SM**、Duration 1.24×；fp16 199.68KB/1 CTA/SM→99.84KB/**2 CTA/SM**、1.23×。
+     **教训：压 smem 提 occupancy 的杠杆要沿「同一算法结构」推广（varlen→定长）；而一个只在高
+     并行度/细 tile 下才暴露的异步竞争，会在推广时跳出来——先证明「同几何逐位、跨几何 1e-6」
+     再谈收益。** 数值 D=128 回归逐位不变。详见 `docs/01` §15f、`docs/01b` §6as、`docs/03` §55、
+     `docs/04` §31。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。

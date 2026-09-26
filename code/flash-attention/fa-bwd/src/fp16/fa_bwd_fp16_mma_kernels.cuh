@@ -747,7 +747,11 @@ lse_mma_kernel_bal(const __half* __restrict__ q, const __half* __restrict__ k,
         }
       }
     }
-    // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）
+    // 切换到下一个 m 块前，确保所有 warp 读完 Qs/Ks（随后要覆盖）。
+    // O59：还必须 drain 本 m 块仍在飞的 cp.async——当本切片 `nuse==0` 时循环内的
+    //   `wait_group 0` 不执行，t=1 的 issue_q 会与 t=0 的 Q 拷贝写同一 Qs 而竞争
+    //   （实测 cfg6/LBN=16 + ksplit 下 LSE 出现 ~1e-2 的非确定性抖动）。
+    if constexpr (PIPE) asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
   }
 }
@@ -906,6 +910,9 @@ lse_mma_kernel_bal_wgmma(const __half* __restrict__ q, const __half* __restrict_
         }
       }
     }
+    // O59：drain 本 m 块仍在飞的 cp.async（nuse==0 时循环内不 wait，t=1 的 issue_q
+    //   会与 t=0 的 Q 拷贝写同一 Qs 而竞争）。
+    if constexpr (PIPE) asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
   }
 }
