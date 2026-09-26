@@ -201,6 +201,18 @@ smem 冲突 + 低 occ
     且 128 线程/4 warp 同病，但需重排 fp8 的 `fp8_mma_body` 2×2 几何与 fold）；② fp16/bf16/fp8
     **D=128** 主 kernel 是否也能吃 8-warp（wgmma 路径已 256 线程，mma fallback 与 GQA 待测）；
     ③ fp8 MLA 的其它杠杆（O42/O45 一致：硬件资源锁死）。
+12. **fp8 MLA（D=512）主 kernel 的 8-warp 几何（O47，第 94 轮，正结果，D=512 默认）**：把
+    同一参数化搬到 fp8——`fp8_mma_body`/`fa_bwd_fp8_mma_kernel` 的 warp 网格由 `NTH`/`NWAR` 派生
+    （`NWM=NTH/32/NWAR`、`GM1/GN1/GM34/GN34/GM5/GN5` 与 m/n-tile 同步、`kv_*` helper 加 `NT`、
+    fold 只由前 4 warp 覆盖 `BN≤64`）。默认 `128/2` 与历史**逐字等价**，MLA 用 `256/4`。
+    ncu（S1024H2 main）：**occ 6.25%→12.49%、Warps/SM 4→8、Ipc 0.57→1.13、issue_active
+    14.4%→28.1%、No Eligible 85.66%→71.95%、Duration 238.8→132.4µs、255→245 regs**，
+    `lts__t_sectors_op_red` **6,684,672 逐字节不变**；墙仍是 `long_scoreboard + wait + short`。
+    **main 1.84×/1.62×/1.61×**、total **0.0694/0.1332/0.1927ms**（0.0896/0.1996/0.2835），
+    fp8 MLA main 现比 fp16/bf16 MLA（O46）更快。数值 vs ref 与历史逐值一致、`max_abs(8w-vs-4w)≤5e-7`，
+    D=128/GQA/MQA 回归逐位不变。`--mla8w=0` 供 A/B。详见 `docs/03` §47。
+    **教训：把「每 scheduler warp 数」从 1 提到 2 在 1 CTA/SM 的 MLA 上是通用杠杆**——
+    fp16/bf16（O46 1.07–1.11×）与 fp8（O47 1.6–1.84×，因 fp8 的 4-warp 档寄存器 255 更死）。
 
 ---
 

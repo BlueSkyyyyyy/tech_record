@@ -140,8 +140,9 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // O12：PREL=true 时把本线程负责的 LSE/D 预装寄存器（见 kernels.cuh），默认开。
 // O7e-2：F16B=true 时 fold 的 Ap/dS3/dS2 用 16B 向量化写（见 kernels.cuh），默认开。
 // O27：RCP=true 时 fold 量化用「每行 rcp + 乘法」代替逐元素精确除法（见 kernels.cuh）。
+// O47：`NTH`/`NWAR` 透传给主 kernel（默认 128/2 与历史逐字等价；MLA 用 256/4）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
-          bool RCP = true>
+          bool RCP = true, int NTH = THREADS, int NWAR = WN>
 static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             const unsigned char* k8, const float* ks,
                             const unsigned char* v8, const float* vs,
@@ -153,9 +154,10 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             const int* mt_b = nullptr, const int* mt_m = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = WGMMA ? Cfg::smem_bytes_wgmma : Cfg::smem_bytes;
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP>,
-                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP><<<mg, THREADS, kSmem>>>(
+  CUDA_CHECK(cudaFuncSetAttribute(
+      fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR><<<mg, NTH, kSmem>>>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, mt_b, mt_m);
 }
@@ -667,6 +669,9 @@ int main(int argc, char** argv) {
   // O38：LSE 的 K 维 split 数（仅 D=128/causal/TMA 生效）。0=自动（目标 grid*split≈2048、上限 8），
   //   >=1 直接指定（`--lsesplit=N` 走「切片 partial + merge」；`--lsesplit=1` 退回 O32、保持历史逐位）。
   int lse_split = 0;
+  // O47：MLA（D=512）主 kernel 的 warp 网格。-1=自动（D=512 默认开 8-warp/256 线程），
+  //   0/1 由 `--mla8w=` 强制（同 session A/B）。默认 128/2 与历史逐字等价。
+  int mla8w_opt = -1;
   int varlen = 0;   // VARLEN：1 = packed [T,H,D] + cu_seqlens.npy（fp8/HD=128/causal）
   int compact_opt = 0;  // 第八十二轮：1 = varlen 主 kernel 紧凑均衡网格（opt-in；实测中性偏负）
   int lse_compact_opt = 0;  // 第八十二轮：1 = varlen causal LSE 紧凑对网格（opt-in，A/B）
@@ -685,6 +690,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--wgmma=", 0) == 0) wgmma = atoi(a.c_str() + 8);
     else if (a.rfind("--lsetma=", 0) == 0) lse_tma = atoi(a.c_str() + 9);
     else if (a.rfind("--lsesplit=", 0) == 0) lse_split = atoi(a.c_str() + 11);
+    else if (a.rfind("--mla8w=", 0) == 0) mla8w_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--qdtma=", 0) == 0) qd_tma = atoi(a.c_str() + 8);
     else if (a.rfind("--kvtma=", 0) == 0) kv_tma = atoi(a.c_str() + 8);
     else if (a == "--kvtma") kv_tma = 1;
@@ -1011,6 +1017,8 @@ int main(int argc, char** argv) {
   const bool prel_sel = (prel_opt < 0) ? true : (prel_opt != 0);
   // O7e-2：fold 16B 向量化写（默认开），`--f16b=0` 退回 O7e 的 4B 写（仅作 A/B）。
   const bool f16b_sel = (f16b_opt != 0);
+  // O47：MLA（D=512）8-warp 几何（默认开；`--mla8w=0` 退回 4-warp A/B）。
+  const bool mla8w_sel = (mla8w_opt < 0) ? true : (mla8w_opt != 0);
   // O27：第 5 个开关 rcp 选 fold 量化用乘法（true，默认）还是精确除法（false，A/B）。
   auto launch128 = [&](bool reg, bool wg, bool prel, bool f16, bool rcp = true) {
 #define GO2(REG_, WG_, PREL_, F16_)                                                          \
@@ -1087,7 +1095,17 @@ int main(int argc, char** argv) {
     if (D == 128 && wgmma) { launch128(use_regdq, true, prel_sel, f16b_sel, rcp_sel); return; }
 #endif
     if (D == 128) { launch128(use_regdq, false, prel_sel, f16b_sel, rcp_sel); return; }
-    if (prel_sel)
+    // O47：MLA（D=512）默认走 8-warp/256 线程几何（`--mla8w=0` 退回 4-warp 供 A/B）。
+    if (mla8w_sel) {
+      if (prel_sel)
+        launch_bwd_main<512, 64, 32, false, false, true, true, true, 256, 4>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      else
+        launch_bwd_main<512, 64, 32, false, false, false, true, true, 256, 4>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+    } else if (prel_sel)
       launch_bwd_main<512, 64, 32, false, false, true, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
                                                        d_do8, d_dos, d_delta, d_lse, d_dq_acc,
                                                        d_dk_acc, d_dv_acc, S, H, Hkv, scale,
@@ -1543,6 +1561,60 @@ int main(int argc, char** argv) {
            "max_abs(on-vs-off) dq=%.3e\n",
            m_off, m_on, m_off / m_on, pd);
     run_main();  // 恢复 CLI 选中路径（写回 d_dq_acc，不影响 d_dq）
+  }
+
+  // ---- O47 A/B（D=512/MLA）：主 kernel 4-warp(128 线程) vs 8-warp(256 线程) ----
+  //   只改 warp 网格/累加器划分，数学口径不变；跨 CTA atomic 次序变 ⇒ 不逐位（预期 ~1e-5）。
+  if (D == 512) {
+    auto go_mla = [&](bool w8) {
+      if (w8)
+        launch_bwd_main<512, 64, 32, false, false, true, true, true, 256, 4>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+      else
+        launch_bwd_main<512, 64, 32, false, false, true, true>(
+            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+    };
+    auto zero_acc = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+    };
+    auto bench_mla = [&](bool w8, float* out) {
+      zero_acc();
+      go_mla(w8);
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) go_mla(w8);
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float m4 = 0.f, m8 = 0.f;
+    bench_mla(false, &m4);
+    bench_mla(true, &m8);
+    std::vector<float> dq4(nq), dq8(nq), dk4(nkv), dk8(nkv), dv4(nkv), dv8(nkv);
+    auto grab = [&](bool w8, std::vector<float>& dq, std::vector<float>& dk,
+                    std::vector<float>& dv) {
+      zero_acc();
+      go_mla(w8);
+      CUDA_CHECK(cudaMemcpy(dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    };
+    grab(false, dq4, dk4, dv4);
+    grab(true, dq8, dk8, dv8);
+    double dqd = 0, dkd = 0, dvd = 0;
+    for (size_t i = 0; i < dq4.size(); ++i) {
+      dqd = std::max(dqd, (double)std::fabs((double)dq4[i] - (double)dq8[i]));
+      dkd = std::max(dkd, (double)std::fabs((double)dk4[i] - (double)dk8[i]));
+      dvd = std::max(dvd, (double)std::fabs((double)dv4[i] - (double)dv8[i]));
+    }
+    printf("[O47 A/B] main MLA 4-warp %.4f ms | 8-warp %.4f ms (%.3fx) | "
+           "max_abs(8w-vs-4w) dq=%.3e dk=%.3e dv=%.3e\n",
+           m4, m8, m4 / m8, dqd, dkd, dvd);
+    run_main();  // 恢复 CLI 选中路径
   }
 
   // ---- O7e-2 A/B（D=128）：fold 的 Ap/dS3/dS2 用 16B 向量化写 vs O7e 的 4B 写 ----

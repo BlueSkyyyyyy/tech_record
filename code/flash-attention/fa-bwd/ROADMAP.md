@@ -2649,7 +2649,27 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第九十三轮）**：**O46——MLA（D=512）mma 主 kernel 的「256 线程 / 8-warp 几何」
+> **最新（第九十四轮）**：**O47——fp8 MLA（D=512）主 kernel 的「256 线程 / 8-warp 几何」
+> （正结果，D=512 默认）**。落实 O45/O46 的唯一未证伪杠杆：把 `fp8_mma_body` +
+> `fa_bwd_fp8_mma_kernel` 的 warp 网格从写死 2×2 改成由模板参数 `NTH`/`NWAR` 派生
+> （`NWM=NTH/32/NWAR`、warp tile `GM1/GN1/GM34/GN34/GM5/GN5` 与 m/n-tile 全部派生、
+> `kv_*` helper 加 `NT`、fold 前 4 warp 即可覆盖 BN≤64）。默认 `128/2` 与历史**逐字等价**，
+> MLA 用 `256/4`（2×4）⇒ 1 CTA/SM 下每 scheduler warp 数 1→2。**ncu（S1024H2 main）：
+> occ 6.25%→12.49%、Active Warps/SM 4.00→7.99、Ipc 0.57→1.13、issue_active 14.4%→28.1%、
+> No Eligible 85.66%→71.95%、Duration 238.8→132.4µs、255→245 regs（无 spill）；
+> `lts__t_sectors_op_red` 6,684,672 逐字节不变**；墙仍是 long_scoreboard + wait + short。
+> **main 1.84×/1.62×/1.61×（S256H2/S512H4/S1024H2）**、total 0.0896/0.1996/0.2835→
+> **0.0694/0.1332/0.1927ms**（main-only 34.6 TF @S1024H2）；数值 vs fp32 ref 与历史逐值一致、
+> `max_abs(8w-vs-4w)≤5e-7`，D=128/GQA/MQA 回归逐位不变。`--mla8w=0/1` 同 binary A/B；
+> 单/两文件 device 逐字一致（`sync_onefile_device.py`）。**fp8 MLA main 现比 fp16/bf16 MLA
+> （O46）更快**（fp16 S1024H2 0.1409ms vs fp8 0.1243ms）。详见 `docs/03` §47。
+> **下一步候选**：① **fp16/bf16/fp8 D=128 主 kernel 是否也能吃 8-warp**（wgmma 路径已 256
+> 线程；mma fallback / GQA 的 3 CTA/SM 待测——需先看每 scheduler 是否 <2 warp）；
+> ② **fp8 MLA 的 `wait`+`short`（mma 依赖）**（O45/O47 一致：硬件资源锁死，需减 mma 依赖）；
+> ③ **MLA 降 smem 冲 2 CTA/SM**（四 dtype 共同墙，需消 Qp/dOp/Kp 83KB）；④ **varlen 主 kernel
+> K 维 split**（O43 varlen 负结果，需另找形态）。
+>
+> **（第九十三轮）**：**O46——MLA（D=512）mma 主 kernel 的「256 线程 / 8-warp 几何」
 > （正结果，D=512 默认）**。落实 O45 判决的「唯一剩余杠杆」：把 `fa_bwd_{fp16,bf16}_mma_kernel`
 > 的 warp 网格从写死 2×2 改成由 **模板参数 `NTH`/`NWAR` 派生**（`NWM=NTH/32/NWAR`；
 > `NTW≡128` 与 warp 数解耦；`kv/qdo_issue_async` 加默认 `NTH`；kernel 内 `THREADS`→`NTH`）。
@@ -3378,6 +3398,15 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       **occ 6.10%→12.36%、Ipc 0.57→0.65、Duration 155.1→145.4µs**、regs 168（+spill）→**151（0 spill）**；
       main 1.070–1.108×、total 1.00–1.07×，数值 vs ref 与 4-warp 逐值一致、D=128 回归逐位不变。
       `--mla8w=0/1` A/B；单/两文件 device 逐字一致。详见 `docs/01` §14z、`docs/01b` §6ah。
+- [x] **O47（第九十四轮）fp8 MLA（D=512）主 kernel 的「256 线程 / 8-warp 几何」
+      （正结果，D=512 默认）**：`fp8_mma_body`/`fa_bwd_fp8_mma_kernel` warp 网格由 `NTH`/`NWAR`
+      派生（`NWM=NTH/32/NWAR`、`GM1/GN1/GM34/GN34/GM5/GN5` 与 m/n-tile 同步、`kv_*` 加 `NT`、
+      fold 前 4 warp 覆盖 BN≤64）；默认 `128/2` 逐字等价，MLA 用 `256/4`（2×4）。ncu（S1024H2 main）：
+      **occ 6.25%→12.49%、Warps/SM 4→8、Ipc 0.57→1.13、issue_active 14.4%→28.1%、
+      Duration 238.8→132.4µs、255→245 regs、`red` 扇区逐字节不变**；**main 1.84×/1.62×/1.61×**、
+      total 0.0896/0.1996/0.2835→**0.0694/0.1332/0.1927ms**，数值 vs ref 与历史逐值一致、
+      D=128/GQA/MQA 回归逐位不变。`--mla8w=0/1` A/B；单/两文件 device 逐字一致。
+      详见 `docs/03` §47。
 
 ## 灵感 / backlog
 

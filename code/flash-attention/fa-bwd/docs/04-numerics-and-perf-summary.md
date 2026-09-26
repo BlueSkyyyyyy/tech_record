@@ -1568,3 +1568,27 @@ Duration 764.5→**228.7µs**、**Waves 0.48→0.97**、Issued Ipc 0.33→0.57�
 不可达，唯一剩余杠杆是 256 线程/8-warp 几何（backlog）。
 详见 `docs/01` §14y、`docs/01b` §6ag、`docs/03` §46。原始输出 `src/{fp16,bf16}/fa_bwd_*_o44_mla_sweep.out.txt`、
 `src/fp16/fa_bwd_fp16_o44_ncu_main_ks{1,2}_s1024h2.out.txt`、`src/fp8/fa_bwd_fp8_main_o45_sweep.out.txt`。
+
+## 20. fp8 MLA（D=512）8-warp 几何（O47，第九十四轮）—— 正结果，D=512 默认
+
+承接 O46（fp16/bf16 MLA 8-warp）与 O45（fp8 MLA 墙 = 1 warp/scheduler），把 `fp8_mma_body` /
+`fa_bwd_fp8_mma_kernel` 的 warp 网格改成由 `NTH`/`NWAR` 派生：默认 `128/2` 与历史**逐字等价**，
+MLA 用 `256/4`（2×4）。**同一 binary 的 `--mla8w=0/1` A/B**：
+
+| MLA case | dtype | main 4w | **main 8w** | main 比 | total 4w→8w | main-only TF（峰值 1978.8） |
+|---|---|---|---|---|---|---|
+| (1,256,2,512) | fp8 | 0.0435 | **0.0237** | 1.84× | 0.0896→**0.0694** | 11.3（0.57%） |
+| (1,512,4,512) | fp8 | 0.1192 | **0.0737** | 1.62× | 0.1996→**0.1332** | 29.1（1.47%） |
+| (1,1024,2,512) | fp8 | 0.1998 | **0.1243** | 1.61× | 0.2835→**0.1927** | 34.6（1.75%） |
+
+**数值**：vs fp32 ref 与历史逐值一致（2.356/2.290/3.441e-1、2.415/2.992/4.481e-1、
+2.232/3.337/3.602e-1），`max_abs(8w-vs-4w)≤5e-7`（仅 atomic 次序）；D=128 MHA/GQA/MQA
+回归逐位不变（S4096 2.635/2.644/3.216e-1、GQA kv4 2.517/5.34/7.17e-1）。FA/TE 反向不支持
+D=512，仅 ours 数字。
+
+**ncu**（S1024H2 main）：occ **6.25%→12.49%**、Active Warps/SM 4→8、Issued Ipc 0.57→1.13、
+`sm__issue_active` 14.4%→28.1%、No Eligible 85.66%→71.95%、Duration 238.8→**132.4µs**、
+255→245 regs（无 spill）、`lts__t_sectors_op_red` **6,684,672 逐字节不变**；stall 仍由
+`long_scoreboard`（L2/全局）主导 + `wait`（mma 依赖）+ `short_scoreboard`（smem→mma）。
+⇒ 提升来自**延迟隐藏/并行度**（每 scheduler 1→2 warp），非带宽/算力。详见 `docs/03` §47、
+`docs/08` §5.12。

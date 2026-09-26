@@ -673,7 +673,7 @@ __device__ __forceinline__ void mma_block_bt(const unsigned char* As, int asld,
 //   * 打包写 Kp[rp][dq..]（uint16，元素 = 相邻两行的同一 d），供 GEMM5 用 `ldmatrix.x2.trans`。
 //   * 打包用 `__byte_perm(a, b, 0x5140/0x7362)` 做字节交织（一次 4B 写两个 uint16）。
 // 与 O3 一致仍用**寄存器双缓冲预取**（不额外占 smem），只是每线程预取的是 NPU 个 unit。
-template <int NPU, int HD>
+template <int NPU, int HD, int NT = THREADS>
 __device__ __forceinline__ void kv_prefetch_pair(const unsigned char* __restrict__ k8,
                                                  const unsigned char* __restrict__ v8,
                                                  int j0, int S, int Hkv, int hkv, int qbase,
@@ -682,7 +682,7 @@ __device__ __forceinline__ void kv_prefetch_pair(const unsigned char* __restrict
   const int nd4 = HD / 4;
 #pragma unroll
   for (int e = 0; e < NPU; ++e) {
-    int u = tid + e * THREADS;
+    int u = tid + e * NT;
     int rp = u / nd4, dq = (u % nd4) * 4;
     int jr = j0 + rp * 2;
     uint32_t k0 = 0, k1 = 0, v0 = 0, v1 = 0;
@@ -704,7 +704,7 @@ __device__ __forceinline__ void kv_prefetch_pair(const unsigned char* __restrict
 }
 
 // O9c-2：`SW=true` 时 Ks/Vs 写 SW128（供 wgmma GEMM1/2 直读），否则写行主序。Kp 恒定。
-template <int NPU, int HD, bool SW = false>
+template <int NPU, int HD, bool SW = false, int NT = THREADS>
 __device__ __forceinline__ void kv_commit_pair(unsigned char* Ks, unsigned char* Vs,
                                                uint16_t* Kp, const uint32_t* pk0,
                                                const uint32_t* pk1, const uint32_t* pv0,
@@ -713,7 +713,7 @@ __device__ __forceinline__ void kv_commit_pair(unsigned char* Ks, unsigned char*
   const int nd4 = HD / 4;
 #pragma unroll
   for (int e = 0; e < NPU; ++e) {
-    int u = tid + e * THREADS;
+    int u = tid + e * NT;
     int rp = u / nd4, dq = (u % nd4) * 4;
     if constexpr (SW) {
       *reinterpret_cast<uint32_t*>(Ks + sw128_off_fp8(rp * 2, dq, HD)) = pk0[e];
@@ -733,7 +733,7 @@ __device__ __forceinline__ void kv_commit_pair(unsigned char* Ks, unsigned char*
 }
 
 // HD>128（MLA）时的直接向量化载入（无寄存器预取）。NDQ 个 unit grid-stride。
-template <int HD, int BN, bool SW = false>
+template <int HD, int BN, bool SW = false, int NT = THREADS>
 __device__ __forceinline__ void kv_load_pair(const unsigned char* __restrict__ k8,
                                              const unsigned char* __restrict__ v8,
                                              int j0, int S, int Hkv, int hkv, int qbase, int tid,
@@ -748,7 +748,7 @@ __device__ __forceinline__ void kv_load_pair(const unsigned char* __restrict__ k
 #endif
   const int nd4 = HD / 4;
   const int units = (BN / 2) * nd4;
-  for (int u = tid; u < units; u += THREADS) {
+  for (int u = tid; u < units; u += NT) {
     int rp = u / nd4, dq = (u % nd4) * 4;
     int jr = j0 + rp * 2;
     uint32_t k0 = 0, k1 = 0, v0 = 0, v1 = 0;
@@ -1714,8 +1714,13 @@ __global__ void delta_warp_kernel(const float* __restrict__ o,
 // O37：把主 kernel 的**函数体**抽成 device 函数，好让「cp.async 版」与「TMA 版」两个 `__global__`
 //   壳复用同一份逻辑（避免 700 行重复）。`TMA=true` 时 Q/dO 用 4D-TMA 一次性搬进 SW128 tile
 //   （`qmap`/`dmap` 为描述符，仅 WGMMA/HD=128 路径实例化），K/V 仍走原路径。
+// O47：warp 网格由模板参数 `NTH`（线程数）+ `NWAR`（N 方向 warp 数）派生——对齐 fp16 O46。
+//   默认 `NTH=128/NWAR=2`（2×2 网格）与历史逐字等价；fp8 MLA（D=512）用 `NTH=256/NWAR=4`
+//   （2×4 网格）⇒ 1 CTA/SM 下 8 warp、每 scheduler 2 warp（O45 诊断的唯一剩余杠杆）。
+//   `NWM=NTH/32/NWAR` 为 M 方向 warp 数。各 warp tile 由 NWM/NWAR 派生（见下方 GM*/GN*）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
-          bool RCP = true, bool TMA = false, bool KVTMA = false>
+           bool RCP = true, bool TMA = false, bool KVTMA = false, int NTH = THREADS,
+           int NWAR = WN>
 __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8,
@@ -1734,6 +1739,11 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                       const int* __restrict__ mt_b = nullptr,
                       const int* __restrict__ mt_m = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
+  // O47：warp 网格派生。默认 128/2 ⇒ NWM=2 与历史 2×2 一致（逐字等价）。
+  constexpr int NWM = NTH / 32 / NWAR;
+  static_assert(NWM * NWAR * 32 == NTH, "NTH 必须 = NWM×NWAR×32");
+  static_assert(WGMMA == false || (NTH == THREADS && NWAR == WN),
+                "WGMMA 是 warpgroup 级，此 body 只在 4-warp/1 个 warpgroup 下正确");
   constexpr int ASLD = Cfg::ASLD;
   constexpr int PSLD = Cfg::PSLD;
   constexpr int QTS = Cfg::QTS;
@@ -1752,12 +1762,17 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   // GEMM3/4/5 的输出 N 维 = head_dim；每遍处理 NTW = WN*64 = 128 列，共 HD/NTW 遍。
   constexpr int NTW = WN * 64;
   static_assert(HD % NTW == 0, "HD 必须是 128 的整数倍");
-  // O21：主 kernel 的 KV tile BN 参数化（原写死 BN=32）。4 个 warp 按 2×2 排布：
-  //   GEMM1/2 的 warp 块 = (BM/2, BN/2)；GEMM3/4 输出 M=BN（KV 行），warp 块 = (BN/2, NTW)；
-  //   GEMM5 输出 M=BM，warp 块 = (BM/2, NTW)。这里把 mma 累加器的 m/n-tile 数派生出来。
-  constexpr int MTM = (BM / 2) / 16;   // GEMM1/2 每 warp 的 m-tile 数（BM=64→2）
-  constexpr int MTN = (BN / 2) / 8;    // GEMM1/2 每 warp 的 n-tile 数（BN=32→2，BN=64→4）
-  constexpr int MTM34 = (BN / 2) / 16; // GEMM3/4 每 warp 的 m-tile 数（BN=32→1，BN=64→2）
+  // O21：主 kernel 的 KV tile BN 参数化（原写死 BN=32）。O47：warp 网格从写死 2×2 改为由
+  //   NWM/NWAR 派生——默认 128/2（2×2）与历史逐字一致；MLA 用 256/4（2×4）。
+  //   GEMM1/2 的 warp 块 = (BM/NWM, BN/NWAR)；GEMM3/4 输出 M=BN（KV 行），warp 块 =
+  //   (BN/NWM, NTW/NWAR)；GEMM5 输出 M=BM，warp 块 = (BM/NWM, NTW/NWAR)。
+  constexpr int GM1 = BM / NWM, GN1 = BN / NWAR;     // GEMM1/2 warp tile
+  constexpr int GM34 = BN / NWM, GN34 = NTW / NWAR;  // GEMM3/4 warp tile（N-tile 内）
+  constexpr int GM5 = BM / NWM, GN5 = NTW / NWAR;    // GEMM5 warp tile（N-tile 内）
+  static_assert(BM % NWM == 0 && BN % NWAR == 0 && NTW % NWAR == 0, "warp tile 必须整除");
+  constexpr int MTM = GM1 / 16, MTN = GN1 / 8;        // GEMM1/2 每 warp 的 m/n-tile 数
+  constexpr int MTM34 = GM34 / 16, NTM34 = GN34 / 8;  // GEMM3/4 每 warp 的 m/n-tile 数
+  constexpr int MTM5 = GM5 / 16, NTM5 = GN5 / 8;      // GEMM5 每 warp 的 m/n-tile 数
   constexpr int NTFOLD = BN / 32;      // fold 时每 warp 负责的 j 行份数（BN=32→1，BN=64→2）
   // O7：本实例是否把 dQ 沿 nt 累加在寄存器里（见 kernel 上方的说明）。
   constexpr bool kRegDq = REGDQ && (HD / NTW == 1);
@@ -1839,7 +1854,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   // P5-3：GQA/MQA——Q 头 h 对应 KV 头 hkv；Q/dO/dQ 用 H，K/V/dK/dV 用 Hkv。
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
-  const int wr = wid / WN, wc = wid % WN;
+  const int wr = wid / NWAR, wc = wid % NWAR;  // O47：warp 网格 NWM×NWAR
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * BM;
   if (m0 >= len) return;  // VARLEN：超出本序列长度的 m 块直接退出
@@ -1898,7 +1913,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     }
     __syncthreads();
     const int nd4t = HD / 4;
-    for (int u = tid; u < (BM / 2) * nd4t; u += THREADS) {
+    for (int u = tid; u < (BM / 2) * nd4t; u += NTH) {
       int rp = u / nd4t, dq = (u % nd4t) * 4;
       uint32_t q0 = *reinterpret_cast<const uint32_t*>(Qs + sw128_off_fp8(rp * 2, dq, HD));
       uint32_t q1 = *reinterpret_cast<const uint32_t*>(Qs + sw128_off_fp8(rp * 2 + 1, dq, HD));
@@ -1913,7 +1928,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     }
     if (KVTMA) {
       // 从 SW128 K[0] 重建 Kp（K 配对布局，供 GEMM5 的 ldmatrix.x2.trans）。
-      for (int u = tid; u < (BN / 2) * nd4t; u += THREADS) {
+      for (int u = tid; u < (BN / 2) * nd4t; u += NTH) {
         int rp = u / nd4t, dq = (u % nd4t) * 4;
         uint32_t k0 = *reinterpret_cast<const uint32_t*>(Ks + sw128_off_fp8(rp * 2, dq, HD));
         uint32_t k1 = *reinterpret_cast<const uint32_t*>(Ks + sw128_off_fp8(rp * 2 + 1, dq, HD));
@@ -1925,7 +1940,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   } else {
   {
     const int nd4 = HD / 4;
-    for (int u = tid; u < (BM / 2) * nd4; u += THREADS) {
+    for (int u = tid; u < (BM / 2) * nd4; u += NTH) {
       int rp = u / nd4, dq = (u % nd4) * 4;
       int qa = m0 + rp * 2, qb = m0 + rp * 2 + 1;
       uint32_t q0 = 0, q1 = 0, o0 = 0, o1 = 0;
@@ -1978,11 +1993,11 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       vs_s[tid] = (jg < len) ? vs[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
     }
   } else if (kPrefetch) {
-    kv_prefetch_pair<NPU, HD>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
+    kv_prefetch_pair<NPU, HD, NTH>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
                               pv1);
-    kv_commit_pair<NPU, HD, WGMMA>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
+    kv_commit_pair<NPU, HD, WGMMA, NTH>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
   } else {
-    kv_load_pair<HD, BN, WGMMA>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, Ks, Vs, Kp, ASLD,
+    kv_load_pair<HD, BN, WGMMA, NTH>(k8, v8, nt_begin * BN, len, Hkv, hkv, qbase, tid, Ks, Vs, Kp, ASLD,
                          PSLD);
   }
   if (!KVTMA && tid < BN) {
@@ -2058,7 +2073,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     // ---- O3：预取下一 tile 的 K/V 到寄存器（延迟被本轮 5 个 GEMM 覆盖）----
     const int nnt = nt + 1;
     if (!KVTMA && kPrefetch && nnt < nt_end)
-      kv_prefetch_pair<NPU, HD>(k8, v8, nnt * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
+      kv_prefetch_pair<NPU, HD, NTH>(k8, v8, nnt * BN, len, Hkv, hkv, qbase, tid, pk0, pk1, pv0,
                                 pv1);
 
     // ---- (1) S = scale·QKᵀ  →  P = exp(S − LSE)，存 fp32 ----
@@ -2127,9 +2142,9 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
           for (int j = 0; j < MTN; ++j)
 #pragma unroll
             for (int q = 0; q < 4; ++q) { acc[i][j][q] = 0.f; acc2[i][j][q] = 0.f; }
-        mma_block<BM / 2, BN / 2, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
-        mma_block<BM / 2, BN / 2, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc2, wr, wc, lane);
-        const int r0 = wr * (BM / 2), c0 = wc * (BN / 2);
+        mma_block<GM1, GN1, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
+        mma_block<GM1, GN1, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc2, wr, wc, lane);
+        const int r0 = wr * GM1, c0 = wc * GN1;
 #pragma unroll
         for (int i = 0; i < MTM; ++i)
 #pragma unroll
@@ -2174,8 +2189,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
         for (int j = 0; j < MTN; ++j)
 #pragma unroll
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-      mma_block<BM / 2, BN / 2, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
-      const int r0 = wr * (BM / 2), c0 = wc * (BN / 2);
+      mma_block<GM1, GN1, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
+      const int r0 = wr * GM1, c0 = wc * GN1;
 #pragma unroll
       for (int i = 0; i < MTM; ++i)
 #pragma unroll
@@ -2210,8 +2225,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
           for (int j = 0; j < MTN; ++j)
 #pragma unroll
             for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-        mma_block<BM / 2, BN / 2, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc, wr, wc, lane);
-        const int r0 = wr * (BM / 2), c0 = wc * (BN / 2);
+        mma_block<GM1, GN1, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc, wr, wc, lane);
+        const int r0 = wr * GM1, c0 = wc * GN1;
 #pragma unroll
         for (int i = 0; i < MTM; ++i)
 #pragma unroll
@@ -2242,7 +2257,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     // 线程空等；现改为**全部 128 线程均衡分工**：warp 内 4 lane 一组做一行 amax 的
     // `__shfl_xor_sync` 归约。fmaxf 可交换结合 ⇒ amax 结果与原顺序**逐位相同**，除法/量化
     // 也逐元素一致，故数值仍与 O3 逐位相同；但这一段的墙钟缩短约 4×（Amax/写入都并行）。
-    {
+    if (wid < 4) {  // O47：BN≤64 ⇒ 4 个 warp 即可覆盖 j（8 行/warp×NTFOLD）；NTH=256 时余下 warp 空等
       // Ap[j][m]=P[m][j]*dos[m] (e4m3, per-j) 与 dS3[j][m]=dS[m][j]*qs[m] (e5m2, per-j)
       // O21：BN 参数化——每 warp 负责 NTFOLD 份 j 行（每份 8 行），j = wid*8 + jl + jh*32。
       const int jl = lane >> 2, sub4 = lane & 3;  // 每 warp 8 行 × 4 lane 分工
@@ -2327,7 +2342,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
         }
       }
     }
-    {
+    if (wid < 4) {  // O47：BM=64 ⇒ 4 个 warp（16 行/warp）即可覆盖 m；NTH=256 时余下 warp 空等
       // dS2[m][j] = dS[m][j]*ks[j] (e5m2, per-m)：每 warp 16 行 × 2 lane 分工。
       // O21：BN 参数化——amax2 需覆盖全部 BN 个 j（NTFOLD 份，j 跨 jh*32），
       //   dS2 的 16B 向量写每份落在 `sub2*16 + jh*32`。
@@ -2383,21 +2398,21 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       // ---- (3) dV = Pᵀ·dO  : A=Ap[j][m] (e4m3), B=dOp[m/2][d0+..] (e5m2, ldmatrix.trans) ----
       // ---- (4) dK = scale·dSᵀ·Q : A=dS3[j][m] (e5m2), B=Qp[m/2][d0+..] (e4m3, ldmatrix.trans) ----
       // O29：把两段 epilogue 抽成 lambda，`FA_ILV34` 时先连发两条 mma 再做 epilogue（见宏说明）。
-      auto zero34 = [&](float (&acc)[MTM34][8][4]) {
+      auto zero34 = [&](float (&acc)[MTM34][NTM34][4]) {
 #pragma unroll
         for (int i = 0; i < MTM34; ++i)
 #pragma unroll
-          for (int j = 0; j < 8; ++j)
+          for (int j = 0; j < NTM34; ++j)
 #pragma unroll
             for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
       };
-      auto epi_dv = [&](float (&acc)[MTM34][8][4]) {
-        const int r0 = wr * (BN / 2), c0 = wc * 64;
+      auto epi_dv = [&](float (&acc)[MTM34][NTM34][4]) {
+        const int r0 = wr * GM34, c0 = wc * GN34;
         float* wstg = pstg + wid * (STGR * STGS);
 #pragma unroll
         for (int i = 0; i < MTM34; ++i)
 #pragma unroll
-          for (int j = 0; j < 8; ++j)
+          for (int j = 0; j < NTM34; ++j)
 #pragma unroll
             for (int q = 0; q < 4; ++q) {
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
@@ -2417,13 +2432,13 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
               }
             }
       };
-      auto epi_dk = [&](float (&acc)[MTM34][8][4]) {
-        const int r0 = wr * (BN / 2), c0 = wc * 64;
+      auto epi_dk = [&](float (&acc)[MTM34][NTM34][4]) {
+        const int r0 = wr * GM34, c0 = wc * GN34;
         float* wstg = pstg + wid * (STGR * STGS);
 #pragma unroll
         for (int i = 0; i < MTM34; ++i)
 #pragma unroll
-          for (int j = 0; j < 8; ++j)
+          for (int j = 0; j < NTM34; ++j)
 #pragma unroll
             for (int q = 0; q < 4; ++q) {
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
@@ -2465,26 +2480,26 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       };
 #if FA_ILV34
       {
-        float a3[MTM34][8][4], a4[MTM34][8][4];
+        float a3[MTM34][NTM34][4], a4[MTM34][NTM34][4];
         zero34(a3);
         zero34(a4);
-        mma_block_bt<BN / 2, 64, BM, E4E5>(Ap, QTS, dOp, PSLD, a3, wr, wc, lane, d0);
-        mma_block_bt<BN / 2, 64, BM, E5E4>(dS3, QTS, Qp, PSLD, a4, wr, wc, lane, d0);
+        mma_block_bt<GM34, GN34, BM, E4E5>(Ap, QTS, dOp, PSLD, a3, wr, wc, lane, d0);
+        mma_block_bt<GM34, GN34, BM, E5E4>(dS3, QTS, Qp, PSLD, a4, wr, wc, lane, d0);
         epi_dv(a3);
         epi_dk(a4);
       }
 #else
       {
-        float acc[MTM34][8][4];
+        float acc[MTM34][NTM34][4];
         zero34(acc);
-        mma_block_bt<BN / 2, 64, BM, E4E5>(Ap, QTS, dOp, PSLD, acc, wr, wc, lane, d0);
+        mma_block_bt<GM34, GN34, BM, E4E5>(Ap, QTS, dOp, PSLD, acc, wr, wc, lane, d0);
         epi_dv(acc);
       }
       if constexpr (kBulkRed) bulk_issue(dv_acc);
       {
-        float acc[MTM34][8][4];
+        float acc[MTM34][NTM34][4];
         zero34(acc);
-        mma_block_bt<BN / 2, 64, BM, E5E4>(dS3, QTS, Qp, PSLD, acc, wr, wc, lane, d0);
+        mma_block_bt<GM34, GN34, BM, E5E4>(dS3, QTS, Qp, PSLD, acc, wr, wc, lane, d0);
         // O42：GEMM4 mma 与 dV 的 TMA 归约重叠；覆盖 staging 前再等它读完。
         if constexpr (kBulkRed) bulk_waitread();
         epi_dk(acc);
@@ -2494,19 +2509,19 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 
       // ---- (5) dQ += scale·dS·K : A=dS2[m][j] (e5m2), B=Kp[j/2][d0+..] (e4m3, ldmatrix.trans) ----
       {
-        float acc[2][8][4];
+        float acc[MTM5][NTM5][4];
 #pragma unroll
-        for (int i = 0; i < 2; ++i)
+        for (int i = 0; i < MTM5; ++i)
 #pragma unroll
-          for (int j = 0; j < 8; ++j)
+          for (int j = 0; j < NTM5; ++j)
 #pragma unroll
             for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
-        mma_block_bt<32, 64, BN, E5E4>(dS2, DSS2, Kp, PSLD, acc, wr, wc, lane, d0);
-        const int r0 = wr * 32, c0 = wc * 64;
+        mma_block_bt<GM5, GN5, BN, E5E4>(dS2, DSS2, Kp, PSLD, acc, wr, wc, lane, d0);
+        const int r0 = wr * GM5, c0 = wc * GN5;
 #pragma unroll
-        for (int i = 0; i < 2; ++i)
+        for (int i = 0; i < MTM5; ++i)
 #pragma unroll
-          for (int j = 0; j < 8; ++j)
+          for (int j = 0; j < NTM5; ++j)
 #pragma unroll
             for (int q = 0; q < 4; q += 2) {
               // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
@@ -2556,7 +2571,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
         __syncthreads();
         const unsigned char* Kb = Ks + (stg ^ 1) * KS_SZ;
         const int nd4k = HD / 4;
-        for (int u = tid; u < (BN / 2) * nd4k; u += THREADS) {
+        for (int u = tid; u < (BN / 2) * nd4k; u += NTH) {
           int rp = u / nd4k, dq = (u % nd4k) * 4;
           uint32_t k0 = *reinterpret_cast<const uint32_t*>(Kb + sw128_off_fp8(rp * 2, dq, HD));
           uint32_t k1 = *reinterpret_cast<const uint32_t*>(Kb + sw128_off_fp8(rp * 2 + 1, dq, HD));
@@ -2570,9 +2585,9 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       }
     } else if (nt + 1 < nt_end) {
       if (kPrefetch) {
-        kv_commit_pair<NPU, HD, WGMMA>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
+        kv_commit_pair<NPU, HD, WGMMA, NTH>(Ks, Vs, Kp, pk0, pk1, pv0, pv1, tid, ASLD, PSLD);
       } else {
-        kv_load_pair<HD, BN, WGMMA>(k8, v8, (nt + 1) * BN, len, Hkv, hkv, qbase, tid, Ks, Vs, Kp, ASLD,
+        kv_load_pair<HD, BN, WGMMA, NTH>(k8, v8, (nt + 1) * BN, len, Hkv, hkv, qbase, tid, Ks, Vs, Kp, ASLD,
                              PSLD);
       }
       if (tid < BN) {
@@ -2604,9 +2619,10 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 
 // O37：两个薄 `__global__` 壳复用同一 `fp8_mma_body`。cp.async 版与 TMA 版签名只差两个
 //   `__grid_constant__` 描述符（`TMA=true` 才用到）。
+// O47：`NTH`/`NWAR` 同 `fp8_mma_body`（默认 128/2 与历史逐字等价；MLA 用 256/4）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
-          bool RCP = true>
-__global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
+          bool RCP = true, int NTH = THREADS, int NWAR = WN>
+__global__ void __launch_bounds__(NTH, (NTH == THREADS && HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8, const float* __restrict__ ks,
                       const unsigned char* __restrict__ v8, const float* __restrict__ vs,
@@ -2617,7 +2633,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
                       const int* __restrict__ mt_b = nullptr,
                       const int* __restrict__ mt_m = nullptr) {
-  fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false>(
+  fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, nullptr, nullptr, nullptr, nullptr, mt_b, mt_m);
 }
