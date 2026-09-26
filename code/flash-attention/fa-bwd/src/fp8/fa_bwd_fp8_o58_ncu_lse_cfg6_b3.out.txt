@@ -1,0 +1,48 @@
+fa_bwd_fp8_kernels.cuh(3171): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1328 of fa_bwd_fp8_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kernels.cuh(2879): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1328 of fa_bwd_fp8_main.cu
+
+==PROF== Connected to process 934618 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_main.out)
+==PROF== Profiling "lse_mma_kernel_bal": 0%....50%....100% - 11 passes
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp8
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 256 768 1792
+O40: varlen lse k-split = 16 (base=48)
+[timing] VARLEN total 0.5388 ms  10.46 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 2 x 3 (nocompact, ksplit=4, total_mt=28) | use_regdq=0 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.3428 ms | 8w 0.1972 ms (1.738x) | 8w+kvpipe 0.1878 ms (1.825x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07 | max_abs(kvp-vs-8w) dq=1.192e-07 dk=3.576e-07 dv=4.768e-07
+[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.1452 split2 0.1239 split4 0.1227 split8 0.1252 split16 0.1244 ms
+[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.1616 split2 0.1225 split4 0.1235 split8 0.1235 split16 0.1246 ms
+[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.2314 split2 0.1250 split4 0.1233 split8 0.1246 split16 0.1258 ms
+[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.1689 split2 0.1237 split4 0.1237 split8 0.1240 split16 0.1244 ms
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.404e-01  max_rel=3.292e+02  (ours_amax=3.980e+00 ref_amax=3.983e+00 @1230)
+  dk  vs ref: max_abs=3.436e-01  max_rel=9.549e+01  (ours_amax=3.468e+00 ref_amax=3.354e+00 @787007)
+  dv  vs ref: max_abs=3.508e-01  max_rel=1.678e+02  (ours_amax=5.212e+00 ref_amax=5.148e+00 @262845)
+==PROF== Disconnected from process 934618
+[934618] fa_bwd_fp8_main.out@127.0.0.1
+  void lse_mma_kernel_bal<512, 1, 0, 128, 16>(const unsigned char *, const float *, const unsigned char *, const float *, float *, int, int, int, float, const int *, float *, int) (8, 2, 48)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    gpu__time_duration.sum                                                                 us        27.07
+    l1tex__throughput.avg.pct_of_peak_sustained_active                                      %        28.19
+    launch__registers_per_thread                                              register/thread           58
+    launch__shared_mem_per_block_allocated                                        Kbyte/block        52.10
+    lts__throughput.avg.pct_of_peak_sustained_active                                        %        35.29
+    sm__throughput.avg.pct_of_peak_sustained_active                                         %        47.17
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        18.26
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         0.89
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         0.46
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.97
+    ------------------------------------------------------------------------- --------------- ------------
+

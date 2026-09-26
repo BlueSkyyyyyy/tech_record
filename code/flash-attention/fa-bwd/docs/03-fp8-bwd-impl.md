@@ -4827,3 +4827,76 @@ fp16/bf16 的 384 更大——实测 b3 最优 k=8、b1 k=8，故取 768 让 b3 
 
 原始输出：`src/fp8/fa_bwd_fp8_o54_varlen_full_b3.out.txt`（两文件）、
 `..._o54_varlen_full_b3_onefile.out.txt`（单文件）、`..._o54_varlen_causal_reg_b3.out.txt`（回归）。
+
+## 54. O58-fp8（第一百零五轮，**正结果，causal varlen 默认；full opt-in**）：fp8 MLA varlen LSE 的 2 CTA/SM / 8-warp 几何
+
+### 54.1 动机与改动
+
+O54 给 fp8 的 full MLA varlen 接了 `lse_mma_kernel_bal<512,1,true>`（FULL，K 维 split），
+但 fp8 的 **causal** MLA varlen LSE 一直是 `<512,1>`（PIPE1/LBN64），且 fp8 侧**从未**做
+O56/O57 的「8-warp / 2 CTA/SM」几何（O56 曾刻意不扩到 fp8，因 fp16/bf16 在 full 上判负）。
+本轮把 fp16/bf16 的 **O58（§15e）** 同构到 fp8，并顺带补做 fp8 的 O56/O57。
+
+**device（fp8 `lse_mma_kernel_bal`）**：模板由 `<HD,PIPE,FULL>` 参数化为
+`<HD,PIPE,FULL,NTH=THREADS,LBN_=LBN>`（`LBM_=(NTH/32)*16`、`MTN=LBN_/8`、`KVL=LBN_*ASLD`；
+`issue_q/issue_k` 步长用 `NTH`、`acc[1][MTN][4]`、`mma_block<16,LBN_,HD,E4E4>`），默认档与原版
+**逐位等价**；单文件 device 由 `sync_onefile_device.py` 同步（`identical: True`）。
+
+**host（`run_varlen` + `launch_lse_bal` 参数化 + `--lseocc/--lse8w`）**：
+- **causal 默认改为 cfg6**（`<512,1,false,128,16>`，PIPE1/LBN16），`--lseocc=4` 退回旧默认、
+  `5`=P0/LBN32、`--lse8w=1`=8-warp（NTH=256/LBM=128/LBN=32）；cfg5/6 的 split auto 目标
+  由 256 提到 **1024**（b1→8 cap、b3→16，A/B 最优附近）。
+- **full 仍默认 O54 旧路**（O56/O57 判该杠杆在 full 上为混合/小正），`--lseocc=6`/`--lse8w=1`
+  opt-in；`[O58 A/B]` 在同 binary 内扫 legacy/cfg6/cfg5/8w × split（LSE-only）。
+
+> **与 fp16/bf16 的关键差异**：fp8 一元素 1B ⇒ LSE smem 只有 fp16/bf16 的一半。
+> **旧默认 P1/LBN64 已是 100,608B（< 116,224B）⇒ 本就 2 CTA/SM**；cfg6 的 49,920B 则给到
+> **4 CTA/SM**。所以 fp8 的「2 CTA/SM」不是新门槛，cfg6 的收益来自**再翻一档 occupancy**。
+
+### 54.2 结果（同 session event）
+
+| case | 旧默认 P1/LBN64 | **新默认 cfg6** | 比值 | 8-warp | cfg5 |
+|---|---|---|---|---|---|
+| b1_t512 causal，LSE 最优 | split8 0.0251 | split16 **0.0198** | **1.27×** | 0.0224 | 0.0326 |
+| b3_t1792 causal，LSE 最优 | split8 0.0366 | split16 **0.0319** | **1.15×** | 0.0338 | 0.0563 |
+| b1 total | 0.1006 ms | **0.0965 ms** | **1.04×** | — | — |
+| b3 total | 0.2997 ms | **0.2789 ms** | **1.07×** | — | — |
+| b3 full total（O57-fp8，opt-in） | 0.3440 ms | `--lseocc=6` 0.3413 / `--lse8w=1` **0.3404** | 1.008–1.011× | — | — |
+
+⇒ **causal 上 cfg6 是稳定净正**（端到端 1.04–1.07×），**causal 默认切 cfg6**；
+full 上同 fp16/bf16 只小正（LSE 1.06–1.15×、端到端 ~1%），保持 **opt-in**。
+
+### 54.3 数值（ours vs fp32 ref，max_abs dq/dk/dv）
+
+b1 causal `1.613e-1/2.238e-1/3.864e-1`、b3 causal `3.404e-1/3.436e-1/3.508e-1`（与 O53 fp8
+causal 历史**逐位相同**）；full b3 与 O54 同量级。单/两文件逐指标一致
+（b3 onefile total 0.2781 vs 两文件 0.2789ms）。D=128 varlen 回归正常
+（b1_t512_h16 causal total 0.1104ms、vs ref 2.28e-1/3.11e-1/3.42e-1）；
+固定 MLA 回归 S1024H2 causal vs ref `2.232/3.337/3.602e-1` 不变。
+
+### 54.4 ncu（fp8 b3 causal，同 split16，`-c 1`）
+
+| | 旧默认 P1/LBN64 | **cfg6 P1/LBN16** |
+|---|---|---|
+| `gpu__time_duration` | 40.70 µs | **27.07 µs（1.50×）** |
+| `sm__warps_active` | 11.14%（≈2 CTA） | **18.26%（≈4 CTA）** |
+| `launch__shared_mem_per_block` | 103.17 KB | **52.10 KB** |
+| `sm__throughput` | 34.84% | **47.17%** |
+| `l1tex__throughput` | 17.76% | 28.19% |
+| `short_scoreboard` / `wait` / `long` stall | 0.51 / 2.02 / 0.34 | 0.46 / **1.97** / 0.89 |
+
+**结论**：fp8 旧默认本就 2 CTA/SM，cfg6 把 smem 砍到 ~50KB ⇒ **4 CTA/SM**，occupancy
+11.14%→18.26%、Duration 1.50×；`wait`（mma/softmax 固定延迟）仍是头号，但被更多 CTA 摊薄。
+**bound = compute/softmax + `wait` 的固定延迟 + occupancy**（不再是 smem 容量）。
+
+### 54.5 复现 / 原始输出
+
+```bash
+F='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+ARCH="" NVCC_FLAGS="$F" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --varlen --causal --iters=50 /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp8
+# A/B：--lseocc=4（旧默认）/ 6 / 5 / --lse8w=1；full 用 --full
+```
+原始输出：`src/fp8/fa_bwd_fp8_o58_varlen_causal_b{1,3}.out.txt`、
+`..._b{1,3}_legacy.out.txt`、`..._b3_onefile.out.txt`、`..._o58_varlen_full_b3.out.txt`、
+`..._o58_ncu_lse_{cfg6,legacy}_b3.out.txt`。

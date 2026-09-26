@@ -1854,3 +1854,34 @@ tile/barrier 变 4×，`short_scoreboard`+`wait` 上升抵消之；只有长 K�
 tile 依赖，不是可被 CTA occupancy 掩盖的访存延迟；默认 `--lseocc=0`。**
 数值 vs fp32 ref 与 O54–O56 **逐位相同**（fp16 b3 5.516/4.451/2.385e-4；bf16 3.100/3.526/2.316e-3）。
 详见 `docs/01` §15d、`docs/01b` §6aq。
+
+## 30. O58（第一百零五轮）：causal MLA varlen 的 LSE 冲 2 CTA/SM（fp16/bf16/fp8）—— **正结果，causal 默认**
+
+补齐 O56/O57 只做 **full** 的缺口：把 LSE 的几何候选（cfg6 的 2 CTA/SM、8-warp）搬到
+**causal 镜像配对版** `lse_mma_kernel_bal<512,1>`（fp16/bf16 host-only；fp8 顺带把 device
+模板参数化为 `<HD,PIPE,FULL,NTH,LBN_>`）。**causal 默认切 cfg6**
+（`<512,1,false,128,16>`，PIPE1/LBN16），`--lseocc=4` 退回旧默认、`--lse8w=1` opt-in；
+full 仍走 O54 旧路（O56/O57 判其混合）。
+
+| dtype / case (causal) | 旧默认 P1/LBN64 | **新默认 cfg6** | LSE 比 | 端到端 total 比 |
+|---|---|---|---|---|
+| fp16 b1_t512 | LSE 0.0213 (sp8) | **0.0180 (sp16)** | 1.18× | 0.0836 → **0.0783 ms（1.07×）** |
+| fp16 b3_t1792 | LSE 0.0388 (sp4) | **0.0318 (sp8)** | 1.22× | 0.3517 → **0.3206 ms（1.10×）** |
+| bf16 b1_t512 | 0.0213 | **0.0180** | 1.18× | 0.0836 → **0.0783 ms（1.07×）** |
+| bf16 b3_t1792 | 0.0388 | **0.0321** | 1.21× | 0.3517 → **0.3206 ms（1.10×）** |
+| fp8 b1_t512 | 0.0251 (sp8) | **0.0198 (sp16)** | 1.27× | 0.1006 → **0.0965 ms（1.04×）** |
+| fp8 b3_t1792 | 0.0366 (sp8) | **0.0319 (sp16)** | 1.15× | 0.2997 → **0.2789 ms（1.07×）** |
+
+**ncu / mechanism**：fp16/bf16 旧默认 199.7KB = **1 CTA/SM**，cfg6 99.8KB = **2 CTA/SM**：
+b3 causal 同 split8 下 Duration **43.07→30.24µs（1.42×）**、`sm__warps_active` 6.25%→10.38%。
+**fp8 特殊**：一元素 1B ⇒ 旧默认仅 100.6KB **本就 2 CTA/SM**，cfg6 49.9KB 给到 **4 CTA/SM**
+（11.14%→18.26%）、Duration 40.70→**27.07µs（1.50×）**。bound 从「低 occupancy」转向
+「compute/softmax + `wait` 固定延迟」。
+**关键对照**：同一杠杆在 **full** 上为混合（O57 cfg6 长 K 1.04×、短 K 0.91×）——**causal 的
+镜像配对让每 CTA 的 K 链更长、2 CTA/SM 真正吃进延迟**，故 causal 净正、full 不默认。
+
+数值（ours vs fp32 ref，max_abs dq/dk/dv）：fp16 b3 causal `2.415/1.834/1.856e-3`、b1
+`1.303/1.537/1.557e-3`；bf16 b3 `1.267e-2/1.217e-2/1.796e-2`；fp8 b3 `3.404e-1/3.436e-1/3.508e-1`;
+与 O53 历史一致（fp16/fp8 的 dq 有跨 CTA atomic 归约次序的既有非确定性，多次运行 2.4–5.2e-3）。
+full 路径（`--full`）默认不变。单/两文件逐指标一致。
+详见 `docs/01` §15e、`docs/01b` §6ar、`docs/03` §54、`docs/08` §5.23。

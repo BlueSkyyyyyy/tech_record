@@ -1,0 +1,24 @@
+fa_bwd_bf16_mma_main.cu(1213): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
+    const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
+              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 629194
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_bf16
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 512
+[O40] varlen lse k-split = 8 (base=8)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 0.0783 ms  13.71 TFLOPS (sum_b 4HL^2D)
+grid main = 256 x 2 x 1 | lse grid = 4 x 2 x 1 | T=512
+[O52 A/B] varlen MLA main-only 4w 0.0519 ms | 8w 0.0455 ms (1.141x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.172e-07 dv=7.153e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2356 2 0.0829 4 0.0552 8 0.0461 16 0.0452 ms (auto=16)
+[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.0573 split2 0.0373 split4 0.0264 split8 0.0214 split16 0.0248 ms
+[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.0637 split2 0.0389 split4 0.0238 split8 0.0181 split16 0.0181 ms
+[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.1306 split2 0.0764 split4 0.0525 split8 0.0409 split16 0.0374 ms
+[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.0871 split2 0.0496 split4 0.0302 split8 0.0230 split16 0.0217 ms
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=8.042e-03  max_rel=1.548e+00  (ours_amax=1.789e+00 ref_amax=1.786e+00 @6099)
+  dk  vs ref: max_abs=1.097e-02  max_rel=2.402e+00  (ours_amax=2.641e+00 ref_amax=2.650e+00 @1570)
+  dv  vs ref: max_abs=1.391e-02  max_rel=2.362e+00  (ours_amax=4.656e+00 ref_amax=4.646e+00 @4248)

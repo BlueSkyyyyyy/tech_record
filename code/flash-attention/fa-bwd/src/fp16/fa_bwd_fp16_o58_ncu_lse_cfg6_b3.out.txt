@@ -1,0 +1,57 @@
+fa_bwd_fp16_mma_main.cu(1371): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
+    const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
+              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp16_mma_kernels.cuh(1715): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma2<HD,SPLIT,CL>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *, const int *, int) [with HD=128, SPLIT=true, CL=1]" at line 611 of fa_bwd_fp16_mma_main.cu
+
+fa_bwd_fp16_mma_kernels.cuh(2993): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma4<HD,SEQ>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) [with HD=128, SEQ=true]" at line 1675 of fa_bwd_fp16_mma_main.cu
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb0EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 660093
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb1EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 654785
+==PROF== Connected to process 931384 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "lse_mma_kernel_bal": 0%....50%....100% - 11 passes
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp16
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 256 768 1792
+VARLEN main backend = wgmma2 cp.async
+[O40] varlen lse k-split = 8 (base=48)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 0.3605 ms  15.64 TFLOPS (sum_b 4HL^2D)
+grid main = 512 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.2862 ms | 8w 0.2585 ms (1.107x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.5643 2 0.3057 4 0.2649 8 0.2534 16 0.2582 ms (auto=16)
+[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.1051 split2 0.1178 split4 0.1181 split8 0.1211 split16 0.1186 ms
+[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.1191 split2 0.1187 split4 0.1211 split8 0.1175 split16 0.1189 ms
+[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.2379 split2 0.1306 split4 0.1178 split8 0.1174 split16 0.1190 ms
+[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.1583 split2 0.1192 split4 0.1194 split8 0.1172 split16 0.1185 ms
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=6.027e-03  max_rel=5.241e-01  (ours_amax=3.986e+00 ref_amax=3.986e+00 @785341)
+  dk  vs ref: max_abs=1.861e-03  max_rel=1.211e+00  (ours_amax=3.363e+00 ref_amax=3.363e+00 @519753)
+  dv  vs ref: max_abs=1.856e-03  max_rel=1.220e+00  (ours_amax=5.152e+00 ref_amax=5.151e+00 @499)
+==PROF== Disconnected from process 931384
+[931384] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void lse_mma_kernel_bal<512, 1, 0, 128, 16>(const __half *, const __half *, float *, int, int, int, float, const int *, float *, int) (8, 2, 24)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    gpu__time_duration.sum                                                                 us        30.24
+    l1tex__throughput.avg.pct_of_peak_sustained_active                                      %        40.29
+    launch__registers_per_thread                                              register/thread           56
+    launch__shared_mem_per_block_allocated                                        Kbyte/block       100.86
+    lts__throughput.avg.pct_of_peak_sustained_active                                        %        41.68
+    sm__throughput.avg.pct_of_peak_sustained_active                                         %        34.49
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        10.38
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         0.56
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         0.81
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.65
+    ------------------------------------------------------------------------- --------------- ------------
+

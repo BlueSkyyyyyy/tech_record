@@ -4109,3 +4109,72 @@ LSE 数学与归约次序不变）；bf16 `3.100/3.526/2.316e-3`（b3）、`1.73
 **原始输出**：`src/fp16/fa_bwd_fp16_o57_varlen_full_b3_auto.out.txt`（默认 A/B）、
 `..._o57_varlen_full_b3.out.txt`（`--lseocc=6`）、`..._o57_varlen_full_b1.out.txt`（b1）、
 `..._o57_ncu_lse.out.txt`（ncu 默认 vs cfg6）；bf16 对应 `src/bf16/fa_bwd_bf16_o57_*`。
+
+## 15e. O58（第一百零五轮，**正结果，causal varlen 默认**）：causal MLA varlen 的 LSE 冲 2 CTA/SM
+
+**动机（补齐 O56/O57 的缺口）**：O54–O57 的 LSE 几何只在 **full（非 causal）** 路径上试过：
+O56 的 8-warp 判为混合、O57 的 2 CTA/SM（cfg6）判为「长 K 小胜、短 K 负」⇒ 均 opt-in。
+但 **causal** 的 MLA varlen LSE 走的是**镜像配对版** `lse_mma_kernel_bal<512,1>`（每 CTA 处理
+`m` 与 `nblk-1-m`，工作量恒 `nblk+1`），其每 CTA 的 K 链比 full 更长、且 full 的「每 CTA 一个
+m 块」本已均衡 ⇒ 两者对 occupancy/CTA 级并行度的敏感度不同。本轮把 O56/O57 的候选几何搬到
+**causal** 上重新判决（device 早已由 O56 参数化为 `<HD,PIPE,FULL,NTH,LBN_>`，**host-only**）。
+
+**改动（host-only；device 一行未改；单/两文件 host 同步）**：在 `run_varlen` 的
+`D==512 && causal` 分支加 `--lseocc` / `--lse8w`：
+- **默认改为 cfg6**（`lse_mma_kernel_bal<512,1,false,128,16>`：PIPE=1/LBN=16/NTH=128/LBM=64，
+  smem `(64+2·16)·(512+8)·2 = 99,840B ≤ 232448/2` ⇒ **2 CTA/SM**）；`--lseocc=4` 退回旧默认
+  （PIPE1/LBN64，199,680B，1 CTA/SM）；`--lseocc=5` = cfg5（PIPE0/LBN32，2 CTA/SM）；
+  `--lse8w=1` = 8-warp（NTH=256/LBM=128/LBN=32，199,680B，1 CTA/SM）。
+- **split auto 目标**：cfg5/6 的 tile 更细、每 CTA 的 K tile 更多，目标从 132 提到 **528**
+  （实测 b1→8、b3→8 均为各自最优附近）；旧默认/8-warp 维持 132。
+- `[O58 A/B]` 在同 binary 内扫 cfg（legacy/6/5/8）× `split∈{1,2,4,8,16}`（LSE-only）。
+  默认路径 `--lseocc=0` 之外的旧行为（`--lseocc=4`、`--full`、D=128）**逐位不变**。
+
+**结果（同 session CUDA-event，LSE-only ms 与端到端 total）——正结果**：
+
+| case (maxlen) | 旧默认 P1/LBN64 | **新默认 cfg6** | 比值 | 8-warp | cfg5 |
+|---|---|---|---|---|---|
+| b1_t512 (512)，LSE 最优 | split8 0.0213 | split16 **0.0180** | **1.18×** | split8 0.0223 | 0.0375 |
+| b3_t1792 (1024)，LSE 最优 | split4 0.0388 | split8 **0.0318** | **1.22×** | split8 0.0331 | 0.0566 |
+| b1 total | 0.0836 ms | **0.0783 ms** | **1.07×** | — | — |
+| b3 total | 0.3517 ms | **0.3206 ms** | **1.10×** | — | — |
+
+即 **causal 上 cfg6 是稳定的净正**（b1 1.07×、b3 1.10× 端到端），与 full 上 O57 的
+「短 K 负」相反——镜像配对的负载均衡让 2 CTA/SM 的 CTA 级并行度真正吃进了延迟；8-warp 在
+causal 上只与旧默认持平（b1 0.95×、b3 1.17×），不如 cfg6。故 **causal 默认切到 cfg6**。
+
+**ncu（fp16 b3 causal，同 split=8，`-c 1`）**：
+
+| | 旧默认 P1/LBN64（1 CTA） | **cfg6 P1/LBN16（2 CTA）** |
+|---|---|---|
+| `gpu__time_duration` | 43.07 µs | **30.24 µs（1.42×）** |
+| `sm__warps_active` | 6.25% | **10.38%**（occupancy 近似翻倍） |
+| `launch__shared_mem_per_block` | 200.70 KB | **100.86 KB** |
+| `sm__throughput` | 24.34% | **34.49%** |
+| `l1tex__throughput` | 22.16% | **40.29%** |
+| `lts__throughput` | 34.58% | 41.68% |
+| `short_scoreboard` / `wait` / `long` stall | 0.93 / 1.37 / 0.17 | 0.81 / **1.65** / 0.56 |
+
+**读法**：occupancy 由 6.25%（1 CTA×4 warp）升到 10.38%（2 CTA），`sm__throughput` 24%→34%、
+L1/TEX 22%→40%（每个 SM 在干更多的活）；`short_scoreboard` 略降（0.93→0.81）、`wait` 升
+（1.65，LBN=16 的 tile/barrier 税），但净效果是 Duration 1.42×。**bound 从「低 occupancy +
+smem→mma tile 依赖」转向「compute/softmax + wait」**。
+
+**数值**（ours vs fp32 ref，max_abs dq/dk/dv）：b1 causal `1.303/1.537/1.557e-3`、
+b3 causal `2.415/1.834/1.856e-3`（与 O53 causal 历史一致）；b3 的 dq 在多次运行间会落到
+`2.4–5.2e-3`——**这是 dK/dV/dQ 的跨 CTA `atomicAdd` 归约次序导致的既有非确定性**（split/LBN
+改动会改变 CTA→K 切片的对应，ncu/event 复跑可见），非本轮引入、非精度回归（amax≈4，相对量级
+~0.1%）。full 路径（`--full`）默认 `--lseocc=0` 保持 O54 旧路，b3 total `0.4663 ms` 不变。
+
+**复现 / 原始输出**：
+
+```bash
+F='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA'
+ARCH="" NVCC_FLAGS="$F" scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --varlen --causal --iters=50 /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp16
+# A/B：--lseocc=4（旧默认）/ 6（新默认）/ 5 / --lse8w=1
+```
+原始输出：`src/fp16/fa_bwd_fp16_o58_varlen_causal_b{1,3}.out.txt`（默认）、
+`..._b{1,3}_legacy.out.txt`（旧默认）、`..._b3_onefile.out.txt`（单文件）、
+`..._o58_varlen_full_b3.out.txt`（full 回归）、`..._o58_ncu_lse_{cfg6,legacy}_b3.out.txt`；
+bf16 对应 `src/bf16/fa_bwd_bf16_o58_*`。

@@ -1,0 +1,26 @@
+fa_bwd_bf16_mma_main.cu(1213): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
+    const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
+              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 629194
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_full_bf16
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=0
+cu_seqlens = 0 256 768 1792
+[O40] varlen lse k-split = 4 (base=48)
+[O53] varlen MLA main k-split = 2 (auto)
+[timing] VARLEN total 0.4624 ms  12.19 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.4031 ms | 8w 0.3864 ms (1.043x) | max_abs(8w-vs-4w) dq=8.941e-08 dk=1.192e-07 dv=8.941e-08
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.6020 2 0.3864 4 0.3892 8 0.3864 16 0.3899 ms (auto=2)
+[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.3804 ms | balFULL/split1 0.0828 balFULL/split2 0.0469 balFULL/split4 0.0412 balFULL/split8 0.0475 balFULL/split16 0.0579 ms (auto=4)
+[O56 A/B] varlen MLA full LSE 8-warp: split1 0.1322 split2 0.0717 split4 0.0412 split8 0.0378 split16 0.0478 ms (lse8w=0 nblk8=8)
+[O57 A/B] PIPE0/LBN64 (1 CTA): split1 0.2364 split2 0.1234 split4 0.1055 split8 0.1214 split16 0.1512 ms
+[O57 A/B] PIPE1/LBN32 (1 CTA): split1 0.1278 split2 0.0692 split4 0.0566 split8 0.0588 split16 0.0698 ms
+[O57 A/B] PIPE0/LBN32 (2 CTA): split1 0.2460 split2 0.1307 split4 0.0725 split8 0.0680 split16 0.0882 ms
+[O57 A/B] PIPE1/LBN16 (2 CTA): split1 0.1162 split2 0.0764 split4 0.0435 split8 0.0392 split16 0.0452 ms
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.100e-03  max_rel=6.355e-01  (ours_amax=1.266e+00 ref_amax=1.267e+00 @100975)
+  dk  vs ref: max_abs=3.526e-03  max_rel=6.618e-01  (ours_amax=1.109e+00 ref_amax=1.108e+00 @108185)
+  dv  vs ref: max_abs=2.316e-03  max_rel=6.903e-01  (ours_amax=6.484e-01 ref_amax=6.485e-01 @552982)
