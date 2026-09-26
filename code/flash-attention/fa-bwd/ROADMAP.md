@@ -4118,7 +4118,30 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   - 原始输出 `src/fa_bwd_p111_varlen_fa3_perf.out.txt`、`src/fa_bwd_compare_p111_doc_table.md`、
     `src/fa_bwd_compare_p111_fa3.out.txt`、`src/fa_bwd_fa3_varlen_bench_p111.out.txt`、
     `src/fa_bwd_fa3_varlen_bench_full_p111.out.txt`；文档 `docs/04` §36、`docs/08` §5.27。
-  - **下一步候选**：① 把 FA3（含 varlen）接入 `harness/fa_vs_te_bwd_only.py` 的纯反向基线；
+   - **下一步候选**：① 把 FA3（含 varlen）接入 `harness/fa_vs_te_bwd_only.py` 的纯反向基线；
+     ② `--doc-table` 直接改写 docs/04 对应小节（含自动 diff 校验）；
+     ③（继续）O59 候选：MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`。
+
+- 2026-09-27（第一百一十二轮）：**P3-4b 完成（`fa_vs_te_bwd_only.py` 补齐 varlen 纯反向基线；
+  harness + 基线增量，含一处口径更正）**。
+  - 动机（落实上轮候选 ①）：用户指定的**纯反向口径**基准 `harness/fa_vs_te_bwd_only.py`
+    （forward 建图在计时区外、只对 `autograd.grad` 计时）此前只有定长 `SHAPES`。
+  - **改动（纯 harness，device 一行未改）**：加 `VARLEN_SHAPES`（MHA 不齐/等长、GQA q32-kv8、
+    强倾斜、MHA 等长 full）、`bench_fa_varlen`（FA2）/`bench_fa3_varlen`（FA3，forward 移出计时区）、
+    `ref_varlen` + `--verify`（小 shape 对拍 fp32 ref），main 固定输出「定长表 + varlen 表」。
+    **TE2.14 变长反向在本容器报错**（ragged QKV 需 padding mask → cuDNN err 700），varlen 表
+    TE 列标 `NA`。
+  - **两项发现**：① **FA2.7.4 的变长反向其实可用**（`flash_attn_varlen_func` 可 autograd，
+    causal/full、MHA/GQA 均可），数值与 FA3 逐点一致（fp16 `1.56/1.38/1.78e-3`、
+    bf16 `9.41e-3/1.13e-2/1.82e-2`）——**推翻长期旧记「FA2 反向不支持 varlen」**；
+    ② **纯反向下 FA3 比 P3-4-lite 的 varlen 数字快 1.6–1.7×**（[1024]×4 causal `0.1480` vs
+    `0.2409`ms），因 `fa_bwd_bench.py` 的 `bench_case_varlen` 把**含 forward** 的
+    `fa3_bwd_varlen()` 整段计时 ⇒ **ours/FA3 应从 1.87–3.5× 更正为 3.0–4.8×**（纯反向）。
+  - **性能（纯反向 CUPTI，fp16；bf16 几乎相同）**：FA3/FA2 = 2.07×（不齐）、1.70×（[1024]×4）、
+    1.69×（GQA kv8）、2.13×（强倾斜）、1.72×（full）。
+  - 原始输出 `src/fa_bwd_p112_varlen_fa2_fa3_te.out.txt`；文档 `docs/04` §37、`docs/08` §5.28。
+  - **下一步候选**：① 用同一纯反向口径重测 `fa_bwd_bench.py` 的定长/变长 FA/TE 列
+    （现 `bench_case*` 也含 forward），把全站基线统一到「forward 在计时区外」；
     ② `--doc-table` 直接改写 docs/04 对应小节（含自动 diff 校验）；
     ③（继续）O59 候选：MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`。
 
@@ -4156,6 +4179,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       已接进 `fa_bwd_bench.py`（dump + bench）与 `--doc-table` 默认口径；varlen causal
       ours/FA3 1.87–2.95×、full 2.90–3.52×；fp8/MLA FA3 不支持。详见「第一百一十一轮」、`docs/04` §36。
 
+- [ ] **把全站基线统一到「纯反向」口径**（第一百一十二轮发现）：`fa_bwd_bench.py` 的
+  `bench_case` / `bench_case_varlen` 把 `*_bwd*()`（含 forward）整段放进 `device_time`，
+  与用户指定的纯反向口径 `fa_vs_te_bwd_only.py` 不一致（FA3 varlen 差 1.6–1.7×）。
+  解法：把 forward 建图移出计时 lambda（或直接改用 `fa_vs_te_bwd_only.py` 出发布数字）。
 - 用 `nsys` 看 preprocess + main + convert 的端到端重叠。
 - 把 FA2 的 `dQ_accum` 累加缓冲 vs 纯 atomic 做对比实验。
 - deterministic 模式的代价量化。

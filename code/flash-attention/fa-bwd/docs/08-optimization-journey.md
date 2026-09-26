@@ -424,6 +424,24 @@ smem 冲突 + 低 occ
     `src/fa_bwd_compare_p111_doc_table.md`、`src/fa_bwd_fa3_varlen_bench_p111.out.txt`。
     本轮为 harness 增量，无新 kernel/ncu 数字。
 
+28. **P3-4b（第 112 轮，harness + 基线，含一处口径更正）**：**`fa_vs_te_bwd_only.py`
+    补齐 varlen 纯反向基线**——落实 §5.27 候选 ①。该脚本是用户指定的**纯反向口径**基准
+    （forward 建图放在计时区外，只对 `autograd.grad` 计时），此前只有定长 `SHAPES`。
+    本轮加 `VARLEN_SHAPES`（MHA 不齐/等长、GQA q32-kv8、强倾斜、full）、`bench_fa_varlen`
+    / `bench_fa3_varlen`（forward 移出计时区）、`ref_varlen`+`--verify`（小 shape 对拍 ref
+    证明新列可信），main 固定输出「定长表 + varlen 表」。**TE2.14 变长反向在本容器报错
+    （ragged QKV 需 padding mask → cuDNN err 700），varlen 表 TE 列标 NA。**
+    **两项发现**：① **FA2.7.4 的变长反向其实可用**（`flash_attn_varlen_func` 可 autograd，
+    causal/full、MHA/GQA 均可），数值与 FA3 逐点一致（fp16 `1.56/1.38/1.78e-3`、bf16
+    `9.41e-3/1.13e-2/1.82e-2`）——推翻旧记「FA2 反向不支持 varlen」；② **纯反向下 FA3 比
+    §5.27 里的 varlen 数字快 1.6–1.7×**（[1024]×4 causal `0.1480` vs `0.2409`ms），因为
+    §5.27 的 `fa_bwd_bench.py` `bench_case_varlen` 把**含 forward** 的 `fa3_bwd_varlen()`
+    整段计了时。**故 ours/FA3 应从 §5.27 的 1.87–3.5× 更正为 3.0–4.8×**（纯反向口径）。
+    **教训：`device_time(fn)` 里 `fn` 是否包含 forward，是「纯反向」与「前向+反向」的分水岭；
+    对标脚本必须先钉死建图位置再谈吞吐。** FA3 varlen 稳定快 FA2 1.69–2.13×；fp8/MLA FA3
+    不支持，最重点的 fp8 口径仍以 ours/TE/ref 为准。本轮为 harness 增量，无新 device 代码。
+    详见 `docs/04` §37；原始输出 `src/fa_bwd_p112_varlen_fa2_fa3_te.out.txt`。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。
