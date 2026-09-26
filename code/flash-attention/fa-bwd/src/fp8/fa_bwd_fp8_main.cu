@@ -271,21 +271,26 @@ static void launch_lse(dim3 lg, const unsigned char* q8, const float* qs,
 
 // O11：LSE 的镜像配对（+可选 cp.async 双缓冲）版本，仅 causal。
 //   O54：`FULL=true` 时也服务非 causal（full）——一个 CTA 一个 m 块（lg.x=nblk），无镜像配对。
-template <int HD, int PIPE, bool FULL = false>
+//   O58：模板参数化为 `<HD,PIPE,FULL,NTH,LBN_>`（对齐 device 侧；默认档 `NTH=THREADS,LBN_=64`
+//   与原版逐位等价）。smem 按 `LBM_=(NTH/32)*16`、`LBN_` 现算。
+template <int HD, int PIPE, bool FULL = false, int NTH = THREADS, int LBN_ = 64>
 static void launch_lse_bal(dim3 lg, const unsigned char* q8, const float* qs,
                            const unsigned char* k8, const float* ks, float* lse, int S, int H,
                            int Hkv, float scale, const int* cu = nullptr,
                            float* lse_part = nullptr, int ksplit = 1,
                            long long merge_rows = -1) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
-  constexpr int kSmem = PIPE ? Cfg::lse_smem_bytes_bal1 : Cfg::lse_smem_bytes_bal0;
-  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<HD, PIPE, FULL>,
+  constexpr int ASLD = Cfg::ASLD;
+  constexpr int LBM_ = (NTH / 32) * 16;
+  constexpr int kSmem = LBM_ * ASLD + (PIPE ? 2 : 1) * LBN_ * ASLD +
+                        (LBM_ + (PIPE ? 2 : 1) * LBN_) * (int)sizeof(float);
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<HD, PIPE, FULL, NTH, LBN_>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
   // O39：K 维 split —— grid.z 由 B 扩成 B*ksplit，部分结果写 lse_part 后由 merge kernel 汇总。
   const int B = (int)lg.z;
   dim3 g(lg.x, lg.y, (unsigned)((size_t)B * ksplit));
-  lse_mma_kernel_bal<HD, PIPE, FULL><<<g, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv, scale,
-                                                       cu, lse_part, ksplit);
+  lse_mma_kernel_bal<HD, PIPE, FULL, NTH, LBN_><<<g, NTH, kSmem>>>(
+      q8, qs, k8, ks, lse, S, H, Hkv, scale, cu, lse_part, ksplit);
   if (ksplit > 1) {
     const long long nrows = (merge_rows >= 0) ? merge_rows : (long long)B * S * H;
     const int th = 256;
@@ -377,7 +382,7 @@ static void launch_lse_bal_tma_split(dim3 lg, const CUtensorMap& qmap, const CUt
 // O1 的 mma LSE；非 TMA 路径（LSE 用 wgmma/mma，主 kernel Q/dO 用 cp.async）。
 static int run_varlen(const std::string& dir, bool causal, int iters, bool compact = false,
                       bool lse_compact = false, int lse_split = 0, int mla8w = -1,
-                      int mla_kvp = -1) {
+                      int mla_kvp = -1, int lseocc = 0, int lse8w = 0) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -507,13 +512,22 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   // O40：varlen LSE 的 K 维 split auto（D=128 目标 `grid*split≈2048`、cap 8；D=512 `≈256`、
   //   cap 16，与定长 O38/O39 同标定）；`--lsesplit=N`（>0）直接指定。再按最大序列的 tile 数封顶。
   const int nblk0 = (maxlen + LBM - 1) / LBM;
+  // O58：把 fp16/bf16 的 O56（8-warp）/O57（2 CTA/SM）LSE 几何同构到 fp8。causal 默认走 cfg6
+  //   （PIPE1/LBN16/NTH=128/LBM=64，smem 99.8KB → 2 CTA/SM）；full 保持 O54 旧默认，`--lseocc=5/6`
+  //   或 `--lse8w=1` 可选（与 O56/O57 一致：full 上该杠杆为混合/负，未默认）。`--lse8w` 优先 8-warp。
+  const int lse_nblk8 = (maxlen + 127) / 128;
+  const bool lse8w_use = (lse8w != 0) && (D == 512);
+  const bool causal_cfg6 = causal && (D == 512) &&
+                           (lseocc == 5 || lseocc == 6 || (lseocc == 0 && !lse8w_use));
   int lse_split_eff = lse_split;
   if (lse_split_eff <= 0) {
     long base;
     if (D == 128 && lse_compact) base = (long)total_pairs * H;
     else if (D == 512 && !causal) base = (long)nblk0 * H * B;   // O54：full 一个 CTA 一个 m 块
     else base = (long)((nblk0 + 1) / 2) * H * B;
-    const int target = (D == 512) ? (causal ? 256 : 768) : 2048;
+    // O58：causal 的 2 CTA/SM 几何（cfg5/6）tile 更细（fp8 LBN=16/HD=512 时 tile 更多），split
+    //   目标提到 1024（b1→8 cap、b3→16，均为 A/B 最优附近）；旧默认/8-warp 维持 256。
+    const int target = (D == 512) ? (causal ? (causal_cfg6 ? 1024 : 256) : 768) : 2048;
     const int cap = (D == 512) ? 16 : 8;
     int sp = 1;
     while (sp < cap && base * (sp * 2) <= target) sp *= 2;
@@ -565,13 +579,42 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       if (D == 128)
         launch_lse_bal<128, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
                                d_lse_part, lse_split_eff, (long long)rows_q);
-      else
+      else if (D == 512 && (lseocc == 5 || lseocc == 6 || causal_cfg6)) {
+        // O58：causal MLA varlen 的 LSE 默认走 cfg6（2 CTA/SM，镜像配对版）；`--lseocc=5` 可选
+        //   PIPE0/LBN32。grid 与默认相同（LBM=64 的镜像对）。
+        if (lseocc == 5)
+          launch_lse_bal<512, 0, false, 128, 32>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H,
+                                                 Hkv, scale, d_cu, d_lse_part, lse_split_eff,
+                                                 (long long)rows_q);
+        else
+          launch_lse_bal<512, 1, false, 128, 16>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H,
+                                                 Hkv, scale, d_cu, d_lse_part, lse_split_eff,
+                                                 (long long)rows_q);
+      } else if (D == 512 && lse8w_use) {
+        launch_lse_bal<512, 1, false, 256, 32>(dim3((lse_nblk8 + 1) / 2, H, B), d_q8, d_qs, d_k8,
+                                               d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
+                                               d_lse_part, lse_split_eff, (long long)rows_q);
+      } else
         launch_lse_bal<512, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
                                d_lse_part, lse_split_eff, (long long)rows_q);
     } else {
       dim3 lg(nblk, H, B);
       if (D == 128)
         launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
+      else if (lseocc == 5 || lseocc == 6)
+        // O58：full MLA varlen 的 LSE「2 CTA/SM」几何（O57 的 fp8 同构；默认仍是 O54 旧路）。
+        if (lseocc == 5)
+          launch_lse_bal<512, 0, true, 128, 32>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv,
+                                                scale, d_cu, d_lse_part, lse_split_eff,
+                                                (long long)rows_q);
+        else
+          launch_lse_bal<512, 1, true, 128, 16>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv,
+                                                scale, d_cu, d_lse_part, lse_split_eff,
+                                                (long long)rows_q);
+      else if (lse8w_use)
+        launch_lse_bal<512, 1, true, 256, 32>(dim3(lse_nblk8, H, B), d_q8, d_qs, d_k8, d_ks,
+                                              d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part,
+                                              lse_split_eff, (long long)rows_q);
       else if (lse_split_eff > 1)
         // O54：full MLA varlen 的 LSE 走 K 维 split（bal 的 FULL 版）。
         launch_lse_bal<512, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
@@ -751,6 +794,61 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     run_all();  // 恢复 CLI 选中路径
   }
 
+  // ---- O58 A/B（D=512/MLA/varlen）：LSE 几何 sweep（LSE-only、同 session；causal 镜像配对 / full
+  //   单 m 块）。默认 causal=cfg6、full=O54 旧路；8-warp 需 `--lse8w=1`。----
+  if (D == 512) {
+    dim3 lgc = causal ? dim3((nblk0 + 1) / 2, H, B) : dim3(nblk0, H, B);
+    dim3 lg8c = causal ? dim3((lse_nblk8 + 1) / 2, H, B) : dim3(lse_nblk8, H, B);
+    auto go_lse58 = [&](auto full_tag, int which, int sp) {
+      constexpr bool F = decltype(full_tag)::value;
+      if (which == 5)
+        launch_lse_bal<512, 0, F, 128, 32>(lgc, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv,
+                                           scale, d_cu, d_lse_part, sp, (long long)rows_q);
+      else if (which == 6)
+        launch_lse_bal<512, 1, F, 128, 16>(lgc, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv,
+                                           scale, d_cu, d_lse_part, sp, (long long)rows_q);
+      else if (which == 8)
+        launch_lse_bal<512, 1, F, 256, 32>(lg8c, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv,
+                                           scale, d_cu, d_lse_part, sp, (long long)rows_q);
+      else
+        launch_lse_bal<512, 1, F>(lgc, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
+                                  d_cu, d_lse_part, sp, (long long)rows_q);
+    };
+    cudaEvent_t eca, ecb;
+    CUDA_CHECK(cudaEventCreate(&eca));
+    CUDA_CHECK(cudaEventCreate(&ecb));
+    auto bench_lse_c = [&](auto full_tag, int which, int sp, float* out) {
+      go_lse58(full_tag, which, sp);
+      CUDA_CHECK(cudaEventRecord(eca));
+      for (int i = 0; i < iters; ++i) go_lse58(full_tag, which, sp);
+      CUDA_CHECK(cudaEventRecord(ecb));
+      CUDA_CHECK(cudaEventSynchronize(ecb));
+      CUDA_CHECK(cudaEventElapsedTime(out, eca, ecb));
+      *out /= iters;
+    };
+    auto sweep58 = [&](auto full_tag, int which, const char* tag) {
+      printf("[O58 A/B] %s:", tag);
+      for (int sp : {1, 2, 4, 8, 16}) {
+        float t = 0.f;
+        bench_lse_c(full_tag, which, sp, &t);
+        printf(" split%d %.4f", sp, t);
+      }
+      printf(" ms\n");
+    };
+    if (causal) {
+      sweep58(std::integral_constant<bool, false>{}, 0, "legacy PIPE1/LBN64 4w (1 CTA)");
+      sweep58(std::integral_constant<bool, false>{}, 6, "cfg6 PIPE1/LBN16 4w (2 CTA) [new default]");
+      sweep58(std::integral_constant<bool, false>{}, 5, "cfg5 PIPE0/LBN32 4w (2 CTA)");
+      sweep58(std::integral_constant<bool, false>{}, 8, "PIPE1/LBN32 8w (1 CTA)");
+    } else {
+      sweep58(std::integral_constant<bool, true>{}, 0, "legacy PIPE1/LBN64 4w (1 CTA) [default]");
+      sweep58(std::integral_constant<bool, true>{}, 6, "cfg6 PIPE1/LBN16 4w (2 CTA)");
+      sweep58(std::integral_constant<bool, true>{}, 5, "cfg5 PIPE0/LBN32 4w (2 CTA)");
+      sweep58(std::integral_constant<bool, true>{}, 8, "PIPE1/LBN32 8w (1 CTA)");
+    }
+    run_all();  // 恢复 CLI 选中路径
+  }
+
   std::vector<float> h_dq(nq), h_dk(nkv), h_dv(nkv);
   CUDA_CHECK(cudaMemcpy(h_dq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(h_dk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
@@ -825,6 +923,11 @@ int main(int argc, char** argv) {
   // O51：MLA（D=512）主 kernel 的 K/V cp.async 回填流水。-1=自动（默认开），0/1 由 `--mlakvp=`
   //   强制（同 binary A/B；需 8-warp 几何）。
   int mla_kvp_opt = -1;
+  // O58：MLA（D=512）varlen LSE 的几何开关。`--lseocc=5/6`（2 CTA/SM：PIPE0/LBN32 或
+  //   PIPE1/LBN16）、`--lse8w=1`（8-warp/256 线程/LBM=128/LBN=32）；默认 causal 走 cfg6、
+  //   full 走 O54 旧路。`--lseocc=4` 退回 causal 旧默认（PIPE1/LBN64）做 A/B。
+  int lseocc_opt = 0;
+  int lse8w_opt = 0;
   // O48（候选 ①）：D=128 主 kernel 是否也用 8-warp（256 线程 / 2×4 网格）几何。0=默认
   //   4-warp（128/2），1=8-warp。仅 mma 路径（WGMMA 版 GEMM1/2 是 warpgroup 级、结构上锁死
   //   2 warp）；用 `--d128w=0/1` 做同 binary A/B。见 docs/03 §48。O49：默认 **-1=自动**
@@ -852,6 +955,9 @@ int main(int argc, char** argv) {
     else if (a.rfind("--mla8w=", 0) == 0) mla8w_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--mlakvp=", 0) == 0) mla_kvp_opt = atoi(a.c_str() + 9);
     else if (a == "--mlakvp") mla_kvp_opt = 1;
+    else if (a.rfind("--lseocc=", 0) == 0) lseocc_opt = atoi(a.c_str() + 9);
+    else if (a.rfind("--lse8w=", 0) == 0) lse8w_opt = atoi(a.c_str() + 8);
+    else if (a == "--lse8w") lse8w_opt = 1;
     else if (a.rfind("--d128w=", 0) == 0) d128w_opt = atoi(a.c_str() + 8);
     else if (a == "--d128w") d128w_opt = 1;
     else if (a.rfind("--qdtma=", 0) == 0) qd_tma = atoi(a.c_str() + 8);
@@ -876,7 +982,7 @@ int main(int argc, char** argv) {
 
   if (varlen)
     return run_varlen(dir, causal, iters, compact_opt, lse_compact_opt, lse_split, mla8w_opt,
-                      mla_kvp_opt);
+                      mla_kvp_opt, lseocc_opt, lse8w_opt);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");

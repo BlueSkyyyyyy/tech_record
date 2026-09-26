@@ -1071,8 +1071,12 @@ lse_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ q
 // O54：`FULL=true` 时本 kernel 也服务 **非 causal（full）** 路径——每个 CTA 只处理一个 m 块
 //   （grid.x = nblk，无镜像配对），`ncols=len`、无因果掩码，其余（cp.async 双缓冲、O40 split）
 //   逐字复用。`FULL=false`（默认）编译出与原版逐位相同的代码。
-template <int HD, int PIPE, bool FULL = false>
-__global__ void __launch_bounds__(THREADS)
+// O58：模板参数化为 `<HD,PIPE,FULL,NTH,LBN_>`（对齐 fp16/bf16 的 O56 改造）：`LBM_ = (NTH/32)*16`
+//   （128→64，256→128）、`MTN = LBN_/8`、`KVL = LBN_*ASLD`；默认档 `<HD,PIPE,FULL,128,64>` 与
+//   O54 版**逐位等价**。用于 causal 与 full 的「2 CTA/SM（LBN=16/32）与 8-warp（NTH=256/LBM=128）」
+//   几何（O58），以及 fp8 侧的 O56/O57 同构复现。
+template <int HD, int PIPE, bool FULL = false, int NTH = THREADS, int LBN_ = LBN>
+__global__ void __launch_bounds__(NTH)
 lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                    const unsigned char* __restrict__ k8, const float* __restrict__ ks,
                    float* __restrict__ lse, int S, int H, int Hkv, float scale,
@@ -1080,13 +1084,15 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
                    float* __restrict__ lse_part = nullptr, int ksplit = 1) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int ASLD = Cfg::ASLD;
-  constexpr int KVL  = LBN * ASLD;
+  constexpr int KVL  = LBN_ * ASLD;
   constexpr int HDV  = HD / 16;   // 每行 16B（16 个 fp8）unit 数
+  constexpr int LBM_ = (NTH / 32) * 16;   // warp 数×16 行（128→64，256→128）
+  constexpr int MTN  = LBN_ / 8;          // 每 warp 的 n8 tile 数
   extern __shared__ __align__(16) char smem[];
   unsigned char* Qs = reinterpret_cast<unsigned char*>(smem);
-  unsigned char* Ks = Qs + LBM * ASLD;                               // PIPE=1：2×KVL
-  float* qs_s = reinterpret_cast<float*>(Ks + (PIPE ? 2 : 1) * KVL);  // [LBM]
-  float* ks_s = qs_s + LBM;                                          // PIPE=1：2×LBN
+  unsigned char* Ks = Qs + LBM_ * ASLD;                              // PIPE=1：2×KVL
+  float* qs_s = reinterpret_cast<float*>(Ks + (PIPE ? 2 : 1) * KVL);  // [LBM_]
+  float* ks_s = qs_s + LBM_;                                         // PIPE=1：2×LBN_
 
   // O39：K 维 split。`ksplit>1` 时 grid.z = B*ksplit，每个 (pair,ks) CTA 只扫本 m 块 K 范围
   //   的第 ks 个连续 tile 切片，部分 (m,l) 写 `lse_part`，由 `lse_split_merge_kernel` 汇总。
@@ -1097,7 +1103,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
   // nullptr 逐式退化为定长（qbase=b*S、len=S），定长路径逐位不变。
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
   const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
-  const int nblk  = (len + LBM - 1) / LBM;
+  const int nblk  = (len + LBM_ - 1) / LBM_;
   // O54：FULL 一个 CTA 一个 m 块；causal 一行镜像对。
   if constexpr (FULL) { if (pair >= nblk) return; }
   else { if (pair >= (nblk + 1) / 2) return; }   // 短序列多余的对 CTA 直接退出
@@ -1108,7 +1114,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
   // 发本 m 块的 Q（PIPE=1 用 16B cp.async，行越界写 0=cvt_e4m3(0)）与 rowwise scale。
   auto issue_q = [&](int m0) {
 #pragma unroll
-    for (int u = tid; u < LBM * HDV; u += THREADS) {
+    for (int u = tid; u < LBM_ * HDV; u += NTH) {
       const int row = u / HDV, c16 = u % HDV;
       const int qi = m0 + row;
       unsigned char* d = Qs + row * ASLD + c16 * 16;
@@ -1123,14 +1129,14 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
         *reinterpret_cast<uint4*>(d) = make_uint4(0, 0, 0, 0);
       }
     }
-    if (tid < LBM) qs_s[tid] = (m0 + tid < len) ? qs[((size_t)(qbase + m0 + tid)) * H + h] : 1.f;
+    if (tid < LBM_) qs_s[tid] = (m0 + tid < len) ? qs[((size_t)(qbase + m0 + tid)) * H + h] : 1.f;
     if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
   };
 
   // 发一个 K tile（j0 起 LBN 行）到 Kd，并写本 tile 的 rowwise scale 到 KdS。
   auto issue_k = [&](unsigned char* Kd, float* KdS, int j0) {
 #pragma unroll
-    for (int u = tid; u < LBN * HDV; u += THREADS) {
+    for (int u = tid; u < LBN_ * HDV; u += NTH) {
       const int row = u / HDV, c16 = u % HDV;
       const int jg = j0 + row;
       unsigned char* d = Kd + row * ASLD + c16 * 16;
@@ -1145,7 +1151,7 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
         *reinterpret_cast<uint4*>(d) = make_uint4(0, 0, 0, 0);
       }
     }
-    if (tid < LBN)
+    if (tid < LBN_)
       KdS[tid] = (j0 + tid < len) ? ks[((size_t)(qbase + j0 + tid)) * Hkv + hkv] : 1.f;
     if constexpr (PIPE) asm volatile("cp.async.commit_group;\n");
   };
@@ -1155,44 +1161,44 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
     if constexpr (FULL) { if (t == 1) continue; }   // O54：full 无镜像配对，只做 t=0
     const int mblk = FULL ? pair : ((t == 0) ? pair : (nblk - 1 - pair));
     if (!FULL && t == 1 && pair == nblk - 1 - pair) continue;  // 奇数 nblk 的中心块只做一次
-    const int m0 = mblk * LBM;
+    const int m0 = mblk * LBM_;
     issue_q(m0);
 
-    const int ncols = FULL ? len : min(len, m0 + LBM);
-    const int ntiles = (ncols + LBN - 1) / LBN;
+    const int ncols = FULL ? len : min(len, m0 + LBM_);
+    const int ntiles = (ncols + LBN_ - 1) / LBN_;
     // O39：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
     const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
     const int nt1 = (int)(((long)ntiles * (ksp + 1)) / ksplit);
     const int nuse = nt1 - nt0;
     if constexpr (PIPE) {
-      if (nuse > 0) issue_k(Ks, ks_s, nt0 * LBN);
+      if (nuse > 0) issue_k(Ks, ks_s, nt0 * LBN_);
     }
     float mrow[2] = {-INFINITY, -INFINITY}, lrow[2] = {0.f, 0.f};
 
     for (int rnt = 0; rnt < nuse; ++rnt) {
       const int nt = nt0 + rnt;
-      const int j0 = nt * LBN;
+      const int j0 = nt * LBN_;
       unsigned char* Kt = Ks + (PIPE ? (rnt & 1) * KVL : 0);
-      float* KtS = ks_s + (PIPE ? (rnt & 1) * LBN : 0);
+      float* KtS = ks_s + (PIPE ? (rnt & 1) * LBN_ : 0);
       if constexpr (PIPE) {
         asm volatile("cp.async.wait_group 0;\n");
         __syncthreads();
         if (rnt + 1 < nuse)
-          issue_k(Ks + ((rnt + 1) & 1) * KVL, ks_s + ((rnt + 1) & 1) * LBN, j0 + LBN);
+          issue_k(Ks + ((rnt + 1) & 1) * KVL, ks_s + ((rnt + 1) & 1) * LBN_, j0 + LBN_);
       } else {
         issue_k(Ks, ks_s, j0);
         __syncthreads();
       }
 
-      float acc[1][8][4];
+      float acc[1][MTN][4];
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int j = 0; j < MTN; ++j)
 #pragma unroll
         for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
-      mma_block<16, LBN, HD, E4E4>(Qs, ASLD, Kt, ASLD, acc, wid, 0, lane);
+      mma_block<16, LBN_, HD, E4E4>(Qs, ASLD, Kt, ASLD, acc, wid, 0, lane);
 
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int j = 0; j < MTN; ++j)
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
           int s = q >= 2 ? 1 : 0;
@@ -3433,21 +3439,25 @@ static void launch_lse(dim3 lg, const unsigned char* q8, const float* qs,
 
 // O11：LSE 的镜像配对（+可选 cp.async 双缓冲）版本，仅 causal。
 //   O54：`FULL=true` 时也服务非 causal（full）——一个 CTA 一个 m 块（lg.x=nblk），无镜像配对。
-template <int HD, int PIPE, bool FULL = false>
+//   O58：模板参数化为 `<HD,PIPE,FULL,NTH,LBN_>`（默认档与原版逐位等价）。
+template <int HD, int PIPE, bool FULL = false, int NTH = THREADS, int LBN_ = 64>
 static void launch_lse_bal(dim3 lg, const unsigned char* q8, const float* qs,
                            const unsigned char* k8, const float* ks, float* lse, int S, int H,
                            int Hkv, float scale, const int* cu = nullptr,
                            float* lse_part = nullptr, int ksplit = 1,
                            long long merge_rows = -1) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
-  constexpr int kSmem = PIPE ? Cfg::lse_smem_bytes_bal1 : Cfg::lse_smem_bytes_bal0;
-  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<HD, PIPE, FULL>,
+  constexpr int ASLD = Cfg::ASLD;
+  constexpr int LBM_ = (NTH / 32) * 16;
+  constexpr int kSmem = LBM_ * ASLD + (PIPE ? 2 : 1) * LBN_ * ASLD +
+                        (LBM_ + (PIPE ? 2 : 1) * LBN_) * (int)sizeof(float);
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<HD, PIPE, FULL, NTH, LBN_>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
   // O39：K 维 split —— grid.z 由 B 扩成 B*ksplit，部分结果写 lse_part 后由 merge kernel 汇总。
   const int B = (int)lg.z;
   dim3 g(lg.x, lg.y, (unsigned)((size_t)B * ksplit));
-  lse_mma_kernel_bal<HD, PIPE, FULL><<<g, THREADS, kSmem>>>(q8, qs, k8, ks, lse, S, H, Hkv, scale,
-                                                       cu, lse_part, ksplit);
+  lse_mma_kernel_bal<HD, PIPE, FULL, NTH, LBN_><<<g, NTH, kSmem>>>(
+      q8, qs, k8, ks, lse, S, H, Hkv, scale, cu, lse_part, ksplit);
   if (ksplit > 1) {
     const long long nrows = (merge_rows >= 0) ? merge_rows : (long long)B * S * H;
     const int th = 256;
@@ -3535,7 +3545,7 @@ static void launch_lse_bal_tma_split(dim3 lg, const CUtensorMap& qmap, const CUt
 // ref 输出 `ref_dq/dk/dv.npy` 也是 packed 布局。FA/TE 不支持变长（本机版本），只对 fp32 ref。
 // 只做 causal（非 causal 留后续）；非 TMA 路径（LSE 用 wgmma，主 kernel Q/dO 用 cp.async）。
 static int run_varlen(const std::string& dir, bool causal, int iters, int lse_split = 0,
-                      int mla8w = -1, int mla_kvp = -1) {
+                      int mla8w = -1, int mla_kvp = -1, int lseocc = 0, int lse8w = 0) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -3625,12 +3635,18 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
   // O40：varlen LSE 的 K 维 split auto（D=128 目标 `grid*split≈2048`、cap 8；D=512 `≈256`、
   //   cap 16，与定长 O38/O39 同标定）；`--lsesplit=N`（>0）直接指定。再按最大序列的 tile 数封顶。
   const int nblk0 = (maxlen + LBM - 1) / LBM;
+  // O58：把 fp16/bf16 的 O56（8-warp）/O57（2 CTA/SM）LSE 几何同构到 fp8。causal 默认走 cfg6；
+  //   full 保持 O54 旧默认，`--lseocc=5/6` 或 `--lse8w=1` 可选。
+  const int lse_nblk8 = (maxlen + 127) / 128;
+  const bool lse8w_use = (lse8w != 0) && (D == 512);
+  const bool causal_cfg6 = causal && (D == 512) &&
+                           (lseocc == 5 || lseocc == 6 || (lseocc == 0 && !lse8w_use));
   int lse_split_eff = lse_split;
   if (lse_split_eff <= 0) {
     long base;
     if (D == 512 && !causal) base = (long)nblk0 * H * B;   // O54：full 一个 CTA 一个 m 块
     else base = (long)((nblk0 + 1) / 2) * H * B;
-    const int target = (D == 512) ? (causal ? 256 : 768) : 2048;
+    const int target = (D == 512) ? (causal ? (causal_cfg6 ? 1024 : 256) : 768) : 2048;
     const int cap = (D == 512) ? 16 : 8;
     int sp = 1;
     while (sp < cap && base * (sp * 2) <= target) sp *= 2;
@@ -3678,6 +3694,20 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
       if (D == 128)
         launch_lse_bal<128, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
                                d_lse_part, lse_split_eff, (long long)rows_q);
+      else if (lseocc == 5 || lseocc == 6 || causal_cfg6) {
+        // O58：causal MLA varlen 的 LSE 默认走 cfg6（2 CTA/SM，镜像配对版）。
+        if (lseocc == 5)
+          launch_lse_bal<512, 0, false, 128, 32>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H,
+                                                 Hkv, scale, d_cu, d_lse_part, lse_split_eff,
+                                                 (long long)rows_q);
+        else
+          launch_lse_bal<512, 1, false, 128, 16>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H,
+                                                 Hkv, scale, d_cu, d_lse_part, lse_split_eff,
+                                                 (long long)rows_q);
+      } else if (lse8w_use)
+        launch_lse_bal<512, 1, false, 256, 32>(dim3((lse_nblk8 + 1) / 2, H, B), d_q8, d_qs, d_k8,
+                                               d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
+                                               d_lse_part, lse_split_eff, (long long)rows_q);
       else
         launch_lse_bal<512, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
                                d_lse_part, lse_split_eff, (long long)rows_q);
@@ -3685,6 +3715,19 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
       dim3 lg(nblk, H, B);
       if (D == 128)
         launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
+      else if (lseocc == 5 || lseocc == 6)
+        if (lseocc == 5)
+          launch_lse_bal<512, 0, true, 128, 32>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv,
+                                                scale, d_cu, d_lse_part, lse_split_eff,
+                                                (long long)rows_q);
+        else
+          launch_lse_bal<512, 1, true, 128, 16>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv,
+                                                scale, d_cu, d_lse_part, lse_split_eff,
+                                                (long long)rows_q);
+      else if (lse8w_use)
+        launch_lse_bal<512, 1, true, 256, 32>(dim3(lse_nblk8, H, B), d_q8, d_qs, d_k8, d_ks,
+                                              d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part,
+                                              lse_split_eff, (long long)rows_q);
       else if (lse_split_eff > 1)
         // O54：full MLA varlen 的 LSE 走 K 维 split（bal 的 FULL 版）。
         launch_lse_bal<512, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
@@ -3901,6 +3944,8 @@ int main(int argc, char** argv) {
   int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
   int mla8w_opt = -1;  // O47：MLA（D=512）主 kernel -1=自动(8w)/0/1 强制（同 session A/B）
   int mla_kvp_opt = -1;  // O51：MLA 主 kernel 的 K/V cp.async 回填流水 -1=自动/0/1 强制
+  int lseocc_opt = 0;    // O58：varlen MLA LSE 几何（5=P0/LBN32、6=P1/LBN16 的 2 CTA/SM）
+  int lse8w_opt = 0;     // O58：varlen MLA LSE 8-warp（256 线程/LBM=128/LBN=32）
   // O48：D=128 mma 主 kernel 0=4w(128/2) / 1=8w(256/4)。O49：默认 -1=自动（仅 mma 后端、
   //   有效 grid ≤ SM 数时开；fp8 的 auto split-K 通常已把小 S 的 grid 抬到 ≫132，故不触发）。
   int d128w_opt = -1;
@@ -3945,6 +3990,9 @@ int main(int argc, char** argv) {
     else if (a.rfind("--mla8w=", 0) == 0) mla8w_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--mlakvp=", 0) == 0) mla_kvp_opt = atoi(a.c_str() + 9);
     else if (a == "--mlakvp") mla_kvp_opt = 1;
+    else if (a.rfind("--lseocc=", 0) == 0) lseocc_opt = atoi(a.c_str() + 9);
+    else if (a.rfind("--lse8w=", 0) == 0) lse8w_opt = atoi(a.c_str() + 8);
+    else if (a == "--lse8w") lse8w_opt = 1;
     else if (a.rfind("--d128w=", 0) == 0) d128w_opt = atoi(a.c_str() + 8);
     else if (a == "--d128w") d128w_opt = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
@@ -3955,7 +4003,9 @@ int main(int argc, char** argv) {
     else if (!a.empty() && a[0] != '-') dir = a;
   }
 
-  if (varlen) return run_varlen(dir, causal, iters, lse_split, mla8w_opt, mla_kvp_opt);
+  if (varlen)
+    return run_varlen(dir, causal, iters, lse_split, mla8w_opt, mla_kvp_opt, lseocc_opt,
+                      lse8w_opt);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");

@@ -2649,7 +2649,33 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百零四轮）**：**O57——full MLA varlen 的 LSE「真正冲 2 CTA/SM」（混合结果，
+> **最新（第一百零五轮）**：**O58——causal MLA varlen 的 LSE 冲 2 CTA/SM（fp16/bf16/fp8；
+> 正结果，causal varlen 默认）**。落实 O57「下一步候选 ③（causal MLA varlen 的 LSE 2 CTA/SM，
+> O57 只做了 full）」+ ④（fp8 侧同构复现 O56/O57）。**关键对照**：O56/O57 在 **full** 上把
+> 「8-warp / 压 smem 换 2 CTA/SM」判为混合/负（默认 opt-in）；本轮把同一几何搬到 **causal 的
+> 镜像配对版** `lse_mma_kernel_bal<512,1>`——**causal 每 CTA 的 K 链更长、2 CTA/SM 的 CTA 级
+> 并行度才吃得进**。fp16/bf16 **host-only**（O56 已参数化 `<HD,PIPE,FULL,NTH,LBN_>`）；fp8
+> 顺带把 device 模板从 `<HD,PIPE,FULL>` 参数化为 `<HD,PIPE,FULL,NTH=THREADS,LBN_=LBN>`（默认档
+> 逐位等价）+ `launch_lse_bal` 同步 + 单文件 sync。**causal 默认切 cfg6**
+> （`<512,1,false,128,16>`，PIPE1/LBN16；`--lseocc=4` 退旧默认、`5`=P0/LBN32、`--lse8w=1`=8-warp；
+> cfg5/6 的 split auto 目标：fp16/bf16 528、fp8 1024）。full 仍走 O54 旧路（未默认）。
+> **结果**：fp16/bf16 LSE b1 1.18×/b3 1.22×、端到端 b1 **1.07×**（0.0836→0.0783ms）/b3
+> **1.10×**（0.3517→0.3206ms）；fp8 LSE 1.15–1.27×、端到端 b1 1.04×（0.1006→0.0965ms）/b3
+> 1.07×（0.2997→0.2789ms）。ncu（b3 causal，同 split）：fp16 旧默认 199.7KB=**1 CTA/SM**
+> `sm__warps_active` 6.25%、Duration 43.07µs → cfg6 99.8KB=**2 CTA/SM** 10.38%/30.24µs
+> （1.42×）；**fp8 旧默认仅 100.6KB 本就 2 CTA/SM，cfg6 49.9KB 给到 4 CTA/SM**
+> （11.14%→18.26%、40.70→**27.07µs，1.50×**）。bound 由「低 occupancy」转向「compute/softmax +
+> `wait` 固定延迟」。数值 vs fp32 ref 与 O53 历史一致（fp16/fp8 的 dq 有跨 CTA atomic 归约次序
+> 的既有非确定性 2.4–5.2e-3）；full/D=128/固定形状默认不变、单/两文件逐指标一致。
+> 详见 `docs/01` §15e、`docs/01b` §6ar、`docs/03` §54、`docs/04` §30、`docs/08` §5.23；
+> 原始输出 `src/{fp16,bf16}/fa_bwd_*_o58_*`、`src/fp8/fa_bwd_fp8_o58_*`。
+> **下一步候选**：① **MLA 主 kernel 降 smem 冲 2 CTA/SM**（四 dtype 共同墙；主 kernel 207–230KB，
+> 需消 ~100KB，先消 Q/dO 常驻或分块 Q/KV——多轮）；② **fp8 MLA 的 `short_scoreboard`
+> （smem→mma 的 `ldmatrix`）**（O47/O51/O57 一致：并列头号）；③ **causal MLA varlen 的 LSE 8-warp
+> × cfg6 组合**（本轮 8-warp 与旧默认持平、不及 cfg6，但两者未叠加）；④ **把 O58 的 causal
+> LSE split auto 目标统一重新标定**（fp16/bf16 528 vs fp8 1024，可合并为按 tile 数/密度）。
+>
+> **（第一百零四轮）**：**O57——full MLA varlen 的 LSE「真正冲 2 CTA/SM」（混合结果，
 > 默认 opt-in）**。落实 O54/O56「下一步候选 ①」。O54/O56 的 FULL LSE smem 恒 199,680B（1 CTA/SM）。
 > 本轮把 smem 压到 99,840B（`≤232448/2`）让**两个 CTA 同驻一个 SM**：4-warp 固定 LBM=64，
 > 可行的只有 **cfg6 `<512,1,true,128,16>`**（PIPE=1/LBN=16，保留 cp.async）与
@@ -3824,6 +3850,40 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   - 原始输出 `src/fp16/fa_bwd_fp16_o57_{varlen_full_b3_auto,varlen_full_b3,varlen_full_b3_onefile,varlen_full_b1,ncu_lse}.out.txt`、
     `src/bf16/fa_bwd_bf16_o57_{varlen_full_b3,varlen_full_b3_onefile,varlen_full_b1}.out.txt`；文档 `docs/01` §15d、
     `docs/01b` §6aq、`docs/04` §29、`docs/08` §5.22。fp8 刻意未扩展（同 O56）。
+
+- 2026-09-27（第一百零五轮）：**O58 完成（causal MLA varlen 的 LSE 冲 2 CTA/SM，fp16/bf16/fp8；
+  **正结果，causal varlen 默认）**。
+  - 动机（落实 O57「下一步候选 ③/④」）：O56/O57 的 LSE 几何（8-warp / 2 CTA/SM）只在 **full** 上
+    试过、均判混合/负；**causal** 的 MLA varlen LSE 走**镜像配对版** `lse_mma_kernel_bal<512,1>`
+    （每 CTA 处理 `m` 与 `nblk-1-m`，工作量恒 `nblk+1`），每 CTA 的 K 链更长，对 CTA 级并行度的
+    敏感度与 full 不同——本轮补齐该缺口，并把 fp8 侧同构（O56 曾刻意不扩 fp8）。
+  - **改动**：fp16/bf16 **host-only**（O56 已把 `lse_mma_kernel_bal` 参数化
+    `<HD,PIPE,FULL,NTH,LBN_>`）；fp8 把 device 模板从 `<HD,PIPE,FULL>` 参数化为
+    `<HD,PIPE,FULL,NTH=THREADS,LBN_=LBN>`（默认档逐位等价）+ `launch_lse_bal` 同步参数化 +
+    单文件 device `sync_onefile_device.py`（`identical: True`）。`run_varlen` 的
+    `D==512 && causal` 分支加 `--lseocc`（4=旧默认 P1/LBN64、5=P0/LBN32、6=P1/LBN16）与
+    `--lse8w`（8-warp/256 线程/LBM=128/LBN=32）；**causal 默认切 cfg6**，cfg5/6 的 split auto
+    目标：fp16/bf16 528、fp8 1024；`[O58 A/B]` 同 binary 扫 legacy/cfg6/cfg5/8w × split。
+    full 仍 O54 旧路（未默认）、`--lseocc=4`/D=128/固定形状逐位不变。
+  - **结果（同 session event）**：fp16/bf16 LSE b1 `0.0213→0.0180`（1.18×）/b3 `0.0388→0.0318`
+    （1.22×），端到端 total b1 `0.0836→0.0783ms`（1.07×）/b3 `0.3517→0.3206ms`（1.10×）；
+    fp8 LSE b1 `0.0251→0.0198`（1.27×）/b3 `0.0366→0.0319`（1.15×），total b1 `0.1006→0.0965ms`
+    （1.04×）/b3 `0.2997→0.2789ms`（1.07×）。fp8 full opt-in 小正（`--lse8w=1` 0.3440→0.3404ms）。
+  - **ncu（b3 causal，同 split）**：fp16 旧默认 199.70KB/**1 CTA/SM**、`sm__warps_active` 6.25%、
+    Duration 43.07µs → cfg6 100.86KB/**2 CTA/SM**、10.38%、**30.24µs（1.42×）**；`short_scoreboard`
+    0.93→0.81、`wait` 1.37→1.65。**fp8 旧默认 103.17KB 本就 2 CTA/SM**（11.14%），cfg6 52.10KB
+    → **4 CTA/SM**（18.26%）、Duration 40.70→**27.07µs（1.50×）**、`sm__throughput` 34.8%→47.2%。
+    ⇒ **bound 由「低 occupancy」转向「compute/softmax + `wait` 固定延迟」**；**「full 判负」的
+    「压 smem 换 occupancy」杠杆在 causal 上翻正**。
+  - **数值 vs fp32 ref**（max_abs dq/dk/dv）：fp16 b1 `1.303/1.537/1.557e-3`、b3
+    `2.415/1.834/1.856e-3`；bf16 b1 `8.042e-3/1.097e-2/1.391e-2`、b3 `1.267e-2/1.217e-2/1.796e-2`；
+    fp8 b1 `1.613e-1/2.238e-1/3.864e-1`、b3 `3.404e-1/3.436e-1/3.508e-1`——与 O53 历史一致；
+    （fp16/fp8 的 dq 因跨 CTA `atomicAdd` 次序有既有非确定性，多次运行落到 2.4–5.2e-3）。
+    单/两文件逐指标一致；D=128 varlen / 固定 MLA / full 默认回归不变。
+  - 原始输出 `src/fp16/fa_bwd_fp16_o58_{varlen_causal_b1,varlen_causal_b3,varlen_causal_b1_legacy,
+    varlen_causal_b3_legacy,varlen_causal_b3_onefile,varlen_full_b3,ncu_lse_cfg6_b3,ncu_lse_legacy_b3}.out.txt`；
+    `src/bf16/fa_bwd_bf16_o58_*`；`src/fp8/fa_bwd_fp8_o58_*`；文档 `docs/01` §15e、`docs/01b`
+    §6ar、`docs/03` §54、`docs/04` §30、`docs/08` §5.23。
 
 ## 灵感 / backlog
 

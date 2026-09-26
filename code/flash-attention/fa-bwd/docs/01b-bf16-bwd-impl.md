@@ -2071,3 +2071,29 @@ LBN=32），`--lse8w=0/1` 同 binary A/B。
 
 原始输出：`src/bf16/fa_bwd_bf16_o57_varlen_full_b3.out.txt`、`..._o57_varlen_full_b3_onefile.out.txt`
 （单文件，数值逐位一致）、`..._o57_varlen_full_b1.out.txt`。
+
+## 6ar. O58-bf16（第一百零五轮，**正结果，causal varlen 默认**）：causal MLA varlen 的 LSE 冲 2 CTA/SM
+
+与 fp16 的 **§15e（O58）逐字同构**：把 O56/O57 在 **full** 上试过、判为混合/opt-in 的 LSE
+几何（cfg6 的 2 CTA/SM 与 8-warp），搬到 **causal 镜像配对版** `lse_mma_kernel_bal<512,1>` 上
+重测 —— **host-only**（device 由 O56 参数化为 `<HD,PIPE,FULL,NTH,LBN_>`，bf16 与 fp16 同源）。
+
+**改动**：`run_varlen` 的 `D==512 && causal` 默认改走 **cfg6**
+（`<512,1,false,128,16>`，smem 99,840B ⇒ 2 CTA/SM），`--lseocc=4` 退回旧默认
+（P1/LBN64，199,680B）、`--lseocc=5` = P0/LBN32、`--lse8w=1` = 8-warp；cfg5/6 的 split auto
+目标由 132 提到 528。单/两文件 host 同步，`[O58 A/B]` 扫 legacy/cfg6/cfg5/8w × split。
+
+**结果（同 session event）**：LSE-only b1 `0.0213→0.0180 ms`、b3 `0.0388→0.0321 ms`
+（**1.18× / 1.21×**）；端到端 total **b1 `0.0836→0.0783 ms`（1.07×）、b3 `0.3517→0.3206 ms`
+（1.10×）**。8-warp 与旧默认持平（b1 0.0223、b3 0.0332）。
+
+**数值**（ours vs fp32 ref）：b1 causal `8.042e-3/1.097e-2/1.391e-2`、b3 causal
+`1.267e-2/1.217e-2/1.796e-2`，与 O53/O54/O55 历史一致；full 默认（`--full`，未切 cfg6）
+b3 total `0.4624 ms` 不变。单/两文件逐指标一致。
+
+**ncu / bound**：机制与 fp16 §15e 相同（bf16 LSE smem 亦为 fp16 的两倍，故旧默认 199,680B
+= 1 CTA/SM、cfg6 99,840B = 2 CTA/SM）；occupancy 6.25%→10.4%、Duration ~1.4×，
+`short_scoreboard` 略降、`wait` 升；bound 由「低 occupancy」转向「compute/softmax + wait」。
+
+**原始输出**：`src/bf16/fa_bwd_bf16_o58_varlen_causal_b{1,3}.out.txt`（默认）、
+`..._b{1,3}_legacy.out.txt`、`..._b3_onefile.out.txt`、`..._o58_varlen_full_b3.out.txt`。

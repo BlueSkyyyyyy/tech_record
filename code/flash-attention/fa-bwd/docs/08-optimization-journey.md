@@ -353,6 +353,21 @@ smem 冲突 + 低 occ
      默认 `--lseocc=0`，数值 vs ref 与 O54–O56 逐位相同。详见 `docs/01` §15d、`docs/01b` §6aq、
      `docs/04` §29。
 
+23. **O58（第 105 轮，正结果，causal varlen 默认）**：**causal MLA varlen 的 LSE 冲 2 CTA/SM**
+     ——补齐 O56/O57 只做 **full** 的缺口。O56/O57 在 full 上把「8-warp / 压 smem 换 2 CTA/SM」
+     判为混合/负；本轮把它搬到 **causal 的镜像配对版** `lse_mma_kernel_bal<512,1>`（fp16/bf16
+     host-only；fp8 顺带把 device 参数化为 `<HD,PIPE,FULL,NTH,LBN_>`）。**causal 默认切 cfg6**
+     （`<512,1,false,128,16>`，PIPE1/LBN16；fp16/bf16 smem 99.8KB ⇒ 2 CTA/SM，**fp8 仅 49.9KB
+     ⇒ 4 CTA/SM**），`--lseocc=4` 退旧默认、`--lse8w=1` opt-in；full 仍 O54 旧路。
+     **结果：fp16/bf16 LSE 1.18–1.22×、端到端 b1 1.07×/b3 1.10×；fp8 LSE 1.15–1.27×、
+     端到端 1.04×/1.07×**。ncu：fp16 b3 causal 同 split8 下 Duration 43.07→**30.24µs（1.42×）**、
+     `sm__warps_active` 6.25%→10.38%；fp8 11.14%→18.26%、Duration 40.70→**27.07µs（1.50×）**。
+     **教训：同一个「压 smem 提 occupancy」杠杆在 full 上负、在 causal 上正——镜像配对让每 CTA
+     的 K 链更长，CTA 级并行度才吃得进；「full 判负」不能外推到 causal。** 数值与 O53 历史一致
+     （fp16/fp8 的 dq 有跨 CTA atomic 的既有非确定性）。bound 由「低 occupancy」转向
+     「compute/softmax + `wait` 固定延迟」。详见 `docs/01` §15e、`docs/01b` §6ar、`docs/03` §54、
+     `docs/04` §30。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。
