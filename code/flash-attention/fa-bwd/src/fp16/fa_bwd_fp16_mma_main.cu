@@ -494,8 +494,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
   //   ≪ 132 SM，ncu Waves 0.48），切 K 均分到 ksplit 个 CTA（device 侧 O44 早已支持：KV tile
   //   切片 + 空切片早退 + dQ 跨 CTA `red_add2`，`ksplit==1` 逐式退化）。auto 口径与定长完全
   //   一致（`--mlaksplit=N` 可强制/关）：
-  //     ① target `base*sp ≈ 528`（1 CTA/SM 的 4 个波），cap 16；
-  //     ② 至少把每个 m 块的 K 范围切成 ≈2 份（`nt_cap/2`，O50 结论），避免 1 CTA/SM 欠并发。
+  //     ① causal target `base*sp ≈ 528`（1 CTA/SM 的 4 个波）、full `≈132`（1 个波，O55），cap 16；
+  //     ② causal 至少把每个 m 块的 K 范围切成 ≈2 份（`nt_cap/2`，O50 结论）、full 至少 2 份。
   int mla_ks_eff = 1;
   if (D == 512) {
     if (mlaksplit >= 1) mla_ks_eff = mlaksplit;
@@ -504,9 +504,17 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
       const long base = (long)base_m * H * B;
       const int nt_cap = (maxlen + 31) / 32;   // BN=32
       int sp = 1;
-      while (sp < 16 && base * (sp * 2) <= 528) sp *= 2;
+      // O55（第一百零二轮）：full（非 causal）与 causal 的最优 split 不同——causal 最优
+      //   `base*sp≈528`（4 个波），full 最优只有一个波（`≈132`：实测 b1_t512_h2 auto 16→4
+      //   main 1.12×）；且 full 至少切 2 份即可（b3 base=192 时 target 给 1、实测 k=2 最优）。
+      //   causal 分支逐字保持 O53 口径以保逐位回归。
+      const int target = causal ? 528 : 132;
+      while (sp < 16 && base * (sp * 2) <= target) sp *= 2;
       int sp_min = 1;
-      while (sp_min < 16 && sp_min * 2 <= (nt_cap + 1) / 2) sp_min *= 2;
+      if (causal)
+        while (sp_min < 16 && sp_min * 2 <= (nt_cap + 1) / 2) sp_min *= 2;
+      else
+        sp_min = 2;
       if (sp_min > sp) sp = sp_min;
       mla_ks_eff = sp;
     }

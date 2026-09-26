@@ -1,0 +1,48 @@
+=== [O55] fp16 onefile varlen_b1_t512_h2_d512_full_fp16 ===
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=0
+[O40] varlen lse k-split = 8 (base=8)
+[O53] varlen MLA main k-split = 4 (auto)
+[timing] VARLEN total 0.0961 ms  11.17 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 2 x 1 | lse grid = 4 x 2 x 1 | T=512
+[O52 A/B] varlen MLA main-only 4w 0.0675 ms | 8w 0.0649 ms (1.040x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=8.941e-08 dv=8.941e-08
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2411 2 0.0924 4 0.0649 8 0.0712 16 0.0748 ms (auto=4)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.046e-04  max_rel=1.265e-01  (ours_amax=5.679e-01 ref_amax=5.679e-01 @148752)
+  dk  vs ref: max_abs=4.449e-04  max_rel=1.074e-01  (ours_amax=6.313e-01 ref_amax=6.316e-01 @479635)
+  dv  vs ref: max_abs=1.327e-04  max_rel=3.917e-02  (ours_amax=4.888e-01 ref_amax=4.887e-01 @335071)
+=== [O55] fp16 onefile varlen_b3_t1792_h2_d512_full_fp16 ===
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=0
+[O40] varlen lse k-split = 4 (base=48)
+[O53] varlen MLA main k-split = 2 (auto)
+[timing] VARLEN total 0.4627 ms  12.18 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.4044 ms | 8w 0.3881 ms (1.042x) | max_abs(8w-vs-4w) dq=8.941e-08 dk=1.192e-07 dv=8.941e-08
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.6010 2 0.3865 4 0.3895 8 0.3867 16 0.3892 ms (auto=2)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
+  dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
+  dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)
+=== [O55] fp16 onefile varlen_b1_t512_h2_d512_causal_fp16 ===
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+[O40] varlen lse k-split = 8 (base=8)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 0.0834 ms  12.88 TFLOPS (sum_b 4HL^2D)
+grid main = 256 x 2 x 1 | lse grid = 4 x 2 x 1 | T=512
+[O52 A/B] varlen MLA main-only 4w 0.0522 ms | 8w 0.0457 ms (1.143x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=2.980e-07 dv=4.768e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2368 2 0.0828 4 0.0542 8 0.0462 16 0.0453 ms (auto=16)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.303e-03  max_rel=3.391e-01  (ours_amax=1.782e+00 ref_amax=1.783e+00 @1240)
+  dk  vs ref: max_abs=1.537e-03  max_rel=3.567e-01  (ours_amax=2.648e+00 ref_amax=2.649e+00 @1529)
+  dv  vs ref: max_abs=1.557e-03  max_rel=2.646e-02  (ours_amax=4.641e+00 ref_amax=4.641e+00 @725)
+=== [O55] fp16 onefile varlen_b3_t1792_h2_d512_causal_fp16 ===
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+[O40] varlen lse k-split = 2 (base=48)
+[O53] varlen MLA main k-split = 16 (auto)
+[timing] VARLEN total 0.3515 ms  16.04 TFLOPS (sum_b 4HL^2D)
+grid main = 512 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
+[O52 A/B] varlen MLA main-only 4w 0.2856 ms | 8w 0.2559 ms (1.116x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=9.537e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.5541 2 0.3011 4 0.2647 8 0.2540 16 0.2548 ms (auto=16)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.415e-03  max_rel=5.241e-01  (ours_amax=3.986e+00 ref_amax=3.986e+00 @1240)
+  dk  vs ref: max_abs=1.834e-03  max_rel=3.483e-01  (ours_amax=3.363e+00 ref_amax=3.363e+00 @17)
+  dv  vs ref: max_abs=1.856e-03  max_rel=6.815e-02  (ours_amax=5.152e+00 ref_amax=5.151e+00 @499)

@@ -309,8 +309,22 @@ smem 冲突 + 低 occ
      No Eligible 74.1%、fixed-latency stall 37.3% ⇒ **bound = 低 occupancy + fixed-latency**。
      **教训：把一个路径已有的优化（split+双缓冲）补到另一路径（full）时，别被「full 工作均衡、
      无需镜像配对」迷惑——`bool FULL` 一个模板参数就够，且默认档必须编译出逐位相同的代码以保回归。**
-     顺带修复单文件 `fa_bwd_bf16_mma_onefile.cu` 缺 `make_lse_map`/`make_main_map`（`-DFA_TMA`
-     构建一直编译不过）的既有 bug。详见 `docs/01` §15、`docs/01b` §6an、`docs/03` §53、`docs/04` §26。
+      顺带修复单文件 `fa_bwd_bf16_mma_onefile.cu` 缺 `make_lse_map`/`make_main_map`（`-DFA_TMA`
+      构建一直编译不过）的既有 bug。详见 `docs/01` §15、`docs/01b` §6an、`docs/03` §53、`docs/04` §26。
+
+20. **O55（第 102 轮，正结果，full varlen 默认）**：**varlen MLA full 的 split-KV auto 重新标定**。
+      O53 的 split-KV auto 对 causal/full 用同一目标（`base*sp≈528` + 每 m 块 K 切 `nt_cap/2`），
+      但 `[O53 A/B]` sweep 显示 **full 的最优 split 明显更小**——full 主 kernel 每 m 块工作量相同，
+      base grid 靠少量切分即可铺满一个波（b1 `base=32`，k=4→128 CTA≈132 SM）；再切到 16 只是
+      **重复读 Q/dO + 增加 dQ 跨 CTA atomic**（纯亏）。host-only：full 分支 `target=132`（1 个波）、
+      `sp_min=2`；**causal 分支逐字不变以保回归**。**b1 full main 0.0745→0.0681ms（1.09×）、
+      同 binary sweep k4 0.0647 vs k16 0.0748（1.16×）、total 0.1030→0.0958ms（1.075×）**；
+      b3 full total 1.009×；causal b1/b3 与 O53 逐位/持平。ncu（b1 full main）：O53 k16 grid 256×2、
+      **Waves 3.88**、77.54µs → O55 k4 grid 64×2、**Waves 0.97**、**68.00µs（1.14×）**。
+      **bound 仍是 L2（dK/dV 跨 CTA red）+ 1 CTA/SM 低 occupancy**；本次是**去过度切分**。
+      **教训：`split-K` 的 auto 目标必须按「每 m 块工作量是否均衡」分路径标定——causal 的镜像配对
+      每 CTA 工作量随 m 变化、需要多切几个波来均衡，full 均匀时只需一个波；否则过切反而更慢。**
+      单/两文件 host 同步、device 一行未改。详见 `docs/01` §15b、`docs/01b` §6ao、`docs/04` §27。
 
 ---
 

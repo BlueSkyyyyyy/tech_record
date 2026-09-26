@@ -2014,3 +2014,19 @@ bound = **L2（跨 CTA dQ red）+ 访存延迟**，不再是 O52 的「grid 不�
 
 原始输出：`src/bf16/fa_bwd_bf16_o54_varlen_full_b3.out.txt`（两文件）、
 `..._o54_varlen_full_b3_onefile.out.txt`（单文件）、`..._o54_varlen_causal_reg_b3.out.txt`（回归）。
+
+## 6ao. O55-bf16：varlen MLA full 的 split-KV auto 重新标定（第 102 轮）—— 正结果，full varlen 默认
+
+与 fp16 §15b 逐字同构（host-only：`run_varlen` 的 O53 auto 分支，causal `target=528`/完整 `sp_min`
+逐字不变，full `target=132`/`sp_min=2`）。bf16 device 一行未改、单/两文件数值逐指标一致。
+
+* **数值 vs fp32 ref（max_abs dq/dk/dv）**：b1 full auto=4 → 1.730/1.692/1.556e-3；
+  b3 full auto=2 → 3.100/3.526/2.316e-3（与 O53/O54 同量级）；causal b1 8.042e-3/1.097e-2/1.391e-2、
+  b3 1.267e-2/1.217e-2/1.796e-2 —— 与 O53 记录**逐位一致**（causal 分支未动）。
+* **性能（同 session `[O53 A/B]` + total）**：b1 full main（auto）**0.0745 → 0.0650 ms（1.14×）**、
+  端到端 total 0.1030 → **0.0944 ms（1.09×，11.37 TF）**；同 binary sweep k=4 0.0665 vs k=16 0.0746。
+  b3 full main 0.3871（≈持平）、total 0.4680 → **0.4620 ms**。causal b1/b3 total 0.0818/0.3510（回归）。
+* ncu 结论与 fp16 一致（b1 full k=4 恰好一个波、k=16 过切 4 个波 ⇒ 多读 Q/dO + 多 dQ atomic）。
+
+原始输出：`src/bf16/fa_bwd_bf16_o55_varlen.out.txt`（两文件，full+causal b1/b3）、
+`..._o55_varlen_onefile.out.txt`（单文件）。
