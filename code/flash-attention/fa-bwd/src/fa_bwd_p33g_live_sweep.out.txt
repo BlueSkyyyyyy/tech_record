@@ -1,0 +1,34 @@
+=== fa_bwd_run.py (P3-3c) 一键跑 ours + 汇总 ===
+cases=2 impls=['twofile', 'singlefile'] iters=5
+[run] fp16 twofile b1_s512_h16_d128_causal_fp16
+[run] fp16 singlefile b1_s512_h16_d128_causal_fp16
+[run] fp8 twofile b1_s512_h16_d128_causal_fp8
+[run] fp8 singlefile b1_s512_h16_d128_causal_fp8
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_p33c_run.out.txt
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_p33c_run.out.txt
+
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_run_p33c_summary.out.txt
+
+[consistency] skipped (--no-consistency)
+
+[compare] /usr/bin/python3 /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_compare.py --case b1_s512_h16_d128_causal_fp16 b1_s512_h16_d128_causal_fp8 --out /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_compare_p33c_summary.out.txt
+=== fa-bwd numeric comparison (baseline = ref; max_abs / max_rel) ===
+case                                           impl  dq_abs    dq_rel    dk_abs    dk_rel    dv_abs    dv_rel   
+----------------------------------------------------------------------------------------------------------------
+[b1_s512_h16_d128_causal_fp16]  (fp16)
+  fa3   1.679e-03 2.666e-01 1.684e-03 5.148e-01 1.899e-03 2.719e-02
+  fa    1.679e-03 2.666e-01 1.684e-03 5.121e-01 1.899e-03 2.719e-02
+  te    1.716e-03 2.439e-01 2.287e-03 5.140e-01 1.899e-03 3.699e-02
+  ours  1.671e-03 3.484e-01 1.771e-03 2.997e-01 1.899e-03 2.805e-02
+  ours_sf 1.671e-03 3.484e-01 1.771e-03 2.997e-01 1.899e-03 2.805e-02
+[b1_s512_h16_d128_causal_fp8]  (fp8)
+  te    4.859e-01 7.005e+01 4.038e-01 8.520e+01 5.906e-01 1.069e+02
+  ours  2.426e-01 1.939e+02 2.975e-01 7.596e+01 3.735e-01 1.004e+02
+  ours_sf 2.426e-01 1.939e+02 2.975e-01 7.596e+01 3.735e-01 1.004e+02
+
+=== ours vs ref 小结（判据 max_abs）===
+  fp16  b1_s512_h16_d128_causal_fp16                   dq=1.671e-03 dk=1.771e-03 dv=1.899e-03
+  fp8   b1_s512_h16_d128_causal_fp8                    dq=2.426e-01 dk=2.975e-01 dv=3.735e-01
+
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_compare_p33c_summary.out.txt
+

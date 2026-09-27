@@ -1,0 +1,32 @@
+=== fa-bwd 实现一致性（P3-3f/P3-3g）：ours vs ours_sf（max_abs，逐元素）===
+baseline-free：两者都算同一数学；期望差异仅跨 CTA atomicAdd 次序（dtype ulp）。
+判据（按 dtype）：max|ours-ours_sf| <= ctol；fp16=0.016, fp8=0.0001（任一超出则退出码 1）
+
+[fp16]
+  b1_s512_h16_d128_causal_fp16                    dq=0.000e+00  dk=1.221e-04  dv=4.883e-04
+
+[fp8]
+  b1_s512_h16_d128_causal_fp8                     dq=1.192e-07  dk=4.768e-07  dv=4.768e-07
+
+=== 小结（2 case 有 ours/ours_sf 双方；0 case 缺一侧）===
+  max|ours-ours_sf| over all cases: dq = 1.192e-07  (b1_s512_h16_d128_causal_fp8)
+  max|ours-ours_sf| over all cases: dk = 1.221e-04  (b1_s512_h16_d128_causal_fp16)
+  max|ours-ours_sf| over all cases: dv = 4.883e-04  (b1_s512_h16_d128_causal_fp16)
+  worst = 4.883e-04
+  gate[fp16] worst=4.883e-04  tol=0.016  -> OK
+  gate[fp8 ] worst=4.768e-07  tol=0.0001  -> OK
+
+[written] src/fa_bwd_p33g_gate_small_consistency.out.txt
+[--consistency] OK：worst=4.883e-04（各 dtype 均在容差内）
+=== fa_bwd_run.py (P3-3c) 一键跑 ours + 汇总 ===
+cases=2 impls=['twofile', 'singlefile'] iters=5
+[run] fp16 twofile b1_s512_h16_d128_causal_fp16
+      (--no-run: 复用已有 npy)
+[run] fp16 singlefile b1_s512_h16_d128_causal_fp16
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s512_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s512_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
+
+[consistency:auto] /usr/bin/python3 /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_compare.py --consistency --ca ours --cb ours_sf --out src/fa_bwd_p33g_gate_small_consistency.out.txt --case b1_s512_h16_d128_causal_fp16 b1_s512_h16_d128_causal_fp8 --ctol auto
