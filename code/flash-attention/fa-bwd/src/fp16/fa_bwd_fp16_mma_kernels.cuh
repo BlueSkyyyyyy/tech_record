@@ -328,6 +328,22 @@ __device__ __forceinline__ void dkv_det_store(float* part, float a, float b) {
   *reinterpret_cast<float2*>(part) = make_float2(a, b);
 }
 
+// O60：**partial 降精度存储**——把 DET 的 dK/dV partial 从 fp32 改存 fp16（`__half2`），
+//   字节减半，直击 reduce 的纯 DRAM 带宽墙（见 docs/01 §15、`docs/08` §5.44）。只改
+//   「存到地址处的元素类型」：写点、归约索引与求和集合/次序都逐字不变，故仍确定性可复现；
+//   代价是每个 partial 值先过一趟 fp16 舍入（~5e-4 相对），最终输出本就 fp16。
+__device__ __forceinline__ void dkv_det_store(__half* part, float a, float b) {
+  *reinterpret_cast<__half2*>(part) = __floats2half2_rn(a, b);
+}
+
+// 注意：`off` 是**元素下标**。fp16 存储时缓冲区的元素单位是 2B，故必须在 `__half*`
+// 上做 `+off`，不能在 `float*` 上先加（否则字节地址会翻倍、越界）。
+template <bool P16>
+__device__ __forceinline__ void dkv_det_store_p(float* base, size_t off, float a, float b) {
+  if constexpr (P16) dkv_det_store(reinterpret_cast<__half*>(base) + off, a, b);
+  else dkv_det_store(base + off, a, b);
+}
+
 // ---- O6：cp.async 异步拷贝（16B）----
 // 把「全局→smem」的 K/V 搬运从「同步 LDG + STS」改成硬件异步流水：`cp.async.cg` 走
 // L2-only 路径（流式数据不污染 L1），发起后立即返回、不占寄存器、不阻塞发射；
@@ -2065,7 +2081,7 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
 //     （存储列 64 的 SW128 kg=1 atom；smoke `fa_bwd_fp16_wgmma2b_smoke.cu` 逐位 PASS）；
 //   * GEMM5 输出 [64][HD=128]（每 wg 自己 64 行）⇒ 一条 m64n128，`dqacc[16][4]`。
 // 数值只改跨 CTA `atomicAdd` 次序，与 O17 在 fp16 噪声内一致。
-template <int HD, bool SPLIT = true, bool DET = false>
+template <int HD, bool SPLIT = true, bool DET = false, bool DET_HALF = false>
 __global__ void __launch_bounds__(256, 1)
 fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
                            const __half* __restrict__ v, const __half* __restrict__ do_,
@@ -2201,7 +2217,7 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int c = j * 8 + c2;
               if (jg < S) {
                 if constexpr (DET)
-                  dkv_det_store(dv_part + (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                  dkv_det_store_p<DET_HALF>(dv_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
                                 accv[j * 4 + qq], accv[j * 4 + qq + 1]);
                 else
                   red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
@@ -2228,7 +2244,7 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int c = j * 8 + c2;
               if (jg < S) {
                 if constexpr (DET)
-                  dkv_det_store(dk_part + (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                  dkv_det_store_p<DET_HALF>(dk_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
                                 acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
                 else
                   red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
@@ -2258,7 +2274,7 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int c = j * 8 + c2;
               if (jg < S) {
                 if constexpr (DET)
-                  dkv_det_store(dv_part + (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                  dkv_det_store_p<DET_HALF>(dv_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
                                 accv[j * 4 + qq], accv[j * 4 + qq + 1]);
                 else
                   red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
@@ -2283,7 +2299,7 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int c = j * 8 + c2;
               if (jg < S) {
                 if constexpr (DET)
-                  dkv_det_store(dk_part + (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                  dkv_det_store_p<DET_HALF>(dk_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
                                 acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
                 else
                   red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
@@ -3677,7 +3693,9 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
 // 它们对 dK/dV 的贡献要**求和**；若 partial 只用 hkv 索引，同 (mblk, hkv) 的多个 h 会互相
 // 覆盖（race，实测 GQA 对拍错 O(1)）。这里 partial 按 `(b*H + h)*nblk + mblk` 分片，归约时
 // 对每个 KV 头 `hkv` 把其 head group `[hkv*G, (hkv+1)*G)`（G=H/Hkv）与 mblk 一起求和。
-template <int HD>
+// O60：`P16=true` 时 partial 以 fp16 存储（指针仍按 `float*` 传入，内部重解释为 `__half*`），
+//   逐元素 `__half2float` 后进 fp32 累加器；求和次序与 P16=false 完全相同，仍是确定性的。
+template <int HD, bool P16 = false>
 __global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
                                   const float* __restrict__ dv_part,
                                   float* __restrict__ dk_acc, float* __restrict__ dv_acc,
@@ -3695,8 +3713,13 @@ __global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
     const size_t prow = (size_t)(b * H + h0 + hh);
     for (int m = mblk0; m < nblk; ++m) {
       const size_t base = ((prow * nblk + m) * (size_t)S + jg) * HD + c;
-      sk += dk_part[base];
-      sv += dv_part[base];
+      if constexpr (P16) {
+        sk += __half2float(reinterpret_cast<const __half*>(dk_part)[base]);
+        sv += __half2float(reinterpret_cast<const __half*>(dv_part)[base]);
+      } else {
+        sk += dk_part[base];
+        sv += dv_part[base];
+      }
     }
   }
   const size_t o = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;

@@ -4207,3 +4207,101 @@ S512H4 2.516/2.916/1.724e-3、S1024H2 1.987/1.712/1.848e-3）；**D=128 S4096 �
 实现/证据与 fp8 版同源，详见 `docs/03` §55。原始输出
 `src/fp16/fa_bwd_fp16_o59_{fixed_s1024h2,onefile_s1024h2}.out.txt`、
 `..._o59_ncu_lse_{cfg6,legacy}_s512h4.out.txt`，汇总 `src/fa_bwd_o59_fixed_mla_shapes.out.txt`。
+
+## 17. O60-fp16（第一百二十九轮，混合结果：reduce 正、端到端中性偏负，opt-in A/B）：DET 的 dK/dV partial 降精度存 fp16
+
+### 17.1 动机与口径
+
+第 128 轮（`docs/03` §66）把 varlen DET 的 **compact per-sequence partial** 判负后，结论是
+「reduce 只读被写过的条目、stride 空洞不产生 DRAM 流量；真正的『减 partial 字节』只剩
+**BM=128 跨 warpgroup 偏和**（fp8 撞 smem 硬墙，见 ROADMAP「阻塞」）或 **partial 降精度存储**」。
+后一条正适用于 fp16：`--det=1`（O7b，§14o）的 dK/dV partial 一直是 **fp32 `float2`** 写、fp32
+读，而 reduce 是**纯 DRAM 带宽 bound**（O7b ncu：reduce 90.4% DRAM、384.9µs）。把 partial
+从 fp32 降到 fp16（`__half2`）**字节直接减半**，且输出本就是 fp16 ⇒ 预期 reduce ~2×。
+本轮实现并实测这个假设：**reduce 确实 1.27–1.66×，但 DET 主 kernel 因写侧变慢，端到端只平**。
+
+### 17.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+- `dkv_det_store` 加 `__half*` 重载（`__floats2half2_rn` 打包成一次 4B `__half2` 覆盖写）；
+  新增模板 helper `dkv_det_store_p<P16>(float* base, size_t off, a, b)`：`P16` 时在
+  `reinterpret_cast<__half*>(base) + off` 上写 half2，否则 `base + off` 写 float2。
+  **坑**：`off` 必须先在 `__half*` 上做加法——若沿用 `float* base + off` 再强转，字节地址会翻倍、
+  越界（`illegal memory access` 实测踩到）。
+- `fa_bwd_fp16_wgmma2b_kernel<HD, SPLIT, DET, DET_HALF=false>` 加第 4 个模板参，4 处 DET
+  dK/dV 写点改 `dkv_det_store_p<DET_HALF>`；host `launch_bwd_wgmma2b` 透传。
+- `dkv_reduce_kernel<HD, P16=false>`：`P16` 时逐元素 `__half2float(reinterpret_cast<const
+  __half*>(partial)[base])` 再进 fp32 累加器；**索引、求和集合、求和次序逐字不变**。
+- host `--det` 的 A/B 扩成 `atomic / DET(fp32) / DET(fp16)` 三档 + main-only / reduce-only
+  分别计时；新增 fp16 partial 缓冲（`B*H*nblk*S*D*2B`，S4096 每个 0.54GB）。默认路径、无 `--det`
+  时行为与数值逐位不变。
+
+### 17.3 数值（fp16 causal，max_abs；两遍 bitwise）
+
+| shape | ours-vs-ref dq/dk/dv | runs[1-2] fp32-partial dk/dv | runs[1-2] fp16-partial dk/dv | fp16-vs-atomic dk/dv |
+|---|---|---|---|---|
+| S512 MHA | 1.671/1.771/1.899e-3 | **0 / 0** | **0 / 0** | 9.70e-4 / 1.95e-3 |
+| S1024 GQA kv4 | 2.134/3.305/3.850e-3 | **0 / 0** | **0 / 0** | 1.49e-3 / 2.45e-3 |
+| S4096 MHA | 1.883/1.734/1.966e-3 | **0 / 0** | **0 / 0** | 9.53e-4 / 1.95e-3 |
+
+**两种 partial 都逐位可复现**（求和次序不变）；fp16-partial 与 fp32-partial/atomic 的差
+= fp16 舍入（~1e-3，1–2 个 fp16 ulp @|v|~1），**确定性保留、只改数值口径**。默认路径数值逐位不变。
+单文件逐指标与两文件一致。
+
+### 17.4 性能（同 session A/B，CUDA event，ms）
+
+| shape | DET main fp32 | DET main fp16 | reduce fp32 | reduce fp16 | DET 合计 fp32→fp16 |
+|---|---|---|---|---|---|
+| S512 MHA | 0.0420 | 0.0481（0.874×） | 0.0107 | 0.0084（**1.274×**） | 0.0536→0.0577（0.929×） |
+| S1024 GQA kv4 | 0.1440 | 0.1700（0.847×） | 0.0577 | 0.0385（**1.500×**） | 0.2073→0.2141（0.968×） |
+| S4096 MHA | 0.8004 | 0.9496（0.843×） | 0.3877 | 0.2341（**1.656×**） | 1.1845→1.1775（**1.006×**） |
+
+单文件 S512 同构（main 0.859×、reduce 1.272×、合计 0.935×）。**reduce 的字节减半红利真实存在
+（1.27–1.66×），但被主 kernel 写侧的 16–19% 变慢抵消**：S4096 端到端只 1.006×，S512/GQA 反而
+0.93–0.97×。
+
+### 17.5 ncu（S4096，同 binary，`--kernel-name-base demangled` 精确选模板实例）
+
+| kernel | Duration | DRAM read | DRAM write | L2 read 扇区 | L2 write 扇区 | store 扇区 |
+|---|---|---|---|---|---|---|
+| DET main fp32 `<128,1,1,0>` | 802.94µs | 74.4 MB | **1.12 GB** | 18.46 M | 53.48 M | **35,651,584** |
+| DET main fp16 `<128,1,1,1>` | **952.64µs** | 75.6 MB | **0.57 GB** | 18.99 M | 53.38 M | **35,651,584（同）** |
+| reduce fp32 `<128,0>` | 386.21µs | **1.11 GB** | 59.5 MB | 51.92 M | 3.14 M | 2.10 M |
+| reduce fp16 `<128,1>` | **232.51µs** | **0.55 GB** | 56.2 MB | 25.96 M | 3.15 M | 2.10 M |
+
+- **reduce**：DRAM read 1.11GB→0.55GB、L2 read 扇区 51.9M→26.0M ⇒ 纯带宽 bound，Duration
+  1.66×。S512 同向（12.58→9.82µs，DRAM 52.2%→32.0%）。
+- **main 的根因**：fp16 把 **DRAM 写字节减半（1.12→0.57GB），但 `st.global` 的 store 扇区数
+  `l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum` 一字不变（35.65M）**——DET partial 的写是
+  **扇区粒度 bound，不是字节 bound**：每个 `(j,row)` 只有 16B/行，落不满 32B 扇区；`__half2`
+  反而把同样的扇区写得更碎，加上 `__floats2half2_rn` 的转换，主 kernel 慢 0.84×。
+- **结论**：**降精度只对「读被写过的字节」的 reduce 成立；对 main 的写侧无效**。要让 partial
+  写侧也降字节，必须让一次 store 落满扇区（改 partial 布局把相邻 `j` 的 half 拼成 32B 连续写，
+  或 staging 到 smem 再整行 128B 写）——留作下一步候选。
+
+### 17.6 对标（纯反向 `harness/fa_vs_te_bwd_only.py fp16`）
+
+O60 只改 opt-in 的 `--det` A/B，**默认非确定性路径一行未动**，故与 FA3/TE 的差距不变：
+MHA S4096 ours total 1.3217ms/104.0TF（打印口径 4BS²HD，真反向 ×2）vs **FA3 0.3245ms/847TF**、
+TE 0.4440/619、FA2 0.7266/378；GQA kv4 S1024 FA3 0.0825/416、TE 0.1123/306；S512 FA3 0.0261/164。
+
+### 17.7 复现 / 原始输出
+
+```
+# 两文件（S512 默认 dir / S4096 / GQA kv4）：
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu --det --iters=50
+# 单文件：
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_onefile.cu --det --iters=50
+# ncu（精确选模板实例）：
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/ncu.sh src/fp16/fa_bwd_fp16_mma_main.cu --kernel-name-base demangled \
+  --kernel-name 'regex:wgmma2b_kernel.*\(bool\)1, \(bool\)1, \(bool\)0>' --launch-count 1 \
+  --metrics gpu__time_duration.sum,dram__bytes_read.sum,dram__bytes_write.sum,lts__t_sectors_op_read.sum,lts__t_sectors_op_write.sum,l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16 --det --iters=2
+```
+
+`src/fp16/fa_bwd_fp16_main_o60_det_{s512,s4096,gqa_kv4}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o60_det_s512.out.txt`、
+`src/fp16/fa_bwd_fp16_p_o60_ncu_{reduce_s512,reduce32_s4096,reduce16_s4096,main32_s4096,main16_s4096}.out.txt`、
+`src/fp16/fa_bwd_o60_fa3_te_baseline_fp16.out.txt`。

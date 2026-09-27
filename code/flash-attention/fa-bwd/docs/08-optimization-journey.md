@@ -668,6 +668,24 @@ smem 冲突 + 低 occ
      `docs/00` §4.2。
 
 
+44. **O60（第 129 轮，device+host 增量，混合结果：reduce 正 / 端到端中性偏负，opt-in A/B）**：
+     **把 fp16 `--det` 的 dK/dV partial 从 fp32 降精度存 fp16**——落实第 128 轮「降 partial
+     字节」候选。`dkv_det_store` 加 `__half*` 重载 + `dkv_det_store_p<P16>(base, off, …)`（**坑：
+     `off` 必须在 `__half*` 上做加法，否则字节地址翻倍、越界**）；`fa_bwd_fp16_wgmma2b_kernel`
+     加 `DET_HALF` 模板参、4 处写点透传；`dkv_reduce_kernel<HD, P16>` 逐元素 `__half2float` 进
+     fp32 累加器，**索引/求和集合/次序逐字不变**。host `--det` A/B 扩成 atomic/DET(fp32)/DET(fp16)
+     × main-only/reduce-only。**两种 partial 都 `runs[1-2]` 逐位可复现**，fp16-vs-atomic 仅差
+     fp16 舍入 0.95–2.4e-3；默认路径数值逐位不变；单/两文件逐指标一致。
+     **实测（同 session，event）**：**reduce 单向 1.27×（S512）/1.50×（GQA kv4）/1.66×（S4096）**
+     （S4096 0.3877→0.2341ms），**但 DET 主 kernel 慢到 0.84–0.87×**（S4096 0.8004→0.9496ms），
+     端到端只 1.006×（S4096）/0.93–0.97×（S512/GQA）。ncu（S4096）：reduce DRAM read
+     1.11→0.55GB、L2 read 扇区 51.9M→26.0M ⇒ 纯带宽 bound、1.66×；**main 的 DRAM 写字节减半
+     （1.12→0.57GB）但 store 扇区数一字不变（35,651,584）**——DET partial 写是**扇区粒度 bound
+     而非字节 bound**（每 `(j,row)` 仅 16B 落不满 32B 扇区），半宽写更碎 + `__floats2half2_rn`
+     转换 ⇒ 主 kernel 慢 19%。**教训：降精度只对「读被写过的字节」的 reduce 成立；要让写侧也降
+     字节，必须让一次 store 落满扇区——下一步候选：把相邻 `j` 的 half 拼成 32B 连续写，或 staging
+     到 smem 再整行 128B 写。** 详见 `docs/01` §17；原始输出 `src/fp16/fa_bwd_fp16_*_o60_*`。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。
