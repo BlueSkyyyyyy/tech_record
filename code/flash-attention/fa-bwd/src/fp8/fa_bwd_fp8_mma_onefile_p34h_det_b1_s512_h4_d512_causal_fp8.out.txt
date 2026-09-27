@@ -1,0 +1,52 @@
+fa_bwd_fp8_mma_onefile.cu(4113): warning #550-D: variable "lsewgm" was set but never used
+    int lsewgm = 0;
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_mma_onefile.cu(3248): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 4515
+
+fa_bwd_fp8_mma_onefile.cu(2956): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 4515
+
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp8
+B=1 S=512 H=4 Hkv=4 D=512 causal=1 scale=0.044194
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 64 x 4 x 1  (ksplit=8, base_grid=32)
+O19: wg2 grid = 64 x 4 x 1 (ksplit2=16, base_grid2=16)
+O7: use_regdq=0 (register dQ accumulation)
+O32: lse backend = wgmma/mma
+O37: main qd-tma = off
+O41: main kv-tma = off
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.1278 ms  16.81 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0146 ms | preprocess 0.0250 ms | main 0.0721 ms | convert 0.0162 ms
+[P3-4h A/B] MLA ksplit=1 atomic(256/4) 0.2850 ms | DET(256/4) 0.3087 ms (0.923x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=0.00e+00/4.77e-07/9.54e-07
+[O59 A/B] LSE MLA legacy(sp=8) 0.0260 ms | cfg6(sp=8) 0.0216 ms (1.203x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[O12 A/B] main LSE/D preload off 0.1214 ms | on 0.1196 ms (1.015x) | max_abs(on-vs-off) dq=2.384e-07
+[O14 A/B] quant old(per-row) 0.0223 ms | new(warp-per-row) 0.0146 ms (1.526x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0066 ms | new(warp-per-row) 0.0035 ms (1.911x) | max_abs=8.583e-06 max_rel=1.586e-04
+[O21b A/B] end2end 保留convert 0.1403 ms | 直写输出(消convert) 0.1286 ms (1.0909x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.415e-01  max_rel=1.803e+02
+  dk   vs ref: max_abs=2.992e-01  max_rel=6.416e+01
+  dv   vs ref: max_abs=4.481e-01  max_rel=9.164e+01
+    dq[d   0..127] max_abs=2.361e-01
+    dq[d 128..255] max_abs=2.415e-01
+    dq[d 256..383] max_abs=1.690e-01
+    dq[d 384..511] max_abs=1.784e-01
+    dk[d   0..127] max_abs=2.532e-01
+    dk[d 128..255] max_abs=2.566e-01
+    dk[d 256..383] max_abs=2.992e-01
+    dk[d 384..511] max_abs=2.525e-01
+    dv[d   0..127] max_abs=4.481e-01
+    dv[d 128..255] max_abs=3.640e-01
+    dv[d 256..383] max_abs=2.988e-01
+    dv[d 384..511] max_abs=2.960e-01
+[compare] ours vs TE FP8

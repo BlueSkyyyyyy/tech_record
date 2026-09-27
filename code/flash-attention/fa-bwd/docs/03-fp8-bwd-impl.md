@@ -5325,3 +5325,105 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
 原始输出：`src/fp8/fa_bwd_fp8_main_p34g_det_{s512,s4096,gqa}.out.txt`、
 `..._mma_onefile_p34g_det_{s512,s4096}.out.txt`、
 `..._p34g_ncu_detmain_s4096.out.txt`、`..._p34g_ncu_reduce_s4096.out.txt`。
+
+## 59. P3-4h（第一百二十一轮，**正结果，opt-in `--det`**）：`--det` 扩到 MLA（HD=512）
+
+### 59.1 动机（落实第 119/120 轮「下一步候选 ①」的 MLA 部分）
+
+P3-4e/f/g 的 `--det` 覆盖了 D=128 的 mma 默认路径与 Hopper TMA 快路。但 **MLA（HD=512）**
+路径的 dK/dV 仍是跨 CTA `atomicAdd`，无法做确定性复现。MLA 与 D=128 的关键差别在于 **dQ 的
+累加方式**：
+
+- D=128：`kRegDq = REGDQ && (HD/NTW == 1)`，`NTW = WN*64 = 128`、`HD/NTW = 1` ⇒ 可把 dQ
+  沿 n-tile 累加在寄存器里，`ksplit>1` 时写 partial、再由 `dq_reduce_kernel` 固定次序求和；
+- MLA：`NTW = 2*64 = 128`、`HD/NTW = 4` ⇒ `kRegDq` **恒 false**，dQ 逐 tile 走 `red_add2`
+  写 `dq_acc`。`ksplit>1` 时同一个 `(row,h,c)` 会被多个 part 的 CTA 原子加 ⇒ 非确定。
+  因此 MLA 的确定性只能取 **`ksplit=1`**：此时每个 `(row,h)` 只属于唯一的 m 块 CTA，
+  `red_add2` 退化为单写者（无竞争）⇒ dQ 也确定。
+
+好消息：`dkv_reduce_kernel<HD,BM>` 的 partial 布局与求和次序本来就对任意 HD 成立，body 的
+DET 分支（`dkv_det_store`）也 HD 无关。**device 数学一行未改**，只是 host 需要把 DET 路径
+实例化到 MLA 的 8-warp/256 几何。
+
+### 59.2 实现（单/两文件 device 逐字同源，`sync_onefile_device.py` 核对 `identical: True`）
+
+- **device（`fa_bwd_fp8_kernels.cuh` + 同步进 `..._mma_onefile.cu`）**：**一行未改**。
+- **host（`fa_bwd_fp8_main.cu` + `..._mma_onefile.cu`）**：
+  - `launch_bwd_main_det` 加模板参数 `int NTH = THREADS, int NWAR = WN`（默认与旧实例逐字
+    等价 ⇒ D=128 路径不变），使其能把 DET 实例化到 MLA 的 `256/4` 几何；
+  - 新增 **P3-4h A/B**（`if (det_ab && D == 512 && !varlen)`）：`ksplit=1` 下 `atomic(256/4)`
+    vs `DET(256/4)` 同几何对比（仅 DET 一个变量），跑两遍 DET 验逐位，`dkv_reduce_kernel<512,64>`
+    以 512 线程启动（`c = threadIdx.x ∈ [0,512)` 覆盖 HD）。
+
+范围：定长、D=512（MLA，MHA/GQA 均可）、ksplit=1、默认 mma 后端。ksplit>1 的 MLA DET 与
+varlen 的 DET 仍列 backlog。
+
+### 59.3 数值：逐位可复现，dQ 与 atomic 逐位同值（`runs[1-2]`）
+
+三 shape × 单/两文件，`runs[1-2] bitwise dq/dk/dv = 0.00e+00`（完全可复现）：
+
+| case | 单/两文件 | `DET-vs-atomic` dq / dk / dv |
+|---|---|---|
+| S256 H2 D512 | 两文件 | 0.00e+00 / 2.38e-07 / 3.58e-07 |
+| S512 H4 D512 | 两文件 | 0.00e+00 / 4.77e-07 / 9.54e-07 |
+| S512 H4 D512 | 单文件 | 0.00e+00 / 2.38e-07 / 9.54e-07 |
+| S1024 H2 D512 | 两文件 | 0.00e+00 / 4.77e-07 / 9.54e-07 |
+| S1024 H2 D512 | 单文件 | 0.00e+00 / 4.77e-07 / 7.15e-07 |
+
+**dQ 恒 `0.00e+00`**（ksplit=1 单写者 vs atomic 同值）、dk/dv ~e-7–e-6（fp32 归约次序末位）。
+`ours vs ref` 与历史逐位一致：S256H2 `2.356/2.290/3.441e-1`、S512H4 `2.415/2.992/4.481e-1`、
+S1024H2 `2.232/3.337/3.602e-1`。默认路径（不加 `--det`）数值逐位不变。
+
+### 59.4 代价（同 session，同 binary A/B，同 256/4 几何、ksplit=1，含 `dkv_reduce`）
+
+| case | atomic(256/4) | DET(256/4) | 比值 |
+|---|---|---|---|
+| S256 H2 D512 | 0.147 ms | 0.142 ms | **1.035×** |
+| S512 H4 D512 | 0.285 ms | 0.307 ms | 0.923× |
+| S1024 H2 D512 | 0.551 ms | 0.586 ms | 0.940× |
+
+与 P3-4e/f/g 同结论：**确定性的售价 = 把 L2 原子归约换成一次性 DRAM partial 写读**。小 S
+（grid 小、atomic 竞争相对不划算）DET 净赚；大 S 净亏。
+
+### 59.5 ncu：主 kernel 把 L2 red 换成 DRAM partial 写；墙仍是 `dkv_reduce` 的 DRAM 带宽
+
+S=1024 H2 D512（`--set full`，`--det`，`--iters=1`）：
+
+| 指标 | DET 主 kernel（256/4，ksplit=1） | atomic 主 kernel（256/4，ksplit=1） |
+|---|---|---|
+| Duration | **541.4 µs** | 611.4 µs |
+| DRAM / L2 / L1TEX / Compute | **3.53** / 10.24 / 57.96 / 3.78 % | 0.83 / 11.23 / 54.14 / 4.12 % |
+| regs / achieved occ / Waves | 255 / 12.5% / 0.24 | 245 / 12.5% / 0.24 |
+
+归约 kernel（`dkv_reduce_kernel<512,64>`，S=1024H2）：
+
+| 指标 | 值 |
+|---|---|
+| Duration / DRAM / L2 / Compute | **29.8 µs** / **76.35%** / 74.70% / 24.22% |
+| 带宽 / occ / regs / Waves | **2.56 TB/s** / 65.63% / 40 / 5.17 |
+
+即 DET 把主 kernel 的 L2 原子归约换成 partial 的 DRAM 写；归约 kernel 是 **纯 DRAM 带宽
+bound**（与 P3-4e/f/g 逐项一致）。注意 ncu 锁频单次下 DET 主 kernel 反而比 atomic 主 kernel
+略快（541 vs 611µs，atomic 的 L2 `red` 在锁频下更贵），但含 reduce 的 event 稳态在 S512/S1024
+上 DET 净慢（0.92–0.94×）——**锁频 ncu 读机制，event 稳态定发布口径**（同 `docs/01` 的教训）。
+
+### 59.6 复现 / 原始输出
+
+```bash
+# 定长 MLA + --det（打印 [P3-4h A/B]）
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8 --det --iters=10
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8 --det --iters=10
+# ncu（DET MLA 主 kernel 的 mangled 实例尾为 ...ELi256ELi4ELb0ELb1E；atomic 为 ...ELb0ELb0E）
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --kernel-name-base mangled \
+  --kernel-name regex:ILi512ELi64ELi32ELb0ELb0ELb1ELb1ELb1ELi256ELi4ELb0ELb1E \
+  --launch-count 1 -- --dir=.../b1_s1024_h2_d512_causal_fp8 --det --iters=1
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:dkv_reduce_kernelILi512 --launch-count 1 -- \
+  --dir=.../b1_s1024_h2_d512_causal_fp8 --det --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_p34h_det_b1_{s256_h2,s512_h4,s1024_h2}_d512_causal_fp8.out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_p34h_det_b1_{s512_h4,s1024_h2}_d512_causal_fp8.out.txt`、
+`src/fp8/fa_bwd_fp8_main_p34h_ncu_{detmain,atomicmain,reduce}_s1024h2.out.txt`。

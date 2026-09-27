@@ -555,8 +555,27 @@ smem 冲突 + 低 occ
      DET 主 kernel 把 L2 `red`（78.6%）换成 DRAM partial 写（38.3%），`dkv_reduce` **729.8µs /
      DRAM 91.7% / 3.07 TB/s**（纯带宽 bound），S4096 0.78×。**教训：只要把确定性做在共享的
      「计算体」而不是某个后端壳里，换后端（cp.async→TMA）时确定性几乎免费继承——新增一个后端
-     只需要把模板参数透传过去，风险被 `DET=false` 默认值完全隔离。** 单/两文件 device 逐字同源；
-     默认路径一行未改。详见 `docs/03` §58。
+      只需要把模板参数透传过去，风险被 `DET=false` 默认值完全隔离。** 单/两文件 device 逐字同源；
+      默认路径一行未改。详见 `docs/03` §58。
+
+37. **P3-4h（第 121 轮，host 增量，正结果/opt-in）**：**把 `--det` 扩到 MLA（HD=512）**——
+     落实第 119/120 轮「下一步候选 ①」的 MLA 部分。MLA 的 dK/dV 同样是跨 CTA `atomicAdd`，
+     而且它的 dQ **无法用寄存器累加**（`kRegDq = REGDQ && HD/NTW==1`，HD=512 时 `HD/NTW=4`
+     ⇒ 恒 false），所以「确定 dQ」只能靠 **ksplit=1 的单写者 `red_add2`**。好消息是
+     `dkv_reduce_kernel<HD,BM>` 与 body 的 DET 分支本来就 HD 无关，**device 数学一行未改**，
+     只给 `launch_bwd_main_det` 加了 `NTH/NWAR`（默认 `THREADS/WN` ⇒ D=128 逐字不变）以复用
+     MLA 的 8-warp/256 几何，host 补一条 A/B。**三 shape（S256H2/S512H4/S1024H2）× 单/两文件，
+     两次跑 `runs[1-2] bitwise dq/dk/dv = 0`**；`DET-vs-atomic` **dq 恒 0**（单写者，与 atomic
+     逐位同值）、dk/dv e-7–e-6；`ours vs ref` 与历史逐位一致（S256H2 `2.356/2.290/3.441e-1`、
+     S512H4 `2.415/2.992/4.481e-1`、S1024H2 `2.232/3.337/3.602e-1`）。代价（同 256/4 几何、
+     仅 DET 一个变量）：S256H2 **1.035×**、S512H4 **0.923×**、S1024H2 **0.940×**。ncu
+     （S1024H2）：DET 主 kernel 541.4µs / DRAM 3.53 / L2 10.24 / L1TEX 57.96 / Compute 3.78%、
+     255 regs / occ 12.5% / Waves 0.24；atomic 主 kernel 611.4µs / DRAM 0.83 / L2 11.23%；
+     `dkv_reduce_kernel` **29.8µs / DRAM 76.4% / 2.56 TB/s / occ 65.6%** ⇒ **bound 仍是 reduce
+     的纯 DRAM 带宽**（与 P3-4e/f/g 一致）。**教训：先在每个 dtype/几何上核对该路径的「dQ 累加
+     方式」再谈确定性——同是 fp8 反向，D=128 能用寄存器累加（ksplit>1 也确定），MLA 不能，
+     于是只能锁 ksplit=1，代价与收益都随形状变号（S256 净赚、大 S 净亏）。** 单/两文件 device
+     逐字同源、默认路径数值逐位不变。详见 `docs/03` §59。
 
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）

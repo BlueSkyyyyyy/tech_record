@@ -4436,6 +4436,34 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     `nblk`）与 **MLA（HD=512）**；② 减 partial 字节（按 KV 行跨 warpgroup 偏和 / 更细分块）
     以压低 reduce 的 DRAM 墙；③ 性能（非确定性）仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
 
+- 2026-09-27（第一百二十一轮）：**P3-4h 完成（`--det` 扩到 MLA（HD=512））**。
+  - 动机（落实第一百一十九/一百二十轮候选 ① 的 MLA 部分）：MLA 的 dK/dV 同样跨 CTA
+    `atomicAdd`，无法确定性复现。**关键差别**：MLA 的 `kRegDq = REGDQ && (HD/NTW==1)` 恒 false
+    （HD/NTW=4）⇒ dQ 无法寄存器累加，`ksplit>1` 时同一 `(row,h,c)` 被多 part 原子加 ⇒ 非确定；
+    故 MLA 的确定性只能取 **ksplit=1**（单写者 `red_add2`，dQ 也确定）。
+  - **改动（host-only，单/两文件 device 一行未改、`sync_onefile_device.py` 核对）**：
+    `dkv_reduce_kernel<HD,BM>` 与 body 的 DET 分支本就 HD 无关；给 `launch_bwd_main_det` 加
+    `int NTH=THREADS, int NWAR=WN`（默认逐字不变）以实例化到 MLA 的 256/4 几何；新增
+    **P3-4h A/B**（`det_ab && D==512 && !varlen`）：同几何 `atomic(256/4)` vs `DET(256/4)`、
+    ksplit=1、跑两遍验逐位，reduce 以 512 线程启动。范围：定长/MLA/ksplit=1/默认 mma 后端。
+  - **数值**：三 shape（S256H2/S512H4/S1024H2）× 单/两文件 **`runs[1-2] bitwise dq/dk/dv =
+    0.00e+00`**；`DET-vs-atomic` **dq 恒 0.00e+00**（单写者同值）、dk/dv e-7–e-6；`ours vs ref`
+    与历史逐位一致（S256H2 `2.356/2.290/3.441e-1`、S512H4 `2.415/2.992/4.481e-1`、
+    S1024H2 `2.232/3.337/3.602e-1`）；默认路径数值逐位不变。
+  - **代价（同 session/同 binary A/B，ksplit=1，含 reduce）**：S256H2 0.147→0.142ms（**1.035×**）、
+    S512H4 0.285→0.307（0.923×）、S1024H2 0.551→0.586（0.940×）。
+  - **ncu（S1024H2）**：DET 主 kernel 541.4µs / DRAM 3.53% / L2 10.24% / L1TEX 57.96% /
+    Compute 3.78% / 255 regs / occ 12.5% / Waves 0.24；atomic 主 kernel 611.4µs / DRAM 0.83% /
+    L2 11.23%；`dkv_reduce_kernel<512,64>` **29.8µs / DRAM 76.35% / 2.56 TB/s / occ 65.63%**
+    ⇒ **bound 仍是 reduce 的纯 DRAM 带宽**（与 P3-4e/f/g 逐项一致）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_main_p34h_det_b1_{s256_h2,s512_h4,s1024_h2}_d512_causal_fp8.out.txt`、
+    `..._mma_onefile_p34h_det_b1_{s512_h4,s1024_h2}_d512_causal_fp8.out.txt`、
+    `..._p34h_ncu_{detmain,atomicmain,reduce}_s1024h2.out.txt`；文档 `docs/03` §59、`docs/08` §5.37、
+    `docs/00` §4.2。
+  - **下一步候选**：① 把 DET 再扩到 **varlen**（partial/reduce 需按序列的 `cu_seqlens` 与逐序列
+    `nblk`；这是候选 ① 的最后一块）；② 减 partial 字节（按 KV 行跨 warpgroup 偏和 / 更细分块）
+    以压低 reduce 的 DRAM 墙；③ 性能（非确定性）仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
@@ -4489,4 +4517,7 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   **`--det` 扩到 Hopper TMA 快路已完成（P3-4g，第一百二十轮）**：`kvtma` 主 kernel 走同一
   `fp8_mma_body` 的 DET 路径（定长/HD=128/GQA、ksplit=1），两次跑逐位相同、代价 0.78–0.86×，
   见 `docs/03` §58。
+  **`--det` 扩到 MLA（HD=512）已完成（P3-4h，第一百二十一轮）**：device 一行未改，host 复用
+  `dkv_reduce_kernel<HD,BM>`（锁 ksplit=1 保 dQ 确定），三 shape 两次跑逐位相同、代价
+  0.92–1.035×，bound 仍是 reduce 的 DRAM 带宽，见 `docs/03` §59。
 - fp8：对比「只量化 dO」vs「dO 和 P 都量化」的精度/性能权衡。
