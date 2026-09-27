@@ -13,11 +13,11 @@
 // 用法：run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu [--dir=...] [--full|--causal] [--o=...] [--iters=N]
 // =============================================================================
 
+#include "../fa_bwd_dump.h"   // P3-3：ours 输出落 npy，供 harness/fa_bwd_compare.py
 #include <cuda_runtime.h>
 #include <cuda.h>  // O32：LSE 的 4D TMA 需要驱动 API（cuTensorMapEncodeTiled / CUtensorMap）
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
-#include "../fa_bwd_dump.h"   // P3-3：ours 输出落 npy，供 harness/fa_bwd_compare.py
 
 #include <cstdint>
 
@@ -3526,8 +3526,11 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
 // P3-4i：`WGMMA`（默认 false，定长路径逐字不变）让 varlen D=128（varlen 构建恒为
 //   `-DFA_WGMMA`，默认主 kernel 走 WGMMA）能用同一 DET 路径；`cu_seqlens/mt_b/mt_m` 透传
 //   varlen 的 packed 索引（定长不传 ⇒ 逐字不变）。
+// P3-4m：`KVPIPE` 让 DET 的 MLA 主 kernel 也能用 O51 的 K/V `cp.async` 回填流水（device 的
+//   `fp8_mma_body` 早已同时支持 `KVPIPE && DET`，此前 host 未接线 ⇒ MLA DET 一直走非 kvpipe
+//   主 kernel，白扔 O51 的 1.78–1.86×）。数值与旧非 kvpipe DET 逐位相同（只改搬运）。
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
-          int NTH = THREADS, int NWAR = WN, bool WGMMA = false>
+          int NTH = THREADS, int NWAR = WN, bool WGMMA = false, bool KVPIPE = false>
 static void launch_bwd_main_det(dim3 mg, const unsigned char* q8, const float* qs,
                                 const unsigned char* k8, const float* ks,
                                 const unsigned char* v8, const float* vs,
@@ -3539,11 +3542,12 @@ static void launch_bwd_main_det(dim3 mg, const unsigned char* q8, const float* q
                                 const int* cu_seqlens = nullptr, const int* mt_b = nullptr,
                                 const int* mt_m = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
-  constexpr int kSmem = WGMMA ? Cfg::smem_bytes_wgmma : Cfg::smem_bytes;
+  constexpr int kSmem = WGMMA ? Cfg::smem_bytes_wgmma
+                              : (KVPIPE ? Cfg::smem_bytes_kvpipe : Cfg::smem_bytes);
   CUDA_CHECK(cudaFuncSetAttribute(
-      fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR, false, true>,
+      fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR, KVPIPE, true>,
       cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR, false, true>
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR, KVPIPE, true>
       <<<mg, NTH, kSmem>>>(q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
                            dv_acc, S, H, Hkv, scale, causal, ksplit, cu_seqlens, mt_b,
                            mt_m, dk_part, dv_part, nblk, dq_part);
@@ -4220,6 +4224,17 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
           g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
           maxlen, H, Hkv, scale, (int)causal, ks, d_cu, nullptr, nullptr);
     };
+    // P3-4m：两个 DET 主 kernel 变体共用同一段 reduce（非 kvpipe 与 kvpipe 只差搬运，
+    //   数值应逐位相同；kvpipe 是 O51 的 K/V cp.async 回填流水，此前 DET 未接线）。
+    auto do_reduce = [&]() {
+      dim3 rg(B * Hkv, maxlen);
+      dkv_reduce_varlen_kernel<512, 64><<<rg, 512>>>(d_dk_part, d_dv_part, d_dk, d_dv, d_cu, H,
+                                                     Hkv, nblk_max, maxlen, (int)causal);
+      if (ks > 1) {
+        dim3 dg(T, H);
+        dq_reduce_kernel<512><<<dg, 512>>>(d_dq_part, d_dq, T, H, ks);
+      }
+    };
     auto run_dt = [&]() {
       CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));   // ksplit==1 时 dQ 用无竞争 red_add2
       CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
@@ -4229,13 +4244,19 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
           g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
           maxlen, H, Hkv, scale, (int)causal, ks, d_dk_part, d_dv_part, nblk_max, d_dq_part, d_cu,
           nullptr, nullptr);
-      dim3 rg(B * Hkv, maxlen);
-      dkv_reduce_varlen_kernel<512, 64><<<rg, 512>>>(d_dk_part, d_dv_part, d_dk, d_dv, d_cu, H,
-                                                     Hkv, nblk_max, maxlen, (int)causal);
-      if (ks > 1) {
-        dim3 dg(T, H);
-        dq_reduce_kernel<512><<<dg, 512>>>(d_dq_part, d_dq, T, H, ks);
-      }
+      do_reduce();
+    };
+    // P3-4m：DET + O51 K/V `cp.async` 回填流水（kvpipe）。
+    auto run_dt_kv = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+      if (ks > 1) CUDA_CHECK(cudaMemset(d_dq_part, 0, dqpart_elems * 4));
+      launch_bwd_main_det<512, 64, 32, false, true, true, true, 256, 4, false, true>(
+          g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
+          maxlen, H, Hkv, scale, (int)causal, ks, d_dk_part, d_dv_part, nblk_max, d_dq_part, d_cu,
+          nullptr, nullptr);
+      do_reduce();
     };
     auto time_fn3 = [&](auto fn, float* out_ms) {
       for (int i = 0; i < 3; ++i) fn();
@@ -4247,7 +4268,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
       *out_ms = t / iters;
     };
-    float ms_at = 0.f, ms_dt = 0.f;
+    float ms_at = 0.f, ms_dt = 0.f, ms_dt_kv = 0.f;
     time_fn3([&] { run_at(); }, &ms_at);
     std::vector<float> ak(nkv), av(nkv), aq(nq);
     CUDA_CHECK(cudaMemcpy(ak.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
@@ -4263,6 +4284,17 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     CUDA_CHECK(cudaMemcpy(dk2.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(dv2.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(dq2.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+    // P3-4m：DET + kvpipe（数值应与非 kvpipe 逐位相同）。
+    time_fn3([&] { run_dt_kv(); }, &ms_dt_kv);
+    std::vector<float> dkk1(nkv), dvk1(nkv), dqk1(nq), dkk2(nkv), dvk2(nkv), dqk2(nq);
+    CUDA_CHECK(cudaMemcpy(dkk1.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dvk1.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dqk1.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+    run_dt_kv();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(dkk2.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dvk2.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dqk2.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
     auto mad3 = [](const std::vector<float>& x, const std::vector<float>& y) {
       double m = 0.0;
       for (size_t i = 0; i < x.size(); ++i) m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
@@ -4272,6 +4304,11 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
            "runs[1-2] bitwise dq/dk/dv=%.2e/%.2e/%.2e | DET-vs-atomic dq/dk/dv=%.2e/%.2e/%.2e\n",
            ks, ms_at, ms_dt, ms_at / ms_dt, mad3(dq1, dq2), mad3(dk1, dk2), mad3(dv1, dv2),
            mad3(dq1, aq), mad3(dk1, ak), mad3(dv1, av));
+    printf("[P3-4m A/B] MLA varlen ksplit=%d | DET nonkv %.4f ms | DET kvpipe %.4f ms (%.3fx) | "
+           "kvpipe runs[1-2] bitwise dq/dk/dv=%.2e/%.2e/%.2e | kvpipe-vs-nonkv dq/dk/dv="
+           "%.2e/%.2e/%.2e\n",
+           ks, ms_dt, ms_dt_kv, ms_dt / ms_dt_kv, mad3(dqk1, dqk2), mad3(dkk1, dkk2),
+           mad3(dvk1, dvk2), mad3(dqk1, dq1), mad3(dkk1, dk1), mad3(dvk1, dv1));
     cudaFree(d_dk_part);
     cudaFree(d_dv_part);
     if (d_dq_part) cudaFree(d_dq_part);
@@ -5285,6 +5322,15 @@ int main(int argc, char** argv) {
           g1, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
           d_dv_acc, S, H, Hkv, scale, (int)causal, k);
     };
+    auto do_reduce = [&](int k) {
+      dim3 rg(B * Hkv, S);
+      dkv_reduce_kernel<512, 64><<<rg, 512>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                              nblk_d, (int)causal);
+      if (k > 1) {
+        dim3 dg(B * S, H);
+        dq_reduce_kernel<512><<<dg, 512>>>(d_dq_part, d_dq_acc, S, H, k);
+      }
+    };
     auto run_dt = [&](int k) {
       dim3 g1((S + 63) / 64 * k, H, B);
       CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
@@ -5294,13 +5340,19 @@ int main(int argc, char** argv) {
       launch_bwd_main_det<512, 64, 32, false, true, true, true, 256, 4>(
           g1, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
           d_dv_acc, S, H, Hkv, scale, (int)causal, k, d_dk_part, d_dv_part, nblk_d, d_dq_part);
-      dim3 rg(B * Hkv, S);
-      dkv_reduce_kernel<512, 64><<<rg, 512>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H, Hkv,
-                                              nblk_d, (int)causal);
-      if (k > 1) {
-        dim3 dg(B * S, H);
-        dq_reduce_kernel<512><<<dg, 512>>>(d_dq_part, d_dq_acc, S, H, k);
-      }
+      do_reduce(k);
+    };
+    // P3-4m：DET + O51 K/V `cp.async` 回填流水（kvpipe），数值应与非 kvpipe 逐位相同。
+    auto run_dt_kv = [&](int k) {
+      dim3 g1((S + 63) / 64 * k, H, B);
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      if (k > 1) CUDA_CHECK(cudaMemset(d_dq_part, 0, dqpart_elems * 4));
+      launch_bwd_main_det<512, 64, 32, false, true, true, true, 256, 4, false, true>(
+          g1, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
+          d_dv_acc, S, H, Hkv, scale, (int)causal, k, d_dk_part, d_dv_part, nblk_d, d_dq_part);
+      do_reduce(k);
     };
     auto tm2h = [&](auto fn, float* o) {
       for (int i = 0; i < 3; ++i) fn();
@@ -5316,7 +5368,7 @@ int main(int argc, char** argv) {
       for (size_t i = 0; i < x.size(); ++i) m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
       return m;
     };
-    float t_at = 0.f, t_dt = 0.f, t_dt1 = 0.f;
+    float t_at = 0.f, t_dt = 0.f, t_dt1 = 0.f, t_dt_kv = 0.f;
     tm2h([&] { run_at(ks); }, &t_at);
     std::vector<float> ak(nkv), av(nkv), aq(nq);
     CUDA_CHECK(cudaMemcpy(ak.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
@@ -5333,11 +5385,27 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemcpy(dk2.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(dv2.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(dq2.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    // P3-4m：DET + kvpipe（数值应与非 kvpipe 逐位相同）。
+    tm2h([&] { run_dt_kv(ks); }, &t_dt_kv);
+    std::vector<float> dkk1(nkv), dvk1(nkv), dqk1(nq), dkk2(nkv), dvk2(nkv), dqk2(nq);
+    CUDA_CHECK(cudaMemcpy(dkk1.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dvk1.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dqk1.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    run_dt_kv(ks);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(dkk2.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dvk2.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dqk2.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
     printf("[P3-4k A/B] MLA ksplit=%d atomic(256/4) %.4f ms | DET %.4f ms (vs atomic %.3fx) | "
            "DET k=1 %.4f ms -> k=%d %.4f ms (%.3fx split speedup) | "
            "runs[1-2] bitwise dq/dk/dv=%.2e/%.2e/%.2e | DET-vs-atomic dq/dk/dv=%.2e/%.2e/%.2e\n",
            ks, t_at, t_dt, t_at / t_dt, t_dt1, ks, t_dt, t_dt1 / t_dt, mad2h(dq1, dq2),
            mad2h(dk1, dk2), mad2h(dv1, dv2), mad2h(dq1, aq), mad2h(dk1, ak), mad2h(dv1, av));
+    printf("[P3-4m A/B] MLA ksplit=%d | DET nonkv %.4f ms | DET kvpipe %.4f ms (%.3fx) | "
+           "kvpipe runs[1-2] bitwise dq/dk/dv=%.2e/%.2e/%.2e | kvpipe-vs-nonkv dq/dk/dv="
+           "%.2e/%.2e/%.2e\n",
+           ks, t_dt, t_dt_kv, t_dt / t_dt_kv, mad2h(dqk1, dqk2), mad2h(dkk1, dkk2),
+           mad2h(dvk1, dvk2), mad2h(dqk1, dq1), mad2h(dkk1, dk1), mad2h(dvk1, dv1));
     cudaFree(d_dk_part);
     cudaFree(d_dv_part);
     if (d_dq_part) cudaFree(d_dq_part);

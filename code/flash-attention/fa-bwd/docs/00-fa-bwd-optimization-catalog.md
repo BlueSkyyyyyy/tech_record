@@ -159,8 +159,15 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    + `dq_reduce_kernel<512><<<(T,H),512>>>`。b1_t512/b3_t1792 ksplit=1/4/8/16、b1 full k=4
    × 单/两文件全部 `runs[1-2] bitwise dq/dk/dv = 0`；**DET 在 k=8 触底**、相对「锁 k=1」
    b1 **3.69×**/b3 **2.13×**；ncu `dkv_reduce_varlen_kernel<512,64>` 48.13µs/DRAM 65.7%、
-   `dq_reduce_kernel<512>` 23.33µs/DRAM 81.7% ⇒ bound = reduce 的纯 DRAM 带宽。
-   见 `docs/03` §63。
+    `dq_reduce_kernel<512>` 23.33µs/DRAM 81.7% ⇒ bound = reduce 的纯 DRAM 带宽。
+    见 `docs/03` §63。
+   → **`--det` 接进 MLA 的 K/V `cp.async` 回填流水（kvpipe，P3-4m，第一百二十六轮）**：
+   此前 host 的 `launch_bwd_main_det` 写死 `KVPIPE=false`，MLA DET 一直走非 kvpipe 主 kernel；
+   本轮加 `bool KVPIPE` 模板参、`kSmem` 选 `smem_bytes_kvpipe`（MLA 229888B ≤ 232448），
+   P3-4k/P3-4l 的 A/B 各加一个 kvpipe DET 变体。**kvpipe DET 与非 kvpipe DET 的 dq/dk/dv
+   逐位相同**（`runs[1-2]=0`、`kvpipe-vs-非kvpipe=0`）；DET 非 kvpipe→kvpipe 5 shape 1.018–1.090×
+   （单文件 b3 1.095×）；ncu 主 kernel 243→220µs、`long_scoreboard` 3.93→3.25（机制同 O51）。
+   见 `docs/03` §64。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 

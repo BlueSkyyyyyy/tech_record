@@ -1,0 +1,18 @@
+===== DET nonkv (skip 8) =====
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %        29.76
+    gpu__time_duration.sum                                                                 us       243.04
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        23.82
+    launch__registers_per_thread                                              register/thread          255
+    launch__shared_mem_per_block_dynamic                                          Kbyte/block       207.87
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        34.31
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        14.98
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        12.49
+===== DET kvpipe (skip 13) =====
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %        32.96
+    gpu__time_duration.sum                                                                 us       220.16
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        26.82
+    launch__registers_per_thread                                              register/thread          255
+    launch__shared_mem_per_block_dynamic                                          Kbyte/block       229.89
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        38.42
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        16.48
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        12.49

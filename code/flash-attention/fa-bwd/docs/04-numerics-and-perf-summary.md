@@ -2917,3 +2917,32 @@ atomic 随 ksplit 单调变快；DET 在 **k=4 触底**（固定 partial 写/读
 `dkv_reduce_kernel` **730.7µs / DRAM 91.56% / 3.07 TB/s**、`dq_reduce_kernel` 55.1µs /
 DRAM 87.6%。**bound = reduce 的纯 DRAM 带宽 + 主 kernel 多写的 partial**（与 §43 同构）。
 详见 `docs/03` §57。
+
+---
+
+## 45. P3-4m：`--det` 接进 MLA 的 K/V `cp.async` 回填流水（第 126 轮）—— 正结果，opt-in `--det`
+
+`--det` 的 partial + 二次归约已覆盖定长/split-K/TMA/MLA/varlen（§43–44、`docs/03` §56–63），
+但 host 的 `launch_bwd_main_det` 一直写死 `KVPIPE=false` ⇒ MLA（HD=512）的 DET 主 kernel 走
+非 kvpipe 旧路，而默认 MLA 主 kernel 早在 O51 就用 K/V `cp.async` 回填流水。本轮加
+`bool KVPIPE` 模板参（`kSmem` 选 `smem_bytes_kvpipe`，MLA 229888B ≤ 232448），把 DET 接上
+同一条流水。**device 一行未改**（`fp8_mma_body` 本就支持 `KVPIPE && DET`），仅 host 接线。
+
+**数值**：kvpipe DET 与非 kvpipe DET **逐位相同**（`runs[1-2]=0`、`kvpipe-vs-非kvpipe=0`）；
+默认路 `ours vs ref` 与历史逐位一致。
+
+**性能**（同 session，两文件；单文件 b3 复核）：
+
+| case | ksplit | DET 非 kvpipe | DET kvpipe | 加速 |
+|---|---|---|---|---|
+| MLA 定长 S256H2 | 4 | 0.0652 ms | 0.0640 | 1.018× |
+| MLA 定长 S512H4 | 4 | 0.1578 ms | 0.1477 | 1.068× |
+| MLA 定长 S1024H2 | 4 | 0.2594 ms | 0.2394 | 1.084× |
+| MLA varlen b1_t512 | 8 | 0.0928 ms | 0.0887 | 1.046× |
+| MLA varlen b3_t1792 | 8 | 0.3550 ms | 0.3258 | 1.090× |
+| varlen b3_t1792（单文件） | 8 | 0.3556 ms | 0.3248 | 1.095× |
+
+**ncu**（b3_t1792 k=8，主 kernel）：Duration 243.0→**220.2µs**、`long_scoreboard` 3.93→**3.25**、
+DRAM 29.8→33.0%、smem 207.87→229.89KB、occ 12.49%（1 CTA/SM）。机制与 O51 一致（K/V 全局读
+延迟藏进计算）。**确定性模式下不再额外付出「非 kvpipe 主 kernel」这一层代价**。详见
+`docs/03` §64、`docs/00` §4.2。
