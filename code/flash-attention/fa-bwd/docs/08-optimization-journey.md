@@ -649,8 +649,23 @@ smem 冲突 + 低 occ
       非 kvpipe→kvpipe 1.018–1.095×（b3_t1792 0.3550→0.3258，单文件 1.095×）；ncu 主 kernel
       243.0→220.2µs、`long_scoreboard` 3.93→3.25（机制同 O51）。顺带修
       `sync_onefile_device.py` 的既有坑（单文件 device 区 marker 在 `#include "../fa_bwd_dump.h"`
-      之前，每次同步都会误删该 include），把它移到 marker 之前。`--ci` 73 case 全绿、默认路径
-      逐位不变。详见 `docs/03` §64。
+       之前，每次同步都会误删该 include），把它移到 marker 之前。`--ci` 73 case 全绿、默认路径
+       逐位不变。详见 `docs/03` §64。
+
+43. **P3-4o（第 128 轮，device+host 增量，负结果（性能）/正结果（显存），opt-in `--partcompact`）**：
+     **varlen `--det` 的 dK/dV partial 试换 compact per-sequence 布局**——落实第 127 轮候选 ① 的
+     「compact per-sequence offset」。`fp8_mma_body` 的两个 DET 写点与两个 varlen 归约 kernel
+     加行前缀和 `part_base`；非空时按 `part_base[b]+(h*nblk_b+mblk)*len_b+jg` 编址，空时逐字
+     退化旧 `maxlen`-strided 布局。**求和集合/次序不变 ⇒ compact-vs-legacy 逐位相同**（`runs[1-2]`
+     与 `DET-vs-atomic` 不变；默认路径数值逐位不变）。**分配大幅缩小**（b4_t3840 D128 2147→713MB
+     =33%、b8_t2904 4295→575MB=13%、D512 b3 201→88MB=44%），但**耗时中性偏负 0.944–0.975×**；
+     ncu（b4_t3840 融合 reduce）两布局都 **DRAM/L2 带宽 bound**（旧 373.76µs/DRAM 86.9%、compact
+     384.86µs/84.4%）。**教训：reduce 本就只读被写过的条目，maxlen-stride 的空洞不产生额外
+     DRAM 流量；compact 只缩地址跨度，拿不到带宽收益，反而破坏跨序列的通道/页并行。真正的
+     「减 partial 字节」只能靠 BM=128 跨 warpgroup 偏和（fp8 撞 smem 硬墙，见「阻塞」）。**
+     故默认保持旧布局，`--partcompact` opt-in 供显存受限场景。`--ci` 73 case 全绿（顺带按项目
+     工作流 `--doc-table-apply` 同步 docs/04 两处末位原子次序噪声）。详见 `docs/03` §66、
+     `docs/00` §4.2。
 
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）

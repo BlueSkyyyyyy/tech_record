@@ -2666,7 +2666,20 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百二十五轮）**：**P3-4l——MLA（HD=512）varlen 的 `--det` 接上 split-K（host 增量，
+> **最新（第一百二十八轮）**：**P3-4o——varlen `--det` 试换 compact per-sequence partial
+> （负结果（性能）/正结果（显存），opt-in `--partcompact`）**。落实第一百二十七轮候选 ① 的
+> 「compact per-sequence offset」：`fp8_mma_body` 两个 DET 写点 + 两个 varlen 归约 kernel 加行
+> 前缀和 `part_base`，非空时紧凑编址、空指针逐字退化。**compact-vs-legacy 逐位相同**（只改地址）；
+> 缓冲 b4 D128 2147→713MB / b8_t2904 4295→575MB / D512 b3 201→88MB，但**耗时 0.944–0.975×**，
+> ncu 两布局都 DRAM/L2 bound（86.9% vs 84.4%）⇒ **reduce 只读被写过的条目、stride 空洞不产生
+> DRAM 流量**。默认保持旧布局。全量 `--ci` 73 case 全绿。详见「当前进度 第一百二十八轮」、
+> `docs/03` §66、`docs/08` §5.43、`docs/00` §4.2。
+> **下一步候选**：① **减 partial 字节**只剩 **BM=128 跨 warpgroup 偏和**（fp8 撞 smem 硬墙，见
+> 「阻塞」）或 **partial 降精度存储**（fp16/bf16，确定性保留但改数值口径）；② reduce 做成
+> **L2 内偏和**（persistent CTA / cluster 分布式归约）省一趟 DRAM；③ 非确定性性能仍受本卡
+> 寄存器/smem 硬墙锁定，见「阻塞」。
+>
+> **（第一百二十五轮）**：**P3-4l——MLA（HD=512）varlen 的 `--det` 接上 split-K（host 增量，
 > 正结果/opt-in `--detk>1`；DET 候选 ① 收口）**。落实第一百二十四轮候选 ①：P3-4j 的 varlen A/B
 > 仍锁 `ksplit=1`。观察与 P3-4k 同构——varlen body 的 DET 分支只依赖 `(b,h,mblk,jg,S,nblk)`、
 > dQ 的 per-part partial 用 `qbase+qi`（packed 全局 q token，与定长 `dq_reduce_kernel` 的 `row`
@@ -4723,6 +4736,41 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   - **下一步候选**：① 减 partial 字节——需 `BM=128`（O19 已证伪 fp8 的放大 BM），或按 KV 行
     跨 warpgroup 偏和 / varlen compact per-sequence offset；② 融合已收口；③ 非确定性性能仍受
     本卡寄存器/smem 硬墙锁定，见「阻塞」。
+
+- 2026-09-27（第一百二十八轮）：**P3-4o 完成（varlen `--det` 试换 compact per-sequence
+  partial；负结果（性能）/正结果（显存），opt-in `--partcompact`）**。
+  - 动机（落实第一百二十七轮候选 ① 的「varlen 的 maxlen-strided partial 尤其浪费，可换
+    compact per-sequence offset」）：varlen dK/dV partial 布局是
+    `((b*H+h)*nblk_max+mblk)*maxlen+jg`，短序列留大片空洞（b8_t2904 要 4.29GB 缓冲、实写 ~0.58GB）。
+  - **改动（单/两文件 device 逐字同源、host 逐字一致）**：`fp8_mma_body` 加尾参
+    `const int* part_base`（行前缀和）+ 两个 DET dK/dV 写点、三个 `__global__` 壳透传；
+    `dkv_reduce_varlen_kernel` / `dkv_dq_reduce_varlen_kernel` 加 `part_base`；非空时按
+    `part_base[b]+(h*nblk_b+mblk)*len_b+jg` 紧凑编址，**空指针逐字退化旧布局**。host 在
+    D=128/D=512 的 varlen DET A/B 计算 `part_base_h[b+1]=part_base_h[b]+H*nblk_b*len_b`、
+    上传；新增 `--partcompact`（默认关）；同 binary 打印 `[P3-4o]` 与 `[P3-4o A/B]`。
+  - **数值**：compact-vs-legacy **逐位相同**（`0.00e+00`，只改地址、不改求和集合/次序）；
+    `runs[1-2]` 与 `DET-vs-atomic` 与历史一致；默认路径 `ours vs ref` 与 P3-4i/P3-4l 逐位一致
+    （b4 D128 2.935/2.938/4.179e-1；b3 D512 3.404/3.436/3.508e-1）。
+  - **性能（同 binary A/B，event）**：**0.944–0.975×（负结果）**——D128 b1_t512 0.973×、
+    b4_t3840 0.969×、b8_t2904 0.969×、b5_t3968 0.975×；D512 b1_t512 0.920×、b3_t1792 0.947×
+    （单文件 0.944×）。**缓冲 footprint 大幅缩小**：b4 D128 2147→**713MB（33%）**、
+    b8_t2904 4295→**575MB（13%）**、b5_t3968 5368→1430MB（27%）、D512 b3 201→88MB（44%）。
+  - **ncu（b4_t3840，融合 reduce，`--launch-count 1`）**：旧布局 **373.76µs / DRAM 86.89% /
+    L2 81.96% / L1TEX 11.41% / SM 33.55%**；compact **384.86µs / DRAM 84.38% / L2 81.29%**；
+    两布局都 **reduce 的纯 DRAM/L2 带宽 bound**。**教训：reduce 本只读被写过的条目，stride
+    空洞不产生额外 DRAM 流量；compact 只缩地址跨度，拿不到带宽收益，反而破坏跨序列通道/页并行
+    ⇒ 略慢。** 默认保持旧布局；`--partcompact` opt-in 供显存受限场景。
+  - **回归**：全量 `python3 harness/fa_bwd_run.py --ci` 73 case 一致性 gate 全绿（fp16 7.812e-3 /
+    bf16 1.562e-2 / fp8 1.144e-5）；docs/04 内嵌表两处 fp8 末位原子次序噪声按项目工作流
+    `--doc-table-apply` 同步后 `--check` OK 194 行。
+  - **候选 ① 判决**：compact 部分**性能判负、仅省显存**；真正的「减 partial 字节」只剩
+    **BM=128 跨 warpgroup 偏和**（fp8 撞 smem 硬墙，见「阻塞」）或 partial 降精度存储
+    （fp16/bf16，确定性保留但改数值口径）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_main_p34o_d128_b4t3840.out.txt`、
+    `src/fp8/fa_bwd_fp8_main_p34o_d512_mla.out.txt`、
+    `src/fp8/fa_bwd_fp8_mma_onefile_p34o_d512_b3.out.txt`、
+    `src/fp8/fa_bwd_fp8_p34o_ncu_reduce_b4.out.txt`、`src/fp8/fa_bwd_p34o_ci_full.out.txt`、
+    `src/fp8/fa_bwd_p34o_ci_afterapply.out.txt`；文档 `docs/03` §66、`docs/08` §5.43、`docs/00` §4.2。
 
 ## 灵感 / backlog
 

@@ -6033,3 +6033,93 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/ru
 跨 warpgroup 偏和 / varlen compact per-sequence offset；② 融合已收口（本轮），进一步的
 「两次 reduce 融合 + partial 原地累加」需先解决字节问题；③ 非确定性性能仍受本卡寄存器/
 smem 硬墙锁定，见 ROADMAP「阻塞」。
+
+---
+
+## 66. P3-4o（第一百二十八轮，**负结果（性能）/正结果（显存），opt-in `--partcompact`**）：varlen `--det` 的 partial 试换 compact per-sequence 布局
+
+### 66.1 动机（落实第一百二十七轮「下一步候选 ①」）
+
+第一百二十七轮候选 ① 是「**减 partial 字节**以压低 DET 二次归约的 DRAM 墙」，其中可选项之一是
+「varlen 的 **maxlen-strided partial 尤其浪费，可换 compact per-sequence offset**」。动机的
+定量背景：varlen 的 dK/dV partial 布局是 `part[((b*H+h)*nblk_max+mblk)*maxlen+jg]`，对长度
+远小于 `maxlen` 的序列会留大片空洞——例如 `b8_t2904`（8 段、最长 2048）的 partial 缓冲要
+**4.29GB**，而真正被写的只有约 0.58GB。compact 布局把每序列的 partial 收紧到
+`H*nblk_b*len_b` 行，理论地址跨度缩小到 ~13%。本轮把这个选项落地并实测。
+
+### 66.2 实现（单/两文件 device 逐字同源，host 逐字一致）
+
+- **device** `fp8_mma_body`：新增尾参 `const int* part_base = nullptr`（行前缀和）。两个 DET
+  dK/dV 写点（GEMM3 的 dV、GEMM4 的 dK）在 `part_base` 非空时用
+  `row = part_base[b] + (h*nblk_seq + mblk)*len_b + jg`（`nblk_seq = ceil(len_b/BM)`），
+  否则**逐字**走原 `((b*H+h)*nblk+mblk)*S+jg`；三个 `__global__` 壳（普通/dO-TMA/KV-TMA）透传。
+- **device** `dkv_reduce_varlen_kernel` / `dkv_dq_reduce_varlen_kernel`：同样加 `part_base`
+  尾参，非空时读 compact 地址（`(h0+hh)*nblk_b+m` 同式），空时逐式退化。**求和集合与次序均
+  不变**（仅地址不同）⇒ 与旧布局**逐位相同**。
+- **host**（`fa_bwd_fp8_main.cu` 与单文件 `fa_bwd_fp8_mma_onefile.cu`）：D=128 与 D=512 的
+  varlen DET A/B 各计算 `part_base_h[b+1] = part_base_h[b] + H*nblk_b*len_b`、上传 device；
+  `pb = part_compact ? d_part_base : nullptr`（**默认 nullptr = 旧布局**）；新增 `--partcompact`
+  开关；同 binary 打印 `[P3-4o]`（两种缓冲大小 + 当前 layout）与 `[P3-4o A/B]`（两布局各跑
+  一遍 main+reduce 的 event 计时 + 数值逐位对比）。
+
+### 66.3 数值：compact-vs-legacy **逐位相同**（仅改地址）
+
+varlen 各 case（ksplit=8）的 `[P3-4o A/B] compact-vs-legacy bitwise dq/dk/dv = 0.00e+00` 全部
+成立；`runs[1-2]` 与 `DET-vs-atomic` 与历史一致。默认路径（`part_base=nullptr`）：
+`b4_t3840` `ours vs ref` dq/dk/dv = 2.935e-1/2.938e-1/4.179e-1（与 P3-4i 记录逐位一致）；
+`b3_t1792` D=512 = 3.404e-1/3.436e-1/3.508e-1（与 P3-4l 记录逐位一致）。
+
+### 66.4 性能：**分配大幅缩小，但耗时中性偏负（0.944–0.975×）**
+
+| case | compact 缓冲 / 旧缓冲 | 旧布局 (ms) | compact (ms) | 比 |
+|---|---|---|---|---|
+| D=128 b1_t512 (单段) | 33.6MB / 33.6MB (100%) | 0.1120 | 0.1151 | 0.973× |
+| D=128 b4_t3840 | 713.0MB / 2147.5MB (33%) | 1.1504 | 1.1869 | 0.969× |
+| D=128 b8_t2904 | 575.1MB / 4295.0MB (13%) | 1.0162 | 1.0485 | 0.969× |
+| D=128 b5_t3968 H32 | 1430.3MB / 5368.7MB (27%) | 2.2434 | 2.3000 | 0.975× |
+| D=512 b1_t512 | 16.8MB / 16.8MB (100%) | 0.0925 | 0.1005 | 0.920× |
+| D=512 b3_t1792 | 88.1MB / 201.3MB (44%) | 0.3633 | 0.3835 | 0.947× |
+| D=512 b3_t1792（单文件） | — | 0.3612 | 0.3828 | 0.944× |
+
+**ncu（`dkv_dq_reduce_varlen_kernel<128,64>`，b4_t3840，融合版，`--launch-count 1`）**：
+旧布局 **373.76µs / DRAM 86.89% / L2 81.96% / L1TEX 11.41% / SM 33.55%**；
+compact **384.86µs / DRAM 84.38% / L2 81.29% / L1TEX 11.33% / SM 33.50%**。
+两者都是 **reduce 的纯 DRAM/L2 带宽 bound**；compact 的 DRAM% 反而略低、耗时略长。
+
+### 66.5 结论（为什么是负结果）
+
+- reduce **读的字节数不变**：它本就只遍历被写过的 `(h,mblk,jg)` 条目（`m<nblk_b`、`jg<len_b`），
+  所以 maxlen-strided 的「空洞」并不产生额外 DRAM 流量；compact 只缩小**地址跨度**。
+- 缩小跨度没有提升 DRAM 效率（84–87% 两种布局相当），反而因为把不同序列的 partial 挤到更近的
+  地址、破坏了跨序列的通道/页并行，**略慢 2.5–5.6%**。
+- 因此 **compact 的性能价值为负**，唯一实打实的收益是**缓冲footprint**（最多降到 13%），
+  这对被显存限制的目标卡有工程意义，故保留为 **opt-in `--partcompact`**，默认保持旧布局
+  （不回归）。
+- 真正的「减 partial **字节**」只能靠 **BM=128 的跨 warpgroup 偏和**（因果下 partial 条目数
+  ∝ `nblk²/2`，BM 翻倍即减到 1/4），但 fp8 的放大 BM 已被 O19 证伪（smem 硬墙），见 ROADMAP
+  「阻塞」。本轮的 compact 路线到此收口。
+
+### 66.6 复现 / 原始输出
+
+```bash
+# 两文件（sm90a + -DFA_WGMMA）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh \
+  src/fp8/fa_bwd_fp8_main.cu --varlen --det --detk=8 --iters=20 \
+  /home/xieminglin/proj/output/fa-bwd/varlen_b4_t3840_h16_d128_causal_fp8
+# 单文件；--partcompact 打开 compact（默认旧布局）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh \
+  src/fp8/fa_bwd_fp8_mma_onefile.cu --varlen --det --detk=8 --iters=20 \
+  /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp8
+# ncu：regex:dkv_dq_reduce_varlen（加/不加 --partcompact 分别抓 compact/旧布局的首次 reduce）
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_p34o_d128_b4t3840.out.txt`、
+`src/fp8/fa_bwd_fp8_main_p34o_d512_mla.out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_p34o_d512_b3.out.txt`、
+`src/fp8/fa_bwd_fp8_p34o_ncu_reduce_b4.out.txt`、`src/fp8/fa_bwd_p34o_ci.out.txt`（CI）、
+`src/fp8/fa_bwd_p34o_ci_full.out.txt`（全量 --ci）、`src/fp8/fa_bwd_p34o_ci_afterapply.out.txt`。
+
+**下一步候选**：① **减 partial 字节**只剩「BM=128 跨 warpgroup 偏和」（fp8 撞 smem 硬墙，见
+「阻塞」）或「partial 降精度存储（fp16/bf16，确定性保留但改数值口径）」；② 把 DET 的
+reduce 做成 **L2 内偏和**（persistent CTA / cluster 分布式归约）以少一趟 DRAM；③ 非确定性
+性能仍受本卡寄存器/smem 硬墙锁定，见 ROADMAP「阻塞」。

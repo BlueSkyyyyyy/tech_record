@@ -1,0 +1,26 @@
+fa_bwd_fp8_kernels.cuh(3463): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1793 of fa_bwd_fp8_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kernels.cuh(3171): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1793 of fa_bwd_fp8_main.cu
+
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b4_t3840_h16_d128_causal_fp8
+VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=1
+cu_seqlens = 0 512 1536 3584 3840
+O40: varlen lse k-split = 2 (base=1024)
+[timing] VARLEN total 0.9254 ms  49.31 TFLOPS (sum_b 4HL^2D)
+grid main = 128 x 16 x 4 (nocompact, ksplit=4, total_mt=60) | use_regdq=1 | T=3840
+[P3-4o] varlen D=128 partial: compact=713.0MB (33% of old 2147.5MB) layout=maxlen-strided
+[P3-4i A/B] varlen ksplit=8 | atomic 0.7809 ms | DET(partial+reduce) 1.1447 ms (0.682x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=1.19e-07/5.96e-07/9.54e-07
+[P3-4n A/B] varlen reduce separate(2 launch) 0.3690 ms | fused(1 launch) 0.3735 ms (0.988x) | fused-vs-sep bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00
+[P3-4o A/B] varlen ksplit=8 | maxlen-strided 1.1504 ms | compact 1.1869 ms (0.969x) | compact-vs-legacy bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=2.935e-01  max_rel=1.671e+02  (ours_amax=3.706e+00 ref_amax=3.849e+00 @1052321)
+  dk  vs ref: max_abs=2.938e-01  max_rel=1.601e+02  (ours_amax=3.889e+00 ref_amax=3.925e+00 @7340422)
+  dv  vs ref: max_abs=4.179e-01  max_rel=1.074e+02  (ours_amax=6.395e+00 ref_amax=6.460e+00 @7341839)
