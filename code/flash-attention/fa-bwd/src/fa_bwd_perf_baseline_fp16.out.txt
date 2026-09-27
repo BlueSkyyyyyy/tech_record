@@ -1,0 +1,30 @@
+pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype=torch.float16
+shape                                  FA2.7.4             FA3          TE2.14  FA3/FA2
+(1, 1024, 40, 128) kv=8        0.1886/  228 0.1219/  352 0.1329/  323    1.55x
+(1, 1024, 32, 128) kv=4        0.1603/  214 0.0833/  413 0.1129/  304    1.93x
+(1, 1024, 64, 128) kv=4        0.2673/  257 0.1597/  430 0.1946/  353    1.67x
+(1, 1024, 64, 128) kv=1        0.2677/  257 0.1572/  437 0.2143/  321    1.70x
+(1, 512, 16, 128) kv=16        0.0441/   97 0.0262/  164 0.0323/  133    1.68x
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 256, 2, 512) kv=2             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 512, 4, 512) kv=4             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 1024, 2, 512) kv=2            nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 4096, 16, 128) kv=16       0.7318/  376 0.3254/  845 0.4454/  617    2.25x
+
+pure bwd VARLEN (packed [T,H,D] + cu_seqlens; flops=4*H*D*sum(L^2)), dtype=torch.float16
+lengths / H,kv / mask                  FA2.7.4             FA3          TE2.14  FA3/FA2
+MHA 不齐 [512, 1024, 2048].. H16/kv16 causal 0.3408/  134 0.1635/  279              NA    2.08x
+MHA 等长 [1024, 1024, 1024].. H16/kv16 causal 0.2549/  135 0.1485/  231              NA    1.72x
+GQA q32/kv8 [128, 256, 512].. H32/kv8 causal 0.6329/  145 0.3755/  244              NA    1.69x
+强倾斜 [2048, 512, 128].. H16/kv16 causal 0.3017/  122 0.1414/  260              NA    2.13x
+MHA 等长 full [1024, 1024, 1024].. H16/kv16 full 0.3452/  100 0.2000/  172              NA    1.73x
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(

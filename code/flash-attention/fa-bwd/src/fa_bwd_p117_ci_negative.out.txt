@@ -1,0 +1,11 @@
+=== P3-4d 负向测试 1：一致性 gate 收严到 1e-9（应 FAIL、rc=1）===
+      (--no-run: 复用已有 npy)[--consistency] FAIL：bf16:7.812e-03>1e-09, fp16:3.906e-03>1e-09, fp8:9.537e-06>1e-09
+  gate[fp16] worst=3.906e-03  tol=1e-09  -> FAIL
+  gate[bf16] worst=7.812e-03  tol=1e-09  -> FAIL
+  gate[fp8 ] worst=9.537e-06  tol=1e-09  -> FAIL
+[consistency] gate FAIL (rc=1)
+rc=1
+
+=== P3-4d 负向测试 2：把 docs/04 内嵌表某格改错（应 STALE、rc=1）===
+[--check] STALE：/tmp/fa_bwd_docs04_stale.md 的 auto-doc-table 块与实测不一致（第 11 行数值超出 rtol=0.005：
+rc=1

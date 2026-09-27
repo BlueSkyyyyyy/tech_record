@@ -503,8 +503,23 @@ smem 冲突 + 低 occ
      varlen `[1024]×4` causal `0.1475ms/233TF`）。**教训：校验工具「做出来」和「接进回归」
      是两件事——只有挂进默认出口并配好按量级的容差，它才会在漏改时真正变红；负向测试是
      验证「gate 会不会拦」的唯一办法。** 本轮 harness 增量、device 一行未改。详见
-     `docs/04` §41；原始输出 `src/fa_bwd_consistency_p33g.out.txt`、
-     `src/fa_bwd_p33g_gate_negative.out.txt`、`src/fa_bwd_p33g_fa_baseline_fp16.out.txt`。
+      `docs/04` §41；原始输出 `src/fa_bwd_consistency_p33g.out.txt`、
+      `src/fa_bwd_p33g_gate_negative.out.txt`、`src/fa_bwd_p33g_fa_baseline_fp16.out.txt`。
+
+33. **P3-4d（第 117 轮，工具链 + 验证，正结果）**：**CI 单一入口 + Hopper 快路入标准 harness**
+     ——落实 §5.32 候选 ②。`fa_bwd_run.py` 加 **`--ci`**（跑完后自动 `fa_bwd_compare.py --check
+     docs/04`，表陈旧即 rc=1；一致性 gate + doc-check 汇总到 `src/fa_bwd_ci.out.txt`）、
+     **`--hopper`**（定长/变长都走 `-DFA_WGMMA -DFA_TMA -lcuda`；用**独立前缀** `ours_hp/ours_sf_hp`，
+     绝不覆盖默认 mma 的 `ours/ours_sf`——因为 wgmma/TMA 与 mma 的数值差可达 O(1e-1)，混用会
+     误触一致性 gate）、**`--perf-baseline <dtype>`**（容器内跑 `fa_vs_te_bwd_only.py` 落盘）。
+     `scripts/ci.sh` 是一行固定入口。**实测**：`--no-run --ci` 在 73 case 上全绿（fp16 3.906e-3 /
+     bf16 7.812e-3 / fp8 9.537e-6，`--check` OK 194 行），**负向测试**（tol 1e-9、改错一格）均 rc=1；
+     现场 `--hopper` 真编译真跑 fp8 S4096：数值 2.635/2.644/3.216e-1、`ours_hp vs ours_sf_hp`
+     worst 7.153e-7、total 1.9359ms/70.99TF（TE FP8 0.3025/908.7 ⇒ **6.40×**）；ncu 复核 fp8 main
+     仍 **L2 red 78.6%（114.5M 扇区）+ wait/short**。**教训：把「多条校验」收口成一条 CI 命令只是
+     第一步，更要防「构建配置差异」被误当作「实现分叉」——`--hopper` 必须走独立前缀。** 本轮
+     device 一行未改；详见 `docs/04` §42、`src/fa_bwd_ci_p34d.out.txt`、`src/fa_bwd_p117_ci_negative.out.txt`。
+
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 

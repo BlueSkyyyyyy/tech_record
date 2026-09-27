@@ -80,8 +80,14 @@
       详见 `docs/03-fp8-bwd-impl.md` §7。剩余（pipeline/提 occupancy/dQ 缓冲）转 backlog。
 - [x] **P3-5** 两文件版 `fa_bwd_fp8_kernels.cuh` + `fa_bwd_fp8_main.cu`（以 mma 单文件为源，行为逐指标一致）
       → 数值逐位相同（S=512 2.426/2.975/3.735e-1；S=1024H32 2.400/4.195/3.536e-1；
-      S=4096 2.635/2.643/3.216e-1），ncu `Executed Instructions=25,543,552`/128 regs/80.13KB 与单文件一致；
-      `docs/03-fp8-bwd-impl.md` §8
+       S=4096 2.635/2.643/3.216e-1），ncu `Executed Instructions=25,543,552`/128 regs/80.13KB 与单文件一致；
+       `docs/03-fp8-bwd-impl.md` §8
+- [x] **P3-4d** CI 单一入口（`scripts/ci.sh` = `fa_bwd_run.py --ci`：汇总 + 一致性 gate +
+  docs/04 表新鲜度校验）+ Hopper 快路入标准 harness（`--hopper`，独立前缀）+ 纯反向基线一键落盘
+      → **已完成（第 117 轮）**：`--no-run --ci` 73 case 全绿（fp16 3.906e-3 / bf16 7.812e-3 /
+      fp8 9.537e-6，`--check` OK），负向测试均 rc=1；现场 `--hopper` fp8 S4096 数值
+      2.635/2.644/3.216e-1、`ours_hp vs ours_sf_hp` 7.153e-7、total 1.9359ms/70.99TF（TE FP8 6.40×）；
+      `docs/04` §42、`docs/08` §5.33。
 
 ### P4 文档 / 汇总
 
@@ -190,6 +196,17 @@
 
 ## 阻塞
 
+- **fp8 主 kernel 的「跨-tile `P/dS` 双缓冲软流水」在本卡 3 CTA/SM 下不可行（第一百一十七轮精确核算）。**
+  该流水是当前唯一能直接打 `wait 1.59 + short_scoreboard 1.29` 的方向：把 GEMM3/4/5(nt) 与
+  fold(nt) 同 GEMM1/2(nt+1) 的 wgmma 重叠，需要**同时存活两份** `Ps/Ss`（各 `BM*PSS*4`，PSS=BN+5=37
+  ⇒ 2×64×37×4 = **18,944B**）与两份 `Ap/dS3/dS2`（`2*BN*QTS + BM*DSS2` = 2×32×80 + 64×48 =
+  **13,312B**，因 `Ap` 别名 `Vs`、`dS3` 别名 `Ks[stg]`），合计 **+32,256B**。而 fp8 KVTMA 主 kernel
+  当前动态 smem = `smem_bytes_wgmma_kvtma` ≈ **73.8–74.8KB**，3 CTA/SM 的上限 = `232448/3 =
+  77,482B` ⇒ **只剩 ~3.7KB**，加双缓冲必掉到 **2 CTA/SM**（~100KB），而 3 CTA/SM→2 在本卡
+  （O9c-2b）已实测中性偏负。要腾出 ~32KB 只能消 `Qp/dOp`（17.4KB，O4b 已证「fp8 A/B 主序相反 +
+  `ldmatrix.trans` 配对方向是 N」**不可整个消掉**）或把 `Ps`（P，[0,1]）从 fp32 降 fp16（仅省
+  ~4.7KB，且改数值口径）。⇒ **除非换更小 smem 的数据通路或换卡（目标卡 smem/寄存器更大），
+  跨-tile 流水暂不可行**；与 L2 `red`（78.6%，114.5M 扇区）共同锁死当前工作点。
 - **fp16/bf16 main 的「放大 BM 到 256」被寄存器文件卡死（O17b，第五十四轮）。**
   512 线程 @1 CTA/SM 时每线程寄存器上限 = `65536/512 = 128`，而本算法必须持有
   dQ 寄存器累加器 `dqacc[2][8][4]=64` + GEMM1/2 两条 wgmma 累加器（各 32，wait0 后同时读）
@@ -2649,7 +2666,25 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百一十六轮）**：**P3-3g——把单/两文件一致性 gate 接进端到端回归（含按 dtype 容差）**。
+> **最新（第一百一十七轮）**：**P3-4d——CI 单一入口 + Hopper 快路入标准 harness（工具链+验证，正结果）**。
+> 落实第一百一十六轮候选 ②：`scripts/ci.sh` = `fa_bwd_run.py --ci` 一条命令收口「跑 ours + 数值 +
+> 单/两文件一致性 gate + docs/04 表新鲜度校验」，任一红即 rc=1；`--hopper` 让定长也走
+> `-DFA_WGMMA -DFA_TMA -lcuda`（用独立前缀 `ours_hp/ours_sf_hp`，不污染默认 mma 的 `ours/ours_sf`）；
+> `--perf-baseline <dtype>` 一键落盘纯反向基线。**实测**：`--no-run --ci` 73 case 全绿
+> （fp16 3.906e-3 / bf16 7.812e-3 / fp8 9.537e-6；`--check` OK 194 行），负向测试（tol 1e-9 + 改错
+> 一格）均 rc=1；现场 `--hopper` fp8 S4096 真编译真跑：数值 2.635/2.644/3.216e-1、
+> `ours_hp vs ours_sf_hp` worst 7.153e-7、total 1.9359ms/70.99TF（TE FP8 `0.3025/908.7` ⇒ **6.40×**）；
+> ncu 复核 fp8 main 仍 **L2 red 78.6%（114.5M 扇区）+ wait 1.59/short 1.29**。device 一行未改。
+> 详见「当前进度 第一百一十七轮」、`docs/04` §42、`docs/08` §5.33；原始输出
+> `src/fa_bwd_ci_p34d.out.txt`、`src/fa_bwd_p117_ci_negative.out.txt`、
+> `src/fa_bwd_perf_baseline_fp16.out.txt`、`src/fa_bwd_p117_fp8_te_baseline.out.txt`、
+> `src/fp8/fa_bwd_fp8_p117_ncu_main_s4096.out.txt`。
+> **下一步候选**：①（device）fp8/fp16 main 的**跨-tile `P/dS` 双缓冲流水**——**本轮已用精确 smem
+> 预算核算判定在本卡 3 CTA/SM 下不可行**（见「阻塞」），除非先消掉 Qp/dOp（O4b 已证不可消）或
+> 把 P 降精度腾 ~17KB；② `--hopper` 的 `ours_hp` 口径接进 `docs/04`（现表默认 mma）；③（继续）
+> O59 候选已被 O45/§46 判决 blocked。
+>
+> **（第一百一十六轮）**：**P3-3g——把单/两文件一致性 gate 接进端到端回归（含按 dtype 容差）**。
 > 落实第一百一十五轮候选 ①：`fa_bwd_run.py` 的**全量扫默认在结束时自动 gate** 单/两文件一致性
 > （`--no-consistency` 可关、`--impls twofile` 只跑一边跳过、`--consistency` 可显式强制）。
 > 关键：容差从单个全局标量升级为**按 dtype**（`--ctol auto`，`CTOL_AUTO={fp16:1.6e-2,
@@ -4276,6 +4311,33 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     `src/fa_bwd_p33g_gate_small{,_consistency}.out.txt`、`src/fa_bwd_p33g_live_sweep.out.txt`、
     `src/fa_bwd_p33g_fa_baseline_fp16.out.txt`；文档 `docs/04` §41、`docs/08` §32。
 
+- 2026-09-27（第一百一十七轮）：**P3-4d 完成（CI 单一入口 + Hopper 快路入标准 harness）**。
+  - 动机（落实第一百一十六轮候选 ②）：一致性 gate / docs 表校验 / 纯反向基线此前分散在多个
+    `--flag`，仍是「人工记得去调」；且 Hopper 快路（`-DFA_WGMMA -DFA_TMA -lcuda`）只能手拼
+    `NVCC_FLAGS`，标准 harness 的定长口径一直是 sm_90 mma。
+  - **改动（纯 harness，device 一行未改）**：`fa_bwd_run.py` 加 **`--ci`**（跑完后自动
+    `fa_bwd_compare.py --check docs/04`，陈旧即 rc=1；一致性 gate + doc-check 汇总到
+    `src/fa_bwd_ci.out.txt`）；**`--hopper`**（定长/变长都切 TMA 构建，输出前缀切到
+    `ours_hp/ours_sf_hp`——wgmma/TMA 与 mma 数值差可达 O(1e-1)，混用会误触一致性 gate）；
+    **`--perf-baseline <dtype>`**（容器内跑 `fa_vs_te_bwd_only.py` 落盘）。新增 `scripts/ci.sh`。
+  - **实测（`--no-run --ci`，73 case，无 GPU）**：全绿退出码 0——fp16 `3.906e-3` / bf16 `7.812e-3` /
+    fp8 `9.537e-6`（按 dtype gate 全 OK），`--check` OK（194 行，rtol=5e-3）。**负向测试**：
+    `--consistency-tol 1e-9` 三 dtype 全 FAIL rc=1；把内嵌表一格改错 → `--check` STALE rc=1。
+  - **现场 device 验证**（`--case b1_s4096_h16_d128_causal_fp8 --impls both --hopper`，容器内真编译真跑）：
+    数值 vs ref `2.635/2.644/3.216e-1`（与历史逐位/同量级一致）、`ours_hp vs ours_sf_hp` worst
+    `7.153e-7`、`quant 0.0693 | preprocess 0.2219 | main 1.5945 | total 1.9359ms / 70.99 TF`。
+  - **性能对标（纯反向）**：fp16 FA3 S4096 `0.3245ms/847TF`、TE `0.4403/624`、FA2 `0.7341/374`；
+    TE FP8 S4096 `0.3025ms/908.7TF` ⇒ ours Hopper `1.9359ms` 为 TE FP8 的 **6.40×**（与 §41 一致）。
+  - **ncu（fp8 main，Hopper，S4096）**：L2 **78.63%**（`red=114.5M` 扇区）、L1TEX 68.23%
+    （bank conflict 15.0M）、DRAM 4.26%、Compute 47.19%、tensor 12.30%、occ 18.25%、168 regs、
+    Waves 20.69、stall **wait 1.59 + short 1.29 + long 0.60** ⇒ bound 与 §41 一致
+    （L2 dK/dV `red` + mma 依赖/等待），非带宽/算力。
+  - **阻塞判定**：本轮用精确 smem 预算把「跨-tile `P/dS` 双缓冲流水」判为不可行（+32,256B，
+    3 CTA/SM 只剩 ~3.7KB），写入「阻塞」。原始输出 `src/fa_bwd_ci_p34d.out.txt`、
+    `src/fa_bwd_p117_ci_negative.out.txt`、`src/fa_bwd_perf_baseline_fp16.out.txt`、
+    `src/fa_bwd_p117_fp8_te_baseline.out.txt`、`src/fp8/fa_bwd_fp8_p117_ncu_main_s4096.out.txt`；
+    文档 `docs/04` §42、`docs/08` §5.33。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
@@ -4315,6 +4377,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   `--with-fwd` 保旧口径 A/B；forward 占 FA3 S512 71%/S4096 43%、**fp8 TE 95–183%**；
   ours/参考比值更正（fp8 S4096 ours/TE 4.0×→**7.85×**、varlen ours/FA3 **3.05×**）。
   数值零变化。详见「第一百一十三轮」、`docs/04` §38。
+- [x] **把一致性 gate + docs 表校验收口成 CI 单一入口**（第一百一十六轮候选 ②）→ **已完成
+  （第一百一十七轮 P3-4d）**：`scripts/ci.sh` = `fa_bwd_run.py --ci`（汇总 + 按 dtype gate +
+  `--check docs/04`，任一红 rc=1）；顺带把 Hopper 快路做成 `--hopper`（独立前缀 `ours_hp`）与
+  `--perf-baseline` 一键落盘。详见「第一百一十七轮」、`docs/04` §42。
 - 用 `nsys` 看 preprocess + main + convert 的端到端重叠。
 - 把 FA2 的 `dQ_accum` 累加缓冲 vs 纯 atomic 做对比实验。
 - deterministic 模式的代价量化。

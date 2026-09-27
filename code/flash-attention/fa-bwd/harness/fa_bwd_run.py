@@ -25,6 +25,9 @@
   python harness/fa_bwd_run.py --consistency --no-run  # 单文件 vs 两文件一致性报告（用已有 npy）
   python harness/fa_bwd_run.py --no-consistency        # 关掉默认的「单/两文件一致性 gate」（P3-3g）
   python harness/fa_bwd_run.py --dry-run               # 只打印将执行的命令
+  python harness/fa_bwd_run.py --hopper                # 定长也走 Hopper 快路（-DFA_WGMMA -DFA_TMA，P3-4d）
+  python harness/fa_bwd_run.py --ci --no-run           # 一条命令：汇总 + 一致性 gate + docs/04 表校验（P3-4d）
+  python harness/fa_bwd_run.py --ci --perf-baseline fp16   # CI + 纯反向基线（FA2/FA3/TE）落盘
 
 P3-3g：一次「全量扫」（两边形态都跑，默认）结束时会**自动**调用
 `fa_bwd_compare.py --consistency --ctol auto`（按 dtype 的 ulp 容差，见该文件的 `CTOL_AUTO`），
@@ -37,6 +40,14 @@ P3-3g：一次「全量扫」（两边形态都跑，默认）结束时会**自�
   src/fa_bwd_run_p33c_summary.out.txt           本脚本的运行清单/命令/结果摘要
   src/fa_bwd_compare_p33c_summary.out.txt       fa_bwd_compare.py 的数值汇总
   src/fa_bwd_consistency_p33g.out.txt           一致性报告（P3-3g 默认产物）
+
+P3-4d：把「跑 ours + 汇总 + 一致性 gate」再收口成**一条 CI 命令**（`--ci`），并在跑完后
+再调用 `fa_bwd_compare.py --check` 校验 `docs/04` 内嵌表是否与实测一致（陈旧则退出码 1），
+于是「单/两文件分叉」与「文档陈旧」两类回归都被同一条命令拦住。`--hopper` 让**定长** case
+也走 `-DFA_WGMMA -DFA_TMA`（Hopper 快路，此前只有变长入口在 sm90a 下编译；与
+`docs/04` 表的默认 sm_90 mma 口径互补）。`--perf-baseline <dtype>` 额外调用用户指定的纯反向
+基线 `fa_vs_te_bwd_only.py`（FA2/FA3/TE 三列）并把原始输出落盘到
+`src/fa_bwd_perf_baseline_<dtype>.out.txt`。
 """
 from __future__ import annotations
 
@@ -69,6 +80,10 @@ HOSTS = {
     },
 }
 PREFIX = {"twofile": "ours", "singlefile": "ours_sf"}
+# P3-4d：Hopper 快路（--hopper）用**独立前缀**，避免把默认 mma 口径的 `ours`/`ours_sf` npy
+# 覆盖掉——wgmma/TMA 与 mma 的数值差可达 O(1e-1)（`docs/03` O9c-2 A/B），若混用会让
+# 「单/两文件一致性 gate」把「构建配置差异」误判成「实现分叉」。
+HOPPER_PREFIX = {"twofile": "ours_hp", "singlefile": "ours_sf_hp"}
 
 # 构建配置：定长走默认 sm_90（mma，与 P3-3 表一致）；varlen 入口在 `#ifdef FA_WGMMA` 内，
 # 需 `sm_90a` + `-DFA_WGMMA`（fp16/bf16 必需；fp8 同样可行）。
@@ -76,6 +91,10 @@ BUILD = {
     "fixed":  {"ARCH": "sm_90", "NVCC_FLAGS": ""},
     "varlen": {"ARCH": "", "NVCC_FLAGS": "-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA"},
 }
+# P3-4d：Hopper 快路（`--hopper`）——定长也走 TMA+wgmma。`-lcuda` 是 TMA 描述符
+# （`cuTensorMapEncodeTiled`）必需的链接项；`ARCH=""` 让 flags 里的 gencode 生效
+# （CUDA 13 的 nvcc 不认 `-arch=sm_90a`）。
+HOPPER_FLAGS = "-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda"
 
 
 def discover(args):
@@ -160,8 +179,24 @@ def main():
     ap.add_argument("--consistency-out",
                     default=str(ROOT / "src" / "fa_bwd_consistency_p33g.out.txt"))
     ap.add_argument("--docs-md", default=str(ROOT / "docs" / "04-numerics-and-perf-summary.md"))
+    ap.add_argument("--hopper", action="store_true",
+                    help="P3-4d：定长也走 Hopper 快路构建（-DFA_WGMMA -DFA_TMA -lcuda，sm90a）")
+    ap.add_argument("--ci", action="store_true",
+                    help="P3-4d：一条命令收口——跑完后自动校验 docs/04 内嵌表最新（陈旧则退出码 1）")
+    ap.add_argument("--perf-baseline", default=None, metavar="DTYPE",
+                    help="P3-4d：额外跑纯反向基线 fa_vs_te_bwd_only.py <DTYPE>（FA2/FA3/TE）并落盘")
+    ap.add_argument("--perf-baseline-out", default=None,
+                    help="--perf-baseline 的产物路径（默认 src/fa_bwd_perf_baseline_<dtype>.out.txt）")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+
+    # P3-4d：--hopper 覆盖定长/变长的构建配置（同一次调用内一致），并切到独立前缀，
+    # 以免污染默认 mma 口径的 ours/ours_sf（两者数值可差 O(1e-1)，见 HOPPER_PREFIX 注释）。
+    prefix_map = dict(PREFIX)
+    if args.hopper:
+        BUILD["fixed"] = {"ARCH": "", "NVCC_FLAGS": HOPPER_FLAGS}
+        BUILD["varlen"] = {"ARCH": "", "NVCC_FLAGS": HOPPER_FLAGS}
+        prefix_map = dict(HOPPER_PREFIX)
 
     # --doc-table-check 是只读校验：不跑 kernel、不依赖 case 过滤。
     if args.doc_table_check:
@@ -191,7 +226,7 @@ def main():
         compare_cases.append(case_dir.name)
         for impl in impls:
             src, bin_name = HOSTS[dt][impl]
-            prefix = PREFIX[impl]
+            prefix = prefix_map[impl]
             prog_args = build_args(case_dir, meta, is_varlen, prefix, args.iters)
             hdr = (f"=== [P3-3c] {dt} {src} {case_dir.name} {prefix} "
                    f"({'varlen' if is_varlen else 'fixed'}) ===")
@@ -209,7 +244,7 @@ def main():
                 logs[dt].append("  (--no-run: 复用已有 npy)")
                 continue
 
-            key = (src, cfg)
+            key = (src, cfg, args.hopper)
             if key in built and Path(os.path.realpath(ROOT / src)).with_suffix(".out").exists():
                 r = run_via_binary(src, built[key], prog_args)
                 how = f"binary {built[key]}.out"
@@ -258,7 +293,7 @@ def main():
     auto_consistency = both_impls and not args.no_consistency
     if args.consistency or auto_consistency:
         cmd_c = [sys.executable, str(ROOT / "harness" / "fa_bwd_compare.py"),
-                 "--consistency", "--ca", "ours", "--cb", "ours_sf",
+                 "--consistency", "--ca", prefix_map["twofile"], "--cb", prefix_map["singlefile"],
                  "--out", args.consistency_out]
         if compare_cases:
             cmd_c += ["--case", *compare_cases]
@@ -273,6 +308,36 @@ def main():
     elif both_impls and args.no_consistency:
         summary.append("[consistency] skipped (--no-consistency)")
         print("\n[consistency] skipped (--no-consistency)")
+
+    # P3-4d：--perf-baseline —— 调用用户指定的纯反向基线（FA2/FA3/TE 三列，forward 在计时区外），
+    # 在容器内跑（该脚本 import torch），原始输出落盘。与 ours 无关，`--no-run` 也可用。
+    ci_lines = list(summary)
+    if args.perf_baseline:
+        dt = args.perf_baseline
+        pbo = (Path(args.perf_baseline_out) if args.perf_baseline_out
+               else ROOT / "src" / f"fa_bwd_perf_baseline_{dt}.out.txt")
+        inner = (f"cd '{ROOT}' && python harness/fa_vs_te_bwd_only.py {dt}")
+        print(f"\n[perf-baseline] docker exec {CONTAINER}: {inner}")
+        rp = subprocess.run(["docker", "exec", CONTAINER, "bash", "-lc", inner],
+                            capture_output=True, text=True)
+        pbo.write_text((rp.stdout or "") + (rp.stderr or ""))
+        print(rp.stdout)
+        ci_lines.append(f"[perf-baseline] {dt} rc={rp.returncode} -> {pbo}")
+        if rp.returncode != 0:
+            print(rp.stderr, file=sys.stderr)
+
+    # P3-4d：--ci —— 在「一致性 gate」之上再校验 docs/04 内嵌表是否最新；陈旧即退出码 1。
+    # 跑 `fa_bwd_compare.py --check`（扫全部 dump、按 rtol 吸收原子次序噪声）。
+    if args.ci:
+        cmd_chk = [sys.executable, str(ROOT / "harness" / "fa_bwd_compare.py"),
+                   "--check", args.docs_md]
+        print("\n[ci doc-table-check] " + " ".join(cmd_chk))
+        rc = subprocess.run(cmd_chk).returncode
+        ci_lines.append(f"[ci] doc-table-check rc={rc}")
+        (ROOT / "src" / "fa_bwd_ci.out.txt").write_text("\n".join(ci_lines) + "\n")
+        if rc != 0:
+            print("[ci] docs/04 内嵌表陈旧（rc=%d）" % rc, file=sys.stderr)
+            return rc
 
     if args.no_run or args.no_compare or not compare_cases:
         return 0
