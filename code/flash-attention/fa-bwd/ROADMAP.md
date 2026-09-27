@@ -4364,10 +4364,40 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
      `..._p34e_ncu_reduce_s4096.out.txt`、`..._p34e_ncu_detmain_s4096.out.txt`、
      `..._p34e_ncu_detmain_stall_s4096.out.txt`；文档 `docs/03` §56、`docs/04` §43、
      `docs/00` §4.2、`docs/08` §5.34。
-   - **下一步候选**：① **把 `--det` 扩展到 ksplit>1**（partial 再按 `part` 分片、dQ 也走
-     partial）以获得「确定性 + split-K 并行度」；② 把 DET 接入 varlen/MLA/TMA 路径；
-     ③（性能，非确定性）仍是「减 mma 依赖 / 提 occupancy」——但受本卡寄存器/smem 硬墙锁定，
-     见「阻塞」。
+    - **下一步候选**：① **把 `--det` 扩展到 ksplit>1**（partial 再按 `part` 分片、dQ 也走
+      partial）以获得「确定性 + split-K 并行度」；② 把 DET 接入 varlen/MLA/TMA 路径；
+      ③（性能，非确定性）仍是「减 mma 依赖 / 提 occupancy」——但受本卡寄存器/smem 硬墙锁定，
+      见「阻塞」。
+
+- 2026-09-27（第一百一十九轮）：**P3-4f 完成（`--det` 扩展到 split-K：dQ 也走 partial，
+  确定性 + split-K 并行度）**。
+  - 动机（落实第一百一十八轮候选 ①）：P3-4e 的 `--det` 固定 `ksplit=1`，白扔了 split-K。
+    分解后发现 **dK/dV 的 partial 天然无需 part 维**——`ksplit` 切的是同一 m 块的 K tile，
+    一个 `(mblk, jg)` 只属于一个 part（各 part 写不相交的 `jg`），固定次序按 `mblk` 归约即可；
+    真正需要分片的只有 **dQ**（同 `(row,h,c)` 被 ksplit 个 part 各贡献偏和）。
+  - **改动（单/两文件 device 逐字同源，`sync_onefile_device.py` 核对 `device region identical`）**：
+    `fp8_mma_body`/`fa_bwd_fp8_mma_kernel` 加默认实参 `float* dq_part`；O7 寄存器 dQ flush 在
+    `DET && ksplit>1` 时非原子覆盖写 `dq_part[((row*H+h)*ksplit+part)*HD+c]`，否则保持原
+    `red_add2`（逐位不变）；新增 `dq_reduce_kernel<HD>`（`grid=(B*S,H)`、`block=HD`，按 part
+    固定次序求和）；host 加 `--detk=N`、`launch_bwd_main_det` 增参、A/B 同 binary 扫
+    ksplit∈{1,2,4,8}；`ksplit>1` 强制 `REGDQ=true`。范围：定长/HD=128/mma。
+  - **数值**：所有 ksplit（含 dQ）`runs[1-2] bitwise dq/dk/dv = 0.00e+00`、单/两文件全部
+    逐位可复现；`DET-vs-atomic` ~e-7–e-6（fp32 归约次序末位）；默认路径（无 `--det`）数值逐位不变。
+  - **性能（同 session ksplit sweep，两文件，含 reduce）**：DET k=1→k=2→k=4→k=8 =
+    S512 `0.1461/0.1116/0.1115/0.1215ms`（相对 k=1 **1.31×**）、
+    S4096 `2.8380/2.6256/2.5514/2.6475ms`（**1.11×**）⇒ **k=4 触底**（固定 partial 写/读
+    成本与 ksplit 无关，主 kernel 收益递减）。atomic k=4 S4096 1.891ms ⇒ DET/atomic 0.741×。
+  - **ncu（S=4096 k=4）**：DET 主 kernel 1.72ms / DRAM **42.3%** / L1TEX 69.8% / occ 18.1% /
+    regs 168 / 3 CTA/SM；`dkv_reduce_kernel` **730.7µs / DRAM 91.56% / 3.07 TB/s**、
+    `dq_reduce_kernel` 55.1µs / DRAM 87.61%。**bound 与 P3-4e 同构 = reduce 的纯 DRAM 带宽
+    + 主 kernel 多写的 partial**（+2.1GB）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_main_p34f_det_{s512,s4096}.out.txt`、
+    `..._mma_onefile_p34f_det_s512.out.txt`、`..._p34f_detsweep.out.txt`、
+    `..._p34f_ncu_reduce_{s512,s4096}.out.txt`、`..._p34f_ncu_detmain_{s512,s4096}.out.txt`；
+    文档 `docs/03` §57、`docs/04` §44、`docs/00` §4.2。
+  - **下一步候选**：① 把 DET（含 ksplit）接入 varlen/MLA/TMA 路径（候选 ②）；② 减 partial
+    字节（按 KV 行跨 warpgroup 偏和 / 更细分块）以压低 reduce 的 DRAM 墙；③ 性能（非确定性）
+    仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
 
 ## 灵感 / backlog
 
@@ -4417,4 +4447,6 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 - deterministic 模式的代价量化 → **已完成（P3-4e，第一百一十八轮）**：fp8 补齐 `--det`
   （partial + 固定次序归约，逐位可复现），代价 ncu 定量（reduce 731.6µs/DRAM 91.5%、
   相对默认档 S4096 ~1.5×），见 `docs/03` §56。
+  **`--det` 扩到 ksplit>1 已完成（P3-4f，第一百一十九轮）**：dQ 也走 partial，DET 在 k=4
+  触底、相对 k=1 提速 S512 1.31×/S4096 1.11×，bound 仍是 reduce 的 DRAM 带宽，见 `docs/03` §57。
 - fp8：对比「只量化 dO」vs「dO 和 P 都量化」的精度/性能权衡。

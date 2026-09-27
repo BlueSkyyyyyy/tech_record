@@ -119,6 +119,10 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    `atomicAdd` 换成「按 (Q 头, Q 块) 分片的 partial 覆盖写 + 固定次序二次归约」，两次跑
    逐位相同（`runs[1-2] bitwise-diff = 0`）；代价是 ksplit 固定为 1 + 一次纯带宽 bound 的
    归约（S=4096 时 reduce 731.6µs、DRAM 91.5%），见 `docs/03` §56。
+   → **`--detk=N>1`（P3-4f，第一百一十九轮）把 `--det` 扩到 split-K**：dK/dV 的 partial
+   天然无需 part 维（一个 `(mblk,jg)` 只属于一个 part），只需给 dQ 加 part 分片 partial +
+   `dq_reduce_kernel`，即可在 ksplit>1 下保持 dq/dk/dv 全逐位可复现；DET 相对 k=1 提速
+   S512 **1.31×** / S4096 **1.11×**（k=4 触底）。见 `docs/03` §57。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 
