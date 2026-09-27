@@ -5510,3 +5510,91 @@ H16 **0.1621ms/282TF**、等长 4×1024 **0.1471/234**、GQA q32/kv8 **0.3766/24
 `[2048,512,…]` **0.1418/259**；TE2.14 反向不支持 ragged QKV（NA）。ours fp8 变长默认路
 （含 quant+preprocess）b4_t3840 total 0.9274ms/49.2TF（docs §37 口径）。DET 为 opt-in 正确性
 模式，代价见 §60.4。
+
+---
+
+## 61. P3-4j：`--det` 扩到 MLA（HD=512）varlen（第一百二十三轮）
+
+### 61.1 动机（落实第一百二十二轮「下一步候选 ②」）
+
+P3-4i 把 `--det` 扩到了 **D=128** 的变长，但 **MLA（HD=512）的变长**仍是跨 CTA
+`atomicAdd`——调度一变末位就抖。P3-4h 已把 DET 扩到 **定长 MLA**，并指出关键约束：
+MLA 的 dQ 无法用寄存器累加（`kRegDq = REGDQ && (HD/NTW==1)`，HD=512 时 `HD/NTW=4`
+⇒ 恒 false），所以「确定 dQ」只能靠 **ksplit=1 的单写者 `red_add2`**。本项把同一结论
+搬到**变长**：device 数学一行未改，只补 host A/B + 复用 `dkv_reduce_varlen_kernel<512,64>`。
+
+### 61.2 设计：定长 MLA DET + varlen 归约
+
+- **partial 布局**沿用定长式 `part[((b*H+h)*nblk_max+mblk)*maxlen + jg]`（body 传
+  `S=maxlen`、`nblk=nblk_max`），归约端换成 `dkv_reduce_varlen_kernel<HD,BM>`（按
+  `cu_seqlens` 的逐序列 `len_b/nblk_b` 定界、只对 `jg<len_b` 求和、输出按 packed token
+  `qbase+jg` 定位）。**该 kernel 模板化在 HD 上，`<512,64>` 直接可用**——这是 P3-4i 把
+  partial 布局抽象成「定长式参数化」的直接红利。
+- **ksplit 锁 1**：与 P3-4h 定长 MLA 同因（dQ 不可寄存器累加 ⇒ partial 非原子覆盖写会在
+  同 CTA 的 nt 循环里互相覆盖）。A/B 的 atomic 基线与 DET 同为 **O47/O51 的 8-warp/256
+  线程几何**（`launch_bwd_main<512,64,32,false,false,true,true,true,256,4>` vs
+  `launch_bwd_main_det<512,64,32,false,true,true,true,256,4>`），只差 DET 一个变量。
+  注：默认 MLA varlen 主 kernel 走 kvpipe 版，DET 未接进 kvpipe（与 P3-4h 一致）。
+- **改动范围**：仅 `fa_bwd_fp8_main.cu` / `fa_bwd_fp8_mma_onefile.cu` 的 `run_varlen`
+  各 +76 行 host A/B；`fa_bwd_fp8_kernels.cuh` **一行未改**。
+
+### 61.3 数值：两次跑逐位可复现；DET-vs-atomic 仅 fp32 次序末位
+
+| case | 后端 | atomic(8w) ms | DET(8w) ms | 比 | runs[1-2] bitwise dq/dk/dv | DET-vs-atomic dq/dk/dv |
+|---|---|---|---|---|---|---|
+| b1_t512 causal | 两文件 | 0.2856 | 0.2810 | **1.016×** | 0 / 0 / 0 | 0 / 4.77e-7 / 4.77e-7 |
+| b3_t1792 causal | 两文件 | 0.5795 | 0.6109 | **0.949×** | 0 / 0 / 0 | 0 / 4.77e-7 / 5.96e-7 |
+| b1_t512 full | 两文件 | 0.2868 | 0.2996 | **0.957×** | 0 / 0 / 0 | 0 / 5.96e-8 / 5.96e-8 |
+| b1_t512 causal | 单文件 | 0.2797 | 0.2789 | **1.003×** | 0 / 0 / 0 | 0 / 4.77e-7 / 4.77e-7 |
+| b3_t1792 causal | 单文件 | 0.5794 | 0.6078 | **0.953×** | 0 / 0 / 0 | 0 / 7.15e-7 / 9.54e-7 |
+
+- **`runs[1-2] bitwise dq/dk/dv = 0` 全部成立**（含不齐 length 的逐序列 `nblk_b`）。
+- `DET-vs-atomic` **dq 恒 0**（ksplit=1 单写者，与 atomic 逐位同值）、dk/dv e-7–e-6
+  （fp32 归约次序末位），**数学口径一致**。
+- **恢复默认路（`run_all()`）后 `ours vs fp32 ref` 与历史逐位一致**：b1 causal
+  `1.613e-1/2.238e-1/3.864e-1`、b3 causal `3.404e-1/3.436e-1/3.508e-1`、b1 full
+  `5.260e-2/5.222e-2/4.218e-2`——全 fp8 噪声量级（D=512/MLA 的 FA3/TE 反向均不支持，
+  仅 fp32 ref 可对）。
+- **单/两文件一致**：b1 causal 两文件 1.613e-1/2.238e-1/3.864e-1、单文件同值；
+  b3 causal 两文件 3.404e-1/3.436e-1/3.508e-1、单文件同值。
+
+### 61.4 代价与 ncu：bound 仍是 reduce 的纯 DRAM/L2 带宽
+
+- **代价（同 session 同 binary A/B，只差 DET 一个变量）**：DET/atomic = **0.95–1.02×**
+  （main kernel 本体几乎免费——确定性只是把 dK/dV 的 L2 `red` 换成 partial 写）。
+- **真正的代价在「ksplit 必锁 1」**：MLA varlen 的 auto ksplit 很大（b1 auto=16、b3 auto=4），
+  强制 k=1 后主 kernel 并行度下降——同 session 默认 8w+kvpipe main-only：b1 **0.0502ms**
+  vs DET(k=1) 0.281ms（**~5.6×**）、b3 0.188ms vs 0.611ms（**~3.25×**）。**这与 P3-4h
+  定长 MLA 的结论一致**：确定性在 MLA 上不是「免费换归约方式」，而是「用 ksplit=1 的单写者
+  换掉 split-K 并行度」。要恢复并行度需让 MLA 的 dQ 也能进 partial（见 §61.5）。
+- **ncu（reduce, b3_t1792 causal, DET k=1）**：`dkv_reduce_varlen_kernel<512,64>`
+  grid `(6,1024,1)` × 512、**Duration 48.03µs**、**DRAM 65.81%** / **L2 67.59%** /
+  L1TEX 10.34% / SM 29.79% / **occ 42.71%**、读 95.43MB/写 10.45MB ⇒ **bound = reduce 的
+  纯 DRAM/L2 带宽**（与 P3-4e/f/g/h/i 逐项一致）。主 kernel 的 DET 路径与 P3-4e 共用同一
+  body/epilogue，bound 结论沿用 §56。
+
+### 61.5 复现 / 原始输出 / 下一步
+
+```bash
+# MLA varlen + --det（打印 [P3-4j A/B]）；varlen 构建需 sm90a + -DFA_WGMMA
+ARCH= NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp8 \
+  --varlen --det --iters=20            # full 加 --full
+# ncu（varlen MLA reduce）
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:dkv_reduce_varlen \
+  --launch-count 1 --metrics gpu__time_duration.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed \
+  -- --dir=.../varlen_b3_t1792_h2_d512_causal_fp8 --varlen --det --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_p34j_det_varlen_{b1_t512,b3_t1792,b1_t512_full}.out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_p34j_det_varlen_{b1_t512,b3_t1792}.out.txt`、
+`src/fp8/fa_bwd_fp8_p34j_ncu_reduce_varlen_b3.out.txt`。
+
+**下一步候选**：① **让 MLA 的 dQ 也进 partial，从而支持 DET 的 ksplit>1**——观察：非
+`kRegDq` 的 dQ epilogue 是对**唯一 CTA**（固定 `(mblk,part)`）的 `red_add2`，
+若把目标从 `dq_acc` 换成 `dq_part[((row*H+h)*ksplit+part)*HD+c]`（host 预先清零），
+则同一 partial 元素仍只被一个 CTA 写、CTA 内 nt 次序固定 ⇒ **确定性天然成立**，且
+`dq_reduce_kernel` 已按 part 固定次序求和。这样 MLA DET 就能保留 split-K 并行度（代价
+是 ksplit× 的 atomic 流量 + partial 读写）。② 长序列的 partial **compact per-sequence
+布局**（现 maxlen-strided，强倾斜时浪费）；③ 其余性能仍受本卡寄存器/smem 硬墙锁定。

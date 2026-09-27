@@ -837,6 +837,82 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     CUDA_CHECK(cudaDeviceSynchronize());
   }
 
+  // ---- P3-4j A/B（D=512 MLA varlen，`--det`）：把 P3-4i 的确定性 dK/dV 从 D=128 扩到
+  //      MLA（HD=512）的变长路径（DET 候选 ① 的最后一块）。MLA 的 dQ 无法用寄存器累加
+  //      （`kRegDq = REGDQ && (HD/NTW==1)` 恒 false）⇒ 锁 ksplit=1（单写者 `red_add2`，
+  //      dQ 也确定）；dK/dV 走 partial + `dkv_reduce_varlen_kernel<512,64>`（按 `cu_seqlens`
+  //      的逐序列 `len_b/nblk_b` 定界、输出按 packed token 定位）。与默认 MLA varlen 主
+  //      kernel 同几何（O47/O51 的 8-warp/256 线程），但用非 kvpipe 版（DET 未接进 kvpipe）。
+  //      同 session 计时 + 跑两遍 DET 验逐位，再与 atomic 比 max|diff|。----
+  if (det_ab && D == 512) {
+    const int nblk_max = (maxlen + BM - 1) / BM;
+    const size_t part_elems = (size_t)B * H * nblk_max * maxlen * D;
+    float* d_dk_part = nullptr;
+    float* d_dv_part = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_dk_part, part_elems * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_dv_part, part_elems * sizeof(float)));
+    dim3 g(nblk_max, H, B);
+    auto run_at = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+      launch_bwd_main<512, 64, 32, false, false, true, true, true, 256, 4>(
+          g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
+          maxlen, H, Hkv, scale, (int)causal, 1, d_cu, nullptr, nullptr);
+    };
+    auto run_dt = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));   // ksplit==1 时 dQ 用无竞争 red_add2
+      CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+      launch_bwd_main_det<512, 64, 32, false, true, true, true, 256, 4>(
+          g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
+          maxlen, H, Hkv, scale, (int)causal, 1, d_dk_part, d_dv_part, nblk_max, nullptr, d_cu,
+          nullptr, nullptr);
+      dim3 rg(B * Hkv, maxlen);
+      dkv_reduce_varlen_kernel<512, 64><<<rg, 512>>>(d_dk_part, d_dv_part, d_dk, d_dv, d_cu, H,
+                                                     Hkv, nblk_max, maxlen, (int)causal);
+    };
+    auto time_fn3 = [&](auto fn, float* out_ms) {
+      for (int i = 0; i < 3; ++i) fn();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) fn();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    float ms_at = 0.f, ms_dt = 0.f;
+    time_fn3([&] { run_at(); }, &ms_at);
+    std::vector<float> ak(nkv), av(nkv), aq(nq);
+    CUDA_CHECK(cudaMemcpy(ak.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(av.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(aq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+    time_fn3([&] { run_dt(); }, &ms_dt);
+    std::vector<float> dk1(nkv), dv1(nkv), dq1(nq), dk2(nkv), dv2(nkv), dq2(nq);
+    CUDA_CHECK(cudaMemcpy(dk1.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dv1.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dq1.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+    run_dt();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(dk2.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dv2.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dq2.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+    auto mad3 = [](const std::vector<float>& x, const std::vector<float>& y) {
+      double m = 0.0;
+      for (size_t i = 0; i < x.size(); ++i) m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
+      return m;
+    };
+    printf("[P3-4j A/B] MLA varlen ksplit=1 | atomic(8w) %.4f ms | DET(8w) %.4f ms (%.3fx) | "
+           "runs[1-2] bitwise dq/dk/dv=%.2e/%.2e/%.2e | DET-vs-atomic dq/dk/dv=%.2e/%.2e/%.2e\n",
+           ms_at, ms_dt, ms_at / ms_dt, mad3(dq1, dq2), mad3(dk1, dk2), mad3(dv1, dv2),
+           mad3(dq1, aq), mad3(dk1, ak), mad3(dv1, av));
+    cudaFree(d_dk_part);
+    cudaFree(d_dv_part);
+    run_all();   // 恢复最终输出为 CLI 选中的路径
+    CUDA_CHECK(cudaDeviceSynchronize());
+  }
+
   // ---- O52 A/B（D=512/MLA/varlen）：主 kernel 4-warp vs 8-warp(+kvpipe) 同 session 计时 ----
   //   只改 warp 网格与 K/V 搬运，数学口径不变；跨 CTA atomic 次序变 ⇒ 预期 max_abs ~1e-6。
   if (D == 512) {
