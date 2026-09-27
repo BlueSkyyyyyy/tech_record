@@ -2656,3 +2656,73 @@ python3 harness/fa_bwd_run.py --doc-table-apply
 | varlen B=5 T=3968 [128,256,512,1024...] H=32 D=128 Hkv=8 full | **ours（两文件）** | 1.429e-01 | 1.598e-01 | 1.079e-01 |
 | varlen B=4 T=4096 [1024,1024,1024,1024] H=16 D=128 full | **ours（两文件）** | 8.881e-02 | 7.043e-02 | 5.721e-02 |
 <!-- END:auto-doc-table -->
+
+## 40. P3-3f：单/两文件实现一致性自动报告（第 115 轮）—— 工具链 + 验证，正结果
+
+> 本轮为 **harness + 验证增量**，device 一行未改。目标是把此前每一轮都要手工做的
+> 「单文件 vs 两文件逐元素一致性」核对（§33/§34/§39 均手工誊抄过）**固化进 harness**，
+> 并顺带修掉 `fa_bwd_run.py` 的 `--no-run` 失效 bug。
+
+### 40.1 改动（纯 harness）
+
+* `harness/fa_bwd_compare.py` 新增 **`--consistency`**：对每个 case 读取两个 impl 的
+  `{dq,dk,dv}`（默认 `--ca ours --cb ours_sf`，可换成任意前缀），逐元素算 `max|A-B|`，
+  按 dtype 分组打印并汇总**全 case 最坏值**；`--ctol` 给定时超过即退出码 1（CI 回归门）。
+  该模式不需要 `ref_*`，也不需要 GPU（直接读 dump）。
+* `harness/fa_bwd_run.py` 新增 **`--consistency` / `--consistency-tol` / `--consistency-out`**，
+  跑完/复用 npy 后一键调用上面的一致性报告（产物默认
+  `src/fa_bwd_consistency_p33f.out.txt`）。
+* **修复 `--no-run`**：文档一直写「跳过 kernel、只重新汇总」，但主循环从未检查它，
+  仍会编译并运行全部 case（一次全量扫 = 146 次运行）。现在 `--no-run` 真正跳过执行、
+  复用已有 npy，且**不改写**上一轮全量扫的运行日志/清单。
+
+### 40.2 实测（全部 73 个 case；`fa_bwd_run.py --consistency --no-run`，无 GPU）
+
+73/73 case 的 `ours_*`（两文件）与 `ours_sf_*`（单文件）**都存在**，0 case 缺一侧。
+两种文件形态的 device 代码逐字同源，唯一的期望差异是**跨 CTA `atomicAdd` 的 fp32 求和次序**。
+
+| dtype | max\|ours−ours_sf\|（dq） | 最坏 dk | 最坏 dv | 最坏出现 | 判定 |
+|---|---|---|---|---|---|
+| fp16 | 2.441e-4 | 1.953e-3 | 3.906e-3 | GQA kv4 的 dv | dtype ulp（amax ~2） |
+| bf16 | 1.953e-3 | 7.812e-3 | 7.812e-3 | GQA/MQA 的 dk/dv | dtype ulp（amax ~2） |
+| fp8  | 1.192e-7 | 6.676e-6 | 9.537e-6 | MQA kv1 的 dk/dv | fp32 累加 ulp |
+
+* `dq` 在两文件/单文件间**多数逐位相同**（MHA 无 split 时恒 0），只在 MLA / split-K / varlen
+  的跨 CTA dQ 归约上差 1–2 ulp——与 §33/§34 的历史结论完全一致。
+* 最坏值都出现在 **GQA/MQA**（KV 头共享、`amax` 更大）的 `dk/dv`，量级 = 1–2 个 dtype ulp。
+  **无任何「实现分歧」型差异**（若同源 device 代码被改坏，会看到 O(输出幅度) 的差）。
+* 复现：`python harness/fa_bwd_run.py --consistency --no-run`（或直接
+  `python harness/fa_bwd_compare.py --consistency`）。原始输出
+  `src/fa_bwd_consistency_p33f.out.txt`。
+
+### 40.3 纯反向基线刷新（同机，CUPTI；`harness/fa_vs_te_bwd_only.py fp16`）
+
+| shape | FA2.7.4 | FA3 | TE2.14 | FA3/FA2 |
+|---|---|---|---|---|
+| (1,1024,32,128) kv4 | 0.1577/218 | 0.0825/417 | 0.1120/307 | 1.91× |
+| (1,4096,16,128) MHA | 0.7258/379 | **0.3237/849** | 0.4388/626 | 2.24× |
+| varlen [1024]×4 causal | 0.2511/137 | 0.1470/234 | NA | 1.71× |
+| varlen [1024]×4 full | 0.3453/100 | 0.2003/172 | NA | 1.72× |
+
+与 §37/§38 的纯反向口径一致（FA3 > TE > FA2）；fp8/MLA（D=512）FA3 反向不支持。原始输出
+`src/fa_bwd_p33f_fa_baseline_fp16.out.txt`。
+
+### 40.4 本轮 ours 性能 / ncu（Hopper 快路：`-DFA_WGMMA -DFA_TMA`，同机）
+
+| case | ours 端到端（event） | 对 FA3（时间） | 对 TE（时间） | 数值 vs ref（max_abs dq/dk/dv） |
+|---|---|---|---|---|
+| fp16 (1,4096,16,128) MHA | **1.2582 ms / 109.2 TF** | 3.89× | 2.87× | 1.883/1.734/1.966e-3 |
+| fp8 (1,4096,16,128) MHA | **1.9466 ms / 70.6 TF** | —（FA3 无 fp8 bwd） | ≈6.4×（TE fp8 纯反向 0.303 ms，§38） | 2.635/2.644/3.216e-1 |
+
+ncu（fp8 主 kernel `fa_bwd_fp8_mma_kvtma_kernel`，S=4096，`-c 1`）：Duration **1.60 ms**、
+**L2 Cache Throughput 78.25%**、L1/TEX 70.48%、DRAM 4.23%、Compute 46.90%、occ 18.34%
+（168 regs / 3 CTA/SM，Waves 20.69）；`lts__t_sectors_op_red=114.5 M`（dK/dV 跨 CTA 归约主导）、
+stall `wait 1.59 + short_scoreboard 1.28 + long 0.58` ⇒ **bound = L2 dK/dV 原子归约 + mma 依赖延迟**，
+与 §45（O42）/§44（O41）一致：red 是头号成本、已由 O19/O42 判决「换实现只会更慢」。
+原始输出 `src/fp8/fa_bwd_fp8_p33f_perf_s4096.out.txt`、`src/fp8/fa_bwd_fp8_p33f_ncu_s4096.out.txt`、
+`src/fp8/fa_bwd_fp8_p33f_ncu_stall_s4096.out.txt`；fp16 见
+`src/fp16/fa_bwd_fp16_p33f_perf_s4096.out.txt`。
+
+**结论**：三 dtype × 单/两文件共 73 case 的两形态一致性被自动化并全量通过（差异 ≤ 2 dtype ulp、
+均来自 `atomicAdd` 次序）；刷新后的纯反向基线与 ours 数字确认当前边界未变（fp8 main 仍是
+L2 red + mma 依赖，属文档已判决的硬件资源墙）。

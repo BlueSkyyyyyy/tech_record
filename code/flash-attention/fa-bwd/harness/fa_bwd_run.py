@@ -22,6 +22,7 @@
   python harness/fa_bwd_run.py --doc-table             # 额外产出 docs/04 分组表（P3-3d）
   python harness/fa_bwd_run.py --doc-table-apply       # 跑完 ours 后原地同步 docs/04 内嵌表（P3-3e）
   python harness/fa_bwd_run.py --doc-table-check       # 只校验 docs/04 内嵌表是否最新（不跑 kernel）
+  python harness/fa_bwd_run.py --consistency --no-run  # 单文件 vs 两文件一致性报告（用已有 npy）
   python harness/fa_bwd_run.py --dry-run               # 只打印将执行的命令
 
 产物：
@@ -141,6 +142,12 @@ def main():
                     help="跑完 ours 后用实测原地同步 docs/04 的 auto-doc-table 块（P3-3e）")
     ap.add_argument("--doc-table-check", action="store_true",
                     help="只校验 docs/04 的 auto-doc-table 块是否最新（P3-3e；不跑 kernel）")
+    ap.add_argument("--consistency", action="store_true",
+                    help="P3-3f：跑完后报告单文件 vs 两文件（ours vs ours_sf）的逐 case 一致性")
+    ap.add_argument("--consistency-tol", type=float, default=None,
+                    help="--consistency：max|ours-ours_sf| 超过该值时退出码 1（默认只报不判）")
+    ap.add_argument("--consistency-out",
+                    default=str(ROOT / "src" / "fa_bwd_consistency_p33f.out.txt"))
     ap.add_argument("--docs-md", default=str(ROOT / "docs" / "04-numerics-and-perf-summary.md"))
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -183,6 +190,13 @@ def main():
                 summary.append(f"      run.sh {src} {' '.join(prog_args)}")
                 logs[dt].append("  (dry-run)")
                 continue
+            if args.no_run:
+                # P3-3f 修复：`--no-run` 原文档说「跳过 kernel、只重新汇总」，但循环未检查它，
+                # 仍会编译+运行所有 case（一次全量扫会跑 146 次）。这里真正跳过执行，
+                # 复用已有 npy（compare/consistency 直接读 dump）。
+                summary.append("      (--no-run: 复用已有 npy)")
+                logs[dt].append("  (--no-run: 复用已有 npy)")
+                continue
 
             key = (src, cfg)
             if key in built and Path(os.path.realpath(ROOT / src)).with_suffix(".out").exists():
@@ -202,16 +216,18 @@ def main():
             if r.returncode != 0:
                 summary.append(f"      !! rc={r.returncode} ({how})")
 
-    # 落盘
-    for dt, lines in logs.items():
-        p = ROOT / "src" / dt / f"fa_bwd_{dt}_p33c_run.out.txt"
-        p.write_text("\n".join(lines) + "\n")
-        summary.append(f"[written] {p}")
-
-    sp = ROOT / "src" / "fa_bwd_run_p33c_summary.out.txt"
-    sp.write_text("\n".join(summary) + "\n")
-    print("\n".join(summary))
-    print(f"\n[written] {sp}")
+    # 落盘（--no-run 时不改写既有的运行日志/清单，避免用空内容覆盖上一轮全量扫的产物）
+    if args.no_run:
+        print("\n".join(summary))
+    else:
+        for dt, lines in logs.items():
+            p = ROOT / "src" / dt / f"fa_bwd_{dt}_p33c_run.out.txt"
+            p.write_text("\n".join(lines) + "\n")
+            summary.append(f"[written] {p}")
+        sp = ROOT / "src" / "fa_bwd_run_p33c_summary.out.txt"
+        sp.write_text("\n".join(summary) + "\n")
+        print("\n".join(summary))
+        print(f"\n[written] {sp}")
 
     if args.doc_table_apply:
         # 同步 docs/04 内嵌块：扫全部 dump（不限定本轮 case），保证表覆盖完整。
@@ -224,6 +240,19 @@ def main():
         if r3.returncode != 0:
             print(r3.stderr, file=sys.stderr)
             return r3.returncode
+
+    if args.consistency:
+        cmd_c = [sys.executable, str(ROOT / "harness" / "fa_bwd_compare.py"),
+                 "--consistency", "--ca", "ours", "--cb", "ours_sf",
+                 "--out", args.consistency_out]
+        if compare_cases:
+            cmd_c += ["--case", *compare_cases]
+        if args.consistency_tol is not None:
+            cmd_c += ["--ctol", str(args.consistency_tol)]
+        print("\n[consistency] " + " ".join(cmd_c))
+        rc = subprocess.run(cmd_c).returncode
+        if rc != 0:
+            return rc
 
     if args.no_run or args.no_compare or not compare_cases:
         return 0

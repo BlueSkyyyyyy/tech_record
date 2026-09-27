@@ -34,6 +34,7 @@ import argparse
 import difflib
 import json
 import re
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -248,6 +249,56 @@ def apply_block(path: Path, block_lines, rtol):
     return True, "\n".join(diff)
 
 
+def consistency_report(rows_meta, ca, cb, ctol):
+    """P3-3f：单文件 vs 两文件（或任意两个 impl）的实现一致性报告。
+
+    同一算法的两种文件形态（device 代码逐字同源）唯一的期望差异来自跨 CTA
+    `atomicAdd` 的求和次序（fp32 ulp 级）。本报告逐 case 给出 `max|A-B|`，并按 dtype
+    汇总最大值；可选用 `--ctol` 让超过容差时以非零退出码报错（CI 回归门）。
+
+    返回 (lines, worst, n_cases, n_missing)。
+    """
+    lines = []
+    lines.append(f"=== fa-bwd 实现一致性（P3-3f）：{ca} vs {cb}（max_abs，逐元素）===")
+    lines.append(f"baseline-free：两者都算同一数学；期望差异仅跨 CTA atomicAdd 次序（fp32 ulp）。")
+    if ctol is not None:
+        lines.append(f"判据：max|{ca}-{cb}| <= --ctol={ctol:g}（超出则退出码 1）")
+    lines.append("")
+    by_dt = {}
+    n_cases = n_missing = 0
+    worst = {v: (0.0, "") for v in VEC}
+    for case, meta in rows_meta:
+        dt = meta.get("dtype", "?")
+        have = all((case / f"{ca}_{v}.npy").exists() and (case / f"{cb}_{v}.npy").exists()
+                   for v in VEC)
+        if not have:
+            n_missing += 1
+            by_dt.setdefault(dt, []).append((case.name, None))
+            continue
+        n_cases += 1
+        st = {}
+        for v in VEC:
+            st[v] = maxdiff(load(case, f"{cb}_{v}"), load(case, f"{ca}_{v}"))[0]
+            if st[v] > worst[v][0]:
+                worst[v] = (st[v], case.name)
+        by_dt.setdefault(dt, []).append((case.name, st))
+    for dt in [d for d in DT_ORDER if d in by_dt] + sorted(set(by_dt) - set(DT_ORDER)):
+        lines.append(f"[{dt}]")
+        for name, st in sorted(by_dt[dt]):
+            if st is None:
+                lines.append(f"  {name:<46}  (缺 {ca} 或 {cb}，跳过)")
+            else:
+                lines.append(f"  {name:<46}  dq={st['dq']:.3e}  dk={st['dk']:.3e}  "
+                             f"dv={st['dv']:.3e}")
+        lines.append("")
+    lines.append(f"=== 小结（{n_cases} case 有 {ca}/{cb} 双方；{n_missing} case 缺一侧）===")
+    for v in VEC:
+        d, who = worst[v]
+        lines.append(f"  max|{ca}-{cb}| over all cases: {v} = {d:.3e}  ({who})")
+    lines.append(f"  worst = {max(worst[v][0] for v in VEC):.3e}")
+    return lines, max(worst[v][0] for v in VEC), n_cases, n_missing
+
+
 def main():
     ap = argparse.ArgumentParser(description="fa-bwd numeric comparison (ours vs ref vs FA/TE)")
     ap.add_argument("--dtype", nargs="+", default=None, help="过滤 dtype：fp16/bf16/fp8")
@@ -263,12 +314,32 @@ def main():
                     help="校验 DOC_MD 的 auto-doc-table 标记块是否为最新；不一致则打印 diff 并退出码 1")
     ap.add_argument("--rtol", type=float, default=5e-3,
                     help="--apply/--check 的数值容差（原子次序噪声；默认 5e-3）")
+    ap.add_argument("--consistency", action="store_true",
+                    help="P3-3f：报告两个 impl（默认 ours vs ours_sf）的逐 case 一致性")
+    ap.add_argument("--ca", default="ours", help="--consistency 的 A 侧 impl（默认 ours）")
+    ap.add_argument("--cb", default="ours_sf", help="--consistency 的 B 侧 impl（默认 ours_sf）")
+    ap.add_argument("--ctol", type=float, default=None,
+                    help="--consistency：max|A-B| 超过该值时退出码 1（默认只报不判）")
     ap.add_argument("--out", default=None, help="把结果同时写到文件")
     args = ap.parse_args()
     if args.apply or args.check:
         args.doc_table = True
         if args.apply and args.check:
             ap.error("--apply 与 --check 不能同时使用")
+
+    if args.consistency:
+        lines, worst, n_cases, n_missing = consistency_report(
+            discover(args), args.ca, args.cb, args.ctol)
+        text = "\n".join(lines)
+        print(text)
+        if args.out:
+            Path(args.out).write_text(text + "\n")
+            print(f"\n[written] {args.out}")
+        if args.ctol is not None and worst > args.ctol:
+            print(f"[--consistency] FAIL：worst={worst:.3e} > ctol={args.ctol:g}",
+                  file=sys.stderr)
+            return 1
+        return 0
 
     rows = []   # (case, meta, impl, {vec: (abs, rel)})
     for case, meta in discover(args):
