@@ -633,6 +633,25 @@ __global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
   dv_acc[o] = sv;
 }
 
+// P3-4f：dQ 的确定性归约（`DET && ksplit>1`）。dK/dV 的 partial 天然无需 part 维
+//   （每个 (mblk, jg) 的 K tile 只属于一个 part，各 part 写不相交的 jg），但 dQ 的每个
+//   `(row, h, c)` 会被同一 mblk 的 ksplit 个 part 各贡献一个偏和 ⇒ 必须按 part 分片，
+//   再按 `part=0..ksplit-1` 固定次序求和。布局 `dq_part[((row*H + h)*ksplit + part)*HD + c]`，
+//   row = b*S+qi（packed q token）。**空 part（causal 下小 mblk 被切空）写不到**，故
+//   host 每次先把 dq_part 清零。每线程一个 `(row,h,c)`，求和次序固定 ⇒ 可复现。
+template <int HD>
+__global__ void dq_reduce_kernel(const float* __restrict__ dq_part, float* __restrict__ dq_acc,
+                                 int S, int H, int ksplit) {
+  const int row = blockIdx.x;  // 全局 q token（b*S + qi）
+  const int h = blockIdx.y;
+  const int c = threadIdx.x;
+  if (c >= HD) return;
+  const size_t b0 = ((size_t)row * H + h) * ksplit;
+  float s = 0.f;
+  for (int p = 0; p < ksplit; ++p) s += dq_part[(b0 + p) * HD + c];
+  dq_acc[((size_t)row * H + h) * HD + c] = s;
+}
+
 // ------------------- O42：Hopper bulk reduce（`cp.reduce.async.bulk`） -------------------
 // 动机：dK/dV 的逐元素 `red_add2` 虽是 coalesced，但每 tile 要发 2048 条、占满 LSU/L2
 //   流水（O42 实测：把 dK/dV 的 red 短路掉 main 1.60→0.94ms，天花板 1.70×）。改成
@@ -1885,7 +1904,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                       const int* __restrict__ mt_b = nullptr,
                       const int* __restrict__ mt_m = nullptr,
                       float* __restrict__ dk_part = nullptr,
-                      float* __restrict__ dv_part = nullptr, int nblk = 0) {
+                      float* __restrict__ dv_part = nullptr, int nblk = 0,
+                      float* __restrict__ dq_part = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   // O47：warp 网格派生。默认 128/2 ⇒ NWM=2 与历史 2×2 一致（逐字等价）。
   constexpr int NWM = NTH / 32 / NWAR;
@@ -2840,9 +2860,23 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
           int r = wr * GM5 + i * 16 + g + (q >= 2 ? 8 : 0);
           int c = wc * GN5 + j * 8 + c2;
           int qi = m0 + r;
-          if (qi < len)
-            red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c, dqacc[i][j][q],
-                     dqacc[i][j][q + 1]);
+          // P3-4f：`DET && ksplit>1` 时 dQ 也走 partial（每 (row,h) 按 part 分片），
+          //   由 `dq_reduce_kernel` 固定次序求和 ⇒ 跨 part 也确定。ksplit==1 时保持原
+          //   单 CTA 无竞争 `red_add2`（逐位不变）。空 part 的 partial 由 host 先清零。
+          if (qi < len) {
+            if constexpr (DET) {
+              if (ksplit > 1)
+                dkv_det_store(dq_part +
+                                  (((size_t)(qbase + qi) * H + h) * ksplit + part) * HD + c,
+                              dqacc[i][j][q], dqacc[i][j][q + 1]);
+              else
+                red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c, dqacc[i][j][q],
+                         dqacc[i][j][q + 1]);
+            } else {
+              red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c, dqacc[i][j][q],
+                       dqacc[i][j][q + 1]);
+            }
+          }
         }
   }
 }
@@ -2864,11 +2898,12 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       const int* __restrict__ mt_b = nullptr,
                       const int* __restrict__ mt_m = nullptr,
                       float* __restrict__ dk_part = nullptr,
-                      float* __restrict__ dv_part = nullptr, int nblk = 0) {
+                      float* __restrict__ dv_part = nullptr, int nblk = 0,
+                      float* __restrict__ dq_part = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR, KVPIPE, DET>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, nullptr, nullptr, nullptr, nullptr, mt_b, mt_m,
-      dk_part, dv_part, nblk);
+      dk_part, dv_part, nblk, dq_part);
 }
 
 // O37：Q/dO 4D-TMA 版（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA 路径实例化）。

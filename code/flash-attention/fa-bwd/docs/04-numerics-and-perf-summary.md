@@ -2892,3 +2892,28 @@ fp16/bf16 早有 `--det`（O7b），fp8 本轮补齐：dK/dV 的跨 CTA `atomicA
 `red` 114.5M→**1.57M** 扇区、`write` 102.4M 扇区（partial 2.20 GB）；`dkv_reduce_kernel`
 **731.6µs / DRAM 91.5% / 3.07 TB/s**（纯带宽 bound）。**代价**：ksplit 固定 1 + 一次纯带宽
 归约；相对调优默认档（S4096 ksplit=4）约 **1.5–1.8×**。详见 `docs/03` §56、`docs/00` §4.2。
+
+---
+
+## 44. P3-4f：`--det` 扩展到 split-K（dQ 也走 partial，第 119 轮）—— 正结果，opt-in `--detk>1`
+
+落实 §43 的「下一步候选 ①」。dK/dV 的 partial **天然无需 part 维**（一个 `(mblk,jg)` 只属于
+一个 part，各 part 写不相交的 `jg`），故只需给 **dQ** 加 part 分片 partial +
+`dq_reduce_kernel<HD>` 固定次序归约，即可让 DET 重新吃 split-K 并行度。新增 `--detk=N`。
+
+**数值**：所有 ksplit（含 dQ）`runs[1-2] bitwise dq/dk/dv = 0.00e+00`；`DET-vs-atomic`
+~e-7–e-6；默认路径（无 `--det`）数值逐位不变。
+
+**性能**（同 session ksplit sweep，两文件；atomic vs DET）：
+
+| case | DET k=1 | DET k=2 | DET k=4 | DET k=8 | 最优 / k=1 |
+|---|---|---|---|---|---|
+| S512 MHA causal | 0.1461 ms | 0.1116 | **0.1115** | 0.1215 | **1.31×** |
+| S4096 MHA causal | 2.8380 ms | 2.6256 | **2.5514** | 2.6475 | **1.11×** |
+
+atomic 随 ksplit 单调变快；DET 在 **k=4 触底**（固定 partial 写/读成本与 ksplit 无关）。
+
+**ncu**：DET 主 kernel（S4096 k=4）Duration 1.72ms / DRAM **42.3%** / L1TEX 69.8% / occ 18.1%；
+`dkv_reduce_kernel` **730.7µs / DRAM 91.56% / 3.07 TB/s**、`dq_reduce_kernel` 55.1µs /
+DRAM 87.6%。**bound = reduce 的纯 DRAM 带宽 + 主 kernel 多写的 partial**（与 §43 同构）。
+详见 `docs/03` §57。

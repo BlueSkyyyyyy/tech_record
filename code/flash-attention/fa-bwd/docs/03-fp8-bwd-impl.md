@@ -5118,3 +5118,112 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --kernel-name-base demangle
 `..._p34e_det_gqa_kv4.out.txt`、`..._p34e_det_s1024_full.out.txt`、
 `..._p34e_default_s512.out.txt`（回归）、`..._p34e_ncu_reduce_s4096.out.txt`、
 `..._p34e_ncu_detmain_s4096.out.txt`、`..._p34e_ncu_detmain_stall_s4096.out.txt`。
+
+---
+
+## 57. P3-4f（第一百一十九轮，**正结果，opt-in `--detk>1`**）：`--det` 扩展到 split-K（dQ 也走 partial）
+
+### 57.1 动机（落实上一轮「下一步候选 ①」）
+
+P3-4e 的 `--det` 固定 `ksplit=1`，注释理由是「DET 要求每个 `(h,mblk)` 恰好一个 CTA 写它的
+partial」。但仔细分解后 **dK/dV 的 partial 其实不需要 part 维**：`ksplit` 是对**同一 m 块的
+K/V 列块（ntile）** 切分，而一个 `(mblk, jg)` 只对应一个 K tile `nt=jg/BN`，**只属于一个
+part**；各 part 写的是不相交的 `jg`，最后由 `dkv_reduce_kernel` 按 `mblk` 固定次序求和即可。
+真正需要按 part 分片的只有 **dQ**：同一个 `(row=b*S+qi, h, c)` 会被该 mblk 的 `ksplit` 个 part
+各贡献一个偏和。所以「扩展到 ksplit>1」= 给 dQ 加一份 part 分片 partial + 一次固定次序归约。
+
+这样 DET 就能重新吃 split-K 的并行度：小 S 补满并发槽、大 S 削尾波——直接把 P3-4e「DET 要求
+ksplit=1、白扔 split-K」的代价（S=4096 比默认档慢 1.5×）收回来一大截。
+
+### 57.2 实现（单/两文件 device 逐字同源）
+
+改动（`src/fp8/fa_bwd_fp8_kernels.cuh` + `fa_bwd_fp8_main.cu`，单文件由
+`scripts/sync_onefile_device.py` 同步，`device region identical: True`）：
+
+- **device**：`fp8_mma_body` / `fa_bwd_fp8_mma_kernel` 再加一个默认实参 `float* dq_part`；
+  在 O7 的寄存器 dQ flush 处，`DET && ksplit>1` 时把每个 `(row,h)` 的 `dqacc` 写成
+  `dq_part[((row*H + h)*ksplit + part)*HD + c]`（一次 `float2` **非原子覆盖写**），
+  `ksplit==1` 时仍走原无竞争 `red_add2`（逐位不变）。
+  新增 `dq_reduce_kernel<HD>`：`grid=(B*S, H)`、`block=HD`，每线程一个 `(row,h,c)` 按
+  `part=0..ksplit-1` **固定次序**求和写回 `dq_acc`。空 part（causal 小 mblk 被切空）写不到，
+  故 host 每次先把 `dq_part` 清零。
+- **host**：`launch_bwd_main_det<...>` 增参 `int ksplit, float* dq_part`；新增 `--detk=N`
+  （默认 1）。A/B 段改为在同一 binary 内对 `ksplit ∈ {1,2,4,8}`（由 `--detk` 指定）做
+  atomic vs DET 计时 + 两次跑 DET 验证 `dq/dk/dv` 逐位可复现 + DET-vs-atomic。
+  另：`ksplit>1` 时**强制 `REGDQ=true`**（dQ 必须先寄存器累加再写 partial；逐 tile 写会与
+  同 CTA 内其它 tile 竞争）。
+
+**范围**：仅定长（非 varlen）、`HD=128`、默认 mma 路径。dK/dV partial 布局与大小不变
+（`B*H*nblk*S*HD`，S=4096 时 2.15 GB/缓冲）；新增 dQ partial `B*S*H*ksplit*HD`（S=4096、
+ksplit=4 时 134 MB）。varlen/MLA/TMA/wgmma 未接入。
+
+### 57.3 数值：`dq/dk/dv` 全逐位可复现（`runs[1-2] = 0`），与 atomic 同量级
+
+同 session ksplit sweep（两文件，`--iters=30`/`10`）：
+
+| case | DET k=1 | DET k=2 | DET k=4 | DET k=8 | 最优比 k=1 |
+|---|---|---|---|---|---|
+| S=512 MHA causal | 0.1461 ms | 0.1116 | **0.1115** | 0.1215 | **1.31×** |
+| S=4096 MHA causal | 2.8380 ms | 2.6256 | **2.5514** | 2.6475 | **1.11×** |
+
+- **`runs[1-2] bitwise dq/dk/dv = 0.00e+00`**：所有 ksplit（含 dQ！）、单/两文件全部达成
+  确定性。
+- `DET-vs-atomic dq/dk/dv` 全部 ~e-7–e-6（fp32 归约次序的末位舍入），与 fp8 容差 O(0.3) 无关。
+- 默认路径（无 `--det`）数值逐位不变：S512 `ours vs ref 2.426/2.975/3.735e-1`、
+  S4096 `2.635/2.643/3.216e-1`，与历史一致。
+
+### 57.4 代价（同 session，atomic vs DET，含 reduce）
+
+| case | atomic k=1 / k=4 | DET k=1 / k=4 | DET/atomic(k=4) |
+|---|---|---|---|
+| S=512 | 0.1262 / 0.0752 ms | 0.1461 / 0.1115 | 0.675× |
+| S=4096 | 2.3773 / 1.8911 ms | 2.8380 / 2.5514 | 0.741× |
+
+- atomic 随 ksplit 增大单调变快（split-K 并行度）；DET 在 **k=4 触底**（S=512 的 k=2≈k=4，
+  取 k=4 统一），再大（k=8）反而回升——因为 DET 的固定成本（partial 写 + reduce 读）与
+  ksplit 无关，而主 kernel 收益递减。
+- **相对 P3-4e 的 k=1 DET**：S=512 **1.31×**、S=4096 **1.11×**；即「确定性 + split-K 并行度」
+  把上一轮白扔的并行度收回了一大半。
+
+### 57.5 ncu：DET 主 kernel 把成本记在 partial 写（DRAM），bound 仍是 reduce 的 DRAM 带宽
+
+DET 主 kernel（`--set full`，唯一模板实例 `...,(bool)1>`）：
+
+| 指标 | S=512 k=4 | S=4096 k=4 |
+|---|---|---|
+| Duration | 61.6 µs | **1.72 ms** |
+| DRAM / L2 / L1TEX / Compute | 20.0 / 30.1 / 52.6 / 23.5 % | **42.3** / 49.0 / **69.8** / 42.7 % |
+| regs / CTA-per-SM / achieved occ / Waves | 168 / 3 / 15.7% / 1.29 | 168 / 3 / 18.1% / 10.34 |
+| 主 stall | long_scoreboard 30.8%（2.3/7.33 cyc） | — |
+
+归约 kernel（`--set full`，S=4096 causal）：
+
+| 指标 | `dkv_reduce_kernel` | `dq_reduce_kernel` |
+|---|---|---|
+| Duration / DRAM / Compute | **730.7 µs** / **91.56%** / 12.87% | 55.1 µs / 87.61% / 33.21% |
+| 带宽 / occ | **3.07 TB/s** / 71.97% | 2.93 TB/s / 83.00% |
+
+**结论**：拆分到 ksplit>1 后，DET 的成本结构与 P3-4e 一致——**主 kernel 因为多写一份 partial
+（+2.1 GB）把 DRAM 从 4.3% 抬到 42.3%，真正的墙是 `dkv_reduce_kernel` 的纯 DRAM 带宽
+（730.7 µs、91.6%、3.07 TB/s）**；`dq_reduce_kernel` 只占 55 µs。S=512 时两个 reduce 合计仅
+~26 µs，故 DET 代价主要体现在大 S。要再快只能**减 partial 字节**（更细粒度的分块归约 /
+按 KV 行分片的跨 warpgroup 偏和），与 P3-4e 的阻塞一致。
+
+### 57.6 复现 / 原始输出
+
+```bash
+# ksplit sweep（同一 binary 内 atomic vs DET；打印 runs[1-2] bitwise-diff）
+for k in 1 2 4 8; do scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --det --detk=$k --iters=10; done
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --det --detk=4 --iters=10   # 单文件
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:reduce_kernel --launch-count 2 -- --det --detk=4 --iters=1
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --kernel-name-base mangled \
+  --kernel-name "regex:fa_bwd_fp8_mma_kernelILi128ELi64ELi32ELb1ELb0ELb1ELb1ELb1ELi128ELi2ELb0ELb1E" \
+  --launch-count 1 -- --det --detk=4 --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_p34f_det_s512.out.txt`、`..._p34f_det_s4096.out.txt`、
+`..._mma_onefile_p34f_det_s512.out.txt`、`..._p34f_detsweep.out.txt`、
+`..._p34f_ncu_reduce_s512.out.txt`、`..._p34f_ncu_reduce_s4096.out.txt`、
+`..._p34f_ncu_detmain_s512.out.txt`、`..._p34f_ncu_detmain_s4096.out.txt`。

@@ -1,0 +1,16 @@
+--- S512 detk=1 ---
+[P3-4f A/B] ksplit=1 | atomic 0.1262 ms | DET(partial+reduce) 0.1461 ms (0.864x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=0.00e+00/4.77e-07/4.77e-07
+--- S512 detk=2 ---
+[P3-4f A/B] ksplit=2 | atomic 0.0865 ms | DET(partial+reduce) 0.1116 ms (0.775x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=0.00e+00/4.77e-07/4.77e-07
+--- S512 detk=4 ---
+[P3-4f A/B] ksplit=4 | atomic 0.0752 ms | DET(partial+reduce) 0.1115 ms (0.675x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=1.19e-07/4.77e-07/4.77e-07
+--- S512 detk=8 ---
+[P3-4f A/B] ksplit=8 | atomic 0.0739 ms | DET(partial+reduce) 0.1215 ms (0.609x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=1.19e-07/3.58e-07/4.77e-07
+--- S4096 detk=1 ---
+[P3-4f A/B] ksplit=1 | atomic 2.3773 ms | DET(partial+reduce) 2.8380 ms (0.838x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=0.00e+00/1.43e-06/1.43e-06
+--- S4096 detk=2 ---
+[P3-4f A/B] ksplit=2 | atomic 2.0455 ms | DET(partial+reduce) 2.6256 ms (0.779x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=0.00e+00/7.15e-07/9.54e-07
+--- S4096 detk=4 ---
+[P3-4f A/B] ksplit=4 | atomic 1.8911 ms | DET(partial+reduce) 2.5514 ms (0.741x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=1.19e-07/7.15e-07/8.34e-07
+--- S4096 detk=8 ---
+[P3-4f A/B] ksplit=8 | atomic 1.9239 ms | DET(partial+reduce) 2.6475 ms (0.727x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=1.19e-07/7.15e-07/9.54e-07

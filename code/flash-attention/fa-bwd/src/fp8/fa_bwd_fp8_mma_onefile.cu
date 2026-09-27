@@ -593,6 +593,25 @@ __global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
   dv_acc[o] = sv;
 }
 
+// P3-4f：dQ 的确定性归约（`DET && ksplit>1`）。dK/dV 的 partial 天然无需 part 维
+//   （每个 (mblk, jg) 的 K tile 只属于一个 part，各 part 写不相交的 jg），但 dQ 的每个
+//   `(row, h, c)` 会被同一 mblk 的 ksplit 个 part 各贡献一个偏和 ⇒ 必须按 part 分片，
+//   再按 `part=0..ksplit-1` 固定次序求和。布局 `dq_part[((row*H + h)*ksplit + part)*HD + c]`，
+//   row = b*S+qi（packed q token）。**空 part（causal 下小 mblk 被切空）写不到**，故
+//   host 每次先把 dq_part 清零。每线程一个 `(row,h,c)`，求和次序固定 ⇒ 可复现。
+template <int HD>
+__global__ void dq_reduce_kernel(const float* __restrict__ dq_part, float* __restrict__ dq_acc,
+                                 int S, int H, int ksplit) {
+  const int row = blockIdx.x;  // 全局 q token（b*S + qi）
+  const int h = blockIdx.y;
+  const int c = threadIdx.x;
+  if (c >= HD) return;
+  const size_t b0 = ((size_t)row * H + h) * ksplit;
+  float s = 0.f;
+  for (int p = 0; p < ksplit; ++p) s += dq_part[(b0 + p) * HD + c];
+  dq_acc[((size_t)row * H + h) * HD + c] = s;
+}
+
 // ------------------- O42：Hopper bulk reduce（`cp.reduce.async.bulk`） -------------------
 // 动机：dK/dV 的逐元素 `red_add2` 虽是 coalesced，但每 tile 要发 2048 条、占满 LSU/L2
 //   流水（O42 实测：把 dK/dV 的 red 短路掉 main 1.60→0.94ms，天花板 1.70×）。改成
@@ -1845,7 +1864,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                       const int* __restrict__ mt_b = nullptr,
                       const int* __restrict__ mt_m = nullptr,
                       float* __restrict__ dk_part = nullptr,
-                      float* __restrict__ dv_part = nullptr, int nblk = 0) {
+                      float* __restrict__ dv_part = nullptr, int nblk = 0,
+                      float* __restrict__ dq_part = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   // O47：warp 网格派生。默认 128/2 ⇒ NWM=2 与历史 2×2 一致（逐字等价）。
   constexpr int NWM = NTH / 32 / NWAR;
@@ -2800,9 +2820,23 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
           int r = wr * GM5 + i * 16 + g + (q >= 2 ? 8 : 0);
           int c = wc * GN5 + j * 8 + c2;
           int qi = m0 + r;
-          if (qi < len)
-            red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c, dqacc[i][j][q],
-                     dqacc[i][j][q + 1]);
+          // P3-4f：`DET && ksplit>1` 时 dQ 也走 partial（每 (row,h) 按 part 分片），
+          //   由 `dq_reduce_kernel` 固定次序求和 ⇒ 跨 part 也确定。ksplit==1 时保持原
+          //   单 CTA 无竞争 `red_add2`（逐位不变）。空 part 的 partial 由 host 先清零。
+          if (qi < len) {
+            if constexpr (DET) {
+              if (ksplit > 1)
+                dkv_det_store(dq_part +
+                                  (((size_t)(qbase + qi) * H + h) * ksplit + part) * HD + c,
+                              dqacc[i][j][q], dqacc[i][j][q + 1]);
+              else
+                red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c, dqacc[i][j][q],
+                         dqacc[i][j][q + 1]);
+            } else {
+              red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c, dqacc[i][j][q],
+                       dqacc[i][j][q + 1]);
+            }
+          }
         }
   }
 }
@@ -2824,11 +2858,12 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       const int* __restrict__ mt_b = nullptr,
                       const int* __restrict__ mt_m = nullptr,
                       float* __restrict__ dk_part = nullptr,
-                      float* __restrict__ dv_part = nullptr, int nblk = 0) {
+                      float* __restrict__ dv_part = nullptr, int nblk = 0,
+                      float* __restrict__ dq_part = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR, KVPIPE, DET>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, nullptr, nullptr, nullptr, nullptr, mt_b, mt_m,
-      dk_part, dv_part, nblk);
+      dk_part, dv_part, nblk, dq_part);
 }
 
 // O37：Q/dO 4D-TMA 版（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA 路径实例化）。
@@ -3407,7 +3442,8 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
       scale, causal, ksplit, cu_seqlens);
 }
 
-// P3-4e：确定性 dK/dV 版主 kernel（`DET=true`）。定长、ksplit==1、HD=128 的 mma 路径。
+// P3-4e/P3-4f：确定性 dK/dV/dQ 版主 kernel（`DET=true`）。定长、HD=128 的 mma 路径。
+//   `ksplit>1` 时 dQ 也走 partial（需 REGDQ=true）。见两文件版 `fa_bwd_fp8_main.cu` 同名注释。
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true>
 static void launch_bwd_main_det(dim3 mg, const unsigned char* q8, const float* qs,
                                 const unsigned char* k8, const float* ks,
@@ -3415,8 +3451,8 @@ static void launch_bwd_main_det(dim3 mg, const unsigned char* q8, const float* q
                                 const unsigned char* do8, const float* dos,
                                 const float* delta, const float* lse, float* dq_acc,
                                 float* dk_acc, float* dv_acc, int S, int H, int Hkv,
-                                float scale, int causal, float* dk_part, float* dv_part,
-                                int nblk) {
+                                float scale, int causal, int ksplit, float* dk_part,
+                                float* dv_part, int nblk, float* dq_part = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = Cfg::smem_bytes;
   CUDA_CHECK(cudaFuncSetAttribute(
@@ -3424,8 +3460,8 @@ static void launch_bwd_main_det(dim3 mg, const unsigned char* q8, const float* q
       cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
   fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, false, PREL, true, true, THREADS, WN, false, true>
       <<<mg, THREADS, kSmem>>>(q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
-                               dv_acc, S, H, Hkv, scale, causal, /*ksplit=*/1, nullptr, nullptr,
-                               nullptr, dk_part, dv_part, nblk);
+                               dv_acc, S, H, Hkv, scale, causal, ksplit, nullptr, nullptr,
+                               nullptr, dk_part, dv_part, nblk, dq_part);
 }
 
 // O51：K/V `cp.async` 回填流水版主 kernel（mma 后端，MLA/HD=512）。数值与旧路径逐位相同。
@@ -4051,6 +4087,8 @@ int main(int argc, char** argv) {
   int d128w_opt = -1;
   // P3-4e：1 = 跑「确定性 dK/dV（partial + 固定次序归约）」A/B（仅 D=128 定长 mma 默认路径）。
   int det_ab = 0;
+  // P3-4f：DET 实验的 ksplit（默认 1 = P3-4e 原状；>1 时 dQ 也走 partial）。
+  int det_ksplit = 1;
   int qfast = 1;      // O14：1 = warp-per-row 向量化量化，0 = 旧 per-row 标量量化（A/B）
   int delta_warp_opt = 1;  // O26：1 = warp-per-row 向量化 delta（默认），0 = 旧 per-row smem 归约（A/B）
   int regdq_opt = -1; // O22：-1 自动；0/1 强制关/开寄存器 dQ 累加（同 session A/B）
@@ -4098,6 +4136,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--d128w=", 0) == 0) d128w_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--det=", 0) == 0) det_ab = atoi(a.c_str() + 6);
     else if (a == "--det") det_ab = 1;
+    else if (a.rfind("--detk=", 0) == 0) det_ksplit = atoi(a.c_str() + 7);
     else if (a == "--d128w") d128w_opt = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--dump=", 0) == 0) dump_prefix = a.substr(7);
@@ -4629,42 +4668,45 @@ int main(int argc, char** argv) {
     run_main();   // 恢复最终输出为 CLI 选中的路径
   }
 
-  // ---- P3-4e A/B（D=128 定长，`--det`）：跨 CTA `atomicAdd` vs 确定性 partial + 二次归约。----
+  // ---- P3-4e/P3-4f A/B（D=128 定长，`--det` / `--detk=N`）：跨 CTA `atomicAdd`（非确定性）
+  //      vs 确定性 partial + 固定次序二次归约。`--detk>1` 时 dQ 也走 partial。----
   if (det_ab && D == 128 && !varlen) {
     const int nblk_d = (S + 63) / 64;
+    const int ks = det_ksplit < 1 ? 1 : det_ksplit;
     const size_t part_elems = (size_t)B * H * nblk_d * S * D;
+    const size_t dqpart_elems = (size_t)B * S * H * (size_t)ks * D;
     float* d_dk_part = nullptr;
     float* d_dv_part = nullptr;
+    float* d_dq_part = nullptr;
     CUDA_CHECK(cudaMalloc(&d_dk_part, part_elems * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_dv_part, part_elems * sizeof(float)));
-    auto run_at = [&](bool reg) {
+    if (ks > 1) CUDA_CHECK(cudaMalloc(&d_dq_part, dqpart_elems * sizeof(float)));
+    auto run_at = [&](int k) {
+      dim3 g((S + 63) / 64 * k, H, B);
       CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
-      if (reg)
-        launch_bwd_main<128, 64, 32, true, false, true>(
-            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, /*ksplit=*/1);
-      else
-        launch_bwd_main<128, 64, 32, false, false, true>(
-            mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, /*ksplit=*/1);
+      launch_bwd_main<128, 64, 32, true, false, true>(
+          g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+          d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, k);
     };
-    auto run_dt = [&](bool reg) {
+    auto run_dt = [&](int k) {
+      dim3 g((S + 63) / 64 * k, H, B);
       CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
-      if (reg)
-        launch_bwd_main_det<128, 64, 32, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
-                                              d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc,
-                                              S, H, Hkv, scale, (int)causal, d_dk_part, d_dv_part,
-                                              nblk_d);
-      else
-        launch_bwd_main_det<128, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
-                                               d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc,
-                                               S, H, Hkv, scale, (int)causal, d_dk_part, d_dv_part,
-                                               nblk_d);
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      if (k > 1) CUDA_CHECK(cudaMemset(d_dq_part, 0, dqpart_elems * 4));
+      launch_bwd_main_det<128, 64, 32, true>(g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
+                                            d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc,
+                                            S, H, Hkv, scale, (int)causal, k, d_dk_part, d_dv_part,
+                                            nblk_d, d_dq_part);
       dim3 rg(B * Hkv, S);
       dkv_reduce_kernel<128, 64><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H, Hkv,
                                               nblk_d, (int)causal);
+      if (k > 1) {
+        dim3 dg(B * S, H);
+        dq_reduce_kernel<128><<<dg, 128>>>(d_dq_part, d_dq_acc, S, H, k);
+      }
     };
     auto time_fn2 = [&](auto fn, float* out_ms) {
       for (int i = 0; i < 3; ++i) fn();
@@ -4677,29 +4719,33 @@ int main(int argc, char** argv) {
       *out_ms = t / iters;
     };
     float ms_at = 0.f, ms_dt = 0.f;
-    time_fn2([&] { run_at(use_regdq); }, &ms_at);
-    std::vector<float> ak(nkv), av(nkv);
+    time_fn2([&] { run_at(ks); }, &ms_at);
+    std::vector<float> ak(nkv), av(nkv), aq(nq);
     CUDA_CHECK(cudaMemcpy(ak.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(av.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
-    time_fn2([&] { run_dt(use_regdq); }, &ms_dt);
-    std::vector<float> dk1(nkv), dv1(nkv), dk2(nkv), dv2(nkv);
+    CUDA_CHECK(cudaMemcpy(aq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    time_fn2([&] { run_dt(ks); }, &ms_dt);
+    std::vector<float> dk1(nkv), dv1(nkv), dq1(nq), dk2(nkv), dv2(nkv), dq2(nq);
     CUDA_CHECK(cudaMemcpy(dk1.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(dv1.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
-    run_dt(use_regdq);
+    CUDA_CHECK(cudaMemcpy(dq1.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    run_dt(ks);
     CUDA_CHECK(cudaDeviceSynchronize());
     CUDA_CHECK(cudaMemcpy(dk2.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(dv2.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dq2.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
     auto mad2 = [](const std::vector<float>& x, const std::vector<float>& y) {
       double m = 0.0;
       for (size_t i = 0; i < x.size(); ++i) m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
       return m;
     };
-    printf("[P3-4e A/B] main D=128 atomic(ksplit=1) %.4f ms | DET(partial+reduce) %.4f ms "
-           "(%.3fx) | runs[1-2] bitwise-diff dk/dv=%.2e/%.2e | DET-vs-atomic dk/dv=%.2e/%.2e\n",
-           ms_at, ms_dt, ms_at / ms_dt, mad2(dk1, dk2), mad2(dv1, dv2), mad2(dk1, ak),
-           mad2(dv1, av));
+    printf("[P3-4f A/B] ksplit=%d | atomic %.4f ms | DET(partial+reduce) %.4f ms (%.3fx) | "
+           "runs[1-2] bitwise dq/dk/dv=%.2e/%.2e/%.2e | DET-vs-atomic dq/dk/dv=%.2e/%.2e/%.2e\n",
+           ks, ms_at, ms_dt, ms_at / ms_dt, mad2(dq1, dq2), mad2(dk1, dk2), mad2(dv1, dv2),
+           mad2(dq1, aq), mad2(dk1, ak), mad2(dv1, av));
     cudaFree(d_dk_part);
     cudaFree(d_dv_part);
+    if (d_dq_part) cudaFree(d_dq_part);
     run_main();   // 恢复最终输出为 CLI 选中的路径
   }
 

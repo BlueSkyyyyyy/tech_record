@@ -532,6 +532,19 @@ smem 冲突 + 低 occ
      性能直接对立；opt-in 而非默认是对的。** 单/两文件 device 逐字同源（`sync_onefile_device.py`
      核对）；默认路径一行未改（回归数值与历史逐位一致）。详见 `docs/03` §56、`docs/04` §43。
 
+35. **P3-4f（第 119 轮，device 增量，正结果/opt-in）**：**把 `--det` 扩展到 split-K（dQ 也走
+     partial）**——P3-4e 为「每 `(h,mblk)` 一个 CTA 写 partial」把 ksplit 锁死为 1，白扔了
+     split-K。分解后发现 **dK/dV 的 partial 天然无需 part 维**（ksplit 切的是同一 m 块的 K
+     tile，一个 `(mblk,jg)` 只属于一个 part），真正需要分片的只有 **dQ**。于是新增
+     `dq_reduce_kernel<HD>` + dQ partial（`[row][h][part]`），`--detk=N` 扫 ksplit。
+     **所有 ksplit（含 dQ）两次跑 `bitwise = 0`**；DET 在 **k=4 触底**，相对 k=1 提速
+     S512 **1.31×** / S4096 **1.11×**。ncu：DET 主 kernel（S4096 k=4）1.72ms/DRAM 42.3%、
+     `dkv_reduce` 730.7µs/DRAM 91.6%/3.07 TB/s、`dq_reduce` 55µs ⇒ **bound 仍是 reduce 的
+     纯 DRAM 带宽**（固定成本与 ksplit 无关，故 k 再大反而回升）。**教训：先想清楚「哪些
+     中间量的竞争域到底多大」再下「必须 ksplit=1」的结论——一个看似必要的限制常常只对一半
+     的累加器成立（这里 dQ 需要分片，dK/dV 不需要）。** 单/两文件 device 逐字同源；默认路径
+     数值逐位不变。详见 `docs/03` §57、`docs/04` §44。
+
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
