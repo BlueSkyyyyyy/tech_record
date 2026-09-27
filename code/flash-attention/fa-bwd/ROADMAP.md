@@ -2649,7 +2649,22 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百一十一轮）**：**P3-4-lite——接入 FA3（SM90）变长反向基线 + FA 口径切到 FA3**。
+> **最新（第一百一十五轮）**：**P3-3f——单/两文件实现一致性自动报告（含 `--no-run` 修复）**。
+> 落实「每轮手工核对的单/两文件一致性」→ harness。`fa_bwd_compare.py --consistency`
+> （默认 `ours vs ours_sf`，逐 case `max|A-B|`、`--ctol` 作 CI 回归门，无需 ref/GPU）+
+> `fa_bwd_run.py --consistency`。**73/73 case 两形态都在**，worst fp16 `3.906e-3` /
+> bf16 `7.812e-3` / fp8 `9.537e-6`，全部 = 1–2 dtype ulp、来自跨 CTA `atomicAdd` 次序，
+> **无实现分歧**。顺带修 `--no-run`（原文档说跳过 kernel，实际仍全量跑 146 次）。并刷新纯反向
+> 基线（FA3 MHA S4096 `0.3237ms/849TF`、TE `0.4388/626`）与 ours（fp16 `1.2582ms/109.2TF`、
+> fp8 `1.9466ms/70.6TF`）；ncu 复核 fp8 main = **L2 78%（red 114.5M 扇区）+ mma 依赖**。
+> 详见「当前进度 第一百一十五轮」、`docs/04` §40、`docs/08` §31；原始输出
+> `src/fa_bwd_consistency_p33f.out.txt`、`src/{fp16,fp8}/fa_bwd_*_p33f_*.out.txt`。
+> **下一步候选**：① 把 `--consistency --ctol` 接进端到端回归（全量扫自动 gate）；②（device）
+> fp8/fp16 main 的**跨-tile `P/dS` 双缓冲流水**（唯一未证伪、直接打 `wait`+`short_scoreboard`
+> 的杠杆，需重排主循环，多轮）；③（继续）O59 候选已判决 blocked（MLA 2 CTA/SM 不可达、
+> red/occupancy 硬件锁死，见 `docs/03` §45/§46）。
+>
+> **（第一百一十一轮）**：**P3-4-lite——接入 FA3（SM90）变长反向基线 + FA 口径切到 FA3**。
 > 落实第 110 轮候选 ①：roadmap 原记「FA/TE 反向不支持 varlen，暂无列」，但 **`flash_attn_3`
 > 3.0.0 的反向支持 varlen**（`flash_attn_varlen_func` 可 autograd；fp16/bf16、MHA/GQA、
 > causal/full；head_dim≤128，fp8/D=512 不支持），与用户「对标一律用 FA3」一致。
@@ -4188,6 +4203,36 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
      `2.635/2.643/3.216e-1`）。本轮无新 kernel/ncu/性能数字，各 dtype bound 结论不变。
    - 原始输出 `src/fa_bwd_p33e_doc_table.md`、`src/fa_bwd_p33e_doc_table_check.out.txt`、
      `src/fa_bwd_p33e_fp8_rerun.out.txt`；文档 `docs/04` §39、`docs/08` §5.30。
+
+- 2026-09-27（第一百一十五轮）：**P3-3f 完成（单/两文件实现一致性自动报告；含 `--no-run` 修复）**。
+  - 动机：单/两文件一致性此前**每轮手工核对**（§33/§34/§39 都誊抄过 max diff），且 `--no-run`
+    文档说「跳过 kernel、只重新汇总」但主循环从未检查它（一次全量扫仍跑 146 次）。
+  - **改动（纯 harness，device 一行未改）**：`fa_bwd_compare.py` 新增 **`--consistency`**
+    （默认 `--ca ours --cb ours_sf`，逐 case 算 `max|A-B|`、按 dtype 分组汇总、`--ctol` 作 CI
+    回归门；不需要 `ref_*`/GPU，直接读 dump）+ 配套 `--ca/--cb`。`fa_bwd_run.py` 新增
+    `--consistency`/`--consistency-tol`/`--consistency-out`（产物
+    `src/fa_bwd_consistency_p33f.out.txt`）。**修 `--no-run`**：真正跳过执行、复用已有 npy，
+    且不改写上一轮全量扫的日志/清单。
+  - **实测（73/73 case 两形态都在，0 缺一侧）**：worst `max|ours-ours_sf|`
+    **fp16 3.906e-3 / bf16 7.812e-3 / fp8 9.537e-6**——均 1–2 个 dtype ulp、来自跨 CTA
+    `atomicAdd` 次序（`dq` 多数逐位相同，仅 MLA/split/varlen 差 1 ulp），**无实现分歧**；
+    与 §33/§34 历史完全一致。复现 `python harness/fa_bwd_run.py --consistency --no-run`。
+  - **纯反向基线刷新**（`fa_vs_te_bwd_only.py fp16`）：FA3 MHA S4096 `0.3237ms/849TF`、
+    TE `0.4388/626`、FA2 `0.7258/379`；varlen [1024]×4 causal FA3 `0.1470/234`——
+    与 §37/§38 口径一致。**本轮 ours**（Hopper 快路 `-DFA_WGMMA -DFA_TMA`）：fp16 S4096
+    `1.2582ms/109.2TF`（ours/FA3 3.89×、ours/TE 2.87×）、fp8 S4096 `1.9466ms/70.6TF`
+    （ours/TE≈6.4×），数值与 §32–§39 逐位/同量级一致。
+  - **ncu（fp8 主 kernel，S=4096）**：Duration 1.60ms、**L2 78.25%**、L1/TEX 70.48%、
+    DRAM 4.23%、Compute 46.90%、occ 18.34%（168 regs/3 CTA/SM）、`red=114.5M` 扇区、
+    stall `wait 1.59 + short 1.28 + long 0.58` ⇒ **bound = L2 dK/dV 原子归约 + mma 依赖延迟**
+    （与 §44/§45 一致，属已判决的硬件资源墙）。
+  - 原始输出 `src/fa_bwd_consistency_p33f.out.txt`、`src/fa_bwd_p33f_fa_baseline_fp16.out.txt`、
+    `src/fp16/fa_bwd_fp16_p33f_perf_s4096.out.txt`、`src/fp8/fa_bwd_fp8_p33f_perf_s4096.out.txt`、
+    `src/fp8/fa_bwd_fp8_p33f_ncu_{s4096,stall_s4096}.out.txt`；文档 `docs/04` §40、`docs/08` §31。
+  - **下一步候选**：① 用 `--consistency --ctol` 接进 `fa_bwd_run.py` 的端到端回归（每次全量扫
+    自动 gate 单/两文件偏差）；②（device）fp8/fp16 main 的跨-tile `P/dS` 双缓冲流水
+    （唯一未证伪、直接打 `wait`+`short_scoreboard` 的杠杆；需重排主循环，多轮）；
+    ③（继续）O59 候选已被 O45/§46 判决 blocked（MLA 2 CTA/SM 不可达、red/occupancy 硬件锁死）。
 
 ## 灵感 / backlog
 

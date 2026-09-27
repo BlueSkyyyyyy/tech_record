@@ -473,6 +473,22 @@ smem 冲突 + 低 occ
      本轮纯 harness，device 一行未改。详见 `docs/04` §39；原始输出
      `src/fa_bwd_p33e_doc_table.md`、`src/fa_bwd_p33e_doc_table_check.out.txt`。
 
+31. **P3-3f（第 115 轮，工具链 + 验证，正结果）**：**单/两文件实现一致性自动报告**
+     ——把每轮都要手工做的「单文件 vs 两文件逐元素一致性」核对应固化为 harness。
+     `fa_bwd_compare.py` 新增 **`--consistency`**（默认 `ours vs ours_sf`，逐 case 算 `max|A-B|`、
+     按 dtype 汇总、`--ctol` 可作 CI 回归门；不需要 ref/GPU）；`fa_bwd_run.py` 加
+     `--consistency`/`--consistency-tol` 一键化。**顺带修一个真 bug**：`--no-run` 文档说
+     「跳过 kernel、只重新汇总」，但主循环从未检查它——仍会编译+运行全部 case（全量扫 146 次）；
+     现在真正跳过且不改写上一轮日志。**实测全部 73 case × 两形态**：worst `max|ours-ours_sf|`
+     fp16 3.906e-3 / bf16 7.812e-3 / fp8 9.537e-6，全部 = 1–2 个 dtype ulp、来自跨 CTA
+     `atomicAdd` 次序（`dq` 多数逐位相同），**无实现分歧**。并刷新纯反向基线
+     （FA3 MHA S4096 `0.3237ms/849TF`、TE `0.4388/626`）与 ours（fp16 S4096 `1.2582ms/109.2TF`、
+     fp8 `1.9466ms/70.6TF`）；ncu 复核 fp8 main 仍 **L2 78%（red 114.5M 扇区）+ mma 依赖**。
+     **教训：两形态「device 逐字同源」这件事应当由脚本持续背书，而不是每轮手抄——把一致性
+     检查自动化后，任何一次单文件同步漏改都会被 `--ctol` 立刻抓住。** 本轮为 harness/验证增量，
+     device 一行未改。详见 `docs/04` §40；原始输出 `src/fa_bwd_consistency_p33f.out.txt`、
+     `src/fa_bwd_p33f_fa_baseline_fp16.out.txt`、`src/{fp16,fp8}/fa_bwd_*_p33f_*.out.txt`。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。
