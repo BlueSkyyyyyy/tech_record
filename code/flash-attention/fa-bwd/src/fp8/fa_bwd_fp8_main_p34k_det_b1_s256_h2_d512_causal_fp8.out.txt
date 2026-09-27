@@ -1,0 +1,54 @@
+fa_bwd_fp8_main.cu(1133): warning #550-D: variable "lsewgm" was set but never used
+    int lsewgm = 0;
+        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kernels.cuh(3345): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1588 of fa_bwd_fp8_main.cu
+
+fa_bwd_fp8_kernels.cuh(3053): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1588 of fa_bwd_fp8_main.cu
+
+case = /home/xieminglin/proj/output/fa-bwd/b1_s256_h2_d512_causal_fp8
+B=1 S=256 H=2 Hkv=2 D=512 causal=1 scale=0.044194
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 64 x 2 x 1  (ksplit=16, base_grid=8)
+O19: wg2 grid = 32 x 2 x 1 (ksplit2=16, base_grid2=4)
+O7: use_regdq=0 (register dQ accumulation)
+O32: lse backend = wgmma/mma
+O37: main qd-tma = off
+O41: main kv-tma = off
+O38: lse k-split = auto(4)
+[timing] total(quant+pre+main+cvt) 0.0648 ms  4.14 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0112 ms | preprocess 0.0221 ms | main 0.0233 ms | convert 0.0081 ms (cvt_on=0)
+[P3-4k A/B] MLA ksplit=4 atomic(256/4) 0.0465 ms | DET 0.0633 ms (vs atomic 0.734x) | DET k=1 0.1683 ms -> k=4 0.0633 ms (2.657x split speedup) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=1.19e-07/2.38e-07/2.38e-07
+[O39 A/B] lse(D=512) split=1 0.0455 ms (1.000x vs split1) | max_abs vs split1=0.000e+00\n[O39 A/B] lse(D=512) split=2 0.0314 ms (1.450x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=4 0.0236 ms (1.929x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=8 0.0245 ms (1.857x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=16 0.0275 ms (1.655x vs split1) | max_abs vs split1=4.768e-07\n[O39] best lse split=4 0.0236 ms (1.929x)\n[O59 A/B] LSE MLA legacy(sp=4) 0.0236 ms | cfg6(sp=4) 0.0197 ms (1.196x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[O12 A/B] main LSE/D preload off 0.0426 ms | on 0.0436 ms (0.977x) | max_abs(on-vs-off) dq=4.768e-07
+[O47 A/B] main MLA 4-warp 0.0437 ms | 8-warp 0.0237 ms (1.846x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=2.384e-07 dv=2.384e-07
+[O51 A/B] main MLA 8w sync 0.0237 ms | kvpipe 0.0232 ms (1.020x) | max_abs(kvp-vs-sync) dq=5.960e-08 dk=2.384e-07 dv=2.384e-07
+[O14 A/B] quant old(per-row) 0.0149 ms | new(warp-per-row) 0.0113 ms (1.325x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0034 ms | new(warp-per-row) 0.0026 ms (1.300x) | max_abs=3.815e-06 max_rel=5.227e-05
+[O21b A/B] end2end 保留convert 0.0681 ms | 直写输出(消convert) 0.0643 ms (1.0585x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.356e-01  max_rel=8.127e+01
+  dk   vs ref: max_abs=2.290e-01  max_rel=6.894e+01
+  dv   vs ref: max_abs=3.441e-01  max_rel=4.412e+01
+    dq[d   0..127] max_abs=1.997e-01
+    dq[d 128..255] max_abs=1.908e-01
+    dq[d 256..383] max_abs=2.138e-01
+    dq[d 384..511] max_abs=2.356e-01
+    dk[d   0..127] max_abs=1.958e-01
+    dk[d 128..255] max_abs=2.290e-01
+    dk[d 256..383] max_abs=1.729e-01
+    dk[d 384..511] max_abs=2.181e-01
+    dv[d   0..127] max_abs=3.441e-01
+    dv[d 128..255] max_abs=2.751e-01
+    dv[d 256..383] max_abs=2.387e-01
+    dv[d 384..511] max_abs=2.669e-01
+[compare] ours vs TE FP8
