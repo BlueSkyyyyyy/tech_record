@@ -4168,6 +4168,27 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
      fixed_fp8}.out.txt`、`src/fa_bwd_p113_fwd_ab.out.txt`、`src/fa_bwd_p113_ours_ref.out.txt`、
      `src/fa_bwd_compare_p113_summary.out.txt`；文档 `docs/04` §38、`docs/06` §6、`docs/08` §5.29。
 
+- 2026-09-27（第一百一十四轮）：**P3-3e 完成（docs/04 数值表自动同步：`--doc-table --apply/--check`）**。
+   - 动机（落实第 113 轮 / `docs/04` §38 候选 ②）：§1/§7 的数值表一直靠人工誊抄
+     `fa_bwd_compare.py` 的输出，已发生过陈旧（§32 的 fp16 S4096 旧值）。
+   - **改动（纯 harness，device 一行未改）**：docs/04 新增第 39 节，内嵌一个被
+     `<!-- BEGIN/END:auto-doc-table -->` 围起来的自动块（194 行，覆盖 73 case ×
+     dtype×家族（MHA/GQA-MQA/MLA/varlen），默认口径 `fa3/te/ours` 两文件版）；
+     `fa_bwd_compare.py` 新增 **`--apply PATH`**（原地改写块、块外正文一行不动）与
+     **`--check PATH`**（unified diff + 退出码 1）；`fa_bwd_run.py` 新增
+     `--doc-table-apply` / `--doc-table-check` 一键化。
+   - **容差设计**：fp8 的 dK/dV（及 split-K dQ）走跨 CTA `atomicAdd`，末位会抖动
+     （本轮重跑即出现 `7.108e-01↔7.107e-01`）。`--check`/`--apply` 按「逐行结构相同 + 数值在
+     `--rtol`（默认 `5e-3`）内」判等价，原子次序噪声不会把文档判陈旧；`--rtol 0` 可逐值复核。
+   - **实测**（GPU：`fa_bwd_run.py --dtype fp8 --impls twofile` 重跑全部 28 个 fp8 case，
+     在 kernel_lab 内编译运行）：`--check` 在 rtol=5e-3 下 **OK（rc=0）**、`--rtol 0` 精确报出
+     上述原子噪声（rc=1）；把某格改成 `9.999e-03` 后 `--check` rc=1 并打印 diff；
+     `--apply` 幂等（rtol 内不改写文件）。另修 `IMPL_LABEL` 缺 `fa3`（`--doc-table` 此前把
+     FA3 列显示为裸 `fa3`）。数值与 §32–§38 历史**逐位/同量级一致**（fp8 S4096
+     `2.635/2.643/3.216e-1`）。本轮无新 kernel/ncu/性能数字，各 dtype bound 结论不变。
+   - 原始输出 `src/fa_bwd_p33e_doc_table.md`、`src/fa_bwd_p33e_doc_table_check.out.txt`、
+     `src/fa_bwd_p33e_fp8_rerun.out.txt`；文档 `docs/04` §39、`docs/08` §5.30。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：

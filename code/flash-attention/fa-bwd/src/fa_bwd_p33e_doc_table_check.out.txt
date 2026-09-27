@@ -1,0 +1,1 @@
+[--check] OK：docs/04-numerics-and-perf-summary.md 的 auto-doc-table 块与实测一致（194 行，rtol=0.005）
