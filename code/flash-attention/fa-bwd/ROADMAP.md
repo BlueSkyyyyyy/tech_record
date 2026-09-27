@@ -4687,9 +4687,42 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
      `..._mma_onefile_p34m_det_varlen_b3_t1792_k8.out.txt`、
      `..._p34m_ncu_{detnonkv,detkv,metrics,stall}_varlen_b3.out.txt`、`src/fp8/fa_bwd_p34m_ci.out.txt`；
      文档 `docs/03` §64、`docs/04` §45、`docs/00` §4.2。
-   - **下一步候选**：① 减 partial 字节（按 KV 行跨 warpgroup 偏和 / varlen compact per-sequence
-     offset）以压低 reduce 的 DRAM 墙；② 把两个 reduce 融合进一个 kernel；③ 非确定性性能仍受
-     本卡寄存器/smem 硬墙锁定，见「阻塞」。
+    - **下一步候选**：① 减 partial 字节（按 KV 行跨 warpgroup 偏和 / varlen compact per-sequence
+      offset）以压低 reduce 的 DRAM 墙；② 把两个 reduce 融合进一个 kernel；③ 非确定性性能仍受
+      本卡寄存器/smem 硬墙锁定，见「阻塞」。
+
+- 2026-09-27（第一百二十七轮）：**P3-4n 完成（把两个二次归约融合进一个 kernel，默认开；候选 ② 收口）**。
+  - 动机（落实第一百二十六轮候选 ②）：DET 的二次归约是两次 launch（`dkv_reduce_kernel` 读
+    dk/dv partial + `dq_reduce_kernel` 读 dq partial）。两者数据不相交，字节无法减少，但 dq 的
+    **尾块**（ncu：8.64µs / DRAM 58.7%，远没打满）可藏进 dkv 的重块、并省一次 launch。
+  - **实现（单/两文件 device 逐字同源，host 逐字一致）**：新增 `dkv_dq_reduce_kernel<HD,BM>` 与
+    `dkv_dq_reduce_varlen_kernel<HD,BM>`——grid 改 1D `dkv_blocks + dq_blocks`（block=HD），
+    前 `dkv_blocks` 做 dK/dV、其余做 dQ，**求和次序逐字沿用旧两个 kernel** ⇒ 逐位相同。
+    host 加 `--nofusered`（默认 `fuse_reduce=1`），在 4 个 DET reduce 站点切换（D128/D512 ×
+    定长/varlen）；Hopper TMA 快路（锁 ksplit=1、无 dq）不涉及。定长与 varlen 各加一段
+    `[P3-4n A/B]`（只测 reduce，2-launch vs 1-launch）。
+  - **数值**：5 个 shape × 单/两文件 **`fused-vs-sep` 与 `runs[1-2]` 的 dq/dk/dv 全 `0.00e+00`**；
+    默认路 `ours vs ref` 与历史逐位一致（S512 2.426/2.975/3.735e-1；S4096 2.635/2.643/3.216e-1；
+    MLA S1024H2 2.232/3.337/3.602e-1；varlen b1 2.280/3.108/3.422e-1、b3 3.404/3.436/3.508e-1）。
+  - **性能**（同 session / 同 binary，reduce-only，event）：D128 S512 **0.0290→0.0253ms
+    （1.149×）**（单文件 1.152×）、varlen D128 b1_t512 **0.0362→0.0309（1.170×）**、
+    D128 S4096 0.7917→0.7867（**1.006× 中性**，纯带宽墙字节不变）。端到端 DET：MLA S1024H2
+    非 kvpipe 0.2594→0.2549、kvpipe 0.2394→0.2366ms。
+  - **ncu（S512，`--set full -c 1`）**：分开 dkv **17.31µs/DRAM 70.4%/occ 65.5%**（grid 8192）
+    + dq **8.64µs/DRAM 58.7%/occ 74.2%**（grid 8192）= 25.95µs；融合 **22.94µs/DRAM 79.7%/
+    occ 86.1%**（grid 16384）⇒ **一个网格把 dq 的低 DRAM 尾块填进 dkv 的发射口**，整体 DRAM
+    70→80%。大 S 因纯带宽墙而中性（预期边界）。**bound：小/中 shape = 尾部与 launch 开销；
+    大 shape = reduce 的纯 DRAM 带宽（不变）。**
+  - **回归**：`python3 harness/fa_bwd_run.py --ci` 全量 73 case 全绿（gate fp16 3.906e-3 /
+    bf16 1.562e-2 / fp8 7.629e-6；`--consistency` OK；`--check docs/04` OK 194 行）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_main_p34n_d128_{s512,s4096}_detk4.out.txt`、
+    `..._p34n_mla_s1024h2_detk4.out.txt`、`..._p34n_varlen_{b1_t512_d128,b3_t1792_d512}_k8.out.txt`、
+    `src/fp8/fa_bwd_fp8_mma_onefile_p34n_{d128_s512_detk4,varlen_b3_t1792_d512_k8}.out.txt`、
+    `src/fp8/fa_bwd_fp8_p34n_ncu_{fused,dkvsep,dqsep}_s512.out.txt`、`src/fp8/fa_bwd_p34n_ci.out.txt`；
+    文档 `docs/03` §65、`docs/00` §4.2。
+  - **下一步候选**：① 减 partial 字节——需 `BM=128`（O19 已证伪 fp8 的放大 BM），或按 KV 行
+    跨 warpgroup 偏和 / varlen compact per-sequence offset；② 融合已收口；③ 非确定性性能仍受
+    本卡寄存器/smem 硬墙锁定，见「阻塞」。
 
 ## 灵感 / backlog
 
@@ -4765,6 +4798,8 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
    单/两文件 kvpipe DET 与非 kvpipe DET **逐位相同**（`kvpipe-vs-非kvpipe=0`、`runs[1-2]=0`），
    非 kvpipe→kvpipe 1.018–1.095×，ncu 主 kernel 243→220µs、`long_scoreboard` 3.93→3.25。
    见 `docs/03` §64。
-   **下一步**：① 减 partial 字节（compact per-sequence offset）；② 两个 reduce 融合成一个 kernel；
-   ③ 非确定性性能仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
+   **下一步**：① 减 partial 字节（compact per-sequence offset / 跨 warpgroup 偏和，需 BM=128）；
+   ~~② 两个 reduce 融合成一个 kernel~~ → **已完成（P3-4n，第一百二十七轮）**：单网格 1D 融合
+   `dkv_dq_reduce[_varlen]_kernel`，S512/varlen reduce-only 1.15–1.17×、S4096 中性，逐位相同，
+   见 `docs/03` §65；③ 非确定性性能仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
 - fp8：对比「只量化 dO」vs「dO 和 P 都量化」的精度/性能权衡。

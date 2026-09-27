@@ -5930,3 +5930,106 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/ru
 **下一步候选**：① 减 partial 字节（按 KV 行跨 warpgroup 偏和 / varlen compact per-sequence
 offset）以压低 reduce 的 DRAM 墙；② 把两个 reduce 融合进一个 kernel；③ 非确定性性能仍受本卡
 寄存器/smem 硬墙锁定，见 ROADMAP「阻塞」。
+
+---
+
+## 65. P3-4n（第一百二十七轮，**正结果（小 S）/中性（大 S），默认开**）：把两个二次归约融合进一个 kernel
+
+### 65.1 动机（落实第一百二十六轮「下一步候选 ②」）
+
+`--det` 的二次归约是**两次 launch**：`dkv_reduce_kernel`（读 dk/dv partial，P3-4e）+
+`dq_reduce_kernel`（读 dq partial，P3-4f；仅 `ksplit>1`）。两者数据不相交、互不依赖。
+P3-4e/f 的 ncu 显示 `dkv_reduce` 730.7µs/DRAM 91.6%，而 `dq_reduce` 只有 55.1µs/DRAM 87.6%
+（大 S）——第二次 launch 的**字节无法减少**（各读各的 partial），但 dq reduce 的**尾部**
+（小 shape 下尤甚：S512 时 dq 仅 8.6µs、DRAM 58.7%，远没打满）可以藏进 dkv 的重块里，
+同时省掉一次 launch。候选 ①（减字节）需要 `BM=128`，而 O19 已证伪 fp8 的「放大 BM/减 red」
+（1 CTA/SM 的并行度损失 > red 收益），故先做候选 ②。
+
+### 65.2 实现（单/两文件 device 逐字同源，host 逐字一致）
+
+- **device**（`fa_bwd_fp8_kernels.cuh`）：新增两个融合 kernel——
+  `dkv_dq_reduce_kernel<HD,BM>`（定长）与 `dkv_dq_reduce_varlen_kernel<HD,BM>`（变长）。
+  grid 改成 **1D**：`dkv_blocks + dq_blocks`、block=HD；`blockIdx.x < dkv_blocks` 的块跑
+  dK/dV（代码与旧 `dkv_reduce[_varlen]_kernel` 逐字相同），其余块跑 dQ（与旧
+  `dq_reduce_kernel` 逐字相同，`row = qi/H, h = qi%H`）。`ksplit==1` 时 `dq_blocks=0`，
+  退化成纯 dkv。**求和次序（hh 升序、m 升序 / part 升序）完全不变 ⇒ 融合版与分开版逐位相同。**
+- **host**：`--nofusered`（默认 `fuse_reduce=1`）在 4 个 DET reduce 站点切换：
+  ① D=128 定长（P3-4e/f）、② D=512 MLA 定长（P3-4h/k/m 的 `do_reduce`）、
+  ③ D=128 varlen（P3-4i）、④ D=512 MLA varlen（P3-4l）。Hopper TMA 快路（D=128、锁
+  `ksplit=1`）没有 dq reduce，无需融合。run_varlen 增 `fuse_reduce` 形参透传。
+  另在 ①（定长）与 ③（varlen）各加一段 `[P3-4n A/B]`：**只测二次归约**（partial 由一次 DET
+  主 kernel 预置），对比 2-launch vs 1-launch 并逐位对拍。
+- 单文件由 `scripts/sync_onefile_device.py` 同步 device 区（`device region identical: True`），
+  host 区与 `fa_bwd_fp8_main.cu` 逐字合并（`diff` 无差异）。**device 数学/数据流一行未改**。
+
+### 65.3 数值：融合版与分开版 dq/dk/dv **逐位相同**
+
+| case | ksplit | `fused-vs-sep` bitwise dq/dk/dv | `runs[1-2]` bitwise | ours vs ref（与历史逐位） |
+|---|---|---|---|---|
+| D128 定长 S512 | 4 | 0 / 0 / 0 | 0 / 0 / 0 | 2.426/2.975/3.735e-1 |
+| D128 定长 S4096 | 4 | 0 / 0 / 0 | 0 / 0 / 0 | 2.635/2.643/3.216e-1 |
+| D512 MLA 定长 S1024H2 | 4 | （经 `do_reduce`，`runs[1-2]`=0） | 0 / 0 / 0 | 2.232/3.337/3.602e-1 |
+| D128 varlen b1_t512 | 8 | 0 / 0 / 0 | 0 / 0 / 0 | 2.280/3.108/3.422e-1 |
+| D512 MLA varlen b3_t1792 | 8 | （经 `do_reduce`，`runs[1-2]`=0） | 0 / 0 / 0 | 3.404/3.436/3.508e-1 |
+
+单文件（S512 定长、b3 varlen D512）与两文件逐指标一致；默认路（无 `--det`）数值逐位不变。
+
+### 65.4 性能：reduce-only S512/varlen 小 shape 1.15–1.17×，大 S 中性
+
+同 session、同 binary（`[P3-4n A/B]`，只测二次归约，ms）：
+
+| case | separate（2 launch）| fused（1 launch）| 加速 |
+|---|---|---|---|
+| D128 定长 S512 | 0.0290 | **0.0253** | **1.149×** |
+| D128 定长 S512（单文件）| 0.0292 | 0.0254 | 1.152× |
+| D128 定长 S4096 | 0.7917 | 0.7867 | 1.006× |
+| D128 varlen b1_t512 | 0.0362 | 0.0309 | **1.170×** |
+
+- **机制**：ncu（S512，`--set full -c 1`）——分开版 `dkv_reduce_kernel` **17.31µs /
+  DRAM 70.4% / occ 65.5% / waves 5.17**（grid 8192）+ `dq_reduce_kernel` **8.64µs /
+  DRAM 58.7% / occ 74.2% / waves 3.88**（grid 8192），合计 25.95µs；融合版 **22.94µs /
+  DRAM 79.7% / occ 86.1% / waves 7.76**（grid 16384）——**一个网格让 dq 的轻块与 dkv 的重块
+  交错，把 dq 的低 DRAM 尾部（58.7%）填进 dkv 的发射口，整体 DRAM 从 70% 抬到 80%**。
+- 大 S（S4096）reduce 已是纯 DRAM 带宽墙（91.6%），两次 launch 的字节不变 ⇒ 融合只剩省一次
+  launch（~1µs），故 **1.006× 中性**。这是预期的边界：融合打的是「小/中 shape 的尾部与
+  launch 开销」，不是带宽。
+- 端到端（DET 含主 kernel）侧写：MLA S1024H2 DET 非 kvpipe 0.2594→**0.2549ms**、
+  kvpipe 0.2394→**0.2366ms**（历史 P3-4m 对照）；b3_t1792 D512 varlen DET 0.3495ms。
+
+### 65.5 回归
+
+`python3 harness/fa_bwd_run.py --ci`（全量 73 case + gate + docs/04 校验）全绿——
+gate[fp16] 3.906e-3 / gate[bf16] 1.562e-2 / gate[fp8] 7.629e-6（按 dtype 容差全 OK），
+`--consistency` OK（worst 1.562e-2），`--check docs/04` OK（194 行，rtol=5e-3）。
+**默认路径（无 `--det`）数值逐位不变。**
+
+### 65.6 复现 / 原始输出
+
+```bash
+# 定长（打印 [P3-4f]/[P3-4n]）
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8 --det --detk=4 --iters=30
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --det --detk=4 --iters=10
+# MLA 定长（打印 [P3-4k]/[P3-4m]）
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8 --det --detk=4 --iters=30
+# varlen（需 sm90a + -DFA_WGMMA；打印 [P3-4i]/[P3-4n]）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh \
+  src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h16_d128_causal_fp8 \
+  --varlen --det --detk=8 --iters=30
+# 单文件同理换 fa_bwd_fp8_mma_onefile.cu；--nofusered 退回两次 launch
+# ncu：融合 = regex:dkv_dq_reduce_kernel；分开 = regex:dkv_reduce_kernel / regex:^dq_reduce_kernel
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_p34n_d128_{s512,s4096}_detk4.out.txt`、
+`src/fp8/fa_bwd_fp8_main_p34n_mla_s1024h2_detk4.out.txt`、
+`src/fp8/fa_bwd_fp8_main_p34n_varlen_{b1_t512_d128,b3_t1792_d512}_k8.out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_p34n_{d128_s512_detk4,varlen_b3_t1792_d512_k8}.out.txt`、
+`src/fp8/fa_bwd_fp8_p34n_ncu_{fused,dkvsep,dqsep}_s512.out.txt`、`src/fp8/fa_bwd_p34n_ci.out.txt`。
+
+**下一步候选**：① 减 partial 字节——需 `BM=128`（O19 已证伪 fp8 的放大 BM），或按 KV 行
+跨 warpgroup 偏和 / varlen compact per-sequence offset；② 融合已收口（本轮），进一步的
+「两次 reduce 融合 + partial 原地累加」需先解决字节问题；③ 非确定性性能仍受本卡寄存器/
+smem 硬墙锁定，见 ROADMAP「阻塞」。

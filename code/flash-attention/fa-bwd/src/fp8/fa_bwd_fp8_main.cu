@@ -449,7 +449,8 @@ static void launch_lse_bal_tma_split(dim3 lg, const CUtensorMap& qmap, const CUt
 static int run_varlen(const std::string& dir, bool causal, int iters, bool compact = false,
                       bool lse_compact = false, int lse_split = 0, int mla8w = -1,
                       int mla_kvp = -1, int lseocc = 0, int lse8w = 0,
-                      const std::string& dump = "", int det_ab = 0, int det_ksplit = 1) {
+                      const std::string& dump = "", int det_ab = 0, int det_ksplit = 1,
+                      int fuse_reduce = 1) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -793,12 +794,21 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
           g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
           maxlen, H, Hkv, scale, (int)causal, k, d_dk_part, d_dv_part, nblk_max, d_dq_part,
           d_cu, nullptr, nullptr);
-      dim3 rg(B * Hkv, maxlen);
-      dkv_reduce_varlen_kernel<128, 64><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk, d_dv, d_cu, H,
-                                                     Hkv, nblk_max, maxlen, (int)causal);
-      if (k > 1) {
-        dim3 dg(T, H);
-        dq_reduce_kernel<128><<<dg, 128>>>(d_dq_part, d_dq, T, H, k);
+      // P3-4n：dkv+dq 融合归约（默认）vs 两次 launch（`--nofusered`）。
+      const int dkv_blocks = B * Hkv * maxlen;
+      const int dq_blocks = (k > 1) ? T * H : 0;
+      if (fuse_reduce) {
+        dkv_dq_reduce_varlen_kernel<128, 64><<<dkv_blocks + dq_blocks, 128>>>(
+            d_dk_part, d_dv_part, (k > 1) ? d_dq_part : nullptr, d_dk, d_dv, d_dq, d_cu, H, Hkv,
+            nblk_max, maxlen, (int)causal, k, dkv_blocks);
+      } else {
+        dim3 rg(B * Hkv, maxlen);
+        dkv_reduce_varlen_kernel<128, 64><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk, d_dv, d_cu, H,
+                                                       Hkv, nblk_max, maxlen, (int)causal);
+        if (k > 1) {
+          dim3 dg(T, H);
+          dq_reduce_kernel<128><<<dg, 128>>>(d_dq_part, d_dq, T, H, k);
+        }
       }
     };
     auto time_fn3 = [&](auto fn, float* out_ms) {
@@ -836,6 +846,38 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
            "runs[1-2] bitwise dq/dk/dv=%.2e/%.2e/%.2e | DET-vs-atomic dq/dk/dv=%.2e/%.2e/%.2e\n",
            ks, ms_at, ms_dt, ms_at / ms_dt, mad3(dq1, dq2), mad3(dk1, dk2), mad3(dv1, dv2),
            mad3(dq1, aq), mad3(dk1, ak), mad3(dv1, av));
+    // ---- P3-4n A/B：varlen 二次归约 分离 vs 融合（只测 reduce；partial 已由上面 run_dt 预置）。
+    {
+      auto only_sep = [&]() {
+        dim3 rg(B * Hkv, maxlen);
+        dkv_reduce_varlen_kernel<128, 64><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk, d_dv, d_cu, H,
+                                                       Hkv, nblk_max, maxlen, (int)causal);
+        if (ks > 1) {
+          dim3 dg(T, H);
+          dq_reduce_kernel<128><<<dg, 128>>>(d_dq_part, d_dq, T, H, ks);
+        }
+      };
+      auto only_fus = [&]() {
+        const int dkv_blocks = B * Hkv * maxlen, dq_blocks = (ks > 1) ? T * H : 0;
+        dkv_dq_reduce_varlen_kernel<128, 64><<<dkv_blocks + dq_blocks, 128>>>(
+            d_dk_part, d_dv_part, (ks > 1) ? d_dq_part : nullptr, d_dk, d_dv, d_dq, d_cu, H, Hkv,
+            nblk_max, maxlen, (int)causal, ks, dkv_blocks);
+      };
+      float t_rs = 0.f, t_rf = 0.f;
+      time_fn3(only_sep, &t_rs);
+      std::vector<float> rsdk(nkv), rsdv(nkv), rsdq(nq);
+      CUDA_CHECK(cudaMemcpy(rsdk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(rsdv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(rsdq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+      time_fn3(only_fus, &t_rf);
+      std::vector<float> rfdk(nkv), rfdv(nkv), rfdq(nq);
+      CUDA_CHECK(cudaMemcpy(rfdk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(rfdv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(rfdq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+      printf("[P3-4n A/B] varlen reduce separate(2 launch) %.4f ms | fused(1 launch) %.4f ms "
+             "(%.3fx) | fused-vs-sep bitwise dq/dk/dv=%.2e/%.2e/%.2e\n",
+             t_rs, t_rf, t_rs / t_rf, mad3(rfdq, rsdq), mad3(rfdk, rsdk), mad3(rfdv, rsdv));
+    }
     cudaFree(d_dk_part);
     cudaFree(d_dv_part);
     if (d_dq_part) cudaFree(d_dq_part);
@@ -877,12 +919,20 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     // P3-4m：两个 DET 主 kernel 变体共用同一段 reduce（非 kvpipe 与 kvpipe 只差搬运，
     //   数值应逐位相同；kvpipe 是 O51 的 K/V cp.async 回填流水，此前 DET 未接线）。
     auto do_reduce = [&]() {
-      dim3 rg(B * Hkv, maxlen);
-      dkv_reduce_varlen_kernel<512, 64><<<rg, 512>>>(d_dk_part, d_dv_part, d_dk, d_dv, d_cu, H,
-                                                     Hkv, nblk_max, maxlen, (int)causal);
-      if (ks > 1) {
-        dim3 dg(T, H);
-        dq_reduce_kernel<512><<<dg, 512>>>(d_dq_part, d_dq, T, H, ks);
+      const int dkv_blocks = B * Hkv * maxlen;
+      const int dq_blocks = (ks > 1) ? T * H : 0;
+      if (fuse_reduce) {
+        dkv_dq_reduce_varlen_kernel<512, 64><<<dkv_blocks + dq_blocks, 512>>>(
+            d_dk_part, d_dv_part, (ks > 1) ? d_dq_part : nullptr, d_dk, d_dv, d_dq, d_cu, H, Hkv,
+            nblk_max, maxlen, (int)causal, ks, dkv_blocks);
+      } else {
+        dim3 rg(B * Hkv, maxlen);
+        dkv_reduce_varlen_kernel<512, 64><<<rg, 512>>>(d_dk_part, d_dv_part, d_dk, d_dv, d_cu, H,
+                                                       Hkv, nblk_max, maxlen, (int)causal);
+        if (ks > 1) {
+          dim3 dg(T, H);
+          dq_reduce_kernel<512><<<dg, 512>>>(d_dq_part, d_dq, T, H, ks);
+        }
       }
     };
     auto run_dt = [&]() {
@@ -1228,6 +1278,9 @@ int main(int argc, char** argv) {
   // P3-4f：DET 实验用的 ksplit（默认 1 = P3-4e 原状）。>1 时 dQ 也走 partial（确定性 +
   //   split-K 并行度）。`--detk=N`。
   int det_ksplit = 1;
+  // P3-4n：DET 的 dkv/dq 二次归约是否融合成一次 launch（默认 1）。`--nofusered` 退回两次
+  //   launch 做同 binary A/B。两版求和次序逐字相同 ⇒ 数值逐位相同。
+  int fuse_reduce = 1;
   int varlen = 0;   // VARLEN：1 = packed [T,H,D] + cu_seqlens.npy（fp8/HD=128/causal）
   int compact_opt = 0;  // 第八十二轮：1 = varlen 主 kernel 紧凑均衡网格（opt-in；实测中性偏负）
   int lse_compact_opt = 0;  // 第八十二轮：1 = varlen causal LSE 紧凑对网格（opt-in，A/B）
@@ -1257,6 +1310,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--det=", 0) == 0) det_ab = atoi(a.c_str() + 6);
     else if (a == "--det") det_ab = 1;
     else if (a.rfind("--detk=", 0) == 0) det_ksplit = atoi(a.c_str() + 7);
+    else if (a == "--nofusered") fuse_reduce = 0;
     else if (a.rfind("--qdtma=", 0) == 0) qd_tma = atoi(a.c_str() + 8);
     else if (a.rfind("--kvtma=", 0) == 0) kv_tma = atoi(a.c_str() + 8);
     else if (a == "--kvtma") kv_tma = 1;
@@ -1280,7 +1334,8 @@ int main(int argc, char** argv) {
 
   if (varlen)
     return run_varlen(dir, causal, iters, compact_opt, lse_compact_opt, lse_split, mla8w_opt,
-                      mla_kvp_opt, lseocc_opt, lse8w_opt, dump_prefix, det_ab, det_ksplit);
+                      mla_kvp_opt, lseocc_opt, lse8w_opt, dump_prefix, det_ab, det_ksplit,
+                      fuse_reduce);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
@@ -1894,12 +1949,21 @@ int main(int argc, char** argv) {
                                             d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc,
                                             S, H, Hkv, scale, (int)causal, k, d_dk_part, d_dv_part,
                                             nblk_d, d_dq_part);
-      dim3 rg(B * Hkv, S);
-      dkv_reduce_kernel<128, 64><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H, Hkv,
-                                              nblk_d, (int)causal);
-      if (k > 1) {
-        dim3 dg(B * S, H);
-        dq_reduce_kernel<128><<<dg, 128>>>(d_dq_part, d_dq_acc, S, H, k);
+      // P3-4n：dkv+dq 融合归约（默认）vs 两次 launch（`--nofusered`）。
+      const int dkv_blocks = B * Hkv * S;
+      const int dq_blocks = (k > 1) ? B * S * H : 0;
+      if (fuse_reduce) {
+        dkv_dq_reduce_kernel<128, 64><<<dkv_blocks + dq_blocks, 128>>>(
+            d_dk_part, d_dv_part, (k > 1) ? d_dq_part : nullptr, d_dk_acc, d_dv_acc, d_dq_acc, S,
+            H, Hkv, nblk_d, (int)causal, k, dkv_blocks);
+      } else {
+        dim3 rg(B * Hkv, S);
+        dkv_reduce_kernel<128, 64><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H,
+                                                Hkv, nblk_d, (int)causal);
+        if (k > 1) {
+          dim3 dg(B * S, H);
+          dq_reduce_kernel<128><<<dg, 128>>>(d_dq_part, d_dq_acc, S, H, k);
+        }
       }
     };
     auto time_fn2 = [&](auto fn, float* out_ms) {
@@ -1937,6 +2001,51 @@ int main(int argc, char** argv) {
            "runs[1-2] bitwise dq/dk/dv=%.2e/%.2e/%.2e | DET-vs-atomic dq/dk/dv=%.2e/%.2e/%.2e\n",
            ks, ms_at, ms_dt, ms_at / ms_dt, mad2(dq1, dq2), mad2(dk1, dk2), mad2(dv1, dv2),
            mad2(dq1, aq), mad2(dk1, ak), mad2(dv1, av));
+    // ---- P3-4n A/B：二次归约「两次 launch（分离）」vs「一次 launch（融合）」，只测 reduce。
+    //      partial 先用一次 DET 主 kernel 预置好；两版只差网格组织、求和次序逐字相同。----
+    {
+      auto only_sep = [&]() {
+        dim3 rg(B * Hkv, S);
+        dkv_reduce_kernel<128, 64><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H,
+                                                Hkv, nblk_d, (int)causal);
+        if (ks > 1) {
+          dim3 dg(B * S, H);
+          dq_reduce_kernel<128><<<dg, 128>>>(d_dq_part, d_dq_acc, S, H, ks);
+        }
+      };
+      auto only_fus = [&]() {
+        const int dkv_blocks = B * Hkv * S;
+        const int dq_blocks = (ks > 1) ? B * S * H : 0;
+        dkv_dq_reduce_kernel<128, 64><<<dkv_blocks + dq_blocks, 128>>>(
+            d_dk_part, d_dv_part, (ks > 1) ? d_dq_part : nullptr, d_dk_acc, d_dv_acc, d_dq_acc, S,
+            H, Hkv, nblk_d, (int)causal, ks, dkv_blocks);
+      };
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      if (ks > 1) CUDA_CHECK(cudaMemset(d_dq_part, 0, dqpart_elems * 4));
+      {
+        dim3 g((S + 63) / 64 * ks, H, B);
+        launch_bwd_main_det<128, 64, 32, true>(g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
+                                               d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc,
+                                               S, H, Hkv, scale, (int)causal, ks, d_dk_part,
+                                               d_dv_part, nblk_d, d_dq_part);
+      }
+      float t_rs = 0.f, t_rf = 0.f;
+      time_fn2(only_sep, &t_rs);
+      std::vector<float> rsdk(nkv), rsdv(nkv), rsdq(nq);
+      CUDA_CHECK(cudaMemcpy(rsdk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(rsdv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(rsdq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+      time_fn2(only_fus, &t_rf);
+      std::vector<float> rfdk(nkv), rfdv(nkv), rfdq(nq);
+      CUDA_CHECK(cudaMemcpy(rfdk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(rfdv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(rfdq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+      printf("[P3-4n A/B] reduce separate(2 launch) %.4f ms | fused(1 launch) %.4f ms (%.3fx) | "
+             "fused-vs-sep bitwise dq/dk/dv=%.2e/%.2e/%.2e\n",
+             t_rs, t_rf, t_rs / t_rf, mad2(rfdq, rsdq), mad2(rfdk, rsdk), mad2(rfdv, rsdv));
+    }
     cudaFree(d_dk_part);
     cudaFree(d_dv_part);
     if (d_dq_part) cudaFree(d_dq_part);
@@ -1973,12 +2082,20 @@ int main(int argc, char** argv) {
           d_dv_acc, S, H, Hkv, scale, (int)causal, k);
     };
     auto do_reduce = [&](int k) {
-      dim3 rg(B * Hkv, S);
-      dkv_reduce_kernel<512, 64><<<rg, 512>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H, Hkv,
-                                              nblk_d, (int)causal);
-      if (k > 1) {
-        dim3 dg(B * S, H);
-        dq_reduce_kernel<512><<<dg, 512>>>(d_dq_part, d_dq_acc, S, H, k);
+      const int dkv_blocks = B * Hkv * S;
+      const int dq_blocks = (k > 1) ? B * S * H : 0;
+      if (fuse_reduce) {
+        dkv_dq_reduce_kernel<512, 64><<<dkv_blocks + dq_blocks, 512>>>(
+            d_dk_part, d_dv_part, (k > 1) ? d_dq_part : nullptr, d_dk_acc, d_dv_acc, d_dq_acc, S,
+            H, Hkv, nblk_d, (int)causal, k, dkv_blocks);
+      } else {
+        dim3 rg(B * Hkv, S);
+        dkv_reduce_kernel<512, 64><<<rg, 512>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H,
+                                                Hkv, nblk_d, (int)causal);
+        if (k > 1) {
+          dim3 dg(B * S, H);
+          dq_reduce_kernel<512><<<dg, 512>>>(d_dq_part, d_dq_acc, S, H, k);
+        }
       }
     };
     auto run_dt = [&](int k) {
