@@ -2313,3 +2313,116 @@ fp16（bf16 逐项几乎相同）：
 > **下一步候选**：① ~~把 FA3（含 varlen）接入 `fa_vs_te_bwd_only.py`~~ **本轮已完成**；
 > ② 用同一纯反向口径重测 `fa_bwd_bench.py` 里定长/变长的 FA/TE 列（现 `bench_case*` 也含 forward），
 > 让全站基线统一；③ 继续 O59 候选（MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`）。
+
+## 38. P3-4c：全站基线统一到「纯反向」口径（第 113 轮，harness + 基线）
+
+**动机**（落实 §37 的候选 ②、`ROADMAP` backlog 最后一条 `[ ]`）：上一轮发现 `harness/fa_bwd_bench.py`
+的 `bench_case` / `bench_case_varlen` 把 `fa_bwd()` / `fa3_bwd()` / `te_bwd()` / `te_bwd_fp8()` /
+`fa3_bwd_varlen()`（**都含 forward**）整段塞进 `CudaTimer.device_time()`，而用户指定的纯反向基准
+`harness/fa_vs_te_bwd_only.py`（forward 建图在计时区外、只测 `autograd.grad` / `fused_attn_bwd`）
+口径不同——§36.2 的 varlen FA3 数字因此偏慢 1.6–1.7×。本轮把 `fa_bwd_bench.py` 的 `bench` 默认切到
+**纯反向**，让全站（定长 + varlen × FA2/FA3/TE）基线口径统一。
+
+### 38.1 变更（纯 harness，device 一行未改）
+
+- 新增 `make_fa_bwd_only` / `make_fa3_bwd_only` / `make_te_bwd_only` / `make_te_fp8_bwd_only` /
+  `make_fa3_varlen_bwd_only`：**forward 只建图/算一次（计时区外）**，返回一个只跑反向的闭包；
+  `bench_case` / `bench_case_varlen` 默认用它们，`CudaTimer.device_time(闭包)` 只计反向。
+- 新增 `--with-fwd`：退回旧口径（整段含 forward）以做 A/B；`dump` 路径仍用原来的 `*_bwd()` 取数值，
+  完全不变。
+- 打印头由 `=== bench CUPTI device time (dtype=..) ===` 改为带 `pure-bwd` / `fwd+bwd` 标注。
+
+### 38.2 定长基线（纯反向 CUPTI；ms / TFLOPS @ `4·B·S²·H·(D+Dv)`）
+
+MHA（H=16 D=128，causal；fp16，bf16 逐项几乎相同）：
+
+| (B,S) | FA2.7.4 | **FA3** | TE2.14 |
+|---|---|---|---|
+| (1,512) | 0.0442 / 97.3 | **0.0263 / 163.2** | 0.0322 / 133.5 |
+| (1,1024) | 0.0820 / 209.5 | **0.0486 / 353.2** | 0.0582 / 295.2 |
+| (4,2048) | 0.7374 / 372.8 | **0.3934 / 698.8** | 0.4747 / 579.1 |
+| (2,2048) full | 0.5882 / 233.7 | **0.3205 / 428.9** | 0.3555 / 386.6 |
+| (1,4096) | 0.7365 / 373.2 | **0.3236 / 849.5** | 0.4518 / 608.4 |
+
+fp8 定长（FA2/FA3 无反向 fp8，只有 TE）：
+
+| (B,S) | TE2.14 |
+|---|---|
+| (1,512) | 0.0357 / 120.2 |
+| (1,1024) | 0.0550 / 312.1 |
+| (1,4096) | 0.3031 / 906.8 |
+
+GQA/MQA（B1 S1024 D128 causal，纯反向 ms / TF；fp16）：
+
+| 形状 | FA2.7.4 | **FA3** | TE2.14 |
+|---|---|---|---|
+| q40 / kv8 | 0.1875 / 229.0 | **0.1218 / 352.6** | 0.1315 / 326.7 |
+| q32 / kv4 | 0.1569 / 219.0 | **0.0823 / 417.3** | 0.1118 / 307.4 |
+| q64 / kv4 | 0.2625 / 261.8 | **0.1595 / 431.0** | 0.1942 / 354.0 |
+| q64 / kv1 (MQA) | 0.2649 / 259.4 | **0.1566 / 438.9** | 0.2154 / 319.1 |
+
+fp8 GQA/MQA（TE2.14，纯反向）：q40/kv8 `0.1232/348.5`、q32/kv4 `0.1038/330.9`、
+q64/kv4 `0.2065/332.7`、q64/kv1 `0.2468/278.5`。
+
+### 38.3 varlen 基线（纯反向 CUPTI；ms / TF @ `4·H·D·Σ_b L_b²`）
+
+fp16（bf16 逐项几乎相同）：
+
+| varlen case (H16 D128) | FA3 纯反向 | 旧口径（含 fwd） |
+|---|---|---|
+| causal [512,1024,2048,256] | 0.1634 / 279.3 | 0.2625 / 173.8 |
+| causal [1024]×4 | 0.1480 / 232.1 | 0.2404 / 142.9 |
+| causal [128..2048] GQA kv8 | 0.3752 / 244.0 | 0.5265 / 173.8 |
+| causal [2048..8] 强倾斜 | 0.1405 / 261.7 | 0.2241 / 164.1 |
+| full [1024]×4 | 0.1991 / 172.6 | — |
+
+fp8（FA3 无反向 fp8）：等长 `[1024]×4` 走 TE FP8 定长等价口径 `0.1472/233.4`（纯反向）；
+其余不等长 case TE2.14 变长反向仍 segfault、无列。
+
+### 38.4 A/B：forward 占了多少、旧口径偏乐观多少
+
+同 binary、同 shape，`--with-fwd`（旧）vs 默认（纯反向）：
+
+| case | 纯反向 | 含 fwd | forward 占比 |
+|---|---|---|---|
+| fp16 MHA S512 FA3 | 0.0263 | 0.0451 | +71% |
+| fp16 MHA S4096 FA3 | 0.3236 | 0.4642 | +43% |
+| fp16 MHA S4096 TE | 0.4518 | 0.5964 | +32% |
+| fp8 MHA S512 TE | 0.0357 | 0.1011 | **+183%** |
+| fp8 MHA S4096 TE | 0.3031 | 0.5900 | **+95%** |
+
+**forward 在 fp8 上占比最大（几乎翻倍）**——`fa_bwd_bench.py` 的旧 TE-fp8 口径把整个前向
+（含量化/`fused_attn_fwd`）都计了进去；定长/变长的旧数字据此应全部作废，以本轮纯反向为准。
+`--with-fwd` 复现出的 varlen `[1024]×4` FA3 `0.2404ms` 与 §36.2 的 `0.2409ms` 一致，
+证明口径切换只动了建图位置、未动其它。
+
+### 38.5 对 ours/FA3、ours/TE 比值的更正
+
+ours = 两文件 `fa_bwd_{fp16,bf16,fp8}_mma_main` 端到端 event（preprocess+main+convert，
+`--iters=100`，同 session）；对照列取本轮纯反向。原始输出 `src/fa_bwd_p113_ours_ref.out.txt`。
+
+| case | ours | 参考（纯反向） | 比值 |
+|---|---|---|---|
+| fp16 MHA S512 | 0.0910 / 23.6 TF | FA3 0.0263 | **3.46×** |
+| fp16 MHA S4096 | 1.9242 / 71.4 TF | FA3 0.3236 | **5.95×** |
+| fp16 varlen [1024]×4 causal | 0.4507 / 76.2 TF | FA3 0.1480 | **3.05×** |
+| fp16 varlen [1024]×4 full | 0.9036 / 38.0 TF | FA3 0.1991 | **4.54×** |
+| fp8 MHA S4096 | 2.3777 / 57.8 TF | TE 0.3031 | **7.85×** |
+| fp8 varlen [1024]×4 causal | 0.7729 / 44.5 TF | TE-fixed 0.1472 | **5.25×** |
+
+- **更正值**：旧口径下 fp8 S4096 的 ours/TE 只有 ~4.0×（TE 含 forward 0.59ms），纯反向后是
+  **7.85×**；varlen `[1024]×4` causal 的 ours/FA3 从 §36.2 的 1.87×、§37 的 3.04× 定为
+  **3.05×**（与本轮 ours 0.4507 一致）。
+- 定长 fp16 的 ours/FA3 由 ~6.0×（§6）微调为 **5.95×**；fp16 varlen full 为 **4.54×**。
+
+### 38.6 数值回归与结论
+
+- **数值零变化**：本轮只改 `bench` 的计时位置，device 一行未动。`harness/fa_bwd_compare.py`
+  对 73 个既有 case 重扫，ours-vs-ref 与 §32–§37 历史**逐位一致**
+  （fp16 S512 `1.671/1.771/1.899e-3`、S4096 `1.883/1.734/1.966e-3`；fp8 S512
+  `2.426/2.975/3.735e-1`、S4096 `2.635/2.643/3.216e-1`；varlen 三 dtype 区间同量级）；
+  原始输出 `src/fa_bwd_compare_p113_summary.out.txt`。
+- 本轮为 **harness + 基线增量**，未改任何 kernel；各 dtype 的 bound 结论（§2/§3、§26–§31）不变。
+- **下一步候选**：① 继续 O59 候选（MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`）；
+  ② `--doc-table` 直接改写 docs/04 对应小节（含自动 diff 校验）；③ 把纯反向口径复用到
+  `fa_bwd_bench.py --requested` 的 MLA 行（现 FA/TE 均 `NA`，只能列 ours）。

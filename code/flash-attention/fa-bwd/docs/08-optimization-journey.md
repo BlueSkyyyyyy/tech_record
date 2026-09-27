@@ -442,6 +442,21 @@ smem 冲突 + 低 occ
     不支持，最重点的 fp8 口径仍以 ours/TE/ref 为准。本轮为 harness 增量，无新 device 代码。
     详见 `docs/04` §37；原始输出 `src/fa_bwd_p112_varlen_fa2_fa3_te.out.txt`。
 
+29. **P3-4c（第 113 轮，工具链 + 基线，正结果）**：**把全站基线统一到「纯反向」口径**
+     ——落实 §5.28 候选 ① / backlog 最后一条 `[ ]`。`fa_bwd_bench.py` 的 `bench_case` /
+     `bench_case_varlen` 一直把 `*_bwd()`（**含 forward**）整段放进 `device_time`，
+     与用户指定的 `fa_vs_te_bwd_only.py` 纯反向口径不一致（§36.2 的 varlen FA3 因此偏慢
+     1.6–1.7×）。本轮加 `make_*_bwd_only()`（forward 在计时区外）并把 `bench` 默认切过去，
+     `--with-fwd` 保留旧口径做 A/B。**实测（同 binary A/B）**：forward 占 FA3 S512 `71%`、
+     S4096 `43%`，而 **fp8 TE 占 `95–183%`**（旧 fp8 口径几乎把前向也算成反向）；
+     纯反向下 FA3 MHA S4096 `0.3236ms/849.5TF`、varlen `[1024]×4` causal `0.1480ms/232.1TF`，
+     与 `fa_vs_te_bwd_only.py` 一致。**更正 ours/参考比值**：fp8 S4096 ours/TE 由 ~4.0× 改为
+     **7.85×**、varlen `[1024]×4` ours/FA3 = **3.05×**、fp16 S4096 ours/FA3 = **5.95×**。
+     **教训：`device_time(fn)` 里 `fn` 的建图位置必须钉死在脚本入口——两个都号称「反向基准」
+     的脚本，口径能差出一整个 forward；且不同后端的 forward 占比天差地别（fp8 最重）。**
+     数值零变化（`fa_bwd_compare.py` 73 case 重扫逐位一致）；详见 `docs/04` §38。
+     原始输出 `src/fa_bwd_p113_*.out.txt`、`src/fa_bwd_compare_p113_summary.out.txt`。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。

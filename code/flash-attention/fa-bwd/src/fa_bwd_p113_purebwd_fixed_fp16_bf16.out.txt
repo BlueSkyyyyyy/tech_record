@@ -1,0 +1,14 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== bench CUPTI device time (pure-bwd, dtype=fp16) ===
+[b1_s512_h16_d128_causal_fp16] fa3=0.0263ms/163.19TF  fa=0.0442ms/97.27TF  te=0.0322ms/133.50TF
+[b1_s1024_h16_d128_causal_fp16] fa3=0.0486ms/353.18TF  fa=0.0820ms/209.51TF  te=0.0582ms/295.24TF
+[b4_s2048_h16_d128_causal_fp16] fa3=0.3934ms/698.79TF  fa=0.7374ms/372.75TF  te=0.4747ms/579.07TF
+[b2_s2048_h16_d128_full_fp16] fa3=0.3205ms/428.85TF  fa=0.5882ms/233.66TF  te=0.3555ms/386.64TF
+[b1_s4096_h16_d128_causal_fp16] fa3=0.3236ms/849.54TF  fa=0.7365ms/373.22TF  te=0.4518ms/608.36TF
+=== bench CUPTI device time (pure-bwd, dtype=bf16) ===
+[b1_s512_h16_d128_causal_bf16] fa3=0.0266ms/161.21TF  fa=0.0441ms/97.44TF  te=0.0322ms/133.18TF
+[b1_s1024_h16_d128_causal_bf16] fa3=0.0484ms/355.02TF  fa=0.0827ms/207.65TF  te=0.0578ms/297.14TF
+[b4_s2048_h16_d128_causal_bf16] fa3=0.3892ms/706.24TF  fa=0.7359ms/373.50TF  te=0.4664ms/589.41TF
+[b2_s2048_h16_d128_full_bf16] fa3=0.3128ms/439.32TF  fa=0.5869ms/234.18TF  te=0.3546ms/387.58TF
+[b1_s4096_h16_d128_causal_bf16] fa3=0.3207ms/857.12TF  fa=0.7177ms/382.98TF  te=0.4438ms/619.34TF

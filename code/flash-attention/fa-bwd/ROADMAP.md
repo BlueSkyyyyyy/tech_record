@@ -4145,6 +4145,29 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     ② `--doc-table` 直接改写 docs/04 对应小节（含自动 diff 校验）；
     ③（继续）O59 候选：MLA 主 kernel 降 smem / fp8 MLA `short_scoreboard`。
 
+- 2026-09-27（第一百一十三轮）：**P3-4c 完成（全站基线统一到「纯反向」口径）**。
+   - 动机（落实第 112 轮候选 ① / backlog 最后一条 `[ ]`）：`harness/fa_bwd_bench.py` 的
+     `bench_case` / `bench_case_varlen` 把 `*_bwd()`（**含 forward**）整段塞进 `device_time`，
+     与用户指定的纯反向基准 `harness/fa_vs_te_bwd_only.py` 口径不一致（§36.2 的 varlen FA3
+     因此偏慢 1.6–1.7×）。
+   - **改动（纯 harness，device 一行未改）**：新增 `make_fa_bwd_only`/`make_fa3_bwd_only`/
+     `make_te_bwd_only`/`make_te_fp8_bwd_only`/`make_fa3_varlen_bwd_only`（forward 在计时区外，
+     只返回跑反向的闭包）；`bench_case`/`bench_case_varlen` 默认 `bwd_only=True`；
+     新增 `--with-fwd` 退回旧口径做 A/B；`dump` 路径不变。
+   - **A/B（同 binary）**：forward 占 FA3 S512 **71%**、S4096 **43%**、TE S4096 32%；
+     **fp8 TE 占 S512 183% / S4096 95%**（旧 fp8 口径几乎把前向也算成反向）。
+   - **纯反向基线**：fp16 MHA FA3 S512 `0.0263ms/163.2TF`、S4096 `0.3236/849.5`、TE S4096
+     `0.4518/608.4`；fp8 TE S4096 `0.3031/906.8`；GQA/MQA FA3 0.0823–0.1595ms；varlen
+     `[1024]×4` causal FA3 `0.1480/232.1`、fp8 TE-fixed `0.1472`——与 `fa_vs_te_bwd_only.py` 一致。
+   - **更正 ours/参考比值**（same-session ours 端到端 event）：fp8 S4096 ours/TE `2.3777/0.3031`
+     = **7.85×**（旧含 fwd 口径 ~4.0×）；fp16 S4096 ours/FA3 `1.9242/0.3236`=**5.95×**；
+     varlen `[1024]×4` causal ours/FA3 `0.4507/0.1480`=**3.05×**、full `0.9036/0.1991`=**4.54×**；
+     fp8 varlen `[1024]×4` ours/TE-fixed `0.7729/0.1472`=**5.25×**。
+   - **数值零变化**：`fa_bwd_compare.py` 73 case 重扫与 §32–§37 历史逐位一致；单/两文件不变。
+     原始输出 `src/fa_bwd_p113_purebwd_{fixed_fp16_bf16,requested,varlen_causal,varlen_full,
+     fixed_fp8}.out.txt`、`src/fa_bwd_p113_fwd_ab.out.txt`、`src/fa_bwd_p113_ours_ref.out.txt`、
+     `src/fa_bwd_compare_p113_summary.out.txt`；文档 `docs/04` §38、`docs/06` §6、`docs/08` §5.29。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
@@ -4179,10 +4202,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       已接进 `fa_bwd_bench.py`（dump + bench）与 `--doc-table` 默认口径；varlen causal
       ours/FA3 1.87–2.95×、full 2.90–3.52×；fp8/MLA FA3 不支持。详见「第一百一十一轮」、`docs/04` §36。
 
-- [ ] **把全站基线统一到「纯反向」口径**（第一百一十二轮发现）：`fa_bwd_bench.py` 的
-  `bench_case` / `bench_case_varlen` 把 `*_bwd*()`（含 forward）整段放进 `device_time`，
-  与用户指定的纯反向口径 `fa_vs_te_bwd_only.py` 不一致（FA3 varlen 差 1.6–1.7×）。
-  解法：把 forward 建图移出计时 lambda（或直接改用 `fa_vs_te_bwd_only.py` 出发布数字）。
+- [x] **把全站基线统一到「纯反向」口径**（第一百一十二轮发现）→ **已完成（第一百一十三轮
+  P3-4c）**：新增 `make_*_bwd_only()`（forward 在计时区外），`bench_case*` 默认纯反向、
+  `--with-fwd` 保旧口径 A/B；forward 占 FA3 S512 71%/S4096 43%、**fp8 TE 95–183%**；
+  ours/参考比值更正（fp8 S4096 ours/TE 4.0×→**7.85×**、varlen ours/FA3 **3.05×**）。
+  数值零变化。详见「第一百一十三轮」、`docs/04` §38。
 - 用 `nsys` 看 preprocess + main + convert 的端到端重叠。
 - 把 FA2 的 `dQ_accum` 累加缓冲 vs 纯 atomic 做对比实验。
 - deterministic 模式的代价量化。
