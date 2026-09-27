@@ -609,6 +609,23 @@ smem 冲突 + 低 occ
      仍确定）——留作下一步候选。** 单/两文件 device 逐字同源、默认路径数值逐位不变。
      详见 `docs/03` §61。
 
+40. **P3-4k（第 124 轮，device+host 增量，正结果/opt-in `--detk>1`）**：**让 MLA（HD=512）
+     的 dQ 也进 partial，从而支持 DET 的 split-K**——落实第 123 轮「下一步候选 ①」。关键观察：
+     非 `kRegDq` 的 dQ epilogue 是对**唯一 CTA**（固定 `(mblk,part)`）的逐 tile 写，把目标从
+     `dq_acc` 换成按 part 分片的 `dq_part`（同一 partial 元素只被一个 CTA 写、CTA 内同一
+     `(row,c)` 由同一线程按 nt 程序序写）⇒ **确定性天然成立**，无需寄存器累加；再接早已就位的
+     `dq_reduce_kernel<512>` 按 part 固定次序求和。**device 只动 dQ epilogue 一处**（`DET=false`
+     与 `ksplit=1` 逐位不变），host 把 P3-4h 的 A/B 扩成 P3-4f 同构（`dq_part` 清零 +
+     `dkv_reduce_kernel<512>` + `dq_reduce_kernel<512>`）。**3 个定长 MLA shape（S256H2/S512H4/
+     S1024H2）× 单/两文件、ksplit=1/4/8/16 全部 `runs[1-2] bitwise dq/dk/dv = 0`**；
+     `DET-vs-atomic` k=1 时 dq 恒 0、k>1 时 e-7。**DET 在 k=4 触底**（S1024H2：k=4 0.2589 <
+     k=8 0.2650 < k=16 0.2738），**相对旧「锁 k=1」主链 2.4–2.8×**（0.7256→0.2589ms），把
+     P3-4h/j 白扔的 split-K 并行度收回一大截；但仍比 atomic 慢 0.61–0.73×（partial 写+两次
+     reduce）。ncu（S1024H2 k=4）：DET 主 kernel 133.34µs/L2 51.5%/occ 12.5%/Waves 3.88、
+     `dkv_reduce_kernel<512,64>` **29.60µs / DRAM 77.1% / L2 75.8% / occ 65.3%**、
+     `dq_reduce_kernel<512>` 8.74µs ⇒ **bound 仍是 reduce 的纯 DRAM 带宽**。默认路径与
+     D=128 回归逐位不变。详见 `docs/03` §62。
+
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 

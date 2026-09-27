@@ -2804,10 +2804,29 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                 dqacc[i][j][q + 1] += acc[i][j][q + 1] * sds2[r] * scale;
               } else {
                 int qi = m0 + r;
-                if (qi < len)
-                  red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + d0 + c,
-                           acc[i][j][q] * sds2[r] * scale,
-                           acc[i][j][q + 1] * sds2[r] * scale);
+                if (qi < len) {
+                  // P3-4k：非 `kRegDq` 路径（MLA/HD=512 因寄存器墙恒走此分支）。`DET && ksplit>1`
+                  //   时把 dQ 的每个 part 偏和累加进本 CTA **独占**的 partial 区（布局同 P3-4f，
+                  //   按 part 分片），由 `dq_reduce_kernel` 按 part 固定次序求和 ⇒ 跨 part 也确定。
+                  //   这里逐 tile 累加：同一 `(row,c)` 在 CTA 内由同一线程按 nt 程序序写，故
+                  //   `red_add2`（原子）虽为跨 CTA 设计，对本 CTA 私有区仍是确定次序；空 part 的
+                  //   partial 由 host 先清零。`ksplit==1` 保持原无竞争 `red_add2`（逐位不变）。
+                  if constexpr (DET) {
+                    if (ksplit > 1)
+                      red_add2(dq_part +
+                                   (((size_t)(qbase + qi) * H + h) * ksplit + part) * HD + d0 + c,
+                               acc[i][j][q] * sds2[r] * scale,
+                               acc[i][j][q + 1] * sds2[r] * scale);
+                    else
+                      red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + d0 + c,
+                               acc[i][j][q] * sds2[r] * scale,
+                               acc[i][j][q + 1] * sds2[r] * scale);
+                  } else {
+                    red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + d0 + c,
+                             acc[i][j][q] * sds2[r] * scale,
+                             acc[i][j][q + 1] * sds2[r] * scale);
+                  }
+                }
               }
             }
       }

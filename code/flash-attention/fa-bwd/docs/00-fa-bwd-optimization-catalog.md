@@ -142,9 +142,17 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
     host 复用 `dkv_reduce_varlen_kernel<512,64>`（P3-4i 的 HD 参数化布局红利）；MLA 的 dQ
     不可寄存器累加 ⇒ 锁 ksplit=1（单写者 `red_add2`）。3 个 case（b1 causal/b3 causal/b1 full）
     × 单/两文件两次跑 `bitwise dq/dk/dv = 0`、`DET-vs-atomic` dq 恒 0 / dk,dv e-7–e-6；
-    代价（只差 DET）0.95–1.02×，但**锁 k=1 相对 auto split 的主 kernel ~3.3–5.6×**（确定性 =
-    用单写者换掉 split-K 并行度）；reduce **48.03µs / DRAM 65.8% / L2 67.6%**（纯带宽 bound）。
-    下一步候选：让 MLA dQ 也进 partial ⇒ 支持 ksplit>1 的确定性。见 `docs/03` §61。
+     代价（只差 DET）0.95–1.02×，但**锁 k=1 相对 auto split 的主 kernel ~3.3–5.6×**（确定性 =
+     用单写者换掉 split-K 并行度）；reduce **48.03µs / DRAM 65.8% / L2 67.6%**（纯带宽 bound）。
+     见 `docs/03` §61。
+   → **`--det` 的 MLA（HD=512）支持 `ksplit>1`（P3-4k，第一百二十四轮）**：非 `kRegDq` 的 dQ
+   epilogue 在 `DET && ksplit>1` 时把目标从 `dq_acc` 换成按 part 分片的 `dq_part`
+   （同 `(mblk,h,part)` 只被一个 CTA 写、CTA 内 nt 程序序 ⇒ 天然确定），再接已就位的
+   `dq_reduce_kernel<512>` 固定次序求和；device 只动这一处、host 扩 A/B。3 个定长 shape
+   × 单/两文件、ksplit=1/4/8/16 **`runs[1-2] bitwise dq/dk/dv = 0`**；DET 在 **k=4 触底**、
+   相对旧「锁 k=1」主链 **2.4–2.8×**（S1024H2 0.7256→0.2589ms），仍比 atomic 慢
+   0.61–0.73×；`DET-vs-atomic` k=1 时 dq 恒 0、k>1 时 e-7。bound = `dkv_reduce_kernel` 的
+   纯 DRAM 带宽（29.6µs/DRAM 77%/L2 76%）。见 `docs/03` §62。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 
