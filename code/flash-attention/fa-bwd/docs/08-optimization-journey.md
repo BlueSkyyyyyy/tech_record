@@ -696,8 +696,23 @@ smem 冲突 + 低 occ
      1.50×（GQA kv4）/1.66×（S4096）、纯 DRAM 带宽 bound（ncu 90.4%→78.9%）；**DET 主 kernel
      写侧 0.84–0.87×**——bf16 把 DRAM 写字节减半（ncu 44.5%→20.3%）但 `st.global` **store 扇区数
      几乎不变**（35,653,558→35,537,820），partial 写是扇区粒度 bound，端到端 `--det` 仍中性偏负。
-     对标默认路径不变：MHA S4096 FA2 379 / FA3 862 / TE 630 TF（ours total 时间 4.14× FA3）。
-     详见 `docs/01b` §6at；原始输出 `src/bf16/fa_bwd_bf16_p61_*`。
+      对标默认路径不变：MHA S4096 FA2 379 / FA3 862 / TE 630 TF（ours total 时间 4.14× FA3）。
+      详见 `docs/01b` §6at；原始输出 `src/bf16/fa_bwd_bf16_p61_*`。
+
+46. **O62（第 131 轮，device+host 增量，正结果：确定性 `--det` 端到端转正，opt-in A/B）**：
+      **DET partial 写扇区化**——落实第 129/130 轮明确点名的「唯一能同时降 reduce 与 main 写侧
+      字节的候选」。O60/O61 把 partial 降到 fp16/bf16 后，每 lane 只写 4B（half2），quad 4 lane
+      合起来 16B **落不满 32B 扇区**（ncu：store 扇区数 35.65M 一字不变），主 kernel 写侧反慢
+      15–19%。O62 把**相邻两个列组 `j`/`j+1` 的 4B 拼成一次 8B 写**（`uint2`），并使 partial 的
+      HD 维做**16 列块内置换**（`dkv_p16_perm`）让 quad 的 4×8B 恰为连续 32B；reduce 端按同一
+      置换读回 ⇒ **求和集合/次序不变、数值逐位不变**。fp16/bf16 同步（bf16 单文件因
+      `#include <algorithm>` 在 device 区之前、`sync_onefile_device.py` 边界启发式误判，改手工
+      同步）。**store 扇区数精确减半**（S4096 35.65M→18.35M）；DET 主 kernel 写侧从
+      **0.84–0.87× 翻正为 1.10–1.17×**，reduce 仍 1.24–1.66×，**端到端 `--det` 首次全面快过
+      非确定 atomic**（fp16 DET/atomic=1.19×/1.09×/1.03×；bf16 1.19×/1.10×/1.02×）。默认路径
+      一行未动；全量 `--ci` gate 全绿（fp16 7.812e-3 / bf16 3.125e-2 / fp8 7.629e-6）、
+      `--check docs/04` OK 194 行。详见 `docs/01` §18、`docs/01b` §6au、`docs/00` §4.2。
+      原始输出 `src/fp16/fa_bwd_fp16_*_o62_*`、`src/bf16/fa_bwd_bf16_*p62*`。
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
