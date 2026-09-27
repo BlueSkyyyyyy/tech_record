@@ -2792,3 +2792,82 @@ fp8 main 仍 **L2 78% red + mma 依赖**）。原始输出 `src/fa_bwd_p33g_fa_b
 **结论**：`--consistency --ctol auto` 已内建为 `fa_bwd_run.py` 全量扫的默认出口检查，用按
 dtype 的 ulp 容差在 73/73 case 上全绿、且负向测试确认会拦；单/两文件「device 逐字同源」从
 此由端到端回归持续背书，无需再逐轮人工誊抄。当前性能边界未变（属文档已判决的硬件资源墙）。
+
+## 42. P3-4d：CI 单一入口 + Hopper 快路入标准 harness（第 117 轮）—— 工具链 + 验证，正结果
+
+> 本轮落实第 116 轮（§41）「下一步候选 ②」：把「跑 ours + 汇总 + 单/两文件一致性 gate」再
+> **收口成一条 CI 命令**，并在其上叠加 **docs/04 内嵌表新鲜度校验**；同时把此前只能在命令行手拼
+> `NVCC_FLAGS` 的 **Hopper 快路（`-DFA_WGMMA -DFA_TMA -lcuda`）** 接进标准 harness（`--hopper`）。
+> device 一行未改；但为保证「构建配置差异 ≠ 实现分叉」，`--hopper` 用**独立前缀**
+> `ours_hp/ours_sf_hp`，绝不覆盖默认 mma 口径的 `ours/ours_sf`。
+
+### 42.1 改动（纯 harness + 一个入口脚本）
+
+* `harness/fa_bwd_run.py`：
+  * **`--ci`**：跑完后（或 `--no-run` 时）自动调用 `fa_bwd_compare.py --check docs/04`，
+    内嵌表陈旧即退出码 1；并把一致性 gate 结果 + doc-check 结果汇总到 `src/fa_bwd_ci.out.txt`。
+  * **`--hopper`**：定长/变长构建都切到 `-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA
+    -DFA_TMA -lcuda`（此前只有 varlen 入口在 sm90a 下编译），且输出前缀切到 `ours_hp/ours_sf_hp`
+    （wgmma/TMA 与 mma 的数值差可达 O(1e-1)，见 `docs/03` O9c-2 A/B；混用会误触一致性 gate）。
+  * **`--perf-baseline <dtype>`**：额外在容器内跑用户指定的纯反向基线 `fa_vs_te_bwd_only.py`
+    （FA2/FA3/TE 三列，forward 在计时区外），原始输出落盘。
+* `scripts/ci.sh`：`exec python harness/fa_bwd_run.py --ci "$@"`，一行命令的固定入口。
+
+### 42.2 实测：CI 全绿（`scripts/ci.sh`，无 GPU 路径）
+
+`python3 harness/fa_bwd_run.py --no-run --ci`（复用 73 case 已有 npy）退出码 **0**：
+
+| dtype | worst `max\|ours-ours_sf\|` | tol（auto） | gate | docs/04 表 |
+|---|---|---|---|---|
+| fp16 | 3.906e-03 | 1.6e-2 | **OK** | `--check` OK（194 行，rtol=5e-3） |
+| bf16 | 7.812e-03 | 3.2e-2 | **OK** | 同上 |
+| fp8  | 9.537e-06 | 1e-4 | **OK** | 同上 |
+
+**负向测试**（`src/fa_bwd_p117_ci_negative.out.txt`）：① `--consistency-tol 1e-9` → 三 dtype
+全 FAIL、**rc=1**；② 把内嵌表某格从 `1.883e-03` 改成 `9.999e-03` → `--check` 报
+`STALE（第 11 行数值超出 rtol=0.005）`、**rc=1**。⇒ 「实现分叉」与「文档陈旧」两类回归都被同一
+条命令拦住。
+
+### 42.3 现场 device 验证：`--hopper` 真编译真跑（fp8 S4096）
+
+`python3 harness/fa_bwd_run.py --case b1_s4096_h16_d128_causal_fp8 --impls both --hopper`
+（4 次运行 / 2 次编译，容器内）退出码 0：
+
+* 数值 vs fp32 ref：`dq/dk/dv = 2.635e-01 / 2.644e-01 / 3.216e-01`（与 §32–§41 历史**逐位/同量级一致**）；
+* 单/两文件（都是 Hopper 构建）一致性 worst `7.153e-07`（fp8 ulp 级，fp8 tol 1e-4）→ **OK**；
+* 计时：`quant 0.0693 | preprocess 0.2219 | main 1.5945 | total 1.9359 ms / 70.99 TF`
+  （Hopper 快路，`ksplit=8`、`grid=512×16`、`O7 use_regdq=1`、`O41 kv-tma=on`）；原始输出
+  `src/fp8/fa_bwd_fp8_p117_hopper_run.out.txt`（对比 `src/fa_bwd_p117_hopper_compare.out.txt`）。
+
+### 42.4 性能对标（纯反向口径）
+
+同机纯反向基线（`src/fa_bwd_perf_baseline_fp16.out.txt`、`src/fa_bwd_p117_fp8_te_baseline.out.txt`）：
+
+| shape | FA2.7.4 | FA3 | TE2.14 | TE FP8 | ours（Hopper） | ours/TE |
+|---|---|---|---|---|---|---|
+| fp16 MHA (1,4096,16,128) | 0.7341ms/374TF | **0.3245/847** | 0.4403/624 | — | 1.2582/109.2（§40） | 2.87× |
+| fp8 MHA (1,4096,16,128) | — | — | — | **0.3025/908.7** | **1.9359/70.99** | **6.40×** |
+
+⇒ fp8 ours/TE 6.40×（§41 记 ~6.4×，一致）；fp16 纯反向 FA3/TE/FA2 三列与 §37/§38/§40 一致。
+
+### 42.5 ncu（fp8 main，Hopper，S=4096；`src/fp8/fa_bwd_fp8_p117_ncu_main_s4096.out.txt`）
+
+| 指标 | 值 |
+|---|---|
+| `lts__throughput` / `lts__t_sectors_op_red` | **78.63%** / **114,524,160** 扇区 |
+| `l1tex__throughput` / shared `op_ld` bank conflict | 68.23% / 15,033,972 |
+| DRAM / Compute / tensor-pipe | 4.26% / 47.19% / 12.30% |
+| stall（per issue active） | **wait 1.59 + short_scoreboard 1.29** + long 0.60 + barrier 0.43 |
+| occ / regs / waves | 18.25% / **168** / 20.69 |
+
+**bound 结论**：与 §41 完全一致——头号是 **L2 的 dK/dV 跨 CTA `red`（78.6%，114.5M 扇区）**，
+其次是 **smem→mma 依赖（short_scoreboard）+ mma 等待（wait）**；DRAM 仅 4.3%、tensor pipe 12.3%。
+非带宽/算力 bound。
+
+### 42.6 结论 / 下一步
+
+`scripts/ci.sh`（=`fa_bwd_run.py --ci`）已是「跑 ours + 数值 + 一致性 gate + 文档新鲜度」的单一
+入口，正/负向测试均确认会拦；`--hopper` 让标准 harness 也能产 Hopper 快路口径而不污染默认基线。
+**设备侧当前无未证伪的可行杠杆**：跨-tile `P/dS` 双缓冲流水（唯一能直接打 `wait+short_scoreboard`
+的方向）经精确 smem 预算核算在本卡 3 CTA/SM 下**不可行**（详见 ROADMAP「阻塞」），与 L2 `red`
+（`red` 只能靠放大 BM / 提 occupancy，两者皆撞寄存器/smem 硬墙）共同锁死了当前工作点。
