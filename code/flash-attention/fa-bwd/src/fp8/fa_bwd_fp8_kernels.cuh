@@ -652,6 +652,54 @@ __global__ void dq_reduce_kernel(const float* __restrict__ dq_part, float* __res
   dq_acc[((size_t)row * H + h) * HD + c] = s;
 }
 
+// ------------------- P3-4n：把两个 reduce 融合进一个 kernel（候选 ②） -------------------
+// 动机：DET 的二次归约原本是**两次 launch**——`dkv_reduce_kernel`（读 dk/dv partial）+
+//   `dq_reduce_kernel`（读 dq partial）。两者数据不相交（各自 block 独立），合成一次 launch
+//   可省掉一次 launch + 一次尾部，并让 dq 的轻量块与 dkv 的重块在同一网格里交错填满 SM。
+//   **字节数不变**（两个 reduce 读的都是各自 partial；无法合并），故预期收益在「省一次
+//   launch + 小 S 的尾部」，对大 S 的纯带宽墙中性。数学/求和次序逐字与两个 kernel 相同 ⇒
+//   融合版与分开版**逐位相同**。grid = `dkv_blocks + dq_blocks`（1D，block=HD）；前
+//   `dkv_blocks` 个块做 dK/dV，其余做 dQ。`ksplit==1` 时 `dq_blocks=0`，退化成纯 dkv。
+template <int HD, int BM = 64>
+__global__ void dkv_dq_reduce_kernel(const float* __restrict__ dk_part,
+                                     const float* __restrict__ dv_part,
+                                     const float* __restrict__ dq_part,
+                                     float* __restrict__ dk_acc, float* __restrict__ dv_acc,
+                                     float* __restrict__ dq_acc, int S, int H, int Hkv,
+                                     int nblk, int causal, int ksplit, int dkv_blocks) {
+  const int c = threadIdx.x;
+  if (c >= HD) return;
+  const int idx = blockIdx.x;
+  if (idx < dkv_blocks) {
+    // ---- 与 dkv_reduce_kernel 逐字相同的 dK/dV 归约 ----
+    const int hb = idx / S, jg = idx - hb * S;
+    const int b = hb / Hkv, hkv = hb % Hkv;
+    const int G = H / Hkv;
+    const int h0 = hkv * G;
+    const int mblk0 = causal ? (jg / BM) : 0;
+    float sk = 0.f, sv = 0.f;
+    for (int hh = 0; hh < G; ++hh) {
+      const size_t prow = (size_t)(b * H + h0 + hh);
+      for (int m = mblk0; m < nblk; ++m) {
+        const size_t base = ((prow * nblk + m) * (size_t)S + jg) * HD + c;
+        sk += dk_part[base];
+        sv += dv_part[base];
+      }
+    }
+    const size_t o = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
+    dk_acc[o] = sk;
+    dv_acc[o] = sv;
+  } else {
+    // ---- 与 dq_reduce_kernel 逐字相同的 dQ 归约（按 part 固定次序） ----
+    const int qi = idx - dkv_blocks;
+    const int row = qi / H, h = qi - row * H;
+    const size_t b0 = ((size_t)row * H + h) * ksplit;
+    float s = 0.f;
+    for (int p = 0; p < ksplit; ++p) s += dq_part[(b0 + p) * HD + c];
+    dq_acc[((size_t)row * H + h) * HD + c] = s;
+  }
+}
+
 // P3-4i：varlen 版的确定性 dK/dV 归约（把 P3-4e 的 `--det` 扩到变长）。partial 布局沿用定长式
 //   `part[((b*H + h)*nblk_max + mblk)*maxlen + jg]`（body 传 `S=maxlen`、`nblk=nblk_max`），
 //   但每个序列长度/块数不同 ⇒ 归约按 `cu_seqlens` 定界：`len_b = cu[b+1]-cu[b]`、
@@ -688,6 +736,50 @@ __global__ void dkv_reduce_varlen_kernel(const float* __restrict__ dk_part,
   const size_t o = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c;
   dk_acc[o] = sk;
   dv_acc[o] = sv;
+}
+
+// P3-4n：varlen 版的 dkv+dq 融合归约（同定长版：grid = dkv_blocks + dq_blocks，求和次序
+//   逐字沿用 `dkv_reduce_varlen_kernel` / `dq_reduce_kernel` ⇒ 与分开版逐位相同）。
+//   `dkv_blocks = B*Hkv*maxlen`（`jg>=len_b` 的块空转 return），`dq_blocks = T*H`。
+template <int HD, int BM = 64>
+__global__ void dkv_dq_reduce_varlen_kernel(
+    const float* __restrict__ dk_part, const float* __restrict__ dv_part,
+    const float* __restrict__ dq_part, float* __restrict__ dk_acc, float* __restrict__ dv_acc,
+    float* __restrict__ dq_acc, const int* __restrict__ cu_seqlens, int H, int Hkv, int nblk_max,
+    int maxlen, int causal, int ksplit, int dkv_blocks) {
+  const int c = threadIdx.x;
+  if (c >= HD) return;
+  const int idx = blockIdx.x;
+  if (idx < dkv_blocks) {
+    const int hb = idx / maxlen, jg = idx - hb * maxlen;
+    const int b = hb / Hkv, hkv = hb % Hkv;
+    const int qbase = cu_seqlens[b];
+    const int len = cu_seqlens[b + 1] - qbase;
+    if (jg >= len) return;
+    const int nblk_b = (len + BM - 1) / BM;
+    const int G = H / Hkv;
+    const int h0 = hkv * G;
+    const int mblk0 = causal ? (jg / BM) : 0;
+    float sk = 0.f, sv = 0.f;
+    for (int hh = 0; hh < G; ++hh) {
+      const size_t prow = (size_t)(b * H + h0 + hh) * nblk_max;
+      for (int m = mblk0; m < nblk_b; ++m) {
+        const size_t base = ((prow + m) * (size_t)maxlen + jg) * HD + c;
+        sk += dk_part[base];
+        sv += dv_part[base];
+      }
+    }
+    const size_t o = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c;
+    dk_acc[o] = sk;
+    dv_acc[o] = sv;
+  } else {
+    const int qi = idx - dkv_blocks;
+    const int row = qi / H, h = qi - row * H;
+    const size_t b0 = ((size_t)row * H + h) * ksplit;
+    float s = 0.f;
+    for (int p = 0; p < ksplit; ++p) s += dq_part[(b0 + p) * HD + c];
+    dq_acc[((size_t)row * H + h) * HD + c] = s;
+  }
 }
 
 // ------------------- O42：Hopper bulk reduce（`cp.reduce.async.bulk`） -------------------

@@ -168,6 +168,15 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    逐位相同**（`runs[1-2]=0`、`kvpipe-vs-非kvpipe=0`）；DET 非 kvpipe→kvpipe 5 shape 1.018–1.090×
    （单文件 b3 1.095×）；ncu 主 kernel 243→220µs、`long_scoreboard` 3.93→3.25（机制同 O51）。
    见 `docs/03` §64。
+   → **把两个二次归约融合进一个 kernel（P3-4n，第一百二十七轮）**：DET 的二次归约原本是两次
+   launch（`dkv_reduce_kernel` 读 dk/dv partial + `dq_reduce_kernel` 读 dq partial）。新增
+   `dkv_dq_reduce_kernel<HD,BM>` / `dkv_dq_reduce_varlen_kernel<HD,BM>`，grid =
+   `dkv_blocks + dq_blocks`（1D，前 `dkv_blocks` 做 dK/dV、其余做 dQ），求和次序逐字沿用两个
+   旧 kernel ⇒ **融合版与分开版 dq/dk/dv 逐位相同**。字节数不变（两 reduce 读各自 partial），
+   收益来自「省一次 launch + 用轻量 dq 块（ncu DRAM 58.7%、8.6µs 尾）填满重 dkv 块的发射口」：
+   reduce-only S512 **1.149×**、varlen D128 b1_t512 **1.170×**、S4096 **1.006×**（纯带宽墙、中性）；
+   ncu 融合 22.94µs/DRAM 79.7%/occ 86.1%（分开 dkv 17.31µs/70.4% + dq 8.64µs/58.7%，合计
+   25.95µs）。`--nofusered` 退回两次 launch。见 `docs/03` §65。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 
