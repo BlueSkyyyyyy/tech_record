@@ -1,0 +1,47 @@
+fa_bwd_bf16_mma_main.cu(1235): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
+    const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
+              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 629916
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_bf16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[O49] d128 8-warp = 0 (d128w=-1, grid=1024, sm=132)
+[O38] lse k-split = 1 (auto)
+[O23] main backend = wgmma2b(BN=128) | lse = wgmma (D=128 S=4096)
+[O43] wgmma2 k-split = 1
+[timing] total(3 kernels) 1.3310 ms  103.26 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2935 ms | main 0.9648 ms | convert 0.0726 ms
+[O24 A/B] delta old 0.0426 ms | warp 0.0128 ms (3.34x)
+[O8b A/B] lse O8 0.8611 ms | bal(单缓冲) 0.4289 ms (2.008x) | bal+cpasync(双缓冲) 0.3111 ms (2.768x)
+[O9 A/B] lse wgmma+SW128 0.2784 ms (vs bal+cpasync 1.118x, vs O8 3.093x)
+[O6 A/B] main nopipe 2.1453 ms (64.06 TF) | pipe(KV both) 1.5316 ms (89.73 TF) | pipe2(K only) 1.5845 ms (86.74 TF) => nopipe/pipe 1.401x, nopipe/pipe2 1.354x
+[O48 A/B] main D=128 4w(128/2) 1.5816 ms | 8w(256/4) 1.7956 ms (0.881x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/7.153e-07/9.537e-07
+[O6c A/B] main sched0(原样) 1.5785 ms | sched1(交错) 1.5495 ms (1.019x) | sched2(逆序) 1.5470 ms (1.020x)
+[O9b A/B] main mma(64,64,2) 1.4527 ms (94.61 TF) | wgmma(GEMM1/2) 1.5171 ms (90.60 TF) => 0.958x
+[O17 A/B] main mma(64,64,2) 1.4632 ms | O9b wgmma 1.5055 (0.972x) | O17 wgmma2(BM128) 0.9865 (1.483x) TF 139.3
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 1.0048 ms (136.8 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.9865 ms (139.3 TF) => 1.019x | max|diff| dq/dk/dv=0.00e+00/3.81e-05/3.05e-05
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/2.29e-04/4.73e-04 | wg2-vs-O9b dq/dk/dv=0.00e+00/2.29e-04/4.73e-04
+[O18 A/B] main O17 wg2(BN64) 0.9865 ms (139.3 TF) | O18 wg2b(BN128,split) 0.9636 ms (142.6 TF) => 1.024x | O18 wg2b(BN128,串行) 0.9872 ms => 0.999x | max|diff| wg2b-vs-wg2 dq/dk/dv=1.79e-07/2.67e-05/3.05e-05 | wg2bns-vs-wg2b 0.00e+00/1.53e-05/1.53e-05
+[O5c A/B] main (64,32,2) 1.5365 ms (89.45 TF) | (64,64,2) 1.4585 (94.23) | (32,32,1) 2.5486 (53.93) | (32,32,2) 2.5586 (53.72) => best 1.053x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.7970 (76.48) | f4 1.8965 (72.47,-5.2%) | f2+PREL 1.5462 (88.89,+16.2%) | f4+PREL 1.5896 (86.46,+13.0%)
+  (BM=64,BN=64,PIPE=2): base 1.7001 (80.84) | f4 1.7206 (79.88,-1.2%) | f2+PREL 1.4706 (93.46,+15.6%) | f4+PREL 1.5115 (90.93,+12.5%)
+  (BM=32,BN=32,PIPE=1): base 2.5832 (53.20) | f4 2.6106 (52.65,-1.0%) | f2+PREL 2.5422 (54.06,+1.6%) | f4+PREL 2.5645 (53.59,+0.7%)
+  (BM=32,BN=32,PIPE=2): base 2.5822 (53.23) | f4 2.5876 (53.11,-0.2%) | f2+PREL 2.5381 (54.15,+1.7%) | f4+PREL 2.5509 (53.88,+1.2%)
+[O61 A/B] main-only DET fp32 0.7756 ms | DET bf16 0.7015 ms (1.106x) || reduce-only fp32 0.3877 ms | bf16 0.2332 ms (1.663x)
+[O61 A/B] main wgmma2b atomic 0.9507 ms (144.6 TF) | DET(fp32) 1.1891 ms (0.800x) | DET(bf16) 0.9327 ms (1.019x)
+[O61 A/B] runs[1-2] bitwise-diff dk/dv: fp32-partial 0.00e+00/0.00e+00 | bf16-partial 0.00e+00/0.00e+00
+[O61 A/B] vs atomic dk/dv: fp32-partial 1.19e-06/1.07e-06 | bf16-partial 7.79e-03/1.54e-02 | bf16-vs-fp32 7.79e-03/1.54e-02
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  fa_dq     vs ref: max_abs=1.441e-02  max_rel=1.630e+00
+  fa_dk     vs ref: max_abs=1.332e-02  max_rel=1.612e+00
+  fa_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  te_dq     vs ref: max_abs=1.524e-02  max_rel=3.641e+00
+  te_dk     vs ref: max_abs=1.763e-02  max_rel=2.718e+00
+  te_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00

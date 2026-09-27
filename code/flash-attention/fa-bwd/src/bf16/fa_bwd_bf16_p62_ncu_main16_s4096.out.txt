@@ -1,0 +1,62 @@
+fa_bwd_bf16_mma_main.cu(1235): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
+    const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
+              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 629916
+==PROF== Connected to process 1032808 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/bf16/fa_bwd_bf16_mma_main.out)
+==PROF== Profiling "void fa_bwd_bf16_wgmma2b_kernel<(int)128, (bool)1, (bool)1, (bool)1>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, const float *, float *, float *, float *, int, int, int, float, int, __nv_bfloat16 *, float *, float *, int)": 0%....50%....100% - 1 pass
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_bf16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[O49] d128 8-warp = 0 (d128w=-1, grid=1024, sm=132)
+[O38] lse k-split = 1 (auto)
+[O23] main backend = wgmma2b(BN=128) | lse = wgmma (D=128 S=4096)
+[O43] wgmma2 k-split = 1
+[timing] total(3 kernels) 1.3540 ms  101.51 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3225 ms | main 0.9906 ms | convert 0.0409 ms
+[O24 A/B] delta old 0.0614 ms | warp 0.0633 ms (0.97x)
+[O8b A/B] lse O8 0.8865 ms | bal(单缓冲) 0.4358 ms (2.034x) | bal+cpasync(双缓冲) 0.3120 ms (2.841x)
+[O9 A/B] lse wgmma+SW128 0.2788 ms (vs bal+cpasync 1.119x, vs O8 3.179x)
+[O6 A/B] main nopipe 2.2114 ms (62.15 TF) | pipe(KV both) 1.6067 ms (85.54 TF) | pipe2(K only) 1.5853 ms (86.70 TF) => nopipe/pipe 1.376x, nopipe/pipe2 1.395x
+[O48 A/B] main D=128 4w(128/2) 1.5505 ms | 8w(256/4) 1.7691 ms (0.876x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.192e-06/1.431e-06
+[O6c A/B] main sched0(原样) 1.5780 ms | sched1(交错) 1.5470 ms (1.020x) | sched2(逆序) 1.5882 ms (0.994x)
+[O9b A/B] main mma(64,64,2) 1.4887 ms (92.32 TF) | wgmma(GEMM1/2) 1.5471 ms (88.84 TF) => 0.962x
+[O17 A/B] main mma(64,64,2) 1.4752 ms | O9b wgmma 1.5359 (0.960x) | O17 wgmma2(BM128) 1.0000 (1.475x) TF 137.4
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 1.0159 ms (135.3 TF) | O17-2 拆分(wg0=dV,wg1=dK) 1.0000 ms (137.4 TF) => 1.016x | max|diff| dq/dk/dv=0.00e+00/4.77e-06/7.63e-06
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/1.53e-05/2.19e-05 | wg2-vs-O9b dq/dk/dv=0.00e+00/1.53e-05/2.10e-05
+[O18 A/B] main O17 wg2(BN64) 1.0000 ms (137.4 TF) | O18 wg2b(BN128,split) 0.9564 ms (143.7 TF) => 1.046x | O18 wg2b(BN128,串行) 0.9801 ms => 1.020x | max|diff| wg2b-vs-wg2 dq/dk/dv=1.79e-07/3.81e-06/7.63e-06 | wg2bns-vs-wg2b 0.00e+00/2.86e-06/3.34e-06
+[O5c A/B] main (64,32,2) 1.5506 ms (88.63 TF) | (64,64,2) 1.4864 (92.47) | (32,32,1) 2.5973 (52.92) | (32,32,2) 2.6377 (52.11) => best 1.043x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.7532 (78.40) | f4 1.8723 (73.41,-6.4%) | f2+PREL 1.5779 (87.10,+11.1%) | f4+PREL 1.6072 (85.52,+9.1%)
+  (BM=64,BN=64,PIPE=2): base 1.6893 (81.36) | f4 1.7101 (80.37,-1.2%) | f2+PREL 1.4852 (92.54,+13.7%) | f4+PREL 1.4910 (92.18,+13.3%)
+  (BM=32,BN=32,PIPE=1): base 2.6710 (51.46) | f4 2.6649 (51.57,+0.2%) | f2+PREL 2.6047 (52.77,+2.5%) | f4+PREL 2.6448 (51.97,+1.0%)
+  (BM=32,BN=32,PIPE=2): base 2.6555 (51.76) | f4 2.6677 (51.52,-0.5%) | f2+PREL 2.6354 (52.15,+0.8%) | f4+PREL 2.6109 (52.64,+1.7%)
+[O61 A/B] main-only DET fp32 0.7845 ms | DET bf16 0.7016 ms (1.118x) || reduce-only fp32 0.3879 ms | bf16 0.2343 ms (1.656x)
+[O61 A/B] main wgmma2b atomic 0.9883 ms (139.1 TF) | DET(fp32) 1.1867 ms (0.833x) | DET(bf16) 0.9323 ms (1.060x)
+[O61 A/B] runs[1-2] bitwise-diff dk/dv: fp32-partial 0.00e+00/0.00e+00 | bf16-partial 0.00e+00/0.00e+00
+[O61 A/B] vs atomic dk/dv: fp32-partial 1.19e-06/1.07e-06 | bf16-partial 7.79e-03/1.54e-02 | bf16-vs-fp32 7.79e-03/1.54e-02
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  fa_dq     vs ref: max_abs=1.441e-02  max_rel=1.630e+00
+  fa_dk     vs ref: max_abs=1.332e-02  max_rel=1.612e+00
+  fa_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+  te_dq     vs ref: max_abs=1.524e-02  max_rel=3.641e+00
+  te_dk     vs ref: max_abs=1.763e-02  max_rel=2.718e+00
+  te_dv     vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+==PROF== Disconnected from process 1032808
+[1032808] fa_bwd_bf16_mma_main.out@127.0.0.1
+  void fa_bwd_bf16_wgmma2b_kernel<128, 1, 1, 1>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, const float *, float *, float *, float *, int, int, int, float, int, __nv_bfloat16 *, float *, float *, int) (32, 16, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ---------------------------------------------- ----------- ------------
+    Metric Name                                    Metric Unit Metric Value
+    ---------------------------------------------- ----------- ------------
+    dram__bytes_write.sum                                Mbyte       566.98
+    gpu__time_duration.sum                                  us       694.21
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum      sector     18350080
+    lts__t_sectors_op_write.sum                         sector     27525289
+    ---------------------------------------------- ----------- ------------
+

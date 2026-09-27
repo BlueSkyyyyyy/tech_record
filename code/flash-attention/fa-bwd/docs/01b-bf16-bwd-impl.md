@@ -2205,3 +2205,75 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
 `src/bf16/fa_bwd_bf16_p61_det_sweep_{twofile,onefile}.out.txt`、
 `src/bf16/fa_bwd_bf16_p61_ncu_{reduce32,reduce16,main_det32,main_det16}_s4096.out.txt`、
 `src/bf16/fa_bwd_bf16_p61_fa3_te_baseline.out.txt`。
+
+## 6au. O62-bf16（第一百三十一轮，**正结果：确定性 `--det` 端到端转正**）：DET partial 写扇区化（fp16 O62 的逐字 dtype 参数化）
+
+### 6au.1 动机
+
+O61（§6at）把 `--det` 扩到 bf16 并支持 partial 降精度到 bf16，但和 fp16 O60 同病：
+**reduce 单向 1.27–1.66×，DET 主 kernel 写侧却慢 0.84–0.87×**——bf16 把 DRAM 写字节减半，
+`st.global` 的 store 扇区数却几乎不变（35.65M→35.54M），因为每 lane 只写 4B、quad 16B 落不满
+32B 扇区。O62 把 fp16 的**扇区化**方案逐字 dtype 参数化到 bf16。
+
+### 6au.2 改动（device 逐字同源）
+
+- 新增 `dkv_det_store_h4(float* base, size_t off, a0,a1,b0,b1)`：两组 `__nv_bfloat162` 拼成
+  一次 8B `uint2` 写；新增 `dkv_p16_perm(c)`（置换公式与 fp16 逐字相同）。
+- `fa_bwd_bf16_wgmma2b_kernel<HD,SPLIT,DET,DET_HALF>` 的 4 处 dK/dV 写点改成
+  `DET_HALF`（偶数 j 写 8B、奇数 j 跳过）/ `DET`（fp32）/ atomic 三分支；`DET_HALF` 用
+  `rb + (j>>1)*16 + (lane&3)*4` 的置换偏移。
+- `dkv_reduce_kernel<HD,P16>` 的 `P16` 分支按 `dkv_p16_perm(c)` 读回（求和集合/次序不变）。
+- **注**：bf16 单文件的 `#include <algorithm>` 位于 device 区之前，`sync_onefile_device.py`
+  的 host 边界启发式在 bf16 上会误判（`min(struct NpyF32, #include <algorithm>)` 取到 include
+  行）⇒ 本轮 bf16 单文件由**手工同步**（与 `.cuh` device 段逐字一致），不走该脚本。
+
+### 6au.3 数值（ours-vs-fp32-ref，bf16 causal，max_abs dq/dk/dv）
+
+| shape | ours-vs-ref | runs[1-2] fp32 | runs[1-2] bf16 | bf16-vs-atomic dk/dv |
+|---|---|---|---|---|
+| S512 MHA | 9.001/12.61/13.65e-3 | 0 / 0 | **0 / 0** | 7.78e-3 / 1.46e-2 |
+| GQA kv4 S1024 | 12.01/21.25/31.56e-3 | 0 / 0 | **0 / 0** | 1.36e-2 / 2.19e-2 |
+| S4096 MHA | 15.10/13.40/16.31e-3 | 0 / 0 | **0 / 0** | 7.79e-3 / 1.54e-2 |
+
+两档 partial 均逐位可复现；bf16-vs-atomic 只差 bf16 舍入（与 O61 完全相同）⇒ **O62 只改存储
+布局**。默认路径数值逐位不变。单文件逐指标一致。
+
+### 6au.4 性能（同 session A/B，event，ms；两文件，单文件复核同构）
+
+| shape | DET main fp32 | DET main bf16(O62) | reduce fp32 | reduce bf16 | DET(bf16)/atomic |
+|---|---|---|---|---|---|
+| S512 MHA | 0.0409 | **0.0356（1.148×）** | 0.0105 | 0.0085（1.235×） | **1.190×** |
+| GQA kv4 S1024 | 0.1427 | **0.1218（1.172×）** | 0.0577 | 0.0386（1.493×） | **1.098×** |
+| S4096 MHA | 0.7756 | **0.7015（1.106×）** | 0.3877 | 0.2332（1.663×） | **1.019×** |
+
+对比 O61（§6at.4）：DET bf16 main 从 **0.868×/0.850×/0.843×**（慢）翻正为
+**1.148×/1.172×/1.106×**，且**首次快过非确定性 `atomicAdd`**（O61 合计 0.950×/0.854×/0.800×，
+现 1.190×/1.098×/1.019×）。单文件 S512 同构（main 1.142×、reduce 1.195×、DET/atomic 1.209×）。
+
+### 6au.5 ncu（S4096，同 binary）
+
+| kernel | Duration | DRAM write | L2 write 扇区 | store 扇区 |
+|---|---|---|---|---|
+| DET main bf16 O61 `<128,1,1,1>` | 944.2µs | 0.57 GB | — | 35,537,820 |
+| **DET main bf16 O62 `<128,1,1,1>`** | **694.2µs** | **0.57 GB** | **27.53 M** | **18,350,080** |
+
+**store 扇区数减半（35.54M→18.35M）**，与 fp16 O62 逐项一致。reduce 置换读零代价。
+
+### 6au.6 结论 / 判决
+
+**正结果**：扇区化把 O60/O61 的写侧 15–19% 损失补回并反超 fp32/atomic；确定性 `--det` 在
+fp16/bf16 上现均**既逐位可复现、又比非确定 atomic 更快**。剩余：fp8 的 partial 降精度/扇区化
+（`fp8_mma_body` 的两个 DET 写点）未做。
+
+### 6au.7 复现 / 原始输出
+
+```
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/bf16/fa_bwd_bf16_mma_main.cu --det --iters=50
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/bf16/fa_bwd_bf16_mma_onefile.cu --det --iters=50
+```
+
+`src/bf16/fa_bwd_bf16_p62_det_{s512,s4096,gqa_kv4}.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_p62_det_s512.out.txt`、
+`src/bf16/fa_bwd_bf16_p62_ncu_main16_s4096.out.txt`。

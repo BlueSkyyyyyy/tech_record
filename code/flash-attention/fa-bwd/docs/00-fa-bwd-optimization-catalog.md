@@ -196,6 +196,14 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    1.27–1.66×（纯 DRAM 读字节减半），DET 主 kernel 写侧 0.84–0.87×**——bf16 把 DRAM 写字节
    减半但 **`st.global` store 扇区数几乎不变**（35.65M→35.54M），partial 写是扇区粒度 bound，
    端到端 `--det` 仍中性偏负。见 `docs/01b` §6at。
+   → **partial 写扇区化（O62，第一百三十一轮，fp16+bf16；确定性 `--det` 端到端转正）**：
+   O60/O61 的病根是「每 lane 只写 4B half2，quad 16B 落不满 32B 扇区」。O62 把**相邻两个列组
+   `j`/`j+1` 的 4B 拼成一次 8B 写**（`uint2`），quad 4 lane 覆盖连续 32B；为让每 lane 的 8B
+   恰好是这两段，partial 的 HD 维做**16 列块内置换**（`dkv_p16_perm`，reduce 端按同一置换读回
+   ⇒ 求和集合/次序不变、数值逐位不变）。**store 扇区数减半**（fp16 S4096 35.65M→18.35M），
+   DET 主 kernel 写侧从 0.84–0.87× **翻正为 1.10–1.17×**，reduce 仍 1.24–1.66×，**端到端
+   `--det` 首次全面快于非确定性 atomic**（fp16 DET(fp16)/atomic = 1.19×/1.09×/1.03×；
+   bf16 1.19×/1.10×/1.02×）。见 `docs/01` §18、`docs/01b` §6au。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 

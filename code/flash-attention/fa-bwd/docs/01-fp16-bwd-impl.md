@@ -4305,3 +4305,103 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
 `src/fp16/fa_bwd_fp16_mma_onefile_o60_det_s512.out.txt`、
 `src/fp16/fa_bwd_fp16_p_o60_ncu_{reduce_s512,reduce32_s4096,reduce16_s4096,main32_s4096,main16_s4096}.out.txt`、
 `src/fp16/fa_bwd_o60_fa3_te_baseline_fp16.out.txt`。
+
+## 18. O62-fp16（第一百三十一轮，正结果：确定性 `--det` 端到端转正，opt-in A/B）：DET partial 写扇区化
+
+### 18.1 动机与口径
+
+第 129 轮（O60，§17）把 `--det` 的 dK/dV partial 从 fp32 降到 fp16（`__half2`）后，
+**reduce 单向 1.27–1.66×**（纯 DRAM 读字节减半），但 **DET 主 kernel 写侧慢到 0.84–0.87×**，
+端到端只中性偏负。ncu 定位到病根：fp16 把 DRAM 写字节减半，**`st.global` 的 store 扇区数却
+一字不变**（35,651,584）——因为每 lane 一次只写 4B（half2），同一 quad 的 4 个 lane 合起来才
+16B，**落不满一个 32B L2 扇区**；半宽写更碎 + `__floats2half2_rn` 转换 ⇒ 主 kernel 慢 16–19%。
+
+O62 就是把这次写**扇区化**：让一次 store 落满 32B。做法不是改数学，而是**改 partial 的列布局**：
+
+- 主 kernel 的 wgmma 累加器里，同一 quad（`lane&3` = L=0..3，同一 KV 行 `jg`）持有相邻两
+  列组 `j`、`j+1` 的 half2（列 `j*8+2L+h` 与 `(j+1)*8+2L+h`）。把**这两个 half2 拼成一次 8B
+  写**（`uint2`），并让 partial 的列偏移按「`(j>>1)*16 + L*4`」排列 ⇒ 4 个 lane 的 8B 恰好
+  是**连续 32B**（一个扇区）。
+- 这要求 partial 的 HD 维做一次**16 列块内置换**：原列 `c`（`j`,`L`,`h`）映射到
+  `p = ((j>>1)<<4) + (L<<2) + ((j&1)<<1) + h`。置换是**双射**、且只在 16 列块内，reduce 端按
+  同一置换读回 ⇒ **求和集合与次序不变 ⇒ 数值逐位不变**（仍确定性可复现）。
+- 只动 `DET_HALF` 这一档；`DET`（fp32）与非确定 atomic 路径一行未改。
+
+### 18.2 实现（单/两文件 device 逐字一致）
+
+- 新增 `dkv_det_store_h4(float* base, size_t off, a0,a1,b0,b1)`：把两组 half2 用
+  `__floats2half2_rn` 打包后拼成 `uint2` 一次写 8B（`off` 是元素下标，在 `__half*` 上做加法）。
+- 新增 `dkv_p16_perm(c)`：上述 16 列块内置换公式（fp16 `__half`/bf16 `__bfloat16` 通用）。
+- `fa_bwd_fp16_wgmma2b_kernel<HD,SPLIT,DET,DET_HALF>` 的 **4 处** dK/dV 写点改成
+  `if constexpr (DET_HALF) { 偶数 j 时写 8B、奇数 j 跳过 } else if constexpr (DET) {fp32}
+  else {red_add2}`；`DET_HALF` 分支用带置换的 `rb + (j>>1)*16 + (lane&3)*4` 偏移。
+- `dkv_reduce_kernel<HD,P16>` 的 `P16` 分支按 `dkv_p16_perm(c)` 读回 partial（列仍局部，
+  读写都保持 warp 内 64B 窗口内的 coalescing）。
+- **顺带修既有坑**：单文件 `fa_bwd_fp16_mma_onefile.cu` 的 `#include "../fa_bwd_dump.h"` 原本
+  位于 device 区 marker（`#include <cuda_runtime.h>`）之后，`sync_onefile_device.py` 每次同步
+  都会把它覆盖掉、导致单文件编译报 `fa_bwd_save_npy_f32 undefined`（同 fp8 P3-4m 的坑）；
+  本轮把它移到 marker **之前**。
+
+### 18.3 数值（fp16 causal，max_abs；跑两遍）
+
+| shape | ours-vs-ref dq/dk/dv | runs[1-2] fp32-partial | runs[1-2] fp16-partial | fp16-vs-atomic dk/dv |
+|---|---|---|---|---|
+| S512 MHA | 1.671/1.771/1.899e-3 | 0 / 0 | **0 / 0** | 9.70e-4 / 1.95e-3 |
+| GQA kv4 S1024 | 2.134/3.305/3.850e-3 | 0 / 0 | **0 / 0** | 1.49e-3 / 2.45e-3 |
+| S4096 MHA | 1.883/1.734/1.966e-3 | 0 / 0 | **0 / 0** | 9.53e-4 / 1.95e-3 |
+
+**两种 partial 都逐位可复现**；fp16-vs-atomic 仍只有 fp16 舍入（与 O60 完全相同）⇒
+O62 只改**存储布局**，数值口径分毫未动。默认（无 `--det`）路径数值逐位不变。单文件逐指标一致。
+
+### 18.4 性能（同 session A/B，CUDA event，ms）
+
+| shape | DET main fp32 | DET main fp16(O62) | reduce fp32 | reduce fp16 | DET(fp16)/atomic |
+|---|---|---|---|---|---|
+| S512 MHA | 0.0417 | **0.0368（1.134×）** | 0.0109 | 0.0089（1.236×） | **1.192×** |
+| GQA kv4 S1024 | 0.1485 | **0.1277（1.162×）** | 0.0579 | 0.0389（1.488×） | **1.094×** |
+| S4096 MHA | 0.8009 | **0.6999（1.144×）** | 0.3878 | 0.2330（1.664×） | **1.035×** |
+
+对比 O60（§17.4）：DET fp16 main 从 **0.874×/0.847×/0.843×**（慢）翻正为
+**1.134×/1.162×/1.144×**（快过 fp32），**且首次快过非确定性 `atomicAdd` 基线**
+（O60 时 DET fp16 合计 0.929×/0.968×/1.006×，现 1.192×/1.094×/1.035×）。
+即：**确定性反向现在既逐位可复现、又比非确定 atomic 更快**。单文件 S512 同构
+（main 1.138×、reduce 1.247×、DET/atomic 1.198×）。
+
+### 18.5 ncu（S4096，同 binary，`--kernel-name-base demangled`）
+
+| kernel | Duration | DRAM write | L2 write 扇区 | store 扇区 |
+|---|---|---|---|---|
+| DET main fp32 `<128,1,1,0>` | 803.4µs | 1.12 GB | 53.48 M | 35,651,584 |
+| DET main fp16 O60 `<128,1,1,1>` | 952.6µs | 0.57 GB | 53.38 M | 35,651,584 |
+| **DET main fp16 O62 `<128,1,1,1>`** | **699.3µs** | **0.57 GB** | **27.53 M** | **18,350,080** |
+| reduce fp16 `<128,1>`（O62，置换读） | 231.0µs | 0.55 GB read | — | 25.96 M read 扇区 |
+
+**store 扇区数精确减半（35.65M→18.35M）**，与扇区化预期一致；reduce 的置换读**零代价**
+（与 O60 的 232.5µs / 25.96M read 扇区逐位相同）。**结论：O60/O61 的 15–19% 写侧损失来自
+「未落满扇区」，扇区化后不仅补回、还因每 8B 覆盖 4 个 half 而快过 fp32 的 8B/2 列。**
+
+### 18.6 对标（纯反向 `harness/fa_vs_te_bwd_only.py fp16`）
+
+O62 只改 opt-in 的 `--det` A/B，**默认非确定性路径一行未动**，故与 FA3/TE 的差距不变
+（MHA S4096 ours total vs FA3/ TE/FA2 见 §17.6）。
+
+### 18.7 复现 / 原始输出
+
+```
+# 两文件（S512 / S4096 / GQA kv4）：
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu --det --iters=50
+# 单文件：
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_onefile.cu --det --iters=50
+# ncu（DET_HALF 实例；换 \(bool\)1, \(bool\)1, \(bool\)0> 看 fp32；reduce 用 dkv_reduce_kernel.*\(bool\)1）：
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/ncu.sh src/fp16/fa_bwd_fp16_mma_main.cu --kernel-name-base demangled \
+  --kernel-name 'regex:wgmma2b_kernel.*\(bool\)1, \(bool\)1, \(bool\)1>' --launch-count 1 \
+  --metrics gpu__time_duration.sum,dram__bytes_write.sum,lts__t_sectors_op_write.sum,l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16 --det --iters=2
+```
+
+`src/fp16/fa_bwd_fp16_mma_main_o62_det_{s512,s4096,gqa_kv4}.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o62_det_s512.out.txt`、
+`src/fp16/fa_bwd_fp16_p_o62_ncu_{main16,main32,reduce16}_s4096.out.txt`。

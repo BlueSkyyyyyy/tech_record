@@ -4890,6 +4890,49 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     `src/bf16/fa_bwd_bf16_p61_fa3_te_baseline.out.txt`；文档 `docs/01b` §6at、`docs/08` §45、
     `docs/00` §4.2。
 
+- 2026-09-27（第一百三十一轮）：**O62 完成（DET partial 写扇区化；fp16+bf16；正结果：确定性
+  `--det` 端到端首次全面快过非确定 atomic，opt-in A/B）**。
+  - 动机（落实第一百二十九/一百三十轮点名的「唯一能同时降 reduce 与 main 写侧字节的候选」）：
+    O60/O61 把 partial 降精度到 fp16/bf16 后，**reduce 单向 1.27–1.66×，但 DET 主 kernel 写侧
+    慢 0.84–0.87×**——ncu 实测写字节减半、**store 扇区数却一字不变**（每 lane 4B half2，quad
+    16B 落不满 32B 扇区）。
+  - **改动（device 逻辑 fp16/bf16 逐字同源；fp16 走 `sync_onefile_device.py`，bf16 手工同步）**：
+    新增 `dkv_det_store_h4(base,off,a0,a1,b0,b1)`（相邻两个列组 `j`/`j+1` 的 half2 拼成一次
+    8B `uint2` 写）与 `dkv_p16_perm(c)`（partial HD 维的**16 列块内置换**，`p=((j>>1)<<4)+
+    (L<<2)+((j&1)<<1)+h`）；`fa_bwd_{fp16,bf16}_wgmma2b_kernel` 的 4 处 dK/dV 写点改成
+    `DET_HALF`（偶数 j 写 8B、奇数跳过）/ `DET`（fp32，逐字不变）/ atomic 三分支；
+    `dkv_reduce_kernel<HD,P16>` 的 `P16` 分支按同一置换读回。**置换是双射且只在 16 列块内
+    ⇒ 求和集合/次序不变、数值逐位不变**。顺带把 fp16 单文件的 `#include "../fa_bwd_dump.h"`
+    移到 device 区 marker 之前（否则每次同步都被覆盖、单文件编译失败，同 fp8 P3-4m 的坑）。
+  - **数值**：fp16/bf16 各 3 shape × 单/两文件，两档 partial **`runs[1-2] bitwise = 0`**；
+    fp16-vs-atomic 9.53e-4–2.45e-3 / bf16-vs-atomic 7.78e-3–2.19e-2（**与 O60/O61 逐位相同**，
+    纯降精度舍入）⇒ 只改存储布局。默认路径 `ours vs ref` 逐位不变。
+  - **性能（同 session A/B，event）**：DET main fp32→fp16 O62 = S512 `0.0417→0.0368（1.134×）`、
+    GQA kv4 `0.1485→0.1277（1.162×）`、S4096 `0.8009→0.6999（1.144×）`（O60 时是
+    0.874×/0.847×/0.843×）；reduce fp32→fp16 1.236×/1.488×/1.664×；**DET(fp16)/atomic =
+    1.192×/1.094×/1.035×**（O60 时 0.929×/0.968×/1.006×）。bf16 同构：main
+    1.148×/1.172×/1.106×、reduce 1.235×/1.493×/1.663×、**DET(bf16)/atomic = 1.190×/1.098×/1.019×**。
+    即**确定性反向现既逐位可复现、又比非确定 atomic 更快**。
+  - **ncu（S4096，同 binary）**：fp16 DET main `<128,1,1,1>` **952.6→699.3µs**、
+    **store 扇区 35,651,584→18,350,080（精确减半）**、L2 write 扇区 53.38M→27.53M、
+    DRAM write 仍 0.57GB；bf16 同（35,537,820→18,350,080、944.2→694.2µs）。
+    reduce `<128,1>` 的置换读**零代价**（231.0µs / 25.96M read 扇区，与 O60 逐位相同）。
+    ⇒ **根因确认为「未落满扇区」，扇区化后不仅补回写侧、还因每 8B 覆盖 4 个 half 而快过 fp32。**
+  - **回归**：全量 `python3 harness/fa_bwd_run.py --ci` gate 全绿（fp16 7.812e-3 / bf16
+    3.125e-2 / fp8 7.629e-6；`--consistency` OK worst 3.125e-2；`--check docs/04`：apply 后
+    OK 194 行，仅一处 fp8 varlen full 的原子次序末位噪声按项目工作流同步）。
+  - **对标**（默认非确定路径，一行未动）：与 O61 一致，差距不变。
+  - 原始输出 `src/fp16/fa_bwd_fp16_mma_{main,onefile}_o62_det_*.out.txt`、
+    `src/fp16/fa_bwd_fp16_p_o62_ncu_{main16,main32,reduce16}_s4096.out.txt`、
+    `src/bf16/fa_bwd_bf16_p62_det_{s512,s4096,gqa_kv4}.out.txt`、
+    `src/bf16/fa_bwd_bf16_mma_onefile_p62_det_s512.out.txt`、
+    `src/bf16/fa_bwd_bf16_p62_ncu_main16_s4096.out.txt`、`src/fp16/fa_bwd_p131_ci.out.txt`；
+    文档 `docs/01` §18、`docs/01b` §6au、`docs/08` §46、`docs/00` §4.2。
+  - **下一步候选**：① **把扇区化/降精度扩到 fp8 的 DET partial**（`fp8_mma_body` 的两个写点，
+    当前 fp32）；② 非确定 atomic 路径的 dK/dV 写也可试同款扇区化（当前 atomic 的 float2 已
+    落满 32B，但 dK/dV 跨 CTA 归约的另一半墙是 L2 red）；③ 非确定性/默认路径性能仍受本卡
+    寄存器/smem 硬墙锁定，见「阻塞」。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
@@ -4973,4 +5016,10 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
    真正能同时降 reduce 与 main 写侧字节的路 = **partial 写扇区化**（相邻 `j` 拼 32B 连续写 /
    staging 到 smem 整行 128B 写），是当前 `--det` 端到端转正的唯一候选；fp8 的 partial 降精度
    仍未做（`fp8_mma_body` 的两个 DET 写点）。
+   **更新（第一百三十一轮，O62-fp16+bf16）**：**partial 写扇区化已完成**——`dkv_det_store_h4`
+   （相邻两列组拼 8B）+ `dkv_p16_perm`（16 列块内置换，reduce 端置换读回），store 扇区精确减半
+   （35.65M→18.35M），DET 主 kernel 写侧 0.84–0.87×→**1.10–1.17×**、端到端 `--det` 首次全面
+   快过非确定 atomic（fp16 1.03–1.19×、bf16 1.02–1.19×），数值逐位不变。见 `docs/01` §18、
+   `docs/01b` §6au。**剩余：fp8 的 DET partial（`fp8_mma_body` 的两个写点，当前 fp32）降精度
+   + 扇区化。**
 - fp8：对比「只量化 dO」vs「dO 和 P 都量化」的精度/性能权衡。

@@ -344,6 +344,33 @@ __device__ __forceinline__ void dkv_det_store_p(float* base, size_t off, float a
   else dkv_det_store(base + off, a, b);
 }
 
+// O62：**partial 写扇区化**——O60/O61 把 partial 降精度到 fp16/bf16 后，每 lane 一次只写
+//   4B（half2），同一 quad 的 4 个 lane 合起来才 16B，**落不满一个 32B L2 扇区**：ncu 实测
+//   主 kernel 的 store 扇区数与 fp32 partial 时**一字不变**（35.6M），字节减半但写更碎 ⇒
+//   主 kernel 反而慢 15–19%（见 docs/01 §17、docs/08 §5.44/§5.45）。这里把**相邻两个列组
+//   `j`、`j+1` 的 half2 拼成一次 8B 写**（`uint2`），4 个 lane 覆盖连续 32B 扇区；同时把
+//   partial 的 HD 维做**16 列块内的置换**（见 `dkv_p16_perm`），使每个 lane 的 8B 恰好是
+//   「group j、group j+1」两段。置换只在 16 列块内，不改变 reduce 的求和集合/次序 ⇒ 数值
+//   逐位不变（仍确定性）。`off` 同样是**元素下标**，在 `__half*` 上做加法。
+__device__ __forceinline__ void dkv_det_store_h4(float* base, size_t off, float a0, float a1,
+                                                 float b0, float b1) {
+  __half2 h0 = __floats2half2_rn(a0, a1), h1 = __floats2half2_rn(b0, b1);
+  uint2 u;
+  u.x = *reinterpret_cast<unsigned*>(&h0);
+  u.y = *reinterpret_cast<unsigned*>(&h1);
+  *reinterpret_cast<uint2*>(reinterpret_cast<__half*>(base) + off) = u;
+}
+
+// O62：fp16/bf16 partial（P16）列布局的「16 列块内置换」。原列 `c = j*8 + 2*L + h`
+//   （`j` 列组、`L=lane&3`、`h∈{0,1}`）映射到 `((j>>1)<<4) + (L<<2) + ((j&1)<<1) + h`：
+//   同一 lane 的 group `j`、`j+1` 两个 half2 相邻构成 8B，4 个 lane 拼成 32B 扇区。
+//   reduce 端按此索引读回，求和集合/次序不变。
+__device__ __forceinline__ int dkv_p16_perm(int c) {
+  const int rem = c & 7, L = rem >> 1, h = rem & 1;
+  const int j = c >> 3;
+  return ((j >> 1) << 4) + (L << 2) + ((j & 1) << 1) + h;
+}
+
 // ---- O6：cp.async 异步拷贝（16B）----
 // 把「全局→smem」的 K/V 搬运从「同步 LDG + STS」改成硬件异步流水：`cp.async.cg` 走
 // L2-only 路径（流式数据不污染 L1），发起后立即返回、不占寄存器、不阻塞发射；
@@ -2216,12 +2243,19 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int jg = j0 + mh * 64 + rr;
               const int c = j * 8 + c2;
               if (jg < S) {
-                if constexpr (DET)
-                  dkv_det_store_p<DET_HALF>(dv_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
-                                accv[j * 4 + qq], accv[j * 4 + qq + 1]);
-                else
+                if constexpr (DET_HALF) {
+                  if (j & 1) continue;
+                  const size_t rb = (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD;
+                  dkv_det_store_h4(dv_part, rb + (j >> 1) * 16 + (lane & 3) * 4, accv[j * 4 + qq],
+                                   accv[j * 4 + qq + 1], accv[(j + 1) * 4 + qq],
+                                   accv[(j + 1) * 4 + qq + 1]);
+                } else if constexpr (DET) {
+                  dkv_det_store_p<false>(dv_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                                         accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+                } else {
                   red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
                            accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+                }
               }
             }
         }
@@ -2243,12 +2277,20 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int jg = j0 + mh * 64 + rr;
               const int c = j * 8 + c2;
               if (jg < S) {
-                if constexpr (DET)
-                  dkv_det_store_p<DET_HALF>(dk_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
-                                acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
-                else
+                if constexpr (DET_HALF) {
+                  if (j & 1) continue;
+                  const size_t rb = (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD;
+                  dkv_det_store_h4(dk_part, rb + (j >> 1) * 16 + (lane & 3) * 4,
+                                   acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale,
+                                   acck[(j + 1) * 4 + qq] * scale,
+                                   acck[(j + 1) * 4 + qq + 1] * scale);
+                } else if constexpr (DET) {
+                  dkv_det_store_p<false>(dk_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                                         acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+                } else {
                   red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
                            acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+                }
               }
             }
         }
@@ -2273,12 +2315,19 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int jg = j0 + mh * 64 + rr;
               const int c = j * 8 + c2;
               if (jg < S) {
-                if constexpr (DET)
-                  dkv_det_store_p<DET_HALF>(dv_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
-                                accv[j * 4 + qq], accv[j * 4 + qq + 1]);
-                else
+                if constexpr (DET_HALF) {
+                  if (j & 1) continue;
+                  const size_t rb = (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD;
+                  dkv_det_store_h4(dv_part, rb + (j >> 1) * 16 + (lane & 3) * 4, accv[j * 4 + qq],
+                                   accv[j * 4 + qq + 1], accv[(j + 1) * 4 + qq],
+                                   accv[(j + 1) * 4 + qq + 1]);
+                } else if constexpr (DET) {
+                  dkv_det_store_p<false>(dv_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                                         accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+                } else {
                   red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
                            accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+                }
               }
             }
         }
@@ -2298,12 +2347,20 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int jg = j0 + mh * 64 + rr;
               const int c = j * 8 + c2;
               if (jg < S) {
-                if constexpr (DET)
-                  dkv_det_store_p<DET_HALF>(dk_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
-                                acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
-                else
+                if constexpr (DET_HALF) {
+                  if (j & 1) continue;
+                  const size_t rb = (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD;
+                  dkv_det_store_h4(dk_part, rb + (j >> 1) * 16 + (lane & 3) * 4,
+                                   acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale,
+                                   acck[(j + 1) * 4 + qq] * scale,
+                                   acck[(j + 1) * 4 + qq + 1] * scale);
+                } else if constexpr (DET) {
+                  dkv_det_store_p<false>(dk_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                                         acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+                } else {
                   red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
                            acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+                }
               }
             }
         }
@@ -3714,8 +3771,10 @@ __global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
     for (int m = mblk0; m < nblk; ++m) {
       const size_t base = ((prow * nblk + m) * (size_t)S + jg) * HD + c;
       if constexpr (P16) {
-        sk += __half2float(reinterpret_cast<const __half*>(dk_part)[base]);
-        sv += __half2float(reinterpret_cast<const __half*>(dv_part)[base]);
+        // O62：partial 用扇区化的 16 列块内置换布局，按置换后的列索引读回（求和集合/次序不变）。
+        const size_t bp = ((prow * nblk + m) * (size_t)S + jg) * HD + dkv_p16_perm(c);
+        sk += __half2float(reinterpret_cast<const __half*>(dk_part)[bp]);
+        sv += __half2float(reinterpret_cast<const __half*>(dv_part)[bp]);
       } else {
         sk += dk_part[base];
         sv += dv_part[base];

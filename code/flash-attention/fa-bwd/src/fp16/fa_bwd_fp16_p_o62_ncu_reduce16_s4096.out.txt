@@ -1,0 +1,76 @@
+fa_bwd_fp16_mma_main.cu(1387): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
+    const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
+              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp16_mma_kernels.cuh(1765): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma2<HD,SPLIT,CL>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *, const int *, int) [with HD=128, SPLIT=true, CL=1]" at line 613 of fa_bwd_fp16_mma_main.cu
+
+fa_bwd_fp16_mma_kernels.cuh(3073): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma4<HD,SEQ>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) [with HD=128, SEQ=true]" at line 1701 of fa_bwd_fp16_mma_main.cu
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb0EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 660518
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb1EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 655210
+==PROF== Connected to process 1031589 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "void dkv_reduce_kernel<(int)128, (bool)1>(const float *, const float *, float *, float *, int, int, int, int, int)": 0%....50%....100% - 1 pass
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[O49] d128 8-warp = 0 (d128w=-1, grid=1024, sm=132)
+[O38] lse k-split = 1 (auto)
+[O23] main backend = wgmma2b(BN=128) | lse = wgmma (D=128 S=4096)
+[O43] wgmma2 k-split = 1
+[timing] total(3 kernels) 1.3504 ms  101.78 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3232 ms | main 0.9887 ms | convert 0.0384 ms
+[O24 A/B] delta old 0.0616 ms | warp 0.0620 ms (0.99x)
+[O8b A/B] lse O8 0.8698 ms | bal(单缓冲) 0.4352 ms (1.999x) | bal+cpasync(双缓冲) 0.3122 ms (2.786x)
+[O9 A/B] lse wgmma+SW128 0.2803 ms (vs bal+cpasync 1.114x, vs O8 3.103x)
+[O6 A/B] main nopipe 2.1806 ms (63.03 TF) | pipe(KV both) 1.5942 ms (86.21 TF) | pipe2(K only) 1.5776 ms (87.12 TF) => nopipe/pipe 1.368x, nopipe/pipe2 1.382x
+[O48 A/B] main D=128 4w(128/2) 1.5658 ms | 8w(256/4) 1.7779 ms (0.881x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/9.537e-07/1.192e-06
+[O17 A/B] main mma(64,64,2) 1.5136 ms | O9b wgmma 1.5296 (0.990x) | O17 wgmma2(BM128) 0.9936 (1.523x) TF 138.3
+[O17b A/B] main O17(BM128) 0.9936 ms | O17b wgmma4(BM256,ovlp) 1.2061 ms (0.824x) | wgmma4(BM256,seq) 1.0877 ms (0.913x) TF 126.4
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/1.29e-05/2.10e-05 | wg2-vs-O9b dq/dk/dv=0.00e+00/1.38e-05/2.00e-05
+[O18 A/B] main O17 wg2(BN64) 0.9936 ms (138.3 TF) | O18 wg2b(BN128,split) 0.9513 ms (144.5 TF) => 1.044x | O18 wg2b(BN128,串行) 0.9727 ms => 1.022x | max|diff| wg2b-vs-wg2 dq/dk/dv=2.38e-07/4.77e-06/7.63e-06 | wg2bns-vs-wg2b 0.00e+00/3.81e-06/2.38e-06
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 0.9972 ms (137.8 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.9936 ms (138.3 TF) => 1.004x | max|diff| dq/dk/dv=0.00e+00/3.81e-06/9.54e-06
+[O17b A/B] max|diff| wg4-vs-wg2 dq/dk/dv=0.00e+00/1.05e-05/2.29e-05 | wg4-vs-mma dq/dk/dv=0.00e+00/1.72e-05/2.48e-05
+[O17b A/B] max|diff| wg4seq-vs-wg4 dq/dk/dv=2.01e-03/1.12e-02/4.77e-06 | wg4seq-vs-wg2 dq/dk/dv=2.01e-03/1.12e-02/2.48e-05
+[O6c A/B] main sched0(原样) 1.6168 ms | sched1(交错) 1.5547 ms (1.040x) | sched2(逆序) 1.5727 ms (1.028x)
+[O5c A/B] main (64,32,2) 1.5674 ms (87.69 TF) | (64,64,2) 1.4740 (93.25) | (32,32,1) 2.6157 (52.54) | (32,32,2) 2.6046 (52.77) => best 1.063x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.7728 (77.53) | f4 1.8744 (73.32,-5.4%) | f2+PREL 1.5736 (87.34,+12.7%) | f4+PREL 1.5679 (87.66,+13.1%)
+  (BM=64,BN=64,PIPE=2): base 1.6515 (83.22) | f4 1.7047 (80.63,-3.1%) | f2+PREL 1.4819 (92.74,+11.4%) | f4+PREL 1.4927 (92.07,+10.6%)
+  (BM=32,BN=32,PIPE=1): base 2.6032 (52.80) | f4 2.6580 (51.71,-2.1%) | f2+PREL 2.5973 (52.92,+0.2%) | f4+PREL 2.6514 (51.84,-1.8%)
+  (BM=32,BN=32,PIPE=2): base 2.6353 (52.15) | f4 2.6865 (51.16,-1.9%) | f2+PREL 2.6091 (52.68,+1.0%) | f4+PREL 2.6518 (51.83,-0.6%)
+[O60 A/B] main-only DET fp32 0.7802 ms | DET fp16 0.6838 ms (1.141x) || reduce-only fp32 0.3880 ms | fp16 0.2352 ms (1.650x)
+[O7b A/B] main wgmma2b atomic 0.9930 ms (138.4 TF) | DET(fp32) 1.1923 ms (0.833x) | DET(fp16) 0.9352 ms (1.062x)
+[O60 A/B] runs[1-2] bitwise-diff dk/dv: fp32-partial 0.00e+00/0.00e+00 | fp16-partial 0.00e+00/0.00e+00
+[O60 A/B] vs atomic dk/dv: fp32-partial 7.15e-07/2.15e-06 | fp16-partial 9.53e-04/1.95e-03 | fp16-vs-fp32 9.53e-04/1.95e-03
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+==PROF== Disconnected from process 1031589
+[1031589] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void dkv_reduce_kernel<128, 1>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 4096, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------- ----------- ------------
+    Metric Name                 Metric Unit Metric Value
+    --------------------------- ----------- ------------
+    dram__bytes_read.sum              Mbyte       553.67
+    dram__bytes_write.sum             Mbyte        55.92
+    gpu__time_duration.sum               us       230.98
+    lts__t_sectors_op_read.sum       sector     25956220
+    lts__t_sectors_op_write.sum      sector      3143473
+    --------------------------- ----------- ------------
+
