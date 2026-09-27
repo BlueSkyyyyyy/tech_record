@@ -2666,7 +2666,28 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百二十轮）**：**P3-4g——`--det` 扩到 Hopper TMA 快路（device 增量，正结果/opt-in）**。
+> **最新（第一百二十三轮）**：**P3-4j——`--det` 扩到 MLA（HD=512）的 varlen（host 增量，正结果/opt-in）**。
+> 落实第一百二十二轮候选 ②：MLA 的 dQ 不可寄存器累加（`kRegDq` 恒 false）⇒ 锁 ksplit=1（单写者
+> `red_add2`）；dK/dV 的 partial 布局已 HD 无关，`dkv_reduce_varlen_kernel<512,64>` 直接可用，
+> **device 一行未改**（仅两个 host 各 +76 行 A/B）。3 case（b1 causal/b3 causal/b1 full）× 单/两文件
+> 两次跑 `bitwise dq/dk/dv = 0`、`DET-vs-atomic` dq 恒 0 / dk,dv e-7–e-6；`ours vs ref` 与历史逐位
+> 一致；代价（只差 DET）0.95–1.02×，但**锁 k=1 相对 auto split 主 kernel ~3.3–5.6×**；reduce
+> **48.03µs / DRAM 65.8% / L2 67.6%**（纯带宽 bound）。详见「当前进度 第一百二十三轮」、`docs/03` §61、
+> `docs/08` §39、`docs/00` §4.2；原始输出 `src/fp8/fa_bwd_fp8_main_p34j_det_varlen_*.out.txt`。
+> **下一步候选**：① **让 MLA 的 dQ 也进 partial ⇒ 支持 DET 的 ksplit>1**（非 `kRegDq` 的 dQ epilogue
+> 对唯一 CTA 的 `red_add2`，改写到 `dq_part[((row*H+h)*ksplit+part)*HD+c]`（host 预清零）仍确定，
+> 且 `dq_reduce_kernel` 已就绪；需 device 改动 + 单文件 sync）——这是让确定性 MLA 恢复 split-K
+> 并行度的唯一杠杆；② 长序列的 partial **compact per-sequence 布局**；③ 其余性能仍受本卡寄存器/smem
+> 硬墙锁定，见「阻塞」。
+>
+> **（第一百二十二轮）**：**P3-4i——`--det` 扩到 varlen（候选 ① 收口）**。body 的 DET 分支只依赖
+> `(b,h,mblk,jg,S,nblk)`、与定长/变长无关 ⇒ host 传 `nblk=nblk_max` 即可；新增
+> `dkv_reduce_varlen_kernel<HD,BM>`。4 个 varlen case × 单/两文件、ksplit=1/4 两次跑逐位相同；
+> bound 仍是 reduce 的 DRAM 带宽（87.4%）。详见「当前进度 第一百二十二轮」、`docs/03` §60。
+> **下一步候选**：① 减 partial 字节（compact per-sequence offset）；② DET 扩到 MLA varlen
+> （**→ 第一百二十三轮 P3-4j 已完成**）；③ 性能受硬墙锁定。
+>
+> **（第一百二十轮）**：**P3-4g——`--det` 扩到 Hopper TMA 快路（device 增量，正结果/opt-in）**。
 > 落实第一百一十九轮候选 ① 的 TMA 部分：`--hopper` 的 Q/dO/K/V 全 4D-TMA `kvtma` 主 kernel
 > 也能走确定性 dK/dV。DET 的 epilogue 早已在共享 `fp8_mma_body`，故 device 数学一行未改，只把
 > `DET` 模板参数与 partial 实参从两个 TMA 壳透传；默认 `DET=false` 完全隔离既有 TMA 行为。
@@ -4500,6 +4521,37 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     DRAM 墙（varlen 的 maxlen-strided partial 较浪费，可换 compact per-sequence offset）；
     ② DET 扩到 **MLA 的 varlen**（D=512，部分缓冲更大，需 compact 布局才可行）；③ 性能（非
     确定性）仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
+
+- 2026-09-27（第一百二十三轮）：**P3-4j 完成（`--det` 扩到 MLA（HD=512）varlen）**。
+  - 动机（落实第一百二十二轮候选 ②）：MLA 的变长 dK/dV 同样跨 CTA `atomicAdd`。**关键**：MLA 的
+    dQ 无法用寄存器累加（`kRegDq = REGDQ && (HD/NTW==1)`，HD=512 时 `HD/NTW=4` ⇒ 恒 false）
+    ⇒ 确定 dQ 只能靠 **ksplit=1 的单写者 `red_add2`**（与 P3-4h 定长 MLA 同因）。dK/dV 的 partial
+    布局在 P3-4i 已抽象成「定长式 + `S/nblk` 参数化」的 HD 无关形式 ⇒ `dkv_reduce_varlen_kernel<512,64>`
+    直接可用。
+  - **改动（host-only，单/两文件 device 一行未改；`fa_bwd_fp8_kernels.cuh` diff 为空）**：两个 host
+    各 +76 行 P3-4j A/B——atomic 基线与 DET 同为 O47/O51 的 8-warp/256 几何
+    （`launch_bwd_main<512,64,32,false,false,true,true,true,256,4>` vs
+    `launch_bwd_main_det<512,64,32,false,true,true,true,256,4>`），只差 DET 一个变量；ksplit=1，
+    归约 `dkv_reduce_varlen_kernel<512,64>`（block=512）。
+  - **数值**：3 个 case（b1 causal/b3 causal/b1 full）× 单/两文件 **`runs[1-2] bitwise dq/dk/dv = 0`**；
+    `DET-vs-atomic` **dq 恒 0**（单写者同值）、dk/dv e-7–e-6；恢复默认路后 `ours vs ref` 与历史逐位
+    一致（b1 causal `1.613e-1/2.238e-1/3.864e-1`、b3 causal `3.404e-1/3.436e-1/3.508e-1`、b1 full
+    `5.260e-2/5.222e-2/4.218e-2`，全 fp8 噪声；D=512 的 FA3/TE 反向不支持，仅 fp32 ref）。
+  - **代价**（同 session 同 binary 只差 DET）：DET/atomic = **0.95–1.02×**（main 本体几乎免费）。
+    **但锁 ksplit=1 相对默认 auto split 的主 kernel ~3.3–5.6×**（b1 auto=16：默认 8w+kvpipe
+    main 0.0502ms vs DET(k=1) 0.281ms；b3 auto=4：0.188 vs 0.611ms）⇒ 确定性在 MLA 上是「用单写者
+    换掉 split-K 并行度」，与 P3-4h 一致。
+  - **ncu（reduce, b3 causal k=1）**：`dkv_reduce_varlen_kernel<512,64>` 48.03µs / **DRAM 65.81% /
+    L2 67.59%** / L1TEX 10.34% / SM 29.79% / occ 42.71%、读 95.43MB/写 10.45MB ⇒ **bound = reduce 的
+    纯 DRAM/L2 带宽**（与 P3-4e/f/g/h/i 逐项一致）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_main_p34j_det_varlen_{b1_t512,b3_t1792,b1_t512_full}.out.txt`、
+    `src/fp8/fa_bwd_fp8_mma_onefile_p34j_det_varlen_{b1_t512,b3_t1792}.out.txt`、
+    `src/fp8/fa_bwd_fp8_p34j_ncu_reduce_varlen_b3.out.txt`；文档 `docs/03` §61、`docs/08` §39、
+    `docs/00` §4.2。
+  - **下一步候选**：① **让 MLA 的 dQ 也进 partial ⇒ 支持 DET 的 ksplit>1**（非 `kRegDq` 的 dQ
+    epilogue 对唯一 CTA 的 `red_add2`，改写到 `dq_part[((row*H+h)*ksplit+part)*HD+c]`（host 预清零）
+    仍确定，且 `dq_reduce_kernel` 已就绪），从而恢复 split-K 并行度；② 长序列的 partial **compact
+    per-sequence 布局**（现 maxlen-strided）；③ 性能（非确定性）仍受本卡寄存器/smem 硬墙锁定。
 
 ## 灵感 / backlog
 

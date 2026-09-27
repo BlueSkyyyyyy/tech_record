@@ -593,6 +593,22 @@ smem 冲突 + 低 occ
      零成本接入。** 单/两文件 device 逐字同源（`sync_onefile_device.py` 核对 `identical: True`），
      默认路径数值逐位不变（`--no-run --ci` 73 case 全绿）。详见 `docs/03` §60。
 
+39. **P3-4j（第 123 轮，host 增量，正结果/opt-in）**：**把 `--det` 扩到 MLA（HD=512）的
+     varlen**——落实第 122 轮「下一步候选 ②」。关键观察与 P3-4h 同：MLA 的 dQ 无法用寄存器
+     累加（`kRegDq` 恒 false）⇒ 确定 dQ 只能靠 **ksplit=1 的单写者 `red_add2`**；而 dK/dV 的
+     partial 布局在 P3-4i 已被抽象成「定长式 + `S/nblk` 参数化」的 HD 无关形式 ⇒
+     **`dkv_reduce_varlen_kernel<512,64>` 直接可用，device 一行未改**，只补 host A/B（+76 行
+     /文件名）。**3 个 case（b1 causal/b3 causal/b1 full）× 单/两文件两次跑
+     `bitwise dq/dk/dv = 0`**；`DET-vs-atomic` **dq 恒 0**、dk/dv e-7–e-6；`ours vs ref` 与历史
+     逐位一致（b1 causal `1.613e-1/2.238e-1/3.864e-1`、b3 causal `3.404e-1/3.436e-1/3.508e-1`、
+     b1 full `5.260e-2/5.222e-2/4.218e-2`）。代价（只差 DET）**0.95–1.02×**（main 本体几乎免费），
+     但 **ksplit 锁 1 相对 auto split 的主 kernel ~3.3–5.6×**（b1 auto=16、b3 auto=4）；
+     reduce **48.03µs / DRAM 65.8% / L2 67.6%**（纯带宽 bound，与 P3-4e/f/g/h/i 一致）。
+     **教训：确定性在 MLA 上不是「免费换归约方式」，而是「用单写者换掉 split-K 并行度」；
+     要既确定又并行，得让 MLA 的 dQ 也进 partial（对唯一 CTA 的 `red_add2` 写 per-part buffer
+     仍确定）——留作下一步候选。** 单/两文件 device 逐字同源、默认路径数值逐位不变。
+     详见 `docs/03` §61。
+
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 

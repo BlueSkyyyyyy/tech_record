@@ -136,8 +136,15 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    只需 host 传 `S=maxlen/nblk=nblk_max`；新增 `dkv_reduce_varlen_kernel<HD,BM>` 按
    `cu_seqlens` 的逐序列 `len_b/nblk_b` 定界、输出按 packed token 定位。4 个 case（MHA 单长/
    不齐/GQA q32kv8）× 单/两文件、ksplit=1/4 两次跑 `bitwise dq/dk/dv = 0`，
-   `DET-vs-atomic` e-7–e-6；代价 0.71–0.91×，bound 仍是 reduce 的 DRAM 带宽（87.4%）。
-   见 `docs/03` §60。
+    `DET-vs-atomic` e-7–e-6；代价 0.71–0.91×，bound 仍是 reduce 的 DRAM 带宽（87.4%）。
+    见 `docs/03` §60。
+   → **`--det` 已扩到 MLA（HD=512）的 varlen（P3-4j，第一百二十三轮）**：device 一行未改，
+    host 复用 `dkv_reduce_varlen_kernel<512,64>`（P3-4i 的 HD 参数化布局红利）；MLA 的 dQ
+    不可寄存器累加 ⇒ 锁 ksplit=1（单写者 `red_add2`）。3 个 case（b1 causal/b3 causal/b1 full）
+    × 单/两文件两次跑 `bitwise dq/dk/dv = 0`、`DET-vs-atomic` dq 恒 0 / dk,dv e-7–e-6；
+    代价（只差 DET）0.95–1.02×，但**锁 k=1 相对 auto split 的主 kernel ~3.3–5.6×**（确定性 =
+    用单写者换掉 split-K 并行度）；reduce **48.03µs / DRAM 65.8% / L2 67.6%**（纯带宽 bound）。
+    下一步候选：让 MLA dQ 也进 partial ⇒ 支持 ksplit>1 的确定性。见 `docs/03` §61。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 
