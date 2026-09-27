@@ -4464,6 +4464,43 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     `nblk`；这是候选 ① 的最后一块）；② 减 partial 字节（按 KV 行跨 warpgroup 偏和 / 更细分块）
     以压低 reduce 的 DRAM 墙；③ 性能（非确定性）仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
 
+- 2026-09-27（第一百二十二轮）：**P3-4i 完成（`--det` 扩到 varlen；候选 ① 收口）**。
+  - 动机（落实第一百二十一轮候选 ① 的最后一块）：varlen 的 dK/dV 同样跨 CTA `atomicAdd`，
+    调度一变末位就抖。**关键观察**：body 的 DET 分支只依赖 `(b,h,mblk,jg,S,nblk)`、与定长/
+    变长无关——varlen main 早已把 `S=maxlen`（packed 索引由 `qbase` 定界）传进 body，故只需
+    host 传 `nblk=nblk_max`，**device 数学一行未改**。
+  - **改动（单/两文件 device 逐字同源，`sync_onefile_device.py` 核对 `identical: True`）**：
+    ① 新增 `dkv_reduce_varlen_kernel<HD,BM>`（grid=`(B*Hkv,maxlen)`，按 `cu_seqlens` 解
+    `len_b/nblk_b`、只对 `jg<len_b`、`mblk∈[causal?jg/BM:0,nblk_b)` 按固定次序求和，输出按
+    packed token `qbase+jg` 定位）；② `launch_bwd_main_det` 尾部加 `WGMMA=false` 模板参 +
+    `cu_seqlens/mt_b/mt_m` 默认实参（定长调用逐字不变）；③ run_varlen 加 `det_ab/det_ksplit`
+    透传 + P3-4i A/B（强制 `REGDQ=true`，ksplit=1 时 dQ 单写者 `red_add2`、ksplit>1 走
+    `dq_part`+`dq_reduce_kernel`）。
+  - **数值**：4 个 case（b1_t512 单长 / b4_t3840 不齐 / b5_t3968 GQA q32kv8）× 单/两文件、
+    ksplit=1/4，**`runs[1-2] bitwise dq/dk/dv = 0` 全部成立**；`DET-vs-atomic` e-7–e-6
+    （fp32 归约次序末位）、`ksplit=1` 时 dQ 逐位等于 atomic；恢复默认路后 `ours vs ref`
+    b1 `2.280/3.108/3.422e-1`、b4 `2.935/2.938/4.179e-1`、b5(GQA) `3.094/5.567/6.203e-1`
+    （全 fp8 噪声）。默认路径数值逐位不变（`--no-run --ci` 73 case 全绿）。
+  - **代价（同 session/同 binary A/B，含 reduce）**：b1 k=1 `0.1263→0.1394`（0.906×）、
+    b1 k=4 `0.0748→0.1049`（0.713×）、b4 k=4 `0.7641→1.0389`（0.736×）、b5 GQA k=4
+    `1.4242→1.9746`（0.721×）。
+  - **ncu（reduce, b4_t3840, k=4）**：`dkv_reduce_varlen_kernel<128,64>` **274.05µs /
+    DRAM 87.40% / L2 85.33% / L1TEX 12.09% / SM 26.32% / occ 56.37%**、读 744.5MB/写 58.3MB
+    ⇒ **bound = reduce 的纯 DRAM 带宽**（与 P3-4e/f/g/h 逐项一致）。
+  - **对标（纯反向 fp16 varlen，`fa_vs_te_bwd_only.py fp16` 现场重跑）**：FA3 不齐
+    `[512,1024,2048,256]` H16 **0.1621ms/282TF**、等长 4×1024 **0.1471/234**、GQA q32/kv8
+    **0.3766/243**、强倾斜 **0.1418/259**、等长 full **0.2002/172**；TE2.14 反向不支持 ragged
+    QKV（NA）。ours fp8 变长默认路（含 preprocess）b4_t3840 total 0.9274ms/49.2TF。
+  - **DET 候选 ①（定长→split-K→TMA→MLA→varlen）至此全部收口。** 原始输出
+    `src/fp8/fa_bwd_fp8_main_p34i_det_varlen_{b1_t512,b1_t512_k4,b4_t3840_k4,b5_t3968_gqa_k4}.out.txt`、
+    `..._mma_onefile_p34i_det_varlen_{b1_t512_k4,b4_t3840_k4}.out.txt`、
+    `..._p34i_ncu_reduce_varlen_b4.out.txt`、`src/fa_bwd_p34i_fa_baseline_fp16.out.txt`；
+    文档 `docs/03` §60、`docs/08` §5.38、`docs/00` §4.2。
+  - **下一步候选**：① 减 partial 字节（按 KV 行跨 warpgroup 偏和 / 更细分块）以压低 reduce 的
+    DRAM 墙（varlen 的 maxlen-strided partial 较浪费，可换 compact per-sequence offset）；
+    ② DET 扩到 **MLA 的 varlen**（D=512，部分缓冲更大，需 compact 布局才可行）；③ 性能（非
+    确定性）仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
@@ -4520,4 +4557,8 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   **`--det` 扩到 MLA（HD=512）已完成（P3-4h，第一百二十一轮）**：device 一行未改，host 复用
   `dkv_reduce_kernel<HD,BM>`（锁 ksplit=1 保 dQ 确定），三 shape 两次跑逐位相同、代价
   0.92–1.035×，bound 仍是 reduce 的 DRAM 带宽，见 `docs/03` §59。
+  **`--det` 扩到 varlen 已完成（P3-4i，第一百二十二轮）**：body DET 分支对定长/变长通用，
+  新增 `dkv_reduce_varlen_kernel`（按 `cu_seqlens` 的逐序列 `nblk_b` 定界、packed 定位）；
+  4 case×单/两文件、ksplit=1/4 两次跑逐位相同、代价 0.71–0.91×，bound 仍是 reduce 的
+  DRAM 带宽（87.4%）。**至此 DET 候选 ① 全部收口。** 见 `docs/03` §60。
 - fp8：对比「只量化 dO」vs「dO 和 P 都量化」的精度/性能权衡。

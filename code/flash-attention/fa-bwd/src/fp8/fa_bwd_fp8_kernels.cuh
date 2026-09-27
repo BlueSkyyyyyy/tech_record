@@ -652,6 +652,44 @@ __global__ void dq_reduce_kernel(const float* __restrict__ dq_part, float* __res
   dq_acc[((size_t)row * H + h) * HD + c] = s;
 }
 
+// P3-4i：varlen 版的确定性 dK/dV 归约（把 P3-4e 的 `--det` 扩到变长）。partial 布局沿用定长式
+//   `part[((b*H + h)*nblk_max + mblk)*maxlen + jg]`（body 传 `S=maxlen`、`nblk=nblk_max`），
+//   但每个序列长度/块数不同 ⇒ 归约按 `cu_seqlens` 定界：`len_b = cu[b+1]-cu[b]`、
+//   `nblk_b = ceil(len_b/BM)`，并只对 `jg < len_b` 的行求和；输出按 packed `[T,Hkv,D]` 定位
+//   （全局 KV token = `qbase + jg`）。grid=(B*Hkv, maxlen)、block=HD。k 维（GQA 广播组）与
+//   mblk 的求和次序固定（hh 升序、m 升序）⇒ 与调度无关、两次跑逐位可复现。
+template <int HD, int BM = 64>
+__global__ void dkv_reduce_varlen_kernel(const float* __restrict__ dk_part,
+                                         const float* __restrict__ dv_part,
+                                         float* __restrict__ dk_acc, float* __restrict__ dv_acc,
+                                         const int* __restrict__ cu_seqlens,
+                                         int H, int Hkv, int nblk_max, int maxlen, int causal) {
+  const int hb = blockIdx.x;   // b*Hkv + hkv
+  const int jg = blockIdx.y;   // 序列内的 KV 行
+  const int c = threadIdx.x;
+  if (c >= HD) return;
+  const int b = hb / Hkv, hkv = hb % Hkv;
+  const int qbase = cu_seqlens[b];
+  const int len = cu_seqlens[b + 1] - qbase;
+  if (jg >= len) return;
+  const int nblk_b = (len + BM - 1) / BM;
+  const int G = H / Hkv;
+  const int h0 = hkv * G;
+  const int mblk0 = causal ? (jg / BM) : 0;
+  float sk = 0.f, sv = 0.f;
+  for (int hh = 0; hh < G; ++hh) {
+    const size_t prow = (size_t)(b * H + h0 + hh) * nblk_max;
+    for (int m = mblk0; m < nblk_b; ++m) {
+      const size_t base = ((prow + m) * (size_t)maxlen + jg) * HD + c;
+      sk += dk_part[base];
+      sv += dv_part[base];
+    }
+  }
+  const size_t o = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c;
+  dk_acc[o] = sk;
+  dv_acc[o] = sv;
+}
+
 // ------------------- O42：Hopper bulk reduce（`cp.reduce.async.bulk`） -------------------
 // 动机：dK/dV 的逐元素 `red_add2` 虽是 coalesced，但每 tile 要发 2048 条、占满 LSU/L2
 //   流水（O42 实测：把 dK/dV 的 red 短路掉 main 1.60→0.94ms，天花板 1.70×）。改成

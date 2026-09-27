@@ -5427,3 +5427,86 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
 原始输出：`src/fp8/fa_bwd_fp8_main_p34h_det_b1_{s256_h2,s512_h4,s1024_h2}_d512_causal_fp8.out.txt`、
 `src/fp8/fa_bwd_fp8_mma_onefile_p34h_det_b1_{s512_h4,s1024_h2}_d512_causal_fp8.out.txt`、
 `src/fp8/fa_bwd_fp8_main_p34h_ncu_{detmain,atomicmain,reduce}_s1024h2.out.txt`。
+
+---
+
+## 60. P3-4i：`--det` 扩到 varlen（第一百二十二轮）
+
+### 60.1 动机（落实第一百二十一轮「下一步候选 ①」的最后一块）
+
+第一百一十八~一百二十一轮把 fp8 反向的确定性模式 `--det` 依次扩到 **定长 → split-K → Hopper
+TMA 快路 → MLA**，只剩 **varlen（packed `[T,H,D]` + `cu_seqlens`）** 未覆盖。varlen 的 dK/dV
+同样跨 CTA `atomicAdd`（`fp8_mma_body` 的 `epi_dv/epi_dk`），调度一变末位就抖、无法位复现。
+本项把同一 partial + 固定次序归约机制接上变长路径。
+
+### 60.2 设计：partial 布局沿用定长式、归约按逐序列定界
+
+关键观察：**body 的 DET 分支只依赖 `(b, h, mblk, jg, S, nblk)`，与定长/变长无关**。
+varlen 的 main kernel 已经把 `S=maxlen`（packed 索引由 `qbase` 定界）传进 body，因此：
+
+1. **device 数学一行未改**——body 的 `dkv_det_store(...(((b*H+h)*nblk+mblk)*S+jg)*HD+c...)`
+   在 varlen 下只要 host 传 `S=maxlen`、`nblk=nblk_max=ceil(maxlen/BM)` 即成立（`jg<len_b`、
+   `mblk<nblk_b` 恒在范围内）。
+2. **只新增一个归约 kernel** `dkv_reduce_varlen_kernel<HD,BM>`：grid=`(B*Hkv, maxlen)`，
+   按 `cu_seqlens` 解出 `len_b=qbase` 差、`nblk_b=ceil(len_b/BM)`，只对 `jg<len_b` 的行、
+   `mblk∈[causal? jg/BM : 0, nblk_b)` 求和（`hh` 升序、`m` 升序 **固定次序**），输出按
+   packed token `qbase+jg` 写 `[T,Hkv,D]`。
+3. dQ 的确定性沿用 P3-4f：`ksplit==1` 时单写者 `red_add2`（确定）；`ksplit>1` 时 dQ 也走
+   `dq_part`（按 `part` 分片）+ `dq_reduce_kernel`（它对 packed 全局行号天然成立）。故 A/B
+   强制 `REGDQ=true`。
+4. `launch_bwd_main_det` 加了尾部模板参数 `WGMMA=false` 与默认实参
+   `cu_seqlens/mt_b/mt_m`：定长调用不传 ⇒ **逐字不变**；varlen D=128（构建恒 `-DFA_WGMMA`、
+   默认主 kernel 走 WGMMA）传 `WGMMA=true` + `d_cu`。
+
+partial 缓冲沿用 maxlen-strided 布局 `B*H*nblk_max*maxlen*HD`（本例最大 b5 H32 → 5.4GB/缓冲；
+D=128 varlen 的 maxlen≤2048，可接受；MLA/D=512 varlen 未纳入本项）。
+
+### 60.3 数值：两次跑逐位可复现；DET-vs-atomic 仅 fp32 次序末位
+
+| case（fp8 causal） | ksplit | atomic | DET | 比 | runs[1-2] bitwise dq/dk/dv | DET-vs-atomic dq/dk/dv |
+|---|---|---|---|---|---|---|
+| b1_t512 MHA | 1 | 0.1263 | 0.1394 | 0.906× | 0 / 0 / 0 | 0 / 4.77e-7 / 4.77e-7 |
+| b1_t512 MHA | 4 | 0.0748 | 0.1049 | 0.713× | 0 / 0 / 0 | 5.96e-8 / 4.77e-7 / 7.15e-7 |
+| b4_t3840 MHA 不齐 | 4 | 0.7641 | 1.0389 | 0.736× | 0 / 0 / 0 | 1.19e-7 / 7.15e-7 / 7.15e-7 |
+| b5_t3968 GQA q32/kv8 | 4 | 1.4242 | 1.9746 | 0.721× | 0 / 0 / 0 | 1.19e-7 / 1.43e-6 / 1.67e-6 |
+
+- **`runs[1-2] bitwise = 0` 全部成立**（含 GQA 广播组、含不齐 length 的逐序列 `nblk_b`）。
+- `DET-vs-atomic` 只有 fp32 归约次序的末位差（e-7–e-6），**数学口径一致**。
+- `ksplit==1` 时 dQ 逐位等于 atomic（同一单写者 `red_add2`）。
+- 恢复默认路（`run_all()`）后 `ours vs fp32 ref`：b1 `2.280/3.108/3.422e-1`、
+  b4 `2.935/2.938/4.179e-1`、b5(GQA) `3.094/5.567/6.203e-1`——**全 fp8 噪声量级**。
+- 单/两文件一致：onefile b1 k4 `0.0761/0.1055`、b4 k4 `0.7667/1.0367`（与两文件同量级）。
+
+### 60.4 代价与 ncu：bound 仍是 reduce 的纯 DRAM 带宽
+
+- **代价**（同 session 同 binary A/B，含 reduce）：DET/atomic = **0.71–0.91×**（ksplit=1 最轻，
+  ksplit=4 因固定 partial 写读成本而 heavier）。与定长 P3-4e/f 同构——确定性 = 把 L2 原子归约
+  换成「partial 的 DRAM 写 + 一趟 DRAM 读归约」。
+- **ncu（reduce, b4_t3840, DET ksplit=4）**：`dkv_reduce_varlen_kernel<128,64>` **274.05µs**、
+  **DRAM 87.40%** / L2 85.33% / L1TEX 12.09% / SM 26.32%、occ 56.37%、读 744.53MB/写 58.26MB
+  ⇒ **纯 DRAM 带宽 bound**（与 P3-4e/f/g/h 逐项一致）。主 kernel 的 DET 路径与 P3-4e 共用同一
+  body/epilogue，bound 结论沿用（见 §56）。
+
+### 60.5 复现 / 原始输出
+
+```bash
+# varlen + --det（打印 [P3-4i A/B]）；varlen 构建需 sm90a + -DFA_WGMMA
+ARCH= NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b4_t3840_h16_d128_causal_fp8 \
+  --varlen --det --detk=4 --iters=30
+# ncu（varlen reduce）
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:dkv_reduce_varlen \
+  --launch-count 1 --metrics gpu__time_duration.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed \
+  -- --dir=.../varlen_b4_t3840_h16_d128_causal_fp8 --varlen --det --detk=4 --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_p34i_det_varlen_{b1_t512,b1_t512_k4,b4_t3840_k4,b5_t3968_gqa_k4}.out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_p34i_det_varlen_{b1_t512_k4,b4_t3840_k4}.out.txt`、
+`src/fp8/fa_bwd_fp8_p34i_ncu_reduce_varlen_b4.out.txt`、`src/fa_bwd_p34i_fa_baseline_fp16.out.txt`。
+
+**对标（纯反向，fp16 变长，`fa_vs_te_bwd_only.py fp16`）**：FA3 不齐 `[512,1024,2048,256]`
+H16 **0.1621ms/282TF**、等长 4×1024 **0.1471/234**、GQA q32/kv8 **0.3766/243**、强倾斜
+`[2048,512,…]` **0.1418/259**；TE2.14 反向不支持 ragged QKV（NA）。ours fp8 变长默认路
+（含 quant+preprocess）b4_t3840 total 0.9274ms/49.2TF（docs §37 口径）。DET 为 opt-in 正确性
+模式，代价见 §60.4。
