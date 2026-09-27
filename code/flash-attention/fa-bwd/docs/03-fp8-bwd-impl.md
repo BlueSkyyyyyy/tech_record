@@ -5828,3 +5828,105 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
 DRAM 墙——varlen 的 maxlen-strided partial 尤其浪费，可换 compact per-sequence offset；
 ② 把两个 reduce 融合进一个 kernel（省一趟 partial 读）；③ 性能（非确定性）仍受本卡寄存器/
 smem 硬墙锁定，见 ROADMAP「阻塞」。
+
+## 64. P3-4m（第一百二十六轮，**正结果，opt-in `--det`**）：把 `--det` 接进 MLA 的 K/V `cp.async` 回填流水（kvpipe）
+
+### 64.1 动机：DET 一直走非 kvpipe 主 kernel，白扔 O51 的 1.78–1.86×
+
+`--det` 的 dK/dV partial 与二次归约（P3-4e…P3-4l）在 device 侧早已完备，但 host 的两个
+`launch_bwd_main_det`（定长 / varlen）**写死 `KVPIPE=false`**，于是 MLA（HD=512）的 DET 主
+kernel 一直走「每 tile 末尾同步载入 K/V」的旧路，而默认（非 DET）MLA 主 kernel 早在 **O51**
+就改用 K/V `cp.async` 回填流水（§O51/O52：8-warp 主 kernel `sync → kvpipe` 在 b1_t512/b3_t1792
+上 **1.78×/1.86×**）。`fp8_mma_body` 的模板参数里 **`KVPIPE && DET` 本来就并存**（只有
+`static_assert(!KVPIPE || (!WGMMA && !TMA && !KVTMA))` 限制后端），缺的只是 host 接线。
+
+### 64.2 实现（host-only；单/两文件 device 逐字同源）
+
+- `launch_bwd_main_det` 增加模板参数 `bool KVPIPE = false`（默认与历史逐字不变），
+  `kSmem` 选择改为 `WGMMA ? smem_bytes_wgmma : (KVPIPE ? smem_bytes_kvpipe : smem_bytes)`，
+  并把 `KVPIPE` 透传给 `fa_bwd_fp8_mma_kernel`。MLA（HD=512,BN=32）的
+  `smem_bytes_kvpipe = 207872 + 16896 + 5120 = 229888B ≤ 232448`（1 CTA/SM，与 O51 一致）。
+- P3-4k（定长）与 P3-4l（varlen）的 A/B 段各加一个 `run_dt_kv` 变体（`launch_bwd_main_det<
+  512,64,32,false,true,true,true,256,4,false,true>`，即 `WGMMA=false, KVPIPE=true`），与旧
+  `run_dt`（非 kvpipe）共用同一段 reduce；新增 `[P3-4m A/B]` 打印与逐位对拍。单/两文件同步。
+- 顺带修 `scripts/sync_onefile_device.py` 的一个既有坑：fp8 单文件的 device 区起点 marker 是
+  `#include <cuda_runtime.h>`，而 `#include "../fa_bwd_dump.h"` 原在其后 ⇒ 每次同步都会把它
+  一并覆盖掉（单文件报 `fa_bwd_save_npy_f32 undefined`）。本轮把该 include **移到 marker 之前**
+  （它只依赖标准库），从此同步不再误删。device 区仍 `identical: True`。
+
+### 64.3 数值：kvpipe DET 与非 kvpipe DET **逐位相同**
+
+同 session `--iters=30`（两文件；单文件 b3 复核）：
+
+| case | ksplit | DET 非 kvpipe ms | DET kvpipe ms | 加速 | kvpipe runs[1-2] bitwise | kvpipe-vs-非kvpipe |
+|---|---|---|---|---|---|---|
+| MLA 定长 S256H2 | 4 | 0.0652 | 0.0640 | 1.018× | 0 / 0 / 0 | 0 / 0 / 0 |
+| MLA 定长 S512H4 | 4 | 0.1578 | 0.1477 | 1.068× | 0 / 0 / 0 | 0 / 0 / 0 |
+| MLA 定长 S1024H2 | 4 | 0.2594 | 0.2394 | 1.084× | 0 / 0 / 0 | 0 / 0 / 0 |
+| MLA varlen b1_t512 | 8 | 0.0928 | 0.0887 | 1.046× | 0 / 0 / 0 | 0 / 0 / 0 |
+| MLA varlen b3_t1792 | 8 | 0.3550 | **0.3258** | 1.090× | 0 / 0 / 0 | 0 / 0 / 0 |
+| varlen b3_t1792（单文件） | 8 | 0.3556 | 0.3248 | 1.095× | 0 / 0 / 0 | 0 / 0 / 0 |
+
+- **`kvpipe-vs-非kvpipe` 与 `runs[1-2]` 的 dq/dk/dv 全为 `0.00e+00`**——kvpipe 只改 K/V 搬运、
+  不改任何归约次序，DET 的逐位可复现性原样保留，且与非 kvpipe DET 逐字节一致。
+- 默认路 `ours vs ref` 逐位不变（S256H2 `2.356/2.290/3.441e-1`、S512H4 `2.415/2.992/4.481e-1`、
+  S1024H2 `2.232/3.337/3.602e-1`；varlen b1 `1.613e-1/2.238e-1/3.864e-1`、b3 `3.404e-1/3.436e-1/
+  3.508e-1`），与 P3-4k/l 历史逐位一致。
+- **收益随主 kernel 占比增大而增大**（kvpipe 是把 K/V 全局读延迟藏进本轮计算）：S256H2 只有
+  1.018×，S1024H2 / b3_t1792 到 1.08–1.09×（reduce 占 DET 总时 ~20%，故端到端加速略小于
+  O52 的主 kernel-only 1.78–1.86×）。
+
+### 64.4 ncu：kvpipe 把 `long_scoreboard` 3.93→3.25，主 kernel 243→220µs
+
+同 session、同 binary、`--iters=1`、`-k regex:fa_bwd_fp8_mma_kernel`（b3_t1792 causal k=8；
+DET 非 kvpipe = 模板 `<...,0,1>` / DET kvpipe = `<...,1,1>`）：
+
+| 指标 | DET 非 kvpipe | DET kvpipe |
+|---|---|---|
+| Duration | 243.0 µs | **220.2 µs（1.104×）** |
+| Dynamic smem | 207.87 KB | 229.89 KB |
+| DRAM / L1TEX / L2 / Compute | 29.8 / 23.8 / 34.3 / 15.0 % | 33.0 / 26.8 / 38.4 / 16.5 % |
+| regs / achieved occ | 255 / 12.49% | 255 / 12.49% |
+| stall long_scoreboard | 3.93 | **3.25** |
+| stall wait / short / barrier | 1.69 / 1.04 / 1.07 | 1.71 / 1.07 / 1.04 |
+
+⇒ **机制与 O51 逐项一致**：kvpipe 用 `cp.async` 提前发下一 tile 的 K/V，把「同步全局读」的
+`long_scoreboard` 从 3.93 压到 3.25，主 kernel 时间 −9.4%（DRAM/L1/L2 利用率同时上升，说明
+更多访存被重叠进来而非减少）；`wait`/`short`/`barrier` 基本不变，occupancy 仍 12.5%（1 CTA/SM，
+255 regs + 230KB smem）。墙仍是 **L2（残余 dK/dV red）+ 低 occupancy**，与 P3-4 系列结论一致。
+
+### 64.5 回归 / 对标
+
+- `python3 harness/fa_bwd_run.py --ci`（全量 73 case + gate + docs/04 校验）：全绿——单/两文件
+  worst fp16 `1.953e-3` / bf16 `3.125e-2` / fp8 `7.629e-6`（按 dtype gate 全 OK），
+  `--check docs/04` OK（194 行，rtol=5e-3）。**默认路径（无 `--det`）数值逐位不变**。
+- MLA（head_dim=512）的 FA2/FA3/TE 反向均不支持，仍只有 fp32 ref；D=128 纯反向基线见
+  `docs/04` §38/§44（本轮未重跑）。
+- **意义**：`--det` 从「能用」推进到「用上当前最优的数据通路」——确定性模式下不再额外付出
+  「非 kvpipe 主 kernel」这一层代价；`--det` 相对 atomic 的剩余差距（reduce 的两趟 DRAM partial）
+  才是确定性真正的净成本。
+
+### 64.6 复现 / 原始输出
+
+```bash
+# 定长 MLA（打印 [P3-4k]/[P3-4m]）
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8 --det --detk=4 --iters=30
+# varlen MLA（需 sm90a + -DFA_WGMMA）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/run.sh \
+  src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp8 \
+  --varlen --det --detk=8 --iters=30
+# 单文件同理换 fa_bwd_fp8_mma_onefile.cu
+# ncu：DET 非 kvpipe = launch-skip 8；DET kvpipe = launch-skip 13（--iters=1）
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_p34m_det_varlen_{b1_t512,b3_t1792}_k8.out.txt`、
+`src/fp8/fa_bwd_fp8_main_p34m_det_mla_{s1024h2_k4,s256h2_s512h4_k4}.out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_p34m_det_varlen_b3_t1792_k8.out.txt`、
+`src/fp8/fa_bwd_fp8_main_p34m_ncu_{detnonkv,detkv,metrics,stall}_varlen_b3.out.txt`、
+`src/fp8/fa_bwd_p34m_ci.out.txt`。
+
+**下一步候选**：① 减 partial 字节（按 KV 行跨 warpgroup 偏和 / varlen compact per-sequence
+offset）以压低 reduce 的 DRAM 墙；② 把两个 reduce 融合进一个 kernel；③ 非确定性性能仍受本卡
+寄存器/smem 硬墙锁定，见 ROADMAP「阻塞」。

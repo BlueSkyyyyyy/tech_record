@@ -639,6 +639,19 @@ smem 冲突 + 低 occ
       DRAM 81.7% ⇒ **bound 仍是 reduce 的纯 DRAM 带宽**。`--no-run --ci` 73 case 全绿、默认路径
       逐位不变。MLA d512 的 FA2/FA3/TE 反向均不支持故无同 shape 对标。详见 `docs/03` §63。
 
+42. **P3-4m（第 126 轮，host 增量，正结果/opt-in `--det`）**：**把 `--det` 接进 MLA 的
+      K/V `cp.async` 回填流水（kvpipe）**。`fp8_mma_body` 的模板里 `KVPIPE && DET` 本就并存，
+      但 host 的 `launch_bwd_main_det` 一直写死 `KVPIPE=false` ⇒ MLA（HD=512）的 DET 主 kernel
+      走的是「每 tile 同步载入 K/V」的旧路，白扔 O51 的 1.78–1.86×。本轮加模板参
+      `bool KVPIPE=false`（`kSmem` 选 `smem_bytes_kvpipe`，MLA 229888B ≤ 232448）、P3-4k/P3-4l
+      的 A/B 各加一个 kvpipe DET 变体，**device 一行未改**。5 shape × 单/两文件
+      **kvpipe DET 与非 kvpipe DET 逐位相同**（`kvpipe-vs-非kvpipe=0`、`runs[1-2]=0`）；
+      非 kvpipe→kvpipe 1.018–1.095×（b3_t1792 0.3550→0.3258，单文件 1.095×）；ncu 主 kernel
+      243.0→220.2µs、`long_scoreboard` 3.93→3.25（机制同 O51）。顺带修
+      `sync_onefile_device.py` 的既有坑（单文件 device 区 marker 在 `#include "../fa_bwd_dump.h"`
+      之前，每次同步都会误删该 include），把它移到 marker 之前。`--ci` 73 case 全绿、默认路径
+      逐位不变。详见 `docs/03` §64。
+
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
@@ -651,3 +664,8 @@ smem 冲突 + 低 occ
 5. **利用对称性做负载均衡**：因果 mask 让第 `m` 个 CTA 的活是 `m+1` 个 tile，
    把 `m` 与 `nblk-1-m` 配对后每个 CTA 恒为 `nblk+1`（O8b）。
 6. **单文件 / 两文件保持逐字一致**：便于教学与工程两用。
+7. **同步脚本的「边界」要用验证兜住**：`sync_onefile_device.py` 只校验替换后的 device 区等于
+   源 `.cuh`，**不校验替换区间内是否夹带了 host 行**。fp8 单文件的 device 区 marker
+   （`#include <cuda_runtime.h>`）一度在 `#include "../fa_bwd_dump.h"` 之前，于是每次同步都
+   把它误删、单文件编译报 `fa_bwd_save_npy_f32 undefined`。修法：把 host-only 的 include 移到
+   marker **之前**。（对照：单项修改后一定重编译单文件，别只跑两文件。）
