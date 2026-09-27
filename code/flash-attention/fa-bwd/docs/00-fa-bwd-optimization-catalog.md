@@ -127,6 +127,11 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    `kvtma` 主 kernel 也能走 deterministic dK/dV（定长 HD=128/GQA、ksplit=1）；三 shape ×
    单/两文件两次跑逐位相同、与 atomic 差 e-7–e-6，代价仍是 reduce 的 DRAM partial 写读。
    见 `docs/03` §58。
+   → **`--det` 已扩到 MLA（HD=512，P3-4h，第一百二十一轮）**：`dkv_reduce_kernel<HD,BM>` 与
+   body 的 DET 分支本就 HD 无关，device 数学一行未改；MLA 的 dQ 无法用寄存器累加 ⇒ 锁
+   ksplit=1 的单写者 `red_add2` 保证 dQ 确定。三 shape × 单/两文件两次跑
+   `bitwise dq/dk/dv = 0`、`DET-vs-atomic` dq 恒 0 / dk,dv e-7–e-6；代价 S256H2 1.035×、
+   S512H4 0.923×、S1024H2 0.940×，bound 仍是 reduce 的 DRAM 带宽。见 `docs/03` §59。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 

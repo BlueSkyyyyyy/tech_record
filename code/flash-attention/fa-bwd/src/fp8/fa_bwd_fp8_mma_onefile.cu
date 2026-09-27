@@ -3457,7 +3457,8 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
 
 // P3-4e/P3-4f：确定性 dK/dV/dQ 版主 kernel（`DET=true`）。定长、HD=128 的 mma 路径。
 //   `ksplit>1` 时 dQ 也走 partial（需 REGDQ=true）。见两文件版 `fa_bwd_fp8_main.cu` 同名注释。
-template <int HD, int BM, int BN, bool REGDQ, bool PREL = true>
+// P3-4h：`NTH`/`NWAR` 参数化（默认 THREADS/WN 逐字不变），让 MLA（HD=512）复用同一 DET 路径。
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, int NTH = THREADS, int NWAR = WN>
 static void launch_bwd_main_det(dim3 mg, const unsigned char* q8, const float* qs,
                                 const unsigned char* k8, const float* ks,
                                 const unsigned char* v8, const float* vs,
@@ -3469,12 +3470,12 @@ static void launch_bwd_main_det(dim3 mg, const unsigned char* q8, const float* q
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = Cfg::smem_bytes;
   CUDA_CHECK(cudaFuncSetAttribute(
-      fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, false, PREL, true, true, THREADS, WN, false, true>,
+      fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, false, PREL, true, true, NTH, NWAR, false, true>,
       cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, false, PREL, true, true, THREADS, WN, false, true>
-      <<<mg, THREADS, kSmem>>>(q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
-                               dv_acc, S, H, Hkv, scale, causal, ksplit, nullptr, nullptr,
-                               nullptr, dk_part, dv_part, nblk, dq_part);
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, false, PREL, true, true, NTH, NWAR, false, true>
+      <<<mg, NTH, kSmem>>>(q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
+                           dv_acc, S, H, Hkv, scale, causal, ksplit, nullptr, nullptr,
+                           nullptr, dk_part, dv_part, nblk, dq_part);
 }
 
 // O51：K/V `cp.async` 回填流水版主 kernel（mma 后端，MLA/HD=512）。数值与旧路径逐位相同。
@@ -4783,6 +4784,75 @@ int main(int argc, char** argv) {
     cudaFree(d_dk_part);
     cudaFree(d_dv_part);
     if (d_dq_part) cudaFree(d_dq_part);
+    run_main();   // 恢复最终输出为 CLI 选中的路径
+  }
+
+  // ---- P3-4h A/B（D=512 MLA 定长，`--det`）：确定性 dK/dV 从 D=128 扩到 MLA（HD=512）。
+  //      见两文件版 `fa_bwd_fp8_main.cu` 同名注释。ksplit=1（dQ 单 CTA 写、无竞争 ⇒ 确定），
+  //      atomic 参照用同 256/4 几何的非 kvpipe 主 kernel，仅 DET 一个变量不同。----
+  if (det_ab && D == 512 && !varlen) {
+    const int nblk_d = (S + 63) / 64;
+    const size_t part_elems = (size_t)B * H * nblk_d * S * D;
+    float* d_dk_part = nullptr;
+    float* d_dv_part = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_dk_part, part_elems * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_dv_part, part_elems * sizeof(float)));
+    dim3 g1((S + 63) / 64, H, B);
+    auto run_at = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      launch_bwd_main<512, 64, 32, false, false, true, 256, 4>(
+          g1, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
+          d_dv_acc, S, H, Hkv, scale, (int)causal, 1);
+    };
+    auto run_dt = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      launch_bwd_main_det<512, 64, 32, false, true, 256, 4>(
+          g1, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
+          d_dv_acc, S, H, Hkv, scale, (int)causal, 1, d_dk_part, d_dv_part, nblk_d);
+      dim3 rg(B * Hkv, S);
+      dkv_reduce_kernel<512, 64><<<rg, 512>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                              nblk_d, (int)causal);
+    };
+    auto tm2h = [&](auto fn, float* o) {
+      for (int i = 0; i < 3; ++i) fn();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) fn();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(o, ev0, ev1));
+      *o /= iters;
+    };
+    auto mad2h = [](const std::vector<float>& x, const std::vector<float>& y) {
+      double m = 0.0;
+      for (size_t i = 0; i < x.size(); ++i) m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
+      return m;
+    };
+    float t_at = 0.f, t_dt = 0.f;
+    tm2h(run_at, &t_at);
+    std::vector<float> ak(nkv), av(nkv), aq(nq);
+    CUDA_CHECK(cudaMemcpy(ak.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(av.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(aq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    tm2h(run_dt, &t_dt);
+    std::vector<float> dk1(nkv), dv1(nkv), dq1(nq), dk2(nkv), dv2(nkv), dq2(nq);
+    CUDA_CHECK(cudaMemcpy(dk1.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dv1.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dq1.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    run_dt();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(dk2.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dv2.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(dq2.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    printf("[P3-4h A/B] MLA ksplit=1 atomic(256/4) %.4f ms | DET(256/4) %.4f ms (%.3fx) | "
+           "runs[1-2] bitwise dq/dk/dv=%.2e/%.2e/%.2e | DET-vs-atomic dq/dk/dv=%.2e/%.2e/%.2e\n",
+           t_at, t_dt, t_at / t_dt, mad2h(dq1, dq2), mad2h(dk1, dk2), mad2h(dv1, dv2),
+           mad2h(dq1, aq), mad2h(dk1, ak), mad2h(dv1, av));
+    cudaFree(d_dk_part);
+    cudaFree(d_dv_part);
     run_main();   // 恢复最终输出为 CLI 选中的路径
   }
 
