@@ -2867,7 +2867,9 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
 }
 
 // O37：Q/dO 4D-TMA 版（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA 路径实例化）。
-template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true>
+// P3-4g：`DET=true` 时复用同一 body 的确定性 dK/dV 路径（partial + 固定次序归约）。
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
+          bool DET = false>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
@@ -2878,15 +2880,22 @@ fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const float* __restrict__ delta, const float* __restrict__ lse,
                             float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                             float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                            int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr) {
-  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true>(
+                            int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
+                            float* __restrict__ dk_part = nullptr,
+                            float* __restrict__ dv_part = nullptr, int nblk = 0,
+                            float* __restrict__ dq_part = nullptr) {
+  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, false, THREADS, WN, false, DET>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit, cu_seqlens, &qmap, &dmap, nullptr, nullptr);
+      scale, causal, ksplit, cu_seqlens, &qmap, &dmap, nullptr, nullptr, nullptr, nullptr,
+      dk_part, dv_part, nblk, dq_part);
 }
 
 // O41：Q/dO/K/V 全 4D-TMA 版（roadmap「下一步候选 ①」）。K 双缓冲、V 单缓冲；Kp 从 SW128
 //   K tile 重建。仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA（BN=32）路径实例化。
-template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true>
+// P3-4g：`DET=true` 时复用同一 body 的确定性 dK/dV 路径（partial + 固定次序归约），
+//   把 `--det` 从默认 mma 路径扩到 Hopper TMA 快路。
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
+          bool DET = false>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
@@ -2899,10 +2908,14 @@ fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const float* __restrict__ delta, const float* __restrict__ lse,
                             float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                             float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                            int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr) {
-  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true>(
+                            int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
+                            float* __restrict__ dk_part = nullptr,
+                            float* __restrict__ dv_part = nullptr, int nblk = 0,
+                            float* __restrict__ dq_part = nullptr) {
+  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true, THREADS, WN, false, DET>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap);
+      scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap, nullptr, nullptr,
+      dk_part, dv_part, nblk, dq_part);
 }
 
 // =============================================================================
@@ -3522,6 +3535,30 @@ static void launch_bwd_main_kvtma(dim3 mg, const CUtensorMap& qmap, const CUtens
   fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL><<<mg, THREADS, kSmem>>>(
       qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
       dv_acc, S, H, Hkv, scale, causal, ksplit);
+}
+
+// P3-4g：`--det` 的 Hopper TMA 快路版（`launch_bwd_main_kvtma` 的 `DET=true`）。定长、HD=128、
+//   ksplit=1；dK/dV 走 partial + `dkv_reduce_kernel` 固定次序归约。见两文件版同名注释。
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true>
+static void launch_bwd_main_kvtma_det(dim3 mg, const CUtensorMap& qmap, const CUtensorMap& dmap,
+                                      const CUtensorMap& kmap, const CUtensorMap& vmap,
+                                      const unsigned char* q8, const float* qs,
+                                      const unsigned char* k8, const float* ks,
+                                      const unsigned char* v8, const float* vs,
+                                      const unsigned char* do8, const float* dos,
+                                      const float* delta, const float* lse, float* dq_acc,
+                                      float* dk_acc, float* dv_acc, int S, int H, int Hkv,
+                                      float scale, int causal, float* dk_part, float* dv_part,
+                                      int nblk) {
+  using Cfg = Fp8Cfg<HD, BM, BN>;
+  constexpr int kSmem = Cfg::smem_bytes_wgmma_kvtma;
+  CUDA_CHECK(cudaFuncSetAttribute(
+      fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, true, true, true>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, true, true, true>
+      <<<mg, THREADS, kSmem>>>(qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos,
+                               delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, 1,
+                               nullptr, dk_part, dv_part, nblk, nullptr);
 }
 #endif
 
@@ -4814,6 +4851,86 @@ int main(int argc, char** argv) {
            maxd(b_dv, a_dv));
     // 恢复最终输出为 CLI 选中的路径（上面 A/B 最后一次跑的是 wgmma）。
     run_main_wg(wgmma != 0);
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    // ---- P3-4g A/B（D=128/Hopper TMA，`--det`）：确定性 dK/dV 扩到 Q/dO/K/V-TMA 快路。
+    //      同 ksplit=1 隔离 partial+reduce 净开销；跑两遍 DET 验证逐位可复现。----
+    if (det_ab && !varlen) {
+      const int nblk_d = (S + 63) / 64;
+      const size_t part_elems = (size_t)B * H * nblk_d * S * D;
+      float* d_dk_part = nullptr;
+      float* d_dv_part = nullptr;
+      CUDA_CHECK(cudaMalloc(&d_dk_part, part_elems * sizeof(float)));
+      CUDA_CHECK(cudaMalloc(&d_dv_part, part_elems * sizeof(float)));
+      dim3 g1((S + 63) / 64, H, B);
+      auto run_at = [&]() {
+        CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+        CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+        CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+        if (use_regdq)
+          launch_bwd_main_kvtma<128, 64, 32, true>(g1, qmap_main, dmap_main, kmap_main,
+                                                   vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
+                                                   d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+                                                   d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                                   (int)causal, 1);
+        else
+          launch_bwd_main_kvtma<128, 64, 32, false>(g1, qmap_main, dmap_main, kmap_main,
+                                                    vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                    d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+                                                    d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                                    (int)causal, 1);
+      };
+      auto run_dt = [&]() {
+        CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+        CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+        CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+        if (use_regdq)
+          launch_bwd_main_kvtma_det<128, 64, 32, true>(g1, qmap_main, dmap_main, kmap_main,
+                                                       vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                       d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                       d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                                       scale, (int)causal, d_dk_part, d_dv_part,
+                                                       nblk_d);
+        else
+          launch_bwd_main_kvtma_det<128, 64, 32, false>(g1, qmap_main, dmap_main, kmap_main,
+                                                        vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
+                                                        d_vs, d_do8, d_dos, d_delta, d_lse,
+                                                        d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                                        scale, (int)causal, d_dk_part, d_dv_part,
+                                                        nblk_d);
+        dim3 rg(B * Hkv, S);
+        dkv_reduce_kernel<128, 64><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                                nblk_d, (int)causal);
+      };
+      auto tm2 = [&](auto fn, float* o) {
+        for (int i = 0; i < 3; ++i) fn();
+        CUDA_CHECK(cudaEventRecord(ev0));
+        for (int i = 0; i < iters; ++i) fn();
+        CUDA_CHECK(cudaEventRecord(ev1));
+        CUDA_CHECK(cudaEventSynchronize(ev1));
+        CUDA_CHECK(cudaEventElapsedTime(o, ev0, ev1));
+        *o /= iters;
+      };
+      float t_at = 0.f, t_dt = 0.f;
+      tm2(run_at, &t_at);
+      std::vector<float> ak(nkv), av(nkv);
+      CUDA_CHECK(cudaMemcpy(ak.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(av.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+      tm2(run_dt, &t_dt);
+      std::vector<float> dk1(nkv), dv1(nkv), dk2(nkv), dv2(nkv);
+      CUDA_CHECK(cudaMemcpy(dk1.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dv1.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+      run_dt();
+      CUDA_CHECK(cudaDeviceSynchronize());
+      CUDA_CHECK(cudaMemcpy(dk2.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dv2.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+      printf("[P3-4g A/B] kvtma ksplit=1 atomic %.4f ms | DET %.4f ms (%.3fx) | "
+             "runs[1-2] dk/dv=%.2e/%.2e | DET-vs-atomic dk/dv=%.2e/%.2e\n",
+             t_at, t_dt, t_at / t_dt, maxd(dk1, dk2), maxd(dv1, dv2), maxd(dk1, ak),
+             maxd(dv1, av));
+      cudaFree(d_dk_part);
+      cudaFree(d_dv_part);
+    }
+#endif
   }
 #endif
 

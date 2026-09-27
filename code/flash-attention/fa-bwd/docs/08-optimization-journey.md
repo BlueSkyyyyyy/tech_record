@@ -543,7 +543,20 @@ smem 冲突 + 低 occ
      纯 DRAM 带宽**（固定成本与 ksplit 无关，故 k 再大反而回升）。**教训：先想清楚「哪些
      中间量的竞争域到底多大」再下「必须 ksplit=1」的结论——一个看似必要的限制常常只对一半
      的累加器成立（这里 dQ 需要分片，dK/dV 不需要）。** 单/两文件 device 逐字同源；默认路径
-     数值逐位不变。详见 `docs/03` §57、`docs/04` §44。
+      数值逐位不变。详见 `docs/03` §57、`docs/04` §44。
+
+36. **P3-4g（第 120 轮，device 增量，正结果/opt-in）**：**把 `--det` 扩到 Hopper TMA 快路**——
+     P3-4e/f 的 `--det` 只挂默认 mma 路径；`--hopper`（`-DFA_WGMMA -DFA_TMA`）的主路径是
+     Q/dO/K/V 全 4D-TMA 的 `kvtma` kernel，dK/dV 仍是跨 CTA `atomicAdd` ⇒ 快路无法确定性复现。
+     因为 DET 的 epilogue 早在 `fp8_mma_body` 里，**device 一行数学都没改**，只把 `DET` 与
+     `dk_part/dv_part/nblk/dq_part` 从两个 TMA 壳透传进 body（默认 `DET=false` ⇒ 既有 TMA 逐位
+     不变）。**三 shape（S512/S1024-GQA/S4096）× 单/两文件，两次跑 `bitwise dk/dv = 0`**，与
+     atomic 差 e-7–e-6；`ours vs ref` 与历史逐位一致；`--no-run --ci` 73 case 全绿。代价同 P3-4e/f：
+     DET 主 kernel 把 L2 `red`（78.6%）换成 DRAM partial 写（38.3%），`dkv_reduce` **729.8µs /
+     DRAM 91.7% / 3.07 TB/s**（纯带宽 bound），S4096 0.78×。**教训：只要把确定性做在共享的
+     「计算体」而不是某个后端壳里，换后端（cp.async→TMA）时确定性几乎免费继承——新增一个后端
+     只需要把模板参数透传过去，风险被 `DET=false` 默认值完全隔离。** 单/两文件 device 逐字同源；
+     默认路径一行未改。详见 `docs/03` §58。
 
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）

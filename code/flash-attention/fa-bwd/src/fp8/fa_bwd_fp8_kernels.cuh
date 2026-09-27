@@ -2907,7 +2907,9 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
 }
 
 // O37：Q/dO 4D-TMA 版（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA 路径实例化）。
-template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true>
+// P3-4g：`DET=true` 时复用同一 body 的确定性 dK/dV 路径（partial + 固定次序归约）。
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
+          bool DET = false>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
@@ -2918,15 +2920,22 @@ fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const float* __restrict__ delta, const float* __restrict__ lse,
                             float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                             float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                            int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr) {
-  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true>(
+                            int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
+                            float* __restrict__ dk_part = nullptr,
+                            float* __restrict__ dv_part = nullptr, int nblk = 0,
+                            float* __restrict__ dq_part = nullptr) {
+  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, false, THREADS, WN, false, DET>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit, cu_seqlens, &qmap, &dmap, nullptr, nullptr);
+      scale, causal, ksplit, cu_seqlens, &qmap, &dmap, nullptr, nullptr, nullptr, nullptr,
+      dk_part, dv_part, nblk, dq_part);
 }
 
 // O41：Q/dO/K/V 全 4D-TMA 版（roadmap「下一步候选 ①」）。K 双缓冲、V 单缓冲；Kp 从 SW128
 //   K tile 重建。仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA（BN=32）路径实例化。
-template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true>
+// P3-4g：`DET=true` 时复用同一 body 的确定性 dK/dV 路径（partial + 固定次序归约），
+//   把 `--det` 从默认 mma 路径扩到 Hopper TMA 快路。
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
+          bool DET = false>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
@@ -2939,10 +2948,14 @@ fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const float* __restrict__ delta, const float* __restrict__ lse,
                             float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                             float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                            int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr) {
-  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true>(
+                            int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
+                            float* __restrict__ dk_part = nullptr,
+                            float* __restrict__ dv_part = nullptr, int nblk = 0,
+                            float* __restrict__ dq_part = nullptr) {
+  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true, THREADS, WN, false, DET>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap);
+      scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap, nullptr, nullptr,
+      dk_part, dv_part, nblk, dq_part);
 }
 
 // =============================================================================

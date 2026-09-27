@@ -123,6 +123,10 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    天然无需 part 维（一个 `(mblk,jg)` 只属于一个 part），只需给 dQ 加 part 分片 partial +
    `dq_reduce_kernel`，即可在 ksplit>1 下保持 dq/dk/dv 全逐位可复现；DET 相对 k=1 提速
    S512 **1.31×** / S4096 **1.11×**（k=4 触底）。见 `docs/03` §57。
+   → **`--det` 已扩到 Hopper TMA 快路（P3-4g，第一百二十轮）**：Q/dO/K/V 全 4D-TMA 的
+   `kvtma` 主 kernel 也能走 deterministic dK/dV（定长 HD=128/GQA、ksplit=1）；三 shape ×
+   单/两文件两次跑逐位相同、与 atomic 差 e-7–e-6，代价仍是 reduce 的 DRAM partial 写读。
+   见 `docs/03` §58。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 
