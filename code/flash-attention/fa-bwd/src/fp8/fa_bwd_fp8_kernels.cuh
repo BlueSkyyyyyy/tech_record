@@ -711,7 +711,8 @@ __global__ void dkv_reduce_varlen_kernel(const float* __restrict__ dk_part,
                                          const float* __restrict__ dv_part,
                                          float* __restrict__ dk_acc, float* __restrict__ dv_acc,
                                          const int* __restrict__ cu_seqlens,
-                                         int H, int Hkv, int nblk_max, int maxlen, int causal) {
+                                         int H, int Hkv, int nblk_max, int maxlen, int causal,
+                                         const int* __restrict__ part_base = nullptr) {
   const int hb = blockIdx.x;   // b*Hkv + hkv
   const int jg = blockIdx.y;   // 序列内的 KV 行
   const int c = threadIdx.x;
@@ -728,7 +729,11 @@ __global__ void dkv_reduce_varlen_kernel(const float* __restrict__ dk_part,
   for (int hh = 0; hh < G; ++hh) {
     const size_t prow = (size_t)(b * H + h0 + hh) * nblk_max;
     for (int m = mblk0; m < nblk_b; ++m) {
-      const size_t base = ((prow + m) * (size_t)maxlen + jg) * HD + c;
+      // P3-4o：`part_base` 非空时读 compact per-sequence 布局（与 `fp8_mma_body` 的写一致）。
+      const size_t base =
+          part_base
+              ? ((size_t)part_base[b] + ((size_t)(h0 + hh) * nblk_b + m) * len + jg) * HD + c
+              : ((prow + m) * (size_t)maxlen + jg) * HD + c;
       sk += dk_part[base];
       sv += dv_part[base];
     }
@@ -746,7 +751,8 @@ __global__ void dkv_dq_reduce_varlen_kernel(
     const float* __restrict__ dk_part, const float* __restrict__ dv_part,
     const float* __restrict__ dq_part, float* __restrict__ dk_acc, float* __restrict__ dv_acc,
     float* __restrict__ dq_acc, const int* __restrict__ cu_seqlens, int H, int Hkv, int nblk_max,
-    int maxlen, int causal, int ksplit, int dkv_blocks) {
+    int maxlen, int causal, int ksplit, int dkv_blocks,
+    const int* __restrict__ part_base = nullptr) {
   const int c = threadIdx.x;
   if (c >= HD) return;
   const int idx = blockIdx.x;
@@ -764,7 +770,11 @@ __global__ void dkv_dq_reduce_varlen_kernel(
     for (int hh = 0; hh < G; ++hh) {
       const size_t prow = (size_t)(b * H + h0 + hh) * nblk_max;
       for (int m = mblk0; m < nblk_b; ++m) {
-        const size_t base = ((prow + m) * (size_t)maxlen + jg) * HD + c;
+        // P3-4o：compact per-sequence 布局（与 `fp8_mma_body` / `dkv_reduce_varlen_kernel` 一致）。
+        const size_t base =
+            part_base
+                ? ((size_t)part_base[b] + ((size_t)(h0 + hh) * nblk_b + m) * len + jg) * HD + c
+                : ((prow + m) * (size_t)maxlen + jg) * HD + c;
         sk += dk_part[base];
         sv += dv_part[base];
       }
@@ -2035,7 +2045,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                       const int* __restrict__ mt_m = nullptr,
                       float* __restrict__ dk_part = nullptr,
                       float* __restrict__ dv_part = nullptr, int nblk = 0,
-                      float* __restrict__ dq_part = nullptr) {
+                      float* __restrict__ dq_part = nullptr,
+                      const int* __restrict__ part_base = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   // O47：warp 网格派生。默认 128/2 ⇒ NWM=2 与历史 2×2 一致（逐字等价）。
   constexpr int NWM = NTH / 32 / NWAR;
@@ -2164,6 +2175,11 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * BM;
   if (m0 >= len) return;  // VARLEN：超出本序列长度的 m 块直接退出
+  // P3-4o：varlen DET 的 partial 支持 **compact per-sequence 布局**（`part_base` 非空）——每序列
+  //   b 的 partial 只占 `H*nblk_b*len_b` 个 token 行（而非全局 `maxlen/nblk_max` stride），缩小
+  //   地址跨度、提高二次归约的 DRAM 局部性。`part_base` 是行前缀和（行单位，见 host）；
+  //   本序列的 m 块数 `nblk_seq = ceil(len_b/BM)`。空指针时逐式退化为定长/旧 varlen 布局。
+  const int nblk_seq = cu_seqlens ? (len + BM - 1) / BM : nblk;
 
   const int ncols = causal ? min(len, m0 + BM) : len;
   const int ntiles = (ncols + BN - 1) / BN;
@@ -2775,11 +2791,15 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                       acc[i][j][q] * sA[r];
                 } else if constexpr (DET) {
                   // P3-4e：非原子写 partial（每元素本 CTA 唯一）→ 固定次序二次归约。
-                  if ((q & 1) == 0)
-                    dkv_det_store(dv_part +
-                                      (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD +
-                                          d0 + c,
-                                  acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r]);
+                  // P3-4o：`part_base` 非空时改用 compact per-sequence 布局（缩小地址跨度）。
+                  if ((q & 1) == 0) {
+                    const size_t dpo =
+                        part_base
+                            ? ((size_t)part_base[b] + ((size_t)h * nblk_seq + mblk) * len + jg) * HD +
+                                  d0 + c
+                            : (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + d0 + c;
+                    dkv_det_store(dv_part + dpo, acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r]);
+                  }
                 } else if ((q & 1) == 0) {
                   // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
                   red_add2(dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
@@ -2805,12 +2825,15 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                   wstg[(i * 16 + g + (q >= 2 ? 8 : 0)) * STGS + (j * 8 + c2 + (q & 1))] =
                       acc[i][j][q] * sds3[r] * scale;
                 } else if constexpr (DET) {
-                  if ((q & 1) == 0)
-                    dkv_det_store(dk_part +
-                                      (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD +
-                                          d0 + c,
-                                  acc[i][j][q] * sds3[r] * scale,
+                  if ((q & 1) == 0) {
+                    const size_t dpo =
+                        part_base
+                            ? ((size_t)part_base[b] + ((size_t)h * nblk_seq + mblk) * len + jg) * HD +
+                                  d0 + c
+                            : (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + d0 + c;
+                    dkv_det_store(dk_part + dpo, acc[i][j][q] * sds3[r] * scale,
                                   acc[i][j][q + 1] * sds3[r] * scale);
+                  }
                 } else if ((q & 1) == 0) {
                   red_add2(dk_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
                            acc[i][j][q] * sds3[r] * scale,
@@ -3048,11 +3071,12 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       const int* __restrict__ mt_m = nullptr,
                       float* __restrict__ dk_part = nullptr,
                       float* __restrict__ dv_part = nullptr, int nblk = 0,
-                      float* __restrict__ dq_part = nullptr) {
+                      float* __restrict__ dq_part = nullptr,
+                      const int* __restrict__ part_base = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR, KVPIPE, DET>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, nullptr, nullptr, nullptr, nullptr, mt_b, mt_m,
-      dk_part, dv_part, nblk, dq_part);
+      dk_part, dv_part, nblk, dq_part, part_base);
 }
 
 // O37：Q/dO 4D-TMA 版（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA 路径实例化）。
@@ -3072,11 +3096,12 @@ fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
                             float* __restrict__ dk_part = nullptr,
                             float* __restrict__ dv_part = nullptr, int nblk = 0,
-                            float* __restrict__ dq_part = nullptr) {
+                            float* __restrict__ dq_part = nullptr,
+                            const int* __restrict__ part_base = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, false, THREADS, WN, false, DET>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, &qmap, &dmap, nullptr, nullptr, nullptr, nullptr,
-      dk_part, dv_part, nblk, dq_part);
+      dk_part, dv_part, nblk, dq_part, part_base);
 }
 
 // O41：Q/dO/K/V 全 4D-TMA 版（roadmap「下一步候选 ①」）。K 双缓冲、V 单缓冲；Kp 从 SW128
@@ -3100,11 +3125,12 @@ fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
                             float* __restrict__ dk_part = nullptr,
                             float* __restrict__ dv_part = nullptr, int nblk = 0,
-                            float* __restrict__ dq_part = nullptr) {
+                            float* __restrict__ dq_part = nullptr,
+                            const int* __restrict__ part_base = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true, THREADS, WN, false, DET>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap, nullptr, nullptr,
-      dk_part, dv_part, nblk, dq_part);
+      dk_part, dv_part, nblk, dq_part, part_base);
 }
 
 // =============================================================================

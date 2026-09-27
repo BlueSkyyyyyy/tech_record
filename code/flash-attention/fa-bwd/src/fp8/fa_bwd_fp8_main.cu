@@ -190,7 +190,7 @@ static void launch_bwd_main_det(dim3 mg, const unsigned char* q8, const float* q
                                 float scale, int causal, int ksplit, float* dk_part,
                                 float* dv_part, int nblk, float* dq_part = nullptr,
                                 const int* cu_seqlens = nullptr, const int* mt_b = nullptr,
-                                const int* mt_m = nullptr) {
+                                const int* mt_m = nullptr, const int* part_base = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = WGMMA ? Cfg::smem_bytes_wgmma
                               : (KVPIPE ? Cfg::smem_bytes_kvpipe : Cfg::smem_bytes);
@@ -200,7 +200,7 @@ static void launch_bwd_main_det(dim3 mg, const unsigned char* q8, const float* q
   fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR, KVPIPE, true>
       <<<mg, NTH, kSmem>>>(q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
                            dv_acc, S, H, Hkv, scale, causal, ksplit, cu_seqlens, mt_b,
-                           mt_m, dk_part, dv_part, nblk, dq_part);
+                           mt_m, dk_part, dv_part, nblk, dq_part, part_base);
 }
 
 // O51：K/V `cp.async` 回填流水版主 kernel（mma 后端，MLA/HD=512）。smem 比 `launch_bwd_main`
@@ -450,7 +450,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
                       bool lse_compact = false, int lse_split = 0, int mla8w = -1,
                       int mla_kvp = -1, int lseocc = 0, int lse8w = 0,
                       const std::string& dump = "", int det_ab = 0, int det_ksplit = 1,
-                      int fuse_reduce = 1) {
+                      int fuse_reduce = 1, int part_compact = 0) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -769,7 +769,21 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   if (det_ab && D == 128) {
     const int nblk_max = (maxlen + BM - 1) / BM;
     const int ks = det_ksplit < 1 ? 1 : det_ksplit;
-    const size_t part_elems = (size_t)B * H * nblk_max * maxlen * D;
+    const size_t part_elems = (size_t)B * H * nblk_max * maxlen * D;   // 旧（maxlen-strided）上界
+    // P3-4o：compact per-sequence offset（行前缀和，行 = 一个 (h,mblk,jg) 的 HD 向量）。
+    //   每序列 b 只占 `H*nblk_b*len_b` 行 ⇒ 缩小地址跨度、提高二次归约 DRAM 局部性。
+    std::vector<int> part_base_h(B + 1, 0);
+    for (int b = 0; b < B; ++b) {
+      const int len_b = cu[b + 1] - cu[b];
+      const int nblk_b = (len_b + BM - 1) / BM;
+      part_base_h[b + 1] = part_base_h[b] + H * nblk_b * len_b;
+    }
+    const size_t part_elems_cmp = (size_t)part_base_h[B] * D;
+    int* d_part_base = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_part_base, (B + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_part_base, part_base_h.data(), (B + 1) * sizeof(int),
+                          cudaMemcpyHostToDevice));
+    const int* pb = part_compact ? d_part_base : nullptr;   // 空 ⇒ 旧 maxlen-strided 布局（默认）
     const size_t dqpart_elems = (size_t)T * H * (size_t)ks * D;
     float* d_dk_part = nullptr;
     float* d_dv_part = nullptr;
@@ -777,6 +791,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     CUDA_CHECK(cudaMalloc(&d_dk_part, part_elems * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_dv_part, part_elems * sizeof(float)));
     if (ks > 1) CUDA_CHECK(cudaMalloc(&d_dq_part, dqpart_elems * sizeof(float)));
+    printf("[P3-4o] varlen D=128 partial: compact=%.1fMB (%.0f%% of old %.1fMB) layout=%s\n",
+           part_elems_cmp * 4 / 1e6, 100.0 * (double)part_elems_cmp / (double)part_elems,
+           part_elems * 4 / 1e6, pb ? "compact" : "maxlen-strided");
     auto run_at = [&](int k) {
       dim3 g(nblk_max * k, H, B);
       CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
@@ -786,31 +803,32 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
           g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
           maxlen, H, Hkv, scale, (int)causal, k, d_cu, nullptr, nullptr);
     };
-    auto run_dt = [&](int k) {
+    auto run_dt_p = [&](int k, const int* p) {
       dim3 g(nblk_max * k, H, B);
       CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));   // ksplit==1 时 dQ 用无竞争 red_add2
       if (k > 1) CUDA_CHECK(cudaMemset(d_dq_part, 0, dqpart_elems * 4));  // 空 part 需为 0
       launch_bwd_main_det<128, 64, 32, true, true, true, true, THREADS, WN, kWgmVarlen>(
           g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
           maxlen, H, Hkv, scale, (int)causal, k, d_dk_part, d_dv_part, nblk_max, d_dq_part,
-          d_cu, nullptr, nullptr);
+          d_cu, nullptr, nullptr, p);
       // P3-4n：dkv+dq 融合归约（默认）vs 两次 launch（`--nofusered`）。
       const int dkv_blocks = B * Hkv * maxlen;
       const int dq_blocks = (k > 1) ? T * H : 0;
       if (fuse_reduce) {
         dkv_dq_reduce_varlen_kernel<128, 64><<<dkv_blocks + dq_blocks, 128>>>(
             d_dk_part, d_dv_part, (k > 1) ? d_dq_part : nullptr, d_dk, d_dv, d_dq, d_cu, H, Hkv,
-            nblk_max, maxlen, (int)causal, k, dkv_blocks);
+            nblk_max, maxlen, (int)causal, k, dkv_blocks, p);
       } else {
         dim3 rg(B * Hkv, maxlen);
         dkv_reduce_varlen_kernel<128, 64><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk, d_dv, d_cu, H,
-                                                       Hkv, nblk_max, maxlen, (int)causal);
+                                                       Hkv, nblk_max, maxlen, (int)causal, p);
         if (k > 1) {
           dim3 dg(T, H);
           dq_reduce_kernel<128><<<dg, 128>>>(d_dq_part, d_dq, T, H, k);
         }
       }
     };
+    auto run_dt = [&](int k) { run_dt_p(k, pb); };
     auto time_fn3 = [&](auto fn, float* out_ms) {
       for (int i = 0; i < 3; ++i) fn();
       CUDA_CHECK(cudaEventRecord(ev0));
@@ -851,7 +869,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       auto only_sep = [&]() {
         dim3 rg(B * Hkv, maxlen);
         dkv_reduce_varlen_kernel<128, 64><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk, d_dv, d_cu, H,
-                                                       Hkv, nblk_max, maxlen, (int)causal);
+                                                       Hkv, nblk_max, maxlen, (int)causal, pb);
         if (ks > 1) {
           dim3 dg(T, H);
           dq_reduce_kernel<128><<<dg, 128>>>(d_dq_part, d_dq, T, H, ks);
@@ -861,7 +879,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
         const int dkv_blocks = B * Hkv * maxlen, dq_blocks = (ks > 1) ? T * H : 0;
         dkv_dq_reduce_varlen_kernel<128, 64><<<dkv_blocks + dq_blocks, 128>>>(
             d_dk_part, d_dv_part, (ks > 1) ? d_dq_part : nullptr, d_dk, d_dv, d_dq, d_cu, H, Hkv,
-            nblk_max, maxlen, (int)causal, ks, dkv_blocks);
+            nblk_max, maxlen, (int)causal, ks, dkv_blocks, pb);
       };
       float t_rs = 0.f, t_rf = 0.f;
       time_fn3(only_sep, &t_rs);
@@ -878,9 +896,39 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
              "(%.3fx) | fused-vs-sep bitwise dq/dk/dv=%.2e/%.2e/%.2e\n",
              t_rs, t_rf, t_rs / t_rf, mad3(rfdq, rsdq), mad3(rfdk, rsdk), mad3(rfdv, rsdv));
     }
+    // ---- P3-4o A/B：同 binary 只改 partial 布局（compact per-sequence vs maxlen-strided），
+    //      主 kernel+二次归约一起计时；两布局数值应逐位相同（只改地址，不改求和集合/次序）。----
+    {
+      auto time_full = [&](const int* p, float* out_ms) {
+        auto fn = [&]() { run_dt_p(ks, p); };
+        for (int i = 0; i < 3; ++i) fn();
+        CUDA_CHECK(cudaEventRecord(ev0));
+        for (int i = 0; i < iters; ++i) fn();
+        CUDA_CHECK(cudaEventRecord(ev1));
+        CUDA_CHECK(cudaEventSynchronize(ev1));
+        float t = 0.f;
+        CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+        *out_ms = t / iters;
+      };
+      float t_cmp = 0.f, t_leg = 0.f;
+      time_full(d_part_base, &t_cmp);
+      std::vector<float> cdk(nkv), cdv(nkv), cdq(nq);
+      CUDA_CHECK(cudaMemcpy(cdk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(cdv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(cdq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+      time_full(nullptr, &t_leg);
+      std::vector<float> ldk(nkv), ldv(nkv), ldq(nq);
+      CUDA_CHECK(cudaMemcpy(ldk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(ldv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(ldq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+      printf("[P3-4o A/B] varlen ksplit=%d | maxlen-strided %.4f ms | compact %.4f ms (%.3fx) | "
+             "compact-vs-legacy bitwise dq/dk/dv=%.2e/%.2e/%.2e\n",
+             ks, t_leg, t_cmp, t_leg / t_cmp, mad3(cdq, ldq), mad3(cdk, ldk), mad3(cdv, ldv));
+    }
     cudaFree(d_dk_part);
     cudaFree(d_dv_part);
     if (d_dq_part) cudaFree(d_dq_part);
+    cudaFree(d_part_base);
     run_all();   // 恢复最终输出为 CLI 选中的路径
     CUDA_CHECK(cudaDeviceSynchronize());
   }
@@ -899,7 +947,20 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   if (det_ab && D == 512) {
     const int nblk_max = (maxlen + BM - 1) / BM;
     const int ks = det_ksplit < 1 ? 1 : det_ksplit;
-    const size_t part_elems = (size_t)B * H * nblk_max * maxlen * D;
+    const size_t part_elems = (size_t)B * H * nblk_max * maxlen * D;   // 旧（maxlen-strided）上界
+    // P3-4o：compact per-sequence offset（同 D=128 版；dK/dV 布局 HD 无关）。
+    std::vector<int> part_base_h(B + 1, 0);
+    for (int b = 0; b < B; ++b) {
+      const int len_b = cu[b + 1] - cu[b];
+      const int nblk_b = (len_b + BM - 1) / BM;
+      part_base_h[b + 1] = part_base_h[b] + H * nblk_b * len_b;
+    }
+    const size_t part_elems_cmp = (size_t)part_base_h[B] * D;
+    int* d_part_base = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_part_base, (B + 1) * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_part_base, part_base_h.data(), (B + 1) * sizeof(int),
+                          cudaMemcpyHostToDevice));
+    const int* pb = part_compact ? d_part_base : nullptr;
     const size_t dqpart_elems = (size_t)T * H * (size_t)ks * D;
     float* d_dk_part = nullptr;
     float* d_dv_part = nullptr;
@@ -907,6 +968,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     CUDA_CHECK(cudaMalloc(&d_dk_part, part_elems * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_dv_part, part_elems * sizeof(float)));
     if (ks > 1) CUDA_CHECK(cudaMalloc(&d_dq_part, dqpart_elems * sizeof(float)));
+    printf("[P3-4o] varlen D=512 partial: compact=%.1fMB (%.0f%% of old %.1fMB) layout=%s\n",
+           part_elems_cmp * 4 / 1e6, 100.0 * (double)part_elems_cmp / (double)part_elems,
+           part_elems * 4 / 1e6, pb ? "compact" : "maxlen-strided");
     dim3 g(nblk_max * ks, H, B);
     auto run_at = [&]() {
       CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
@@ -918,24 +982,24 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     };
     // P3-4m：两个 DET 主 kernel 变体共用同一段 reduce（非 kvpipe 与 kvpipe 只差搬运，
     //   数值应逐位相同；kvpipe 是 O51 的 K/V cp.async 回填流水，此前 DET 未接线）。
-    auto do_reduce = [&]() {
+    auto do_reduce = [&](const int* p) {
       const int dkv_blocks = B * Hkv * maxlen;
       const int dq_blocks = (ks > 1) ? T * H : 0;
       if (fuse_reduce) {
         dkv_dq_reduce_varlen_kernel<512, 64><<<dkv_blocks + dq_blocks, 512>>>(
             d_dk_part, d_dv_part, (ks > 1) ? d_dq_part : nullptr, d_dk, d_dv, d_dq, d_cu, H, Hkv,
-            nblk_max, maxlen, (int)causal, ks, dkv_blocks);
+            nblk_max, maxlen, (int)causal, ks, dkv_blocks, p);
       } else {
         dim3 rg(B * Hkv, maxlen);
         dkv_reduce_varlen_kernel<512, 64><<<rg, 512>>>(d_dk_part, d_dv_part, d_dk, d_dv, d_cu, H,
-                                                       Hkv, nblk_max, maxlen, (int)causal);
+                                                       Hkv, nblk_max, maxlen, (int)causal, p);
         if (ks > 1) {
           dim3 dg(T, H);
           dq_reduce_kernel<512><<<dg, 512>>>(d_dq_part, d_dq, T, H, ks);
         }
       }
     };
-    auto run_dt = [&]() {
+    auto run_dt_p = [&](const int* p) {
       CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));   // ksplit==1 时 dQ 用无竞争 red_add2
       CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
       CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
@@ -943,9 +1007,10 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       launch_bwd_main_det<512, 64, 32, false, true, true, true, 256, 4>(
           g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
           maxlen, H, Hkv, scale, (int)causal, ks, d_dk_part, d_dv_part, nblk_max, d_dq_part, d_cu,
-          nullptr, nullptr);
-      do_reduce();
+          nullptr, nullptr, p);
+      do_reduce(p);
     };
+    auto run_dt = [&]() { run_dt_p(pb); };
     // P3-4m：DET + O51 K/V `cp.async` 回填流水（kvpipe）。
     auto run_dt_kv = [&]() {
       CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
@@ -955,8 +1020,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       launch_bwd_main_det<512, 64, 32, false, true, true, true, 256, 4, false, true>(
           g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
           maxlen, H, Hkv, scale, (int)causal, ks, d_dk_part, d_dv_part, nblk_max, d_dq_part, d_cu,
-          nullptr, nullptr);
-      do_reduce();
+          nullptr, nullptr, pb);
+      do_reduce(pb);
     };
     auto time_fn3 = [&](auto fn, float* out_ms) {
       for (int i = 0; i < 3; ++i) fn();
@@ -1009,9 +1074,38 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
            "%.2e/%.2e/%.2e\n",
            ks, ms_dt, ms_dt_kv, ms_dt / ms_dt_kv, mad3(dqk1, dqk2), mad3(dkk1, dkk2),
            mad3(dvk1, dvk2), mad3(dqk1, dq1), mad3(dkk1, dk1), mad3(dvk1, dv1));
+    // ---- P3-4o A/B：同 binary 只改 partial 布局（compact vs maxlen-strided）。
+    {
+      auto time_full = [&](const int* p, float* out_ms) {
+        auto fn = [&]() { run_dt_p(p); };
+        for (int i = 0; i < 3; ++i) fn();
+        CUDA_CHECK(cudaEventRecord(ev0));
+        for (int i = 0; i < iters; ++i) fn();
+        CUDA_CHECK(cudaEventRecord(ev1));
+        CUDA_CHECK(cudaEventSynchronize(ev1));
+        float t = 0.f;
+        CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+        *out_ms = t / iters;
+      };
+      float t_cmp = 0.f, t_leg = 0.f;
+      time_full(d_part_base, &t_cmp);
+      std::vector<float> cdk(nkv), cdv(nkv), cdq(nq);
+      CUDA_CHECK(cudaMemcpy(cdk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(cdv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(cdq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+      time_full(nullptr, &t_leg);
+      std::vector<float> ldk(nkv), ldv(nkv), ldq(nq);
+      CUDA_CHECK(cudaMemcpy(ldk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(ldv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(ldq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+      printf("[P3-4o A/B] MLA varlen ksplit=%d | maxlen-strided %.4f ms | compact %.4f ms (%.3fx) | "
+             "compact-vs-legacy bitwise dq/dk/dv=%.2e/%.2e/%.2e\n",
+             ks, t_leg, t_cmp, t_leg / t_cmp, mad3(cdq, ldq), mad3(cdk, ldk), mad3(cdv, ldv));
+    }
     cudaFree(d_dk_part);
     cudaFree(d_dv_part);
     if (d_dq_part) cudaFree(d_dq_part);
+    cudaFree(d_part_base);
     run_all();   // 恢复最终输出为 CLI 选中的路径
     CUDA_CHECK(cudaDeviceSynchronize());
   }
@@ -1281,6 +1375,10 @@ int main(int argc, char** argv) {
   // P3-4n：DET 的 dkv/dq 二次归约是否融合成一次 launch（默认 1）。`--nofusered` 退回两次
   //   launch 做同 binary A/B。两版求和次序逐字相同 ⇒ 数值逐位相同。
   int fuse_reduce = 1;
+  // P3-4o：varlen DET 的 dK/dV partial 是否用 compact per-sequence 布局。默认 0 = 旧
+  //   maxlen-strided（性能略优）。`--partcompact` 打开 compact（分配大幅缩小，但实测约
+  //   0.966–0.975×，见 docs/03 §66）；A/B 在同 binary 内始终两种布局都跑。
+  int part_compact = 0;
   int varlen = 0;   // VARLEN：1 = packed [T,H,D] + cu_seqlens.npy（fp8/HD=128/causal）
   int compact_opt = 0;  // 第八十二轮：1 = varlen 主 kernel 紧凑均衡网格（opt-in；实测中性偏负）
   int lse_compact_opt = 0;  // 第八十二轮：1 = varlen causal LSE 紧凑对网格（opt-in，A/B）
@@ -1311,6 +1409,7 @@ int main(int argc, char** argv) {
     else if (a == "--det") det_ab = 1;
     else if (a.rfind("--detk=", 0) == 0) det_ksplit = atoi(a.c_str() + 7);
     else if (a == "--nofusered") fuse_reduce = 0;
+    else if (a == "--partcompact") part_compact = 1;
     else if (a.rfind("--qdtma=", 0) == 0) qd_tma = atoi(a.c_str() + 8);
     else if (a.rfind("--kvtma=", 0) == 0) kv_tma = atoi(a.c_str() + 8);
     else if (a == "--kvtma") kv_tma = 1;
@@ -1335,7 +1434,7 @@ int main(int argc, char** argv) {
   if (varlen)
     return run_varlen(dir, causal, iters, compact_opt, lse_compact_opt, lse_split, mla8w_opt,
                       mla_kvp_opt, lseocc_opt, lse8w_opt, dump_prefix, det_ab, det_ksplit,
-                      fuse_reduce);
+                      fuse_reduce, part_compact);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");

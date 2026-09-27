@@ -177,6 +177,13 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    reduce-only S512 **1.149×**、varlen D128 b1_t512 **1.170×**、S4096 **1.006×**（纯带宽墙、中性）；
    ncu 融合 22.94µs/DRAM 79.7%/occ 86.1%（分开 dkv 17.31µs/70.4% + dq 8.64µs/58.7%，合计
    25.95µs）。`--nofusered` 退回两次 launch。见 `docs/03` §65。
+   → **varlen DET partial 试换 compact per-sequence 布局（P3-4o，第一百二十八轮）**：
+   `fp8_mma_body` 的两个 DET 写点 + `dkv_reduce_varlen_kernel` / `dkv_dq_reduce_varlen_kernel`
+   加行前缀和 `part_base`，非空时紧凑编址，空时逐字退化。**逐位相同**（只改地址）；缓冲大幅
+   缩小（b4_t3840 D128 2147→713MB、b8_t2904 4295→575MB、D512 b3 201→88MB），但**耗时
+   0.944–0.975×（负结果）**——reduce 只读被写过的条目，stride 空洞不产生 DRAM 流量；两布局都
+   DRAM/L2 bound（86.9% vs 84.4%）。默认保持旧布局，`--partcompact` opt-in 只为省显存。真正的
+   「减 partial 字节」只能靠 BM=128 跨 warpgroup 偏和（fp8 撞 smem 硬墙）。见 `docs/03` §66。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 
