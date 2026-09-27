@@ -184,6 +184,11 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    0.944–0.975×（负结果）**——reduce 只读被写过的条目，stride 空洞不产生 DRAM 流量；两布局都
    DRAM/L2 bound（86.9% vs 84.4%）。默认保持旧布局，`--partcompact` opt-in 只为省显存。真正的
    「减 partial 字节」只能靠 BM=128 跨 warpgroup 偏和（fp8 撞 smem 硬墙）。见 `docs/03` §66。
+   → **partial 降精度存储（O60，第一百二十九轮，fp16）**：把 `--det` 的 dK/dV partial 从 fp32
+   降到 fp16（`__half2`）。**reduce 单向 1.27–1.66×**（纯 DRAM 读字节减半），**但 DET 主 kernel
+   写侧慢 0.84–0.87×**——ncu 实测 fp16 把 DRAM 写字节减半、**store 扇区数却一字不变**（DET
+   partial 写是扇区粒度 bound，每 `(j,row)` 仅 16B 落不满 32B 扇区），故端到端只中性偏负
+   （S4096 1.006×、S512/GQA 0.93–0.97×）。确定性保留、只改数值口径（~1e-3）。见 `docs/01` §17。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 

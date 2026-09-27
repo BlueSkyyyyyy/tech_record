@@ -319,6 +319,22 @@ __device__ __forceinline__ void dkv_det_store(float* part, float a, float b) {
   *reinterpret_cast<float2*>(part) = make_float2(a, b);
 }
 
+// O60：**partial 降精度存储**——把 DET 的 dK/dV partial 从 fp32 改存 fp16（`__half2`），
+//   字节减半，直击 reduce 的纯 DRAM 带宽墙（见 docs/01 §15、`docs/08` §5.44）。只改
+//   「存到地址处的元素类型」：写点、归约索引与求和集合/次序都逐字不变，故仍确定性可复现；
+//   代价是每个 partial 值先过一趟 fp16 舍入（~5e-4 相对），最终输出本就 fp16。
+__device__ __forceinline__ void dkv_det_store(__half* part, float a, float b) {
+  *reinterpret_cast<__half2*>(part) = __floats2half2_rn(a, b);
+}
+
+// 注意：`off` 是**元素下标**。fp16 存储时缓冲区的元素单位是 2B，故必须在 `__half*`
+// 上做 `+off`，不能在 `float*` 上先加（否则字节地址会翻倍、越界）。
+template <bool P16>
+__device__ __forceinline__ void dkv_det_store_p(float* base, size_t off, float a, float b) {
+  if constexpr (P16) dkv_det_store(reinterpret_cast<__half*>(base) + off, a, b);
+  else dkv_det_store(base + off, a, b);
+}
+
 // ---- O6：cp.async 异步拷贝（16B）----
 // 把「全局→smem」的 K/V 搬运从「同步 LDG + STS」改成硬件异步流水：`cp.async.cg` 走
 // L2-only 路径（流式数据不污染 L1），发起后立即返回、不占寄存器、不阻塞发射；
@@ -2056,7 +2072,7 @@ fa_bwd_fp16_wgmma2_kernel(const __half* __restrict__ q, const __half* __restrict
 //     （存储列 64 的 SW128 kg=1 atom；smoke `fa_bwd_fp16_wgmma2b_smoke.cu` 逐位 PASS）；
 //   * GEMM5 输出 [64][HD=128]（每 wg 自己 64 行）⇒ 一条 m64n128，`dqacc[16][4]`。
 // 数值只改跨 CTA `atomicAdd` 次序，与 O17 在 fp16 噪声内一致。
-template <int HD, bool SPLIT = true, bool DET = false>
+template <int HD, bool SPLIT = true, bool DET = false, bool DET_HALF = false>
 __global__ void __launch_bounds__(256, 1)
 fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restrict__ k,
                            const __half* __restrict__ v, const __half* __restrict__ do_,
@@ -2192,7 +2208,7 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int c = j * 8 + c2;
               if (jg < S) {
                 if constexpr (DET)
-                  dkv_det_store(dv_part + (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                  dkv_det_store_p<DET_HALF>(dv_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
                                 accv[j * 4 + qq], accv[j * 4 + qq + 1]);
                 else
                   red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
@@ -2219,7 +2235,7 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int c = j * 8 + c2;
               if (jg < S) {
                 if constexpr (DET)
-                  dkv_det_store(dk_part + (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                  dkv_det_store_p<DET_HALF>(dk_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
                                 acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
                 else
                   red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
@@ -2249,7 +2265,7 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int c = j * 8 + c2;
               if (jg < S) {
                 if constexpr (DET)
-                  dkv_det_store(dv_part + (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                  dkv_det_store_p<DET_HALF>(dv_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
                                 accv[j * 4 + qq], accv[j * 4 + qq + 1]);
                 else
                   red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
@@ -2274,7 +2290,7 @@ fa_bwd_fp16_wgmma2b_kernel(const __half* __restrict__ q, const __half* __restric
               const int c = j * 8 + c2;
               if (jg < S) {
                 if constexpr (DET)
-                  dkv_det_store(dk_part + (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                  dkv_det_store_p<DET_HALF>(dk_part, (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
                                 acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
                 else
                   red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
@@ -3668,7 +3684,9 @@ fa_bwd_fp16_mma_kernel(const __half* __restrict__ q, const __half* __restrict__ 
 // 它们对 dK/dV 的贡献要**求和**；若 partial 只用 hkv 索引，同 (mblk, hkv) 的多个 h 会互相
 // 覆盖（race，实测 GQA 对拍错 O(1)）。这里 partial 按 `(b*H + h)*nblk + mblk` 分片，归约时
 // 对每个 KV 头 `hkv` 把其 head group `[hkv*G, (hkv+1)*G)`（G=H/Hkv）与 mblk 一起求和。
-template <int HD>
+// O60：`P16=true` 时 partial 以 fp16 存储（指针仍按 `float*` 传入，内部重解释为 `__half*`），
+//   逐元素 `__half2float` 后进 fp32 累加器；求和次序与 P16=false 完全相同，仍是确定性的。
+template <int HD, bool P16 = false>
 __global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
                                   const float* __restrict__ dv_part,
                                   float* __restrict__ dk_acc, float* __restrict__ dv_acc,
@@ -3686,8 +3704,13 @@ __global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
     const size_t prow = (size_t)(b * H + h0 + hh);
     for (int m = mblk0; m < nblk; ++m) {
       const size_t base = ((prow * nblk + m) * (size_t)S + jg) * HD + c;
-      sk += dk_part[base];
-      sv += dv_part[base];
+      if constexpr (P16) {
+        sk += __half2float(reinterpret_cast<const __half*>(dk_part)[base]);
+        sv += __half2float(reinterpret_cast<const __half*>(dv_part)[base]);
+      } else {
+        sk += dk_part[base];
+        sv += dv_part[base];
+      }
     }
   }
   const size_t o = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
@@ -3963,7 +3986,7 @@ static void launch_bwd_wgmma2(dim3 mg, const __half* q, const __half* k, const _
 
 // O18：BN=128 版 wgmma2（只 HD=128）。tile 数减半；smem = 1024 + Q32 + dO32 + K 2×32 + V32 + P32 + dS32
 // ≈ 230400B（仍 1 CTA/SM）。
-template <int HD, bool SPLIT = true, bool DET = false>
+template <int HD, bool SPLIT = true, bool DET = false, bool DET_HALF = false>
 static void launch_bwd_wgmma2b(dim3 mg, const __half* q, const __half* k, const __half* v,
                                const __half* do_, const float* delta, const float* lse,
                                float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
@@ -3976,9 +3999,9 @@ static void launch_bwd_wgmma2b(dim3 mg, const __half* q, const __half* k, const 
   constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
   constexpr int PTILE = (BM / 8) * (BN / 64) * 1024;
   constexpr int smem = 1024 + QTILE * 2 + KTILE * 3 + PTILE * 2;
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma2b_kernel<HD, SPLIT, DET>,
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma2b_kernel<HD, SPLIT, DET, DET_HALF>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-  fa_bwd_fp16_wgmma2b_kernel<HD, SPLIT, DET><<<mg, 256, smem>>>(
+  fa_bwd_fp16_wgmma2b_kernel<HD, SPLIT, DET, DET_HALF><<<mg, 256, smem>>>(
       q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, dk_part,
       dv_part, nblk, dq_h);
 }
@@ -6294,6 +6317,12 @@ int main(int argc, char** argv) {
     float* d_dv_part = nullptr;
     CUDA_CHECK(cudaMalloc(&d_dk_part, part_elems * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_dv_part, part_elems * sizeof(float)));
+    // O60：同样的 DET，但 partial 以 fp16 存（缓冲区字节减半）。指针按 `float*` 传入、
+    //   设备侧重解释为 `__half*`；写入的元素个数与索引不变。
+    float* d_dk_part_h = nullptr;
+    float* d_dv_part_h = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_dk_part_h, part_elems * sizeof(__half)));
+    CUDA_CHECK(cudaMalloc(&d_dv_part_h, part_elems * sizeof(__half)));
     dim3 g((S + 127) / 128, H, B);
     auto run_atomic = [&]() {
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
@@ -6309,6 +6338,33 @@ int main(int argc, char** argv) {
       dkv_reduce_kernel<128><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H, Hkv,
                                           nblk, (int)causal);
     };
+    auto run_det_h = [&]() {
+      launch_bwd_wgmma2b<128, true, true, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                                d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                                                d_dk_part_h, d_dv_part_h, nblk);
+      dim3 rg(B * Hkv, S);
+      dkv_reduce_kernel<128, true><<<rg, 128>>>(d_dk_part_h, d_dv_part_h, d_dk_acc, d_dv_acc, S, H,
+                                                Hkv, nblk, (int)causal);
+    };
+    dim3 rg(B * Hkv, S);
+    auto main32 = [&]() {
+      launch_bwd_wgmma2b<128, true, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                          d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                                          d_dk_part, d_dv_part, nblk);
+    };
+    auto main16 = [&]() {
+      launch_bwd_wgmma2b<128, true, true, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                                d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                                                d_dk_part_h, d_dv_part_h, nblk);
+    };
+    auto reduce32 = [&]() {
+      dkv_reduce_kernel<128><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                          nblk, (int)causal);
+    };
+    auto reduce16 = [&]() {
+      dkv_reduce_kernel<128, true><<<rg, 128>>>(d_dk_part_h, d_dv_part_h, d_dk_acc, d_dv_acc, S, H,
+                                                Hkv, nblk, (int)causal);
+    };
     auto time_fn = [&](auto fn, float* out_ms) {
       for (int i = 0; i < 3; ++i) fn();
       CUDA_CHECK(cudaEventRecord(ev0));
@@ -6319,31 +6375,54 @@ int main(int argc, char** argv) {
       CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
       *out_ms = t / iters;
     };
-    float ms_at = 0.f, ms_det = 0.f;
-    time_fn(run_atomic, &ms_at);
-    std::vector<float> ak(nkv), av(nkv);
-    CUDA_CHECK(cudaMemcpy(ak.data(), d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(av.data(), d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
-    time_fn(run_det, &ms_det);
-    std::vector<float> dk1(nkv), dv1(nkv);
-    CUDA_CHECK(cudaMemcpy(dk1.data(), d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(dv1.data(), d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
-    run_det();
-    CUDA_CHECK(cudaDeviceSynchronize());
-    std::vector<float> dk2(nkv), dv2(nkv);
-    CUDA_CHECK(cudaMemcpy(dk2.data(), d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(dv2.data(), d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    auto fetch = [&](std::vector<float>& dk, std::vector<float>& dv) {
+      CUDA_CHECK(cudaMemcpy(dk.data(), d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dv.data(), d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    };
     auto mad = [](const std::vector<float>& a, const std::vector<float>& b) {
       double d = 0;
       for (size_t i = 0; i < a.size(); ++i) d = std::max(d, (double)std::fabs(a[i] - b[i]));
       return d;
     };
-    printf("[O7b A/B] main wgmma2b atomic %.4f ms (%.1f TF) | DET(partial+reduce) %.4f ms (%.3fx) "
-           "| runs[1-2] bitwise-diff dk/dv=%.2e/%.2e | DET-vs-atomic dk/dv=%.2e/%.2e\n",
-           ms_at, main_flops / (ms_at * 1e-3) / 1e12, ms_det, ms_at / ms_det, mad(dk1, dk2),
-           mad(dv1, dv2), mad(dk1, ak), mad(dv1, av));
+    float ms_at = 0.f, ms_det = 0.f, ms_deth = 0.f;
+    float ms_m32 = 0.f, ms_m16 = 0.f, ms_r32 = 0.f, ms_r16 = 0.f;
+    time_fn(run_atomic, &ms_at);
+    std::vector<float> ak(nkv), av(nkv);   // 必须在任何 reduce 覆盖 d_dk_acc 之前取 atomic 结果
+    fetch(ak, av);
+    time_fn(main32, &ms_m32);
+    time_fn(main16, &ms_m16);
+    time_fn(reduce32, &ms_r32);
+    time_fn(reduce16, &ms_r16);
+    printf("[O60 A/B] main-only DET fp32 %.4f ms | DET fp16 %.4f ms (%.3fx) || reduce-only "
+           "fp32 %.4f ms | fp16 %.4f ms (%.3fx)\n",
+           ms_m32, ms_m16, ms_m32 / ms_m16, ms_r32, ms_r16, ms_r32 / ms_r16);
+    time_fn(run_det, &ms_det);
+    std::vector<float> dk1(nkv), dv1(nkv);
+    fetch(dk1, dv1);
+    run_det();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<float> dk2(nkv), dv2(nkv);
+    fetch(dk2, dv2);
+    time_fn(run_det_h, &ms_deth);
+    std::vector<float> dk3(nkv), dv3(nkv);
+    fetch(dk3, dv3);
+    run_det_h();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<float> dk4(nkv), dv4(nkv);
+    fetch(dk4, dv4);
+    printf("[O7b A/B] main wgmma2b atomic %.4f ms (%.1f TF) | DET(fp32) %.4f ms (%.3fx) | "
+           "DET(fp16) %.4f ms (%.3fx)\n",
+           ms_at, main_flops / (ms_at * 1e-3) / 1e12, ms_det, ms_at / ms_det, ms_deth,
+           ms_at / ms_deth);
+    printf("[O60 A/B] runs[1-2] bitwise-diff dk/dv: fp32-partial %.2e/%.2e | fp16-partial %.2e/%.2e\n",
+           mad(dk1, dk2), mad(dv1, dv2), mad(dk3, dk4), mad(dv3, dv4));
+    printf("[O60 A/B] vs atomic dk/dv: fp32-partial %.2e/%.2e | fp16-partial %.2e/%.2e | "
+           "fp16-vs-fp32 %.2e/%.2e\n",
+           mad(dk1, ak), mad(dv1, av), mad(dk3, ak), mad(dv3, av), mad(dk3, dk1), mad(dv3, dv1));
     cudaFree(d_dk_part);
     cudaFree(d_dv_part);
+    cudaFree(d_dk_part_h);
+    cudaFree(d_dv_part_h);
   }
 #endif
 
