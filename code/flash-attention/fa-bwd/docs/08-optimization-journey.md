@@ -454,8 +454,24 @@ smem 冲突 + 低 occ
      **7.85×**、varlen `[1024]×4` ours/FA3 = **3.05×**、fp16 S4096 ours/FA3 = **5.95×**。
      **教训：`device_time(fn)` 里 `fn` 的建图位置必须钉死在脚本入口——两个都号称「反向基准」
      的脚本，口径能差出一整个 forward；且不同后端的 forward 占比天差地别（fp8 最重）。**
-     数值零变化（`fa_bwd_compare.py` 73 case 重扫逐位一致）；详见 `docs/04` §38。
-     原始输出 `src/fa_bwd_p113_*.out.txt`、`src/fa_bwd_compare_p113_summary.out.txt`。
+      数值零变化（`fa_bwd_compare.py` 73 case 重扫逐位一致）；详见 `docs/04` §38。
+      原始输出 `src/fa_bwd_p113_*.out.txt`、`src/fa_bwd_compare_p113_summary.out.txt`。
+
+30. **P3-3e（第 114 轮，工具链，正结果）**：**docs/04 数值表自动同步（`--doc-table
+     --apply/--check`）**——落实 §38 候选 ②。§35 的 `--doc-table` 已能直出分组表，但仍是
+     「人工把输出粘进文档」，且已发生过陈旧（§32 的 fp16 S4096 旧值）。本轮在 docs/04 里放一个
+     被标记（`<!-- BEGIN/END:auto-doc-table -->`）围起来的自动块，并给 `fa_bwd_compare.py`
+     加 **`--apply PATH`（原地改写块）** 与 **`--check PATH`（diff 校验、陈旧则退出码 1）**；
+     `fa_bwd_run.py` 加 `--doc-table-apply` / `--doc-table-check` 一键化。**容差**：fp8 的
+     dK/dV（及 split-K 的 dQ）走跨 CTA `atomicAdd`，末位会抖动，故 `--check`/`--apply` 按
+     「逐行结构相同 + 数值在 `--rtol`（默认 `5e-3`）内」判等价；`--rtol 0` 可做逐值复核。
+     **实测**：本轮重跑全部 fp8（28 case）后，`--check` 在 rtol=5e-3 下 OK、`--rtol 0` 精确报出
+     原子噪声 `7.108e-01↔7.107e-01`；把某格改成 `9.999e-03` 后 `--check` 退出码 1 且打印
+     unified diff；`--apply` 幂等（rtol 内不改写文件）。另修 `IMPL_LABEL` 缺 `fa3`（此前
+     `--doc-table` 把 FA3 列显示为裸 `fa3`）。**教训：把「产出表」再往前一步到「自动改写 + 可
+     校验」，文档与实测之间就不再有手抄环节，且原子非确定性必须用容差吸收，否则 CI 会抖。**
+     本轮纯 harness，device 一行未改。详见 `docs/04` §39；原始输出
+     `src/fa_bwd_p33e_doc_table.md`、`src/fa_bwd_p33e_doc_table_check.out.txt`。
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 

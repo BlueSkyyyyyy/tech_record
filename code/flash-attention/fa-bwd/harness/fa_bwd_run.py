@@ -20,6 +20,8 @@
   python harness/fa_bwd_run.py --case b1_s512_h16_d128_causal_fp16 --impls both
   python harness/fa_bwd_run.py --no-run                # 只用已有 npy 重新汇总
   python harness/fa_bwd_run.py --doc-table             # 额外产出 docs/04 分组表（P3-3d）
+  python harness/fa_bwd_run.py --doc-table-apply       # 跑完 ours 后原地同步 docs/04 内嵌表（P3-3e）
+  python harness/fa_bwd_run.py --doc-table-check       # 只校验 docs/04 内嵌表是否最新（不跑 kernel）
   python harness/fa_bwd_run.py --dry-run               # 只打印将执行的命令
 
 产物：
@@ -135,8 +137,20 @@ def main():
     ap.add_argument("--doc-table", action="store_true",
                     help="额外产出 docs/04 可内联的分组表（P3-3d）")
     ap.add_argument("--doc-table-out", default=str(ROOT / "src" / "fa_bwd_compare_p33d_table.md"))
+    ap.add_argument("--doc-table-apply", action="store_true",
+                    help="跑完 ours 后用实测原地同步 docs/04 的 auto-doc-table 块（P3-3e）")
+    ap.add_argument("--doc-table-check", action="store_true",
+                    help="只校验 docs/04 的 auto-doc-table 块是否最新（P3-3e；不跑 kernel）")
+    ap.add_argument("--docs-md", default=str(ROOT / "docs" / "04-numerics-and-perf-summary.md"))
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+
+    # --doc-table-check 是只读校验：不跑 kernel、不依赖 case 过滤。
+    if args.doc_table_check:
+        cmd = [sys.executable, str(ROOT / "harness" / "fa_bwd_compare.py"),
+               "--check", args.docs_md]
+        print("[doc-table-check] " + " ".join(cmd))
+        return subprocess.run(cmd).returncode
 
     impls = ["twofile", "singlefile"] if "both" in args.impls else args.impls
     cases = discover(args)
@@ -198,6 +212,18 @@ def main():
     sp.write_text("\n".join(summary) + "\n")
     print("\n".join(summary))
     print(f"\n[written] {sp}")
+
+    if args.doc_table_apply:
+        # 同步 docs/04 内嵌块：扫全部 dump（不限定本轮 case），保证表覆盖完整。
+        # 放在 compare_cases 早退之前，使 `--no-run --doc-table-apply` 也能用已有 dump 重出表。
+        cmd3 = [sys.executable, str(ROOT / "harness" / "fa_bwd_compare.py"),
+                "--apply", args.docs_md]
+        print("\n[compare --apply] " + " ".join(cmd3))
+        r3 = subprocess.run(cmd3, capture_output=True, text=True)
+        print(r3.stdout)
+        if r3.returncode != 0:
+            print(r3.stderr, file=sys.stderr)
+            return r3.returncode
 
     if args.no_run or args.no_compare or not compare_cases:
         return 0
