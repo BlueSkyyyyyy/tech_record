@@ -2666,7 +2666,17 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百一十七轮）**：**P3-4d——CI 单一入口 + Hopper 快路入标准 harness（工具链+验证，正结果）**。
+> **最新（第一百二十轮）**：**P3-4g——`--det` 扩到 Hopper TMA 快路（device 增量，正结果/opt-in）**。
+> 落实第一百一十九轮候选 ① 的 TMA 部分：`--hopper` 的 Q/dO/K/V 全 4D-TMA `kvtma` 主 kernel
+> 也能走确定性 dK/dV。DET 的 epilogue 早已在共享 `fp8_mma_body`，故 device 数学一行未改，只把
+> `DET` 模板参数与 partial 实参从两个 TMA 壳透传；默认 `DET=false` 完全隔离既有 TMA 行为。
+> **实测**：S512/S1024-GQA/S4096 × 单/两文件两次跑 dk/dv bitwise = 0，DET-vs-atomic e-7–e-6，
+> `ours vs ref` 与历史逐位一致，`--no-run --ci` 73 case 全绿；代价 S4096 0.78×（reduce 纯 DRAM
+> bound：729.8µs/91.7%/3.07TB/s）。详见「当前进度 第一百二十轮」、`docs/03` §58、`docs/08` §5.36。
+> **下一步候选**：① 把 DET 再扩到 **varlen**（按 `cu_seqlens`/逐序列 `nblk` 归约）与 **MLA(HD=512)**；
+> ② 减 partial 字节以压低 reduce 的 DRAM 墙；③ 性能（非确定性）仍受本卡寄存器/smem 硬墙锁定。
+>
+> **（第一百一十七轮）**：**P3-4d——CI 单一入口 + Hopper 快路入标准 harness（工具链+验证，正结果）**。
 > 落实第一百一十六轮候选 ②：`scripts/ci.sh` = `fa_bwd_run.py --ci` 一条命令收口「跑 ours + 数值 +
 > 单/两文件一致性 gate + docs/04 表新鲜度校验」，任一红即 rc=1；`--hopper` 让定长也走
 > `-DFA_WGMMA -DFA_TMA -lcuda`（用独立前缀 `ours_hp/ours_sf_hp`，不污染默认 mma 的 `ours/ours_sf`）；
@@ -4399,6 +4409,33 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     字节（按 KV 行跨 warpgroup 偏和 / 更细分块）以压低 reduce 的 DRAM 墙；③ 性能（非确定性）
     仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
 
+- 2026-09-27（第一百二十轮）：**P3-4g 完成（`--det` 扩到 Hopper TMA 快路）**。
+  - 动机（落实第一百一十九轮候选 ① 的 TMA 部分）：`--det` 此前只挂默认 mma 路径；`--hopper`
+    （`-DFA_WGMMA -DFA_TMA`）的主路径是 Q/dO/K/V 全 4D-TMA 的 `kvtma` kernel（O41），其 dK/dV
+    仍跨 CTA `atomicAdd` ⇒ 快路无法确定性复现。
+  - **改动（单/两文件 device 逐字同源，`sync_onefile_device.py` 核对 `device region identical: True`）**：
+    DET 的 epilogue 早已在共享 `fp8_mma_body` 里，故 **device 数学一行未改**——给
+    `fa_bwd_fp8_mma_{qdtma,kvtma}_kernel` 加 `bool DET=false` 模板参数与
+    `dk_part/dv_part/nblk/dq_part` 尾部默认实参并透传 body；host 新增 `launch_bwd_main_kvtma_det`
+    （定长/HD=128/ksplit=1）+ P3-4g A/B（atomic vs DET，跑两遍验逐位 + 计时）。范围：定长、
+    HD=128（MHA/GQA）、ksplit=1、TMA 构建；varlen/MLA/TMA 的 ksplit>1 留 backlog。
+  - **数值**：三 shape（S512、S1024-kv4 GQA、S4096）× 单/两文件 **`runs[1-2] bitwise dk/dv=0.00e+00`**；
+    `DET-vs-atomic` ~e-7–e-6（fp32 次序末位）；`ours vs ref` 与历史逐位一致（S512
+    `2.426/2.972/3.733e-1`、S4096 `2.635/2.644/3.216e-1`、GQA kv4 `2.517/5.339/7.173e-1`）；
+    默认路径逐位不变（`--no-run --ci` 73 case 全绿）。GQA 的 partial 按 Q 头分片、归约按广播组求和。
+  - **代价（同 session 同 binary A/B，ksplit=1，含 reduce）**：S512 0.120→0.139ms（0.86×）、
+    S1024 0.334→0.407（0.82×）、GQA kv4 0.334→0.402（0.84×）、S4096 2.00→2.57ms（0.78×）。
+  - **ncu**：DET TMA 主 kernel（S4096）Duration 1.80ms、**DRAM 38.3% / L2 42.5% / L1TEX 72.0% /
+    Compute 33.9%**、168 regs/74.82KB/occ 16.8%/Waves 2.59（把 atomic 的 L2 `red` 78.6% 换成
+    partial 的 DRAM 写）；`dkv_reduce_kernel` **729.8µs / DRAM 91.68% / 3.07 TB/s / occ 71.9%**
+    ⇒ **bound = reduce 的纯 DRAM 带宽**（与 P3-4e/f 逐项一致）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_main_p34g_det_{s512,s4096,gqa}.out.txt`、
+    `..._mma_onefile_p34g_det_{s512,s4096}.out.txt`、`..._p34g_ncu_detmain_s4096.out.txt`、
+    `..._p34g_ncu_reduce_s4096.out.txt`；文档 `docs/03` §58、`docs/08` §5.36、`docs/00` §4.2。
+  - **下一步候选**：① 把 DET 再扩到 **varlen**（partial/reduce 需按序列的 `cu_seqlens` 与逐序列
+    `nblk`）与 **MLA（HD=512）**；② 减 partial 字节（按 KV 行跨 warpgroup 偏和 / 更细分块）
+    以压低 reduce 的 DRAM 墙；③ 性能（非确定性）仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
@@ -4449,4 +4486,7 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   相对默认档 S4096 ~1.5×），见 `docs/03` §56。
   **`--det` 扩到 ksplit>1 已完成（P3-4f，第一百一十九轮）**：dQ 也走 partial，DET 在 k=4
   触底、相对 k=1 提速 S512 1.31×/S4096 1.11×，bound 仍是 reduce 的 DRAM 带宽，见 `docs/03` §57。
+  **`--det` 扩到 Hopper TMA 快路已完成（P3-4g，第一百二十轮）**：`kvtma` 主 kernel 走同一
+  `fp8_mma_body` 的 DET 路径（定长/HD=128/GQA、ksplit=1），两次跑逐位相同、代价 0.78–0.86×，
+  见 `docs/03` §58。
 - fp8：对比「只量化 dO」vs「dO 和 P 都量化」的精度/性能权衡。

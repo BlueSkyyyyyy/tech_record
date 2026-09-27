@@ -5227,3 +5227,101 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --kernel-name-base mangled 
 `..._mma_onefile_p34f_det_s512.out.txt`、`..._p34f_detsweep.out.txt`、
 `..._p34f_ncu_reduce_s512.out.txt`、`..._p34f_ncu_reduce_s4096.out.txt`、
 `..._p34f_ncu_detmain_s512.out.txt`、`..._p34f_ncu_detmain_s4096.out.txt`。
+
+---
+
+## 58. P3-4g（第一百二十轮，**正结果，opt-in `--det`**）：`--det` 扩到 Hopper TMA 快路（Q/dO/K/V-4D-TMA）
+
+### 58.1 动机（落实第一百一十九轮「下一步候选 ①」）
+
+P3-4e/P3-4f 的 `--det` 只挂在**默认 mma 路径**（`launch_bwd_main_det` → `fa_bwd_fp8_mma_kernel`）。
+而 `--hopper`（`-DFA_WGMMA -DFA_TMA`，P3-4d 入标准 harness）下的**主路径**是 Q/dO/K/V 全
+4D-TMA 的 `fa_bwd_fp8_mma_kvtma_kernel`（O41），它的 dK/dV 仍走跨 CTA `atomicAdd` ⇒ **快路无法
+做确定性复现**。本项把 deterministic dK/dV 的 partial + 固定次序归约接进 TMA 快路。
+
+好消息：DET 的 epilogue 早就写在**共享的 `fp8_mma_body`** 里（P3-4e），TMA 只是它的一个后端
+（`TMA=true/KVTMA=true`）。所以 device 侧**一行数学都没改**，只是把 `DET` 模板参数与
+`dk_part/dv_part/nblk/dq_part` 实参从两个 TMA 壳（`qdtma`/`kvtma`）透传进 body。
+
+### 58.2 实现（单/两文件 device 逐字同源）
+
+- **device（`fa_bwd_fp8_kernels.cuh` + 同步进 `..._mma_onefile.cu`，`sync_onefile_device.py`
+  核对 `device region identical: True`）**：`fa_bwd_fp8_mma_qdtma_kernel` /
+  `fa_bwd_fp8_mma_kvtma_kernel` 各加 `bool DET=false` 模板参数与
+  `dk_part/dv_part/nblk/dq_part` 尾部默认实参，转调
+  `fp8_mma_body<..., DET>`。默认 `DET=false` ⇒ 既有 TMA 路径逐位不变。
+- **host（`fa_bwd_fp8_main.cu` + `..._mma_onefile.cu`）**：新增 `launch_bwd_main_kvtma_det`
+  （定长、HD=128、ksplit=1，`DET=true` 实例化）；在既有 TMA A/B 段（`--det` 时）加
+  **P3-4g A/B**：同 `ksplit=1` 下 `atomic vs DET`（隔离 partial+reduce 净开销），跑两遍 DET
+  验证逐位可复现，再与 atomic 比 `max|diff|`。
+
+范围：定长、HD=128（MHA/GQA）、ksplit=1、`-DFA_WGMMA -DFA_TMA` 构建。ksplit>1 与
+varlen/MLA/TMA 的进一步覆盖仍列 backlog。
+
+### 58.3 数值：逐位可复现，与 atomic 同量级（`runs[1-2]`）
+
+三 shape × 单/两文件，`runs[1-2] bitwise dk/dv = 0.00e+00`（完全可复现）：
+
+| case | 单/两文件 | `DET-vs-atomic` dk / dv |
+|---|---|---|
+| S512 H16 D128 | 两文件 | 4.77e-07 / 4.77e-07 |
+| S512 H16 D128 | 单文件 | 2.38e-07 / 7.15e-07 |
+| S1024 H32 D128 (kv4 GQA) | 两文件 | 2.86e-06 / 4.77e-06 |
+| S4096 H16 D128 | 两文件 | 9.54e-07 / 1.07e-06 |
+| S4096 H16 D128 | 单文件 | 9.54e-07 / 1.43e-06 |
+
+`DET-vs-atomic` ~e-7–e-6（fp32 归约次序末位）。**`ours vs ref` 与历史逐位一致**：
+S512 `2.426/2.972/3.733e-1`、S1024H32 `2.399/4.177/3.535e-1`、S1024 kv4 `2.517/5.339/7.173e-1`、
+S4096 `2.635/2.644/3.216e-1`；默认路径（不加 `--det`）数值逐位不变（`--no-run --ci` 73 case 全绿）。
+GQA 的 partial **按 Q 头 `h` 分片**（非 KV 头），归约端按广播组 `G=H/Hkv` 求和 ⇒ 正确覆盖 GQA。
+
+### 58.4 代价（同 session，同 binary A/B，ksplit=1，含 `dkv_reduce`）
+
+| case | atomic | DET(partial+reduce) | 比值 |
+|---|---|---|---|
+| S512 H16 | 0.120 ms | 0.139 ms | 0.86× |
+| S1024 H32 | 0.334 ms | 0.407 ms | 0.82× |
+| S1024 kv4 | 0.334 ms | 0.402 ms | 0.84× |
+| S4096 H16 | 2.00 ms | 2.57 ms | 0.78× |
+
+与 P3-4e/f 的结论一致：**确定性的售价 = 把 L2 原子归约换成一次性 DRAM partial 写读**，大 S 更贵。
+
+### 58.5 ncu：主 kernel 把 L2 red 换成 DRAM partial 写；墙仍是 `dkv_reduce` 的 DRAM 带宽
+
+DET TMA 主 kernel（`fa_bwd_fp8_mma_kvtma_kernel<...,(bool)DET=1>`，`--set full`，S=4096）：
+
+| 指标 | DET TMA (`--det`) | 对照：atomic TMA（`docs/04` §42 / P3-4d） |
+|---|---|---|
+| Duration | **1.80 ms** | ~1.72 ms（atomic，ksplit 默认档） |
+| DRAM / L2 / L1TEX / Compute | **38.3** / 42.5 / 72.0 / 33.9 % | 4.26 / **78.6** / 68.2 / 47.2 % |
+| regs / smem / achieved occ / Waves | 168 / 74.82KB / 16.8% / 2.59 | 168 / 74.8KB / 18.3% / 20.7 |
+
+即 DET 把 **L2 的 `red`（114.5M 扇区、78.6%）换成 partial 的 DRAM 写（38.3%）**；
+主 kernel 的其它指标几乎不动。归约 kernel（`dkv_reduce_kernel`，S=4096）：
+
+| 指标 | 值 |
+|---|---|
+| Duration / DRAM / L2 / Compute | **729.8 µs** / **91.68%** / 88.89% / 12.90% |
+| 带宽 / occ / regs | **3.07 TB/s** / 71.93% / 40 |
+
+与 P3-4e 的 731.6 µs / 3.07 TB/s 逐项一致。**bound = `dkv_reduce` 的纯 DRAM 带宽**（非算力）。
+
+### 58.6 复现 / 原始输出
+
+```bash
+# 定长 Hopper 快路 + --det（打印 [P3-4g A/B]）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --det --iters=10
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --det --iters=10
+# ncu（DET 主 kernel 的 mangled 实例尾为 ...Lb1ELb1ELb1ELb1ELb1E）
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --kernel-name-base mangled \
+  --kernel-name regex:kvtma_kernelILi128ELi64ELi32ELb1ELb1ELb1ELb1ELb1E \
+  --launch-count 1 -- --det --iters=1
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:dkv_reduce_kernel --launch-count 1 -- --det --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_p34g_det_{s512,s4096,gqa}.out.txt`、
+`..._mma_onefile_p34g_det_{s512,s4096}.out.txt`、
+`..._p34g_ncu_detmain_s4096.out.txt`、`..._p34g_ncu_reduce_s4096.out.txt`。
