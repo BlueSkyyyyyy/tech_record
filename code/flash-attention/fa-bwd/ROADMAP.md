@@ -2649,7 +2649,26 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百一十五轮）**：**P3-3f——单/两文件实现一致性自动报告（含 `--no-run` 修复）**。
+> **最新（第一百一十六轮）**：**P3-3g——把单/两文件一致性 gate 接进端到端回归（含按 dtype 容差）**。
+> 落实第一百一十五轮候选 ①：`fa_bwd_run.py` 的**全量扫默认在结束时自动 gate** 单/两文件一致性
+> （`--no-consistency` 可关、`--impls twofile` 只跑一边跳过、`--consistency` 可显式强制）。
+> 关键：容差从单个全局标量升级为**按 dtype**（`--ctol auto`，`CTOL_AUTO={fp16:1.6e-2,
+> bf16:3.2e-2, fp8:1e-4}`）——三 dtype 的 ulp 差 3 个数量级，全局标量必然误判。**实测全量 73
+> case**：fp16 `3.906e-3` / bf16 `7.812e-3` / fp8 `9.537e-6` 全部 OK（退出码 0），与 §40 逐位
+> 一致；**负向测试**（`--ctol 1e-3`、`--consistency-tol 1e-9`）均退出码 1 确认 gate 会拦；容器内
+> 真编译真跑 2 case 证实自动 gate 挂在真实运行路径。刷新纯反向基线（FA3 MHA S4096
+> `0.3243ms/848TF`、TE `0.4399/625`、varlen `[1024]×4` causal `0.1475ms/233TF`）；device 未改，
+> ours 性能/ ncu 沿用 §40（fp8 main 仍 L2 red + mma 依赖）。详见「当前进度 第一百一十六轮」、
+> `docs/04` §41、`docs/08` §32；原始输出 `src/fa_bwd_consistency_p33g.out.txt`、
+> `src/fa_bwd_p33g_gate_negative.out.txt`、`src/fa_bwd_p33g_live_sweep.out.txt`、
+> `src/fa_bwd_p33g_fa_baseline_fp16.out.txt`。
+> **下一步候选**：①（device）fp8/fp16 main 的**跨-tile `P/dS` 双缓冲流水**（唯一未证伪、直接打
+> `wait`+`short_scoreboard` 的杠杆，需重排主循环，多轮；注意 smem 已在 3 CTA/SM 顶格，须先腾
+> 空间）；② 把 `fa_bwd_run.py` 的一致性 gate 也接进 `--doc-table-apply`/CI 的单一入口（现已是
+> 默认出口，可再收口到 `fa_bwd_run.py` 一条命令产出 docs+gate+summary）；③（继续）O59 候选已被
+> O45/§46 判决 blocked（MLA 2 CTA/SM 不可达、red/occupancy 硬件锁死）。
+>
+> **（第一百一十五轮）**：**P3-3f——单/两文件实现一致性自动报告（含 `--no-run` 修复）**。
 > 落实「每轮手工核对的单/两文件一致性」→ harness。`fa_bwd_compare.py --consistency`
 > （默认 `ours vs ours_sf`，逐 case `max|A-B|`、`--ctol` 作 CI 回归门，无需 ref/GPU）+
 > `fa_bwd_run.py --consistency`。**73/73 case 两形态都在**，worst fp16 `3.906e-3` /
@@ -4233,6 +4252,29 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     自动 gate 单/两文件偏差）；②（device）fp8/fp16 main 的跨-tile `P/dS` 双缓冲流水
     （唯一未证伪、直接打 `wait`+`short_scoreboard` 的杠杆；需重排主循环，多轮）；
     ③（继续）O59 候选已被 O45/§46 判决 blocked（MLA 2 CTA/SM 不可达、red/occupancy 硬件锁死）。
+
+- 2026-09-27（第一百一十六轮）：**P3-3g 完成（把单/两文件一致性 gate 接进端到端回归；按 dtype 容差）**。
+  - 动机（落实第 115 轮候选 ①）：§P3-3f 把「单/两文件一致性」做成 `--consistency` 工具，但仍是
+    「人工记得去调」；本轮让它成为 `fa_bwd_run.py` **全量扫的默认出口检查**，漏同步即端到端变红。
+  - **改动（纯 harness，device 一行未改）**：① `fa_bwd_compare.py` 的 `--ctol` 升级为**按 dtype**
+    ——`--ctol auto` 用 `CTOL_AUTO={fp16:1.6e-2, bf16:3.2e-2, fp8:1e-4}`（≈实测 worst 的 2–4×；三
+    dtype ulp 差 3 个数量级，全局标量必然误判），报告逐 dtype 打 `gate[...] -> OK/FAIL`，任一超门
+    退出码 1；`--ctol <float>` 仍作全局标量（向后兼容），缺省只报不判。② `fa_bwd_run.py` 全量扫
+    默认结束后自动调用该检查（两边形态都跑才开；`--impls twofile` 或 `--no-consistency` 跳过；
+    `--consistency` 可强制，配 `--no-run` 可用已有 npy 复核）；`--consistency-tol` 默认 `None`→
+    `"auto"`，`--consistency-out` 默认 `..._p33g.out.txt`。
+  - **实测（全量 73 case，无 GPU）**：worst `max|ours-ours_sf|` fp16 `3.906e-3` / bf16 `7.812e-3` /
+    fp8 `9.537e-6`，全部 OK、退出码 **0**（与 §40 逐位一致）。**负向测试**：`--ctol 1e-3`（fp16/bf16
+    FAIL、fp8 OK）与 `--consistency-tol 1e-9`（run 端到端 FAIL）均退出码 **1**，确认 gate 真的接上。
+  - **现场小样本**（容器内真编译真跑 fp16+fp8 各一 case × 单/两文件，4 次运行/2 次编译）：默认 auto
+    gate fp16 `4.883e-4` / fp8 `4.768e-7`，退出码 0；对拍值 fp16 `1.671/1.771/1.899e-3`、fp8
+    `2.426/2.975/3.735e-1`，与历史一致。
+  - **纯反向基线刷新**（`fa_vs_te_bwd_only.py fp16`，容器内）：FA3 MHA S4096 `0.3243ms/848TF`、
+    TE `0.4399/625`、FA2 `0.7277/378`；varlen `[1024]×4` causal FA3 `0.1475ms/233TF`；与 §37/§38/§40
+    口径一致。device 未改，ours 性能/ncu 沿用 §40（fp8 main 仍 L2 red + mma 依赖）。
+  - 原始输出 `src/fa_bwd_consistency_p33g.out.txt`、`src/fa_bwd_p33g_gate_negative.out.txt`、
+    `src/fa_bwd_p33g_gate_small{,_consistency}.out.txt`、`src/fa_bwd_p33g_live_sweep.out.txt`、
+    `src/fa_bwd_p33g_fa_baseline_fp16.out.txt`；文档 `docs/04` §41、`docs/08` §32。
 
 ## 灵感 / backlog
 

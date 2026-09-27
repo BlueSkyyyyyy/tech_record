@@ -23,12 +23,20 @@
   python harness/fa_bwd_run.py --doc-table-apply       # 跑完 ours 后原地同步 docs/04 内嵌表（P3-3e）
   python harness/fa_bwd_run.py --doc-table-check       # 只校验 docs/04 内嵌表是否最新（不跑 kernel）
   python harness/fa_bwd_run.py --consistency --no-run  # 单文件 vs 两文件一致性报告（用已有 npy）
+  python harness/fa_bwd_run.py --no-consistency        # 关掉默认的「单/两文件一致性 gate」（P3-3g）
   python harness/fa_bwd_run.py --dry-run               # 只打印将执行的命令
+
+P3-3g：一次「全量扫」（两边形态都跑，默认）结束时会**自动**调用
+`fa_bwd_compare.py --consistency --ctol auto`（按 dtype 的 ulp 容差，见该文件的 `CTOL_AUTO`），
+任一 dtype 的 `max|ours-ours_sf|` 超门即以非零退出码失败——单/两文件 device 代码分叉会被
+端到端回归自动抓住，不必再逐轮人工誊抄。`--impls twofile`（只跑一边）或 `--no-consistency`
+时跳过。`--consistency` 可显式强制（如配 `--no-run` 用已有 npy 复核）。
 
 产物：
   src/<dtype>/fa_bwd_<dtype>_p33c_run.out.txt    每个 case 的原始运行输出（逐 dtype）
   src/fa_bwd_run_p33c_summary.out.txt           本脚本的运行清单/命令/结果摘要
   src/fa_bwd_compare_p33c_summary.out.txt       fa_bwd_compare.py 的数值汇总
+  src/fa_bwd_consistency_p33g.out.txt           一致性报告（P3-3g 默认产物）
 """
 from __future__ import annotations
 
@@ -143,11 +151,14 @@ def main():
     ap.add_argument("--doc-table-check", action="store_true",
                     help="只校验 docs/04 的 auto-doc-table 块是否最新（P3-3e；不跑 kernel）")
     ap.add_argument("--consistency", action="store_true",
-                    help="P3-3f：跑完后报告单文件 vs 两文件（ours vs ours_sf）的逐 case 一致性")
-    ap.add_argument("--consistency-tol", type=float, default=None,
-                    help="--consistency：max|ours-ours_sf| 超过该值时退出码 1（默认只报不判）")
+                    help="P3-3f：强制报告单文件 vs 两文件（ours vs ours_sf）的逐 case 一致性")
+    ap.add_argument("--no-consistency", action="store_true",
+                    help="P3-3g：关掉全量扫默认的单/两文件一致性 gate（两边形态都跑时才默认开）")
+    ap.add_argument("--consistency-tol", default="auto", metavar="TOL",
+                    help="P3-3g：'auto'=按 dtype 的 ulp 容差（推荐）；浮点=全局标量；"
+                         "缺省 auto（超出则退出码 1）")
     ap.add_argument("--consistency-out",
-                    default=str(ROOT / "src" / "fa_bwd_consistency_p33f.out.txt"))
+                    default=str(ROOT / "src" / "fa_bwd_consistency_p33g.out.txt"))
     ap.add_argument("--docs-md", default=str(ROOT / "docs" / "04-numerics-and-perf-summary.md"))
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
@@ -241,7 +252,11 @@ def main():
             print(r3.stderr, file=sys.stderr)
             return r3.returncode
 
-    if args.consistency:
+    # P3-3g：两边文件形态都跑（默认）时自动 gate 一致性；--impls 只跑一边或显式
+    # --no-consistency 时跳过；--consistency 可强制（含 --no-run 用已有 npy 复核）。
+    both_impls = ("twofile" in impls) and ("singlefile" in impls)
+    auto_consistency = both_impls and not args.no_consistency
+    if args.consistency or auto_consistency:
         cmd_c = [sys.executable, str(ROOT / "harness" / "fa_bwd_compare.py"),
                  "--consistency", "--ca", "ours", "--cb", "ours_sf",
                  "--out", args.consistency_out]
@@ -249,10 +264,15 @@ def main():
             cmd_c += ["--case", *compare_cases]
         if args.consistency_tol is not None:
             cmd_c += ["--ctol", str(args.consistency_tol)]
-        print("\n[consistency] " + " ".join(cmd_c))
+        tag = "auto" if (auto_consistency and not args.consistency) else "explicit"
+        print(f"\n[consistency:{tag}] " + " ".join(cmd_c))
         rc = subprocess.run(cmd_c).returncode
         if rc != 0:
+            print(f"[consistency] gate FAIL (rc={rc})", file=sys.stderr)
             return rc
+    elif both_impls and args.no_consistency:
+        summary.append("[consistency] skipped (--no-consistency)")
+        print("\n[consistency] skipped (--no-consistency)")
 
     if args.no_run or args.no_compare or not compare_cases:
         return 0

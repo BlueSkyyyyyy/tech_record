@@ -2726,3 +2726,69 @@ stall `wait 1.59 + short_scoreboard 1.28 + long 0.58` ⇒ **bound = L2 dK/dV 原
 **结论**：三 dtype × 单/两文件共 73 case 的两形态一致性被自动化并全量通过（差异 ≤ 2 dtype ulp、
 均来自 `atomicAdd` 次序）；刷新后的纯反向基线与 ours 数字确认当前边界未变（fp8 main 仍是
 L2 red + mma 依赖，属文档已判决的硬件资源墙）。
+
+## 41. P3-3g：单/两文件一致性 gate 接进端到端回归（第 116 轮）—— 工具链 + 验证，正结果
+
+> 本轮为 **harness + 验证增量**，device 一行未改。落实第 115 轮（§40）「下一步候选 ①」：
+> §40 把「单/两文件一致性」做成了 `--consistency` 工具，但仍要**人工记得**去调它；本轮把它
+> **默认接进 `fa_bwd_run.py` 的全量扫**，并用**按 dtype 的容差**自动 gate——任何一次单文件
+> 同步漏改都会被端到端回归立刻抓住。
+
+### 41.1 改动（纯 harness）
+
+* `harness/fa_bwd_compare.py`：`--consistency` 的容差从「单个全局标量」升级为 **按 dtype**。
+  `--ctol auto` 使用 `CTOL_AUTO = {fp16: 1.6e-2, bf16: 3.2e-2, fp8: 1e-4}`（约实测 worst 的
+  2–4× 余量），报告新增逐 dtype 的 `gate[dtype] worst=… tol=… -> OK/FAIL`，任一 dtype 超门即
+  退出码 1；`--ctol <float>` 仍作全局标量（向后兼容），缺省只报不判。
+* `harness/fa_bwd_run.py`：**默认在全量扫结束时自动调用**上述检查（两边文件形态都跑时才开；
+  `--impls twofile` 只跑一边、或 `--no-consistency` 时跳过；`--consistency` 可显式强制，配
+  `--no-run` 可用已有 npy 复核）。`--consistency-tol` 默认由 `None` 改为 `"auto"`，
+  `--consistency-out` 默认产物改为 `src/fa_bwd_consistency_p33g.out.txt`。
+
+**为什么必须按 dtype**：两形态的 device 代码逐字同源，唯一差异是跨 CTA `atomicAdd` 的 fp32
+求和次序，其数值 = **1–2 个 dtype ulp**。而 fp16/bf16/fp8 的 ulp 相差 **3 个数量级**
+（fp8 worst 9.5e-6 vs bf16 worst 7.8e-3）。任何单个全局标量要么放过 bf16 的错误、要么误杀
+fp8 的正常原子噪声——这正是 §40 只做「报告」而没有直接上门的顾虑。
+
+### 41.2 实测：全量 73 case 自动 gate（`fa_bwd_run.py --no-run`，无 GPU）
+
+| dtype | worst `max|ours-ours_sf|` | 出现位置 | tol（auto） | 判定 |
+|---|---|---|---|---|
+| fp16 | 3.906e-03 | d512 GQA/MLA 的 dk/dv | 1.6e-2 | **OK** |
+| bf16 | 7.812e-03 | GQA kv4/kv8 的 dk/dv | 3.2e-2 | **OK** |
+| fp8  | 9.537e-06 | MQA kv1 的 dv | 1e-4 | **OK** |
+
+73/73 case 两侧都在、0 case 缺一侧；全量 gate 退出码 **0**。与 §40 的实测逐位一致。原始输出
+`src/fa_bwd_consistency_p33g.out.txt`。
+
+### 41.3 负向验证（gate 确实会拦）
+
+为防止「绿灯只是没接上」，做了两个负向测试（`src/fa_bwd_p33g_gate_negative.out.txt`）：
+
+* `fa_bwd_compare.py --consistency --ctol 1e-3`（把全局容差收到 1e-3）：fp16 `3.906e-03`、
+  bf16 `7.812e-03` 均判 **FAIL**，fp8 `9.537e-06` **OK**，退出码 **1**；
+* `fa_bwd_run.py --no-run --consistency-tol 1e-9`：端到端 gate 退出码 **1**。
+
+### 41.4 现场小样本重跑（证明自动 gate 挂在真实编译/运行路径上）
+
+在 `kernel_lab` 容器里以 `fa_bwd_run.py --case <fp16 与 fp8 各一> --impls both` 真编译真运行
+（4 次运行 / 2 次编译），随后默认 auto gate：fp16 worst `4.883e-04`、fp8 worst `4.768e-07`，
+退出码 **0**；对拍值与历史一致（fp16 `1.671/1.771/1.899e-3`、fp8 `2.426/2.975/3.735e-1`）。
+原始输出 `src/fa_bwd_p33g_live_sweep.out.txt`、`src/fa_bwd_p33g_gate_small.out.txt`。
+
+### 41.5 纯反向基线刷新（同机，CUPTI；`harness/fa_vs_te_bwd_only.py fp16`）
+
+| shape | FA2.7.4 | FA3 | TE2.14 | FA3/FA2 |
+|---|---|---|---|---|
+| (1,1024,32,128) kv4 | 0.1582/217 | 0.0822/418 | 0.1121/306 | 1.92× |
+| (1,4096,16,128) MHA | 0.7277/378 | **0.3243/848** | 0.4399/625 | 2.24× |
+| varlen [1024]×4 causal | 0.2508/137 | 0.1475/233 | NA | 1.70× |
+| varlen [1024]×4 full | 0.3394/101 | 0.1980/174 | NA | 1.71× |
+
+与 §37/§38/§40 的纯反向口径一致（FA3 > TE > FA2）；fp8/MLA（D=512）FA3 反向不支持。本轮
+device 未改，故 ours 性能沿用 §40（fp16 S4096 `1.2582ms/109.2TF`、fp8 `1.9466ms/70.6TF`，
+fp8 main 仍 **L2 78% red + mma 依赖**）。原始输出 `src/fa_bwd_p33g_fa_baseline_fp16.out.txt`。
+
+**结论**：`--consistency --ctol auto` 已内建为 `fa_bwd_run.py` 全量扫的默认出口检查，用按
+dtype 的 ulp 容差在 73/73 case 上全绿、且负向测试确认会拦；单/两文件「device 逐字同源」从
+此由端到端回归持续背书，无需再逐轮人工誊抄。当前性能边界未变（属文档已判决的硬件资源墙）。

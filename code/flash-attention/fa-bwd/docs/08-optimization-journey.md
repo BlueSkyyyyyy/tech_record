@@ -489,6 +489,23 @@ smem 冲突 + 低 occ
      device 一行未改。详见 `docs/04` §40；原始输出 `src/fa_bwd_consistency_p33f.out.txt`、
      `src/fa_bwd_p33f_fa_baseline_fp16.out.txt`、`src/{fp16,fp8}/fa_bwd_*_p33f_*.out.txt`。
 
+32. **P3-3g（第 116 轮，工具链 + 验证，正结果）**：**把单/两文件一致性 gate 接进端到端回归**
+     ——落实 §5.31 候选 ①。§5.31 的 `--consistency` 仍是「人工记得去调」的工具；本轮让
+     `fa_bwd_run.py` 的**全量扫默认在结束时自动 gate**（`--no-consistency` 可关、`--impls
+     twofile` 只跑一边时跳过）。关键改动是容差**从单个全局标量升级为按 dtype**：
+     fp16/bf16/fp8 的 ulp 差 3 个数量级（worst fp8 9.5e-6 vs bf16 7.8e-3），全局标量必然
+     放过 bf16 的错误或误杀 fp8 的正常原子噪声；故 `--ctol auto` 用
+     `{fp16:1.6e-2, bf16:3.2e-2, fp8:1e-4}`（≈实测 worst 的 2–4×），报告逐 dtype 打
+     `gate[...] -> OK/FAIL`。**实测全量 73 case**：fp16 `3.906e-3` / bf16 `7.812e-3` /
+     fp8 `9.537e-6`，全部 OK、退出码 0；**负向验证**（`--ctol 1e-3` 与 `--consistency-tol
+     1e-9`）均退出码 1，确认 gate 真的接上了；并在容器里真编译真跑 2 个 case 证明自动 gate
+     挂在真实运行路径上。刷新纯反向基线（FA3 MHA S4096 `0.3243ms/848TF`、TE `0.4399/625`、
+     varlen `[1024]×4` causal `0.1475ms/233TF`）。**教训：校验工具「做出来」和「接进回归」
+     是两件事——只有挂进默认出口并配好按量级的容差，它才会在漏改时真正变红；负向测试是
+     验证「gate 会不会拦」的唯一办法。** 本轮 harness 增量、device 一行未改。详见
+     `docs/04` §41；原始输出 `src/fa_bwd_consistency_p33g.out.txt`、
+     `src/fa_bwd_p33g_gate_negative.out.txt`、`src/fa_bwd_p33g_fa_baseline_fp16.out.txt`。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。
