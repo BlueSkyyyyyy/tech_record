@@ -626,6 +626,19 @@ smem 冲突 + 低 occ
      `dq_reduce_kernel<512>` 8.74µs ⇒ **bound 仍是 reduce 的纯 DRAM 带宽**。默认路径与
      D=128 回归逐位不变。详见 `docs/03` §62。
 
+41. **P3-4l（第 125 轮，host 增量，正结果/opt-in `--detk>1`）**：**把 MLA（HD=512）varlen 的
+      DET 也接上 split-K（DET 候选 ① 收口）**——落实第 124 轮「下一步候选 ①」。观察与 P3-4k
+      同构：varlen body 的 DET 分支只依赖 `(b,h,mblk,jg,S,nblk)`，dQ 的 per-part partial 用
+      `qbase+qi`（就是 packed 全局 q token，与定长 `dq_reduce_kernel` 的 `row` 语义逐字相同）
+      ⇒ **device 一行未改**，host 只补 `dq_part` 分配/清零 + `dq_reduce_kernel<512><<<(T,H),512>>>`。
+      **b1_t512（k=1/4/8/16）、b3_t1792（k=1/4/8/16）、b1 full（k=4）× 单/两文件全部
+      `runs[1-2] bitwise dq/dk/dv = 0`**；`ksplit=1` 时 `DET-vs-atomic` dq 恒 0、k>1 时 e-7；
+      `ours vs ref` 与历史逐位一致（b1 causal `1.613e-1/2.238e-1/3.864e-1`）。**DET 在 k=8 触底**
+      （varlen 短序列 k=4 并行度未吃饱），**相对 P3-4j「锁 k=1」b1 3.69×、b3 2.13×**；ncu
+      `dkv_reduce_varlen_kernel<512,64>` 48.13µs/DRAM 65.7%、`dq_reduce_kernel<512>` 23.33µs/
+      DRAM 81.7% ⇒ **bound 仍是 reduce 的纯 DRAM 带宽**。`--no-run --ci` 73 case 全绿、默认路径
+      逐位不变。MLA d512 的 FA2/FA3/TE 反向均不支持故无同 shape 对标。详见 `docs/03` §63。
+
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
