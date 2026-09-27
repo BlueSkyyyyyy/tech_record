@@ -256,6 +256,26 @@ __device__ __forceinline__ void red_add4(float* p, float a, float b, float c, fl
   atomicAdd(reinterpret_cast<float4*>(p), make_float4(a, b, c, d));
 }
 
+// O61：确定性 dK/dV 归约（从 fp16 O7b/O60 逐字 dtype 参数化，可选 `DET`/`DET_HALF`）。
+//   `DET` 时把每个 (Q-block, KV 行) 的贡献写进独立 partial 缓冲——partial 下标含 `mblk`，
+//   每个元素**只被本 CTA 写一次**（非原子覆盖写），无竞争、无浮点加法乱序；再由
+//   `dkv_reduce_kernel` 按 `mblk` 升序求和 ⇒ 结果与执行/调度顺序无关（可复现）。
+//   `DET_HALF` 时 partial 以 bf16（`__nv_bfloat162`）存，字节减半、直击 reduce 的纯 DRAM
+//   带宽墙；只改「存到地址处的元素类型」，写点/归约索引/求和集合与次序逐字不变，仍确定性。
+__device__ __forceinline__ void dkv_det_store(float* part, float a, float b) {
+  *reinterpret_cast<float2*>(part) = make_float2(a, b);
+}
+__device__ __forceinline__ void dkv_det_store(bf16* part, float a, float b) {
+  *reinterpret_cast<__nv_bfloat162*>(part) = __floats2bfloat162_rn(a, b);
+}
+// 注意：`off` 是**元素下标**。bf16 存储时缓冲区的元素单位是 2B，故必须在 `bf16*` 上
+// 做 `+off`，不能在 `float*` 上先加（否则字节地址会翻倍、越界）。
+template <bool P16>
+__device__ __forceinline__ void dkv_det_store_p(float* base, size_t off, float a, float b) {
+  if constexpr (P16) dkv_det_store(reinterpret_cast<bf16*>(base) + off, a, b);
+  else dkv_det_store(base + off, a, b);
+}
+
 // ---- O6：cp.async 异步拷贝（16B）----
 // 把「全局→smem」的 K/V 搬运从「同步 LDG + STS」改成硬件异步流水：`cp.async.cg` 走
 // L2-only 路径（流式数据不污染 L1），发起后立即返回、不占寄存器、不阻塞发射；
@@ -1853,14 +1873,16 @@ fa_bwd_bf16_wgmma2_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k
 //     bf16 与 fp16 同为 2 字节、布局逐字节同构）；
 //   * GEMM5 输出 [64][HD=128]（每 wg 自己 64 行）⇒ 一条 m64n128，`dqacc[16][4]`。
 // 数值只改跨 CTA `atomicAdd` 次序，与 O17 在 bf16 噪声内一致。
-template <int HD, bool SPLIT = true>
+template <int HD, bool SPLIT = true, bool DET = false, bool DET_HALF = false>
 __global__ void __launch_bounds__(256, 1)
 fa_bwd_bf16_wgmma2b_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
                            const bf16* __restrict__ v, const bf16* __restrict__ do_,
                            const float* __restrict__ delta, const float* __restrict__ lse,
                            float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                            float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                           int causal, bf16* __restrict__ dq_h = nullptr) {
+                           int causal, bf16* __restrict__ dq_h = nullptr,
+                           float* __restrict__ dk_part = nullptr,
+                           float* __restrict__ dv_part = nullptr, int nblk = 0) {
   static_assert(HD == 128, "wgmma2b 主 kernel 目前只做 HD=128");
   constexpr int NTH = 256;
   constexpr int BM = 128, BN = 128;
@@ -1985,8 +2007,15 @@ fa_bwd_bf16_wgmma2b_kernel(const bf16* __restrict__ q, const bf16* __restrict__ 
               const int rr = r0 + (qq >= 2 ? 8 : 0);
               const int jg = j0 + mh * 64 + rr;
               const int c = j * 8 + c2;
-              if (jg < S) red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                                   accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+              if (jg < S) {
+                if constexpr (DET)
+                  dkv_det_store_p<DET_HALF>(dv_part,
+                                            (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                                            accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+                else
+                  red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                           accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+              }
             }
         }
       } else {
@@ -2006,8 +2035,15 @@ fa_bwd_bf16_wgmma2b_kernel(const bf16* __restrict__ q, const bf16* __restrict__ 
               const int rr = r0 + (qq >= 2 ? 8 : 0);
               const int jg = j0 + mh * 64 + rr;
               const int c = j * 8 + c2;
-              if (jg < S) red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                                   acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+              if (jg < S) {
+                if constexpr (DET)
+                  dkv_det_store_p<DET_HALF>(dk_part,
+                                            (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                                            acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+                else
+                  red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                           acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+              }
             }
         }
       }
@@ -2030,8 +2066,15 @@ fa_bwd_bf16_wgmma2b_kernel(const bf16* __restrict__ q, const bf16* __restrict__ 
               const int rr = r0 + (qq >= 2 ? 8 : 0);
               const int jg = j0 + mh * 64 + rr;
               const int c = j * 8 + c2;
-              if (jg < S) red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                                   accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+              if (jg < S) {
+                if constexpr (DET)
+                  dkv_det_store_p<DET_HALF>(dv_part,
+                                            (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                                            accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+                else
+                  red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                           accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+              }
             }
         }
 #pragma unroll
@@ -2049,8 +2092,15 @@ fa_bwd_bf16_wgmma2b_kernel(const bf16* __restrict__ q, const bf16* __restrict__ 
               const int rr = r0 + (qq >= 2 ? 8 : 0);
               const int jg = j0 + mh * 64 + rr;
               const int c = j * 8 + c2;
-              if (jg < S) red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
-                                   acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+              if (jg < S) {
+                if constexpr (DET)
+                  dkv_det_store_p<DET_HALF>(dk_part,
+                                            (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + c,
+                                            acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+                else
+                  red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                           acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+              }
             }
         }
       }
@@ -3146,6 +3196,50 @@ fa_bwd_bf16_mma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
           }
         }
   }
+}
+
+// =============================================================================
+// 2.9) O61：确定性 dK/dV 的二次归约（从 fp16 O7b/O60 逐字 dtype 参数化）
+// =============================================================================
+// 把 `(--det)` 主 kernel 写的 partial 按 `mblk` 升序求和，写成 dK/dV fp32 累加缓冲。
+// causal 下 KV 行 `jg` 只被 `mblk >= jg/BM`（BM=128）的 CTA 写 ⇒ 直接从 `jg/BM` 起求和；
+// 非 causal 从 0 起。**求和顺序固定**（mblk 升序）⇒ 与调度无关，可复现（deterministic）。
+// partial 按 **Q 头 h**（不是 KV 头）分片：GQA/MQA 下多个 Q 头 `h` 共享同一 KV 头 `hkv`，
+// 它们对 dK/dV 的贡献要**求和**；若 partial 只用 hkv 索引，同 (mblk, hkv) 的多个 h 会互相
+// 覆盖（race，实测 GQA 对拍错 O(1)）。这里 partial 按 `(b*H + h)*nblk + mblk` 分片，归约时
+// 对每个 KV 头 `hkv` 把其 head group `[hkv*G, (hkv+1)*G)`（G=H/Hkv）与 mblk 一起求和。
+// `P16=true` 时 partial 以 bf16 存储（指针仍按 `float*` 传入，内部重解释为 `bf16*`），
+//   逐元素 `__bfloat162float` 后进 fp32 累加器；求和次序与 P16=false 完全相同，仍是确定性的。
+template <int HD, bool P16 = false>
+__global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
+                                  const float* __restrict__ dv_part,
+                                  float* __restrict__ dk_acc, float* __restrict__ dv_acc,
+                                  int S, int H, int Hkv, int nblk, int causal) {
+  const int hb = blockIdx.x;   // b*Hkv + hkv
+  const int jg = blockIdx.y;
+  const int c = threadIdx.x;
+  if (c >= HD || jg >= S) return;
+  const int b = hb / Hkv, hkv = hb % Hkv;
+  const int G = H / Hkv;                    // 每 KV 头对应的 Q 头数（GQA 广播组）
+  const int h0 = hkv * G;
+  const int mblk0 = causal ? (jg / 128) : 0;
+  float sk = 0.f, sv = 0.f;
+  for (int hh = 0; hh < G; ++hh) {
+    const size_t prow = (size_t)(b * H + h0 + hh);
+    for (int m = mblk0; m < nblk; ++m) {
+      const size_t base = ((prow * nblk + m) * (size_t)S + jg) * HD + c;
+      if constexpr (P16) {
+        sk += __bfloat162float(reinterpret_cast<const bf16*>(dk_part)[base]);
+        sv += __bfloat162float(reinterpret_cast<const bf16*>(dv_part)[base]);
+      } else {
+        sk += dk_part[base];
+        sv += dv_part[base];
+      }
+    }
+  }
+  const size_t o = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
+  dk_acc[o] = sk;
+  dv_acc[o] = sv;
 }
 
 // =============================================================================

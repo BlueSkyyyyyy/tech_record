@@ -189,6 +189,13 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    写侧慢 0.84–0.87×**——ncu 实测 fp16 把 DRAM 写字节减半、**store 扇区数却一字不变**（DET
    partial 写是扇区粒度 bound，每 `(j,row)` 仅 16B 落不满 32B 扇区），故端到端只中性偏负
    （S4096 1.006×、S512/GQA 0.93–0.97×）。确定性保留、只改数值口径（~1e-3）。见 `docs/01` §17。
+   → **确定性反向 `--det` 补齐 bf16（O61，第一百三十轮）**：把 fp16 的 O7b（partial + 固定次序
+   二次归约）+ O60（partial 降精度存 fp16→bf16）逐字 dtype 参数化到 bf16（此前 bf16 无 `--det`），
+   **三 dtype（fp16/bf16/fp8）现均有确定性反向**。两档 partial `runs[1-2]=0`；bf16-vs-atomic 仅
+   bf16 舍入（7.8e-3–2.2e-2），默认路径逐位不变。性能与 fp16 O60 逐项同构：**reduce 单向
+   1.27–1.66×（纯 DRAM 读字节减半），DET 主 kernel 写侧 0.84–0.87×**——bf16 把 DRAM 写字节
+   减半但 **`st.global` store 扇区数几乎不变**（35.65M→35.54M），partial 写是扇区粒度 bound，
+   端到端 `--det` 仍中性偏负。见 `docs/01b` §6at。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 

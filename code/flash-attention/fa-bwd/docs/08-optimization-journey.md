@@ -686,6 +686,19 @@ smem 冲突 + 低 occ
      字节，必须让一次 store 落满扇区——下一步候选：把相邻 `j` 的 half 拼成 32B 连续写，或 staging
      到 smem 再整行 128B 写。** 详见 `docs/01` §17；原始输出 `src/fp16/fa_bwd_fp16_*_o60_*`。
 
+45. **O61（第 130 轮，device+host 增量，功能补齐 + 混合结果，opt-in A/B）**：**把 fp16 的确定性
+     dK/dV 归约（`--det`/O7b）+ partial 降精度（O60）逐字 dtype 参数化到 bf16**——补齐三 dtype
+     里 bf16 唯一缺的 `--det`。device 新增 `dkv_det_store`/`dkv_det_store_p<P16>` 与
+     `dkv_reduce_kernel<HD,P16>`；`fa_bwd_bf16_wgmma2b_kernel<HD,SPLIT,DET,DET_HALF>` 加参、
+     4 处写点透传；host 加 `--det` A/B。**两档 partial `runs[1-2]=0`**（确定性），bf16-vs-atomic
+     仅 bf16 舍入（7.8e-3–2.2e-2），默认路径数值逐位不变（`--no-run --ci` 73 case 全绿、
+     `--check docs/04` OK 194 行）。**性能与 fp16 O60 逐项同构**：reduce 单向 1.27×（S512）/
+     1.50×（GQA kv4）/1.66×（S4096）、纯 DRAM 带宽 bound（ncu 90.4%→78.9%）；**DET 主 kernel
+     写侧 0.84–0.87×**——bf16 把 DRAM 写字节减半（ncu 44.5%→20.3%）但 `st.global` **store 扇区数
+     几乎不变**（35,653,558→35,537,820），partial 写是扇区粒度 bound，端到端 `--det` 仍中性偏负。
+     对标默认路径不变：MHA S4096 FA2 379 / FA3 862 / TE 630 TF（ours total 时间 4.14× FA3）。
+     详见 `docs/01b` §6at；原始输出 `src/bf16/fa_bwd_bf16_p61_*`。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。

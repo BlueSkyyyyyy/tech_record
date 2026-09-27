@@ -223,22 +223,24 @@ static void launch_bwd_wgmma2(dim3 mg, const bf16* q, const bf16* k, const bf16*
 
 // O18-bf16：BN=128 版 wgmma2（只 HD=128）。tile 数减半；smem = 1024 + Q32 + dO32 + K 2×32 +
 // V32 + P32 + dS32 ≈ 230400B（仍 1 CTA/SM）。
-template <int HD, bool SPLIT = true>
+template <int HD, bool SPLIT = true, bool DET = false, bool DET_HALF = false>
 static void launch_bwd_wgmma2b(dim3 mg, const bf16* q, const bf16* k, const bf16* v,
                                const bf16* do_, const float* delta, const float* lse,
                                float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
-                               int Hkv, float scale, int causal, bf16* dq_h = nullptr) {
+                               int Hkv, float scale, int causal, bf16* dq_h = nullptr,
+                               float* dk_part = nullptr, float* dv_part = nullptr,
+                               int nblk = 0) {
   static_assert(HD == 128, "wgmma2b 只做 HD=128");
   constexpr int BM = 128, BN = 128;
   constexpr int QTILE = (BM / 8) * (HD / 64) * 1024;
   constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
   constexpr int PTILE = (BM / 8) * (BN / 64) * 1024;
   constexpr int smem = 1024 + QTILE * 2 + KTILE * 3 + PTILE * 2;
-  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_wgmma2b_kernel<HD, SPLIT>,
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_bf16_wgmma2b_kernel<HD, SPLIT, DET, DET_HALF>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-  fa_bwd_bf16_wgmma2b_kernel<HD, SPLIT><<<mg, 256, smem>>>(q, k, v, do_, delta, lse, dq_acc,
-                                                           dk_acc, dv_acc, S, H, Hkv, scale,
-                                                           causal, dq_h);
+  fa_bwd_bf16_wgmma2b_kernel<HD, SPLIT, DET, DET_HALF><<<mg, 256, smem>>>(
+      q, k, v, do_, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal, dq_h,
+      dk_part, dv_part, nblk);
 }
 
 #if defined(FA_TMA)
@@ -1083,6 +1085,8 @@ int main(int argc, char** argv) {
   int delta_warp_sel = 1;
   // O24：D==128 wgmma2/2b 路径直接用 bf16 写 dQ、convert 跳过 dQ（1，默认；0=A/B）。
   int dq_direct_sel = 1;
+  // O61：是否跑「确定性 dK/dV（partial + 二次归约）」A/B（仅 FA_WGMMA 构建、D==128）。
+  int det_ab = 0;
   int varlen = 0;   // VARLEN：packed [T,H,D] + cu_seqlens.npy（bf16/HD=128/causal|full/wgmma2）
   int iters = 50;
   for (int i = 1; i < argc; ++i) {
@@ -1124,6 +1128,8 @@ int main(int argc, char** argv) {
     else if (a == "--d128w") d128w = 1;
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_sel = atoi(a.c_str() + 12);
     else if (a.rfind("--dqdirect=", 0) == 0) dq_direct_sel = atoi(a.c_str() + 11);
+    else if (a.rfind("--det=", 0) == 0) det_ab = atoi(a.c_str() + 6);
+    else if (a == "--det") det_ab = 1;
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
     else if (a.rfind("--dump=", 0) == 0) dump_prefix = a.substr(7);
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
@@ -2347,6 +2353,123 @@ int main(int argc, char** argv) {
     printf("[O46 A/B] MLA main warp: 4w %.4f (%.2f) | 8w %.4f (%.2f, %.3fx)\n",
            w4, tf(w4), w8, tf(w8), w4 / w8);
   }
+
+  // ---- O61 A/B（仅 FA_WGMMA 构建、HD=128，`--det` 开启）：从 fp16 O7b/O60 逐字 dtype 参数化。
+  //      跨 CTA `atomicAdd` vs「确定性 partial 缓冲 + 二次归约」，partial 分 fp32 / bf16 两档。
+  //      跑两遍 DET 验证逐位可复现，再与 atomic 比 max|diff|。
+#ifdef FA_WGMMA
+  if (det_ab && D == 128) {
+    const int nblk = (S + 127) / 128;
+    const size_t part_elems = (size_t)B * H * nblk * S * D;
+    float* d_dk_part = nullptr;
+    float* d_dv_part = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_dk_part, part_elems * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_dv_part, part_elems * sizeof(float)));
+    // partial 以 bf16 存（缓冲区字节减半）。指针按 `float*` 传入、设备侧重解释为 `bf16*`。
+    float* d_dk_part_h = nullptr;
+    float* d_dv_part_h = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_dk_part_h, part_elems * sizeof(bf16)));
+    CUDA_CHECK(cudaMalloc(&d_dv_part_h, part_elems * sizeof(bf16)));
+    dim3 g((S + 127) / 128, H, B);
+    dim3 rg(B * Hkv, S);
+    auto run_atomic = [&]() {
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+      launch_bwd_wgmma2b<128, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                    d_dv_acc, S, H, Hkv, scale, (int)causal, 0);
+    };
+    auto run_det = [&]() {
+      launch_bwd_wgmma2b<128, true, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                          d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, 0,
+                                          d_dk_part, d_dv_part, nblk);
+      dkv_reduce_kernel<128><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                          nblk, (int)causal);
+    };
+    auto run_det_h = [&]() {
+      launch_bwd_wgmma2b<128, true, true, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                                d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                                                0, d_dk_part_h, d_dv_part_h, nblk);
+      dkv_reduce_kernel<128, true><<<rg, 128>>>(d_dk_part_h, d_dv_part_h, d_dk_acc, d_dv_acc, S,
+                                                H, Hkv, nblk, (int)causal);
+    };
+    auto main32 = [&]() {
+      launch_bwd_wgmma2b<128, true, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                          d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, 0,
+                                          d_dk_part, d_dv_part, nblk);
+    };
+    auto main16 = [&]() {
+      launch_bwd_wgmma2b<128, true, true, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc,
+                                                d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                                                0, d_dk_part_h, d_dv_part_h, nblk);
+    };
+    auto reduce32 = [&]() {
+      dkv_reduce_kernel<128><<<rg, 128>>>(d_dk_part, d_dv_part, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                          nblk, (int)causal);
+    };
+    auto reduce16 = [&]() {
+      dkv_reduce_kernel<128, true><<<rg, 128>>>(d_dk_part_h, d_dv_part_h, d_dk_acc, d_dv_acc, S,
+                                                H, Hkv, nblk, (int)causal);
+    };
+    auto time_fn = [&](auto fn, float* out_ms) {
+      for (int i = 0; i < 3; ++i) fn();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) fn();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      *out_ms = t / iters;
+    };
+    auto fetch = [&](std::vector<float>& dk, std::vector<float>& dv) {
+      CUDA_CHECK(cudaMemcpy(dk.data(), d_dk_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+      CUDA_CHECK(cudaMemcpy(dv.data(), d_dv_acc, nkv * sizeof(float), cudaMemcpyDeviceToHost));
+    };
+    auto mad = [](const std::vector<float>& a, const std::vector<float>& b) {
+      double d = 0;
+      for (size_t i = 0; i < a.size(); ++i) d = std::max(d, (double)std::fabs(a[i] - b[i]));
+      return d;
+    };
+    float ms_at = 0.f, ms_det = 0.f, ms_deth = 0.f;
+    float ms_m32 = 0.f, ms_m16 = 0.f, ms_r32 = 0.f, ms_r16 = 0.f;
+    time_fn(run_atomic, &ms_at);
+    std::vector<float> ak(nkv), av(nkv);
+    fetch(ak, av);
+    time_fn(main32, &ms_m32);
+    time_fn(main16, &ms_m16);
+    time_fn(reduce32, &ms_r32);
+    time_fn(reduce16, &ms_r16);
+    printf("[O61 A/B] main-only DET fp32 %.4f ms | DET bf16 %.4f ms (%.3fx) || reduce-only "
+           "fp32 %.4f ms | bf16 %.4f ms (%.3fx)\n",
+           ms_m32, ms_m16, ms_m32 / ms_m16, ms_r32, ms_r16, ms_r32 / ms_r16);
+    time_fn(run_det, &ms_det);
+    std::vector<float> dk1(nkv), dv1(nkv);
+    fetch(dk1, dv1);
+    run_det();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<float> dk2(nkv), dv2(nkv);
+    fetch(dk2, dv2);
+    time_fn(run_det_h, &ms_deth);
+    std::vector<float> dk3(nkv), dv3(nkv);
+    fetch(dk3, dv3);
+    run_det_h();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    std::vector<float> dk4(nkv), dv4(nkv);
+    fetch(dk4, dv4);
+    auto tf = [&](float ms) { return main_flops / (ms * 1e-3) / 1e12; };
+    printf("[O61 A/B] main wgmma2b atomic %.4f ms (%.1f TF) | DET(fp32) %.4f ms (%.3fx) | "
+           "DET(bf16) %.4f ms (%.3fx)\n",
+           ms_at, tf(ms_at), ms_det, ms_at / ms_det, ms_deth, ms_at / ms_deth);
+    printf("[O61 A/B] runs[1-2] bitwise-diff dk/dv: fp32-partial %.2e/%.2e | bf16-partial %.2e/%.2e\n",
+           mad(dk1, dk2), mad(dv1, dv2), mad(dk3, dk4), mad(dv3, dv4));
+    printf("[O61 A/B] vs atomic dk/dv: fp32-partial %.2e/%.2e | bf16-partial %.2e/%.2e | "
+           "bf16-vs-fp32 %.2e/%.2e\n",
+           mad(dk1, ak), mad(dv1, av), mad(dk3, ak), mad(dv3, av), mad(dk3, dk1), mad(dv3, dv1));
+    cudaFree(d_dk_part);
+    cudaFree(d_dv_part);
+    cudaFree(d_dk_part_h);
+    cudaFree(d_dv_part_h);
+  }
+#endif
 
   // ---- 数值对拍（重新跑一次完整 forward 保证累加缓冲清零）----
   run_all();

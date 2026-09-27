@@ -2116,3 +2116,92 @@ ours-vs-ref 与历史同量级（S256H2 1.230e-2/9.875e-3/1.686e-2、S512H4 8.75
 
 原始输出 `src/bf16/fa_bwd_bf16_o59_{fixed_s1024h2,onefile_s1024h2}.out.txt`，
 汇总 `src/fa_bwd_o59_fixed_mla_shapes.out.txt`。
+
+## 6at. O61-bf16（第一百三十轮，**功能补齐 + 混合结果**）：把 fp16 的确定性 dK/dV 归约（`--det` / O7b）与其 partial 降精度（O60）**逐字 dtype 参数化到 bf16**
+
+### 6at.1 动机
+
+fp16 早在 O7b 就有确定性反向（跨 CTA `atomicAdd` → 按 (Q 头, Q 块) 分片的 partial 覆盖写 +
+固定次序二次归约，两次跑逐位相同），O60 又把 partial 降精度到 fp16（reduce 1.27–1.66×）；
+**fp8 也有 `--det`（P3-4e…P3-4n）**。唯独 **bf16 一直没有 `--det`**（`grep --det src/bf16`
+为空），是三种 dtype 里确定性支持的唯一缺口。本项把 fp16 的整套（O7b + O60）**逐字 dtype
+参数化**到 bf16，补齐功能对等，同时量化 bf16 partial 的收益/代价（bf16 与 fp16 同为 2 字节，
+但 bf16 尾数更短、舍入更粗）。
+
+### 6at.2 改动（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+- **device（`fa_bwd_bf16_mma_kernels.cuh`）**：
+  1. 新增 `dkv_det_store(float*,…)` / `dkv_det_store(bf16*,…)`（`__nv_bfloat162`）重载与
+     `dkv_det_store_p<P16>(base,off,a,b)`——`off` 是**元素下标**，bf16 存储时须在 `bf16*`
+     上做 `+off`（否则字节地址翻倍越界，与 fp16 O60 同一坑）。
+  2. `fa_bwd_bf16_wgmma2b_kernel<HD, SPLIT, DET=false, DET_HALF=false>` 加两个模板参 +
+     尾参 `dk_part/dv_part/nblk`；4 处 dK/dV 写点改成
+     `if constexpr (DET) dkv_det_store_p<...>(part, (((b*H+h)*nblk+mblk)*S+jg)*HD+c, …) else red_add2(…)`。
+     求和集合/次序与 fp16 完全一致（partial 按 **Q 头 h** 分片、GQA 归约时对 head group 求和）。
+  3. 新增 `dkv_reduce_kernel<HD, P16=false>`：按 `mblk` 升序求和（causal 从 `jg/128` 起），
+     `P16` 时逐元素 `__bfloat162float` 进 fp32 累加器。**求和次序与 P16=false 完全相同**。
+- **host（`fa_bwd_bf16_mma_main.cu` + 单文件同源）**：`launch_bwd_wgmma2b` 加
+  `DET/DET_HALF` 模板参与三项 partial 实参（默认逐字不变）；`--det` 解析 + O61 A/B 段
+  （atomic / DET fp32 / DET bf16 × main-only/reduce-only，跑两遍 DET 验证逐位可复现）。
+  `#ifdef FA_WGMMA` 包裹，默认 sm_90/mma 构建不含、行为不变。
+
+### 6at.3 数值（ours-vs-fp32-ref，bf16 causal，max_abs dq/dk/dv）
+
+- **确定性**：两档 partial 的 `runs[1-2] bitwise-diff` 全 `0.00e+00`。
+- **与 atomic 的差**：fp32-partial ≤4.8e-6（仅归约次序）；**bf16-partial 7.78e-3/1.46e-2
+  （S512）/ 7.79e-3/1.54e-2（S4096）/ 1.36e-2/2.19e-2（GQA kv4）**——纯 bf16 舍入（最终输出
+  本就 bf16），与 bf16 噪声同量级。
+- **默认路径逐位不变**：S512 9.001/12.61/13.65e-3、S4096 15.10/13.40/16.31e-3、
+  GQA kv4 12.01/21.25/31.56e-3（与 O5b…O59 历史值逐位一致）。单/两文件逐指标一致。
+
+### 6at.4 性能（同 session A/B，event；两文件，单文件复核同构）
+
+| shape | main-only DET fp32→bf16 | reduce-only fp32→bf16 | main atomic→DET(fp32)→DET(bf16) |
+|---|---|---|---|
+| S512 H16 | 0.0421→0.0485（0.868×） | 0.0110→0.0087（**1.265×**） | 0.0555→0.0542（1.024×）→0.0584（0.950×） |
+| S4096 H16 | 0.8082→0.9586（0.843×） | 0.3877→0.2340（**1.657×**） | 0.9509→1.1902（0.799×）→1.1883（0.800×） |
+| S1024 H32 kv4 | 0.1483→0.1745（0.850×） | 0.0578→0.0386（**1.498×**） | 0.1856→0.2110（0.879×）→0.2172（0.854×） |
+
+与 fp16 O60 **逐项同构**：reduce 单向 1.27–1.66×（纯 DRAM 读字节减半），但 DET 主 kernel 写侧
+慢 ~15%，端到端 DET 合计仍慢于 atomic（S4096 main 0.95→1.19ms）。默认（非 `--det`）路径性能
+一行未动。（打印口径 `4BS²HD`，数值来自 `src/bf16/fa_bwd_bf16_p61_det_sweep_{twofile,onefile}.out.txt`。）
+
+### 6at.5 ncu（S4096，主 kernel 与 reduce，`--set full`）
+
+| kernel | Duration | DRAM | L2 | L1/TEX | regs |
+|---|---|---|---|---|---|
+| `dkv_reduce_kernel<128,0>`（fp32） | 385.22 µs | **90.37%** | 87.80% | 10.55% | — |
+| `dkv_reduce_kernel<128,1>`（bf16） | 230.50 µs | **78.93%** | 85.02% | — | — |
+| `wgmma2b<128,1,1,0>`（DET fp32） | 801.47 µs | 44.48% | 57.51% | 53.49% | 252 |
+| `wgmma2b<128,1,1,1>`（DET bf16） | 944.22 µs | **20.34%** | 57.48% | 44.52% | 252 |
+
+- **reduce 是纯 DRAM 带宽 bound**（fp32 90.4% → bf16 78.9%），字节减半 ⇒ 1.66×。
+- **主 kernel**：bf16 把 DRAM 写字节减半（44.5%→20.3%），但 **L2 `store` 扇区数几乎不变**
+  （`L2 Compression Input Sectors` 35,653,558 → 35,537,820）——每 `(j,row)` 只写 16B、落不满
+  32B 扇区，DET partial 写是**扇区粒度 bound 而非字节 bound**；半宽写更碎 + `__floats2half2`
+  类转换 ⇒ 主 kernel 慢 15%。与 fp16 O60 的 ncu 结论**逐项一致**（fp16 35,651,584 扇区）。
+
+### 6at.6 结论 / 判决
+
+- **功能**：bf16 补齐 `--det`（fp16/fp8/bf16 三 dtype 现均有确定性反向），确定性保留、
+  `runs[1-2]=0`，默认路径逐位不变（`--no-run --ci` 全量 73 case：fp16 7.812e-3 /
+  bf16 1.562e-2 / fp8 1.144e-5 全绿，`--check docs/04` OK 194 行）。
+- **性能判决**：与 fp16 O60 相同——**partial 降精度只对「读被写过的字节」的 reduce 成立
+  （1.27–1.66×）；对 main 写侧无效**（扇区粒度 bound）。端到端 `--det` 仍中性偏负，默认非确定
+  性路径不变。要真正降 main 写侧字节，须先**把 partial 写扇区化**（相邻 `j` 的 half 拼 32B，
+  或 staging 到 smem 后整行 128B 写）——列入 backlog。
+- **对标**（同 session 纯反向 `fa_vs_te_bwd_only.py bf16`，默认路径）：MHA S4096 FA2 0.7260ms/379TF、
+  FA3 0.3189/862、TE 0.4361/630 ⇒ ours total（1.32ms）时间比 **4.14×**（FA3）；O61 只改 opt-in
+  `--det` A/B，默认路径一行未动，差距不变。
+
+### 6at.7 复现 / 原始输出
+
+```
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/bf16/fa_bwd_bf16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_bf16 --det --iters=20
+```
+
+`src/bf16/fa_bwd_bf16_p61_det_sweep_{twofile,onefile}.out.txt`、
+`src/bf16/fa_bwd_bf16_p61_ncu_{reduce32,reduce16,main_det32,main_det16}_s4096.out.txt`、
+`src/bf16/fa_bwd_bf16_p61_fa3_te_baseline.out.txt`。

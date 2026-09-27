@@ -1,0 +1,20 @@
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 256, 2, 512) kv=2             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 512, 4, 512) kv=4             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 1024, 2, 512) kv=2            nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 4096, 16, 128) kv=16       0.7260/  379 0.3189/  862 0.4361/  630    2.28x
+
+pure bwd VARLEN (packed [T,H,D] + cu_seqlens; flops=4*H*D*sum(L^2)), dtype=torch.bfloat16
+lengths / H,kv / mask                  FA2.7.4             FA3          TE2.14  FA3/FA2
+MHA 不齐 [512, 1024, 2048].. H16/kv16 causal 0.3343/  137 0.1615/  283              NA    2.07x
+MHA 等长 [1024, 1024, 1024].. H16/kv16 causal 0.2506/  137 0.1469/  234              NA    1.71x
+GQA q32/kv8 [128, 256, 512].. H32/kv8 causal 0.6252/  146 0.3724/  246              NA    1.68x
+强倾斜 [2048, 512, 128].. H16/kv16 causal 0.3009/  122 0.1407/  261              NA    2.14x
+MHA 等长 full [1024, 1024, 1024].. H16/kv16 full 0.3450/  100 0.1993/  172              NA    1.73x
