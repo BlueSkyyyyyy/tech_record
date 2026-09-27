@@ -115,6 +115,10 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
 4. **量化误差对 dQ/dK/dV 的影响**：反向对 S 的误差敏感（softmax 的 `dS` 含 `P` 因子，小 P 处噪声相对大），
    需要对拍确定容差（预期比 fp16 松 1~2 个数量级）。
 5. **确定性**：FP8 kernel 一般非确定性（原子累加）；对拍用容差而非位相等。
+   → **已提供 opt-in 的确定性模式 `--det`（P3-4e，第一百一十八轮）**：把 dK/dV 的跨 CTA
+   `atomicAdd` 换成「按 (Q 头, Q 块) 分片的 partial 覆盖写 + 固定次序二次归约」，两次跑
+   逐位相同（`runs[1-2] bitwise-diff = 0`）；代价是 ksplit 固定为 1 + 一次纯带宽 bound 的
+   归约（S=4096 时 reduce 731.6µs、DRAM 91.5%），见 `docs/03` §56。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 

@@ -4335,8 +4335,39 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   - **阻塞判定**：本轮用精确 smem 预算把「跨-tile `P/dS` 双缓冲流水」判为不可行（+32,256B，
     3 CTA/SM 只剩 ~3.7KB），写入「阻塞」。原始输出 `src/fa_bwd_ci_p34d.out.txt`、
     `src/fa_bwd_p117_ci_negative.out.txt`、`src/fa_bwd_perf_baseline_fp16.out.txt`、
-    `src/fa_bwd_p117_fp8_te_baseline.out.txt`、`src/fp8/fa_bwd_fp8_p117_ncu_main_s4096.out.txt`；
-    文档 `docs/04` §42、`docs/08` §5.33。
+     `src/fa_bwd_p117_fp8_te_baseline.out.txt`、`src/fp8/fa_bwd_fp8_p117_ncu_main_s4096.out.txt`；
+     文档 `docs/04` §42、`docs/08` §5.33。
+
+- 2026-09-27（第一百一十八轮）：**P3-4e 完成（fp8 反向的确定性 dK/dV 归约，opt-in `--det`）**。
+   - 动机：补齐 `docs/00` catalog §4.2 第 5 条「FP8 kernel 一般非确定性（原子累加）」——
+     fp16/bf16 早在 O7b（第六十四轮）就有 `--det=1`，fp8 一直没有；顺带量化 backlog 里的
+     「deterministic 模式的代价」。
+   - **改动（单/两文件 device 逐字同源，`sync_onefile_device.py` 核对 `device region identical`）**：
+     `fp8_mma_body`/`fa_bwd_fp8_mma_kernel` 加模板参数 `bool DET=false` 与默认实参
+     `dk_part/dv_part/nblk`；GEMM3(dV)/GEMM4(dK) epilogue 在 `DET` 下改 `dkv_det_store`
+     （partial `[((b*H+h)*nblk+mblk)*S*HD]` 的 `float2` 覆盖写、按 **Q 头** 分片以正确归约
+     GQA 广播组），否则保持 O4c `red_add2`；新增 `dkv_reduce_kernel<HD,BM>`（`h` 升序、
+     `mblk` 升序、causal 从 `jg/BM` 起）。host 新增 `launch_bwd_main_det` + `--det` 的
+     同 session A/B（固定 ksplit=1）。范围：定长、`HD=128`、默认 mma 路径。
+   - **数值**：`runs[1-2] bitwise-diff dk/dv = 0.00e+00`（S512 单/两文件、S4096、GQA kv4、
+     full 全部逐位可复现）；`DET-vs-atomic` ~e-7–e-6（fp32 归约次序末位）；**`ours vs ref`
+     与历史逐位一致**。默认路径（无 `--det`）数值/计时逐位不变。
+   - **代价（A/B 同 ksplit=1）**：S=4096 2.3649→**2.8588ms（0.827×）**、GQA kv4 0.3882→0.4611
+     （0.842×）、full S1024 0.4182→0.4671（0.895×）、S512 0.961×；相对**调优默认档**（S4096
+     ksplit=4、main 1.8915ms sm_90）约 **1.5×**（DET 要求 ksplit=1，牺牲 split-K 并行度）。
+   - **ncu**：DET 主 kernel DRAM 4.3%→**33.3%**、L2 78.6%→**36.2%**、`red` 114.5M→**1.57M**
+     扇区、`write` 102.4M 扇区（partial 写 2.20GB）；`dkv_reduce_kernel` **731.6µs /
+     DRAM 91.5% / 3.07 TB/s / occ 71.9%** ⇒ **bound = 全局 partial 写/读的 DRAM 带宽**，
+     非算力。**确定性的售价 = 把 L2 原子归约换成一次性 DRAM partial 写读**。
+   - 原始输出 `src/fp8/fa_bwd_fp8_p34e_det_{s512,s4096,gqa_kv4,s1024_full}.out.txt`、
+     `..._mma_onefile_p34e_det_s512.out.txt`、`..._p34e_default_s512.out.txt`（回归）、
+     `..._p34e_ncu_reduce_s4096.out.txt`、`..._p34e_ncu_detmain_s4096.out.txt`、
+     `..._p34e_ncu_detmain_stall_s4096.out.txt`；文档 `docs/03` §56、`docs/04` §43、
+     `docs/00` §4.2、`docs/08` §5.34。
+   - **下一步候选**：① **把 `--det` 扩展到 ksplit>1**（partial 再按 `part` 分片、dQ 也走
+     partial）以获得「确定性 + split-K 并行度」；② 把 DET 接入 varlen/MLA/TMA 路径；
+     ③（性能，非确定性）仍是「减 mma 依赖 / 提 occupancy」——但受本卡寄存器/smem 硬墙锁定，
+     见「阻塞」。
 
 ## 灵感 / backlog
 
@@ -4383,5 +4414,7 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   `--perf-baseline` 一键落盘。详见「第一百一十七轮」、`docs/04` §42。
 - 用 `nsys` 看 preprocess + main + convert 的端到端重叠。
 - 把 FA2 的 `dQ_accum` 累加缓冲 vs 纯 atomic 做对比实验。
-- deterministic 模式的代价量化。
+- deterministic 模式的代价量化 → **已完成（P3-4e，第一百一十八轮）**：fp8 补齐 `--det`
+  （partial + 固定次序归约，逐位可复现），代价 ncu 定量（reduce 731.6µs/DRAM 91.5%、
+  相对默认档 S4096 ~1.5×），见 `docs/03` §56。
 - fp8：对比「只量化 dO」vs「dO 和 P 都量化」的精度/性能权衡。

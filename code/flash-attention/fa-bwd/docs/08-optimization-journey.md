@@ -520,6 +520,18 @@ smem 冲突 + 低 occ
      第一步，更要防「构建配置差异」被误当作「实现分叉」——`--hopper` 必须走独立前缀。** 本轮
      device 一行未改；详见 `docs/04` §42、`src/fa_bwd_ci_p34d.out.txt`、`src/fa_bwd_p117_ci_negative.out.txt`。
 
+34. **P3-4e（第 118 轮，device 增量，正结果/opt-in）**：**fp8 反向的确定性 dK/dV 归约**
+     ——补齐 `docs/00` §4.2 第 5 条（fp16/bf16 早在 O7b 就有 `--det=1`）。把 dK/dV 的跨 CTA
+     `atomicAdd` 换成「按 (Q 头, Q 块) 分片的 partial 覆盖写 + `dkv_reduce_kernel` 固定次序
+     求和」（causal 下从 `jg/BM` 起求和；partial 必须按 Q 头而非 KV 头分片，否则 GQA 广播组
+     互相覆盖）。**两次跑 `bitwise-diff = 0`（逐位可复现）**；`DET-vs-atomic` ~e-6（fp32 次序
+     末位）。**代价 ncu 定量**：DET 主 kernel DRAM 4.3%→33.3%、L2 78.6%→36.2%、`red` 114.5M→
+     1.57M 扇区，`dkv_reduce_kernel` **731.6µs / DRAM 91.5% / 3.07 TB/s**（纯带宽 bound）；
+     因 DET 要求 `ksplit=1`，相对调优默认档 S=4096 约 **1.5–1.8×**。**教训：确定性的售价就是
+     「把 L2 原子换成一次性 DRAM partial 写读」——在 atomic 归约已是墙的工作点上，确定性与
+     性能直接对立；opt-in 而非默认是对的。** 单/两文件 device 逐字同源（`sync_onefile_device.py`
+     核对）；默认路径一行未改（回归数值与历史逐位一致）。详见 `docs/03` §56、`docs/04` §43。
+
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 

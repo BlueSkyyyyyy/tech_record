@@ -591,6 +591,48 @@ __device__ __forceinline__ void red_add2(float* p, float a, float b) {
   atomicAdd(reinterpret_cast<float2*>(p), make_float2(a, b));
 }
 
+// ----------------------------- P3-4e：确定性 dK/dV 归约（`DET`） -----------------------------
+// 动机（对齐 fp16/bf16 O7b、catalog §4.2 第 5 条）：fp8 反向的 dK/dV 用跨 CTA `atomicAdd`
+//   汇总，一个 KV 元素被多个（Q 块 × Q 头）CTA 贡献；`atomicAdd` 的浮点加法**次序随调度
+//   变化** ⇒ 同一 binary 两次跑末位会抖动、无法位复现。`DET=true` 时把每个 CTA 的贡献
+//   写进按 `(Q 头, Q 块)` 分片的 partial 缓冲（**非原子覆盖写**，每元素只被一个 CTA 写），
+//   再由 `dkv_reduce_kernel` 按固定次序（`h` 升序、`mblk` 升序）求和 ⇒ 与调度无关、可复现。
+//   partial 布局：`part[((b*H + h)*nblk + mblk) * S * HD + jg*HD + c]`（每 CTA 一份）。
+//   注意 partial 按 **Q 头 h**（不是 KV 头）分片：GQA/MQA 下多个 Q 头共享同一 KV 头，
+//   它们的贡献要相加；若只按 hkv 分片会互相覆盖（race）。代价：多一趟写 + 一趟读。
+__device__ __forceinline__ void dkv_det_store(float* part, float a, float b) {
+  *reinterpret_cast<float2*>(part) = make_float2(a, b);
+}
+
+// partial → dK/dV 累加（固定次序）。causal 下 KV 行 `jg` 只被 `mblk >= jg/BM` 的 CTA 写，
+//   故从 `jg/BM` 起求和；非 causal 从 0 起。`BM` 由模板给出（fp8 默认 64；fp16 用 128）。
+template <int HD, int BM = 64>
+__global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
+                                  const float* __restrict__ dv_part,
+                                  float* __restrict__ dk_acc, float* __restrict__ dv_acc,
+                                  int S, int H, int Hkv, int nblk, int causal) {
+  const int hb = blockIdx.x;  // b*Hkv + hkv
+  const int jg = blockIdx.y;
+  const int c = threadIdx.x;
+  if (c >= HD || jg >= S) return;
+  const int b = hb / Hkv, hkv = hb % Hkv;
+  const int G = H / Hkv;  // 每 KV 头对应的 Q 头数（GQA 广播组）
+  const int h0 = hkv * G;
+  const int mblk0 = causal ? (jg / BM) : 0;
+  float sk = 0.f, sv = 0.f;
+  for (int hh = 0; hh < G; ++hh) {
+    const size_t prow = (size_t)(b * H + h0 + hh);
+    for (int m = mblk0; m < nblk; ++m) {
+      const size_t base = ((prow * nblk + m) * (size_t)S + jg) * HD + c;
+      sk += dk_part[base];
+      sv += dv_part[base];
+    }
+  }
+  const size_t o = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
+  dk_acc[o] = sk;
+  dv_acc[o] = sv;
+}
+
 // ------------------- O42：Hopper bulk reduce（`cp.reduce.async.bulk`） -------------------
 // 动机：dK/dV 的逐元素 `red_add2` 虽是 coalesced，但每 tile 要发 2048 条、占满 LSU/L2
 //   流水（O42 实测：把 dK/dV 的 red 短路掉 main 1.60→0.94ms，天花板 1.70×）。改成
@@ -1824,7 +1866,7 @@ __global__ void delta_warp_kernel(const float* __restrict__ o,
 //   `NWM=NTH/32/NWAR` 为 M 方向 warp 数。各 warp tile 由 NWM/NWAR 派生（见下方 GM*/GN*）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
            bool RCP = true, bool TMA = false, bool KVTMA = false, int NTH = THREADS,
-           int NWAR = WN, bool KVPIPE = false>
+           int NWAR = WN, bool KVPIPE = false, bool DET = false>
 __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8,
@@ -1841,7 +1883,9 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                       const CUtensorMap* qmap = nullptr, const CUtensorMap* dmap = nullptr,
                       const CUtensorMap* kmap = nullptr, const CUtensorMap* vmap = nullptr,
                       const int* __restrict__ mt_b = nullptr,
-                      const int* __restrict__ mt_m = nullptr) {
+                      const int* __restrict__ mt_m = nullptr,
+                      float* __restrict__ dk_part = nullptr,
+                      float* __restrict__ dv_part = nullptr, int nblk = 0) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   // O47：warp 网格派生。默认 128/2 ⇒ NWM=2 与历史 2×2 一致（逐字等价）。
   constexpr int NWM = NTH / 32 / NWAR;
@@ -2579,6 +2623,13 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                   //   随后由 `bulk_flush` 一次性 coalesced 归约回 global。
                   wstg[(i * 16 + g + (q >= 2 ? 8 : 0)) * STGS + (j * 8 + c2 + (q & 1))] =
                       acc[i][j][q] * sA[r];
+                } else if constexpr (DET) {
+                  // P3-4e：非原子写 partial（每元素本 CTA 唯一）→ 固定次序二次归约。
+                  if ((q & 1) == 0)
+                    dkv_det_store(dv_part +
+                                      (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD +
+                                          d0 + c,
+                                  acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r]);
                 } else if ((q & 1) == 0) {
                   // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
                   red_add2(dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
@@ -2603,6 +2654,13 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                 if constexpr (kBulkRed) {
                   wstg[(i * 16 + g + (q >= 2 ? 8 : 0)) * STGS + (j * 8 + c2 + (q & 1))] =
                       acc[i][j][q] * sds3[r] * scale;
+                } else if constexpr (DET) {
+                  if ((q & 1) == 0)
+                    dkv_det_store(dk_part +
+                                      (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD +
+                                          d0 + c,
+                                  acc[i][j][q] * sds3[r] * scale,
+                                  acc[i][j][q + 1] * sds3[r] * scale);
                 } else if ((q & 1) == 0) {
                   red_add2(dk_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
                            acc[i][j][q] * sds3[r] * scale,
@@ -2793,7 +2851,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 //   `__grid_constant__` 描述符（`TMA=true` 才用到）。
 // O47：`NTH`/`NWAR` 同 `fp8_mma_body`（默认 128/2 与历史逐字等价；MLA 用 256/4）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
-          bool RCP = true, int NTH = THREADS, int NWAR = WN, bool KVPIPE = false>
+          bool RCP = true, int NTH = THREADS, int NWAR = WN, bool KVPIPE = false, bool DET = false>
 __global__ void __launch_bounds__(NTH, (NTH == THREADS && HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8, const float* __restrict__ ks,
@@ -2804,10 +2862,13 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                       int causal, int ksplit, const int* __restrict__ cu_seqlens = nullptr,
                       const int* __restrict__ mt_b = nullptr,
-                      const int* __restrict__ mt_m = nullptr) {
-  fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR, KVPIPE>(
+                      const int* __restrict__ mt_m = nullptr,
+                      float* __restrict__ dk_part = nullptr,
+                      float* __restrict__ dv_part = nullptr, int nblk = 0) {
+  fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR, KVPIPE, DET>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit, cu_seqlens, nullptr, nullptr, nullptr, nullptr, mt_b, mt_m);
+      scale, causal, ksplit, cu_seqlens, nullptr, nullptr, nullptr, nullptr, mt_b, mt_m,
+      dk_part, dv_part, nblk);
 }
 
 // O37：Q/dO 4D-TMA 版（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA 路径实例化）。
