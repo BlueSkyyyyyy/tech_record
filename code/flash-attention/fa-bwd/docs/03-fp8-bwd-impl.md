@@ -5007,3 +5007,114 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
 原始输出：`src/fp8/fa_bwd_fp8_o59_fixed_s1024h2.out.txt`、
 `..._o59_onefile_s{512h4,1024h2}.out.txt`、`..._o59_ncu_lse_{cfg6,legacy}_s512h4.out.txt`；
 `src/fp16/..._o59_*`、`src/bf16/..._o59_*`；汇总 `src/fa_bwd_o59_fixed_mla_shapes.out.txt`。
+
+---
+
+## 56. P3-4e（第一百一十八轮，**正结果，opt-in `--det`**）：fp8 反向的**确定性 dK/dV 归约**
+
+### 56.1 动机（补齐 `docs/00` catalog §4.2 第 5 条）
+
+`docs/00` 在「FP8 反向：为什么最难点」里明写第 5 条：**「确定性：FP8 kernel 一般非确定性
+（原子累加）；对拍用容差而非位相等」**。fp16/bf16 早在 **O7b（第六十四轮）** 就给了
+`--det=1`（partial + 二次归约，逐位可复现、代价量化，见 `docs/01` §14o）；fp8 一直没有。
+本轮把这条补齐，并顺带量化「确定性模式的代价」（`ROADMAP` backlog 里的
+「deterministic 模式的代价量化」）。
+
+fp8 反向的非确定性来自跨 CTA 的 `atomicAdd`：dK/dV 的每个 KV 元素被 `(Q 块 × Q 头)`
+个 CTA 贡献，dQ 在 `ksplit>1` 时也被多个 CTA 贡献；**浮点加法次序随 block 调度变化**，
+末位会抖动。所谓「确定性」= 把每个 CTA 的贡献写进**独立的 partial 缓冲**（非原子覆盖写，
+每元素只被一个 CTA 写），再由一个固定的归约 kernel **按固定次序求和**。
+
+### 56.2 实现（单/两文件 device 逐字同源）
+
+改动（`src/fp8/fa_bwd_fp8_kernels.cuh` + `fa_bwd_fp8_main.cu`，单文件由
+`scripts/sync_onefile_device.py` 同步、`device region identical: True`）：
+
+- **device**：`fp8_mma_body` / `fa_bwd_fp8_mma_kernel` 加模板参数 `bool DET=false` 与三个
+  默认实参 `float* dk_part, float* dv_part, int nblk`；GEMM3(dV)/GEMM4(dK) 的 epilogue 在
+  `DET` 下改成 `dkv_det_store(dv_part + (((b*H + h)*nblk + mblk)*S + jg)*HD + d0 + c, a, b)`
+  （一次 `float2` 覆盖写），否则保持 O4c 的 `red_add2`。
+  新增 `dkv_reduce_kernel<HD, BM>`：partial `[((b*H+h)*nblk+mblk)*S*HD]` → `dk_acc`，按
+  `h`（GQA 广播组）升序、`mblk` 升序求和；causal 下 KV 行 `jg` 只被 `mblk ≥ jg/BM` 写，
+  故从 `jg/BM` 起求和。**partial 按 Q 头 `h` 分片**（不是 KV 头）：GQA 下多个 Q 头共享同一
+  KV 头，只按 hkv 分片会互相覆盖（race）。
+- **host**：`launch_bwd_main_det<...>`（`DET=true` 的薄壳，ksplit 固定 1）；`--det` / `--det=1`
+  触发一段**同 session A/B**：`atomicAdd`（ksplit=1）vs `DET(partial+reduce)`，计时 + 跑两遍
+  DET 验证 `runs[1-2] bitwise-diff` + 与 atomic 比 `max|diff|`。默认关，常规路径一行未改。
+
+**范围**：仅定长（非 varlen）、`HD=128` 的默认 mma 路径（`--det` A/B 内固定 `ksplit=1`；
+varlen/MLA/TMA/wgmma 路径未接入）。partial 元素数 `B*H*nblk*S*HD`（S=4096/H16/BM64 时
+2.15 GB/缓冲、共 4.3 GB）。
+
+### 56.3 数值：逐位可复现 + 与 atomic 同量级（`runs[1-2]` 两次跑）
+
+| case（fp8） | atomic (ksplit=1) | DET | 比值 | `runs[1-2]` dk/dv | `DET-vs-atomic` dk/dv |
+|---|---|---|---|---|---|
+| S=512 MHA causal（两文件） | 0.1657 ms | 0.1723 ms | 0.961× | **0 / 0** | 3.58e-7 / 4.77e-7 |
+| S=512 MHA causal（单文件） | 0.1676 ms | 0.1744 ms | 0.961× | **0 / 0** | 2.38e-7 / 4.77e-7 |
+| S=4096 MHA causal | 2.3649 ms | 2.8588 ms | 0.827× | **0 / 0** | 9.54e-7 / 2.38e-6 |
+| S=1024 GQA kv4 causal | 0.3882 ms | 0.4611 ms | 0.842× | **0 / 0** | 2.38e-6 / 3.81e-6 |
+| S=1024 MHA full（非 causal） | 0.4182 ms | 0.4671 ms | 0.895× | **0 / 0** | 8.94e-8 / 5.96e-8 |
+
+- **`runs[1-2] bitwise-diff dk/dv = 0.00e+00`**（三种 shape/两种 causal/单两文件）：确定性达成。
+- `DET-vs-atomic` 差 ~e-7–e-6，是 **fp32 归约次序不同**造成的末位舍入（atomic 本身不收敛到
+  某个确定值），与 fp8 容差（O(0.3)）无关。**最终 `ours vs fp32 ref` 与历史逐位一致**
+  （S512 `2.426/2.975/3.735e-1`、GQA kv4 `2.517/5.408/7.072e-1`、full `5.518/5.309/4.007e-2`）。
+- 单/两文件 A/B 数值逐位一致（S512 `0.961×`、diff 同量级）。
+
+### 56.4 代价（确定性模式慢多少）
+
+- 与**同一 ksplit=1 的 atomic** 比：S=4096 **0.827×**（+21%）、GQA kv4 0.842×、full 0.895×、
+  S=512 0.961×。**慢的绝对值 ≈ 0.5 ms（S=4096）**，主要落在 reduce（见 §56.5）。
+- 与**调优后的默认档**比（S=4096 默认 ksplit=4、main 1.5945 ms Hopper / 1.8915 ms
+  sm_90）：DET 2.86 ms = 默认 main 的 **1.5–1.8×**；因为 DET 额外要求 `ksplit=1`
+  （每 `(h,mblk)` 恰好一个 CTA 写 partial），牺牲了 split-K 的并行度。
+
+### 56.5 ncu：bound = **全局 partial 写/读的 DRAM 带宽**，不是算力
+
+`dkv_reduce_kernel`（S=4096 causal，`--set full`）:
+
+| 指标 | 值 |
+|---|---|
+| Duration / DRAM / L2 / L1TEX / Compute | **731.6 µs** / **91.47%** / 88.76% / 9.70% / 12.89% |
+| 带宽 / Achieved Occupancy | **3.07 TB/s** / 71.87% |
+
+DET 主 kernel（S=4096 causal，ksplit=1，`--set full`）vs 历史 atomic 主 kernel：
+
+| 指标 | DET 主 kernel | atomic 主 kernel（P117） |
+|---|---|---|
+| Duration | 2.05 ms | ~1.6 ms |
+| DRAM | **33.34%**（写 2.20 GB） | **4.26%** |
+| L2 / L1TEX / Compute / occ | 36.22% / 63.20% / 33.08% / 16.72% | 78.63% / 68.23% / 47.19% / 18.25% |
+| `lts__t_sectors_op_red` | **1.57 M**（仅 dQ） | **114.5 M** |
+| `lts__t_sectors_op_write` | 102.4 M | — |
+| stall | wait 1.56 + short 1.23 + long 1.02 + barrier 0.40 | wait 1.59 + short 1.29 + long 0.60 |
+
+**结论**：DET 把 atomic 归约（114.5 M red 扇区）换成 **partial 覆盖写（102.4 M write 扇区、
+2.20 GB DRAM 写）+ 一次纯带宽 bound 的二次归约（731.6 µs、DRAM 91.5%）**。L2 red 压力消失
+（L2 78.6%→36.2%），但 DRAM 从 4.3% 抬到 33.3%，且 reduce 自身 ~0.73 ms 是新增成本 ——
+这就是「确定性」在本工作点的售价。对**需要跨运行逐位复现**（CI 数值回归、调试）的场景可接受；
+对纯性能优先的生产路径不建议默认开。
+
+### 56.6 复现 / 原始输出
+
+```bash
+# A/B（atomic vs DET，单/两文件；打印 runs[1-2] bitwise-diff）
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --det --iters=10            # S=512
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --det --iters=10
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --det --iters=10     # 单文件
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:dkv_reduce_kernel --launch-count 1 -- --det --iters=1 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --kernel-name-base demangled \
+  --kernel-name "regex:fa_bwd_fp8_mma_kernel.*, \(bool\)1>" --launch-count 1 -- --det --iters=1 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_p34e_det_s512.out.txt`、
+`..._mma_onefile_p34e_det_s512.out.txt`、`..._p34e_det_s4096.out.txt`、
+`..._p34e_det_gqa_kv4.out.txt`、`..._p34e_det_s1024_full.out.txt`、
+`..._p34e_default_s512.out.txt`（回归）、`..._p34e_ncu_reduce_s4096.out.txt`、
+`..._p34e_ncu_detmain_s4096.out.txt`、`..._p34e_ncu_detmain_stall_s4096.out.txt`。

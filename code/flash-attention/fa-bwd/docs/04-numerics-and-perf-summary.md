@@ -2871,3 +2871,24 @@ dtype 的 ulp 容差在 73/73 case 上全绿、且负向测试确认会拦；单
 **设备侧当前无未证伪的可行杠杆**：跨-tile `P/dS` 双缓冲流水（唯一能直接打 `wait+short_scoreboard`
 的方向）经精确 smem 预算核算在本卡 3 CTA/SM 下**不可行**（详见 ROADMAP「阻塞」），与 L2 `red`
 （`red` 只能靠放大 BM / 提 occupancy，两者皆撞寄存器/smem 硬墙）共同锁死了当前工作点。
+
+## 43. P3-4e：fp8 确定性 dK/dV 归约（`--det`，第 118 轮）—— 正结果，opt-in
+
+补齐 `docs/00` catalog §4.2 第 5 条（FP8 非确定性）与 backlog「deterministic 模式代价量化」。
+fp16/bf16 早有 `--det`（O7b），fp8 本轮补齐：dK/dV 的跨 CTA `atomicAdd` 换成「按 (Q 头, Q 块)
+分片的 partial 覆盖写 + `dkv_reduce_kernel` 固定次序求和」。单/两文件 device 逐字同源。
+
+**数值**（`runs[1-2] bitwise-diff dk/dv = 0.00e+00`，全部 case 逐位可复现；`DET-vs-atomic`
+~e-7–e-6 为 fp32 归约次序的末位差；`ours vs ref` 与历史逐位一致）：
+
+| case（fp8） | atomic (ksplit=1) | DET | 比值 | `runs[1-2]` |
+|---|---|---|---|---|
+| S512 MHA causal（两/单文件） | 0.1657 / 0.1676 ms | 0.1723 / 0.1744 ms | 0.961× | 0 / 0 |
+| S4096 MHA causal | 2.3649 ms | 2.8588 ms | 0.827× | 0 / 0 |
+| S1024 GQA kv4 causal | 0.3882 ms | 0.4611 ms | 0.842× | 0 / 0 |
+| S1024 MHA full | 0.4182 ms | 0.4671 ms | 0.895× | 0 / 0 |
+
+**ncu**：DET 主 kernel（S4096 ksplit=1）DRAM 4.3%→**33.3%**、L2 78.6%→**36.2%**、
+`red` 114.5M→**1.57M** 扇区、`write` 102.4M 扇区（partial 2.20 GB）；`dkv_reduce_kernel`
+**731.6µs / DRAM 91.5% / 3.07 TB/s**（纯带宽 bound）。**代价**：ksplit 固定 1 + 一次纯带宽
+归约；相对调优默认档（S4096 ksplit=4）约 **1.5–1.8×**。详见 `docs/03` §56、`docs/00` §4.2。
