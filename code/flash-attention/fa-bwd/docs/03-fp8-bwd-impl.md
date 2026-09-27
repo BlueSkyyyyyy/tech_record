@@ -5721,3 +5721,110 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
 `dq_part` 清零 + `dq_reduce_kernel<512>` 的 packed 定位即可）；② 减 partial 字节（按 KV 行
 跨 warpgroup 偏和 / 更细分块）以压低 reduce 的 DRAM 墙；③ 性能（非确定性）仍受本卡寄存器/
 smem 硬墙锁定，见 ROADMAP「阻塞」。
+
+## 63. P3-4l（第一百二十五轮，**正结果，opt-in `--detk>1`**）：MLA（HD=512）varlen 的 DET 接上 split-K（候选 ① 收口）
+
+### 63.1 动机（落实上一轮「下一步候选 ①」）
+
+P3-4k 让 **定长** MLA 的 dQ 也进 partial，从而 `--det` 支持 `ksplit>1`；但 P3-4j 的
+**MLA varlen** A/B 仍写死 `ksplit=1`（device 早已支持、host 未接线）。本轮的观察与
+P3-4k 完全同构：
+
+- varlen 的 body 的 DET 分支只依赖 `(b,h,mblk,jg,S,nblk)`，与定长/变长无关；
+- dQ 的 per-part partial 用 `((qbase+qi)*H + h)*ksplit + part`，其中 `qbase+qi` 就是 packed
+  全局 q token，与定长 `dq_reduce_kernel` 的 `row` 语义**逐字相同**；
+- 故只需在 host 把 `dq_part` 分配/清零、把 `dq_reduce_kernel<512>`（`grid=(T,H)`、
+  `block=512`）接到 `dkv_reduce_varlen_kernel<512,64>` 之后即可，**device 一行未改**。
+
+### 63.2 实现（host-only；单/两文件 device 逐字同源）
+
+改动只在 `run_varlen` 的 P3-4j A/B 段（`fa_bwd_fp8_main.cu` + `fa_bwd_fp8_mma_onefile.cu`
+各 +~20 行），与 P3-4i/P3-4k 同构：
+
+- 取 `ks = det_ksplit<1 ? 1 : det_ksplit`；`g = dim3(nblk_max*ks, H, B)`；
+- `dq_part` 大小 `T*H*ks*HD`，`ks>1` 时分配、每跑前 `cudaMemset(...,0)`（空 part 需为 0）；
+- atomic 参照与 DET 用**同 8-warp/256 几何、同 ksplit**的非 kvpipe 主 kernel（只差 DET）；
+- DET 跑完接 `dkv_reduce_varlen_kernel<512,64>`，`ks>1` 时再接
+  `dq_reduce_kernel<512><<<(T,H),512>>>` 按 `part` 固定次序求和。
+
+`ksplit==1` 时走单写者 `red_add2`，与 P3-4j **逐位一致**。单文件由
+`scripts/sync_onefile_device.py` 核对 `device region identical: True`（device 未动）。
+
+### 63.3 数值：`ksplit>1` 下 dq/dk/dv 全逐位可复现
+
+两文件 `--iters=30`，同 session：
+
+| case | ksplit | atomic ms | DET ms | DET/atomic | runs[1-2] bitwise dq/dk/dv | DET-vs-atomic dq/dk/dv |
+|---|---|---|---|---|---|---|
+| b1_t512 causal | 1 | 0.2834 | 0.3424 | 0.828× | 0 / 0 / 0 | 0 / 4.77e-7 / 4.77e-7 |
+| b1_t512 causal | 4 | 0.0805 | 0.1236 | 0.651× | 0 / 0 / 0 | 1.19e-7 / 2.38e-7 / 4.77e-7 |
+| b1_t512 causal | 8 | 0.0556 | **0.0929** | 0.599× | 0 / 0 / 0 | 1.19e-7 / 2.38e-7 / 4.77e-7 |
+| b1_t512 causal | 16 | 0.0585 | 0.1220 | 0.480× | 0 / 0 / 0 | 1.19e-7 / 4.77e-7 / 4.77e-7 |
+| b3_t1792 causal | 1 | 0.5795 | 0.7533 | 0.769× | 0 / 0 / 0 | 0 / 4.77e-7 / 7.15e-7 |
+| b3_t1792 causal | 4 | 0.2150 | 0.3649 | 0.589× | 0 / 0 / 0 | 1.19e-7 / 3.58e-7 / 7.15e-7 |
+| b3_t1792 causal | 8 | 0.1868 | **0.3544** | 0.527× | 0 / 0 / 0 | 1.19e-7 / 2.38e-7 / 4.77e-7 |
+| b3_t1792 causal | 16 | 0.1719 | 0.3898 | 0.441× | 0 / 0 / 0 | 1.19e-7 / 3.58e-7 / 4.77e-7 |
+| b1_t512 full | 4 | 0.0845 | 0.1323 | 0.638× | 0 / 0 / 0 | 8.94e-8 / 5.96e-8 / 5.96e-8 |
+
+- **`runs[1-2] bitwise dq/dk/dv = 0.00e+00` 全部成立**（含 dQ、含 ksplit>1），单/两文件一致
+  （单文件 b1 k=4：0.653×、runs 0/0/0；b3 k=4：0.591×、runs 0/0/0）。
+- `ksplit=1` 时 `DET-vs-atomic` **dq 恒 0**（单写者同值，与 P3-4j 一致）；`ksplit>1` 时 dq/dk/dv
+  ~e-7（fp32 归约次序末位），与 fp8 容差 O(0.3) 无关。
+- **恢复默认路后 `ours vs ref` 与历史逐位一致**：b1 causal `1.613e-1/2.238e-1/3.864e-1`、
+  b3 causal `3.404e-1/3.436e-1/3.508e-1`、b1 full `5.260e-2/5.222e-2/4.218e-2`。全 fp8 噪声量级。
+
+### 63.4 代价与 ncu：DET 在 k=8 触底；bound 仍是 reduce 的纯 DRAM 带宽
+
+- **DET 触底点比定长 MLA（k=4）更靠后**：b1_t512 k=8（0.0929）< k=4（0.1236）< k=16（0.1220）、
+  b3_t1792 k=8（0.3544）< k=4（0.3649）< k=16（0.3898）。varlen 的短序列在 k=4 时并行度仍不足，
+  故 k=8 才吃饱；k=16 后固定 reduce 成本占优、反升。
+- **相对 P3-4j「锁 k=1」**：b1_t512 DET 主链 0.3424 → **0.0929 ms（3.69×）**、b3_t1792
+  0.7533 → **0.3544 ms（2.13×）**——把 P3-4j 白扔的 split-K 并行度收回。
+- **ncu（b3_t1792 causal, DET k=8）**：
+  - `dkv_reduce_varlen_kernel<512,64>`（grid `(6,1024,1)`×512）：**48.13 µs / DRAM 65.68% /
+    L2 67.48%** / L1TEX 10.38% / SM 29.90% / occ 42.67%、读 95.43MB / 写 10.46MB ⇒ **纯 DRAM/L2
+    带宽 bound**（与 P3-4j 的 48.03µs/65.81%/67.59% 逐项一致；k 越大 partial 总量不变、耗时恒定）。
+  - `dq_reduce_kernel<512>`（grid `(1792,2,1)`×512）：**23.33 µs / DRAM 81.73% / L2 77.21%** /
+    L1TEX 10.05% / SM 18.63% / occ 81.02%、读 58.73MB / 写 5.10MB ⇒ 同样是**纯 DRAM 带宽 bound**
+    （与 P3-4k 的 8.74µs 定长版量级一致，varlen 的 T 更大故耗时更长）。
+  - 即 DET 的增量 ~72 µs（两个 reduce）+ partial 清零/读写；**真正的墙仍是 reduce 的 DRAM 带宽**，
+    与 P3-4e/f/g/h/i/j/k 逐项一致。
+
+### 63.5 回归与对标
+
+- `--no-run --ci`（73 case，默认路径）：全绿——单/两文件 worst fp16 `3.906e-3` / bf16 `7.812e-3` /
+  fp8 `9.537e-6`（按 dtype gate 全 OK），`--check docs/04` OK（194 行，rtol=5e-3）。**默认路径数值
+  逐位不变**。
+- **对标**：MLA（`head_dim=512`）的 FA2/FA3/TE 反向**均不支持**（本机实测 `fa2/fa3/te failed
+  MLA d512`），故本轮无 FA/TE 同 shape 对标；刷新纯反向 D=128 基线（`fa_vs_te_bwd_only.py fp16`）：
+  FA3 MHA S4096 `0.3236ms/849TF`、TE `0.4403/624`、FA2 `0.7265/378`；varlen 等长 4×1024 causal
+  FA3 `0.1477ms/233TF`、不齐 `0.1623/281`——与 §37/§38/§40 口径一致。
+
+### 63.6 复现 / 原始输出
+
+```bash
+# MLA varlen + --det --detk=N（打印 [P3-4l A/B]；varlen 需 sm90a + -DFA_WGMMA）
+for k in 1 4 8 16; do ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp8 \
+  --varlen --det --detk=$k --iters=30; done
+# full 需显式 --full；单文件同理换 fa_bwd_fp8_mma_onefile.cu
+# ncu（两个 reduce）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:dkv_reduce_varlen_kernel -c 1 \
+  --metrics gpu__time_duration.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed,... \
+  -- --dir=... --varlen --det --detk=8 --iters=3
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_main_p34l_det_varlen_b1_t512_h2_d512_causal_{1,4,8,16}.out.txt`、
+`src/fp8/fa_bwd_fp8_main_p34l_det_varlen_b3_t1792_{k1,k4,k8,k16}.out.txt`、
+`src/fp8/fa_bwd_fp8_main_p34l_det_varlen_b1_t512_full_k4.out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_p34l_det_varlen_b1_t512_k4.out.txt`、
+`src/fp8/fa_bwd_fp8_mma_onefile_p34l_det_varlen_b3_t1792_k4.out.txt`、
+`src/fp8/fa_bwd_fp8_p34l_ncu_{dkvreduce,dqreduce}_varlen_b3.out.txt`、
+`src/fa_bwd_p34l_fa_baseline_fp16.out.txt`。
+
+**下一步候选**：① **减 partial 字节**（按 KV 行跨 warpgroup 偏和 / 更细分块）以压低 reduce 的
+DRAM 墙——varlen 的 maxlen-strided partial 尤其浪费，可换 compact per-sequence offset；
+② 把两个 reduce 融合进一个 kernel（省一趟 partial 读）；③ 性能（非确定性）仍受本卡寄存器/
+smem 硬墙锁定，见 ROADMAP「阻塞」。

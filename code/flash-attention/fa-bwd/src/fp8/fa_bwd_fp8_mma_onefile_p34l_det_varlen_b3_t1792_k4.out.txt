@@ -1,0 +1,16 @@
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp8
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 256 768 1792
+O40: varlen lse k-split = 16 (base=48)
+[timing] VARLEN total 0.2780 ms  20.28 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 2 x 3 (nocompact, ksplit=4, total_mt=28) | use_regdq=0 | T=1792
+[P3-4l A/B] MLA varlen ksplit=4 | atomic(8w) 0.2163 ms | DET(8w) 0.3660 ms (0.591x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=1.19e-07/3.58e-07/7.15e-07
+[O52 A/B] varlen MLA main-only 4w 0.3475 ms | 8w 0.1981 ms (1.754x) | 8w+kvpipe 0.1883 ms (1.846x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=3.576e-07 dv=4.768e-07 | max_abs(kvp-vs-8w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07
+[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.1438 split2 0.0809 split4 0.0515 split8 0.0366 split16 0.0427 ms
+[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.1657 split2 0.0849 split4 0.0510 split8 0.0342 split16 0.0320 ms
+[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.2303 split2 0.1240 split4 0.0767 split8 0.0564 split16 0.0565 ms
+[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.1671 split2 0.0899 split4 0.0503 split8 0.0385 split16 0.0338 ms
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.404e-01  max_rel=3.292e+02  (ours_amax=3.980e+00 ref_amax=3.983e+00 @1230)
+  dk  vs ref: max_abs=3.436e-01  max_rel=9.549e+01  (ours_amax=3.468e+00 ref_amax=3.354e+00 @787007)
+  dv  vs ref: max_abs=3.508e-01  max_rel=1.678e+02  (ours_amax=5.212e+00 ref_amax=5.148e+00 @262845)

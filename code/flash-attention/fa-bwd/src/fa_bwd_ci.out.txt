@@ -292,5 +292,4 @@ cases=73 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp8 singlefile varlen_b8_t2904_h16_d128_full_fp8
       (--no-run: 复用已有 npy)
-[perf-baseline] fp16 rc=0 -> /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_perf_baseline_fp16.out.txt
 [ci] doc-table-check rc=0

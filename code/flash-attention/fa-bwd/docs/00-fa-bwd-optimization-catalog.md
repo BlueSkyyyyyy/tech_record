@@ -153,6 +153,14 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    相对旧「锁 k=1」主链 **2.4–2.8×**（S1024H2 0.7256→0.2589ms），仍比 atomic 慢
    0.61–0.73×；`DET-vs-atomic` k=1 时 dq 恒 0、k>1 时 e-7。bound = `dkv_reduce_kernel` 的
    纯 DRAM 带宽（29.6µs/DRAM 77%/L2 76%）。见 `docs/03` §62。
+   → **`--det` 的 MLA（HD=512）varlen 也支持 `ksplit>1`（P3-4l，第一百二十五轮）**：P3-4j 的
+   A/B 仍锁 `ksplit=1`；本轮观察与 P3-4k 同构（varlen body 的 DET 分支与定长无关、dQ 的
+   per-part partial 用 packed 全局 token），**device 一行未改**，host 只补 `dq_part` 分配/清零
+   + `dq_reduce_kernel<512><<<(T,H),512>>>`。b1_t512/b3_t1792 ksplit=1/4/8/16、b1 full k=4
+   × 单/两文件全部 `runs[1-2] bitwise dq/dk/dv = 0`；**DET 在 k=8 触底**、相对「锁 k=1」
+   b1 **3.69×**/b3 **2.13×**；ncu `dkv_reduce_varlen_kernel<512,64>` 48.13µs/DRAM 65.7%、
+   `dq_reduce_kernel<512>` 23.33µs/DRAM 81.7% ⇒ bound = reduce 的纯 DRAM 带宽。
+   见 `docs/03` §63。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 

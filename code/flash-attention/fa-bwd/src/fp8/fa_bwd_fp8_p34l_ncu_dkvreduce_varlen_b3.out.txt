@@ -1,0 +1,47 @@
+fa_bwd_fp8_kernels.cuh(3345): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1602 of fa_bwd_fp8_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kernels.cuh(3053): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1602 of fa_bwd_fp8_main.cu
+
+==PROF== Connected to process 989740 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_main.out)
+==PROF== Profiling "dkv_reduce_varlen_kernel": 0%....50%....100% - 10 passes
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp8
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 256 768 1792
+O40: varlen lse k-split = 16 (base=48)
+[timing] VARLEN total 0.5877 ms  9.59 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 2 x 3 (nocompact, ksplit=4, total_mt=28) | use_regdq=0 | T=1792
+[P3-4l A/B] MLA varlen ksplit=8 | atomic(8w) 0.1892 ms | DET(8w) 0.3588 ms (0.527x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=1.19e-07/4.77e-07/4.77e-07
+[O52 A/B] varlen MLA main-only 4w 0.3521 ms | 8w 0.1987 ms (1.772x) | 8w+kvpipe 0.1906 ms (1.848x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=3.576e-07 dv=7.153e-07 | max_abs(kvp-vs-8w) dq=1.192e-07 dk=2.384e-07 dv=4.768e-07
+[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.1469 split2 0.1243 split4 0.1244 split8 0.1222 split16 0.1240 ms
+[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.1692 split2 0.1225 split4 0.1239 split8 0.1264 split16 0.1243 ms
+[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.2350 split2 0.1268 split4 0.1248 split8 0.1250 split16 0.1256 ms
+[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.1709 split2 0.1271 split4 0.1243 split8 0.1249 split16 0.1249 ms
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.404e-01  max_rel=3.292e+02  (ours_amax=3.980e+00 ref_amax=3.983e+00 @1230)
+  dk  vs ref: max_abs=3.436e-01  max_rel=9.549e+01  (ours_amax=3.468e+00 ref_amax=3.354e+00 @787007)
+  dv  vs ref: max_abs=3.508e-01  max_rel=1.678e+02  (ours_amax=5.212e+00 ref_amax=5.148e+00 @262845)
+==PROF== Disconnected from process 989740
+[989740] fa_bwd_fp8_main.out@127.0.0.1
+  void dkv_reduce_varlen_kernel<512, 64>(const float *, const float *, float *, float *, const int *, int, int, int, int, int) (6, 1024, 1)x(512, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------- ----------- ------------
+    Metric Name                                         Metric Unit Metric Value
+    --------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                      Mbyte        95.43
+    dram__bytes_write.sum                                     Mbyte        10.46
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        65.68
+    gpu__time_duration.sum                                       us        48.13
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %        10.38
+    lts__throughput.avg.pct_of_peak_sustained_elapsed             %        67.48
+    sm__throughput.avg.pct_of_peak_sustained_elapsed              %        29.90
+    sm__warps_active.avg.pct_of_peak_sustained_active             %        42.67
+    --------------------------------------------------- ----------- ------------
+

@@ -839,40 +839,53 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     CUDA_CHECK(cudaDeviceSynchronize());
   }
 
-  // ---- P3-4j A/B（D=512 MLA varlen，`--det`）：把 P3-4i 的确定性 dK/dV 从 D=128 扩到
-  //      MLA（HD=512）的变长路径（DET 候选 ① 的最后一块）。MLA 的 dQ 无法用寄存器累加
-  //      （`kRegDq = REGDQ && (HD/NTW==1)` 恒 false）⇒ 锁 ksplit=1（单写者 `red_add2`，
-  //      dQ 也确定）；dK/dV 走 partial + `dkv_reduce_varlen_kernel<512,64>`（按 `cu_seqlens`
-  //      的逐序列 `len_b/nblk_b` 定界、输出按 packed token 定位）。与默认 MLA varlen 主
-  //      kernel 同几何（O47/O51 的 8-warp/256 线程），但用非 kvpipe 版（DET 未接进 kvpipe）。
+  // ---- P3-4j/P3-4l A/B（D=512 MLA varlen，`--det`）：把 P3-4i 的确定性 dK/dV 从 D=128 扩到
+  //      MLA（HD=512）的变长路径（DET 候选 ① 的最后一块）。dK/dV 走 partial +
+  //      `dkv_reduce_varlen_kernel<512,64>`（按 `cu_seqlens` 的逐序列 `len_b/nblk_b` 定界、
+  //      输出按 packed token 定位）。**P3-4l**：MLA 的 dQ 无法用寄存器累加
+  //      （`kRegDq = REGDQ && (HD/NTW==1)` 恒 false），但 P3-4k 已让非 `kRegDq` 的 dQ epilogue
+  //      在 `DET && ksplit>1` 时写按 part 分片的 `dq_part`（同 `(mblk,h,part)` 只被一个 CTA
+  //      写 ⇒ 天然确定），故 ksplit>1 时再接 `dq_reduce_kernel<512>`（packed token = `qbase+qi`，
+  //      与定长 `dq_reduce_kernel` 的 `row` 语义一致）按 part 固定次序求和；`ksplit==1` 仍走
+  //      单写者 `red_add2`（逐位不变）。与默认 MLA varlen 主 kernel 同几何（O47/O51 的
+  //      8-warp/256 线程），但用非 kvpipe 版（DET 未接进 kvpipe）。
   //      同 session 计时 + 跑两遍 DET 验逐位，再与 atomic 比 max|diff|。----
   if (det_ab && D == 512) {
     const int nblk_max = (maxlen + BM - 1) / BM;
+    const int ks = det_ksplit < 1 ? 1 : det_ksplit;
     const size_t part_elems = (size_t)B * H * nblk_max * maxlen * D;
+    const size_t dqpart_elems = (size_t)T * H * (size_t)ks * D;
     float* d_dk_part = nullptr;
     float* d_dv_part = nullptr;
+    float* d_dq_part = nullptr;
     CUDA_CHECK(cudaMalloc(&d_dk_part, part_elems * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&d_dv_part, part_elems * sizeof(float)));
-    dim3 g(nblk_max, H, B);
+    if (ks > 1) CUDA_CHECK(cudaMalloc(&d_dq_part, dqpart_elems * sizeof(float)));
+    dim3 g(nblk_max * ks, H, B);
     auto run_at = [&]() {
       CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
       CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
       CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
       launch_bwd_main<512, 64, 32, false, false, true, true, true, 256, 4>(
           g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
-          maxlen, H, Hkv, scale, (int)causal, 1, d_cu, nullptr, nullptr);
+          maxlen, H, Hkv, scale, (int)causal, ks, d_cu, nullptr, nullptr);
     };
     auto run_dt = [&]() {
       CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));   // ksplit==1 时 dQ 用无竞争 red_add2
       CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
       CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+      if (ks > 1) CUDA_CHECK(cudaMemset(d_dq_part, 0, dqpart_elems * 4));  // 空 part 需为 0
       launch_bwd_main_det<512, 64, 32, false, true, true, true, 256, 4>(
           g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
-          maxlen, H, Hkv, scale, (int)causal, 1, d_dk_part, d_dv_part, nblk_max, nullptr, d_cu,
+          maxlen, H, Hkv, scale, (int)causal, ks, d_dk_part, d_dv_part, nblk_max, d_dq_part, d_cu,
           nullptr, nullptr);
       dim3 rg(B * Hkv, maxlen);
       dkv_reduce_varlen_kernel<512, 64><<<rg, 512>>>(d_dk_part, d_dv_part, d_dk, d_dv, d_cu, H,
                                                      Hkv, nblk_max, maxlen, (int)causal);
+      if (ks > 1) {
+        dim3 dg(T, H);
+        dq_reduce_kernel<512><<<dg, 512>>>(d_dq_part, d_dq, T, H, ks);
+      }
     };
     auto time_fn3 = [&](auto fn, float* out_ms) {
       for (int i = 0; i < 3; ++i) fn();
@@ -905,12 +918,13 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       for (size_t i = 0; i < x.size(); ++i) m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
       return m;
     };
-    printf("[P3-4j A/B] MLA varlen ksplit=1 | atomic(8w) %.4f ms | DET(8w) %.4f ms (%.3fx) | "
+    printf("[P3-4l A/B] MLA varlen ksplit=%d | atomic(8w) %.4f ms | DET(8w) %.4f ms (%.3fx) | "
            "runs[1-2] bitwise dq/dk/dv=%.2e/%.2e/%.2e | DET-vs-atomic dq/dk/dv=%.2e/%.2e/%.2e\n",
-           ms_at, ms_dt, ms_at / ms_dt, mad3(dq1, dq2), mad3(dk1, dk2), mad3(dv1, dv2),
+           ks, ms_at, ms_dt, ms_at / ms_dt, mad3(dq1, dq2), mad3(dk1, dk2), mad3(dv1, dv2),
            mad3(dq1, aq), mad3(dk1, ak), mad3(dv1, av));
     cudaFree(d_dk_part);
     cudaFree(d_dv_part);
+    if (d_dq_part) cudaFree(d_dq_part);
     run_all();   // 恢复最终输出为 CLI 选中的路径
     CUDA_CHECK(cudaDeviceSynchronize());
   }

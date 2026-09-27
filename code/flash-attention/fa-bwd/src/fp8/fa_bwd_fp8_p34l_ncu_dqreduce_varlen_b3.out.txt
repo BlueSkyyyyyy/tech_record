@@ -1,0 +1,47 @@
+fa_bwd_fp8_kernels.cuh(3345): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1602 of fa_bwd_fp8_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kernels.cuh(3053): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 1602 of fa_bwd_fp8_main.cu
+
+==PROF== Connected to process 990006 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_main.out)
+==PROF== Profiling "dq_reduce_kernel": 0%....50%....100% - 10 passes
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp8
+VARLEN: B=3 T=1792 maxlen=1024 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 256 768 1792
+O40: varlen lse k-split = 16 (base=48)
+[timing] VARLEN total 0.7091 ms  7.95 TFLOPS (sum_b 4HL^2D)
+grid main = 64 x 2 x 3 (nocompact, ksplit=4, total_mt=28) | use_regdq=0 | T=1792
+[P3-4l A/B] MLA varlen ksplit=8 | atomic(8w) 0.1889 ms | DET(8w) 0.3589 ms (0.526x) | runs[1-2] bitwise dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=1.19e-07/3.58e-07/7.15e-07
+[O52 A/B] varlen MLA main-only 4w 0.3516 ms | 8w 0.2006 ms (1.753x) | 8w+kvpipe 0.1893 ms (1.858x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=3.576e-07 dv=4.768e-07 | max_abs(kvp-vs-8w) dq=1.192e-07 dk=2.980e-07 dv=4.768e-07
+[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.1471 split2 0.1241 split4 0.1245 split8 0.1241 split16 0.1241 ms
+[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.1636 split2 0.1255 split4 0.1249 split8 0.1260 split16 0.1234 ms
+[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.2333 split2 0.1269 split4 0.1271 split8 0.1254 split16 0.1236 ms
+[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.1709 split2 0.1264 split4 0.1252 split8 0.1250 split16 0.1237 ms
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.404e-01  max_rel=3.292e+02  (ours_amax=3.980e+00 ref_amax=3.983e+00 @1230)
+  dk  vs ref: max_abs=3.436e-01  max_rel=9.549e+01  (ours_amax=3.468e+00 ref_amax=3.354e+00 @787007)
+  dv  vs ref: max_abs=3.508e-01  max_rel=1.678e+02  (ours_amax=5.212e+00 ref_amax=5.148e+00 @262845)
+==PROF== Disconnected from process 990006
+[990006] fa_bwd_fp8_main.out@127.0.0.1
+  void dq_reduce_kernel<512>(const float *, float *, int, int, int) (1792, 2, 1)x(512, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------- ----------- ------------
+    Metric Name                                         Metric Unit Metric Value
+    --------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                      Mbyte        58.73
+    dram__bytes_write.sum                                     Mbyte         5.10
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        81.73
+    gpu__time_duration.sum                                       us        23.33
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %        10.05
+    lts__throughput.avg.pct_of_peak_sustained_elapsed             %        77.21
+    sm__throughput.avg.pct_of_peak_sustained_elapsed              %        18.63
+    sm__warps_active.avg.pct_of_peak_sustained_active             %        81.02
+    --------------------------------------------------- ----------- ------------
+
