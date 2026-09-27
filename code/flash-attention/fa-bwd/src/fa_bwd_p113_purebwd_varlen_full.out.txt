@@ -1,0 +1,14 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== VARLEN bench（pure-bwd，CUPTI device time）===
+[varlen_b4_t3840_h16_d128_full_fp16] lengths=[512, 1024, 2048, 256]  fa3=0.2383ms/191.49TF
+[varlen_b4_t4096_h16_d128_full_fp16] lengths=[1024, 1024, 1024, 1024]  fa3=0.1991ms/172.62TF
+[varlen_b5_t3968_h32_d128_full_fp16] lengths=[128, 256, 512, 1024, 2048]  fa3=0.5180ms/176.72TF
+[varlen_b8_t2904_h16_d128_full_fp16] lengths=[2048, 512, 128, 96, 64, 32, 16, 8]  fa3=0.2014ms/182.53TF
+[varlen_b3_t1792_h2_d512_full_fp16] lengths=[256, 512, 1024]  fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)
+=== VARLEN bench（pure-bwd，CUPTI device time）===
+[varlen_b4_t3840_h16_d128_full_bf16] lengths=[512, 1024, 2048, 256]  fa3=0.2352ms/194.00TF
+[varlen_b4_t4096_h16_d128_full_bf16] lengths=[1024, 1024, 1024, 1024]  fa3=0.1988ms/172.83TF
+[varlen_b5_t3968_h32_d128_full_bf16] lengths=[128, 256, 512, 1024, 2048]  fa3=0.5141ms/178.05TF
+[varlen_b8_t2904_h16_d128_full_bf16] lengths=[2048, 512, 128, 96, 64, 32, 16, 8]  fa3=0.1990ms/184.75TF
+[varlen_b3_t1792_h2_d512_full_bf16] lengths=[256, 512, 1024]  fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)

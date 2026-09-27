@@ -13,6 +13,8 @@ shape 语法（空白或逗号分隔，逗号/括号会被忽略）：
 设计要点：
 - 输入用固定 seed 生成，张量以 fp32 CPU npy 保存（fp16/bf16 可被 fp32 无损表示），
   方便自己的 kernel 直接 load 同一份输入、和同一份 ref 输出逐元素比对。
+- bench 默认**纯反向口径**（forward 在计时区外，只测 backward，对齐 fa_vs_te_bwd_only.py）；
+  `--with-fwd` 可退回旧口径（forward+backward 整段计时）做 A/B。
 - ref = 纯 PyTorch fp32（autograd，支持 GQA/MQA + MLA 的 Dv≠D）；
   fa = flash_attn 2.7.4（FA2/SM80，仅供历史对照）；fa3 = flash_attn_3 3.0.0（FA3/SM90，
   **当前对标口径**，不支持 head_dim>256 / fp8）；te = TransformerEngine 2.14。
@@ -285,6 +287,109 @@ def fa3_bwd_varlen(q, k, v, do, lengths, causal=True):
     return o.detach(), q2.grad, k2.grad, v2.grad
 
 
+# ----------------------------- 纯反向 bench（forward 在计时区外） -----------------------------
+# 用户指定口径（对齐 harness/fa_vs_te_bwd_only.py）：forward 只建图/算一次、放在计时区外，
+# `device_time` 只测 backward。上面 *_bwd() 是「含 forward」的整段实现，dump 仍用它取数值；
+# bench 默认走这里的 `make_*_bwd_only()`，`--with-fwd` 可退回旧口径做 A/B。
+def make_fa_bwd_only(q, k, v, do, causal=True):
+    from flash_attn import flash_attn_func
+    q2 = q.detach().clone().requires_grad_(True)
+    k2 = k.detach().clone().requires_grad_(True)
+    v2 = v.detach().clone().requires_grad_(True)
+    o = flash_attn_func(q2, k2, v2, causal=causal)
+    return lambda: torch.autograd.grad(o, [q2, k2, v2], do, retain_graph=True)
+
+
+def make_fa3_bwd_only(q, k, v, do, causal=True):
+    from flash_attn_3 import flash_attn_interface as f3
+    q2 = q.detach().clone().requires_grad_(True)
+    k2 = k.detach().clone().requires_grad_(True)
+    v2 = v.detach().clone().requires_grad_(True)
+    o = f3.flash_attn_func(q2, k2, v2, causal=causal)
+    return lambda: torch.autograd.grad(o, [q2, k2, v2], do, retain_graph=True)
+
+
+def make_te_bwd_only(q, k, v, do, causal=True):
+    from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+        FusedAttnBackend, fused_attn_bwd, fused_attn_fwd,
+    )
+    from transformer_engine.pytorch.constants import TE_DType
+    B, S, H, D = q.shape
+    Hkv, Dv = k.shape[2], v.shape[-1]
+    cu = torch.arange(0, (B + 1) * S, S, dtype=torch.int32, device=DEV)
+    backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+    dtype = q.dtype
+    mask = "causal" if causal else "no_mask"
+    qf = q.reshape(B * S, H, D).contiguous()
+    kf = k.reshape(B * S, Hkv, D).contiguous()
+    vf = v.reshape(B * S, Hkv, Dv).contiguous()
+    out, aux = fused_attn_fwd(
+        True, S, S, cu, cu, qf, kf, vf, dtype, backend, None,
+        attn_bias_type="no_bias", attn_mask_type=mask,
+        softmax_type="vanilla", qkv_layout="bshd_bshd_bshd",
+    )
+    dof = do.reshape(B * S, H, Dv).contiguous()
+
+    def f():
+        return fused_attn_bwd(
+            S, S, cu, cu, qf, kf, vf, out, dof, dtype,
+            qkv_layout="bshd_bshd_bshd", dqkv_dtype=TE_DType[dtype],
+            aux_ctx_tensors=list(aux), fused_attention_backend=backend,
+            attn_bias_type="no_bias", attn_mask_type=mask, softmax_type="vanilla",
+        )
+    return f
+
+
+def make_te_fp8_bwd_only(q, k, v, do, causal=True):
+    import transformer_engine  # noqa: F401
+    import transformer_engine_torch as tex
+    from transformer_engine.pytorch.cpp_extensions.fused_attn import (
+        FusedAttnBackend, fused_attn_bwd, fused_attn_fwd,
+    )
+    B, S, H, D = q.shape
+    Hkv, Dv = k.shape[2], v.shape[-1]
+    nominal = torch.bfloat16
+    e4m3, e5m2 = tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2
+    cu = torch.arange(0, (B + 1) * S, S, dtype=torch.int32, device=DEV)
+    qkv_q, s_q, o_q = _fp8_q(e4m3, tex), _fp8_q(e4m3, tex), _fp8_q(e4m3, tex)
+    do_q, dp_q, dqkv_q = _fp8_q(e5m2, tex), _fp8_q(e5m2, tex), _fp8_q(e5m2, tex)
+    qf = q.reshape(B * S, H, D).to(nominal).contiguous()
+    kf = k.reshape(B * S, Hkv, D).to(nominal).contiguous()
+    vf = v.reshape(B * S, Hkv, Dv).to(nominal).contiguous()
+    dof = do.reshape(B * S, H, Dv).to(nominal).contiguous()
+    q8, k8, v8, do8 = qkv_q(qf), qkv_q(kf), qkv_q(vf), do_q(dof)
+    backend = FusedAttnBackend["FP8"]
+    mask = "causal" if causal else "no_mask"
+    out, aux, *_ = fused_attn_fwd(
+        True, S, S, cu, cu, q8, k8, v8, nominal, backend, None,
+        s_quantizer=s_q, o_quantizer=o_q, attn_bias_type="no_bias",
+        attn_mask_type=mask, softmax_type="vanilla", qkv_layout="bshd_bshd_bshd")
+
+    def f():
+        return fused_attn_bwd(
+            S, S, cu, cu, q8, k8, v8, out, do8, nominal, do8._fp8_dtype, list(aux), backend,
+            qkv_layout="bshd_bshd_bshd", s_quantizer=s_q, dp_quantizer=dp_q, dqkv_quantizer=dqkv_q,
+            attn_bias_type="no_bias", attn_mask_type=mask, softmax_type="vanilla")
+    return f
+
+
+def make_fa3_varlen_bwd_only(q, k, v, do, lengths, causal=True):
+    from flash_attn_3 import flash_attn_interface as f3
+    q2 = q.detach().clone().requires_grad_(True)
+    k2 = k.detach().clone().requires_grad_(True)
+    v2 = v.detach().clone().requires_grad_(True)
+    cu = _cu(lengths)
+    smax = max(lengths)
+    o = f3.flash_attn_varlen_func(q2, k2, v2, cu, cu, smax, smax, causal=causal)
+    return lambda: torch.autograd.grad(o, [q2, k2, v2], do, retain_graph=True)
+
+
+# 旧口径（含 forward）整段实现：仅 `--with-fwd` 复现用。
+_COMBINED = {"fa": fa_bwd, "fa3": fa3_bwd, "te": te_bwd, "te_fp8": te_bwd_fp8}
+_BUILDERS = {"fa": make_fa_bwd_only, "fa3": make_fa3_bwd_only,
+             "te": make_te_bwd_only, "te_fp8": make_te_fp8_bwd_only}
+
+
 def maxdiff(a, b):
     return (a.float() - b.float()).abs().max().item()
 
@@ -423,7 +528,9 @@ class CudaTimer:
         return sum(e.device_time_total for e in prof.key_averages()) / self.repeat / 1e3
 
 
-def bench_case(sh, dtype_name, timer):
+def bench_case(sh, dtype_name, timer, bwd_only=True):
+    """定长性能对标。bwd_only=True（默认）= 用户指定的纯反向口径（forward 在计时区外，
+    只测 backward）；False = 旧口径（含 forward），供 `--with-fwd` A/B。"""
     dtype = DTYPES[dtype_name]
     torch.manual_seed(seed_case(sh))
     B, S, H, D, Hkv, Dv = sh["B"], sh["S"], sh["H"], sh["D"], sh["Hkv"], sh["Dv"]
@@ -434,11 +541,16 @@ def bench_case(sh, dtype_name, timer):
     flops = 4.0 * B * S * H * S * (D + Dv)  # bwd ≈ 2x fwd
     tag = case_slug(sh, dtype_name)
     cells = []
-    pairs = ([("te", te_bwd_fp8)] if dtype_name == "fp8"
-             else [("fa3", fa3_bwd), ("fa", fa_bwd), ("te", te_bwd)])
-    for who, fn in pairs:
+    pairs = (["te_fp8"] if dtype_name == "fp8" else ["fa3", "fa", "te"])
+    for key in pairs:
+        who = "te" if key == "te_fp8" else key
         try:
-            ms = timer.device_time(lambda: fn(q, k, v, do, sh["causal"]))
+            if bwd_only:
+                f = _BUILDERS[key](q, k, v, do, sh["causal"])
+                ms = timer.device_time(f)
+            else:
+                fn = _COMBINED[key]
+                ms = timer.device_time(lambda: fn(q, k, v, do, sh["causal"]))
             cells.append(f"{who}={ms:.4f}ms/{flops / (ms * 1e-3) / 1e12:.2f}TF")
         except Exception as e:  # noqa
             cells.append(f"{who}=NA({str(e)[:40]})")
@@ -446,8 +558,8 @@ def bench_case(sh, dtype_name, timer):
     return tag, cells
 
 
-def bench_case_varlen(lengths, H, D, Hkv, Dv, dtype_name, timer, causal=True):
-    """VARLEN 性能对标（纯反向 device time）。
+def bench_case_varlen(lengths, H, D, Hkv, Dv, dtype_name, timer, causal=True, bwd_only=True):
+    """VARLEN 性能对标（纯反向 device time，forward 在计时区外；`--with-fwd` 退回旧口径）。
     * fp16/bf16：FA3 支持变长反向 → 直接给出 fa3 列（任意 lengths）。
     * fp8：FA3 无反向 fp8；等长时与 TE FP8 定长同 shape 等价，列 te-fixed；
       不等长时 TE 2.14 FP8 变长在本容器 segfault，只报 ours（见各轮自测）。
@@ -464,7 +576,10 @@ def bench_case_varlen(lengths, H, D, Hkv, Dv, dtype_name, timer, causal=True):
     cells = []
     if dtype_name != "fp8":
         try:
-            ms = timer.device_time(lambda: fa3_bwd_varlen(q, k, v, do, lengths, causal))
+            if bwd_only:
+                ms = timer.device_time(make_fa3_varlen_bwd_only(q, k, v, do, lengths, causal))
+            else:
+                ms = timer.device_time(lambda: fa3_bwd_varlen(q, k, v, do, lengths, causal))
             cells.append(f"fa3={ms:.4f}ms/{flops / (ms * 1e-3) / 1e12:.2f}TF")
         except Exception as e:  # noqa
             cells.append(f"fa3=NA({str(e)[:40]})")
@@ -475,7 +590,10 @@ def bench_case_varlen(lengths, H, D, Hkv, Dv, dtype_name, timer, causal=True):
         vb = v.reshape(B, S, Hkv, Dv)
         dob = do.reshape(B, S, H, Dv)
         try:
-            ms = timer.device_time(lambda: te_bwd_fp8(qb, kb, vb, dob, causal))
+            if bwd_only:
+                ms = timer.device_time(make_te_fp8_bwd_only(qb, kb, vb, dob, causal))
+            else:
+                ms = timer.device_time(lambda: te_bwd_fp8(qb, kb, vb, dob, causal))
             cells.append(f"te-fixed={ms:.4f}ms/{flops / (ms * 1e-3) / 1e12:.2f}TF")
         except Exception as e:  # noqa
             cells.append(f"te=NA({str(e)[:40]})")
@@ -528,6 +646,8 @@ def main():
     ap.add_argument("--dtypes", nargs="+", default=None, help="对多个 dtype 依次跑")
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--repeat", type=int, default=50)
+    ap.add_argument("--with-fwd", action="store_true",
+                    help="bench 旧口径（forward+backward 整段计时）；默认纯反向（forward 在计时区外）")
     # VARLEN：--lengths 给出各序列长度；--H/--D/--kv/--Dv 给出其余维度。
     ap.add_argument("--lengths", nargs="+", type=int, default=None,
                     help="变长：各序列长度，如 --lengths 512 1024 256")
@@ -558,10 +678,12 @@ def main():
                 for lengths, H, D, hkv, dv in vspecs:
                     dump_case_varlen(lengths, H, D, hkv, dv, dt, vl_causal)
             if args.cmd in ("bench", "all"):
-                print("=== VARLEN bench（TE FP8 基线，CUPTI device time）===")
+                mode = "fwd+bwd" if args.with_fwd else "pure-bwd"
+                print(f"=== VARLEN bench（{mode}，CUPTI device time）===")
                 timer = CudaTimer(args.warmup, args.repeat)
                 for lengths, H, D, hkv, dv in vspecs:
-                    bench_case_varlen(lengths, H, D, hkv, dv, dt, timer, vl_causal)
+                    bench_case_varlen(lengths, H, D, hkv, dv, dt, timer, vl_causal,
+                                      bwd_only=not args.with_fwd)
         return
 
     if args.shape:
@@ -578,10 +700,11 @@ def main():
             for sh in shapes:
                 dump_case(sh, dt)
         if args.cmd in ("bench", "all"):
-            print(f"=== bench CUPTI device time (dtype={dt}) ===")
+            mode = "fwd+bwd" if args.with_fwd else "pure-bwd"
+            print(f"=== bench CUPTI device time ({mode}, dtype={dt}) ===")
             timer = CudaTimer(args.warmup, args.repeat)
             for sh in shapes:
-                bench_case(sh, dt, timer)
+                bench_case(sh, dt, timer, bwd_only=not args.with_fwd)
 
 
 if __name__ == "__main__":
