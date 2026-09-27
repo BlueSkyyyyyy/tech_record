@@ -577,6 +577,22 @@ smem 冲突 + 低 occ
      于是只能锁 ksplit=1，代价与收益都随形状变号（S256 净赚、大 S 净亏）。** 单/两文件 device
      逐字同源、默认路径数值逐位不变。详见 `docs/03` §59。
 
+38. **P3-4i（第 122 轮，device+host 增量，正结果/opt-in）**：**把 `--det` 扩到 varlen**——
+     落实第 121 轮「下一步候选 ①」的最后一块。关键观察：body 的 DET 分支只依赖
+     `(b,h,mblk,jg,S,nblk)`，**与定长/变长无关**——varlen 的 main kernel 早已把 `S=maxlen`
+     （packed 索引由 `qbase` 定界）传进 body，故**只需 host 传 `nblk=nblk_max`**，device 数学
+     一行未改；真正的新代码是 `dkv_reduce_varlen_kernel<HD,BM>`（按 `cu_seqlens` 的逐序列
+     `len_b/nblk_b` 定界、输出按 packed token 定位）。`launch_bwd_main_det` 尾部加
+     `WGMMA=false` 与 `cu_seqlens/mt_b/mt_m` 默认实参 ⇒ 定长调用逐字不变。**4 个 case
+     （b1 单长 / b4 不齐 / b5 GQA q32kv8）× 单/两文件、ksplit=1/4，两次跑
+     `bitwise dq/dk/dv = 0`**；`DET-vs-atomic` e-7–e-6；`ksplit=1` 时 dQ 逐位等于 atomic。
+     代价（同 binary A/B，含 reduce）**0.71–0.91×**（ksplit=1 最轻）；varlen reduce
+     **274.0µs / DRAM 87.4% / L2 85.3%**（b4_t3840）⇒ **bound 仍是 reduce 的纯 DRAM 带宽**
+     （与 P3-4e/f/g/h 一致）。**教训：把 DET 的 partial 布局选成「定长式 + `S/nblk` 参数化」
+     后，变长只剩「归约端按 `cu_seqlens` 定界」这一处新逻辑——好的布局抽象让第 5 个后端几乎
+     零成本接入。** 单/两文件 device 逐字同源（`sync_onefile_device.py` 核对 `identical: True`），
+     默认路径数值逐位不变（`--no-run --ci` 73 case 全绿）。详见 `docs/03` §60。
+
 
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 

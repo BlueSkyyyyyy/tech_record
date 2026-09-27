@@ -132,6 +132,12 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    ksplit=1 的单写者 `red_add2` 保证 dQ 确定。三 shape × 单/两文件两次跑
    `bitwise dq/dk/dv = 0`、`DET-vs-atomic` dq 恒 0 / dk,dv e-7–e-6；代价 S256H2 1.035×、
    S512H4 0.923×、S1024H2 0.940×，bound 仍是 reduce 的 DRAM 带宽。见 `docs/03` §59。
+   → **`--det` 已扩到 varlen（P3-4i，第一百二十二轮）**：body 的 DET 分支对定长/变长通用，
+   只需 host 传 `S=maxlen/nblk=nblk_max`；新增 `dkv_reduce_varlen_kernel<HD,BM>` 按
+   `cu_seqlens` 的逐序列 `len_b/nblk_b` 定界、输出按 packed token 定位。4 个 case（MHA 单长/
+   不齐/GQA q32kv8）× 单/两文件、ksplit=1/4 两次跑 `bitwise dq/dk/dv = 0`，
+   `DET-vs-atomic` e-7–e-6；代价 0.71–0.91×，bound 仍是 reduce 的 DRAM 带宽（87.4%）。
+   见 `docs/03` §60。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 
