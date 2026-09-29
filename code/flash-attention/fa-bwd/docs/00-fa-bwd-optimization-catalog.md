@@ -258,6 +258,14 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
      `bool FULL`，`grid.x=nblk` 无镜像配对、不做因果掩码）；LSE **42.46→23.94µs（1.77×）**、
      指令 −46.9%，preprocess 0.0401→**0.0226ms**、端到端 1.049×，数值与 cp.async 版仅差
      LSE fp32 求和次序（~1e-5）。见 `docs/03` §95、`docs/08` §5.78。
+     → **varlen full D=128 的 LSE 也上 4D-TMA（O72，第一百六十六轮）**：补齐 F9→O70→O71
+     链漏掉的分支——`run_varlen` 的 full D=128 此前仍走 O54 的 `cp.async` 均衡版。`lse_mma_kernel_bal_tma`
+     加 `cu_seqlens`（packed 定界：`qbase=cu[b]/len=cu[b+1]-qbase`、TMA 行坐标 `qbase+m0/j0`、
+     batch 维恒 0），host 建 `dims={D,T,Hkv,1}` packed 描述符、fp8 varlen 构建加 `-DFA_TMA -lcuda`。
+     数值与 `cp.async` 版**打印逐位相同**、单/两文件一致性 worst 3.815e-6 OK；同 binary A/B
+     `b4_t4096` full **1.181→1.119ms（1.055×）**、不齐 `b4_t3840` **1.472→1.405ms（1.048×）**，
+     LSE ncu **118.3→63.0µs（1.88×）、指令 −46.8%、occ 25.8→35.9%**（issue-bound 的搬运升级）。
+     见 `docs/03` §96、`docs/08` §5.80。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 
