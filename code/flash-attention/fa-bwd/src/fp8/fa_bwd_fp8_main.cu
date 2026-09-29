@@ -326,6 +326,37 @@ static void launch_bwd_wg2(dim3 mg, const unsigned char* q8, const float* qs,
       scale, causal, ksplit);
 }
 
+// F6 第二步：双 warpgroup + wgmma（GEMM1/2）的 BM=128 主 kernel。仅 `-DFA_WGMMA` 构建可用。
+#ifdef FA_WGMMA
+template <int HD>
+static constexpr int wgmma2_smem_bytes() {
+  constexpr int BM = 128, BN = 32;
+  constexpr int PSLD = HD + 8, QTS = BM + 16, DSS2 = BN + 16, PSS = BN + 5;
+  constexpr int kNScale = 3 * BM + 4 * BN;
+  constexpr int QS_SZ = (BM / 8) * (HD / 128) * 1024, KS_SZ = (BN / 8) * (HD / 128) * 1024;
+  constexpr int qp_bytes = (BM / 2) * PSLD * 2, kp_bytes = (BN / 2) * PSLD * 2;
+  // 前 4 块 SW128（Q/dO/K/V）+ Qp/dOp/Kp + dS2 + scales/Ps/Ss + 独立 Ap/dS3 + 1024B 对齐 slack。
+  return 2 * QS_SZ + 2 * KS_SZ + 2 * qp_bytes + kp_bytes + BM * DSS2 +
+         (kNScale + 2 * BM * PSS) * (int)sizeof(float) + 2 * BN * QTS + 1024;
+}
+
+template <int HD>
+static void launch_bwd_wgmma2(dim3 mg, const unsigned char* q8, const float* qs,
+                              const unsigned char* k8, const float* ks,
+                              const unsigned char* v8, const float* vs,
+                              const unsigned char* do8, const float* dos,
+                              const float* delta, const float* lse, float* dq_acc,
+                              float* dk_acc, float* dv_acc, int S, int H, int Hkv,
+                              float scale, int causal, int ksplit) {
+  constexpr int kSmem = wgmma2_smem_bytes<HD>();
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_wgmma2_kernel<HD, 128, 32>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  fa_bwd_fp8_wgmma2_kernel<HD, 128, 32><<<mg, 256, kSmem>>>(
+      q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
+      scale, causal, ksplit);
+}
+#endif  // FA_WGMMA
+
 template <int HD>
 static void launch_lse(dim3 lg, const unsigned char* q8, const float* qs,
                        const unsigned char* k8, const float* ks, float* lse, int S, int H,
@@ -1435,6 +1466,7 @@ int main(int argc, char** argv) {
   int wgmma = 0;
 #endif
   int wg2 = 0;      // O19：1 = 主 kernel 走跨 warpgroup 归约版（BM=128, 2 wg, 256 线程）
+  int wg2wgmma = 0; // F6：1 = BM=128 双 warpgroup 主 kernel 的 GEMM1/2 走 wgmma（SW128）
   int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
   int qfast = 1;      // O14：1 = warp-per-row 向量化量化，0 = 旧 per-row 标量量化（A/B）
   int delta_warp_opt = 1;  // O26：1 = warp-per-row 向量化 delta（默认），0 = 旧 per-row smem 归约（A/B）
@@ -1520,6 +1552,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--kvtma=", 0) == 0) kv_tma = atoi(a.c_str() + 8);
     else if (a == "--kvtma") kv_tma = 1;
     else if (a == "--wg2") wg2 = 1;
+    else if (a == "--wg2wgmma") wg2wgmma = 1;
     else if (a == "--bn64") bn64_opt = 1;
     else if (a.rfind("--cvt=", 0) == 0) cvt_on = atoi(a.c_str() + 6);
     else if (a.rfind("--foldrcp=", 0) == 0) foldrcp_opt = atoi(a.c_str() + 10);
@@ -1899,6 +1932,17 @@ int main(int argc, char** argv) {
 #undef GO2
   };
   auto run_main = [&]() {
+    if (D == 128 && wg2wgmma) {
+#ifdef FA_WGMMA
+      launch_bwd_wgmma2<128>(mg2, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
+                             d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                             ksplit2);
+      return;
+#else
+      fprintf(stderr, "--wg2wgmma 需要 -DFA_WGMMA（sm_90a）构建\n");
+      std::exit(2);
+#endif
+    }
     if (D == 128 && wg2) {
       launch_bwd_wg2<128>(mg2, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
                           d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
@@ -3395,6 +3439,61 @@ int main(int argc, char** argv) {
            maxd(b_dv, a_dv));
     run_main();  // 恢复 CLI 选中路径
   }
+
+#ifdef FA_WGMMA
+  // ---- F6 A/B（D=128）：wg2（BM=128, 2 wg, mma GEMM1/2）vs wgmma2（GEMM1/2 走 wgmma
+  //      + SW128 直读，GEMM3/4/5 仍 mma）。只改 GEMM1/2 的计算通路，数学口径不变。----
+  if (D == 128) {
+    auto run_wg2b = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      launch_bwd_wg2<128>(mg2, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
+                          d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                          ksplit2);
+    };
+    auto run_wg2wg = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      launch_bwd_wgmma2<128>(mg2, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
+                             d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                             ksplit2);
+    };
+    auto bench_sel2 = [&](auto&& fn, float* out) {
+      fn();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) fn();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      CUDA_CHECK(cudaEventElapsedTime(out, ev0, ev1));
+      *out /= iters;
+    };
+    float t_wg2b = 0.f, t_wg2wg = 0.f;
+    bench_sel2(run_wg2b, &t_wg2b);
+    bench_sel2(run_wg2wg, &t_wg2wg);
+    std::vector<float> a_dq(nq), a_dk(nkv), a_dv(nkv), b_dq(nq), b_dk(nkv), b_dv(nkv);
+    run_wg2b();
+    CUDA_CHECK(cudaMemcpy(a_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(a_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    run_wg2wg();
+    CUDA_CHECK(cudaMemcpy(b_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(b_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    auto maxd2 = [](const std::vector<float>& x, const std::vector<float>& y) {
+      double m = 0.0;
+      for (size_t i = 0; i < x.size(); ++i)
+        m = std::max(m, std::fabs((double)x[i] - (double)y[i]));
+      return m;
+    };
+    printf("[F6 A/B] main wg2(mma GEMM1/2) %.4f ms | wg2wgmma(GEMM1/2 wgmma) %.4f ms (%.3fx) | "
+           "max_abs(wg2wg-vs-wg2) dq/dk/dv=%.3e/%.3e/%.3e\n",
+           t_wg2b, t_wg2wg, t_wg2b / t_wg2wg, maxd2(b_dq, a_dq), maxd2(b_dk, a_dk),
+           maxd2(b_dv, a_dv));
+    run_main();  // 恢复 CLI 选中路径
+  }
+#endif
 
   // ---- O21 A/B（D=128）：主 kernel KV tile BN=32（3 CTA/SM）vs BN=64（2 CTA/SM，tile 数减半）。
   //      同一 session 计时 + 逐元素对拍（只改 KV 分块宽度，数学口径不变）。----

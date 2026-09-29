@@ -2772,15 +2772,39 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       各算 BM=128 的一半（A 描述符 +8192B 偏移）：GEMM1（e4m3×e4m3）与 GEMM2（e5m2×e4m3）
       **max_abs=0.000e+00**；SASS **4×`QGMMA.64x64x32.E4E3` + 4×`QGMMA...E5E3`，无 HMMA/LDSM**；
       ncu **90 regs**/49.15KB（远低于 wg2 的 217）。⇒ 双 WG wgmma 几何成立。
-      **剩余（F6 主体）**：Q/K/V/dO 走 4D-TMA + SW128，GEMM1/2 换 wgmma、3/4/5 仍 mma；
-      smem 压到 **≤116224B** 且 regs **≤128** 才能 2 CTA/SM（wg2 现 131.33KB/217regs，缺口
-      15.1KB/89regs；路径 = TMA 去 `Qp/dOp` 寄存器构造 + `Ps/Ss` 二选一驻留）。见 `docs/03` §75。
+      → **第二步已完成（第一百四十一轮，`--wg2wgmma`，正确但中性）**：把冒烟落进主 kernel——
+      新增 `fa_bwd_fp8_wgmma2_kernel`（= `wg2` 的 GEMM1/2 换 `wgmma.m64n32k32` 直读 SW128，
+      Qp/dOp/Kp 由 SW128 重建，fold 与 GEMM3/4/5 逐字沿用；Ap/dS3 改独立缓冲）。数值
+      vs ref S512 2.426/2.996/3.713e-1、S4096 2.635/2.760/3.325e-1（fp8 噪声）、单/两文件
+      逐位一致。**性能中性**：相对 wg2(mma) 仅 **1.021×（S512）/1.044×（S4096）**，仍只有默认
+      BM=64 档的 0.66–0.68×。ncu：**212 regs / 136.4KB → 1 CTA/SM**（wg2 217/131.3KB），
+      occ 12.5%、`wait 1.67+long 1.49`。SASS `16×QGMMA + 1568×HMMA`。**结论**：子模块 90 regs
+      不代表整 kernel；F6 要 2 CTA/SM 的**最大障碍是 Qp/dOp（34.8KB smem）**，下一小步应先去它
+      （SW128 tile 直读 `ldmatrix`）而非先换 GEMM1/2 指令。见 `docs/03` §76、`docs/08` §5.55。
+      **剩余（F6 主体）**：Q/K/V/dO 走 4D-TMA + SW128，**去掉 Qp/dOp（从 SW128 直读 B）**、
+      GEMM1/2 wgmma、3/4/5 仍 mma；smem 压到 **≤116224B** 且 regs **≤128** 才能 2 CTA/SM。见 `docs/03` §75/§76。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百四十轮）**：**F6 第一步——双 warpgroup（256 线程）fp8 wgmma 冒烟（BM=128 几何
+> **最新（第一百四十一轮）**：**F6 第二步——双 warpgroup 主 kernel 的 GEMM1/2 wgmma 化
+> （`--wg2wgmma`，正确但中性）**。把第 140 轮冒烟落进主 kernel：新增
+> `fa_bwd_fp8_wgmma2_kernel`（`wg2` 的 GEMM1/2 换 `wgmma.m64n32k32` 直读 SW128，Qp/dOp/Kp
+> 由 SW128 重建，fold 与 GEMM3/4/5 逐字沿用；Ap/dS3 改独立缓冲）。数值 vs ref S512
+> 2.426/2.996/3.713e-1、S4096 2.635/2.760/3.325e-1（fp8 噪声），单/两文件逐位一致；
+> `--ci --dtype fp8 --fixed-only` **rc=0**（gate worst=1.049e-5、`--check docs/04` OK 194 行）。
+> **性能中性**：相对 wg2(mma) 仅 1.021×（S512）/1.044×（S4096），仍为默认 BM=64 档的
+> 0.66–0.68×；ncu **212 regs / 136.4KB → 1 CTA/SM**、occ 12.5%、`wait 1.67+long 1.49`。
+> **结论**：冒烟的 90 regs 只是 GEMM1/2 子系统；F6 的最大障碍是 **Qp/dOp（34.8KB smem）**。
+> 详见「当前进度 第一百四十一轮」、`docs/03` §76、`docs/08` §5.55；原始输出
+> `src/fp8/fa_bwd_fp8_p141_wg2wgmma_*`。
+> **下一步候选**：① **F6 主体（修正后的最小步）**——**去掉 Qp/dOp**（从 SW128 的 Q/dO tile
+> 直接 `ldmatrix` 读出 GEMM3/4 的 B，kernel-opt 42 篇已证 SW128 16B chunk 可转置读），把 smem
+> 压到 ≤116224B 冲 2 CTA/SM；再加 Q/K/V/dO 的 4D-TMA；② 其余候选（dK/dV-over-KV、
+> GEMM3/4/5 wgmma、ksplit/LSE）均已判决/到顶，不再候选；③ DET 仅 opt-in。
+>
+> **（第一百四十轮）**：**F6 第一步——双 warpgroup（256 线程）fp8 wgmma 冒烟（BM=128 几何
 > 钉死）**。落实第 139 轮 F6：新增 `src/fp8/fa_bwd_fp8_wgmma2_smoke.cu`，在 **256 线程 = 2 个
 > warpgroup** 下用 K-major SW128 描述符跑 `wgmma.m64n64k32`，每个 WG 各算 BM=128 的一半
 > （第 2 个 WG 的 A 描述符 +`(64/8)×1024=8192B` 偏移）：GEMM1 `S=Q·Kᵀ`（e4m3×e4m3）与 GEMM2
@@ -5456,6 +5480,39 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   - 原始输出 `src/fp8/fa_bwd_fp8_wgmma2_smoke.out.txt`、`..._sass.out.txt`、`..._ncu.out.txt`、
     `src/fp8/fa_bwd_fp8_p140_ci_fixed.out.txt`；文档 `docs/03` §75。
   - **下一步候选**：① **F6 主体**（见上「F6 剩余」）；② 其余候选均已判决/到顶，不再候选。
+
+- 2026-09-29（第一百四十一轮）：**F6 第二步——双 warpgroup 主 kernel 的 GEMM1/2 wgmma 化
+  （`--wg2wgmma`，正确但中性）**（默认路径一行未改；新增 opt-in kernel）。
+  - 动机：第 140 轮冒烟证明「256 线程 / 2 WG 下 SW128 fp8 `wgmma.m64n32k32`，每 WG 算
+    BM=128 的一半」几何成立、90 regs。本轮把它落进主 kernel。
+  - **实现**：新增 `fa_bwd_fp8_wgmma2_kernel<HD=128,BM=128,BN=32>`（`#ifdef FA_WGMMA`）=
+    `fa_bwd_fp8_wg2_kernel` 的 GEMM1/2 换 wgmma：Q/dO/K/V 存 **SW128 K-major**（描述符直读），
+    Qp/dOp/Kp 由 SW128 `__byte_perm` 重建；**fold 与 GEMM3/4/5 逐字沿用 wg2**；GEMM1/2 每 WG
+    各发 `wgmma.m64n32k32`（A 描述符 `+8192B`），累加器映射
+    `row=wg*64+wl*16+g+(q>=2?8:0)`、`col=j*8+c2+(q&1)`；Ap/dS3 从「别名 Ks/Vs」改独立缓冲
+    （SW128 Ks/Vs 各 4096B < BN×QTS=4608B）。host 加 `--wg2wgmma`（复用 `mg2`/ksplit2 自动档），
+    单/两文件同步（`sync_onefile_device.py`，device 区逐字一致）。加 `[F6 A/B]` 同 session 计时。
+  - **数值（vs fp32 ref，causal）**：S512 **2.426/2.996/3.713e-1**（默认 2.426/2.972/3.733e-1）；
+    S4096 **2.635/2.760/3.325e-1**（默认 2.635/2.644/3.216e-1）——fp8 噪声、无系统误差；
+    单文件与两文件逐位一致。`[F6 A/B]` wg2wg-vs-wg2 dq/dk/dv S512 4.5e-2/5.4e-2/5.7e-2、
+    S4096 4.0e-2/1.5e-1/2.6e-2（与既有 `[O9c-2 A/B]` wgmma-vs-mma 同量级，来自 GEMM1/2 次序）。
+  - **性能（同 session event，main-only）**：wg2(mma) → wg2wgmma = S512 0.1101→**0.1078ms
+    （1.021×）**、S4096 2.9311→**2.8081ms（1.044×）**；但默认 BM=64 kvtma 档 S512 0.0717 /
+    S4096 1.911ms ⇒ wg2wgmma 仍只有默认的 **0.66–0.68×**。
+  - **ncu（S512，`--set full`）**：**212 regs / smem 136.4KB**、`Block Limit Registers=1`/
+    `Shared Mem=1`、theoretical=achieved **occ 12.50%（1 CTA/SM）**、Duration 109µs、
+    DRAM 4.67% / L1TEX 35.5% / L2 29.2% / Compute 25.0%、No Eligible 70.5%、
+    stall `wait 1.67+long_scoreboard 1.49+short 0.76`。SASS：**16×QGMMA.E4M3.E4M3 +
+    16×QGMMA.E5M2.E4M3 + 1568×HMMA + 766×LDSM**（GEMM3/4/5 仍 mma）。
+  - **结论**：GEMM1/2 wgmma 化本身为正但太小（1.02–1.04× over wg2）；冒烟的 90 regs 只在
+    「只有 GEMM1/2」成立，叠上 `dqacc`+fold+3/4/5 后整 kernel 仍 212 regs/136KB → 1 CTA/SM，
+    延迟/occupancy bound 未变。且本轮把 smem 推高（131→136KB）。**F6 要 2 CTA/SM 的最大障碍
+    是 Qp/dOp（34.8KB）** ⇒ 下一小步应「从 SW128 直读 B、去掉 Qp/dOp」。
+  - 原始输出 `src/fp8/fa_bwd_fp8_p141_wg2wgmma_{s512,s4096}.out.txt`、
+    `..._p141_onefile_wg2wgmma_s512.out.txt`、`..._p141_ncu_wg2wgmma_s512.out.txt`、
+    `..._p141_ci_fixed.out.txt`；文档 `docs/03` §76、`docs/08` §5.55。
+  - **下一步候选**：① **F6 主体（修正后最小步）= 去 Qp/dOp（SW128 直读 `ldmatrix`）压 smem
+    ≤116224B + Q/K/V/dO 的 4D-TMA**；② 其余候选均已判决/到顶；③ DET 仅 opt-in。
 
 ## 灵感 / backlog
 

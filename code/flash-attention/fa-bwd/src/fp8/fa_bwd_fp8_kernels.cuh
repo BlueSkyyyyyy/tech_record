@@ -3847,6 +3847,367 @@ fa_bwd_fp8_wg2_kernel(const unsigned char* __restrict__ q8,
 }
 
 // =============================================================================
+// 3c) fa_bwd_fp8_wgmma2_kernel —— F6 第二步：双 warpgroup（256 线程）+ wgmma 的
+//     BM=128 主 kernel（GEMM1/2 走 `wgmma.m64n32k32` 直读 SW128，GEMM3/4/5 仍 mma）。
+// =============================================================================
+// 动机（ROADMAP『fp8 专项冲刺』F6）：默认 fp8 main 的墙是 dK/dV 跨 CTA 的 L2 `red`
+//   （114.5M 扇区、占 L2 流量 ~74%）。唯一真杠杆是把 BM 64→128，让每个 KV 元素被一半的
+//   CTA 贡献。已有 `fa_bwd_fp8_wg2_kernel`（BM=128、2 warpgroup、mma + 全同步载入）确实把
+//   `red` 砍半（58.2M），但它 217 regs / 131KB smem → 1 CTA/SM、L2 只到 20.4%，反而慢
+//   0.53×。F6 的解法是「双 warpgroup + wgmma（+后续 TMA）」用 Hopper 原语把寄存器/指令
+//   压下来。第 140 轮冒烟 `fa_bwd_fp8_wgmma2_smoke.cu` 已证明双 WG wgmma 几何成立、
+//   SASS 无 HMMA/LDSM、90 regs。本 kernel 是它的**主 kernel 化**：
+//     * Q/dO/K/V 存 **SW128 K-major**（wgmma 描述符直读），Qp/dOp/Kp 由 SW128 重建
+//       （供 GEMM3/4/5 的 `ldmatrix.x2.trans`）；fold 与 GEMM3/4/5 逐字沿用 wg2。
+//     * GEMM1/2：每个 WG 各跑 `wgmma.m64n32k32`（A 描述符按 WG +`(64/8)*1024=8192B`），
+//       累加器映射 `row=wg*64+wl*16+g+(q>=2?8:0)`、`col=j*8+c2+(q&1)`，epilogue 直接写
+//       Ps/Ss；rowwise scale 仍在 epilogue 折算（口径与 wg2 逐项一致，仅 fp 归约次序略变）。
+//     * Ap/dS3 从 wg2 的「别名 Ks/Vs」改为**独立缓冲**（SW128 的 Ks/Vs 只有 4096B/块，
+//       放不下 BN×QTS=4608B，且 Vs 在 GEMM2 时仍被读）。
+// 这是 F6 的**中间态**（未上 TMA），用于量「GEMM1/2 wgmma 化」单独能省多少寄存器/时间；
+// 默认路径一行未改（仅 `--wg2wgmma` opt-in）。
+#ifdef FA_WGMMA
+template <int HD, int BM = 128, int BN = 32>
+__global__ void __launch_bounds__(256, 1)
+fa_bwd_fp8_wgmma2_kernel(const unsigned char* __restrict__ q8,
+                         const float* __restrict__ qs,
+                         const unsigned char* __restrict__ k8,
+                         const float* __restrict__ ks,
+                         const unsigned char* __restrict__ v8,
+                         const float* __restrict__ vs,
+                         const unsigned char* __restrict__ do8,
+                         const float* __restrict__ dos,
+                         const float* __restrict__ delta,
+                         const float* __restrict__ lse,
+                         float* __restrict__ dq_acc, float* __restrict__ dk_acc,
+                         float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
+                         int causal, int ksplit) {
+  static_assert(HD == 128, "wgmma2 目前只做 HD=128");
+  constexpr int TH = 256;
+  constexpr int PSLD = HD + 8;   // 136
+  constexpr int QTS = BM + 16;   // 144
+  constexpr int DSS2 = BN + 16;  // 48
+  constexpr int PSS = BN + 5;    // 37
+  constexpr int kNScale = 3 * BM + 4 * BN;
+  constexpr int QS_SZ = (BM / 8) * (HD / 128) * 1024;  // 16384
+  constexpr int KS_SZ = (BN / 8) * (HD / 128) * 1024;  // 4096
+  constexpr int qp_bytes = (BM / 2) * PSLD * 2;
+  constexpr int kp_bytes = (BN / 2) * PSLD * 2;
+
+  extern __shared__ __align__(16) char smem[];
+  // wgmma 的 SW128 描述符要求 1024B 对齐 ⇒ 手动对齐动态 smem 基址（host 多给 1024B）。
+  char* base = smem;
+  {
+    const uint32_t a0 = smem_u32(smem);
+    base = smem + ((1024u - (a0 & 1023u)) & 1023u);
+  }
+  unsigned char* Qs  = reinterpret_cast<unsigned char*>(base);
+  unsigned char* dOs = Qs + QS_SZ;
+  unsigned char* Ks  = dOs + QS_SZ;
+  unsigned char* Vs  = Ks + KS_SZ;
+  uint16_t* Qp  = reinterpret_cast<uint16_t*>(Vs + KS_SZ);
+  uint16_t* dOp = reinterpret_cast<uint16_t*>(reinterpret_cast<unsigned char*>(Qp) + qp_bytes);
+  uint16_t* Kp  = reinterpret_cast<uint16_t*>(reinterpret_cast<unsigned char*>(dOp) + qp_bytes);
+  unsigned char* dS2 = reinterpret_cast<unsigned char*>(Kp) + kp_bytes;
+  float* scales = reinterpret_cast<float*>(dS2 + BM * DSS2);
+  float* Ps = scales + kNScale;
+  float* Ss = Ps + BM * PSS;
+  // F6：Ap/dS3 独立缓冲（wg2 里别名 Ks/Vs；SW128 下 Ks/Vs 各 4096B 放不下 BN×QTS=4608B）。
+  unsigned char* Ap  = reinterpret_cast<unsigned char*>(Ss + BM * PSS);
+  unsigned char* dS3 = Ap + BN * QTS;
+  float* qs_s = scales;
+  float* ks_s = qs_s + BM;
+  float* vs_s = ks_s + BN;
+  float* dos_s = vs_s + BN;
+  float* sA = dos_s + BM;
+  float* sds2 = sA + BN;
+  float* sds3 = sds2 + BM;
+
+  const int mblk = blockIdx.x / ksplit, part = blockIdx.x % ksplit;
+  const int h = blockIdx.y, b = blockIdx.z;
+  const int hkv = h / (H / Hkv);
+  const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  const int wg = wid >> 2;              // 0/1：两个 warpgroup
+  const int wl = wid & 3;               // warpgroup 内 warp 号
+  const int g = lane >> 2, c2 = (lane & 3) * 2;
+  const int m0 = mblk * BM;
+
+  const int ncols = causal ? min(S, m0 + BM) : S;
+  const int ntiles = (ncols + BN - 1) / BN;
+  const int nt_begin = part * ntiles / ksplit;
+  const int nt_end = (part + 1) * ntiles / ksplit;
+  if (nt_end <= nt_begin) return;
+
+  // ---- 载入 Q/dO 为 SW128（供 wgmma 直读）+ 重建 Qp/dOp（供 GEMM3/4 的 ldmatrix.trans）----
+  {
+    const int nd4 = HD / 4;
+    for (int u = tid; u < (BM / 2) * nd4; u += TH) {
+      int rp = u / nd4, dq = (u % nd4) * 4;
+      int qa = m0 + rp * 2, qb = m0 + rp * 2 + 1;
+      uint32_t q0 = 0, q1 = 0, o0 = 0, o1 = 0;
+      if (qa < S) {
+        size_t idx = (((size_t)(b * S + qa)) * H + h) * HD + dq;
+        q0 = *reinterpret_cast<const uint32_t*>(q8 + idx);
+        o0 = *reinterpret_cast<const uint32_t*>(do8 + idx);
+      }
+      if (qb < S) {
+        size_t idx = (((size_t)(b * S + qb)) * H + h) * HD + dq;
+        q1 = *reinterpret_cast<const uint32_t*>(q8 + idx);
+        o1 = *reinterpret_cast<const uint32_t*>(do8 + idx);
+      }
+      *reinterpret_cast<uint32_t*>(Qs + sw128_off_fp8(rp * 2, dq, HD)) = q0;
+      *reinterpret_cast<uint32_t*>(Qs + sw128_off_fp8(rp * 2 + 1, dq, HD)) = q1;
+      *reinterpret_cast<uint32_t*>(dOs + sw128_off_fp8(rp * 2, dq, HD)) = o0;
+      *reinterpret_cast<uint32_t*>(dOs + sw128_off_fp8(rp * 2 + 1, dq, HD)) = o1;
+      uint32_t* qpw = reinterpret_cast<uint32_t*>(Qp + rp * PSLD + dq);
+      qpw[0] = __byte_perm(q0, q1, 0x5140);
+      qpw[1] = __byte_perm(q0, q1, 0x7362);
+      uint32_t* opw = reinterpret_cast<uint32_t*>(dOp + rp * PSLD + dq);
+      opw[0] = __byte_perm(o0, o1, 0x5140);
+      opw[1] = __byte_perm(o0, o1, 0x7362);
+    }
+  }
+  if (tid < BM) {
+    int qi = m0 + tid;
+    qs_s[tid] = (qi < S) ? qs[((size_t)(b * S + qi)) * H + h] : 1.f;
+    dos_s[tid] = (qi < S) ? dos[((size_t)(b * S + qi)) * H + h] : 1.f;
+  }
+  // 首个 tile 的 K/V 直接读成 SW128 + 重建 Kp（`SW=true` 分支）。
+  kv_load_pair<HD, BN, true, TH>(k8, v8, nt_begin * BN, S, Hkv, hkv, b * S, tid, Ks, Vs, Kp,
+                                 PSLD, PSLD);
+  if (tid < BN) {
+    int jg = nt_begin * BN + tid;
+    ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
+    vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
+  }
+  __syncthreads();
+
+  // ---- PREL：本线程负责行的 LSE/D 预装寄存器（wgmma 行布局）----
+  float lse_r[2], del_r[2];
+#pragma unroll
+  for (int t = 0; t < 2; ++t) {
+    const int r = wg * 64 + wl * 16 + g + (t ? 8 : 0);
+    const int qi = m0 + r;
+    const size_t idx = ((size_t)(b * S + qi)) * H + h;
+    const bool ok = qi < S;
+    lse_r[t] = ok ? lse[idx] : 0.f;
+    del_r[t] = ok ? delta[idx] : 0.f;
+  }
+
+  // ---- dQ 寄存器累加（O7）：GEMM5 每 warp 32 行 × 64 列 = 2×8×4。----
+  float dqacc[2][8][4];
+#pragma unroll
+  for (int i = 0; i < 2; ++i)
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+      for (int q = 0; q < 4; ++q) dqacc[i][j][q] = 0.f;
+
+  for (int nt = nt_begin; nt < nt_end; ++nt) {
+    const int j0 = nt * BN;
+    // ---- (1) S = scale·QKᵀ → P=exp(S−LSE)； (2) dP = dO·Vᵀ → dS = P∘(dP−D) ----
+    //   两条 wgmma 一起发、统一 wait0；每个 warpgroup 各算自己 64 行的 S/dP。
+    {
+      float sacc[16], dpacc[16];
+      const char* qa_sw = reinterpret_cast<const char*>(Qs) + (size_t)wg * ((64 / 8) * 1024);
+      const char* doa_sw = reinterpret_cast<const char*>(dOs) + (size_t)wg * ((64 / 8) * 1024);
+      wgmma_mn32_issue<0>(qa_sw, reinterpret_cast<const char*>(Ks), HD, sacc);
+      wgmma_mn32_issue<1>(doa_sw, reinterpret_cast<const char*>(Vs), HD, dpacc);
+      wgmma_wait0_fp8();
+      float pval[16];
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          int r = wg * 64 + wl * 16 + g + (q >= 2 ? 8 : 0);
+          int c = j * 8 + c2 + (q & 1);
+          int qi = m0 + r, jg = j0 + c;
+          float p = 0.f;
+          if (qi < S && jg < S && !(causal && jg > qi)) {
+            float sval = sacc[j * 4 + q] * scale * qs_s[r] * ks_s[c];
+            p = fexp(sval - lse_r[q >= 2 ? 1 : 0]);
+          }
+          pval[j * 4 + q] = p;
+          Ps[r * PSS + c] = p;
+        }
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          int r = wg * 64 + wl * 16 + g + (q >= 2 ? 8 : 0);
+          int c = j * 8 + c2 + (q & 1);
+          int qi = m0 + r;
+          float dpv = dpacc[j * 4 + q] * dos_s[r] * vs_s[c];
+          float del = del_r[q >= 2 ? 1 : 0];
+          if (qi >= S) del = 0.f;
+          Ss[r * PSS + c] = pval[j * 4 + q] * (dpv - del);
+        }
+    }
+    __syncthreads();
+
+    // ---- fold：把 Ps/Ss（全 BM=128 行）量化成 GEMM3/4/5 的操作数并乘 rowwise scale ----
+    {
+      // Ap[j][m]=P[m][j]*dos[m] (e4m3)，dS3[j][m]=dS[m][j]*qs[m] (e5m2)：每 warp 4 个 j，
+      //   8 个 lane 一组沿 m（每组 16 个 m）。
+      const int jj = lane >> 3, sub = lane & 7;
+      const int j = wid * 4 + jj;   // 0..31
+      float amaxA = 0.f, amax3 = 0.f;
+#pragma unroll
+      for (int t = 0; t < 16; ++t) {
+        int m = sub * 16 + t;
+        amaxA = fmaxf(amaxA, fabsf(Ps[m * PSS + j] * dos_s[m]));
+        amax3 = fmaxf(amax3, fabsf(Ss[m * PSS + j] * qs_s[m]));
+      }
+      amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 1));
+      amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 2));
+      amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 4));
+      amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 1));
+      amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 2));
+      amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 4));
+      float scA = (amaxA > 0.f) ? amaxA / kE4M3Max : 1.f;
+      float sc3 = (amax3 > 0.f) ? amax3 / kE5M2Max : 1.f;
+      if (sub == 0) { sA[j] = scA; sds3[j] = sc3; }
+      scA = __shfl_sync(0xffffffffu, scA, jj * 8);
+      sc3 = __shfl_sync(0xffffffffu, sc3, jj * 8);
+      uint32_t pa[4] = {0, 0, 0, 0}, d3[4] = {0, 0, 0, 0};
+#pragma unroll
+      for (int t4 = 0; t4 < 4; ++t4)
+#pragma unroll
+        for (int tt = 0; tt < 4; ++tt) {
+          int m = sub * 16 + t4 * 4 + tt;
+          pa[t4] |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
+          d3[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
+        }
+      *reinterpret_cast<uint4*>(Ap + j * QTS + sub * 16) = make_uint4(pa[0], pa[1], pa[2], pa[3]);
+      *reinterpret_cast<uint4*>(dS3 + j * QTS + sub * 16) = make_uint4(d3[0], d3[1], d3[2], d3[3]);
+    }
+    {
+      // dS2[m][j] = dS[m][j]*ks[j] (e5m2)：每 warp 16 行 × 2 lane；8 warp 覆盖 128 行。
+      const int ml = lane >> 1, sub2 = lane & 1;
+      const int m = wid * 16 + ml;
+      float amax2 = 0.f;
+#pragma unroll
+      for (int t = 0; t < 16; ++t) {
+        int j = sub2 * 16 + t;
+        amax2 = fmaxf(amax2, fabsf(Ss[m * PSS + j] * ks_s[j]));
+      }
+      amax2 = fmaxf(amax2, __shfl_xor_sync(0xffffffffu, amax2, 1));
+      float sc2 = (amax2 > 0.f) ? amax2 / kE5M2Max : 1.f;
+      if (sub2 == 0) sds2[m] = sc2;
+      sc2 = __shfl_sync(0xffffffffu, sc2, ml * 2);
+      uint32_t d2[4] = {0, 0, 0, 0};
+#pragma unroll
+      for (int t4 = 0; t4 < 4; ++t4)
+#pragma unroll
+        for (int tt = 0; tt < 4; ++tt) {
+          int j = sub2 * 16 + t4 * 4 + tt;
+          d2[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * ks_s[j] / sc2) << (8 * tt);
+        }
+      *reinterpret_cast<uint4*>(dS2 + m * DSS2 + sub2 * 16) = make_uint4(d2[0], d2[1], d2[2], d2[3]);
+    }
+    __syncthreads();
+
+    // ---- (3) dV = Pᵀ·dO：A=Ap[j][m]（全 BM=128 重叠），B=dOp 配对布局 ----
+    {
+      float acc[1][4][4];
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
+      mma_block_bt<16, 32, BM, E4E5>(Ap, QTS, dOp, PSLD, acc, wg, wl, lane, 0);
+      const int r0 = wg * 16, c0 = wl * 32;
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; q += 2) {
+          int r = r0 + g + (q >= 2 ? 8 : 0);
+          int c = c0 + j * 8 + c2;
+          int jg = j0 + r;
+          if (jg < S)
+            red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                     acc[0][j][q] * sA[r], acc[0][j][q + 1] * sA[r]);
+        }
+    }
+    // ---- (4) dK = scale·dSᵀ·Q：A=dS3[j][m]，B=Qp 配对布局 ----
+    {
+      float acc[1][4][4];
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
+      mma_block_bt<16, 32, BM, E5E4>(dS3, QTS, Qp, PSLD, acc, wg, wl, lane, 0);
+      const int r0 = wg * 16, c0 = wl * 32;
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; q += 2) {
+          int r = r0 + g + (q >= 2 ? 8 : 0);
+          int c = c0 + j * 8 + c2;
+          int jg = j0 + r;
+          if (jg < S)
+            red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                     acc[0][j][q] * sds3[r] * scale, acc[0][j][q + 1] * sds3[r] * scale);
+        }
+    }
+    // ---- (5) dQ += scale·dS·K：A=dS2[m][j]（全 BM=128 行），B=Kp 配对布局 ----
+    {
+      float acc[2][8][4];
+#pragma unroll
+      for (int i = 0; i < 2; ++i)
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+      const int wm = wid >> 1, wn = wid & 1;
+      mma_block_bt<32, 64, BN, E5E4>(dS2, DSS2, Kp, PSLD, acc, wm, wn, lane, 0);
+      const int r0 = wm * 32, c0 = wn * 64;
+#pragma unroll
+      for (int i = 0; i < 2; ++i)
+#pragma unroll
+        for (int j = 0; j < 8; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; q += 2) {
+            int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+            int c = c0 + j * 8 + c2;
+            dqacc[i][j][q] += acc[i][j][q] * sds2[r] * scale;
+            dqacc[i][j][q + 1] += acc[i][j][q + 1] * sds2[r] * scale;
+          }
+    }
+    __syncthreads();
+    // 载入下一 tile 的 K/V（本轮 GEMM 已读完 smem）
+    if (nt + 1 < nt_end) {
+      kv_load_pair<HD, BN, true, TH>(k8, v8, (nt + 1) * BN, S, Hkv, hkv, b * S, tid, Ks, Vs, Kp,
+                                     PSLD, PSLD);
+      if (tid < BN) {
+        int jg = (nt + 1) * BN + tid;
+        ks_s[tid] = (jg < S) ? ks[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
+        vs_s[tid] = (jg < S) ? vs[((size_t)(b * S + jg)) * Hkv + hkv] : 1.f;
+      }
+      __syncthreads();
+    }
+  }
+
+  // ---- dQ flush（每 CTA 每元素一次）----
+  {
+    const int wm = wid >> 1, wn = wid & 1;
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; q += 2) {
+          int r = wm * 32 + i * 16 + g + (q >= 2 ? 8 : 0);
+          int c = wn * 64 + j * 8 + c2;
+          int qi = m0 + r;
+          if (qi < S)
+            red_add2(dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c, dqacc[i][j][q],
+                     dqacc[i][j][q + 1]);
+        }
+  }
+}
+#endif  // FA_WGMMA
+
+// =============================================================================
 // 4) convert：fp32 累加缓冲 -> 输出（本版直接 fp32 拷贝）
 // =============================================================================
 // O14b：fp32→fp32 拷贝向量化 `float4`（旧的逐元素 grid-stride 只 ~1.4TB/s，
