@@ -390,6 +390,367 @@ fp8_kvowner_dkv_kernel(const unsigned char* __restrict__ q8, const float* __rest
 }
 
 // =============================================================================
+// F7 第四步：KV-owner dK/dV 原型 + **Q/dO staging 的 cp.async 双缓冲重叠**
+// =============================================================================
+// 动机（ROADMAP 第一百五十轮「下一步候选 ①/②」）：第 150 轮的 KV-owner mma 原型虽然
+// `red=0`，但每个 query 块的 Q/dO staging 是**同步全局读 + `__syncthreads`**，全局延迟
+// 串在 GEMM1 之前（ncu `long_scoreboard`）；且每次迭代的 staging 无法与上一次迭代的
+// GEMM 重叠。本变体把 Q/dO 的 staging 换成 **`cp.async.cg` 16B 双缓冲流水**：prologue 发
+// stage0，循环里先 issue 下一 query 块的 stage、再 `wait_group 1` 等当前 stage，然后
+// 在循环体里算 5 个 GEMM——把全局读延迟藏到上一块的 compute 后面。
+//
+// 代价：staging 缓冲（Qs/dOs/Qp/dOp）翻倍 ⇒ smem 70144→105984B ⇒ 1 CTA/SM 的 3 档降到
+// **2 CTA/SM**。本变体就是用来做「重叠收益 vs occupancy 损失」的同 binary A/B。
+//
+// 数值口径与第 150 轮原型**完全一致**（同一量化/折算/mma 布局），只改搬运时序。
+template <int HD, int BM, int BN>
+__global__ void __launch_bounds__(THREADS, 2)
+fp8_kvowner_dkv_pipe_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
+                            const unsigned char* __restrict__ k8, const float* __restrict__ ks,
+                            const unsigned char* __restrict__ v8, const float* __restrict__ vs,
+                            const unsigned char* __restrict__ do8, const float* __restrict__ dos,
+                            const float* __restrict__ lse, const float* __restrict__ delta,
+                            float* __restrict__ dk, float* __restrict__ dv, int S, int H, float scale,
+                            int causal) {
+  using Cfg = Fp8Cfg<HD, BM, BN>;
+  constexpr int ASLD = Cfg::ASLD;
+  constexpr int PSLD = Cfg::PSLD;
+  constexpr int QTS = Cfg::QTS;
+  constexpr int PSS = Cfg::PSS;
+  constexpr int NWM = 2, NWAR = 2;
+  constexpr int NTW = NWAR * 64;
+  constexpr int GM1 = BM / NWM, GN1 = BN / NWAR;
+  constexpr int MTM = GM1 / 16, MTN = GN1 / 8;
+  constexpr int GM34 = BN / NWM, GN34 = NTW / NWAR;
+  constexpr int MTM34 = GM34 / 16, NTM34 = GN34 / 8;
+  constexpr int NTFOLD = BN / 32;
+  constexpr int STAGES = 2;
+  static_assert(HD == 128 && BM == 64 && BN == 32, "本原型固定 HD=128/BM=64/BN=32");
+
+  constexpr int sz_Ks = BN * ASLD;
+  constexpr int sz_Vs = BN * ASLD;
+  constexpr int sz_Q = BM * ASLD;
+  constexpr int sz_Qp = (BM / 2) * PSLD * (int)sizeof(uint16_t);
+  constexpr int sz_Ap = BN * QTS;
+  constexpr int sz_Ps = BM * PSS * (int)sizeof(float);
+
+  extern __shared__ __align__(16) char smem[];
+  int off = 0;
+  unsigned char* Ks = reinterpret_cast<unsigned char*>(smem + off); off += sz_Ks;
+  unsigned char* Vs = reinterpret_cast<unsigned char*>(smem + off); off += sz_Vs;
+  // staging：[stage][Qs|dOs|Qp|dOp]。用「基址 + 标量偏移」而非指针数组（运行期下标的
+  // 指针数组会被推到 local memory，第 151 轮实测把 regs 顶到 243）。
+  constexpr int STG = sz_Q + sz_Q + sz_Qp + sz_Qp;
+  unsigned char* STG_base = reinterpret_cast<unsigned char*>(smem + off);
+  off += STAGES * STG;
+  unsigned char* Ap = reinterpret_cast<unsigned char*>(smem + off); off += sz_Ap;
+  unsigned char* dS3 = reinterpret_cast<unsigned char*>(smem + off); off += sz_Ap;
+  float* Ps = reinterpret_cast<float*>(smem + off); off += sz_Ps;
+  float* Ss = reinterpret_cast<float*>(smem + off); off += sz_Ps;
+  float* scales = reinterpret_cast<float*>(smem + off);
+  float* qs_s = scales;
+  float* dos_s = qs_s + BM;
+  float* ks_s = dos_s + BM;
+  float* vs_s = ks_s + BN;
+  float* sA = vs_s + BN;
+  float* sds3 = sA + BN;
+
+  const int j0 = blockIdx.x * BN;
+  const int h = blockIdx.y;
+  const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  const int wr = wid / NWAR, wc = wid % NWAR;
+  const int g = lane >> 2, c2 = (lane & 3) * 2;
+  const int nd4 = HD / 4;
+
+  // ---- 拥有的 K/V 行块：只从 global 读一次常驻 smem（同第 150 轮原型）----
+  for (int u = tid; u < (BN / 2) * nd4; u += THREADS) {
+    const int rp = u / nd4, dq = (u % nd4) * 4;
+    const int jr = j0 + rp * 2;
+    uint32_t k0 = 0, k1 = 0, v0 = 0, v1 = 0;
+    if (jr < S) {
+      size_t i0 = (((size_t)jr) * H + h) * HD + dq;
+      k0 = *reinterpret_cast<const uint32_t*>(k8 + i0);
+      v0 = *reinterpret_cast<const uint32_t*>(v8 + i0);
+    }
+    if (jr + 1 < S) {
+      size_t i1 = (((size_t)(jr + 1)) * H + h) * HD + dq;
+      k1 = *reinterpret_cast<const uint32_t*>(k8 + i1);
+      v1 = *reinterpret_cast<const uint32_t*>(v8 + i1);
+    }
+    *reinterpret_cast<uint32_t*>(Ks + (rp * 2) * ASLD + dq) = k0;
+    *reinterpret_cast<uint32_t*>(Ks + (rp * 2 + 1) * ASLD + dq) = k1;
+    *reinterpret_cast<uint32_t*>(Vs + (rp * 2) * ASLD + dq) = v0;
+    *reinterpret_cast<uint32_t*>(Vs + (rp * 2 + 1) * ASLD + dq) = v1;
+  }
+  if (tid < BN) {
+    const int jg = j0 + tid;
+    ks_s[tid] = (jg < S) ? ks[((size_t)jg) * H + h] : 1.f;
+    vs_s[tid] = (jg < S) ? vs[((size_t)jg) * H + h] : 1.f;
+  }
+  __syncthreads();
+
+  float dVacc[MTM34][NTM34][4];
+  float dKacc[MTM34][NTM34][4];
+#pragma unroll
+  for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+    for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+      for (int q = 0; q < 4; ++q) { dVacc[i][j][q] = 0.f; dKacc[i][j][q] = 0.f; }
+
+  // ---- Q/dO 的异步 staging：16B cp.async 搬 Qs/dOs（行越界补 0）----
+  const int nd16 = HD / 16;
+  auto issue_qdo = [&](int m0, int s) {
+    unsigned char* st = STG_base + s * STG;
+    unsigned char* Qsd = st;
+    unsigned char* Ood = st + sz_Q;
+    for (int u = tid; u < (BM / 2) * nd16; u += THREADS) {
+      const int rp = u / nd16, dc = (u % nd16) * 16;
+      const int qa = m0 + rp * 2, qb = m0 + rp * 2 + 1;
+      unsigned char* qd = Qsd + (rp * 2) * ASLD + dc;
+      unsigned char* od = Ood + (rp * 2) * ASLD + dc;
+      if (qa < S) {
+        size_t idx = (((size_t)qa) * H + h) * HD + dc;
+        cp_async16(qd, q8 + idx);
+        cp_async16(od, do8 + idx);
+      } else {
+        cp_async16_z(qd, q8, 0);
+        cp_async16_z(od, do8, 0);
+      }
+      if (qb < S) {
+        size_t idx = (((size_t)qb) * H + h) * HD + dc;
+        cp_async16(qd + ASLD, q8 + idx);
+        cp_async16(od + ASLD, do8 + idx);
+      } else {
+        cp_async16_z(qd + ASLD, q8, 0);
+        cp_async16_z(od + ASLD, do8, 0);
+      }
+    }
+    cp_async_commit();
+  };
+  // 从 Qs/dOs 在 smem 上重建配对布局 Qp/dOp（同第 150 轮原型的逐字节交织写）。
+  auto build_paired = [&](int s) {
+    unsigned char* st = STG_base + s * STG;
+    unsigned char* Qsd = st;
+    unsigned char* Ood = st + sz_Q;
+    uint16_t* Qpd = reinterpret_cast<uint16_t*>(st + sz_Q + sz_Q);
+    uint16_t* Opd = reinterpret_cast<uint16_t*>(st + sz_Q + sz_Q + sz_Qp);
+    for (int u = tid; u < (BM / 2) * nd4; u += THREADS) {
+      const int rp = u / nd4, dq = (u % nd4) * 4;
+      uint32_t q0 = *reinterpret_cast<uint32_t*>(Qsd + (rp * 2) * ASLD + dq);
+      uint32_t q1 = *reinterpret_cast<uint32_t*>(Qsd + (rp * 2 + 1) * ASLD + dq);
+      uint32_t o0 = *reinterpret_cast<uint32_t*>(Ood + (rp * 2) * ASLD + dq);
+      uint32_t o1 = *reinterpret_cast<uint32_t*>(Ood + (rp * 2 + 1) * ASLD + dq);
+      uint32_t* qpw = reinterpret_cast<uint32_t*>(Qpd + rp * PSLD + dq);
+      qpw[0] = __byte_perm(q0, q1, 0x5140);
+      qpw[1] = __byte_perm(q0, q1, 0x7362);
+      uint32_t* opw = reinterpret_cast<uint32_t*>(Opd + rp * PSLD + dq);
+      opw[0] = __byte_perm(o0, o1, 0x5140);
+      opw[1] = __byte_perm(o0, o1, 0x7362);
+    }
+  };
+
+  const int mstart = (j0 / BM) * BM;
+  issue_qdo(mstart, 0);
+  int cur = 0;
+  for (int m0 = mstart; m0 < S; m0 += BM) {
+    const int nxt = m0 + BM;
+    const bool has_next = nxt < S;
+    if (has_next) issue_qdo(nxt, cur ^ 1);
+    if (has_next) asm volatile("cp.async.wait_group 1;\n");
+    else asm volatile("cp.async.wait_group 0;\n");
+    __syncthreads();
+    build_paired(cur);
+    if (tid < BM) {
+      const int qi = m0 + tid;
+      qs_s[tid] = (qi < S) ? qs[((size_t)qi) * H + h] : 1.f;
+      dos_s[tid] = (qi < S) ? dos[((size_t)qi) * H + h] : 1.f;
+    }
+    __syncthreads();
+
+    unsigned char* STGc = STG_base + cur * STG;
+    unsigned char* Qc = STGc;
+    unsigned char* Oc = STGc + sz_Q;
+    uint16_t* Qpc = reinterpret_cast<uint16_t*>(STGc + sz_Q + sz_Q);
+    uint16_t* Opc = reinterpret_cast<uint16_t*>(STGc + sz_Q + sz_Q + sz_Qp);
+
+    float lse_r[4], del_r[4];
+#pragma unroll
+    for (int i = 0; i < 2; ++i)
+#pragma unroll
+      for (int s = 0; s < 2; ++s) {
+        const int r = wr * 32 + i * 16 + g + (s ? 8 : 0);
+        const int qi = m0 + r;
+        const size_t idx = ((size_t)qi) * H + h;
+        const bool ok = qi < S;
+        lse_r[i * 2 + s] = ok ? lse[idx] : 0.f;
+        del_r[i * 2 + s] = ok ? delta[idx] : 0.f;
+      }
+
+    float preg[MTM][MTN][4];
+    {
+      float acc[MTM][MTN][4];
+#pragma unroll
+      for (int i = 0; i < MTM; ++i)
+#pragma unroll
+        for (int j = 0; j < MTN; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+      mma_block<GM1, GN1, HD, E4E4>(Qc, ASLD, Ks, ASLD, acc, wr, wc, lane);
+      const int r0 = wr * GM1, c0 = wc * GN1;
+#pragma unroll
+      for (int i = 0; i < MTM; ++i)
+#pragma unroll
+        for (int j = 0; j < MTN; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+            const int c = c0 + j * 8 + c2 + (q & 1);
+            const int qi = m0 + r, jg = j0 + c;
+            float p = 0.f;
+            if (qi < S && jg < S && !(causal && jg > qi)) {
+              const float sval = acc[i][j][q] * scale * qs_s[r] * ks_s[c];
+              p = fexp(sval - lse_r[i * 2 + (q >= 2 ? 1 : 0)]);
+            }
+            Ps[r * PSS + c] = p;
+            preg[i][j][q] = p;
+          }
+    }
+    {
+      float acc[MTM][MTN][4];
+#pragma unroll
+      for (int i = 0; i < MTM; ++i)
+#pragma unroll
+        for (int j = 0; j < MTN; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+      mma_block<GM1, GN1, HD, E5E4>(Oc, ASLD, Vs, ASLD, acc, wr, wc, lane);
+      const int r0 = wr * GM1, c0 = wc * GN1;
+#pragma unroll
+      for (int i = 0; i < MTM; ++i)
+#pragma unroll
+        for (int j = 0; j < MTN; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+            const int c = c0 + j * 8 + c2 + (q & 1);
+            const float dpv = acc[i][j][q] * dos_s[r] * vs_s[c];
+            const float del = del_r[i * 2 + (q >= 2 ? 1 : 0)];
+            Ss[r * PSS + c] = preg[i][j][q] * (dpv - del);
+          }
+    }
+    __syncthreads();
+
+    if (wid < 4) {
+      const int jl = lane >> 2, sub4 = lane & 3;
+#pragma unroll
+      for (int jh = 0; jh < NTFOLD; ++jh) {
+        const int j = wid * 8 + jl + jh * 32;
+        float amaxA = 0.f, amax3 = 0.f;
+#pragma unroll
+        for (int half = 0; half < 2; ++half)
+#pragma unroll
+          for (int t = 0; t < 8; ++t) {
+            const int m = sub4 * 8 + t + half * 32;
+            amaxA = fmaxf(amaxA, fabsf(Ps[m * PSS + j] * dos_s[m]));
+            amax3 = fmaxf(amax3, fabsf(Ss[m * PSS + j] * qs_s[m]));
+          }
+        amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 1));
+        amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 2));
+        amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 1));
+        amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 2));
+        float scA = (amaxA > 0.f) ? amaxA / kE4M3Max : 1.f;
+        float sc3 = (amax3 > 0.f) ? amax3 / kE5M2Max : 1.f;
+        if (sub4 == 0) { sA[j] = scA; sds3[j] = sc3; }
+        scA = __shfl_sync(0xffffffffu, scA, jl * 4);
+        sc3 = __shfl_sync(0xffffffffu, sc3, jl * 4);
+        const float invA = __frcp_rn(scA);
+        const float inv3 = __frcp_rn(sc3);
+#pragma unroll
+        for (int half = 0; half < 2; ++half) {
+          uint32_t pa2[2], d32[2];
+#pragma unroll
+          for (int t4 = 0; t4 < 2; ++t4) {
+            const int m = sub4 * 8 + t4 * 4 + half * 32;
+            pa2[t4] = foldpack4<true, false>(
+                Ps[(m + 0) * PSS + j] * dos_s[m + 0], Ps[(m + 1) * PSS + j] * dos_s[m + 1],
+                Ps[(m + 2) * PSS + j] * dos_s[m + 2], Ps[(m + 3) * PSS + j] * dos_s[m + 3], scA,
+                invA);
+            d32[t4] = foldpack4<true, true>(
+                Ss[(m + 0) * PSS + j] * qs_s[m + 0], Ss[(m + 1) * PSS + j] * qs_s[m + 1],
+                Ss[(m + 2) * PSS + j] * qs_s[m + 2], Ss[(m + 3) * PSS + j] * qs_s[m + 3], sc3,
+                inv3);
+          }
+          *reinterpret_cast<uint2*>(Ap + j * QTS + sub4 * 8 + half * 32) =
+              make_uint2(pa2[0], pa2[1]);
+          *reinterpret_cast<uint2*>(dS3 + j * QTS + sub4 * 8 + half * 32) =
+              make_uint2(d32[0], d32[1]);
+        }
+      }
+    }
+    __syncthreads();
+
+    {
+      float acc[MTM34][NTM34][4];
+#pragma unroll
+      for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+        for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+      mma_block_bt<GM34, GN34, BM, E4E5>(Ap, QTS, Opc, PSLD, acc, wr, wc, lane, 0);
+      const int r0 = wr * GM34;
+#pragma unroll
+      for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+        for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+            dVacc[i][j][q] += acc[i][j][q] * sA[r];
+          }
+    }
+    {
+      float acc[MTM34][NTM34][4];
+#pragma unroll
+      for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+        for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+      mma_block_bt<GM34, GN34, BM, E5E4>(dS3, QTS, Qpc, PSLD, acc, wr, wc, lane, 0);
+      const int r0 = wr * GM34;
+#pragma unroll
+      for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+        for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+            dKacc[i][j][q] += acc[i][j][q] * sds3[r] * scale;
+          }
+    }
+    __syncthreads();
+    cur ^= 1;
+  }
+
+#pragma unroll
+  for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+    for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+      for (int q = 0; q < 4; ++q) {
+        const int r = wr * GM34 + i * 16 + g + (q >= 2 ? 8 : 0);
+        const int d = wc * GN34 + j * 8 + c2 + (q & 1);
+        const int jg = j0 + r;
+        if (jg < S) {
+          dv[(((size_t)jg) * H + h) * HD + d] = dVacc[i][j][q];
+          dk[(((size_t)jg) * H + h) * HD + d] = dKacc[i][j][q];
+        }
+      }
+}
+
+// =============================================================================
 // host：npy 读取 / launcher / 对拍 / 计时
 // =============================================================================
 struct NpyF32 {
@@ -512,15 +873,24 @@ int main(int argc, char** argv) {
            (BM / 2) * Cfg::PSLD * 2 + (BM / 2) * Cfg::PSLD * 2 + BN * Cfg::QTS + BN * Cfg::QTS +
            BM * Cfg::PSS * 4 + BM * Cfg::PSS * 4 + (2 * BM + 4 * BN) * 4;
   }();
+  // F7 第四步：Q/dO staging 双缓冲（Qs/dOs/Qp/dOp ×2）。
+  constexpr int pipe_smem = [] {
+    return BN * Cfg::ASLD + BN * Cfg::ASLD +
+           2 * (BM * Cfg::ASLD + BM * Cfg::ASLD + (BM / 2) * Cfg::PSLD * 2 +
+                (BM / 2) * Cfg::PSLD * 2) +
+           BN * Cfg::QTS + BN * Cfg::QTS + BM * Cfg::PSS * 4 + BM * Cfg::PSS * 4 +
+           (2 * BM + 4 * BN) * 4;
+  }();
 
   const int lse_smem = Cfg::lse_smem_bytes;
 
-  printf("=== F7 第三步：fp8 mma KV-owner dK/dV 原型 ===\n");
+  printf("=== F7：fp8 mma KV-owner dK/dV 原型（--pipe 双缓冲 staging A/B） ===\n");
   printf("case = %s\n", dir.c_str());
   printf("B=%d S=%d H=%d Hkv=%d D=%d causal=%d scale=%.6f\n", B, S, H, Hkv, D, (int)causal,
          scale);
-  printf("grid = (%d, %d); kvowner smem = %d B (%.1f KB); lse smem = %d B\n",
-         (S + BN - 1) / BN, H, kv_smem, kv_smem / 1024.0, lse_smem);
+  printf("grid = (%d, %d); kvowner smem = %d B (%.1f KB); pipe smem = %d B (%.1f KB); lse smem = %d B\n",
+         (S + BN - 1) / BN, H, kv_smem, kv_smem / 1024.0, pipe_smem, pipe_smem / 1024.0,
+         lse_smem);
 
   float *d_q_f, *d_k_f, *d_v_f, *d_do_f, *d_o_f;
   unsigned char *d_q8, *d_k8, *d_v8, *d_do8;
@@ -558,8 +928,10 @@ int main(int argc, char** argv) {
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, lse_smem));
   CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_kernel<HD, BM, BN>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kv_smem));
+  CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_pipe_kernel<HD, BM, BN>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, pipe_smem));
 
-  auto run = [&]() {
+  auto preprocess = [&]() {
     quantize_row_kernel<<<(int)rows_q, 128>>>(d_q_f, d_q8, d_qs, D, 0);
     quantize_row_kernel<<<(int)rows_kv, 128>>>(d_k_f, d_k8, d_ks, D, 0);
     quantize_row_kernel<<<(int)rows_kv, 128>>>(d_v_f, d_v8, d_vs, D, 0);
@@ -567,22 +939,46 @@ int main(int argc, char** argv) {
     lse_mma_kernel<HD><<<lg, THREADS, lse_smem>>>(d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale,
                                                   (int)causal);
     delta_warp_kernel<HD><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+  };
+  auto launch_base = [&]() {
     fp8_kvowner_dkv_kernel<HD, BM, BN><<<kg, THREADS, kv_smem>>>(
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, S, H, scale,
         (int)causal);
   };
+  auto launch_pipe = [&]() {
+    fp8_kvowner_dkv_pipe_kernel<HD, BM, BN><<<kg, THREADS, pipe_smem>>>(
+        d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, S, H, scale,
+        (int)causal);
+  };
+  auto run = [&]() { preprocess(); launch_base(); };
   run();
   CUDA_CHECK(cudaDeviceSynchronize());
 
-  std::vector<float> h_dk(nkv), h_dv(nkv);
+  std::vector<float> h_dk(nkv), h_dv(nkv), p_dk(nkv), p_dv(nkv);
   CUDA_CHECK(cudaMemcpy(h_dk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(h_dv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
 
+  // F7 第四步：跑 pipe 变体并落盘（沿用同一 preprocess 输出）。
+  CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+  CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+  launch_pipe();
+  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaMemcpy(p_dk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(p_dv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+
   DiffStat sk = diff_stat(h_dk, rdk.data);
   DiffStat sv = diff_stat(h_dv, rdv.data);
-  printf("\n[对拍] ours(KV-owner mma) vs fp32 ref:\n");
+  printf("\n[对拍] ours(KV-owner mma base) vs fp32 ref:\n");
   printf("  dk  max_abs=%.4e  max_rel=%.4e\n", sk.max_abs, sk.max_rel);
   printf("  dv  max_abs=%.4e  max_rel=%.4e\n", sv.max_abs, sv.max_rel);
+  DiffStat pk = diff_stat(p_dk, rdk.data);
+  DiffStat pv = diff_stat(p_dv, rdv.data);
+  printf("[对拍] ours(KV-owner mma **pipe**) vs fp32 ref:\n");
+  printf("  dk  max_abs=%.4e  max_rel=%.4e\n", pk.max_abs, pk.max_rel);
+  printf("  dv  max_abs=%.4e  max_rel=%.4e\n", pv.max_abs, pv.max_rel);
+  DiffStat bpk = diff_stat(p_dk, h_dk), bpv = diff_stat(p_dv, h_dv);
+  printf("[对拍] pipe vs base: dk max_abs=%.4e  dv max_abs=%.4e（应=0，仅搬运时序）\n",
+         bpk.max_abs, bpv.max_abs);
 
   // 与既有 ours（Q-owner + atomic）dk/dv 比：应只差跨 CTA 加法次序 / 同一 fp8 口径。
   if (file_exists(dir + "/ours_dk.npy")) {
@@ -618,25 +1014,16 @@ int main(int argc, char** argv) {
     cudaEventDestroy(a); cudaEventDestroy(b);
     return ms / it;
   };
-  float t_main = bench([&] {
-    fp8_kvowner_dkv_kernel<HD, BM, BN><<<kg, THREADS, kv_smem>>>(
-        d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, S, H, scale,
-        (int)causal);
-  }, iters);
-  float t_pre = bench([&] {
-    quantize_row_kernel<<<(int)rows_q, 128>>>(d_q_f, d_q8, d_qs, D, 0);
-    quantize_row_kernel<<<(int)rows_kv, 128>>>(d_k_f, d_k8, d_ks, D, 0);
-    quantize_row_kernel<<<(int)rows_kv, 128>>>(d_v_f, d_v8, d_vs, D, 0);
-    quantize_row_kernel<<<(int)rows_q, 128>>>(d_do_f, d_do8, d_dos, D, 1);
-    lse_mma_kernel<HD><<<lg, THREADS, lse_smem>>>(d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale,
-                                                  (int)causal);
-    delta_warp_kernel<HD><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
-  }, iters);
-  double flops = 2.0 * (double)S * S * H * (double)HD * (causal ? 0.5 : 1.0) * 3.0;  // dK,dV 两个 GEMM 的前身（S 与 dP 另计，此处给 dK/dV 口径）
-  printf("\n[计时] main(dK/dV) = %.4f ms (%.2f TF @dK/dV) | preprocess = %.4f ms | total = %.4f ms\n",
-         t_main, flops / t_main / 1e9, t_pre, t_main + t_pre);
-  printf("[计时] 说明：main 仅需 dK/dV，与 FP8 峰值 1978.8 TF 的占比 = %.3f%%\n",
-         100.0 * flops / t_main / 1e9 / 1978.8);
+  float t_base = bench(launch_base, iters);
+  float t_pipe = bench(launch_pipe, iters);
+  float t_pre = bench(preprocess, iters);
+  double flops = 2.0 * (double)S * S * H * (double)HD * (causal ? 0.5 : 1.0) * 3.0;
+  printf("\n[计时] main(dK/dV) base = %.4f ms (%.2f TF) | **pipe** = %.4f ms (%.2f TF) | A/B = %.3f×\n",
+         t_base, flops / t_base / 1e9, t_pipe, flops / t_pipe / 1e9, t_base / t_pipe);
+  printf("[计时] preprocess = %.4f ms | total base = %.4f | total pipe = %.4f\n", t_pre,
+         t_base + t_pre, t_pipe + t_pre);
+  printf("[计时] 说明：main 仅需 dK/dV，与 FP8 峰值 1978.8 TF 的占比 = %.3f%% (base) / %.3f%% (pipe)\n",
+         100.0 * flops / t_base / 1e9 / 1978.8, 100.0 * flops / t_pipe / 1e9 / 1978.8);
 
   CUDA_CHECK(cudaFree(d_q_f)); CUDA_CHECK(cudaFree(d_k_f)); CUDA_CHECK(cudaFree(d_v_f));
   CUDA_CHECK(cudaFree(d_do_f)); CUDA_CHECK(cudaFree(d_o_f));

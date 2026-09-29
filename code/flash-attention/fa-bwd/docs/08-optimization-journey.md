@@ -1092,3 +1092,24 @@ smem 冲突 + 低 occ
   净收益。**F7 主体须同时做**：persistent（grid≈132）+ Q/dO/K/V 4D-TMA 暂存重叠 + dQ 同循环 +
   降寄存器占用。
 - 详见 `docs/03` §83；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_{s512,s4096,ncu_s4096}.out.txt`。
+
+### 5.65 F7 第四步：KV-owner mma 的 Q/dO staging 加 cp.async 双缓冲重叠（形状相关，第一百五十一轮）
+
+- **动机（落实 §5.64 的 F7 主体子项「重叠」）**：§5.64 的 KV-owner mma 原型 staging 是同步全局读，
+  全局延迟串在 GEMM1 前。给 Q/dO staging 加 `cp.async.cg` 16B **双缓冲流水**，做同 binary A/B。
+- **做了什么**：`src/fp8/fa_bwd_fp8_kvowner_mma.cu` 新增 `fp8_kvowner_dkv_pipe_kernel`（默认路径
+  一行未改）：staging 缓冲 ×2（`Qs/dOs/Qp/dOp` 双 stage），循环里 `issue_qdo(next)`→`wait_group 1`
+  →`build_paired(cur)`→5 GEMM；末块 `wait_group 0`。
+  **踩坑**：`Qs[STAGES]` 运行期下标的**指针数组**被 ptxas 推到 local memory，首版 regs 243；
+  改成「基址 + 标量偏移」后 239、A/B 0.875×→**0.958×**（S4096）。smem 70,144→**105,984B**。
+- **数值（逐位）**：S512 base/pipe dk/dv 均 2.975e-1/3.735e-1、S4096 均 2.643e-1/3.216e-1，
+  **pipe vs base = 0/0**（只换搬运时序）。
+- **性能（event，同 binary/session）**：**形状相关**——S512（grid 256）**1.148×**（0.0566→0.0493ms）、
+  S4096（grid 2048）**0.959×**（1.4218→1.4825ms）。
+- **ncu 机制（S4096）**：base long 0.58 / short 0.88 / **wait 1.44**（墙）；pipe long **0.15**
+  （重叠生效，全局延迟被藏住）但 regs 168→**239**、smem 70→106KB ⇒ **3→2 CTA/SM**、
+  warps 17.7%→12.2%、op_read 51.0M→67.4M ⇒ 净 −4.1%。
+- **结论**：KV-owner mma 原型的墙是 **`wait`+`short_scoreboard`（mma/smem 依赖）而非全局延迟**，
+  所以「隐藏全局延迟」只在小 grid（未撑满 3 CTA/SM 容量）时有效。F7 要转正必须直接打 `wait` 与
+  occupancy，属 §83 的 persistent+4D-TMA+降寄存器大改。**本子项判决完成。**
+- 详见 `docs/03` §84；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p151_{s512,s4096,sol}.out.txt`。

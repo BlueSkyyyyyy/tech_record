@@ -1,0 +1,69 @@
+fa_bwd_fp8_kvowner_mma.cu(101): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+==PROF== Connected to process 1154612 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_kvowner_mma.out)
+==PROF== Profiling "fp8_kvowner_dkv_kernel": 0%....50%....100% - 11 passes
+==PROF== Profiling "fp8_kvowner_dkv_pipe_kernel": 0%....50%....100% - 11 passes
+=== F7：fp8 mma KV-owner dK/dV 原型（--pipe 双缓冲 staging A/B） ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+grid = (128, 16); kvowner smem = 70144 B (68.5 KB); pipe smem = 105984 B (103.5 KB); lse smem = 18944 B
+
+[对拍] ours(KV-owner mma base) vs fp32 ref:
+  dk  max_abs=2.6427e-01  max_rel=8.5413e+01
+  dv  max_abs=3.2161e-01  max_rel=4.2332e+01
+[对拍] ours(KV-owner mma **pipe**) vs fp32 ref:
+  dk  max_abs=2.6427e-01  max_rel=8.5413e+01
+  dv  max_abs=3.2161e-01  max_rel=4.2332e+01
+[对拍] pipe vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅搬运时序）
+[对拍] vs ours(Q-owner atomic) dk max_abs=1.5000e-01  dv max_abs=2.5735e-02
+[对拍] ref-vs-TE dk max_abs=3.6857e-01  dv max_abs=6.6881e-01 | ours-vs-TE dk=5.3237e-01 dv=6.8069e-01
+
+[计时] main(dK/dV) base = 1.4439 ms (71.39 TF) | **pipe** = 1.4972 ms (68.85 TF) | A/B = 0.964×
+[计时] preprocess = 1.3729 ms | total base = 2.8168 | total pipe = 2.8701
+[计时] 说明：main 仅需 dK/dV，与 FP8 峰值 1978.8 TF 的占比 = 3.608% (base) / 3.479% (pipe)
+==PROF== Disconnected from process 1154612
+[1154612] fa_bwd_fp8_kvowner_mma.out@127.0.0.1
+  void fp8_kvowner_dkv_kernel<128, 64, 32>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, int, int, float, int) (128, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    gpu__time_duration.sum                                                                 ms         1.42
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        50.46
+    launch__occupancy_limit_registers                                                   block            3
+    launch__occupancy_limit_shared_mem                                                  block            3
+    launch__registers_per_thread                                              register/thread          168
+    lts__t_sectors_op_read.sum                                                         sector     51018691
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        12.86
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        46.98
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        17.69
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.22
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         0.58
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         0.88
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.44
+    ------------------------------------------------------------------------- --------------- ------------
+
+  void fp8_kvowner_dkv_pipe_kernel<128, 64, 32>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, int, int, float, int) (128, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    gpu__time_duration.sum                                                                 ms         1.47
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        47.74
+    launch__occupancy_limit_registers                                                   block            2
+    launch__occupancy_limit_shared_mem                                                  block            2
+    launch__registers_per_thread                                              register/thread          239
+    lts__t_sectors_op_read.sum                                                         sector     67403384
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        18.37
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        40.97
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        12.16
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.20
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         0.15
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         0.88
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.28
+    ------------------------------------------------------------------------- --------------- ------------
+

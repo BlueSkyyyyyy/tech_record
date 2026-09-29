@@ -2838,15 +2838,36 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
        KV-owner 5.41ms(0.64×) / **stage 0.876ms（vs Q-owner 3.95×、vs 无 stage 6.17×）**。
        ⇒ F7 机制两根支柱（单一 owner 消 red + staging 消读放大）均已 de-risk。见 `docs/03` §82、
        `docs/08` §5.63；原始输出 `src/fp8/fa_bwd_fp8_kvowner_stage_{run,ncu}.out.txt`。
-       **剩余（F7 主体）**：把这两点落进真实 fp8 主 kernel（persistent + 4D-TMA 暂存 +
-       dK/dV TMA store / `cp.reduce.async.bulk` 一次写出，对标 TE grid=132）。
-       见 `docs/03` §81、`docs/08` §5.62；原始输出 `src/fp8/fa_bwd_fp8_kvowner_smoke*.out.txt`。
+        **剩余（F7 主体）**：把这两点落进真实 fp8 主 kernel（persistent + 4D-TMA 暂存 +
+        dK/dV TMA store / `cp.reduce.async.bulk` 一次写出，对标 TE grid=132）。
+        见 `docs/03` §81、`docs/08` §5.62；原始输出 `src/fp8/fa_bwd_fp8_kvowner_smoke*.out.txt`。
+       → **第四步已完成（第一百五十一轮，重叠子项判决：形状相关）**：给 KV-owner mma 原型的
+       Q/dO staging 加 `cp.async.cg` 16B 双缓冲重叠（`fp8_kvowner_dkv_pipe_kernel`）——
+       **数值逐位不变**（pipe vs base 0/0）；**S512 1.148×、S4096 0.959×**。ncu：重叠确实
+       把 `long_scoreboard 0.58→0.15`，但 base 的墙是 `wait 1.44+short 0.88`（非全局延迟），
+       且双缓冲把 smem 70→106KB、regs 168→239 ⇒ **3→2 CTA/SM**，大 S 净负。**⇒ F7 主体须
+       直接打 `wait`+occupancy（persistent+4D-TMA+降寄存器），「重叠 staging」单独不是杠杆**。
+       见 `docs/03` §84、`docs/08` §5.65。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百四十九届）**：**F7 第二步——persistent KV-owner + smem/cp.async 暂存（机制正结果；
+> **最新（第一百五十一轮）**：**F7 第四步——KV-owner mma 原型的 Q/dO staging 加 `cp.async`
+> 双缓冲重叠（形状相关，重叠子项判决完成）**。新增 `fp8_kvowner_dkv_pipe_kernel`
+> （`src/fp8/fa_bwd_fp8_kvowner_mma.cu`）：staging 改 `cp.async.cg` 16B 双缓冲（`wait_group 1`）。
+> **数值逐位不变**（pipe vs base `0/0`）；**同 binary A/B：S512 1.148×（0.0566→0.0493ms）、
+> S4096 0.959×（1.4218→1.4825ms）**。ncu 机制：pipe 把 `long_scoreboard 0.58→0.15`（重叠
+> 确实生效），但 base 的墙是 **`wait 1.44`+`short 0.88`（mma/smem 依赖）**、且双缓冲把
+> smem 70→106KB、regs 168→239 ⇒ **3→2 CTA/SM**（warps 17.7%→12.2%）、`op_read` 51→67M，
+> 大 S 净 −4.1%。**⇒「隐藏全局延迟」只在小 grid 有效；F7 要转正必须直接打 `wait`+occupancy**。
+> 文档 `docs/03` §84、`docs/08` §5.65；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p151_*`。
+> **下一步候选**：① **F7 主体**（唯一经 ncu 钉死的真杠杆）——persistent + 4D-TMA 暂存
+> Q/dO/K/V + dK/dV TMA store + dQ 同循环 + 降 `dVacc/dKacc` 寄存器（对标 TE grid=132）；
+> ② 其余候选（F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、非 main 融合）均已判决/到顶/收口；
+> ③ DET 仅 opt-in。
+>
+> **（第一百四十九届）**：**F7 第二步——persistent KV-owner + smem/cp.async 暂存（机制正结果；
 > ncu 证 red=0 且读放大消除）**——落实第 148 轮「下一步候选 ①」的判据。在
 > `src/fp8/fa_bwd_fp8_kvowner_smoke.cu` 新增 `kvowner_stage_kernel`（S512 H8 HD128 causal，
 > fp32 标量）：拥有的 K/V 只从 global 读一次常驻 smem、Q/dO 用 `cp.async.cg` 16B 双缓冲流水
@@ -5968,6 +5989,29 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     - **下一步候选**：① **F7 主体（修正后）**——KV-owner + persistent（grid≈132）+ Q/dO/K/V
       4D-TMA 暂存重叠 + dQ 同循环；② 降 `dVacc/dKacc` 寄存器占用（如分块 flush / 半精度累加）
       以提 occupancy；③ 其余候选均已判决/到顶/收口。
+
+- 2026-09-30（第一百五十一轮）：**F7 第四步完成（KV-owner mma 的 Q/dO staging 加 cp.async
+  双缓冲重叠——形状相关：小 S 正、大 S 负）**——落实第 150 轮「下一步候选 ①」的重叠子项。
+    - 新增 `fp8_kvowner_dkv_pipe_kernel`（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，**默认路径一行未改**）：
+      Q/dO staging 由「同步全局读」改成 **`cp.async.cg` 16B 双缓冲流水**（prologue 发 stage0、
+      循环 `issue_qdo(next)`→`wait_group 1`→`build_paired(cur)`→5 GEMM，末块 `wait_group 0`）；
+      staging 缓冲 ×2（`Qs/dOs/Qp/dOp`）。**踩坑**：`Qs[STAGES]` 运行期下标的**指针数组**被 ptxas
+      推到 local memory，首版 regs 243；改「基址 + 标量偏移」后 239、A/B 0.875×→**0.958×**（S4096）。
+      smem 70,144→**105,984B**。
+    - **数值逐位相同**：S512 base/pipe 均 2.975e-1/3.735e-1、S4096 均 2.643e-1/3.216e-1，
+      **pipe vs base = 0/0**（只换搬运时序）。
+    - **性能（event，同 binary/session）形状相关**：S512（grid 256）**1.148×**（0.0566→0.0493ms）、
+      S4096（grid 2048）**0.959×**（1.4218→1.4825ms）。
+    - **ncu（S4096）机制**：base `wait 1.44 + short 0.88 + long 0.58`（墙 = mma/smem 依赖）；
+      pipe **long 0.58→0.15**（重叠确实藏住全局延迟）但 regs 168→**239**、smem 70→106KB ⇒
+      **3→2 CTA/SM**、warps 17.7%→12.2%、`op_read` 51.0M→67.4M ⇒ 净 −4.1%。
+    - **结论**：KV-owner mma 原型的墙**不是全局延迟**，所以「隐藏全局延迟」只在小 grid
+      （未撑满 3 CTA/SM 容量）时有正收益；F7 要转正必须直接打 `wait`（mma 依赖）+ occupancy
+      （smem≤58KB/regs≤128 才 4 CTA/SM），属 §83 的 persistent+4D-TMA+降寄存器大改。
+      「重叠」子项判决完成。文档 `docs/03` §84、`docs/08` §5.65；原始输出
+      `src/fp8/fa_bwd_fp8_kvowner_mma_p151_{s512,s4096,sol}.out.txt`。
+    - **下一步候选**：① F7 主体（persistent + 4D-TMA + dQ 同循环 + 降寄存器，对标 TE grid=132）；
+      ② 其余候选均已判决/到顶/收口；③ DET 仅 opt-in。
 
 ## 灵感 / backlog
 

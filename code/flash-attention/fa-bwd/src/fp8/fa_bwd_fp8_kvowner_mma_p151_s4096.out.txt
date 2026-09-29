@@ -1,0 +1,24 @@
+fa_bwd_fp8_kvowner_mma.cu(101): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+=== F7：fp8 mma KV-owner dK/dV 原型（--pipe 双缓冲 staging A/B） ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+grid = (128, 16); kvowner smem = 70144 B (68.5 KB); pipe smem = 105984 B (103.5 KB); lse smem = 18944 B
+
+[对拍] ours(KV-owner mma base) vs fp32 ref:
+  dk  max_abs=2.6427e-01  max_rel=8.5413e+01
+  dv  max_abs=3.2161e-01  max_rel=4.2332e+01
+[对拍] ours(KV-owner mma **pipe**) vs fp32 ref:
+  dk  max_abs=2.6427e-01  max_rel=8.5413e+01
+  dv  max_abs=3.2161e-01  max_rel=4.2332e+01
+[对拍] pipe vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅搬运时序）
+[对拍] vs ours(Q-owner atomic) dk max_abs=1.5000e-01  dv max_abs=2.5735e-02
+[对拍] ref-vs-TE dk max_abs=3.6857e-01  dv max_abs=6.6881e-01 | ours-vs-TE dk=5.3237e-01 dv=6.8069e-01
+
+[计时] main(dK/dV) base = 1.4218 ms (72.50 TF) | **pipe** = 1.4825 ms (69.53 TF) | A/B = 0.959×
+[计时] preprocess = 1.3335 ms | total base = 2.7554 | total pipe = 2.8160
+[计时] 说明：main 仅需 dK/dV，与 FP8 峰值 1978.8 TF 的占比 = 3.664% (base) / 3.514% (pipe)
