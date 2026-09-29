@@ -1,0 +1,5 @@
+### O68 TE FP8 full baseline (bench, pure-bwd CUPTI)
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== bench CUPTI device time (pure-bwd, dtype=fp8) ===
+[b1_s1024_h16_d128_full_fp8] te=0.0562ms/305.61TF

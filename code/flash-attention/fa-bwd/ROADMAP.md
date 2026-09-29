@@ -2943,13 +2943,47 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 - [x] **F8**（第一百六十一轮，**正结果，默认**）**fp16/bf16 定长默认切 Hopper（wgmma+TMA）**——
       F1 的 dtype 泛化。纯 harness（device 一行未改）：`HOPPER_DEFAULT_DTYPES={"fp8","fp16","bf16"}`。
       数值逐值不变；S4096 causal total fp16 **1.8245→1.1726ms（1.556×）**、bf16
-      **1.8325→1.1643ms（1.574×）**；相对 FA3 时间比 5.6×→3.6×。见 `docs/08` §5.75。
+       **1.8325→1.1643ms（1.574×）**；相对 FA3 时间比 5.6×→3.6×。见 `docs/08` §5.75。
+- [x] **F9**（第一百六十二轮，**正结果，默认**）**非 causal（full）D=128 的 LSE 接上均衡 `cp.async` 版**
+      —— 补 F1/F5 遗漏的一条分支。O1/F5/F1 把 fp8 **causal** 的 LSE 做到 TMA/wgmma + 两趟 softmax，
+      O54 也给 `lse_mma_kernel_bal` 加了 `FULL=true`（一个 CTA 一个 m 块 + `cp.async` 双缓冲），
+      但该 FULL 模式**只接到 D=512（MLA）**；D=128 的**定长 full 与 varlen full 仍走 O1
+      `lse_mma_kernel`**（逐元素 `LDG.U8→STS`、无流水、无 split）。纯 host（`fa_bwd_fp8_main.cu`
+      + `fa_bwd_fp8_mma_onefile.cu`，device 一行未改）：新增文件作用域开关 `g_lse_full_opt`
+      （默认 1）+ CLI `--lsefull=0/1`，把两条 D=128 full 的 LSE 调用从 `launch_lse<128>` 改
+      `launch_lse_bal<128,1,true>`。**数值**：ours vs ref full `5.52/5.31/4.02e-2`（fp8 噪声）；
+      lsefull 0 vs 1 只差 LSE fp32 求和次序 ~1e-3；`--ci` fp8 单/两文件一致性 worst 7.153e-06 OK、
+      `--check docs/04` OK。**性能（同 binary A/B）**：定长 full S1024 **preprocess 0.1466→0.0397ms
+      （3.70×）/ total 0.5388→0.3740ms（1.44×，22.96 TF）**；varlen full b4_t4096 **total
+      1.5589→1.2293ms（1.27×）**；对标 TE FP8 0.0562ms/305.8TF ⇒ ours/TE **9.6×→6.65×**。
+      **ncu（LSE）**：O1 **208.4µs/Warp-Cycles-Issued 8.11/L1TEX 9.4%（纯延迟 bound）** →
+      均衡 FULL **42.3µs（4.93×）/3.86/L1TEX 22.9%**；两路径 `Waves 0.39`（网格不足）⇒ 真实墙
+      是「网格不足 + 串行载入延迟」，`cp.async` 直接打掉后者。**这是 preprocess 内一条被漏改的
+      LSE 分支，不是 main 的 L2 `red` 墙。** 见 `docs/03` §94、`docs/08` §5.76、`docs/04` §9；
+      原始输出 `src/fp8/fa_bwd_fp8_o68_*`。**剩余**：同路径再上 4D-TMA（对齐 causal O32）。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百六十一轮）**：**F8——fp16/bf16 定长默认切 Hopper（wgmma+TMA）：正结果，默认**。
+> **最新（第一百六十二轮）**：**F9——非 causal（full）D=128 的 LSE 接上均衡 `cp.async` 版：
+> 正结果，默认**。这是「F1/F5 只优化了 causal LSE」留下的一条**漏改分支**：O54 早给
+> `lse_mma_kernel_bal` 加了 `FULL=true`（一个 CTA 一个 m 块 + `cp.async` 双缓冲），却**只接到
+> D=512（MLA）**；**D=128 的定长 full 与 varlen full 一直走 O1 `lse_mma_kernel`**（逐元素
+> `LDG.U8→STS`、无流水）。纯 host（device 一行未改）：`g_lse_full_opt`（默认 1）+ `--lsefull=0/1`，
+> 把两条 D=128 full 的 LSE 改走 `lse_mma_kernel_bal<128,1,FULL=true>`。**数值**：ours vs ref full
+> `5.52/5.31/4.02e-2`（fp8 噪声）；lsefull 0/1 只差 ~1e-3（fp32 求和次序）；`--ci` fp8 一致性
+> worst 7.153e-06 OK、`--check docs/04` OK。**性能（同 binary A/B）**：定长 full S1024
+> **preprocess 3.70×、total 1.44×（22.96 TF）**；varlen full b4_t4096 **total 1.27×**；对标
+> TE FP8（0.0562ms/305.8TF）ours/TE **9.6×→6.65×**。**ncu**：LSE **208.4→42.3µs（4.93×）**、
+> `Warp Cycles/Issued 8.11→3.86`（O1 是纯延迟 bound）；两路径 `Waves 0.39`。见 `docs/03` §94、
+> `docs/08` §5.76、`docs/04` §9；原始输出 `src/fp8/fa_bwd_fp8_o68_*`。
+> **下一步候选**：① **同路径的 LSE 再上 4D-TMA**（对齐 causal O32，把 `cp.async` 换 TMA）；
+>   ② fp16/bf16 的对应 full 分支是否也漏接（本轮只动了 fp8，值得核查）；
+>   ③ 其余候选（F7 工作划分、F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、非 main 融合）均已判决/到顶/收口，
+>   受本卡寄存器/smem 硬墙锁定（见「阻塞」）。
+>
+> **（第一百六十一轮）**：**F8——fp16/bf16 定长默认切 Hopper（wgmma+TMA）：正结果，默认**。
 > 这是 **F1（只默认 fp8）的 dtype 泛化**：host 自 O5/O5b 起已有 wgmma+TMA 快路，但 fp16/bf16 的
 > `ours` 口径一直锁在 `-arch=sm_90` 的 `mma.sync`（快路只由 `--hopper` 独立前缀在跑）。本轮
 > **纯 harness**（device 一行未改）：`harness/fa_bwd_run.py` 的 `FP8_HOPPER_DEFAULT` 泛化为
@@ -6529,7 +6563,28 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       寄存器文件」同源。F7 单趟「减少贡献数」路线（两 kernel / TMA store-reduce / BN≥BM）**穷尽**；
       剩余只有「跨 warpgroup 偏和 + 二次归约」（同样撞 smem/regs）或放弃/换卡。见 `docs/03` §93、
       `docs/08` §5.74；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p160_bn64_{s512,s1024h32,s4096}.out.txt`、
-      `src/fp8/fa_bwd_fp8_p160_ncu_{bn32,bn64}_s4096.out.txt`。
+       `src/fp8/fa_bwd_fp8_p160_ncu_{bn32,bn64}_s4096.out.txt`。
+
+- 2026-09-30（第一百六十二轮）：**O68/F9 完成（非 causal（full）D=128 的 LSE 接上均衡 `cp.async`
+  版：正结果，默认）**——补 F1/F5 遗漏的一条分支。
+    - **动机**：O54 早给 `lse_mma_kernel_bal` 加了 `FULL=true`（一个 CTA 一个 m 块 + `cp.async`
+      双缓冲），但**只接到 D=512（MLA）**；**D=128 的定长 full 与 varlen full 一直走 O1
+      `lse_mma_kernel`**（逐元素 `LDG.U8→STS`、无流水、无 split）。
+    - **改动**（纯 host，`src/fp8/fa_bwd_fp8_main.cu` + `fa_bwd_fp8_mma_onefile.cu`，device 一行
+      未改）：新增文件作用域开关 `g_lse_full_opt`（默认 1）+ CLI `--lsefull=0/1`；把两条 D=128 full
+      的 LSE 调用从 `launch_lse<128>`（O1）改走 `launch_lse_bal<128,1,true>`（O54 FULL）。
+    - **数值**：ours vs fp32 ref（定长 full S1024）`5.520/5.312/4.024e-2`（fp8 噪声）；lsefull=0 vs 1
+      只差 LSE 的 fp32 求和次序（`dq 2.02e-3/dk 1.15e-3/dv 1.68e-3`，远小于容差）；`--ci` fp8 单/两
+      文件一致性 worst **7.153e-06** OK、`--check docs/04` OK。
+    - **性能（同 binary A/B，event）**：定长 full S1024 **preprocess 0.1466→0.0397ms（3.70×）/
+      total 0.5388→0.3740ms（1.44×，22.96 TF）**；varlen full b4_t4096 **total 1.5589→1.2293ms
+      （1.27×）**；单文件逐指标一致。对标 TE FP8 纯反向 `0.0562ms/305.8TF` ⇒ ours/TE **9.6×→6.65×**。
+    - **ncu（LSE，`regex:lse_mma_kernel`）**：O1 **208.4µs / Warp-Cycles-Issued 8.11 / L1TEX 9.4%
+      （纯延迟 bound）** → 均衡 FULL **42.3µs（4.93×）/ 3.86 / L1TEX 22.9%**；两路径 `Waves 0.39`
+      （网格不足）⇒ **这是 preprocess 内一条被漏改的 LSE 分支，不是 main 的 L2 `red` 墙**。
+    - **下一步**：同路径再上 4D-TMA（对齐 causal O32）。见 `docs/03` §94、`docs/08` §5.76、
+      `docs/04` §9；原始输出 `src/fp8/fa_bwd_fp8_o68_{ab_fixed_full_s1024,ab_onefile_full_s1024,
+      ab_varlen_full_b4t4096,ncu_lse_full_s1024,te_full_baseline}.out.txt`。
 
 ## 灵感 / backlog
 

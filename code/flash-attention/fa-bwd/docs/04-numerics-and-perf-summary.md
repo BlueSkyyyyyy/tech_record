@@ -1188,6 +1188,13 @@ Waves 7.76 ⇒ bound = **L2 red + L1/TEX + 低 occupancy**，与定长 wgmma2 �
 切到通用 mma `lse_mma_kernel`（加 `cu_seqlens` 默认参数，`nullptr` 时定长逐位不变）。
 主 kernel 本就带 `causal`，无需改。三 dtype 单/两文件均完成，device 逐字一致。
 
+> **O68（第 162 轮）更正**：上句里 fp8 的「通用 mma `lse_mma_kernel`」实为 **O1 版（无 `cp.async`
+> 流水）**，是唯一没跟上 O11/O54 均衡/流水改造的分支。O68 把 **fp8 的定长 full 与 varlen full
+> D=128** 都改走 O54 的 `lse_mma_kernel_bal<128,1,FULL=true>`（一个 CTA 一个 m 块 + `cp.async`
+> 双缓冲）：定长 S1024 full **total 0.539→0.374ms（1.44×）**、varlen `[1024]×4` full
+> **1.559→1.229ms（1.27×）**（下表 fp8 行随更新），LSE 本身 **208→42µs（4.93×）**、数值只差
+> LSE 的 fp32 求和次序（~1e-3）。详见 `docs/03` §94。
+
 **数值对拍（ours vs fp32 ref，full，max_abs dq/dk/dv）**：
 
 | varlen case | lengths | fp16 | bf16 | fp8 |
@@ -1207,7 +1214,7 @@ Waves 7.76 ⇒ bound = **L2 red + L1/TEX + 低 occupancy**，与定长 wgmma2 �
 |---|---|---|---|---|
 | fp16 | 0.9090（0.450 causal 的 2.02×） | 75.6 | 0.2805 / 245.0TF | 0.4740 / 145.0TF |
 | bf16 | 0.9088 | 75.6 | 0.2787 / 246.6TF | 0.4663 / 147.4TF |
-| fp8 | 1.5800 | 43.5 | 0.4316 / 159.2TF（含 forward） | — |
+| fp8 | **1.2293**（O68，旧 1.5800） | **55.9** | 0.4316 / 159.2TF（含 forward） | — |
 
 ncu（main，b4_t3840）：fp16 Duration 705µs / DRAM 7.9% / L1TEX 49% / **L2 70.3%** /
 Compute 35.8% / 1 CTA/SM（occ 12.5%）；fp8 Duration 1.20ms / DRAM 5.1% / L1TEX 62.5% /

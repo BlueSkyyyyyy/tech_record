@@ -4432,6 +4432,12 @@ __global__ void convert_kernel(const float* __restrict__ dq_acc,
     }                                                                           \
   } while (0)
 
+// 第 162 轮 O68：非 causal（full）D=128 的 LSE 用 O54 的均衡版
+//   `lse_mma_kernel_bal<HD,PIPE,FULL=true>`（一个 CTA 一个 m 块 + cp.async 双缓冲）
+//   替代 O1 的 `lse_mma_kernel`（无流水，逐标量 global→smem）。默认 1；`--lsefull=0`
+//   退回 O1 做同 binary A/B。定长与 varlen 两条 full 路径都读这个开关（故用文件作用域）。
+static int g_lse_full_opt = 1;
+
 #if defined(FA_WGMMA) && defined(FA_TMA)
 // O32：为 LSE 的 Q/K 建 4D TMA 描述符（dims={D,S,H,B}，SW128，box={128,64,1,1}）。
 // fp8 一行 = 128 字节 = SW128 atom 整行 ⇒ 一个 box 覆盖整个 head_dim（不像 fp16 需 2 chunk）。
@@ -5126,9 +5132,14 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
                                d_lse_part, lse_split_eff, (long long)rows_q);
     } else {
       dim3 lg(nblk, H, B);
-      if (D == 128)
-        launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
-      else if (lseocc == 5 || lseocc == 6)
+      if (D == 128) {
+        // O68（第 162 轮）：varlen full D=128 的 LSE 同定长，改走 O54 均衡版（cp.async 双缓冲）。
+        if (g_lse_full_opt)
+          launch_lse_bal<128, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv,
+                                       scale, d_cu, nullptr, 1);
+        else
+          launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
+      } else if (lseocc == 5 || lseocc == 6)
         // O58：full MLA varlen 的 LSE「2 CTA/SM」几何（O57 的 fp8 同构；默认仍是 O54 旧路）。
         if (lseocc == 5)
           launch_lse_bal<512, 0, true, 128, 32>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv,
@@ -5983,6 +5994,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--wgmma=", 0) == 0) wgmma = atoi(a.c_str() + 8);
     else if (a.rfind("--lsetma=", 0) == 0) lse_tma = atoi(a.c_str() + 9);
     else if (a.rfind("--lsesplit=", 0) == 0) lse_split = atoi(a.c_str() + 11);
+    else if (a.rfind("--lsefull=", 0) == 0) g_lse_full_opt = atoi(a.c_str() + 10);
+    else if (a == "--lsefull") g_lse_full_opt = 1;
     else if (a.rfind("--mla8w=", 0) == 0) mla8w_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--mlakvp=", 0) == 0) mla_kvp_opt = atoi(a.c_str() + 9);
     else if (a == "--mlakvp") mla_kvp_opt = 1;
@@ -6343,6 +6356,13 @@ int main(int argc, char** argv) {
 #endif
           launch_lse_bal<128, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale,
                                  nullptr, d_lse_part, lse_split_eff);
+      } else if (g_lse_full_opt) {
+        // O68（第 162 轮）：非 causal D=128 的 LSE 从 O1 `lse_mma_kernel`（无 cp.async 流水）
+        //   改走 O54 的均衡版 `lse_mma_kernel_bal<FULL=true>`——一个 CTA 一个 m 块、
+        //   K 用 `cp.async` 16B 双缓冲。full 各 m 块工作量相同（均 nblk 个 tile）无需镜像配对。
+        //   `--lsefull=0` 退回 O1（逐标量 global→smem）做同 binary A/B。
+        launch_lse_bal<128, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale,
+                                     nullptr, nullptr, 1);
       } else
         launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
       if (do_delta) {
