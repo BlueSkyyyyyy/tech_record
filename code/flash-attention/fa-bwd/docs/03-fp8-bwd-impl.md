@@ -6123,3 +6123,94 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" scripts/ru
 「阻塞」）或「partial 降精度存储（fp16/bf16，确定性保留但改数值口径）」；② 把 DET 的
 reduce 做成 **L2 内偏和**（persistent CTA / cluster 分布式归约）以少一趟 DRAM；③ 非确定性
 性能仍受本卡寄存器/smem 硬墙锁定，见 ROADMAP「阻塞」。
+
+---
+
+## 67. F1（第一百三十二轮，**正结果，默认化**）：fp8 主路径默认切到 Hopper（wgmma GEMM1/2 + Q/K/V/dO 4D-TMA）
+
+### 67.1 动机与现状（fp8 专项冲刺第一步）
+
+ROADMAP『fp8 专项冲刺：用 SASS/PTX 对标 TE』指出：TE 的 fp8 反向是
+`..._flash_bprop_wgmma_f8_...`（**QGMMA + TMA + WARPGROUP**，64x64x128、384 线程、132 CTA，
+S=4096 约 258µs），而 ours 的 `ours` 口径此前一直跑在 **`-arch=sm_90` 的 mma.sync** 上
+（SASS 全 `HMMA`/`LDSM`，无 `QGMMA`/`TMA`）。但仓库里其实**早就有** Hopper 实现：
+O9c-2 的主 kernel GEMM1/2 `wgmma`、O32/O9c 的 LSE `wgmma`/TMA、O37 的 Q/dO 4D-TMA、
+O41 的 K/V 4D-TMA——只是它们**只在显式传 `--hopper` / 用 `-DFA_WGMMA -DFA_TMA` 构建时才生效**，
+默认 harness 仍走 mma。F1 = 把这条已存在的快路**默认化**。
+
+### 67.2 实现（host / harness-only，device 一行未改）
+
+- **`scripts/run.sh` 默认不变**（仍 `-arch=sm_90`，供 smoke / 单 kernel 用），只改**标准入口**
+  `harness/fa_bwd_run.py`：新增 `FP8_HOPPER_DEFAULT = True`，**fp8 定长 case 的构建环境切到
+  `HOPPER_FLAGS`**（`-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda`）；
+  varlen 与 fp16/bf16 保持原口径（`docs/04` 表稳定）。新增 `--mma` 让 fp8 退回旧 mma 构建做 A/B。
+  `-lcuda` 是 TMA 描述符 `cuTensorMapEncodeTiled` 的链接项；`ARCH=""` 让 gencode 生效
+  （CUDA 13 的 nvcc 不认 `-arch=sm_90a`）。
+- **device 无改动**：`-DFA_WGMMA -DFA_TMA` 下 host 自动打印
+  `O32: lse backend = tma`、`O37: main qd-tma = on`、`O41: main kv-tma = on`，主 kernel 选到
+  `fa_bwd_fp8_mma_kvtma_kernel`（Q/dO/K/V 全 4D-TMA + GEMM1/2 wgmma）。
+
+### 67.3 SASS 证据（`cuobjdump -sass`，与 TE 的 QGMMA+TMA 对标）
+
+| kernel（活跃实例） | QGMMA | HMMA | LDSM | UTMA/UBLKCP |
+|---|---|---|---|---|
+| 旧默认 `fa_bwd_fp8_mma_kernel`（`sm_90`，REGDQ） | **0** | **160** | **78** | 0 |
+| 新默认 `fa_bwd_fp8_mma_kvtma_kernel`（`sm90a`，REGDQ） | **8** | **96** | **46** | **7** |
+
+即默认化后：**GEMM1/2（S=QKᵀ、dP=dO·Vᵀ）切到 `wgmma`（8 条 QGMMA），Q/K/V/dO 由 7 条 TMA
+搬运**；**GEMM3/4/5 仍是 mma.sync（96 HMMA + 46 LDSM）**——这正是 backlog 的下一堵墙
+（O9c-2b 已判 fp8 `wgmma` 无转置操作数、MN-major 描述符无效，见 ROADMAP「阻塞」）。
+原始输出 `src/fp8/fa_bwd_fp8_p132_sass_counts.out.txt`。
+
+### 67.4 数值：与历史在 fp8 容差内一致（默认路径换后端，不改数学口径）
+
+fp8 定长 12 case（含 GQA/MQA/MLA）**ours vs ref** 与历史逐位同级：S512 `2.426/2.972/3.733e-1`、
+S1024H32 `2.399/4.177/3.535e-1`、S4096 `2.635/2.644/3.216e-1`、GQA kv4 `2.517/5.339/7.173e-1`、
+MLA S1024H2 `2.232/3.337/3.602e-1`；单/两文件一致性 gate `worst=1.049e-5`（容差 1e-4）OK。
+`docs/04` auto 表已按新默认刷新（fp8 各行仅末位噪声级变化）。
+
+### 67.5 性能（同 session，CUDA event，两文件 fp8）
+
+| shape | mma 默认 total / main (ms) | **Hopper 默认 total / main (ms)** | 端到端比 | TE FP8 total (ms) | ours/TE |
+|---|---|---|---|---|---|
+| S512 H16 | 0.1139 / 0.0636 | **0.1004 / 0.0552** | 1.135× | 0.0355 | 2.83× |
+| S1024 H32 | — / — | **0.3879 / 0.2641** | — | 0.0741 | 5.23× |
+| S4096 H16 | 2.3990 / 1.8849 | **1.9459 / 1.6084** | 1.233× | 0.3027 | 6.43× |
+
+默认化**端到端 1.14–1.23×**（S4096 主 kernel 1.17×、LSE 0.38→0.22ms）；相对同 session TE FP8
+仍是 2.8–6.4×（sprint 起点，F2–F5 继续收）。
+
+### 67.6 ncu：默认换到 Hopper 后**墙没有变**（验证 backlog 判断）
+
+`fa_bwd_fp8_mma_kvtma_kernel`（S=4096，ksplit=8，grid 8192，128 线程）：
+Duration **1.59ms**、**L2 77.9% / L1TEX 70.4% / Compute 47.1% / DRAM 4.3%**、
+168 regs / 74.82KB smem → **3 CTA/SM（occ 18.4%）**、Waves 20.7；
+stall **`wait 1.59` + `short_scoreboard 1.29` + `long 0.59` + `not_selected 0.40` + `barrier 0.42`**；
+L2 `red` = **114.5M 扇区**（dK/dV 跨 CTA `atomicAdd`）。这与 ROADMAP「阻塞」里
+「fp8 主 kernel 3 CTA/SM 下唯一能打的杠杆是跨-tile `P/dS` 双缓冲，但 smem 放不下」的核算
+**逐项吻合**——默认 wgmma+TMA 只是把搬运/GEMM1-2 打快，**GEMM3/4/5 的 mma 依赖（wait+short）
+与 L2 `red` 仍是墙**，是 F3/F4 的靶子。
+原始输出 `src/fp8/fa_bwd_fp8_p132_ncu_main_s4096.out.txt`、`..._p132_stall_s4096.out.txt`。
+
+### 67.7 复现 / 原始输出
+
+```bash
+# 新默认（fp8 定长走 Hopper）：一键跑 ours + 汇总 + 一致性 + docs/04 校验
+python3 harness/fa_bwd_run.py --dtype fp8 --fixed-only
+python3 harness/fa_bwd_run.py --no-run --ci
+# A/B：--mma 退回旧 mma.sync 构建
+python3 harness/fa_bwd_run.py --dtype fp8 --fixed-only --mma
+# 直接跑（sm90a + wgmma + TMA）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_p132_main_{s512,s1024_h32,s4096}*.out.txt`（Hopper）、
+`src/fp8/fa_bwd_fp8_p132_mma_{s512,s4096}*.out.txt`（A/B mma）、
+`src/fp8/fa_bwd_fp8_p132_sass_counts.out.txt`、`..._p132_ncu_main_s4096.out.txt`、
+`..._p132_stall_s4096.out.txt`、`..._p132_te_baseline.out.txt`。
+
+**下一步候选**：① 仍无法把 GEMM3/4/5 上 wgmma（无转置操作数，见「阻塞」）⇒ 转 **F3
+（warp specialization / 更深 mbarrier 流水）**与 **F4（dK/dV 归约去 L2 `red`）**；
+② 把 fp8 的 partial 降精度 + 扇区化（第 131 轮候选 ①，`fp8_mma_body` 两个写点）接上，
+压 L2 `red`；③ preprocess（F5）S4096 已仅 0.22ms、非当前墙。

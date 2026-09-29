@@ -26,6 +26,7 @@
   python harness/fa_bwd_run.py --no-consistency        # 关掉默认的「单/两文件一致性 gate」（P3-3g）
   python harness/fa_bwd_run.py --dry-run               # 只打印将执行的命令
   python harness/fa_bwd_run.py --hopper                # 定长也走 Hopper 快路（-DFA_WGMMA -DFA_TMA，P3-4d）
+  python harness/fa_bwd_run.py --mma                   # F1：fp8 退回旧 mma.sync 构建（默认已切 Hopper）
   python harness/fa_bwd_run.py --ci --no-run           # 一条命令：汇总 + 一致性 gate + docs/04 表校验（P3-4d）
   python harness/fa_bwd_run.py --ci --perf-baseline fp16   # CI + 纯反向基线（FA2/FA3/TE）落盘
 
@@ -85,7 +86,7 @@ PREFIX = {"twofile": "ours", "singlefile": "ours_sf"}
 # 「单/两文件一致性 gate」把「构建配置差异」误判成「实现分叉」。
 HOPPER_PREFIX = {"twofile": "ours_hp", "singlefile": "ours_sf_hp"}
 
-# 构建配置：定长走默认 sm_90（mma，与 P3-3 表一致）；varlen 入口在 `#ifdef FA_WGMMA` 内，
+# 构建配置：定长默认 sm_90（mma）；varlen 入口在 `#ifdef FA_WGMMA` 内，
 # 需 `sm_90a` + `-DFA_WGMMA`（fp16/bf16 必需；fp8 同样可行）。
 BUILD = {
     "fixed":  {"ARCH": "sm_90", "NVCC_FLAGS": ""},
@@ -95,6 +96,13 @@ BUILD = {
 # （`cuTensorMapEncodeTiled`）必需的链接项；`ARCH=""` 让 flags 里的 gencode 生效
 # （CUDA 13 的 nvcc 不认 `-arch=sm_90a`）。
 HOPPER_FLAGS = "-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda"
+# F1（第一百三十二轮）：**fp8 定长默认切到 Hopper 快路**（`wgmma` GEMM1/2 + Q/K/V/dO 的 4D-TMA），
+# 对齐 ROADMAP『fp8 专项冲刺 F1』——此前 fp8 的 `ours` 口径是 `-arch=sm_90` 的 mma.sync
+# （SASS：160×HMMA + 78×LDSM，无 QGMMA/TMA），而 TE 的 fp8 反向是 QGMMA+TMA+WARPGROUP。
+# 只有把默认构建改成 `sm90a`，host 才会走 `-DFA_WGMMA -DFA_TMA` 下的 wgmma+TMA 主路径
+# （SASS：8×QGMMA + 96×HMMA + 46×LDSM + 7×UTMA）。fp16/bf16 的默认口径**不变**（仍 mma），
+# 以保持 docs/04 表稳定；`--mma` 可让 fp8 退回旧的 mma.sync 构建做 A/B 回归。
+FP8_HOPPER_DEFAULT = True
 
 
 def discover(args):
@@ -181,6 +189,8 @@ def main():
     ap.add_argument("--docs-md", default=str(ROOT / "docs" / "04-numerics-and-perf-summary.md"))
     ap.add_argument("--hopper", action="store_true",
                     help="P3-4d：定长也走 Hopper 快路构建（-DFA_WGMMA -DFA_TMA -lcuda，sm90a）")
+    ap.add_argument("--mma", action="store_true",
+                    help="F1：让 fp8 定长退回旧的 mma.sync 构建（-arch=sm_90，解 fp8 默认 Hopper）做 A/B")
     ap.add_argument("--ci", action="store_true",
                     help="P3-4d：一条命令收口——跑完后自动校验 docs/04 内嵌表最新（陈旧则退出码 1）")
     ap.add_argument("--perf-baseline", default=None, metavar="DTYPE",
@@ -223,6 +233,10 @@ def main():
             summary.append(f"[skip] {case_dir.name}: 未知 dtype={dt}")
             continue
         cfg = "varlen" if is_varlen else "fixed"
+        # F1：fp8 定长默认走 Hopper（wgmma+TMA）；`--mma` 或 `--hopper`（全局前缀）时退回/统一。
+        fp8_hopper = (FP8_HOPPER_DEFAULT and dt == "fp8" and not is_varlen
+                      and not args.mma and not args.hopper)
+        build_env = ({"ARCH": "", "NVCC_FLAGS": HOPPER_FLAGS} if fp8_hopper else BUILD[cfg])
         compare_cases.append(case_dir.name)
         for impl in impls:
             src, bin_name = HOSTS[dt][impl]
@@ -244,14 +258,14 @@ def main():
                 logs[dt].append("  (--no-run: 复用已有 npy)")
                 continue
 
-            key = (src, cfg, args.hopper)
+            key = (src, cfg, args.hopper, fp8_hopper)
             if key in built and Path(os.path.realpath(ROOT / src)).with_suffix(".out").exists():
                 r = run_via_binary(src, built[key], prog_args)
                 how = f"binary {built[key]}.out"
             else:
-                r = run_via_runsh(src, prog_args, BUILD[cfg])
+                r = run_via_runsh(src, prog_args, build_env)
                 built[key] = bin_name
-                how = f"run.sh ({cfg})"
+                how = f"run.sh ({cfg}{', fp8-hopper' if fp8_hopper else ''})"
             out = (r.stdout or "") + (r.stderr or "")
             logs[dt].append(f"  [{how}] rc={r.returncode}")
             logs[dt].append(out.rstrip())

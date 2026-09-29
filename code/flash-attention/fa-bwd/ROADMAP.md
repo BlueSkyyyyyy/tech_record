@@ -2678,8 +2678,15 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 `ncu --page source --print-source sass`、`--kernel-name-base mangled`。
 
 **任务（按序）**：
-- [ ] **F1** fp8 main 默认走 **wgmma**（补全 O9c 的 GEMM3/4/5、默认开启），数值逐位/容差不变
-- [ ] **F2** Q/dO 也上 **4D TMA**（K/V 已在 O41）
+- [x] **F1** fp8 main 默认走 **wgmma**（补全 O9c 的 GEMM3/4/5、默认开启），数值逐位/容差不变
+      → **已完成（第一百三十二轮）**：只改标准入口 `harness/fa_bwd_run.py`（`FP8_HOPPER_DEFAULT`，
+      fp8 定长构建切 `sm90a -DFA_WGMMA -DFA_TMA -lcuda`；`--mma` 回退），**device 一行未改**。
+      SASS：QGMMA 0→**8**、HMMA 160→**96**、LDSM 78→**46**、新增 **7×UTMA**；端到端
+      **1.14–1.23×**（S4096 total 2.399→1.946ms）。**GEMM3/4/5 仍 mma.sync**——O9c-2b 已判
+      fp8 wgmma 无转置操作数、MN-major 描述符无效（见「阻塞」），故 F1 只做到「已实现快路默认化」，
+      补全需等 F3/F4 的非 wgmma 手段。详见 `docs/03` §67、`docs/08` §5.47、`docs/04` 表。
+- [x] **F2** Q/dO 也上 **4D TMA**（K/V 已在 O41）
+      → 实际早在 **O37** 完成、并在 F1 默认化里生效（`qd-tma=on`），此处标注为已覆盖。
 - [ ] **F3** **warp specialization / 更深 mbarrier 流水**（对标 TE 384 线程、1 CTA/SM）
 - [ ] **F4** dK/dV 归约（L2 red；fp8 天花板实验显示占 ~35%）
 - [ ] **F5** preprocess 继续提速
@@ -2688,6 +2695,22 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
+> **最新（第一百三十二轮）**：**F1——fp8 主路径默认切到 Hopper（wgmma GEMM1/2 + Q/K/V/dO
+> 4D-TMA；harness-only，device 一行未改）**。落实『fp8 专项冲刺』第一步：ours 的 `ours` 口径
+> 此前一直是 `-arch=sm_90` 的 mma.sync，而 O9c-2/O32/O37/O41 的 wgmma+TMA 只在 `--hopper` 下生效。
+> `harness/fa_bwd_run.py` 新增 `FP8_HOPPER_DEFAULT`（fp8 定长构建切 `sm90a -DFA_WGMMA -DFA_TMA
+> -lcuda`；`--mma` 回退）。**SASS：QGMMA 0→8、HMMA 160→96、LDSM 78→46、7×UTMA**；端到端
+> **1.14–1.23×**（S4096 total 2.399→**1.946ms**），相对同 session TE FP8 **2.83×/5.23×/6.43×**。
+> 数值与历史在 fp8 容差内一致、单/两文件 gate worst=1.05e-5、`--check docs/04` OK。
+> **ncu 墙未变**：`wait 1.59 + short 1.29`、L2 `red` 114.5M（3 CTA/SM），GEMM3/4/5 仍 mma.sync
+> （fp8 wgmma 无转置操作数，见「阻塞」）。详见「当前进度 第一百三十二轮」、`docs/03` §67、
+> `docs/08` §5.47；原始输出 `src/fp8/fa_bwd_fp8_p132_*`。
+> **下一步候选**：① **F3（warp specialization / 更深 mbarrier 流水，对标 TE 384 线程/1 CTA/SM）**
+> ——当前 `wait 1.59 + short 1.29` 的最大来源是 GEMM3/4/5 的 mma 依赖，WS 只能*重叠*不能*减少*，
+> 先按 O48 的判据（被拆的工作是否「发射即返回」）评估；② **F4（dK/dV 去 L2 `red`，114.5M 扇区）**
+> 可复用第 131 轮 fp8 的 partial 降精度+扇区化候选（`fp8_mma_body` 两个写点，当前 fp32）；
+> ③ 非确定性/默认路径性能仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
+>
 > **最新（第一百三十轮）**：**O61——把 fp16 的确定性 `--det` + partial 降精度逐字 dtype
 > 参数化到 bf16（功能补齐 / 混合结果，opt-in A/B）**。落实现第一百二十九轮候选 ②：三 dtype
 > 里 **bf16 是唯一没有 `--det` 的**，本轮把 O7b（partial 覆盖写 + 固定次序二次归约）+ O60
@@ -4954,6 +4977,35 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     当前 fp32）；② 非确定 atomic 路径的 dK/dV 写也可试同款扇区化（当前 atomic 的 float2 已
     落满 32B，但 dK/dV 跨 CTA 归约的另一半墙是 L2 red）；③ 非确定性/默认路径性能仍受本卡
     寄存器/smem 硬墙锁定，见「阻塞」。
+
+- 2026-09-29（第一百三十二轮）：**F1 完成（fp8 主路径默认切到 Hopper：wgmma GEMM1/2 +
+  Q/K/V/dO 4D-TMA；正结果，默认化，harness-only）**——『fp8 专项冲刺』第一步。
+  - 动机：TE fp8 反向是 **QGMMA+TMA+WARPGROUP**，而 ours 的 `ours` 口径一直是 `-arch=sm_90`
+    的 mma.sync（SASS 160×HMMA+78×LDSM、无 QGMMA/TMA）。但其实 **O9c-2/O32/O37/O41 早已把
+    wgmma+TMA 实现好**，只在显式 `--hopper`（`-DFA_WGMMA -DFA_TMA`）下生效。F1 = 把这条已存在
+    的快路默认化。
+  - **改动（host/harness-only，device 一行未改）**：`harness/fa_bwd_run.py` 新增
+    `FP8_HOPPER_DEFAULT=True`——**fp8 定长 case 的构建切到**
+    `-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda`（varlen 与 fp16/bf16
+    不变，`docs/04` 表稳定）；新增 `--mma` 回退旧 mma 构建做 A/B。`scripts/run.sh` 默认不变。
+    host 自动打印 `O32 lse=tma / O37 qd-tma=on / O41 kv-tma=on`，选到
+    `fa_bwd_fp8_mma_kvtma_kernel`。
+  - **SASS（`cuobjdump -sass`）**：活跃主 kernel 从 **QGMMA 0 / HMMA 160 / LDSM 78 / UTMA 0**
+    → **QGMMA 8 / HMMA 96 / LDSM 46 / UTMA 7**。即 GEMM1/2 上 wgmma、Q/K/V/dO 走 TMA；
+    **GEMM3/4/5 仍 mma.sync**（fp8 wgmma 无转置操作数=O9c-2b 硬件阻塞，见「阻塞」）。
+  - **数值**：fp8 定长 12 case（MHA/GQA/MQA/MLA）**ours vs ref** 与历史在容差内一致
+    （S512 2.426/2.972/3.733e-1、S1024H32 2.399/4.177/3.535e-1、S4096 2.635/2.644/3.216e-1、
+    GQA kv4 2.517/5.339/7.173e-1、MLA S1024H2 2.232/3.337/3.602e-1）；单/两文件 gate
+    **worst=1.049e-5（tol 1e-4）OK**；`--check docs/04` 刷新后 OK 194 行。
+  - **性能**（同 session，event，两文件）：端到端 **1.14–1.23×**——S512 0.1139→**0.1004ms**、
+    S4096 2.399→**1.9459ms**（main 1.8849→**1.6084**、LSE 0.38→0.22）；同 session TE FP8
+    0.0355/0.0741/0.3027ms ⇒ ours/TE = **2.83×/5.23×/6.43×**（S512/S1024H32/S4096）。
+  - **ncu（kvtma, S=4096, ksplit=8, grid 8192）**：Duration 1.59ms、**L2 77.9% / L1TEX 70.4%
+    / Compute 47.1% / DRAM 4.3%**、168 regs / 74.82KB → **3 CTA/SM（occ 18.4%）**、Waves 20.7；
+    stall **`wait 1.59 + short_scoreboard 1.29`**、L2 `red` **114.5M 扇区**。**墙与默认化前一致**，
+    与「阻塞」里「跨-tile `P/dS` 双缓冲放不下」的核算逐项吻合 ⇒ 下一步 F3（warp specialization）
+    /F4（去 L2 `red`）。详见 `docs/03` §67、`docs/08` §5.47；原始输出
+    `src/fp8/fa_bwd_fp8_p132_*`。
 
 ## 灵感 / backlog
 

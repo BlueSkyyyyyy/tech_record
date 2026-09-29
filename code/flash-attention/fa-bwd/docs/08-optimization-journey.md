@@ -714,6 +714,21 @@ smem 冲突 + 低 occ
       `--check docs/04` OK 194 行。详见 `docs/01` §18、`docs/01b` §6au、`docs/00` §4.2。
       原始输出 `src/fp16/fa_bwd_fp16_*_o62_*`、`src/bf16/fa_bwd_bf16_*p62*`。
 
+47. **F1（第 132 轮，harness-only，正结果，默认化）**：**fp8 主路径默认切到 Hopper**
+      （wgmma GEMM1/2 + Q/K/V/dO 4D-TMA）——落实 ROADMAP『fp8 专项冲刺』第一步。此前 ours 的
+      `ours` 口径一直是 `-arch=sm_90` 的 mma.sync（SASS：160×HMMA + 78×LDSM、无 QGMMA/TMA），
+      而 O9c-2/O32/O37/O41 早已把 wgmma+TMA 实现好、只是 opt-in。F1 只改标准入口
+      `harness/fa_bwd_run.py`（`FP8_HOPPER_DEFAULT`：fp8 定长用
+      `sm90a -DFA_WGMMA -DFA_TMA -lcuda`，新增 `--mma` 回退），**device 一行未改**；host 自动打印
+      `qd-tma=on / kv-tma=on` 并选到 `fa_bwd_fp8_mma_kvtma_kernel`。**SASS：QGMMA 0→8、HMMA
+      160→96、LDSM 78→46、新增 7×UTMA**（GEMM3/4/5 仍是 mma.sync，因 fp8 wgmma 无转置操作数）。
+      数值与历史在 fp8 容差内一致（S4096 `2.635/2.644/3.216e-1`），单/两文件 gate `worst=1.05e-5`。
+      **端到端 1.14–1.23×**（S4096 total 2.399→**1.946ms**、main 1.885→1.608ms），相对同 session
+      TE FP8 仍 2.83×/5.23×/6.43×（S512/S1024/S4096）。**ncu：墙未变**——`wait 1.59 +
+      short_scoreboard 1.29`、L2 `red` 114.5M 扇区、L2 77.9%、3 CTA/SM，与 ROADMAP「阻塞」的
+      核算逐项吻合（下一步 F3/F4）。详见 `docs/03` §67；原始输出 `src/fp8/fa_bwd_fp8_p132_*`、
+      `src/fp8/fa_bwd_fp8_p132_{sass_counts,ncu_main_s4096,stall_s4096,te_baseline}.out.txt`。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。
