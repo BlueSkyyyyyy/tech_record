@@ -7137,8 +7137,14 @@ wgmma2 的 smem 明细（代码常量）：`Qs/dOs` SW128 2×16384、`Ks/Vs` 2×
 - **可行但代价高**：`Ps/Ss` fp32→fp16（−18,944B）+ 去全部 padding（约 −10KB）刚压到
   ~105KB，但 `Ps` 是 `[0,1]` 的 P、`Ss` 改半精度会**改数值口径**；且 regs 212 要降到
   ≤128 才能真 2 CTA/SM（`__launch_bounds__(256,2)`），**−84 寄存器必然大 spill**。
-- ⇒ 即便绕过 Qp/dOp，F6 也**只能停在 1 CTA/SM**；而 1 CTA/SM 下 212 regs/8 warp 的延迟
+  - ⇒ 即便绕过 Qp/dOp，F6 也**只能停在 1 CTA/SM**；而 1 CTA/SM 下 212 regs/8 warp 的延迟
   隐藏正是它只有默认档 0.66–0.68× 的原因（§76）。**F6「冲 2 CTA/SM」在本卡不成立。**
+
+本轮 ncu（`fa_bwd_fp8_wgmma2_kernel`，S=512，`--set full`）复核：**212 regs**、
+**Dynamic Shared Memory 136.45KB**、`Block Limit Registers=1` / `Block Limit Shared Mem=1`、
+**Theoretical/Achieved Occupancy 12.50%/12.45%**、DRAM 4.67% / L2 29.18% / Compute 25.09%、
+`No Eligible 70.45%`（原始输出 `fa_bwd_fp8_p142_ncu_wgmma2_s512.out.txt`）⇒ 与 §76 逐项一致，
+确认「寄存器 + smem 双限 1 CTA/SM」是 F6 的硬墙。
 
 ### 77.6 性能复核（同 session，CUDA event，main-only）
 
