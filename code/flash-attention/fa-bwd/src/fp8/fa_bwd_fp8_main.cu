@@ -1760,7 +1760,11 @@ int main(int argc, char** argv) {
     // O39：D=512（MLA，mma LSE）目标 `grid*split ≈ 256`、上限 16；D=128 的 TMA LSE 维持
     //   O38 的 `≈2048`、上限 8。O59：cfg6 的 4 CTA/SM 把并发槽翻倍，目标抬到 1024
     //   （对齐 O58 varlen 的 fp8 档）。
-    const int target = (D == 512) ? (causal_cfg6_fixed ? 1024 : 256) : 2048;
+    // O63（第 138 轮）：D=128 的 TMA LSE 在大 S 上原目标 2048 会比实测最优**多切一档**——
+    //   S=4096 H16 时 base=`lg_grid`=512，2048→split=4，而同 binary 交替实测 split=2 的
+    //   LSE 快 ~2.7%（端到端在噪声内）。S≥2048 时把目标降到 1024（仍 ≈2 个满波量级）；
+    //   S<2048 维持 2048，避免小 shape 的二次归约/尾部回归（S512/S1024H32 实测两档相同）。
+    const int target = (D == 512) ? (causal_cfg6_fixed ? 1024 : 256) : (S >= 2048 ? 1024 : 2048);
     const int cap = (D == 512) ? 16 : 8;
     int sp = 1;
     while (sp < cap && lg_grid * (sp * 2) <= target) sp *= 2;
