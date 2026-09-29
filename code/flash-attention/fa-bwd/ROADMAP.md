@@ -207,10 +207,15 @@
   单一 owner + TMA store-reduce / persistent 调度**（对标 TE 132 CTA；O42 的 `cp.reduce.async.bulk`
    失败是因为**没换工作划分**，只加 staging、归约次数没降）。工程量大，是当前唯一经 ncu 钉死的
    真杠杆。详见 `docs/03` §80、`docs/08` §5.61。
-   **进展（第一百五十轮 F7 第三步）**：KV-owner 已落进**真实 fp8 mma**（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，
+    **进展（第一百五十轮 F7 第三步）**：KV-owner 已落进**真实 fp8 mma**（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，
    dK/dV），`red` 114.5M→**0** 确认；但单做 dK/dV（无持久化/TMA/重叠）不构成净收益——
    `red` 被换成 **Q/dO 跨 CTA 读放大（1.40×）+ 寄存器墙**。F7 主体尚需 persistent+4D-TMA。
    详见 `docs/03` §83。
+   **进展（第一百五十三轮 F7 第六步）**：persistent 栅格改用 **dynamic work-queue**（`atomicAdd`
+   领 tile，LPT 重块前置）——`red` 仍 0，S4096 static-persist 的 0.715× **恢复到 0.993×**
+   （追平硬件调度的 base），并查明 static 的 L2 读扇区多 1.42×（步长撒在 ~6 head ⇒ 局部性损失）。
+   **「持久化有害」修正为「静态划分有害」**；持久化本身可用。F7 主体（4D-TMA + dQ 同循环 +
+   降寄存器冲 4 CTA/SM）仍待做。详见 `docs/03` §86。
 - **F6（BM=128 双 warpgroup）「去 Qp/dOp 冲 2 CTA/SM」在 fp8 上不可行（第一百四十二轮三证收口）。**
   ① fp8 `mma.m16n8k32` **只有 `.row.col`**（`.col.row/.row.row/.col.col` 被 ptxas 拒）⇒
   GEMM3/4/5 的 B（`Qᵀ/dOᵀ/Kᵀ`）必须 col-major、**必须转置**；② fp8 的 1 个 b16=2 个 fp8，
@@ -2854,15 +2859,40 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
        永不反超**：S4096 pgrid=132→**0.313×**、264→0.558×、396→**0.707×**、1188→0.931×、
        2048（无循环）→0.931×（vs base 1.414ms）；S512(无循环)=0.921×。ncu 根因：base waves 5.17 /
        Compute 46.9%，persist(pgrid=396) waves **1.0** / Compute **32.5%**、Eligible 0.82→0.67
-       ⇒ **causal 块间负载差 ~64×，静态 strided 划分无硬件动态回填**。**TE grid=132 可行因其
-       tile 划分均匀；照搬「grid=132」到 causal 偏斜的 KV-owner 上有害**。见 `docs/03` §85、
-       `docs/08` §5.66；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p152_*`。
+        ⇒ **causal 块间负载差 ~64×，静态 strided 划分无硬件动态回填**。**TE grid=132 可行因其
+        tile 划分均匀；照搬「grid=132」到 causal 偏斜的 KV-owner 上有害**。见 `docs/03` §85、
+        `docs/08` §5.66；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p152_*`。
+        → **第六步已完成（第一百五十三轮，dynamic work-queue 调度：正结果）**：`persist_kernel`
+        加 `bool DYN` + `int* wq`，`DYN=true` 用 `atomicAdd` 领 tile（LPT 重块前置）、host
+        `d_wq` 清零。**数值逐位=0**；S4096 base 1.4151 / static 1.9799（0.715×）/
+        **dyn 1.4248ms（0.993×、dyn/static 1.390×）**；ncu 三者的 `red` 均=0，且发现 static 的
+        `lts read` 72.2M = dyn/base 的 ~1.42×（**步长撒在 ~6 head ⇒ L2 局部性损失**，非单纯负载
+        不均）。**「persistent 只能更慢」修正为「静态 persistent 更慢」**；持久化不再是障碍，
+        为 F7 主体（持久 CTA + TMA staging + dQ 同循环）提供可用调度骨架，但 dyn 相对 base 仅
+        中性（无 dQ）⇒ 要转正仍需叠加 4D-TMA / 降寄存器 / 打 `wait`。见 `docs/03` §86、`docs/08` §5.67。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百五十二轮）**：**F7 主体第一步——KV-owner mma 原型的 persistent 调度
+> **最新（第一百五十三轮）**：**F7 第六步——KV-owner mma 原型的 dynamic work-queue 调度
+> （正结果）**。落实第一百五十二轮「下一步候选 ①」的「动态负载均衡」子项：
+> `fp8_kvowner_dkv_persist_kernel` 加模板参 `bool DYN` + `int* wq`，`DYN=true` 时循环顶
+> `if (tid==0) s_tile=atomicAdd(wq,1); __syncthreads();` 领 tile 直至越界（tile=`h*nblk+jblk`，
+> 小 `j0` 先领 = LPT），host 加 `d_wq` 每次 launch 前清零。**数值逐位=0**（仅换栅格映射）；
+> **性能**：S4096 base 1.4151 / static 1.9799（0.715×）/ **dyn 1.4248ms（0.993×、dyn/static
+> 1.390×）**；S512 dyn/base 0.977×。**ncu**：三者 `red` 均=0，发现 static 的 `lts read`
+> 72.2M = dyn/base 的 ~1.42× ⇒ 修正第一百五十二轮单因归因：**static strided 步长把并发 CTA
+> 撒在 ~6 head、Q/dO 工作集打散（L2 局部性损失）+ 负载不均**，dynamic 一并消除。
+> **「persistent 只能更慢」修正为「静态 persistent 更慢」**——持久化不再是障碍。
+> 文档 `docs/03` §86、`docs/08` §5.67；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p153_*`。
+> **下一步候选**：① **F7 主体**（唯一经 ncu 钉死的真杠杆）——现已有可用调度骨架（dynamic
+> persistent），主体须叠加 **4D-TMA 暂存 Q/dO/K/V + dK/dV 本地累加后 TMA store / dQ 同循环 +
+> 降 `dVacc/dKacc` 寄存器冲 4 CTA/SM（smem≤58KB/regs≤128）**，把 74% 的 L2 `red` 打成 0 并对标
+> TE grid=132；② 其余候选（F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、非 main 融合）
+> 均已判决/到顶/收口；③ DET 仅 opt-in。
+>
+> **（第一百五十二轮）**：**F7 主体第一步——KV-owner mma 原型的 persistent 调度
 > （persistent 子项判决：负结果）**。新增 `fp8_kvowner_dkv_persist_kernel`
 > （`src/fp8/fa_bwd_fp8_kvowner_mma.cu`）：1D persistent `grid=min(nblk*H, SM×3)` +
 > `tile += gridDim.x` 循环（`--pgrid` 可覆盖）。**数值逐位=0**（只换栅格映射）；
@@ -6053,6 +6083,26 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     - **结论**：KV-owner dK/dV 原型的「persistent 调度」不是杠杆。F7 主体若要 persistent，
       必须配 **动态负载均衡 / 均匀化 causal 工作划分**，否则杠杆仍回到 §5.65 的 `wait`+occupancy。
       文档 `docs/03` §85、`docs/08` §5.66；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p152_*`。
+
+- 2026-09-30（第一百五十三轮）：**F7 第六步完成（KV-owner mma 的 dynamic work-queue 调度；
+  正结果：恢复 base 性能、`red` 仍 0）**——落实第 152 轮「下一步候选 ①」的「动态负载均衡」子项。
+    - `fp8_kvowner_dkv_persist_kernel` 加模板参 **`bool DYN`** 与 `int* wq`：`DYN=true` 时循环顶
+      `if (tid==0) s_tile = atomicAdd(wq,1); __syncthreads(); tile=s_tile;` 直至越界；tile 编号
+      `h*nblk+jblk` ⇒ 小 `j0`（重块）先领 = **LPT**。host 加 `d_wq` + 每次 launch 前
+      `cudaMemsetAsync` 清零。**默认路径一行未改**（base/pipe/static-persist 原样）。
+    - **数值逐位相同**：S512/S4096 **dyn vs base = 0/0**、dyn vs static = 0/0（只换栅格映射），
+      vs ref 与 base 同（S512 2.975e-1/3.735e-1、S4096 2.643e-1/3.216e-1）。
+    - **性能（event，同 binary，S4096 H16 iters=50）**：base **1.4151ms**、static(396)
+      1.9799ms（**0.715×**）、**dynamic(396) 1.4248ms（0.993×、dyn/static 1.390×）**；
+      S512 base 0.0577 / static 0.0622 / dyn 0.0591ms（0.977×）。
+    - **ncu（S4096）**：三者的 `red` **均=0**；Duration 1.40/1.40/2.00ms、SM% 47.1/47.5/32.3、
+      **`lts__t_sectors_op_read` 51.0M/53.1M/72.2M** ⇒ 修正第 152 轮单因归因：static strided 的
+      步长 `gridDim=396` 把并发 CTA 撒在 ~6 个 head、Q/dO 工作集打散 ⇒ **L2 局部性损失（读扇区
+      1.42×）+ 负载不均**，二者被 dynamic 连续领号一并消除（dyn 与 base 逐项吻合）。见
+      `docs/03` §86、`docs/08` §5.67。
+    - **结论**：**dynamic work-queue 正结果**——「persistent 只能更慢」修正为「**静态 persistent
+      更慢**」；持久化本身不再是障碍，为 F7 主体提供可用调度骨架。但 dyn 相对 base 仅中性
+      （main 只做 dK/dV，无 dQ）——F7 主体要转正仍需叠加 4D-TMA / 降寄存器冲 4 CTA/SM / 打 `wait`。
 
 ## 灵感 / backlog
 

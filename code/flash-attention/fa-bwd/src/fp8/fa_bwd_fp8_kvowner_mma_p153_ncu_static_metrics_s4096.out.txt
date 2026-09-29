@@ -1,0 +1,63 @@
+fa_bwd_fp8_kvowner_mma.cu(101): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kvowner_mma.cu(803): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+==PROF== Connected to process 1158637 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_kvowner_mma.out)
+==PROF== Profiling "_Z30fp8_kvowner_dkv_persist_kernelILi128ELi64ELi32ELb0EEvPKhPKfS1_S3_S1_S3_S1_S3_S3_S3_PfS4_Piiiifi": 0%....50%....100% - 11 passes
+=== F7：fp8 mma KV-owner dK/dV 原型（base/pipe/persistent/**dynamic-wq** A/B） ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+grid = (128, 16); kvowner smem = 70144 B (68.5 KB); pipe smem = 105984 B (103.5 KB); lse smem = 18944 B
+[F7 persist] SM=132  total_tiles=2048  pgrid=396（base 栅格 = 2048 CTA）
+
+[对拍] ours(KV-owner mma base) vs fp32 ref:
+  dk  max_abs=2.6427e-01  max_rel=8.5413e+01
+  dv  max_abs=3.2161e-01  max_rel=4.2332e+01
+[对拍] ours(KV-owner mma **pipe**) vs fp32 ref:
+  dk  max_abs=2.6427e-01  max_rel=8.5413e+01
+  dv  max_abs=3.2161e-01  max_rel=4.2332e+01
+[对拍] pipe vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅搬运时序）
+[对拍] ours(KV-owner mma **persistent**) vs fp32 ref:
+  dk  max_abs=2.6427e-01  max_rel=8.5413e+01
+  dv  max_abs=3.2161e-01  max_rel=4.2332e+01
+[对拍] persistent vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[对拍] ours(KV-owner mma **dynamic wq**) vs fp32 ref:
+  dk  max_abs=2.6427e-01  max_rel=8.5413e+01
+  dv  max_abs=3.2161e-01  max_rel=4.2332e+01
+[对拍] dynamic vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[对拍] vs ours(Q-owner atomic) dk max_abs=1.5000e-01  dv max_abs=2.5735e-02
+[对拍] ref-vs-TE dk max_abs=3.6857e-01  dv max_abs=6.6881e-01 | ours-vs-TE dk=5.3237e-01 dv=6.8069e-01
+
+[计时] main(dK/dV) base = 1.4173 ms (72.73 TF) | **pipe** = 1.4638 ms (70.42 TF) | A/B = 0.968×
+[计时] main(dK/dV) **persistent**(pgrid=396) = 2.0260 ms (50.88 TF) | persist/base = 0.700×
+[计时] main(dK/dV) **dynamic wq**(pgrid=396) = 1.3822 ms (74.58 TF) | dyn/base = 1.025× | dyn/persist = 1.466×
+[计时] preprocess = 1.3285 ms | total base = 2.7458 | total pipe = 2.7923 | total persist = 3.3545 | total dyn = 2.7107
+[计时] 说明：main 仅需 dK/dV，与 FP8 峰值 1978.8 TF 的占比 = 3.675% (base) / 3.559% (pipe) / 2.571% (persist) / 3.769% (dyn)
+==PROF== Disconnected from process 1158637
+[1158637] fa_bwd_fp8_kvowner_mma.out@127.0.0.1
+  void fp8_kvowner_dkv_persist_kernel<128, 64, 32, 0>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, int *, int, int, int, float, int) (396, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    gpu__time_duration.sum                                                             ms         2.00
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum                                sector            0
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        36.54
+    lts__t_sectors_op_read.sum                                                     sector     72187429
+    lts__t_sectors_op_red.sum                                                      sector            0
+    lts__t_sectors_op_write.sum                                                    sector      6125373
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        12.97
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        32.33
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        16.85
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.22
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.11
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.77
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.70
+    ------------------------------------------------------------------------- ----------- ------------
+

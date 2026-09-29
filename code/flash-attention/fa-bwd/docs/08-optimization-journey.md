@@ -1134,3 +1134,27 @@ smem 冲突 + 低 occ
   tile 工作划分**均匀**；把「grid=132」直接搬到带 causal 偏斜的 KV-owner 划分上有害。F7 主体若
   要 persistent 必须配**动态负载均衡 / 均匀化工作划分**，否则杠杆仍是 §5.65 的 `wait`+occupancy。
 - 详见 `docs/03` §85；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p152_*`。
+
+### 5.67 F7 第六步：KV-owner mma 的 dynamic work-queue 调度（正结果，第一百五十三轮）
+
+- **动机**：承接 §5.66 的「必须配动态负载均衡」——把持久栅格的静态 strided tile 分配换成
+  **dynamic work-queue**（global `atomicAdd` 领任务），验证是否能在 persistent 栅格上复现硬件
+  调度器的「完成即回填」。`fp8_kvowner_dkv_persist_kernel` 加模板参 `bool DYN`：`DYN=true` 时
+  循环顶 `tid==0 atomicAdd(wq,1)` + `__syncthreads` 广播 tile 直至越界。tile=`h*nblk+jblk`，
+  小 `j0` 先领 = **LPT 重块前置**。host 加 `d_wq` + `cudaMemsetAsync` 清零。
+- **数值（逐位）**：S512/S4096 **dyn vs base = 0/0**、dyn vs static=0/0（只换栅格映射），
+  vs ref 与 base 同（S512 2.975e-1/3.735e-1、S4096 2.643e-1/3.216e-1）。
+- **性能（event，同 binary，iters=50）**：S4096 H16 base **1.4151ms**、static(396) 1.9799ms
+  （**0.715×**）、**dynamic(396) 1.4248ms（0.993× / dyn-vs-static 1.390×）**；S512
+  base 0.0577 / static 0.0622 / dyn 0.0591ms（0.977×）。
+- **ncu（S4096）机制**：base / dyn / static 的 `red` **均=0**；Duration 1.40 / 1.40 / 2.00ms、
+  SM% 47.1 / 47.5 / 32.3、`lts__t_sectors_op_read` 51.0M / 53.1M / **72.2M**。⇒ 修正 §5.66
+  的单因归因：static strided 的 step=`gridDim=396` 把并发 CTA 撒在 ~6 个 head 上、Q/dO 工作集
+  打散 ⇒ **L2 局部性损失（读扇区 1.42×）+ 负载不均**，二者都被 dynamic 连续领号一并消除，
+  dyn 与 base 逐项吻合。
+- **结论**：**dynamic work-queue 正结果**——同 3 CTA/SM、同 396 CTA 下把 §5.66 的 0.715×
+  恢复到 **0.993×**（追平硬件调度的 base），`red` 仍 0。「persistent 只能更慢」修正为
+  「**静态 persistent 更慢**」；持久化本身不再是障碍，为 F7 主体（持久 CTA + TMA staging +
+  dQ 同循环）提供了可用的调度骨架。但 dyn 相对 base 仅中性——F7 主体要真正转正仍需叠加
+  4D-TMA / 降寄存器冲 4 CTA/SM / 打 `wait`，否则杠杆回到 §5.65。
+- 详见 `docs/03` §86；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p153_*`。

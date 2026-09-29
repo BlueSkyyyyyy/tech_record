@@ -1,0 +1,39 @@
+fa_bwd_fp8_kvowner_mma.cu(101): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kvowner_mma.cu(803): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+=== F7：fp8 mma KV-owner dK/dV 原型（base/pipe/persistent/**dynamic-wq** A/B） ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+grid = (16, 16); kvowner smem = 70144 B (68.5 KB); pipe smem = 105984 B (103.5 KB); lse smem = 18944 B
+[F7 persist] SM=132  total_tiles=256  pgrid=256（base 栅格 = 256 CTA）
+
+[对拍] ours(KV-owner mma base) vs fp32 ref:
+  dk  max_abs=2.9749e-01  max_rel=7.5965e+01
+  dv  max_abs=3.7347e-01  max_rel=1.0042e+02
+[对拍] ours(KV-owner mma **pipe**) vs fp32 ref:
+  dk  max_abs=2.9749e-01  max_rel=7.5965e+01
+  dv  max_abs=3.7347e-01  max_rel=1.0042e+02
+[对拍] pipe vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅搬运时序）
+[对拍] ours(KV-owner mma **persistent**) vs fp32 ref:
+  dk  max_abs=2.9749e-01  max_rel=7.5965e+01
+  dv  max_abs=3.7347e-01  max_rel=1.0042e+02
+[对拍] persistent vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[对拍] ours(KV-owner mma **dynamic wq**) vs fp32 ref:
+  dk  max_abs=2.9749e-01  max_rel=7.5965e+01
+  dv  max_abs=3.7347e-01  max_rel=1.0042e+02
+[对拍] dynamic vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[对拍] vs ours(Q-owner atomic) dk max_abs=3.9019e-02  dv max_abs=5.6436e-02
+[对拍] ref-vs-TE dk max_abs=4.0376e-01  dv max_abs=5.9056e-01 | ours-vs-TE dk=4.4292e-01 dv=8.5458e-01
+
+[计时] main(dK/dV) base = 0.0577 ms (27.89 TF) | **pipe** = 0.0497 ms (32.42 TF) | A/B = 1.163×
+[计时] main(dK/dV) **persistent**(pgrid=256) = 0.0622 ms (25.89 TF) | persist/base = 0.928×
+[计时] main(dK/dV) **dynamic wq**(pgrid=256) = 0.0591 ms (27.26 TF) | dyn/base = 0.977× | dyn/persist = 1.053×
+[计时] preprocess = 0.1141 ms | total base = 0.1719 | total pipe = 0.1638 | total persist = 0.1763 | total dyn = 0.1732
+[计时] 说明：main 仅需 dK/dV，与 FP8 峰值 1978.8 TF 的占比 = 1.409% (base) / 1.639% (pipe) / 1.308% (persist) / 1.377% (dyn)

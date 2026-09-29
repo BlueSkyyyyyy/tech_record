@@ -762,14 +762,19 @@ fp8_kvowner_dkv_pipe_kernel(const unsigned char* __restrict__ q8, const float* _
 //
 // 数值口径与第 150/151 轮原型**完全一致**（每 tile 独立、每输出元素仅被其 owner 写
 // 一次），故 `persist vs base` 应**逐位 = 0**（只换栅格映射）。
-template <int HD, int BM, int BN>
+// DYN=false：第 152 轮的 1D static strided persistent（判定负：静态划分失去硬件
+//            「块完成即回填」）；DYN=true（F7 第六步）：dynamic work-queue——每 CTA 用
+//            全局 `atomicAdd(wq,1)` 领取下一个 tile。tile 编号 `h*nblk+jblk` ⇒ 小 j0
+//            （重块，query 块数最多）先被领取 = LPT 调度，恢复动态回填。
+template <int HD, int BM, int BN, bool DYN = false>
 __global__ void __launch_bounds__(THREADS, 3)
 fp8_kvowner_dkv_persist_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                                const unsigned char* __restrict__ k8, const float* __restrict__ ks,
                                const unsigned char* __restrict__ v8, const float* __restrict__ vs,
                                const unsigned char* __restrict__ do8, const float* __restrict__ dos,
                                const float* __restrict__ lse, const float* __restrict__ delta,
-                               float* __restrict__ dk, float* __restrict__ dv, int S, int H, int nblk,
+                               float* __restrict__ dk, float* __restrict__ dv,
+                               int* __restrict__ wq, int S, int H, int nblk,
                                float scale, int causal) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int ASLD = Cfg::ASLD;
@@ -823,8 +828,20 @@ fp8_kvowner_dkv_persist_kernel(const unsigned char* __restrict__ q8, const float
   const int nd4 = HD / 4;
   const int total = nblk * H;
 
-  // ---- persistent 1D strided 循环：tile = h*nblk + jblk（按 head 连续，L2 友好）----
-  for (int tile = blockIdx.x; tile < total; tile += gridDim.x) {
+  // ---- 调度：tile = h*nblk + jblk（按 head 连续，L2 友好）----
+  //   DYN=false：static 1D strided，tile = blockIdx.x + k*gridDim.x；
+  //   DYN=true ：dynamic work-queue，tile = atomicAdd(wq,1)（重块先领 = LPT）。
+  __shared__ int s_tile;
+  int tile = DYN ? 0 : blockIdx.x;
+  for (;;) {
+    if (DYN) {
+      if (tid == 0) s_tile = atomicAdd(wq, 1);
+      __syncthreads();
+      tile = s_tile;
+      if (tile >= total) break;
+    } else if (tile >= total) {
+      break;
+    }
     const int h = tile / nblk;
     const int j0 = (tile % nblk) * BN;
 
@@ -1072,6 +1089,7 @@ fp8_kvowner_dkv_persist_kernel(const unsigned char* __restrict__ q8, const float
             dk[(((size_t)jg) * H + h) * HD + d] = dKacc[i][j][q];
           }
         }
+    if (!DYN) tile += gridDim.x;
   }
 }
 
@@ -1211,7 +1229,7 @@ int main(int argc, char** argv) {
 
   const int lse_smem = Cfg::lse_smem_bytes;
 
-  printf("=== F7：fp8 mma KV-owner dK/dV 原型（--pipe 双缓冲 staging A/B） ===\n");
+  printf("=== F7：fp8 mma KV-owner dK/dV 原型（base/pipe/persistent/**dynamic-wq** A/B） ===\n");
   printf("case = %s\n", dir.c_str());
   printf("B=%d S=%d H=%d Hkv=%d D=%d causal=%d scale=%.6f\n", B, S, H, Hkv, D, (int)causal,
          scale);
@@ -1221,6 +1239,7 @@ int main(int argc, char** argv) {
   float *d_q_f, *d_k_f, *d_v_f, *d_do_f, *d_o_f;
   unsigned char *d_q8, *d_k8, *d_v8, *d_do8;
   float *d_qs, *d_ks, *d_vs, *d_dos, *d_delta, *d_lse, *d_dk, *d_dv;
+  int* d_wq = nullptr;  // F7 第六步：dynamic work-queue 计数器（global）
   CUDA_CHECK(cudaMalloc(&d_q_f, nq * 4));
   CUDA_CHECK(cudaMalloc(&d_k_f, nkv * 4));
   CUDA_CHECK(cudaMalloc(&d_v_f, nkv * 4));
@@ -1238,6 +1257,7 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaMalloc(&d_lse, rows_q * 4));
   CUDA_CHECK(cudaMalloc(&d_dk, nkv * 4));
   CUDA_CHECK(cudaMalloc(&d_dv, nkv * 4));
+  CUDA_CHECK(cudaMalloc(&d_wq, sizeof(int)));
 
   CUDA_CHECK(cudaMemcpy(d_q_f, q_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_k_f, k_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
@@ -1266,7 +1286,9 @@ int main(int argc, char** argv) {
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kv_smem));
   CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_pipe_kernel<HD, BM, BN>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, pipe_smem));
-  CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_persist_kernel<HD, BM, BN>,
+  CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_persist_kernel<HD, BM, BN, false>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kv_smem));
+  CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_persist_kernel<HD, BM, BN, true>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kv_smem));
 
   auto preprocess = [&]() {
@@ -1289,9 +1311,16 @@ int main(int argc, char** argv) {
         (int)causal);
   };
   auto launch_persist = [&]() {
-    fp8_kvowner_dkv_persist_kernel<HD, BM, BN><<<pgrid_use, THREADS, kv_smem>>>(
-        d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, S, H, nblk,
-        scale, (int)causal);
+    fp8_kvowner_dkv_persist_kernel<HD, BM, BN, false><<<pgrid_use, THREADS, kv_smem>>>(
+        d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, nullptr, S, H,
+        nblk, scale, (int)causal);
+  };
+  // F7 第六步：dynamic work-queue 调度（每次 launch 前把计数器清零）。
+  auto launch_dyn = [&]() {
+    CUDA_CHECK(cudaMemsetAsync(d_wq, 0, sizeof(int)));
+    fp8_kvowner_dkv_persist_kernel<HD, BM, BN, true><<<pgrid_use, THREADS, kv_smem>>>(
+        d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, d_wq, S, H,
+        nblk, scale, (int)causal);
   };
   auto run = [&]() { preprocess(); launch_base(); };
   run();
@@ -1340,6 +1369,23 @@ int main(int argc, char** argv) {
   printf("[对拍] persistent vs base: dk max_abs=%.4e  dv max_abs=%.4e（应=0，仅换栅格映射）\n",
          cpk.max_abs, cpv.max_abs);
 
+  // F7 第六步：dynamic work-queue（沿用同一 preprocess 输出）。
+  std::vector<float> y_dk(nkv), y_dv(nkv);
+  CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+  CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+  launch_dyn();
+  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaMemcpy(y_dk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(y_dv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+  DiffStat dk_r = diff_stat(y_dk, rdk.data);
+  DiffStat dv_r = diff_stat(y_dv, rdv.data);
+  printf("[对拍] ours(KV-owner mma **dynamic wq**) vs fp32 ref:\n");
+  printf("  dk  max_abs=%.4e  max_rel=%.4e\n", dk_r.max_abs, dk_r.max_rel);
+  printf("  dv  max_abs=%.4e  max_rel=%.4e\n", dv_r.max_abs, dv_r.max_rel);
+  DiffStat dk_b = diff_stat(y_dk, h_dk), dv_b = diff_stat(y_dv, h_dv);
+  printf("[对拍] dynamic vs base: dk max_abs=%.4e  dv max_abs=%.4e（应=0，仅换栅格映射）\n",
+         dk_b.max_abs, dv_b.max_abs);
+
   // 与既有 ours（Q-owner + atomic）dk/dv 比：应只差跨 CTA 加法次序 / 同一 fp8 口径。
   if (file_exists(dir + "/ours_dk.npy")) {
     auto odk = load_npy_f32(dir + "/ours_dk.npy");
@@ -1377,17 +1423,20 @@ int main(int argc, char** argv) {
   float t_base = bench(launch_base, iters);
   float t_pipe = bench(launch_pipe, iters);
   float t_persist = bench(launch_persist, iters);
+  float t_dyn = bench(launch_dyn, iters);
   float t_pre = bench(preprocess, iters);
   double flops = 2.0 * (double)S * S * H * (double)HD * (causal ? 0.5 : 1.0) * 3.0;
   printf("\n[计时] main(dK/dV) base = %.4f ms (%.2f TF) | **pipe** = %.4f ms (%.2f TF) | A/B = %.3f×\n",
          t_base, flops / t_base / 1e9, t_pipe, flops / t_pipe / 1e9, t_base / t_pipe);
   printf("[计时] main(dK/dV) **persistent**(pgrid=%d) = %.4f ms (%.2f TF) | persist/base = %.3f×\n",
          pgrid_use, t_persist, flops / t_persist / 1e9, t_base / t_persist);
-  printf("[计时] preprocess = %.4f ms | total base = %.4f | total pipe = %.4f | total persist = %.4f\n",
-         t_pre, t_base + t_pre, t_pipe + t_pre, t_persist + t_pre);
-  printf("[计时] 说明：main 仅需 dK/dV，与 FP8 峰值 1978.8 TF 的占比 = %.3f%% (base) / %.3f%% (pipe) / %.3f%% (persist)\n",
+  printf("[计时] main(dK/dV) **dynamic wq**(pgrid=%d) = %.4f ms (%.2f TF) | dyn/base = %.3f× | dyn/persist = %.3f×\n",
+         pgrid_use, t_dyn, flops / t_dyn / 1e9, t_base / t_dyn, t_persist / t_dyn);
+  printf("[计时] preprocess = %.4f ms | total base = %.4f | total pipe = %.4f | total persist = %.4f | total dyn = %.4f\n",
+         t_pre, t_base + t_pre, t_pipe + t_pre, t_persist + t_pre, t_dyn + t_pre);
+  printf("[计时] 说明：main 仅需 dK/dV，与 FP8 峰值 1978.8 TF 的占比 = %.3f%% (base) / %.3f%% (pipe) / %.3f%% (persist) / %.3f%% (dyn)\n",
          100.0 * flops / t_base / 1e9 / 1978.8, 100.0 * flops / t_pipe / 1e9 / 1978.8,
-         100.0 * flops / t_persist / 1e9 / 1978.8);
+         100.0 * flops / t_persist / 1e9 / 1978.8, 100.0 * flops / t_dyn / 1e9 / 1978.8);
 
   CUDA_CHECK(cudaFree(d_q_f)); CUDA_CHECK(cudaFree(d_k_f)); CUDA_CHECK(cudaFree(d_v_f));
   CUDA_CHECK(cudaFree(d_do_f)); CUDA_CHECK(cudaFree(d_o_f));
@@ -1395,6 +1444,6 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaFree(d_do8));
   CUDA_CHECK(cudaFree(d_qs)); CUDA_CHECK(cudaFree(d_ks)); CUDA_CHECK(cudaFree(d_vs));
   CUDA_CHECK(cudaFree(d_dos)); CUDA_CHECK(cudaFree(d_delta)); CUDA_CHECK(cudaFree(d_lse));
-  CUDA_CHECK(cudaFree(d_dk)); CUDA_CHECK(cudaFree(d_dv));
+  CUDA_CHECK(cudaFree(d_dk)); CUDA_CHECK(cudaFree(d_dv)); CUDA_CHECK(cudaFree(d_wq));
   return 0;
 }
