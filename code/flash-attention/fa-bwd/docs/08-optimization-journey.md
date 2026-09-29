@@ -854,3 +854,20 @@ smem 冲突 + 低 occ
    （`#include <cuda_runtime.h>`）一度在 `#include "../fa_bwd_dump.h"` 之前，于是每次同步都
    把它误删、单文件编译报 `fa_bwd_save_npy_f32 undefined`。修法：把 host-only 的 include 移到
    marker **之前**。（对照：单项修改后一定重编译单文件，别只跑两文件。）
+
+### 5.54 fp8 主 kernel「唯一真杠杆」定位（第一百三十九轮）
+
+- **不是新优化，是把「red 到底是谁」钉死**：第 138 轮已证默认 fp8 main 是 L2-bound（77%）、
+  `red` 114.5M 占 L2 扇区 74.3%。本轮用 ncu 把 `red` 拆开：
+  - **ksplit=1**：`red` **103.8M**（dQ 无原子）⇒ **dK/dV 的跨 m-block `red` ≈ 104M，占 ~90%**；
+    ksplit=8 只多 ~10.7M 的 **dQ 跨 part 原子**。⇒ 「dQ 改 partial」收益 <10%，不值。
+  - **候选① `dK/dV-over-KV`：流量中性（负杠杆）**——把原子负担从 dK/dV 搬到 dQ，总数
+    `Σ(nblk-j)·BN·HD` ≡ `Σ(m+1)·BM·HD`（BM=BN），MHA 对称、**GQA 更差 `H/Hkv` 倍**。关闭。
+  - **候选② BM=128：单独不够**——现有 `wg2<128>`（无 TMA/wgmma）实测 `red` 砍半
+    （114.5M→58.2M）但 **L2 仅 20.4%**（1 CTA/SM、12.5% warps 的延迟 bound），慢 0.53×。
+    必须 **TMA+wgmma+双 warpgroup 的 BM=128**；`fp8_mma_body` 现锁死单 warpgroup ⇒ 需新 body。
+  - **候选③ ksplit auto=8 已最优**（1/2/4/8/12/16/24/32 → 1.92/1.69/1.58/**1.53**/1.57/1.62/2.30/2.31ms）。
+- **LSE（F5 后）issue_active 77.6%、sm 73.3%** ⇒ 已近指令侧下限，无新低垂果实。
+- **教训**：**当「候选清单」里的路没被定量验证前，先花一轮把每条路算/测清楚再动手**——
+  本轮避免了一次基于「dK/dV-over-KV」的错误大重写（该路流量中性），并把唯一真路
+  （双 warpgroup wgmma+TMA BM=128，F6）钉成可执行目标。详见 `docs/03` §74。
