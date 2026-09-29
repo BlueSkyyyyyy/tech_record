@@ -2277,3 +2277,51 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
 `src/bf16/fa_bwd_bf16_p62_det_{s512,s4096,gqa_kv4}.out.txt`、
 `src/bf16/fa_bwd_bf16_mma_onefile_p62_det_s512.out.txt`、
 `src/bf16/fa_bwd_bf16_p62_ncu_main16_s4096.out.txt`。
+
+## 6av. O63-bf16（第一百四十三轮，**正结果，默认**）：LSE 的「tile 内两趟 softmax」（fp16 O63 的 dtype 参数化）
+
+### 6av.1 动机与改动
+
+第一百三十六轮的 **F5**（`docs/03` §71）给 fp8 的 LSE 上了「tile 内两趟 softmax」；fp16 的
+O63（`docs/01` §19）已把它回移；本轮把同一改动逐字 dtype 参数化到 **bf16** 的 4 个 LSE kernel
+（`lse_mma_kernel`、`lse_mma_kernel_bal`（含 `FULL`）、`lse_mma_kernel_bal_wgmma`、
+`lse_mma_kernel_bal_tma`），并把 `_bal_tma` 的 `int kuse[2]` 动态下标（→ local memory）
+改两标量。算法/掩码/两趟结构与 fp16 **逐字同构**，只是 `__half`→`bf16`。
+
+### 6av.2 数值（与改前**逐位相同**，`ours-vs-ref` bf16 causal）
+
+| shape（B,S,H,D） | dq | dk | dv |
+|---|---|---|---|
+| 1×4096×16×128 causal | 1.510e-02 | 1.340e-02 | 1.631e-02 |
+
+与改前逐位一致。全量 CI（`fa_bwd_run.py --ci --dtype fp16 bf16`）：gate bf16 **1.562e-02** OK、
+单/两文件一致性 gate OK、`--check docs/04` OK（194 行）。
+
+### 6av.3 性能（同 session、同 binary，CUDA event，S=4096 causal，默认 `sm_90` mma）
+
+| 阶段 | OLD | NEW | 加速 |
+|---|---|---|---|
+| LSE `bal+cpasync` | 0.3098 ms | **0.2158 ms** | 1.44× |
+| preprocess | 0.3214 ms | **0.2279 ms** | 1.41× |
+| total | 1.9213 ms | **1.8333 ms** | 1.048× |
+
+**main 一行未动**（1.5037→1.5021ms，噪声内）。与 fp16 O63 的收益逐项一致。
+
+### 6av.4 单文件同步（重要：bf16 的 `#include <algorithm>` 在 device 区之前）
+
+bf16 单文件的 host 头 `#include <algorithm>` 位于 marker（`#include <cuda_runtime.h>`）**之后、
+device 区之前**，`sync_onefile_device.py` 的「首个 `#include <algorithm>` 为边界」假定不成立
+（会把旧 device 区留下造成重复定义）。按 §6x.1 的既定做法，bf16 改用 marker
+`using bf16 = __nv_bfloat16;`（device 区从它到 `#endif`），同步后 `device region identical: True`：
+
+```
+python3 scripts/sync_onefile_device.py src/bf16/fa_bwd_bf16_mma_kernels.cuh \
+  src/bf16/fa_bwd_bf16_mma_onefile.cu 'using bf16 = __nv_bfloat16;'
+```
+
+### 6av.5 结论 / 原始输出
+
+**正结果、默认**：bf16 LSE 1.44×、preprocess 1.41×、端到端 1.048×，数值逐位不变。至此
+**fp8 / fp16 / bf16 三 dtype 的 LSE 均走两趟 softmax**。原始输出
+`src/bf16/fa_bwd_bf16_p143_{base,new}_s4096.out.txt`（`fa_bwd_bf16_mma_base_main.cu` 为
+临时 OLD 构建，已删除）、`src/fa_bwd_p143_ci_fp16_bf16.out.txt`。

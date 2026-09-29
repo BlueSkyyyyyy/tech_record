@@ -1,0 +1,7 @@
+VARLEN main backend = wgmma2 cp.async
+[O40] varlen lse k-split = 1 (base=1024)
+[timing] VARLEN total 0.7424 ms  61.47 TFLOPS (sum_b 4HL^2D)
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=3.163e-03  max_rel=6.210e-01  (ours_amax=3.857e+00 ref_amax=3.858e+00 @1057096)
+  dk  vs ref: max_abs=2.158e-03  max_rel=9.492e-01  (ours_amax=3.920e+00 ref_amax=3.922e+00 @1058571)
+  dv  vs ref: max_abs=1.966e-03  max_rel=6.954e-02  (ours_amax=6.461e+00 ref_amax=6.462e+00 @1050605)

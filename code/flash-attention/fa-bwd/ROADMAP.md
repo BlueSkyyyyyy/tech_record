@@ -2807,7 +2807,26 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百四十二轮）**：**F6 判定——「去 Qp/dOp（SW128 直读 B）」在 fp8 上不可行
+> **最新（第一百四十三轮）**：**O63——fp16/bf16 LSE 的「tile 内两趟 softmax」**
+> （把 fp8 F5 的 LSE 提速逐字回移；**正结果，默认**）。F1→F6 收口后 fp8 默认路径受本卡寄存器/
+> smem 硬墙锁定（见「阻塞」），本轮转做**跨 dtype 的既证优化回移**：F5 只覆盖 fp8 的 4 个 LSE
+> kernel，fp16/bf16 仍是旧的「逐元素 online-softmax」。把两趟 epilogue 逐字回移/参数化到 fp16
+> 与 bf16 的 4 个 LSE kernel（`lse_mma_kernel` / `_bal`（含 `FULL`）/ `_bal_wgmma` /
+> `_bal_tma`），并把 `_bal_tma` 的 `int kuse[2]`（→ local memory）改两标量。**数学等价、只换
+> fp32 求和次序**。单/两文件同源（**bf16 用 `using bf16 = ...` marker**——其 `<algorithm>`
+> 在 device 区之前，用错 marker 会重复定义，本轮踩到并修正）。
+> **数值逐位不变**（fp16 1.883/1.734/1.966e-3；bf16 1.510/1.340/1.631e-2）；CI gate fp16
+> 3.906e-3 / bf16 1.562e-2 均 OK、一致性 OK、docs/04 check OK。**性能**（同 session，S4096）：
+> fp16 LSE **1.44×**、preprocess **1.42×**、total **1.052×**；bf16 LSE **1.44×**、total
+> **1.048×**；fp16 varlen **1.050×**；Hopper preprocess **1.69×**、total **1.078×**；main
+> 一行未动。ncu：LSE **310.27→221.18µs（1.40×）**、指令 **−27.3%**、local 扇区 **→0**；
+> wgmma 版 **1.42×**。**三 dtype 的 LSE 现已统一走两趟 softmax**。详见「当前进度 第一百四十三轮」、
+> `docs/01` §19、`docs/01b` §6av、`docs/04` §46、`docs/08` §5.57；原始输出
+> `src/fp16/fa_bwd_fp16_p143_*`、`src/bf16/fa_bwd_bf16_p143_*`、`src/fa_bwd_p143_ci_fp16_bf16.out.txt`。
+> **下一步候选**：① 默认 fp8 main 的 L2 `red`（F4/F6）仍受本卡硬墙锁定（见「阻塞」）；
+> ② 其余候选（dK/dV-over-KV、GEMM3/4/5 wgmma、ksplit）均已判决/到顶；③ DET 仅 opt-in。
+>
+> **（第一百四十二轮）**：**F6 判定——「去 Qp/dOp（SW128 直读 B）」在 fp8 上不可行
 > （负结果 + 收口）**。落实第 141 轮「下一步候选 ①」，用三证判决 F6 的最小步：
 > ① ISA 探针 `fa_bwd_fp8_mma_variant_probe.cu`：fp8 `mma.m16n8k32` **只有 `.row.col`**
 > （`.col.row/.row.row/.col.col` 全被 ptxas 拒，原始错误见 `*.illegal.out.txt`）⇒ B 必须
@@ -5584,6 +5603,44 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     文档 `docs/03` §77、`docs/08` §5.56。
   - **下一步候选**：① F6 收口（转 backlog：物理转置 B / 换卡）；② 回到默认 `kvtma` 的 L2 `red`
     墙（见「阻塞」，唯一真杠杆受本卡寄存器/smem 硬墙锁定）；③ 其余候选均已判决/到顶。
+
+- 2026-09-29（第一百四十三轮）：**O63 完成（fp16/bf16 LSE 的「tile 内两趟 softmax」——
+  把 fp8 F5 的 LSE 提速逐字回移；正结果，默认）**。『fp8 专项』F1→F6 收口后，fp8 默认路径
+  受本卡寄存器/smem 硬墙锁定（见「阻塞」），本轮转做**跨 dtype 的既证优化回移**：F5
+  （第一百三十六轮）只把 4 个 **fp8** LSE kernel 的 epilogue 改成「tile 内两趟 softmax」
+  （`docs/03` §71），而 fp16/bf16 的 LSE 仍是旧「逐元素 online-softmax」（每元素 `fmax`+
+  两个 `fexp`+逐元素 `if (sv!=-INF)`）。
+   - **改动（单/两文件 device 逐字一致）**：把两趟 epilogue 逐字回移/参数化到 fp16 与 bf16 的
+     4 个 LSE kernel（`lse_mma_kernel`、`lse_mma_kernel_bal`（含 `FULL`）、
+     `lse_mma_kernel_bal_wgmma`、`lse_mma_kernel_bal_tma`），**数学等价、只换 fp32 求和次序**；
+     顺带把 `_bal_tma` 的 `int kuse[2]`（运行期动态下标 → local memory，F3-a 的坑）改两标量。
+     fp16 单文件用 `#include <cuda_runtime.h>` marker 同步；**bf16 按既定做法用
+     `using bf16 = __nv_bfloat16;` marker**（其 `#include <algorithm>` 在 device 区之前，
+     用错 marker 会把旧 device 区留下造成重复定义——本轮踩到并修正）。
+   - **数值**：与改前**逐位相同**（fp16 S4096 1.883/1.734/1.966e-3、varlen B4 3.163/2.158/
+     1.966e-3；bf16 1.510/1.340/1.631e-2）；全量 `fa_bwd_run.py --ci --dtype fp16 bf16`
+     gate fp16 **3.906e-3** / bf16 **1.562e-2** 均 OK、单/两文件一致性 gate OK、
+     `--check docs/04` OK（194 行，2 处 full 的 dv 第 5 位移动已 `--apply` 同步）。
+   - **性能（同 session 同 binary，event，S4096 causal）**：fp16 LSE `bal+cpasync`
+     0.3112→**0.2159ms（1.44×）**、preprocess 0.3246→**0.2293（1.42×）**、total 1.9173→
+     **1.8233（1.052×）**；bf16 LSE 0.3098→**0.2158（1.44×）**、preprocess 0.3214→**0.2279
+     （1.41×）**、total 1.9213→**1.8333（1.048×）**；fp16 varlen B4T3840（`-DFA_WGMMA`）total
+     0.7792→**0.7424（1.050×）**；fp16 Hopper（`-DFA_WGMMA -DFA_TMA`，wgmma LSE）preprocess
+     0.2268→**0.1339（1.69×）**、total 1.2571→**1.1657（1.078×）**。**main 一行未动**。
+   - **ncu / SASS**（fp16 `lse_mma_kernel_bal<128,1,false,128,64>`，S4096）：Duration
+     **310.27→221.18µs（1.40×）**、`smsp__inst_executed` **163.8M→119.1M（−27.3%）**、
+     local 扇区 **98K/16K→0**、stall `wait` 2.16→1.05；wgmma 版 `lse_mma_kernel_bal_wgmma<128,1>`
+     277.79→**195.17µs（1.42×）**、指令 −26.0%。SASS 直方图：`MUFU`（fexp）**172→112**、
+     `BSSY/BSYNC` **109→42**、`FSETP` **260→140**、`BRA` 162→95、静态指令 **4544→3776**；
+     `HMMA/LDSM/LDS/LDGSTS` 不变（只改 softmax epilogue）。
+   - **结论**：**fp8 / fp16 / bf16 三 dtype 的 LSE 现已统一走两趟 softmax**；LSE 不再是墙
+     （fp16 S4096 preprocess 仅 ~13% 端到端），默认路径的墙仍是 main。详见 `docs/01` §19、
+     `docs/01b` §6av、`docs/04` §46、`docs/08` §5.57；原始输出
+     `src/fp16/fa_bwd_fp16_p143_{base,new}_{s4096,varlen,hopper}.out.txt`、
+     `..._ncu_lse_{base,new}.out.txt`、`..._ncu_wgmma_{base,new}.out.txt`、
+     `src/bf16/fa_bwd_bf16_p143_{base,new}_s4096.out.txt`、`src/fa_bwd_p143_ci_fp16_bf16.out.txt`。
+   - **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡硬墙锁定，见「阻塞」）；
+     ② fp8/MLA 的对应 LSE 两趟优化已做（F5）；③ 其余候选均已判决/到顶。
 
 ## 灵感 / backlog
 
