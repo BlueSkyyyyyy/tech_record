@@ -1,0 +1,17 @@
+### O67 ncu: red requests/sectors, FA_R4=0 vs 1 (mma_kvtma, S4096) ###
+== r4base ==
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                 15860711
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                 15518953
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                          9543680
+    lts__t_requests_op_red.sum                                   request    114524160
+    lts__t_sectors_op_read.sum                                    sector     30934323
+    lts__t_sectors_op_red.sum                                     sector    114524160
+    lts__t_sectors_op_write.sum                                   sector      8401388
+== r4on ==
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                 12273585
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                 15521017
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                          9543680
+    lts__t_requests_op_red.sum                                   request    114524160
+    lts__t_sectors_op_read.sum                                    sector     30934689
+    lts__t_sectors_op_red.sum                                     sector    114524160
+    lts__t_sectors_op_write.sum                                   sector      1907145

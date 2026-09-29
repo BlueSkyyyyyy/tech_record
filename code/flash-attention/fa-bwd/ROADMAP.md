@@ -196,6 +196,17 @@
 
 ## 阻塞
 
+- **默认 fp8 main 的 L2 `red` 的「真差距」已由 ncu 钉为「工作划分」（第一百四十七轮 O67 修正）。**
+  `FA_R4`（16B `red.global.add.v4.f32`，SASS 确为 `F32x4`）ncu 的 red 请求/扇区**一字不变**
+  （`l1tex 9.54M` / `lts 114.52M`）⇒ 归约加宽无效。同轮重测 TE fp8 反向
+  （`..._flash_bprop_wgmma_f8_..._64x64x128`，grid=**132**、384 线程、**BM=64 与 ours 相同**）
+  S4096：`red 25.96M`、read 10.2M、write 0.79M、**L2 总量 ~36.9M = ours 153.9M 的 1/4.17**、
+  **260.7µs = ours 1/6**、同用 128-bit red（`REDG.4D.ADD`）⇒ **同 BM=64 下 red 仍可压 4.4×**
+  ⇒ 差距是**「每个 KV 元素被多少 CTA 贡献」= 工作划分 / tile 调度**，**不是归约宽度、也不只是
+  放大 BM**（修正第一百三十九轮把 red 归因为「只能放大 BM」的结论）。**新立 F7 = dK/dV-over-KV
+  单一 owner + TMA store-reduce / persistent 调度**（对标 TE 132 CTA；O42 的 `cp.reduce.async.bulk`
+  失败是因为**没换工作划分**，只加 staging、归约次数没降）。工程量大，是当前唯一经 ncu 钉死的
+  真杠杆。详见 `docs/03` §80、`docs/08` §5.61。
 - **F6（BM=128 双 warpgroup）「去 Qp/dOp 冲 2 CTA/SM」在 fp8 上不可行（第一百四十二轮三证收口）。**
   ① fp8 `mma.m16n8k32` **只有 `.row.col`**（`.col.row/.row.row/.col.col` 被 ptxas 拒）⇒
   GEMM3/4/5 的 B（`Qᵀ/dOᵀ/Kᵀ`）必须 col-major、**必须转置**；② fp8 的 1 个 b16=2 个 fp8，
@@ -2802,12 +2813,32 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       不可行，改 `Ps/Ss` 半精度只能刚够且改口径、regs 必大 spill。**F6 在本卡只能停在 1 CTA/SM**
       （0.56× 默认档），继续只能走**物理转置 SW128 B**（O4b 判净负）或**换卡** ⇒ **转 backlog**。
       默认路径一行未改。见 `docs/03` §77、`docs/08` §5.56。
+- [ ] **F7** **工作划分 / persistent 调度**（第一百四十七轮新立，唯一经 ncu 钉死的真杠杆）：
+      同 **BM=64** 下 TE 的 `red` 仅 ours 的 **1/4.4×**、L2 总量 1/4.17×、时间 1/6×
+      （TE grid=**132** persistent vs ours ksplit=8→8192）；SASS 同为 128-bit red（`REDG.4D.ADD`）
+      ⇒ 走 **dK/dV-over-KV 单一 owner + TMA store-reduce**（对标 TE）。O42 的
+      `cp.reduce.async.bulk` 失败是**因没换工作划分**（只加 staging、归约次数没降）。见
+      `docs/03` §80、`docs/08` §5.61。**注**：`FA_R4`（归约加宽 v4）已判负（red 计数不变）。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百四十六轮）**：**O66——fp8 把 delta 融进「量化 + 清零」单 launch（正结果，默认）**
+> **最新（第一百四十七轮）**：**O67——fp8 dK/dV 归约 float4 = 负结果；ncu 重测 TE 把「真差距」
+> 钉到「工作划分」；新立 F7**——落实「阻塞」里默认 fp8 main 的唯一真杠杆 L2 `red`。① `FA_R4`
+> （16B `red.global.add.v4.f32`）在 SASS 里确为 `F32x4`，但 **ncu 的 red 请求/扇区一字不变**
+> （`l1tex 9.54M` / `lts 114.52M`）、main 0.992–0.997× ⇒ **归约加宽无效**（与 O7c/fp16 一致）。
+> ② TE fp8 反向（`..._flash_bprop_wgmma_f8_..._64x64x128`，grid=132、384 线程、**BM=64 同 ours**）
+> S4096：`red 25.96M`、read 10.2M、write 0.79M、**L2 总量 ~36.9M（ours 的 1/4.17）**、
+> **260.7µs（ours 的 1/6）**、同用 128-bit red（`REDG.4D.ADD`）⇒ **同 BM 下 red 仍可压 4.4×**
+> ⇒ 差距是**工作划分 / tile 调度**（persistent 132 CTA vs ours ksplit=8→8192 CTA），**不是
+> 归约宽度、也不只是放大 BM**（修正第一百三十九轮归因）。**新立 F7 = dK/dV-over-KV 单一 owner
+> + TMA store-reduce / persistent 调度**（O42 的 bulk reduce 失败是因没换工作划分）。默认路径
+> 逐位不变（`FA_R4=0`）。文档 `docs/03` §80、`docs/08` §5.61；原始输出 `src/fp8/fa_bwd_fp8_p147_*`。
+> **下一步候选**：① **F7**（唯一经 ncu 钉死、同 BM 可压 ~4× red 的杠杆）；② 其余候选（F6/放大 BM、
+> 归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、非 main 融合）均已判决/到顶/收口；③ DET 仅 opt-in。
+>
+> **（第一百四十六轮）**：**O66——fp8 把 delta 融进「量化 + 清零」单 launch（正结果，默认）**
 > ——继 O64/O65 之后继续清 fp8 非 main 固定开销。O64 已把「4 次量化 + 3 次清零」并成 1 个
 > `quantize_zero_warp_kernel`，但 **delta 仍是紧随的一次独立 `delta_warp_kernel` launch**；delta 只
 > 依赖 dO/O、且逐 query 行归约，与 dO 的 rowwise 量化**同域同 warp-per-row 几何**。新增
@@ -5769,9 +5800,35 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     - 文档 `docs/03` §79、`docs/08` §5.60、`docs/00` §4.2；原始输出 `src/fp8/fa_bwd_fp8_o66_*`。
     - **结论**：**fp8 非 main 固定开销的「小 launch 融合」至此收口**（7 类任务 + delta = 一次
       launch）。剩余墙仍是默认 fp8 main 的 L2 `red`（受本卡寄存器/smem 硬墙锁定，见「阻塞」）。
-    - **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡硬墙锁定，见「阻塞」）；
+     - **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡硬墙锁定，见「阻塞」）；
       ② 其余候选（dK/dV-over-KV、GEMM3/4/5 wgmma、ksplit、非 main 融合）均已判决/到顶/收口；
       ③ DET 仅 opt-in。
+
+- 2026-09-30（第一百四十七轮）：**O67 完成（fp8 dK/dV 归约 float4 = 负结果；并用 ncu 重测 TE
+  定位真差距 = 工作划分；新立 F7）**——落实「阻塞」里默认 fp8 main 的唯一真杠杆 L2 `red`。
+    - **改动（单/两文件 device 逐字同源）**：新增 `red_add4`（16B `red.global.add.v4.f32`）与
+      编译开关 `FA_R4`（默认 0）。fp8 `m16n8k32` 一个 quad 的 `c2=(lane&3)*2` 是同 row 连续 8 列，
+      用 `__shfl_down_sync(...,1)` 把 quad 的 float2 拼成两个 float4（列 0-3 lane0 写、列 4-7
+      lane2 写），shfl 在 `jg<len` guard 之外（全 warp 参与）、仅偶 lane 落 st。`epi_dv`/`epi_dk`
+      的非 DET/BULKRED 分支改走它；默认 0 ⇒ 旗舰路径逐位不变。
+    - **负结果（同 shape 交替 A/B，iters=100，event，main-only）**：S512 0.996×、S1024H32 0.997×、
+      GQA kv4 0.992×、S4096 0.995×。SASS 确认生成了 `F32x4`（base 320×`F32x2` → R4
+      256×`F32x2`+64×`F32x4`），**但 ncu 的 red 计数一字不变**（`l1tex 9,543,680`、
+      `lts requests/sectors 114,524,160`、read 30.9M）⇒ red 的 L2 计数不随同 warp 内合并列而变。
+      与 O7c（fp16）一致。数值 vs ref 逐位不变（S4096 `2.635/2.644/3.216e-1`）。
+    - **同轮 TE ncu/SASS 重测（真价值）**：TE fp8 反向 `..._flash_bprop_wgmma_f8_..._64x64x128_1x4x1`
+      （grid=**132**、384 线程、**BM=64 与 ours 相同**）S4096：`red=25,957,088`、read 10.2M、
+      write 0.79M、**L2 总量 ~36.9M（ours 153.9M 的 1/4.17）**、Duration **260.7µs（ours 1/6）**、
+      SASS 归约同为 128-bit（`REDG.4D.ADD`）。⇒ **同 BM=64 下 red 仍可压 4.4×** ⇒ 差距是
+      **工作划分 / tile 调度**（TE persistent 132 CTA vs ours ksplit=8→8192 CTA），**不是归约
+      宽度、也不只是放大 BM**——**修正/补充第一百三十九轮的归因**。
+    - **新立 F7**：**dK/dV-over-KV 单一 owner + TMA store-reduce / persistent 调度**（对标 TE）；
+      O42 的 `cp.reduce.async.bulk` 失败是因为**没换工作划分**（只加 staging、次数没降）。
+    - 文档 `docs/03` §80、`docs/08` §5.61；原始输出 `src/fp8/fa_bwd_fp8_p147_r4_ab.out.txt`、
+      `..._p147_ncu_red.out.txt`、`..._p147_te_ncu.out.txt`。
+    - **下一步候选**：① **F7（工作划分：dK/dV-over-KV + persistent/TMA store-reduce）**——唯一
+      经 ncu 钉死、同 BM 下可压 ~4× red 的杠杆；② 其余候选（放大 BM/F6、归约加宽/GEMM3·4·5
+      wgmma、ksplit/LSE、非 main 融合）均已判决/到顶/收口；③ DET 仅 opt-in。
 
 ## 灵感 / backlog
 

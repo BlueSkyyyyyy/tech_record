@@ -163,6 +163,13 @@ struct Fp8Cfg {
 #define FA_ILV34 0
 #endif
 
+  // O67（第 147 轮）：dK/dV 归约从 `red.global.add.v2.f32`（8B）提升到 `.v4.f32`（16B），
+  //   把 red 请求/扇区数再减半。`-DFA_R4=0/1` 同 session A/B，默认 0（不改旗舰路径）。
+  //   仅作用于非 DET 的 `red_add2` 点（epi_dv/epi_dk），DET/BULKRED 路径不受影响。
+#ifndef FA_R4
+#define FA_R4 0
+#endif
+
   // O42：dK/dV 的跨 CTA 归约从「逐元素 `red_add2`」改成「per-warp smem staging +
   //   `cp.reduce.async.bulk...add.f32`」。O42 实测 dK/dV 的 red 是 fp8 main 头号成本
   //   （短路掉 main 1.60→0.94ms，天花板 1.70×），但 bulk 版因 staging 的 smem 流量 +
@@ -589,6 +596,20 @@ __device__ __forceinline__ void wgmma_qkt64_fp8(const char* Qsw, const char* Ksw
 // **red 请求数与 L2 扇区数各减半**，数值等价（硬件对 v2 的两个 f32 仍各自原子累加）。
 __device__ __forceinline__ void red_add2(float* p, float a, float b) {
   atomicAdd(reinterpret_cast<float2*>(p), make_float2(a, b));
+}
+
+// O67（第 147 轮）：把 dK/dV 的 `red_add2`（8B `red.global.add.v2.f32`）再提升到
+//   `red_add4`（16B `red.global.add.v4.f32`）。动机：默认 fp8 `kvtma` main 的 L2 墙里
+//   `red` 占 114.5M 扇区（74%），而每个 red **请求**固定吃 8 个 L2 扇区（mma.m16n8 累加器
+//   的 8 行分散在 8 个 32B 扇区）⇒ 扇区数正比于请求数。fp8 `m16n8k32` 的累加器里一个 quad
+//   （`lane&3`=0..3）的 `c2=(lane&3)*2` 恰是 0/2/4/6 —— 同 row 的**连续 8 列**；把 quad 的
+//   float2 用 `__shfl_down_sync(...,1)` 拼成两个 float4（列 0-3 由 lane0 写、列 4-7 由 lane2
+//   写），请求数与 L2 扇区数再减半。调用者须保证 shfl 在整个 warp 上执行（在 `jg<len` guard
+//   之外算好），且仅 `(lane&1)==0` 的 lane 落 st；偶 lane 地址天然 16B 对齐（`c2∈{0,4}`）。
+//   默认关（`-DFA_R4=1` 同 binary A/B）；O7c 在 fp16 上试过同款为负（见 docs/01 §14q），
+//   本轮在 fp8（L2 `red` 占比更高）上复测。
+__device__ __forceinline__ void red_add4(float* p, float a, float b, float c, float d) {
+  atomicAdd(reinterpret_cast<float4*>(p), make_float4(a, b, c, d));
 }
 
 // ----------------------------- P3-4e：确定性 dK/dV 归约（`DET`） -----------------------------
@@ -3263,7 +3284,17 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
               int c = c0 + j * 8 + c2;
               int jg = j0 + r;
-              if (jg < len) {
+              if constexpr (FA_R4 && !kBulkRed && !DET) {
+                // O67：非 DET/BULKRED 的 dV 归约走 16B `red_add4`（见 `red_add4` 上方说明）。
+                if ((q & 1) == 0) {
+                  float a2 = __shfl_down_sync(0xffffffffu, acc[i][j][q], 1);
+                  float b2 = __shfl_down_sync(0xffffffffu, acc[i][j][q + 1], 1);
+                  if (jg < len && (lane & 1) == 0)
+                    red_add4(dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
+                             acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r], a2 * sA[r],
+                             b2 * sA[r]);
+                }
+              } else if (jg < len) {
                 if constexpr (kBulkRed) {
                   // O42：写 per-warp staging（行=warp 内 KV 行，列=warp 内 64 列），
                   //   随后由 `bulk_flush` 一次性 coalesced 归约回 global。
@@ -3312,7 +3343,18 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
               int c = c0 + j * 8 + c2;
               int jg = j0 + r;
-              if (jg < len) {
+              if constexpr (FA_R4 && !kBulkRed && !DET) {
+                // O67：非 DET/BULKRED 的 dK 归约走 16B `red_add4`（与 epi_dv 同款）。
+                if ((q & 1) == 0) {
+                  float a = acc[i][j][q] * sds3[r] * scale;
+                  float b = acc[i][j][q + 1] * sds3[r] * scale;
+                  float a2 = __shfl_down_sync(0xffffffffu, a, 1);
+                  float b2 = __shfl_down_sync(0xffffffffu, b, 1);
+                  if (jg < len && (lane & 1) == 0)
+                    red_add4(dk_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
+                             a, b, a2, b2);
+                }
+              } else if (jg < len) {
                 if constexpr (kBulkRed) {
                   wstg[(i * 16 + g + (q >= 2 ? 8 : 0)) * STGS + (j * 8 + c2 + (q & 1))] =
                       acc[i][j][q] * sds3[r] * scale;

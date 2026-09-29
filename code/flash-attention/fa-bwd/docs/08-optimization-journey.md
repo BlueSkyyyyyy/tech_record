@@ -1005,3 +1005,25 @@ smem 冲突 + 低 occ
   尾波」**，故小/中 shape 有 2–5%、大 S 边际；但把依赖同一数据域的逐行归约（delta）并进量化任务
   几乎零成本（只多 O 的读，被 DRAM 流水吸收）。**fp8 非 main 固定开销的融合至此收口。**
   详见 `docs/03` §79；原始输出 `src/fp8/fa_bwd_fp8_o66_*`。
+
+### 5.61 O67：fp8 dK/dV 归约 float4（负结果）+ 用 ncu 重测 TE 定位真差距（第一百四十七轮）
+
+- **做了什么**：默认 fp8 `kvtma` main 的 L2 `red`（114.5M 扇区=74% L2）是唯一真杠杆（见 §5.53/§5.56）。
+  O4c 已把归约从标量提到 `red.v2.f32`（8B）。本轮再提到 **`red.v4.f32`（16B，`FA_R4`，默认 0）**：
+  fp8 `m16n8k32` 的一个 quad 的 `c2=(lane&3)*2` 是同 row 连续 8 列，用 `shfl_down(1)` 拼两个
+  float4（列 0-3 lane0 写、列 4-7 lane2 写），请求数应再减半。`epi_dv`/`epi_dk` 的
+  非 DET/BULKRED 分支同步改，单/两文件 device 同源。
+- **结果：负**。SASS 确认生成了 `REDG.E.ADD.F32x4`（base 320×`F32x2` → 256×`F32x2`+64×`F32x4`），
+  但 **ncu 的 red 请求/扇区一字不变**（`l1tex 9,543,680` / `lts 114,524,160`）——red 的 L2 计数
+  不随「同 warp 内合并列」而变；同 shape 交替 A/B main **-0.4~-0.8%**（S512/S1024/S4096）。
+  与 O7c 在 fp16 上的结论一致（§5.12），本轮补齐 fp8。默认关，旗舰路径逐位不变。
+- **真正价值（重新定位）**：同轮用 `harness/te_fp8_ncu.py` 重测 TE fp8 反向
+  （`..._flash_bprop_wgmma_f8_..._64x64x128_1x4x1_cga1x1x1`，grid=132、384 线程、**BM=64 与
+  ours 相同**）：TE `red=25.96M`、read 10.2M、write 0.79M、**L2 总量 ~36.9M（ours 153.9M 的
+  1/4.2）**、Duration 260.7µs（ours 1/6）。TE 的 SASS 是 `REDG.4D.ADD`（同为 128-bit red）。
+  ⇒ **同 BM 下 red 仍可压 4.4×** ⇒ 差距是**工作划分 / tile 调度**（TE 132 CTA persistent，
+  ours ksplit=8 → 8192 CTA），**不是归约宽度、也不只是放大 BM**。
+- **教训**：**「同 BM、同归约位宽」也能有 4× 的 red 差**——瓶颈是「每个 KV 元素被多少 CTA
+  贡献」，即 FA2/TE 的 **dK/dV-over-KV 单一 owner** 工作划分（+ TMA store-reduce / persistent）。
+  O42 的 `cp.reduce.async.bulk` 失败是因为**没换工作划分**（归约次数没降、只加 staging）。
+  新立 **F7**。详见 `docs/03` §80；原始输出 `src/fp8/fa_bwd_fp8_p147_*`。
