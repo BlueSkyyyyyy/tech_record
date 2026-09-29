@@ -1298,3 +1298,25 @@ smem 冲突 + 低 occ
 - **判决 / 下一步**：**L2 `red` 流量由工作划分（每元素贡献 CTA 数）决定，与归约指令机制无关**；
   TE 的 `UTMAREDG` 只是指令选择，其 4.4× 低的 red 来自 tile 调度。**F7「TMA store-reduce」假设关闭**，
   F7 主体只剩工作划分本身（BN≥BM / 放大 tile / persistent 调度）。详见 `docs/03` §92。
+
+### 5.74 F7 第十三步：BN≥BM（BN=64）——dQ 贡献数减半，但撞寄存器墙（中性/偏负，第一百六十轮）
+
+- **动机**（落实第一百五十九轮「下一步候选 ①(a)」）：KV-owner 下 dQ 的跨 CTA 贡献数 ≈ `S/BN`。
+  把 KV-owner 的 tile 从 `BN=32` 放大到 `BN=64=BM`，dQ `red` 与 Q/dO 读放大**各减半**；
+  代价是 `dK/dV` 累加器与 GEMM1/2 wgmma 累加器翻倍、smem 74.75→111.42KB（3→2 CTA/SM）。
+- **做了什么**（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，默认路径一行未改）：把 `fp8_kvowner_dkv_wgmma_body`
+  参数化到 `BN∈{32,64}`——GEMM1/2 新增 `wgmma_mn_issue<BN,KIND>`（BN=32 `m64n32k32` / BN=64
+  `m64n64k32`）、epilogue 的 `j<4`→`j<BN/8`；壳的 `__launch_bounds__` 按 BN 选 `FA_KV_CTA64=2`；
+  host 加 `Cfg64`/`wg_tma_smem64`/`launch_wgtma64`/`--only=wgtma64` 与同 binary 对拍+计时。
+- **数值**：三 shape BN=64 的 `dk/dv` 与 BN=32 **逐位相同**（0.0）、`dq` 只差 ~5.9e-2（fp8 噪声，
+  贡献数变少的加法次序）；vs fp32 ref 与 BN=32 同量级。
+- **性能（同 binary，event，iters=30）**：S512 **0.900×**（grid 8×16=128<132 SM，grid-bound）、
+  S1024H32 **0.960×**、S4096 **1.042×（另一 session 1.015×）** ⇒ **中性**。
+- **ncu（S4096，判决）**：`lts__t_sectors_op_red` **102,236,160→51,118,080（精确减半）**、
+  `lts read` 52.6M→40.1M（−24%），**但 `lts write` 6.2M→26.6M、local `op_st` 65,536→13,754,368
+  （+210×）**，registers 168→**255（上限）**、occ 17.9%→11.9%（3→2 CTA/SM）。⇒ **`dVacc+dKacc`
+  翻倍顶穿 255 寄存器文件 → 溢出流量盖过省下的 `red`/读**。
+- **判决 / 下一步**：**F7 option(a)「BN≥BM」判为中性/偏负**。至此 F7 的单趟「减少贡献数」路线
+  （两 kernel / TMA store-reduce / BN≥BM）**全部判决**；剩余只有「跨 warpgroup 偏和 + 二次归约」
+  （同样撞 smem/regs）或「放弃 F7 / 换卡」。与阻塞里 O17b/F6 的「寄存器文件锁死放大 tile」同源。
+  详见 `docs/03` §93。
