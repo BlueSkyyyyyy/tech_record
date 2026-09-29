@@ -2521,9 +2521,14 @@ __global__ void delta_warp_kernel(const float* __restrict__ o,
 //   默认 `NTH=128/NWAR=2`（2×2 网格）与历史逐字等价；fp8 MLA（D=512）用 `NTH=256/NWAR=4`
 //   （2×4 网格）⇒ 1 CTA/SM 下 8 warp、每 scheduler 2 warp（O45 诊断的唯一剩余杠杆）。
 //   `NWM=NTH/32/NWAR` 为 M 方向 warp 数。各 warp tile 由 NWM/NWAR 派生（见下方 GM*/GN*）。
+// F7 第十一步（第 158 轮）：`DQONLY` —— 只算 dQ 的 Q-owner pass（dK/dV 全跳过）。动机：
+//   F7 主体「两 kernel」选项（ROADMAP「下一步候选 ①(a)」）——KV-owner 出 dK/dV（red=0）＋
+//   本 pass 出 dQ。dQ 在 `kRegDq` 下寄存器 owned（每元素单写者），DQONLY 时用 **plain store**
+//   写出（red=0）。跳过 Ap/dS3 fold + GEMM3/4(dV/dK) + 其 epilogue；保留 GEMM1/2/5 与 dS2 fold。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
            bool RCP = true, bool TMA = false, bool KVTMA = false, int NTH = THREADS,
-           int NWAR = WN, bool KVPIPE = false, bool DET = false, bool DET_HALF = false>
+           int NWAR = WN, bool KVPIPE = false, bool DET = false, bool DET_HALF = false,
+           bool DQONLY = false>
 __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8,
@@ -3123,6 +3128,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     // 线程空等；现改为**全部 128 线程均衡分工**：warp 内 4 lane 一组做一行 amax 的
     // `__shfl_xor_sync` 归约。fmaxf 可交换结合 ⇒ amax 结果与原顺序**逐位相同**，除法/量化
     // 也逐元素一致，故数值仍与 O3 逐位相同；但这一段的墙钟缩短约 4×（Amax/写入都并行）。
+    if constexpr (!DQONLY) {
     if (wid < 4) {  // O47：BN≤64 ⇒ 4 个 warp 即可覆盖 j（8 行/warp×NTFOLD）；NTH=256 时余下 warp 空等
       // Ap[j][m]=P[m][j]*dos[m] (e4m3, per-j) 与 dS3[j][m]=dS[m][j]*qs[m] (e5m2, per-j)
       // O21：BN 参数化——每 warp 负责 NTFOLD 份 j 行（每份 8 行），j = wid*8 + jl + jh*32。
@@ -3208,6 +3214,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
         }
       }
     }
+    }  // if constexpr (!DQONLY)：DQONLY 跳过 Ap/dS3 fold（dV/dK 的操作数）
     if (wid < 4) {  // O47：BM=64 ⇒ 4 个 warp（16 行/warp）即可覆盖 m；NTH=256 时余下 warp 空等
       // dS2[m][j] = dS[m][j]*ks[j] (e5m2, per-m)：每 warp 16 行 × 2 lane 分工。
       // O21：BN 参数化——amax2 需覆盖全部 BN 个 j（NTFOLD 份，j 跨 jh*32），
@@ -3411,6 +3418,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
         if (lane < STGR) bulk_reduce_wait0();
         __syncwarp();
       };
+      if constexpr (!DQONLY) {
 #if FA_ILV34
       {
         float a3[MTM34][NTM34][4], a4[MTM34][NTM34][4];
@@ -3439,6 +3447,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       }
       if constexpr (kBulkRed) bulk_issue(dk_acc);
 #endif
+      }  // if constexpr (!DQONLY)：跳过 GEMM3/4（dV/dK）及其 epilogue
 
       // ---- (5) dQ += scale·dS·K : A=dS2[m][j] (e5m2), B=Kp[j/2][d0+..] (e4m3, ldmatrix.trans) ----
       {
@@ -3494,7 +3503,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       }
       // O42：离开本 tile 前等 dK 的 TMA 归约读完 staging（下一 tile 的 GEMM1/2 epilogue
       //   会覆写 Ps/Ss）。与 GEMM5 重叠。
-      if constexpr (kBulkRed) bulk_waitread();
+      if constexpr (kBulkRed && !DQONLY) bulk_waitread();
     }
     __syncthreads();
     // ---- O3：落盘预取的下一 tile 的 K/V（本轮 GEMM 已全部读完 smem），并更新 ks/vs ----
@@ -3593,6 +3602,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
               else
                 red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c, dqacc[i][j][q],
                          dqacc[i][j][q + 1]);
+            } else if constexpr (DQONLY) {
+              // F7 第十一步：DQONLY 时 dQ 由本 CTA 独占（ksplit=1），用 plain store 写出
+              //   ⇒ L2 `red` = 0（对比默认 `red_add2` 每元素一次 red）。
+              float* dst = dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c;
+              dst[0] = dqacc[i][j][q];
+              dst[1] = dqacc[i][j][q + 1];
             } else {
               red_add2(dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c, dqacc[i][j][q],
                        dqacc[i][j][q + 1]);
@@ -3606,8 +3621,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 //   `__grid_constant__` 描述符（`TMA=true` 才用到）。
 // O47：`NTH`/`NWAR` 同 `fp8_mma_body`（默认 128/2 与历史逐字等价；MLA 用 256/4）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
-          bool RCP = true, int NTH = THREADS, int NWAR = WN, bool KVPIPE = false, bool DET = false,
-          bool DET_HALF = false>
+           bool RCP = true, int NTH = THREADS, int NWAR = WN, bool KVPIPE = false, bool DET = false,
+           bool DET_HALF = false, bool DQONLY = false>
 __global__ void __launch_bounds__(NTH, (NTH == THREADS && HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8, const float* __restrict__ ks,
@@ -3624,7 +3639,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       float* __restrict__ dq_part = nullptr,
                       const int* __restrict__ part_base = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR, KVPIPE, DET,
-               DET_HALF>(
+               DET_HALF, DQONLY>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, nullptr, nullptr, nullptr, nullptr, mt_b, mt_m,
       dk_part, dv_part, nblk, dq_part, part_base);
@@ -3661,7 +3676,7 @@ fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
 // P3-4g：`DET=true` 时复用同一 body 的确定性 dK/dV 路径（partial + 固定次序归约），
 //   把 `--det` 从默认 mma 路径扩到 Hopper TMA 快路。
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
-          bool DET = false, bool DET_HALF = false>
+           bool DET = false, bool DET_HALF = false, bool DQONLY = false>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
@@ -3680,7 +3695,7 @@ fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             float* __restrict__ dq_part = nullptr,
                             const int* __restrict__ part_base = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true, THREADS, WN, false, DET,
-               DET_HALF>(
+               DET_HALF, DQONLY>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap, nullptr, nullptr,
       dk_part, dv_part, nblk, dq_part, part_base);

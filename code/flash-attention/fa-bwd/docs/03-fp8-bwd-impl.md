@@ -8102,3 +8102,55 @@ KV-owner 出 dK/dV（red=0）＋ **Q-owner 的 dQ-only pass**（dQ 在寄存器 
 - 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p157_dq_{s512_h16_d128_causal_fp8,
   s1024_h32_d128_causal_fp8,s4096_h16_d128_causal_fp8}.out.txt`、`..._p157_dq0_s4096.out.txt`（A/B）、
   `..._p157_dq_ncu_s4096.out.txt`。
+
+### 91 F7 第十一步（第一百五十八轮）：option(a)「两 kernel」——Q-owner **dQ-only pass** 的判决 —— **负结果**
+
+**动机（ROADMAP「下一步候选 ①(a)」）**：§90 证明「把原子从 dK/dV 搬到 dQ」流量中性，F7 主体唯一
+真杠杆 = **让 dQ 也 owned（red=0）**，二选一：**(a) 两 kernel**（KV-owner 出 dK/dV[red=0] ＋
+Q-owner 出 dQ[red=0]），**(b) 两级 partial**（需 BN≥BM）。本轮把 (a) 落地并判决。
+
+**改动（`src/fp8/fa_bwd_fp8_kernels.cuh`，一行默认路径未改）**：给 `fp8_mma_body` 尾部加编译期
+`bool DQONLY = false`，并透传到两个壳（`fa_bwd_fp8_mma_kernel` / `fa_bwd_fp8_mma_kvtma_kernel`）：
+- `DQONLY=true` 时 **跳过 Ap/dS3 fold + GEMM3/4（dV/dK）+ 其 epilogue/bulk-reduce**，保留
+  GEMM1/2（`S=QKᵀ`、`dP=dO·Vᵀ`）、dS2 fold、GEMM5（`dQ=dS·K`）；
+- `kRegDq` 下 dQ 寄存器 owned，**`DQONLY` 时用 plain store 写出**（而非 `red_add2`）⇒ L2 `red=0`。
+`DQONLY=false` 逐字退化（CI fp8 全绿、数值与历史逐位一致）。
+
+原型 `src/fp8/fa_bwd_fp8_kvowner_mma.cu` 新增：同一 binary 内
+① `launch_dqonly`（`kvtma`, `DQONLY=1`, Q-owner 栅格 `(S/BM,H,B)`, `ksplit=1`）；
+② `launch_main3`（生产默认 `kvtma`, `DQONLY=0`, 三梯度, 含 dK/dV 的跨 CTA `red`）；
+③ KV-owner dK/dV-only 走 p155 的 `launch_wgtma`（编译 `-DFA_KV_DQ=0`）。
+
+**数值（三 shape）**：`dQ-only` vs fp32 ref **S512 2.4262e-1 / S1024H32 2.3993e-1 / S4096 2.6355e-1**
+——与历史 dQ 逐位一致（`dQ-only vs 三梯度基线 dq = 0.0000e+00`）；`main3` 的 dq/dk/dv 也与历史
+逐位一致（S512 2.4262/2.9757/3.7318e-1、S1024H32 2.3993/4.1764/3.5346e-1、S4096
+2.6355/2.6437/3.2157e-1）。⇒ **DQONLY 未动默认数值，dQ-only 数学正确。**
+
+**性能（CUDA event，main，iters=100，同 binary A/B，ms）**：
+
+| case | KV-owner dK/dV (TMA) | Q-owner **dQ-only** | 两 kernel 合计 | 单 kernel 三梯度 | 两/单 |
+|---|---|---|---|---|---|
+| S512 H16 | 0.0467 | 0.0539 | **0.1006** | 0.0948 | **0.944×** |
+| S1024 H32 | 0.1903 | 0.1582 | **0.3485** | 0.3303 | **0.955×** |
+| S4096 H16 | 1.1206 | 0.9230 | **2.0435** | 1.9425 | **0.955×** |
+
+⇒ **两 kernel 反而慢 4.5–6%（负结果）**。
+
+**ncu（S4096 H16，同 binary，`--metrics`）**：
+
+| 口径 | Duration | `lts op_red` | `lts read` | `lts write` | L2% | DRAM% | SM% |
+|---|---|---|---|---|---|---|---|
+| dqonly（Q-owner, DQONLY=1） | **933.7µs** | **0** | 18.18M | 2.44M | 6.79 | 1.73 | 36.98 |
+| main3（kvtma 三梯度，默认） | **1.99ms** | **103.8M** | 24.22M | 6.66M | 54.95 | 3.30 | 36.64 |
+| wgtma（KV-owner dK/dV, TMA） | **1.12ms** | **0** | 52.30M | 12.43M | 18.77 | 2.27 | 43.94 |
+
+**判决**：两 kernel 把跨 CTA `red` 从 **103.8M 扇区彻底打成 0**，但**总时间不降反升**（S4096
+2.04ms > 1.94ms）。机制：单 kernel 里 GEMM1/2（`S`/`dP`）与 fold 出的 `P/dS` 被 dK/dV 与 dQ
+**共享**；拆两 kernel 后 **dQ-only pass 必须重算一遍 S/dP 并重新流式读 Q/K/V/dO**（ncu：dQ-only
+`read 18.2M`、KV-owner `read 52.3M`，合计 70.5M vs 单 kernel 24.2M，**L2 读放大 2.9×**），
+省下的 `red` 打不过「重算 + 重复 operand 流量」。⇒ **ROADMAP「候选 ①(a)」判负**；
+F7 主体只剩 **(b) 两级 partial / 单趟内非原子归约（BN≥BM）**，或放弃「拆 kernel」。
+
+- 原始输出 `src/fp8/fa_bwd_fp8_p158_b1_{s512_h16,s1024_h32,s4096_h16}_d128_causal_fp8.out.txt`、
+  `src/fp8/fa_bwd_fp8_p158_ncu_dqonly_s4096.out.txt`（full）、
+  `src/fp8/fa_bwd_fp8_p158_ncu_metrics_s4096.out.txt`（三口径 metrics）。
