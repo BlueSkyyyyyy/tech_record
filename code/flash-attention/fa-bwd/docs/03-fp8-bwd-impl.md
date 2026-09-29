@@ -7770,3 +7770,76 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_mma.cu -c 1 \
   `src/fp8/fa_bwd_fp8_kvowner_mma_p152_s512.out.txt`、
   `..._p152_s4096.out.txt`、`..._p152_pgridsweep_s4096.out.txt`、
   `..._p152_ncu_base_s4096.out.txt`、`..._p152_ncu_persist_s4096.out.txt`。
+
+---
+
+## 86. F7 第六步（第一百五十三轮）：KV-owner mma 的 **dynamic work-queue 调度**——正结果（恢复 base 性能，`red` 仍 0）
+
+> 承接 §85「结论 / 下一步」与 ROADMAP「下一步候选 ①」：§85 把 KV-owner mma 原型的 persistent
+> 判负，根因是 **causal 块间负载差 ~64×、静态 strided 划分失去硬件「块完成即回填」**。本轮直接
+> 落实那条「必须配**动态负载均衡**」——把持久栅格的 tile 分配从 **static strided** 换成
+> **dynamic work-queue**（global `atomicAdd` 领任务）。**默认路径一行未改**（纯新增 `DYN` 模板分支；
+> base/pipe/static-persist 变体原样保留）。
+
+### 86.1 改动（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`）
+
+- `fp8_kvowner_dkv_persist_kernel` 加模板参 **`bool DYN = false`** 与 `int* wq`：
+  - `DYN=false`：原 static 1D strided（`tile = blockIdx.x; tile += gridDim.x`），逐位不变；
+  - `DYN=true`：循环顶 `if (tid==0) s_tile = atomicAdd(wq, 1); __syncthreads(); tile = s_tile;`
+    直到 `tile >= nblk*H` 退出。tile 编号 `h*nblk + jblk` ⇒ 小 `j0`（重块，query 块数最多）
+    先行领取 = **LPT（longest-processing-time-first）**，天然把重块前置、轻块填尾。
+- host：新增 `d_wq`（int）缓冲；`launch_dyn` 每次 launch 前 `cudaMemsetAsync(d_wq,0,4)`，
+  用 `<HD,BM,BN,true>` 实例；`cudaFuncSetAttribute` 对两个实例分别设 smem 上限。
+- smem/regs/几何与 base/static-persist **完全相同**（70,144 B、168 regs、3 CTA/SM）。
+
+### 86.2 数值：与 base **逐位相同**（仅换栅格映射）
+
+| shape（causal, MHA, fp8） | base dk/dv (vs ref) | dyn dk/dv (vs ref) | **dyn vs base** |
+|---|---|---|---|
+| S=512  H16 | 2.975e-1 / 3.735e-1 | 2.975e-1 / 3.735e-1 | **0 / 0** |
+| S=4096 H16 | 2.643e-1 / 3.216e-1 | 2.643e-1 / 3.216e-1 | **0 / 0** |
+
+（`dyn vs static-persist` 亦逐位 = 0；与既有 Q-owner ours 的差仍是跨 CTA 加法次序。）
+
+### 86.3 性能：**dynamic wq 追平硬件调度的 base**（event，iters=50，同 binary / 同 session）
+
+| 变体（S4096 H16） | grid | main(dK/dV) | 相对 base | 相对 static-persist |
+|---|---|---|---|---|
+| base（2D `(nblk,H)`，2048 CTA，硬件调度） | 2048 | **1.4151 ms** | 1.000× | — |
+| static persistent | 396 | 1.9799 ms | **0.715×** | 1.000× |
+| **dynamic work-queue** | 396 | **1.4248 ms** | **0.993×** | **1.390×** |
+
+- S512（grid=256=total，无循环）：base 0.0577 / static 0.0622 / dyn 0.0591 ms（dyn/base 0.977×）。
+
+### 86.4 ncu：dynamic 的机制 = **消负载不均 + 恢复 L2 时间局部性**（S4096 H16，同 binary）
+
+| kernel | Duration | Waves | `lts__t_sectors_op_red` | `lts__t_sectors_op_read` | SM% | L1/TEX% | stall wait / short / long | occ |
+|---|---|---|---|---|---|---|---|---|
+| base | **1.40 ms** | 5.17 | **0** | 51.0 M | 47.1 | 50.5 | 1.44 / 0.88 / 0.58 | 17.7% |
+| **dynamic wq** | **1.40 ms** | 1.0 | **0** | 53.1 M | **47.5** | 50.4 | 1.47 / 0.86 / 0.61 | 17.6% |
+| static persist | 2.00 ms | 1.0 | **0** | **72.2 M** | 32.3 | 36.5 | 1.70 / 0.77 / **1.11** | 16.9% |
+
+- `red` 三者在**真实 mma 路径下均为 0**（KV-owner 单一 owner 的核心收益不变）。
+- dynamic 与 base 的利用率/停顿/时长**逐项吻合**（1.40 vs 1.40 ms、SM 47.5 vs 47.1%）。
+- **新证据（修正 §85 的单一「负载不均」归因）**：static 的 `lts__t_sectors_op_read` 涨到
+  **72.2 M（base/dyn 的 ~1.42×）**——不只是时长/占用率问题。static strided 的 tile 步长
+  `gridDim=396` 使同一时刻 396 个 CTA 的 `tile` 撒在 **~6 个不同 head** 上（`396/64≈6.2`），
+  Q/dO 工作集被打散、L2 时间局部性差、重复读取增多；dynamic 连续领号让并发的 CTA 集中在
+  相邻 `h`/`jblk`，工作集收敛（53 M，≈base 的 51 M）。⇒ **§85 的负结果 = 负载不均 + L2 局部性
+  双重损失，二者都被 dynamic 领号一并消掉。**
+
+### 86.5 结论 / 下一步
+
+- **KV-owner mma 原型的「dynamic work-queue 调度」正结果**：在**同 3 CTA/SM、同 396 CTA**
+  下把 §85 的 **0.715× 恢复到 0.993×**（vs 硬件调度的 base），且 `red` 仍为 **0**。
+  ⇒ 「persistent 只能更慢」的结论被修正为「**静态 persistent 更慢**」；用 dynamic 领号即可在
+  persistent 栅格上复现硬件调度器的「完成即回填」+ L2 局部性。这为 **F7 主体**（持久 CTA +
+  TMA/smem staging + dQ 同循环）提供了**可用的调度骨架**——持久化本身不再是障碍。
+- 注意：本轮 main 仍**只做 dK/dV**（无 dQ），dynamic wq 相对 base 是**中性**（0.993×），
+  并未单独带来净收益；F7 主体要真正转正，仍需叠加 **4D-TMA 暂存 / 降 `dVacc/dKacc` 寄存器
+  冲 4 CTA/SM / 打 `wait`**，否则杠杆回到 §5.65。**dynamic 调度的价值 = 让后续持久 CTA
+  （要复用 smem/TMA 描述符）不被静态划分拖死。**
+- 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p153_s4096.out.txt`、
+  `..._p153_s512.out.txt`、`..._p153_ncu_dyn_metrics_s4096.out.txt`、
+  `..._p153_ncu_static_metrics_s4096.out.txt`、`..._p153_ncu_base_metrics_s4096.out.txt`、
+  `..._p153_ncu_dyn_s4096.out.txt`（`--set full`）。
