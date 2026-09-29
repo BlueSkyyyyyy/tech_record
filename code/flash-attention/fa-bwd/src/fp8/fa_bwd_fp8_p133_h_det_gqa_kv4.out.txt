@@ -1,0 +1,11 @@
+[P3-4g A/B] kvtma ksplit=1 atomic 0.3320 ms | DET 0.4142 ms (0.802x) | runs[1-2] dk/dv=0.00e+00/0.00e+00 | DET-vs-atomic dk/dv=3.34e-06/3.81e-06
+[F4 A/B] kvtma ksplit=1 atomic 0.3320 ms | DET-fp32 0.4142 ms (0.802x) | DET-fp16(扇区化) 0.3679 ms (0.903x vs atomic) | runs[1-2] dk/dv=0.00e+00/0.00e+00 | fp16-vs-fp32 dk/dv=1.91e-03/2.36e-03 | fp16-vs-atomic dk/dv=1.91e-03/2.36e-03
+[O26 A/B] delta old(per-row) 0.0239 ms | new(warp-per-row) 0.0078 ms (3.075x) | max_abs=2.861e-06 max_rel=2.580e-03
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.517e-01  max_rel=1.987e+02
+  dk   vs ref: max_abs=5.339e-01  max_rel=1.396e+02
+  dv   vs ref: max_abs=7.173e-01  max_rel=9.160e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=5.052e-01  max_rel=1.872e+02
+  dk   vs te_dk: max_abs=9.555e-01  max_rel=2.486e+02
+  dv   vs te_dv: max_abs=1.429e+00  max_rel=1.654e+02

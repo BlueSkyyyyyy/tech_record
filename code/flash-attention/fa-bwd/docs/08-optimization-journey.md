@@ -729,6 +729,26 @@ smem 冲突 + 低 occ
       核算逐项吻合（下一步 F3/F4）。详见 `docs/03` §67；原始输出 `src/fp8/fa_bwd_fp8_p132_*`、
       `src/fp8/fa_bwd_fp8_p132_{sass_counts,ncu_main_s4096,stall_s4096,te_baseline}.out.txt`。
 
+### 5.48 F4-第一步（第一百三十三轮）：fp8 DET 的 dK/dV partial「降精度 + 写扇区化」
+
+- **背景**：F1 后默认路径的墙是 `wait + short_scoreboard`（GEMM3/4/5 的 mma 依赖，见「阻塞」）
+  与 L2 `red` 114.5M；F4 想做的是打掉 dK/dV 归约。第 131 轮把 fp16/bf16 的 DET partial 做完
+  了「降精度（O60）+ 扇区化（O62）」，fp8 一直没做——本轮把这块补齐（落实 §67.7 候选 ②）。
+- **fp8 的特殊性**：fp32 的 DET partial 在 `m16n8k32` 布局下**已经落满 32B 扇区**（quad 的
+  4 个 `float2` 连续），所以只把存储降 fp16 会变成 16B/quad、扇区不减 ⇒ 必须叠加 O62 的
+  「相邻两列组拼 8B + 16 列块内置换」。
+- **实现**：`dkv_det_store_h4` + `dkv_p16_perm`（公式与 fp16/bf16 逐字相同）；`fp8_mma_body`
+  加 `DET_HALF`，`epi_dv/epi_dk` 在 `DET_HALF` 时一次写 8B；两个 `dkv*_reduce_kernel` 加 `P16`
+  按置换列读回 fp16。单/两文件 device 逐字一致、默认路径一行未改（`--ci` 全绿）。
+- **正结果（DET 路径）**：S4096 DET-fp32 2.597ms → **DET-fp16 2.214ms（1.17×）**，相对非确定
+  atomic 由 0.78× 抬到 **0.92×**（S512 0.88→0.93、GQA 0.80→0.90）；`runs[1-2]` 逐位=0（确定性
+  保留），**ncu**：主 kernel store 扇区 68.2M→**34.1M（−50%）**、reduce 734.7→**420.9µs
+  （1.75×）**、读扇区 102.2M→51.1M。数值只差 partial 的 fp16 舍入（~1e-3），`ours-vs-ref` 不变。
+- **尚未转正**：fp8 的 partial 即使 fp16 也有 1.1GB 写 + 1.1GB 读（atomic 在 L2 RMW 无额外
+  DRAM），故 ksplit=1 下 DET 仍 0.90–0.93×——与 fp16/bf16 O62「反超 atomic」不同（fp8 原
+  partial 已满扇区，降精度只减字节）。默认路径的 `red` 仍被 O42 的双硬约束锁定。详见 `docs/03`
+  §68；原始输出 `src/fp8/fa_bwd_fp8_p133_*`。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。
