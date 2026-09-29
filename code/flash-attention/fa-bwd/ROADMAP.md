@@ -196,6 +196,19 @@
 
 ## 阻塞
 
+- **fp8 默认 main 的 L2 `red` 墙已「不可再辩」地收口（第一百三十八轮）。** 定量复核（S=4096
+  causal）：默认 `fa_bwd_fp8_mma_kvtma_kernel` 的 **L2 76.96%**、L2 扇区 **154.0M 中 `red`
+  114.5M（74.3%）**、DRAM ~4.3%（L2 hit 97%）、stall `wait` 1.61+`short` 1.27、Active
+  Warps/Sched 2.94（3 CTA/SM，168 regs，74.8KB smem）。**ISA 层**：CUTLASS
+  `cute/arch/mma_sm90_gmma.hpp` 的 fp8 `SS_TN` asm 尾操作数只有 `p,scaleA,scaleB`（**无
+  `tnspA/tnspB`**），而 fp16 `SS` 有 —— 故 **GEMM3/4/5 的 B（N 连续）上 wgmma 必须物理转置
+  SW128 tile（+20KB smem + scatter），O4b 已判净负**。**负结果**：① 累加缓冲 `cudaMemset`
+  旁路 stream 与 quant/preprocess 重叠 = **1.8072 vs 1.8096ms（噪声内）**；② 量化 grid cap =
+  **0.0686 vs 0.0687ms（无效，quant 单 kernel DRAM 70.8% 是真带宽 bound）** ⇒
+  **非 main 固定开销（quant 0.069 / preprocess 0.139 / 残余 ~0.03ms）无余量**。
+  真杠杆只剩：**跨 CTA 分块偏和（FA2 式 dK/dV-over-KV）**、**放大 BM**（O17b 寄存器墙）、
+  **换卡（目标卡 smem/寄存器更大）**。详见 `docs/03` §73、`docs/08` §5.53。
+
 - **F3（fp8 warp specialization）在 3 CTA/SM 的资源约束下不成立（第一百三十五轮评估收口）。**
   ncu 对标 TE 证明：ours 默认 fp8 main 的 **L2 搬运量 ≈ TE 的 6.9×**（`Duration×L2%`，因 3 CTA/SM
   的 74.8KB smem 限制下靠 ksplit=8 凑并行度 ⇒ Q/dO 重读 + dK/dV `red`）。WS 只能*重叠*、不能*减少*
@@ -2692,8 +2705,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       补全需等 F3/F4 的非 wgmma 手段。详见 `docs/03` §67、`docs/08` §5.47、`docs/04` 表。
 - [x] **F2** Q/dO 也上 **4D TMA**（K/V 已在 O41）
       → 实际早在 **O37** 完成、并在 F1 默认化里生效（`qd-tma=on`），此处标注为已覆盖。
-- [~] **F3** **warp specialization / 更深 mbarrier 流水**（对标 TE 384 线程、1 CTA/SM）
-      → **评估已完成（第一百三十五轮 F3-a）**：ncu 对标 TE（384 线程/132 CTA/1 CTA/SM/232KB smem，
+- [x] **F3** **warp specialization / 更深 mbarrier 流水**（对标 TE 384 线程、1 CTA/SM）
+      → **评估已完成（第一百三十五轮 F3-a） + 第一百三十八轮收口**：第 138 轮把默认 fp8 main
+      的墙再做定量复核（L2 76.96%、L2 扇区 154M 中 `red` 114.5M=74.3%、`wait`1.61+`short`1.27），
+      并记两条负结果（memset 旁路 stream 重叠、quant grid cap 均噪声内）⇒ 非 main 固定开销无余量。
+      ncu 对标 TE（384 线程/132 CTA/1 CTA/SM/232KB smem，
       258µs）——**两者都 L2 bound，但 ours 的 L2 搬运量 ≈ TE 的 6.9×**（`Duration×L2%`，因 3 CTA/SM
       的 smem 限制靠 ksplit=8 凑并行度 ⇒ Q/dO 重读 + dK/dV 跨 CTA `red`）。**WS 只能重叠不能减少
       这笔 L2 流量**（O48 判据不满足）、更深流水被 3 CTA/SM 的 74.8↔77.5KB 硬间隙锁死 ⇒ **F3 不是
@@ -2701,6 +2717,11 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `int kuse[2]`（运行期 `stg^1` 动态下标 → **local memory**）改两标量，local 扇区 ld/st
       7.33/8.48M→**5.84/5.67M**、main S4096 **~2%↑**、数值逐位不变。详见 `docs/03` §70、`docs/08` §5.50。
 - [~] **F4** dK/dV 归约（L2 red；fp8 天花板实验显示占 ~35%）
+      → **第一百三十八轮收口（默认路径部分）**：默认 fp8 main 的 L2 `red` 仍 114.5M 扇区
+      （占 L2 流量 74.3%）、是唯一真杠杆，且**只有三条路**：跨 CTA 分块偏和（FA2 式
+      dK/dV-over-KV，工程量大）、放大 BM（O17b 寄存器墙）、换卡（目标卡资源更大）。
+      GEMM3/4/5 上 wgmma 被 ISA 锁死（fp8 `SS_TN` asm 无 `tnspA/tnspB`，须物理转置 SW128 B
+      +20KB smem + scatter，O4b 已判净负）。详见 `docs/03` §73。
       → **第一步已完成（第一百三十三轮）**：把 fp16/bf16 O60+O62 的「partial 降精度 + 写扇区化」
       逐字搬到 fp8 的 `--det` 路径（`DET_HALF`/`P16`）。S4096 DET-fp32→fp16 **1.17×**、相对
       atomic 由 0.78×→**0.92×**；ncu store 扇区 68.2M→34.1M（−50%）、reduce 735→**421µs（1.75×）**；
@@ -2735,7 +2756,23 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百三十七轮）**：**F4-c——fp16 DET partial 归约的读取向量化**（正结果，opt-in
+> **最新（第一百三十八轮）**：**F3/F4-default/GEMM3·5-wgmma 收口（墙的定量复核 + fp8 wgmma ISA
+> 验证 + 负结果）＋ LSE split auto 大 S 档微调**。『fp8 专项冲刺』F1→F5 后，本轮的判断是
+> **默认 fp8 main 已到设计空间内的局部最优**，于是把「墙」钉到不可再辩，并排除几个小改动：
+> ncu 复核默认 main（S4096 causal）**L2 76.96%、L2 扇区 154.0M 中 `red` 114.5M=74.3%、
+> DRAM ~4.3%（L2 hit 97%）、`wait`1.61+`short`1.27、3 CTA/SM**；CUTLASS `mma_sm90_gmma.hpp`
+> 证明 **fp8 `SS_TN` asm 无 `tnspA/tnspB`**（fp16 有）⇒ GEMM3/4/5 的 B 上 wgmma 必须物理转置
+> SW128（+20KB smem + scatter，O4b 已判净负），**ISA 锁死**。两条负结果：memset 旁路 stream
+> 重叠 **1.8072 vs 1.8096ms（噪声内）**、quant grid cap **0.0686 vs 0.0687ms（无效）** ⇒
+> 非 main 固定开销无余量。唯一小正结果：LSE split auto 在 **S≥2048 多切一档**（S4096
+> split=2 vs auto=4：0.1185 vs 0.1189ms），`target` 改为 `S≥2048→1024`。数值逐位不变、
+> `--ci` fp8 全绿、`--check docs/04` OK 194 行。详见「当前进度 第一百三十八轮」、`docs/03`
+> §73、`docs/08` §5.53；原始输出 `src/fp8/fa_bwd_fp8_p138_*`。
+> **下一步候选**：① 默认路径 L2 `red` 是唯一真杠杆——只有**跨 CTA 分块偏和（FA2 式
+> dK/dV-over-KV，工程量大）**、**放大 BM（O17b 寄存器墙）**、**换卡（目标卡资源更大）**三条路；
+> ② GEMM3/4/5 wgmma 被 ISA 锁死；③ DET 仅 opt-in、非目标。
+>
+> **（第一百三十七轮）**：**F4-c——fp16 DET partial 归约的读取向量化**（正结果，opt-in
 > `--det`）。F4/F4-b 把 `--det` 的 dK/dV partial 降到 fp16 + 写扇区化后，reduce 端仍逐列 2B
 > 标量读；ncu 实测 fp16 reduce **DRAM 仅 ~78%**（fp32 版 91.2%）——减半的字节被窄读低效率吃掉。
 > 改法：`dkv_det_store_h4` 的 8B 单元（4 个连续物理列）在 reduce 端用 **`uint2` 一次读回**
@@ -5279,6 +5316,35 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     `..._p137_f4c_varlen_mla.out.txt`；文档 `docs/03` §72、`docs/08` §5.52。
   - **下一步候选**：① F4 默认路径 L2 `red`（唯一真杠杆，受本卡寄存器/smem 硬墙锁定）；
     ② main 仍占端到端 ~86%；③ DET 仅 opt-in，默认路径本次未动。
+
+- 2026-09-29（第一百三十八轮）：**F3/F4-default/GEMM3·5-wgmma 收口（墙的定量复核 + fp8 wgmma
+  ISA 验证 + 负结果）＋ LSE split auto 大 S 档微调**。
+  - 动机：F1→F5 后 `下一步候选` 反复收敛到「默认路径 L2 `red` 是唯一真杠杆、受寄存器/smem 双硬墙
+    锁定」。本轮不臆断，把这条结论**定量复核**，并逐条排除几个看似能做的改动。
+  - **ncu 复核**（默认 `kvtma<128,64,32,...>`，S4096 causal）：Duration **1.59ms**、**L2 76.96%**、
+    L1/TEX 71.75%、Compute 47.89%、DRAM ~4.3%（L2 hit **97.08%**）；L2 扇区 **154.0M**（`red`
+    **114.5M=74.3%**、read 30.9M、write 8.4M），`op_red` 占峰值 52.79%；stall **`wait`1.61 +
+    `short_scoreboard`1.27**、No Eligible 50.12%、Active Warps/Sched 2.94。**L2 吞吐是墙。**
+    ksplit 复核 k=1/2/4/8 → main 1.952/1.701/1.591/1.578ms ⇒ auto k=8 正确。
+  - **ISA 验证**：CUTLASS `mma_sm90_gmma.hpp`——fp8 `SS_TN` asm 尾操作数 `p,scaleA,scaleB`，
+    fp16 `SS` 为 `p,scaleA,scaleB,tnspA,tnspB`。**fp8 wgmma 无运行时转置** ⇒ GEMM3/4/5 的 B
+    （N 连续）必须物理转置 SW128 tile（+20KB smem + scatter，O4b 已判净负）。阻塞判据精确成立。
+  - **负结果**（同 session/同 binary 交替）：① dQ/dK/dV 清零放旁路 stream 与 quant+preprocess
+    重叠 → total **1.8072 vs 1.8096ms（≈0.1%，噪声内）**；② 量化 grid cap（靠 grid-stride 多吃
+    几轮）→ quant **0.0686 vs 0.0687ms**（quant 单 kernel 15.5µs、DRAM 70.8%，真带宽 bound）。
+    ⇒ 非 main 固定开销无余量。
+  - **正结果（小）**：LSE K 维 split auto 在 **S≥2048 多切一档**（S4096 `lg_grid=512`，目标 2048
+    →split=4；同 binary 实测 split=1/2/4/8=0.1219/0.1185/0.1189/0.1272ms，best=2）。改
+    `target`：`S≥2048→1024`、`S<2048` 维持 2048（S512/S1024H32 无回归，端到端噪声内）。单/两
+    文件同步（`fa_bwd_fp8_main.cu` / `fa_bwd_fp8_mma_onefile.cu`）。
+  - **数值/回归**：`ours vs ref` 与历史**逐位相同**（S512 2.426/2.972/3.733e-1、S4096
+    2.635/2.644/3.216e-1、GQA 2.517/5.339/7.173e-1、MLA 2.232/3.337/3.602e-1）；
+    `fa_bwd_run.py --ci --dtype fp8 --fixed-only --hopper` **rc=0**（单/两文件 gate
+    worst=7.629e-06、`--check docs/04` OK 194 行）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_p138_s4096.out.txt`、`..._p138_ncu_main_s4096.out.txt`、
+    `..._p138_wgmma_isa.out.txt`、`..._p138_ci_fp8.out.txt`；文档 `docs/03` §73、`docs/08` §5.53。
+  - **下一步候选**：① 默认路径 L2 `red`（唯一真杠杆）——跨 CTA 分块偏和（FA2 式 dK/dV-over-KV）
+    / 放大 BM（寄存器墙）/ 换卡；② GEMM3/4/5 wgmma 被 ISA 锁死；③ DET 仅 opt-in、非目标。
 
 ## 灵感 / backlog
 

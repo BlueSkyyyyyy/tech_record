@@ -6727,3 +6727,98 @@ python3 scripts/sync_onefile_device.py src/fp8/fa_bwd_fp8_kernels.cuh \
 
 **下一步候选**：① F4 默认路径的 L2 `red`（114.5M 扇区）仍受本卡寄存器/smem 硬墙锁定（见
 ROADMAP「阻塞」）；② main 仍是端到端 ~86%；③ DET 仅 opt-in，默认（非确定）路径本次未动。
+
+## 73. 第 138 轮：F3/F4-default/GEMM3·5-wgmma 收口（fp8 main 墙的定量复核 + fp8 wgmma ISA 验证 + 负结果）＋ LSE split auto 大 S 档微调
+
+### 73.1 动机
+
+『fp8 专项冲刺』F1→F5 后，`下一步候选` 反复收敛到同一句：**默认（非确定）路径的 dK/dV/dQ
+跨 CTA `red`（114.5M 扇区）是唯一真杠杆，但受本卡寄存器（168 regs @3 CTA/SM）与 smem
+（74.8KB @3 CTA/SM）双硬墙锁定**。本轮不臆断，直接把这条结论**定量复核**一遍，并逐条排除
+几个「看起来能做」的小改动；同时把 §23.6 那条『fp8 wgmma 无转置操作数』的**阻塞判据**拿
+真实 CUTLASS 头文件二次核对（它是 GEMM3/4/5 能否上 wgmma 的唯一前提）。
+
+### 73.2 默认 fp8 main 的墙（ncu，S=4096 causal，`fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>`）
+
+| 指标 | 值 |
+|---|---|
+| Duration | **1.59 ms**（grid 512×16、ksplit=8、3 CTA/SM、128 线程/CTA） |
+| **L2 Cache Throughput** | **76.96%**（新墙/并列第一） |
+| L1/TEX Cache Throughput | 71.75% |
+| Compute (SM) Throughput | 47.89% |
+| DRAM Throughput | ~4.3%（L2 Hit Rate **97.08%**） |
+| L2 扇区总计 | **154.0 M**（`red` **114.5 M = 74.3%**、read 30.9 M、write 8.4 M） |
+| `lts__t_sectors_op_red` 占峰值 | **52.79%** |
+| stall（per issue-active inst） | **`wait` 1.61 + `short_scoreboard` 1.27** + barrier 0.41 + long 0.40 |
+| Scheduler | No Eligible 50.12%、Active Warps/Scheduler **2.94** |
+
+结论与 F3-a/O42 一致：**L2 流量（其中 `red` 占 74%）是墙**；`wait`+`short_scoreboard`
+合计 2.88/5.88≈49% 是**症状**（3 warp/scheduler 不足以同时隐藏 wgmma 依赖与 smem→mma 依赖），
+不是能靠「重排指令」消掉的发射序问题（O50/O29 已证）。
+
+**ksplit 复核**（同 session 交替）：k=1/2/4/8 → main **1.952/1.701/1.591/1.578 ms**，
+即 auto 选的 k=8 正确（切 K 提并行度的收益 > dQ red ×8 的代价）。
+
+### 73.3 fp8 wgmma ISA 验证（GEMM3/4/5 上 wgmma 的唯一前提）
+
+直接读容器内 CUTLASS `cute/arch/mma_sm90_gmma.hpp`：
+
+- fp8 `MMA_64x64x32_F32E4M3E4M3_SS_TN` 的 asm 尾操作数为 **`p, scaleA, scaleB`**（3 个）；
+- fp16 `MMA_64x64x16_F32F16F16_SS` 的 asm 尾操作数为
+  **`p, scaleA, scaleB, tnspA, tnspB`**（5 个）。
+
+⇒ **fp8 `wgmma` 没有运行时转置立即数**，只能读固定的 TN 布局（A/B 的归约维连续）。反向的
+GEMM3(dV=PᵀdO)/GEMM4(dK=dSᵀQ)/GEMM5(dQ=dS2·K) 的 **B 操作数都是 N（head_dim）连续**，
+要上 wgmma 必须为 Q/dO/K 各物理存一份**转置 SW128 tile**（+20KB smem，且转置写是 O4b 已
+证昂贵的 scatter）。**§23.6 的阻塞判据成立、and 给出精确 ISA 证据**（原始：
+`src/fp8/fa_bwd_fp8_p138_wgmma_isa.out.txt`）。
+
+### 73.4 负结果（逐条排除，均同 session 交替 / 同 binary A/B）
+
+1. **累加缓冲清零旁路 stream 重叠**：把 dQ/dK/dV 三个 ~100MB `cudaMemset` 放非阻塞 stream、
+   与 quant+preprocess 重叠（事件同步）。S=4096：**total 1.8072 vs 1.8096 ms（≈0.1%，噪声内）**
+   ——mem 与 compute 争 SM/带宽，重叠不赚。`--zeroov` A/B 开关已回退（不入库）。
+2. **量化 grid 上限 cap**（靠 kernel 自带 grid-stride 多吃几轮）：quant **0.0686 vs 0.0687 ms**
+   ——quant 实测单 kernel 15.5µs、DRAM 70.8%，是**真带宽 bound**（非块调度），cap 无效。
+
+⇒ 非 main 的三块（quant 0.069 / preprocess 0.139 / 残余 ~0.03ms）都已是各自机理下的
+近最优，端到端固定开销没有可捡的余量。
+
+### 73.5 正结果（小）：LSE K 维 split auto 的大 S 档重标定
+
+D=128 TMA LSE 的 auto（§41 O38，目标 `grid*split≈2048`）在 **S≥2048 时比实测最优多切一档**：
+S=4096 H16 的 `lg_grid=512`，目标 2048 → split=4；同 binary 交替实测
+**split=1 / 2 / 4 / 8 = 0.1219 / 0.1185 / 0.1189 / 0.1272 ms**（best=2，+2.9% vs split1）。
+改 `target`：**`S≥2048 → 1024`**（仍 ≈2 个满波量级），`S<2048` 维持 2048。S512 / S1024H32
+实测两档相同（无回归）。端到端在噪声内（1.8086 vs 1.8083 ms），但使 auto 贴合 per-shape 最优。
+单/两文件同步（`fa_bwd_fp8_main.cu` / `fa_bwd_fp8_mma_onefile.cu`）。
+
+### 73.6 数值 / 回归
+
+- `ours vs ref` 与历史**逐位相同**：S512 2.426/2.972/3.733e-1、S4096 2.635/2.644/3.216e-1、
+  GQA kv4 2.517/5.339/7.173e-1、MLA S1024H2 2.232/3.337/3.602e-1。
+- `python3 harness/fa_bwd_run.py --ci --dtype fp8 --fixed-only --hopper`：**rc=0**，
+  单/两文件 gate `worst=7.629e-06（tol 1e-4）OK`、`--check docs/04` OK 194 行。
+
+### 73.7 复现 / 原始输出
+
+```bash
+FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=300
+# ncu（默认 main）
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu \
+  --launch-count 1 --kernel-name regex:kvtma --section SpeedOfLight --section SchedulerStats \
+  --section WarpStateStats --metrics lts__t_sectors.sum,... -- \
+  --dir=.../b1_s4096_h16_d128_causal_fp8 --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_p138_s4096.out.txt`（默认 + O38 split A/B + 全 A/B）、
+`..._p138_ncu_main_s4096.out.txt`（L2 扇区/SOL/stall）、
+`..._p138_wgmma_isa.out.txt`（fp8 vs fp16 SS asm 操作数）、
+`..._p138_ci_fp8.out.txt`（CI 全绿）。
+
+**下一步候选**：① 默认路径 L2 `red` 仍是唯一真杠杆——只有三条路：**跨 CTA 分块偏和**
+（FA2 式 `dK/dV-over-KV`，工程量大）、**增大 BM**（O17b 寄存器墙）、**换卡（目标卡 smem/寄存器更大）**；
+② GEMM3/4/5 的 wgmma 需物理转置 SW128 B（+20KB smem + scatter），O4b 已判净负，**ISA 层锁死**；
+③ DET 仅 opt-in，非目标。

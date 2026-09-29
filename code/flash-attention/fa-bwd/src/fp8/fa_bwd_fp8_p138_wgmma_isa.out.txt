@@ -1,0 +1,30 @@
+=== F3/F4-default/GEMM3-5 wgmma ISA verification (第138轮) ===
+CUTLASS mma_sm90_gmma.hpp: fp8 SS asm vs fp16 SS asm 操作数尾部
+
+--- fp8 MMA_64x64x32_F32E4M3E4M3_SS_TN asm (line 13652附近) ---
+        "+f"(d16), "+f"(d17), "+f"(d18), "+f"(d19),
+        "+f"(d20), "+f"(d21), "+f"(d22), "+f"(d23),
+        "+f"(d24), "+f"(d25), "+f"(d26), "+f"(d27),
+        "+f"(d28), "+f"(d29), "+f"(d30), "+f"(d31)
+      :  "l"(desc_a),
+         "l"(desc_b),
+         "r"(int32_t(scale_D)), "n"(int32_t(scaleA)), "n"(int32_t(scaleB)));
+#else
+    CUTE_INVALID_CONTROL_PATH("Attempting to use MMA_64x64x32_F32E4M3E4M3_SS_TN without CUTE_ARCH_MMA_SM90A_ENABLED");
+
+--- fp16 MMA_64x64x16_F32F16F16_SS asm ---
+        "+f"(d16), "+f"(d17), "+f"(d18), "+f"(d19),
+        "+f"(d20), "+f"(d21), "+f"(d22), "+f"(d23),
+        "+f"(d24), "+f"(d25), "+f"(d26), "+f"(d27),
+        "+f"(d28), "+f"(d29), "+f"(d30), "+f"(d31)
+      :  "l"(desc_a),
+         "l"(desc_b),
+         "r"(int32_t(scale_D)), "n"(int32_t(scaleA)), "n"(int32_t(scaleB)), "n"(int32_t(tnspA)), "n"(int32_t(tnspB)));
+#else
+    CUTE_INVALID_CONTROL_PATH("Attempting to use MMA_64x64x16_F32F16F16_SS without CUTE_ARCH_MMA_SM90A_ENABLED");
+#endif
+  }
+};
+
+结论：fp8 SS asm 尾部为 p, scaleA, scaleB（无 tnspA/tnspB）；fp16 SS 尾部为 p, scaleA, scaleB, tnspA, tnspB。
+=> fp8 wgmma 无运行时转置操作数，只能读固定 TN 布局（A/B 的归约维连续）。GEMM3/4/5 的 B 是 N 连续，须物理转置副本，与【阻塞】记录一致。

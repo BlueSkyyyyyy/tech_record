@@ -818,6 +818,26 @@ smem 冲突 + 低 occ
 - **教训**：**「把精度降一半」只在读侧也做到「宽读」时才兑现带宽收益**——O60 在写侧踩过
   「扇区粒度」的坑，本轮在读侧踩到同一个镜像问题（**标量窄读达不到 HBM 峰值效率**）。
 
+### 5.53 F3/F4-default/GEMM3·5-wgmma 收口 + LSE split auto 微调（第一百三十八轮）
+
+- **不是新优化，是把「墙」钉死**：F1→F5 后 `下一步候选` 一直收敛到「默认路径 L2 `red` 是唯一
+  真杠杆、受寄存器/smem 双硬墙锁定」。本轮用 ncu 定量复核：默认 fp8 main（S4096 causal）
+  **Duration 1.59ms、L2 76.96%、L1/TEX 71.75%、Compute 47.89%、DRAM ~4.3%（L2 hit 97.08%）**；
+  L2 扇区 **154.0M，其中 `red` 114.5M = 74.3%**；stall **`wait` 1.61 + `short_scoreboard` 1.27**
+  （症状，非发射序）、Active Warps/Scheduler 2.94。**L2 吞吐就是墙。**
+- **ISA 层验证**：读 CUTLASS `mma_sm90_gmma.hpp`——fp8 `SS_TN` 的 asm 尾操作数是
+  `p, scaleA, scaleB`，fp16 `SS` 是 `p, scaleA, scaleB, tnspA, tnspB`。**fp8 wgmma 无运行时转置**，
+  GEMM3/4/5 的 B 是 N 连续 ⇒ 必须物理转置（+20KB smem + scatter，O4b 已判净负）。阻塞判据成立。
+- **负结果两条**（都同 session/同 binary 交替）：① 累加缓冲 `cudaMemset` 旁路 stream 重叠 →
+  **1.8072 vs 1.8096ms（噪声内）**；② 量化 grid cap → **0.0686 vs 0.0687ms（无效）**
+  （quant 单 kernel 15.5µs、DRAM 70.8%，是真带宽 bound）。非 main 固定开销无余量。
+- **正结果（小）**：LSE K 维 split auto 在 S≥2048 多切一档（S4096：auto split=4，
+  实测最优 split=2：0.1185 vs 0.1189/0.1219ms）。`target` 在 `S≥2048` 降到 1024，S<2048 不变；
+  S512/S1024H32 无回归，端到端噪声内。数值逐位不变，`--ci` fp8 全绿（gate 7.629e-6）。
+- **教训**：**当所有 quick lever 都在噪声内、且结构杠杆已被 ISA/硬件判死时，正确的增量是
+  「把阻塞证据补全到不可再辩」**，而不是制造一个噪声级 commit。真杠杆只剩：跨 CTA 分块偏和
+  （FA2 式 dK/dV-over-KV）、放大 BM（寄存器墙）、或换卡。详见 `docs/03` §73。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。
