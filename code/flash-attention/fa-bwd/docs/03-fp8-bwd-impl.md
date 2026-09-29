@@ -7548,3 +7548,92 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_smoke.cu -c 3 \
 ```
 
 原始输出 `src/fp8/fa_bwd_fp8_kvowner_stage_run.out.txt`、`src/fp8/fa_bwd_fp8_kvowner_stage_ncu.out.txt`。
+
+## 83. F7 第三步（第一百五十轮）：KV-owner 落进真实 fp8 张量核（dK/dV 的 mma 原型）
+
+> 承接 §82「结论 / 下一步」：F7 的两根机制支柱（单一 owner 消 `red` + staging 消读放大）已在
+> **fp32 标量** smoke 上 de-risk，但**真实 fp8 主 kernel 走 mma/TMA**，必须把同一划分落进真实
+> 数据通路才能判断它是否真的成立。本轮是 F7 主体的**第一步**：`src/fp8/fa_bwd_fp8_kvowner_mma.cu`
+> 用 **E4M3/E5M2 + rowwise scale + `mma.m16n8k32`** 实现 **KV-owner 的 dK/dV**（暂不含 dQ）。
+> **默认路径一行未改**（纯新增独立文件）。
+
+### 83.1 设计（`fp8_kvowner_dkv_kernel<HD=128,BM=64,BN=32>`，128 线程）
+
+- **划分**：grid=`(ceil(S/BN), H)`，每 CTA **拥有 KV 行块 `[j0,j0+BN)`**，沿 query 块
+  `m0 = floor(j0/BM)*BM … S`（causal 裁剪）遍历；dK/dV 在**寄存器**本地累加，循环外**一次
+  plain store** ⇒ 每元素仅 owner 写一次、**无跨 CTA 原子 / 无 `red`**。
+- **K/V 常驻 smem**：拥有的 K/V 行块只从 global 读一次（`float4`? 4B 向量化），供 GEMM1 的
+  B=`Ks`、GEMM2 的 B=`Vs`；`ks_s/vs_s` rowwise scale 也一次装好。
+- **Q/dO staging**：每个 m0 把 Q/dO 行块搬进 `Qs/dOs`（行主序 ASLD）+ 配对布局 `Qp/dOp`
+  （uint16，`ldmatrix.x2.trans` 读 B）。
+- **4 个 GEMM**（省掉 dQ 的 GEMM4；记账与 Q-owner 主 kernel **完全一致**）：
+  | GEMM | 算式 | A×B | 输出 | 处理 |
+  |---|---|---|---|---|
+  | 1 | `S = scale·QKᵀ` | E4M3×E4M3 | `[BM][BN]` | epilogue `P=exp(S−LSE)` |
+  | 2 | `dP = dO·Vᵀ` | E5M2×E4M3 | `[BM][BN]` | epilogue `dS=P∘(dP−D)` |
+  | 3 | `dV += Ap·dOᵀ` | E4M3×E5M2 | `[BN][HD]` | 乘 `sA[j]` 累进 `dVacc` 寄存器 |
+  | 5 | `dK += scale·dS3·Qᵀ` | E5M2×E4M3 | `[BN][HD]` | 乘 `sds3[j]·scale` 累进 `dKacc` 寄存器 |
+- **fold**：`Ap[j][m]=P[m][j]·dos[m]`（E4M3, per-j）、`dS3[j][m]=dS[m][j]·qs[m]`（E5M2, per-j），
+  与 Q-owner 主 kernel **同款**（全 128 线程均衡分工 + 4-lane `shfl` 归约 amax + `foldpack4`）。
+- smem = 70,144 B（K/V 常驻 + Q/dO staging + P/dS + 折叠操作数）。
+
+### 83.2 数值：与既有 fp8 ours **逐位同量级**（只差跨 CTA 加法次序）
+
+| shape（causal, MHA, fp8） | ours KV-owner mma dk / dv (vs ref) | 既有 ours Q-owner（已知值） |
+|---|---|---|
+| S=512  H16 | **2.975e-1 / 3.735e-1** | dk/dv 2.975e-1 / 3.735e-1 |
+| S=4096 H16 | **2.643e-1 / 3.216e-1** | dk/dv 2.643e-1 / 3.216e-1 |
+
+两个 shape 的 `max_abs` 与既有 Q-owner ours **完全相同**（同一 fp8 量化、同一 rowwise 折算、
+同一 mma 布局），`ours(KV) vs ours(Q)` 仅 **3.9e-2/5.6e-2（S512）**、**1.50e-1/2.57e-2（S4096）**
+——纯 fp32 加法次序差（Q-owner 逐 tile 原子、KV-owner 逐 query 块寄存器累加）。与 ref/TE 同量级，
+无系统误差。原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_{s512,s4096}.out.txt`。
+
+### 83.3 ncu：真实 mma 路径下 `red` 精确为 0（S4096 H16 causal，同 session）
+
+| kernel | Duration | regs | `op_red` | `op_read` | `op_write` | occ（CTA/SM） |
+|---|---|---|---|---|---|---|
+| Q-owner 主 kernel（mma 路径，5 GEMM + dQ） | **1.91 ms** | 168 | **114,524,160** | 36,393,440 | — | 3 |
+| **KV-owner dK/dV mma（本原型，4 GEMM）** | **1.41 ms** | 168 | **0** | 50,989,925 | 6,036,301 | 3 |
+
+⇒ **`red` 从 114.5M 精确归零**（F7 核心判据在真实张量核数据通路上成立）；
+`sm__throughput 47.3%`、achieved occupancy 17.7%（168 regs、3 CTA/SM）；
+`l1tex` 共享 bank conflict 14.8M。原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_ncu_s4096.out.txt`。
+
+### 83.4 性能（event，iters=30，同 binary / 同 session）
+
+| shape | KV-owner dK/dV main | 同 session Q-owner mma 主 kernel（5 GEMM+dQ） |
+|---|---|---|
+| S=512  H16 | **0.057 ms** | — |
+| S=4096 H16 | **1.41 ms**（72.9 TF @dK/dV 口径） | **1.91 ms** |
+
+**关键读数（重要，非结论性正收益）**：KV-owner dK/dV **只做 4 个 GEMM**（无 GEMM4 dQ），
+却仍要 1.41ms；Q-owner 做 **5 个 GEMM + dK/dV 的 114.5M `red`** 只要 1.91ms。按「每 GEMM 等效
+时间」折算：KV `1.41/4 = 0.353 ms`、Q `1.91/5 = 0.382 ms`——KV-owner **单 GEMM 反而略快**，
+但 `op_read` 从 36.4M **涨到 51.0M（1.40×）**：KV-owner 每个 KV CTA 都要把（causal 范围内的）
+全部 Q/dO 重读一遍（staging 只保证「逐 tile 合并读」，不消除**跨 CTA 的 Q/dO 复用**）。
+再加上本原型**无 K/V 预取、无 TMA、无 persistent**，所以把 dQ 也补上后**并不构成净收益**。
+
+### 83.5 结论 / 下一步
+
+- **F7 的「单一 owner 消 `red`」判据在真实 fp8 mma 上成立**（`red` 114.5M → **0**，数值逐位同
+  口径）。这是 F7 主体的必要不充分条件。
+- **但 `red` 归零本身买不到墙钟**：主 kernel 是 occupancy/延迟 bound（§73、§80），不是 L2 带宽
+  bound；KV-owner 把 `red` 换成 **Q/dO 的跨 CTA 读放大（1.40×）** 与**寄存器墙**（dVacc+dKacc
+  占 64 regs）。要让 F7 真正转正，必须同时：① **persistent + 4D-TMA staging** 消除跨 CTA 读
+  放大并对齐 TE 的 grid=132；② Q/dO/K/V 的 TMA 与 mma 重叠；③ 把 dQ 也纳入同一 KV-owner 循环
+  （否则 dQ 另起一趟，收益被摊薄）；④ 降 `dVacc/dKacc` 的寄存器占用以提 occupancy。
+- **本原型定位**：F7 主体的「真实数据通路 de-risk」，与 §81/§82 的标量机制 de-risk 互补。
+  下一步 = 把上述 ①②③④ 落进主 kernel（对标 TE `..._flash_bprop_wgmma_f8_..._64x64x128`）。
+
+```bash
+# 运行 + 对拍（读 dump case）
+scripts/run.sh src/fp8/fa_bwd_fp8_kvowner_mma.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# ncu（red=0）
+scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_mma.cu -c 1 \
+  --metrics lts__t_sectors_op_red.sum,lts__t_sectors_op_read.sum \
+  --kernel-name regex:kvowner -- --dir=.../b1_s4096_h16_d128_causal_fp8
+```
+
+原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_{s512,s4096,ncu_s4096}.out.txt`。

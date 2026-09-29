@@ -205,8 +205,12 @@
   ⇒ 差距是**「每个 KV 元素被多少 CTA 贡献」= 工作划分 / tile 调度**，**不是归约宽度、也不只是
   放大 BM**（修正第一百三十九轮把 red 归因为「只能放大 BM」的结论）。**新立 F7 = dK/dV-over-KV
   单一 owner + TMA store-reduce / persistent 调度**（对标 TE 132 CTA；O42 的 `cp.reduce.async.bulk`
-  失败是因为**没换工作划分**，只加 staging、归约次数没降）。工程量大，是当前唯一经 ncu 钉死的
-  真杠杆。详见 `docs/03` §80、`docs/08` §5.61。
+   失败是因为**没换工作划分**，只加 staging、归约次数没降）。工程量大，是当前唯一经 ncu 钉死的
+   真杠杆。详见 `docs/03` §80、`docs/08` §5.61。
+   **进展（第一百五十轮 F7 第三步）**：KV-owner 已落进**真实 fp8 mma**（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，
+   dK/dV），`red` 114.5M→**0** 确认；但单做 dK/dV（无持久化/TMA/重叠）不构成净收益——
+   `red` 被换成 **Q/dO 跨 CTA 读放大（1.40×）+ 寄存器墙**。F7 主体尚需 persistent+4D-TMA。
+   详见 `docs/03` §83。
 - **F6（BM=128 双 warpgroup）「去 Qp/dOp 冲 2 CTA/SM」在 fp8 上不可行（第一百四十二轮三证收口）。**
   ① fp8 `mma.m16n8k32` **只有 `.row.col`**（`.col.row/.row.row/.col.col` 被 ptxas 拒）⇒
   GEMM3/4/5 的 B（`Qᵀ/dOᵀ/Kᵀ`）必须 col-major、**必须转置**；② fp8 的 1 个 b16=2 个 fp8，
@@ -5939,6 +5943,31 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       Q/dO/K/V + dK/dV 本地累加后 TMA store / `cp.reduce.async.bulk` 一次写出，对标 TE grid=132）；
       ② 其余候选（放大 BM/F6、归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、非 main 融合）均已判决/到顶/收口；
       ③ DET 仅 opt-in。
+
+- 2026-09-30（第一百五十轮）：**F7 第三步完成（KV-owner 落进真实 fp8 张量核：dK/dV 的
+  mma.m16n8k32 原型——`red` 精确归零，但读放大/寄存器墙使净收益未现）**——落实第 149 轮
+  「下一步候选 ①」的真实数据通路 de-risk。
+    - 新增 `src/fp8/fa_bwd_fp8_kvowner_mma.cu`（独立文件，**默认路径一行未改**）：
+      `fp8_kvowner_dkv_kernel<HD=128,BM=64,BN=32>`，grid=`(S/BN,H)`，每 CTA 拥有 KV 行块、
+      K/V 常驻 smem 只读一次、Q/dO staging 到 smem（Qs/dOs + Qp/dOp 配对）、遍历 query 块、
+      dK/dV 在**寄存器**本地累加后**一次 plain store**。4 个 GEMM（GEMM1 S、GEMM2 dP、
+      GEMM3 dV、GEMM5 dK）全 `mma.m16n8k32`，记账（E4M3/E5M2 + rowwise scale 折叠）与
+      Q-owner 主 kernel **完全一致**；fold 同款。
+    - **数值**：S512 dk/dv vs ref **2.975e-1/3.735e-1**、S4096 **2.643e-1/3.216e-1**——
+      与既有 Q-owner ours **完全相同**（同量化/同折算），`KV vs Q` 仅跨 CTA 加法次序差
+      （S512 3.9e-2/5.6e-2、S4096 1.5e-1/2.6e-2），与 ref/TE 同量级、无系统误差。
+    - **ncu（S4096 H16 causal，同 session）**：Q-owner mma 主 kernel `red=114,524,160`、
+      Duration 1.91ms；**KV-owner dK/dV `red=0`**、`op_read 36.4M→51.0M（1.40×）`、
+      Duration **1.41ms**（168 regs、3 CTA/SM、throughput 47.3%）。
+    - **结论（非正收益，方向明确）**：`red` 114.5M→**0** 在真实 mma 上成立，但按「每 GEMM 等效」
+      KV `1.41/4=0.353ms` 仅略优于 Q `1.91/5=0.382ms`；KV-owner 把 `red` 换成 **Q/dO 跨 CTA
+      读放大（1.40×）+ 寄存器墙**（dVacc+dKacc 64 regs），且本原型无持久化/TMA/预取，
+      补齐 dQ 后**不构成净收益**。F7 主体须同时做 **persistent+4D-TMA staging / 重叠 / dQ 同循环 /
+      降寄存器**。文档 `docs/03` §83；原始输出
+      `src/fp8/fa_bwd_fp8_kvowner_mma_{s512,s4096,ncu_s4096}.out.txt`。
+    - **下一步候选**：① **F7 主体（修正后）**——KV-owner + persistent（grid≈132）+ Q/dO/K/V
+      4D-TMA 暂存重叠 + dQ 同循环；② 降 `dVacc/dKacc` 寄存器占用（如分块 flush / 半精度累加）
+      以提 occupancy；③ 其余候选均已判决/到顶/收口。
 
 ## 灵感 / backlog
 
