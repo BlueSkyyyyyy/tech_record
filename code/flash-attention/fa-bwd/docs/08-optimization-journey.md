@@ -1398,3 +1398,34 @@ smem 冲突 + 低 occ
   寄存器/smem 硬墙锁定（见「阻塞」）。
 - 详见 `docs/01` §22、`docs/01b` §6ay、`docs/04` §44；原始输出
   `src/fp16/fa_bwd_fp16_o69_*`、`src/bf16/fa_bwd_bf16_o69_*`、`src/fa_bwd_p163_full_baseline.out.txt`。
+
+### 5.78 O70：fp8 非 causal（full）D=128 的 LSE 再上 **4D-TMA**（第一百六十四轮，正结果，默认）
+
+- **动机**：O68/F9 把 fp8 定长 full D=128 的 LSE 从 O1 接到「均衡 + `cp.async`」；但 **causal 的
+  LSE 早就是 4D-TMA 版**（O32 `lse_mma_kernel_bal_tma`，一条 `cp.async.bulk.tensor.4d` 搬整块
+  SW128，省掉逐 16B `cp.async` 的 load 指令/地址运算）。本步把 full 也切到同一套 TMA 搬运（fp8
+  先行，fp16/bf16 留下一轮）。
+- **做了什么**（device+host，单/两文件同步）：
+  - device（`fa_bwd_fp8_kernels.cuh` + onefile 的 `lse_mma_kernel_bal_tma`）：模板加
+    `bool FULL=false`。`FULL=true` 时只做 `t=0`（无镜像配对，`grid.x=nblk` 一个 CTA 一个 m 块）、
+    `ncols=S`、四个掩码 `jg<=qi` 改 `(FULL || jg<=qi)`；其余（TMA 双缓冲、rowwise scale、tile 内
+    两趟 softmax、4-lane shfl）逐字复用。`FULL=false` 与 O32/O38 **逐位相同**。
+  - host：`launch_lse_bal_tma` 加 `bool FULL`；full 分支当 `lse_tma` 真时调
+    `launch_lse_bal_tma<128,1,true>`；默认 `lse_tma = (D==128) ? 1 : 0`。`--lsetma=0` 退回 O68
+    的 cp.async 版、`--lsefull=0` 仍退回 O1；`sm_90` 构建 `lse_tma=0` 自动退回 O68。
+- **数值**：ours vs fp32 ref（定长 full S1024）`dq/dk/dv=5.518e-2 / 5.310e-2 / 4.025e-2`，与 O68
+  cp.async 版仅差 LSE 的 fp32 求和次序（~1e-5）；单/两文件一致性 worst **1.192e-07 OK**
+  （fp8 容差 1e-4）、`--check docs/04` OK；causal S512 回归 2.426/2.972/3.733e-1 与历史一致。
+- **性能（同 binary A/B，Hopper，event）**：定长 full S1024 — preprocess
+  **O1 0.1498 / cp.async 0.0401 / TMA 0.0226ms（TMA vs cp.async 1.77×）**；total
+  **0.5399 / 0.3742 / 0.3569ms**（TMA 24.07 TF），单文件一致。收益全在 preprocess（main 不变）；
+  ours/TE 时间比 6.65×→**6.35×**（TE 0.0562ms/305.8TF），峰值占比 1.16%→**1.22%**。
+- **ncu（`regex:lse_mma_kernel`，`--launch-count 1`，S1024 H16 full）**：O1 **208.4µs** →
+  cp.async **42.46µs（Compute 45.4% / inst 18.39M）** → TMA **23.94µs（Compute 43.1% /
+  inst 9.77M，−46.9%）**。⇒ O1 是串行载入延迟；TMA 用一条 bulk 指令搬整块 SW128 把 load 指令
+  砍半，再 1.77×。仍 `Waves 0.39`（网格不足一个波）、非 DRAM/L2 bound——**是 preprocess 内部的
+  搬运方式升级，不是 main 的 L2 `red` 墙**。
+- **下一步**：① fp16/bf16 的同类改造（把 `lse_mma_kernel_bal_tma` 加 `FULL`，fp16 是 2×K=64
+  chunk、bf16 逐字 dtype 化）——三 dtype full D=128 LSE 统一到 TMA；② main 的 L2 `red` 墙仍受
+  寄存器/smem 硬墙锁定（见「阻塞」）。
+- 详见 `docs/03` §95；原始输出 `src/fp8/fa_bwd_fp8_o70_*`。

@@ -253,6 +253,11 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
       4.4×** ⇒ 真差距 = **工作划分 / tile 调度**（persistent 132 CTA vs ksplit=8→8192），**不是
       归约宽度、也不只是放大 BM**（修正第一百三十九轮）⇒ **新立 F7 = dK/dV-over-KV 单一 owner +
       TMA store-reduce / persistent 调度**。见 `docs/03` §80、`docs/08` §5.61。
+     → **fp8 非 causal（full）D=128 的 LSE 接 4D-TMA（O70，第一百六十四轮）**：把 O68 的
+     「均衡 + `cp.async`」版再换成 causal 同款的 4D-TMA 搬运（`lse_mma_kernel_bal_tma` 加
+     `bool FULL`，`grid.x=nblk` 无镜像配对、不做因果掩码）；LSE **42.46→23.94µs（1.77×）**、
+     指令 −46.9%，preprocess 0.0401→**0.0226ms**、端到端 1.049×，数值与 cp.async 版仅差
+     LSE fp32 求和次序（~1e-5）。见 `docs/03` §95、`docs/08` §5.78。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 

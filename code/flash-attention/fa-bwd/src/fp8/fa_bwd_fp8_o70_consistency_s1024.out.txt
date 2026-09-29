@@ -1,0 +1,13 @@
+=== fa-bwd 实现一致性（P3-3f/P3-3g）：ours_hp vs ours_sf_hp（max_abs，逐元素）===
+baseline-free：两者都算同一数学；期望差异仅跨 CTA atomicAdd 次序（dtype ulp）。
+判据（按 dtype）：max|ours_hp-ours_sf_hp| <= ctol；fp8=0.0001（任一超出则退出码 1）
+
+[fp8]
+  b1_s1024_h16_d128_full_fp8                      dq=1.192e-07  dk=8.941e-08  dv=5.960e-08
+
+=== 小结（1 case 有 ours_hp/ours_sf_hp 双方；0 case 缺一侧）===
+  max|ours_hp-ours_sf_hp| over all cases: dq = 1.192e-07  (b1_s1024_h16_d128_full_fp8)
+  max|ours_hp-ours_sf_hp| over all cases: dk = 8.941e-08  (b1_s1024_h16_d128_full_fp8)
+  max|ours_hp-ours_sf_hp| over all cases: dv = 5.960e-08  (b1_s1024_h16_d128_full_fp8)
+  worst = 1.192e-07
+  gate[fp8 ] worst=1.192e-07  tol=0.0001  -> OK
