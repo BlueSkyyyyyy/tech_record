@@ -1027,3 +1027,25 @@ smem 冲突 + 低 occ
   贡献」，即 FA2/TE 的 **dK/dV-over-KV 单一 owner** 工作划分（+ TMA store-reduce / persistent）。
   O42 的 `cp.reduce.async.bulk` 失败是因为**没换工作划分**（归约次数没降、只加 staging）。
   新立 **F7**。详见 `docs/03` §80；原始输出 `src/fp8/fa_bwd_fp8_p147_*`。
+
+### 5.62 F7 第一步：dK/dV「KV-owner 单一 owner」划分 smoke（第一百四十八轮）
+
+- **背景**：O67（§5.61）把默认 fp8 main 的 L2 `red`（S4096 114.5M 扇区、占 L2 74%）真差距钉到
+  **工作划分**：TE 同 **BM=64** 下 `red` 仅 ours 的 **1/4.4×**、L2 1/4.2×、时间 1/6×
+  （TE grid=132 persistent vs ours ksplit=8→8192）。ours 是 **Q-owner**（每 CTA 一块 query、遍历
+  KV、dK/dV 跨 CTA `atomicAdd`）。F7 = 换 **KV-owner**（每 CTA 一块 KV、遍历 query、dK/dV
+  本地累加一次写）。
+- **做了什么**：新增自包含最小复现 `src/fp8/fa_bwd_fp8_kvowner_smoke.cu`——同一批随机
+  Q/K/V/dO（S512 H8 HD128 causal），`mowner_kernel`（现有划分，atomic）与 `kvowner_kernel`
+  （F7 划分，smem 累加 + 一次 plain store）对拍 double host 参考。fp32 标量（隔离变量）。
+- **结果（机制正）**：数值 KV-owner **正确**（vs double ref dk/dv max_abs 3.64e-5/2.28e-6，
+  与 Q-owner 差 5.7e-6 = fp32 次序）；ncu `lts__t_sectors_op_red`：Q-owner **1,671,168** →
+  KV-owner **0**（L1 red 请求 278,528 → **0**）⇒ 跨 CTA 原子归约**彻底消除**，与 TE 低 red 一致。
+- **关键教训（下一步判据）**：这个**最小原型** KV-owner 的 `op_read` 反涨到 **44M**（Q-owner 1.5M）、
+  标量耗时 0.64×——因为**没做 operand staging**：Q-owner 的 K/V tile 被并发 query CTA 大量复用、
+  L2 命中极高；KV-owner 每个 KV CTA 反复从 global 重读 Q/dO（`dot` 里跨行未合并）把 red 的收益
+  吃回。⇒ **F7 主体不能只翻转 grid**，必须让 persistent CTA **拥有 KV 块并把 Q/dO/K/V 经
+  smem/TMA staging 复用**（对标 TE grid=132 persistent + 本卡 TMA 通路）。prize 由 O42 钉死：
+  短路 dK/dV red ⇒ main 1.70×、total 1.53×。
+- 详见 `docs/03` §81；原始输出 `src/fp8/fa_bwd_fp8_kvowner_smoke.out.txt`、
+  `..._kvowner_ncu_red.out.txt`。
