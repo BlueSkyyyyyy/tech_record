@@ -2807,7 +2807,22 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百四十四轮）**：**O64——fp8 输入量化 + 累加缓冲清零融合成单 launch**
+> **最新（第一百四十五轮）**：**O65——fp16/bf16 prologue 融合（清零 dq/dk/dv + delta 单 launch，
+> 小/中 shape 正结果、大 S 中性；默认）**——落实第 144 轮「下一步候选 ②」。新增
+> `zero_delta_warp_kernel<HD>`（float4 清零 dq/dk/dv + 与 O24 `delta_warp` 逐字同几何的 delta），
+> `--zfuse=`（默认 1）/`--zfuse=0` 同 binary A/B，fp16/bf16 单/两文件同源。**数值逐位/1 ulp**；
+> CI fp16 gate 3.906e-3 / bf16 3.125e-2 OK、`--check docs/04` OK 194 行。**性能（total）**：
+> fp16 **S512 1.053×**、MLA 1.035×、GQA 1.012×、S4096 中性；bf16 同构（S512 1.054×）。
+> **ncu**：S4096 融合 33.95µs/DRAM 70.8% ≈ 拆开 14.3+21µs（**同字节、已带宽 bound**）；
+> S512 融合 6.1µs/DRAM 20.5%（省 launch 开销）。**教训：融合只对「不满带宽的小 kernel」有效**
+> （fp8 quant 58% 故 O64 有效；fp16/bf16 memset 已 3.1 TB/s 故仅小 shape 1–5%）。详见「当前进度
+> 第一百四十五轮」、`docs/01` §20、`docs/01b` §6aw、`docs/08` §5.59；原始输出
+> `src/fp16/fa_bwd_fp16_o65_*`、`src/bf16/fa_bwd_bf16_o65_*`。
+> **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡寄存器/smem 硬墙锁定，见「阻塞」）；
+> ② 其余候选（dK/dV-over-KV、GEMM3/4/5 wgmma、ksplit/LSE、prologue 融合）均已判决/到顶；
+> ③ DET 仅 opt-in、非目标。
+>
+> **（第一百四十四轮）**：**O64——fp8 输入量化 + 累加缓冲清零融合成单 launch**
 > （**正结果，默认**）。F1→F6 收口后 fp8 main 受本卡寄存器/smem 硬墙锁定（见「阻塞」），
 > 本轮转查**非 main 固定开销**：nsys 拆 fp8 默认路径发现 per-call 有 **4 个 quant kernel +
 > 3 个 `cudaMemset`** 共 7 次串行小 launch（每个 quant 仅 DRAM 58%、尾波 + 间隙截断），
@@ -5681,9 +5696,39 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     - **CI**：`--ci --dtype fp8`（定长 + varlen）全绿（一致性 gate worst 1.144e-05 / 2.861e-06，
       tol 1e-4）、`--check docs/04` OK 194 行；sm_90 与 sm90a 构建均通过。详见 `docs/03` §78、
       `docs/08` §5.58；原始输出 `src/fp8/fa_bwd_fp8_o64_*`。
-    - **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡硬墙锁定，见「阻塞」）；
-      ② 把同款「小 launch 融合」思路扫 fp16/bf16 的固定开销（memset/convert/quant 无，dbg 项少）；
-      ③ 其余候选均已判决/到顶。
+     - **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡硬墙锁定，见「阻塞」）；
+       ② 把同款「小 launch 融合」思路扫 fp16/bf16 的固定开销（memset/convert/quant 无，dbg 项少）；
+       ③ 其余候选均已判决/到顶。
+
+- 2026-09-29（第一百四十五轮）：**O65 完成（fp16/bf16 prologue 融合——清零 dq/dk/dv + delta
+  单 launch；小/中 shape 正结果、大 S 中性；默认）**——落实第 144 轮「下一步候选 ②」。
+  - 动机：O64（fp8）证明「小 launch 融合」有效（fp8 4 个 quant 各自只到 DRAM 58%）。本轮把同款
+    思路扫 fp16/bf16 的固定开销（无 quant，只剩 `cudaMemset`×2–3 + `delta_warp`）。**先定量**：
+    nsys `cuda_gpu_mem_time_sum` 显示 memset 33MB/10.6µs = **~3.1 TB/s（已近 HBM 峰值）**、
+    `delta_warp` DRAM 71% ⇒ 预判融合空间有限。
+  - **改动（单/两文件 device 逐字同源，`sync_onefile_device.py` `identical: True`）**：新增
+    `zero_delta_warp_kernel<HD>`——一个 grid-stride 内核里先 float4 清零 dq_acc（可选）/dk_acc/
+    dv_acc，再按 **与 O24 `delta_warp_kernel` 逐字相同的几何**（warp-per-row、half2 读、
+    `__shfl_xor_sync` 同树）算 delta。host `--zfuse=`（默认 1）在 `run_pre` 替换 delta 那个
+    launch、并去掉 `run_all` 的 memset；`--zfuse=0` 同 binary A/B。fp16/bf16 同步。
+  - **数值**：delta 段逐字同几何 ⇒ **逐位相同**（dump 对拍 dq 逐位 0、dk/dv 仅 1 ulp 的
+    `atomicAdd` 次序差）；CI `--ci --dtype fp16` gate worst **3.906e-3** / bf16 **3.125e-2** 均 OK、
+    `--check docs/04` OK 194 行。
+  - **性能（同 binary A/B，event，total，3 rep）**：fp16 **S512 0.0855→0.0812ms（1.053×）**、
+    GQA kv4 S1024 0.3347→0.3308（1.012×）、MLA S1024H2 0.1826→0.1765（**1.035×**）、S4096
+    1.8271→1.8301（中性）；bf16 同构（S512 1.054×、GQA 1.012×、MLA 1.033×、S4096 中性）。
+  - **ncu**：S4096 融合 kernel `zero_delta_warp_kernel<128>` **Duration 33.95µs / DRAM 70.8% /
+    L2 76%**，≈ `delta_warp` 14.3µs + 2×memset ~21µs（**同字节数、已带宽 bound**）；S512 融合
+    **6.1µs / DRAM 20.5%**（远未饱和），省的是 3 次小 launch 的开销（实测 −4µs / 5.3%）。
+  - **结论/教训**：**融合只对「不满带宽的小 kernel」有效**——fp8 quant 只到 DRAM 58% 故 O64 有效；
+    fp16/bf16 的 memset 已到 3.1 TB/s、delta 71%，融合最多省 launch 开销 ⇒ 只在**小/中 shape**
+    有 1–5%、大 S 中性，与第 144 轮对候选 ② 的预判一致。原始输出
+    `src/fp16/fa_bwd_fp16_o65_ab.out.txt`、`..._o65_ncu_s{512,4096}.out.txt`、
+    `src/bf16/fa_bwd_bf16_o65_ab.out.txt`；文档 `docs/01` §20、`docs/01b` §6aw、`docs/08` §5.59、
+    `docs/00` §4.2、`docs/04`（数值/性能表无需改，rtol 内）。
+  - **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡硬墙锁定，见「阻塞」）；
+    ② 其余候选（dK/dV-over-KV、GEMM3/4/5 wgmma、ksplit/LSE、prologue 融合）均已判决/到顶；
+    ③ DET 仅 opt-in。
 
 ## 灵感 / backlog
 

@@ -957,3 +957,31 @@ smem 冲突 + 低 occ
 - **教训**：**「小 launch 的固定开销」是继 main 之后的第二梯队**——多个独立、各自不满带宽的小 kernel
   （量化/清零）串行时，融合成一个大 kernel 能让 DRAM 流水连续、吃掉 per-launch 尾波与间隙；对
   launch 占比高的小 shape 收益可达 15–18%，对 main 主导的大 S 则边际（~1%）。详见 `docs/03` §78。
+
+### 5.59 O65：fp16/bf16 prologue 融合（清零 dq/dk/dv + delta 单 launch，第一百四十五轮，小/中 shape 正结果，默认）
+
+- **背景**：O64（fp8）证明「小 launch 融合」有效，其原因是 fp8 的 4 个 quant kernel 各自只到
+  DRAM 58%（尾波 + 间隙截断）。ROADMAP 的下一步候选 ② 是把同款思路扫到 **fp16/bf16 的固定开销**
+  （无 quant，只剩 `cudaMemset` 与 `delta`）。先量化：nsys `cuda_gpu_mem_time_sum` 显示默认路径
+  per-call 有 **2–3 次 `cudaMemset`**（S4096 每次 10.6µs / 33MB ⇒ **~3.1 TB/s，已近 HBM 峰值**）+
+  1 次 `delta_warp_kernel`（~14µs，DRAM 71%）。
+- **做了什么**：新增 `zero_delta_warp_kernel<HD>`（fp16/bf16 单/两文件同源）——一个 grid-stride 内核里
+  先 float4 清零 dq_acc（可选，`n_q`）/dk_acc/dv_acc，再按 **与 O24 `delta_warp_kernel` 逐字相同的
+  几何**（warp-per-row、lane 沿 HD 以 half2 读、`__shfl_xor_sync` 同树）算 delta；host 在 `run_pre`
+  里替换 `delta` 那个 launch，并去掉 `run_all` 的 memset（`zfuse_sel` 开关，`--zfuse=0` 同 binary A/B）。
+- **数值**：delta 段与 `delta_warp` 逐字同几何 ⇒ **结果逐位相同**；dump 对拍 `dq` 逐位 0，
+  dk/dv 仅 132/155 个元素差 **1 ulp**（跨 CTA `atomicAdd` 的调度次序，本就非确定）。CI：fp16
+  gate worst 3.906e-3 / bf16 3.125e-2 均 OK、`--check docs/04` OK。
+- **性能**（同 binary A/B，event，total，3 rep 中位）：fp16 **S512 0.0855→0.0812ms（1.053×）**、
+  GQA kv4 S1024 0.3347→0.3308（1.012×）、MLA S1024H2 0.1826→0.1765（**1.035×**）、S4096 1.8271→1.8301
+  （中性）；bf16 同构（S512 1.054×、GQA 1.012×、MLA 1.033×、S4096 中性）。
+- **ncu**：S4096 融合 kernel `zero_delta_warp_kernel<128>` Duration **33.95µs / DRAM 70.8% / L2 76%**；
+  拆开看 `delta_warp` 14.3µs + 2×memset ~21µs ≈ 35µs ⇒ **大 S 处本质是「同字节数、已带宽 bound」，
+  融合不省字节、也省不出时间**。S512 融合 kernel **6.1µs / DRAM 20.5%**（远未饱和、launch 占比高），
+  而旧路径 2×memset(~2µs) + delta(~3.6µs) + 3 次 launch 开销 ⇒ 融合实测省 ~4µs（5.3%）。
+- **教训**：**融合只对「不满带宽的小 kernel」有效**。O64 的 fp8 quant 只到 DRAM 58%，融合能把流水拉满；
+  而 fp16/bf16 的 memset 已到 3.1 TB/s（近峰值）、delta 也到 71%，融合最多省 launch 开销，故只在
+  **小/中 shape（launch 占比高）**有 1–5% 收益，大 S 中性。结论与 ROADMAP 对候选 ② 的预判一致
+  （fp16/bf16「无 quant，仅剩 memset/convert」）。详见 `docs/01` §20、`docs/01b` §6aw；
+  原始输出 `src/fp16/fa_bwd_fp16_o65_ab.out.txt`、`..._o65_ncu_s{512,4096}.out.txt`、
+  `src/bf16/fa_bwd_bf16_o65_ab.out.txt`。

@@ -1,5 +1,5 @@
 === fa_bwd_run.py (P3-3c) 一键跑 ours + 汇总 ===
-cases=48 impls=['twofile', 'singlefile'] iters=5
+cases=73 impls=['twofile', 'singlefile'] iters=5
 [run] bf16 twofile b1_s1024_h16_d128_full_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile b1_s1024_h16_d128_full_bf16
@@ -7,6 +7,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
 [run] fp16 twofile b1_s1024_h16_d128_full_fp16
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile b1_s1024_h16_d128_full_fp16
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s1024_h16_d128_full_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s1024_h16_d128_full_fp8
       (--no-run: 复用已有 npy)
 [run] bf16 twofile b1_s1024_h2_d512_causal_bf16
       (--no-run: 复用已有 npy)
@@ -16,6 +20,14 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile b1_s1024_h2_d512_causal_fp16
       (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s1024_h2_d512_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s1024_h2_d512_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s1024_h32_d128_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s1024_h32_d128_causal_fp8
+      (--no-run: 复用已有 npy)
 [run] bf16 twofile b1_s1024_h32_d128_kv4_causal_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile b1_s1024_h32_d128_kv4_causal_bf16
@@ -23,6 +35,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
 [run] fp16 twofile b1_s1024_h32_d128_kv4_causal_fp16
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile b1_s1024_h32_d128_kv4_causal_fp16
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s1024_h32_d128_kv4_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s1024_h32_d128_kv4_causal_fp8
       (--no-run: 复用已有 npy)
 [run] bf16 twofile b1_s1024_h40_d128_kv8_causal_bf16
       (--no-run: 复用已有 npy)
@@ -32,6 +48,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile b1_s1024_h40_d128_kv8_causal_fp16
       (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s1024_h40_d128_kv8_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s1024_h40_d128_kv8_causal_fp8
+      (--no-run: 复用已有 npy)
 [run] bf16 twofile b1_s1024_h64_d128_kv1_causal_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile b1_s1024_h64_d128_kv1_causal_bf16
@@ -39,6 +59,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
 [run] fp16 twofile b1_s1024_h64_d128_kv1_causal_fp16
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile b1_s1024_h64_d128_kv1_causal_fp16
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s1024_h64_d128_kv1_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s1024_h64_d128_kv1_causal_fp8
       (--no-run: 复用已有 npy)
 [run] bf16 twofile b1_s1024_h64_d128_kv4_causal_bf16
       (--no-run: 复用已有 npy)
@@ -48,6 +72,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile b1_s1024_h64_d128_kv4_causal_fp16
       (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s1024_h64_d128_kv4_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s1024_h64_d128_kv4_causal_fp8
+      (--no-run: 复用已有 npy)
 [run] bf16 twofile b1_s256_h2_d512_causal_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile b1_s256_h2_d512_causal_bf16
@@ -55,6 +83,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
 [run] fp16 twofile b1_s256_h2_d512_causal_fp16
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile b1_s256_h2_d512_causal_fp16
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s256_h2_d512_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s256_h2_d512_causal_fp8
       (--no-run: 复用已有 npy)
 [run] bf16 twofile b1_s4096_h16_d128_causal_bf16
       (--no-run: 复用已有 npy)
@@ -64,6 +96,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile b1_s4096_h16_d128_causal_fp16
       (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s4096_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s4096_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
 [run] bf16 twofile b1_s512_h16_d128_causal_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile b1_s512_h16_d128_causal_bf16
@@ -72,6 +108,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile b1_s512_h16_d128_causal_fp16
       (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s512_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s512_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
 [run] bf16 twofile b1_s512_h2_d512_causal_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile b1_s512_h2_d512_causal_bf16
@@ -79,6 +119,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
 [run] fp16 twofile b1_s512_h2_d512_causal_fp16
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile b1_s512_h2_d512_causal_fp16
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s512_h2_d512_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s512_h2_d512_causal_fp8
       (--no-run: 复用已有 npy)
 [run] fp16 twofile b1_s512_h2_d512_full_fp16
       (--no-run: 复用已有 npy)
@@ -92,6 +136,14 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile b1_s512_h4_d512_causal_fp16
       (--no-run: 复用已有 npy)
+[run] fp8 twofile b1_s512_h4_d512_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile b1_s512_h4_d512_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b1_t512_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b1_t512_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
 [run] bf16 twofile varlen_b1_t512_h2_d512_causal_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile varlen_b1_t512_h2_d512_causal_bf16
@@ -100,6 +152,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile varlen_b1_t512_h2_d512_causal_fp16
       (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b1_t512_h2_d512_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b1_t512_h2_d512_causal_fp8
+      (--no-run: 复用已有 npy)
 [run] bf16 twofile varlen_b1_t512_h2_d512_full_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile varlen_b1_t512_h2_d512_full_bf16
@@ -107,6 +163,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
 [run] fp16 twofile varlen_b1_t512_h2_d512_full_fp16
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile varlen_b1_t512_h2_d512_full_fp16
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b1_t512_h2_d512_full_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b1_t512_h2_d512_full_fp8
       (--no-run: 复用已有 npy)
 [run] fp16 twofile varlen_b2_t500_h16_d128_causal_fp16
       (--no-run: 复用已有 npy)
@@ -120,6 +180,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile varlen_b3_t1792_h2_d512_causal_fp16
       (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b3_t1792_h2_d512_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b3_t1792_h2_d512_causal_fp8
+      (--no-run: 复用已有 npy)
 [run] bf16 twofile varlen_b3_t1792_h2_d512_full_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile varlen_b3_t1792_h2_d512_full_bf16
@@ -127,6 +191,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
 [run] fp16 twofile varlen_b3_t1792_h2_d512_full_fp16
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile varlen_b3_t1792_h2_d512_full_fp16
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b3_t1792_h2_d512_full_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b3_t1792_h2_d512_full_fp8
       (--no-run: 复用已有 npy)
 [run] bf16 twofile varlen_b4_t3840_h16_d128_causal_bf16
       (--no-run: 复用已有 npy)
@@ -136,6 +204,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile varlen_b4_t3840_h16_d128_causal_fp16
       (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b4_t3840_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b4_t3840_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
 [run] bf16 twofile varlen_b4_t3840_h16_d128_full_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile varlen_b4_t3840_h16_d128_full_bf16
@@ -143,6 +215,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
 [run] fp16 twofile varlen_b4_t3840_h16_d128_full_fp16
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile varlen_b4_t3840_h16_d128_full_fp16
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b4_t3840_h16_d128_full_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b4_t3840_h16_d128_full_fp8
       (--no-run: 复用已有 npy)
 [run] bf16 twofile varlen_b4_t4096_h16_d128_causal_bf16
       (--no-run: 复用已有 npy)
@@ -152,6 +228,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile varlen_b4_t4096_h16_d128_causal_fp16
       (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b4_t4096_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b4_t4096_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
 [run] bf16 twofile varlen_b4_t4096_h16_d128_full_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile varlen_b4_t4096_h16_d128_full_bf16
@@ -159,6 +239,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
 [run] fp16 twofile varlen_b4_t4096_h16_d128_full_fp16
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile varlen_b4_t4096_h16_d128_full_fp16
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b4_t4096_h16_d128_full_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b4_t4096_h16_d128_full_fp8
       (--no-run: 复用已有 npy)
 [run] bf16 twofile varlen_b5_t3968_h32_d128_causal_bf16
       (--no-run: 复用已有 npy)
@@ -168,6 +252,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile varlen_b5_t3968_h32_d128_causal_fp16
       (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b5_t3968_h32_d128_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b5_t3968_h32_d128_causal_fp8
+      (--no-run: 复用已有 npy)
 [run] bf16 twofile varlen_b5_t3968_h32_d128_full_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile varlen_b5_t3968_h32_d128_full_bf16
@@ -175,6 +263,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
 [run] fp16 twofile varlen_b5_t3968_h32_d128_full_fp16
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile varlen_b5_t3968_h32_d128_full_fp16
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b5_t3968_h32_d128_full_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b5_t3968_h32_d128_full_fp8
       (--no-run: 复用已有 npy)
 [run] bf16 twofile varlen_b8_t2904_h16_d128_causal_bf16
       (--no-run: 复用已有 npy)
@@ -184,6 +276,10 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile varlen_b8_t2904_h16_d128_causal_fp16
       (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b8_t2904_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b8_t2904_h16_d128_causal_fp8
+      (--no-run: 复用已有 npy)
 [run] bf16 twofile varlen_b8_t2904_h16_d128_full_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile varlen_b8_t2904_h16_d128_full_bf16
@@ -191,5 +287,9 @@ cases=48 impls=['twofile', 'singlefile'] iters=5
 [run] fp16 twofile varlen_b8_t2904_h16_d128_full_fp16
       (--no-run: 复用已有 npy)
 [run] fp16 singlefile varlen_b8_t2904_h16_d128_full_fp16
+      (--no-run: 复用已有 npy)
+[run] fp8 twofile varlen_b8_t2904_h16_d128_full_fp8
+      (--no-run: 复用已有 npy)
+[run] fp8 singlefile varlen_b8_t2904_h16_d128_full_fp8
       (--no-run: 复用已有 npy)
 [ci] doc-table-check rc=0

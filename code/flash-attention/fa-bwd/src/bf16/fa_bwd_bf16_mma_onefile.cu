@@ -1188,6 +1188,52 @@ __global__ void delta_warp_kernel(const bf16* __restrict__ o,
 }
 
 // =============================================================================
+// O65：prologue 融合——清零 dq/dk/dv 累加缓冲 + delta=rowsum(dO∘O) 合并成单次 launch。
+// 与 fp16 `zero_delta_warp_kernel` 逐字同构（仅 `__half2`→`__nv_bfloat162`），详见其注释。
+// delta 段与 O24 `delta_warp_kernel` 逐字同几何/同归约次序 ⇒ 结果逐位不变。
+// =============================================================================
+template <int HD>
+__global__ void zero_delta_warp_kernel(float* __restrict__ dq_acc, size_t n_q,
+                                       float* __restrict__ dk_acc, float* __restrict__ dv_acc,
+                                       size_t n_kv, const bf16* __restrict__ o,
+                                       const bf16* __restrict__ do_,
+                                       float* __restrict__ delta, int rows) {
+  const size_t t0 = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t stride = (size_t)gridDim.x * blockDim.x;
+  const float4 z4 = make_float4(0.f, 0.f, 0.f, 0.f);
+  const size_t nq4 = n_q >> 2;
+  for (size_t i = t0; i < nq4; i += stride) reinterpret_cast<float4*>(dq_acc)[i] = z4;
+  for (size_t i = (nq4 << 2) + t0; i < n_q; i += stride) dq_acc[i] = 0.f;
+  const size_t nkv4 = n_kv >> 2;
+  for (size_t i = t0; i < nkv4; i += stride) {
+    reinterpret_cast<float4*>(dk_acc)[i] = z4;
+    reinterpret_cast<float4*>(dv_acc)[i] = z4;
+  }
+  for (size_t i = (nkv4 << 2) + t0; i < n_kv; i += stride) {
+    dk_acc[i] = 0.f;
+    dv_acc[i] = 0.f;
+  }
+  const int lane = threadIdx.x & 31;
+  const int wpb = blockDim.x >> 5;
+  const int gwarp0 = blockIdx.x * wpb + (threadIdx.x >> 5);
+  const int nwarp = gridDim.x * wpb;
+  for (int row = gwarp0; row < rows; row += nwarp) {
+    const __nv_bfloat162* o2 = reinterpret_cast<const __nv_bfloat162*>(o + (size_t)row * HD);
+    const __nv_bfloat162* d2 = reinterpret_cast<const __nv_bfloat162*>(do_ + (size_t)row * HD);
+    float acc = 0.f;
+#pragma unroll
+    for (int k = lane; k < HD / 2; k += 32) {
+      const float2 a = __bfloat1622float2(o2[k]);
+      const float2 b = __bfloat1622float2(d2[k]);
+      acc += a.x * b.x + a.y * b.y;
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+    if (lane == 0) delta[row] = acc;
+  }
+}
+
+// =============================================================================
 // O9b / O9b-2：主 kernel 的 wgmma 版（bf16，与 fp16 版 `fa_bwd_fp16_mma_kernels.cuh` 逐字同构）
 //   O9b：GEMM1/2（S=QKᵀ、dP=dO·Vᵀ）用 `wgmma.m64n64k16` + SW128；
 //   O9b-2：GEMM3/4/5（dV=Pᵀ·dO、dK=dSᵀ·Q、dQ=dS·K）也用 `wgmma.m64n64k16`，
@@ -4409,6 +4455,9 @@ int main(int argc, char** argv) {
   int wg2split_sel = 1;
   // O24：delta 用 warp-per-row 向量化版（1，默认）还是旧 block-per-row smem 版（0，A/B）。
   int delta_warp_sel = 1;
+  // O65：定长默认路径把「清零 dq/dk/dv 累加缓冲 + delta」融合成单次 launch（1，默认；
+  //   0=退回旧 memset + delta_warp，做同 binary A/B）。仅 `delta_warp_sel==1` 时生效。
+  int zfuse_sel = 1;
   // O24：D==128 wgmma2/2b 路径直接用 bf16 写 dQ、convert 跳过 dQ（1，默认；0=A/B）。
   int dq_direct_sel = 1;
   // O61：是否跑「确定性 dK/dV（partial + 二次归约）」A/B（仅 FA_WGMMA 构建、D==128）。
@@ -4453,6 +4502,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--d128w=", 0) == 0) d128w = atoi(a.c_str() + 8);
     else if (a == "--d128w") d128w = 1;
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_sel = atoi(a.c_str() + 12);
+    else if (a.rfind("--zfuse=", 0) == 0) zfuse_sel = atoi(a.c_str() + 8);
     else if (a.rfind("--dqdirect=", 0) == 0) dq_direct_sel = atoi(a.c_str() + 11);
     else if (a.rfind("--det=", 0) == 0) det_ab = atoi(a.c_str() + 6);
     else if (a == "--det") det_ab = 1;
@@ -4831,6 +4881,7 @@ int main(int argc, char** argv) {
          (D == 128 && causal && (lse_tma ? 1 : lse_wgm)) ? (lse_tma ? "tma" : "wgmma") : "mma",
          D, S, (wg2_ksplit_eff > 1) ? " +ksplit" : "");
   printf("[O43] wgmma2 k-split = %d\n", wg2_ksplit_eff);
+  printf("[O65] prologue fusion (zero+delta) = %d\n", (int)(zfuse_sel && delta_warp_sel));
   bool dq_direct = false;
   auto run_main = [&]() {
 #ifdef FA_WGMMA
@@ -4929,7 +4980,15 @@ int main(int argc, char** argv) {
       } else
         lse_mma_kernel<512><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
                                                        (int)causal);
-      if (delta_warp_sel)
+      if (zfuse_sel && delta_warp_sel) {
+        const size_t nq0 = (size_t)((D == 512 || wg2_ksplit_eff > 1) ? n : 0);
+        const size_t zops = (nq0 >> 2) + (nkv >> 2);
+        int zblk = (int)std::min<size_t>((zops + THREADS - 1) / THREADS, 528);
+        int zfblk = std::max(zblk, d_blocks);
+        if (zfblk < 1) zfblk = 1;
+        zero_delta_warp_kernel<512><<<zfblk, THREADS>>>(d_dq_acc, nq0, d_dk_acc, d_dv_acc, nkv,
+                                                        d_o, d_do, d_delta, d_rows);
+      } else if (delta_warp_sel)
         delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
       else
         delta_kernel<512><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
@@ -4982,7 +5041,15 @@ int main(int argc, char** argv) {
       } else
         lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
                                                        (int)causal);
-      if (delta_warp_sel)
+      if (zfuse_sel && delta_warp_sel) {
+        const size_t nq0 = (size_t)((D == 512 || wg2_ksplit_eff > 1) ? n : 0);
+        const size_t zops = (nq0 >> 2) + (nkv >> 2);
+        int zblk = (int)std::min<size_t>((zops + THREADS - 1) / THREADS, 528);
+        int zfblk = std::max(zblk, d_blocks);
+        if (zfblk < 1) zfblk = 1;
+        zero_delta_warp_kernel<128><<<zfblk, THREADS>>>(d_dq_acc, nq0, d_dk_acc, d_dv_acc, nkv,
+                                                        d_o, d_do, d_delta, d_rows);
+      } else if (delta_warp_sel)
         delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
       else
         delta_kernel<128><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
@@ -4995,9 +5062,13 @@ int main(int argc, char** argv) {
 
   auto run_all = [&]() {
     // O13：HD=128（NDT==1）时 dQ 由主 kernel 覆盖写，无需清零；只有 MLA（HD=512）走 RMW 累加才 memset。
-    if (D == 512 || wg2_ksplit_eff > 1) CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+    // O65：`zfuse_sel` 时改用 `zero_delta_warp_kernel`（在 run_pre 的 delta 位置）一并清零。
+    if (!(zfuse_sel && delta_warp_sel)) {
+      if (D == 512 || wg2_ksplit_eff > 1)
+        CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+    }
     run_pre();
     run_main();
     // O24：dq_direct 时主 kernel 已直接写 bf16 dq ⇒ convert 跳过 dQ（n_q=0）。
