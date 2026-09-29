@@ -1429,3 +1429,39 @@ smem 冲突 + 低 occ
   chunk、bf16 逐字 dtype 化）——三 dtype full D=128 LSE 统一到 TMA；② main 的 L2 `red` 墙仍受
   寄存器/smem 硬墙锁定（见「阻塞」）。
 - 详见 `docs/03` §95；原始输出 `src/fp8/fa_bwd_fp8_o70_*`。
+
+### 5.79 O71：fp16/bf16 非 causal（full）D=128 的 LSE 再上 **4D-TMA**（第一百六十五轮，正结果，默认）
+
+- **动机**：O69/F10 把 fp16/bf16 定长 full D=128 的 LSE 从 O8 接到「均衡 + `cp.async`」；但
+  **causal 的 LSE 早就是 4D-TMA 版**（O30 fp16 / O31 bf16）。O70 已把 fp8 的对应改造做完，本轮
+  把 fp16/bf16 也切到同一套 TMA 搬运——**至此三 dtype 的 full D=128 LSE 统一到 TMA**。
+- **做了什么**（device+host，单/两文件同步）：
+  - device（`fa_bwd_{fp16,bf16}_mma_kernels.cuh` + onefile 的 `lse_mma_kernel_bal_tma`）：模板加
+    `bool FULL=false`。`FULL=true` 时只做 `t=0`（无镜像配对，`grid.x=nblk` 一个 CTA 一个 m 块）、
+    `ncols=S`、掩码 `jg<=qi` 改 `(FULL || jg<=qi)`；其余（fp16 的 2×K=64 chunk TMA 双缓冲、tile
+    内两趟 softmax、4-lane shfl）逐字复用。`FULL=false` 与 O30/O31/O38 **逐位相同**。
+  - host（四个文件 `fa_bwd_{fp16,bf16}_mma_{main,onefile}.cu`）：`cudaFuncSetAttribute` 增
+    `lse_mma_kernel_bal_tma<128,1,true>` 实例；full 分支当 `lse_tma` 真时改调
+    `lse_mma_kernel_bal_tma<128,1,true><<<lg,…>>>(qmap_lse,kmap_lse,d_lse,nullptr,…,1)`；默认
+    `lse_tma = (D==128) ? 1 : 0`（此前 `&&causal`）。`--lsetma=0` 退回 O69 cp.async、`--lsefull=0`
+    退回 O8；`sm_90` 构建 `lse_tma=0` 自动退回 O69。
+- **数值**：ours vs fp32 ref（定长 full S1024 H16）fp16 `3.268e-4 / 2.523e-4 / 1.225e-4`、bf16
+  `1.938e-3 / 1.684e-3 / 1.449e-3`，与 O69 cp.async 版**逐值一致**（只差 LSE fp32 求和次序）；
+  单/两文件一致性 gate fp16 worst 2.441e-4 / bf16 4.883e-4（均 OK）、`--check docs/04` OK；
+  causal S512 回归 fp16 1.671/1.771/1.899e-3 与历史逐位。
+- **性能（同 session、同 binary A/B，Hopper，event）**：定长 full S1024 —
+  **fp16** preprocess **O8 0.1602 / cp.async 0.0465 / TMA 0.0362ms（TMA vs cp.async 1.28×）**、
+  total **0.3037 / 0.1687 / 0.1583ms（54.27 TF）**；**bf16** preprocess **0.1602 / 0.0463 /
+  0.0364ms（1.27×）**、total **0.3047 / 0.1700 / 0.1605ms（53.52 TF）**。收益全在 preprocess。
+  纯反向对标（同 session CUPTI）：fp16 FA3 0.0512ms/335.9TF、TE 0.0577/297.9 ⇒ ours/FA3
+  3.29×→**3.09×**、ours/TE 2.92×→**2.74×**；bf16 FA3 0.0504/340.7、TE 0.0576/298.3 ⇒ **3.18×/2.79×**。
+- **ncu（`regex:lse_mma_kernel_bal_tma`，`--launch-count 1`，S1024 H16 full）**：fp16
+  O8 **175.84µs / L1TEX 11.8%** → cp.async **38.62µs / L1TEX 37.6%** → TMA **28.16µs /
+  L1TEX 18.8% / Compute 33.8% / regs 64 / Waves 0.48**（bf16 28.32µs 逐项一致）。⇒ O8 是串行
+  载入延迟 bound，`cp.async` 打掉它（4.55×），**4D-TMA 再把 load 指令/地址运算交给 TMA 引擎
+  （L1/TEX 37.6%→18.8%），Duration 再 1.37×**。仍网格不足一个波、非 DRAM/L2 bound——**是
+  preprocess 内部的搬运方式升级，不是 main 的 L2 `red` 墙**。
+- **下一步**：main 的 L2 `red` 墙受本卡寄存器/smem 硬墙锁定（见「阻塞」）；full LSE 的三 dtype
+  搬运至此统一到 TMA。
+- 详见 `docs/01` §23、`docs/01b` §6az；原始输出 `src/fp16/fa_bwd_fp16_o71_*`、
+  `src/bf16/fa_bwd_bf16_o71_*`、`src/fa_bwd_o71_*`。

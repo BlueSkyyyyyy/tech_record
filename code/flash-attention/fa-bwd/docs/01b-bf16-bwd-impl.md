@@ -2386,3 +2386,30 @@ smem 52.22KB**；与 fp16 逐项一致。**结论**同 fp16：O8 是串行全局
 原始输出：`src/bf16/fa_bwd_bf16_o69_ab_fixed_full_s1024.out.txt`、
 `..._o69_ab_varlen_full_b4t4096.out.txt`、`..._o69_onefile_fixed_full_s1024.out.txt`、
 `..._o69_ncu_lse_full_s1024_lsefull{0,1}.out.txt`；基线 `src/fa_bwd_p163_full_baseline.out.txt`。
+
+## 6az. O71（第一百六十五轮，**正结果，默认**）：非 causal（full）D=128 的 LSE 再上 **4D-TMA**
+
+与 fp16（`docs/01` §23）**逐字 dtype 参数化**：O69（§6ay）把 bf16 定长 full D=128 的 LSE 从 O8 接到
+`lse_mma_kernel_bal<FULL=true>`（`cp.async` 双缓冲），但 causal 的 LSE 早就是 4D-TMA 版
+（O31 `lse_mma_kernel_bal_tma`）。本轮给 bf16 的 `lse_mma_kernel_bal_tma` 加 `bool FULL`、host full
+分支优先走 TMA（`lse_tma = (D==128)?1:0`），与 fp16/fp8 把**三 dtype full D=128 LSE 统一到 TMA**。
+`--lsetma=0` 退回 O69 cp.async；`--lsefull=0` 退回 O8。device 与 fp16 逐字同源（`__half`→bf16）。
+
+**数值（ours vs fp32 ref，max_abs dq/dk/dv，定长 full S1024 H16）**：`1.938e-3 / 1.684e-3 / 1.449e-3`，
+与 O69 cp.async 版**逐值一致**；单/两文件一致性 gate worst 4.883e-4 OK。
+
+**性能（同 session，同 binary A/B，CUDA event）**：
+
+| 路径（定长 full S1024 H16） | O8（`--lsefull=0`） | cp.async（`--lsetma=0`） | **TMA（默认，O71）** | TMA vs cp.async |
+|---|---|---|---|---|
+| preprocess | 0.1602 ms | 0.0463 ms | **0.0364 ms** | **1.27×** |
+| total | 0.3047 ms / 28.19 TF | 0.1700 ms / 50.53 TF | **0.1605 ms / 53.52 TF** | **1.059×** |
+
+纯反向对标（同 session CUPTI，定长 full S1024 H16 D128 bf16）：FA3 `0.0504ms/340.7TF`、
+FA2 `0.0825ms/208.2TF`、TE `0.0576ms/298.3TF` ⇒ ours total 为 FA3 **3.18×**、TE **2.79×**。
+
+**ncu（LSE，S1024 H16 full）**：TMA **28.32 µs / L1TEX 18.80% / Compute 34.17% / regs 64 /
+Waves 0.48**，与 fp16 TMA（28.16µs）逐项一致。**结论**同 fp16：O8 是串行全局载入延迟 bound，
+`cp.async` 打掉它，**4D-TMA 再把 L1/TEX 从 37.6% 压回 18.8%、Duration 再 ~1.3×**。见 `docs/08`
+§5.79。原始输出：`src/bf16/fa_bwd_bf16_o71_ab_full_s1024.out.txt`、
+`..._o71_ncu_lse_tma_full_s1024.out.txt`。
