@@ -7028,6 +7028,10 @@ wgmma-vs-mma 同量级——来自 GEMM1/2 的累加/归约次序，不是 bug�
 
 ⇒ **GEMM1/2 wgmma 化相对 wg2 只快 2–4%**，整 kernel 仍远慢于默认 BM=64（0.66–0.68×）。
 
+端到端（含 quant/preprocess/convert）wg2wgmma：S512 **0.1410ms / 14.73 TF**、S4096
+**3.0599ms / 44.92 TF**，相对 FP8 峰值（1978.8 TF）为 **0.74% / 2.27%**（仅参考；该路是
+F6 优化探针、非发布口径，默认 kvtma 档的 TE 对标见 `docs/04`）。
+
 ### 76.4 ncu（wg2wgmma，S=512，`--set full`）
 
 **212 regs / smem 136.4KB**（wg2 是 217 / 131.3KB）、`Block Limit Registers=1`、
