@@ -1,0 +1,33 @@
+==PROF== Profiling "zero_delta_warp_kernel": 0%....50%....100% - 10 passes
+==PROF== Profiling "zero_delta_warp_kernel": 0%....50%....100% - 10 passes
+==PROF== Profiling "zero_delta_warp_kernel": 0%....50%....100% - 10 passes
+  void zero_delta_warp_kernel<128>(float *, unsigned long, float *, float *, unsigned long, const __half *, const __half *, float *, int) (2048, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    -------------------------------------------------- ----------- ------------
+    Metric Name                                        Metric Unit Metric Value
+    -------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        20.53
+    gpu__time_duration.sum                                      us         6.14
+    l1tex__throughput.avg.pct_of_peak_sustained_active           %        30.90
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        55.86
+    sm__throughput.avg.pct_of_peak_sustained_elapsed             %        15.84
+    -------------------------------------------------- ----------- ------------
+  void zero_delta_warp_kernel<128>(float *, unsigned long, float *, float *, unsigned long, const __half *, const __half *, float *, int) (2048, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    -------------------------------------------------- ----------- ------------
+    Metric Name                                        Metric Unit Metric Value
+    -------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        20.63
+    gpu__time_duration.sum                                      us         6.11
+    l1tex__throughput.avg.pct_of_peak_sustained_active           %        30.08
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        56.91
+    sm__throughput.avg.pct_of_peak_sustained_elapsed             %        15.85
+    -------------------------------------------------- ----------- ------------
+  void zero_delta_warp_kernel<128>(float *, unsigned long, float *, float *, unsigned long, const __half *, const __half *, float *, int) (2048, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    -------------------------------------------------- ----------- ------------
+    Metric Name                                        Metric Unit Metric Value
+    -------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        19.89
+    gpu__time_duration.sum                                      us         6.34
+    l1tex__throughput.avg.pct_of_peak_sustained_active           %        30.19
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        54.64
+    sm__throughput.avg.pct_of_peak_sustained_elapsed             %        15.29
+    -------------------------------------------------- ----------- ------------

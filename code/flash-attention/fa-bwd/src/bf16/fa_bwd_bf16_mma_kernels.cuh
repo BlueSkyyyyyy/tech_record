@@ -1196,6 +1196,52 @@ __global__ void delta_warp_kernel(const bf16* __restrict__ o,
 }
 
 // =============================================================================
+// O65：prologue 融合——清零 dq/dk/dv 累加缓冲 + delta=rowsum(dO∘O) 合并成单次 launch。
+// 与 fp16 `zero_delta_warp_kernel` 逐字同构（仅 `__half2`→`__nv_bfloat162`），详见其注释。
+// delta 段与 O24 `delta_warp_kernel` 逐字同几何/同归约次序 ⇒ 结果逐位不变。
+// =============================================================================
+template <int HD>
+__global__ void zero_delta_warp_kernel(float* __restrict__ dq_acc, size_t n_q,
+                                       float* __restrict__ dk_acc, float* __restrict__ dv_acc,
+                                       size_t n_kv, const bf16* __restrict__ o,
+                                       const bf16* __restrict__ do_,
+                                       float* __restrict__ delta, int rows) {
+  const size_t t0 = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t stride = (size_t)gridDim.x * blockDim.x;
+  const float4 z4 = make_float4(0.f, 0.f, 0.f, 0.f);
+  const size_t nq4 = n_q >> 2;
+  for (size_t i = t0; i < nq4; i += stride) reinterpret_cast<float4*>(dq_acc)[i] = z4;
+  for (size_t i = (nq4 << 2) + t0; i < n_q; i += stride) dq_acc[i] = 0.f;
+  const size_t nkv4 = n_kv >> 2;
+  for (size_t i = t0; i < nkv4; i += stride) {
+    reinterpret_cast<float4*>(dk_acc)[i] = z4;
+    reinterpret_cast<float4*>(dv_acc)[i] = z4;
+  }
+  for (size_t i = (nkv4 << 2) + t0; i < n_kv; i += stride) {
+    dk_acc[i] = 0.f;
+    dv_acc[i] = 0.f;
+  }
+  const int lane = threadIdx.x & 31;
+  const int wpb = blockDim.x >> 5;
+  const int gwarp0 = blockIdx.x * wpb + (threadIdx.x >> 5);
+  const int nwarp = gridDim.x * wpb;
+  for (int row = gwarp0; row < rows; row += nwarp) {
+    const __nv_bfloat162* o2 = reinterpret_cast<const __nv_bfloat162*>(o + (size_t)row * HD);
+    const __nv_bfloat162* d2 = reinterpret_cast<const __nv_bfloat162*>(do_ + (size_t)row * HD);
+    float acc = 0.f;
+#pragma unroll
+    for (int k = lane; k < HD / 2; k += 32) {
+      const float2 a = __bfloat1622float2(o2[k]);
+      const float2 b = __bfloat1622float2(d2[k]);
+      acc += a.x * b.x + a.y * b.y;
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+    if (lane == 0) delta[row] = acc;
+  }
+}
+
+// =============================================================================
 // O9b / O9b-2：主 kernel 的 wgmma 版（bf16，与 fp16 版 `fa_bwd_fp16_mma_kernels.cuh` 逐字同构）
 //   O9b：GEMM1/2（S=QKᵀ、dP=dO·Vᵀ）用 `wgmma.m64n64k16` + SW128；
 //   O9b-2：GEMM3/4/5（dV=Pᵀ·dO、dK=dSᵀ·Q、dQ=dS·K）也用 `wgmma.m64n64k16`，

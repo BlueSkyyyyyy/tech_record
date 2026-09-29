@@ -4500,3 +4500,29 @@ scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
 `..._{base,new}_varlen.out.txt`、`..._{base,new}_hopper.out.txt`、
 `..._ncu_lse_{base,new}.out.txt`、`..._ncu_wgmma_{base,new}.out.txt`、
 `src/fa_bwd_p143_ci_fp16_bf16.out.txt`。
+
+## 20. O65-fp16（第一百四十五轮，**小/中 shape 正结果、大 S 中性；默认**）：prologue 融合（清零 dq/dk/dv + delta 单 launch）
+
+**背景**：O63 收口后 fp16 默认路径（S4096）端到端仍 ~1.82ms，其中 main 1.50ms（82%），
+非 main 固定开销里有 `cudaMemset(dk/dv)` ×2 + 1 次 `delta_warp_kernel` 共 3 个串行小 launch。
+nsys `cuda_gpu_mem_time_sum`：每次 memset 33MB/10.6µs = **~3.1 TB/s（已近 HBM 峰值）**；
+`delta_warp` ~14µs（DRAM 71%）。本项把三者融合成单 launch（对齐 fp8 O64 的思路）。
+
+**改动（单/两文件 device 逐字同源，`sync_onefile_device.py` `identical: True`）**：
+- device 新增 `zero_delta_warp_kernel<HD>`：一个 grid-stride 内核里先 float4 清零
+  `dq_acc`（`n_q>0` 时）/`dk_acc`/`dv_acc`，再按 **与 O24 `delta_warp_kernel` 逐字相同的几何**
+  （warp-per-row、lane 沿 HD 以 `__half2` 读、`__shfl_xor_sync` 同树）算 `delta`。
+- host：`--zfuse=`（默认 1）在 `run_pre` 里替换 `delta` 那个 launch，并去掉 `run_all` 里的
+  memset（`zfuse_sel && delta_warp_sel` 时才生效；`--zfuse=0` 回旧路径做同 binary A/B）。
+  grid = `max(rows/(THREADS/32), min(zero_ops/THREADS, 528))`，THREADS=128。
+
+**数值**：`delta` 段逐字同几何 ⇒ **逐位相同**；dump 对拍 `dq` 逐位 0、dk/dv 仅 1 ulp 差
+（跨 CTA `atomicAdd` 次序）。CI fp16 gate worst 3.906e-3 OK、`--check docs/04` OK。
+
+**性能（同 binary A/B，event，total，3 rep）**：**S512 0.0855→0.0812ms（1.053×）**、
+GQA kv4 S1024 0.3347→0.3308（1.012×）、MLA S1024H2 0.1826→0.1765（**1.035×**）、
+S4096 1.8271→1.8301（中性）。**ncu**：S4096 融合 kernel 33.95µs/DRAM 70.8%/L2 76%，
+≈ `delta_warp`14.3µs + 2×memset ~21µs（同字节、已带宽 bound）；S512 融合 6.1µs/DRAM 20.5%
+（远未饱和），省下的是 3 次小 launch 的开销。**结论：融合只对不满带宽的小 kernel 有效**，
+小/中 shape +1–5%、大 S 中性。原始输出 `src/fp16/fa_bwd_fp16_o65_ab.out.txt`、
+`..._o65_ncu_s{512,4096}.out.txt`；见 `docs/08` §5.59。

@@ -1296,6 +1296,60 @@ __global__ void delta_warp_kernel(const __half* __restrict__ o,
 }
 
 // =============================================================================
+// O65：prologue 融合——把「清零 dq/dk/dv 累加缓冲」与「delta=rowsum(dO∘O)」
+//   合并成**单次 launch**（对齐 fp8 O64 的 `quantize_zero_warp_kernel` 思路）。
+// 动机：默认路径 per-call 之前是 2–3 次 `cudaMemset` + 1 次 `delta_warp_kernel`（共 3–4 次
+//   小 launch，S512 时约占端到端 ~6%、S4096 ~2%）。三者互不依赖、且都在 main 之前完成，
+//   故可在一个 grid-stride 内核里串行做完：先 float4 清零三段累加缓冲，再 warp-per-row 算 delta。
+// 数值：delta 段与 O24 `delta_warp_kernel` **逐字同几何/同归约次序**（lane 沿 HD 以 half2 读、
+//   `__shfl_xor_sync` 同树）⇒ 结果**逐位不变**；zero 段只是写 0。
+//   `--zfuse=0` 退回「memset + delta_warp」，做同 binary A/B。
+// =============================================================================
+template <int HD>
+__global__ void zero_delta_warp_kernel(float* __restrict__ dq_acc, size_t n_q,
+                                       float* __restrict__ dk_acc, float* __restrict__ dv_acc,
+                                       size_t n_kv, const __half* __restrict__ o,
+                                       const __half* __restrict__ do_,
+                                       float* __restrict__ delta, int rows) {
+  const size_t t0 = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  const size_t stride = (size_t)gridDim.x * blockDim.x;
+  const float4 z4 = make_float4(0.f, 0.f, 0.f, 0.f);
+  // ---- zero 段 1：dq_acc（n_q==0 时整段跳过）----
+  const size_t nq4 = n_q >> 2;
+  for (size_t i = t0; i < nq4; i += stride) reinterpret_cast<float4*>(dq_acc)[i] = z4;
+  for (size_t i = (nq4 << 2) + t0; i < n_q; i += stride) dq_acc[i] = 0.f;
+  // ---- zero 段 2/3：dk_acc / dv_acc ----
+  const size_t nkv4 = n_kv >> 2;
+  for (size_t i = t0; i < nkv4; i += stride) {
+    reinterpret_cast<float4*>(dk_acc)[i] = z4;
+    reinterpret_cast<float4*>(dv_acc)[i] = z4;
+  }
+  for (size_t i = (nkv4 << 2) + t0; i < n_kv; i += stride) {
+    dk_acc[i] = 0.f;
+    dv_acc[i] = 0.f;
+  }
+  // ---- delta 段：warp-per-row（同 O24 delta_warp_kernel）----
+  const int lane = threadIdx.x & 31;
+  const int wpb = blockDim.x >> 5;
+  const int gwarp0 = blockIdx.x * wpb + (threadIdx.x >> 5);
+  const int nwarp = gridDim.x * wpb;
+  for (int row = gwarp0; row < rows; row += nwarp) {
+    const __half2* o2 = reinterpret_cast<const __half2*>(o + (size_t)row * HD);
+    const __half2* d2 = reinterpret_cast<const __half2*>(do_ + (size_t)row * HD);
+    float acc = 0.f;
+#pragma unroll
+    for (int k = lane; k < HD / 2; k += 32) {
+      const float2 a = __half22float2(o2[k]);
+      const float2 b = __half22float2(d2[k]);
+      acc += a.x * b.x + a.y * b.y;
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+    if (lane == 0) delta[row] = acc;
+  }
+}
+
+// =============================================================================
 // 2) main kernel（张量核）：1colblock 反向，5 个 GEMM 全 mma.m16n8k16
 // =============================================================================
 // smem 布局（half，除注明外）：

@@ -224,10 +224,19 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
      `if (sv != -INF)` 分支（SASS 每 tile 64 MUFU + 214 BSSY/BSYNC + 180 FSETP）。改成
      **先求本 lane 列 max、再统一 rescale+exp**（数学等价、只换 fp32 求和次序）：`fexp` 64→34、
      去逐元素分支；顺带把 `int kuse[2]`（运行期动态下标 → **local memory**）改两标量（同 F3-a 的坑）。
-     **LSE 201→120µs（1.67×）、指令 141.0M→86.4M（−38.7%）、local 扇区→0**；**preprocess
-     1.21–1.56×（S4096 0.216→0.138）**、端到端 **1.03–1.04×**（S4096 1.888→1.817ms/75.6TF）；
-     vs-ref/TE 打印位一致、单两文件 gate 1.335e-5 OK、`--check docs/04` OK。见 `docs/03` §71、
-     `docs/08` §5.51。
+      **LSE 201→120µs（1.67×）、指令 141.0M→86.4M（−38.7%）、local 扇区→0**；**preprocess
+      1.21–1.56×（S4096 0.216→0.138）**、端到端 **1.03–1.04×**（S4096 1.888→1.817ms/75.6TF）；
+      vs-ref/TE 打印位一致、单两文件 gate 1.335e-5 OK、`--check docs/04` OK。见 `docs/03` §71、
+      `docs/08` §5.51。
+   → **fp16/bf16 prologue 融合（O65，第一百四十五轮，小/中 shape 正结果、大 S 中性）**：
+     O64 的「小 launch 融合」搬到 fp16/bf16 的固定开销（无 quant，仅 `cudaMemset`×2–3 + `delta`）。
+     nsys 定量：memset 33MB/10.6µs = **~3.1 TB/s（已近峰值）**、`delta_warp` 71% DRAM。新增
+     `zero_delta_warp_kernel<HD>`（float4 清零 dq/dk/dv + 逐字同 `delta_warp` 几何的 delta），
+     `--zfuse=0` A/B。**数值逐位/1 ulp**；**S512 1.053×、MLA 1.035×、GQA 1.012×、S4096 中性**
+     （ncu：S4096 融合 33.95µs/DRAM 70.8% ≈ 拆开的 14.3+21µs，同字节带宽 bound；S512 融合
+     6.1µs/DRAM 20.5%，省的是 launch 开销）。**教训：融合只对「不满带宽的小 kernel」有效**——
+     fp8 quant 只到 58% 故 O64 有效，fp16/bf16 memset 已 3.1TB/s 故仅小 shape 有 1–5%。见
+     `docs/01` §20、`docs/01b` §6aw、`docs/08` §5.59。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 

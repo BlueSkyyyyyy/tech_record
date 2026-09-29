@@ -2325,3 +2325,15 @@ python3 scripts/sync_onefile_device.py src/bf16/fa_bwd_bf16_mma_kernels.cuh \
 **fp8 / fp16 / bf16 三 dtype 的 LSE 均走两趟 softmax**。原始输出
 `src/bf16/fa_bwd_bf16_p143_{base,new}_s4096.out.txt`（`fa_bwd_bf16_mma_base_main.cu` 为
 临时 OLD 构建，已删除）、`src/fa_bwd_p143_ci_fp16_bf16.out.txt`。
+
+## 6aw. O65-bf16（第一百四十五轮，**小/中 shape 正结果、大 S 中性；默认**）：prologue 融合（清零 dq/dk/dv + delta 单 launch）
+
+fp16 O65（`docs/01` §20）的**逐字 dtype 参数化**：新增 `zero_delta_warp_kernel<HD>`（`__half2`→
+`__nv_bfloat162`、`__half22float2`→`__bfloat1622float2`），其余（zero 的 float4 段、delta 的
+warp-per-row 几何、host `--zfuse=` 默认 1 + `run_pre`/`run_all` 接线）与 fp16 完全相同；
+单/两文件 device 用 `using bf16 = __nv_bfloat16;` marker 同步（`identical: True`）。
+
+**数值**：与 `delta_warp_kernel<HD>` 逐位相同；CI bf16 gate worst 3.125e-2 OK、`--check docs/04` OK。
+**性能（同 binary A/B，event，total，3 rep）**：**S512 0.0852→0.0808ms（1.054×）**、
+GQA kv4 S1024 0.3340→0.3301（1.012×）、MLA S1024H2 0.1829→0.1771（**1.033×**）、
+S4096 1.8246→1.8222（中性）。原始输出 `src/bf16/fa_bwd_bf16_o65_ab.out.txt`；见 `docs/08` §5.59。

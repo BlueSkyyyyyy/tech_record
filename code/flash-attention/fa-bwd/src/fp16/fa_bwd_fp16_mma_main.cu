@@ -1193,6 +1193,9 @@ int main(int argc, char** argv) {
   int det_ab = 0;
   // O24：delta 用 warp-per-row 向量化版（1，默认）还是旧 block-per-row smem 版（0，A/B）。
   int delta_warp_sel = 1;
+  // O65：定长默认路径把「清零 dq/dk/dv 累加缓冲 + delta」融合成单次 launch（1，默认；
+  //   0=退回旧 memset + delta_warp，做同 binary A/B）。仅 `delta_warp_sel==1` 时生效。
+  int zfuse_sel = 1;
   // O24：D==128 wgmma2/2b 路径直接用 fp16 写 dQ、convert 跳过 dQ（1，默认；0=A/B）。
   int dq_direct_sel = 1;
   // O25：cluster 分布式归约（仅 HD=128、BN=64 的 wgmma2；cluster 沿 bx 配对相邻 mblk）。
@@ -1277,6 +1280,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--det=", 0) == 0) det_ab = atoi(a.c_str() + 6);
     else if (a == "--det") det_ab = 1;
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_sel = atoi(a.c_str() + 12);
+    else if (a.rfind("--zfuse=", 0) == 0) zfuse_sel = atoi(a.c_str() + 8);
     else if (a.rfind("--dqdirect=", 0) == 0) dq_direct_sel = atoi(a.c_str() + 11);
     else if (a.rfind("--cluster=", 0) == 0) cluster_sel = atoi(a.c_str() + 10);
     else if (a == "--cluster") cluster_sel = 2;
@@ -1690,6 +1694,7 @@ int main(int argc, char** argv) {
          ((wg2bn_sel || wg2_sel) && maintma_sel) ? " +maintma" : "",
          (wg2_ksplit_eff > 1) ? " +ksplit" : "");
   printf("[O43] wgmma2 k-split = %d\n", wg2_ksplit_eff);
+  printf("[O65] prologue fusion (zero+delta) = %d\n", (int)(zfuse_sel && delta_warp_sel));
   // O24：D==128 的 wgmma2/wgmma2b 路径里 dQ 唯一拥有 ⇒ 主 kernel 直接写 fp16 `dq`，
   // `convert_kernel` 跳过 dQ（n_q 传 0）。其它路径（mma/wgmma/wgmma4/MLA）仍写 fp32 dq_acc。
   bool dq_direct = false;
@@ -1813,7 +1818,15 @@ int main(int argc, char** argv) {
       } else
         lse_mma_kernel<512><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
                                                        (int)causal);
-      if (delta_warp_sel)
+      if (zfuse_sel && delta_warp_sel) {
+        const size_t nq0 = (size_t)((D == 512 || wg2_ksplit_eff > 1) ? n : 0);
+        const size_t zops = (nq0 >> 2) + (nkv >> 2);
+        int zblk = (int)std::min<size_t>((zops + THREADS - 1) / THREADS, 528);
+        int zfblk = std::max(zblk, d_blocks);
+        if (zfblk < 1) zfblk = 1;
+        zero_delta_warp_kernel<512><<<zfblk, THREADS>>>(d_dq_acc, nq0, d_dk_acc, d_dv_acc, nkv,
+                                                        d_o, d_do, d_delta, d_rows);
+      } else if (delta_warp_sel)
         delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
       else
         delta_kernel<512><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
@@ -1866,7 +1879,15 @@ int main(int argc, char** argv) {
       } else
         lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
                                                        (int)causal);
-      if (delta_warp_sel)
+      if (zfuse_sel && delta_warp_sel) {
+        const size_t nq0 = (size_t)((D == 512 || wg2_ksplit_eff > 1) ? n : 0);
+        const size_t zops = (nq0 >> 2) + (nkv >> 2);
+        int zblk = (int)std::min<size_t>((zops + THREADS - 1) / THREADS, 528);
+        int zfblk = std::max(zblk, d_blocks);
+        if (zfblk < 1) zfblk = 1;
+        zero_delta_warp_kernel<128><<<zfblk, THREADS>>>(d_dq_acc, nq0, d_dk_acc, d_dv_acc, nkv,
+                                                        d_o, d_do, d_delta, d_rows);
+      } else if (delta_warp_sel)
         delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
       else
         delta_kernel<128><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
@@ -1880,9 +1901,13 @@ int main(int argc, char** argv) {
   auto run_all = [&]() {
     // O13：HD=128（NDT==1）时 dQ 由主 kernel **覆盖写**（寄存器累加后一次写回），无需清零；
     // 只有 MLA（HD=512）的 GEMM5 走全局 RMW 累加才需要 memset。省掉一趟 n 个 float 的 memset。
-    if (D == 512 || wg2_ksplit_eff > 1) CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
-    CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+    // O65：`zfuse_sel` 时改用 `zero_delta_warp_kernel`（在 run_pre 的 delta 位置）一并清零。
+    if (!(zfuse_sel && delta_warp_sel)) {
+      if (D == 512 || wg2_ksplit_eff > 1)
+        CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
+    }
     run_pre();
     run_main();
     // O24：dq_direct 时主 kernel 已直接写 fp16 dq ⇒ convert 跳过 dQ（n_q=0）。
