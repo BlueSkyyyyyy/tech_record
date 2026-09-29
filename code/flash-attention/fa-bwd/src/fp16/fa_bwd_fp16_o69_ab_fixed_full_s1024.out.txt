@@ -1,0 +1,49 @@
+### O69 A/B fp16 定长 full S1024H16D128: lsefull=1 (bal FULL) vs 0 (O8)
+--- round 1 lsefull=1 ---
+[timing] total(3 kernels) 0.1682 ms  51.06 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0462 ms | main 0.1062 ms | convert 0.0158 ms
+  dq   vs ref: max_abs=3.268e-04  max_rel=8.146e-02
+  dk   vs ref: max_abs=2.523e-04  max_rel=8.022e-02
+  dv   vs ref: max_abs=1.225e-04  max_rel=1.830e-02
+  fa_dq     vs ref: max_abs=3.268e-04  max_rel=8.090e-02
+  fa_dk     vs ref: max_abs=2.523e-04  max_rel=7.871e-02
+  fa_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
+  te_dq     vs ref: max_abs=1.558e-04  max_rel=4.590e-02
+  te_dk     vs ref: max_abs=2.297e-04  max_rel=3.468e-02
+  te_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
+--- round 1 lsefull=0 ---
+[timing] total(3 kernels) 0.3045 ms  28.21 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1605 ms | main 0.1068 ms | convert 0.0372 ms
+  dq   vs ref: max_abs=3.268e-04  max_rel=8.146e-02
+  dk   vs ref: max_abs=2.523e-04  max_rel=8.022e-02
+  dv   vs ref: max_abs=1.225e-04  max_rel=1.830e-02
+  fa_dq     vs ref: max_abs=3.268e-04  max_rel=8.090e-02
+  fa_dk     vs ref: max_abs=2.523e-04  max_rel=7.871e-02
+  fa_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
+  te_dq     vs ref: max_abs=1.558e-04  max_rel=4.590e-02
+  te_dk     vs ref: max_abs=2.297e-04  max_rel=3.468e-02
+  te_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
+--- round 2 lsefull=1 ---
+[timing] total(3 kernels) 0.1700 ms  50.53 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0469 ms | main 0.1076 ms | convert 0.0155 ms
+  dq   vs ref: max_abs=3.268e-04  max_rel=8.146e-02
+  dk   vs ref: max_abs=2.523e-04  max_rel=8.022e-02
+  dv   vs ref: max_abs=1.225e-04  max_rel=1.830e-02
+  fa_dq     vs ref: max_abs=3.268e-04  max_rel=8.090e-02
+  fa_dk     vs ref: max_abs=2.523e-04  max_rel=7.871e-02
+  fa_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
+  te_dq     vs ref: max_abs=1.558e-04  max_rel=4.590e-02
+  te_dk     vs ref: max_abs=2.297e-04  max_rel=3.468e-02
+  te_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
+--- round 2 lsefull=0 ---
+[timing] total(3 kernels) 0.3055 ms  28.12 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1578 ms | main 0.1072 ms | convert 0.0404 ms
+  dq   vs ref: max_abs=3.268e-04  max_rel=8.146e-02
+  dk   vs ref: max_abs=2.523e-04  max_rel=8.022e-02
+  dv   vs ref: max_abs=1.225e-04  max_rel=1.830e-02
+  fa_dq     vs ref: max_abs=3.268e-04  max_rel=8.090e-02
+  fa_dk     vs ref: max_abs=2.523e-04  max_rel=7.871e-02
+  fa_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
+  te_dq     vs ref: max_abs=1.558e-04  max_rel=4.590e-02
+  te_dk     vs ref: max_abs=2.297e-04  max_rel=3.468e-02
+  te_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02

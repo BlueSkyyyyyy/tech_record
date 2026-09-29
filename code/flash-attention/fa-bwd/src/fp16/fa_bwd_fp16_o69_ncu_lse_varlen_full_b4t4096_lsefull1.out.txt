@@ -1,0 +1,136 @@
+fa_bwd_fp16_mma_kernels.cuh(2831): warning #177-D: variable "NTH" was declared but never referenced
+    constexpr int NTH = 256;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *, const int *) [with HD=128, SPLIT=true]" at line 621 of fa_bwd_fp16_mma_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp16_mma_kernels.cuh(2833): warning #177-D: variable "NG" was declared but never referenced
+    constexpr int NG = BN / 8;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *, const int *) [with HD=128, SPLIT=true]" at line 621 of fa_bwd_fp16_mma_main.cu
+
+fa_bwd_fp16_mma_kernels.cuh(1864): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma2<HD,SPLIT,CL>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *, const int *, int) [with HD=128, SPLIT=true, CL=1]" at line 626 of fa_bwd_fp16_mma_main.cu
+
+fa_bwd_fp16_mma_kernels.cuh(3172): warning #177-D: variable "nblk" was declared but never referenced
+    const int nblk = (S + BM - 1) / BM;
+              ^
+          detected during instantiation of "void launch_bwd_wgmma4<HD,SEQ>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) [with HD=128, SEQ=true]" at line 1724 of fa_bwd_fp16_mma_main.cu
+
+fa_bwd_fp16_mma_kernels.cuh(2552): warning #177-D: variable "NTH" was declared but never referenced
+    constexpr int NTH = 256;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2b_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *) [with HD=128, SPLIT=true]" at line 1738 of fa_bwd_fp16_mma_main.cu
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb0EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 685515
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb1EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 680207
+==PROF== Connected to process 1205701 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "lse_mma_kernel_bal": 0%....50%....100% - 17 passes
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_full_fp16
+VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=0
+cu_seqlens = 0 1024 2048 3072 4096
+VARLEN main backend = wgmma2 cp.async
+[O40] varlen lse k-split = 1 (base=512)
+[timing] VARLEN total 0.6342 ms  54.17 TFLOPS (sum_b 4HL^2D)
+grid main = 8 x 16 x 4 | lse grid = 8 x 16 x 4 | T=4096
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=4.094e-04  max_rel=9.879e-02  (ours_amax=6.499e-01 ref_amax=6.495e-01 @3415108)
+  dk  vs ref: max_abs=4.953e-04  max_rel=1.029e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
+  dv  vs ref: max_abs=1.234e-04  max_rel=3.416e-02  (ours_amax=4.905e-01 ref_amax=4.906e-01 @7991790)
+==PROF== Disconnected from process 1205701
+[1205701] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void lse_mma_kernel_bal<128, 1, 1, 128, 64>(const __half *, const __half *, float *, int, int, int, float, const int *, float *, int) (16, 16, 4)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.77
+    Elapsed Cycles                cycle       192761
+    Memory Throughput                 %        50.94
+    DRAM Throughput                   %         9.94
+    Duration                         us       108.48
+    L1/TEX Cache Throughput           %        53.68
+    L2 Cache Throughput               %        44.50
+    SM Active Cycles              cycle    182416.77
+    Compute (SM) Throughput           %        57.99
+    ----------------------- ----------- ------------
+
+    OPT   This workload exhibits low compute throughput and memory bandwidth utilization relative to the peak           
+          performance of this device. Achieved compute throughput and/or memory bandwidth below 60.0% of peak           
+          typically indicate latency issues. Look at Scheduler Statistics and Warp State Statistics for potential       
+          reasons.                                                                                                      
+
+    Section: Warp State Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Warp Cycles Per Issued Instruction             cycle         6.04
+    Warp Cycles Per Executed Instruction           cycle         6.04
+    Avg. Active Threads Per Warp                                31.93
+    Avg. Not Predicated Off Threads Per Warp                    26.61
+    ---------------------------------------- ----------- ------------
+
+    WRN   The optional metric smsp__pcsamp_sample_count could not be found. Collecting it as an additional metric could 
+          enable the rule to provide more guidance.                                                                     
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   128
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                   1024
+    Registers Per Thread             register/thread              64
+    Shared Memory Configuration Size           Kbyte          233.47
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block      Kbyte/block           52.22
+    Static Shared Memory Per Block        byte/block               0
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread          131072
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                                1.94
+    -------------------------------- --------------- ---------------
+
+    OPT   Est. Speedup: 50%                                                                                             
+          A wave of thread blocks is defined as the maximum number of blocks that can be executed in parallel on the    
+          target GPU. The number of blocks in a wave depends on the number of multiprocessors and the theoretical       
+          occupancy of the kernel. This kernel launch results in 1 full waves and a partial wave of 496 thread blocks.  
+          Under the assumption of a uniform execution duration of all thread blocks, this partial wave may account for  
+          up to 50.0% of the total runtime of this kernel. Try launching a grid with no partial wave. The overall       
+          impact of this tail effect also lessens with the number of full waves executed for a grid. See the Hardware   
+          Model (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-hw-model) description for     
+          more details on launch configurations.                                                                        
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            8
+    Block Limit Shared Mem                block            4
+    Block Limit Warps                     block           16
+    Theoretical Active Warps per SM        warp           16
+    Theoretical Occupancy                     %           25
+    Achieved Occupancy                        %        23.09
+    Achieved Active Warps Per SM           warp        14.78
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 75%                                                                                       
+          The 4.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (25.0%) is limited by the required amount of      
+          shared memory.                                                                                                
+

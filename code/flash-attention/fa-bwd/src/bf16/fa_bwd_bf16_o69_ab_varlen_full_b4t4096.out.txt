@@ -1,0 +1,21 @@
+### O69 A/B bf16 varlen full b4_t4096H16D128
+--- round 1 lsefull=1 ---
+[timing] VARLEN total 0.6005 ms  57.22 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=3.237e-03  max_rel=5.841e-01  (ours_amax=6.523e-01 ref_amax=6.509e-01 @3415108)
+  dk  vs ref: max_abs=2.392e-03  max_rel=6.019e-01  (ours_amax=9.414e-01 ref_amax=9.414e-01 @7710804)
+  dv  vs ref: max_abs=2.013e-03  max_rel=5.696e-01  (ours_amax=4.902e-01 ref_amax=4.908e-01 @7021756)
+--- round 1 lsefull=0 ---
+[timing] VARLEN total 0.8704 ms  39.48 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=3.237e-03  max_rel=5.841e-01  (ours_amax=6.523e-01 ref_amax=6.509e-01 @3415108)
+  dk  vs ref: max_abs=2.392e-03  max_rel=6.019e-01  (ours_amax=9.414e-01 ref_amax=9.414e-01 @7710804)
+  dv  vs ref: max_abs=2.013e-03  max_rel=5.696e-01  (ours_amax=4.902e-01 ref_amax=4.908e-01 @7021756)
+--- round 2 lsefull=1 ---
+[timing] VARLEN total 0.5982 ms  57.44 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=3.237e-03  max_rel=5.841e-01  (ours_amax=6.523e-01 ref_amax=6.509e-01 @3415108)
+  dk  vs ref: max_abs=2.392e-03  max_rel=6.019e-01  (ours_amax=9.414e-01 ref_amax=9.414e-01 @7710804)
+  dv  vs ref: max_abs=2.013e-03  max_rel=5.696e-01  (ours_amax=4.902e-01 ref_amax=4.908e-01 @7021756)
+--- round 2 lsefull=0 ---
+[timing] VARLEN total 0.8709 ms  39.45 TFLOPS (sum_b 4HL^2D)
+  dq  vs ref: max_abs=3.237e-03  max_rel=5.841e-01  (ours_amax=6.523e-01 ref_amax=6.509e-01 @3415108)
+  dk  vs ref: max_abs=2.392e-03  max_rel=6.019e-01  (ours_amax=9.414e-01 ref_amax=9.414e-01 @7710804)
+  dv  vs ref: max_abs=2.013e-03  max_rel=5.696e-01  (ours_amax=4.902e-01 ref_amax=4.908e-01 @7021756)

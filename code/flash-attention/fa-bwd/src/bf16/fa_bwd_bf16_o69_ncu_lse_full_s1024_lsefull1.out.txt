@@ -1,0 +1,157 @@
+fa_bwd_bf16_mma_kernels.cuh(2333): warning #177-D: variable "NTH" was declared but never referenced
+    constexpr int NTH = 256;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2b_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 1541 of fa_bwd_bf16_mma_main.cu
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_bf16_mma_kernels.cuh(2610): warning #177-D: variable "NTH" was declared but never referenced
+    constexpr int NTH = 256;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 1568 of fa_bwd_bf16_mma_main.cu
+
+fa_bwd_bf16_mma_kernels.cuh(2612): warning #177-D: variable "NG" was declared but never referenced
+    constexpr int NG = BN / 8;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 1568 of fa_bwd_bf16_mma_main.cu
+
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 655164
+==PROF== Connected to process 1206375 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/bf16/fa_bwd_bf16_mma_main.out)
+==PROF== Profiling "lse_mma_kernel_bal": 0%....50%....100% - 17 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h16_d128_full_bf16
+B=1 S=1024 H=16 Hkv=16 D=128 causal=0 scale=0.088388
+[O6c] main grid=256 auto=(BM=64,BN=64,PIPE=1) sel=(BM=64,BN=64,PIPE=1)
+[O49] d128 8-warp = 0 (d128w=-1, grid=256, sm=132)
+[O38] lse k-split = 4 (auto)
+[O23] main backend = wgmma2(BN=64) | lse = mma (D=128 S=1024)
+[O43] wgmma2 k-split = 1
+[O65] prologue fusion (zero+delta) = 1
+[timing] total(3 kernels) 0.2885 ms  29.77 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1233 ms | main 0.1668 ms | convert -0.0016 ms
+[O24 A/B] delta old 0.0597 ms | warp 0.0618 ms (0.97x)
+[O6 A/B] main nopipe 0.3009 ms (28.55 TF) | pipe(KV both) 0.1746 ms (49.20 TF) | pipe2(K only) 0.1972 ms (43.56 TF) => nopipe/pipe 1.723x, nopipe/pipe2 1.526x
+[O48 A/B] main D=128 4w(128/2) 0.1951 ms | 8w(256/4) 0.2116 ms (0.922x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/8.941e-08/5.960e-08
+[O17 A/B] main mma(64,64,2) 0.1787 ms | O9b wgmma 0.1810 (0.987x) | O17 wgmma2(BM128) 0.1099 (1.626x) TF 78.2
+[O17-2 A/B] main O17 wg2 wg0串行(dV+dK) 0.1106 ms (77.7 TF) | O17-2 拆分(wg0=dV,wg1=dK) 0.1099 ms (78.2 TF) => 1.007x | max|diff| dq/dk/dv=0.00e+00/3.58e-07/2.38e-07
+[O17 A/B] max|diff| wg2-vs-mma dq/dk/dv=0.00e+00/1.07e-06/5.96e-07 | wg2-vs-O9b dq/dk/dv=0.00e+00/9.54e-07/5.36e-07
+[O18 A/B] main O17 wg2(BN64) 0.1099 ms (78.2 TF) | O18 wg2b(BN128,split) 0.1147 ms (74.9 TF) => 0.958x | O18 wg2b(BN128,串行) 0.1145 ms => 0.959x | max|diff| wg2b-vs-wg2 dq/dk/dv=1.19e-07/3.58e-07/3.58e-07 | wg2bns-vs-wg2b 0.00e+00/2.38e-07/2.38e-07
+[O34 A/B] main O18 wg2b(cp.async) 0.1147 ms (74.9 TF) | O34 wg2b(TMA,split) 0.1134 ms (75.8 TF) => 1.012x | max|diff| tma-vs-cpasync dq/dk/dv=0.00e+00/2.98e-07/2.38e-07
+[O36 A/B] main O17 wg2(BN64,cp.async) 0.1099 ms (78.2 TF) | O36 wg2(BN64,TMA,split) 0.1079 ms (79.6 TF) => 1.018x | max|diff| tma-vs-cpasync dq/dk/dv=0.00e+00/4.77e-07/2.38e-07
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.938e-03  max_rel=3.901e-01
+  dk   vs ref: max_abs=1.684e-03  max_rel=4.643e-01
+  dv   vs ref: max_abs=1.449e-03  max_rel=4.925e-01
+  fa_dq     vs ref: max_abs=1.827e-03  max_rel=3.919e-01
+  fa_dk     vs ref: max_abs=1.684e-03  max_rel=3.996e-01
+  fa_dv     vs ref: max_abs=1.449e-03  max_rel=4.925e-01
+  te_dq     vs ref: max_abs=2.421e-03  max_rel=3.546e-01
+  te_dk     vs ref: max_abs=2.970e-03  max_rel=3.313e-01
+  te_dv     vs ref: max_abs=1.449e-03  max_rel=4.925e-01
+==PROF== Disconnected from process 1206375
+[1206375] fa_bwd_bf16_mma_main.out@127.0.0.1
+  void lse_mma_kernel_bal<128, 1, 1, 128, 64>(const __nv_bfloat16 *, const __nv_bfloat16 *, float *, int, int, int, float, const int *, float *, int) (16, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.81
+    Elapsed Cycles                cycle        70570
+    Memory Throughput                 %        34.73
+    DRAM Throughput                   %         6.47
+    Duration                         us        38.82
+    L1/TEX Cache Throughput           %        37.59
+    L2 Cache Throughput               %        30.17
+    SM Active Cycles              cycle     65012.73
+    Compute (SM) Throughput           %        39.62
+    ----------------------- ----------- ------------
+
+    OPT   This kernel grid is too small to fill the available resources on this device, resulting in only 0.48 full     
+          waves across all SMs. Look at Launch Statistics for more details.                                             
+
+    Section: Warp State Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Warp Cycles Per Issued Instruction             cycle         4.53
+    Warp Cycles Per Executed Instruction           cycle         4.53
+    Avg. Active Threads Per Warp                                31.93
+    Avg. Not Predicated Off Threads Per Warp                    26.60
+    ---------------------------------------- ----------- ------------
+
+    WRN   The optional metric smsp__pcsamp_sample_count could not be found. Collecting it as an additional metric could 
+          enable the rule to provide more guidance.                                                                     
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Local Speedup: 33.9%                                                                                     
+          On average, each warp of this workload spends 1.5 cycles being stalled waiting for a scoreboard dependency on 
+          a MIO (memory input/output) operation (not to L1TEX). The primary reason for a high number of stalls due to   
+          short scoreboards is typically memory operations to shared memory. Other reasons include frequent execution   
+          of special math instructions (e.g. MUFU) or dynamic branching (e.g. BRX, JMX). Consult the Memory Workload    
+          Analysis section to verify if there are shared memory operations and reduce bank conflicts, if reported.      
+          Assigning frequently accessed values to variables can assist the compiler in using low-latency registers      
+          instead of direct memory accesses. This stall type represents about 33.9% of the total average of 4.5 cycles  
+          between issuing two instructions.                                                                             
+    ----- --------------------------------------------------------------------------------------------------------------
+    INF   Check the Warp Stall Sampling (All Samples) table for the top stall locations in your source based on         
+          sampling data. The Profiling Guide                                                                            
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-reference) provides more details    
+          on each stall reason.                                                                                         
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   128
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                    256
+    Registers Per Thread             register/thread              64
+    Shared Memory Configuration Size           Kbyte          233.47
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block      Kbyte/block           52.22
+    Static Shared Memory Per Block        byte/block               0
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread           32768
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                                0.48
+    -------------------------------- --------------- ---------------
+
+    OPT   If you execute __syncthreads() to synchronize the threads of a block, it is recommended to have at least two  
+          blocks per multiprocessor (compared to the currently executed 1.9 blocks) This way, blocks that aren't        
+          waiting for __syncthreads() can keep the hardware busy.                                                       
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            8
+    Block Limit Shared Mem                block            4
+    Block Limit Warps                     block           16
+    Theoretical Active Warps per SM        warp           16
+    Theoretical Occupancy                     %           25
+    Achieved Occupancy                        %        12.14
+    Achieved Active Warps Per SM           warp         7.77
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 51.42%                                                                                    
+          The difference between calculated theoretical (25.0%) and measured achieved occupancy (12.1%) can be the      
+          result of warp scheduling overheads or workload imbalances during the kernel execution. Load imbalances can   
+          occur between warps within a block as well as across blocks of the same kernel. See the CUDA Best Practices   
+          Guide (https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#occupancy) for more details on     
+          optimizing occupancy.                                                                                         
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Local Speedup: 75%                                                                                       
+          The 4.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (25.0%) is limited by the required amount of      
+          shared memory.                                                                                                
+

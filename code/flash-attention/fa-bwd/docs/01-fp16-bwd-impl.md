@@ -4543,3 +4543,82 @@ main 1.5031→0.9640ms、preprocess 0.250→0.157ms；vs fp32 ref 无变化。�
 （`0.3238ms/849TF`）时间比由 **5.6× 收窄到 3.6×**。host 在 S=4096 自动选 `wgmma2b(BN=128)`、
 S512/GQA 选 `wgmma2(BN=64)`、MLA（D=512）自动退回 mma。原始输出
 `src/fa_bwd_p161_hopper_default_ab.out.txt`；见 `docs/08` §5.75。
+
+## 22. O69（第一百六十三轮，**正结果，默认**）：非 causal（full）D=128 的 LSE 接上均衡 `cp.async` 版
+
+### 22.1 动机（F9 的 fp16/bf16 泛化 = 补一条漏改分支）
+
+第 162 轮（O68/F9）发现 **fp8 的 causal LSE 早已上均衡版，但非 causal（full）D=128 的 LSE 一直
+走 O1 的 `lse_mma_kernel`**（逐元素 `LDG.U8→STS`、无 `cp.async` 流水、无 K 维 split），并把它接到
+`lse_mma_kernel_bal<FULL=true>`（O54 的均衡版：一个 CTA 一个 m 块 + K 的 `cp.async` 16B 双缓冲）。
+核查 fp16/bf16 发现**同一条分支也漏改**（fp8 的 F9 只动了 fp8）：
+
+- 定长：`fa_bwd_fp16_mma_main.cu` 的 `!causal` D=128 分支直接 `lse_mma_kernel<128><<<lg,...>>>`；
+- varlen：`run_varlen` 的 `!causal` D=128 分支同样 `lse_mma_kernel<128>`。
+
+本轮把两条 D=128 的 full LSE 从 O8 `lse_mma_kernel` 切到 `lse_mma_kernel_bal<128, PIPE=1, FULL=true>`
+（`ksplit=1`，与 fp8 F9 逐字一致）——**纯 host 改动，device 一行未改**（`FULL=true` 的模板实例
+O54 早已存在、只是此前只服务 MLA D=512 的 full）。新增文件作用域开关 `g_lse_full_opt`（默认 1）+
+CLI `--lsefull=0/1` 做同 binary A/B；`--lsefull=0` 逐字退回 O8。
+
+### 22.2 数值（`--lsefull=1` vs `0`，ours vs fp32 ref，max_abs dq/dk/dv）
+
+LSE 只差 fp32 求和次序 ⇒ **数值在 fp16 噪声内逐值一致**：
+
+| case | lsefull=1 | lsefull=0 |
+|---|---|---|
+| 定长 full S1024 H16 D128 | 3.268e-4 / 2.523e-4 / 1.225e-4 | 3.268e-4 / 2.523e-4 / 1.225e-4 |
+| varlen full b4_t4096 H16 D128 | 4.094e-4 / 4.953e-4 / 1.234e-4 | 4.094e-4 / 4.953e-4 / 1.234e-4 |
+
+与同 case 的 FA3（定长 `3.268e-4/2.523e-4/1.217e-4`）同量级。单/两文件逐指标一致
+（定长 full S1024 两文件 total 0.1687ms / 单文件 0.1687ms；`--check docs/04` OK、fp16
+一致性 gate worst 3.906e-3 `OK`）。
+
+### 22.3 性能（同 binary A/B，CUDA event，iters=50/30）
+
+| case | lsefull=0（O8） | lsefull=1（bal FULL） | 加速 |
+|---|---|---|---|
+| 定长 full S1024：preprocess | 0.1588 ms | **0.0463 ms** | **3.43×** |
+| 定长 full S1024：total | 0.3048 ms（28.2 TF） | **0.1687 ms（50.9 TF）** | **1.81×** |
+| varlen full b4_t4096：total | 0.8632 ms（39.8 TF） | **0.5942 ms（57.8 TF）** | **1.46×** |
+
+收益全部来自 preprocess（main 0.1068→0.1069ms 不变）。纯反向对标（同 session CUPTI，
+`harness/fa_bwd_bench.py bench`，定长 full S1024 H16 D128 fp16）：FA3 `0.0512ms/335.6TF`、
+FA2 `0.0828ms/207.6TF`、TE `0.0577ms/297.7TF` ⇒ ours total 为 FA3 时间 **3.29×**、TE **2.92×**
+（峰值口径 989 TF 的 **5.1%**）。varlen full `[1024]×4` fp16：FA3 `0.1996ms/172.1TF` ⇒ ours **3.0×**。
+
+### 22.4 ncu（LSE，`regex:lse_mma_kernel`，`--launch-count 1`，S1024 H16 full）
+
+| 指标 | lsefull=0（O8） | lsefull=1（bal FULL） |
+|---|---|---|
+| Duration | 175.8 µs | **39.2 µs（4.49×）** |
+| L1/TEX Throughput | 11.8% | 37.6% |
+| Compute (SM) Throughput | 25.6% | 39.6% |
+| Executed Ipc Active | 1.05 | 1.72 |
+| No Eligible | 73.7% | 57.1% |
+| 主导 stall | `long_scoreboard` 4.4 cy（全局载入延迟） | `short_scoreboard` 1.5 cy（smem→mma） |
+| Waves Per SM / Occupancy | 0.32 / 11.96% | 0.48 / 12.14% |
+| regs / dynamic smem | 80 / 34.82 KB | 64 / 52.22 KB |
+
+varlen full b4_t4096 同构：LSE **375.5→108.5 µs（3.46×）**、Compute 49.4→58.0%、Waves
+1.29→1.94、Occupancy 26.55→23.09%。**结论**：O8 的墙是**串行载入的全局访存延迟**
+（`long_scoreboard` 主导、No Eligible 74%、L1TEX 仅 12%）；均衡 FULL 版用 `cp.async` 双缓冲
+把它打掉，新墙变为 **issue（Compute 40%）+ smem 依赖 + 网格不足一个波**——与 fp8 F9（208→42µs）
+逐项同源。这是 preprocess 内一条**被漏改的 LSE 分支**，不是 main 的 L2 `red` 墙（阻塞项）。
+
+### 22.5 复现 / 原始输出
+
+```
+# 定长 full（默认 Hopper 构建）A/B
+ARCH= NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h16_d128_full_fp16 --full --lsefull=1
+# varlen full（追加 --varlen）
+# ncu：scripts/ncu.sh src/fp16/fa_bwd_fp16_mma_main.cu --kernel-name regex:lse_mma_kernel \
+#   --launch-count 1 --set full -- --dir=... --full --lsefull=1
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_o69_ab_fixed_full_s1024.out.txt`、
+`..._o69_ab_varlen_full_b4t4096.out.txt`、`..._o69_onefile_fixed_full_s1024.out.txt`、
+`..._o69_ncu_lse_full_s1024_lsefull{0,1}.out.txt`、`..._o69_ncu_lse_varlen_full_b4t4096_lsefull{0,1}.out.txt`；
+基线 `src/fa_bwd_p163_full_baseline.out.txt`。见 `docs/08` §5.77。

@@ -2960,13 +2960,49 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       均衡 FULL **42.3µs（4.93×）/3.86/L1TEX 22.9%**；两路径 `Waves 0.39`（网格不足）⇒ 真实墙
       是「网格不足 + 串行载入延迟」，`cp.async` 直接打掉后者。**这是 preprocess 内一条被漏改的
       LSE 分支，不是 main 的 L2 `red` 墙。** 见 `docs/03` §94、`docs/08` §5.76、`docs/04` §9；
-      原始输出 `src/fp8/fa_bwd_fp8_o68_*`。**剩余**：同路径再上 4D-TMA（对齐 causal O32）。
+       原始输出 `src/fp8/fa_bwd_fp8_o68_*`。**剩余**：同路径再上 4D-TMA（对齐 causal O32）。
+- [x] **F10**（第一百六十三轮，**正结果，默认**）**fp16/bf16 非 causal（full）D=128 的 LSE
+       接上均衡 `cp.async` 版**——F9 的 dtype 泛化 / 同一条漏改分支。核查发现 fp16/bf16 与 fp8
+       一样：O54 的 `lse_mma_kernel_bal<FULL=true>` 此前**只服务 D=512 MLA 的 full**，D=128 的
+       定长 full 与 varlen full 仍走 O8 `lse_mma_kernel`（无 `cp.async`、逐标量 global→smem）。
+       **纯 host**（四个文件 `fa_bwd_{fp16,bf16}_mma_{main,onefile}.cu`，device 一行未改）：
+       `g_lse_full_opt`（默认 1）+ `--lsefull=0/1`，两条 D=128 full LSE 改走
+       `lse_mma_kernel_bal<128,1,FULL=true>`（`ksplit=1`，对齐 fp8 F9）。**数值**：LSE 只差
+       fp32 求和次序 ⇒ 逐值一致；`--ci` fp16 gate worst 3.906e-3、bf16 7.812e-3（均 OK）、
+       `--check docs/04` OK。**性能（同 binary A/B）**：fp16 定长 full S1024 preprocess
+       **3.43×**、total **1.81×（28.2→50.9 TF）**；varlen full b4_t4096 total **1.46×**；
+       bf16 同构（3.38× / 1.79× / 1.45×）。对标纯反向 FA3（定长 full S1024 fp16
+       0.0512ms/335.6TF）ours 3.29×、TE 2.92×。**ncu**：LSE fp16 **175.8→39.2µs（4.49×）**
+       （O8 是 `long_scoreboard` 纯延迟 bound → 均衡 FULL 新墙 = issue+smem 依赖+网格不足）；
+       bf16 175.2→38.8µs（4.51×）；varlen fp16 375.5→108.5µs（3.46×）。见 `docs/01` §22、
+       `docs/01b` §6ay、`docs/04` §44、`docs/08` §5.77；原始输出 `src/fp16/fa_bwd_fp16_o69_*`、
+       `src/bf16/fa_bwd_bf16_o69_*`、`src/fa_bwd_p163_full_baseline.out.txt`。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百六十二轮）**：**F9——非 causal（full）D=128 的 LSE 接上均衡 `cp.async` 版：
+> **最新（第一百六十三轮）**：**F10——fp16/bf16 非 causal（full）D=128 的 LSE 接上均衡
+> `cp.async` 版：正结果，默认**。F9（fp8）的 dtype 泛化，补同一条**漏改分支**：O54 的
+> `lse_mma_kernel_bal<FULL=true>`（一个 CTA 一个 m 块 + K 的 `cp.async` 16B 双缓冲）此前只接到
+> D=512（MLA）的 full，fp16/bf16 的 **D=128 定长 full 与 varlen full 仍走 O8 `lse_mma_kernel`**
+> （逐标量 global→smem、无流水）。**纯 host**（`fa_bwd_{fp16,bf16}_mma_{main,onefile}.cu`，
+> device 一行未改）：`g_lse_full_opt`（默认 1）+ `--lsefull=0/1`，两条 D=128 full LSE 改走
+> `lse_mma_kernel_bal<128,1,FULL=true>`（`ksplit=1`）。**数值**：LSE 只差 fp32 求和次序 ⇒ 逐值
+> 一致；`--ci` fp16 worst 3.906e-3 / bf16 7.812e-3（均 OK）、`--check docs/04` OK。**性能（同
+> binary A/B）**：fp16 定长 full S1024 **preprocess 3.43× / total 1.81×（28.2→50.9 TF）**、varlen
+> full b4_t4096 **1.46×**；bf16 同构（3.38× / 1.79× / 1.45×）；对标纯反向 FA3（定长 full S1024
+> fp16 0.0512ms/335.6TF）ours **3.29×**、TE **2.92×**。**ncu**：LSE fp16 **175.8→39.2µs（4.49×）**、
+> bf16 175.2→38.8µs（4.51×）、varlen fp16 375.5→108.5µs（3.46×）；O8 是 `long_scoreboard`
+> 纯延迟 bound，均衡 FULL 新墙 = issue + smem 依赖 + 网格不足一个波。见 `docs/01` §22、
+> `docs/01b` §6ay、`docs/04` §44、`docs/08` §5.77；原始输出 `src/fp16/fa_bwd_fp16_o69_*`、
+> `src/bf16/fa_bwd_bf16_o69_*`、`src/fa_bwd_p163_full_baseline.out.txt`。
+> **下一步候选**：① **把这条 full D=128 的 LSE 再上 4D-TMA**（对齐 causal O32/O30 的
+> `lse_mma_kernel_bal_tma`；目前 bal 版仍是 `cp.async`，TMA 版只服务 causal）——**三 dtype 统一**；
+>   ② main 的 L2 `red` 墙（F7 已全判死，受本卡寄存器/smem 硬墙锁定，见「阻塞」）；③ 其余候选
+>   （F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、非 main 融合）均已判决/到顶/收口。
+>
+> **（第一百六十二轮）**：**F9——非 causal（full）D=128 的 LSE 接上均衡 `cp.async` 版：
 > 正结果，默认**。这是「F1/F5 只优化了 causal LSE」留下的一条**漏改分支**：O54 早给
 > `lse_mma_kernel_bal` 加了 `FULL=true`（一个 CTA 一个 m 块 + `cp.async` 双缓冲），却**只接到
 > D=512（MLA）**；**D=128 的定长 full 与 varlen full 一直走 O1 `lse_mma_kernel`**（逐元素
@@ -6583,8 +6619,45 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       （纯延迟 bound）** → 均衡 FULL **42.3µs（4.93×）/ 3.86 / L1TEX 22.9%**；两路径 `Waves 0.39`
       （网格不足）⇒ **这是 preprocess 内一条被漏改的 LSE 分支，不是 main 的 L2 `red` 墙**。
     - **下一步**：同路径再上 4D-TMA（对齐 causal O32）。见 `docs/03` §94、`docs/08` §5.76、
-      `docs/04` §9；原始输出 `src/fp8/fa_bwd_fp8_o68_{ab_fixed_full_s1024,ab_onefile_full_s1024,
-      ab_varlen_full_b4t4096,ncu_lse_full_s1024,te_full_baseline}.out.txt`。
+       `docs/04` §9；原始输出 `src/fp8/fa_bwd_fp8_o68_{ab_fixed_full_s1024,ab_onefile_full_s1024,
+       ab_varlen_full_b4t4096,ncu_lse_full_s1024,te_full_baseline}.out.txt`。
+
+- 2026-09-30（第一百六十三轮）：**O69/F10 完成（fp16/bf16 非 causal（full）D=128 的 LSE 接上均衡
+  `cp.async` 版：正结果，默认）**——F9 的 dtype 泛化 / 同一条漏改分支。
+    - **动机**：F9（fp8）只动了 fp8；核查发现 **fp16/bf16 同一条分歧也漏改**——O54 给
+      `lse_mma_kernel_bal` 加的 `FULL=true`（一个 CTA 一个 m 块 + K 的 `cp.async` 16B 双缓冲）
+      **此前只服务 D=512（MLA）的 full**；fp16/bf16 的 **D=128 定长 full 与 varlen full 一直走 O8
+      `lse_mma_kernel`**（逐标量 `LDG→STS`、无 `cp.async`、纯全局载入延迟 bound）。
+    - **改动**（纯 host，`fa_bwd_{fp16,bf16}_mma_{main,onefile}.cu` 四个文件，device 一行未改）：
+      新增文件作用域开关 `g_lse_full_opt`（默认 1）+ CLI `--lsefull=0/1`；两条 D=128 full 的 LSE
+      从 `lse_mma_kernel<128>` 改走 `lse_mma_kernel_bal<128, 1, true>`（`ksplit=1`，与 fp8 F9
+      逐字一致）+ 对应 `cudaFuncSetAttribute` 实例；`--lsefull=0` 逐字退回 O8。
+    - **数值**：LSE 只差 fp32 求和次序 ⇒ 同一 case 的 dq/dk/dv **逐值一致**——fp16 定长 full
+      S1024 `3.268/2.523/1.225e-4`、varlen b4_t4096 `4.094/4.953/1.234e-4`；bf16 定长 full S1024
+      `1.938/1.684/1.449e-3`、varlen `3.237/2.392/2.013e-3`。单/两文件逐指标一致
+      （fp16 定长 full 两文件/单文件 total 0.1687ms；bf16 0.1710/0.1713ms）；`--ci` fp16 gate
+      worst **3.906e-3**、bf16 **7.812e-3**（均 OK）、`--check docs/04` OK（194 行，随本轮同步
+      fp16 一处 full dv `1.234e-4→1.213e-4`）。
+    - **性能（同 binary A/B，event）**：fp16 定长 full S1024 **preprocess 0.1588→0.0463ms（3.43×）/
+      total 0.3048→0.1687ms（1.81×，28.2→50.9 TF）**、varlen full b4_t4096 **total
+      0.8632→0.5942ms（1.46×）**；bf16 定长 full S1024 **preprocess 3.38× / total 1.79×**、
+      varlen full **1.45×**。收益全在 preprocess（main 不变）。
+    - **对标**（同 session CUPTI，`harness/fa_bwd_bench.py bench`）：定长 full S1024 H16 D128
+      **fp16** FA3 `0.0512ms/335.6TF`、FA2 `0.0828/207.6`、TE `0.0577/297.7` ⇒ ours total 为
+      FA3 时间 **3.29×**、TE **2.92×**（峰值 989 的 5.1%）；**bf16** FA3 `0.0506ms/339.6TF`、
+      TE `0.0576/298.1` ⇒ 3.38×/2.94×；varlen full `[1024]×4` fp16 FA3 `0.1996ms/172.1TF`
+      ⇒ ours **3.0×**。
+    - **ncu（LSE，`regex:lse_mma_kernel`，S1024 H16 full）**：fp16 O8 **175.8µs / L1TEX 11.8% /
+      Compute 25.6% / Ipc 1.05 / No Eligible 73.7% / `long_scoreboard` 4.4cy / regs 80 /
+      smem 34.82KB** → 均衡 FULL **39.2µs（4.49×）/ L1TEX 37.6% / Compute 39.6% / Ipc 1.72 /
+      No Eligible 57.1% / `short_scoreboard` 1.5cy / regs 64 / smem 52.22KB**；bf16 逐项一致
+      （175.2→38.8µs，4.51×）；varlen fp16 **375.5→108.5µs（3.46×）**。⇒ O8 的墙是**串行全局载入
+      延迟**，均衡 FULL 用 `cp.async` 打掉它，新墙 = issue + smem 依赖 + 网格不足一个波
+      （`Waves 0.48/1.94`）。与 fp8 F9（208→42µs）同源；**不是 main 的 L2 `red` 墙**。
+    - **下一步**：同路径再上 **4D-TMA**（对齐 causal O32/O30 的 `lse_mma_kernel_bal_tma`），
+      把三 dtype 的 full D=128 LSE 统一到 TMA。见 `docs/01` §22、`docs/01b` §6ay、`docs/04` §44、
+      `docs/08` §5.77；原始输出 `src/fp16/fa_bwd_fp16_o69_*`、`src/bf16/fa_bwd_bf16_o69_*`、
+      `src/fa_bwd_p163_full_baseline.out.txt`。
 
 ## 灵感 / backlog
 
