@@ -1318,5 +1318,25 @@ smem 冲突 + 低 occ
   翻倍顶穿 255 寄存器文件 → 溢出流量盖过省下的 `red`/读**。
 - **判决 / 下一步**：**F7 option(a)「BN≥BM」判为中性/偏负**。至此 F7 的单趟「减少贡献数」路线
   （两 kernel / TMA store-reduce / BN≥BM）**全部判决**；剩余只有「跨 warpgroup 偏和 + 二次归约」
-  （同样撞 smem/regs）或「放弃 F7 / 换卡」。与阻塞里 O17b/F6 的「寄存器文件锁死放大 tile」同源。
-  详见 `docs/03` §93。
+   （同样撞 smem/regs）或「放弃 F7 / 换卡」。与阻塞里 O17b/F6 的「寄存器文件锁死放大 tile」同源。
+   详见 `docs/03` §93。
+
+### 5.75 F8：fp16/bf16 定长默认切 Hopper（wgmma+TMA）（第一百六十一轮，正结果，默认）
+
+- **动机（F1 的 dtype 泛化）**：F1（第一百三十二轮）只把 **fp8** 定长默认切到
+  `sm90a -DFA_WGMMA -DFA_TMA`；fp16/bf16 的 `ours` 口径仍锁在 `-arch=sm_90` 的 `mma.sync`——
+  尽管 host 自 O5/O5b 起已有 wgmma+TMA 快路（一直只由 `--hopper` 独立前缀在跑，未做默认）。
+  本轮把同一默认化推到 fp16/bf16（用户优先级「逐步把 main 切到 wgmma+TMA 路径」的 dtype 收尾）。
+- **改动（纯 harness，device 一行未改）**：`harness/fa_bwd_run.py` 把 `FP8_HOPPER_DEFAULT`
+  泛化为 `HOPPER_DEFAULT_DTYPES = {"fp8", "fp16", "bf16"}`：定长（`not is_varlen`）且非
+  `--mma`/`--hopper` 时用 `HOPPER_FLAGS`（`-gencode=compute_90a -DFA_WGMMA -DFA_TMA -lcuda`）
+  构建；`--mma` 一次退回三 dtype 的旧 mma.sync 口径做 A/B；`--hopper` 仍走独立前缀
+  `ours_hp/ours_sf_hp`。
+- **数值**：S=4096 causal `max_abs` vs fp32 ref **逐值不变**（fp16 `1.883/1.734/1.966e-3`、
+  bf16 `1.510/1.340/1.631e-2`）——wgmma 与 mma 只差 fp32 累加次序（A/B `wg2b-vs-wg2` ~1e-5），
+  被 fp16/bf16 舍入盖住；MLA（HD=512）host 自动退回 mma（不变）、full 走 mma LSE 亦正确。
+  CI 73 case 全绿（fp16 worst `1.953e-3`/bf16 `7.812e-3`/fp8 `1.049e-5`，`--check docs/04` OK）。
+- **性能（同 session，S4096 causal MHA，total/event）**：**fp16 1.8245→1.1726ms（1.556×）**、
+  **bf16 1.8325→1.1643ms（1.574×）**；main 分别 1.503→0.964ms / 1.495→0.958ms。相对纯反向
+  FA3（`0.3238ms/849TF`，fp16）时间比 **5.6×→3.6×**。
+- **原始输出**：`src/fa_bwd_p161_hopper_default_ab.out.txt`、`src/fa_bwd_p161_baseline_{fp16,bf16}.out.txt`。

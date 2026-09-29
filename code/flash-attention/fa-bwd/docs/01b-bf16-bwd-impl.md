@@ -2337,3 +2337,13 @@ warp-per-row 几何、host `--zfuse=` 默认 1 + `run_pre`/`run_all` 接线）�
 **性能（同 binary A/B，event，total，3 rep）**：**S512 0.0852→0.0808ms（1.054×）**、
 GQA kv4 S1024 0.3340→0.3301（1.012×）、MLA S1024H2 0.1829→0.1771（**1.033×**）、
 S4096 1.8246→1.8222（中性）。原始输出 `src/bf16/fa_bwd_bf16_o65_ab.out.txt`；见 `docs/08` §5.59。
+
+## 6ax. F8（第一百六十一轮，正结果，默认）：bf16 定长默认切 Hopper（wgmma+TMA）
+
+与 fp16（`docs/01` §21）逐字同源：`harness/fa_bwd_run.py` 的 `HOPPER_DEFAULT_DTYPES` 扩到
+fp16/bf16，定长默认构建走 `-DFA_WGMMA -DFA_TMA`。**device 一行未改**。
+
+**数值（S=4096 causal，max_abs vs fp32 ref）**：`1.510/1.340/1.631e-2` **逐值不变**；CI 73 case
+全绿（bf16 gate worst `7.812e-3`，`--check docs/04` OK）。**性能（同 session，event）**：
+**total 1.8325→1.1643ms（1.574×）**、main 1.4949→0.9581ms。host 自动选 `wgmma2b(BN=128)`
+（LSE 走 tma）。原始输出 `src/fa_bwd_p161_hopper_default_ab.out.txt`；见 `docs/08` §5.75。

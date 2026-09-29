@@ -100,9 +100,15 @@ HOPPER_FLAGS = "-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda
 # 对齐 ROADMAP『fp8 专项冲刺 F1』——此前 fp8 的 `ours` 口径是 `-arch=sm_90` 的 mma.sync
 # （SASS：160×HMMA + 78×LDSM，无 QGMMA/TMA），而 TE 的 fp8 反向是 QGMMA+TMA+WARPGROUP。
 # 只有把默认构建改成 `sm90a`，host 才会走 `-DFA_WGMMA -DFA_TMA` 下的 wgmma+TMA 主路径
-# （SASS：8×QGMMA + 96×HMMA + 46×LDSM + 7×UTMA）。fp16/bf16 的默认口径**不变**（仍 mma），
-# 以保持 docs/04 表稳定；`--mma` 可让 fp8 退回旧的 mma.sync 构建做 A/B 回归。
-FP8_HOPPER_DEFAULT = True
+# （SASS：8×QGMMA + 96×HMMA + 46×LDSM + 7×UTMA）。
+#
+# F8（第 161 轮）：把同一「定长默认切 Hopper」从 fp8 泛化到 **fp16/bf16**。此前 fp16/bf16
+# 的 `ours` 口径仍锁在 `-arch=sm_90` 的 mma.sync（O5/O5b 起 host 其实已有 wgmma+TMA 快路，
+# 但只有 `--hopper` 独立前缀在跑）。实测 S=4096 causal：fp16 total 1.829→**1.175ms（1.56×）**、
+# bf16 1.829→**1.164ms（1.57×）**，max_abs vs fp32 ref **逐值不变**（fp32 累加次序噪声 ~1e-5，
+# 被 fp16/bf16 舍入盖住）；MLA（HD=512）host 自动退回 mma、非 causal 走 mma LSE，均正确。
+# `--mma` 可让三 dtype 定长全部退回旧的 mma.sync 构建做 A/B 回归。
+HOPPER_DEFAULT_DTYPES = {"fp8", "fp16", "bf16"}
 
 
 def discover(args):
@@ -190,7 +196,7 @@ def main():
     ap.add_argument("--hopper", action="store_true",
                     help="P3-4d：定长也走 Hopper 快路构建（-DFA_WGMMA -DFA_TMA -lcuda，sm90a）")
     ap.add_argument("--mma", action="store_true",
-                    help="F1：让 fp8 定长退回旧的 mma.sync 构建（-arch=sm_90，解 fp8 默认 Hopper）做 A/B")
+                    help="F1/F8：让三 dtype 定长全部退回旧的 mma.sync 构建（-arch=sm_90，解默认 Hopper）做 A/B")
     ap.add_argument("--ci", action="store_true",
                     help="P3-4d：一条命令收口——跑完后自动校验 docs/04 内嵌表最新（陈旧则退出码 1）")
     ap.add_argument("--perf-baseline", default=None, metavar="DTYPE",
@@ -233,10 +239,10 @@ def main():
             summary.append(f"[skip] {case_dir.name}: 未知 dtype={dt}")
             continue
         cfg = "varlen" if is_varlen else "fixed"
-        # F1：fp8 定长默认走 Hopper（wgmma+TMA）；`--mma` 或 `--hopper`（全局前缀）时退回/统一。
-        fp8_hopper = (FP8_HOPPER_DEFAULT and dt == "fp8" and not is_varlen
-                      and not args.mma and not args.hopper)
-        build_env = ({"ARCH": "", "NVCC_FLAGS": HOPPER_FLAGS} if fp8_hopper else BUILD[cfg])
+        # F1/F8：fp8/fp16/bf16 定长默认走 Hopper（wgmma+TMA）；`--mma` 或 `--hopper`（全局前缀）时退回/统一。
+        hopper_default = (dt in HOPPER_DEFAULT_DTYPES and not is_varlen
+                          and not args.mma and not args.hopper)
+        build_env = ({"ARCH": "", "NVCC_FLAGS": HOPPER_FLAGS} if hopper_default else BUILD[cfg])
         compare_cases.append(case_dir.name)
         for impl in impls:
             src, bin_name = HOSTS[dt][impl]
@@ -258,14 +264,14 @@ def main():
                 logs[dt].append("  (--no-run: 复用已有 npy)")
                 continue
 
-            key = (src, cfg, args.hopper, fp8_hopper)
+            key = (src, cfg, args.hopper, hopper_default)
             if key in built and Path(os.path.realpath(ROOT / src)).with_suffix(".out").exists():
                 r = run_via_binary(src, built[key], prog_args)
                 how = f"binary {built[key]}.out"
             else:
                 r = run_via_runsh(src, prog_args, build_env)
                 built[key] = bin_name
-                how = f"run.sh ({cfg}{', fp8-hopper' if fp8_hopper else ''})"
+                how = f"run.sh ({cfg}{', hopper-default' if hopper_default else ''})"
             out = (r.stdout or "") + (r.stderr or "")
             logs[dt].append(f"  [{how}] rc={r.returncode}")
             logs[dt].append(out.rstrip())

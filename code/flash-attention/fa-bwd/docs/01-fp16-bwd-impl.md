@@ -4526,3 +4526,20 @@ S4096 1.8271→1.8301（中性）。**ncu**：S4096 融合 kernel 33.95µs/DRAM 
 （远未饱和），省下的是 3 次小 launch 的开销。**结论：融合只对不满带宽的小 kernel 有效**，
 小/中 shape +1–5%、大 S 中性。原始输出 `src/fp16/fa_bwd_fp16_o65_ab.out.txt`、
 `..._o65_ncu_s{512,4096}.out.txt`；见 `docs/08` §5.59。
+
+## 21. F8（第一百六十一轮，正结果，默认）：fp16 定长默认切 Hopper（wgmma+TMA）
+
+F1（fp8，第一百三十二轮）的 dtype 泛化。此前 fp16 的 `ours` 口径仍是 `-arch=sm_90` 的
+`mma.sync`（O5/O5b 起 host 其实已有 wgmma+TMA 快路，但只在 `--hopper` 独立前缀下跑）；本轮把
+`harness/fa_bwd_run.py` 的 `HOPPER_DEFAULT_DTYPES` 扩到 fp16/bf16，使定长默认构建走
+`-gencode=compute_90a -DFA_WGMMA -DFA_TMA -lcuda`。**device 一行未改**。
+
+**数值（S=4096 causal，max_abs vs fp32 ref）**：`1.883/1.734/1.966e-3` **逐值不变**——wgmma 与
+mma 只差 fp32 累加次序（A/B `wg2b-vs-wg2` ~1e-5），被 fp16 舍入盖住。CI 73 case 全绿
+（fp16 gate worst `1.953e-3`，`--check docs/04` OK）。
+
+**性能（同 session，S=4096 causal MHA，event）**：**total 1.8245→1.1726ms（1.556×）**、
+main 1.5031→0.9640ms、preprocess 0.250→0.157ms；vs fp32 ref 无变化。相对纯反向 FA3
+（`0.3238ms/849TF`）时间比由 **5.6× 收窄到 3.6×**。host 在 S=4096 自动选 `wgmma2b(BN=128)`、
+S512/GQA 选 `wgmma2(BN=64)`、MLA（D=512）自动退回 mma。原始输出
+`src/fa_bwd_p161_hopper_default_ab.out.txt`；见 `docs/08` §5.75。

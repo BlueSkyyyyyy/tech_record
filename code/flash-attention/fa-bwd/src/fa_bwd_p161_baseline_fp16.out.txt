@@ -1,0 +1,30 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype=torch.float16
+shape                                  FA2.7.4             FA3          TE2.14  FA3/FA2
+(1, 1024, 40, 128) kv=8        0.1881/  228 0.1213/  354 0.1323/  325    1.55x
+(1, 1024, 32, 128) kv=4        0.1591/  216 0.0828/  415 0.1123/  306    1.92x
+(1, 1024, 64, 128) kv=4        0.2668/  258 0.1593/  431 0.1945/  353    1.67x
+(1, 1024, 64, 128) kv=1        0.2669/  257 0.1573/  437 0.2140/  321    1.70x
+(1, 512, 16, 128) kv=16        0.0436/   98 0.0262/  164 0.0321/  134    1.66x
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 256, 2, 512) kv=2             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 512, 4, 512) kv=4             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 1024, 2, 512) kv=2            nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 4096, 16, 128) kv=16       0.7280/  378 0.3238/  849 0.4441/  619    2.25x
+
+pure bwd VARLEN (packed [T,H,D] + cu_seqlens; flops=4*H*D*sum(L^2)), dtype=torch.float16
+lengths / H,kv / mask                  FA2.7.4             FA3          TE2.14  FA3/FA2
+MHA 不齐 [512, 1024, 2048].. H16/kv16 causal 0.3386/  135 0.1634/  279              NA    2.07x
+MHA 等长 [1024, 1024, 1024].. H16/kv16 causal 0.2545/  135 0.1481/  232              NA    1.72x
+GQA q32/kv8 [128, 256, 512].. H32/kv8 causal 0.6320/  145 0.3763/  243              NA    1.68x
+强倾斜 [2048, 512, 128].. H16/kv16 causal 0.3019/  122 0.1420/  259              NA    2.13x
+MHA 等长 full [1024, 1024, 1024].. H16/kv16 full 0.3449/  100 0.2002/  172              NA    1.72x
