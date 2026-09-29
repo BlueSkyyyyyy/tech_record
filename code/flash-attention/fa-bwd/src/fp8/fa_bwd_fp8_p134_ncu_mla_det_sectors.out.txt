@@ -1,0 +1,9 @@
+F4-b ncu: DET main kernel global store sectors, fp32 partial vs fp16+扇区化 partial
+(ncu --metrics l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum,lts__t_sectors_op_write.sum)
+<512, 64, 32, 0, 0, 0, 1, 1, 128, 2, 0, 0, 0>  op_st=0  lts_write=589792
+<512, 64, 32, 0, 0, 1, 1, 1, 128, 2, 0, 0, 0>  op_st=0  lts_write=618031
+<512, 64, 32, 0, 0, 1, 1, 1, 256, 4, 0, 0, 0>  op_st=0  lts_write=817
+<512, 64, 32, 0, 0, 1, 1, 1, 256, 4, 0, 1, 0>  op_st=2228224  lts_write=3466388
+<512, 64, 32, 0, 0, 1, 1, 1, 256, 4, 0, 1, 1>  op_st=1114112  lts_write=1761733
+<512, 64, 32, 0, 0, 1, 1, 1, 256, 4, 1, 0, 0>  op_st=0  lts_write=1585
+<512, 64, 32, 0, 0, 1, 1, 1, 256, 4, 1, 1, 0>  op_st=2228224  lts_write=3485570

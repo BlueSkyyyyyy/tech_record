@@ -710,7 +710,10 @@ __global__ void dkv_dq_reduce_kernel(const float* __restrict__ dk_part,
 //   `nblk_b = ceil(len_b/BM)`，并只对 `jg < len_b` 的行求和；输出按 packed `[T,Hkv,D]` 定位
 //   （全局 KV token = `qbase + jg`）。grid=(B*Hkv, maxlen)、block=HD。k 维（GQA 广播组）与
 //   mblk 的求和次序固定（hh 升序、m 升序）⇒ 与调度无关、两次跑逐位可复现。
-template <int HD, int BM = 64>
+// F4-b（第 134 轮）：把 F4 第一步的「fp16 partial + O62 写扇区化」从定长扩到变长——`P16=true`
+//   时 dK/dV partial 以 fp16 存储且用 16 列块内置换布局（与 `fp8_mma_body` 的 `DET_HALF` 写一致），
+//   按置换后的列索引读回（求和集合/次序不变，仍确定性；数值只差 fp16 舍入）。HD 无关。
+template <int HD, int BM = 64, bool P16 = false>
 __global__ void dkv_reduce_varlen_kernel(const float* __restrict__ dk_part,
                                          const float* __restrict__ dv_part,
                                          float* __restrict__ dk_acc, float* __restrict__ dv_acc,
@@ -734,12 +737,19 @@ __global__ void dkv_reduce_varlen_kernel(const float* __restrict__ dk_part,
     const size_t prow = (size_t)(b * H + h0 + hh) * nblk_max;
     for (int m = mblk0; m < nblk_b; ++m) {
       // P3-4o：`part_base` 非空时读 compact per-sequence 布局（与 `fp8_mma_body` 的写一致）。
-      const size_t base =
+      const size_t row =
           part_base
-              ? ((size_t)part_base[b] + ((size_t)(h0 + hh) * nblk_b + m) * len + jg) * HD + c
-              : ((prow + m) * (size_t)maxlen + jg) * HD + c;
-      sk += dk_part[base];
-      sv += dv_part[base];
+              ? ((size_t)part_base[b] + ((size_t)(h0 + hh) * nblk_b + m) * len + jg) * HD
+              : ((prow + m) * (size_t)maxlen + jg) * HD;
+      if constexpr (P16) {
+        // F4-b：fp16 partial + 16 列块内置换（`dkv_p16_perm`），按置换列读回。
+        const size_t bp = row + dkv_p16_perm(c);
+        sk += __half2float(reinterpret_cast<const __half*>(dk_part)[bp]);
+        sv += __half2float(reinterpret_cast<const __half*>(dv_part)[bp]);
+      } else {
+        sk += dk_part[row + c];
+        sv += dv_part[row + c];
+      }
     }
   }
   const size_t o = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c;
@@ -750,7 +760,8 @@ __global__ void dkv_reduce_varlen_kernel(const float* __restrict__ dk_part,
 // P3-4n：varlen 版的 dkv+dq 融合归约（同定长版：grid = dkv_blocks + dq_blocks，求和次序
 //   逐字沿用 `dkv_reduce_varlen_kernel` / `dq_reduce_kernel` ⇒ 与分开版逐位相同）。
 //   `dkv_blocks = B*Hkv*maxlen`（`jg>=len_b` 的块空转 return），`dq_blocks = T*H`。
-template <int HD, int BM = 64>
+// F4-b：varlen 融合归约的 P16 版（与 `dkv_reduce_varlen_kernel` 的 P16 读逐字一致）。
+template <int HD, int BM = 64, bool P16 = false>
 __global__ void dkv_dq_reduce_varlen_kernel(
     const float* __restrict__ dk_part, const float* __restrict__ dv_part,
     const float* __restrict__ dq_part, float* __restrict__ dk_acc, float* __restrict__ dv_acc,
@@ -775,12 +786,18 @@ __global__ void dkv_dq_reduce_varlen_kernel(
       const size_t prow = (size_t)(b * H + h0 + hh) * nblk_max;
       for (int m = mblk0; m < nblk_b; ++m) {
         // P3-4o：compact per-sequence 布局（与 `fp8_mma_body` / `dkv_reduce_varlen_kernel` 一致）。
-        const size_t base =
+        const size_t row =
             part_base
-                ? ((size_t)part_base[b] + ((size_t)(h0 + hh) * nblk_b + m) * len + jg) * HD + c
-                : ((prow + m) * (size_t)maxlen + jg) * HD + c;
-        sk += dk_part[base];
-        sv += dv_part[base];
+                ? ((size_t)part_base[b] + ((size_t)(h0 + hh) * nblk_b + m) * len + jg) * HD
+                : ((prow + m) * (size_t)maxlen + jg) * HD;
+        if constexpr (P16) {
+          const size_t bp = row + dkv_p16_perm(c);
+          sk += __half2float(reinterpret_cast<const __half*>(dk_part)[bp]);
+          sv += __half2float(reinterpret_cast<const __half*>(dv_part)[bp]);
+        } else {
+          sk += dk_part[row + c];
+          sv += dv_part[row + c];
+        }
       }
     }
     const size_t o = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c;
@@ -3723,7 +3740,8 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
 //   `fp8_mma_body` 早已同时支持 `KVPIPE && DET`，此前 host 未接线 ⇒ MLA DET 一直走非 kvpipe
 //   主 kernel，白扔 O51 的 1.78–1.86×）。数值与旧非 kvpipe DET 逐位相同（只改搬运）。
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
-          int NTH = THREADS, int NWAR = WN, bool WGMMA = false, bool KVPIPE = false>
+          int NTH = THREADS, int NWAR = WN, bool WGMMA = false, bool KVPIPE = false,
+          bool DET_HALF = false>
 static void launch_bwd_main_det(dim3 mg, const unsigned char* q8, const float* qs,
                                 const unsigned char* k8, const float* ks,
                                 const unsigned char* v8, const float* vs,
@@ -3738,9 +3756,11 @@ static void launch_bwd_main_det(dim3 mg, const unsigned char* q8, const float* q
   constexpr int kSmem = WGMMA ? Cfg::smem_bytes_wgmma
                               : (KVPIPE ? Cfg::smem_bytes_kvpipe : Cfg::smem_bytes);
   CUDA_CHECK(cudaFuncSetAttribute(
-      fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR, KVPIPE, true>,
+      fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR, KVPIPE, true,
+                            DET_HALF>,
       cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR, KVPIPE, true>
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR, KVPIPE, true,
+                        DET_HALF>
       <<<mg, NTH, kSmem>>>(q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
                            dv_acc, S, H, Hkv, scale, causal, ksplit, cu_seqlens, mt_b,
                            mt_m, dk_part, dv_part, nblk, dq_part, part_base);
@@ -4407,6 +4427,58 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
            "runs[1-2] bitwise dq/dk/dv=%.2e/%.2e/%.2e | DET-vs-atomic dq/dk/dv=%.2e/%.2e/%.2e\n",
            ks, ms_at, ms_dt, ms_at / ms_dt, mad3(dq1, dq2), mad3(dk1, dk2), mad3(dv1, dv2),
            mad3(dq1, aq), mad3(dk1, ak), mad3(dv1, av));
+    // ---- F4-b（第 134 轮）：把 F4 第一步的「fp16 partial + O62 写扇区化」从定长扩到 varlen。
+    //      同 binary、只把 partial 存储从 fp32 换 fp16（`DET_HALF`）并让二次归约走 `P16`
+    //      置换读（求和集合/次序不变）。两档 partial 应逐位可复现，数值只差 fp16 舍入。----
+    __half* d_dk_part_h = nullptr;
+    __half* d_dv_part_h = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_dk_part_h, part_elems * sizeof(__half)));
+    CUDA_CHECK(cudaMalloc(&d_dv_part_h, part_elems * sizeof(__half)));
+    auto run_dth_p = [&](int k, const int* p) {
+      dim3 g(nblk_max * k, H, B);
+      CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
+      if (k > 1) CUDA_CHECK(cudaMemset(d_dq_part, 0, dqpart_elems * 4));
+      launch_bwd_main_det<128, 64, 32, true, true, true, true, THREADS, WN, kWgmVarlen, false,
+                          true>(g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
+                                d_lse, d_dq, d_dk, d_dv, maxlen, H, Hkv, scale, (int)causal, k,
+                                reinterpret_cast<float*>(d_dk_part_h),
+                                reinterpret_cast<float*>(d_dv_part_h), nblk_max, d_dq_part, d_cu,
+                                nullptr, nullptr, p);
+      const int dkv_blocks = B * Hkv * maxlen;
+      const int dq_blocks = (k > 1) ? T * H : 0;
+      if (fuse_reduce) {
+        dkv_dq_reduce_varlen_kernel<128, 64, true><<<dkv_blocks + dq_blocks, 128>>>(
+            reinterpret_cast<const float*>(d_dk_part_h),
+            reinterpret_cast<const float*>(d_dv_part_h), (k > 1) ? d_dq_part : nullptr, d_dk,
+            d_dv, d_dq, d_cu, H, Hkv, nblk_max, maxlen, (int)causal, k, dkv_blocks, p);
+      } else {
+        dim3 rg(B * Hkv, maxlen);
+        dkv_reduce_varlen_kernel<128, 64, true><<<rg, 128>>>(
+            reinterpret_cast<const float*>(d_dk_part_h),
+            reinterpret_cast<const float*>(d_dv_part_h), d_dk, d_dv, d_cu, H, Hkv, nblk_max,
+            maxlen, (int)causal, p);
+        if (k > 1) {
+          dim3 dg(T, H);
+          dq_reduce_kernel<128><<<dg, 128>>>(d_dq_part, d_dq, T, H, k);
+        }
+      }
+    };
+    auto run_dth = [&](int k) { run_dth_p(k, pb); };
+    float ms_dth = 0.f;
+    time_fn3([&] { run_dth(ks); }, &ms_dth);
+    std::vector<float> hdk1(nkv), hdv1(nkv), hdk2(nkv), hdv2(nkv);
+    CUDA_CHECK(cudaMemcpy(hdk1.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hdv1.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+    run_dth(ks);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(hdk2.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hdv2.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+    printf("[F4 A/B] varlen ksplit=%d | DET-fp32 %.4f ms | DET-fp16(扇区化) %.4f ms (%.3fx) | "
+           "runs[1-2] bitwise dk/dv=%.2e/%.2e | fp16-vs-fp32 dk/dv=%.2e/%.2e\n",
+           ks, ms_dt, ms_dth, ms_dt / ms_dth, mad3(hdk1, hdk2), mad3(hdv1, hdv2),
+           mad3(hdk1, dk1), mad3(hdv1, dv1));
+    cudaFree(d_dk_part_h);
+    cudaFree(d_dv_part_h);
     // ---- P3-4n A/B：varlen 二次归约 分离 vs 融合（只测 reduce；partial 已由上面 run_dt 预置）。
     {
       auto only_sep = [&]() {
@@ -4616,6 +4688,56 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
            "%.2e/%.2e/%.2e\n",
            ks, ms_dt, ms_dt_kv, ms_dt / ms_dt_kv, mad3(dqk1, dqk2), mad3(dkk1, dkk2),
            mad3(dvk1, dvk2), mad3(dqk1, dq1), mad3(dkk1, dk1), mad3(dvk1, dv1));
+    // ---- F4-b（第 134 轮）：MLA（HD=512）varlen 的「fp16 partial + O62 扇区化」。
+    //      `dkv_p16_perm` 只在 16 列块内置换、且 GEMM3/4 的 warp n-tile `c0=wc*GN34`
+    //      （HD=512/8w：GN34=32）是 16 的倍数 ⇒ 全局列索引可直接套用，与定长/D=128 同一布局。----
+    __half* d_dk_part_h = nullptr;
+    __half* d_dv_part_h = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_dk_part_h, part_elems * sizeof(__half)));
+    CUDA_CHECK(cudaMalloc(&d_dv_part_h, part_elems * sizeof(__half)));
+    auto run_dth_p = [&](const int* p) {
+      CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+      if (ks > 1) CUDA_CHECK(cudaMemset(d_dq_part, 0, dqpart_elems * 4));
+      launch_bwd_main_det<512, 64, 32, false, true, true, true, 256, 4, false, false, true>(
+          g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
+          maxlen, H, Hkv, scale, (int)causal, ks, reinterpret_cast<float*>(d_dk_part_h),
+          reinterpret_cast<float*>(d_dv_part_h), nblk_max, d_dq_part, d_cu, nullptr, nullptr, p);
+      const int dkv_blocks = B * Hkv * maxlen;
+      const int dq_blocks = (ks > 1) ? T * H : 0;
+      if (fuse_reduce) {
+        dkv_dq_reduce_varlen_kernel<512, 64, true><<<dkv_blocks + dq_blocks, 512>>>(
+            reinterpret_cast<const float*>(d_dk_part_h),
+            reinterpret_cast<const float*>(d_dv_part_h), (ks > 1) ? d_dq_part : nullptr, d_dk,
+            d_dv, d_dq, d_cu, H, Hkv, nblk_max, maxlen, (int)causal, ks, dkv_blocks, p);
+      } else {
+        dim3 rg(B * Hkv, maxlen);
+        dkv_reduce_varlen_kernel<512, 64, true><<<rg, 512>>>(
+            reinterpret_cast<const float*>(d_dk_part_h),
+            reinterpret_cast<const float*>(d_dv_part_h), d_dk, d_dv, d_cu, H, Hkv, nblk_max,
+            maxlen, (int)causal, p);
+        if (ks > 1) {
+          dim3 dg(T, H);
+          dq_reduce_kernel<512><<<dg, 512>>>(d_dq_part, d_dq, T, H, ks);
+        }
+      }
+    };
+    float ms_dth = 0.f;
+    time_fn3([&] { run_dth_p(pb); }, &ms_dth);
+    std::vector<float> hdk1(nkv), hdv1(nkv), hdk2(nkv), hdv2(nkv);
+    CUDA_CHECK(cudaMemcpy(hdk1.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hdv1.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+    run_dth_p(pb);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(hdk2.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hdv2.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+    printf("[F4 A/B] MLA varlen ksplit=%d | DET-fp32 %.4f ms | DET-fp16(扇区化) %.4f ms (%.3fx) | "
+           "runs[1-2] bitwise dk/dv=%.2e/%.2e | fp16-vs-fp32 dk/dv=%.2e/%.2e\n",
+           ks, ms_dt, ms_dth, ms_dt / ms_dth, mad3(hdk1, hdk2), mad3(hdv1, hdv2),
+           mad3(hdk1, dk1), mad3(hdv1, dv1));
+    cudaFree(d_dk_part_h);
+    cudaFree(d_dv_part_h);
     // ---- P3-4o A/B：同 binary 只改 partial 布局（compact vs maxlen-strided）。
     {
       auto time_full = [&](const int* p, float* out_ms) {
@@ -5813,6 +5935,56 @@ int main(int argc, char** argv) {
            "%.2e/%.2e/%.2e\n",
            ks, t_dt, t_dt_kv, t_dt / t_dt_kv, mad2h(dqk1, dqk2), mad2h(dkk1, dkk2),
            mad2h(dvk1, dvk2), mad2h(dqk1, dq1), mad2h(dkk1, dk1), mad2h(dvk1, dv1));
+    // ---- F4-b（第 134 轮）：MLA（HD=512）定长的「fp16 partial + O62 扇区化」。
+    //      `dkv_reduce_kernel<512,64,true>` 已支持 P16；此处只把主 kernel 换 `DET_HALF`。----
+    __half* d_dk_part_h = nullptr;
+    __half* d_dv_part_h = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_dk_part_h, part_elems * sizeof(__half)));
+    CUDA_CHECK(cudaMalloc(&d_dv_part_h, part_elems * sizeof(__half)));
+    auto run_dth = [&](int k) {
+      dim3 g1((S + 63) / 64 * k, H, B);
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      if (k > 1) CUDA_CHECK(cudaMemset(d_dq_part, 0, dqpart_elems * 4));
+      launch_bwd_main_det<512, 64, 32, false, true, true, true, 256, 4, false, false, true>(
+          g1, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
+          d_dv_acc, S, H, Hkv, scale, (int)causal, k, reinterpret_cast<float*>(d_dk_part_h),
+          reinterpret_cast<float*>(d_dv_part_h), nblk_d, d_dq_part);
+      const int dkv_blocks = B * Hkv * S;
+      const int dq_blocks = (k > 1) ? B * S * H : 0;
+      if (fuse_reduce) {
+        dkv_dq_reduce_kernel<512, 64, true><<<dkv_blocks + dq_blocks, 512>>>(
+            reinterpret_cast<const float*>(d_dk_part_h),
+            reinterpret_cast<const float*>(d_dv_part_h), (k > 1) ? d_dq_part : nullptr, d_dk_acc,
+            d_dv_acc, d_dq_acc, S, H, Hkv, nblk_d, (int)causal, k, dkv_blocks);
+      } else {
+        dim3 rg(B * Hkv, S);
+        dkv_reduce_kernel<512, 64, true><<<rg, 512>>>(
+            reinterpret_cast<const float*>(d_dk_part_h),
+            reinterpret_cast<const float*>(d_dv_part_h), d_dk_acc, d_dv_acc, S, H, Hkv, nblk_d,
+            (int)causal);
+        if (k > 1) {
+          dim3 dg(B * S, H);
+          dq_reduce_kernel<512><<<dg, 512>>>(d_dq_part, d_dq_acc, S, H, k);
+        }
+      }
+    };
+    float t_dth = 0.f;
+    tm2h([&] { run_dth(ks); }, &t_dth);
+    std::vector<float> hdk1(nkv), hdv1(nkv), hdk2(nkv), hdv2(nkv);
+    CUDA_CHECK(cudaMemcpy(hdk1.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hdv1.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    run_dth(ks);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(hdk2.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hdv2.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    printf("[F4 A/B] MLA ksplit=%d | DET-fp32 %.4f ms | DET-fp16(扇区化) %.4f ms (%.3fx) | "
+           "runs[1-2] bitwise dk/dv=%.2e/%.2e | fp16-vs-fp32 dk/dv=%.2e/%.2e\n",
+           ks, t_dt, t_dth, t_dt / t_dth, mad2h(hdk1, hdk2), mad2h(hdv1, hdv2),
+           mad2h(hdk1, dk1), mad2h(hdv1, dv1));
+    cudaFree(d_dk_part_h);
+    cudaFree(d_dv_part_h);
     cudaFree(d_dk_part);
     cudaFree(d_dv_part);
     if (d_dq_part) cudaFree(d_dq_part);
