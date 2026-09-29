@@ -2711,6 +2711,13 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       DET-fp32→fp16 端到端 **1.06–1.11×（大 varlen 1.20×）**、`runs[1-2]` 逐位=0、`fp16-vs-fp32`
       ~1e-3、`ours-vs-ref` 不变；ncu store 扇区在 MLA（2.228M→1.114M）与 varlen（1.180M→0.590M）
       **精确减半**。**默认路径一行未改、`--ci` 全绿**。详见 `docs/03` §69、`docs/08` §5.49。
+      → **第三步已完成（第一百三十七轮 F4-c）**：fp16 DET partial 的 **归约读取向量化**——
+      `dkv_det_store_h4` 的 8B 单元（4 个连续物理列）用 `uint2` 一次读回（每 block 4 行、
+      `HD/4` 列组），**求和集合/次序逐字保持 ⇒ 逐位不变**。**reduce 421→370µs（1.14×）、
+      DRAM 78%→92.5%**（追平 fp32 版 91.2%），DET 端到端 S4096 2.180→2.147ms（同 session 交替）、
+      DET/atomic 0.899→0.908×；varlen/MLA 同步受益。四个归约 kernel + 7 处 host；
+      默认路径一行未改、`--ci` 全绿。详见 `docs/03` §72、`docs/08` §5.52。
+      **F4 默认路径的 L2 `red` 仍被本卡寄存器/smem 硬墙锁定（见「阻塞」）**。
 - [x] **F5** preprocess 继续提速
       → **已完成（第一百三十六轮）**：D=128 定长 causal 的 LSE（`lse_mma_kernel_bal_tma`）ncu 是
       **纯 issue-bound**（S=4096 Duration 201µs / 141.0M 指令 / Issue 73.6% / Ipc 3.09）。SASS
@@ -2728,7 +2735,21 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百三十六轮）**：**F5——fp8 LSE 的「tile 内两趟 softmax」+ mbarrier 相位去 local**
+> **最新（第一百三十七轮）**：**F4-c——fp16 DET partial 归约的读取向量化**（正结果，opt-in
+> `--det`）。F4/F4-b 把 `--det` 的 dK/dV partial 降到 fp16 + 写扇区化后，reduce 端仍逐列 2B
+> 标量读；ncu 实测 fp16 reduce **DRAM 仅 ~78%**（fp32 版 91.2%）——减半的字节被窄读低效率吃掉。
+> 改法：`dkv_det_store_h4` 的 8B 单元（4 个连续物理列）在 reduce 端用 **`uint2` 一次读回**
+> （每 block 4 行、`HD/4` 列组），**每输出列的求和集合/次序逐字保持 ⇒ 逐位不变**。四个归约
+> kernel 的 `P16` 分支 + 7 处 host；默认路径一行未改。
+> **reduce 421→370µs（1.14×）、DRAM 78%→92.5%**；DET 端到端 S4096 **2.180→2.147ms（同 session
+> 交替）**、DET/atomic **0.899→0.908×**；varlen fp32→fp16 比 1.057→**1.088×**、MLA 1.088/1.107×。
+> 三处 `runs[1-2] bitwise=0`、`fp16-vs-fp32` 与 F4/F4-b 逐位相同、`ours-vs-ref` 不变；
+> `--no-run --ci` 三 dtype 全绿、`--check docs/04` OK 194 行。详见「当前进度 第一百三十七轮」、
+> `docs/03` §72、`docs/08` §5.52；原始输出 `src/fp8/fa_bwd_fp8_p137_*`。
+> **下一步候选**：① **F4 默认路径的 L2 `red`（114.5M 扇区）仍是唯一真杠杆**，受本卡寄存器/smem
+> 双硬约束锁定（见「阻塞」）；② main 仍占端到端 ~86%；③ DET 仅 opt-in，默认路径本次未动。
+>
+> **（第一百三十六轮）**：**F5——fp8 LSE 的「tile 内两趟 softmax」+ mbarrier 相位去 local**
 > （正结果，默认化）。『fp8 专项冲刺』第五步：main 被 F3-a 判为「3 CTA/SM 的 L2 流量锁死」
 > 后，转 preprocess。ncu 定位 D=128 定长 causal 的 LSE（`lse_mma_kernel_bal_tma`）是**纯
 > issue-bound**（S=4096 Duration 201µs / 141.0M 指令 / Issue 73.6% / Ipc 3.09）；SASS 直方图显示
@@ -5232,6 +5253,33 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   - **下一步候选**：① main 仍是 81% 的墙（F4 默认路径 L2 `red` / 改工作划分，见「阻塞」）；
     ② quant/delta/convert 已近 DRAM 带宽，F5 收口；③ F4 DET 路径可再压 partial 字节。
 
+- 2026-09-29（第一百三十七轮）：**F4-c 完成（fp16 DET partial 归约读取向量化；正结果，
+  opt-in `--det`）**——落实第 136 轮候选 ③ / §71.6。
+  - 动机：F4/F4-b 把 `--det` 的 dK/dV partial 降到 fp16 + 写扇区化，但 reduce 端仍**逐列 2B
+    标量读**（`dkv_p16_perm` 反查）。ncu 实测 fp16 reduce 的 **DRAM 只有 ~78%**（fp32 版 91.2%）
+    ——reduce 是纯带宽 bound，**降精度减半的字节被窄读的低效率吃掉一半**。
+  - **改动（单/两文件 device 逐字一致，`sync_onefile_device.py` `identical: True`）**：新增
+    `h4_to_f4`；四个归约 kernel 的 `P16` 分支改成「每 block `RW=4` 行、每行 `HD/4` 个列组，
+    每线程一次 `uint2` 读回 `dkv_det_store_h4` 写的 8B 单元」。物理 4 列 ↔ 逻辑列
+    `{16·blk+2L, +1, 16·blk+8+2L, +1}`，**每输出列的求和集合/次序逐字保持 ⇒ 逐位不变**。
+    独立版 grid.y `S→ceil(S/4)`、融合版 `dkv_blocks=B·Hkv·ceil(S/4)`（varlen 用 maxlen）；共 7 处
+    host。`P16=false` 与 `dq` 分支、以及**默认（非 `--det`）路径一行未改**。
+  - **数值**：三处 `runs[1-2] bitwise dk/dv=0`；`fp16-vs-fp32` S4096 `9.66e-4/1.76e-3`、
+    MLA S1024H2 `9.07e-4/1.79e-3`、varlen D128 `1.01e-3/1.83e-3`——**与 F4/F4-b 逐位相同**；
+    `ours-vs-ref` 逐位不变（S4096 2.635/2.644/3.216e-1）；单/两文件逐指标一致。
+  - **性能**（同 session 同 binary 交替 A/B）：DET-fp16 端到端 S4096 **2.180→2.147ms（1.015×）**、
+    DET/atomic **0.899→0.908×**；**reduce 421→370µs（1.14×）**。varlen D128 的 fp32→fp16 比
+    由 1.057×→**1.088×**；MLA S1024H2 1.088× / S512H4 1.107×。
+  - **ncu**：`dkv_reduce_kernel<128,64,1>` grid `(16,1024)×128`、Duration **370µs**、
+    **DRAM 92.5%**（F4-b 78%）、L1TEX 11.4% ⇒ fp16 reduce 的 HBM 效率追平 fp32 版。
+  - **回归**：`--no-run --ci` 三 dtype gate 全绿（fp16 7.812e-3 / bf16 7.812e-3 / fp8 1.335e-5）、
+    `--check docs/04` OK 194 行。**F4 默认路径的 L2 `red`（114.5M 扇区）仍被本卡寄存器/smem
+    硬墙锁定，见「阻塞」。**
+  - 原始输出 `src/fp8/fa_bwd_fp8_p137_f4c_ab.out.txt`、`..._p137_ncu_reduce16.out.txt`、
+    `..._p137_f4c_varlen_mla.out.txt`；文档 `docs/03` §72、`docs/08` §5.52。
+  - **下一步候选**：① F4 默认路径 L2 `red`（唯一真杠杆，受本卡寄存器/smem 硬墙锁定）；
+    ② main 仍占端到端 ~86%；③ DET 仅 opt-in，默认路径本次未动。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
@@ -5319,6 +5367,7 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
    （相邻两列组拼 8B）+ `dkv_p16_perm`（16 列块内置换，reduce 端置换读回），store 扇区精确减半
    （35.65M→18.35M），DET 主 kernel 写侧 0.84–0.87×→**1.10–1.17×**、端到端 `--det` 首次全面
    快过非确定 atomic（fp16 1.03–1.19×、bf16 1.02–1.19×），数值逐位不变。见 `docs/01` §18、
-   `docs/01b` §6au。**剩余：fp8 的 DET partial（`fp8_mma_body` 的两个写点，当前 fp32）降精度
-   + 扇区化。**
+    `docs/01b` §6au。**fp8 的 DET partial 降精度+扇区化已完成（第 133/134 轮 F4/F4-b：dK/dV
+    fp32→fp16 + O62 扇区化，覆盖定长/MLA/varlen）；归约读取的向量化也已完成（第 137 轮 F4-c：
+    reduce 421→370µs、DRAM 78%→92.5%）。**
 - fp8：对比「只量化 dO」vs「dO 和 P 都量化」的精度/性能权衡。
