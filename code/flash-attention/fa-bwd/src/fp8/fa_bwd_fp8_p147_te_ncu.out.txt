@@ -1,0 +1,14 @@
+### O67: TE FP8 bwd (cudnn flash_bprop_wgmma_f8, 64x64x128, 384thr, grid=132) ncu ###
+==PROF== Profiling "cudnn_generated_fort_native_sdpa_sm90_flash_bprop_wgmma_f8_knob_26_64x64x128_1x4x1_cga1x1x1_kernel0_0": 0%....50%....100% - 9 passes
+  cudnn_generated_fort_native_sdpa_sm90_flash_bprop_wgmma_f8_knob_26_64x64x128_1x4x1_cga1x1x1_kernel0_0 (132, 1, 1)x(384, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                    us       260.74
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                     3168
+    lts__t_sectors_op_read.sum                            sector     10202429
+    lts__t_sectors_op_red.sum                             sector     25957088
+    lts__t_sectors_op_write.sum                           sector       789522
+    sm__throughput.avg.pct_of_peak_sustained_elapsed           %        45.03
+--- TE SASS atomic/reduce ops (--page source) ---
+      4 UTMALDG
+      4 REDG.4D.ADD
+      3 REDG.E.MIN.STRONG.GPU
+      3 REDG.E.MAX.S32.STRONG.GPU

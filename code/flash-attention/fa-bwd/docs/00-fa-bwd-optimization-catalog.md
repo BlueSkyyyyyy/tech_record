@@ -241,9 +241,18 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
      delta（`D=rowsum(dO∘O)`）只依赖 dO/O、与 dO 的 rowwise 量化同域同几何。新增
      `quant_delta_row_warp`（量化 dO 时用寄存器值顺便算 delta）+ `quantize_zero_delta_warp_kernel`；
      **delta 必须耦合进 dO 量化任务**（同 launch 内无跨 warp 同步，独立任务读 `do8` 会竞争）。
-     **数值逐位不变**（`max_abs=0`）；**S512 1.047×、S1024H32 1.025×、MLA 1.021×、varlen 1.036×、
-     S4096 1.003×**（ncu 融合 kernel DRAM 76.3%/L2 84.7%）。**fp8 非 main 固定开销融合收口**。
-     见 `docs/03` §79、`docs/08` §5.60。
+      **数值逐位不变**（`max_abs=0`）；**S512 1.047×、S1024H32 1.025×、MLA 1.021×、varlen 1.036×、
+      S4096 1.003×**（ncu 融合 kernel DRAM 76.3%/L2 84.7%）。**fp8 非 main 固定开销融合收口**。
+      见 `docs/03` §79、`docs/08` §5.60。
+    → **fp8 dK/dV 归约加宽到 `red.v4.f32` = 负结果 + ncu 重测 TE 定位真差距（O67，第一百四十七轮）**：
+      `red_add4`（16B，`FA_R4`，默认 0）SASS 确为 `F32x4`，但 **ncu 的 red 请求/扇区一字不变**
+      （`l1tex 9.54M`/`lts 114.52M`）、main 0.992–0.997× ⇒ 归约加宽无效（同 O7c/fp16）。同轮
+      重测 TE fp8 反向（`..._flash_bprop_wgmma_f8_..._64x64x128`，grid=132、384 线程、**BM=64
+      与 ours 相同**）S4096：`red 25.96M`、read 10.2M、write 0.79M、**L2 总量 ~36.9M（ours 的
+      1/4.17）**、260.7µs（ours 1/6）、同为 128-bit red（`REDG.4D.ADD`）⇒ **同 BM 下 red 仍可压
+      4.4×** ⇒ 真差距 = **工作划分 / tile 调度**（persistent 132 CTA vs ksplit=8→8192），**不是
+      归约宽度、也不只是放大 BM**（修正第一百三十九轮）⇒ **新立 F7 = dK/dV-over-KV 单一 owner +
+      TMA store-reduce / persistent 调度**。见 `docs/03` §80、`docs/08` §5.61。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 

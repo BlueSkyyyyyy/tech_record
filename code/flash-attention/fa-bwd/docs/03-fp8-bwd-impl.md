@@ -7319,3 +7319,82 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 原始输出 `src/fp8/fa_bwd_fp8_o66_{main_s512,main_s1024_h32,main_s4096,main_mla_s1024h2,onefile_s512,
 varlen_b1_t512,varlen_b1_t512_dfuse0,varlen_b3_d512}.out.txt`、`..._o66_ncu_quant_s1024h32.out.txt`、
 `..._o66_ci_{fixed,full}.out.txt`。
+
+## 80. O67（第一百四十七轮）：dK/dV 归约 float4（`FA_R4`）——负结果；并用 ncu 重测 TE 定位真差距
+
+> 落实 ROADMAP「fp8 专项冲刺」/「阻塞」里默认 fp8 main 的唯一真杠杆 **L2 `red`**。默认
+> `kvtma` main（S4096 causal）ncu 复核：**`lts__t_sectors_op_red = 114,524,160`**（占 L2 总扇区
+> 154M 的 74%）、read 30.9M、write 8.4M、`l1tex__t_requests_..._op_red = 9,543,680`（L1→L2
+> 展开 ~12×）。本轮做了两件事：① 把 `red_add2`（8B `red.global.add.v2.f32`）提升到
+> **`red_add4`（16B `.v4.f32`）**，期待请求/扇区再减半；② 用 `harness/te_fp8_ncu.py` 重测
+> TE 的 fp8 反向并看 SASS，把「差距在哪」钉死。
+
+### 80.1 O67 改动（`FA_R4`，默认 0）
+
+`red_add2`（O4c）已把「相邻两列」打包成一次 `atomicAdd(float2*)`。本轮新增 `red_add4` 与
+编译开关 `FA_R4`（默认 0）：fp8 `mma.m16n8k32` 的累加器里一个 quad（`lane&3`=0..3）的
+`c2=(lane&3)*2` 恰是 **同 row 的连续 8 列**，用 `__shfl_down_sync(...,1)` 把 quad 的 float2
+拼成两个 float4（列 0-3 由 lane0 写、列 4-7 由 lane2 写），`red.global.add.v4.f32` 的请求数
+相对 float2 再减半。`epi_dv`/`epi_dk` 的非 DET/BULKRED 分支同步改；shfl 放在 `jg<len` guard
+之外（全 warp 参与），仅偶 lane 落 st（地址 `c2∈{0,4}` 天然 16B 对齐）。单/两文件 device 同源
+（`sync_onefile_device.py` 核对 `identical: True`）。默认 0 ⇒ 旗舰路径逐位/逐字节不变。
+
+### 80.2 实测：负结果（同 shape 交替 A/B，iters=100，event，main-only ms）
+
+| shape | `FA_R4=0` | `FA_R4=1` | 比 |
+|---|---|---|---|
+| S512 H16 | 0.0548 | 0.0550 | 0.996× |
+| S1024 H32 | 0.2580 | 0.2588 | 0.997× |
+| S1024 H32 GQA kv4 | 0.2493 | 0.2514 | 0.992× |
+| S4096 H16 | 1.5615 | 1.5694 | 0.995× |
+
+SASS 确认 `FA_R4=1` 确实生成了 `REDG.E.ADD.F32x4`（`kvtma` kernel：base 320×`F32x2` →
+R4 256×`F32x2`+64×`F32x4`）。**但 ncu 的 red 计数一字不变**：base 与 R4 都是
+`l1tex requests 9,543,680`、`lts requests/sectors 114,524,160`、read 30.9M。即
+**把请求从 v2 提到 v4 并未减少 L2 侧的 red 请求/扇区数**（硬件对 red 的扇区计数不随
+「同 warp 内合并列」而变），所以 main 持平偏负（-0.4~-0.8%）。与 O7c 在 fp16 上的结论一致
+（`docs/01` §14q），本轮把「fp8 也如此」补齐。数值 vs ref 与历史逐位一致
+（S4096 `2.635/2.644/3.216e-1`），CI 不受影响（默认关）。
+
+### 80.3 TE ncu/SASS 重测：真差距是**工作划分**，不是归约宽度
+
+TE（`cudnn_generated_..._flash_bprop_wgmma_f8_knob_26_64x64x128_1x4x1_cga1x1x1`，
+grid=132、384 线程、tile **64×64×128**，即 **BM=64 与 ours 相同**）S4096 causal：
+
+| 指标 | TE | ours（默认 `kvtma`） | 比 |
+|---|---|---|---|
+| Duration | **260.7 µs** | 1560 µs | 5.98× |
+| `lts__t_sectors_op_red` | **25,957,088** | 114,524,160 | **4.41×** |
+| `lts__t_sectors_op_read` | 10,202,429 | 30,934,323 | 3.03× |
+| `lts__t_sectors_op_write` | 789,522 | 8,401,388 | 10.6× |
+| L2 总量（red+read+write） | **~36.9M** | ~153.9M | **4.17×** |
+| `sm__throughput` | 45.0% | 48.2% | — |
+
+TE 的 SASS 里 dK/dV 归约是 **`REDG.4D.ADD`**（128-bit red，与我们的 `F32x4` 同级），但红量
+只有 ours 的 **4.4×↓**、L2 总量 4.2×↓。**关键**：TE 的 `BM=64` 与 ours 完全相同，却把 red 降
+到 1/4 ⇒ 差距**不在「每一笔归约多宽」**（O67 已证加宽无效），而在**「每个 KV 元素被多少个
+CTA 贡献」= 工作划分 / tile 调度**：TE grid 只有 **132**（1 CTA/SM、persistent），ours 默认
+grid 8192（ksplit=8）。这**修正/补充**了第一百三十九轮把 red 归因为「只能靠放大 BM（撞寄存器
+墙）」的结论——**同 BM 下仍有 ~4× 的 red 可压**，路径是 **dK/dV-over-KV（每个 KV 元素单一
+owner）+ TMA store-reduce / persistent 调度**，而非放大 BM。O42 的 `cp.reduce.async.bulk`
+失败是因为**没换工作划分**（归约次数没降、只多了 staging）。
+
+### 80.4 结论 / 下一步
+
+- O67：**fp8 dK/dV 归约加宽到 v4 = 负结果**（red 计数不变、main -0.4~-0.8%）。`FA_R4` 保留
+  为 opt-in A/B 工具（默认 0）。
+- **新定位（F7）**：默认 fp8 main 的 L2 `red` 真差距是**工作划分**——TE 在同 BM=64 下 red 仅
+  1/4.4×、L2 总量 1/4.2×、时间 1/6×。下一杠杆 = **dK/dV-over-KV 单一 owner 的 persistent
+  调度 + TMA store-reduce**（对标 TE 的 `REDG.4D.ADD` + 132 CTA），工程量大但方向已被 ncu 钉死。
+  见 ROADMAP「阻塞」更新。
+
+```bash
+# 同 binary A/B（R4）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda [-DFA_R4=1]" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=.../b1_s4096_h16_d128_causal_fp8 --iters=100
+# TE 侧 ncu / SASS
+python3 harness/te_fp8_ncu.py "1 4096 16 128 causal"   # 配合 ncu --kernel-name regex:flash_bprop
+```
+
+原始输出 `src/fp8/fa_bwd_fp8_p147_r4_ab.out.txt`、`..._p147_ncu_red.out.txt`、
+`..._p147_te_ncu.out.txt`。
