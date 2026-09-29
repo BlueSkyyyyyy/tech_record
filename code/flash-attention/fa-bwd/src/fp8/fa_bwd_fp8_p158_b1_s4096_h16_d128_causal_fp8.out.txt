@@ -1,0 +1,49 @@
+=== F7：fp8 mma KV-owner dK/dV 原型（base/pipe/persistent/**dynamic-wq**/**wgmma** A/B） ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+grid = (128, 16); kvowner smem = 70144 B (68.5 KB); pipe smem = 105984 B (103.5 KB); wgmma smem = 74752 B (73.0 KB); lse smem = 18944 B
+[F7 persist] SM=132  total_tiles=2048  pgrid=396（base 栅格 = 2048 CTA）
+
+[对拍] ours(KV-owner mma base) vs fp32 ref:
+  dk  max_abs=2.6427e-01  max_rel=8.5413e+01
+  dv  max_abs=3.2161e-01  max_rel=4.2332e+01
+[对拍] ours(KV-owner mma **pipe**) vs fp32 ref:
+  dk  max_abs=2.6427e-01  max_rel=8.5413e+01
+  dv  max_abs=3.2161e-01  max_rel=4.2332e+01
+[对拍] pipe vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅搬运时序）
+[对拍] ours(KV-owner mma **persistent**) vs fp32 ref:
+  dk  max_abs=2.6427e-01  max_rel=8.5413e+01
+  dv  max_abs=3.2161e-01  max_rel=4.2332e+01
+[对拍] persistent vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[对拍] ours(KV-owner mma **dynamic wq**) vs fp32 ref:
+  dk  max_abs=2.6427e-01  max_rel=8.5413e+01
+  dv  max_abs=3.2161e-01  max_rel=4.2332e+01
+[对拍] dynamic vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[对拍] ours(KV-owner mma **wgmma**) vs fp32 ref:
+  dk  max_abs=2.6437e-01  max_rel=8.5368e+01
+  dv  max_abs=3.2157e-01  max_rel=4.2386e+01
+[对拍] wgmma vs base: dk max_abs=1.4997e-01  dv max_abs=2.5755e-02（同口径，应≈0）
+[对拍] ours(KV-owner mma **wgmma+Q/dO-TMA**) vs fp32 ref:
+  dk  max_abs=2.6437e-01  max_rel=8.5368e+01
+  dv  max_abs=3.2157e-01  max_rel=4.2386e+01
+[对拍] wgmma+TMA vs wgmma: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅搬运通路）
+[对拍] vs ours(Q-owner atomic) dk max_abs=1.5000e-01  dv max_abs=2.5735e-02
+[对拍] ref-vs-TE dk max_abs=3.6857e-01  dv max_abs=6.6881e-01 | ours-vs-TE dk=5.3237e-01 dv=6.8069e-01
+[对拍] ours(Q-owner **dQ-only** pass) vs fp32 ref: dq max_abs=2.6355e-01 max_rel=1.3964e+02
+[对拍] 同 binary 三梯度基线(kvtma, DQONLY=0): dq=2.6355e-01 dk=2.6437e-01 dv=3.2157e-01
+[对拍] dQ-only vs 三梯度基线 dq: max_abs=0.0000e+00（应≈0，dQ 路径逐字一致）
+
+[计时] main(dK/dV) base = 1.4129 ms (72.96 TF) | **pipe** = 1.4688 ms (70.18 TF) | A/B = 0.962×
+[计时] main(dK/dV) **persistent**(pgrid=396) = 2.0043 ms (51.43 TF) | persist/base = 0.705×
+[计时] main(dK/dV) **dynamic wq**(pgrid=396) = 1.3932 ms (73.99 TF) | dyn/base = 1.014× | dyn/persist = 1.439×
+[计时] preprocess = 1.3366 ms | total base = 2.7495 | total pipe = 2.8053 | total persist = 3.3409 | total dyn = 2.7298
+[计时] 说明：base/pipe/persist/dyn **仅 dK/dV**（2 GEMM）而 wgmma 档为**三梯度**（dK/dV/dQ，3 GEMM）；
+[计时]   `flops` 全按 3 GEMM 口径 ⇒ **base 档 TF 被高估 1.5×**，同档内 A/B 比值仍有效。
+[计时]   与 FP8 峰值 1978.8 TF 的占比 = 3.687% (base) / 3.547% (pipe) / 2.599% (persist) / 3.739% (dyn)
+[计时] main(dK/dV) **wgmma**(SW128+GEMM1/2 async) = 1.3889 ms (74.21 TF) | wg/base = 1.017× | wg/pipe = 1.057× | wg/dyn = 1.003×
+[计时] total wgmma = 2.7255 ms | 峰值占比 = 3.750%
+[计时] main(dK/dV/dQ 三梯度) **wgmma+Q/dO-TMA** = 1.1206 ms (91.99 TF) | tma/wg = 1.239× | tma/base = 1.261×
+[计时] total wgmma+TMA = 2.4572 ms | 峰值占比 = 4.649%
+[计时] Q-owner **dQ-only** pass = 0.9230 ms | 同 binary 三梯度基线(kvtma) = 1.9515 ms
+[计时] F7 option(a) 两 kernel = KV-owner dK/dV 1.1206 + dQ-only 0.9230 = 2.0435 ms | vs 单 kernel 三梯度 0.955×
+[计时]   注：KV-owner 档须以 -DFA_KV_DQ=0 构建方为**纯 dK/dV**（当前 FA_KV_DQ=0）。

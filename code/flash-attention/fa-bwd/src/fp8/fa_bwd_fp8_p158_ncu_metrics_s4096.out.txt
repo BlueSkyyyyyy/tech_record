@@ -1,0 +1,37 @@
+### ncu metrics (S4096 H16, same binary fa_bwd_fp8_kvowner_mma.out)
+### 口径: dqonly=Q-owner DQONLY=true(ksplit=1); main3=生产默认 kvtma 三梯度; wgtma=KV-owner dK/dV-only TMA
+
+=== --only=dqonly ===
+    Metric Name                                        Metric Unit Metric Value
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %         1.73
+    gpu__time_duration.sum                                      us       933.73
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum         sector            0
+    lts__t_sectors_op_read.sum                              sector     18180553
+    lts__t_sectors_op_red.sum                               sector            0
+    lts__t_sectors_op_write.sum                             sector      2444392
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %         6.79
+    sm__throughput.avg.pct_of_peak_sustained_elapsed             %        36.98
+
+=== --only=main3 ===
+    Metric Name                                        Metric Unit Metric Value
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %         3.30
+    gpu__time_duration.sum                                      ms         1.99
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum         sector     69206016
+    lts__t_sectors_op_read.sum                              sector     24224699
+    lts__t_sectors_op_red.sum                               sector    103809024
+    lts__t_sectors_op_write.sum                             sector      6660354
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        54.95
+    sm__throughput.avg.pct_of_peak_sustained_elapsed             %        36.64
+
+=== --only=wgtma ===
+
+=== --only=wgtma (KV-owner dK/dV TMA) ===
+    Metric Name                                        Metric Unit Metric Value
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %         2.27
+    gpu__time_duration.sum                                      ms         1.12
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum         sector            0
+    lts__t_sectors_op_read.sum                              sector     52301881
+    lts__t_sectors_op_red.sum                               sector            0
+    lts__t_sectors_op_write.sum                             sector     12434761
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        18.77
+    sm__throughput.avg.pct_of_peak_sustained_elapsed             %        43.94

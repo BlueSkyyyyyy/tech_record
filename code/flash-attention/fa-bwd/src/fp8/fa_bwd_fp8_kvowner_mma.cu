@@ -1711,6 +1711,7 @@ int main(int argc, char** argv) {
   bool causal = true;
   int iters = 50;
   int pgrid = 0;  // persistent grid；0 = 自动（SM 数 × 3）
+  std::string only;  // ncu 用：只跑一个 launch（dqonly / main3 / wgtma），其余跳过
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
@@ -1718,6 +1719,7 @@ int main(int argc, char** argv) {
     else if (a == "--causal") causal = true;
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--pgrid=", 0) == 0) pgrid = atoi(a.c_str() + 8);
+    else if (a.rfind("--only=", 0) == 0) only = a.substr(7);
     else if (!a.empty() && a[0] != '-') dir = a;
   }
 
@@ -1897,10 +1899,58 @@ int main(int argc, char** argv) {
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, d_dq, S, H,
         scale, (int)causal, qmap_kv, dmap_kv);
   };
+  // ---- F7 第十一步：option (a)「两 kernel」——KV-owner 出 dK/dV（red=0）＋ Q-owner dQ-only pass。
+  //   复用生产 `fa_bwd_fp8_mma_kvtma_kernel`（Q/K/V/dO 全 4D-TMA）的 `DQONLY=true` 实例：
+  //   保留 GEMM1/2/5 + dS2 fold，跳过 Ap/dS3 fold + GEMM3/4(dV/dK) + epilogue；dQ 在 `kRegDq`
+  //   下寄存器 owned、DQONLY 用 **plain store** 写出 ⇒ 无跨 CTA `red`。ksplit=1、Q-owner 栅格。
+  CUtensorMap kmap_dq = make_kvowner_qd_map(d_k8, Hkv, S, D, B, BN);
+  CUtensorMap vmap_dq = make_kvowner_qd_map(d_v8, Hkv, S, D, B, BN);
+  constexpr int kDqSmem = Fp8Cfg<HD, BM, BN>::smem_bytes_wgmma_kvtma;
+  CUDA_CHECK(cudaFuncSetAttribute(
+      fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, true, true, true, true, false, false, true>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kDqSmem));
+  CUDA_CHECK(cudaFuncSetAttribute(
+      fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, true, true, true, true, false, false, false>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize, kDqSmem));
+  const dim3 dq_grid((S + BM - 1) / BM, H, B);
+  auto launch_dqonly = [&]() {
+    fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, true, true, true, true, false, false, true>
+        <<<dq_grid, THREADS, kDqSmem>>>(
+            qmap_kv, dmap_kv, kmap_dq, vmap_dq, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
+            d_delta, d_lse, d_dq, d_dk, d_dv, S, H, Hkv, scale, (int)causal, 1, nullptr, nullptr,
+            nullptr, 0, nullptr, nullptr);
+  };
+  // 同 binary 的三梯度基线（生产默认 kvtma，DQONLY=false，含 dK/dV 的跨 CTA red）。
+  auto launch_main3 = [&]() {
+    fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, true, true, true, true, false, false, false>
+        <<<dq_grid, THREADS, kDqSmem>>>(
+            qmap_kv, dmap_kv, kmap_dq, vmap_dq, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
+            d_delta, d_lse, d_dq, d_dk, d_dv, S, H, Hkv, scale, (int)causal, 1, nullptr, nullptr,
+            nullptr, 0, nullptr, nullptr);
+  };
 #endif
   auto run = [&]() { preprocess(); launch_base(); };
   run();
   CUDA_CHECK(cudaDeviceSynchronize());
+
+  // ncu 专用：只跑一个 launch（预热 1 + iters 次），便于按 grid/kernel 定位。
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  if (!only.empty()) {
+    if (only == "dqonly") CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
+    else { CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4)); CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4)); CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4)); }
+    auto fn = [&]() {
+      if (only == "dqonly") launch_dqonly();
+      else if (only == "main3") launch_main3();
+      else if (only == "wgtma") launch_wgtma();
+    };
+    fn();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    for (int i = 0; i < iters; ++i) fn();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    printf("[only=%s] done (iters=%d)\n", only.c_str(), iters);
+    return 0;
+  }
+#endif
 
   std::vector<float> h_dk(nkv), h_dv(nkv), p_dk(nkv), p_dv(nkv);
   CUDA_CHECK(cudaMemcpy(h_dk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
@@ -2035,6 +2085,41 @@ int main(int argc, char** argv) {
            tv.max_abs);
   }
 
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  // F7 第十一步：Q-owner dQ-only pass 与同 binary 三梯度基线（kvtma）。
+  {
+    std::vector<float> dq_dq(nq), m3_dq(nq), m3_dk(nkv), m3_dv(nkv);
+    CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
+    CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+    CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+    launch_dqonly();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(dq_dq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+    if (file_exists(dir + "/ref_dq.npy")) {
+      DiffStat s = diff_stat(dq_dq, rdq.data);
+      printf("[对拍] ours(Q-owner **dQ-only** pass) vs fp32 ref: dq max_abs=%.4e max_rel=%.4e\n",
+             s.max_abs, s.max_rel);
+    }
+    CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
+    CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+    CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+    launch_main3();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(m3_dq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(m3_dk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(m3_dv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+    printf("[对拍] 同 binary 三梯度基线(kvtma, DQONLY=0):");
+    if (file_exists(dir + "/ref_dq.npy")) {
+      DiffStat s = diff_stat(m3_dq, rdq.data);
+      printf(" dq=%.4e", s.max_abs);
+    }
+    printf(" dk=%.4e dv=%.4e\n", diff_stat(m3_dk, rdk.data).max_abs,
+           diff_stat(m3_dv, rdv.data).max_abs);
+    printf("[对拍] dQ-only vs 三梯度基线 dq: max_abs=%.4e（应≈0，dQ 路径逐字一致）\n",
+           diff_stat(dq_dq, m3_dq).max_abs);
+  }
+#endif
+
   // 计时：preprocess（quant+lse+delta）+ main 分开
   auto bench = [&](auto fn, int it) {
     fn();
@@ -2089,7 +2174,16 @@ int main(int argc, char** argv) {
   printf("[计时] main(dK/dV/dQ 三梯度) **wgmma+Q/dO-TMA** = %.4f ms (%.2f TF) | tma/wg = %.3f× | tma/base = %.3f×\n",
           t_wgtma, flops / t_wgtma / 1e9, t_wg / t_wgtma, t_base / t_wgtma);
   printf("[计时] total wgmma+TMA = %.4f ms | 峰值占比 = %.3f%%\n", t_wgtma + t_pre,
-         100.0 * flops / t_wgtma / 1e9 / 1978.8);
+          100.0 * flops / t_wgtma / 1e9 / 1978.8);
+  // F7 第十一步：两 kernel 判决（KV-owner dK/dV[red=0] + Q-owner dQ-only[red=0] vs 单 kernel 三梯度）。
+  float t_dqonly = bench(launch_dqonly, iters);
+  float t_main3 = bench(launch_main3, iters);
+  printf("[计时] Q-owner **dQ-only** pass = %.4f ms | 同 binary 三梯度基线(kvtma) = %.4f ms\n",
+         t_dqonly, t_main3);
+  printf("[计时] F7 option(a) 两 kernel = KV-owner dK/dV %.4f + dQ-only %.4f = %.4f ms | vs 单 kernel 三梯度 %.3f×\n",
+         t_wgtma, t_dqonly, t_wgtma + t_dqonly, t_main3 / (t_wgtma + t_dqonly));
+  printf("[计时]   注：KV-owner 档须以 -DFA_KV_DQ=0 构建方为**纯 dK/dV**（当前 FA_KV_DQ=%d）。\n",
+         (int)FA_KV_DQ);
 #endif
 
   CUDA_CHECK(cudaFree(d_q_f)); CUDA_CHECK(cudaFree(d_k_f)); CUDA_CHECK(cudaFree(d_v_f));

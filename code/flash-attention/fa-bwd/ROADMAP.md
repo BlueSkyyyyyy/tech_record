@@ -2924,7 +2924,26 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百五十七轮）**：**F7 第十步——KV-owner 原型补 dQ 同循环（三梯度全通；atomic 归约
+> **最新（第一百五十八轮）**：**F7 第十一步——option(a)「两 kernel」判决：负结果**。给 `fp8_mma_body`
+> 加编译期 `DQONLY`（默认 false；`DQONLY=true` 跳过 Ap/dS3 fold + GEMM3/4(dV/dK)，保留
+> GEMM1/2/5，dQ 寄存器 owned + **plain store** ⇒ `red=0`），原型加同 binary 的 Q-owner dQ-only
+> pass / 生产默认 kvtma 三梯度 / KV-owner dK/dV-only 三口径。**数值逐位**（dQ-only vs 基线 dq=0；
+> main3 vs ref 与历史逐位一致；CI fp8 mma+hopper 全绿）。**性能**：两 kernel 合计 / 单 kernel
+> 三梯度 = S512 **0.944×** / S1024H32 **0.955×** / S4096 **0.955×** ⇒ **慢 4.5–6%**。**ncu（S4096）**：
+> dqonly 933.7µs/`red`0/L2 6.8%；main3 1.99ms/`red`103.8M/L2 55%；KV-owner 1.12ms/`red`0/read
+> 52.3M。机制：两 kernel 红归零但 **L2 读放大 2.9×**（单 kernel 的 GEMM1/2 S/dP 与 P/dS 被
+> dK/dV 与 dQ 共享；拆开后 dQ-only 重算重读）。⇒ **「候选 ①(a)」判负**；F7 主体只剩 **①(b) 单趟内
+> 非原子归约 / 两级 partial（需 BN≥BM 或跨 warpgroup 偏和+二次归约）**。见 `docs/03` §91、
+> `docs/08` §5.72；原始输出 `src/fp8/fa_bwd_fp8_p158_*`。
+> **下一步候选**：① **F7 主体（唯一真杠杆）**——在**单趟**内让 dQ/dK/dV 全 owned（red=0）：
+>   (a) 已判负（两 kernel，见上）；
+>   (b) **BN≥BM 或用跨 warpgroup 偏和 + 二次归约**，在同一 pass 里把 dK/dV 的跨 CTA `red` 消掉
+>       同时保留 GEMM1/2 复用（这是唯一还能吃到 O42「短路 red ⇒ main 1.70×」prize 的路）；
+>   (c) 若 (b) 仍撞本卡 smem/寄存器硬墙（见「阻塞」），转「换卡/放弃 F7」。
+>   ② 其余候选（F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、非 main 融合）均已判决/到顶/收口；
+>   ③ DET 仅 opt-in。
+>
+> **（第一百五十七轮）**：**F7 第十步——KV-owner 原型补 dQ 同循环（三梯度全通；atomic 归约
 > 判决）**。给 p155 的 wgmma+TMA body 加编译期开关 `FA_KV_DQ`（默认 1）：fold 新增
 > `dS2[m][j]=dS[m][j]·ks[j]`（e5m2/per-m `sds2`，与 Q-owner 逐字同款）、K 的配对布局 `Kp`
 > 从 SW128 `Ks` **一次重建**、**GEMM4** `dQ+=scale·(dS2·K)` 用 `mma_block_bt<32,64,BN,E5E4>` +
@@ -6349,6 +6368,34 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       dK/dV ＋ **Q-owner dQ-only pass**，dQ 寄存器 owned、red=0，代价 S/dS 重算一次，算力仅
       ~4% 峰值、省 ~74% L2）；② **两级 partial**（需 BN≥BM 或二次归约）。见 `docs/03` §90、
       `docs/08` §5.71；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p157_dq_*`。
+
+- 2026-09-30（第一百五十八轮）：**F7 第十一步完成（option(a)「两 kernel」判决：负结果）**——落地
+  ROADMAP「下一步候选 ①(a)」：KV-owner 出 dK/dV（red=0）＋ **Q-owner dQ-only pass**（dQ 寄存器
+  owned、plain store ⇒ red=0），把「让 dQ owned」的两条路之一做成真实数据。
+    - `src/fp8/fa_bwd_fp8_kernels.cuh`（**默认路径一行未改**）：`fp8_mma_body` 加尾部编译期
+      `bool DQONLY=false`，透传到 `fa_bwd_fp8_mma_kernel` / `fa_bwd_fp8_mma_kvtma_kernel`。
+      `DQONLY=true` **跳过 Ap/dS3 fold + GEMM3/4(dV/dK)+epilogue/bulk-reduce**，保留 GEMM1/2 +
+      dS2 fold + GEMM5（dQ）；`kRegDq` 下 dQ 用 **plain store**（非 `red_add2`）⇒ `red=0`。
+      原型 `fa_bwd_fp8_kvowner_mma.cu` 加 `--only={dqonly,main3,wgtma}` 与同 binary 的
+      `launch_dqonly` / `launch_main3`（生产默认 kvtma 三梯度）。
+    - **数值三 shape**：`dQ-only vs 三梯度基线 dq = 0.0000e+00`（S512/S1024H32/S4096）；
+      `main3` 的 dq/dk/dv 与历史逐位一致（S512 2.4262/2.9757/3.7318e-1、S1024H32
+      2.3993/4.1764/3.5346e-1、S4096 2.6355/2.6437/3.2157e-1）。CI `--dtype fp8`（mma 与
+      `--hopper`）均 rc=0、数值逐位不变。
+    - **性能（同 binary A/B，event，iters=100）**：**两 kernel 合计 vs 单 kernel 三梯度** = S512
+      **0.944×**（0.1006 vs 0.0948）、S1024H32 **0.955×**（0.3485 vs 0.3303）、S4096 **0.955×**
+      （2.0435 vs 1.9425ms）⇒ **慢 4.5–6%（负结果）**。
+    - **ncu（S4096 H16）**：dqonly **933.7µs / `red`=0** / read 18.2M / L2 6.8% / SM 37.0%；
+      main3 **1.99ms / `red` 103.8M** / read 24.2M / L2 55.0%；wgtma(KV-owner) **1.12ms /
+      `red`=0** / read 52.3M / L2 18.8%。⇒ 两 kernel 把跨 CTA `red` **打成 0**，但 **L2 读放大 2.9×**
+      （70.5M vs 24.2M）：单 kernel 的 GEMM1/2（S/dP）与 P/dS 被 dK/dV 与 dQ **共享**，拆开后
+      dQ-only 必须重算 S/dP 并重读 Q/K/V/dO ⇒ 省下的 `red` 打不过重算 + 重复 operand 流量。
+    - **判决 / 下一步**：**ROADMAP「候选 ①(a) 两 kernel」判负**；「让 dQ owned」的收益必须在
+      **单趟**内取。F7 主体只剩 **①(b) 两级 partial / 单趟内非原子归约（需 BN≥BM，或跨 warpgroup
+      偏和 + 二次归约）**，或放弃「拆 kernel」。见 `docs/03` §91、`docs/08` §5.72；原始输出
+      `src/fp8/fa_bwd_fp8_p158_b1_{s512_h16,s1024_h32,s4096_h16}_d128_causal_fp8.out.txt`、
+      `src/fp8/fa_bwd_fp8_p158_ncu_dqonly_s4096.out.txt`（full）、
+      `src/fp8/fa_bwd_fp8_p158_ncu_metrics_s4096.out.txt`。
 
 ## 灵感 / backlog
 
