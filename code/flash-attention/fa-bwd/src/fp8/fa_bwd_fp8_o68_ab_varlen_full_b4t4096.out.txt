@@ -1,0 +1,25 @@
+### O68 twofile varlen full D=128 b4_t4096
+===== --lsefull=0 =====
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_full_fp8
+VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=0
+cu_seqlens = 0 1024 2048 3072 4096
+O40: varlen lse k-split = 4 (base=512)
+[timing] VARLEN total 1.5682 ms  21.91 TFLOPS (sum_b 4HL^2D)
+[O64 A/B] VARLEN total fused(1 launch) 1.5470 ms | unfused(4 quant + 3 memset) 1.5698 ms (1.0147x)
+grid main = 64 x 16 x 4 (nocompact, ksplit=4, total_mt=64) | use_regdq=1 | T=4096
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=8.881e-02  max_rel=2.570e+01  (ours_amax=6.648e-01 ref_amax=6.509e-01 @1939770)
+  dk  vs ref: max_abs=7.043e-02  max_rel=2.908e+01  (ours_amax=9.624e-01 ref_amax=9.414e-01 @471383)
+  dv  vs ref: max_abs=5.721e-02  max_rel=2.096e+01  (ours_amax=4.657e-01 ref_amax=4.908e-01 @3312082)
+===== --lsefull=1 =====
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_full_fp8
+VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=0
+cu_seqlens = 0 1024 2048 3072 4096
+O40: varlen lse k-split = 4 (base=512)
+[timing] VARLEN total 1.2344 ms  27.84 TFLOPS (sum_b 4HL^2D)
+[O64 A/B] VARLEN total fused(1 launch) 1.2214 ms | unfused(4 quant + 3 memset) 1.2509 ms (1.0241x)
+grid main = 64 x 16 x 4 (nocompact, ksplit=4, total_mt=64) | use_regdq=1 | T=4096
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=8.881e-02  max_rel=2.570e+01  (ours_amax=6.648e-01 ref_amax=6.509e-01 @1939770)
+  dk  vs ref: max_abs=7.043e-02  max_rel=2.908e+01  (ours_amax=9.624e-01 ref_amax=9.414e-01 @471383)
+  dv  vs ref: max_abs=5.721e-02  max_rel=2.096e+01  (ours_amax=4.657e-01 ref_amax=4.908e-01 @3312082)

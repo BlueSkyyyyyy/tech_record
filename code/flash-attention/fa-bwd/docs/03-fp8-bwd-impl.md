@@ -8319,3 +8319,95 @@ A/B + ncu，给出判决。
   同样撞 smem/regs），或 **放弃 F7 / 换卡**。
 - 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p160_bn64_{s512,s1024h32,s4096}.out.txt`、
   `src/fp8/fa_bwd_fp8_p160_ncu_{bn32,bn64}_s4096.out.txt`。
+
+---
+
+## 94. O68（第一百六十二轮）：非 causal（full）D=128 的 LSE 接上均衡 `cp.async` 版 —— 正结果，默认
+
+### 94.1 动机（发现一处被遗漏的路径）
+
+F1（第 132 轮）把 fp8 **定长**默认切到 Hopper（wgmma+TMA），F5（第 136 轮）又把 causal 的
+TMA LSE 做了「tile 内两趟 softmax」。但 **非 causal（full）D=128 的 LSE 一直走 O1 的
+`lse_mma_kernel`**——那是全仓库最早的 LSE：每 CTA 64 行 × 64 列、**逐元素 `LDG.U8→STS` 载入
+Q/K（无 `cp.async` 双缓冲）**、无 K 维 split。对照代码可见：
+
+- 定长 causal：`launch_lse_bal_tma` / `launch_lse_bal_wgmma`（TMA/wgmma + `cp.async` 双缓冲）；
+- 定长 full：`launch_lse<128>`（O1）——**没有跟上 O8b/O11/O54 的均衡/流水改造**；
+- varlen full D=128：同样 `launch_lse<128>`（O1）。
+
+而 O54（第 101 轮）其实早就给 `lse_mma_kernel_bal` 加了 **`FULL=true`** 模式（一个 CTA 一个
+m 块 + `cp.async` 双缓冲），只是**只接到了 D=512（MLA）的 full 路径**，D=128 的定长/varlen
+full 都漏接了。O68 = 把这两条 D=128 full 的 LSE 也切到 `lse_mma_kernel_bal<128,1,FULL=true>`。
+
+### 94.2 实现（纯 host：`src/fp8/fa_bwd_fp8_main.cu` + `fa_bwd_fp8_mma_onefile.cu`，device 一行未改）
+
+- 新增文件作用域开关 `g_lse_full_opt`（默认 **1**）+ CLI `--lsefull=0/1`（`--lsefull=0` 退回 O1
+  做同 binary A/B）。定长与 varlen 两条 full 路径共用该开关。
+- **定长 full D=128**（`run_preprocess` 的 `else` 分支）：`launch_lse<128>` 改为
+  `launch_lse_bal<128, 1, true>(lg, …, nullptr, nullptr, 1)`（`lg=dim3(nblk,H,B)`，恰好是
+  FULL 模式期望的「一个 CTA 一个 m 块」网格；ksplit=1，不需 partial/merge）。
+- **varlen full D=128**（`run_varlen`）：同上，带 `d_cu`。
+- 未改 device：kernel `lse_mma_kernel_bal<HD,PIPE,FULL=true>` 早已存在且经 D=512 full 验证。
+
+### 94.3 数值（换 LSE 实现 → LSE 的 fp32 求和次序变化，噪声量级）
+
+- **ours vs fp32 ref**（S1024 H16 full）：`dq/dk/dv = 5.520e-2 / 5.312e-2 / 4.024e-2`（fp8 噪声）。
+- **lsefull=0 vs =1**（同输入落盘逐元素）：`dq 2.02e-3 / dk 1.15e-3 / dv 1.68e-3`——正是 O1 的
+  「逐元素 online-softmax」与均衡版「tile 内两趟 softmax」的 fp32 求和次序差异，**远小于 fp8
+  的 O(1e-1) 容差**（对照 `docs/03` §71 F5：同一类差异 ~1e-5–1e-3）。
+- `--ci`（fp8）：单/两文件一致性 worst **7.153e-06** OK、`--check docs/04` OK。
+
+### 94.4 性能（同 binary A/B，CUDA event）
+
+| 路径 | lsefull=0（O1 LSE） | **lsefull=1（均衡 FULL）** | 比 |
+|---|---|---|---|
+| 定长 full S1024 H16 — **preprocess** | 0.1466 ms | **0.0397 ms** | **3.70×** |
+| 定长 full S1024 H16 — total | 0.5388 ms / 15.94 TF | **0.3740 ms / 22.96 TF** | **1.44×** |
+| varlen full b4_t4096 H16 — total | 1.5589 ms / 22.04 TF | **1.2293 ms / 27.95 TF** | **1.27×** |
+
+单文件版逐指标一致（total 0.3739 vs 两文件 0.3745ms）。
+**对标**（`harness/fa_bwd_bench.py bench --dtype fp8 --shape '1 1024 16 128 full'`）：
+TE FP8 纯反向 **0.0562ms / 305.8 TF** ⇒ ours/ TE 时间比 **9.6× → 6.65×**；峰值占比
+**0.81% → 1.16%**（fp8 峰值 1978.8 TF）。
+
+### 94.5 ncu（定长 full S1024 H16，`regex:lse_mma_kernel`，`--launch-count 1`）——bound
+
+| 指标 | lsefull=0（O1） | **lsefull=1（均衡 FULL）** |
+|---|---|---|
+| **Duration** | **208.4 µs** | **42.3 µs（4.93×）** |
+| DRAM Throughput | 0.62% | 3.08% |
+| L1/TEX Throughput | 9.43% | 22.87% |
+| L2 Throughput | 2.59% | 15.33% |
+| Compute (SM) | 23.36% | 45.14% |
+| **Warp Cycles / Issued** | **8.11** | **3.86** |
+| Registers / thread | 82 | 88 |
+| Waves Per SM | 0.39 | 0.39 |
+| Achieved Occupancy | 12.04% | 11.89% |
+
+**结论**：O1 LSE 是**纯延迟 bound**（`Warp Cycles/Issued 8.11`、L1/TEX 仅 9.4%——每个 K tile 都
+同步等 global→smem，再串行算），而均衡 FULL 版用 `cp.async` 16B 双缓冲把载入与 wgmma 重叠，
+`Warp Cycles/Issued` 砍半、Duration **4.93×**。两条路径都 `Waves 0.39`（S1024 的 grid=256 只有
+~0.4 个波），所以真实墙是**网格不足 + 串行载入延迟**；`cp.async` 直接打掉后者。
+**这不是 main 的 L2 `red` 墙，而是 preprocess 内部的一条被漏改的 LSE 分支**。
+
+### 94.6 复现 / 原始输出
+
+```bash
+# 两文件 A/B（Hopper 构建）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --full --lsefull=0 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h16_d128_full_fp8
+# ncu：regex:lse_mma_kernel --launch-count 1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o68_ab_fixed_full_s1024.out.txt`、
+`src/fp8/fa_bwd_fp8_o68_ab_onefile_full_s1024.out.txt`、
+`src/fp8/fa_bwd_fp8_o68_ab_varlen_full_b4t4096.out.txt`、
+`src/fp8/fa_bwd_fp8_o68_ncu_lse_full_s1024.out.txt`、
+`src/fp8/fa_bwd_fp8_o68_te_full_baseline.out.txt`。
+
+### 94.7 下一步
+
+- **剩余 full 路径**：LSE 的 **TMA 化**（把 `lse_mma_kernel_bal<FULL>` 再换成 4D-TMA 版，对齐
+  causal 的 O32）——当前 FULL 版是 `cp.async`，TMA 可再省 load 指令。
+- 其余候选（F6/F7/放大 BM 等）均已判决/收口，见「阻塞」。
