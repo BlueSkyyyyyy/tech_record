@@ -1,0 +1,9 @@
+   44.48us  quantZERO<
+   27.36us  LSEbal_tma<
+    2.75us  merge
+   10.94us  delta<
+  257.92us  mma_kvtma_kernel<
+   48.90us  quantZERO<
+   27.14us  LSEbal_tma<
+    2.75us  merge
+   11.26us  delta<

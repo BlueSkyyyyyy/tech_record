@@ -1,0 +1,33 @@
+fa_bwd_fp8_mma_onefile.cu(4195): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 6226
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_mma_onefile.cu(3835): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 6236
+
+fa_bwd_fp8_mma_onefile.cu(3543): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 6236
+
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp8
+VARLEN: B=1 T=512 maxlen=512 H=2 Hkv=2 D=512 causal=1
+cu_seqlens = 0 512
+O40: varlen lse k-split = 8 (base=8)
+[timing] VARLEN total 0.0798 ms  13.46 TFLOPS (sum_b 4HL^2D)
+[O64 A/B] VARLEN total fused(1 launch) 0.0799 ms | unfused(4 quant + 3 memset) 0.0942 ms (1.1794x)
+grid main = 128 x 2 x 1 (nocompact, ksplit=16, total_mt=8) | use_regdq=0 | T=512
+[O52 A/B] varlen MLA main-only 4w 0.0897 ms | 8w 0.0515 ms (1.743x) | 8w+kvpipe 0.0504 ms (1.780x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07 | max_abs(kvp-vs-8w) dq=1.192e-07 dk=2.384e-07 dv=4.768e-07
+[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.0595 split2 0.0385 split4 0.0270 split8 0.0220 split16 0.0254 ms
+[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.0739 split2 0.0424 split4 0.0256 split8 0.0190 split16 0.0185 ms
+[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.1089 split2 0.0635 split4 0.0432 split8 0.0333 split16 0.0308 ms
+[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.0734 split2 0.0424 split4 0.0263 split8 0.0208 split16 0.0203 ms
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=1.613e-01  max_rel=8.119e+01  (ours_amax=1.811e+00 ref_amax=1.786e+00 @28675)
+  dk  vs ref: max_abs=2.238e-01  max_rel=1.136e+02  (ours_amax=2.700e+00 ref_amax=2.650e+00 @1228)
+  dv  vs ref: max_abs=3.864e-01  max_rel=7.430e+01  (ours_amax=4.658e+00 ref_amax=4.646e+00 @241)
