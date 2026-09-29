@@ -2877,13 +2877,45 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
         S1024H32 1.004×、S512 0.998×；ncu 证 **`wait` 未降**（1.44→1.52），收益纯粹来自
         指令数（去 `ldmatrix` + SM80 兼容发射）。数值 vs ref 同 base、与 base 的差 = 累加次序
         噪声。见 `docs/03` §87、`docs/08` §5.68；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p154_*`。
-        **剩余（F7 主体）**：4D-TMA staging（对标 TE）+ dQ 同循环 + 降寄存器冲 4 CTA/SM。
+        → **第八步已完成（第一百五十五轮，Q/dO 4D-TMA staging：全 shape 正结果）**：把
+        `fp8_kvowner_dkv_wgmma_kernel` 抽成 device body `<...,bool TMA>` + 两薄壳；`TMA=true`
+        用两条 4D-TMA（UINT8 box={128,64}、SWIZZLE_128B）把 Q/dO 搬进 SW128 tile、mbarrier 相位
+        每迭代翻转，再从 SW128 重建 `Qp/dOp`（同 O37）；smem 67072+64B ⇒ **仍 3 CTA/SM**。
+        **数值逐位**（`wgmma+TMA vs wgmma = 0/0`，S512/S1024H32/S4096）。**性能**（main 仅
+        dK/dV）：S512 0.0577→**0.0462ms（1.247×）**、S1024H32 0.2404→**0.1940（1.239×）**、
+        S4096 1.3747→**1.1183（1.229×）**，tma/base 1.22–1.27× ⇒ **§84/§86/§87 之后最大的
+        KV-owner 结构收益**。ncu：指令 **−13.2%**、`lts read −11.4%`、`red 仍 0`、
+        **`long_scoreboard 1.40→0.43`**、`wait 1.52→1.53（未降）`。**顺带修一处 p154 遗留
+        race**：wgmma 经 async proxy 读 smem，generic 写的 K/V/Q/dO 缺
+        `fence.proxy.async.shared::cta` ⇒ 偶发 nondeterminism（已在 HEAD 原文件复现），补
+        `bulk_reduce_fence()` 后 8/8 稳定。见 `docs/03` §88、`docs/08` §5.69。
+        **剩余（F7 主体）**：dQ 同循环 + 降寄存器冲 4 CTA/SM。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百五十四轮）**：**F7 第七步——KV-owner mma 原型的 GEMM1/2 换 Hopper `wgmma`
+> **最新（第一百五十五轮）**：**F7 第八步——KV-owner wgmma 原型的 Q/dO 4D-TMA staging
+> （全 shape 正结果）＋修一处 p154 遗留 race**。落实第一百五十四轮「下一步候选 ①」的
+> 「4D-TMA staging（对标 TE）」子项：把 `fp8_kvowner_dkv_wgmma_kernel` 抽成 device body
+> `<...,bool TMA>` + 两薄壳，`TMA=true` 用两条 4D-TMA（UINT8 box={128,64}、SWIZZLE_128B，
+> fp8 一行 128B = SW128 atom 整行）把 Q/dO 搬进 SW128 tile、mbarrier 相位每迭代翻转，再从
+> SW128 重建 `Qp/dOp`（同 O37）；**smem 67072+64B ⇒ 仍 3 CTA/SM**。**数值逐位**
+> （`wgmma+TMA vs wgmma = 0/0`）。**性能（main 仅 dK/dV，同 binary A/B）**：S512 0.0577→
+> **0.0462ms（1.247×）**、S1024H32 0.2404→**0.1940（1.239×）**、S4096 1.3747→**1.1183
+> （1.229×）**，tma/base 1.22–1.27× ⇒ **§84/§86/§87 之后最大的 KV-owner 结构收益**。**ncu
+> （S4096）**：Duration 1.38→1.12ms、指令 **−13.2%**、`lts read −11.4%`、`red 仍 0`、
+> **`long_scoreboard 1.40→0.43`**、`wait 1.52→1.53（未降）`、regs/smem/3 CTA/SM 不变。
+> **顺带修 race**：wgmma 经 async proxy 读 smem，generic 写的 K/V（及非 TMA 的 Q/dO）缺
+> `fence.proxy.async.shared::cta` ⇒ 偶发 nondeterminism（已在 HEAD 原文件复现），补
+> `bulk_reduce_fence()` 后 8/8 稳定。文档 `docs/03` §88、`docs/08` §5.69；原始输出
+> `src/fp8/fa_bwd_fp8_kvowner_mma_p155_*`。
+> **下一步候选**：① **F7 主体**——在 wgmma+TMA 化的 KV-owner 上补 **dQ 同循环**（dQ 跨 CTA
+> 归约须 `cp.reduce.async.bulk` 或 partial+reduce）+ 降 `dVacc/dKacc` 冲 4 CTA/SM（smem≤58KB/
+> regs≤128），对标 TE grid=132；② 其余候选（F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、
+> 非 main 融合）均已判决/到顶/收口；③ DET 仅 opt-in。
+>
+> **（第一百五十四轮）**：**F7 第七步——KV-owner mma 原型的 GEMM1/2 换 Hopper `wgmma`
 > （大 S 正结果，第一百五十四轮）**。落实第 153 轮「下一步候选 ①」的「打 `wait`」子项，
 > 先在 KV-owner 原型上把 **GEMM 指令层对齐 TE**：新增 `fp8_kvowner_dkv_wgmma_kernel`
 > （`-DFA_WGMMA`）——Q/dO/K/V 全存 **SW128**、GEMM1/2 换 `wgmma.m64n32k32`（异步、直读描述符、
@@ -6153,8 +6185,40 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   - **结论**：§84/§86 之后**第一个在大 S 转正的 KV-owner 结构改动**（优于 pipe/dyn），且保持
     3 CTA/SM。但仍是 dK/dV-only（FLOPs 只算 2/3），净收益 ~5%——F7 主体仍欠 **4D-TMA staging /
     dQ 同循环 / 降寄存器冲 4 CTA/SM**。见 `docs/03` §87、`docs/08` §5.68。
-  - 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p154_s{512,1024_h32,4096}*.out.txt`、
-    `..._p154_ncu_{wgmma,base}_s4096.out.txt`、`..._p154_stall_{base,wgmma}_s4096.out.txt`。
+   - 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p154_s{512,1024_h32,4096}*.out.txt`、
+     `..._p154_ncu_{wgmma,base}_s4096.out.txt`、`..._p154_stall_{base,wgmma}_s4096.out.txt`。
+
+- 2026-09-30（第一百五十五轮）：**F7 第八步完成（KV-owner wgmma 原型的 Q/dO 4D-TMA staging；
+  全 shape 正结果）＋修一处 p154 遗留 async-proxy race**——落实第一百五十四轮「下一步候选 ①」
+  的「4D-TMA staging（对标 TE）」子项。
+    - `src/fp8/fa_bwd_fp8_kvowner_mma.cu`：把 `fp8_kvowner_dkv_wgmma_kernel` 抽成 device body
+      `fp8_kvowner_dkv_wgmma_body<HD,BM,BN,bool TMA>` + 两个 `__global__` 薄壳（`TMA=false`
+      逐字退化 = §87；`TMA=true` 新增 `..._wgmma_tma_kernel`）。TMA 版 per m 块由 tid0 发两条
+      `cp.async.bulk.tensor.4d`（UINT8 `dims={D,S,H,B}`、`box={128,BM=64,1,1}`、SWIZZLE_128B；
+      fp8 一行 128B = SW128 atom 整行）把 Q/dO 搬进 SW128 tile，`mbarrier` 相位 `qph` 每迭代
+      翻转，再从 SW128 用 `__byte_perm` 重建 `Qp/dOp`（同主 kernel O37）；`bulk_reduce_fence()`
+      即 `fence.proxy.async.shared::cta`。smem 67072+64B（qbar/dbar）⇒ **仍 3 CTA/SM**。
+    - **顺带修一处 p154 遗留 race**：wgmma 经 async proxy 读 smem，而 K/V（及非 TMA 路径的
+      Q/dO）是 generic 写，p154 缺 `fence.proxy.async` ⇒ 偶发 nondeterminism（同一 binary 8 次
+      `wgmma vs base` 在 4.08e-2/6.4e-2/2.2e-1 间跳；已在 `git show HEAD` 的 p154 原文件复现）。
+      补 fence 后 8/8 稳定。
+    - **数值逐位**：`wgmma+TMA vs wgmma = 0.0000e+00`（S512/S1024H32/S4096 各多次）；vs ref
+      与 wgmma 同量级（S512 2.976/3.732e-1、S1024H32 4.176/3.535e-1、S4096 2.644/3.216e-1）。
+      修复后 `wgmma vs base` 稳定（S512 3.058e-2、S1024H32 4.079e-2、S4096 1.500e-1 = 累加次序噪声）。
+    - **性能（CUDA event，同 binary A/B，main 仅 dK/dV，iters=50）**：S512 base 0.0563 / wgmma
+      0.0577 / **TMA 0.0462ms（tma/wg 1.247×）**；S1024H32 0.2406/0.2404/**0.1940（1.239×）**；
+      S4096 1.3863/1.3747/**1.1183（1.229×）**；tma/base 1.22–1.27× ⇒ **§84/§86/§87 之后最大的
+      KV-owner 结构收益**。
+    - **ncu（S4096 H16）**：Duration 1.38→**1.12ms**、`Executed Instructions` 541.5M→**470.1M
+      （−13.2%）**、`lts__t_sectors_op_read` 58.86M→**52.18M（−11.4%）**、write 15.89M→12.46M、
+      **`red` 仍 = 0**、`long_scoreboard` **1.40→0.43**、`wait 1.52→1.53（未降）**、short
+      0.95→1.31、barrier 0.28→0.32、regs 168 / smem 67.1KB / 3 CTA/SM / occ ~17.7% / Waves 5.17
+      不变 ⇒ **收益 = 去全局 gather（指令 + L2 read + `long_scoreboard`），墙回到 `wait` + L1/TEX +
+      `short_scoreboard`**。
+    - **结论**：F7 主体的「TMA staging」子项 **de-risk 并转正**（1.23–1.27×，全 shape）。剩余 =
+      **dQ 同循环**（跨 CTA 归约 / partial+reduce）+ **降寄存器冲 4 CTA/SM**。本原型仍 dK/dV-only
+      （FLOPs 2/3），非生产路径；同 session TE FP8 纯反向（全反向）S4096 = 0.3003ms/915.25TF。
+      见 `docs/03` §88、`docs/08` §5.69；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p155_*`。
 
 ## 灵感 / backlog
 

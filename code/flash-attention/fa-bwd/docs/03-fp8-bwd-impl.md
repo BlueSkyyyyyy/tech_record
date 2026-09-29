@@ -7907,3 +7907,83 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_mma.cu -c 1 \
   `..._p154_s1024_h32_d128_causal_fp8.out.txt`、`..._p154_s4096_h16_d128_causal_fp8.out.txt`、
   `..._p154_ncu_wgmma_s4096.out.txt`、`..._p154_ncu_base_s4096.out.txt`、
   `..._p154_stall_{base,wgmma}_s4096.out.txt`。
+
+### 88 F7 第八步：KV-owner wgmma 原型的 Q/dO 4D-TMA staging（正结果）＋修正一处 p154 遗留的 async-proxy race（第一百五十五轮）
+
+**动机**：§87 把 GEMM1/2 上 wgmma 后，KV-owner 原型的 Q/dO staging 仍是「逐 ROW-pair 的标量
+global gather + `__byte_perm` 写 SW128」——每个 query 块都要标量读 Q/dO（ncu 相对暴露的
+`long_scoreboard`）。F7 主体「对标 TE 的 TMA 数据通路」的第一子项就是把它换成 **4D-TMA**：fp8
+一行 128B = 一个 SW128 atom 的整行，一条 `cp.async.bulk.tensor.4d` 即可搬完整块（无需 fp16 的
+2×K=64 chunk 拆分，与主 kernel O37/O32 同构）。
+
+**改动**（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，plant 路径一行未改）：
+
+- 把原 `fp8_kvowner_dkv_wgmma_kernel` 抽成 device body
+  **`fp8_kvowner_dkv_wgmma_body<HD,BM,BN,bool TMA>`**，两个 `__global__` 薄壳共用：原
+  `..._wgmma_kernel`（`TMA=false`，逐字退化 = §87）与新 `..._wgmma_tma_kernel`（`TMA=true`，
+  `const __grid_constant__ CUtensorMap qmap,dmap`）。避免复制 ~280 行。
+- TMA 版 per m 块由 tid0 发两条 4D-TMA 把 Q/dO 搬进 SW128 tile（`make_kvowner_qd_map`：
+  UINT8 `dims={D,S,H,B}`、`box={128,BM=64,1,1}`、SWIZZLE_128B），`mbarrier` 相位 `qph` 每迭代
+  翻转；再从 SW128 用 `__byte_perm` **重建 `Qp/dOp` 的 K 配对布局**（与主 kernel O37 逐字同构）。
+  其余（K/V 常驻、GEMM1/2 wgmma、GEMM3/5 mma、fold、本地累加、single-owner plain store）逐字不变。
+  smem `67072 + 64B`（qbar/dbar）⇒ 仍 **3 CTA/SM**。
+- **顺带修一处 p154 遗留 race**：wgmma 经 **async proxy** 读 smem，而 K/V（及非 TMA 路径的
+  Q/dO）是 **generic 写**，p154 缺 `fence.proxy.async.shared::cta` ⇒ 偶发 nondeterminism
+  （本轮实测同一 binary 8 次：`wgmma vs base` 在 `4.08e-2 / 6.4e-2 / 2.2e-1` 间跳；已在
+  `git show HEAD` 的 p154 原文件上复现，确认非本步引入）。在 K/V staging 与（每迭代）Q/dO
+  staging 后补 `bulk_reduce_fence()`（= `fence.proxy.async.shared::cta`）后 **8/8 次稳定**。
+
+**数值**（ours-vs-fp32 ref，单 case）：S512 `2.976 / 3.732e-1`、S1024H32 `4.176 / 3.535e-1`、
+S4096 `2.644 / 3.216e-1`——与 wgmma 版同量级、无系统误差。**`wgmma+TMA vs wgmma = 0.0000e+00
+（逐位）**（S512/S1024H32/S4096 各多次；仅搬运通路）。修复 fence 后 `wgmma vs base` 也稳定：
+S512 `3.058e-2`、S1024H32 `4.079e-2`、S4096 `1.500e-1`（= fp8 GEMM1/2 累加次序噪声，与
+`ours(Q-owner) vs base` 同源）。
+
+**性能**（CUDA event，同 binary A/B，iters=50，main 仅 dK/dV）：
+
+| case | base | wgmma(§87) | **+Q/dO-TMA** | tma/wg | tma/base |
+|---|---|---|---|---|---|
+| S512 H16 | 0.0563 ms | 0.0577 | **0.0462 ms** | **1.247×** | **1.224×** |
+| S1024 H32 | 0.2406 | 0.2404 | **0.1940** | **1.239×** | **1.241×** |
+| S4096 H16 | 1.3863 | 1.3747 | **1.1183** | **1.229×** | **1.267×** |
+
+- **三个 shape 一致 1.23–1.27×**，且是 §84/§86/§87 之后**最大的 KV-owner 结构收益**（§87 wgmma
+  只在大 S 1.049×，§84/§86 中性/负）。原因是把「标量 global gather + SW128 逐 pair 写」换成
+  单条 TMA，去掉的既是指令也是全局延迟；小 S（单波、grid-bound）同样受益。
+
+**ncu（S4096 H16，main only）**：
+
+| 指标 | wgmma(§87) | **+TMA** |
+|---|---|---|
+| Duration | 1.38 ms | **1.12 ms** |
+| Executed Instructions | 541.5 M | **470.1 M（−13.2%）** |
+| L1/TEX | 56.45% | 66.25% |
+| Compute (SM) | 41.35% | 44.41% |
+| L2 | 17.20% | 18.63% |
+| DRAM | 1.85% | 2.27% |
+| regs / smem | 168 / 67.07 KB | 168 / 67.14 KB（**3 CTA/SM**） |
+| occ / Waves | 17.6% / 5.17 | 17.7% / 5.17 |
+| `lts__t_sectors_op_read` | 58.86 M | **52.18 M（−11.4%）** |
+| `lts__t_sectors_op_write` | 15.89 M | 12.46 M |
+| `lts__t_sectors_op_red` | **0** | **0** |
+| stall `long_scoreboard` | 1.40 | **0.43** |
+| stall `wait` | 1.52 | **1.53（未降）** |
+| stall `short_scoreboard` | 0.95 | 1.31 |
+| stall `barrier` / `not_selected` | 0.28 / 0.36 | 0.32 / 0.42 |
+
+⇒ **TMA 的收益 = 去全局 gather**（`long_scoreboard 1.40→0.43`、指令 −13.2%、L2 读扇区 −11%），
+墙随即回到 **`wait`（wgmma/立即数延迟，未降）+ L1/TEX + `short_scoreboard`**——与 §87「收益来自
+减指令、不是消 `wait`」完全一致，也正是 F7 主体下一步（降寄存器冲 4 CTA/SM / 打 `wait`）要啃的。
+
+**对标**：本原型仍只做 dK/dV（FLOPs 2/3），非生产路径；同 session TE FP8 纯反向（全反向）S4096
+= **0.3003 ms / 915.25 TF**（`docs/03` §71 口径）。本步把 F7 主体的「TMA staging」子项
+**de-risk 并转正**。
+
+**结论 / 下一步**：F7 主体剩余 = ① **dQ 同循环**（dQ 跨 CTA 归约须 `cp.reduce.async.bulk` 或
+partial+reduce）；② **降 `dVacc/dKacc` + `dqacc` 寄存器冲 4 CTA/SM**；③ K/V 已 resident，
+无需再 TMA。本步完成后 KV-owner 原型的 Q/dO 已是「wgmma + TMA」的 TE 同款数据通路。
+
+- 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p155_tma_{s512_h16_d128_causal_fp8,
+  s1024_h32_d128_causal_fp8,s4096_h16_d128_causal_fp8}.out.txt`、
+  `..._p155_nontma_{...}.out.txt`、`..._p155_ncu_{tma,wgmma}_s4096.out.txt`、
+  `..._p155_stall_{tma,wgmma}_s4096.out.txt`。
