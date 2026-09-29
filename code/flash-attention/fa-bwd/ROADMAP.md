@@ -2761,18 +2761,40 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       端到端 1.03–1.04×（S4096 1.888→1.817ms/75.6TF；varlen D128 1.02–1.04×）**；vs-ref/TE 打印位
       一致、单/两文件 gate 1.335e-5 OK、`--check docs/04` OK 194 行。详见 `docs/03` §71、
        `docs/08` §5.51；原始输出 `src/fp8/fa_bwd_fp8_f5_*`。
-- [ ] **F6** 唯一真杠杆：**双 warpgroup + TMA + wgmma 的 BM=128 主 kernel**（`red` 砍半且保 L2 利用率）。
+- [~] **F6** 唯一真杠杆：**双 warpgroup + TMA + wgmma 的 BM=128 主 kernel**（`red` 砍半且保 L2 利用率）。
       → 依据（第一百三十九轮定量）：默认 main 的 `red` 90% 是 dK/dV（ksplit=1 实测 103.8M vs
       默认 114.5M）；BM 64→128 确实把 `red` 砍半（现有 `wg2<128>` 58.2M），但 `wg2` 无 TMA/wgmma
       ⇒ L2 仅 20.4%、1 CTA/SM、慢 0.53×；故必须新写双 warpgroup body（对标
       `fa_bwd_fp16_wgmma2_kernel`，`fp8_mma_body` 现 `static_assert` 锁单 warpgroup）。
       「dK/dV-over-KV」已证**流量中性**（关闭），ksplit auto=8 已最优。见 `docs/03` §74。
+      → **第一步已完成（第一百四十轮，冒烟）**：新 `src/fp8/fa_bwd_fp8_wgmma2_smoke.cu` 在
+      **256 线程（2 个 warpgroup）** 下用 K-major SW128 描述符跑 `wgmma.m64n64k32`，每个 WG
+      各算 BM=128 的一半（A 描述符 +8192B 偏移）：GEMM1（e4m3×e4m3）与 GEMM2（e5m2×e4m3）
+      **max_abs=0.000e+00**；SASS **4×`QGMMA.64x64x32.E4E3` + 4×`QGMMA...E5E3`，无 HMMA/LDSM**；
+      ncu **90 regs**/49.15KB（远低于 wg2 的 217）。⇒ 双 WG wgmma 几何成立。
+      **剩余（F6 主体）**：Q/K/V/dO 走 4D-TMA + SW128，GEMM1/2 换 wgmma、3/4/5 仍 mma；
+      smem 压到 **≤116224B** 且 regs **≤128** 才能 2 CTA/SM（wg2 现 131.33KB/217regs，缺口
+      15.1KB/89regs；路径 = TMA 去 `Qp/dOp` 寄存器构造 + `Ps/Ss` 二选一驻留）。见 `docs/03` §75。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百三十九轮）**：**fp8 主 kernel「唯一真杠杆」定位——dK/dV 跨 CTA `red` 的定量归因
+> **最新（第一百四十轮）**：**F6 第一步——双 warpgroup（256 线程）fp8 wgmma 冒烟（BM=128 几何
+> 钉死）**。落实第 139 轮 F6：新增 `src/fp8/fa_bwd_fp8_wgmma2_smoke.cu`，在 **256 线程 = 2 个
+> warpgroup** 下用 K-major SW128 描述符跑 `wgmma.m64n64k32`，每个 WG 各算 BM=128 的一半
+> （第 2 个 WG 的 A 描述符 +`(64/8)×1024=8192B` 偏移）：GEMM1 `S=Q·Kᵀ`（e4m3×e4m3）与 GEMM2
+> `dP=dO·Vᵀ`（e5m2×e4m3）**max_abs=0.000e+00**；SASS **4×`QGMMA.64x64x32.F32.E4M3.E4M3` +
+> 4×`QGMMA...E5M2.E4M3`，无 HMMA/LDSM**（两 WG 各自走完 128/32=4 步归约）；ncu **90 regs** /
+> 49.15KB（远低于 `wg2` 的 217 regs）⇒ 双 WG wgmma 几何成立、且寄存器压力可控。
+> **默认路径一行未改**、`--ci --dtype fp8 --fixed-only` rc=0（gate worst=7.629e-06、
+> `--check docs/04` OK 194 行）。**F6 主体仍待做**：Q/K/V/dO 走 4D-TMA+SW128、GEMM1/2 换 wgmma
+> （3/4/5 仍 mma，fp8 wgmma 无转置操作数）、smem 压到 ≤116224B 且 regs ≤128 冲 2 CTA/SM。
+> 详见「当前进度 第一百四十轮」、`docs/03` §75；原始输出 `src/fp8/fa_bwd_fp8_wgmma2_smoke*`。
+> **下一步候选**：① **F6 主体**（见上「F6 剩余」三条）；② 其余候选（dK/dV-over-KV、
+> GEMM3/4/5 wgmma、ksplit/LSE）均已判决/到顶，不再候选；③ DET 仅 opt-in。
+>
+> **（第一百三十九轮）**：**fp8 主 kernel「唯一真杠杆」定位——dK/dV 跨 CTA `red` 的定量归因
 > + 三条候选判决**。把 `red` 拆到「哪个梯度 / 哪一维」：默认 kvtma（S4096 causal）L2 `red`
 > 114.5M，其中 **dK/dV 恒 ~104M（~90%）**，ksplit=8 只多 ~10.7M 的 **dQ 跨 part 原子**
 > （ksplit=1 实测 `red` 103.8M、L2 56.9%、main 1.92ms）⇒ 「dQ 改 partial」收益 <10% 不值。
@@ -5408,6 +5430,32 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     `..._p139_ncu_lse_s4096.out.txt`；文档 `docs/03` §74、`docs/08` §5.54。
   - **下一步候选**：① **F6**（双 warpgroup + TMA + wgmma 的 BM=128，唯一能砍半 `red` 且保 L2
     利用率）；② dK/dV-over-KV/GEMM3·5-wgmma/ksplit/LSE 均已判决/到顶，不再候选；③ DET 仅 opt-in。
+
+- 2026-09-29（第一百四十轮）：**F6 第一步完成——双 warpgroup（256 线程）fp8 wgmma 冒烟
+  （BM=128 几何钉死）**（默认路径一行未改；本轮是 F6 的「前置冒烟/de-risk」）。
+  - 动机：第 139 轮把 F6（BM=128 双 warpgroup + TMA + wgmma）立为唯一真杠杆。F6 是大改，
+    先把最不确定的一块单独冒烟：**256 线程 = 2 个 warpgroup 下用 K-major SW128 跑 fp8
+    `wgmma.m64n64k32`，每个 WG 各算 BM=128 的一半**，验证描述符偏移与 epilogue 行映射。
+  - **冒烟** `src/fp8/fa_bwd_fp8_wgmma2_smoke.cu`（输入 `{-3..3}` 整数，e4m3/e5m2 均精确，
+    CPU 参考无需 host 反量化）：GEMM1 `S=Q·Kᵀ`（`Q[128][128]`e4m3 × `K[64][128]`e4m3）、
+    GEMM2 `dP=dO·Vᵀ`（`dO[128][128]`e5m2 × `V[64][128]`e4m3）。第 2 个 WG 的 A 描述符按
+    `(64 行/8)×atom(1024B)=8192B` 偏移；epilogue `row=wg*64+wl*16+g+(q≥2?8:0)`、
+    `col=j*8+2*(lane%4)+(q&1)`。
+  - **数值**：GEMM1 / GEMM2 **max_abs=0.000e+00**（两个 warpgroup 都对）。
+  - **SASS**（`cuobjdump -sass` opcode 直方图）：**4×`QGMMA.64x64x32.F32.E4M3.E4M3` +
+    4×`QGMMA.64x64x32.F32.E5M2.E4M3`，无 HMMA / 无 LDSM**（128/32=4 步归约，两 WG 各自完整）。
+  - **ncu**（`--set full`，单 CTA）：**90 regs**、smem 49.15KB、`Block Limit Registers=2`、
+    `Block Limit Shared Mem=2` ⇒ **wgmma GEMM1/2 的寄存器压力远低于 `wg2` 的 217 regs**
+    （关键 F6 论据：wgmma 省掉 `ldmatrix` 与全局地址寄存器）。
+  - **F6 剩余**：Q/K/V/dO 走 4D-TMA + SW128（复用 O32/O37/O41/LSE 基建）；GEMM1/2 换 wgmma、
+    3/4/5 仍 mma（fp8 wgmma 无 `tnspA/tnspB`）；smem 压到 **≤116224B** 且 regs **≤128**
+    才能 2 CTA/SM（`wg2` 现 131.33KB/217regs，缺口 15.1KB/89regs；路径 = TMA 去 `Qp/dOp`
+    寄存器构造 + `Ps/Ss` 二选一驻留）。
+  - **回归**：`harness/fa_bwd_run.py --ci --dtype fp8 --fixed-only` **rc=0**（gate
+    worst=7.629e-06、`--check docs/04` OK 194 行）；默认 kernel 一行未改。
+  - 原始输出 `src/fp8/fa_bwd_fp8_wgmma2_smoke.out.txt`、`..._sass.out.txt`、`..._ncu.out.txt`、
+    `src/fp8/fa_bwd_fp8_p140_ci_fixed.out.txt`；文档 `docs/03` §75。
+  - **下一步候选**：① **F6 主体**（见上「F6 剩余」）；② 其余候选均已判决/到顶，不再候选。
 
 ## 灵感 / backlog
 
