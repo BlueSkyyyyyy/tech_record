@@ -1460,23 +1460,43 @@ lse_mma_kernel_bal(const unsigned char* __restrict__ q8, const float* __restrict
         for (int q = 0; q < 4; ++q) acc[0][j][q] = 0.f;
       mma_block<16, LBN_, HD, E4E4>(Qs, ASLD, Kt, ASLD, acc, wid, 0, lane);
 
+      // O63/F5：tile 内两趟 softmax（先求本 lane 各 s 的列 max，再统一 rescale+exp）；
+      //   与旧逐元素 online update 数学等价、只差 fp32 求和次序。覆盖 D=512 MLA/sm_90 回退。
+      const float qsc0 = scale * qs_s[wid * 16 + g];
+      const float qsc1 = scale * qs_s[wid * 16 + g + 8];
+      const int qi0 = m0 + wid * 16 + g;
+      const int qi1 = qi0 + 8;
+      const bool ge0 = qi0 < len, ge1 = qi1 < len;
+      float mloc0 = -INFINITY, mloc1 = -INFINITY;
 #pragma unroll
-      for (int j = 0; j < MTN; ++j)
+      for (int j = 0; j < MTN; ++j) {
+        const int jg0 = j0 + j * 8 + c2, jg1 = jg0 + 1;
+        const bool m00 = FULL || jg0 <= qi0, m01 = FULL || jg1 <= qi0;
+        const bool m10 = FULL || jg0 <= qi1, m11 = FULL || jg1 <= qi1;
+        const bool c00 = ge0 && jg0 < len && m00;
+        const bool c01 = ge0 && jg1 < len && m01;
+        const bool c10 = ge1 && jg0 < len && m10;
+        const bool c11 = ge1 && jg1 < len && m11;
+        const float k0 = KtS[j * 8 + c2], k1 = KtS[j * 8 + c2 + 1];
+        const float v0 = c00 ? acc[0][j][0] * qsc0 * k0 : -INFINITY;
+        const float v1 = c01 ? acc[0][j][1] * qsc0 * k1 : -INFINITY;
+        const float v2 = c10 ? acc[0][j][2] * qsc1 * k0 : -INFINITY;
+        const float v3 = c11 ? acc[0][j][3] * qsc1 * k1 : -INFINITY;
+        acc[0][j][0] = v0; acc[0][j][1] = v1; acc[0][j][2] = v2; acc[0][j][3] = v3;
+        mloc0 = fmaxf(mloc0, fmaxf(v0, v1));
+        mloc1 = fmaxf(mloc1, fmaxf(v2, v3));
+      }
+      const float mn0 = fmaxf(mrow[0], mloc0), mn1 = fmaxf(mrow[1], mloc1);
+      const float mr0 = (mn0 == -INFINITY) ? 0.f : mn0;
+      const float mr1 = (mn1 == -INFINITY) ? 0.f : mn1;
+      float add0 = 0.f, add1 = 0.f;
 #pragma unroll
-        for (int q = 0; q < 4; ++q) {
-          int s = q >= 2 ? 1 : 0;
-          int r = wid * 16 + g + (q >= 2 ? 8 : 0);
-          int c = j * 8 + c2 + (q & 1);
-          int qi = m0 + r, jg = j0 + c;
-          float sv = -INFINITY;
-          if (qi < len && jg < len && (FULL || jg <= qi))
-            sv = acc[0][j][q] * scale * qs_s[r] * KtS[c];
-          if (sv != -INFINITY) {
-            float mn = fmaxf(mrow[s], sv);
-            lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
-            mrow[s] = mn;
-          }
-        }
+      for (int j = 0; j < MTN; ++j) {
+        add0 += fexp(acc[0][j][0] - mr0) + fexp(acc[0][j][1] - mr0);
+        add1 += fexp(acc[0][j][2] - mr1) + fexp(acc[0][j][3] - mr1);
+      }
+      if (mn0 != -INFINITY) { lrow[0] = lrow[0] * fexp(mrow[0] - mn0) + add0; mrow[0] = mn0; }
+      if (mn1 != -INFINITY) { lrow[1] = lrow[1] * fexp(mrow[1] - mn1) + add1; mrow[1] = mn1; }
     }
 
     // 同一 row 由 4 个 lane（同 g、lane&3=0..3）持有，warp 内 shfl 归约
@@ -1646,22 +1666,41 @@ lse_mma_kernel_bal_wgmma(const unsigned char* __restrict__ q8, const float* __re
       float d[32];
       wgmma_qkt64_fp8(Qs, Kt, HD, d);
 
+      // O63/F5：同 `lse_mma_kernel_bal_tma` 的「tile 内两趟 softmax」（先求本 lane 各 s 的
+      //   列 max，再统一 rescale+exp）。数学等价、只差 fp32 求和次序；exp 64→34、去逐元素分支。
+      const float qsc0 = scale * qs_s[wid * 16 + g];
+      const float qsc1 = scale * qs_s[wid * 16 + g + 8];
+      const int qi0 = m0 + wid * 16 + g;
+      const int qi1 = qi0 + 8;
+      const bool ge0 = qi0 < len, ge1 = qi1 < len;
+      float mloc0 = -INFINITY, mloc1 = -INFINITY;
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int j = 0; j < 8; ++j) {
+        const int jg0 = j0 + j * 8 + c2, jg1 = jg0 + 1;
+        const bool c00 = ge0 && jg0 < len && jg0 <= qi0;
+        const bool c01 = ge0 && jg1 < len && jg1 <= qi0;
+        const bool c10 = ge1 && jg0 < len && jg0 <= qi1;
+        const bool c11 = ge1 && jg1 < len && jg1 <= qi1;
+        const float k0 = KtS[j * 8 + c2], k1 = KtS[j * 8 + c2 + 1];
+        const float v0 = c00 ? d[j * 4 + 0] * qsc0 * k0 : -INFINITY;
+        const float v1 = c01 ? d[j * 4 + 1] * qsc0 * k1 : -INFINITY;
+        const float v2 = c10 ? d[j * 4 + 2] * qsc1 * k0 : -INFINITY;
+        const float v3 = c11 ? d[j * 4 + 3] * qsc1 * k1 : -INFINITY;
+        d[j * 4 + 0] = v0; d[j * 4 + 1] = v1; d[j * 4 + 2] = v2; d[j * 4 + 3] = v3;
+        mloc0 = fmaxf(mloc0, fmaxf(v0, v1));
+        mloc1 = fmaxf(mloc1, fmaxf(v2, v3));
+      }
+      const float mn0 = fmaxf(mrow[0], mloc0), mn1 = fmaxf(mrow[1], mloc1);
+      const float mr0 = (mn0 == -INFINITY) ? 0.f : mn0;
+      const float mr1 = (mn1 == -INFINITY) ? 0.f : mn1;
+      float add0 = 0.f, add1 = 0.f;
 #pragma unroll
-        for (int q = 0; q < 4; ++q) {
-          int s = q >= 2 ? 1 : 0;
-          int r = wid * 16 + g + (q >= 2 ? 8 : 0);
-          int c = j * 8 + c2 + (q & 1);
-          int qi = m0 + r, jg = j0 + c;
-          float sv = -INFINITY;
-          if (qi < len && jg < len && jg <= qi) sv = d[j * 4 + q] * scale * qs_s[r] * KtS[c];
-          if (sv != -INFINITY) {
-            float mn = fmaxf(mrow[s], sv);
-            lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
-            mrow[s] = mn;
-          }
-        }
+      for (int j = 0; j < 8; ++j) {
+        add0 += fexp(d[j * 4 + 0] - mr0) + fexp(d[j * 4 + 1] - mr0);
+        add1 += fexp(d[j * 4 + 2] - mr1) + fexp(d[j * 4 + 3] - mr1);
+      }
+      if (mn0 != -INFINITY) { lrow[0] = lrow[0] * fexp(mrow[0] - mn0) + add0; mrow[0] = mn0; }
+      if (mn1 != -INFINITY) { lrow[1] = lrow[1] * fexp(mrow[1] - mn1) + add1; mrow[1] = mn1; }
     }
 
     // 同一 row 由 4 个 lane（同 g、lane&3=0..3）持有，warp 内 shfl 归约
@@ -1857,7 +1896,9 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   };
 
   int quse = 0;
-  int kuse[2] = {0, 0};
+  // O63/F5：mbarrier 相位用两个标量（原 `int kuse[2]` 按运行期 `st=rnt&1` 动态下标会被
+  //   ptxas 落到 local memory——同 F3-a 在 `fp8_mma_body` 修的坑；此处 LSE 也有）。
+  int kuse0 = 0, kuse1 = 0;
 #pragma unroll 1
   for (int t = 0; t < 2; ++t) {
     const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
@@ -1878,7 +1919,9 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
     for (int rnt = 0; rnt < nuse; ++rnt) {
       const int nt = nt0 + rnt;
       const int st = PIPE ? (rnt & 1) : 0;
-      mbar_wait(kbar + st, (uint32_t)(kuse[st] & 1)); kuse[st]++;
+      const uint32_t kphase = st ? (uint32_t)(kuse1 & 1) : (uint32_t)(kuse0 & 1);
+      if (st) kuse1++; else kuse0++;
+      mbar_wait(kbar + st, kphase);
       __syncthreads();
       const int j0 = nt * LBN;
       char* Kt = Ks + st * TILE;
@@ -1890,22 +1933,45 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
       float d[32];
       wgmma_qkt64_fp8(Qs, Kt, HD, d);
 
+      // O63/F5：tile 内「两趟 softmax」——先求本 lane 两个 s 的列 max（第一趟，顺手把
+      //   掩码后的 S 写回 `d`），再统一 rescale + 求和（第二趟）。与旧「逐元素 online
+      //   update」**数学等价**（只差 fp32 求和次序），但把每 tile 的 `fexp` 从 64 降到
+      //   34、并删掉逐元素的 `if (sv != -INF)` 分支（SASS 里 107×BSSY/BSYNC）。
+      const float qsc0 = scale * qs_s[wid * 16 + g];
+      const float qsc1 = scale * qs_s[wid * 16 + g + 8];
+      const int qi0 = m0 + wid * 16 + g;
+      const int qi1 = qi0 + 8;
+      const bool ge0 = qi0 < S, ge1 = qi1 < S;
+      float mloc0 = -INFINITY, mloc1 = -INFINITY;
 #pragma unroll
-      for (int j = 0; j < 8; ++j)
+      for (int j = 0; j < 8; ++j) {
+        const int jg0 = j0 + j * 8 + c2, jg1 = jg0 + 1;
+        const bool c00 = ge0 && jg0 < S && jg0 <= qi0;
+        const bool c01 = ge0 && jg1 < S && jg1 <= qi0;
+        const bool c10 = ge1 && jg0 < S && jg0 <= qi1;
+        const bool c11 = ge1 && jg1 < S && jg1 <= qi1;
+        const float k0 = KtS[j * 8 + c2], k1 = KtS[j * 8 + c2 + 1];
+        float v0 = c00 ? d[j * 4 + 0] * qsc0 * k0 : -INFINITY;
+        float v1 = c01 ? d[j * 4 + 1] * qsc0 * k1 : -INFINITY;
+        float v2 = c10 ? d[j * 4 + 2] * qsc1 * k0 : -INFINITY;
+        float v3 = c11 ? d[j * 4 + 3] * qsc1 * k1 : -INFINITY;
+        d[j * 4 + 0] = v0; d[j * 4 + 1] = v1; d[j * 4 + 2] = v2; d[j * 4 + 3] = v3;
+        mloc0 = fmaxf(mloc0, fmaxf(v0, v1));
+        mloc1 = fmaxf(mloc1, fmaxf(v2, v3));
+      }
+      const float mn0 = fmaxf(mrow[0], mloc0), mn1 = fmaxf(mrow[1], mloc1);
+      // 全掩码（mn 仍为 -inf）时跳过本 tile 的更新；否则用安全的 `mr` 参考值算 exp（掩码
+      // 位 -inf 自动得 0）。
+      const float mr0 = (mn0 == -INFINITY) ? 0.f : mn0;
+      const float mr1 = (mn1 == -INFINITY) ? 0.f : mn1;
+      float add0 = 0.f, add1 = 0.f;
 #pragma unroll
-        for (int q = 0; q < 4; ++q) {
-          int s = q >= 2 ? 1 : 0;
-          int r = wid * 16 + g + (q >= 2 ? 8 : 0);
-          int c = j * 8 + c2 + (q & 1);
-          int qi = m0 + r, jg = j0 + c;
-          float sv = -INFINITY;
-          if (qi < S && jg < S && jg <= qi) sv = d[j * 4 + q] * scale * qs_s[r] * KtS[c];
-          if (sv != -INFINITY) {
-            float mn = fmaxf(mrow[s], sv);
-            lrow[s] = lrow[s] * fexp(mrow[s] - mn) + fexp(sv - mn);
-            mrow[s] = mn;
-          }
-        }
+      for (int j = 0; j < 8; ++j) {
+        add0 += fexp(d[j * 4 + 0] - mr0) + fexp(d[j * 4 + 1] - mr0);
+        add1 += fexp(d[j * 4 + 2] - mr1) + fexp(d[j * 4 + 3] - mr1);
+      }
+      if (mn0 != -INFINITY) { lrow[0] = lrow[0] * fexp(mrow[0] - mn0) + add0; mrow[0] = mn0; }
+      if (mn1 != -INFINITY) { lrow[1] = lrow[1] * fexp(mrow[1] - mn1) + add1; mrow[1] = mn1; }
       __syncthreads();  // 所有 warp 读完本 tile 后才能覆盖该 stage / 下一轮 Q
       if (!PIPE && rnt + 1 < nuse) issue_k(0, j0 + LBN);
     }

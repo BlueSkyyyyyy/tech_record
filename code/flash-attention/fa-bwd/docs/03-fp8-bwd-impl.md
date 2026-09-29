@@ -6499,3 +6499,137 @@ ncu --set full --launch-skip 3 --launch-count 1 \
 ~6.9×，WS/流水都改不了这个量；可走 FA2 式「dK/dV 按 KV 并行」的分块（backlog，工程量大）
 或继续 DET 降字节；② F3 的 WS 在 3 CTA/SM 的资源约束下不成立（评估已收口）；
 ③ 默认 `REGDQ` 实例的 60B spill（168-reg 硬墙）是剩余 local 流量，除非改工作点（BM/occupancy）。
+
+---
+
+## 71. F5（第一百三十六轮，**正结果，默认化**）：fp8 LSE 的「tile 内两趟 softmax」+ mbarrier 相位去 local
+
+### 71.1 动机与现状（fp8 专项冲刺第五步 = preprocess 提速）
+
+『fp8 专项冲刺』F5 = preprocess 继续提速。F1–F4 把 main 默认切到 Hopper（wgmma+TMA）、
+把 DET partial 降精度+扇区化后，S=4096 端到端的时间构成为
+**main 1.55ms（81%）/ preprocess 0.22ms（12%）/ quant 0.069ms（3.6%）/ convert 0.05ms**。
+main 的杠杆已被 F3-a 判为「3 CTA/SM 的 L2 流量锁死」（见「阻塞」），故 F5 转向 **preprocess**。
+
+先用 ncu 定位 preprocess 的构成：D=128 定长 causal 的 LSE 是 **`lse_mma_kernel_bal_tma`**（O32/O38），
+S=4096 时 **Duration 201µs / Executed Instructions 141.0M / Issue Slots Busy 73.6% / Ipc 3.09 /
+occupancy 42%**——**纯指令发射（issue）受限**，DRAM 仅 2.7%、Compute-pipe 也非 mma（是 softmax 的
+`fexp`/比较/归约）。对 SASS 做 opcode 直方图（`cuobjdump -sass`）看每 tile 的 epilogue：
+
+| opcode | 每 tile 计数 | 说明 |
+|---|---|---|
+| `MUFU.EX2` | **64** | 每元素 2 个 `fexp`（= 2×FMUL+2×MUFU），32 元素/tile |
+| `FMUL` | 64 | 其中一半是 `fexp` 的 `×log2e` |
+| `FSETP.*` | **180** | 掩码 + `sv != -INF` + online max 三类比较 |
+| `BSSY`/`BSYNC` | **107 / 107** | `if (sv != -INF) {…}` 逐元素分支 → 分支同步指令 |
+| `LDS` | 316 | smem 读 |
+
+即旧 epilogue 是「**逐元素 online-softmax**」：每个 (m,j) 元素都做
+`mn=max(m,sv); l=l*exp(m-mn)+exp(sv-mn); m=mn`。因为 `mn` 必是 `m`、`sv` 之一，
+**两次 `exp` 里恒有一次是 `exp(0)=1`（纯浪费）**；且 `if (sv != -INF)` 逐元素分支在 SASS 里
+展开成大量 `BSSY/BSYNC`。这正是可动的地方。
+
+### 71.2 实现（单/两文件 device 逐字同源，`sync_onefile_device.py` 核对 `identical: True`）
+
+把 4 个 LSE kernel 的 epilogue 从「逐元素 online」改成 **tile 内两趟 softmax**：
+
+1. **第一趟**：对本 lane 负责的 16 个列（每个 `s` 行槽 8 个 `j` × 2 个 `(q&1)`）先算掩码后的
+   `sv`（掩码位 `-inf`）并顺手写回累加器数组，同时用 `fmaxf` 求本 lane 的**列 max `mloc`**；
+2. `mn = max(mrow, mloc)`；**第二趟**：`add = Σ exp(sv - mn)`（掩码位 `exp(-inf)=0` 自动为 0），
+   再 `l = l*exp(mrow-mn) + add`、`m = mn`。
+
+与旧实现**数学等价**（max 是精确的、sum 只换了结合次序），但：
+- `fexp` 从每 tile **64 → 34**（16 列 ×2 个 s + 2 个 rescale），砍掉那次恒为 `exp(0)` 的浪费；
+- 删掉逐元素的 `if (sv != -INF)` 分支（改成第一趟的三元选择 + 第二趟的 `fexp(-inf)=0`）；
+- 全掩码（`mn` 仍为 `-inf`）时用 `if (mn != -INF)` 跳过本 tile（每 tile 仅 2 次，而非每元素）；
+- `qi < len`（每 `s` 一次）从内层提出；`jg < len && jg<=qi` 合并进各列的三元判断。
+
+覆盖的 4 个 kernel：`lse_mma_kernel_bal_tma`（D=128 定长 causal，默认）、
+`lse_mma_kernel_bal_wgmma`（varlen D=128 causal、`--lsetma=0` 回退）、
+`lse_mma_kernel_bal`（D=512 MLA、`sm_90` 回退；支持 `FULL`/`MTN`）。
+
+**顺带修一个既有坑（同 F3-a 在 main kernel 修的）**：`lse_mma_kernel_bal_tma` 里 mbarrier 相位
+`int kuse[2]` 按运行期 `kuse[st]`（`st=rnt&1`）动态下标 → ptxas 落到 **local memory**
+（ncu：local `op_ld/op_st` = 532,480 / 598,016 扇区）。改两标量 `kuse0/kuse1` + 运行期三元，
+local 扇区归 **0**。
+
+### 71.3 数值：与 vs-ref/TE 打印精度一致、单两文件 gate 全绿（只改 exp/求和次序）
+
+SASS 的两趟化只改 LSE 的 fp32 求和次序 ⇒ LSE 差 ~1e-7，再经 fp8 量化取整边界会翻少数元素，
+使 dq/dk/dv 相对旧实现偏移 **~1e-3**（远小于 fp8 本身 ~0.26 的对拍误差，且不改变 vs-ref 的
+max_abs）。实测 **vs ref / vs TE 与历史打印位一致**：
+
+| case（fp8 causal） | vs fp32 ref max_abs（OLD = NEW） |
+|---|---|
+| S512 H16 | 2.426e-1 / 2.972e-1 / 3.733e-1 |
+| S1024 H32 | 2.399e-1 / 4.177e-1 / 3.535e-1 |
+| S1024 H32 kv4 | 2.517e-1 / 5.339e-1 / 7.173e-1 |
+| S4096 H16 | 2.635e-1 / 2.644e-1 / 3.216e-1 |
+| MLA S1024 H2 D512 | 2.232e-1 / 3.337e-1 / 3.602e-1 |
+| varlen b1_t512 D128 | 2.280e-1 / 3.108e-1 / 3.422e-1 |
+
+单/两文件一致性 gate：**worst=1.335e-5（tol 1e-4）OK**；`--check docs/04` OK 194 行
+（`docs/04` 内嵌表无需刷新）。旧/新逐元素差 `max|new-old|`：S4096 dq 4.29e-3 / dk 1.62e-3 /
+dv 6.68e-4（S512 dq 8.35e-7 —— 小 shape 常整块命中，差异更小）。
+
+### 71.4 性能（同 session，CUDA event，OLD vs NEW）
+
+**preprocess（LSE+delta）**：
+
+| case | OLD preprocess (ms) | **NEW preprocess (ms)** | 倍数 |
+|---|---|---|---|
+| S512 H16 | 0.0188 | **0.0156** | 1.21× |
+| S1024 H32 | 0.0513 | **0.0396** | 1.30× |
+| S1024 H32 kv4 | 0.0499 | **0.0371** | 1.34× |
+| S4096 H16 | 0.2155 | **0.1378** | **1.56×** |
+
+**端到端 total**：S512 0.1010→**0.0977**（1.034×）、S1024H32 0.3847→**0.3711**（1.037×）、
+kv4 0.3524→**0.3381**（1.042×）、S4096 1.8876→**1.8172ms（75.63 TF，1.039×）**。
+**varlen**：b1_t512 D128 0.1090→**0.1066**（1.023×）、b4_t3840 D128 0.9264→**0.8904（1.040×）**、
+b3_t1792 D512(MLA) 0.2766→**0.2737**（1.011×）。main 不受影响（逐 shape 持平）。
+
+**对标**（同 session 纯反向 `harness/fa_bwd_bench.py bench --dtype fp8`，CUPTI device）：
+TE FP8 S512 **0.0357ms/120.3TF**、S1024H16 0.0552/311、S4096 **0.3003ms/915TF** ⇒ ours total
+（含 quant+preprocess+main）S512 **2.74×**、S4096 **6.05×**（F1 时 2.83×/6.43×）。
+
+### 71.5 ncu：LSE 1.67×、指令 −38.7%、local 归零
+
+`lse_mma_kernel_bal_tma<128,1>`（S=4096，grid (32,16,4)，128 线程）：
+
+| 指标 | OLD | **NEW** |
+|---|---|---|
+| Duration | 201.25 µs | **120.29 µs（1.67×）** |
+| Executed Instructions | 140,994,592 | **86,441,386（−38.7%）** |
+| local `op_ld`/`op_st` 扇区 | 532,480 / 598,016 | **0 / 0** |
+| SM Throughput | 73.73% | 75.73% |
+| registers / occupancy | 59 / 42.19% | 59 / 41.69% |
+
+指令数 −38.7% 与 SASS 归因（`fexp` 64→34、去 214 条 BSSY/BSYNC、去 ~120 条 FSETP）吻合。
+**结论：LSE 此前是纯 issue-bound（73.6%），该 epilogue 重写把「每元素额外一次废物 exp +
+逐元素分支」这块纯开销拿掉，是本轮全部收益来源。**
+
+### 71.6 复现 / 原始输出
+
+```bash
+# 两文件（Hopper：sm90a + wgmma + TMA）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=80
+# A/B：OLD（pre-change）二进制 vs NEW
+# ncu LSE
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --launch-count 1 \
+  --kernel-name regex:lse_mma_kernel_bal_tma --set full -- --iters=1
+# 单文件 device 同步
+python3 scripts/sync_onefile_device.py src/fp8/fa_bwd_fp8_kernels.cuh \
+  src/fp8/fa_bwd_fp8_mma_onefile.cu '#include <cuda_runtime.h>'
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_f5_lse2pass_ab.out.txt`（8 shape×OLD/NEW 计时+对拍）、
+`src/fp8/fa_bwd_fp8_f5_ncu_lse_s4096.out.txt`（LSE OLD/NEW 全指标）、
+`src/fp8/fa_bwd_fp8_f5_te_baseline_fp8.out.txt`（同 session TE FP8 基线）。
+全量 `python3 harness/fa_bwd_run.py --ci` 73 case 全绿（fp16 7.812e-3 / bf16 7.812e-3 /
+fp8 1.335e-5，`--check docs/04` OK 194 行）。
+
+**下一步候选**：① main kernel 仍是 81% 的墙（F3-a：L2 流量受 3 CTA/SM 锁死，真杠杆是 F4/改工作划分）；
+② quant（0.069ms）已 DRAM ~72%，delta/convert 也近带宽，F5 至此收口；③ F4 默认路径的 L2 `red`
+（114.5M 扇区）仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
