@@ -939,3 +939,21 @@ smem 冲突 + 低 occ
   LSE 不再是墙（S4096 fp16 preprocess 仅 ~13% 端到端），默认路径的墙仍是 main。
   详见 `docs/01` §19、`docs/01b` §6av；原始输出 `src/fp16/fa_bwd_fp16_p143_*`、
   `src/bf16/fa_bwd_bf16_p143_*`、`src/fa_bwd_p143_ci_fp16_bf16.out.txt`。
+
+### 5.58 O64：fp8 量化 + 清零融合成单 launch（第一百四十四轮，正结果，默认）
+
+- **背景**：F1→F6 收口后默认 fp8 main 受本卡寄存器/smem 硬墙锁定（见 ROADMAP「阻塞」），转查
+  **非 main 固定开销**。nsys 拆 S1024H32 causal 默认路径：per-call 有 4 个 quant kernel + 3 个
+  `cudaMemset` 共 7 次串行小 launch；ncu 每个 quant 只到 **DRAM 58% / Compute 43%**（8.7µs/个，
+  尾波 + 间隙截断），quant+残留 ≈ 端到端 19%。
+- **做了什么**：新增 `quantize_zero_warp_kernel<VPT>`——每 warp 一行、单一 grid 覆盖「量化 Q/dO/K/V +
+  清零 dQ/dK/dV」7 类任务；量化抽成 `quant_row_warp`（与 O14 逐字相同），清零 `zero_row_warp`（float4）。
+  定长 + varlen 的 `run_all` 默认走它，`--qfuse=0` 退回旧路径做 A/B。**数值逐位不变**。仅 fp8（fp16/bf16
+  无量化）。
+- **结果**（同 binary A/B）：定长 S512 **1.168×** / S1024H32 **1.046×** / GQA kv4 **1.048×** /
+  S4096 **1.016×**；varlen MLA b1_t512 **1.177×** / b4_t3840 **1.020×**。
+  `max_abs(fused-vs-unfused)` dq/dk/dv ≤ 7.2e-7（仅 atomic 次序）。ncu 融合 kernel DRAM **58→73%**；
+  nsys per-call kernel 数 **10→5**、间隙残留 ~31→~12µs。`--ci --dtype fp8` 全绿、`--check docs/04` OK。
+- **教训**：**「小 launch 的固定开销」是继 main 之后的第二梯队**——多个独立、各自不满带宽的小 kernel
+  （量化/清零）串行时，融合成一个大 kernel 能让 DRAM 流水连续、吃掉 per-launch 尾波与间隙；对
+  launch 占比高的小 shape 收益可达 15–18%，对 main 主导的大 S 则边际（~1%）。详见 `docs/03` §78。

@@ -2807,7 +2807,24 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百四十三轮）**：**O63——fp16/bf16 LSE 的「tile 内两趟 softmax」**
+> **最新（第一百四十四轮）**：**O64——fp8 输入量化 + 累加缓冲清零融合成单 launch**
+> （**正结果，默认**）。F1→F6 收口后 fp8 main 受本卡寄存器/smem 硬墙锁定（见「阻塞」），
+> 本轮转查**非 main 固定开销**：nsys 拆 fp8 默认路径发现 per-call 有 **4 个 quant kernel +
+> 3 个 `cudaMemset`** 共 7 次串行小 launch（每个 quant 仅 DRAM 58%、尾波 + 间隙截断），
+> quant + 残留 ≈ 端到端 ~19%。新增 `quantize_zero_warp_kernel<VPT>`（每 warp 一行、单一 grid
+> 覆盖「量化 Q/dO/K/V + 清零 dQ/dK/dV」7 类任务；量化 `quant_row_warp` 与 O14 **逐字相同**、
+> 清零 `zero_row_warp`），定长 + varlen 默认走它、`--qfuse=0` 同 binary A/B。**数值逐位不变**
+> （仅 atomic 次序，`max_abs(fused-vs-unfused) ≤ 7.2e-7`），**仅 fp8**（fp16/bf16 无量化）。
+> **性能（同 binary A/B）**：定长 S512 **1.168×**、S1024H32 **1.046×**、GQA kv4 **1.048×**、
+> S4096 **1.016×**；varlen MLA b1_t512 **1.177×**、varlen b4_t3840 **1.020×**。ncu 融合 kernel
+> DRAM **58→73%**；nsys per-call kernel 数 **10→5**、间隙残留 ~31→~12µs。`--ci --dtype fp8`
+> 全绿、`--check docs/04` OK。详见「当前进度 第一百四十四轮」、`docs/03` §78、`docs/08` §5.58；
+> 原始输出 `src/fp8/fa_bwd_fp8_o64_*`。
+> **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡硬墙锁定，见「阻塞」）；
+> ② 同款「小 launch 融合」思路可扫 fp16/bf16 的固定开销（其无 quant，仅剩 memset/convert）；
+> ③ 其余候选（dK/dV-over-KV、GEMM3/4/5 wgmma、ksplit）均已判决/到顶；④ DET 仅 opt-in。
+>
+> **（第一百四十三轮）**：**O63——fp16/bf16 LSE 的「tile 内两趟 softmax」**
 > （把 fp8 F5 的 LSE 提速逐字回移；**正结果，默认**）。F1→F6 收口后 fp8 默认路径受本卡寄存器/
 > smem 硬墙锁定（见「阻塞」），本轮转做**跨 dtype 的既证优化回移**：F5 只覆盖 fp8 的 4 个 LSE
 > kernel，fp16/bf16 仍是旧的「逐元素 online-softmax」。把两趟 epilogue 逐字回移/参数化到 fp16
@@ -5639,8 +5656,34 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
      `src/fp16/fa_bwd_fp16_p143_{base,new}_{s4096,varlen,hopper}.out.txt`、
      `..._ncu_lse_{base,new}.out.txt`、`..._ncu_wgmma_{base,new}.out.txt`、
      `src/bf16/fa_bwd_bf16_p143_{base,new}_s4096.out.txt`、`src/fa_bwd_p143_ci_fp16_bf16.out.txt`。
-   - **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡硬墙锁定，见「阻塞」）；
-     ② fp8/MLA 的对应 LSE 两趟优化已做（F5）；③ 其余候选均已判决/到顶。
+    - **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡硬墙锁定，见「阻塞」）；
+      ② fp8/MLA 的对应 LSE 两趟优化已做（F5）；③ 其余候选均已判决/到顶。
+
+- 2026-09-29（第一百四十四轮）：**O64 完成（fp8 输入量化 + 累加缓冲清零融合成单 launch；
+  正结果，默认）**。F1→F6 收口后默认 fp8 main 受本卡寄存器/smem 硬墙锁定（见「阻塞」），
+  本轮转查**非 main 固定开销**：nsys 拆 fp8 默认路径（S1024H32 causal）发现 per-call 有
+  **4 个 `quantize_row_warp_kernel` + 3 个 `cudaMemset`** 共 7 次串行小 launch，ncu 每个 quant
+  只到 **DRAM 58% / Compute 43%**（尾波 + 间隙截断），quant + 残留 ≈ 端到端 ~19%。
+    - **改动（单/两文件同源，device 由 sync 脚本核对 `identical: True`）**：新增
+      `quantize_zero_warp_kernel<VPT>`（`src/fp8/fa_bwd_fp8_kernels.cuh`）——每 warp 一行、单一
+      1D grid 按任务序号覆盖「量化 Q/dO/K/V + 清零 dQ/dK/dV」7 类任务；量化抽成
+      `quant_row_warp<VPT,E5M2>`（与 O14 **逐字相同**）、清零 `zero_row_warp<VPT>`（float4）。
+      定长 + varlen 的 `run_all` 默认走它，`--qfuse=0` 退回旧「4 quant + 3 memset」做同 binary A/B。
+      **数值逐位不变**（每行 amax/scale/cvt 与 O14 一致；清零只是写 0）。**仅 fp8**（fp16/bf16 无量化步）。
+    - **结果（同 binary `[O64 A/B]`，event）**：定长 S512 **1.168×**（0.0990→0.0848ms）、
+      S1024H32 **1.046×**、GQA kv4 S1024 **1.048×**、S4096 **1.016×**（1.8256→1.7974ms）；
+      varlen MLA b1_t512 **1.177×**（0.0933→0.0793ms）、varlen b4_t3840 D=128 **1.020×**。
+      `max_abs(fused-vs-unfused)` dq/dk/dv ≤ **7.2e-7**（仅跨 CTA atomic 次序）；对 ref/TE 与
+      O4b/O7 历史一致。
+    - **ncu / nsys**：融合 kernel S1024H32 `Duration 45.7µs、DRAM 73.1%`（旧单 kernel 58%）、
+      `L2 82.6% / Compute 61.2% / 27 regs`；默认 per-call kernel 数 **10→5**（`quantZERO` 44.5µs
+      一次、无 memset；其余 LSE 27.4 / merge 2.8 / delta 10.9 / main 257.9µs），间隙残留 ~31→~12µs。
+    - **CI**：`--ci --dtype fp8`（定长 + varlen）全绿（一致性 gate worst 1.144e-05 / 2.861e-06，
+      tol 1e-4）、`--check docs/04` OK 194 行；sm_90 与 sm90a 构建均通过。详见 `docs/03` §78、
+      `docs/08` §5.58；原始输出 `src/fp8/fa_bwd_fp8_o64_*`。
+    - **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡硬墙锁定，见「阻塞」）；
+      ② 把同款「小 launch 融合」思路扫 fp16/bf16 的固定开销（memset/convert/quant 无，dbg 项少）；
+      ③ 其余候选均已判决/到顶。
 
 ## 灵感 / backlog
 

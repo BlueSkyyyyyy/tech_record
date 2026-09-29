@@ -1388,44 +1388,108 @@ __global__ void quantize_row_kernel(const float* __restrict__ x,
 // **数值逐位不变**：行 amax 用 `fmaxf`，可交换结合 ⇒ warp 树与旧 smem 树的归约顺序无关；
 // scale 公式、每元素 `cvt_*` 与旧版逐元素一致。故 q8/qs 等与旧 kernel 完全相同（本篇 A/B 验证）。
 // 只实例化 D%4==0 且 D/32 ∈ {4,16}（本项目的 head_dim 128/512）；其它 D 回退旧 kernel。
+// O64：量化单行的 warp 例程（从 `quantize_row_warp_kernel` 抽出，供融合 kernel 复用）。
+//   与 O14 版**逐字相同**：float4 读、lane 内 amax、warp `shfl_xor` 树、scale=amax/fp8_max、
+//   `cvt_*` 逐元素、`uchar4` 写回。数值逐位不变。
+template <int VPT, bool E5M2>
+__device__ __forceinline__ void quant_row_warp(const float* __restrict__ x,
+                                               unsigned char* __restrict__ xq,
+                                               float* __restrict__ scale, long long row,
+                                               int lane) {
+  constexpr int D = VPT * 32;  // 一行元素数（VPT=4→128，16→512）
+  const float fp8_max = E5M2 ? kE5M2Max : kE4M3Max;
+  const float4* xr4 = reinterpret_cast<const float4*>(x + row * (long long)D);
+  float v[VPT];
+  float amax = 0.f;
+#pragma unroll
+  for (int t = 0; t < VPT / 4; ++t) {
+    const float4 q = xr4[t * 32 + lane];
+    v[t * 4 + 0] = q.x;
+    v[t * 4 + 1] = q.y;
+    v[t * 4 + 2] = q.z;
+    v[t * 4 + 3] = q.w;
+    amax = fmaxf(amax, fmaxf(fmaxf(fabsf(q.x), fabsf(q.y)), fmaxf(fabsf(q.z), fabsf(q.w))));
+  }
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1)
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+  const float s = (amax > 0.f) ? (amax / fp8_max) : 1.f;
+  if (lane == 0) scale[row] = s;
+  unsigned char* out = xq + row * (long long)D;
+#pragma unroll
+  for (int t = 0; t < VPT / 4; ++t) {
+    uchar4 o;
+    o.x = E5M2 ? cvt_e5m2(v[t * 4 + 0] / s) : cvt_e4m3(v[t * 4 + 0] / s);
+    o.y = E5M2 ? cvt_e5m2(v[t * 4 + 1] / s) : cvt_e4m3(v[t * 4 + 1] / s);
+    o.z = E5M2 ? cvt_e5m2(v[t * 4 + 2] / s) : cvt_e4m3(v[t * 4 + 2] / s);
+    o.w = E5M2 ? cvt_e5m2(v[t * 4 + 3] / s) : cvt_e4m3(v[t * 4 + 3] / s);
+    *reinterpret_cast<uchar4*>(out + (t * 32 + lane) * 4) = o;
+  }
+}
+
+// 清零单行（VPT*32 个 fp32，float4 写）。
+template <int VPT>
+__device__ __forceinline__ void zero_row_warp(float* __restrict__ x, long long row, int lane) {
+  constexpr int D = VPT * 32;
+  float4* p = reinterpret_cast<float4*>(x + row * (long long)D);
+  const float4 z = make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll
+  for (int t = 0; t < VPT / 4; ++t) p[t * 32 + lane] = z;
+}
+
 template <int VPT, bool E5M2>
 __global__ void __launch_bounds__(128)
 quantize_row_warp_kernel(const float* __restrict__ x, unsigned char* __restrict__ xq,
                          float* __restrict__ scale, long long nrows) {
-  constexpr int D = VPT * 32;  // 一行元素数（VPT=4→128，16→512）
-  const float fp8_max = E5M2 ? kE5M2Max : kE4M3Max;
   const int lane = threadIdx.x & 31;
   const int warp = threadIdx.x >> 5;
   constexpr int NW = 4;  // 128 线程 = 4 个 warp
   for (long long row = (long long)blockIdx.x * NW + warp; row < nrows;
        row += (long long)gridDim.x * NW) {
-    const float4* xr4 = reinterpret_cast<const float4*>(x + row * (long long)D);
-    float v[VPT];
-    float amax = 0.f;
-#pragma unroll
-    for (int t = 0; t < VPT / 4; ++t) {
-      const float4 q = xr4[t * 32 + lane];
-      v[t * 4 + 0] = q.x;
-      v[t * 4 + 1] = q.y;
-      v[t * 4 + 2] = q.z;
-      v[t * 4 + 3] = q.w;
-      amax = fmaxf(amax, fmaxf(fmaxf(fabsf(q.x), fabsf(q.y)), fmaxf(fabsf(q.z), fabsf(q.w))));
-    }
-#pragma unroll
-    for (int off = 16; off > 0; off >>= 1)
-      amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
-    const float s = (amax > 0.f) ? (amax / fp8_max) : 1.f;
-    if (lane == 0) scale[row] = s;
-    unsigned char* out = xq + row * (long long)D;
-#pragma unroll
-    for (int t = 0; t < VPT / 4; ++t) {
-      uchar4 o;
-      o.x = E5M2 ? cvt_e5m2(v[t * 4 + 0] / s) : cvt_e4m3(v[t * 4 + 0] / s);
-      o.y = E5M2 ? cvt_e5m2(v[t * 4 + 1] / s) : cvt_e4m3(v[t * 4 + 1] / s);
-      o.z = E5M2 ? cvt_e5m2(v[t * 4 + 2] / s) : cvt_e4m3(v[t * 4 + 2] / s);
-      o.w = E5M2 ? cvt_e5m2(v[t * 4 + 3] / s) : cvt_e4m3(v[t * 4 + 3] / s);
-      *reinterpret_cast<uchar4*>(out + (t * 32 + lane) * 4) = o;
-    }
+    quant_row_warp<VPT, E5M2>(x, xq, scale, row, lane);
+  }
+}
+
+// O64：把「4 次输入量化（q/dO/k/v）+ 3 次累加缓冲清零（dQ/dK/dV）」融合成 **1 个 launch**。
+//   动机：默认路径的 4 个 quant kernel + 3 个 `cudaMemset` 是 7 次串行 launch，各自在
+//   S1024H32 上只到 ~57% DRAM、且被尾延迟截断（实测 quant 40.8µs + 尾/清零残留 ~31µs，
+//   合计约占端到端 ~19%）。融合后 DRAM 流水连续、省 6 次 launch 的间隙与每次的尾波；
+//   数值**逐位不变**（每行 amax/scale/cvt 与 O14 完全相同，清零只是写 0）。每 warp 一行；
+//   任务序（rq=rows_q、rkv=rows_kv）：
+//     [0, rq) 量化 Q(E4M3)  [rq, 2rq) 量化 dO(E5M2)
+//     [2rq, 2rq+rkv) 量化 K(E4M3)  [.., 2rq+2rkv) 量化 V(E4M3)
+//     [.., +rq) 清零 dQ  [.., +rkv) 清零 dK  [.., +rkv) 清零 dV
+template <int VPT>
+__global__ void __launch_bounds__(128)
+quantize_zero_warp_kernel(const float* __restrict__ q, const float* __restrict__ kf,
+                          const float* __restrict__ v, const float* __restrict__ dof,
+                          unsigned char* __restrict__ q8, unsigned char* __restrict__ k8,
+                          unsigned char* __restrict__ v8, unsigned char* __restrict__ do8,
+                          float* __restrict__ qs, float* __restrict__ ks,
+                          float* __restrict__ vs, float* __restrict__ dos,
+                          float* __restrict__ dq, float* __restrict__ dk,
+                          float* __restrict__ dv, long long rq, long long rkv) {
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  constexpr int NW = 4;  // 128 线程 = 4 个 warp
+  const long long b1 = rq, b2 = 2 * rq, b3 = 2 * rq + rkv, b4 = 2 * rq + 2 * rkv;
+  const long long b5 = b4 + rq, b6 = b5 + rkv, b7 = b6 + rkv;
+  for (long long t = (long long)blockIdx.x * NW + warp; t < b7;
+       t += (long long)gridDim.x * NW) {
+    if (t < b1)
+      quant_row_warp<VPT, false>(q, q8, qs, t, lane);
+    else if (t < b2)
+      quant_row_warp<VPT, true>(dof, do8, dos, t - b1, lane);
+    else if (t < b3)
+      quant_row_warp<VPT, false>(kf, k8, ks, t - b2, lane);
+    else if (t < b4)
+      quant_row_warp<VPT, false>(v, v8, vs, t - b3, lane);
+    else if (t < b5)
+      zero_row_warp<VPT>(dq, t - b4, lane);
+    else if (t < b6)
+      zero_row_warp<VPT>(dk, t - b5, lane);
+    else
+      zero_row_warp<VPT>(dv, t - b6, lane);
   }
 }
 

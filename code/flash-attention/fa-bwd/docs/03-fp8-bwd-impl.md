@@ -7179,3 +7179,62 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 
 原始输出：`src/fp8/fa_bwd_fp8_f6_directb_smoke.out.txt`、`fa_bwd_fp8_mma_variant_probe.out.txt`、
 `fa_bwd_fp8_mma_variant_probe.illegal.out.txt`、`fa_bwd_fp8_p142_f6judge_s4096.out.txt`。
+
+## 78. O64（第一百四十四轮，**正结果，默认化**）：fp8 输入量化 + 累加缓冲清零融合成单 launch
+
+### 78.1 动机
+
+F1→F6 收口后，fp8 默认 main 受本卡寄存器/smem 硬墙锁定（见 ROADMAP「阻塞」），改从**非 main 的
+固定开销**找余量。用 nsys 逐 kernel 拆 fp8 默认路径（S1024H32 causal）发现：默认路径 per-call 有
+**4 个 `quantize_row_warp_kernel`（q/dO/k/v）+ 3 个 `cudaMemset`（dQ/dK/dV）** 共 7 次串行小 launch；
+ncu 显示每个 quant kernel 只到 **DRAM 58% / Compute 43%**（8.7µs/个，尾波 + launch 间隙截断），
+清零又与量化串行。合计 quant ~40.8µs + 尾/清零残留 ~31.4µs ≈ **端到端 19%**（S1024H32）。
+
+### 78.2 实现
+
+新增 `quantize_zero_warp_kernel<VPT>`（`src/fp8/fa_bwd_fp8_kernels.cuh`）：每 warp 一行，单一 1D grid
+按任务序号覆盖「量化 Q/dO/K/V + 清零 dQ/dK/dV」7 类任务；量化逻辑抽成 `quant_row_warp<VPT,E5M2>`
+（与 O14 **逐字相同**：float4 读、lane amax、warp `shfl_xor` 树、scale、`cvt_*`、`uchar4` 写），
+清零用 `zero_row_warp<VPT>`（float4 写 0）。默认路径（定长 + varlen）的 `run_all` 改走它；
+`--qfuse=0` 退回旧「4 quant + 3 cudaMemset」做同 binary A/B。**数值逐位不变**（每行 amax/scale/cvt
+与 O14 完全一致；清零只是写 0）。fp16/bf16 无量化步，故本项仅 fp8 适用。
+
+### 78.3 结果（同 session 同 binary `[O64 A/B]`，CUDA event）
+
+| shape | 形态 | fused (ms) | unfused (ms) | 加速 |
+|---|---|---|---|---|
+| b1_s512_h16_d128 causal | 定长 | 0.0848 | 0.0990 | **1.168×** |
+| b1_s1024_h32_d128 causal | 定长 | 0.3550 | 0.3714 | **1.046×** |
+| b1_s1024_h32 kv4 | 定长 GQA | 0.3232 | 0.3388 | **1.048×** |
+| b1_s4096_h16_d128 causal | 定长 | 1.7974 | 1.8256 | **1.016×** |
+| varlen b1_t512_h2_d512 causal | varlen MLA | 0.0793 | 0.0933 | **1.177×** |
+| varlen b4_t3840_h16_d128 causal | varlen | 0.8777 | 0.8951 | **1.020×** |
+
+数值：`max_abs(fused-vs-unfused) dq/dk/dv = 1.2e-7 / 4.8e-7 / 7.2e-7`（仅跨 CTA `atomicAdd` 次序）；
+对 fp32 ref / TE 的 max_abs 与 O4b/O7 历史一致。`--ci --dtype fp8`（定长 + varlen）**全绿**
+（一致性 gate worst 定长 1.144e-05 / varlen 2.861e-06，tol 1e-4）、`--check docs/04` OK 194 行。
+单/两文件同源（device 由 `sync_onefile_device.py` 核对 `identical: True`）。
+
+**ncu**（融合 kernel，S1024H32）：`Duration 45.7µs、DRAM 73.1%`（旧单 kernel 58%）、`L2 82.6%`、
+`Compute 61.2%`、`27 regs`、`occ 61.5%`。**nsys**：默认 per-call kernel 数 **10→5**
+（`quantZERO` 44.5µs 一次、无 memset；其余 LSE 27.4 / merge 2.8 / delta 10.9 / main 257.9µs），
+per-call 间隙残留 ~31→~12µs。
+
+### 78.4 结论 / 复现
+
+收益来自「把 7 次串行小 launch（含 3 次 memset）并成 1 次、让 DRAM 流水连续」——**小/中 shape 收益
+最大**（launch 与尾波占比高），S4096 因主 kernel 占比高仅 ~1%。零风险默认化。
+
+```
+# 定长（Hopper 快路）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=.../b1_s1024_h32_d128_causal_fp8 --iters=50
+# varlen（wgmma 构建）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --varlen --dir=.../varlen_b1_t512_h2_d512_causal_fp8
+# 同 binary A/B：加 --qfuse=0
+```
+
+原始输出 `src/fp8/fa_bwd_fp8_o64_{fixed_s512,fixed_s1024h32,fixed_gqa_kv4,fixed_s4096,onefile_s512,
+varlen_b1t512,onefile_varlen_b1t512,varlen_b4t3840}.out.txt`、`..._o64_ncu_{quantzero,quantold}_s1024h32.out.txt`、
+`..._o64_nsys_s1024h32.out.txt`。
