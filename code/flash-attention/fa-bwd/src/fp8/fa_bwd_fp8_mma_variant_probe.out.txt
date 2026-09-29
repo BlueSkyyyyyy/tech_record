@@ -1,0 +1,4 @@
+=== fp8 mma.m16n8k32 布局探针 ===
+  row.col : 编译通过（fp8 m16n8k32 唯一合法布局；B 必须 col-major）
+  col.row / row.row / col.col : ptxas 拒绝（见 .illegal.out.txt）
+=== PASS（.row.col 可用；转置不可免） ===

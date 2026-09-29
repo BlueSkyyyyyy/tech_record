@@ -196,6 +196,15 @@
 
 ## 阻塞
 
+- **F6（BM=128 双 warpgroup）「去 Qp/dOp 冲 2 CTA/SM」在 fp8 上不可行（第一百四十二轮三证收口）。**
+  ① fp8 `mma.m16n8k32` **只有 `.row.col`**（`.col.row/.row.row/.col.col` 被 ptxas 拒）⇒
+  GEMM3/4/5 的 B（`Qᵀ/dOᵀ/Kᵀ`）必须 col-major、**必须转置**；② fp8 的 1 个 b16=2 个 fp8，
+  `ldmatrix.trans` **只交换 8×8 矩阵行列、不改 b16 配对方向**，K-major tile 的配对轴仍是 N
+  不是 K ⇒ 直读不可行；③ 穷举：K-major tile 的 `x4.trans` 4 个寄存器里任意 2 个都拼不出
+  col-major 的 B 片段（0/32 lane）。资源账：F6 `wgmma2` **212 regs / 135,424B → 1 CTA/SM**，
+  2 CTA/SM 上限 116,224B、缺口 19,200B；去 Qp/dOp（34,816B）本可解但不可行，改 `Ps/Ss`
+  半精度只能刚够且改口径、regs 必大 spill ⇒ **F6 只能停在 1 CTA/SM（0.56× 默认档）**。
+  唯一理论路 = **物理转置 SW128 B**（O4b 判净负）/ **换卡**。见 `docs/03` §77。
 - **fp8 默认 main 的 `red` 已精确定位到「dK/dV 跨 m-block」且三条候选已判决（第一百三十九轮）。**
   定量：默认 `kvtma<128,64,32>`（S4096 causal）L2 `red` 114.5M，其中 **dK/dV 恒 ~104M（~90%）**，
   ksplit 只影响 dQ 的跨 part 原子（8→1 只掉 ~10.7M）；**ksplit=1 实测 `red` 103.8M / L2 56.9% /
@@ -2783,12 +2792,41 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       （SW128 tile 直读 `ldmatrix`）而非先换 GEMM1/2 指令。见 `docs/03` §76、`docs/08` §5.55。
       **剩余（F6 主体）**：Q/K/V/dO 走 4D-TMA + SW128，**去掉 Qp/dOp（从 SW128 直读 B）**、
       GEMM1/2 wgmma、3/4/5 仍 mma；smem 压到 **≤116224B** 且 regs **≤128** 才能 2 CTA/SM。见 `docs/03` §75/§76。
+      → **判定完成（第一百四十二轮）：F6「去 Qp/dOp 冲 2 CTA/SM」在 fp8 上不可行（负结果）**。
+      三证：① ISA——fp8 `mma.m16n8k32` **只有 `.row.col`**（`.col.row/.row.row/.col.col` 被
+      ptxas 拒）⇒ B 必须 col-major（必须转置）；② pairing——fp8 的 1 个 b16=2 个 fp8，`.trans`
+      只交换 8×8 矩阵行列、**不改 b16 配对方向**，K-major tile 的配对轴仍是 N 不是 K（O4b 已证）；
+      ③ 穷举——`fa_bwd_fp8_f6_directb_smoke.cu` 从 K-major tile `ldmatrix.x4.trans` 取回的 4 个
+      寄存器里**任意 2 个都拼不出** col-major `x2` 的 B 片段（**0/32 lane 匹配**）。资源账：
+      wgmma2 **212 regs / 135,424B → 1 CTA/SM**，2 CTA/SM 缺口 19,200B；去 Qp/dOp 本可解但
+      不可行，改 `Ps/Ss` 半精度只能刚够且改口径、regs 必大 spill。**F6 在本卡只能停在 1 CTA/SM**
+      （0.56× 默认档），继续只能走**物理转置 SW128 B**（O4b 判净负）或**换卡** ⇒ **转 backlog**。
+      默认路径一行未改。见 `docs/03` §77、`docs/08` §5.56。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百四十一轮）**：**F6 第二步——双 warpgroup 主 kernel 的 GEMM1/2 wgmma 化
+> **最新（第一百四十二轮）**：**F6 判定——「去 Qp/dOp（SW128 直读 B）」在 fp8 上不可行
+> （负结果 + 收口）**。落实第 141 轮「下一步候选 ①」，用三证判决 F6 的最小步：
+> ① ISA 探针 `fa_bwd_fp8_mma_variant_probe.cu`：fp8 `mma.m16n8k32` **只有 `.row.col`**
+> （`.col.row/.row.row/.col.col` 全被 ptxas 拒，原始错误见 `*.illegal.out.txt`）⇒ B 必须
+> col-major、必须转置；② fp8 的 1 个 b16=2 个 fp8，`.trans` **不改 b16 配对方向** ⇒ K-major
+> tile 的配对轴仍是 N 不是 K（O4b 已证，本轮显式化）；③ 穷举复现
+> `fa_bwd_fp8_f6_directb_smoke.cu`：K-major tile `ldmatrix.x4.trans` 取回的 4 个寄存器里
+> **任意 2 个都拼不出** col-major `x2` 的 B 片段（**0/32 lane 匹配**）。资源账（cuobjdump）：
+> wgmma2 **212 regs / 135,424B smem → 1 CTA/SM**，2 CTA/SM 上限 116,224B、缺口 19,200B；
+> 去 Qp/dOp（34,816B）本可解但已判不可行，改 `Ps/Ss` 半精度只能刚够且改口径、regs 212→≤128
+> 必大 spill ⇒ **F6 在本卡只能停在 1 CTA/SM（0.56× 默认档）**。性能复核：默认 BM=64 `kvtma`
+> main S4096 **1.569ms** vs F6 2.808ms（TE FP8 纯反向 0.3003ms ⇒ F6 ~9.4×）。默认路径一行
+> 未改。详见「当前进度 第一百四十二轮」、`docs/03` §77、`docs/08` §5.56；原始输出
+> `src/fp8/fa_bwd_fp8_{f6_directb_smoke,mma_variant_probe,p142_f6judge_s4096}.*`。
+> **下一步候选**：① **F6 收口为「本卡不可行」**（转 backlog，唯一理论路=物理转置 SW128 B，
+> O4b 判净负 / 换卡）；② 默认 BM=64 `kvtma` 档的 **L2 `red`（dK/dV 跨 CTA 原子）仍是主力墙**，
+> 见「阻塞」；③ 其余候选（dK/dV-over-KV、GEMM3/4/5 wgmma、ksplit/LSE）均已判决/到顶；
+> ④ DET 仅 opt-in。
+>
+> **（第一百四十一轮）**：**F6 第二步——双 warpgroup 主 kernel 的 GEMM1/2 wgmma 化
 > （`--wg2wgmma`，正确但中性）**。把第 140 轮冒烟落进主 kernel：新增
 > `fa_bwd_fp8_wgmma2_kernel`（`wg2` 的 GEMM1/2 换 `wgmma.m64n32k32` 直读 SW128，Qp/dOp/Kp
 > 由 SW128 重建，fold 与 GEMM3/4/5 逐字沿用；Ap/dS3 改独立缓冲）。数值 vs ref S512
@@ -5513,6 +5551,39 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     `..._p141_ci_fixed.out.txt`；文档 `docs/03` §76、`docs/08` §5.55。
   - **下一步候选**：① **F6 主体（修正后最小步）= 去 Qp/dOp（SW128 直读 `ldmatrix`）压 smem
     ≤116224B + Q/K/V/dO 的 4D-TMA**；② 其余候选均已判决/到顶；③ DET 仅 opt-in。
+
+- 2026-09-29（第一百四十二轮）：**F6 判定——「去 Qp/dOp（SW128 直读 B）」在 fp8/`.row.col`
+  下不可行（负结果 + 资源账收口）**（默认路径一行未改）。
+  - 动机：落实第 141 轮「下一步候选 ①」——第 141 轮判断 F6 要 2 CTA/SM 的最大障碍是
+    `Qp/dOp`（34,816B），且假定「可从 SW128 的 Q/dO tile 直接 `ldmatrix` 取 B」。
+  - **判决 1（ISA）**：新增 `src/fp8/fa_bwd_fp8_mma_variant_probe.cu`——fp8 `mma.m16n8k32`
+    **只有 `.row.col` 合法**；`.col.row/.row.row/.col.col` 被 ptxas 全部拒绝
+    （`Illegal alayout '.col'...` / `Illegal blayout '.row'...`，原始输出
+    `fa_bwd_fp8_mma_variant_probe.illegal.out.txt`）⇒ B 必须 col-major（必须转置）。
+  - **判决 2（pairing）**：fp8 的 1 个 b16 = **2 个相邻 fp8**；K-major tile（Q/dO 的 `[m][d]`，
+    d 连续）里 16B 行的配对**沿 N**，`.trans` 只交换 8×8 矩阵行列、**不改 b16 配对方向** ⇒
+    取到的是「沿 N 的 4 个 fp8」而非 mma 要的「沿 K 的 4 个 fp8」。O4b（`docs/03` §17）已证，
+    本轮显式化。
+  - **判决 3（穷举）**：新增 `src/fp8/fa_bwd_fp8_f6_directb_smoke.cu`——从 K-major `[K][N]`
+    tile 用 `ldmatrix.x4.trans` 取回 4 个寄存器，穷举其中任意有序 2 个与「col-major `[N][K]`
+    + `ldmatrix.x2`」的 B 片段逐位比对：**0/32 lane 匹配** ⇒ 不存在可用的地址/寄存器重排方案。
+  - **资源账（`cuobjdump --dump-resource-usage`，sm90a）**：默认 `kvtma<128,64,32,...>`
+    **164–168 regs / 74.8KB → 3 CTA/SM**；`wg2<128,128,32>` 217/131.3KB；F6 `wgmma2<128,128,32>`
+    **212 regs / 135,424B（Qs/dOs 2×16384、Ks/Vs 2×4096、Qp/dOp 2×17408、Kp 4352、dS2 6144、
+    scales 2048、Ps/Ss 2×18944、Ap/dS3 2×4608 +1KB 对齐）→ 1 CTA/SM**。2 CTA/SM 上限
+    `232448/2=116,224B`，缺口 **19,200B**；去 Qp/dOp 本可解但判不可行；改 `Ps/Ss` 半精度
+    （−18,944B）只能刚够且改数值口径，regs 212→≤128 必大 spill ⇒ **F6 只能停在 1 CTA/SM**。
+  - **性能复核（同 session，event，main-only，S4096 causal）**：默认 BM=64 `kvtma` **1.569ms**
+    （O41 A/B）/ total ≈1.92ms；F6 wgmma2 **2.808ms（默认的 0.56×）**；同 session TE FP8 纯反向
+    **0.3003ms/915.25TF** ⇒ 默认 ours main/TE ≈5.2×、F6 ≈9.4×。**F6 当前不是前进方向。**
+  - **结论**：F6 在本卡「冲 2 CTA/SM」不成立；继续只能走**物理转置 SW128 B**（O4b 判净负）
+    或**换卡** ⇒ 转 backlog。默认 `kvtma` 档的 **L2 `red`（dK/dV 跨 CTA 原子）仍是主力墙**，
+    见「阻塞」。数值/CI：默认路径一行未改。
+  - 原始输出 `src/fp8/fa_bwd_fp8_f6_directb_smoke.out.txt`、`fa_bwd_fp8_mma_variant_probe.out.txt`、
+    `fa_bwd_fp8_mma_variant_probe.illegal.out.txt`、`fa_bwd_fp8_p142_f6judge_s4096.out.txt`；
+    文档 `docs/03` §77、`docs/08` §5.56。
+  - **下一步候选**：① F6 收口（转 backlog：物理转置 B / 换卡）；② 回到默认 `kvtma` 的 L2 `red`
+    墙（见「阻塞」，唯一真杠杆受本卡寄存器/smem 硬墙锁定）；③ 其余候选均已判决/到顶。
 
 ## 灵感 / backlog
 

@@ -1,0 +1,10 @@
+----- .col.row -----
+ptxas /tmp/tmpxft_0010c52b_00000000-6__iv_tmp.ptx, line 43; error   : Illegal alayout '.col' for instruction 'mma'
+ptxas /tmp/tmpxft_0010c52b_00000000-6__iv_tmp.ptx, line 43; error   : Illegal blayout '.row' for instruction 'mma'
+ptxas fatal   : Ptx assembly aborted due to errors
+----- .row.row -----
+ptxas /tmp/tmpxft_0010c59f_00000000-6__iv_tmp.ptx, line 43; error   : Illegal blayout '.row' for instruction 'mma'
+ptxas fatal   : Ptx assembly aborted due to errors
+----- .col.col -----
+ptxas /tmp/tmpxft_0010c613_00000000-6__iv_tmp.ptx, line 43; error   : Illegal alayout '.col' for instruction 'mma'
+ptxas fatal   : Ptx assembly aborted due to errors

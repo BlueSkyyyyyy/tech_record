@@ -891,3 +891,24 @@ smem 冲突 + 低 occ
   2. **BM=128 的最大 smem 项是 Qp/dOp（34.8KB）**；F6 要 2 CTA/SM 必须先干掉它（SW128 tile
      直读 `ldmatrix`），而不是先换 GEMM1/2 的指令。下一小步据此排序。
   详见 `docs/03` §76。
+
+### 5.56 F6 判定：「去 Qp/dOp 冲 2 CTA/SM」在 fp8 上不可行（第一百四十二轮，负结果 + 收口）
+
+- **做了什么**：落实第 141 轮「下一步候选 ①」，用**三条证据**判决 F6 的最小步：
+  ① ISA 探针（`fa_bwd_fp8_mma_variant_probe.cu`）：fp8 `mma.m16n8k32` **只有 `.row.col`**，
+  `.col.row/.row.row/.col.col` 全被 ptxas 拒 ⇒ B 必须 col-major（必须转置）；
+  ② pairing 分析：fp8 的 1 个 b16 = 2 个 fp8，`.trans` 不改变 b16 配对方向 ⇒ K-major tile
+  的配对轴仍是 N，不是 mma 要的 K（O4b 已证，本轮显式化）；
+  ③ 穷举复现（`fa_bwd_fp8_f6_directb_smoke.cu`）：从 K-major tile `ldmatrix.x4.trans` 取回
+  的 4 个寄存器里**任意 2 个都拼不出** col-major `x2` 的 B 片段（**0/32 lane 匹配**）。
+- **资源账**：wgmma2（F6）`cuobjdump` **212 regs / 135,424B smem → 1 CTA/SM**；2 CTA/SM 上限
+  `116,224B`，缺口 19,200B。去 Qp/dOp（34,816B）本可解，但被上面判不可行；改 `Ps/Ss` 半精度
+  只能刚够且改数值口径，regs 212→≤128 必大 spill。
+- **性能复核**（S4096 causal，同 session）：默认 BM=64 `kvtma` main **1.569ms** vs F6
+  wgmma2 **2.808ms**（默认的 0.56×）；TE FP8 纯反向 0.3003ms ⇒ F6 是 TE 的 ~9.4×。
+- **结论**：F6 在本卡「冲 2 CTA/SM」不成立；继续只能走**物理转置 SW128 B**（O4b 已判净负）
+  或**换卡**，转 backlog。默认路径一行未改。
+- **教训**：**「别的 dtype 成立的技巧」跨到 fp8 前先做 ISA 句法级验证**——kernel-opt 42 篇的
+  「SW128 16B chunk 可 `ldmatrix` 转置读」是 **bf16（1 个 b16 = 1 元素）** 的结论；fp8 的
+  2 元素/b16 让「转置」只发生在 8×8 矩阵层、不改元素配对，直接搬运会导致整块 B 错位。
+  详见 `docs/03` §77。
