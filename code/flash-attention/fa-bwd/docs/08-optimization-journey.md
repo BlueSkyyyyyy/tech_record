@@ -1113,3 +1113,24 @@ smem 冲突 + 低 occ
   所以「隐藏全局延迟」只在小 grid（未撑满 3 CTA/SM 容量）时有效。F7 要转正必须直接打 `wait` 与
   occupancy，属 §83 的 persistent+4D-TMA+降寄存器大改。**本子项判决完成。**
 - 详见 `docs/03` §84；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p151_{s512,s4096,sol}.out.txt`。
+
+### 5.66 F7 主体第一步：KV-owner mma 的 persistent 调度（负结果，第一百五十二轮）
+
+- **动机**：F7 主体要对标 TE `..._flash_bprop_wgmma_f8_..._64x64x128`（grid=132 persistent、
+  1 CTA/SM），先把「persistent 调度」子项单独判决。`src/fp8/fa_bwd_fp8_kvowner_mma.cu` 新增
+  `fp8_kvowner_dkv_persist_kernel`（默认路径一行未改）：栅格从 `(nblk,H)`（S4096=2048 CTA）改
+  1D persistent `grid = min(nblk*H, SM×3)`（`--pgrid` 可覆盖）+ `tile += gridDim.x` 循环，
+  `tile→(h=tile/nblk, j0=(tile%nblk)*BN)`。
+- **数值（逐位）**：S512/S4096 **persistent vs base = 0/0**（只换栅格映射），
+  vs ref 与 base 同（S512 2.975e-1/3.735e-1、S4096 2.643e-1/3.216e-1）。
+- **性能（event，同 binary，S4096 H16 iters=50）**：pgrid=132→**0.313×**、264→0.558×、
+  396→**0.707×**、792→0.789×、1188→0.931×、**2048（无循环，纯 1D 版 base）→0.931×**；
+  base(2D 2048 CTA)=1.0。**单调、永不反超**。S512（grid 256<396 无循环）=0.921×。
+- **ncu 根因（S4096）**：base waves 5.17、Compute/Memory 46.9/50.3%、Eligible 0.82；
+  persist(pgrid=396) waves **1.0**、Compute/Memory **32.5/36.8%**、Eligible 0.67
+  ⇒ **SM 空闲但无 block 可补**。causal 下每 tile 权重（被多少 query 消费）差 ~64×，
+  静态 strided 划分总权重不均 + 失去硬件「块完成即回填」⇒ 单波利用率骤降。
+- **结论**：**KV-owner dK/dV 原型的 persistent 不是杠杆**（负结果）。TE grid=132 可行是因为其
+  tile 工作划分**均匀**；把「grid=132」直接搬到带 causal 偏斜的 KV-owner 划分上有害。F7 主体若
+  要 persistent 必须配**动态负载均衡 / 均匀化工作划分**，否则杠杆仍是 §5.65 的 `wait`+occupancy。
+- 详见 `docs/03` §85；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p152_*`。

@@ -2847,13 +2847,39 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
        把 `long_scoreboard 0.58→0.15`，但 base 的墙是 `wait 1.44+short 0.88`（非全局延迟），
        且双缓冲把 smem 70→106KB、regs 168→239 ⇒ **3→2 CTA/SM**，大 S 净负。**⇒ F7 主体须
        直接打 `wait`+occupancy（persistent+4D-TMA+降寄存器），「重叠 staging」单独不是杠杆**。
-       见 `docs/03` §84、`docs/08` §5.65。
+        见 `docs/03` §84、`docs/08` §5.65。
+       → **第五步已完成（第一百五十二轮，persistent 子项判决：负结果）**：新增
+       `fp8_kvowner_dkv_persist_kernel`（1D persistent `grid=min(nblk*H,SM×3)` +
+       `tile+=gridDim.x`，`--pgrid` 可覆盖）。**数值逐位=0**（只换栅格映射）；性能**单调更慢、
+       永不反超**：S4096 pgrid=132→**0.313×**、264→0.558×、396→**0.707×**、1188→0.931×、
+       2048（无循环）→0.931×（vs base 1.414ms）；S512(无循环)=0.921×。ncu 根因：base waves 5.17 /
+       Compute 46.9%，persist(pgrid=396) waves **1.0** / Compute **32.5%**、Eligible 0.82→0.67
+       ⇒ **causal 块间负载差 ~64×，静态 strided 划分无硬件动态回填**。**TE grid=132 可行因其
+       tile 划分均匀；照搬「grid=132」到 causal 偏斜的 KV-owner 上有害**。见 `docs/03` §85、
+       `docs/08` §5.66；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p152_*`。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百五十一轮）**：**F7 第四步——KV-owner mma 原型的 Q/dO staging 加 `cp.async`
+> **最新（第一百五十二轮）**：**F7 主体第一步——KV-owner mma 原型的 persistent 调度
+> （persistent 子项判决：负结果）**。新增 `fp8_kvowner_dkv_persist_kernel`
+> （`src/fp8/fa_bwd_fp8_kvowner_mma.cu`）：1D persistent `grid=min(nblk*H, SM×3)` +
+> `tile += gridDim.x` 循环（`--pgrid` 可覆盖）。**数值逐位=0**（只换栅格映射）；
+> **性能单调更慢、永不反超**：S4096 pgrid=132→**0.313×**、264→0.558×、396→**0.707×**、
+> 1188→0.931×、2048（无循环，纯 1D 版 base）→0.931×（base 1.414ms）；S512（无循环）=0.921×。
+> ncu 根因：base waves 5.17 / Compute 46.9% / Eligible 0.82，persist(pgrid=396) waves **1.0** /
+> Compute **32.5%** / Eligible 0.67 ⇒ **causal 块间负载差 ~64×，静态 strided 划分失去硬件
+> 「块完成即回填」**。**TE grid=132 可行因其 tile 划分均匀；照搬「grid=132」到 causal 偏斜的
+> KV-owner 上有害**。文档 `docs/03` §85、`docs/08` §5.66；原始输出
+> `src/fp8/fa_bwd_fp8_kvowner_mma_p152_*`。
+> **下一步候选**：① **F7 主体**（唯一经 ncu 钉死的真杠杆）——但「persistent 调度」子项已判负，
+> 故主体须走 **动态负载均衡 / 均匀化 causal 工作划分** + 4D-TMA 暂存 Q/dO/K/V + dK/dV TMA store
+> + dQ 同循环 + 降 `dVacc/dKacc` 寄存器，或直接打 `wait`+occupancy（smem≤58KB/regs≤128）；
+> ② 其余候选（F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、非 main 融合）均已判决/到顶/收口；
+> ③ DET 仅 opt-in。
+>
+> **（第一百五十一轮）**：**F7 第四步——KV-owner mma 原型的 Q/dO staging 加 `cp.async`
 > 双缓冲重叠（形状相关，重叠子项判决完成）**。新增 `fp8_kvowner_dkv_pipe_kernel`
 > （`src/fp8/fa_bwd_fp8_kvowner_mma.cu`）：staging 改 `cp.async.cg` 16B 双缓冲（`wait_group 1`）。
 > **数值逐位不变**（pipe vs base `0/0`）；**同 binary A/B：S512 1.148×（0.0566→0.0493ms）、
@@ -2862,10 +2888,6 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > smem 70→106KB、regs 168→239 ⇒ **3→2 CTA/SM**（warps 17.7%→12.2%）、`op_read` 51→67M，
 > 大 S 净 −4.1%。**⇒「隐藏全局延迟」只在小 grid 有效；F7 要转正必须直接打 `wait`+occupancy**。
 > 文档 `docs/03` §84、`docs/08` §5.65；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p151_*`。
-> **下一步候选**：① **F7 主体**（唯一经 ncu 钉死的真杠杆）——persistent + 4D-TMA 暂存
-> Q/dO/K/V + dK/dV TMA store + dQ 同循环 + 降 `dVacc/dKacc` 寄存器（对标 TE grid=132）；
-> ② 其余候选（F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、非 main 融合）均已判决/到顶/收口；
-> ③ DET 仅 opt-in。
 >
 > **（第一百四十九届）**：**F7 第二步——persistent KV-owner + smem/cp.async 暂存（机制正结果；
 > ncu 证 red=0 且读放大消除）**——落实第 148 轮「下一步候选 ①」的判据。在
@@ -6012,6 +6034,25 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `src/fp8/fa_bwd_fp8_kvowner_mma_p151_{s512,s4096,sol}.out.txt`。
     - **下一步候选**：① F7 主体（persistent + 4D-TMA + dQ 同循环 + 降寄存器，对标 TE grid=132）；
       ② 其余候选均已判决/到顶/收口；③ DET 仅 opt-in。
+
+- 2026-09-30（第一百五十二轮）：**F7 主体第一步完成（KV-owner mma 的 persistent 调度；
+  persistent 子项判决为负结果）**——落实第 151 轮「下一步候选 ①」的「persistent」子项。
+    - `src/fp8/fa_bwd_fp8_kvowner_mma.cu` 新增 `fp8_kvowner_dkv_persist_kernel`（默认路径
+      一行未改）：栅格从 `(nblk,H)`（S4096=2048 CTA）改 **1D persistent**
+      `grid=min(nblk*H, SM×3)`（`--pgrid` 可覆盖）+ `tile += gridDim.x`，`tile→(h,j0)`。
+    - **数值逐位相同**：S512/S4096 `persistent vs base = 0/0`（只换栅格映射），vs ref 与
+      base 同（S512 2.975e-1/3.735e-1、S4096 2.643e-1/3.216e-1）。
+    - **性能（event，同 binary，S4096 H16 iters=50）：单调更慢、永不反超**——pgrid=132→
+      **0.313×**、264→0.558×、396→**0.707×**、792→0.789×、1188→0.931×、2048（无循环，
+      纯 1D 版 base）→**0.931×**（base 1.414ms）；S512（grid 256<396 无循环）=0.921×。
+    - **ncu 根因（S4096）**：base waves 5.17 / Compute 46.9% / Memory 50.3% / Eligible 0.82，
+      persist(pgrid=396) waves **1.0** / Compute **32.5%** / Memory **36.8%** / Eligible 0.67
+      ⇒ **causal 块间负载差 ~64×，静态 strided 划分失去硬件「块完成即回填」**（SM 空闲但无
+      block 可补）。**TE grid=132 可行因其 tile 工作划分均匀；照搬「grid=132」到带 causal 偏斜
+      的 KV-owner 划分上有害**。
+    - **结论**：KV-owner dK/dV 原型的「persistent 调度」不是杠杆。F7 主体若要 persistent，
+      必须配 **动态负载均衡 / 均匀化 causal 工作划分**，否则杠杆仍回到 §5.65 的 `wait`+occupancy。
+      文档 `docs/03` §85、`docs/08` §5.66；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p152_*`。
 
 ## 灵感 / backlog
 
