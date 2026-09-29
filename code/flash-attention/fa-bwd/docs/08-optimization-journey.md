@@ -1072,3 +1072,23 @@ smem 冲突 + 低 occ
   钉死：main **1.70×**、total **1.53×**。
 - 详见 `docs/03` §82；原始输出 `src/fp8/fa_bwd_fp8_kvowner_stage_run.out.txt`、
   `src/fp8/fa_bwd_fp8_kvowner_stage_ncu.out.txt`。
+
+### 5.64 F7 第三步：KV-owner 落进真实 fp8 张量核（dK/dV 的 mma 原型，第一百五十轮）
+
+- **动机（落实 §5.63 的下一步）**：§5.62/§5.63 的 KV-owner + staging 是在 **fp32 标量** smoke 上做的，
+  而真实 fp8 主 kernel 走 **E4M3/E5M2 + rowwise scale + `mma.m16n8k32`**。必须把「单一 owner 消 red」
+  落进真实数据通路，才能判断它是否成立。
+- **做了什么**：新增 `src/fp8/fa_bwd_fp8_kvowner_mma.cu`（独立文件，默认路径一行未改）——
+  `fp8_kvowner_dkv_kernel<128,64,32>`：grid=`(S/BN,H)`，每 CTA 拥有 KV 行块、K/V 常驻 smem 只读
+  一次、Q/dO staging 到 smem（Qs/dOs + Qp/dOp 配对）、遍历 query 块、dK/dV 在**寄存器**本地累加后
+  **一次 plain store**。4 个 GEMM（S、dP、dV、dK）全 mma，量化/折算记账与 Q-owner 主 kernel 完全一致。
+- **数值（正）**：S512 dk/dv vs ref **2.975e-1/3.735e-1**、S4096 **2.643e-1/3.216e-1**——与既有
+  Q-owner ours **完全相同**；`KV vs Q` 仅跨 CTA 加法次序差（≤1.5e-1）。
+- **ncu（同 session，S4096 H16 causal）**：Q-owner mma 主 kernel `red=114,524,160`、1.91ms；
+  **KV-owner dK/dV `red=0`**、`op_read 36.4M→51.0M（1.40×）`、**1.41ms**（168 regs、3 CTA/SM）。
+- **结论（非正收益，方向明确）**：`red` 114.5M→**0** 在真实 mma 上成立；但按每 GEMM 等效折算
+  KV `1.41/4=0.353ms` 仅略优于 Q `1.91/5=0.382ms`。KV-owner 把 `red` 换成了 **Q/dO 的跨 CTA 读
+  放大（1.40×）+ 寄存器墙**（dVacc+dKacc 占 64 regs），且无持久化/预取/TMA，补齐 dQ 后不构成
+  净收益。**F7 主体须同时做**：persistent（grid≈132）+ Q/dO/K/V 4D-TMA 暂存重叠 + dQ 同循环 +
+  降寄存器占用。
+- 详见 `docs/03` §83；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_{s512,s4096,ncu_s4096}.out.txt`。
