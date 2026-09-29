@@ -1,0 +1,33 @@
+# p139: fp8 main kvtma ksplit sweep (S4096 H16 D128 causal, event, iters=50)
+=== ksplit=1 ===
+grid main = 64 x 16 x 1  (ksplit=1, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 2.1794 ms  63.06 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0682 ms | preprocess 0.1372 ms | main 1.9241 ms | convert 0.0499 ms (cvt_on=0)
+=== ksplit=2 ===
+grid main = 128 x 16 x 1  (ksplit=2, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.9383 ms  70.91 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0690 ms | preprocess 0.1388 ms | main 1.6914 ms | convert 0.0391 ms (cvt_on=0)
+=== ksplit=4 ===
+grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.8201 ms  75.51 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0682 ms | preprocess 0.1384 ms | main 1.5767 ms | convert 0.0369 ms (cvt_on=0)
+=== ksplit=8 ===
+grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.8261 ms  75.26 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0686 ms | preprocess 0.1370 ms | main 1.5334 ms | convert 0.0871 ms (cvt_on=0)
+=== ksplit=12 ===
+grid main = 768 x 16 x 1  (ksplit=12, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.8420 ms  74.62 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0681 ms | preprocess 0.1381 ms | main 1.5749 ms | convert 0.0609 ms (cvt_on=0)
+=== ksplit=16 ===
+grid main = 1024 x 16 x 1  (ksplit=16, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.8886 ms  72.77 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0690 ms | preprocess 0.1386 ms | main 1.6186 ms | convert 0.0624 ms (cvt_on=0)
+=== ksplit=24 ===
+grid main = 1536 x 16 x 1  (ksplit=24, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 2.5527 ms  53.84 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0688 ms | preprocess 0.1385 ms | main 2.2968 ms | convert 0.0486 ms (cvt_on=0)
+=== ksplit=32 ===
+grid main = 2048 x 16 x 1  (ksplit=32, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 2.5620 ms  53.64 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0691 ms | preprocess 0.1387 ms | main 2.3064 ms | convert 0.0479 ms (cvt_on=0)

@@ -196,6 +196,16 @@
 
 ## 阻塞
 
+- **fp8 默认 main 的 `red` 已精确定位到「dK/dV 跨 m-block」且三条候选已判决（第一百三十九轮）。**
+  定量：默认 `kvtma<128,64,32>`（S4096 causal）L2 `red` 114.5M，其中 **dK/dV 恒 ~104M（~90%）**，
+  ksplit 只影响 dQ 的跨 part 原子（8→1 只掉 ~10.7M）；**ksplit=1 实测 `red` 103.8M / L2 56.9% /
+  main 1.92ms**。**候选①「dK/dV-over-KV」流量中性**：把原子从 dK/dV 搬到 dQ，总数 `Σ(nblk-j)·BN·HD`
+  ≡ `Σ(m+1)·BM·HD`（BM=BN），MHA 对称、GQA 差 `H/Hkv` 倍 ⇒ **关闭**。**候选②「放大 BM=128」单独
+  不够**：现有 `wg2<128>`（无 TMA/wgmma）`red` 砍半（58.2M）但 **L2 仅 20.4%**（1 CTA/SM、12.5%
+  warps 的延迟 bound）、慢 0.53×；必须 **双 warpgroup + TMA + wgmma** 才能同时保 L2 利用率，
+  而 `fp8_mma_body` 现 `static_assert` 锁单 warpgroup ⇒ 需新写 body。**候选③ ksplit auto=8 已最优**。
+  ⇒ 唯一可行路 = **F6（BM=128 双 warpgroup wgmma+TMA）**，属大改（非本卡 quick lever）。
+  详见 `docs/03` §74、`docs/08` §5.54。
 - **fp8 默认 main 的 L2 `red` 墙已「不可再辩」地收口（第一百三十八轮）。** 定量复核（S=4096
   causal）：默认 `fa_bwd_fp8_mma_kvtma_kernel` 的 **L2 76.96%**、L2 扇区 **154.0M 中 `red`
   114.5M（74.3%）**、DRAM ~4.3%（L2 hit 97%）、stall `wait` 1.61+`short` 1.27、Active
@@ -2750,13 +2760,36 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       141.0M→86.4M（−38.7%）、local 扇区→0；preprocess 1.21–1.56×（S4096 0.216→0.138ms）、
       端到端 1.03–1.04×（S4096 1.888→1.817ms/75.6TF；varlen D128 1.02–1.04×）**；vs-ref/TE 打印位
       一致、单/两文件 gate 1.335e-5 OK、`--check docs/04` OK 194 行。详见 `docs/03` §71、
-      `docs/08` §5.51；原始输出 `src/fp8/fa_bwd_fp8_f5_*`。
+       `docs/08` §5.51；原始输出 `src/fp8/fa_bwd_fp8_f5_*`。
+- [ ] **F6** 唯一真杠杆：**双 warpgroup + TMA + wgmma 的 BM=128 主 kernel**（`red` 砍半且保 L2 利用率）。
+      → 依据（第一百三十九轮定量）：默认 main 的 `red` 90% 是 dK/dV（ksplit=1 实测 103.8M vs
+      默认 114.5M）；BM 64→128 确实把 `red` 砍半（现有 `wg2<128>` 58.2M），但 `wg2` 无 TMA/wgmma
+      ⇒ L2 仅 20.4%、1 CTA/SM、慢 0.53×；故必须新写双 warpgroup body（对标
+      `fa_bwd_fp16_wgmma2_kernel`，`fp8_mma_body` 现 `static_assert` 锁单 warpgroup）。
+      「dK/dV-over-KV」已证**流量中性**（关闭），ksplit auto=8 已最优。见 `docs/03` §74。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百三十八轮）**：**F3/F4-default/GEMM3·5-wgmma 收口（墙的定量复核 + fp8 wgmma ISA
+> **最新（第一百三十九轮）**：**fp8 主 kernel「唯一真杠杆」定位——dK/dV 跨 CTA `red` 的定量归因
+> + 三条候选判决**。把 `red` 拆到「哪个梯度 / 哪一维」：默认 kvtma（S4096 causal）L2 `red`
+> 114.5M，其中 **dK/dV 恒 ~104M（~90%）**，ksplit=8 只多 ~10.7M 的 **dQ 跨 part 原子**
+> （ksplit=1 实测 `red` 103.8M、L2 56.9%、main 1.92ms）⇒ 「dQ 改 partial」收益 <10% 不值。
+> **候选① `dK/dV-over-KV`：流量中性（负杠杆）**——把原子负担从 dK/dV 搬到 dQ，总数
+> `Σ(nblk-j)·BN·HD ≡ Σ(m+1)·BM·HD`（BM=BN），MHA 对称、**GQA 更差 `H/Hkv` 倍**；**关闭**。
+> **候选② BM=128：单独不够**——现有 `wg2<128>`（无 TMA/wgmma）实测 `red` 砍半（58.2M）但
+> **L2 仅 20.4%**（1 CTA/SM、12.5% warps 的延迟 bound）、慢 0.53×；必须 **双 warpgroup + TMA +
+> wgmma 的 BM=128**（新 body）才能同时保 L2 利用率。**候选③ ksplit auto=8 已最优**
+> （1/2/4/8/12/16/24/32 → 1.92/1.69/1.58/**1.53**/1.57/1.62/2.30/2.31ms）。LSE（F5 后）
+> issue_active 77.6%、sm 73.3% ⇒ 已近指令侧下限。**默认路径性能本次一行未改**（数值/CI 不变）。
+> 新增 **F6**（唯一真杠杆）。详见下方「当前进度 第一百三十九轮」、`docs/03` §74、`docs/08` §5.54；
+> 原始输出 `src/fp8/fa_bwd_fp8_p139_*`。
+> **下一步候选**：① **F6 = 双 warpgroup + TMA + wgmma 的 BM=128 主 kernel**（唯一能砍半 `red`
+> 且保 L2 利用率的路，工程量大）；② `dK/dV-over-KV` 已证流量中性、GEMM3/4/5 wgmma 被 ISA
+> 锁死、ksplit/LSE 已到顶——这些都不再是候选；③ DET 仅 opt-in、非目标。
+>
+> **（第一百三十八轮）**：**F3/F4-default/GEMM3·5-wgmma 收口（墙的定量复核 + fp8 wgmma ISA
 > 验证 + 负结果）＋ LSE split auto 大 S 档微调**。『fp8 专项冲刺』F1→F5 后，本轮的判断是
 > **默认 fp8 main 已到设计空间内的局部最优**，于是把「墙」钉到不可再辩，并排除几个小改动：
 > ncu 复核默认 main（S4096 causal）**L2 76.96%、L2 扇区 154.0M 中 `red` 114.5M=74.3%、
@@ -5345,6 +5378,36 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     `..._p138_wgmma_isa.out.txt`、`..._p138_ci_fp8.out.txt`；文档 `docs/03` §73、`docs/08` §5.53。
   - **下一步候选**：① 默认路径 L2 `red`（唯一真杠杆）——跨 CTA 分块偏和（FA2 式 dK/dV-over-KV）
     / 放大 BM（寄存器墙）/ 换卡；② GEMM3/4/5 wgmma 被 ISA 锁死；③ DET 仅 opt-in、非目标。
+
+- 2026-09-29（第一百三十九轮）：**fp8 主 kernel「唯一真杠杆」定位——dK/dV 跨 CTA `red` 的
+  定量归因 + 三条候选判决**（默认路径性能一行未改；本轮是「判决/钉目标」）。
+  - 动机：第 138 轮把默认 fp8 main 的墙钉到「L2 `red`」，但候选①「dK/dV-over-KV」是一笔**大改**。
+    本轮先用 ncu 把 `red` 拆清（哪个梯度）再决定动不动手，避免对流量中性的路做无谓重写。
+  - **`red` 定量归因**（`kvtma<128,64,32>`，S4096 causal）：ksplit=8（默认）L2 `red` **114.5M**、
+    L2 77.0%、main 1.57ms；ksplit=1（dQ 无原子）`red` **103.8M**、L2 56.9%、1.92ms。
+    ⇒ **dK/dV 的跨 m-block `red` 恒 ~104M（~90%）、与 ksplit 无关**（各 part 的 K 切片不相交）；
+    ksplit 只多 ~10.7M 的 **dQ 跨 part `red_add2`**。⇒ 「dQ 改 partial + reduce」收益 <10% 不值。
+  - **候选①「dK/dV-over-KV」判决：流量中性（负杠杆）**。当前 Q 主序 `dK/dV[j]` 贡献数 `nblk-j`；
+    KV 主序 `dK/dV` 单写者但 `dQ[m]` 贡献数 `m+1`；总跨 CTA 元素加次数 `Σ(nblk-j)·BN·HD ≡
+    Σ(m+1)·BM·HD`（BM=BN）⇒ 只是把原子负担从 dK/dV 搬到 dQ，**总量不变**；**GQA（H>Hkv）
+    时 dQ 更大 ⇒ 更差 `H/Hkv` 倍**。**关闭该候选**。
+  - **候选②「放大 BM=128」：单独不够**。现有 `wg2<128,128,32>`（2 warpgroup、mma+`cp.async`，
+    无 TMA/wgmma）ncu：L2 `red` **58.2M（≈½）** 但 **L2 仅 20.4%**、L1TEX 45.5%、SM 33.1%、
+    warps active 12.5%、Duration **2.96ms（0.53×）** ⇒ **非 L2-bound，而是 1 CTA/SM 的延迟/
+    occupancy bound**。⇒「BM=128」本身不足以赢；必须 **双 warpgroup + TMA + wgmma** 的 BM=128
+    （同时砍 `red` 与保 L2 利用率）。`fp8_mma_body` 现 `static_assert` 锁单 warpgroup ⇒ 新 body
+    （对标 fp16/bf16 `wgmma2`）。**这是唯一路径**（=新 **F6**）。
+  - **候选③ ksplit auto 复核**（event iters=50）：1/2/4/8/12/16/24/32 → main
+    **1.92/1.69/1.58/1.53/1.57/1.62/2.30/2.31ms** ⇒ **auto=8 已最优**，无调参空间。
+  - **非 main 复核（F5 后 LSE）**：`lse_mma_kernel_bal_tma` Duration **121.7µs**、`sm__throughput`
+    73.3%、`issue_active` 77.6%、warps 36.0% ⇒ 仍 issue-bound、已近指令侧下限。
+  - **数值/回归**：默认路径**一行未改**（数值与历史逐位一致；本次未触 device）。
+  - **新增 F6**（唯一真杠杆）到「fp8 专项冲刺」。原始输出
+    `src/fp8/fa_bwd_fp8_p139_ksplit_sweep.out.txt`、`..._p139_ncu_main_ks8_s4096.out.txt`、
+    `..._p139_ncu_main_ks1_s4096.out.txt`、`..._p139_ncu_wg2_bm128_s4096.out.txt`、
+    `..._p139_ncu_lse_s4096.out.txt`；文档 `docs/03` §74、`docs/08` §5.54。
+  - **下一步候选**：① **F6**（双 warpgroup + TMA + wgmma 的 BM=128，唯一能砍半 `red` 且保 L2
+    利用率）；② dK/dV-over-KV/GEMM3·5-wgmma/ksplit/LSE 均已判决/到顶，不再候选；③ DET 仅 opt-in。
 
 ## 灵感 / backlog
 

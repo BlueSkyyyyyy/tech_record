@@ -6822,3 +6822,95 @@ ARCH="" NVCC_FLAGS="$FLAGS" scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu \
 （FA2 式 `dK/dV-over-KV`，工程量大）、**增大 BM**（O17b 寄存器墙）、**换卡（目标卡 smem/寄存器更大）**；
 ② GEMM3/4/5 的 wgmma 需物理转置 SW128 B（+20KB smem + scatter），O4b 已判净负，**ISA 层锁死**；
 ③ DET 仅 opt-in，非目标。
+
+---
+
+## 74. 第 139 轮：fp8 主 kernel「唯一真杠杆」定位——dK/dV 跨 CTA `red` 的定量归因 + 三条候选判决
+
+### 74.1 动机
+
+第 133–138 轮（F1→F5 + 收口）后，`下一步候选` 反复收敛到「默认 fp8 main 的 L2 `red` 是唯一真
+杠杆」，并列了三条路：① 跨 CTA 分块偏和（FA2 式 `dK/dV-over-KV`）、② 放大 BM、③ 换卡。本轮
+**不再猜测**，用 ncu 把 `red` 拆到「哪个梯度（dK/dV vs dQ）、哪一维（m-block / part）」并逐条
+判决三条候选，避免对一条流量中性的路做一次大规模重写。
+
+### 74.2 `red` 的定量归因（`fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>`，S=4096 causal）
+
+| ksplit | L2 `op_red` 扇区 | L2 `op_read` | L1 `op_red` 扇区 | L2 吞吐 | Duration |
+|---|---|---|---|---|---|
+| **1**（dQ 无原子） | **103.8M** | 24.3M | 69.2M | 56.9% | 1.92 ms |
+| **8**（默认 auto） | **114.5M** | 30.9M | 76.3M | 77.0% | 1.57 ms |
+
+- **dK/dV 的跨 CTA `red` 与 ksplit 无关**：每个 K tile 只属于一个 part（K 切片不相交），故
+  `red` 的 dK/dV 项恒为 ~104M 扇区。
+- **ksplit 8→1 只让 `red` 掉了 ~10.7M（−9.3%）**，这部分就是 **dQ 的跨 part `red_add2`**
+  （REGDQ 路径：每 part 覆盖同一 `dQ[BM][HD]` 的完整寄存器累加，再跨 part 原子加）。
+  ⇒ **`red` 的 ~90% 是 dK/dV**，dQ 只占 ~10%。
+- 结论：**「把 dQ 改 partial + reduce 消掉 dQ 原子」最多省 ~10% `red`，还要付 `dq_reduce`**
+  （DET 实测 0.908× 已佐证），不值。
+
+### 74.3 候选①「dK/dV-over-KV」判决：**流量中性（负杠杆），关闭**
+
+设 causal、Q 块数 `nblk = S/BM`、`BM=BN`。
+
+- **当前 Q 主序**：`dK/dV[j]` 被覆盖它的每个 m 块原子加一次 ⇒ 贡献数 `nblk - j`；
+  总跨 CTA 元素加次数 `∝ Σ_{j=0}^{nblk-1} (nblk-j) · BN·HD = [nblk(nblk+1)/2] · BN·HD`。
+  dQ 寄存器累加（ksplit=1 时无原子）。
+- **KV 主序**：`dK/dV[j]` 单写者（`red → 0`），但 `dQ[m]` 被覆盖它的每个 K tile 原子加一次 ⇒
+  贡献数 `m+1`；总跨 CTA 元素加次数 `∝ Σ_{m=0}^{nblk-1} (m+1) · BM·HD = [nblk(nblk+1)/2] · BM·HD`。
+- `BM=BN` 时**两者逐项相等** ⇒ 只是把原子负担从 dK/dV 搬到 dQ，**总流量不变**。
+- **GQA（`H > Hkv`）时更差**：dQ 是 `[S,H,HD]` 而 dK/dV 是 `[S,Hkv,HD]`，把原子搬到更大的 dQ
+  上会让 red 放大 `H/Hkv` 倍。⇒ **该候选应关闭**（此前 ROADMAP 把它列为「唯一路之一」是乐观的）。
+
+### 74.4 候选②「放大 BM 到 128」：**单独不够，必须配 TMA+wgmma**
+
+现有 `fa_bwd_fp8_wg2_kernel<128,128,32>`（BM=128、2 warpgroup、mma + `cp.async`、无 TMA/wgmma）：
+
+| kernel | BM | L2 `op_red` | L2 吞吐 | L1TEX | SM | warps active | Duration |
+|---|---|---|---|---|---|---|---|
+| `kvtma<...,64,32>` | 64 | 114.5M | **77.0%** | 71.8% | 47.9% | — | **1.57 ms** |
+| `wg2<128,...>` | **128** | **58.2M（≈½）** | **20.4%** | 45.5% | 33.1% | 12.5% | **2.96 ms** |
+
+- BM 64→128 确实把 `red` **砍半**（114.5M→58.2M），但 `wg2` **根本不是 L2-bound**（L2 仅 20.4%），
+  而是 **1 CTA/SM（12.5% warps）的延迟/occupancy bound**（无 TMA、无 wgmma、每 tile 两次
+  `__syncthreads`、单缓冲 `cp.async`、smem ~131KB 锁 1 CTA/SM）⇒ 慢 0.53×。
+- ⇒ **「BM=128」本身不足以赢**；必须是 **TMA + wgmma + 双 warpgroup 的 BM=128**，才能「把 red
+  砍半」的同时保持 kvtma 的高 L2 利用率。当前 `fp8_mma_body` 用
+  `static_assert(WGMMA==false || (NTH==THREADS && NWAR==WN))` **锁死单 warpgroup**，故需新写
+  双 warpgroup 的 body（对标 fp16/bf16 的 `fa_bwd_fp16_wgmma2_kernel`）。**这是唯一路径，工程量大。**
+
+### 74.5 候选③ ksplit auto 复核（S=4096 causal，event iters=50）
+
+`ksplit` = 1/2/4/8/12/16/24/32 → main **1.92/1.69/1.58/1.53/1.57/1.62/2.30/2.31 ms**
+⇒ **auto=8 就是最优点**，无调参回归空间。
+
+### 74.6 非 main 复核（F5 后 LSE）
+
+`lse_mma_kernel_bal_tma<128,1>`（S4096 split=2）：Duration **121.7µs**、`sm__throughput`
+**73.3%**、`issue_active` **77.6%**、warps active 36.0% ⇒ **仍是 issue-bound、已接近指令侧下限**
+（F5 已 1.67×），无新的低垂果实。
+
+### 74.7 结论 / 下一步
+
+默认 fp8 main 的 `red`（**dK/dV，~104M L2 扇区，占 `red` 90% / L2 流量 ~67%**）是唯一真杠杆。
+三条候选里只有「**双 warpgroup + TMA + wgmma 的 BM=128**」能从根上把 `red` 砍半并保持 L2 利用率；
+其余（dQ partial、KV 主序、ksplit 调参）要么收益 <10%、要么流量中性甚至更差。
+→ 新立 **F6**（见 ROADMAP「fp8 专项冲刺」）。
+
+### 74.8 复现 / 原始输出
+
+```bash
+FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+# ksplit sweep（event）
+for k in 1 2 4 8 12 16 24 32; do
+  ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+    --dir=.../b1_s4096_h16_d128_causal_fp8 --iters=50 --ksplit=$k
+done
+# ncu：默认 main / ksplit=1 / wg2 / LSE
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu \
+  --kernel-name regex:kvtma -c 1 --metrics lts__t_sectors_op_red.sum,... -- ...
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_p139_ksplit_sweep.out.txt`、
+`..._p139_ncu_main_ks8_s4096.out.txt`、`..._p139_ncu_main_ks1_s4096.out.txt`、
+`..._p139_ncu_wg2_bm128_s4096.out.txt`、`..._p139_ncu_lse_s4096.out.txt`。
