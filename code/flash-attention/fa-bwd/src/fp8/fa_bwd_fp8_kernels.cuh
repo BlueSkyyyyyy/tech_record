@@ -2278,8 +2278,13 @@ __global__ void lse_split_merge_kernel(const float* __restrict__ part,
   lse[row] = m + flog(l);
 }
 
+// O70（第 164 轮）：加 `bool FULL`——`FULL=true` 服务**非 causal（full）** 定长路径。
+//   一个 CTA 只处理一个 m 块（grid.x = nblk，不做镜像配对；full 各 m 块工作量相同），
+//   `ncols = S` 且不做 `jg <= qi` 因果掩码；其余（cp.async/TMA 双缓冲、rowwise scale、
+//   tile 内两趟 softmax、4-lane shfl 归约）逐字复用。`FULL=false` 编译出与 O32/O38 逐位
+//   相同的 causal 代码。仅定长（无 cu_seqlens）；varlen full 仍走 `lse_mma_kernel_bal`。
 #if defined(FA_WGMMA) && defined(FA_TMA)
-template <int HD, int PIPE = 1>
+template <int HD, int PIPE = 1, bool FULL = false>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
                        const __grid_constant__ CUtensorMap kmap,
@@ -2343,10 +2348,11 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   int kuse0 = 0, kuse1 = 0;
 #pragma unroll 1
   for (int t = 0; t < 2; ++t) {
-    const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
-    if (t == 1 && pair == nblk - 1 - pair) break;
+    if constexpr (FULL) { if (t == 1) continue; }   // O70：full 无镜像配对，只做 t=0
+    const int mblk = FULL ? pair : ((t == 0) ? pair : (nblk - 1 - pair));
+    if (!FULL && t == 1 && pair == nblk - 1 - pair) break;
     const int m0 = mblk * LBM;
-    const int ncols = min(S, m0 + LBM);
+    const int ncols = FULL ? S : min(S, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
     // O38：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
     const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
@@ -2388,10 +2394,10 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
 #pragma unroll
       for (int j = 0; j < 8; ++j) {
         const int jg0 = j0 + j * 8 + c2, jg1 = jg0 + 1;
-        const bool c00 = ge0 && jg0 < S && jg0 <= qi0;
-        const bool c01 = ge0 && jg1 < S && jg1 <= qi0;
-        const bool c10 = ge1 && jg0 < S && jg0 <= qi1;
-        const bool c11 = ge1 && jg1 < S && jg1 <= qi1;
+        const bool c00 = ge0 && jg0 < S && (FULL || jg0 <= qi0);
+        const bool c01 = ge0 && jg1 < S && (FULL || jg1 <= qi0);
+        const bool c10 = ge1 && jg0 < S && (FULL || jg0 <= qi1);
+        const bool c11 = ge1 && jg1 < S && (FULL || jg1 <= qi1);
         const float k0 = KtS[j * 8 + c2], k1 = KtS[j * 8 + c2 + 1];
         float v0 = c00 ? d[j * 4 + 0] * qsc0 * k0 : -INFINITY;
         float v1 = c01 ? d[j * 4 + 1] * qsc0 * k1 : -INFINITY;

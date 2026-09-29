@@ -2207,8 +2207,13 @@ __global__ void lse_split_merge_kernel(const float* __restrict__ part,
   lse[row] = m + flog(l);
 }
 
+// O70（第 164 轮）：加 `bool FULL`——`FULL=true` 服务**非 causal（full）** 定长路径。
+//   一个 CTA 只处理一个 m 块（grid.x = nblk，不做镜像配对；full 各 m 块工作量相同），
+//   `ncols = S` 且不做 `jg <= qi` 因果掩码；其余（cp.async/TMA 双缓冲、rowwise scale、
+//   tile 内两趟 softmax、4-lane shfl 归约）逐字复用。`FULL=false` 编译出与 O32/O38 逐位
+//   相同的 causal 代码。仅定长（无 cu_seqlens）；varlen full 仍走 `lse_mma_kernel_bal`。
 #if defined(FA_WGMMA) && defined(FA_TMA)
-template <int HD, int PIPE = 1>
+template <int HD, int PIPE = 1, bool FULL = false>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
                        const __grid_constant__ CUtensorMap kmap,
@@ -2272,10 +2277,11 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   int kuse0 = 0, kuse1 = 0;
 #pragma unroll 1
   for (int t = 0; t < 2; ++t) {
-    const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
-    if (t == 1 && pair == nblk - 1 - pair) break;
+    if constexpr (FULL) { if (t == 1) continue; }   // O70：full 无镜像配对，只做 t=0
+    const int mblk = FULL ? pair : ((t == 0) ? pair : (nblk - 1 - pair));
+    if (!FULL && t == 1 && pair == nblk - 1 - pair) break;
     const int m0 = mblk * LBM;
-    const int ncols = min(S, m0 + LBM);
+    const int ncols = FULL ? S : min(S, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
     // O38：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
     const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
@@ -2317,10 +2323,10 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
 #pragma unroll
       for (int j = 0; j < 8; ++j) {
         const int jg0 = j0 + j * 8 + c2, jg1 = jg0 + 1;
-        const bool c00 = ge0 && jg0 < S && jg0 <= qi0;
-        const bool c01 = ge0 && jg1 < S && jg1 <= qi0;
-        const bool c10 = ge1 && jg0 < S && jg0 <= qi1;
-        const bool c11 = ge1 && jg1 < S && jg1 <= qi1;
+        const bool c00 = ge0 && jg0 < S && (FULL || jg0 <= qi0);
+        const bool c01 = ge0 && jg1 < S && (FULL || jg1 <= qi0);
+        const bool c10 = ge1 && jg0 < S && (FULL || jg0 <= qi1);
+        const bool c11 = ge1 && jg1 < S && (FULL || jg1 <= qi1);
         const float k0 = KtS[j * 8 + c2], k1 = KtS[j * 8 + c2 + 1];
         float v0 = c00 ? d[j * 4 + 0] * qsc0 * k0 : -INFINITY;
         float v1 = c01 ? d[j * 4 + 1] * qsc0 * k1 : -INFINITY;
@@ -4835,16 +4841,17 @@ static void launch_lse_bal_wgmma(dim3 lg, const unsigned char* q8, const float* 
 #endif
 
 // O32：fp8 TMA 版 LSE（4D-TMA 载入 Q/K，单块），仅 `-DFA_WGMMA -DFA_TMA` 构建存在。
+//   O70：模板加 `bool FULL`，`FULL=true` 时 grid.x 应是 `nblk`（一个 m 块一个 CTA，非因果）。
 #if defined(FA_WGMMA) && defined(FA_TMA)
-template <int HD, int PIPE>
+template <int HD, int PIPE, bool FULL = false>
 static void launch_lse_bal_tma(dim3 lg, const CUtensorMap& qmap, const CUtensorMap& kmap,
                                const float* qs, const float* ks, float* lse, int S, int H,
                                int Hkv, float scale) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = Cfg::lse_smem_bytes_tma1;
-  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<HD, PIPE>,
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<HD, PIPE, FULL>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  lse_mma_kernel_bal_tma<HD, PIPE><<<lg, THREADS, kSmem>>>(qmap, kmap, qs, ks, lse, nullptr,
+  lse_mma_kernel_bal_tma<HD, PIPE, FULL><<<lg, THREADS, kSmem>>>(qmap, kmap, qs, ks, lse, nullptr,
                                                            S, H, Hkv, scale, 1);
 }
 
@@ -6264,7 +6271,7 @@ int main(int argc, char** argv) {
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     Fp8Cfg<128, 64, 32>::lse_smem_bytes_tma1));
   }
-  if (lse_tma < 0) lse_tma = (D == 128 && causal) ? 1 : 0;
+  if (lse_tma < 0) lse_tma = (D == 128) ? 1 : 0;   // O70：D=128 的 causal/full 都默认 TMA
 #else
   if (lse_tma < 0) lse_tma = 0;
 #endif
@@ -6360,9 +6367,19 @@ int main(int argc, char** argv) {
         // O68（第 162 轮）：非 causal D=128 的 LSE 从 O1 `lse_mma_kernel`（无 cp.async 流水）
         //   改走 O54 的均衡版 `lse_mma_kernel_bal<FULL=true>`——一个 CTA 一个 m 块、
         //   K 用 `cp.async` 16B 双缓冲。full 各 m 块工作量相同（均 nblk 个 tile）无需镜像配对。
-        //   `--lsefull=0` 退回 O1（逐标量 global→smem）做同 binary A/B。
-        launch_lse_bal<128, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale,
-                                     nullptr, nullptr, 1);
+        // O70（第 164 轮）：full D=128 定长**优先走 4D-TMA**（对齐 causal O32）；`--lsetma=0`
+        //   退回 O68 的 cp.async 均衡版做同 binary A/B；`--lsefull=0` 仍退回 O1。
+        bool did_tma = false;
+#if defined(FA_WGMMA) && defined(FA_TMA)
+        if (lse_tma) {
+          launch_lse_bal_tma<128, 1, true>(lg, qmap_lse, kmap_lse, d_qs, d_ks, d_lse, S, H, Hkv,
+                                           scale);
+          did_tma = true;
+        }
+#endif
+        if (!did_tma)
+          launch_lse_bal<128, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale,
+                                       nullptr, nullptr, 1);
       } else
         launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
       if (do_delta) {
