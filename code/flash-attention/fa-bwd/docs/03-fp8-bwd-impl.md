@@ -7698,3 +7698,75 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_mma.cu -c 1 \
   §83 已指出这需要 persistent + 4D-TMA + 降寄存器的大改（“F7 主体”），不是单个 micro-lever。
 - **本原型定位**：F7 主体的「重叠」子项判决完成（形状相关、大 S 负）。原始输出
   `src/fp8/fa_bwd_fp8_kvowner_mma_p151_{s512,s4096,sol}.out.txt`。
+
+## 85. F7 主体第一步（第一百五十二轮）：KV-owner mma 的 **persistent 调度**——负结果（对标 TE grid=132 不成立）
+
+> 承接 §84「结论 / 下一步」与 ROADMAP「下一步候选 ①」：F7 主体要对标 TE 的
+> `..._flash_bprop_wgmma_f8_..._64x64x128`（**grid=132 persistent、1 CTA/SM**），
+> 所以先单独把「persistent 调度」这一子项在 KV-owner mma 原型上判决掉。**默认路径一行未改**
+> （纯新增 `fp8_kvowner_dkv_persist_kernel`；base/pipe 变体原样保留）。
+
+### 85.1 改动（`src/fp8/fa_bwd_fp8_kvowner_mma.cu` 新增 `fp8_kvowner_dkv_persist_kernel`）
+
+- 栅格从 `dim3(nblk, H)`（每 (KV 块, head) 一个 CTA，S4096 时 **2048 CTA**）改成
+  **1D persistent**：`grid = min(nblk*H, SM数×3)`（可 `--pgrid=` 覆盖），
+  `for (tile = blockIdx.x; tile < total; tile += gridDim.x)`，`tile → (h = tile/nblk,
+  j0 = (tile%nblk)*BN)`（按 head 连续）。每个 CTA 用同一块 smem/寄存器依次处理多个 tile。
+- 数值口径与 §83/§84 **完全一致**（每 tile 独立、每输出元素仅被其 owner 写一次）⇒
+  **`persistent vs base` 逐位 = 0**（只换栅格映射）。smem 与 base 相同（70,144 B），
+  168 regs → 3 CTA/SM。
+
+### 85.2 数值：与 base **逐位相同**
+
+| shape（causal, MHA, fp8） | base dk/dv (vs ref) | persist dk/dv (vs ref) | **persist vs base** |
+|---|---|---|---|
+| S=512  H16 | 2.975e-1 / 3.735e-1 | 2.975e-1 / 3.735e-1 | **0 / 0** |
+| S=4096 H16 | 2.643e-1 / 3.216e-1 | 2.643e-1 / 3.216e-1 | **0 / 0** |
+
+### 85.3 性能：**persistent 全面更慢**（S4096 H16，event，iters=50，同 binary）
+
+| pgrid | grid 波数 | persist main | persist/base |
+|---|---|---|---|
+| 132（1 CTA/SM，对标 TE） | 1 | 4.543 ms | **0.313×** |
+| 264（2 CTA/SM） | 1 | 2.537 ms | 0.558× |
+| 396（3 CTA/SM = 现行上限） | 1 | 2.013 ms | **0.707×** |
+| 792 | 2 | 1.798 ms | 0.789× |
+| 1188 | 3 | 1.530 ms | 0.931× |
+| 2048（= 每 CTA 仍只 1 tile，纯换 1D kernel） | 5.17 | 1.520 ms | 0.931× |
+| base（2D `(nblk,H)`，2048 CTA） | 5.17 | **1.414 ms** | 1.0 |
+
+- **单调趋势**：pgrid 越小越慢，**永不反超 base**；即便 pgrid=2048（无循环，退化成 1D 版
+  base）仍 **0.93×**（1D 解码 + 循环脚手架的开销，去掉 loop 顶的冗余 `__syncthreads` 后
+  0.944→0.931×，基本不变）。S512（grid=256<396，无循环）persist/base = **0.921×**。
+- 结论：**KV-owner dK/dV 原型的「persistent」不是杠杆**。
+
+### 85.4 ncu：根因 = **causal 的块间负载极不均衡**，静态 persistent 无法动态回填（S4096 H16）
+
+| kernel | Duration | Waves/SM | Compute% | Memory% | Achieved occ | Eligible warps/sched |
+|---|---|---|---|---|---|---|
+| base | **1.42 ms** | 5.17 | 46.9 | 50.3 | 17.69% | 0.82 |
+| persist(pgrid=396) | 2.01 ms | **1.0** | **32.5** | **36.8** | 16.86% | 0.67 |
+
+- persistent=1 波时，`Compute/Memory` 利用率从 46.9/50.3 掉到 32.5/36.8、`Eligible` 0.82→0.67：
+  **SM 有大量空闲但无 block 可补**。根因是 causal 下每 tile 的工作量 = 它拥有的 KV 块被多少
+  query 消费（j0 小 ⇒ ~S/BM 个 m-step，j0 接近 S ⇒ 1 个），**块间权重差 ~64×**；静态 strided
+  划分给每个 CTA 的**总权重不均**，且没有 GPU 原生调度器的「块完成即回填」来消尾。
+  base 的 2048-CTA 大栅格 + 硬件调度器天然把重/轻块混填（5.17 波）⇒ 利用率反而高。
+- 注意：**TE 的 grid=132 之所以行，是因为它的 tile（64×64×128）工作划分是均匀的**（无 causal
+  偏斜的静态映射 + 其 persistent 调度器做均衡分配）。**直接照搬「grid=132」到我们带 causal
+  偏斜的 KV-owner 划分上是有害的**。
+
+### 85.5 结论 / 下一步
+
+- **F7「persistent 调度」子项判决为负结果**：KV-owner dK/dV 原型上，把栅格改成 persistent
+  （含对标 TE 的 grid=132）**只会更慢**（1 CTA/SM 时 **0.31×**，3 CTA/SM 时 **0.71×**），
+  根因是 causal 块间负载差 ~64× + 静态划分失去硬件动态回填。⇒ F7 主体若要 persistent，
+  必须配 **动态负载均衡**（work-stealing / 按权重重排 tile）**或均匀化工作划分**，
+  单纯「减 CTA 数 + strided 循环」是本卡的负优化。
+- 与 §84 合并看，F7 要真转正的杠杆仍收窄为：**打 `wait`（mma/smem 依赖）+ occupancy**
+  （smem≤58KB/regs≤128 才能 4 CTA/SM），或**先把 causal 工作划分均匀化**（例如把
+  dK/dV-over-KV 的 KV 块与「消费它的 query 数」配对均衡），而非照搬 TE 的栅格形状。
+- 本原型定位：F7 主体的「persistent」子项判决完成（负结果）。原始输出
+  `src/fp8/fa_bwd_fp8_kvowner_mma_p152_s512.out.txt`、
+  `..._p152_s4096.out.txt`、`..._p152_pgridsweep_s4096.out.txt`、
+  `..._p152_ncu_base_s4096.out.txt`、`..._p152_ncu_persist_s4096.out.txt`。

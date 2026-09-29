@@ -1,0 +1,31 @@
+=== F7 主体 persistent pgrid sweep (S4096 H16 causal fp8, iters=50) ===
+----- pgrid=132 -----
+[对拍] persistent vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[计时] main(dK/dV) base = 1.4217 ms (72.51 TF) | **pipe** = 1.4566 ms (70.77 TF) | A/B = 0.976×
+[计时] main(dK/dV) **persistent**(pgrid=132) = 4.5425 ms (22.69 TF) | persist/base = 0.313×
+[计时] preprocess = 1.2978 ms | total base = 2.7194 | total pipe = 2.7543 | total persist = 5.8403
+----- pgrid=264 -----
+[对拍] persistent vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[计时] main(dK/dV) base = 1.4154 ms (72.83 TF) | **pipe** = 1.4584 ms (70.68 TF) | A/B = 0.971×
+[计时] main(dK/dV) **persistent**(pgrid=264) = 2.5369 ms (40.63 TF) | persist/base = 0.558×
+[计时] preprocess = 1.2989 ms | total base = 2.7143 | total pipe = 2.7573 | total persist = 3.8358
+----- pgrid=396 -----
+[对拍] persistent vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[计时] main(dK/dV) base = 1.4238 ms (72.40 TF) | **pipe** = 1.4567 ms (70.76 TF) | A/B = 0.977×
+[计时] main(dK/dV) **persistent**(pgrid=396) = 2.0127 ms (51.21 TF) | persist/base = 0.707×
+[计时] preprocess = 1.3127 ms | total base = 2.7365 | total pipe = 2.7694 | total persist = 3.3254
+----- pgrid=792 -----
+[对拍] persistent vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[计时] main(dK/dV) base = 1.4196 ms (72.61 TF) | **pipe** = 1.4571 ms (70.74 TF) | A/B = 0.974×
+[计时] main(dK/dV) **persistent**(pgrid=792) = 1.7981 ms (57.33 TF) | persist/base = 0.789×
+[计时] preprocess = 1.3099 ms | total base = 2.7295 | total pipe = 2.7670 | total persist = 3.1080
+----- pgrid=1188 -----
+[对拍] persistent vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[计时] main(dK/dV) base = 1.4242 ms (72.38 TF) | **pipe** = 1.4492 ms (71.13 TF) | A/B = 0.983×
+[计时] main(dK/dV) **persistent**(pgrid=1188) = 1.5298 ms (67.38 TF) | persist/base = 0.931×
+[计时] preprocess = 1.3351 ms | total base = 2.7593 | total pipe = 2.7843 | total persist = 2.8648
+----- pgrid=2048 -----
+[对拍] persistent vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[计时] main(dK/dV) base = 1.4143 ms (72.88 TF) | **pipe** = 1.4570 ms (70.75 TF) | A/B = 0.971×
+[计时] main(dK/dV) **persistent**(pgrid=2048) = 1.5195 ms (67.84 TF) | persist/base = 0.931×
+[计时] preprocess = 1.3358 ms | total base = 2.7501 | total pipe = 2.7928 | total persist = 2.8553

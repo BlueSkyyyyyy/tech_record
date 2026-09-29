@@ -751,6 +751,331 @@ fp8_kvowner_dkv_pipe_kernel(const unsigned char* __restrict__ q8, const float* _
 }
 
 // =============================================================================
+// F7 主体第一步：KV-owner dK/dV 原型 + **persistent 调度**（对标 TE grid=132）
+// =============================================================================
+// 动机（ROADMAP 第一百五十一轮「下一步候选 ①」）：第 150/151 轮的 KV-owner 原型
+// 每个 (KV 块, head) 一个 CTA ⇒ grid=(S/BN)·H，S4096 时 **2048 个 CTA**；而 TE 的
+// `..._flash_bprop_wgmma_f8_..._64x64x128` 是 **132 个 persistent CTA**（1 CTA/SM）。
+// 本变体把栅格改成 **1D persistent**：grid = min(总 tile 数, SM数×CTAS_PER_SM)，每个
+// CTA 用 `tile += gridDim.x` 的 strided 循环处理多个 (h, j0) tile，**无栅格尾波量化**
+// （原 2048/396=5.17 波、尾波 68/396）且 tile 顺序可控（按 head 连续 ⇒ L2 友好）。
+//
+// 数值口径与第 150/151 轮原型**完全一致**（每 tile 独立、每输出元素仅被其 owner 写
+// 一次），故 `persist vs base` 应**逐位 = 0**（只换栅格映射）。
+template <int HD, int BM, int BN>
+__global__ void __launch_bounds__(THREADS, 3)
+fp8_kvowner_dkv_persist_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
+                               const unsigned char* __restrict__ k8, const float* __restrict__ ks,
+                               const unsigned char* __restrict__ v8, const float* __restrict__ vs,
+                               const unsigned char* __restrict__ do8, const float* __restrict__ dos,
+                               const float* __restrict__ lse, const float* __restrict__ delta,
+                               float* __restrict__ dk, float* __restrict__ dv, int S, int H, int nblk,
+                               float scale, int causal) {
+  using Cfg = Fp8Cfg<HD, BM, BN>;
+  constexpr int ASLD = Cfg::ASLD;
+  constexpr int PSLD = Cfg::PSLD;
+  constexpr int QTS = Cfg::QTS;
+  constexpr int PSS = Cfg::PSS;
+  constexpr int NWM = 2, NWAR = 2;
+  constexpr int NTW = NWAR * 64;
+  constexpr int GM1 = BM / NWM, GN1 = BN / NWAR;
+  constexpr int MTM = GM1 / 16, MTN = GN1 / 8;
+  constexpr int GM34 = BN / NWM, GN34 = NTW / NWAR;
+  constexpr int MTM34 = GM34 / 16, NTM34 = GN34 / 8;
+  constexpr int NTFOLD = BN / 32;
+  static_assert(HD == 128 && BM == 64 && BN == 32, "本原型固定 HD=128/BM=64/BN=32");
+
+  constexpr int sz_Ks = BN * ASLD;
+  constexpr int sz_Vs = BN * ASLD;
+  constexpr int sz_Qs = BM * ASLD;
+  constexpr int sz_dOs = BM * ASLD;
+  constexpr int sz_Qp = (BM / 2) * PSLD * (int)sizeof(uint16_t);
+  constexpr int sz_dOp = (BM / 2) * PSLD * (int)sizeof(uint16_t);
+  constexpr int sz_Ap = BN * QTS;
+  constexpr int sz_dS3 = BN * QTS;
+  constexpr int sz_Ps = BM * PSS * (int)sizeof(float);
+  constexpr int sz_Ss = BM * PSS * (int)sizeof(float);
+  constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+
+  extern __shared__ __align__(16) char smem[];
+  int off = 0;
+  unsigned char* Ks = reinterpret_cast<unsigned char*>(smem + off); off += sz_Ks;
+  unsigned char* Vs = reinterpret_cast<unsigned char*>(smem + off); off += sz_Vs;
+  unsigned char* Qs = reinterpret_cast<unsigned char*>(smem + off); off += sz_Qs;
+  unsigned char* dOs = reinterpret_cast<unsigned char*>(smem + off); off += sz_dOs;
+  uint16_t* Qp = reinterpret_cast<uint16_t*>(smem + off); off += sz_Qp;
+  uint16_t* dOp = reinterpret_cast<uint16_t*>(smem + off); off += sz_dOp;
+  unsigned char* Ap = reinterpret_cast<unsigned char*>(smem + off); off += sz_Ap;
+  unsigned char* dS3 = reinterpret_cast<unsigned char*>(smem + off); off += sz_dS3;
+  float* Ps = reinterpret_cast<float*>(smem + off); off += sz_Ps;
+  float* Ss = reinterpret_cast<float*>(smem + off); off += sz_Ss;
+  float* scales = reinterpret_cast<float*>(smem + off);
+  float* qs_s = scales;
+  float* dos_s = qs_s + BM;
+  float* ks_s = dos_s + BM;
+  float* vs_s = ks_s + BN;
+  float* sA = vs_s + BN;
+  float* sds3 = sA + BN;
+
+  const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  const int wr = wid / NWAR, wc = wid % NWAR;
+  const int g = lane >> 2, c2 = (lane & 3) * 2;
+  const int nd4 = HD / 4;
+  const int total = nblk * H;
+
+  // ---- persistent 1D strided 循环：tile = h*nblk + jblk（按 head 连续，L2 友好）----
+  for (int tile = blockIdx.x; tile < total; tile += gridDim.x) {
+    const int h = tile / nblk;
+    const int j0 = (tile % nblk) * BN;
+
+    // ---- 拥有的 K/V 行块：**只从 global 读一次**常驻 smem（越界补 0=E4M3(0)）----
+    for (int u = tid; u < (BN / 2) * nd4; u += THREADS) {
+      const int rp = u / nd4, dq = (u % nd4) * 4;
+      const int jr = j0 + rp * 2;
+      uint32_t k0 = 0, k1 = 0, v0 = 0, v1 = 0;
+      if (jr < S) {
+        size_t i0 = (((size_t)jr) * H + h) * HD + dq;
+        k0 = *reinterpret_cast<const uint32_t*>(k8 + i0);
+        v0 = *reinterpret_cast<const uint32_t*>(v8 + i0);
+      }
+      if (jr + 1 < S) {
+        size_t i1 = (((size_t)(jr + 1)) * H + h) * HD + dq;
+        k1 = *reinterpret_cast<const uint32_t*>(k8 + i1);
+        v1 = *reinterpret_cast<const uint32_t*>(v8 + i1);
+      }
+      *reinterpret_cast<uint32_t*>(Ks + (rp * 2) * ASLD + dq) = k0;
+      *reinterpret_cast<uint32_t*>(Ks + (rp * 2 + 1) * ASLD + dq) = k1;
+      *reinterpret_cast<uint32_t*>(Vs + (rp * 2) * ASLD + dq) = v0;
+      *reinterpret_cast<uint32_t*>(Vs + (rp * 2 + 1) * ASLD + dq) = v1;
+    }
+    if (tid < BN) {
+      const int jg = j0 + tid;
+      ks_s[tid] = (jg < S) ? ks[((size_t)jg) * H + h] : 1.f;
+      vs_s[tid] = (jg < S) ? vs[((size_t)jg) * H + h] : 1.f;
+    }
+    __syncthreads();
+
+    float dVacc[MTM34][NTM34][4];
+    float dKacc[MTM34][NTM34][4];
+#pragma unroll
+    for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+      for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) { dVacc[i][j][q] = 0.f; dKacc[i][j][q] = 0.f; }
+
+    const int mstart = (j0 / BM) * BM;
+    for (int m0 = mstart; m0 < S; m0 += BM) {
+      for (int u = tid; u < (BM / 2) * nd4; u += THREADS) {
+        const int rp = u / nd4, dq = (u % nd4) * 4;
+        const int qa = m0 + rp * 2, qb = m0 + rp * 2 + 1;
+        uint32_t q0 = 0, q1 = 0, o0 = 0, o1 = 0;
+        if (qa < S) {
+          size_t idx = (((size_t)qa) * H + h) * HD + dq;
+          q0 = *reinterpret_cast<const uint32_t*>(q8 + idx);
+          o0 = *reinterpret_cast<const uint32_t*>(do8 + idx);
+        }
+        if (qb < S) {
+          size_t idx = (((size_t)qb) * H + h) * HD + dq;
+          q1 = *reinterpret_cast<const uint32_t*>(q8 + idx);
+          o1 = *reinterpret_cast<const uint32_t*>(do8 + idx);
+        }
+        *reinterpret_cast<uint32_t*>(Qs + (rp * 2) * ASLD + dq) = q0;
+        *reinterpret_cast<uint32_t*>(Qs + (rp * 2 + 1) * ASLD + dq) = q1;
+        *reinterpret_cast<uint32_t*>(dOs + (rp * 2) * ASLD + dq) = o0;
+        *reinterpret_cast<uint32_t*>(dOs + (rp * 2 + 1) * ASLD + dq) = o1;
+        uint32_t* qpw = reinterpret_cast<uint32_t*>(Qp + rp * PSLD + dq);
+        qpw[0] = __byte_perm(q0, q1, 0x5140);
+        qpw[1] = __byte_perm(q0, q1, 0x7362);
+        uint32_t* opw = reinterpret_cast<uint32_t*>(dOp + rp * PSLD + dq);
+        opw[0] = __byte_perm(o0, o1, 0x5140);
+        opw[1] = __byte_perm(o0, o1, 0x7362);
+      }
+      if (tid < BM) {
+        const int qi = m0 + tid;
+        qs_s[tid] = (qi < S) ? qs[((size_t)qi) * H + h] : 1.f;
+        dos_s[tid] = (qi < S) ? dos[((size_t)qi) * H + h] : 1.f;
+      }
+      __syncthreads();
+
+      float lse_r[4], del_r[4];
+#pragma unroll
+      for (int i = 0; i < 2; ++i)
+#pragma unroll
+        for (int s = 0; s < 2; ++s) {
+          const int r = wr * 32 + i * 16 + g + (s ? 8 : 0);
+          const int qi = m0 + r;
+          const size_t idx = ((size_t)qi) * H + h;
+          const bool ok = qi < S;
+          lse_r[i * 2 + s] = ok ? lse[idx] : 0.f;
+          del_r[i * 2 + s] = ok ? delta[idx] : 0.f;
+        }
+
+      float preg[MTM][MTN][4];
+      {
+        float acc[MTM][MTN][4];
+#pragma unroll
+        for (int i = 0; i < MTM; ++i)
+#pragma unroll
+          for (int j = 0; j < MTN; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+        mma_block<GM1, GN1, HD, E4E4>(Qs, ASLD, Ks, ASLD, acc, wr, wc, lane);
+        const int r0 = wr * GM1, c0 = wc * GN1;
+#pragma unroll
+        for (int i = 0; i < MTM; ++i)
+#pragma unroll
+          for (int j = 0; j < MTN; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              const int c = c0 + j * 8 + c2 + (q & 1);
+              const int qi = m0 + r, jg = j0 + c;
+              float p = 0.f;
+              if (qi < S && jg < S && !(causal && jg > qi)) {
+                const float sval = acc[i][j][q] * scale * qs_s[r] * ks_s[c];
+                p = fexp(sval - lse_r[i * 2 + (q >= 2 ? 1 : 0)]);
+              }
+              Ps[r * PSS + c] = p;
+              preg[i][j][q] = p;
+            }
+      }
+      {
+        float acc[MTM][MTN][4];
+#pragma unroll
+        for (int i = 0; i < MTM; ++i)
+#pragma unroll
+          for (int j = 0; j < MTN; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+        mma_block<GM1, GN1, HD, E5E4>(dOs, ASLD, Vs, ASLD, acc, wr, wc, lane);
+        const int r0 = wr * GM1, c0 = wc * GN1;
+#pragma unroll
+        for (int i = 0; i < MTM; ++i)
+#pragma unroll
+          for (int j = 0; j < MTN; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              const int c = c0 + j * 8 + c2 + (q & 1);
+              const float dpv = acc[i][j][q] * dos_s[r] * vs_s[c];
+              const float del = del_r[i * 2 + (q >= 2 ? 1 : 0)];
+              Ss[r * PSS + c] = preg[i][j][q] * (dpv - del);
+            }
+      }
+      __syncthreads();
+
+      if (wid < 4) {
+        const int jl = lane >> 2, sub4 = lane & 3;
+#pragma unroll
+        for (int jh = 0; jh < NTFOLD; ++jh) {
+          const int j = wid * 8 + jl + jh * 32;
+          float amaxA = 0.f, amax3 = 0.f;
+#pragma unroll
+          for (int half = 0; half < 2; ++half)
+#pragma unroll
+            for (int t = 0; t < 8; ++t) {
+              const int m = sub4 * 8 + t + half * 32;
+              amaxA = fmaxf(amaxA, fabsf(Ps[m * PSS + j] * dos_s[m]));
+              amax3 = fmaxf(amax3, fabsf(Ss[m * PSS + j] * qs_s[m]));
+            }
+          amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 1));
+          amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 2));
+          amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 1));
+          amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 2));
+          float scA = (amaxA > 0.f) ? amaxA / kE4M3Max : 1.f;
+          float sc3 = (amax3 > 0.f) ? amax3 / kE5M2Max : 1.f;
+          if (sub4 == 0) { sA[j] = scA; sds3[j] = sc3; }
+          scA = __shfl_sync(0xffffffffu, scA, jl * 4);
+          sc3 = __shfl_sync(0xffffffffu, sc3, jl * 4);
+          const float invA = __frcp_rn(scA);
+          const float inv3 = __frcp_rn(sc3);
+#pragma unroll
+          for (int half = 0; half < 2; ++half) {
+            uint32_t pa2[2], d32[2];
+#pragma unroll
+            for (int t4 = 0; t4 < 2; ++t4) {
+              const int m = sub4 * 8 + t4 * 4 + half * 32;
+              pa2[t4] = foldpack4<true, false>(
+                  Ps[(m + 0) * PSS + j] * dos_s[m + 0], Ps[(m + 1) * PSS + j] * dos_s[m + 1],
+                  Ps[(m + 2) * PSS + j] * dos_s[m + 2], Ps[(m + 3) * PSS + j] * dos_s[m + 3], scA,
+                  invA);
+              d32[t4] = foldpack4<true, true>(
+                  Ss[(m + 0) * PSS + j] * qs_s[m + 0], Ss[(m + 1) * PSS + j] * qs_s[m + 1],
+                  Ss[(m + 2) * PSS + j] * qs_s[m + 2], Ss[(m + 3) * PSS + j] * qs_s[m + 3], sc3,
+                  inv3);
+            }
+            *reinterpret_cast<uint2*>(Ap + j * QTS + sub4 * 8 + half * 32) =
+                make_uint2(pa2[0], pa2[1]);
+            *reinterpret_cast<uint2*>(dS3 + j * QTS + sub4 * 8 + half * 32) =
+                make_uint2(d32[0], d32[1]);
+          }
+        }
+      }
+      __syncthreads();
+
+      {
+        float acc[MTM34][NTM34][4];
+#pragma unroll
+        for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+          for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+        mma_block_bt<GM34, GN34, BM, E4E5>(Ap, QTS, dOp, PSLD, acc, wr, wc, lane, 0);
+        const int r0 = wr * GM34;
+#pragma unroll
+        for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+          for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              dVacc[i][j][q] += acc[i][j][q] * sA[r];
+            }
+      }
+      {
+        float acc[MTM34][NTM34][4];
+#pragma unroll
+        for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+          for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+        mma_block_bt<GM34, GN34, BM, E5E4>(dS3, QTS, Qp, PSLD, acc, wr, wc, lane, 0);
+        const int r0 = wr * GM34;
+#pragma unroll
+        for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+          for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              dKacc[i][j][q] += acc[i][j][q] * sds3[r] * scale;
+            }
+      }
+      __syncthreads();
+    }
+
+    // ---- 单一 owner：每 tile 循环外一次 plain store（无 atomic / 无 red）----
+#pragma unroll
+    for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+      for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          const int r = wr * GM34 + i * 16 + g + (q >= 2 ? 8 : 0);
+          const int d = wc * GN34 + j * 8 + c2 + (q & 1);
+          const int jg = j0 + r;
+          if (jg < S) {
+            dv[(((size_t)jg) * H + h) * HD + d] = dVacc[i][j][q];
+            dk[(((size_t)jg) * H + h) * HD + d] = dKacc[i][j][q];
+          }
+        }
+  }
+}
+
+// =============================================================================
 // host：npy 读取 / launcher / 对拍 / 计时
 // =============================================================================
 struct NpyF32 {
@@ -832,12 +1157,14 @@ int main(int argc, char** argv) {
   std::string dir = "/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8";
   bool causal = true;
   int iters = 50;
+  int pgrid = 0;  // persistent grid；0 = 自动（SM 数 × 3）
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
     else if (a == "--full") causal = false;
     else if (a == "--causal") causal = true;
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
+    else if (a.rfind("--pgrid=", 0) == 0) pgrid = atoi(a.c_str() + 8);
     else if (!a.empty() && a[0] != '-') dir = a;
   }
 
@@ -891,7 +1218,6 @@ int main(int argc, char** argv) {
   printf("grid = (%d, %d); kvowner smem = %d B (%.1f KB); pipe smem = %d B (%.1f KB); lse smem = %d B\n",
          (S + BN - 1) / BN, H, kv_smem, kv_smem / 1024.0, pipe_smem, pipe_smem / 1024.0,
          lse_smem);
-
   float *d_q_f, *d_k_f, *d_v_f, *d_do_f, *d_o_f;
   unsigned char *d_q8, *d_k8, *d_v8, *d_do8;
   float *d_qs, *d_ks, *d_vs, *d_dos, *d_delta, *d_lse, *d_dk, *d_dv;
@@ -924,12 +1250,24 @@ int main(int argc, char** argv) {
   dim3 lg((S + LBM - 1) / LBM, H, B);
   dim3 kg((S + BN - 1) / BN, H);
 
+  // F7 主体：persistent 栅格。grid = min(总 tile 数, SM 数 × 3 CTA/SM)；--pgrid 可覆盖。
+  int nsm = 0;
+  CUDA_CHECK(cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, 0));
+  const int nblk = (S + BN - 1) / BN;
+  const int total_tiles = nblk * H;
+  if (pgrid <= 0) pgrid = nsm * 3;
+  const int pgrid_use = std::min(pgrid, total_tiles);
+  printf("[F7 persist] SM=%d  total_tiles=%d  pgrid=%d（base 栅格 = %d CTA）\n", nsm, total_tiles,
+         pgrid_use, total_tiles);
+
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<HD>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, lse_smem));
   CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_kernel<HD, BM, BN>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kv_smem));
   CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_pipe_kernel<HD, BM, BN>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, pipe_smem));
+  CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_persist_kernel<HD, BM, BN>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kv_smem));
 
   auto preprocess = [&]() {
     quantize_row_kernel<<<(int)rows_q, 128>>>(d_q_f, d_q8, d_qs, D, 0);
@@ -949,6 +1287,11 @@ int main(int argc, char** argv) {
     fp8_kvowner_dkv_pipe_kernel<HD, BM, BN><<<kg, THREADS, pipe_smem>>>(
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, S, H, scale,
         (int)causal);
+  };
+  auto launch_persist = [&]() {
+    fp8_kvowner_dkv_persist_kernel<HD, BM, BN><<<pgrid_use, THREADS, kv_smem>>>(
+        d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, S, H, nblk,
+        scale, (int)causal);
   };
   auto run = [&]() { preprocess(); launch_base(); };
   run();
@@ -979,6 +1322,23 @@ int main(int argc, char** argv) {
   DiffStat bpk = diff_stat(p_dk, h_dk), bpv = diff_stat(p_dv, h_dv);
   printf("[对拍] pipe vs base: dk max_abs=%.4e  dv max_abs=%.4e（应=0，仅搬运时序）\n",
          bpk.max_abs, bpv.max_abs);
+
+  // F7 主体：persistent 变体（沿用同一 preprocess 输出）。
+  std::vector<float> s_dk(nkv), s_dv(nkv);
+  CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+  CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+  launch_persist();
+  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaMemcpy(s_dk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(s_dv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+  DiffStat rk = diff_stat(s_dk, rdk.data);
+  DiffStat rv = diff_stat(s_dv, rdv.data);
+  printf("[对拍] ours(KV-owner mma **persistent**) vs fp32 ref:\n");
+  printf("  dk  max_abs=%.4e  max_rel=%.4e\n", rk.max_abs, rk.max_rel);
+  printf("  dv  max_abs=%.4e  max_rel=%.4e\n", rv.max_abs, rv.max_rel);
+  DiffStat cpk = diff_stat(s_dk, h_dk), cpv = diff_stat(s_dv, h_dv);
+  printf("[对拍] persistent vs base: dk max_abs=%.4e  dv max_abs=%.4e（应=0，仅换栅格映射）\n",
+         cpk.max_abs, cpv.max_abs);
 
   // 与既有 ours（Q-owner + atomic）dk/dv 比：应只差跨 CTA 加法次序 / 同一 fp8 口径。
   if (file_exists(dir + "/ours_dk.npy")) {
@@ -1016,14 +1376,18 @@ int main(int argc, char** argv) {
   };
   float t_base = bench(launch_base, iters);
   float t_pipe = bench(launch_pipe, iters);
+  float t_persist = bench(launch_persist, iters);
   float t_pre = bench(preprocess, iters);
   double flops = 2.0 * (double)S * S * H * (double)HD * (causal ? 0.5 : 1.0) * 3.0;
   printf("\n[计时] main(dK/dV) base = %.4f ms (%.2f TF) | **pipe** = %.4f ms (%.2f TF) | A/B = %.3f×\n",
          t_base, flops / t_base / 1e9, t_pipe, flops / t_pipe / 1e9, t_base / t_pipe);
-  printf("[计时] preprocess = %.4f ms | total base = %.4f | total pipe = %.4f\n", t_pre,
-         t_base + t_pre, t_pipe + t_pre);
-  printf("[计时] 说明：main 仅需 dK/dV，与 FP8 峰值 1978.8 TF 的占比 = %.3f%% (base) / %.3f%% (pipe)\n",
-         100.0 * flops / t_base / 1e9 / 1978.8, 100.0 * flops / t_pipe / 1e9 / 1978.8);
+  printf("[计时] main(dK/dV) **persistent**(pgrid=%d) = %.4f ms (%.2f TF) | persist/base = %.3f×\n",
+         pgrid_use, t_persist, flops / t_persist / 1e9, t_base / t_persist);
+  printf("[计时] preprocess = %.4f ms | total base = %.4f | total pipe = %.4f | total persist = %.4f\n",
+         t_pre, t_base + t_pre, t_pipe + t_pre, t_persist + t_pre);
+  printf("[计时] 说明：main 仅需 dK/dV，与 FP8 峰值 1978.8 TF 的占比 = %.3f%% (base) / %.3f%% (pipe) / %.3f%% (persist)\n",
+         100.0 * flops / t_base / 1e9 / 1978.8, 100.0 * flops / t_pipe / 1e9 / 1978.8,
+         100.0 * flops / t_persist / 1e9 / 1978.8);
 
   CUDA_CHECK(cudaFree(d_q_f)); CUDA_CHECK(cudaFree(d_k_f)); CUDA_CHECK(cudaFree(d_v_f));
   CUDA_CHECK(cudaFree(d_do_f)); CUDA_CHECK(cudaFree(d_o_f));
