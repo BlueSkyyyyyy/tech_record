@@ -1,0 +1,51 @@
+fa_bwd_fp8_kvowner_mma.cu(125): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kvowner_mma.cu(1225): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+=== F7：fp8 mma KV-owner dK/dV 原型（base/pipe/persistent/**dynamic-wq**/**wgmma** A/B） ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_causal_fp8
+B=1 S=1024 H=32 Hkv=32 D=128 causal=1 scale=0.088388
+grid = (32, 32); kvowner smem = 70144 B (68.5 KB); pipe smem = 105984 B (103.5 KB); wgmma smem = 67072 B (65.5 KB); lse smem = 18944 B
+[F7 persist] SM=132  total_tiles=1024  pgrid=396（base 栅格 = 1024 CTA）
+
+[对拍] ours(KV-owner mma base) vs fp32 ref:
+  dk  max_abs=4.1950e-01  max_rel=6.6141e+01
+  dv  max_abs=3.5355e-01  max_rel=8.0685e+01
+[对拍] ours(KV-owner mma **pipe**) vs fp32 ref:
+  dk  max_abs=4.1950e-01  max_rel=6.6141e+01
+  dv  max_abs=3.5355e-01  max_rel=8.0685e+01
+[对拍] pipe vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅搬运时序）
+[对拍] ours(KV-owner mma **persistent**) vs fp32 ref:
+  dk  max_abs=4.1950e-01  max_rel=6.6141e+01
+  dv  max_abs=3.5355e-01  max_rel=8.0685e+01
+[对拍] persistent vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[对拍] ours(KV-owner mma **dynamic wq**) vs fp32 ref:
+  dk  max_abs=4.1950e-01  max_rel=6.6141e+01
+  dv  max_abs=3.5355e-01  max_rel=8.0685e+01
+[对拍] dynamic vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[对拍] ours(KV-owner mma **wgmma**) vs fp32 ref:
+  dk  max_abs=4.1764e-01  max_rel=6.6142e+01
+  dv  max_abs=3.5346e-01  max_rel=8.0856e+01
+[对拍] wgmma vs base: dk max_abs=4.0793e-02  dv max_abs=6.3011e-02（同口径，应≈0）
+[对拍] ours(KV-owner mma **wgmma+Q/dO-TMA**) vs fp32 ref:
+  dk  max_abs=4.1764e-01  max_rel=6.6142e+01
+  dv  max_abs=3.5346e-01  max_rel=8.0856e+01
+[对拍] wgmma+TMA vs wgmma: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅搬运通路）
+[对拍] vs ours(Q-owner atomic) dk max_abs=4.0801e-02  dv max_abs=6.2986e-02
+[对拍] ref-vs-TE dk max_abs=4.4982e-01  dv max_abs=8.5578e-01 | ours-vs-TE dk=5.7013e-01 dv=9.4315e-01
+
+[计时] main(dK/dV) base = 0.2416 ms (53.34 TF) | **pipe** = 0.2508 ms (51.37 TF) | A/B = 0.963×
+[计时] main(dK/dV) **persistent**(pgrid=396) = 0.2631 ms (48.97 TF) | persist/base = 0.918×
+[计时] main(dK/dV) **dynamic wq**(pgrid=396) = 0.2388 ms (53.96 TF) | dyn/base = 1.012× | dyn/persist = 1.102×
+[计时] preprocess = 0.3246 ms | total base = 0.5661 | total pipe = 0.5754 | total persist = 0.5877 | total dyn = 0.5634
+[计时] 说明：main 仅需 dK/dV，与 FP8 峰值 1978.8 TF 的占比 = 2.696% (base) / 2.596% (pipe) / 2.475% (persist) / 2.727% (dyn)
+[计时] main(dK/dV) **wgmma**(SW128+GEMM1/2 async) = 0.2380 ms (54.14 TF) | wg/base = 1.015× | wg/pipe = 1.054× | wg/dyn = 1.003×
+[计时] total wgmma = 0.5626 ms | 峰值占比 = 2.736%
+[计时] main(dK/dV) **wgmma+Q/dO-TMA** = 0.1923 ms (66.99 TF) | tma/wg = 1.237× | tma/base = 1.256×
+[计时] total wgmma+TMA = 0.5169 ms | 峰值占比 = 3.385%
