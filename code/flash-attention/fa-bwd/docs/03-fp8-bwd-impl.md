@@ -6633,3 +6633,97 @@ fp8 1.335e-5，`--check docs/04` OK 194 行）。
 **下一步候选**：① main kernel 仍是 81% 的墙（F3-a：L2 流量受 3 CTA/SM 锁死，真杠杆是 F4/改工作划分）；
 ② quant（0.069ms）已 DRAM ~72%，delta/convert 也近带宽，F5 至此收口；③ F4 默认路径的 L2 `red`
 （114.5M 扇区）仍受本卡寄存器/smem 硬墙锁定，见「阻塞」。
+
+---
+
+## 72. F4-c（第一百三十七轮，**正结果（DET 路径），opt-in `--det`**）：fp16 DET partial 归约的读取向量化
+
+### 72.1 动机与现状（落实 §70.4 / §71.6 的「补充任务」）
+
+F4/F4-b 把 fp8 的确定性 `--det` 路径的 dK/dV partial 从 fp32 降到 **fp16 + 写扇区化**
+（`dkv_det_store_h4` 每 lane 写 8B = 4 个连续物理列），reduce 端的 `P16` 却仍**逐列 2B 标量读**
+（`dkv_p16_perm(c)` 反查）。ncu 实测这版 fp16 reduce：
+
+| S=4096 causal | fp32 reduce（`P16=0`） | fp16 reduce（`P16=1`，F4-b） |
+|---|---|---|
+| grid / block | `(16, 4096)×128` | `(16, 4096)×128` |
+| Duration | 734 µs | ~421 µs |
+| **DRAM 吞吐** | **91.2%** | **~78%** |
+
+即 fp16 partial 虽把字节减半，但 **2B 标量读把 HBM 效率从 91% 掉到 78%**——reduce 是纯带宽
+bound（§56/§68），这部分效率亏空是可回收的。本轮把 `P16` 归约读取向量化为 8B。
+
+**关键观察**：`dkv_det_store_h4` 写的 8B 单元在物理上就是 4 个连续列，而它对应的 4 个逻辑列
+恰是 `{16·blk+2L, +1, 16·blk+8+2L, +1}`（`blk=j/2`、`L=lane&3`，见 `dkv_p16_perm` 推导）。
+故 reduce 端只要**每线程按物理 4 列一组**读回，就能一次 `uint2` 拿 4 个元素；每个输出列的
+求和集合/次序与标量读**逐字相同 ⇒ 结果逐位相同**。
+
+### 72.2 实现（单/两文件 device 逐字同源，`sync_onefile_device.py` `identical: True`）
+
+- 新增 `h4_to_f4(uint2, float&×4)`：把 8B 单元拆成 4 个 fp32。
+- 四个归约 kernel 的 `P16` 分支改为**每 block 处理 `RW=4` 行**（`blockDim=HD`、每行 `HD/4` 个
+  列组；`sub=threadIdx.x/(HD/4)`、`t=threadIdx.x%(HD/4)`），行号
+  `jg = blockIdx.y*4 + sub`（定长/独立版）或 `(idx%rowblocks)*4+sub`（融合版）。
+  每 (hh,m) 读一次 `uint2`；输出写 4 列。
+  - `dkv_reduce_kernel` / `dkv_reduce_varlen_kernel`（独立版）；
+  - `dkv_dq_reduce_kernel` / `dkv_dq_reduce_varlen_kernel`（融合版的 dK/dV 分支）。
+  - `P16=false`（fp32）路径与 `dq` 分支**逐字未动**。
+- host：4 处独立 P16 启动的 `grid.y = S→ceil(S/4)`（varlen 用 `ceil(maxlen/4)`）；3 处融合 P16
+  的 `dkv_blocks = B*Hkv*S → B*Hkv*ceil(S/4)`（varlen 用 `ceil(maxlen/4)`）。**默认（非 `--det`）
+  路径一行未改**。
+
+### 72.3 数值：只改「哪个线程算哪列」，逐位不变
+
+- 三处 `runs[1-2] bitwise dk/dv = 0`（确定性保留）。
+- `fp16-vs-fp32`：S4096 `9.66e-4/1.76e-3`、MLA S1024H2 `9.07e-4/1.79e-3`、
+  varlen D128 `1.01e-3/1.83e-3`、MLA S512H4 `9.26e-4/1.58e-3`——**与 F4/F4-b 打印逐位相同**。
+- `ours-vs-ref` 与历史逐位不变（S4096 2.635/2.644/3.216e-1、varlen 2.280/3.108/3.422e-1、
+  MLA S1024H2 2.232/3.337/3.602e-1）；单/两文件逐指标一致。
+
+### 72.4 性能（同 session、同 binary 交替 A/B，`--det`）
+
+S=4096 causal 的 `[F4 A/B]`（OLD=§68/§69 的标量 P16 读，NEW=本轮），3 次交替：
+
+| | DET-fp16 均值 | DET/atomic |
+|---|---|---|
+| OLD（标量 P16 读） | **2.180 ms** | 0.899× |
+| NEW（向量化 P16 读） | **2.147 ms（1.015×）** | **0.908×** |
+
+端到端 DET 只动 1.4–2.5%（main 占 DET 的大头），**收益集中在 reduce 本体**：
+
+| reduce（S4096，`--det`） | Duration | DRAM |
+|---|---|---|
+| fp32（`P16=0`，基线） | 734 µs | 91.2% |
+| fp16 标量读（F4-b） | ~421 µs | ~78% |
+| **fp16 向量化读（F4-c）** | **370 µs（1.14×）** | **92.5%** |
+
+varlen D128 的 `[F4 A/B]` fp32→fp16 由 F4-b 的 1.057× 提到 **1.088×**；MLA S1024H2 1.088× /
+S512H4 1.107×（main 占比大，故总比变化小）。
+
+### 72.5 ncu（`dkv_reduce_kernel<128,64,1>`，S4096）
+
+网格 `(16, 1024)×128`、Duration **369–370 µs**、**`dram__throughput` 92.5–92.7%**、
+`l1tex 11.4%`。即向量化后 fp16 reduce 的 HBM 效率与 fp32 版持平（91%），**把「降精度减半字节」
+的收益完整落袋**（此前被 2B 标量读的 78% 效率吃掉一半）。
+
+### 72.6 复现 / 原始输出
+
+```bash
+FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+ARCH="" NVCC_FLAGS="$FLAGS" scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=100 --det
+# reduce ncu（P16 实例）
+ncu --launch-count 12 --kernel-name regex:dkv_reduce_kernel \
+  --metrics gpu__time_duration.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed \
+  ./fp8.out --dir=... --iters=1 --det
+# 单文件 device 同步
+python3 scripts/sync_onefile_device.py src/fp8/fa_bwd_fp8_kernels.cuh \
+  src/fp8/fa_bwd_fp8_mma_onefile.cu '// ----------------------------- 编译期常量 -----------------------------'
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_p137_f4c_ab.out.txt`（同 session OLD/NEW×3）、
+`..._p137_ncu_reduce16.out.txt`（fp32 vs fp16 P16 全指标）、
+`..._p137_f4c_varlen_mla.out.txt`（varlen/MLA DET A/B）。
+
+**下一步候选**：① F4 默认路径的 L2 `red`（114.5M 扇区）仍受本卡寄存器/smem 硬墙锁定（见
+ROADMAP「阻塞」）；② main 仍是端到端 ~86%；③ DET 仅 opt-in，默认（非确定）路径本次未动。

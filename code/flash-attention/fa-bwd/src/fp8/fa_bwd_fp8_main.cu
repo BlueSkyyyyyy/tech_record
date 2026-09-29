@@ -885,7 +885,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
                                 reinterpret_cast<float*>(d_dk_part_h),
                                 reinterpret_cast<float*>(d_dv_part_h), nblk_max, d_dq_part, d_cu,
                                 nullptr, nullptr, p);
-      const int dkv_blocks = B * Hkv * maxlen;
+      const int dkv_blocks = B * Hkv * ((maxlen + 3) / 4);  // F4-c：P16 归约每 block 4 行
       const int dq_blocks = (k > 1) ? T * H : 0;
       if (fuse_reduce) {
         dkv_dq_reduce_varlen_kernel<128, 64, true><<<dkv_blocks + dq_blocks, 128>>>(
@@ -893,7 +893,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
             reinterpret_cast<const float*>(d_dv_part_h), (k > 1) ? d_dq_part : nullptr, d_dk,
             d_dv, d_dq, d_cu, H, Hkv, nblk_max, maxlen, (int)causal, k, dkv_blocks, p);
       } else {
-        dim3 rg(B * Hkv, maxlen);
+        dim3 rg(B * Hkv, (maxlen + 3) / 4);  // F4-c：P16 归约每 block 4 行
         dkv_reduce_varlen_kernel<128, 64, true><<<rg, 128>>>(
             reinterpret_cast<const float*>(d_dk_part_h),
             reinterpret_cast<const float*>(d_dv_part_h), d_dk, d_dv, d_cu, H, Hkv, nblk_max,
@@ -1146,7 +1146,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
           g, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk, d_dv,
           maxlen, H, Hkv, scale, (int)causal, ks, reinterpret_cast<float*>(d_dk_part_h),
           reinterpret_cast<float*>(d_dv_part_h), nblk_max, d_dq_part, d_cu, nullptr, nullptr, p);
-      const int dkv_blocks = B * Hkv * maxlen;
+      const int dkv_blocks = B * Hkv * ((maxlen + 3) / 4);  // F4-c：P16 归约每 block 4 行
       const int dq_blocks = (ks > 1) ? T * H : 0;
       if (fuse_reduce) {
         dkv_dq_reduce_varlen_kernel<512, 64, true><<<dkv_blocks + dq_blocks, 512>>>(
@@ -1154,7 +1154,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
             reinterpret_cast<const float*>(d_dv_part_h), (ks > 1) ? d_dq_part : nullptr, d_dk,
             d_dv, d_dq, d_cu, H, Hkv, nblk_max, maxlen, (int)causal, ks, dkv_blocks, p);
       } else {
-        dim3 rg(B * Hkv, maxlen);
+        dim3 rg(B * Hkv, (maxlen + 3) / 4);  // F4-c：P16 归约每 block 4 行
         dkv_reduce_varlen_kernel<512, 64, true><<<rg, 512>>>(
             reinterpret_cast<const float*>(d_dk_part_h),
             reinterpret_cast<const float*>(d_dv_part_h), d_dk, d_dv, d_cu, H, Hkv, nblk_max,
@@ -2394,7 +2394,7 @@ int main(int argc, char** argv) {
           g1, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
           d_dv_acc, S, H, Hkv, scale, (int)causal, k, reinterpret_cast<float*>(d_dk_part_h),
           reinterpret_cast<float*>(d_dv_part_h), nblk_d, d_dq_part);
-      const int dkv_blocks = B * Hkv * S;
+      const int dkv_blocks = B * Hkv * ((S + 3) / 4);  // F4-c：P16 归约每 block 4 行
       const int dq_blocks = (k > 1) ? B * S * H : 0;
       if (fuse_reduce) {
         dkv_dq_reduce_kernel<512, 64, true><<<dkv_blocks + dq_blocks, 512>>>(
@@ -2402,7 +2402,7 @@ int main(int argc, char** argv) {
             reinterpret_cast<const float*>(d_dv_part_h), (k > 1) ? d_dq_part : nullptr, d_dk_acc,
             d_dv_acc, d_dq_acc, S, H, Hkv, nblk_d, (int)causal, k, dkv_blocks);
       } else {
-        dim3 rg(B * Hkv, S);
+        dim3 rg(B * Hkv, (S + 3) / 4);  // F4-c：P16 归约每 block 4 行
         dkv_reduce_kernel<512, 64, true><<<rg, 512>>>(
             reinterpret_cast<const float*>(d_dk_part_h),
             reinterpret_cast<const float*>(d_dv_part_h), d_dk_acc, d_dv_acc, S, H, Hkv, nblk_d,
@@ -2668,7 +2668,7 @@ int main(int argc, char** argv) {
               g1, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
               d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
               (int)causal, d_dk_part_h, d_dv_part_h, nblk_d);
-        dim3 rg(B * Hkv, S);
+        dim3 rg(B * Hkv, (S + 3) / 4);  // F4-c：P16 归约每 block 4 行
         dkv_reduce_kernel<128, 64, true><<<rg, 128>>>(d_dk_part_h, d_dv_part_h, d_dk_acc, d_dv_acc,
                                                       S, H, Hkv, nblk_d, (int)causal);
       };

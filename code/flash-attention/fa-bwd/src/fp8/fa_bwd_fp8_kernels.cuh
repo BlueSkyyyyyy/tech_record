@@ -634,6 +634,18 @@ __device__ __forceinline__ int dkv_p16_perm(int c) {
   return ((j >> 1) << 4) + (L << 2) + ((j & 1) << 1) + h;
 }
 
+// F4-c（第一百三十七轮）：把 `dkv_det_store_h4` 写的 8B 单元（4 个连续物理列的 fp16）
+//   一次读回。`u.x` 是逻辑列对（16*blk + 2L, +1），`u.y` 是（16*blk + 8 + 2L, +1）——与
+//   `dkv_p16_perm` 的 16 列块内置换一致（见上）。用于 P16 归约的向量化读。
+__device__ __forceinline__ void h4_to_f4(uint2 u, float& a, float& b, float& c, float& d) {
+  __half2 h0 = *reinterpret_cast<__half2*>(&u.x);
+  __half2 h1 = *reinterpret_cast<__half2*>(&u.y);
+  a = __low2float(h0);
+  b = __high2float(h0);
+  c = __low2float(h1);
+  d = __high2float(h1);
+}
+
 // partial → dK/dV 累加（固定次序）。causal 下 KV 行 `jg` 只被 `mblk >= jg/BM` 的 CTA 写，
 //   故从 `jg/BM` 起求和；非 causal 从 0 起。`BM` 由模板给出（fp8 默认 64；fp16 用 128）。
 // F4：`P16=true` 时 dK/dV partial 以 fp16 存储且用扇区化 16 列块内置换布局（O62），按置换后
@@ -643,6 +655,48 @@ __global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
                                   const float* __restrict__ dv_part,
                                   float* __restrict__ dk_acc, float* __restrict__ dv_acc,
                                   int S, int H, int Hkv, int nblk, int causal) {
+  if constexpr (P16) {
+    // F4-c（第一百三十七轮）：P16 归约读取向量化——每条 `uint2` 读回 `dkv_det_store_h4`
+    //   写的 8B 单元（4 个连续物理列）。每 block 处理 `RW=4` 行（`blockDim=HD`、每行 `HD/4`
+    //   组），grid.y = ceil(S/4)。**每输出列的求和集合/次序与标量读逐字相同 ⇒ 逐位相同**；
+    //   读指令 4×2B → 1×8B，把 fp16 partial 归约从 ~78% 提到 DRAM 峰值附近。
+    constexpr int NPG = HD / 4;          // 每行 HD/4 个列组（每组 4 列）
+    constexpr int RW = 4;                // 每 block 行数 = blockDim/NPG = HD/(HD/4)
+    const int sub = threadIdx.x / NPG;   // block 内行号
+    const int t = threadIdx.x % NPG;     // 列组
+    const int jg = blockIdx.y * RW + sub;
+    if (jg >= S) return;
+    const int hb = blockIdx.x;  // b*Hkv + hkv
+    const int b = hb / Hkv, hkv = hb % Hkv;
+    const int G = H / Hkv;
+    const int h0 = hkv * G;
+    const int mblk0 = causal ? (jg / BM) : 0;
+    const int blk = t >> 2, L = t & 3;
+    float k0 = 0.f, k1 = 0.f, k2 = 0.f, k3 = 0.f;
+    float v0 = 0.f, v1 = 0.f, v2 = 0.f, v3 = 0.f;
+    for (int hh = 0; hh < G; ++hh) {
+      const size_t prow = (size_t)(b * H + h0 + hh);
+      for (int m = mblk0; m < nblk; ++m) {
+        const size_t base = ((prow * nblk + m) * (size_t)S + jg) * HD + t * 4;
+        const uint2 uk =
+            *reinterpret_cast<const uint2*>(reinterpret_cast<const __half*>(dk_part) + base);
+        const uint2 uv =
+            *reinterpret_cast<const uint2*>(reinterpret_cast<const __half*>(dv_part) + base);
+        float a, bb, cc, dd;
+        h4_to_f4(uk, a, bb, cc, dd);
+        k0 += a; k1 += bb; k2 += cc; k3 += dd;
+        h4_to_f4(uv, a, bb, cc, dd);
+        v0 += a; v1 += bb; v2 += cc; v3 += dd;
+      }
+    }
+    const size_t o = (((size_t)(b * S + jg)) * Hkv + hkv) * HD;
+    const int cA = (blk << 4) + (L << 1);   // 16*blk + 2L
+    dk_acc[o + cA] = k0;      dk_acc[o + cA + 1] = k1;
+    dk_acc[o + cA + 8] = k2;  dk_acc[o + cA + 9] = k3;
+    dv_acc[o + cA] = v0;      dv_acc[o + cA + 1] = v1;
+    dv_acc[o + cA + 8] = v2;  dv_acc[o + cA + 9] = v3;
+    return;
+  }
   const int hb = blockIdx.x;  // b*Hkv + hkv
   const int jg = blockIdx.y;
   const int c = threadIdx.x;
@@ -709,6 +763,46 @@ __global__ void dkv_dq_reduce_kernel(const float* __restrict__ dk_part,
   if (c >= HD) return;
   const int idx = blockIdx.x;
   if (idx < dkv_blocks) {
+    if constexpr (P16) {
+      // F4-c（第一百三十七轮）：dK/dV 分支的向量化读（与 `dkv_reduce_kernel` 的 P16 逐字同构）。
+      //   此时 host 传 `dkv_blocks = B*Hkv*ceil(S/4)`，`idx` 按「每 4 行一 block」编码。
+      constexpr int NPG = HD / 4;
+      constexpr int RW = 4;
+      const int rowblocks = (S + RW - 1) / RW;
+      const int hb = idx / rowblocks;
+      const int jg = (idx - hb * rowblocks) * RW + threadIdx.x / NPG;
+      const int t = threadIdx.x % NPG;
+      if (jg >= S) return;
+      const int b = hb / Hkv, hkv = hb % Hkv;
+      const int G = H / Hkv;
+      const int h0 = hkv * G;
+      const int mblk0 = causal ? (jg / BM) : 0;
+      const int blk = t >> 2, L = t & 3;
+      float k0 = 0.f, k1 = 0.f, k2 = 0.f, k3 = 0.f;
+      float v0 = 0.f, v1 = 0.f, v2 = 0.f, v3 = 0.f;
+      for (int hh = 0; hh < G; ++hh) {
+        const size_t prow = (size_t)(b * H + h0 + hh);
+        for (int m = mblk0; m < nblk; ++m) {
+          const size_t base = ((prow * nblk + m) * (size_t)S + jg) * HD + t * 4;
+          const uint2 uk =
+              *reinterpret_cast<const uint2*>(reinterpret_cast<const __half*>(dk_part) + base);
+          const uint2 uv =
+              *reinterpret_cast<const uint2*>(reinterpret_cast<const __half*>(dv_part) + base);
+          float a, bb, cc, dd;
+          h4_to_f4(uk, a, bb, cc, dd);
+          k0 += a; k1 += bb; k2 += cc; k3 += dd;
+          h4_to_f4(uv, a, bb, cc, dd);
+          v0 += a; v1 += bb; v2 += cc; v3 += dd;
+        }
+      }
+      const size_t o = (((size_t)(b * S + jg)) * Hkv + hkv) * HD;
+      const int cA = (blk << 4) + (L << 1);
+      dk_acc[o + cA] = k0;      dk_acc[o + cA + 1] = k1;
+      dk_acc[o + cA + 8] = k2;  dk_acc[o + cA + 9] = k3;
+      dv_acc[o + cA] = v0;      dv_acc[o + cA + 1] = v1;
+      dv_acc[o + cA + 8] = v2;  dv_acc[o + cA + 9] = v3;
+      return;
+    }
     // ---- 与 dkv_reduce_kernel 逐字相同的 dK/dV 归约 ----
     const int hb = idx / S, jg = idx - hb * S;
     const int b = hb / Hkv, hkv = hb % Hkv;
@@ -760,6 +854,52 @@ __global__ void dkv_reduce_varlen_kernel(const float* __restrict__ dk_part,
                                          const int* __restrict__ cu_seqlens,
                                          int H, int Hkv, int nblk_max, int maxlen, int causal,
                                          const int* __restrict__ part_base = nullptr) {
+  if constexpr (P16) {
+    // F4-c（第一百三十七轮）：varlen P16 归约读取向量化（与定长版 `h4_to_f4` 同构）。
+    constexpr int NPG = HD / 4;
+    constexpr int RW = 4;
+    const int sub = threadIdx.x / NPG;
+    const int t = threadIdx.x % NPG;
+    const int hb = blockIdx.x;  // b*Hkv + hkv
+    const int jg = blockIdx.y * RW + sub;  // 序列内的 KV 行
+    const int b = hb / Hkv, hkv = hb % Hkv;
+    const int qbase = cu_seqlens[b];
+    const int len = cu_seqlens[b + 1] - qbase;
+    if (jg >= len) return;
+    const int nblk_b = (len + BM - 1) / BM;
+    const int G = H / Hkv;
+    const int h0 = hkv * G;
+    const int mblk0 = causal ? (jg / BM) : 0;
+    const int blk = t >> 2, L = t & 3;
+    float k0 = 0.f, k1 = 0.f, k2 = 0.f, k3 = 0.f;
+    float v0 = 0.f, v1 = 0.f, v2 = 0.f, v3 = 0.f;
+    for (int hh = 0; hh < G; ++hh) {
+      const size_t prow = (size_t)(b * H + h0 + hh) * nblk_max;
+      for (int m = mblk0; m < nblk_b; ++m) {
+        const size_t row =
+            part_base
+                ? ((size_t)part_base[b] + ((size_t)(h0 + hh) * nblk_b + m) * len + jg) * HD
+                : ((prow + m) * (size_t)maxlen + jg) * HD;
+        const size_t base = row + t * 4;
+        const uint2 uk =
+            *reinterpret_cast<const uint2*>(reinterpret_cast<const __half*>(dk_part) + base);
+        const uint2 uv =
+            *reinterpret_cast<const uint2*>(reinterpret_cast<const __half*>(dv_part) + base);
+        float a, bb, cc, dd;
+        h4_to_f4(uk, a, bb, cc, dd);
+        k0 += a; k1 += bb; k2 += cc; k3 += dd;
+        h4_to_f4(uv, a, bb, cc, dd);
+        v0 += a; v1 += bb; v2 += cc; v3 += dd;
+      }
+    }
+    const size_t o = (((size_t)(qbase + jg)) * Hkv + hkv) * HD;
+    const int cA = (blk << 4) + (L << 1);
+    dk_acc[o + cA] = k0;      dk_acc[o + cA + 1] = k1;
+    dk_acc[o + cA + 8] = k2;  dk_acc[o + cA + 9] = k3;
+    dv_acc[o + cA] = v0;      dv_acc[o + cA + 1] = v1;
+    dv_acc[o + cA + 8] = v2;  dv_acc[o + cA + 9] = v3;
+    return;
+  }
   const int hb = blockIdx.x;   // b*Hkv + hkv
   const int jg = blockIdx.y;   // 序列内的 KV 行
   const int c = threadIdx.x;
@@ -812,6 +952,53 @@ __global__ void dkv_dq_reduce_varlen_kernel(
   if (c >= HD) return;
   const int idx = blockIdx.x;
   if (idx < dkv_blocks) {
+    if constexpr (P16) {
+      // F4-c（第一百三十七轮）：varlen 融合归约的 dK/dV 向量化读（与 `dkv_reduce_varlen_kernel`
+      //   的 P16 逐字同构）。host 传 `dkv_blocks = B*Hkv*ceil(maxlen/4)`。
+      constexpr int NPG = HD / 4;
+      constexpr int RW = 4;
+      const int rowblocks = (maxlen + RW - 1) / RW;
+      const int hb = idx / rowblocks;
+      const int jg = (idx - hb * rowblocks) * RW + threadIdx.x / NPG;
+      const int t = threadIdx.x % NPG;
+      const int b = hb / Hkv, hkv = hb % Hkv;
+      const int qbase = cu_seqlens[b];
+      const int len = cu_seqlens[b + 1] - qbase;
+      if (jg >= len) return;
+      const int nblk_b = (len + BM - 1) / BM;
+      const int G = H / Hkv;
+      const int h0 = hkv * G;
+      const int mblk0 = causal ? (jg / BM) : 0;
+      const int blk = t >> 2, L = t & 3;
+      float k0 = 0.f, k1 = 0.f, k2 = 0.f, k3 = 0.f;
+      float v0 = 0.f, v1 = 0.f, v2 = 0.f, v3 = 0.f;
+      for (int hh = 0; hh < G; ++hh) {
+        const size_t prow = (size_t)(b * H + h0 + hh) * nblk_max;
+        for (int m = mblk0; m < nblk_b; ++m) {
+          const size_t row =
+              part_base
+                  ? ((size_t)part_base[b] + ((size_t)(h0 + hh) * nblk_b + m) * len + jg) * HD
+                  : ((prow + m) * (size_t)maxlen + jg) * HD;
+          const size_t base = row + t * 4;
+          const uint2 uk =
+              *reinterpret_cast<const uint2*>(reinterpret_cast<const __half*>(dk_part) + base);
+          const uint2 uv =
+              *reinterpret_cast<const uint2*>(reinterpret_cast<const __half*>(dv_part) + base);
+          float a, bb, cc, dd;
+          h4_to_f4(uk, a, bb, cc, dd);
+          k0 += a; k1 += bb; k2 += cc; k3 += dd;
+          h4_to_f4(uv, a, bb, cc, dd);
+          v0 += a; v1 += bb; v2 += cc; v3 += dd;
+        }
+      }
+      const size_t o = (((size_t)(qbase + jg)) * Hkv + hkv) * HD;
+      const int cA = (blk << 4) + (L << 1);
+      dk_acc[o + cA] = k0;      dk_acc[o + cA + 1] = k1;
+      dk_acc[o + cA + 8] = k2;  dk_acc[o + cA + 9] = k3;
+      dv_acc[o + cA] = v0;      dv_acc[o + cA + 1] = v1;
+      dv_acc[o + cA + 8] = v2;  dv_acc[o + cA + 9] = v3;
+      return;
+    }
     const int hb = idx / maxlen, jg = idx - hb * maxlen;
     const int b = hb / Hkv, hkv = hb % Hkv;
     const int qbase = cu_seqlens[b];

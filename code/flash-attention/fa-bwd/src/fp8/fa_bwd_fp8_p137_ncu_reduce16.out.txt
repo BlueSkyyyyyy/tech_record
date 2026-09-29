@@ -1,0 +1,48 @@
+  void dkv_reduce_kernel<128, 64, 0>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 4096, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        91.12
+    gpu__time_duration.sum                                       us       734.30
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %         9.67
+  void dkv_reduce_kernel<128, 64, 0>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 4096, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        91.09
+    gpu__time_duration.sum                                       us       734.62
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %         9.64
+  void dkv_reduce_kernel<128, 64, 0>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 4096, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        91.10
+    gpu__time_duration.sum                                       us       734.56
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %         9.63
+  void dkv_reduce_kernel<128, 64, 0>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 4096, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        90.84
+    gpu__time_duration.sum                                       us       736.61
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %         9.61
+  void dkv_reduce_kernel<128, 64, 0>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 4096, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        91.28
+    gpu__time_duration.sum                                       us       733.02
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %         9.72
+  void dkv_reduce_kernel<128, 64, 0>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 4096, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        91.00
+    gpu__time_duration.sum                                       us       735.36
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %         9.69
+  void dkv_reduce_kernel<128, 64, 0>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 4096, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        90.90
+    gpu__time_duration.sum                                       us       736.16
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %         9.69
+  void dkv_reduce_kernel<128, 64, 0>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 4096, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        90.87
+    gpu__time_duration.sum                                       us       736.35
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %         9.68
+  void dkv_reduce_kernel<128, 64, 0>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 4096, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        91.24
+    gpu__time_duration.sum                                       us       733.38
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %         9.74
+  void dkv_reduce_kernel<128, 64, 1>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 1024, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        92.45
+    gpu__time_duration.sum                                       us       370.27
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %        11.44
+  void dkv_reduce_kernel<128, 64, 1>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 1024, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        92.70
+    gpu__time_duration.sum                                       us       369.22
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %        11.47
+  void dkv_reduce_kernel<128, 64, 1>(const float *, const float *, float *, float *, int, int, int, int, int) (16, 1024, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %        92.52
+    gpu__time_duration.sum                                       us       369.92
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %        11.44

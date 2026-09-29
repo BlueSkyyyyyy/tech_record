@@ -1,0 +1,7 @@
+### same-session A/B: OLD (F4-b, scalar P16 read) vs NEW (F4-c, vectorized P16 read)
+fp8_sweep run1: [F4 A/B] kvtma ksplit=1 atomic 1.9565 ms | DET-fp32 2.6069 ms (0.751x) | DET-fp16(扇区化) 2.1891 ms (0.894x vs atomic) | runs[1-2] dk/dv=0.00e+00/0.00e+00 | fp16-vs-fp32 dk/dv=9.66e-04/1.76e-03 | fp16-vs-atomic dk/dv=9.66e-04/1.76e-03
+fp8_f4c run1: [F4 A/B] kvtma ksplit=1 atomic 1.9421 ms | DET-fp32 2.6077 ms (0.745x) | DET-fp16(扇区化) 2.1470 ms (0.905x vs atomic) | runs[1-2] dk/dv=0.00e+00/0.00e+00 | fp16-vs-fp32 dk/dv=9.66e-04/1.76e-03 | fp16-vs-atomic dk/dv=9.66e-04/1.76e-03
+fp8_sweep run2: [F4 A/B] kvtma ksplit=1 atomic 1.9664 ms | DET-fp32 2.5880 ms (0.760x) | DET-fp16(扇区化) 2.1769 ms (0.903x vs atomic) | runs[1-2] dk/dv=0.00e+00/0.00e+00 | fp16-vs-fp32 dk/dv=9.66e-04/1.76e-03 | fp16-vs-atomic dk/dv=9.66e-04/1.76e-03
+fp8_f4c run2: [F4 A/B] kvtma ksplit=1 atomic 1.9573 ms | DET-fp32 2.6002 ms (0.753x) | DET-fp16(扇区化) 2.1495 ms (0.911x vs atomic) | runs[1-2] dk/dv=0.00e+00/0.00e+00 | fp16-vs-fp32 dk/dv=9.66e-04/1.76e-03 | fp16-vs-atomic dk/dv=9.66e-04/1.76e-03
+fp8_sweep run3: [F4 A/B] kvtma ksplit=1 atomic 1.9551 ms | DET-fp32 2.6043 ms (0.751x) | DET-fp16(扇区化) 2.1747 ms (0.899x vs atomic) | runs[1-2] dk/dv=0.00e+00/0.00e+00 | fp16-vs-fp32 dk/dv=9.66e-04/1.76e-03 | fp16-vs-atomic dk/dv=9.66e-04/1.76e-03
+fp8_f4c run3: [F4 A/B] kvtma ksplit=1 atomic 1.9544 ms | DET-fp32 2.6129 ms (0.748x) | DET-fp16(扇区化) 2.1559 ms (0.907x vs atomic) | runs[1-2] dk/dv=0.00e+00/0.00e+00 | fp16-vs-fp32 dk/dv=9.66e-04/1.76e-03 | fp16-vs-atomic dk/dv=9.66e-04/1.76e-03
