@@ -7068,3 +7068,108 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 原始输出：`src/fp8/fa_bwd_fp8_p141_wg2wgmma_{s512,s4096}.out.txt`、
 `..._p141_onefile_wg2wgmma_s512.out.txt`（单文件，数值逐位一致）、
 `..._p141_ncu_wg2wgmma_s512.out.txt`、`..._p141_ci_fixed.out.txt`。
+
+## 77. 第 142 轮：F6 判定——「去 Qp/dOp（SW128 直读 B）」在 fp8/`.row.col` 下**不可行** + 资源账收口
+
+### 77.1 动机（落实 §76.5「下一步候选 ①」）
+
+第 141 轮把 F6（BM=128 双 warpgroup）要冲 2 CTA/SM 的**最大障碍**定位为 `Qp/dOp`（两份
+「K 配对」B 副本，共 34,816B），并判断「可去掉它——从 SW128 的 Q/dO tile 直接 `ldmatrix`
+读出 GEMM3/4 的 B（kernel-opt 42 篇已证 SW128 16B chunk 可转置读）」。本轮不臆断，先用
+**ISA 探针 + 最小复现 + 资源账**三条证据把这一前提判决清楚。
+
+### 77.2 判决 1（ISA）：fp8 `mma.m16n8k32` **只支持 `.row.col`**
+
+`src/fp8/fa_bwd_fp8_mma_variant_probe.cu` 编译唯一合法布局 `.row.col`；对
+`.col.row` / `.row.row` / `.col.col` 分别单编，ptxas 全部拒绝（原始输出
+`fa_bwd_fp8_mma_variant_probe.illegal.out.txt`）：
+
+```
+----- .col.row -----  Illegal alayout '.col' for instruction 'mma'
+                      Illegal blayout '.row' for instruction 'mma'
+----- .row.row -----  Illegal blayout '.row' for instruction 'mma'
+----- .col.col -----  Illegal alayout '.col' for instruction 'mma'
+```
+
+⇒ B 操作数**必须是 col-major**（逻辑 `B[K][N]` 存成 `[N][K]`、K 连续）⇒ 反向的
+GEMM3/4/5（B=`Qᵀ`/`dOᵀ`/`Kᵀ`）**必须转置**，不能沿用 GEMM1/2 的 K-major（N 连续）tile。
+这与第 138 轮 fp8 wgmma「无 `tnspA/tnspB`」是同一根因（转置不可免）。
+
+### 77.3 判决 2（pairing）：fp8 `.trans` 的配对轴是 tile 的连续轴（N），不是 K
+
+`ldmatrix` 以 **b16** 为单位转置，而 **1 个 b16 = 2 个相邻 fp8**。K-major tile（Q/dO 的
+`[m][d]`，`d`=N 连续）里每个「16B 行」的 2-fp8 配对**沿 N**；`.trans` 只交换 8×8 矩阵的
+行列、**不改变 b16 内部的配对方向** ⇒ 寄存器里得到的仍是「沿 N 的 4 个 fp8」，而不是 mma
+需要的「沿 K 的 4 个 fp8」。O4b 的 `fa_bwd_fp8_trans_smoke.cu`（§17）已给出同一结论并据此
+改用「K 配对布局」；本轮把它显式化。
+
+### 77.4 判决 3（穷举）：K-major tile 的 `x4.trans` 寄存器任意 2 个都拼不出 B 片段
+
+新增 `src/fp8/fa_bwd_fp8_f6_directb_smoke.cu`：同一批 fp8 B 字节，一路从 col-major
+`[N][K]` 用 `ldmatrix.x2`（已知正确的 mma B 路径）取片段，另一路从 K-major `[K][N]`
+（即 Q/dO 原布局）用 `ldmatrix.x4.trans` 取全部 4 个寄存器，然后**穷举** 4 个寄存器里任意
+有序 2 个，看能否逐位复现前者的片段。实测：
+
+```
+  lane 级片段匹配（x4.trans 任选 2 reg vs col-major x2）：0/32
+      lane0  ref = 4f359c20 4e26b2c7
+      lane0  att = b420b731 2f313731 24b12db6 b1aa1299
+=== FAIL：K-major (N 连续) tile 无法用 ldmatrix.trans 拼出 mma 的 B 片段 ⇒ F6『去 Qp/dOp』不可行 ===
+```
+
+⇒ **不存在可用的地址/寄存器重排方案**。F6「从 SW128 直读 B」在 fp8 上不成立。
+
+### 77.5 资源账：F6 要 2 CTA/SM 的缺口与可行项
+
+`cuobjdump --dump-resource-usage`（sm90a 构建）：
+
+| kernel | REG | 动态 smem | CTA/SM |
+|---|---|---|---|
+| 默认 `fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>` | **164–168** | 74.8KB | **3** |
+| `fa_bwd_fp8_wg2_kernel<128,128,32>`（BM=128, mma） | 217 | 131.3KB | 1 |
+| `fa_bwd_fp8_wgmma2_kernel<128,128,32>`（F6） | **212** | **135,424B（132.25KB）** | **1** |
+
+wgmma2 的 smem 明细（代码常量）：`Qs/dOs` SW128 2×16384、`Ks/Vs` 2×4096、`Qp/dOp`
+2×17408、`Kp` 4352、`dS2` 6144、`scales` 2048、`Ps/Ss` 2×18944、`Ap/dS3` 2×4608
+（+1024 对齐余量）。2 CTA/SM 的上限 = `232448/2 = 116,224B`，**缺口 19,200B**。
+
+- **去 Qp/dOp（34,816B）**：本是最直接的解法，但被 §77.2–77.4 三条证据判**不可行**。
+- **可行但代价高**：`Ps/Ss` fp32→fp16（−18,944B）+ 去全部 padding（约 −10KB）刚压到
+  ~105KB，但 `Ps` 是 `[0,1]` 的 P、`Ss` 改半精度会**改数值口径**；且 regs 212 要降到
+  ≤128 才能真 2 CTA/SM（`__launch_bounds__(256,2)`），**−84 寄存器必然大 spill**。
+- ⇒ 即便绕过 Qp/dOp，F6 也**只能停在 1 CTA/SM**；而 1 CTA/SM 下 212 regs/8 warp 的延迟
+  隐藏正是它只有默认档 0.66–0.68× 的原因（§76）。**F6「冲 2 CTA/SM」在本卡不成立。**
+
+### 77.6 性能复核（同 session，CUDA event，main-only）
+
+```
+[O41 A/B] main Q/dO-TMA 1.7160 ms | Q/dO/K/V-TMA 1.5691 ms   ← 默认 BM=64 档
+[F6 A/B]  main wg2(mma) 2.9225 ms | wg2wgmma 2.8083 ms (1.041×)  ← BM=128 档
+```
+
+S=4096 causal：默认 main **1.569ms** / total ≈1.92ms；F6（wgmma2）main **2.808ms**（默认的
+0.56×）。同 session TE FP8 纯反向基线 S=4096 = **0.3003ms/915.25TF**（`fa_bwd_fp8_f5_te_
+baseline_fp8.out.txt`）⇒ 默认 ours main/TE ≈5.2×、F6 ≈9.4×。**F6 当前不是前进方向。**
+
+### 77.7 结论 / 下一步
+
+1. **F6 的「去 Qp/dOp 冲 2 CTA/SM」在 fp8/`.row.col` 下不可行**（ISA + pairing + 穷举三证）。
+2. F6 若继续，唯一理论路 = **物理转置 SW128 B**（`[N][K]` K 连续，+16KB smem + scatter），
+   O4b（§17）已判净负；或**换卡**（目标卡 smem/寄存器更大）。**转 backlog**。
+3. 默认 BM=64 `kvtma` 档仍是主力，其墙仍是 **L2 `red`（dK/dV 跨 CTA 原子）**，见「阻塞」；
+   F6 不构成对它的替代。默认路径一行未改。
+
+### 77.8 复现 / 原始输出
+
+```bash
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_variant_probe.cu
+scripts/run.sh src/fp8/fa_bwd_fp8_f6_directb_smoke.cu
+docker exec kernel_lab bash -lc "cd .../src/fp8 && nvcc -O3 -gencode=arch=compute_90a,code=sm_90a \
+  -DFA_WGMMA -DFA_TMA -lcuda fa_bwd_fp8_main.cu -o /tmp/fp8wg.out && \
+  cuobjdump --dump-resource-usage /tmp/fp8wg.out | grep -A1 wgmma2"
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --wg2wgmma --iters=20
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_f6_directb_smoke.out.txt`、`fa_bwd_fp8_mma_variant_probe.out.txt`、
+`fa_bwd_fp8_mma_variant_probe.illegal.out.txt`、`fa_bwd_fp8_p142_f6judge_s4096.out.txt`。

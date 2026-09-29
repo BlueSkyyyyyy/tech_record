@@ -1,0 +1,6 @@
+=== F6 判定：fp8 mma B 片段能否从 K-major (N 连续) tile 直接 ldmatrix ===
+M=16 N=8 K=64  BKLD=80 BRSLD=16
+  lane 级片段匹配（x4.trans 任选 2 reg vs col-major x2）：0/32
+  lane0  ref = 4f359c20 4e26b2c7
+  lane0  att = b420b731 2f313731 24b12db6 b1aa1299
+=== FAIL：K-major (N 连续) tile 无法用 ldmatrix.trans 拼出 mma 的 B 片段 ⇒ F6『去 Qp/dOp』不可行 ===

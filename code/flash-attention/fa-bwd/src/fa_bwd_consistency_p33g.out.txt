@@ -3,22 +3,22 @@ baseline-free：两者都算同一数学；期望差异仅跨 CTA atomicAdd 次�
 判据（按 dtype）：max|ours-ours_sf| <= ctol；fp8=0.0001（任一超出则退出码 1）
 
 [fp8]
-  b1_s1024_h16_d128_full_fp8                      dq=8.941e-08  dk=8.941e-08  dv=8.941e-08
-  b1_s1024_h2_d512_causal_fp8                     dq=1.192e-07  dk=2.384e-07  dv=4.768e-07
-  b1_s1024_h32_d128_causal_fp8                    dq=1.192e-07  dk=7.153e-07  dv=4.768e-07
-  b1_s1024_h32_d128_kv4_causal_fp8                dq=1.192e-07  dk=2.146e-06  dv=3.815e-06
-  b1_s1024_h40_d128_kv8_causal_fp8                dq=1.192e-07  dk=1.431e-06  dv=1.907e-06
-  b1_s1024_h64_d128_kv1_causal_fp8                dq=1.192e-07  dk=6.199e-06  dv=1.049e-05
-  b1_s1024_h64_d128_kv4_causal_fp8                dq=1.192e-07  dk=2.384e-06  dv=3.815e-06
+  b1_s1024_h16_d128_full_fp8                      dq=8.941e-08  dk=8.941e-08  dv=5.960e-08
+  b1_s1024_h2_d512_causal_fp8                     dq=1.192e-07  dk=4.768e-07  dv=7.153e-07
+  b1_s1024_h32_d128_causal_fp8                    dq=1.192e-07  dk=4.768e-07  dv=9.537e-07
+  b1_s1024_h32_d128_kv4_causal_fp8                dq=1.192e-07  dk=1.788e-06  dv=3.576e-06
+  b1_s1024_h40_d128_kv8_causal_fp8                dq=1.192e-07  dk=1.192e-06  dv=2.146e-06
+  b1_s1024_h64_d128_kv1_causal_fp8                dq=1.192e-07  dk=6.676e-06  dv=7.629e-06
+  b1_s1024_h64_d128_kv4_causal_fp8                dq=1.192e-07  dk=2.384e-06  dv=3.338e-06
   b1_s256_h2_d512_causal_fp8                      dq=1.192e-07  dk=2.384e-07  dv=2.384e-07
-  b1_s4096_h16_d128_causal_fp8                    dq=1.192e-07  dk=5.960e-07  dv=1.192e-06
-  b1_s512_h16_d128_causal_fp8                     dq=1.192e-07  dk=4.768e-07  dv=9.537e-07
+  b1_s4096_h16_d128_causal_fp8                    dq=1.192e-07  dk=5.960e-07  dv=4.768e-07
+  b1_s512_h16_d128_causal_fp8                     dq=1.192e-07  dk=2.980e-07  dv=4.768e-07
   b1_s512_h2_d512_causal_fp8                      dq=1.192e-07  dk=2.384e-07  dv=4.768e-07
   b1_s512_h4_d512_causal_fp8                      dq=1.192e-07  dk=4.768e-07  dv=4.768e-07
 
 === 小结（12 case 有 ours/ours_sf 双方；0 case 缺一侧）===
   max|ours-ours_sf| over all cases: dq = 1.192e-07  (b1_s1024_h2_d512_causal_fp8)
-  max|ours-ours_sf| over all cases: dk = 6.199e-06  (b1_s1024_h64_d128_kv1_causal_fp8)
-  max|ours-ours_sf| over all cases: dv = 1.049e-05  (b1_s1024_h64_d128_kv1_causal_fp8)
-  worst = 1.049e-05
-  gate[fp8 ] worst=1.049e-05  tol=0.0001  -> OK
+  max|ours-ours_sf| over all cases: dk = 6.676e-06  (b1_s1024_h64_d128_kv1_causal_fp8)
+  max|ours-ours_sf| over all cases: dv = 7.629e-06  (b1_s1024_h64_d128_kv1_causal_fp8)
+  worst = 7.629e-06
+  gate[fp8 ] worst=7.629e-06  tol=0.0001  -> OK
