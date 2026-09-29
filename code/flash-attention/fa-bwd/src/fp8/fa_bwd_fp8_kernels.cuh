@@ -2251,9 +2251,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   // ---- 载入 Q/dO：原始行 [m][d] 写 Qs/dOs（供 GEMM1/2 的 A）+ 打包行对写 Qp/dOp
   //      （供 GEMM4/3 的 B，ldmatrix.trans）。行对用 __byte_perm 交织，4B 一次。----
   // O41：K/V TMA 的 mbarrier 相位计数器（K 两个 stage 各一个、V 一个）。非 KVTMA 不用。
-  int kuse[2] = {0, 0};
+  // F3-a：`kuse` 原为 `int kuse[2]` 且按运行期 `stg^1` 动态下标 → ptxas 落到 **local memory**
+  //   （栈帧 8B + 每 tile LDL/STL）。改成两个标量 + 运行期三元选择，去 local 化、语义逐位不变。
+  int kuse0 = 0, kuse1 = 0;
   int vuse = 0;
-  (void)kuse;
+  (void)kuse0;
+  (void)kuse1;
   (void)vuse;
   if constexpr (TMA) {
     static_assert(WGMMA, "fp8 Q/dO TMA 只在 WGMMA(SW128) 路径");
@@ -2291,7 +2294,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     mbar_wait(qbars + 0, 0);
     mbar_wait(qbars + 1, 0);
     if (KVTMA) {
-      mbar_wait(qbars + 2, (uint32_t)(kuse[0] & 1)); kuse[0]++;
+      mbar_wait(qbars + 2, (uint32_t)(kuse0 & 1)); kuse0++;
       mbar_wait(qbars + 4, (uint32_t)(vuse & 1)); vuse++;
     }
     __syncthreads();
@@ -3057,8 +3060,10 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
           ks_s[tid] = (jg < len) ? ks[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
           vs_s[tid] = (jg < len) ? vs[((size_t)(qbase + jg)) * Hkv + hkv] : 1.f;
         }
-        mbar_wait(qbars + 2 + (stg ^ 1), (uint32_t)(kuse[stg ^ 1] & 1));
-        kuse[stg ^ 1]++;
+        const int sk2 = stg ^ 1;
+        const int kc = sk2 ? kuse1 : kuse0;
+        mbar_wait(qbars + 2 + sk2, (uint32_t)(kc & 1));
+        if (sk2) kuse1++; else kuse0++;
         __syncthreads();
         const unsigned char* Kb = Ks + (stg ^ 1) * KS_SZ;
         const int nd4k = HD / 4;

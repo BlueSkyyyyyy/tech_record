@@ -1,0 +1,17 @@
+### F3-a base (int kuse[2], local memory) ###
+grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.9285 ms  71.27 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0691 ms | preprocess 0.2217 ms | main 1.5822 ms | convert 0.0556 ms (cvt_on=0)
+
+### F3-a new (kuse0/kuse1 scalars) ###
+grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.8969 ms  72.46 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0688 ms | preprocess 0.2218 ms | main 1.5638 ms | convert 0.0424 ms (cvt_on=0)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=4.525e-01  max_rel=1.051e+02
+  dk   vs te_dk: max_abs=5.325e-01  max_rel=1.158e+02
+  dv   vs te_dv: max_abs=6.806e-01  max_rel=1.078e+02

@@ -766,6 +766,22 @@ smem 冲突 + 低 occ
   非确定 atomic；默认路径 `red` 仍由 O42 双硬约束锁定。详见 `docs/03` §69；原始输出
   `src/fp8/fa_bwd_fp8_p134_*`。
 
+### 5.50 F3-a（第一百三十五轮）：fp8 主 kernel 去 local 化 + F3（WS）可行性评估
+
+- **先评估后动手**：F3 = warp specialization / 更深 mbarrier 流水。用 ncu 对标 TE（S4096 causal）：
+  TE 384 线程/132 CTA/1 CTA/SM/**232KB smem**/258µs；ours 128 线程/8192 CTA/3 CTA/SM/74.8KB/1.61ms。
+  **两者都 L2 bound，但 ours 的 L2 搬运量 ≈ TE 的 6.9×**（`Duration×L2%`）——因为 ours 受 3 CTA/SM
+  的 smem 限制，靠 ksplit=8 凑并行度，Q/dO 重读 + dK/dV 跨 CTA `red`（114.5M 扇区）。
+- **判决**：WS 只能*重叠*、不能*减少*这笔 L2 流量（O48 判据不满足）；更深流水被 3 CTA/SM 的
+  74.8KB↔77.5KB 硬间隙锁死。**F3 不是最优点，真杠杆是 F4（减 L2 `red`）/ 改工作划分（dK/dV-over-KV）。**
+- **正结果（微优化）**：ncu 报默认 kernel local memory 占 L1TEX 扇区 18.29%。定位到
+  `int kuse[2]` 按运行期 `stg^1` 动态下标 ⇒ 落 local（8B stack + 每 tile LDL/STL，同 kernel-opt
+  「mbarrier 相位别用动态下标数组」坑）。改两标量后：local `op_ld/st` 扇区 **7.33/8.48M→
+  5.84/5.67M**；main S4096 6 次交替 **1.588→1.557ms（~2%↑）**、端到端 1.9285→**1.8969ms**、
+  S512/GQA 亦 1.8–2.4%；数值**逐位不变**、单/两文件 gate worst 6.7e-6 OK。剩余 local 是默认
+  `REGDQ` 实例 168-reg 硬墙下的 60B spill（寄存器粒度 8 ⇒ 封顶 168）。详见 `docs/03` §70；
+  原始输出 `src/fp8/fa_bwd_fp8_p135_*`、`..._f3_te_ncu_s4096.out.txt`。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。

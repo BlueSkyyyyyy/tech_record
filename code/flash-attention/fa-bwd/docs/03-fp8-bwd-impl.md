@@ -6422,3 +6422,80 @@ onefile_varlen}.out.txt`、`..._p134_ncu_{mla,varlen}_det_sectors.out.txt`；
 *重叠*不能*减少*，先按 O48 的判据（被拆的工作是否「发射即返回」）评估；② F4 默认路径的
 L2 `red`（114.5M 扇区）仍被 O42 双硬约束锁定，见「阻塞」；③ fp8 DET 要端到端转正还需再减
 partial 字节（fp8 partial / 只存 causal 非零块）或提 reduce 效率。
+
+---
+
+## 70. F3-a（第一百三十五轮，**正结果（微优化）**）：fp8 主 kernel 去 local 化 + F3 可行性评估（对标 TE）
+
+### 70.1 动机（F3 的「先评估再动手」）
+
+『fp8 专项冲刺』F3 = **warp specialization / 更深 mbarrier 流水**，目标是默认路径的头号
+stall `wait 1.59 + short_scoreboard 1.29`、以及 `L2 77.9%`。按 O48 的判据（被拆的工作是否
+「发射即返回」），先做 SASS/SOL 级对标，再决定 WS 值不值得做。
+
+### 70.2 对标（ncu，S=4096 causal，两实现同 shape）
+
+| 指标 | **TE**（`cudnn...flash_bprop_wgmma_f8_...`） | **ours**（默认 `fa_bwd_fp8_mma_kvtma_kernel`） |
+|---|---|---|
+| 线程 / CTA 几何 | 384 线程（3 warpgroup）、132 CTA、**1 CTA/SM** | 128 线程、grid 8192（ksplit=8）、**3 CTA/SM** |
+| smem / 寄存器 | **232.45 KB** / 168 regs | 74.82 KB / 168 regs |
+| Duration | **258 µs** | 1610 µs |
+| L2 / L1 / DRAM / Compute | 70.95% / 58.84% / 18.27% / 45.0% | 77.94% / 70.43% / 4.27% / 46.9% |
+| Executed Instructions | 108.3 M | 719.2 M |
+| L2 命中率 | 88.73% | — |
+
+**两者都是 L2 bound，但 ours 搬的 L2 量约为 TE 的 ~6.9×**（`Duration × L2%`：1.61×77.9% vs
+0.258×70.95%）。这解释了 6× 的时长差：TE 的 232KB smem + 1 CTA/SM 让它**每份数据只搬一次、
+无 split-K 冗余**；ours 受 3 CTA/SM 的 74.8KB 限制，靠 ksplit=8 凑并行度 ⇒ Q/dO 被重读、
+dK/dV 跨 CTA `red`（O42 定量：114.5M 扇区）。**结论：WS 只能*重叠***不能*减少*这笔 L2 流量
+（O48 判据不满足），**F3 不是当前最优点**；真杠杆仍是 F4（去/减 L2 `red`）或改工作划分
+（FA2 式 dK/dV-over-KV，roadmap backlog）。**更深 mbarrier 流水**同样被 3 CTA/SM 的
+74.8KB↔77.5KB 硬间隙锁死（放不下额外 stage / 跨-tile `P/dS` 双缓冲，见「阻塞」）。
+
+### 70.3 正结果：主 kernel 去 local 化（`int kuse[2]` → 两标量）
+
+对标时 `ncu` 报默认 kernel **local memory 占 L1TEX 扇区 18.29%**（占 L2 扇区 7.61%）。
+定位到 `fp8_mma_body` 里 K/V TMA 的 mbarrier 相位计数器 `int kuse[2] = {0,0}`——它按**运行期**
+`kuse[stg ^ 1]` 动态下标 ⇒ ptxas 把它放进 **local memory**（栈帧 8B + 每 tile `LDL/STL`；
+`-Xptxas -v` 原为 8B stack，与 kernel-opt 的「mbarrier 相位别用动态下标数组」坑一致）。
+改成两个标量 `kuse0/kuse1` + 运行期三元选择（`sk2=stg^1; kc=sk2?kuse1:kuse0`），**逐位语义不变**。
+
+- `-Xptxas -v`：默认实例 `<...,RDG=1,...>` 的 8B stack 消失；KVTMA 路径不再有动态下标数组。
+- **ncu（<128,64,32,1,1,1,1,0,0>，S=4096）**：local `op_ld` 扇区 **7.33M→5.84M**、
+  `op_st` **8.48M→5.67M**（−20%/−33%）；Duration 1.59→**1.58ms**。
+  剩余的 local 流量是默认 `REGDQ` 实例的**寄存器 spill**（168 regs 下 48B stack、60B
+  spill loads/stores）——`floor(65536/(3×128))=170`、但寄存器分配粒度 8 ⇒ 实际封顶 168，
+  **属硬墙**（与「阻塞」里的寄存器约束一致）。
+- **性能（同 binary、同 session A/B，main-only，event；6 次交替）**：
+  base 均值 **1.588ms** → new 均值 **1.557ms（1.9–2.0%↑）**；端到端 S4096 total
+  1.9285→**1.8969ms（1.6%↑，72.46 TF）**。逐 shape（main）：S512 0.0560→**0.0547**、
+  GQA kv4 0.2539→**0.2494（1.8%）**、MLA d512 0.1201→**0.1194**、S1024H32 中性。
+- **数值**：与历史**逐位相同**（S512 2.426/2.972/3.733e-1；S4096 2.635/2.644/3.216e-1；
+  GQA kv4 2.517/5.339/7.173e-1；MLA 2.232/3.337/3.602e-1）；单/两文件一致性 gate
+  `worst=6.676e-6`（tol 1e-4）OK、`--check docs/04` rc=0。
+
+### 70.4 复现 / 原始输出
+
+```bash
+# A/B：base（int kuse[2]）vs new（标量），同一 session 交替
+nvcc -O3 -gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda \
+  src/fp8/fa_bwd_fp8_main.cu -o ab_new.out
+./ab_new.out --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# ncu local 扇区（默认 kvtma 实例）
+ncu --kernel-name regex:fa_bwd_fp8_mma_kvtma --launch-skip 1 --launch-count 1 \
+  --metrics gpu__time_duration.sum,l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum,\
+l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum -- ./ab_new.out --dir=...
+# TE 对标
+ncu --set full --launch-skip 3 --launch-count 1 \
+  --kernel-name regex:flash_bprop_wgmma_f8 --print-summary per-kernel \
+  python3 harness/te_fp8_ncu.py '1 4096 16 128 causal'
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_p135_ab.out.txt`（base/new 计时 + 对拍）、
+`..._p135_ncu_local.out.txt`（local 扇区 A/B）、`..._f3_te_ncu_s4096.out.txt`（TE 全 set）、
+`..._p132_ncu_main_s4096.out.txt`（ours 对照）。
+
+**下一步候选**：① **F4（减 L2 `red`）才是真杠杆**——本轮对标证明 ours 的 L2 搬运量是 TE 的
+~6.9×，WS/流水都改不了这个量；可走 FA2 式「dK/dV 按 KV 并行」的分块（backlog，工程量大）
+或继续 DET 降字节；② F3 的 WS 在 3 CTA/SM 的资源约束下不成立（评估已收口）；
+③ 默认 `REGDQ` 实例的 60B spill（168-reg 硬墙）是剩余 local 流量，除非改工作点（BM/occupancy）。
