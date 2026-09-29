@@ -485,6 +485,37 @@ fp8_kvowner_dkv_kernel(const unsigned char* __restrict__ q8, const float* __rest
 #ifndef FA_KV_DQ
 #define FA_KV_DQ 1
 #endif
+// F7 第十三步（BN≥BM）：GEMM1/2 的 N 维 = BN。BN=32 走 `m64n32k32`（16 累加器），BN=64 走
+//   `m64n64k32`（32 累加器）。两者累加器映射同构（`d[j*4+q]` ↔ row=16w+g+(q>=2?8:0)、
+//   col=j*8+c2+(q&1)，j<BN/8）⇒ epilogue 只需把 j 上界从 4 改成 BN/8。
+template <int BN, int KIND>
+__device__ __forceinline__ void wgmma_mn_issue(const char* Asw, const char* Bsw, int HD,
+                                               float (&d)[BN / 2]) {
+  if constexpr (BN == 32) {
+    wgmma_mn32_issue<KIND>(Asw, Bsw, HD, d);
+  } else {
+#pragma unroll
+    for (int i = 0; i < 32; ++i) d[i] = 0.f;
+    wgmma_fence_fp8();
+    const uint32_t aa = smem_u32(Asw), ba = smem_u32(Bsw);
+    const uint32_t sbo = (uint32_t)((HD / 128) * 1024);
+#pragma unroll
+    for (int s = 0; s < HD / 32; ++s) {
+      uint64_t da = make_desc_sw128_fp8(sw128_k32_addr(aa, s), sbo);
+      uint64_t db = make_desc_sw128_fp8(sw128_k32_addr(ba, s), sbo);
+      if (KIND == 0)
+        wgmma_m64n64k32_e4e4(d, da, db);
+      else
+        wgmma_m64n64k32_e5e4(d, da, db);
+    }
+    wgmma_commit_fp8();
+  }
+}
+// F7 第十三步：BN=64 的壳用 `__launch_bounds__(THREADS, 2)`（smem ~111KB ⇒ 2 CTA/SM，
+//   regs 上限 256/thread）；BN=32 沿用 `FA_KV_CTA`。
+#ifndef FA_KV_CTA64
+#define FA_KV_CTA64 2
+#endif
 // F7 第八步：把「Q/dO 的逐 ROW-pair 标量 global gather + __byte_perm 写 SW128」staging，
 //   换成 **4D-TMA 一次性搬入 SW128 tile**（对标 TE 的 TMA 数据通路），再从 SW128 重建
 //   Qp/dOp 的 K 配对布局（与主 kernel O37 逐字同构）。本 kernel = `TMA` 模板参数化后的
@@ -511,7 +542,8 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
   constexpr int GM5 = BM / NWM, GN5 = NTW / NWAR;
   constexpr int MTM5 = GM5 / 16, NTM5 = GN5 / 8;
   constexpr int NTFOLD = BN / 32;
-  static_assert(HD == 128 && BM == 64 && BN == 32, "本原型固定 HD=128/BM=64/BN=32");
+  static_assert(HD == 128 && BM == 64 && (BN == 32 || BN == 64),
+                "本原型固定 HD=128/BM=64，BN∈{32,64}");
 
   // SW128 tile 尺寸（fp8 一行 HD 字节 = 128B）。
   constexpr int sz_Ks = BN * HD;
@@ -711,16 +743,16 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
 
     // ---- GEMM1 S=scale·QKᵀ (e4m3×e4m3) + GEMM2 dP=dO·Vᵀ (e5m2×e4m3)：wgmma 直读 SW128 ----
     {
-      float sacc[16], dpacc[16];
-      wgmma_mn32_issue<0>(reinterpret_cast<const char*>(Qs), reinterpret_cast<const char*>(Ks), HD,
-                          sacc);
-      wgmma_mn32_issue<1>(reinterpret_cast<const char*>(dOs), reinterpret_cast<const char*>(Vs), HD,
-                          dpacc);
+      float sacc[BN / 2], dpacc[BN / 2];
+      wgmma_mn_issue<BN, 0>(reinterpret_cast<const char*>(Qs), reinterpret_cast<const char*>(Ks), HD,
+                            sacc);
+      wgmma_mn_issue<BN, 1>(reinterpret_cast<const char*>(dOs), reinterpret_cast<const char*>(Vs), HD,
+                            dpacc);
       // F7 第九步：OVL=1 时在此重建 Qp/dOp（与上面两条异步 wgmma 重叠），再等 wgmma。
       if (FA_KV_OVL && TMA) build_paired_tma();
       wgmma_wait0_fp8();
 #pragma unroll
-      for (int j = 0; j < 4; ++j)
+      for (int j = 0; j < BN / 8; ++j)
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
           const int r = wid * 16 + g + (q >= 2 ? 8 : 0);
@@ -735,7 +767,7 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
           Ps[r * PSS + c] = p;
         }
 #pragma unroll
-      for (int j = 0; j < 4; ++j)
+      for (int j = 0; j < BN / 8; ++j)
 #pragma unroll
         for (int q = 0; q < 4; ++q) {
           const int r = wid * 16 + g + (q >= 2 ? 8 : 0);
@@ -973,8 +1005,9 @@ fp8_kvowner_dkv_wgmma_kernel(const unsigned char* __restrict__ q8, const float* 
 }
 #ifdef FA_TMA
 // F7 第八步壳：Q/dO 走 4D-TMA（需 `-DFA_TMA -lcuda` + sm90a gencode）。
+// F7 第十三步：BN=64（smem ~111KB）自动切 2 CTA/SM；BN=32 沿用 FA_KV_CTA。
 template <int HD, int BM, int BN>
-__global__ void __launch_bounds__(THREADS, FA_KV_CTA)
+__global__ void __launch_bounds__(THREADS, (BN == 64 ? FA_KV_CTA64 : FA_KV_CTA))
 fp8_kvowner_dkv_wgmma_tma_kernel(const unsigned char* __restrict__ q8,
                                  const float* __restrict__ qs,
                                  const unsigned char* __restrict__ k8,
@@ -1874,6 +1907,17 @@ int main(int argc, char** argv) {
   constexpr int wg_tma_smem = ((wg_smem + 15) & ~15) + 64;
   // F7 第十二步：TMAR 版再加 [BM][HD] fp32 的 dQ staging（与 body 的 dQst 布局一致）。
   constexpr int wg_tmar_smem = wg_tma_smem + FA_KV_DQ_TMAR * (BM * HD * 4);
+  // F7 第十三步（BN≥BM）：BN=64 的 smem 账——K/V/Ap/dS3/Kp/dS2/Ps/Ss 全随 BN 线性增长。
+  //   按 Fp8Cfg<HD,64,64> 精确重算：111,360B ⇒ 2 CTA/SM（上限 116,224B）；3 CTA/SM（77,482B）放不下。
+  using Cfg64 = Fp8Cfg<HD, 64, 64>;
+  constexpr int BM64 = 64, BN64 = 64;
+  constexpr int wg_smem64 = [] {
+    return BN64 * HD + BN64 * HD + BM64 * HD + BM64 * HD +
+           (BM64 / 2) * Cfg64::PSLD * 2 + (BM64 / 2) * Cfg64::PSLD * 2 + BN64 * Cfg64::QTS +
+           BN64 * Cfg64::QTS + (BN64 / 2) * Cfg64::PSLD * 2 + BM64 * Cfg64::DSS2 +
+           BM64 * Cfg64::PSS * 4 + BM64 * Cfg64::PSS * 4 + (3 * BM64 + 4 * BN64) * 4;
+  }();
+  constexpr int wg_tma_smem64 = ((wg_smem64 + 15) & ~15) + 64;
 #endif
 
   const int lse_smem = Cfg::lse_smem_bytes;
@@ -1947,6 +1991,9 @@ int main(int argc, char** argv) {
 #if defined(FA_WGMMA) && defined(FA_TMA)
   CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_wgmma_tma_kernel<HD, BM, BN>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, wg_tma_smem));
+  // F7 第十三步：BN=64 实例（BN≥BM）。
+  CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_wgmma_tma_kernel<HD, BM64, BN64>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, wg_tma_smem64));
   if (FA_KV_DQ_TMAR) {
     CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_wgmma_tma_r_kernel<HD, BM, BN>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, wg_tmar_smem));
@@ -2001,6 +2048,14 @@ int main(int argc, char** argv) {
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, d_dq, S, H,
         scale, (int)causal, qmap_kv, dmap_kv);
   };
+  // F7 第十三步（BN≥BM）：BN=64 —— 每 CTA 拥有 64 行 KV（=BM），dQ 的跨 CTA 贡献数从 S/32 减半到
+  //   S/64、Q/dO 的跨 CTA 读放大也减半。grid.x 减半（S/64）。代价：smem 111KB ⇒ 2 CTA/SM。
+  const dim3 kg64((S + BN64 - 1) / BN64, H);
+  auto launch_wgtma64 = [&]() {
+    fp8_kvowner_dkv_wgmma_tma_kernel<HD, BM64, BN64><<<kg64, THREADS, wg_tma_smem64>>>(
+        d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, d_dq, S, H,
+        scale, (int)causal, qmap_kv, dmap_kv);
+  };
   // F7 第十二步：dQ 归约换 **4D-TMA tensor store-reduce**（对标 TE `UTMAREDG.4D.ADD`）。
   // box 内维 = 64 列 fp32 = 256B（TMA box 上限）；body 沿 D 拆 2 个 chunk。
   CUtensorMap dqmap_kv = make_kvowner_dq_map_f32(d_dq, H, S, D, B, 64, BM);
@@ -2052,6 +2107,7 @@ int main(int argc, char** argv) {
       if (only == "dqonly") launch_dqonly();
       else if (only == "main3") launch_main3();
       else if (only == "wgtma") launch_wgtma();
+      else if (only == "wgtma64") launch_wgtma64();
       else if (only == "wgtmar") launch_wgtmar();
     };
     fn();
@@ -2175,6 +2231,27 @@ int main(int argc, char** argv) {
   DiffStat qk_b = diff_stat(q_dk, w_dk), qv_b = diff_stat(q_dv, w_dv);
   printf("[对拍] wgmma+TMA vs wgmma: dk max_abs=%.4e  dv max_abs=%.4e（应=0，仅搬运通路）\n",
          qk_b.max_abs, qv_b.max_abs);
+  // F7 第十三步（BN≥BM）：BN=64 三梯度 vs ref / vs BN=32 —— 验证「工作划分减半」不改数学口径。
+  std::vector<float> b64_dk(nkv), b64_dv(nkv), b64_dq(nq);
+  CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+  CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+  CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
+  launch_wgtma64();
+  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaMemcpy(b64_dk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(b64_dv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(b64_dq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+  DiffStat xk_r = diff_stat(b64_dk, rdk.data), xv_r = diff_stat(b64_dv, rdv.data);
+  printf("[对拍] ours(KV-owner **BN=64** 三梯度) vs fp32 ref:\n");
+  printf("  dk  max_abs=%.4e  max_rel=%.4e\n", xk_r.max_abs, xk_r.max_rel);
+  printf("  dv  max_abs=%.4e  max_rel=%.4e\n", xv_r.max_abs, xv_r.max_rel);
+  if (file_exists(dir + "/ref_dq.npy")) {
+    DiffStat xq_r = diff_stat(b64_dq, rdq.data);
+    printf("  dq  max_abs=%.4e  max_rel=%.4e\n", xq_r.max_abs, xq_r.max_rel);
+  }
+  printf("[对拍] BN=64 vs BN=32(wgmma+TMA): dk=%.4e dv=%.4e dq=%.4e（fp8 噪声，仅跨 CTA 加序/分块变）\n",
+         diff_stat(b64_dk, q_dk).max_abs, diff_stat(b64_dv, q_dv).max_abs,
+         diff_stat(b64_dq, q_dq).max_abs);
 #if FA_KV_DQ
   // F7 第十二步：dQ 走 4D-TMA tensor store-reduce（对标 TE `UTMAREDG.4D.ADD`）。
   {
@@ -2284,12 +2361,16 @@ int main(int argc, char** argv) {
 #endif
 #if defined(FA_WGMMA) && defined(FA_TMA)
   float t_wgtma = bench(launch_wgtma, iters);
+  float t_wgtma64 = bench(launch_wgtma64, iters);
 #endif
 #if defined(FA_WGMMA) && defined(FA_TMA) && FA_KV_DQ && FA_KV_DQ_TMAR
   float t_wgtmar = bench(launch_wgtmar, iters);
 #endif
 #if !(defined(FA_WGMMA) && defined(FA_TMA))
   float t_wgtma = 0.f;
+#endif
+#if !(defined(FA_WGMMA) && defined(FA_TMA))
+  float t_wgtma64 = 0.f;
 #endif
 #if !(defined(FA_WGMMA) && defined(FA_TMA) && FA_KV_DQ && FA_KV_DQ_TMAR)
   float t_wgtmar = 0.f;
@@ -2318,6 +2399,11 @@ int main(int argc, char** argv) {
 #if defined(FA_WGMMA) && defined(FA_TMA)
   printf("[计时] main(dK/dV/dQ 三梯度) **wgmma+Q/dO-TMA** = %.4f ms (%.2f TF) | tma/wg = %.3f× | tma/base = %.3f×\n",
           t_wgtma, flops / t_wgtma / 1e9, t_wg / t_wgtma, t_base / t_wgtma);
+  printf("[计时] main(三梯度) **BN=64 (BN≥BM)** = %.4f ms (%.2f TF) | BN64/BN32 = %.3f× | smem=%d B (%.1f KB)\n",
+          t_wgtma64, flops / t_wgtma64 / 1e9, t_wgtma / t_wgtma64, wg_tma_smem64,
+          wg_tma_smem64 / 1024.0);
+  printf("[计时] total BN=64 = %.4f ms | 峰值占比 = %.3f%%\n", t_wgtma64 + t_pre,
+         100.0 * flops / t_wgtma64 / 1e9 / 1978.8);
   printf("[计时] total wgmma+TMA = %.4f ms | 峰值占比 = %.3f%%\n", t_wgtma + t_pre,
           100.0 * flops / t_wgtma / 1e9 / 1978.8);
 #if FA_KV_DQ_TMAR

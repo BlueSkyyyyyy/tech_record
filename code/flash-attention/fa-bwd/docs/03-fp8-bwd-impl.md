@@ -8233,3 +8233,89 @@ persistent、384 线程、232KB smem、1 CTA/SM），**不是**用了 TMA 归约
   `..._p159_tmar_s512_h16_d128_causal_fp8.out.txt`、`..._p159_tmar_s1024_h32_d128_causal_fp8.out.txt`、
   `..._p159_default_regression_s512.out.txt`（默认档回归逐位）、
   `src/fp8/fa_bwd_fp8_p159_ncu_wgtmar_s4096.out.txt`、`..._p159_ncu_wgtma_s4096.out.txt`。
+
+## 93. F7 第十三步（第一百六十轮）：BN≥BM（BN=64）——dK/dV-over-KV 的 dQ 贡献数减半，但撞寄存器墙（中性/偏负）
+
+### 93.1 动机（落实第一百五十九轮「下一步候选 ①(a)」）
+
+F7 的「KV-owner 单一 owner」划分把 dK/dV 的跨 CTA `red` 打成 **0**，但代价是 **dQ 变跨 CTA 原子**
+（q157）：一个 dQ 元素 `(m,d)` 收到所有 `j<=m` 的 KV 块的贡献，贡献数 ≈ `S/BN`。q157 实测
+KV-owner 三梯度的总 `red` **114.5M→102.2M（−10.7%）**——因为解析上 dK/dV 贡献 `S²/BM`、dQ 贡献
+`S²/(2BN)`，`BM=64=2·BN` 时两者相等（「把原子从 dK/dV 搬到 dQ 流量中性」）。
+
+第一百五十九轮据此给出唯一剩余的工作划分杠杆：**BN≥BM**。若把 KV-owner 的 tile 从 `BN=32`
+放大到 `BN=64`（=BM），则：
+
+- dQ 的贡献数 `S/BN` 从 `S/32` **减半到 `S/64`** ⇒ dQ `red` 减半；
+- Q/dO 的跨 CTA **读放大**（每个 Q tile 被 `S/BN` 个 KV-owner CTA 重读）也减半；
+- 代价：`Ks/Vs/Ap/dS3/Kp/dS2/Ps/Ss` 全随 BN 线性增长 ⇒ **smem 74.75→111.42KB**（3→2 CTA/SM）；
+  `dVacc/dKacc`（`MTM34=BN/32` 从 1 变 2）与 GEMM1/2 的 wgmma 累加器（n32→n64）**翻倍**。
+
+本轮把该选项**完整落进 p155/p157 的 `fp8_kvowner_dkv_wgmma_body`**（而非纸面估算），做同 binary
+A/B + ncu，给出判决。
+
+### 93.2 实现（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，device + host，默认路径一行未改）
+
+- **body 参数化 BN∈{32,64}**：删 `static_assert(BN==32)` → 允许 64；GEMM1/2 新增
+  `wgmma_mn_issue<BN,KIND>`（BN=32 走 `m64n32k32`（16 累加器）、BN=64 走 `m64n64k32`（32 累加器）；
+  两者累加器映射同构，epilogue 的 j 上界由 `4` 改 `BN/8`）。其余（fold/GEMM3/4/5/epilogue/Kp
+  重建/plain store）**逐字沿用**——`MTM34/NTM34/NTFOLD` 全部由 `BN` 派生。
+- **壳**：`fp8_kvowner_dkv_wgmma_tma_kernel<HD,BM,BN>` 的 `__launch_bounds__` 改为
+  `(BN==64?FA_KV_CTA64:FA_KV_CTA)`（`FA_KV_CTA64` 默认 2）。BN=32 实例逐字不变。
+- **host**：新增 `Cfg64`/`BM64`/`BN64`、`wg_tma_smem64`（精确 111,424B）、BN=64 的
+  `cudaFuncSetAttribute`/`launch_wgtma64`（grid.x 减半 `S/64`）/`--only=wgtma64`，以及对拍与计时。
+
+### 93.3 数值（三 shape 全通，与 ref/TE 同量级）
+
+| shape | 实现的 dk / dv / dq vs fp32 ref | BN=64 vs BN=32 |
+|---|---|---|
+| S512 H16 | 2.9757e-1 / 3.7318e-1 / 2.4262e-1 | dk/dv **0.0**、dq 5.9272e-2 |
+| S1024 H32 | 4.1764e-1 / 3.5346e-1 / 2.3993e-1 | dk/dv **0.0**、dq 7.1432e-2 |
+| S4096 H16 | 2.6355e-1 / 3.2161e-1 / 2.6355e-1 | dk/dv **0.0**、dq 5.9015e-2 |
+
+⇒ **换工作划分不改变数学口径**：dK/dV（本地 owned、无跨 CTA 加序）**逐位相同**；dQ（跨 CTA
+原子）只差贡献数变少导致的 fp32 加法次序，量级 ~5.9e-2 与 fp8 噪声一致。
+
+### 93.4 性能（同 binary A/B，CUDA event，iters=30）
+
+| shape | BN=32（wgmma+Q/dO-TMA 三梯度） | **BN=64** | 比值 | smem |
+|---|---|---|---|---|
+| S512 H16（grid 16→8 <132 SM，**grid-bound**） | 0.0748 ms | 0.0831 ms | **0.900×** | 111.4KB |
+| S1024 H32 | 0.3349 ms | 0.3214 ms | **0.960×** | 111.4KB |
+| S4096 H16 | 1.8483 ms | 1.7731 ms | **1.042×** | 111.4KB |
+
+- S512：BN=64 的 grid 只有 `8×16=128 < 132 SM` ⇒ **连一个波都铺不满**（BN=32 是 256 CTA），
+  净慢 10%。
+- S1024/S4096：grid 足够，BN=64 把 `red` 与读放大减半，但只换来 **+4%（S4096，另一 session
+  +1.5%）/ −4%（S1024）**——**基本中性**。
+
+### 93.5 ncu（S4096 H16，同 session A/B）——**寄存器墙是判决**
+
+| 指标 | BN=32 | **BN=64** | 说明 |
+|---|---|---|---|
+| **`lts__t_sectors_op_red`** | **102,236,160** | **51,118,080** | **精确减半**（工作划分生效） |
+| `lts read` | 52.62M | 40.06M | −24%（Q/dO 重读减少） |
+| `lts write` | 6.19M | **26.64M** | **+4.3×（溢出！）** |
+| **`l1tex …mem_local_op_st`** | **65,536** | **13,754,368** | **+210× ⇒ `dVacc/dKacc` 翻倍把寄存器顶穿** |
+| `l1tex …mem_local_op_ld` | 1.06M | 13.72M | 同上 |
+| registers/thread | 168 | **255（上限）** | 2 CTA 上限 256，仍不够 |
+| achieved occupancy | 17.86% | 11.85% | 3→2 CTA/SM |
+| `smsp__inst_executed` | 703.65M | 539.34M | −23%（n64 + 少一半 CTA） |
+| Duration | 1.83 ms | 1.79 ms | 中性 |
+
+**结论（决定性）**：**BN≥BM 的算术假设（red 减半、读放大减半）完全成立**（`lts op_red`
+102.2M→51.1M 一字不差地减半），但 **dQ/dK/dV 的「单一 owner」本质要求把整块 KV 的 `dK/dV`
+累加器常驻寄存器**（BN=64 ⇒ `dVacc+dKacc = 2×64 = 128` 个 fp32），叠加 GEMM1/2 从 n32→n64 的
+累加器翻倍，**顶穿 255 寄存器硬上限 → 每线程 112B 栈 + 13.75M 扇区的 local store 流量**，
+其代价盖过了省下的 `red`/读。⇒ **F7 option(a)（BN≥BM）在本卡判为中性/偏负**：
+`red` 的减半被**寄存器溢出**吃掉，与「阻塞」里 O17b/F6 的「寄存器文件锁死放大 tile」是**同一堵墙**。
+
+### 93.6 下一步
+
+- **F7 的「BN≥BM」子项就此判决（中性/偏负）**。到此 F7 主体已穷尽本卡可行的机制：
+  single-owner（red=0）机制成立、但**任何「单趟内减少贡献数」的实现（两 kernel / TMA
+  store-reduce / BN≥BM）都被 (i) L2 读放大、(ii) 寄存器文件 255 上限 之一挡住**。
+  剩余唯一未试的 = **跨 warpgroup 偏和 + 二次归约**（需先把 dK/dV 累加器搬出寄存器，
+  同样撞 smem/regs），或 **放弃 F7 / 换卡**。
+- 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p160_bn64_{s512,s1024h32,s4096}.out.txt`、
+  `src/fp8/fa_bwd_fp8_p160_ncu_{bn32,bn64}_s4096.out.txt`。

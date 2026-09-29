@@ -1,0 +1,46 @@
+fa_bwd_fp8_kvowner_mma.cu(2376): warning #177-D: variable "t_wgtmar" was declared but never referenced
+    float t_wgtmar = 0.f;
+          ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kvowner_mma.cu(157): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+fa_bwd_fp8_kvowner_mma.cu(1463): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+==PROF== Connected to process 1192594 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_kvowner_mma.out)
+==PROF== Profiling "fp8_kvowner_dkv_wgmma_tma_kernel": 0%....50%....100% - 10 passes
+=== F7：fp8 mma KV-owner dK/dV 原型（base/pipe/persistent/**dynamic-wq**/**wgmma** A/B） ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+grid = (128, 16); kvowner smem = 70144 B (68.5 KB); pipe smem = 105984 B (103.5 KB); wgmma smem = 74752 B (73.0 KB); lse smem = 18944 B
+[F7 persist] SM=132  total_tiles=2048  pgrid=396（base 栅格 = 2048 CTA）
+[only=wgtma64] done (iters=1)
+==PROF== Disconnected from process 1192594
+[1192594] fa_bwd_fp8_kvowner_mma.out@127.0.0.1
+  void fp8_kvowner_dkv_wgmma_tma_kernel<128, 64, 64>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, float, int, CUtensorMap_st, CUtensorMap_st) (64, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------- --------------- ------------
+    Metric Name                                             Metric Unit Metric Value
+    --------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                %         2.99
+    gpu__time_duration.sum                                           ms         1.79
+    l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum                sector     13721600
+    l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum                sector     13754368
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed               %        47.24
+    launch__registers_per_thread                        register/thread          255
+    lts__t_sector_hit_rate.pct                                        %        97.78
+    lts__t_sectors_op_read.sum                                   sector     40057240
+    lts__t_sectors_op_red.sum                                    sector     51118080
+    lts__t_sectors_op_write.sum                                  sector     26644486
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                 %        41.43
+    sm__maximum_warps_per_active_cycle_pct                            %        12.50
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                  %        31.73
+    sm__warps_active.avg.pct_of_peak_sustained_active                 %        11.85
+    smsp__inst_executed.sum                                        inst    539343360
+    --------------------------------------------------- --------------- ------------
+
