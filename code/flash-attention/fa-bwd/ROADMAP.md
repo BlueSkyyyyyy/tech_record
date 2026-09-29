@@ -2870,12 +2870,38 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
         不均）。**「persistent 只能更慢」修正为「静态 persistent 更慢」**；持久化不再是障碍，
         为 F7 主体（持久 CTA + TMA staging + dQ 同循环）提供可用调度骨架，但 dyn 相对 base 仅
         中性（无 dQ）⇒ 要转正仍需叠加 4D-TMA / 降寄存器 / 打 `wait`。见 `docs/03` §86、`docs/08` §5.67。
+       → **第七步已完成（第一百五十四轮，GEMM 指令层上 wgmma：大 S 正结果）**：新增
+        `fp8_kvowner_dkv_wgmma_kernel`——Q/dO/K/V 全存 **SW128**、GEMM1/2 换 `wgmma.m64n32k32`
+        （异步、直读描述符）、GEMM3/5 仍 mma；SW128 更紧凑 ⇒ smem 67072B **仍 3 CTA/SM**。
+        **S4096 main 1.413→1.347ms（1.049×、优于 pipe 0.979×/dyn 1.004×）、指令 −15.3%**，
+        S1024H32 1.004×、S512 0.998×；ncu 证 **`wait` 未降**（1.44→1.52），收益纯粹来自
+        指令数（去 `ldmatrix` + SM80 兼容发射）。数值 vs ref 同 base、与 base 的差 = 累加次序
+        噪声。见 `docs/03` §87、`docs/08` §5.68；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p154_*`。
+        **剩余（F7 主体）**：4D-TMA staging（对标 TE）+ dQ 同循环 + 降寄存器冲 4 CTA/SM。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百五十三轮）**：**F7 第六步——KV-owner mma 原型的 dynamic work-queue 调度
+> **最新（第一百五十四轮）**：**F7 第七步——KV-owner mma 原型的 GEMM1/2 换 Hopper `wgmma`
+> （大 S 正结果，第一百五十四轮）**。落实第 153 轮「下一步候选 ①」的「打 `wait`」子项，
+> 先在 KV-owner 原型上把 **GEMM 指令层对齐 TE**：新增 `fp8_kvowner_dkv_wgmma_kernel`
+> （`-DFA_WGMMA`）——Q/dO/K/V 全存 **SW128**、GEMM1/2 换 `wgmma.m64n32k32`（异步、直读描述符、
+> 统一 `wait0`）、GEMM3/5 仍 mma+ldmatrix。**SW128 tile 更紧凑 ⇒ smem 67072B < base 70144B、
+> 仍 3 CTA/SM**（区别于第 151 轮 pipe 的 2 CTA/SM）。**数值** vs ref 与 base 同量级
+> （S512 2.976/3.732e-1、S1024H32 4.176/3.535e-1、S4096 2.644/3.216e-1），wgmma-vs-base
+> = 累加次序噪声。**性能**（main 仅 dK/dV）：S4096 base 1.4128 / pipe 1.4428 / dyn 1.4074 /
+> **wgmma 1.3472ms（wg/base 1.049×、wg/pipe 1.071×、wg/dyn 1.045×）**，S1024H32 1.004×、
+> S512 0.998×。**ncu（S4096）**：Duration 1.42→1.38ms、`Executed Instructions`
+> **638.7M→541.0M（−15.3%）**、Compute 47.25→41.01%、**`wait` 1.44→1.52（未降）**、
+> `long` 0.58→1.40、3 CTA/SM 不变 ⇒ **收益 = 指令数 −15.3%，非消除 `wait`**。
+> 文档 `docs/03` §87、`docs/08` §5.68；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p154_*`。
+> **下一步候选**：① **F7 主体**——在 wgmma 化的 KV-owner 上叠加 **4D-TMA 暂存 Q/dO/K/V +
+> dQ 同循环（dQ 跨 CTA 归约）+ 降 `dVacc/dKacc` 冲 4 CTA/SM（smem≤58KB/regs≤128）**，对标
+> TE grid=132；② 其余候选（F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、非 main 融合）
+> 均已判决/到顶/收口；③ DET 仅 opt-in。
+>
+> **（第一百五十三轮）**：**F7 第六步——KV-owner mma 原型的 dynamic work-queue 调度
 > （正结果）**。落实第一百五十二轮「下一步候选 ①」的「动态负载均衡」子项：
 > `fp8_kvowner_dkv_persist_kernel` 加模板参 `bool DYN` + `int* wq`，`DYN=true` 时循环顶
 > `if (tid==0) s_tile=atomicAdd(wq,1); __syncthreads();` 领 tile 直至越界（tile=`h*nblk+jblk`，
@@ -6100,9 +6126,35 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       步长 `gridDim=396` 把并发 CTA 撒在 ~6 个 head、Q/dO 工作集打散 ⇒ **L2 局部性损失（读扇区
       1.42×）+ 负载不均**，二者被 dynamic 连续领号一并消除（dyn 与 base 逐项吻合）。见
       `docs/03` §86、`docs/08` §5.67。
-    - **结论**：**dynamic work-queue 正结果**——「persistent 只能更慢」修正为「**静态 persistent
-      更慢**」；持久化本身不再是障碍，为 F7 主体提供可用调度骨架。但 dyn 相对 base 仅中性
-      （main 只做 dK/dV，无 dQ）——F7 主体要转正仍需叠加 4D-TMA / 降寄存器冲 4 CTA/SM / 打 `wait`。
+     - **结论**：**dynamic work-queue 正结果**——「persistent 只能更慢」修正为「**静态 persistent
+       更慢**」；持久化本身不再是障碍，为 F7 主体提供可用调度骨架。但 dyn 相对 base 仅中性
+       （main 只做 dK/dV，无 dQ）——F7 主体要转正仍需叠加 4D-TMA / 降寄存器冲 4 CTA/SM / 打 `wait`。
+
+- 2026-09-30（第一百五十四轮）：**F7 第七步完成（KV-owner mma 原型的 GEMM1/2 换 Hopper
+  `wgmma`，保持 3 CTA/SM；大 S 正结果 main 1.049×、指令 −15.3%）**——落实第 153 轮
+  「下一步候选 ①」的「打 `wait`」子项，在 KV-owner 原型上先对齐 TE 的 GEMM 指令层。
+  - 新增 `fp8_kvowner_dkv_wgmma_kernel`（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，`-DFA_WGMMA`）：
+    Q/dO/K/V 的 smem 全改 **SW128 K-major**（`sw128_off_fp8`），GEMM1(`S=scale·QKᵀ`
+    e4m3×e4m3)/GEMM2(`dP=dO·Vᵀ` e5m2×e4m3) 换 **`wgmma.m64n32k32`**（1 warpgroup、BM=64/BN=32，
+    直读 smem 描述符、两条异步一起发 + 统一 `wait0`），epilogue 改 wgmma 累加器映射（warp `w`
+    持行 `[16w,16w+16)`）；GEMM3(dV)/GEMM5(dK) 仍 `mma+ldmatrix`（fp8 wgmma 无转置操作数，
+    O9c-2 判死），B 仍用 O4b 配对布局。**SW128 tile 比 ASLD 更紧凑 ⇒ smem 67072B < base
+    70144B，仍 3 CTA/SM**（关键区别于第 151 轮 pipe 的 2 CTA/SM）。
+  - **数值**：wgmma-vs-ref 与 base-vs-ref 同量级（S512 2.976/3.732e-1、S1024H32 4.176/3.535e-1、
+    S4096 2.644/3.216e-1）；`wgmma-vs-base` = 既有 `Q-owner-vs-base` 的累加次序噪声（非 bug）。
+  - **性能**（同 binary A/B，main 仅 dK/dV，ms）：S4096 H16 base 1.4128 / pipe 1.4428 /
+    dyn 1.4074 / **wgmma 1.3472（wg/base 1.049×、wg/pipe 1.071×、wg/dyn 1.045×）**；
+    S1024H32 **1.004×**；S512 0.998×（grid=256 单波、grid-bound）。
+  - **ncu（S4096）**：Duration 1.42→**1.38ms**、`Executed Instructions` **638.7M→541.0M
+    （−15.3%）**、Compute 47.25→41.01%、L1/TEX 56.8→56.5%、L2 12.8→17.2%、regs 168 /
+    smem 65.5KB / **3 CTA/SM** 不变；stall `wait 1.44→1.52`（**未降**）、`short 0.88→0.96`、
+    `long 0.58→1.40`、`not_selected 0.55→0.36`。⇒ **收益 = 指令数 −15.3%（去掉 `ldmatrix` +
+    SM80 兼容发射），不是消除 `wait`**。
+  - **结论**：§84/§86 之后**第一个在大 S 转正的 KV-owner 结构改动**（优于 pipe/dyn），且保持
+    3 CTA/SM。但仍是 dK/dV-only（FLOPs 只算 2/3），净收益 ~5%——F7 主体仍欠 **4D-TMA staging /
+    dQ 同循环 / 降寄存器冲 4 CTA/SM**。见 `docs/03` §87、`docs/08` §5.68。
+  - 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p154_s{512,1024_h32,4096}*.out.txt`、
+    `..._p154_ncu_{wgmma,base}_s4096.out.txt`、`..._p154_stall_{base,wgmma}_s4096.out.txt`。
 
 ## 灵感 / backlog
 

@@ -1158,3 +1158,24 @@ smem 冲突 + 低 occ
   dQ 同循环）提供了可用的调度骨架。但 dyn 相对 base 仅中性——F7 主体要真正转正仍需叠加
   4D-TMA / 降寄存器冲 4 CTA/SM / 打 `wait`，否则杠杆回到 §5.65。
 - 详见 `docs/03` §86；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p153_*`。
+
+### 5.68 F7 第七步：KV-owner mma 的 GEMM1/2 上 Hopper wgmma（正结果，第一百五十四轮）
+
+- **动机**：承接 §5.67 的「F7 主体须打 `wait` + occupancy」。base 第一墙是
+  `wait 1.44 + short 0.88`（mma/`ldmatrix` 依赖），非全局延迟（`long` 0.58）。F6 第二步（Q-owner）
+  已用 wgmma 重叠 GEMM1/2；本步把它搬到 KV-owner，且**关键约束 = 不掉 occupancy**。
+- **做法**：新增 `fp8_kvowner_dkv_wgmma_kernel`（`-DFA_WGMMA`）：Q/dO/K/V 全存 **SW128**，
+  GEMM1/2 用 `wgmma.m64n32k32` 直读描述符（异步、一起发、统一 wait0），epilogue 改 wgmma
+  累加器映射；GEMM3/5 仍 mma+ldmatrix（fp8 wgmma 无转置操作数，O9c-2 判死）。SW128 tile 比
+  ASLD 更紧凑 ⇒ smem **67072B < base 70144B，仍 3 CTA/SM**（区别于 §5.65 pipe 的 2 CTA/SM）。
+- **数值**：wgmma vs ref 与 base vs ref 同量级（S512 2.976e-1/3.732e-1、S4096 2.644e-1/3.216e-1）；
+  wgmma-vs-base 差 = 既有 Q-owner-vs-base 的累加次序噪声，非 bug。
+- **性能（同 binary A/B，main 仅 dK/dV）**：S4096 H16 base 1.4128 / pipe 1.4428 / dyn 1.4074 /
+  **wgmma 1.3472ms（wg/base 1.049×、wg/pipe 1.071×、wg/dyn 1.045×）**；S1024H32 1.004×；
+  S512 0.998×（grid-bound）。
+- **ncu（S4096）**：Duration 1.42→**1.38ms**、`Executed Instructions` **638.7M→541.0M（−15.3%）**、
+  Compute 47.25→41.01%、`wait 1.44→1.52`（**未降**）、`long 0.58→1.40`、regs/smem/3 CTA/SM 不变。
+  ⇒ **收益来自指令数 −15.3%（去掉 ldmatrix + SM80 兼容发射），不是消除 `wait`**。
+- **结论**：§5.65/§5.67 之后**第一个在大 S 转正的 KV-owner 结构改动**（1.049×，优于 pipe 0.979×
+  与 dyn 1.004×），且保持 3 CTA/SM。但仍是 dK/dV-only；F7 主体仍欠 4D-TMA staging、dQ 同循环、
+  降寄存器冲 4 CTA/SM。详见 `docs/03` §87；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p154_*`。
