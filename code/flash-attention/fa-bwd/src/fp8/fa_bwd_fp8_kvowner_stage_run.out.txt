@@ -1,0 +1,14 @@
+fa_bwd_fp8_kvowner_smoke.cu(436): warning #177-D: variable "B" was declared but never referenced
+    const int S = 512, H = 8, B = 1;
+                              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+=== F7 KV-owner smoke (S=512 H=8 HD=128 causal, fp32 scalar) ===
+[vs host double ref]  Q-owner  dk max_abs=3.640e-05 rel=9.602e-07 | dv max_abs=2.680e-06 rel=4.131e-07
+[vs host double ref]  KV-owner dk max_abs=3.640e-05 rel=9.602e-07 | dv max_abs=2.275e-06 rel=3.506e-07
+[vs host double ref]  KV-owner+stage dk max_abs=3.640e-05 rel=9.602e-07 | dv max_abs=2.275e-06 rel=3.506e-07
+[KV-owner vs Q-owner] dk max_abs=7.629e-06  dv max_abs=4.768e-07
+[KV-owner+stage vs Q-owner] dk max_abs=7.629e-06  dv max_abs=4.768e-07
+[time] Q-owner atomic = 3.4606 ms | KV-owner single-store = 5.4065 ms (save 0.64x)
+[time] KV-owner+stage = 0.8759 ms | vs Q-owner 3.95x | vs KV-owner 6.17x

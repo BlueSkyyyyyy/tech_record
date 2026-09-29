@@ -1,0 +1,96 @@
+fa_bwd_fp8_kvowner_smoke.cu(436): warning #177-D: variable "B" was declared but never referenced
+    const int S = 512, H = 8, B = 1;
+                              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+==PROF== Connected to process 1149527 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_kvowner_smoke.out)
+==PROF== Profiling "mowner_kernel": 0%....50%....100% - 10 passes
+==PROF== Profiling "kvowner_kernel": 0%....50%....100% - 10 passes
+==PROF== Profiling "kvowner_stage_kernel": 0%....50%....100% - 10 passes
+=== F7 KV-owner smoke (S=512 H=8 HD=128 causal, fp32 scalar) ===
+[vs host double ref]  Q-owner  dk max_abs=3.545e-05 rel=9.350e-07 | dv max_abs=2.275e-06 rel=3.506e-07
+[vs host double ref]  KV-owner dk max_abs=3.640e-05 rel=9.602e-07 | dv max_abs=2.275e-06 rel=3.506e-07
+[vs host double ref]  KV-owner+stage dk max_abs=3.640e-05 rel=9.602e-07 | dv max_abs=2.275e-06 rel=3.506e-07
+[KV-owner vs Q-owner] dk max_abs=5.722e-06  dv max_abs=7.153e-07
+[KV-owner+stage vs Q-owner] dk max_abs=5.722e-06  dv max_abs=7.153e-07
+[time] Q-owner atomic = 3.4604 ms | KV-owner single-store = 5.4044 ms (save 0.64x)
+[time] KV-owner+stage = 0.8786 ms | vs Q-owner 3.94x | vs KV-owner 6.15x
+==PROF== Disconnected from process 1149527
+[1149527] fa_bwd_fp8_kvowner_smoke.out@127.0.0.1
+  void mowner_kernel<32, 32, 128>(const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, int, int, float) (16, 8, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------- ----------- ------------
+    Metric Name                                         Metric Unit Metric Value
+    --------------------------------------------------- ----------- ------------
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                     26808320
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                      278528
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %        32.45
+    lts__t_sectors_op_read.sum                               sector      1502165
+    lts__t_sectors_op_red.sum                                sector      1671168
+    lts__t_sectors_op_write.sum                              sector         9862
+    sm__throughput.avg.pct_of_peak_sustained_elapsed              %         3.95
+    --------------------------------------------------- ----------- ------------
+
+  void kvowner_kernel<32, 32, 128>(const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, int, int, float) (16, 8, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------- ----------- ------------
+    Metric Name                                         Metric Unit Metric Value
+    --------------------------------------------------- ----------- ------------
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                     26808320
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                           0
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %        20.78
+    lts__t_sectors_op_read.sum                               sector     44066794
+    lts__t_sectors_op_red.sum                                sector            0
+    lts__t_sectors_op_write.sum                              sector       199907
+    sm__throughput.avg.pct_of_peak_sustained_elapsed              %         2.55
+    --------------------------------------------------- ----------- ------------
+
+  void kvowner_stage_kernel<32, 32, 128>(const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, int, int, float) (16, 8, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------- ----------- ------------
+    Metric Name                                         Metric Unit Metric Value
+    --------------------------------------------------- ----------- ------------
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                       147456
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                           0
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %        39.04
+    lts__t_sectors_op_read.sum                               sector      1382731
+    lts__t_sectors_op_red.sum                                sector            0
+    lts__t_sectors_op_write.sum                              sector       199821
+    sm__throughput.avg.pct_of_peak_sustained_elapsed              %        10.08
+    --------------------------------------------------- ----------- ------------
+
+fa_bwd_fp8_kvowner_smoke.cu(436): warning #177-D: variable "B" was declared but never referenced
+    const int S = 512, H = 8, B = 1;
+                              ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+==PROF== Connected to process 1150072 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_kvowner_smoke.out)
+==PROF== Profiling "kvowner_stage_kernel": 0%....50%....100% - 3 passes
+=== F7 KV-owner smoke (S=512 H=8 HD=128 causal, fp32 scalar) ===
+[vs host double ref]  Q-owner  dk max_abs=3.545e-05 rel=9.350e-07 | dv max_abs=2.442e-06 rel=3.763e-07
+[vs host double ref]  KV-owner dk max_abs=3.640e-05 rel=9.602e-07 | dv max_abs=2.275e-06 rel=3.506e-07
+[vs host double ref]  KV-owner+stage dk max_abs=3.640e-05 rel=9.602e-07 | dv max_abs=2.275e-06 rel=3.506e-07
+[KV-owner vs Q-owner] dk max_abs=5.722e-06  dv max_abs=4.768e-07
+[KV-owner+stage vs Q-owner] dk max_abs=5.722e-06  dv max_abs=4.768e-07
+[time] Q-owner atomic = 3.4614 ms | KV-owner single-store = 5.4024 ms (save 0.64x)
+[time] KV-owner+stage = 0.8783 ms | vs Q-owner 3.94x | vs KV-owner 6.15x
+==PROF== Disconnected from process 1150072
+[1150072] fa_bwd_fp8_kvowner_smoke.out@127.0.0.1
+  void kvowner_stage_kernel<32, 32, 128>(const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, int, int, float) (16, 8, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    gpu__time_duration.sum                                                                 us       879.78
+    launch__occupancy_limit_shared_mem                                                  block            1
+    launch__registers_per_thread                                              register/thread           32
+    launch__shared_mem_per_block_dynamic                                          Kbyte/block       139.26
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %         6.25
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.01
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         0.21
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         4.49
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.67
+    ------------------------------------------------------------------------- --------------- ------------
+
