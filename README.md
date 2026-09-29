@@ -164,6 +164,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 逐篇精读值得读的系统/算法论文：讲清真实问题、设计取舍背后的物理约束、以及能迁移的经验。
 
 1. [DSec 精读：DeepSeek 的 Agentic RL 沙箱平台，为什么不是「一个容器运行时」](content/posts/paper-reading-01-dsec/index.md)
+2. [DeepSeek-V4.1-Flash 精读：把 KV Cache 压到 890 bytes/token，架构、精度、部署三线并进](content/posts/paper-reading-02-dsv41-flash/index.md)
 
 ### 其他
 
