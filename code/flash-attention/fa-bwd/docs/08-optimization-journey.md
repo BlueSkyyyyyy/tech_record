@@ -782,6 +782,27 @@ smem 冲突 + 低 occ
   `REGDQ` 实例 168-reg 硬墙下的 60B spill（寄存器粒度 8 ⇒ 封顶 168）。详见 `docs/03` §70；
   原始输出 `src/fp8/fa_bwd_fp8_p135_*`、`..._f3_te_ncu_s4096.out.txt`。
 
+### 5.51 F5（第一百三十六轮）：fp8 LSE 的「tile 内两趟 softmax」+ mbarrier 相位去 local
+
+- **动机**：main 的杠箱被 F3-a 判为「3 CTA/SM 的 L2 流量锁死」后，转 preprocess。ncu 定位
+  D=128 定长 causal 的 LSE（`lse_mma_kernel_bal_tma`）是**纯 issue-bound**：S=4096 Duration
+  201µs / 指令 141.0M / Issue Slots Busy 73.6% / Ipc 3.09。
+- **SASS 归因**（`cuobjdump -sass` opcode 直方图，每 tile）：`MUFU.EX2` **64**（每元素 2 个
+  `fexp`，其中一次恒为 `exp(0)=1` 纯浪费）、`BSSY/BSYNC` **107/107**（逐元素 `if (sv!=-INF)`）、
+  `FSETP.*` **180**、`LDS` 316。
+- **改法**：epilogue 从「逐元素 online-softmax」改成 **tile 内两趟**——第一趟算本 lane 各 `s`
+  的列 max（顺手把掩码后的 `sv` 写回累加器），第二趟统一 `Σexp(sv-mn)` + 一次 rescale。数学
+  等价、只换 fp32 求和次序。**`fexp` 64→34、去逐元素分支**。覆盖 4 个 LSE kernel（TMA / wgmma
+  / mma-bal，含 `FULL`/`MTN`）。顺带把 TMA LSE 的 `int kuse[2]`（运行期动态下标 → local
+  memory，同 F3-a 在 main 修的坑）改两标量。
+- **结果**：LSE **201→120µs（1.67×）**、指令 **141.0M→86.4M（−38.7%）**、local 扇区
+  532k/598k→**0**；**preprocess 1.21–1.56×（S4096 0.216→0.138ms）**、端到端 **1.03–1.04×**
+  （S4096 1.888→**1.817ms/75.6TF**）；varlen D=128 1.02–1.04×。vs-ref/TE 打印位一致、单/两文件
+  gate 1.335e-5 OK、`--check docs/04` OK。原始输出 `src/fp8/fa_bwd_fp8_f5_*`。详见 `docs/03` §71。
+- **教训**：**softmax epilogue 的「逐元素 online」常隐含一次恒为 `exp(0)` 的废物 `exp` 与
+  逐元素分支**；改成「先求 tile/lane 列 max 再统一 exp」既省 exp 又消分支，是 issue-bound
+  softmax 的常规手段。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。

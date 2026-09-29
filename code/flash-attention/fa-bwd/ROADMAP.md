@@ -2711,13 +2711,41 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       DET-fp32→fp16 端到端 **1.06–1.11×（大 varlen 1.20×）**、`runs[1-2]` 逐位=0、`fp16-vs-fp32`
       ~1e-3、`ours-vs-ref` 不变；ncu store 扇区在 MLA（2.228M→1.114M）与 varlen（1.180M→0.590M）
       **精确减半**。**默认路径一行未改、`--ci` 全绿**。详见 `docs/03` §69、`docs/08` §5.49。
-- [ ] **F5** preprocess 继续提速
+- [x] **F5** preprocess 继续提速
+      → **已完成（第一百三十六轮）**：D=128 定长 causal 的 LSE（`lse_mma_kernel_bal_tma`）ncu 是
+      **纯 issue-bound**（S=4096 Duration 201µs / 141.0M 指令 / Issue 73.6% / Ipc 3.09）。SASS
+      直方图显示旧 epilogue 是「逐元素 online-softmax」：每元素 2 个 `fexp`（一次恒为 `exp(0)` 纯浪费）
+      + 逐元素 `if (sv!=-INF)` 分支（每 tile 64 `MUFU.EX2` + 214 `BSSY/BSYNC` + 180 `FSETP`）。
+      改成 **tile 内两趟 softmax**（先求本 lane 各 `s` 的列 max、再统一 rescale+exp，数学等价、只换
+      fp32 求和次序），覆盖 4 个 LSE kernel（TMA/wgmma/mma-bal）；顺带把 TMA LSE 的 `int kuse[2]`
+      （运行期动态下标 → local memory，同 F3-a）改两标量。**LSE 201→120µs（1.67×）、指令
+      141.0M→86.4M（−38.7%）、local 扇区→0；preprocess 1.21–1.56×（S4096 0.216→0.138ms）、
+      端到端 1.03–1.04×（S4096 1.888→1.817ms/75.6TF；varlen D128 1.02–1.04×）**；vs-ref/TE 打印位
+      一致、单/两文件 gate 1.335e-5 OK、`--check docs/04` OK 194 行。详见 `docs/03` §71、
+      `docs/08` §5.51；原始输出 `src/fp8/fa_bwd_fp8_f5_*`。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百三十五轮）**：**F3-a——fp8 主 kernel 去 local 化 + F3（WS）可行性评估**
+> **最新（第一百三十六轮）**：**F5——fp8 LSE 的「tile 内两趟 softmax」+ mbarrier 相位去 local**
+> （正结果，默认化）。『fp8 专项冲刺』第五步：main 被 F3-a 判为「3 CTA/SM 的 L2 流量锁死」
+> 后，转 preprocess。ncu 定位 D=128 定长 causal 的 LSE（`lse_mma_kernel_bal_tma`）是**纯
+> issue-bound**（S=4096 Duration 201µs / 141.0M 指令 / Issue 73.6% / Ipc 3.09）；SASS 直方图显示
+> 旧 epilogue 是「逐元素 online-softmax」：每元素 2 个 `fexp`（一次恒为 `exp(0)=1` 纯浪费）+
+> 逐元素 `if (sv!=-INF)` 分支（每 tile 64 `MUFU.EX2` + 214 `BSSY/BSYNC` + 180 `FSETP`）。改成
+> **tile 内两趟 softmax**（先求本 lane 各 `s` 的列 max、再统一 rescale+exp，数学等价、只换 fp32
+> 求和次序），覆盖 4 个 LSE kernel（TMA/wgmma/mma-bal，含 `FULL`/`MTN`）；顺带把 TMA LSE 的
+> `int kuse[2]`（运行期动态下标 → local memory，同 F3-a）改两标量。
+> **LSE 201→120µs（1.67×）、指令 141.0M→86.4M（−38.7%）、local 扇区→0；preprocess 1.21–1.56×
+> （S4096 0.216→0.138ms）、端到端 1.03–1.04×（S4096 1.888→1.817ms/75.6TF；varlen D128 1.02–1.04×）**；
+> vs-ref/TE 打印位一致、单/两文件 gate **1.335e-5** OK、`--check docs/04` OK 194 行；`--ci` 73 case 全绿。
+> 详见「当前进度 第一百三十六轮」、`docs/03` §71、`docs/08` §5.51；原始输出 `src/fp8/fa_bwd_fp8_f5_*`。
+> **下一步候选**：① **main 仍是端到端 81% 的墙**——F4 默认路径的 L2 `red`（114.5M 扇区）受本卡
+> 寄存器/smem 双硬约束锁定（见「阻塞」），唯一真杠杆是「改工作划分（dK/dV-over-KV）」等大改；
+> ② F5（quant/delta/convert）已近 DRAM 带宽，收口；③ F4 DET 路径可再压 partial 字节（fp8 partial）。
+>
+> **（第一百三十五轮）**：**F3-a——fp8 主 kernel 去 local 化 + F3（WS）可行性评估**
 > （正结果（微优化）+ 评估结论）。先按 O48 判据做 ncu/SOL 对标：TE（384 线程/132 CTA/1 CTA/SM/
 > 232KB smem，258µs）vs ours（128 线程/8192 CTA/3 CTA/SM/74.8KB，1.61ms）——**两者都 L2 bound，
 > 但 ours 的 L2 搬运量 ≈ TE 的 6.9×**（`Duration×L2%`），根源是 3 CTA/SM 的 smem 限制下靠 ksplit=8
@@ -5167,8 +5195,42 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     单/两文件一致性 gate **worst=6.676e-6（tol 1e-4）OK**、`--check docs/04` rc=0。
   - 原始输出 `src/fp8/fa_bwd_fp8_p135_ab.out.txt`、`..._p135_ncu_local.out.txt`、
     `..._f3_te_ncu_s4096.out.txt`；文档 `docs/03` §70、`docs/08` §5.50。
-  - **下一步候选**：① 默认路径 L2 `red`（F4）才是真杠杆（本轮证明 L2 量是 TE 的 6.9×，
-    WS 改不了量）；② F3 的 WS 在 3 CTA/SM 约束下不成立（评估收口）；③ 剩余 spill / F5 非当前墙。
+   - **下一步候选**：① 默认路径 L2 `red`（F4）才是真杠杆（本轮证明 L2 量是 TE 的 6.9×，
+     WS 改不了量）；② F3 的 WS 在 3 CTA/SM 约束下不成立（评估收口）；③ 剩余 spill / F5 非当前墙。
+
+- 2026-09-29（第一百三十六轮）：**F5 完成（fp8 LSE 的「tile 内两趟 softmax」+ mbarrier 相位去 local；
+  正结果，默认化）**——『fp8 专项冲刺』第五步 = preprocess 提速。
+  - 动机：main 被 F3-a 判为「3 CTA/SM 的 L2 流量锁死」后转 preprocess。ncu 定位 D=128 定长 causal
+    的 LSE（`lse_mma_kernel_bal_tma`）是**纯 issue-bound**：S=4096 Duration 201µs / Executed
+    141.0M / Issue Slots Busy 73.6% / Ipc 3.09 / DRAM 2.7%。
+  - **SASS 归因**（`cuobjdump -sass` opcode 直方图，每 tile）：`MUFU.EX2` **64**（每元素 2 个 `fexp`，
+    其中一次恒为 `exp(0)=1` 纯浪费）、`BSSY/BSYNC` **107/107**（逐元素 `if (sv!=-INF)`）、
+    `FSETP.*` **180**、`LDS` 316。
+  - **改动（单/两文件 device 逐字一致，`sync_onefile_device.py` `identical: True`）**：4 个 LSE kernel
+    的 epilogue 从「逐元素 online-softmax」改成 **tile 内两趟**——① 第一趟算本 lane 各 `s` 的列 max
+    （顺手把掩码后的 `sv` 写回累加器数组）；② `mn=max(mrow,mloc)`，第二趟 `Σexp(sv-mn)`+一次 rescale。
+    **数学等价、只换 fp32 求和次序**。`fexp` 64→34、去逐元素分支。覆盖 `lse_mma_kernel_bal_tma`
+    （D=128 定长 causal，默认）、`_bal_wgmma`（varlen D=128 / `--lsetma=0`）、`_bal`（D=512 MLA /
+    `sm_90` 回退，含 `FULL`/`MTN`）。顺带把 TMA LSE 的 `int kuse[2]`（运行期动态下标 → **local
+    memory**，同 F3-a 在 main 修的坑）改两标量 `kuse0/kuse1`。
+  - **数值**：LSE 只差 ~1e-7（fp32 求和次序），经 fp8 量化边界使 dq/dk/dv 相对旧实现偏移 ~1e-3
+    （≪ fp8 对拍误差 0.26）；**vs ref / vs TE 与历史打印位一致**（S512 2.426/2.972/3.733e-1、S4096
+    2.635/2.644/3.216e-1、GQA kv4 2.517/5.339/7.173e-1、MLA 2.232/3.337/3.602e-1、varlen b1
+    2.280/3.108/3.422e-1）；单/两文件 gate **worst=1.335e-5（tol 1e-4）OK**、`--check docs/04` OK 194 行。
+  - **性能（同 session，event，OLD vs NEW）**：**LSE 201.25→120.29µs（1.67×）、指令
+    141.0M→86.4M（−38.7%）、local 扇区 532k/598k→0**；**preprocess** S512 0.0188→0.0156（1.21×）、
+    S1024H32 0.0513→0.0396（1.30×）、kv4 0.0499→0.0371（1.34×）、**S4096 0.2155→0.1378（1.56×）**；
+    **端到端** S512 1.034×、S1024H32 1.037×、kv4 1.042×、**S4096 1.8876→1.8172ms（75.63 TF，
+    1.039×）**；varlen D128 b1 1.023× / b4 1.040×、MLA varlen 1.011×；main 持平。
+  - **对标**（同 session 纯反向 `fa_bwd_bench.py bench --dtype fp8`）：TE FP8 S512 0.0357ms/120.3TF、
+    S4096 0.3003ms/915TF ⇒ ours total（含 quant+preprocess+main）**2.74× / 6.05×**（F1 时 2.83×/6.43×）。
+  - **回归**：全量 `python3 harness/fa_bwd_run.py --ci` 73 case 全绿（fp16 7.812e-3 / bf16 7.812e-3 /
+    fp8 1.335e-5，`--check docs/04` OK 194 行）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_f5_lse2pass_ab.out.txt`（8 shape×OLD/NEW）、
+    `..._f5_ncu_lse_s4096.out.txt`（LSE OLD/NEW 全指标）、`..._f5_te_baseline_fp8.out.txt`；
+    文档 `docs/03` §71、`docs/08` §5.51、`docs/00` §4.2。
+  - **下一步候选**：① main 仍是 81% 的墙（F4 默认路径 L2 `red` / 改工作划分，见「阻塞」）；
+    ② quant/delta/convert 已近 DRAM 带宽，F5 收口；③ F4 DET 路径可再压 partial 字节。
 
 ## 灵感 / backlog
 

@@ -1,0 +1,28 @@
+### F5/O63: fp8 LSE (lse_mma_kernel_bal_tma) OLD vs NEW — ncu S=4096, launch-count 1
+### Tue Sep 29 06:05:13 PM CST 2026
+
+===================== OLD (/tmp/fp8main_hp.out) =====================
+    Metric Name                                           Metric Unit Metric Value
+    ------------------------------------------------- --------------- ------------
+    gpu__time_duration.sum                                         us       201.25
+    l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum              sector       532480
+    l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum              sector       598016
+    launch__registers_per_thread                      register/thread           59
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                %        73.73
+    sm__warps_active.avg.pct_of_peak_sustained_active               %        42.19
+    smsp__inst_executed.sum                                      inst    140994592
+    ------------------------------------------------- --------------- ------------
+
+
+===================== NEW (/tmp/fp8main_hp_new2.out) =====================
+    Metric Name                                           Metric Unit Metric Value
+    ------------------------------------------------- --------------- ------------
+    gpu__time_duration.sum                                         us       120.29
+    l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum              sector            0
+    l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum              sector            0
+    launch__registers_per_thread                      register/thread           59
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                %        75.73
+    sm__warps_active.avg.pct_of_peak_sustained_active               %        41.69
+    smsp__inst_executed.sum                                      inst     86441386
+    ------------------------------------------------- --------------- ------------
+

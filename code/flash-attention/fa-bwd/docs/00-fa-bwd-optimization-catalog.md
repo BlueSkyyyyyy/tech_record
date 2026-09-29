@@ -217,7 +217,17 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
     ⇒ 仍确定性）；HD=512 成立因 `c0=wc*GN34`（4-N-tile 的 `GN34=32`）是 16 的倍数。**DET-fp32→
     fp16 端到端 1.06–1.11×（大 varlen ksplit=4 1.20×）**、`runs[1-2]` 逐位=0、`fp16-vs-fp32`
     ~1e-3、`ours-vs-ref` 不变；ncu store 扇区在 MLA（2.228M→1.114M）与 varlen（1.180M→0.590M）
-    **精确减半**。见 `docs/03` §69、`docs/08` §5.49。
+     **精确减半**。见 `docs/03` §69、`docs/08` §5.49。
+     → **fp8 LSE 的 tile 内两趟 softmax + mbarrier 相位去 local（F5，第一百三十六轮，正结果/默认化）**：
+     preprocess 的 LSE（`lse_mma_kernel_bal_tma`）是纯 issue-bound（Ipc 3.09、Issue 73.6%）。旧
+     epilogue 是「逐元素 online-softmax」：每元素 2 个 `fexp`（其中一次恒为 `exp(0)`）+ 逐元素
+     `if (sv != -INF)` 分支（SASS 每 tile 64 MUFU + 214 BSSY/BSYNC + 180 FSETP）。改成
+     **先求本 lane 列 max、再统一 rescale+exp**（数学等价、只换 fp32 求和次序）：`fexp` 64→34、
+     去逐元素分支；顺带把 `int kuse[2]`（运行期动态下标 → **local memory**）改两标量（同 F3-a 的坑）。
+     **LSE 201→120µs（1.67×）、指令 141.0M→86.4M（−38.7%）、local 扇区→0**；**preprocess
+     1.21–1.56×（S4096 0.216→0.138）**、端到端 **1.03–1.04×**（S4096 1.888→1.817ms/75.6TF）；
+     vs-ref/TE 打印位一致、单两文件 gate 1.335e-5 OK、`--check docs/04` OK。见 `docs/03` §71、
+     `docs/08` §5.51。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 
