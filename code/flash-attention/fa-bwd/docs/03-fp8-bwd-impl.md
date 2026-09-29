@@ -6914,3 +6914,75 @@ ARCH="" NVCC_FLAGS="$FLAGS" scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu \
 原始输出：`src/fp8/fa_bwd_fp8_p139_ksplit_sweep.out.txt`、
 `..._p139_ncu_main_ks8_s4096.out.txt`、`..._p139_ncu_main_ks1_s4096.out.txt`、
 `..._p139_ncu_wg2_bm128_s4096.out.txt`、`..._p139_ncu_lse_s4096.out.txt`。
+
+---
+
+## 75. 第 140 轮：F6 第一步——双 warpgroup（256 线程）fp8 wgmma 冒烟（BM=128 几何钉死）
+
+### 75.1 动机（落实 §74.7 / ROADMAP『fp8 专项冲刺』F6）
+
+第 139 轮把默认 fp8 main 的「唯一真杠杆」钉死为 **dK/dV 跨 CTA 的 L2 `red`**（~104M 扇区，
+占 `red` 90%、L2 流量 ~67%），且判决只有 **BM 64→128**（让每个 KV 元素被一半 CTA 贡献）
+能从根上砍半。已有 `fa_bwd_fp8_wg2_kernel<128>`（BM=128、2 warpgroup、mma + `cp.async`）
+**确实把 `red` 砍半（58.2M）**，却是 **217 regs / 131.33KB smem → 1 CTA/SM**、L2 仅 20.4%、
+慢 0.53×（延迟/occupancy bound）。ROADMAP 判定的解法是「**双 warpgroup + TMA + wgmma**」：
+用 Hopper 原语把寄存器/指令压下来。F6 是一条大改，本轮先把其中最不确定、也最不可复用的一块
+**单独冒烟钉死**：在 **256 线程（2 个 warpgroup）** 的 CTA 里，用 K-major SW128 描述符跑
+fp8 `wgmma.m64n64k32`，每个 warpgroup 各算 BM=128 的一半（64 行）。
+
+### 75.2 冒烟内容（`src/fp8/fa_bwd_fp8_wgmma2_smoke.cu`）
+
+最小 GEMM，输入取 `{-3..3}` 整数（e4m3 的 3 位尾数、e5m2 的 2 位尾数都能**精确**表示，
+CPU 参考无需 host 反量化，避开 kernel-opt 32 篇的 fp8 转换坑）：
+
+- **GEMM1** `S = Q·Kᵀ`：`Q[128][128]` e4m3、`K[64][128]` e4m3，K 归约维 = HD = 128 = 4×k32；
+- **GEMM2** `dP = dO·Vᵀ`：`dO[128][128]` e5m2、`V[64][128]` e4m3；
+- 2 个 warpgroup 各发自己的 `wgmma`：第 2 个 WG 的 A 描述符基址按 `(64 行/8)×atom(1024B)
+  = 8192B` 偏移；accumulator epilogue 用 `row = wg*64 + wl*16 + g + (q≥2?8:0)`、
+  `col = j*8 + 2*(lane%4) + (q&1)`。
+
+### 75.3 结果（原始输出 `src/fp8/fa_bwd_fp8_wgmma2_smoke.out.txt`）
+
+```
+wgmma2(2 WG) GEMM1 S=QKᵀ  e4m3×e4m3  BM=128 vs CPU: max_abs=0.000e+00
+wgmma2(2 WG) GEMM2 dP=dO·Vᵀ e5m2×e4m3 BM=128 vs CPU: max_abs=0.000e+00
+PASS
+```
+
+SASS（`..._sass.out.txt`，`cuobjdump -sass` opcode 直方图）：**4×`QGMMA.64x64x32.F32.E4M3.E4M3`
++ 4×`QGMMA.64x64x32.F32.E5M2.E4M3`，无 HMMA / 无 LDSM**——两个 warpgroup 各自完整走完归约维
+（128/32 = 4 步），且都落在 Hopper `wgmma` 指令上。
+
+ncu（`..._ncu.out.txt`，`--set full`，单 CTA）：**90 regs**、smem 49.15KB、`Block Limit
+Registers=2`、`Block Limit Shared Mem=2`、achieved occ 12.24%。⇒ **wgmma 版 GEMM1/2 的寄存器
+压力远低于 wg2 的 217**（关键 F6 论据：wgmma 省掉 `ldmatrix` 与全局地址寄存器）。
+
+### 75.4 F6 的剩余工作量与资源账（下一步）
+
+冒烟只证明「双 WG wgmma 几何成立」，真正的 F6 kernel 还要：
+1. **Q/K/V/dO 走 4D-TMA + SW128**（复用 O32/O37/O41 的描述符与 mbarrier 基建，已在
+   `lse_mma_kernel_bal_tma` / `fp8_mma_body<...,TMA>` 验证），去掉 wg2 的逐元素全局读与
+   `Qp/dOp/Kp` 的寄存器构造；
+2. **GEMM1/2 换 wgmma（K-major）**；3/4/5 仍用 `mma.m16n8k32`（fp8 `SS_TN` asm 无
+   `tnspA/tnspB`，见 §73 阻塞，转置读不可用）；
+3. **smem 必须压到 ≤116,224B 且 regs ≤128** 才能 2 CTA/SM：wg2 现 131.33KB（超 15.1KB）、
+   217 regs（超 89）。冒烟显示「wgmma GEMM1/2」本身只要 90 regs，缺口主要在
+   `dqacc[2][8][4]`(64) + fold/pair 构造 + 3/4/5 的 mma epilogue；TMA 化 Q/dO（去掉
+   `Qp/dOp` 的寄存器构造）与「Ps/Ss 二选一驻留」是两条待试的具体路径。
+
+`red` 的账不变：BM=128 ⇒ 每 KV 元素贡献 CTA 数减半 ⇒ `red` 从 114.5M 砍到 ~58M，
+若同时靠 TMA+wgmma 把 occupancy 从 1 拉到 2 CTA/SM、L2 从 20.4% 拉回 ~50%，即可兑现 F6。
+
+### 75.5 复现 / 原始输出
+
+```bash
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_wgmma2_smoke.cu
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a" \
+  scripts/ncu.sh src/fp8/fa_bwd_fp8_wgmma2_smoke.cu --set full \
+  --kernel-name regex:wgmma2_smoke --launch-count 1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_wgmma2_smoke.out.txt`、`..._sass.out.txt`、`..._ncu.out.txt`。
+回归：`harness/fa_bwd_run.py --ci --dtype fp8 --fixed-only` **rc=0**（gate worst=7.629e-06、
+`--check docs/04` OK 194 行），默认路径一行未改（原始输出 `src/fp8/fa_bwd_fp8_p140_ci_fixed.out.txt`）。
