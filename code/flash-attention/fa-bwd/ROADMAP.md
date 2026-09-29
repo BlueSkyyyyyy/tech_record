@@ -196,6 +196,11 @@
 
 ## 阻塞
 
+- **F3（fp8 warp specialization）在 3 CTA/SM 的资源约束下不成立（第一百三十五轮评估收口）。**
+  ncu 对标 TE 证明：ours 默认 fp8 main 的 **L2 搬运量 ≈ TE 的 6.9×**（`Duration×L2%`，因 3 CTA/SM
+  的 74.8KB smem 限制下靠 ksplit=8 凑并行度 ⇒ Q/dO 重读 + dK/dV `red`）。WS 只能*重叠*、不能*减少*
+  这笔量（O48 判据不满足）；更深 mbarrier 流水被 74.8↔77.5KB 硬间隙锁死（与下条跨-tile `P/dS`
+  双缓冲同因）。真杠杆是 **F4（减 L2 `red`）/ 改工作划分（dK/dV-over-KV）**。详见 `docs/03` §70。
 - **fp8 主 kernel 的「跨-tile `P/dS` 双缓冲软流水」在本卡 3 CTA/SM 下不可行（第一百一十七轮精确核算）。**
   该流水是当前唯一能直接打 `wait 1.59 + short_scoreboard 1.29` 的方向：把 GEMM3/4/5(nt) 与
   fold(nt) 同 GEMM1/2(nt+1) 的 wgmma 重叠，需要**同时存活两份** `Ps/Ss`（各 `BM*PSS*4`，PSS=BN+5=37
@@ -2687,7 +2692,14 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       补全需等 F3/F4 的非 wgmma 手段。详见 `docs/03` §67、`docs/08` §5.47、`docs/04` 表。
 - [x] **F2** Q/dO 也上 **4D TMA**（K/V 已在 O41）
       → 实际早在 **O37** 完成、并在 F1 默认化里生效（`qd-tma=on`），此处标注为已覆盖。
-- [ ] **F3** **warp specialization / 更深 mbarrier 流水**（对标 TE 384 线程、1 CTA/SM）
+- [~] **F3** **warp specialization / 更深 mbarrier 流水**（对标 TE 384 线程、1 CTA/SM）
+      → **评估已完成（第一百三十五轮 F3-a）**：ncu 对标 TE（384 线程/132 CTA/1 CTA/SM/232KB smem，
+      258µs）——**两者都 L2 bound，但 ours 的 L2 搬运量 ≈ TE 的 6.9×**（`Duration×L2%`，因 3 CTA/SM
+      的 smem 限制靠 ksplit=8 凑并行度 ⇒ Q/dO 重读 + dK/dV 跨 CTA `red`）。**WS 只能重叠不能减少
+      这笔 L2 流量**（O48 判据不满足）、更深流水被 3 CTA/SM 的 74.8↔77.5KB 硬间隙锁死 ⇒ **F3 不是
+      最优点，真杠杆是 F4 / 改工作划分（dK/dV-over-KV）**。评估中顺带修一个正结果小优化：主 kernel
+      `int kuse[2]`（运行期 `stg^1` 动态下标 → **local memory**）改两标量，local 扇区 ld/st
+      7.33/8.48M→**5.84/5.67M**、main S4096 **~2%↑**、数值逐位不变。详见 `docs/03` §70、`docs/08` §5.50。
 - [~] **F4** dK/dV 归约（L2 red；fp8 天花板实验显示占 ~35%）
       → **第一步已完成（第一百三十三轮）**：把 fp16/bf16 O60+O62 的「partial 降精度 + 写扇区化」
       逐字搬到 fp8 的 `--det` 路径（`DET_HALF`/`P16`）。S4096 DET-fp32→fp16 **1.17×**、相对
@@ -2705,7 +2717,26 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百三十四轮）**：**F4-b——把 fp16 partial + 写扇区化扩到 fp8 的 MLA 与 varlen DET**
+> **最新（第一百三十五轮）**：**F3-a——fp8 主 kernel 去 local 化 + F3（WS）可行性评估**
+> （正结果（微优化）+ 评估结论）。先按 O48 判据做 ncu/SOL 对标：TE（384 线程/132 CTA/1 CTA/SM/
+> 232KB smem，258µs）vs ours（128 线程/8192 CTA/3 CTA/SM/74.8KB，1.61ms）——**两者都 L2 bound，
+> 但 ours 的 L2 搬运量 ≈ TE 的 6.9×**（`Duration×L2%`），根源是 3 CTA/SM 的 smem 限制下靠 ksplit=8
+> 凑并行度（Q/dO 重读 + dK/dV 跨 CTA `red`）。**判决：WS 只能重叠不能减少 L2 流量（F3 不是最优点）、
+> 更深流水被 3 CTA/SM 的 74.8↔77.5KB 硬间隙锁死。**评估中定位并修掉默认 kernel 的
+> `int kuse[2]`（运行期 `stg^1` 动态下标 → local memory，同 kernel-opt 坑）：local 扇区
+> `op_ld/st` **7.33/8.48M→5.84/5.67M（−20%/−33%）**；**main S4096 6 次交替 1.588→1.557ms
+> （~2%↑）**、端到端 1.9285→**1.8969ms（72.46 TF）**、S512/GQA 1.8–2.4%、MLA 0.6%；数值**逐位不变**
+> （S512 2.426/2.972/3.733e-1、S4096 2.635/2.644/3.216e-1、GQA 2.517/5.339/7.173e-1、MLA
+> 2.232/3.337/3.602e-1）、单/两文件 gate **worst=6.676e-6** OK、`--check docs/04` rc=0。
+> 剩余 local 是默认 `REGDQ` 实例 168-reg 硬墙下的 60B spill（寄存器粒度 8 ⇒ 封顶 168）。
+> 详见「当前进度 第一百三十五轮」、`docs/03` §70、`docs/08` §5.50；原始输出
+> `src/fp8/fa_bwd_fp8_p135_*`、`..._f3_te_ncu_s4096.out.txt`。
+> **下一步候选**：① **F4（减默认路径 L2 `red`）才是真杠杆**——本轮证明 ours 的 L2 搬运量是 TE 的
+> ~6.9×，WS/流水改不了量；可走 FA2 式「dK/dV 按 KV 并行」分块（backlog，工程量大）或继续 DET 降字节；
+> ② F3 的 WS 在 3 CTA/SM 资源约束下不成立（评估已收口）；③ 默认 `REGDQ` 实例的 60B spill 是剩余
+> local，除非改工作点；④ F5（preprocess）非当前墙。
+>
+> **（第一百三十四轮）**：**F4-b——把 fp16 partial + 写扇区化扩到 fp8 的 MLA 与 varlen DET**
 > （正结果（DET 路径），opt-in `--det`；落实 `docs/03` §68.6 候选 ③）。两个 varlen 归约内核加
 > `bool P16`（按 `dkv_p16_perm` 读回 fp16，求和集合/次序不变 ⇒ 仍确定性）；host 给定长 MLA /
 > varlen D=128 / varlen MLA 三处 DET A/B 各加 `run_dth`。**HD=512 成立**：`dkv_p16_perm` 只在
@@ -5104,8 +5135,40 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     `--consistency` OK worst 1.562e-2、`--check docs/04` OK 194 行。**默认路径 L2 `red`（114.5M
     扇区）仍被 O42 双硬约束锁定。** 详见 `docs/03` §69、`docs/08` §5.49；原始输出
     `src/fp8/fa_bwd_fp8_p134_f4b_*`、`..._p134_ncu_{mla,varlen}_det_sectors.out.txt`。
-  - **下一步候选**：① **F3（warp specialization / 更深 mbarrier 流水）**；② F4 默认路径 red（阻塞）；
-    ③ fp8 DET 转正需再减 partial 字节或提 reduce 效率；④ F5（preprocess）非当前墙。
+   - **下一步候选**：① **F3（warp specialization / 更深 mbarrier 流水）**；② F4 默认路径 red（阻塞）；
+     ③ fp8 DET 转正需再减 partial 字节或提 reduce 效率；④ F5（preprocess）非当前墙。
+
+- 2026-09-29（第一百三十五轮）：**F3-a 完成（fp8 主 kernel 去 local 化 + F3（WS）可行性评估；
+  正结果（微优化）+ 评估结论）**——落实『fp8 专项冲刺』F3，先按 O48 判据评估再决定是否动手。
+  - **对标（ncu，S=4096 causal）**：TE `..._flash_bprop_wgmma_f8_...` = 384 线程/132 CTA/
+    **1 CTA/SM/232.45KB smem**/168 regs、Duration **258µs**、L2 70.95%/L1 58.84%/DRAM 18.27%/
+    Compute 45.0%/Executed 108.3M；ours 默认 `fa_bwd_fp8_mma_kvtma_kernel` = 128 线程/grid 8192
+    （ksplit=8）/**3 CTA/SM/74.82KB**/168 regs、Duration **1.61ms**、L2 77.94%/L1 70.43%/DRAM 4.27%/
+    Compute 46.9%/Executed 719.2M。**两者都 L2 bound，但 ours 的 L2 搬运量 ≈ TE 的 6.9×**
+    （`Duration×L2%`）——根源：ours 受 3 CTA/SM 的 smem 限制，靠 ksplit=8 凑并行度 ⇒ Q/dO 重读 +
+    dK/dV 跨 CTA `red`（114.5M 扇区）。**判决：WS 只能*重叠*不能*减少*这笔 L2 流量（O48 判据不满足）、
+    更深流水被 3 CTA/SM 的 74.8↔77.5KB 硬间隙锁死 ⇒ F3 不是最优点，真杠杆是 F4 / 改工作划分
+    （dK/dV-over-KV）。**
+  - **正结果（评估顺带定位并修掉）**：ncu 报默认 kernel **local memory 占 L1TEX 扇区 18.29%**
+    （占 L2 扇区 7.61%）。定位到 `fp8_mma_body` 的 mbarrier 相位计数器 `int kuse[2] = {0,0}`
+    按**运行期** `kuse[stg ^ 1]` 动态下标 ⇒ ptxas 落 **local memory**（8B 栈帧 + 每 tile `LDL/STL`，
+    同 kernel-opt「mbarrier 相位别用动态下标数组」坑）。改两标量 `kuse0/kuse1` + 运行期三元选择，
+    **逐位语义不变**；`-Xptxas -v` 的 8B stack 消失，KVTMA 路径不再有动态下标数组。
+  - **ncu**：默认实例 `<128,64,32,1,1,1,1,0,0>` local `op_ld` 扇区 **7.33M→5.84M**、
+    `op_st` **8.48M→5.67M（−20%/−33%）**、Duration 1.59→**1.58ms**。剩余 local 是默认 `REGDQ`
+    实例的**寄存器 spill**（168 regs 下 48B stack/60B spill；`floor(65536/(3×128))=170` 但寄存器
+    分配粒度 8 ⇒ 封顶 168，**硬墙**）。
+  - **性能（同 binary、同 session，event，6 次交替）**：main base 均值 **1.588ms** → new
+    **1.557ms（1.9–2.0%↑）**；端到端 S4096 total 1.9285→**1.8969ms（1.6%↑，72.46 TF）**；
+    逐 shape（main）：S512 0.0560→**0.0547**、GQA kv4 0.2539→**0.2494（1.8%）**、
+    MLA d512 0.1201→**0.1194**、S1024H32 中性。
+  - **数值**：与历史**逐位相同**（S512 2.426/2.972/3.733e-1；S4096 2.635/2.644/3.216e-1；
+    GQA kv4 2.517/5.339/7.173e-1；MLA 2.232/3.337/3.602e-1）；`--dtype fp8 --fixed-only --ci`
+    单/两文件一致性 gate **worst=6.676e-6（tol 1e-4）OK**、`--check docs/04` rc=0。
+  - 原始输出 `src/fp8/fa_bwd_fp8_p135_ab.out.txt`、`..._p135_ncu_local.out.txt`、
+    `..._f3_te_ncu_s4096.out.txt`；文档 `docs/03` §70、`docs/08` §5.50。
+  - **下一步候选**：① 默认路径 L2 `red`（F4）才是真杠杆（本轮证明 L2 量是 TE 的 6.9×，
+    WS 改不了量）；② F3 的 WS 在 3 CTA/SM 约束下不成立（评估收口）；③ 剩余 spill / F5 非当前墙。
 
 ## 灵感 / backlog
 
