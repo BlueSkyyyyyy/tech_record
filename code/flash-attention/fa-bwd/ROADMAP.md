@@ -2664,6 +2664,28 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 - [x] FA3（SM90）编译并三方对比：**FA3 > TE > FA2**（详见 docs/06）：GQA/MQA FA3 355–438TF vs TE 307–356TF；MHA S4096 FA3 850TF vs TE 618TF。
 - [ ] 后续：ours 对标升级为 Hopper 路线（O5 mma → O9 wgmma+TMA）；GQA KV 归约放进 kernel。
 
+## fp8 专项冲刺：用 SASS/PTX 对标 TE（当前最高优先）
+
+**指令级对标（已实测，S=4096 causal）**：
+
+| | kernel | SASS | 其它 | main 时间 |
+|---|---|---|---|---|
+| **TE** | `cudnn_generated_..._flash_bprop_wgmma_f8_knob_26_64x64x128_1x4x1_cga1x1x1` | **QGMMA(fp8 wgmma) + UTMA?(TMA) + WARPGROUP** | tile 64x64x128，384 线程，grid=132(1 CTA/SM) | **258 µs** |
+| **ours** | `fa_bwd_fp8_mma_kernel` | **HMMA.16816.F32 + LDSM（mma.sync，无 TMA）** | — | ~1.9 ms（慢 ~7×） |
+
+结论：**ours fp8 默认仍在 SM80 的 mma.sync 路径**；核心动作 = 把 fp8 main 切到 **wgmma(fp8)+TMA** 路径，
+再对齐 TE 的 1 CTA/SM + warp specialization + 深流水。工具：`harness/te_fp8_ncu.py`（TE fp8 反向 ncu 驱动）、
+`ncu --page source --print-source sass`、`--kernel-name-base mangled`。
+
+**任务（按序）**：
+- [ ] **F1** fp8 main 默认走 **wgmma**（补全 O9c 的 GEMM3/4/5、默认开启），数值逐位/容差不变
+- [ ] **F2** Q/dO 也上 **4D TMA**（K/V 已在 O41）
+- [ ] **F3** **warp specialization / 更深 mbarrier 流水**（对标 TE 384 线程、1 CTA/SM）
+- [ ] **F4** dK/dV 归约（L2 red；fp8 天花板实验显示占 ~35%）
+- [ ] **F5** preprocess 继续提速
+> 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
+> 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
+
 ## 下一步（明确到可执行）
 
 > **最新（第一百三十轮）**：**O61——把 fp16 的确定性 `--det` + partial 降精度逐字 dtype

@@ -1,0 +1,9 @@
+### b1_s512_h16_d128_causal_fp8
+[timing] total(quant+pre+main+cvt) 0.1136 ms  18.91 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0150 ms | preprocess 0.0233 ms | main 0.0628 ms | convert 0.0124 ms (cvt_on=0)
+### b1_s1024_h32_d128_causal_fp8
+[timing] total(quant+pre+main+cvt) 0.4736 ms  36.28 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0415 ms | preprocess 0.0808 ms | main 0.3203 ms | convert 0.0310 ms (cvt_on=0)
+### b1_s4096_h16_d128_causal_fp8
+[timing] total(quant+pre+main+cvt) 2.3938 ms  57.41 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0695 ms | preprocess 0.3828 ms | main 1.9022 ms | convert 0.0393 ms (cvt_on=0)
