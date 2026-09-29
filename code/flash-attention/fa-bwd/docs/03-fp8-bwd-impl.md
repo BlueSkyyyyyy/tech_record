@@ -7238,3 +7238,84 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
 原始输出 `src/fp8/fa_bwd_fp8_o64_{fixed_s512,fixed_s1024h32,fixed_gqa_kv4,fixed_s4096,onefile_s512,
 varlen_b1t512,onefile_varlen_b1t512,varlen_b4t3840}.out.txt`、`..._o64_ncu_{quantzero,quantold}_s1024h32.out.txt`、
 `..._o64_nsys_s1024h32.out.txt`。
+
+---
+
+## 79. O66（第一百四十六轮，**正结果，默认化**）：fp8 把 delta 融进「量化 + 清零」单 launch
+
+### 79.1 动机与现状
+
+O64（§78）已把「4 次输入量化 + 3 次累加缓冲清零」并成 1 个 `quantize_zero_warp_kernel`，但
+**delta（`D = rowsum(dO∘O)`）仍是紧接着的一次独立 launch**（`delta_warp_kernel`，O26）。
+delta 恰好只依赖 **dO 与 O** 两项、且是**逐 query 行的归约**——与 dO 的 rowwise 量化同一数据域、
+同一 warp-per-row 几何。背景：F1→F6 收口后默认 fp8 main 受本卡寄存器/smem 硬墙锁定（见 ROADMAP
+「阻塞」），本轮的既定路线是继续清**非 main 固定开销**（继 O64 后的下一小步）。
+
+### 79.2 实现（单/两文件 device 逐字同源，`sync_onefile_device.py` 核对 `identical: True`）
+
+- **device（`fa_bwd_fp8_kernels.cuh`）**：新增 `quant_delta_row_warp<VPT>`——把 O26 的
+  `delta_warp_kernel` 的「读 O(fp32)+dO(e5m2)、行点积、`__shfl_xor_sync` 树」逻辑**并进 dO 的
+  量化任务**：量化时 `v[]` 已在寄存器里，量化后直接用 `deq_e5m2(cvt_e5m2(v/s))·s` 与同步读入的
+  `O` 行做点积，一次 `scale[row]`/`delta[row]` 写回。新增 `quantize_zero_delta_warp_kernel<VPT>`
+  = O64 版任务序**逐字相同**，只把 dO 那一档换成 `quant_delta_row_warp`（多 2 个入参 `o`/`delta`）。
+- **为什么必须耦合、不能「追加 delta 任务」**：同一 launch 内各 warp 任务无跨 warp 同步，若把 delta
+  作为**独立任务**读 `do8`，会与 dO 量化任务产生读后写竞争。耦合在同一 warp 内（量化后立即用它
+  寄存器里的值算 delta）天然无竞争。
+- **数值逐位不变的证明**：lane 的累加顺序同为「`t` 外层（元素 `t*128+lane*4`）、float4 内
+  `x/y/z/w` 内层」，随后同一 `__shfl_xor_sync` 树；`s == dos[row]`、`cvt/deq` 与量化/delta 现用
+  函数逐字一致。A/B 实测 `max_abs(delta fused-vs-separate) = 0.000e+00`（所有 shape）。
+- **host（`fa_bwd_fp8_main.cu` / 单文件 host）**：新增 `--dfuse=`（默认 1，需 `qfuse=1` 且
+  `delta_warp_sel`）；定长 `run_all` 与 varlen `run_all` 在融合时调 `quant_zero_delta()`、并让
+  `run_preprocess(!fused_delta)` 跳过独立 delta launch；新增 `[O66 A/B]`（同 binary 端到端 +
+  delta 缓冲逐位校验）。`--dfuse=0` 退回 O64+独立 delta 做同 session A/B。
+
+### 79.3 数值：与历史**逐位相同**
+
+`ours vs fp32 ref`（fp8，causal）与 O4b/O7/O64 历史完全一致：S512 `2.426/2.972/3.733e-1`、
+S1024H32 `2.399/4.177/3.535e-1`、S4096 `2.635/2.644/3.216e-1`、MLA S1024H2 `2.232/3.337/3.602e-1`；
+varlen D128 b1_t512 `2.280/3.108/3.422e-1`、varlen MLA b3 `3.404/3.436/3.508e-1`。
+`--ci --dtype fp8`（定长 + varlen）**全绿**：一致性 gate `worst = 9.537e-06`（tol 1e-4）、
+`--check docs/04` OK 194 行；`delta fused-vs-separate` 全部 `0.000e+00`。
+
+### 79.4 性能（同 binary `[O66 A/B]`，CUDA event）
+
+| shape（fp8 causal） | delta 独立 (ms) | **delta 融合 (ms)** | 加速 | delta 逐位差 |
+|---|---|---|---|---|
+| S512 MHA（两文件） | 0.0847 | **0.0809** | **1.047×** | 0 |
+| S512 MHA（单文件） | 0.0849 | **0.0809** | **1.049×** | 0 |
+| S1024H32 | 0.3519 | **0.3434** | **1.025×** | 0 |
+| S4096 | 1.7872 | **1.7828** | **1.003×** | 0 |
+| MLA S1024H2（D=512） | 0.1642 | **0.1608** | **1.021×** | 0 |
+| varlen D128 b1_t512（`--dfuse=1/0`） | 0.0934 | **0.0902** | **1.036×** | 0 |
+
+即端到端 **1.003–1.049×**，**小/中 shape 收益最大**（launch 与尾波占比高）、大 S 边际——与
+O64/O65 的规律一致：**融合只值「省一次小 launch」**。`[timing]` 分解显示 delta 的字节被并进
+quant（quant 略升、preprocess 等量下降），净省的是 `delta_warp_kernel` 的 launch 与尾波。
+
+### 79.5 ncu（融合 kernel，S1024H32）
+
+`quantize_zero_delta_warp_kernel<4>`：**Duration 50.85µs、DRAM 76.3%（旧单 quant 58%）、L2 84.7%、
+SM 61.8%、31 regs**（O64 版 27 regs）⇒ 仍是 **DRAM/L2 带宽 bound**，融合后 delta 的 O 读被
+DRAM 流水吸收、未新增明显尾延迟。
+
+### 79.6 结论 / 复现
+
+**fp8 非 main 固定开销的「小 launch 融合」至此收口**：7 类任务 + delta 现在是**一次** launch。
+零风险默认化（数值逐位不变）。剩余墙仍是默认 fp8 main 的 L2 `red`（受本卡寄存器/smem 硬墙锁定，
+见 ROADMAP「阻塞」）。
+
+```bash
+# 定长（Hopper 快路）一键 + 汇总 + 一致性 + docs/04 校验
+python3 harness/fa_bwd_run.py --dtype fp8 --fixed-only
+python3 harness/fa_bwd_run.py --no-run --ci
+# 同 binary A/B：加 --dfuse=0
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=.../b1_s1024_h32_d128_causal_fp8 --iters=50 [--dfuse=0]
+# varlen（wgmma 构建）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --varlen --dir=.../varlen_b1_t512_h16_d128_causal_fp8
+```
+
+原始输出 `src/fp8/fa_bwd_fp8_o66_{main_s512,main_s1024_h32,main_s4096,main_mla_s1024h2,onefile_s512,
+varlen_b1_t512,varlen_b1_t512_dfuse0,varlen_b3_d512}.out.txt`、`..._o66_ncu_quant_s1024h32.out.txt`、
+`..._o66_ci_{fixed,full}.out.txt`。

@@ -985,3 +985,23 @@ smem 冲突 + 低 occ
   （fp16/bf16「无 quant，仅剩 memset/convert」）。详见 `docs/01` §20、`docs/01b` §6aw；
   原始输出 `src/fp16/fa_bwd_fp16_o65_ab.out.txt`、`..._o65_ncu_s{512,4096}.out.txt`、
   `src/bf16/fa_bwd_bf16_o65_ab.out.txt`。
+
+### 5.60 O66：fp8 把 delta 融进「量化 + 清零」单 launch（第一百四十六轮，正结果，默认）
+
+- **背景**：O64（§5.58）把 fp8 的「4 次量化 + 3 次清零」并成 1 个 `quantize_zero_warp_kernel`，
+  但 `delta`（`D=rowsum(dO∘O)`）仍是紧随的一次独立 `delta_warp_kernel` launch。delta 只依赖
+  dO/O 且是逐 query 行归约——与 dO 的 rowwise 量化同一域、同一 warp-per-row 几何。
+- **做了什么**：新增 `quant_delta_row_warp<VPT>`（量化 dO 时，用寄存器里的 dO 值与同步读入的 O 行
+  顺便算 delta）与 `quantize_zero_delta_warp_kernel<VPT>`（O64 任务序逐字相同，dO 档换成融合版）；
+  host `--dfuse=`（默认 1）在 `run_all` 调融合 kernel、让 `run_preprocess(false)` 跳过独立 delta。
+  **关键正确性点**：delta 必须**耦合进 dO 的量化任务**（同一 warp 内），不能作独立任务——同一
+  launch 内无跨 warp 同步，独立任务读 `do8` 会与量化写竞争。数值逐位不变（`max_abs=0.000e+00`）。
+- **结果**（同 binary `[O66 A/B]`，event）：S512 **1.047×**、S1024H32 **1.025×**、MLA S1024H2
+  **1.021×**、varlen D128 b1_t512 **1.036×**、S4096 **1.003×**；数值 vs ref 与历史逐位一致
+  （S4096 `2.635/2.644/3.216e-1`）、`--ci --dtype fp8`（定长+varlen）全绿（gate worst 9.537e-06）、
+  `--check docs/04` OK 194 行。ncu 融合 kernel S1024H32 `Duration 50.85µs / DRAM 76.3% / L2 84.7%
+  / 31 regs` ⇒ 仍 DRAM/L2 带宽 bound。
+- **教训**：继 O64/O65 之后再次印证——**「小 launch 融合」只值「省一次尾部小 kernel 的 launch 与
+  尾波」**，故小/中 shape 有 2–5%、大 S 边际；但把依赖同一数据域的逐行归约（delta）并进量化任务
+  几乎零成本（只多 O 的读，被 DRAM 流水吸收）。**fp8 非 main 固定开销的融合至此收口。**
+  详见 `docs/03` §79；原始输出 `src/fp8/fa_bwd_fp8_o66_*`。
