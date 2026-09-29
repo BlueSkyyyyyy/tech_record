@@ -242,7 +242,15 @@ def main():
         # F1/F8：fp8/fp16/bf16 定长默认走 Hopper（wgmma+TMA）；`--mma` 或 `--hopper`（全局前缀）时退回/统一。
         hopper_default = (dt in HOPPER_DEFAULT_DTYPES and not is_varlen
                           and not args.mma and not args.hopper)
-        build_env = ({"ARCH": "", "NVCC_FLAGS": HOPPER_FLAGS} if hopper_default else BUILD[cfg])
+        # O72（第 166 轮）：**fp8 varlen 也默认走 TMA 构建**——varlen full D=128 的 LSE 接到
+        # 定长 O70 同款 4D-TMA（`--lsetmavarlen=0` 退回 cp.async 版做同 binary A/B）。主 kernel
+        # 仍走 `launch_bwd_main`（无 TMA 模板参数）⇒ 仅 LSE 换搬运方式。fp16/bf16 varlen 维持
+        # 旧构建（其 varlen full LSE TMA 化尚未做，留后续）。
+        varlen_tma = is_varlen and dt == "fp8" and not args.mma
+        if hopper_default or varlen_tma:
+            build_env = {"ARCH": "", "NVCC_FLAGS": HOPPER_FLAGS}
+        else:
+            build_env = BUILD[cfg]
         compare_cases.append(case_dir.name)
         for impl in impls:
             src, bin_name = HOSTS[dt][impl]

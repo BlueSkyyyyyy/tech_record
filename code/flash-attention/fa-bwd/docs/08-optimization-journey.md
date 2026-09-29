@@ -1465,3 +1465,40 @@ smem 冲突 + 低 occ
   搬运至此统一到 TMA。
 - 详见 `docs/01` §23、`docs/01b` §6az；原始输出 `src/fp16/fa_bwd_fp16_o71_*`、
   `src/bf16/fa_bwd_bf16_o71_*`、`src/fa_bwd_o71_*`。
+
+### 5.80 O72：varlen full D=128 的 LSE 也上 **4D-TMA**（第一百六十六轮，正结果，默认）
+
+- **动机**：O68→O70→O71（F9/F11）把「三 dtype full D=128 LSE 统一到 TMA」，但**只覆盖定长**；
+  `run_varlen` 里 full D=128 仍硬编码走 O54 的 `launch_lse_bal<128,1,true>`（`cp.async`，源码
+  自认「仅定长（无 cu_seqlens）；varlen full 仍走 lse_mma_kernel_bal」）。本轮把这条**漏掉的分支**
+  补上（fp8 先行，沿用 F9→F11 的「fp8 先、再泛化」惯例）。
+- **做了什么**（device+host，单/两文件同步）：
+  - device（`fa_bwd_fp8_kernels.cuh` + onefile 的 `lse_mma_kernel_bal_tma`）：模板加
+    `const int* cu_seqlens = nullptr`。`cu` 非空时 `qbase=cu_seqlens[b]`、`len=cu_seqlens[b+1]
+    -qbase`、`nblk=ceil(len/LBM)`，否则退化为 `qbase=b*S/len=S`（**定长逐位不变**）。`FULL` 下
+    `pair>=nblk` 早退；scale 索引、TMA 行坐标（`qbase+m0/j0`，batch 维恒 0）、`ncols`、四个
+    `jg<len` 掩码、输出写全部换 `qbase/len`。
+  - host（`fa_bwd_fp8_main.cu` + onefile）：`launch_lse_bal_tma` 加 `const int* cu=nullptr`；
+    `run_varlen` 为 D=128/full 建 packed 描述符（`dims={D,T,Hkv,1}`）并优先
+    `launch_lse_bal_tma<128,1,true>(lg, qmap_v, kmap_v, …, d_cu)`。`--lsetmavarlen=0` 退回
+    `cp.async` 版做同 binary A/B、`--lsefull=0` 退回 O1。
+  - 构建（`harness/fa_bwd_run.py`）：varlen 构建对 **fp8** 也加 `-DFA_TMA -lcuda`（主 kernel 仍
+    `launch_bwd_main`，无 TMA 模板参数 ⇒ 只换 LSE 搬运）。fp16/bf16 varlen 维持旧构建。
+- **数值**：ours vs fp32 ref 与 `cp.async` 版**打印逐位相同**（`b4_t4096` 8.881e-2/7.043e-2/5.721e-2；
+  不齐序列 `b4_t3840` 1.011e-1/9.656e-2/7.032e-2，仅 LSE fp32 求和次序 ~1e-4）；13 个 fp8 varlen
+  case 单/两文件一致性 worst **3.815e-6 OK**；全量 CI `--no-run --ci` 73 case 三 dtype gate 全 OK、
+  `--check docs/04` OK；定长 full S1024 回归 `5.518e-2/5.310e-2/4.025e-2` 逐位不变。
+- **性能（同 binary A/B，Hopper，event，iters=50）**：`b4_t4096` full fp8 两文件
+  **cp.async 1.1810 → TMA 1.1190ms（1.055×）**、单文件 1.1841→1.1221ms（1.055×）；不齐 `b4_t3840`
+  两文件 **1.4724 → 1.4054ms（1.048×）**、单文件 1.4806→1.4061ms（1.053×）。同 session TE FP8
+  纯反向 0.1842ms/186.56TF ⇒ ours/TE **6.39× → 6.10×**。
+- **ncu（`regex:lse_mma_kernel_bal`，`--launch-count 1`，b4_t4096 full）**：cp.async
+  **118.34µs / inst 73.58M / regs 88 / occ 25.8% / waves 1.55** → TMA **63.01µs（1.88×）/
+  inst 39.17M（−46.8%）/ regs 58 / occ 35.9% / waves 0.97**；两者 `Compute≈Issue ~65%`
+  （issue-bound）、DRAM 4–8%、L2 22% ⇒ **搬迁升级，不是 DRAM/L2 bound**。
+- **下一步**：把 `cu_seqlens` 参数化逐字 dtype 化到 fp16/bf16 varlen（fp16 是 2×K=64 chunk 描述符）
+  并给其 varlen 构建加 `-DFA_TMA`，做全「三 dtype × {定长, varlen} full D=128 LSE 统一到 TMA」；
+  main 的 L2 `red` 墙仍受过本卡寄存器/smem 硬墙锁定（见「阻塞」）。
+- 详见 `docs/03` §96；原始输出 `src/fp8/fa_bwd_fp8_o72_varlen_lse_ab.out.txt`、
+  `src/fp8/fa_bwd_fp8_p166_ncu_lse_{tma,cpasync}_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_p166_{varlen_run,ci,te_varlen_baseline}.out.txt`。

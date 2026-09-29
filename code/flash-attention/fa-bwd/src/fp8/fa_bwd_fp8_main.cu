@@ -38,6 +38,9 @@
 //   替代 O1 的 `lse_mma_kernel`（无流水，逐标量 global→smem）。默认 1；`--lsefull=0`
 //   退回 O1 做同 binary A/B。定长与 varlen 两条 full 路径都读这个开关（故用文件作用域）。
 static int g_lse_full_opt = 1;
+// 第 166 轮 O72：varlen full D=128 的 LSE 是否走 4D-TMA（对齐定长 O70）。默认 1；`--lsetmavarlen=0`
+//   退回 O68 的 cp.async 均衡版做同 binary A/B。需要 `-DFA_WGMMA -DFA_TMA` 构建（否则恒 0）。
+static int g_lse_tma_varlen = 1;
 
 #if defined(FA_WGMMA) && defined(FA_TMA)
 // O32：为 LSE 的 Q/K 建 4D TMA 描述符（dims={D,S,H,B}，SW128，box={128,64,1,1}）。
@@ -439,16 +442,18 @@ static void launch_lse_bal_wgmma(dim3 lg, const unsigned char* q8, const float* 
 // O32：fp8 TMA 版 LSE（4D-TMA 载入 Q/K，单块），仅 `-DFA_WGMMA -DFA_TMA` 构建存在。
 //   O70：模板加 `bool FULL`，`FULL=true` 时 grid.x 应是 `nblk`（一个 m 块一个 CTA，非因果）。
 #if defined(FA_WGMMA) && defined(FA_TMA)
+//   O72（第 166 轮）：加 `const int* cu`——varlen full D=128 复用它（描述符建在 packed 张量上、
+//   行坐标由内核用 `cu_seqlens[b]` 定界）。定长调用不传 ⇒ 逐位不变。
 template <int HD, int PIPE, bool FULL = false>
 static void launch_lse_bal_tma(dim3 lg, const CUtensorMap& qmap, const CUtensorMap& kmap,
                                const float* qs, const float* ks, float* lse, int S, int H,
-                               int Hkv, float scale) {
+                               int Hkv, float scale, const int* cu = nullptr) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = Cfg::lse_smem_bytes_tma1;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<HD, PIPE, FULL>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
   lse_mma_kernel_bal_tma<HD, PIPE, FULL><<<lg, THREADS, kSmem>>>(qmap, kmap, qs, ks, lse,
-                                                                 nullptr, S, H, Hkv, scale, 1);
+                                                                 nullptr, S, H, Hkv, scale, 1, cu);
 }
 
 // O38：LSE 的 K 维 split + 二次归约（仅 D=128/causal/TMA）。`lg.z` 是 batch B；内部把
@@ -696,6 +701,16 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     //   causal → 镜像配对 + cp.async 的 wgmma 版（工作量随 mblk 递增，需均衡）；
     //   非 causal → 各 m 块工作量恒为 nblk 个 tile，本已均衡，走 O1 的 mma `lse_mma_kernel`。
     const int nblk = (maxlen + LBM - 1) / LBM;
+    // O72（第 166 轮）：varlen full D=128 的 LSE 走 4D-TMA（对齐定长 O70）。TMA 描述符建在
+    //   packed 张量上（dims={D,T,Hkv,1}，batch 维恒 0），内核对每个 b 用 `cu_seqlens[b]` 定界。
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    const bool lse_tma_v = (g_lse_tma_varlen != 0) && g_lse_full_opt && (D == 128) && !causal;
+    CUtensorMap qmap_v{}, kmap_v{};
+    if (lse_tma_v) {
+      qmap_v = make_lse_map_fp8(d_q8, H, T, D, 1);
+      kmap_v = make_lse_map_fp8(d_k8, Hkv, T, D, 1);
+    }
+#endif
     if (causal) {
       dim3 lg((nblk + 1) / 2, H, B);
       // D==128 走 wgmma 版（SW128 + wgmma）；D==512（MLA）只有 mma 版（HD>128 无 SW128 快路）。
@@ -737,10 +752,19 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       dim3 lg(nblk, H, B);
       if (D == 128) {
         // O68（第 162 轮）：varlen full D=128 的 LSE 同定长，改走 O54 均衡版（cp.async 双缓冲）。
-        if (g_lse_full_opt)
+        // O72（第 166 轮）：再优先走定长 O70 同款的 4D-TMA（`--lsetmavarlen=0` 退回 cp.async 版）。
+        bool did_tma_v = false;
+#if defined(FA_WGMMA) && defined(FA_TMA)
+        if (lse_tma_v) {
+          launch_lse_bal_tma<128, 1, true>(lg, qmap_v, kmap_v, d_qs, d_ks, d_lse, maxlen, H, Hkv,
+                                           scale, d_cu);
+          did_tma_v = true;
+        }
+#endif
+        if (!did_tma_v && g_lse_full_opt)
           launch_lse_bal<128, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv,
                                        scale, d_cu, nullptr, 1);
-        else
+        else if (!did_tma_v)
           launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
       }
       else if (lseocc == 5 || lseocc == 6)
@@ -1603,6 +1627,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--lsesplit=", 0) == 0) lse_split = atoi(a.c_str() + 11);
     else if (a.rfind("--lsefull=", 0) == 0) g_lse_full_opt = atoi(a.c_str() + 10);
     else if (a == "--lsefull") g_lse_full_opt = 1;
+    else if (a.rfind("--lsetmavarlen=", 0) == 0) g_lse_tma_varlen = atoi(a.c_str() + 15);
+    else if (a == "--lsetmavarlen") g_lse_tma_varlen = 1;
     else if (a.rfind("--mla8w=", 0) == 0) mla8w_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--mlakvp=", 0) == 0) mla_kvp_opt = atoi(a.c_str() + 9);
     else if (a == "--mlakvp") mla_kvp_opt = 1;

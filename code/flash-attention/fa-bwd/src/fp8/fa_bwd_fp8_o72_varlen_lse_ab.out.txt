@@ -1,0 +1,12 @@
+===== varlen_b4_t4096_h16_d128_full_fp8 (two-file) =====
+  [TMA] [timing] VARLEN total 1.1190 ms  30.71 TFLOPS (sum_b 4HL^2D)
+  [cpasync] [timing] VARLEN total 1.1810 ms  29.09 TFLOPS (sum_b 4HL^2D)
+===== varlen_b4_t4096_h16_d128_full_fp8 (one-file) =====
+  [TMA] [timing] VARLEN total 1.1221 ms  30.62 TFLOPS (sum_b 4HL^2D)
+  [cpasync] [timing] VARLEN total 1.1841 ms  29.02 TFLOPS (sum_b 4HL^2D)
+===== varlen_b4_t3840_h16_d128_full_fp8 (two-file) =====
+  [TMA] [timing] VARLEN total 1.4054 ms  32.47 TFLOPS (sum_b 4HL^2D)
+  [cpasync] [timing] VARLEN total 1.4724 ms  30.99 TFLOPS (sum_b 4HL^2D)
+===== varlen_b4_t3840_h16_d128_full_fp8 (one-file) =====
+  [TMA] [timing] VARLEN total 1.4061 ms  32.46 TFLOPS (sum_b 4HL^2D)
+  [cpasync] [timing] VARLEN total 1.4806 ms  30.82 TFLOPS (sum_b 4HL^2D)

@@ -2282,7 +2282,12 @@ __global__ void lse_split_merge_kernel(const float* __restrict__ part,
 //   一个 CTA 只处理一个 m 块（grid.x = nblk，不做镜像配对；full 各 m 块工作量相同），
 //   `ncols = S` 且不做 `jg <= qi` 因果掩码；其余（cp.async/TMA 双缓冲、rowwise scale、
 //   tile 内两趟 softmax、4-lane shfl 归约）逐字复用。`FULL=false` 编译出与 O32/O38 逐位
-//   相同的 causal 代码。仅定长（无 cu_seqlens）；varlen full 仍走 `lse_mma_kernel_bal`。
+//   相同的 causal 代码。
+// O72（第 166 轮）：加 `const int* cu_seqlens`——VARLEN 支持。cu 非空时用 `cu_seqlens[b]` 作
+//   packed [T,H,D] 的 token 基址、`cu_seqlens[b+1]-qbase` 作本序列长度；nullptr 时逐式退化为
+//   定长（qbase=b*S、len=S），定长路径逐位不变。TMA 描述符建在 packed 张量上（dims={D,T,H,1}，
+//   batch 维恒 0），行坐标 = qbase + m0/j0。O68 之前 varlen full 只走 cp.async 版
+//   `lse_mma_kernel_bal`，本改动补上 varlen full D=128 的 4D-TMA 分支。
 #if defined(FA_WGMMA) && defined(FA_TMA)
 template <int HD, int PIPE = 1, bool FULL = false>
 __global__ void __launch_bounds__(THREADS)
@@ -2290,7 +2295,8 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
                        const __grid_constant__ CUtensorMap kmap,
                        const float* __restrict__ qs, const float* __restrict__ ks,
                        float* __restrict__ lse, float* __restrict__ lse_part,
-                       int S, int H, int Hkv, float scale, int ksplit) {
+                       int S, int H, int Hkv, float scale, int ksplit,
+                       const int* __restrict__ cu_seqlens = nullptr) {
   static_assert(HD == 128, "fp8 wgmma LSE TMA 目前只做 HD=128");
   constexpr int TILE = (LBM / 8) * (HD / 128) * 1024;  // 单个 [LBM][HD] SW128 tile（8KB）
   extern __shared__ char smem_raw[];
@@ -2307,9 +2313,15 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   // O38：K 维 split。grid = (pairs, H, B*ksplit)；每个 (pair,ks) CTA 只扫本 m 块 K 范围的
   //   第 ks 个连续切片（按 tile 粒度切分），把部分 (m,l) 写到 `lse_part`，由 merge kernel 汇总。
   //   ksplit==1 时切片即整段、直接写 `lse`（逐位退化为 O32 原路径）。
-  const int nblk = (S + LBM - 1) / LBM;
   const int pair = blockIdx.x, h = blockIdx.y;
   const int b = blockIdx.z / ksplit, ksp = blockIdx.z % ksplit;
+  // O72：VARLEN——cu 给出本序列 packed token 基址/长度；nullptr 时逐式退化（定长逐位不变）。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
+  const int nblk  = (len + LBM - 1) / LBM;
+  // O72：短序列多余的对 CTA 直接退出（定长时 grid.x==nblk ⇒ 恒不触发，逐位不变）。
+  if constexpr (FULL) { if (pair >= nblk) return; }
+  const int bq = cu_seqlens ? 0 : b;   // packed [T,H,D] 的 TMA batch 维恒 0（基址由 qbase 给）
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -2324,21 +2336,21 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   // 发本 m 块的 Q（一次 4D TMA 搬整块）+ rowwise scale（标量 global 读，TMA 带不了）。
   auto issue_q = [&](int m0) {
     if (tid < LBM)
-      qs_s[tid] = (m0 + tid < S) ? qs[((size_t)(b * S + m0 + tid)) * H + h] : 1.f;
+      qs_s[tid] = (m0 + tid < len) ? qs[((size_t)(qbase + m0 + tid)) * H + h] : 1.f;
     if (tid == 0) {
       mbar_arrive_expect(qbar, TILE);
-      tma_load_4d(Qs, &qmap, 0, m0, h, b, qbar);
+      tma_load_4d(Qs, &qmap, 0, qbase + m0, h, bq, qbar);
     }
   };
   // 发一个 K tile（j0 起 LBN 行）+ 本 tile 的 rowwise scale。
   auto issue_k = [&](int stage, int j0) {
     if (tid < LBN)
       ks_s[stage * LBN + tid] =
-          (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * Hkv + hkv] : 1.f;
+          (j0 + tid < len) ? ks[((size_t)(qbase + j0 + tid)) * Hkv + hkv] : 1.f;
     if (tid == 0) {
       char* Kd = Ks + stage * TILE;
       mbar_arrive_expect(kbar + stage, TILE);
-      tma_load_4d(Kd, &kmap, 0, j0, hkv, b, kbar + stage);
+      tma_load_4d(Kd, &kmap, 0, qbase + j0, hkv, bq, kbar + stage);
     }
   };
 
@@ -2352,7 +2364,7 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
     const int mblk = FULL ? pair : ((t == 0) ? pair : (nblk - 1 - pair));
     if (!FULL && t == 1 && pair == nblk - 1 - pair) break;
     const int m0 = mblk * LBM;
-    const int ncols = FULL ? S : min(S, m0 + LBM);
+    const int ncols = FULL ? len : min(len, m0 + LBM);   // O72：len（定长时 == S，逐位不变）
     const int ntiles = (ncols + LBN - 1) / LBN;
     // O38：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
     const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
@@ -2389,15 +2401,15 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
       const float qsc1 = scale * qs_s[wid * 16 + g + 8];
       const int qi0 = m0 + wid * 16 + g;
       const int qi1 = qi0 + 8;
-      const bool ge0 = qi0 < S, ge1 = qi1 < S;
+      const bool ge0 = qi0 < len, ge1 = qi1 < len;
       float mloc0 = -INFINITY, mloc1 = -INFINITY;
 #pragma unroll
       for (int j = 0; j < 8; ++j) {
         const int jg0 = j0 + j * 8 + c2, jg1 = jg0 + 1;
-        const bool c00 = ge0 && jg0 < S && (FULL || jg0 <= qi0);
-        const bool c01 = ge0 && jg1 < S && (FULL || jg1 <= qi0);
-        const bool c10 = ge1 && jg0 < S && (FULL || jg0 <= qi1);
-        const bool c11 = ge1 && jg1 < S && (FULL || jg1 <= qi1);
+        const bool c00 = ge0 && jg0 < len && (FULL || jg0 <= qi0);
+        const bool c01 = ge0 && jg1 < len && (FULL || jg1 <= qi0);
+        const bool c10 = ge1 && jg0 < len && (FULL || jg0 <= qi1);
+        const bool c11 = ge1 && jg1 < len && (FULL || jg1 <= qi1);
         const float k0 = KtS[j * 8 + c2], k1 = KtS[j * 8 + c2 + 1];
         float v0 = c00 ? d[j * 4 + 0] * qsc0 * k0 : -INFINITY;
         float v1 = c01 ? d[j * 4 + 1] * qsc0 * k1 : -INFINITY;
@@ -2440,11 +2452,11 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < S) {
+        if (qi < len) {
           if (ksplit == 1) {
-            lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+            lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
           } else {
-            size_t row = ((size_t)(b * S + qi)) * H + h;
+            size_t row = ((size_t)(qbase + qi)) * H + h;
             lse_part[(row * ksplit + ksp) * 2 + 0] = m;
             lse_part[(row * ksplit + ksp) * 2 + 1] = l;
           }

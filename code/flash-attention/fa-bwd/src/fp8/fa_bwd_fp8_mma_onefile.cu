@@ -1055,6 +1055,37 @@ __device__ __forceinline__ void bulk_reduce_wait0() {
 #endif
 }
 
+// ---- F7 第十二步：TMA **4D tensor store-reduce**（`cp.reduce.async.bulk.tensor.4d`）----
+//   背景：O67/p147 用 ncu 重测 TE fp8 反向（`..._flash_bprop_wgmma_f8_...`）发现它全局归约
+//   只有 **3168** 条 `smsp__inst_executed_op_global_red`（ours 9.54M、`l1tex_red` 请求），
+//   且 **0 条** plain global store；SASS 直方图见 **`UTMAREDG.4D.ADD`**——即 TE 的 dK/dV/dQ
+//   归约走 **TMA 4D 张量归约**（一次搬一整块 [rows][cols] 到 global 并原子加），而不是
+//   逐 lane 的 `red.global.add`。这正是 O42 的「smem staging + bulk reduce」思路，但 O42 用
+//   的是 **1D** `cp.reduce.async.bulk`（每行一条、且 per-warp），本 helper 用 **4D tensor**
+//   变体：src 是 smem 里行主序的整块 [boxR][boxD]（与行主序 tile 完全一致），**一条指令**
+//   归约整个 tile，与 TE 同构。
+//   语义：`map` 描述 global 张量（用 `make_kvowner_dq_map_f32` 建，dims={D,S,H,B}、f32、
+//   box={boxD,boxR,1,1}、SWIZZLE_NONE），`ssrc` 是 16B 对齐的 smem 源（boxD*boxR*f32 字节），
+//   坐标 `{c0,c1,c2,c3}` 是 tile 原点。硬件对并发写到同一 global 元素的多个 CTA 做原子加。
+//   generic 写 smem 后必须 `bulk_reduce_fence()`（`fence.proxy.async.shared::cta`）。
+__device__ __forceinline__ void tma_reduce_add_4d_f32(const CUtensorMap* map, const float* ssrc,
+                                                     int c0, int c1, int c2, int c3) {
+  // 注意：此处用 `__CUDA_ARCH__` 直接守卫（不能用 `FA_FP8_HAS_TMA`——它在文件更后面才
+  //   `#define`，宏按出现顺序展开，放在这里会恒为 0 而把 asm 编掉，实测 dQ 完全错）。
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  const unsigned s = smem_u32(ssrc);
+  // 正确 PTX（对齐 CUDA `cuda/__ptx` 生成头）：`.redOp.tile.bulk_group`，类型由 tensormap
+  //   element type（此处 FLOAT32）推断，指令**不带** `.f32` 后缀。
+  asm volatile(
+      "cp.reduce.async.bulk.tensor.4d.global.shared::cta.add.tile.bulk_group"
+      " [%0, {%1, %2, %3, %4}], [%5];\n" ::"l"((uint64_t)map),
+      "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(s)
+      : "memory");
+#else
+  (void)map; (void)ssrc; (void)c0; (void)c1; (void)c2; (void)c3;
+#endif
+}
+
 // A[M_TILE][K_TILE]、B[N_TILE][K_TILE] 均行主序（行距 asld/bsld，含 padding）。
 // 每 warp 负责 WARP_M×WARP_N 输出块；各 warp 旧 (wm,wn) 由调用方给出。
 template <int WARP_M, int WARP_N, int K_TILE, int KIND>
@@ -2211,7 +2242,12 @@ __global__ void lse_split_merge_kernel(const float* __restrict__ part,
 //   一个 CTA 只处理一个 m 块（grid.x = nblk，不做镜像配对；full 各 m 块工作量相同），
 //   `ncols = S` 且不做 `jg <= qi` 因果掩码；其余（cp.async/TMA 双缓冲、rowwise scale、
 //   tile 内两趟 softmax、4-lane shfl 归约）逐字复用。`FULL=false` 编译出与 O32/O38 逐位
-//   相同的 causal 代码。仅定长（无 cu_seqlens）；varlen full 仍走 `lse_mma_kernel_bal`。
+//   相同的 causal 代码。
+// O72（第 166 轮）：加 `const int* cu_seqlens`——VARLEN 支持。cu 非空时用 `cu_seqlens[b]` 作
+//   packed [T,H,D] 的 token 基址、`cu_seqlens[b+1]-qbase` 作本序列长度；nullptr 时逐式退化为
+//   定长（qbase=b*S、len=S），定长路径逐位不变。TMA 描述符建在 packed 张量上（dims={D,T,H,1}，
+//   batch 维恒 0），行坐标 = qbase + m0/j0。O68 之前 varlen full 只走 cp.async 版
+//   `lse_mma_kernel_bal`，本改动补上 varlen full D=128 的 4D-TMA 分支。
 #if defined(FA_WGMMA) && defined(FA_TMA)
 template <int HD, int PIPE = 1, bool FULL = false>
 __global__ void __launch_bounds__(THREADS)
@@ -2219,7 +2255,8 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
                        const __grid_constant__ CUtensorMap kmap,
                        const float* __restrict__ qs, const float* __restrict__ ks,
                        float* __restrict__ lse, float* __restrict__ lse_part,
-                       int S, int H, int Hkv, float scale, int ksplit) {
+                       int S, int H, int Hkv, float scale, int ksplit,
+                       const int* __restrict__ cu_seqlens = nullptr) {
   static_assert(HD == 128, "fp8 wgmma LSE TMA 目前只做 HD=128");
   constexpr int TILE = (LBM / 8) * (HD / 128) * 1024;  // 单个 [LBM][HD] SW128 tile（8KB）
   extern __shared__ char smem_raw[];
@@ -2236,9 +2273,15 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   // O38：K 维 split。grid = (pairs, H, B*ksplit)；每个 (pair,ks) CTA 只扫本 m 块 K 范围的
   //   第 ks 个连续切片（按 tile 粒度切分），把部分 (m,l) 写到 `lse_part`，由 merge kernel 汇总。
   //   ksplit==1 时切片即整段、直接写 `lse`（逐位退化为 O32 原路径）。
-  const int nblk = (S + LBM - 1) / LBM;
   const int pair = blockIdx.x, h = blockIdx.y;
   const int b = blockIdx.z / ksplit, ksp = blockIdx.z % ksplit;
+  // O72：VARLEN——cu 给出本序列 packed token 基址/长度；nullptr 时逐式退化（定长逐位不变）。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
+  const int nblk  = (len + LBM - 1) / LBM;
+  // O72：短序列多余的对 CTA 直接退出（定长时 grid.x==nblk ⇒ 恒不触发，逐位不变）。
+  if constexpr (FULL) { if (pair >= nblk) return; }
+  const int bq = cu_seqlens ? 0 : b;   // packed [T,H,D] 的 TMA batch 维恒 0（基址由 qbase 给）
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -2253,21 +2296,21 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   // 发本 m 块的 Q（一次 4D TMA 搬整块）+ rowwise scale（标量 global 读，TMA 带不了）。
   auto issue_q = [&](int m0) {
     if (tid < LBM)
-      qs_s[tid] = (m0 + tid < S) ? qs[((size_t)(b * S + m0 + tid)) * H + h] : 1.f;
+      qs_s[tid] = (m0 + tid < len) ? qs[((size_t)(qbase + m0 + tid)) * H + h] : 1.f;
     if (tid == 0) {
       mbar_arrive_expect(qbar, TILE);
-      tma_load_4d(Qs, &qmap, 0, m0, h, b, qbar);
+      tma_load_4d(Qs, &qmap, 0, qbase + m0, h, bq, qbar);
     }
   };
   // 发一个 K tile（j0 起 LBN 行）+ 本 tile 的 rowwise scale。
   auto issue_k = [&](int stage, int j0) {
     if (tid < LBN)
       ks_s[stage * LBN + tid] =
-          (j0 + tid < S) ? ks[((size_t)(b * S + j0 + tid)) * Hkv + hkv] : 1.f;
+          (j0 + tid < len) ? ks[((size_t)(qbase + j0 + tid)) * Hkv + hkv] : 1.f;
     if (tid == 0) {
       char* Kd = Ks + stage * TILE;
       mbar_arrive_expect(kbar + stage, TILE);
-      tma_load_4d(Kd, &kmap, 0, j0, hkv, b, kbar + stage);
+      tma_load_4d(Kd, &kmap, 0, qbase + j0, hkv, bq, kbar + stage);
     }
   };
 
@@ -2281,7 +2324,7 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
     const int mblk = FULL ? pair : ((t == 0) ? pair : (nblk - 1 - pair));
     if (!FULL && t == 1 && pair == nblk - 1 - pair) break;
     const int m0 = mblk * LBM;
-    const int ncols = FULL ? S : min(S, m0 + LBM);
+    const int ncols = FULL ? len : min(len, m0 + LBM);   // O72：len（定长时 == S，逐位不变）
     const int ntiles = (ncols + LBN - 1) / LBN;
     // O38：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
     const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
@@ -2318,15 +2361,15 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
       const float qsc1 = scale * qs_s[wid * 16 + g + 8];
       const int qi0 = m0 + wid * 16 + g;
       const int qi1 = qi0 + 8;
-      const bool ge0 = qi0 < S, ge1 = qi1 < S;
+      const bool ge0 = qi0 < len, ge1 = qi1 < len;
       float mloc0 = -INFINITY, mloc1 = -INFINITY;
 #pragma unroll
       for (int j = 0; j < 8; ++j) {
         const int jg0 = j0 + j * 8 + c2, jg1 = jg0 + 1;
-        const bool c00 = ge0 && jg0 < S && (FULL || jg0 <= qi0);
-        const bool c01 = ge0 && jg1 < S && (FULL || jg1 <= qi0);
-        const bool c10 = ge1 && jg0 < S && (FULL || jg0 <= qi1);
-        const bool c11 = ge1 && jg1 < S && (FULL || jg1 <= qi1);
+        const bool c00 = ge0 && jg0 < len && (FULL || jg0 <= qi0);
+        const bool c01 = ge0 && jg1 < len && (FULL || jg1 <= qi0);
+        const bool c10 = ge1 && jg0 < len && (FULL || jg0 <= qi1);
+        const bool c11 = ge1 && jg1 < len && (FULL || jg1 <= qi1);
         const float k0 = KtS[j * 8 + c2], k1 = KtS[j * 8 + c2 + 1];
         float v0 = c00 ? d[j * 4 + 0] * qsc0 * k0 : -INFINITY;
         float v1 = c01 ? d[j * 4 + 1] * qsc0 * k1 : -INFINITY;
@@ -2369,11 +2412,11 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < S) {
+        if (qi < len) {
           if (ksplit == 1) {
-            lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+            lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
           } else {
-            size_t row = ((size_t)(b * S + qi)) * H + h;
+            size_t row = ((size_t)(qbase + qi)) * H + h;
             lse_part[(row * ksplit + ksp) * 2 + 0] = m;
             lse_part[(row * ksplit + ksp) * 2 + 1] = l;
           }
@@ -4443,6 +4486,9 @@ __global__ void convert_kernel(const float* __restrict__ dq_acc,
 //   替代 O1 的 `lse_mma_kernel`（无流水，逐标量 global→smem）。默认 1；`--lsefull=0`
 //   退回 O1 做同 binary A/B。定长与 varlen 两条 full 路径都读这个开关（故用文件作用域）。
 static int g_lse_full_opt = 1;
+// 第 166 轮 O72：varlen full D=128 的 LSE 是否走 4D-TMA（对齐定长 O70）。默认 1；`--lsetmavarlen=0`
+//   退回 O68 的 cp.async 均衡版做同 binary A/B。需要 `-DFA_WGMMA -DFA_TMA` 构建（否则恒 0）。
+static int g_lse_tma_varlen = 1;
 
 #if defined(FA_WGMMA) && defined(FA_TMA)
 // O32：为 LSE 的 Q/K 建 4D TMA 描述符（dims={D,S,H,B}，SW128，box={128,64,1,1}）。
@@ -4843,16 +4889,18 @@ static void launch_lse_bal_wgmma(dim3 lg, const unsigned char* q8, const float* 
 // O32：fp8 TMA 版 LSE（4D-TMA 载入 Q/K，单块），仅 `-DFA_WGMMA -DFA_TMA` 构建存在。
 //   O70：模板加 `bool FULL`，`FULL=true` 时 grid.x 应是 `nblk`（一个 m 块一个 CTA，非因果）。
 #if defined(FA_WGMMA) && defined(FA_TMA)
+//   O72（第 166 轮）：加 `const int* cu`——varlen full D=128 复用它（描述符建在 packed 张量上、
+//   行坐标由内核用 `cu_seqlens[b]` 定界）。定长调用不传 ⇒ 逐位不变。
 template <int HD, int PIPE, bool FULL = false>
 static void launch_lse_bal_tma(dim3 lg, const CUtensorMap& qmap, const CUtensorMap& kmap,
                                const float* qs, const float* ks, float* lse, int S, int H,
-                               int Hkv, float scale) {
+                               int Hkv, float scale, const int* cu = nullptr) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = Cfg::lse_smem_bytes_tma1;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<HD, PIPE, FULL>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
   lse_mma_kernel_bal_tma<HD, PIPE, FULL><<<lg, THREADS, kSmem>>>(qmap, kmap, qs, ks, lse, nullptr,
-                                                           S, H, Hkv, scale, 1);
+                                                           S, H, Hkv, scale, 1, cu);
 }
 
 // O38：LSE 的 K 维 split + 二次归约（仅 D=128/causal/TMA）。`lg.z` 是 batch B；内部把
@@ -5100,6 +5148,16 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     //   causal → 镜像配对 + cp.async 的 wgmma 版（工作量随 mblk 递增，需均衡）；
     //   非 causal → 各 m 块工作量恒为 nblk 个 tile，本已均衡，走 O1 的 mma `lse_mma_kernel`。
     const int nblk = (maxlen + LBM - 1) / LBM;
+    // O72（第 166 轮）：varlen full D=128 的 LSE 走 4D-TMA（对齐定长 O70）。TMA 描述符建在
+    //   packed 张量上（dims={D,T,Hkv,1}，batch 维恒 0），内核对每个 b 用 `cu_seqlens[b]` 定界。
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    const bool lse_tma_v = (g_lse_tma_varlen != 0) && g_lse_full_opt && (D == 128) && !causal;
+    CUtensorMap qmap_v{}, kmap_v{};
+    if (lse_tma_v) {
+      qmap_v = make_lse_map_fp8(d_q8, H, T, D, 1);
+      kmap_v = make_lse_map_fp8(d_k8, Hkv, T, D, 1);
+    }
+#endif
     if (causal) {
       dim3 lg((nblk + 1) / 2, H, B);
       // D==128 走 wgmma 版（SW128 + wgmma）；D==512（MLA）只有 mma 版（HD>128 无 SW128 快路）。
@@ -5141,10 +5199,19 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       dim3 lg(nblk, H, B);
       if (D == 128) {
         // O68（第 162 轮）：varlen full D=128 的 LSE 同定长，改走 O54 均衡版（cp.async 双缓冲）。
-        if (g_lse_full_opt)
+        // O72（第 166 轮）：再优先走定长 O70 同款的 4D-TMA（`--lsetmavarlen=0` 退回 cp.async 版）。
+        bool did_tma_v = false;
+#if defined(FA_WGMMA) && defined(FA_TMA)
+        if (lse_tma_v) {
+          launch_lse_bal_tma<128, 1, true>(lg, qmap_v, kmap_v, d_qs, d_ks, d_lse, maxlen, H, Hkv,
+                                           scale, d_cu);
+          did_tma_v = true;
+        }
+#endif
+        if (!did_tma_v && g_lse_full_opt)
           launch_lse_bal<128, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv,
                                        scale, d_cu, nullptr, 1);
-        else
+        else if (!did_tma_v)
           launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
       } else if (lseocc == 5 || lseocc == 6)
         // O58：full MLA varlen 的 LSE「2 CTA/SM」几何（O57 的 fp8 同构；默认仍是 O54 旧路）。
@@ -6003,6 +6070,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--lsesplit=", 0) == 0) lse_split = atoi(a.c_str() + 11);
     else if (a.rfind("--lsefull=", 0) == 0) g_lse_full_opt = atoi(a.c_str() + 10);
     else if (a == "--lsefull") g_lse_full_opt = 1;
+    else if (a.rfind("--lsetmavarlen=", 0) == 0) g_lse_tma_varlen = atoi(a.c_str() + 15);
+    else if (a == "--lsetmavarlen") g_lse_tma_varlen = 1;
     else if (a.rfind("--mla8w=", 0) == 0) mla8w_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--mlakvp=", 0) == 0) mla_kvp_opt = atoi(a.c_str() + 9);
     else if (a == "--mlakvp") mla_kvp_opt = 1;
