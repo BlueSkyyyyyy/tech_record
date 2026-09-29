@@ -7637,3 +7637,64 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_mma.cu -c 1 \
 ```
 
 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_{s512,s4096,ncu_s4096}.out.txt`。
+
+## 84. F7 第四步（第一百五十一轮）：KV-owner mma 的 Q/dO staging 加 cp.async 双缓冲重叠——形状相关
+
+> 承接 §83「结论 / 下一步」④②（重叠 staging）：第 150 轮 KV-owner mma 原型的 Q/dO staging 是
+> **同步全局读 + `__syncthreads`**，每个 query 块的全局延迟串在 GEMM1 之前。本轮给它加
+> **`cp.async.cg` 16B 双缓冲流水**（prologue 发 stage0，循环里先 issue 下一块、再
+> `cp.async.wait_group 1`，把全局读延迟藏到上一块 compute 后面），做「重叠收益 vs occupancy
+> 损失」的同 binary A/B。**默认路径一行未改**（纯新增 `fp8_kvowner_dkv_pipe_kernel`）。
+
+### 84.1 改动（`src/fp8/fa_bwd_fp8_kvowner_mma.cu` 新增 `fp8_kvowner_dkv_pipe_kernel`）
+
+- Q/dO 的 staging 缓冲 `Qs/dOs/Qp/dOp` **翻倍**（2 stage）：`issue_qdo(m0,s)` 用 16B
+  `cp_async16` 搬 Q/dO（行越界 `cp_async16_z(...,0)` 零填充），`cp_async_commit`；
+  循环里 `issue_qdo(next, cur^1)` → `wait_group 1`（末块 `wait_group 0`）→ `__syncthreads`
+  → `build_paired(cur)`（从 `Qs/dOs` 在 smem 上重建 `Qp/dOp`，同 §83 的 `__byte_perm` 交织写）
+  → 5 个 GEMM。
+- **踩坑**：`Qs[STAGES]` 这类**运行期下标的指针数组**会被 ptxas 推到 **local memory**，
+  首版把 regs 顶到 **243**（226→243）。改成「`STG_base + s*STG` 标量偏移」后 regs **243→239**、
+  A/B 从 0.875× 回升到 **0.958×**（S4096）。smem：70,144 → **105,984 B**。
+
+### 84.2 数值：与 base **逐位相同**（仅搬运时序）
+
+| shape（causal, MHA, fp8） | base dk/dv (vs ref) | pipe dk/dv (vs ref) | **pipe vs base** |
+|---|---|---|---|
+| S=512  H16 | 2.975e-1 / 3.735e-1 | 2.975e-1 / 3.735e-1 | **0 / 0** |
+| S=4096 H16 | 2.643e-1 / 3.216e-1 | 2.643e-1 / 3.216e-1 | **0 / 0** |
+
+只换搬运时序、数学口径与 §83 完全一致；与 ref/TE 同量级、无系统误差。
+
+### 84.3 性能（event，同 binary / 同 session）：**形状相关**
+
+| shape | base main | **pipe main** | A/B（base/pipe） |
+|---|---|---|---|
+| S=512  H16（grid=16×16=256） | 0.0566 ms | **0.0493 ms** | **1.148×** |
+| S=4096 H16（grid=128×16=2048） | 1.4218 ms | 1.4825 ms | 0.959× |
+
+### 84.4 ncu：机制清楚——重叠**确实**消了全局延迟，但 base 不是全局延迟 bound（S4096 H16）
+
+| kernel | Duration | regs | CTA/SM（限） | sm% | l1tex% | warps_active% | long | short | wait |
+|---|---|---|---|---|---|---|---|---|---|
+| base | **1.42 ms** | 168 | 3 | 46.98 | 50.46 | 17.69 | **0.58** | 0.88 | **1.44** |
+| pipe | 1.47 ms | 239 | 2（regs+smem） | 40.97 | 47.74 | 12.16 | **0.15** | 0.88 | 1.28 |
+
+- **重叠生效的铁证**：`long_scoreboard` **0.58 → 0.15**（全局读延迟被 cp.async 藏住）；
+  `lts__t_sectors_op_read` 反而 51.0M → 67.4M（cp.async 16B 粒度 + 双缓冲的额外 L2 读）。
+- **但 base 的头号 stall 不是全局延迟**：`wait 1.44`（固定延迟 / mma 依赖）+ `short 0.88`
+  （smem→`ldmatrix`）才是墙，`long` 只有 0.58。**重叠一个非瓶颈** ⇒ 收益为 0。
+- **代价**：staging 翻倍把 smem 顶到 106KB、regs 顶到 239 ⇒ **3→2 CTA/SM**（warps 17.7%→12.2%），
+  加上 op_read 变多 ⇒ 大 S 时**净 −4.1%**；小 S（grid 撑不满 3 CTA/SM 容量）时 occupancy
+  不是约束，重叠直接拿下 **+14.8%**。
+
+### 84.5 结论 / 下一步
+
+- **F7「重叠 Q/dO staging」是形状相关的结果**：小/中 grid（S≤512）正结果 **1.148×**，
+  大 S 负结果 **0.959×**。根因经 ncu 钉死：**KV-owner mma 原型的墙是 `wait`+`short_scoreboard`，
+  不是全局延迟**，所以「隐藏全局延迟」只在本来就延迟受限的小 shape 有效。
+- 这把 F7 的杠杆进一步收窄：要在本卡让 KV-owner 真转正，必须直接打 **`wait`（mma/smem 依赖，
+  如 GEMM 间指令级交错）** 与 **occupancy**（smem ≤58KB / regs ≤128 才能 4 CTA/SM）——而
+  §83 已指出这需要 persistent + 4D-TMA + 降寄存器的大改（“F7 主体”），不是单个 micro-lever。
+- **本原型定位**：F7 主体的「重叠」子项判决完成（形状相关、大 S 负）。原始输出
+  `src/fp8/fa_bwd_fp8_kvowner_mma_p151_{s512,s4096,sol}.out.txt`。
