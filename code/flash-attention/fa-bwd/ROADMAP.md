@@ -2890,7 +2890,23 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
         `fence.proxy.async.shared::cta` ⇒ 偶发 nondeterminism（已在 HEAD 原文件复现），补
         `bulk_reduce_fence()` 后 8/8 稳定。见 `docs/03` §88、`docs/08` §5.69。
          **剩余（F7 主体）**：dQ 同循环 + 降寄存器冲 4 CTA/SM。
-        → **第九步已完成（第一百五十六轮，微调判决：负结果，p155 定为局部最优）**：加两个编译期
+         → **第十步已完成（第一百五十七轮，三梯度全通 + atomic 归约判决）**：给 wgmma+TMA body 补
+         **dQ 同循环**（`FA_KV_DQ` 默认 1）——fold 新增 `dS2[m][j]=dS[m][j]·ks[j]`（e5m2/per-m
+         `sds2`，与 Q-owner 逐字同款）、K 的配对布局 `Kp` 从 SW128 `Ks` 一次重建、**GEMM4**
+         `dQ+=scale·(dS2·K)` 用 `mma_block_bt<32,64,BN,E5E4>` + `red_add2` 原子归约进 `dq`；
+         smem 67072→**74752B（仍 3 CTA/SM）**。**数值三梯度全通**：`dq` vs ref S512 2.4262e-1 /
+         S1024H32 2.3993e-1 / S4096 2.6355e-1（与 dk/dv 同量级 fp8 噪声）。**A/B（同 binary）**：
+         dK/dV-only→三梯度 S512 0.0462→**0.0750ms**、S1024H32 0.1940→**0.3044**、
+         S4096 1.1167→**1.8318ms**（dQ 增量 **1.6×**）。**ncu（S4096）**：Duration 1.84ms、
+         **`red` 102.2M**（dK/dV-only 原型为 0）、L2 63.86%、DRAM 2.45%、occ 17.8%（3 CTA/SM）、
+         stall `wait 1.64+short 1.52+long 0.89`。**判决**：默认 fp8 `kvtma` main（三梯度）`red`
+         114.5M/L2 76.96%/~1.92ms ⇒ 本原型总 red **114.5M→102.2M（−10.7%）**、时间 −4%；
+         **解析式吻合**（dK/dV 贡献 `S²/BM`、dQ 贡献 `S²/(2BN)`，`BM=2BN` ⇒ 相等）——**把原子从
+         dK/dV 搬到 dQ 是流量中性，坐实「候选①关闭」**；**单趟 KV-owner 解锁不了 prize
+         （dK/dV-only 1.12ms）**。**下一步 = 让 dQ 也 owned（red=0）：两 kernel（KV-owner dK/dV ＋
+         Q-owner dQ-only）或两级 partial（需 BN≥BM）**。见 `docs/03` §90、`docs/08` §5.71；
+         原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p157_dq_*`。
+         → **第九步已完成（第一百五十六轮，微调判决：负结果，p155 定为局部最优）**：加两个编译期
         旋钮（`FA_KV_CTA` / `FA_KV_OVL`）并一次性判决 F7 主体的「便宜子项」：① **消 store bank
         conflict 无杠杆**——源码把 Qp/dOp 两次 4B 存合成 `uint2` 后 `sm__inst_executed` 与 store
         conflict **逐位不变**（nvcc 早合成 `ST.64`，源级 no-op、已回退），真冲突源是 Ps/Ss
@@ -2908,7 +2924,31 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百五十六轮）**：**F7 第九步——微调判决（负结果）：p155 的 KV-owner wgmma+TMA
+> **最新（第一百五十七轮）**：**F7 第十步——KV-owner 原型补 dQ 同循环（三梯度全通；atomic 归约
+> 判决）**。给 p155 的 wgmma+TMA body 加编译期开关 `FA_KV_DQ`（默认 1）：fold 新增
+> `dS2[m][j]=dS[m][j]·ks[j]`（e5m2/per-m `sds2`，与 Q-owner 逐字同款）、K 的配对布局 `Kp`
+> 从 SW128 `Ks` **一次重建**、**GEMM4** `dQ+=scale·(dS2·K)` 用 `mma_block_bt<32,64,BN,E5E4>` +
+> `red_add2` 原子归约进 `dq`；smem 67072→**74752B（仍 3 CTA/SM）**。**数值三梯度全通**：`dq`
+> vs fp32 ref S512 **2.4262e-1** / S1024H32 **2.3993e-1** / S4096 **2.6355e-1**（与 dk/dv 同量级
+> fp8 噪声）；`wgmma+TMA vs wgmma` dk/dv **逐位 0**。**A/B（同 binary，main）**：dK/dV-only→
+> 三梯度 S512 0.0462→**0.0750ms**、S1024H32 0.1940→**0.3044**、S4096 1.1167→**1.8318ms**
+> （dQ 增量 **1.6×**）。**ncu（S4096）**：Duration 1.84ms、**`red` 102.2M**（dK/dV-only 原型为 0）、
+> `read` 52.6M/`write` 6.2M、L2 63.86%、DRAM 2.45%、occ 17.8%（3 CTA/SM，168 regs）、Waves 5.17、
+> stall `wait 1.64+short 1.52+long 0.89`。**判决**：默认 fp8 `kvtma` main（三梯度）`red` 114.5M /
+> L2 76.96% / ~1.92ms ⇒ 本原型 dK/dV red=0 但 dQ atomic 新添 102.2M，**总 red 114.5M→102.2M
+> （−10.7%）**、L2 −13pt、时间 −4%。**解析式吻合**：dK/dV 贡献 `2·S²/(2BM)=S²/BM`、dQ 贡献
+> `S²/(2BN)`，`BM=64=2·BN` ⇒ 相等——**「把原子从 dK/dV 搬到 dQ」流量中性，坐实 ROADMAP「候选①
+> 关闭」**；**单趟 KV-owner（atomic 或等价 bulk-reduce，字节不变）解锁不了 prize（dK/dV-only 已
+> 1.12ms）**。文档 `docs/03` §90、`docs/08` §5.71；原始输出
+> `src/fp8/fa_bwd_fp8_kvowner_mma_p157_dq_{s512_h16,s1024_h32,s4096_h16}.out.txt`、`..._p157_dq0_s4096.out.txt`、`..._p157_dq_ncu_s4096.out.txt`。
+> **下一步候选**：① **（F7 主体，唯一真杠杆）让 dQ 也「owned」（red=0）**，二选一：
+>   (a) **两 kernel**——KV-owner 出 dK/dV（red=0，1.12ms 档）＋ **Q-owner 的 dQ-only pass**
+>       （dQ 在寄存器 owned、red=0，代价是 S/dS 重算一次；算力仅 ~4% 峰值、省 ~74% L2）；
+>   (b) **两级 partial**（需 BN≥BM 或二次归约；本原型 BN=32<BM=64 时 dQ red 恒 ≈ dK/dV）。
+>   ② 其余候选（F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、非 main 融合）均已判决/到顶/收口；
+>   ③ DET 仅 opt-in。
+>
+> **（第一百五十六轮）**：**F7 第九步——微调判决（负结果）：p155 的 KV-owner wgmma+TMA
 > 原型定为局部最优**。为在 F7 主体大改前消除盲点，一次性判决三个「便宜旋钮」（加两个默认关闭
 > 的编译期开关 `FA_KV_CTA`/`FA_KV_OVL`，默认 = p155 逐字行为）：① **消 store bank conflict
 > 无杠杆**——Qp/dOp 两次 4B 存合成一次 8B 存后 `sm__inst_executed` 与 store conflict **逐位不变**
@@ -6280,6 +6320,35 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       > 原 dK/dV red）+ 三梯度同循环摊薄 `wait`（GEMM3/5 上不了 fp8 wgmma，F6 三证）。工程量大，
       转「下一步候选 ①/阻塞」。见 `docs/03` §89、`docs/08` §5.70；原始输出
       `src/fp8/fa_bwd_fp8_kvowner_mma_p156_*`。
+
+- 2026-09-30（第一百五十七轮）：**F7 第十步完成（KV-owner 原型补 dQ 同循环：三梯度全通 +
+  atomic 归约判决）**——F7 主体第一块（dQ 落进同一循环）。
+    - `src/fp8/fa_bwd_fp8_kvowner_mma.cu`：`fp8_kvowner_dkv_wgmma_body` 加编译期开关
+      **`FA_KV_DQ`**（默认 1；=0 退回 p155 逐字行为）。fold 新增 `dS2[m][j]=dS[m][j]·ks[j]`
+      （e5m2/per-m `sds2`，与 Q-owner 主 kernel 逐字同款）；K 的配对布局 `Kp` 从 SW128 `Ks`
+      **整个 m-loop 只建一次**；**GEMM4** `dQ += scale·(dS2·K)` 用
+      `mma_block_bt<GM5=32,GN5=64,BN,E5E4>` + `red_add2` 原子归约进 global `dq`。
+      smem 67072→**74752B（仍 3 CTA/SM，上限 77482B）**；168 regs。
+    - **数值（三梯度全通）**：`dq` vs fp32 ref S512 **2.4262e-1** / S1024H32 **2.3993e-1** /
+      S4096 **2.6355e-1**（与 dk/dv 2.64/3.22e-1 同量级 fp8 噪声，无系统误差）；
+      `wgmma+TMA vs wgmma` 的 dk/dv **逐位 0**（仅搬运通路）。
+    - **性能（同 binary A/B，main，iters=50~100）**：dK/dV-only(`FA_KV_DQ=0`)→三梯度：S512
+      0.0462→**0.0750ms**、S1024H32 0.1940→**0.3044**、S4096 1.1167→**1.8318ms**（dQ 增量
+      **1.6×**）。三梯度 TFLOPS：21.48 / 42.32 / 56.27（峰值 1978.8 的 1.09/2.14/2.84%）。
+    - **ncu（S4096，`..._wgmma_tma`）**：Duration **1.84ms**、`lts__t_sectors_op_red`
+      **102,236,160**（dK/dV-only 原型为 **0**）、`l1tex…_op_red` 68.16M、`read` 52.6M /
+      `write` 6.2M、L2 63.86%、DRAM 2.45%、occ 17.8%（3 CTA/SM）、Waves 5.17、stall
+      `wait 1.64 + short 1.52 + long 0.89`。
+    - **判决**：默认 fp8 `kvtma` main（三梯度）ncu 为 `red` 114.5M（O67）/ L2 76.96% / ~1.92ms
+      （O41）。本原型 dK/dV red=0 但 dQ atomic 新添 102.2M ⇒ **总 red 114.5M→102.2M（−10.7%）**、
+      L2 76.96%→63.86%、时间 1.92→1.84ms（−4%）。**数量级吻合解析式**：dK/dV 贡献
+      `2·S²/(2·BM)=S²/BM`、dQ 贡献 `S²/(2·BN)`，`BM=64=2·BN` ⇒ **两者相等**。⇒ **「把原子从
+      dK/dV 搬到 dQ」是流量中性，实证坐实 ROADMAP「候选①关闭」**；**单趟 KV-owner（atomic 或
+      等价的 bulk-reduce，字节不变）解锁不了 F7 的 prize（dK/dV-only 1.12ms）**。
+    - **结论 / 下一步**：F7 主体真杠杆 = **让 dQ 也 owned（red=0）**：① **两 kernel**（KV-owner
+      dK/dV ＋ **Q-owner dQ-only pass**，dQ 寄存器 owned、red=0，代价 S/dS 重算一次，算力仅
+      ~4% 峰值、省 ~74% L2）；② **两级 partial**（需 BN≥BM 或二次归约）。见 `docs/03` §90、
+      `docs/08` §5.71；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p157_dq_*`。
 
 ## 灵感 / backlog
 

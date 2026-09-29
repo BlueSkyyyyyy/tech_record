@@ -8046,3 +8046,59 @@ reduce** 并把三梯度收进同一循环以摊薄 `wait`——工程量大，�
 - 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p156_tma_{s512_h16_d128_causal_fp8,
   s1024_h32_d128_causal_fp8,s4096_h16_d128_causal_fp8}.out.txt`、
   `..._p156_ncu_tma_s4096.out.txt`、`..._p156_ctasweep_s4096.out.txt`、`..._p156_ovlsweep.out.txt`。
+
+### 90 F7 第十步（第一百五十七轮）：KV-owner 原型补 **dQ 同循环**（三梯度全通 + atomic 归约判决）
+
+**动机**：§89 判决 p155 的 KV-owner wgmma+TMA 原型（**仅 dK/dV**）微调空间已尽，F7 主体唯一
+真杠杆 = **dQ 同循环**——`lts__t_sectors_op_red` 能不能真正降下来，取决于 dQ 的跨 CTA 归约方式。
+本轮先把 **dQ 落进同一循环**，让 KV-owner 成为**首个三梯度全通的 fp8 反向原型**，并给出
+「dQ 走 atomic」的定量判决（这正是 ROADMAP「候选①流量中性」预言的实证）。
+
+**改动**（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，`fp8_kvowner_dkv_wgmma_body`，加编译期开关
+`FA_KV_DQ` 默认 1；=0 退回 p155 逐字行为）：
+
+- **A=`dS2`**：fold 阶段新增 `dS2[m][j]=dS[m][j]·ks[j]`（e5m2，per-m scale `sds2[m]`），与
+  Q-owner 主 kernel 的 `dS2` fold **逐字同款**（4 warp × 16 行 × 2 lane，`foldpack4` + 16B 向量写）。
+- **B=`Kp`**：K 的配对布局 `Kp[rp][d]`（uint16 = `{K[2rp][d], K[2rp+1][d]}`）从 SW128 `Ks` 重建，
+  **整个 m-loop 只建一次**（K 常驻），供 `ldmatrix.x2.trans` 读出 `[N=d][K=j]` 片段。
+- **GEMM4** `dQ += scale·(dS2·K)`：`mma_block_bt<GM5=32, GN5=64, BN, E5E4>(dS2, DSS2, Kp, PSLD, …)`
+  输出 `[BM][HD]`，4 warp 各 32×64；epilogue 乘 `sds2[m]·scale` 后用 **`red_add2`（跨 CTA 原子）**
+  归约进 global `dq`。
+- smem：`+Kp(4352B) + dS2(3072B) + sds2(256B)` ⇒ wgmma smem 67072→**74752B**（仍 **3 CTA/SM**，
+  上限 77482B）。
+
+**数值（三梯度全通）**：`dq` vs fp32 ref，S512 **2.4262e-1** / S1024H32 **2.3993e-1** / S4096
+**2.6355e-1**——与同 kernel 的 `dk/dv`（2.64/3.22e-1）**同量级 fp8 噪声**，无系统误差；
+`wgmma+TMA vs wgmma` 的 dk/dv **逐位 0**（仅搬运通路）。⇒ **KV-owner 三梯度数学正确。**
+
+**性能（CUDA event，main，iters=50~100，同 binary A/B）**：
+
+| case | dK/dV-only（`FA_KV_DQ=0`，p155） | **三梯度**（`FA_KV_DQ=1`） | dQ 增量 | 比值 |
+|---|---|---|---|---|
+| S512 H16 | 0.0462 ms | **0.0750 ms** | +0.0288 | 1.62× |
+| S1024 H32 | 0.1940 ms | **0.3044 ms** | +0.1104 | 1.57× |
+| S4096 H16 | 1.1167 ms | **1.8318 ms** | +0.7151 | 1.64× |
+
+三梯度口径 TFLOPS（`flops=2·S²·H·HD·causal·3`）：S512 21.48 TF / S1024H32 42.32 / S4096 56.27
+（峰值 1978.8 的 1.09%/2.14%/2.84%）。**dQ 一步让 main 涨 ~1.6×**。
+
+**ncu（S4096，`..._wgmma_tma`）**：Duration **1.84 ms**、`lts__t_sectors_op_red` **102,236,160**、
+`l1tex…_op_red` 68.16M、`read` 52.6M / `write` 6.2M、L2 63.86%、DRAM 2.45%、occ 17.8%
+（3 CTA/SM，168 regs）、Waves 5.17、stall `wait 1.64 + short 1.52 + long 0.89`。
+
+**判决（对照 ROADMAP「候选①流量中性」）**：默认 fp8 `kvtma` main（三梯度）ncu 为 `red` **114.5M**
+（O67）/ L2 76.96% / ~1.92ms（O41）。本原型把 dK/dV 的 red 打成 **0**，却因 dQ 走 atomic 新增
+**102.2M** red ⇒ **总 red 只从 114.5M → 102.2M（−10.7%）**，L2 76.96%→63.86%、duration
+1.92→1.84ms（−4%）。**数量级吻合「dQ red ≈ dK/dV red」的解析式**：dK/dV 的贡献数
+`2×S²/(2·BM)=S²/BM`，dQ 的贡献数 `S²/(2·BN)`，`BM=64=2·BN` ⇒ **两者相等**。
+⇒ **把原子从 dK/dV 搬到 dQ 是「流量中性」的，实证坐实 ROADMAP「候选①关闭」**；**单趟 KV-owner
+（无论 atomic 还是等价的 bulk-reduce，字节数不变）不能解锁 F7 的 prize（dK/dV-only 的 1.12ms）**。
+
+**结论 / 下一步**：F7 主体真杠杆只剩 **让 dQ 也「owned」（red=0）**，只有两条路：① **两 kernel**——
+KV-owner 出 dK/dV（red=0）＋ **Q-owner 的 dQ-only pass**（dQ 在寄存器 owned、red=0，代价是 S/dS
+重算一次，但算力仅 ~4% 峰值，L2 省 ~74% 值得）；② **两级 partial**——需 BN≥BM 或二次归约
+（本原型 BN=32<BM=64 时 dQ red 恒 ≈ dK/dV）。**转入「下一步候选 ①」**。
+
+- 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p157_dq_{s512_h16_d128_causal_fp8,
+  s1024_h32_d128_causal_fp8,s4096_h16_d128_causal_fp8}.out.txt`、`..._p157_dq0_s4096.out.txt`（A/B）、
+  `..._p157_dq_ncu_s4096.out.txt`。
