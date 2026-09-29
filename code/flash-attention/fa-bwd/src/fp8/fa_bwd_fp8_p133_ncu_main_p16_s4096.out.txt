@@ -1,0 +1,16 @@
+  dq   vs te_dq: max_abs=4.525e-01  max_rel=1.051e+02
+  dk   vs te_dk: max_abs=5.325e-01  max_rel=1.158e+02
+  dv   vs te_dv: max_abs=6.806e-01  max_rel=1.078e+02
+[1047719] fa_bwd_fp8_main.out@127.0.0.1
+  void fa_bwd_fp8_mma_kvtma_kernel<128, 64, 32, 1, 1, 1, 1, 1, 1>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, float *, float *, int, float *, const int *) (64, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ---------------------------------------------- ----------- ------------
+    Metric Name                                    Metric Unit Metric Value
+    ---------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                 Mbyte        80.68
+    dram__bytes_write.sum                                Gbyte         1.11
+    gpu__time_duration.sum                                  ms         1.78
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum      sector     34078720
+    lts__t_sectors_op_read.sum                          sector     26151778
+    lts__t_sectors_op_write.sum                         sector     53014348
+    ---------------------------------------------- ----------- ------------

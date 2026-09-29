@@ -604,9 +604,41 @@ __device__ __forceinline__ void dkv_det_store(float* part, float a, float b) {
   *reinterpret_cast<float2*>(part) = make_float2(a, b);
 }
 
+// ---- F4（第一百三十三轮）：把 fp16/bf16 O60/O62 的「partial 降精度 + 写扇区化」逐字搬到 fp8 ----
+// 动机：fp8 默认 DET 的 partial 是 fp32（每 lane 一次 `float2` = 8B，同一 quad 的 4 个 lane
+//   拼成连续 32B 扇区 ⇒ **已落满扇区**）。但 DET 的二次归约是纯 DRAM 带宽 bound（docs/03 §56：
+//   reduce 731.6µs / DRAM 91.5%、partial 写 2.20GB），把 partial 改存 **fp16** 可把写/读字节
+//   减半、直接打这条墙。代价与 fp16/bf16 O60 同：每 lane 一次只写 4B（`__half2`），同一 quad
+//   仅 16B、**落不满 32B 扇区** ⇒ store 扇区数不减、主 kernel 写侧反而更碎。故必须叠加 O62 的
+//   **扇区化**：把相邻两列组 `j`、`j+1` 的 half2 拼成一次 8B 写（`uint2`），4 个 lane 覆盖连续
+//   32B；HD 维做 16 列块内置换（`dkv_p16_perm`）使同一 lane 的两个 half2 相邻。
+//   partial 以 fp16 存储时指针仍按 `float*` 传入，内部重解释为 `__half*`（元素单位是 2B，故
+//   `off` 是 **half 元素下标**，必须在 `__half*` 上做加法）。
+__device__ __forceinline__ void dkv_det_store_h4(float* base, size_t off, float a0, float a1,
+                                                 float b0, float b1) {
+  __half2 h0 = __floats2half2_rn(a0, a1), h1 = __floats2half2_rn(b0, b1);
+  uint2 u;
+  u.x = *reinterpret_cast<unsigned*>(&h0);
+  u.y = *reinterpret_cast<unsigned*>(&h1);
+  *reinterpret_cast<uint2*>(reinterpret_cast<__half*>(base) + off) = u;
+}
+
+// F4：fp16 partial（`P16`）列布局的 16 列块内置换，公式与 fp16/bf16 `dkv_p16_perm` **逐字相同**。
+//   原列 `c = j*8 + 2*L + h`（`j` 列组、`L=lane&3`、`h∈{0,1}`；fp8 的 mma 列 `c2=(lane&3)*2`）
+//   映射到 `((j>>1)<<4) + (L<<2) + ((j&1)<<1) + h`：同一 lane 的 group `j`、`j+1` 两个 half2
+//   相邻构成 8B，4 个 lane 拼成 32B 扇区。`c0=wc*GN34` 是 16 的倍数，故全局列索引可直接套用。
+//   reduce 端按此索引读回，求和集合/次序不变 ⇒ 仍确定性、数值只差 fp16 舍入。
+__device__ __forceinline__ int dkv_p16_perm(int c) {
+  const int rem = c & 7, L = rem >> 1, h = rem & 1;
+  const int j = c >> 3;
+  return ((j >> 1) << 4) + (L << 2) + ((j & 1) << 1) + h;
+}
+
 // partial → dK/dV 累加（固定次序）。causal 下 KV 行 `jg` 只被 `mblk >= jg/BM` 的 CTA 写，
 //   故从 `jg/BM` 起求和；非 causal 从 0 起。`BM` 由模板给出（fp8 默认 64；fp16 用 128）。
-template <int HD, int BM = 64>
+// F4：`P16=true` 时 dK/dV partial 以 fp16 存储且用扇区化 16 列块内置换布局（O62），按置换后
+//   的列索引读回（求和集合/次序不变，仍确定性；数值只差 fp16 舍入）。
+template <int HD, int BM = 64, bool P16 = false>
 __global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
                                   const float* __restrict__ dv_part,
                                   float* __restrict__ dk_acc, float* __restrict__ dv_acc,
@@ -624,8 +656,14 @@ __global__ void dkv_reduce_kernel(const float* __restrict__ dk_part,
     const size_t prow = (size_t)(b * H + h0 + hh);
     for (int m = mblk0; m < nblk; ++m) {
       const size_t base = ((prow * nblk + m) * (size_t)S + jg) * HD + c;
-      sk += dk_part[base];
-      sv += dv_part[base];
+      if constexpr (P16) {
+        const size_t bp = ((prow * nblk + m) * (size_t)S + jg) * HD + dkv_p16_perm(c);
+        sk += __half2float(reinterpret_cast<const __half*>(dk_part)[bp]);
+        sv += __half2float(reinterpret_cast<const __half*>(dv_part)[bp]);
+      } else {
+        sk += dk_part[base];
+        sv += dv_part[base];
+      }
     }
   }
   const size_t o = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
@@ -660,7 +698,7 @@ __global__ void dq_reduce_kernel(const float* __restrict__ dq_part, float* __res
 //   launch + 小 S 的尾部」，对大 S 的纯带宽墙中性。数学/求和次序逐字与两个 kernel 相同 ⇒
 //   融合版与分开版**逐位相同**。grid = `dkv_blocks + dq_blocks`（1D，block=HD）；前
 //   `dkv_blocks` 个块做 dK/dV，其余做 dQ。`ksplit==1` 时 `dq_blocks=0`，退化成纯 dkv。
-template <int HD, int BM = 64>
+template <int HD, int BM = 64, bool P16 = false>
 __global__ void dkv_dq_reduce_kernel(const float* __restrict__ dk_part,
                                      const float* __restrict__ dv_part,
                                      const float* __restrict__ dq_part,
@@ -682,8 +720,14 @@ __global__ void dkv_dq_reduce_kernel(const float* __restrict__ dk_part,
       const size_t prow = (size_t)(b * H + h0 + hh);
       for (int m = mblk0; m < nblk; ++m) {
         const size_t base = ((prow * nblk + m) * (size_t)S + jg) * HD + c;
-        sk += dk_part[base];
-        sv += dv_part[base];
+        if constexpr (P16) {
+          const size_t bp = ((prow * nblk + m) * (size_t)S + jg) * HD + dkv_p16_perm(c);
+          sk += __half2float(reinterpret_cast<const __half*>(dk_part)[bp]);
+          sv += __half2float(reinterpret_cast<const __half*>(dv_part)[bp]);
+        } else {
+          sk += dk_part[base];
+          sv += dv_part[base];
+        }
       }
     }
     const size_t o = (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c;
@@ -2025,7 +2069,7 @@ __global__ void delta_warp_kernel(const float* __restrict__ o,
 //   `NWM=NTH/32/NWAR` 为 M 方向 warp 数。各 warp tile 由 NWM/NWAR 派生（见下方 GM*/GN*）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
            bool RCP = true, bool TMA = false, bool KVTMA = false, int NTH = THREADS,
-           int NWAR = WN, bool KVPIPE = false, bool DET = false>
+           int NWAR = WN, bool KVPIPE = false, bool DET = false, bool DET_HALF = false>
 __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8,
@@ -2789,6 +2833,18 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                   //   随后由 `bulk_flush` 一次性 coalesced 归约回 global。
                   wstg[(i * 16 + g + (q >= 2 ? 8 : 0)) * STGS + (j * 8 + c2 + (q & 1))] =
                       acc[i][j][q] * sA[r];
+                } else if constexpr (DET && DET_HALF) {
+                  // F4：fp16 partial + O62 扇区化——把 group `j`、`j+1` 的两个 half2 拼成一次
+                  //   8B 写（4 lane 覆盖连续 32B），列地址走 16 列块内置换（与 reduce 读回一致）。
+                  if ((q & 1) == 0 && (j & 1) == 0 && (j + 1) < NTM34) {
+                    const size_t rb =
+                        part_base
+                            ? ((size_t)part_base[b] + ((size_t)h * nblk_seq + mblk) * len + jg) * HD
+                            : (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD;
+                    const size_t dpo = rb + d0 + c0 + (j >> 1) * 16 + (lane & 3) * 4;
+                    dkv_det_store_h4(dv_part, dpo, acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r],
+                                     acc[i][j + 1][q] * sA[r], acc[i][j + 1][q + 1] * sA[r]);
+                  }
                 } else if constexpr (DET) {
                   // P3-4e：非原子写 partial（每元素本 CTA 唯一）→ 固定次序二次归约。
                   // P3-4o：`part_base` 非空时改用 compact per-sequence 布局（缩小地址跨度）。
@@ -2824,6 +2880,19 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                 if constexpr (kBulkRed) {
                   wstg[(i * 16 + g + (q >= 2 ? 8 : 0)) * STGS + (j * 8 + c2 + (q & 1))] =
                       acc[i][j][q] * sds3[r] * scale;
+                } else if constexpr (DET && DET_HALF) {
+                  // F4：fp16 partial + O62 扇区化（与 epi_dv 同布局；dK 额外乘 fold scale）。
+                  if ((q & 1) == 0 && (j & 1) == 0 && (j + 1) < NTM34) {
+                    const size_t rb =
+                        part_base
+                            ? ((size_t)part_base[b] + ((size_t)h * nblk_seq + mblk) * len + jg) * HD
+                            : (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD;
+                    const size_t dpo = rb + d0 + c0 + (j >> 1) * 16 + (lane & 3) * 4;
+                    dkv_det_store_h4(dk_part, dpo, acc[i][j][q] * sds3[r] * scale,
+                                     acc[i][j][q + 1] * sds3[r] * scale,
+                                     acc[i][j + 1][q] * sds3[r] * scale,
+                                     acc[i][j + 1][q + 1] * sds3[r] * scale);
+                  }
                 } else if constexpr (DET) {
                   if ((q & 1) == 0) {
                     const size_t dpo =
@@ -3057,7 +3126,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 //   `__grid_constant__` 描述符（`TMA=true` 才用到）。
 // O47：`NTH`/`NWAR` 同 `fp8_mma_body`（默认 128/2 与历史逐字等价；MLA 用 256/4）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
-          bool RCP = true, int NTH = THREADS, int NWAR = WN, bool KVPIPE = false, bool DET = false>
+          bool RCP = true, int NTH = THREADS, int NWAR = WN, bool KVPIPE = false, bool DET = false,
+          bool DET_HALF = false>
 __global__ void __launch_bounds__(NTH, (NTH == THREADS && HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8, const float* __restrict__ ks,
@@ -3073,7 +3143,8 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       float* __restrict__ dv_part = nullptr, int nblk = 0,
                       float* __restrict__ dq_part = nullptr,
                       const int* __restrict__ part_base = nullptr) {
-  fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR, KVPIPE, DET>(
+  fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR, KVPIPE, DET,
+               DET_HALF>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, nullptr, nullptr, nullptr, nullptr, mt_b, mt_m,
       dk_part, dv_part, nblk, dq_part, part_base);
@@ -3082,7 +3153,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
 // O37：Q/dO 4D-TMA 版（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA 路径实例化）。
 // P3-4g：`DET=true` 时复用同一 body 的确定性 dK/dV 路径（partial + 固定次序归约）。
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
-          bool DET = false>
+          bool DET = false, bool DET_HALF = false>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
@@ -3098,7 +3169,8 @@ fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             float* __restrict__ dv_part = nullptr, int nblk = 0,
                             float* __restrict__ dq_part = nullptr,
                             const int* __restrict__ part_base = nullptr) {
-  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, false, THREADS, WN, false, DET>(
+  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, false, THREADS, WN, false, DET,
+               DET_HALF>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, &qmap, &dmap, nullptr, nullptr, nullptr, nullptr,
       dk_part, dv_part, nblk, dq_part, part_base);
@@ -3109,7 +3181,7 @@ fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
 // P3-4g：`DET=true` 时复用同一 body 的确定性 dK/dV 路径（partial + 固定次序归约），
 //   把 `--det` 从默认 mma 路径扩到 Hopper TMA 快路。
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
-          bool DET = false>
+          bool DET = false, bool DET_HALF = false>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
@@ -3127,7 +3199,8 @@ fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             float* __restrict__ dv_part = nullptr, int nblk = 0,
                             float* __restrict__ dq_part = nullptr,
                             const int* __restrict__ part_base = nullptr) {
-  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true, THREADS, WN, false, DET>(
+  fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true, THREADS, WN, false, DET,
+               DET_HALF>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap, nullptr, nullptr,
       dk_part, dv_part, nblk, dq_part, part_base);

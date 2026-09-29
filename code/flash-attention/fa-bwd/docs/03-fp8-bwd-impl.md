@@ -6214,3 +6214,117 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 （warp specialization / 更深 mbarrier 流水）**与 **F4（dK/dV 归约去 L2 `red`）**；
 ② 把 fp8 的 partial 降精度 + 扇区化（第 131 轮候选 ①，`fp8_mma_body` 两个写点）接上，
 压 L2 `red`；③ preprocess（F5）S4096 已仅 0.22ms、非当前墙。
+
+---
+
+## 68. F4（第一百三十三轮，**正结果（DET 路径），opt-in `--det`**）：fp8 DET 的 dK/dV partial「降精度 + 写扇区化」
+
+### 68.1 动机与现状（落实第 131 轮候选 ① / §67.7 下一步候选 ②）
+
+`docs/03` §56 已定量：fp8 的确定性反向（`--det`）把跨 CTA `atomicAdd`（114.5M L2 `red` 扇区）
+换成「按 `(Q 头, Q 块)` 分片的 partial 覆盖写 + 固定次序二次归约」。DET 的**二次归约是纯 DRAM
+带宽 bound**（`dkv_reduce_kernel` 731.6µs、DRAM 91.5%），partial 写 2.20GB / 读 4.3GB（dk+dv）——
+因为 partial 是 **fp32**。fp16/bf16 早在 **O60**（partial 降精度到 fp16/bf16）+ **O62**（写扇区化）
+就把这条墙打掉（reduce 1.24–1.66×、DET 主 kernel 写侧 0.84→1.10–1.17×、`--det` 首次快过
+非确定 atomic）；**fp8 一直没做**（`fp8_mma_body` 的两个 DET 写点仍是 fp32）。
+
+**fp8 与 fp16/bf16 的关键差别**：fp8 的 mma `m16n8k32` 片段里，同一 quad 的 4 个 lane 的列
+`c2=(lane&3)*2` 写 `float2`（8B）恰为连续 32B ⇒ **fp32 partial 已落满 L2 扇区**。若只把存储
+改 fp16（每 lane 4B `__half2`），quad 只覆盖 16B、**落不满 32B 扇区** ⇒ store 扇区数不减、
+主 kernel 写侧变碎（O60 在 fp16/bf16 上量到的正是此现象）。故 **降精度必须叠加 O62 的写扇区化**
+才成立。
+
+### 68.2 实现（单/两文件 device 逐字同源，`sync_onefile_device.py` 核对 `identical: True`）
+
+- **device（`fa_bwd_fp8_kernels.cuh`）**：
+  新增 `dkv_det_store_h4(float* base, size_t off, a0,a1,b0,b1)`（把相邻两列组 `j`、`j+1` 的两个
+  `half2` 拼成一次 `uint2` 8B 写）与 `dkv_p16_perm(int c)`（16 列块内置换，公式与 fp16/bf16
+  **逐字相同**：`c = j*8 + 2L + h` → `((j>>1)<<4)+(L<<2)+((j&1)<<1)+h`；`c0=wc*GN34` 是 16 的
+  倍数，故全局列索引可直接套用）。`fp8_mma_body` 加模板参数 `bool DET_HALF=false`，`epi_dv`/
+  `epi_dk` 在 `DET && DET_HALF` 时按 `(j>>1)*16+(lane&3)*4` 的置换列一次写 8B（每个 lane 的
+  `uint2` 恰含 group `j`、`j+1` 两段，求和集合/次序不变）。`fa_bwd_fp8_mma_kernel`、`_qdtma`、
+  `_kvtma` 三个壳加 `DET_HALF` 透传。
+  `dkv_reduce_kernel<HD,BM>`、`dkv_dq_reduce_kernel<HD,BM>` 加 `bool P16=false`：`P16` 时按
+  `dkv_p16_perm(c)` 读回 fp16 partial（`__half2float` 进 fp32 累加器，求和次序逐字不变）。
+- **host（`fa_bwd_fp8_main.cu`，两文件；单文件同步 host 段）**：`launch_bwd_main_kvtma_det` 加
+  `DET_HALF` 模板；P3-4g 的 `--det` A/B 段加 `run_dth`（额外分配 fp16 partial 缓冲、走
+  `DET_HALF=true` 主 kernel + `dkv_reduce_kernel<128,64,true>`），打印 `[F4 A/B]` 三列时间 +
+  `runs[1-2]` 逐位复现 + `fp16-vs-fp32`/`fp16-vs-atomic` 差。**默认路径一行未改**（`DET_HALF`
+  默认 false；`--ci` gate 全绿、`--check docs/04` 194 行 OK）。
+
+### 68.3 数值：确定性不变、只差 fp16 舍入（`runs[1-2]` 两次跑）
+
+| case（fp8，`--det`，ksplit=1） | atomic ms | DET-fp32 ms | **DET-fp16(扇区化) ms** | `runs[1-2]` dk/dv | fp16-vs-fp32 dk/dv | ours-vs-ref（不变） |
+|---|---|---|---|---|---|---|
+| S=512 MHA causal（两文件） | 0.1205 | 0.1367 (0.882×) | **0.1290 (0.934×)** | **0 / 0** | 1.01e-3 / 1.81e-3 | 2.426/2.972/3.733e-1 |
+| S=4096 MHA causal（两文件） | 2.0288 | 2.5974 (0.781×) | **2.2142 (0.916×)** | **0 / 0** | 9.66e-4 / 1.76e-3 | 2.635/2.644/3.216e-1 |
+| S=1024 GQA kv4 causal（两文件） | 0.3320 | 0.4142 (0.802×) | **0.3679 (0.903×)** | **0 / 0** | 1.91e-3 / 2.36e-3 | 2.517/5.339/7.173e-1 |
+
+- **`runs[1-2] bitwise dk/dv = 0`**（三种 shape）：确定性不变。
+- **fp16-vs-fp32 ≈ 1e-3–2.4e-3**：partial 过一趟 fp16 舍入（dK/dV 梯度 amax ~3–6，相对 ~3–4e-4，
+  与 O60 fp16/bf16 同量级），非结构误差；`ours vs fp32 ref` 与历史**逐位不变**。
+- 单文件（S=512）与两文件逐指标一致（`DET-fp16 0.937×`、`fp16-vs-fp32 1.01e-3/1.81e-3`、runs=0）。
+
+### 68.4 性能（同 session，CUDA event，`--det` A/B）
+
+| case | atomic ms | DET-fp32（0.78–0.88×） | **DET-fp16** | fp16 vs fp32 | fp16 vs atomic |
+|---|---|---|---|---|---|
+| S=512 | 0.1205 | 0.1367 | **0.1290** | 1.06× | 0.934× |
+| S=4096 | 2.0288 | 2.5974 | **2.2142** | **1.17×** | 0.916× |
+| GQA kv4 | 0.3320 | 0.4142 | **0.3679** | 1.13× | 0.903× |
+
+即 fp8 DET 相对 fp32 DET 端到端 **1.06–1.17×**（与 O60/O62 在 fp16/bf16 上的方向一致）。
+但 **ksplit=1 下仍略慢于非确定 atomic**（0.90–0.93×）——剩余差距是「partial 多一趟写 + 一趟读」
+的固有字节（atomic 在 L2 里 RMW，无额外 DRAM）；fp8 的 partial 即使 fp16 也有 1.1GB 写 + 1.1GB 读。
+这与 O62 时 fp16/bf16「sector 减半后 DET 反超 atomic」不同：fp8 原 fp32 partial 已满扇区，降精度只
+减字节、不再减扇区数（见 §68.5 的 store 扇区：68.2M→34.1M 是「字节减半 + 扇区也减半」，因为
+fp16 后 8B/lane 恰好仍覆盖 32B；但 reduce 读扇区 102.2M→51.1M 同理）。**结论：fp8 DET 的确定性
+售价从 +21%（fp32）降到 +9%（fp16）；要让 fp8 `--det` 端到端转正需再减 partial 字节
+（fp8 partial？）或提 reduce 效率。**
+
+### 68.5 ncu：写扇区/读扇区精确减半、reduce 1.75×
+
+**DET 主 kernel**（`fa_bwd_fp8_mma_kvtma_kernel<128,64,32,1,1,1,1,1,{0,1}>`，S=4096，ksplit=1）：
+
+| 指标 | DET-fp32 | **DET-fp16(扇区化)** |
+|---|---|---|
+| Duration | 1.93 ms | **1.78 ms** |
+| DRAM 写 / 读 | 2.21 GB / 94.6 MB | **1.11 GB / 80.7 MB** |
+| L1 store 扇区 | 68,157,440 | **34,078,720（−50%）** |
+| L2 store 扇区 | 103,890,606 | **53,014,348（−49%）** |
+
+即 **O62 扇区化在 fp8 上同样成立**：每 lane 8B、quad 32B 连续 ⇒ store 扇区精确减半（不是只减字节）。
+
+**`dkv_reduce_kernel<128,64,{0,1}>`**（S=4096）：
+
+| 指标 | P16=false | **P16=true** |
+|---|---|---|
+| Duration | 734.7 µs | **420.9 µs（1.746×）** |
+| DRAM 读 | 2.18 GB | **1.09 GB** |
+| L2 读扇区 | 102,243,661 | **51,126,082（−50%）** |
+| DRAM 吞吐占比 | 91.1% | **81.5%** |
+
+置换读零代价（扇区仍满），仍纯 DRAM 带宽 bound。
+
+### 68.6 复现 / 原始输出
+
+```bash
+# A/B（atomic vs DET-fp32 vs DET-fp16）——走 F1 默认的 Hopper 快路（TMA+wgmma）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --det --iters=10 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+# ncu：DET-fp32 vs DET-fp16 主 kernel 的 store 扇区
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name-base mangled \
+  --kernel-name "regex:kvtma_kernelILi128ELi64ELi32ELb1ELb1ELb1ELb1ELb1ELb1E" --launch-count 1 \
+  --metrics l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum,lts__t_sectors_op_write.sum \
+  -- --det --iters=1 --dir=.../b1_s4096_h16_d128_causal_fp8
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_p133_h_det_{s512,s4096,gqa_kv4}.out.txt`、
+`..._p133_onefile_det_s512.out.txt`、`..._p133_ncu_main_{p32,p16}_s4096.out.txt`、
+`..._p133_ncu_reduce_s4096.out.txt`、`src/fa_bwd_p133_ci.out.txt`。
+
+**下一步候选**：① F4 的**默认路径**（非确定 atomic 的 L2 `red`，114.5M 扇区）仍被 O42 判为
+「不可用 smem+TMA 替换、只剩放大 BM/提 occupancy 两条硬约束路」锁定，见 ROADMAP「阻塞」；
+② fp8 DET 要把端到端转正需再减 partial 字节（fp8 partial / 只存 causal 非零块）或提 reduce
+效率；③ 本改动可同样扩到 varlen/MLA 的 DET 路径（当前只在定长 D=128 kvtma 的 A/B 接线）。

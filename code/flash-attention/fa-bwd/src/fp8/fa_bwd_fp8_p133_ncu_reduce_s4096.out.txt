@@ -1,0 +1,14 @@
+=== dkv_reduce P16=0 ===
+    Metric Name                                        Metric Unit Metric Value
+    dram__bytes_read.sum                                     Gbyte         2.18
+    dram__bytes_write.sum                                    Mbyte        61.78
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        91.07
+    gpu__time_duration.sum                                      us       734.72
+    lts__t_sectors_op_read.sum                              sector    102243661
+=== dkv_reduce P16=1 ===
+    Metric Name                                        Metric Unit Metric Value
+    dram__bytes_read.sum                                     Gbyte         1.09
+    dram__bytes_write.sum                                    Mbyte        59.17
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        81.49
+    gpu__time_duration.sum                                      us       420.90
+    lts__t_sectors_op_read.sum                              sector     51126082

@@ -2688,14 +2688,33 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 - [x] **F2** Q/dO 也上 **4D TMA**（K/V 已在 O41）
       → 实际早在 **O37** 完成、并在 F1 默认化里生效（`qd-tma=on`），此处标注为已覆盖。
 - [ ] **F3** **warp specialization / 更深 mbarrier 流水**（对标 TE 384 线程、1 CTA/SM）
-- [ ] **F4** dK/dV 归约（L2 red；fp8 天花板实验显示占 ~35%）
+- [~] **F4** dK/dV 归约（L2 red；fp8 天花板实验显示占 ~35%）
+      → **第一步已完成（第一百三十三轮）**：把 fp16/bf16 O60+O62 的「partial 降精度 + 写扇区化」
+      逐字搬到 fp8 的 `--det` 路径（`DET_HALF`/`P16`）。S4096 DET-fp32→fp16 **1.17×**、相对
+      atomic 由 0.78×→**0.92×**；ncu store 扇区 68.2M→34.1M（−50%）、reduce 735→**421µs（1.75×）**；
+      `runs[1-2]` 逐位=0、默认路径一行未改（`--ci` 全绿）。**默认路径的非确定 atomic `red`
+      （114.5M 扇区）仍被 O42 的双硬约束锁定，见「阻塞」**。详见 `docs/03` §68、`docs/08` §5.48。
 - [ ] **F5** preprocess 继续提速
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百三十二轮）**：**F1——fp8 主路径默认切到 Hopper（wgmma GEMM1/2 + Q/K/V/dO
+> **最新（第一百三十三轮）**：**F4 第一步——fp8 DET 的 dK/dV partial「降精度 + 写扇区化」
+> （正结果（DET 路径），opt-in `--det`）**。把 fp16/bf16 O60+O62 的做法逐字搬到 fp8：新增
+> `dkv_det_store_h4`/`dkv_p16_perm`，`fp8_mma_body` 加 `DET_HALF`、reduce 加 `P16`。**fp8 特殊性**
+> 是 fp32 partial 已满扇区、只降 fp16 会变 16B/quad ⇒ 必须叠加扇区化。**S4096 DET-fp32→fp16
+> 1.17×**（DET/atomic 由 0.78×→**0.92×**）；ncu store 扇区 68.2M→**34.1M（−50%）**、reduce
+> 735→**421µs（1.75×）**；`runs[1-2]` 逐位=0、`ours-vs-ref` 逐位不变、`--ci` 全绿。
+> **默认路径的非确定 atomic `red`（114.5M）仍被 O42 双硬约束锁定。** 详见「当前进度 第一百三十三轮」、
+> `docs/03` §68、`docs/08` §5.48；原始输出 `src/fp8/fa_bwd_fp8_p133_*`。
+> **下一步候选**：① **F3（warp specialization / 更深 mbarrier 流水，对标 TE 384 线程/1 CTA/SM）**
+> ——当前 `wait 1.59 + short 1.29` 的最大来源是 GEMM3/4/5 的 mma 依赖，WS 只能*重叠*不能*减少*，
+> 先按 O48 的判据（被拆的工作是否「发射即返回」）评估；② F4 默认路径 `red` 仍受本卡寄存器/
+> smem 硬墙锁定，见「阻塞」；③ fp8 DET 转正需再减 partial 字节或提 reduce 效率；④ 本改动扩到
+> varlen/MLA 的 DET 路径。
+>
+> **（第一百三十二轮）**：**F1——fp8 主路径默认切到 Hopper（wgmma GEMM1/2 + Q/K/V/dO
 > 4D-TMA；harness-only，device 一行未改）**。落实『fp8 专项冲刺』第一步：ours 的 `ours` 口径
 > 此前一直是 `-arch=sm_90` 的 mma.sync，而 O9c-2/O32/O37/O41 的 wgmma+TMA 只在 `--hopper` 下生效。
 > `harness/fa_bwd_run.py` 新增 `FP8_HOPPER_DEFAULT`（fp8 定长构建切 `sm90a -DFA_WGMMA -DFA_TMA
@@ -5006,6 +5025,34 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     与「阻塞」里「跨-tile `P/dS` 双缓冲放不下」的核算逐项吻合 ⇒ 下一步 F3（warp specialization）
     /F4（去 L2 `red`）。详见 `docs/03` §67、`docs/08` §5.47；原始输出
     `src/fp8/fa_bwd_fp8_p132_*`。
+
+- 2026-09-29（第一百三十三轮）：**F4 第一步完成（fp8 DET 的 dK/dV partial「降精度 + 写扇区化」，
+  正结果（DET 路径），opt-in `--det`）**——落实第 131 轮候选 ① / §67.7 候选 ②。
+  - 动机：§56 已定量 fp8 `--det` 的二次归约是纯 DRAM 带宽 bound（731.6µs、DRAM 91.5%），因为
+    partial 是 fp32（2.2GB 写 + 4.3GB 读）。fp16/bf16 早用 O60（降精度）+O62（写扇区化）打掉；
+    fp8 一直没做。**fp8 的特殊性**：`m16n8k32` 下 fp32 partial 已落满 32B 扇区（quad 4×`float2`
+    连续），只降 fp16 会变 16B/quad、扇区不减 ⇒ 必须叠加 O62 的「相邻列组拼 8B + 16 列块内置换」。
+  - **改动（单/两文件 device 逐字一致，`sync_onefile_device.py` `identical: True`）**：新增
+    `dkv_det_store_h4` + `dkv_p16_perm`（公式与 fp16/bf16 逐字同）；`fp8_mma_body` 加
+    `bool DET_HALF`，`epi_dv/epi_dk` 在 `DET_HALF` 下一次写 8B；三个 `_mma/_qdtma/_kvtma` 壳
+    透传；`dkv_reduce_kernel`/`dkv_dq_reduce_kernel` 加 `bool P16`（置换列读回 fp16）。host
+    `launch_bwd_main_kvtma_det` 加 `DET_HALF`、P3-4g A/B 加 `run_dth` + `[F4 A/B]` 打印。
+    **默认路径一行未改**。
+  - **数值**：`runs[1-2]` 逐位 **0/0**（确定性保留）；fp16-vs-fp32 dk/dv 1e-3–2.4e-3（纯 partial
+    的 fp16 舍入）；`ours-vs-ref` 与历史**逐位不变**（S512 2.426/2.972/3.733e-1、S4096
+    2.635/2.644/3.216e-1、GQA kv4 2.517/5.339/7.173e-1）；单文件 S512 与两文件逐指标一致。
+  - **性能**（同 session event，`--det` A/B）：DET-fp32→fp16 = S512 1.06×、S4096 **1.17×**、
+    GQA kv4 1.13×；相对非确定 atomic 由 0.88/0.78/0.80× 抬到 **0.93/0.92/0.90×**（ksplit=1 下仍
+    略慢——partial 即使 fp16 仍有 1.1GB 写 + 1.1GB 读，atomic 在 L2 RMW 无额外 DRAM）。
+  - **ncu**：DET 主 kernel store 扇区 68.2M→**34.1M（−50%）**、DRAM 写 2.21→1.11GB、Duration
+    1.93→1.78ms；`dkv_reduce_kernel` 734.7→**420.9µs（1.75×）**、读扇区 102.2M→51.1M、DRAM 读
+    2.18→1.09GB（仍纯带宽 bound）。**O62 扇区化在 fp8 上同样成立。**
+  - **回归**：`--no-run --ci` gate 全绿（fp16 7.812e-3 / bf16 3.125e-2 / fp8 1.049e-5）、
+    `--check docs/04` OK 194 行。**默认路径 L2 `red`（114.5M 扇区）仍被 O42 的双硬约束锁定。**
+    详见 `docs/03` §68、`docs/08` §5.48；原始输出 `src/fp8/fa_bwd_fp8_p133_*`、`src/fa_bwd_p133_ci.out.txt`。
+  - **下一步候选**：① F3（warp specialization / 更深 mbarrier 流水）；② F4 默认路径 red（阻塞）；
+    ③ fp8 DET 转正需再减 partial 字节（fp8 partial / 只存 causal 非零块）或提 reduce 效率；
+    ④ 本改动扩到 varlen/MLA 的 DET 路径。
 
 ## 灵感 / backlog
 
