@@ -7398,3 +7398,72 @@ python3 harness/te_fp8_ncu.py "1 4096 16 128 causal"   # 配合 ncu --kernel-nam
 
 原始输出 `src/fp8/fa_bwd_fp8_p147_r4_ab.out.txt`、`..._p147_ncu_red.out.txt`、
 `..._p147_te_ncu.out.txt`。
+
+## 81. F7 第一步（第一百四十八轮）：dK/dV 的「KV-owner 单一 owner」划分 smoke —— 正结果（机制）
+
+> 落实 ROADMAP「fp8 专项冲刺」F7：O67（§80）把默认 fp8 main 的 L2 `red`（S4096 114.5M 扇区、
+> 占 L2 74%）真差距钉到**工作划分**——TE 在同 **BM=64** 下 `red` 仅 ours 的 **1/4.4×**、L2 总量
+> 1/4.2×、时间 1/6×（TE grid=132 persistent vs ours ksplit=8→8192）。默认 ours 是 **Q-owner**：
+> 每 CTA 拥有一个 query 行块、遍历 KV 块，dK/dV 用**跨 CTA `atomicAdd`**（每个 KV 元素被
+> ~mblk 个 CTA 各加一次）。F7 = 换成 **KV-owner**：每 CTA 拥有一个 KV 行块、遍历所有 query 块，
+> dK/dV 在本地累加后**一次写**。本轮是 F7 的**前置 de-risk**（同 F6 第一步、O42 smoke 的做法）：
+> 用一个**独立、自包含的最小 kernel**证明「换划分」在数学上正确、且能把 `red` 打到 **0**。
+
+### 81.1 smoke 设计（`src/fp8/fa_bwd_fp8_kvowner_smoke.cu`）
+
+- 自包含：host 造随机 Q/K/V/dO（S=512,H=8,HD=128,causal,scale=1/√HD），用 **double 版 host 参考**
+  （独立算 LSE、delta、dK、dV）作基准；**fp32 标量** device kernel（隔离「划分」这一变量；
+  真实 kernel 用 fp8 mma，但划分机制与 dtype 无关）。
+- 两个 device kernel 对同一批输入：
+  - `mowner_kernel`（现有 ours 划分）：grid=`(S/BM,H)`，每 CTA 一块 query，遍历 KV（causal 裁到
+    `jmax=m0+BM-1`），逐 `(m,kv)` tile 对 dK/dV `atomicAdd` —— **red 大**。
+  - `kvowner_kernel`（F7 划分）：grid=`(S/BN,H)`，每 CTA 一块 KV `[j0,j0+BN)`，从含 `j0` 的 query
+    块开始遍历到 S，把 dK/dV 在 smem `dKa/dVa[BN][HD]` 里**本地累加**，循环结束后**一次 plain
+    store** 写回 —— **red = 0**。
+
+### 81.2 数值（S=512 H=8 HD=128 causal，fp32 标量）
+
+| 实现 | dk max_abs / rel | dv max_abs / rel |
+|---|---|---|
+| Q-owner（atomic） vs double ref | 3.64e-05 / 9.60e-07 | 2.44e-06 / 3.76e-07 |
+| **KV-owner（single store） vs double ref** | **3.64e-05 / 9.60e-07** | **2.28e-06 / 3.51e-07** |
+
+`KV-owner vs Q-owner`：dk max_abs **5.72e-06**、dv max_abs **7.15e-07**（仅 fp32 加和次序）。
+⇒ **KV-owner 划分数学正确**，与现有 Q-owner 在 fp32 舍入内一致。
+
+### 81.3 ncu：red 归零（机制成立）
+
+`lts__t_sectors`（同 shape，单 kernel）：
+
+| kernel | `op_red` | `op_read` | `op_write` | `l1tex_...op_red`(请求) |
+|---|---|---|---|---|
+| Q-owner（atomic） | **1,671,168** | 1,504,317 | 16,252 | 278,528 |
+| **KV-owner** | **0** | 44,081,332 | 200,208 | **0** |
+
+⇒ F7 的**核心目标达成**：KV-owner 把跨 CTA 原子归约 **完全消除**（red 0、L1 red 请求 0），
+dK/dV 每个元素只被唯一 owner 写一次（write 200K 扇区 ≈ 2 份输出的 coalesced 写）。
+
+### 81.4 代价与结论（为什么 F7 主体需要 persistent + smem/TMA staging）
+
+smoke 里 KV-owner 的 `op_read` 反而涨到 **44M**（Q-owner 仅 1.5M）、标量耗时 **0.64×**。原因：
+这个**最小原型没有做 operand staging**——Q-owner 的 K/V tile 被大量并发 query CTA 复用、L2 命中
+极高；KV-owner 每个 KV CTA 反复从 global 重读 Q/dO（且 `dot` 循环里 `kat(j,d)` 沿 lane 跨行、
+未合并），读放大把省下的 red 又吃回去。**这正是 F7 必须「persistent 调度 + TMA/smem staging」
+而非「简单翻转 grid」的原因**：
+
+- **结论 1（正）**：KV-owner 单一 owner 划分**正确**、能把 dK/dV 的 `red` 从 O(mblk·元素) 打成 **0**
+  ——机制成立，与 TE 的低 red 一致。
+- **结论 2（下一步判据）**：不能只翻转 grid。F7 主体必须让每个 persistent CTA **拥有 KV 块并把
+  Q/dO/K/V 经 smem/TMA staging 复用**（对标 TE grid=132 persistent + 本卡已建好的 TMA 数据通路），
+  否则读放大会抵消 red 收益。**prize 仍由 O42 钉死**：短路 dK/dV 的 red ⇒ main 1.60→0.94ms
+  （**1.70×**）、total 1.93→1.25ms（1.53×）。
+
+```bash
+# 运行 + ncu（red 归零）
+scripts/run.sh src/fp8/fa_bwd_fp8_kvowner_smoke.cu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_smoke.cu \
+  --metrics lts__t_sectors_op_red.sum,lts__t_sectors_op_read.sum,lts__t_sectors_op_write.sum \
+  --kernel-name regex:kvowner --launch-count 1 --   # red=0
+```
+
+原始输出 `src/fp8/fa_bwd_fp8_kvowner_smoke.out.txt`、`..._kvowner_ncu_red.out.txt`。

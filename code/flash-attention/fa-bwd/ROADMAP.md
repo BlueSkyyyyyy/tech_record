@@ -2813,18 +2813,42 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       不可行，改 `Ps/Ss` 半精度只能刚够且改口径、regs 必大 spill。**F6 在本卡只能停在 1 CTA/SM**
       （0.56× 默认档），继续只能走**物理转置 SW128 B**（O4b 判净负）或**换卡** ⇒ **转 backlog**。
       默认路径一行未改。见 `docs/03` §77、`docs/08` §5.56。
-- [ ] **F7** **工作划分 / persistent 调度**（第一百四十七轮新立，唯一经 ncu 钉死的真杠杆）：
+- [~] **F7** **工作划分 / persistent 调度**（第一百四十七轮新立，唯一经 ncu 钉死的真杠杆）：
       同 **BM=64** 下 TE 的 `red` 仅 ours 的 **1/4.4×**、L2 总量 1/4.17×、时间 1/6×
       （TE grid=**132** persistent vs ours ksplit=8→8192）；SASS 同为 128-bit red（`REDG.4D.ADD`）
       ⇒ 走 **dK/dV-over-KV 单一 owner + TMA store-reduce**（对标 TE）。O42 的
       `cp.reduce.async.bulk` 失败是**因没换工作划分**（只加 staging、归约次数没降）。见
       `docs/03` §80、`docs/08` §5.61。**注**：`FA_R4`（归约加宽 v4）已判负（red 计数不变）。
+      → **第一步已完成（第一百四十八轮，机制 smoke）**：`src/fp8/fa_bwd_fp8_kvowner_smoke.cu`
+      对拍 double ref：**KV-owner 划分数学正确**（dk/dv max_abs 3.64e-5/2.28e-6，与现有
+      Q-owner 仅差 fp32 次序 5.7e-6）；ncu `lts__t_sectors_op_red` Q-owner **1.67M → KV-owner 0**
+      （L1 red 请求 278K→**0**）⇒ **跨 CTA 原子归约彻底消除**（对标 TE）。**关键判据**：最小原型
+      KV-owner 的 `op_read` 反涨到 44M（Q-owner 1.5M、未做 staging 而读放大）、标量 0.64×
+      ⇒ **F7 主体不能只翻转 grid**，必须让 persistent CTA 拥有 KV 块 + Q/dO/K/V 经 **smem/TMA
+      staging 复用**。prize 由 O42 钉死：短路 dK/dV red ⇒ main 1.70×、total 1.53×。
+      见 `docs/03` §81、`docs/08` §5.62；原始输出 `src/fp8/fa_bwd_fp8_kvowner_smoke*.out.txt`。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百四十七轮）**：**O67——fp8 dK/dV 归约 float4 = 负结果；ncu 重测 TE 把「真差距」
+> **最新（第一百四十八轮）**：**F7 第一步——fp8 dK/dV「KV-owner 单一 owner」划分 smoke
+> （机制正结果；ncu 证 red 归零）**——落实「fp8 专项冲刺」F7。新增自包含最小复现
+> `src/fp8/fa_bwd_fp8_kvowner_smoke.cu`（S512 H8 HD128 causal，fp32 标量）：`mowner_kernel`
+> （现有 Q-owner，dK/dV 跨 CTA atomic）vs `kvowner_kernel`（F7：每 CTA 一块 KV、遍历 query、
+> smem 累加后一次 plain store）。**数值正确**（vs double ref dk/dv `3.64e-05/2.28e-06`，与
+> Q-owner 仅差 fp32 次序 `5.72e-06`）；**ncu 关键结果** `lts__t_sectors_op_red` Q-owner
+> **1,671,168 → KV-owner 0**（L1 red 请求 278,528 → **0**）⇒ 跨 CTA 原子归约**彻底消除**。
+> **关键判据**：最小原型 KV-owner 的 `op_read` 反涨到 **44.08M**（Q-owner 1.50M、因未做
+> operand staging 而读放大）、标量 0.64× ⇒ **F7 主体不能只翻转 grid**，必须 **persistent CTA
+> 拥有 KV 块 + Q/dO/K/V 经 smem/TMA staging 复用**（对标 TE grid=132 persistent + 本卡 TMA 通路）。
+> prize 由 O42 钉死：短路 dK/dV red ⇒ main **1.70×**、total **1.53×**。默认路径一行未改。
+> 文档 `docs/03` §81、`docs/08` §5.62；原始输出 `src/fp8/fa_bwd_fp8_kvowner_smoke*.out.txt`。
+> **下一步候选**：① **F7 主体**（KV-owner + persistent + TMA/smem staging，把 74% 的 L2 `red`
+> 打成 0）；② 其余候选（F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、非 main 融合）
+> 均已判决/到顶/收口；③ DET 仅 opt-in。
+>
+> **（第一百四十七轮）**：**O67——fp8 dK/dV 归约 float4 = 负结果；ncu 重测 TE 把「真差距」
 > 钉到「工作划分」；新立 F7**——落实「阻塞」里默认 fp8 main 的唯一真杠杆 L2 `red`。① `FA_R4`
 > （16B `red.global.add.v4.f32`）在 SASS 里确为 `F32x4`，但 **ncu 的 red 请求/扇区一字不变**
 > （`l1tex 9.54M` / `lts 114.52M`）、main 0.992–0.997× ⇒ **归约加宽无效**（与 O7c/fp16 一致）。
@@ -5829,6 +5853,34 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     - **下一步候选**：① **F7（工作划分：dK/dV-over-KV + persistent/TMA store-reduce）**——唯一
       经 ncu 钉死、同 BM 下可压 ~4× red 的杠杆；② 其余候选（放大 BM/F6、归约加宽/GEMM3·4·5
       wgmma、ksplit/LSE、非 main 融合）均已判决/到顶/收口；③ DET 仅 opt-in。
+
+- 2026-09-30（第一百四十八轮）：**F7 第一步完成（fp8 dK/dV「KV-owner 单一 owner」划分 smoke
+  —— 机制正结果；ncu 证 red 归零）**——落实「fp8 专项冲刺」F7。
+    - 动机：O67（§80/§5.61）把默认 fp8 main 的 L2 `red`（S4096 114.5M 扇区、占 L2 74%）真差距
+      钉到**工作划分**：TE 在同 **BM=64** 下 `red` 仅 ours 的 **1/4.4×**、时间 1/6×。ours 是
+      **Q-owner**（每 CTA 一块 query、遍历 KV、dK/dV 跨 CTA `atomicAdd`）。F7 = 换 **KV-owner**
+      （每 CTA 一块 KV、遍历 query、dK/dV 本地累加后**一次写**）。
+    - **改动**：新增自包含最小复现 `src/fp8/fa_bwd_fp8_kvowner_smoke.cu`——同一批随机 Q/K/V/dO
+      （S512 H8 HD128 causal，fp32 标量以隔离变量），`mowner_kernel`（现有划分，atomic）与
+      `kvowner_kernel`（F7 划分，smem `dKa/dVa[BN][HD]` 累加 + 一次 plain store）对拍 double
+      host 参考。
+    - **数值**：KV-owner **正确**——vs double ref dk/dv `max_abs 3.64e-05/2.28e-06`（rel 9.6e-7/
+      3.5e-7），与现有 Q-owner 差 **5.72e-06/7.15e-07**（仅 fp32 加和次序）。
+    - **ncu（`lts__t_sectors`，S512 单 kernel）**：`op_red` Q-owner **1,671,168** → **KV-owner 0**；
+      `l1tex...op_red` 请求 278,528 → **0**；write 16,252 → 200,208。⇒ **跨 CTA 原子归约彻底消除**，
+      机制与 TE 的低 red 一致。
+    - **关键判据（下一步）**：最小原型 KV-owner 的 `op_read` 反涨到 **44.08M**（Q-owner 1.50M）、
+      标量耗时 **0.64×**——因未做 operand staging：Q-owner 的 K/V tile 被并发 query CTA 复用、L2
+      命中极高，KV-owner 每个 KV CTA 反复从 global 重读 Q/dO 把 red 收益吃回。⇒ **F7 主体不能只
+      翻转 grid**；必须 **persistent CTA 拥有 KV 块 + Q/dO/K/V 经 smem/TMA staging 复用**
+      （对标 TE grid=132 persistent + 本卡已建 TMA 通路）。prize 由 O42 钉死：短路 dK/dV red ⇒
+      main **1.70×**、total **1.53×**（1.60→0.94ms / 1.93→1.25ms）。
+    - 文档 `docs/03` §81、`docs/08` §5.62；原始输出 `src/fp8/fa_bwd_fp8_kvowner_smoke.out.txt`、
+      `..._kvowner_ncu_red.out.txt`。**默认路径一行未改**。
+    - **下一步候选**：① **F7 主体**——把 KV-owner 划分落进 persistent + TMA/smem staging 的 fp8
+      主 kernel（须同时拥有 KV 块的 dK/dV 累加缓冲并复用 Q/dO/K/V），目标把 74% 的 L2 `red` 打成 0；
+      ② 其余候选（放大 BM/F6、归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、非 main 融合）均已判决/到顶/收口；
+      ③ DET 仅 opt-in。
 
 ## 灵感 / backlog
 

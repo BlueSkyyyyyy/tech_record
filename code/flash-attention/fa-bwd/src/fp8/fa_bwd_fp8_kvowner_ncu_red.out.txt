@@ -1,0 +1,23 @@
+### F7 KV-owner smoke — ncu red/read/write (S512 H8 HD128 causal, fp32 scalar)
+
+## Q-owner (existing ours partition, atomicAdd dK/dV)
+    ------------------------------------------------ ----------- ------------
+    Metric Name                                      Metric Unit Metric Value
+    ------------------------------------------------ ----------- ------------
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                   278528
+    lts__t_sectors_op_read.sum                            sector      1504317
+    lts__t_sectors_op_red.sum                             sector      1671168
+    lts__t_sectors_op_write.sum                           sector        16252
+    ------------------------------------------------ ----------- ------------
+
+
+## KV-owner (F7 partition, local accumulate + single plain store)
+    ------------------------------------------------ ----------- ------------
+    Metric Name                                      Metric Unit Metric Value
+    ------------------------------------------------ ----------- ------------
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                        0
+    lts__t_sectors_op_read.sum                            sector     44081332
+    lts__t_sectors_op_red.sum                             sector            0
+    lts__t_sectors_op_write.sum                           sector       200208
+    ------------------------------------------------ ----------- ------------
+
