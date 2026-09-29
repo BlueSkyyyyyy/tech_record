@@ -999,7 +999,11 @@ __global__ void lse_split_merge_kernel(const float* __restrict__ part,
   lse[row] = m + flog(l);
 }
 
-template <int HD, int PIPE = 1>
+// O71（第 165 轮）：加 `bool FULL`——`FULL=true` 服务**非 causal（full）** 定长路径（对齐
+//   fp8 O70）。一个 CTA 只处理一个 m 块（grid.x=nblk，无镜像配对；full 各块工作量相同），
+//   `ncols=S` 且不做 `jg<=qi` 因果掩码；其余（4D-TMA/cp.async 双缓冲、tile 内两趟 softmax、
+//   4-lane shfl 归约）逐字复用。`FULL=false` 编译出与 O31/O38 逐位相同的 causal 代码。
+template <int HD, int PIPE = 1, bool FULL = false>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
                        const __grid_constant__ CUtensorMap kmap,
@@ -1055,10 +1059,11 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   int kuse0 = 0, kuse1 = 0;
 #pragma unroll 1
   for (int t = 0; t < 2; ++t) {
-    const int mblk = (t == 0) ? pair : (nblk - 1 - pair);
-    if (t == 1 && pair == nblk - 1 - pair) break;
+    if constexpr (FULL) { if (t == 1) continue; }   // O71：full 无镜像配对，只做 t=0
+    const int mblk = FULL ? pair : ((t == 0) ? pair : (nblk - 1 - pair));
+    if (!FULL && t == 1 && pair == nblk - 1 - pair) break;
     const int m0 = mblk * LBM;
-    const int ncols = min(S, m0 + LBM);
+    const int ncols = FULL ? S : min(S, m0 + LBM);
     const int ntiles = (ncols + LBN - 1) / LBN;
     // O38：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
     const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
@@ -1096,7 +1101,7 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
           int c = j * 8 + c2 + (q & 1);
           int qi = m0 + r, jg = j0 + c;
           float sv = -INFINITY;
-          if (qi < S && jg < S && jg <= qi) sv = d[j * 4 + q] * scale;
+          if (qi < S && jg < S && (FULL || jg <= qi)) sv = d[j * 4 + q] * scale;
           d[j * 4 + q] = sv;
           if (s == 0) mloc0 = fmaxf(mloc0, sv); else mloc1 = fmaxf(mloc1, sv);
         }

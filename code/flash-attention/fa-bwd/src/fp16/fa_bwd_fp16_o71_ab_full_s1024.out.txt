@@ -1,0 +1,30 @@
+=== lsetma=1 ===
+[O38] lse k-split = 4 (auto)
+[O23] main backend = wgmma2(BN=64) | lse = tma (D=128 S=1024)
+[timing] total(3 kernels) 0.1583 ms  54.27 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0362 ms | main 0.1068 ms | convert 0.0154 ms
+[O48 A/B] main D=128 4w(128/2) 0.1862 ms | 8w(256/4) 0.2097 ms (0.888x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/8.941e-08/8.941e-08
+  dq   vs ref: max_abs=3.268e-04  max_rel=8.146e-02
+  dk   vs ref: max_abs=2.523e-04  max_rel=8.022e-02
+  dv   vs ref: max_abs=1.225e-04  max_rel=1.830e-02
+  fa_dq     vs ref: max_abs=3.268e-04  max_rel=8.090e-02
+  fa_dk     vs ref: max_abs=2.523e-04  max_rel=7.871e-02
+  fa_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
+  te_dq     vs ref: max_abs=1.558e-04  max_rel=4.590e-02
+  te_dk     vs ref: max_abs=2.297e-04  max_rel=3.468e-02
+  te_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
+=== lsetma=0 ===
+[O38] lse k-split = 4 (auto)
+[O23] main backend = wgmma2(BN=64) | lse = mma (D=128 S=1024)
+[timing] total(3 kernels) 0.1687 ms  50.92 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0465 ms | main 0.1068 ms | convert 0.0154 ms
+[O48 A/B] main D=128 4w(128/2) 0.1846 ms | 8w(256/4) 0.2094 ms (0.881x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/8.941e-08/7.451e-08
+  dq   vs ref: max_abs=3.268e-04  max_rel=8.146e-02
+  dk   vs ref: max_abs=2.523e-04  max_rel=8.022e-02
+  dv   vs ref: max_abs=1.225e-04  max_rel=1.830e-02
+  fa_dq     vs ref: max_abs=3.268e-04  max_rel=8.090e-02
+  fa_dk     vs ref: max_abs=2.523e-04  max_rel=7.871e-02
+  fa_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
+  te_dq     vs ref: max_abs=1.558e-04  max_rel=4.590e-02
+  te_dk     vs ref: max_abs=2.297e-04  max_rel=3.468e-02
+  te_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02

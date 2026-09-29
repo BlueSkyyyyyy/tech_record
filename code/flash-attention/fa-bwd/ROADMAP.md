@@ -2977,12 +2977,36 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
        bf16 175.2→38.8µs（4.51×）；varlen fp16 375.5→108.5µs（3.46×）。见 `docs/01` §22、
        `docs/01b` §6ay、`docs/04` §44、`docs/08` §5.77；原始输出 `src/fp16/fa_bwd_fp16_o69_*`、
        `src/bf16/fa_bwd_bf16_o69_*`、`src/fa_bwd_p163_full_baseline.out.txt`。
+- [x] **F11**（第一百六十五轮，**正结果，默认**）**fp16/bf16 非 causal（full）D=128 的 LSE
+      再上 4D-TMA**——O70 的 dtype 泛化（F9/F10 的收尾）。`lse_mma_kernel_bal_tma`（fp16/bf16 版）
+      加 `bool FULL`（device，单/两文件逐字同源）、host full 分支优先 4D-TMA、`lse_tma=(D==128)?1:0`；
+      **三 dtype 的 full D=128 LSE 至此统一到 TMA**。数值 vs ref **逐值不变**（fp16
+      3.268/2.523/1.225e-4、bf16 1.938/1.684/1.449e-3）；preprocess fp16 0.0465→**0.0362ms（1.28×）**、
+      total 0.1687→**0.1583ms（1.066×，54.3TF）**，bf16 同构（1.27× / 1.059×）；对标纯反向 FA3 时间比
+      3.29×→**3.09×**（TE 2.92×→**2.74×**）；ncu LSE O8 175.8µs → cp.async 38.6µs → **TMA 28.2µs
+      （vs O8 6.24×；L1/TEX 37.6%→18.8%）**，bf16 28.3µs 逐项一致；`--ci` gate fp16 **2.441e-4** /
+      bf16 **4.883e-4** OK。见 `docs/01` §23、`docs/01b` §6az、`docs/04` §45、`docs/08` §5.79；
+      原始输出 `src/fp16/fa_bwd_fp16_o71_*`、`src/bf16/fa_bwd_bf16_o71_*`、`src/fa_bwd_o71_*`。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百六十三轮）**：**F10——fp16/bf16 非 causal（full）D=128 的 LSE 接上均衡
+> **最新（第一百六十五轮）**：**F11——fp16/bf16 非 causal（full）D=128 的 LSE 再上 4D-TMA：
+> 正结果，默认**。O70（fp8）的 dtype 泛化 / F9-F10 的收尾：把 fp16/bf16 的
+> `lse_mma_kernel_bal_tma` 加 `bool FULL`、host full 分支优先 4D-TMA（`lse_tma=(D==128)?1:0`），
+> **三 dtype 的 full D=128 LSE 至此统一到 TMA**。数值 vs ref 逐值不变；preprocess fp16
+> 0.0465→**0.0362ms（1.28×）**、total 0.1687→**0.1583ms（1.066×，54.3TF）**，bf16 同构；
+> 对标纯反向 FA3 时间比 3.29×→**3.09×**（TE **2.74×**）；ncu LSE O8 **175.8µs** → cp.async
+> 38.6µs → **TMA 28.2µs**（L1/TEX 37.6%→**18.8%**）；`--ci` gate fp16 2.441e-4 / bf16
+> 4.883e-4 OK。见 `docs/01` §23、`docs/01b` §6az、`docs/04` §45、`docs/08` §5.79；原始输出
+> `src/fp16/fa_bwd_fp16_o71_*`、`src/bf16/fa_bwd_bf16_o71_*`、`src/fa_bwd_o71_*`。
+> **下一步候选**：① **能动的便宜分支已被 F9/F10/F11 穷尽**——LSE 的三 dtype × {causal, full,
+> varlen, MLA} 均已均衡化/TMA 化；② **main 的 L2 `red` 墙**（F7 全判死、F6 不可行，受本卡
+> 寄存器/smem 硬墙锁定，见「阻塞」）——唯一真杠杆是 F7 主体的「工作划分」，需换卡或大改；
+> ③ 其余候选（放大 BM、归约加宽、GEMM3/4/5 wgmma、非 main 融合）均已判决/到顶/收口。
+>
+> **（第一百六十三轮）**：**F10——fp16/bf16 非 causal（full）D=128 的 LSE 接上均衡
 > `cp.async` 版：正结果，默认**。F9（fp8）的 dtype 泛化，补同一条**漏改分支**：O54 的
 > `lse_mma_kernel_bal<FULL=true>`（一个 CTA 一个 m 块 + K 的 `cp.async` 16B 双缓冲）此前只接到
 > D=512（MLA）的 full，fp16/bf16 的 **D=128 定长 full 与 varlen full 仍走 O8 `lse_mma_kernel`**
@@ -6685,10 +6709,38 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     - **ncu（`regex:lse_mma_kernel`，`--launch-count 1`）**：O1 208.4µs → cp.async **42.46µs
       （Compute 45.4% / inst 18.39M）** → TMA **23.94µs（Compute 43.1% / inst 9.77M，−46.9%）**；
       仍 `Waves 0.39`、非 DRAM/L2 bound ⇒ **preprocess 内的搬运升级，不是 main 的 L2 `red` 墙**。
-    - **下一步**：① **fp16/bf16 的同类改造**（`lse_mma_kernel_bal_tma` 加 `FULL`；fp16 是
-      2×K=64 chunk、bf16 逐字 dtype 化）——三 dtype full D=128 LSE 统一到 TMA；② main 的 L2
+     - **下一步**：① ~~fp16/bf16 的同类改造~~ → **已完成（O71/F11，第一百六十五轮）**——
+       三 dtype full D=128 LSE 统一到 TMA；② main 的 L2
       `red` 墙仍受寄存器/smem 硬墙锁定（见「阻塞」）。详见 `docs/03` §95、`docs/08` §5.78；
       原始输出 `src/fp8/fa_bwd_fp8_o70_*`。
+
+- 2026-09-30（第一百六十五轮）：**F11/O71 完成（fp16/bf16 非 causal（full）D=128 的 LSE 再上
+  4D-TMA：正结果，默认）**——落实 O70 的「fp16/bf16 同类改造」，**三 dtype full D=128 LSE 统一到
+  TMA**。
+  - **动机**：O69/F10（fp16/bf16）把定长 full D=128 的 LSE 从 O8 接到「均衡 + `cp.async`」；但
+    causal 的 LSE 早就是 4D-TMA（O30/O31），fp8 的对应改造 O70 已完成，fp16/bf16 仍走 `cp.async`。
+  - **改动**（device + host，单/两文件逐字同源）：
+    - device（`fa_bwd_{fp16,bf16}_mma_kernels.cuh` + onefile 的 `lse_mma_kernel_bal_tma`）模板加
+      `bool FULL=false`：`for(t<2)` 里 `if constexpr (FULL){ if(t==1) continue; }`、
+      `mblk=FULL?pair:…`、`ncols=FULL?S:min(...)`、掩码 `jg<=qi`→`(FULL||jg<=qi)`；其余逐字复用；
+      `FULL=false` 与 O30/O31/O38 逐位相同。
+    - host（四个文件）：`cudaFuncSetAttribute` 增 `lse_mma_kernel_bal_tma<128,1,true>` 实例；full
+      分支当 `lse_tma` 真时改调 `lse_mma_kernel_bal_tma<128,1,true><<<lg,…>>>(qmap_lse,kmap_lse,
+      d_lse,nullptr,…,1)`（`lg=dim3(nblk,H,B)`）；默认 `lse_tma=(D==128)?1:0`（此前 `&&causal`）；
+      `--lsetma=0` 退回 O69、`--lsefull=0` 退回 O8、`sm_90` 构建自动退回 O69。
+  - **数值**：定长 full S1024 H16 vs fp32 ref fp16 `3.268/2.523/1.225e-4`、bf16
+    `1.938/1.684/1.449e-3`，与 O69 cp.async 版**逐值一致**；单/两文件 gate fp16 worst **2.441e-4**、
+    bf16 **4.883e-4** OK、`--check docs/04` OK；causal S512 回归 fp16 1.671/1.771/1.899e-3 逐位。
+  - **性能（同 binary A/B，Hopper，event）**：定长 full S1024 preprocess **O8 0.1602 / cp.async
+    0.0465 / TMA 0.0362ms（TMA vs cp.async 1.28×）**、total **0.3037/0.1687/0.1583ms（54.3TF）**；
+    bf16 preprocess 0.1602/0.0463/**0.0364**、total 0.3047/0.1700/**0.1605ms（53.5TF）**；对标纯
+    反向 FA3 时间比 3.29×→**3.09×**（TE 2.92×→**2.74×**）。
+  - **ncu（LSE，S1024 H16 full）**：fp16 O8 **175.84µs/L1TEX 11.8%** → cp.async
+    **38.62µs/L1TEX 37.6%** → TMA **28.16µs（vs O8 6.24×；L1TEX 18.8%/Compute 33.8%/regs 64/
+    Waves 0.48）**；bf16 TMA 28.32µs 逐项一致。⇒ O8 串行载入延迟 bound，`cp.async` 打掉它
+    （4.55×），**4D-TMA 把 load 指令/地址运算交给 TMA 引擎，再 1.37×**；仍非 DRAM/L2/算力 bound。
+  - 见 `docs/01` §23、`docs/01b` §6az、`docs/04` §45、`docs/08` §5.79；原始输出
+    `src/fp16/fa_bwd_fp16_o71_*`、`src/bf16/fa_bwd_bf16_o71_*`、`src/fa_bwd_o71_*`。
 
 ## 灵感 / backlog
 

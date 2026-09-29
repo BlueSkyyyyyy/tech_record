@@ -1,0 +1,64 @@
+=== fa-bwd 实现一致性（P3-3f/P3-3g）：ours_hp vs ours_sf_hp（max_abs，逐元素）===
+baseline-free：两者都算同一数学；期望差异仅跨 CTA atomicAdd 次序（dtype ulp）。
+判据（按 dtype）：max|ours_hp-ours_sf_hp| <= ctol；bf16=0.032, fp16=0.016（任一超出则退出码 1）
+
+[fp16]
+  b1_s1024_h16_d128_full_fp16                     dq=0.000e+00  dk=2.441e-04  dv=1.221e-04
+
+[bf16]
+  b1_s1024_h16_d128_full_bf16                     dq=0.000e+00  dk=4.883e-04  dv=4.883e-04
+
+=== 小结（2 case 有 ours_hp/ours_sf_hp 双方；0 case 缺一侧）===
+  max|ours_hp-ours_sf_hp| over all cases: dq = 0.000e+00  ()
+  max|ours_hp-ours_sf_hp| over all cases: dk = 4.883e-04  (b1_s1024_h16_d128_full_bf16)
+  max|ours_hp-ours_sf_hp| over all cases: dv = 4.883e-04  (b1_s1024_h16_d128_full_bf16)
+  worst = 4.883e-04
+  gate[fp16] worst=2.441e-04  tol=0.016  -> OK
+  gate[bf16] worst=4.883e-04  tol=0.032  -> OK
+
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_consistency_p33g.out.txt
+[--consistency] OK：worst=4.883e-04（各 dtype 均在容差内）
+=== fa_bwd_run.py (P3-3c) 一键跑 ours + 汇总 ===
+cases=2 impls=['twofile', 'singlefile'] iters=20
+[run] bf16 twofile b1_s1024_h16_d128_full_bf16
+[run] bf16 singlefile b1_s1024_h16_d128_full_bf16
+[run] fp16 twofile b1_s1024_h16_d128_full_fp16
+[run] fp16 singlefile b1_s1024_h16_d128_full_fp16
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/bf16/fa_bwd_bf16_p33c_run.out.txt
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_p33c_run.out.txt
+
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_run_p33c_summary.out.txt
+
+[consistency:auto] /usr/bin/python3 /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_compare.py --consistency --ca ours_hp --cb ours_sf_hp --out /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_consistency_p33g.out.txt --case b1_s1024_h16_d128_full_bf16 b1_s1024_h16_d128_full_fp16 --ctol auto
+
+[compare] /usr/bin/python3 /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_compare.py --case b1_s1024_h16_d128_full_bf16 b1_s1024_h16_d128_full_fp16 --out /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_compare_p33c_summary.out.txt
+=== fa-bwd numeric comparison (baseline = ref; max_abs / max_rel) ===
+case                                           impl  dq_abs    dq_rel    dk_abs    dk_rel    dv_abs    dv_rel   
+----------------------------------------------------------------------------------------------------------------
+[b1_s1024_h16_d128_full_bf16]  (bf16)
+  fa3   1.938e-03 3.808e-01 1.684e-03 3.725e-01 1.449e-03 4.925e-01
+  fa    1.827e-03 3.919e-01 1.684e-03 3.996e-01 1.449e-03 4.925e-01
+  te    2.421e-03 3.546e-01 2.970e-03 3.313e-01 1.449e-03 4.925e-01
+  ours  1.938e-03 3.901e-01 1.684e-03 4.643e-01 1.449e-03 4.925e-01
+  ours_hp 1.938e-03 3.901e-01 1.684e-03 4.643e-01 1.449e-03 4.925e-01
+  ours_p165_lsetma0 1.938e-03 3.901e-01 1.684e-03 4.643e-01 1.449e-03 4.925e-01
+  ours_p165_lsetma1 1.938e-03 3.901e-01 1.684e-03 4.643e-01 1.449e-03 4.925e-01
+  ours_sf 1.938e-03 3.901e-01 1.684e-03 4.643e-01 1.449e-03 4.925e-01
+  ours_sf_hp 1.938e-03 3.901e-01 1.684e-03 4.643e-01 1.449e-03 4.925e-01
+[b1_s1024_h16_d128_full_fp16]  (fp16)
+  fa3   3.268e-04 7.838e-02 2.523e-04 7.882e-02 1.217e-04 1.824e-02
+  fa    3.268e-04 8.090e-02 2.523e-04 7.871e-02 1.217e-04 1.824e-02
+  te    1.558e-04 4.590e-02 2.297e-04 3.468e-02 1.217e-04 1.824e-02
+  ours  3.268e-04 8.146e-02 2.523e-04 8.022e-02 1.225e-04 1.830e-02
+  ours_hp 3.268e-04 8.146e-02 2.523e-04 8.022e-02 1.225e-04 1.830e-02
+  ours_p165_lsetma0 3.268e-04 8.146e-02 2.523e-04 8.022e-02 1.225e-04 1.830e-02
+  ours_p165_lsetma1 3.268e-04 8.146e-02 2.523e-04 8.022e-02 1.225e-04 1.830e-02
+  ours_sf 3.268e-04 8.146e-02 2.523e-04 8.022e-02 1.225e-04 1.830e-02
+  ours_sf_hp 3.268e-04 8.146e-02 2.523e-04 8.022e-02 1.225e-04 1.830e-02
+
+=== ours vs ref 小结（判据 max_abs）===
+  bf16  b1_s1024_h16_d128_full_bf16                    dq=1.938e-03 dk=1.684e-03 dv=1.449e-03
+  fp16  b1_s1024_h16_d128_full_fp16                    dq=3.268e-04 dk=2.523e-04 dv=1.225e-04
+
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_compare_p33c_summary.out.txt
+

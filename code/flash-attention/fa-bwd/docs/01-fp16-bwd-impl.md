@@ -4622,3 +4622,87 @@ ARCH= NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcu
 `..._o69_ab_varlen_full_b4t4096.out.txt`、`..._o69_onefile_fixed_full_s1024.out.txt`、
 `..._o69_ncu_lse_full_s1024_lsefull{0,1}.out.txt`、`..._o69_ncu_lse_varlen_full_b4t4096_lsefull{0,1}.out.txt`；
 基线 `src/fa_bwd_p163_full_baseline.out.txt`。见 `docs/08` §5.77。
+
+## 23. O71（第一百六十五轮，**正结果，默认**）：非 causal（full）D=128 的 LSE 再上 **4D-TMA**（对齐 causal O30）
+
+### 23.1 动机（O70 的 fp16/bf16 泛化 = 三 dtype full LSE 统一到 TMA）
+
+O69（§22）把定长 full D=128 的 LSE 从 O8 接到「均衡 + `cp.async`」版（`lse_mma_kernel_bal<FULL=true>`，
+preprocess 3.43×）。但 **causal 的 LSE 早就是 4D-TMA 版**（O30 `lse_mma_kernel_bal_tma`：每 k-chunk 一条
+`cp.async.bulk.tensor.4d` 搬整块 SW128，省掉逐 16B `cp.async` 的 load 指令/地址运算），full 仍走
+`cp.async`。fp8 的对应改造已在 O70（`docs/03` §95）完成；本步把 **fp16（2×K=64 chunk TMA）与 bf16**
+的 full LSE 也切到同一 TMA 搬运，至此**三 dtype 的 full D=128 LSE 统一到 TMA**。
+
+### 23.2 实现（device + host，单/两文件同步）
+
+- **device**（`src/fp16/fa_bwd_fp16_mma_kernels.cuh` + `fa_bwd_fp16_mma_onefile.cu`，
+  `lse_mma_kernel_bal_tma`）：模板加 `bool FULL = false`。
+  - `for (t<2)` 里 `if constexpr (FULL) { if (t == 1) continue; }`，`mblk = FULL ? pair : …`
+    ——full 各 m 块工作量相同，**用 grid.x=nblk 一个 CTA 一个 m 块**，不做镜像配对。
+  - `ncols = FULL ? S : min(S, m0 + LBM)`；掩码 `jg <= qi` 改为 `(FULL || jg <= qi)`。
+  - 其余（Q/K 的 2×K=64 chunk TMA 双缓冲、`tile 内两趟 softmax`、4-lane `shfl` 归约）逐字复用。
+    `FULL=false` 编译出与 O30/O38 **逐位相同**的 causal 代码。
+- **host**（`fa_bwd_fp16_mma_main.cu` + onefile）：`cudaFuncSetAttribute` 增
+  `lse_mma_kernel_bal_tma<128, 1, true>` 实例；full 分支（`else if (g_lse_full_opt)`）当 `lse_tma`
+  为真时改调 `lse_mma_kernel_bal_tma<128,1,true><<<lg,…>>>(qmap_lse, kmap_lse, d_lse, nullptr,
+  S, H, Hkv, scale, 1)`（`lg = dim3(nblk,H,B)` 正是 FULL 期望的网格，ksplit=1）；
+  默认 `lse_tma = (D == 128) ? 1 : 0`（此前 `(D==128 && causal)`）。
+  - A/B：`--lsetma=0` 退回 O69 的 `cp.async` 均衡版；`--lsefull=0` 仍退回 O8（无关 `lse_tma`）。
+    `sm_90`（非 TMA）构建下 `lse_tma=0`，自动退回 O69，行为不变。
+
+### 23.3 数值
+
+- **ours vs fp32 ref**（定长 full S1024 H16）：`dq/dk/dv = 3.268e-4 / 2.523e-4 / 1.225e-4`，与 O69 的
+  `cp.async` 版**逐值一致**（LSE 只差 fp32 求和次序）；与同 case FA3（`3.268e-4/2.523e-4/1.217e-4`）
+  同量级。
+- **单/两文件一致性**（`--hopper --consistency`，`fa_bwd_run.py`）：worst **2.441e-4**（fp16 容差
+  1.6e-2）**OK**；`--check docs/04` OK。
+- **causal 回归**：S512 H16 causal 仍 dq/dk/dv = 1.671/1.771/1.899e-3，与 O5 历史值一致。
+
+### 23.4 性能（同 session，同 binary A/B，Hopper 构建，CUDA event）
+
+| 路径（定长 full S1024 H16） | O8（`--lsefull=0`） | cp.async（`--lsetma=0`，O69） | **TMA（默认，O71）** | TMA vs cp.async |
+|---|---|---|---|---|
+| **preprocess** | 0.1602 ms | 0.0465 ms | **0.0362 ms** | **1.28×** |
+| total | 0.3037 ms / 28.28 TF | 0.1687 ms / 50.92 TF | **0.1583 ms / 54.27 TF** | **1.066×** |
+| main | 0.1072 ms | 0.1068 ms | 0.1068 ms | 1.00×（不变） |
+
+**对标**（同 session CUPTI，`harness/fa_bwd_bench.py bench`，定长 full S1024 H16 D128 fp16）：
+FA3 `0.0512ms/335.9TF`、FA2 `0.0828ms/207.4TF`、TE `0.0577ms/297.9TF` ⇒ ours total 为 FA3 时间
+**3.09×**（O69 3.29×）、TE **2.74×**（O69 2.92×），峰值口径 989 TF 的 **5.5%**。收益全在 preprocess。
+
+### 23.5 ncu（LSE，`--launch-count 1`，S1024 H16 full）—— bound
+
+| 指标 | O8（`--lsefull=0`） | cp.async（`--lsetma=0`） | **TMA（默认，O71）** |
+|---|---|---|---|
+| **Duration** | 175.84 µs | 38.62 µs | **28.16 µs（vs cp.async 1.37×）** |
+| DRAM Throughput | 1.43% | 6.51% | 8.93% |
+| L1/TEX Throughput | 11.78% | 37.59% | **18.83%** |
+| L2 Cache Throughput | 3.20% | 30.10% | 12.05% |
+| Compute (SM) | 25.41% | 39.64% | 33.77% |
+| Executed Ipc Active | 1.05 | 1.71 | 1.59 |
+| regs | 80 | 64 | 64 |
+| Waves / Occupancy | 0.32 / 11.95% | 0.48 / 12.14% | 0.48 / 12.14% |
+
+**结论**：O8 是纯延迟 bound（串行 global→smem，`long_scoreboard` 主导、L1TEX 仅 12%），均衡
+`cp.async` 把它打掉（4.55×），**4D-TMA 再用一条 bulk 指令搬整块 SW128，把 L1/TEX 从 37.6% 压回
+18.8%（load 指令/地址运算交给 TMA 引擎）、Duration 再 1.37×**。三条路径都是 `Compute 25–40%` +
+网格不足一个波（`Waves 0.48`），不是 DRAM/L2/算力 bound。bf16 逐项一致（TMA 28.32µs）。**这是
+preprocess 内一条被漏改分支的搬运方式升级，不是 main 的 L2 `red` 墙。**
+
+### 23.6 复现 / 原始输出
+
+```bash
+# 两文件 A/B（Hopper 构建）：TMA(默认) / cp.async(--lsetma=0) / O8(--lsefull=0)
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu --full \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h16_d128_full_fp16
+# 一致性 gate：python3 harness/fa_bwd_run.py --case b1_s1024_h16_d128_full_fp16 --impls both --hopper
+# ncu：--kernel-name regex:lse_mma_kernel_bal_tma --launch-count 1 --set full
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_o71_ab_full_s1024.out.txt`、
+`..._o71_ncu_lse_tma_full_s1024.out.txt`、`..._o71_ncu_lse_cpasync_full_s1024.out.txt`、
+`..._o71_ncu_lse_o8_full_s1024.out.txt`；`src/fa_bwd_o71_run_full_d128.out.txt`、
+`src/fa_bwd_o71_full_bench_baseline.out.txt`。见 `docs/08` §5.79。**下一步**：main 的 L2 `red` 墙受
+本卡寄存器/smem 硬墙锁定（见 ROADMAP「阻塞」），full LSE 的搬运至此三 dtype 统一。

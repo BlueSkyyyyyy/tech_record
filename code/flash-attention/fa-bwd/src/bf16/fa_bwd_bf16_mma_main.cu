@@ -1263,6 +1263,10 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<128, 1>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     kLseSmemTma1));
+    // O71：full D=128 的 TMA LSE 实例（FULL=true）。
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<128, 1, true>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    kLseSmemTma1));
 #endif
   }
 #if defined(FA_WGMMA) && defined(FA_TMA)
@@ -1495,7 +1499,8 @@ int main(int argc, char** argv) {
   // O31：TMA 版 LSE 需驱动 API（`cuTensorMapEncodeTiled`）⇒ 只有 `-DFA_TMA -lcuda` 构建才编译
   //   该路径；此时 D==128/causal 默认开（对齐 fp16 O30 的做法，wgmma+cp.async → 4D TMA）。
 #if defined(FA_WGMMA) && defined(FA_TMA)
-  if (lse_tma < 0) lse_tma = (D == 128 && causal) ? 1 : 0;
+  // O71：D==128 的 causal 与 full 都默认走 TMA（full 由 O69 的 cp.async 再升级为 4D-TMA）。
+  if (lse_tma < 0) lse_tma = (D == 128) ? 1 : 0;
 #else
   if (lse_tma < 0) lse_tma = 0;
 #endif
@@ -1524,7 +1529,7 @@ int main(int argc, char** argv) {
   printf("[O38] lse k-split = %d%s\n", lse_split_eff, (lse_split <= 0 ? " (auto)" : ""));
   printf("[O23] main backend = %s | lse = %s (D=%d S=%d)%s\n",
          wg2bn_sel ? "wgmma2b(BN=128)" : (wg2_sel ? "wgmma2(BN=64)" : "mma"),
-         (D == 128 && causal && (lse_tma ? 1 : lse_wgm)) ? (lse_tma ? "tma" : "wgmma") : "mma",
+         (D == 128 && (lse_tma ? 1 : lse_wgm)) ? (lse_tma ? "tma" : "wgmma") : "mma",
          D, S, (wg2_ksplit_eff > 1) ? " +ksplit" : "");
   printf("[O43] wgmma2 k-split = %d\n", wg2_ksplit_eff);
   printf("[O65] prologue fusion (zero+delta) = %d\n", (int)(zfuse_sel && delta_warp_sel));
@@ -1684,13 +1689,23 @@ int main(int argc, char** argv) {
           lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
                                                                         Hkv, scale);
         }
-      } else if (g_lse_full_opt)
+      } else if (g_lse_full_opt) {
         // O69（第 163 轮）：非 causal D=128 的 LSE 从 O8（无 cp.async 流水、逐标量 global→smem）
         //   改走 O54 均衡版 `FULL=true`（一个 CTA 一个 m 块 + K 的 cp.async 16B 双缓冲）。
-        //   `--lsefull=0` 退回 O8 做同 binary A/B。
-        lse_mma_kernel_bal<128, 1, true><<<lg, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
-                                                                        Hkv, scale);
-      else
+        // O71（第 165 轮）：full D=128 定长**优先走 4D-TMA**（对齐 causal O31）。`--lsetma=0`
+        //   退回 O69 的 cp.async 均衡版做同 binary A/B；`--lsefull=0` 退回 O8。
+        bool did_tma = false;
+#if defined(FA_WGMMA) && defined(FA_TMA)
+        if (lse_tma) {
+          lse_mma_kernel_bal_tma<128, 1, true><<<lg, THREADS, kLseSmemTma1>>>(
+              qmap_lse, kmap_lse, d_lse, nullptr, S, H, Hkv, scale, 1);
+          did_tma = true;
+        }
+#endif
+        if (!did_tma)
+          lse_mma_kernel_bal<128, 1, true><<<lg, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
+                                                                          Hkv, scale);
+      } else
         lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
                                                        (int)causal);
       if (zfuse_sel && delta_warp_sel) {

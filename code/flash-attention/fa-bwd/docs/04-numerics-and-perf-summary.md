@@ -3032,3 +3032,32 @@ L2 `red` 墙**（后者仍受本卡寄存器/smem 硬墙锁定，见「阻塞」
 **3.906e-3**、bf16 **7.812e-3**（均 OK）、`--check docs/04` OK（内嵌数值表 194 行，随本轮同步
 更新 fp16 一处 full dv `1.234e-4→1.213e-4`）。详见 `docs/08` §5.77；原始输出
 `src/fp16/fa_bwd_fp16_o69_*`、`src/bf16/fa_bwd_bf16_o69_*`、`src/fa_bwd_p163_full_baseline.out.txt`。
+
+## 45. O71（第一百六十五轮，正结果，默认）：fp16/bf16 非 causal D=128 的 LSE 再上 **4D-TMA**
+
+O69（§44）把 fp16/bf16 定长 full D=128 的 LSE 接到「均衡 + `cp.async`」，但 causal LSE 早就是
+4D-TMA 版（O30/O31）。fp8 的对应改造（O70）已于第 164 轮完成；本轮把 fp16/bf16 也切到同一 TMA
+搬运（`lse_mma_kernel_bal_tma` 加 `bool FULL`、host full 分支优先 TMA、`lse_tma=(D==128)?1:0`），
+**三 dtype full D=128 LSE 至此统一到 TMA**。`--lsetma=0` 退回 O69 cp.async、`--lsefull=0` 退回 O8。
+device 与 fp16 逐字同源（bf16 为 `__half`→bf16），`FULL=false` 与 O30/O31/O38 逐位相同。
+
+| case（dtype） | 阶段 | O8（`--lsefull=0`） | cp.async（`--lsetma=0`） | **TMA（默认，O71）** | TMA vs cp.async | max_abs vs fp32 ref |
+|---|---|---|---|---|---|---|
+| fp16 定长 full S1024 H16 D128 | preprocess | 0.1602 ms | 0.0465 ms | **0.0362 ms** | **1.28×** | 同（3.27/2.52/1.23e-4） |
+| fp16 定长 full S1024 H16 D128 | total | 0.3037 ms（28.3 TF） | 0.1687（50.9） | **0.1583 ms（54.3 TF）** | **1.066×** | — |
+| bf16 定长 full S1024 H16 D128 | preprocess | 0.1602 ms | 0.0463 ms | **0.0364 ms** | **1.27×** | 同（1.94/1.68/1.45e-3） |
+| bf16 定长 full S1024 H16 D128 | total | 0.3047 ms（28.2 TF） | 0.1700（50.5） | **0.1605 ms（53.5 TF）** | **1.059×** | — |
+
+收益全在 preprocess（main 不变）。纯反向对标（同 session CUPTI，`harness/fa_bwd_bench.py bench`，
+定长 full S1024 H16 D128）：**fp16** FA3 `0.0512ms/335.9TF`、TE `0.0577/297.9` ⇒ ours/FA3
+**3.29×→3.09×**、ours/TE **2.92×→2.74×**；**bf16** FA3 `0.0504ms/340.7TF`、TE `0.0576/298.3` ⇒
+**3.18×/2.79×**。
+
+ncu（LSE，S1024 H16 full）：fp16 O8 **175.84µs / L1TEX 11.8%** → cp.async **38.62µs / L1TEX 37.6% /
+Compute 39.6%** → TMA **28.16µs（vs O8 6.24×、vs cp.async 1.37×）/ L1TEX 18.8% / Compute 33.8% /
+regs 64 / Waves 0.48**；bf16 TMA **28.32µs** 逐项一致。⇒ O8 是串行全局载入延迟 bound，`cp.async`
+打掉它（4.55×），**4D-TMA 把 load 指令/地址运算交给 TMA 引擎（L1/TEX 37.6%→18.8%），再 1.37×**；
+仍网格不足一个波、非 DRAM/L2/算力 bound。**这是 preprocess 内一条漏改分支的搬运升级，不是 main 的
+L2 `red` 墙。** CI：fp16 一致性 gate worst 2.441e-4、bf16 4.883e-4（均 OK）、`--check docs/04` OK
+（内嵌数值表不变，本步数值逐值一致）。详见 `docs/01` §23、`docs/01b` §6az、`docs/08` §5.79；原始
+输出 `src/fp16/fa_bwd_fp16_o71_*`、`src/bf16/fa_bwd_bf16_o71_*`、`src/fa_bwd_o71_*`。

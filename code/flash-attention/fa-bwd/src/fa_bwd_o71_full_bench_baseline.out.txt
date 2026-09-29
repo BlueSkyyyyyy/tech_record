@@ -1,0 +1,8 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== bench CUPTI device time (pure-bwd, dtype=fp16) ===
+[b1_s1024_h16_d128_full_fp16] fa3=0.0512ms/335.87TF  fa=0.0828ms/207.38TF  te=0.0577ms/297.86TF
+=== bench CUPTI device time (pure-bwd, dtype=bf16) ===
+[b1_s1024_h16_d128_full_bf16] fa3=0.0504ms/340.74TF  fa=0.0825ms/208.18TF  te=0.0576ms/298.33TF
+=== bench CUPTI device time (pure-bwd, dtype=fp8) ===
+[b1_s1024_h16_d128_full_fp8] te=0.0567ms/303.21TF
