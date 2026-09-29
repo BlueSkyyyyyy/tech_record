@@ -6986,3 +6986,81 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a" \
 原始输出：`src/fp8/fa_bwd_fp8_wgmma2_smoke.out.txt`、`..._sass.out.txt`、`..._ncu.out.txt`。
 回归：`harness/fa_bwd_run.py --ci --dtype fp8 --fixed-only` **rc=0**（gate worst=7.629e-06、
 `--check docs/04` OK 194 行），默认路径一行未改（原始输出 `src/fp8/fa_bwd_fp8_p140_ci_fixed.out.txt`）。
+
+## 76. 第 141 轮：F6 第二步——双 warpgroup 主 kernel 的 GEMM1/2 wgmma 化（`--wg2wgmma`，**正确但中性**）
+
+### 76.1 动机与实现
+
+第 140 轮冒烟（§75）证明「256 线程 / 2 个 warpgroup 下用 K-major SW128 跑 fp8
+`wgmma.m64n32k32`、每 WG 算 BM=128 的一半」几何成立且只有 90 regs。本轮把它**落进主 kernel**：
+新增 `src/fp8/fa_bwd_fp8_kernels.cuh` 的
+`fa_bwd_fp8_wgmma2_kernel<HD=128, BM=128, BN=32>`（`#ifdef FA_WGMMA`），它 =
+`fa_bwd_fp8_wg2_kernel`（§3b，BM=128、2 warpgroup、mma）**把 GEMM1/2 换成 wgmma**：
+
+- **Q/dO/K/V 存 SW128 K-major**（wgmma 描述符直读 smem），Qp/dOp/Kp 由 SW128 用
+  `__byte_perm` 重建（供 GEMM3/4/5 的 `ldmatrix.x2.trans`）；**fold 与 GEMM3/4/5 逐字沿用 wg2**。
+- **GEMM1/2**：每个 warpgroup 各发 `wgmma.m64n32k32`（A 描述符按 WG `+ (64/8)*1024 = 8192B`），
+  累加器映射 `row = wg*64 + wl*16 + g + (q>=2?8:0)`、`col = j*8 + c2 + (q&1)`，epilogue 直接
+  写 `Ps/Ss`；rowwise scale 仍在 epilogue 折算（口径与 wg2 逐项一致，仅 fp 归约次序略变）。
+- **Ap/dS3 从 wg2 的「别名 Ks/Vs」改为独立缓冲**：SW128 的 Ks/Vs 各只有 4096B，放不下
+  `BN×QTS = 32×144 = 4608B`，且 Vs 在 GEMM2 时仍被读。
+
+host 加 `--wg2wgmma`（`--wg2` 的 wgmma 版，复用同一 `mg2`/ksplit2 自动档）；单/两文件同步
+（`sync_onefile_device.py`），默认路径一行未改。
+
+### 76.2 数值（vs fp32 ref，causal；单/两文件逐位一致）
+
+| shape | 默认 kvtma（历史） | **wg2wgmma** |
+|---|---|---|
+| S=512 | 2.426 / 2.972 / 3.733e-1 | **2.426 / 2.996 / 3.713e-1** |
+| S=4096 | 2.635 / 2.644 / 3.216e-1 | **2.635 / 2.760 / 3.325e-1** |
+
+均 fp8 噪声量级、无系统误差。`[F6 A/B]` 的 `wg2wg-vs-wg2` dq/dk/dv：S512
+`4.5e-2/5.4e-2/5.7e-2`、S4096 `4.0e-2/1.5e-1/2.6e-2`（与既有 `[O9c-2 A/B]` 的
+wgmma-vs-mma 同量级——来自 GEMM1/2 的累加/归约次序，不是 bug）。
+
+### 76.3 性能（同 session，CUDA event，main-only）
+
+| shape | 默认 kvtma<128,64,32> | wg2（mma GEMM1/2） | **wg2wgmma** | vs wg2 | vs 默认 |
+|---|---|---|---|---|---|
+| S=512 | 0.0717 ms | 0.1101 ms | **0.1078 ms** | **1.021×** | 0.66× |
+| S=4096 | 1.911 ms | 2.9311 ms | **2.8081 ms** | **1.044×** | 0.68× |
+
+⇒ **GEMM1/2 wgmma 化相对 wg2 只快 2–4%**，整 kernel 仍远慢于默认 BM=64（0.66–0.68×）。
+
+### 76.4 ncu（wg2wgmma，S=512，`--set full`）
+
+**212 regs / smem 136.4KB**（wg2 是 217 / 131.3KB）、`Block Limit Registers=1`、
+`Block Limit Shared Mem=1`、theoretical = achieved **12.50%**（**1 CTA/SM**）、Duration 109µs、
+DRAM 4.67% / L1/TEX 35.5% / L2 29.2% / Compute 25.0%、No Eligible 70.5%、stall
+`wait 1.67 + long_scoreboard 1.49 + short 0.76`。
+SASS（`cuobjdump -sass` opcode 直方图）：**`16×QGMMA.64x32x32.F32.E4M3.E4M3` +
+`16×QGMMA.64x32x32.F32.E5M2.E4M3`**（2 WG × 4 k-step × 2 GEMM）+ `1568×HMMA` + `766×LDSM`
+（GEMM3/4/5 仍 `mma.sync`）⇒ GEMM1/2 确实走 wgmma。
+
+### 76.5 结论 / 下一步
+
+- **GEMM1/2 wgmma 化本身是正的、但太小**（1.02–1.04× over wg2）：第 140 轮冒烟的 90 regs
+  只在「只有 GEMM1/2」时成立；一旦叠上 `dqacc[2][8][4]`(64) + fold + GEMM3/4/5 的 mma，
+  整 kernel 仍 **212 regs / 136KB → 1 CTA/SM**，延迟/occupancy bound 未变 ⇒ 不敌 BM=64 的
+  3 CTA/SM 默认档。且本轮为 Ap/dS3 独立缓冲把 smem **推高**（131→136KB），方向相反。
+- **F6 的必要条件是「TMA + 压 smem ≤116,224B」**：唯一能把 smem 压到 2 CTA/SM 预算
+  （≤116,224B）的路径是**去掉 Qp/dOp（34,816B）**——从 SW128 的 Q/dO tile 里直接 `ldmatrix`
+  读出 GEMM3/4 的 B（kernel-opt 42 篇已证 SW128 的 16B chunk 可 `ldmatrix` 转置读），
+  或改 3/4/5 的 warp 几何。这是 F6 主体下一小步，见 ROADMAP backlog/「下一步」。
+- 默认路径一行未改；`harness/fa_bwd_run.py --ci --dtype fp8 --fixed-only` **rc=0**
+  （gate worst=1.049e-5、`--check docs/04` OK 194 行）。
+
+### 76.6 复现 / 原始输出
+
+```bash
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=/home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8 --wg2wgmma --iters=20
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --kernel-name regex:fa_bwd_fp8_wgmma2_kernel \
+  --launch-count 1 -- --dir=.../b1_s512_h16_d128_causal_fp8 --wg2wgmma --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_p141_wg2wgmma_{s512,s4096}.out.txt`、
+`..._p141_onefile_wg2wgmma_s512.out.txt`（单文件，数值逐位一致）、
+`..._p141_ncu_wg2wgmma_s512.out.txt`、`..._p141_ci_fixed.out.txt`。

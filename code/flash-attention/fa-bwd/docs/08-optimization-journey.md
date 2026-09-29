@@ -871,3 +871,23 @@ smem 冲突 + 低 occ
 - **教训**：**当「候选清单」里的路没被定量验证前，先花一轮把每条路算/测清楚再动手**——
   本轮避免了一次基于「dK/dV-over-KV」的错误大重写（该路流量中性），并把唯一真路
   （双 warpgroup wgmma+TMA BM=128，F6）钉成可执行目标。详见 `docs/03` §74。
+
+### 5.55 F6 第二步：双 warpgroup 主 kernel 的 GEMM1/2 wgmma 化（第一百四十一轮，正确但中性）
+
+- **做了什么**：把第 140 轮冒烟落进主 kernel——新增 `fa_bwd_fp8_wgmma2_kernel`（= `wg2`
+  的 GEMM1/2 换 `wgmma.m64n32k32`，Q/dO/K/V 存 SW128，Qp/dOp/Kp 由 SW128 重建，fold 与
+  GEMM3/4/5 逐字沿用），host `--wg2wgmma`；单/两文件同步。
+- **正确**：vs fp32 ref S512 `2.426/2.996/3.713e-1`、S4096 `2.635/2.760/3.325e-1`（fp8 噪声）；
+  单文件逐位一致；`[F6 A/B]` wg2wg-vs-wg2 差 ~5e-2（同既有 wgmma-vs-mma 量级）。
+- **性能：中性**。相对 wg2（mma）只快 **1.021×（S512）/1.044×（S4096）**，仍只有默认
+  BM=64 档的 **0.66–0.68×**。
+- **原因（ncu）**：wg2wgmma **212 regs / 136.4KB smem → 1 CTA/SM**（wg2 是 217/131.3KB），
+  occupancy 12.5%、`wait 1.67 + long_scoreboard 1.49` ⇒ 延迟/occupancy bound 未变。冒烟的
+  90 regs 只在「只有 GEMM1/2」成立；叠上 `dqacc[2][8][4]`+fold+3/4/5 的 mma 后寄存器照旧。
+  且本轮为 Ap/dS3 独立缓冲把 smem 推高，方向相反。
+- **教训**：
+  1. **别把「子模块的孤岛测量」当整 kernel 的预算**——90 regs 是 GEMM1/2 单独的数，不等于
+     整 kernel 能到 128 regs / 2 CTA/SM。
+  2. **BM=128 的最大 smem 项是 Qp/dOp（34.8KB）**；F6 要 2 CTA/SM 必须先干掉它（SW128 tile
+     直读 `ldmatrix`），而不是先换 GEMM1/2 的指令。下一小步据此排序。
+  详见 `docs/03` §76。
