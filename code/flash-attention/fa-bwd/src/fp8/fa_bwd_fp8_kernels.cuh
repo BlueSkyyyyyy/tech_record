@@ -750,7 +750,10 @@ __global__ void dkv_dq_reduce_kernel(const float* __restrict__ dk_part,
 //   `nblk_b = ceil(len_b/BM)`，并只对 `jg < len_b` 的行求和；输出按 packed `[T,Hkv,D]` 定位
 //   （全局 KV token = `qbase + jg`）。grid=(B*Hkv, maxlen)、block=HD。k 维（GQA 广播组）与
 //   mblk 的求和次序固定（hh 升序、m 升序）⇒ 与调度无关、两次跑逐位可复现。
-template <int HD, int BM = 64>
+// F4-b（第 134 轮）：把 F4 第一步的「fp16 partial + O62 写扇区化」从定长扩到变长——`P16=true`
+//   时 dK/dV partial 以 fp16 存储且用 16 列块内置换布局（与 `fp8_mma_body` 的 `DET_HALF` 写一致），
+//   按置换后的列索引读回（求和集合/次序不变，仍确定性；数值只差 fp16 舍入）。HD 无关。
+template <int HD, int BM = 64, bool P16 = false>
 __global__ void dkv_reduce_varlen_kernel(const float* __restrict__ dk_part,
                                          const float* __restrict__ dv_part,
                                          float* __restrict__ dk_acc, float* __restrict__ dv_acc,
@@ -774,12 +777,19 @@ __global__ void dkv_reduce_varlen_kernel(const float* __restrict__ dk_part,
     const size_t prow = (size_t)(b * H + h0 + hh) * nblk_max;
     for (int m = mblk0; m < nblk_b; ++m) {
       // P3-4o：`part_base` 非空时读 compact per-sequence 布局（与 `fp8_mma_body` 的写一致）。
-      const size_t base =
+      const size_t row =
           part_base
-              ? ((size_t)part_base[b] + ((size_t)(h0 + hh) * nblk_b + m) * len + jg) * HD + c
-              : ((prow + m) * (size_t)maxlen + jg) * HD + c;
-      sk += dk_part[base];
-      sv += dv_part[base];
+              ? ((size_t)part_base[b] + ((size_t)(h0 + hh) * nblk_b + m) * len + jg) * HD
+              : ((prow + m) * (size_t)maxlen + jg) * HD;
+      if constexpr (P16) {
+        // F4-b：fp16 partial + 16 列块内置换（`dkv_p16_perm`），按置换列读回。
+        const size_t bp = row + dkv_p16_perm(c);
+        sk += __half2float(reinterpret_cast<const __half*>(dk_part)[bp]);
+        sv += __half2float(reinterpret_cast<const __half*>(dv_part)[bp]);
+      } else {
+        sk += dk_part[row + c];
+        sv += dv_part[row + c];
+      }
     }
   }
   const size_t o = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c;
@@ -790,7 +800,8 @@ __global__ void dkv_reduce_varlen_kernel(const float* __restrict__ dk_part,
 // P3-4n：varlen 版的 dkv+dq 融合归约（同定长版：grid = dkv_blocks + dq_blocks，求和次序
 //   逐字沿用 `dkv_reduce_varlen_kernel` / `dq_reduce_kernel` ⇒ 与分开版逐位相同）。
 //   `dkv_blocks = B*Hkv*maxlen`（`jg>=len_b` 的块空转 return），`dq_blocks = T*H`。
-template <int HD, int BM = 64>
+// F4-b：varlen 融合归约的 P16 版（与 `dkv_reduce_varlen_kernel` 的 P16 读逐字一致）。
+template <int HD, int BM = 64, bool P16 = false>
 __global__ void dkv_dq_reduce_varlen_kernel(
     const float* __restrict__ dk_part, const float* __restrict__ dv_part,
     const float* __restrict__ dq_part, float* __restrict__ dk_acc, float* __restrict__ dv_acc,
@@ -815,12 +826,18 @@ __global__ void dkv_dq_reduce_varlen_kernel(
       const size_t prow = (size_t)(b * H + h0 + hh) * nblk_max;
       for (int m = mblk0; m < nblk_b; ++m) {
         // P3-4o：compact per-sequence 布局（与 `fp8_mma_body` / `dkv_reduce_varlen_kernel` 一致）。
-        const size_t base =
+        const size_t row =
             part_base
-                ? ((size_t)part_base[b] + ((size_t)(h0 + hh) * nblk_b + m) * len + jg) * HD + c
-                : ((prow + m) * (size_t)maxlen + jg) * HD + c;
-        sk += dk_part[base];
-        sv += dv_part[base];
+                ? ((size_t)part_base[b] + ((size_t)(h0 + hh) * nblk_b + m) * len + jg) * HD
+                : ((prow + m) * (size_t)maxlen + jg) * HD;
+        if constexpr (P16) {
+          const size_t bp = row + dkv_p16_perm(c);
+          sk += __half2float(reinterpret_cast<const __half*>(dk_part)[bp]);
+          sv += __half2float(reinterpret_cast<const __half*>(dv_part)[bp]);
+        } else {
+          sk += dk_part[row + c];
+          sv += dv_part[row + c];
+        }
       }
     }
     const size_t o = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c;

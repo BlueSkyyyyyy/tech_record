@@ -6328,3 +6328,97 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name-base mangled \
 「不可用 smem+TMA 替换、只剩放大 BM/提 occupancy 两条硬约束路」锁定，见 ROADMAP「阻塞」；
 ② fp8 DET 要把端到端转正需再减 partial 字节（fp8 partial / 只存 causal 非零块）或提 reduce
 效率；③ 本改动可同样扩到 varlen/MLA 的 DET 路径（当前只在定长 D=128 kvtma 的 A/B 接线）。
+
+---
+
+## 69. F4-b（第一百三十四轮，**正结果（DET 路径），opt-in `--det`**）：把「fp16 partial + 写扇区化」扩到 fp8 的 MLA 与 varlen DET
+
+### 69.1 动机（落实 §68.6 下一步候选 ③）
+
+第 133 轮（`docs/03` §68）把 fp16/bf16 O60+O62 的「dK/dV partial 降精度 + 写扇区化」搬到了
+fp8，但**只在定长 D=128 的 Hopper `kvtma` 快路**接线（`launch_bwd_main_kvtma_det` 的
+`DET_HALF`）。fp8 的 DET 还有三条路径没吃到：**定长 MLA（HD=512）**、**varlen D=128**、
+**varlen MLA（HD=512）**。本轮把这三条补齐，使 `--det` 的扇区化覆盖 fp8 的全部 DET 路径。
+
+### 69.2 实现（单/两文件 device 逐字同源，`sync_onefile_device.py` 核对 `identical: True`）
+
+- **device（`fa_bwd_fp8_kernels.cuh`）**：两个 varlen 归约内核加 `bool P16=false` 模板参数——
+  `dkv_reduce_varlen_kernel<HD,BM,P16>` 与 `dkv_dq_reduce_varlen_kernel<HD,BM,P16>`：`P16` 时把
+  原来的行地址 `row + c` 拆成 `row + dkv_p16_perm(c)`、按 `__half` 读回（`__half2float` 进 fp32
+  累加器）。**求和集合与次序逐字不变 ⇒ 仍确定性，数值只差 fp16 舍入**。`dkv_p16_perm` 在
+  §68 已定义、与 fp16/bf16 公式逐字相同。定长两内核（`dkv_reduce_kernel`/`dkv_dq_reduce_kernel`）
+  §68 已支持 `P16`，本轮直接复用。
+- **为什么 HD=512 也成立**：`dkv_p16_perm` 只在 **16 列块内**置换，而 GEMM3/4 的 warp n-tile
+  起点 `c0=wc*GN34`：HD=128/8-warp 时 `GN34=64`、HD=512/4-N-tile 时 `GN34=32`（`NTW=128`、
+  `NWAR=4`），**都是 16 的倍数** ⇒ 全局列索引可直接套用同一置换，与 D=128 同一布局（含 `nd`
+  N-tile 循环的 `d0` 也是 128 的倍数）。`fp8_mma_body` 的 `DET_HALF` 分支本就同时支持
+  `part_base`（compact per-sequence）与非 compact 布局，无需改动。
+- **host（`fa_bwd_fp8_main.cu` 与单文件 `fa_bwd_fp8_mma_onefile.cu`）**：给三处 DET A/B 各加一个
+  `run_dth` 变体（分配一份 fp16 partial 缓冲，主 kernel 走 `DET_HALF=true`、二次归约走 `P16`），
+  打印新的 `[F4 A/B]` 行（DET-fp32 vs DET-fp16 时间 + `runs[1-2]` 逐位 + `fp16-vs-fp32`）：
+  ① varlen D=128（`launch_bwd_main_det<128,...,kWgmVarlen,false,true>`）；
+  ② varlen MLA（`launch_bwd_main_det<512,64,32,...,256,4,false,false,true>`）；
+  ③ 定长 MLA（同 ②，非 varlen）。
+  顺带修一个**单文件的历史遗漏**：`fa_bwd_fp8_mma_onefile.cu` 的 `launch_bwd_main_det` 此前缺
+  `DET_HALF` 模板参数（§68 只补了 `kvtma_det`），本轮补齐，使单文件的默认-mma DET 路径与两文件
+  完全一致。**默认路径一行未改**（`DET_HALF` 默认 false、`P16` 默认 false）。
+
+### 69.3 数值：确定性不变、只差 fp16 舍入（`runs[1-2]` 两次跑）
+
+| case（fp8，`--det`，ksplit=1） | DET-fp32 ms | **DET-fp16(扇区化) ms** | `runs[1-2]` dk/dv | fp16-vs-fp32 dk/dv | ours-vs-ref（不变） |
+|---|---|---|---|---|---|
+| 定长 MLA S=1024 H2 D512（两文件） | 0.7841 | **0.7210 (1.088×)** | **0 / 0** | 9.07e-4 / 1.79e-3 | 2.232/3.337/3.602e-1 |
+| varlen D=128 b1_t512_h16（两文件） | 0.1333 | **0.1262 (1.057×)** | **0 / 0** | 1.01e-3 / 1.83e-3 | 2.280/3.108/3.422e-1 |
+| MLA varlen b1_t512_h2 D512（两文件） | 0.3709 | **0.3351 (1.107×)** | **0 / 0** | 9.73e-4 / 1.67e-3 | 1.613/2.238/3.864e-1 |
+
+- **`runs[1-2] bitwise dk/dv = 0`**（全部）：确定性保留。
+- **fp16-vs-fp32 ≈ 1e-3–2.4e-3**：partial 过一趟 fp16 舍入（dK/dV 梯度 amax ~3–6，相对 ~3e-4），
+  与 §68 的定长 D=128 同量级；`ours vs fp32 ref` 与历史**逐位不变**。
+- **单文件与两文件逐指标一致**（三处 `fp16-vs-fp32` 完全相同：MLA `9.07e-4/1.79e-3`、
+  varlen D128 `1.01e-3/1.83e-3`、MLA varlen `9.73e-4/1.67e-3`）。
+- ksplit=4（含 causal/full、D128/MLA）同样 `runs[1-2]=0`、1.07–1.20×：大 case
+  `varlen_b5_t3968_h32_d128` 达 **1.202×**（1.943→1.617ms）。
+
+### 69.4 ncu：store 扇区在 varlen/MLA 上同样精确减半（O62 普适）
+
+**定长 MLA**（`fa_bwd_fp8_mma_kernel<512,64,32,0,0,1,1,1,256,4,0,1,{0,1}>`，S=1024 H2）：
+
+| 指标 | DET-fp32 | **DET-fp16(扇区化)** |
+|---|---|---|
+| L1 global store 扇区 | 2,228,224 | **1,114,112（−50%）** |
+| L2 write 扇区 | 3,466,388 | **1,761,733（−49%）** |
+
+**varlen D=128**（`fa_bwd_fp8_mma_kernel<128,64,32,1,1,1,1,1,128,2,0,1,{0,1}>`，b1_t512_h16）：
+
+| 指标 | DET-fp32 | **DET-fp16(扇区化)** |
+|---|---|---|
+| L1 global store 扇区 | 1,179,648 | **589,824（−50%）** |
+| L2 write 扇区 | 1,802,282 | **916,170（−49%）** |
+
+即 **O62 的「相邻两列组拼 8B + 16 列块内置换」在 HD=512 与 varlen 上逐字节成立**：每 lane
+写 8B、quad 覆盖连续 32B ⇒ store 扇区精确减半（不是只减字节）。
+
+### 69.5 复现 / 原始输出
+
+```bash
+# 定长 MLA（默认 mma 构建）
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --det --iters=8 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8
+# varlen D=128 / MLA varlen（Hopper 构建：sm90a + -DFA_WGMMA）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --varlen --det --iters=8 \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h16_d128_causal_fp8
+# ncu：DET-fp32 vs DET-fp16 主 kernel 的 store 扇区（按模板尾部分辨两个实例）
+ncu --metrics l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum,lts__t_sectors_op_write.sum \
+  --kernel-name regex:mma_kernel --csv -- target.out --det --iters=1 --dir=...
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_p134_f4b_{mla_fixed,varlen_d128,mla_varlen,onefile_mla,
+onefile_varlen}.out.txt`、`..._p134_ncu_{mla,varlen}_det_sectors.out.txt`；
+全量回归 `--ci` 全绿（fp16 3.906e-3 / bf16 1.562e-2 / fp8 7.629e-6，`--check docs/04` 194 行 OK）。
+
+**下一步候选**：① **F3（warp specialization / 更深 mbarrier 流水，对标 TE 384 线程/1 CTA/SM）**
+——默认路径 `wait 1.59 + short_scoreboard 1.29` 的最大来源是 GEMM3/4/5 的 mma 依赖，WS 只能
+*重叠*不能*减少*，先按 O48 的判据（被拆的工作是否「发射即返回」）评估；② F4 默认路径的
+L2 `red`（114.5M 扇区）仍被 O42 双硬约束锁定，见「阻塞」；③ fp8 DET 要端到端转正还需再减
+partial 字节（fp8 partial / 只存 causal 非零块）或提 reduce 效率。

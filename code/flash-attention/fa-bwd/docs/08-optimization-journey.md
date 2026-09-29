@@ -749,6 +749,23 @@ smem 冲突 + 低 occ
   partial 已满扇区，降精度只减字节）。默认路径的 `red` 仍被 O42 的双硬约束锁定。详见 `docs/03`
   §68；原始输出 `src/fp8/fa_bwd_fp8_p133_*`。
 
+### 5.49 F4-b（第一百三十四轮）：把 fp16 partial + 写扇区化扩到 fp8 的 MLA 与 varlen DET
+
+- **背景**：第 133 轮把 fp8 的 DET partial 降精度+扇区化只接到了定长 D=128 的 Hopper `kvtma`
+  快路；`docs/03` §68.6 候选 ③ 点名要把这条扩到 varlen/MLA。本轮补齐 fp8 DET 的全部三条路径。
+- **实现**：两个 varlen 归约内核加 `bool P16`，按 `row + dkv_p16_perm(c)` 读回 fp16（求和集合/
+  次序逐字不变 ⇒ 仍确定性）；boot host 给三处 DET A/B 各加 `run_dth`（varlen D=128、varlen MLA、
+  定长 MLA）。**HD=512 成立的关键**：`dkv_p16_perm` 只在 16 列块内置换，而 GEMM3/4 的 warp
+  n-tile 起点 `c0=wc*GN34`（HD=512/4-N-tile 的 `GN34=32`）是 16 的倍数 ⇒ 全局列索引直接套用。
+  顺带补上单文件 `launch_bwd_main_det` 缺失的 `DET_HALF` 模板参数（§68 的历史遗漏）。
+- **正结果（DET 路径）**：DET-fp32→fp16 端到端 **1.06–1.11×**（大 varlen ksplit=4 达 1.20×）；
+  `runs[1-2]` 逐位=0、`fp16-vs-fp32` ~1e-3（纯 partial 舍入）、`ours-vs-ref` 逐位不变；
+  **ncu**：store 扇区在定长 MLA（2.228M→1.114M）与 varlen D=128（1.180M→0.590M）上**精确减半**，
+  证明 O62 扇区化对 HD=512/varlen 普适。单/两文件逐指标一致；`--ci` 全绿。
+- **仍未转正**：与 §68 同——fp8 partial 即使 fp16 仍有 ~1.1GB 写 + 读，ksplit=1 下 DET 仍略慢于
+  非确定 atomic；默认路径 `red` 仍由 O42 双硬约束锁定。详见 `docs/03` §69；原始输出
+  `src/fp8/fa_bwd_fp8_p134_*`。
+
 ## 6. 可复用的经验（写给别人 / 未来的自己）
 
 1. **对标要选同代**：FA2（SM80）≠ FA3（SM90）。拿错代际会得出相反结论（见 `docs/06`）。

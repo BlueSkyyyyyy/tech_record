@@ -211,6 +211,13 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
     扇区 68.2M→**34.1M（−50%）**；`runs[1-2]` 逐位=0、默认路径不变。**默认路径的非确定 atomic
     `red`（114.5M）仍被 O42 双硬约束锁定**，fp8 DET 转正需再减 partial 字节。见 `docs/03` §68、
     `docs/08` §5.48。
+    → **fp8 的 DET 扇区化扩到 MLA 与 varlen（F4-b，第一百三十四轮）**：把 F4 第一步只接在
+    定长 D=128 `kvtma` 快路的「fp16 partial + 扇区化」补到 **定长 MLA（HD=512）/ varlen D=128 /
+    varlen MLA**。varlen 归约内核加 `bool P16`（按 `dkv_p16_perm` 读回 fp16，求和集合/次序不变
+    ⇒ 仍确定性）；HD=512 成立因 `c0=wc*GN34`（4-N-tile 的 `GN34=32`）是 16 的倍数。**DET-fp32→
+    fp16 端到端 1.06–1.11×（大 varlen ksplit=4 1.20×）**、`runs[1-2]` 逐位=0、`fp16-vs-fp32`
+    ~1e-3、`ours-vs-ref` 不变；ncu store 扇区在 MLA（2.228M→1.114M）与 varlen（1.180M→0.590M）
+    **精确减半**。见 `docs/03` §69、`docs/08` §5.49。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 
