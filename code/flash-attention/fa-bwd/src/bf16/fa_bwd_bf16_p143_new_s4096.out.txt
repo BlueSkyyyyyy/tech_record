@@ -1,0 +1,3 @@
+[timing] total(3 kernels) 1.8333 ms  74.97 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2279 ms | main 1.5021 ms | convert 0.1033 ms
+[O8b A/B] lse O8 0.8319 ms | bal(单缓冲) 0.3488 ms (2.385x) | bal+cpasync(双缓冲) 0.2158 ms (3.856x)

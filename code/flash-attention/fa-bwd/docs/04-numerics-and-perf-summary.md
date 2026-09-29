@@ -2478,7 +2478,7 @@ python3 harness/fa_bwd_run.py --doc-table-apply
 |  | **ours（两文件）** | 1.883e-03 | 1.734e-03 | 1.966e-03 |
 | (1,1024,16,128) full | FA3.0.0 | 3.268e-04 | 2.523e-04 | 1.217e-04 |
 |  | TE2.14 | 1.558e-04 | 2.297e-04 | 1.217e-04 |
-|  | **ours（两文件）** | 3.268e-04 | 2.523e-04 | 1.225e-04 |
+|  | **ours（两文件）** | 3.268e-04 | 2.523e-04 | 1.217e-04 |
 
 **GQA/MQA**
 
@@ -2532,7 +2532,7 @@ python3 harness/fa_bwd_run.py --doc-table-apply
 | varlen B=5 T=3968 [128,256,512,1024...] H=32 D=128 Hkv=8 full | FA3.0.0 | 7.515e-04 | 7.856e-04 | 4.880e-04 |
 |  | **ours（两文件）** | 7.341e-04 | 7.906e-04 | 4.880e-04 |
 | varlen B=4 T=4096 [1024,1024,1024,1024] H=16 D=128 full | FA3.0.0 | 4.094e-04 | 4.953e-04 | 1.213e-04 |
-|  | **ours（两文件）** | 4.094e-04 | 4.953e-04 | 1.234e-04 |
+|  | **ours（两文件）** | 4.094e-04 | 4.953e-04 | 1.213e-04 |
 
 ### bf16
 
@@ -2946,3 +2946,31 @@ DRAM 87.6%。**bound = reduce 的纯 DRAM 带宽 + 主 kernel 多写的 partial*
 DRAM 29.8→33.0%、smem 207.87→229.89KB、occ 12.49%（1 CTA/SM）。机制与 O51 一致（K/V 全局读
 延迟藏进计算）。**确定性模式下不再额外付出「非 kvpipe 主 kernel」这一层代价**。详见
 `docs/03` §64、`docs/00` §4.2。
+
+## 46. O63（第 143 轮）：fp16/bf16 LSE 的「tile 内两趟 softmax」—— 正结果，默认
+
+把第 136 轮 F5（fp8，`docs/03` §71、`§5.51`）的 LSE 两趟 softmax epilogue 逐字回移/参数化到
+**fp16 与 bf16** 的 4 个 LSE kernel（`lse_mma_kernel` / `_bal`（含 `FULL`）/ `_bal_wgmma` /
+`_bal_tma`），并把 `_bal_tma` 的 `int kuse[2]`（→ local memory）改两标量。数学等价、只换
+fp32 求和次序。单/两文件同源（bf16 按既定做法用 `using bf16=...` marker 同步）。
+
+**数值**：与改前**逐位相同**（fp16 S4096 1.883/1.734/1.966e-3；bf16 1.510/1.340/1.631e-2）；
+全量 `--ci --dtype fp16 bf16` gate fp16 **3.906e-3** / bf16 **1.562e-2** 均 OK、一致性 OK、
+`--check docs/04` OK（194 行）。仅 full 的个别 dv 第 5 位移动（~1e-4），已 `--apply` 同步本表。
+
+**性能**（同 session 同 binary，event，S4096 causal）：
+
+| dtype / 构建 | 阶段 | OLD | NEW | 加速 |
+|---|---|---|---|---|
+| fp16 `sm_90` | LSE / preprocess / total | 0.3112 / 0.3246 / 1.9173 ms | **0.2159 / 0.2293 / 1.8233 ms** | 1.44× / 1.42× / 1.052× |
+| bf16 `sm_90` | LSE / preprocess / total | 0.3098 / 0.3214 / 1.9213 ms | **0.2158 / 0.2279 / 1.8333 ms** | 1.44× / 1.41× / 1.048× |
+| fp16 `-DFA_WGMMA`（varlen B4T3840） | total | 0.7792 ms | **0.7424 ms** | 1.050× |
+| fp16 `-DFA_WGMMA -DFA_TMA`（Hopper） | preprocess / total | 0.2268 / 1.2571 ms | **0.1339 / 1.1657 ms** | 1.69× / 1.078× |
+
+**ncu**（fp16 `lse_mma_kernel_bal<128,1>`，S4096）：Duration **310.27→221.18µs（1.40×）**、
+`smsp__inst_executed` **163.8M→119.1M（−27.3%）**、local 扇区 **98K/16K→0**；wgmma 版
+277.79→**195.17µs（1.42×）**。SASS：`MUFU` 172→112、`BSSY/BSYNC` 109→42、`FSETP` 260→140。
+
+**结论**：三 dtype 的 LSE 现已统一走两趟 softmax；LSE 不是墙，默认路径的墙仍是 main。
+详见 `docs/01` §19、`docs/01b` §6av、`docs/08` §5.57；原始输出 `src/fp16/fa_bwd_fp16_p143_*`、
+`src/bf16/fa_bwd_bf16_p143_*`、`src/fa_bwd_p143_ci_fp16_bf16.out.txt`。

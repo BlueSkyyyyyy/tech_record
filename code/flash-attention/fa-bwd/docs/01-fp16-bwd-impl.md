@@ -4405,3 +4405,98 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
 `src/fp16/fa_bwd_fp16_mma_main_o62_det_{s512,s4096,gqa_kv4}.out.txt`、
 `src/fp16/fa_bwd_fp16_mma_onefile_o62_det_s512.out.txt`、
 `src/fp16/fa_bwd_fp16_p_o62_ncu_{main16,main32,reduce16}_s4096.out.txt`。
+
+## 19. O63-fp16（第一百四十三轮，**正结果，默认**）：LSE 的「tile 内两趟 softmax」——把 fp8 F5 的 LSE 提速回移到 fp16
+
+### 19.1 动机
+
+第一百三十六轮的 **F5**（`docs/03` §71）把 fp8 的 4 个 LSE kernel 的 epilogue 从「逐元素
+online-softmax」改成「tile 内两趟 softmax」（先求本 lane 各 `s` 的列 max、再统一 rescale+exp），
+fp8 LSE **201→120µs（1.67×）**、每 tile 的 `fexp` 64→34、删掉逐元素 `if (sv != -INF)` 分支。
+但那次只覆盖了 **fp8** 的 kernel；fp16/bf16 的 LSE 仍是旧写法（每元素一次 `fmax` + 两个
+`fexp` + 一次逐元素 online update）。本轮把它逐字回移到 fp16/bf16 的 LSE，覆盖默认路径的全部
+LSE kernel：`lse_mma_kernel`、`lse_mma_kernel_bal`（含 `FULL` 模板）、
+`lse_mma_kernel_bal_wgmma`、`lse_mma_kernel_bal_tma`。
+
+### 19.2 改动（device 逐字，单/两文件同源）
+
+对每个 LSE kernel 的 epilogue，把「逐元素 online update」改成 **tile 内两趟**（数学等价，
+只换 fp32 求和次序）：
+
+1. **第一趟**：对本 lane 持有的 8（或 `MTN`）×4 个累加器逐个做掩码，把掩码后的 `sv` **写回**
+   累加器数组，同时更新两个 row-slot 的局部列 max `mloc0/mloc1`；
+2. `mn = max(mrow, mloc)`；`mr = (mn==-INF) ? 0 : mn`（全掩码行用安全参考值，掩码位算 exp 自然得 0）；
+3. **第二趟**：`Σ fexp(acc[i]-mr)` 得到本 tile 的行和，再 `lrow = lrow*fexp(mrow-mn) + add`。
+
+顺带把 `lse_mma_kernel_bal_tma` 的 mbarrier 相位计数器 `int kuse[2]`（运行期 `st = rnt&1`
+动态下标 → ptxas 落 **local memory**，同 F3-a 的坑）改成两个标量 `kuse0/kuse1`。
+
+### 19.3 数值（与改前**逐位相同**，`ours-vs-ref` fp16 causal）
+
+| shape（B,S,H,D） | dq | dk | dv |
+|---|---|---|---|
+| 1×4096×16×128 causal | 1.883e-03 | 1.734e-03 | 1.966e-03 |
+| varlen B=4 T=3840 H=16 D=128 causal | 3.163e-03 | 2.158e-03 | 1.966e-03 |
+
+与改前**逐位一致**（LSE 只差 ~1e-7 的 fp32 求和次序，未改变任何 fp16 输出位）。全量 CI
+（`fa_bwd_run.py --ci --dtype fp16 bf16`）：gate fp16 **3.906e-03**、bf16 **1.562e-02** 均 OK，
+单/两文件一致性 gate OK，`--check docs/04` OK（194 行）。仅 full（非 causal）的少量 dv 值在
+第 5 位有效数字上移动（如 `1.225e-04→1.217e-04`，仍远小于容差），已 `--apply` 同步 docs/04。
+
+### 19.4 性能（同 session、同 binary，CUDA event，S=4096 causal）
+
+| 构建 | 阶段 | OLD | NEW | 加速 |
+|---|---|---|---|---|
+| fp16 `sm_90`（默认 mma） | LSE `bal+cpasync` | 0.3112 ms | **0.2159 ms** | 1.44× |
+| | preprocess | 0.3246 ms | **0.2293 ms** | 1.42× |
+| | total | 1.9173 ms | **1.8233 ms** | 1.052× |
+| bf16 `sm_90`（默认 mma） | LSE `bal+cpasync` | 0.3098 ms | **0.2158 ms** | 1.44× |
+| | preprocess | 0.3214 ms | **0.2279 ms** | 1.41× |
+| | total | 1.9213 ms | **1.8333 ms** | 1.048× |
+| fp16 `sm90a -DFA_WGMMA`（varlen B4 T3840） | total | 0.7792 ms | **0.7424 ms** | 1.050× |
+| fp16 `sm90a -DFA_WGMMA -DFA_TMA`（Hopper） | LSE `bal_wgmma` | 0.3110 ms | **0.2142 ms** | 1.45× |
+| | preprocess | 0.2268 ms | **0.1339 ms** | 1.69× |
+| | total | 1.2571 ms | **1.1657 ms** | 1.078× |
+
+**main 一行未动**（S4096 fixed 1.4934→1.4956ms，噪声内）。
+
+### 19.5 ncu / SASS 归因（`lse_mma_kernel_bal<128,1,false,128,64>`，S=4096）
+
+| 指标 | OLD | NEW |
+|---|---|---|
+| `gpu__time_duration` | 310.27 µs | **221.18 µs（1.40×）** |
+| `smsp__inst_executed` | 163,842,048 | **119,110,656（−27.3%）** |
+| local ld/st sectors | 98,304 / 16,384 | **0 / 0** |
+| stall `wait` | 2.16 | **1.05** |
+
+wgmma 版 `lse_mma_kernel_bal_wgmma<128,1>`：Duration **277.79 → 195.17µs（1.42×）**、
+指令 **160.1M → 118.5M（−26.0%）**。
+
+SASS opcode 直方图（`cuobjdump -sass`，同函数）说明收益来源：`MUFU`（`fexp`/`__expf`）
+**172→112**、`BSSY`/`BSYNC`（逐元素 `if` 分支）**109→42**、`FSETP` **260→140**、`BRA` 162→95、
+静态指令总数 **4544→3776**；`HMMA`/`LDSM`/`LDS`/`LDGSTS` 不变（只改 softmax epilogue）。
+
+### 19.6 结论 / 下一步
+
+**正结果、默认**：与 fp8 F5 同源的两趟 softmax 在 fp16/bf16 上同样成立——LSE 单 kernel
+**1.40–1.45×**、preprocess **1.4–1.7×**、端到端 **1.05–1.08×**，数值逐位不变（full 的
+第 5 位噪声在容差内）。至此 **fp8 / fp16 / bf16 三 dtype 的 LSE 都走两趟 softmax**。
+LSE 已不是墙（S4096 fp16 preprocess 仅占端到端 ~13%），默认路径的墙仍是 main。
+
+### 19.7 复现 / 原始输出
+
+```
+# 单文件（device 由 sync_onefile_device.py 同步，逐字一致）：
+python3 scripts/sync_onefile_device.py src/fp16/fa_bwd_fp16_mma_kernels.cuh \
+  src/fp16/fa_bwd_fp16_mma_onefile.cu '#include <cuda_runtime.h>'
+# 默认 mma：两文件 / 单文件 S4096
+scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16 --iters=50
+# Hopper：ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda"
+# varlen：追加 --varlen（ARCH="" NVCC_FLAGS="...-DFA_WGMMA"）
+```
+
+`src/fp16/fa_bwd_fp16_p143_{base,new}_s4096.out.txt`、
+`..._{base,new}_varlen.out.txt`、`..._{base,new}_hopper.out.txt`、
+`..._ncu_lse_{base,new}.out.txt`、`..._ncu_wgmma_{base,new}.out.txt`、
+`src/fa_bwd_p143_ci_fp16_bf16.out.txt`。

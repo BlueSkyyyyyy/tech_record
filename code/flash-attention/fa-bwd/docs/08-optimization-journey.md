@@ -912,3 +912,30 @@ smem 冲突 + 低 occ
   「SW128 16B chunk 可 `ldmatrix` 转置读」是 **bf16（1 个 b16 = 1 元素）** 的结论；fp8 的
   2 元素/b16 让「转置」只发生在 8×8 矩阵层、不改元素配对，直接搬运会导致整块 B 错位。
   详见 `docs/03` §77。
+
+### 5.57 O63：fp16/bf16 LSE 的「tile 内两趟 softmax」（第一百四十三轮，正结果，默认）
+
+- **背景**：第一百三十六轮 F5 给 **fp8** 的 4 个 LSE kernel 上了「tile 内两趟 softmax」
+  （`docs/03` §71、`docs/08` §5.51），fp8 LSE **1.67×**。但 F5 只覆盖 fp8；fp16/bf16 的 LSE
+  仍是旧的「逐元素 online-softmax」（每元素 `fmax` + 两个 `fexp` + 逐元素 `if (sv!=-INF)`）。
+- **做了什么**：把 F5 的两趟 epilogue **逐字回移/参数化**到 fp16 与 bf16 的 4 个 LSE kernel
+  （`lse_mma_kernel` / `_bal` 含 `FULL` / `_bal_wgmma` / `_bal_tma`），并顺手把 `_bal_tma` 的
+  `int kuse[2]`（运行期动态下标 → local memory，F3-a 的坑）改两标量。数学等价，只换 fp32 求和次序。
+  单/两文件同源：fp16 用 `#include <cuda_runtime.h>` marker；bf16 按既定做法用
+  `using bf16 = ...` marker（其 `#include <algorithm>` 在 device 区之前）。
+- **数值**：与改前**逐位相同**（fp16 S4096 1.883/1.734/1.966e-3；bf16 1.510/1.340/1.631e-2；
+  fp16 varlen B4 3.163/2.158/1.966e-3）；CI gate fp16 3.906e-3 / bf16 1.562e-2 均 OK；
+  仅 full 的个别 dv 第 5 位移动（~1e-4 级），`--apply` 同步 docs/04。
+- **性能**（同 session 同 binary，event，S4096 causal）：fp16 LSE **0.3112→0.2159ms（1.44×）**、
+  preprocess 0.3246→**0.2293（1.42×）**、total 1.9173→**1.8233（1.052×）**；bf16 LSE
+  **0.3098→0.2158（1.44×）**、total 1.9213→**1.8333（1.048×）**；fp16 varlen 0.7792→**0.7424
+  （1.050×）**；Hopper（wgmma LSE）preprocess 0.2268→**0.1339（1.69×）**、total 1.2571→**1.1657
+  （1.078×）**。main 一行未动。
+- **ncu/SASS**：fp16 `lse_mma_kernel_bal<128,1>` Duration **310.27→221.18µs（1.40×）**、
+  指令 **163.8M→119.1M（−27.3%）**、local 扇区 **98K/16K→0**、stall `wait` 2.16→1.05；
+  wgmma 版 277.79→**195.17µs（1.42×）**、指令 −26.0%。SASS：`MUFU` **172→112**、
+  `BSSY/BSYNC` **109→42**、`FSETP` **260→140**、静态指令 **4544→3776**。
+- **结论**：F5 的两趟 softmax 对 fp16/bf16 同样成立；**三 dtype 的 LSE 现已统一走两趟**。
+  LSE 不再是墙（S4096 fp16 preprocess 仅 ~13% 端到端），默认路径的墙仍是 main。
+  详见 `docs/01` §19、`docs/01b` §6av；原始输出 `src/fp16/fa_bwd_fp16_p143_*`、
+  `src/bf16/fa_bwd_bf16_p143_*`、`src/fa_bwd_p143_ci_fp16_bf16.out.txt`。

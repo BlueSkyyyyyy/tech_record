@@ -1,0 +1,88 @@
+fa_bwd_fp16_mma_main.cu(1170): warning #550-D: variable "lse_forced" was set but never used
+    bool lse_forced = false;
+         ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp16_mma_main.cu(1177): warning #550-D: variable "wgmma_sel" was set but never used
+    int wgmma_sel = 0;
+        ^
+
+fa_bwd_fp16_mma_main.cu(1185): warning #550-D: variable "wg_forced" was set but never used
+    bool wg_forced = false;
+         ^
+
+fa_bwd_fp16_mma_main.cu(1187): warning #550-D: variable "wg2split_sel" was set but never used
+    int wg2split_sel = 1;
+        ^
+
+fa_bwd_fp16_mma_main.cu(1189): warning #550-D: variable "wg4_sel" was set but never used
+    int wg4_sel = 0;
+        ^
+
+fa_bwd_fp16_mma_main.cu(1193): warning #550-D: variable "det_ab" was set but never used
+    int det_ab = 0;
+        ^
+
+fa_bwd_fp16_mma_main.cu(1197): warning #550-D: variable "dq_direct_sel" was set but never used
+    int dq_direct_sel = 1;
+        ^
+
+fa_bwd_fp16_mma_main.cu(1200): warning #550-D: variable "cluster_sel" was set but never used
+    int cluster_sel = 0;
+        ^
+
+fa_bwd_fp16_mma_main.cu(1206): warning #550-D: variable "wg2ksplit" was set but never used
+    int wg2ksplit = -1;
+        ^
+
+fa_bwd_fp16_mma_main.cu(1219): warning #550-D: variable "lse8w" was set but never used
+    int lse8w = 0;
+        ^
+
+fa_bwd_fp16_mma_main.cu(1232): warning #550-D: variable "varlen_tma" was set but never used
+    int varlen_tma = -1;
+        ^
+
+fa_bwd_fp16_mma_main.cu(1387): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
+    const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
+              ^
+
+fa_bwd_fp16_mma_main.cu(1615): warning #177-D: variable "ow_sel" was declared but never referenced
+    const bool ow_sel = (ow_opt > 0);
+               ^
+
+fa_bwd_fp16_mma_main.cu(1617): warning #177-D: variable "wg4seq_sel" was declared but never referenced
+    const bool wg4seq_sel = (wg4seq_opt > 0);
+               ^
+
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+[O6c] main grid=1024 auto=(BM=64,BN=64,PIPE=2) sel=(BM=64,BN=64,PIPE=2)
+[O49] d128 8-warp = 0 (d128w=-1, grid=1024, sm=132)
+[O38] lse k-split = 1 (auto)
+[O23] main backend = mma | lse = mma (D=128 S=4096)
+[O43] wgmma2 k-split = 1
+[timing] total(3 kernels) 1.9187 ms  71.63 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.3220 ms | main 1.5082 ms | convert 0.0885 ms
+[O24 A/B] delta old 0.0427 ms | warp 0.0128 ms (3.34x)
+[O8b A/B] lse O8 0.8582 ms | bal(单缓冲) 0.4276 ms (2.007x) | bal+cpasync(双缓冲) 0.3109 ms (2.761x)
+[O6 A/B] main nopipe 2.1811 ms (63.01 TF) | pipe(KV both) 1.5464 ms (88.88 TF) | pipe2(K only) 1.5948 ms (86.18 TF) => nopipe/pipe 1.410x, nopipe/pipe2 1.368x
+[O48 A/B] main D=128 4w(128/2) 1.5905 ms | 8w(256/4) 1.7973 ms (0.885x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/7.153e-07/1.907e-06
+[O6c A/B] main sched0(原样) 1.5809 ms | sched1(交错) 1.5573 ms (1.015x) | sched2(逆序) 1.5541 ms (1.017x)
+[O5c A/B] main (64,32,2) 1.5477 ms (88.80 TF) | (64,64,2) 1.4698 (93.51) | (32,32,1) 2.5672 (53.54) | (32,32,2) 2.5561 (53.77) => best 1.053x
+[O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
+  (BM=64,BN=32,PIPE=2): base 1.7495 (78.56) | f4 1.8753 (73.29,-6.7%) | f2+PREL 1.5450 (88.96,+13.2%) | f4+PREL 1.5840 (86.77,+10.4%)
+  (BM=64,BN=64,PIPE=2): base 1.6961 (81.03) | f4 1.7096 (80.39,-0.8%) | f2+PREL 1.4652 (93.80,+15.8%) | f4+PREL 1.5033 (91.42,+12.8%)
+  (BM=32,BN=32,PIPE=1): base 2.5982 (52.90) | f4 2.6010 (52.84,-0.1%) | f2+PREL 2.5500 (53.90,+1.9%) | f4+PREL 2.5726 (53.42,+1.0%)
+  (BM=32,BN=32,PIPE=2): base 2.5887 (53.09) | f4 2.5934 (53.00,-0.2%) | f2+PREL 2.5523 (53.85,+1.4%) | f4+PREL 2.5660 (53.56,+0.9%)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.408e-01
+  dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
+  fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
+  fa_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
+  te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
+  te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
+  te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02

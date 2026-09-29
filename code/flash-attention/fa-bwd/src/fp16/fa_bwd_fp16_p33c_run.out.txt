@@ -7,16 +7,16 @@ B=1 S=1024 H=16 Hkv=16 D=128 causal=0 scale=0.088388
 [O38] lse k-split = 4 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=1024)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.4017 ms  21.39 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.1547 ms | main 0.1666 ms | convert 0.0803 ms
-[O24 A/B] delta old 0.0132 ms | warp 0.0053 ms (2.51x)
-[O6 A/B] main nopipe 0.3013 ms (28.51 TF) | pipe(KV both) 0.1867 ms (46.01 TF) | pipe2(K only) 0.1943 ms (44.22 TF) => nopipe/pipe 1.614x, nopipe/pipe2 1.551x
-[O48 A/B] main D=128 4w(128/2) 0.1818 ms | 8w(256/4) 0.2095 ms (0.868x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.192e-07/5.960e-08
+[timing] total(3 kernels) 0.3841 ms  22.36 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1363 ms | main 0.1793 ms | convert 0.0685 ms
+[O24 A/B] delta old 0.0135 ms | warp 0.0053 ms (2.53x)
+[O6 A/B] main nopipe 0.3023 ms (28.41 TF) | pipe(KV both) 0.1780 ms (48.25 TF) | pipe2(K only) 0.1928 ms (44.54 TF) => nopipe/pipe 1.698x, nopipe/pipe2 1.568x
+[O48 A/B] main D=128 4w(128/2) 0.1860 ms | 8w(256/4) 0.2097 ms (0.887x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/8.941e-08/5.960e-08
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h16_d128_full_fp16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=3.268e-04  max_rel=8.146e-02
   dk   vs ref: max_abs=2.523e-04  max_rel=8.022e-02
-  dv   vs ref: max_abs=1.225e-04  max_rel=1.830e-02
+  dv   vs ref: max_abs=1.217e-04  max_rel=1.830e-02
   fa_dq     vs ref: max_abs=3.268e-04  max_rel=8.090e-02
   fa_dk     vs ref: max_abs=2.523e-04  max_rel=7.871e-02
   fa_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
@@ -80,11 +80,11 @@ fa_bwd_fp16_mma_main.cu(1615): warning #177-D: variable "ow_sel" was declared bu
 fa_bwd_fp16_mma_main.cu(1617): warning #177-D: variable "wg4seq_sel" was declared but never referenced
     const bool wg4seq_sel = (wg4seq_opt > 0);
                ^
-  | [O48 A/B] main D=128 4w(128/2) 0.1818 ms | 8w(256/4) 0.2095 ms (0.868x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.192e-07/5.960e-08
+  | [O48 A/B] main D=128 4w(128/2) 0.1860 ms | 8w(256/4) 0.2097 ms (0.887x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/8.941e-08/5.960e-08
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h16_d128_full_fp16/ours_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=3.268e-04  max_rel=8.146e-02
   | dk   vs ref: max_abs=2.523e-04  max_rel=8.022e-02
-  | dv   vs ref: max_abs=1.225e-04  max_rel=1.830e-02
+  | dv   vs ref: max_abs=1.217e-04  max_rel=1.830e-02
   | fa_dq     vs ref: max_abs=3.268e-04  max_rel=8.090e-02
   | fa_dk     vs ref: max_abs=2.523e-04  max_rel=7.871e-02
   | fa_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
@@ -100,11 +100,11 @@ B=1 S=1024 H=16 Hkv=16 D=128 causal=0 scale=0.088388
 [O38] lse k-split = 4 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=1024)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.4007 ms  21.44 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.1547 ms | main 0.1674 ms | convert 0.0787 ms
-[O24 A/B] delta old 0.0133 ms | warp 0.0053 ms (2.51x)
-[O6 A/B] main nopipe 0.2989 ms (28.74 TF) | pipe(KV both) 0.1774 ms (48.42 TF) | pipe2(K only) 0.1938 ms (44.32 TF) => nopipe/pipe 1.685x, nopipe/pipe2 1.542x
-[O48 A/B] main D=128 4w(128/2) 0.1839 ms | 8w(256/4) 0.2094 ms (0.878x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.192e-07/5.960e-08
+[timing] total(3 kernels) 0.3837 ms  22.39 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1363 ms | main 0.1689 ms | convert 0.0785 ms
+[O24 A/B] delta old 0.0135 ms | warp 0.0055 ms (2.44x)
+[O6 A/B] main nopipe 0.2985 ms (28.78 TF) | pipe(KV both) 0.1787 ms (48.07 TF) | pipe2(K only) 0.1940 ms (44.28 TF) => nopipe/pipe 1.670x, nopipe/pipe2 1.539x
+[O48 A/B] main D=128 4w(128/2) 0.1872 ms | 8w(256/4) 0.2099 ms (0.892x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/8.941e-08/7.451e-08
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h16_d128_full_fp16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=3.268e-04  max_rel=8.146e-02
@@ -116,64 +116,64 @@ B=1 S=1024 H=16 Hkv=16 D=128 causal=0 scale=0.088388
   te_dq     vs ref: max_abs=1.558e-04  max_rel=4.590e-02
   te_dk     vs ref: max_abs=2.297e-04  max_rel=3.468e-02
   te_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
-fa_bwd_fp16_mma_onefile.cu(4938): warning #550-D: variable "lse_forced" was set but never used
+fa_bwd_fp16_mma_onefile.cu(4983): warning #550-D: variable "lse_forced" was set but never used
     bool lse_forced = false;
          ^
 
 Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
 
-fa_bwd_fp16_mma_onefile.cu(4945): warning #550-D: variable "wgmma_sel" was set but never used
+fa_bwd_fp16_mma_onefile.cu(4990): warning #550-D: variable "wgmma_sel" was set but never used
     int wgmma_sel = 0;
         ^
 
-fa_bwd_fp16_mma_onefile.cu(4953): warning #550-D: variable "wg_forced" was set but never used
+fa_bwd_fp16_mma_onefile.cu(4998): warning #550-D: variable "wg_forced" was set but never used
     bool wg_forced = false;
          ^
 
-fa_bwd_fp16_mma_onefile.cu(4955): warning #550-D: variable "wg2split_sel" was set but never used
+fa_bwd_fp16_mma_onefile.cu(5000): warning #550-D: variable "wg2split_sel" was set but never used
     int wg2split_sel = 1;
         ^
 
-fa_bwd_fp16_mma_onefile.cu(4957): warning #550-D: variable "wg4_sel" was set but never used
+fa_bwd_fp16_mma_onefile.cu(5002): warning #550-D: variable "wg4_sel" was set but never used
     int wg4_sel = 0;
         ^
 
-fa_bwd_fp16_mma_onefile.cu(4961): warning #550-D: variable "det_ab" was set but never used
+fa_bwd_fp16_mma_onefile.cu(5006): warning #550-D: variable "det_ab" was set but never used
     int det_ab = 0;
         ^
 
-fa_bwd_fp16_mma_onefile.cu(4965): warning #550-D: variable "dq_direct_sel" was set but never used
+fa_bwd_fp16_mma_onefile.cu(5010): warning #550-D: variable "dq_direct_sel" was set but never used
     int dq_direct_sel = 1;
         ^
 
-fa_bwd_fp16_mma_onefile.cu(4968): warning #550-D: variable "cluster_sel" was set but never used
+fa_bwd_fp16_mma_onefile.cu(5013): warning #550-D: variable "cluster_sel" was set but never used
     int cluster_sel = 0;
         ^
 
-fa_bwd_fp16_mma_onefile.cu(4974): warning #550-D: variable "wg2ksplit" was set but never used
+fa_bwd_fp16_mma_onefile.cu(5019): warning #550-D: variable "wg2ksplit" was set but never used
     int wg2ksplit = -1;
         ^
 
-fa_bwd_fp16_mma_onefile.cu(4986): warning #550-D: variable "lse8w" was set but never used
+fa_bwd_fp16_mma_onefile.cu(5031): warning #550-D: variable "lse8w" was set but never used
     int lse8w = 0;
         ^
 
-fa_bwd_fp16_mma_onefile.cu(4999): warning #550-D: variable "varlen_tma" was set but never used
+fa_bwd_fp16_mma_onefile.cu(5044): warning #550-D: variable "varlen_tma" was set but never used
     int varlen_tma = -1;
         ^
 
-fa_bwd_fp16_mma_onefile.cu(5154): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
+fa_bwd_fp16_mma_onefile.cu(5199): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
     const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
               ^
 
-fa_bwd_fp16_mma_onefile.cu(5382): warning #177-D: variable "ow_sel" was declared but never referenced
+fa_bwd_fp16_mma_onefile.cu(5427): warning #177-D: variable "ow_sel" was declared but never referenced
     const bool ow_sel = (ow_opt > 0);
                ^
 
-fa_bwd_fp16_mma_onefile.cu(5384): warning #177-D: variable "wg4seq_sel" was declared but never referenced
+fa_bwd_fp16_mma_onefile.cu(5429): warning #177-D: variable "wg4seq_sel" was declared but never referenced
     const bool wg4seq_sel = (wg4seq_opt > 0);
                ^
-  | [O48 A/B] main D=128 4w(128/2) 0.1839 ms | 8w(256/4) 0.2094 ms (0.878x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.192e-07/5.960e-08
+  | [O48 A/B] main D=128 4w(128/2) 0.1872 ms | 8w(256/4) 0.2099 ms (0.892x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/8.941e-08/7.451e-08
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h16_d128_full_fp16/ours_sf_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=3.268e-04  max_rel=8.146e-02
   | dk   vs ref: max_abs=2.523e-04  max_rel=8.022e-02
@@ -194,29 +194,29 @@ B=1 S=1024 H=2 Hkv=2 D=512 causal=1 scale=0.044194
 [O38] lse k-split = 16 (auto)
 [O23] main backend = mma | lse = mma (D=512 S=1024)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.1849 ms  23.23 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0308 ms | main 0.1370 ms | convert 0.0171 ms
-[O39 A/B] lse(D=512) split=1 0.1042 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-[O39 A/B] lse(D=512) split=2 0.0614 ms (1.698x vs split1) | max_abs vs split1=9.537e-07
-[O39 A/B] lse(D=512) split=4 0.0391 ms (2.665x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=8 0.0288 ms (3.614x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=16 0.0410 ms (2.542x vs split1) | max_abs vs split1=4.768e-07
-[O39] best lse split=8 0.0288 ms (3.614x)
-[O59 A/B] LSE MLA legacy(sp=8) 0.0288 ms | cfg6(sp=16) 0.0280 ms (1.029x) | max_abs(cfg6-vs-legacy)=4.768e-07
-[MLA512 A/B] main: (32,32,0) 0.5178 (8.30 TF) | (32,32,1) 0.1376 (31.22) | (64,32,0) 0.5714 (7.52) => best 3.763x
-[O44 A/B] MLA main ksplit: 1 0.7454 (5.76) | 2 0.2112 (20.33, 3.53x) | 4 0.1752 (24.51, 4.25x)
-[O46 A/B] MLA main warp: 4w 0.1475 (29.11) | 8w 0.1370 (31.35, 1.077x)
+[timing] total(3 kernels) 0.1839 ms  23.35 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0298 ms | main 0.1372 ms | convert 0.0169 ms
+[O39 A/B] lse(D=512) split=1 0.0749 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O39 A/B] lse(D=512) split=2 0.0464 ms (1.616x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=4 0.0308 ms (2.429x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=8 0.0239 ms (3.130x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=16 0.0359 ms (2.089x vs split1) | max_abs vs split1=4.768e-07
+[O39] best lse split=8 0.0239 ms (3.130x)
+[O59 A/B] LSE MLA legacy(sp=8) 0.0238 ms | cfg6(sp=16) 0.0263 ms (0.905x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[MLA512 A/B] main: (32,32,0) 0.5158 (8.33 TF) | (32,32,1) 0.1378 (31.18) | (64,32,0) 0.5716 (7.51) => best 3.744x
+[O44 A/B] MLA main ksplit: 1 0.7663 (5.60) | 2 0.2221 (19.34, 3.45x) | 4 0.1750 (24.54, 4.38x)
+[O46 A/B] MLA main warp: 4w 0.1474 (29.13) | 8w 0.1378 (31.16, 1.070x)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.987e-03  max_rel=2.120e-01
   dk   vs ref: max_abs=1.712e-03  max_rel=3.190e-01
   dv   vs ref: max_abs=1.848e-03  max_rel=4.306e-02
-  | [O39 A/B] lse(D=512) split=1 0.1042 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-  | [O39 A/B] lse(D=512) split=2 0.0614 ms (1.698x vs split1) | max_abs vs split1=9.537e-07
-  | [O39 A/B] lse(D=512) split=4 0.0391 ms (2.665x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=8 0.0288 ms (3.614x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=16 0.0410 ms (2.542x vs split1) | max_abs vs split1=4.768e-07
-  | [O59 A/B] LSE MLA legacy(sp=8) 0.0288 ms | cfg6(sp=16) 0.0280 ms (1.029x) | max_abs(cfg6-vs-legacy)=4.768e-07
+  | [O39 A/B] lse(D=512) split=1 0.0749 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+  | [O39 A/B] lse(D=512) split=2 0.0464 ms (1.616x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=4 0.0308 ms (2.429x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=8 0.0239 ms (3.130x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=16 0.0359 ms (2.089x vs split1) | max_abs vs split1=4.768e-07
+  | [O59 A/B] LSE MLA legacy(sp=8) 0.0238 ms | cfg6(sp=16) 0.0263 ms (0.905x) | max_abs(cfg6-vs-legacy)=4.768e-07
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16/ours_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=1.987e-03  max_rel=2.120e-01
   | dk   vs ref: max_abs=1.712e-03  max_rel=3.190e-01
@@ -231,29 +231,29 @@ B=1 S=1024 H=2 Hkv=2 D=512 causal=1 scale=0.044194
 [O38] lse k-split = 16 (auto)
 [O23] main backend = mma | lse = mma (D=512 S=1024)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.1844 ms  23.29 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0314 ms | main 0.1376 ms | convert 0.0153 ms
-[O39 A/B] lse(D=512) split=1 0.1044 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-[O39 A/B] lse(D=512) split=2 0.0618 ms (1.690x vs split1) | max_abs vs split1=9.537e-07
-[O39 A/B] lse(D=512) split=4 0.0394 ms (2.647x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=8 0.0291 ms (3.589x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=16 0.0413 ms (2.529x vs split1) | max_abs vs split1=4.768e-07
-[O39] best lse split=8 0.0291 ms (3.589x)
-[O59 A/B] LSE MLA legacy(sp=8) 0.0291 ms | cfg6(sp=16) 0.0282 ms (1.030x) | max_abs(cfg6-vs-legacy)=4.768e-07
-[MLA512 A/B] main: (32,32,0) 0.5176 (8.30 TF) | (32,32,1) 0.1382 (31.07) | (64,32,0) 0.5715 (7.52) => best 3.745x
-[O44 A/B] MLA main ksplit: 1 0.7450 (5.77) | 2 0.2139 (20.08, 3.48x) | 4 0.1801 (23.85, 4.14x)
-[O46 A/B] MLA main warp: 4w 0.1481 (29.01) | 8w 0.1371 (31.34, 1.080x)
+[timing] total(3 kernels) 0.1837 ms  23.38 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0295 ms | main 0.1375 ms | convert 0.0167 ms
+[O39 A/B] lse(D=512) split=1 0.0756 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O39 A/B] lse(D=512) split=2 0.0462 ms (1.635x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=4 0.0304 ms (2.485x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=8 0.0235 ms (3.217x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=16 0.0357 ms (2.117x vs split1) | max_abs vs split1=4.768e-07
+[O39] best lse split=8 0.0235 ms (3.217x)
+[O59 A/B] LSE MLA legacy(sp=8) 0.0237 ms | cfg6(sp=16) 0.0263 ms (0.901x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[MLA512 A/B] main: (32,32,0) 0.5152 (8.34 TF) | (32,32,1) 0.1373 (31.29) | (64,32,0) 0.5669 (7.58) => best 3.753x
+[O44 A/B] MLA main ksplit: 1 0.7504 (5.72) | 2 0.2162 (19.87, 3.47x) | 4 0.1779 (24.14, 4.22x)
+[O46 A/B] MLA main warp: 4w 0.1475 (29.12) | 8w 0.1370 (31.35, 1.076x)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.987e-03  max_rel=2.120e-01
   dk   vs ref: max_abs=1.712e-03  max_rel=3.190e-01
   dv   vs ref: max_abs=1.848e-03  max_rel=4.306e-02
-  | [O39 A/B] lse(D=512) split=1 0.1044 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-  | [O39 A/B] lse(D=512) split=2 0.0618 ms (1.690x vs split1) | max_abs vs split1=9.537e-07
-  | [O39 A/B] lse(D=512) split=4 0.0394 ms (2.647x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=8 0.0291 ms (3.589x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=16 0.0413 ms (2.529x vs split1) | max_abs vs split1=4.768e-07
-  | [O59 A/B] LSE MLA legacy(sp=8) 0.0291 ms | cfg6(sp=16) 0.0282 ms (1.030x) | max_abs(cfg6-vs-legacy)=4.768e-07
+  | [O39 A/B] lse(D=512) split=1 0.0756 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+  | [O39 A/B] lse(D=512) split=2 0.0462 ms (1.635x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=4 0.0304 ms (2.485x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=8 0.0235 ms (3.217x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=16 0.0357 ms (2.117x vs split1) | max_abs vs split1=4.768e-07
+  | [O59 A/B] LSE MLA legacy(sp=8) 0.0237 ms | cfg6(sp=16) 0.0263 ms (0.901x) | max_abs(cfg6-vs-legacy)=4.768e-07
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16/ours_sf_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=1.987e-03  max_rel=2.120e-01
   | dk   vs ref: max_abs=1.712e-03  max_rel=3.190e-01
@@ -267,19 +267,19 @@ B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388
 [O38] lse k-split = 2 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=1024)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.3448 ms  49.83 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0614 ms | main 0.2584 ms | convert 0.0250 ms
-[O24 A/B] delta old 0.0230 ms | warp 0.0078 ms (2.95x)
-[O8b A/B] lse O8 0.1501 ms | bal(单缓冲) 0.0996 ms (1.507x) | bal+cpasync(双缓冲) 0.0721 ms (2.082x)
-[O6 A/B] main nopipe 0.3799 ms (45.23 TF) | pipe(KV both) 0.2684 ms (64.00 TF) | pipe2(K only) 0.2669 ms (64.36 TF) => nopipe/pipe 1.415x, nopipe/pipe2 1.423x
-[O48 A/B] main D=128 4w(128/2) 0.2836 ms | 8w(256/4) 0.2798 ms (1.014x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.384e-06/4.768e-06
-[O6c A/B] main sched0(原样) 0.2717 ms | sched1(交错) 0.2497 ms (1.088x) | sched2(逆序) 0.2639 ms (1.030x)
-[O5c A/B] main (64,32,2) 0.2509 ms (68.47 TF) | (64,64,2) 0.2715 (63.28) | (32,32,1) 0.4390 (39.13) | (32,32,2) 0.4428 (38.80) => best 1.000x
+[timing] total(3 kernels) 0.3353 ms  51.23 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0485 ms | main 0.2665 ms | convert 0.0203 ms
+[O24 A/B] delta old 0.0229 ms | warp 0.0077 ms (2.97x)
+[O8b A/B] lse O8 0.1406 ms | bal(单缓冲) 0.0719 ms (1.955x) | bal+cpasync(双缓冲) 0.0422 ms (3.328x)
+[O6 A/B] main nopipe 0.3826 ms (44.90 TF) | pipe(KV both) 0.2728 ms (62.97 TF) | pipe2(K only) 0.2642 ms (65.04 TF) => nopipe/pipe 1.403x, nopipe/pipe2 1.448x
+[O48 A/B] main D=128 4w(128/2) 0.2761 ms | 8w(256/4) 0.2794 ms (0.988x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.384e-06/5.722e-06
+[O6c A/B] main sched0(原样) 0.2594 ms | sched1(交错) 0.2481 ms (1.046x) | sched2(逆序) 0.2525 ms (1.027x)
+[O5c A/B] main (64,32,2) 0.2576 ms (66.69 TF) | (64,64,2) 0.2671 (64.32) | (32,32,1) 0.4394 (39.10) | (32,32,2) 0.4367 (39.34) => best 1.000x
 [O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
-  (BM=64,BN=32,PIPE=2): base 0.3030 (56.69) | f4 0.3185 (53.94,-4.9%) | f2+PREL 0.2507 (68.53,+20.9%) | f4+PREL 0.2470 (69.55,+22.7%)
-  (BM=64,BN=64,PIPE=2): base 0.3304 (52.00) | f4 0.3295 (52.13,+0.3%) | f2+PREL 0.2705 (63.50,+22.1%) | f4+PREL 0.2703 (63.56,+22.2%)
-  (BM=32,BN=32,PIPE=1): base 0.4458 (38.53) | f4 0.4520 (38.01,-1.4%) | f2+PREL 0.4390 (39.13,+1.6%) | f4+PREL 0.4399 (39.05,+1.3%)
-  (BM=32,BN=32,PIPE=2): base 0.4554 (37.72) | f4 0.4524 (37.97,+0.7%) | f2+PREL 0.4345 (39.54,+4.8%) | f4+PREL 0.4441 (38.68,+2.5%)
+  (BM=64,BN=32,PIPE=2): base 0.3103 (55.36) | f4 0.3095 (55.50,+0.3%) | f2+PREL 0.2417 (71.08,+28.4%) | f4+PREL 0.2500 (68.72,+24.1%)
+  (BM=64,BN=64,PIPE=2): base 0.3260 (52.70) | f4 0.3313 (51.86,-1.6%) | f2+PREL 0.2721 (63.13,+19.8%) | f4+PREL 0.2734 (62.84,+19.2%)
+  (BM=32,BN=32,PIPE=1): base 0.4536 (37.87) | f4 0.4545 (37.80,-0.2%) | f2+PREL 0.4305 (39.91,+5.4%) | f4+PREL 0.4416 (38.90,+2.7%)
+  (BM=32,BN=32,PIPE=2): base 0.4510 (38.09) | f4 0.4517 (38.03,-0.2%) | f2+PREL 0.4390 (39.13,+2.7%) | f4+PREL 0.4445 (38.65,+1.5%)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=2.134e-03  max_rel=5.101e-01
@@ -291,7 +291,7 @@ B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388
   te_dq     vs ref: max_abs=2.075e-03  max_rel=2.991e-01
   te_dk     vs ref: max_abs=3.175e-03  max_rel=4.837e-01
   te_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
-  | [O48 A/B] main D=128 4w(128/2) 0.2836 ms | 8w(256/4) 0.2798 ms (1.014x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.384e-06/4.768e-06
+  | [O48 A/B] main D=128 4w(128/2) 0.2761 ms | 8w(256/4) 0.2794 ms (0.988x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.384e-06/5.722e-06
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp16/ours_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=2.134e-03  max_rel=5.101e-01
   | dk   vs ref: max_abs=3.305e-03  max_rel=1.044e+00
@@ -311,19 +311,19 @@ B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388
 [O38] lse k-split = 2 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=1024)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.3474 ms  49.46 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0614 ms | main 0.2628 ms | convert 0.0232 ms
-[O24 A/B] delta old 0.0229 ms | warp 0.0078 ms (2.93x)
-[O8b A/B] lse O8 0.1519 ms | bal(单缓冲) 0.0995 ms (1.527x) | bal+cpasync(双缓冲) 0.0716 ms (2.120x)
-[O6 A/B] main nopipe 0.3745 ms (45.88 TF) | pipe(KV both) 0.2737 ms (62.77 TF) | pipe2(K only) 0.2614 ms (65.74 TF) => nopipe/pipe 1.368x, nopipe/pipe2 1.433x
-[O48 A/B] main D=128 4w(128/2) 0.2816 ms | 8w(256/4) 0.2803 ms (1.005x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.384e-06/3.815e-06
-[O6c A/B] main sched0(原样) 0.2617 ms | sched1(交错) 0.2438 ms (1.073x) | sched2(逆序) 0.2603 ms (1.005x)
-[O5c A/B] main (64,32,2) 0.2458 ms (69.91 TF) | (64,64,2) 0.2677 (64.17) | (32,32,1) 0.4367 (39.34) | (32,32,2) 0.4376 (39.26) => best 1.000x
+[timing] total(3 kernels) 0.3285 ms  52.29 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0488 ms | main 0.2700 ms | convert 0.0097 ms
+[O24 A/B] delta old 0.0230 ms | warp 0.0079 ms (2.90x)
+[O8b A/B] lse O8 0.1401 ms | bal(单缓冲) 0.0723 ms (1.938x) | bal+cpasync(双缓冲) 0.0428 ms (3.275x)
+[O6 A/B] main nopipe 0.3799 ms (45.22 TF) | pipe(KV both) 0.2737 ms (62.77 TF) | pipe2(K only) 0.2683 ms (64.03 TF) => nopipe/pipe 1.388x, nopipe/pipe2 1.416x
+[O48 A/B] main D=128 4w(128/2) 0.2817 ms | 8w(256/4) 0.2807 ms (1.004x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.861e-06/4.292e-06
+[O6c A/B] main sched0(原样) 0.2627 ms | sched1(交错) 0.2477 ms (1.061x) | sched2(逆序) 0.2530 ms (1.038x)
+[O5c A/B] main (64,32,2) 0.2419 ms (71.01 TF) | (64,64,2) 0.2699 (63.66) | (32,32,1) 0.4377 (39.25) | (32,32,2) 0.4307 (39.89) => best 1.000x
 [O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
-  (BM=64,BN=32,PIPE=2): base 0.3061 (56.13) | f4 0.3110 (55.24,-1.6%) | f2+PREL 0.2439 (70.42,+25.5%) | f4+PREL 0.2560 (67.10,+19.5%)
-  (BM=64,BN=64,PIPE=2): base 0.3260 (52.70) | f4 0.3363 (51.08,-3.1%) | f2+PREL 0.2700 (63.63,+20.7%) | f4+PREL 0.2698 (63.69,+20.8%)
-  (BM=32,BN=32,PIPE=1): base 0.4512 (38.07) | f4 0.4490 (38.26,+0.5%) | f2+PREL 0.4343 (39.56,+3.9%) | f4+PREL 0.4412 (38.94,+2.3%)
-  (BM=32,BN=32,PIPE=2): base 0.4537 (37.86) | f4 0.4586 (37.46,-1.1%) | f2+PREL 0.4326 (39.71,+4.9%) | f4+PREL 0.4388 (39.15,+3.4%)
+  (BM=64,BN=32,PIPE=2): base 0.3102 (55.39) | f4 0.3157 (54.43,-1.7%) | f2+PREL 0.2544 (67.54,+21.9%) | f4+PREL 0.2576 (66.70,+20.4%)
+  (BM=64,BN=64,PIPE=2): base 0.3204 (53.62) | f4 0.3236 (53.10,-1.0%) | f2+PREL 0.2709 (63.41,+18.3%) | f4+PREL 0.2740 (62.70,+16.9%)
+  (BM=32,BN=32,PIPE=1): base 0.4400 (39.05) | f4 0.4585 (37.47,-4.0%) | f2+PREL 0.4387 (39.16,+0.3%) | f4+PREL 0.4469 (38.44,-1.5%)
+  (BM=32,BN=32,PIPE=2): base 0.4539 (37.85) | f4 0.4546 (37.79,-0.2%) | f2+PREL 0.4403 (39.02,+3.1%) | f4+PREL 0.4431 (38.77,+2.4%)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=2.134e-03  max_rel=5.101e-01
@@ -335,7 +335,7 @@ B=1 S=1024 H=32 Hkv=4 D=128 causal=1 scale=0.088388
   te_dq     vs ref: max_abs=2.075e-03  max_rel=2.991e-01
   te_dk     vs ref: max_abs=3.175e-03  max_rel=4.837e-01
   te_dv     vs ref: max_abs=5.107e-03  max_rel=4.510e-01
-  | [O48 A/B] main D=128 4w(128/2) 0.2816 ms | 8w(256/4) 0.2803 ms (1.005x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.384e-06/3.815e-06
+  | [O48 A/B] main D=128 4w(128/2) 0.2817 ms | 8w(256/4) 0.2807 ms (1.004x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.861e-06/4.292e-06
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp16/ours_sf_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=2.134e-03  max_rel=5.101e-01
   | dk   vs ref: max_abs=3.305e-03  max_rel=1.044e+00
@@ -355,23 +355,23 @@ B=1 S=1024 H=40 Hkv=8 D=128 causal=1 scale=0.088388
 [O38] lse k-split = 1 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=1024)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.4174 ms  51.45 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0888 ms | main 0.2965 ms | convert 0.0321 ms
-[O24 A/B] delta old 0.0280 ms | warp 0.0089 ms (3.14x)
-[O8b A/B] lse O8 0.1695 ms | bal(单缓冲) 0.1094 ms (1.549x) | bal+cpasync(双缓冲) 0.0783 ms (2.164x)
-[O6 A/B] main nopipe 0.4905 ms (43.78 TF) | pipe(KV both) 0.3133 ms (68.55 TF) | pipe2(K only) 0.3151 ms (68.15 TF) => nopipe/pipe 1.566x, nopipe/pipe2 1.557x
-[O48 A/B] main D=128 4w(128/2) 0.3141 ms | 8w(256/4) 0.3393 ms (0.926x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.907e-06/3.815e-06
-[O6c A/B] main sched0(原样) 0.3158 ms | sched1(交错) 0.3150 ms (1.002x) | sched2(逆序) 0.3133 ms (1.008x)
-[O5c A/B] main (64,32,2) 0.3233 ms (66.43 TF) | (64,64,2) 0.3004 (71.50) | (32,32,1) 0.4997 (42.98) | (32,32,2) 0.4971 (43.20) => best 1.076x
+[timing] total(3 kernels) 0.3933 ms  54.60 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0628 ms | main 0.2956 ms | convert 0.0348 ms
+[O24 A/B] delta old 0.0283 ms | warp 0.0092 ms (3.07x)
+[O8b A/B] lse O8 0.1630 ms | bal(单缓冲) 0.0818 ms (1.993x) | bal+cpasync(双缓冲) 0.0515 ms (3.164x)
+[O6 A/B] main nopipe 0.4789 ms (44.84 TF) | pipe(KV both) 0.3096 ms (69.35 TF) | pipe2(K only) 0.3165 ms (67.86 TF) => nopipe/pipe 1.547x, nopipe/pipe2 1.513x
+[O48 A/B] main D=128 4w(128/2) 0.3153 ms | 8w(256/4) 0.3383 ms (0.932x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.861e-06/2.861e-06
+[O6c A/B] main sched0(原样) 0.3105 ms | sched1(交错) 0.3199 ms (0.971x) | sched2(逆序) 0.3112 ms (0.998x)
+[O5c A/B] main (64,32,2) 0.3199 ms (67.12 TF) | (64,64,2) 0.2938 (73.09) | (32,32,1) 0.4989 (43.05) | (32,32,2) 0.5016 (42.81) => best 1.089x
 [O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
-  (BM=64,BN=32,PIPE=2): base 0.3753 (57.22) | f4 0.3879 (55.36,-3.3%) | f2+PREL 0.3240 (66.29,+15.8%) | f4+PREL 0.3251 (66.06,+15.4%)
-  (BM=64,BN=64,PIPE=2): base 0.3546 (60.55) | f4 0.3598 (59.68,-1.4%) | f2+PREL 0.2956 (72.64,+20.0%) | f4+PREL 0.3037 (70.72,+16.8%)
-  (BM=32,BN=32,PIPE=1): base 0.5098 (42.12) | f4 0.5060 (42.44,+0.8%) | f2+PREL 0.4933 (43.53,+3.3%) | f4+PREL 0.5137 (41.81,-0.8%)
-  (BM=32,BN=32,PIPE=2): base 0.5089 (42.20) | f4 0.5159 (41.63,-1.3%) | f2+PREL 0.5085 (42.23,+0.1%) | f4+PREL 0.5036 (42.65,+1.1%)
+  (BM=64,BN=32,PIPE=2): base 0.3899 (55.08) | f4 0.3824 (56.16,+2.0%) | f2+PREL 0.3237 (66.34,+20.4%) | f4+PREL 0.3186 (67.40,+22.4%)
+  (BM=64,BN=64,PIPE=2): base 0.3573 (60.10) | f4 0.3564 (60.25,+0.3%) | f2+PREL 0.2975 (72.19,+20.1%) | f4+PREL 0.3007 (71.42,+18.8%)
+  (BM=32,BN=32,PIPE=1): base 0.5108 (42.05) | f4 0.5124 (41.91,-0.3%) | f2+PREL 0.4988 (43.05,+2.4%) | f4+PREL 0.5074 (42.33,+0.7%)
+  (BM=32,BN=32,PIPE=2): base 0.5133 (41.84) | f4 0.5106 (42.05,+0.5%) | f2+PREL 0.5085 (42.23,+0.9%) | f4+PREL 0.5096 (42.14,+0.7%)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h40_d128_kv8_causal_fp16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=2.008e-03  max_rel=5.284e-01
-  dk   vs ref: max_abs=2.931e-03  max_rel=5.103e-01
+  dk   vs ref: max_abs=2.931e-03  max_rel=5.104e-01
   dv   vs ref: max_abs=3.891e-03  max_rel=3.167e-02
   fa_dq     vs ref: max_abs=1.757e-03  max_rel=3.464e-01
   fa_dk     vs ref: max_abs=2.996e-03  max_rel=5.725e-01
@@ -379,10 +379,10 @@ B=1 S=1024 H=40 Hkv=8 D=128 causal=1 scale=0.088388
   te_dq     vs ref: max_abs=1.580e-03  max_rel=3.944e-01
   te_dk     vs ref: max_abs=2.893e-03  max_rel=3.941e-01
   te_dv     vs ref: max_abs=4.326e-03  max_rel=4.573e-01
-  | [O48 A/B] main D=128 4w(128/2) 0.3141 ms | 8w(256/4) 0.3393 ms (0.926x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.907e-06/3.815e-06
+  | [O48 A/B] main D=128 4w(128/2) 0.3153 ms | 8w(256/4) 0.3383 ms (0.932x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.861e-06/2.861e-06
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h40_d128_kv8_causal_fp16/ours_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=2.008e-03  max_rel=5.284e-01
-  | dk   vs ref: max_abs=2.931e-03  max_rel=5.103e-01
+  | dk   vs ref: max_abs=2.931e-03  max_rel=5.104e-01
   | dv   vs ref: max_abs=3.891e-03  max_rel=3.167e-02
   | fa_dq     vs ref: max_abs=1.757e-03  max_rel=3.464e-01
   | fa_dk     vs ref: max_abs=2.996e-03  max_rel=5.725e-01
@@ -399,19 +399,19 @@ B=1 S=1024 H=40 Hkv=8 D=128 causal=1 scale=0.088388
 [O38] lse k-split = 1 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=1024)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.4185 ms  51.32 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0888 ms | main 0.2962 ms | convert 0.0335 ms
-[O24 A/B] delta old 0.0281 ms | warp 0.0092 ms (3.06x)
-[O8b A/B] lse O8 0.1691 ms | bal(单缓冲) 0.1090 ms (1.551x) | bal+cpasync(双缓冲) 0.0781 ms (2.164x)
-[O6 A/B] main nopipe 0.4890 ms (43.92 TF) | pipe(KV both) 0.3014 ms (71.26 TF) | pipe2(K only) 0.3201 ms (67.08 TF) => nopipe/pipe 1.623x, nopipe/pipe2 1.527x
-[O48 A/B] main D=128 4w(128/2) 0.3175 ms | 8w(256/4) 0.3384 ms (0.938x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.669e-06/3.815e-06
-[O6c A/B] main sched0(原样) 0.3192 ms | sched1(交错) 0.3213 ms (0.994x) | sched2(逆序) 0.3202 ms (0.997x)
-[O5c A/B] main (64,32,2) 0.3199 ms (67.13 TF) | (64,64,2) 0.2979 (72.08) | (32,32,1) 0.4939 (43.48) | (32,32,2) 0.5008 (42.88) => best 1.074x
+[timing] total(3 kernels) 0.3894 ms  55.15 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0617 ms | main 0.2987 ms | convert 0.0289 ms
+[O24 A/B] delta old 0.0281 ms | warp 0.0090 ms (3.12x)
+[O8b A/B] lse O8 0.1538 ms | bal(单缓冲) 0.0817 ms (1.881x) | bal+cpasync(双缓冲) 0.0515 ms (2.986x)
+[O6 A/B] main nopipe 0.4785 ms (44.88 TF) | pipe(KV both) 0.3066 ms (70.05 TF) | pipe2(K only) 0.3172 ms (67.71 TF) => nopipe/pipe 1.561x, nopipe/pipe2 1.509x
+[O48 A/B] main D=128 4w(128/2) 0.3094 ms | 8w(256/4) 0.3373 ms (0.917x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.669e-06/3.815e-06
+[O6c A/B] main sched0(原样) 0.3169 ms | sched1(交错) 0.3212 ms (0.987x) | sched2(逆序) 0.3194 ms (0.992x)
+[O5c A/B] main (64,32,2) 0.3223 ms (66.63 TF) | (64,64,2) 0.2955 (72.66) | (32,32,1) 0.4998 (42.97) | (32,32,2) 0.4964 (43.26) => best 1.091x
 [O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
-  (BM=64,BN=32,PIPE=2): base 0.3769 (56.98) | f4 0.3807 (56.42,-1.0%) | f2+PREL 0.3257 (65.94,+15.7%) | f4+PREL 0.3243 (66.22,+16.2%)
-  (BM=64,BN=64,PIPE=2): base 0.3491 (61.52) | f4 0.3610 (59.48,-3.3%) | f2+PREL 0.2945 (72.92,+18.5%) | f4+PREL 0.3060 (70.19,+14.1%)
-  (BM=32,BN=32,PIPE=1): base 0.5040 (42.61) | f4 0.5072 (42.34,-0.6%) | f2+PREL 0.5012 (42.85,+0.5%) | f4+PREL 0.5045 (42.57,-0.1%)
-  (BM=32,BN=32,PIPE=2): base 0.5171 (41.53) | f4 0.5028 (42.71,+2.8%) | f2+PREL 0.4982 (43.11,+3.8%) | f4+PREL 0.5083 (42.25,+1.7%)
+  (BM=64,BN=32,PIPE=2): base 0.3812 (56.33) | f4 0.3880 (55.35,-1.7%) | f2+PREL 0.3228 (66.52,+18.1%) | f4+PREL 0.3277 (65.53,+16.3%)
+  (BM=64,BN=64,PIPE=2): base 0.3585 (59.90) | f4 0.3578 (60.01,+0.2%) | f2+PREL 0.2944 (72.95,+21.8%) | f4+PREL 0.3039 (70.66,+18.0%)
+  (BM=32,BN=32,PIPE=1): base 0.4997 (42.98) | f4 0.5031 (42.69,-0.7%) | f2+PREL 0.4997 (42.98,-0.0%) | f4+PREL 0.5070 (42.35,-1.5%)
+  (BM=32,BN=32,PIPE=2): base 0.5113 (42.00) | f4 0.5094 (42.16,+0.4%) | f2+PREL 0.4998 (42.97,+2.3%) | f4+PREL 0.4988 (43.05,+2.5%)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h40_d128_kv8_causal_fp16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=2.008e-03  max_rel=5.284e-01
@@ -423,7 +423,7 @@ B=1 S=1024 H=40 Hkv=8 D=128 causal=1 scale=0.088388
   te_dq     vs ref: max_abs=1.580e-03  max_rel=3.944e-01
   te_dk     vs ref: max_abs=2.893e-03  max_rel=3.941e-01
   te_dv     vs ref: max_abs=4.326e-03  max_rel=4.573e-01
-  | [O48 A/B] main D=128 4w(128/2) 0.3175 ms | 8w(256/4) 0.3384 ms (0.938x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.669e-06/3.815e-06
+  | [O48 A/B] main D=128 4w(128/2) 0.3094 ms | 8w(256/4) 0.3373 ms (0.917x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.669e-06/3.815e-06
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h40_d128_kv8_causal_fp16/ours_sf_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=2.008e-03  max_rel=5.284e-01
   | dk   vs ref: max_abs=2.931e-03  max_rel=5.104e-01
@@ -443,35 +443,35 @@ B=1 S=1024 H=64 Hkv=1 D=128 causal=1 scale=0.088388
 [O38] lse k-split = 1 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=1024)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.5787 ms  59.37 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.1072 ms | main 0.4310 ms | convert 0.0405 ms
-[O24 A/B] delta old 0.0430 ms | warp 0.0132 ms (3.26x)
-[O8b A/B] lse O8 0.2247 ms | bal(单缓冲) 0.1256 ms (1.789x) | bal+cpasync(双缓冲) 0.0904 ms (2.486x)
-[O6 A/B] main nopipe 0.6495 ms (52.90 TF) | pipe(KV both) 0.4551 ms (75.50 TF) | pipe2(K only) 0.4689 ms (73.28 TF) => nopipe/pipe 1.427x, nopipe/pipe2 1.385x
-[O48 A/B] main D=128 4w(128/2) 0.4549 ms | 8w(256/4) 0.4918 ms (0.925x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/5.990e-06/1.144e-05
-[O6c A/B] main sched0(原样) 0.4761 ms | sched1(交错) 0.4739 ms (1.005x) | sched2(逆序) 0.4630 ms (1.028x)
-[O5c A/B] main (64,32,2) 0.4694 ms (73.20 TF) | (64,64,2) 0.4266 (80.54) | (32,32,1) 0.7328 (46.89) | (32,32,2) 0.7381 (46.55) => best 1.100x
+[timing] total(3 kernels) 0.5514 ms  62.32 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0825 ms | main 0.4307 ms | convert 0.0382 ms
+[O24 A/B] delta old 0.0432 ms | warp 0.0133 ms (3.25x)
+[O8b A/B] lse O8 0.2167 ms | bal(单缓冲) 0.1001 ms (2.165x) | bal+cpasync(双缓冲) 0.0655 ms (3.309x)
+[O6 A/B] main nopipe 0.6518 ms (52.72 TF) | pipe(KV both) 0.4546 ms (75.58 TF) | pipe2(K only) 0.4823 ms (71.24 TF) => nopipe/pipe 1.434x, nopipe/pipe2 1.351x
+[O48 A/B] main D=128 4w(128/2) 0.4530 ms | 8w(256/4) 0.4855 ms (0.933x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/5.722e-06/9.537e-06
+[O6c A/B] main sched0(原样) 0.4818 ms | sched1(交错) 0.4714 ms (1.022x) | sched2(逆序) 0.4663 ms (1.033x)
+[O5c A/B] main (64,32,2) 0.4726 ms (72.71 TF) | (64,64,2) 0.4318 (79.57) | (32,32,1) 0.7469 (46.00) | (32,32,2) 0.7407 (46.39) => best 1.094x
 [O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
-  (BM=64,BN=32,PIPE=2): base 0.5637 (60.95) | f4 0.5799 (59.25,-2.8%) | f2+PREL 0.4691 (73.25,+20.2%) | f4+PREL 0.4891 (70.25,+15.3%)
-  (BM=64,BN=64,PIPE=2): base 0.5182 (66.31) | f4 0.5283 (65.04,-1.9%) | f2+PREL 0.4271 (80.44,+21.3%) | f4+PREL 0.4393 (78.21,+18.0%)
-  (BM=32,BN=32,PIPE=1): base 0.7522 (45.68) | f4 0.7680 (44.74,-2.0%) | f2+PREL 0.7397 (46.45,+1.7%) | f4+PREL 0.7473 (45.98,+0.7%)
-  (BM=32,BN=32,PIPE=2): base 0.7599 (45.22) | f4 0.7616 (45.12,-0.2%) | f2+PREL 0.7446 (46.14,+2.1%) | f4+PREL 0.7458 (46.07,+1.9%)
+  (BM=64,BN=32,PIPE=2): base 0.5609 (61.26) | f4 0.5801 (59.23,-3.3%) | f2+PREL 0.4814 (71.37,+16.5%) | f4+PREL 0.4845 (70.92,+15.8%)
+  (BM=64,BN=64,PIPE=2): base 0.5147 (66.76) | f4 0.5299 (64.84,-2.9%) | f2+PREL 0.4306 (79.80,+19.5%) | f4+PREL 0.4408 (77.96,+16.8%)
+  (BM=32,BN=32,PIPE=1): base 0.7600 (45.21) | f4 0.7561 (45.44,+0.5%) | f2+PREL 0.7449 (46.12,+2.0%) | f4+PREL 0.7454 (46.10,+2.0%)
+  (BM=32,BN=32,PIPE=2): base 0.7645 (44.95) | f4 0.7583 (45.31,+0.8%) | f2+PREL 0.7507 (45.77,+1.8%) | f4+PREL 0.7446 (46.15,+2.7%)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=2.292e-03  max_rel=4.022e-01
-  dk   vs ref: max_abs=7.934e-03  max_rel=3.853e-01
-  dv   vs ref: max_abs=7.517e-03  max_rel=3.239e-02
+  dk   vs ref: max_abs=7.934e-03  max_rel=3.820e-01
+  dv   vs ref: max_abs=7.517e-03  max_rel=3.193e-02
   fa_dq     vs ref: max_abs=1.971e-03  max_rel=3.588e-01
   fa_dk     vs ref: max_abs=7.586e-03  max_rel=5.690e-01
   fa_dv     vs ref: max_abs=1.057e-02  max_rel=9.507e-01
   te_dq     vs ref: max_abs=2.141e-03  max_rel=3.596e-01
   te_dk     vs ref: max_abs=6.452e-03  max_rel=4.311e-01
   te_dv     vs ref: max_abs=1.057e-02  max_rel=8.528e-01
-  | [O48 A/B] main D=128 4w(128/2) 0.4549 ms | 8w(256/4) 0.4918 ms (0.925x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/5.990e-06/1.144e-05
+  | [O48 A/B] main D=128 4w(128/2) 0.4530 ms | 8w(256/4) 0.4855 ms (0.933x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/5.722e-06/9.537e-06
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp16/ours_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=2.292e-03  max_rel=4.022e-01
-  | dk   vs ref: max_abs=7.934e-03  max_rel=3.853e-01
-  | dv   vs ref: max_abs=7.517e-03  max_rel=3.239e-02
+  | dk   vs ref: max_abs=7.934e-03  max_rel=3.820e-01
+  | dv   vs ref: max_abs=7.517e-03  max_rel=3.193e-02
   | fa_dq     vs ref: max_abs=1.971e-03  max_rel=3.588e-01
   | fa_dk     vs ref: max_abs=7.586e-03  max_rel=5.690e-01
   | fa_dv     vs ref: max_abs=1.057e-02  max_rel=9.507e-01
@@ -487,35 +487,35 @@ B=1 S=1024 H=64 Hkv=1 D=128 causal=1 scale=0.088388
 [O38] lse k-split = 1 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=1024)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.5700 ms  60.28 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.1072 ms | main 0.4350 ms | convert 0.0277 ms
-[O24 A/B] delta old 0.0429 ms | warp 0.0132 ms (3.26x)
-[O8b A/B] lse O8 0.2226 ms | bal(单缓冲) 0.1255 ms (1.774x) | bal+cpasync(双缓冲) 0.0904 ms (2.464x)
-[O6 A/B] main nopipe 0.6455 ms (53.23 TF) | pipe(KV both) 0.4547 ms (75.57 TF) | pipe2(K only) 0.4679 ms (73.44 TF) => nopipe/pipe 1.420x, nopipe/pipe2 1.380x
-[O48 A/B] main D=128 4w(128/2) 0.4535 ms | 8w(256/4) 0.4877 ms (0.930x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/6.676e-06/1.335e-05
-[O6c A/B] main sched0(原样) 0.4738 ms | sched1(交错) 0.4725 ms (1.003x) | sched2(逆序) 0.4752 ms (0.997x)
-[O5c A/B] main (64,32,2) 0.4737 ms (72.53 TF) | (64,64,2) 0.4248 (80.89) | (32,32,1) 0.7358 (46.69) | (32,32,2) 0.7352 (46.74) => best 1.115x
+[timing] total(3 kernels) 0.5546 ms  61.95 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0823 ms | main 0.4296 ms | convert 0.0428 ms
+[O24 A/B] delta old 0.0432 ms | warp 0.0134 ms (3.22x)
+[O8b A/B] lse O8 0.2136 ms | bal(单缓冲) 0.1004 ms (2.129x) | bal+cpasync(双缓冲) 0.0658 ms (3.248x)
+[O6 A/B] main nopipe 0.6474 ms (53.07 TF) | pipe(KV both) 0.4529 ms (75.87 TF) | pipe2(K only) 0.4660 ms (73.74 TF) => nopipe/pipe 1.430x, nopipe/pipe2 1.389x
+[O48 A/B] main D=128 4w(128/2) 0.4529 ms | 8w(256/4) 0.4847 ms (0.934x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/5.722e-06/9.537e-06
+[O6c A/B] main sched0(原样) 0.4627 ms | sched1(交错) 0.4759 ms (0.972x) | sched2(逆序) 0.4704 ms (0.984x)
+[O5c A/B] main (64,32,2) 0.4740 ms (72.49 TF) | (64,64,2) 0.4224 (81.34) | (32,32,1) 0.7340 (46.81) | (32,32,2) 0.7395 (46.46) => best 1.122x
 [O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
-  (BM=64,BN=32,PIPE=2): base 0.5580 (61.58) | f4 0.5895 (58.29,-5.4%) | f2+PREL 0.4705 (73.04,+18.6%) | f4+PREL 0.4867 (70.59,+14.6%)
-  (BM=64,BN=64,PIPE=2): base 0.5209 (65.96) | f4 0.5309 (64.72,-1.9%) | f2+PREL 0.4263 (80.60,+22.2%) | f4+PREL 0.4372 (78.60,+19.2%)
-  (BM=32,BN=32,PIPE=1): base 0.7525 (45.66) | f4 0.7683 (44.72,-2.1%) | f2+PREL 0.7434 (46.22,+1.2%) | f4+PREL 0.7553 (45.49,-0.4%)
-  (BM=32,BN=32,PIPE=2): base 0.7497 (45.83) | f4 0.7658 (44.87,-2.1%) | f2+PREL 0.7374 (46.59,+1.7%) | f4+PREL 0.7426 (46.27,+0.9%)
+  (BM=64,BN=32,PIPE=2): base 0.5590 (61.46) | f4 0.5826 (58.97,-4.1%) | f2+PREL 0.4790 (71.73,+16.7%) | f4+PREL 0.4902 (70.10,+14.0%)
+  (BM=64,BN=64,PIPE=2): base 0.5219 (65.83) | f4 0.5234 (65.64,-0.3%) | f2+PREL 0.4359 (78.82,+19.7%) | f4+PREL 0.4386 (78.34,+19.0%)
+  (BM=32,BN=32,PIPE=1): base 0.7525 (45.66) | f4 0.7649 (44.92,-1.6%) | f2+PREL 0.7443 (46.16,+1.1%) | f4+PREL 0.7412 (46.36,+1.5%)
+  (BM=32,BN=32,PIPE=2): base 0.7541 (45.56) | f4 0.7566 (45.41,-0.3%) | f2+PREL 0.7379 (46.56,+2.2%) | f4+PREL 0.7483 (45.91,+0.8%)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=2.292e-03  max_rel=4.022e-01
-  dk   vs ref: max_abs=7.934e-03  max_rel=3.849e-01
-  dv   vs ref: max_abs=7.517e-03  max_rel=3.239e-02
+  dk   vs ref: max_abs=7.934e-03  max_rel=3.824e-01
+  dv   vs ref: max_abs=7.517e-03  max_rel=3.193e-02
   fa_dq     vs ref: max_abs=1.971e-03  max_rel=3.588e-01
   fa_dk     vs ref: max_abs=7.586e-03  max_rel=5.690e-01
   fa_dv     vs ref: max_abs=1.057e-02  max_rel=9.507e-01
   te_dq     vs ref: max_abs=2.141e-03  max_rel=3.596e-01
   te_dk     vs ref: max_abs=6.452e-03  max_rel=4.311e-01
   te_dv     vs ref: max_abs=1.057e-02  max_rel=8.528e-01
-  | [O48 A/B] main D=128 4w(128/2) 0.4535 ms | 8w(256/4) 0.4877 ms (0.930x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/6.676e-06/1.335e-05
+  | [O48 A/B] main D=128 4w(128/2) 0.4529 ms | 8w(256/4) 0.4847 ms (0.934x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/5.722e-06/9.537e-06
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp16/ours_sf_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=2.292e-03  max_rel=4.022e-01
-  | dk   vs ref: max_abs=7.934e-03  max_rel=3.849e-01
-  | dv   vs ref: max_abs=7.517e-03  max_rel=3.239e-02
+  | dk   vs ref: max_abs=7.934e-03  max_rel=3.824e-01
+  | dv   vs ref: max_abs=7.517e-03  max_rel=3.193e-02
   | fa_dq     vs ref: max_abs=1.971e-03  max_rel=3.588e-01
   | fa_dk     vs ref: max_abs=7.586e-03  max_rel=5.690e-01
   | fa_dv     vs ref: max_abs=1.057e-02  max_rel=9.507e-01
@@ -531,23 +531,23 @@ B=1 S=1024 H=64 Hkv=4 D=128 causal=1 scale=0.088388
 [O38] lse k-split = 1 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=1024)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.5871 ms  58.52 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.1041 ms | main 0.4498 ms | convert 0.0332 ms
-[O24 A/B] delta old 0.0430 ms | warp 0.0131 ms (3.28x)
-[O8b A/B] lse O8 0.2203 ms | bal(单缓冲) 0.1210 ms (1.821x) | bal+cpasync(双缓冲) 0.0871 ms (2.529x)
-[O6 A/B] main nopipe 0.6830 ms (50.31 TF) | pipe(KV both) 0.4561 ms (75.33 TF) | pipe2(K only) 0.4866 ms (70.60 TF) => nopipe/pipe 1.497x, nopipe/pipe2 1.404x
-[O48 A/B] main D=128 4w(128/2) 0.4612 ms | 8w(256/4) 0.4836 ms (0.954x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/4.768e-06/8.583e-06
-[O6c A/B] main sched0(原样) 0.4914 ms | sched1(交错) 0.4884 ms (1.006x) | sched2(逆序) 0.4783 ms (1.027x)
-[O5c A/B] main (64,32,2) 0.4845 ms (70.92 TF) | (64,64,2) 0.4446 (77.28) | (32,32,1) 0.7614 (45.13) | (32,32,2) 0.7530 (45.63) => best 1.090x
+[timing] total(3 kernels) 0.5707 ms  60.21 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0798 ms | main 0.4514 ms | convert 0.0395 ms
+[O24 A/B] delta old 0.0429 ms | warp 0.0132 ms (3.26x)
+[O8b A/B] lse O8 0.2180 ms | bal(单缓冲) 0.0981 ms (2.223x) | bal+cpasync(双缓冲) 0.0632 ms (3.451x)
+[O6 A/B] main nopipe 0.6763 ms (50.80 TF) | pipe(KV both) 0.4566 ms (75.26 TF) | pipe2(K only) 0.4939 ms (69.57 TF) => nopipe/pipe 1.481x, nopipe/pipe2 1.369x
+[O48 A/B] main D=128 4w(128/2) 0.4576 ms | 8w(256/4) 0.4872 ms (0.939x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/5.245e-06/1.049e-05
+[O6c A/B] main sched0(原样) 0.4899 ms | sched1(交错) 0.4844 ms (1.011x) | sched2(逆序) 0.4936 ms (0.993x)
+[O5c A/B] main (64,32,2) 0.4839 ms (71.01 TF) | (64,64,2) 0.4446 (77.29) | (32,32,1) 0.7572 (45.38) | (32,32,2) 0.7568 (45.40) => best 1.088x
 [O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
-  (BM=64,BN=32,PIPE=2): base 0.5755 (59.71) | f4 0.5956 (57.69,-3.4%) | f2+PREL 0.4890 (70.27,+17.7%) | f4+PREL 0.4957 (69.31,+16.1%)
-  (BM=64,BN=64,PIPE=2): base 0.5282 (65.05) | f4 0.5501 (62.47,-4.0%) | f2+PREL 0.4515 (76.11,+17.0%) | f4+PREL 0.4529 (75.87,+16.6%)
-  (BM=32,BN=32,PIPE=1): base 0.7674 (44.78) | f4 0.7682 (44.73,-0.1%) | f2+PREL 0.7514 (45.73,+2.1%) | f4+PREL 0.7557 (45.47,+1.5%)
-  (BM=32,BN=32,PIPE=2): base 0.7597 (45.23) | f4 0.7761 (44.27,-2.1%) | f2+PREL 0.7585 (45.30,+0.2%) | f4+PREL 0.7561 (45.45,+0.5%)
+  (BM=64,BN=32,PIPE=2): base 0.5765 (59.60) | f4 0.6052 (56.77,-4.7%) | f2+PREL 0.4957 (69.32,+16.3%) | f4+PREL 0.4878 (70.43,+18.2%)
+  (BM=64,BN=64,PIPE=2): base 0.5355 (64.17) | f4 0.5534 (62.09,-3.2%) | f2+PREL 0.4455 (77.12,+20.2%) | f4+PREL 0.4620 (74.38,+15.9%)
+  (BM=32,BN=32,PIPE=1): base 0.7617 (45.11) | f4 0.7724 (44.48,-1.4%) | f2+PREL 0.7523 (45.67,+1.3%) | f4+PREL 0.7586 (45.29,+0.4%)
+  (BM=32,BN=32,PIPE=2): base 0.7697 (44.64) | f4 0.7669 (44.81,+0.4%) | f2+PREL 0.7590 (45.27,+1.4%) | f4+PREL 0.7591 (45.26,+1.4%)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv4_causal_fp16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=2.348e-03  max_rel=4.160e-01
-  dk   vs ref: max_abs=5.704e-03  max_rel=5.847e-01
+  dk   vs ref: max_abs=5.704e-03  max_rel=5.815e-01
   dv   vs ref: max_abs=3.893e-03  max_rel=5.754e-02
   fa_dq     vs ref: max_abs=1.911e-03  max_rel=3.018e-01
   fa_dk     vs ref: max_abs=4.778e-03  max_rel=1.004e+00
@@ -555,10 +555,10 @@ B=1 S=1024 H=64 Hkv=4 D=128 causal=1 scale=0.088388
   te_dq     vs ref: max_abs=2.167e-03  max_rel=3.246e-01
   te_dk     vs ref: max_abs=3.818e-03  max_rel=4.580e-01
   te_dv     vs ref: max_abs=5.651e-03  max_rel=3.961e-01
-  | [O48 A/B] main D=128 4w(128/2) 0.4612 ms | 8w(256/4) 0.4836 ms (0.954x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/4.768e-06/8.583e-06
+  | [O48 A/B] main D=128 4w(128/2) 0.4576 ms | 8w(256/4) 0.4872 ms (0.939x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/5.245e-06/1.049e-05
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv4_causal_fp16/ours_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=2.348e-03  max_rel=4.160e-01
-  | dk   vs ref: max_abs=5.704e-03  max_rel=5.847e-01
+  | dk   vs ref: max_abs=5.704e-03  max_rel=5.815e-01
   | dv   vs ref: max_abs=3.893e-03  max_rel=5.754e-02
   | fa_dq     vs ref: max_abs=1.911e-03  max_rel=3.018e-01
   | fa_dk     vs ref: max_abs=4.778e-03  max_rel=1.004e+00
@@ -575,35 +575,35 @@ B=1 S=1024 H=64 Hkv=4 D=128 causal=1 scale=0.088388
 [O38] lse k-split = 1 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=1024)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.6016 ms  57.11 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.1055 ms | main 0.4539 ms | convert 0.0422 ms
-[O24 A/B] delta old 0.0432 ms | warp 0.0132 ms (3.26x)
-[O8b A/B] lse O8 0.2192 ms | bal(单缓冲) 0.1221 ms (1.795x) | bal+cpasync(双缓冲) 0.0881 ms (2.489x)
-[O6 A/B] main nopipe 0.6757 ms (50.85 TF) | pipe(KV both) 0.4491 ms (76.51 TF) | pipe2(K only) 0.4862 ms (70.67 TF) => nopipe/pipe 1.505x, nopipe/pipe2 1.390x
-[O48 A/B] main D=128 4w(128/2) 0.4606 ms | 8w(256/4) 0.4885 ms (0.943x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/3.815e-06/6.676e-06
-[O6c A/B] main sched0(原样) 0.4845 ms | sched1(交错) 0.4831 ms (1.003x) | sched2(逆序) 0.4910 ms (0.987x)
-[O5c A/B] main (64,32,2) 0.4935 ms (69.62 TF) | (64,64,2) 0.4465 (76.95) | (32,32,1) 0.7501 (45.81) | (32,32,2) 0.7578 (45.34) => best 1.105x
+[timing] total(3 kernels) 0.5698 ms  60.30 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0803 ms | main 0.4525 ms | convert 0.0370 ms
+[O24 A/B] delta old 0.0431 ms | warp 0.0134 ms (3.22x)
+[O8b A/B] lse O8 0.2176 ms | bal(单缓冲) 0.0981 ms (2.219x) | bal+cpasync(双缓冲) 0.0635 ms (3.429x)
+[O6 A/B] main nopipe 0.6830 ms (50.31 TF) | pipe(KV both) 0.4500 ms (76.36 TF) | pipe2(K only) 0.4844 ms (70.93 TF) => nopipe/pipe 1.518x, nopipe/pipe2 1.410x
+[O48 A/B] main D=128 4w(128/2) 0.4644 ms | 8w(256/4) 0.4842 ms (0.959x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/4.292e-06/6.676e-06
+[O6c A/B] main sched0(原样) 0.4884 ms | sched1(交错) 0.4925 ms (0.992x) | sched2(逆序) 0.4916 ms (0.993x)
+[O5c A/B] main (64,32,2) 0.4878 ms (70.44 TF) | (64,64,2) 0.4460 (77.05) | (32,32,1) 0.7553 (45.49) | (32,32,2) 0.7569 (45.40) => best 1.094x
 [O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
-  (BM=64,BN=32,PIPE=2): base 0.5601 (61.34) | f4 0.6079 (56.52,-7.9%) | f2+PREL 0.4884 (70.35,+14.7%) | f4+PREL 0.4846 (70.91,+15.6%)
-  (BM=64,BN=64,PIPE=2): base 0.5388 (63.78) | f4 0.5497 (62.50,-2.0%) | f2+PREL 0.4477 (76.75,+20.4%) | f4+PREL 0.4494 (76.46,+19.9%)
-  (BM=32,BN=32,PIPE=1): base 0.7679 (44.74) | f4 0.7808 (44.00,-1.7%) | f2+PREL 0.7568 (45.40,+1.5%) | f4+PREL 0.7589 (45.28,+1.2%)
-  (BM=32,BN=32,PIPE=2): base 0.7765 (44.25) | f4 0.7720 (44.51,+0.6%) | f2+PREL 0.7527 (45.65,+3.2%) | f4+PREL 0.7622 (45.08,+1.9%)
+  (BM=64,BN=32,PIPE=2): base 0.5728 (59.98) | f4 0.6118 (56.16,-6.4%) | f2+PREL 0.4881 (70.39,+17.4%) | f4+PREL 0.5008 (68.62,+14.4%)
+  (BM=64,BN=64,PIPE=2): base 0.5457 (62.97) | f4 0.5593 (61.43,-2.4%) | f2+PREL 0.4500 (76.35,+21.2%) | f4+PREL 0.4551 (75.50,+19.9%)
+  (BM=32,BN=32,PIPE=1): base 0.7697 (44.64) | f4 0.7756 (44.30,-0.8%) | f2+PREL 0.7575 (45.36,+1.6%) | f4+PREL 0.7658 (44.87,+0.5%)
+  (BM=32,BN=32,PIPE=2): base 0.7671 (44.79) | f4 0.7801 (44.04,-1.7%) | f2+PREL 0.7661 (44.85,+0.1%) | f4+PREL 0.7597 (45.23,+1.0%)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv4_causal_fp16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=2.348e-03  max_rel=4.160e-01
-  dk   vs ref: max_abs=5.704e-03  max_rel=5.850e-01
-  dv   vs ref: max_abs=3.893e-03  max_rel=5.754e-02
+  dk   vs ref: max_abs=5.704e-03  max_rel=5.815e-01
+  dv   vs ref: max_abs=3.893e-03  max_rel=5.790e-02
   fa_dq     vs ref: max_abs=1.911e-03  max_rel=3.018e-01
   fa_dk     vs ref: max_abs=4.778e-03  max_rel=1.004e+00
   fa_dv     vs ref: max_abs=5.651e-03  max_rel=3.961e-01
   te_dq     vs ref: max_abs=2.167e-03  max_rel=3.246e-01
   te_dk     vs ref: max_abs=3.818e-03  max_rel=4.580e-01
   te_dv     vs ref: max_abs=5.651e-03  max_rel=3.961e-01
-  | [O48 A/B] main D=128 4w(128/2) 0.4606 ms | 8w(256/4) 0.4885 ms (0.943x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/3.815e-06/6.676e-06
+  | [O48 A/B] main D=128 4w(128/2) 0.4644 ms | 8w(256/4) 0.4842 ms (0.959x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/4.292e-06/6.676e-06
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h64_d128_kv4_causal_fp16/ours_sf_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=2.348e-03  max_rel=4.160e-01
-  | dk   vs ref: max_abs=5.704e-03  max_rel=5.850e-01
-  | dv   vs ref: max_abs=3.893e-03  max_rel=5.754e-02
+  | dk   vs ref: max_abs=5.704e-03  max_rel=5.815e-01
+  | dv   vs ref: max_abs=3.893e-03  max_rel=5.790e-02
   | fa_dq     vs ref: max_abs=1.911e-03  max_rel=3.018e-01
   | fa_dk     vs ref: max_abs=4.778e-03  max_rel=1.004e+00
   | fa_dv     vs ref: max_abs=5.651e-03  max_rel=3.961e-01
@@ -620,29 +620,29 @@ B=1 S=256 H=2 Hkv=2 D=512 causal=1 scale=0.044194
 [O38] lse k-split = 4 (auto)
 [O23] main backend = mma | lse = mma (D=512 S=256)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.0511 ms  5.25 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0209 ms | main 0.0200 ms | convert 0.0102 ms
-[O39 A/B] lse(D=512) split=1 0.0364 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-[O39 A/B] lse(D=512) split=2 0.0271 ms (1.342x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=4 0.0216 ms (1.686x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=8 0.0224 ms (1.623x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=16 0.0255 ms (1.429x vs split1) | max_abs vs split1=4.768e-07
-[O39] best lse split=4 0.0216 ms (1.686x)
-[O59 A/B] LSE MLA legacy(sp=4) 0.0214 ms | cfg6(sp=4) 0.0183 ms (1.169x) | max_abs(cfg6-vs-legacy)=4.768e-07
-[MLA512 A/B] main: (32,32,0) 0.1124 (2.39 TF) | (32,32,1) 0.0201 (13.33) | (64,32,0) 0.0993 (2.70) => best 5.580x
-[O44 A/B] MLA main ksplit: 1 0.1881 (1.43) | 2 0.0532 (5.05, 3.54x) | 4 0.0291 (9.24, 6.47x)
-[O46 A/B] MLA main warp: 4w 0.0221 (12.15) | 8w 0.0200 (13.45, 1.107x)
+[timing] total(3 kernels) 0.0505 ms  5.32 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0196 ms | main 0.0199 ms | convert 0.0110 ms
+[O39 A/B] lse(D=512) split=1 0.0278 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O39 A/B] lse(D=512) split=2 0.0217 ms (1.281x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=4 0.0182 ms (1.528x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=8 0.0191 ms (1.452x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=16 0.0221 ms (1.256x vs split1) | max_abs vs split1=4.768e-07
+[O39] best lse split=4 0.0182 ms (1.528x)
+[O59 A/B] LSE MLA legacy(sp=4) 0.0182 ms | cfg6(sp=4) 0.0167 ms (1.085x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[MLA512 A/B] main: (32,32,0) 0.1123 (2.39 TF) | (32,32,1) 0.0196 (13.71) | (64,32,0) 0.0983 (2.73) => best 5.733x
+[O44 A/B] MLA main ksplit: 1 0.1882 (1.43) | 2 0.0529 (5.08, 3.56x) | 4 0.0291 (9.22, 6.46x)
+[O46 A/B] MLA main warp: 4w 0.0219 (12.24) | 8w 0.0197 (13.66, 1.116x)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s256_h2_d512_causal_fp16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.638e-03  max_rel=2.557e-01
   dk   vs ref: max_abs=1.582e-03  max_rel=2.770e-01
   dv   vs ref: max_abs=1.753e-03  max_rel=1.772e-02
-  | [O39 A/B] lse(D=512) split=1 0.0364 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-  | [O39 A/B] lse(D=512) split=2 0.0271 ms (1.342x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=4 0.0216 ms (1.686x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=8 0.0224 ms (1.623x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=16 0.0255 ms (1.429x vs split1) | max_abs vs split1=4.768e-07
-  | [O59 A/B] LSE MLA legacy(sp=4) 0.0214 ms | cfg6(sp=4) 0.0183 ms (1.169x) | max_abs(cfg6-vs-legacy)=4.768e-07
+  | [O39 A/B] lse(D=512) split=1 0.0278 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+  | [O39 A/B] lse(D=512) split=2 0.0217 ms (1.281x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=4 0.0182 ms (1.528x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=8 0.0191 ms (1.452x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=16 0.0221 ms (1.256x vs split1) | max_abs vs split1=4.768e-07
+  | [O59 A/B] LSE MLA legacy(sp=4) 0.0182 ms | cfg6(sp=4) 0.0167 ms (1.085x) | max_abs(cfg6-vs-legacy)=4.768e-07
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s256_h2_d512_causal_fp16/ours_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=1.638e-03  max_rel=2.557e-01
   | dk   vs ref: max_abs=1.582e-03  max_rel=2.770e-01
@@ -657,29 +657,29 @@ B=1 S=256 H=2 Hkv=2 D=512 causal=1 scale=0.044194
 [O38] lse k-split = 4 (auto)
 [O23] main backend = mma | lse = mma (D=512 S=256)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.0491 ms  5.47 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0204 ms | main 0.0198 ms | convert 0.0088 ms
-[O39 A/B] lse(D=512) split=1 0.0361 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-[O39 A/B] lse(D=512) split=2 0.0267 ms (1.350x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=4 0.0211 ms (1.713x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=8 0.0219 ms (1.647x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=16 0.0248 ms (1.455x vs split1) | max_abs vs split1=4.768e-07
-[O39] best lse split=4 0.0211 ms (1.713x)
-[O59 A/B] LSE MLA legacy(sp=4) 0.0211 ms | cfg6(sp=4) 0.0179 ms (1.179x) | max_abs(cfg6-vs-legacy)=4.768e-07
-[MLA512 A/B] main: (32,32,0) 0.1122 (2.39 TF) | (32,32,1) 0.0198 (13.56) | (64,32,0) 0.0991 (2.71) => best 5.665x
-[O44 A/B] MLA main ksplit: 1 0.1877 (1.43) | 2 0.0529 (5.07, 3.55x) | 4 0.0288 (9.33, 6.53x)
-[O46 A/B] MLA main warp: 4w 0.0217 (12.40) | 8w 0.0193 (13.89, 1.120x)
+[timing] total(3 kernels) 0.0490 ms  5.48 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0193 ms | main 0.0195 ms | convert 0.0102 ms
+[O39 A/B] lse(D=512) split=1 0.0277 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O39 A/B] lse(D=512) split=2 0.0215 ms (1.289x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=4 0.0180 ms (1.540x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=8 0.0189 ms (1.460x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=16 0.0217 ms (1.274x vs split1) | max_abs vs split1=4.768e-07
+[O39] best lse split=4 0.0180 ms (1.540x)
+[O59 A/B] LSE MLA legacy(sp=4) 0.0180 ms | cfg6(sp=4) 0.0166 ms (1.083x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[MLA512 A/B] main: (32,32,0) 0.1120 (2.40 TF) | (32,32,1) 0.0197 (13.62) | (64,32,0) 0.0989 (2.72) => best 5.680x
+[O44 A/B] MLA main ksplit: 1 0.1880 (1.43) | 2 0.0529 (5.08, 3.56x) | 4 0.0293 (9.16, 6.42x)
+[O46 A/B] MLA main warp: 4w 0.0220 (12.21) | 8w 0.0200 (13.45, 1.102x)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s256_h2_d512_causal_fp16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.638e-03  max_rel=2.557e-01
   dk   vs ref: max_abs=1.582e-03  max_rel=2.770e-01
   dv   vs ref: max_abs=1.753e-03  max_rel=1.772e-02
-  | [O39 A/B] lse(D=512) split=1 0.0361 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-  | [O39 A/B] lse(D=512) split=2 0.0267 ms (1.350x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=4 0.0211 ms (1.713x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=8 0.0219 ms (1.647x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=16 0.0248 ms (1.455x vs split1) | max_abs vs split1=4.768e-07
-  | [O59 A/B] LSE MLA legacy(sp=4) 0.0211 ms | cfg6(sp=4) 0.0179 ms (1.179x) | max_abs(cfg6-vs-legacy)=4.768e-07
+  | [O39 A/B] lse(D=512) split=1 0.0277 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+  | [O39 A/B] lse(D=512) split=2 0.0215 ms (1.289x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=4 0.0180 ms (1.540x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=8 0.0189 ms (1.460x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=16 0.0217 ms (1.274x vs split1) | max_abs vs split1=4.768e-07
+  | [O59 A/B] LSE MLA legacy(sp=4) 0.0180 ms | cfg6(sp=4) 0.0166 ms (1.083x) | max_abs(cfg6-vs-legacy)=4.768e-07
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s256_h2_d512_causal_fp16/ours_sf_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=1.638e-03  max_rel=2.557e-01
   | dk   vs ref: max_abs=1.582e-03  max_rel=2.770e-01
@@ -693,23 +693,23 @@ B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
 [O38] lse k-split = 1 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=4096)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 1.9369 ms  70.96 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.3250 ms | main 1.4994 ms | convert 0.1124 ms
-[O24 A/B] delta old 0.0431 ms | warp 0.0133 ms (3.23x)
-[O8b A/B] lse O8 0.8482 ms | bal(单缓冲) 0.4263 ms (1.990x) | bal+cpasync(双缓冲) 0.3096 ms (2.740x)
-[O6 A/B] main nopipe 2.1804 ms (63.03 TF) | pipe(KV both) 1.5484 ms (88.76 TF) | pipe2(K only) 1.5464 ms (88.87 TF) => nopipe/pipe 1.408x, nopipe/pipe2 1.410x
-[O48 A/B] main D=128 4w(128/2) 1.5885 ms | 8w(256/4) 1.7802 ms (0.892x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/9.537e-07/1.073e-06
-[O6c A/B] main sched0(原样) 1.6011 ms | sched1(交错) 1.5343 ms (1.044x) | sched2(逆序) 1.5434 ms (1.037x)
-[O5c A/B] main (64,32,2) 1.5261 ms (90.06 TF) | (64,64,2) 1.4626 (93.97) | (32,32,1) 2.5763 (53.35) | (32,32,2) 2.5531 (53.83) => best 1.043x
+[timing] total(3 kernels) 1.8350 ms  74.90 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2312 ms | main 1.5092 ms | convert 0.0947 ms
+[O24 A/B] delta old 0.0432 ms | warp 0.0133 ms (3.25x)
+[O8b A/B] lse O8 0.8371 ms | bal(单缓冲) 0.3527 ms (2.374x) | bal+cpasync(双缓冲) 0.2154 ms (3.887x)
+[O6 A/B] main nopipe 2.1972 ms (62.55 TF) | pipe(KV both) 1.5468 ms (88.85 TF) | pipe2(K only) 1.5713 ms (87.47 TF) => nopipe/pipe 1.420x, nopipe/pipe2 1.398x
+[O48 A/B] main D=128 4w(128/2) 1.5617 ms | 8w(256/4) 1.7720 ms (0.881x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/7.153e-07/2.384e-06
+[O6c A/B] main sched0(原样) 1.5797 ms | sched1(交错) 1.5253 ms (1.036x) | sched2(逆序) 1.5533 ms (1.017x)
+[O5c A/B] main (64,32,2) 1.5432 ms (89.06 TF) | (64,64,2) 1.4626 (93.97) | (32,32,1) 2.5773 (53.33) | (32,32,2) 2.5642 (53.60) => best 1.055x
 [O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
-  (BM=64,BN=32,PIPE=2): base 1.7979 (76.44) | f4 1.8793 (73.13,-4.3%) | f2+PREL 1.5295 (89.86,+17.6%) | f4+PREL 1.5801 (86.98,+13.8%)
-  (BM=64,BN=64,PIPE=2): base 1.6809 (81.76) | f4 1.6878 (81.43,-0.4%) | f2+PREL 1.4603 (94.12,+15.1%) | f4+PREL 1.5080 (91.14,+11.5%)
-  (BM=32,BN=32,PIPE=1): base 2.6082 (52.69) | f4 2.6174 (52.51,-0.4%) | f2+PREL 2.5806 (53.26,+1.1%) | f4+PREL 2.5877 (53.11,+0.8%)
-  (BM=32,BN=32,PIPE=2): base 2.5970 (52.92) | f4 2.6115 (52.63,-0.6%) | f2+PREL 2.5631 (53.62,+1.3%) | f4+PREL 2.6030 (52.80,-0.2%)
+  (BM=64,BN=32,PIPE=2): base 1.8269 (75.23) | f4 1.8834 (72.97,-3.0%) | f2+PREL 1.5731 (87.37,+16.1%) | f4+PREL 1.6166 (85.02,+13.0%)
+  (BM=64,BN=64,PIPE=2): base 1.7173 (80.03) | f4 1.7334 (79.29,-0.9%) | f2+PREL 1.4842 (92.60,+15.7%) | f4+PREL 1.5058 (91.27,+14.0%)
+  (BM=32,BN=32,PIPE=1): base 2.5808 (53.25) | f4 2.5881 (53.10,-0.3%) | f2+PREL 2.5723 (53.43,+0.3%) | f4+PREL 2.6039 (52.78,-0.9%)
+  (BM=32,BN=32,PIPE=2): base 2.6094 (52.67) | f4 2.5995 (52.87,+0.4%) | f2+PREL 2.5806 (53.26,+1.1%) | f4+PREL 2.5637 (53.61,+1.8%)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
-  dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  dk   vs ref: max_abs=1.734e-03  max_rel=2.408e-01
   dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
   fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
   fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
@@ -717,10 +717,10 @@ B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
   te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
   te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
   te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
-  | [O48 A/B] main D=128 4w(128/2) 1.5885 ms | 8w(256/4) 1.7802 ms (0.892x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/9.537e-07/1.073e-06
+  | [O48 A/B] main D=128 4w(128/2) 1.5617 ms | 8w(256/4) 1.7720 ms (0.881x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/7.153e-07/2.384e-06
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16/ours_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
-  | dk   vs ref: max_abs=1.734e-03  max_rel=2.409e-01
+  | dk   vs ref: max_abs=1.734e-03  max_rel=2.408e-01
   | dv   vs ref: max_abs=1.966e-03  max_rel=3.855e-02
   | fa_dq     vs ref: max_abs=1.883e-03  max_rel=2.251e-01
   | fa_dk     vs ref: max_abs=1.734e-03  max_rel=4.736e-01
@@ -737,19 +737,19 @@ B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
 [O38] lse k-split = 1 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=4096)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 1.9368 ms  70.96 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.3271 ms | main 1.5023 ms | convert 0.1074 ms
-[O24 A/B] delta old 0.0429 ms | warp 0.0131 ms (3.28x)
-[O8b A/B] lse O8 0.8448 ms | bal(单缓冲) 0.4337 ms (1.948x) | bal+cpasync(双缓冲) 0.3111 ms (2.716x)
-[O6 A/B] main nopipe 2.1766 ms (63.14 TF) | pipe(KV both) 1.5343 ms (89.58 TF) | pipe2(K only) 1.5989 ms (85.96 TF) => nopipe/pipe 1.419x, nopipe/pipe2 1.361x
-[O48 A/B] main D=128 4w(128/2) 1.6038 ms | 8w(256/4) 1.7516 ms (0.916x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/9.537e-07/1.431e-06
-[O6c A/B] main sched0(原样) 1.5632 ms | sched1(交错) 1.5645 ms (0.999x) | sched2(逆序) 1.5451 ms (1.012x)
-[O5c A/B] main (64,32,2) 1.5250 ms (90.13 TF) | (64,64,2) 1.4426 (95.27) | (32,32,1) 2.5583 (53.72) | (32,32,2) 2.5691 (53.50) => best 1.057x
+[timing] total(3 kernels) 1.8504 ms  74.28 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2311 ms | main 1.5085 ms | convert 0.1108 ms
+[O24 A/B] delta old 0.0430 ms | warp 0.0132 ms (3.25x)
+[O8b A/B] lse O8 0.8349 ms | bal(单缓冲) 0.3478 ms (2.400x) | bal+cpasync(双缓冲) 0.2144 ms (3.895x)
+[O6 A/B] main nopipe 2.1735 ms (63.23 TF) | pipe(KV both) 1.5651 ms (87.81 TF) | pipe2(K only) 1.5656 ms (87.79 TF) => nopipe/pipe 1.389x, nopipe/pipe2 1.388x
+[O48 A/B] main D=128 4w(128/2) 1.5747 ms | 8w(256/4) 1.7825 ms (0.883x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.192e-06/1.907e-06
+[O6c A/B] main sched0(原样) 1.5876 ms | sched1(交错) 1.5614 ms (1.017x) | sched2(逆序) 1.5602 ms (1.018x)
+[O5c A/B] main (64,32,2) 1.5634 ms (87.91 TF) | (64,64,2) 1.4679 (93.63) | (32,32,1) 2.5695 (53.49) | (32,32,2) 2.5714 (53.45) => best 1.065x
 [O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
-  (BM=64,BN=32,PIPE=2): base 1.7495 (78.56) | f4 1.8700 (73.50,-6.4%) | f2+PREL 1.5028 (91.45,+16.4%) | f4+PREL 1.5580 (88.22,+12.3%)
-  (BM=64,BN=64,PIPE=2): base 1.6956 (81.05) | f4 1.7097 (80.39,-0.8%) | f2+PREL 1.4747 (93.20,+15.0%) | f4+PREL 1.4866 (92.45,+14.1%)
-  (BM=32,BN=32,PIPE=1): base 2.5780 (53.31) | f4 2.6174 (52.51,-1.5%) | f2+PREL 2.5557 (53.78,+0.9%) | f4+PREL 2.6058 (52.74,-1.1%)
-  (BM=32,BN=32,PIPE=2): base 2.5908 (53.05) | f4 2.6186 (52.49,-1.1%) | f2+PREL 2.5889 (53.09,+0.1%) | f4+PREL 2.5999 (52.86,-0.4%)
+  (BM=64,BN=32,PIPE=2): base 1.7646 (77.89) | f4 1.8586 (73.95,-5.1%) | f2+PREL 1.5321 (89.70,+15.2%) | f4+PREL 1.5509 (88.62,+13.8%)
+  (BM=64,BN=64,PIPE=2): base 1.6786 (81.88) | f4 1.7110 (80.33,-1.9%) | f2+PREL 1.4660 (93.75,+14.5%) | f4+PREL 1.4938 (92.01,+12.4%)
+  (BM=32,BN=32,PIPE=1): base 2.6069 (52.72) | f4 2.6197 (52.46,-0.5%) | f2+PREL 2.5629 (53.63,+1.7%) | f4+PREL 2.5954 (52.95,+0.4%)
+  (BM=32,BN=32,PIPE=2): base 2.5867 (53.13) | f4 2.5920 (53.02,-0.2%) | f2+PREL 2.5580 (53.73,+1.1%) | f4+PREL 2.5897 (53.07,-0.1%)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
@@ -761,7 +761,7 @@ B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
   te_dq     vs ref: max_abs=1.883e-03  max_rel=2.048e-01
   te_dk     vs ref: max_abs=1.858e-03  max_rel=1.492e-01
   te_dv     vs ref: max_abs=1.966e-03  max_rel=3.855e-02
-  | [O48 A/B] main D=128 4w(128/2) 1.6038 ms | 8w(256/4) 1.7516 ms (0.916x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/9.537e-07/1.431e-06
+  | [O48 A/B] main D=128 4w(128/2) 1.5747 ms | 8w(256/4) 1.7825 ms (0.883x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/1.192e-06/1.907e-06
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16/ours_sf_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=1.883e-03  max_rel=2.673e-01
   | dk   vs ref: max_abs=1.734e-03  max_rel=2.408e-01
@@ -781,35 +781,35 @@ B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
 [O38] lse k-split = 8 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=512)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.0880 ms  24.40 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0238 ms | main 0.0512 ms | convert 0.0130 ms
-[O24 A/B] delta old 0.0081 ms | warp 0.0040 ms (2.03x)
-[O8b A/B] lse O8 0.0645 ms | bal(单缓冲) 0.0508 ms (1.269x) | bal+cpasync(双缓冲) 0.0370 ms (1.743x)
-[O6 A/B] main nopipe 0.1060 ms (20.25 TF) | pipe(KV both) 0.0562 ms (38.18 TF) | pipe2(K only) 0.0605 ms (35.52 TF) => nopipe/pipe 1.885x, nopipe/pipe2 1.754x
-[O48 A/B] main D=128 4w(128/2) 0.0619 ms | 8w(256/4) 0.0587 ms (1.055x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.384e-07/4.768e-07
-[O6c A/B] main sched0(原样) 0.0562 ms | sched1(交错) 0.0564 ms (0.996x) | sched2(逆序) 0.0564 ms (0.997x)
-[O5c A/B] main (64,32,2) 0.0602 ms (35.65 TF) | (64,64,2) 0.0566 (37.97) | (32,32,1) 0.0699 (30.73) | (32,32,2) 0.0712 (30.15) => best 1.065x
+[timing] total(3 kernels) 0.0852 ms  25.20 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0208 ms | main 0.0516 ms | convert 0.0128 ms
+[O24 A/B] delta old 0.0083 ms | warp 0.0042 ms (1.98x)
+[O8b A/B] lse O8 0.0539 ms | bal(单缓冲) 0.0369 ms (1.461x) | bal+cpasync(双缓冲) 0.0222 ms (2.426x)
+[O6 A/B] main nopipe 0.1061 ms (20.25 TF) | pipe(KV both) 0.0567 ms (37.86 TF) | pipe2(K only) 0.0607 ms (35.40 TF) => nopipe/pipe 1.870x, nopipe/pipe2 1.748x
+[O48 A/B] main D=128 4w(128/2) 0.0628 ms | 8w(256/4) 0.0593 ms (1.058x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.384e-07/4.768e-07
+[O6c A/B] main sched0(原样) 0.0566 ms | sched1(交错) 0.0567 ms (0.998x) | sched2(逆序) 0.0568 ms (0.998x)
+[O5c A/B] main (64,32,2) 0.0608 ms (35.34 TF) | (64,64,2) 0.0565 (37.98) | (32,32,1) 0.0649 (33.09) | (32,32,2) 0.0689 (31.15) => best 1.075x
 [O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
-  (BM=64,BN=32,PIPE=2): base 0.0743 (28.91) | f4 0.0753 (28.50,-1.4%) | f2+PREL 0.0602 (35.65,+23.3%) | f4+PREL 0.0656 (32.76,+13.3%)
-  (BM=64,BN=64,PIPE=2): base 0.0683 (31.43) | f4 0.0700 (30.68,-2.4%) | f2+PREL 0.0565 (37.98,+20.8%) | f4+PREL 0.0590 (36.37,+15.7%)
-  (BM=32,BN=32,PIPE=1): base 0.0753 (28.51) | f4 0.0781 (27.51,-3.5%) | f2+PREL 0.0706 (30.42,+6.7%) | f4+PREL 0.0723 (29.70,+4.2%)
-  (BM=32,BN=32,PIPE=2): base 0.0780 (27.52) | f4 0.0798 (26.92,-2.2%) | f2+PREL 0.0709 (30.29,+10.1%) | f4+PREL 0.0739 (29.05,+5.6%)
+  (BM=64,BN=32,PIPE=2): base 0.0748 (28.69) | f4 0.0763 (28.15,-1.9%) | f2+PREL 0.0607 (35.40,+23.4%) | f4+PREL 0.0660 (32.54,+13.4%)
+  (BM=64,BN=64,PIPE=2): base 0.0686 (31.29) | f4 0.0703 (30.53,-2.4%) | f2+PREL 0.0566 (37.93,+21.2%) | f4+PREL 0.0593 (36.23,+15.8%)
+  (BM=32,BN=32,PIPE=1): base 0.0705 (30.45) | f4 0.0749 (28.67,-5.8%) | f2+PREL 0.0681 (31.51,+3.5%) | f4+PREL 0.0701 (30.64,+0.6%)
+  (BM=32,BN=32,PIPE=2): base 0.0754 (28.48) | f4 0.0773 (27.79,-2.4%) | f2+PREL 0.0689 (31.15,+9.4%) | f4+PREL 0.0728 (29.49,+3.5%)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
   dk   vs ref: max_abs=1.771e-03  max_rel=2.997e-01
-  dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+  dv   vs ref: max_abs=1.899e-03  max_rel=3.693e-02
   fa_dq     vs ref: max_abs=1.679e-03  max_rel=2.666e-01
   fa_dk     vs ref: max_abs=1.684e-03  max_rel=5.121e-01
   fa_dv     vs ref: max_abs=1.899e-03  max_rel=2.719e-02
   te_dq     vs ref: max_abs=1.716e-03  max_rel=2.439e-01
   te_dk     vs ref: max_abs=2.287e-03  max_rel=5.140e-01
   te_dv     vs ref: max_abs=1.899e-03  max_rel=3.699e-02
-  | [O48 A/B] main D=128 4w(128/2) 0.0619 ms | 8w(256/4) 0.0587 ms (1.055x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.384e-07/4.768e-07
+  | [O48 A/B] main D=128 4w(128/2) 0.0628 ms | 8w(256/4) 0.0593 ms (1.058x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/2.384e-07/4.768e-07
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16/ours_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
   | dk   vs ref: max_abs=1.771e-03  max_rel=2.997e-01
-  | dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+  | dv   vs ref: max_abs=1.899e-03  max_rel=3.693e-02
   | fa_dq     vs ref: max_abs=1.679e-03  max_rel=2.666e-01
   | fa_dk     vs ref: max_abs=1.684e-03  max_rel=5.121e-01
   | fa_dv     vs ref: max_abs=1.899e-03  max_rel=2.719e-02
@@ -825,35 +825,35 @@ B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
 [O38] lse k-split = 8 (auto)
 [O23] main backend = mma | lse = mma (D=128 S=512)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.0878 ms  24.45 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0238 ms | main 0.0513 ms | convert 0.0127 ms
-[O24 A/B] delta old 0.0081 ms | warp 0.0041 ms (2.00x)
-[O8b A/B] lse O8 0.0645 ms | bal(单缓冲) 0.0509 ms (1.267x) | bal+cpasync(双缓冲) 0.0370 ms (1.745x)
-[O6 A/B] main nopipe 0.1054 ms (20.37 TF) | pipe(KV both) 0.0561 ms (38.25 TF) | pipe2(K only) 0.0602 ms (35.70 TF) => nopipe/pipe 1.877x, nopipe/pipe2 1.752x
-[O48 A/B] main D=128 4w(128/2) 0.0616 ms | 8w(256/4) 0.0582 ms (1.057x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/3.576e-07/4.768e-07
-[O6c A/B] main sched0(原样) 0.0562 ms | sched1(交错) 0.0562 ms (0.999x) | sched2(逆序) 0.0562 ms (1.000x)
-[O5c A/B] main (64,32,2) 0.0602 ms (35.69 TF) | (64,64,2) 0.0563 (38.13) | (32,32,1) 0.0688 (31.23) | (32,32,2) 0.0700 (30.67) => best 1.068x
+[timing] total(3 kernels) 0.0836 ms  25.68 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0206 ms | main 0.0511 ms | convert 0.0119 ms
+[O24 A/B] delta old 0.0081 ms | warp 0.0040 ms (2.02x)
+[O8b A/B] lse O8 0.0537 ms | bal(单缓冲) 0.0366 ms (1.466x) | bal+cpasync(双缓冲) 0.0220 ms (2.439x)
+[O6 A/B] main nopipe 0.1058 ms (20.29 TF) | pipe(KV both) 0.0565 ms (38.03 TF) | pipe2(K only) 0.0605 ms (35.48 TF) => nopipe/pipe 1.874x, nopipe/pipe2 1.748x
+[O48 A/B] main D=128 4w(128/2) 0.0620 ms | 8w(256/4) 0.0588 ms (1.054x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/3.576e-07/4.768e-07
+[O6c A/B] main sched0(原样) 0.0566 ms | sched1(交错) 0.0565 ms (1.001x) | sched2(逆序) 0.0567 ms (0.998x)
+[O5c A/B] main (64,32,2) 0.0605 ms (35.52 TF) | (64,64,2) 0.0565 (38.03) | (32,32,1) 0.0672 (31.95) | (32,32,2) 0.0695 (30.92) => best 1.071x
 [O7c A/B] main-only: base(f2,noPREL) | f4 | f2+PREL | f4+PREL, main-only:
-  (BM=64,BN=32,PIPE=2): base 0.0744 (28.85) | f4 0.0757 (28.38,-1.6%) | f2+PREL 0.0600 (35.77,+24.0%) | f4+PREL 0.0653 (32.88,+14.0%)
-  (BM=64,BN=64,PIPE=2): base 0.0681 (31.55) | f4 0.0697 (30.80,-2.4%) | f2+PREL 0.0562 (38.18,+21.0%) | f4+PREL 0.0588 (36.52,+15.8%)
-  (BM=32,BN=32,PIPE=1): base 0.0749 (28.69) | f4 0.0765 (28.09,-2.1%) | f2+PREL 0.0688 (31.22,+8.8%) | f4+PREL 0.0716 (29.98,+4.5%)
-  (BM=32,BN=32,PIPE=2): base 0.0772 (27.83) | f4 0.0791 (27.16,-2.4%) | f2+PREL 0.0712 (30.17,+8.4%) | f4+PREL 0.0736 (29.20,+4.9%)
+  (BM=64,BN=32,PIPE=2): base 0.0749 (28.68) | f4 0.0761 (28.21,-1.7%) | f2+PREL 0.0605 (35.51,+23.8%) | f4+PREL 0.0657 (32.71,+14.0%)
+  (BM=64,BN=64,PIPE=2): base 0.0684 (31.41) | f4 0.0702 (30.58,-2.6%) | f2+PREL 0.0565 (38.00,+21.0%) | f4+PREL 0.0591 (36.31,+15.6%)
+  (BM=32,BN=32,PIPE=1): base 0.0755 (28.44) | f4 0.0764 (28.11,-1.1%) | f2+PREL 0.0676 (31.75,+11.6%) | f4+PREL 0.0713 (30.11,+5.9%)
+  (BM=32,BN=32,PIPE=2): base 0.0760 (28.26) | f4 0.0779 (27.58,-2.4%) | f2+PREL 0.0695 (30.89,+9.3%) | f4+PREL 0.0731 (29.39,+4.0%)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
   dk   vs ref: max_abs=1.771e-03  max_rel=2.997e-01
-  dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+  dv   vs ref: max_abs=1.899e-03  max_rel=3.699e-02
   fa_dq     vs ref: max_abs=1.679e-03  max_rel=2.666e-01
   fa_dk     vs ref: max_abs=1.684e-03  max_rel=5.121e-01
   fa_dv     vs ref: max_abs=1.899e-03  max_rel=2.719e-02
   te_dq     vs ref: max_abs=1.716e-03  max_rel=2.439e-01
   te_dk     vs ref: max_abs=2.287e-03  max_rel=5.140e-01
   te_dv     vs ref: max_abs=1.899e-03  max_rel=3.699e-02
-  | [O48 A/B] main D=128 4w(128/2) 0.0616 ms | 8w(256/4) 0.0582 ms (1.057x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/3.576e-07/4.768e-07
+  | [O48 A/B] main D=128 4w(128/2) 0.0620 ms | 8w(256/4) 0.0588 ms (1.054x) | max_abs(8w-vs-4w) dq/dk/dv=0.000e+00/3.576e-07/4.768e-07
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp16/ours_sf_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=1.671e-03  max_rel=3.484e-01
   | dk   vs ref: max_abs=1.771e-03  max_rel=2.997e-01
-  | dv   vs ref: max_abs=1.899e-03  max_rel=2.805e-02
+  | dv   vs ref: max_abs=1.899e-03  max_rel=3.699e-02
   | fa_dq     vs ref: max_abs=1.679e-03  max_rel=2.666e-01
   | fa_dk     vs ref: max_abs=1.684e-03  max_rel=5.121e-01
   | fa_dv     vs ref: max_abs=1.899e-03  max_rel=2.719e-02
@@ -870,29 +870,29 @@ B=1 S=512 H=2 Hkv=2 D=512 causal=1 scale=0.044194
 [O38] lse k-split = 8 (auto)
 [O23] main backend = mma | lse = mma (D=512 S=512)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.0798 ms  13.45 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0220 ms | main 0.0463 ms | convert 0.0115 ms
-[O39 A/B] lse(D=512) split=1 0.0583 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-[O39 A/B] lse(D=512) split=2 0.0384 ms (1.519x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=4 0.0274 ms (2.128x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=8 0.0224 ms (2.605x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=16 0.0258 ms (2.263x vs split1) | max_abs vs split1=4.768e-07
-[O39] best lse split=8 0.0224 ms (2.605x)
-[O59 A/B] LSE MLA legacy(sp=8) 0.0224 ms | cfg6(sp=8) 0.0191 ms (1.170x) | max_abs(cfg6-vs-legacy)=4.768e-07
-[MLA512 A/B] main: (32,32,0) 0.2010 (5.34 TF) | (32,32,1) 0.0454 (23.66) | (64,32,0) 0.1955 (5.49) => best 4.428x
-[O44 A/B] MLA main ksplit: 1 0.3771 (2.85) | 2 0.0990 (10.85, 3.81x) | 4 0.0596 (18.02, 6.33x)
-[O46 A/B] MLA main warp: 4w 0.0523 (20.55) | 8w 0.0461 (23.29, 1.134x)
+[timing] total(3 kernels) 0.0787 ms  13.65 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0207 ms | main 0.0465 ms | convert 0.0114 ms
+[O39 A/B] lse(D=512) split=1 0.0431 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O39 A/B] lse(D=512) split=2 0.0298 ms (1.447x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=4 0.0226 ms (1.907x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=8 0.0192 ms (2.249x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=16 0.0222 ms (1.941x vs split1) | max_abs vs split1=4.768e-07
+[O39] best lse split=8 0.0192 ms (2.249x)
+[O59 A/B] LSE MLA legacy(sp=8) 0.0192 ms | cfg6(sp=8) 0.0178 ms (1.081x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[MLA512 A/B] main: (32,32,0) 0.2021 (5.31 TF) | (32,32,1) 0.0466 (23.05) | (64,32,0) 0.1983 (5.41) => best 4.337x
+[O44 A/B] MLA main ksplit: 1 0.3849 (2.79) | 2 0.0994 (10.80, 3.87x) | 4 0.0582 (18.44, 6.61x)
+[O46 A/B] MLA main warp: 4w 0.0522 (20.56) | 8w 0.0454 (23.67, 1.151x)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h2_d512_causal_fp16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.584e-03  max_rel=3.134e-01
   dk   vs ref: max_abs=1.580e-03  max_rel=4.347e-01
   dv   vs ref: max_abs=1.859e-03  max_rel=5.815e-02
-  | [O39 A/B] lse(D=512) split=1 0.0583 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-  | [O39 A/B] lse(D=512) split=2 0.0384 ms (1.519x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=4 0.0274 ms (2.128x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=8 0.0224 ms (2.605x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=16 0.0258 ms (2.263x vs split1) | max_abs vs split1=4.768e-07
-  | [O59 A/B] LSE MLA legacy(sp=8) 0.0224 ms | cfg6(sp=8) 0.0191 ms (1.170x) | max_abs(cfg6-vs-legacy)=4.768e-07
+  | [O39 A/B] lse(D=512) split=1 0.0431 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+  | [O39 A/B] lse(D=512) split=2 0.0298 ms (1.447x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=4 0.0226 ms (1.907x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=8 0.0192 ms (2.249x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=16 0.0222 ms (1.941x vs split1) | max_abs vs split1=4.768e-07
+  | [O59 A/B] LSE MLA legacy(sp=8) 0.0192 ms | cfg6(sp=8) 0.0178 ms (1.081x) | max_abs(cfg6-vs-legacy)=4.768e-07
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h2_d512_causal_fp16/ours_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=1.584e-03  max_rel=3.134e-01
   | dk   vs ref: max_abs=1.580e-03  max_rel=4.347e-01
@@ -907,29 +907,29 @@ B=1 S=512 H=2 Hkv=2 D=512 causal=1 scale=0.044194
 [O38] lse k-split = 8 (auto)
 [O23] main backend = mma | lse = mma (D=512 S=512)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.0802 ms  13.39 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0223 ms | main 0.0458 ms | convert 0.0120 ms
-[O39 A/B] lse(D=512) split=1 0.0584 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-[O39 A/B] lse(D=512) split=2 0.0383 ms (1.523x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=4 0.0277 ms (2.107x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=8 0.0225 ms (2.597x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=16 0.0258 ms (2.267x vs split1) | max_abs vs split1=4.768e-07
-[O39] best lse split=8 0.0225 ms (2.597x)
-[O59 A/B] LSE MLA legacy(sp=8) 0.0224 ms | cfg6(sp=8) 0.0192 ms (1.166x) | max_abs(cfg6-vs-legacy)=4.768e-07
-[MLA512 A/B] main: (32,32,0) 0.2009 (5.34 TF) | (32,32,1) 0.0455 (23.59) | (64,32,0) 0.1968 (5.46) => best 4.413x
-[O44 A/B] MLA main ksplit: 1 0.3806 (2.82) | 2 0.0988 (10.87, 3.85x) | 4 0.0594 (18.08, 6.41x)
-[O46 A/B] MLA main warp: 4w 0.0524 (20.49) | 8w 0.0459 (23.38, 1.141x)
+[timing] total(3 kernels) 0.0780 ms  13.77 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0202 ms | main 0.0463 ms | convert 0.0115 ms
+[O39 A/B] lse(D=512) split=1 0.0430 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O39 A/B] lse(D=512) split=2 0.0297 ms (1.449x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=4 0.0224 ms (1.919x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=8 0.0192 ms (2.244x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=16 0.0222 ms (1.935x vs split1) | max_abs vs split1=4.768e-07
+[O39] best lse split=8 0.0192 ms (2.244x)
+[O59 A/B] LSE MLA legacy(sp=8) 0.0191 ms | cfg6(sp=8) 0.0175 ms (1.092x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[MLA512 A/B] main: (32,32,0) 0.2015 (5.33 TF) | (32,32,1) 0.0458 (23.46) | (64,32,0) 0.1994 (5.39) => best 4.403x
+[O44 A/B] MLA main ksplit: 1 0.3851 (2.79) | 2 0.0991 (10.84, 3.89x) | 4 0.0580 (18.51, 6.64x)
+[O46 A/B] MLA main warp: 4w 0.0525 (20.45) | 8w 0.0457 (23.52, 1.150x)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h2_d512_causal_fp16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.584e-03  max_rel=3.134e-01
   dk   vs ref: max_abs=1.580e-03  max_rel=4.347e-01
   dv   vs ref: max_abs=1.859e-03  max_rel=5.815e-02
-  | [O39 A/B] lse(D=512) split=1 0.0584 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-  | [O39 A/B] lse(D=512) split=2 0.0383 ms (1.523x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=4 0.0277 ms (2.107x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=8 0.0225 ms (2.597x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=16 0.0258 ms (2.267x vs split1) | max_abs vs split1=4.768e-07
-  | [O59 A/B] LSE MLA legacy(sp=8) 0.0224 ms | cfg6(sp=8) 0.0192 ms (1.166x) | max_abs(cfg6-vs-legacy)=4.768e-07
+  | [O39 A/B] lse(D=512) split=1 0.0430 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+  | [O39 A/B] lse(D=512) split=2 0.0297 ms (1.449x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=4 0.0224 ms (1.919x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=8 0.0192 ms (2.244x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=16 0.0222 ms (1.935x vs split1) | max_abs vs split1=4.768e-07
+  | [O59 A/B] LSE MLA legacy(sp=8) 0.0191 ms | cfg6(sp=8) 0.0175 ms (1.092x) | max_abs(cfg6-vs-legacy)=4.768e-07
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h2_d512_causal_fp16/ours_sf_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=1.584e-03  max_rel=3.134e-01
   | dk   vs ref: max_abs=1.580e-03  max_rel=4.347e-01
@@ -944,8 +944,8 @@ B=1 S=512 H=2 Hkv=2 D=512 causal=0 scale=0.044194
 [O38] lse k-split = 8 (auto)
 [O23] main backend = mma | lse = mma (D=512 S=512)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.2828 ms  3.80 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.1960 ms | main 0.0754 ms | convert 0.0114 ms
+[timing] total(3 kernels) 0.2709 ms  3.96 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1838 ms | main 0.0753 ms | convert 0.0118 ms
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h2_d512_full_fp16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=2.861e-04  max_rel=7.772e-02
@@ -965,8 +965,8 @@ B=1 S=512 H=2 Hkv=2 D=512 causal=0 scale=0.044194
 [O38] lse k-split = 8 (auto)
 [O23] main backend = mma | lse = mma (D=512 S=512)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.2844 ms  3.78 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.1966 ms | main 0.0763 ms | convert 0.0116 ms
+[timing] total(3 kernels) 0.2707 ms  3.97 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1835 ms | main 0.0756 ms | convert 0.0116 ms
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h2_d512_full_fp16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=2.861e-04  max_rel=7.772e-02
@@ -986,29 +986,29 @@ B=1 S=512 H=4 Hkv=4 D=512 causal=1 scale=0.044194
 [O38] lse k-split = 8 (auto)
 [O23] main backend = mma | lse = mma (D=512 S=512)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.1165 ms  18.43 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0224 ms | main 0.0764 ms | convert 0.0177 ms
-[O39 A/B] lse(D=512) split=1 0.0581 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-[O39 A/B] lse(D=512) split=2 0.0384 ms (1.515x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=4 0.0276 ms (2.104x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=8 0.0227 ms (2.561x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=16 0.0357 ms (1.626x vs split1) | max_abs vs split1=4.768e-07
-[O39] best lse split=8 0.0227 ms (2.561x)
-[O59 A/B] LSE MLA legacy(sp=8) 0.0227 ms | cfg6(sp=8) 0.0189 ms (1.202x) | max_abs(cfg6-vs-legacy)=4.768e-07
-[MLA512 A/B] main: (32,32,0) 0.2965 (7.24 TF) | (32,32,1) 0.0760 (28.26) | (64,32,0) 0.3678 (5.84) => best 3.903x
-[O44 A/B] MLA main ksplit: 1 0.3808 (5.64) | 2 0.1077 (19.94, 3.54x) | 4 0.0950 (22.60, 4.01x)
-[O46 A/B] MLA main warp: 4w 0.0840 (25.57) | 8w 0.0761 (28.21, 1.103x)
+[timing] total(3 kernels) 0.1130 ms  19.00 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0213 ms | main 0.0764 ms | convert 0.0154 ms
+[O39 A/B] lse(D=512) split=1 0.0433 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O39 A/B] lse(D=512) split=2 0.0303 ms (1.429x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=4 0.0223 ms (1.938x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=8 0.0194 ms (2.230x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=16 0.0314 ms (1.380x vs split1) | max_abs vs split1=4.768e-07
+[O39] best lse split=8 0.0194 ms (2.230x)
+[O59 A/B] LSE MLA legacy(sp=8) 0.0196 ms | cfg6(sp=8) 0.0178 ms (1.102x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[MLA512 A/B] main: (32,32,0) 0.2971 (7.23 TF) | (32,32,1) 0.0761 (28.21) | (64,32,0) 0.3646 (5.89) => best 3.903x
+[O44 A/B] MLA main ksplit: 1 0.3710 (5.79) | 2 0.1114 (19.28, 3.33x) | 4 0.0958 (22.42, 3.87x)
+[O46 A/B] MLA main warp: 4w 0.0844 (25.43) | 8w 0.0761 (28.22, 1.109x)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=2.516e-03  max_rel=5.182e-01
   dk   vs ref: max_abs=2.916e-03  max_rel=4.260e-01
   dv   vs ref: max_abs=1.724e-03  max_rel=4.151e-02
-  | [O39 A/B] lse(D=512) split=1 0.0581 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-  | [O39 A/B] lse(D=512) split=2 0.0384 ms (1.515x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=4 0.0276 ms (2.104x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=8 0.0227 ms (2.561x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=16 0.0357 ms (1.626x vs split1) | max_abs vs split1=4.768e-07
-  | [O59 A/B] LSE MLA legacy(sp=8) 0.0227 ms | cfg6(sp=8) 0.0189 ms (1.202x) | max_abs(cfg6-vs-legacy)=4.768e-07
+  | [O39 A/B] lse(D=512) split=1 0.0433 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+  | [O39 A/B] lse(D=512) split=2 0.0303 ms (1.429x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=4 0.0223 ms (1.938x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=8 0.0194 ms (2.230x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=16 0.0314 ms (1.380x vs split1) | max_abs vs split1=4.768e-07
+  | [O59 A/B] LSE MLA legacy(sp=8) 0.0196 ms | cfg6(sp=8) 0.0178 ms (1.102x) | max_abs(cfg6-vs-legacy)=4.768e-07
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp16/ours_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=2.516e-03  max_rel=5.182e-01
   | dk   vs ref: max_abs=2.916e-03  max_rel=4.260e-01
@@ -1023,29 +1023,29 @@ B=1 S=512 H=4 Hkv=4 D=512 causal=1 scale=0.044194
 [O38] lse k-split = 8 (auto)
 [O23] main backend = mma | lse = mma (D=512 S=512)
 [O43] wgmma2 k-split = 1
-[timing] total(3 kernels) 0.1151 ms  18.65 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0221 ms | main 0.0759 ms | convert 0.0171 ms
-[O39 A/B] lse(D=512) split=1 0.0581 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-[O39 A/B] lse(D=512) split=2 0.0383 ms (1.518x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=4 0.0271 ms (2.139x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=8 0.0225 ms (2.583x vs split1) | max_abs vs split1=4.768e-07
-[O39 A/B] lse(D=512) split=16 0.0355 ms (1.636x vs split1) | max_abs vs split1=4.768e-07
-[O39] best lse split=8 0.0225 ms (2.583x)
-[O59 A/B] LSE MLA legacy(sp=8) 0.0225 ms | cfg6(sp=8) 0.0188 ms (1.196x) | max_abs(cfg6-vs-legacy)=4.768e-07
-[MLA512 A/B] main: (32,32,0) 0.2970 (7.23 TF) | (32,32,1) 0.0757 (28.35) | (64,32,0) 0.3690 (5.82) => best 3.921x
-[O44 A/B] MLA main ksplit: 1 0.3817 (5.63) | 2 0.1082 (19.84, 3.53x) | 4 0.0951 (22.59, 4.02x)
-[O46 A/B] MLA main warp: 4w 0.0836 (25.68) | 8w 0.0763 (28.16, 1.097x)
+[timing] total(3 kernels) 0.1154 ms  18.61 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0215 ms | main 0.0766 ms | convert 0.0174 ms
+[O39 A/B] lse(D=512) split=1 0.0434 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O39 A/B] lse(D=512) split=2 0.0307 ms (1.411x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=4 0.0227 ms (1.912x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=8 0.0199 ms (2.184x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=16 0.0315 ms (1.377x vs split1) | max_abs vs split1=4.768e-07
+[O39] best lse split=8 0.0199 ms (2.184x)
+[O59 A/B] LSE MLA legacy(sp=8) 0.0197 ms | cfg6(sp=8) 0.0180 ms (1.098x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[MLA512 A/B] main: (32,32,0) 0.2988 (7.19 TF) | (32,32,1) 0.0765 (28.06) | (64,32,0) 0.3708 (5.79) => best 3.905x
+[O44 A/B] MLA main ksplit: 1 0.3738 (5.74) | 2 0.1075 (19.98, 3.48x) | 4 0.0960 (22.37, 3.89x)
+[O46 A/B] MLA main warp: 4w 0.0847 (25.36) | 8w 0.0770 (27.90, 1.100x)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=2.516e-03  max_rel=5.182e-01
   dk   vs ref: max_abs=2.916e-03  max_rel=4.260e-01
   dv   vs ref: max_abs=1.724e-03  max_rel=4.151e-02
-  | [O39 A/B] lse(D=512) split=1 0.0581 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
-  | [O39 A/B] lse(D=512) split=2 0.0383 ms (1.518x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=4 0.0271 ms (2.139x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=8 0.0225 ms (2.583x vs split1) | max_abs vs split1=4.768e-07
-  | [O39 A/B] lse(D=512) split=16 0.0355 ms (1.636x vs split1) | max_abs vs split1=4.768e-07
-  | [O59 A/B] LSE MLA legacy(sp=8) 0.0225 ms | cfg6(sp=8) 0.0188 ms (1.196x) | max_abs(cfg6-vs-legacy)=4.768e-07
+  | [O39 A/B] lse(D=512) split=1 0.0434 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+  | [O39 A/B] lse(D=512) split=2 0.0307 ms (1.411x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=4 0.0227 ms (1.912x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=8 0.0199 ms (2.184x vs split1) | max_abs vs split1=4.768e-07
+  | [O39 A/B] lse(D=512) split=16 0.0315 ms (1.377x vs split1) | max_abs vs split1=4.768e-07
+  | [O59 A/B] LSE MLA legacy(sp=8) 0.0197 ms | cfg6(sp=8) 0.0180 ms (1.098x) | max_abs(cfg6-vs-legacy)=4.768e-07
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp16/ours_sf_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=2.516e-03  max_rel=5.182e-01
   | dk   vs ref: max_abs=2.916e-03  max_rel=4.260e-01
@@ -1058,14 +1058,14 @@ cu_seqlens = 0 512
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 8 (base=8)
 [O53] varlen MLA main k-split = 16 (auto)
-[timing] VARLEN total 0.0803 ms  13.38 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.0777 ms  13.82 TFLOPS (sum_b 4HL^2D)
 grid main = 256 x 2 x 1 | lse grid = 4 x 2 x 1 | T=512
-[O52 A/B] varlen MLA main-only 4w 0.0536 ms | 8w 0.0463 ms (1.158x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=3.576e-07 dv=5.960e-07
-[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2369 2 0.0841 4 0.0558 8 0.0471 16 0.0463 ms (auto=16)
-[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.0588 split2 0.0386 split4 0.0279 split8 0.0227 split16 0.0260 ms
-[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.0650 split2 0.0403 split4 0.0250 split8 0.0193 split16 0.0193 ms
-[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.1324 split2 0.0781 split4 0.0540 split8 0.0424 split16 0.0389 ms
-[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.0901 split2 0.0520 split4 0.0321 split8 0.0246 split16 0.0234 ms
+[O52 A/B] varlen MLA main-only 4w 0.0527 ms | 8w 0.0459 ms (1.148x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=3.576e-07 dv=4.768e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2353 2 0.0838 4 0.0550 8 0.0467 16 0.0457 ms (auto=16)
+[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.0431 split2 0.0295 split4 0.0224 split8 0.0191 split16 0.0223 ms
+[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.0543 split2 0.0344 split4 0.0221 split8 0.0176 split16 0.0183 ms
+[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.1201 split2 0.0719 split4 0.0506 split8 0.0398 split16 0.0370 ms
+[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.0632 split2 0.0378 split4 0.0245 split8 0.0199 split16 0.0205 ms
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=1.303e-03  max_rel=3.391e-01  (ours_amax=1.782e+00 ref_amax=1.783e+00 @1240)
   dk  vs ref: max_abs=1.537e-03  max_rel=3.567e-01  (ours_amax=2.648e+00 ref_amax=2.649e+00 @1529)
@@ -1077,19 +1077,19 @@ fa_bwd_fp16_mma_main.cu(1387): warning #177-D: variable "kLseSmemTma1" was decla
 
 Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
 
-fa_bwd_fp16_mma_kernels.cuh(1765): warning #177-D: variable "nblk" was declared but never referenced
+fa_bwd_fp16_mma_kernels.cuh(1810): warning #177-D: variable "nblk" was declared but never referenced
     const int nblk = (S + BM - 1) / BM;
               ^
           detected during instantiation of "void launch_bwd_wgmma2<HD,SPLIT,CL>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *, const int *, int) [with HD=128, SPLIT=true, CL=1]" at line 613 of fa_bwd_fp16_mma_main.cu
 
-fa_bwd_fp16_mma_kernels.cuh(3073): warning #177-D: variable "nblk" was declared but never referenced
+fa_bwd_fp16_mma_kernels.cuh(3118): warning #177-D: variable "nblk" was declared but never referenced
     const int nblk = (S + BM - 1) / BM;
               ^
           detected during instantiation of "void launch_bwd_wgmma4<HD,SEQ>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) [with HD=128, SEQ=true]" at line 1701 of fa_bwd_fp16_mma_main.cu
 
-ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb0EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 660518
-ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb1EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 655210
-  | [O52 A/B] varlen MLA main-only 4w 0.0536 ms | 8w 0.0463 ms (1.158x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=3.576e-07 dv=5.960e-07
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb0EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 652933
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb1EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 647625
+  | [O52 A/B] varlen MLA main-only 4w 0.0527 ms | 8w 0.0459 ms (1.148x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=3.576e-07 dv=4.768e-07
   | dq  vs ref: max_abs=1.303e-03  max_rel=3.391e-01  (ours_amax=1.782e+00 ref_amax=1.783e+00 @1240)
   | dk  vs ref: max_abs=1.537e-03  max_rel=3.567e-01  (ours_amax=2.648e+00 ref_amax=2.649e+00 @1529)
   | dv  vs ref: max_abs=1.557e-03  max_rel=1.063e-01  (ours_amax=4.641e+00 ref_amax=4.641e+00 @725)
@@ -1102,38 +1102,38 @@ cu_seqlens = 0 512
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 8 (base=8)
 [O53] varlen MLA main k-split = 16 (auto)
-[timing] VARLEN total 0.0810 ms  13.26 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.0775 ms  13.85 TFLOPS (sum_b 4HL^2D)
 grid main = 256 x 2 x 1 | lse grid = 4 x 2 x 1 | T=512
-[O52 A/B] varlen MLA main-only 4w 0.0528 ms | 8w 0.0461 ms (1.144x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.172e-07 dv=4.768e-07
-[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2368 2 0.0841 4 0.0557 8 0.0464 16 0.0465 ms (auto=16)
-[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.0588 split2 0.0387 split4 0.0277 split8 0.0225 split16 0.0261 ms
-[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.0650 split2 0.0402 split4 0.0248 split8 0.0193 split16 0.0190 ms
-[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.1325 split2 0.0780 split4 0.0537 split8 0.0420 split16 0.0388 ms
-[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.0901 split2 0.0517 split4 0.0319 split8 0.0244 split16 0.0233 ms
+[O52 A/B] varlen MLA main-only 4w 0.0527 ms | 8w 0.0455 ms (1.159x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2363 2 0.0837 4 0.0578 8 0.0470 16 0.0453 ms (auto=16)
+[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.0430 split2 0.0298 split4 0.0224 split8 0.0191 split16 0.0222 ms
+[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.0544 split2 0.0348 split4 0.0221 split8 0.0177 split16 0.0182 ms
+[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.1202 split2 0.0718 split4 0.0507 split8 0.0399 split16 0.0370 ms
+[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.0636 split2 0.0379 split4 0.0245 split8 0.0201 split16 0.0205 ms
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=1.303e-03  max_rel=3.391e-01  (ours_amax=1.782e+00 ref_amax=1.783e+00 @1240)
   dk  vs ref: max_abs=1.537e-03  max_rel=3.567e-01  (ours_amax=2.648e+00 ref_amax=2.649e+00 @1529)
   dv  vs ref: max_abs=1.557e-03  max_rel=1.063e-01  (ours_amax=4.641e+00 ref_amax=4.641e+00 @725)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_causal_fp16/ours_sf_{dq,dk,dv}.npy
-fa_bwd_fp16_mma_onefile.cu(5154): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
+fa_bwd_fp16_mma_onefile.cu(5199): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
     const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
               ^
 
 Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
 
-fa_bwd_fp16_mma_onefile.cu(1756): warning #177-D: variable "nblk" was declared but never referenced
+fa_bwd_fp16_mma_onefile.cu(1801): warning #177-D: variable "nblk" was declared but never referenced
     const int nblk = (S + BM - 1) / BM;
               ^
-          detected during instantiation of "void launch_bwd_wgmma2<HD,SPLIT,CL>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *, const int *, int) [with HD=128, SPLIT=true, CL=1]" at line 4409
+          detected during instantiation of "void launch_bwd_wgmma2<HD,SPLIT,CL>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, __half *, const int *, int) [with HD=128, SPLIT=true, CL=1]" at line 4454
 
-fa_bwd_fp16_mma_onefile.cu(3064): warning #177-D: variable "nblk" was declared but never referenced
+fa_bwd_fp16_mma_onefile.cu(3109): warning #177-D: variable "nblk" was declared but never referenced
     const int nblk = (S + BM - 1) / BM;
               ^
-          detected during instantiation of "void launch_bwd_wgmma4<HD,SEQ>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) [with HD=128, SEQ=true]" at line 5468
+          detected during instantiation of "void launch_bwd_wgmma4<HD,SEQ>(dim3, const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int) [with HD=128, SEQ=true]" at line 5513
 
-ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb0EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 655932
-ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb1EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 650624
-  | [O52 A/B] varlen MLA main-only 4w 0.0528 ms | 8w 0.0461 ms (1.144x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.172e-07 dv=4.768e-07
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb0EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 648714
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_fp16_wgmma_kernelILi128ELb1EEvPK6__halfS2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 643406
+  | [O52 A/B] varlen MLA main-only 4w 0.0527 ms | 8w 0.0455 ms (1.159x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07
   | dq  vs ref: max_abs=1.303e-03  max_rel=3.391e-01  (ours_amax=1.782e+00 ref_amax=1.783e+00 @1240)
   | dk  vs ref: max_abs=1.537e-03  max_rel=3.567e-01  (ours_amax=2.648e+00 ref_amax=2.649e+00 @1529)
   | dv  vs ref: max_abs=1.557e-03  max_rel=1.063e-01  (ours_amax=4.641e+00 ref_amax=4.641e+00 @725)
@@ -1146,23 +1146,23 @@ cu_seqlens = 0 512
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 8 (base=8)
 [O53] varlen MLA main k-split = 4 (auto)
-[timing] VARLEN total 0.0958 ms  11.21 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.0975 ms  11.02 TFLOPS (sum_b 4HL^2D)
 grid main = 64 x 2 x 1 | lse grid = 4 x 2 x 1 | T=512
-[O52 A/B] varlen MLA main-only 4w 0.0681 ms | 8w 0.0654 ms (1.041x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=1.192e-07 dv=8.941e-08
-[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2406 2 0.0952 4 0.0671 8 0.0716 16 0.0751 ms (auto=4)
-[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.1940 ms | balFULL/split1 0.0452 balFULL/split2 0.0276 balFULL/split4 0.0180 balFULL/split8 0.0145 balFULL/split16 0.0248 ms (auto=8)
-[O56 A/B] varlen MLA full LSE 8-warp: split1 0.0706 split2 0.0407 split4 0.0251 split8 0.0181 split16 0.0184 ms (lse8w=0 nblk8=4)
-[O56 A/B] ... 8-warp LBN64/PIPE0: split1 0.0952 split2 0.0556 split4 0.0353 split8 0.0256 split16 0.0287 ms
-[O57 A/B] PIPE0/LBN64 (1 CTA): split1 0.1210 split2 0.0695 split4 0.0419 split8 0.0287 split16 0.0538 ms
-[O57 A/B] PIPE1/LBN32 (1 CTA): split1 0.0679 split2 0.0389 split4 0.0234 split8 0.0171 split16 0.0231 ms
-[O57 A/B] PIPE0/LBN32 (2 CTA): split1 0.1263 split2 0.0720 split4 0.0430 split8 0.0293 split16 0.0258 ms
-[O57 A/B] PIPE1/LBN16 (2 CTA): split1 0.0626 split2 0.0361 split4 0.0220 split8 0.0157 split16 0.0185 ms
+[O52 A/B] varlen MLA main-only 4w 0.0717 ms | 8w 0.0684 ms (1.048x) | max_abs(8w-vs-4w) dq=7.451e-08 dk=1.192e-07 dv=5.960e-08
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2402 2 0.0965 4 0.0684 8 0.0710 16 0.0746 ms (auto=4)
+[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.1809 ms | balFULL/split1 0.0520 balFULL/split2 0.0307 balFULL/split4 0.0192 balFULL/split8 0.0152 balFULL/split16 0.0255 ms (auto=8)
+[O56 A/B] varlen MLA full LSE 8-warp: split1 0.0578 split2 0.0344 split4 0.0213 split8 0.0158 split16 0.0168 ms (lse8w=0 nblk8=4)
+[O56 A/B] ... 8-warp LBN64/PIPE0: split1 0.0840 split2 0.0499 split4 0.0323 split8 0.0239 split16 0.0270 ms
+[O57 A/B] PIPE0/LBN64 (1 CTA): split1 0.1095 split2 0.0634 split4 0.0385 split8 0.0272 split16 0.0506 ms
+[O57 A/B] PIPE1/LBN32 (1 CTA): split1 0.0557 split2 0.0324 split4 0.0200 split8 0.0150 split16 0.0213 ms
+[O57 A/B] PIPE0/LBN32 (2 CTA): split1 0.1142 split2 0.0657 split4 0.0397 split8 0.0276 split16 0.0247 ms
+[O57 A/B] PIPE1/LBN16 (2 CTA): split1 0.0520 split2 0.0298 split4 0.0182 split8 0.0142 split16 0.0175 ms
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=3.046e-04  max_rel=1.265e-01  (ours_amax=5.679e-01 ref_amax=5.679e-01 @148752)
   dk  vs ref: max_abs=4.449e-04  max_rel=1.074e-01  (ours_amax=6.313e-01 ref_amax=6.316e-01 @479635)
   dv  vs ref: max_abs=1.327e-04  max_rel=3.917e-02  (ours_amax=4.888e-01 ref_amax=4.887e-01 @335071)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_full_fp16/ours_{dq,dk,dv}.npy
-  | [O52 A/B] varlen MLA main-only 4w 0.0681 ms | 8w 0.0654 ms (1.041x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=1.192e-07 dv=8.941e-08
+  | [O52 A/B] varlen MLA main-only 4w 0.0717 ms | 8w 0.0684 ms (1.048x) | max_abs(8w-vs-4w) dq=7.451e-08 dk=1.192e-07 dv=5.960e-08
   | dq  vs ref: max_abs=3.046e-04  max_rel=1.265e-01  (ours_amax=5.679e-01 ref_amax=5.679e-01 @148752)
   | dk  vs ref: max_abs=4.449e-04  max_rel=1.074e-01  (ours_amax=6.313e-01 ref_amax=6.316e-01 @479635)
   | dv  vs ref: max_abs=1.327e-04  max_rel=3.917e-02  (ours_amax=4.888e-01 ref_amax=4.887e-01 @335071)
@@ -1175,22 +1175,22 @@ cu_seqlens = 0 512
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 8 (base=8)
 [O53] varlen MLA main k-split = 4 (auto)
-[timing] VARLEN total 0.0943 ms  11.38 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.0984 ms  10.91 TFLOPS (sum_b 4HL^2D)
 grid main = 64 x 2 x 1 | lse grid = 4 x 2 x 1 | T=512
-[O52 A/B] varlen MLA main-only 4w 0.0703 ms | 8w 0.0669 ms (1.050x) | max_abs(8w-vs-4w) dq=5.960e-08 dk=8.941e-08 dv=8.941e-08
-[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2409 2 0.0968 4 0.0684 8 0.0711 16 0.0761 ms (auto=4)
-[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.1945 ms | balFULL/split1 0.0451 balFULL/split2 0.0274 balFULL/split4 0.0176 balFULL/split8 0.0142 balFULL/split16 0.0244 ms (auto=8)
-[O56 A/B] varlen MLA full LSE 8-warp: split1 0.0706 split2 0.0405 split4 0.0247 split8 0.0177 split16 0.0179 ms (lse8w=0 nblk8=4)
-[O57 A/B] PIPE0/LBN64 (1 CTA): split1 0.1213 split2 0.0691 split4 0.0414 split8 0.0284 split16 0.0536 ms
-[O57 A/B] PIPE1/LBN32 (1 CTA): split1 0.0680 split2 0.0388 split4 0.0232 split8 0.0166 split16 0.0228 ms
-[O57 A/B] PIPE0/LBN32 (2 CTA): split1 0.1266 split2 0.0718 split4 0.0426 split8 0.0291 split16 0.0254 ms
-[O57 A/B] PIPE1/LBN16 (2 CTA): split1 0.0627 split2 0.0358 split4 0.0216 split8 0.0157 split16 0.0183 ms
+[O52 A/B] varlen MLA main-only 4w 0.0679 ms | 8w 0.0652 ms (1.041x) | max_abs(8w-vs-4w) dq=8.941e-08 dk=7.451e-08 dv=8.941e-08
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.2400 2 0.0974 4 0.0684 8 0.0716 16 0.0749 ms (auto=4)
+[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.1811 ms | balFULL/split1 0.0522 balFULL/split2 0.0311 balFULL/split4 0.0196 balFULL/split8 0.0154 balFULL/split16 0.0260 ms (auto=8)
+[O56 A/B] varlen MLA full LSE 8-warp: split1 0.0583 split2 0.0348 split4 0.0215 split8 0.0160 split16 0.0172 ms (lse8w=0 nblk8=4)
+[O57 A/B] PIPE0/LBN64 (1 CTA): split1 0.1097 split2 0.0638 split4 0.0389 split8 0.0275 split16 0.0507 ms
+[O57 A/B] PIPE1/LBN32 (1 CTA): split1 0.0559 split2 0.0327 split4 0.0202 split8 0.0153 split16 0.0217 ms
+[O57 A/B] PIPE0/LBN32 (2 CTA): split1 0.1145 split2 0.0661 split4 0.0401 split8 0.0279 split16 0.0248 ms
+[O57 A/B] PIPE1/LBN16 (2 CTA): split1 0.0521 split2 0.0300 split4 0.0184 split8 0.0144 split16 0.0180 ms
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=3.046e-04  max_rel=1.265e-01  (ours_amax=5.679e-01 ref_amax=5.679e-01 @148752)
   dk  vs ref: max_abs=4.449e-04  max_rel=1.074e-01  (ours_amax=6.313e-01 ref_amax=6.316e-01 @479635)
   dv  vs ref: max_abs=1.327e-04  max_rel=3.917e-02  (ours_amax=4.888e-01 ref_amax=4.887e-01 @335071)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b1_t512_h2_d512_full_fp16/ours_sf_{dq,dk,dv}.npy
-  | [O52 A/B] varlen MLA main-only 4w 0.0703 ms | 8w 0.0669 ms (1.050x) | max_abs(8w-vs-4w) dq=5.960e-08 dk=8.941e-08 dv=8.941e-08
+  | [O52 A/B] varlen MLA main-only 4w 0.0679 ms | 8w 0.0652 ms (1.041x) | max_abs(8w-vs-4w) dq=8.941e-08 dk=7.451e-08 dv=8.941e-08
   | dq  vs ref: max_abs=3.046e-04  max_rel=1.265e-01  (ours_amax=5.679e-01 ref_amax=5.679e-01 @148752)
   | dk  vs ref: max_abs=4.449e-04  max_rel=1.074e-01  (ours_amax=6.313e-01 ref_amax=6.316e-01 @479635)
   | dv  vs ref: max_abs=1.327e-04  max_rel=3.917e-02  (ours_amax=4.888e-01 ref_amax=4.887e-01 @335071)
@@ -1202,7 +1202,7 @@ VARLEN: B=2 T=500 maxlen=300 H=16 Hkv=16 D=128 causal=1
 cu_seqlens = 0 300 500
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 4 (base=96)
-[timing] VARLEN total 0.0670 ms  15.89 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.0645 ms  16.52 TFLOPS (sum_b 4HL^2D)
 grid main = 3 x 16 x 2 | lse grid = 3 x 16 x 2 | T=500
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=1.832e-03  max_rel=8.652e-01  (ours_amax=3.363e+00 ref_amax=3.364e+00 @620105)
@@ -1220,7 +1220,7 @@ VARLEN: B=2 T=500 maxlen=300 H=16 Hkv=16 D=128 causal=1
 cu_seqlens = 0 300 500
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 4 (base=96)
-[timing] VARLEN total 0.0677 ms  15.73 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.0639 ms  16.68 TFLOPS (sum_b 4HL^2D)
 grid main = 3 x 16 x 2 | lse grid = 3 x 16 x 2 | T=500
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=1.832e-03  max_rel=8.652e-01  (ours_amax=3.363e+00 ref_amax=3.364e+00 @620105)
@@ -1239,20 +1239,20 @@ cu_seqlens = 0 256 768 1792
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 8 (base=48)
 [O53] varlen MLA main k-split = 16 (auto)
-[timing] VARLEN total 0.3211 ms  17.56 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.3185 ms  17.70 TFLOPS (sum_b 4HL^2D)
 grid main = 512 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
-[O52 A/B] varlen MLA main-only 4w 0.2859 ms | 8w 0.2562 ms (1.116x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=3.576e-07 dv=4.768e-07
-[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.5587 2 0.3052 4 0.2668 8 0.2550 16 0.2562 ms (auto=16)
-[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.1053 split2 0.0616 split4 0.0398 split8 0.0453 split16 0.0525 ms
-[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.1204 split2 0.0644 split4 0.0460 split8 0.0328 split16 0.0390 ms
-[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.2422 split2 0.1333 split4 0.0846 split8 0.0582 split16 0.0783 ms
-[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.1576 split2 0.0850 split4 0.0488 split8 0.0341 split16 0.0431 ms
+[O52 A/B] varlen MLA main-only 4w 0.2850 ms | 8w 0.2569 ms (1.109x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=7.153e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.5578 2 0.3022 4 0.2664 8 0.2538 16 0.2559 ms (auto=16)
+[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.0762 split2 0.0462 split4 0.0312 split8 0.0365 split16 0.0457 ms
+[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.1002 split2 0.0550 split4 0.0409 split8 0.0298 split16 0.0371 ms
+[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.2170 split2 0.1210 split4 0.0774 split8 0.0551 split16 0.0750 ms
+[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.1084 split2 0.0604 split4 0.0363 split8 0.0268 split16 0.0366 ms
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=2.415e-03  max_rel=5.241e-01  (ours_amax=3.986e+00 ref_amax=3.986e+00 @1240)
   dk  vs ref: max_abs=1.834e-03  max_rel=3.483e-01  (ours_amax=3.363e+00 ref_amax=3.363e+00 @17)
   dv  vs ref: max_abs=1.856e-03  max_rel=6.845e-02  (ours_amax=5.152e+00 ref_amax=5.151e+00 @499)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp16/ours_{dq,dk,dv}.npy
-  | [O52 A/B] varlen MLA main-only 4w 0.2859 ms | 8w 0.2562 ms (1.116x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=3.576e-07 dv=4.768e-07
+  | [O52 A/B] varlen MLA main-only 4w 0.2850 ms | 8w 0.2569 ms (1.109x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=7.153e-07
   | dq  vs ref: max_abs=2.415e-03  max_rel=5.241e-01  (ours_amax=3.986e+00 ref_amax=3.986e+00 @1240)
   | dk  vs ref: max_abs=1.834e-03  max_rel=3.483e-01  (ours_amax=3.363e+00 ref_amax=3.363e+00 @17)
   | dv  vs ref: max_abs=1.856e-03  max_rel=6.845e-02  (ours_amax=5.152e+00 ref_amax=5.151e+00 @499)
@@ -1265,20 +1265,20 @@ cu_seqlens = 0 256 768 1792
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 8 (base=48)
 [O53] varlen MLA main k-split = 16 (auto)
-[timing] VARLEN total 0.3205 ms  17.59 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.3162 ms  17.83 TFLOPS (sum_b 4HL^2D)
 grid main = 512 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
-[O52 A/B] varlen MLA main-only 4w 0.2862 ms | 8w 0.2565 ms (1.116x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=7.153e-07 dv=9.537e-07
-[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.5661 2 0.3041 4 0.2666 8 0.2551 16 0.2564 ms (auto=16)
-[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.1052 split2 0.0618 split4 0.0398 split8 0.0452 split16 0.0526 ms
-[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.1208 split2 0.0641 split4 0.0456 split8 0.0330 split16 0.0389 ms
-[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.2449 split2 0.1331 split4 0.0848 split8 0.0580 split16 0.0783 ms
-[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.1581 split2 0.0853 split4 0.0491 split8 0.0340 split16 0.0430 ms
+[O52 A/B] varlen MLA main-only 4w 0.2849 ms | 8w 0.2561 ms (1.113x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=7.153e-07
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.5600 2 0.3050 4 0.2653 8 0.2540 16 0.2554 ms (auto=16)
+[O58 A/B] legacy PIPE1/LBN64 4w (1 CTA): split1 0.0758 split2 0.0457 split4 0.0306 split8 0.0362 split16 0.0453 ms
+[O58 A/B] cfg6 PIPE1/LBN16 4w (2 CTA) [new default]: split1 0.1000 split2 0.0546 split4 0.0412 split8 0.0293 split16 0.0363 ms
+[O58 A/B] cfg5 PIPE0/LBN32 4w (2 CTA): split1 0.2109 split2 0.1178 split4 0.0762 split8 0.0551 split16 0.0747 ms
+[O58 A/B] PIPE1/LBN32 8w (1 CTA): split1 0.1083 split2 0.0601 split4 0.0360 split8 0.0267 split16 0.0362 ms
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=2.415e-03  max_rel=5.241e-01  (ours_amax=3.986e+00 ref_amax=3.986e+00 @1240)
   dk  vs ref: max_abs=1.834e-03  max_rel=3.483e-01  (ours_amax=3.363e+00 ref_amax=3.363e+00 @17)
   dv  vs ref: max_abs=1.856e-03  max_rel=6.845e-02  (ours_amax=5.152e+00 ref_amax=5.151e+00 @499)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_causal_fp16/ours_sf_{dq,dk,dv}.npy
-  | [O52 A/B] varlen MLA main-only 4w 0.2862 ms | 8w 0.2565 ms (1.116x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=7.153e-07 dv=9.537e-07
+  | [O52 A/B] varlen MLA main-only 4w 0.2849 ms | 8w 0.2561 ms (1.113x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=7.153e-07
   | dq  vs ref: max_abs=2.415e-03  max_rel=5.241e-01  (ours_amax=3.986e+00 ref_amax=3.986e+00 @1240)
   | dk  vs ref: max_abs=1.834e-03  max_rel=3.483e-01  (ours_amax=3.363e+00 ref_amax=3.363e+00 @17)
   | dv  vs ref: max_abs=1.856e-03  max_rel=6.845e-02  (ours_amax=5.152e+00 ref_amax=5.151e+00 @499)
@@ -1291,23 +1291,23 @@ cu_seqlens = 0 256 768 1792
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 4 (base=48)
 [O53] varlen MLA main k-split = 2 (auto)
-[timing] VARLEN total 0.4638 ms  12.16 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.4633 ms  12.17 TFLOPS (sum_b 4HL^2D)
 grid main = 64 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
-[O52 A/B] varlen MLA main-only 4w 0.4051 ms | 8w 0.3879 ms (1.044x) | max_abs(8w-vs-4w) dq=7.451e-08 dk=1.192e-07 dv=8.941e-08
-[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.6057 2 0.3878 4 0.3909 8 0.3882 16 0.3922 ms (auto=2)
-[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.3786 ms | balFULL/split1 0.0863 balFULL/split2 0.0494 balFULL/split4 0.0432 balFULL/split8 0.0497 balFULL/split16 0.0605 ms (auto=4)
-[O56 A/B] varlen MLA full LSE 8-warp: split1 0.1368 split2 0.0745 split4 0.0429 split8 0.0396 split16 0.0497 ms (lse8w=0 nblk8=8)
-[O56 A/B] ... 8-warp LBN64/PIPE0: split1 0.1832 split2 0.0994 split4 0.0572 split8 0.0569 split16 0.0781 ms
-[O57 A/B] PIPE0/LBN64 (1 CTA): split1 0.2336 split2 0.1264 split4 0.1079 split8 0.1243 split16 0.1545 ms
-[O57 A/B] PIPE1/LBN32 (1 CTA): split1 0.1311 split2 0.0716 split4 0.0585 split8 0.0607 split16 0.0717 ms
-[O57 A/B] PIPE0/LBN32 (2 CTA): split1 0.2497 split2 0.1342 split4 0.0747 split8 0.0701 split16 0.0907 ms
-[O57 A/B] PIPE1/LBN16 (2 CTA): split1 0.1211 split2 0.0792 split4 0.0454 split8 0.0409 split16 0.0473 ms
+[O52 A/B] varlen MLA main-only 4w 0.4041 ms | 8w 0.3894 ms (1.038x) | max_abs(8w-vs-4w) dq=8.941e-08 dk=1.192e-07 dv=8.941e-08
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.6030 2 0.3873 4 0.3900 8 0.3881 16 0.3916 ms (auto=2)
+[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.3602 ms | balFULL/split1 0.0997 balFULL/split2 0.0553 balFULL/split4 0.0467 balFULL/split8 0.0533 balFULL/split16 0.0642 ms (auto=4)
+[O56 A/B] varlen MLA full LSE 8-warp: split1 0.1125 split2 0.0607 split4 0.0356 split8 0.0339 split16 0.0438 ms (lse8w=0 nblk8=8)
+[O56 A/B] ... 8-warp LBN64/PIPE0: split1 0.1607 split2 0.0881 split4 0.0511 split8 0.0524 split16 0.0736 ms
+[O57 A/B] PIPE0/LBN64 (1 CTA): split1 0.2169 split2 0.1151 split4 0.0987 split8 0.1153 split16 0.1453 ms
+[O57 A/B] PIPE1/LBN32 (1 CTA): split1 0.1073 split2 0.0584 split4 0.0477 split8 0.0509 split16 0.0625 ms
+[O57 A/B] PIPE0/LBN32 (2 CTA): split1 0.2252 split2 0.1214 split4 0.0685 split8 0.0657 split16 0.0864 ms
+[O57 A/B] PIPE1/LBN16 (2 CTA): split1 0.0905 split2 0.0677 split4 0.0401 split8 0.0366 split16 0.0434 ms
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
   dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
   dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_full_fp16/ours_{dq,dk,dv}.npy
-  | [O52 A/B] varlen MLA main-only 4w 0.4051 ms | 8w 0.3879 ms (1.044x) | max_abs(8w-vs-4w) dq=7.451e-08 dk=1.192e-07 dv=8.941e-08
+  | [O52 A/B] varlen MLA main-only 4w 0.4041 ms | 8w 0.3894 ms (1.038x) | max_abs(8w-vs-4w) dq=8.941e-08 dk=1.192e-07 dv=8.941e-08
   | dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
   | dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
   | dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)
@@ -1320,22 +1320,22 @@ cu_seqlens = 0 256 768 1792
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 4 (base=48)
 [O53] varlen MLA main k-split = 2 (auto)
-[timing] VARLEN total 0.4629 ms  12.18 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.4656 ms  12.11 TFLOPS (sum_b 4HL^2D)
 grid main = 64 x 2 x 3 | lse grid = 8 x 2 x 3 | T=1792
-[O52 A/B] varlen MLA main-only 4w 0.4039 ms | 8w 0.3890 ms (1.038x) | max_abs(8w-vs-4w) dq=7.451e-08 dk=1.192e-07 dv=8.941e-08
-[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.6064 2 0.3868 4 0.3911 8 0.3887 16 0.3925 ms (auto=2)
-[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.3783 ms | balFULL/split1 0.0861 balFULL/split2 0.0490 balFULL/split4 0.0429 balFULL/split8 0.0492 balFULL/split16 0.0600 ms (auto=4)
-[O56 A/B] varlen MLA full LSE 8-warp: split1 0.1368 split2 0.0743 split4 0.0427 split8 0.0392 split16 0.0494 ms (lse8w=0 nblk8=8)
-[O57 A/B] PIPE0/LBN64 (1 CTA): split1 0.2424 split2 0.1275 split4 0.1086 split8 0.1247 split16 0.1553 ms
-[O57 A/B] PIPE1/LBN32 (1 CTA): split1 0.1323 split2 0.0717 split4 0.0586 split8 0.0607 split16 0.0723 ms
-[O57 A/B] PIPE0/LBN32 (2 CTA): split1 0.2518 split2 0.1343 split4 0.0749 split8 0.0700 split16 0.0909 ms
-[O57 A/B] PIPE1/LBN16 (2 CTA): split1 0.1218 split2 0.0796 split4 0.0455 split8 0.0409 split16 0.0471 ms
+[O52 A/B] varlen MLA main-only 4w 0.4057 ms | 8w 0.3877 ms (1.046x) | max_abs(8w-vs-4w) dq=7.451e-08 dk=1.192e-07 dv=8.941e-08
+[O53 A/B] varlen MLA main-only ksplit sweep: 1 0.6129 2 0.3889 4 0.3905 8 0.3874 16 0.3923 ms (auto=2)
+[O54 A/B] varlen MLA full LSE: old(O8 mma) 0.3636 ms | balFULL/split1 0.1005 balFULL/split2 0.0557 balFULL/split4 0.0470 balFULL/split8 0.0536 balFULL/split16 0.0645 ms (auto=4)
+[O56 A/B] varlen MLA full LSE 8-warp: split1 0.1135 split2 0.0615 split4 0.0360 split8 0.0340 split16 0.0440 ms (lse8w=0 nblk8=8)
+[O57 A/B] PIPE0/LBN64 (1 CTA): split1 0.2182 split2 0.1153 split4 0.0995 split8 0.1160 split16 0.1461 ms
+[O57 A/B] PIPE1/LBN32 (1 CTA): split1 0.1082 split2 0.0589 split4 0.0485 split8 0.0514 split16 0.0630 ms
+[O57 A/B] PIPE0/LBN32 (2 CTA): split1 0.2269 split2 0.1218 split4 0.0693 split8 0.0658 split16 0.0868 ms
+[O57 A/B] PIPE1/LBN16 (2 CTA): split1 0.0913 split2 0.0683 split4 0.0405 split8 0.0369 split16 0.0433 ms
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
   dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
   dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b3_t1792_h2_d512_full_fp16/ours_sf_{dq,dk,dv}.npy
-  | [O52 A/B] varlen MLA main-only 4w 0.4039 ms | 8w 0.3890 ms (1.038x) | max_abs(8w-vs-4w) dq=7.451e-08 dk=1.192e-07 dv=8.941e-08
+  | [O52 A/B] varlen MLA main-only 4w 0.4057 ms | 8w 0.3877 ms (1.046x) | max_abs(8w-vs-4w) dq=7.451e-08 dk=1.192e-07 dv=8.941e-08
   | dq  vs ref: max_abs=5.516e-04  max_rel=1.133e-01  (ours_amax=1.272e+00 ref_amax=1.272e+00 @98346)
   | dk  vs ref: max_abs=4.451e-04  max_rel=1.385e-01  (ours_amax=1.113e+00 ref_amax=1.113e+00 @146432)
   | dv  vs ref: max_abs=2.385e-04  max_rel=4.581e-02  (ours_amax=6.479e-01 ref_amax=6.481e-01 @146533)
@@ -1347,7 +1347,7 @@ VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=1
 cu_seqlens = 0 512 1536 3584 3840
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=1024)
-[timing] VARLEN total 0.7800 ms  58.51 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.7411 ms  61.58 TFLOPS (sum_b 4HL^2D)
 grid main = 16 x 16 x 4 | lse grid = 16 x 16 x 4 | T=3840
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=3.163e-03  max_rel=6.210e-01  (ours_amax=3.857e+00 ref_amax=3.858e+00 @1057096)
@@ -1365,7 +1365,7 @@ VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=1
 cu_seqlens = 0 512 1536 3584 3840
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=1024)
-[timing] VARLEN total 0.7802 ms  58.49 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.7417 ms  61.53 TFLOPS (sum_b 4HL^2D)
 grid main = 16 x 16 x 4 | lse grid = 16 x 16 x 4 | T=3840
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=3.163e-03  max_rel=6.210e-01  (ours_amax=3.857e+00 ref_amax=3.858e+00 @1057096)
@@ -1383,7 +1383,7 @@ VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=0
 cu_seqlens = 0 512 1536 3584 3840
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=1024)
-[timing] VARLEN total 1.2920 ms  35.32 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 1.2727 ms  35.86 TFLOPS (sum_b 4HL^2D)
 grid main = 16 x 16 x 4 | lse grid = 16 x 16 x 4 | T=3840
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=5.603e-04  max_rel=1.414e-01  (ours_amax=1.457e+00 ref_amax=1.457e+00 @367083)
@@ -1401,7 +1401,7 @@ VARLEN: B=4 T=3840 maxlen=2048 H=16 Hkv=16 D=128 causal=0
 cu_seqlens = 0 512 1536 3584 3840
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=1024)
-[timing] VARLEN total 1.2905 ms  35.36 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 1.2690 ms  35.96 TFLOPS (sum_b 4HL^2D)
 grid main = 16 x 16 x 4 | lse grid = 16 x 16 x 4 | T=3840
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=5.603e-04  max_rel=1.414e-01  (ours_amax=1.457e+00 ref_amax=1.457e+00 @367083)
@@ -1419,7 +1419,7 @@ VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=1
 cu_seqlens = 0 1024 2048 3072 4096
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=512)
-[timing] VARLEN total 0.4525 ms  75.93 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.4268 ms  80.50 TFLOPS (sum_b 4HL^2D)
 grid main = 8 x 16 x 4 | lse grid = 8 x 16 x 4 | T=4096
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=2.112e-03  max_rel=6.328e-01  (ours_amax=3.455e+00 ref_amax=3.455e+00 @19270)
@@ -1437,7 +1437,7 @@ VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=1
 cu_seqlens = 0 1024 2048 3072 4096
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=512)
-[timing] VARLEN total 0.4510 ms  76.19 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.4269 ms  80.49 TFLOPS (sum_b 4HL^2D)
 grid main = 8 x 16 x 4 | lse grid = 8 x 16 x 4 | T=4096
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=2.112e-03  max_rel=6.328e-01  (ours_amax=3.455e+00 ref_amax=3.455e+00 @19270)
@@ -1455,16 +1455,16 @@ VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=0
 cu_seqlens = 0 1024 2048 3072 4096
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=512)
-[timing] VARLEN total 0.9068 ms  37.89 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.8607 ms  39.92 TFLOPS (sum_b 4HL^2D)
 grid main = 8 x 16 x 4 | lse grid = 8 x 16 x 4 | T=4096
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=4.094e-04  max_rel=9.879e-02  (ours_amax=6.499e-01 ref_amax=6.495e-01 @3415108)
-  dk  vs ref: max_abs=4.953e-04  max_rel=1.020e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
-  dv  vs ref: max_abs=1.234e-04  max_rel=3.416e-02  (ours_amax=4.905e-01 ref_amax=4.906e-01 @7991790)
+  dk  vs ref: max_abs=4.953e-04  max_rel=1.030e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
+  dv  vs ref: max_abs=1.213e-04  max_rel=3.416e-02  (ours_amax=4.905e-01 ref_amax=4.906e-01 @7025610)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_full_fp16/ours_{dq,dk,dv}.npy
   | dq  vs ref: max_abs=4.094e-04  max_rel=9.879e-02  (ours_amax=6.499e-01 ref_amax=6.495e-01 @3415108)
-  | dk  vs ref: max_abs=4.953e-04  max_rel=1.020e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
-  | dv  vs ref: max_abs=1.234e-04  max_rel=3.416e-02  (ours_amax=4.905e-01 ref_amax=4.906e-01 @7991790)
+  | dk  vs ref: max_abs=4.953e-04  max_rel=1.030e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
+  | dv  vs ref: max_abs=1.213e-04  max_rel=3.416e-02  (ours_amax=4.905e-01 ref_amax=4.906e-01 @7025610)
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_full_fp16/ours_{dq,dk,dv}.npy
 === [P3-3c] fp16 src/fp16/fa_bwd_fp16_mma_onefile.cu varlen_b4_t4096_h16_d128_full_fp16 ours_sf (varlen) ===
   [binary fa_bwd_fp16_mma_onefile.out] rc=0
@@ -1473,15 +1473,15 @@ VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=0
 cu_seqlens = 0 1024 2048 3072 4096
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=512)
-[timing] VARLEN total 0.9063 ms  37.91 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.8611 ms  39.90 TFLOPS (sum_b 4HL^2D)
 grid main = 8 x 16 x 4 | lse grid = 8 x 16 x 4 | T=4096
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=4.094e-04  max_rel=9.879e-02  (ours_amax=6.499e-01 ref_amax=6.495e-01 @3415108)
-  dk  vs ref: max_abs=4.953e-04  max_rel=1.020e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
+  dk  vs ref: max_abs=4.953e-04  max_rel=1.030e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
   dv  vs ref: max_abs=1.234e-04  max_rel=3.416e-02  (ours_amax=4.905e-01 ref_amax=4.906e-01 @7991790)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_full_fp16/ours_sf_{dq,dk,dv}.npy
   | dq  vs ref: max_abs=4.094e-04  max_rel=9.879e-02  (ours_amax=6.499e-01 ref_amax=6.495e-01 @3415108)
-  | dk  vs ref: max_abs=4.953e-04  max_rel=1.020e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
+  | dk  vs ref: max_abs=4.953e-04  max_rel=1.030e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
   | dv  vs ref: max_abs=1.234e-04  max_rel=3.416e-02  (ours_amax=4.905e-01 ref_amax=4.906e-01 @7991790)
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_full_fp16/ours_sf_{dq,dk,dv}.npy
 === [P3-3c] fp16 src/fp16/fa_bwd_fp16_mma_main.cu varlen_b5_t3968_h32_d128_causal_fp16 ours (varlen) ===
@@ -1491,16 +1491,16 @@ VARLEN: B=5 T=3968 maxlen=2048 H=32 Hkv=8 D=128 causal=1
 cu_seqlens = 0 128 384 896 1920 3968
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=2560)
-[timing] VARLEN total 1.4258 ms  64.20 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 1.3608 ms  67.27 TFLOPS (sum_b 4HL^2D)
 grid main = 16 x 32 x 5 | lse grid = 16 x 32 x 5 | T=3968
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=2.438e-03  max_rel=7.964e-01  (ours_amax=4.371e+00 ref_amax=4.373e+00 @7868799)
   dk  vs ref: max_abs=3.433e-03  max_rel=9.943e-01  (ours_amax=6.766e+00 ref_amax=6.765e+00 @918668)
-  dv  vs ref: max_abs=3.843e-03  max_rel=1.208e-01  (ours_amax=1.075e+01 ref_amax=1.075e+01 @131977)
+  dv  vs ref: max_abs=3.843e-03  max_rel=7.240e-02  (ours_amax=1.075e+01 ref_amax=1.075e+01 @131977)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b5_t3968_h32_d128_causal_fp16/ours_{dq,dk,dv}.npy
   | dq  vs ref: max_abs=2.438e-03  max_rel=7.964e-01  (ours_amax=4.371e+00 ref_amax=4.373e+00 @7868799)
   | dk  vs ref: max_abs=3.433e-03  max_rel=9.943e-01  (ours_amax=6.766e+00 ref_amax=6.765e+00 @918668)
-  | dv  vs ref: max_abs=3.843e-03  max_rel=1.208e-01  (ours_amax=1.075e+01 ref_amax=1.075e+01 @131977)
+  | dv  vs ref: max_abs=3.843e-03  max_rel=7.240e-02  (ours_amax=1.075e+01 ref_amax=1.075e+01 @131977)
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b5_t3968_h32_d128_causal_fp16/ours_{dq,dk,dv}.npy
 === [P3-3c] fp16 src/fp16/fa_bwd_fp16_mma_onefile.cu varlen_b5_t3968_h32_d128_causal_fp16 ours_sf (varlen) ===
   [binary fa_bwd_fp16_mma_onefile.out] rc=0
@@ -1509,16 +1509,16 @@ VARLEN: B=5 T=3968 maxlen=2048 H=32 Hkv=8 D=128 causal=1
 cu_seqlens = 0 128 384 896 1920 3968
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=2560)
-[timing] VARLEN total 1.4272 ms  64.14 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 1.3610 ms  67.26 TFLOPS (sum_b 4HL^2D)
 grid main = 16 x 32 x 5 | lse grid = 16 x 32 x 5 | T=3968
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=2.438e-03  max_rel=7.964e-01  (ours_amax=4.371e+00 ref_amax=4.373e+00 @7868799)
-  dk  vs ref: max_abs=3.433e-03  max_rel=9.938e-01  (ours_amax=6.766e+00 ref_amax=6.765e+00 @918668)
-  dv  vs ref: max_abs=3.843e-03  max_rel=1.208e-01  (ours_amax=1.075e+01 ref_amax=1.075e+01 @131977)
+  dk  vs ref: max_abs=3.433e-03  max_rel=9.943e-01  (ours_amax=6.766e+00 ref_amax=6.765e+00 @918668)
+  dv  vs ref: max_abs=3.843e-03  max_rel=7.240e-02  (ours_amax=1.075e+01 ref_amax=1.075e+01 @131977)
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b5_t3968_h32_d128_causal_fp16/ours_sf_{dq,dk,dv}.npy
   | dq  vs ref: max_abs=2.438e-03  max_rel=7.964e-01  (ours_amax=4.371e+00 ref_amax=4.373e+00 @7868799)
-  | dk  vs ref: max_abs=3.433e-03  max_rel=9.938e-01  (ours_amax=6.766e+00 ref_amax=6.765e+00 @918668)
-  | dv  vs ref: max_abs=3.843e-03  max_rel=1.208e-01  (ours_amax=1.075e+01 ref_amax=1.075e+01 @131977)
+  | dk  vs ref: max_abs=3.433e-03  max_rel=9.943e-01  (ours_amax=6.766e+00 ref_amax=6.765e+00 @918668)
+  | dv  vs ref: max_abs=3.843e-03  max_rel=7.240e-02  (ours_amax=1.075e+01 ref_amax=1.075e+01 @131977)
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/varlen_b5_t3968_h32_d128_causal_fp16/ours_sf_{dq,dk,dv}.npy
 === [P3-3c] fp16 src/fp16/fa_bwd_fp16_mma_main.cu varlen_b5_t3968_h32_d128_full_fp16 ours (varlen) ===
   [binary fa_bwd_fp16_mma_main.out] rc=0
@@ -1527,7 +1527,7 @@ VARLEN: B=5 T=3968 maxlen=2048 H=32 Hkv=8 D=128 causal=0
 cu_seqlens = 0 128 384 896 1920 3968
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=2560)
-[timing] VARLEN total 2.4696 ms  37.07 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 2.3882 ms  38.33 TFLOPS (sum_b 4HL^2D)
 grid main = 16 x 32 x 5 | lse grid = 16 x 32 x 5 | T=3968
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=7.341e-04  max_rel=1.790e-01  (ours_amax=1.382e+00 ref_amax=1.382e+00 @45553)
@@ -1545,7 +1545,7 @@ VARLEN: B=5 T=3968 maxlen=2048 H=32 Hkv=8 D=128 causal=0
 cu_seqlens = 0 128 384 896 1920 3968
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=2560)
-[timing] VARLEN total 2.4542 ms  37.30 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 2.3884 ms  38.32 TFLOPS (sum_b 4HL^2D)
 grid main = 16 x 32 x 5 | lse grid = 16 x 32 x 5 | T=3968
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=7.341e-04  max_rel=1.790e-01  (ours_amax=1.382e+00 ref_amax=1.382e+00 @45553)
@@ -1563,7 +1563,7 @@ VARLEN: B=8 T=2904 maxlen=2048 H=16 Hkv=16 D=128 causal=1
 cu_seqlens = 0 2048 2560 2688 2784 2848 2880 2896 2904
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=2048)
-[timing] VARLEN total 0.5959 ms  61.69 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.5464 ms  67.28 TFLOPS (sum_b 4HL^2D)
 grid main = 16 x 16 x 8 | lse grid = 16 x 16 x 8 | T=2904
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=2.624e-03  max_rel=6.553e-01  (ours_amax=3.531e+00 ref_amax=3.532e+00 @22951)
@@ -1581,7 +1581,7 @@ VARLEN: B=8 T=2904 maxlen=2048 H=16 Hkv=16 D=128 causal=1
 cu_seqlens = 0 2048 2560 2688 2784 2848 2880 2896 2904
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=2048)
-[timing] VARLEN total 0.5959 ms  61.69 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 0.5445 ms  67.52 TFLOPS (sum_b 4HL^2D)
 grid main = 16 x 16 x 8 | lse grid = 16 x 16 x 8 | T=2904
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=2.624e-03  max_rel=6.553e-01  (ours_amax=3.531e+00 ref_amax=3.532e+00 @22951)
@@ -1599,7 +1599,7 @@ VARLEN: B=8 T=2904 maxlen=2048 H=16 Hkv=16 D=128 causal=0
 cu_seqlens = 0 2048 2560 2688 2784 2848 2880 2896 2904
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=2048)
-[timing] VARLEN total 1.0740 ms  34.23 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 1.0734 ms  34.25 TFLOPS (sum_b 4HL^2D)
 grid main = 16 x 16 x 8 | lse grid = 16 x 16 x 8 | T=2904
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=1.486e-03  max_rel=3.120e-01  (ours_amax=3.012e+00 ref_amax=3.013e+00 @5929661)
@@ -1617,7 +1617,7 @@ VARLEN: B=8 T=2904 maxlen=2048 H=16 Hkv=16 D=128 causal=0
 cu_seqlens = 0 2048 2560 2688 2784 2848 2880 2896 2904
 VARLEN main backend = wgmma2 cp.async
 [O40] varlen lse k-split = 1 (base=2048)
-[timing] VARLEN total 1.0738 ms  34.23 TFLOPS (sum_b 4HL^2D)
+[timing] VARLEN total 1.0683 ms  34.41 TFLOPS (sum_b 4HL^2D)
 grid main = 16 x 16 x 8 | lse grid = 16 x 16 x 8 | T=2904
 [compare] VARLEN ours vs fp32 ref
   dq  vs ref: max_abs=1.486e-03  max_rel=3.120e-01  (ours_amax=3.012e+00 ref_amax=3.013e+00 @5929661)
