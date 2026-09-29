@@ -1,0 +1,12 @@
+### O69 fp16 单文件 full S1024H16D128 (lsefull=1 bal FULL)
+[timing] total(3 kernels) 0.1687 ms  50.91 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0463 ms | main 0.1065 ms | convert 0.0159 ms
+  dq   vs ref: max_abs=3.268e-04  max_rel=8.146e-02
+  dk   vs ref: max_abs=2.523e-04  max_rel=8.022e-02
+  dv   vs ref: max_abs=1.225e-04  max_rel=1.830e-02
+  fa_dq     vs ref: max_abs=3.268e-04  max_rel=8.090e-02
+  fa_dk     vs ref: max_abs=2.523e-04  max_rel=7.871e-02
+  fa_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02
+  te_dq     vs ref: max_abs=1.558e-04  max_rel=4.590e-02
+  te_dk     vs ref: max_abs=2.297e-04  max_rel=3.468e-02
+  te_dv     vs ref: max_abs=1.217e-04  max_rel=1.824e-02

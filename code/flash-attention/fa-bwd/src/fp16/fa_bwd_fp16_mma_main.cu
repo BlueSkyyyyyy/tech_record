@@ -31,6 +31,12 @@
     }                                                                           \
   } while (0)
 
+// O69（第 163 轮）：D=128 非 causal（full）的 LSE 从 O8 `lse_mma_kernel`（无流水、逐标量
+//   global→smem，L1TEX 9%、纯延迟 bound）改走 O54 均衡版 `lse_mma_kernel_bal<FULL=true>`
+//   （一个 CTA 一个 m 块 + K 用 `cp.async` 16B 双缓冲），对齐 fp8 的 O68/F9。默认 1；
+//   `--lsefull=0` 退回 O8 做同 binary A/B。
+static int g_lse_full_opt = 1;
+
 #if defined(FA_WGMMA) && defined(FA_TMA)
 // O30：为 LSE 的 Q/K 建 4D TMA 描述符（dims={D,S,H,B}，SW128，box={64,64,1,1}）。
 // globalStride（字节）：dim1(S) 的行距 = H*D*2，dim2(H) 的头距 = D*2，dim3(B) 的批距。
@@ -467,6 +473,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
                                     kLseSmemWgm1));
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<128>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
+    // O69：full D=128 的 LSE 走 O54 均衡版（FULL=true）。
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 1, true>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
   } else {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<512>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
@@ -595,7 +604,11 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
           lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(
               d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
         }
-      } else
+      } else if (g_lse_full_opt)
+        // O69（第 163 轮）：full D=128 的 LSE 从 O8（无流水）改走 O54 均衡版（cp.async 双缓冲）。
+        lse_mma_kernel_bal<128, 1, true><<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1>>>(
+            d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
+      else
         lse_mma_kernel<128><<<dim3(lse_nblk, H, B), THREADS, kLseSmem>>>(d_q, d_k, d_lse,
                                                                          maxlen, H, Hkv, scale,
                                                                          0, d_cu);
@@ -1255,6 +1268,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--lsetma=", 0) == 0) lse_tma = atoi(a.c_str() + 9);
     else if (a == "--lsetma") lse_tma = 1;
     else if (a.rfind("--lsesplit=", 0) == 0) lse_split = atoi(a.c_str() + 11);
+    else if (a.rfind("--lsefull=", 0) == 0) g_lse_full_opt = atoi(a.c_str() + 10);
+    else if (a == "--lsefull") g_lse_full_opt = 1;
     else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
     else if (a == "--wgmma") wgmma_sel = 1;
     else if (a.rfind("--ow=", 0) == 0) ow_opt = atoi(a.c_str() + 5);
@@ -1423,6 +1438,9 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 0>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal0));
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 1>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
+  // O69：full D=128 的 LSE 走 O54 均衡版（FULL=true）。
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 1, true>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
   if (D == 512) {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<512>,
@@ -1876,7 +1894,14 @@ int main(int argc, char** argv) {
           lse_mma_kernel_bal<128, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
                                                                         Hkv, scale);
         }
-      } else
+      } else if (g_lse_full_opt)
+        // O69（第 163 轮）：非 causal D=128 的 LSE 从 O8 `lse_mma_kernel`（无 cp.async 流水、
+        //   逐标量 global→smem、纯延迟 bound）改走 O54 均衡版 `FULL=true`——一个 CTA 一个 m 块、
+        //   K 用 `cp.async` 16B 双缓冲。full 各 m 块工作量相同（均 nblk 个 tile）无需镜像配对。
+        //   `--lsefull=0` 退回 O8 做同 binary A/B。
+        lse_mma_kernel_bal<128, 1, true><<<lg, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
+                                                                        Hkv, scale);
+      else
         lse_mma_kernel<128><<<lg, THREADS, kLseSmem>>>(d_q, d_k, d_lse, S, H, Hkv, scale,
                                                        (int)causal);
       if (zfuse_sel && delta_warp_sel) {

@@ -2347,3 +2347,42 @@ fp16/bf16，定长默认构建走 `-DFA_WGMMA -DFA_TMA`。**device 一行未改*
 全绿（bf16 gate worst `7.812e-3`，`--check docs/04` OK）。**性能（同 session，event）**：
 **total 1.8325→1.1643ms（1.574×）**、main 1.4949→0.9581ms。host 自动选 `wgmma2b(BN=128)`
 （LSE 走 tma）。原始输出 `src/fa_bwd_p161_hopper_default_ab.out.txt`；见 `docs/08` §5.75。
+
+## 6ay. O69（第一百六十三轮，**正结果，默认**）：非 causal（full）D=128 的 LSE 接上均衡 `cp.async` 版
+
+与 fp16（`docs/01` §22）**逐字 dtype 参数化**：核查发现 bf16 与 fp16 一样，**非 causal（full）
+D=128 的 LSE 一直走 O8 的 `lse_mma_kernel`**（无 `cp.async` 流水、逐标量 global→smem、纯延迟
+bound），而 O54 的均衡版 `lse_mma_kernel_bal<FULL=true>`（一个 CTA 一个 m 块 + K 的 `cp.async`
+16B 双缓冲）此前**只服务 MLA D=512 的 full**。本轮把定长与 varlen 两条 D=128 full LSE 切到
+`lse_mma_kernel_bal<128, PIPE=1, FULL=true>`（`ksplit=1`，对齐 fp8 O68/F9 与 fp16 O69）。
+**纯 host 改动，device 一行未改**；新增 `g_lse_full_opt`（默认 1）+ `--lsefull=0/1`。
+
+**数值（ours vs fp32 ref，max_abs dq/dk/dv）**：LSE 只差 fp32 求和次序 ⇒ 逐值一致：
+
+| case | lsefull=1 | lsefull=0 |
+|---|---|---|
+| 定长 full S1024 H16 D128 | 1.938e-3 / 1.684e-3 / 1.449e-3 | 1.938e-3 / 1.684e-3 / 1.449e-3 |
+| varlen full b4_t4096 H16 D128 | 3.237e-3 / 2.392e-3 / 2.013e-3 | 3.237e-3 / 2.392e-3 / 2.013e-3 |
+
+单/两文件逐指标一致（定长 full S1024 两文件 total 0.1707–0.1711ms / 单文件 0.1713ms；
+`--check docs/04` OK、bf16 一致性 gate worst 7.812e-3 `OK`）。
+
+**性能（同 binary A/B，CUDA event）**：
+
+| case | lsefull=0（O8） | lsefull=1（bal FULL） | 加速 |
+|---|---|---|---|
+| 定长 full S1024：preprocess | 0.1578 ms | **0.0467 ms** | **3.38×** |
+| 定长 full S1024：total | 0.3060 ms（28.1 TF） | **0.1710 ms（50.2 TF）** | **1.79×** |
+| varlen full b4_t4096：total | 0.8706 ms（39.5 TF） | **0.5993 ms（57.3 TF）** | **1.45×** |
+
+纯反向对标（同 session CUPTI，定长 full S1024 H16 D128 bf16）：FA3 `0.0506ms/339.6TF`、
+FA2 `0.0828ms/207.5TF`、TE `0.0576ms/298.1TF` ⇒ ours total 为 FA3 时间 **3.38×**、TE **2.94×**。
+
+**ncu（LSE，S1024 H16 full）**：O8 **175.2 µs / L1TEX 11.8% / Compute 25.8% / regs 80 /
+smem 34.82KB** → bal FULL **38.8 µs（4.51×）/ L1TEX 37.6% / Compute 39.6% / regs 64 /
+smem 52.22KB**；与 fp16 逐项一致。**结论**同 fp16：O8 是串行全局载入延迟 bound，均衡 FULL 用
+`cp.async` 打掉它 → 新墙 = issue + smem 依赖 + 网格不足一个波。见 `docs/08` §5.77。
+
+原始输出：`src/bf16/fa_bwd_bf16_o69_ab_fixed_full_s1024.out.txt`、
+`..._o69_ab_varlen_full_b4t4096.out.txt`、`..._o69_onefile_fixed_full_s1024.out.txt`、
+`..._o69_ncu_lse_full_s1024_lsefull{0,1}.out.txt`；基线 `src/fa_bwd_p163_full_baseline.out.txt`。

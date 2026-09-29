@@ -1,0 +1,14 @@
+### O69 baseline: fixed full S1024 H16 D128 (pure bwd)
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== bench CUPTI device time (pure-bwd, dtype=fp16) ===
+[b1_s1024_h16_d128_full_fp16] fa3=0.0512ms/335.62TF  fa=0.0828ms/207.57TF  te=0.0577ms/297.73TF
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== bench CUPTI device time (pure-bwd, dtype=bf16) ===
+[b1_s1024_h16_d128_full_bf16] fa3=0.0506ms/339.58TF  fa=0.0828ms/207.46TF  te=0.0576ms/298.06TF
+### O69 baseline: varlen full [1024]*4 H16 D128
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== VARLEN bench（pure-bwd，CUPTI device time）===
+[varlen_b4_t4096_h16_d128_full_fp16] lengths=[1024, 1024, 1024, 1024]  fa3=0.1996ms/172.12TF

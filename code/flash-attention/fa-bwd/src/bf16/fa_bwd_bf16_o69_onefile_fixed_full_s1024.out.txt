@@ -1,0 +1,12 @@
+### O69 bf16 单文件 full S1024H16D128
+[timing] total(3 kernels) 0.1713 ms  50.16 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0469 ms | main 0.1084 ms | convert 0.0160 ms
+  dq   vs ref: max_abs=1.938e-03  max_rel=3.901e-01
+  dk   vs ref: max_abs=1.684e-03  max_rel=4.643e-01
+  dv   vs ref: max_abs=1.449e-03  max_rel=4.925e-01
+  fa_dq     vs ref: max_abs=1.827e-03  max_rel=3.919e-01
+  fa_dk     vs ref: max_abs=1.684e-03  max_rel=3.996e-01
+  fa_dv     vs ref: max_abs=1.449e-03  max_rel=4.925e-01
+  te_dq     vs ref: max_abs=2.421e-03  max_rel=3.546e-01
+  te_dk     vs ref: max_abs=2.970e-03  max_rel=3.313e-01
+  te_dv     vs ref: max_abs=1.449e-03  max_rel=4.925e-01
