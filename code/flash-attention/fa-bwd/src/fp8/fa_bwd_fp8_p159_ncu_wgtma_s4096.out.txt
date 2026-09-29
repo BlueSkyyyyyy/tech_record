@@ -1,0 +1,37 @@
+fa_bwd_fp8_kvowner_mma.cu(157): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kvowner_mma.cu(1430): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+==PROF== Connected to process 1188522 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_kvowner_mma.out)
+==PROF== Profiling "_Z32fp8_kvowner_dkv_wgmma_tma_kernelILi128ELi64ELi32EEvPKhPKfS1_S3_S1_S3_S1_S3_S3_S3_PfS4_S4_iifi14CUtensorMap_stS5_": 0%....50%....100% - 1 pass
+=== F7：fp8 mma KV-owner dK/dV 原型（base/pipe/persistent/**dynamic-wq**/**wgmma** A/B） ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8
+B=1 S=4096 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+grid = (128, 16); kvowner smem = 70144 B (68.5 KB); pipe smem = 105984 B (103.5 KB); wgmma smem = 74752 B (73.0 KB); lse smem = 18944 B
+[F7 persist] SM=132  total_tiles=2048  pgrid=396（base 栅格 = 2048 CTA）
+[only=wgtma] done (iters=5)
+==PROF== Disconnected from process 1188522
+[1188522] fa_bwd_fp8_kvowner_mma.out@127.0.0.1
+  void fp8_kvowner_dkv_wgmma_tma_kernel<128, 64, 32>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, float, int, CUtensorMap_st, CUtensorMap_st) (128, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------- --------------- ------------
+    Metric Name                                           Metric Unit Metric Value
+    ------------------------------------------------- --------------- ------------
+    gpu__time_duration.sum                                         ms         1.84
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                       8519680
+    launch__registers_per_thread                      register/thread          168
+    launch__shared_mem_per_block_dynamic                  Kbyte/block        74.82
+    lts__t_sectors_op_read.sum                                 sector     52735163
+    lts__t_sectors_op_red.sum                                  sector    102236160
+    lts__t_sectors_op_write.sum                                sector      6204700
+    sm__warps_active.avg.pct_of_peak_sustained_active               %        17.79
+    smsp__inst_executed.sum                                      inst    703654918
+    smsp__inst_executed_op_global_red.sum                        inst      8519680
+    ------------------------------------------------- --------------- ------------
+

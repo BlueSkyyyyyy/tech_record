@@ -1095,6 +1095,37 @@ __device__ __forceinline__ void bulk_reduce_wait0() {
 #endif
 }
 
+// ---- F7 第十二步：TMA **4D tensor store-reduce**（`cp.reduce.async.bulk.tensor.4d`）----
+//   背景：O67/p147 用 ncu 重测 TE fp8 反向（`..._flash_bprop_wgmma_f8_...`）发现它全局归约
+//   只有 **3168** 条 `smsp__inst_executed_op_global_red`（ours 9.54M、`l1tex_red` 请求），
+//   且 **0 条** plain global store；SASS 直方图见 **`UTMAREDG.4D.ADD`**——即 TE 的 dK/dV/dQ
+//   归约走 **TMA 4D 张量归约**（一次搬一整块 [rows][cols] 到 global 并原子加），而不是
+//   逐 lane 的 `red.global.add`。这正是 O42 的「smem staging + bulk reduce」思路，但 O42 用
+//   的是 **1D** `cp.reduce.async.bulk`（每行一条、且 per-warp），本 helper 用 **4D tensor**
+//   变体：src 是 smem 里行主序的整块 [boxR][boxD]（与行主序 tile 完全一致），**一条指令**
+//   归约整个 tile，与 TE 同构。
+//   语义：`map` 描述 global 张量（用 `make_kvowner_dq_map_f32` 建，dims={D,S,H,B}、f32、
+//   box={boxD,boxR,1,1}、SWIZZLE_NONE），`ssrc` 是 16B 对齐的 smem 源（boxD*boxR*f32 字节），
+//   坐标 `{c0,c1,c2,c3}` 是 tile 原点。硬件对并发写到同一 global 元素的多个 CTA 做原子加。
+//   generic 写 smem 后必须 `bulk_reduce_fence()`（`fence.proxy.async.shared::cta`）。
+__device__ __forceinline__ void tma_reduce_add_4d_f32(const CUtensorMap* map, const float* ssrc,
+                                                     int c0, int c1, int c2, int c3) {
+  // 注意：此处用 `__CUDA_ARCH__` 直接守卫（不能用 `FA_FP8_HAS_TMA`——它在文件更后面才
+  //   `#define`，宏按出现顺序展开，放在这里会恒为 0 而把 asm 编掉，实测 dQ 完全错）。
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  const unsigned s = smem_u32(ssrc);
+  // 正确 PTX（对齐 CUDA `cuda/__ptx` 生成头）：`.redOp.tile.bulk_group`，类型由 tensormap
+  //   element type（此处 FLOAT32）推断，指令**不带** `.f32` 后缀。
+  asm volatile(
+      "cp.reduce.async.bulk.tensor.4d.global.shared::cta.add.tile.bulk_group"
+      " [%0, {%1, %2, %3, %4}], [%5];\n" ::"l"((uint64_t)map),
+      "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(s)
+      : "memory");
+#else
+  (void)map; (void)ssrc; (void)c0; (void)c1; (void)c2; (void)c3;
+#endif
+}
+
 // A[M_TILE][K_TILE]、B[N_TILE][K_TILE] 均行主序（行距 asld/bsld，含 padding）。
 // 每 warp 负责 WARP_M×WARP_N 输出块；各 warp 旧 (wm,wn) 由调用方给出。
 template <int WARP_M, int WARP_N, int K_TILE, int KIND>

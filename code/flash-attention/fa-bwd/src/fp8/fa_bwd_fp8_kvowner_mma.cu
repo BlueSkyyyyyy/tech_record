@@ -83,6 +83,38 @@ static CUtensorMap make_kvowner_qd_map(const void* ptr, long long H, long long S
   }
   return map;
 }
+
+// F7 第十二步：dQ 的 **fp32 4D-TMA 归约描述符**（`cp.reduce.async.bulk.tensor.4d`，对标 TE 的
+//   `UTMAREDG.4D.ADD`）。张量布局 = dq[B][S][H][D]（dims={D,S,H,B}，f32 元素 4B）；box =
+//   {boxD, boxR, 1, 1}（一张 [boxR][boxD] 的 fp32 tile，行主序）。SWIZZLE_NONE ⇒ smem 源就是
+//   行主序 tile，与 KV-owner 的 dQ staging 布局一致。
+static CUtensorMap make_kvowner_dq_map_f32(const void* ptr, long long H, long long S, long long D,
+                                           long long B, uint32_t boxD, uint32_t boxR) {
+  CUtensorMap map;
+  uint64_t dims[4] = {(uint64_t)D, (uint64_t)S, (uint64_t)H, (uint64_t)B};
+  uint64_t strides[3] = {(uint64_t)(H * D * 4), (uint64_t)(D * 4), (uint64_t)(S * H * D * 4)};
+  uint32_t box[4] = {boxD, boxR, 1, 1};
+  uint32_t estr[4] = {1, 1, 1, 1};
+  CUresult r = cuTensorMapEncodeTiled(
+      &map, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4, (void*)ptr, dims, strides, box, estr,
+      CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_NONE,
+      CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  if (r != CUDA_SUCCESS) {
+    const char* s = "?";
+    cuGetErrorString(r, &s);
+    fprintf(stderr, "cuTensorMapEncodeTiled(kvowner dq f32) failed: %s\n", s);
+    std::exit(1);
+  }
+  return map;
+}
+#endif
+
+// F7 第十二步：把 KV-owner 的 dQ 跨 CTA 归约从逐 lane `red_add2` 换成 **TMA 4D tensor store-reduce**
+//   （`cp.reduce.async.bulk.tensor.4d`），对标 TE 的 `UTMAREDG.4D.ADD`（p147 ncu：TE 全局 red 指令
+//   仅 3168 条、ours 9.54M）。=1 时每个 (m0) 迭代把本 CTA 的 dQ tile 先写 smem 行主序，再由
+//   `tid==0` 发**一条** 4D 归约回 global；=0 时退回 p157 的 `red_add2` 原子（逐位基线）。
+#ifndef FA_KV_DQ_TMAR
+#define FA_KV_DQ_TMAR 0
 #endif
 
 // =============================================================================
@@ -457,7 +489,7 @@ fp8_kvowner_dkv_kernel(const unsigned char* __restrict__ q8, const float* __rest
 //   换成 **4D-TMA 一次性搬入 SW128 tile**（对标 TE 的 TMA 数据通路），再从 SW128 重建
 //   Qp/dOp 的 K 配对布局（与主 kernel O37 逐字同构）。本 kernel = `TMA` 模板参数化后的
 //   device body，两个 `__global__` 壳（cp.async/标量版 vs TMA 版）共用同一份逻辑。
-template <int HD, int BM, int BN, bool TMA>
+template <int HD, int BM, int BN, bool TMA, bool TMAR = false>
 __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
     const unsigned char* __restrict__ q8, const float* __restrict__ qs,
     const unsigned char* __restrict__ k8, const float* __restrict__ ks,
@@ -466,7 +498,7 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
     const float* __restrict__ lse, const float* __restrict__ delta,
     float* __restrict__ dk, float* __restrict__ dv, float* __restrict__ dq, int S, int H,
     float scale, int causal,
-    const CUtensorMap* qmap, const CUtensorMap* dmap) {
+    const CUtensorMap* qmap, const CUtensorMap* dmap, const CUtensorMap* dqmap) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int PSLD = Cfg::PSLD;
   constexpr int QTS = Cfg::QTS;
@@ -496,6 +528,8 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
   constexpr int sz_Kp = (BN / 2) * PSLD * (int)sizeof(uint16_t);
   constexpr int sz_dS2 = BM * Cfg::DSS2;
   constexpr int sz_scales = (3 * BM + 4 * BN) * (int)sizeof(float);  // qs,dos,sds2 / ks,vs,sA,sds3
+  // F7 第十二步：dQ 的 4D-TMA 归约 staging（[BM][HD] fp32 行主序；仅 FA_KV_DQ_TMAR 时分配）。
+  constexpr int sz_dQst = TMAR ? (BM * HD * (int)sizeof(float)) : 0;
 
   extern __shared__ __align__(16) char smem[];
   int off = 0;
@@ -519,13 +553,20 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
   float* sA = vs_s + BN;
   float* sds3 = sA + BN;
   float* sds2 = sds3 + BN;
+  // F7 第十二步：dQ 的 4D-TMA 归约 staging（16B 对齐；恰好紧跟 scales）。
+  constexpr int dqst_off = (sz_Ks + sz_Vs + sz_Qs + sz_dOs + sz_Qp + sz_dOp + sz_Ap + sz_dS3 +
+                            sz_Kp + sz_dS2 + sz_Ps + sz_Ss + sz_scales + 15) &
+                           ~15;
+  float* dQst = reinterpret_cast<float*>(smem + dqst_off);
 
   // F7 第八步：Q/dO 4D-TMA 的两个 mbarrier（qbar/dbar），落在 scales 区之后、按 16B 对齐。
-  constexpr int WGBASE = sz_Ks + sz_Vs + sz_Qs + sz_dOs + sz_Qp + sz_dOp + sz_Ap + sz_dS3 +
-                         sz_Kp + sz_dS2 + sz_Ps + sz_Ss + sz_scales;
+  constexpr int WGBASE =
+      sz_Ks + sz_Vs + sz_Qs + sz_dOs + sz_Qp + sz_dOp + sz_Ap + sz_dS3 + sz_Kp + sz_dS2 +
+      sz_Ps + sz_Ss + sz_scales + sz_dQst;
   uint64_t* qbars = reinterpret_cast<uint64_t*>(smem + ((WGBASE + 15) & ~15));
   (void)qmap;
   (void)dmap;
+  (void)dqmap;
 
   const int j0 = blockIdx.x * BN;
   const int h = blockIdx.y;
@@ -835,8 +876,11 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
     }
 #if FA_KV_DQ
     // ---- GEMM4 dQ += scale·(dS2·K) —— **同循环**，但 dQ 跨 KV 块（跨 CTA）不归本 CTA 独占：
-    //   dQ 元素 (m,d) 收到所有 j<=m 的 KV 块的贡献，本原型用 atomicAdd 归约（见 body 顶部说明）。
+    //   dQ 元素 (m,d) 收到所有 j<=m 的 KV 块的贡献。
     //   A=dS2[m][j] (e5m2), B=Kp[j/2][d] (e4m3, ldmatrix.trans)，输出 [BM][HD]，乘 sds2[m]·scale。
+    //   F7 第十二步（FA_KV_DQ_TMAR）：归约从逐 lane `red_add2` 换成 **TMA 4D tensor store-reduce**
+    //   （对标 TE 的 `UTMAREDG.4D.ADD`）——先把整块 [BM][HD] 写 smem 行主序，再由 tid0 发**一条**
+    //   `cp.reduce.async.bulk.tensor.4d` 归约回 global。
     {
       float acc[MTM5][NTM5][4];
 #pragma unroll
@@ -847,19 +891,50 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
           for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
       mma_block_bt<GM5, GN5, BN, E5E4>(dS2, Cfg::DSS2, Kp, PSLD, acc, wr, wc, lane, 0);
       const int r0 = wr * GM5, c0 = wc * GN5;
+      if constexpr (TMAR && TMA) {
+        // F7 第十二步：先等上一迭代的 dQ 4D-TMA 归约读完 dQst 再覆写——放在这里（GEMM1/2/
+        //   fold/GEMM3/5 之后）让归约与整轮计算充分重叠（放 loop-top 会立即串行化，慢 1.35×）。
+        if (tid == 0) bulk_reduce_wait0();
+        __syncthreads();
+        // TMA 4D tensor reduce 的 box 内维 ≤ 256B（fp32 即 64 列）⇒ 沿 D 维拆 2 个 64 列 chunk，
+        //   每个 chunk 在 smem 里紧凑存成 [BM][64]（行距 64），各发一条 reduce。
+        constexpr int CH = 64;  // chunk 列数
 #pragma unroll
-      for (int i = 0; i < MTM5; ++i)
+        for (int i = 0; i < MTM5; ++i)
 #pragma unroll
-        for (int j = 0; j < NTM5; ++j)
+          for (int j = 0; j < NTM5; ++j)
 #pragma unroll
-          for (int q = 0; q < 4; q += 2) {
-            const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
-            const int c = c0 + j * 8 + c2;
-            const int qi = m0 + r;
-            if (qi < S)
-              red_add2(dq + (((size_t)qi) * H + h) * HD + c, acc[i][j][q] * sds2[r] * scale,
-                       acc[i][j][q + 1] * sds2[r] * scale);
-          }
+            for (int q = 0; q < 4; ++q) {
+              const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              const int c = c0 + j * 8 + c2 + (q & 1);
+              const int ch = c / CH, cc = c % CH;
+              dQst[ch * (BM * CH) + r * CH + cc] =
+                  (m0 + r < S) ? acc[i][j][q] * sds2[r] * scale : 0.f;
+            }
+        __syncthreads();
+        if (tid == 0) {
+          bulk_reduce_fence();  // generic smem 写 → async proxy 可见
+#pragma unroll
+          for (int ch = 0; ch < HD / CH; ++ch)
+            tma_reduce_add_4d_f32(dqmap, dQst + ch * (BM * CH), /*c0=*/ch * CH, /*c1=*/m0,
+                                  /*c2=*/h, /*c3=*/0);
+          bulk_reduce_commit();
+        }
+      } else {
+#pragma unroll
+        for (int i = 0; i < MTM5; ++i)
+#pragma unroll
+          for (int j = 0; j < NTM5; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; q += 2) {
+              const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              const int c = c0 + j * 8 + c2;
+              const int qi = m0 + r;
+              if (qi < S)
+                red_add2(dq + (((size_t)qi) * H + h) * HD + c, acc[i][j][q] * sds2[r] * scale,
+                         acc[i][j][q + 1] * sds2[r] * scale);
+            }
+      }
     }
 #endif
     __syncthreads();
@@ -893,8 +968,8 @@ fp8_kvowner_dkv_wgmma_kernel(const unsigned char* __restrict__ q8, const float* 
                              float* __restrict__ dk, float* __restrict__ dv, float* __restrict__ dq,
                              int S, int H,
                              float scale, int causal) {
-  fp8_kvowner_dkv_wgmma_body<HD, BM, BN, false>(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, dk,
-                                                dv, dq, S, H, scale, causal, nullptr, nullptr);
+  fp8_kvowner_dkv_wgmma_body<HD, BM, BN, false, false>(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, dk,
+                                                dv, dq, S, H, scale, causal, nullptr, nullptr, nullptr);
 }
 #ifdef FA_TMA
 // F7 第八步壳：Q/dO 走 4D-TMA（需 `-DFA_TMA -lcuda` + sm90a gencode）。
@@ -914,8 +989,29 @@ fp8_kvowner_dkv_wgmma_tma_kernel(const unsigned char* __restrict__ q8,
                                  float scale, int causal,
                                  const __grid_constant__ CUtensorMap qmap,
                                  const __grid_constant__ CUtensorMap dmap) {
-  fp8_kvowner_dkv_wgmma_body<HD, BM, BN, true>(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, dk, dv,
-                                               dq, S, H, scale, causal, &qmap, &dmap);
+  fp8_kvowner_dkv_wgmma_body<HD, BM, BN, true, false>(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, dk, dv,
+                                               dq, S, H, scale, causal, &qmap, &dmap, nullptr);
+}
+// F7 第十二步壳：在 TMA 版基础上多传一个 **dQ 的 fp32 4D-TMA 归约描述符**（`FA_KV_DQ_TMAR`）。
+template <int HD, int BM, int BN>
+__global__ void __launch_bounds__(THREADS, FA_KV_CTA)
+fp8_kvowner_dkv_wgmma_tma_r_kernel(const unsigned char* __restrict__ q8,
+                                   const float* __restrict__ qs,
+                                   const unsigned char* __restrict__ k8,
+                                   const float* __restrict__ ks,
+                                   const unsigned char* __restrict__ v8,
+                                   const float* __restrict__ vs,
+                                   const unsigned char* __restrict__ do8,
+                                   const float* __restrict__ dos,
+                                   const float* __restrict__ lse,
+                                   const float* __restrict__ delta, float* __restrict__ dk,
+                                   float* __restrict__ dv, float* __restrict__ dq, int S, int H,
+                                   float scale, int causal,
+                                   const __grid_constant__ CUtensorMap qmap,
+                                   const __grid_constant__ CUtensorMap dmap,
+                                   const __grid_constant__ CUtensorMap dqmap) {
+  fp8_kvowner_dkv_wgmma_body<HD, BM, BN, true, true>(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, dk, dv,
+                                               dq, S, H, scale, causal, &qmap, &dmap, &dqmap);
 }
 #endif
 #endif  // FA_WGMMA
@@ -1776,6 +1872,8 @@ int main(int argc, char** argv) {
 #if defined(FA_WGMMA) && defined(FA_TMA)
   // F7 第八步：Q/dO TMA 版在 wg_smem 之后加 64B 放 qbar/dbar（qbars 起点 16B 对齐）。
   constexpr int wg_tma_smem = ((wg_smem + 15) & ~15) + 64;
+  // F7 第十二步：TMAR 版再加 [BM][HD] fp32 的 dQ staging（与 body 的 dQst 布局一致）。
+  constexpr int wg_tmar_smem = wg_tma_smem + FA_KV_DQ_TMAR * (BM * HD * 4);
 #endif
 
   const int lse_smem = Cfg::lse_smem_bytes;
@@ -1849,6 +1947,10 @@ int main(int argc, char** argv) {
 #if defined(FA_WGMMA) && defined(FA_TMA)
   CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_wgmma_tma_kernel<HD, BM, BN>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, wg_tma_smem));
+  if (FA_KV_DQ_TMAR) {
+    CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_wgmma_tma_r_kernel<HD, BM, BN>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, wg_tmar_smem));
+  }
 #endif
 
   auto preprocess = [&]() {
@@ -1899,6 +2001,14 @@ int main(int argc, char** argv) {
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, d_dq, S, H,
         scale, (int)causal, qmap_kv, dmap_kv);
   };
+  // F7 第十二步：dQ 归约换 **4D-TMA tensor store-reduce**（对标 TE `UTMAREDG.4D.ADD`）。
+  // box 内维 = 64 列 fp32 = 256B（TMA box 上限）；body 沿 D 拆 2 个 chunk。
+  CUtensorMap dqmap_kv = make_kvowner_dq_map_f32(d_dq, H, S, D, B, 64, BM);
+  auto launch_wgtmar = [&]() {
+    fp8_kvowner_dkv_wgmma_tma_r_kernel<HD, BM, BN><<<kg, THREADS, wg_tmar_smem>>>(
+        d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, d_dq, S, H,
+        scale, (int)causal, qmap_kv, dmap_kv, dqmap_kv);
+  };
   // ---- F7 第十一步：option (a)「两 kernel」——KV-owner 出 dK/dV（red=0）＋ Q-owner dQ-only pass。
   //   复用生产 `fa_bwd_fp8_mma_kvtma_kernel`（Q/K/V/dO 全 4D-TMA）的 `DQONLY=true` 实例：
   //   保留 GEMM1/2/5 + dS2 fold，跳过 Ap/dS3 fold + GEMM3/4(dV/dK) + epilogue；dQ 在 `kRegDq`
@@ -1942,6 +2052,7 @@ int main(int argc, char** argv) {
       if (only == "dqonly") launch_dqonly();
       else if (only == "main3") launch_main3();
       else if (only == "wgtma") launch_wgtma();
+      else if (only == "wgtmar") launch_wgtmar();
     };
     fn();
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -2064,6 +2175,33 @@ int main(int argc, char** argv) {
   DiffStat qk_b = diff_stat(q_dk, w_dk), qv_b = diff_stat(q_dv, w_dv);
   printf("[对拍] wgmma+TMA vs wgmma: dk max_abs=%.4e  dv max_abs=%.4e（应=0，仅搬运通路）\n",
          qk_b.max_abs, qv_b.max_abs);
+#if FA_KV_DQ
+  // F7 第十二步：dQ 走 4D-TMA tensor store-reduce（对标 TE `UTMAREDG.4D.ADD`）。
+  {
+    std::vector<float> r_dk(nkv), r_dv(nkv), r_dq(nq);
+    CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+    CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+    CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
+    launch_wgtmar();
+    CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaMemcpy(r_dk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(r_dv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(r_dq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+    printf("[对拍] ours(KV-owner mma **wgmma+Q/dO-TMA + dQ 4D-TMA-reduce**) vs fp32 ref:\n");
+    printf("  dk  max_abs=%.4e  max_rel=%.4e\n", diff_stat(r_dk, rdk.data).max_abs,
+           diff_stat(r_dk, rdk.data).max_rel);
+    printf("  dv  max_abs=%.4e  max_rel=%.4e\n", diff_stat(r_dv, rdv.data).max_abs,
+           diff_stat(r_dv, rdv.data).max_rel);
+    if (file_exists(dir + "/ref_dq.npy")) {
+      DiffStat sq = diff_stat(r_dq, rdq.data);
+      printf("  dq  max_abs=%.4e  max_rel=%.4e\n", sq.max_abs, sq.max_rel);
+    }
+    printf("[对拍] dQ 4D-TMA-reduce vs atomic(red_add2): dq max_abs=%.4e（应≈0，仅归约加序）\n",
+           diff_stat(r_dq, q_dq).max_abs);
+    printf("[对拍] 4D-TMA-reduce vs wgmma+TMA: dk max_abs=%.4e  dv max_abs=%.4e（应=0）\n",
+           diff_stat(r_dk, q_dk).max_abs, diff_stat(r_dv, q_dv).max_abs);
+  }
+#endif
 #endif
 
   // 与既有 ours（Q-owner + atomic）dk/dv 比：应只差跨 CTA 加法次序 / 同一 fp8 口径。
@@ -2146,8 +2284,15 @@ int main(int argc, char** argv) {
 #endif
 #if defined(FA_WGMMA) && defined(FA_TMA)
   float t_wgtma = bench(launch_wgtma, iters);
-#else
+#endif
+#if defined(FA_WGMMA) && defined(FA_TMA) && FA_KV_DQ && FA_KV_DQ_TMAR
+  float t_wgtmar = bench(launch_wgtmar, iters);
+#endif
+#if !(defined(FA_WGMMA) && defined(FA_TMA))
   float t_wgtma = 0.f;
+#endif
+#if !(defined(FA_WGMMA) && defined(FA_TMA) && FA_KV_DQ && FA_KV_DQ_TMAR)
+  float t_wgtmar = 0.f;
 #endif
   float t_pre = bench(preprocess, iters);
   double flops = 2.0 * (double)S * S * H * (double)HD * (causal ? 0.5 : 1.0) * 3.0;
@@ -2175,6 +2320,10 @@ int main(int argc, char** argv) {
           t_wgtma, flops / t_wgtma / 1e9, t_wg / t_wgtma, t_base / t_wgtma);
   printf("[计时] total wgmma+TMA = %.4f ms | 峰值占比 = %.3f%%\n", t_wgtma + t_pre,
           100.0 * flops / t_wgtma / 1e9 / 1978.8);
+#if FA_KV_DQ_TMAR
+  printf("[计时] main(三梯度) **dQ 4D-TMA-reduce** = %.4f ms (%.2f TF) | tmar/wgtma = %.3f×\n",
+         t_wgtmar, flops / t_wgtmar / 1e9, t_wgtma / t_wgtmar);
+#endif
   // F7 第十一步：两 kernel 判决（KV-owner dK/dV[red=0] + Q-owner dQ-only[red=0] vs 单 kernel 三梯度）。
   float t_dqonly = bench(launch_dqonly, iters);
   float t_main3 = bench(launch_main3, iters);

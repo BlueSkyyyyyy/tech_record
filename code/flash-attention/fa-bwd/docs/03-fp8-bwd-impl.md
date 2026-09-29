@@ -8154,3 +8154,82 @@ F7 主体只剩 **(b) 两级 partial / 单趟内非原子归约（BN≥BM）**�
 - 原始输出 `src/fp8/fa_bwd_fp8_p158_b1_{s512_h16,s1024_h32,s4096_h16}_d128_causal_fp8.out.txt`、
   `src/fp8/fa_bwd_fp8_p158_ncu_dqonly_s4096.out.txt`（full）、
   `src/fp8/fa_bwd_fp8_p158_ncu_metrics_s4096.out.txt`（三口径 metrics）。
+
+## 92. F7 第十二步（第一百五十九轮）：用 **TMA 4D tensor store-reduce**（`cp.reduce.async.bulk.tensor.4d`，对标 TE 的 `UTMAREDG.4D.ADD`）替掉 dQ 的逐 lane `red.global.add` —— **机制正结果（指令数归零）+ 性能负结果（red 扇区一字不变、1.34× 慢）**
+
+> 动机：第一百四十七轮（§80）用 ncu 重测 TE fp8 反向时，发现 TE 的全局归约只有 **3168** 条
+> `smsp__inst_executed_op_global_red`（ours 9.54M 条 L1 red 请求）、且 **0 条** plain global
+> store；本轮把 TE 的 SASS 拉出来，直方图里是 **`UTMAREDG.4D.ADD`**（TMA 4D 张量归约）+
+> `UTMALDG.4D`（TMA 载入）+ `UTMASTG.4D`（TMA 存）+ `USETMAXREG`（setmaxnreg，warp-spec）。
+> 于是做出**此前从未试过的最小判决**：把 KV-owner 原型的 dQ 跨 CTA 归约从逐 lane
+> `red_add2`（8B `red.global.add.v2.f32`）换成 **一条 4D TMA tensor store-reduce**（硬件把
+> 整块 `[BM][HD]` fp32 原子加回 global），验证「O42 的 bulk-reduce 思路」在**换成 4D tensor
+> 变体 + 已换工作划分（KV-owner）**后是否真能吃到 O42 短路 red 的 prize（main 1.70×）。
+
+### 92.1 改动（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，默认路径一行未改）
+
+- `fa_bwd_fp8_kernels.cuh` 新增 `tma_reduce_add_4d_f32(map, smem_src, c0..c3)`——PTX 用
+  **`cp.reduce.async.bulk.tensor.4d.global.shared::cta.add.tile.bulk_group`**（类型由 tensormap
+  的 element type 推断、指令**不带** `.f32`；对照 CUDA `cuda/__ptx` 生成头）。
+- 原型加编译期开关 **`FA_KV_DQ_TMAR`**（默认 0）：=1 时 GEMM4 的 dQ 结果先写 smem 行主序
+  staging（`dQst`），再由 `tid==0` 发 tensor reduce；=0 退回 p157 的 `red_add2`（逐位基线）。
+  新增 `fp8_kvowner_dkv_wgmma_tma_r_kernel` 薄壳（多传一个 **fp32 的 dQ tensormap**：
+  `make_kvowner_dq_map_f32`，dims={D,S,H,B}、box={64,BM}、SWIZZLE_NONE）+ 同 binary 的
+  `launch_wgtmar` / `--only=wgtmar` / 计时与对拍。
+
+### 92.2 两个关键坑（都实测踩过）
+
+1. **`FA_FP8_HAS_TMA` 在本文件里晚于 helper 才 `#define`**（宏按出现顺序展开）⇒ 我一开始用它
+   守卫新 helper 的 asm，导致 `#if FA_FP8_HAS_TMA` 恒为 0、**asm 被整段编掉**：SASS 里没有
+   `UTMAREDG`、dQ 完全错（max_abs 2.96 vs 0.24）却**不报任何错**。改用
+   `#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900` 直接守卫后 SASS 才出现归约指令。
+   判据：**新增 device asm helper 先 `cuobjdump -sass | grep 指令名` 确认被发射**。
+2. **tensor-reduce 的 box 内维 ≤ 256B**（fp32 即 64 列）⇒ 128 列的 dQ tile 必须沿 D 拆
+   **2 个 64 列 chunk**（每 chunk 在 smem 紧凑存成 `[BM][64]`、行距 64），各发一条 reduce。
+   另 PTX 记法必须是 `.add.tile.bulk_group`（红操作在前、`.tile` 后接完成机制），写成
+   `.bulk_group.add.f32` 会 `ptxas: Unexpected instruction types specified`。
+
+### 92.3 数值（三 shape，单 binary A/B，全对拍通过）
+
+`dQ 4D-TMA-reduce vs atomic(red_add2)`：S512/S1024H32/S4096 **dq max_abs = 1.1921e-07**
+（仅 fp32 归约加序）；`4D-TMA-reduce vs wgmma+TMA` 的 **dk/dv max_abs = 0**（只改归约通路）；
+`dq vs fp32 ref` S4096 = **2.6355e-1**（与 atomic 版逐位同量级）。三梯度全通、无系统误差。
+
+### 92.4 性能（同 binary A/B，main 三梯度，event；ms）
+
+| shape | wgmma+TMA（atomic `red_add2`） | **dQ 4D-TMA-reduce** | tmar/wgtma |
+|---|---|---|---|
+| S512 H16 | 0.0753 | 0.0820–0.0852 | **0.89–0.91×** |
+| S1024 H32 | ~0.307 | 0.3926 | **0.78×** |
+| S4096 H16 | ~1.856 | 2.3796 | **0.78×** |
+
+### 92.5 ncu（S4096 H16，同 session A/B）——**判决性证据**
+
+| 指标 | wgmma+TMA（atomic） | **dQ 4D-TMA-reduce** | 说明 |
+|---|---|---|---|
+| Duration | 1.84 ms | 2.47 ms | 慢 1.34× |
+| `l1tex …op_red` 请求 | 8,519,680 | **0** | 逐 lane 原子**彻底消失** |
+| `smsp__inst_executed_op_global_red` | 8,519,680 | **0** | 同上（指令层归零） |
+| **`lts__t_sectors_op_red`** | **102,236,160** | **102,236,160** | **一字不变！** |
+| `lts read / write` | 52.7M / 6.20M | 52.1M / 11.07M | write 反涨（reduce 写扇区） |
+| `smsp__inst_executed` | 703.65M | 660.41M | −43M（省掉 8.5M 条 red） |
+| dynamic smem | 74.82 KB（3 CTA/SM） | 107.58 KB（**2 CTA/SM**） | 32KB fp32 staging 的代价 |
+| achieved occupancy | 17.79% | 12.19% | 掉一档 |
+
+**结论（决定性）**：把归约从「逐 lane `red.global.add`」换成「TMA 4D tensor store-reduce」
+后，**L1 层的 red 请求/指令归零，但 L2 的 `red` 扇区数一模一样（102,236,160）**、时间还因
+3→2 CTA/SM 变慢 1.34×。⇒ **L2 `red` 流量由「每个输出元素被多少个 CTA 贡献」= 工作划分决定，
+与归约指令机制无关**（O67「加宽归约无效」的同源结论再进一层）。TE 的 `UTMAREDG` 只是它的
+**指令选择**，其 `red` 仅 25.96M（ours 1/3.9×）**来自它的 tile 调度/工作划分**（grid=132
+persistent、384 线程、232KB smem、1 CTA/SM），**不是**用了 TMA 归约本身。
+
+### 92.6 下一步
+
+- **F7 的「TMA store-reduce」假设就此关闭**（机制已验证正确、但非杠杆）；F7 主体只剩
+  **工作划分本身**（减少每个元素的贡献数）：① **BN≥BM**（KV-owner 的 dQ 贡献数 `S/BN`，
+  BN 32→64 砍半；代价是寄存器/occupancy，见「阻塞」）；② **放大 tile / 持久化 tile 调度**
+  （对标 TE 132 CTA，需先解决本卡 smem/寄存器硬墙）。③ 放弃 F7、转「换卡」。
+- 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p159_tmar_s4096.out.txt`、
+  `..._p159_tmar_s512_h16_d128_causal_fp8.out.txt`、`..._p159_tmar_s1024_h32_d128_causal_fp8.out.txt`、
+  `..._p159_default_regression_s512.out.txt`（默认档回归逐位）、
+  `src/fp8/fa_bwd_fp8_p159_ncu_wgtmar_s4096.out.txt`、`..._p159_ncu_wgtma_s4096.out.txt`。
