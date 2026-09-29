@@ -2974,3 +2974,21 @@ fp32 求和次序。单/两文件同源（bf16 按既定做法用 `using bf16=..
 **结论**：三 dtype 的 LSE 现已统一走两趟 softmax；LSE 不是墙，默认路径的墙仍是 main。
 详见 `docs/01` §19、`docs/01b` §6av、`docs/08` §5.57；原始输出 `src/fp16/fa_bwd_fp16_p143_*`、
 `src/bf16/fa_bwd_bf16_p143_*`、`src/fa_bwd_p143_ci_fp16_bf16.out.txt`。
+
+## 43. F8（第一百六十一轮，正结果，默认）：fp16/bf16 定长默认切 Hopper（wgmma+TMA）
+
+§42 的 `--hopper` 快路此前只是**可选**（独立前缀 `ours_hp`），默认 `ours` 口径对 fp8 走 Hopper
+（F1）、对 fp16/bf16 仍锁 `-arch=sm_90` 的 mma.sync。本轮把 F1 的默认化**泛化到 fp16/bf16**：
+`harness/fa_bwd_run.py` 的 `HOPPER_DEFAULT_DTYPES = {"fp8","fp16","bf16"}`。**device 一行未改**。
+
+| dtype | S4096 causal total（mma→Hopper） | 加速 | main | max_abs vs fp32 ref |
+|---|---|---|---|---|
+| fp16 | 1.8245→**1.1726 ms** | **1.556×** | 1.503→0.964 ms | 1.883/1.734/1.966e-3（**逐值不变**） |
+| bf16 | 1.8325→**1.1643 ms** | **1.574×** | 1.495→0.958 ms | 1.510/1.340/1.631e-2（**逐值不变**） |
+
+纯反向对标（`harness/fa_vs_te_bwd_only.py`，S4096 MHA fp16）：FA3 `0.3238ms/849TF`、
+TE `0.4441ms/619TF`；ours total 5.6×→**3.6×** FA3。MLA（D=512）host 自动退回 mma（不变）、
+full 走 mma LSE 亦正确、varlen 早已 Hopper。CI 73 case 全绿（fp16 worst 1.953e-3 / bf16
+7.812e-3 / fp8 1.049e-5），`--check docs/04` OK（内嵌数值表不受默认切换影响，逐值/rtol 内）。
+`--mma` 可一次退回三 dtype 的旧 mma 口径。详见 `docs/08` §5.75；原始输出
+`src/fa_bwd_p161_hopper_default_ab.out.txt`、`src/fa_bwd_p161_baseline_{fp16,bf16}.out.txt`。

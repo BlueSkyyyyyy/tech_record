@@ -2938,14 +2938,33 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
          dq ~5.9e-2 fp8 噪声）。**性能 S512 0.900× / S1024H32 0.960× / S4096 1.042×（另一 session
          1.015×）中性**。ncu 判决：`lts op_red` **102.2M→51.1M 精确减半**，但 `dVacc/dKacc` 翻倍
          顶穿 **255 寄存器**（local st 65,536→13.75M 扇区）、3→2 CTA/SM ⇒ 溢出流量盖过省下的 red。
-         ⇒ **F7 option(a) 判为中性/偏负**。见 `docs/03` §93、`docs/08` §5.74；原始输出
-         `src/fp8/fa_bwd_fp8_kvowner_mma_p160_bn64_*`、`src/fp8/fa_bwd_fp8_p160_ncu_*`。
+          ⇒ **F7 option(a) 判为中性/偏负**。见 `docs/03` §93、`docs/08` §5.74；原始输出
+          `src/fp8/fa_bwd_fp8_kvowner_mma_p160_bn64_*`、`src/fp8/fa_bwd_fp8_p160_ncu_*`。
+- [x] **F8**（第一百六十一轮，**正结果，默认**）**fp16/bf16 定长默认切 Hopper（wgmma+TMA）**——
+      F1 的 dtype 泛化。纯 harness（device 一行未改）：`HOPPER_DEFAULT_DTYPES={"fp8","fp16","bf16"}`。
+      数值逐值不变；S4096 causal total fp16 **1.8245→1.1726ms（1.556×）**、bf16
+      **1.8325→1.1643ms（1.574×）**；相对 FA3 时间比 5.6×→3.6×。见 `docs/08` §5.75。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百六十轮）**：**F7 第十三步——「BN≥BM」判决：中性/偏负（撞寄存器墙）**。落实
+> **最新（第一百六十一轮）**：**F8——fp16/bf16 定长默认切 Hopper（wgmma+TMA）：正结果，默认**。
+> 这是 **F1（只默认 fp8）的 dtype 泛化**：host 自 O5/O5b 起已有 wgmma+TMA 快路，但 fp16/bf16 的
+> `ours` 口径一直锁在 `-arch=sm_90` 的 `mma.sync`（快路只由 `--hopper` 独立前缀在跑）。本轮
+> **纯 harness**（device 一行未改）：`harness/fa_bwd_run.py` 的 `FP8_HOPPER_DEFAULT` 泛化为
+> `HOPPER_DEFAULT_DTYPES = {"fp8","fp16","bf16"}`，定长默认构建走 `-DFA_WGMMA -DFA_TMA -lcuda`；
+> `--mma` 一次退回三 dtype 旧 mma 口径。**数值逐值不变**（fp16 S4096
+> `1.883/1.734/1.966e-3`、bf16 `1.510/1.340/1.631e-2`；wgmma/mma 只差 fp32 累加次序 ~1e-5）。
+> **性能（同 session，S4096 causal MHA，event，total）**：fp16 **1.8245→1.1726ms（1.556×）**、
+> bf16 **1.8325→1.1643ms（1.574×）**；相对纯反向 FA3（`0.3238ms/849TF`）时间比 **5.6×→3.6×**。
+> MLA（D=512）host 自动退回 mma、full 走 mma LSE 均正确；CI 73 case 全绿、`--check docs/04` OK。
+> 见 `docs/08` §5.75、`docs/01` §21、`docs/01b` §6ax、`docs/04` §43；原始输出
+> `src/fa_bwd_p161_hopper_default_ab.out.txt`、`src/fa_bwd_p161_baseline_{fp16,bf16}.out.txt`。
+> **下一步候选**：① 由此 fp16/bf16 也进入「L2 `red` + `wait`」的工作点（同 fp8，受阻塞锁定）；
+>   ② F7 单趟路线已全判（见下），只剩换卡/大改；③ 其余候选均已判决/到顶/收口。
+>
+> **（第一百六十轮）**：**F7 第十三步——「BN≥BM」判决：中性/偏负（撞寄存器墙）**。落实
 > 第一百五十九轮「下一步候选 ①(a)」：把 KV-owner 的 tile 从 `BN=32` 放大到 **`BN=64=BM`**，
 > 使 dQ 的跨 CTA 贡献数 `S/BN` 与 Q/dO 读放大**各减半**。把 `fp8_kvowner_dkv_wgmma_body`
 > 完整参数化到 `BN∈{32,64}`（GEMM1/2 新增 `wgmma_mn_issue<BN,KIND>`：n32/n64；epilogue
