@@ -7467,3 +7467,84 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_smoke.cu \
 ```
 
 原始输出 `src/fp8/fa_bwd_fp8_kvowner_smoke.out.txt`、`..._kvowner_ncu_red.out.txt`。
+
+## 82. F7 第二步（第一百四十九届）：persistent KV-owner + smem/cp.async 暂存 —— 读放大消除（机制）
+
+> 承接 §81 的「结论 2（下一步判据）」：KV-owner 把 `red` 打成 0，但**没做 operand staging** ⇒
+> `op_read` 从 Q-owner 的 1.5M 暴涨到 **44.03M（29×）**、标量耗时 0.64×。本轮落实这一判据：
+> 在**同一 smoke 文件**里新增 `kvowner_stage_kernel`，验证「**persistent CTA 拥有 KV 块 +
+> Q/dO 经 smem/cp.async staging**」能把读放大消除、且 `red` 仍为 0。这是 F7 主体的最小机制原型
+> （真实 fp8 主 kernel 仍走 mma/TMA，但 staging 与划分机制同构）。
+
+### 82.1 设计（`kvowner_stage_kernel<BM=32,BN=32,HD=128>`）
+
+与 §81 的 `kvowner_kernel` 同一划分（grid=`(S/BN,H)`，每 CTA 一块 KV、遍历 query、dK/dV 本地
+累加后一次 plain store），区别在 **operand 全部 staging 到 smem**：
+
+- **拥有的 K/V 行块只从 global 读一次**：`Ks/Vs[BN][HD]` 在 kernel 开头 vectorized `float4`
+  载入后常驻（原版每个 m0 迭代都重读 K/V）。
+- **Q/dO 用 `cp.async.cg` 16B 双缓冲流水搬入**：`Qs/dOs[2][BM][HD]`，prologue 发 stage0，
+  每次迭代先 `issue(st^1, m0+BM)` 再 `cp.async.wait_group`（`has_next` 时 `<1>`、末轮 `<0>`）；
+  越界行补 0。
+- phase1（S=QKᵀ、P、dP=dO·Vᵀ、dS）与 phase2（dK=dSᵀQ、dV=PᵀdO）**全部从 smem 读**。
+- 动态 smem：`4·BN·HD + 2·BM·BN + 4·BM·HD = 34,816` floats = **139,264 B**（>48KB 静态上限 ⇒
+  `extern __shared__` + `cudaFuncSetAttribute(MaxDynamicSharedMemorySize)`）。
+
+### 82.2 数值：与 KV-owner **逐位相同**（只换 operand 来源，不换数学次序）
+
+| 实现 | dk max_abs / rel | dv max_abs / rel |
+|---|---|---|
+| Q-owner（atomic） vs double ref | 3.64e-05 / 9.60e-07 | 2.68e-06 / 4.13e-07 |
+| KV-owner（single store） vs double ref | 3.64e-05 / 9.60e-07 | 2.28e-06 / 3.51e-07 |
+| **KV-owner+stage vs double ref** | **3.64e-05 / 9.60e-07** | **2.28e-06 / 3.51e-07** |
+
+`KV-owner+stage vs Q-owner`：dk 7.63e-06、dv 4.77e-07；`KV-owner+stage vs KV-owner` = **0**
+（逐位相同，符合预期）。原始输出 `src/fp8/fa_bwd_fp8_kvowner_stage_run.out.txt`。
+
+### 82.3 ncu：`red` 仍为 0，`op_read` 回落（读放大消除）
+
+`lts__t_sectors` / `l1tex` 请求（同 shape，单 kernel，`-c 1`）：
+
+| kernel | `op_red` | `op_read` | `op_write` | global ld 请求 | L1TEX% / SM% |
+|---|---|---|---|---|---|
+| Q-owner（atomic） | 1,671,168 | 1,502,165 | 9,862 | 26,808,320 | 32.5 / 3.95 |
+| KV-owner（无 staging） | **0** | **44,066,794** | 199,907 | 26,808,320 | 20.8 / 2.55 |
+| **KV-owner+stage** | **0** | **1,382,731** | 199,821 | **147,456** | 39.0 / 10.08 |
+
+⇒ 判据全部达成：① `red = 0`（跨 CTA 原子归约消除，同 §81）；② `op_read` 从 **44.07M → 1.38M
+（31.9×）**，甚至略低于 Q-owner 的 1.50M；③ global 载入请求从 26.8M → **147K（182×）**
+（staging 把「逐元素 global 读」换成「每 tile 一次 16B`cp.async`」）。
+
+### 82.4 性能（event，iters=20，同 binary A/B）
+
+| 实现 | 时间 (ms) | vs Q-owner | vs KV-owner(无 stage) |
+|---|---|---|---|
+| Q-owner（atomic） | 3.46 | 1.00× | — |
+| KV-owner（无 staging） | 5.41 | **0.64×** | 1.00× |
+| **KV-owner+stage** | **0.876** | **3.95×** | **6.17×** |
+
+ncu（stage kernel）：`Duration 880µs`、**32 regs**、`139.26KB` smem → **1 CTA/SM**（occ 6.25%）、
+stall `short_scoreboard 4.49 + wait 1.67 + long_scoreboard 0.21`、barrier 0.01。
+即 staging 后墙回到 **smem→计算的依赖（short_scoreboard）+ 低 occupancy**（标量 dot 的 smem 读），
+**不再是 global 读放大，也不是原子归约**。
+
+### 82.5 结论 / 下一步
+
+- **F7 机制两根支柱均已 de-risk**：① 单一 owner 划分把 dK/dV 的 `red` 打成 0（§81）；
+  ② persistent + smem/cp.async staging 把读放大消除（本节）。
+- **F7 主体 = 把这两点落进真实 fp8 主 kernel**：persistent CTA 拥有 KV 块、Q/dO/K/V 走本卡
+  已建好的 **4D-TMA** 通路暂存 smem、dK/dV 在 smem/寄存器本地累加后经 **TMA store（或
+  `cp.reduce.async.bulk`）一次写出**（对标 TE grid=132 persistent）。**prize 由 O42 钉死**：
+  短路 dK/dV 的 red ⇒ main **1.70×**、total **1.53×**。
+- 本节的标量原型（0.876ms）只为证明机制与量级；真实 fp8 主 kernel 的绝对性能需在 F7 主体里
+  用 mma/wgmma + TMA 重做（标量 `dot` 的 `short_scoreboard 4.49` 是标量特有，不代表最终形态）。
+
+```bash
+# 运行 + ncu（red=0 且 op_read 回落）
+scripts/run.sh src/fp8/fa_bwd_fp8_kvowner_smoke.cu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_smoke.cu -c 3 \
+  --metrics lts__t_sectors_op_red.sum,lts__t_sectors_op_read.sum, \
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum --kernel-name regex:owner
+```
+
+原始输出 `src/fp8/fa_bwd_fp8_kvowner_stage_run.out.txt`、`src/fp8/fa_bwd_fp8_kvowner_stage_ncu.out.txt`。

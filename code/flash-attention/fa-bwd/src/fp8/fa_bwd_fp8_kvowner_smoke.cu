@@ -25,6 +25,20 @@
 //   划分机制与 dtype 无关）。目的 = 证明划分正确 + ncu 证实 red=0，作为 F7 主体
 //   （把同一划分落进 mma/TMA 主 kernel）的前置 de-risk。
 //
+// -----------------------------------------------------------------------------
+// F7 第二步（第一百四十九届，本文件新增）：**persistent KV-owner + smem/cp.async 暂存**
+// -----------------------------------------------------------------------------
+// 第一步的判据：KV-owner 把跨 CTA `red` 打成 0，但 `lts__t_sectors_op_read` 从 Q-owner 的
+// 1.51M 暴涨到 **44.03M（29×）**——因为「每 CTA 一块 KV、遍历所有 query」时，Q/dO 的 operand
+// 没有 staging，每个 query 元素被反复从 L2 重读；单元素 reduc 收益被读放大吃回（标量 0.64×）。
+//
+// 本步新增 `kvowner_stage_kernel`（真实 F7 主体思路：**persistent CTA 拥有 KV 块，K/V 常驻
+// smem 只读一次；Q/dO 用 `cp.async` 双缓冲流水暂存**）：
+//   - 每 CTA（grid=(S/BN,H)）**只从 global 读一次自己拥有的 K/V 行块** → 常驻 smem；
+//   - 遍历 query 块时，Q/dO 由 `cp.async.cg` 16B 双缓冲搬进 smem，phase1/phase2 全从 smem 读；
+//   - dK/dV 在 smem 本地累加、循环外一次 plain store（与第一步一致，red=0）。
+// 预期：`red` 仍为 0，且 `op_read` 回落到与 Q-owner 同量级（读放大的机制被 staging 消除）。
+//
 // 运行：scripts/run.sh src/fp8/fa_bwd_fp8_kvowner_smoke.cu
 // 剖析：scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_smoke.cu --metrics \
 //         lts__t_sectors_op_red.sum,lts__t_sectors_op_read.sum,lts__t_sectors_op_write.sum \
@@ -53,6 +67,19 @@ static constexpr int BM = 32;              // query 行块
 static constexpr int BN = 32;              // KV 行块
 static constexpr int HD = 128;             // head_dim
 static constexpr int THREADS = 128;
+
+// ---- cp.async 16B（Q/dO staging） ------------------------------------------
+__device__ __forceinline__ void cp_async16(void* smem, const void* gmem) {
+  unsigned s = (unsigned)__cvta_generic_to_shared(smem);
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(gmem));
+}
+__device__ __forceinline__ void cp_async_commit() {
+  asm volatile("cp.async.commit_group;\n");
+}
+template <int N>
+__device__ __forceinline__ void cp_async_wait() {
+  asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
+}
 
 // Q/K/V/dO/LSE/delta 在 [S,H,HD]（B=1）上的行主序；LSE/delta 在 [S,H]。
 
@@ -183,6 +210,138 @@ __global__ void kvowner_kernel(const float* __restrict__ q,
         if (i >= S_) break;
         ak += dSs[ii][jj] * qat(i, d);
         av += Ps[ii][jj] * oat(i, d);
+      }
+      dKa[jj][d] += ak;
+      dVa[jj][d] += av;
+    }
+    __syncthreads();
+  }
+  // 单一 owner：一次 plain store（无 atomic）
+  for (int idx = tid; idx < BN_ * HD_; idx += THREADS) {
+    const int jj = idx / HD_, d = idx % HD_;
+    const int j = j0 + jj;
+    if (j >= S_) continue;
+    dk[((size_t)(j * H + h)) * HD_ + d] = dKa[jj][d];
+    dv[((size_t)(j * H + h)) * HD_ + d] = dVa[jj][d];
+  }
+}
+
+// -----------------------------------------------------------------------------
+// (3) KV-owner persistent + smem/cp.async staging（F7 第二步）：K/V 常驻 smem 只读一次，
+//     Q/dO 由 cp.async 双缓冲流水搬入，dK/dV 本地累加后一次 plain store（red=0 且无读放大）。
+// -----------------------------------------------------------------------------
+template <int BM_, int BN_, int HD_>
+__global__ void kvowner_stage_kernel(const float* __restrict__ q,
+                                     const float* __restrict__ k,
+                                     const float* __restrict__ v,
+                                     const float* __restrict__ do_,
+                                     const float* __restrict__ lse,
+                                     const float* __restrict__ delta,
+                                     float* __restrict__ dk, float* __restrict__ dv, int S,
+                                     int H, float scale) {
+  const int j0 = blockIdx.x * BN_;
+  const int h = blockIdx.y;
+  const int tid = threadIdx.x;
+  const int S_ = S;
+
+  // 动态 smem（smem 总量 ~136KB > 48KB 静态上限）：单一 extern 缓冲手工切分（按 float 偏移）。
+  extern __shared__ float smem[];
+  const int off_Vs = BN_ * HD_;
+  const int off_dKa = 2 * off_Vs;
+  const int off_dVa = 3 * off_Vs;
+  const int off_Ps = 4 * off_Vs;
+  const int off_dSs = off_Ps + BM_ * BN_;
+  const int off_Qs = off_dSs + BM_ * BN_;
+  const int off_dOs = off_Qs + 2 * BM_ * HD_;
+  float(*Ks)[HD_] = (float(*)[HD_])smem;                     // 拥有的 K 行块：只读一次
+  float(*Vs)[HD_] = (float(*)[HD_])(smem + off_Vs);          // 拥有的 V 行块：只读一次
+  float(*dKa)[HD_] = (float(*)[HD_])(smem + off_dKa);        // dK 本地累加器（无 atomic）
+  float(*dVa)[HD_] = (float(*)[HD_])(smem + off_dVa);        // dV 本地累加器
+  float(*Ps)[BN_] = (float(*)[BN_])(smem + off_Ps);
+  float(*dSs)[BN_] = (float(*)[BN_])(smem + off_dSs);
+  float(*Qs)[BM_][HD_] = (float(*)[BM_][HD_])(smem + off_Qs);    // Q staging（双缓冲）
+  float(*dOs)[BM_][HD_] = (float(*)[BM_][HD_])(smem + off_dOs);  // dO staging（双缓冲）
+
+  auto rowp = [&](const float* p, int i) {
+    return p + ((size_t)(i * H + h)) * HD_;
+  };
+  constexpr int U = HD_ / 4;  // 每行 float4 单元数
+
+  for (int idx = tid; idx < BN_ * HD_; idx += THREADS) {
+    reinterpret_cast<float*>(dKa)[idx] = 0.f;
+    reinterpret_cast<float*>(dVa)[idx] = 0.f;
+  }
+  // 拥有的 K/V 行块：一次 vectorized 载入 smem（j 越界补 0）
+  for (int idx = tid; idx < BN_ * U; idx += THREADS) {
+    const int r = idx / U, c4 = idx % U;
+    const int j = j0 + r;
+    const bool ok = (j < S_);
+    const float4 kk = ok ? ((const float4*)rowp(k, j))[c4] : make_float4(0, 0, 0, 0);
+    const float4 vv = ok ? ((const float4*)rowp(v, j))[c4] : make_float4(0, 0, 0, 0);
+    ((float4*)Ks[r])[c4] = kk;
+    ((float4*)Vs[r])[c4] = vv;
+  }
+  __syncthreads();
+
+  // KV 行块 [j0,j0+BN) 只被 query i >= j0 消费 ⇒ 从含 j0 的 query 块开始（causal 裁剪）
+  const int mstart = (j0 / BM_) * BM_;
+
+  // Q/dO staging 的双缓冲：issue(stage, m0) 发一整块 BM×HD，越界补 0
+  auto issue = [&](int stage, int m0) {
+    for (int idx = tid; idx < BM_ * U; idx += THREADS) {
+      const int r = idx / U, c4 = idx % U;
+      const int i = m0 + r;
+      if (i < S_) {
+        cp_async16(&((float4*)Qs[stage][r])[c4], &((const float4*)rowp(q, i))[c4]);
+        cp_async16(&((float4*)dOs[stage][r])[c4], &((const float4*)rowp(do_, i))[c4]);
+      } else {
+        ((float4*)Qs[stage][r])[c4] = make_float4(0, 0, 0, 0);
+        ((float4*)dOs[stage][r])[c4] = make_float4(0, 0, 0, 0);
+      }
+    }
+    cp_async_commit();
+  };
+
+  issue(0, mstart);
+  int st = 0;
+  for (int m0 = mstart; m0 < S_; m0 += BM_, st ^= 1) {
+    const bool has_next = (m0 + BM_ < S_);
+    if (has_next) issue(st ^ 1, m0 + BM_);
+    if (has_next)
+      cp_async_wait<1>();  // 只等当前 stage（下一 stage 仍在飞）
+    else
+      cp_async_wait<0>();
+    __syncthreads();
+
+    // phase1：S=QKᵀ、P=softmax、dP=dO·Vᵀ、dS=P∘(dP−D)，全从 smem 读
+    for (int idx = tid; idx < BM_ * BN_; idx += THREADS) {
+      const int ii = idx / BN_, jj = idx % BN_;
+      const int i = m0 + ii, j = j0 + jj;
+      float p = 0.f, ds = 0.f;
+      if (i < S_ && j < S_ && j <= i) {
+        float s = 0.f, dp = 0.f;
+#pragma unroll 4
+        for (int d = 0; d < HD_; ++d) {
+          s += Qs[st][ii][d] * Ks[jj][d];
+          dp += dOs[st][ii][d] * Vs[jj][d];
+        }
+        p = __expf(s * scale - lse[i * H + h]);
+        ds = p * (dp - delta[i * H + h]);
+      }
+      Ps[ii][jj] = p;
+      dSs[ii][jj] = ds;
+    }
+    __syncthreads();
+    // phase2：dK += dSᵀQ、dV += PᵀdO，本地累加（无 atomic）
+    for (int idx = tid; idx < BN_ * HD_; idx += THREADS) {
+      const int jj = idx / HD_, d = idx % HD_;
+      float ak = 0.f, av = 0.f;
+#pragma unroll 4
+      for (int ii = 0; ii < BM_; ++ii) {
+        const int i = m0 + ii;
+        if (i >= S_) break;
+        ak += dSs[ii][jj] * Qs[st][ii][d];
+        av += Ps[ii][jj] * dOs[st][ii][d];
       }
       dKa[jj][d] += ak;
       dVa[jj][d] += av;
@@ -345,6 +504,8 @@ int main() {
   CUDA_CHECK(cudaMemcpy(ddelta, delta.data(), (size_t)S * H * 4, cudaMemcpyHostToDevice));
 
   dim3 gm((S + BM - 1) / BM, H), gk((S + BN - 1) / BN, H);
+  CUDA_CHECK(cudaFuncSetAttribute(kvowner_stage_kernel<BM, BN, HD>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, 139264));
   // Q-owner：分两次跑做 A/B 计时；red 大
   auto run_mo = [&](float* dk, float* dv) {
     CUDA_CHECK(cudaMemset(dk, 0, n * 4));
@@ -356,21 +517,31 @@ int main() {
     kvowner_kernel<BM, BN, HD><<<gk, THREADS>>>(dqq, dkk, dvv, ddo, dlse, ddelta, dk, dv, S, H,
                                                 scale);
   };
+  auto run_kvs = [&](float* dk, float* dv) {
+    kvowner_stage_kernel<BM, BN, HD><<<gk, THREADS, 139264>>>(dqq, dkk, dvv, ddo, dlse, ddelta,
+                                                              dk, dv, S, H, scale);
+  };
 
-  float *mo_dk, *mo_dv, *kvo_dk, *kvo_dv;
+  float *mo_dk, *mo_dv, *kvo_dk, *kvo_dv, *kvs_dk, *kvs_dv;
   CUDA_CHECK(cudaMalloc(&mo_dk, n * 4));
   CUDA_CHECK(cudaMalloc(&mo_dv, n * 4));
   CUDA_CHECK(cudaMalloc(&kvo_dk, n * 4));
   CUDA_CHECK(cudaMalloc(&kvo_dv, n * 4));
+  CUDA_CHECK(cudaMalloc(&kvs_dk, n * 4));
+  CUDA_CHECK(cudaMalloc(&kvs_dv, n * 4));
   run_mo(mo_dk, mo_dv);
   run_kvo(kvo_dk, kvo_dv);
+  run_kvs(kvs_dk, kvs_dv);
   CUDA_CHECK(cudaDeviceSynchronize());
 
-  std::vector<float> h_mo_dk(n), h_mo_dv(n), h_kvo_dk(n), h_kvo_dv(n);
+  std::vector<float> h_mo_dk(n), h_mo_dv(n), h_kvo_dk(n), h_kvo_dv(n), h_kvs_dk(n),
+      h_kvs_dv(n);
   CUDA_CHECK(cudaMemcpy(h_mo_dk.data(), mo_dk, n * 4, cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(h_mo_dv.data(), mo_dv, n * 4, cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(h_kvo_dk.data(), kvo_dk, n * 4, cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaMemcpy(h_kvo_dv.data(), kvo_dv, n * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(h_kvs_dk.data(), kvs_dk, n * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(h_kvs_dv.data(), kvs_dv, n * 4, cudaMemcpyDeviceToHost));
 
   auto maxabs = [&](const std::vector<float>& a, const std::vector<double>& b) {
     double m = 0.0;
@@ -396,8 +567,12 @@ int main() {
          maxabs(h_mo_dk, rdk), rel(h_mo_dk, rdk), maxabs(h_mo_dv, rdv), rel(h_mo_dv, rdv));
   printf("[vs host double ref]  KV-owner dk max_abs=%.3e rel=%.3e | dv max_abs=%.3e rel=%.3e\n",
          maxabs(h_kvo_dk, rdk), rel(h_kvo_dk, rdk), maxabs(h_kvo_dv, rdv), rel(h_kvo_dv, rdv));
+  printf("[vs host double ref]  KV-owner+stage dk max_abs=%.3e rel=%.3e | dv max_abs=%.3e rel=%.3e\n",
+         maxabs(h_kvs_dk, rdk), rel(h_kvs_dk, rdk), maxabs(h_kvs_dv, rdv), rel(h_kvs_dv, rdv));
   printf("[KV-owner vs Q-owner] dk max_abs=%.3e  dv max_abs=%.3e\n",
          vs_mo(h_kvo_dk, h_mo_dk), vs_mo(h_kvo_dv, h_mo_dv));
+  printf("[KV-owner+stage vs Q-owner] dk max_abs=%.3e  dv max_abs=%.3e\n",
+         vs_mo(h_kvs_dk, h_mo_dk), vs_mo(h_kvs_dv, h_mo_dv));
 
   // 计时
   auto bench = [&](auto fn, int iters) {
@@ -416,8 +591,11 @@ int main() {
   };
   float t_mo = bench([&] { run_mo(mo_dk, mo_dv); }, 20);
   float t_kvo = bench([&] { run_kvo(kvo_dk, kvo_dv); }, 20);
+  float t_kvs = bench([&] { run_kvs(kvs_dk, kvs_dv); }, 20);
   printf("[time] Q-owner atomic = %.4f ms | KV-owner single-store = %.4f ms (save %.2fx)\n",
          t_mo, t_kvo, t_mo / t_kvo);
+  printf("[time] KV-owner+stage = %.4f ms | vs Q-owner %.2fx | vs KV-owner %.2fx\n", t_kvs,
+         t_mo / t_kvs, t_kvo / t_kvs);
 
   CUDA_CHECK(cudaFree(dqq));
   CUDA_CHECK(cudaFree(dkk));
@@ -429,5 +607,7 @@ int main() {
   CUDA_CHECK(cudaFree(mo_dv));
   CUDA_CHECK(cudaFree(kvo_dk));
   CUDA_CHECK(cudaFree(kvo_dv));
+  CUDA_CHECK(cudaFree(kvs_dk));
+  CUDA_CHECK(cudaFree(kvs_dv));
   return 0;
 }
