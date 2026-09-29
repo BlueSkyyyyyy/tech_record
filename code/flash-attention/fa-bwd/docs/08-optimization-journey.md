@@ -1229,3 +1229,29 @@ smem 冲突 + 低 occ
 - **结论**：**p155 原型微调空间已尽（局部最优）**；F7 主体真杠杆只剩 **dQ 同循环（`cp.reduce.async
   .bulk` / partial+reduce）+ 三梯度同循环摊薄 `wait`**（GEMM3/5 上不了 fp8 wgmma，F6 三证）。
   工程量大，转「阻塞/下一步」。详见 `docs/03` §89；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p156_*`。
+
+### 5.71 F7 第十步：KV-owner 原型补 dQ 同循环（三梯度全通；atomic 归约判决，第一百五十七轮）
+
+- **动机**：§5.70 后 p155 的 KV-owner wgmma+TMA 原型（仅 dK/dV）微调已尽，F7 主体只剩「dQ 同
+  循环」。本轮把 dQ 落进同一循环，让 KV-owner 成为**首个三梯度全通的 fp8 反向原型**，并判决
+  「dQ 走 atomic」。
+- **做了什么**（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，`FA_KV_DQ` 默认 1，=0 退回 p155）：
+  ① fold 新增 `dS2[m][j]=dS[m][j]·ks[j]`（e5m2，per-m `sds2`，与 Q-owner 逐字同款）；
+  ② K 的配对布局 `Kp` 从 SW128 `Ks` **一次重建**；③ **GEMM4** `dQ += scale·(dS2·K)` =
+  `mma_block_bt<32,64,BN,E5E4>`，epilogue 乘 `sds2·scale` 后 `red_add2` 原子归约进 `dq`。
+  smem 67072→**74752B**（仍 3 CTA/SM）。
+- **数值**：`dq` vs fp32 ref S512 **2.4262e-1** / S1024H32 **2.3993e-1** / S4096 **2.6355e-1**
+  → 与 dk/dv **同量级 fp8 噪声**；`wgmma+TMA vs wgmma` dk/dv **逐位 0**。⇒ 三梯度数学正确。
+- **性能（同 binary A/B，main）**：dK/dV-only → 三梯度：S512 0.0462→**0.0750ms**、
+  S1024H32 0.1940→**0.3044**、S4096 1.1167→**1.8318ms**（dQ 增量 +1.6×）。
+- **ncu（S4096）**：Duration **1.84ms**、`red` **102.2M**（dK/dV-only 原型为 **0**）、`read` 52.6M /
+  `write` 6.2M、L2 63.86%、DRAM 2.45%、occ 17.8%（3 CTA/SM）、stall `wait 1.64 + short 1.52 +
+  long 0.89`。
+- **判决**：默认 fp8 `kvtma` main（三梯度）`red` **114.5M** / L2 76.96% / ~1.92ms。本原型 dK/dV red=0
+  但 dQ atomic 新添 **102.2M** ⇒ 总 red 114.5M→**102.2M（−10.7%）**、L2 −13pt、时间 −4%。
+  **解析式吻合**：dK/dV 贡献 `2·S²/(2BM)=S²/BM`，dQ 贡献 `S²/(2BN)`，`BM=64=2BN` ⇒ 相等。
+  ⇒ **原子从 dK/dV 搬到 dQ 是流量中性**，坐实 ROADMAP「候选①关闭」；**单趟 KV-owner 解锁不了
+  F7 的 prize（dK/dV-only 1.12ms）**。
+- **下一步**：让 dQ 也 **owned（red=0）**——① 两 kernel（KV-owner dK/dV ＋ Q-owner dQ-only pass，
+  S/dS 重算但省 ~74% L2）；② 两级 partial（需 BN≥BM）。详见 `docs/03` §90；原始输出
+  `src/fp8/fa_bwd_fp8_kvowner_mma_p157_dq_*`。
