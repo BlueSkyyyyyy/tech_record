@@ -435,6 +435,17 @@ fp8_kvowner_dkv_kernel(const unsigned char* __restrict__ q8, const float* __rest
 //   总 smem 67072B < base 70144B ⇒ **仍 3 CTA/SM**——即在不牺牲 occupancy 的前提下拿到
 //   异步（脱离 SM80 `mma.sync` 兼容路径的 `wait`）。
 #ifdef FA_WGMMA
+// F7 第九步：wgmma 壳的 CTA/SM 目标（`__launch_bounds__` 的 minBlocks）。默认 3（历史最优点）；
+//   置 2 让 ptxas 多用寄存器（消除 16B spill）、置 4 强制 128 regs 冲 4 CTA/SM，用于同 binary A/B。
+#ifndef FA_KV_CTA
+#define FA_KV_CTA 3
+#endif
+// F7 第九步：把 TMA 路径的 Qp/dOp 重建（`Qs/dOs` SW128 → 配对布局）**挪到 wgmma GEMM1/2 之后**，
+//   让这段纯 smem 搬运/交织工作与**异步 wgmma 的延迟重叠**（原顺序：重建 → sync → wgmma → wait0，
+//   重建串在 wgmma 之前）。置 0 退回原顺序做 A/B。
+#ifndef FA_KV_OVL
+#define FA_KV_OVL 0
+#endif
 // F7 第八步：把「Q/dO 的逐 ROW-pair 标量 global gather + __byte_perm 写 SW128」staging，
 //   换成 **4D-TMA 一次性搬入 SW128 tile**（对标 TE 的 TMA 数据通路），再从 SW128 重建
 //   Qp/dOp 的 K 配对布局（与主 kernel O37 逐字同构）。本 kernel = `TMA` 模板参数化后的
@@ -549,20 +560,9 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
   }
   uint32_t qph = 0;  // F7 第八步：Q/dO TMA mbarrier 的相位（每迭代翻转）
   for (int m0 = mstart; m0 < S; m0 += BM) {
-    // ---- staging：Q/dO 行 [m0,m0+BM) → SW128（Qs/dOs）+ 配对布局（Qp/dOp）----
-    if constexpr (TMA) {
-      // F7 第八步：4D-TMA 一次性把 Q/dO 搬进 SW128 tile（fp8 一行 128B = SW128 atom 整行），
-      //   再从 SW128 重建 Qp/dOp 的 K 配对布局（与主 kernel O37 逐字同构）。
-      if (tid == 0) {
-        mbar_arrive_expect(qbars + 0, (uint32_t)(BM * HD));
-        tma_load_4d(Qs, qmap, 0, m0, h, 0, qbars + 0);
-        mbar_arrive_expect(qbars + 1, (uint32_t)(BM * HD));
-        tma_load_4d(dOs, dmap, 0, m0, h, 0, qbars + 1);
-      }
-      mbar_wait(qbars + 0, qph);
-      mbar_wait(qbars + 1, qph);
-      qph ^= 1;
-      __syncthreads();
+    // F7 第九步：Qp/dOp 重建体（SW128 Qs/dOs → K 配对布局，与主 kernel O37 逐字同构）。
+    //   `FA_KV_OVL=1` 时在 wgmma 之后调用，与异步 wgmma 重叠；=0 时在 wgmma 之前调用（原顺序）。
+    auto build_paired_tma = [&]() {
       for (int u = tid; u < (BM / 2) * nd4; u += THREADS) {
         const int rp = u / nd4, dq = (u % nd4) * 4;
         const uint32_t q0 = *reinterpret_cast<const uint32_t*>(Qs + sw128_off_fp8(rp * 2, dq, HD));
@@ -576,6 +576,21 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
         opw[0] = __byte_perm(o0, o1, 0x5140);
         opw[1] = __byte_perm(o0, o1, 0x7362);
       }
+    };
+    // ---- staging：Q/dO 行 [m0,m0+BM) → SW128（Qs/dOs）+ 配对布局（Qp/dOp）----
+    if constexpr (TMA) {
+      // F7 第八步：4D-TMA 一次性把 Q/dO 搬进 SW128 tile（fp8 一行 128B = SW128 atom 整行）。
+      if (tid == 0) {
+        mbar_arrive_expect(qbars + 0, (uint32_t)(BM * HD));
+        tma_load_4d(Qs, qmap, 0, m0, h, 0, qbars + 0);
+        mbar_arrive_expect(qbars + 1, (uint32_t)(BM * HD));
+        tma_load_4d(dOs, dmap, 0, m0, h, 0, qbars + 1);
+      }
+      mbar_wait(qbars + 0, qph);
+      mbar_wait(qbars + 1, qph);
+      qph ^= 1;
+      __syncthreads();
+      if (!FA_KV_OVL) build_paired_tma();
     } else {
       for (int u = tid; u < (BM / 2) * nd4; u += THREADS) {
         const int rp = u / nd4, dq = (u % nd4) * 4;
@@ -628,6 +643,8 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
                           sacc);
       wgmma_mn32_issue<1>(reinterpret_cast<const char*>(dOs), reinterpret_cast<const char*>(Vs), HD,
                           dpacc);
+      // F7 第九步：OVL=1 时在此重建 Qp/dOp（与上面两条异步 wgmma 重叠），再等 wgmma。
+      if (FA_KV_OVL && TMA) build_paired_tma();
       wgmma_wait0_fp8();
 #pragma unroll
       for (int j = 0; j < 4; ++j)
@@ -772,7 +789,7 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
 
 // F7 第七步壳：非 TMA（标量 global gather staging）——行为与 p154 逐字一致。
 template <int HD, int BM, int BN>
-__global__ void __launch_bounds__(THREADS, 3)
+__global__ void __launch_bounds__(THREADS, FA_KV_CTA)
 fp8_kvowner_dkv_wgmma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                              const unsigned char* __restrict__ k8, const float* __restrict__ ks,
                              const unsigned char* __restrict__ v8, const float* __restrict__ vs,
@@ -786,7 +803,7 @@ fp8_kvowner_dkv_wgmma_kernel(const unsigned char* __restrict__ q8, const float* 
 #ifdef FA_TMA
 // F7 第八步壳：Q/dO 走 4D-TMA（需 `-DFA_TMA -lcuda` + sm90a gencode）。
 template <int HD, int BM, int BN>
-__global__ void __launch_bounds__(THREADS, 3)
+__global__ void __launch_bounds__(THREADS, FA_KV_CTA)
 fp8_kvowner_dkv_wgmma_tma_kernel(const unsigned char* __restrict__ q8,
                                  const float* __restrict__ qs,
                                  const unsigned char* __restrict__ k8,

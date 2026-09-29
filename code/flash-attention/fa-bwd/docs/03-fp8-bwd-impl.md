@@ -7987,3 +7987,62 @@ partial+reduce）；② **降 `dVacc/dKacc` + `dqacc` 寄存器冲 4 CTA/SM**；
   s1024_h32_d128_causal_fp8,s4096_h16_d128_causal_fp8}.out.txt`、
   `..._p155_nontma_{...}.out.txt`、`..._p155_ncu_{tma,wgmma}_s4096.out.txt`、
   `..._p155_stall_{tma,wgmma}_s4096.out.txt`。
+
+### 89 F7 第九步（第一百五十六轮）：F7 主体的「降寄存器冲 4 CTA/SM + 微调」子项判决 —— 负结果（p155 定为局部最优）
+
+**动机**：§88 后 F7 主体只剩两件大事：① **dQ 同循环**（跨 CTA 归约须 `cp.reduce.async.bulk` 或
+partial+reduce）；② **降 `dVacc/dKacc` 寄存器冲 4 CTA/SM（smem≤58KB / regs≤128）**。①是大改，
+②被列为「小步」。本轮先**把②以及几个便宜的微调旋钮一次性判决**，避免在 F7 主体大改前留盲点。
+
+**改动**（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，仅加两个编译期旋钮，默认值 = p155 逐字行为）：
+
+- **`FA_KV_CTA`**（默认 3）：wgmma 两壳的 `__launch_bounds__(THREADS, FA_KV_CTA)`，用于 CTA/SM 扫参。
+- **`FA_KV_OVL`**（默认 0）：把 TMA 路径的 **Qp/dOp 重建**（SW128 → K 配对布局）抽成
+  `build_paired_tma` lambda；=1 时挪到 wgmma GEMM1/2 **之后、`wait0` 之前**，试图让这段纯 smem
+  搬运/交织与**异步 wgmma 的延迟重叠**（原顺序是「重建 → sync → wgmma → wait0」，重建串在 wgmma 前）。
+
+**实验一：消 store bank conflict（机制验证，源码级 no-op）**。p155 ncu：`l1tex__data_bank_conflicts
+_pipe_lsu_mem_shared_op_st = 13.7M`（store 波前的 37.8%，ncu Est. 25%）。先怀疑是 Qp/dOp 重建的
+两次 4B 存（8B 步长 ⇒ 2-way），改成一次 8B `uint2` 存后：**`sm__inst_executed` 逐位不变
+470,056,960**、store conflict 也不变 13.73M ⇒ **nvcc 早把两次相邻 `ST.32` 合成 `ST.64`**，
+源级改动是 no-op（故已回退）。真正的 store 冲突源是 **Ps/Ss epilogue 的 `Ps[r*PSS+c]`**：8 行
+（`g`）× 4 列（`sub`，步长 2）在 `PSS=37`（≡5 mod 32）下 8 个基址 `{0,5,10,15,20,25,30,3}`
+各展开 `{0,2,4,6}` ⇒ 6 个 bank 二用；但**每行只用 4 个偶 bank、8 行需 32 个偶 bank 而全 warp 只有
+16 个偶 bank**，数学上**至少 2-way**（ncu 实测 2.5-way 已近最优）。且 **store 不产生 stall**
+（同为 dependency-bound 的 `wait`/`short`），故这条无杠杆。
+
+**实验二：CTA/SM 扫参（`FA_KV_CTA` = 1/2/3/4，同 session，main 仅 dK/dV，iters=100）**：
+
+| case | cta1 (237r/0spill) | cta2 (254r) | **cta3 (168r，默认)** | cta4 (128r，仍被 67KB smem 卡 3) |
+|---|---|---|---|---|
+| S512 H16 | **0.0449 ms** | 0.0450 | 0.0465 | 0.0498 |
+| S1024 H32 | 0.2198 | 0.2188 | **0.1918** | 0.2054 |
+| S4096 H16 | 1.2689 | 1.2683 | **1.1113** | 1.1803 |
+
+⇒ **3 CTA/SM（168 regs）是最优点**：2 CTA/SM（更多寄存器、0 spill）在大 S 慢 ~14%（warps 12→8）、
+1 CTA/SM 慢 ~14%、4 CTA/SM（强制 128 regs）慢 ~6%。**「降寄存器冲 4 CTA/SM」在本卡不成立**：
+168→128 要砍 40 regs，而两个跨 m-loop 常驻的 `dVacc/dKacc`（各 `[1][8][4]`=32）、`sacc/dpacc`
+（各 16）已占 96；除非把 dK/dV 拆成两个 kernel（读翻倍）或把累加器降 fp16（改数值口径）——
+均不划算。且即便 regs 降到 128，smem 67KB 仍把 Block Limit Shared Mem 卡在 3（要到 4 须 ≤58KB，
+需再去 Qp/dOp 的 17.4KB = F6 已判不可行的路）。**⇒ 4 CTA/SM 双硬墙（regs + smem）均未松动。**
+
+**实验三：Qp/dOp 重建与 wgmma 重叠（`FA_KV_OVL` 0/1）**：bitwise `wgmma+TMA vs wgmma = 0/0`
+（仅改重排），但性能 **S512/S1024 慢 ~1%、S4096 中性**。ptxas 报 **`C7517`：在 OVL=1 下注入了
+额外 `wgmma.wait_group`**——编译器保守地把重建排在 wgmma 之后（防 GMMA 寄存器依赖），**重叠被
+串行化**，故无收益（与 O22/O29/O46「`wait` 不是靠指令重排能解的」一致）。
+
+**ncu（S4096，最终默认档）**：Duration 1.12ms、`Executed Instructions` 470.06M、`red` **0**、
+`lts read` 52.2M / `write` 12.4M、L1/TEX 66.3%、Compute 44.4%、occ 17.7%（**3 CTA/SM**）、
+stall **`wait 1.53` + `short 1.31` + `long 0.43`**、load conflict 5.51M（占 load 波前 5.7%，
+`PSLD=136` 的 `ldmatrix.x2.trans` 16 行 stride 68 word ≡ 4 ⇒ 2-way，但量小）、store conflict
+13.7M（不 stall）。
+
+**结论**：**p155 的 KV-owner wgmma+TMA 原型是「微调空间已尽」的局部最优**——消 store 冲突无杠杆
+（no-op / 数学下界 / 不 stall）、CTA/SM 3 为最优、指令重排被 ptxas 串行化、4 CTA/SM 被 regs+smem
+双墙锁死。剩余唯一真杠杆 = **F7 主体本身（dQ 同循环 + GEMM3/5 的等待方式）**：GEMM3/5 上不了
+fp8 wgmma（F6/「阻塞」三证），唯一路是把 **dQ 的跨 CTA 归约改成 `cp.reduce.async.bulk` / partial+
+reduce** 并把三梯度收进同一循环以摊薄 `wait`——工程量大，转入「阻塞/下一步」。
+
+- 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p156_tma_{s512_h16_d128_causal_fp8,
+  s1024_h32_d128_causal_fp8,s4096_h16_d128_causal_fp8}.out.txt`、
+  `..._p156_ncu_tma_s4096.out.txt`、`..._p156_ctasweep_s4096.out.txt`、`..._p156_ovlsweep.out.txt`。

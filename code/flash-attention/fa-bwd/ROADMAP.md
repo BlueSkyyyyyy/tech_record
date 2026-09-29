@@ -2889,13 +2889,46 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
         race**：wgmma 经 async proxy 读 smem，generic 写的 K/V/Q/dO 缺
         `fence.proxy.async.shared::cta` ⇒ 偶发 nondeterminism（已在 HEAD 原文件复现），补
         `bulk_reduce_fence()` 后 8/8 稳定。见 `docs/03` §88、`docs/08` §5.69。
-        **剩余（F7 主体）**：dQ 同循环 + 降寄存器冲 4 CTA/SM。
+         **剩余（F7 主体）**：dQ 同循环 + 降寄存器冲 4 CTA/SM。
+        → **第九步已完成（第一百五十六轮，微调判决：负结果，p155 定为局部最优）**：加两个编译期
+        旋钮（`FA_KV_CTA` / `FA_KV_OVL`）并一次性判决 F7 主体的「便宜子项」：① **消 store bank
+        conflict 无杠杆**——源码把 Qp/dOp 两次 4B 存合成 `uint2` 后 `sm__inst_executed` 与 store
+        conflict **逐位不变**（nvcc 早合成 `ST.64`，源级 no-op、已回退），真冲突源是 Ps/Ss
+        epilogue（`PSS=37`，8 行×4 偶 bank ⇒ 数学下界 ≥2-way）且 store 不 stall；② **CTA/SM
+        扫参 1/2/3/4 → 3 最优**（S4096 1.269/1.268/**1.111**/1.180ms，S1024H32 0.220/0.219/
+        **0.192**/0.205），**「降寄存器冲 4 CTA/SM」双硬墙（regs 168→128 要砍 40、smem 67KB 需
+        ≤58KB）均未松动**；③ **Qp/dOp 重建与 wgmma 重叠**（`FA_KV_OVL`）bitwise `0/0` 但性能
+        中性/略负（ptxas **C7517** 注入额外 `wait_group`，重叠被串行化）。ncu（最终档）：`red 0`、
+        `wait 1.53 + short 1.31`、3 CTA/SM。⇒ **微调空间已尽，F7 主体只剩算法级改动**：dQ 同循环
+        （`cp.reduce.async.bulk` / partial+reduce）+ 三梯度同循环摊薄 `wait`（GEMM3/5 上不了 fp8
+        wgmma，F6 三证）。见 `docs/03` §89、`docs/08` §5.70；原始输出
+        `src/fp8/fa_bwd_fp8_kvowner_mma_p156_*`。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百五十五轮）**：**F7 第八步——KV-owner wgmma 原型的 Q/dO 4D-TMA staging
+> **最新（第一百五十六轮）**：**F7 第九步——微调判决（负结果）：p155 的 KV-owner wgmma+TMA
+> 原型定为局部最优**。为在 F7 主体大改前消除盲点，一次性判决三个「便宜旋钮」（加两个默认关闭
+> 的编译期开关 `FA_KV_CTA`/`FA_KV_OVL`，默认 = p155 逐字行为）：① **消 store bank conflict
+> 无杠杆**——Qp/dOp 两次 4B 存合成一次 8B 存后 `sm__inst_executed` 与 store conflict **逐位不变**
+> （`470,056,960` / `13.73M`；nvcc 早合成 `ST.64`，源级 no-op、已回退），真冲突源是 `Ps/Ss`
+> epilogue（`PSS=37`，每行 4 个偶 bank ⇒ 8 行数学下界 ≥2-way）且 store 不 stall；② **CTA/SM
+> 扫参 1/2/3/4 → 3 最优**（S4096 `1.269/1.268/**1.111**/1.180ms`、S1024H32 `0.220/0.219/
+> **0.192**/0.205`、S512 `0.0449/0.0450/0.0465/0.0498`）⇒ **「降寄存器冲 4 CTA/SM」双硬墙
+> （168→128 要砍 40 regs、smem 67KB 需 ≤58KB）均未松动**；③ **Qp/dOp 重建挪到 wgmma 后做重叠**
+> （`FA_KV_OVL`）数值逐位 `0/0`，但性能 S512/S1024 慢 ~1%、S4096 中性——ptxas **`C7517`**
+> 注入了额外 `wgmma.wait_group`，重叠被串行化（同 O22/O29/O46）。ncu（最终档 S4096）：Duration
+> 1.12ms、`red 0`、L1/TEX 66.3%、occ 17.7%（3 CTA/SM）、stall `wait 1.53 + short 1.31 + long
+> 0.43`。⇒ **微调空间已尽，F7 主体只剩算法级改动**。文档 `docs/03` §89、`docs/08` §5.70；原始
+> 输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p156_*`。
+> **下一步候选**：① **F7 主体（唯一真杠杆，算法级）**——在 wgmma+TMA 化的 KV-owner 上补 **dQ
+> 同循环**，用 **`cp.reduce.async.bulk`（TMA store-reduce）/ partial+reduce** 做 dQ 的跨 CTA 归约
+> （不能走 naive atomic：KV-owner 下 dQ 的贡献数 ≈ `S/BN`，比原 dK/dV red 更大），并把三梯度收进
+> 同循环以摊薄 `wait`、对标 TE grid=132；② 其余候选（F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、
+> ksplit/LSE、非 main 融合）均已判决/到顶/收口；③ DET 仅 opt-in。
+>
+> **（第一百五十五轮）**：**F7 第八步——KV-owner wgmma 原型的 Q/dO 4D-TMA staging
 > （全 shape 正结果）＋修一处 p154 遗留 race**。落实第一百五十四轮「下一步候选 ①」的
 > 「4D-TMA staging（对标 TE）」子项：把 `fp8_kvowner_dkv_wgmma_kernel` 抽成 device body
 > `<...,bool TMA>` + 两薄壳，`TMA=true` 用两条 4D-TMA（UINT8 box={128,64}、SWIZZLE_128B，
@@ -6219,6 +6252,34 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       **dQ 同循环**（跨 CTA 归约 / partial+reduce）+ **降寄存器冲 4 CTA/SM**。本原型仍 dK/dV-only
       （FLOPs 2/3），非生产路径；同 session TE FP8 纯反向（全反向）S4096 = 0.3003ms/915.25TF。
       见 `docs/03` §88、`docs/08` §5.69；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p155_*`。
+
+- 2026-09-30（第一百五十六轮）：**F7 第九步完成（KV-owner wgmma+TMA 的微调判决：负结果，
+  p155 定为局部最优）**——F7 主体大改前先消除便宜旋钮的盲点。
+    - `src/fp8/fa_bwd_fp8_kvowner_mma.cu`：加两个默认关闭的编译期开关 **`FA_KV_CTA`**（wgmma
+      两壳的 `__launch_bounds__`，默认 3）与 **`FA_KV_OVL`**（+`build_paired_tma` lambda，=1 时把
+      TMA 路径 Qp/dOp 重建挪到 wgmma 之后做重叠）；默认档 = p155 **逐字行为**。
+    - **① 消 store bank conflict = 无杠杆**：Qp/dOp 两次 4B 存合成一次 `uint2` 后
+      **`sm__inst_executed` 逐位不变 470,056,960**、`l1tex..._op_st bank_conflict` 逐位不变
+      **13.73M** ⇒ nvcc 早合成 `ST.64`，源级改动是 **no-op**（已回退）。真冲突源是 `Ps/Ss`
+      epilogue（`PSS=37`：8 行 `{0,5,10,15,20,25,30,3}` 各展开 `{0,2,4,6}`，而每行仅用 4 个
+      **偶** bank ⇒ 8 行/16 偶 bank 数学下界 **≥2-way**），且 **store 不产生 stall**（墙是 `wait`/
+      `short`）。load conflict 仅 5.51M（占 load 波前 5.7%）。
+    - **② CTA/SM 扫参 1/2/3/4 → 3 最优**（同 session，main 仅 dK/dV，iters=100，ms）：
+      S4096 `1.269 / 1.268 / **1.111** / 1.180`、S1024H32 `0.220 / 0.219 / **0.192** / 0.205`、
+      S512 `0.0449 / 0.0450 / 0.0465 / 0.0498`（regs 237/0spill、254、168、128；smem 67KB 使 cta4
+      仍卡 3）。⇒ **「降寄存器冲 4 CTA/SM」双硬墙（168→128 要砍 40 regs、smem 67KB 需 ≤58KB）
+      均未松动**：`dVacc/dKacc`(64)+`sacc/dpacc`(32) 已占 96，拆/降精度均不划算。
+    - **③ Qp/dOp 重建与 wgmma 重叠（`FA_KV_OVL` 0/1）**：数值逐位 `wgmma+TMA vs wgmma = 0/0`；
+      性能 S512/S1024 慢 ~1%、S4096 中性——ptxas **`C7517`** 在 OVL=1 注入额外 `wgmma.wait_group`
+      把重叠串行化（同 O22/O29/O46「`wait` 非指令重排可解」）。
+    - **ncu（最终默认档 S4096）**：Duration 1.12ms、指令 470.06M、**`red` 仍 0**、`lts read`
+      52.2M / `write` 12.4M、L1/TEX 66.3% / Compute 44.4% / occ 17.7%（**3 CTA/SM**）、stall
+      **`wait 1.53` + `short 1.31` + `long 0.43`**。
+    - **结论**：**p155 原型微调空间已尽（局部最优）**；F7 主体唯一真杠杆 = **算法级**：dQ 同循环
+      （`cp.reduce.async.bulk` / partial+reduce，naive atomic 更差：KV-owner 下 dQ 贡献数 ≈ `S/BN`
+      > 原 dK/dV red）+ 三梯度同循环摊薄 `wait`（GEMM3/5 上不了 fp8 wgmma，F6 三证）。工程量大，
+      转「下一步候选 ①/阻塞」。见 `docs/03` §89、`docs/08` §5.70；原始输出
+      `src/fp8/fa_bwd_fp8_kvowner_mma_p156_*`。
 
 ## 灵感 / backlog
 
