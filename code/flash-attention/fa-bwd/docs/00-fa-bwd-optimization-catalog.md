@@ -212,6 +212,12 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
 - `D`/`dS` 计算和 `dS` 量化在 fp32 完成后再量化；
 - 先做 **正确性**（对 fp32 ref 的容差），再对标 TE fp8 的时间。
 
+> **更新（第一百三十二轮，F1）**：fp8 反向已远不止 `mma.m16n8k32`——GEMM1/2 走 Hopper
+> `wgmma`、Q/K/V/dO 走 4D-TMA（O9c-2/O32/O37/O41），并在 **F1** 里把这条快路设为**默认构建**
+> （`harness/fa_bwd_run.py` 的 `FP8_HOPPER_DEFAULT`）。SASS 为 **QGMMA 8 + HMMA 96 + LDSM 46
+> + UTMA 7**；GEMM3/4/5 因 fp8 `wgmma` 无转置操作数仍 `mma.sync`（见 ROADMAP「阻塞」）。
+> 详见 `docs/03` §67。
+
 ---
 
 ## 5. 目标 AI 卡的可移植性注意点
