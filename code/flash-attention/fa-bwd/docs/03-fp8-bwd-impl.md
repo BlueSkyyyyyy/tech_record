@@ -7843,3 +7843,67 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_mma.cu -c 1 \
   `..._p153_s512.out.txt`、`..._p153_ncu_dyn_metrics_s4096.out.txt`、
   `..._p153_ncu_static_metrics_s4096.out.txt`、`..._p153_ncu_base_metrics_s4096.out.txt`、
   `..._p153_ncu_dyn_s4096.out.txt`（`--set full`）。
+
+### 87 F7 第七步：KV-owner mma 原型的 GEMM1/2 换 Hopper `wgmma`（负→正结果，第一百五十四轮）
+
+**动机**：§86（第 153 轮）把 KV-owner mma 原型的 dynamic work-queue 调度调到与硬件调度 base
+持平（0.993×），但 main 仍只做 dK/dV 且**未转正**。ncu 钉死 base 的第一墙是
+`wait 1.44 + short_scoreboard 0.88`（**mma / `ldmatrix` 依赖**），而 `long_scoreboard` 仅 0.58
+⇒ **不是全局访存延迟**。F6 第二步（Q-owner）已证明「GEMM1/2 换 wgmma」能把两条独立 mma 的
+等待重叠掉；本步把同款改造搬到 KV-owner 原型，检验它在**不牺牲 occupancy** 的前提下能否打 `wait`。
+
+**改动**（`src/fp8/fa_bwd_fp8_kvowner_mma.cu` 新增 `fp8_kvowner_dkv_wgmma_kernel`，`-DFA_WGMMA` 构建）：
+
+- Q/dO/K/V 的 smem 全部改存 **SW128 K-major**（fp8 一行 128B = 一个反交织 atom 的整行，
+  `sw128_off_fp8`），不再存行主序 ASLD；`Qp/dOp` 的 K 配对布局由同一份 `q0/q1` 用
+  `__byte_perm` 直接写出（不变）。
+- GEMM1 `S=scale·QKᵀ`(e4m3×e4m3) 与 GEMM2 `dP=dO·Vᵀ`(e5m2×e4m3) 用 **`wgmma.m64n32k32`**
+  （1 warpgroup=128 线程；BM=64、BN=32）**直读 smem 描述符**，两条异步 mma 一起发、统一
+  `wgmma.wait_group 0`；epilogue 改用 wgmma 累加器映射（warp `w` 持行 `[16w,16w+16)`，
+  `sacc[j*4+q]` ↔ `row=16w+g+(q>=2?8:0)`、`col=j*8+2*(lane%4)+(q&1)`），LSE/D 预装 2 个行槽。
+- GEMM3(dV)/GEMM5(dK) **仍 `mma.m16n8k32 + ldmatrix`**（fp8 wgmma 无转置操作数、MN-major
+  描述符无效，O9c-2 / 「阻塞」已三证判死），B 仍用 O4b 的 K 配对布局。
+- **收益账**：SW128 tile 比 ASLD 行主序更紧凑（Ks/Vs 4096 vs 4608、Qs/dOs 8192 vs 9216），
+  总 smem **67072B < base 70144B** ⇒ 仍 **3 CTA/SM**——这是与 §84 的 pipe 变体（103.5KB → 2
+  CTA/SM）的关键区别：**在不掉 occupancy 的前提下拿到异步 mma**。
+
+**数值**（ours-vs-fp32 ref，单 case）：S512 dk/dv `2.976e-1 / 3.732e-1`、S1024H32
+`4.176e-1 / 3.535e-1`、S4096 `2.644e-1 / 3.216e-1`——与 base 同量级（base 为 2.975e-1/3.735e-1、
+2.643e-1/3.216e-1），**无系统误差**。`wgmma vs base` 差 3.1e-2（S512）/ 4.1e-2（S1024H32）/
+1.50e-1（S4096），与既有 `ours(Q-owner atomic) vs base` 同值 ⇒ 仅是 **fp8 GEMM1/2 累加次序**
+（wgmma 与 mma）经 `exp` 放大后的 fp8 噪声，与「换 KV-owner 划分」同源，**非 bug**。
+
+**性能**（CUDA event，同 binary A/B，iters=50，main 仅 dK/dV）：
+
+| case | base | pipe | dynamic wq | **wgmma** | wg/base | wg/pipe | wg/dyn |
+|---|---|---|---|---|---|---|---|
+| S512 H16 | 0.0570 ms | 0.0492 | 0.0589 | **0.0571 ms** | 0.998× | 0.861× | 1.031× |
+| S1024 H32 | 0.2407 ms | 0.2514 | 0.2411 | **0.2398 ms** | **1.004×** | 1.049× | 1.005× |
+| S4096 H16 | 1.4128 ms | 1.4428 | 1.4074 | **1.3472 ms** | **1.049×** | 1.071× | 1.045× |
+
+- 大 S 正收益（**S4096 1.049×**，且优于 §84 pipe 的 0.979×、§86 dynamic 的 1.004×），中等 S
+  中性（1.004×），小 S 略负（0.998×，grid=256 单波、本就 grid-bound）。
+- **ncu（S4096 H16）**：wgmma vs base —— Duration **1.42→1.38ms**、`Executed Instructions`
+  **638.7M → 541.0M（−15.3%）**（mma+ldmatrix 换成 wgmma 的直接证据）、Compute **47.25→41.01%**、
+  L1/TEX 56.77→56.51%、L2 12.78→**17.23%**、regs 168 / smem 65.5KB / **3 CTA/SM** 不变、
+  achieved occ 17.7%。
+  **stall（per-issue-active）**：`wait 1.44→1.52`、`short 0.88→0.96`、`long 0.58→1.40`、
+  `not_selected 0.55→0.36`、`barrier 0.22→0.28`。
+  ⇒ **`wait` 并未下降**（wgmma 的 `wait0` 本身仍等，且指令数变少后全局延迟相对更暴露，
+  `long` 反升）；**净收益来自指令数 −15.3%**（去掉 `ldmatrix` 与 SM80 兼容 path 的多余发射），
+  不是消除 `wait`。这与 F6 第二步（Q-owner）的「换 wgmma 但墙在别处 ⇒ 中性」不同：
+  KV-owner 原型本就 issue/指令偏重，减指令能直接缩短关键路径。
+
+**结论 / 下一步**：
+- **正结果（大 S）**：KV-owner dK/dV 原型的 GEMM1/2 上 wgmma（配 SW128、**保持 3 CTA/SM**）
+  把 S4096 main 1.049×（1.413→1.347ms）、指令 −15.3%，是 §84/§86 之后**第一个在大 S 转正的
+  KV-owner 结构改动**；也优于 pipe（0.979×）与 dynamic（1.004×）。
+- 但它仍是 **dK/dV-only** 原型（FLOPs 只算 2/3），且净收益仅 ~5%——**F7 主体要真正对标 TE
+  （grid=132、1 CTA/SM、wgmma+TMA）还需**：① 把 Q/K/V/dO 的 `cp.async`/标量 staging 换成
+  **4D-TMA**（对标 TE）；② 加 **dQ 同循环**（dQ 的跨 CTA 归约须 `cp.reduce.async.bulk` 或
+  partial+reduce）；③ 降 `dVacc/dKacc` + `dqacc` 寄存器冲 **4 CTA/SM**。本轮把①③之外的
+  「GEMM 指令层」先对齐 TE（wgmma 已进 KV-owner）。
+- 原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p154_s512_h16_d128_causal_fp8.out.txt`、
+  `..._p154_s1024_h32_d128_causal_fp8.out.txt`、`..._p154_s4096_h16_d128_causal_fp8.out.txt`、
+  `..._p154_ncu_wgmma_s4096.out.txt`、`..._p154_ncu_base_s4096.out.txt`、
+  `..._p154_stall_{base,wgmma}_s4096.out.txt`。
