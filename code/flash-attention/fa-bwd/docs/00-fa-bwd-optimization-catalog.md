@@ -235,8 +235,15 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
      `--zfuse=0` A/B。**数值逐位/1 ulp**；**S512 1.053×、MLA 1.035×、GQA 1.012×、S4096 中性**
      （ncu：S4096 融合 33.95µs/DRAM 70.8% ≈ 拆开的 14.3+21µs，同字节带宽 bound；S512 融合
      6.1µs/DRAM 20.5%，省的是 launch 开销）。**教训：融合只对「不满带宽的小 kernel」有效**——
-     fp8 quant 只到 58% 故 O64 有效，fp16/bf16 memset 已 3.1TB/s 故仅小 shape 有 1–5%。见
-     `docs/01` §20、`docs/01b` §6aw、`docs/08` §5.59。
+      fp8 quant 只到 58% 故 O64 有效，fp16/bf16 memset 已 3.1TB/s 故仅小 shape 有 1–5%。见
+      `docs/01` §20、`docs/01b` §6aw、`docs/08` §5.59。
+   → **fp8 把 delta 融进「量化 + 清零」单 launch（O66，第一百四十六轮，正结果，默认）**：
+     delta（`D=rowsum(dO∘O)`）只依赖 dO/O、与 dO 的 rowwise 量化同域同几何。新增
+     `quant_delta_row_warp`（量化 dO 时用寄存器值顺便算 delta）+ `quantize_zero_delta_warp_kernel`；
+     **delta 必须耦合进 dO 量化任务**（同 launch 内无跨 warp 同步，独立任务读 `do8` 会竞争）。
+     **数值逐位不变**（`max_abs=0`）；**S512 1.047×、S1024H32 1.025×、MLA 1.021×、varlen 1.036×、
+     S4096 1.003×**（ncu 融合 kernel DRAM 76.3%/L2 84.7%）。**fp8 非 main 固定开销融合收口**。
+     见 `docs/03` §79、`docs/08` §5.60。
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 

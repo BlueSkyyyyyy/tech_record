@@ -2807,7 +2807,24 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百四十五轮）**：**O65——fp16/bf16 prologue 融合（清零 dq/dk/dv + delta 单 launch，
+> **最新（第一百四十六轮）**：**O66——fp8 把 delta 融进「量化 + 清零」单 launch（正结果，默认）**
+> ——继 O64/O65 之后继续清 fp8 非 main 固定开销。O64 已把「4 次量化 + 3 次清零」并成 1 个
+> `quantize_zero_warp_kernel`，但 **delta 仍是紧随的一次独立 `delta_warp_kernel` launch**；delta 只
+> 依赖 dO/O、且逐 query 行归约，与 dO 的 rowwise 量化**同域同 warp-per-row 几何**。新增
+> `quant_delta_row_warp`（量化 dO 时用寄存器值顺便算 delta）+ `quantize_zero_delta_warp_kernel`
+> （O64 任务序**逐字相同**）。**正确性关键**：delta 必须**耦合进 dO 量化任务**——同 launch 内无跨
+> warp 同步，独立任务读 `do8` 会与量化写竞争。host `--dfuse=`（默认 1）/`--dfuse=0` 同 binary A/B。
+> **数值逐位不变**（`max_abs(delta fused-vs-separate)=0`；ours vs ref 与历史逐位一致）。**性能
+> （event）**：S512 **1.047×**、S1024H32 **1.025×**、MLA S1024H2 **1.021×**、varlen D128
+> **1.036×**、S4096 **1.003×**。ncu 融合 kernel DRAM 76.3%/L2 84.7%/31 regs。`--ci --dtype fp8`
+> （定长+varlen）全绿（gate worst 9.537e-06）、`--check docs/04` OK 194 行。**结论：fp8 非 main
+> 固定开销融合收口**。详见「当前进度 第一百四十六轮」、`docs/03` §79、`docs/08` §5.60、`docs/00`
+> §4.2；原始输出 `src/fp8/fa_bwd_fp8_o66_*`。
+> **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡寄存器/smem 硬墙锁定，见「阻塞」）；
+> ② 其余候选（dK/dV-over-KV、GEMM3/4/5 wgmma、ksplit、非 main 融合）均已判决/到顶/收口；
+> ③ DET 仅 opt-in、非目标。
+>
+> **（第一百四十五轮）**：**O65——fp16/bf16 prologue 融合（清零 dq/dk/dv + delta 单 launch，
 > 小/中 shape 正结果、大 S 中性；默认）**——落实第 144 轮「下一步候选 ②」。新增
 > `zero_delta_warp_kernel<HD>`（float4 清零 dq/dk/dv + 与 O24 `delta_warp` 逐字同几何的 delta），
 > `--zfuse=`（默认 1）/`--zfuse=0` 同 binary A/B，fp16/bf16 单/两文件同源。**数值逐位/1 ulp**；
@@ -2818,9 +2835,6 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > （fp8 quant 58% 故 O64 有效；fp16/bf16 memset 已 3.1 TB/s 故仅小 shape 1–5%）。详见「当前进度
 > 第一百四十五轮」、`docs/01` §20、`docs/01b` §6aw、`docs/08` §5.59；原始输出
 > `src/fp16/fa_bwd_fp16_o65_*`、`src/bf16/fa_bwd_bf16_o65_*`。
-> **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡寄存器/smem 硬墙锁定，见「阻塞」）；
-> ② 其余候选（dK/dV-over-KV、GEMM3/4/5 wgmma、ksplit/LSE、prologue 融合）均已判决/到顶；
-> ③ DET 仅 opt-in、非目标。
 >
 > **（第一百四十四轮）**：**O64——fp8 输入量化 + 累加缓冲清零融合成单 launch**
 > （**正结果，默认**）。F1→F6 收口后 fp8 main 受本卡寄存器/smem 硬墙锁定（见「阻塞」），
@@ -5729,6 +5743,35 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
   - **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡硬墙锁定，见「阻塞」）；
     ② 其余候选（dK/dV-over-KV、GEMM3/4/5 wgmma、ksplit/LSE、prologue 融合）均已判决/到顶；
     ③ DET 仅 opt-in。
+
+- 2026-09-30（第一百四十六轮）：**O66 完成（fp8 把 delta 融进「量化 + 清零」单 launch；
+  正结果，默认）**——继 O64/O65 之后继续清 fp8 非 main 固定开销。
+    - 动机：O64（§78）已把「4 次量化 + 3 次清零」并成 1 个 `quantize_zero_warp_kernel`，但
+      **delta（`D=rowsum(dO∘O)`）仍是紧随的一次独立 `delta_warp_kernel` launch**。delta 只依赖
+      dO/O、且是逐 query 行归约——与 dO 的 rowwise 量化同域、同 warp-per-row 几何。
+    - **改动（单/两文件 device 逐字同源，`sync_onefile_device.py` 核对 `identical: True`）**：
+      新增 `quant_delta_row_warp<VPT>`（量化 dO 时用寄存器里的 dO 值与同步读入的 O 行顺便算
+      delta）与 `quantize_zero_delta_warp_kernel<VPT>`（O64 任务序**逐字相同**，dO 档换成融合版）。
+      **正确性关键**：delta 必须**耦合进 dO 的量化任务**（同一 warp 内）——同一 launch 内无跨 warp
+      同步，若作独立任务读 `do8` 会与量化写竞争。host 加 `--dfuse=`（默认 1，需 `qfuse=1` 且
+      `delta_warp_sel`）在定长/varlen 的 `run_all` 调融合 kernel、`run_preprocess(false)` 跳过独立
+      delta；新增 `[O66 A/B]`（同 binary 端到端 + delta 缓冲逐位校验）。
+    - **数值逐位不变**：`max_abs(delta fused-vs-separate) = 0.000e+00`（所有 shape）；`ours vs ref`
+      与历史逐位一致（S512 2.426/2.972/3.733e-1、S1024H32 2.399/4.177/3.535e-1、S4096
+      2.635/2.644/3.216e-1、MLA S1024H2 2.232/3.337/3.602e-1、varlen D128 b1_t512
+      2.280/3.108/3.422e-1、varlen MLA b3 3.404/3.436/3.508e-1）。
+    - **性能（同 binary `[O66 A/B]`，event）**：S512 **1.047×**（两文件）/1.049×（单文件）、
+      S1024H32 **1.025×**、MLA S1024H2 **1.021×**、varlen D128 b1_t512 **1.036×**、S4096
+      **1.003×**（端到端 1.003–1.049×，小/中 shape 收益最大）。ncu 融合 kernel（S1024H32）
+      `Duration 50.85µs / DRAM 76.3% / L2 84.7% / SM 61.8% / 31 regs` ⇒ 仍 DRAM/L2 带宽 bound。
+    - **CI**：`--ci --dtype fp8`（定长 + varlen）**全绿**（一致性 gate worst **9.537e-06**、tol 1e-4；
+      `--check docs/04` OK 194 行）；sm_90 与 sm90a 构建均通过。
+    - 文档 `docs/03` §79、`docs/08` §5.60、`docs/00` §4.2；原始输出 `src/fp8/fa_bwd_fp8_o66_*`。
+    - **结论**：**fp8 非 main 固定开销的「小 launch 融合」至此收口**（7 类任务 + delta = 一次
+      launch）。剩余墙仍是默认 fp8 main 的 L2 `red`（受本卡寄存器/smem 硬墙锁定，见「阻塞」）。
+    - **下一步候选**：① 默认 fp8 main 的 L2 `red` 墙（F4/F6，受本卡硬墙锁定，见「阻塞」）；
+      ② 其余候选（dK/dV-over-KV、GEMM3/4/5 wgmma、ksplit、非 main 融合）均已判决/到顶/收口；
+      ③ DET 仅 opt-in。
 
 ## 灵感 / backlog
 

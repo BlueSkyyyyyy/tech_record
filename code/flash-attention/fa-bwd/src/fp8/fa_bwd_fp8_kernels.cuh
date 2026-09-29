@@ -1437,6 +1437,66 @@ __device__ __forceinline__ void zero_row_warp(float* __restrict__ x, long long r
   for (int t = 0; t < VPT / 4; ++t) p[t * 32 + lane] = z;
 }
 
+// O66：`quant_row_warp<E5M2>` 的「顺便算 delta」版——量化 dO(E5M2) 的同时就地算
+//   delta[row] = Σ_d O[d]·(deq_e5m2(do8[d])·dos[row])。
+//   动机：delta 只依赖 dO/O 两项、且是逐 query 行的归约；与 dO 的量化同域、同 warp-per-row
+//   几何。把两者合进同一个 warp 任务，可省掉一次 delta kernel 的 launch 与对 do8 的回读。
+//   **数值与 `delta_warp_kernel` 逐位相同**：lane 累加顺序同为「t 外层（元素 t*128+lane*4）、
+//   float4 内 x/y/z/w 内层」，随后同一 `__shfl_xor_sync` 树；`s == dos[row]`、`cvt`/`deq` 与
+//   量化/delta 现用函数逐字一致（A/B 里 `max_abs(fused-vs-delta_warp) == 0`）。
+template <int VPT>
+__device__ __forceinline__ void quant_delta_row_warp(const float* __restrict__ x,
+                                                     unsigned char* __restrict__ xq,
+                                                     float* __restrict__ scale,
+                                                     const float* __restrict__ o,
+                                                     float* __restrict__ delta, long long row,
+                                                     int lane) {
+  constexpr int D = VPT * 32;
+  const float fp8_max = kE5M2Max;
+  const float4* xr4 = reinterpret_cast<const float4*>(x + row * (long long)D);
+  const float4* or4 = reinterpret_cast<const float4*>(o + row * (long long)D);
+  float v[VPT];
+  float ov[VPT];
+  float amax = 0.f;
+#pragma unroll
+  for (int t = 0; t < VPT / 4; ++t) {
+    const float4 q = xr4[t * 32 + lane];
+    const float4 oo = or4[t * 32 + lane];
+    v[t * 4 + 0] = q.x;
+    v[t * 4 + 1] = q.y;
+    v[t * 4 + 2] = q.z;
+    v[t * 4 + 3] = q.w;
+    ov[t * 4 + 0] = oo.x;
+    ov[t * 4 + 1] = oo.y;
+    ov[t * 4 + 2] = oo.z;
+    ov[t * 4 + 3] = oo.w;
+    amax = fmaxf(amax, fmaxf(fmaxf(fabsf(q.x), fabsf(q.y)), fmaxf(fabsf(q.z), fabsf(q.w))));
+  }
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1)
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+  const float s = (amax > 0.f) ? (amax / fp8_max) : 1.f;
+  if (lane == 0) scale[row] = s;
+  unsigned char* out = xq + row * (long long)D;
+  float acc = 0.f;
+#pragma unroll
+  for (int t = 0; t < VPT / 4; ++t) {
+    uchar4 c;
+    c.x = cvt_e5m2(v[t * 4 + 0] / s);
+    c.y = cvt_e5m2(v[t * 4 + 1] / s);
+    c.z = cvt_e5m2(v[t * 4 + 2] / s);
+    c.w = cvt_e5m2(v[t * 4 + 3] / s);
+    *reinterpret_cast<uchar4*>(out + (t * 32 + lane) * 4) = c;
+    acc += ov[t * 4 + 0] * (deq_e5m2(c.x) * s);
+    acc += ov[t * 4 + 1] * (deq_e5m2(c.y) * s);
+    acc += ov[t * 4 + 2] * (deq_e5m2(c.z) * s);
+    acc += ov[t * 4 + 3] * (deq_e5m2(c.w) * s);
+  }
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+  if (lane == 0) delta[row] = acc;
+}
+
 template <int VPT, bool E5M2>
 __global__ void __launch_bounds__(128)
 quantize_row_warp_kernel(const float* __restrict__ x, unsigned char* __restrict__ xq,
@@ -1480,6 +1540,45 @@ quantize_zero_warp_kernel(const float* __restrict__ q, const float* __restrict__
       quant_row_warp<VPT, false>(q, q8, qs, t, lane);
     else if (t < b2)
       quant_row_warp<VPT, true>(dof, do8, dos, t - b1, lane);
+    else if (t < b3)
+      quant_row_warp<VPT, false>(kf, k8, ks, t - b2, lane);
+    else if (t < b4)
+      quant_row_warp<VPT, false>(v, v8, vs, t - b3, lane);
+    else if (t < b5)
+      zero_row_warp<VPT>(dq, t - b4, lane);
+    else if (t < b6)
+      zero_row_warp<VPT>(dk, t - b5, lane);
+    else
+      zero_row_warp<VPT>(dv, t - b6, lane);
+  }
+}
+
+// O66：把 `quantize_zero_warp_kernel` 的 dO 量化任务升级为「量化 dO + 顺便算 delta」
+//   （`quant_delta_row_warp`）。任务序与 O64 版**逐字相同**，只多 2 个入参 `o`/`delta`；
+//   数值逐位不变（dO 的 amax/scale/cvt 逐字一致；delta 与 `delta_warp_kernel` 逐位一致）。
+//   收益：默认路径少一次独立 `delta_warp_kernel` launch（并省掉对 do8 的一趟回读）。
+template <int VPT>
+__global__ void __launch_bounds__(128)
+quantize_zero_delta_warp_kernel(const float* __restrict__ q, const float* __restrict__ kf,
+                                const float* __restrict__ v, const float* __restrict__ dof,
+                                const float* __restrict__ o, float* __restrict__ delta,
+                                unsigned char* __restrict__ q8, unsigned char* __restrict__ k8,
+                                unsigned char* __restrict__ v8, unsigned char* __restrict__ do8,
+                                float* __restrict__ qs, float* __restrict__ ks,
+                                float* __restrict__ vs, float* __restrict__ dos,
+                                float* __restrict__ dq, float* __restrict__ dk,
+                                float* __restrict__ dv, long long rq, long long rkv) {
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  constexpr int NW = 4;  // 128 线程 = 4 个 warp
+  const long long b1 = rq, b2 = 2 * rq, b3 = 2 * rq + rkv, b4 = 2 * rq + 2 * rkv;
+  const long long b5 = b4 + rq, b6 = b5 + rkv, b7 = b6 + rkv;
+  for (long long t = (long long)blockIdx.x * NW + warp; t < b7;
+       t += (long long)gridDim.x * NW) {
+    if (t < b1)
+      quant_row_warp<VPT, false>(q, q8, qs, t, lane);
+    else if (t < b2)
+      quant_delta_row_warp<VPT>(dof, do8, dos, o, delta, t - b1, lane);
     else if (t < b3)
       quant_row_warp<VPT, false>(kf, k8, ks, t - b2, lane);
     else if (t < b4)

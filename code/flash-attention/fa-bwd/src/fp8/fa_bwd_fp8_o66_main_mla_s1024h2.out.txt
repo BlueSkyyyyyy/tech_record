@@ -1,0 +1,60 @@
+fa_bwd_fp8_main.cu(2239): warning #550-D: variable "md" was set but never used
+      double md = 0, mq = 0, mk = 0, mv = 0;
+             ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kernels.cuh(4334): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wgmma2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 2025 of fa_bwd_fp8_main.cu
+
+fa_bwd_fp8_kernels.cuh(3974): warning #177-D: variable "c" was declared but never referenced
+              int c = c0 + j * 8 + c2;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 2035 of fa_bwd_fp8_main.cu
+
+fa_bwd_fp8_kernels.cuh(3682): warning #177-D: variable "NTW" was declared but never referenced
+    constexpr int NTW = 64;
+                  ^
+          detected during instantiation of "void launch_bwd_wg2<HD>(dim3, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) [with HD=128]" at line 2035 of fa_bwd_fp8_main.cu
+
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8
+B=1 S=1024 H=2 Hkv=2 D=512 causal=1 scale=0.044194
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 256 x 2 x 1  (ksplit=16, base_grid=32)
+O19: wg2 grid = 128 x 2 x 1 (ksplit2=16, base_grid2=16)
+O7: use_regdq=0 (register dQ accumulation)
+O32: lse backend = wgmma/mma
+O37: main qd-tma = on
+O41: main kv-tma = on
+O38: lse k-split = auto(16)
+[timing] total(quant+pre+main+cvt) 0.1615 ms  26.60 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0105 ms | preprocess 0.0243 ms | main 0.1194 ms | convert 0.0073 ms (cvt_on=0, qfuse=1, dfuse=1)
+[O64 A/B] end2end fused(1 launch) 0.1606 ms | unfused(4 quant + 3 memset) 0.1784 ms (1.1112x) | max_abs(fused-vs-unfused) dq/dk/dv=1.192e-07/2.980e-07/4.768e-07
+[O66 A/B] end2end delta-fused 0.1608 ms | delta-separate 0.1642 ms (1.0213x) | max_abs(delta fused-vs-separate)=0.000e+00
+[O39 A/B] lse(D=512) split=1 0.1091 ms (1.000x vs split1) | max_abs vs split1=0.000e+00\n[O39 A/B] lse(D=512) split=2 0.0626 ms (1.742x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=4 0.0384 ms (2.843x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=8 0.0277 ms (3.938x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=16 0.0276 ms (3.955x vs split1) | max_abs vs split1=4.768e-07\n[O39] best lse split=16 0.0276 ms (3.955x)\n[O59 A/B] LSE MLA legacy(sp=16) 0.0276 ms | cfg6(sp=16) 0.0243 ms (1.137x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[O12 A/B] main LSE/D preload off 0.1988 ms | on 0.1984 ms (1.002x) | max_abs(on-vs-off) dq=2.251e-04
+[O47 A/B] main MLA 4-warp 0.1958 ms | 8-warp 0.1224 ms (1.599x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07
+[O51 A/B] main MLA 8w sync 0.1226 ms | kvpipe 0.1185 ms (1.034x) | max_abs(kvp-vs-sync) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07
+[O14 A/B] quant old(per-row) 0.0193 ms | new(warp-per-row) 0.0133 ms (1.451x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0044 ms | new(warp-per-row) 0.0031 ms (1.428x) | max_abs=2.861e-06 max_rel=4.161e-04
+[O21b A/B] end2end 保留convert 0.1885 ms | 直写输出(消convert) 0.1764 ms (1.0686x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.232e-01  max_rel=5.072e+01
+  dk   vs ref: max_abs=3.337e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.602e-01  max_rel=5.326e+01
+    dq[d   0..127] max_abs=1.801e-01
+    dq[d 128..255] max_abs=1.420e-01
+    dq[d 256..383] max_abs=1.629e-01
+    dq[d 384..511] max_abs=2.232e-01
+    dk[d   0..127] max_abs=2.844e-01
+    dk[d 128..255] max_abs=3.337e-01
+    dk[d 256..383] max_abs=2.273e-01
+    dk[d 384..511] max_abs=2.713e-01
+    dv[d   0..127] max_abs=2.472e-01
+    dv[d 128..255] max_abs=2.419e-01
+    dv[d 256..383] max_abs=3.602e-01
+    dv[d 384..511] max_abs=2.730e-01
+[compare] ours vs TE FP8

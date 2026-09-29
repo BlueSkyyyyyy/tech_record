@@ -1397,6 +1397,66 @@ __device__ __forceinline__ void zero_row_warp(float* __restrict__ x, long long r
   for (int t = 0; t < VPT / 4; ++t) p[t * 32 + lane] = z;
 }
 
+// O66：`quant_row_warp<E5M2>` 的「顺便算 delta」版——量化 dO(E5M2) 的同时就地算
+//   delta[row] = Σ_d O[d]·(deq_e5m2(do8[d])·dos[row])。
+//   动机：delta 只依赖 dO/O 两项、且是逐 query 行的归约；与 dO 的量化同域、同 warp-per-row
+//   几何。把两者合进同一个 warp 任务，可省掉一次 delta kernel 的 launch 与对 do8 的回读。
+//   **数值与 `delta_warp_kernel` 逐位相同**：lane 累加顺序同为「t 外层（元素 t*128+lane*4）、
+//   float4 内 x/y/z/w 内层」，随后同一 `__shfl_xor_sync` 树；`s == dos[row]`、`cvt`/`deq` 与
+//   量化/delta 现用函数逐字一致（A/B 里 `max_abs(fused-vs-delta_warp) == 0`）。
+template <int VPT>
+__device__ __forceinline__ void quant_delta_row_warp(const float* __restrict__ x,
+                                                     unsigned char* __restrict__ xq,
+                                                     float* __restrict__ scale,
+                                                     const float* __restrict__ o,
+                                                     float* __restrict__ delta, long long row,
+                                                     int lane) {
+  constexpr int D = VPT * 32;
+  const float fp8_max = kE5M2Max;
+  const float4* xr4 = reinterpret_cast<const float4*>(x + row * (long long)D);
+  const float4* or4 = reinterpret_cast<const float4*>(o + row * (long long)D);
+  float v[VPT];
+  float ov[VPT];
+  float amax = 0.f;
+#pragma unroll
+  for (int t = 0; t < VPT / 4; ++t) {
+    const float4 q = xr4[t * 32 + lane];
+    const float4 oo = or4[t * 32 + lane];
+    v[t * 4 + 0] = q.x;
+    v[t * 4 + 1] = q.y;
+    v[t * 4 + 2] = q.z;
+    v[t * 4 + 3] = q.w;
+    ov[t * 4 + 0] = oo.x;
+    ov[t * 4 + 1] = oo.y;
+    ov[t * 4 + 2] = oo.z;
+    ov[t * 4 + 3] = oo.w;
+    amax = fmaxf(amax, fmaxf(fmaxf(fabsf(q.x), fabsf(q.y)), fmaxf(fabsf(q.z), fabsf(q.w))));
+  }
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1)
+    amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, off));
+  const float s = (amax > 0.f) ? (amax / fp8_max) : 1.f;
+  if (lane == 0) scale[row] = s;
+  unsigned char* out = xq + row * (long long)D;
+  float acc = 0.f;
+#pragma unroll
+  for (int t = 0; t < VPT / 4; ++t) {
+    uchar4 c;
+    c.x = cvt_e5m2(v[t * 4 + 0] / s);
+    c.y = cvt_e5m2(v[t * 4 + 1] / s);
+    c.z = cvt_e5m2(v[t * 4 + 2] / s);
+    c.w = cvt_e5m2(v[t * 4 + 3] / s);
+    *reinterpret_cast<uchar4*>(out + (t * 32 + lane) * 4) = c;
+    acc += ov[t * 4 + 0] * (deq_e5m2(c.x) * s);
+    acc += ov[t * 4 + 1] * (deq_e5m2(c.y) * s);
+    acc += ov[t * 4 + 2] * (deq_e5m2(c.z) * s);
+    acc += ov[t * 4 + 3] * (deq_e5m2(c.w) * s);
+  }
+#pragma unroll
+  for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffffu, acc, off);
+  if (lane == 0) delta[row] = acc;
+}
+
 template <int VPT, bool E5M2>
 __global__ void __launch_bounds__(128)
 quantize_row_warp_kernel(const float* __restrict__ x, unsigned char* __restrict__ xq,
@@ -1440,6 +1500,45 @@ quantize_zero_warp_kernel(const float* __restrict__ q, const float* __restrict__
       quant_row_warp<VPT, false>(q, q8, qs, t, lane);
     else if (t < b2)
       quant_row_warp<VPT, true>(dof, do8, dos, t - b1, lane);
+    else if (t < b3)
+      quant_row_warp<VPT, false>(kf, k8, ks, t - b2, lane);
+    else if (t < b4)
+      quant_row_warp<VPT, false>(v, v8, vs, t - b3, lane);
+    else if (t < b5)
+      zero_row_warp<VPT>(dq, t - b4, lane);
+    else if (t < b6)
+      zero_row_warp<VPT>(dk, t - b5, lane);
+    else
+      zero_row_warp<VPT>(dv, t - b6, lane);
+  }
+}
+
+// O66：把 `quantize_zero_warp_kernel` 的 dO 量化任务升级为「量化 dO + 顺便算 delta」
+//   （`quant_delta_row_warp`）。任务序与 O64 版**逐字相同**，只多 2 个入参 `o`/`delta`；
+//   数值逐位不变（dO 的 amax/scale/cvt 逐字一致；delta 与 `delta_warp_kernel` 逐位一致）。
+//   收益：默认路径少一次独立 `delta_warp_kernel` launch（并省掉对 do8 的一趟回读）。
+template <int VPT>
+__global__ void __launch_bounds__(128)
+quantize_zero_delta_warp_kernel(const float* __restrict__ q, const float* __restrict__ kf,
+                                const float* __restrict__ v, const float* __restrict__ dof,
+                                const float* __restrict__ o, float* __restrict__ delta,
+                                unsigned char* __restrict__ q8, unsigned char* __restrict__ k8,
+                                unsigned char* __restrict__ v8, unsigned char* __restrict__ do8,
+                                float* __restrict__ qs, float* __restrict__ ks,
+                                float* __restrict__ vs, float* __restrict__ dos,
+                                float* __restrict__ dq, float* __restrict__ dk,
+                                float* __restrict__ dv, long long rq, long long rkv) {
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  constexpr int NW = 4;  // 128 线程 = 4 个 warp
+  const long long b1 = rq, b2 = 2 * rq, b3 = 2 * rq + rkv, b4 = 2 * rq + 2 * rkv;
+  const long long b5 = b4 + rq, b6 = b5 + rkv, b7 = b6 + rkv;
+  for (long long t = (long long)blockIdx.x * NW + warp; t < b7;
+       t += (long long)gridDim.x * NW) {
+    if (t < b1)
+      quant_row_warp<VPT, false>(q, q8, qs, t, lane);
+    else if (t < b2)
+      quant_delta_row_warp<VPT>(dof, do8, dos, o, delta, t - b1, lane);
     else if (t < b3)
       quant_row_warp<VPT, false>(kf, k8, ks, t - b2, lane);
     else if (t < b4)
@@ -4727,7 +4826,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
                       bool lse_compact = false, int lse_split = 0, int mla8w = -1,
                       int mla_kvp = -1, int lseocc = 0, int lse8w = 0,
                       const std::string& dump = "", int det_ab = 0, int det_ksplit = 1,
-                      int fuse_reduce = 1, int part_compact = 0, int qfuseflag = 1) {
+                      int fuse_reduce = 1, int part_compact = 0, int qfuseflag = 1,
+                      int dfuseflag = 1) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -4888,10 +4988,21 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     const int gkv = (int)std::min<long long>((rkv + 3) / 4, 65535);
     // VPT = D/32：D=128→4、D=512→16（与定长路径一致；写错会把行距当 128 ⇒ 整行错位）。
     // O64：默认把 4 次量化 + 3 次清零融合成 1 个 launch（`qfuseflag=0` 退回旧路径做 A/B）。
+    // O66：`dfuseflag`（默认 1）时把 delta 也算进 dO 的量化任务（省一次 delta launch）。
+    const bool dfuse = (dfuseflag != 0);
     if (qfuseflag) {
       const long long total = 3 * rq + 4 * rkv;
       const int g = (int)std::min<long long>((total + 3) / 4, 1048576);
-      if (D == 128)
+      if (dfuse) {
+        if (D == 128)
+          quantize_zero_delta_warp_kernel<4><<<g, 128>>>(
+              d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks,
+              d_vs, d_dos, d_dq, d_dk, d_dv, rq, rkv);
+        else
+          quantize_zero_delta_warp_kernel<16><<<g, 128>>>(
+              d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks,
+              d_vs, d_dos, d_dq, d_dk, d_dv, rq, rkv);
+      } else if (D == 128)
         quantize_zero_warp_kernel<4><<<g, 128>>>(d_q_f, d_k_f, d_v_f, d_do_f, d_q8, d_k8, d_v8,
                                                  d_do8, d_qs, d_ks, d_vs, d_dos, d_dq, d_dk,
                                                  d_dv, rq, rkv);
@@ -4984,10 +5095,13 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     const int d_rows = (int)rows_q;
     const int d_wpb = THREADS / 32;
     const int d_blocks = (d_rows + d_wpb - 1) / d_wpb;
-    if (D == 128)
-      delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
-    else
-      delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+    // O66：融合路径下 delta 已在 quant kernel 内算好，跳过独立的 delta launch。
+    if (!(qfuseflag && dfuse)) {
+      if (D == 128)
+        delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+      else
+        delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+    }
     // 均衡分块：`--compact` 走紧凑一维 m-tile 网格（grid.z=1，由 mt_b/mt_m 查表解出 (b, mblk)）；
     //   默认走旧的 maxlen 网格（含早退死 CTA，实测反而更快，见 docs/03 §40）。
     dim3 mg = compact ? dim3(total_mt * ksplit, H, 1)
@@ -5748,6 +5862,9 @@ int main(int argc, char** argv) {
   // O64：1 = 把 4 次输入量化 + 3 次累加缓冲清零融合成 1 个 launch（默认 1，数值逐位不变）；
   //   0 = 退回 O14 的 4 个 quant kernel + 3 个 cudaMemset，供同 session A/B。
   int qfuse = 1;
+  // O66：1 = 把 delta 也融进 quant kernel 的 dO 任务（默认 1，数值逐位不变；需 qfuse=1
+  //   且 delta 走 warp-per-row 版）；0 = 独立 delta launch，供同 session A/B。
+  int dfuse = 1;
   int foldrcp_opt = 1;  // O27：1 = fold 量化用「每行 rcp + 乘法」（默认），0 = 精确除法（A/B）
   int regdq_opt = -1; // O22：-1 自动；0/1 强制关/开寄存器 dQ 累加（同 session A/B）
   // O32：LSE 是否用 TMA 版（仅 FA_TMA 构建、D==128、causal）。-1=自动（默认开），0/1 由
@@ -5830,6 +5947,7 @@ int main(int argc, char** argv) {
     else if (a == "--bn64") bn64_opt = 1;
     else if (a.rfind("--cvt=", 0) == 0) cvt_on = atoi(a.c_str() + 6);
     else if (a.rfind("--qfuse=", 0) == 0) qfuse = atoi(a.c_str() + 8);
+    else if (a.rfind("--dfuse=", 0) == 0) dfuse = atoi(a.c_str() + 8);
     else if (a.rfind("--foldrcp=", 0) == 0) foldrcp_opt = atoi(a.c_str() + 10);
     else if (a.rfind("--qfast=", 0) == 0) qfast = atoi(a.c_str() + 8);
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_opt = atoi(a.c_str() + 12);
@@ -5848,7 +5966,7 @@ int main(int argc, char** argv) {
   if (varlen)
     return run_varlen(dir, causal, iters, compact_opt, lse_compact_opt, lse_split, mla8w_opt,
                        mla_kvp_opt, lseocc_opt, lse8w_opt, dump_prefix, det_ab, det_ksplit,
-                       fuse_reduce, part_compact, qfuse);
+                       fuse_reduce, part_compact, qfuse, dfuse);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
@@ -5982,6 +6100,20 @@ int main(int argc, char** argv) {
       quantize_zero_warp_kernel<16><<<grid, 128>>>(d_q_f, d_k_f, d_v_f, d_do_f, d_q8, d_k8, d_v8,
                                                    d_do8, d_qs, d_ks, d_vs, d_dos, d_dq_acc,
                                                    d_dk_acc, d_dv_acc, rq, rkv);
+  };
+  // O66：在 O64 融合的基础上，把 delta 也算进 dO 的量化任务（省一次独立 delta launch）。
+  auto quant_zero_delta = [&]() {
+    const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
+    const long long total = 3 * rq + 4 * rkv;
+    const int grid = (int)std::min<long long>((total + 3) / 4, 1048576);
+    if (D == 128)
+      quantize_zero_delta_warp_kernel<4><<<grid, 128>>>(
+          d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
+          d_dos, d_dq_acc, d_dk_acc, d_dv_acc, rq, rkv);
+    else
+      quantize_zero_delta_warp_kernel<16><<<grid, 128>>>(
+          d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
+          d_dos, d_dq_acc, d_dk_acc, d_dv_acc, rq, rkv);
   };
 
   // ---- O2b：自动选择 N 方向切块数 ksplit。base = 未切块时的 CTA 数；切块把小 S 时
@@ -6128,7 +6260,8 @@ int main(int argc, char** argv) {
   printf("O37: main qd-tma = %s\n", qd_tma ? "on" : "off");
   printf("O41: main kv-tma = %s\n", kv_tma ? "on" : "off");  printf("O38: lse k-split = auto(%d)\n", lse_split_eff);
 
-  auto run_preprocess = [&]() {
+  // O66：`do_delta=false` 时跳过 delta（融合路径已在 quant kernel 内算好）。
+  auto run_preprocess = [&](bool do_delta = true) {
     if (D == 128) {
       // O11：causal 走镜像配对 + cp.async 双缓冲（非 causal 各块工作量相同，走 O1 原版）。
       // O9c：`--lsewgm` 且以 `-DFA_WGMMA` 构建时，causal 走 wgmma.m64n64k32（SW128）。
@@ -6155,10 +6288,12 @@ int main(int argc, char** argv) {
                                  nullptr, d_lse_part, lse_split_eff);
       } else
         launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
-      if (delta_warp_sel)
-        delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
-      else
-        delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+      if (do_delta) {
+        if (delta_warp_sel)
+          delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+        else
+          delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+      }
     } else {
       // O39：D=512（MLA）causal LSE 也用 K 维 split（此前只有 D=128/TMA 有）。
       // O59：定长 causal MLA 默认走 O58 的 cfg6（PIPE1/LBN16，4 CTA/SM）；`--lseocc=4` 退回旧默认。
@@ -6174,10 +6309,12 @@ int main(int argc, char** argv) {
                                  d_lse_part, lse_split_eff);
       } else
         launch_lse<512>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
-      if (delta_warp_sel)
-        delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
-      else
-        delta_kernel<512><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+      if (do_delta) {
+        if (delta_warp_sel)
+          delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+        else
+          delta_kernel<512><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+      }
     }
   };
 
@@ -6340,14 +6477,19 @@ int main(int argc, char** argv) {
 
   auto run_all = [&]() {
     if (qfuse && qfast) {
-      quant_zero();   // O64：4 次量化 + 3 次清零融合为 1 个 launch
+      // O66：默认把 delta 也融进 quant kernel（`dfuse && delta_warp_sel`）。
+      if (dfuse && delta_warp_sel)
+        quant_zero_delta();
+      else
+        quant_zero();   // O64：4 次量化 + 3 次清零融合为 1 个 launch
     } else {
       quant();
       CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
     }
-    run_preprocess();
+    // O66：delta 已在 quant 阶段算好时，preprocess 跳过独立 delta launch。
+    run_preprocess(!(qfuse && qfast && dfuse && delta_warp_sel));
     run_main();
     if (cvt_on)
       convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
@@ -6372,9 +6514,12 @@ int main(int argc, char** argv) {
          flops / (ms * 1e-3) / 1e12);
 
   CUDA_CHECK(cudaEventRecord(ev0));
-  if (qfuse && qfast)
-    for (int i = 0; i < iters; ++i) quant_zero();
-  else
+  if (qfuse && qfast) {
+    if (dfuse && delta_warp_sel)
+      for (int i = 0; i < iters; ++i) quant_zero_delta();
+    else
+      for (int i = 0; i < iters; ++i) quant_zero();
+  } else
     for (int i = 0; i < iters; ++i) quant();
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
@@ -6383,7 +6528,8 @@ int main(int argc, char** argv) {
   ms_quant /= iters;
 
   CUDA_CHECK(cudaEventRecord(ev0));
-  for (int i = 0; i < iters; ++i) run_preprocess();
+  for (int i = 0; i < iters; ++i)
+    run_preprocess(!(qfuse && qfast && dfuse && delta_warp_sel));
   CUDA_CHECK(cudaEventRecord(ev1));
   CUDA_CHECK(cudaEventSynchronize(ev1));
   float ms_pre = 0.f;
@@ -6400,8 +6546,8 @@ int main(int argc, char** argv) {
   float ms_main = 0.f;
   CUDA_CHECK(cudaEventElapsedTime(&ms_main, ev0, ev1));
   ms_main /= iters;
-  printf("[timing] quant %.4f ms | preprocess %.4f ms | main %.4f ms | convert %.4f ms (cvt_on=%d, qfuse=%d)\n",
-         ms_quant, ms_pre, ms_main, ms - ms_quant - ms_pre - ms_main, cvt_on, qfuse);
+  printf("[timing] quant %.4f ms | preprocess %.4f ms | main %.4f ms | convert %.4f ms (cvt_on=%d, qfuse=%d, dfuse=%d)\n",
+         ms_quant, ms_pre, ms_main, ms - ms_quant - ms_pre - ms_main, cvt_on, qfuse, dfuse);
 
   // ---- O64 A/B：融合 quant+zero 的同一 binary 端到端对比。----
   {
@@ -6435,6 +6581,32 @@ int main(int argc, char** argv) {
     printf("[O64 A/B] end2end fused(1 launch) %.4f ms | unfused(4 quant + 3 memset) %.4f ms "
            "(%.4fx) | max_abs(fused-vs-unfused) dq/dk/dv=%.3e/%.3e/%.3e\n",
            t_f, t_u, t_u / t_f, mq, mk, mv);
+  }
+
+  // ---- O66 A/B：把 delta 融进 quant kernel（同一 binary）端到端对比 + delta 逐位校验。----
+  {
+    auto time_all = [&](bool f) {
+      dfuse = f ? 1 : 0;
+      for (int i = 0; i < 3; ++i) run_all();
+      CUDA_CHECK(cudaEventRecord(ev0));
+      for (int i = 0; i < iters; ++i) run_all();
+      CUDA_CHECK(cudaEventRecord(ev1));
+      CUDA_CHECK(cudaEventSynchronize(ev1));
+      float t = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&t, ev0, ev1));
+      return t / iters;
+    };
+    const float t_f = time_all(true), t_u = time_all(false);
+    std::vector<float> df((size_t)d_rows), du((size_t)d_rows);
+    dfuse = 1; run_all();
+    CUDA_CHECK(cudaMemcpy(df.data(), d_delta, (size_t)d_rows * 4, cudaMemcpyDeviceToHost));
+    dfuse = 0; run_all();
+    CUDA_CHECK(cudaMemcpy(du.data(), d_delta, (size_t)d_rows * 4, cudaMemcpyDeviceToHost));
+    dfuse = 1;
+    double mdelta = 0;
+    for (int i = 0; i < d_rows; ++i) mdelta = std::max(mdelta, (double)fabsf(df[i] - du[i]));
+    printf("[O66 A/B] end2end delta-fused %.4f ms | delta-separate %.4f ms (%.4fx) | "
+           "max_abs(delta fused-vs-separate)=%.3e\n", t_f, t_u, t_u / t_f, mdelta);
   }
 
   // ---- O48 A/B（D=128，仅 mma 路径）：主 kernel 4-warp（128/2）vs 8-warp（256/4 网格）。
