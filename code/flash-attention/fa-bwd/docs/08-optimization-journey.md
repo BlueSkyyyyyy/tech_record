@@ -1279,3 +1279,22 @@ smem 冲突 + 低 occ
 - **判决 / 下一步**：**「候选 ①(a) 两 kernel」判负**。F7 主体只剩 **①(b) 两级 partial / 单趟内
   非原子归约（需 BN≥BM）**，或放弃「拆 kernel」；「让 dQ owned」的收益必须在**单趟**内取。详见
   `docs/03` §91；原始输出 `src/fp8/fa_bwd_fp8_p158_*`。
+
+### 5.73 F7 第十二步：用 TMA 4D tensor store-reduce（TE 的 `UTMAREDG`）替掉 dQ 逐 lane 原子（机制正/性能负，第一百五十九轮）
+
+- **背景**：§5.61（O67）里 TE 的全局 red 只有 **3168** 条指令、ours 9.54M；本轮把 TE SASS 拉出来
+  直方图确认是 **`UTMAREDG.4D.ADD`（TMA 4D 张量归约）** + `UTMALDG/UTMASTG` + `USETMAXREG`。
+  于是试做 F7 里点名的「TMA store-reduce」：KV-owner 原型的 dQ 归约从 `red_add2` 换成
+  **`cp.reduce.async.bulk.tensor.4d`**（一条指令归约整块 `[BM][HD]` fp32 回 global，box 内维 ≤256B
+  故拆 2×64 列 chunk）。
+- **两个坑**：① `FA_FP8_HAS_TMA` 晚于 helper 定义 ⇒ 用它守卫 asm 会**恒 0 编掉**（SASS 无
+  `UTMAREDG`、dQ 错 max_abs 2.96 却**不报错**）——**新 device asm helper 必须 `cuobjdump -sass`
+  验指令被发射**；② PTX 记法必须是 `.add.tile.bulk_group`。
+- **数值**：`TMA-reduce vs atomic` dq max_abs **1.19e-7**、dk/dv **0**，dq vs ref 与 atomic 同量级。
+- **性能（同 binary，main 三梯度）**：S512 0.89–0.91×、S1024H32 0.78×、S4096 0.78× ⇒ **更慢**。
+- **ncu（S4096，判决性）**：`l1tex …op_red` 8.52M → **0**、`smsp …global_red` 8.52M → **0**、
+  `smsp inst` 703.65M→660.41M，**但 `lts__t_sectors_op_red` 102,236,160 → 102,236,160 一字不变**；
+  dynamic smem 74.82→107.58KB ⇒ 3→2 CTA/SM、occ 17.79→12.19%、Duration 1.84→2.47ms。
+- **判决 / 下一步**：**L2 `red` 流量由工作划分（每元素贡献 CTA 数）决定，与归约指令机制无关**；
+  TE 的 `UTMAREDG` 只是指令选择，其 4.4× 低的 red 来自 tile 调度。**F7「TMA store-reduce」假设关闭**，
+  F7 主体只剩工作划分本身（BN≥BM / 放大 tile / persistent 调度）。详见 `docs/03` §92。

@@ -207,6 +207,13 @@
   单一 owner + TMA store-reduce / persistent 调度**（对标 TE 132 CTA；O42 的 `cp.reduce.async.bulk`
    失败是因为**没换工作划分**，只加 staging、归约次数没降）。工程量大，是当前唯一经 ncu 钉死的
    真杠杆。详见 `docs/03` §80、`docs/08` §5.61。
+   **更新（第一百五十九轮，§92）：`red` 流量与归约指令机制无关——「减 red」的路彻底关闭。**
+   TE 的 SASS 实为 **`UTMAREDG.4D.ADD`（TMA 4D 张量归约）**；在 KV-owner 原型上用同款
+   `cp.reduce.async.bulk.tensor.4d` 替 dQ 逐 lane 原子：数值逐位（dq vs atomic 1.19e-7），但 ncu
+   **`lts__t_sectors_op_red` 102,236,160 → 102,236,160 一字不变**（`l1tex/inst` red 8.52M→0），
+   且 32KB staging 掉 occupancy **慢 0.78×**。⇒ **1D/4D、逐 lane/整块 归约都试过，L2 `red` 由
+   工作划分（每元素贡献 CTA 数）唯一决定**；F7 只剩「工作划分」本身（BN≥BM / 放大 tile /
+   persistent），或换卡。
     **进展（第一百五十轮 F7 第三步）**：KV-owner 已落进**真实 fp8 mma**（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，
    dK/dV），`red` 114.5M→**0** 确认；但单做 dK/dV（无持久化/TMA/重叠）不构成净收益——
    `red` 被换成 **Q/dO 跨 CTA 读放大（1.40×）+ 寄存器墙**。F7 主体尚需 persistent+4D-TMA。
@@ -2924,7 +2931,24 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百五十八轮）**：**F7 第十一步——option(a)「两 kernel」判决：负结果**。给 `fp8_mma_body`
+> **最新（第一百五十九轮）**：**F7 第十二步——「TMA store-reduce」（TE 的 `UTMAREDG.4D.ADD`）判决：
+> 机制正结果 / 性能负结果**。先把 TE SASS 拉出来确认其全局归约走 **TMA 4D 张量归约**
+> （`UTMAREDG.4D.ADD` + `UTMALDG/UTMASTG` + `USETMAXREG`；`global_red` 指令仅 3168、plain store 0）。
+> 在 KV-owner 原型上用 `cp.reduce.async.bulk.tensor.4d`（`FA_KV_DQ_TMAR`，默认 0）替掉 dQ 的逐 lane
+> `red_add2`：**数值逐位**（TMA-reduce vs atomic dq=1.19e-7、dk/dv=0），**但 ncu 判决 `lts__t_sectors_op_red`
+> 102,236,160 → 102,236,160 一字不变**（`l1tex/inst` red 8.52M→0），且 32KB fp32 staging 使
+> 74.82→107.58KB ⇒ 3→2 CTA/SM、Duration 1.84→2.47ms（**0.78×，更慢**）。⇒ **L2 `red` 由工作划分
+> （每元素贡献 CTA 数）决定，与归约指令机制无关**；**F7「TMA store-reduce」假设关闭**。见 `docs/03` §92、
+> `docs/08` §5.73；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p159_tmar_*`、`src/fp8/fa_bwd_fp8_p159_ncu_*`。
+> **下一步候选**：① **F7 主体只剩「工作划分」本身**——减少每个输出元素的贡献 CTA 数：
+>   (a) **BN≥BM**（KV-owner 的 dQ 贡献数 `S/BN`，BN 32→64 砍半；代价 dK/dV 累加器翻倍 + K/V smem
+>       +8KB、易掉 3→2 CTA/SM，需先做寄存器/smem 账）；
+>   (b) **放大 tile / persistent tile 调度**（对标 TE 132 CTA，需先破本卡 smem/寄存器硬墙，见「阻塞」）；
+>   (c) 放弃 F7，转「换卡」。
+>   ② 其余候选（F6/放大 BM、归约加宽、GEMM3/4/5 wgmma、ksplit/LSE、非 main 融合、TMA store-reduce）均已判决/到顶/收口；
+>   ③ DET 仅 opt-in。
+>
+> **（第一百五十八轮）**：**F7 第十一步——option(a)「两 kernel」判决：负结果**。给 `fp8_mma_body`
 > 加编译期 `DQONLY`（默认 false；`DQONLY=true` 跳过 Ap/dS3 fold + GEMM3/4(dV/dK)，保留
 > GEMM1/2/5，dQ 寄存器 owned + **plain store** ⇒ `red=0`），原型加同 binary 的 Q-owner dQ-only
 > pass / 生产默认 kvtma 三梯度 / KV-owner dK/dV-only 三口径。**数值逐位**（dQ-only vs 基线 dq=0；
@@ -6396,6 +6420,37 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `src/fp8/fa_bwd_fp8_p158_b1_{s512_h16,s1024_h32,s4096_h16}_d128_causal_fp8.out.txt`、
       `src/fp8/fa_bwd_fp8_p158_ncu_dqonly_s4096.out.txt`（full）、
       `src/fp8/fa_bwd_fp8_p158_ncu_metrics_s4096.out.txt`。
+
+- 2026-09-30（第一百五十九轮）：**F7 第十二步完成（TMA 4D tensor store-reduce 判决：机制正结果 /
+  性能负结果）**——落实 ROADMAP「F7 = dK/dV-over-KV 单一 owner + **TMA store-reduce**」里唯一未试的
+  「TMA store-reduce」子项，且刚好把 O67（§80）留下的「TE 为何只有 3168 条 red 指令」问到底。
+    - **先钉机制**：把 TE fp8 反向 SASS 直方图拉出来（`harness/te_fp8_ncu.py` + `--print-source sass`）：
+      **`UTMAREDG.4D.ADD`（TMA 4D 张量归约）+ `UTMALDG.4D` + `UTMASTG.4D` + `USETMAXREG`**，
+      ncu：grid=132、384 线程、168 regs、232.45KB smem、waves=1、occ 15.61%、
+      `smsp__inst_executed_op_global_red`=**3168**、plain store=0、`smsp inst`=108.3M。
+    - `src/fp8/fa_bwd_fp8_kernels.cuh` 新增 `tma_reduce_add_4d_f32`（PTX
+      `cp.reduce.async.bulk.tensor.4d.global.shared::cta.add.tile.bulk_group`）；原型
+      `fa_bwd_fp8_kvowner_mma.cu` 加编译期 `FA_KV_DQ_TMAR`（默认 0）——GEMM4 的 dQ 先写 smem 行主序
+      staging、再由 `tid==0` 发 tensor reduce；新增薄壳 `fp8_kvowner_dkv_wgmma_tma_r_kernel` +
+      `make_kvowner_dq_map_f32`（fp32 tensormap）+ `--only=wgtmar` + 同 binary A/B。**默认路径一行未改**。
+    - **两个坑**：① `FA_FP8_HAS_TMA` 在本文件里**晚于** helper 才 `#define` ⇒ 用它守卫 asm 恒 0、
+      **整段被编掉**（SASS 无 `UTMAREDG`、dQ 错 max_abs 2.96 却**不报错**）——改 `__CUDA_ARCH__` 守卫，
+      **新 device asm helper 必须 `cuobjdump -sass` 验发射**；② tensor-reduce **box 内维 ≤256B**
+      （fp32=64 列）⇒ 128 列拆 2 chunk，PTX 记法必须 `.add.tile.bulk_group`（否则
+      `ptxas: Unexpected instruction types`）。
+    - **数值（三 shape 全通）**：`dQ 4D-TMA-reduce vs atomic(red_add2)` dq max_abs **1.1921e-07**；
+      `vs wgmma+TMA` dk/dv **0**；dq vs ref S4096 **2.6355e-1**（与 atomic 同量级）。
+    - **性能（同 binary，main 三梯度）**：S512 0.89–0.91×、S1024H32 **0.78×**、S4096 **0.78×**（更慢）。
+    - **ncu（S4096 同 session A/B，判决性）**：`l1tex…op_red` 8,519,680→**0**、
+      `smsp…global_red` 8,519,680→**0**、`smsp inst` 703.65M→660.41M，**但 `lts__t_sectors_op_red`
+      102,236,160→102,236,160 一字不变**；dynamic smem 74.82→**107.58KB** ⇒ 3→2 CTA/SM、
+      occ 17.79→12.19%、Duration 1.84→2.47ms。
+    - **判决**：**L2 `red` 流量由「每个输出元素被多少 CTA 贡献」= 工作划分决定，与归约指令机制无关**
+      （O67「加宽无效」的同源结论再进一层）；TE 的 `UTMAREDG` 只是指令选择，其 4.4× 低的 red 来自
+      **tile 调度/工作划分**（128→132 persistent、1 CTA/SM）。⇒ **F7「TMA store-reduce」假设关闭**；
+      F7 主体只剩工作划分本身。见 `docs/03` §92、`docs/08` §5.73；原始输出
+      `src/fp8/fa_bwd_fp8_kvowner_mma_p159_tmar_*`、`..._p159_default_regression_s512.out.txt`、
+      `src/fp8/fa_bwd_fp8_p159_ncu_wgtmar_s4096.out.txt`、`..._p159_ncu_wgtma_s4096.out.txt`。
 
 ## 灵感 / backlog
 
