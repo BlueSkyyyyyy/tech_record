@@ -1179,3 +1179,28 @@ smem 冲突 + 低 occ
 - **结论**：§5.65/§5.67 之后**第一个在大 S 转正的 KV-owner 结构改动**（1.049×，优于 pipe 0.979×
   与 dyn 1.004×），且保持 3 CTA/SM。但仍是 dK/dV-only；F7 主体仍欠 4D-TMA staging、dQ 同循环、
   降寄存器冲 4 CTA/SM。详见 `docs/03` §87；原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p154_*`。
+
+### 5.69 F7 第八步：KV-owner wgmma 的 Q/dO 4D-TMA staging（正结果）＋修一处 p154 遗留 race（第一百五十五轮）
+
+- **动机**：承接 §5.68 的「F7 主体仍欠 4D-TMA staging」。§87 后 Q/dO 仍是逐 ROW-pair 的标量
+  global gather（ncu 相对暴露的 `long_scoreboard`）。本步把它换成 **4D-TMA**（对标 TE 数据通路）。
+- **做法**：`fp8_kvowner_dkv_wgmma_kernel` 抽成 device body `<...,bool TMA>` + 两个薄壳（`TMA=false`
+  逐字退化 = §87；`TMA=true` 新加）。TMA 版 per m 块发两条 `cp.async.bulk.tensor.4d` 搬 Q/dO 进
+  SW128 tile（fp8 一行 128B = SW128 atom 整行，一条 TMA 整块），mbarrier 相位每迭代翻转，再从
+  SW128 重建 `Qp/dOp`（同 O37）；smem 67072+64B ⇒ 仍 3 CTA/SM。
+- **附带修 race**：wgmma 经 async proxy 读 smem，而 K/V（及非 TMA 的 Q/dO）是 generic 写，p154
+  **缺 `fence.proxy.async.shared::cta`** ⇒ 偶发 nondeterminism（同一 binary 8 次
+  `wgmma vs base` 在 4.08e-2/6.4e-2/2.2e-1 间跳；已在 HEAD 原文件复现）。补
+  `bulk_reduce_fence()` 后 8/8 稳定，`wgmma+TMA vs wgmma` 逐位 = 0。
+- **数值**：TMA-vs-wgmma **0.0000e+00（逐位）**；vs ref 与 wgmma 同量级（S512 2.976/3.732e-1、
+  S1024H32 4.176/3.535e-1、S4096 2.644/3.216e-1）。
+- **性能（同 binary A/B，main 仅 dK/dV）**：S512 0.0577→**0.0462ms（1.247×）**、
+  S1024H32 0.2404→**0.1940（1.239×）**、S4096 1.3747→**1.1183（1.229×）**，tma/base 1.22–1.27×
+  ⇒ **§84/§86/§87 之后最大的 KV-owner 结构收益**（小 S 也转正）。
+- **ncu（S4096）**：Duration 1.38→**1.12ms**、`Executed Instructions` **541.5M→470.1M（−13.2%）**、
+  `lts op_read` 58.86M→**52.18M（−11.4%）**、**`red` 仍 = 0**、`long_scoreboard` **1.40→0.43**
+  （全局 gather 延迟被 TMA 去掉）、`wait 1.52→1.53（未降）`、short 0.95→1.31、regs 168 / 67.1KB /
+  3 CTA/SM 不变。⇒ 收益 = **去全局 gather**；墙回到 `wait` + L1/TEX + short（F7 主体下一步）。
+- **结论**：F7 主体的「TMA staging」子项 **de-risk 并转正**（1.23–1.27×，全部 shape）。剩余 =
+  ① dQ 同循环（跨 CTA 归约/partial+reduce）；② 降寄存器冲 4 CTA/SM。详见 `docs/03` §88；
+  原始输出 `src/fp8/fa_bwd_fp8_kvowner_mma_p155_*`。
