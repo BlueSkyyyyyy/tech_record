@@ -1726,3 +1726,32 @@ smem 冲突 + 低 occ
   M=BM=64 已满足）。默认路径一行未改、数值逐位不变。
 - 详见 `docs/03` §103；原始输出 `src/fp8/fa_bwd_fp8_stmatrix_smoke.out.txt`、
   `..._sass.out.txt`、`..._ptxas.out.txt`。
+
+### 5.90 第 176 轮（O81）：fp8 **GEMM5（dQ）切到 wgmma RS**（正结果，默认）——F3b 主体第一块落地
+
+- **承接**：O79/O80 把「GEMM3/4/5 上 wgmma」的操作数死结打开（RS 允许 A 在寄存器；
+  `ldmatrix.x4.trans + PRMT 0x5140` 逐字节转置）。默认 fp8 main 里唯一满足 wgmma 最小 **m64**
+  的 GEMM 是 **GEMM5（dQ，M=BM=64）**，先把它落进真实 `fp8_mma_body`。
+- **三个新事实**（冒烟 `fa_bwd_fp8_wgmma345_smoke.cu`，全 max_abs=0）：
+  ① **no-swizzle K-major 描述符**可用，但 CUTLASS canonical INTERLEAVE 布局是
+  `((8,n),2):((1,SBO),LBO)`（8 行 stride 恒 1 个 uint128），K=32 时 **LBO_u=8/SBO_u=16**；
+  ② 从 **SW128 源**做逐字节转置只需把 `transpose_store` 的源地址改成 `sw128_off_fp8`（PRMT 不变）；
+  ③ 端到端 `dQ=dS2·K`（A=dS2 e5m2 经 ldmatrix、B=Kᵀ no-swizzle、`m64n32k32.e5m2.e4m3` ×4）精确。
+- **落地**（`-DFA_WGMMA5`，**默认 1**）：KVTMA 路径的 Kp 配对构建换成从 SW128 K stage 转置成
+  Kᵀ INTERLEAVE（**复用 Kp 缓冲 ⇒ smem 零增长**），GEMM5 换 `wgmma RS` + CLayout_64x32 epilogue
+  （`dqacc5[4][4][4]`）。门控 `WGMMA && KVTMA && HD==128 && BN==32 && !DET && !DQONLY && kRegDq`，
+  其余路径逐字不变。**关键坑**：generic 写 smem 后必须 `fence.proxy.async.shared::cta`
+  （`bulk_reduce_fence()`），否则 wgmma 的 async proxy 读到半成品，dQ 出现 **O(1) 偶发错**
+  （首版 O64/O41 A/B 的 dq 差 2.36/5.14；补 fence 后回到 1e-7）。
+- **数值**：S512/S4096 causal、GQA、full 四例 vs fp32 ref relL2（dq/dk/dv）8.15–8.18% /
+  8.22–8.30% / 6.32–6.71%，与 `FA_WGMMA5=0` **逐位打印相同**；`--ci --dtype fp8 --hopper`
+  单/两文件 gate 7.629e-6 OK、docs/04 OK。
+- **性能（同 binary A/B，S4096 H16）**：main **1.5564→1.4810ms（1.051×）**、total
+  **1.7885→1.7235ms（1.038×，76.84→79.74 TF）**。ncu：Duration 1.56→1.49ms、
+  `smsp inst` **−11.1%**、HMMA **−26.9%**、`lts read` −9.3%、**`lts red` 114.52M 不变**、
+  regs 168 不变。⇒ 收益是**指令路径**（GEMM5 由 16×HMMA/线程组 → 4×QGMMA + 省 Kp 构建），
+  与「降 L2 搬运量」正交。S4096 相对 TE FP8（0.3025ms/908.7TF）**5.93× → 5.70×**。
+- **剩余（F3b 主体）**：GEMM3/4 的 M=BN=32 < m64 ⇒ 需 BN=64（翻倍 dVacc/dKacc 撞 255 regs，
+  p160 已判负，需先解寄存器账）；WS 完整化。详见 `docs/03` §104；原始输出
+  `src/fp8/fa_bwd_fp8_wgmma345_smoke.out.txt`、`src/fp8/fa_bwd_fp8_o81_ab_wgmma5_{0,1}_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o81_ncu_wgmma5_{0,1}_s4096.out.txt`、`src/fp8/fa_bwd_fp8_o81_ci_fp8.out.txt`。

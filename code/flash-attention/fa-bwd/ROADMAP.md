@@ -3110,10 +3110,12 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       TE SASS 证其用 `QGMMA RS_TN`（A 在寄存器）+ `STSM/LDSM` 配对粒度转置；O79 冒烟证
       `ldmatrix.x4` 的 A 片段直接喂 `wgmma.m64n32k32` RS（max_abs=0 PASS）；**O80（第 175 轮）
       把「逐字节转置」用 `ldmatrix.x4.trans + PRMT(0x5140)` 钉死并跑到 wgmma RS GEMM3 端到端
-      max_abs=0 PASS**（SASS：8×QGMMA + 0×HMMA + PRMT，74 regs）。**剩余 = 接进 `fp8_mma_body`
-      的 GEMM3/4/5 + 把 GEMM3/4 的 M=BN 从 32 提到 64（wgmma 最小 m64）+ 重算 smem/CTA/SM
-      （见 O80）。② WS 完整化（producer/consumer + 更深 mbarrier 流水，重叠 `wait`，
-      降 L1/L2 压力）仍待做。
+      max_abs=0 PASS**（SASS：8×QGMMA + 0×HMMA + PRMT，74 regs）。**O81（第 176 轮）已把
+      GEMM5（dQ，M=BM=64）落进真实 `fp8_mma_body` 默认开启**（B=Kᵀ 用 no-swizzle INTERLEAVE
+      描述符、从 SW128 K stage 转置、复用 Kp 缓冲；S4096 main 1.051×、total 1.038×、red 不变，
+      见「当前进度 第一百七十六轮」）。**剩余 = GEMM3/4（dV/dK，M=BN=32<64）需 BN=64（撞 255 regs，
+      p160 判负，需先解寄存器账）+ WS 完整化**（见 O80）。② WS 完整化（producer/consumer + 更深
+      mbarrier 流水，重叠 `wait`，降 L1/L2 压力）仍待做。
 - [ ] **F4b**：fp8 非 det 默认的 dK/dV 归约再优化（当前 red 仍是 74% L2）。
 - [x] **O79**（第一百七十四轮，**路径正结果 / 代码未改默认**）**TE SASS 发现 QGMMA `RS_TN` +
   fp8 wgmma RS 冒烟**——用 `ncu --page source --print-source sass` 对照 TE 反向：TE
@@ -3151,7 +3153,23 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百七十五轮）**：**O80——fp8 逐字节转置（`ldmatrix.x4.trans` + `PRMT 0x5140`）
+> **最新（第一百七十六轮）**：**O81——fp8 GEMM5（dQ）切到 wgmma RS，正结果、默认开启；F3b 主体
+> 第一块落地**。把默认 fp8 main 里唯一满足 wgmma 最小 m64 的 GEMM5（dQ，M=BM=64）从 `mma.m16n8k32`
+> 换到 `wgmma.m64n32k32` RS（A=dS2 寄存器；B=Kᵀ 用 **no-swizzle INTERLEAVE 描述符**、由**从 SW128
+> K stage 逐字节转置**得到、**复用 Kp 缓冲 ⇒ smem 零增长**）。数据通路由新冒烟
+> `src/fp8/fa_bwd_fp8_wgmma345_smoke.cu` 三验证（no-swizzle 描述符 + SW128 源转置 + 端到端
+> GEMM5 全 max_abs=0）。**坑**：generic 写 smem 后必须 `fence.proxy.async`，否则偶发 O(1) 错。
+> 数值与 `FA_WGMMA5=0` 逐位打印相同、`--ci --dtype fp8 --hopper` 全绿。S4096 **main
+> 1.5564→1.4810ms（1.051×）/ total 1.7885→1.7235ms（1.038×，79.74 TF）**；ncu `smsp inst`
+> −11.1%、HMMA −26.9%、`lts read` −9.3%、**`red` 114.52M 不变**、regs 168。相对 TE FP8
+> 5.93×→**5.70×**。
+> **下一步候选**：① **F3b 剩余：GEMM3/4（dV/dK）上 wgmma**——M=BN=32 < m64，需 BN=64（或两块凑
+> M=64）；BN 32→64 翻倍 `dVacc/dKacc` 撞 255 寄存器/2 CTA/SM（p160 判负）⇒ 需先解寄存器账
+> （如 256/384 线程摊累加器，对标 TE 384 线程）；② WS 完整化（producer/consumer + 更深 mbarrier）；
+> ③ 换形状/dtype 覆盖。见 `docs/03` §104、`docs/08` §5.90、`docs/04` §48；原始输出
+> `src/fp8/fa_bwd_fp8_o81_*`、`src/fp8/fa_bwd_fp8_wgmma345_smoke.out.txt`。
+>
+> **（第一百七十五轮）**：**O80——fp8 逐字节转置（`ldmatrix.x4.trans` + `PRMT 0x5140`）
 > 打通 + wgmma RS GEMM3 端到端 PASS；F3b 主体的「操作数构造」死结全解**。承接 O79：把 TE SASS
 > 证的 `LDSM.MT88.4 → PRMT → STSM.M88.4` 操作数构造法用最小复现钉死——`src/fp8/fa_bwd_fp8_stmatrix_smoke.cu`
 > 对 [R][C] fp8 行主序 tile 做 **逐字节转置**（4 种 shape **mismatches=0**），再直接落成 **SW128**
@@ -7286,6 +7304,41 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     smem/CTA/SM。默认路径一行未改、数值逐位不变。
   - 原始输出 `src/fp8/fa_bwd_fp8_stmatrix_smoke.out.txt`、`..._sass.out.txt`、`..._ptxas.out.txt`；
     文档 `docs/03` §103、`docs/08` §5.89。
+
+- 2026-09-30（第一百七十六轮）：**F3b 主体第一块落地（O81）：fp8 GEMM5（dQ）切到 wgmma RS
+  —— 正结果，默认**。落实第一百七十五轮「下一步候选 ①」。默认 fp8 main 五个 GEMM 里只有
+  GEMM1/2 是 QGMMA；本轮把**唯一满足 wgmma 最小 m64 的 GEMM5（dQ，M=BM=64）**落进真实
+  `fp8_mma_body`，并解决它相对 GEMM1/2 的两个新问题：B=Kᵀ（K 归约维=BN=32<128B，用不了 SW128）
+  与真实 K 以 SW128 存储。
+    - **三个新钉死事实**（新 `src/fp8/fa_bwd_fp8_wgmma345_smoke.cu`，全 max_abs=0）：① **no-swizzle
+      K-major 描述符**可用，但 CUTLASS canonical INTERLEAVE 布局是 `((8,n),2):((1,SBO),LBO)`
+      （8 行 stride 恒 1 个 uint128），K=32 自然编码 **LBO_u=8/SBO_u=16**（扫参对照）；② 从
+      **SW128 源**逐字节转置只需把 `transpose_store` 的 lane 源地址改成 `sw128_off_fp8`（PRMT 不变），
+      `[32][128]/[64][128]` mismatches=0；③ 端到端 `dQ=dS2·K`（A=dS2 e5m2 经 ldmatrix、
+      B=Kᵀ no-swizzle、`wgmma.m64n32k32.e5m2.e4m3`×4）精确。
+    - **落地**（`-DFA_WGMMA5`，**默认 1**）：KVTMA 路径的 Kp 配对构建换成从 SW128 K stage 转置成
+      Kᵀ INTERLEAVE（**复用 Kp 的 4352B 缓冲 ⇒ smem 零增长**），GEMM5 换 `wgmma RS` + CLayout_64x32
+      epilogue（`dqacc5[4][4][4]`）。门控 `WGMMA && KVTMA && HD==128 && BN==32 && !DET && !DQONLY
+      && kRegDq`，其余路径逐字不变。**关键坑**：generic 写 smem 后必须
+      `fence.proxy.async.shared::cta`（`bulk_reduce_fence()`），否则 wgmma 的 async proxy 读到半成品，
+      dQ 出现 **O(1) 偶发错**（首版 O64/O41 A/B 的 dq 差 2.36/5.14；补 fence 后回到 1e-7）。
+    - **数值（护栏全过，不改精度）**：S512/S4096 causal、GQA、full 四例 vs fp32 ref relL2（dq/dk/dv）
+      8.15–8.18% / 8.22–8.30% / 6.32–6.71%，与 `FA_WGMMA5=0` **逐位打印相同**；S4096 max_abs
+      **2.635e-1/2.644e-1/3.216e-1**、S512 2.426e-1/2.972e-1/3.733e-1；`--ci --dtype fp8 --hopper`
+      29 case 单/两文件 gate **7.629e-6 OK**、`--check docs/04` OK（198 行）。
+    - **性能（同 binary A/B，S4096 H16 causal，event iters=30）**：main **1.5564→1.4810ms（1.051×）**、
+      total **1.7885→1.7235ms（1.038×，76.84→79.74 TF）**。ncu（同 session）：Duration 1.56→**1.49ms**、
+      `smsp inst` 722.28M→**641.86M（−11.1%）**、HMMA 27.69M→**20.23M（−26.9%）**、
+      `lts read` 30.91M→**28.03M（−9.3%）**、**`lts red` 114.52M→114.52M 一字不变**、regs 168 不变。
+      ⇒ 收益纯粹来自**指令路径**（GEMM5 由 16×HMMA/线程组 → 4×QGMMA + 省 Kp 构建），与「降 L2
+      搬运量」正交。S4096 total 相对 TE FP8（纯反向 0.3025ms/908.7TF）**5.93×→5.70×**。
+    - **下一步**：F3b 主体剩余 = **GEMM3/4（dV/dK）上 wgmma**（M=BN=32 < m64 ⇒ 需 BN=64，翻倍
+      dVacc/dKacc 撞 255 regs，p160 已判负，需先解寄存器账，例如 256/384 线程摊累加器）；
+      以及 WS 完整化。见 `docs/03` §104、`docs/08` §5.90、`docs/04` §48；原始输出
+      `src/fp8/fa_bwd_fp8_wgmma345_smoke.{cu,out.txt}`、
+      `src/fp8/fa_bwd_fp8_o81_ab_wgmma5_{0,1}_s4096.out.txt`、
+      `src/fp8/fa_bwd_fp8_o81_ncu_wgmma5_{0,1}_s4096.out.txt`、`src/fp8/fa_bwd_fp8_o81_ci_fp8.out.txt`、
+      `src/fp8/fa_bwd_fp8_o81_baseline_fa3_te.out.txt`。
 
 ## 灵感 / backlog
 

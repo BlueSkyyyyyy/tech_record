@@ -1,0 +1,12 @@
+=== p176 O81 baseline (S=4096 H16 D128 causal fp8, ours 默认 Hopper + FA_WGMMA5=1, 本轮后默认) ===
+[ours] total 1.7235 ms / 79.74 TFLOPS  (quant 0.1060 | preprocess 0.1224 | main 1.4810 ms)
+[ours] numeric vs fp32 ref (b1_s4096_h16_d128_causal_fp8): dq/dk/dv max_abs = 2.635e-01 / 2.644e-01 / 3.216e-01
+[TE FP8 pure-bwd] 0.3025 ms / 908.72 TFLOPS  => ours/TE = 5.70x   (O81 前 5.93x)
+[ours] relL2 vs fp32 ref: dq 8.15% / dk 8.26% / dv 6.49%  (护栏 8.2/8.3/6.5% ±0.3, 不回退)
+[ours] relL2 vs TE  fp8: dq 13.42% / dk 13.48% / dv 28.15%  (max_abs O(0.3-0.7), 与 O80 前逐位相同)
+
+--- A/B (同 binary FA_WGMMA5=0/1, event iters=30): main 1.5564->1.4810ms (1.051x); total 1.7885->1.7235ms (1.038x) ---
+--- ncu (同 session): Duration 1.56->1.49ms; smsp inst 722.28M->641.86M (-11.1%); HMMA 27.69M->20.23M (-26.9%); ---
+---   lts read 30.91M->28.03M (-9.3%); lts red 114.52M->114.52M (不变); regs 168->168 ---
+--- TE baseline 取自 src/fp8/fa_bwd_fp8_p174_baseline.out.txt（0.3025ms/908.72TF, 同机同口径纯反向）---
+--- see fa_bwd_fp8_o81_ab_wgmma5_{0,1}_s4096.out.txt, fa_bwd_fp8_o81_ncu_wgmma5_{0,1}_s4096.out.txt, fa_bwd_fp8_wgmma345_smoke.out.txt ---
