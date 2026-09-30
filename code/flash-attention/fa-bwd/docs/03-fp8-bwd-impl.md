@@ -10605,3 +10605,92 @@ dQ 跨 part 原子略动（dK/dV 主体与 ksplit 无关，再次印证 O83/O86/
 - **原始输出**：`src/fp8/fa_bwd_fp8_o98_varlen_full_ab.out.txt`（A/B 主表）、
   `..._o98_ksweep.out.txt`（全扫）、`..._o98_ncu.out.txt`（ncu）、
   `..._o98_fa3_baseline.out.txt`（纯反向 FA2/FA3/TE 基线）。见 `docs/08` §5.106。
+
+---
+
+## 121. O99（第 193 轮）：**causal D=256 的 ksplit 重标定** —— **正结果，默认**
+
+> 承接 O96/O97/O98 的「把按 causal 经验错套到 full 的 ksplit 启发式逐条复核」。此前只审了
+> **full**，而 **causal D=256** 一直沿用 O29 的 `target_ctas = S/2`——那是按 **causal MLA
+> （D=512，1 CTA/SM）** 标的。本轮把 causal D=256 补上。**纯 host、device 一行未改、单/两文件
+> 同源**；`--ksplit=K` 显式给出时不覆盖（保留 A/B）。
+
+### 121.1 机制：`S/2` 对 causal D=256 是「与 S 无关的欠切」
+
+- **D=256 主 kernel = `fa_bwd_fp8_mma_kernel<256,64,32>`（cp.async wgmma、非 TMA，2 CTA/SM
+  ⇒ 264 并发槽）**。O29 给 `D != 128` 的 `target = S/2` ⇒ `k = S/2 / ((S/64)*H*B) = 32/(H*B)`
+  **与 S 无关**：H=8 时恒 k=4、H=16 时恒 k=2。causal 三角偏斜本要靠细切分摊平尾波，于是
+  小/中 S **严重欠切**（并发不足、全局延迟藏不住）。
+- 实测 6 个 causal D=256 shape 全扫 k∈[1,32]（`src/fp8/fa_bwd_fp8_o99_ksweep.out.txt`）：
+
+| shape（B,S,H,D；Hkv） | base | nblk | 旧 auto k | 旧 total | 最优 k | 最优 total | 加速 |
+|---|---|---|---|---|---|---|---|
+| (1,512,8,256)  | 64  | 8  | 4 | 0.1086ms | 8  | 0.1017ms | **1.068×** |
+| (1,1024,8,256) | 128 | 16 | 4 | 0.3058ms | 8  | 0.2749ms | **1.112×** |
+| (1,2048,8,256) | 256 | 32 | 4 | 0.8833ms | 16 | 0.8001ms | **1.104×** |
+| (1,4096,8,256) | 512 | 64 | 4 | 2.9015ms | 16 | 2.7498ms | **1.055×** |
+| (1,1024,16,256; Hkv4) | 256 | 16 | 2 | 0.5424ms | 6  | 0.4745ms | **1.143×** |
+| (1,2048,16,256) | 512 | 32 | 2 | 1.6999ms | 12 | 1.5145ms | **1.122×** |
+
+- 最优 k 一致地落在「`grid = base*k ≈ 2*S`」（即 `k ≈ 128/(H*B)`）附近：s1024→2048、
+  s2048→4096、s4096→8192（H8 取到 k=16）；小 S 由 `k ≤ nblk` 封顶（s512 取 k=8）。
+  这与 O29 给 **D=128 causal 大 S** 的目标 `8192 = 2*S` 同源。
+
+### 121.2 新规则（host，`fa_bwd_fp8_main.cu` / `fa_bwd_fp8_mma_onefile.cu` 同源）
+
+```
+if (ksplit_auto && causal && D == 256) {
+  nblk = ceil(S / 64);                 // 变长用 maxlen
+  k = clamp(2*S / base_grid, 1, 16);   // grid = base*k ≈ 2*S
+  if (k > nblk) k = nblk;              // 不切得比 m 块数还细
+  ksplit = k;
+}
+```
+
+选中：s512H8 **8** / s1024H8 **16** / s2048H8 **16** / s4096H8 **16** / s1024H16kv4 **8** /
+s2048H16 **8**——全部距 per-shape 最优 **≤1.7%**，全部 ≥1.05×。变长 `run_varlen` 的同名分支
+用 `maxlen` 当串长（**当前无 D=256 变长 dump，按定长实测外推、未单独测量**）。
+
+### 121.3 ncu（main kernel；同 binary，new vs 旧 auto 两档）
+
+| shape | 配置 | Duration | `op_read` | `op_red` | L2 利用率 |
+|---|---|---|---|---|---|
+| s2048H8 | 旧 k=4 | 769.6µs | 6.05M | 51.90M | 67.1% |
+|  | **新 k=16** | **681.5µs** | 8.41M | 51.90M | **76.4%** |
+| s1024H16kv4 | 旧 k=2 | 464.1µs | 2.93M | 26.74M | 57.4% |
+|  | **新 k=8** | **397.1µs** | 4.14M | 26.74M | **67.7%** |
+
+机制与 O97 的 D=256 full 完全同型：**加 k → `op_read`（Q/dO 重读）升，但并发/延迟隐藏变好、
+L2 利用率抬高，Duration 直接下降**；**两组 `op_red` 一字不变**（dK/dV 跨 m-block 主体与 ksplit
+无关，复证 O83/O86/O95）。故这是「不改工作划分、只买并发」的调度杠杆。
+
+### 121.4 精度护栏与回归
+
+- **数值不变量**：只改「哪些 CTA 算哪段 K」⇒ 只改跨 CTA `atomicAdd` 的次数/次序。6 个 shape
+  `ours vs fp32 ref` relL2：dq 8.15–8.33%、dk 8.33–8.48%、dv 6.39–6.50%，全在护栏内
+  （dq≤8.2+0.3 / dk≤8.3+0.3 / dv≤6.5+0.3）；`max_abs` O(0.21–0.62)。
+- **单/两文件一致**：`ours vs ours_sf` 对这 6 个 shape **逐位相同**（relL2 完全一致）。
+- **全量 CI**（`fa_bwd_run.py --ci`，**93 case**）：三 dtype 一致性 gate **OK**（fp16 1.953e-3 /
+  bf16 7.812e-3 / fp8 **6.676e-6**）；顺带把 O96/O97/O98 遗留的 `docs/04` 内嵌表同步（198→214 行）。
+- **无回归**：`!causal` 走 O96/O97/O98；D=128 causal 走 O93 的 hswap k=2；D=512 causal 仍 `S/2`。
+  实测 D=128 causal S4096H16 仍 k=2 / total 1.616ms、full D=256/512 逐档不变。
+
+### 121.5 性能与峰值占比
+
+- ours fp8 causal D=256 total：s2048H8 **0.805ms（42.7 TF）** / s4096H8 **2.757ms（49.9 TF）**，
+  FP8 峰值 1978.8 TF ⇒ **2.2% / 2.5%**。
+- **外部基线**：TE fp8 `fused_attn` 对 D=256 **causal** 报
+  `Invalid combination of data type and sequence`（dump 时确认），FA3 不支持 fp8 ⇒ 无 fp8 外部列。
+  同 shape fp16 纯反向（`fa_bwd_bench.py bench`）TE 0.216/0.592ms（317.7/464.5 TF）、FA2
+  0.301/0.863ms（228.6/318.5 TF），D=256 反向 `fa3=NA`——仅供数量级参照（dtype 不同、不可直接比）。
+
+### 121.6 结论 / 下一步
+
+- **判决：正结果、默认开启。** causal D=256 的 ksplit 自动档从「causal MLA 的 `S/2`」改为
+  「`grid≈2*S`（`k≈128/(H*B)`，按 `nblk` 封顶）」，6 shape 全部 ≥1.05×（最高 1.14×）、无回退。
+  仍属「纠正被 causal 经验错套的启发式」，不改数据通路。
+- 至此 **fp8 ksplit 自动档：causal/full × 定长/变长 × D=128/256/512 全部复核过**。causal 旗舰
+  （D=128 S4096）的 L2 `red` 主体墙仍是唯一真杠杆，本卡无软件解（见「阻塞」）。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o99_ab.out.txt`（A/B 主表）、`..._o99_ksweep.out.txt`
+  （全扫）、`..._o99_ncu.out.txt`（ncu）、`..._o99_accuracy.out.txt`（relL2）、
+  `..._o99_fa3_baseline.out.txt`（外部基线参照）、`..._o99_ci.out.txt`（全量 CI）。见 `docs/08` §5.107。

@@ -1,0 +1,7 @@
+=== O99 外部基线（纯反向 CUPTI，fp16；TE/FA3 对 D=256 causal 的 fp8 不支持，仅列 fp16 供参照）===
+cmd: python3 harness/fa_bwd_bench.py bench --dtype fp16 --shape '1 2048 8 256 causal' --shape '1 4096 8 256 causal'
+[b1_s2048_h8_d256_causal_fp16] fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)  fa=0.3006ms/228.60TF  te=0.2163ms/317.71TF
+[b1_s4096_h8_d256_causal_fp16] fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)  fa=0.8629ms/318.54TF  te=0.5918ms/464.49TF
+
+注: TE fp8 fused_attn 对 D=256 causal 报 'Invalid combination of data type and sequence'（dump 时已确认）；FA3 不支持 fp8 且 D=256 反向 fa3=NA。
+ours fp8 causal D=256 total: s2048H8 0.805ms(42.7TF) / s4096H8 2.757ms(49.9TF)，FP8 峰值 1978.8TF ⇒ 2.2%/2.5%。

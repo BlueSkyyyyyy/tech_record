@@ -758,6 +758,19 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       }
     }
   }
+  // O99（第 193 轮）：**causal D=256 的 ksplit 重标定**（定长规则同源，用 `maxlen` 当串长）。
+  //   与 O98 的 full 分支并列：定长 causal D=256 的 `target=S/2` 是小/中 S 严重欠切（见定长
+  //   路径注释 / docs/03 §121），变长沿用同一错；改为 `k = clamp(2*maxlen/base,1,16)` 再按
+  //   `nblk(=`maxlen/64`)` 封顶。**当前无 D=256 变长 dump，本分支按定长实测外推、未单独测量**；
+  //   只改跨 CTA atomicAdd 次序、数值逐位不变。full 走上面的 O98 分支。
+  if (causal && D == 256) {
+    const long nblk256 = (long)((maxlen + BM - 1) / BM);
+    long k = (2L * maxlen) / base_grid;
+    if (k < 1) k = 1;
+    if (k > 16) k = 16;
+    if (k > nblk256) k = nblk256;
+    auto_k = k;
+  }
   // O97：`--ksplit=K` 也可用于 varlen（同 binary A/B；K>=1 直接覆盖自动档）。默认 -1 自动。
   const int ksplit = (vksplit >= 1) ? vksplit : (int)auto_k;
   const bool use_regdq = (D == 128) && ((long)(maxlen / 32) / (causal ? 2 : 1) / ksplit >= 4);
@@ -2181,6 +2194,27 @@ int main(int argc, char** argv) {
       if (k > 12) k = 12;
       ksplit = (int)k;
     }
+  }
+  // O99（第 193 轮）：**causal D=256 的 ksplit 重标定**。`D != 128` 一直沿用 O29 的
+  //   `target_ctas = S/2`——那是按 **causal MLA（D=512，1 CTA/SM）** 标的，套到 **causal
+  //   D=256（2 CTA/SM→264 槽）** 上 `k = S/2 / ((S/64)*H*B) = 32/(H*B)` 与 S 无关，小/中 S
+  //   严重欠切（并发不足、藏不住延迟）。O96/O97/O98 只复核了 **full**，causal D=256 从未审计。
+  //   实测（6 个 causal D=256 shape 全扫 k∈[1,32]，见 docs/03 §121）：
+  //   · s512H8 最优 k=8、s1024H8 k=8/16（差 1.7%）、s2048H8 k=16、s4096H8 k=16、
+  //     s1024H16kv4 k=6（k=8 差 0.5%）、s2048H16 k=12（k=8 差 0.6%）。
+  //   · 最优都落在「`grid = base*k ≈ 2*S`」附近（即 `k ≈ 128/(H*B)`）：s1024→2048、s2048→4096、
+  //     s4096→8192（H8 取到 cap 16）；小 S 被 `k ≤ nblk` 封顶（s512 取 8）。这与 D=128 causal
+  //     大 S 的目标 `8192 = 2*S`（O29）同源。
+  //   ⇒ 规则：`k = clamp(2*S/base, 1, 16)` 再按 `nblk` 封顶；`--ksplit=K` 显式时不覆盖。
+  //   6 shape 全部 ≥1.05×（s1024H16 1.14×）、无回退。**只改「哪些 CTA 算哪段 K」⇒ 只改跨 CTA
+  //   atomicAdd 次序，数值逐位不变。** full D=256/512 走 O97 分支、D=128 走 O96/O93，均不受影响。
+  if (ksplit_auto && causal && D == 256) {
+    const long nblk = (long)((S + 63) / 64);
+    long k = (2L * S) / base_grid;
+    if (k < 1) k = 1;
+    if (k > 16) k = 16;
+    if (k > nblk) k = nblk;
+    ksplit = (int)k;
   }
   // O93：hswap（跨 head 全局 LPT）启用时把自动 ksplit 收到 2——全局 LPT 使低 ksplit 的负载
   //   均衡足够好（S4096 main 1.443→1.373ms，Q/dO 重读 8×→2×；S1024H32/GQA 同向 1.10–1.12×）。

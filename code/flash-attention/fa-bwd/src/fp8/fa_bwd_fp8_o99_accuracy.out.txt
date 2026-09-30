@@ -1,0 +1,14 @@
+=== O99 精度护栏: fp8 causal D=256, ours(两文件=ours_hp / 单文件=ours_sf_hp) vs fp32 ref ===
+guardrail: relL2 dq<=8.2±0.3% / dk<=8.3±0.3% / dv<=6.5±0.3%; max_abs O(0.2-0.9)
+b1_s512_h8_d256_causal_fp8                 ours_hp     relL2 dq 8.152% | dk 8.329% | dv 6.462%  max_abs 2.863e-01 3.446e-01 3.655e-01
+b1_s512_h8_d256_causal_fp8                 ours_sf_hp  relL2 dq 8.152% | dk 8.329% | dv 6.462%  max_abs 2.863e-01 3.446e-01 3.655e-01
+b1_s1024_h8_d256_causal_fp8                ours_hp     relL2 dq 8.332% | dk 8.435% | dv 6.464%  max_abs 2.633e-01 2.797e-01 3.572e-01
+b1_s1024_h8_d256_causal_fp8                ours_sf_hp  relL2 dq 8.332% | dk 8.435% | dv 6.464%  max_abs 2.633e-01 2.797e-01 3.572e-01
+b1_s2048_h8_d256_causal_fp8                ours_hp     relL2 dq 8.272% | dk 8.366% | dv 6.500%  max_abs 2.227e-01 2.839e-01 3.586e-01
+b1_s2048_h8_d256_causal_fp8                ours_sf_hp  relL2 dq 8.272% | dk 8.366% | dv 6.500%  max_abs 2.227e-01 2.839e-01 3.586e-01
+b1_s4096_h8_d256_causal_fp8                ours_hp     relL2 dq 8.242% | dk 8.369% | dv 6.498%  max_abs 2.078e-01 3.040e-01 3.771e-01
+b1_s4096_h8_d256_causal_fp8                ours_sf_hp  relL2 dq 8.242% | dk 8.369% | dv 6.498%  max_abs 2.078e-01 3.040e-01 3.771e-01
+b1_s1024_h16_d256_kv4_causal_fp8           ours_hp     relL2 dq 8.234% | dk 8.481% | dv 6.392%  max_abs 2.477e-01 4.412e-01 6.152e-01
+b1_s1024_h16_d256_kv4_causal_fp8           ours_sf_hp  relL2 dq 8.234% | dk 8.481% | dv 6.392%  max_abs 2.477e-01 4.412e-01 6.152e-01
+b1_s2048_h16_d256_causal_fp8               ours_hp     relL2 dq 8.201% | dk 8.349% | dv 6.485%  max_abs 2.202e-01 3.006e-01 3.525e-01
+b1_s2048_h16_d256_causal_fp8               ours_sf_hp  relL2 dq 8.201% | dk 8.349% | dv 6.485%  max_abs 2.202e-01 3.006e-01 3.525e-01

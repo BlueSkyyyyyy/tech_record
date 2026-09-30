@@ -1,0 +1,61 @@
+=== O99: fp8 causal D=256 ksplit sweep (total ms, iters=100, Hopper wgmma+TMA) ===
+sweep cmd: ./fa_bwd_fp8_main_ab.out --dir=/home/xieminglin/proj/output/fa-bwd/<case> --ksplit=K --iters=100
+
+-- b1_s512_h8_d256_causal_fp8   (base=64,  nblk=8,  old-auto k=4, new-auto k=8)
+  k=2 total=0.1364 ms
+  k=4 total=0.1082 ms
+  k=6 total=0.1106 ms
+  k=8 total=0.1017 ms   <-- opt
+  k=12 total=0.1109 ms
+  k=16 total=0.1052 ms
+  k=24 total=0.1042 ms
+  k=32 total=0.1034 ms
+
+-- b1_s1024_h8_d256_causal_fp8  (base=128, nblk=16, old-auto k=4, new-auto k=16)
+  k=2 total=0.3386 ms
+  k=3 total=0.3105 ms
+  k=4 total=0.3059 ms
+  k=6 total=0.2847 ms
+  k=8 total=0.2749 ms   <-- opt (k=16 差 1.7%)
+  k=12 total=0.2779 ms
+  k=16 total=0.2797 ms
+
+-- b1_s2048_h8_d256_causal_fp8  (base=256, nblk=32, old-auto k=4, new-auto k=16)
+  k=2 total=1.0235 ms
+  k=4 total=0.8875 ms
+  k=6 total=0.8398 ms
+  k=8 total=0.8230 ms
+  k=12 total=0.8067 ms
+  k=16 total=0.8001 ms   <-- opt
+
+-- b1_s4096_h8_d256_causal_fp8  (base=512, nblk=64, old-auto k=4, new-auto k=16)
+  k=2 total=3.1691 ms
+  k=4 total=2.8921 ms
+  k=8 total=2.7740 ms
+  k=12 total=2.7574 ms
+  k=16 total=2.7498 ms   <-- opt
+  k=24 total=2.7834 ms
+  k=32 total=2.8159 ms
+
+-- b1_s1024_h16_d256_kv4_causal_fp8  (base=256, nblk=16, old-auto k=2, new-auto k=8)
+  k=2 total=0.5422 ms
+  k=4 total=0.4933 ms
+  k=5 total=0.4783 ms
+  k=6 total=0.4745 ms   <-- opt (k=8 差 0.5%)
+  k=8 total=0.4771 ms
+  k=12 total=0.4907 ms
+  k=16 total=0.5016 ms
+
+-- b1_s2048_h16_d256_causal_fp8  (base=512, nblk=32, old-auto k=2, new-auto k=8)
+  k=2 total=1.6993 ms
+  k=4 total=1.5701 ms
+  k=6 total=1.5357 ms
+  k=8 total=1.5230 ms
+  k=12 total=1.5145 ms  <-- opt (k=8 差 0.6%)
+  k=16 total=1.5312 ms
+  k=24 total=1.5905 ms
+  k=32 total=1.6340 ms
+
+规则: k = clamp(2*S/base, 1, 16) 再按 nblk 封顶  (grid = base*k ≈ 2*S)
+新 auto 选中: s512H8 k=8 / s1024H8 k=16 / s2048H8 k=16 / s4096H8 k=16 /
+              s1024H16kv4 k=8 / s2048H16 k=8  — 全部距 per-shape 最优 ≤1.7%。

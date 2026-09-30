@@ -1,0 +1,21 @@
+=== O99 A/B: fp8 causal D=256 ksplit 重标定（new-auto vs 旧 O29 auto），Hopper wgmma+TMA，iters=100 ===
+cmd: ./fa_bwd_fp8_main_ab.out --dir=<case> [--ksplit=K] --iters=100
+
+b1_s512_h8_d256_causal_fp8
+  new: grid main = 64 x 8 x 1  (ksplit=8, base_grid=64) [timing] total(quant+pre+main+cvt) 0.1005 ms  21.38 TFLOPS (bwd FLOPs=4BS^2HD) 
+  old: [timing] total(quant+pre+main+cvt) 0.1086 ms  19.77 TFLOPS (bwd FLOPs=4BS^2HD)
+b1_s1024_h8_d256_causal_fp8
+  new: grid main = 256 x 8 x 1  (ksplit=16, base_grid=128) [timing] total(quant+pre+main+cvt) 0.2793 ms  30.75 TFLOPS (bwd FLOPs=4BS^2HD) 
+  old: [timing] total(quant+pre+main+cvt) 0.3058 ms  28.09 TFLOPS (bwd FLOPs=4BS^2HD)
+b1_s2048_h8_d256_causal_fp8
+  new: grid main = 512 x 8 x 1  (ksplit=16, base_grid=256) [timing] total(quant+pre+main+cvt) 0.8051 ms  42.68 TFLOPS (bwd FLOPs=4BS^2HD) 
+  old: [timing] total(quant+pre+main+cvt) 0.8833 ms  38.90 TFLOPS (bwd FLOPs=4BS^2HD)
+b1_s4096_h8_d256_causal_fp8
+  new: grid main = 1024 x 8 x 1  (ksplit=16, base_grid=512) [timing] total(quant+pre+main+cvt) 2.7569 ms  49.85 TFLOPS (bwd FLOPs=4BS^2HD) 
+  old: [timing] total(quant+pre+main+cvt) 2.9015 ms  47.37 TFLOPS (bwd FLOPs=4BS^2HD)
+b1_s1024_h16_d256_kv4_causal_fp8
+  new: grid main = 128 x 16 x 1  (ksplit=8, base_grid=256) [timing] total(quant+pre+main+cvt) 0.4754 ms  36.14 TFLOPS (bwd FLOPs=4BS^2HD) 
+  old: [timing] total(quant+pre+main+cvt) 0.5424 ms  31.67 TFLOPS (bwd FLOPs=4BS^2HD)
+b1_s2048_h16_d256_causal_fp8
+  new: grid main = 256 x 16 x 1  (ksplit=8, base_grid=512) [timing] total(quant+pre+main+cvt) 1.5188 ms  45.25 TFLOPS (bwd FLOPs=4BS^2HD) 
+  old: [timing] total(quant+pre+main+cvt) 1.6999 ms  40.42 TFLOPS (bwd FLOPs=4BS^2HD)
