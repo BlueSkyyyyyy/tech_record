@@ -3151,6 +3151,14 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
        **candidate ① 按资源账收口**（与 F6/F7/p160 同源）。诊断 `FA_RED_STORE`（plain store 替原子）
        证 `red` 成本 ~8% 在原子语义、~29% 是写流量本身 ⇒ 与归约机制无关。见 `docs/03` §106、
        `docs/08` §5.92。
+       → **O87（第 182 轮，wait-schedule 变体，负结果/默认一行未改）**：只改 wgmma 的
+       fence/commit/wait 时序（A 合并 commit/wait、B `wait_group<1>` 流水、C O81 的 GEMM5
+       wait 流水）都翻不正 O82（A 0.930×/B 0.937×/C 0.989× vs 默认），ncu 证 `smsp inst −7.3%`、
+       `short_scoreboard 1.82→1.41` 但 **`red` 一字不变、`wait` 不降、Duration 反升** ⇒
+       **任何只改指令/wait、不改「每元素贡献 CTA 数」的改动不可能转正**。**F3b 的「无 BN=64 时
+       GEMM3/4 切 wgmma」路线在 wait 维度再无空间；唯一剩余真 m64 路 = BN=64 + 多 warpgroup
+       （256/384 线程），被 3 CTA/SM 的 77,482B/170-reg 硬墙锁死（O83）**。见 `docs/03` §110、
+       `docs/08` §5.96。
 - [x] **F4b**：fp8 非 det 默认的 dK/dV 归约再优化（当前 red 仍是 74% L2）。
       → **O83（第 178 轮）分解**：`red` 114.5M 扇区中 ~29% 是写流量本身、~8% 是原子 RMW；
       O42/O67/O83 三证「与归约指令/宽度/机制无关」⇒ 唯一杠杆=减少贡献 CTA 数（工作划分），
@@ -3201,7 +3209,19 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百八十一轮）**：**O86——GQA/MQA「跨 Q 头折叠 dK/dV」结构性不可行（负结果，
+> **最新（第一百八十二轮）**：**O87——F3b GEMM3/4 wgmma 的 wait-schedule 变体收口（负结果，
+> 默认一行未改）**。只改 wgmma 的 fence/commit/wait 时序：A 合并 commit/wait（0.930×）、
+> B `wait_group<1>` 流水（0.937×）、C O81 的 GEMM5 wait 流水（0.989×）全部翻不正 O82。
+> ncu：`smsp inst −7.3%`、`short_scoreboard 1.82→1.41`，但 **`lts op_red` 114,524,160 一字不变、
+> `wait` 不降、Duration 1.49→1.55ms** ⇒ 默认 fp8 main 是 **L2 `red` bound**，**任何只改指令/wait、
+> 不改「每元素贡献 CTA 数」的改动都不可能转正**。**F3b 至此与 F4b/F6/F7 一样收口为「本卡无软件解」**；
+> 唯一剩余真 m64 路 = BN=64 + 多 warpgroup（256/384 线程），被 3 CTA/SM 的 77,482B/170-reg 硬墙
+> 锁死（O83）。见 `docs/03` §110、`docs/08` §5.96。
+> **下一步候选**：① **换卡**（更大 smem/寄存器，解锁 BN=64 + 多 warpgroup KV-owner / 真 m64）或
+> **硬件 scatter-reduce**；② **多 warpgroup WS（256/384 线程）**——唯一未试的结构性杠杆，但需先
+> 破 fp8 `wgmma` 无转置 + 175-reg 累加器墙；③ 其余 fp8 覆盖项（`D=256` K/V-TMA、MLA 降 smem）
+> 均受同一 smem 墙，属 backlog。
+> **（第 181 轮）**：**O86——GQA/MQA「跨 Q 头折叠 dK/dV」结构性不可行（负结果，
 > 默认一行未改）**。落实 F4b 新 backlog。ncu 证默认 fp8 main 的 L2 `red` **只由 Q 头数 H 决定**
 > （MQA H64kv1 == GQA H64kv4 == 32,833,536 扇区），故头折叠上界可 ÷`(H/Hkv)`；但 **dQ 与
 > dK/dV 的 loop-order 偏好相反**，(A) head 内层→dQ 丢寄存器累加 + Q/dO 按 `(nt,head)` 重载、
@@ -7560,6 +7580,26 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     顶穿 116KB/2-CTA 门槛，backlog）。见 `docs/03` §108、`docs/08` §5.94、`docs/04` §50；
     原始输出 `src/fp8/fa_bwd_fp8_o85_d256_ab.out.txt`、`..._o85_ncu_d256_s1024.out.txt`、
     `..._o85_accuracy_d256.out.txt`。
+
+- 2026-09-30（第一百八十二轮）：**O87——F3b GEMM3/4 wgmma 的 wait-schedule 变体收口（负结果，
+  默认一行未改）**。承接 O82（`-DFA_WGMMA34=1` 0.964×，诊断「wgmma `wait` + 零填充/转置抵消
+  指令收益」），本轮**只改 fence/commit/wait 时序**、试三个「藏 wait」写法：
+  - **变体 A 合并 commit/wait**（4 个 n-tile 的 8 条 wgmma 一次 fence/连发/commit/wait）：
+    S4096 main **1.5901ms（0.930×）**；**变体 B `wait_group<1>` 流水**（两组各 commit、先等
+    `ng=0` 做 epilogue）**1.5778ms（0.937×）**——两者都比 O82 原版（1.5435/0.958×）更慢。
+  - **变体 C**：O81 的 GEMM5（正结果路径）wait 流水 **1.4957ms（0.989×）**中性偏负 ⇒ 连 O81
+    也到 wait 平台期。默认基线同 session **1.4788ms**。
+  - **ncu（S4096）**：`WGMMA34=0→1` 的 `smsp inst` 641.86M→**594.83M（−7.3%）**、
+    `short_scoreboard` 1.82→**1.41**，但 **`lts op_red` 114,524,160 一字不变、`wait` 1.56 不降、
+    Duration 1.49→1.55ms**。⇒ 默认 fp8 main 是 **L2 `red` bound**，wgmma 对 `red` 一字不减
+    （O83），**任何只改指令/wait 时序、不改「每元素贡献 CTA 数」的改动都不可能转正**——三变体
+    独立复证。默认实例仍 168 regs/40B spill（合并 `acc[4][16]` 未进一步溢出 ⇒ 纯时序问题）。
+  - **判决**：F3b 的「无 BN=64 时 GEMM3/4 切 wgmma」在 wait 维度**再无空间**；唯一剩余真 m64 路 =
+    **BN=64 + 多 warpgroup（256/384 线程）**，被 3 CTA/SM 的 77,482B/170-reg 硬墙锁死（O83）。
+    **F3b 至此与 F4b/F6/F7 一样收口为「本卡无软件解」**。数值逐位不变（三变体 vs fp32 ref 的
+    max_abs 均 2.635/2.644/3.216e-1）。见 `docs/03` §110、`docs/08` §5.96；原始输出
+    `src/fp8/fa_bwd_fp8_o87_wg34_{0,1_orig,1_mergewait,1_pipewait}_s4096.out.txt`、
+    `..._o87_g5pipe_s4096.out.txt`、`..._o87_ncu_wg34_{0,1}_s4096.out.txt`。
 
 - 2026-09-30（第一百八十一轮）：**O86——GQA/MQA「跨 Q 头折叠 dK/dV」可行性收口（负结果，
   默认一行未改）**。落实 F4b 的新 backlog（GQA/MQA 把 `red` ÷`(H/Hkv)`，MQA 最多 ÷64）。

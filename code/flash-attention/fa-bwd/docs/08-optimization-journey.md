@@ -1865,3 +1865,29 @@ smem 冲突 + 低 occ
   不变。解锁需换卡 / 硬件 scatter-reduce / 多 warpgroup WS（同 F6/F3b 寄存器墙）。
 
 详见 `docs/03` §109；原始输出 `src/fp8/fa_bwd_fp8_o86_gqa_red_probe.out.txt`。
+
+### 5.96 第 182 轮（O87）：F3b **GEMM3/4 wgmma 的 wait-schedule 变体** —— **仍负（收口）**
+
+承接 O82（`-DFA_WGMMA34=1`：dV/dK 切 wgmma RS、M=BN=32 零填充到 m64，实测 0.964×，诊断
+「wgnma `wait` + 零填充/转置抵消指令收益」）。本轮只改 **fence/commit/wait 时序**，试三个
+「藏 wait」写法，看能否翻正：
+
+- **变体 A 合并 commit/wait**：4 个 n-tile 的 8 条 wgmma 一次 fence/连发/commit/wait。
+  S4096 main **1.5901ms（0.930×）**——比 O82 原版（1.5435/0.958×）更慢。
+- **变体 B `wait_group<1>` 流水**：两组各 commit，先 `wait_group<1>` 做 `ng=0` epilogue、
+  再 `wait0` 做 `ng=1`。**1.5778ms（0.937×）**。
+- **变体 C GEMM5（O81 正结果路径）wait 流水**：**1.4957ms（0.989×）**中性偏负。
+
+**ncu（S4096）**：`WGMMA34=0→1` 的 `smsp inst` 641.86M→594.83M（−7.3%）、`short_scoreboard`
+1.82→1.41，但 **`lts op_red` 114,524,160 一字不变、`wait` 1.56 不降、Duration 1.49→1.55ms**。
+⇒ 默认 fp8 main 是 **L2 `red` bound**，wgmma 对 `red` 一字不减（O83），**任何只改指令/wait
+时序、不改「每元素贡献 CTA 数」的改动都不可能转正**——三个变体独立复证。寄存器账复现
+（默认实例 168 regs/40B spill；合并 `acc[4][16]` 未进一步溢出 ⇒ 纯时序问题）。
+
+**判决**：F3b 的「无 BN=64 时 GEMM3/4 切 wgmma」路线在 wait 维度**再无空间**，默认路径一行未改、
+数值逐位不变（三变体 vs fp32 ref 的 max_abs 均 2.635/2.644/3.216e-1）。唯一剩余真 m64 路 =
+**BN=64 + 多 warpgroup（256/384 线程）**，被 3 CTA/SM 的 77,482B/170-reg 硬墙锁死（O83），
+与 F6/F7/p160/O86 同源。**F3b 至此与 F4b/F6/F7 一样收口为「本卡无软件解」。**
+
+详见 `docs/03` §110；原始输出 `src/fp8/fa_bwd_fp8_o87_wg34_{0,1_orig,1_mergewait,1_pipewait}_s4096.out.txt`、
+`..._o87_g5pipe_s4096.out.txt`、`..._o87_ncu_wg34_{0,1}_s4096.out.txt`。
