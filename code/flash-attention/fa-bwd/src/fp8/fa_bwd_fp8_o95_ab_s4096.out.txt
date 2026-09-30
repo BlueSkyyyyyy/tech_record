@@ -1,0 +1,57 @@
+### O95（第 189 轮）A/B：变 ks 调度（--ksm，list-driven per-m ksplit）—— S4096 H16 B1 causal fp8，两文件版
+### 同 binary（sm90a -DFA_WGMMA -DFA_TMA），hswap=1，event iters=40
+
+=== args: --ksm=-1 --ksmhi=2 ===
+[timing] total(quant+pre+main+cvt) 1.6068 ms  85.53 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1058 ms | preprocess 0.1214 ms | main 1.3670 ms | convert 0.0126 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --ksm=0 --ksmhi=2 ===
+O95: ksm on (top 0/64 m-blocks ks=2, rest ks=1; nslots=64 vs uniform ks=2 128)
+[timing] total(quant+pre+main+cvt) 1.6720 ms  82.20 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1055 ms | preprocess 0.1202 ms | main 1.4488 ms | convert -0.0026 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --ksm=8 --ksmhi=2 ===
+O95: ksm on (top 8/64 m-blocks ks=2, rest ks=1; nslots=72 vs uniform ks=2 128)
+[timing] total(quant+pre+main+cvt) 1.6187 ms  84.91 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1062 ms | preprocess 0.1230 ms | main 1.3874 ms | convert 0.0021 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --ksm=16 --ksmhi=2 ===
+O95: ksm on (top 16/64 m-blocks ks=2, rest ks=1; nslots=80 vs uniform ks=2 128)
+[timing] total(quant+pre+main+cvt) 1.6195 ms  84.86 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1060 ms | preprocess 0.1225 ms | main 1.3807 ms | convert 0.0103 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --ksm=24 --ksmhi=2 ===
+O95: ksm on (top 24/64 m-blocks ks=2, rest ks=1; nslots=88 vs uniform ks=2 128)
+[timing] total(quant+pre+main+cvt) 1.6506 ms  83.27 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1055 ms | preprocess 0.1203 ms | main 1.4027 ms | convert 0.0221 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --ksm=32 --ksmhi=2 ===
+O95: ksm on (top 32/64 m-blocks ks=2, rest ks=1; nslots=96 vs uniform ks=2 128)
+[timing] total(quant+pre+main+cvt) 1.6431 ms  83.64 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1057 ms | preprocess 0.1206 ms | main 1.4120 ms | convert 0.0048 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --ksm=48 --ksmhi=2 ===
+O95: ksm on (top 48/64 m-blocks ks=2, rest ks=1; nslots=112 vs uniform ks=2 128)
+[timing] total(quant+pre+main+cvt) 1.6862 ms  81.51 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1060 ms | preprocess 0.1218 ms | main 1.4543 ms | convert 0.0040 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --ksm=64 --ksmhi=2 ===
+O95: ksm on (top 64/64 m-blocks ks=2, rest ks=1; nslots=128 vs uniform ks=2 128)
+[timing] total(quant+pre+main+cvt) 1.5978 ms  86.02 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1057 ms | preprocess 0.1206 ms | main 1.3652 ms | convert 0.0062 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --ksm=32 --ksmhi=3 ===
+O95: ksm on (top 32/64 m-blocks ks=3, rest ks=1; nslots=128 vs uniform ks=2 128)
+[timing] total(quant+pre+main+cvt) 1.6961 ms  81.03 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1061 ms | preprocess 0.1216 ms | main 1.4506 ms | convert 0.0178 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --ksm=24 --ksmhi=3 ===
+O95: ksm on (top 24/64 m-blocks ks=3, rest ks=1; nslots=112 vs uniform ks=2 128)
+[timing] total(quant+pre+main+cvt) 1.6383 ms  83.89 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1060 ms | preprocess 0.1211 ms | main 1.4047 ms | convert 0.0065 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --ksm=16 --ksmhi=4 ===
+O95: ksm on (top 16/64 m-blocks ks=4, rest ks=1; nslots=112 vs uniform ks=2 128)
+[timing] total(quant+pre+main+cvt) 1.6814 ms  81.74 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1060 ms | preprocess 0.1220 ms | main 1.4353 ms | convert 0.0181 ms (cvt_on=0, qfuse=1, dfuse=1)
+

@@ -1,0 +1,20 @@
+### O95 ncu：变 ks（--ksm=8，nslots=72 vs 均匀 ks=2 的 128）vs 默认，S4096 H16 B1 causal fp8，main kernel
+### metrics: gpu__time_duration.sum,lts__t_sectors.sum,lts__t_sectors_op_read.sum,lts__t_sectors_op_red.sum,lts__t_sectors_op_write.sum,dram__bytes.sum,sm__warps_active.avg.pct_of_peak_sustained_active
+
+    dram__bytes.sum                                         Mbyte       553.45
+    gpu__time_duration.sum                                     ms         1.37
+    lts__t_sectors.sum                                     sector    129812971
+    lts__t_sectors_op_read.sum                             sector     24266787
+    lts__t_sectors_op_red.sum                              sector    105381888
+    lts__t_sectors_op_write.sum                            sector        99426
+    sm__warps_active.avg.pct_of_peak_sustained_active           %        18.66
+
+----- ksm=8 -----
+O95: ksm on (top 8/64 m-blocks ks=2, rest ks=1; nslots=72 vs uniform ks=2 128)
+    dram__bytes.sum                                         Mbyte       559.56
+    gpu__time_duration.sum                                     ms         1.38
+    lts__t_sectors.sum                                     sector    127864586
+    lts__t_sectors_op_read.sum                             sector     23735195
+    lts__t_sectors_op_red.sum                              sector    104005632
+    lts__t_sectors_op_write.sum                            sector        59000
+    sm__warps_active.avg.pct_of_peak_sustained_active           %        18.56
