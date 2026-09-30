@@ -3,6 +3,8 @@
 数组题千变万化，但真正高频的「招式」只有几类。本篇围绕双指针展开，讲透四种最常用的变形：
 **对撞双指针**（区间从两端向中间收缩）、**快慢指针**（一个探路、一个写结果）、
 **从后向前双指针**（原地归并时避免覆盖）与**原地反转技巧**（用三次反转完成轮转）。
+最后再用三道综合题收口：**接雨水**把对撞双指针与「边扫边维护极值」结合，
+**合并区间**是区间类问题的排序模板，**螺旋矩阵**则是矩阵类问题的边界模拟模板。
 把这几种吃透，再看后面的滑动窗口、二分查找会顺很多。
 
 本篇题目（由易到难）：
@@ -19,6 +21,9 @@
 | 快慢指针（原地交换） | 283. 移动零 | 简单 |
 | 从后向前双指针 | 88. 合并两个有序数组 | 简单 |
 | 原地反转 | 189. 轮转数组 | 中等 |
+| 对撞双指针 + 维护极值 | 42. 接雨水 | 困难 |
+| 排序 + 区间扫描 | 56. 合并区间 | 中等 |
+| 四条边界模拟 | 54. 螺旋矩阵 | 中等 |
 
 ---
 
@@ -507,6 +512,240 @@ void rotate(std::vector<int> &nums, int k) {
 
 ---
 
+## 模式五：综合三题（极值 / 区间 / 边界）
+
+前四种模式解决的是「有序数组里的两数、原地去重、归并、轮转」这类问题。真实题目里还有三条很常见的主线：**在一个数列里统计「能装多少」这类极值贡献**（42）、**把一堆区间合并或筛选**（56）、**按某种路径遍历矩阵**（54）。它们各有固定套路，学完这三道，数组类的常见骨架基本就集齐了。
+
+### 42. 接雨水（困难）
+
+**题目**：`n` 个非负整数表示宽度均为 1 的柱子高度。下雨后，这些柱子之间能接多少单位的雨水？例如 `height = [0,1,0,2,1,0,1,3,2,1,2,1]`，答案是 `6`。
+
+**思路（对撞双指针 + 维护两侧最大值）**：
+先看一个位置 `i` 能接多少水：它上方的水面高度由**左右两侧最高柱子的较矮者**决定，所以
+
+```
+位置 i 的水量 = min(i 左边最高, i 右边最高) - height[i]
+```
+
+最直接的做法是先从左、从右各扫一遍，预处理出每个位置的左右最大值，再逐位求和，需要 O(n) 额外空间。双指针把这点空间也省下来：
+
+- 维护 `left_max`、`right_max`，分别表示「已经扫过的左半段 / 右半段」里的最大高度；
+- `lo`、`hi` 从两端出发，每轮**移动较矮的那一端**。
+
+为什么移动矮端就能立刻结算：假设 `height[lo] < height[hi]`。此时右边的 `hi`（乃至更靠右还未处理的柱子）至少有一根高度 `>= height[hi] > height[lo]`，也就是说，`lo` 右侧一定存在足够高的柱子兜底。于是 `lo` 的水位**只由左侧的 `left_max` 决定**，与右侧的确切高度无关，可以马上算出并累加，然后把 `lo` 右移。反之亦然。
+
+每个位置在被走过之前，另一侧总有更高的柱子兜底，所以这样逐位结算不会漏、不会错。这与 11 盛最多水的容器「移动矮端」的直觉一脉相承，只是那里算的是面积，这里算的是水位。
+
+**代码**（`src/array/trapping_rain_water.py` / `.cpp`）：
+
+```python
+def trap(height):
+    if not height:
+        return 0
+    lo, hi = 0, len(height) - 1
+    left_max, right_max = height[lo], height[hi]
+    water = 0
+    while lo < hi:
+        if height[lo] < height[hi]:
+            lo += 1
+            left_max = max(left_max, height[lo])
+            water += left_max - height[lo]
+        else:
+            hi -= 1
+            right_max = max(right_max, height[hi])
+            water += right_max - height[hi]
+    return water
+```
+
+```cpp
+int trap(const std::vector<int> &height) {
+    if (height.empty()) return 0;
+    int lo = 0, hi = static_cast<int>(height.size()) - 1;
+    int leftMax = height[lo], rightMax = height[hi];
+    int water = 0;
+    while (lo < hi) {
+        if (height[lo] < height[hi]) {
+            ++lo;
+            leftMax = std::max(leftMax, height[lo]);
+            water += leftMax - height[lo];
+        } else {
+            --hi;
+            rightMax = std::max(rightMax, height[hi]);
+            water += rightMax - height[hi];
+        }
+    }
+    return water;
+}
+```
+
+同样的题也可以用**单调栈**做，思路是：遇到比栈顶更高的柱子时，栈顶那根柱子与当前柱子之间形成一个凹槽，弹出栈顶当槽底、横向按宽度累加水量。它好理解，但要 O(n) 空间：
+
+```python
+def trap_stack(height):
+    stack = []
+    water = 0
+    for i, h in enumerate(height):
+        while stack and height[stack[-1]] < h:
+            bottom = stack.pop()
+            if not stack:
+                break
+            width = i - stack[-1] - 1
+            bounded = min(height[stack[-1]], h) - height[bottom]
+            water += width * bounded
+        stack.append(i)
+    return water
+```
+
+```cpp
+int trapStack(const std::vector<int> &height) {
+    std::vector<int> st;
+    int water = 0;
+    for (int i = 0; i < static_cast<int>(height.size()); ++i) {
+        while (!st.empty() && height[st.back()] < height[i]) {
+            int bottom = st.back();
+            st.pop_back();
+            if (st.empty()) break;
+            int width = i - st.back() - 1;
+            int bounded = std::min(height[st.back()], height[i]) - height[bottom];
+            water += width * bounded;
+        }
+        st.push_back(i);
+    }
+    return water;
+}
+```
+
+- **复杂度**：双指针时间 O(n)、空间 O(1)；单调栈时间 O(n)、空间 O(n)。
+- **易错点**：空数组要先返回，否则取 `height[0]` 越界；更新 `left_max`/`right_max` 与结算水量的顺序要一致——先让指针走一步、再更新该侧最大值、最后用「最大值 - 当前高度」，这样当前柱子不会把自己算进去；`while` 条件是 `lo < hi`（相遇即结束）。
+- **相似题**：11. 盛最多水的容器（同为「移动矮端」的对撞双指针）；84. 柱状图中最大的矩形（单调栈的另一经典，见栈篇）；407. 接雨水 II（二维版，用最小堆从边界向内推进）。
+
+### 56. 合并区间（中等）
+
+**题目**：给定一组区间 `intervals`，合并所有重叠的区间，返回互不重叠的结果。例如 `[[1,3],[2,6],[8,10],[15,18]]` → `[[1,6],[8,10],[15,18]]`。
+
+**思路（按左端点排序 + 顺序合并）**：
+先把区间按**左端点**从小到大排序。排序带来两个好处：
+
+1. 可以合并的区间在数组里必定**相邻**，不会出现「中间隔着一个已处理完的区间、后面又蹦出一个能接上的」情况；
+2. 扫描时可以只看「当前区间」与「结果里最后一个区间」是否重叠。
+
+具体扫描：维护结果数组 `res`。对每个区间 `[start, end]`：
+
+- 若 `start <= res[-1][1]`：与最后一个区间重叠（端点相等也算），把最后一个区间的右端点更新为 `max(res[-1][1], end)`；
+- 否则：与前面都不重叠，直接追加为新区间。
+
+为什么排序后这样判断就足够：排序后左端点单调不减。一旦某个区间与 `res[-1]` 不重叠（`start > res[-1][1]`），后续区间的左端点只会更大，更不可能再和 `res[-1]` 重叠，所以可以放心把它固定下来。
+
+**代码**（`src/array/merge_intervals.py` / `.cpp`）：
+
+```python
+def merge_intervals(intervals):
+    intervals = sorted(intervals, key=lambda x: x[0])
+    res = []
+    for start, end in intervals:
+        if res and start <= res[-1][1]:
+            res[-1][1] = max(res[-1][1], end)
+        else:
+            res.append([start, end])
+    return res
+```
+
+```cpp
+std::vector<std::vector<int>> mergeIntervals(std::vector<std::vector<int>> intervals) {
+    std::sort(intervals.begin(), intervals.end(),
+              [](const std::vector<int> &a, const std::vector<int> &b) { return a[0] < b[0]; });
+    std::vector<std::vector<int>> res;
+    for (const auto &iv : intervals) {
+        if (!res.empty() && iv[0] <= res.back()[1]) {
+            res.back()[1] = std::max(res.back()[1], iv[1]);
+        } else {
+            res.push_back(iv);
+        }
+    }
+    return res;
+}
+```
+
+- **复杂度**：排序 O(n log n)，扫描 O(n)；总时间 O(n log n)，空间 O(n)（结果与排序开销）。
+- **易错点**：重叠判定要用 `<=` 而不是 `<`，因为 `[1,4]` 与 `[4,5]` 也要合并；更新右端点务必取 `max`，像 `[1,10]` 后接 `[2,3]` 时直接赋值会把区间缩短。
+- **相似题**：57. 插入区间（先插入再合并）；435. 无重叠区间（按右端点排序的贪心，见贪心篇）；252/253. 会议室（区间排序后扫描的同一骨架）。
+
+### 54. 螺旋矩阵（中等）
+
+**题目**：给定一个 `m x n` 的矩阵，按顺时针螺旋顺序返回所有元素。例如 `[[1,2,3],[4,5,6],[7,8,9]]` → `[1,2,3,6,9,8,7,4,5]`。
+
+**思路（四条边界模拟）**：
+把问题看成不断剥掉矩阵的外圈。用 `top`、`bottom`、`left`、`right` 四条边界框住「还没访问的子矩形」，然后每轮依次走四条边：
+
+1. **右**：从左到右输出上边 `matrix[top][left..right]`，走完 `top += 1`；
+2. **下**：从上到下输出右边 `matrix[top..bottom][right]`，走完 `right -= 1`；
+3. **左**：从右到左输出下边，走完 `bottom -= 1`；
+4. **上**：从下到上输出左边，走完 `left += 1`。
+
+为什么走完「右」「下」之后要各加一次判断：当剩下的子矩形只有**一行**或**一列**时，若不判断就继续走「左」「上」，会把刚走过的那一行/列**反向重复**输出一遍。因此：
+
+- 走「左」前判断 `top <= bottom`（确实还有底部行）；
+- 走「上」前判断 `left <= right`（确实还有左侧列）。
+
+循环条件是 `top <= bottom and left <= right`，四条边界一旦交错就说明全部访问完。
+
+**代码**（`src/array/spiral_matrix.py` / `.cpp`）：
+
+```python
+def spiral_order(matrix):
+    if not matrix or not matrix[0]:
+        return []
+    top, bottom = 0, len(matrix) - 1
+    left, right = 0, len(matrix[0]) - 1
+    res = []
+    while top <= bottom and left <= right:
+        for j in range(left, right + 1):
+            res.append(matrix[top][j])
+        top += 1
+        for i in range(top, bottom + 1):
+            res.append(matrix[i][right])
+        right -= 1
+        if top <= bottom:
+            for j in range(right, left - 1, -1):
+                res.append(matrix[bottom][j])
+            bottom -= 1
+        if left <= right:
+            for i in range(bottom, top - 1, -1):
+                res.append(matrix[i][left])
+            left += 1
+    return res
+```
+
+```cpp
+std::vector<int> spiralOrder(const std::vector<std::vector<int>> &matrix) {
+    std::vector<int> res;
+    if (matrix.empty() || matrix[0].empty()) return res;
+    int top = 0, bottom = static_cast<int>(matrix.size()) - 1;
+    int left = 0, right = static_cast<int>(matrix[0].size()) - 1;
+    while (top <= bottom && left <= right) {
+        for (int j = left; j <= right; ++j) res.push_back(matrix[top][j]);
+        ++top;
+        for (int i = top; i <= bottom; ++i) res.push_back(matrix[i][right]);
+        --right;
+        if (top <= bottom) {
+            for (int j = right; j >= left; --j) res.push_back(matrix[bottom][j]);
+            --bottom;
+        }
+        if (left <= right) {
+            for (int i = bottom; i >= top; --i) res.push_back(matrix[i][left]);
+            ++left;
+        }
+    }
+    return res;
+}
+```
+
+- **复杂度**：时间 O(m × n)，每个元素恰好访问一次；空间 O(1)（不计输出）。
+- **易错点**：空矩阵（`matrix` 为空，或首行为空）要先判空再取 `matrix[0].size()`；走完左右两条边后的两个 `if` 判断不能省，否则只剩一行/一列时会重复输出；每走完一条边记得把对应的那条边界向内收一格。
+- **相似题**：59. 螺旋矩阵 II（按同样路径**填充** 1 到 n²）；885. 螺旋矩阵 III（从任意起点出发）；498. 对角线遍历（矩阵按对角线方向遍历，同属「边界与方向模拟」）。
+
+---
+
 ## 规律总结
 
 1. **对撞双指针 = 有序或对称 + 两端逼近 + 可证明的排除**。`167` 排除的是「矮端那一侧」，`11` 排除的是「较矮的那根线」，`15` 先排序再降维成 `167`，`125` 则利用「回文左右对称」跳过干扰字符。判断该动哪一端，本质是问「当前这一端还有没有可能出现在最优解里」。
@@ -515,3 +754,7 @@ void rotate(std::vector<int> &nums, int k) {
 4. **反转是一把瑞士军刀**。189 用「整体反转 + 两段各自反转」实现轮转，151 用同样的思路翻单词。翻转本身又是对撞双指针，招式之间是复用的。
 5. **排序往往是双指针的前置步骤**：它同时带来「有序可收缩」和「相同元素相邻便于去重」两个好处。
 6. 遇到「无序数组两数之和」不要硬套对撞双指针，那要用哈希表（下一篇）。
+7. **对撞双指针不只会「排除」，还能「边扫边维护信息」**。42 每移动一步就用 `left_max`/`right_max` 结算一格的蓄水量，把本来要两遍预处理的答案压缩成一次扫描、O(1) 空间。判断「这一端能不能立刻定案」，是这类题的通用心法。
+8. **区间题先排序，再扫描**。56 按左端点排序后，重叠区间必然相邻，于是只需和结果里最后一个区间比较。57、435、252/253 都是同一骨架，区别只在「比较什么、留下什么」。
+9. **矩阵题用边界模拟**。54 用上下左右四条边界框住待访问区域，逐边剥离；同类型的 59（填充）、498（对角线遍历）都能套。关键在边界收缩后要重新判断是否越界，避免重复访问。
+10. 到这里，数组类的高频骨架已经齐全：**对撞 / 快慢 / 从后向前 / 反转 / 维护极值 / 区间排序 / 边界模拟**。后面学滑动窗口、二分、前缀和，本质上都是在这几根骨架上换一个「移动或判定规则」。
