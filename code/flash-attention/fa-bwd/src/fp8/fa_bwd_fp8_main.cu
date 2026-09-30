@@ -47,6 +47,11 @@ static int g_lse_tma_varlen = 1;
 // fp8 一行 = 128 字节 = SW128 atom 整行 ⇒ 一个 box 覆盖整个 head_dim（不像 fp16 需 2 chunk）。
 // dtype 用 UINT8（CUDA 13 驱动枚举无 FLOAT8_E4M3）。globalStride（字节）：dim1(S) 行距 = H*D，
 // dim2(H) 头距 = D，dim3(B) 批距 = S*H*D（元素即字节）。要求 16B 对齐（D=128 恒成立）。
+// F6-③（O77）：Q/dO/K/V 的 4D-TMA 描述符的 L2 promotion 档位。0=NONE（历史默认）、
+//   1=L2_128B、2=L2_256B。`--l2promo=N` 强制，用于同 binary A/B「TMA cache hint 能否降低
+//   跨 ksplit part 的 Q/dO 重读」。默认 0 ⇒ 描述符与历史逐字节相同。
+static int g_l2promo = 0;
+
 static CUtensorMap make_lse_map_fp8(const void* ptr, long long H, long long S, long long D,
                                     long long B, uint32_t boxR = 64) {
   CUtensorMap map;
@@ -54,10 +59,14 @@ static CUtensorMap make_lse_map_fp8(const void* ptr, long long H, long long S, l
   uint64_t strides[3] = {(uint64_t)(H * D), (uint64_t)D, (uint64_t)(S * H * D)};
   uint32_t box[4] = {128, boxR, 1, 1};
   uint32_t estr[4] = {1, 1, 1, 1};
+  const CUtensorMapL2promotion promo =
+      (g_l2promo == 2) ? CU_TENSOR_MAP_L2_PROMOTION_L2_256B
+                       : (g_l2promo == 1) ? CU_TENSOR_MAP_L2_PROMOTION_L2_128B
+                                          : CU_TENSOR_MAP_L2_PROMOTION_NONE;
   CUresult r = cuTensorMapEncodeTiled(
       &map, CU_TENSOR_MAP_DATA_TYPE_UINT8, 4, (void*)ptr, dims, strides, box, estr,
       CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
-      CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+      promo, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   if (r != CUDA_SUCCESS) {
     const char* s = "?";
     cuGetErrorString(r, &s);
@@ -1565,6 +1574,8 @@ int main(int argc, char** argv) {
   int dfuse = 1;
   int foldrcp_opt = 1;  // O27：1 = fold 量化用「每行 rcp + 乘法」（默认），0 = 精确除法（A/B）
   int regdq_opt = -1; // O22：-1 自动；0/1 强制关/开寄存器 dQ 累加（同 session A/B）
+  // F6-③（O77）：TMA 描述符的 L2 promotion 档（0=NONE/1=L2_128B/2=L2_256B，仅 A/B）。
+  int l2promo_opt = 0;
   // O32：LSE 是否用 TMA 版（仅 FA_TMA 构建、D==128、causal）。-1=自动（默认开），0/1 由
   //   `--lsetma=` 强制。
   int lse_tma = -1;
@@ -1655,6 +1666,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--qfast=", 0) == 0) qfast = atoi(a.c_str() + 8);
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_opt = atoi(a.c_str() + 12);
     else if (a.rfind("--regdq=", 0) == 0) regdq_opt = atoi(a.c_str() + 8);
+    else if (a.rfind("--l2promo=", 0) == 0) l2promo_opt = atoi(a.c_str() + 10);
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--f16b=", 0) == 0) f16b_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
@@ -1665,6 +1677,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
     else if (!a.empty() && a[0] != '-') dir = a;
   }
+
+  g_l2promo = l2promo_opt;  // F6-③：在创建 TMA 描述符之前生效
 
   if (varlen)
     return run_varlen(dir, causal, iters, compact_opt, lse_compact_opt, lse_split, mla8w_opt,

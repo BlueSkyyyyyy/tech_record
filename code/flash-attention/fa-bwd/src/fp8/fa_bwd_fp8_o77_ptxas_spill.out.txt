@@ -1,0 +1,240 @@
+### ptxas -v 证据 (O77, 第172轮)：默认 fp8 main 的寄存器/spill 账
+### cd src/fp8 && nvcc -O3 -gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda -Xptxas -v fa_bwd_fp8_main.cu
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 59 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 80 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 164 registers, used 1 barriers
+    40 bytes stack frame, 40 bytes spill stores, 44 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 40 bytes cumulative stack size
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 166 registers, used 1 barriers
+ptxas info    : Compiling entry function '_Z27fa_bwd_fp8_mma_kvtma_kernelILi128ELi64ELi32ELb1ELb1ELb1ELb1ELb1ELb0ELb0EEv14CUtensorMap_stS0_S0_S0_PKhPKfS2_S4_S2_S4_S2_S4_S4_S4_PfS5_S5_iiifiiPKiS5_S5_iS5_S7_' for 'sm_90a'
+ptxas info    : Function properties for _Z27fa_bwd_fp8_mma_kvtma_kernelILi128ELi64ELi32ELb1ELb1ELb1ELb1ELb1ELb0ELb0EEv14CUtensorMap_stS0_S0_S0_PKhPKfS2_S4_S2_S4_S2_S4_S4_S4_PfS5_S5_iiifiiPKiS5_S5_iS5_S7_
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers
+    72 bytes stack frame, 72 bytes spill stores, 456 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 72 bytes cumulative stack size
+    248 bytes stack frame, 244 bytes spill stores, 244 bytes spill loads
+ptxas info    : Used 255 registers, used 1 barriers, 248 bytes cumulative stack size
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 246 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers
+    24 bytes stack frame, 24 bytes spill stores, 24 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 24 bytes cumulative stack size
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 158 registers, used 1 barriers
+    48 bytes stack frame, 60 bytes spill stores, 60 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 48 bytes cumulative stack size
+    16 bytes stack frame, 12 bytes spill stores, 12 bytes spill loads
+ptxas info    : Used 255 registers, used 1 barriers, 16 bytes cumulative stack size
+    56 bytes stack frame, 56 bytes spill stores, 256 bytes spill loads
+ptxas info    : Used 255 registers, used 1 barriers, 56 bytes cumulative stack size
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 188 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 176 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 255 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 232 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 217 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 212 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 254 registers, used 1 barriers
+    8 bytes stack frame, 4 bytes spill stores, 4 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 8 bytes cumulative stack size
+    8 bytes stack frame, 4 bytes spill stores, 4 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 8 bytes cumulative stack size
+    8 bytes stack frame, 4 bytes spill stores, 4 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 8 bytes cumulative stack size
+    8 bytes stack frame, 4 bytes spill stores, 4 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 8 bytes cumulative stack size
+    16 bytes stack frame, 12 bytes spill stores, 12 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 16 bytes cumulative stack size
+    16 bytes stack frame, 12 bytes spill stores, 12 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 16 bytes cumulative stack size
+    16 bytes stack frame, 12 bytes spill stores, 12 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 16 bytes cumulative stack size
+    16 bytes stack frame, 12 bytes spill stores, 12 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 16 bytes cumulative stack size
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers
+    56 bytes stack frame, 56 bytes spill stores, 60 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 56 bytes cumulative stack size
+    96 bytes stack frame, 152 bytes spill stores, 156 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 96 bytes cumulative stack size
+    56 bytes stack frame, 56 bytes spill stores, 60 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 56 bytes cumulative stack size
+    96 bytes stack frame, 152 bytes spill stores, 156 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 96 bytes cumulative stack size
+    96 bytes stack frame, 96 bytes spill stores, 184 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 96 bytes cumulative stack size
+    88 bytes stack frame, 92 bytes spill stores, 400 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 88 bytes cumulative stack size
+    96 bytes stack frame, 96 bytes spill stores, 184 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 96 bytes cumulative stack size
+    88 bytes stack frame, 92 bytes spill stores, 400 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 88 bytes cumulative stack size
+    48 bytes stack frame, 44 bytes spill stores, 44 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 48 bytes cumulative stack size
+    40 bytes stack frame, 40 bytes spill stores, 40 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 40 bytes cumulative stack size
+    48 bytes stack frame, 44 bytes spill stores, 44 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 48 bytes cumulative stack size
+    40 bytes stack frame, 40 bytes spill stores, 40 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 40 bytes cumulative stack size
+    40 bytes stack frame, 40 bytes spill stores, 40 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 40 bytes cumulative stack size
+    48 bytes stack frame, 56 bytes spill stores, 96 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 48 bytes cumulative stack size
+    40 bytes stack frame, 40 bytes spill stores, 40 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 40 bytes cumulative stack size
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 83 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 80 registers, used 1 barriers
+    232 bytes stack frame, 232 bytes spill stores, 232 bytes spill loads
+ptxas info    : Used 255 registers, used 1 barriers, 232 bytes cumulative stack size
+    368 bytes stack frame, 364 bytes spill stores, 364 bytes spill loads
+ptxas info    : Used 255 registers, used 1 barriers, 368 bytes cumulative stack size
+    320 bytes stack frame, 320 bytes spill stores, 320 bytes spill loads
+ptxas info    : Used 255 registers, used 1 barriers, 320 bytes cumulative stack size
+    48 bytes stack frame, 44 bytes spill stores, 64 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 48 bytes cumulative stack size
+    48 bytes stack frame, 44 bytes spill stores, 64 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 48 bytes cumulative stack size
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers
+    48 bytes stack frame, 56 bytes spill stores, 96 bytes spill loads
+ptxas info    : Used 168 registers, used 1 barriers, 48 bytes cumulative stack size
+    256 bytes stack frame, 256 bytes spill stores, 256 bytes spill loads
+ptxas info    : Used 255 registers, used 1 barriers, 256 bytes cumulative stack size
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 245 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 249 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 79 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 83 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 64 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 61 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 59 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 82 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 88 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 58 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 80 registers, used 1 barriers
+    24 bytes stack frame, 56 bytes spill stores, 112 bytes spill loads
+ptxas info    : Used 64 registers, used 1 barriers, 24 bytes cumulative stack size
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 61 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 59 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 112 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 72 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 48 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 17 registers, used 1 barriers, 512 bytes smem
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 17 registers, used 1 barriers, 512 bytes smem
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 29 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 17 registers, used 1 barriers, 512 bytes smem
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 61 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 59 registers, used 1 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 37 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 27 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 27 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 48 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 48 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 30 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 56 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 48 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 48 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 30 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 56 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 38 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 38 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 24 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 24 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 27 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 54 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 20 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 17 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 19 registers, used 1 barriers, 512 bytes smem

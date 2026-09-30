@@ -1633,3 +1633,27 @@ smem 冲突 + 低 occ
   接 wgmma/TMA（受 fp8 wgmma `HD=128` 锁死）；③ main 的 L2 `red` 墙（F7/F6 已判死，见「阻塞」）。
 - 详见 `docs/03` §99；原始输出 `src/fp8/fa_bwd_fp8_o76_d256_*.out.txt`、
   `src/fp8/fa_bwd_fp8_o76_ncu_d256_main_s1024.out.txt`、`src/fa_bwd_o76_d256_baseline_fp16bf16.out.txt`。
+
+### 5.86 O77：F6-③（TMA L2 promotion）收口 + fp8 main 的「寄存器/smem/occupancy」三证（第一百七十二轮，负结果 / 平台期确认）
+
+- **一句话**：把「fp8 继续」里唯一未测的 **F6-③（Q/dO 的 4D-TMA cache hint / L2 persist 减重读）**
+  实测判决为**负结果**，并用 ksplit、编译期开关、ptxas 寄存器账三组证据把「fp8 默认 main 在本卡
+  已到硬件平台期」钉死。默认路径数值逐位不变。
+- **F6-③**（纯 host，`--l2promo=0/1/2` = NONE/L2_128B/L2_256B）：S4096 causal 同 binary 交替
+  **1.7913 / 1.7936 / 1.8052 ms**——噪声内、256B 略负。根因：ncu 默认 main **L2 命中 97.08%、
+  DRAM 4.32%**，Q/dO 的 ksplit 重读本就在 L2 命中，promotion 改不了 L2 扇区总量。**L2 persist /
+  cache hint 对 fp8 main 无效**。
+- **ksplit 复扫**：1/2/4/**8**/16 = 2.154/1.913/1.805/**1.790**/1.873 ms ⇒ auto=8 最优；少切分
+  red 更低但 grid 铺不满、延迟暴露，净更慢。F6-① 被并行度锁死（同既往结论）。
+- **编译期开关复测**（`FA_WS1/FA_ILV/FA_ILV34/FA_R4` 及组合，当前 TMA 构建）：全部 1.789–1.818ms，
+  baseline 1.791ms ⇒ 噪声内或有损；`FA_R4`（16B red）再次确认不降 L2 扇区。**默认关是正确的。**
+- **寄存器账**：默认实例 **168 regs / 40B spill / 74.82KB smem**，`__launch_bounds__(128,3)` 上限
+  170 ⇒ 顶格溢出 10 个长生命期值。4 CTA/SM 需 ≤128 regs **且** ≤58.1KB smem，两者都达不到；
+  去 spill 需 >170 regs（ptxas 需求 ~180）。ncu：local memory 占 L1TEX ~7.7%、L2 ~4.5%；
+  头号 stall `wait 27.5% + short_scoreboard 21.7%`（3 warps/scheduler），要藏它需更多 warp /
+  跨-tile 软流水，均被同一双墙锁死。
+- **结论**：fp8 默认 main（S4096 main 1.553ms / total 1.791ms / **76.7 TFLOPS**、TE FP8 ~6.4×）
+  在本卡无更多软件杠杆；减 L2 搬运量只剩「换工作划分」（撞 128-reg/116KB 双墙，F6/F7/O17b/p160/
+  p168 五路全判死）、藏延迟只剩「换卡 / 多 warpgroup 摊累加器」。
+- 详见 `docs/03` §100；原始输出 `src/fp8/fa_bwd_fp8_o77_{l2promo_ab,ksplit_sweep,macro_ab,
+  ptxas_spill,ncu_local_src}_s4096.out.txt`。

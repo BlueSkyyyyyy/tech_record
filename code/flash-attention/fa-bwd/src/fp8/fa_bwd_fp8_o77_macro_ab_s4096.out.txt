@@ -1,0 +1,13 @@
+### 默认关的编译期 A/B 开关在**当前 TMA 构建**下复测 (O77, 第172轮)
+### 均为 -DFA_WGMMA -DFA_TMA，shape b1_s4096_h16_d128_causal_fp8, iters=30
+### baseline(全默认, 见 o77_l2promo_ab) total 1.791ms / main 1.553ms
+=== -DFA_WS1=1 ===
+[timing] total(quant+pre+main+cvt) 1.7925 ms  76.67 TFLOPS (bwd FLOPs=4BS^2HD)
+=== -DFA_ILV=1 ===
+[timing] total(quant+pre+main+cvt) 1.7894 ms  76.81 TFLOPS (bwd FLOPs=4BS^2HD)
+=== -DFA_ILV34=1 ===
+[timing] total(quant+pre+main+cvt) 1.7944 ms  76.59 TFLOPS (bwd FLOPs=4BS^2HD)
+=== -DFA_R4=1 ===
+[timing] total(quant+pre+main+cvt) 1.8180 ms  75.60 TFLOPS (bwd FLOPs=4BS^2HD)
+=== -DFA_WS1=1 -DFA_ILV34=1 ===
+[timing] total(quant+pre+main+cvt) 1.7916 ms  76.71 TFLOPS (bwd FLOPs=4BS^2HD)

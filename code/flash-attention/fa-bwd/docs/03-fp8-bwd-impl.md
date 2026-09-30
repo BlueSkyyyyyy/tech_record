@@ -8926,3 +8926,79 @@ s1024_h8_full}_{twofile,onefile}.out.txt`、`src/fp8/fa_bwd_fp8_o76_ncu_d256_mai
 选 `BM/BN/几何`，或复用一个通用 mma 分支）；② `D=256` 的 fp8 main 接 wgmma/TMA（受 fp8
 wgmma `HD=128` 与 SW128 atom 约束，见「阻塞」）；③ main 的 L2 `red` 墙（F7 全判死、F6 不可行，
 受本卡寄存器/smem 硬墙锁定，见「阻塞」）。
+
+## 100. O77（第一百七十二轮）：F6-③ 收口 + fp8 main 的寄存器/smem/occupancy 三证 —— fp8 main 在本卡**已到硬件平台期**
+
+> 背景：ROADMAP「下一批（fp8 继续）F6」的三条子项中，①（降 ksplit 消 Q/dO 重读）与 ②
+> （dK/dV 跨 CTA `red` 改分块/column-owner）此前已被 F6/F7 系列判决；仅剩 **③（Q/dO 的
+> 4D-TMA cache hint / L2 persist 减少重读）** 未实测。本轮把 ③ 实测收口，并把「为什么
+> fp8 默认 main 在本卡无更多软件空间」用三组硬证据钉死。
+
+### 100.1 F6-③：4D-TMA 的 L2 promotion（Q/dO/K/V）——**负结果**
+
+- **动机**：fp8 默认 main（`fa_bwd_fp8_mma_kvtma_kernel`，ksplit=8）会**重复读取**
+  每个 m 块的 Q/dO（每个 ksplit part 各读一次，共 8 次），直觉上给 Q/dO 的 TMA 描述符加
+  L2 promotion（`CU_TENSOR_MAP_L2_PROMOTION_L2_128B/256B`）可提高 L2 命中、减少重读。
+- **实现**（纯 host，device 一行未改）：`make_lse_map_fp8` 的 promotion 由文件作用域
+  `g_l2promo` 决定（0=NONE 历史默认 / 1=L2_128B / 2=L2_256B），CLI `--l2promo=N` 强制，
+  在**创建描述符之前**生效；默认 0 ⇒ 描述符与历史逐字节相同。
+- **实测（同 binary 交替，S4096 causal，iters=30）**：
+
+  | l2promo | total (ms) | main (ms) | TFLOPS |
+  |---|---|---|---|
+  | 0 = NONE | **1.7913** | 1.5533 | 76.73 |
+  | 1 = L2_128B | 1.7936 | 1.5524 | 76.63 |
+  | 2 = L2_256B | 1.8052 | 1.5691 | 76.13 |
+
+  ⇒ **噪声内（±0.3%）、L2_256B 略负**。原因：ncu 显示默认 main 的 **L2 命中率 97.08%、
+  DRAM 仅 4.32%**——Q/dO 的「重读」本来就在 L2 命中（并未打到 DRAM），promotion 只影响
+  回填粒度、改变不了 L2 扇区总量。**L2 persist / cache hint 这条路对 fp8 main 无效。**
+  原始输出 `src/fp8/fa_bwd_fp8_o77_l2promo_ab_s4096.out.txt`。
+
+### 100.2 三证：ksplit / 编译期旋钮 / 寄存器账
+
+- **ksplit 复扫（同 binary，S4096 causal，iters=30）**：1→**2.154ms**、2→1.913、4→1.805、
+  **8→1.790（auto，最优）**、16→1.873。⇒ F6-①「降 ksplit 消 Q/dO 重读」在本卡被**并行度**
+  锁死：少切分虽然 red 更低，但 grid 铺不满、延迟暴露，净更慢。auto=8 已是最优点。
+  原始输出 `src/fp8/fa_bwd_fp8_o77_ksplit_sweep_s4096.out.txt`。
+- **默认关的编译期开关在当前 TMA 构建下复测**（均在 `-DFA_WGMMA -DFA_TMA` 下，同 shape）：
+  `FA_WS1=1` 1.7925 / `FA_ILV=1` 1.7894 / `FA_ILV34=1` 1.7944 / `FA_R4=1` 1.8180 /
+  `FA_WS1+ILV34` 1.7916，baseline **1.7913**。⇒ 全部噪声内或有损（`FA_R4` 的 16B red
+  再次确认「归约加宽」不降 L2 扇区）。这些旋钮**保持默认关是正确的**。
+  原始输出 `src/fp8/fa_bwd_fp8_o77_macro_ab_s4096.out.txt`。
+- **寄存器/spill 账（`-Xptxas -v`）**：默认实例
+  `fa_bwd_fp8_mma_kvtma_kernel<128,64,32,REGDQ=1,...>` = **168 regs / 40B spill
+  （40B st + 44B ld）/ 74.82KB smem**。`__launch_bounds__(128,3)` 的寄存器上限 =
+  `65536/384 = 170` ⇒ **恰好顶格、溢出 10 个长生命期值**。而
+  - 4 CTA/SM 需 **≤ 128 regs**（`65536/512`）**且 ≤ 58.1KB smem**（`232448/4`）；
+  - 去掉 spill 需 > 170 regs（实测 ptxas 需求 ~180）。
+  ⇒ 两者都**达不到**。ncu 亦记 **local memory 占 L1TEX 扇区 ~7.7%（local op_ld/st
+  5.84M/5.67M sectors）、占 L2 ~4.5%**，属 spill + 长生命期地址的固有开销。
+  原始输出 `src/fp8/fa_bwd_fp8_o77_ptxas_spill.out.txt`、
+  `src/fp8/fa_bwd_fp8_o77_ncu_local_src_s4096.out.txt`。
+- **`wait`/`short_scoreboard` 是头号 stall**（ncu，S4096）：`wait 27.48% + short_scoreboard
+  21.65% + barrier 6.77% + long 6.71%`，`Active Warps/Sched 2.94`（3 CTA/SM = 12 warps）。
+  即 kernel 在 L2 80% 之下**仍受 mma 依赖延迟 + smem→ldmatrix 依赖约束**；要打它需要更多
+  warp（→4 CTA/SM，被 100.2 的寄存器/smem 双墙锁死）或跨-tile 软流水（→+32KB smem 掉
+  2 CTA/SM，ROADMAP「阻塞」已核算为中性偏负）。
+
+### 100.3 结论
+
+fp8 默认 main（S4096：main 1.553ms / total 1.791ms / 76.7 TFLOPS、TE FP8 的 ~6.4×）在本卡
+（3 CTA/SM、170 regs 上限、74.8↔77.5KB smem 硬间隙）**已无更多软件杠杆**：
+- **减 L2 搬运量**只有「改工作划分」一条路，而它需要翻倍的长生命期累加器（dK/dV 或 dQ），
+  撞 128-reg / 4-CTA 与 116KB / 2-CTA 双墙（F6/F7/O17b/p160/p168 五条路全部判决，见「阻塞」）；
+- **TMA cache hint / L2 persist**（F6-③）已实测无效（L2 命中 97%、DRAM 4.3%）；
+- **藏延迟**需要的额外 warp / 软流水被同一双墙锁死。
+
+⇒ 继续产出正结果只能**换卡**（寄存器/smem 更大的目标卡）或**多 warpgroup 摊累加器**
+（对标 TE 384 线程，需先破 fp8 `wgmma` 无转置操作数）。本轮默认路径数值逐位不变，
+`--l2promo` 为默认关的诊断开关。
+
+### 100.4 原始输出
+
+- `src/fp8/fa_bwd_fp8_o77_l2promo_ab_s4096.out.txt`（F6-③ A/B）
+- `src/fp8/fa_bwd_fp8_o77_ksplit_sweep_s4096.out.txt`（ksplit 复扫）
+- `src/fp8/fa_bwd_fp8_o77_macro_ab_s4096.out.txt`（编译期开关复测）
+- `src/fp8/fa_bwd_fp8_o77_ptxas_spill.out.txt`（寄存器/spill 账）
+- `src/fp8/fa_bwd_fp8_o77_ncu_local_src_s4096.out.txt`（ncu local-memory 源级）
