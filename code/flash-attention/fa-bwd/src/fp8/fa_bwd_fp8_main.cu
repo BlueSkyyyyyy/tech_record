@@ -1897,7 +1897,13 @@ int main(int argc, char** argv) {
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     Fp8Cfg<128, 64, 32>::lse_smem_bytes_tma1));
   }
-  if (lse_tma < 0) lse_tma = (D == 128) ? 1 : 0;   // O70：D=128 的 causal/full 都默认 TMA
+  // O74（第 169 轮）：MLA（D=512）的 causal LSE 也上 4D-TMA（此前只有 mma/cp.async 版）。
+  if (D == 512) {
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<512, 1>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    Fp8Cfg<512, 64, 32>::lse_smem_bytes_tma1));
+  }
+  if (lse_tma < 0) lse_tma = (D == 128) ? 1 : (D == 512 && causal ? 1 : 0);
 #else
   if (lse_tma < 0) lse_tma = 0;
 #endif
@@ -1935,7 +1941,7 @@ int main(int argc, char** argv) {
   CUtensorMap qmap_lse, kmap_lse;
   // 注：O32/O9c A/B 段无论 `--lsetma` 取值都会跑 TMA 版 LSE，故 D==128 时始终建描述符
   //     （否则 `--lsetma=0` 会拿未初始化 map 启动 TMA kernel → illegal instruction）。
-  if (D == 128) {
+  if (D == 128 || D == 512) {   // O74：MLA（D=512）causal LSE 也需要 Q/K 描述符
     qmap_lse = make_lse_map_fp8(d_q8, H, S, D, B);
     kmap_lse = make_lse_map_fp8(d_k8, Hkv, S, D, B);
   }
@@ -2019,7 +2025,22 @@ int main(int argc, char** argv) {
       // O39：D=512（MLA）causal LSE 也用 K 维 split（此前只有 D=128/TMA 有）。
       // O59：定长 causal MLA 默认走 O58 的 cfg6（PIPE1/LBN16，4 CTA/SM）；`--lseocc=4` 退回旧默认。
       if (causal) {
-        if (lseocc_opt == 5)
+        // O74（第 169 轮）：MLA causal LSE 优先走 4D-TMA（`--lsetma=0` 退回 mma/cp.async A/B）。
+        bool did_tma512 = false;
+#if defined(FA_WGMMA) && defined(FA_TMA)
+        if (lse_tma) {
+          if (lse_split_eff > 1)
+            launch_lse_bal_tma_split<512, 1>(lg_bal, qmap_lse, kmap_lse, d_qs, d_ks, d_lse,
+                                             d_lse_part, S, H, Hkv, scale, lse_split_eff);
+          else
+            launch_lse_bal_tma<512, 1>(lg_bal, qmap_lse, kmap_lse, d_qs, d_ks, d_lse, S, H, Hkv,
+                                       scale);
+          did_tma512 = true;
+        }
+#endif
+        if (did_tma512) {
+          // 已走 4D-TMA
+        } else if (lseocc_opt == 5)
           launch_lse_bal<512, 0, false, 128, 32>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv,
                                                  scale, nullptr, d_lse_part, lse_split_eff);
         else if (lseocc_opt == 6 || causal_cfg6_fixed)

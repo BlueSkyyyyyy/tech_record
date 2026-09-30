@@ -264,8 +264,15 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
      batch 维恒 0），host 建 `dims={D,T,Hkv,1}` packed 描述符、fp8 varlen 构建加 `-DFA_TMA -lcuda`。
      数值与 `cp.async` 版**打印逐位相同**、单/两文件一致性 worst 3.815e-6 OK；同 binary A/B
      `b4_t4096` full **1.181→1.119ms（1.055×）**、不齐 `b4_t3840` **1.472→1.405ms（1.048×）**，
-     LSE ncu **118.3→63.0µs（1.88×）、指令 −46.8%、occ 25.8→35.9%**（issue-bound 的搬运升级）。
-     见 `docs/03` §96、`docs/08` §5.80。
+      LSE ncu **118.3→63.0µs（1.88×）、指令 −46.8%、occ 25.8→35.9%**（issue-bound 的搬运升级）。
+      见 `docs/03` §96、`docs/08` §5.80。
+      → **MLA（`D=512`）causal LSE 上 4D-TMA（O74，第一百六十九轮）**：补齐 fp8 4D-TMA LSE 的
+      **最后一条分支**。`lse_mma_kernel_bal_tma` 去掉 `static_assert(HD==128)`，泛化为 `NCH=HD/128`
+      个 TMA box（`HD=512` 用 4 次 4D-TMA 搬整行），新增 `wgmma_qkt64_fp8_chunked`（每 chunk 各用
+      SBO=1024 累加，对齐 fp16 的 2-chunk 写法）。**LSE-only 1.50–1.80×、端到端 S256H2 1.20× /
+      S512H4 1.08× / S1024H2 1.06×**；ncu LSE **19.62→10.34µs（1.90×）、Waves 0.48→0.97**；
+      D=128 逐位不变。见 `docs/03` §98、`docs/08` §5.83。
+
 
 ### 4.3 我们的 FP8 反向实现路线（计划）
 

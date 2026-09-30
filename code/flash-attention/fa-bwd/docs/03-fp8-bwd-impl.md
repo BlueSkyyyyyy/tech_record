@@ -8704,3 +8704,97 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_mma.cu --metrics <...> --launch-count 
 
 原始输出：`src/fp8/fa_bwd_fp8_kvowner_col_p168_{s512,s1024h32,s4096}.out.txt`、
 `src/fp8/fa_bwd_fp8_kvowner_col_p168_ncu_s4096.out.txt`。
+
+## 98. O74（第一百六十九轮）：MLA（head_dim=512）causal LSE 上 **4D-TMA** —— 补齐 fp8 LSE 的最后一条分支
+
+### 98.1 动机
+
+F5→F9→O70→F11→F12 把 fp8 的 **4D-TMA LSE** 逐步铺到 `D=128` 的 {causal, full, varlen-full}；
+但 **MLA（`D=512`）的 causal LSE 一直走 `lse_mma_kernel_bal<512,...>`（`mma.m16n8k32` + `cp.async`）**，
+从没有 TMA 版。`lse_mma_kernel_bal_tma<HD>` 里硬编码了 `static_assert(HD == 128)`（原因：TMA 的 box
+内维固定 128B=128 fp8，`HD=128` 恰好一个 box 搬完整行；`HD=512` 需要拆 4 个 box）。本轮把这层
+dtype/维度泛化补上，使 **fp8 的 LSE 四条路径（定长/变长 × causal/full × D=128/D=512）全部走 4D-TMA**。
+
+判据（O39/O59 已把 MLA causal LSE 优化到 `cfg6`）：`lse_mma_kernel_bal<512,1,false,128,16>`（4 CTA/SM、
+K 维 split auto=16）实测 S1024H2 Duration **19.62µs / Waves 0.48 / Compute 30.77%**；TMA 在 D=128 上
+是 1.88×（O72），预期 MLA 的 LSE 也能降 1.5–1.9×。
+
+### 98.2 实现（device + host，单/两文件 device 由 `sync_onefile_device.py` 逐字同步）
+
+- **device**（`fa_bwd_fp8_kernels.cuh` 的 `lse_mma_kernel_bal_tma`）：
+  - `static_assert(HD % 128 == 0)`；新增 `NCH = HD/128`、`CHUNK = (LBM/8)*1024`（=8KB）、
+    `TILE = NCH*CHUNK`。
+  - `issue_q`/`issue_k` 各发 **`NCH` 次 4D-TMA**，第 `c` 个 box 写入 `Qs + c*CHUNK`、global 内维坐标
+    `c*128`；`mbar_arrive_expect` 仍只声明总字节 `TILE`（N 次 load 的 `complete_tx` 累加）。
+  - 新增 `wgmma_qkt64_fp8_chunked(nch, chunk)`：因为 4 个 box 各写一块 canonical `[LBM][128]` tile，
+    物理布局是 `[kg][rg]`（而非单 box 的 canonical `[rg][kg]`），故**每个 chunk 各用 SBO=1024 的描述符**
+    累加（逐字对齐 fp16 O30/O71 的 2-chunk 写法）。`NCH==1` 时 `if constexpr` 仍走原
+    `wgmma_qkt64_fp8` ⇒ **D=128 路径编译出逐位相同的代码**。
+- **host**（`fa_bwd_fp8_main.cu` + `fa_bwd_fp8_mma_onefile.cu`，两处逐字相同）：
+  - `cudaFuncSetAttribute(lse_mma_kernel_bal_tma<512,1>, ..., Fp8Cfg<512,64,32>::lse_smem_bytes_tma1)`
+    （smem = `3*lse_tile_wgmma + (LBM+2*LBN)*4 + 1024 + 64` = **100,160B ⇒ 2 CTA/SM**）。
+  - `lse_tma` 默认：`(D==128) ? 1 : (D==512 && causal ? 1 : 0)`；`--lsetma=0` 供同 binary A/B。
+  - Q/K 的 LSE 描述符构建条件 `D==128` 改为 `D==128 || D==512`（`run_varlen` 的 D=512 **不受影响**，
+    仍走 `cp.async` 版——本轮只动定长 causal 路径）。
+  - D=512 的 causal 分支：`lse_tma` 时优先 `launch_lse_bal_tma_split<512,1>` / `launch_lse_bal_tma<512,1>`，
+    否则退回原来的 `launch_lse_bal<512,...>`（cfg6/legacy）。
+
+### 98.3 数值
+
+- **D=128 逐位不变**（`NCH==1` 走原 wgmma 路径）：S4096 causal `2.635/2.644/3.216e-1`、S512
+  `2.426/2.972/3.733e-1`，与 O37/O41 历史完全一致。`--ci` fp8 单/两文件一致性 **worst 8.583e-6 OK**、
+  `--check docs/04` OK。
+- **D=512 MLA causal**（TMA vs `--lsetma=0` 的 mma/cfg6，只差 LSE 的 fp32 求和次序）：
+  | shape | 路径 | dq | dk | dv |
+  |---|---|---|---|---|
+  | `(1,256,2,512)` | TMA | 2.355e-1 | 2.284e-1 | 3.485e-1 |
+  | | mma | 2.356e-1 | 2.290e-1 | 3.441e-1 |
+  | `(1,512,4,512)` | TMA | 2.415e-1 | 2.992e-1 | 4.481e-1 |
+  | | mma | 2.415e-1 | 2.992e-1 | 4.481e-1 |
+  | `(1,1024,2,512)` | TMA | 2.228e-1 | 3.311e-1 | 3.611e-1 |
+  | | mma | 2.232e-1 | 3.337e-1 | 3.602e-1 |
+  全部在 fp8 噪声/求和次序量级内（≤4.7e-3，对应 split 的 fp32 求和次序差）。单文件与两文件逐指标
+  一致（单文件 S1024H2 `2.228/3.311/3.611e-1`、total 0.1508ms）。
+
+### 98.4 性能（同 binary A/B，Hopper+TMA 构建，CUDA event，iters=200）
+
+| shape | preprocess mma | preprocess TMA | total mma | total TMA | total 加速 |
+|---|---|---|---|---|---|
+| `(1,256,2,512)` | 0.0175 ms | **0.0097 ms（1.80×）** | 0.0481 ms | **0.0400 ms** | **1.203×** |
+| `(1,512,4,512)` | 0.0186 ms | **0.0116 ms（1.60×）** | 0.1052 ms | **0.0977 ms** | **1.077×** |
+| `(1,1024,2,512)` | 0.0240 ms | **0.0160 ms（1.50×）** | 0.1601 ms | **0.1510 ms** | **1.060×** |
+
+`lse k-split auto` 分别选 4/8/16；main 不变（MLA main 仍是 mma/cp.async，占 74–82%）。
+
+### 98.5 ncu（`(1,1024,2,512)` causal，同 binary，`regex:lse_mma_kernel_bal`，`-c 1`）
+
+| LSE 路径 | Duration | Waves/SM | Achieved Occ | Compute | L1/TEX | L2 | 寄存器 | Block Limit Shared Mem |
+|---|---|---|---|---|---|---|---|---|
+| mma `cfg6`（`--lsetma=0`） | 19.62 µs | 0.48 | 11.83% | 30.77% | 24.41% | 24.58% | 61 | 4 CTA/SM |
+| **TMA（默认）** | **10.34 µs（1.90×）** | **0.97** | 11.55% | 15.08% | 15.56% | 21.60% | 61 | 2 CTA/SM |
+
+⇒ **LSE kernel 1.90×**：TMA 把「网格不足半个波 + `cp.async`/ldmatrix 发射」换成「填满一个波 + 纯 TMA
+搬运」，`Waves 0.48→0.97`、Compute 30.77%→15.08%、L1/TEX 24.41%→15.56%；新档 `Compute 15% / L1TEX 16%`
+说明已不在指令/访存饱和区，墙回到 LSE 固有的 tile 级 `mma wait` + 2 CTA/SM（与 D=128 的 TMA LSE 一致）。
+
+### 98.6 复现 / 原始输出
+
+```bash
+# 默认（TMA）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=.../b1_s1024_h2_d512_causal_fp8 --iters=200
+# A/B（mma/cfg6）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=... --iters=200 --lsetma=0
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o74_mla_lse_tma_{s256h2,s512h4,s1024h2}.out.txt`、
+`..._mla_lse_mma_{s256h2,s512h4,s1024h2}.out.txt`、`..._mla_lse_tma_onefile_s1024h2.out.txt`、
+`..._mla_lse_tma_ncu_s1024h2.out.txt`、`..._mla_lse_mma_ncu_s1024h2.out.txt`、
+`..._o74_d128_regression_s4096.out.txt`。
+
+### 98.7 下一步
+
+① **把本步逐字 dtype 化到 fp16/bf16**（`lse_mma_kernel_bal_tma` 当前 `HD==128`、2 个 K=64 chunk；
+`HD=512` 需 8 个 chunk，`TILE=64KB`、Qs+2×Ks=192KB ⇒ 1 CTA/SM）——补齐「三 dtype × MLA LSE TMA」；
+② main 的 L2 `red` 墙（F7 全判死、F6 不可行，受本卡寄存器/smem 硬墙锁定，见「阻塞」）。
