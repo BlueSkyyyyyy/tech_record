@@ -1,0 +1,118 @@
+O101 fp8 定长 full LSE 均衡+split A/B（两文件 fa_bwd_fp8_main，Hopper 构建，iters=30）
+日期: 2026-10-01T03:53:08+08:00
+
+== D=512（MLA）full: old=O1(--lse512old=1) vs new=balFULL+split(auto) ==
+--- b1_s512_h2_d512_full_fp8 ---
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.2583 ms  4.16 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0051 ms | preprocess 0.1898 ms | main 0.0544 ms | convert 0.0090 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.0747 ms  14.38 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0053 ms | preprocess 0.0136 ms | main 0.0518 ms | convert 0.0040 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s512_h4_d512_full_fp8 ---
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.3140 ms  6.84 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0109 ms | preprocess 0.1969 ms | main 0.0952 ms | convert 0.0111 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.1242 ms  17.30 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0106 ms | preprocess 0.0157 ms | main 0.0932 ms | convert 0.0046 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s1024_h2_d512_full_fp8 ---
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.5819 ms  7.38 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0108 ms | preprocess 0.3755 ms | main 0.1830 ms | convert 0.0126 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.2207 ms  19.46 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0108 ms | preprocess 0.0238 ms | main 0.1857 ms | convert 0.0004 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s2048_h2_d512_full_fp8 ---
+O38: lse k-split = auto(4)
+[timing] total(quant+pre+main+cvt) 1.6729 ms  10.27 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0271 ms | preprocess 0.7549 ms | main 0.6526 ms | convert 0.2382 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(4)
+[timing] total(quant+pre+main+cvt) 0.7637 ms  22.50 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0272 ms | preprocess 0.0672 ms | main 0.6582 ms | convert 0.0111 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s4096_h2_d512_full_fp8 ---
+O38: lse k-split = auto(2)
+[timing] total(quant+pre+main+cvt) 4.6356 ms  14.82 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0524 ms | preprocess 1.4905 ms | main 2.4673 ms | convert 0.6254 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(2)
+[timing] total(quant+pre+main+cvt) 2.7631 ms  24.87 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0526 ms | preprocess 0.2282 ms | main 2.4549 ms | convert 0.0274 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+== D=256 full: old=balFULL split1(--lsesplit=1) vs new=balFULL+split(auto) ==
+--- b1_s512_h8_d256_full_fp8 ---
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 0.1387 ms  15.49 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0110 ms | preprocess 0.0317 ms | main 0.0964 ms | convert -0.0004 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.1221 ms  17.58 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0108 ms | preprocess 0.0149 ms | main 0.0923 ms | convert 0.0042 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s1024_h8_d256_full_fp8 ---
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 0.4360 ms  19.70 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0273 ms | preprocess 0.0620 ms | main 0.3317 ms | convert 0.0150 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(4)
+[timing] total(quant+pre+main+cvt) 0.4031 ms  21.31 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0274 ms | preprocess 0.0318 ms | main 0.3379 ms | convert 0.0060 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s1024_h16_d256_full_fp8 ---
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 0.7874 ms  21.82 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0527 ms | preprocess 0.0713 ms | main 0.6496 ms | convert 0.0138 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(2)
+[timing] total(quant+pre+main+cvt) 0.7716 ms  22.27 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0526 ms | preprocess 0.0551 ms | main 0.6565 ms | convert 0.0074 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s2048_h8_d256_full_fp8 ---
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 1.4389 ms  23.88 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0526 ms | preprocess 0.1333 ms | main 1.2430 ms | convert 0.0100 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(2)
+[timing] total(quant+pre+main+cvt) 1.4037 ms  24.48 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0527 ms | preprocess 0.1001 ms | main 1.2491 ms | convert 0.0019 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s2048_h16_d256_full_fp8 ---
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 2.7064 ms  25.39 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1003 ms | preprocess 0.1879 ms | main 2.4111 ms | convert 0.0072 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 2.7150 ms  25.31 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1009 ms | preprocess 0.1906 ms | main 2.4058 ms | convert 0.0177 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s2048_h32_d256_full_fp8 ---
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 5.4330 ms  25.30 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1957 ms | preprocess 0.3654 ms | main 4.8232 ms | convert 0.0487 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 5.4234 ms  25.34 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1958 ms | preprocess 0.3626 ms | main 4.8253 ms | convert 0.0396 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s4096_h8_d256_full_fp8 ---
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 5.2057 ms  26.40 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1008 ms | preprocess 0.3613 ms | main 4.7197 ms | convert 0.0239 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 5.2191 ms  26.33 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1006 ms | preprocess 0.3608 ms | main 4.7225 ms | convert 0.0352 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s4096_h16_d256_full_fp8 ---
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 10.4174 ms  26.39 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1957 ms | preprocess 0.7155 ms | main 9.4639 ms | convert 0.0423 ms (cvt_on=0, qfuse=1, dfuse=1)
+O38: lse k-split = auto(1)
+[timing] total(quant+pre+main+cvt) 10.4077 ms  26.41 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1957 ms | preprocess 0.7158 ms | main 9.4406 ms | convert 0.0556 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+== 回归：D=128 full（TMA，未接 split）与 causal（应逐字不变）==
+--- b1_s1024_h16_d128_full_fp8 ---
+O38: lse k-split = auto(2)
+[timing] total(quant+pre+main+cvt) 0.2614 ms  32.86 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0308 ms | preprocess 0.0227 ms | main 0.2054 ms | convert 0.0026 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s1024_h2_d512_causal_fp8 ---
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 0.2203 ms  19.49 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0109 ms | preprocess 0.0236 ms | main 0.1833 ms | convert 0.0025 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- b1_s1024_h8_d256_causal_fp8 ---
+O38: lse k-split = auto(4)
+[timing] total(quant+pre+main+cvt) 0.4023 ms  21.35 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0274 ms | preprocess 0.0316 ms | main 0.3419 ms | convert 0.0013 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+== 外部基线（纯反向 CUPTI，fa_bwd_bench.py bench）：MLA D=512 full（FA2/FA3/TE 均不支持/NA）==
+$ python harness/fa_bwd_bench.py bench --dtypes fp16 fp8 --shape '1 1024 2 512 kv=2 dv=512 full'
+=== bench CUPTI device time (pure-bwd, dtype=fp16) ===
+[b1_s1024_h2_d512_full_fp16] fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)  fa=NA(FlashAttention forward only supports hea)  te=NA(/workspace/TransformerEngine/transformer)
+=== bench CUPTI device time (pure-bwd, dtype=fp8) ===
+[b1_s1024_h2_d512_full_fp8] te=NA(/workspace/TransformerEngine/transformer)

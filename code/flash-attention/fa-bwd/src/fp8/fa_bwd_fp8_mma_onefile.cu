@@ -5424,6 +5424,10 @@ static int g_lse_full_opt = 1;
 // 第 166 轮 O72：varlen full D=128 的 LSE 是否走 4D-TMA（对齐定长 O70）。默认 1；`--lsetmavarlen=0`
 //   退回 O68 的 cp.async 均衡版做同 binary A/B。需要 `-DFA_WGMMA -DFA_TMA` 构建（否则恒 0）。
 static int g_lse_tma_varlen = 1;
+// O101（第 195 轮）：**定长 full 的 LSE 补齐均衡/流水/split**——此前 D=512（MLA）定长 full 的
+//   LSE 一直是 O1 的 `lse_mma_kernel`（逐标量 global→smem、无 cp.async 流水、无 K 维 split）。
+//   默认 1 = 走 `lse_mma_kernel_bal<512,1,true>`；`--lse512old=1` 退回 O1 做同 binary A/B。
+static int g_lse_full512_opt = 1;
 
 #if defined(FA_WGMMA) && defined(FA_TMA)
 // O32：为 LSE 的 Q/K 建 4D TMA 描述符（dims={D,S,H,B}，SW128，box={128,64,1,1}）。
@@ -7148,6 +7152,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--lsesplit=", 0) == 0) lse_split = atoi(a.c_str() + 11);
     else if (a.rfind("--lsefull=", 0) == 0) g_lse_full_opt = atoi(a.c_str() + 10);
     else if (a == "--lsefull") g_lse_full_opt = 1;
+    else if (a.rfind("--lse512old=", 0) == 0) g_lse_full512_opt = !atoi(a.c_str() + 12);
+    else if (a == "--lse512old") g_lse_full512_opt = 0;
     else if (a.rfind("--lsetmavarlen=", 0) == 0) g_lse_tma_varlen = atoi(a.c_str() + 15);
     else if (a == "--lsetmavarlen") g_lse_tma_varlen = 1;
     else if (a.rfind("--mla8w=", 0) == 0) mla8w_opt = atoi(a.c_str() + 8);
@@ -7599,7 +7605,10 @@ int main(int argc, char** argv) {
       (lseocc_opt == 5 || lseocc_opt == 6 || (lseocc_opt == 0 && !lse8w_fixed));
   int lse_split_eff = lse_split;
   if (lse_split_eff <= 0) {
-    long lg_grid = (long)lg_bal.x * H * B;
+    // O101（第 195 轮）：base 随 causal/full 取不同网格——causal 走镜像配对（`lg_bal.x`），
+    //   full 一个 CTA 一个 m 块（`lg.x=nblk`）。此前 full 也误用 `lg_bal.x`（只有 causal 的半格），
+    //   对新增了 split 的 full D=256/D=512 会把并发目标低估一半。
+    long lg_grid = (long)(causal ? lg_bal.x : lg.x) * H * B;
     // O39：D=512（MLA，mma LSE）目标 `grid*split ≈ 256`、上限 16；D=128 的 TMA LSE 维持
     //   O38 的 `≈2048`、上限 8。O59：cfg6 的 4 CTA/SM 把并发槽翻倍，目标抬到 1024
     //   （对齐 O58 varlen 的 fp8 档）。
@@ -7607,7 +7616,10 @@ int main(int argc, char** argv) {
     //   S=4096 H16 时 base=`lg_grid`=512，2048→split=4，而同 binary 交替实测 split=2 的
     //   LSE 快 ~2.7%（端到端在噪声内）。S≥2048 时把目标降到 1024（仍 ≈2 个满波量级）；
     //   S<2048 维持 2048，避免小 shape 的二次归约/尾部回归（S512/S1024H32 实测两档相同）。
-    const int target = (D == 512) ? (causal_cfg6_fixed ? 1024 : 256) : (S >= 2048 ? 1024 : 2048);
+    // O101：full D=512 新接 split，目标 **256**；full D=256 新接 split，目标 **512**
+    //   （实测见两文件 `fa_bwd_fp8_main.cu` 同段注释 / docs/03 §123）。causal 逐字不变。
+    const int target = (D == 512) ? (causal ? (causal_cfg6_fixed ? 1024 : 256) : 256)
+                                  : (causal ? (S >= 2048 ? 1024 : 2048) : 512);
     const int cap = (D == 512) ? 16 : 8;
     int sp = 1;
     while (sp < cap && lg_grid * (sp * 2) <= target) sp *= 2;
@@ -7708,8 +7720,9 @@ int main(int argc, char** argv) {
         launch_lse_bal<256, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, nullptr,
                                d_lse_part, lse_split_eff);
       else
+        // O101（第 195 轮）：full D=256 的均衡 LSE 也接上 K 维 split（此前恒 split=1）。
         launch_lse_bal<256, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, nullptr,
-                                     nullptr, 1);
+                                     d_lse_part, lse_split_eff);
       if (do_delta) {
         if (delta_warp_sel)
           delta_warp_kernel<256><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
@@ -7744,6 +7757,15 @@ int main(int argc, char** argv) {
         else
           launch_lse_bal<512, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, nullptr,
                                  d_lse_part, lse_split_eff);
+      } else if (g_lse_full512_opt) {
+        // O101（第 195 轮）：定长 full MLA（D=512）的 LSE 补齐均衡 + cp.async + K 维 split
+        //   （对齐 O54 只修了的 varlen full）。`--lse512old=1` 退回 O1 做同 binary A/B。
+        if (lse_split_eff > 1)
+          launch_lse_bal<512, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale,
+                                       nullptr, d_lse_part, lse_split_eff);
+        else
+          launch_lse_bal<512, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale,
+                                       nullptr, nullptr, 1);
       } else
         launch_lse<512>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, (int)causal);
       if (do_delta) {

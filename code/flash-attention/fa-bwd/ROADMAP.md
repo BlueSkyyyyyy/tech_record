@@ -3262,7 +3262,24 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百九十四轮）**：**O100——fp8 full 变长 D=128 的 ksplit 收口（k=3）——正结果，默认**。
+> **最新（第一百九十五轮）**：**O101——定长 full 的 LSE 补齐均衡/流水/split——正结果，默认**。
+> 落实 O100 结尾的「`partial/split` 的 full 标定」中的 **split 部分**。O54 只修了 **varlen** full
+> MLA 的 LSE，O68/O70 只补了定长 full 的 D=128/D=256——**定长 full MLA（D=512）的 LSE 一直被漏**，
+> 占 full MLA 端到端 **~65%**（S1024H2 preprocess 0.376ms > main 0.183ms）。**纯 host、device 一行未改、
+> 单/两文件同源**：D=512 full 的 LSE 从 O1 切到 `lse_mma_kernel_bal<512,1,true>`+K split
+> （`--lse512old=1` 退回 O1 A/B）；D=256 full 的均衡 LSE 接上 split；split auto 的 base 改为
+> `causal ? lg_bal.x : lg.x`，target full D=512 **256** / D=256 **512**。
+> **性能（同 binary A/B）**：D=512 full 端到端 **S512H2 3.46× / S512H4 2.53× / S1024H2 2.64× /
+> S2048H2 2.19× / S4096H2 1.68×**（LSE 6.5–15.8×）；D=256 full 小/中 S 1.02–1.14×。ncu old 544µs/
+> `sm 3.38%`/warps 6.25% → new **21.1µs（25.8×）/ sm 35.4% / warps 12.1%**。relL2 全在护栏内
+> （dq 8.14–8.24/dk 8.29–8.39/dv 6.69–6.79%）、单/两文件 worst 8.94e-8、全量 `--ci --dtype fp8`
+> gate OK（6.199e-6）、`--check docs/04` OK；causal 与 D=128 full 逐位不变。见 `docs/03` §123、
+> `docs/08` §5.109。
+> **下一步候选**：① **换卡**（唯一能解 causal 旗舰 D=128 的 L2 `red` 主体墙，见「阻塞」）；
+> ② `partial/split` 的 full 标定里的 **Deterministic `--det` partial 布局**（非默认路径）；
+> ③ 覆盖型 backlog（`D=256` K/V-TMA、MLA 降 smem）均受同一 smem 墙。
+>
+> **（第一百九十四轮）**：**O100——fp8 full 变长 D=128 的 ksplit 收口（k=3）——正结果，默认**。
 > 落实 O98 留的「均匀 vs 混合长度」残余。**干净机器上 k∈[1,5]×3 次重测**推翻 O98 前提：
 > 四个 D=128 full 变长 shape 最优**一致为 k=3**（b4_t3840 1.386 / b4_t4096 1.114 / b5 2.684 /
 > b8 1.126 ms），O98 的「b4_t3840 k3 慢 3.9%」是当轮噪声/残留。**纯 host、device 一行未改、
@@ -8115,6 +8132,31 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     **fp8 ksplit 自动档至此全部收口**；唯一未复核的同类启发式只剩 `partial/split` 的 full 标定。
     见 `docs/03` §122、`docs/08` §5.108；原始输出
     `src/fp8/fa_bwd_fp8_o100_{varlen_full_k_sweep,ab,accuracy,ncu,fa3_baseline}.out.txt`。
+
+- 2026-10-01（第一百九十五轮）：**O101——定长 full 的 LSE 补齐均衡/流水/split——正结果，默认**。
+  落实 O100 结尾的「`partial/split` 的 full 标定」中的 **split 部分**：O54 只把 **varlen** full
+  MLA（D=512）的 LSE 从 O1 切到均衡 FULL+K split，O68/O70 只补了定长 full 的 D=128（TMA）/D=256
+  （均衡 FULL 但无 split）——**定长 full MLA 的 LSE 一直被漏掉**，实测占 full MLA 端到端 **~65%**
+  （S1024H2：preprocess 0.376ms > main 0.183ms；ncu old `lse_mma_kernel<512>` 纯延迟 bound
+  `sm 3.38% / warps 6.25% / DRAM 0.12%`）。
+  - **改动（纯 host，device 一行未改、单/两文件同源）**：① D=512 full 的 LSE 从
+    `launch_lse<512>`（O1）切到 `launch_lse_bal<512,1,true>` + K 维 split（新增 `--lse512old=1`
+    退回 O1 做同 binary A/B）；② D=256 full 的均衡 LSE 接上 K 维 split（此前恒 1）；
+    ③ split auto 的 base 从「恒 `lg_bal.x`」改为 **`causal ? lg_bal.x : lg.x`**（full 一个 CTA
+    一个 m 块 = `nblk`），target 取 full D=512 **256**、full D=256 **512**（5+8 个 full shape
+    全扫确认 `base*split≈256/512` 最优）。causal 路径逐字不变。
+  - **性能（同 binary A/B，iters=30，两文件）**：**D=512 full 端到端 S512H2 3.46× / S512H4 2.53× /
+    S1024H2 2.64× / S2048H2 2.19× / S4096H2 1.68×**（LSE 单向 6.5–15.8×）；D=256 full 小/中 S
+    1.02–1.14×、大 S 中性（LSE 只占 ~14%）。ncu new `lse_mma_kernel_bal<512,1,1,128,64>` grid(16,2,8)
+    **21.1µs（25.8×）/ sm 35.4% / warps 12.1% / L1TEX 18.4%**（`cp.async` 藏载入 + split 铺满
+    2 CTA/SM）。S1024H2 full new total **0.2207ms/19.46TF**、S4096H2 **2.763ms/24.87TF**。
+  - **数值/回归**：D=512/D=256 full 的 relL2 vs fp32 ref 全在护栏内（dq 8.14–8.24 / dk 8.29–8.39 /
+    dv 6.69–6.79 %）、`max_abs` O(0.02–0.09)；单/两文件 worst 8.94e-8；全量 `--ci --dtype fp8`
+    一致性 gate **worst 6.199e-6 OK**、`--check docs/04` **OK（214 行）**；causal 与 D=128 full 逐位不变。
+    MLA D=512 full 的 FA2.7.4/FA3/fp16-fp8 TE **均 NA**（`fa_bwd_bench.py bench`），仅 ours。
+  - **判决：正结果、默认开启。** fp8 的 LSE split/均衡至此覆盖 causal/full × 定长/变长 ×
+    D=128/256/512（D=128 full 用 TMA、grid 已 ≥SM，无 split 需求）。见 `docs/03` §123、
+    `docs/08` §5.109；原始输出 `src/fp8/fa_bwd_fp8_o101_{ab,ncu}.out.txt`。
 
 ## 灵感 / backlog
 

@@ -10780,3 +10780,117 @@ D=256/D=512 的 full 分支（O97/O98）与 causal 路径（O93/O99）逐字不�
 - **原始输出**：`src/fp8/fa_bwd_fp8_o100_varlen_full_k_sweep.out.txt`（全扫）、
   `..._o100_ab.out.txt`（A/B 主表 3 次）、`..._o100_accuracy.out.txt`（relL2）、
   `..._o100_ncu.out.txt`（ncu）、`..._o100_fa3_baseline.out.txt`（外部基线参照）。见 `docs/08` §5.108。
+
+## 123. O101（第 195 轮）：**定长 full 的 LSE 补齐均衡/流水/split** —— **正结果，默认**
+
+### 123.1 动机：被 O54 漏掉的「定长 full」LSE 分支
+
+O54（§53）只把 **varlen** 的 full MLA（D=512）LSE 从 O1 的 `lse_mma_kernel`（逐标量
+global→smem、无 `cp.async` 流水、无 K 维 split）切到 O54 的均衡 FULL 版；**定长 full** 一直是
+O1。O68/O70 也只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL，但 split 固定 1）。
+本项把「full 的 LSE 也接均衡/流水/split」（O100 结尾留的 `partial/split 的 full 标定`）补齐。
+
+实测（Hopper 构建，`fa_bwd_fp8_main`）**定长 full MLA 的 LSE 是端到端绝对瓶颈**：
+
+| case | preprocess(LSE) | main | total |
+|---|---|---|---|
+| D=512 S1024 H2 full | **0.376 ms** | 0.183 ms | 0.582 ms |
+| D=512 S4096 H2 full | **1.491 ms** | 2.467 ms | 4.636 ms |
+
+即 LSE 占端到端的 ~65%（S1024H2）——而 `lse_mma_kernel`（O1）的 ncu 是**纯延迟 bound**：
+`sm 3.38% / warps_active 6.25%（1 CTA/SM）/ DRAM 0.12% / L1TEX 1.36%`（每 CTA 单线程顺序扫整条 K）。
+
+### 123.2 改动（纯 host，device 一行未改、单/两文件同源）
+
+O54/O58 的 `lse_mma_kernel_bal<HD,PIPE,FULL,NTH,LBN>` 与 `launch_lse_bal` 早已支持
+`FULL=true` + `lse_part`/`ksplit`。本轮只改 host 三处：
+
+1. **D=512 full**：`launch_lse<512>(lg,…)`（O1）→ `launch_lse_bal<512,1,true>(lg,…,d_lse_part,
+   lse_split_eff)`（一个 CTA 一个 m 块 `grid.x=nblk`、K 用 `cp.async` 双缓冲、`split>1` 时
+   grid.z 扩成 `B*split` + `lse_split_merge_kernel`）。新增 `--lse512old=1` 退回 O1 做同 binary A/B。
+2. **D=256 full**：原来的 `launch_lse_bal<256,1,true>(lg,…,nullptr,1)` 改为传
+   `d_lse_part, lse_split_eff`（接上 K 维 split；此前恒 1）。
+3. **split auto 重标定**：base 从「恒 `lg_bal.x`（causal 镜像配对的半格）」改成
+   **`causal ? lg_bal.x : lg.x`**（full 是一个 CTA 一个 m 块 = `nblk`）。target：full D=512
+   **256**（同 causal legacy）、full D=256 **512**；causal（D=512 cfg6/legacy、D=256）逐字不变。
+
+### 123.3 D=512（MLA）full：全扫 + A/B（同 binary，iters=30）
+
+sweep（total ms）确认 `base*split≈256` 最优，与 target=256 的 auto 一致：
+
+| shape（full） | split1 | 2 | **4** | **8** | 16 | auto |
+|---|---|---|---|---|---|---|
+| S512H2（base 16） | 0.1131 | 0.0913 | 0.0795 | **0.0746** | 0.0792 | **8** |
+| S512H4（base 32） | 0.1610 | 0.1392 | 0.1279 | **0.1240** | 0.1354 | **8** |
+| S1024H2（base 32） | — | — | — | **0.2207** | 0.2254 | **8** |
+| S2048H2（base 64） | 0.9036 | 0.8094 | **0.7639** | 0.7646 | 0.7749 | **4** |
+| S4096H2（base 128） | 2.9477 | **2.7586** | 2.7622 | 2.7724 | 2.7837 | **2** |
+
+**A/B（old=O1 vs new=balFULL+split）**：
+
+| shape | old total | **new total** | gain | old preprocess | **new preprocess** | LSE gain |
+|---|---|---|---|---|---|---|
+| S512H2 | 0.2583 | **0.0747** | **3.46×** | 0.1898 | **0.0136** | 14.0× |
+| S512H4 | 0.3140 | **0.1242** | **2.53×** | 0.1969 | **0.0157** | 12.5× |
+| S1024H2 | 0.5819 | **0.2207** | **2.64×** | 0.3755 | **0.0238** | 15.8× |
+| S2048H2 | 1.6729 | **0.7637** | **2.19×** | 0.7549 | **0.0672** | 11.2× |
+| S4096H2 | 4.6356 | **2.7631** | **1.68×** | 1.4905 | **0.2282** | 6.5× |
+
+### 123.4 D=256 full：A/B（old=split1 vs new=auto）
+
+| shape | old total | new total | gain | 最优 split |
+|---|---|---|---|---|
+| S512H8 | 0.1387 | **0.1221** | 1.14× | 4–8 |
+| S1024H8 | 0.4360 | **0.4031** | 1.08× | 4 |
+| S1024H16 | 0.7874 | **0.7716** | 1.02× | 2 |
+| S2048H8 | 1.4389 | **1.4037** | 1.03× | 4 |
+| S2048H16 | 2.7064 | 2.7150 | 1.00× | 1 |
+| S2048H32 | 5.4330 | 5.4234 | 1.00× | 1 |
+| S4096H8 | 5.2057 | 5.2191 | 1.00× | 1 |
+| S4096H16 | 10.4174 | 10.4077 | 1.00× | 1 |
+
+（D=256 full 的 LSE 只占端到端 ~14%，故小/中 S 才有可见收益，大 S 已铺满并发、退化为 split=1。）
+
+### 123.5 ncu（D=512 S1024H2 full，同 binary，`launch-count 1`）
+
+| 指标 | old `lse_mma_kernel<512>` | **new `lse_mma_kernel_bal<512,1,1,128,64>`** |
+|---|---|---|
+| grid | (16,2,1) | (16,2,**8**) |
+| `gpu__time_duration` | 544.16 µs | **21.12 µs（25.8×）** |
+| `sm__throughput` | 3.38% | **35.35%** |
+| `sm__warps_active` | 6.25%（1 CTA/SM） | **12.11%（2 CTA/SM）** |
+| `dram__throughput` | 0.12% | 3.04% |
+| `l1tex__throughput` / `lts__throughput` | 1.36% / 0.45% | **18.38% / 20.35%** |
+| `lts op_read` 扇区 | 581,881 | 1,165,932 |
+
+⇒ **old 是纯「单线程顺序扫 K」的延迟 bound（sm 3.4%、DRAM 0.12%）**；new 用 `cp.async` 双缓冲
+把 K 载入藏进 mma、并用 split 把 grid 从 16×2 铺到 16×2×8（填满 2 CTA/SM 的并发槽）⇒
+利用率升到 sm 35%/L1TEX 18%，Duration 掉 25.8×。**新的墙是 issue/延迟（`sm 35%` 远未饱和）**，
+符合「preprocess 的 LSE 已被搬进正确量级、不再主导端到端」的预期。
+
+### 123.6 精度护栏与回归
+
+- **relL2 vs fp32 ref**（护栏 dq≤8.2+0.3 / dk≤8.3+0.3 / dv≤6.5+0.3 %）：D=512 full 5 shape
+  `dq 8.14–8.24% / dk 8.31–8.39% / dv 6.69–6.79%`；D=256 full 4 shape
+  `dq 8.14–8.18% / dk 8.29–8.31% / dv 6.71–6.76%`；`max_abs` O(0.02–0.09)。**全在护栏内**
+  （split/均衡只改 LSE 的 fp32 求和次序，不改数学口径）。
+- **单/两文件一致**：4 个代表 shape `ours vs ours_sf` worst **8.94e-8**；全量 `--ci --dtype fp8`
+  一致性 gate **worst 6.199e-6 OK（tol 1e-4）**，`--check docs/04` **OK（214 行）**。
+- **causal 与 D=128 full 无回归**：causal 走各自的 launch 分支与 auto（base/target 逐字不变）⇒
+  逐位不变；D=128 full 走 TMA `launch_lse_bal_tma<128,1,true>`、未接 split（其 grid 已 ≥SM），
+  数值/时间不变（S1024H16 full preprocess 0.0227ms、max_abs 5.52/5.31/4.02e-2）。
+- **外部基线**：MLA D=512 full 的 FA2.7.4/FA3/fp16-TE **均不支持**（`fa_bwd_bench.py bench` 报 NA），
+  故本项仅 ours（fp8 TE 亦 NA）。S1024H2 full new total **0.2207ms/19.46TF**（FP8 峰值 1978.8 ⇒ 0.98%）、
+  S4096H2 **2.763ms/24.87TF（1.26%）**——低占比主要来自 MLA 只有 H=2、main（张量核 11% 空转）占 89%。
+
+### 123.7 结论 / 下一步
+
+- **判决：正结果、默认开启。** 定长 full 的 LSE 从 O1 切到均衡 FULL + K split：D=512 full
+  端到端 **1.68–3.46×**（LSE 6.5–15.8×）、D=256 full 小/中 S 1.02–1.14×。**至此 fp8 的 LSE
+  split/均衡覆盖 causal/full × 定长/变长 × D=128/256/512**（D=128 full 用 TMA 无 split 需求）。
+- **下一步候选**：① O100 留的「`partial/split` 的 full 标定」中的「split」部分本轮收口；
+  余下同类启发式只剩**确定性 `--det` 的 partial 布局/`split` full 标定**（非默认路径）；
+  ② causal 旗舰（D=128 S4096）的 L2 `red` 主体墙仍是唯一真杠杆，本卡无软件解（换卡/多
+  warpgroup，见 ROADMAP「阻塞」）；③ 覆盖型 backlog（`D=256` K/V-TMA、MLA 降 smem）受同一 smem 墙。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o101_ab.out.txt`（A/B 全表 + 外部基线）、
+  `src/fp8/fa_bwd_fp8_o101_ncu.out.txt`（ncu 新旧对比）。见 `docs/08` §5.109。
