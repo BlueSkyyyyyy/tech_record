@@ -3138,6 +3138,11 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       **1.7913/1.7936/1.8052ms** 噪声内，根因 ncu 默认 main **L2 命中 97.08% / DRAM 4.32%**，
       重读本就在 L2 命中、promotion 改不了 L2 扇区总量。**F6 三条子项至此全部收口（无正结果）**，
       默认路径数值逐位不变。见 `docs/03` §100、`docs/08` §5.86。
+      → **① 的调度子项复探（第 184 轮 O89）：LPT m 块序（causal 贵块先跑，`--mrev=1` 默认）
+      为 S4096 main 1.022×/total 1.025× 的小幅正收益**（尾波削平，ncu `red` 一字不变），
+      但 **ksplit auto=8 仍最优**（反转把 k=1 只从 1.836 拉到 1.792，2.6 波的粗粒度补不上）⇒
+      **消 Q/dO 重读的 ksplit 路径确认关闭**；多 warpgroup WS 仍是唯一能改工作划分的路。见
+      `docs/03` §112、`docs/08` §5.98。
 - [~] **F3b**：① **GEMM3/4/5 上 RS wgmma（第一百七十四/一百七十五轮 O79/O80 打通）**——
       TE SASS 证其用 `QGMMA RS_TN`（A 在寄存器）+ `STSM/LDSM` 配对粒度转置；O79 冒烟证
       `ldmatrix.x4` 的 A 片段直接喂 `wgmma.m64n32k32` RS（max_abs=0 PASS）；**O80（第 175 轮）
@@ -3217,15 +3222,24 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百八十三轮）**：**O88——fp8 非 main「quant+zero」栅格封顶 + O81 后宏复扫 +
+> **最新（第一百八十四轮）**：**O89——fp8 主 kernel 的 LPT m 块调度序（causal 贵块先跑）
+> ——正结果，默认**。默认稠密网格按 blockIdx 升序派发、causal 便宜块在低 blockIdx ⇒ 尾波全重块；
+> 给默认 `kvtma` 壳加 `mt_m` 透传 + host 反转表（`--mrev=1`，默认开）即把最贵块前置。
+> **S4096 main 1.4796→1.4475ms（1.022×）、total 1.7159→1.6747ms（1.025×，82.07 TF）**；其它
+> causal D=128 0.5–2.0% 正；S512 门控外。ncu **`lts op_red` 一字不变**、stall 不变 ⇒ 收益纯
+> 尾波/负载均衡。gate worst 7.629e-6 OK、`--check docs/04` OK。见 `docs/03` §112、`docs/08` §5.98。
+> **下一步候选**：① **换卡**（更大 smem/寄存器）；② **多 warpgroup WS（256/384 线程）**——
+> 唯一未试的结构性杠杆（详见下方 O87 块），能真正改工作划分、减 `red`；③ LPT 进一步做**跨
+> head 的全局降序**（当前只 per-head 反转，理论上可再省一点尾波）；④ `D=256` K/V-TMA /
+> MLA 降 smem 均受同一 smem 墙。
+>
+> **（第一百八十三轮）**：**O88——fp8 非 main「quant+zero」栅格封顶 + O81 后宏复扫 +
 > `D=256` K/V-TMA 资源收口（负结果/收口，默认一行未改）**。① quant 融合 kernel 的 grid 封顶
 > （`--qcap`，S4096 grid=114,688→…）**单调更慢**（quant 0.106→0.448ms），块调度不是瓶颈、
 > 该 kernel 已近带宽墙（~2.5TB/s）；② O81 之后宏复扫全部中性/有损（ILV34 −5%、R4 −2.5%）；
 > ③ `D=256` K/V 4D-TMA：`115,712+8,192+64 = 123,968B > 116,224`（2-CTA 上限）⇒ K 双缓冲
 > 把 2 CTA/SM 挤成 1 ⇒ **结构性不可行**（见「阻塞」）。**默认路径性能/数值一字未改**。
 > 见 `docs/03` §111、`docs/08` §5.97。
-> **下一步候选**：① **换卡**（更大 smem/寄存器）；② **多 warpgroup WS（256/384 线程）**——
-> 唯一未试的结构性杠杆（详见下方 O87 块）；③ `D=256` K/V-TMA / MLA 降 smem 均受同一 smem 墙。
 >
 > **（第一百八十二轮）**：**O87——F3b GEMM3/4 wgmma 的 wait-schedule 变体收口（负结果，
 > 默认一行未改）**。只改 wgmma 的 fence/commit/wait 时序：A 合并 commit/wait（0.930×）、
@@ -7598,6 +7612,28 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     顶穿 116KB/2-CTA 门槛，backlog）。见 `docs/03` §108、`docs/08` §5.94、`docs/04` §50；
     原始输出 `src/fp8/fa_bwd_fp8_o85_d256_ab.out.txt`、`..._o85_ncu_d256_s1024.out.txt`、
     `..._o85_accuracy_d256.out.txt`。
+
+- 2026-09-30（第一百八十四轮）：**O89——fp8 主 kernel 的 LPT m 块调度序（causal 贵块先跑）
+  ——正结果，默认**。承接 O77/O83/O87 的「默认 fp8 main 在本卡是 L2 `red` bound、无软件杠杆」，
+  本轮换一个**不改数据通路、不改 L2 搬运量、只改「哪个 CTA 算哪个 m 块」的派发顺序**的角度。
+  - **动机**：默认稠密网格 `grid=(nblk*ksplit, H, B)`、`mt=blockIdx.x/ksplit` 直接是 m 块号，
+    硬件按 blockIdx **升序**派发；causal 下 m 块的 K 循环长 ∝`(m+1)` ⇒ **便宜块先跑、最贵块排
+    段末**（LPT 的反面），尾波全重块。ksplit=8 正是靠细粒度掩盖此偏斜（代价 Q/dO 重读 8 次）。
+  - **改动（纯 host + 壳透传，device 数学零改动）**：给默认 `fa_bwd_fp8_mma_kvtma_kernel` 壳加
+    `const int* mt_m` 尾参并透传给 body（body 早已支持，varlen 紧凑网格用）；host 在 `--mrev=1`
+    时建反转表 `mt_m[i]=nblk-1-i`。dK/dV 是跨 CTA `atomicAdd`（可交换）⇒ 数值语义不变、仅加法
+    次序略变。门控 `causal && D==128 && nblk>=16`（S>=1024），单/两文件同步，默认开，
+    `--mrev=0` A/B。
+  - **性能（同 binary A/B，S=4096 H16 causal，event iters=30）**：main **1.4796→1.4475ms
+    （1.022×）**、total **1.7159→1.6747ms（1.025×，80.10→82.07 TF）**（重复实测 **~3.2%**）；
+    S1024H32 main 1.6%、GQA kv4 2.0%、GQA kv8 1.3%、MQA kv1 0.5%；S512（nblk=8）门控外不变。
+  - **ncu（S4096）**：Duration **1.48→1.46ms**、**`lts op_red` 114,524,160 一字不变**、
+    `short_scoreboard 1.82`/`wait 1.56` 不变 ⇒ 收益 = **尾波/负载均衡**，与 L2 搬运量无关。
+  - **判决**：正结果、默认开启。是「不改 L2 搬运量」类微优化里目前唯一转正的一条；**减 `red`
+    仍需改工作划分**。`--ci --dtype fp8 --hopper` gate worst **7.629e-6 OK**、`--check docs/04`
+    OK；vs ref max_abs 与 mrev=0 打印相同。见 `docs/03` §112、`docs/08` §5.98、`docs/04` §51；
+    原始输出 `src/fp8/fa_bwd_fp8_o89_ab_mrev_s4096.out.txt`、`..._o89_ab_mrev_shapes.out.txt`、
+    `..._o89_ncu_mrev_{0,1}_s4096.out.txt`、`..._o89_ci_fp8.out.txt`。
 
 - 2026-09-30（第一百八十三轮）：**O88——fp8 非 main「quant+zero」栅格封顶 A/B + O81 后编译宏
   复扫 + `D=256` K/V-TMA 资源收口（负结果/收口，默认一行未改）**。承接 O77/O83/O87，把

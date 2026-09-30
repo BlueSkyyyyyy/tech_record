@@ -1915,3 +1915,42 @@ smem 冲突 + 低 occ
 **默认路径回归**：S=4096 两文件 total 1.7162ms/80.08TF、main 1.4829ms，vs fp32 ref max_abs
 2.635/2.644/3.216e-1，单/两文件 device 逐字同源（只动 host 栅格）。见 `docs/03` §111；
 原始输出 `src/fp8/fa_bwd_fp8_o88_qcap_ab_s4096.out.txt`、`..._o88_macro_sweep_s4096.out.txt`。
+
+### 5.98 第 184 轮（O89）：fp8 主 kernel 的 **LPT m 块调度序（causal 贵块先跑）** —— **正结果，默认**
+
+承接 O77/O83/O87 的「默认 fp8 main 在本卡是 L2 `red` bound、张量核空转、无软件杠杆」。本轮换一个
+此前**从未试过**的角度——**不改数据通路、不改 L2 搬运量，只改「哪个 CTA 算哪个 m 块」的调度序**。
+
+- **动机**：默认稠密网格是 `grid=(nblk*ksplit, H, B)`，`mt = blockIdx.x/ksplit` 直接就是 m 块号，
+  而 GigaThread 按线性 blockIdx **升序**派发。causal 下第 `m` 个 m 块的 K 循环长度 ∝ `(m+1)` ⇒
+  **便宜的 m 块先跑、最贵的 m 块排在每个 head 段的末尾** ⇒ 尾波全是重块（LPT 的反面）。
+  ksplit=8 之所以比 ksplit=1 快 ~20%，正是用**更细的块粒度**掩盖这个偏斜——代价是 Q/dO 被重读
+  8 次、dQ 多一轮跨 part 原子。若能把平衡拿回来，理论上可再降 ksplit 消 Q/dO 重读。
+- **改动（纯 host + 1 个透传参数，device 数学一行未改）**：主 kernel body 早已支持 `mt_m` 查询表
+  （varlen 紧凑网格用）。给默认 `fa_bwd_fp8_mma_kvtma_kernel` 壳加一个 `const int* mt_m` 尾参
+  并透传给 body；host 在 `--mrev=1` 时建一个**反转表** `mt_m[i] = nblk-1-i`（`nblk=ceil(S/64)`）。
+  于是执行序变为「每个 head 从最贵的 m 块开始、最便宜的收尾」。dK/dV 是跨 CTA `atomicAdd`
+  （可交换）⇒ **数值语义不变**，仅加法次序略变。门控 `causal && D==128 && nblk>=16`（S>=1024；
+  小 S 网格太浅、反转只剩噪声），单/两文件同步。`--mrev=0` 供 A/B。
+- **同 binary A/B（S=4096 H16 causal，event iters=30）**：main **1.4796→1.4475ms（1.022×）**、
+  total **1.7159→1.6747ms（1.025×，80.10→82.07 TF）**；多次重复 main 1.473–1.488 → 1.429–1.440
+  （**~3.2%**，稳定）。其它 causal D=128：S1024H32 main 0.2481→0.2442（1.6%）、GQA kv4
+  0.2410→0.2362（2.0%）、GQA kv8 0.2982→0.2944（1.3%）、MQA kv1 0.4442→0.4420（0.5%）；
+  S512（nblk=8）在门控外 ⇒ 逐位不变。
+- **ncu（S=4096，`regex:kvtma_kernel --launch-count 1`）**：Duration **1.48→1.46ms**；
+  **`lts op_red` 114,524,160 一字不变**、`op_read` 28.04M→27.92M、`op_write` 0.384M、
+  DRAM 4.40→4.50%、`short_scoreboard 1.82`/`wait 1.56` 均不变 ⇒ **收益纯粹来自尾波/负载均衡
+  （LPT），与 L2 搬运量无关**——再次印证默认 main 是 `red` bound + 尾波偏斜。
+- **ksplit 复扫（mrev=1，main ms）**：k=1 **1.792** / k=2 1.547 / k=4 1.445 / **k=8 1.448**；
+  反转把 ksplit=1 从 1.836 拉到 1.792（仅 1.024×）——**即「削尾波」并不能替代 ksplit 的
+  细粒度并行**（1024 个 CTA 只有 2.6 波，静态排序再好也补不上粒度），故 **ksplit auto=8 仍最优**、
+  Q/dO 重读消不掉。结论：调度序是**免费的小幅正收益**，不是「降 L2」的钥匙。
+- **数值（护栏全过）**：`--ci --dtype fp8 --hopper` 单/两文件一致性 gate worst **7.629e-6 OK**、
+  `--check docs/04` OK（198 行）；vs fp32 ref max_abs 与 mrev=0 **打印相同**
+  （S4096 2.635/2.644/3.216e-1，S512 2.426/2.972/3.733e-1），单/两文件逐字同源。
+
+**判决**：LPT m 块调度为**正结果、默认开启**（无需改 device、可随时 `--mrev=0` 回退）。它是
+「不改 L2 搬运量」类微优化里目前唯一转正的一条；也再次证明**减 `red` 仍需改工作划分（换卡/
+多 warpgroup）**；`red` 墙不受影响。见 `docs/03` §112；原始输出
+`src/fp8/fa_bwd_fp8_o89_ab_mrev_s4096.out.txt`、`..._o89_ab_mrev_shapes.out.txt`、
+`..._o89_ncu_mrev_{0,1}_s4096.out.txt`、`..._o89_ci_fp8.out.txt`。
