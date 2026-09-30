@@ -3141,3 +3141,22 @@ auto-table 在 rtol=0.005 内不变）。详见 `docs/01` §25、`docs/01b` §6b
   （0.3025ms/908.7TF）**5.93×→5.70×**。
 - 详见 `docs/03` §104、`docs/08` §5.90；原始输出 `src/fp8/fa_bwd_fp8_o81_*`、
   `src/fp8/fa_bwd_fp8_wgmma345_smoke.out.txt`。
+
+## 49. O82（第一百七十七轮，**负结果**，默认关）：fp8 GEMM3/4（dV/dK）切到 **wgmma RS（M 零填充 m64）**
+
+- **动机**：承接 O81（GEMM5 已 wgmma），把 fp8 默认 Hopper main 剩下的两条 HMMA GEMM——GEMM3(dV)、
+  GEMM4(dK)——也换到 wgmma RS。二者 M=BN=32 < wgmma 最小 m64，故把 A（Ap/dS3）的 M 维**零填充到 64**
+  （warp 2/3 的 A 寄存器置 0、其输出行 32–63 丢弃）。B=dOᵀ/Qᵀ 由 SW128 Q/dO 逐字节转置成**紧凑
+  no-swizzle K-major [HD][BM]**（复用 Qp/dOp 缓冲，smem 零增长）；A 经 `ldmatrix.x4` 装入。
+- **数值（正确，与 mma 版同量级）**：S4096 vs fp32 ref relL2 dq/dk/dv = **8.149% / 8.263% / 6.489%**
+  （与 wg34=0 **打印完全相同**，护栏内）；A/B wg34_1 vs wg34_0：dq max_abs 1.19e-7（逐位）、
+  dk 9.13e-4 / dv 2.28e-3（原子次序噪声）。S512 = 2.426e-1/2.973e-1/3.726e-1（基线 2.426/2.972/3.733e-1）。
+- **性能（负结果，同 binary A/B，S4096 H16 causal）**：main **1.4738→1.5289ms（0.964×）**、
+  total **1.7119→1.7694ms（0.967×，80.28→77.67 TF）**。ncu：Duration 1.49→1.56ms、
+  Executed Instructions **641.86M→594.83M（−7.3%）**、L1/TEX **74.44→67.55%**、L2 **78.81→75.45%**、
+  Compute 45.06→40.30%、regs 168→164，但 **No Eligible 53.22→58.19%**（延迟 bound 恶化）。⇒
+  **本 kernel 是 L2 `red` bound（~75%，wgmma 一字不减）+ 延迟 bound**；零填充让张量核做 2× 无用功，
+  Q/dO 转置与 wgmma `fence/commit/wait` 又加延迟，指令路径的收益被抵消。**默认关**
+  （`-DFA_WGMMA34=1` 复现）。F3b 的「无 BN=64 时上 GEMM3/4 wgmma」子路线就此判负。
+- 详见 `docs/03` §105、`docs/08` §5.91；原始输出 `src/fp8/fa_bwd_fp8_o82_ab_wg34_{0,1}_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o82_ncu_wg34_{0,1}_s4096.out.txt`。
