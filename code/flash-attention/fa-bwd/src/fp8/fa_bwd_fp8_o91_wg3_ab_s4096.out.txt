@@ -1,0 +1,4 @@
+=== O91 wg3 A/B S4096 H16 causal fp8 (same binary) ===
+[timing] total(quant+pre+main+cvt) 1.6706 ms  82.27 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1062 ms | preprocess 0.1220 ms | main 1.4436 ms | convert -0.0011 ms (cvt_on=0, qfuse=1, dfuse=1)
+[O91 A/B] main wgmma2(BM128,grid=128) 2.8330 ms | wg3(BM192,grid=176,ksplit3=8) 2.7718 ms (1.022x) | max_abs(wg3-vs-wgmma2) dq/dk/dv=1.192e-07/8.590e-02/3.946e-02

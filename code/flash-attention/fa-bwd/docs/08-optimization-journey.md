@@ -1978,3 +1978,31 @@ smem 冲突 + 低 occ
   `D>128`/WS 版基建。数值：`ours_o90 vs fp32 ref` relL2 S4096 8.15/8.39/6.52%、S512
   8.18/8.41/6.36%（护栏内）；单/两文件默认路径逐值不变。见 `docs/03` §113；原始输出
   `src/fp8/fa_bwd_fp8_o90_{ab_s4096,ab_s512,default_s4096,ncu_wg2tma_s4096,ncu_default_s4096}.out.txt`。
+
+### 5.100 第 186 轮（O91 / F6-step4）：**多 warpgroup（BM=192、3 WG、384 线程）** —— **负结果（opt-in）**
+
+落实 O90 的「下一步候选 ①」——本卡 fp8 主 kernel **最后一条未试的结构性杠杆**：多 warpgroup。
+O90 证 `wgmma2`（BM=128、2 WG）`red` 砍半却只有 8 warp/SM（1 CTA×2 WG）⇒ 延迟 bound。本轮把
+`wgmma2` 泛化成 **`NWG` 个 warpgroup（`BM=NWG*64`）**，`NWG=3`（BM=192、384 线程、1 CTA/SM）：
+既把 `red` 再压（BM 64→192），又把 warp/SM 拉回默认档（12 warp/SM）。
+
+- **实现**：`fa_bwd_fp8_wgmma2_kernel<HD,BM,BN,NWG=2>` 泛化（相 A 每 WG 算 64 行、GEMM3/4 仍
+  8 warp `if(wid<8)`、GEMM5 铺 6×2、`Ap/dS3` fold 沿 m 泛化 `NPC/REM`）；`NWG=2` 逐位不变。
+  CLI `--wg3`（opt-in）+ `--ksplit3=`；host `launch_bwd_wgmma_nw`。BM=192 smem=197,120B → 1 CTA/SM。
+  **踩坑**：SW128 是 generic 写、wgmma 走 async proxy 读，NWG=3 时序下**首次 dk/dv 偶发 `inf`**；
+  每迭代补 `bulk_reduce_fence()`（`fence.proxy.async.shared::cta`）后 3/3 稳定（p155/O81 同坑）。
+- **性能（同 binary A/B + 默认同 session）**：S4096 默认 main **1.4436ms/82.27TF**；`wgmma2`
+  2.8330 → `wg3` **2.7718ms（1.022×）** ⇒ **wg3 仍只有默认档的 0.52×**。S512 `wgmma2 0.1076 →
+  wg3 0.1179ms（0.913×）`（grid-bound）。
+- **ncu（S4096，默认 vs O91）**：`lts op_red` **114.52M → 49.64M（0.43×）**、`read` 27.90M →
+  16.99M、L2 总扇区 142.9M → **80.6M（0.56×）**、**L2 利用率 81.4% → 21.2%**；**warps 18.60% →
+  18.72%（12 warp/SM，已追平默认）**；但 **Duration 1.44 → 2.78ms、CTA/SM 3→1**。⇒ 卡点**不是
+  warp 数**，是 **1 CTA/SM 的单一 barrier 域**：默认 12 warp 分属 3 个独立 CTA，wg3 的 12 warp
+  挤在一个 CTA、被每 tile 5 个 `__syncthreads` 串成依赖链。**「多 warp 摊延迟」被证伪：要多 CTA，
+  不是多 warp。**
+- **数值（护栏内）**：`ours_wg3 vs fp32 ref` relL2 S4096 8.149/8.449/6.532%、S512 8.179/8.455/
+  6.371%（护栏 dq≤8.2/dk≤8.3/dv≤6.5±0.3）；单/两文件 device 逐字一致（`identical=True`）、
+  `ours_wg3` vs `ours_wg3_sf` ≤1.19e-7；`--ci --dtype fp8 --hopper` 全绿。
+- **判决**：**负结果、opt-in 默认关**。多 warpgroup / 放大 BM 这条结构性杠杆在本卡（1 CTA/SM，
+  ≤116KB smem / ≤128 regs 才能 2 CTA/SM）**判死**；正结果只剩 **换卡**。见 `docs/03` §114；
+  原始输出 `src/fp8/fa_bwd_fp8_o91_*.out.txt`。

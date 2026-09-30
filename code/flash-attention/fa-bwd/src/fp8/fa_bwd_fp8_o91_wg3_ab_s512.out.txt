@@ -1,0 +1,4 @@
+=== O91 wg3 A/B S512 H16 causal fp8 (same binary) ===
+[timing] total(quant+pre+main+cvt) 0.0813 ms  26.42 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0131 ms | preprocess 0.0123 ms | main 0.0547 ms | convert 0.0011 ms (cvt_on=0, qfuse=1, dfuse=1)
+[O91 A/B] main wgmma2(BM128,grid=64) 0.1076 ms | wg3(BM192,grid=48,ksplit3=16) 0.1179 ms (0.913x) | max_abs(wg3-vs-wgmma2) dq/dk/dv=1.192e-07/5.225e-02/3.550e-02

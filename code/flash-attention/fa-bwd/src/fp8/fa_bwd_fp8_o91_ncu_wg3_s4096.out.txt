@@ -1,0 +1,16 @@
+=== O91 ncu wg3 (fa_bwd_fp8_wgmma2_kernel<128,192,32,3>) S4096 H16 causal fp8 ===
+  void fa_bwd_fp8_wgmma2_kernel<128, 192, 32, 3>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int) (176, 16, 1)x(384, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    -------------------------------------------------------------- --------------- ------------
+    Metric Name                                                        Metric Unit Metric Value
+    -------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                           %         2.51
+    gpu__time_duration.sum                                                      ms         2.78
+    launch__occupancy_limit_shared_mem                                       block            1
+    launch__registers_per_thread                                   register/thread          168
+    lts__t_sectors.sum                                                      sector     80622712
+    lts__t_sectors_op_read.sum                                              sector     16987685
+    lts__t_sectors_op_red.sum                                               sector     49643520
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                            %        21.18
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active               %         8.38
+    sm__warps_active.avg.pct_of_peak_sustained_active                            %        18.72
+    -------------------------------------------------------------- --------------- ------------

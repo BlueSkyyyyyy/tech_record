@@ -398,6 +398,35 @@ static void launch_bwd_wgmma2(dim3 mg, const unsigned char* q8, const float* qs,
       scale, causal, ksplit);
 }
 
+// O91（F6-step4，multi-warpgroup）：把 `fa_bwd_fp8_wgmma2_kernel` 泛化到 `NWG` 个 warpgroup、
+//   `BM = NWG*64`（默认 NWG=2 即原 wgmma2）。`--wg3` 走 `NWG=3`（BM=192、384 线程、1 CTA/SM）：
+//   每 KV 元素被贡献的 CTA 数按 m 块数 S/BM 再降 1.5×（vs BM=128），且 12 warp/SM（vs 8）摊延迟。
+template <int HD, int BM, int BN, int NWG>
+static constexpr int wgmma_nw_smem_bytes() {
+  constexpr int PSLD = HD + 8, QTS = BM + 16, DSS2 = BN + 16, PSS = BN + 5;
+  constexpr int kNScale = 3 * BM + 4 * BN;
+  constexpr int QS_SZ = (BM / 8) * (HD / 128) * 1024, KS_SZ = (BN / 8) * (HD / 128) * 1024;
+  constexpr int qp_bytes = (BM / 2) * PSLD * 2, kp_bytes = (BN / 2) * PSLD * 2;
+  return 2 * QS_SZ + 2 * KS_SZ + 2 * qp_bytes + kp_bytes + BM * DSS2 +
+         (kNScale + 2 * BM * PSS) * (int)sizeof(float) + 2 * BN * QTS + 1024;
+}
+
+template <int HD, int BM, int BN, int NWG>
+static void launch_bwd_wgmma_nw(dim3 mg, const unsigned char* q8, const float* qs,
+                                const unsigned char* k8, const float* ks,
+                                const unsigned char* v8, const float* vs,
+                                const unsigned char* do8, const float* dos,
+                                const float* delta, const float* lse, float* dq_acc,
+                                float* dk_acc, float* dv_acc, int S, int H, int Hkv,
+                                float scale, int causal, int ksplit) {
+  constexpr int kSmem = wgmma_nw_smem_bytes<HD, BM, BN, NWG>();
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_wgmma2_kernel<HD, BM, BN, NWG>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  fa_bwd_fp8_wgmma2_kernel<HD, BM, BN, NWG><<<mg, NWG * 128, kSmem>>>(
+      q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
+      scale, causal, ksplit);
+}
+
 // O90（F6-step3）：wgmma2 + K/V 4D-TMA（K 双缓冲）的 launcher。需 `-DFA_WGMMA -DFA_TMA`。
 #if defined(FA_WGMMA) && defined(FA_TMA)
 template <int HD>
@@ -1623,6 +1652,8 @@ int main(int argc, char** argv) {
   int wg2 = 0;      // O19：1 = 主 kernel 走跨 warpgroup 归约版（BM=128, 2 wg, 256 线程）
   int wg2wgmma = 0; // F6：1 = BM=128 双 warpgroup 主 kernel 的 GEMM1/2 走 wgmma（SW128）
   int wg2tma = 0;   // O90（F6-step3）：1 = wgmma2 的 K/V 改 4D-TMA（K 双缓冲）
+  int wg3 = 0;        // O91（F6-step4）：1 = BM=192 / 3 warpgroup / 384 线程主 kernel
+  int ksplit3_opt = -1;  // O91：wg3 的 ksplit（-1 自动）
   int prel_opt = -1;  // O12：-1 自动（开）；0/1 强制 LSE/D 预装寄存器开关
   int qfast = 1;      // O14：1 = warp-per-row 向量化量化，0 = 旧 per-row 标量量化（A/B）
   int delta_warp_opt = 1;  // O26：1 = warp-per-row 向量化 delta（默认），0 = 旧 per-row smem 归约（A/B）
@@ -1754,6 +1785,8 @@ int main(int argc, char** argv) {
     else if (a == "--wg2") wg2 = 1;
     else if (a == "--wg2wgmma") wg2wgmma = 1;
     else if (a == "--wg2tma") wg2tma = 1;
+    else if (a == "--wg3") wg3 = 1;
+    else if (a.rfind("--ksplit3=", 0) == 0) ksplit3_opt = atoi(a.c_str() + 10);
     else if (a == "--bn64") bn64_opt = 1;
     else if (a.rfind("--cvt=", 0) == 0) cvt_on = atoi(a.c_str() + 6);
     else if (a.rfind("--qfuse=", 0) == 0) qfuse = atoi(a.c_str() + 8);
@@ -2028,6 +2061,20 @@ int main(int argc, char** argv) {
     ksplit2 = (int)kp;
   }
   dim3 mg2((S + 127) / 128 * ksplit2, H, B);
+  // O91（F6-step4）：wg3（BM=192、3 warpgroup、384 线程、1 CTA/SM）的 grid。并发槽 132，
+  //   目标 ~8 波 ⇒ ksplit3 自动（base=(S/192)*H*B，S4096H16=352 时 k=8）；--ksplit3= 可覆盖。
+  int ksplit3 = 4;
+  if (ksplit3_opt >= 1) ksplit3 = ksplit3_opt;
+  else {
+    const long base_grid3 = (long)((S + 191) / 192) * H * B;
+    long k = 4096L / (base_grid3 > 0 ? base_grid3 : 1);
+    if (k < 1) k = 1;
+    if (k > 16) k = 16;
+    long kp = 1;
+    while (kp * 2 <= k) kp *= 2;
+    ksplit3 = (int)kp;
+  }
+  dim3 mg3((S + 191) / 192 * ksplit3, H, B);
   printf("grid main = %d x %d x %d  (ksplit=%d, base_grid=%ld)\n", mg.x, mg.y, mg.z,
          ksplit, base_grid);
   printf("O19: wg2 grid = %d x %d x %d (ksplit2=%d, base_grid2=%ld)\n", mg2.x, mg2.y, mg2.z,
@@ -2294,6 +2341,18 @@ int main(int argc, char** argv) {
                                           d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
                                           scale, (int)causal, ksplit);
       return;
+    }
+    if (D == 128 && wg3) {
+#ifdef FA_WGMMA
+      // O91（F6-step4）：BM=192 / 3 warpgroup（384 线程）主 kernel，opt-in。
+      launch_bwd_wgmma_nw<128, 192, 32, 3>(mg3, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
+                                           d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc,
+                                           S, H, Hkv, scale, (int)causal, ksplit3);
+      return;
+#else
+      fprintf(stderr, "--wg3 需要 -DFA_WGMMA（sm_90a）构建\n");
+      std::exit(2);
+#endif
     }
     if (D == 128 && wg2wgmma) {
 #ifdef FA_WGMMA
@@ -4114,6 +4173,27 @@ int main(int argc, char** argv) {
            t_wg2wg, t_wg2tma, t_wg2wg / t_wg2tma, maxd2(c_dq, b_dq), maxd2(c_dk, b_dk),
            maxd2(c_dv, b_dv));
 #endif
+    // O91（F6-step4）：wgmma2（BM=128, 2WG）vs wg3（BM=192, 3WG, 384 线程）同 session A/B。
+    //   只改几何/归约结构（BM 64→192 由泛化的 NWG 核承接），数学口径不变，差异应只有 fp32 归约次序。
+    auto run_wg3 = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      launch_bwd_wgmma_nw<128, 192, 32, 3>(mg3, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
+                                           d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc,
+                                           S, H, Hkv, scale, (int)causal, ksplit3);
+    };
+    float t_wg3 = 0.f;
+    bench_sel2(run_wg3, &t_wg3);
+    std::vector<float> d_dq(nq), d_dk(nkv), d_dv(nkv);
+    run_wg3();
+    CUDA_CHECK(cudaMemcpy(d_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(d_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(d_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    printf("[O91 A/B] main wgmma2(BM128,grid=%d) %.4f ms | wg3(BM192,grid=%d,ksplit3=%d) "
+           "%.4f ms (%.3fx) | max_abs(wg3-vs-wgmma2) dq/dk/dv=%.3e/%.3e/%.3e\n",
+           mg2.x, t_wg2wg, mg3.x, ksplit3, t_wg3, t_wg2wg / t_wg3, maxd2(d_dq, b_dq),
+           maxd2(d_dk, b_dk), maxd2(d_dv, b_dv));
     run_main();  // 恢复 CLI 选中路径
   }
 #endif

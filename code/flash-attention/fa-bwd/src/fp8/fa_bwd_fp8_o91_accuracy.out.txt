@@ -1,0 +1,15 @@
+=== O91 accuracy: ours_wg3 (NWG=3, BM=192) vs fp32 ref / TE FP8 ===
+[S4096 causal H16 D128 fp8]  (guardrail relL2 vs ref dq/dk/dv <= 8.2/8.3/6.5 ±0.3%)
+  vs fp32 ref : dq relL2=8.149%  max_abs=2.635e-01
+  vs fp32 ref : dk relL2=8.449%  max_abs=2.783e-01
+  vs fp32 ref : dv relL2=6.532%  max_abs=3.330e-01
+  vs TE FP8   : dq relL2=13.420%
+  vs TE FP8   : dk relL2=13.590%
+  vs TE FP8   : dv relL2=28.160%
+[S512 causal H16 D128 fp8]  (guardrail relL2 vs ref dq/dk/dv <= 8.2/8.3/6.5 ±0.3%)
+  vs fp32 ref : dq relL2=8.179%  max_abs=2.426e-01
+  vs fp32 ref : dk relL2=8.455%  max_abs=3.027e-01
+  vs fp32 ref : dv relL2=6.371%  max_abs=3.678e-01
+  vs TE FP8   : dq relL2=13.414%
+  vs TE FP8   : dk relL2=13.564%
+  vs TE FP8   : dv relL2=12.007%

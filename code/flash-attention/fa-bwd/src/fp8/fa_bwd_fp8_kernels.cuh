@@ -4607,8 +4607,12 @@ fa_bwd_fp8_wg2_kernel(const unsigned char* __restrict__ q8,
 // 这是 F6 的**中间态**（未上 TMA），用于量「GEMM1/2 wgmma 化」单独能省多少寄存器/时间；
 // 默认路径一行未改（仅 `--wg2wgmma` opt-in）。
 #ifdef FA_WGMMA
-template <int HD, int BM = 128, int BN = 32>
-__global__ void __launch_bounds__(256, 1)
+// O91（F6-step4，multi-warpgroup）：把本 kernel 泛化为 `NWG` 个 warpgroup（`BM = NWG*64`），
+//   默认 `NWG=2`（BM=128）行为逐位不变。`--wg3` 用 `NWG=3`（BM=192、384 线程、1 CTA/SM）：
+//   每个 KV 元素被贡献的 CTA 数再 ÷1.5（相对 BM=128）⇒ L2 `red` 目标 ≈ 114.5M×128/192≈76M…
+//   实际按 m 块数 S/BM 比例降（64→192 是 3×）。同时 12 warp/SM（vs wgmma2 的 8）缓解延迟。 
+template <int HD, int BM = 128, int BN = 32, int NWG = 2>
+__global__ void __launch_bounds__(NWG * 128, 1)
 fa_bwd_fp8_wgmma2_kernel(const unsigned char* __restrict__ q8,
                          const float* __restrict__ qs,
                          const unsigned char* __restrict__ k8,
@@ -4623,7 +4627,8 @@ fa_bwd_fp8_wgmma2_kernel(const unsigned char* __restrict__ q8,
                          float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                          int causal, int ksplit) {
   static_assert(HD == 128, "wgmma2 目前只做 HD=128");
-  constexpr int TH = 256;
+  static_assert(NWG >= 2 && BM == NWG * 64, "BM 必须 = NWG*64");
+  constexpr int TH = NWG * 128;
   constexpr int PSLD = HD + 8;   // 136
   constexpr int QTS = BM + 16;   // 144
   constexpr int DSS2 = BN + 16;  // 48
@@ -4745,6 +4750,10 @@ fa_bwd_fp8_wgmma2_kernel(const unsigned char* __restrict__ q8,
 
   for (int nt = nt_begin; nt < nt_end; ++nt) {
     const int j0 = nt * BN;
+    // O91：K/V/Q/dO 的 SW128 是 **generic 写**，下一句 wgmma（async proxy）读 smem 前
+    //   必须 `fence.proxy.async.shared::cta`（同 p155/O81 的坑；NWG=3 的线程时序更易触发
+    //   偶发 race ⇒ 首次实测出现 dk/dv=inf 的非确定错误）。每迭代顶部补一次。
+    bulk_reduce_fence();
     // ---- (1) S = scale·QKᵀ → P=exp(S−LSE)； (2) dP = dO·Vᵀ → dS = P∘(dP−D) ----
     //   两条 wgmma 一起发、统一 wait0；每个 warpgroup 各算自己 64 行的 S/dP。
     {
@@ -4785,18 +4794,32 @@ fa_bwd_fp8_wgmma2_kernel(const unsigned char* __restrict__ q8,
     }
     __syncthreads();
 
-    // ---- fold：把 Ps/Ss（全 BM=128 行）量化成 GEMM3/4/5 的操作数并乘 rowwise scale ----
-    {
+    // ---- fold：把 Ps/Ss（全 BM 行）量化成 GEMM3/4/5 的操作数并乘 rowwise scale ----
+    if (wid < 8) {
       // Ap[j][m]=P[m][j]*dos[m] (e4m3)，dS3[j][m]=dS[m][j]*qs[m] (e5m2)：每 warp 4 个 j，
       //   8 个 lane 一组沿 m（每组 16 个 m）。
+      // O91：每个 (j) 行沿 m 覆盖全 BM 行。`BM=128` 时 `NPC=1,REM=0`，与旧代码逐位相同；
+      //   `BM=192`（NWG=3）时 NPC=1 覆盖 m 0..127、REM=64 再覆盖 m 128..191（每 lane 组 8 行）。
+      constexpr int NPC = BM / 128;        // 完整 128 行块数
+      constexpr int REM = BM - NPC * 128;  // 尾块行数
       const int jj = lane >> 3, sub = lane & 7;
       const int j = wid * 4 + jj;   // 0..31
       float amaxA = 0.f, amax3 = 0.f;
 #pragma unroll
-      for (int t = 0; t < 16; ++t) {
-        int m = sub * 16 + t;
-        amaxA = fmaxf(amaxA, fabsf(Ps[m * PSS + j] * dos_s[m]));
-        amax3 = fmaxf(amax3, fabsf(Ss[m * PSS + j] * qs_s[m]));
+      for (int mh = 0; mh < NPC; ++mh)
+#pragma unroll
+        for (int t = 0; t < 16; ++t) {
+          int m = mh * 128 + sub * 16 + t;
+          amaxA = fmaxf(amaxA, fabsf(Ps[m * PSS + j] * dos_s[m]));
+          amax3 = fmaxf(amax3, fabsf(Ss[m * PSS + j] * qs_s[m]));
+        }
+      if (REM > 0) {
+#pragma unroll
+        for (int t = 0; t < REM / 8; ++t) {
+          int m = NPC * 128 + sub * (REM / 8) + t;
+          amaxA = fmaxf(amaxA, fabsf(Ps[m * PSS + j] * dos_s[m]));
+          amax3 = fmaxf(amax3, fabsf(Ss[m * PSS + j] * qs_s[m]));
+        }
       }
       amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 1));
       amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 2));
@@ -4809,17 +4832,37 @@ fa_bwd_fp8_wgmma2_kernel(const unsigned char* __restrict__ q8,
       if (sub == 0) { sA[j] = scA; sds3[j] = sc3; }
       scA = __shfl_sync(0xffffffffu, scA, jj * 8);
       sc3 = __shfl_sync(0xffffffffu, sc3, jj * 8);
-      uint32_t pa[4] = {0, 0, 0, 0}, d3[4] = {0, 0, 0, 0};
 #pragma unroll
-      for (int t4 = 0; t4 < 4; ++t4)
+      for (int mh = 0; mh < NPC; ++mh) {
+        uint32_t pa[4] = {0, 0, 0, 0}, d3[4] = {0, 0, 0, 0};
 #pragma unroll
-        for (int tt = 0; tt < 4; ++tt) {
-          int m = sub * 16 + t4 * 4 + tt;
-          pa[t4] |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
-          d3[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
-        }
-      *reinterpret_cast<uint4*>(Ap + j * QTS + sub * 16) = make_uint4(pa[0], pa[1], pa[2], pa[3]);
-      *reinterpret_cast<uint4*>(dS3 + j * QTS + sub * 16) = make_uint4(d3[0], d3[1], d3[2], d3[3]);
+        for (int t4 = 0; t4 < 4; ++t4)
+#pragma unroll
+          for (int tt = 0; tt < 4; ++tt) {
+            int m = mh * 128 + sub * 16 + t4 * 4 + tt;
+            pa[t4] |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
+            d3[t4] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
+          }
+        *reinterpret_cast<uint4*>(Ap + j * QTS + mh * 128 + sub * 16) =
+            make_uint4(pa[0], pa[1], pa[2], pa[3]);
+        *reinterpret_cast<uint4*>(dS3 + j * QTS + mh * 128 + sub * 16) =
+            make_uint4(d3[0], d3[1], d3[2], d3[3]);
+      }
+      if (REM > 0) {
+        uint32_t pa[2] = {0, 0}, d3[2] = {0, 0};
+#pragma unroll
+        for (int t2 = 0; t2 < 2; ++t2)
+#pragma unroll
+          for (int tt = 0; tt < 4; ++tt) {
+            int m = NPC * 128 + sub * (REM / 8) + t2 * 4 + tt;
+            pa[t2] |= (uint32_t)cvt_e4m3(Ps[m * PSS + j] * dos_s[m] / scA) << (8 * tt);
+            d3[t2] |= (uint32_t)cvt_e5m2(Ss[m * PSS + j] * qs_s[m] / sc3) << (8 * tt);
+          }
+        *reinterpret_cast<uint2*>(Ap + j * QTS + NPC * 128 + sub * (REM / 8)) =
+            make_uint2(pa[0], pa[1]);
+        *reinterpret_cast<uint2*>(dS3 + j * QTS + NPC * 128 + sub * (REM / 8)) =
+            make_uint2(d3[0], d3[1]);
+      }
     }
     {
       // dS2[m][j] = dS[m][j]*ks[j] (e5m2)：每 warp 16 行 × 2 lane；8 warp 覆盖 128 行。
@@ -4847,8 +4890,9 @@ fa_bwd_fp8_wgmma2_kernel(const unsigned char* __restrict__ q8,
     }
     __syncthreads();
 
-    // ---- (3) dV = Pᵀ·dO：A=Ap[j][m]（全 BM=128 重叠），B=dOp 配对布局 ----
-    {
+    // ---- (3) dV = Pᵀ·dO：A=Ap[j][m]（全 BM 重叠），B=dOp 配对布局 ----
+    //   GEMM3/4 输出只有 BN(32)×HD(128)，8 个 warp 足矣；NWG>2 时 wid≥8 的 warpgroup 跳过。
+    if (wid < 8) {
       float acc[1][4][4];
 #pragma unroll
       for (int j = 0; j < 4; ++j)
@@ -4869,7 +4913,7 @@ fa_bwd_fp8_wgmma2_kernel(const unsigned char* __restrict__ q8,
         }
     }
     // ---- (4) dK = scale·dSᵀ·Q：A=dS3[j][m]，B=Qp 配对布局 ----
-    {
+    if (wid < 8) {
       float acc[1][4][4];
 #pragma unroll
       for (int j = 0; j < 4; ++j)
@@ -4889,7 +4933,7 @@ fa_bwd_fp8_wgmma2_kernel(const unsigned char* __restrict__ q8,
                      acc[0][j][q] * sds3[r] * scale, acc[0][j][q + 1] * sds3[r] * scale);
         }
     }
-    // ---- (5) dQ += scale·dS·K：A=dS2[m][j]（全 BM=128 行），B=Kp 配对布局 ----
+    // ---- (5) dQ += scale·dS·K：A=dS2[m][j]（全 BM 行），B=Kp 配对布局 ----
     {
       float acc[2][8][4];
 #pragma unroll
