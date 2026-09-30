@@ -1,0 +1,28 @@
+pure bwd device time (ms / TFLOPS @4BS^2H(D+Dv)), dtype=torch.float16
+shape                                  FA2.7.4             FA3          TE2.14  FA3/FA2
+(1, 1024, 40, 128) kv=8        0.1882/  228 0.1213/  354 0.1315/  327    1.55x
+(1, 1024, 32, 128) kv=4        0.1584/  217 0.0825/  416 0.1123/  306    1.92x
+(1, 1024, 64, 128) kv=4        0.2679/  257 0.1596/  430 0.1934/  355    1.68x
+(1, 1024, 64, 128) kv=1        0.2657/  259 0.1568/  438 0.2145/  320    1.70x
+(1, 512, 16, 128) kv=16        0.0439/   98 0.0264/  163 0.0319/  135    1.66x
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 256, 2, 512) kv=2             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 512, 4, 512) kv=4             nan/  nan    nan/  nan    nan/  nan     nanx
+  fa2 failed MLA d512: FlashAttention forward only supports head dimension at most 256
+  fa3 failed MLA d512: mha_fwd, /home/xieminglin/github/flash-attention/hopper/flash_api_stab
+  te failed MLA d512: /workspace/TransformerEngine/transformer_engine/common/fused_attn/fuse
+(1, 1024, 2, 512) kv=2            nan/  nan    nan/  nan    nan/  nan     nanx
+(1, 4096, 16, 128) kv=16       0.7272/  378 0.3231/  851 0.4440/  619    2.25x
+
+pure bwd VARLEN (packed [T,H,D] + cu_seqlens; flops=4*H*D*sum(L^2)), dtype=torch.float16
+lengths / H,kv / mask                  FA2.7.4             FA3          TE2.14  FA3/FA2
+MHA 不齐 [512, 1024, 2048].. H16/kv16 causal 0.3397/  134 0.1629/  280              NA    2.09x
+MHA 等长 [1024, 1024, 1024].. H16/kv16 causal 0.2542/  135 0.1481/  232              NA    1.72x
+GQA q32/kv8 [128, 256, 512].. H32/kv8 causal 0.6321/  145 0.3766/  243              NA    1.68x
+强倾斜 [2048, 512, 128].. H16/kv16 causal 0.3018/  122 0.1419/  259              NA    2.13x
+MHA 等长 full [1024, 1024, 1024].. H16/kv16 full 0.3445/  100 0.1997/  172              NA    1.73x

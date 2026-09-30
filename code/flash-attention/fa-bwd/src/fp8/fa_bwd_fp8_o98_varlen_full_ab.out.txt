@@ -1,0 +1,9 @@
+=== O98 A/B: fp8 varlen full ksplit 重标定（new-auto vs 旧 auto target）===
+cmd: fa_bwd_fp8_main_ab.out --dir=<case> --varlen --full [--ksplit=K] --iters=100   (Hopper wgmma+TMA)
+
+varlen_b4_t3840_h16_d128_full_fp8      new(ksplit=4 )   1.4158 ms | old(ksplit=4)   1.4131 ms | gain 0.9981x
+varlen_b4_t4096_h16_d128_full_fp8      new(ksplit=4 )   1.1659 ms | old(ksplit=4)   1.1625 ms | gain 0.9971x
+varlen_b5_t3968_h32_d128_full_fp8      new(ksplit=3 )   2.6904 ms | old(ksplit=1)   2.8480 ms | gain 1.0586x
+varlen_b8_t2904_h16_d128_full_fp8      new(ksplit=3 )   1.1495 ms | old(ksplit=2)   1.1960 ms | gain 1.0405x
+varlen_b1_t512_h2_d512_full_fp8        new(ksplit=8 )   0.0746 ms | old(ksplit=16)   0.0818 ms | gain 1.0965x
+varlen_b3_t1792_h2_d512_full_fp8       new(ksplit=11)   0.3108 ms | old(ksplit=4)   0.3165 ms | gain 1.0183x
