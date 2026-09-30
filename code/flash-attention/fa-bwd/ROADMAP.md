@@ -3085,6 +3085,9 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       occ 6.25%）/ No Eligible 78.87% / Compute 15.97% / L2 41.41% / DRAM 3.53% ⇒
       **低 occupancy + 延迟受限**（同 MLA `D=512`）。见 `docs/03` §99、`docs/08` §5.85；
       原始输出 `src/fp8/fa_bwd_fp8_o76_d256_*`、`src/fa_bwd_o76_d256_baseline_fp16bf16.out.txt`。
+      → **后续已完成（O84，第一百七十九轮）：`D=256` 主 kernel 默认切 wgmma**（SW128 布局更紧凑
+      ⇒ 首次 **2 CTA/SM**、main 1.15–1.29×、指令 −7.4%，见「当前进度 第一百七十九轮」/`docs/03` §107）。
+      `D=256` 的 4D-TMA 仍未做（留 backlog）。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
@@ -3180,7 +3183,21 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百七十八轮）**：**O83——F3b①「GEMM3/4 真 m64」三条路资源核算收口（负结果）+
+> **最新（第一百七十九轮）**：**O84——fp8 `head_dim=256` 主 kernel 默认切 wgmma（正结果，默认）**。
+> 落实 O76 的「下一步候选 ②」前半：fp8 SW128 数据通路 helper 本就支持 `HD` 为 128 的整数倍
+> （`SBO=(HD/128)*1024`），真正的锁是一条保守 `static_assert`；放宽到 `HD==128||256`、host
+> `D==256` 接到 `launch_bwd_main<256,64,32,false,true>`（wgmma，非 TMA）即可。**4 个 D=256 case
+> main 1.145–1.289× / total 1.176–1.270×**；ncu 证 `D=256` 的 wgmma SW128 布局 smem
+> 117,760→**115,712B ⇒ 首次 2 CTA/SM**（warps_active 6.25→11.78%）、指令 −7.4%、SASS 有 QGMMA、
+> `red` 不变。数值同量级、单/两文件 gate 6.676e-6 OK、`docs/04` 已同步。见 `docs/03` §107、
+> `docs/08` §5.93。
+> **下一步候选**：① 把 `D=256` 的 Q/dO/K/V 也接 **4D-TMA**（`NCH=HD/128=2` 个 box，参考
+> `lse_mma_kernel_bal_tma` 的 HD=512 分块）——继续减 L2 搬运；② 继续降 `D=256` smem 冲
+> **3 CTA/SM**；③ F4b/F6/F3b 的剩余（工作划分减 `red`）仍受本卡寄存器/smem 硬墙锁定，
+> 见「阻塞」，正结果只剩「换卡」或「256/384 线程多 warpgroup KV-owner」。
+> 见 `docs/03` §107、`docs/08` §5.93；原始输出 `src/fp8/fa_bwd_fp8_o84_*`。
+>
+> **（第一百七十八轮）**：**O83——F3b①「GEMM3/4 真 m64」三条路资源核算收口（负结果）+
 > `red` 成本分解**。默认路径一行未改。① 最新 ncu 证默认 fp8 `kvtma` main 是 **L2 79.26%/
 > `red` 114.52M 扇区=80%/DRAM 4.41%/张量核 11.15% 空转** ⇒ F3b 换 wgmma 对 `red` 一字不减、
 > 张量核非瓶颈。②「真 m64」三形式（配对两 tile +4KB⇒2 CTA/SM；转置 GEMM⇒red 取向翻转；
@@ -7454,6 +7471,28 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       `src/fp8/fa_bwd_fp8_o83_ncu_main_s4096.out.txt`、`..._o83_baseline_s4096.out.txt`、
       `..._o83_redstore_s4096.out.txt`。
 
+- 2026-09-30（第一百七十九轮）：**O84——fp8 `head_dim=256` 主 kernel 默认切 wgmma
+  （正结果，默认）**。落实 O76 的「下一步候选 ②」（`D=256` 的 fp8 main 接 wgmma/TMA）的前半。
+  - **发现**：fp8 SW128 K-major helper（`sw128_off_fp8`/`sw128_k32_addr`/`make_desc_sw128_fp8`、
+    `wgmma_mn32_issue`/`wgmma_qkt64_fp8`）**本就按 `SBO=(HD/128)*1024`、`s<HD/32` 编写**，
+    `HD=256` 的 canonical 布局 `[row/8][2 k-blocks][8][128]` 与描述符逐字相容；真正的锁只是
+    device 里一条保守的 `static_assert(!WGMMA || HD==128)`。
+  - **改动**：`static_assert` 放宽到 `HD==128||256`；host 把 `D==256` 分派接到
+    `launch_bwd_main<256,64,32,false,true>`（`WGMMA=true`，仍 cp.async 载入、非 TMA），加 CLI
+    `--d256wgm=0/1` 同 binary A/B。**只动 `D==256`，D=128/512 一行未改**；单/两文件 device 逐字同步。
+  - **性能（4 个 D=256 case 同 binary A/B，event iters=50）**：main **1.145×（S1024H8 causal）/
+    1.289×（S2048H8 causal）/1.272×（S1024H8 full）/1.211×（GQA h16kv4）**、total
+    **1.176/1.270/1.220/1.214×**。数值与 mma 版同量级（max_abs 差 ≲1e-3）、与 O76 记录一致
+    （causal 2.633/2.797/3.572e-1、full 5.012/5.569/4.044e-2、GQA 2.477/4.412/6.152e-1）。
+  - **ncu（S1024H8 causal）**：`D=256` mma smem **117,760B（1 CTA/SM）** → wgmma SW128
+    **115,712B（≤116,224B ⇒ 2 CTA/SM）**，warps_active 6.25%→**11.78%**；`smsp__inst_executed`
+    49.72M→**46.01M（−7.4%）**；SASS **16×QGMMA+192×HMMA+92×LDSM**（mma 版无 QGMMA）；
+    `lts red` 13.37M 一字不变 ⇒ 收益 = **跨过 2 CTA/SM 门槛 + 指令路径**（墙仍是 L2 red）。
+  - 单/两文件 gate worst **6.676e-6** OK；`--ci --dtype fp8`（定长 16 + 变长）全绿、`docs/04`
+    auto 表已同步（D=256 4 行，变化仅 fp8 原子次序噪声）。见 `docs/03` §107、`docs/08` §5.93；
+    原始输出 `src/fp8/fa_bwd_fp8_o84_d256_wgmma_ab.out.txt`、`..._o84_ncu_d256_s1024.out.txt`、
+    `..._o84_d256_onefile.out.txt`。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
@@ -7546,7 +7585,9 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     reduce 421→370µs、DRAM 78%→92.5%）。**
 - fp8：对比「只量化 dO」vs「dO 和 P 都量化」的精度/性能权衡。
 - **[ ] fp16/bf16 的 `head_dim=256`（O76 的 dtype 泛化，留 backlog）**：fp8 已于 **O76** 支持
-  `D=256`（host-only、device 未改）；fp16/bf16 的 `fa_bwd_{fp16,bf16}_mma_main.cu` 有 ~80–90 处
+  `D=256`（host-only、device 未改），并已于 **O84（第 179 轮）**默认切到 **wgmma**（`D=256`
+  首次 2 CTA/SM、main 1.15–1.29×，见「当前进度 第一百七十九轮」）；fp16/bf16 的
+  `fa_bwd_{fp16,bf16}_mma_main.cu` 有 ~80–90 处
   `D==128/512` 的 wg2/wgmma4/cluster 分派，需为 256 选 `BM/BN/几何`（或复用一个通用 mma 分支），
   工作量明显大于 fp8。**注意**：`harness/fa_bwd_bench.py` 的 `REQUESTED_SHAPES` 暂不含 256，
   否则 `dump --requested` 会给 fp16/bf16 也产出 D=256 case 让 CI 报「不支持 256」；用

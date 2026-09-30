@@ -9420,3 +9420,85 @@ F7（多 owner 撞 255 regs）同源。真要 GEMM3/4 wgmma 化，只能**换卡
 **原始输出**：`src/fp8/fa_bwd_fp8_o83_ncu_main_s4096.out.txt`（ncu）、
 `src/fp8/fa_bwd_fp8_o83_baseline_s4096.out.txt`（timing+数值）、
 `src/fp8/fa_bwd_fp8_o83_redstore_s4096.out.txt`（`FA_RED_STORE` A/B）。
+
+## 107. O84（第一百七十九轮）：fp8 `head_dim=256` 主 kernel 默认切 **wgmma** —— 正结果，默认
+
+### 107.1 动机与现状
+
+O76（第 171 轮）把 fp8 反向的 `head_dim` 覆盖补到 **256**，但当时 host 明确让 `D=256`
+走 **非 wgmma 的 mma 主 kernel**（`launch_bwd_main<256,64,32,false,false,...>`），注释写
+「无 fp8 wgmma——它只做 HD=128」。原因是 device 里有一条保守的编译期锁：
+
+```cpp
+static_assert(!WGMMA || (HD == 128), "WGMMA 主 kernel 目前只做 HD=128");
+```
+
+而 O76 自己在「下一步」里就点名了这条路：**「`D=256` 的 fp8 main 接 wgmma/TMA（受 fp8
+wgmma 只做 HD=128 / SW128 atom 的 HD 约束）」**。本轮落实它——先只做 **wgmma（非 TMA）**。
+
+**关键事实：fp8 的 SW128 K-major 数据通路 helper 本就支持 `HD` 为 128 的整数倍。**
+`sw128_off_fp8(row,k,K)` 布局是 `[row/8][k/128][8][128]`（atom 1024B），描述符
+`SBO=(K/128)*1024`、k32 步进 `sw128_k32_addr = (s>>2)*1024 + (s&3)*32`。当 `K=HD=256` 时：
+- canonical 布局 = `[row/8][2 k-blocks][8][128]`，row-group 跨步 = `2*1024 = 2048 = SBO`；
+- 第 2 个 128-block 的基址偏移 = `+1024`，恰是 `sw128_k32_addr` 的 `(s>>2)*1024`（s=4..7）。
+
+`wgmma_mn32_issue`（GEMM1/2）与 `wgmma_qkt64_fp8`（LSE）的 K 循环都写的是 `s < HD/32`，
+天然对 `HD=256` 正确。**所以本轮 device 侧只放开了那条 `static_assert`（改为
+`HD==128 || HD==256`），host 把 `D=256` 的分派接到 `launch_bwd_main<256,64,32,false,true>`
+（`WGMMA=true`，仍走 cp.async 载入，非 TMA），加 CLI `--d256wgm=0/1` 供同 binary A/B。**
+
+### 107.2 四个 D=256 case 的同 binary A/B（两文件版，Hopper 构建，event iters=50）
+
+| case | main wgmma | main mma | main × | total wgmma | total mma | total × | vs ref max_abs（wgmma） |
+|---|---|---|---|---|---|---|---|
+| S1024 H8 causal | 0.2450 ms | 0.2806 ms | **1.145×** | 0.3064 ms | 0.3603 ms | **1.176×** | 2.633e-1 / 2.797e-1 / 3.572e-1 |
+| S2048 H8 causal | 0.7667 ms | 0.9883 ms | **1.289×** | 0.8891 ms | 1.1289 ms | **1.270×** | 2.227e-1 / 2.839e-1 / 3.586e-1 |
+| S1024 H8 full | 0.3489 ms | 0.4438 ms | **1.272×** | 0.4524 ms | 0.5518 ms | **1.220×** | 5.012e-2 / 5.569e-2 / 4.044e-2 |
+| S1024 H16 **GQA kv4** | 0.4537 ms | 0.5496 ms | **1.211×** | 0.5443 ms | 0.6606 ms | **1.214×** | 2.477e-1 / 4.412e-1 / 6.152e-1 |
+
+**数值**：`wgmma vs mma` 的 max_abs 差均在 fp8 原子次序噪声内（≲1e-3）；与 O76 记录的
+mma 结果同量级（causal 2.630/2.795/3.589e-1、full 4.972/5.571/4.092e-2、GQA 2.477/4.455/6.157e-1）。
+**单/两文件一致性**（`--ci --dtype fp8` 的 gate）：16 个定长 case worst `6.676e-6` OK，
+`docs/04` 内嵌表 `--check` OK（198 行）。
+
+### 107.3 ncu：为什么能快（S1024 H8 causal）
+
+| | `--d256wgm=1`（wgmma） | `--d256wgm=0`（mma） |
+|---|---|---|
+| Duration | **261.9 µs** | 329.6 µs |
+| `launch__occupancy_limit_shared_mem` | **2 CTA/SM** | 1 CTA/SM |
+| `launch__registers_per_thread` | 238 | 254 |
+| `sm__warps_active` | **11.78%** | 6.25% |
+| `smsp__inst_executed` | **46.01 M** | 49.72 M |
+| `lts__throughput` | 51.61% | 41.11% |
+| `lts red / read`（扇区） | 13.37M / 1.69M | 13.37M / 1.80M |
+
+**两条机制**：
+1. **SW128 布局更紧凑跨过 2 CTA/SM 门槛**：`D=256` 的 mma 动态 smem = **117,760B**
+   （`232448/117760 = 1.97 ⇒ 1 CTA/SM`）；wgmma 的 SW128 布局 = **115,712B**
+   （`≤116,224B ⇒ 2 CTA/SM`）。warps_active 翻倍是本轮最大收益来源。
+2. **指令路径**：`smsp__inst_executed` −7.4%；SASS 直方图 **16×QGMMA + 192×HMMA + 92×LDSM**
+   （mma 版 `0×QGMMA + 256×HMMA + 124×LDSM`）⇒ GEMM1/2 从 `HMMA+LDSM` 换成 `QGMMA`。
+   `lts red` 一字不变（工作划分没动，符合 O67/O83「red 由贡献 CTA 数决定」）。
+
+`sm__pipe_tensor_cycles_active` 仍只 ~7%、`red` 仍是头号 L2 项 ⇒ 与 D=128 一样，**D=256 的
+墙仍是 L2 `red` + 延迟**；wgmma 的收益主要来自「顺手把 occupancy 抬到 2 CTA/SM」。
+
+### 107.4 默认路径与回归
+
+- `-DFA_WGMMA`（Hopper）构建下 `D=256` 定长默认走 wgmma；`--d256wgm=0` 退回 mma，
+  `-arch=sm_90`（无 `-DFA_WGMMA`）构建自动退化 mma（`#ifdef` 门控）。
+- **D=128 / D=512 一行未改**：`static_assert` 放宽对已实例化的 `HD=128` 无影响；host 只改
+  `D==256` 分支。`--ci --dtype fp8`（定长 16 case + 变长）全绿、`docs/04` `--check` OK。
+- 单/两文件 device 逐字同步（`scripts/sync_onefile_device.py`）。
+
+### 107.5 剩余（D=256）
+
+`D=256` 仍未上 **4D-TMA**（Q/dO/K/V 仍 cp.async 载入）；且 `smem=115.7KB` 只够 2 CTA/SM。
+后续可选：① 把 Q/dO/K/V 也接 4D-TMA（需 `NCH=HD/128=2` 个 box，参考 O74 的
+`lse_mma_kernel_bal_tma` HD=512 分块）；② 继续降 smem 冲 3 CTA/SM。二者都属 F6/F3b 同源
+的「减 L2 搬运/提 occupancy」方向。
+
+**原始输出**：`src/fp8/fa_bwd_fp8_o84_d256_wgmma_ab.out.txt`（4 case × wgmma/mma A/B）、
+`src/fp8/fa_bwd_fp8_o84_ncu_d256_s1024.out.txt`（ncu + SASS 直方图）、
+`src/fp8/fa_bwd_fp8_o84_d256_onefile.out.txt`（单文件版）。

@@ -1802,3 +1802,27 @@ smem 冲突 + 低 occ
   跨头合并会使 `dqacc` ×`(H/Hkv)` 撞寄存器墙（仅 GQA/MQA 有效、MHA 零收益）。
 - 默认路径一行未改（`FA_RED_STORE` 默认 0、单/两文件同步），数值 vs ref **逐位不变**
   （2.635/2.644/3.216e-1）。详见 `docs/03` §106；原始输出 `src/fp8/fa_bwd_fp8_o83_*`。
+
+### 5.93 第 179 轮（O84）：fp8 **`head_dim=256` 主 kernel 默认切 wgmma**（正结果/默认）
+
+- **承接**：O76（第 171 轮）把 fp8 反向的 `head_dim` 覆盖补到 **256**，但当时 host 明确让
+  `D=256` 走 **非 wgmma 的 mma 主 kernel**，并在「下一步」里点名「D=256 的 fp8 main 接
+  wgmma/TMA（受 fp8 wgmma 只做 HD=128 的约束）」。本轮落实 **wgmma（非 TMA）那半**。
+- **发现**：fp8 的 SW128 K-major helper（`sw128_off_fp8`/`sw128_k32_addr`/
+  `make_desc_sw128_fp8`、`wgmma_mn32_issue`/`wgmma_qkt64_fp8`）**本就按 `SBO=(HD/128)*1024`、
+  `s < HD/32` 编写**，`HD=256` 的 canonical 布局 `[row/8][2 k-blocks][8][128]` 与描述符
+  逐字相容。真正的锁只是一条保守的 `static_assert(!WGMMA || HD==128)`。
+- **改了什么**：把 `static_assert` 放宽到 `HD==128||256`（device）；host 把 `D=256` 分派接到
+  `launch_bwd_main<256,64,32,false,true>`（`WGMMA=true`，仍 cp.async 载入），加
+  `--d256wgm=0/1` 同 binary A/B。**只动 `D==256`，D=128/512 一行未改**（单/两文件逐字同步）。
+- **性能（4 个 D=256 case 同 binary A/B，event iters=50）**：main **1.145×（S1024 causal）/
+  1.289×（S2048 causal）/1.272×（S1024 full）/1.211×（GQA kv4）**，total 同量级
+  （1.176/1.270/1.220/1.214×）。数值与 mma 版同量级（差 ≲1e-3）、与 O76 记录一致。
+- **ncu（S1024 causal）**：`D=256` mma 动态 smem **117,760B（1 CTA/SM）** → wgmma SW128
+  **115,712B（≤116,224B ⇒ 2 CTA/SM）**，warps_active 6.25%→**11.78%**；`smsp__inst_executed`
+  49.72M→**46.01M（−7.4%）**；SASS **16×QGMMA + 192×HMMA + 92×LDSM**（mma 版无 QGMMA）；
+  `lts red` 一字不变（工作划分没动）。⇒ 收益 = **跨过 2 CTA/SM 门槛 + 指令路径**。
+- 单/两文件 gate worst **6.676e-6** OK、`docs/04` auto 表已同步（D=256 行 +fp8 次序噪声）。
+  `D=256` 仍未上 4D-TMA（留 backlog）。详见 `docs/03` §107；原始输出
+  `src/fp8/fa_bwd_fp8_o84_d256_wgmma_ab.out.txt`、`..._o84_ncu_d256_s1024.out.txt`、
+  `..._o84_d256_onefile.out.txt`。

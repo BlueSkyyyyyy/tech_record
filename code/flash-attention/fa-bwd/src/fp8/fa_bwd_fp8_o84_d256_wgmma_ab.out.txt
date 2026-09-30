@@ -1,0 +1,63 @@
+### O84（第 179 轮）：fp8 head_dim=256 主 kernel 默认切 wgmma —— 4 个 D=256 case 同 binary A/B
+### 两文件版 fa_bwd_fp8_main（Hopper 构建 -DFA_WGMMA -DFA_TMA）；--d256wgm=1(wgmma) vs 0(mma)
+
+==================== b1_s1024_h8_d256_causal_fp8  ====================
+---- d256wgm=1 ----
+[timing] total(quant+pre+main+cvt) 0.3064 ms  28.04 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0274 ms | preprocess 0.0274 ms | main 0.2450 ms | convert 0.0065 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.633e-01  max_rel=1.052e+02
+  dk   vs ref: max_abs=2.797e-01  max_rel=6.114e+01
+  dv   vs ref: max_abs=3.572e-01  max_rel=1.189e+02
+[compare] ours vs TE FP8
+---- d256wgm=0 ----
+[timing] total(quant+pre+main+cvt) 0.3603 ms  23.84 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0274 ms | preprocess 0.0273 ms | main 0.2806 ms | convert 0.0250 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.630e-01  max_rel=1.049e+02
+  dk   vs ref: max_abs=2.795e-01  max_rel=6.095e+01
+  dv   vs ref: max_abs=3.589e-01  max_rel=1.184e+02
+[compare] ours vs TE FP8
+==================== b1_s2048_h8_d256_causal_fp8  ====================
+---- d256wgm=1 ----
+[timing] total(quant+pre+main+cvt) 0.8891 ms  38.64 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0526 ms | preprocess 0.0733 ms | main 0.7667 ms | convert -0.0035 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.227e-01  max_rel=1.471e+02
+  dk   vs ref: max_abs=2.839e-01  max_rel=8.667e+01
+  dv   vs ref: max_abs=3.586e-01  max_rel=1.324e+02
+[compare] ours vs TE FP8
+---- d256wgm=0 ----
+[timing] total(quant+pre+main+cvt) 1.1289 ms  30.44 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0526 ms | preprocess 0.0724 ms | main 0.9883 ms | convert 0.0157 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.220e-01  max_rel=1.444e+02
+  dk   vs ref: max_abs=2.835e-01  max_rel=8.652e+01
+  dv   vs ref: max_abs=3.584e-01  max_rel=1.328e+02
+[compare] ours vs TE FP8
+==================== b1_s1024_h8_d256_full_fp8 --full ====================
+---- d256wgm=1 ----
+[timing] total(quant+pre+main+cvt) 0.4524 ms  18.99 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0273 ms | preprocess 0.0623 ms | main 0.3489 ms | convert 0.0138 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=5.012e-02  max_rel=1.766e+01
+  dk   vs ref: max_abs=5.569e-02  max_rel=1.500e+01
+  dv   vs ref: max_abs=4.044e-02  max_rel=1.473e+01
+[compare] ours vs TE FP8
+---- d256wgm=0 ----
+[timing] total(quant+pre+main+cvt) 0.5518 ms  15.57 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0274 ms | preprocess 0.0619 ms | main 0.4438 ms | convert 0.0187 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=4.972e-02  max_rel=1.770e+01
+  dk   vs ref: max_abs=5.571e-02  max_rel=1.569e+01
+  dv   vs ref: max_abs=4.092e-02  max_rel=1.488e+01
+[compare] ours vs TE FP8
+==================== b1_s1024_h16_d256_kv4_causal_fp8  ====================
+---- d256wgm=1 ----
+[timing] total(quant+pre+main+cvt) 0.5443 ms  31.56 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0350 ms | preprocess 0.0482 ms | main 0.4537 ms | convert 0.0074 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.477e-01  max_rel=1.026e+02
+  dk   vs ref: max_abs=4.412e-01  max_rel=1.082e+02
+  dv   vs ref: max_abs=6.152e-01  max_rel=6.992e+01
+[compare] ours vs TE FP8
+---- d256wgm=0 ----
+[timing] total(quant+pre+main+cvt) 0.6606 ms  26.01 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0350 ms | preprocess 0.0482 ms | main 0.5496 ms | convert 0.0279 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.477e-01  max_rel=1.027e+02
+  dk   vs ref: max_abs=4.455e-01  max_rel=1.078e+02
+  dv   vs ref: max_abs=6.157e-01  max_rel=7.000e+01
+[compare] ours vs TE FP8

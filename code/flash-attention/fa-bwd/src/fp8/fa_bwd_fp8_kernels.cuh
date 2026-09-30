@@ -2817,7 +2817,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   constexpr int KS_SZ = WGMMA ? Cfg::ks_sw_bytes : BN * ASLD;
   // O41：K/V TMA 时 K 双缓冲（2 个 SW128 stage），V 单缓冲。O51：KVPIPE（mma）同样 K 双缓冲。
   constexpr int KSTAGES = (KVTMA || KVPIPE) ? 2 : 1;
-  static_assert(!WGMMA || (HD == 128), "WGMMA 主 kernel 目前只做 HD=128");
+  // O84（第 179 轮）：放开 WGMMA 主 kernel 到 HD=256。SW128 K-major helper（`sw128_off_fp8`
+  //   /`sw128_k32_addr`/`make_desc_sw128_fp8`）与 `wgmma_mn32_issue`/`wgmma_qkt64_fp8` 本就按
+  //   `SBO=(HD/128)*1024`、k32 步进 `(s>>2)*1024+(s&3)*32` 编写，HD 为 128 的整数倍即正确
+  //   （K=256 的 canonical 布局 [row/8][2 k-blocks][8][128]，rg 跨步 = 2048 = SBO）。此前只
+  //   在 HD=128 实例化过（D=256 走 mma 后端），故加锁保守。GEMM3/4/5 仍 mma（见 kWg5/kWg34）。
+  static_assert(!WGMMA || (HD == 128 || HD == 256), "WGMMA 主 kernel 只做 HD=128/256");
   static_assert(!KVTMA || (TMA && WGMMA && HD == 128),
                 "K/V TMA 只在 Q/dO-TMA + WGMMA + HD=128 路径");
   // O51：K/V cp.async 回填流水只用于 mma 后端（非 WGMMA/TMA），目前实例化于 MLA（HD=512）。
