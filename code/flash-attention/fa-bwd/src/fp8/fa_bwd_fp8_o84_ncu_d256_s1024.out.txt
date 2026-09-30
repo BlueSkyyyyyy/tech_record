@@ -1,0 +1,39 @@
+### O84（第 179 轮）：fp8 head_dim=256 主 kernel 上 wgmma —— ncu A/B（S=1024 H8 causal）
+### --d256wgm=1 (wgmma) vs 0 (mma)；kernel=fa_bwd_fp8_mma_kernel
+=== d256wgm=1 ===
+    Metric Name                                                                   Metric Unit Metric Value
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %         4.45
+    gpu__time_duration.sum                                                                 us       261.89
+    launch__occupancy_limit_shared_mem                                                  block            2
+    launch__registers_per_thread                                              register/thread          238
+    lts__t_sectors_op_read.sum                                                         sector      1689330
+    lts__t_sectors_op_red.sum                                                          sector     13369344
+    lts__t_sectors_op_write.sum                                                        sector         3099
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        51.61
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                          %         7.30
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        11.78
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         1.59
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.34
+    smsp__inst_executed.sum                                                              inst     46008464
+=== d256wgm=0 ===
+    Metric Name                                                                   Metric Unit Metric Value
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %         3.50
+    gpu__time_duration.sum                                                                 us       329.60
+    launch__occupancy_limit_shared_mem                                                  block            1
+    launch__registers_per_thread                                              register/thread          254
+    lts__t_sectors_op_read.sum                                                         sector      1796551
+    lts__t_sectors_op_red.sum                                                          sector     13369344
+    lts__t_sectors_op_write.sum                                                        sector         2967
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        41.11
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                          %         7.08
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %         6.25
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         0.78
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.20
+    smsp__inst_executed.sum                                                              inst     49722640
+
+### SASS 直方图（ncu --page source --print-source sass；source-line 出现次数）
+### d256wgm=1 (wgmma): 16 QGMMA + 192 HMMA + 92 LDSM  → GEMM1/2 走 wgmma
+### d256wgm=0 (mma)  :  0 QGMMA + 256 HMMA + 124 LDSM
+### 结论：wgmma 版把 GEMM1/2 从 HMMA+LDSM 换成 QGMMA（指令数 49.72M→46.01M，−7.4%），
+###   且 SW128 布局让 smem 从 117,760B（1 CTA/SM）降到 115,712B（≤116,224B ⇒ 2 CTA/SM），
+###   warps_active 6.25%→11.78% ⇒ main 1.16–1.31×（本卡 D=256 首次跨 2 CTA/SM）。

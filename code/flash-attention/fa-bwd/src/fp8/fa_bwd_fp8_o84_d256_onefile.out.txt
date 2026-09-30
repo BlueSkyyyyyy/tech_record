@@ -1,0 +1,8 @@
+### O84（第 179 轮）：单文件版 fp8 D=256 默认 wgmma —— S1024 H8 causal
+
+smem = 117760 bytes (115.0 KB); lse smem = 35328 bytes (34.5 KB)
+[timing] total(quant+pre+main+cvt) 0.3055 ms  28.11 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0275 ms | preprocess 0.0280 ms | main 0.2449 ms | convert 0.0052 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.633e-01  max_rel=1.052e+02
+  dk   vs ref: max_abs=2.797e-01  max_rel=6.114e+01
+  dv   vs ref: max_abs=3.572e-01  max_rel=1.189e+02

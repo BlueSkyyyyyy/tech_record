@@ -2777,7 +2777,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   constexpr int KS_SZ = WGMMA ? Cfg::ks_sw_bytes : BN * ASLD;
   // O41：K/V TMA 时 K 双缓冲（2 个 SW128 stage），V 单缓冲。O51：KVPIPE（mma）同样 K 双缓冲。
   constexpr int KSTAGES = (KVTMA || KVPIPE) ? 2 : 1;
-  static_assert(!WGMMA || (HD == 128), "WGMMA 主 kernel 目前只做 HD=128");
+  // O84（第 179 轮）：放开 WGMMA 主 kernel 到 HD=256。SW128 K-major helper（`sw128_off_fp8`
+  //   /`sw128_k32_addr`/`make_desc_sw128_fp8`）与 `wgmma_mn32_issue`/`wgmma_qkt64_fp8` 本就按
+  //   `SBO=(HD/128)*1024`、k32 步进 `(s>>2)*1024+(s&3)*32` 编写，HD 为 128 的整数倍即正确
+  //   （K=256 的 canonical 布局 [row/8][2 k-blocks][8][128]，rg 跨步 = 2048 = SBO）。此前只
+  //   在 HD=128 实例化过（D=256 走 mma 后端），故加锁保守。GEMM3/4/5 仍 mma（见 kWg5/kWg34）。
+  static_assert(!WGMMA || (HD == 128 || HD == 256), "WGMMA 主 kernel 只做 HD=128/256");
   static_assert(!KVTMA || (TMA && WGMMA && HD == 128),
                 "K/V TMA 只在 Q/dO-TMA + WGMMA + HD=128 路径");
   // O51：K/V cp.async 回填流水只用于 mma 后端（非 WGMMA/TMA），目前实例化于 MLA（HD=512）。
@@ -6418,6 +6423,9 @@ int main(int argc, char** argv) {
   // O41：主 kernel 的 K/V 是否也用 4D-TMA（roadmap「下一步候选 ①」）。仅 `-DFA_WGMMA -DFA_TMA`
   //   构建、D==128；-1=自动（默认开，对齐 O37），0/1 由 `--kvtma=` 强制。
   int kv_tma = -1;
+  // O84（第 179 轮）：head_dim=256 的主 kernel 是否走 Hopper wgmma（GEMM1/2 换 wgmma、Q/dO/K/V
+  //   存 SW128；非 TMA）。-1=自动（`-DFA_WGMMA` 构建默认开），0/1 由 `--d256wgm=` 强制（A/B）。
+  int d256wgm_opt = -1;
   // O38：LSE 的 K 维 split 数（仅 D=128/causal/TMA 生效）。0=自动（目标 grid*split≈2048、上限 8），
   //   >=1 直接指定（`--lsesplit=N` 走「切片 partial + merge」；`--lsesplit=1` 退回 O32、保持历史逐位）。
   int lse_split = 0;
@@ -6488,6 +6496,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--qdtma=", 0) == 0) qd_tma = atoi(a.c_str() + 8);
     else if (a.rfind("--kvtma=", 0) == 0) kv_tma = atoi(a.c_str() + 8);
     else if (a == "--kvtma") kv_tma = 1;
+    else if (a.rfind("--d256wgm=", 0) == 0) d256wgm_opt = atoi(a.c_str() + 10);
+    else if (a == "--d256wgm") d256wgm_opt = 1;
     else if (a == "--wg2") wg2 = 1;
     else if (a == "--wg2wgmma") wg2wgmma = 1;
     else if (a == "--bn64") bn64_opt = 1;
@@ -6974,7 +6984,18 @@ int main(int argc, char** argv) {
   };
   auto run_main = [&]() {
     // O76（第 171 轮）：head_dim=256 走 mma 主 kernel（无 fp8 wgmma/TMA）。
+    // O84（第 179 轮）：放开 WGMMA——`-DFA_WGMMA` 构建下 D=256 默认走 wgmma 主 kernel
+    //   （GEMM1/2 wgmma + SW128；K/V/dO 仍 cp.async 载入，非 TMA）。`--d256wgm=0` 退回 mma A/B。
     if (D == 256) {
+#ifdef FA_WGMMA
+      const bool d256_wg = (d256wgm_opt < 0) ? true : (d256wgm_opt != 0);
+      if (d256_wg) {
+        launch_bwd_main<256, 64, 32, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
+                                                  d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                                  d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+        return;
+      }
+#endif
       launch_bwd_main<256, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
                                           d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
                                           scale, (int)causal, ksplit);

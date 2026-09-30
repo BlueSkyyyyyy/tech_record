@@ -1610,6 +1610,11 @@ int main(int argc, char** argv) {
   // O41：主 kernel 的 K/V 是否也用 4D-TMA（roadmap「下一步候选 ①」）。仅 `-DFA_WGMMA -DFA_TMA`
   //   构建、D==128；-1=自动（默认开，对齐 O37），0/1 由 `--kvtma=` 强制。
   int kv_tma = -1;
+  // O84（第 179 轮）：head_dim=256 的主 kernel 是否走 Hopper wgmma（GEMM1/2 换 wgmma、Q/dO/K/V
+  //   存 SW128；非 TMA，走 cp.async 载入）。-1=自动（`-DFA_WGMMA` 构建默认开、否则退化 mma），
+  //   0/1 由 `--d256wgm=` 强制（同 binary A/B）。数值与 mma 版同量级（只改 GEMM1/2 指令路径 +
+  //   跨 CTA red 次序）。
+  int d256wgm_opt = -1;
   // O38：LSE 的 K 维 split 数（仅 D=128/causal/TMA 生效）。0=自动（目标 grid*split≈2048、上限 8），
   //   >=1 直接指定（`--lsesplit=N` 走「切片 partial + merge」；`--lsesplit=1` 退回 O32、保持历史逐位）。
   int lse_split = 0;
@@ -1695,6 +1700,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--qdtma=", 0) == 0) qd_tma = atoi(a.c_str() + 8);
     else if (a.rfind("--kvtma=", 0) == 0) kv_tma = atoi(a.c_str() + 8);
     else if (a == "--kvtma") kv_tma = 1;
+    else if (a.rfind("--d256wgm=", 0) == 0) d256wgm_opt = atoi(a.c_str() + 10);
+    else if (a == "--d256wgm") d256wgm_opt = 1;
     else if (a == "--wg2") wg2 = 1;
     else if (a == "--wg2wgmma") wg2wgmma = 1;
     else if (a == "--bn64") bn64_opt = 1;
@@ -2189,7 +2196,18 @@ int main(int argc, char** argv) {
     // O76（第 171 轮）：head_dim=256 走 mma 主 kernel（无 fp8 wgmma——它只做 HD=128；
     //   无 4D-TMA）。HD/NTW=2 ⇒ 不启用寄存器 dQ 累加（kRegDq 由 device 自动关）。
     //   与 D=512（MLA）同款 4-warp/128 线程几何；数值路径与其它 HD 逐字同源。
+    // O84（第 179 轮）：放开 WGMMA——`-DFA_WGMMA` 构建下 D=256 默认走 wgmma 主 kernel
+    //   （GEMM1/2 wgmma + SW128；K/V/dO 仍 cp.async 载入，非 TMA）。`--d256wgm=0` 退回 mma A/B。
     if (D == 256) {
+#ifdef FA_WGMMA
+      const bool d256_wg = (d256wgm_opt < 0) ? true : (d256wgm_opt != 0);
+      if (d256_wg) {
+        launch_bwd_main<256, 64, 32, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
+                                                  d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                                  d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+        return;
+      }
+#endif
       launch_bwd_main<256, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
                                           d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
                                           scale, (int)causal, ksplit);
