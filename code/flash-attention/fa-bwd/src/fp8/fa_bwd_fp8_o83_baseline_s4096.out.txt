@@ -1,0 +1,14 @@
+### O83（第 178 轮，F3b① 收口）：fp8 默认 kvtma main —— 基线 timing + 数值
+### 构建：-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda
+### shape: b1_s4096_h16_d128_causal_fp8 (S=4096 H=16 D=128 causal)
+
+[timing] total(quant+pre+main+cvt) 1.7140 ms  80.19 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1059 ms | preprocess 0.1223 ms | main 1.4857 ms | convert 0.0001 ms (cvt_on=0, qfuse=1, dfuse=1)
+[O9c-2 A/B] main mma(regdq=1) 1.9294 ms | wgmma(m64n32) 1.8230 ms (1.058x) | max_abs(wg-vs-mma) dq/dk/dv=3.985e-02/1.500e-01/2.576e-02
+[O41 A/B] main Q/dO-TMA 1.7274 ms | Q/dO/K/V-TMA 1.5050 ms (1.148x) | max_abs(kvtma-vs-qdtma) dq/dk/dv=2.183e-04/7.153e-07/9.537e-07
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+  dq   vs te_dq: max_abs=4.525e-01  max_rel=1.051e+02
+  dk   vs te_dk: max_abs=5.325e-01  max_rel=1.158e+02
+  dv   vs te_dv: max_abs=6.806e-01  max_rel=1.078e+02

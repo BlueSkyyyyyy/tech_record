@@ -1,0 +1,7 @@
+### O83：red 成本分解（诊断，数值错误）—— FA_RED_STORE=1 把跨 CTA 原子换成 plain store
+### 目的：分离「原子语义」与「epilogue 写流量」；只改时序语义，写地址/字节不变
+### shape: b1_s4096_h16_d128_causal_fp8
+### 对照 O42（短路整个 dK/dV epilogue）main 1.60->0.94ms（天花板 1.70x）
+
+[timing] total(quant+pre+main+cvt) 1.6039 ms  85.69 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1056 ms | preprocess 0.1219 ms | main 1.3681 ms | convert 0.0084 ms (cvt_on=0, qfuse=1, dfuse=1)

@@ -198,6 +198,17 @@
 
 ## 阻塞
 
+- **F3b①「GEMM3/4 真 m64」按资源账收口（第一百七十八轮 O83）。** 默认 fp8 `kvtma` main
+  ncu = L2 **79.26%**、`red` **114.52M 扇区 = L2 的 80%**、DRAM 4.41%、**张量核只有 11.15% 忙**。
+  「真 m64」（不零填充）三形式在本卡 3 CTA/SM（上限 77,482B/170 regs）下**全部不可行**：
+  (a) **配对两 KV tile**（A=[Pᵀ₀;Pᵀ₁]）=+4KB ⇒ 78.8KB > 77.5 掉 **2 CTA/SM**（p160/O21 已证负）；
+  (b) **转置 GEMM** dVᵀ=dOᵀ·P（M=HD=128，smem 中性）但输出取向翻转 ⇒ `acc`（行=d、列=j）写
+  `dv[j][d]`，相邻 lane 写 stride=`Hkv·HD`=512B 的不同行 ⇒ `red` 扇区每 warp-inst 8→32；
+  (c) **BN=64** `Ps/Ss`→17.7KB 各 + `K/V`/`dS2` 翻倍 ⇒ smem≈120KB ⇒ **1 CTA/SM**。⇒ 与 F6/F7/p160
+  同源的「放大 tile/多 owner 撞寄存器/smem 文件」墙。且**张量核空转** ⇒ 即便做成 wgmma 也无收益
+  （wgmma 对 `red` 一字不减）。诊断 `FA_RED_STORE` 证 `red` 成本 ~8% 在原子语义、~29% 是写流量本身，
+  与归约机制无关。**剩余只有换卡 / 256-384 线程多 warpgroup KV-owner**。见 `docs/03` §106。
+
 - **修正（第一百七十四轮 O79）：下面「F6 / O9c-2b」里「fp8 wgmma 无转置操作数 ⇒ GEMM3/4/5
   只能 mma」的论据只针对 `SS_TN`。** TE SASS 证明其用 **`RS_TN`（A 在寄存器）**跑 GEMM3/4/5；
   冒烟已证 `ldmatrix.x4` 的 A 片段可直接喂 `wgmma.m64n32k32` RS（max_abs=0）。**真阻塞改述为**：
@@ -3116,10 +3127,23 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       见「当前进度 第一百七十六轮」）。**O82（第 177 轮）把 GEMM3/4 也试了 wgmma RS（M 零填充
       到 m64），判决为负结果（0.964×）、默认关**（指令 −7.3%、L1/L2 降，但 No Eligible 升、Duration
       反升——L2 `red` bound + 延迟 bound，零填充 2× 无用功 + 转置 + wgmma wait 抵消收益，见「当前进度
-      第一百七十七轮」）。**剩余 = GEMM3/4 的「真 m64」= BN=64 + 多 warpgroup 摊累加器（256/384 线程，
-      撞 255 regs，p160 判负，需先解寄存器账）+ WS 完整化**（见 O80）。② WS 完整化（producer/consumer
-      + 更深 mbarrier 流水，重叠 `wait`，降 L1/L2 压力）仍待做。
+       第一百七十七轮」）。**剩余 = GEMM3/4 的「真 m64」= BN=64 + 多 warpgroup 摊累加器（256/384 线程，
+       撞 255 regs，p160 判负，需先解寄存器账）+ WS 完整化**（见 O80）。② WS 完整化（producer/consumer
+       + 更深 mbarrier 流水，重叠 `wait`，降 L1/L2 压力）仍待做。
+       → **O83（第 178 轮）「真 m64」三条路资源核算收口（负结果，默认一行未改）**：最新 ncu 证默认
+       main 为 L2 **79.26%**、`red` **114.52M 扇区 = L2 的 80%**、DRAM 4.41%、**张量核 11.15% 空转**
+       ⇒ F3b 换 wgmma 对 `red` 一字不减且张量核非瓶颈。「真 m64」三形式——(a) 配对两 KV tile
+       （A=[Pᵀ₀;Pᵀ₁]）需 +4KB ⇒ 掉 2 CTA/SM；(b) 转置 GEMM（M=HD=128，smem 中性）但输出取向翻转
+       ⇒ red 扇区每 warp-inst 8→32；(c) BN=64 smem≈120KB ⇒ 1 CTA/SM——**全部停不到 3 CTA/SM**，
+       **candidate ① 按资源账收口**（与 F6/F7/p160 同源）。诊断 `FA_RED_STORE`（plain store 替原子）
+       证 `red` 成本 ~8% 在原子语义、~29% 是写流量本身 ⇒ 与归约机制无关。见 `docs/03` §106、
+       `docs/08` §5.92。
 - [ ] **F4b**：fp8 非 det 默认的 dK/dV 归约再优化（当前 red 仍是 74% L2）。
+      → **O83（第 178 轮）分解**：`red` 114.5M 扇区中 ~29% 是写流量本身、~8% 是原子 RMW；
+      O42/O67/O83 三证「与归约指令/宽度/机制无关」⇒ 唯一杠杆=减少贡献 CTA 数（工作划分），
+      本卡受寄存器/smem 墙锁定（见「阻塞」）。**新 backlog**：GQA/MQA 跨 Q 头本地累加 dK/dV
+      可把 `red` ÷`(H/Hkv)`（MQA 最多 ÷64），但 dQ 的 `kRegdQ` 需「一 CTA 一 Q 头」跨 nt 保持、
+      跨头合并会 ×`dqacc` 撞寄存器墙（仅 GQA/MQA 有效）。
 - [x] **O79**（第一百七十四轮，**路径正结果 / 代码未改默认**）**TE SASS 发现 QGMMA `RS_TN` +
   fp8 wgmma RS 冒烟**——用 `ncu --page source --print-source sass` 对照 TE 反向：TE
   `..._flash_bprop_wgmma_f8_..._64x64x128`（384 线程/grid=64）= **16×QGMMA + 0×HMMA + 24×STSM
@@ -3156,7 +3180,18 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百七十七轮）**：**O82——fp8 GEMM3/4（dV/dK）切到 wgmma RS（M 零填充 m64），
+> **最新（第一百七十八轮）**：**O83——F3b①「GEMM3/4 真 m64」三条路资源核算收口（负结果）+
+> `red` 成本分解**。默认路径一行未改。① 最新 ncu 证默认 fp8 `kvtma` main 是 **L2 79.26%/
+> `red` 114.52M 扇区=80%/DRAM 4.41%/张量核 11.15% 空转** ⇒ F3b 换 wgmma 对 `red` 一字不减、
+> 张量核非瓶颈。②「真 m64」三形式（配对两 tile +4KB⇒2 CTA/SM；转置 GEMM⇒red 取向翻转；
+> BN=64⇒1 CTA/SM）**全部停不到 3 CTA/SM** ⇒ candidate ① 按资源账收口。③ 诊断 `FA_RED_STORE`
+> 证 `red` 成本 ~8% 在原子语义、~29% 是写流量本身（与机制无关）。见 `docs/03` §106、`docs/08` §5.92。
+> **下一步候选**：① **能产正结果的只剩「换卡」或「256/384 线程多 warpgroup KV-owner」**
+> （把 `dVacc/dKacc/dqacc` 摊到更多线程；O80 已破 fp8 wgmma 转置，但工程量大、仍受同一 L2 墙）；
+> ② **GQA/MQA 跨 Q 头本地累加 dK/dV**（`red` ÷`(H/Hkv)`，MQA 最多 ÷64）——受 dQ `kRegdQ`
+> 寄存器墙阻塞（新 backlog）；③ 换形状/dtype 覆盖（如 `D=256` dtype 化到 fp16/bf16）。
+>
+> **（第一百七十七轮）**：**O82——fp8 GEMM3/4（dV/dK）切到 wgmma RS（M 零填充 m64），
 > 负结果、默认关**。承接 O81，把剩余两条 HMMA GEMM（GEMM3 dV / GEMM4 dK，M=BN=32）也换 wgmma RS；
 > 因 M<64 且 BN 32→64 在本卡已判负（p160/O21），改把 A 的 M 零填充到 64（warp 2/3 A 置 0、
 > 输出行 32–63 丢弃）。新 helper：**紧凑 no-swizzle K-major**（O81 的 `inter_k_off_fp8` 的 LBO=8
@@ -7392,6 +7427,32 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       `docs/03` §105、`docs/08` §5.91、`docs/04` §49；原始输出
       `src/fp8/fa_bwd_fp8_o82_ab_wg34_{0,1}_s4096.out.txt`、
       `src/fp8/fa_bwd_fp8_o82_ncu_wg34_{0,1}_s4096.out.txt`。
+
+- 2026-09-30（第一百七十八轮）：**O83——F3b①「GEMM3/4 真 m64」三条路资源核算收口（负结果）+
+  `red` 成本分解**。承接 O82 的「下一步候选 ①」。默认路径一行未改，本轮做三件事：
+    - **默认 main 的 bound 再钉（ncu，S4096 H16 causal，`--only=kvtma`，168 regs/3 CTA/SM）**：
+      L2 **79.26%**、`red` **114,524,160 扇区（占 L2 总扇区 143M 的 80%）**、`read` 28.05M、
+      `write` 0.39M、DRAM **4.41%**、`sm__pipe_tensor_cycles_active` **11.15%**、`sm__issue_active`
+      46.66%、warps active 18.33%；stall `short_scoreboard 1.81 + wait 1.55`。⇒ **red-bound +
+      张量核空转**——这本身即说明「把 GEMM3/4 换 wgmma」不可能有收益（wgmma 对 `red` 一字不减）。
+    - **「真 m64」三形式资源核算**（3 CTA/SM 上限 77,482B / 170 regs）：(a) **配对两 KV tile**
+      （A=[Pᵀ₀;Pᵀ₁]，M=64）需 +4,096B 存被配对 tile 的 `Ap`/`dS3` ⇒ 78.8KB > 77.5 ⇒ **掉 2 CTA/SM**；
+      (b) **转置 GEMM** dVᵀ=dOᵀ[128][BM]·P（M=HD=128 自然、复用 Qp/dOp 缓冲、smem 中性）但**输出取向
+      翻转** ⇒ `acc`（行=d、列=j）写 `dv[j][d]`，相邻 lane 写 stride=`Hkv·HD`=512B 的**不同行** ⇒
+      `red` 扇区每 warp-inst 8→32、red 墙恶化；(c) **BN=64**（自然 m64）`Ps`/`Ss`=`[64][BN+5]`（各
+      17.7KB）+`Ks`/`Vs`/`dS2` 翻倍 ⇒ smem≈120KB ⇒ **1 CTA/SM**。⇒ **三条全部停不到 3 CTA/SM，
+      candidate ① 按资源账收口**（与 F6/F7/p160 同源）。
+    - **`red` 成本分解（新诊断 `FA_RED_STORE`，plain store 替原子，数值错误、仅诊断）**：默认原子
+      main **1.493ms** vs plain store **1.368ms（1.09×）** ⇒ 原子 RMW ≈ 0.125ms(~8%)；对照 O42
+      短路整个 epilogue **0.94ms** ⇒ **写流量本身 ≈ 0.43ms(~29%)**。⇒ `red` 大头是写流量、与归约
+      指令/宽度/机制无关（复证 O42/O67），**唯一杠杆仍是减少贡献 CTA 数（工作划分）**。
+    - **新观察（backlog）**：GQA/MQA 下同 KV 头被 `H/Hkv` 个 Q 头共享，跨 Q 头本地累加 dK/dV 再
+      原子可把 `red` ÷`(H/Hkv)`（MQA 最多 ÷64）；**阻塞**：dQ 的 `kRegDq` 寄存器累加需「一 CTA 一
+      Q 头」跨 nt 保持，跨头合并会 ×`dqacc` 撞寄存器墙（仅 GQA/MQA 有效、MHA 零收益）。
+    - **数值**：默认构建 vs ref **逐位不变**（2.635/2.644/3.216e-1）、vs TE 同量级；单/两文件
+      device 逐字同步（同步 `red_add2`）。见 `docs/03` §106、`docs/08` §5.92；原始输出
+      `src/fp8/fa_bwd_fp8_o83_ncu_main_s4096.out.txt`、`..._o83_baseline_s4096.out.txt`、
+      `..._o83_redstore_s4096.out.txt`。
 
 ## 灵感 / backlog
 

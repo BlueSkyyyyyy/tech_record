@@ -1777,3 +1777,28 @@ smem 冲突 + 低 occ
   （自然 m64），需先解寄存器账（256/384 线程摊累加器，与 F7/p160 同源）。默认一行未改。
   详见 `docs/03` §105、`docs/04` §49；原始输出 `src/fp8/fa_bwd_fp8_o82_ab_wg34_{0,1}_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o82_ncu_wg34_{0,1}_s4096.out.txt`。
+
+### 5.92 第 178 轮（O83）：fp8 **GEMM3/4「真 m64」三条路资源核算收口** + **`red` 成本分解**（负结果/收口）
+
+- **承接**：O82 的「下一步候选 ①：真 m64 化（BN=64 + 多 warpgroup 摊累加器）」。
+- **默认 main 的 bound 再钉（ncu，S4096 H16 causal）**：L2 **79.26%**、其中 `red` **114.52M
+  扇区 = L2 总扇区的 80%**、`read` 28.05M、`write` 0.39M；DRAM **4.41%**；
+  `sm__pipe_tensor_cycles_active` **11.15%**、`sm__issue_active` 46.66%、warps active 18.33%
+  （3 CTA/SM/168 regs）；stall `short_scoreboard 1.81 + wait 1.55`。⇒ **red-bound + 张量核空转**，
+  这本身即说明「F3b 把 GEMM3/4 换 wgmma」不可能有收益（wgmma 对 `red` 一字不减、张量核非瓶颈）。
+- **「真 m64」三形式资源核算（3 CTA/SM 上限 77,482B / 170 regs）**：
+  (a) **配对两 KV tile**（A=[Pᵀ₀;Pᵀ₁]）需 +4KB 存被配对 tile 的 `Ap`/`dS3` ⇒ 78.8KB > 77.5 ⇒
+  **掉 2 CTA/SM**（p160/O21 已证负）；(b) **转置 GEMM** dVᵀ=dOᵀ·P（M=HD=128，smem 中性）但
+  **输出取向翻转** ⇒ `acc`（行=d、列=j）写 `dv[j][d]`，相邻 lane 写 stride=`Hkv·HD`=512B 的
+  不同行 ⇒ red 扇区每 warp-inst 8→32、**red 墙恶化**；(c) **BN=64** 令 `Ps`/`Ss`=`[64][BN+5]`
+  （各 17.7KB）+`K/V`/`dS2` 翻倍 ⇒ smem≈120KB ⇒ **1 CTA/SM**。⇒ **三条全部停不到 3 CTA/SM，
+  candidate ① 按资源账收口**（与 F6/F7/p160 同源）。
+- **`red` 成本分解（新诊断 `FA_RED_STORE`，plain store 替原子，数值错误仅诊断）**：默认原子
+  main **1.493ms** vs plain store **1.368ms（1.09×）** ⇒ 原子 RMW ≈ 0.125ms(~8%)；对照 O42
+  短路整个 epilogue **0.94ms** ⇒ **写流量本身 ≈ 0.43ms(~29%)**。⇒ `red` 大头是写流量、
+  与归约指令/宽度/机制无关（复证 O42/O67），**唯一杠杆仍是减少贡献 CTA 数（工作划分）**。
+- **新观察（backlog）**：GQA/MQA 下同 KV 头被 `H/Hkv` 个 Q 头共享，跨 Q 头本地累加 dK/dV 再原子
+  可把 `red` ÷`(H/Hkv)`（MQA 最多 ÷64）；**阻塞**：dQ 的 `kRegDq` 寄存器累加需「一 CTA 一 Q 头」，
+  跨头合并会使 `dqacc` ×`(H/Hkv)` 撞寄存器墙（仅 GQA/MQA 有效、MHA 零收益）。
+- 默认路径一行未改（`FA_RED_STORE` 默认 0、单/两文件同步），数值 vs ref **逐位不变**
+  （2.635/2.644/3.216e-1）。详见 `docs/03` §106；原始输出 `src/fp8/fa_bwd_fp8_o83_*`。

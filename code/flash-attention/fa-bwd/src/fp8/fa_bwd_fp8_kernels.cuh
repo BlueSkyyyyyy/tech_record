@@ -778,7 +778,14 @@ __device__ __forceinline__ void wgmma_qkt64_fp8_chunked(const char* Qsw, const c
 // 于是把两个标量 `atomicAdd` 打包成一次 `atomicAdd(float2*)`（sm_90 支持），
 // **red 请求数与 L2 扇区数各减半**，数值等价（硬件对 v2 的两个 f32 仍各自原子累加）。
 __device__ __forceinline__ void red_add2(float* p, float a, float b) {
+#if FA_RED_STORE
+  // O83（第 178 轮）：**诊断专用**——把跨 CTA 原子归约换成 plain store（last-writer-wins，
+  //   数值错误），用来分离「原子语义的成本」与「epilogue 写流量本身的成本」。
+  //   `FA_RED_STORE=1` 只改时序语义；写地址/字节数与原子版相同。默认 0。
+  *reinterpret_cast<float2*>(p) = make_float2(a, b);
+#else
   atomicAdd(reinterpret_cast<float2*>(p), make_float2(a, b));
+#endif
 }
 
 // O67（第 147 轮）：把 dK/dV 的 `red_add2`（8B `red.global.add.v2.f32`）再提升到
