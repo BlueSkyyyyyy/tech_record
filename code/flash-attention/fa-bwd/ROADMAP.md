@@ -3113,9 +3113,12 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       max_abs=0 PASS**（SASS：8×QGMMA + 0×HMMA + PRMT，74 regs）。**O81（第 176 轮）已把
       GEMM5（dQ，M=BM=64）落进真实 `fp8_mma_body` 默认开启**（B=Kᵀ 用 no-swizzle INTERLEAVE
       描述符、从 SW128 K stage 转置、复用 Kp 缓冲；S4096 main 1.051×、total 1.038×、red 不变，
-      见「当前进度 第一百七十六轮」）。**剩余 = GEMM3/4（dV/dK，M=BN=32<64）需 BN=64（撞 255 regs，
-      p160 判负，需先解寄存器账）+ WS 完整化**（见 O80）。② WS 完整化（producer/consumer + 更深
-      mbarrier 流水，重叠 `wait`，降 L1/L2 压力）仍待做。
+      见「当前进度 第一百七十六轮」）。**O82（第 177 轮）把 GEMM3/4 也试了 wgmma RS（M 零填充
+      到 m64），判决为负结果（0.964×）、默认关**（指令 −7.3%、L1/L2 降，但 No Eligible 升、Duration
+      反升——L2 `red` bound + 延迟 bound，零填充 2× 无用功 + 转置 + wgmma wait 抵消收益，见「当前进度
+      第一百七十七轮」）。**剩余 = GEMM3/4 的「真 m64」= BN=64 + 多 warpgroup 摊累加器（256/384 线程，
+      撞 255 regs，p160 判负，需先解寄存器账）+ WS 完整化**（见 O80）。② WS 完整化（producer/consumer
+      + 更深 mbarrier 流水，重叠 `wait`，降 L1/L2 压力）仍待做。
 - [ ] **F4b**：fp8 非 det 默认的 dK/dV 归约再优化（当前 red 仍是 74% L2）。
 - [x] **O79**（第一百七十四轮，**路径正结果 / 代码未改默认**）**TE SASS 发现 QGMMA `RS_TN` +
   fp8 wgmma RS 冒烟**——用 `ncu --page source --print-source sass` 对照 TE 反向：TE
@@ -3153,7 +3156,22 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百七十六轮）**：**O81——fp8 GEMM5（dQ）切到 wgmma RS，正结果、默认开启；F3b 主体
+> **最新（第一百七十七轮）**：**O82——fp8 GEMM3/4（dV/dK）切到 wgmma RS（M 零填充 m64），
+> 负结果、默认关**。承接 O81，把剩余两条 HMMA GEMM（GEMM3 dV / GEMM4 dK，M=BN=32）也换 wgmma RS；
+> 因 M<64 且 BN 32→64 在本卡已判负（p160/O21），改把 A 的 M 零填充到 64（warp 2/3 A 置 0、
+> 输出行 32–63 丢弃）。新 helper：**紧凑 no-swizzle K-major**（O81 的 `inter_k_off_fp8` 的 LBO=8
+> 只对 K≤32 无冲突，K=BM=64 需「K-core 主序、C 行连续 16B」布局）+ `wgmma_m64n32k32_rs_e4e5`；
+> Q/dO 转置复用 Qp/dOp 缓冲（smem 零增长）。**数值正确**（S4096 relL2 dq/dk/dv 8.149/8.263/6.489%，
+> 与 `FA_WGMMA34=0` 打印相同；A/B dq 逐位、dk/dv ~1e-3）。**性能 0.964×（负）**：main
+> 1.4738→1.5289ms、total 1.7119→1.7694ms；ncu inst −7.3%、L1/TEX 74.4→67.6%、L2 78.8→75.5%，
+> 但 No Eligible 53.2→58.2%、Duration 反升 ⇒ **L2 `red` bound（75%，wgmma 不减 `red`）+ 延迟
+> bound**，零填充 2× 无用功 + 转置 + wgmma wait 抵消收益。默认关（`-DFA_WGMMA34=1` 复现）。
+> **下一步候选**：① **真 m64 化 = BN=64 + 多 warpgroup 摊累加器**（256/384 线程，对标 TE 384）
+> ——先解寄存器账（与 F7/p160 同源）；② WS 完整化（producer/consumer + 更深 mbarrier 流水）；
+> ③ L2 `red` 仍是唯一真杠杆（F7 全判死、F6 不可行，受本卡寄存器/smem 硬墙锁定，见「阻塞」）。
+> 见 `docs/03` §105、`docs/08` §5.91、`docs/04` §49；原始输出 `src/fp8/fa_bwd_fp8_o82_*`。
+>
+> **（第一百七十六轮）**：**O81——fp8 GEMM5（dQ）切到 wgmma RS，正结果、默认开启；F3b 主体
 > 第一块落地**。把默认 fp8 main 里唯一满足 wgmma 最小 m64 的 GEMM5（dQ，M=BM=64）从 `mma.m16n8k32`
 > 换到 `wgmma.m64n32k32` RS（A=dS2 寄存器；B=Kᵀ 用 **no-swizzle INTERLEAVE 描述符**、由**从 SW128
 > K stage 逐字节转置**得到、**复用 Kp 缓冲 ⇒ smem 零增长**）。数据通路由新冒烟
@@ -7344,6 +7362,36 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       O78 overlap 块也未加守卫）。把 `g_l2promo` 定义移到守卫外、给 overlap 块加守卫后，
       默认 `scripts/run.sh`（`ARCH=sm_90`，mma 路径）现可编译、S512 数值与历史一致
       （2.426e-1/2.975e-1/3.735e-1）。默认 Hopper 路径逐位不变、`--ci --dtype fp8 --hopper` 仍全绿。
+
+- 2026-09-30（第一百七十七轮）：**F3b 主体续（O82）：fp8 GEMM3/4（dV/dK）切到 wgmma RS
+  （M 零填充到 m64）—— 负结果，默认关**。承接 O81，把默认 fp8 Hopper main 剩下的
+  GEMM3(dV)/GEMM4(dK)（M=BN=32 < wgmma 最小 m64）也换 wgmma RS。因 BN 32→64 在本卡为负
+  （p160/O21），改走**零填充**：A 的 M 补到 64、warp 2/3 的 A 置 0、输出行 32–63 丢弃。
+    - **新 helper**：① **紧凑 no-swizzle K-major**（`noswz_k_off_c` + `transpose_sw128_to_noswz<R,C>`）——
+      O81 的 `inter_k_off_fp8` 的 LBO=8 只对 K≤32 无冲突（K=64 时 `8*(k>>4)` 第 4 位与 `SBO*(r>>3)`
+      撞），本轮 K=BM=64 用「K-core 主序、块内 C 行连续 16B」，描述符 `(lbo_u=C, sbo_u=8)`，
+      k-step `s*2*C*16`、n-tile `nn*512`；② `wgmma_m64n32k32_rs_e4e5`（GEMM3），GEMM4 复用
+      O81 的 `rs_e5e4`。Q/dO 的转置复用 Qp/dOp 缓冲（**smem 零增长**）；累加器按 **2 个 n-tile
+      一组**（`acc[2][16]`）压低寄存器。
+    - **落地**（`-DFA_WGMMA34`，**默认 0**）：门控 `FA_WGMMA34 && WGMMA && KVTMA && HD==128 &&
+      BN==32 && !DET && !DQONLY && !ILV34 && !BULKRED && !R4`；默认路径一行未改、数值逐位不变。
+    - **数值（正确）**：S4096 vs fp32 ref relL2 dq/dk/dv **8.149/8.263/6.489%**、max_abs
+      **2.635e-1/2.641e-1/3.218e-1**，与 `FA_WGMMA34=0` **打印完全相同**（护栏内）；A/B
+      wg34_1 vs wg34_0 dq 1.19e-7（逐位）、dk 9.13e-4/dv 2.28e-3（red 原子次序）。`--ci --dtype
+      fp8 --hopper` 全绿（gate 7.629e-6、`--check docs/04` OK 198 行）。
+    - **性能（负结果，同 binary A/B，S4096 H16 causal）**：main **1.4738→1.5289ms（0.964×）**、
+      total **1.7119→1.7694ms（0.967×，80.28→77.67 TF）**。ncu（同 session）：Executed Instructions
+      **641.86M→594.83M（−7.3%）**、L1/TEX **74.44→67.55%**、L2 **78.81→75.45%**、Compute
+      45.06→40.30%、regs 168→164，**但 No Eligible 53.22→58.19%、Duration 反升 1.49→1.56ms**。
+      ⇒ 本 kernel 是 **L2 `red` bound（~75%，wgmma 对 `red` 一字不减）+ 延迟 bound**；零填充的
+      2× 无用张量功 + Q/dO 转置 + wgmma `wait` 抵消了指令路径收益。**F3b 的「无 BN=64 时上
+      GEMM3/4 wgmma」子路线判负**；真做仍须 **BN=64（自然 m64）**，先解寄存器账（256/384 线程
+      摊累加器，与 F7/p160 同源）。
+    - **下一步**：F3b 剩余 = ① **BN=64 + 多 warpgroup 摊累加器**（256/384 线程，对标 TE 384）让
+      GEMM3/4 走真 m64 wgmma；② WS 完整化（producer/consumer + 更深 mbarrier 流水）。见
+      `docs/03` §105、`docs/08` §5.91、`docs/04` §49；原始输出
+      `src/fp8/fa_bwd_fp8_o82_ab_wg34_{0,1}_s4096.out.txt`、
+      `src/fp8/fa_bwd_fp8_o82_ncu_wg34_{0,1}_s4096.out.txt`。
 
 ## 灵感 / backlog
 

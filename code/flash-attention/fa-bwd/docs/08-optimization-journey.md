@@ -1755,3 +1755,25 @@ smem 冲突 + 低 occ
   p160 已判负，需先解寄存器账）；WS 完整化。详见 `docs/03` §104；原始输出
   `src/fp8/fa_bwd_fp8_wgmma345_smoke.out.txt`、`src/fp8/fa_bwd_fp8_o81_ab_wgmma5_{0,1}_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o81_ncu_wgmma5_{0,1}_s4096.out.txt`、`src/fp8/fa_bwd_fp8_o81_ci_fp8.out.txt`。
+
+### 5.91 第 177 轮（O82）：fp8 **GEMM3/4（dV/dK）切到 wgmma RS（M 零填充 m64）**（负结果，默认关）
+
+- **承接**：O81 把 GEMM5（dQ，M=BM=64）落进 wgmma RS。本轮把默认 fp8 Hopper main 剩下的
+  GEMM3(dV)/GEMM4(dK)（M=BN=32）也换 wgmma RS，把 F3b「全 GEMM wgmma」再推一块。
+- **障碍/绕法**：M=32 < wgmma 最小 m64。TE 用 BN=64；p160/O21 已判 BN 32→64 在本卡为负
+  （累加器翻倍撞 255 regs）。故用**零填充**：A 的 M 补到 64，warp 2/3 的 A 置 0、输出行 32–63 丢弃。
+- **新 helper**：① 紧凑 no-swizzle K-major（`noswz_k_off_c` + `transpose_sw128_to_noswz<R,C>`，
+  K=BM=64；O81 的 `inter_k_off_fp8` 的 LBO=8 只对 K≤32 无冲突，K=64 第 4 位会撞）；②
+  `wgmma_m64n32k32_rs_e4e5`（GEMM3），GEMM4 复用 O81 的 `rs_e5e4`。Q/dO 转置复用 Qp/dOp
+  缓冲（smem 零增长）；累加器按 2 个 n-tile 一组（`acc[2][16]`）压低寄存器。
+- **数值（正确）**：S4096 vs fp32 ref relL2 8.149/8.263/6.489%、max_abs 2.635/2.641/3.218e-1，
+  与 `FA_WGMMA34=0` **逐位打印相同**；A/B dq 1.19e-7、dk 9.13e-4、dv 2.28e-3。
+  `--ci --dtype fp8 --hopper` 全绿（gate 7.629e-6、docs check OK）。
+- **性能（负结果，同 binary A/B，S4096）**：main **1.4738→1.5289ms（0.964×）**、total
+  **1.7119→1.7694ms（0.967×）**。ncu：inst **−7.3%**、L1/TEX 74.4→67.6%、L2 78.8→75.5%、Compute
+  45.1→40.3%，但 **No Eligible 53.2→58.2%**、Duration 反升。⇒ **L2 `red` bound（75%，wgmma 不减
+  `red`）+ 延迟 bound**；零填充的 2× 无用张量功 + Q/dO 转置 + wgmma wait 抵消了指令路径收益。
+- **判决**：F3b「无 BN=64 时上 GEMM3/4 wgmma」子路线判负。真做 GEMM3/4 wgmma 仍须 **BN=64**
+  （自然 m64），需先解寄存器账（256/384 线程摊累加器，与 F7/p160 同源）。默认一行未改。
+  详见 `docs/03` §105、`docs/04` §49；原始输出 `src/fp8/fa_bwd_fp8_o82_ab_wg34_{0,1}_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o82_ncu_wg34_{0,1}_s4096.out.txt`。

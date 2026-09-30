@@ -9286,3 +9286,59 @@ GEMM3/4（dV/dK，M=BN=32）与 GEMM5（dQ，M=BM=64）仍是 `HMMA.16816 + LDSM
   `src/fp8/fa_bwd_fp8_o81_ab_wgmma5_{0,1}_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o81_ncu_wgmma5_{0,1}_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o81_ci_fp8.out.txt`、`src/fp8/fa_bwd_fp8_o81_baseline_fa3_te.out.txt`。
+
+## 105. F3b 主体续（第 177 轮，O82）：fp8 **GEMM3/4（dV/dK）切到 wgmma RS** —— **负结果，默认关**
+
+**动机**：O81 已把 GEMM5（dQ）落进 wgmma RS，默认 fp8 Hopper main 的五个 GEMM 里只剩 GEMM3(dV)
+与 GEMM4(dK) 还是 `HMMA.16816 + LDSM`。本轮把这两条也换到 wgmma RS，把 F3b 的「全 GEMM wgmma」
+再往前推一块。
+
+**障碍与绕法**：GEMM3/4 的 M=BN=32 < wgmma 最小 m64。TE 的解法是 BN=64（自然 m64），但 p160/O21
+已判 BN 32→64 在本卡为负（累加器翻倍撞 255 regs）。本轮改走**零填充**：A 的 M 维补到 64，warp 2/3
+的 A 寄存器置 0、输出行 32–63 丢弃——只多花一半张量核周期（tensor 利用率 <20%，非瓶颈）。
+
+**新数据通路（两个可复用 helper）**：
+1. `noswz_k_off_c(d,m,C) = (m>>4)*(C*16) + d*16 + (m&15)` + `transpose_sw128_to_noswz<R,C>`：
+   把 SW128 源 [R][C] 逐字节转置成**紧凑 no-swizzle K-major** [C][R]。与 O81 的
+   `inter_k_off_fp8(...,16,8)` 不同——后者 LBO=8 只对 **K≤32** 无冲突（K=64 时 `8*(k>>4)`
+   的第 4 位与 `SBO*(r>>3)` 撞），故本轮 K=BM=64 用「K-core 主序、块内 C 行连续 16B」的新布局，
+   描述符 `make_desc_noswz_fp8(addr, /*lbo_u=*/C, /*sbo_u=*/8)`；k-step `s` 前进 `s*2*C*16`
+   字节、n-tile `nn` 前进 `nn*4*8*16=nn*512` 字节。
+2. `wgmma_m64n32k32_rs_e4e5`：新增 e4m3×e5m2 的 RS_TN 封装（GEMM3 A=Ap e4m3、B=dOᵀ e5m2）；
+   GEMM4（A=dS3 e5m2、B=Qᵀ e4m3）复用 O81 的 `wgmma_m64n32k32_rs_e5e4`。
+
+**落地（`-DFA_WGMMA34`，默认 0）**：门控
+`FA_WGMMA34 && WGMMA && KVTMA && HD==128 && BN==32 && !DET && !DQONLY && !ILV34 && !BULKRED && !R4`。
+Q/dO 的配对缓冲（Qp/dOp）在 kWg34 时改存 Qᵀ/dOᵀ 紧凑 no-swizzle（8192B ≤ qp_bytes 8704B，
+**smem 零增长**），由 `transpose_sw128_to_noswz<BM,HD>` 从 SW128 Qs/dOs 重建 + `fence.proxy.async`；
+A=Ap/dS3 走 `ldmatrix.x4`（K=64 分两个 k-step）；累加器按 **2 个 n-tile 一组**（`acc[2][16]`），
+两组各一次 wait 以压低寄存器；epilogue 只在 wid<2（有效 32 行）做 `red_add2`。
+
+**数值（正确）**：S4096 vs fp32 ref relL2 dq/dk/dv = **8.149 / 8.263 / 6.489%**、max_abs
+**2.635e-1 / 2.641e-1 / 3.218e-1**，与 `FA_WGMMA34=0` **打印完全相同**（护栏内）；A/B
+`wg34_1 vs wg34_0` dq max_abs 1.19e-7（逐位）、dk 9.13e-4 / dv 2.28e-3（red 原子次序）。
+S512 = 2.426e-1/2.973e-1/3.726e-1。`--ci --dtype fp8 --hopper` 全绿（gate 7.629e-6、docs check OK 198 行）。
+
+**性能与 ncu（同 binary A/B，S4096 H16 causal）**：
+
+| 口径 | wg34=0（mma GEMM3/4） | wg34=1（wgmma RS M-填充） | 比 |
+|---|---|---|---|
+| event main | 1.4738 ms | 1.5289 ms | **0.964×** |
+| event total | 1.7119 ms / 80.28 TF | 1.7694 ms / 77.67 TF | **0.967×** |
+| ncu Duration | 1.49 ms | 1.56 ms | 1.047×（更慢） |
+| ncu Executed Instructions | 641.86 M | **594.83 M** | **−7.3%** |
+| ncu L1/TEX tput | 74.44% | **67.55%** | −6.9pp |
+| ncu L2 tput | 78.81% | **75.45%** | −3.4pp |
+| ncu Compute (SM) | 45.06% | 40.30% | — |
+| ncu No Eligible | 53.22% | **58.19%** | 延迟 bound 恶化 |
+| ncu regs | 168 | 164 | — |
+
+**判决（负结果，默认关）**：指令路径确实更优（−7.3% inst、L1/L2 吞吐降），但 **Duration 反升**。
+根因：本 kernel 是 **L2 `red` bound（~75%，wgmma 对 `red` 一字不减）+ 延迟 bound**（No Eligible
+升高）——零填充令张量核做 2× 无用功，Q/dO 的逐字节转置与 wgmma `fence/commit/wait` 又加延迟，
+而被省下的 HMMA/LDSM 本就不是瓶颈。⇒ **F3b 的「无 BN=64 时上 GEMM3/4 wgmma」子路线判负**；
+要把 GEMM3/4 真正 wgmma 化仍须 **BN=64（自然 m64）**，而那要先解寄存器账（256/384 线程摊累加器），
+与 F7/p160 同源。默认路径一行未改、数值逐位不变。
+
+**原始输出**：`src/fp8/fa_bwd_fp8_o82_ab_wg34_{0,1}_s4096.out.txt`、
+`src/fp8/fa_bwd_fp8_o82_ncu_wg34_{0,1}_s4096.out.txt`。

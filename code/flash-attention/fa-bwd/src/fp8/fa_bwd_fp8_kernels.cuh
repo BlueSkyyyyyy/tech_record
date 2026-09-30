@@ -100,6 +100,18 @@ static constexpr float kE5M2Max = 57344.0f;
 #define FA_WGMMA5 1
 #endif
 
+// O82（F3b 主体续，第 177 轮）：把 GEMM3(dV)/GEMM4(dK) 从 `mma.m16n8k32` 换成 **wgmma RS**
+//   （A=Ap/dS3 寄存器；B=dOᵀ/Qᵀ 紧凑 no-swizzle 描述符）。这两条 GEMM 的 M=BN=32 < wgmma 最小 m64，
+//   故把 A 的 M 维**零填充到 64**（warp 2/3 的 A 寄存器置 0，其输出行 32–63 丢弃）。
+//   **判决（第 177 轮，负结果）**：S4096 同 binary A/B main 1.4777→1.5494ms（**0.954×**），
+//   虽 instruction −7.3%、L1/TEX 74.4→67.6%、L2 78.8→75.5%，但 Duration 反升——本 kernel 是
+//   **L2 `red` bound（75%，wgmma 一字不减）+ 延迟 bound**（No Eligible 53→58%），零填充使张量核
+//   做 2× 无用功，q/dO 转置与 wgmma wait 又加延迟。⇒ **默认 0**；`-DFA_WGMMA34=1` 复现 A/B。
+//   仅 KVTMA+WGMMA+HD=128+BN=32 非 DET/DQONLY/ILV34/BULKRED/R4 路径生效（数值与 mma 版同量级）。
+#ifndef FA_WGMMA34
+#define FA_WGMMA34 0
+#endif
+
 // O1：preprocess 的 LSE 改用 mma 分块（见下），独立的 tile 常量。
 // 每个 CTA 负责 LBM 行，4 个 warp 各 16 行（wm=wid），沿 N 一次 LBN 列。
 static constexpr int LBM = 64;
@@ -505,6 +517,42 @@ __device__ __forceinline__ void transpose_sw128_to_inter(unsigned char* __restri
   }
 }
 
+// O82：**紧凑 no-swizzle K-major**（`layout_type=0`）通用布局，支持 K=64（`inter_k_off_fp8`
+//   的 LBO=8 编码只对 K≤32 无冲突——K=64 时 8*(k>>4) 的第 4 位会与 SBO*(r>>3) 撞）。
+//   定义 [N=C 行][K=R 列] 的行主序分块：offset(d,m) = (m>>4)*(C*16) + d*16 + (m&15)。
+//   即：K-core（16 元素）为主序、块内 C 行连续 16B。描述符用 `make_desc_noswz_fp8(addr,
+//   /*lbo_u=*/C, /*sbo_u=*/8)`（LBO=core 间 16B 数 = C，SBO=8 行组间 = 8）。
+__device__ __forceinline__ int noswz_k_off_c(int d, int m, int C) {
+  return (m >> 4) * (C * 16) + d * 16 + (m & 15);
+}
+// 从 SW128 源 [R][C]（K-major，C 连续）逐字节转置并写成上面的紧凑 no-swizzle 目标 [C][R]。
+//   R 须为 8 的倍数（K 维，可达 64）；C 须为 64 的倍数（每个 x4.trans 覆盖 64 fp8 列）。4 warp 协作。
+template <int R, int C>
+__device__ __forceinline__ void transpose_sw128_to_noswz(unsigned char* __restrict__ sDst,
+                                                         const unsigned char* __restrict__ sSrc,
+                                                         int wid, int lane) {
+  static_assert(R % 8 == 0 && C % 64 == 0, "transpose_sw128_to_noswz 尺寸约束");
+  const int nblkC = C / 64;
+  const int nwork = (R / 8) * nblkC;
+  for (int w = wid; w < nwork; w += 4) {
+    const int rblk = w / nblkC, cblk = w % nblkC;
+    const int r0 = rblk * 8, c0 = cblk * 64;
+    const int mat = lane >> 3, row = lane & 7;
+    uint32_t reg[4];
+    ldmatrix_x4_trans(smem_u32(sSrc + sw128_off_fp8(r0 + row, c0 + mat * 16, C)), reg);
+    const int p = lane & 3, q = lane >> 2;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const int k = 8 * i + q;
+      const uint32_t word = __byte_perm(reg[i], reg[i] >> 16, 0x5140);
+      const int d0 = c0 + 2 * k, d1 = d0 + 1;
+      const int m = r0 + 2 * p;
+      *reinterpret_cast<uint16_t*>(sDst + noswz_k_off_c(d0, m, C)) = (uint16_t)(word & 0xffffu);
+      *reinterpret_cast<uint16_t*>(sDst + noswz_k_off_c(d1, m, C)) = (uint16_t)(word >> 16);
+    }
+  }
+}
+
 #ifdef FA_WGMMA
 #if defined(__CUDA_ARCH__) && defined(__CUDA_ARCH_FEAT_SM90_ALL)
 #define FA_FP8_HAS_WGMMA 1
@@ -626,6 +674,26 @@ __device__ __forceinline__ void wgmma_m64n32k32_rs_e5e4(float (&d)[16],
   asm volatile(
       "{\n.reg .pred p;\nsetp.ne.b32 p, %21, 0;\n"
       "wgmma.mma_async.sync.aligned.m64n32k32.f32.e5m2.e4m3 "
+      "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15},\n"
+      "{%16,%17,%18,%19}, %20, p, %22, %23;\n}\n"
+      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]),
+        "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]),
+        "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15])
+      : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(db), "r"(1), "n"(1),
+        "n"(1));
+#else
+  (void)a; (void)db;
+  for (int i = 0; i < 16; ++i) d[i] = 0.f;
+#endif
+}
+// O82（F3b 主体续）：**RS_TN e4m3×e5m2**（GEMM3 dV：A=Ap e4m3 寄存器，B=dOᵀ e5m2 描述符）。
+__device__ __forceinline__ void wgmma_m64n32k32_rs_e4e5(float (&d)[16],
+                                                        const uint32_t a[4],
+                                                        uint64_t db) {
+#if FA_FP8_HAS_WGMMA
+  asm volatile(
+      "{\n.reg .pred p;\nsetp.ne.b32 p, %21, 0;\n"
+      "wgmma.mma_async.sync.aligned.m64n32k32.f32.e4m3.e5m2 "
       "{%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15},\n"
       "{%16,%17,%18,%19}, %20, p, %22, %23;\n}\n"
       : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]),
@@ -2783,6 +2851,10 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   //   由编译期总闸 `FA_WGMMA5` 控制（默认 0），`-DFA_WGMMA5=1` 同 binary A/B。
   constexpr bool kWg5 = FA_WGMMA5 && WGMMA && KVTMA && (HD == 128) && (BN == 32) &&
                         !DQONLY && !DET && kRegDq;
+  // O82（F3b 主体续）：GEMM3(dV)/GEMM4(dK) 走 wgmma RS（A 寄存器、M 零填充到 64）。门控同 kWg5，
+  //   另需 !ILV34/BULKRED（这两者与 wgmma epilogue 不兼容）。`-DFA_WGMMA34=0` 同 binary A/B。
+  constexpr bool kWg34 = FA_WGMMA34 && WGMMA && KVTMA && (HD == 128) && (BN == 32) &&
+                         !DQONLY && !DET && !FA_ILV34 && !kBulkRed && !FA_R4;
 
   extern __shared__ __align__(16) char smem[];
   // WGMMA 的 SW128 描述符要求 tile 1024B 对齐（base_offset=0）→ 手动对齐动态 smem 基址
@@ -2919,6 +2991,13 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     }
     __syncthreads();
     const int nd4t = HD / 4;
+    if constexpr (kWg34) {
+      // O82：GEMM3/4 走 wgmma 时，把 Q/dO 从 SW128 逐字节转置成 Qᵀ/dOᵀ 的紧凑 no-swizzle
+      //   K-major（[HD][BM]，K=BM=64），复用 Qp/dOp 的配对缓冲（8192B ≤ qp_bytes 8704B）。
+      transpose_sw128_to_noswz<BM, HD>(reinterpret_cast<unsigned char*>(Qp), Qs, wid, lane);
+      transpose_sw128_to_noswz<BM, HD>(reinterpret_cast<unsigned char*>(dOp), dOs, wid, lane);
+      bulk_reduce_fence();
+    } else {
     for (int u = tid; u < (BM / 2) * nd4t; u += NTH) {
       int rp = u / nd4t, dq = (u % nd4t) * 4;
       uint32_t q0 = *reinterpret_cast<const uint32_t*>(Qs + sw128_off_fp8(rp * 2, dq, HD));
@@ -2931,6 +3010,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       uint32_t* opw = reinterpret_cast<uint32_t*>(dOp + rp * PSLD + dq);
       opw[0] = __byte_perm(o0, o1, 0x5140);
       opw[1] = __byte_perm(o0, o1, 0x7362);
+    }
     }
     if (KVTMA) {
       // O81：GEMM5 走 wgmma 时，从 SW128 K[0] 逐字节转置成 Kᵀ 的 INTERLEAVE K-major。
@@ -3613,6 +3693,114 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
         __syncwarp();
       };
       if constexpr (!DQONLY) {
+      if constexpr (kWg34) {
+#ifdef FA_WGMMA
+        // O82（F3b 主体续）：GEMM3(dV)/GEMM4(dK) 走 wgmma RS。M=BN=32 零填充到 m64——warp 2/3
+        //   的 A 寄存器置 0、其输出行 32–63 丢弃；只多花一半张量核周期（tensor 利用率 <20%）。
+        //   A=Ap/dS3（[BN][QTS]，K=BM=64 分两个 k-step 用 `ldmatrix.x4` 装入）；
+        //   B=dOᵀ/Qᵀ（复用 Qp/dOp 的紧凑 no-swizzle [HD][BM] 缓冲，LBO=HD、SBO=8）。
+        const int arow = (lane & 7) + ((lane >> 3) & 1) * 8;
+        const int acol = (lane >> 4) * 16;
+        const uint32_t baQ = smem_u32(reinterpret_cast<const unsigned char*>(Qp));
+        const uint32_t baO = smem_u32(reinterpret_cast<const unsigned char*>(dOp));
+        // 分两组 n-tile（每组 2 个，acc[2][16]=32 fp32）以压低寄存器/溢出；两组各一次 wait。
+        // ---- GEMM3 dV = Pᵀ·dO : A=Ap (e4m3), B=dOᵀ (e5m2) ----
+        {
+          uint32_t av[2][4];
+          if (wid < 2) {
+            ldmatrix_x4(smem_u32(Ap + (wid * 16 + arow) * QTS + 0 + acol), av[0]);
+            ldmatrix_x4(smem_u32(Ap + (wid * 16 + arow) * QTS + 32 + acol), av[1]);
+          } else {
+#pragma unroll
+            for (int s = 0; s < 2; ++s)
+#pragma unroll
+              for (int i = 0; i < 4; ++i) av[s][i] = 0u;
+          }
+#pragma unroll
+          for (int ng = 0; ng < 2; ++ng) {
+            float acc[2][16];
+#pragma unroll
+            for (int nn = 0; nn < 2; ++nn)
+#pragma unroll
+              for (int i = 0; i < 16; ++i) acc[nn][i] = 0.f;
+            wgmma_fence_fp8();
+#pragma unroll
+            for (int s = 0; s < 2; ++s)
+#pragma unroll
+              for (int nn = 0; nn < 2; ++nn) {
+                uint64_t db = make_desc_noswz_fp8(
+                    baO + (uint32_t)((ng * 2 + nn) * 512 + s * 4096), (uint32_t)HD, 8);
+                wgmma_m64n32k32_rs_e4e5(acc[nn], av[s], db);
+              }
+            wgmma_commit_fp8();
+            wgmma_wait0_fp8();
+            if (wid < 2) {
+#pragma unroll
+              for (int nn = 0; nn < 2; ++nn)
+#pragma unroll
+                for (int j = 0; j < 4; ++j)
+#pragma unroll
+                  for (int q = 0; q < 4; q += 2) {
+                    int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+                    int c = (ng * 2 + nn) * 32 + j * 8 + c2;
+                    int jg = j0 + r;
+                    if (jg < len)
+                      red_add2(dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
+                               acc[nn][j * 4 + q] * sA[r], acc[nn][j * 4 + q + 1] * sA[r]);
+                  }
+            }
+          }
+        }
+        // ---- GEMM4 dK = scale·dSᵀ·Q : A=dS3 (e5m2), B=Qᵀ (e4m3) ----
+        {
+          uint32_t av[2][4];
+          if (wid < 2) {
+            ldmatrix_x4(smem_u32(dS3 + (wid * 16 + arow) * QTS + 0 + acol), av[0]);
+            ldmatrix_x4(smem_u32(dS3 + (wid * 16 + arow) * QTS + 32 + acol), av[1]);
+          } else {
+#pragma unroll
+            for (int s = 0; s < 2; ++s)
+#pragma unroll
+              for (int i = 0; i < 4; ++i) av[s][i] = 0u;
+          }
+#pragma unroll
+          for (int ng = 0; ng < 2; ++ng) {
+            float acc[2][16];
+#pragma unroll
+            for (int nn = 0; nn < 2; ++nn)
+#pragma unroll
+              for (int i = 0; i < 16; ++i) acc[nn][i] = 0.f;
+            wgmma_fence_fp8();
+#pragma unroll
+            for (int s = 0; s < 2; ++s)
+#pragma unroll
+              for (int nn = 0; nn < 2; ++nn) {
+                uint64_t db = make_desc_noswz_fp8(
+                    baQ + (uint32_t)((ng * 2 + nn) * 512 + s * 4096), (uint32_t)HD, 8);
+                wgmma_m64n32k32_rs_e5e4(acc[nn], av[s], db);
+              }
+            wgmma_commit_fp8();
+            wgmma_wait0_fp8();
+            if (wid < 2) {
+#pragma unroll
+              for (int nn = 0; nn < 2; ++nn)
+#pragma unroll
+                for (int j = 0; j < 4; ++j)
+#pragma unroll
+                  for (int q = 0; q < 4; q += 2) {
+                    int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+                    int c = (ng * 2 + nn) * 32 + j * 8 + c2;
+                    int jg = j0 + r;
+                    if (jg < len)
+                      red_add2(dk_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
+                               acc[nn][j * 4 + q] * sds3[r] * scale,
+                               acc[nn][j * 4 + q + 1] * sds3[r] * scale);
+                  }
+            }
+          }
+        }
+#endif
+      } else {
 #if FA_ILV34
       {
         float a3[MTM34][NTM34][4], a4[MTM34][NTM34][4];
@@ -3641,6 +3829,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       }
       if constexpr (kBulkRed) bulk_issue(dk_acc);
 #endif
+      }  // else：kWg34=false 的原 mma GEMM3/4
       }  // if constexpr (!DQONLY)：跳过 GEMM3/4（dV/dK）及其 epilogue
 
       // ---- (5) dQ += scale·dS·K : A=dS2[m][j] (e5m2), B=Kp[j/2][d0+..] (e4m3, ldmatrix.trans) ----
