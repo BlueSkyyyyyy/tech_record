@@ -1,5 +1,5 @@
 === fa_bwd_run.py (P3-3c) 一键跑 ours + 汇总 ===
-cases=77 impls=['twofile', 'singlefile'] iters=20
+cases=77 impls=['twofile', 'singlefile'] iters=5
 [run] bf16 twofile b1_s1024_h16_d128_full_bf16
       (--no-run: 复用已有 npy)
 [run] bf16 singlefile b1_s1024_h16_d128_full_bf16

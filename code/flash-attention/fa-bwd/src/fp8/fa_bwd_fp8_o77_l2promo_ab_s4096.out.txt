@@ -1,0 +1,11 @@
+### F6-③ A/B: 4D-TMA L2 promotion for Q/dO/K/V (O77, 第172轮)
+### shape b1_s4096_h16_d128_causal_fp8, 同 binary 交替, iters=30
+=== l2promo=0 (0=NONE/1=L2_128B/2=L2_256B) ===
+[timing] total(quant+pre+main+cvt) 1.7913 ms  76.73 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1056 ms | preprocess 0.1204 ms | main 1.5533 ms | convert 0.0120 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== l2promo=1 (0=NONE/1=L2_128B/2=L2_256B) ===
+[timing] total(quant+pre+main+cvt) 1.7936 ms  76.63 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1056 ms | preprocess 0.1208 ms | main 1.5524 ms | convert 0.0148 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== l2promo=2 (0=NONE/1=L2_128B/2=L2_256B) ===
+[timing] total(quant+pre+main+cvt) 1.8052 ms  76.13 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1062 ms | preprocess 0.1229 ms | main 1.5691 ms | convert 0.0070 ms (cvt_on=0, qfuse=1, dfuse=1)

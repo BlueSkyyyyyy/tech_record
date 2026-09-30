@@ -1,0 +1,17 @@
+### ksplit 复扫 (O77, 第172轮)：确认 auto=8 仍最优（F6-①「降 ksplit 消 Q/dO 重读」的并行度约束）
+### shape b1_s4096_h16_d128_causal_fp8, iters=30
+=== ksplit=1 ===
+grid main = 64 x 16 x 1  (ksplit=1, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 2.1538 ms  63.81 TFLOPS (bwd FLOPs=4BS^2HD)
+=== ksplit=2 ===
+grid main = 128 x 16 x 1  (ksplit=2, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.9126 ms  71.86 TFLOPS (bwd FLOPs=4BS^2HD)
+=== ksplit=4 ===
+grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.8046 ms  76.16 TFLOPS (bwd FLOPs=4BS^2HD)
+=== ksplit=8 ===
+grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.7899 ms  76.79 TFLOPS (bwd FLOPs=4BS^2HD)
+=== ksplit=16 ===
+grid main = 1024 x 16 x 1  (ksplit=16, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.8730 ms  73.38 TFLOPS (bwd FLOPs=4BS^2HD)
