@@ -1,5 +1,5 @@
 ---
-title: "LeetCode 题解精讲（九）：二叉树基础"
+title: "LeetCode 题解精讲（九）：二叉树（遍历 / 递归 / 层序 / 构造）"
 date: 2026-09-30
 draft: false
 weight: 10
