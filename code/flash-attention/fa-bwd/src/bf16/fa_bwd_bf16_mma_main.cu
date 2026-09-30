@@ -39,6 +39,9 @@
 //   K 用 `cp.async` 16B 双缓冲），对齐 fp8 的 O68/F9（fp16 同步）。默认 1；
 //   `--lsefull=0` 退回 O8 做同 binary A/B。
 static int g_lse_full_opt = 1;
+// O73（第 167 轮）：varlen full D=128 的 LSE 是否走 4D-TMA（对齐定长 O71）。默认 1；
+//   `--lsetmavarlen=0` 退回 O69 的 cp.async 均衡版做同 binary A/B（需 FA_TMA 构建）。
+static int g_lse_tma_varlen = 1;
 
 #if defined(FA_WGMMA) && defined(FA_TMA)
 // O31：为 LSE 的 Q/K 建 4D TMA 描述符（dims={D,S,H,B}，SW128，box={64,64,1,1}）。
@@ -371,6 +374,17 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
   CUDA_CHECK(cudaMemcpy(d_do, doh.data(), nq * sizeof(bf16), cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_o, oh.data(), nq * sizeof(bf16), cudaMemcpyHostToDevice));
 
+  // O73（第 167 轮）：varlen full D=128 的 LSE 走 4D-TMA（对齐定长 O71）。TMA 描述符建在
+  //   packed [T,H,D] 张量上（dims={D,T,H,1}，batch 维恒 0），内核对每个 b 用 cu_seqlens[b] 定界。
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  const bool lse_tma_v = (g_lse_tma_varlen != 0) && g_lse_full_opt && (D == 128) && !causal;
+  CUtensorMap vqmap_lse, vkmap_lse;
+  if (lse_tma_v) {
+    vqmap_lse = make_lse_map(d_q, H, T, D, 1);
+    vkmap_lse = make_lse_map(d_k, Hkv, T, D, 1);
+  }
+#endif
+
   const int lse_nblk = (maxlen + LBM - 1) / LBM;
   // O56：full MLA varlen 的 LSE 用 8-warp/256 线程（LBM=128、LBN=32）几何（fp16 同款）。
   //   O58：服务 D=512（full 走 FULL 版，causal 走镜像配对版）。
@@ -395,6 +409,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
   const int kLseSmemBal1_6 = (64 + 2 * 16) * (D + 8) * (int)sizeof(bf16);
   const int kLseTileWgm = (D == 128) ? (LBM / 8) * (D / 64) * 1024 : 0;
   const int kLseSmemWgm1 = 1024 + kLseTileWgm * 3;
+  // O73：TMA 版与 wgmma 版同布局（Q + 2×K）+ 3 个 mbarrier（24B，取 64B 余量）。
+  const int kLseSmemTma1_v = 1024 + kLseTileWgm * 3 + 64;
   if (D == 128) {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<128, 1>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -404,6 +420,11 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
     // O69：full D=128 的 LSE 走 O54 均衡版（FULL=true）。
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 1, true>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    // O73：varlen full D=128 的 LSE TMA 实例（FULL=true，带 cu_seqlens）。
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<128, 1, true>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemTma1_v));
+#endif
   } else {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<512>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
@@ -517,10 +538,22 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int lse_sp
           lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(
               d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
         }
-      } else if (g_lse_full_opt)
+      } else if (g_lse_full_opt) {
         // O69（第 163 轮）：full D=128 的 LSE 从 O8（无流水）改走 O54 均衡版（cp.async 双缓冲）。
-        lse_mma_kernel_bal<128, 1, true><<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1>>>(
-            d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
+        // O73（第 167 轮）：再优先走定长 O71 同款的 4D-TMA（`--lsetmavarlen=0` 退回 cp.async 版）。
+        bool did_tma_v = false;
+#if defined(FA_WGMMA) && defined(FA_TMA)
+        if (lse_tma_v) {
+          lse_mma_kernel_bal_tma<128, 1, true><<<dim3(lse_nblk, H, B), THREADS,
+                                                 kLseSmemTma1_v>>>(
+              vqmap_lse, vkmap_lse, d_lse, nullptr, maxlen, H, Hkv, scale, 1, d_cu);
+          did_tma_v = true;
+        }
+#endif
+        if (!did_tma_v)
+          lse_mma_kernel_bal<128, 1, true><<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1>>>(
+              d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
+      }
       else
         lse_mma_kernel<128><<<dim3(lse_nblk, H, B), THREADS, kLseSmem>>>(d_q, d_k, d_lse,
                                                                          maxlen, H, Hkv, scale,
@@ -1126,6 +1159,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--lsesplit=", 0) == 0) lse_split = atoi(a.c_str() + 11);
     else if (a.rfind("--lsefull=", 0) == 0) g_lse_full_opt = atoi(a.c_str() + 10);
     else if (a == "--lsefull") g_lse_full_opt = 1;
+    else if (a.rfind("--lsetmavarlen=", 0) == 0) g_lse_tma_varlen = atoi(a.c_str() + 15);
+    else if (a == "--lsetmavarlen") g_lse_tma_varlen = 1;
     else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
     else if (a == "--wgmma") wgmma_sel = 1;
     else if (a.rfind("--wg2=", 0) == 0) { wg2_sel = atoi(a.c_str() + 6); wg_forced = true; }

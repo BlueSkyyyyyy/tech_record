@@ -2413,3 +2413,36 @@ Waves 0.48**，与 fp16 TMA（28.16µs）逐项一致。**结论**同 fp16：O8 
 `cp.async` 打掉它，**4D-TMA 再把 L1/TEX 从 37.6% 压回 18.8%、Duration 再 ~1.3×**。见 `docs/08`
 §5.79。原始输出：`src/bf16/fa_bwd_bf16_o71_ab_full_s1024.out.txt`、
 `..._o71_ncu_lse_tma_full_s1024.out.txt`。
+
+## 6ba. O73（第一百六十七轮，**正结果，默认**）：**varlen** full D=128 的 LSE 也上 **4D-TMA**
+
+与 fp16（`docs/01` §24）**逐字 dtype 参数化**，与 fp8 O72（`docs/03` §96）同构。第 166 轮 fp8 O72 把
+varlen full D=128 的 LSE 从 `cp.async` 均衡版切到 4D-TMA，并留「dtype 化到 fp16/bf16」为下一步；本轮
+给 bf16 的 `lse_mma_kernel_bal_tma` 加 `const int* cu_seqlens = nullptr`（`cu` 非空时用
+`cu_seqlens[b]` 定界 packed `[T,H,D]` 的 token 基址/长度，`nullptr` 时逐式退化 ⇒ 定长逐位不变），
+`run_varlen` 为 D=128/full 建 packed 描述符并优先走 `lse_mma_kernel_bal_tma<128,1,true>`；新增文件
+作用域开关 `g_lse_tma_varlen`（默认 1）+ CLI `--lsetmavarlen=0/1`；`harness/fa_bwd_run.py` 的
+`varlen_tma` 判据扩为 `dt in HOPPER_DEFAULT_DTYPES`（bf16 varlen 也走 `-DFA_TMA -lcuda`）。
+device 与 fp16 逐字同源（`__half`→bf16）。
+
+**数值**（ours vs fp32 ref，max_abs dq/dk/dv，bf16 varlen full D=128）：`b4_t3840`
+5.764/3.851/3.031e-3、`b4_t4096` 3.237/2.392/2.013e-3、`b5_t3968`(h32kv8) 5.324/5.454/5.881e-3、
+`b8_t2904` 1.153e-2/9.529e-3/1.083e-2 —— 均 bf16 噪声，与 O69 `cp.async` 版**打印逐位相同**（仅 LSE
+fp32 求和次序噪声）；单/两文件一致性 gate bf16 worst **1.953e-3 OK**（容差 3.2e-2）。
+
+**性能（同 session，同 binary A/B，CUDA event，iters=50）**：
+
+| case（bf16 varlen D=128 full） | cp.async（`--lsetmavarlen=0`） | **TMA（默认，O73）** | 加速 |
+|---|---|---|---|
+| b4_t3840 | 0.9522 ms / 47.92 TF | **0.8878 ms / 51.40 TF** | **1.072×** |
+| b4_t4096 | 0.5986 ms / 57.40 TF | **0.5589 ms / 61.48 TF** | **1.071×** |
+| b5_t3968（h32kv8） | 1.8528 ms / 49.41 TF | **1.7496 ms / 52.32 TF** | **1.059×** |
+| b8_t2904 | 0.7622 ms / 48.23 TF | **0.7190 ms / 51.13 TF** | **1.060×** |
+
+纯反向对标：`[1024]×4` bf16 FA3 `0.1980ms/173.5TF` ⇒ ours total 为 FA3 **3.02×→2.82×**。
+
+**ncu（LSE，b4_t4096 full）**：TMA **66.78 µs / inst 36.08M / L1TEX 27.1% / Compute 57.2% / regs 64**
+vs cp.async **109.54 µs / inst 58.86M / L1TEX 50.7%**，与 fp16（66.75µs）逐项一致。**结论**同 fp16：
+**搬迁方式升级（指令 −38.7%、L1/TEX 50.9%→27.1%、Duration 1.63×），不是 main 的 L2 `red` 墙。**
+见 `docs/08` §5.81；原始输出 `src/bf16/fa_bwd_bf16_p167_lse_tma_ab.out.txt`、
+`..._p167_ncu_lse_tma.out.txt`、`src/bf16/fa_bwd_bf16_p33c_run.out.txt`。

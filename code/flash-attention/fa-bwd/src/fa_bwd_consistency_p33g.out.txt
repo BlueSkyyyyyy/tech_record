@@ -42,17 +42,17 @@ baseline-free：两者都算同一数学；期望差异仅跨 CTA atomicAdd 次�
   b1_s512_h2_d512_causal_bf16                     dq=2.441e-04  dk=1.953e-03  dv=1.953e-03
   b1_s512_h4_d512_causal_bf16                     dq=9.766e-04  dk=1.953e-03  dv=9.766e-04
   varlen_b1_t512_h2_d512_causal_bf16              dq=4.883e-04  dk=1.953e-03  dv=9.766e-04
-  varlen_b1_t512_h2_d512_full_bf16                dq=4.883e-04  dk=4.883e-04  dv=4.883e-04
+  varlen_b1_t512_h2_d512_full_bf16                dq=2.441e-04  dk=4.883e-04  dv=4.883e-04
   varlen_b3_t1792_h2_d512_causal_bf16             dq=9.766e-04  dk=9.766e-04  dv=9.766e-04
-  varlen_b3_t1792_h2_d512_full_bf16               dq=9.766e-04  dk=9.766e-04  dv=9.766e-04
+  varlen_b3_t1792_h2_d512_full_bf16               dq=4.883e-04  dk=9.766e-04  dv=9.766e-04
   varlen_b4_t3840_h16_d128_causal_bf16            dq=0.000e+00  dk=1.953e-03  dv=1.953e-03
-  varlen_b4_t3840_h16_d128_full_bf16              dq=0.000e+00  dk=9.766e-04  dv=9.766e-04
+  varlen_b4_t3840_h16_d128_full_bf16              dq=0.000e+00  dk=4.883e-04  dv=4.883e-04
   varlen_b4_t4096_h16_d128_causal_bf16            dq=0.000e+00  dk=1.953e-03  dv=1.953e-03
-  varlen_b4_t4096_h16_d128_full_bf16              dq=0.000e+00  dk=4.883e-04  dv=9.766e-04
+  varlen_b4_t4096_h16_d128_full_bf16              dq=0.000e+00  dk=9.766e-04  dv=9.766e-04
   varlen_b5_t3968_h32_d128_causal_bf16            dq=0.000e+00  dk=3.906e-03  dv=7.812e-03
-  varlen_b5_t3968_h32_d128_full_bf16              dq=0.000e+00  dk=9.766e-04  dv=9.766e-04
+  varlen_b5_t3968_h32_d128_full_bf16              dq=0.000e+00  dk=1.953e-03  dv=9.766e-04
   varlen_b8_t2904_h16_d128_causal_bf16            dq=0.000e+00  dk=4.883e-04  dv=1.953e-03
-  varlen_b8_t2904_h16_d128_full_bf16              dq=0.000e+00  dk=4.883e-04  dv=4.883e-04
+  varlen_b8_t2904_h16_d128_full_bf16              dq=0.000e+00  dk=4.883e-04  dv=9.766e-04
 
 [fp8]
   b1_s1024_h16_d128_full_fp8                      dq=8.941e-08  dk=5.960e-08  dv=5.960e-08

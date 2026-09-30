@@ -3061,3 +3061,37 @@ regs 64 / Waves 0.48**；bf16 TMA **28.32µs** 逐项一致。⇒ O8 是串行�
 L2 `red` 墙。** CI：fp16 一致性 gate worst 2.441e-4、bf16 4.883e-4（均 OK）、`--check docs/04` OK
 （内嵌数值表不变，本步数值逐值一致）。详见 `docs/01` §23、`docs/01b` §6az、`docs/08` §5.79；原始
 输出 `src/fp16/fa_bwd_fp16_o71_*`、`src/bf16/fa_bwd_bf16_o71_*`、`src/fa_bwd_o71_*`。
+
+## 46. O73（第一百六十七轮，正结果，默认）：**varlen** full D=128 的 LSE 也上 **4D-TMA**（fp16/bf16）
+
+第 166 轮 fp8 O72 把 varlen full D=128 的 LSE 切到 4D-TMA；O69→O70→O71 只覆盖**定长**，`run_varlen`
+里 full D=128 仍走 O69 的 `cp.async` 均衡版。本轮把 `lse_mma_kernel_bal_tma` 加
+`const int* cu_seqlens`（`nullptr` 逐式退化为定长 ⇒ 定长/因果路径逐位不变）、`run_varlen` 为
+D=128/full 建 packed 描述符并优先走 TMA、`harness/fa_bwd_run.py` 的 varlen 构建对 fp16/bf16 也加
+`-DFA_TMA -lcuda`。`--lsetmavarlen=0` 退回 cp.async 做同 binary A/B。**三 dtype × {定长, varlen}
+full D=128 的 LSE 至此全部统一到 4D-TMA。**
+
+| case（varlen D=128 full） | dtype | cp.async（`--lsetmavarlen=0`） | **TMA（默认，O73）** | 加速 | max_abs vs fp32 ref |
+|---|---|---|---|---|---|
+| b4_t3840 | fp16 | 0.9397 ms（48.56 TF） | **0.8810 ms（51.80 TF）** | 1.067× | 5.60/6.84/2.34e-4 |
+| b4_t4096 | fp16 | 0.5908 ms（58.16 TF） | **0.5517 ms（62.28 TF）** | 1.071× | 4.09/4.95/1.23e-4 |
+| b5_t3968（h32kv8） | fp16 | 1.8331 ms（49.93 TF） | **1.7218 ms（53.16 TF）** | 1.065× | 7.34/7.91/4.88e-4 |
+| b8_t2904 | fp16 | 0.7562 ms（48.61 TF） | **0.7113 ms（51.69 TF）** | 1.063× | 1.49/1.56/1.58e-3 |
+| b4_t3840 | bf16 | 0.9522 ms（47.92 TF） | **0.8878 ms（51.40 TF）** | 1.072× | 5.76/3.85/3.03e-3 |
+| b4_t4096 | bf16 | 0.5986 ms（57.40 TF） | **0.5589 ms（61.48 TF）** | 1.071× | 3.24/2.39/2.01e-3 |
+| b5_t3968（h32kv8） | bf16 | 1.8528 ms（49.41 TF） | **1.7496 ms（52.32 TF）** | 1.059× | 5.32/5.45/5.88e-3 |
+| b8_t2904 | bf16 | 0.7622 ms（48.23 TF） | **0.7190 ms（51.13 TF）** | 1.060× | 1.15e-2/9.53e-3/1.08e-2 |
+
+纯反向对标（同 session CUPTI，`harness/fa_bwd_bench.py bench --lengths 1024 1024 1024 1024 --H 16
+--D 128 --full`）：`[1024]×4` full **fp16** FA3 `0.1993ms/172.4TF` ⇒ ours/FA3 **2.96×→2.77×**；
+**bf16** FA3 `0.1978ms/173.7TF` ⇒ ours/FA3 **3.03×→2.83×**。
+
+ncu（LSE，`b4_t4096` full，`--launch-count 1`，fp16/bf16 逐项一致）：cp.async **109.0µs /
+inst 58.86M / L1TEX 50.9% / Compute 57.7%** → TMA **66.8µs（1.63×）/ inst 36.08M（−38.7%）/
+L1TEX 27.1% / Compute 57.2%**；两者 DRAM 10–16%、L2 34–44% ⇒ O8 式的**串行载入延迟/issue bound**，
+4D-TMA 把 Q/K 搬运交给 TMA 引擎。**这是 preprocess 内一条漏改分支的搬运升级，不是 main 的 L2 `red`
+墙。** 一致性 gate：fp16 worst 2.441e-4、bf16 1.953e-3（均 OK）；`--check docs/04` OK。详见
+`docs/01` §24、`docs/01b` §6ba、`docs/08` §5.81；原始输出
+`src/fp16/fa_bwd_fp16_p167_lse_tma_ab.out.txt`、`..._p167_ncu_lse_tma.out.txt`、
+`src/bf16/fa_bwd_bf16_p167_lse_tma_ab.out.txt`、`..._p167_ncu_lse_tma.out.txt`、
+`src/fa_bwd_p167_fa3_varlen_full_baseline.out.txt`。
