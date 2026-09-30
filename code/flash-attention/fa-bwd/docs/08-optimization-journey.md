@@ -1695,3 +1695,34 @@ smem 冲突 + 低 occ
   ⇒ GEMM3/4/5 wgmma 路径**明确但工程量中等偏大**，非本轮 quick lever。默认路径逐位不变。
 - 详见 `docs/03` §102；原始输出 `src/fp8/fa_bwd_fp8_p174_sass_te_vs_ours.out.txt`、
   `src/fp8/fa_bwd_fp8_wgmma_rs_smoke.out.txt`。
+
+### 5.89 第 175 轮（O80）：fp8 `stmatrix`/`ldmatrix.trans` + PRMT **逐字节转置**冒烟 PASS + wgmma RS GEMM3 端到端 PASS——F3b 主体去风险
+
+- **动机**：第 174 轮（§5.88）把 F3b 的下一步定为「① `stmatrix` 冒烟 → GEMM3/4/5 逐个换 RS wgmma」。
+  本轮把这条路径的**最不确定一步**（fp8 逐字节转置）用最小复现钉死，并跑到 wgmma RS 端到端。
+- **TE SASS 复核**（`ncu --page source --print-source sass`，`harness/te_fp8_ncu.py`）：TE 的
+  `..._flash_bprop_wgmma_f8_..._64x64x128` 里，GEMM3/4/5 的操作数是
+  `LDSM.16.MT88.4`（`ldmatrix.x4.trans`，转置读）→ **`PRMT R, R, 0x5140/0x6420/0x7531, R`**
+  （逐字节重排 b16 配对方向）→ `STSM.16.M88.4`（`stmatrix.x4` 落盘）造出来的；
+  A 用 `LDSM.16.M88.4`（非转置）读回喂 `QGMMA ... R216(寄存器A) gdesc`（RS_TN）。
+- **冒烟（正结果）**：新增 `src/fp8/fa_bwd_fp8_stmatrix_smoke.cu`，两阶段：
+  1. **逐字节转置**：对 [R][C] fp8 行主序 tile，warp 用 `ldmatrix.x4.trans`（4 个 8×8 b16 矩阵并排）
+     + `__byte_perm(reg, reg>>16, 0x5140)` + 两次 16-bit 存，得到 [C][R]（R 连续）。
+     推导的 lane 映射 = `lo16=(X[2p][2k],X[2p+1][2k])`、`hi16=(X[2p][2k+1],X[2p+1][2k+1])`
+     （`p=lane&3, k=8·reg+lane>>2`）。四种 shape `[128][64]/[64][64]/[64][128]/[32][128]`
+     **全部 mismatches=0（逐字节）PASS**。**关键坑**：PRMT selector 是 **`0x5140`**（byte0←a0,
+     byte1←b0, byte2←a1, byte3←b1），写反成 `0x5410` 会退化成恒等、只错一半字节——与 fp8 kernel
+     里已有的 `__byte_perm(q0,q1,0x5140)` 交织写同源。
+  2. **wgmma RS GEMM3**：`C[j][d]=Σ_m P[m][j]·dO[m][d]`（dV 形状，BM=128/BN=64/HD=64）。
+     A=Pᵀ[64][128]（逐字节转置成行主序 K-major，`ldmatrix.x4` 非转置取片段），
+     B=dOᵀ[64][128]（逐字节转置**直接写进 SW128 tile**），跑 `wgmma.m64n32k32.e4m3.e5m2`
+     （4 个 k=32 步 × 2 个 n=32 块），与 CPU `max_abs=0.000e+00 bad=0 PASS`。
+- **SASS 证据**：`gemm3_wgmma_kernel` = **8×`QGMMA.64x32x32.F32.E4M3.E5M2`**（其中 R56/R60/R64/R68
+  为寄存器 A）+ **0×HMMA** + `LDSM.16.MT88.4`（转置读）+ `PRMT 0x5140`；ptxas **74 regs / 0 spill**。
+- **结论 / 对 F3b 的意义**：① fp8 的「逐字节转置」不再是死结——`ldmatrix.trans + PRMT` 可用且
+  逐字节正确；② 转置操作数可直接落成 wgmma 消费的 SW128，RS 端到端正确。**剩余工程量**：
+  把这套 `transpose_store` 接进 `fp8_mma_body` 的 GEMM3/4/5（替换 `mma_block_bt` 的
+  `dOp/Qp/Kp` 配对读），并把 GEMM3/4 的 M=BN 从 32 提到 **64**（wgmma 最小 m64；GEMM5 的
+  M=BM=64 已满足）。默认路径一行未改、数值逐位不变。
+- 详见 `docs/03` §103；原始输出 `src/fp8/fa_bwd_fp8_stmatrix_smoke.out.txt`、
+  `..._sass.out.txt`、`..._ptxas.out.txt`。

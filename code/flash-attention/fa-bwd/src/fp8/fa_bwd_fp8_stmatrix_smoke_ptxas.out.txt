@@ -1,0 +1,8 @@
+ptxas info    : (C7517) wgmma.wait_group is injected in around line 670 by compiler to allow use of registers defined by GMMA in function '_Z18gemm3_wgmma_kernelPKhS0_Pf'
+ptxas info    : 0 bytes gmem
+ptxas info    : Function properties for _Z18gemm3_wgmma_kernelPKhS0_Pf
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 74 registers, used 1 barriers
+ptxas info    : Function properties for _Z21byte_transpose_kernelPKhPhii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers

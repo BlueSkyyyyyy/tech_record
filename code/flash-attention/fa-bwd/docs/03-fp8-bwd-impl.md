@@ -9122,3 +9122,87 @@ dOᵀ/Qᵀ/Kᵀ 的 A 片段。TE 的 SASS 给出它真正的做法：**`STSM`�
 
 **原始输出**：`src/fp8/fa_bwd_fp8_p174_sass_te_vs_ours.out.txt`（逐 opcode 对照）、
 `src/fp8/fa_bwd_fp8_wgmma_rs_smoke.out.txt`（冒烟 PASS）。
+
+## 103. F3b 主体第一步（第 175 轮，O80）：fp8 **逐字节转置**（`ldmatrix.x4.trans` + `PRMT`）+ **wgmma RS GEMM3** 冒烟 —— 打通 GEMM3/4/5 的 wgmma 操作数构造
+
+### 103.1 结论一句话
+
+第 174 轮（§102）用 TE SASS 发现 GEMM3/4/5 的「需转置操作数」可以经 `ldmatrix` 进寄存器 A
+（RS_TN），但每个 GEMM 仍各有**一个逐字节转置**需求（dOᵀ/Qᵀ/Kᵀ），而 fp8 的 `ldmatrix.trans`
+只交换 b16 配对方向。本轮把 **TE 真正的做法**（`LDSM.MT88.4` 转置读 → `PRMT` 逐字节重排 →
+`STSM.M88.4` 矩阵写）用最小复现钉死，并跑到 wgmma RS 端到端，**全部逐字节 / max_abs=0 PASS**。
+于是 GEMM3/4/5 上 wgmma 的**操作数构造问题已解**，剩下的是把它接进主 kernel + 几何调整。
+
+### 103.2 TE SASS 复核（`ncu --page source --print-source sass`）
+
+用 `harness/te_fp8_ncu.py` 跑 TE FP8 反向并抽 SASS，GEMM3/4/5 区域的指令序列为：
+
+```
+LDSM.16.MT88.4 R16, [R29]          # ldmatrix.x4.trans（转置读一个 8×8 b16 = 8 行×16 fp8）
+PRMT R28, R16, 0x6420, R17         # 逐字节重排（修正 b16 配对方向）
+PRMT R30, R16, 0x7531, R17
+STSM.16.M88.4 [R64], R28           # stmatrix.x4（非转置）落盘成操作数
+...
+QGMMA.64x128x32.F32.E4M3.E5M2 R152, R216, gdesc[UR20], R152   # A=R216 寄存器(RS_TN)
+LDSM.16.M88.4 R216, [R216+0x20400]                            # 非转置读回 A 片段
+```
+
+即「转置读 → 字节重排 → 矩阵写」，A 再用非转置 `ldmatrix` 读回喂 RS QGMMA。TE 用 PRMT
+（而不是逐字节 scatter）解决 b16 配对方向——正是 O4b/F6 判负的「+20KB smem + scatter」之外的路。
+
+### 103.3 逐字节转置的映射与冒烟（`src/fp8/fa_bwd_fp8_stmatrix_smoke.cu`）
+
+对 [R][C] fp8 行主序 tile，取一个 **8 行 × 64 fp8** 块（= 4 个并排 8×8 b16 矩阵），一个 warp
+`ldmatrix.x4.trans`（lane L：matrix=L>>3、row=L&7、地址 `&src[r0+(L&7)][c0+(L>>3)*16]`）。
+推导并实测的 lane 映射（`p=L&3, q=L>>2`）：
+
+```
+reg_i  = ( Xb16[2p][8i+q] , Xb16[2p+1][8i+q] )          # 低/高 16-bit
+       = ( (X[2p][2k],X[2p][2k+1]) , (X[2p+1][2k],X[2p+1][2k+1]) ) ,  k=8i+q
+```
+
+用 `__byte_perm(reg, reg>>16, 0x5140)` 得到：
+
+```
+word = ( X[2p][2k], X[2p+1][2k] | X[2p][2k+1], X[2p+1][2k+1] )
+     = ( Y[2k][2p], Y[2k][2p+1] | Y[2k+1][2p], Y[2k+1][2p+1] )      # Y[c][r]=X[r][c]
+```
+
+于是把低 16-bit 写成 `Y[2k][2p..2p+2]`、高 16-bit 写成 `Y[2k+1][2p..2p+2]`（行主序或 SW128）。
+`__byte_perm` 的 selector 是 **`0x5140`**（byte0←a0、byte1←b0、byte2←a1、byte3←b1）；写反成
+`0x5410` 会退化成恒等、只错一半字节。**四种 shape `[128][64]→[64][128]`、`[64][64]`、
+`[64][128]→[128][64]`、`[32][128]→[128][32]` 全部 mismatches=0 PASS**。
+
+### 103.4 wgmma RS GEMM3 端到端（同一冒烟第二阶段）
+
+`gemm3_wgmma_kernel`：`C[j][d] = Σ_m P[m][j]·dO[m][d]`（dV 形状，BM=128 / BN=64 / HD=64）。
+- A = Pᵀ[64][128]：把源 P[128][64] 用上面的逐字节转置写成**行主序 K-major**（m 连续），
+  再用 `ldmatrix.x4`（**非转置**）取 A 片段（O79 已证 = `ALayout_64x32`）。
+- B = dOᵀ[64][128]：逐字节转置**直接写进 SW128 tile**（K=BM=128，行 128B = 一个 SW128 atom 整行），
+  描述符 `make_desc_sw128_fp8(sw128_k32_addr(base,s), sbo=1024)`。
+- `wgmma.mma_async.m64n32k32.f32.e4m3.e5m2`，4 个 k=32 步 × 2 个 n=32 块（N=HD=64）。
+
+输入取 {-3..3} 整数（e4m3/e5m2 精确），CPU 参考直接整数乘加：
+
+```
+wgmma RS GEMM3 dV[j][d]=Σ_m P[m][j]·dO[m][d] (BM128 BN64 HD64,
+  A=Pᵀ ldmatrix, B=dOᵀ SW128字节转置): max_abs=0.000e+00 bad=0  PASS
+```
+
+**SASS**（`ncu --page source`）：`gemm3_wgmma_kernel` = **8×`QGMMA.64x32x32.F32.E4M3.E5M2`**
+（R56/R60/R64/R68 为寄存器 A 操作数）+ **0×HMMA** + `LDSM.MT88.4`（转置读）+ `PRMT 0x5140`；
+ptxas **74 regs / 0 spill / 0 stack**。
+
+### 103.5 对 F3b 的意义与剩余工作
+
+- **正结果**：fp8 的逐字节转置用 `ldmatrix.trans + PRMT` 可解且逐字节正确，转置操作数可直接落成
+  wgmma 消费的 SW128；RS wgmma 端到端数值精确。**「GEMM3/4/5 上不了 wgmma」的两道死结
+  （ISA 无转置 + B 需物理转置）已全部打开。**
+- **剩余工程量**（下一步 F3b 主体）：
+  1. 把 `transpose_store` 接进 `fp8_mma_body` 的 GEMM3/4/5（替换 `mma_block_bt` 的
+     `dOp/Qp/Kp` 配对读 + `ldmatrix.x2.trans`）；
+  2. **几何调整**：GEMM3/4 的 M=BN，wgmma 最小 m64 ⇒ BN 需提到 **64**（或把两个 KV 块配成 M=64）；
+     GEMM5 的 M=BM=64 已满足。BN=32→64 会改 smem/寄存器账（需重新核算 CTA/SM）；
+  3. fold 的 P/dS 量化输出顺带落成 wgmma 操作数布局（目前 Ap/dS3 已是 K-major A，dS2 亦然）。
+- 默认路径一行未改、数值逐位不变。**原始输出**：`src/fp8/fa_bwd_fp8_stmatrix_smoke.out.txt`
+  （逐字节 + GEMM3 PASS）、`..._sass.out.txt`（QGMMA 直方图）、`..._ptxas.out.txt`（74 regs）。
