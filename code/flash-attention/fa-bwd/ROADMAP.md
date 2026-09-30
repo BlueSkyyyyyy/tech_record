@@ -203,7 +203,9 @@
   冒烟已证 `ldmatrix.x4` 的 A 片段可直接喂 `wgmma.m64n32k32` RS（max_abs=0）。**真阻塞改述为**：
   每个非平凡 GEMM 仍需**一个逐字节转置的操作数**（dOᵀ/Qᵀ/Kᵀ），fp8 `ldmatrix.trans` 只交换 b16
   配对方向；TE 用 `stmatrix`/`ldmatrix`（含 `MT88.4`）配对搬运解决（44 条）。⇒ GEMM3/4/5 wgmma
-  **不再是死结，是可做的 F3b 主体**（见 §102 / O79）。以下旧的绝对化结论按此修正阅读。
+  **不再是死结，是可做的 F3b 主体**（见 §102 / O79）。**进一步（第一百七十五轮 O80）：该「逐字节
+  转置」已用 `ldmatrix.x4.trans + PRMT(0x5140)` 钉死并跑到 wgmma RS GEMM3 端到端 max_abs=0 PASS
+  ⇒ 两道死结全部打开，只剩工程接线与几何调整（BN→64）。** 以下旧的绝对化结论按此修正阅读。
 
 - **fp8 默认 main 在本卡已到硬件平台期（第一百七十二轮 O77 三证收口）。** F6 的第三条子项
   **③（Q/dO 的 TMA cache hint / L2 persist）实测为负结果**：`--l2promo=0/1/2` S4096
@@ -3104,11 +3106,14 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       **1.7913/1.7936/1.8052ms** 噪声内，根因 ncu 默认 main **L2 命中 97.08% / DRAM 4.32%**，
       重读本就在 L2 命中、promotion 改不了 L2 扇区总量。**F6 三条子项至此全部收口（无正结果）**，
       默认路径数值逐位不变。见 `docs/03` §100、`docs/08` §5.86。
-- [~] **F3b**：① **GEMM3/4/5 上 RS wgmma（第一百七十四轮 O79 重新打开，可行）**——
-      TE SASS 证其用 `QGMMA RS_TN`（A 在寄存器）+ `STSM/LDSM` 配对粒度转置；冒烟已证
-      `ldmatrix.x4` 的 A 片段直接喂 `wgmma.m64n32k32` RS（max_abs=0 PASS）。剩余 = `stmatrix`
-      造 B/操作数 + 逐个 GEMM 替换 + 评估去 Qp/dOp 冲 4 CTA/SM（见下 O79）。② WS 完整化
-      （producer/consumer + 更深 mbarrier 流水，重叠 `wait`，降 L1/L2 压力）仍待做。
+- [~] **F3b**：① **GEMM3/4/5 上 RS wgmma（第一百七十四/一百七十五轮 O79/O80 打通）**——
+      TE SASS 证其用 `QGMMA RS_TN`（A 在寄存器）+ `STSM/LDSM` 配对粒度转置；O79 冒烟证
+      `ldmatrix.x4` 的 A 片段直接喂 `wgmma.m64n32k32` RS（max_abs=0 PASS）；**O80（第 175 轮）
+      把「逐字节转置」用 `ldmatrix.x4.trans + PRMT(0x5140)` 钉死并跑到 wgmma RS GEMM3 端到端
+      max_abs=0 PASS**（SASS：8×QGMMA + 0×HMMA + PRMT，74 regs）。**剩余 = 接进 `fp8_mma_body`
+      的 GEMM3/4/5 + 把 GEMM3/4 的 M=BN 从 32 提到 64（wgmma 最小 m64）+ 重算 smem/CTA/SM
+      （见 O80）。② WS 完整化（producer/consumer + 更深 mbarrier 流水，重叠 `wait`，
+      降 L1/L2 压力）仍待做。
 - [ ] **F4b**：fp8 非 det 默认的 dK/dV 归约再优化（当前 red 仍是 74% L2）。
 - [x] **O79**（第一百七十四轮，**路径正结果 / 代码未改默认**）**TE SASS 发现 QGMMA `RS_TN` +
   fp8 wgmma RS 冒烟**——用 `ncu --page source --print-source sass` 对照 TE 反向：TE
@@ -3120,6 +3125,18 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
   逐字节转置（dOᵀ/Qᵀ/Kᵀ），fp8 `ldmatrix.trans` 只换 b16 配对方向 ⇒ TE 靠 `stmatrix/ldmatrix`
   配对搬运（44 条）造操作数。默认路径一行未改、数值逐位不变。见 `docs/03` §102、`docs/08` §5.88；
   原始输出 `src/fp8/fa_bwd_fp8_p174_sass_te_vs_ours.out.txt`、`src/fp8/fa_bwd_fp8_wgmma_rs_smoke.out.txt`。
+- [x] **O80**（第一百七十五轮，**路径正结果 / 代码未改默认**）**fp8 逐字节转置（`ldmatrix.x4.trans`
+  + `PRMT`）+ wgmma RS GEMM3 端到端冒烟**——把 TE SASS 证的 `LDSM.MT88.4 → PRMT → STSM.M88.4`
+  操作数构造法用最小复现钉死：对 [R][C] fp8 行主序 tile，`ldmatrix.x4.trans` +
+  `__byte_perm(reg,reg>>16,**0x5140**)` + 两次 16-bit 存，得到逐字节转置的 [C][R]（K-major）；
+  4 种 shape **mismatches=0 PASS**（selector 写反成 `0x5410` 会退化成恒等、只错一半字节——坑）。
+  再把转置结果直接落成 **SW128**，A=Pᵀ（`ldmatrix.x4` 非转置）、B=dOᵀ（SW128 描述符），
+  跑 `wgmma.m64n32k32.e4m3.e5m2` 计算 `dV[j][d]=Σ_m P[m][j]·dO[m][d]`：**max_abs=0.000e+00 PASS**。
+  SASS：`gemm3_wgmma_kernel` = **8×`QGMMA.64x32x32` + 0×HMMA** + `LDSM.MT88.4` + `PRMT 0x5140`、
+  **74 regs/0 spill**。⇒ **GEMM3/4/5 上 wgmma 的两道死结（ISA 无转置 + B 需物理转置）全部打开**；
+  剩余 = 接进 `fp8_mma_body` + 把 GEMM3/4 的 M=BN 提到 64 + 重算 smem/CTA/SM。默认路径一行未改、
+  数值逐位不变。见 `docs/03` §103、`docs/08` §5.89；原始输出 `src/fp8/fa_bwd_fp8_stmatrix_smoke.out.txt`、
+  `..._sass.out.txt`、`..._ptxas.out.txt`。
 - [x] **O78**（第一百七十三轮，**负结果**）**端到端 overlap（quant/LSE 与 main 跨 stream）**——
       实现「按 head 分块 + 4D-TMA 描述符解耦 + 指针偏移」的跨 stream 流水（**device 一行未改**，
       `--ovlp=N`；默认关）。**诊断**（整块 main||LSE）证明内核级重叠可行（concurrent 0.951×，LSE
@@ -3134,7 +3151,19 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百七十四轮）**：**O79——TE SASS 发现 QGMMA `RS_TN`（A 在寄存器）+ fp8 wgmma RS
+> **最新（第一百七十五轮）**：**O80——fp8 逐字节转置（`ldmatrix.x4.trans` + `PRMT 0x5140`）
+> 打通 + wgmma RS GEMM3 端到端 PASS；F3b 主体的「操作数构造」死结全解**。承接 O79：把 TE SASS
+> 证的 `LDSM.MT88.4 → PRMT → STSM.M88.4` 操作数构造法用最小复现钉死——`src/fp8/fa_bwd_fp8_stmatrix_smoke.cu`
+> 对 [R][C] fp8 行主序 tile 做 **逐字节转置**（4 种 shape **mismatches=0**），再直接落成 **SW128**
+> 喂 `wgmma.m64n32k32.e4m3.e5m2` 算 `dV[j][d]=Σ_m P[m][j]·dO[m][d]`：**max_abs=0.000e+00 PASS**；
+> SASS `8×QGMMA + 0×HMMA + PRMT`、74 regs。⇒ GEMM3/4/5 wgmma 的**两道死结（ISA 无转置 + B 需物理
+> 转置）全部打开**。默认路径一行未改、数值逐位不变（S4096 total 1.795ms/76.6 TFLOPS，TE FP8 ~5.9×）。
+> **下一步候选**：① **F3b 主体（操作数已就绪）**——把 `transpose_store` 接进 `fp8_mma_body` 的
+> GEMM3/4/5、GEMM3/4 的 M=BN 提到 **64**（wgmma 最小 m64）、重算 smem/CTA/SM；② WS 完整化；
+> ③ 换形状/dtype 覆盖。见 `docs/03` §103、`docs/08` §5.89；原始输出
+> `src/fp8/fa_bwd_fp8_stmatrix_smoke.out.txt`、`..._sass.out.txt`、`..._ptxas.out.txt`。
+>
+> **（第一百七十四轮）**：**O79——TE SASS 发现 QGMMA `RS_TN`（A 在寄存器）+ fp8 wgmma RS
 > 冒烟 PASS；「GEMM3/4/5 上不了 wgmma」的阻塞被修正**。用 `ncu --page source --print-source sass`
 > 逐指令对照：TE 的 `..._flash_bprop_wgmma_f8_..._64x64x128`（384 线程/grid=64）是 **16×QGMMA
 > + 0×HMMA + 24×STSM + 20×LDSM**，其中半数 QGMMA 带**寄存器 A 操作数**
@@ -7235,6 +7264,28 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
   - **默认路径一行未改、数值逐位不变**（S4096 total 1.7951ms/**76.6 TFLOPS**，TE FP8 ~5.9×）。
   - 原始输出 `src/fp8/fa_bwd_fp8_p174_sass_te_vs_ours.out.txt`、
     `src/fp8/fa_bwd_fp8_wgmma_rs_smoke.out.txt`；文档 `docs/03` §102、`docs/08` §5.88。
+
+- 2026-09-30（第一百七十五轮）：**O80——fp8 逐字节转置 + wgmma RS GEMM3 端到端冒烟（F3b 操作数死结全解）**。
+  - 动机：落实第 174 轮「下一步候选 ①」的第一步——`stmatrix` 冒烟，把 GEMM3/4/5 上 wgmma 的
+    「需转置操作数」问题钉死。
+  - **TE SASS 复核**：`harness/te_fp8_ncu.py` + `ncu --page source --print-source sass`，
+    TE 反向 kernel 的 GEMM3/4/5 操作数构造 = `LDSM.16.MT88.4`（`ldmatrix.x4.trans`）→
+    `PRMT R,R,0x5140/0x6420/0x7531,R` → `STSM.16.M88.4`（`stmatrix.x4`）；A 再 `LDSM.M88.4`
+    非转置读回喂 `QGMMA ... R216(寄存器A) gdesc`（RS_TN）。
+  - **冒烟**：新增 `src/fp8/fa_bwd_fp8_stmatrix_smoke.cu`。
+    ① **逐字节转置**：`ldmatrix.x4.trans` + `__byte_perm(reg,reg>>16,0x5140)` + 两次 16-bit 存；
+    `[128][64]/[64][64]/[64][128]/[32][128]` 四 shape **mismatches=0 PASS**。**坑**：selector 必须
+    `0x5140`（写反成 `0x5410` 退化成恒等、只错一半字节）。
+    ② **wgmma RS GEMM3**：`C[j][d]=Σ_m P[m][j]·dO[m][d]`（BM=128/BN=64/HD=64），A=Pᵀ 行主序
+    K-major（`ldmatrix.x4` 非转置）、B=dOᵀ 逐字节转置直落 **SW128**，`wgmma.m64n32k32.e4m3.e5m2`：
+    **max_abs=0.000e+00 PASS**。
+  - **SASS**：`gemm3_wgmma_kernel` = **8×`QGMMA.64x32x32.F32.E4M3.E5M2`（R56/R60/R64/R68 寄存器A）
+    + 0×HMMA** + `LDSM.MT88.4`（转置读）+ `PRMT 0x5140`；ptxas **74 regs / 0 spill**。
+  - **结论**：GEMM3/4/5 上 wgmma 的两道死结（fp8 ISA 无转置操作数 + B 需物理转置）**全部打开**；
+    剩余 = 把 `transpose_store` 接进 `fp8_mma_body` + GEMM3/4 的 M=BN 提到 64 + 重算
+    smem/CTA/SM。默认路径一行未改、数值逐位不变。
+  - 原始输出 `src/fp8/fa_bwd_fp8_stmatrix_smoke.out.txt`、`..._sass.out.txt`、`..._ptxas.out.txt`；
+    文档 `docs/03` §103、`docs/08` §5.89。
 
 ## 灵感 / backlog
 

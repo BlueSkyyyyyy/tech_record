@@ -1,0 +1,8 @@
+=== fp8 逐字节转置：ldmatrix.x4.trans + PRMT ===
+byte_transpose [128][64] -> [64][128]: mismatches=0/8192  PASS
+byte_transpose [64][64] -> [64][64]: mismatches=0/4096  PASS
+byte_transpose [64][128] -> [128][64]: mismatches=0/8192  PASS
+byte_transpose [32][128] -> [128][32]: mismatches=0/4096  PASS
+=== 第二阶段：wgmma RS GEMM3（转置操作数直喂 wgmma） ===
+wgmma RS GEMM3 dV[j][d]=Σ_m P[m][j]·dO[m][d] (BM128 BN64 HD64, A=Pᵀ ldmatrix, B=dOᵀ SW128字节转置): max_abs=0.000e+00 bad=0  PASS
+=== ALL PASS ===
