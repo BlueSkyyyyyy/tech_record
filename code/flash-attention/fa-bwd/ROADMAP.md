@@ -198,6 +198,13 @@
 
 ## 阻塞
 
+- **修正（第一百七十四轮 O79）：下面「F6 / O9c-2b」里「fp8 wgmma 无转置操作数 ⇒ GEMM3/4/5
+  只能 mma」的论据只针对 `SS_TN`。** TE SASS 证明其用 **`RS_TN`（A 在寄存器）**跑 GEMM3/4/5；
+  冒烟已证 `ldmatrix.x4` 的 A 片段可直接喂 `wgmma.m64n32k32` RS（max_abs=0）。**真阻塞改述为**：
+  每个非平凡 GEMM 仍需**一个逐字节转置的操作数**（dOᵀ/Qᵀ/Kᵀ），fp8 `ldmatrix.trans` 只交换 b16
+  配对方向；TE 用 `stmatrix`/`ldmatrix`（含 `MT88.4`）配对搬运解决（44 条）。⇒ GEMM3/4/5 wgmma
+  **不再是死结，是可做的 F3b 主体**（见 §102 / O79）。以下旧的绝对化结论按此修正阅读。
+
 - **fp8 默认 main 在本卡已到硬件平台期（第一百七十二轮 O77 三证收口）。** F6 的第三条子项
   **③（Q/dO 的 TMA cache hint / L2 persist）实测为负结果**：`--l2promo=0/1/2` S4096
   **1.7913/1.7936/1.8052ms** 噪声内，因 ncu 默认 main **L2 命中 97.08%、DRAM 4.32%**（重读本就在
@@ -3097,8 +3104,22 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       **1.7913/1.7936/1.8052ms** 噪声内，根因 ncu 默认 main **L2 命中 97.08% / DRAM 4.32%**，
       重读本就在 L2 命中、promotion 改不了 L2 扇区总量。**F6 三条子项至此全部收口（无正结果）**，
       默认路径数值逐位不变。见 `docs/03` §100、`docs/08` §5.86。
-- [ ] **F3b WS 完整化**：producer/consumer 分工 + 更深 mbarrier 流水（重叠 `wait`，降 L1/L2 压力）。
+- [~] **F3b**：① **GEMM3/4/5 上 RS wgmma（第一百七十四轮 O79 重新打开，可行）**——
+      TE SASS 证其用 `QGMMA RS_TN`（A 在寄存器）+ `STSM/LDSM` 配对粒度转置；冒烟已证
+      `ldmatrix.x4` 的 A 片段直接喂 `wgmma.m64n32k32` RS（max_abs=0 PASS）。剩余 = `stmatrix`
+      造 B/操作数 + 逐个 GEMM 替换 + 评估去 Qp/dOp 冲 4 CTA/SM（见下 O79）。② WS 完整化
+      （producer/consumer + 更深 mbarrier 流水，重叠 `wait`，降 L1/L2 压力）仍待做。
 - [ ] **F4b**：fp8 非 det 默认的 dK/dV 归约再优化（当前 red 仍是 74% L2）。
+- [x] **O79**（第一百七十四轮，**路径正结果 / 代码未改默认**）**TE SASS 发现 QGMMA `RS_TN` +
+  fp8 wgmma RS 冒烟**——用 `ncu --page source --print-source sass` 对照 TE 反向：TE
+  `..._flash_bprop_wgmma_f8_..._64x64x128`（384 线程/grid=64）= **16×QGMMA + 0×HMMA + 24×STSM
+  + 20×LDSM + 4×`UTMAREDG.4D.ADD`**，半数 QGMMA 带寄存器 A（`RS_TN`）；ours 默认 `kvtma` =
+  8×QGMMA(仅 GEMM1/2) + **96×HMMA**。新 `src/fp8/fa_bwd_fp8_wgmma_rs_smoke.cu` 证 `ldmatrix.x4`
+  （行主序 [64,K]）取回的 4×u32 恰是 `wgmma.m64n32k32` RS 的 A 片段（`ALayout_64x32`）：
+  e4m3×e4m3 / e5m2×e4m3 **max_abs=0 PASS**。**修正「阻塞」**：RS 只解决 A，dV/dK/dQ 仍各需一个
+  逐字节转置（dOᵀ/Qᵀ/Kᵀ），fp8 `ldmatrix.trans` 只换 b16 配对方向 ⇒ TE 靠 `stmatrix/ldmatrix`
+  配对搬运（44 条）造操作数。默认路径一行未改、数值逐位不变。见 `docs/03` §102、`docs/08` §5.88；
+  原始输出 `src/fp8/fa_bwd_fp8_p174_sass_te_vs_ours.out.txt`、`src/fp8/fa_bwd_fp8_wgmma_rs_smoke.out.txt`。
 - [x] **O78**（第一百七十三轮，**负结果**）**端到端 overlap（quant/LSE 与 main 跨 stream）**——
       实现「按 head 分块 + 4D-TMA 描述符解耦 + 指针偏移」的跨 stream 流水（**device 一行未改**，
       `--ovlp=N`；默认关）。**诊断**（整块 main||LSE）证明内核级重叠可行（concurrent 0.951×，LSE
@@ -3113,7 +3134,25 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百七十三轮）**：**O78——端到端 overlap（quant/LSE 与 main 跨 stream）判决为负结果**。
+> **最新（第一百七十四轮）**：**O79——TE SASS 发现 QGMMA `RS_TN`（A 在寄存器）+ fp8 wgmma RS
+> 冒烟 PASS；「GEMM3/4/5 上不了 wgmma」的阻塞被修正**。用 `ncu --page source --print-source sass`
+> 逐指令对照：TE 的 `..._flash_bprop_wgmma_f8_..._64x64x128`（384 线程/grid=64）是 **16×QGMMA
+> + 0×HMMA + 24×STSM + 20×LDSM**，其中半数 QGMMA 带**寄存器 A 操作数**
+> （`QGMMA.64x128x32... R152, R216, gdesc[UR20], R152` = CUTLASS `RS_TN`）；ours 默认
+> `kvtma` 仍是 8×QGMMA（仅 GEMM1/2）+ **96×HMMA**。新冒烟
+> `src/fp8/fa_bwd_fp8_wgmma_rs_smoke.cu` 证 `ldmatrix.x4` 取回的 4×u32 恰是
+> `wgmma.m64n32k32` RS 的 A 片段（`ALayout_64x32`）——**e4m3×e4m3 / e5m2×e4m3 max_abs=0 PASS**。
+> **修正后的真阻塞**：RS 只解决 A；dV/dK/dQ 仍各需一个**逐字节转置**（dOᵀ/Qᵀ/Kᵀ），而 fp8
+> `ldmatrix.trans` 只交换 b16 配对方向；TE 用 **`stmatrix`/`ldmatrix`（含 `MT88.4` 转置）配对粒度
+> 搬运**（44 条）来造操作数，而非逐字节 scatter。默认路径一行未改、数值逐位不变（S4096 total
+> 1.795ms/76.6 TFLOPS，TE FP8 ~5.9×）。
+> **下一步候选**：① **F3b 主体（新，可行）**——`stmatrix` 冒烟 → GEMM3/4/5 逐个换 RS wgmma
+> （A=ldmatrix 寄存器、B=stmatrix 落盘的 fold 操作数）→ 评估去 Qp/dOp 后冲 4 CTA/SM；② 端到端
+> 重叠靠「把 preprocess 融进 main」；③ 换形状/dtype 覆盖（`D=256` 泛化到 fp16/bf16）。
+> 见 `docs/03` §102、`docs/08` §5.88；原始输出 `src/fp8/fa_bwd_fp8_p174_sass_te_vs_ours.out.txt`、
+> `src/fp8/fa_bwd_fp8_wgmma_rs_smoke.out.txt`。
+>
+> **（第一百七十三轮）**：**O78——端到端 overlap（quant/LSE 与 main 跨 stream）判决为负结果**。
 > 实现「按 head 分块 + 4D-TMA 描述符 `dims[2]=hc`/`strides` 用全 H 解耦 + 指针偏移」的跨 stream
 > 流水（`--ovlp=N`，**device 一行未改**，默认关）。`--ovltest` 诊断：整块 main||LSE 并发墙钟
 > `1.594ms` vs 串行和 `1.676ms`（**0.951×**）⇒ 内核级重叠可行、LSE 可藏 ~0.082ms（67%）。但
@@ -7172,6 +7211,30 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     数值逐位不变。
   - 原始输出 `src/fp8/fa_bwd_fp8_o77_{l2promo_ab,ksplit_sweep,macro_ab,ptxas_spill,
     ncu_local_src}_s4096.out.txt`；文档 `docs/03` §100、`docs/08` §5.86。
+
+- 2026-09-30（第一百七十四轮）：**O79——TE SASS 发现 `QGMMA RS_TN`（A 在寄存器）+ fp8 wgmma
+  RS 冒烟 PASS；「GEMM3/4/5 上不了 wgmma」的阻塞被修正**。
+  - **动机**：`fp8 专项冲刺` 主线是把 fp8 main 从 mma.sync 切到 wgmma（F1→F5），但 F1 只换了
+    GEMM1/2；GEMM3/4/5 仍是 `HMMA`，「阻塞」的论据是「fp8 wgmma 无转置操作数」。本轮按任务用
+    `ncu --page source --print-source sass` 逐指令对照 TE 的 fp8 反向 kernel。
+  - **TE SASS**（`cudnn_generated_..._flash_bprop_wgmma_f8_knob_26_64x64x128_1x4x1_cga1x1x1`，
+    384 线程、grid=64）：**16×QGMMA**（8×`64x64x32` + 8×`64x128x32`）、**0×HMMA**、20×LDSM
+    （12×`MT88.4` trans）、**24×STSM**（4×`MT88.4` trans）、6×`REDG`（仅 amax）、
+    4×`UTMAREDG.4D.ADD`；其中半数 QGMMA **带寄存器 A 操作数**
+    （`QGMMA.64x128x32... R152, R216, gdesc[UR20], R152`），即 CUTLASS
+    `MMA_64x{32,64,128}x32_..._RS_TN`。ours 默认 `fa_bwd_fp8_mma_kvtma_kernel`：8×QGMMA
+    （仅 GEMM1/2）+ **96×HMMA** + 40×LDSM + 32×`REDG.E.ADD.F32`。
+  - **冒烟（正结果）**：新增 `src/fp8/fa_bwd_fp8_wgmma_rs_smoke.cu`——M=64,N=32,K=128、128
+    线程、A 行主序 [64][128] 用 `ldmatrix.x4`（与 `mma_block` 同款 `arow/acol`）装进 4×u32，
+    跑 `wgmma.mma_async...m64n32k32` RS_TN，与 CPU fp32 参考比：**e4m3×e4m3 与 e5m2×e4m3
+    均 max_abs=0.000e+00 PASS** ⇒ `ldmatrix.x4` 的 4×u32 恰是 `ALayout_64x32`。
+  - **修正「真阻塞」**：RS 只解决 A；dV/dK/dQ 仍各需**一个逐字节转置**（dOᵀ/Qᵀ/Kᵀ），而 fp8
+    `ldmatrix.trans` 只交换 b16 配对方向（O4b 已证）。TE 的做法 = **`stmatrix`/`ldmatrix` 配对
+    粒度搬运**（44 条，含 `MT88.4` 转置变体）来造 wgmma 可消费的操作数，而不是逐字节 scatter。
+    ⇒ GEMM3/4/5 wgmma 路径**明确、工程量中等偏大**，是 F3b 的第一步（非本轮 quick lever）。
+  - **默认路径一行未改、数值逐位不变**（S4096 total 1.7951ms/**76.6 TFLOPS**，TE FP8 ~5.9×）。
+  - 原始输出 `src/fp8/fa_bwd_fp8_p174_sass_te_vs_ours.out.txt`、
+    `src/fp8/fa_bwd_fp8_wgmma_rs_smoke.out.txt`；文档 `docs/03` §102、`docs/08` §5.88。
 
 ## 灵感 / backlog
 

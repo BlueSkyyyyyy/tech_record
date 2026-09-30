@@ -1,0 +1,33 @@
+=== p174: TE fp8 bwd vs ours fp8 kvtma SASS opcode compare (S=512 causal, ncu --page source) ===
+
+--- TE: cudnn_generated_..._flash_bprop_wgmma_f8_knob_26_64x64x128_1x4x1_cga1x1x1_kernel0_0 ---
+grid=(64,1,1) block=(384,1,1), 64x64x128, cga1x1x1
+     20 STSM.N.MN.N
+     16 STS.N
+     16 QGMMA.N
+     16 LDS.N
+     12 LDSM.N.MTN.N
+      8 LDSM.N.MN.N
+      6 STS
+      4 UTMAREDG.ND.ADD
+      4 UTMALDG.ND
+      4 STSM.N.MTN.N
+      4 LDS
+      3 REDG.E.MIN.STRONG.GPU
+      3 REDG.E.MAX.SN.STRONG.GPU
+      2 UTMASTG.ND
+
+--- ours: fa_bwd_fp8_mma_kvtma_kernel<128,64,32,REGDQ=1,...> (default Hopper) ---
+    316 LDS
+     96 HMMA.N.FN
+     65 STS
+     40 LDSM.N.MTN.N
+     32 REDG.E.ADD.FN
+      8 QGMMA.N
+      7 UTMALDG.ND
+      6 LDSM.N.MN.N
+      5 STS.N
+
+--- TE QGMMA variants (with register A operands) ---
+      8 QGMMA.64x128x32.
+      8 QGMMA.64x64x32.

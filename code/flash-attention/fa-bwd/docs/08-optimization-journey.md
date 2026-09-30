@@ -1676,3 +1676,22 @@ smem 冲突 + 低 occ
 - **结论**：本 shape 的 fp8 main 已按「3 CTA/SM、铺满 20.7 波」调优，head/seq 切分必回尾波；
   吃这 ~5% 只能「把 preprocess 融进 main」（WS prologue，同 F3b 大改）。默认逐位不变。
 - 详见 `docs/03` §101；原始输出 `src/fp8/fa_bwd_fp8_o78_{ovltest,sweep,ncu_main,baseline_te}*`。
+
+### 5.88 第 174 轮（O79）：TE SASS 的 QGMMA **RS_TN** 发现 + fp8 wgmma RS 冒烟——重新打开 GEMM3/4/5 wgmma 路径
+
+- **动机**：ROADMAP『fp8 专项冲刺』主线是「fp8 main 从 mma.sync 切到 wgmma」（F1→F5），但 F1
+  只把 GEMM1/2 换成 wgmma；GEMM3/4/5 仍是 `HMMA`，「阻塞」记为「fp8 wgmma 无转置操作数」。
+  本轮按任务要求用 `ncu --page source --print-source sass` 逐指令对照 TE 的反向 kernel。
+- **发现**：TE 的 `..._flash_bprop_wgmma_f8_..._64x64x128`（384 线程、grid=64）**16×QGMMA**
+  （8×`64x64x32` + 8×`64x128x32`）、**0×HMMA**；其中一半带**寄存器 A 操作数**
+  （`QGMMA.64x128x32... R152, R216, gdesc[UR20], R152`）= CUTLASS `RS_TN`。即「需转置的那个
+  操作数」可经 `ldmatrix` 进寄存器 A，绕开「B 必须物理转置」。此外 TE 有 **24×STSM + 20×LDSM**
+  （含 `MT88.4` 转置变体）——它靠**矩阵搬运指令做配对粒度的转置**，不是逐字节 scatter。
+- **冒烟（正结果）**：`src/fp8/fa_bwd_fp8_wgmma_rs_smoke.cu` 验证 `ldmatrix.x4`（行主序 [64,K]
+  K-major，mma 同款 `arow/acol`）取回的 4×u32 **恰是** `wgmma.m64n32k32` RS_TN 的 A 片段
+  （`ALayout_64x32`）：e4m3×e4m3 与 e5m2×e4m3 **max_abs=0 PASS**。
+- **修正后的真阻塞**：RS 只解决 A；dV/dK/dQ 仍各有**一个逐字节转置**需求（dOᵀ/Qᵀ/Kᵀ），而 fp8
+  `ldmatrix.trans` 只交换 b16 配对方向。TE 的解法是 `stmatrix/ldmatrix` 配对粒度搬运（44 条）。
+  ⇒ GEMM3/4/5 wgmma 路径**明确但工程量中等偏大**，非本轮 quick lever。默认路径逐位不变。
+- 详见 `docs/03` §102；原始输出 `src/fp8/fa_bwd_fp8_p174_sass_te_vs_ours.out.txt`、
+  `src/fp8/fa_bwd_fp8_wgmma_rs_smoke.out.txt`。

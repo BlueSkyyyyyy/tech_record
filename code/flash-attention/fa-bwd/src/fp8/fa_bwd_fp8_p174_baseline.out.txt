@@ -1,0 +1,9 @@
+=== p174 O79 baseline (S=4096 H16 D128 causal fp8, ours 默认 Hopper, 未改) ===
+[ours] total 1.7951 ms / 76.56 TFLOPS  (quant 0.1060 | preprocess 0.1217 | main 1.5652 ms)
+[ours] numeric vs fp32 ref (b1_s4096_h16_d128_causal_fp8): dq/dk/dv max_abs = 2.635e-01 / 2.644e-01 / 3.216e-01
+[TE FP8 pure-bwd] 0.3025 ms / 908.72 TFLOPS  => ours/TE = 5.93x
+[ours] relL2 vs fp32 ref: dq 8.15% / dk 8.26% / dv 6.49%  (护栏 8.2/8.3/6.5% ±0.3)
+[ours] relL2 vs TE  fp8: dq 13.42% / dk 13.48% / dv 28.15%  (max_abs O(0.3-0.7))
+
+--- reasons: ours 8xQGMMA(GEMM1/2) + 96xHMMA(GEMM3/4/5) + 40xLDSM; TE 16xQGMMA + 0xHMMA + 24xSTSM + 20xLDSM ---
+--- see fa_bwd_fp8_p174_sass_te_vs_ours.out.txt and fa_bwd_fp8_wgmma_rs_smoke.out.txt ---

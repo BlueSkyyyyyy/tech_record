@@ -9058,3 +9058,67 @@ prologue / 单 kernel 内流水），属大改（同 F3b 的困境）。**默认
 - `src/fp8/fa_bwd_fp8_o78_ncu_main_s4096.out.txt`（默认 main ncu，L2 77.10% / L1TEX 71.96% /
   DRAM 4.21% / Compute 48.27% / 168 regs / 74.82KB / 3 CTA/SM / Waves 20.69）
 - `src/fp8/fa_bwd_fp8_o78_baseline_te.out.txt`（TE FP8 纯反向 0.3035ms/905.6TF ⇒ ours/TE 5.92×）
+
+## 102. F3b 前置（第 174 轮）：TE SASS 的 **QGMMA RS_TN（A 在寄存器）** 发现 + fp8 wgmma RS 冒烟 —— 重新打开「GEMM3/4/5 上 wgmma」路径
+
+### 102.1 动机与结论一句话
+
+ROADMAP『fp8 专项冲刺』把「把 fp8 main 从 mma.sync 切到 wgmma」列为主线（F1→F5），
+但 F1 只把 **GEMM1/2** 换成了 wgmma（SS_TN），GEMM3/4/5 仍 `HMMA.16816 + LDSM`；「阻塞」
+里记的论据是「fp8 wgmma 只有 `SS_TN`，没有转置操作数，故 B 必须物理转置」。本轮用
+`ncu --page source --print-source sass` 逐指令对照 TE 的反向 kernel 后发现：**该论据只覆盖
+`SS_TN`（A/B 均描述符）**；TE 的 GEMM3/4/5 用的是 **`RS_TN`（A 在寄存器、B 走描述符）**，
+于是「需要转置的那个操作数」可以经 `ldmatrix` 放进寄存器，绕开「B 必须物理转置 SW128」。
+本轮的增量就是**把这条路径的第一步钉死**：写 `fa_bwd_fp8_wgmma_rs_smoke.cu` 验证
+`ldmatrix.x4` 取回的 4×u32 恰是 `wgmma.m64n32k32` RS_TN 的 A 片段（`ALayout_64x32`），
+**e4m3×e4m3 与 e5m2×e4m3 两组 max_abs=0（PASS）**。默认路径一行未改。
+
+### 102.2 逐指令对照（S=512 causal，`ncu --page source --print-source sass`）
+
+| opcode | TE `..._flash_bprop_wgmma_f8_..._64x64x128_1x4x1` (384 线程, grid=64) | ours `fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>` (128 线程, grid=...) |
+|---|---|---|
+| QGMMA | **16**（8×`64x64x32` + 8×`64x128x32`） | 8（仅 GEMM1/2 `64x32`） |
+| HMMA | **0** | **96**（GEMM3/4/5） |
+| LDSM | 20（12×`MT88.4` trans + 8×`M88.4`） | 46（40×`MT88.2` + 6×`M88.2/4`） |
+| **STSM** | **24**（20×`M88.4` + 4×`MT88.4` trans） | **0** |
+| REDG | 6（`MIN/MAX` amax；无逐元素 ADD） | **32×`REDG.E.ADD.F32`**（dK/dV/dQ 原子） |
+| UTMA | 4×`UTMALDG.4D` + 2×`UTMASTG.4D` + **4×`UTMAREDG.4D.ADD`** | 7×`UTMALDG.4D`（Q/K/V/dO） |
+
+TE 的 QGMMA 里半数带**寄存器 A 操作数**，例如
+`QGMMA.64x128x32.F32.E4M3.E5M2 R152, R216, gdesc[UR20], R152`
+（`D=R152, A=R216(寄存器), B=gdesc[UR20], C=R152`）。这正是 CUTLASS 的
+`MMA_64x{32,64,128}x32_F32E*M3E*M3_RS_TN`（见 `cute/arch/mma_sm90_gmma.hpp`），
+A 片段类型为 `uint32_t[N/8]`、`ALayout_64x32`（`mma_traits_sm90_gmma.hpp`）。
+
+### 102.3 冒烟：`ldmatrix.x4` 产出 wgmma RS 的 A 片段（PASS）
+
+`src/fp8/fa_bwd_fp8_wgmma_rs_smoke.cu`：M=64,N=32,K=128、128 线程、A 行主序 [64][128]、
+B SW128 K-major [32][128]，A 用 `ldmatrix.x4`（与 `mma_block` 同款 `arow/acol` 模式）装进
+4×u32，跑 `wgmma.mma_async...m64n32k32...{%0..%15}, {%16..%19}, %20, p, ...`，与 CPU fp32 参考逐元素比：
+
+```
+wgmma RS_TN m64n32k32 e4m3×e4m3 A(ldmatrix,x4) vs CPU: max_abs=0.000e+00  PASS
+wgmma RS_TN m64n32k32 e5m2×e4m3 A(ldmatrix,x4) vs CPU: max_abs=0.000e+00  PASS
+```
+
+⇒ **A 片段 = mma.m16n8k32 的 A 片段在 4 warp 上铺 64 行**，可直接由现有 `mma_block` 的
+`ldmatrix_x4` 取数模式喂给 wgmma RS。原始输出
+`src/fp8/fa_bwd_fp8_wgmma_rs_smoke.out.txt`。
+
+### 102.4 修正后的「真阻塞」与下一步
+
+RS 只解决 A。每个非平凡 GEMM 仍有**恰好一个操作数需要（逐字节）转置**：
+dV=PᵀdO（需 dOᵀ）、dK=dSᵀQ（需 Qᵀ）、dQ=dS·K（需 Kᵀ）。fp8 的 `ldmatrix.trans` **只交换
+8×8 的 b16（2 字节）配对方向、不做逐字节转置**（O4b 已证）——所以不能靠 `.trans` 直接得到
+dOᵀ/Qᵀ/Kᵀ 的 A 片段。TE 的 SASS 给出它真正的做法：**`STSM`（store-matrix，含
+`STSM.MT88.4` 转置写）+ `LDSM`（含 `MT88.4` 转置读）** 共 44 条——即用矩阵搬运指令在寄存器
+片段与 smem 之间做**配对粒度的转置搬运**（fold 出来的 P/dS 片段、以及 Q/K/dO 的转置副本都在
+寄存器里用 `stmatrix` 落成 wgmma 可消费的 smem tile），而不是逐字节 scatter（那正是 O4b/F6
+判负的 `+20KB smem + scatter` 方案）。**路径已明确、工程量中等偏大**：
+① 冒烟 `stmatrix`（含 trans）能把 mma 累加器片段写成 SW128/none canonical B/G 操作数；
+② 把 GEMM3/4/5 逐个换成 RS wgmma（A=ldmatrix 寄存器片段，B=stmatrix 落盘的 fold 操作数）；
+③ 顺带评估去掉 `Qp/dOp`（17.4KB）后能否冲 **4 CTA/SM**（当前 168 regs/74.8KB→3 CTA/SM）。
+默认路径数值逐位不变。见 `docs/08` §5.88、ROADMAP「下一步」。
+
+**原始输出**：`src/fp8/fa_bwd_fp8_p174_sass_te_vs_ours.out.txt`（逐 opcode 对照）、
+`src/fp8/fa_bwd_fp8_wgmma_rs_smoke.out.txt`（冒烟 PASS）。
