@@ -1,0 +1,24 @@
+### O88（第 183 轮）：默认 fp8 main 的编译期优化宏复扫（O81 引入 GEMM5 wgmma 之后），S=4096 H16 causal，Hopper
+### 结论：全部宏中性或有损（ILV34 −5%、R4 −2.5%），O77 的结论在 O81 后仍成立。
+
+=== [] ===
+[timing] total(quant+pre+main+cvt) 1.7177 ms  80.01 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1061 ms | preprocess 0.1217 ms | main 1.4802 ms | convert 0.0098 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== [-DFA_ILV=1] ===
+[timing] total(quant+pre+main+cvt) 1.7197 ms  79.92 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1061 ms | preprocess 0.1216 ms | main 1.4842 ms | convert 0.0079 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== [-DFA_ILV34=1] ===
+[timing] total(quant+pre+main+cvt) 1.7995 ms  76.37 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1062 ms | preprocess 0.1216 ms | main 1.5672 ms | convert 0.0045 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== [-DFA_WS1=1] ===
+[timing] total(quant+pre+main+cvt) 1.7258 ms  79.64 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1060 ms | preprocess 0.1223 ms | main 1.4913 ms | convert 0.0062 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== [-DFA_R4=1] ===
+[timing] total(quant+pre+main+cvt) 1.7553 ms  78.30 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1059 ms | preprocess 0.1214 ms | main 1.5135 ms | convert 0.0144 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== [-DFA_ILV=1 -DFA_ILV34=1] ===
+[timing] total(quant+pre+main+cvt) 1.8090 ms  75.97 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1063 ms | preprocess 0.1228 ms | main 1.5591 ms | convert 0.0208 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== [-DFA_WS1=1 -DFA_ILV34=1] ===
+[timing] total(quant+pre+main+cvt) 1.7966 ms  76.50 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1062 ms | preprocess 0.1218 ms | main 1.5570 ms | convert 0.0117 ms (cvt_on=0, qfuse=1, dfuse=1)

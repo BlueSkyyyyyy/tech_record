@@ -1,0 +1,7 @@
+### O88（第 183 轮）：纯反向基线（FP8，TE2.14，forward 在计时区外）——同本轮 ours S4096 对照
+### ours 两文件 total S4096 1.7162ms / 80.08TF，见 o88_qcap_ab
+
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+=== bench CUPTI device time (pure-bwd, dtype=fp8) ===
+[b1_s4096_h16_d128_causal_fp8] te=0.3041ms/903.83TF
