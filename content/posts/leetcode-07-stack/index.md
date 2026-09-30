@@ -1,5 +1,5 @@
 ---
-title: "LeetCode 题解精讲（七）：栈"
+title: "LeetCode 题解精讲（七）：栈与单调栈"
 date: 2026-09-30
 draft: false
 weight: 8
