@@ -293,7 +293,8 @@ static void launch_bwd_main_qdtma(dim3 mg, const CUtensorMap& qmap, const CUtens
 
 // O41：Q/dO/K/V 全 4D-TMA 版主 kernel（roadmap「下一步候选 ①」；仅 `-DFA_WGMMA -DFA_TMA`
 //   构建、HD=128、WGMMA 路径）。K 双缓冲、V 单缓冲，Kp 由 SW128 K tile 重建。
-template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true>
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
+          bool HSWAP = false>
 static void launch_bwd_main_kvtma(dim3 mg, const CUtensorMap& qmap, const CUtensorMap& dmap,
                                   const CUtensorMap& kmap, const CUtensorMap& vmap,
                                   const unsigned char* q8, const float* qs,
@@ -307,9 +308,9 @@ static void launch_bwd_main_kvtma(dim3 mg, const CUtensorMap& qmap, const CUtens
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = Cfg::smem_bytes_wgmma_kvtma;
   CUDA_CHECK(cudaFuncSetAttribute(
-      fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP>,
+      fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP, false, false, false, HSWAP>,
       cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP>
+  fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP, false, false, false, HSWAP>
       <<<mg, THREADS, kSmem, st>>>(qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos,
                                delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
                                ksplit, nullptr, nullptr, nullptr, 0, nullptr, nullptr, mt_m);
@@ -1639,6 +1640,13 @@ int main(int argc, char** argv) {
   //   1 = 反转（贵块先跑，削尾波）——只改「哪个 CTA 算哪个 m 块」，dK/dV 原子顺序略变，
   //   数值仍在 fp8 噪声内。用于验证「靠调度把 ksplit 降下来、消 Q/dO 重读」是否可行。
   int mrev_opt = 1;  // O89：默认开（LPT 贵块先跑）；--mrev=0 A/B
+  // O93（第 188 轮，LPT 候选 ③）：定长 causal 默认 kernel 的**跨 head 全局 LPT**。0 = 历史
+  //   （grid=(nblk*ksplit, H, B)，head 走慢轴 ⇒ 每个 head 内 m 降序的锯齿）；1 = 轴对调
+  //   （grid=(H, nblk*ksplit, B)，head 走快轴）⇒ 所有 head 的最贵 m 块一起先派发。只改
+  //   「哪个 CTA 算哪个 (h,mblk,part)」，dK/dV 原子顺序略变、数值在 fp8 噪声内。
+  //   **默认开**（正结果）；`--hswap=0` A/B。配合 `hswap_elig` 时自动把 ksplit 收到 2
+  //   （全局 LPT 让低 ksplit 的负载均衡够好，Q/dO 重读 8×→2×）。
+  int hswap_opt = 1;  // O93：默认开；--hswap=0 回退历史锯齿序
   // O22：在 `-DFA_WGMMA`（sm_90a）构建下，默认启用 Hopper 路径（LSE + 主 kernel GEMM1/2 的
   //   wgmma）；sm_90 构建下这两个宏路径不存在，保持 mma。`--lsewgm=0/--wgmma=0` 可显式退回 mma
   //   做 A/B（S=4096 端到端 wgmma 比 mma 快 ~8%：2.70→2.49ms，preprocess 0.40→0.32、main 2.19→2.04）。
@@ -1806,6 +1814,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--ksplit2=", 0) == 0) ksplit2_opt = atoi(a.c_str() + 10);
     else if (a.rfind("--mrev=", 0) == 0) mrev_opt = atoi(a.c_str() + 7);
     else if (a == "--mrev") mrev_opt = 1;
+    else if (a.rfind("--hswap=", 0) == 0) hswap_opt = atoi(a.c_str() + 8);
+    else if (a == "--hswap") hswap_opt = 1;
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
     else if (!a.empty() && a[0] != '-') dir = a;
   }
@@ -1924,6 +1934,18 @@ int main(int argc, char** argv) {
   } else if (mrev_opt) {
     printf("O89: mrev requested but ignored (need causal & D==128 & fixed-length)\n");
   }
+  // O93：跨 head 全局 LPT（轴对调）的启用条件（与 launch 分支一致）：默认开 + mrev 表已建
+  //   （定长 causal D=128 nblk>=16）。仅 Hopper `-DFA_WGMMA -DFA_TMA` 构建真正生效。
+  const bool hswap_elig = (hswap_opt != 0) && (mrev_opt != 0) && causal && D == 128 &&
+                          (S + 63) / 64 >= 16;
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  if (hswap_elig)
+    printf("O93: hswap on (grid=(H,nblk*ksplit,B), global LPT across heads)\n");
+  else if (hswap_opt)
+    printf("O93: hswap requested but ignored (need causal & D==128 & nblk>=16)\n");
+#else
+  if (hswap_opt) printf("O93: hswap requested but ignored (非 Hopper 构建)\n");
+#endif
 
   CUDA_CHECK(cudaMemcpy(d_q_f, q_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_k_f, k_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
@@ -2007,6 +2029,7 @@ int main(int argc, char** argv) {
   //        TARGET = (D==128) ? 4096 : 132;  k = clamp(TARGET/base, 1, 16) 后向下取 2 的幂。----
   constexpr int BM = 64;
   const long base_grid = (long)((S + BM - 1) / BM) * H * B;
+  const bool ksplit_auto = (ksplit < 1);
   if (ksplit < 1) {
     // O29：自动切块数重新标定。原公式 `target=(D==128)?4096:132` 是早期（O2b）在
     //   「d128=3 CTA/SM、MLA=1 CTA/SM」下测的，随后的 O3/O4b/O9c-2/O22 等把数据通路改过之后
@@ -2030,6 +2053,12 @@ int main(int argc, char** argv) {
     while (kp * 2 <= k) kp *= 2;  // 向下取 2 的幂，让 grid 对齐到整数个波附近
     ksplit = (int)kp;
   }
+  // O93：hswap（跨 head 全局 LPT）启用时把自动 ksplit 收到 2——全局 LPT 使低 ksplit 的负载
+  //   均衡足够好（S4096 main 1.443→1.373ms，Q/dO 重读 8×→2×；S1024H32/GQA 同向 1.10–1.12×）。
+  //   仅默认 Hopper kvtma 构建生效；`--ksplit=K` 显式给出时不覆盖。（`hswap_elig` 定义见上。）
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  if (hswap_elig && ksplit_auto) ksplit = 2;
+#endif
   // O7：只有 HD=128（dQ 一次铺满 N）且「平均每 CTA 的 nt tile 足够多」时才启用寄存器累加。
   // 因果下每 mblk 的 nt tile 数 ≈ (m0+BM)/BN，三角求和 /(mblk·ksplit) 后平均每 CTA
   // ≈ (S/BN)/2/ksplit；阈值取 4（实测 S=1024H32 平均=2、启用反而持平/略慢，S=4096=16 明显收益）。
@@ -2421,6 +2450,22 @@ int main(int argc, char** argv) {
 #if defined(FA_WGMMA) && defined(FA_TMA)
     // O41：Q/dO/K/V 全 TMA 版（K 双缓冲、V 单缓冲）。仅默认 fold 选项下启用。
     if (D == 128 && wgmma && qd_tma && kv_tma && prel_sel && f16b_sel && rcp_sel) {
+      // O93：跨 head 全局 LPT——grid 轴对调（head 走快轴）。仅当 O89 的 mrev 表已建
+      //   （定长 causal D=128 nblk>=16）才有意义；否则维持历史锯齿序。
+      if (hswap_opt && d_mrev) {
+        dim3 mgh(H, mg.x, mg.z);
+        if (use_regdq)
+          launch_bwd_main_kvtma<128, 64, 32, true, true, true, true, true>(
+              mgh, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
+              d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+              scale, (int)causal, ksplit, nullptr, d_mrev);
+        else
+          launch_bwd_main_kvtma<128, 64, 32, false, true, true, true, true>(
+              mgh, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
+              d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+              scale, (int)causal, ksplit, nullptr, d_mrev);
+        return;
+      }
       if (use_regdq)
         launch_bwd_main_kvtma<128, 64, 32, true>(
             mg, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,

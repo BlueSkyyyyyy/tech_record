@@ -1,0 +1,7 @@
+### O93 同 session TE FP8 纯反向基线（S4096 H16 B1 causal），harness/fa_bwd_bench.py bench --dtype fp8
+
+=== bench CUPTI device time (pure-bwd, dtype=fp8) ===
+[b1_s4096_h16_d128_causal_fp8] te=0.3049ms/901.60TF
+
+### ours（默认 hswap，两文件）: total 1.6109ms/85.32TF, main 1.3742ms
+### ours/TE：total 1.6109/0.3039=5.30x, main 1.3742/0.3039=4.52x

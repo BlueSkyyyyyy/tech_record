@@ -2774,10 +2774,17 @@ __global__ void delta_warp_kernel(const float* __restrict__ o,
 //   F7 主体「两 kernel」选项（ROADMAP「下一步候选 ①(a)」）——KV-owner 出 dK/dV（red=0）＋
 //   本 pass 出 dQ。dQ 在 `kRegDq` 下寄存器 owned（每元素单写者），DQONLY 时用 **plain store**
 //   写出（red=0）。跳过 Ap/dS3 fold + GEMM3/4(dV/dK) + 其 epilogue；保留 GEMM1/2/5 与 dS2 fold。
+// O93（第 188 轮，F6-①/LPT 候选 ③）：`HSWAP` —— 把默认稠密网格的 **x/y 轴对调**（head 走
+//   blockIdx.x 快轴、m 块走 blockIdx.y），于是硬件派发顺序变成「**所有 head 的最贵 m 块先跑**」
+//   （配合 O89 的 `mt_m` 反转表）= 跨 head 的**全局 LPT**；历史路径（head=blockIdx.y）是
+//   「每个 head 内 m 降序」的锯齿形，head 边界处会重置。纯调度、不改任何数据/数学：dK/dV 仍是
+//   跨 CTA 原子（可交换）⇒ 数值只在 fp8 噪声内。仅定长（`mt_b==nullptr`）用；`HSWAP=false`
+//   与历史逐位相同。代价：相邻 CTA 落在不同 head ⇒ 理论损 L2 读局部性（S4096 的 K/V 全体
+//   ~17MB 仍装得下 50MB L2，实测见 docs）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
            bool RCP = true, bool TMA = false, bool KVTMA = false, int NTH = THREADS,
            int NWAR = WN, bool KVPIPE = false, bool DET = false, bool DET_HALF = false,
-           bool DQONLY = false>
+           bool DQONLY = false, bool HSWAP = false>
 __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8,
@@ -2933,10 +2940,13 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   //   `mt_b/mt_m`（保持同序列 K/V 的 L2 局部性），grid.x = total_mt*ksplit、grid.y = H、grid.z = 1。
   //   这消掉了「以 maxlen 为界」时短序列大量越界早退的死 CTA（强倾斜 b8 实测 8192→~1376），
   //   并让最贵的 m 块先调度（削尾波）。`mt_b==nullptr` 时逐式退化为定长/旧 varlen 行为。
-  const int part = blockIdx.x % ksplit;
-  const int mt = blockIdx.x / ksplit;
+  // O93：`HSWAP` 时把 head 放到快轴（grid=(H, nblk*ksplit, B)）⇒ 跨 head 全局 LPT；
+  //   历史路径 grid=(nblk*ksplit, H, B)。两者只在「哪个 CTA 算哪个 (h,mblk,part)」上不同。
+  const int part = HSWAP ? (blockIdx.y % ksplit) : (blockIdx.x % ksplit);
+  const int mt   = HSWAP ? (blockIdx.y / ksplit) : (blockIdx.x / ksplit);
   const int mblk = mt_m ? mt_m[mt] : mt;
-  const int h = blockIdx.y, b = mt_b ? mt_b[mt] : blockIdx.z;
+  const int h = HSWAP ? blockIdx.x : blockIdx.y;
+  const int b = mt_b ? mt_b[mt] : blockIdx.z;
   // VARLEN：cu_seqlens 给出每个序列在 packed [T,H,D] 的 token 基址与长度。
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
   const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
@@ -4155,7 +4165,7 @@ fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
 // P3-4g：`DET=true` 时复用同一 body 的确定性 dK/dV 路径（partial + 固定次序归约），
 //   把 `--det` 从默认 mma 路径扩到 Hopper TMA 快路。
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
-           bool DET = false, bool DET_HALF = false, bool DQONLY = false>
+           bool DET = false, bool DET_HALF = false, bool DQONLY = false, bool HSWAP = false>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
@@ -4175,7 +4185,7 @@ fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const int* __restrict__ part_base = nullptr,
                             const int* __restrict__ mt_m = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true, THREADS, WN, false, DET,
-               DET_HALF, DQONLY>(
+               DET_HALF, DQONLY, HSWAP>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap, nullptr, mt_m,
       dk_part, dv_part, nblk, dq_part, part_base);
@@ -5617,7 +5627,8 @@ static void launch_bwd_main_qdtma(dim3 mg, const CUtensorMap& qmap, const CUtens
 
 // O41：Q/dO/K/V 全 4D-TMA 版主 kernel（roadmap「下一步候选 ①」；仅 `-DFA_WGMMA -DFA_TMA`
 //   构建、HD=128、WGMMA 路径）。K 双缓冲、V 单缓冲，Kp 由 SW128 K tile 重建。
-template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true>
+template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
+          bool HSWAP = false>
 static void launch_bwd_main_kvtma(dim3 mg, const CUtensorMap& qmap, const CUtensorMap& dmap,
                                   const CUtensorMap& kmap, const CUtensorMap& vmap,
                                   const unsigned char* q8, const float* qs,
@@ -5631,9 +5642,9 @@ static void launch_bwd_main_kvtma(dim3 mg, const CUtensorMap& qmap, const CUtens
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = Cfg::smem_bytes_wgmma_kvtma;
   CUDA_CHECK(cudaFuncSetAttribute(
-      fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP>,
+      fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP, false, false, false, HSWAP>,
       cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP>
+  fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP, false, false, false, HSWAP>
       <<<mg, THREADS, kSmem>>>(qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos,
                                delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
                                ksplit, nullptr, nullptr, nullptr, 0, nullptr, nullptr, mt_m);
@@ -6953,6 +6964,10 @@ int main(int argc, char** argv) {
   int ksplit2_opt = -1;  // O19：wg2 的 ksplit（-1 自动）
   // O89：定长 causal 主 kernel 的 m 块调度序（LPT）。0 = 历史；1 = 贵块先跑（削尾波）。
   int mrev_opt = 1;  // O89：默认开（LPT 贵块先跑）；--mrev=0 A/B
+  // O93（第 188 轮，LPT 候选 ③）：跨 head 全局 LPT——grid 轴对调（head 走快轴），
+  //   所有 head 的最贵 m 块一起先派发。默认开（正结果）；--hswap=0 A/B。配合 hswap_elig
+  //   时自动把 ksplit 收到 2（Q/dO 重读 8×→2×）。
+  int hswap_opt = 1;
   // O22：在 `-DFA_WGMMA`（sm_90a）构建下，默认启用 Hopper 路径（LSE + 主 kernel GEMM1/2 的
   //   wgmma）；sm_90 构建下这两个宏路径不存在，保持 mma。`--lsewgm=0/--wgmma=0` 可显式退回 mma
   //   做 A/B（S=4096 端到端 wgmma 比 mma 快 ~8%：2.70→2.49ms，preprocess 0.40→0.32、main 2.19→2.04）。
@@ -7100,6 +7115,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--ksplit2=", 0) == 0) ksplit2_opt = atoi(a.c_str() + 10);
     else if (a.rfind("--mrev=", 0) == 0) mrev_opt = atoi(a.c_str() + 7);
     else if (a == "--mrev") mrev_opt = 1;
+    else if (a.rfind("--hswap=", 0) == 0) hswap_opt = atoi(a.c_str() + 8);
+    else if (a == "--hswap") hswap_opt = 1;
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
     else if (!a.empty() && a[0] != '-') dir = a;
   }
@@ -7213,6 +7230,17 @@ int main(int argc, char** argv) {
   } else if (mrev_opt) {
     printf("O89: mrev requested but ignored (need causal & D==128 & fixed-length)\n");
   }
+  // O93：跨 head 全局 LPT（轴对调）的启用条件（与 launch 分支一致）。仅 Hopper 构建生效。
+  const bool hswap_elig = (hswap_opt != 0) && (mrev_opt != 0) && causal && D == 128 &&
+                          (S + 63) / 64 >= 16;
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  if (hswap_elig)
+    printf("O93: hswap on (grid=(H,nblk*ksplit,B), global LPT across heads)\n");
+  else if (hswap_opt)
+    printf("O93: hswap requested but ignored (need causal & D==128 & nblk>=16)\n");
+#else
+  if (hswap_opt) printf("O93: hswap requested but ignored (非 Hopper 构建)\n");
+#endif
 
   CUDA_CHECK(cudaMemcpy(d_q_f, q_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_k_f, k_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
@@ -7296,6 +7324,7 @@ int main(int argc, char** argv) {
   //        TARGET = (D==128) ? 4096 : 132;  k = clamp(TARGET/base, 1, 16) 后向下取 2 的幂。----
   constexpr int BM = 64;
   const long base_grid = (long)((S + BM - 1) / BM) * H * B;
+  const bool ksplit_auto = (ksplit < 1);
   if (ksplit < 1) {
     // O29：自动切块数重新标定。原公式 `target=(D==128)?4096:132` 是早期（O2b）在
     //   「d128=3 CTA/SM、MLA=1 CTA/SM」下测的，随后的 O3/O4b/O9c-2/O22 等把数据通路改过之后
@@ -7319,6 +7348,10 @@ int main(int argc, char** argv) {
     while (kp * 2 <= k) kp *= 2;  // 向下取 2 的幂，让 grid 对齐到整数个波附近
     ksplit = (int)kp;
   }
+  // O93：hswap（跨 head 全局 LPT）启用时把自动 ksplit 收到 2（与两文件版同源）。
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  if (hswap_elig && ksplit_auto) ksplit = 2;
+#endif
   // O7：只有 HD=128（dQ 一次铺满 N）且「平均每 CTA 的 nt tile 足够多」时才启用寄存器累加。
   // 因果下每 mblk 的 nt tile 数 ≈ (m0+BM)/BN，三角求和 /(mblk·ksplit) 后平均每 CTA
   // ≈ (S/BN)/2/ksplit；阈值取 4（实测 S=1024H32 平均=2、启用反而持平/略慢，S=4096=16 明显收益）。
@@ -7704,6 +7737,21 @@ int main(int argc, char** argv) {
 #if defined(FA_WGMMA) && defined(FA_TMA)
     // O41：Q/dO/K/V 全 TMA 版（K 双缓冲、V 单缓冲）。仅默认 fold 选项下启用。
     if (D == 128 && wgmma && qd_tma && kv_tma && prel_sel && f16b_sel && rcp_sel) {
+      // O93：跨 head 全局 LPT（grid 轴对调，head 走快轴）。仅当 O89 的 mrev 表已建时启用。
+      if (hswap_opt && d_mrev) {
+        dim3 mgh(H, mg.x, mg.z);
+        if (use_regdq)
+          launch_bwd_main_kvtma<128, 64, 32, true, true, true, true, true>(
+              mgh, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
+              d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+              scale, (int)causal, ksplit, d_mrev);
+        else
+          launch_bwd_main_kvtma<128, 64, 32, false, true, true, true, true>(
+              mgh, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
+              d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+              scale, (int)causal, ksplit, d_mrev);
+        return;
+      }
       if (use_regdq)
         launch_bwd_main_kvtma<128, 64, 32, true>(
             mg, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,

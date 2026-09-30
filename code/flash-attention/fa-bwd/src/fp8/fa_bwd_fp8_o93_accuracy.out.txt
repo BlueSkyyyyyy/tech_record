@@ -1,0 +1,22 @@
+### O93（第 188 轮）精度护栏：ours_hp（默认 hswap+ksplit=2）vs fp32 ref 与 vs TE FP8
+### 判据：ours-vs-ref relL2 dq/dk/dv <= 8.2/8.3/6.5% (+-0.3)；ours-vs-TE <= ~15%；max_abs O(0.2-0.9)
+
+== b1_s4096_h16_d128_causal_fp8 ==
+  dq  ours-vs-ref: relL2=8.148%  max_abs=2.635e-01  |  ours-vs-TE: relL2=13.42%
+  dk  ours-vs-ref: relL2=8.263%  max_abs=2.644e-01  |  ours-vs-TE: relL2=13.48%
+  dv  ours-vs-ref: relL2=6.489%  max_abs=3.216e-01  |  ours-vs-TE: relL2=28.15%
+
+== b1_s1024_h32_d128_causal_fp8 ==
+  dq  ours-vs-ref: relL2=8.104%  max_abs=2.399e-01  |  ours-vs-TE: relL2=13.32%
+  dk  ours-vs-ref: relL2=8.226%  max_abs=4.177e-01  |  ours-vs-TE: relL2=13.36%
+  dv  ours-vs-ref: relL2=6.389%  max_abs=3.535e-01  |  ours-vs-TE: relL2=14.87%
+
+== b1_s1024_h32_d128_kv4_causal_fp8 ==
+  dq  ours-vs-ref: relL2=8.148%  max_abs=2.517e-01  |  ours-vs-TE: relL2=13.44%
+  dk  ours-vs-ref: relL2=8.218%  max_abs=5.339e-01  |  ours-vs-TE: relL2=13.41%
+  dv  ours-vs-ref: relL2=6.320%  max_abs=7.173e-01  |  ours-vs-TE: relL2=14.72%
+
+== b1_s512_h16_d128_causal_fp8 ==
+  dq  ours-vs-ref: relL2=8.179%  max_abs=2.426e-01  |  ours-vs-TE: relL2=13.41%
+  dk  ours-vs-ref: relL2=8.298%  max_abs=2.972e-01  |  ours-vs-TE: relL2=13.47%
+  dv  ours-vs-ref: relL2=6.341%  max_abs=3.733e-01  |  ours-vs-TE: relL2=12.00%

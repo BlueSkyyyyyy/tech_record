@@ -1,0 +1,34 @@
+### O93 跨 head 全局 LPT（hswap）A/B —— 其它 causal D=128 形状（两文件版，iters=40）
+### 默认（无参数）= hswap 开 + auto ksplit=2；--hswap=0 = 历史（auto ksplit）
+
+########## b1_s1024_h32_d128_causal_fp8 ##########
+=== args: '--hswap=0' ===
+O89: mrev on (nblk=16, LPT expensive-first)
+[timing] total(quant+pre+main+cvt) 0.3327 ms  51.64 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0568 ms | preprocess 0.0306 ms | main 0.2448 ms | convert 0.0004 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== args: '<default>' ===
+O89: mrev on (nblk=16, LPT expensive-first)
+O93: hswap on (grid=(H,nblk*ksplit,B), global LPT across heads)
+[timing] total(quant+pre+main+cvt) 0.3111 ms  55.23 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0567 ms | preprocess 0.0303 ms | main 0.2224 ms | convert 0.0018 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== args: '--ksplit=4' ===
+O89: mrev on (nblk=16, LPT expensive-first)
+O93: hswap on (grid=(H,nblk*ksplit,B), global LPT across heads)
+[timing] total(quant+pre+main+cvt) 0.3185 ms  53.95 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0570 ms | preprocess 0.0306 ms | main 0.2310 ms | convert -0.0002 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+########## b1_s1024_h32_d128_kv4_causal_fp8 ##########
+=== args: '--hswap=0' ===
+O89: mrev on (nblk=16, LPT expensive-first)
+[timing] total(quant+pre+main+cvt) 0.3024 ms  56.81 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0338 ms | preprocess 0.0304 ms | main 0.2367 ms | convert 0.0016 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== args: '<default>' ===
+O89: mrev on (nblk=16, LPT expensive-first)
+O93: hswap on (grid=(H,nblk*ksplit,B), global LPT across heads)
+[timing] total(quant+pre+main+cvt) 0.2761 ms  62.23 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0336 ms | preprocess 0.0298 ms | main 0.2100 ms | convert 0.0026 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== args: '--ksplit=4' ===
+O89: mrev on (nblk=16, LPT expensive-first)
+O93: hswap on (grid=(H,nblk*ksplit,B), global LPT across heads)
+[timing] total(quant+pre+main+cvt) 0.2850 ms  60.28 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0333 ms | preprocess 0.0302 ms | main 0.2190 ms | convert 0.0024 ms (cvt_on=0, qfuse=1, dfuse=1)

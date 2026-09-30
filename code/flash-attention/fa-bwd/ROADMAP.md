@@ -3164,6 +3164,11 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       但 **ksplit auto=8 仍最优**（反转把 k=1 只从 1.836 拉到 1.792，2.6 波的粗粒度补不上）⇒
       **消 Q/dO 重读的 ksplit 路径确认关闭**；多 warpgroup WS 仍是唯一能改工作划分的路。见
       `docs/03` §112、`docs/08` §5.98。
+      → **① 的 ksplit 路径「在跨 head 全局 LPT 下重开」（第 188 轮 O93，正结果/默认）**：
+      O89 的 per-head LPT 不足让低 ksplit 的尾波回本，但把它升级为 **跨 head 全局 LPT**
+      （grid 轴对调，head 走快轴）后，**ksplit=2 首次成为最优**（S4096 main 1.4304→1.3742ms、
+      total 1.6686→1.6109ms；Q/dO 重读 8×→2×、ncu `read` −13%、`red` −8%）。**① 由「关闭」
+      转为「部分达成」**（dK/dV `red` 主体墙仍在）。见 `docs/03` §116、`docs/08` §5.102。
 - [~] **F3b**：① **GEMM3/4/5 上 RS wgmma（第一百七十四/一百七十五轮 O79/O80 打通）**——
       TE SASS 证其用 `QGMMA RS_TN`（A 在寄存器）+ `STSM/LDSM` 配对粒度转置；O79 冒烟证
       `ldmatrix.x4` 的 A 片段直接喂 `wgmma.m64n32k32` RS（max_abs=0 PASS）；**O80（第 175 轮）
@@ -3243,7 +3248,22 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百八十七轮）**：**O92——fp8 main L2 墙的「TE 侧对侧」闭环复核——无新正结果，
+> **最新（第一百八十八轮）**：**O93——跨 head 全局 LPT（grid 轴对调）+ 低 ksplit——正结果，默认**。
+> 落实 O89「下一步候选 ③」：`fp8_mma_body` 加 `bool HSWAP`（只改解码 `h/mt/part` 的 blockIdx 来源），
+> host 用 `grid=(H, nblk*ksplit, B)`（head 走快轴）⇒ 所有 head 的最贵 m 块一起先派发 = **全局 LPT**；
+> `hswap_elig` 时 auto ksplit 收到 **2**。**S4096 main 1.4304→1.3742ms（1.041×）/ total 1.6686→
+> 1.6109ms（1.036×，85.32TF）**；S1024H32 1.10× / GQA 1.13×。ncu：L2 总扇区 −9.1%、`read` −13.0%
+> （Q/dO 重读 8×→2×）、`red` −8.0%、Duration −4%；代价 DRAM 2.5×（跨 head 交错损 L2 局部性，但
+> 墙是 L2 吞吐、净快）。精度护栏全过（relL2 8.148/8.263/6.489%）、`--ci --hopper` 全绿。同 session
+> TE FP8 纯反向 0.3049ms ⇒ ours total **5.30×**（O92 5.50×）/ main **4.52×**（O92 4.75×）。
+> 见 `docs/03` §116、`docs/08` §5.102。
+> **下一步候选**：① 换卡（更大 smem/寄存器，解 dK/dV `red` 主体墙）；② warp specialization 完整化；
+> ③ **O93 的调度空间可继续挖**——目前只做了「head 快轴 + per-head m 反转」，可试 **按 `(h,m)` 的
+> 真·全局降序表**（把 head 也纳入排序、`grid.z` 承载 batch）以进一步削尾波；或试 **ksplit 随 m 变化**
+> （贵块多切、便宜块少切）在 O93 平衡点上再省 Q/dO 重读；④ 覆盖型 backlog（`D=256` K/V-TMA、MLA
+> 降 smem）仍受同一 smem 墙。
+>
+> **（第一百八十七轮）**：**O92——fp8 main L2 墙的「TE 侧对侧」闭环复核——无新正结果，
 > 默认一行未改**。不做新算法，用同 session 数据钉死差距并复测三条 O81/O89 后的候选：
 > ① 基线 `total 1.6711ms/82.24TF`、`main 1.4437ms`；② **ksplit 复扫** 1/2/4/8/16 = 2.032/1.804/
 > 1.694/**1.667**/1.821ms ⇒ auto=8 仍最优；③ **`FA_BULKRED` 复测 0.877×**（O42 不翻转）；
@@ -7821,8 +7841,38 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     把 N 次全局原子 1:1 换成 N 次远程 smem 原子、慢 7.4×，GQA 只放大 G 不减少每 CTA 远程原子数。
   - **判决**：本卡（74.8KB smem/170 regs/3 CTA/SM）**结构性不可行**。默认路径一行未改、
     数值逐位不变（无新 kernel 需 gate）。解锁需换卡 / 硬件 scatter-reduce / 多 warpgroup WS。
-  - **F4b 至此收口**：三条「减 `red`」路（归约宽度/机制、工作划分、GQA 头折叠）全部负/不可行。
+   - **F4b 至此收口**：三条「减 `red`」路（归约宽度/机制、工作划分、GQA 头折叠）全部负/不可行。
     见 `docs/03` §109、`docs/08` §5.95；原始输出 `src/fp8/fa_bwd_fp8_o86_gqa_red_probe.out.txt`。
+
+- 2026-09-30（第一百八十八轮）：**O93——跨 head 全局 LPT（grid 轴对调）+ 低 ksplit
+  ——正结果，默认**。落实 O89「下一步候选 ③」（LPT 从 per-head 升级为跨 head 全局）并叠加
+  「全局 LPT 解锁的低 ksplit（消 Q/dO 重读）」。**device 数学一行未改**——`fp8_mma_body` 加末位
+  模板参 `HSWAP`，只改解码（`h=blockIdx.x`、`mt=blockIdx.y/ksplit`、`part=blockIdx.y%ksplit`）；
+  host 用 `grid=(H, nblk*ksplit, B)`（head 走**快轴**）⇒ 硬件按 `blockIdx.x` 最快的顺序派发 =
+  **所有 head 的最贵 m 块一起先跑** = 全局 LPT；`hswap_elig`（定长 causal D=128 nblk≥16）时自动把
+  auto ksplit 收到 **2**。默认 `hswap_opt=1`（`--hswap=0` 回退）；单/两文件 device 逐字同源
+  （`sync_onefile_device.py` `identical=True`）。
+  - **性能（S4096 causal，同 binary A/B，iters=40）**：`mrev=1 hswap=0`（O89 默认，k=8）
+    main 1.4304 / total 1.6686ms（82.37TF）→ **hswap k=2：main 1.3742 / total 1.6109ms（85.32TF）
+    = main 1.041× / total 1.036×**。**关键**：hswap 在 k=8 时**反而慢**（1.87ms——跨 head 交错损
+    L2 局部性，细粒度下更明显），只有 **hswap + k=2** 最优 ⇒ 收益来自「全局 LPT 解锁的低 ksplit」，
+    不是 hswap 本身。S1024H32 main 0.2448→**0.2224（1.10×）**、GQA kv4 0.2367→**0.2100（1.13×）**；
+    S512（nblk=8，门控外）不变。
+  - **ncu（S4096，同 session，默认 vs `--hswap=0`）**：Duration 1.45→**1.39ms**、L2 总扇区
+    142.97M→**129.87M（−9.1%）**、**`read` 27.88M→24.26M（−13.0%，Q/dO 重读 8×→2×）**、
+    **`red` 114.52M→105.38M（−8.0%，dQ 跨 part 原子减少；dK/dV 主体不变）**、L2 利用率
+    81.0%→76.9%；**代价**：DRAM 219→557MB（2.5×，跨 head 交错损 L2 局部性），但主 kernel 墙是
+    **L2 吞吐**、DRAM 绝对量仍低 ⇒ 净快。
+  - **精度护栏**：`ours vs fp32 ref` relL2 dq/dk/dv **8.148/8.263/6.489%**（护栏内，与 O91/O92
+    同档；调度只改 atomic 加法次序）；`max_abs` 2.635/2.644/3.216e-1；`ours vs TE` 13.42/13.48/
+    28.15%（TE-vs-ref dv 自身 27.45%）；`--ci --dtype fp8 --hopper` gate worst **7.629e-6 OK**、
+    `--check docs/04` OK。
+  - **对标**：同 session TE FP8 纯反向 S4096 = 0.3049ms（`fa_bwd_bench.py bench --dtype fp8`）⇒
+    ours total **5.30×**（O92 5.50×）、main **4.52×**（O92 4.75×）。**判决：正结果、默认**；这是
+    「不改工作划分/指令」类里第一条 `read`/`red` **双向**下降的调度杠杆（对照 O89 只削尾波、`red`
+    一字不变）。`red` 的 dK/dV 主体墙（O83/O91/O92 已收口）不变。见 `docs/03` §116、`docs/08`
+    §5.102；原始输出 `src/fp8/fa_bwd_fp8_o93_{ab_s4096,ab_shapes,accuracy,tebench_s4096,
+    ncu_hswap0_s4096,ncu_hswap1_s4096}.out.txt`。
 
 ## 灵感 / backlog
 

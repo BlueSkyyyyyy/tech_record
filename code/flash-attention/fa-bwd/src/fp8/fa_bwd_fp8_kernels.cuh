@@ -2814,10 +2814,17 @@ __global__ void delta_warp_kernel(const float* __restrict__ o,
 //   F7 主体「两 kernel」选项（ROADMAP「下一步候选 ①(a)」）——KV-owner 出 dK/dV（red=0）＋
 //   本 pass 出 dQ。dQ 在 `kRegDq` 下寄存器 owned（每元素单写者），DQONLY 时用 **plain store**
 //   写出（red=0）。跳过 Ap/dS3 fold + GEMM3/4(dV/dK) + 其 epilogue；保留 GEMM1/2/5 与 dS2 fold。
+// O93（第 188 轮，F6-①/LPT 候选 ③）：`HSWAP` —— 把默认稠密网格的 **x/y 轴对调**（head 走
+//   blockIdx.x 快轴、m 块走 blockIdx.y），于是硬件派发顺序变成「**所有 head 的最贵 m 块先跑**」
+//   （配合 O89 的 `mt_m` 反转表）= 跨 head 的**全局 LPT**；历史路径（head=blockIdx.y）是
+//   「每个 head 内 m 降序」的锯齿形，head 边界处会重置。纯调度、不改任何数据/数学：dK/dV 仍是
+//   跨 CTA 原子（可交换）⇒ 数值只在 fp8 噪声内。仅定长（`mt_b==nullptr`）用；`HSWAP=false`
+//   与历史逐位相同。代价：相邻 CTA 落在不同 head ⇒ 理论损 L2 读局部性（S4096 的 K/V 全体
+//   ~17MB 仍装得下 50MB L2，实测见 docs）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
            bool RCP = true, bool TMA = false, bool KVTMA = false, int NTH = THREADS,
            int NWAR = WN, bool KVPIPE = false, bool DET = false, bool DET_HALF = false,
-           bool DQONLY = false>
+           bool DQONLY = false, bool HSWAP = false>
 __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8,
@@ -2973,10 +2980,13 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   //   `mt_b/mt_m`（保持同序列 K/V 的 L2 局部性），grid.x = total_mt*ksplit、grid.y = H、grid.z = 1。
   //   这消掉了「以 maxlen 为界」时短序列大量越界早退的死 CTA（强倾斜 b8 实测 8192→~1376），
   //   并让最贵的 m 块先调度（削尾波）。`mt_b==nullptr` 时逐式退化为定长/旧 varlen 行为。
-  const int part = blockIdx.x % ksplit;
-  const int mt = blockIdx.x / ksplit;
+  // O93：`HSWAP` 时把 head 放到快轴（grid=(H, nblk*ksplit, B)）⇒ 跨 head 全局 LPT；
+  //   历史路径 grid=(nblk*ksplit, H, B)。两者只在「哪个 CTA 算哪个 (h,mblk,part)」上不同。
+  const int part = HSWAP ? (blockIdx.y % ksplit) : (blockIdx.x % ksplit);
+  const int mt   = HSWAP ? (blockIdx.y / ksplit) : (blockIdx.x / ksplit);
   const int mblk = mt_m ? mt_m[mt] : mt;
-  const int h = blockIdx.y, b = mt_b ? mt_b[mt] : blockIdx.z;
+  const int h = HSWAP ? blockIdx.x : blockIdx.y;
+  const int b = mt_b ? mt_b[mt] : blockIdx.z;
   // VARLEN：cu_seqlens 给出每个序列在 packed [T,H,D] 的 token 基址与长度。
   const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
   const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
@@ -4195,7 +4205,7 @@ fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
 // P3-4g：`DET=true` 时复用同一 body 的确定性 dK/dV 路径（partial + 固定次序归约），
 //   把 `--det` 从默认 mma 路径扩到 Hopper TMA 快路。
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
-           bool DET = false, bool DET_HALF = false, bool DQONLY = false>
+           bool DET = false, bool DET_HALF = false, bool DQONLY = false, bool HSWAP = false>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
@@ -4215,7 +4225,7 @@ fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const int* __restrict__ part_base = nullptr,
                             const int* __restrict__ mt_m = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true, THREADS, WN, false, DET,
-               DET_HALF, DQONLY>(
+               DET_HALF, DQONLY, HSWAP>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap, nullptr, mt_m,
       dk_part, dv_part, nblk, dq_part, part_base);
