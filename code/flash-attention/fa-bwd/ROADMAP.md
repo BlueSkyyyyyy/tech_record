@@ -3262,7 +3262,19 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百九十三轮）**：**O99——fp8 causal D=256 的 ksplit 重标定——正结果，默认**。
+> **最新（第一百九十四轮）**：**O100——fp8 full 变长 D=128 的 ksplit 收口（k=3）——正结果，默认**。
+> 落实 O98 留的「均匀 vs 混合长度」残余。**干净机器上 k∈[1,5]×3 次重测**推翻 O98 前提：
+> 四个 D=128 full 变长 shape 最优**一致为 k=3**（b4_t3840 1.386 / b4_t4096 1.114 / b5 2.684 /
+> b8 1.126 ms），O98 的「b4_t3840 k3 慢 3.9%」是当轮噪声/残留。**纯 host、device 一行未改、
+> 单/两文件同源**：`!causal && D==128` 时 `ksplit=min(3, nblk32)`（`max(kp,3)`→精确 3）。
+> **性能（同 binary A/B）**：`b4_t4096` **1.009–1.011×**、`b4_t3840` 1.002–1.005×、其余 ≈1.00×
+> （同配置/噪声内）；relL2 新旧**逐位相同**（护栏内）、一致性 gate OK（worst 5.722e-6）、
+> `--check docs/04` OK。**fp8 ksplit 自动档至此全部收口。** 见 `docs/03` §122、`docs/08` §5.108。
+> **下一步候选**：① **换卡**（唯一能解 causal 旗舰 D=128 的 L2 `red` 主体墙，见「阻塞」）；
+> ② **`partial/split` 的 full 标定**（O97 结尾候选 ②，唯一未复核的同类启发式）；
+> ③ 覆盖型 backlog（`D=256` K/V-TMA、MLA 降 smem）均受同一 smem 墙。
+>
+> **（第一百九十三轮）**：**O99——fp8 causal D=256 的 ksplit 重标定——正结果，默认**。
 > O96/O97/O98 只复核 full，**causal D=256** 一直沿用 O29 的 `target=S/2`（按 causal MLA/D=512/
 > 1 CTA/SM 标），套到 D=256（2 CTA/SM→264 槽）上 `k=32/(H*B)` 与 S 无关 ⇒ 小/中 S 欠切。
 > **纯 host、device 一行未改、单/两文件同源**：6 个 causal D=256 shape 全扫 k∈[1,32]，最优一致
@@ -3290,8 +3302,8 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 > 减 Q/dO 重读（`op_read` −19%）。relL2 vs fp32 ref 全在护栏内、单/两文件 ≤3.6e-7、
 > `--ci --no-run` 三 dtype gate OK（fp8 6.676e-6）、`--check docs/04` OK。见 `docs/03` §120、
 > `docs/08` §5.106；原始输出 `src/fp8/fa_bwd_fp8_o98_{varlen_full_ab,ksweep,ncu,fa3_baseline}.out.txt`。
-> **下一步候选**：① **D=128 变长「均匀 vs 混合长度」判据**——b4_t4096 的 k=3 比当前 k=4 快 ~3.7%，
-> 但全局 k=3 会反伤 b4_t3840；可用 `total_mt/(nmb*B)` 利用率区分后按 shape 选 k；
+> **下一步候选**：① ~~**D=128 变长「均匀 vs 混合长度」判据**~~ → **已完成（O100，第 194 轮）**：
+> 干净机器重测证明四 shape 最优一致 k=3、原「b4_t3840 反伤」为噪声，直接统一 k=3；
 > ② 把同类审计推广到 **`partial/split` 的 full 标定**；③ causal 旗舰的 L2 `red` 墙仍是唯一真杠杆，
 > 本卡无软件解（换卡/多 warpgroup，见「阻塞」）；④ 用全量 `--ci`（跑 kernel 版）验收 O96/O97/O98。
 >
@@ -8082,7 +8094,27 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
   - **判决：正结果、默认开启**。至此 **fp8 ksplit 自动档在 causal/full × 定长/变长 ×
     D=128/256/512 全部经实测复核**。causal 旗舰（D=128 S4096）的 L2 `red` 主体墙仍是唯一真杠杆，
     本卡无软件解（见「阻塞」）。见 `docs/03` §121、`docs/08` §5.107；原始输出
-    `src/fp8/fa_bwd_fp8_o99_{ab,ksweep,ncu,accuracy,fa3_baseline,ci}.out.txt`。
+     `src/fp8/fa_bwd_fp8_o99_{ab,ksweep,ncu,accuracy,fa3_baseline,ci}.out.txt`。
+
+- 2026-10-01（第一百九十四轮）：**O100——fp8 full 变长 D=128 的 ksplit 收口（k=3）——正结果，默认**。
+  O98 给 D=128 full 变长设 `max(kp,3)`，并留「`b4_t4096` 最优 3、`b4_t3840` 最优 4，需均匀 vs
+  混合长度判据」的残余。本轮**在干净机器（`nvidia-smi` 无残留进程）上 k∈[1,5] × 3 次重测**，
+  推翻该前提：**四个 D=128 full 变长 shape 的最优一致为 k=3**（b4_t3840 1.386 / b4_t4096 1.114 /
+  b5_t3968 2.684 / b8_t2904 1.126 ms），O98 的「b4_t3840 k3 慢 3.9%」判为**当轮噪声/残留进程**。
+  **纯 host、device 一行未改、单/两文件同源**：`!causal && D==128` 时 `ksplit=min(3, nblk32)`
+  （把 `max(kp,3)` 改成精确 3；D=256/D=512 full 与 causal 路径逐字不变）。
+  - **性能（同 binary A/B，iters=150，3 次）**：`b4_t4096` **1.009–1.011×**（1.115 vs 1.127ms）、
+    `b4_t3840` 1.002–1.005×、`b5`/`b8`/D=512 均 ≈1.00×（同配置/噪声内）——只有等长 shape 有稳定
+    正收益，量级小但**非回退**。
+  - **数值/回归**：只改 atomic 次序 ⇒ 4 shape 的 relL2 vs fp32 ref **新旧逐位相同**（dq 8.06–8.12% /
+    dk 8.21–8.26% / dv 6.48–6.68%，护栏内）、单/两文件一致性 gate **OK（worst 5.722e-6）**、
+    `--check docs/04` **OK（214 行）**；causal 与定长 full 逐字不变。
+  - **外部基线**（纯反向 CUPTI，fp16；FA3/TE fp8 变长不支持）：FA3 `b4_t4096` 0.1989ms/172.8TF、
+    `b4_t3840` 0.2370/192.5、`b5_t3968` 0.5183/176.6、`b8_t2904` 0.2007/183.2（ours fp8 时间约 5.6×）。
+  - **教训**：单轮 sweep 里某 shape 的反向结论不可直接进启发式——先查残留、多次重复再判断。
+    **fp8 ksplit 自动档至此全部收口**；唯一未复核的同类启发式只剩 `partial/split` 的 full 标定。
+    见 `docs/03` §122、`docs/08` §5.108；原始输出
+    `src/fp8/fa_bwd_fp8_o100_{varlen_full_k_sweep,ab,accuracy,ncu,fa3_baseline}.out.txt`。
 
 ## 灵感 / backlog
 

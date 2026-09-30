@@ -1,0 +1,45 @@
+=== O100 A/B: fp8 D=128 full 变长 ksplit —— D=128 统一取 k=3（O98 的下限 3 -> 精确 3）===
+cmd: fa_bwd_fp8_main_ab.out --dir=<case> --varlen --full [--ksplit=K] --iters=150 (Hopper wgmma+TMA)
+
+varlen_b4_t3840_h16_d128_full_fp8          k=1 [timing] VARLEN total 1.6348 ms  27.91 TFLOPS (sum_b 4HL^2D)
+varlen_b4_t3840_h16_d128_full_fp8          k=2 [timing] VARLEN total 1.4215 ms  32.10 TFLOPS (sum_b 4HL^2D)
+varlen_b4_t3840_h16_d128_full_fp8          k=3 [timing] VARLEN total 1.3863 ms  32.92 TFLOPS (sum_b 4HL^2D)
+varlen_b4_t3840_h16_d128_full_fp8          k=4 [timing] VARLEN total 1.3954 ms  32.70 TFLOPS (sum_b 4HL^2D)
+varlen_b4_t3840_h16_d128_full_fp8          k=5 [timing] VARLEN total 1.4163 ms  32.22 TFLOPS (sum_b 4HL^2D)
+varlen_b4_t3840_h16_d128_full_fp8          auto [timing] VARLEN total 1.3843 ms  32.97 TFLOPS (sum_b 4HL^2D)
+
+varlen_b4_t4096_h16_d128_full_fp8          k=1 [timing] VARLEN total 1.2005 ms  28.62 TFLOPS (sum_b 4HL^2D)
+varlen_b4_t4096_h16_d128_full_fp8          k=2 [timing] VARLEN total 1.1536 ms  29.79 TFLOPS (sum_b 4HL^2D)
+varlen_b4_t4096_h16_d128_full_fp8          k=3 [timing] VARLEN total 1.1140 ms  30.84 TFLOPS (sum_b 4HL^2D)
+varlen_b4_t4096_h16_d128_full_fp8          k=4 [timing] VARLEN total 1.1277 ms  30.47 TFLOPS (sum_b 4HL^2D)
+varlen_b4_t4096_h16_d128_full_fp8          k=5 [timing] VARLEN total 1.1226 ms  30.61 TFLOPS (sum_b 4HL^2D)
+varlen_b4_t4096_h16_d128_full_fp8          auto [timing] VARLEN total 1.1173 ms  30.75 TFLOPS (sum_b 4HL^2D)
+
+varlen_b5_t3968_h32_d128_full_fp8          k=1 [timing] VARLEN total 2.7898 ms  32.81 TFLOPS (sum_b 4HL^2D)
+varlen_b5_t3968_h32_d128_full_fp8          k=2 [timing] VARLEN total 2.7277 ms  33.56 TFLOPS (sum_b 4HL^2D)
+varlen_b5_t3968_h32_d128_full_fp8          k=3 [timing] VARLEN total 2.6843 ms  34.10 TFLOPS (sum_b 4HL^2D)
+varlen_b5_t3968_h32_d128_full_fp8          k=4 [timing] VARLEN total 2.7736 ms  33.00 TFLOPS (sum_b 4HL^2D)
+varlen_b5_t3968_h32_d128_full_fp8          k=5 [timing] VARLEN total 2.7306 ms  33.52 TFLOPS (sum_b 4HL^2D)
+varlen_b5_t3968_h32_d128_full_fp8          auto [timing] VARLEN total 2.6875 ms  34.06 TFLOPS (sum_b 4HL^2D)
+
+varlen_b8_t2904_h16_d128_full_fp8          k=1 [timing] VARLEN total 1.4963 ms  24.57 TFLOPS (sum_b 4HL^2D)
+varlen_b8_t2904_h16_d128_full_fp8          k=2 [timing] VARLEN total 1.1806 ms  31.14 TFLOPS (sum_b 4HL^2D)
+varlen_b8_t2904_h16_d128_full_fp8          k=3 [timing] VARLEN total 1.1255 ms  32.66 TFLOPS (sum_b 4HL^2D)
+varlen_b8_t2904_h16_d128_full_fp8          k=4 [timing] VARLEN total 1.1346 ms  32.40 TFLOPS (sum_b 4HL^2D)
+varlen_b8_t2904_h16_d128_full_fp8          k=5 [timing] VARLEN total 1.1416 ms  32.20 TFLOPS (sum_b 4HL^2D)
+varlen_b8_t2904_h16_d128_full_fp8          auto [timing] VARLEN total 1.1323 ms  32.47 TFLOPS (sum_b 4HL^2D)
+
+varlen_b1_t512_h2_d512_full_fp8            k=1 [timing] VARLEN total 0.2870 ms  3.74 TFLOPS (sum_b 4HL^2D)
+varlen_b1_t512_h2_d512_full_fp8            k=2 [timing] VARLEN total 0.1571 ms  6.83 TFLOPS (sum_b 4HL^2D)
+varlen_b1_t512_h2_d512_full_fp8            k=3 [timing] VARLEN total 0.1256 ms  8.55 TFLOPS (sum_b 4HL^2D)
+varlen_b1_t512_h2_d512_full_fp8            k=4 [timing] VARLEN total 0.0937 ms  11.46 TFLOPS (sum_b 4HL^2D)
+varlen_b1_t512_h2_d512_full_fp8            k=5 [timing] VARLEN total 0.1000 ms  10.74 TFLOPS (sum_b 4HL^2D)
+varlen_b1_t512_h2_d512_full_fp8            auto [timing] VARLEN total 0.0750 ms  14.32 TFLOPS (sum_b 4HL^2D)
+
+varlen_b3_t1792_h2_d512_full_fp8           k=1 [timing] VARLEN total 0.5835 ms  9.66 TFLOPS (sum_b 4HL^2D)
+varlen_b3_t1792_h2_d512_full_fp8           k=2 [timing] VARLEN total 0.3737 ms  15.09 TFLOPS (sum_b 4HL^2D)
+varlen_b3_t1792_h2_d512_full_fp8           k=3 [timing] VARLEN total 0.3633 ms  15.52 TFLOPS (sum_b 4HL^2D)
+varlen_b3_t1792_h2_d512_full_fp8           k=4 [timing] VARLEN total 0.3147 ms  17.91 TFLOPS (sum_b 4HL^2D)
+varlen_b3_t1792_h2_d512_full_fp8           k=5 [timing] VARLEN total 0.3438 ms  16.40 TFLOPS (sum_b 4HL^2D)
+varlen_b3_t1792_h2_d512_full_fp8           auto [timing] VARLEN total 0.3100 ms  18.18 TFLOPS (sum_b 4HL^2D)
+

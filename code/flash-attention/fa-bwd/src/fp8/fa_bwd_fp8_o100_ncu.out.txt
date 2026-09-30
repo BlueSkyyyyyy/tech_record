@@ -1,0 +1,18 @@
+=== ncu: O100 fp8 D=128 full 变长 main kernel = fa_bwd_fp8_mma_kernel<128,64,32,...> ===
+metrics: duration / lts op_read / op_red / op_write / lts% / sm% / warps_active%
+--- varlen_b4_t4096_h16_d128_full_fp8  new k=3
+      gpu__time_duration.sum                                     us       959.23
+      lts__t_sectors_op_read.sum                             sector     14903112
+      lts__t_sectors_op_red.sum                              sector     55050240
+      lts__t_sectors_op_write.sum                            sector      2451910
+      lts__throughput.avg.pct_of_peak_sustained_elapsed           %        60.42
+      sm__throughput.avg.pct_of_peak_sustained_elapsed            %        38.34
+      sm__warps_active.avg.pct_of_peak_sustained_active           %        18.29
+--- varlen_b4_t4096_h16_d128_full_fp8  old k=4
+      gpu__time_duration.sum                                     ms         1.03
+      lts__t_sectors_op_read.sum                             sector     14629672
+      lts__t_sectors_op_red.sum                              sector     56623104
+      lts__t_sectors_op_write.sum                            sector      2753837
+      lts__throughput.avg.pct_of_peak_sustained_elapsed           %        58.13
+      sm__throughput.avg.pct_of_peak_sustained_elapsed            %        36.43
+      sm__warps_active.avg.pct_of_peak_sustained_active           %        18.46

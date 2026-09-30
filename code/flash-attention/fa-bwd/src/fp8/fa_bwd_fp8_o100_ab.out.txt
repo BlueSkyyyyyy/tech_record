@@ -1,0 +1,29 @@
+=== O100 A/B: fp8 变长 full ksplit（new auto vs 旧 auto，同 binary，iters=150，3 次）===
+cmd: fa_bwd_fp8_main_ab.out --dir=<case> --varlen --full [--ksplit=K_old] --iters=150
+D=128: 旧 auto=max(kp,3) -> b4_t3840 k4 / b4_t4096 k4 / b5 k3 / b8 k3；new auto 统一 k=3
+
+shape                                      new_auto   old_auto     gain
+varlen_b4_t3840_h16_d128_full_fp8            1.3853     1.3923  1.0051x
+varlen_b4_t3840_h16_d128_full_fp8            1.3853     1.3882  1.0021x
+varlen_b4_t3840_h16_d128_full_fp8            1.3940     1.3889  0.9963x
+
+varlen_b4_t4096_h16_d128_full_fp8            1.1144     1.1271  1.0114x
+varlen_b4_t4096_h16_d128_full_fp8            1.1151     1.1256  1.0094x
+varlen_b4_t4096_h16_d128_full_fp8            1.1153     1.1270  1.0105x
+
+varlen_b5_t3968_h32_d128_full_fp8            2.6908     2.6862  0.9983x
+varlen_b5_t3968_h32_d128_full_fp8            2.6946     2.6855  0.9966x
+varlen_b5_t3968_h32_d128_full_fp8            2.6911     2.6870  0.9985x
+
+varlen_b8_t2904_h16_d128_full_fp8            1.1280     1.1281  1.0001x
+varlen_b8_t2904_h16_d128_full_fp8            1.1318     1.1306  0.9989x
+varlen_b8_t2904_h16_d128_full_fp8            1.1280     1.1314  1.0030x
+
+varlen_b1_t512_h2_d512_full_fp8              0.0743     0.0744  1.0013x
+varlen_b1_t512_h2_d512_full_fp8              0.0744     0.0749  1.0067x
+varlen_b1_t512_h2_d512_full_fp8              0.0741     0.0744  1.0040x
+
+varlen_b3_t1792_h2_d512_full_fp8             0.3112     0.3095  0.9945x
+varlen_b3_t1792_h2_d512_full_fp8             0.3102     0.3104  1.0006x
+varlen_b3_t1792_h2_d512_full_fp8             0.3092     0.3100  1.0026x
+
