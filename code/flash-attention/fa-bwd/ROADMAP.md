@@ -198,6 +198,16 @@
 
 ## 阻塞
 
+- **「多 warpgroup / 放大 BM」在本卡 fp8 主 kernel 上判死（第一百八十六轮 O91）。** 把 `wgmma2`
+  泛化为 `NWG` 个 warpgroup（`BM=NWG*64`），用 **NWG=3 / BM=192 / 384 线程 / 1 CTA/SM** 实测：
+  `red` **114.52M→49.64M（0.43×）**、L2 总搬运 0.56×、L2 利用率 81%→**21%**、**warps 已追平默认
+  档（18.72% = 12 warp/SM）**，但 **Duration 1.44→2.78ms（0.52× 默认）**。⇒ 卡点**不是 warp 数**，
+  而是 **1 CTA/SM = 单一 barrier 域**：默认 12 warp 分属 3 个独立 CTA（互不 `__syncthreads`），
+  `wg3` 的 12 warp 挤在 1 个 CTA、被每 tile 5 个 `__syncthreads` 串成依赖链，跨-tile 延迟无法用
+  另一 CTA 的工作填。**要转正需 ≥2 个独立 CTA/SM（≤116KB smem 且 ≤128 regs）**，而 BM≥128 的
+  fp8 反向本卡达不到（F6/O83/O90 同墙）。⇒ 与 F3b/F4b/F6/F7 一并收口为「本卡无软件解」，
+  **正结果只剩换卡**（更大 smem/寄存器）。见 `docs/03` §114、`docs/08` §5.100。
+
 - **`D=256` K/V 4D-TMA 结构性不可行（第一百八十三轮 O88）。** `D=256` 的 `smem_bytes_wgmma =
   115,712B`（O84 ncu 实测，2 CTA/SM，上限 116,224B）；`smem_bytes_wgmma_kvtma = 115,712 +
   ks_sw_bytes(=(32/8)*2*1024=8,192) + 64 = **123,968B > 116,224** ⇒ **K 双缓冲把 2 CTA/SM 直接
@@ -2898,6 +2908,13 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       （K 双缓冲），同 binary A/B 仅 1.035×（2.806→2.711ms，仍 0.54× 默认）；ncu 证 `red`
       精确砍半（114.52M→58.20M）但 **L2 利用率 81%→22%、3→1 CTA/SM**，`red` 红利被「8 warp
       藏不住延迟」吃掉 ⇒ **确认 F6 的 1-CTA/SM 延迟墙**。见 `docs/03` §113、`docs/08` §5.99。
+      → **F6-step4 已完成（第一百八十六轮 O91，负结果/opt-in `--wg3`）**：把 `wgmma2` 泛化为
+      `NWG` 个 warpgroup，用 **NWG=3 / BM=192 / 384 线程**（12 warp/SM，追平默认档）实测：
+      `red` 再降 **114.52M→49.64M（0.43×）**、L2 总搬运 0.56×、L2 利用率 81%→**21%**、warps
+      18.60%→**18.72%**，但 Duration **1.44→2.78ms（0.52× 默认）**。⇒ 卡点是 **1 CTA/SM 的单一
+      barrier 域**（非 warp 数）：默认 12 warp 分属 3 个独立 CTA、`wg3` 挤在 1 个 CTA 被
+      `__syncthreads` 串化。**「多 warpgroup / 放大 BM」这条本卡最后的 fp8 结构性杠杆判死；
+      正结果只剩换卡。** 见 `docs/03` §114、`docs/08` §5.100。
 - [~] **F7** **工作划分 / persistent 调度**（第一百四十七轮新立，唯一经 ncu 钉死的真杠杆）：
       同 **BM=64** 下 TE 的 `red` 仅 ours 的 **1/4.4×**、L2 总量 1/4.17×、时间 1/6×
       （TE grid=**132** persistent vs ours ksplit=8→8192）；SASS 同为 128-bit red（`REDG.4D.ADD`）
@@ -3226,18 +3243,20 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百八十五轮）**：**O90（F6-step3）——wgmma2 的 K/V 4D-TMA 化（K 双缓冲）
-> ——负结果，opt-in `--wg2tma`，默认一行未改**。给 F6 第二步的 `wgmma2`（BM=128、2 warpgroup）
-> 补 K/V 4D-TMA（复现 O41 时序；208 regs/0 spill），同 binary A/B **1.035×（S4096
-> 2.806→2.711ms）**，但仅默认档的 **0.54×**。ncu 证 **`red` 精确砍半（114.52M→58.20M）、
-> `read` 砍半**（BM=128 减 L2 机制成立），但 **L2 利用率 81%→22%、warps 18.6%→12.5%
-> （3→1 CTA/SM）**——`red` 红利被 8 warp 藏不住延迟吃掉。**确认 F6 的 1-CTA/SM 延迟墙**。
-> 数值 `ours_o90 vs fp32 ref` relL2 S4096 8.15/8.39/6.52%、S512 8.18/8.41/6.36%（护栏内）。
-> 见 `docs/03` §113、`docs/08` §5.99。
-> **下一步候选**：① **多 warpgroup WS（256/384 线程）**——唯一能把 BM=128 的 occupancy 拉起来、
-> 真正吃下 `red` 砍半红利的结构性杠杆（本轮把 K/V-TMA 基建补上了；下一步是加第 3 个 warpgroup
-> 做 producer/epilogue 摊累加器，对标 TE 384 线程/1 CTA/SM）；② **换卡**（更大 smem/寄存器）；
-> ③ 其余 fp8 覆盖项（`D=256` K/V-TMA、MLA 降 smem）均受同一 smem 墙。
+> **最新（第一百八十六轮）**：**O91（F6-step4）——多 warpgroup（BM=192、3 WG、384 线程）
+> ——负结果，opt-in `--wg3`，默认一行未改**。把 `wgmma2` 泛化为 `NWG` 个 warpgroup，用 NWG=3
+> （BM=192、384 线程、1 CTA/SM、smem 197KB、168 regs/0 spill）实测：「既放大 BM 压 `red`、
+> 又把 warp/SM 拉回默认档」——`red` **114.52M→49.64M（0.43×）**、L2 总搬运 **0.56×**、L2 利用率
+> 81%→**21%**、warps 18.60%→**18.72%（12 warp/SM，追平默认）**；但 **Duration 1.44→2.78ms
+> （0.52× 默认）**。⇒ **卡点是 1 CTA/SM 的单一 barrier 域，不是 warp 数**：默认 12 warp 属 3 个
+> 独立 CTA、`wg3` 挤在 1 个 CTA 被每 tile 5 个 `__syncthreads` 串化。**「多 warpgroup / 放大 BM」
+> 这条本卡最后的 fp8 结构性杠杆判死**。数值 `ours_wg3 vs fp32 ref` relL2 S4096 8.149/8.449/6.532%、
+> S512 8.179/8.455/6.371%（护栏内）；单/两文件 `identical=True`、`--ci --dtype fp8 --hopper` 全绿。
+> 见 `docs/03` §114、`docs/08` §5.100；原始输出 `src/fp8/fa_bwd_fp8_o91_*.out.txt`。
+> **下一步候选**：① **换卡**（更大 smem/寄存器，让 BM≥128 能维持 ≥2 独立 CTA/SM）——**本卡
+> fp8 主 kernel 的 L2 `red` 墙已无软件解**（F3b/F4b/F6/F7/O90/O91 全收口，见「阻塞」）；
+> ② 覆盖型 backlog（`D=256` K/V-TMA、MLA 降 smem）均受同一 smem 墙；③ 非 main 项（preprocess/
+> quant）均已达带宽墙。
 >
 > **（第一百八十四轮）**：**O89——fp8 主 kernel 的 LPT m 块调度序（causal 贵块先跑）
 > ——正结果，默认**。默认稠密网格按 blockIdx 升序派发、causal 便宜块在低 blockIdx ⇒ 尾波全重块；
@@ -7629,6 +7648,35 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     顶穿 116KB/2-CTA 门槛，backlog）。见 `docs/03` §108、`docs/08` §5.94、`docs/04` §50；
     原始输出 `src/fp8/fa_bwd_fp8_o85_d256_ab.out.txt`、`..._o85_ncu_d256_s1024.out.txt`、
     `..._o85_accuracy_d256.out.txt`。
+
+- 2026-09-30（第一百八十六轮）：**O91（F6-step4）——多 warpgroup（BM=192、3 WG、384 线程）
+  ——负结果（opt-in `--wg3`，默认一行未改）**。落实 O90「下一步候选 ①」——本卡 fp8 主 kernel
+  **最后一条未试的结构性杠杆**：多 warpgroup（既放大 BM 压 `red`、又把 warp/SM 拉回默认档）。
+  - **实现**：把 `fa_bwd_fp8_wgmma2_kernel` 泛化为 `<HD,BM,BN,NWG=2>`（`BM=NWG*64`、`TH=NWG*128`）。
+    相 A 每 WG 算 64 行；GEMM3/4（dV/dK）仍 8 warp（`if(wid<8)`，`NWG=2` 恒真 ⇒ **逐位不变**）；
+    GEMM5（dQ）铺 6×2；`Ap/dS3` fold 沿 m 泛化（`NPC=BM/128` 整块 + `REM` 尾块；`BM=128` 逐位不变）。
+    CLI `--wg3`（opt-in）+ `--ksplit3=`；host `launch_bwd_wgmma_nw`。`BM=192` smem=**197,120B**
+    ⇒ 1 CTA/SM，**168 regs / 0 spill**（384 线程上限 170，未触寄存器墙）。单/两文件 device 逐字
+    `identical=True`。**踩坑**：SW128 是 generic 写、wgmma 走 async proxy 读，NWG=3 时序下首次
+    **dk/dv 偶发 `inf`**（非确定）；每迭代补 `bulk_reduce_fence()`（`fence.proxy.async.shared::cta`）
+    后 3/3 稳定（同 p155/O81 的坑）。
+  - **性能（同 binary A/B + 默认同 session，S4096 H16 causal，event）**：默认 `kvtma` main
+    **1.4436ms/82.27TF**；`wgmma2` 2.8330 → **`wg3` 2.7718ms（1.022×）** ⇒ **`wg3` 仍只有默认档
+    的 0.52×**；S512 `wgmma2 0.1076 → wg3 0.1179ms（0.913×，grid-bound）**。
+  - **ncu（S4096，默认 vs O91）**：`lts op_red` **114.52M→49.64M（0.43×）**、`read` 27.90M→16.99M、
+    L2 总扇区 142.9M→**80.6M（0.56×）**、**L2 利用率 81.4%→21.2%（带宽空闲）**；
+    **warps 18.60%→18.72%（=12 warp/SM，已追平默认）**；但 **Duration 1.44→2.78ms、CTA/SM 3→1**。
+    ⇒ 卡点**不是 warp 数**，是 **1 CTA/SM 的单一 barrier 域**：默认 12 warp 属 3 个独立 CTA，
+    `wg3` 的 12 warp 挤在 1 个 CTA、被每 tile 5 个 `__syncthreads` 串成依赖链。**「多 warp 摊延迟」
+    被证伪：需要多 CTA，不是多 warp。**
+  - **数值（护栏全过）**：`ours_wg3 vs fp32 ref` relL2 S4096 **8.149/8.449/6.532%**、S512
+    **8.179/8.455/6.371%**（护栏 dq≤8.2/dk≤8.3±0.3/dv≤6.5±0.3）；`ours_wg3` vs `ours_wg3_sf`
+    ≤1.19e-7；`--ci --dtype fp8 --hopper` 全绿、`docs/04` check OK。
+  - **判决**：**负结果、opt-in 默认关**。**多 warpgroup / 放大 BM 这条结构性杠杆在本卡判死**
+    （1 CTA/SM；要 2 CTA/SM 需 ≤116KB smem 且 ≤128 regs，BM≥128 达不到——F6/O83/O90 同墙）。
+    正结果只剩**换卡**。`--wg3` 与 `NWG` 泛化留作换卡后的 `D>128`/WS 基建。见 `docs/03` §114、
+    `docs/08` §5.100；原始输出 `src/fp8/fa_bwd_fp8_o91_{wg3_ab_s4096,wg3_ab_s512,
+    ncu_wg3_s4096,ncu_default_s4096,accuracy}.out.txt`。
 
 - 2026-09-30（第一百八十五轮）：**O90（F6-step3）——wgmma2 的 K/V 4D-TMA 化（K 双缓冲）
   ——负结果（opt-in `--wg2tma`，默认一行未改）**。落实 F6 的「下一步」：给 F6 第二步的

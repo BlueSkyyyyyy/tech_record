@@ -9954,3 +9954,85 @@ CLI `--wg2tma`（**opt-in，默认路径一行未改**；smem 约 140KB ⇒ 1 CT
 K/V-TMA helper 仍可复用（是后续 `D>128`/WS 版的基建）。见 `docs/08` §5.99、`ROADMAP`
 「fp8 专项冲刺 F6」。原始输出 `src/fp8/fa_bwd_fp8_o90_{ab_s4096,ab_s512,default_s4096,
 ncu_wg2tma_s4096,ncu_default_s4096}.out.txt`。
+
+## 114. 第 186 轮（O91 / F6-step4）：多 warpgroup（BM=192、3 WG、384 线程）—— 负结果（opt-in `--wg3`）
+
+### 114.1 动机
+
+O90（§113）把 `wgmma2`（BM=128、2 warpgroup、256 线程）补上 K/V 4D-TMA，`red` 精确砍半，
+但只有默认档的 0.54×，根因钉为 **1 CTA/SM、仅 8 warp/SM 藏不住延迟**。O90 的「下一步候选 ①」
+是 **多 warpgroup（256/384 线程）**——本卡上唯一未试、能同时（a）把 BM 继续放大以压 `red`、
+（b）把每 SM 的 **warp 数**拉回默认档（默认 3 CTA/SM × 4 warp = 12 warp/SM；wgmma2 仅 1 CTA ×
+8 warp = 8 warp/SM）的结构性杠杆。本轮把 `wgmma2` 泛化到 **`NWG` 个 warpgroup（`BM=NWG*64`）**，
+用 `NWG=3`（BM=192、384 线程、1 CTA/SM）实测：**12 warp/SM + `red` 从 114.5M 再降到 49.6M**。
+
+### 114.2 实现
+
+- **device 泛化**（`kernels.cuh` 3c 节，单/两文件 device 逐字一致）：`fa_bwd_fp8_wgmma2_kernel`
+  加 `int NWG=2` 模板参（`BM=NWG*64`、`TH=NWG*128`、`__launch_bounds__(NWG*128,1)`）。相 A 每个 WG
+  各跑 `wgmma.m64n32k32` 算自己 64 行（A 描述符 +`wg*8192B`）；GEMM3/4（dV/dK，输出仅 BN×HD）
+  仍用 8 个 warp（`if (wid<8)`，NWG=2 时恒真 ⇒ **逐位不变**）；GEMM5（dQ）按 `wm=wid>>1,wn=wid&1`
+  自然铺 6×2；fold 的 `Ap/dS3` 沿 m **泛化到全 BM**（`NPC=BM/128` 个整块 + `REM` 尾块，
+  `BM=128` 时 `NPC=1,REM=0` ⇒ 与旧代码逐位相同）；`dS2` fold 本就用 `wid*16` 覆盖全 BM。
+- **`fence.proxy.async.shared::cta`**：SW128 的 Q/dO/K/V 是 generic 写、下一句 wgmma 走 async
+  proxy 读。NWG=3 的线程时序更易命中 p155/O81 记过的 race——**首次实测 dk/dv 偶发 `inf`**
+  （非确定），在每迭代顶部补 `bulk_reduce_fence()` 后 3/3 稳定。这是本轮最重要的踩坑。
+- **host**：`wgmma_nw_smem_bytes<HD,BM,BN,NWG>`/`launch_bwd_wgmma_nw<...>`、CLI `--wg3`（opt-in，
+  默认路径一行未改）+ `--ksplit3=`（自动 ~8 波）。`BM=192` 的 smem = **197,120B ⇒ 1 CTA/SM**。
+  384 线程 `__launch_bounds__(384,1)` 上限 170 regs，实测 **168 regs / 0 spill**（未触寄存器墙）。
+
+### 114.3 实测（同 binary A/B + 默认同 session，S=4096 / S=512 H16 causal，event）
+
+| 配置（S4096） | main (ms) | total (ms) | TFLOPS | 相对默认 |
+|---|---|---|---|---|
+| **默认 `kvtma`（BM=64，3 CTA/SM）** | **1.4436** | **1.6706** | **82.27** | 1.00× |
+| `wg2wgmma`（BM=128，2 WG） | 2.8330 | — | 41.9 | 0.51× |
+| **`wg3`（BM=192，3 WG，**本轮 O91**）** | 2.7718 | 3.00 | 42.8 | **0.52×** |
+
+- 同 session `[O91 A/B]`（S4096）：`wgmma2 2.8330 → wg3 2.7718 ms（1.022×）`；`wg3` 的 auto
+  `ksplit3=8`、grid=176×16。**S512**：`wgmma2 0.1076 → wg3 0.1179ms（0.913×）`（grid-bound）。
+- 即：`wg3` 相对 `wgmma2` 只快 2.2%，相对**默认档仍只有 0.52×**。
+
+### 114.4 ncu 证据（S=4096 causal，`--launch-count 1`，默认 vs O91 `wg3`）
+
+| 指标 | 默认 `kvtma`（BM=64） | **O91 `wg3`（BM=192）** |
+|---|---|---|
+| Duration | 1.44 ms | 2.78 ms |
+| `lts op_red` | 114,524,160 | **49,643,520（0.43×）** |
+| `lts op_read` | 27,896,828 | 16,987,685 |
+| `lts sectors 总量` | 142,941,608 | **80,622,712（0.56×）** |
+| L2 利用率 | **81.42%** | **21.18%（带宽大量空闲）** |
+| DRAM | 4.52% | 2.51% |
+| Active warps | 18.60% | **18.72%（= 12 warp/SM，与默认同）** |
+| Tensor pipe | 11.26% | 8.38% |
+| regs / CTA/SM | 168 / **3** | 168 / **1** |
+
+⇒ **`red` 再降 2.3×、L2 搬运量降到 0.56×、warp 数已追平默认档（18.7%=12 warp/SM）**——机制完全成立；
+但 **Duration 反升 1.93×、L2 利用率只剩 21%**。⇒ 卡点**不是「每 SM 的 warp 数」本身**，而是
+**1 CTA/SM = 只有一个 barrier 域**：默认档的 12 warp 分属 **3 个独立 CTA**（互不 `__syncthreads`），
+而 `wg3` 的 12 warp 挤在 **1 个 CTA** 内、被每 tile 的 5 个 `__syncthreads` 串成一条依赖链，
+跨-tile 的延迟无法用另一 CTA 的工作填。**「多 warp 摊延迟」被证伪：需要的是多 CTA，不是多 warp。**
+
+### 114.5 数值（护栏全过）
+
+- `ours_wg3 vs fp32 ref` relL2：S4096 dq/dk/dv **8.149% / 8.449% / 6.532%**、S512 **8.179% /
+  8.455% / 6.371%**（护栏 dq≤8.2 / dk≤8.3±0.3 / dv≤6.5±0.3；与默认档同量级，差异来自
+  BM=192 的 atomic 次序）。
+- `max_abs`：S4096 `2.635/2.783/3.330e-1`、S512 `2.426/3.027/3.678e-1`。
+  O91 A/B `wg3 vs wgmma2` max_abs `1.19e-7/8.59e-2/3.95e-2`（fp8/BM 次序噪声）。
+- `ours vs TE` relL2 dq/dk ~13.4%、dv S512 12.0% / S4096 **28.2%**；**TE-vs-ref 的 dv 本 shape
+  就是 27.45%**，故 28% 由 TE 自身误差主导，非本实现回退（同 §113.5）。
+- **单/两文件 device 逐字一致**（`sync` 区段 `identical=True`），`ours_wg3` vs `ours_wg3_sf`
+  max_abs ≤ `1.19e-7`（纯 atomic 次序）；`--ci --dtype fp8 --hopper` gate 全绿、`docs/04` check OK。
+
+### 114.6 判决
+
+**负结果（opt-in，默认关）。** 这是本卡 fp8 主 kernel **最后一条未试的结构性杠杆（多 warpgroup /
+放大 BM）** 的直接判决：它确实把 L2 `red` 从 114.5M 压到 49.6M（0.43×）、总 L2 搬运 0.56×，
+并把 warp/SM 追平默认档，**但 1 CTA/SM 的单 barrier 域让 12 warp 无法互相填延迟**，净 0.52×。
+**「多 warpgroup 摊累加器」只有在能同时维持 ≥2 个独立 CTA/SM 时才成立**——而那需要 ≤116KB smem
+与 ≤128 regs，本卡 fp8 反向（BM≥128）达不到（F6/O83/O90 同墙）。⇒ 与 `ROADMAP`「阻塞」完全一致：
+**默认 fp8 main 的 L2 `red` 墙在本卡无软件解；正结果只剩「换卡（更大 smem/寄存器）」**。
+`--wg3` 与 `NWG` 泛化保留为换卡后的 `D>128`/WS 基建。见 `docs/08` §5.100、`ROADMAP`
+「fp8 专项冲刺 F6」；原始输出 `src/fp8/fa_bwd_fp8_o91_{wg3_ab_s4096,wg3_ab_s512,
+ncu_wg3_s4096,ncu_default_s4096,accuracy}.out.txt`。
