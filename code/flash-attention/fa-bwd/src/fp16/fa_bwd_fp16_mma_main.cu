@@ -1456,7 +1456,8 @@ int main(int argc, char** argv) {
 #if defined(FA_WGMMA) && defined(FA_TMA)
   // O30：建 LSE 的 Q/K 4D TMA 描述符（一次，供所有 (h,b) CTA 用坐标选择）。
   CUtensorMap qmap_lse, kmap_lse;
-  if (D == 128) {
+  // O74：D=512（MLA）causal LSE 也上 4D-TMA，故 D=512 也建 LSE 描述符（box 内维恒 64 fp16）。
+  if (D == 128 || D == 512) {
     qmap_lse = make_lse_map(d_q, H, S, D, B);
     kmap_lse = make_lse_map(d_k, Hkv, S, D, B);
   }
@@ -1490,6 +1491,11 @@ int main(int argc, char** argv) {
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1_5));
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<512, 1, false, 128, 16>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1_6));
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    // O74（第 169 轮）：MLA（D=512）causal LSE 的 4D-TMA 实例（8 个 K=64 box；smem ~193KB ⇒ 1 CTA/SM）。
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<512, 1>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemTma1));
+#endif
   }
   const int cvt_threads = 256;
   const int cvt_blocks =
@@ -1710,7 +1716,8 @@ int main(int argc, char** argv) {
   //   该路径；此时 D==128/causal 默认开（1.30–1.36× 于 wgmma+cp.async，且逐位相同）。
 #if defined(FA_WGMMA) && defined(FA_TMA)
   // O71：D==128 的 causal 与 full 都默认走 TMA（full 由 O69 的 cp.async 再升级为 4D-TMA）。
-  if (lse_tma < 0) lse_tma = (D == 128) ? 1 : 0;
+  // O74：D=512（MLA）causal 也默认走 TMA（`--lsetma=0` 退回 mma/cp.async A/B）。
+  if (lse_tma < 0) lse_tma = (D == 128) ? 1 : ((D == 512 && causal) ? 1 : 0);
 #else
   if (lse_tma < 0) lse_tma = 0;
 #endif
@@ -1728,7 +1735,9 @@ int main(int argc, char** argv) {
     // O39：D=512（MLA，mma LSE，全 dtype 适用）目标 `grid*split ≈ 256`、上限 16；D=128 的
     //   TMA LSE 维持 O38 的「一波」目标 528、上限 8。两者都只在小 grid 时生效。
     // O59：cfg6（2 CTA/SM）把并发槽翻倍，目标抬到 528（对齐 O58 varlen 的 fp16/bf16 档）。
-    const int target = (D == 512) ? (causal_cfg6_fixed ? 528 : 132) : 528;
+    // O74：D=512 causal 走 4D-TMA（1 CTA/SM、smem ~193KB）时并发槽回到 132 ⇒ 目标同非 cfg6。
+    const bool lse_tma_512 = causal && (D == 512) && (lse_tma != 0);
+    const int target = (D == 512) ? ((causal_cfg6_fixed && !lse_tma_512) ? 528 : 132) : 528;
     const int cap = (D == 512) ? 16 : 8;
     int sp = 1;
     while (sp < cap && lg_grid * (sp * 2) <= target) sp *= 2;
@@ -1852,10 +1861,23 @@ int main(int argc, char** argv) {
       // O59：定长 causal MLA 默认走 O58 的 cfg6（PIPE1/LBN16 → 2 CTA/SM）；`--lseocc=4` 旧默认，
       //   5=PIPE0/LBN32。其余数学口径不变（split 只改 fp32 求和次序）。
       if (causal) {
+        // O74（第 169 轮）：MLA causal LSE 优先走 4D-TMA（`--lsetma=0` 退回 mma/cp.async A/B）。
+        //   TMA 版同样支持 K 维 split（写 `lse_part` + merge），故两条子路径共用。
         dim3 g = (lse_split_eff > 1)
                      ? dim3(lg_bal.x, lg_bal.y, (unsigned)(B * lse_split_eff))
                      : lg_bal;
-        if (lseocc == 5)
+        bool did_tma512 = false;
+#if defined(FA_WGMMA) && defined(FA_TMA)
+        if (lse_tma) {
+          lse_mma_kernel_bal_tma<512, 1><<<g, THREADS, kLseSmemTma1>>>(
+              qmap_lse, kmap_lse, d_lse, (lse_split_eff > 1 ? d_lse_part : nullptr), S, H, Hkv,
+              scale, lse_split_eff);
+          did_tma512 = true;
+        }
+#endif
+        if (did_tma512) {
+          // 已走 4D-TMA
+        } else if (lseocc == 5)
           lse_mma_kernel_bal<512, 0, false, 128, 32><<<g, THREADS, kLseSmemBal1_5>>>(
               d_q, d_k, d_lse, S, H, Hkv, scale, nullptr, d_lse_part, lse_split_eff);
         else if (lseocc == 6 || causal_cfg6_fixed)

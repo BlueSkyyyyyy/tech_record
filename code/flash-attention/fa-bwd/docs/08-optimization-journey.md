@@ -1581,3 +1581,28 @@ smem 冲突 + 低 occ
 - **下一步**：把本步 dtype 化到 fp16/bf16（`HD=512` 需 8 个 K=64 chunk、`TILE=64KB`、192KB smem
   ⇒ 1 CTA/SM）；main 的 L2 `red` 墙仍受本卡硬墙锁定。
 - 详见 `docs/03` §98；原始输出 `src/fp8/fa_bwd_fp8_o74_*`。
+
+### 5.84 O75：MLA（D=512）causal LSE 上 **4D-TMA**（fp16/bf16 泛化，第一百七十轮，正结果，默认）
+
+- **一句话**：落实 §5.83 的「dtype 化到 fp16/bf16」，把 fp8 O74 的 `NCH=HD/128` 泛化逐字搬到
+  fp16/bf16（box 内维 128B = 64 个 fp16/bf16，故 `NCH=HD/64`；`HD=512` 用 **8 个 K=64 chunk**），
+  `NCH==2`（HD=128）走原 `wgmma_qkt64_tma` ⇒ **HD=128 逐位不变**；host `lse_tma` 默认
+  `(D==512&&causal)?1:0`、causal 优先 `lse_mma_kernel_bal_tma<512,1>`（smem 197,696B ⇒ 1 CTA/SM）。
+  **至此三 dtype × MLA 的 causal LSE 也统一到 4D-TMA。**
+- **为什么值得**：`lse_mma_kernel_bal<512,1,false,128,16>`（mma+`cp.async`，cfg6）在 S1024H2 上 ncu
+  **Duration 20.26µs / Compute 30.39% / L1TEX 42.10%**（发射受限）；TMA 版把 load 指令/地址运算交给
+  TMA 引擎。
+- **性能（同 binary A/B，event，iters=50）**：LSE-only preprocess **fp16 S256H2 1.47× / S512H4 1.20× /
+  S1024H2 1.56×**（bf16 1.48×/1.21×/1.54×）；端到端 total fp16 **0.0420→0.0359（1.17×）/
+  0.1092→0.1051（1.04×）/ 0.1785→0.1666（1.07×）**（MLA main 占 74–82%）。
+- **ncu（S1024H2 LSE）**：mma **20.26µs / Compute 30.39% / L1TEX 42.10% / 2 CTA/SM** → TMA
+  **12.99µs（1.56×）/ Compute 10.49% / L1TEX 16.63% / 1 CTA/SM**；bf16 TMA 12.77µs 逐项一致 ⇒ 搬迁
+  方式升级，非 DRAM/L2/算力 bound。
+- **数值**：fp16 MLA causal `S256H2 1.638/1.582/1.753e-3`、`S512H4 2.516/2.916/1.724e-3`、
+  `S1024H2 1.987/1.712/1.848e-3`（bf16 同量级 ~1e-2），与 mma 版**打印逐位相同**；D=128 定长
+  causal/full 与 varlen 回归逐位不变；`--ci` 三 dtype gate 全 OK（fp16 1.953e-3 / bf16 7.812e-3 /
+  fp8 5.722e-6）、单/两文件一致性 worst 7.812e-3 OK、`--check docs/04` OK。单/两文件 device 由
+  `sync_onefile_device.py` 逐字同步（fp16 `#include <cuda_runtime.h>` / bf16 `using bf16 = …` 为界）。
+- **下一步**：main 的 L2 `red` 墙仍受本卡寄存器/smem 硬墙锁定（见「阻塞」）。
+- 详见 `docs/01` §25、`docs/01b` §6bb；原始输出 `src/fp16/fa_bwd_fp16_o74_*`、
+  `src/bf16/fa_bwd_bf16_o74_*`。

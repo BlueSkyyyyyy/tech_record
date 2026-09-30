@@ -1,0 +1,81 @@
+
+################ b1_s256_h2_d512_causal_fp16 (singlefile) ################
+case = /home/xieminglin/proj/output/fa-bwd/b1_s256_h2_d512_causal_fp16
+B=1 S=256 H=2 Hkv=2 D=512 causal=1 scale=0.044194
+[O6c] main grid=8 auto=(BM=32,BN=32,PIPE=1) sel=(BM=32,BN=32,PIPE=1)
+[O49] d128 8-warp = 0 (d128w=-1, grid=8, sm=132)
+[O44] MLA main k-split = 16 (auto)
+[O38] lse k-split = 4 (auto)
+[O23] main backend = mma | lse = mma (D=512 S=256)
+[O43] wgmma2 k-split = 1
+[O65] prologue fusion (zero+delta) = 1
+[timing] total(3 kernels) 0.0362 ms  7.41 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0134 ms | main 0.0192 ms | convert 0.0037 ms
+[O39 A/B] lse(D=512) split=1 0.0271 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O39 A/B] lse(D=512) split=2 0.0208 ms (1.304x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=4 0.0174 ms (1.553x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=8 0.0184 ms (1.475x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=16 0.0215 ms (1.263x vs split1) | max_abs vs split1=4.768e-07
+[O39] best lse split=4 0.0174 ms (1.553x)
+[O59 A/B] LSE MLA legacy(sp=4) 0.0174 ms | cfg6(sp=4) 0.0162 ms (1.080x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[MLA512 A/B] main: (32,32,0) 0.1116 (2.40 TF) | (32,32,1) 0.0193 (13.89) | (64,32,0) 0.0986 (2.72) => best 5.775x
+[O44 A/B] MLA main ksplit: 1 0.1877 (1.43) | 2 0.0521 (5.15, 3.60x) | 4 0.0285 (9.43, 6.59x)
+[O46 A/B] MLA main warp: 4w 0.0213 (12.63) | 8w 0.0192 (13.95, 1.104x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.638e-03  max_rel=2.557e-01
+  dk   vs ref: max_abs=1.582e-03  max_rel=2.770e-01
+  dv   vs ref: max_abs=1.753e-03  max_rel=1.772e-02
+
+################ b1_s512_h4_d512_causal_fp16 (singlefile) ################
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp16
+B=1 S=512 H=4 Hkv=4 D=512 causal=1 scale=0.044194
+[O6c] main grid=32 auto=(BM=32,BN=32,PIPE=1) sel=(BM=32,BN=32,PIPE=1)
+[O49] d128 8-warp = 0 (d128w=-1, grid=32, sm=132)
+[O44] MLA main k-split = 8 (auto)
+[O38] lse k-split = 8 (auto)
+[O23] main backend = mma | lse = mma (D=512 S=512)
+[O43] wgmma2 k-split = 1
+[O65] prologue fusion (zero+delta) = 1
+[timing] total(3 kernels) 0.1052 ms  20.40 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0198 ms | main 0.0761 ms | convert 0.0093 ms
+[O39 A/B] lse(D=512) split=1 0.0431 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O39 A/B] lse(D=512) split=2 0.0303 ms (1.424x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=4 0.0222 ms (1.943x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=8 0.0192 ms (2.249x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=16 0.0311 ms (1.387x vs split1) | max_abs vs split1=4.768e-07
+[O39] best lse split=8 0.0192 ms (2.249x)
+[O59 A/B] LSE MLA legacy(sp=8) 0.0193 ms | cfg6(sp=8) 0.0174 ms (1.110x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[MLA512 A/B] main: (32,32,0) 0.2985 (7.19 TF) | (32,32,1) 0.0761 (28.21) | (64,32,0) 0.3648 (5.89) => best 3.921x
+[O44 A/B] MLA main ksplit: 1 0.3699 (5.81) | 2 0.1103 (19.46, 3.35x) | 4 0.0949 (22.63, 3.90x)
+[O46 A/B] MLA main warp: 4w 0.0837 (25.67) | 8w 0.0755 (28.46, 1.109x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.516e-03  max_rel=5.182e-01
+  dk   vs ref: max_abs=2.916e-03  max_rel=4.260e-01
+  dv   vs ref: max_abs=1.724e-03  max_rel=4.151e-02
+
+################ b1_s1024_h2_d512_causal_fp16 (singlefile) ################
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16
+B=1 S=1024 H=2 Hkv=2 D=512 causal=1 scale=0.044194
+[O6c] main grid=32 auto=(BM=32,BN=32,PIPE=1) sel=(BM=32,BN=32,PIPE=1)
+[O49] d128 8-warp = 0 (d128w=-1, grid=32, sm=132)
+[O44] MLA main k-split = 16 (auto)
+[O38] lse k-split = 8 (auto)
+[O23] main backend = mma | lse = mma (D=512 S=1024)
+[O43] wgmma2 k-split = 1
+[O65] prologue fusion (zero+delta) = 1
+[timing] total(3 kernels) 0.1672 ms  25.68 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0213 ms | main 0.1369 ms | convert 0.0091 ms
+[O39 A/B] lse(D=512) split=1 0.0756 ms (1.000x vs split1) | max_abs vs split1=0.000e+00
+[O39 A/B] lse(D=512) split=2 0.0463 ms (1.635x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=4 0.0303 ms (2.494x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=8 0.0233 ms (3.242x vs split1) | max_abs vs split1=4.768e-07
+[O39 A/B] lse(D=512) split=16 0.0355 ms (2.133x vs split1) | max_abs vs split1=4.768e-07
+[O39] best lse split=8 0.0233 ms (3.242x)
+[O59 A/B] LSE MLA legacy(sp=8) 0.0233 ms | cfg6(sp=16) 0.0258 ms (0.903x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[MLA512 A/B] main: (32,32,0) 0.5109 (8.41 TF) | (32,32,1) 0.1363 (31.50) | (64,32,0) 0.5642 (7.61) => best 3.747x
+[O44 A/B] MLA main ksplit: 1 0.7590 (5.66) | 2 0.2193 (19.58, 3.46x) | 4 0.1749 (24.56, 4.34x)
+[O46 A/B] MLA main warp: 4w 0.1457 (29.47) | 8w 0.1362 (31.53, 1.070x)
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.987e-03  max_rel=2.120e-01
+  dk   vs ref: max_abs=1.712e-03  max_rel=3.190e-01
+  dv   vs ref: max_abs=1.848e-03  max_rel=4.306e-02

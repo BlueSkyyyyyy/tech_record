@@ -4796,3 +4796,90 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 原始输出：`src/fp16/fa_bwd_fp16_p167_lse_tma_ab.out.txt`、
 `..._p167_ncu_lse_tma.out.txt`、`src/fp16/fa_bwd_fp16_p33c_run.out.txt`；见 `docs/08` §5.81。
 **下一步**：main 的 L2 `red` 墙受本卡寄存器/smem 硬墙锁定（见 ROADMAP「阻塞」）。
+
+## 25. O75-fp16（第一百七十轮，**正结果，默认**）：MLA（`head_dim=512`）causal LSE 上 **4D-TMA**（对齐 fp8 O74）
+
+### 25.1 动机（fp8 O74 的 dtype 泛化，补齐「三 dtype × MLA LSE TMA」）
+
+第 169 轮 fp8 O74（`docs/03` §98）把 `lse_mma_kernel_bal_tma` 从 `static_assert(HD==128)`
+泛化为 `NCH=HD/128` 个 TMA box，让 **MLA（D=512）causal 的 LSE 也上 4D-TMA**，并留了「逐字
+dtype 化到 fp16/bf16」的下一步。此前 F5→F12 已把 fp16/bf16 的 `D=128` 的 {causal, full,
+varlen-full} LSE 统一到 TMA，但 **`D=512` MLA causal 仍走 `lse_mma_kernel_bal<512,1,false,128,16>`
+（`mma`+`cp.async`，cfg6）**。本轮把同一步搬到 fp16/bf16，**至此三 dtype × MLA 的 causal LSE
+也统一到 4D-TMA**。
+
+### 25.2 实现（device + host，单/两文件同步）
+
+- **device**（`src/fp16/fa_bwd_fp16_mma_kernels.cuh` + onefile 的 `lse_mma_kernel_bal_tma`，
+  与 fp8 O74 逐字同构、只是 fp8 的 box 内维是 128 fp8 / fp16 是 64 fp16）：
+  - 去 `static_assert(HD==128)`，改 `static_assert(HD%64==0)`；新增 `NCH=HD/64`（fp16 box 内维
+    固定 128B = 64 个 fp16），`TILE = NCH*CH`（`CH=(LBM/8)*1024=8KB`；HD=128→16KB / HD=512→64KB）。
+  - `issue_q/issue_k` 各发 `NCH` 次 4D-TMA（第 `c` 个写 `Q/Ks + c*CH`、global 内维坐标 `c*64`），
+    `mbar_arrive_expect(TILE)` 仍一次。`HD=128`（NCH=2）发 `c=0/1` 两条、与历史逐位相同。
+  - 新增 `wgmma_qkt64_tma_chunked`：每个 K=64 chunk 各用 **SBO=1024** 的描述符累加（4 步
+    `wgmma_m64n64k16_f16`），对齐原 2-chunk 写法；`NCH==2` 走原 `wgmma_qkt64_tma` ⇒ **HD=128 逐位不变**。
+  - tile 内两趟 softmax、4-lane `shfl` 归约、K 维 split 逐字复用（split 只改 LSE 的 fp32 求和次序）。
+- **host**（`fa_bwd_fp16_mma_main.cu` + onefile）：`lse_tma` 默认从 `(D==128)?1:0` 改为
+  `(D==128)?1:((D==512&&causal)?1:0)`；`if (D==128||D==512)` 建 LSE 的 Q/K 描述符
+  （`make_lse_map`，box={64,64}，HD=512 只需 8 次 TMA）；`if (D==512)` 段补
+  `cudaFuncSetAttribute(lse_mma_kernel_bal_tma<512,1>, …, kLseSmemTma1=197,696B)`（1 CTA/SM）。
+  `D==512` causal 分支优先 `lse_mma_kernel_bal_tma<512,1>`（ksplit>1 时写 `lse_part` + merge，
+  与 mma 版同口径）；`--lsetma=0` 退回 cfg6（`<512,1,false,128,16>`）做同 binary A/B。
+  auto split 目标：D=512 走 TMA（1 CTA/SM）时并发槽回到 132 ⇒ `target=132`（非 cfg6 档）。
+
+### 25.3 数值（vs fp32 ref，max_abs dq/dk/dv，causal）
+
+| case（fp16 MLA causal） | dq | dk | dv |
+|---|---|---|---|
+| S=256 H=2 D=512 | 1.638e-3 | 1.582e-3 | 1.753e-3 |
+| S=512 H=4 D=512 | 2.516e-3 | 2.916e-3 | 1.724e-3 |
+| S=1024 H=2 D=512 | 1.987e-3 | 1.712e-3 | 1.848e-3 |
+
+均 fp16 噪声，与 mma 版**打印逐位相同**（`--lsetma=0` 与 `=1` 对拍 max_abs 完全一致），
+单/两文件一致性 gate worst **1.953e-3**（容差 1.6e-2）**OK**。定长 D=128 causal/full、varlen
+全量 73 case CI 三 dtype gate 全 OK、`--check docs/04` OK。
+
+### 25.4 性能（同 session，同 binary A/B，Hopper 构建，iters=50）
+
+| case（fp16 MLA causal） | preprocess mma（`--lsetma=0`） | **preprocess TMA（默认）** | LSE 加速 | total mma | **total TMA** | 端到端 |
+|---|---|---|---|---|---|---|
+| S256 H2 | 0.0193 ms | **0.0131 ms** | **1.47×** | 0.0420 ms | **0.0359 ms** | **1.17×** |
+| S512 H4 | 0.0237 ms | **0.0197 ms** | **1.20×** | 0.1092 ms | **0.1051 ms** | **1.04×** |
+| S1024 H2 | 0.0322 ms | **0.0206 ms** | **1.56×** | 0.1785 ms | **0.1666 ms** | **1.07×** |
+
+main 不变（0.0192/0.0761/0.1368 ms）。**对标**：MLA（D=512）反向 FA2/FA3/TE 均不支持（只有
+fp32 ref），故仅给 ours 数字；S1024H2 total **0.1666 ms / 25.8 TF**（fp16 峰值 989 的 2.6%）。
+
+### 25.5 ncu（LSE，`regex:lse_mma_kernel_bal`，`--launch-count 1`，S1024 H2 causal）—— bound
+
+| 指标 | mma cfg6（`--lsetma=0`） | **TMA（默认，O75）** |
+|---|---|---|
+| **Duration** | 20.26 µs | **12.99 µs（1.56×）** |
+| Compute (SM) | 30.39% | 10.49% |
+| L1/TEX Throughput | 42.10% | **16.63%** |
+| L2 Cache Throughput | 43.75% | 28.89% |
+| DRAM Throughput | 6.27% | 9.72% |
+| regs / Block-Limit-Smem | 56 / 2 | 59 / **1** |
+| Achieved Occupancy | 11.94% | 6.25% |
+| Waves Per SM | 0.97 | 0.97 |
+
+**结论**：与 fp8 O74 同源——MLA causal 的 LSE 仍是**搬迁方式**问题：mma cfg6 靠逐 16B
+`cp.async`/`ldmatrix` 把 Q/K 搬进 smem（Compute 30.4%、L1/TEX 42.1%），4D-TMA 用 `NCH=8` 条 bulk
+指令搬整块 SW128、把 load 指令/地址运算交给 TMA 引擎 ⇒ **L1/TEX 42.1%→16.6%、Duration 1.56×**；
+两者都非 DRAM/L2/算力 bound（`Waves 0.97`、occ ≤ 12%）。**这是 preprocess 内一条分支的搬运升级，
+不是 main 的 L2 `red` 墙。** bf16 逐项一致（TMA Duration 12.77 µs）。
+
+### 25.6 复现 / 原始输出
+
+```bash
+# 两文件 A/B（Hopper 构建）：TMA(默认) / mma cfg6(--lsetma=0)
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16 --iters=50
+# ncu：--kernel-name regex:lse_mma_kernel_bal --launch-count 1 --lsetma=0/1
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_o74_mla_lse_ab.out.txt`、
+`src/fp16/fa_bwd_fp16_mma_onefile_o74_mla.out.txt`、
+`src/fp16/fa_bwd_fp16_o74_ncu_lse_{tma,mma}_s1024h2.out.txt`；见 `docs/08` §5.84。
+**下一步**：main 的 L2 `red` 墙受本卡寄存器/smem 硬墙锁定（见 ROADMAP「阻塞」）。

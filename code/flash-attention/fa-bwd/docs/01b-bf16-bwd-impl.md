@@ -2446,3 +2446,33 @@ vs cp.async **109.54 µs / inst 58.86M / L1TEX 50.7%**，与 fp16（66.75µs）�
 **搬迁方式升级（指令 −38.7%、L1/TEX 50.9%→27.1%、Duration 1.63×），不是 main 的 L2 `red` 墙。**
 见 `docs/08` §5.81；原始输出 `src/bf16/fa_bwd_bf16_p167_lse_tma_ab.out.txt`、
 `..._p167_ncu_lse_tma.out.txt`、`src/bf16/fa_bwd_bf16_p33c_run.out.txt`。
+
+## 6bb. O75-bf16（第一百七十轮，**正结果，默认**）：MLA（`head_dim=512`）causal LSE 上 **4D-TMA**
+
+与 fp16（`docs/01` §25）**逐字 dtype 参数化**，与 fp8 O74（`docs/03` §98）同构。第 169 轮 fp8 O74
+把 `lse_mma_kernel_bal_tma` 从 `static_assert(HD==128)` 泛化为 `NCH=HD/128` 个 TMA box，让 MLA
+causal LSE 也上 4D-TMA，并留「dtype 化到 fp16/bf16」为下一步。本轮给 bf16 的
+`lse_mma_kernel_bal_tma` 去 `static_assert(HD==128)`、改 `NCH=HD/64`（bf16 box 内维 128B = 64 个
+bf16），`issue_q/issue_k` 各发 `NCH` 次 4D-TMA、新增 `wgmma_qkt64_tma_chunked`（每 K=64 chunk 用
+`SBO=1024` 描述符累加，`NCH==2` 走原 `wgmma_qkt64_tma` ⇒ **HD=128 逐位不变**）；host `lse_tma`
+默认 `(D==512&&causal)?1:0`、`if (D==128||D==512)` 建描述符、`if (D==512)` 段补 TMA 实例
+（smem 197,696B ⇒ 1 CTA/SM）、causal 分支优先 `lse_mma_kernel_bal_tma<512,1>`、auto split 目标
+回到 132。device 与 fp16 逐字同源（`__half`→bf16）。
+
+**数值**（ours vs fp32 ref，max_abs dq/dk/dv，bf16 MLA causal）：S256H2
+`1.230e-2/9.875e-3/1.686e-2`、S512H4 `8.753e-3/1.082e-2/1.740e-2`、S1024H2
+`5.838e-3/9.519e-3/1.568e-2` —— 均 bf16 噪声，与 mma 版**打印逐位相同**；单/两文件一致性
+gate bf16 worst **7.812e-3 OK**（容差 3.2e-2）。
+
+**性能（同 session，同 binary A/B，CUDA event，iters=50）**：
+
+| case（bf16 MLA causal） | preprocess mma | **preprocess TMA** | LSE 加速 | total mma | **total TMA** | 端到端 |
+|---|---|---|---|---|---|---|
+| S256 H2 | 0.0197 ms | **0.0133 ms** | **1.48×** | 0.0427 ms | **0.0363 ms** | **1.18×** |
+| S512 H4 | 0.0233 ms | **0.0192 ms** | **1.21×** | 0.1085 ms | **0.1032 ms** | **1.05×** |
+| S1024 H2 | 0.0318 ms | **0.0207 ms** | **1.54×** | 0.1786 ms | **0.1669 ms** | **1.07×** |
+
+main 不变；MLA 反向 FA/TE 不支持，仅 ours。**ncu**：TMA **12.77 µs / L1TEX 16.6% / Compute 10.2%
+/ 1 CTA/SM**，与 fp16（12.99µs）逐项一致。**结论**同 fp16：搬迁方式升级，非 DRAM/L2/算力 bound。
+见 `docs/08` §5.84；原始输出 `src/bf16/fa_bwd_bf16_o74_mla_lse_ab.out.txt`、
+`src/bf16/fa_bwd_bf16_mma_onefile_o74_mla.out.txt`、`..._o74_ncu_lse_tma_s1024h2.out.txt`。
