@@ -2300,3 +2300,28 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 
 见 `docs/03` §125；原始输出 `src/fp8/fa_bwd_fp8_o103_d256_ab.out.txt`、
 `..._o103_ncu_lse_d256_s4096.out.txt`。
+
+### 5.112 第 198 轮（O104）：fp8 `head_dim=256` causal 的跨 head 全局 LPT（`hswap256`）—— **正结果（默认）**
+
+- **动机**：`fp8 专项冲刺`剩余的唯一「不改工作划分/指令」杠杆是 **O93 的跨 head 全局 LPT**
+  （`HSWAP`）。O93 只接在 `kvtma` 快路（D=128，需 TMA），而 **D=256 默认走通用
+  `fa_bwd_fp8_mma_kernel`**（wgmma 档、cp.async、非 TMA），一直没有 LPT 排序。`fp8_mma_body`
+  本就支持 `HSWAP`，缺的只是通用 kernel 的模板透传 + host。
+- **改动（device 一行数学未改 + host）**：`fa_bwd_fp8_mma_kernel` / `launch_bwd_main` 加
+  `bool HSWAP=false` 并透传；host 对 D=256 定长 causal、`base_grid=nblk*H*B ≤ 256`、nblk≥16
+  建 O89 的 `d_mrev`、grid 改 `(H,nblk*ksplit,B)`、自动 ksplit 收 4；`--hswap=0` 回退。
+  单/两文件 device 由 `sync_onefile_device.py` 同步（`identical: True`）。
+- **关键判据（形状相关）**：hswap256 只在小 `base_grid` 为正——S1024H8 **1.133×**、
+  S1024H16kv4 **1.090×**、S2048H8 **1.014×**；而 S2048H16（base=512）/S4096H8（base=512）
+  hswap 在任意 k 都**回退**（0.84–0.95×，大工作集下 hswap 损 L2 局部性盖过全局 LPT 收益）
+  ⇒ 故按 `base_grid ≤ 256` 门控（门控外逐值不变）。
+- **ncu（D=256 causal S1024H8 main）**：Duration **231.5→194.5µs（1.19×）**、**`op_read`
+  2.665M→1.939M（−27%）**、**`op_red` 13.369M 一字不变**（D=256 无 regdq，降低 ksplit 不减
+  dK/dV 的 red）、L2 利用率 58.8%→69.9%。机制 = 全局 LPT 削尾波 + Q/dO 重读 k×→4×。
+- **精度/回归**：relL2 vs fp32 ref 与 hswap0 **逐位相同 8.332/8.434/6.464%**；hswap-vs-hswap0
+  max_abs ~1e-7（atomic 次序）；`--ci --dtype fp8` gate worst **7.629e-06 OK**、`--check docs/04`
+  OK。D=128/D=512/full/varlen/D=256 非 causal 逐字不变。TE/FA3 无 fp8 D=256 列。
+- **判决**：正结果、默认。D=256 第一条 `op_read` 下降的调度杠杆。`op_red` 主体墙仍无软件解。
+
+见 `docs/03` §126；原始输出 `src/fp8/fa_bwd_fp8_o104_ab.out.txt`、
+`..._o104_ncu_s1024h8.out.txt`、`..._o104_fa3_te_baseline.out.txt`、`..._o104_ci.out.txt`。

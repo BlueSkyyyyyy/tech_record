@@ -4163,9 +4163,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 // O37：两个薄 `__global__` 壳复用同一 `fp8_mma_body`。cp.async 版与 TMA 版签名只差两个
 //   `__grid_constant__` 描述符（`TMA=true` 才用到）。
 // O47：`NTH`/`NWAR` 同 `fp8_mma_body`（默认 128/2 与历史逐字等价；MLA 用 256/4）。
+// O104（第 198 轮）：`HSWAP`（默认 false）——把 O93 的跨 head 全局 LPT 调度从 `kvtma` 快路
+//   （D=128）推广到**通用 `fa_bwd_fp8_mma_kernel`**（D=256 默认走它）。`fp8_mma_body` 本就支持
+//   HSWAP（见 body 上方说明），此处只是把模板参透传；`HSWAP=false` 与历史逐位相同。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
            bool RCP = true, int NTH = THREADS, int NWAR = WN, bool KVPIPE = false, bool DET = false,
-           bool DET_HALF = false, bool DQONLY = false>
+           bool DET_HALF = false, bool DQONLY = false, bool HSWAP = false>
 __global__ void __launch_bounds__(NTH, (NTH == THREADS && HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8, const float* __restrict__ ks,
@@ -4182,7 +4185,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       float* __restrict__ dq_part = nullptr,
                       const int* __restrict__ part_base = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR, KVPIPE, DET,
-               DET_HALF, DQONLY>(
+               DET_HALF, DQONLY, HSWAP>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, nullptr, nullptr, nullptr, nullptr, mt_b, mt_m,
       dk_part, dv_part, nblk, dq_part, part_base);

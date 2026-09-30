@@ -11051,3 +11051,84 @@ causal：total 0.2650 vs 0.2649ms，max_abs 相同）。
   （`D=256` K/V-TMA 受 116KB/2-CTA smem 墙、MLA 降 smem）。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o103_d256_ab.out.txt`、
   `src/fp8/fa_bwd_fp8_o103_ncu_lse_d256_s4096.out.txt`。见 `docs/08` §5.111。
+
+---
+
+## 126. 第 198 轮：O104——fp8 `head_dim=256` causal 的跨 head 全局 LPT（`hswap256`）——正结果，默认
+
+### 126.1 动机
+
+O96–O103 把「按 causal 标定却被无条件套用到 full/其它 D 的 ksplit 启发式」逐条复核后，
+`fp8 专项冲刺`剩余的唯一「不改工作划分、不改指令」的调度杠杆是 **O93 的跨 head 全局 LPT**
+（`HSWAP`，把 head 放到 `grid.x` 快轴 + O89 的 m 块反转表 ⇒ 所有 head 的最贵 m 块一起先跑）。
+O93 此前**只接在 `kvtma` 快路（D=128，需 TMA）**；而 **`head_dim=256` 的生产默认走通用
+`fa_bwd_fp8_mma_kernel`（`-DFA_WGMMA` 的 wgmma 档、cp.async 载入、非 TMA）**，一直没有 LPT 排序。
+`fp8_mma_body` 本就支持 `HSWAP`（仅解码 `h/mt/part` 的轴来源），缺的只是通用 kernel 的模板透传 + host。
+
+### 126.2 实现（device + host；单/两文件 device 逐字一致）
+
+- **device**：`fa_bwd_fp8_mma_kernel` 加末位模板参 `bool HSWAP=false` 并透传给 `fp8_mma_body`
+  （`launch_bwd_main` 同步加 `HSWAP` 默认参）。`HSWAP=false` 与历史逐位相同。
+- **host**：D=256 定长 causal 的 `base_grid = nblk*H*B`；当 `hswap_opt && mrev_opt && causal &&
+  D==256 && nblk≥16 && base_grid ≤ 256` 时：建 O89 的 `d_mrev`（m 块反转表）、
+  grid 改为 `(H, nblk*ksplit, B)`（head 走快轴）、自动 ksplit 收为 **4**；`--hswap=0` 回退历史锯齿序。
+  单文件由 `sync_onefile_device.py` 同步 device（`identical: True`），host 段同源手改。
+
+### 126.3 为什么加 `base_grid ≤ 256` 的门控（形状相关）
+
+实测（同 binary，iters=150，见 §126.4）hswap256 的收益**强烈依赖 `base_grid`**：
+
+| case | base_grid | hswap=0（总 ms） | hswap（总 ms） | 比值 |
+|---|---|---|---|---|
+| S1024H8 causal | 128 | 0.2643 | **0.2330** | **1.133×** |
+| S1024H16kv4 causal | 256 | 0.4513 | **0.4129** | **1.090×** |
+| S2048H8 causal | 256 | 0.7592 | **0.7462** | **1.014×** |
+| S2048H16 causal | 512 | 1.4681 | 1.4644 | 1.003×（门控外，不变） |
+| S4096H8 causal | 512 | 2.6674 | 2.6650 | 1.001×（门控外，不变） |
+
+> 若不加门控（default 直接 hswap）：S2048H16 与 S4096H8 会**回退**（hswap 在 k=4/8 下 0.84–0.95×）
+> ——大 `base_grid` 时 K/V 工作集更大、hswap 把相邻 CTA 撒到不同 head，损 L2 读局部性的代价
+> 超过全局 LPT 的收益。O93 对 D=128 无此问题（其收益主体是 regdq 下的 dQ 跨 part `red`，
+> 而 D=256 无 regdq，见 §126.5）。⇒ 只在 `base_grid ≤ 256` 时默认开。
+
+### 126.4 性能（同 binary A/B，event，iters=150）
+
+| case | 段 | hswap=0 | hswap256 | 比值 |
+|---|---|---|---|---|
+| S1024H8 causal | main / total | 0.2051 / 0.2659 | **0.1838 / 0.2330** | **1.116× / 1.141×** |
+| S1024H16kv4 causal | main / total | 0.3815 / 0.4513 | **0.3491 / 0.4129** | **1.093× / 1.093×** |
+| S2048H8 causal | main / total | 0.6721 / 0.7592 | **0.6520 / 0.7462** | **1.031× / 1.017×** |
+
+（non-eligible 的 S2048H16/S4096H8 门控外，逐值不变。）
+
+### 126.5 ncu（D=256 causal S1024H8，main kernel）
+
+| | grid | Duration | L2 `op_read` | L2 `op_red` | L2 利用率 |
+|---|---|---|---|---|---|
+| hswap=0（k=16） | 256×8 | 231.5 µs | 2.665 M | **13.369 M** | 58.8% |
+| hswap256（k=4） | 8×64 | **194.5 µs** | **1.939 M（−27%）** | **13.369 M（一字不变）** | **69.9%** |
+
+⇒ 机制与预期完全一致：**只降 Q/dO 重读（`op_read`），dK/dV 的 `op_red` 一字不变**（D=256 无
+`regdq`，dQ 的 red 由 tile 数而非 ksplit 决定，故降低 ksplit 不减 red）——收益 = 全局 LPT 的
+尾波削平 + Q/dO 重读从 k× 降到 4×，与 O93 对 D=128 的机制（部分来自 dQ 跨 part red）不同。
+
+### 126.6 精度 / 回归（护栏）
+
+- **`ours vs fp32 ref` relL2**（S1024H8 causal）：hswap=0 与 hswap 均 **8.332 / 8.434 / 6.464%**
+  （护栏 ≤8.5/≤8.6/≤6.8 内，与 O84/O99/O103 统计一致）；`hswap-vs-hswap0` max_abs = **1.19e-7 /
+  4.77e-7 / 7.15e-7**（纯跨 CTA atomicAdd 次序，fp8 噪声下 `max_abs` 打印位相同）。
+- **单/两文件一致性 gate（`--ci --dtype fp8`，45 case）worst = 7.629e-06 OK**；`--check docs/04`
+  **OK（214 行）**。D=128 / D=512 / full / varlen / D=256 非 causal 逐字不变。
+- **外部基线**：D=256 fp8 无 FA2/FA3/TE 列（TE fp8 报 `Invalid combination of data type and
+  sequence`、FA3 不支持 fp8），只能对 fp32 ref。
+
+### 126.7 结论 / 下一步
+
+- **判决：正结果、默认开启**。这是 D=256 主 kernel 上第一条 `op_read` 下降的调度杠杆（对照
+  O99 只是调 ksplit 买并发、`op_read` 反升）。`op_red`（dK/dV 主体墙）仍与本卡 causal 旗舰
+  D=128 同源，**无软件解**（见「阻塞」）。
+- `HSWAP` 模板参 + `--hswap=0` A/B 已在通用 kernel/launcher 就位，为后续换卡后的
+  `D>128` / 多 warpgroup WS 复用。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o104_ab.out.txt`（5 shape × {hswap0, hswap} 计时+数值）、
+  `src/fp8/fa_bwd_fp8_o104_ncu_s1024h8.out.txt`、`src/fp8/fa_bwd_fp8_o104_fa3_te_baseline.out.txt`、
+  `src/fp8/fa_bwd_fp8_o104_ci.out.txt`。见 `docs/08` §5.112。

@@ -1,0 +1,87 @@
+### O104 (第198轮) fp8 D=256 causal hswap256 A/B — main/总时间 + 数值 vs fp32 ref
+### 同 binary (/tmp/o104_twofile，-O3 sm90a+FA_WGMMA+FA_TMA)，同 session iters=150
+
+===== b1_s1024_h8_d256_causal_fp8  opt='--hswap=0' =====
+grid main = 256 x 8 x 1  (ksplit=16, base_grid=128)
+[timing] total(quant+pre+main+cvt) 0.2659 ms  32.31 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0275 ms | preprocess 0.0158 ms | main 0.2051 ms | convert 0.0175 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.632e-01  max_rel=1.052e+02
+  dk   vs ref: max_abs=2.799e-01  max_rel=6.116e+01
+  dv   vs ref: max_abs=3.584e-01  max_rel=1.189e+02
+
+===== b1_s1024_h8_d256_causal_fp8  opt='' =====
+O104: hswap256 on (D=256, grid=(H,nblk*ksplit,B), global LPT across heads)
+grid main = 64 x 8 x 1  (ksplit=4, base_grid=128)
+[timing] total(quant+pre+main+cvt) 0.2330 ms  36.87 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0273 ms | preprocess 0.0155 ms | main 0.1838 ms | convert 0.0064 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.632e-01  max_rel=1.052e+02
+  dk   vs ref: max_abs=2.799e-01  max_rel=6.116e+01
+  dv   vs ref: max_abs=3.584e-01  max_rel=1.189e+02
+
+===== b1_s1024_h16_d256_kv4_causal_fp8  opt='--hswap=0' =====
+grid main = 128 x 16 x 1  (ksplit=8, base_grid=256)
+[timing] total(quant+pre+main+cvt) 0.4513 ms  38.07 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0347 ms | preprocess 0.0232 ms | main 0.3815 ms | convert 0.0119 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.475e-01  max_rel=1.026e+02
+  dk   vs ref: max_abs=4.412e-01  max_rel=1.082e+02
+  dv   vs ref: max_abs=6.153e-01  max_rel=7.004e+01
+
+===== b1_s1024_h16_d256_kv4_causal_fp8  opt='' =====
+O104: hswap256 on (D=256, grid=(H,nblk*ksplit,B), global LPT across heads)
+grid main = 64 x 16 x 1  (ksplit=4, base_grid=256)
+[timing] total(quant+pre+main+cvt) 0.4129 ms  41.60 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0347 ms | preprocess 0.0233 ms | main 0.3491 ms | convert 0.0059 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.475e-01  max_rel=1.026e+02
+  dk   vs ref: max_abs=4.412e-01  max_rel=1.082e+02
+  dv   vs ref: max_abs=6.153e-01  max_rel=7.004e+01
+
+===== b1_s2048_h8_d256_causal_fp8  opt='--hswap=0' =====
+grid main = 512 x 8 x 1  (ksplit=16, base_grid=256)
+[timing] total(quant+pre+main+cvt) 0.7592 ms  45.26 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0528 ms | preprocess 0.0317 ms | main 0.6717 ms | convert 0.0031 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.224e-01  max_rel=1.471e+02
+  dk   vs ref: max_abs=2.838e-01  max_rel=8.667e+01
+  dv   vs ref: max_abs=3.585e-01  max_rel=1.324e+02
+
+===== b1_s2048_h8_d256_causal_fp8  opt='' =====
+O104: hswap256 on (D=256, grid=(H,nblk*ksplit,B), global LPT across heads)
+grid main = 128 x 8 x 1  (ksplit=4, base_grid=256)
+[timing] total(quant+pre+main+cvt) 0.7462 ms  46.04 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0527 ms | preprocess 0.0318 ms | main 0.6520 ms | convert 0.0097 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.224e-01  max_rel=1.471e+02
+  dk   vs ref: max_abs=2.838e-01  max_rel=8.667e+01
+  dv   vs ref: max_abs=3.585e-01  max_rel=1.324e+02
+
+===== b1_s2048_h16_d256_causal_fp8  opt='--hswap=0' =====
+grid main = 256 x 16 x 1  (ksplit=8, base_grid=512)
+[timing] total(quant+pre+main+cvt) 1.4681 ms  46.81 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1003 ms | preprocess 0.0488 ms | main 1.3117 ms | convert 0.0073 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.203e-01  max_rel=1.512e+02
+  dk   vs ref: max_abs=3.006e-01  max_rel=8.519e+01
+  dv   vs ref: max_abs=3.532e-01  max_rel=7.107e+01
+
+===== b1_s2048_h16_d256_causal_fp8  opt='' =====
+O104: hswap256 skipped for D=256 (base_grid=512 > 256: L2 locality loss > LPT gain)
+grid main = 256 x 16 x 1  (ksplit=8, base_grid=512)
+[timing] total(quant+pre+main+cvt) 1.4644 ms  46.93 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1003 ms | preprocess 0.0483 ms | main 1.3137 ms | convert 0.0021 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.203e-01  max_rel=1.512e+02
+  dk   vs ref: max_abs=3.006e-01  max_rel=8.519e+01
+  dv   vs ref: max_abs=3.532e-01  max_rel=7.107e+01
+
+===== b1_s4096_h8_d256_causal_fp8  opt='--hswap=0' =====
+grid main = 1024 x 8 x 1  (ksplit=16, base_grid=512)
+[timing] total(quant+pre+main+cvt) 2.6674 ms  51.53 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1004 ms | preprocess 0.0776 ms | main 2.4812 ms | convert 0.0082 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.076e-01  max_rel=1.377e+02
+  dk   vs ref: max_abs=3.052e-01  max_rel=1.322e+02
+  dv   vs ref: max_abs=3.776e-01  max_rel=6.097e+01
+
+===== b1_s4096_h8_d256_causal_fp8  opt='' =====
+O104: hswap256 skipped for D=256 (base_grid=512 > 256: L2 locality loss > LPT gain)
+grid main = 1024 x 8 x 1  (ksplit=16, base_grid=512)
+[timing] total(quant+pre+main+cvt) 2.6650 ms  51.57 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1003 ms | preprocess 0.0778 ms | main 2.4798 ms | convert 0.0070 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.076e-01  max_rel=1.377e+02
+  dk   vs ref: max_abs=3.052e-01  max_rel=1.322e+02
+  dv   vs ref: max_abs=3.776e-01  max_rel=6.097e+01

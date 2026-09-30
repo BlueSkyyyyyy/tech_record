@@ -1,0 +1,9 @@
+===== O104 fp8 D=256 causal 外部基线（FA3/TE，纯反向 CUPTI）=====
+--- 1 1024 8 256 causal ---
+[b1_s1024_h8_d256_causal_fp8] te=NA(/workspace/TransformerEngine/transformer)
+--- 1 1024 16 256 causal kv=4 ---
+[b1_s1024_h16_d256_kv4_causal_fp8] te=NA(/workspace/TransformerEngine/transformer)
+--- 1 2048 8 256 causal ---
+[b1_s2048_h8_d256_causal_fp8] te=NA(/workspace/TransformerEngine/transformer)
+--- 1 4096 8 256 causal ---
+[b1_s4096_h8_d256_causal_fp8] te=NA(/workspace/TransformerEngine/transformer)
