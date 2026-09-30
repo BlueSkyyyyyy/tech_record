@@ -2245,3 +2245,33 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   O68/O70 补 D=128/D=256，「定长 full MLA」被两次改造同时漏掉，成了 full MLA 端到端的头号成本。
 
 见 `docs/03` §123；原始输出 `src/fp8/fa_bwd_fp8_o101_{ab,ncu}.out.txt`。
+
+### 5.110 第 196 轮（O102）：`--det` 确定性路径的 Hopper split-K + full/causal 标定 —— **正结果（非默认路径）**
+
+**背景**：O101（本文 §5.109 / `docs/03` §123）把「`partial/split` 的 full 标定」里的 **split** 收口，
+点明**唯一未复核的同类启发式** = **确定性 `--det` 的 partial/`split` 标定**。核查发现：mma 路径的
+`--det` 早在 P3-4f 支持 `--detk>1`（causal 下 k=4 触底），但 **Hopper `kvtma` 快路**的 `--det`
+（P3-4g）**把 ksplit 写死为 1**——而 F1 之后 fp8 的生产默认构建就是 Hopper，于是默认构建上 `--det`
+一直白扔 split-K 并行度。
+
+- **改动（纯 host，device 一行未改、单/两文件同源）**：`launch_bwd_main_kvtma_det` 加
+  `int ksplit = 1, float* dq_part = nullptr` 并透传（`fp8_mma_body` 本就支持 `DET && ksplit>1` 的
+  per-part dQ partial）；P3-4g 的 A/B 段参数化到 `--detk`：grid `(nblk*ks,H,B)`、`ks>1` 时分配/清零
+  `dq_part` + `dkv_reduce_kernel` + `dq_reduce_kernel<128>` 固定次序求和（与 P3-4f 同款）。`det_ksplit`
+  默认由 1 改 **0=auto**：定长 D=128（mma 与 Hopper 两条）取 `causal ? min(4,nblk) : 1`；`--detk=1`
+  可复现旧状；varlen/MLA 三条 DET 路径仍 `⇒1`（逐位不变）。
+- **标定（causal S4096 H16 Hopper，iters=20）**：DET-fp32 k=1 **2.5344** → k=2 2.3472 → **k=4 2.2860
+  (1.109×)** → k=8 2.3583；DET-fp16(扇区化) k=1 **2.1241** → **k=4 1.8743 (1.133×)**；auto 选中 k=4
+  （2.2845 / 1.8729）。**full（S1024 H16）** k=1 0.3353 < k=4 0.3465 ⇒ auto 取 k=1（无三角偏斜）。
+- **确定性/精度**：所有 ks、单/两文件、causal/full **`runs[1-2] bitwise dq/dk/dv = 0`**；
+  `DET-vs-atomic` ~e-7–e-4；`fp16-vs-fp32 dk/dv` ~1e-3（partial 过 fp16）。**默认路径一行未改**：
+  causal S4096 total 1.6079ms/85.48TF、max_abs 2.635/2.644/3.216e-1（与历史同档），
+  `--doc-table-check` OK（214 行）。
+- **ncu**：`dkv_reduce_kernel<128,64>`（k=4）Duration **732.7µs** / **DRAM 91.31%** / L2 88.76% /
+  Compute 12.97% / 3.06 TB/s ⇒ 墙仍是**二次归约的纯 DRAM 带宽**（与 §56/§57/§68 一致），与 split-K 无关。
+- **判决**：正结果（非默认路径，`--det`）。**`partial/split` 的 full 标定至此全部收口**（LSE split =
+  O101；DET partial/split = 本轮）。剩余只有换卡 / 减 DET partial 字节（§68 候选 ②，非默认）/ 覆盖型 backlog。
+
+见 `docs/03` §124；原始输出 `src/fp8/fa_bwd_fp8_p196_det_hopper_ksweep_s4096.out.txt`、
+`..._p196_det_hopper_full_1file.out.txt`、`..._p196_default_regression.out.txt`、
+`..._p196_ncu_reduce_s4096.out.txt`。

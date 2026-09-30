@@ -1,0 +1,17 @@
+=== O102 (P196) fp8 DET Hopper split-K calibration: causal S4096 H16 (two-file) ===
+--- detk=1 ---
+[P3-4g A/B] kvtma ksplit=1 atomic 1.8117 ms | DET 2.5344 ms (0.715x) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=2.18e-04/9.54e-07/1.43e-06
+[F4 A/B] kvtma ksplit=1 atomic 1.8117 ms | DET-fp32 2.5344 ms (0.715x) | DET-fp16(扇区化) 2.1241 ms (0.853x vs atomic) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | fp16-vs-fp32 dq/dk/dv=0.00e+00/9.66e-04/1.76e-03 | fp16-vs-atomic dq/dk/dv=2.18e-04/9.66e-04/1.76e-03
+--- detk=2 ---
+[P3-4g A/B] kvtma ksplit=2 atomic 1.5843 ms | DET 2.3472 ms (0.675x) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=2.18e-04/1.19e-06/1.91e-06
+[F4 A/B] kvtma ksplit=2 atomic 1.5843 ms | DET-fp32 2.3472 ms (0.675x) | DET-fp16(扇区化) 1.9428 ms (0.815x vs atomic) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | fp16-vs-fp32 dq/dk/dv=0.00e+00/9.66e-04/1.76e-03 | fp16-vs-atomic dq/dk/dv=2.18e-04/9.66e-04/1.76e-03
+--- detk=4 ---
+[P3-4g A/B] kvtma ksplit=4 atomic 1.4856 ms | DET 2.2860 ms (0.650x) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=2.18e-04/7.15e-07/9.54e-07
+[F4 A/B] kvtma ksplit=4 atomic 1.4856 ms | DET-fp32 2.2860 ms (0.650x) | DET-fp16(扇区化) 1.8743 ms (0.793x vs atomic) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | fp16-vs-fp32 dq/dk/dv=0.00e+00/9.66e-04/1.76e-03 | fp16-vs-atomic dq/dk/dv=2.18e-04/9.66e-04/1.76e-03
+--- detk=8 ---
+[P3-4g A/B] kvtma ksplit=8 atomic 1.4884 ms | DET 2.3583 ms (0.631x) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=2.18e-04/4.77e-07/7.15e-07
+[F4 A/B] kvtma ksplit=8 atomic 1.4884 ms | DET-fp32 2.3583 ms (0.631x) | DET-fp16(扇区化) 1.9445 ms (0.765x vs atomic) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | fp16-vs-fp32 dq/dk/dv=0.00e+00/9.66e-04/1.76e-03 | fp16-vs-atomic dq/dk/dv=2.18e-04/9.66e-04/1.76e-03
+
+--- detk=auto (default) ---
+[P3-4g A/B] kvtma ksplit=4 atomic 1.4909 ms | DET 2.2845 ms (0.653x) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=2.18e-04/7.15e-07/1.19e-06
+[F4 A/B] kvtma ksplit=4 atomic 1.4909 ms | DET-fp32 2.2845 ms (0.653x) | DET-fp16(扇区化) 1.8729 ms (0.796x vs atomic) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | fp16-vs-fp32 dq/dk/dv=0.00e+00/9.66e-04/1.76e-03 | fp16-vs-atomic dq/dk/dv=2.18e-04/9.66e-04/1.76e-03

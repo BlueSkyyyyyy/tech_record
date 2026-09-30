@@ -3262,7 +3262,24 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百九十五轮）**：**O101——定长 full 的 LSE 补齐均衡/流水/split——正结果，默认**。
+> **最新（第一百九十六轮）**：**O102——`--det` 确定性路径的 Hopper split-K + full/causal 标定
+> ——正结果（非默认路径）**。落实 O101「下一步候选 ②」= `partial/split` 的 full 标定里唯一未复核的
+> **DET partial/split**。mma 路径的 `--det` 早有 `--detk>1`（P3-4f，causal k=4 触底），但 **Hopper
+> `kvtma` 快路**的 `--det`（P3-4g）**把 ksplit 写死为 1**，而 F1 后 fp8 生产默认构建就是 Hopper ⇒
+> 默认构建上 `--det` 白扔 split-K。**纯 host、device 一行未改、单/两文件同源**：`launch_bwd_main_kvtma_det`
+> 加 `ksplit/dq_part` 透传、P3-4g 的 A/B 参数化到 `--detk`（grid `(nblk*ks,H,B)` + `dq_part` +
+> `dq_reduce_kernel<128>`）、`det_ksplit` 默认 1→**0=auto**（定长 D=128 取 `causal ? min(4,nblk) : 1`）。
+> **性能**：causal D=128 S4096 DET-fp32 k=1→k=4 **1.109×**（2.5344→2.2860ms）、DET-fp16(扇区化)
+> **1.133×**（2.1241→1.8743ms）；auto 选中 k=4；full S1024 auto k=1（k=4 更慢）。所有 ks/单两文件/
+> causal/full **`runs[1-2] bitwise dq/dk/dv = 0`**。**默认路径一行未改**（S4096 total 1.6079ms/85.48TF、
+> max_abs 2.635/2.644/3.216e-1；`--doc-table-check` OK 214 行）。ncu：reduce 732.7µs/DRAM 91.31%/
+> 3.06 TB/s（纯 DRAM 带宽 bound，与 split-K 无关）。**`partial/split` 的 full 标定全部收口。**
+> 见 `docs/03` §124、`docs/08` §5.110。
+> **下一步候选**：① **换卡**（唯一能解 causal 旗舰 D=128 的 L2 `red` 主体墙，见「阻塞」）；
+> ② 确定性路径减 **partial 字节**（fp8 partial / 只存 causal 非零块）或提 reduce 效率（§68 候选 ②，
+> 非默认）；③ 覆盖型 backlog（`D=256` K/V-TMA、MLA 降 smem）均受同一 smem 墙。
+>
+> **（第一百九十五轮）**：**O101——定长 full 的 LSE 补齐均衡/流水/split——正结果，默认**。
 > 落实 O100 结尾的「`partial/split` 的 full 标定」中的 **split 部分**。O54 只修了 **varlen** full
 > MLA 的 LSE，O68/O70 只补了定长 full 的 D=128/D=256——**定长 full MLA（D=512）的 LSE 一直被漏**，
 > 占 full MLA 端到端 **~65%**（S1024H2 preprocess 0.376ms > main 0.183ms）。**纯 host、device 一行未改、
@@ -8154,9 +8171,33 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     dv 6.69–6.79 %）、`max_abs` O(0.02–0.09)；单/两文件 worst 8.94e-8；全量 `--ci --dtype fp8`
     一致性 gate **worst 6.199e-6 OK**、`--check docs/04` **OK（214 行）**；causal 与 D=128 full 逐位不变。
     MLA D=512 full 的 FA2.7.4/FA3/fp16-fp8 TE **均 NA**（`fa_bwd_bench.py bench`），仅 ours。
-  - **判决：正结果、默认开启。** fp8 的 LSE split/均衡至此覆盖 causal/full × 定长/变长 ×
-    D=128/256/512（D=128 full 用 TMA、grid 已 ≥SM，无 split 需求）。见 `docs/03` §123、
-    `docs/08` §5.109；原始输出 `src/fp8/fa_bwd_fp8_o101_{ab,ncu}.out.txt`。
+   - **判决：正结果、默认开启。** fp8 的 LSE split/均衡至此覆盖 causal/full × 定长/变长 ×
+     D=128/256/512（D=128 full 用 TMA、grid 已 ≥SM，无 split 需求）。见 `docs/03` §123、
+     `docs/08` §5.109；原始输出 `src/fp8/fa_bwd_fp8_o101_{ab,ncu}.out.txt`。
+
+- 2026-10-01（第一百九十六轮）：**O102——`--det` 确定性路径的 Hopper split-K + full/causal 标定
+  ——正结果（非默认路径）**。落实 O101「下一步候选 ②」= `partial/split` 的 full 标定里唯一未复核的
+  **DET `partial`/`split`**。核查发现：mma 路径的 `--det` 早在 P3-4f 支持 `--detk>1`（causal k=4
+  触底），但 **Hopper `kvtma` 快路**的 `--det`（P3-4g）**把 ksplit 写死为 1**，而 F1 后 fp8 的生产
+  默认构建就是 Hopper ⇒ 默认构建上 `--det` 白扔 split-K 并行度。**纯 host、device 一行未改、单/两
+  文件同源**：`launch_bwd_main_kvtma_det` 加 `ksplit/dq_part` 并透传（body 本就支持 `DET && ksplit>1`
+  的 per-part dQ partial）；P3-4g 的 A/B 参数化到 `--detk`（grid `(nblk*ks,H,B)` + `dq_part` 分配/清零
+  + `dkv_reduce_kernel` + `dq_reduce_kernel<128>`）；`det_ksplit` 默认 1→**0=auto**（定长 D=128 的
+  mma 与 Hopper 两条取 `causal ? min(4,nblk) : 1`；`--detk=1` 复现旧状；varlen/MLA 三条仍 `⇒1`）。
+  - **标定（causal S4096 H16 Hopper，iters=20）**：DET-fp32 k=1 **2.5344** → k=2 2.3472 →
+    **k=4 2.2860（1.109×）** → k=8 2.3583；DET-fp16(扇区化) k=1 **2.1241** → **k=4 1.8743（1.133×）**；
+    auto 选中 k=4（2.2845 / 1.8729）。**full（S1024 H16）** k=1 0.3353 < k=4 0.3465 ⇒ auto 取 k=1
+    （无三角偏斜，多切只增 Q/dO 重读 + dQ 跨 part 原子）。S1024H32 causal auto k=4（0.4149/0.3558）。
+  - **确定性/精度**：所有 ks、单/两文件、causal/full **`runs[1-2] bitwise dq/dk/dv = 0`**；
+    `DET-vs-atomic` ~e-7–e-4；`fp16-vs-fp32 dk/dv` ~1e-3。**默认路径一行未改**：causal S4096
+    total **1.6079ms/85.48TF**、max_abs **2.635/2.644/3.216e-1**（与历史同档）；full S1024
+    5.521/5.310/4.025e-2；MLA S1024H2 2.228/3.311/3.611e-1；`--doc-table-check` **OK（214 行）**。
+  - **ncu**：`dkv_reduce_kernel<128,64>`（k=4）Duration **732.7µs** / **DRAM 91.31%** / L2 88.76% /
+    Compute 12.97% / 3.06 TB/s ⇒ 墙仍是**二次归约的纯 DRAM 带宽**，与 split-K 无关。
+  - **判决：正结果（非默认路径）。** **`partial/split` 的 full 标定至此全部收口**（LSE split = O101；
+    DET partial/split = 本轮）。见 `docs/03` §124、`docs/08` §5.110；原始输出
+    `src/fp8/fa_bwd_fp8_p196_{det_hopper_ksweep_s4096,det_hopper_full_1file,default_regression,
+    ncu_reduce_s4096}.out.txt`。
 
 ## 灵感 / backlog
 
