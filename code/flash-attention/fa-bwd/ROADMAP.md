@@ -3127,6 +3127,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       → **后续已完成（O84，第一百七十九轮）：`D=256` 主 kernel 默认切 wgmma**（SW128 布局更紧凑
       ⇒ 首次 **2 CTA/SM**、main 1.15–1.29×、指令 −7.4%，见「当前进度 第一百七十九轮」/`docs/03` §107）。
       `D=256` 的 4D-TMA 仍未做（留 backlog）。
+- [x] **F16/O98**（第一百九十二轮，**正结果，默认**）**full（非 causal）变长的 ksplit 重标定**——
+      O96/O97 的定长 full 审计补齐到 `run_varlen`。6 个 dumped varlen full shape 全扫 k∈[1,16]：
+      D=128 最优 k=3~4、D=512 最优 k≈128/base。规则（纯 host、单/两文件同源）：D=128 `k=max(kp,3)`、
+      D=512 按 132 槽波对齐、D=256 沿用 O97。**性能** b5 **1.059×**、b8 **1.041×**、
+      d512 b1 **1.097×**、d512 b3 **1.018×**，6 shape 无回退；relL2 护栏内、`--ci --no-run` 全绿。
+      见 `docs/03` §120、`docs/08` §5.106。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
@@ -3251,7 +3257,24 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百九十一轮）**：**O97——fp8 full（非 causal）D=256 / D=512（MLA）的 ksplit 重标定
+> **最新（第一百九十二轮）**：**O98——fp8 full（非 causal）变长的 ksplit 重标定——正结果，默认**。
+> 把 O96/O97 的「full 重标定」从定长补齐到 **`run_varlen`**（此前仍是 O29 的 causal 标定，且
+> `base_grid=ceil(maxlen/BM)*H*B` 含短序列早退死 CTA ⇒ 名义网格被高估）。**纯 host、device
+> 一行未改、单/两文件同源**：6 个 dumped varlen full shape 全扫 k∈[1,16]——**D=128 最优 k=3~4**
+> （与 O96 定长同源）、**D=512 最优 k≈128/base**（对齐 132 槽一波）。规则：D=128 `k=max(kp,3)`
+> （只抬下限、不碰已最优的 k=4 档）、D=512 按 132 槽波对齐（下限 2）、D=256 沿用 O97。
+> **性能（同 binary A/B，iters=100）**：b5_t3968 **1.059×**、b8_t2904 **1.041×**、
+> b1_t512_d512 **1.097×**、b3_t1792_d512 **1.018×**，另两 shape 同配置（0.997–0.998 = 噪声）
+> ⇒ **6 shape 无回退**。ncu：D=128 靠提 L2 利用率（54.6→60.4%）压 Duration；D=512 直接
+> 减 Q/dO 重读（`op_read` −19%）。relL2 vs fp32 ref 全在护栏内、单/两文件 ≤3.6e-7、
+> `--ci --no-run` 三 dtype gate OK（fp8 6.676e-6）、`--check docs/04` OK。见 `docs/03` §120、
+> `docs/08` §5.106；原始输出 `src/fp8/fa_bwd_fp8_o98_{varlen_full_ab,ksweep,ncu,fa3_baseline}.out.txt`。
+> **下一步候选**：① **D=128 变长「均匀 vs 混合长度」判据**——b4_t4096 的 k=3 比当前 k=4 快 ~3.7%，
+> 但全局 k=3 会反伤 b4_t3840；可用 `total_mt/(nmb*B)` 利用率区分后按 shape 选 k；
+> ② 把同类审计推广到 **`partial/split` 的 full 标定**；③ causal 旗舰的 L2 `red` 墙仍是唯一真杠杆，
+> 本卡无软件解（换卡/多 warpgroup，见「阻塞」）；④ 用全量 `--ci`（跑 kernel 版）验收 O96/O97/O98。
+>
+> **（第一百九十一轮）**：**O97——fp8 full（非 causal）D=256 / D=512（MLA）的 ksplit 重标定
 > ——正结果，默认**。O96「causal 标定的启发式要复核 full」的同类审计落到 D=256/D=512——两者
 > 共用 O29 的 `target_ctas=S/2`（按 causal MLA 标定）。**纯 host、device 一行未改、单/两文件同源**：
 > ① **D=512**（1 CTA/SM→132 槽）`S/2/base=32/H` 恒把 k 顶到 16 ⇒ **过切**，改为按 132 槽波对齐
@@ -7983,6 +8006,35 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     causal 路径逐档不变；varlen `use_regdq` 的 `/2` 仅 full 分支去掉（当前 full varlen 本就 regdq=1）。
   - **判决：正结果、默认开启**。仍属「纠正被 causal 经验错套的启发式」，不改数据通路。见
     `docs/03` §119、`docs/08` §5.105；原始输出 `src/fp8/fa_bwd_fp8_o97_{ab,ncu}.out.txt`。
+
+- 2026-10-01（第一百九十二轮）：**O98——fp8 full（非 causal）变长的 ksplit 重标定——正结果，默认**。
+  O96/O97 只改定长 full，`run_varlen` 仍是 O29 的 causal 标定，且 `base_grid` 按 maxlen 计、
+  含短序列早退死 CTA ⇒ 名义网格被高估。本轮把「full 重标定」补齐到变长。**纯 host、device
+  一行未改、单/两文件同源**（`--ksplit=K` 仍可覆盖）。
+  - **全扫（6 个 dumped varlen full shape，k∈[1,16]，iters=80）**：D=128 最优稳定 **k=3~4**
+    （b4_t3840→4，b4_t4096/b5_t3968/b8_t2904→3，与 O96 定长同源）；D=512 最优 **k≈128/base**
+    （b1_t512→8、b3_t1792→11，即「对齐 132 槽一波」）。causal 自动档在 base 偏大时给 k=1/2
+    **欠切**（b5 k1 慢 5.6%、b8 k2 慢 4.3%），D=512 给 k=16 **过切**（b1 慢 8.2%）。
+    **注**：O96 的 396 槽波对齐直接套变长会因死 CTA 高估网格而给 1/2/5/8（偏差最大 4.3%）。
+  - **规则**：`!causal` 时——**D=128** `k=max(kp,3)`（只抬下限、不碰已近最优的 k=4 档）；
+    **D=512** 按 132 槽波对齐（下限 2，同 O97）；**D=256** 沿用 O97（`maxlen≥2048` 取
+    `clamp(8192/base,1,12)`，否则 264 槽波对齐）。
+  - **性能（同 binary A/B，iters=100）**：`b4_t3840`/`b4_t4096` 配置不变（0.998×/0.997× =
+    run-to-run 噪声），`b5_t3968` **1.059×**（2.848→2.690ms）、`b8_t2904` **1.041×**
+    （1.196→1.150）、`b1_t512_d512` **1.097×**（0.0818→0.0746）、`b3_t1792_d512` **1.018×**
+    ⇒ **6 shape 无回退**。
+  - **ncu（main）**：**D=128** k 增大 ⇒ `op_read` +19~37%（Q/dO 重读），但墙是延迟/并行度，
+    L2 利用率 b5 54.6→60.4%、b8 58.4→61.2%，Duration −3.9%/−2.0%；**D=512** 最优 k 反而
+    **减少**重读（k16→8 `op_read` 0.661M→0.533M = −19%、L2 44.7→50.8%），Duration −12%
+    （73.2→64.2µs）；两组 `op_red` 仅随 dQ 跨 part 原子微动（dK/dV 主体与 ksplit 无关）。
+  - **数值/回归**：只改 atomic 次序 ⇒ 6 shape relL2 vs fp32 ref dq 8.06–8.22% / dk 8.21–8.36% /
+    dv 6.48–6.76%（护栏内）、`max_abs` O(0.05–0.25)；单/两文件 `max_abs ≤3.58e-7`；
+    `fa_bwd_run.py --ci --no-run` 三 dtype gate **OK**（fp16 1.953e-3 / bf16 7.812e-3 /
+    fp8 **6.676e-6**）、`--check docs/04` **OK（198 行）**；causal 与定长 full 逐字不变。
+  - **残余**：D=128 `b4_t4096` 的 k=4 比最优 k=3 差 ~3.7%，但全局 k=3 会反伤 `b4_t3840`
+    （k3 比 k4 慢 3.9%），需「均匀 vs 混合长度」判据才能吃下（backlog）。**fp8 的 full ksplit
+    自动档至此定长/变长 × D=128/256/512 全覆盖。** 见 `docs/03` §120、`docs/08` §5.106；
+    原始输出 `src/fp8/fa_bwd_fp8_o98_{varlen_full_ab,ksweep,ncu,fa3_baseline}.out.txt`。
 
 ## 灵感 / backlog
 

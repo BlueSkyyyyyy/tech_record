@@ -721,8 +721,45 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
                                : (long)(maxlen / 2);
   long kk = target_ctas / base_grid; if (kk < 1) kk = 1; if (kk > 16) kk = 16;
   long kp = 1; while (kp * 2 <= kk) kp *= 2;
+  long auto_k = kp;
+  // O98（第 192 轮）：**full（非 causal）变长的 ksplit 重标定**——把 O96/O97 的定长 full
+  //   审计推广到 `run_varlen`。原自动档沿用 O29 的 **causal** 标定 target（D=128 用 8192、
+  //   D=256/512 用 `maxlen/2`），对 full 过切/欠切；且 `target/base` 含**短序列的早退死
+  //   CTA**（`base_grid` 按 `maxlen` 计）⇒ 名义网格被高估。本轮对 dump 的全部 6 个 varlen
+  //   full shape 做 k∈[1,16] 全扫（docs/03 §120）：
+  //   · **D=128**：4 个 shape 的最优 **k=3~4**（b4_t4096/b5_t3968/b8_t2904 最优 3、
+  //     b4_t3840 最优 4），与 O96 定长 D=128 full 的 k=3 同源；causal 自动档在 base 偏大时
+  //     给 k=1/2（欠切，b5 慢 5.6%、b8 慢 4.3%），而 b4_t3840/b4_t4096 给的 k=4 已近最优。
+  //     故 **只把 causal 自动档的 k 抬到下限 3**（`max(kp,3)`）⇒ 不碰已最优档、只补欠切档。
+  //   · **D=512（MLA，1 CTA/SM→132 槽）**：按 O97 的 132 槽波对齐（b1_t512 最优 k=8、
+  //     b3_t1792 k=11 恰整数波），实测 +8.6%/+1.8%。
+  //   · **D=256**（无 varlen dump，沿用 O97 定长规则：`maxlen≥2048` 给足并发、否则波对齐）。
+  //   `--ksplit=K` 显式给出时不覆盖。
+  if (!causal) {
+    if (D == 128) {
+      auto_k = std::max(kp, 3L);
+    } else {
+      const long SLOTS = (D == 512) ? 132L : 264L;
+      const long KMAX = (D == 512) ? 16L : 12L;
+      if (D == 256 && maxlen >= 2048) {
+        long k = 8192L / base_grid;
+        if (k < 1) k = 1;
+        if (k > KMAX) k = KMAX;
+        auto_k = k;
+      } else {
+        long best_k = 1, best_waste = -1;
+        for (long k = 1; k <= KMAX; ++k) {
+          const long g = base_grid * k;
+          const long waste = ((g + SLOTS - 1) / SLOTS) * SLOTS - g;
+          if (best_waste < 0 || waste < best_waste) { best_waste = waste; best_k = k; }
+        }
+        if (D == 512 && best_k < 2) best_k = 2;  // 长 K 循环仍偏好 ≥2 份并发（同 O97）
+        auto_k = best_k;
+      }
+    }
+  }
   // O97：`--ksplit=K` 也可用于 varlen（同 binary A/B；K>=1 直接覆盖自动档）。默认 -1 自动。
-  const int ksplit = (vksplit >= 1) ? vksplit : (int)kp;
+  const int ksplit = (vksplit >= 1) ? vksplit : (int)auto_k;
   const bool use_regdq = (D == 128) && ((long)(maxlen / 32) / (causal ? 2 : 1) / ksplit >= 4);
 
   // O40：varlen LSE 的 K 维 split auto（D=128 目标 `grid*split≈2048`、cap 8；D=512 `≈256`、
