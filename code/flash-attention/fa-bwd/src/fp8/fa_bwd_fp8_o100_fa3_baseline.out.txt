@@ -1,0 +1,11 @@
+=== O100 外部基线（纯反向 CUPTI，fp16；变长 full。FA3/TE 对 fp8 变长不支持，仅列 fp16 供参照）===
+cmd: python3 harness/fa_bwd_bench.py bench --dtype fp16 --lengths ... --H .. --D 128 --full
+
+=== VARLEN bench（pure-bwd，CUPTI device time）===
+[varlen_b4_t3840_h16_d128_full_fp16] lengths=[512, 1024, 2048, 256]  fa3=0.2370ms/192.52TF
+=== VARLEN bench（pure-bwd，CUPTI device time）===
+[varlen_b4_t4096_h16_d128_full_fp16] lengths=[1024, 1024, 1024, 1024]  fa3=0.1989ms/172.75TF
+=== VARLEN bench（pure-bwd，CUPTI device time）===
+[varlen_b5_t3968_h32_d128_full_fp16] lengths=[128, 256, 512, 1024, 2048]  fa3=0.5183ms/176.62TF
+=== VARLEN bench（pure-bwd，CUPTI device time）===
+[varlen_b8_t2904_h16_d128_full_fp16] lengths=[2048, 512, 128, 96, 64, 32, 16, 8]  fa3=0.2007ms/183.20TF

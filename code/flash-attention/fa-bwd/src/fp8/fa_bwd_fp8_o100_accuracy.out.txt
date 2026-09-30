@@ -1,0 +1,18 @@
+=== O100 精度护栏：D=128 full 变长（new auto k=3 vs 旧 auto k=4）relL2 vs fp32 ref ===
+
+varlen_b4_t3840_h16_d128_full_fp8
+  dq: new relL2=8.1005% max_abs=1.011e-01  old relL2=8.1005% max_abs=1.011e-01
+  dk: new relL2=8.2268% max_abs=9.656e-02  old relL2=8.2268% max_abs=9.656e-02
+  dv: new relL2=6.6790% max_abs=7.032e-02  old relL2=6.6790% max_abs=7.032e-02
+varlen_b4_t4096_h16_d128_full_fp8
+  dq: new relL2=8.1208% max_abs=8.881e-02  old relL2=8.1208% max_abs=8.881e-02
+  dk: new relL2=8.2400% max_abs=7.043e-02  old relL2=8.2400% max_abs=7.043e-02
+  dv: new relL2=6.6677% max_abs=5.721e-02  old relL2=6.6677% max_abs=5.721e-02
+varlen_b5_t3968_h32_d128_full_fp8
+  dq: new relL2=8.1181% max_abs=1.428e-01  old relL2=8.1181% max_abs=1.428e-01
+  dk: new relL2=8.2593% max_abs=1.597e-01  old relL2=8.2593% max_abs=1.597e-01
+  dv: new relL2=6.6458% max_abs=1.082e-01  old relL2=6.6458% max_abs=1.082e-01
+varlen_b8_t2904_h16_d128_full_fp8
+  dq: new relL2=8.0593% max_abs=2.412e-01  old relL2=8.0593% max_abs=2.412e-01
+  dk: new relL2=8.2127% max_abs=2.057e-01  old relL2=8.2127% max_abs=2.057e-01
+  dv: new relL2=6.4828% max_abs=2.512e-01  old relL2=6.4828% max_abs=2.512e-01

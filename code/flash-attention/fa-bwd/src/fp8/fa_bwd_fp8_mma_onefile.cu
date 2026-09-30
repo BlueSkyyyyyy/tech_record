@@ -6072,17 +6072,20 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   //   D=256/512 用 `maxlen/2`），对 full 过切/欠切；且 `target/base` 含**短序列的早退死
   //   CTA**（`base_grid` 按 `maxlen` 计）⇒ 名义网格被高估。本轮对 dump 的全部 6 个 varlen
   //   full shape 做 k∈[1,16] 全扫（docs/03 §120）：
-  //   · **D=128**：4 个 shape 的最优 **k=3~4**（b4_t4096/b5_t3968/b8_t2904 最优 3、
-  //     b4_t3840 最优 4），与 O96 定长 D=128 full 的 k=3 同源；causal 自动档在 base 偏大时
-  //     给 k=1/2（欠切，b5 慢 5.6%、b8 慢 4.3%），而 b4_t3840/b4_t4096 给的 k=4 已近最优。
-  //     故 **只把 causal 自动档的 k 抬到下限 3**（`max(kp,3)`）⇒ 不碰已最优档、只补欠切档。
+  //   · **D=128**：O98 取「`max(kp,3)`」下限 3（当时测 b4_t3840 最优 4）；**O100（第 194 轮）
+  //     在干净机器上重复实测**（k∈[2,5]×3 次、150 iters）——4 个 shape 的最优**一致为 k=3**
+  //     （b4_t4096 1.114 vs k4 1.128、b4_t3840 1.387 vs k4 1.391、b5 2.690、b8 1.129），
+  //     O98 的「b4_t3840 k3 反慢 3.9%」证实为当轮噪声/残留进程。故 D=128 full 变长**直接取
+  //     k=3**（按 nblk 封顶）——full 无三角偏斜，k 越大只增 Q/dO 重读，实测 3 即最优点。
   //   · **D=512（MLA，1 CTA/SM→132 槽）**：按 O97 的 132 槽波对齐（b1_t512 最优 k=8、
   //     b3_t1792 k=11 恰整数波），实测 +8.6%/+1.8%。
   //   · **D=256**（无 varlen dump，沿用 O97 定长规则：`maxlen≥2048` 给足并发、否则波对齐）。
   //   `--ksplit=K` 显式给出时不覆盖。
   if (!causal) {
     if (D == 128) {
-      auto_k = std::max(kp, 3L);
+      const long nblk32 = (long)((maxlen + 31) / 32);  // main kernel BN=32
+      auto_k = std::min(3L, nblk32);
+      if (auto_k < 1) auto_k = 1;
     } else {
       const long SLOTS = (D == 512) ? 132L : 264L;
       const long KMAX = (D == 512) ? 16L : 12L;
