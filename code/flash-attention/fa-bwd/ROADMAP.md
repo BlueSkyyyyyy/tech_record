@@ -3017,12 +3017,38 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       regs 88→58、occ 25.8→35.9%**（issue-bound → TMA 搬运；非 DRAM/L2 bound）。见 `docs/03` §96、
       `docs/08` §5.80；原始输出 `src/fp8/fa_bwd_fp8_o72_varlen_lse_ab.out.txt`、
       `src/fp8/fa_bwd_fp8_p166_*`。
+- [x] **F14/O74**（第一百六十九轮，**正结果，默认**）**MLA（`head_dim=512`）causal LSE 上 4D-TMA**
+      ——补齐 fp8 4D-TMA LSE 的**最后一条分支**（F5→F9→O70→F11→F12 把 `D=128` 的
+      {causal, full, varlen-full} 都做了，`D=512` MLA 一直是 `mma`+`cp.async`）。`lse_mma_kernel_bal_tma`
+      去掉 `static_assert(HD==128)`，泛化为 `NCH=HD/128` 个 TMA box（`HD=512` 用 4 次 4D-TMA 搬整行，
+      每 box 一块 `[64][128]` canonical SW128 tile）；新增 `wgmma_qkt64_fp8_chunked` 对每 chunk 用
+      SBO=1024 的描述符累加（`[kg][rg]` 布局，对齐 fp16 的 2-chunk 写法），`NCH==1` 走原路径 ⇒
+      **D=128 逐位不变**。host 让 `D=512 && causal` 默认 `lse_tma`（`--lsetma=0` A/B），单/两文件
+      device 逐字同步。**LSE-only preprocess 1.50–1.80×、端到端 S256H2 1.20× / S512H4 1.08× /
+      S1024H2 1.06×**（main 占 74–82%）；ncu LSE **19.62→10.34µs（1.90×）、Waves 0.48→0.97、
+      Compute 30.77%→15.08%、L1TEX 24.41%→15.56%**；`--ci` fp8 gate 8.583e-6 OK、D=128 逐位不变。
+      见 `docs/03` §98、`docs/08` §5.83；原始输出 `src/fp8/fa_bwd_fp8_o74_*`。
+      剩余：把本步 dtype 化到 fp16/bf16（`HD=512` 需 8 个 K=64 chunk、`TILE=64KB`、192KB smem）。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百六十八轮）**：**F7 第十四步——KV-owner column-owner（每 CTA 拥有 RCOL=2 个连续
+> **最新（第一百六十九轮）**：**F14/O74——MLA（`head_dim=512`）causal LSE 上 4D-TMA：正结果，默认**。
+> 补齐 fp8 4D-TMA LSE 的**最后一条分支**：`D=128` 的 {causal, full, varlen-full} 都被 F5→F12 铺上
+> TMA，而 `D=512` MLA causal 一直是 `lse_mma_kernel_bal<512,...>`（`mma`+`cp.async`）。把
+> `lse_mma_kernel_bal_tma` 从 `static_assert(HD==128)` 泛化为 `NCH=HD/128` 个 TMA box（`HD=512`
+> 用 4 次 4D-TMA 搬整行，每 box 一块 `[64][128]` canonical SW128 tile；新增 `wgmma_qkt64_fp8_chunked`
+> 对每 chunk 用 SBO=1024 累加），`NCH==1` 走原路径 ⇒ **D=128 逐位不变**。host `D=512 && causal`
+> 默认 `lse_tma`（`--lsetma=0` A/B）。**LSE-only preprocess 1.50–1.80×、端到端 S256H2 1.20× /
+> S512H4 1.08× / S1024H2 1.06×**；ncu LSE **19.62→10.34µs（1.90×）、Waves 0.48→0.97、Compute
+> 30.77%→15.08%**；`--ci` fp8 gate 8.583e-6 OK、`docs/04` 已同步。见 `docs/03` §98、`docs/08` §5.83。
+> **下一步候选**：① **把本步 dtype 化到 fp16/bf16**（`HD=512` 需 8 个 K=64 chunk、`TILE=64KB`、Qs+2×Ks
+> = 192KB smem ⇒ 1 CTA/SM）——完成「三 dtype × MLA LSE TMA」；② main 的 L2 `red` 墙（F7 全判死、
+> F6 不可行，受本卡寄存器/smem 硬墙锁定，见「阻塞」）；③ 其余候选（放大 BM、归约加宽、
+> GEMM3/4/5 wgmma、非 main 融合）均已判决/到顶/收口。
+>
+> **（第一百六十八轮）**：**F7 第十四步——KV-owner column-owner（每 CTA 拥有 RCOL=2 个连续
 > KV 块）：机制正结果 / 性能负结果**。承接 §93.6「唯一未试 = 跨 warpgroup 偏和 + 二次归约」的最可行
 > 形态：**BN 仍 32**（避开 p160 BN≥BM 的 GEMM1/2 累加器翻倍），只让同一 CTA 拥有 2 个连续 KV 块、
 > dK/dV 本地累加（red=0）、dQ 跨列先本地累加再每 m 一次原子。**机制完全成立**：S4096 `lts op_red`
@@ -6909,6 +6935,42 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       破 fp8 wgmma 无转置，见「阻塞」）。见 `docs/03` §97、`docs/08` §5.82；原始输出
       `src/fp8/fa_bwd_fp8_kvowner_col_p168_{s512,s1024h32,s4096}.out.txt`、
       `src/fp8/fa_bwd_fp8_kvowner_col_p168_ncu_s4096.out.txt`。
+
+- 2026-09-30（第一百六十九轮）：**F14/O74 完成（MLA（D=512）causal LSE 上 4D-TMA：正结果，默认）**
+  ——补齐 fp8 4D-TMA LSE 的**最后一条分支**。
+    - **动机**：F5→F9→O70→F11→F12 把 fp8 的 4D-TMA LSE 铺到 `D=128` 的 {causal, full,
+      varlen-full}，但 **MLA（`D=512`）causal 一直走 `lse_mma_kernel_bal<512,...>`（`mma`+`cp.async`）**；
+      `lse_mma_kernel_bal_tma` 里硬编码 `static_assert(HD==128)`（TMA box 内维 128B=128 fp8，
+      `HD=128` 恰好一行；`HD=512` 需拆 4 个 box）。O39/O59 的 cfg6 实测 S1024H2 Duration
+      **19.62µs / Waves 0.48 / Compute 30.77%**（半波都铺不满、发射受限）。
+    - **改动**（`src/fp8/fa_bwd_fp8_kernels.cuh` + host 两处；单/两文件 device 由
+      `sync_onefile_device.py` 核对 `identical: True`）：`lse_mma_kernel_bal_tma` 去 `static_assert`，
+      加 `NCH=HD/128`、`CHUNK=(LBM/8)*1024`、`TILE=NCH*CHUNK`；`issue_q/issue_k` 各发 `NCH` 次
+      4D-TMA（第 `c` 个写 `Qs+c*CHUNK`、global 内维坐标 `c*128`），`mbar_arrive_expect(TILE)`
+      仍一次；新增 `wgmma_qkt64_fp8_chunked`（每 chunk 各用 SBO=1024 的描述符累加，因 4 个 box
+      各写一块 canonical `[64][128]` ⇒ 物理布局 `[kg][rg]`，对齐 fp16 的 2-chunk 写法），
+      `NCH==1` 走原 `wgmma_qkt64_fp8` ⇒ **D=128 编译出逐位相同代码**。host：`D=512` 也
+      `cudaFuncSetAttribute`（smem **100,160B ⇒ 2 CTA/SM**）、`lse_tma` 默认 `(D==128)?1:(D==512&&
+      causal?1:0)`、Q/K 描述符条件改 `D==128||D==512`、D=512 causal 优先
+      `launch_lse_bal_tma_split<512,1>`/`launch_lse_bal_tma<512,1>`（`--lsetma=0` A/B）。`run_varlen`
+      D=512 不受影响（仍 cp.async）。
+    - **数值**：D=128 **逐位不变**（S4096 `2.635/2.644/3.216e-1`）；D=512 只差 LSE 的 fp32 求和次序
+      ——S256H2 `2.355/2.284/3.485e-1`（vs mma `2.356/2.290/3.441e-1`）、S512H4 `2.415/2.992/4.481e-1`
+      （与 mma 逐位）、S1024H2 `2.228/3.311/3.611e-1`（vs `2.232/3.337/3.602e-1`）；单/两文件逐指标
+      一致（单文件 S1024H2 total 0.1508ms vs 两文件 0.1510ms）。`--ci` fp8 单/两文件 gate
+      **worst 8.583e-6 OK**、`--check docs/04` OK（`--doc-table-apply` 同步 3 行 MLA causal）。
+    - **性能（同 binary A/B，Hopper+TMA，event，iters=200）**：LSE-only preprocess S256H2
+      **0.0175→0.0097ms（1.80×）**、S512H4 **0.0186→0.0116（1.60×）**、S1024H2
+      **0.0240→0.0160（1.50×）**；端到端 total **0.0481→0.0400（1.203×）**、
+      **0.1052→0.0977（1.077×）**、**0.1601→0.1510（1.060×）**。
+    - **ncu（S1024H2 causal LSE，同 binary，`regex:lse_mma_kernel_bal`，`-c 1`）**：mma cfg6
+      **19.62µs / Waves 0.48 / occ 11.83% / Compute 30.77% / L1TEX 24.41% / L2 24.58% / 61 regs /
+      4 CTA/SM** ⇒ TMA **10.34µs（1.90×）/ Waves 0.97 / occ 11.55% / Compute 15.08% / L1TEX
+      15.56% / L2 21.60% / 61 regs / 2 CTA/SM** ⇒ **新墙回到 LSE 固有的 tile 级 `mma wait` + 2 CTA/SM**
+      （与 D=128 的 TMA LSE 同）。
+    - **下一步**：① 把本步 dtype 化到 fp16/bf16（`HD=512` 需 8 个 K=64 chunk、`TILE=64KB`、
+      Qs+2×Ks=192KB ⇒ 1 CTA/SM）；② main 的 L2 `red` 墙（F7 全判死，见「阻塞」）。
+      见 `docs/03` §98、`docs/08` §5.83；原始输出 `src/fp8/fa_bwd_fp8_o74_*`。
 
 ## 灵感 / backlog
 

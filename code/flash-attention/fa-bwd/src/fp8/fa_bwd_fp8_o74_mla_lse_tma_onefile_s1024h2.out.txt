@@ -1,0 +1,6 @@
+O32: lse backend = tma
+[timing] total(quant+pre+main+cvt) 0.1508 ms  28.48 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0109 ms | preprocess 0.0158 ms | main 0.1191 ms | convert 0.0051 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.228e-01  max_rel=5.071e+01
+  dk   vs ref: max_abs=3.311e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.611e-01  max_rel=5.323e+01

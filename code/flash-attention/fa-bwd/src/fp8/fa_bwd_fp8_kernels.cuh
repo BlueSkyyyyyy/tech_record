@@ -586,6 +586,32 @@ __device__ __forceinline__ void wgmma_qkt64_fp8(const char* Qsw, const char* Ksw
   wgmma_commit_fp8();
   wgmma_wait0_fp8();
 }
+
+// O74（第 169 轮）：HD>128 的 TMA LSE 用的「分 chunk QKᵀ」。TMA 一个 box 内维固定 128B
+//   （128 fp8），HD=512（MLA）要 4 个 box 才能搬完整行；4 个 box 各写一块 [64][128] 的
+//   canonical SW128 tile 到 `Qs + c*CHUNK`（CHUNK=(LBM/8)*1024=8KB），故物理布局是
+//   `[kg][rg]` 而非单 box 的 canonical `[rg][kg]`。这里对每个 chunk 各用 **SBO=1024** 的描述符
+//   累加（对齐 fp16 O30/O71 的 2-chunk 写法），数学与 `wgmma_qkt64_fp8` 完全相同、只差同一
+//   tile 内跨 chunk 的 fp32 累加次序（LSE 容差 O(1) 内）。`NCH=HD/128`、`CHUNK` 由调用方传。
+__device__ __forceinline__ void wgmma_qkt64_fp8_chunked(const char* Qsw, const char* Ksw,
+                                                        int nch, int chunk, float (&d)[32]) {
+#pragma unroll
+  for (int i = 0; i < 32; ++i) d[i] = 0.f;
+  wgmma_fence_fp8();
+  const uint32_t qa = smem_u32(Qsw), ka = smem_u32(Ksw);
+#pragma unroll 1
+  for (int c = 0; c < nch; ++c) {
+    const uint32_t qc = qa + (uint32_t)(c * chunk), kc = ka + (uint32_t)(c * chunk);
+#pragma unroll
+    for (int s = 0; s < 4; ++s) {
+      uint64_t da = make_desc_sw128_fp8(sw128_k32_addr(qc, s), 1024);
+      uint64_t db = make_desc_sw128_fp8(sw128_k32_addr(kc, s), 1024);
+      wgmma_m64n64k32_e4e4(d, da, db);
+    }
+  }
+  wgmma_commit_fp8();
+  wgmma_wait0_fp8();
+}
 #endif  // FA_WGMMA
 
 // ----------------------------- O4c：向量化归约（red） -----------------------------
@@ -2297,8 +2323,13 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
                        float* __restrict__ lse, float* __restrict__ lse_part,
                        int S, int H, int Hkv, float scale, int ksplit,
                        const int* __restrict__ cu_seqlens = nullptr) {
-  static_assert(HD == 128, "fp8 wgmma LSE TMA 目前只做 HD=128");
-  constexpr int TILE = (LBM / 8) * (HD / 128) * 1024;  // 单个 [LBM][HD] SW128 tile（8KB）
+  static_assert(HD % 128 == 0, "fp8 wgmma LSE TMA 需 HD 为 128 的整数倍");
+  // O74（第 169 轮）：HD>128 支持——TMA box 内维固定 128B=128 fp8，`NCH=HD/128` 个 box，
+  //   每个搬一整块 [LBM][128]，写到 `Qs + c*CHUNK`（CHUNK=(LBM/8)*1024）。HD=128 时 NCH=1、
+  //   与历史单 box 路径**逐位相同**。
+  constexpr int NCH = HD / 128;
+  constexpr int CHUNK = (LBM / 8) * 1024;              // 单个 K=128 chunk 的 SW128 字节数（8KB）
+  constexpr int TILE = NCH * CHUNK;                    // 单个 [LBM][HD] SW128 tile
   extern __shared__ char smem_raw[];
   // SW128 描述符 base_offset=0 要求 tile 1024B 对齐 → 手动对齐动态 smem 基址。
   const uint32_t a0 = smem_u32(smem_raw);
@@ -2333,13 +2364,14 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   }
   __syncthreads();
 
-  // 发本 m 块的 Q（一次 4D TMA 搬整块）+ rowwise scale（标量 global 读，TMA 带不了）。
+  // 发本 m 块的 Q（NCH 次 4D TMA 搬整块）+ rowwise scale（标量 global 读，TMA 带不了）。
   auto issue_q = [&](int m0) {
     if (tid < LBM)
       qs_s[tid] = (m0 + tid < len) ? qs[((size_t)(qbase + m0 + tid)) * H + h] : 1.f;
     if (tid == 0) {
       mbar_arrive_expect(qbar, TILE);
-      tma_load_4d(Qs, &qmap, 0, qbase + m0, h, bq, qbar);
+      for (int c = 0; c < NCH; ++c)
+        tma_load_4d(Qs + c * CHUNK, &qmap, c * 128, qbase + m0, h, bq, qbar);
     }
   };
   // 发一个 K tile（j0 起 LBN 行）+ 本 tile 的 rowwise scale。
@@ -2350,7 +2382,8 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
     if (tid == 0) {
       char* Kd = Ks + stage * TILE;
       mbar_arrive_expect(kbar + stage, TILE);
-      tma_load_4d(Kd, &kmap, 0, qbase + j0, hkv, bq, kbar + stage);
+      for (int c = 0; c < NCH; ++c)
+        tma_load_4d(Kd + c * CHUNK, &kmap, c * 128, qbase + j0, hkv, bq, kbar + stage);
     }
   };
 
@@ -2391,7 +2424,10 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
       }
 
       float d[32];
-      wgmma_qkt64_fp8(Qs, Kt, HD, d);
+      if constexpr (NCH == 1)
+        wgmma_qkt64_fp8(Qs, Kt, HD, d);   // HD=128：与历史逐位相同
+      else
+        wgmma_qkt64_fp8_chunked(Qs, Kt, NCH, CHUNK, d);
 
       // O63/F5：tile 内「两趟 softmax」——先求本 lane 两个 s 的列 max（第一趟，顺手把
       //   掩码后的 S 写回 `d`），再统一 rescale + 求和（第二趟）。与旧「逐元素 online
