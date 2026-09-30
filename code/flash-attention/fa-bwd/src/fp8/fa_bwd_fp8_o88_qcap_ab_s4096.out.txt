@@ -1,0 +1,24 @@
+### O88（第 183 轮）：融合 quant+zero kernel 的栅格上限 A/B（S=4096 H16 causal fp8，两文件，Hopper）
+### 结论：栅格封顶全部更慢 ⇒ 该 kernel 不受块调度限制（114688 个 4-行 CTA 已最优）。
+
+=== --qcap=0 ===
+[timing] total(quant+pre+main+cvt) 1.7277 ms  79.55 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1060 ms | preprocess 0.1224 ms | main 1.4848 ms | convert 0.0145 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== --qcap=4096 ===
+[timing] total(quant+pre+main+cvt) 1.7253 ms  79.66 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1100 ms | preprocess 0.1218 ms | main 1.4891 ms | convert 0.0044 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== --qcap=2048 ===
+[timing] total(quant+pre+main+cvt) 1.7214 ms  79.84 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1101 ms | preprocess 0.1211 ms | main 1.4806 ms | convert 0.0096 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== --qcap=1056 ===
+[timing] total(quant+pre+main+cvt) 1.7403 ms  78.97 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1194 ms | preprocess 0.1226 ms | main 1.4832 ms | convert 0.0151 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== --qcap=528 ===
+[timing] total(quant+pre+main+cvt) 1.7676 ms  77.76 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1556 ms | preprocess 0.1207 ms | main 1.4803 ms | convert 0.0110 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== --qcap=264 ===
+[timing] total(quant+pre+main+cvt) 1.8628 ms  73.78 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2503 ms | preprocess 0.1218 ms | main 1.4912 ms | convert -0.0006 ms (cvt_on=0, qfuse=1, dfuse=1)
+=== --qcap=132 ===
+[timing] total(quant+pre+main+cvt) 2.0724 ms  66.32 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.4477 ms | preprocess 0.1231 ms | main 1.4860 ms | convert 0.0156 ms (cvt_on=0, qfuse=1, dfuse=1)

@@ -1594,6 +1594,11 @@ int main(int argc, char** argv) {
   // O64：1 = 把 4 次输入量化 + 3 次累加缓冲清零融合成 1 个 launch（默认 1，数值逐位不变）；
   //   0 = 退回 O14 的 4 个 quant kernel + 3 个 cudaMemset，供同 session A/B。
   int qfuse = 1;
+  // O88（本机 A/B）：融合 quant+zero kernel 的**栅格上限**（0 = 历史行为：grid = 任务数/4，
+  //   即「每 warp 一行、每 CTA 4 行」，S4096 时 = 114688 个 CTA）。该 kernel 是纯带宽/访存
+  //   kernel，114688 个微小 CTA 的**块调度开销**可能是端到端非 main 开销的一部分；把栅格
+  //   封顶、让每 warp 沿 grid-stride 多搬几行可摊薄块调度。`--qcap=N` 强制上限（N=0 历史）。
+  int qcap_opt = 0;
   // O66：1 = 把 delta 也融进 quant kernel 的 dO 任务（默认 1，数值逐位不变；需 qfuse=1
   //   且 delta 走 warp-per-row 版）；0 = 独立 delta launch，供同 session A/B。
   int dfuse = 1;
@@ -1714,6 +1719,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--cvt=", 0) == 0) cvt_on = atoi(a.c_str() + 6);
     else if (a.rfind("--qfuse=", 0) == 0) qfuse = atoi(a.c_str() + 8);
     else if (a.rfind("--dfuse=", 0) == 0) dfuse = atoi(a.c_str() + 8);
+    else if (a.rfind("--qcap=", 0) == 0) qcap_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--foldrcp=", 0) == 0) foldrcp_opt = atoi(a.c_str() + 10);
     else if (a.rfind("--qfast=", 0) == 0) qfast = atoi(a.c_str() + 8);
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_opt = atoi(a.c_str() + 12);
@@ -1869,7 +1875,8 @@ int main(int argc, char** argv) {
   auto quant_zero = [&]() {
     const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
     const long long total = 3 * rq + 4 * rkv;
-    const int grid = (int)std::min<long long>((total + 3) / 4, 1048576);
+    int grid = (int)std::min<long long>((total + 3) / 4, 1048576);
+    if (qcap_opt > 0) grid = std::min(grid, qcap_opt);  // O88：栅格封顶（A/B）
     if (D == 128)
       quantize_zero_warp_kernel<4><<<grid, 128>>>(d_q_f, d_k_f, d_v_f, d_do_f, d_q8, d_k8, d_v8,
                                                   d_do8, d_qs, d_ks, d_vs, d_dos, d_dq_acc,
@@ -1887,7 +1894,8 @@ int main(int argc, char** argv) {
   auto quant_zero_delta = [&]() {
     const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
     const long long total = 3 * rq + 4 * rkv;
-    const int grid = (int)std::min<long long>((total + 3) / 4, 1048576);
+    int grid = (int)std::min<long long>((total + 3) / 4, 1048576);
+    if (qcap_opt > 0) grid = std::min(grid, qcap_opt);  // O88：栅格封顶（A/B）
     if (D == 128)
       quantize_zero_delta_warp_kernel<4><<<grid, 128>>>(
           d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,

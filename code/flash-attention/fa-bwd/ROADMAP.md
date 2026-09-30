@@ -198,6 +198,14 @@
 
 ## 阻塞
 
+- **`D=256` K/V 4D-TMA 结构性不可行（第一百八十三轮 O88）。** `D=256` 的 `smem_bytes_wgmma =
+  115,712B`（O84 ncu 实测，2 CTA/SM，上限 116,224B）；`smem_bytes_wgmma_kvtma = 115,712 +
+  ks_sw_bytes(=(32/8)*2*1024=8,192) + 64 = **123,968B > 116,224** ⇒ **K 双缓冲把 2 CTA/SM 直接
+  挤成 1**（O85 的中性档是 K/V cp.async；K 单缓冲 TMA 则无预取重叠、仍是 O85 中性）。⇒ O85 的
+  「`D=256` K/V-TMA 转正」backlog 在 2 CTA/SM 下无解，与本卡 F6/F7/p160/O83/F3b/F4b 的
+  **smem 墙同源**。解锁：换卡（更大 smem）或消 `D=256` 的 Qp/dOp/Kp 配对副本（fp8 逐字节转置，
+  O80/O81 基建已具备）。见 `docs/03` §111.3。
+
 - **GQA/MQA「跨 Q 头折叠 dK/dV」结构性不可行（第一百八十一轮 O86）。** ncu 证默认 fp8 main 的
   L2 `red` **只由 Q 头数 H 决定**（MQA H64kv1 == GQA H64kv4 == 32,833,536 扇区），故「把 G 个
   共享 KV 头的 Q 头折叠成一次 dK/dV 贡献」上界可 ÷`(H/Hkv)`（MQA ×64）——F4b 唯一未做的杠杆。
@@ -3209,7 +3217,17 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百八十二轮）**：**O87——F3b GEMM3/4 wgmma 的 wait-schedule 变体收口（负结果，
+> **最新（第一百八十三轮）**：**O88——fp8 非 main「quant+zero」栅格封顶 + O81 后宏复扫 +
+> `D=256` K/V-TMA 资源收口（负结果/收口，默认一行未改）**。① quant 融合 kernel 的 grid 封顶
+> （`--qcap`，S4096 grid=114,688→…）**单调更慢**（quant 0.106→0.448ms），块调度不是瓶颈、
+> 该 kernel 已近带宽墙（~2.5TB/s）；② O81 之后宏复扫全部中性/有损（ILV34 −5%、R4 −2.5%）；
+> ③ `D=256` K/V 4D-TMA：`115,712+8,192+64 = 123,968B > 116,224`（2-CTA 上限）⇒ K 双缓冲
+> 把 2 CTA/SM 挤成 1 ⇒ **结构性不可行**（见「阻塞」）。**默认路径性能/数值一字未改**。
+> 见 `docs/03` §111、`docs/08` §5.97。
+> **下一步候选**：① **换卡**（更大 smem/寄存器）；② **多 warpgroup WS（256/384 线程）**——
+> 唯一未试的结构性杠杆（详见下方 O87 块）；③ `D=256` K/V-TMA / MLA 降 smem 均受同一 smem 墙。
+>
+> **（第一百八十二轮）**：**O87——F3b GEMM3/4 wgmma 的 wait-schedule 变体收口（负结果，
 > 默认一行未改）**。只改 wgmma 的 fence/commit/wait 时序：A 合并 commit/wait（0.930×）、
 > B `wait_group<1>` 流水（0.937×）、C O81 的 GEMM5 wait 流水（0.989×）全部翻不正 O82。
 > ncu：`smsp inst −7.3%`、`short_scoreboard 1.82→1.41`，但 **`lts op_red` 114,524,160 一字不变、
@@ -7580,6 +7598,23 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     顶穿 116KB/2-CTA 门槛，backlog）。见 `docs/03` §108、`docs/08` §5.94、`docs/04` §50；
     原始输出 `src/fp8/fa_bwd_fp8_o85_d256_ab.out.txt`、`..._o85_ncu_d256_s1024.out.txt`、
     `..._o85_accuracy_d256.out.txt`。
+
+- 2026-09-30（第一百八十三轮）：**O88——fp8 非 main「quant+zero」栅格封顶 A/B + O81 后编译宏
+  复扫 + `D=256` K/V-TMA 资源收口（负结果/收口，默认一行未改）**。承接 O77/O83/O87，把
+  「fp8 专项冲刺」剩余候选逐一判决：
+  - **quant 栅格封顶（`--qcap`，纯 host，默认 0=历史）**：融合 `quantize_zero_delta_warp_kernel`
+    S=4096 时 grid=**114,688**（每 warp 一行）；封顶 4096/2048/1056/528/264/132 → quant
+    **0.110/0.110/0.119/0.156/0.250/0.448ms**（历史 **0.106**）⇒ **单调更慢**。quant 流量
+    ~268MB/0.106ms ≈ **2.5TB/s ≈ 峰值 75%**，块调度不是瓶颈（最大栅格已最优）。`--qcap` 留作诊断。
+  - **O81 之后宏复扫（S4096 main ms）**：baseline **1.480**；ILV 1.484、**ILV34 1.567（−5%）**、
+    WS1 1.491、**R4 1.514（−2.5%）**、ILV+ILV34 1.559、WS1+ILV34 1.557 ⇒ 全部中性/有损，
+    复证「默认 L2 `red` bound，只改指令/发射顺序不改贡献 CTA 数即不可能转正」。
+  - **`D=256` K/V 4D-TMA 收口（解析）**：`D=256` `smem_bytes_wgmma=115,712B`（2 CTA/SM，上限
+    116,224B）；`smem_bytes_wgmma_kvtma=115,712+ks_sw_bytes(8,192)+64=123,968B > 116,224`
+    ⇒ K 双缓冲把 2 CTA/SM 挤成 1、退回 O85 中性档（K 单缓冲则无预取重叠）⇒ **结构性不可行**。
+  - **默认路径性能/数值一字未改**（S4096 total 1.7162ms/80.08TF，max_abs 2.635/2.644/3.216e-1），
+    单/两文件 device 逐字同源。见 `docs/03` §111、`docs/08` §5.97；原始输出
+    `src/fp8/fa_bwd_fp8_o88_qcap_ab_s4096.out.txt`、`..._o88_macro_sweep_s4096.out.txt`。
 
 - 2026-09-30（第一百八十二轮）：**O87——F3b GEMM3/4 wgmma 的 wait-schedule 变体收口（负结果，
   默认一行未改）**。承接 O82（`-DFA_WGMMA34=1` 0.964×，诊断「wgmma `wait` + 零填充/转置抵消
