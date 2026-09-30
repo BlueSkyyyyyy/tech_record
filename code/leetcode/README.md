@@ -42,4 +42,5 @@ leetcode/
 `array`（A-1 ~ A-3，共 13 题）、`hash`（B-1 ~ B-3，共 10 题）、
 `sliding-window`（C-1 ~ C-3，共 10 题）、`prefix-sum`（D-1 ~ D-4，共 9 题 + 560 交叉）、
 `binary-search`（E-1 ~ E-3，共 10 题）、`linked-list`（F-1 ~ F-3，共 11 题）、
-`stack`（G-1 ~ G-3，共 11 题）、`heap`（H-1，共 2 题），其余分类陆续补充。
+`stack`（G-1 ~ G-3，共 11 题）、`heap`（H-1 ~ H-3，共 10 题）、
+`binary-tree`（I-1，共 5 题），其余分类陆续补充。
