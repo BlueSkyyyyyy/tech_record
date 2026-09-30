@@ -3027,14 +3027,41 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       device 逐字同步。**LSE-only preprocess 1.50–1.80×、端到端 S256H2 1.20× / S512H4 1.08× /
       S1024H2 1.06×**（main 占 74–82%）；ncu LSE **19.62→10.34µs（1.90×）、Waves 0.48→0.97、
       Compute 30.77%→15.08%、L1TEX 24.41%→15.56%**；`--ci` fp8 gate 8.583e-6 OK、D=128 逐位不变。
-      见 `docs/03` §98、`docs/08` §5.83；原始输出 `src/fp8/fa_bwd_fp8_o74_*`。
-      剩余：把本步 dtype 化到 fp16/bf16（`HD=512` 需 8 个 K=64 chunk、`TILE=64KB`、192KB smem）。
+       见 `docs/03` §98、`docs/08` §5.83；原始输出 `src/fp8/fa_bwd_fp8_o74_*`。
+       剩余：把本步 dtype 化到 fp16/bf16（`HD=512` 需 8 个 K=64 chunk、`TILE=64KB`、192KB smem）。
+- [x] **F15/O75**（第一百七十轮，**正结果，默认**）**MLA（`head_dim=512`）causal LSE 上 4D-TMA
+       （fp16/bf16 泛化）**——落实 F14/O74 的「dtype 化」：把 fp8 的 `NCH=HD/128` 泛化逐字搬到
+       fp16/bf16（box 内维 128B=64 个 fp16/bf16 ⇒ `NCH=HD/64`，`HD=512` 用 **8 个 K=64 chunk**），
+       `NCH==2`（HD=128）走原 `wgmma_qkt64_tma` ⇒ **HD=128 逐位不变**；新增
+       `wgmma_qkt64_tma_chunked`；host `lse_tma` 默认 `(D==512&&causal)?1:0`、causal 优先
+       `lse_mma_kernel_bal_tma<512,1>`（smem 197,696B ⇒ 1 CTA/SM）。**LSE-only preprocess
+       1.20–1.56×（fp16）/1.21–1.54×（bf16）、端到端 S256H2 1.17× / S512H4 1.04× / S1024H2 1.07×**；
+       ncu LSE mma 20.26µs → TMA **12.99µs（1.56×）/ Compute 30.4%→10.5% / L1TEX 42.1%→16.6%**；
+       数值与 mma 版**打印逐位相同**、`--ci` 三 dtype gate 全 OK、`--check docs/04` OK。
+       **至此三 dtype × MLA 的 causal LSE 也统一到 4D-TMA。** 见 `docs/01` §25、`docs/01b` §6bb、
+       `docs/04` §47、`docs/08` §5.84；原始输出 `src/{fp16,bf16}/fa_bwd_*_o74_*`。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百六十九轮）**：**F14/O74——MLA（`head_dim=512`）causal LSE 上 4D-TMA：正结果，默认**。
+> **最新（第一百七十轮）**：**F15/O75——MLA（`head_dim=512`）causal LSE 上 4D-TMA：fp16/bf16
+> 泛化，正结果，默认**。落实 F14/O74 的「dtype 化」：把 fp8 的 `NCH=HD/128` 逐字搬到 fp16/bf16
+> （box 内维 128B=64 个 fp16/bf16 ⇒ `NCH=HD/64`，`HD=512` 用 **8 个 K=64 chunk**），`NCH==2`（HD=128）
+> 走原 `wgmma_qkt64_tma` ⇒ **HD=128 逐位不变**；新增 `wgmma_qkt64_tma_chunked`。host `lse_tma` 默认
+> `(D==512&&causal)?1:0`、causal 优先 `lse_mma_kernel_bal_tma<512,1>`（smem 197,696B ⇒ 1 CTA/SM）、
+> `--lsetma=0` 退回 cfg6 A/B。**LSE-only preprocess 1.20–1.56×（fp16）/1.21–1.54×（bf16）、端到端
+> S256H2 1.17× / S512H4 1.04× / S1024H2 1.07×**；ncu LSE mma 20.26µs → TMA **12.99µs（1.56×）/
+> Compute 30.4%→10.5% / L1TEX 42.1%→16.6%**；数值与 mma 版**打印逐位相同**、`--ci` 全绿、
+> `--check docs/04` OK。**至此三 dtype × MLA 的 causal LSE 也统一到 4D-TMA。** 见 `docs/01` §25、
+> `docs/01b` §6bb、`docs/04` §47、`docs/08` §5.84。
+> **下一步候选**：① **LSE 家族已全部收口**——三 dtype × {causal, full, varlen, MLA} 的 LSE 均
+> 均衡化/TMA 化；② **main 的 L2 `red` 墙**是唯一真杠杆，但 F7 单趟路线全判死、F6 不可行，受本卡
+> 寄存器/smem 硬墙锁定（见「阻塞」），剩余只有换卡或「多 warpgroup 摊累加器」（需先破 fp8 `wgmma`
+> 无转置操作数）；③ 若要继续产出正结果，只能换形状/dtype 覆盖或做端到端重叠（preprocess/main 跨
+> head 流水，最多省 ~7–13% 非 main）。
+>
+> **（第一百六十九轮）**：**F14/O74——MLA（`head_dim=512`）causal LSE 上 4D-TMA：正结果，默认**。
 > 补齐 fp8 4D-TMA LSE 的**最后一条分支**：`D=128` 的 {causal, full, varlen-full} 都被 F5→F12 铺上
 > TMA，而 `D=512` MLA causal 一直是 `lse_mma_kernel_bal<512,...>`（`mma`+`cp.async`）。把
 > `lse_mma_kernel_bal_tma` 从 `static_assert(HD==128)` 泛化为 `NCH=HD/128` 个 TMA box（`HD=512`
@@ -6971,6 +6998,41 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     - **下一步**：① 把本步 dtype 化到 fp16/bf16（`HD=512` 需 8 个 K=64 chunk、`TILE=64KB`、
       Qs+2×Ks=192KB ⇒ 1 CTA/SM）；② main 的 L2 `red` 墙（F7 全判死，见「阻塞」）。
       见 `docs/03` §98、`docs/08` §5.83；原始输出 `src/fp8/fa_bwd_fp8_o74_*`。
+
+- 2026-09-30（第一百七十轮）：**F15/O75 完成（MLA（D=512）causal LSE 上 4D-TMA：fp16/bf16
+  泛化，正结果，默认）**——落实 F14/O74 的「dtype 化」，**至此三 dtype × MLA 的 causal LSE 也
+  统一到 4D-TMA**。
+    - **动机**：F14/O74 把 fp8 的 `lse_mma_kernel_bal_tma` 泛化为 `NCH=HD/128` 个 TMA box；fp16/bf16
+      的 `HD=512` MLA causal 仍走 `lse_mma_kernel_bal<512,1,false,128,16>`（mma+`cp.async`，cfg6）。
+    - **改动**（device + host，单/两文件同步）：
+      - device（`fa_bwd_{fp16,bf16}_mma_{kernels.cuh,onefile.cu}` 的 `lse_mma_kernel_bal_tma`）：
+        去 `static_assert(HD==128)` 改 `HD%64==0`；新增 `NCH=HD/64`（box 内维 128B=64 个
+        fp16/bf16）、`TILE=NCH*CH`；`issue_q/issue_k` 各发 `NCH` 次 4D-TMA（第 `c` 个写
+        `Q/Ks+c*CH`、global 内维坐标 `c*64`）；新增 `wgmma_qkt64_tma_chunked`（每 K=64 chunk 各用
+        `SBO=1024` 描述符累加），`NCH==2` 走原 `wgmma_qkt64_tma` ⇒ **HD=128 逐位不变**。
+      - host（四个文件）：`lse_tma` 默认 `(D==128)?1:((D==512&&causal)?1:0)`；LSE 描述符构建条件
+        `D==128` → `D==128||D==512`；`if (D==512)` 段补 `lse_mma_kernel_bal_tma<512,1>` 的
+        `cudaFuncSetAttribute`（smem `kLseSmemTma1`=197,696B ⇒ 1 CTA/SM）；causal 分支优先
+        `lse_mma_kernel_bal_tma<512,1>`（ksplit>1 时写 `lse_part`+merge），`--lsetma=0` 退回 cfg6；
+        auto split 目标 D=512 走 TMA 时回到 132。
+    - **数值**：fp16 MLA causal `S256H2 1.638/1.582/1.753e-3`、`S512H4 2.516/2.916/1.724e-3`、
+      `S1024H2 1.987/1.712/1.848e-3`；bf16 `S256H2 1.230e-2/9.875e-3/1.686e-2`、`S512H4
+      8.753e-3/1.082e-2/1.740e-2`、`S1024H2 5.838e-3/9.519e-3/1.568e-2`——均本 dtype 噪声，与
+      mma 版（`--lsetma=0`）**打印逐位相同**；D=128 定长 causal/full 与 varlen 回归**逐位不变**；
+      `--ci` 三 dtype gate 全 OK（fp16 1.953e-3 / bf16 7.812e-3 / fp8 5.722e-6）、单/两文件一致性
+      worst 7.812e-3 OK、`--check docs/04` OK。
+    - **性能（同 binary A/B，Hopper，event，iters=50）**：LSE-only preprocess fp16
+      **S256H2 0.0193→0.0131（1.47×）/ S512H4 0.0237→0.0197（1.20×）/ S1024H2 0.0322→0.0206
+      （1.56×）**、bf16 同构（1.48×/1.21×/1.54×）；端到端 total fp16 **0.0420→0.0359（1.17×）/
+      0.1092→0.1051（1.04×）/ 0.1785→0.1666（1.07×）**（main 不变，占 74–82%）。单文件逐指标一致。
+      MLA 反向 FA/TE 不支持，仅 ours（S1024H2 total 0.1666ms/25.8TF，峰值 989 的 2.6%）。
+    - **ncu（LSE，S1024H2 causal，`--launch-count 1`）**：mma cfg6 **20.26µs / Compute 30.39% /
+      L1TEX 42.10% / 2 CTA/SM / occ 11.94%** ⇒ TMA **12.99µs（1.56×）/ Compute 10.49% / L1TEX
+      16.63% / 1 CTA/SM / occ 6.25%**；bf16 TMA 12.77µs 逐项一致 ⇒ **搬迁方式升级，非
+      DRAM/L2/算力 bound**（preprocess 内的分支，不是 main 的 L2 `red` 墙）。
+    - **下一步**：main 的 L2 `red` 墙仍受本卡寄存器/smem 硬墙锁定（见「阻塞」）。见 `docs/01` §25、
+      `docs/01b` §6bb、`docs/04` §47、`docs/08` §5.84；原始输出 `src/fp16/fa_bwd_fp16_o74_*`、
+      `src/bf16/fa_bwd_bf16_o74_*`、`src/fa_bwd_o74_ci_apply.out.txt`。
 
 ## 灵感 / backlog
 

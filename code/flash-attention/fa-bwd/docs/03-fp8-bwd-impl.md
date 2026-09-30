@@ -8795,6 +8795,11 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 
 ### 98.7 下一步
 
-① **把本步逐字 dtype 化到 fp16/bf16**（`lse_mma_kernel_bal_tma` 当前 `HD==128`、2 个 K=64 chunk；
-`HD=512` 需 8 个 chunk，`TILE=64KB`、Qs+2×Ks=192KB ⇒ 1 CTA/SM）——补齐「三 dtype × MLA LSE TMA」；
+① ~~**把本步逐字 dtype 化到 fp16/bf16**~~ → **已完成（O75，第一百七十轮）**：fp16/bf16 的
+`lse_mma_kernel_bal_tma` 去 `static_assert(HD==128)`、改 `NCH=HD/64`（box 内维 128B = 64 个
+fp16/bf16），`NCH==2` 走原 `wgmma_qkt64_tma` ⇒ **HD=128 逐位不变**，新增 `wgmma_qkt64_tma_chunked`；
+host `lse_tma` 默认 `(D==512&&causal)?1:0`、causal 优先 `lse_mma_kernel_bal_tma<512,1>`（smem
+197,696B ⇒ 1 CTA/SM）。**LSE-only preprocess 1.20–1.56×（fp16）/1.21–1.54×（bf16）、端到端 S256H2
+1.17× / S512H4 1.04× / S1024H2 1.07×，数值逐位相同、`--ci` 全绿**。见 `docs/01` §25、`docs/01b`
+§6bb。**至此三 dtype × MLA 的 causal LSE 也统一到 4D-TMA**；
 ② main 的 L2 `red` 墙（F7 全判死、F6 不可行，受本卡寄存器/smem 硬墙锁定，见「阻塞」）。

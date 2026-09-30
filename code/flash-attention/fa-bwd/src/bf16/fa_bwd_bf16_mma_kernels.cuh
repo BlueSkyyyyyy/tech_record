@@ -976,6 +976,31 @@ __device__ __forceinline__ void wgmma_qkt64_tma(const char* Q0, const char* Q1,
   wgmma_wait0();
 }
 
+// O74（第 169 轮，bf16 版对齐 fp8 §98 / fp16）：HD>128 的 TMA LSE 用「分 chunk QKᵀ」。
+//   TMA 一个 box 内维固定 128B（64 个 bf16），HD=512（MLA）要 8 个 box 才能搬完整行；每个 box
+//   各写一块 [LBM][64] 的 canonical SW128 tile 到 `Q/Ks + c*CH`（CH=(LBM/8)*1024=8KB），故物理
+//   布局是 chunk-major 而非单 box 的 canonical `[rg][kg]`。这里对每个 K=64 chunk 各用 **SBO=1024**
+//   的描述符累加（与 `wgmma_qkt64_tma` 的 2-chunk 写法同源），数学与它完全相同、只差同一 tile 内
+//   跨 chunk 的 fp32 累加次序（LSE 容差 O(1) 内）。`nch=HD/64`、`chunk` 由调用方传。
+__device__ __forceinline__ void wgmma_qkt64_tma_chunked(const char* Qsw, const char* Ksw,
+                                                        int nch, int chunk, float (&d)[32]) {
+#pragma unroll
+  for (int i = 0; i < 32; ++i) d[i] = 0.f;
+  wgmma_fence();
+  const uint32_t qa = smem_u32(Qsw), ka = smem_u32(Ksw);
+#pragma unroll 1
+  for (int c = 0; c < nch; ++c) {
+    const uint32_t qc = qa + (uint32_t)(c * chunk), kc = ka + (uint32_t)(c * chunk);
+#pragma unroll
+    for (int s = 0; s < 4; ++s) {
+      wgmma_m64n64k16_bf16(d, make_desc_sw128(sw128_k16_addr(qc, s), 1024),
+                           make_desc_sw128(sw128_k16_addr(kc, s), 1024));
+    }
+  }
+  wgmma_commit();
+  wgmma_wait0();
+}
+
 // O38（bf16 版，对齐 fp8 §41 / fp16 O38）：把 K 维 split 的 LSE 部分结果 `(m_ks, l_ks)`
 //   沿 `ks` 二次归约成最终 LSE。`part` 布局 `[row][ks] -> (m,l)`（每行 `2*ksplit` 个 fp32），
 //   输出 `lse[row]=m+log(l)`。online-softmax 合并（max 取大、sum 按 exp 重标定），
@@ -1007,6 +1032,9 @@ __global__ void lse_split_merge_kernel(const float* __restrict__ part,
 //   非空时用 `cu_seqlens[b]` 作 packed [T,H,D] 的 token 基址、`cu_seqlens[b+1]-qbase` 作本序列
 //   长度；nullptr 时逐式退化为定长（qbase=b*S、len=S），定长路径逐位不变。TMA 描述符建在
 //   packed 张量上（dims={D,T,H,1}，batch 维恒 0），行坐标 = qbase + m0/j0。
+// O74（第 169 轮）：去 `static_assert(HD==128)`，泛化为 `NCH=HD/64` 个 TMA box（`HD=512` MLA
+//   causal 用 8 个 box 搬整行，每 box 一块 [LBM][64] canonical SW128 tile），对齐 fp8 §98。
+//   `HD=128`（NCH=2）逐位走原 `wgmma_qkt64_tma` ⇒ 与历史逐位相同。
 template <int HD, int PIPE = 1, bool FULL = false>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
@@ -1014,9 +1042,13 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
                        float* __restrict__ lse, float* __restrict__ lse_part,
                        int S, int H, int Hkv, float scale, int ksplit,
                        const int* __restrict__ cu_seqlens = nullptr) {
-  static_assert(HD == 128, "wgmma LSE TMA 目前只做 HD=128");
+  // O74（第 169 轮）：HD>128 支持——TMA box 内维固定 128B=64 bf16，`NCH=HD/64` 个 box，每个搬
+  //   一整块 [LBM][64]，写到 `Qs + c*CH`（CH=(LBM/8)*1024）。HD=128 时 NCH=2、与历史 2-chunk
+  //   路径（`wgmma_qkt64_tma` + 两条 `tma_load_4d`）**逐位相同**。
+  static_assert(HD % 64 == 0, "wgmma LSE TMA 需 HD 为 64 的整数倍");
+  constexpr int NCH = HD / 64;
   constexpr int CH = (LBM / 8) * 1024;   // 单个 K=64 chunk 的 SW128 字节数（8KB）
-  constexpr int TILE = 2 * CH;           // [LBM][HD] K-major tile（16KB）
+  constexpr int TILE = NCH * CH;         // [LBM][HD] K-major tile（HD=128→16KB / HD=512→64KB）
   extern __shared__ char smem_raw[];
   const uint32_t a0 = smem_u32(smem_raw);
   const uint32_t pad = (1024u - (a0 & 1023u)) & 1023u;
@@ -1050,16 +1082,16 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   auto issue_q = [&](int m0) {
     if (tid == 0) {
       mbar_arrive_expect(qbar, TILE);
-      tma_load_4d(Qs, &qmap, 0, qbase + m0, h, bq, qbar);
-      tma_load_4d(Qs + CH, &qmap, 64, qbase + m0, h, bq, qbar);
+      for (int c = 0; c < NCH; ++c)
+        tma_load_4d(Qs + c * CH, &qmap, c * 64, qbase + m0, h, bq, qbar);
     }
   };
   auto issue_k = [&](int stage, int j0) {
     if (tid == 0) {
       char* Kd = Ks + stage * TILE;
       mbar_arrive_expect(kbar + stage, TILE);
-      tma_load_4d(Kd, &kmap, 0, qbase + j0, hkv, bq, kbar + stage);
-      tma_load_4d(Kd + CH, &kmap, 64, qbase + j0, hkv, bq, kbar + stage);
+      for (int c = 0; c < NCH; ++c)
+        tma_load_4d(Kd + c * CH, &kmap, c * 64, qbase + j0, hkv, bq, kbar + stage);
     }
   };
 
@@ -1098,7 +1130,10 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
       }
 
       float d[32];
-      wgmma_qkt64_tma(Qs, Qs + CH, Kt, Kt + CH, d);
+      if constexpr (NCH == 2)
+        wgmma_qkt64_tma(Qs, Qs + CH, Kt, Kt + CH, d);   // HD=128：与历史逐位相同
+      else
+        wgmma_qkt64_tma_chunked(Qs, Kt, NCH, CH, d);
 
       // O63/F5（第 143 轮）：tile 内两趟 softmax（同 `lse_mma_kernel`）。
       float mloc0 = -INFINITY, mloc1 = -INFINITY;
