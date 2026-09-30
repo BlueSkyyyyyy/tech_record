@@ -1954,3 +1954,27 @@ smem 冲突 + 低 occ
 多 warpgroup）**；`red` 墙不受影响。见 `docs/03` §112；原始输出
 `src/fp8/fa_bwd_fp8_o89_ab_mrev_s4096.out.txt`、`..._o89_ab_mrev_shapes.out.txt`、
 `..._o89_ncu_mrev_{0,1}_s4096.out.txt`、`..._o89_ci_fp8.out.txt`。
+
+### 5.99 第 185 轮（O90 / F6-step3）：wgmma2 的 **K/V 4D-TMA** 化 —— **负结果（opt-in）**
+
+落实 F6 的「下一步」：给 F6 第二步的 `wgmma2`（BM=128、2 warpgroup、GEMM1/2 wgmma + SW128）
+补上 **K/V 4D-TMA（K 双缓冲、V 单缓冲）**，看「TMA 化 + `red` 砍半」能否把 BM=128 档拉回竞争区。
+
+- **实现**：新增 `fa_bwd_fp8_wgmma2_tma_kernel<128,128,32>`（`kernels.cuh` 3d 节，单/两文件
+  device 逐字一致、392 行 `identical=True`）+ `launch_bwd_wgmma2tma` + `--wg2tma`（opt-in，
+  默认一行未改）。Q/dO 仍手工载入（每 CTA 一次）；K/V 走 `tma_load_4d` + mbarrier（prologue
+  发 K[0]/K[1]/V[0]；循环尾发 K[nt+2]/V[nt+1]、等 K[nt+1] 重建 Kp、等 V[nt+1]；相位标量）。
+  **208 regs / 0 spill / 1 barrier**。
+- **性能（同 binary A/B，S4096 H16 causal）**：默认 `kvtma` main **1.4518ms/81.98TF**；
+  `wg2wgmma` **2.8062ms** → `+KVTMA` **2.7113ms（1.035×）**。即 K/V TMA 相对 wgmma2 只省
+  ~3.5%，`wgmma2tma` 仍只有默认档的 **0.54×（S4096）/ 0.66×（S512）**。
+- **ncu（S4096，默认 vs O90）**：`lts op_red` **114.52M → 58.20M（精确砍半）**、`read`
+  27.92M → **14.47M（砍半）**——**BM=128 减 L2 搬运量的机制完全成立**；但 **L2 利用率
+  81.06% → 21.99%**（省下的带宽用不上）、**warps 18.62% → 12.50%（3→1 CTA/SM）**、
+  `smsp inst` 642M → 838M、Duration 1.45 → 2.72ms。K/V TMA 只把 `long_scoreboard` 0.37→0.18。
+- **判决**：**负结果、opt-in 默认关**。BM=128 双 warpgroup 在本卡 1 CTA/SM 下是 **延迟/occupancy
+  bound**，`red` 砍半被「8 warp 藏不住延迟」吃掉——与 F6/O83/O86/O87 同一堵墙；转正需
+  **256/384 线程多 warpgroup 摊累加器**或**换卡**。`wgmma2_tma` + K/V-TMA helper 留作后续
+  `D>128`/WS 版基建。数值：`ours_o90 vs fp32 ref` relL2 S4096 8.15/8.39/6.52%、S512
+  8.18/8.41/6.36%（护栏内）；单/两文件默认路径逐值不变。见 `docs/03` §113；原始输出
+  `src/fp8/fa_bwd_fp8_o90_{ab_s4096,ab_s512,default_s4096,ncu_wg2tma_s4096,ncu_default_s4096}.out.txt`。

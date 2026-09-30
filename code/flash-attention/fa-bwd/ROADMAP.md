@@ -2892,8 +2892,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       寄存器里**任意 2 个都拼不出** col-major `x2` 的 B 片段（**0/32 lane 匹配**）。资源账：
       wgmma2 **212 regs / 135,424B → 1 CTA/SM**，2 CTA/SM 缺口 19,200B；去 Qp/dOp 本可解但
       不可行，改 `Ps/Ss` 半精度只能刚够且改口径、regs 必大 spill。**F6 在本卡只能停在 1 CTA/SM**
-      （0.56× 默认档），继续只能走**物理转置 SW128 B**（O4b 判净负）或**换卡** ⇒ **转 backlog**。
+       （0.56× 默认档），继续只能走**物理转置 SW128 B**（O4b 判净负）或**换卡** ⇒ **转 backlog**。
       默认路径一行未改。见 `docs/03` §77、`docs/08` §5.56。
+      → **F6-step3 已完成（第一百八十五轮 O90，负结果/opt-in）**：给 wgmma2 补 K/V 4D-TMA
+      （K 双缓冲），同 binary A/B 仅 1.035×（2.806→2.711ms，仍 0.54× 默认）；ncu 证 `red`
+      精确砍半（114.52M→58.20M）但 **L2 利用率 81%→22%、3→1 CTA/SM**，`red` 红利被「8 warp
+      藏不住延迟」吃掉 ⇒ **确认 F6 的 1-CTA/SM 延迟墙**。见 `docs/03` §113、`docs/08` §5.99。
 - [~] **F7** **工作划分 / persistent 调度**（第一百四十七轮新立，唯一经 ncu 钉死的真杠杆）：
       同 **BM=64** 下 TE 的 `red` 仅 ours 的 **1/4.4×**、L2 总量 1/4.17×、时间 1/6×
       （TE grid=**132** persistent vs ours ksplit=8→8192）；SASS 同为 128-bit red（`REDG.4D.ADD`）
@@ -3222,7 +3226,20 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百八十四轮）**：**O89——fp8 主 kernel 的 LPT m 块调度序（causal 贵块先跑）
+> **最新（第一百八十五轮）**：**O90（F6-step3）——wgmma2 的 K/V 4D-TMA 化（K 双缓冲）
+> ——负结果，opt-in `--wg2tma`，默认一行未改**。给 F6 第二步的 `wgmma2`（BM=128、2 warpgroup）
+> 补 K/V 4D-TMA（复现 O41 时序；208 regs/0 spill），同 binary A/B **1.035×（S4096
+> 2.806→2.711ms）**，但仅默认档的 **0.54×**。ncu 证 **`red` 精确砍半（114.52M→58.20M）、
+> `read` 砍半**（BM=128 减 L2 机制成立），但 **L2 利用率 81%→22%、warps 18.6%→12.5%
+> （3→1 CTA/SM）**——`red` 红利被 8 warp 藏不住延迟吃掉。**确认 F6 的 1-CTA/SM 延迟墙**。
+> 数值 `ours_o90 vs fp32 ref` relL2 S4096 8.15/8.39/6.52%、S512 8.18/8.41/6.36%（护栏内）。
+> 见 `docs/03` §113、`docs/08` §5.99。
+> **下一步候选**：① **多 warpgroup WS（256/384 线程）**——唯一能把 BM=128 的 occupancy 拉起来、
+> 真正吃下 `red` 砍半红利的结构性杠杆（本轮把 K/V-TMA 基建补上了；下一步是加第 3 个 warpgroup
+> 做 producer/epilogue 摊累加器，对标 TE 384 线程/1 CTA/SM）；② **换卡**（更大 smem/寄存器）；
+> ③ 其余 fp8 覆盖项（`D=256` K/V-TMA、MLA 降 smem）均受同一 smem 墙。
+>
+> **（第一百八十四轮）**：**O89——fp8 主 kernel 的 LPT m 块调度序（causal 贵块先跑）
 > ——正结果，默认**。默认稠密网格按 blockIdx 升序派发、causal 便宜块在低 blockIdx ⇒ 尾波全重块；
 > 给默认 `kvtma` 壳加 `mt_m` 透传 + host 反转表（`--mrev=1`，默认开）即把最贵块前置。
 > **S4096 main 1.4796→1.4475ms（1.022×）、total 1.7159→1.6747ms（1.025×，82.07 TF）**；其它
@@ -7612,6 +7629,27 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     顶穿 116KB/2-CTA 门槛，backlog）。见 `docs/03` §108、`docs/08` §5.94、`docs/04` §50；
     原始输出 `src/fp8/fa_bwd_fp8_o85_d256_ab.out.txt`、`..._o85_ncu_d256_s1024.out.txt`、
     `..._o85_accuracy_d256.out.txt`。
+
+- 2026-09-30（第一百八十五轮）：**O90（F6-step3）——wgmma2 的 K/V 4D-TMA 化（K 双缓冲）
+  ——负结果（opt-in `--wg2tma`，默认一行未改）**。落实 F6 的「下一步」：给 F6 第二步的
+  `wgmma2`（BM=128、2 warpgroup、GEMM1/2 wgmma + SW128）补 **K/V 4D-TMA**，验证「TMA + `red`
+  砍半」能否把 BM=128 档拉回竞争区。
+  - **实现**：新增 `fa_bwd_fp8_wgmma2_tma_kernel<128,128,32>`（`kernels.cuh` 3d 节）+ host
+    `launch_bwd_wgmma2tma`/`wgmma2tma_smem_bytes` + CLI `--wg2tma`；单/两文件 device 392 行
+    `identical=True`。K/V 走 `tma_load_4d`+mbarrier（K 双缓冲/V 单缓冲，复现 O41 时序）、
+    Q/dO 仍手工载入。**208 regs / 0 spill**。
+  - **性能（同 binary A/B，S4096 H16 causal）**：默认 `kvtma` main **1.4518ms/81.98TF**、
+    total 1.6765ms；`wg2wgmma` 2.8062 → **+KVTMA 2.7113ms（1.035×）**；但 `wgmma2tma` 仍只有
+    默认档的 **0.54×（S4096）/0.66×（S512）**。
+  - **ncu（S4096，默认 vs O90）**：`lts op_red` **114.52M→58.20M（精确砍半）**、`read`
+    27.92M→**14.47M（砍半）**（机制成立）；但 **L2 利用率 81.06%→21.99%（带宽空闲）**、
+    **warps 18.62%→12.50%（3→1 CTA/SM）**、`smsp inst` 642M→838M、Duration 1.45→2.72ms。
+  - **判决**：**负结果、默认关**。BM=128 双 warpgroup 在本卡 1 CTA/SM 下是**延迟/occupancy
+    bound**，`red` 砍半被「8 warp 藏不住延迟」吃掉——与 F6/O83/O86/O87 同一堵墙；转正需
+    **256/384 线程多 warpgroup 摊累加器**或**换卡**。数值：`ours_o90 vs fp32 ref` relL2 S4096
+    **8.15/8.39/6.52%**、S512 **8.18/8.41/6.36%**（护栏内）；单/两文件默认路径逐值不变。
+    见 `docs/03` §113、`docs/08` §5.99；原始输出 `src/fp8/fa_bwd_fp8_o90_{ab_s4096,ab_s512,
+    default_s4096,ncu_wg2tma_s4096,ncu_default_s4096}.out.txt`。
 
 - 2026-09-30（第一百八十四轮）：**O89——fp8 主 kernel 的 LPT m 块调度序（causal 贵块先跑）
   ——正结果，默认**。承接 O77/O83/O87 的「默认 fp8 main 在本卡是 L2 `red` bound、无软件杠杆」，
