@@ -10036,3 +10036,105 @@ O90（§113）把 `wgmma2`（BM=128、2 warpgroup、256 线程）补上 K/V 4D-T
 `--wg3` 与 `NWG` 泛化保留为换卡后的 `D>128`/WS 基建。见 `docs/08` §5.100、`ROADMAP`
 「fp8 专项冲刺 F6」；原始输出 `src/fp8/fa_bwd_fp8_o91_{wg3_ab_s4096,wg3_ab_s512,
 ncu_wg3_s4096,ncu_default_s4096,accuracy}.out.txt`。
+
+---
+
+## §115 O92（第一百八十七轮）：fp8 main L2 墙的「TE 侧对侧」闭环复核
+
+### 115.1 目的与范围
+
+`fp8 专项冲刺`（F1→F6）与 `下一批`（F6/F3b/F4b）在 O77 之后反复收敛到同一结论：
+默认 fp8 `kvtma` main 是 **L2 `red` bound**、且所有软件杠杆（工作划分 / wgmma / wait-schedule /
+BULKRED / GQA 折叠 / 多 warpgroup）均已判决。本轮**不再引入新算法**，而是做一次**闭环复核 + TE
+逐指标对侧**，把「差距到底在哪一级、还差多少、剩余杠杆是什么」用同 session 的原始数据钉死，
+并顺手复测两条在 O81（GEMM5 wgmma）/O89（LPT 调度）之后**尚未在最新默认上复跑**的候选
+（`FA_BULKRED`、编译宏复扫、ksplit 复扫）。
+
+**默认路径一行未改**；本节所有数字来自最新默认构建（`-DFA_WGMMA -DFA_TMA -lcuda`，sm90a）。
+
+### 115.2 最新默认基线（S=4096 H16 B1 causal，event iters=30）
+
+- `[timing] total(quant+pre+main+cvt) 1.6711 ms / 82.24 TFLOPS`；
+  `quant 0.1061 | preprocess 0.1218 | main 1.4437 ms`（`main wgmma smem = 70656B`）。
+- 与 O89/O91 基线逐位同档（复现稳定，非本轮回退）。
+
+### 115.3 三条「已判决项」在最新默认上的复测
+
+| 候选 | 实测（S4096 main，ms） | 相对默认 | 判定 |
+|---|---|---|---|
+| 默认 `kvtma` | **1.4397–1.4437** | 1.000× | — |
+| `ksplit=1 / 2 / 4 / 8 / 16` | 2.032 / 1.804 / 1.694 / **1.667** / 1.821 | — | **auto=8 仍最优**（同 O77） |
+| `-DFA_BULKRED=1`（TMA tensor-reduce） | 1.6454 | **0.877×** | 负（同 O42，O81/O89 后不翻转） |
+| `-DFA_ILV34=1` | 1.5175 | 0.948× | 负（同 O88 宏复扫） |
+
+- **ksplit**：mrev 已默认开（O89），复扫确认 **auto=8 最优**——`red` 随 ksplit 减小而降，
+  但 causal 偏斜下的尾波/并行度损失盖过 `red` 收益 ⇒ **「消 Q/dO 重读的 ksplit 路径」仍关闭**。
+- **BULKRED**：`cp.reduce.async.bulk.add.f32`（TMA 张量归约）替逐元素 `red.global.add`，机制上
+  把「每 tile 2048 条原子」换成 per-warp staging + 一次 bulk，但 **staging 的 smem 流量 + TMA
+  归约延迟** 使其 **0.877×**——与 O42 完全一致（O67/p159 已证 `red` 扇区数与归约机制无关）。
+- **编译宏复扫**：ILV34（−5.2%）等仍全部中性/有损，复证 O88「只改指令/发射顺序、不改
+  『每元素贡献 CTA 数』即不可能转正」。
+
+### 115.4 TE vs ours：SASS 指令组合（S=4096 causal，`ncu --page source --print-source sass`）
+
+| | TE `..._flash_bprop_wgmma_f8_..._64x64x128` | ours 默认 `kvtma<128,64,32>` |
+|---|---|---|
+| QGMMA | **16** | 12（GEMM1/2 共 8 + O81 的 GEMM5 共 4） |
+| HMMA | **0** | **64**（GEMM3/4 dV/dK，O82/O87 已判负） |
+| LDSM | 20 | 39 |
+| STSM | **24** | 0 |
+| TMA 归约 | **4× `UTMAREDG.4D.ADD`** + 4× `UTMALDG` + 2× `UTMASTG` | 7× `UTMALDG`（无 tensor-reduce） |
+| 逐元素归约 | — | **64× `REDG.E.ADD.F32`** |
+
+- ours 的 SASS 说明：**wgmma 已覆盖 GEMM1/2/5**（O81 起）；剩余 64 条 HMMA 是 GEMM3/4（dV/dK），
+  其 wgmma 化（O82 零填充 m64 / O87 wait-schedule 变体）均已判负，**与 L2 `red` bond 无关**。
+- TE 用 **TMA 4D 张量归约**写 dK/dV；但 O67/p159 已证 `red` 扇区数**只由工作划分决定**、与
+  归约机制/宽度无关 ⇒ TE 的低 `red` 来自其**工作划分（persistent/每元素贡献数）**，不是 `UTMAREDG`。
+
+### 115.5 TE vs ours：L2 / occupancy 六指标（S=4096 causal，同 session）
+
+| 指标 | ours `kvtma`（BM=64） | TE `flash_bprop_wgmma_f8`（BM=64） | 比值 |
+|---|---|---|---|
+| Duration | **1.45 ms** | **258.34 µs** | **5.62×** |
+| `lts sectors 总量` | 142.97M | 36.84M | **3.88×** |
+| `lts op_read` | 27.91M | 10.00M | 2.79× |
+| `lts op_red` | **114.52M** | **25.96M** | **4.41×** |
+| `lts op_write` | 0.39M | 0.80M | — |
+| L2 利用率 | **81.30%** | 70.70% | — |
+| DRAM | 4.52% | 17.60% | — |
+| Tensor pipe | 11.25% | **36.86%** | 3.28× |
+| Active warps | 18.60% | 15.61% | — |
+| regs / CTA/SM | 168 / **3** | 168 / **1** | — |
+
+- **两者都 L2 bound**（81% vs 71%），但 ours 的 L2 搬运量是 TE 的 **3.9×**、其中 `red` 是 **4.4×**。
+- 关键：**TE 的 tile 与 ours 同为 BM=64**（`64x64x128`）⇒ 差距**不是放大 BM**，而是
+  **「每个 dK/dV 元素被多少 CTA 贡献」= 工作划分**（TE persistent grid=132，ours ksplit=8→8192 CTA）。
+  把 ours 的 114.52M `red` 按 32B/sector 折算 = 830MB 原子流量，dK/dV 真实体量仅 67MB ⇒
+  **每元素 ~54 次贡献**；TE 25.96M 对应 **~12 次**。这就是 F7 一直在追的 4.4×。
+- **TE 的 tensor pipe 是 ours 的 3.3×**（36.9% vs 11.3%）⇒ TE 的 L2 墙背后算力更贴；ours 则
+  在 L2 原子 + 低并行度上大量空转。
+
+### 115.6 精度护栏（本轮默认，S=4096 causal）
+
+- `ours vs fp32 ref` relL2：dq **8.149%** / dk **8.263%** / dv **6.489%**
+  （护栏 dq≤8.2 / dk≤8.3 / dv≤6.5 ⇒ **全部通过**，与 O91 逐位同档）。
+- `max_abs`：`2.635 / 2.644 / 3.216e-1`（O(0.2–0.9) 内）。
+- `ours vs TE FP8` relL2：13.42% / 13.48% / 28.15%；其中 **TE-vs-ref 的 dv 自身就是 27.45%**
+  ⇒ dv 的 28% 由 TE 误差主导、非本实现回退。
+
+### 115.7 判决与剩余杠杆
+
+**本轮为「闭环复核」：默认路径无新正结果。** 结论与 `ROADMAP`「阻塞」完全一致：
+
+1. **默认 fp8 main 的 L2 `red` 墙在本卡无软件解**——F3b（GEMM3/4 wgmma）、F4b（归约机制/宽度/
+   GQA 折叠）、F6/O90/O91（放大 BM / 多 warpgroup）、F7（工作划分：两 kernel / BULKRED /
+   BN≥BM / column-owner）**全部判决**；本轮再复测 BULKRED/ksplit/宏亦无翻转。
+2. **唯一经 ncu 钉死的真差距 = 工作划分**（同 BM 下 TE `red` 4.4× 低）——解锁需 **≥2 个独立
+   CTA/SM 的放大 tile**（本卡 ≤116KB smem / ≤128 regs 达不到），或**换卡**（更大 smem/寄存器）。
+3. **O91 的新认知**：1 CTA/SM 的瓶颈是 **单 barrier 域的 `__syncthreads` 串行**，而非 warp 数。
+   若将来要复活 `wg3`/BM≥128 档，唯一路径是 **warp specialization（producer/consumer + mbarrier
+   流水，彻底替换 `__syncthreads`）**——但这是多轮工程，且仍受同一 L2 墙约束，非本轮范围。
+
+见 `docs/08` §5.101、`ROADMAP`「当前进度 第一百八十七轮」/「下一步」；原始输出
+`src/fp8/fa_bwd_fp8_o92_{default_s4096,bulkred_s4096,sass_te_s4096,sass_ours_s4096,
+ncu_te_s4096,ncu_ours_s4096}.out.txt`。

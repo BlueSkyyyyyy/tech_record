@@ -1,0 +1,23 @@
+==PROF== Connected to process 1345768 (/usr/bin/python3.12)
+==PROF== Profiling "cudnn_generated_fort_native_sdpa_sm90_flash_bprop_wgmma_f8_knob_26_64x64x128_1x4x1_cga1x1x1_kernel0_0": 0%....50%....100% - 6 passes
+==PROF== Disconnected from process 1345768
+[1345768] python3.12@127.0.0.1
+  cudnn_generated_fort_native_sdpa_sm90_flash_bprop_wgmma_f8_knob_26_64x64x128_1x4x1_cga1x1x1_kernel0_0 (132, 1, 1)x(384, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    -------------------------------------------------------------- --------------- ------------
+    Metric Name                                                        Metric Unit Metric Value
+    -------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                           %        17.60
+    gpu__time_duration.sum                                                      us       258.34
+    launch__occupancy_limit_shared_mem                                       block            1
+    launch__registers_per_thread                                   register/thread          168
+    launch__waves_per_multiprocessor                                                          1
+    lts__t_sectors.sum                                                      sector     36838056
+    lts__t_sectors_op_read.sum                                              sector     10003705
+    lts__t_sectors_op_red.sum                                               sector     25956960
+    lts__t_sectors_op_write.sum                                             sector       795862
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                            %        70.70
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active               %        36.86
+    sm__warps_active.avg.pct_of_peak_sustained_active                            %        15.61
+    -------------------------------------------------------------- --------------- ------------
+

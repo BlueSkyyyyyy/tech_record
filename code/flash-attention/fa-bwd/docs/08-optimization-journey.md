@@ -2006,3 +2006,36 @@ O90 证 `wgmma2`（BM=128、2 WG）`red` 砍半却只有 8 warp/SM（1 CTA×2 WG
 - **判决**：**负结果、opt-in 默认关**。多 warpgroup / 放大 BM 这条结构性杠杆在本卡（1 CTA/SM，
   ≤116KB smem / ≤128 regs 才能 2 CTA/SM）**判死**；正结果只剩 **换卡**。见 `docs/03` §114；
   原始输出 `src/fp8/fa_bwd_fp8_o91_*.out.txt`。
+
+### 5.101 第 187 轮（O92）：fp8 main L2 墙的「TE 侧对侧」闭环复核 —— **无新正结果（默认一行未改）**
+
+`fp8 专项冲刺`（F1→F6）与 `下一批`（F6/F3b/F4b）在 O77 后反复收敛到「默认 fp8 `kvtma` main 是
+L2 `red` bound、软件杠杆已尽」。本轮不做新算法，而是**闭环复核 + TE 逐指标对侧**，并用同 session
+原始数据把「差距在哪一级、剩余杠杆是什么」钉死；顺带在 O81（GEMM5 wgmma）/O89（LPT 调度）之后
+**复测三条尚未在最新默认上复跑的候选**。
+
+- **基线（S4096 causal，event iters=30）**：`total 1.6711ms / 82.24TF`、`main 1.4437ms`
+  （70656B smem）——与 O89/O91 同档，复现稳定。
+- **复测（默认一行未改）**：① **ksplit 复扫** 1/2/4/**8**/16 = 2.032/1.804/1.694/**1.667**/
+  1.821ms ⇒ **auto=8 仍最优**（`red` 随 ksplit 降但尾波补偿更贵）；② **`FA_BULKRED` 复测**
+  1.6454ms（**0.877×**）⇒ O42 的负结果在 O81/O89 后**不翻转**（staging smem 流量 + TMA 归约延迟）；
+  ③ **编译宏复扫** ILV34 0.948× 等仍全负 ⇒ 复证 O88「不改贡献数即不可能转正」。
+- **TE vs ours SASS（S4096，`ncu --page source --print-source sass`）**：TE = **16 QGMMA + 0 HMMA
+  + 4×`UTMAREDG.4D.ADD` + 24 STSM**；ours = **12 QGMMA**（GEMM1/2+O81 的 GEMM5）+ **64 HMMA**
+  （GEMM3/4，O82/O87 已判负）+ **64×`REDG.E.ADD.F32`** + 39 LDSM。⇒ ours 的 wgmma 覆盖已到顶
+  （剩余 HMMA 与 `red` bond 无关）；TE 的低 `red` 来自**工作划分**，不是 `UTMAREDG`（O67/p159 已证
+  `red` 扇区与归约机制无关）。
+- **TE vs ours L2/occupancy 六指标（同 session，S4096）**：Duration **1.45ms vs 258.34µs（5.62×）**、
+  L2 总扇区 **142.97M vs 36.84M（3.88×）**、`read` 27.91M vs 10.00M、**`red` 114.52M vs 25.96M
+  （4.41×）**、L2 利用率 **81.30% vs 70.70%**、DRAM 4.52% vs 17.60%、**tensor pipe 11.25% vs
+  36.86%（3.28×）**、warps 18.60% vs 15.61%、regs 168/168、CTA/SM **3 vs 1**。**TE tile 同为
+  BM=64（64x64x128）** ⇒ 差距**不是放大 BM**，而是「每个 dK/dV 元素的贡献 CTA 数」：ours 的
+  114.52M `red`=830MB 原子流量 / dK/dV 真实 67MB ⇒ **~54 次/元素**；TE 25.96M ⇒ **~12 次**。
+- **精度护栏（S4096）**：`ours vs fp32 ref` relL2 dq/dk/dv **8.149/8.263/6.489%**（护栏内，与 O91
+  逐位同档）；`max_abs` 2.635/2.644/3.216e-1；`ours vs TE` 13.42/13.48/28.15%（TE-vs-ref 的 dv
+  自身 27.45%，非回退）。
+- **判决**：**无新正结果，默认一行未改**。默认 fp8 main 的 L2 `red` 墙在本卡**无软件解**
+  （F3b/F4b/F6/O90/O91/F7 全收口，本轮复测亦无翻转）；真差距 = 工作划分（同 BM 下 TE `red` 4.4× 低），
+  解锁需 ≥2 独立 CTA/SM 的放大 tile（本卡达不到）或**换卡**。**O91 的新认知**：1 CTA/SM 的瓶颈是
+  **单 barrier 域 `__syncthreads` 串行**，复活 BM≥128 档唯一路径是 **warp specialization**
+  （多轮工程，且仍受同一 L2 墙）。见 `docs/03` §115；原始输出 `src/fp8/fa_bwd_fp8_o92_*.out.txt`。

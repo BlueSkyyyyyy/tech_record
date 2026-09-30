@@ -3243,7 +3243,22 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百八十六轮）**：**O91（F6-step4）——多 warpgroup（BM=192、3 WG、384 线程）
+> **最新（第一百八十七轮）**：**O92——fp8 main L2 墙的「TE 侧对侧」闭环复核——无新正结果，
+> 默认一行未改**。不做新算法，用同 session 数据钉死差距并复测三条 O81/O89 后的候选：
+> ① 基线 `total 1.6711ms/82.24TF`、`main 1.4437ms`；② **ksplit 复扫** 1/2/4/8/16 = 2.032/1.804/
+> 1.694/**1.667**/1.821ms ⇒ auto=8 仍最优；③ **`FA_BULKRED` 复测 0.877×**（O42 不翻转）；
+> ④ 宏复扫 ILV34 0.948× 等全负。**TE vs ours S4096**：SASS 16 QGMMA+0 HMMA+4×`UTMAREDG` vs
+> 12 QGMMA+64 HMMA+64×`REDG`；L2 总扇区 **36.84M vs 142.97M（3.88×）**、`red` **25.96M vs
+> 114.52M（4.41×）**、Duration **258µs vs 1.45ms（5.62×）**、tensor 36.86% vs 11.25%，**TE tile
+> 同为 BM=64** ⇒ 差距是**工作划分**（同 BM 下 TE `red` 4.4× 低），非放大 BM。**精度护栏全过**
+> （ours vs ref relL2 8.149/8.263/6.489%）。
+> **下一步候选**：① **换卡**（更大 smem/寄存器）——本卡 fp8 main 的 L2 `red` 墙已无软件解
+> （F3b/F4b/F6/F7/O90/O91/O92 全收口，见「阻塞」）；② 若要复活 BM≥128 档，唯一路径是
+> **warp specialization 完整化**（producer/consumer + mbarrier 流水替换 `__syncthreads`，
+> 多轮工程，仍受同一 L2 墙）；③ 覆盖型 backlog（`D=256` K/V-TMA、MLA 降 smem）均受同一 smem 墙；
+> ④ 非 main 项（preprocess/quant）均已达带宽墙。见 `docs/03` §115、`docs/08` §5.101。
+>
+> **（第一百八十六轮）**：**O91（F6-step4）——多 warpgroup（BM=192、3 WG、384 线程）
 > ——负结果，opt-in `--wg3`，默认一行未改**。把 `wgmma2` 泛化为 `NWG` 个 warpgroup，用 NWG=3
 > （BM=192、384 线程、1 CTA/SM、smem 197KB、168 regs/0 spill）实测：「既放大 BM 压 `red`、
 > 又把 warp/SM 拉回默认档」——`red` **114.52M→49.64M（0.43×）**、L2 总搬运 **0.56×**、L2 利用率
@@ -7648,6 +7663,40 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     顶穿 116KB/2-CTA 门槛，backlog）。见 `docs/03` §108、`docs/08` §5.94、`docs/04` §50；
     原始输出 `src/fp8/fa_bwd_fp8_o85_d256_ab.out.txt`、`..._o85_ncu_d256_s1024.out.txt`、
     `..._o85_accuracy_d256.out.txt`。
+
+- 2026-09-30（第一百八十七轮）：**O92——fp8 main L2 墙的「TE 侧对侧」闭环复核
+  ——无新正结果，默认一行未改**。`fp8 专项冲刺`（F1→F6）+ `下一批`（F6/F3b/F4b）在 O77 后
+  反复收敛到「默认 fp8 `kvtma` main 是 L2 `red` bound、软件杠杆已尽」。本轮不做新算法，用
+  同 session 原始数据把**差距在哪一级、还差多少、剩余杠杆是什么**钉死，并复测三条 O81/O89
+  之后尚未在最新默认上复跑的候选。
+  - **基线**（S4096 H16 B1 causal，event iters=30）：`total 1.6711ms/82.24TF`、`main 1.4437ms`
+    （70656B smem）——与 O89/O91 同档、复现稳定。
+  - **复测（默认一行未改）**：① **ksplit 复扫** 1/2/4/**8**/16 = 2.032/1.804/1.694/**1.667**/
+    1.821ms ⇒ **auto=8 仍最优**（`red` 随 ksplit 降但 causal 尾波补偿更贵）；② **`FA_BULKRED`
+    复测**（TMA 张量归约替逐元素 `red`）**1.6454ms（0.877×）**⇒ O42 负结果在 O81/O89 后**不翻转**；
+    ③ **编译宏复扫** ILV34 0.948× 等仍全负 ⇒ 复证 O88「只改指令/发射顺序、不改贡献 CTA 数即不可能
+    转正」。
+  - **TE vs ours SASS**（S4096，`ncu --page source --print-source sass`）：TE = **16 QGMMA + 0 HMMA
+    + 4×`UTMAREDG.4D.ADD` + 24 STSM**；ours = **12 QGMMA**（GEMM1/2 + O81 的 GEMM5）+ **64 HMMA**
+    （GEMM3/4，O82/O87 已判负）+ **64×`REDG.E.ADD.F32`** + 39 LDSM。⇒ ours 的 wgmma 覆盖已到顶，
+    剩余 HMMA 与 `red` bond 无关；TE 的低 `red` 来自**工作划分**而非 `UTMAREDG`（O67/p159 已证
+    `red` 扇区与归约机制/宽度无关）。
+  - **TE vs ours L2/occupancy 六指标**（同 session，S4096）：Duration **1.45ms vs 258.34µs
+    （5.62×）**、L2 总扇区 **142.97M vs 36.84M（3.88×）**、`read` 27.91M vs 10.00M、
+    **`red` 114.52M vs 25.96M（4.41×）**、L2 利用率 **81.30% vs 70.70%**、DRAM 4.52% vs 17.60%、
+    **tensor pipe 11.25% vs 36.86%（3.28×）**、warps 18.60% vs 15.61%、regs 168/168、CTA/SM **3 vs 1**。
+    **TE tile 同为 BM=64（64x64x128）** ⇒ 差距**不是放大 BM**，而是「每个 dK/dV 元素的贡献 CTA
+    数」：ours 114.52M `red`=830MB 原子流量 / dK/dV 真实 67MB ⇒ **~54 次/元素**；TE **~12 次**。
+  - **精度护栏（S4096）**：`ours vs fp32 ref` relL2 dq/dk/dv **8.149/8.263/6.489%**（护栏内，与
+    O91 逐位同档）；`max_abs` 2.635/2.644/3.216e-1；`ours vs TE` 13.42/13.48/28.15%（TE-vs-ref
+    的 dv 自身 27.45%，非回退）。
+  - **判决**：**无新正结果，默认一行未改**。默认 fp8 main 的 L2 `red` 墙在本卡**无软件解**
+    （F3b/F4b/F6/O90/O91/F7 全收口，本轮复测亦无翻转）；真差距 = 工作划分（同 BM 下 TE `red`
+    4.4× 低），解锁需 ≥2 独立 CTA/SM 的放大 tile（本卡 ≤116KB smem/≤128 regs 达不到）或**换卡**。
+    **O91 的新认知**：1 CTA/SM 的瓶颈是**单 barrier 域 `__syncthreads` 串行**（非 warp 数），
+    复活 BM≥128 档唯一路径是 **warp specialization**（多轮工程，且仍受同一 L2 墙）。见 `docs/03`
+    §115、`docs/08` §5.101；原始输出 `src/fp8/fa_bwd_fp8_o92_{default_s4096,bulkred_s4096,
+    sass_te_s4096,sass_ours_s4096,ncu_te_s4096,ncu_ours_s4096}.out.txt`。
 
 - 2026-09-30（第一百八十六轮）：**O91（F6-step4）——多 warpgroup（BM=192、3 WG、384 线程）
   ——负结果（opt-in `--wg3`，默认一行未改）**。落实 O90「下一步候选 ①」——本卡 fp8 主 kernel
