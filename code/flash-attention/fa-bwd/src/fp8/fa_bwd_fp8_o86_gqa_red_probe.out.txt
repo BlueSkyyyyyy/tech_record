@@ -1,0 +1,53 @@
+### O86（第一百八十一轮）：GQA/MQA「跨 Q 头折叠 dK/dV」可行性收口——ncu red 探针
+### 命令：ncu --metrics gpu__time_duration.sum,lts__t_sectors_op_{read,red,write}.sum,
+###        lts__throughput,dram__throughput,sm__warps_active
+###        --kernel-name regex:kvtma --launch-count 1 ./fa_bwd_fp8_main.out --dir=<case> --iters=10
+### 关键规律：默认 fp8 kvtma main 的 L2 `red` **正比于 Q 头数 H，与 Hkv 无关**（下表：
+###   H32→16.42M、H40→20.52M、H64→32.83M；H64kv4 与 H64kv1(MQA) 的 red **完全相同** 32,833,536）。
+###   ⇒ GQA/MQA 的 red 是「H 个 Q 头各自向共享 KV 头累加」造成的 H 倍放大；
+###     「跨 Q 头折叠到一次贡献」理论上可把 red ÷(H/Hkv)（MQA÷64）——本轮的唯一新杠杆，
+###     但被结构性 loop-order 冲突锁死（见 docs/03 §109）。默认路径一行未改。
+===== b1_s1024_h32_d128_causal_fp8 =====
+    Metric Name                                        Metric Unit Metric Value
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        12.19
+    gpu__time_duration.sum                                      us       242.69
+    lts__t_sectors_op_read.sum                              sector      4414171
+    lts__t_sectors_op_red.sum                               sector     16416768
+    lts__t_sectors_op_write.sum                             sector        98270
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        71.02
+    sm__warps_active.avg.pct_of_peak_sustained_active            %        17.64
+===== b1_s1024_h64_d128_kv4_causal_fp8 =====
+    Metric Name                                        Metric Unit Metric Value
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %         5.04
+    gpu__time_duration.sum                                      us       444.67
+    lts__t_sectors_op_read.sum                              sector      8077902
+    lts__t_sectors_op_red.sum                               sector     32833536
+    lts__t_sectors_op_write.sum                             sector       192936
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        76.28
+    sm__warps_active.avg.pct_of_peak_sustained_active            %        18.12
+===== b1_s1024_h40_d128_kv8_causal_fp8 =====
+    Metric Name                                        Metric Unit Metric Value
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %         5.37
+    gpu__time_duration.sum                                      us       291.14
+    lts__t_sectors_op_read.sum                              sector      5302221
+    lts__t_sectors_op_red.sum                               sector     20523168
+    lts__t_sectors_op_write.sum                             sector       121541
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        72.95
+    sm__warps_active.avg.pct_of_peak_sustained_active            %        17.81
+===== b1_s4096_h16_d128_causal_fp8 =====
+    Metric Name                                        Metric Unit Metric Value
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %         4.33
+    gpu__time_duration.sum                                      ms         1.50
+    lts__t_sectors_op_read.sum                              sector     28013759
+    lts__t_sectors_op_red.sum                               sector    114524160
+    lts__t_sectors_op_write.sum                             sector       386038
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        78.28
+    sm__warps_active.avg.pct_of_peak_sustained_active            %        18.35
+===== b1_s1024_h64_d128_kv1_causal_fp8 (MQA) =====
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %         4.65
+    gpu__time_duration.sum                                      us       437.60
+    lts__t_sectors_op_read.sum                              sector      7712055
+    lts__t_sectors_op_red.sum                               sector     32833536
+    lts__t_sectors_op_write.sum                             sector       192553
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        77.49
+    sm__warps_active.avg.pct_of_peak_sustained_active            %        18.12
