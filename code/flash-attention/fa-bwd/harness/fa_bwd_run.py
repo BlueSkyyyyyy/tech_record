@@ -244,9 +244,10 @@ def main():
                           and not args.mma and not args.hopper)
         # O72（第 166 轮）：**fp8 varlen 也默认走 TMA 构建**——varlen full D=128 的 LSE 接到
         # 定长 O70 同款 4D-TMA（`--lsetmavarlen=0` 退回 cp.async 版做同 binary A/B）。主 kernel
-        # 仍走 `launch_bwd_main`（无 TMA 模板参数）⇒ 仅 LSE 换搬运方式。fp16/bf16 varlen 维持
-        # 旧构建（其 varlen full LSE TMA 化尚未做，留后续）。
-        varlen_tma = is_varlen and dt == "fp8" and not args.mma
+        # 仍走 `launch_bwd_main`（无 TMA 模板参数）⇒ 仅 LSE 换搬运方式。
+        # O73（第 167 轮）：把同一「varlen full D=128 LSE 走 4D-TMA」泛化到 **fp16/bf16**
+        # （dtype 参数化 O72），故三 dtype varlen 一律用 Hopper（FA_TMA）构建。
+        varlen_tma = is_varlen and dt in HOPPER_DEFAULT_DTYPES and not args.mma
         if hopper_default or varlen_tma:
             build_env = {"ARCH": "", "NVCC_FLAGS": HOPPER_FLAGS}
         else:

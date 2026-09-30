@@ -1502,3 +1502,39 @@ smem 冲突 + 低 occ
 - 详见 `docs/03` §96；原始输出 `src/fp8/fa_bwd_fp8_o72_varlen_lse_ab.out.txt`、
   `src/fp8/fa_bwd_fp8_p166_ncu_lse_{tma,cpasync}_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_p166_{varlen_run,ci,te_varlen_baseline}.out.txt`。
+
+### 5.81 O73：varlen full D=128 的 LSE 也上 **4D-TMA**（fp16/bf16 泛化，第一百六十七轮，正结果，默认）
+
+- **动机**：第 166 轮 fp8 O72（§5.80）把 varlen full D=128 的 LSE 切到 4D-TMA，并留「逐字 dtype
+  化到 fp16/bf16」为下一步。O69→O70→O71（F9/F11）只覆盖**定长**；`run_varlen` 里 full D=128 仍硬
+  编码走 O69 的 `lse_mma_kernel_bal<128,1,true>`（`cp.async`）。本轮补齐，**三 dtype × {定长,
+  varlen} full D=128 的 LSE 全部统一到 4D-TMA**。
+- **做了什么**（device+host，单/两文件同步）：
+  - device（`fa_bwd_{fp16,bf16}_mma_kernels.cuh` + onefile 的 `lse_mma_kernel_bal_tma`，与 fp8 O72
+    逐字同构）：模板加 `const int* cu_seqlens = nullptr`。`cu` 非空时 `qbase=cu_seqlens[b]`、
+    `len=cu_seqlens[b+1]-qbase`、`nblk=ceil(len/LBM)`，否则退化（**定长逐位不变**）。`FULL` 下
+    `pair>=nblk` 早退；TMA 行坐标 `qbase+m0/j0`（batch 维恒 0）、`ncols`、掩码 `jg<len`、输出写
+    全部换 `qbase/len`。Q/K 仍 2×K=64 chunk TMA（fp16 是 2 chunk 描述符，fp8 是 1 chunk）。
+  - host（四个文件）：新增文件作用域 `g_lse_tma_varlen`（默认 1）+ CLI `--lsetmavarlen=0/1`；
+    `run_varlen` 为 D=128/full 建 packed 描述符（`make_lse_map(d_q,H,T,D,1)`）并优先调
+    `lse_mma_kernel_bal_tma<128,1,true>(…, d_cu)`。`--lsetmavarlen=0` 退回 cp.async 版做同 binary
+    A/B、`--lsefull=0` 退回 O8。
+  - 构建（`harness/fa_bwd_run.py`）：`varlen_tma` 判据由 `dt=="fp8"` 扩为
+    `dt in HOPPER_DEFAULT_DTYPES` ⇒ fp16/bf16 varlen 也加 `-DFA_TMA -lcuda`（主 kernel 不变）。
+- **数值**：ours vs fp32 ref 与 `cp.async` 版**打印逐位相同**（fp16 b4_t4096
+  4.094e-4/4.953e-4/1.234e-4；bf16 b4_t4096 3.237e-3/2.392e-3/2.013e-3；个别元素仅 LSE fp32 求和
+  次序 ~1e-4）；12 个 varlen full case 单/两文件一致性 gate fp16 worst 2.441e-4、bf16 1.953e-3 均
+  OK；全量 CI `--no-run --ci` 73 case 三 dtype gate 全 OK、`--check docs/04` OK；定长 causal
+  S512/S4096 回归逐位不变。
+- **性能（同 binary A/B，Hopper，event，iters=50）**：varlen full D=128 total **1.06–1.07×**：
+  fp16 b4_t3840 `0.9397→0.8810ms`、b4_t4096 `0.5908→0.5517`、b5_t3968(h32kv8)
+  `1.8331→1.7218`、b8_t2904 `0.7562→0.7113`；bf16 同量级（`0.9522→0.8878` 等）。对标纯反向
+  `[1024]×4` full：fp16 FA3 `0.1999ms` ⇒ ours/FA3 **2.96×→2.76×**；bf16 FA3 `0.1980ms` ⇒
+  **3.02×→2.82×**。
+- **ncu（`regex:lse_mma_kernel_bal`，`--launch-count 1`，b4_t4096 full，fp16/bf16 逐项一致）**：
+  cp.async **109.0µs / inst 58.86M / L1TEX 50.9%** → TMA **66.8µs（1.63×）/ inst 36.08M
+  （−38.7%）/ L1TEX 27.1%**；两者 `Compute ~57%`（issue/延迟 bound）、DRAM 10–16%、L2 34–44%
+  ⇒ **搬迁升级，不是 DRAM/L2/算力 bound**。
+- **下一步**：main 的 L2 `red` 墙仍受本卡寄存器/smem 硬墙锁定（见「阻塞」）。
+- 详见 `docs/01` §24、`docs/01b` §6ba；原始输出 `src/fp16/fa_bwd_fp16_p167_lse_tma_ab.out.txt`、
+  `..._p167_ncu_lse_tma.out.txt`、`src/bf16/fa_bwd_bf16_p167_*`、`src/fp16/fa_bwd_fp16_p33c_run.out.txt`。

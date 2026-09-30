@@ -1,0 +1,60 @@
+=== O73 p167 ncu: varlen_b4_t4096_h16_d128_full_fp16 的 LSE kernel, --lsetmavarlen=1(TMA) vs 0(cp.async) ===
+binary fa_bwd_fp16_mma_main.out (HOPPER).  --launch-skip 3 --launch-count 1 --kernel-name regex:lse_mma_kernel_bal
+
+########## --lsetmavarlen=1 ##########
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_full_fp16
+VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=0
+cu_seqlens = 0 1024 2048 3072 4096
+VARLEN main backend = wgmma2 cp.async
+[O40] varlen lse k-split = 1 (base=512)
+[timing] VARLEN total 27.5086 ms  1.25 TFLOPS (sum_b 4HL^2D)
+grid main = 8 x 16 x 4 | lse grid = 8 x 16 x 4 | T=4096
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=4.094e-04  max_rel=9.879e-02  (ours_amax=6.499e-01 ref_amax=6.495e-01 @3415108)
+  dk  vs ref: max_abs=4.953e-04  max_rel=1.029e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
+  dv  vs ref: max_abs=1.213e-04  max_rel=3.416e-02  (ours_amax=4.905e-01 ref_amax=4.906e-01 @7025610)
+[1234542] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void lse_mma_kernel_bal_tma<128, 1, 1>(CUtensorMap_st, CUtensorMap_st, float *, float *, int, int, int, float, int, const int *) (16, 16, 4)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------- --------------- ------------
+    Metric Name                                             Metric Unit Metric Value
+    --------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                %        16.15
+    gpu__time_duration.sum                                           us        66.75
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed               %        27.13
+    launch__occupancy_limit_shared_mem                            block            4
+    launch__registers_per_thread                        register/thread           64
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                 %        33.50
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                  %        57.20
+    sm__warps_active.avg.pct_of_peak_sustained_active                 %        23.23
+    smsp__inst_executed.sum                                        inst     36080640
+    --------------------------------------------------- --------------- ------------
+
+########## --lsetmavarlen=0 ##########
+case = /home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h16_d128_full_fp16
+VARLEN: B=4 T=4096 maxlen=1024 H=16 Hkv=16 D=128 causal=0
+cu_seqlens = 0 1024 2048 3072 4096
+VARLEN main backend = wgmma2 cp.async
+[O40] varlen lse k-split = 1 (base=512)
+[timing] VARLEN total 27.0755 ms  1.27 TFLOPS (sum_b 4HL^2D)
+grid main = 8 x 16 x 4 | lse grid = 8 x 16 x 4 | T=4096
+[compare] VARLEN ours vs fp32 ref
+  dq  vs ref: max_abs=4.094e-04  max_rel=9.879e-02  (ours_amax=6.499e-01 ref_amax=6.495e-01 @3415108)
+  dk  vs ref: max_abs=4.953e-04  max_rel=1.029e-01  (ours_amax=9.463e-01 ref_amax=9.458e-01 @6429672)
+  dv  vs ref: max_abs=1.234e-04  max_rel=3.416e-02  (ours_amax=4.905e-01 ref_amax=4.906e-01 @7991790)
+[1234610] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void lse_mma_kernel_bal<128, 1, 1, 128, 64>(const __half *, const __half *, float *, int, int, int, float, const int *, float *, int) (16, 16, 4)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------- --------------- ------------
+    Metric Name                                             Metric Unit Metric Value
+    --------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                %         9.89
+    gpu__time_duration.sum                                           us       109.02
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed               %        50.93
+    launch__occupancy_limit_shared_mem                            block            4
+    launch__registers_per_thread                        register/thread           64
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                 %        44.22
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                  %        57.98
+    sm__warps_active.avg.pct_of_peak_sustained_active                 %        23.07
+    smsp__inst_executed.sum                                        inst     58855424
+    --------------------------------------------------- --------------- ------------

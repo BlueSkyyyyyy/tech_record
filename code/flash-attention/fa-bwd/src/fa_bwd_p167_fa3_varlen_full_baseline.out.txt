@@ -1,0 +1,3 @@
+=== O73 p167 FA3 纯反向（CUPTI device time）varlen full [1024]x4 H16 D128 ===
+[varlen_b4_t4096_h16_d128_full_fp16] lengths=[1024, 1024, 1024, 1024]  fa3=0.1993ms/172.39TF
+[varlen_b4_t4096_h16_d128_full_bf16] lengths=[1024, 1024, 1024, 1024]  fa3=0.1978ms/173.67TF

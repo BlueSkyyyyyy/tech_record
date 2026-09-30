@@ -1,0 +1,27 @@
+=== fa-bwd 实现一致性（P3-3f/P3-3g）：ours vs ours_sf（max_abs，逐元素）===
+baseline-free：两者都算同一数学；期望差异仅跨 CTA atomicAdd 次序（dtype ulp）。
+判据（按 dtype）：max|ours-ours_sf| <= ctol；bf16=0.032, fp16=0.016（任一超出则退出码 1）
+
+[fp16]
+  varlen_b1_t512_h2_d512_full_fp16                dq=1.221e-04  dk=1.221e-04  dv=1.221e-04
+  varlen_b3_t1792_h2_d512_full_fp16               dq=1.221e-04  dk=2.441e-04  dv=1.221e-04
+  varlen_b4_t3840_h16_d128_full_fp16              dq=0.000e+00  dk=1.221e-04  dv=1.221e-04
+  varlen_b4_t4096_h16_d128_full_fp16              dq=0.000e+00  dk=1.221e-04  dv=1.221e-04
+  varlen_b5_t3968_h32_d128_full_fp16              dq=0.000e+00  dk=2.441e-04  dv=2.441e-04
+  varlen_b8_t2904_h16_d128_full_fp16              dq=0.000e+00  dk=1.221e-04  dv=1.221e-04
+
+[bf16]
+  varlen_b1_t512_h2_d512_full_bf16                dq=2.441e-04  dk=4.883e-04  dv=4.883e-04
+  varlen_b3_t1792_h2_d512_full_bf16               dq=4.883e-04  dk=9.766e-04  dv=9.766e-04
+  varlen_b4_t3840_h16_d128_full_bf16              dq=0.000e+00  dk=4.883e-04  dv=4.883e-04
+  varlen_b4_t4096_h16_d128_full_bf16              dq=0.000e+00  dk=9.766e-04  dv=9.766e-04
+  varlen_b5_t3968_h32_d128_full_bf16              dq=0.000e+00  dk=1.953e-03  dv=9.766e-04
+  varlen_b8_t2904_h16_d128_full_bf16              dq=0.000e+00  dk=4.883e-04  dv=9.766e-04
+
+=== 小结（12 case 有 ours/ours_sf 双方；0 case 缺一侧）===
+  max|ours-ours_sf| over all cases: dq = 4.883e-04  (varlen_b3_t1792_h2_d512_full_bf16)
+  max|ours-ours_sf| over all cases: dk = 1.953e-03  (varlen_b5_t3968_h32_d128_full_bf16)
+  max|ours-ours_sf| over all cases: dv = 9.766e-04  (varlen_b3_t1792_h2_d512_full_bf16)
+  worst = 1.953e-03
+  gate[fp16] worst=2.441e-04  tol=0.016  -> OK
+  gate[bf16] worst=1.953e-03  tol=0.032  -> OK

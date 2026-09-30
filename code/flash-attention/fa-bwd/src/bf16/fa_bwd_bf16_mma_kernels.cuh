@@ -1003,12 +1003,17 @@ __global__ void lse_split_merge_kernel(const float* __restrict__ part,
 //   fp8 O70）。一个 CTA 只处理一个 m 块（grid.x=nblk，无镜像配对；full 各块工作量相同），
 //   `ncols=S` 且不做 `jg<=qi` 因果掩码；其余（4D-TMA/cp.async 双缓冲、tile 内两趟 softmax、
 //   4-lane shfl 归约）逐字复用。`FULL=false` 编译出与 O31/O38 逐位相同的 causal 代码。
+// O73（第 167 轮）：加 `const int* cu_seqlens`——VARLEN 支持（逐字对齐 fp8 O72/fp16 O73）。cu
+//   非空时用 `cu_seqlens[b]` 作 packed [T,H,D] 的 token 基址、`cu_seqlens[b+1]-qbase` 作本序列
+//   长度；nullptr 时逐式退化为定长（qbase=b*S、len=S），定长路径逐位不变。TMA 描述符建在
+//   packed 张量上（dims={D,T,H,1}，batch 维恒 0），行坐标 = qbase + m0/j0。
 template <int HD, int PIPE = 1, bool FULL = false>
 __global__ void __launch_bounds__(THREADS)
 lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
                        const __grid_constant__ CUtensorMap kmap,
                        float* __restrict__ lse, float* __restrict__ lse_part,
-                       int S, int H, int Hkv, float scale, int ksplit) {
+                       int S, int H, int Hkv, float scale, int ksplit,
+                       const int* __restrict__ cu_seqlens = nullptr) {
   static_assert(HD == 128, "wgmma LSE TMA 目前只做 HD=128");
   constexpr int CH = (LBM / 8) * 1024;   // 单个 K=64 chunk 的 SW128 字节数（8KB）
   constexpr int TILE = 2 * CH;           // [LBM][HD] K-major tile（16KB）
@@ -1020,12 +1025,17 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   uint64_t* qbar = reinterpret_cast<uint64_t*>(Ks + (PIPE ? 2 : 1) * TILE);
   uint64_t* kbar = qbar + 1;
 
-  const int nblk = (S + LBM - 1) / LBM;
   // O38：K 维 split。grid = (pairs, H, B*ksplit)；每个 (pair,ks) CTA 只扫本 m 块 K 范围的
   //   第 ks 个连续切片（按 tile 粒度切分），把部分 (m,l) 写到 `lse_part`，由 merge kernel 汇总。
   //   ksplit==1 时切片即整段、直接写 `lse`（逐位退化为 O31 原路径）。
   const int pair = blockIdx.x, h = blockIdx.y;
   const int b = (int)blockIdx.z / ksplit, ksp = (int)blockIdx.z % ksplit;
+  // O73：VARLEN——cu 给出本序列 packed token 基址/长度；nullptr 时逐式退化（定长逐位不变）。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
+  const int nblk = (len + LBM - 1) / LBM;
+  if constexpr (FULL) { if (pair >= nblk) return; }   // 短序列多余 CTA 早退（定长恒不触发）
+  const int bq = cu_seqlens ? 0 : b;   // packed [T,H,D] 的 TMA batch 维恒 0（基址由 qbase 给）
   const int hkv = h / (H / Hkv);
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
@@ -1040,16 +1050,16 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
   auto issue_q = [&](int m0) {
     if (tid == 0) {
       mbar_arrive_expect(qbar, TILE);
-      tma_load_4d(Qs, &qmap, 0, m0, h, b, qbar);
-      tma_load_4d(Qs + CH, &qmap, 64, m0, h, b, qbar);
+      tma_load_4d(Qs, &qmap, 0, qbase + m0, h, bq, qbar);
+      tma_load_4d(Qs + CH, &qmap, 64, qbase + m0, h, bq, qbar);
     }
   };
   auto issue_k = [&](int stage, int j0) {
     if (tid == 0) {
       char* Kd = Ks + stage * TILE;
       mbar_arrive_expect(kbar + stage, TILE);
-      tma_load_4d(Kd, &kmap, 0, j0, hkv, b, kbar + stage);
-      tma_load_4d(Kd + CH, &kmap, 64, j0, hkv, b, kbar + stage);
+      tma_load_4d(Kd, &kmap, 0, qbase + j0, hkv, bq, kbar + stage);
+      tma_load_4d(Kd + CH, &kmap, 64, qbase + j0, hkv, bq, kbar + stage);
     }
   };
 
@@ -1063,7 +1073,7 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
     const int mblk = FULL ? pair : ((t == 0) ? pair : (nblk - 1 - pair));
     if (!FULL && t == 1 && pair == nblk - 1 - pair) break;
     const int m0 = mblk * LBM;
-    const int ncols = FULL ? S : min(S, m0 + LBM);
+    const int ncols = FULL ? len : min(len, m0 + LBM);   // O73：len（定长时 == S，逐位不变）
     const int ntiles = (ncols + LBN - 1) / LBN;
     // O38：本 CTA 负责的 K tile 切片 [nt0, nt1)（连续，按 tile 数均分）。
     const int nt0 = (int)(((long)ntiles * ksp) / ksplit);
@@ -1101,7 +1111,7 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
           int c = j * 8 + c2 + (q & 1);
           int qi = m0 + r, jg = j0 + c;
           float sv = -INFINITY;
-          if (qi < S && jg < S && (FULL || jg <= qi)) sv = d[j * 4 + q] * scale;
+          if (qi < len && jg < len && (FULL || jg <= qi)) sv = d[j * 4 + q] * scale;
           d[j * 4 + q] = sv;
           if (s == 0) mloc0 = fmaxf(mloc0, sv); else mloc1 = fmaxf(mloc1, sv);
         }
@@ -1135,11 +1145,11 @@ lse_mma_kernel_bal_tma(const __grid_constant__ CUtensorMap qmap,
       if (c2 == 0) {
         int r = wid * 16 + g + (s ? 8 : 0);
         int qi = m0 + r;
-        if (qi < S) {
+        if (qi < len) {   // O73：len（定长时 == S，逐位不变）
           if (ksplit == 1) {
-            lse[((size_t)(b * S + qi)) * H + h] = m + flog(l);
+            lse[((size_t)(qbase + qi)) * H + h] = m + flog(l);
           } else {
-            size_t row = ((size_t)(b * S + qi)) * H + h;
+            size_t row = ((size_t)(qbase + qi)) * H + h;
             lse_part[(row * ksplit + ksp) * 2 + 0] = m;
             lse_part[(row * ksplit + ksp) * 2 + 1] = l;
           }

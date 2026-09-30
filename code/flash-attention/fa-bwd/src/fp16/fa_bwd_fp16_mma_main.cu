@@ -36,6 +36,9 @@
 //   （一个 CTA 一个 m 块 + K 用 `cp.async` 16B 双缓冲），对齐 fp8 的 O68/F9。默认 1；
 //   `--lsefull=0` 退回 O8 做同 binary A/B。
 static int g_lse_full_opt = 1;
+// O73（第 167 轮）：varlen full D=128 的 LSE 是否走 4D-TMA（对齐定长 O71）。默认 1；`--lsetmavarlen=0`
+//   退回 O69 的 cp.async 均衡版做同 binary A/B。需要 `-DFA_WGMMA -DFA_TMA` 构建（否则恒 0）。
+static int g_lse_tma_varlen = 1;
 
 #if defined(FA_WGMMA) && defined(FA_TMA)
 // O30：为 LSE 的 Q/K 建 4D TMA 描述符（dims={D,S,H,B}，SW128，box={64,64,1,1}）。
@@ -431,6 +434,14 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
     vvmap = make_main_map(d_v, Hkv, T, D, 1);
     vdmap = make_main_map(d_do, H, T, D, 1);
   }
+  // O73：varlen full D=128 的 LSE 4D-TMA 描述符——建在 packed [T,H,D] 张量上
+  //   （dims={D,T,H,1}，strides 自动为 {H*D*2, D*2, T*H*D*2}，batch 维恒 0）。
+  const bool lse_tma_v = (g_lse_tma_varlen != 0) && g_lse_full_opt && (D == 128) && !causal;
+  CUtensorMap vqmap_lse, vkmap_lse;
+  if (lse_tma_v) {
+    vqmap_lse = make_lse_map(d_q, H, T, D, 1);
+    vkmap_lse = make_lse_map(d_k, Hkv, T, D, 1);
+  }
 #else
   const int varlen_tma_use = 0;
 #endif
@@ -467,6 +478,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
   const int kLseSmemBal1_6 = (64 + 2 * 16) * (D + 8) * (int)sizeof(__half);
   const int kLseTileWgm = (D == 128) ? (LBM / 8) * (D / 64) * 1024 : 0;
   const int kLseSmemWgm1 = 1024 + kLseTileWgm * 3;
+  // O73：TMA 版与 wgmma 版同布局（Q + 2×K）+ 3 个 mbarrier（24B，取 64B 余量）。
+  const int kLseSmemTma1_v = 1024 + kLseTileWgm * 3 + 64;
   if (D == 128) {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_wgmma<128, 1>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -476,6 +489,11 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
     // O69：full D=128 的 LSE 走 O54 均衡版（FULL=true）。
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 1, true>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    // O73：varlen full D=128 的 LSE TMA 实例（FULL=true，带 cu_seqlens）。
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<128, 1, true>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemTma1_v));
+#endif
   } else {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<512>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
@@ -604,10 +622,22 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
           lse_mma_kernel_bal_wgmma<128, 1><<<lg_bal, THREADS, kLseSmemWgm1>>>(
               d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
         }
-      } else if (g_lse_full_opt)
+      } else if (g_lse_full_opt) {
         // O69（第 163 轮）：full D=128 的 LSE 从 O8（无流水）改走 O54 均衡版（cp.async 双缓冲）。
-        lse_mma_kernel_bal<128, 1, true><<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1>>>(
-            d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
+        // O73（第 167 轮）：再优先走定长 O71 同款的 4D-TMA（`--lsetmavarlen=0` 退回 cp.async 版）。
+        bool did_tma_v = false;
+#if defined(FA_WGMMA) && defined(FA_TMA)
+        if (lse_tma_v) {
+          lse_mma_kernel_bal_tma<128, 1, true><<<dim3(lse_nblk, H, B), THREADS,
+                                                 kLseSmemTma1_v>>>(
+              vqmap_lse, vkmap_lse, d_lse, nullptr, maxlen, H, Hkv, scale, 1, d_cu);
+          did_tma_v = true;
+        }
+#endif
+        if (!did_tma_v)
+          lse_mma_kernel_bal<128, 1, true><<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1>>>(
+              d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
+      }
       else
         lse_mma_kernel<128><<<dim3(lse_nblk, H, B), THREADS, kLseSmem>>>(d_q, d_k, d_lse,
                                                                          maxlen, H, Hkv, scale,
@@ -1270,6 +1300,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--lsesplit=", 0) == 0) lse_split = atoi(a.c_str() + 11);
     else if (a.rfind("--lsefull=", 0) == 0) g_lse_full_opt = atoi(a.c_str() + 10);
     else if (a == "--lsefull") g_lse_full_opt = 1;
+    else if (a.rfind("--lsetmavarlen=", 0) == 0) g_lse_tma_varlen = atoi(a.c_str() + 15);
+    else if (a == "--lsetmavarlen") g_lse_tma_varlen = 1;
     else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
     else if (a == "--wgmma") wgmma_sel = 1;
     else if (a.rfind("--ow=", 0) == 0) ow_opt = atoi(a.c_str() + 5);
