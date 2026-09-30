@@ -166,6 +166,17 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 1. [DSec 精读：DeepSeek 的 Agentic RL 沙箱平台，为什么不是「一个容器运行时」](content/posts/paper-reading-01-dsec/index.md)
 2. [DeepSeek-V4.1-Flash 精读：把 KV Cache 压到 890 bytes/token，架构、精度、部署三线并进](content/posts/paper-reading-02-dsv41-flash/index.md)
 
+### LeetCode 题解精讲（专题，连载中）
+
+把 LeetCode 高频经典题按数据结构/算法模式分类，由易到难、相似题成组，
+每道题配 Python 与 C++ 可运行代码，并总结可迁移的通用规律。路线图见 [code/leetcode/ROADMAP.md](code/leetcode/ROADMAP.md)。
+
+1. [专题导读：分类目录与学习路线](content/posts/leetcode-00-index/index.md)
+2. [数组与双指针](content/posts/leetcode-01-array/index.md)
+
+配套代码：[code/leetcode/](code/leetcode/README.md)
+（各篇正文由 `docs/` 下的 Markdown 通过 `lc_include` shortcode 实时内联渲染）。
+
 ### 其他
 
 - [开篇：为什么写这个博客](content/posts/hello-world/index.md)

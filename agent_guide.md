@@ -56,3 +56,4 @@ static/katex/                   # 自托管 KaTeX，勿删
 | [publish](agent_skills/publish.md) | 构建、推送、验证线上部署 |
 | [kernel-opt](agent_skills/kernel-opt.md) | 推进「CUDA 算子调优」系列（长期自驱：写代码→实测→ncu→写文章→发布） |
 | [fa-bwd](agent_skills/fa-bwd.md) | 推进「FlashAttention 反向工程」项目（GPUkernel 实现/对标 TE/移植目标卡） |
+| [leetcode](agent_skills/leetcode.md) | 推进「LeetCode 题解精讲」专题（分类题解 + Python/C++ 代码，长期自驱） |
