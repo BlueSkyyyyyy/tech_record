@@ -3251,7 +3251,19 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百八十九轮）**：**O95——变 ks 调度（表驱动 per-m ksplit，`--ksm`）——中性/负结果，
+> **最新（第一百九十轮）**：**O96——fp8 full（非 causal）D=128 的 ksplit/regdq 重标定——正结果，默认**。
+> 审计「按 causal 三角标定、却被无条件套用到 full」的两条启发式：O29 的 ksplit target（细切分
+> 只为摊平三角尾波，full 下纯浪费 Q/dO 重读 + dQ 跨 part 原子）与 O7 的 `use_regdq` 阈值（`/2`
+> 让 full 误关 regdq）。**纯 host、device 一行未改、单/两文件同源**：full D=128 的 ksplit 改为让
+> `grid=base*k` 最接近整数个并发波（396 槽），`use_regdq` 的 `/2` 只对 causal 生效。**main 最高
+> 1.59×**（S2048H16 1.136→0.716ms 等，8 shape 一致选 k=3），ncu S1024H16 full：Duration
+> **299→205µs**、L2 总扇区 **−42%**、`red` **−45%**、L2 利用率 **84.6%→68.3%**；数值**逐位不变**
+> （relL2 新旧 8.111/8.235/6.709%），causal 路径逐档不变。见 `docs/03` §118、`docs/08` §5.104。
+> **下一步候选**：① 把「full 专属标定」的同类审计推广到**变长/MLA/D=256** 的 ksplit/regdq/split
+> 启发式（本轮只修了定长 full D=128）；② 用全量 `--ci`（73 case）验收本轮并同步 `docs/04` perf 列；
+> ③ causal 旗舰的 L2 `red` 墙仍是唯一真杠杆，本卡无软件解（换卡/多 warpgroup，见「阻塞」）。
+>
+> **（第一百八十九轮）**：**O95——变 ks 调度（表驱动 per-m ksplit，`--ksm`）——中性/负结果，
 > opt-in，默认一行未改**。落实 O93 候选 ③ 的 ksplit 子项：给 `fp8_mma_body` 加运行期 `slot_tab`
 > （`(ks,part,mt)` 表解码；`--ksm=N --ksmhi=K` = 最贵 N 个 m 块 ks=K、其余 ks=1，host 按全局 LPT
 > 建表、`grid=(H,nslots,B)`），**device 一行数学未改**、默认 `nullptr` 逐位退化。
@@ -7914,6 +7926,25 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     「下一步候选 ③」的 ksplit 子项关闭。对标同 session TE FP8 S4096 0.3025ms ⇒ ours total **5.31×**、
     main **4.52×**（与 O93 持平）。见 `docs/03` §117、`docs/08` §5.103；原始输出
     `src/fp8/fa_bwd_fp8_o95_{ab_s4096,ab_shapes,accuracy,ncu_s4096}.out.txt`。
+
+- 2026-10-01（第一百九十轮）：**O96——fp8 full（非 causal）D=128 主 kernel 的 ksplit/regdq 重标定
+  ——正结果，默认**。causal 旗舰到 L2 `red` 平台期后，本轮审计**两条按 causal 标定却无条件套用到
+  full 的启发式**（O29 的 ksplit target、O7 的 `use_regdq` 阈值）：full 每块工作量相同，O29 的
+  「细切分摊平三角尾波」不成立、只剩 Q/dO 重读 + dQ 跨 part 原子；O7 阈值里的 `/2`（causal 平均
+  扫半三角）让 full 在 k 稍大时**误关 regdq**，dQ 退化成逐 tile 跨 CTA `atomicAdd`。**纯 host，
+  device 一行未改，单/两文件同源**：① full D=128 的 ksplit 改为在 k∈[1,8] 里取「尾波空泡
+  `ceil(base*k/396)*396−base*k`」最小者（396 = 3 CTA/SM × 132 SM）；② `use_regdq` 的 `/2` 只对
+  causal 生效。**8 个 full shape 一致选到 k=3**（S4096 选 k=5）。
+  - **性能（同 binary A/B，iters=60）**：main 最高 **1.59×**（S2048H16 1.136→0.716ms、
+    S1024H16 0.301→0.206、S1024H8 0.167→0.109、S512H16 0.093→0.067ms），S4096 1.004×
+    （仍受 L2 `red` 墙）。**ncu（S1024H16 full）**：Duration **299→205µs**、L2 总扇区
+    **29.24M→16.85M（−42%）**、`op_red` **25.17M→13.76M（−45%）**、`op_read` −26%、
+    **L2 利用率 84.6%→68.3%**（L2 `red` 从饱和降到有余）。
+  - **数值/回归**：只改 atomic 加法次序 ⇒ S1024H16 full relL2 新旧**完全相同 8.111/8.235/6.709%**；
+    **causal 路径逐档不变**（S1024H32/S4096H16 仍 k=2、main 0.221/1.360ms、max_abs
+    2.635/2.644/3.216e-1）；`--check docs/04` OK（198 行）。**样本用定向 A/B 核验，未重跑全量
+    `--ci`（留作下一轮验收）。** 见 `docs/03` §118、`docs/08` §5.104；原始输出
+    `src/fp8/fa_bwd_fp8_o96_{ab_full,causal_reg,ksweep,ncu_full_s1024}.out.txt`。
 
 ## 灵感 / backlog
 

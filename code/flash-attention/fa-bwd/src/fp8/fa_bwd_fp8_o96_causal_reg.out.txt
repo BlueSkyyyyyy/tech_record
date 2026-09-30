@@ -1,0 +1,5 @@
+=== O96 causal 回归（O96 只动 full 分支；causal 应保持 ksplit=2 且数值逐位/同档）===
+b1_s1024_h32_d128_causal_fp8 ksplit=2     pre=0.0304 main=0.2209             maxabs=2.399e-01/4.177e-01/3.535e-01/4.639e-01/
+b1_s4096_h16_d128_causal_fp8 ksplit=2     pre=0.1222 main=1.3602             maxabs=2.635e-01/2.644e-01/3.216e-01/4.525e-01/
+b1_s1024_h64_d128_kv4_causal_fp8 ksplit=2     pre=0.0432 main=0.3964             maxabs=2.761e-01/8.427e-01/1.233e+00/5.376e-01/
+b1_s1024_h64_d128_kv1_causal_fp8 ksplit=2     pre=0.0430 main=0.4303             maxabs=4.101e-01/1.572e+00/2.126e+00/5.475e-01/

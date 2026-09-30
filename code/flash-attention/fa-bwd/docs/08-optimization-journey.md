@@ -2088,3 +2088,26 @@ O92 把 `fp8 专项冲刺 F6-①`（降 L2 搬运）的 ksplit 路径判为关�
   `--ci --dtype fp8 --hopper` gate worst **7.629e-6 OK**、`--check docs/04` OK。**默认一行未改**，
   `--ksm` opt-in。⇒ O93 的均匀 `ksplit=2` 是本卡默认最优点。见 `docs/03` §117；
   原始输出 `src/fp8/fa_bwd_fp8_o95_*.out.txt`。
+
+### 5.104 第 190 轮（O96）：full（非 causal）D=128 的 ksplit/regdq 重标定 —— **正结果（默认）**
+
+**思路转向**：causal 旗舰调到 L2 `red` 平台期（O83/O91/O92）后，本轮不再攻 causal，而是审计
+**两条按 causal 标定、却被无条件套用到 full 的启发式**——O29 的 ksplit target 与 O7 的
+`use_regdq` 阈值。**full 每块工作量相同**，O29 的「细切分摊平三角尾波」在 full 下不成立，
+只剩 Q/dO 重读 + dQ 跨 part 原子；O7 阈值里的 `/2`（causal 平均只扫半个三角）在 full 下会让
+`ksplit` 稍大时**误关寄存器 dQ 累加**，使 dQ 退化成逐 tile 跨 CTA `atomicAdd`。
+
+- **改动（纯 host，device 一行未改，单/两文件同源）**：① full D=128 的 ksplit 改为在 k∈[1,8] 里
+  取「尾波空泡 `ceil(base*k/396)*396 − base*k`」最小者（`396` = 3 CTA/SM × 132 SM），8 个 full
+  shape 一致选到 **k=3**（S4096 选 k=5）；② `use_regdq` 的 `/2` 只对 causal 生效。
+- **性能（8 个 full D=128 shape，同 binary A/B，iters=60）**：main 最高 **1.59×**
+  （S2048H16 1.136→0.716ms；S1024H16 0.301→0.206ms；S1024H8 0.167→0.109ms；S512H16
+  0.093→0.067ms），大 S S4096 1.004×（仍受 L2 `red` 墙）。
+- **ncu（S1024H16 full）**：Duration **299→205µs**、L2 总扇区 **29.24M→16.85M（−42%）**、
+  `op_red` **25.17M→13.76M（−45%）**、`op_read` **−26%**、L2 利用率 **84.6%→68.3%** ⇒
+  **L2 `red` 从饱和（84.6%）降到有余**，是教科书式的「降 L2 搬运量」正结果。
+- **数值/回归**：只改 atomic 加法次序 ⇒ S1024H16 full `ours vs fp32 ref` relL2 新旧**完全相同**
+  （8.111/8.235/6.709%）；**causal 路径逐档不变**（S1024H32/S4096H16 仍 k=2、main 0.221/1.360ms、
+  max_abs 2.635/2.644/3.216e-1）。`--check docs/04` OK。
+- **教训**：凡「按 causal 三角标定」的启发式（ksplit、regdq、未来的 partial/split）都要逐条
+  复核 full/变长。见 `docs/03` §118；原始输出 `src/fp8/fa_bwd_fp8_o96_*.out.txt`。

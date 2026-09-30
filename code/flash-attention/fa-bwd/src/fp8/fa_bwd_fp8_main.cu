@@ -2090,6 +2090,27 @@ int main(int argc, char** argv) {
     while (kp * 2 <= k) kp *= 2;  // 向下取 2 的幂，让 grid 对齐到整数个波附近
     ksplit = (int)kp;
   }
+  // O96（第 190 轮）：**full（非 causal）D=128 的 ksplit 重标定**。O29 的 target（2048/8192）
+  //   是按 **causal 三角偏斜**标定的——causal 下 m 块工作量 ∝(m+1)，要靠极细切分把尾波摊平；
+  //   而 **full 每块工作量相同**，尾波只由「grid 是否落在整数个并发波上」决定，过细切分只剩下
+  //   Q/dO 重读 + dQ 跨 part 原子（纯浪费）。实测（S512/1024/2048 H8/16/32，见 docs/03 §118）：
+  //   自动档 k=8/16 比最优慢 **1.05–1.59×**；最优 k 一致地让 `grid=base*k` 最接近整数个并发波
+  //   （本卡 D=128 fp8 main = 3 CTA/SM × 132 SM = **396 槽**）。故 full D=128 自动档改为：在
+  //   k∈[1,8] 里取「尾波空泡 `ceil(g/SLOTS)*SLOTS - g`」最小者，并列取更小 k（Q/dO 重读更少）。
+  //   显式 `--ksplit=K` 时不覆盖。
+  if (ksplit_auto && !causal && D == 128) {
+    const long SLOTS = 396L;  // 3 CTA/SM × 132 SM
+    long best_k = 1, best_waste = -1;
+    for (long k = 1; k <= 8; ++k) {
+      const long g = base_grid * k;
+      const long waste = ((g + SLOTS - 1) / SLOTS) * SLOTS - g;
+      if (best_waste < 0 || waste < best_waste) {
+        best_waste = waste;
+        best_k = k;
+      }
+    }
+    ksplit = (int)best_k;
+  }
   // O93：hswap（跨 head 全局 LPT）启用时把自动 ksplit 收到 2——全局 LPT 使低 ksplit 的负载
   //   均衡足够好（S4096 main 1.443→1.373ms，Q/dO 重读 8×→2×；S1024H32/GQA 同向 1.10–1.12×）。
   //   仅默认 Hopper kvtma 构建生效；`--ksplit=K` 显式给出时不覆盖。（`hswap_elig` 定义见上。）
@@ -2099,7 +2120,10 @@ int main(int argc, char** argv) {
   // O7：只有 HD=128（dQ 一次铺满 N）且「平均每 CTA 的 nt tile 足够多」时才启用寄存器累加。
   // 因果下每 mblk 的 nt tile 数 ≈ (m0+BM)/BN，三角求和 /(mblk·ksplit) 后平均每 CTA
   // ≈ (S/BN)/2/ksplit；阈值取 4（实测 S=1024H32 平均=2、启用反而持平/略慢，S=4096=16 明显收益）。
-  bool use_regdq = (D == 128) && ((long)(S / 32) / 2 / ksplit >= 4);
+  // O96：**full 下无三角折半**，平均每 CTA 的 nt tile 数 = (S/BN)/ksplit，故阈值判断不得再 `/2`
+  //   （否则 full 在 k 偏大时被误关 regdq ⇒ dQ 逐 tile 跨 CTA `red`，S1024H16 从 0.22ms 退化到
+  //   0.30ms）。causal 分支逐字不变。
+  bool use_regdq = (D == 128) && ((long)(S / 32) / (causal ? 2 : 1) / ksplit >= 4);
   // O22：`--regdq=0/1` 强制开关（仅同 session A/B 用）；-1 = 用上面的启发式。
   if (regdq_opt >= 0) use_regdq = (D == 128) && (regdq_opt != 0);
   dim3 pg(S, H, B);

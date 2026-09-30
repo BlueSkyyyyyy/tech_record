@@ -10317,3 +10317,97 @@ S4096 H16：槽位 128→72（−44%）只省 `56·64·128·2·16 ≈ 14.7MB ≈
 - **判决：中性/负结果**。`--ksm` 保留 opt-in（默认 `-1` 关，默认路径一行未改），ROADMAP
   「下一步候选 ③」的「ksplit 随 m 变化」子项到此关闭；O93 均匀 `ksplit=2` 仍是本卡默认最优点。
   原始输出 `src/fp8/fa_bwd_fp8_o95_{ab_s4096,ab_shapes,accuracy,ncu_s4096}.out.txt`。
+
+## 118. O96（第 190 轮）：**full（非 causal）D=128 主 kernel 的 ksplit/regdq 重标定** —— **正结果，默认**
+
+> 前 189 轮把 fp8 causal 主 kernel 调到本卡 L2 `red` 平台期后，「fp8 性能」的剩余空间一度只剩
+> 「换卡」。本轮换一个角度：**检查与 causal 强绑定、但被无条件套用到 full 的两个启发式**
+> （O29 的 ksplit target、O7 的 `use_regdq` 阈值）。结论先行：**full D=128 的 main 默认被这两条
+> causal 标定的启发式系统性拖慢 1.3–1.6×**；改成 full 专属标定后，**L2 `red` 与总扇区各降 ~45%**，
+> main 最高快 **1.59×**，且**数值与 causal 路径一字未动**。这是「降 L2 搬运量」在 full 分支上
+> 一条被长期漏掉的、纯 host 的杠杆。
+
+### 118.1 动机与机制（为什么 causal 的经验在 full 上反过来）
+
+- **O29 的 ksplit target**（`D==128: S>=2048→8192，否则 max(2048,4*base)`）是按 **causal 的三角
+  偏斜**标定的：causal 下第 m 个 m 块要扫 `(m+1)` 个 K 块，工作量从头到尾线性增长，尾波里全是
+  「最贵的几块」，必须用**极细切分**（k=8/16）把它们摊到更多 CTA 上才能填满机器。
+- **但 full（非 causal）每个 m 块工作量完全相同**，尾波只由「`grid=base*k` 是否落在整数个并发波
+  上」决定，与块大小无关；此时**过细切分不再摊平任何东西，只剩纯浪费**：每个 CTA 要把
+  Q/dO 重读一遍（L2 `read` 放大 k 倍）、dQ 还要跨 part 原子（L2 `red` 放大）。
+- **O7 的 `use_regdq` 阈值**（`(S/32)/2/ksplit >= 4`）同样按 causal 标定：那个 `/2` 是「causal
+  平均只扫一半三角」。full 下平均每 CTA 的 nt tile 数 = `(S/32)/ksplit`（**无折半**），阈值判断
+  里的 `/2` 会让 full 在 `ksplit` 稍大时**误关寄存器 dQ 累加**（`kRegDq`），于是 dQ 退化成
+  「每个 nt tile 都对本 CTA 的 dQ tile 做一次跨 CTA `atomicAdd`」——同一 (r,c) 被 RMW
+  `ntiles` 次，`red` 直接翻数倍。
+
+### 118.2 实测账（S=1024 H16 full，ncu 主 kernel `fa_bwd_fp8_mma_kvtma_kernel`）
+
+| 指标 | O29 auto（k=8, regdq=**0**） | O96（k=3, regdq=**1**） | 变化 |
+|---|---|---|---|
+| Duration | 299.33 µs | **205.22 µs** | **−31%（1.46×）** |
+| L2 总扇区 | 29,239,266 | **16,850,496** | **−42%** |
+| L2 `op_red` | 25,165,824 | **13,762,560** | **−45%** |
+| L2 `op_read` | 3,987,551 | **2,965,727** | −26% |
+| L2 `op_write` | 3,554 | 39,780 | — |
+| L2 利用率 | 84.64% | **68.34%** | 带宽从满降到有余 |
+| sm throughput | 31.12% | 39.88% | — |
+| DRAM 字节 | 39.09 MB | 39.32 MB | 中性 |
+
+⇒ full 的 main 原本是 **L2 `red` 饱和（84.6%）**，一半的 `red` 来自「被误关 regdq 后 dQ 的
+逐 tile 原子」；O96 把 `red` 砍半、L2 总量降 42%，Duration 直接 1.46×。**这不是换算法，而是
+纠正了一条把 causal 经验错套到 full 上的启发式。**
+
+### 118.3 实现（纯 host；单/两文件 device 一行未改）
+
+- **device（`fa_bwd_fp8_kernels.cuh`）**：**未改**（`fp8_mma_body` 早已支持任意 `ksplit`/`REGDQ`）。
+- **host（`fa_bwd_fp8_main.cu` + `fa_bwd_fp8_mma_onefile.cu`，两文件版与单文件版同源）**：
+  1. **full D=128 的 ksplit 重标定**（`ksplit_auto && !causal && D==128`）：在 `k∈[1,8]` 里取
+     「尾波空泡 `ceil(base*k/SLOTS)*SLOTS − base*k`」最小者（并列取更小 k），`SLOTS=396`
+     = 本卡 D=128 fp8 main 的**3 CTA/SM × 132 SM**。显式 `--ksplit=K` 时**不覆盖**（保留 A/B）。
+     实测该规则在 8 个 full shape 上**一致选到 k=3**（S4096H16 选 k=5，也确为最优）。
+  2. **`use_regdq` 的 causal 折半只对 causal 生效**：
+     `(D==128) && ((S/32) / (causal ? 2 : 1) / ksplit >= 4)`。causal 分支**逐字不变**。
+- **单/两文件**：device 逐字同源；harness 一致性 gate 对 full case 检出
+  `ours_hp vs ours_sf_hp` **逐值相同**。
+
+### 118.4 性能（8 个 full D=128 shape，同 binary A/B，event iters=60）
+
+| shape（B,S,H,D）full | O29 auto（k,regdq,main） | O96（k,regdq,main） | main 加速 | O96 main TFLOPS |
+|---|---|---|---|---|
+| (1,512,16,128) | 16,0, 0.0928ms | 3,1, **0.0665ms** | **1.40×** | 23.31 |
+| (1,512,32,128) | 8,0, 0.1581ms | 3,1, **0.1189ms** | **1.33×** | 26.03 |
+| (1,1024,8,128) | 16,0, 0.1670ms | 3,1, **0.1091ms** | **1.53×** | 29.91 |
+| (1,1024,16,128) | 8,0, 0.3010ms | 3,1, **0.2064ms** | **1.46×** | 32.88 |
+| (1,1024,32,128) | 4,1, 0.4172ms | 3,1, **0.3943ms** | 1.06× | 34.99 |
+| (1,2048,8,128) | 16,0, 0.5968ms | 3,1, **0.3813ms** | **1.57×** | 37.88 |
+| (1,2048,16,128) | 16,0, 1.1361ms | 3,1, **0.7159ms** | **1.59×** | 40.56 |
+| (1,4096,16,128) | 8,1, 2.6713ms | 5,1, **2.6601ms** | 1.004× | 45.46 |
+
+- **大 S（≥2048）仍受同一 L2 `red` 墙**（O93 结论不变），故 S4096 只 1.004×；收益集中在
+  **base_grid 小 / 被过切或误关 regdq 的中小 shape**（1.3–1.6×）。
+- k 扫描原始输出（`--regdq=1` 隔离 k 效应）见 `src/fp8/fa_bwd_fp8_o96_ksweep.out.txt`：8 个
+  shape 的最优 k 一致落在 3（S4096 落在 3–8 近平）。
+
+### 118.5 精度护栏与回归
+
+- **数值不变量**：O96 只改「哪些 CTA 算哪个 (m,part)」与「dQ 是否寄存器累加」——两者都只改
+  跨 CTA `atomicAdd` 的**加法次序/次数**，不改任何 fp8 量化口径。实测 S1024H16 full 新旧配置
+  `ours vs fp32 ref` relL2 **完全相同 8.111/8.235/6.709%**（`max_abs` 5.521e-2/5.310e-2/4.025e-2，
+  与旧 5.518e-2 差 ~0.05% = fp32 求和次序）。
+- **causal 路径无回归**：`hswap_elig` 仍要求 `causal`，O96 的 full 分支不进 causal；实测
+  S1024H32 causal 仍 **ksplit=2 / main 0.2209ms**、S4096H16 causal 仍 **ksplit=2 / main 1.3602ms**、
+  `max_abs` 2.635/2.644/3.216e-1（与 O93 逐档一致），GQA kv4 / MQA kv1 亦 k=2。
+- `--check docs/04` **OK（198 行）**；O96 的受影响 full case 一致性与数值用定向 A/B 核验
+  （见原始输出），未重跑全量 73 case `--ci`（全量扫留作下一轮验收）。
+
+### 118.6 结论 / 下一步
+
+- **判决：正结果、默认开启。** full D=128 的 main 恢复「不做无谓切分」的正确工作点，
+  `red`/L2 总扇区各 −45%/−42%，main 最高 **1.59×**。**注意口径**：这改善的是 **full 分支**，
+  causal 旗舰（S4096）的 L2 `red` 墙仍是换卡前的天花板（O83/O91/O92 结论不变）。
+- **新增的通用教训**：凡「按 causal 三角标定」的启发式（ksplit target、regdq 阈值、以及
+  未来的 partial/split heuristic）都要逐条问一句「full/变长下还成立吗」，本轮已抓到两条。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o96_ab_full.out.txt`（A/B 主表）、
+  `..._o96_causal_reg.out.txt`（causal 回归）、`..._o96_ksweep.out.txt`（k 扫描）、
+  `..._o96_ncu_full_s1024.out.txt`（ncu）。见 `docs/08` §5.104。
