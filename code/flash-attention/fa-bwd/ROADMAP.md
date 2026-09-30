@@ -3262,7 +3262,24 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百九十六轮）**：**O102——`--det` 确定性路径的 Hopper split-K + full/causal 标定
+> **最新（第一百九十七轮）**：**O103——head_dim=256 的 LSE 上 4D-TMA——正结果，默认**。
+> 落实 O102「下一步候选 ③」的覆盖型 backlog（不撞 smem 墙的一条）：D=256 的 LSE 一直走
+> mma+`cp.async`，而 LSE 的 TMA kernel 早在 O74 就泛化为 `NCH=HD/128`（D=512 已用）、
+> `make_lse_map_fp8` 也早被 D=256 主 kernel 用过 ⇒ 缺口纯在 host。**纯 host、device 一行未改、
+> 单/两文件同源**：`launch_lse_bal_tma_split` 加 `bool FULL`；D==256 建 LSE 描述符 +
+> `cudaFuncSetAttribute<256,1>`；`lse_tma` 自动档纳入 D=256；D==256 `run_preprocess` 加 TMA
+> 优先路径（causal 镜像配对 + split / full FULL + split），`--lsetma=0` 同 binary A/B。
+> **性能**：preprocess **1.74–2.71×**、total **~5%**（S1024H8 causal 0.2792→0.2649ms 1.054×、
+> S4096H8 causal 2.7648→2.6373 1.048×、S1024H8 full 1.047×、S4096H16 full 1.048×）；ncu LSE
+> Duration **211.6→79.6µs（2.66×）**、L1TEX 载入扇区 **−10×**。精度 relL2 护栏内（与 O84 统计
+> 一致），`--ci --dtype fp8` worst **7.629e-06 OK**、`--check docs/04` OK。fp8 4D-TMA LSE 至此
+> 覆盖 D=128/256/512 × causal/full（定长）。见 `docs/03` §125、`docs/08` §5.111。
+> **下一步候选**：① **换卡**——causal 旗舰 D=128（及 D=256）的 L2 `red` 主体墙仍是唯一真杠杆，
+> 本卡无软件解（F3b/F4b/F6/F7/O90/O91/O92/O95 全收口，见「阻塞」）；② 确定性路径减 partial
+> 字节（fp8 partial / 只存 causal 非零块）或提 reduce 效率（§68 候选 ②，非默认）；③ 余下覆盖型
+> backlog（`D=256` K/V-TMA 受 116KB/2-CTA smem 墙、MLA 降 smem）均受同一 smem 墙。
+>
+> **（第一百九十六轮）**：**O102——`--det` 确定性路径的 Hopper split-K + full/causal 标定
 > ——正结果（非默认路径）**。落实 O101「下一步候选 ②」= `partial/split` 的 full 标定里唯一未复核的
 > **DET partial/split**。mma 路径的 `--det` 早有 `--detk>1`（P3-4f，causal k=4 触底），但 **Hopper
 > `kvtma` 快路**的 `--det`（P3-4g）**把 ksplit 写死为 1**，而 F1 后 fp8 生产默认构建就是 Hopper ⇒
@@ -8196,8 +8213,40 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     Compute 12.97% / 3.06 TB/s ⇒ 墙仍是**二次归约的纯 DRAM 带宽**，与 split-K 无关。
   - **判决：正结果（非默认路径）。** **`partial/split` 的 full 标定至此全部收口**（LSE split = O101；
     DET partial/split = 本轮）。见 `docs/03` §124、`docs/08` §5.110；原始输出
-    `src/fp8/fa_bwd_fp8_p196_{det_hopper_ksweep_s4096,det_hopper_full_1file,default_regression,
-    ncu_reduce_s4096}.out.txt`。
+     `src/fp8/fa_bwd_fp8_p196_{det_hopper_ksweep_s4096,det_hopper_full_1file,default_regression,
+     ncu_reduce_s4096}.out.txt`。
+
+- 2026-10-01（第一百九十七轮）：**O103——head_dim=256 的 LSE 上 4D-TMA——正结果，默认**。
+  落实 O102「下一步候选 ③」的覆盖型 backlog 里**不撞 smem 墙**的一条：D=256 的 LSE 一直走
+  mma + `cp.async`（O76/O101 注释「不做 4D-TMA（只服务 128/512）」），而 LSE 的 TMA kernel
+  早在 **O74 就已泛化为 `NCH=HD/128` 个 box**（D=512 已用）、`make_lse_map_fp8` 也早被 D=256 的
+  主 kernel Q/dO 用过 ⇒ **缺口纯在 host 未接 D=256**。
+  - **改动（纯 host、device 一行未改、单/两文件同源）**：① `launch_lse_bal_tma_split` 加
+    `bool FULL=false` 模板参（full 也能 TMA+split；FULL=false 与历史逐字相同）；② D==256 建
+    LSE 的 Q/K 描述符 + `cudaFuncSetAttribute(lse_mma_kernel_bal_tma<256,1>, lse_smem_bytes_tma1)`；
+    ③ `lse_tma` 自动档 `(D==128)?1:…` 改为 `(D==128||D==256)?1:…`；④ `run_preprocess` 的 D==256
+    分支加 TMA 优先路径（causal `launch_lse_bal_tma_split<256,1>`/`<256,1>` + `lg_bal`；full
+    `launch_lse_bal_tma_split<256,1,true>`/`<256,1,true>` + `lg`），`--lsetma=0` 退回 mma+cp.async
+    做同 binary A/B。`lse_smem_bytes_tma1`(256)=**51008B ⇒ 4 CTA/SM**（不撞 smem 墙）。
+  - **性能（同 binary A/B，iters=40）**：preprocess **1.74–2.71×**、端到端 total **~5%**——
+    S1024H8 causal 0.2792→**0.2649ms（1.054×）**、S4096H8 causal 2.7648→**2.6373（1.048×）**、
+    S1024H8 full 0.2785→**0.2659（1.047×）**、S4096H16 full 5.4279→**5.1792（1.048×）**；
+    main 段两档一致（D=256 主 kernel 不受影响）。单文件与两文件逐值一致。
+  - **ncu（D=256 causal S4096 LSE）**：TMA `lse_mma_kernel_bal_tma<256,1,0>` **79.6µs / L1TEX
+    全局载入 1.196M 扇区 / L2 10.49M / mem 45.1%** vs cp.async `lse_mma_kernel_bal<256,1,0,128,64>`
+    **211.6µs / L1TEX 11.96M / L2 15.99M / mem 30.0%** ⇒ **载入扇区 −10×、Duration 2.66×**，
+    从「载入指令 bound」转为计算/搬运均衡（同 D=128 O32 / D=512 O74）。
+  - **精度/回归（护栏）**：D=256 fp8 无 FA/TE 外部列（TE fp8 对 D=256 报 invalid、FA3 无 fp8），
+    对 fp32 ref——15 个定长 shape relL2 dq/dk/dv **8.14–8.33 / 8.29–8.48 / 6.39–6.76%**（护栏内，
+    与 O84/O99 统计一致）；`max_abs` 与 mma 版同档（差异 = wgmma vs mma 的 fp32 累加次序）；
+    `--ci --dtype fp8` 单/两文件 gate **worst 7.629e-06 OK**、`--check docs/04` **OK（214 行）**；
+    D=128 / D=512 / varlen 逐字不变。
+  - **判决：正结果、默认开启**。fp8 的 4D-TMA LSE 至此覆盖 **D=128 / 256 / 512 × causal/full**
+    （定长；varlen D=128 full/MLA 已在 O72/O73/F14 覆盖，无 D=256 varlen dump）。仍属非 main 优化：
+    主 kernel 是 L2 `red` bound（D=256 ncu：S1024H8 causal main `op_red` 13.37M vs `op_read` 2.65M），
+    **主体墙与 causal 旗舰 D=128 同源、本卡无软件解**（见「阻塞」）。见 `docs/03` §125、
+    `docs/08` §5.111；原始输出 `src/fp8/fa_bwd_fp8_o103_d256_ab.out.txt`、
+    `..._o103_ncu_lse_d256_s4096.out.txt`。
 
 ## 灵感 / backlog
 

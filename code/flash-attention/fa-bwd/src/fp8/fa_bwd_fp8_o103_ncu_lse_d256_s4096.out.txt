@@ -1,0 +1,20 @@
+O103 ncu: D=256 causal S4096 LSE — TMA vs cp.async mma (kernel lse_mma_kernel_bal*)
+date: 2026-10-01T05:28:04+08:00
+===== lsetma=1 =====
+==PROF== Profiling "lse_mma_kernel_bal_tma": 0%....50%....100% - 10 passes
+  void lse_mma_kernel_bal_tma<256, 1, 0>(CUtensorMap_st, CUtensorMap_st, const float *, const float *, float *, float *, int, int, int, float, int, const int *) (32, 8, 4)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed           %        45.13
+    gpu__time_duration.sum                                                    us        79.55
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                        sector      1196032
+    lts__t_sectors.sum                                                    sector     10494066
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                           %        63.29
+    sm__warps_active.avg.pct_of_peak_sustained_active                          %        22.12
+===== lsetma=0 =====
+==PROF== Profiling "lse_mma_kernel_bal": 0%....50%....100% - 10 passes
+  void lse_mma_kernel_bal<256, 1, 0, 128, 64>(const unsigned char *, const float *, const unsigned char *, const float *, float *, int, int, int, float, const int *, float *, int) (32, 8, 4)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed           %        30.01
+    gpu__time_duration.sum                                                    us       211.58
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                        sector     11960320
+    lts__t_sectors.sum                                                    sector     15985018
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                           %        63.16
+    sm__warps_active.avg.pct_of_peak_sustained_active                          %        22.60

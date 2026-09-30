@@ -2275,3 +2275,28 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 见 `docs/03` §124；原始输出 `src/fp8/fa_bwd_fp8_p196_det_hopper_ksweep_s4096.out.txt`、
 `..._p196_det_hopper_full_1file.out.txt`、`..._p196_default_regression.out.txt`、
 `..._p196_ncu_reduce_s4096.out.txt`。
+
+### 5.111 第 197 轮（O103）：head_dim=256 的 LSE 上 4D-TMA —— **正结果（默认）**
+
+- **动机**：O96–O102 收口「错套启发式」后，剩下的是覆盖型 backlog。取其中不撞 smem 墙的一条：
+  **D=256 的 LSE 仍走 mma + `cp.async`**（O76/O101 注释「不做 4D-TMA（只服务 128/512）」）。
+  但 LSE 的 TMA kernel 早在 O74 就泛化为 `NCH=HD/128`（D=512 已用），`make_lse_map_fp8` 也早已
+  服务 D=256 的主 kernel Q/dO；**缺口纯在 host 未接 D=256**。
+- **改动（纯 host，device 一行未改，单/两文件同源）**：`launch_lse_bal_tma_split` 加 `bool FULL`
+  模板参；D==256 建 LSE 描述符 + `cudaFuncSetAttribute`；`lse_tma` 自动档纳入 D=256；D==256
+  的 `run_preprocess` 加 TMA 优先路径（causal 镜像配对 + split / full FULL + split），
+  `--lsetma=0` 退回 mma+cp.async 做同 binary A/B。`lse_smem_bytes_tma1`(256)=51008B ⇒ 4 CTA/SM。
+- **性能（同 binary A/B，event）**：preprocess **1.74–2.71×**、端到端 total **~5%**——
+  S1024H8 causal 0.2792→**0.2649ms（1.054×）**、S4096H8 causal 2.7648→**2.6373（1.048×）**、
+  S1024H8 full 0.2785→**0.2659（1.047×）**、S4096H16 full 5.4279→**5.1792（1.048×）**；main 不变。
+- **ncu（D=256 causal S4096 LSE）**：TMA `lse_mma_kernel_bal_tma<256,1,0>` **79.6µs / L1TEX 1.196M
+  扇区 / L2 10.49M / mem 45.1%** vs cp.async `lse_mma_kernel_bal<256,…>` **211.6µs / L1TEX 11.96M /
+  L2 15.99M / mem 30.0%** ⇒ 载入扇区 **−10×**、Duration **2.66×**，从「载入指令 bound」转均衡。
+- **精度/回归**：15 个 D=256 定长 shape `ours vs fp32 ref` relL2 **8.14–8.33 / 8.29–8.48 / 6.39–6.76%**
+  （护栏内，与 O84/O99 统计一致）；`--ci --dtype fp8` 单/两文件 gate worst **7.629e-06 OK**、
+  `--check docs/04` OK。D=128/D=512/varlen 逐字不变。
+- **判决**：正结果、默认。fp8 4D-TMA LSE 覆盖 D=128/256/512 × causal/full。主 kernel 仍是
+  L2 `red` bound（本卡无软件解，见「阻塞」）。
+
+见 `docs/03` §125；原始输出 `src/fp8/fa_bwd_fp8_o103_d256_ab.out.txt`、
+`..._o103_ncu_lse_d256_s4096.out.txt`。

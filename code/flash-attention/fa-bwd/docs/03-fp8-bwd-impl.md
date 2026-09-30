@@ -10973,3 +10973,81 @@ Compute 12.97% / Achieved Occupancy 71.95% / **3.06 TB/s** —— 与 §56/§57/
   `src/fp8/fa_bwd_fp8_p196_det_hopper_full_1file.out.txt`、
   `src/fp8/fa_bwd_fp8_p196_default_regression.out.txt`、
   `src/fp8/fa_bwd_fp8_p196_ncu_reduce_s4096.out.txt`。见 `docs/08` §5.110。
+
+## 125. O103（第 197 轮）：**head_dim=256 的 LSE 上 4D-TMA** —— **正结果，默认**
+
+### 125.1 动机（落实 O102「下一步候选 ③」的覆盖型 backlog）
+
+O96–O102 把 fp8 的 ksplit / LSE split / DET partial 这类「按 causal 标定、被错套到别的 regime」的
+启发式逐条收口后，`下一步候选` 收敛到「换卡 / 覆盖型 backlog」。本轮取覆盖型 backlog 里**不撞 smem
+墙、且能直接吃 4D-TMA 红利**的一条：**`head_dim=256` 的 LSE 仍走 mma + `cp.async`**——
+O76/O101 给 D=256 的 LSE 复用 `lse_mma_kernel_bal<256,…>`（镜像配对 causal / 均衡 FULL + K 维
+split），注释里明确写着「**不做 4D-TMA（只服务 128/512）**」。
+
+但 LSE 的 4D-TMA kernel（`lse_mma_kernel_bal_tma`）**早在 O74 就已泛化为 `NCH=HD/128` 个 box**
+（D=512 = NCH=4，D=128 = NCH=1 逐位不变），`wgmma_qkt64_fp8_chunked` 对 NCH=2 天然可用；host 建
+D=256 的 Q/K TMA 描述符的同一函数 `make_lse_map_fp8` 也早在 O85（主 kernel Q/dO 的 chunk-major
+TMA）就被 D=256 用过。**此前的缺口纯粹在 host 未把 D=256 接到 TMA 分支**。这是一条「基建已具备、
+只差接线」的低风险覆盖项，且 LSE 是 D=256 端到端里唯一还没吃 TMA 的非 main 大头。
+
+### 125.2 改动（**纯 host，device 一行未改，单/两文件同源**）
+
+- `launch_lse_bal_tma_split` 模板加 `bool FULL = false`（`lse_mma_kernel_bal_tma<HD,PIPE,FULL>`），
+  使 full 的 D=256 也能走「TMA + K 维 split」；FULL=false（causal 镜像配对）时**与历史逐字相同**
+  （D=128/D=512 的现有调用不带该参数，走默认 false）。
+- host：① D==256 时 `cudaFuncSetAttribute(lse_mma_kernel_bal_tma<256,1>, …,
+  Fp8Cfg<256,64,32>::lse_smem_bytes_tma1)`；② LSE 描述符的构建条件 `D==128 || D==512` 扩到
+  `D==128 || D==256 || D==512`；③ `lse_tma` 自动档由 `(D==128)?1:(D==512&&causal)?1:0` 改为
+  **`(D==128||D==256)?1:(D==512&&causal)?1:0`**；④ `run_preprocess` 的 D==256 分支加 TMA 优先路径
+  （causal 走 `launch_lse_bal_tma_split<256,1>`/`launch_lse_bal_tma<256,1>` + `lg_bal`；full 走
+  `launch_lse_bal_tma_split<256,1,true>`/`launch_lse_bal_tma<256,1,true>` + `lg`），`--lsetma=0`
+  退回 O76/O101 的 mma+`cp.async` 版做**同 binary A/B**。单文件 `fa_bwd_fp8_mma_onefile.cu` 同步。
+- smem：`lse_smem_bytes_tma1`（D=256，LBM=LBN=64）= `3*(64/8)*2*1024 + (64+128)*4 + 1024 + 64`
+  = **51008 B** ⇒ 4 CTA/SM（上限 58112B），不撞 smem 墙。
+
+### 125.3 性能（同 binary A/B，`--lsetma=0` vs `=1`，event）
+
+| shape（B1, fp8） | preprocess (ms) | total (ms) | preprocess | total |
+|---|---|---|---|---|
+| S1024 H8 causal | 0.0279 → **0.0157** | 0.2792 → **0.2649** | **1.78×** | **1.054×** |
+| S4096 H8 causal | 0.2091 → **0.0793** | 2.7648 → **2.6373** | **2.64×** | **1.048×** |
+| S1024 H8 full   | 0.0276 → **0.0159** | 0.2785 → **0.2659** | **1.74×** | **1.047×** |
+| S4096 H16 full  | 0.3925 → **0.1446** | 5.4279 → **5.1792** | **2.71×** | **1.048×** |
+
+main 段两档一致（D=256 主 kernel 不受影响），收益全部来自 LSE。单文件与两文件逐值一致（S1024H8
+causal：total 0.2650 vs 0.2649ms，max_abs 相同）。
+
+### 125.4 ncu（D=256 causal S4096，LSE kernel）
+
+| | kernel | Duration | L1TEX global-ld 扇区 | L2 扇区 | sm throughp. | mem throughp. |
+|---|---|---|---|---|---|---|
+| TMA | `lse_mma_kernel_bal_tma<256,1,0>` | **79.6 µs** | **1.196 M** | 10.49 M | 63.3% | 45.1% |
+| cp.async | `lse_mma_kernel_bal<256,1,0,128,64>` | 211.6 µs | 11.96 M | 15.99 M | 63.2% | 30.0% |
+
+⇒ TMA 把 L1TEX 全局载入扇区**降 10×**、Duration **2.66×**，L2 扇区也降 1.5×（不再有逐元素
+`LDG.U8`）；`sm__throughput` 持平（63%），`mem__throughput` 30%→45%——即从「载入指令 bound」转到
+「计算/搬运更均衡」。这与 D=128（O32）/D=512（O74）LSE 的结论一致。
+
+### 125.5 精度 / 回归（护栏）
+
+- D=256 是 fp8 形状，**FA2/FA3/TE 均无 fp8 外部列**（TE fp8 对 D=256 报 `Invalid combination of
+  data type and sequence`，FA3 不支持 fp8），只能对 fp32 ref。
+- **`ours vs fp32 ref` relL2**（`‖a−b‖/‖b‖`，本轮 TMA 后）：15 个 D=256 定长 shape 的 dq/dk/dv =
+  **8.14–8.33% / 8.29–8.48% / 6.39–6.76%**，**在护栏内**（≤8.5/≤8.6/≤6.8），且与 O84/O99 记录的
+  D=256 值**统计一致**（如 S1024H8 causal 8.332/8.434/6.464% == O84 的 8.332/8.435/6.464%）。
+- `max_abs` 与 mma 版同档（causal S4096 2.076/3.052/3.776e-1 vs 2.078/3.040/3.771e-1；差异是
+  wgmma vs mma 的 fp32 累加次序，量级 e-3，落在 fp8 噪声内）。
+- **单/两文件一致性 gate（`--ci --dtype fp8`，45 case）worst = 7.629e-06 OK**；`--check docs/04`
+  **OK（214 行）**。D=128 / D=512 / varlen / D=256 非 LSE 路径逐字不变。
+
+### 125.6 结论 / 下一步
+
+- **判决：正结果、默认开启**。fp8 的 4D-TMA LSE 至此覆盖 **D=128 / 256 / 512** × causal/full
+  （定长；varlen 的 D=128 full/MLA 亦已在 O72/O73/F14 覆盖，D=256 无 varlen dump）。D=256 端到端
+  **~5%**（LSE 1.7–2.7×），不撞本卡的寄存器/smem 墙。
+- 这仍属「非 main」优化：D=256 主 kernel 也是 **L2 `red` bound**（ncu：S1024H8 causal main
+  `lts op_red` 13.37M vs `op_read` 2.65M），主体墙与 causal 旗舰 D=128 同源，本卡无软件解（见
+  「阻塞」）。**下一步候选**：① **换卡**；② 确定性路径减 partial 字节；③ 余下覆盖型 backlog
+  （`D=256` K/V-TMA 受 116KB/2-CTA smem 墙、MLA 降 smem）。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o103_d256_ab.out.txt`、
+  `src/fp8/fa_bwd_fp8_o103_ncu_lse_d256_s4096.out.txt`。见 `docs/08` §5.111。

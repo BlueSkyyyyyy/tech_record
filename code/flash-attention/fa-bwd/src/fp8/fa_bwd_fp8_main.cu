@@ -571,18 +571,20 @@ static void launch_lse_bal_tma(dim3 lg, const CUtensorMap& qmap, const CUtensorM
 //   `ksplit==1` 时等于原 O32 路径（kernel 内逐位退化，不写 part、不 launch merge）。
 //   好处：小 S / 低 H 时镜像配对后的 grid（=`ceil(nblk/2)*H`）常 < 132 SM，split 直接补满
 //   并发槽、缩短「单 CTA 顺序扫 nblk+1 个 tile」的临界路径；大 S 已铺满一个波时收益趋零。
-template <int HD, int PIPE>
+//   O103（第 197 轮）：模板加 `bool FULL`——full D=256 也走 TMA+split（此前只有 mma/cp.async
+//   版）；FULL=false（causal 镜像配对）时与历史逐字相同。
+template <int HD, int PIPE, bool FULL = false>
 static void launch_lse_bal_tma_split(dim3 lg, const CUtensorMap& qmap, const CUtensorMap& kmap,
                                      const float* qs, const float* ks, float* lse,
                                      float* lse_part, int S, int H, int Hkv, float scale,
                                      int ksplit, cudaStream_t st = nullptr) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = Cfg::lse_smem_bytes_tma1;
-  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<HD, PIPE>,
+  CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<HD, PIPE, FULL>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
   const int B = (int)lg.z;
   dim3 g(lg.x, lg.y, (unsigned)(B * ksplit));
-  lse_mma_kernel_bal_tma<HD, PIPE><<<g, THREADS, kSmem, st>>>(qmap, kmap, qs, ks, lse, lse_part,
+  lse_mma_kernel_bal_tma<HD, PIPE, FULL><<<g, THREADS, kSmem, st>>>(qmap, kmap, qs, ks, lse, lse_part,
                                                           S, H, Hkv, scale, ksplit);
   if (ksplit > 1) {
     const long long nrows = (long long)B * S * H;
@@ -2308,7 +2310,15 @@ int main(int argc, char** argv) {
                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     Fp8Cfg<512, 64, 32>::lse_smem_bytes_tma1));
   }
-  if (lse_tma < 0) lse_tma = (D == 128) ? 1 : (D == 512 && causal ? 1 : 0);
+  // O103（第 197 轮）：head_dim=256 的 LSE 也上 4D-TMA。LSE TMA kernel 在 O74 已泛化为
+  //   `NCH=HD/128` 个 box（HD=256 → NCH=2），此前只是 host 未把它接到 D=256（`不做 4D-TMA
+  //   （只服务 128/512）`）。host 建 D=256 的 Q/K 描述符 + 在此设 `lse_smem_bytes_tma1`。
+  if (D == 256) {
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<256, 1>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                    Fp8Cfg<256, 64, 32>::lse_smem_bytes_tma1));
+  }
+  if (lse_tma < 0) lse_tma = (D == 128 || D == 256) ? 1 : (D == 512 && causal ? 1 : 0);
 #else
   if (lse_tma < 0) lse_tma = 0;
 #endif
@@ -2355,7 +2365,7 @@ int main(int argc, char** argv) {
   CUtensorMap qmap_lse, kmap_lse;
   // 注：O32/O9c A/B 段无论 `--lsetma` 取值都会跑 TMA 版 LSE，故 D==128 时始终建描述符
   //     （否则 `--lsetma=0` 会拿未初始化 map 启动 TMA kernel → illegal instruction）。
-  if (D == 128 || D == 512) {   // O74：MLA（D=512）causal LSE 也需要 Q/K 描述符
+  if (D == 128 || D == 256 || D == 512) {  // O74/O103：MLA（512）causal、D=256 LSE 需 Q/K 描述符
     qmap_lse = make_lse_map_fp8(d_q8, H, S, D, B);
     kmap_lse = make_lse_map_fp8(d_k8, Hkv, S, D, B);
   }
@@ -2437,16 +2447,41 @@ int main(int argc, char** argv) {
           delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
       }
     } else if (D == 256) {
-      // O76（第 171 轮）：head_dim=256 的 LSE。走 O11 的镜像配对 mma 版（causal）/ 均衡
-      //   FULL 版（非 causal），即 D=128 在非 wgmma/TMA 下的同一套几何——`lse_mma_kernel_bal`
-      //   对 HD 是模板参数（D=512 已验证），HD=256 直接复用；不做 4D-TMA（只服务 128/512）。
-      if (causal)
-        launch_lse_bal<256, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, nullptr,
-                               d_lse_part, lse_split_eff);
-      else
-        // O101（第 195 轮）：full D=256 的均衡 LSE 也接上 K 维 split（此前恒 split=1）。
-        launch_lse_bal<256, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, nullptr,
-                                     d_lse_part, lse_split_eff);
+      // O76（第 171 轮）：head_dim=256 的 LSE。`lse_mma_kernel_bal` 对 HD 是模板参数
+      //   （D=512 已验证），HD=256 直接复用其镜像配对（causal）/ 均衡 FULL（非 causal）几何。
+      // O103（第 197 轮）：优先走 4D-TMA（对齐 D=128 O32 / D=512 O74）；`--lsetma=0` 退回
+      //   O76/O101 的 mma/cp.async 版做同 binary A/B。causal 走镜像配对 `lg_bal` + split，
+      //   full 走 `lg`（一个 m 块一个 CTA）+ split（FULL=true）。
+      bool did_tma256 = false;
+#if defined(FA_WGMMA) && defined(FA_TMA)
+      if (lse_tma) {
+        if (causal) {
+          if (lse_split_eff > 1)
+            launch_lse_bal_tma_split<256, 1>(lg_bal, qmap_lse, kmap_lse, d_qs, d_ks, d_lse,
+                                             d_lse_part, S, H, Hkv, scale, lse_split_eff);
+          else
+            launch_lse_bal_tma<256, 1>(lg_bal, qmap_lse, kmap_lse, d_qs, d_ks, d_lse, S, H, Hkv,
+                                       scale);
+        } else {
+          if (lse_split_eff > 1)
+            launch_lse_bal_tma_split<256, 1, true>(lg, qmap_lse, kmap_lse, d_qs, d_ks, d_lse,
+                                                   d_lse_part, S, H, Hkv, scale, lse_split_eff);
+          else
+            launch_lse_bal_tma<256, 1, true>(lg, qmap_lse, kmap_lse, d_qs, d_ks, d_lse, S, H, Hkv,
+                                             scale);
+        }
+        did_tma256 = true;
+      }
+#endif
+      if (!did_tma256) {
+        if (causal)
+          launch_lse_bal<256, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, nullptr,
+                                 d_lse_part, lse_split_eff);
+        else
+          // O101（第 195 轮）：full D=256 的均衡 LSE 也接上 K 维 split（此前恒 split=1）。
+          launch_lse_bal<256, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale,
+                                       nullptr, d_lse_part, lse_split_eff);
+      }
       if (do_delta) {
         if (delta_warp_sel)
           delta_warp_kernel<256><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
