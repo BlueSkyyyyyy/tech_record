@@ -11132,3 +11132,73 @@ O93 此前**只接在 `kvtma` 快路（D=128，需 TMA）**；而 **`head_dim=25
 - **原始输出**：`src/fp8/fa_bwd_fp8_o104_ab.out.txt`（5 shape × {hswap0, hswap} 计时+数值）、
   `src/fp8/fa_bwd_fp8_o104_ncu_s1024h8.out.txt`、`src/fp8/fa_bwd_fp8_o104_fa3_te_baseline.out.txt`、
   `src/fp8/fa_bwd_fp8_o104_ci.out.txt`。见 `docs/08` §5.112。
+
+## 127. 第 199 轮：fp8 D=512（MLA）causal 的 per-head LPT（`mrev`）——正结果，默认
+
+### 127.1 动机（落实 O104「下一步候选 ③」里不撞 smem 墙的一条）
+
+O104 把 **O93 的跨 head 全局 LPT**（`HSWAP`：grid 轴对调，head 走快轴）从 D=128 推广到 D=256
+的**通用 wgmma 主 kernel**，但发现它**只在小 `base_grid`（≤256）为正**——大 `base_grid` 下
+hswap 把相邻 CTA 撒到不同 head，**牺牲 L2 读局部性**盖过全局 LPT 的尾波收益（0.84–0.95×）。
+
+而 **D=512（MLA）causal 一直没有接任何 LPT**：它走 `fa_bwd_fp8_mma_kernel` 的 mma/kvpipe 档，
+host 只建 `d_mrev=nullptr`。MLA 每块工作量大（HD=512）、**1 CTA/SM**、`target_ctas=S/2` 把
+ksplit 切得很细（S1024H2 → k=16，grid=256×2=512 但只有 132 个并发槽 ⇒ ~4 个波），causal 三角
+偏斜下**最贵的 m 块落在最后几个波**，尾波明显。本轮只把 **per-head 反转**（`mblk = nblk-1-mt`，
+**grid 与 head 排布都不动**）接上去——它不改跨 head 的 L2 局部性，只让贵块先跑。
+
+### 127.2 改动（host-only；device 一行未改；单/两文件同源）
+
+- `fa_bwd_fp8_main.cu` / `fa_bwd_fp8_mma_onefile.cu` 的 `mrev_elig` 从
+  `(D==128) || (D==256 && hswap_opt && base≤256)` 扩为 **再加 `D==512`**；`nblk>=16`（S≥1024）
+  门槛沿用 O89（S512 的 nblk=8 实测 mrev 中性、不纳入默认）。建表逻辑不变（全长反转表）。
+- 定长 **D=512 的三个主 kernel launcher**（`launch_bwd_main_kvpipe` / `launch_bwd_main` 的
+  8-warp/4-warp 档）把 `d_mrev` 作为 `mt_m` 透传；`fp8_mma_body` 早已消费 `mt_m`
+  （`mblk = mt_m ? mt_m[mt] : mt`），故 **device 零改动**。`--mrev=0` 回退历史锯齿序。
+- D=256 大 `base_grid` 的对照实验（`mrev` only，无 grid 轴对调）仅 1.003×（噪声内），
+  故**不纳入 D=256 默认**（其小 `base_grid` 档已由 O104 hswap256 覆盖）。
+
+### 127.3 性能（同 binary A/B，iters=300，同 session）
+
+| case | mrev=0 main / total | mrev=1 main / total | 比值 |
+|---|---|---|---|
+| **S1024H2 D=512 causal** | 0.1184 / 0.1505 ms | **0.1106 / 0.1464 ms** | **1.071× / 1.028×** |
+| S512H4 D=512 causal | 0.0710 / 0.0980 | 0.0708 / 0.0972 | 1.003×（nblk=8，门控外，不变） |
+| S512H2 D=512 causal | 0.0498 / 0.0685 | 0.0497 / 0.0679 | 1.002×（门控外，不变） |
+| S4096H8 D=256 causal | 2.4840 / 2.6644 | 2.4836 / 2.6648 | 1.000×（mrev ignored） |
+| S4096H16 D=128 causal | — | 1.3586 / 1.5839 | O93 默认不变 |
+
+反复重测（3×400 iters）main：mrev0 = 0.1182/0.1189/0.1186、mrev1 = 0.1107/0.1104/0.1106 ms，
+**稳定 1.069–1.071×**。这是 O104 之后 **MLA 主 kernel 的第一条调度正收益**。
+
+### 127.4 ncu（D=512 causal S1024H2，main kernel；1 CTA/SM）
+
+| | Duration | L2 `op_read` | L2 `op_red` | L2 `op_write` | L2 总量 | L2 利用率 | warps |
+|---|---|---|---|---|---|---|---|
+| mrev=0 | 130.1–132.7 µs | 1.414 M | 6.685 M | ~3 K | 8.17 M | 51.8–52.8% | 12.48% |
+| mrev=1 | **126.0 µs** | 1.416 M | **6.685 M** | ~3 K | 8.17 M | **54.5%** | 12.48% |
+
+⇒ **L2 扇区一字不变**（`op_read`/`op_red`/`op_write` 逐位相同），收益**纯来自尾波削平**：
+贵块先跑让后期波次更均衡，同样 1 CTA/SM、同样 249 regs 下 **Duration 降 ~3–5%、L2 利用率升
+~2–3 个点**。这与 O93/O104 的「全局 LPT 降 `op_read`」不同——**per-head 反转不改任何访存量，
+只改调度序**。
+
+### 127.5 精度 / 回归（护栏）
+
+- **`ours vs fp32 ref`（S1024H2 causal）**：relL2 dq/dk/dv = **8.163 / 8.564 / 6.507 %**
+  （护栏 ≤8.2+0.3 / ≤8.3+0.3 / ≤6.5+0.3 内）；mrev 前后 **max_abs 逐位相同
+  2.228/3.311/3.611e-1**，`mrev-vs-mrev0` max_abs = **1.19e-7 / 4.77e-7 / 9.54e-7**（纯跨 CTA
+  `atomicAdd` 次序）。
+- **单/两文件一致性 gate（`--dtype fp8 --fixed-only --impls both --hopper --consistency`）**：
+  32 case 双方齐、**worst = 5.722e-06 OK**（`src/fa_bwd_consistency_p33g.out.txt`）。
+- **`--check docs/04` OK（214 行）**；D=128 / D=256 / full / varlen 逐字不变。
+- **外部基线**：fp8 MLA（D=512）反向 FA3 不支持、TE fp8 报 invalid（
+  `harness/fa_bwd_bench.py bench` 的 `fa=NA`/`te=NA`），只有 fp32 ref 可对。
+
+### 127.6 结论 / 下一步
+
+- **判决：正结果、默认开启**。MLA causal 的第一条主 kernel 调度杠杆；**不改 L2 搬运量**，靠
+  per-head LPT 削尾波拿到 1.07× main。主 kernel 的 L2 `op_red`（dK/dV 主体墙）仍与本卡 causal
+  旗舰 D=128 同源，**无软件解**（见「阻塞」）。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o105_ab.out.txt`、
+  `src/fp8/fa_bwd_fp8_o105_ncu_s1024h2_mrev{0,1}.out.txt`；见 `docs/08` §5.113。
