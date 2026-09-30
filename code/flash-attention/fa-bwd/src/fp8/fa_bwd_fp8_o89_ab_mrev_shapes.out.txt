@@ -1,0 +1,36 @@
+# O89 A/B: mrev on/off across shapes (Hopper kvtma, same binary; nblk>=16 gate)
+
+######## b1_s512_h16_d128_causal_fp8
+== --mrev=0
+[timing] quant 0.0133 ms | preprocess 0.0126 ms | main 0.0546 ms | convert 0.0007 ms (cvt_on=0, qfuse=1, dfuse=1)
+== --mrev=1
+O89: mrev requested but ignored (need causal & D==128 & fixed-length)
+[timing] quant 0.0132 ms | preprocess 0.0124 ms | main 0.0546 ms | convert 0.0008 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+######## b1_s1024_h32_d128_causal_fp8
+== --mrev=0
+[timing] quant 0.0569 ms | preprocess 0.0309 ms | main 0.2481 ms | convert 0.0010 ms (cvt_on=0, qfuse=1, dfuse=1)
+== --mrev=1
+O89: mrev on (nblk=16, LPT expensive-first)
+[timing] quant 0.0566 ms | preprocess 0.0304 ms | main 0.2442 ms | convert 0.0021 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+######## b1_s1024_h32_d128_kv4_causal_fp8
+== --mrev=0
+[timing] quant 0.0338 ms | preprocess 0.0305 ms | main 0.2410 ms | convert 0.0010 ms (cvt_on=0, qfuse=1, dfuse=1)
+== --mrev=1
+O89: mrev on (nblk=16, LPT expensive-first)
+[timing] quant 0.0335 ms | preprocess 0.0300 ms | main 0.2362 ms | convert 0.0027 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+######## b1_s1024_h40_d128_kv8_causal_fp8
+== --mrev=0
+[timing] quant 0.0443 ms | preprocess 0.0318 ms | main 0.2982 ms | convert 0.0040 ms (cvt_on=0, qfuse=1, dfuse=1)
+== --mrev=1
+O89: mrev on (nblk=16, LPT expensive-first)
+[timing] quant 0.0444 ms | preprocess 0.0321 ms | main 0.2944 ms | convert 0.0042 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+######## b1_s1024_h64_d128_kv1_causal_fp8
+== --mrev=0
+[timing] quant 0.0577 ms | preprocess 0.0436 ms | main 0.4442 ms | convert 0.0019 ms (cvt_on=0, qfuse=1, dfuse=1)
+== --mrev=1
+O89: mrev on (nblk=16, LPT expensive-first)
+[timing] quant 0.0576 ms | preprocess 0.0434 ms | main 0.4420 ms | convert 0.0018 ms (cvt_on=0, qfuse=1, dfuse=1)

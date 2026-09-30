@@ -303,7 +303,7 @@ static void launch_bwd_main_kvtma(dim3 mg, const CUtensorMap& qmap, const CUtens
                                   const float* delta, const float* lse, float* dq_acc,
                                   float* dk_acc, float* dv_acc, int S, int H, int Hkv,
                                   float scale, int causal, int ksplit,
-                                  cudaStream_t st = nullptr) {
+                                  cudaStream_t st = nullptr, const int* mt_m = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = Cfg::smem_bytes_wgmma_kvtma;
   CUDA_CHECK(cudaFuncSetAttribute(
@@ -312,7 +312,7 @@ static void launch_bwd_main_kvtma(dim3 mg, const CUtensorMap& qmap, const CUtens
   fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP>
       <<<mg, THREADS, kSmem, st>>>(qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos,
                                delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
-                               ksplit);
+                               ksplit, nullptr, nullptr, nullptr, 0, nullptr, nullptr, mt_m);
 }
 
 // P3-4g：把 `--det` 从默认 mma 路径扩到 Hopper TMA 快路（`launch_bwd_main_kvtma` 的
@@ -1573,6 +1573,10 @@ int main(int argc, char** argv) {
   int iters = 20;
   int ksplit = -1;  // -1 = 自动
   int ksplit2_opt = -1;  // O19：wg2 的 ksplit（-1 自动）
+  // O89：定长 causal 主 kernel 的 m 块调度序（LPT）。0 = 历史（mblk = mt 升序，便宜块先跑）；
+  //   1 = 反转（贵块先跑，削尾波）——只改「哪个 CTA 算哪个 m 块」，dK/dV 原子顺序略变，
+  //   数值仍在 fp8 噪声内。用于验证「靠调度把 ksplit 降下来、消 Q/dO 重读」是否可行。
+  int mrev_opt = 1;  // O89：默认开（LPT 贵块先跑）；--mrev=0 A/B
   // O22：在 `-DFA_WGMMA`（sm_90a）构建下，默认启用 Hopper 路径（LSE + 主 kernel GEMM1/2 的
   //   wgmma）；sm_90 构建下这两个宏路径不存在，保持 mma。`--lsewgm=0/--wgmma=0` 可显式退回 mma
   //   做 A/B（S=4096 端到端 wgmma 比 mma 快 ~8%：2.70→2.49ms，preprocess 0.40→0.32、main 2.19→2.04）。
@@ -1732,6 +1736,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--iters=", 0) == 0) iters = atoi(a.c_str() + 8);
     else if (a.rfind("--ksplit=", 0) == 0) ksplit = atoi(a.c_str() + 9);
     else if (a.rfind("--ksplit2=", 0) == 0) ksplit2_opt = atoi(a.c_str() + 10);
+    else if (a.rfind("--mrev=", 0) == 0) mrev_opt = atoi(a.c_str() + 7);
+    else if (a == "--mrev") mrev_opt = 1;
     else if (a.rfind("--dir=", 0) == 0) dir = a.substr(6);
     else if (!a.empty() && a[0] != '-') dir = a;
   }
@@ -1835,6 +1841,21 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaFree(d_dq_acc)); d_dq_acc = d_dq;
   CUDA_CHECK(cudaFree(d_dk_acc)); d_dk_acc = d_dk;
   CUDA_CHECK(cudaFree(d_dv_acc)); d_dv_acc = d_dv;
+
+  // O89：定长 causal 的 LPT m 块调度序（`--mrev=1`）。构建反转的 mt→mblk 查询表，透传给
+  //   默认 kvtma 主 kernel（稠密网格 grid.x = nblk*ksplit，mt = blockIdx.x/ksplit）。
+  //   只改「哪个 CTA 算哪个 m 块」；dK/dV 的跨 CTA 原子顺序略变 ⇒ 数值在 fp8 噪声内。
+  int* d_mrev = nullptr;
+  if (mrev_opt && causal && D == 128 && (S + 63) / 64 >= 16) {  // O89：nblk>=16（S>=1024）才启用，避免小 S 噪声
+    const int nblk_m = (S + 63) / 64;
+    std::vector<int> hrev(nblk_m);
+    for (int i = 0; i < nblk_m; ++i) hrev[i] = nblk_m - 1 - i;
+    CUDA_CHECK(cudaMalloc(&d_mrev, nblk_m * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_mrev, hrev.data(), nblk_m * sizeof(int), cudaMemcpyHostToDevice));
+    printf("O89: mrev on (nblk=%d, LPT expensive-first)\n", nblk_m);
+  } else if (mrev_opt) {
+    printf("O89: mrev requested but ignored (need causal & D==128 & fixed-length)\n");
+  }
 
   CUDA_CHECK(cudaMemcpy(d_q_f, q_np.data.data(), nq * 4, cudaMemcpyHostToDevice));
   CUDA_CHECK(cudaMemcpy(d_k_f, k_np.data.data(), nkv * 4, cudaMemcpyHostToDevice));
@@ -2301,12 +2322,12 @@ int main(int argc, char** argv) {
         launch_bwd_main_kvtma<128, 64, 32, true>(
             mg, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
             d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
-            scale, (int)causal, ksplit);
+            scale, (int)causal, ksplit, nullptr, d_mrev);
       else
         launch_bwd_main_kvtma<128, 64, 32, false>(
             mg, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
             d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
-            scale, (int)causal, ksplit);
+            scale, (int)causal, ksplit, nullptr, d_mrev);
       return;
     }
     // O37：Q/dO TMA 版（仅在默认 fold 选项下启用；其它组合回退 cp.async 版）。

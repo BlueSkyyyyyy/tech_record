@@ -3171,3 +3171,21 @@ auto-table 在 rtol=0.005 内不变）。详见 `docs/01` §25、`docs/01b` §6b
   （**+1.3–1.7%**）、S1024H8 full **+1.3%**、S2048H8 causal **−1.1%**、GQA h16kv4 **−3.7%**；
   ncu 隔离 Duration **245.5 vs 255.6µs（1.041×）**、指令 **−3.2%**、2 CTA/SM。**净中性 ⇒ 默认关**。
 - 详见 `docs/03` §108、`docs/08` §5.94；原始输出 `src/fp8/fa_bwd_fp8_o85_*`。
+
+## 51. O89（第一百八十四轮，**正结果，默认**）：fp8 主 kernel 的 **LPT m 块调度序**（causal 贵块先跑）
+
+- **改动（纯 host + 壳透传，device 数学零改动）**：默认 fp8 `kvtma` 主 kernel 的 m 块号就是
+  `blockIdx.x/ksplit`，而硬件按 blockIdx 升序派发；causal 下便宜块在低 blockIdx ⇒ 尾波全重块。
+  给 `fa_bwd_fp8_mma_kvtma_kernel` 壳加 `mt_m` 透传，host 在 `--mrev=1` 时建反转表
+  `mt_m[i]=nblk-1-i`，改成「贵块先跑」（LPT）。门控 `causal && D==128 && nblk>=16`，
+  单/两文件同步，`--mrev=0` 供 A/B，**默认开**。
+- **数值（护栏全过）**：`--ci --dtype fp8 --hopper` 单/两文件一致性 gate worst **7.629e-6 OK**、
+  `--check docs/04` OK；vs fp32 ref max_abs 与 `mrev=0` **打印相同**（S4096 2.635/2.644/3.216e-1、
+  S512 2.426/2.972/3.733e-1）。`--mma`（sm_90）构建不含 kvtma ⇒ 无效、逐位不变。
+- **性能（同 binary A/B，S4096 H16 causal，event）**：main **1.4796→1.4475ms（1.022×）**、
+  total **1.7159→1.6747ms（1.025×，80.10→82.07 TF）**（重复实测 ~3.2%）。其它 causal D=128：
+  S1024H32 main 1.6%、GQA kv4 2.0%、GQA kv8 1.3%、MQA kv1 0.5%；S512 门控外不变。
+- **ncu（S4096）**：Duration **1.48→1.46ms**、**`lts op_red` 114,524,160 一字不变**、
+  stall `short_scoreboard 1.82`/`wait 1.56` 均不变 ⇒ 收益 = **尾波/负载均衡**，与 L2 搬运量无关
+  （再次印证 `red` bound；减 `red` 仍需改工作划分）。
+- 详见 `docs/03` §112、`docs/08` §5.98；原始输出 `src/fp8/fa_bwd_fp8_o89_*`。

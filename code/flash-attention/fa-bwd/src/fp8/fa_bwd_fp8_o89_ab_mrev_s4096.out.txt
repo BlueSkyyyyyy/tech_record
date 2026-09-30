@@ -1,0 +1,63 @@
+# O89 A/B: mrev（LPT 贵块先跑）on/off, S=4096 H16 d128 causal fp8 (Hopper kvtma, same binary)
+# binary: fa_bwd_fp8_main.cu built with -gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda
+
+==== --mrev=0 ====
+grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.7159 ms  80.10 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1058 ms | preprocess 0.1206 ms | main 1.4796 ms | convert 0.0100 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+
+==== --mrev=1 ====
+O89: mrev on (nblk=64, LPT expensive-first)
+grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.6747 ms  82.07 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1059 ms | preprocess 0.1218 ms | main 1.4475 ms | convert -0.0006 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+
+==== --mrev=0 --ksplit=1 ====
+grid main = 64 x 16 x 1  (ksplit=1, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 2.0729 ms  66.30 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1059 ms | preprocess 0.1219 ms | main 1.8356 ms | convert 0.0094 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+
+==== --mrev=1 --ksplit=1 ====
+O89: mrev on (nblk=64, LPT expensive-first)
+grid main = 64 x 16 x 1  (ksplit=1, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 2.0476 ms  67.12 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1057 ms | preprocess 0.1203 ms | main 1.7924 ms | convert 0.0292 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+
+==== --mrev=0 --ksplit=4 ====
+grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.7289 ms  79.50 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1059 ms | preprocess 0.1214 ms | main 1.4990 ms | convert 0.0026 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+
+==== --mrev=1 --ksplit=4 ====
+O89: mrev on (nblk=64, LPT expensive-first)
+grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.6831 ms  81.66 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1059 ms | preprocess 0.1208 ms | main 1.4454 ms | convert 0.0109 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+
+==== --mrev=1 --ksplit=2 ====
+O89: mrev on (nblk=64, LPT expensive-first)
+grid main = 128 x 16 x 1  (ksplit=2, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.7845 ms  77.02 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1060 ms | preprocess 0.1216 ms | main 1.5466 ms | convert 0.0104 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+

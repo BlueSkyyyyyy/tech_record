@@ -9803,3 +9803,74 @@ L2 扇区 ~80%、§106），`wgmma` 对 `red` 一字不减（O83 已证），因
   1.7162ms / 80.08 TF、main 1.4829ms；vs fp32 ref max_abs **2.635/2.644/3.216e-1**、vs TE
   同量级。单/两文件 device 代码仍逐字同源（本轮只动 host 的栅格计算与一个诊断入参）。
 - 原始输出：`src/fp8/fa_bwd_fp8_o88_qcap_ab_s4096.out.txt`、`..._o88_macro_sweep_s4096.out.txt`。
+
+---
+
+## 112. O89（第一百八十四轮）：fp8 主 kernel 的 **LPT m 块调度序**（causal 贵块先跑）—— **正结果，默认**
+
+默认 fp8 `kvtma` 主 kernel 在本卡是 **L2 `red` bound + 尾波偏斜**。前几轮（O77/O83/O86/O87）
+已把「减 L2 搬运量」的三条路（归约宽度/机制、工作划分、GQA 头折叠）全部收口为硬件墙，本轮
+换一个**不改任何数据通路、不改 L2 搬运量**的角度：**只改「哪个 CTA 算哪个 m 块」的派发顺序**。
+
+### 112.1 动机：causal 的块代价偏斜 vs 硬件升序派发
+
+- 默认稠密网格 `grid=(nblk*ksplit, H, B)`，body 里 `mt = blockIdx.x / ksplit`、`mblk = mt`
+  （定长无查询表路径，`fp8_mma_body` 第 2976–2979 行）。GigaThread 按线性 blockIdx **升序**
+  派发 block。
+- causal 下第 `m` 个 m 块的 K 循环长 ∝ `(m+1)`（`ncols = min(len, m0+BM)`）⇒ **便宜块先跑、
+  最贵块排在每个 head 段末尾**，正是 LPT（Longest-Processing-Time-first）的反面，尾波全是重块。
+- 这解释了 O77 的 ksplit 复扫：ksplit=8 比 ksplit=1 快 ~20%，靠的是**更细的块粒度**掩盖偏斜，
+  代价是 Q/dO 被重读 8 次、dQ 多一轮跨 part `atomicAdd`。若能把平衡拿回来，理论上可降 ksplit
+  以消 Q/dO 重读与 dQ 原子。
+
+### 112.2 实现（纯 host + 一个透传参数，device 数学零改动）
+
+- `fp8_mma_body` 早已支持 `mt_m` 查询表（varlen 紧凑网格用，`mblk = mt_m[mt]`）。给默认
+  `fa_bwd_fp8_mma_kvtma_kernel` 壳加尾参 `const int* mt_m = nullptr` 并在调 body 时填到
+  `mt_m` 槽（此前恒传 `nullptr`）；`launch_bwd_main_kvtma` 同样加尾参并透传。
+- host 在 `--mrev=1` 时建反转表 `mt_m[i] = nblk-1-i`（`nblk = ceil(S/64)`）：执行序变成
+  「每个 head 从最贵的 m 块开始、最便宜的收尾」。dK/dV 是跨 CTA `atomicAdd`（可交换）⇒
+  **数值语义不变**，仅加法次序略变（fp8 噪声内）。
+- 门控：`mrev_opt && causal && D==128 && nblk>=16`（S>=1024；小 S 网格太浅、反转只剩噪声）。
+  单/两文件（`fa_bwd_fp8_main.cu` / `fa_bwd_fp8_mma_onefile.cu`）同步；`--mrev=0` 供 A/B；
+  默认 `--mrev=1`。
+
+### 112.3 实测（同 binary A/B，S=4096 H16 causal，event iters=30）
+
+| 配置 | main (ms) | total (ms) | TFLOPS |
+|---|---|---|---|
+| `--mrev=0`（历史） | 1.4796 | 1.7159 | 80.10 |
+| `--mrev=1`（默认） | **1.4475（1.022×）** | **1.6747（1.025×）** | **82.07** |
+
+多次重复：main `mrev=0` 1.473–1.488 → `mrev=1` 1.429–1.440（**~3.2%**，稳定）。其它 causal
+D=128：S1024H32 `0.2481→0.2442`（1.6%）、GQA kv4 `0.2410→0.2362`（2.0%）、GQA kv8
+`0.2982→0.2944`（1.3%）、MQA kv1 `0.4442→0.4420`（0.5%）；S512 在门控外 ⇒ 逐位不变。
+
+ksplit 复扫（`mrev=1`，main ms）：k=1 **1.792** / k=2 1.547 / k=4 1.445 / **k=8 1.448**。
+反转把 ksplit=1 从 1.836 拉到 1.792（仅 1.024×）——**「削尾波」补不上 ksplit 的细粒度并行**
+（1024 CTA 只 2.6 波），故 **ksplit auto=8 仍最优、Q/dO 重读消不掉**。
+
+### 112.4 ncu 证据（S=4096 causal，`regex:kvtma_kernel --launch-count 1`）
+
+| 指标 | mrev=0 | mrev=1 |
+|---|---|---|
+| `gpu__time_duration` | 1.48 ms | **1.46 ms** |
+| `lts op_red` | 114,524,160 | 114,524,160（**一字不变**） |
+| `lts op_read` | 28.04M | 27.92M |
+| `lts op_write` | 0.384M | 0.384M |
+| DRAM% | 4.40 | 4.50 |
+| `short_scoreboard` / `wait` | 1.82 / 1.56 | 1.82 / 1.56 |
+
+⇒ **收益纯粹来自尾波/负载均衡（LPT），与 L2 搬运量、stall 结构无关**——再次印证默认 main
+是 `red` bound。**减 `red` 仍需改工作划分（换卡 / 多 warpgroup）**，本条不改 `red` 墙。
+
+### 112.5 数值与回归
+
+- `--ci --dtype fp8 --hopper`：单/两文件一致性 gate worst **7.629e-6 OK**、`--check docs/04`
+  OK（198 行）。
+- vs fp32 ref max_abs 与 `mrev=0` **打印相同**（S4096 `2.635/2.644/3.216e-1`、S512
+  `2.426/2.972/3.733e-1`）；单/两文件 device 代码仍逐字同源（本轮只动 host 的查询表构建与
+  壳的尾参透传）。默认 `--mma`（sm_90）构建不含 kvtma 路径 ⇒ mrev 无效、逐位不变。
+- 原始输出：`src/fp8/fa_bwd_fp8_o89_ab_mrev_s4096.out.txt`、
+  `..._o89_ab_mrev_shapes.out.txt`、`..._o89_ncu_mrev_{0,1}_s4096.out.txt`、
+  `..._o89_ci_fp8.out.txt`。

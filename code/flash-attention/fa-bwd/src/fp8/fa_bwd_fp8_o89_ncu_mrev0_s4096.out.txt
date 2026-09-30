@@ -1,0 +1,12 @@
+# O89 ncu main kernel, --mrev=0, S4096 H16 d128 causal fp8
+  void fa_bwd_fp8_mma_kvtma_kernel<128, 64, 32, 1, 1, 1, 1, 0, 0, 0>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, float *, float *, int, float *, const int *, const int *) (512, 16, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %         4.40
+    gpu__time_duration.sum                                                             ms         1.48
+    lts__t_sectors.sum                                                             sector    143014318
+    lts__t_sectors_op_read.sum                                                     sector     28040467
+    lts__t_sectors_op_red.sum                                                      sector    114524160
+    lts__t_sectors_op_write.sum                                                    sector       384330
+    sm__warps_active.avg.pct_of_peak_sustained_active                                   %        18.33
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         1.82
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.56
+    smsp__issue_active.avg.pct_of_peak_sustained_active                                 %        46.50

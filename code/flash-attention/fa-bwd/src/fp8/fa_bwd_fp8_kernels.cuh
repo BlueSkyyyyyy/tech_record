@@ -4212,11 +4212,12 @@ fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             float* __restrict__ dk_part = nullptr,
                             float* __restrict__ dv_part = nullptr, int nblk = 0,
                             float* __restrict__ dq_part = nullptr,
-                            const int* __restrict__ part_base = nullptr) {
+                            const int* __restrict__ part_base = nullptr,
+                            const int* __restrict__ mt_m = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true, THREADS, WN, false, DET,
                DET_HALF, DQONLY>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
-      scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap, nullptr, nullptr,
+      scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap, nullptr, mt_m,
       dk_part, dv_part, nblk, dq_part, part_base);
 }
 
