@@ -42,6 +42,8 @@ struct TreeNode {
 | 后序递归：返回值设计 | 226. 翻转二叉树 | 简单 |
 | 后序递归：返回值设计 | 111. 二叉树的最小深度 | 简单 |
 | 后序递归：返回值设计 | 110. 平衡二叉树 | 简单 |
+| 后序递归：返回值设计 | 543. 二叉树的直径 | 简单 |
+| 后序递归：返回值设计 | 124. 二叉树中的最大路径和 | 困难 |
 | 镜像与对称 | 101. 对称二叉树 | 简单 |
 | 层序遍历与右视图 | 102. 二叉树的层序遍历 | 中等 |
 | 层序遍历与右视图 | 199. 二叉树的右视图 | 中等 |
@@ -49,6 +51,9 @@ struct TreeNode {
 | 由遍历序列构造 | 106. 从中序与后序构造二叉树 | 中等 |
 | 祖先与 BST 校验 | 236. 二叉树的最近公共祖先 | 中等 |
 | 祖先与 BST 校验 | 98. 验证二叉搜索树 | 中等 |
+| BST 的中序与建树 | 230. 二叉搜索树中第 K 小的元素 | 中等 |
+| BST 的中序与建树 | 108. 将有序数组转换为二叉搜索树 | 简单 |
+| 原地改造 | 114. 二叉树展开为链表 | 中等 |
 
 ---
 
@@ -411,7 +416,131 @@ bool isBalanced(TreeNode *root) {
 
 - **复杂度**：时间 O(n)（每个节点算一次高度），空间 O(h)。
 - **易错点**：不要写成「对每个节点各求一次高度」（O(n²)）；-1 是「不平衡」的哨兵，一旦拿到 -1 要立即短路，否则 -1 会被继续当成数值参与 `max`；高度差判断是 `> 1`（等于 1 仍然平衡）；空节点高度是 0。
-- **相似题**：104. 最大深度（就是这里的 `height`）；111. 最小深度；543. 二叉树的直径（同样「返回高度、顺路更新全局最优」的模式，见后续专题）；面试常把本题当作「后序 + 剪枝」的入门。
+- **相似题**：104. 最大深度（就是这里的 `height`）；111. 最小深度；543. 二叉树的直径（同样「返回高度、顺路更新全局最优」的模式，见下）；面试常把本题当作「后序 + 剪枝」的入门。
+
+### 543. 二叉树的直径（简单）
+
+**题目**：给定一棵二叉树的根节点 `root`，返回它的直径。直径指树中任意两个节点之间最长路径的**边数**。
+
+**思路（后序递归：返回深度、顺路更新全局最优）**：
+一条路径可能不经过根，而是藏在某一棵子树里，所以不能只算「根到最远叶」。
+换个视角：任意一条路径，都可以看成「以某个节点为最高点，向左下走一段、向右下走一段」。
+这段路径的长度（边数）正好等于**左子树深度 + 右子树深度**。
+
+于是让递归函数 `depth(node)` 返回「以 node 为根的子树深度（节点到最远叶的边数）」，
+同时在每个节点处用 `左深 + 右深` 更新答案。父节点拿到的返回值用于继续向上汇总，
+而「经过当前节点的最长路径」只用于更新全局最大值，不再往上返回。
+
+为什么要区分「返回值」和「全局量」：向上传递时，路径只能走单侧——父节点只可能接
+左边或右边其中一条腿，所以返回值是「单臂长度」；而答案允许左右两条腿都算，
+所以要用一个外部变量记录双臂之和的最大值。这是「返回一个量、顺路更新另一个量」的
+经典题型，124 最大路径和是它在「带权路径」上的版本。
+
+**代码**（`src/binary-tree/diameter_of_binary_tree.py` / `.cpp`）：
+
+```python
+def diameter_of_binary_tree(root):
+    best = 0
+
+    def depth(node):
+        nonlocal best
+        if node is None:
+            return 0
+        left = depth(node.left)
+        right = depth(node.right)
+        best = max(best, left + right)
+        return 1 + max(left, right)
+
+    depth(root)
+    return best
+```
+
+```cpp
+int depth(TreeNode *node, int &best) {
+    if (node == nullptr) return 0;
+    int left = depth(node->left, best);
+    int right = depth(node->right, best);
+    best = std::max(best, left + right);
+    return 1 + std::max(left, right);
+}
+
+int diameterOfBinaryTree(TreeNode *root) {
+    int best = 0;
+    depth(root, best);
+    return best;
+}
+```
+
+- **复杂度**：时间 O(n)（每个节点访问一次），空间 O(h)。
+- **易错点**：`best` 初值取 0，空树/单节点直径都是 0；更新答案用 `left + right`（边数之和），
+  返回值却要 `1 + max(left, right)`，两者别写混；直径的「长度」按**边数**计，若题目改成节点数则要加一；
+  路径不一定过根，必须在**每个节点**处都更新，而不是只在根处算一次。
+- **相似题**：124. 二叉树中的最大路径和（同骨架，把长度换成和、并处理负数，见下）；
+  104. 最大深度（`depth` 就是它）；110. 平衡二叉树（同样返回高度）。
+
+### 124. 二叉树中的最大路径和（困难）
+
+**题目**：给定一棵二叉树的根节点 `root`，返回其任意一条路径的最大路径和。
+路径被定义为一条从树中任意节点出发、沿父子边移动、到达任意节点的序列，
+同一个节点在路径中最多出现一次（路径不必经过根，也不一定经过叶子）。
+
+**思路（后序递归：返回「单臂最大增益」，顺路更新全局最优）**：
+这是 543 的加权版本。定义递归函数 `gain(node)`：以 node 为起点、向下的某一条「单臂」
+路径能贡献的最大和。父节点只能接 left 或 right 其中一条腿，所以返回值取两者较大的
+那个加上自己。
+
+关键在于**负数处理**：如果某侧子树的最大增益是负数，把这一侧接进来只会让和变小，
+不如不接——所以用 `max(gain, 0)` 把它截断成 0（表示「放弃这一侧」）。
+这样 `node.val + 左增益 + 右增益` 就是「以 node 为最高点的最佳路径」，用它更新全局答案；
+而返回值 `node.val + max(左增益, 右增益)` 只保留单臂继续上传。
+
+为什么全局最优初值要设成负无穷：空子树贡献 0 表示「这里没有节点可选」，但如果整棵树
+都是负数（例如 `[-3]`），用 0 截断会得出「一条都不选」的 0，而题目要求路径至少含一个节点。
+所以答案初值取负无穷，返回时自然能得到「必选一个节点」的最大值。
+
+**代码**（`src/binary-tree/binary_tree_maximum_path_sum.py` / `.cpp`）：
+
+```python
+def max_path_sum(root):
+    best = float("-inf")
+
+    def gain(node):
+        nonlocal best
+        if node is None:
+            return 0
+        left = max(gain(node.left), 0)
+        right = max(gain(node.right), 0)
+        best = max(best, node.val + left + right)
+        return node.val + max(left, right)
+
+    gain(root)
+    return best
+```
+
+```cpp
+int gain(TreeNode *node, long long &best) {
+    if (node == nullptr) return 0;
+    int left = std::max(gain(node->left, best), 0);
+    int right = std::max(gain(node->right, best), 0);
+    long long through = static_cast<long long>(node->val) + left + right;
+    if (through > best) best = through;
+    return node->val + std::max(left, right);
+}
+
+int maxPathSum(TreeNode *root) {
+    long long best = LLONG_MIN;
+    gain(root, best);
+    return static_cast<int>(best);
+}
+```
+
+- **复杂度**：时间 O(n)（每个节点访问一次），空间 O(h)。
+- **易错点**：`best` 初值必须是负无穷，用 0 会在全负树上错成 0；两侧增益要先 `max(..., 0)`
+  再相加，负增益不接；返回值只能是「单臂」`node.val + max(left, right)`，不能把左右都带上
+  （那样路径就分叉了，父节点接不上）；C++ 里用 `long long` 汇总以防累加溢出。
+- **相似题**：543. 二叉树的直径（同一个「返回值 + 全局量」骨架，见上）；
+  112. 路径总和、113. 路径总和 II（自顶向下带着剩余和，属另一类）；
+  687. 最长同值路径（也是返回单臂、全局取双臂，只是加了「值相同」的约束）。
 
 ---
 
@@ -850,7 +979,211 @@ bool isValidBst(TreeNode *root) {
 
 - **复杂度**：时间 O(n)（每个节点一次），空间 O(h)。
 - **易错点**：只比较直接父子是经典错误，必须携带祖先约束；边界用开区间（严格不等），出现相等值即不合法；Python 用 `float("-inf"/"inf")` 作初值可避免整数边界问题，C++ 用 `long long` + `LLONG_MIN/LLONG_MAX`（若用 `INT_MIN/MAX`，节点值恰好取到边界时会误判）；中序遍历法也正确，但要额外维护「上一个值」。
-- **相似题**：94. 中序遍历（BST 有序性的来源）；700. BST 中的搜索；230. BST 第 K 小（中序计数）；701. BST 中的插入；面试常要求同时给出「上下界法」和「中序法」两种思路。
+- **相似题**：94. 中序遍历（BST 有序性的来源）；700. BST 中的搜索；230. BST 第 K 小（中序计数，见下）；701. BST 中的插入；面试常要求同时给出「上下界法」和「中序法」两种思路。
+
+---
+
+## 模式七：BST 的中序性质与分治建树
+
+**适用信号**：题目里出现「二叉搜索树 / BST」并要找「第 k 小 / 第 k 大 / 某个排名」，
+或反过来「给一个有序序列，构造一棵 BST」。前者是「中序 = 有序」的顺用，
+后者是它的逆用：**中序有序 ⇒ 取中点作根即可还原平衡 BST**。
+
+### 230. 二叉搜索树中第 K 小的元素（中等）
+
+**题目**：给定一棵二叉搜索树的根节点 `root` 和一个整数 `k`，返回其中第 k 小的元素（k 从 1 开始计数）。
+
+**思路（中序遍历 + 计数，边走边停）**：
+二叉搜索树最重要的性质是「中序遍历的结果严格递增」，所以「第 k 小」就等于
+「中序遍历序列里的第 k 个元素」。只要做一次中序遍历，用计数器记录已经访问到第几个，
+数到第 k 个时直接返回即可。
+
+为什么可以提前停：一旦数到第 k 个，后面更大的元素都不可能是答案，直接返回即可，
+不必遍历完整棵树。这比「先完整中序存进数组再取下标 k-1」在 k 很小时更省时间
+（虽然后者代码更短、也是常见写法）。
+
+更进阶的写法是给每个节点维护「左子树节点数」，就可以像查排名一样 O(h) 找出答案
+（对应 173. BST 迭代器、面试变体）。本篇用中序计数，简单直接。
+
+**代码**（`src/binary-tree/kth_smallest_bst.py` / `.cpp`）：
+
+```python
+def kth_smallest(root, k):
+    count = 0
+    answer = None
+
+    def inorder(node):
+        nonlocal count, answer
+        if node is None or answer is not None:
+            return
+        inorder(node.left)
+        count += 1
+        if count == k:
+            answer = node.val
+            return
+        inorder(node.right)
+
+    inorder(root)
+    return answer
+```
+
+```cpp
+void inorder(TreeNode *node, int k, int &count, int &answer) {
+    if (node == nullptr || answer != -1) return;
+    inorder(node->left, k, count, answer);
+    count += 1;
+    if (count == k) {
+        answer = node->val;
+        return;
+    }
+    inorder(node->right, k, count, answer);
+}
+
+int kthSmallest(TreeNode *root, int k) {
+    int count = 0;
+    int answer = -1;
+    inorder(root, k, count, answer);
+    return answer;
+}
+```
+
+- **复杂度**：时间 O(h + k)（先走到最左下角 O(h)，再访问 k 个），最坏 O(n)；空间 O(h)。
+- **易错点**：中序访问顺序是「左 → 根 → 右」，`count` 自增必须夹在两次递归之间；
+  计数的口径是从 1 开始数的「第 k 个」，与下标（从 0 开始）差一；找到后要能短路，
+  否则后面的节点会把 `answer` 覆盖掉；C++ 里若用 `-1` 当「未找到」哨兵，需确认节点值域不含歧义。
+- **相似题**：94. 中序遍历（性质来源）；98. 验证 BST（也用中序有序）；
+  173. 二叉搜索树迭代器（用栈实现「中序的暂停与恢复」）；700/701. BST 的搜索与插入。
+
+### 108. 将有序数组转换为二叉搜索树（简单）
+
+**题目**：给定一个按升序排列的整数数组 `nums`，将它转换成一棵**高度平衡**的二叉搜索树，返回它的根节点。（本题有多个合法答案。）
+
+**思路（分治：取中点作根，左右递归）**：
+要让 BST 高度平衡，最自然的做法是让左右子树的节点数尽量相等。有序数组的中点正好把
+数组分成「比它小的左半」和「比它大的右半」，取中点作根再对两半分别递归，就同时满足了：
+左半全小于根、右半全大于根（是 BST），左右规模相差不超过 1（高度平衡）。
+
+这正是「中序序列反推 BST」：只要保证每次取的是当前区间的中间元素作根，还原出的树就平衡。
+用下标区间 `[lo, hi]` 递归、不切数组，每个元素只被处理一次。
+若取首或尾作根，树会退化成链表（高度 O(n)），这是本题最要避免的。
+
+**代码**（`src/binary-tree/sorted_array_to_bst.py` / `.cpp`）：
+
+```python
+def sorted_array_to_bst(nums):
+    def build(lo, hi):
+        if lo > hi:
+            return None
+        mid = (lo + hi) // 2
+        node = TreeNode(nums[mid])
+        node.left = build(lo, mid - 1)
+        node.right = build(mid + 1, hi)
+        return node
+
+    return build(0, len(nums) - 1)
+```
+
+```cpp
+TreeNode *build(std::vector<int> &nums, int lo, int hi) {
+    if (lo > hi) return nullptr;
+    int mid = lo + (hi - lo) / 2;
+    TreeNode *node = new TreeNode(nums[mid]);
+    node->left = build(nums, lo, mid - 1);
+    node->right = build(nums, mid + 1, hi);
+    return node;
+}
+
+TreeNode *sortedArrayToBst(std::vector<int> nums) {
+    return build(nums, 0, static_cast<int>(nums.size()) - 1);
+}
+```
+
+- **复杂度**：时间 O(n)（每个元素建一个节点），空间 O(log n)（平衡树的递归栈深度）。
+- **易错点**：终止条件是空区间 `lo > hi`（返回空），用 `lo == hi` 会漏掉单元素区间；
+  中点用 `(lo + hi) // 2` 或 `lo + (hi - lo) // 2`，后者可防溢出；左右子树区间是
+  `[lo, mid-1]` 与 `[mid+1, hi]`，**中点本身要排除**，否则会重复或死循环；
+  空数组要返回空树，测试时别直接对空树解引用。
+- **相似题**：109. 有序链表转换 BST（同样的「取中点作根」，只是找中点的成本变高）；
+  105/106. 由遍历序列构造（同属「定根 + 分区间」的分治）；
+  98. 验证 BST（可用来反向验证结果合法）。
+
+---
+
+## 模式八：原地改造二叉树
+
+**适用信号**：题目要求「原地」把一棵树改成另一种结构（展开成链表、原地转成某种顺序），
+不允许新建数组或新树。核心思路是**让递归函数返回改造后子结构的「尾巴 / 端点」**，
+这样父节点就能把几段拼起来，而不用重复遍历找接头。
+
+### 114. 二叉树展开为链表（中等）
+
+**题目**：给定一棵二叉树的根节点 `root`，把它原地展开成一个「只有右孩子的链表」，
+展开后的顺序与二叉树**前序遍历**的顺序一致，要求原地修改，不额外开数组。
+
+**思路（后序递归：让每棵子树返回它的尾节点）**：
+前序顺序是「根 → 左 → 右」。把左子树整条展开后链接到根的右边，再把原来的右子树
+接到左链的尾巴上，就完成一次拼接；对每个节点都这样做，最终整棵树就变成前序的右斜链表。
+
+为了知道「左链的尾巴在哪」，递归函数 `dfs(node)` 返回**以 node 为根的子树展开后的最后一个节点**：
+- 空节点返回空；
+- 先递归展开左右子树，拿到 `left_tail`、`right_tail`；
+- 若左子树存在：把右子树挂到左子树尾巴后面（`left_tail.right = node.right`），
+  再把整条左链搬到右边（`node.right = node.left`），并清空 `node.left`；
+- 返回尾节点：优先 `right_tail`，否则 `left_tail`，都没有就是 `node` 自己。
+
+为什么用后序：拼接动作依赖「左右子树都已经展开好、且知道各自尾巴」，必须先处理子问题
+再处理当前节点，正是后序。用返回值传尾节点，避免了为找尾巴再遍历一遍。
+
+另一种等价写法是「逆前序」：按「右 → 左 → 根」的顺序遍历，把每个节点的 `right` 指向
+「上一个访问过的节点」，最后访问的（原前序第一个）成为新头。两种写法都是 O(n) 原地。
+
+**代码**（`src/binary-tree/flatten_binary_tree.py` / `.cpp`）：
+
+```python
+def flatten(root):
+    def dfs(node):
+        if node is None:
+            return None
+        left_tail = dfs(node.left)
+        right_tail = dfs(node.right)
+        if node.left is not None:
+            left_tail.right = node.right
+            node.right = node.left
+            node.left = None
+        return right_tail or left_tail or node
+
+    dfs(root)
+```
+
+```cpp
+TreeNode *flattenDfs(TreeNode *node) {
+    if (node == nullptr) return nullptr;
+    TreeNode *left_tail = flattenDfs(node->left);
+    TreeNode *right_tail = flattenDfs(node->right);
+    if (node->left != nullptr) {
+        left_tail->right = node->right;
+        node->right = node->left;
+        node->left = nullptr;
+    }
+    if (right_tail != nullptr) return right_tail;
+    if (left_tail != nullptr) return left_tail;
+    return node;
+}
+
+void flatten(TreeNode *root) {
+    flattenDfs(root);
+}
+```
+
+- **复杂度**：时间 O(n)（每个节点访问一次），空间 O(h)（递归栈）。
+- **易错点**：拼接顺序不能反——必须**先**把原右子树接到左链尾巴，**再**把左链搬到右边，
+  否则 `node.right` 被覆盖后就找不到原右子树了；搬到右边后记得把 `node.left` 置空，
+  否则不是「只有右孩子的链表」；返回尾节点时优先 `right_tail`，因为右子树在拼接后排在更后面；
+  空节点返回空。Python 里 `right_tail or left_tail or node` 依赖「节点对象为真」，
+  节点对象非空即为真，语义正确（不要误以为在用节点值判断）。
+- **相似题**：144. 前序遍历（展开顺序就是前序，先写出前序序列再连成链表是朴素解）；
+  430. 扁平化多级双向链表（同样的「把子结构插进主链」的拼接思想）；
+  116. 填充每个节点的下一个右侧节点指针（也是原地改指针）。
 
 ---
 
@@ -906,7 +1239,17 @@ bool isValidBst(TreeNode *root) {
     于是把「找到的节点」当返回值往上带（后序）。**带参数还是用返回值**，是树题最核心的分叉口。
     另外，涉及具体节点（而非值）时，比较要用对象身份 / 指针，不能用 `val`。
 
-12. **`docs` 与 `src` 必须逐字一致**。题解代码与 `code/leetcode/src/binary-tree/`
+12. **BST 的一切都建立在「中序 = 有序」上**。找第 k 小（230）、验证（98）、求后继（285）、
+    迭代器（173）都是这句性质的展开；反过来，给有序序列建树（108/109）就是它的逆用——
+    取中点作根即可得平衡 BST。只要看到 BST，先想「中序遍历会得到什么」。
+
+13. **要原地改结构，就让递归返回「端点」**。114 展开为链表时，递归函数返回子结构展开后的
+    尾节点，父节点据此把「左链尾」和「右链头」接起来，全程 O(1) 额外空间。
+    凡是「把几段子结构拼成一段」的原地改造（改指针、串链表、填 next），都用这个套路：
+    **返回值携带接头**，而不是回头再遍历去找。拼接时牢记「先保存、再覆盖」的顺序，
+    否则被覆盖的指针会丢掉要接的那一段。
+
+14. **`docs` 与 `src` 必须逐字一致**。题解代码与 `code/leetcode/src/binary-tree/`
     下的实现保持完全一致，以经过自测的 `src` 为准，文档只做粘贴。
     C++ 自测时不要把 `{1, 2}` 这类初值列表直接写进 `assert` 实参——花括号里的逗号会被
     当成宏参数分隔符；先把期望值存进变量再比较。
