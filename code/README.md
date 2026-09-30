@@ -10,3 +10,4 @@
 | [Megatron-LM 源码精读系列](../content/posts/megatron-code-01-structure/) | [megatron-code/](megatron-code/README.md) | 源码分析笔记（analysis-notes/），基于 commit f713506ce |
 | [H100 上 TE 算子的性能与 Roofline 对比](../content/posts/te-perf-roofline/) | [te-perf/](te-perf/) | `bench_te.py`：TE 原生 kernel（rmsnorm / bwd / bwd_add / fused_attn）微基准 + launch overhead |
 | [CUDA 算子调优系列](../content/posts/cuda-kernel-opt-01-overview/) | [kernel-opt/](kernel-opt/README.md) | CUDA 手写算子系列：公共头 `cuda_utils.cuh` + 容器/编译/`ncu` 脚本 + 每篇实验（vector add、计时陷阱…） |
+| [LeetCode 题解精讲](../content/posts/leetcode-00-index/) | [leetcode/](leetcode/README.md) | 分类刷题题解 + Python/C++ 自测代码，统一入口 `scripts/run_all.py`，长期自驱 |

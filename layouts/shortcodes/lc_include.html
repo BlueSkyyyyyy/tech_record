@@ -1,0 +1,14 @@
+{{- /*
+  在博客页面里内联渲染仓库中的 Markdown 文件（相对仓库根目录）。
+  用法：{{< lc_include "code/leetcode/docs/01-array-two-pointers.md" >}}
+  会跳过文件首行的 H1（避免和文章标题重复）。
+  docs/ 里的内容更新后，博客页面在下次构建时自动同步，无需复制。
+  注意：被内联的 Markdown 里不要再写 {{< >}} 短代码（readFile+markdownify 不会二次处理，
+  只会原样输出）。需要站内链接时，请在 content/posts 的文章里用 relref。
+*/ -}}
+{{- $p := .Get 0 -}}
+{{- $raw := readFile $p -}}
+{{- if hasPrefix $raw "# " -}}
+  {{- $raw = delimit (after 1 (split $raw "\n")) "\n" -}}
+{{- end -}}
+{{- $raw | markdownify -}}
