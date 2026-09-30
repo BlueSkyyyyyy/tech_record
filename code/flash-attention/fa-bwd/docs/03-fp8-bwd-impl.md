@@ -9659,3 +9659,72 @@ O25 的 7.4× 负结果原样成立（非原子 `st.async` 方案需 `CL×2×[BN
 `src/fp8/fa_bwd_fp8_o86_red_law.out.txt`（`harness/fa_fp8_red_law.py` 解析并打印 `red/H` 常数
 = 5.1304e5±5.5e1）、`src/fp8/fa_bwd_fp8_o86_accuracy.out.txt`（4 个 GQA/MQA 的 relL2 护栏复核）、
 `src/fp8/fa_bwd_fp8_o86_ci.out.txt`（`--no-run --ci` 全绿）。
+
+## 110. O87（第一百八十二轮）：F3b GEMM3/4 wgmma 的 **wait-schedule 变体**（合并 commit/wait、`wait_group<1>` 流水）—— **仍为负结果**，默认路径一行未改
+
+> 承接 O82（`-DFA_WGMMA34=1` 把 dV/dK 切 wgmma RS，M=BN=32 零填充到 m64，实测 **0.964×**）。
+> O82 的 ncu 诊断是「指令 −7.3%、L1/L2 降，但 **No Eligible 升、Duration 反升**——wgnma `wait`
+> 与零填充/转置的开销抵消了指令路径收益」。本轮**只改 wgmma 的 fence/commit/wait 时序**（不改
+> 操作数几何），试两个最自然的「藏 wait」写法，看能否把 O82 翻正。**结论：翻不正，F3b 的
+> GEMM3/4 wgmma（无 BN=64 时）路线彻底关闭。**
+
+### 110.1 两个 wait-schedule 变体（只改 fence/commit/wait，不改数学）
+
+O82 原版（`-DFA_WGMMA34=1`）：对每个 GEMM 分两组 n-tile（`ng=0/1`，每组 2 条 `wgmma`），
+每组各自 `wgmma_fence_fp8(); issue×4; commit; wait0;` 后 epilogue ⇒ **只有 2 条 wgmma 在飞、
+且 epilogue 前必等齐**。本轮两个变体：
+
+- **变体 A「合并 commit/wait」**：`acc[4][16]` 一次零初始化、一次 fence、一次连发 8 条 wgmma、
+  一次 `commit`、一次 `wait0`，再对 4 个 n-tile 一起 epilogue ⇒ 8 条在飞。
+- **变体 B「`wait_group<1>` 流水」**：`acc[4][16]`、一次 fence、`ng=0`（2 条）`commit` 后
+  再 `ng=1`（2 条）`commit`；先 `wgmma_wait_group_fp8<1>()`（只等 `ng=0`）做 `ng=0` 的
+  epilogue（与 `ng=1` 仍在飞的 wgmma 重叠），再 `wait0` 做 `ng=1` 的 epilogue。
+- （对照）**变体 C「GEMM5 wait 流水」**：O81 的 GEMM5（正结果、默认开）是单组 4 条 wgmma
+  + 一次 `wait0`。把它拆成两个 `commit` 组，`wait_group<1>` 后先折算 `nn=0/1`、`wait0` 再
+  折算 `nn=2/3`（`acc5` 数量不变）。**只验证 O81 路径有没有同款残余 wait。**
+
+### 110.2 实测（同 session，`fa_bwd_fp8_main.cu`，S=4096 H16 causal，event iters=30，main ms）
+
+| 构建 / 变体 | main (ms) | vs 默认 | 说明 |
+|---|---|---|---|
+| `-DFA_WGMMA34=0`（默认，GEMM3/4 mma） | **1.4788** | 1.000× | 基线 |
+| `-DFA_WGMMA34=1`（O82 原版，分组 wait） | 1.5435 | 0.958× | 复现 O82 0.964× |
+| 变体 A 合并 commit/wait | 1.5901 | 0.930× | 8 条在飞但 epilogue 前等齐 |
+| 变体 B `wait_group<1>` 流水 | 1.5778 | 0.937× | 两个变体都比 O82 原版更慢 |
+| 变体 C GEMM5 wait 流水（默认 O81 路径） | 1.4957 | 0.989× | 中性偏负 |
+
+**两个 GEMM3/4 变体都跌破 O82 原版**（0.930/0.937 vs 0.958）——细粒度「每 2 条就等」反而比
+「攒 4/8 条一起等」更贴近 wgmma 的发射-完成节奏；把 epilogue 前移（变体 B）也没换来收益。
+变体 C 说明**连 O81 这条正结果路径也已到 wait 的平台期**（`acc5` 折算太短、藏不住）。
+
+### 110.3 ncu 证据（S=4096 causal，`regex:kvtma_kernel --launch-count 1`）
+
+| 指标 | `WGMMA34=0`（默认） | `WGMMA34=1`（O82） |
+|---|---|---|
+| Duration | **1.49 ms** | 1.55 ms |
+| `smsp inst` | 641,862,784 | **594,828,928（−7.3%）** |
+| `lts op_red`（dK/dV 跨 CTA 原子） | **114,524,160** | **114,524,160（一字不变）** |
+| `lts op_read` | 28,038,921 | 27,712,491（−1.2%） |
+| `sm__pipe_tensor_cycles_active` | 11.13% | 8.37% |
+| stall `short_scoreboard` | 1.82 | **1.41** |
+| stall `wait` | 1.56 | 1.56 |
+| warps active | 18.35% | 18.35% |
+
+⇒ wgmma **确实打掉了指令与 smem→mma 依赖（`short_scoreboard` 1.82→1.41）**，但
+**`red` 一字不减、`wait` 不降**，Duration 反升。默认 fp8 main 是 **L2 `red` bound**（`red` 占
+L2 扇区 ~80%、§106），`wgmma` 对 `red` 一字不减（O83 已证），因此**任何只改指令/wait 时序、
+不改「每元素贡献 CTA 数」的改动都不可能转正**——本轮三个变体再次独立验证。
+
+### 110.4 判决与解锁条件
+
+- **判决**：F3b 的「无 BN=64 时把 GEMM3/4 切 wgmma」路线在 wait-schedule 维度上**再无空间**
+  （O82 负 → O87 三个代表变体更负）。**默认路径一行未改、数值逐位不变**（三变体 vs fp32 ref 的
+  `max_abs` 均 2.635/2.644/3.216e-1，与默认逐位相同）。寄存器账也复现：默认实例仍
+  **168 regs / 40B spill**（合并 `acc[4][16]` 未进一步 spill，说明纯时序问题而非溢出）。
+- **唯一剩余的真 m64 路** = **BN=64 + 多 warpgroup 摊累加器（256/384 线程，对标 TE 384）**，
+  被本卡「3 CTA/SM ⇒ 77,482B / 170 regs」硬墙锁死（O83 §106.2：三条真 m64 形式全停不到
+  3 CTA/SM）——与 F6/F7/p160/O86 同源。解锁需**换卡**（更大 smem/寄存器）或 **warp-specialized
+  producer/consumer**。**F3b 至此与 F4b/F6/F7 一样收口为「本卡无软件解」。**
+- 见 `docs/08` §5.96；原始输出 `src/fp8/fa_bwd_fp8_o87_wg34_{0,1_orig,1_mergewait,1_pipewait}_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o87_g5pipe_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o87_ncu_wg34_{0,1}_s4096.out.txt`。
