@@ -1,5 +1,5 @@
 === fa_bwd_run.py (P3-3c) 一键跑 ours + 汇总 ===
-cases=45 impls=['twofile', 'singlefile'] iters=3
+cases=45 impls=['twofile', 'singlefile'] iters=5
 [run] fp8 twofile b1_s1024_h16_d128_full_fp8
 [run] fp8 singlefile b1_s1024_h16_d128_full_fp8
 [run] fp8 twofile b1_s1024_h16_d256_full_fp8

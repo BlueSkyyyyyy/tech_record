@@ -1,0 +1,69 @@
+O103 (round 197): fp8 head_dim=256 LSE -> 4D-TMA  (--lsetma A/B, same binary)
+twofile = src/fp8/fa_bwd_fp8_main.cu   singlefile = src/fp8/fa_bwd_fp8_mma_onefile.cu
+build: -gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda
+date: 2026-10-01T05:27:22+08:00
+==================================================================
+--- [twofile] b1_s1024_h8_d256_causal_fp8  lsetma=1 ---
+O32: lse backend = tma
+[timing] total(quant+pre+main+cvt) 0.2649 ms  32.42 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0273 ms | preprocess 0.0157 ms | main 0.2056 ms | convert 0.0164 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.632e-01  max_rel=1.052e+02
+  dk   vs ref: max_abs=2.799e-01  max_rel=6.116e+01
+  dv   vs ref: max_abs=3.584e-01  max_rel=1.189e+02
+--- [twofile] b1_s1024_h8_d256_causal_fp8  lsetma=0 ---
+O32: lse backend = wgmma/mma
+[timing] total(quant+pre+main+cvt) 0.2792 ms  30.77 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0273 ms | preprocess 0.0279 ms | main 0.2069 ms | convert 0.0172 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.633e-01  max_rel=1.052e+02
+  dk   vs ref: max_abs=2.797e-01  max_rel=6.114e+01
+  dv   vs ref: max_abs=3.572e-01  max_rel=1.189e+02
+--- [twofile] b1_s4096_h8_d256_causal_fp8  lsetma=1 ---
+O32: lse backend = tma
+[timing] total(quant+pre+main+cvt) 2.6373 ms  52.11 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1003 ms | preprocess 0.0793 ms | main 2.4440 ms | convert 0.0138 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.076e-01  max_rel=1.377e+02
+  dk   vs ref: max_abs=3.052e-01  max_rel=1.322e+02
+  dv   vs ref: max_abs=3.776e-01  max_rel=6.097e+01
+--- [twofile] b1_s4096_h8_d256_causal_fp8  lsetma=0 ---
+O32: lse backend = wgmma/mma
+[timing] total(quant+pre+main+cvt) 2.7648 ms  49.71 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1010 ms | preprocess 0.2091 ms | main 2.4440 ms | convert 0.0107 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.078e-01  max_rel=1.377e+02
+  dk   vs ref: max_abs=3.040e-01  max_rel=1.322e+02
+  dv   vs ref: max_abs=3.771e-01  max_rel=6.094e+01
+--- [twofile] b1_s1024_h8_d256_full_fp8  lsetma=1 ---
+O32: lse backend = tma
+[timing] total(quant+pre+main+cvt) 0.2659 ms  32.30 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0274 ms | preprocess 0.0159 ms | main 0.2065 ms | convert 0.0161 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=5.004e+00  max_rel=2.397e+03
+  dk   vs ref: max_abs=6.392e+00  max_rel=2.430e+03
+  dv   vs ref: max_abs=4.976e+00  max_rel=3.486e+03
+--- [twofile] b1_s1024_h8_d256_full_fp8  lsetma=0 ---
+O32: lse backend = wgmma/mma
+[timing] total(quant+pre+main+cvt) 0.2785 ms  30.85 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0274 ms | preprocess 0.0276 ms | main 0.2060 ms | convert 0.0174 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=5.006e+00  max_rel=2.397e+03
+  dk   vs ref: max_abs=6.391e+00  max_rel=2.430e+03
+  dv   vs ref: max_abs=4.976e+00  max_rel=3.486e+03
+--- [twofile] b1_s4096_h16_d256_full_fp8  lsetma=1 ---
+O32: lse backend = tma
+[timing] total(quant+pre+main+cvt) 5.1792 ms  53.07 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1956 ms | preprocess 0.1446 ms | main 4.8372 ms | convert 0.0017 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=6.601e+00  max_rel=4.535e+03
+  dk   vs ref: max_abs=7.672e+00  max_rel=3.177e+03
+  dv   vs ref: max_abs=5.359e+00  max_rel=3.899e+03
+--- [twofile] b1_s4096_h16_d256_full_fp8  lsetma=0 ---
+O32: lse backend = wgmma/mma
+[timing] total(quant+pre+main+cvt) 5.4279 ms  50.64 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1960 ms | preprocess 0.3925 ms | main 4.8124 ms | convert 0.0271 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=6.603e+00  max_rel=4.536e+03
+  dk   vs ref: max_abs=7.673e+00  max_rel=3.177e+03
+  dv   vs ref: max_abs=5.359e+00  max_rel=3.899e+03
+==================================================================
+--- [singlefile] b1_s1024_h8_d256_causal_fp8 (default lsetma=1) ---
+O32: lse backend = tma
+[timing] total(quant+pre+main+cvt) 0.2650 ms  32.41 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0274 ms | preprocess 0.0158 ms | main 0.2053 ms | convert 0.0165 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.632e-01  max_rel=1.052e+02
+  dk   vs ref: max_abs=2.799e-01  max_rel=6.116e+01
+  dv   vs ref: max_abs=3.584e-01  max_rel=1.189e+02
