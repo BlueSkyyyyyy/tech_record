@@ -1,0 +1,34 @@
+O101 ncu：定长 full MLA（D=512, S1024 H2）LSE kernel 新旧对比（两文件，Hopper 构建）
+日期: 2026-10-01T04:20:11+08:00
+
+== old = O1 lse_mma_kernel<512> (--lse512old=1) ==
+==PROF== Profiling "lse_mma_kernel": 0%....50%....100% - 10 passes
+  void lse_mma_kernel<512>(const unsigned char *, const float *, const unsigned char *, const float *, float *, int, int, int, float, int, const int *) (16, 2, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    --------------------------------------------------- ----------- ------------
+    Metric Name                                         Metric Unit Metric Value
+    --------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %         0.12
+    gpu__time_duration.sum                                       us       544.16
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %         1.36
+    lts__t_sectors_op_read.sum                               sector       581881
+    lts__t_sectors_op_write.sum                              sector         3819
+    lts__throughput.avg.pct_of_peak_sustained_elapsed             %         0.45
+    sm__throughput.avg.pct_of_peak_sustained_elapsed              %         3.38
+    sm__warps_active.avg.pct_of_peak_sustained_active             %         6.25
+    --------------------------------------------------- ----------- ------------
+
+== new = lse_mma_kernel_bal<512,1,true> + split8 ==
+==PROF== Profiling "lse_mma_kernel_bal": 0%....50%....100% - 10 passes
+  void lse_mma_kernel_bal<512, 1, 1, 128, 64>(const unsigned char *, const float *, const unsigned char *, const float *, float *, int, int, int, float, const int *, float *, int) (16, 2, 8)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    --------------------------------------------------- ----------- ------------
+    Metric Name                                         Metric Unit Metric Value
+    --------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed            %         3.04
+    gpu__time_duration.sum                                       us        21.12
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %        18.38
+    lts__t_sectors_op_read.sum                               sector      1165932
+    lts__t_sectors_op_write.sum                              sector        25391
+    lts__throughput.avg.pct_of_peak_sustained_elapsed             %        20.35
+    sm__throughput.avg.pct_of_peak_sustained_elapsed              %        35.35
+    sm__warps_active.avg.pct_of_peak_sustained_active             %        12.11
+    --------------------------------------------------- ----------- ------------

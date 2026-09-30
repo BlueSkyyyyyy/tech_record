@@ -2217,3 +2217,31 @@ O92 把 `fp8 专项冲刺 F6-①`（降 L2 搬运）的 ksplit 路径判为关�
   （D=128 S4096）的 L2 `red` 主体墙仍是唯一真杠杆，本卡无软件解（见「阻塞」）。
 
 见 `docs/03` §122；原始输出 `src/fp8/fa_bwd_fp8_o100_{varlen_full_k_sweep,ab,accuracy,fa3_baseline}.out.txt`。
+
+### 5.109 第 195 轮（O101）：定长 full 的 LSE 补齐均衡/流水/split —— **正结果（默认）**
+
+**背景**：O54（第 101 轮，本文第 19 条 / `docs/03` §53）只把 **varlen** full MLA 的 LSE 从 O1 切到均衡 FULL+K split；
+O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL 但无 split）。O100 结尾留的
+`partial/split 的 full 标定` 中「split」这一半，**定长 full D=512（MLA）**从未做——实测其 LSE
+（O1 `lse_mma_kernel`）占 full MLA 端到端 **~65%**（S1024H2：preprocess 0.376ms > main 0.183ms）。
+
+- **改动（纯 host，device 一行未改、单/两文件同源）**：① D=512 full 的 LSE 从 O1 切到
+  `lse_mma_kernel_bal<512,1,true>` + K 维 split（`--lse512old=1` 退回 O1 做同 binary A/B）；
+  ② D=256 full 的均衡 LSE 接上 K 维 split（此前恒 1）；③ split auto 的 base 从「恒 `lg_bal.x`」
+  改为 `causal ? lg_bal.x : lg.x`（full 一个 CTA 一个 m 块 = `nblk`），target 取 full D=512 **256**、
+  full D=256 **512**（5+8 个 full shape 全扫确认 `base*split≈256/512` 最优）。causal 路径逐字不变。
+- **性能（同 binary A/B，iters=30，两文件）**：**D=512 full 端到端 S512H2 3.46× / S512H4 2.53× /
+  S1024H2 2.64× / S2048H2 2.19× / S4096H2 1.68×**（LSE 单向 6.5–15.8×）；D=256 full 小/中 S
+  1.02–1.14×、大 S 中性（LSE 只占 ~14%）。
+- **ncu（D=512 S1024H2）**：old `lse_mma_kernel<512>` 544µs / `sm 3.38%` / warps 6.25%（1 CTA/SM）/
+  DRAM 0.12%（纯「单线程顺序扫 K」的延迟 bound）→ new `lse_mma_kernel_bal<512,1,1,128,64>`
+  grid(16,2,**8**) **21.1µs（25.8×）/ sm 35.4% / warps 12.1% / L1TEX 18.4%**（`cp.async` 藏载入 +
+  split 铺满 2 CTA/SM 的并发槽）。新墙是 issue/延迟，不再主导端到端。
+- **数值/回归**：D=512/D=256 full 的 relL2 vs fp32 ref 全在护栏内（dq 8.14–8.24 / dk 8.29–8.39 /
+  dv 6.69–6.79 %），`max_abs` O(0.02–0.09)；单/两文件 worst 8.94e-8；全量 `--ci --dtype fp8`
+  一致性 gate **worst 6.199e-6 OK**、`--check docs/04` **OK（214 行）**；causal 与 D=128 full 逐位不变。
+- **外部基线**：MLA D=512 full 的 FA2.7.4/FA3/（fp16/ fp8）TE **均 NA**，仅 ours。
+- **教训**：**「把某路径已有的优化补到另一条路径」时，必须核对所有分支**——O54 补 varlen、
+  O68/O70 补 D=128/D=256，「定长 full MLA」被两次改造同时漏掉，成了 full MLA 端到端的头号成本。
+
+见 `docs/03` §123；原始输出 `src/fp8/fa_bwd_fp8_o101_{ab,ncu}.out.txt`。
