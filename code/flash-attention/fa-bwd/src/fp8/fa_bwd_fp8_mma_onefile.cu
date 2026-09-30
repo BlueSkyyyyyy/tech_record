@@ -4123,9 +4123,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 // O37：两个薄 `__global__` 壳复用同一 `fp8_mma_body`。cp.async 版与 TMA 版签名只差两个
 //   `__grid_constant__` 描述符（`TMA=true` 才用到）。
 // O47：`NTH`/`NWAR` 同 `fp8_mma_body`（默认 128/2 与历史逐字等价；MLA 用 256/4）。
+// O104（第 198 轮）：`HSWAP`（默认 false）——把 O93 的跨 head 全局 LPT 调度从 `kvtma` 快路
+//   （D=128）推广到**通用 `fa_bwd_fp8_mma_kernel`**（D=256 默认走它）。`fp8_mma_body` 本就支持
+//   HSWAP（见 body 上方说明），此处只是把模板参透传；`HSWAP=false` 与历史逐位相同。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
            bool RCP = true, int NTH = THREADS, int NWAR = WN, bool KVPIPE = false, bool DET = false,
-           bool DET_HALF = false, bool DQONLY = false>
+           bool DET_HALF = false, bool DQONLY = false, bool HSWAP = false>
 __global__ void __launch_bounds__(NTH, (NTH == THREADS && HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8, const float* __restrict__ ks,
@@ -4142,7 +4145,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
                       float* __restrict__ dq_part = nullptr,
                       const int* __restrict__ part_base = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, false, false, NTH, NWAR, KVPIPE, DET,
-               DET_HALF, DQONLY>(
+               DET_HALF, DQONLY, HSWAP>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, nullptr, nullptr, nullptr, nullptr, mt_b, mt_m,
       dk_part, dv_part, nblk, dq_part, part_base);
@@ -5538,8 +5541,10 @@ static DiffStat diff_stat(const std::vector<float>& a, const std::vector<float>&
 // O7e-2：F16B=true 时 fold 的 Ap/dS3/dS2 用 16B 向量化写（见 kernels.cuh），默认开。
 // O27：RCP=true 时 fold 量化用「每行 rcp + 乘法」代替逐元素精确除法（见 kernels.cuh）。
 // O47：`NTH`/`NWAR` 透传给主 kernel（默认 128/2 与历史逐字等价；MLA 用 256/4）。
+// O104（第 198 轮）：`HSWAP`（默认 false）同 `fa_bwd_fp8_mma_kernel`——把 O93 的跨 head 全局 LPT
+//   调度推广到通用 mma/wgmma 主 kernel（D=256 默认走它）。`HSWAP=false` 与历史逐位相同。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
-          bool RCP = true, int NTH = THREADS, int NWAR = WN>
+          bool RCP = true, int NTH = THREADS, int NWAR = WN, bool HSWAP = false>
 static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
                             const unsigned char* k8, const float* ks,
                             const unsigned char* v8, const float* vs,
@@ -5552,9 +5557,11 @@ static void launch_bwd_main(dim3 mg, const unsigned char* q8, const float* qs,
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = WGMMA ? Cfg::smem_bytes_wgmma : Cfg::smem_bytes;
   CUDA_CHECK(cudaFuncSetAttribute(
-      fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR>,
+      fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR, false, false,
+                            false, false, HSWAP>,
       cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR><<<mg, NTH, kSmem>>>(
+  fa_bwd_fp8_mma_kernel<HD, BM, BN, REGDQ, WGMMA, PREL, F16B, RCP, NTH, NWAR, false, false,
+                        false, false, HSWAP><<<mg, NTH, kSmem>>>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, mt_b, mt_m);
 }
@@ -7311,7 +7318,14 @@ int main(int argc, char** argv) {
 
   // O89：定长 causal 的 LPT m 块调度序（`--mrev=1`），与两文件版 `fa_bwd_fp8_main.cu` 同源。
   int* d_mrev = nullptr;
-  if (mrev_opt && causal && D == 128 && (S + 63) / 64 >= 16) {  // O89：nblk>=16（S>=1024）才启用，避免小 S 噪声
+  // O104（第 198 轮）：把 O93 的跨 head 全局 LPT（hswap）从 D=128 推广到 **D=256 的通用 wgmma
+  //   主 kernel**。实测（本卡，见 docs/03 §126）：hswap 对 D=256 的收益**只在小 `base_grid`
+  //   （=`nblk*H*B ≤ 256`，即 K/V 工作集小、hswap 损 L2 局部性可忽略）时为正**——
+  //   S1024H8 1.15×、S1024H16kv4 1.09×、S2048H8 1.02×；而 S2048H16（base=512）、S4096H8
+  //   （base=512）为负（0.95×/0.84×）。故只在 `base_grid ≤ 256` 且 causal 定长 nblk≥16 时启用。
+  const bool mrev_elig = (D == 128) || (D == 256 && hswap_opt != 0 &&
+                                        (long)((S + 63) / 64) * H * B <= 256);
+  if (mrev_opt && causal && mrev_elig && (S + 63) / 64 >= 16) {  // O89：nblk>=16（S>=1024）才启用，避免小 S 噪声
     const int nblk_m = (S + 63) / 64;
     std::vector<int> hrev(nblk_m);
     for (int i = 0; i < nblk_m; ++i) hrev[i] = nblk_m - 1 - i;
@@ -7319,7 +7333,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemcpy(d_mrev, hrev.data(), nblk_m * sizeof(int), cudaMemcpyHostToDevice));
     printf("O89: mrev on (nblk=%d, LPT expensive-first)\n", nblk_m);
   } else if (mrev_opt) {
-    printf("O89: mrev requested but ignored (need causal & D==128 & fixed-length)\n");
+    printf("O89: mrev requested but ignored (need causal & D==128/256 & fixed-length)\n");
   }
   // O93：跨 head 全局 LPT（轴对调）的启用条件（与 launch 分支一致）。仅 Hopper 构建生效。
   const bool hswap_elig = (hswap_opt != 0) && (mrev_opt != 0) && causal && D == 128 &&
@@ -7327,10 +7341,24 @@ int main(int argc, char** argv) {
 #if defined(FA_WGMMA) && defined(FA_TMA)
   if (hswap_elig)
     printf("O93: hswap on (grid=(H,nblk*ksplit,B), global LPT across heads)\n");
-  else if (hswap_opt)
+  else if (hswap_opt && D == 128)
     printf("O93: hswap requested but ignored (need causal & D==128 & nblk>=16)\n");
 #else
-  if (hswap_opt) printf("O93: hswap requested but ignored (非 Hopper 构建)\n");
+  if (hswap_opt && D == 128) printf("O93: hswap requested but ignored (非 Hopper 构建)\n");
+#endif
+  // O104（第 198 轮）：把 O93 的跨 head 全局 LPT 从 `kvtma`（D=128）推广到**通用 wgmma 主 kernel**
+  //   （D=256 默认档）。只需 `-DFA_WGMMA`（不需 TMA——D=256 走 cp.async）；`--hswap=0` 关闭。
+  const bool hswap256_elig = (hswap_opt != 0) && (mrev_opt != 0) && causal && D == 256 &&
+                             (S + 63) / 64 >= 16 &&
+                             (long)((S + 63) / 64) * H * B <= 256;
+#if defined(FA_WGMMA)
+  if (hswap256_elig)
+    printf("O104: hswap256 on (D=256, grid=(H,nblk*ksplit,B), global LPT across heads)\n");
+  else if (hswap_opt && D == 256 && (long)((S + 63) / 64) * H * B > 256)
+    printf("O104: hswap256 skipped for D=256 (base_grid=%ld > 256: L2 locality loss > LPT gain)\n",
+           (long)((S + 63) / 64) * H * B);
+#else
+  if (hswap_opt && D == 256) printf("O104: hswap256 requested but ignored (非 Hopper 构建)\n");
 #endif
   // O95：变 ks 调度表（`--ksm=N`）。仅 hswap eligible 时构建；表按 mt 升序（= 全局 LPT）排列，
   //   前 N 个（最贵）m 块 ks=2、其余 ks=1。`slot_tab` 由主 kernel 在 HSWAP 路径消费。
@@ -7525,6 +7553,11 @@ int main(int argc, char** argv) {
   // O93：hswap（跨 head 全局 LPT）启用时把自动 ksplit 收到 2（与两文件版同源）。
 #if defined(FA_WGMMA) && defined(FA_TMA)
   if (hswap_elig && ksplit_auto) ksplit = 2;
+#endif
+  // O104：D=256 hswap 把自动 ksplit 收到 **4**（实测最优；k=2 过细、并行度不足，k=8/16 又损
+  //   Q/dO 重读 + 局部性）。`--ksplit=K` 显式给出时不覆盖。
+#if defined(FA_WGMMA)
+  if (hswap256_elig && ksplit_auto) ksplit = 4;
 #endif
   // O7：只有 HD=128（dQ 一次铺满 N）且「平均每 CTA 的 nt tile 足够多」时才启用寄存器累加。
   // 因果下每 mblk 的 nt tile 数 ≈ (m0+BM)/BN，三角求和 /(mblk·ksplit) 后平均每 CTA
@@ -7871,6 +7904,16 @@ int main(int argc, char** argv) {
       }
 #endif
       if (d256_wg) {
+        // O104：hswap256（跨 head 全局 LPT）——head 走快轴，grid=(H, nblk*ksplit, B)，配 O89 的
+        //   `d_mrev`（LPT 反转表）⇒ 所有 head 的最贵 m 块一起先跑。只改调度，dK/dV 仍是可交换
+        //   的跨 CTA 原子 ⇒ 数值只在 fp8 噪声内。`--hswap=0` 回退历史锯齿序。
+        if (hswap256_elig) {
+          dim3 mgh256(H, mg.x, mg.z);
+          launch_bwd_main<256, 64, 32, false, true, true, true, true, THREADS, WN, true>(
+              mgh256, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
+          return;
+        }
         launch_bwd_main<256, 64, 32, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
                                                   d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
                                                   d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);

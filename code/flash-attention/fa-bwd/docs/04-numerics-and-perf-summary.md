@@ -3285,3 +3285,21 @@ full，**causal D=256** 一直沿用 O29 的 `target_ctas = S/2`（按 causal ML
   `--ci --dtype fp8` 单/两文件 gate **worst 7.629e-06 OK**、`--check docs/04` OK。
 
 见 `docs/03` §125、`docs/08` §5.111；原始输出 `src/fp8/fa_bwd_fp8_o103_*`。
+
+## 55. O104（第一百九十八轮，**正结果，默认**）：fp8 `head_dim=256` causal 的跨 head 全局 LPT
+
+- **动机**：`fp8 专项冲刺`剩余唯一「不改工作划分/指令」的调度杠杆是 O93 的跨 head 全局 LPT
+  （`HSWAP`）；O93 只接在 `kvtma`（D=128、需 TMA），而 **D=256 默认走通用
+  `fa_bwd_fp8_mma_kernel`**（wgmma + cp.async、非 TMA），一直没有 LPT 排序。
+- **改动（device 一行数学未改 + host、单/两文件同源）**：通用 kernel/launcher 加 `bool HSWAP`
+  并透传 `fp8_mma_body`；host 对 D=256 定长 causal、`base_grid=nblk*H*B ≤ 256`、nblk≥16 建 O89
+  `d_mrev` + grid 轴对调 + 自动 ksplit=4；`--hswap=0` A/B。
+- **性能（同 binary A/B，iters=150，total）**：S1024H8 **1.141×**、S1024H16kv4 **1.093×**、
+  S2048H8 **1.017×**；大 `base_grid`（S2048H16/S4096H8）为负 ⇒ 门控在 `base_grid ≤ 256`，
+  门控外逐值不变。main-only（S1024H8）0.2051→0.1838ms。
+- **ncu（D=256 causal S1024H8 main）**：Duration **231.5→194.5µs**、**`op_read` 2.665M→1.939M
+  （−27%）**、**`op_red` 一字不变**（D=256 无 regdq）、L2 利用率 58.8%→69.9%。
+- **精度护栏**：relL2 vs fp32 ref 与 hswap0 **逐位相同 8.332/8.434/6.464%**；`--ci --dtype fp8`
+  gate **worst 7.629e-06 OK**、`--check docs/04` OK；D=256 fp8 无 FA/TE 外部列。
+
+见 `docs/03` §126、`docs/08` §5.112；原始输出 `src/fp8/fa_bwd_fp8_o104_*`。

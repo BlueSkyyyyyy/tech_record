@@ -3180,9 +3180,16 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       （grid 轴对调，head 走快轴）后，**ksplit=2 首次成为最优**（S4096 main 1.4304→1.3742ms、
        total 1.6686→1.6109ms；Q/dO 重读 8×→2×、ncu `read` −13%、`red` −8%）。**① 由「关闭」
        转为「部分达成」**（dK/dV `red` 主体墙仍在）。见 `docs/03` §116、`docs/08` §5.102。
-       → **① 的「ksplit 随 m 变化」子项已判决（第 189 轮 O95）：中性/负结果**（表驱动 per-m ksplit，
-       槽位 −44% 但 L2 总扇区仅 −1.5%，因 `read` 主体是 K/V 读、与 ksplit 无关；MQA 例外 +2.6%）。
-       默认仍均匀 ksplit=2。见 `docs/03` §117、`docs/08` §5.103。
+        → **① 的「ksplit 随 m 变化」子项已判决（第 189 轮 O95）：中性/负结果**（表驱动 per-m ksplit，
+        槽位 −44% 但 L2 总扇区仅 −1.5%，因 `read` 主体是 K/V 读、与 ksplit 无关；MQA 例外 +2.6%）。
+        默认仍均匀 ksplit=2。见 `docs/03` §117、`docs/08` §5.103。
+        → **① 的全局 LPT 推广到 `head_dim=256`（第 198 轮 O104，正结果/默认）**：O93 的 `HSWAP`
+        此前只接 `kvtma`（D=128）；本轮给通用 `fa_bwd_fp8_mma_kernel`/`launch_bwd_main` 加
+        `bool HSWAP` 并透传，host 对 **D=256 定长 causal、`base_grid=nblk*H*B ≤ 256`、nblk≥16**
+        建 O89 `d_mrev` + grid 轴对调 + ksplit=4。**S1024H8 1.141× / S1024H16kv4 1.093× /
+        S2048H8 1.017×**（total）；大 base_grid（S2048H16/S4096H8）为负 ⇒ 门控在 `base_grid≤256`。
+        ncu：`op_read` −27%、`op_red` **一字不变**（无 regdq）、Duration 231.5→194.5µs。
+        `--hswap=0` A/B；数值逐位/护栏内。见 `docs/03` §126、`docs/08` §5.112。
 - [~] **F3b**：① **GEMM3/4/5 上 RS wgmma（第一百七十四/一百七十五轮 O79/O80 打通）**——
       TE SASS 证其用 `QGMMA RS_TN`（A 在寄存器）+ `STSM/LDSM` 配对粒度转置；O79 冒烟证
       `ldmatrix.x4` 的 A 片段直接喂 `wgmma.m64n32k32` RS（max_abs=0 PASS）；**O80（第 175 轮）
@@ -3262,7 +3269,23 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百九十七轮）**：**O103——head_dim=256 的 LSE 上 4D-TMA——正结果，默认**。
+> **最新（第一百九十八轮）**：**O104——fp8 `head_dim=256` causal 的跨 head 全局 LPT
+> （`hswap256`）——正结果，默认**。O93 的 `HSWAP` 此前只接在 `kvtma` 快路（D=128、需 TMA），
+> 而 **D=256 默认走通用 `fa_bwd_fp8_mma_kernel`**（wgmma 档、cp.async、非 TMA），一直没有 LPT
+> 排序。本轮给通用 kernel/launcher 加 `bool HSWAP` 并透传 `fp8_mma_body`（device 一行数学未改），
+> host 对 D=256 定长 causal、`base_grid=nblk*H*B ≤ 256`、nblk≥16 建 O89 的 `d_mrev`、
+> grid 改 `(H,nblk*ksplit,B)`、自动 ksplit 收 4；`--hswap=0` 回退。**性能（同 binary A/B，
+> iters=150）**：S1024H8 total **1.141×**、S1024H16kv4 **1.093×**、S2048H8 **1.017×**；
+> **但大 `base_grid` 为负**（S2048H16/S4096H8 hswap 0.84–0.95×）⇒ 按 `base_grid ≤ 256` 门控
+> （门控外逐值不变）。**ncu（S1024H8 main）**：Duration **231.5→194.5µs**、**`op_read`
+> 2.665M→1.939M（−27%）**、**`op_red` 一字不变**（D=256 无 regdq）、L2 利用率 58.8→69.9%。
+> 机制 = 全局 LPT 削尾波 + Q/dO 重读 k×→4×（与 O93 对 D=128 部分靠 dQ red 不同）。
+> 精度 relL2 vs ref 与 hswap0 **逐位相同 8.332/8.434/6.464%**、`--ci --dtype fp8` gate worst
+> **7.629e-06 OK**、`--check docs/04` OK。见 `docs/03` §126、`docs/08` §5.112。
+> **下一步候选**：① **换卡**——`op_red`（dK/dV 主体墙）仍是唯一真杠杆，本卡无软件解；
+> ② `D>128` 的 `HSWAP`/多 warpgroup WS 复用（换卡后）；③ 非 main backlog / `--det` partial。
+>
+> **（第一百九十七轮）**：**O103——head_dim=256 的 LSE 上 4D-TMA——正结果，默认**。
 > 落实 O102「下一步候选 ③」的覆盖型 backlog（不撞 smem 墙的一条）：D=256 的 LSE 一直走
 > mma+`cp.async`，而 LSE 的 TMA kernel 早在 O74 就泛化为 `NCH=HD/128`（D=512 已用）、
 > `make_lse_map_fp8` 也早被 D=256 主 kernel 用过 ⇒ 缺口纯在 host。**纯 host、device 一行未改、
@@ -8247,6 +8270,33 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     **主体墙与 causal 旗舰 D=128 同源、本卡无软件解**（见「阻塞」）。见 `docs/03` §125、
     `docs/08` §5.111；原始输出 `src/fp8/fa_bwd_fp8_o103_d256_ab.out.txt`、
     `..._o103_ncu_lse_d256_s4096.out.txt`。
+
+- 2026-10-01（第一百九十八轮）：**O104——fp8 `head_dim=256` causal 的跨 head 全局 LPT
+  （`hswap256`）——正结果，默认**。落实 O103「下一步候选 ③」里不撞 smem 墙的一条。O93 的
+  `HSWAP`（跨 head 全局 LPT）此前只接在 `kvtma` 快路（D=128、需 TMA），而 **D=256 的生产默认
+  走通用 `fa_bwd_fp8_mma_kernel`**（`-DFA_WGMMA` 的 wgmma 档、cp.async 载入、非 TMA），一直没有
+  LPT 排序；`fp8_mma_body` 本就支持 `HSWAP`，缺的只是通用 kernel 的模板透传 + host。
+  - **改动（device 一行数学未改 + host；单/两文件 device 逐字一致）**：`fa_bwd_fp8_mma_kernel`
+    与 `launch_bwd_main` 加末位模板参 `bool HSWAP=false` 并透传 `fp8_mma_body`；host 对 D=256
+    定长 causal、`base_grid=nblk*H*B ≤ 256`、nblk≥16 时建 O89 的 `d_mrev`（m 块反转表）、
+    grid 改 `(H,nblk*ksplit,B)`（head 走快轴）、自动 ksplit 收 **4**；`--hswap=0` 回退历史锯齿序。
+    单文件由 `sync_onefile_device.py` 同步（`identical: True`），host 同源手改。
+  - **形状相关门控（关键）**：hswap256 只在小 `base_grid` 为正——**S1024H8 total 1.141×、
+    S1024H16kv4 1.093×、S2048H8 1.017×**；而 **S2048H16（base=512）/S4096H8（base=512）
+    hswap 在任意 k 都回退（0.84–0.95×）**（大 K/V 工作集下 hswap 把相邻 CTA 撒到不同 head、
+    损 L2 读局部性的代价盖过全局 LPT 收益）⇒ 按 `base_grid ≤ 256` 门控，门控外逐值不变。
+  - **ncu（D=256 causal S1024H8 main）**：Duration **231.5→194.5µs（1.19×）**、**`op_read`
+    2.665M→1.939M（−27%）**、**`op_red` 13.369M 一字不变**（D=256 无 `regdq`，降 ksplit 不减
+    dK/dV 的 red；收益 = 全局 LPT 削尾波 + Q/dO 重读 k×→4×）、L2 利用率 58.8%→69.9%。
+  - **精度/回归（护栏）**：`ours vs fp32 ref` relL2 S1024H8 causal 与 hswap0 **逐位相同
+    8.332/8.434/6.464%**（护栏 ≤8.5/≤8.6/≤6.8）；`hswap-vs-hswap0` max_abs 1.19e-7/4.77e-7/
+    7.15e-7（纯 atomic 次序）；`--ci --dtype fp8`（45 case）单/两文件 gate **worst 7.629e-06 OK**、
+    `--check docs/04` **OK（214 行）**；D=128/D=512/full/varlen/D=256 非 causal 逐字不变。
+    D=256 fp8 无 FA2/FA3/TE 列（TE fp8 报 invalid、FA3 无 fp8）。
+  - **判决：正结果、默认开启**。D=256 主 kernel 上第一条 `op_read` 下降的调度杠杆；
+    `op_red`（dK/dV 主体墙）仍与 causal 旗舰 D=128 同源、本卡无软件解（见「阻塞」）。
+    见 `docs/03` §126、`docs/08` §5.112；原始输出 `src/fp8/fa_bwd_fp8_o104_ab.out.txt`、
+    `..._o104_ncu_s1024h8.out.txt`、`..._o104_fa3_te_baseline.out.txt`、`..._o104_ci.out.txt`。
 
 ## 灵感 / backlog
 

@@ -1,0 +1,18 @@
+===== ncu S1024H8 D256 causal opt='--hswap=0' =====
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 9 passes
+  void fa_bwd_fp8_mma_kernel<256, 64, 32, 0, 1, 1, 1, 1, 128, 2, 0, 0, 0, 0, 0>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, const int *, const int *, float *, float *, int, float *, const int *) (256, 8, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                     us       231.52
+    lts__t_sectors_op_read.sum                             sector      2664819
+    lts__t_sectors_op_red.sum                              sector     13369344
+    lts__t_sectors_op_write.sum                            sector         3093
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        58.76
+    sm__throughput.avg.pct_of_peak_sustained_elapsed            %        24.79
+===== ncu S1024H8 D256 causal opt='' =====
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 9 passes
+  void fa_bwd_fp8_mma_kernel<256, 64, 32, 0, 1, 1, 1, 1, 128, 2, 0, 0, 0, 0, 1>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, const int *, const int *, float *, float *, int, float *, const int *) (8, 64, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                     us       194.53
+    lts__t_sectors_op_read.sum                             sector      1938942
+    lts__t_sectors_op_red.sum                              sector     13369344
+    lts__t_sectors_op_write.sum                            sector         2952
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        69.85
+    sm__throughput.avg.pct_of_peak_sustained_elapsed            %        24.49
