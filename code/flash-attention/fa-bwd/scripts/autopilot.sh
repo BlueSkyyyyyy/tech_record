@@ -29,8 +29,9 @@ PROMPT='你是 tech_record 仓库的长期自驱 agent，负责推进「flash-at
 **不要创建 AUTOPILOT_STOP（只有用户能停）。** 若遇无法解决的阻塞，写入 ROADMAP「阻塞」并结束本轮。
 全程不要请求人工确认、不要用 question 类工具。GPU 用 kernel_lab 容器，ncu 必须在该容器里跑，git push 需要代理（NO_PROXY 已含本地 vLLM）。
 **安全**：不要在仓库任何文件（文章/代码/注释/commit message）里出现目标 AI 卡的实际代号，一律用「目标卡」指代。
-**当前最高优先 = fp8 专项（见 ROADMAP『fp8 专项冲刺：用 SASS/PTX 对标 TE』）**：ours fp8 默认还是 mma.sync（HMMA/LDSM），要用 `ncu --page source --print-source sass` 研究 TE 的 `..._flash_bprop_wgmma_f8_...`（QGMMA+TMA+WARPGROUP, 64x64x128, 384线程, 132 CTA）并逐步把 fp8 main 切到 wgmma+TMA 路径（F1→F5）。工具 `harness/te_fp8_ncu.py`。
+**本轮只做 fp8 性能（见 ROADMAP『fp8 专项冲刺』+『下一批（fp8 继续）F6/F3b/F4b』）**：核心是降 L2 搬运量（ksplit 导致 Q/dO 重读 + 跨 CTA red），向 TE 逼近：ours fp8 默认还是 mma.sync（HMMA/LDSM），要用 `ncu --page source --print-source sass` 研究 TE 的 `..._flash_bprop_wgmma_f8_...`（QGMMA+TMA+WARPGROUP, 64x64x128, 384线程, 132 CTA）并逐步把 fp8 main 切到 wgmma+TMA 路径（F1→F5）。工具 `harness/te_fp8_ncu.py`。
 **对标**：与 FA 对比时一律用 **FA3（flash_attn_3，SM90，本机已编译好 3.0.0）**，不要用 flash_attn 2.7.4（那是 FA2/SM80）；基准统一用纯反向口径 `harness/fa_vs_te_bwd_only.py`（FA2/FA3/TE 三列）。
+**精度硬约束**：每轮 fp8 改动必须跑数值对拍——ours vs fp32 ref 的 relL2 dq/dk/dv 不得高于 8.2%/8.3%/6.5%（±0.3%），ours vs TE ≤ ~15%，max_abs 维持 O(0.2–0.9)；任何降精度换速度的改动必须 A/B 出误差，超护栏即回滚或 opt-in。
 **博客**：code/flash-attention/fa-bwd/docs/*.md 会通过 fa_include shortcode 自动内联到博客专题，改 docs 即等于更新博客。
 **网络容错**：若 `git push`（或线上 200 验证）因网络失败，先 `git commit` 到本地并继续本轮其它工作，不要因此阻塞或反复重试；在 ROADMAP 记一句“待推送”，网络恢复后补推即可。'
 
