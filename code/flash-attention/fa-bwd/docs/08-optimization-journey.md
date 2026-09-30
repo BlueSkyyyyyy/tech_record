@@ -2039,3 +2039,31 @@ L2 `red` bound、软件杠杆已尽」。本轮不做新算法，而是**闭环�
   解锁需 ≥2 独立 CTA/SM 的放大 tile（本卡达不到）或**换卡**。**O91 的新认知**：1 CTA/SM 的瓶颈是
   **单 barrier 域 `__syncthreads` 串行**，复活 BM≥128 档唯一路径是 **warp specialization**
   （多轮工程，且仍受同一 L2 墙）。见 `docs/03` §115；原始输出 `src/fp8/fa_bwd_fp8_o92_*.out.txt`。
+
+### 5.102 第 188 轮（O93）：跨 head 全局 LPT（grid 轴对调）+ 低 ksplit —— **正结果（默认）**
+
+O92 把 `fp8 专项冲刺 F6-①`（降 L2 搬运）的 ksplit 路径判为关闭（「auto=8 仍最优」），并复证
+「不改工作划分/指令即不可能转正」。本轮回到 **O89 的下一步候选 ③**：O89 的 `--mrev` 只是
+**per-head** 的 m 块降序，全局仍是锯齿。**O93 = 把 LPT 升级为跨 head 全局，并利用它解锁低 ksplit。**
+
+- **实现（device 数学一行未改）**：`fp8_mma_body` 加末位模板参 `HSWAP`，只改解码——`h=blockIdx.x`、
+  `mt=blockIdx.y/ksplit`、`part=blockIdx.y%ksplit`；host 用 `grid=(H, nblk*ksplit, B)` 启动（head
+  走**快轴**）⇒ 硬件按 `blockIdx.x` 最快的顺序派发 = 所有 head 的最贵 m 块一起先跑 = 全局 LPT。
+  `hswap_elig`（定长 causal D=128 nblk≥16）时自动把 ksplit 收到 **2**。**默认开**（`--hswap=0` 回退）；
+  单/两文件 device 逐字同源。
+- **性能（S4096 causal，同 binary A/B，iters=40）**：`mrev=1 hswap=0`（O89 默认）main 1.4304 /
+  total 1.6686ms（82.37TF）→ **hswap k=2：main 1.3742 / total 1.6109ms（85.32TF）= main 1.041× /
+  total 1.036×**。**关键**：hswap 在 k=8 时**反而慢**（1.87ms，跨 head 交错损 L2 局部性），只有
+  **hswap + k=2** 才最优 ⇒ 收益来自「全局 LPT 解锁的低 ksplit」，不是 hswap 本身。
+  S1024H32 main 1.10×、GQA kv4 1.13×；S512（门控外）不变。
+- **ncu（S4096，同 session）**：Duration 1.45→**1.39ms**、L2 总扇区 142.97M→**129.87M（−9.1%）**、
+  **`read` 27.88M→24.26M（−13.0%，Q/dO 重读 8×→2×）**、**`red` 114.52M→105.38M（−8.0%，dQ 跨 part
+  原子减少；dK/dV 主体不变）**、L2 利用率 81.0%→76.9%；**代价**：DRAM 219→557MB（2.5×，跨 head
+  交错损 L2 局部性），但主 kernel 墙是 L2 吞吐、DRAM 绝对量仍低 ⇒ 净快。
+- **精度护栏**：`ours vs ref` relL2 dq/dk/dv **8.148/8.263/6.489%**（护栏内，与 O91/O92 同档）；
+  `max_abs` 2.635/2.644/3.216e-1；`--ci --dtype fp8 --hopper` gate worst **7.629e-6 OK**、
+  `--check docs/04` OK。
+- **对标**：同 session TE FP8 纯反向 S4096 = 0.3049ms ⇒ ours total **5.30×**（O92 5.50×）、
+  main **4.52×**（O92 4.75×）。**判决：正结果、默认**；这是「不改工作划分/指令」类里第一条
+  `read`/`red` 双向下降的调度杠杆（对照 O89 只削尾波、`red` 一字不变）。见 `docs/03` §116；
+  原始输出 `src/fp8/fa_bwd_fp8_o93_*.out.txt`。

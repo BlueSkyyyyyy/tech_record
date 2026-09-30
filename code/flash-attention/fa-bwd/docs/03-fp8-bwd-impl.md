@@ -10138,3 +10138,95 @@ BULKRED / GQA 折叠 / 多 warpgroup）均已判决。本轮**不再引入新算
 见 `docs/08` §5.101、`ROADMAP`「当前进度 第一百八十七轮」/「下一步」；原始输出
 `src/fp8/fa_bwd_fp8_o92_{default_s4096,bulkred_s4096,sass_te_s4096,sass_ours_s4096,
 ncu_te_s4096,ncu_ours_s4096}.out.txt`。
+
+---
+
+## 116. O93（第 188 轮）：跨 head 全局 LPT（grid 轴对调）—— 默认 fp8 causal 主 kernel 的调度正结果
+
+> 承接 O89（`--mrev`，**per-head** 的 m 块降序 = LPT 贵块先跑，S4096 main 1.022×）与
+> `ROADMAP`「fp8 专项冲刺 F6-①」的下一步候选 ③：**把 LPT 从「每个 head 内」升级到「跨 head
+> 全局」**，并把由此解锁的**低 ksplit**（消 Q/dO 重读）一起利用。**不改任何数据/数学通路**，
+> 只改「哪个 CTA 算哪个 `(h, mblk, part)`」。**默认开启**（`--hswap=0` 回退）。
+
+### 116.1 动机
+
+O89 的 `mrev` 只让**每个 head 内部**按 m 降序派发（`grid=(nblk*ksplit, H, B)`、`blockIdx.y=h`
+是慢轴），序列是「`[64…1][64…1]…[64…1]`」的**锯齿**——每个 head 边界处负载重置，全局并非单调下降。
+O92 的 ksplit 复扫（1/2/4/8/16 = 2.032/1.804/1.694/**1.667**/1.821ms）证明低 ksplit 的**尾波**
+补不回来，而高 ksplit 正是 Q/dO 被重复读（8×）与 dQ 跨 part 原子的根源。
+
+**O93 的思路**：把 head 放到 **`blockIdx.x` 快轴**——`grid=(H, nblk*ksplit, B)`，硬件按
+`blockIdx.x` 最快的线性顺序派发 ⇒ 前 `H` 个 CTA 是 **所有 head 最贵的 m 块**、随后依次降档，
+天然 = **跨 head 的全局 LPT**。全局单调下降让「长任务」全部尽早开始，尾波只剩最便宜块，
+于是**低 ksplit 的负载均衡第一次够用**，可以放心把 ksplit 收到 2。
+
+### 116.2 实现（device 一行数学未改；单/两文件 device 逐字同源）
+
+- **device（`fa_bwd_fp8_kernels.cuh`）**：给 `fp8_mma_body` 加末位模板参 `bool HSWAP=false`，
+  仅改解码三行：
+  ```cpp
+  const int part = HSWAP ? (blockIdx.y % ksplit) : (blockIdx.x % ksplit);
+  const int mt   = HSWAP ? (blockIdx.y / ksplit) : (blockIdx.x / ksplit);
+  const int h    = HSWAP ? blockIdx.x : blockIdx.y;
+  ```
+  `fp8_mma_kvtma_kernel` 加同名额模板参并透传；其余 kernel 用默认 `false`（零影响）。
+- **host（`fa_bwd_fp8_main.cu`）**：`launch_bwd_main_kvtma` 加 `bool HSWAP`；默认分支在
+  `hswap_opt && d_mrev`（即 O89 的 mrev 表已建：定长 causal D=128 nblk≥16）时，用
+  `dim3(H, mg.x, mg.z)` 启动 + `HSWAP=true`。默认 `hswap_opt=1`，`--hswap=0` 回退。
+- **自动 ksplit**：`hswap_elig` 且未显式 `--ksplit` 时把 auto ksplit 置 **2**（仅 Hopper
+  `-DFA_WGMMA -DFA_TMA` 构建）。历史路径/非 D=128/非 causal/varlen 一律不变。
+- **单文件** `fa_bwd_fp8_mma_onefile.cu` 由 `scripts/sync_onefile_device.py` 同步（`identical=True`），
+  host 段手工同源（声明/CLI/launch/print）。
+
+### 116.3 性能（S=4096 H16 B1 causal，同 binary A/B，event iters=40）
+
+| 配置 | main (ms) | total (ms) | TFLOPS |
+|---|---|---|---|
+| `mrev=0 hswap=0`（O88 前） | 1.4768 | 1.7151 | 80.13 |
+| `mrev=1 hswap=0`（**O89 默认**，ksplit=8） | 1.4304 | 1.6686 | 82.37 |
+| `hswap=1` ksplit=8 | 1.8699（0.76×） | 2.0936 | 65.65 |
+| `hswap=1` ksplit=4 | 1.4028 | 1.6349 | 84.07 |
+| **`hswap=1` ksplit=2（新默认）** | **1.3742** | **1.6109** | **85.32** |
+| `hswap=1` ksplit=1 | 1.4558 | 1.6900 | 81.32 |
+
+- **主结果**：main **1.4304→1.3742ms（1.041×）**、total **1.6686→1.6109ms（1.036×，82.37→85.32 TF）**。
+- **关键判据**：`hswap=1` 在 ksplit=8 时**反而慢**（跨 head 交错损 L2 读局部性、细粒度下更明显），
+  但 **hswap=1 + ksplit=2** 才最优 —— 说明收益来自「全局 LPT 解锁的低 ksplit」而非 hswap 本身。
+- **其它形状（默认 vs `--hswap=0`）**：S1024H32 main 0.2448→**0.2224（1.10×）**；
+  GQA kv4 main 0.2367→**0.2100（1.13×）**；S512（nblk=8，门控外）不变。
+
+### 116.4 ncu（S=4096 causal，同 session，`fa_bwd_fp8_mma_kvtma_kernel`）
+
+| 指标 | `--hswap=0`（k=8） | 默认 `hswap`（k=2） | 变化 |
+|---|---|---|---|
+| Duration | 1.45 ms | **1.39 ms** | −4% |
+| L2 总扇区 | 142.97 M | **129.87 M** | **−9.1%** |
+| L2 `op_read` | 27.88 M | **24.26 M** | **−13.0%** |
+| L2 `op_red` | 114.52 M | **105.38 M** | **−8.0%** |
+| L2 利用率 | 81.0% | 76.9% | — |
+| DRAM 字节 | 219 MB | 557 MB | **+2.5×** |
+| warps active | 18.6% | 18.7% | — |
+
+- **真降 L2 搬运**：ksplit=8→2 使 Q/dO 重读从 8× 降到 2×（`read −13%`），dQ 跨 part 原子
+  也随之减少（`red` 中 dQ 部分 −8%）。`red` 的 dK/dV 主体（~104M）不变——仍是工作划分决定。
+- **代价**：跨 head 交错使并发 CTA 落在 16 个 head ⇒ L2 局部性下降，**DRAM 字节 2.5×**。
+  但主 kernel 墙是 **L2 吞吐（81→77%）**，DRAM 仅 4.5→11.7%（绝对量仍低），故 **L2 降幅盖过
+  DRAM 升幅、净快**。换卡时需复核 L2/DRAM 比（见 `docs/05`）。
+
+### 116.5 精度护栏（S=4096 causal，`ours_hp vs fp32 ref` relL2）
+
+- dq **8.148%** / dk **8.263%** / dv **6.489%** —— 全在护栏（≤8.2 / 8.3 / 6.5）内，
+  与 O91/O92 同档（调度只改 atomic 加法次序，数值在 fp8 噪声内）。
+- `max_abs` 2.635 / 2.644 / 3.216e-1（O(0.2–0.9)）。`ours vs TE` relL2 13.4/13.5/28.2%
+  （dv 的 28% 由 TE 自身 vs-ref 27.45% 主导，非回退）。
+- `--ci --dtype fp8 --hopper`：一致性 gate worst **7.629e-6 OK**、`--check docs/04` OK（198 行）。
+
+### 116.6 对标与判决
+
+- 同 session TE FP8 纯反向 S4096 = **0.3049ms**（`harness/fa_bwd_bench.py bench --dtype fp8`）：
+  ours total **5.30×**（O92 时 5.50×）、main **4.52×**（O92 时 4.75×）。**向 TE 靠近了一步。**
+- **判决：正结果，默认开启。** 这是 `fp8 专项冲刺 F6-①`（降 L2 搬运：Q/dO 重读 + 跨 CTA red）
+  在「不改工作划分、不改指令」前提下**第一条真正双向降 L2 的调度杠杆**（O89 的 mrev 只削尾波、
+  `red` 一字不变；O93 的 `read/red` 都降）。`red` 的 dK/dV 主体墙（O83/O91/O92 已收口）不变。
+- 原始输出：`src/fp8/fa_bwd_fp8_o93_{ab_s4096,ab_shapes,accuracy,tebench_s4096,
+  ncu_hswap0_s4096,ncu_hswap1_s4096}.out.txt`。见 `docs/08` §5.102、`ROADMAP`「当前进度 第一百八十八轮」。

@@ -3189,3 +3189,30 @@ auto-table 在 rtol=0.005 内不变）。详见 `docs/01` §25、`docs/01b` §6b
   stall `short_scoreboard 1.82`/`wait 1.56` 均不变 ⇒ 收益 = **尾波/负载均衡**，与 L2 搬运量无关
   （再次印证 `red` bound；减 `red` 仍需改工作划分）。
 - 详见 `docs/03` §112、`docs/08` §5.98；原始输出 `src/fp8/fa_bwd_fp8_o89_*`。
+
+---
+
+## 52. O93（第一百八十八轮，**正结果，默认**）：fp8 主 kernel 的**跨 head 全局 LPT**（grid 轴对调）+ 低 ksplit
+
+承接 §51（O89，per-head LPT m 块降序，`red` 一字不变）：O93 把 LPT 升级为**跨 head 全局**
+并在其解锁下把 **ksplit 8→2**（消 Q/dO 重读）。**device 数学一行未改**（`fp8_mma_body` 加
+`bool HSWAP`，只改 `h/mt/part` 从哪个 blockIdx 取；host `grid=(H, nblk*ksplit, B)` head 走快轴），
+`hswap_elig`（定长 causal D=128 nblk≥16）时 auto ksplit 收到 2。默认开（`--hswap=0` 回退）。
+
+| S4096 H16 B1 causal（iters=40，同 binary A/B） | main (ms) | total (ms) | TFLOPS |
+|---|---|---|---|
+| `hswap=0`（§51 默认，ksplit=8） | 1.4304 | 1.6686 | 82.37 |
+| `hswap=1` ksplit=8 | 1.8699 | 2.0936 | 65.65 |
+| **`hswap=1` ksplit=2（新默认）** | **1.3742** | **1.6109** | **85.32** |
+
+- **main 1.041× / total 1.036×**；其它 causal D=128：S1024H32 1.10×、GQA kv4 1.13×。
+- **ncu（默认 vs `--hswap=0`）**：Duration 1.45→1.39ms、L2 总扇区 −9.1%、`read` −13.0%
+  （Q/dO 重读 8×→2×）、`red` −8.0%（dQ 跨 part 原子减少）；代价 DRAM 219→557MB（跨 head 交错
+  损 L2 局部性），但主 kernel 墙是 L2 吞吐 ⇒ 净快。
+- **数值（vs fp32 ref，relL2）**：S4096 dq/dk/dv **8.148 / 8.263 / 6.489%**（护栏 8.2/8.3/6.5 内，
+  与 §51 同档）；`max_abs` 2.635/2.644/3.216e-1。`--ci --dtype fp8 --hopper` gate worst
+  **7.629e-6 OK**、`--check docs/04` OK。
+- **对标**：同 session TE FP8 纯反向 S4096 = 0.3049ms ⇒ ours total **5.30×**（§51 时 5.50×）、
+  main **4.52×**（§51 时 4.75×）。
+
+见 `docs/03` §116、`docs/08` §5.102；原始输出 `src/fp8/fa_bwd_fp8_o93_*.out.txt`。

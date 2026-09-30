@@ -1,0 +1,45 @@
+### O93（第 188 轮）A/B：跨 head 全局 LPT（hswap）+ ksplit —— S4096 H16 B1 causal fp8，两文件版
+### 同 binary（sm90a -DFA_WGMMA -DFA_TMA），event iters=40
+
+=== args: --mrev=0 --hswap=0 --ksplit=8 ===
+[timing] total(quant+pre+main+cvt) 1.7151 ms  80.13 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1056 ms | preprocess 0.1207 ms | main 1.4768 ms | convert 0.0120 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --mrev=1 --hswap=0 --ksplit=8 ===
+O89: mrev on (nblk=64, LPT expensive-first)
+[timing] total(quant+pre+main+cvt) 1.6686 ms  82.37 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1057 ms | preprocess 0.1210 ms | main 1.4304 ms | convert 0.0115 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --mrev=1 --hswap=0 --ksplit=4 ===
+O89: mrev on (nblk=64, LPT expensive-first)
+[timing] total(quant+pre+main+cvt) 1.6818 ms  81.72 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1059 ms | preprocess 0.1218 ms | main 1.4528 ms | convert 0.0014 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --mrev=1 --hswap=0 --ksplit=2 ===
+O89: mrev on (nblk=64, LPT expensive-first)
+[timing] total(quant+pre+main+cvt) 1.8059 ms  76.10 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1062 ms | preprocess 0.1231 ms | main 1.5435 ms | convert 0.0332 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --mrev=1 --hswap=1 --ksplit=8 ===
+O89: mrev on (nblk=64, LPT expensive-first)
+O93: hswap on (grid=(H,nblk*ksplit,B), global LPT across heads)
+[timing] total(quant+pre+main+cvt) 2.0936 ms  65.65 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1060 ms | preprocess 0.1219 ms | main 1.8699 ms | convert -0.0043 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --mrev=1 --hswap=1 --ksplit=4 ===
+O89: mrev on (nblk=64, LPT expensive-first)
+O93: hswap on (grid=(H,nblk*ksplit,B), global LPT across heads)
+[timing] total(quant+pre+main+cvt) 1.6349 ms  84.07 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1061 ms | preprocess 0.1221 ms | main 1.4028 ms | convert 0.0039 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --mrev=1 --hswap=1 --ksplit=2 ===
+O89: mrev on (nblk=64, LPT expensive-first)
+O93: hswap on (grid=(H,nblk*ksplit,B), global LPT across heads)
+[timing] total(quant+pre+main+cvt) 1.6109 ms  85.32 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1059 ms | preprocess 0.1211 ms | main 1.3742 ms | convert 0.0096 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+=== args: --mrev=1 --hswap=1 --ksplit=1 ===
+O89: mrev on (nblk=64, LPT expensive-first)
+O93: hswap on (grid=(H,nblk*ksplit,B), global LPT across heads)
+[timing] total(quant+pre+main+cvt) 1.6900 ms  81.32 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1056 ms | preprocess 0.1203 ms | main 1.4558 ms | convert 0.0084 ms (cvt_on=0, qfuse=1, dfuse=1)
