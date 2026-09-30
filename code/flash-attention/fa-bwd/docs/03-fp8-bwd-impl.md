@@ -11202,3 +11202,86 @@ ksplit 切得很细（S1024H2 → k=16，grid=256×2=512 但只有 132 个并发
   旗舰 D=128 同源，**无软件解**（见「阻塞」）。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o105_ab.out.txt`、
   `src/fp8/fa_bwd_fp8_o105_ncu_s1024h2_mrev{0,1}.out.txt`；见 `docs/08` §5.113。
+
+---
+
+## 128. 第 200 轮：O106——fp8 变长（varlen）causal 主 kernel 的 per-head LPT（`mrev_varlen`）——正结果，默认
+
+### 128.1 动机
+
+O89（D=128 定长 per-head LPT）→ O93（D=128 跨 head 全局 LPT）→ O104（D=256 hswap256）→
+O105（D=512 per-head mrev）把「**不改数据通路、不改 L2 搬运量，只改 CTA→m 块的派发顺序**」这条
+调度杠杆，逐个补到 fp8 的定长因果路径；但**变长（varlen）causal 一直没接**。变长因果的偏斜比
+定长更重——同一 `maxlen` 网格里短序列产生大量早退死 CTA、且每个序列内 K 循环长 ∝
+`ceil(len_b/BM)`、causal 下 m 越大越贵。默认非紧凑网格直接把 `mt = blockIdx.x/ksplit` 当 mblk
+（**LPT 的反面**：便宜块先派发、贵块压尾波）。有意思的是 §120 的 varlen LSE **早已**把镜像对表
+按降序工作量 `stable_sort`（`pairs` 表），主 kernel 却从没接这条。
+
+### 128.2 实现（纯 host、device 一行未改、单/两文件同源）
+
+- `run_varlen` 末尾加 `int mrev_flag`（由 `main` 透传 `mrev_opt`，默认 1）；新增 `d_mrev_v`
+  （大小 `nblk_max = ceil(maxlen/BM)`，`hrev[i]=nblk_max-1-i`）。非紧凑网格把 `d_mrev_v` 当
+  `mt_m` 传入（`mt_b=nullptr` ⇒ `b=blockIdx.z`）——`fp8_mma_body` 顶部的 `mblk = mt_m?mt_m[mt]:mt`
+  本就支持（O89 的机制），故 **device 零改动**；`--compact` 走 `mt` 表本身，不叠加。
+- **形状门控（关键，同 O104）**：`mrev_v_elig = mrev_flag && causal && (D==128||D==512) &&
+  nblk_max>=16 && (long)total_mt < (long)nblk_max*B`。最后一条 = **名义 maxlen 网格被短序列
+  padding**（存在早退死 CTA、序列不齐）。依据：4 个 D=128 varlen shape 实测，**不齐**的
+  b4_t3840 +1.5%、b8_t2904 +1.0%、b5_t3968 +0.8%（均 maxlen=2048），而**等长** b4_t4096
+  （无 padding）为 **−1.1%**（纯 LPT 打乱同序列相邻 m 的 K/V 微局部性、收益不抵）；故门控在
+  「有 padding」，等长档逐值不变。`--mrev=0` 回退历史锯齿序。
+- 单文件 `fa_bwd_fp8_mma_onefile.cu` 的同一段 host 代码逐字同步（`run_varlen` 签名、门控、调用点）。
+
+### 128.3 性能（同 binary A/B，iters=200，3× 复测）
+
+| case | grid (ksplit) | mrev=0 | mrev=1 | 比值 |
+|---|---|---|---|---|
+| varlen b4_t3840 H16 D128 causal | (128,16,4) k=4, total_mt=60/nblk32·B4 | 0.8627 | **0.8502** | **1.015×** |
+| varlen b8_t2904 H16 D128 causal | (64,16,8) k=2, total_mt=48/nblk32·B8 | 0.7403 | **0.7330** | **1.010×** |
+| varlen b5_t3968 H32 D128 causal | (32,32,5) k=1, total_mt=62/nblk32·B5 | 1.7104 | **1.6970** | **1.008×** |
+| varlen b3_t1792 H2 **D512** causal | (64,2,3) k=4, total_mt=28/nblk16·B3 | 0.2545 | **0.2357** | **1.080×** |
+| varlen b4_t4096 H16 D128 causal（等长、门控外） | (64,16,4) k=4, total_mt=64/64 | 0.7160 | 0.7173 | 1.00×（不变） |
+| varlen b1_t512（nblk=8，门控外） | D128/D512 | — | — | 中性 |
+
+3× 复测（iters=200）：b4_t3840 0.8635/0.8634/0.8652 → 0.8502/0.8489/0.8515（**1.016× 稳定**）；
+b8_t2904 0.7435/0.7450/0.7425 → 0.7335/0.7320/0.7329（**1.015× 稳定**）；
+b3_t1792 D512 0.2536/0.2534/0.2521 → 0.2356/0.2361/0.2368（**1.071× 稳定**）。
+
+### 128.4 ncu（同 session，main kernel，launch-skip/count=1）
+
+| case | mrev | Duration | `lts op_red` | `lts op_read` | L2 util | warps | regs |
+|---|---|---|---|---|---|---|---|
+| b8_t2904 D128 | 0 | 593.5 µs | 30,292,992 | 8,570,973 | 53.95% | 17.76% | 168 |
+| b8_t2904 D128 | 1 | **582.6 µs** | **30,292,992** | 8,536,827 | **54.96%** | 17.90% | 168 |
+| b3_t1792 **D512** | 0 | 203.8 µs | 8,945,664 | 1,552,485 | 44.91% | 12.49% | 249 |
+| b3_t1792 **D512** | 1 | **180.96 µs** | **8,945,664** | 1,551,479 | **50.60%** | 12.49% | 249 |
+
+⇒ **`op_red`/`op_read`/`op_write` 逐位不变**（D512 的 `op_read` 仅 1.5M 内噪声、`op_red` 一字不变）、
+regs/warps 不变，**Duration 却降**（D512 main ncu **1.126×**）——收益**纯来自尾波/负载均衡**（削平
+causal 偏斜下最后几个贵 m 块的尾波），与 O89/O105 同源、**不是**降 L2 搬运量。D512 的 L2 利用率
+44.9%→50.6% 印证「尾波被填满、带宽用得更满」。
+
+### 128.5 数值 / 回归（护栏）
+
+- `ours vs fp32 ref` 的 `max_abs` 与 `mrev=0` **逐位相同**（只改 atomic 加法次序）：
+  b4_t3840 **2.935/2.938/4.179e-1**、b8_t2904 **3.136/3.584/4.030e-1**、
+  b3_t1792 D512 **3.404/3.436/3.508e-1**（fp8 噪声 O(0.2–0.6)，护栏内）；
+- 单/两文件一致性（`--dtype fp8 --varlen-only --impls both --hopper --consistency`）：**worst
+  1.907e-06 OK**（ours/ours_hp/ours_sf/ours_sf_hp 四列对拍逐位相同）；
+- **全量 `--ci --dtype fp8 --hopper`（45 case）gate worst 9.537e-06 OK**、`--check docs/04`
+  **OK（214 行）**；定长（D=128 kvtma/D=256 hswap256/D=512 mrev/MLA）与 full 路径逐字不变。
+- fp8 varlen causal 无 FA3/TE 外部列（FA3 不支持 fp8、TE fp8 变长不可用），只对 fp32 ref。
+
+### 128.6 结论 / 下一步
+
+- **判决：正结果、默认开启**。补齐「LPT 调度杠杆」在 fp8 上的最后一块拼图（D=128/256/512 ×
+  定长/变长 × causal）。形状门控在「maxlen 网格有 padding」——等长 varlen 与 nblk<16 的小 shape
+  逐值不变。
+- 仍属**不改 L2 搬运量**的调度优化：主 kernel 的 `op_red`（dK/dV 主体墙）仍与本卡 causal 旗舰
+  D=128 同源，**无软件解**（见「阻塞」）；varlen causal 的 D512 主 kernel 已到 **1.126× ncu**
+  （tail）。
+- **下一步候选**：① **换卡**（更大 smem/寄存器）；② 确定性路径减 partial 字节；③ 余下覆盖型
+  backlog（MLA 降 smem）。见 `docs/03` §127 / `docs/08` §5.113 同源。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o106_ab.out.txt`、
+  `src/fp8/fa_bwd_fp8_o106_ncu_b8_t2904_h16_d128.out.txt`、
+  `src/fp8/fa_bwd_fp8_o106_ncu_b3_t1792_h2_d512.out.txt`、`src/fp8/fa_bwd_fp8_o106_consistency.out.txt`、
+  `src/fp8/fa_bwd_fp8_o106_ci.out.txt`；见 `docs/08` §5.114。

@@ -613,7 +613,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
                       int mla_kvp = -1, int lseocc = 0, int lse8w = 0,
                       const std::string& dump = "", int det_ab = 0, int det_ksplit = 1,
                        int fuse_reduce = 1, int part_compact = 0, int qfuseflag = 1,
-                       int dfuseflag = 1, int vksplit = -1) {
+                       int dfuseflag = 1, int vksplit = -1, int mrev_flag = 1) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -794,6 +794,32 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   const int ksplit = (vksplit >= 1) ? vksplit : (int)auto_k;
   const bool use_regdq = (D == 128) && ((long)(maxlen / 32) / (causal ? 2 : 1) / ksplit >= 4);
 
+  // O106（第 200 轮）：把 O89/O105 的**per-head LPT m 块反转**（`mblk = nblk-1-mt`）推广到
+  //   **变长（varlen）causal 主 kernel**。同一序列内 K 循环长 ∝ `ceil(len_b/BM)`，causal 下
+  //   m 越大越贵；默认非紧凑网格直接把 `mt = blockIdx.x/ksplit` 当 mblk，是 LPT 的反面（便宜块
+  //   先派发、贵块压尾波）。LSE 早已按降序工作量排序（镜像对表），主 kernel 一直没接。只改
+  //   「哪个 CTA 算哪个 m 块」，dK/dV 仍是可交换的跨 CTA `atomicAdd` ⇒ 数值仅在 fp8 噪声内。
+  //   仅 causal、D==128/512、`nblk_max>=16` 生效（非紧凑网格；`--compact` 走 mt 表本身，不叠加）；
+  //   `--mrev=0` 回退历史锯齿序。
+  int* d_mrev_v = nullptr;
+  const int nblk_mv = (maxlen + BM - 1) / BM;
+  //   形状门控（关键，同 O104 hswap256）：只在**名义网格被短序列 padding**（`total_mt < nblk_max*B`，
+  //   即存在早退死 CTA、序列长度不齐）时为正——4 个 D=128 shape 实测 b4_t3840 +1.6% / b8_t2904
+  //   +1.5% / b5_t3968 +0.6%（均不齐、maxlen=2048），而**等长 b4_t4096（无 padding）为 −1.1%**
+  //   （纯 LPT 打乱同序列相邻 m 的 K/V 微局部性、收益不抵）；D=512 b3_t1792 +7.1%。故门控在
+  //   「有 padding」；等长档逐值不变。
+  const bool mrev_v_elig = (mrev_flag != 0) && causal && (D == 128 || D == 512) &&
+                           nblk_mv >= 16 && (long)total_mt < (long)nblk_mv * B;
+  if (mrev_v_elig) {
+    std::vector<int> hrev(nblk_mv);
+    for (int i = 0; i < nblk_mv; ++i) hrev[i] = nblk_mv - 1 - i;
+    CUDA_CHECK(cudaMalloc(&d_mrev_v, nblk_mv * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_mrev_v, hrev.data(), nblk_mv * sizeof(int), cudaMemcpyHostToDevice));
+    printf("O106: varlen mrev on (nblk=%d, LPT expensive-first)\n", nblk_mv);
+  } else if (mrev_flag) {
+    printf("O106: varlen mrev requested but ignored (need causal & D==128/512 & nblk>=16)\n");
+  }
+
   // O40：varlen LSE 的 K 维 split auto（D=128 目标 `grid*split≈2048`、cap 8；D=512 `≈256`、
   //   cap 16，与定长 O38/O39 同标定）；`--lsesplit=N`（>0）直接指定。再按最大序列的 tile 数封顶。
   const int nblk0 = (maxlen + LBM - 1) / LBM;
@@ -971,8 +997,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     //   默认走旧的 maxlen 网格（含早退死 CTA，实测反而更快，见 docs/03 §40）。
     dim3 mg = compact ? dim3(total_mt * ksplit, H, 1)
                       : dim3((maxlen + BM - 1) / BM * ksplit, H, B);
+    // O106：非紧凑 varlen 网格把 O89 的 m 块反转表当作 `mt_m`（`mt_b=null` 时 b=blockIdx.z）。
     const int* mtb = compact ? d_mtb : nullptr;
-    const int* mtm = compact ? d_mtm : nullptr;
+    const int* mtm = compact ? d_mtm : d_mrev_v;
     if (D == 512) {
       // MLA：非 wgmma / 非 regdq（与定长 D=512 路径一致）。
       // O52：把定长路径的 O47（8-warp/256 线程）+ O51（K/V cp.async 回填流水）搬进 varlen MLA。
@@ -1910,7 +1937,7 @@ int main(int argc, char** argv) {
   if (varlen)
     return run_varlen(dir, causal, iters, compact_opt, lse_compact_opt, lse_split, mla8w_opt,
                        mla_kvp_opt, lseocc_opt, lse8w_opt, dump_prefix, det_ab, det_ksplit,
-                       fuse_reduce, part_compact, qfuse, dfuse, ksplit);
+                       fuse_reduce, part_compact, qfuse, dfuse, ksplit, mrev_opt);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");

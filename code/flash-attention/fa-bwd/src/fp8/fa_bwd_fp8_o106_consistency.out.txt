@@ -1,0 +1,25 @@
+=== fa-bwd 实现一致性（P3-3f/P3-3g）：ours_hp vs ours_sf_hp（max_abs，逐元素）===
+baseline-free：两者都算同一数学；期望差异仅跨 CTA atomicAdd 次序（dtype ulp）。
+判据（按 dtype）：max|ours_hp-ours_sf_hp| <= ctol；fp8=0.0001（任一超出则退出码 1）
+
+[fp8]
+  varlen_b1_t512_h16_d128_causal_fp8              dq=1.192e-07  dk=2.384e-07  dv=4.768e-07
+  varlen_b1_t512_h2_d512_causal_fp8               dq=1.192e-07  dk=2.384e-07  dv=9.537e-07
+  varlen_b1_t512_h2_d512_full_fp8                 dq=8.941e-08  dk=5.960e-08  dv=5.960e-08
+  varlen_b3_t1792_h2_d512_causal_fp8              dq=1.192e-07  dk=2.384e-07  dv=4.768e-07
+  varlen_b3_t1792_h2_d512_full_fp8                dq=1.192e-07  dk=5.960e-08  dv=5.960e-08
+  varlen_b4_t3840_h16_d128_causal_fp8             dq=1.192e-07  dk=2.384e-07  dv=4.768e-07
+  varlen_b4_t3840_h16_d128_full_fp8               dq=1.192e-07  dk=1.192e-07  dv=1.192e-07
+  varlen_b4_t4096_h16_d128_causal_fp8             dq=1.192e-07  dk=7.153e-07  dv=9.537e-07
+  varlen_b4_t4096_h16_d128_full_fp8               dq=5.960e-08  dk=1.192e-07  dv=5.960e-08
+  varlen_b5_t3968_h32_d128_causal_fp8             dq=0.000e+00  dk=1.431e-06  dv=1.907e-06
+  varlen_b5_t3968_h32_d128_full_fp8               dq=5.960e-08  dk=2.384e-07  dv=2.384e-07
+  varlen_b8_t2904_h16_d128_causal_fp8             dq=0.000e+00  dk=7.153e-07  dv=9.537e-07
+  varlen_b8_t2904_h16_d128_full_fp8               dq=1.192e-07  dk=1.192e-07  dv=7.451e-08
+
+=== 小结（13 case 有 ours_hp/ours_sf_hp 双方；0 case 缺一侧）===
+  max|ours_hp-ours_sf_hp| over all cases: dq = 1.192e-07  (varlen_b1_t512_h16_d128_causal_fp8)
+  max|ours_hp-ours_sf_hp| over all cases: dk = 1.431e-06  (varlen_b5_t3968_h32_d128_causal_fp8)
+  max|ours_hp-ours_sf_hp| over all cases: dv = 1.907e-06  (varlen_b5_t3968_h32_d128_causal_fp8)
+  worst = 1.907e-06
+  gate[fp8 ] worst=1.907e-06  tol=0.0001  -> OK

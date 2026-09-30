@@ -1,0 +1,17 @@
+### O106 ncu: varlen_b3_t1792_h2_d512_causal_fp8 （fa_bwd_fp8_mma_kernel, launch-skip 1, launch-count 1）
+--- mrev=0 ---
+    gpu__time_duration.sum                                         us       204.35
+    launch__registers_per_thread                      register/thread          249
+    lts__t_sectors_op_read.sum                                 sector      1548757
+    lts__t_sectors_op_red.sum                                  sector      8945664
+    lts__t_sectors_op_write.sum                                sector         3032
+    lts__throughput.avg.pct_of_peak_sustained_elapsed               %        44.76
+    sm__warps_active.avg.pct_of_peak_sustained_active               %        12.49
+--- mrev=1 ---
+    gpu__time_duration.sum                                         us       182.40
+    launch__registers_per_thread                      register/thread          249
+    lts__t_sectors_op_read.sum                                 sector      1590134
+    lts__t_sectors_op_red.sum                                  sector      8945664
+    lts__t_sectors_op_write.sum                                sector         2997
+    lts__throughput.avg.pct_of_peak_sustained_elapsed               %        50.28
+    sm__warps_active.avg.pct_of_peak_sustained_active               %        12.49
