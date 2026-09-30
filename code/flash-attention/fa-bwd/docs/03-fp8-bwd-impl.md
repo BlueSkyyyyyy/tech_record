@@ -9874,3 +9874,83 @@ ksplit 复扫（`mrev=1`，main ms）：k=1 **1.792** / k=2 1.547 / k=4 1.445 / 
 - 原始输出：`src/fp8/fa_bwd_fp8_o89_ab_mrev_s4096.out.txt`、
   `..._o89_ab_mrev_shapes.out.txt`、`..._o89_ncu_mrev_{0,1}_s4096.out.txt`、
   `..._o89_ci_fp8.out.txt`。
+
+## 113. 第 185 轮（O90 / F6-step3）：wgmma2 的 K/V 4D-TMA 化（K 双缓冲）—— 负结果（opt-in `--wg2tma`）
+
+### 113.1 动机
+
+默认 fp8 main（`kvtma`，BM=64）在本卡是 **L2 `red` bound**（`red` 114.5M 扇区、占 L2 流量
+80%、Duration×L2% ≈ TE 的 6.9×），且 F3b/F4b/F6/F7 已证所有「不改工作划分」的杠杆失效。
+唯一能真正减 `red` 的是 **BM 64→128**（每个 KV 元素被一半的 CTA 贡献 ⇒ `red` 精确砍半，
+O17b/F6 的既有结论）。F6 第二步的 `wgmma2`（BM=128、2 warpgroup、GEMM1/2 wgmma + SW128）
+已实现，但只有默认档的 **~0.56×**——除 1 CTA/SM 外，每 tile 的 K/V 仍是「标量 global 读 +
+`__syncthreads`」串行。本轮（F6-step3）把 `wgmma2` 的 K/V 换成 **4D-TMA（K 双缓冲、V 单缓冲，
+复现 O41 的时序）**，验证「TMA 化 + `red` 砍半」能否把 BM=128 档拉回竞争区。
+
+### 113.2 实现
+
+新增 `fa_bwd_fp8_wgmma2_tma_kernel<HD, BM=128, BN=32>`（`kernels.cuh` 3d 节；单/两文件 device
+逐字一致，392 行核对 `identical=True`）+ host `wgmma2tma_smem_bytes`/`launch_bwd_wgmma2tma` +
+CLI `--wg2tma`（**opt-in，默认路径一行未改**；smem 约 140KB ⇒ 1 CTA/SM）。
+
+- Q/dO 仍**手工载入**（每 CTA 一次，非热点；SW128 + `__byte_perm` 重建 Qp/dOp，与 wgmma2 逐字相同）。
+- K/V 走 `tma_load_4d` + mbarrier：prologue 发 K[nt_begin]→stage0、K[nt_begin+1]→stage1、
+  V[nt_begin]→Vs；循环尾发 K[nt+2]→stage `stg`、V[nt+1]，等 K[nt+1]（stage `stg^1`）→
+  从 SW128 K stage 重建 Kp（`__byte_perm` 配对）→ 等 V[nt+1]；相位用 `kc0/kc1/vuse` 标量
+  （不落 local，复现 F3-a 的教训）。
+- 编译：208 regs / 0 spill / 1 barrier（wgmma2 为 212 regs）。
+
+### 113.3 实测（同 binary A/B，S=4096 H16 causal，event）
+
+| 配置 | main (ms) | total (ms) | TFLOPS |
+|---|---|---|---|
+| 默认 `kvtma`（BM=64，wgmma） | **1.4518** | **1.6765** | **81.98** |
+| `wg2`（BM=128，mma GEMM1/2） | 2.9533 | — | 40.3 |
+| `wg2wgmma`（F6：GEMM1/2 wgmma） | 2.8308 | — | 42.0 |
+| `wg2wgmma`+K/V-TMA（**本轮 O90**） | 2.7113 | 2.9494 | 46.6 |
+
+同 session `[O90 A/B]`：**wg2wgmma 2.8062 → +KVTMA 2.7113 ms（1.035×）**；S=512 为
+0.1067→0.1065（1.001×）。即 **K/V TMA 相对 wgmma2 仅省 ~3.5%（大 S）**，`wgmma2tma` 仍只有默认
+档的 **0.54×（S4096）/ 0.66×（S512）**。
+
+### 113.4 ncu 证据（S=4096 causal，`--launch-count 1`，默认 vs O90）
+
+| 指标 | 默认 `kvtma`（BM=64） | O90 `wgmma2_tma`（BM=128） |
+|---|---|---|
+| Duration | 1.45 ms | 2.72 ms |
+| `lts op_red` | 114,524,160 | **58,195,968（精确砍半）** |
+| `lts op_read` | 27,916,478 | **14,467,149（砍半）** |
+| `lts op_write` | 0.386M | 0.003M |
+| L2 利用率 | **81.06%** | **21.99%（带宽大量空闲）** |
+| L1/TEX | 74.82% | 51.13% |
+| Active warps | 18.62% | 12.50% |
+| CTA/SM | 3 | 1 |
+| `smsp inst` | 642.1M | 838.3M |
+| stall（short/wait/long） | 1.81 / 1.56 / 0.37 | 1.22 / 1.32 / 0.18 |
+
+⇒ **BM=128 把 L2 搬运量精确砍半**（`red`/`read`）——机制完全成立；但 L2 利用率从 81% 掉到
+22%（**省下来的带宽用不上**），根因是 **occupancy 18.62%→12.50%（3→1 CTA/SM）、仅 8 warp
+藏不住延迟**（K/V TMA 只把 `long_scoreboard` 0.37→0.18）。这正是 F6/O83 早已判定的
+「BM=128 在本卡停不到 2 CTA/SM」资源墙的直接体现。
+
+### 113.5 数值（护栏全过）
+
+- `ours_o90 vs fp32 ref` relL2：S4096 dq/dk/dv **8.15% / 8.39% / 6.52%**、S512 **8.18% /
+  8.41% / 6.36%**（护栏 dq≤8.2 / dk≤8.3±0.3 / dv≤6.5±0.3；与默认档 ~8.2/8.3/6.5 同量级，
+  差异来自 BM=128 的 atomic 次序）。
+- `max_abs` vs ref：S4096 `2.635/2.760/3.325e-1`、S512 `2.426/2.996/3.713e-1`；
+  O90 A/B `wg2wgmma_tma vs wg2wgmma` max_abs `1.19e-7/2.38e-7/4.77e-7`（纯 atomic 次序）。
+- `ours_o90 vs 默认 ours_hp`：dq max_abs `4.6e-4`、dk `8.8e-2`、dv `4.5e-2`（fp8/BM 次序噪声）。
+- `ours vs TE` relL2 dq/dk ~13.4%、dv S512 12.0% / S4096 **28.2%**——注意 **TE-vs-ref 的 dv
+  本身在本 shape 就有 relL2 27.45%**，故该 28% 由 TE 自身误差主导，非本实现回退。
+- 单/两文件默认路径数值逐值不变（`ours_hp`==`ours_sf_hp`）；`--mma`（sm_90）构建亦编译通过。
+
+### 113.6 判决
+
+**负结果（opt-in，默认关）。** K/V TMA 化确实把 `wgmma2` 提速 3.5%（指令/搬运路径收益），但
+**BM=128 双 warpgroup 在本卡 1 CTA/SM 下是延迟/occupancy bound**（L2 利用率仅 22%），`red`
+砍半的收益被 8 warp 藏不住延迟完全吃掉。与 F6/O83/O86/O87 同一堵墙：**除非 256/384 线程 +
+多 warpgroup 摊累加器 / 换卡把 occupancy 拉起来，BM=128 无法转正**。本轮的 `wgmma2_tma` 与
+K/V-TMA helper 仍可复用（是后续 `D>128`/WS 版的基建）。见 `docs/08` §5.99、`ROADMAP`
+「fp8 专项冲刺 F6」。原始输出 `src/fp8/fa_bwd_fp8_o90_{ab_s4096,ab_s512,default_s4096,
+ncu_wg2tma_s4096,ncu_default_s4096}.out.txt`。
