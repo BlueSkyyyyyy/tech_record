@@ -1,0 +1,2 @@
+=== TE FP8 pure-bwd baseline (fa_bwd_bench.py bench --dtype fp8) ===
+[b1_s4096_h16_d128_causal_fp8] te=0.3035ms/905.61TF  (ours total 1.7956ms => ours/TE 5.92x)

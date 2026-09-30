@@ -75,6 +75,30 @@ static CUtensorMap make_lse_map_fp8(const void* ptr, long long H, long long S, l
   }
   return map;
 }
+
+// O78：为「按 head 分块」的 overlap 建**子范围**描述符——head 计数 `hc`（dims[2]）与
+//   全张量 head 数 `Hfull`（stride 用）解耦，基址前移 `h0*D`。这样 kernel 里 head 坐标
+//   仍取 `blockIdx.y∈[0,hc)`，而物理行距仍是全 head 数 ⇒ 与全量路径逐元素同址。
+static CUtensorMap make_map_fp8_chunk(const void* ptr, long long Hfull, long long h0, long long hc,
+                                      long long S, long long D, long long B, uint32_t boxR) {
+  CUtensorMap map;
+  uint64_t dims[4] = {(uint64_t)D, (uint64_t)S, (uint64_t)hc, (uint64_t)B};
+  uint64_t strides[3] = {(uint64_t)(Hfull * D), (uint64_t)D, (uint64_t)(S * Hfull * D)};
+  uint32_t box[4] = {128, boxR, 1, 1};
+  uint32_t estr[4] = {1, 1, 1, 1};
+  const char* base = reinterpret_cast<const char*>(ptr) + (size_t)h0 * D;
+  CUresult r = cuTensorMapEncodeTiled(
+      &map, CU_TENSOR_MAP_DATA_TYPE_UINT8, 4, (void*)base, dims, strides, box, estr,
+      CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+      CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  if (r != CUDA_SUCCESS) {
+    const char* s = "?";
+    cuGetErrorString(r, &s);
+    fprintf(stderr, "cuTensorMapEncodeTiled(chunk) failed: %s\n", s);
+    std::exit(1);
+  }
+  return map;
+}
 #endif
 
 // =============================================================================
@@ -279,14 +303,15 @@ static void launch_bwd_main_kvtma(dim3 mg, const CUtensorMap& qmap, const CUtens
                                   const unsigned char* do8, const float* dos,
                                   const float* delta, const float* lse, float* dq_acc,
                                   float* dk_acc, float* dv_acc, int S, int H, int Hkv,
-                                  float scale, int causal, int ksplit) {
+                                  float scale, int causal, int ksplit,
+                                  cudaStream_t st = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   constexpr int kSmem = Cfg::smem_bytes_wgmma_kvtma;
   CUDA_CHECK(cudaFuncSetAttribute(
       fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP>,
       cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
   fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP>
-      <<<mg, THREADS, kSmem>>>(qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos,
+      <<<mg, THREADS, kSmem, st>>>(qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos,
                                delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
                                ksplit);
 }
@@ -456,12 +481,13 @@ static void launch_lse_bal_wgmma(dim3 lg, const unsigned char* q8, const float* 
 template <int HD, int PIPE, bool FULL = false>
 static void launch_lse_bal_tma(dim3 lg, const CUtensorMap& qmap, const CUtensorMap& kmap,
                                const float* qs, const float* ks, float* lse, int S, int H,
-                               int Hkv, float scale, const int* cu = nullptr) {
+                               int Hkv, float scale, const int* cu = nullptr,
+                               cudaStream_t st = nullptr) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = Cfg::lse_smem_bytes_tma1;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<HD, PIPE, FULL>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  lse_mma_kernel_bal_tma<HD, PIPE, FULL><<<lg, THREADS, kSmem>>>(qmap, kmap, qs, ks, lse,
+  lse_mma_kernel_bal_tma<HD, PIPE, FULL><<<lg, THREADS, kSmem, st>>>(qmap, kmap, qs, ks, lse,
                                                                  nullptr, S, H, Hkv, scale, 1, cu);
 }
 
@@ -475,20 +501,20 @@ template <int HD, int PIPE>
 static void launch_lse_bal_tma_split(dim3 lg, const CUtensorMap& qmap, const CUtensorMap& kmap,
                                      const float* qs, const float* ks, float* lse,
                                      float* lse_part, int S, int H, int Hkv, float scale,
-                                     int ksplit) {
+                                     int ksplit, cudaStream_t st = nullptr) {
   using Cfg = Fp8Cfg<HD, 64, 32>;
   constexpr int kSmem = Cfg::lse_smem_bytes_tma1;
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<HD, PIPE>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
   const int B = (int)lg.z;
   dim3 g(lg.x, lg.y, (unsigned)(B * ksplit));
-  lse_mma_kernel_bal_tma<HD, PIPE><<<g, THREADS, kSmem>>>(qmap, kmap, qs, ks, lse, lse_part,
+  lse_mma_kernel_bal_tma<HD, PIPE><<<g, THREADS, kSmem, st>>>(qmap, kmap, qs, ks, lse, lse_part,
                                                           S, H, Hkv, scale, ksplit);
   if (ksplit > 1) {
     const long long nrows = (long long)B * S * H;
     const int th = 256;
     const long long bl = (nrows + th - 1) / th;
-    lse_split_merge_kernel<<<(unsigned)bl, th>>>(lse_part, lse, nrows, ksplit);
+    lse_split_merge_kernel<<<(unsigned)bl, th, 0, st>>>(lse_part, lse, nrows, ksplit);
   }
 }
 #endif
@@ -1605,6 +1631,17 @@ int main(int argc, char** argv) {
   //   （仅 `!wgmma` 的 mma 路径、且含 ksplit 的有效 grid ≤ SM 数时开；fp8 的 auto split-K
   //   通常已把小 S 的 grid 抬到 ≫132，故自动档在默认 shape 下不触发、保持逐位）。
   int d128w_opt = -1;
+  // O78（实验/诊断）：端到端 overlap 可行性探针。>0 时在默认计时后额外测「main 与 LSE
+  //   并发（两条非阻塞 stream）」相对「串行」的墙钟，用来判定本卡能否靠重叠非 main 阶段
+  //   提吞吐（ROADMAP「下一步候选 ②：preprocess/main 跨 head 流水」）。**只做计时诊断**，
+  //   并发期的 LSE 输出被丢弃、不影响已 dump 的结果。`--ovltest=1`。
+  int ovltest = 0;
+  // O78（正结果候选）：端到端 overlap —— 把 q/dO/K/V 按 **head 分成 ovlp 块**，用两条非阻塞
+  //   stream 把「LSE(chunk k+1)」与「main(chunk k)」重叠（quant 仍整体在流水前）。
+  //   仅定长 / D=128 / causal / MHA(Hkv==H) / 默认 wgmma+4D-TMA / H%ovlp==0 时启用；
+  //   否则逐字退回原串行路径。`--ovlp=N`（N≥2）。见 docs/03 §101。
+  int ovlp = 0;
+  int ovl_nolse = 0;   // O78 诊断控制：1=跳过 LSE 发射，只测「分块 main 串行」的下界。
   // P3-4e：1 = 跑「确定性 dK/dV（partial + 固定次序归约）」A/B（仅 D=128 定长 mma 默认路径，
   //   对齐 fp16/bf16 O7b；`--det` 或 `--det=1`）。默认关，不影响常规计时。
   int det_ab = 0;
@@ -1647,6 +1684,9 @@ int main(int argc, char** argv) {
     else if (a.rfind("--lse8w=", 0) == 0) lse8w_opt = atoi(a.c_str() + 8);
     else if (a == "--lse8w") lse8w_opt = 1;
     else if (a.rfind("--d128w=", 0) == 0) d128w_opt = atoi(a.c_str() + 8);
+    else if (a.rfind("--ovltest=", 0) == 0) ovltest = atoi(a.c_str() + 10);
+    else if (a.rfind("--ovlp=", 0) == 0) ovlp = atoi(a.c_str() + 7);
+    else if (a.rfind("--ovlnolse=", 0) == 0) ovl_nolse = atoi(a.c_str() + 11);
     else if (a == "--d128w") d128w_opt = 1;
     else if (a.rfind("--det=", 0) == 0) det_ab = atoi(a.c_str() + 6);
     else if (a == "--det") det_ab = 1;
@@ -2273,6 +2313,46 @@ int main(int argc, char** argv) {
                                                         (int)causal, ksplit);
   };
 
+  // ---- O78：端到端 overlap（按 head 分块，LSE 与 main 跨 stream 流水）的设置。----
+  const bool ovlp_req = (ovlp >= 2) && (D == 128) && causal && (Hkv == H) && (H % ovlp == 0) &&
+                        qfuse && qfast && dfuse && delta_warp_sel;
+  int ovlp_n = ovlp_req ? ovlp : 0;
+  const int ovlp_hc = ovlp_n ? (H / ovlp_n) : H;
+  bool ovlp_path = false;
+  std::vector<CUtensorMap> c_q, c_d, c_k, c_v, c_lq, c_lk;
+  cudaStream_t ovA = nullptr, ovB = nullptr;
+  std::vector<cudaEvent_t> ov_eL(ovlp_n), ov_eM(ovlp_n);
+  cudaEvent_t ov_eQ = nullptr;
+  CUDA_CHECK(cudaEventCreateWithFlags(&ov_eQ, cudaEventDisableTiming));
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  {
+    const bool rcp_sel0 = (foldrcp_opt != 0);
+    if (ovlp_n && wgmma && qd_tma && kv_tma && prel_sel && f16b_sel && rcp_sel0) {
+      ovlp_path = true;
+      for (int k = 0; k < ovlp_n; ++k) {
+        const long long h0 = (long long)k * ovlp_hc;
+        c_q.push_back(make_map_fp8_chunk(d_q8, H, h0, ovlp_hc, S, D, B, 64));
+        c_d.push_back(make_map_fp8_chunk(d_do8, H, h0, ovlp_hc, S, D, B, 64));
+        c_k.push_back(make_map_fp8_chunk(d_k8, Hkv, h0, ovlp_hc, S, D, B, 32));
+        c_v.push_back(make_map_fp8_chunk(d_v8, Hkv, h0, ovlp_hc, S, D, B, 32));
+        c_lq.push_back(make_map_fp8_chunk(d_q8, H, h0, ovlp_hc, S, D, B, 64));
+        c_lk.push_back(make_map_fp8_chunk(d_k8, Hkv, h0, ovlp_hc, S, D, B, 64));
+      }
+      CUDA_CHECK(cudaStreamCreateWithFlags(&ovA, cudaStreamNonBlocking));
+      CUDA_CHECK(cudaStreamCreateWithFlags(&ovB, cudaStreamNonBlocking));
+      for (int k = 0; k < ovlp_n; ++k) {
+        CUDA_CHECK(cudaEventCreateWithFlags(&ov_eL[k], cudaEventDisableTiming));
+        CUDA_CHECK(cudaEventCreateWithFlags(&ov_eM[k], cudaEventDisableTiming));
+      }
+      printf("O78: overlap ON, head chunks=%d (hc=%d), LSE(sA) || main(sB)\n", ovlp_n, ovlp_hc);
+    } else if (ovlp >= 2) {
+      printf("O78: overlap requested but conditions unmet (D=%d causal=%d Hkv=%d H=%d "
+             "wgmma=%d qd_tma=%d kv_tma=%d) -> serial\n",
+             D, (int)causal, Hkv, H, wgmma, qd_tma, kv_tma);
+    }
+  }
+#endif
+
   auto run_all = [&]() {
     if (qfuse && qfast) {
       // O66：默认把 delta 也融进 quant kernel（`dfuse && delta_warp_sel`）。
@@ -2285,6 +2365,44 @@ int main(int argc, char** argv) {
       CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+    }
+    if (ovlp_path) {
+      // O78：按 head 分块，LSE(sA) 与 main(sB) 流水。quant（含 delta/清零）已在 default stream
+      //   整体完成，两条 stream 先等 `ov_eQ`。
+      CUDA_CHECK(cudaEventRecord(ov_eQ));
+      CUDA_CHECK(cudaStreamWaitEvent(ovA, ov_eQ, 0));
+      CUDA_CHECK(cudaStreamWaitEvent(ovB, ov_eQ, 0));
+      for (int k = 0; k < ovlp_n; ++k) {
+        const long long h0 = (long long)k * ovlp_hc;
+        dim3 lgc(lg_bal.x, (unsigned)ovlp_hc, B);
+        if (!ovl_nolse) {
+          launch_lse_bal_tma<128, 1>(lgc, c_lq[k], c_lk[k], d_qs + h0, d_ks + h0, d_lse + h0,
+                                     S, H, Hkv, scale, nullptr, ovA);
+          CUDA_CHECK(cudaEventRecord(ov_eL[k], ovA));
+          CUDA_CHECK(cudaStreamWaitEvent(ovB, ov_eL[k], 0));
+        }
+        dim3 mgc(mg.x, (unsigned)ovlp_hc, mg.z);
+        if (use_regdq)
+          launch_bwd_main_kvtma<128, 64, 32, true>(
+              mgc, c_q[k], c_d[k], c_k[k], c_v[k], d_q8 + (size_t)h0 * D, d_qs + h0,
+              d_k8 + (size_t)h0 * D, d_ks + h0, d_v8 + (size_t)h0 * D, d_vs + h0,
+              d_do8 + (size_t)h0 * D, d_dos + h0, d_delta + h0, d_lse + h0,
+              d_dq_acc + (size_t)h0 * D, d_dk_acc + (size_t)h0 * D, d_dv_acc + (size_t)h0 * D,
+              S, H, Hkv, scale, (int)causal, ksplit, ovB);
+        else
+          launch_bwd_main_kvtma<128, 64, 32, false>(
+              mgc, c_q[k], c_d[k], c_k[k], c_v[k], d_q8 + (size_t)h0 * D, d_qs + h0,
+              d_k8 + (size_t)h0 * D, d_ks + h0, d_v8 + (size_t)h0 * D, d_vs + h0,
+              d_do8 + (size_t)h0 * D, d_dos + h0, d_delta + h0, d_lse + h0,
+              d_dq_acc + (size_t)h0 * D, d_dk_acc + (size_t)h0 * D, d_dv_acc + (size_t)h0 * D,
+              S, H, Hkv, scale, (int)causal, ksplit, ovB);
+        CUDA_CHECK(cudaEventRecord(ov_eM[k], ovB));
+      }
+      for (int k = 0; k < ovlp_n; ++k) CUDA_CHECK(cudaStreamWaitEvent(nullptr, ov_eM[k], 0));
+      if (cvt_on)
+        convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
+                                                    d_dv, nq, nkv);
+      return;
     }
     // O66：delta 已在 quant 阶段算好时，preprocess 跳过独立 delta launch。
     run_preprocess(!(qfuse && qfast && dfuse && delta_warp_sel));
@@ -2346,6 +2464,72 @@ int main(int argc, char** argv) {
   ms_main /= iters;
   printf("[timing] quant %.4f ms | preprocess %.4f ms | main %.4f ms | convert %.4f ms (cvt_on=%d, qfuse=%d, dfuse=%d)\n",
          ms_quant, ms_pre, ms_main, ms - ms_quant - ms_pre - ms_main, cvt_on, qfuse, dfuse);
+
+  // ---- O78（实验/诊断）：main 与 LSE 并发（两条非阻塞 stream）vs 串行的墙钟对比。
+  //   目的：判定「端到端 overlap（preprocess/main 跨 head 流水）」在本卡是否可行。
+  //   只计时、不改结果（并发期的 LSE 写与 main 读 d_lse 竞争，输出丢弃）。----
+  if (ovltest && D == 128 && causal) {
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    const bool rcp_sel = (foldrcp_opt != 0);
+    if (wgmma && qd_tma && kv_tma && prel_sel && f16b_sel && rcp_sel) {
+      cudaStream_t sA, sB;
+      CUDA_CHECK(cudaStreamCreateWithFlags(&sA, cudaStreamNonBlocking));
+      CUDA_CHECK(cudaStreamCreateWithFlags(&sB, cudaStreamNonBlocking));
+      auto lse_s = [&](cudaStream_t s) {
+        if (lse_split_eff > 1)
+          launch_lse_bal_tma_split<128, 1>(lg_bal, qmap_lse, kmap_lse, d_qs, d_ks, d_lse,
+                                           d_lse_part, S, H, Hkv, scale, lse_split_eff, s);
+        else
+          launch_lse_bal_tma<128, 1>(lg_bal, qmap_lse, kmap_lse, d_qs, d_ks, d_lse, S, H, Hkv,
+                                     scale, nullptr, s);
+      };
+      auto main_s = [&](cudaStream_t s) {
+        if (use_regdq)
+          launch_bwd_main_kvtma<128, 64, 32, true>(mg, qmap_main, dmap_main, kmap_main, vmap_main,
+              d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit, s);
+        else
+          launch_bwd_main_kvtma<128, 64, 32, false>(mg, qmap_main, dmap_main, kmap_main, vmap_main,
+              d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit, s);
+      };
+      for (int i = 0; i < 3; ++i) { main_s(sA); lse_s(sB); }
+      CUDA_CHECK(cudaStreamSynchronize(sA));
+      CUDA_CHECK(cudaStreamSynchronize(sB));
+      cudaEvent_t e0, e1, eA, eB;
+      CUDA_CHECK(cudaEventCreate(&e0)); CUDA_CHECK(cudaEventCreate(&e1));
+      CUDA_CHECK(cudaEventCreate(&eA)); CUDA_CHECK(cudaEventCreate(&eB));
+      float t_main = 0.f, t_lse = 0.f, wall = 0.f;
+      CUDA_CHECK(cudaEventRecord(e0, sA));
+      for (int i = 0; i < iters; ++i) main_s(sA);
+      CUDA_CHECK(cudaEventRecord(e1, sA));
+      CUDA_CHECK(cudaEventSynchronize(e1));
+      CUDA_CHECK(cudaEventElapsedTime(&t_main, e0, e1)); t_main /= iters;
+      CUDA_CHECK(cudaEventRecord(e0, sB));
+      for (int i = 0; i < iters; ++i) lse_s(sB);
+      CUDA_CHECK(cudaEventRecord(e1, sB));
+      CUDA_CHECK(cudaEventSynchronize(e1));
+      CUDA_CHECK(cudaEventElapsedTime(&t_lse, e0, e1)); t_lse /= iters;
+      // 并发：两 stream 同时发（eA=main 完、eB=lse 完），sA 等 eB 后记 e1 ⇒ wall 覆盖两者。
+      CUDA_CHECK(cudaEventRecord(e0, sA));
+      for (int i = 0; i < iters; ++i) main_s(sA);
+      CUDA_CHECK(cudaEventRecord(eA, sA));
+      for (int i = 0; i < iters; ++i) lse_s(sB);
+      CUDA_CHECK(cudaEventRecord(eB, sB));
+      CUDA_CHECK(cudaStreamWaitEvent(sA, eB, 0));
+      CUDA_CHECK(cudaEventRecord(e1, sA));
+      CUDA_CHECK(cudaEventSynchronize(e1));
+      CUDA_CHECK(cudaEventElapsedTime(&wall, e0, e1)); wall /= iters;
+      float tm_a = 0.f, tb = 0.f;
+      CUDA_CHECK(cudaEventElapsedTime(&tm_a, e0, eA)); tm_a /= iters;
+      CUDA_CHECK(cudaEventElapsedTime(&tb, eA, e1)); tb /= iters;
+      printf("[O78 ovltest] main=%.4f ms | lse=%.4f ms | serial(sum)=%.4f ms | concurrent wall=%.4f ms"
+             " (main_end@%.4f) => overlap %.3fx (concurrent/serial)\n",
+             t_main, t_lse, t_main + t_lse, wall, tm_a, wall / (t_main + t_lse));
+      cudaStreamDestroy(sA); cudaStreamDestroy(sB);
+    }
+#endif
+  }
 
   // ---- O64 A/B：融合 quant+zero 的同一 binary 端到端对比。----
   {

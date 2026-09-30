@@ -9002,3 +9002,59 @@ fp8 默认 main（S4096：main 1.553ms / total 1.791ms / 76.7 TFLOPS、TE FP8 �
 - `src/fp8/fa_bwd_fp8_o77_macro_ab_s4096.out.txt`（编译期开关复测）
 - `src/fp8/fa_bwd_fp8_o77_ptxas_spill.out.txt`（寄存器/spill 账）
 - `src/fp8/fa_bwd_fp8_o77_ncu_local_src_s4096.out.txt`（ncu local-memory 源级）
+
+## 101. O78（第一百七十三轮）：端到端 overlap（quant/LSE 与 main 跨 stream）—— 负结果
+
+**动机**：§100 把 fp8 main 钉成「硬件平台期」后，ROADMAP「下一步候选 ②」只剩一条能产正结果的
+方向——**端到端重叠**：fp8 端到端里 main 只占 ~87%，`quant`（~0.106ms）+ `preprocess`（LSE，
+~0.121ms）合计 ~12.7%，若能与 main 重叠即最多省 ~7–13%。本轮把这条候选人正式实现并判决。
+
+**实现（纯 host，默认关；`--ovlp=N`）**：
+- 新 `make_map_fp8_chunk(ptr, Hfull, h0, hc, S, D, B, box)`：把 4D-TMA 描述符的 **head 计数
+  `dims[2]=hc`** 与 **物理行距 `strides={Hfull*D, D, S*Hfull*D}`** 解耦、基址前移 `h0*D`。于是
+  kernel 内 head 坐标仍取 `blockIdx.y∈[0,hc)`，而物理地址与全量路径**逐元素同址**——**device
+  代码一行未改**。
+- 把 `d_q8/qs/do8/dos/delta/lse/dq_acc` 按 `h0`、`d_k8/ks/v8/vs/dk_acc/dv_acc` 按 `hkv0=h0`
+  （MHA）做指针偏移；`grid.y` 由 H 改为 `hc`。LSE 强制 `ksplit=1`（避开 `lse_part` 的跨 head 步长）。
+- 两条非阻塞 stream：`sA` 顺序发 `LSE(k)`、`sB` 发 `main(k)`；`main(k)` 用 event 等 `LSE(k)`；
+  quant（含 delta/清零）整体留在 default stream，两 stream 先等一个 quant 完成的 event。
+- 条件：定长 / D=128 / causal / MHA(`Hkv==H`) / 默认 wgmma+4D-TMA / `H%ovlp==0`；否则逐字退回串行。
+
+**诊断（`--ovltest=1`，不改结果）**：把**整块** LSE 与**整块** main 放到两条 non-blocking stream
+并发（LSE 输出丢弃、只测墙钟）：
+```
+main=1.5549 | lse=0.1210 | serial(sum)=1.6759 | concurrent wall=1.5939 => 0.951x
+```
+即**内核级**重叠确实可行——并发墙钟比串行和快 ~5%（LSE 被隐藏 ~0.082ms，67%）。
+
+**实测（`--ovlp=N`，S4096 causal MHA，同 binary，`--iters=10`）**：
+```
+ovlp=0   1.7956 ms / 76.54 TF   (基线，串行)
+ovlp=2   1.9032 ms / 72.22 TF   (+6.0%)
+ovlp=4   2.1194 ms / 64.85 TF   (+18.0%)
+ovlp=8   2.3798 ms / 57.75 TF   (+32.5%)
+ovlp=16  2.7310 ms / 50.33 TF   (+52.1%)
+```
+**控制实验**（`--ovlp=N --ovlnolse=1`，只测「分块 main 串行」，去掉 LSE 变量）：
+```
+mainonly chunks=2  1.7625 ms   (full main+quant=1.676 → 分块 main +5.2%)
+mainonly chunks=4  1.9258 ms   (+15%)
+mainonly chunks=8  2.1622 ms   (+29%)
+```
+**归因**：把 main 的**单一 8192-CTA 栅格**切成 N 段后，每段的**尾波量化（tail quantization）**
+被放大 ~N 倍——full main 是 20.7 波、尾波占比 ~5%，切成 2/4/8 段后每段只有 10.3/5.2/2.6 波，
+尾波占比升到 ~10/~19/~38%。**分块 main 的尾波损失（+5%~+29%）远大于被隐藏的 LSE（~0.08ms，
+4.5%）**；且并发时 LSE 与 main 争 SM 还会进一步拖慢 main（ovlp=4 的 LSE 实际加了 ~0.14ms 而非
+0.12ms）。故 **O78 = 负结果**：端到端重叠在本卡对本 shape 不成立。
+
+**结论**：本 shape 的 fp8 默认 main 已按「3 CTA/SM + 8192 CTA 铺满 20.7 波」调优，**任何在 head/
+sequence 维上的切分都会重新引入尾波**；LSE 只有 ~7%，无法在「不切分 main」的前提下被隐藏。
+⇒ 想真正吃到这 ~5% 的内核级重叠收益，只能**把 preprocess 融进 main**（warp-specialized
+prologue / 单 kernel 内流水），属大改（同 F3b 的困境）。**默认路径未改，数值逐位不变。**
+
+**原始输出**：
+- `src/fp8/fa_bwd_fp8_o78_ovltest_s4096.out.txt`（诊断）
+- `src/fp8/fa_bwd_fp8_o78_sweep_s4096.out.txt`（ovlp 扫参 + 分块 main 控制）
+- `src/fp8/fa_bwd_fp8_o78_ncu_main_s4096.out.txt`（默认 main ncu，L2 77.10% / L1TEX 71.96% /
+  DRAM 4.21% / Compute 48.27% / 168 regs / 74.82KB / 3 CTA/SM / Waves 20.69）
+- `src/fp8/fa_bwd_fp8_o78_baseline_te.out.txt`（TE FP8 纯反向 0.3035ms/905.6TF ⇒ ours/TE 5.92×）

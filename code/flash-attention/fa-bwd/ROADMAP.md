@@ -3099,13 +3099,33 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       默认路径数值逐位不变。见 `docs/03` §100、`docs/08` §5.86。
 - [ ] **F3b WS 完整化**：producer/consumer 分工 + 更深 mbarrier 流水（重叠 `wait`，降 L1/L2 压力）。
 - [ ] **F4b**：fp8 非 det 默认的 dK/dV 归约再优化（当前 red 仍是 74% L2）。
+- [x] **O78**（第一百七十三轮，**负结果**）**端到端 overlap（quant/LSE 与 main 跨 stream）**——
+      实现「按 head 分块 + 4D-TMA 描述符解耦 + 指针偏移」的跨 stream 流水（**device 一行未改**，
+      `--ovlp=N`；默认关）。**诊断**（整块 main||LSE）证明内核级重叠可行（concurrent 0.951×，LSE
+      藏住 ~0.082ms/67%），但**分块 main 的尾波量化损失**（chunks=2/4/8 → +5%/+15%/+29%）远大于
+      被藏的 LSE（4.5%），实测 ovlp=0/2/4/8/16 = **1.796/1.903/2.119/2.380/2.731ms** 单调更慢。
+      ⇒ **本 shape 的 fp8 main 已按「3 CTA/SM、8192 CTA 铺 20.7 波」调优，head/seq 切分必回尾波**；
+      吃这 ~5% 只能「把 preprocess 融进 main」（WS prologue，同 F3b 大改）。默认逐位不变。
+      见 `docs/03` §101、`docs/08` §5.87；原始输出 `src/fp8/fa_bwd_fp8_o78_*`。
 - [ ] 每步：`ncu` 复测 **L2 扇区/`red`/Duration**，与 TE（`harness/te_fp8_ncu.py`）同 session 对比；
       `harness/fa_vs_te_bwd_only.py` 纯反向验收；数值逐位/容差不变。
 - 目标：fp8 S4096 从 ~1.95ms（6.4× TE）→ 先到 **3× TE**，再逼近 **2×**。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百七十二轮）**：**O77——F6-③（TMA L2 promotion / L2 persist）收口为负结果 + fp8
+> **最新（第一百七十三轮）**：**O78——端到端 overlap（quant/LSE 与 main 跨 stream）判决为负结果**。
+> 实现「按 head 分块 + 4D-TMA 描述符 `dims[2]=hc`/`strides` 用全 H 解耦 + 指针偏移」的跨 stream
+> 流水（`--ovlp=N`，**device 一行未改**，默认关）。`--ovltest` 诊断：整块 main||LSE 并发墙钟
+> `1.594ms` vs 串行和 `1.676ms`（**0.951×**）⇒ 内核级重叠可行、LSE 可藏 ~0.082ms（67%）。但
+> **切分 main 栅格的尾波量化损失**（控制实验 chunks=2/4/8 → +5%/+15%/+29%）远大于 4.5% 的 LSE
+> 收益，实测 ovlp=0/2/4/8/16 = **1.796/1.903/2.119/2.380/2.731ms** 单调更慢。默认路径数值逐位不变
+> （total 1.796ms/**76.5 TFLOPS**，TE FP8 0.3035ms/905.6TF ⇒ 5.92×）。
+> **下一步候选**：① **端到端重叠要靠「把 preprocess 融进 main」**（单 kernel warp-specialized
+> prologue / 内部流水，而非跨 kernel 切分——切分必回尾波）；② 能产正结果的仍只剩**换形状/dtype
+> 覆盖**（`D=256` dtype 化到 fp16/bf16）或**换卡/多 warpgroup**（受 fp8 wgmma 无转置锁定）。
+> 见 `docs/03` §101、`docs/08` §5.87；原始输出 `src/fp8/fa_bwd_fp8_o78_*`。
+>
+> **（第一百七十二轮）**：**O77——F6-③（TMA L2 promotion / L2 persist）收口为负结果 + fp8
 > main 的「寄存器/smem/occupancy」三证：本卡已到硬件平台期**。`--l2promo=0/1/2`（NONE/L2_128B/
 > L2_256B）S4096 causal **1.7913/1.7936/1.8052ms** 噪声内（ncu 默认 main L2 命中 97.08%、DRAM
 > 4.32% ⇒ 重读本就在 L2 命中）；ksplit 复扫确认 auto=8 最优；`FA_WS1/ILV/ILV34/R4` 复测全部噪声内
