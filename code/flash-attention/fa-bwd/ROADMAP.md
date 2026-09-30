@@ -198,6 +198,16 @@
 
 ## 阻塞
 
+- **F7 单趟「减少每元素贡献 CTA 数」路线已全部判决（第一百六十八轮 column-owner 收口）。**
+  到第一百六十八轮，减少 dK/dV/dQ 跨 CTA 贡献数的四条路（**两 kernel**（p158 负）/ **TMA
+  store-reduce**（p159 负：`red` 与机制无关）/ **BN≥BM**（p160 中性偏负）/ **column-owner
+  RCOL=2**（p168：`lts op_red` 精确减半 102.2M→51.1M、读放大随 grid 减半，**机制完全成立**，
+  但 dK/dV 累加器翻倍 + 跨列 `dqacc` 顶穿 **255 寄存器**、local spill `write` 6.2M→113.7M
+  扇区，净 **0.72–0.77×**）**全部**收敛到同一堵墙：**本卡 1 CTA/SM 的 170 regs（`__launch_bounds__`
+  @3CTA）容不下「一个 CTA 拥有更多 KV」所必需的翻倍 dK/dV 累加器**。⇒ 默认 fp8 main 的 L2 `red`
+  墙在本卡**无软件解**；剩余只有 **换卡**（寄存器/smem 更大）或 **多 warpgroup 摊累加器**
+  （256/384 线程，对标 TE 384 线程/1 CTA/SM——需先破 fp8 `wgmma` 无转置操作数）。见
+  `docs/03` §93/§97、`docs/08` §5.74/§5.82。
 - **默认 fp8 main 的 L2 `red` 的「真差距」已由 ncu 钉为「工作划分」（第一百四十七轮 O67 修正）。**
   `FA_R4`（16B `red.global.add.v4.f32`，SASS 确为 `F32x4`）ncu 的 red 请求/扇区**一字不变**
   （`l1tex 9.54M` / `lts 114.52M`）⇒ 归约加宽无效。同轮重测 TE fp8 反向
@@ -2942,6 +2952,12 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
          顶穿 **255 寄存器**（local st 65,536→13.75M 扇区）、3→2 CTA/SM ⇒ 溢出流量盖过省下的 red。
           ⇒ **F7 option(a) 判为中性/偏负**。见 `docs/03` §93、`docs/08` §5.74；原始输出
           `src/fp8/fa_bwd_fp8_kvowner_mma_p160_bn64_*`、`src/fp8/fa_bwd_fp8_p160_ncu_*`。
+         → **第十四步已完成（第一百六十八轮，column-owner：机制正结果 / 性能负结果）**：每 CTA 拥有
+         **RCOL=2 个连续 KV 块**，dK/dV 本地累加（red=0）、dQ 跨列先本地累加再每 m 一次原子。**机制完全
+         成立**：`lts op_red` 102.2M→**51.1M（精确减半）**、`l1tex op_red` 减半、Q/dO 读放大随 grid 减半；
+         但 `dK/dV` 累加器翻倍 + 跨列 `dqacc` 顶穿 **255 寄存器**（write 6.2M→113.7M 扇区），净慢
+         **0.72–0.77×**。与 p160/F6/O17b「多 owner 撞寄存器文件」同源 ⇒ **F7 单趟路线全判死**。见
+         `docs/03` §97、`docs/08` §5.82；原始输出 `src/fp8/fa_bwd_fp8_kvowner_col_p168_*`。
 - [x] **F8**（第一百六十一轮，**正结果，默认**）**fp16/bf16 定长默认切 Hopper（wgmma+TMA）**——
       F1 的 dtype 泛化。纯 harness（device 一行未改）：`HOPPER_DEFAULT_DTYPES={"fp8","fp16","bf16"}`。
       数值逐值不变；S4096 causal total fp16 **1.8245→1.1726ms（1.556×）**、bf16
@@ -3006,7 +3022,23 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百六十六轮）**：**F12/O72——varlen full D=128 的 LSE 也上 4D-TMA：
+> **最新（第一百六十八轮）**：**F7 第十四步——KV-owner column-owner（每 CTA 拥有 RCOL=2 个连续
+> KV 块）：机制正结果 / 性能负结果**。承接 §93.6「唯一未试 = 跨 warpgroup 偏和 + 二次归约」的最可行
+> 形态：**BN 仍 32**（避开 p160 BN≥BM 的 GEMM1/2 累加器翻倍），只让同一 CTA 拥有 2 个连续 KV 块、
+> dK/dV 本地累加（red=0）、dQ 跨列先本地累加再每 m 一次原子。**机制完全成立**：S4096 `lts op_red`
+> **102,236,160→51,118,080（精确减半）**、`l1tex op_red` 8.52M→4.26M、Q/dO 跨 CTA 读放大随 grid
+> 减半；**但** `dK/dV` 累加器翻倍 + 跨列 `dqacc` 顶穿 **255 寄存器**、local `write` 6.2M→**113.7M
+> 扇区**，净 **慢 0.72–0.77×**（S4096 1.835→2.397ms）。数值 dk/dv vs wgmma+TMA **逐位 0**、dq
+> ~2e-7。⇒ 与 p160 / F6 / O17b「多 owner 撞 255 寄存器文件」同源；**F7 单趟路线（两 kernel / TMA
+> store-reduce / BN≥BM / column-owner）全部判决**。见 `docs/03` §97、`docs/08` §5.82；原始输出
+> `src/fp8/fa_bwd_fp8_kvowner_col_p168_*`。
+> **下一步候选**：① **F7 单趟已收口**，唯一剩余 = **换卡**（寄存器/smem 更大）或「多 warpgroup 把
+> dK/dV 累加器摊到 256/384 线程」（对标 TE 384 线程 1 CTA/SM）——需先破 fp8 `wgmma` 无转置操作数
+> （见「阻塞」）；② **其余便宜分支已穷尽**——LSE 的三 dtype × {causal, full, varlen, MLA} 均已
+> 均衡化/TMA 化、非 main 固定开销已融合（O66）、归约加宽已判负；③ 若要继续产出的正结果，只能换
+> 形状/dtype 覆盖或做端到端重叠（preprocess/main 跨 head 流水，最多省 ~7–13% 非 main）。
+>
+> **（第一百六十六轮）**：**F12/O72——varlen full D=128 的 LSE 也上 4D-TMA：
 > 正结果，默认**。补齐 F9→O70→O71「三 dtype full D=128 LSE 统一到 TMA」**漏掉的 varlen
 > 分支**（`run_varlen` 此前仍走 O54 的 `cp.async` 均衡版）。`lse_mma_kernel_bal_tma` 加
 > `const int* cu_seqlens`（packed 定界：`qbase=cu[b]`、`len=cu[b+1]-qbase`、`pair>=nblk` 早退、
@@ -6847,6 +6879,36 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
       `src/fp16/fa_bwd_fp16_p167_lse_tma_ab.out.txt`、`..._p167_ncu_lse_tma.out.txt`、
       `src/bf16/fa_bwd_bf16_p167_lse_tma_ab.out.txt`、`..._p167_ncu_lse_tma.out.txt`、
       `src/fa_bwd_p167_fa3_varlen_full_baseline.out.txt`。
+
+- 2026-09-30（第一百六十八轮）：**F7 第十四步完成（KV-owner column-owner：机制正结果 / 性能负结果）**
+  —— 落实 §93.6「唯一未试 = 跨 warpgroup 偏和 + 二次归约」的最可行形态。
+    - **动机**：p157 的 KV-owner 把 dK/dV 的跨 CTA `red` 打成 0，但 dQ 仍逐 lane 原子、且每个 dQ
+      元素被**所有** KV 块各贡献一次（贡献数 = S/BN = 64）⇒ 总 `red` 又回到 102M ≈ 默认 114M。要真降
+      `red` 须让同一 CTA 拥有**多个连续 KV 块**、把它们对 dQ 的偏和先在本地累加再发一次原子。与已判死
+      的 **p160 BN≥BM** 的关键差别：p160 放宽 BN 时**连 GEMM1/2 累加器一起翻倍**；本方案 **BN 仍 32**，
+      只翻倍 dK/dV 累加器，寄存器账更省（p160 教训的正面解）。
+    - **改动**（`src/fp8/fa_bwd_fp8_kvowner_mma.cu`，**默认路径一行未改**）：新增 device body
+      `fp8_kvowner_col_body<HD,BM,BN,TMA,RCOL>` + 壳 `fp8_kvowner_dkv_col_tma_kernel`，host 加
+      `--only=col2` 与同 binary A/B、对拍、计时。grid.x=`ceil(S/(RCOL·BN))`；K/V/Kp（RCOL 份）常驻
+      smem、dK/dV 寄存器累加（RCOL 份）、循环末每块一次 plain store（red=0）；Q/dO 4D-TMA staging 每 m
+      一次 RCOL 列共享；内层 `for cc`：GEMM1/2(wgmma)→P/S→fold(Ap/dS3/dS2)→GEMM3/5→GEMM4（dQ 偏和进
+      跨列 `dqacc`）；内层退出后 `dqacc` **一次** `red_add2` ⇒ dQ 贡献数 ÷ RCOL。
+      **踩坑**：`Kp` 是 `uint16_t*` 而 `sz_Kp` 是字节数，`Kp+cc*sz_Kp` 指针算术前进 2×（首跑 dq 错
+      1.89）；改按字节 cast 后逐位修正。
+    - **数值（三 shape 全通）**：dk/dv vs wgmma+TMA(BN=32) **逐位 0.000e+00**（S512/S1024H32/S4096）；
+      dq 差 ~2e-7（仅跨 CTA 加法次序）；三梯度 vs fp32 ref 与 wgmma+TMA 同量级。
+    - **性能（同 binary，Hopper+TMA，event）**：S512 **0.731×**（0.0749→0.1025）、S1024H32 **0.718×**
+      （0.3075→0.4281）、S4096 **0.766×**（1.835→2.397ms）⇒ **净慢**。
+    - **ncu（S4096，`--only=` 单 kernel）**：`lts__t_sectors_op_red` **102,236,160→51,118,080（精确
+      减半）**、`l1tex op_red` 8.52M→4.26M、`read` 52.78M→105.69M、**`write` 6.20M→113.73M（18.3×）**、
+      registers 168→**255（上限）**、occ 3→2 CTA/SM、Duration 1.85→2.46ms、inst 703.65M→628.78M。
+    - **判决 / 下一步**：**机制完全成立**（dQ red 精确减半、Q/dO 读放大随 grid 减半），但 dK/dV 累加器
+      翻倍 + 跨列 `dqacc` 顶穿 **255 寄存器文件**，local spill 盖过省下的 `red` —— **与 p160 / F6 /
+      O17b「放大 tile / 多 owner 撞寄存器文件」同源**。F7 单趟路线（两 kernel / TMA store-reduce /
+      BN≥BM / column-owner）**全部判决**；剩余只有换卡或「多 warpgroup 摊累加器」（256/384 线程，需先
+      破 fp8 wgmma 无转置，见「阻塞」）。见 `docs/03` §97、`docs/08` §5.82；原始输出
+      `src/fp8/fa_bwd_fp8_kvowner_col_p168_{s512,s1024h32,s4096}.out.txt`、
+      `src/fp8/fa_bwd_fp8_kvowner_col_p168_ncu_s4096.out.txt`。
 
 ## 灵感 / backlog
 

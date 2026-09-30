@@ -1,0 +1,29 @@
+=== p168 (第 168 轮) col-owner RCOL=2 ncu A/B（S=4096 H16 causal fp8）===
+--- only=wgtma (kernel ~ wgmma_tma_kernel) ---
+    gpu__time_duration.sum                                           ms         1.85
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed               %        60.95
+    launch__occupancy_limit_registers                             block            3
+    launch__occupancy_limit_shared_mem                            block            3
+    launch__registers_per_thread                        register/thread          168
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                 %        63.38
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                         8519680
+    lts__t_sectors_op_read.sum                                   sector     52783547
+    lts__t_sectors_op_red.sum                                    sector    102236160
+    lts__t_sectors_op_write.sum                                  sector      6198377
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                  %        40.00
+    sm__warps_active.avg.pct_of_peak_sustained_active                 %        17.77
+    smsp__inst_executed.sum                                        inst    703654916
+--- only=col2 (kernel ~ col_tma) ---
+    gpu__time_duration.sum                                           ms         2.46
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed               %        47.60
+    launch__occupancy_limit_registers                             block            2
+    launch__occupancy_limit_shared_mem                            block            2
+    launch__registers_per_thread                        register/thread          255
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                 %        51.30
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                         4259840
+    lts__t_sectors_op_read.sum                                   sector    105693741
+    lts__t_sectors_op_red.sum                                    sector     51118080
+    lts__t_sectors_op_write.sum                                  sector    113731151
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                  %        26.83
+    sm__warps_active.avg.pct_of_peak_sustained_active                 %        11.93
+    smsp__inst_executed.sum                                        inst    628776475
