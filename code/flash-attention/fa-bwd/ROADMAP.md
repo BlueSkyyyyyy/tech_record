@@ -198,6 +198,16 @@
 
 ## 阻塞
 
+- **GQA/MQA「跨 Q 头折叠 dK/dV」结构性不可行（第一百八十一轮 O86）。** ncu 证默认 fp8 main 的
+  L2 `red` **只由 Q 头数 H 决定**（MQA H64kv1 == GQA H64kv4 == 32,833,536 扇区），故「把 G 个
+  共享 KV 头的 Q 头折叠成一次 dK/dV 贡献」上界可 ÷`(H/Hkv)`（MQA ×64）——F4b 唯一未做的杠杆。
+  但 **dQ 与 dK/dV 的 loop-order 偏好相反**，四种排布全部撞本卡寄存器/smem/互连墙：(A) head
+  内层→dQ 丢寄存器累加(+17.8M 扇区)且 Q/dO 按 `(nt,head)` 重载(MQA +140M 扇区)；(B) head
+  外层→dK/dV 累加器须常驻整个 head 循环(ksplit=4 已 128KB/dK，smem 放不下)；(C) 两遍重算只
+  增读；**cluster（O25）把 N 次全局原子 1:1 换成 N 次远程原子、实测慢 7.4×**（GQA 只放大 G、
+  不减少每 CTA 远程原子数）。⇒ 本卡无解，解锁需 **换卡**（更大 smem/寄存器）/ **硬件
+  scatter-reduce primitive** / **多 warpgroup WS**（同 F6/F3b 寄存器墙）。见 `docs/03` §109。
+
 - **F3b①「GEMM3/4 真 m64」按资源账收口（第一百七十八轮 O83）。** 默认 fp8 `kvtma` main
   ncu = L2 **79.26%**、`red` **114.52M 扇区 = L2 的 80%**、DRAM 4.41%、**张量核只有 11.15% 忙**。
   「真 m64」（不零填充）三形式在本卡 3 CTA/SM（上限 77,482B/170 regs）下**全部不可行**：
@@ -3141,12 +3151,20 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
        **candidate ① 按资源账收口**（与 F6/F7/p160 同源）。诊断 `FA_RED_STORE`（plain store 替原子）
        证 `red` 成本 ~8% 在原子语义、~29% 是写流量本身 ⇒ 与归约机制无关。见 `docs/03` §106、
        `docs/08` §5.92。
-- [ ] **F4b**：fp8 非 det 默认的 dK/dV 归约再优化（当前 red 仍是 74% L2）。
+- [x] **F4b**：fp8 非 det 默认的 dK/dV 归约再优化（当前 red 仍是 74% L2）。
       → **O83（第 178 轮）分解**：`red` 114.5M 扇区中 ~29% 是写流量本身、~8% 是原子 RMW；
       O42/O67/O83 三证「与归约指令/宽度/机制无关」⇒ 唯一杠杆=减少贡献 CTA 数（工作划分），
       本卡受寄存器/smem 墙锁定（见「阻塞」）。**新 backlog**：GQA/MQA 跨 Q 头本地累加 dK/dV
       可把 `red` ÷`(H/Hkv)`（MQA 最多 ÷64），但 dQ 的 `kRegdQ` 需「一 CTA 一 Q 头」跨 nt 保持、
       跨头合并会 ×`dqacc` 撞寄存器墙（仅 GQA/MQA 有效）。
+      → **O86（第一百八十一轮）收口：结构性不可行（负结果）**。ncu 实测默认 fp8 main 的 `red`
+      **只由 Q 头数 H 决定**（MQA H64kv1 与 GQA H64kv4 的 `red` 逐字节相同 32,833,536）；
+      但跨 Q 头折叠被「dQ 与 dK/dV 相反的 loop-order 偏好」锁死——(A) head 内层折叠 dK/dV 但
+      dQ 丢寄存器累加（+17.8M 扇区）且 Q/dO 按 `(nt,head)` 重载（MQA +140M 扇区，致命）；
+      (B) head 外层保住 dQ 但 dK/dV 累加器须常驻（ksplit=4 已 128KB/dK，smem 放不下）；
+      (C) 两遍重算只增读；cluster（O25）1:1 换远程原子、实测慢 7.4×。**默认一行未改、数值逐位
+      不变**；解锁需换卡 / 硬件 scatter-reduce / 多 warpgroup WS（同 F6/F3b 寄存器墙）。
+      见 `docs/03` §109、`docs/08` §5.95；原始输出 `src/fp8/fa_bwd_fp8_o86_gqa_red_probe.out.txt`。
 - [x] **O79**（第一百七十四轮，**路径正结果 / 代码未改默认**）**TE SASS 发现 QGMMA `RS_TN` +
   fp8 wgmma RS 冒烟**——用 `ncu --page source --print-source sass` 对照 TE 反向：TE
   `..._flash_bprop_wgmma_f8_..._64x64x128`（384 线程/grid=64）= **16×QGMMA + 0×HMMA + 24×STSM
@@ -3183,7 +3201,19 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百八十轮）**：**O85——fp8 `head_dim=256` 的 Q/dO 切 4D-TMA（chunk-major）**
+> **最新（第一百八十一轮）**：**O86——GQA/MQA「跨 Q 头折叠 dK/dV」结构性不可行（负结果，
+> 默认一行未改）**。落实 F4b 新 backlog。ncu 证默认 fp8 main 的 L2 `red` **只由 Q 头数 H 决定**
+> （MQA H64kv1 == GQA H64kv4 == 32,833,536 扇区），故头折叠上界可 ÷`(H/Hkv)`；但 **dQ 与
+> dK/dV 的 loop-order 偏好相反**，(A) head 内层→dQ 丢寄存器累加 + Q/dO 按 `(nt,head)` 重载、
+> (B) head 外层→dK/dV 累加器须常驻（放不下）、(C) 两遍只增读、cluster（O25）1:1 换远程原子
+> 实测慢 7.4× ⇒ 本卡无解（74.8KB smem/170 regs/3 CTA/SM）。**F4b 至此收口**（三条减 `red`
+> 路全负）。见 `docs/03` §109、`docs/08` §5.95、原始输出 `src/fp8/fa_bwd_fp8_o86_gqa_red_probe.out.txt`。
+> **下一步候选**：① **换卡**（更大 smem/寄存器）或**硬件 scatter-reduce**，或**多 warpgroup WS**
+> 才能拿 GQA 头折叠的 `red` 红利；② 默认 fp8 main 的 L2 `red` 墙在本卡已宣告无软件解
+> （F3b/F4b/F6/F7 全收口，见「阻塞」）；③ 其余 fp8 覆盖项（`D=256` K/V-TMA、MLA 降 smem）
+> 均受同一 smem 墙，属 backlog。
+>
+> **（第一百八十轮）**：**O85——fp8 `head_dim=256` 的 Q/dO 切 4D-TMA（chunk-major）**
 > （**中性，默认关 / opt-in**）。落实 O84 候选 ①。TMA 一个 SW128 box 只搬 128 列 ⇒ `D=256`
 > 要 2 个 box、物理布局变 **chunk-major**，新增 `sw128c_*` + `wgmma_mn32_issue_cm`（A
 > chunk-major、B rg-major；`D=128` 逐位不变）；**坑**：`smem_bytes_wgmma_tma` 的 +64 对
@@ -7530,6 +7560,23 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     顶穿 116KB/2-CTA 门槛，backlog）。见 `docs/03` §108、`docs/08` §5.94、`docs/04` §50；
     原始输出 `src/fp8/fa_bwd_fp8_o85_d256_ab.out.txt`、`..._o85_ncu_d256_s1024.out.txt`、
     `..._o85_accuracy_d256.out.txt`。
+
+- 2026-09-30（第一百八十一轮）：**O86——GQA/MQA「跨 Q 头折叠 dK/dV」可行性收口（负结果，
+  默认一行未改）**。落实 F4b 的新 backlog（GQA/MQA 把 `red` ÷`(H/Hkv)`，MQA 最多 ÷64）。
+  - **收益上界（ncu，S1024 causal，同 session）**：默认 fp8 `kvtma` main 的 L2 `red`
+    **只由 Q 头数 H 决定**——MQA（H64kv1）与 GQA（H64kv4）的 `red` **逐字节相同 32,833,536**；
+    H32→16.42M、H40→20.52M 精确落 `red≈(H/32)×16.42M`（`red/(red+read)≈0.80`）。⇒ 跨 Q 头
+    折叠可将 dK/dV 的 `red` 压 (G−1)/G（MQA ×64），是 F4b 里唯一未做、上界最大的杠杆。
+  - **为何拿不到（结构）**：dQ 要沿 `nt` 寄存器累加（`kRegdQ`）、dK/dV 要沿 `nt` 原子冲刷——
+    两者 loop-order 相反。(A) `for nt{for head{}}`：dK/dV 可折叠但 dQ 丢寄存器累加（MQA
+    +17.8M 扇区）且 Q/dO 按 `(nt,head)` 重载（MQA +140M 扇区，致命）；(B) `for head{for nt{}}`：
+    dQ/Q 读保住但 dK/dV 累加器须常驻整个 head 循环（ksplit=4 已 128KB/dK，smem 放不下）；
+    (C) 两遍（DQONLY + DKV）重算只增读、第二遍回到 (A)/(B)；**cluster**（O25 fp16/bf16 已实测）
+    把 N 次全局原子 1:1 换成 N 次远程 smem 原子、慢 7.4×，GQA 只放大 G 不减少每 CTA 远程原子数。
+  - **判决**：本卡（74.8KB smem/170 regs/3 CTA/SM）**结构性不可行**。默认路径一行未改、
+    数值逐位不变（无新 kernel 需 gate）。解锁需换卡 / 硬件 scatter-reduce / 多 warpgroup WS。
+  - **F4b 至此收口**：三条「减 `red`」路（归约宽度/机制、工作划分、GQA 头折叠）全部负/不可行。
+    见 `docs/03` §109、`docs/08` §5.95；原始输出 `src/fp8/fa_bwd_fp8_o86_gqa_red_probe.out.txt`。
 
 ## 灵感 / backlog
 

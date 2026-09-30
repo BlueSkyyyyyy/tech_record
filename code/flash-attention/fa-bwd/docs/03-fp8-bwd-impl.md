@@ -9580,3 +9580,82 @@ barrier 等待与 K/V cp.async 未重叠，抵消了指令收益；`red`/工作�
 **原始输出**：`src/fp8/fa_bwd_fp8_o85_d256_ab.out.txt`（4 case × tma1/0 event 计时）、
 `src/fp8/fa_bwd_fp8_o85_ncu_d256_s1024.out.txt`（两档 ncu）、
 `src/fp8/fa_bwd_fp8_o85_accuracy_d256.out.txt`（relL2 / A/B 逐元素）。
+
+## 109. O86（第一百八十一轮）：GQA/MQA「跨 Q 头折叠 dK/dV」可行性收口 —— **结构性不可行（负结果）**，默认路径一行未改
+
+> 落实 F4b 的「新 backlog：GQA/MQA 跨 Q 头本地累加 dK/dV 可把 `red` ÷`(H/Hkv)`」。本轮**不写
+> 新 kernel**，而是先用 ncu 把这条路的**收益上界**钉死，再对三种可行的 loop order 做寄存器/smem
+> 解析核算，最后与 O25（cluster 分布式归约）的实测负结果合起来给出判决。**结论：该杠杆在本卡
+> 被「dQ 与 dK/dV 相反的 loop-order 偏好」锁死，MQA 的 `red÷64` 拿不到；需要换卡或硬件 scatter-reduce。**
+
+### 109.1 收益上界：默认 fp8 main 的 `red` **正比于 Q 头数 H，与 Hkv 无关**
+
+用 ncu 探针（`--kernel-name regex:kvtma --launch-count 1`，S=1024 causal，同 session）测了
+5 个点。关键规律：**MQA（H64kv1）与 GQA（H64kv4）的 `red` 逐字节相同（32,833,536 扇区）**，
+而 H32→16.42M、H40→20.52M 都精确落在 `red ≈ (H/32)×16.42M` 线上 ⇒ `red` 只由 **Q 头数**决定：
+
+| case（S1024 causal，fp8 默认 kvtma） | H | Hkv | G=H/Hkv | `lts op_red` | `op_read` | Duration | L2% |
+|---|---|---|---|---|---|---|---|
+| MHA q32/kv32 | 32 | 32 | 1 | 16,416,768 | 4,414,171 | 242.7µs | 71.0 |
+| GQA q40/kv8  | 40 | 8  | 5 | 20,523,168 | 5,302,221 | 291.1µs | 73.0 |
+| GQA q64/kv4  | 64 | 4  | 16| 32,833,536 | 8,077,902 | 444.7µs | 76.3 |
+| **MQA q64/kv1** | 64 | 1 | 64| **32,833,536** | 7,712,055 | 437.6µs | 77.5 |
+| MHA q16 （S4096） | 16 | 16 | 1 | 114,524,160 | 28,013,759 | 1.50ms | 78.3 |
+
+（`red/(red+read)` ≈ 0.80，与 `docs/03` §106 的 MHA 结论一致；`dK/dV` 部分按 O67/§106 约占
+`red` 的 ~55–90%，其余是 dQ 的跨-part 原子。）⇒ **理论上把「G 个 Q 头的 dK/dV 偏和折叠成一次贡献」
+可把 dK/dV 的 `red` 压掉 (G-1)/G**（MQA 最多 ×64）——这是 F4b 里唯一还没做、且上界最大的杠杆。
+
+### 109.2 为什么没有可用的 loop order：dQ 与 dK/dV 的偏好相反
+
+令 head 组大小 `G=H/Hkv`、`BM=64`、`BN=32`、`HD=128`。默认 kernel 每个 CTA = 一个
+`(mblk, Q头 h, part)`，`nt` 内层循环、**dQ 用寄存器沿 `nt` 累加**（`kRegDq`，每元素单写者，
+只 flush 一次）、`dK/dV` 每个 `nt` tile 原子写回。要折叠 head，只有两种嵌套：
+
+**(A) `for nt { for head { 算 } }`（head 内层）** —— `dK/dV` 可在一个 tile 的寄存器累加器里
+跨 head 累加、每 `nt` 只 flush 一次（**red 成功 ÷G**）。但 `nt` 在外层 ⇒
+1. **dQ 丢掉寄存器累加**：每个 `(nt,head)` 都要原子写 dQ。dQ 的 `red` 从「每 (mblk,h,part) 一次」
+   涨到「每 (mblk,h,nt) 一次」——对 MQA S1024 = `H×Σntiles = 64×272` 个 tile、每 tile `BM·HD/8=1024`
+   扇区 ≈ **+17.8M 扇区**，直接把省下的 dK/dV `red`(~18M) 吃回去；
+2. **Q/dO 必须按 `(nt,head)` 重载**（Q/dO 只在 head 维度复用、`nt` 在外层无法跨 `nt` 复用）：
+   MQA 多出的 Q/dO 读 = `(G-1)·#(mblk,kv,nt)·(BM·HD·2/32)` ≈ `63×4352×512 ≈ 140M 扇区`
+   ⇒ 比全部 `red` 还大 4×，**致命**。
+
+**(B) `for head { for nt { 算 } }`（head 外层）** —— dQ 保住寄存器累加、Q/dO 每个 head 只读一次
+（无放大）。但要把 dK/dV 跨 head 折叠，`dK/dV` 的累加器必须在整个 head 循环内**常驻**，
+即覆盖本 CTA 的**全部 nt tile 的 KV 行**（`part` 内 `Σntiles × BN × HD` 个 fp32）：
+ksplit=4 时 MQA 小 m 块也要 8×32×128×4B = **128KB/dK + 128KB/dV**，ksplit=1 更大（~S×HD×8B）
+——**smem 放不下**；退一步只在寄存器里存一个 tile、每个 `nt` flush，那 head 就没有折叠（`red` 不变）。
+
+**(C) 只折叠 dK/dV、dQ 单独一遍（两 kernel / DQONLY + DKV pass）** —— 两遍都要重算
+GEMM1/2/softmax 并各自读一遍 Q/K/V/dO；第 2 遍的 loop order 仍是 (A) 或 (B)，回到同一墙。
+（唯一正收益场景是「compute 免费」——本卡张量核确实只 10% 忙、重算不贵，但**读/`red` 才是墙**，
+重算第二遍只增读。）
+
+### 109.3 cluster 分布式归约为什么对 GQA 也不成立
+
+唯一能绕开 loop order 的是 Hopper thread block cluster（O25，fp16/bf16 已实现并实测）：
+CTA 照常各算各的 head，用 `red.shared::cluster.add.f32` 把**逐元素**偏和推进 leader 的 smem，
+leader 每 tile 只发一次全局原子。O25 实测 `red` **精确减半**（51.9M→26.7M）但 **main 慢 7.4×**
+（`long_scoreboard` 0.75→5.83），根因是「逐元素远程 smem 原子 + 每 tile leader 串行 flush」。
+**关键**：cluster 把 N 次全局原子换成 N 次远程原子是 **1:1**，省下的只是「flush 次数」；
+GQA 只是让 cluster 的 `G` 更大，而**每个 CTA 的逐元素远程原子数不变** ⇒ 远程原子总成本随
+CTA 数（=`H`）线性增长，与 MQA 的 `H` 倍 `red` 同阶。**换来的全局 `red` 削减 ≤ 远程原子开销**，
+O25 的 7.4× 负结果原样成立（非原子 `st.async` 方案需 `CL×2×[BN][HD]` smem，GQA 下更大，放不下）。
+
+### 109.4 判决与解锁条件
+
+- **判决**：GQA/MQA 跨 Q 头折叠 dK/dV 在本卡（74.8KB smem / 170 regs / 3 CTA/SM）**结构性不可行**：
+  loop order (A) 的 dQ 原子化 + Q/dO 重载、(B) 的 dK/dV 常驻累加器、(C) 的两遍重读、
+  cluster 的 1:1 远程原子，四条路都撞同一组寄存器/smem/互连墙。**默认路径一行未改，数值逐位不变。**
+- **解锁条件**（写入 backlog）：① **换卡**（更多 smem/寄存器，能放下 (B) 的常驻 dK/dV 累加器，
+  或 `CL×[BN][HD]` 的 cluster staging）；② 硬件 **scatter/bulk-reduce 到 L2 的 primitive**
+  且不按 CTA 数线性计费；③ 把 dK/dV 折叠到 **warp-specialized producer/consumer + 384 线程**
+  （同 F6/F3b 的多 warpgroup 路线，受同一寄存器墙）。
+- 这条结论**补全了 F4b 的 backlog**：F4b 的三条「减 `red`」路（归约宽度/机制、工作划分、
+  GQA 头折叠）至此全部收口为负/不可行。
+
+**原始输出**：`src/fp8/fa_bwd_fp8_o86_gqa_red_probe.out.txt`（5 case × ncu red/read/duration）、
+`src/fp8/fa_bwd_fp8_o86_red_law.out.txt`（`harness/fa_fp8_red_law.py` 解析并打印 `red/H` 常数
+= 5.1304e5±5.5e1）、`src/fp8/fa_bwd_fp8_o86_accuracy.out.txt`（4 个 GQA/MQA 的 relL2 护栏复核）、
+`src/fp8/fa_bwd_fp8_o86_ci.out.txt`（`--no-run --ci` 全绿）。

@@ -1844,3 +1844,24 @@ smem 冲突 + 低 occ
   转正需把 K/V 也 TMA 化并与 cp.async 重叠（K 双缓冲顶穿 116KB，backlog）。
 - 见 `docs/03` §108；原始输出 `src/fp8/fa_bwd_fp8_o85_d256_ab.out.txt`、
   `..._o85_ncu_d256_s1024.out.txt`、`..._o85_accuracy_d256.out.txt`。
+
+### 5.95 第 181 轮（O86）：GQA/MQA 跨 Q 头折叠 dK/dV —— **结构性不可行（负结果/收口）**
+
+落实 F4b 的新 backlog（GQA/MQA 把 `red` ÷`(H/Hkv)`，MQA 最多 ÷64）。本轮先用 ncu 钉死收益
+上界，再对三种 loop order + cluster 逐条解析核算：
+
+- **收益上界（ncu 实测）**：默认 fp8 `kvtma` main 的 L2 `red` **只由 Q 头数 H 决定**——
+  MQA（H64kv1）与 GQA（H64kv4）的 `red` **逐字节相同 32,833,536**；H32→16.42M、H40→20.52M
+  精确落 `red≈(H/32)×16.42M`。⇒「跨 Q 头折叠」可把 dK/dV 的 `red` 压 (G-1)/G（MQA ×64），
+  是 F4b 里唯一没做、上界最大的杠杆。
+- **为何拿不到**：dQ 与 dK/dV 的 loop-order 偏好相反——(A) head 内层可折叠 dK/dV 但 dQ 丢掉
+  寄存器累加（+17.8M 扇区）且 Q/dO 按 `(nt,head)` 重载（MQA +140M 扇区，致命）；(B) head 外层
+  保住 dQ/Q 读但 dK/dV 累加器须常驻整个 head 循环（ksplit=4 已 128KB/dK，smem 放不下）；
+  (C) 两遍重算回到同一墙。
+- **cluster 也不成立**：O25（fp16/bf16，§5.x）实测 `red` 精确减半但慢 **7.4×**（远程逐元素
+  smem 原子）；它把 N 次全局原子换成 N 次远程原子是 **1:1**，GQA 只放大 `G` 不减少每 CTA 的
+  远程原子数 ⇒ 同阶成本，负结果原样成立。
+- **判决**：本卡（74.8KB smem/170 regs/3 CTA/SM）**结构性不可行**，默认路径一行未改、数值逐位
+  不变。解锁需换卡 / 硬件 scatter-reduce / 多 warpgroup WS（同 F6/F3b 寄存器墙）。
+
+详见 `docs/03` §109；原始输出 `src/fp8/fa_bwd_fp8_o86_gqa_red_probe.out.txt`。
