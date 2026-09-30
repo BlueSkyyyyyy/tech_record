@@ -1,0 +1,10 @@
+=== O102 (P196) fp8 DET Hopper: full S1024 H16 (auto => k=1) + causal k-sweep onefile ===
+--- two-file full S1024 --det ---
+[P3-4g A/B] kvtma ksplit=1 atomic 0.2463 ms | DET 0.3353 ms (0.735x) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=1.24e-04/1.19e-07/8.94e-08
+[F4 A/B] kvtma ksplit=1 atomic 0.2463 ms | DET-fp32 0.3353 ms (0.735x) | DET-fp16(扇区化) 0.2815 ms (0.875x vs atomic) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | fp16-vs-fp32 dq/dk/dv=0.00e+00/2.04e-04/1.11e-04 | fp16-vs-atomic dq/dk/dv=1.24e-04/2.04e-04/1.11e-04
+--- two-file full S1024 --det --detk=4 (worse) ---
+[P3-4g A/B] kvtma ksplit=4 atomic 0.2402 ms | DET 0.3465 ms (0.693x) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=1.24e-04/1.19e-07/7.45e-08
+[F4 A/B] kvtma ksplit=4 atomic 0.2402 ms | DET-fp32 0.3465 ms (0.693x) | DET-fp16(扇区化) 0.2850 ms (0.843x vs atomic) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | fp16-vs-fp32 dq/dk/dv=0.00e+00/2.04e-04/1.11e-04 | fp16-vs-atomic dq/dk/dv=1.24e-04/2.04e-04/1.11e-04
+--- onefile causal S4096 --det ---
+[P3-4g A/B] kvtma ksplit=4 atomic 1.4919 ms | DET 2.3008 ms (0.648x) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | DET-vs-atomic dq/dk/dv=2.18e-04/7.15e-07/1.91e-06
+[F4 A/B] kvtma ksplit=4 atomic 1.4919 ms | DET-fp32 2.3008 ms (0.648x) | DET-fp16(扇区化) 1.8985 ms (0.786x vs atomic) | runs[1-2] dq/dk/dv=0.00e+00/0.00e+00/0.00e+00 | fp16-vs-fp32 dq/dk/dv=0.00e+00/9.66e-04/1.76e-03 | fp16-vs-atomic dq/dk/dv=2.18e-04/9.66e-04/1.76e-03

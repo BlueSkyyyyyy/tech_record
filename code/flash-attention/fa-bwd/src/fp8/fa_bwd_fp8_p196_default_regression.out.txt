@@ -1,0 +1,16 @@
+=== O102 (P196) default-path regression (two-file, no --det) — numbers must match history ===
+--- b1_s4096_h16_d128_causal_fp8  ---
+[timing] total(quant+pre+main+cvt) 1.6071 ms  85.52 TFLOPS (bwd FLOPs=4BS^2HD)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+--- b1_s1024_h16_d128_full_fp8 --full ---
+[timing] total(quant+pre+main+cvt) 0.2629 ms  32.67 TFLOPS (bwd FLOPs=4BS^2HD)
+  dq   vs ref: max_abs=5.521e-02  max_rel=2.450e+01
+  dk   vs ref: max_abs=5.310e-02  max_rel=1.622e+01
+  dv   vs ref: max_abs=4.025e-02  max_rel=1.772e+01
+--- b1_s1024_h2_d512_causal_fp8  ---
+[timing] total(quant+pre+main+cvt) 0.1513 ms  28.38 TFLOPS (bwd FLOPs=4BS^2HD)
+  dq   vs ref: max_abs=2.228e-01  max_rel=5.071e+01
+  dk   vs ref: max_abs=3.311e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.611e-01  max_rel=5.323e+01

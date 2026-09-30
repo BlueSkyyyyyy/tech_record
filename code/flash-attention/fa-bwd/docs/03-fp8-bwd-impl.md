@@ -10894,3 +10894,82 @@ sweep（total ms）确认 `base*split≈256` 最优，与 target=256 的 auto �
   warpgroup，见 ROADMAP「阻塞」）；③ 覆盖型 backlog（`D=256` K/V-TMA、MLA 降 smem）受同一 smem 墙。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o101_ab.out.txt`（A/B 全表 + 外部基线）、
   `src/fp8/fa_bwd_fp8_o101_ncu.out.txt`（ncu 新旧对比）。见 `docs/08` §5.109。
+
+---
+
+## 124. O102（第 196 轮）：`--det` 确定性路径的 Hopper split-K + full/causal 标定 —— **正结果（非默认路径）**
+
+### 124.1 动机（落实 O101「下一步候选 ②」= `partial/split` 的 full 标定里的 DET `partial` 布局）
+
+O101 把「`partial/split` 的 full 标定」里的「split」（LSE 的 K 维 split）收口，指明**唯一未复核的
+同类启发式**是**确定性 `--det` 路径的 partial/`split` 标定**（非默认路径）。
+
+翻查发现两处历史遗留：
+- **mma 路径**的 `--det` 早在 P3-4f 就支持 `--detk>1`（dK/dV partial 天然无 part 维、dQ 加 per-part
+  partial + 固定次序归约），并实测 **causal 下 k=4 触底**（§57）。
+- 但 **Hopper kvtma 快路**的 `--det`（P3-4g，§58）**把 ksplit 写死为 1**（`launch_bwd_main_kvtma_det`
+  的 `...causal, 1, ..., nullptr`），理由是当时只需隔离 partial+reduce 的净开销。于是 fp8 的
+  **生产默认构建（F1：Hopper）**上，`--det` 一直白扔 split-K 并行度。
+
+本项 = 把 P3-4f 的 split-K 能力接到 Hopper 快路，并给 D=128 定长两条 DET 路径加**自动 ksplit 标定**。
+
+### 124.2 实现（**纯 host**，device 一行未改；单/两文件同源）
+
+`fp8_mma_body` / `fa_bwd_fp8_mma_kvtma_kernel` 早已支持 `DET && ksplit>1`（dQ 写
+`dq_part[((row*H+h)*ksplit+part)*HD+c]`、`ksplit==1` 时逐位退化为无竞争 `red_add2`），故只需改 host：
+
+- `launch_bwd_main_kvtma_det` 加 `int ksplit = 1, float* dq_part = nullptr`，替换写死的 `..., 1, ...,
+  nullptr`；调用点透传。
+- P3-4g 的 A/B 段参数化到 `--detk=N`：grid 变 `(nblk*ks, H, B)`，`ks>1` 时分配/清零 `dq_part`、
+  主 kernel 走 `ksplit=ks`，随后 `dkv_reduce_kernel` + `dq_reduce_kernel<128>` 固定次序求和
+  （与 mma 路径 P3-4f/P3-4k 逐字同款）。atomic 参照同 ks。打印补上 `dq` 的 runs[1-2]/diff。
+- **auto ksplit**：`det_ksplit` 默认由 1 改为 **0 = auto**（定长 D=128 的 mma 与 Hopper 两条 DET
+  路径）：`causal ? min(4, nblk) : 1`。`--detk=1` 可显式复现 P3-4e/g 原状；varlen/MLA 三条
+  DET 路径仍 `det_ksplit<1 ⇒ 1`（逐位不变）。
+
+### 124.3 标定（causal S=4096 H16 D=128，两文件 Hopper 构建，`--iters=20`）
+
+| `--detk` | atomic (kvtma) | DET-fp32 | DET-fp16(扇区化) |
+|---|---|---|---|
+| 1 | 1.8117 ms | 2.5344 ms (**1.000×**) | 2.1241 ms (**1.000×**) |
+| 2 | 1.5843 | 2.3472 (1.080×) | 1.9428 (1.093×) |
+| **4** | 1.4856 | **2.2860 (1.109×)** | **1.8743 (1.133×)** |
+| 8 | 1.4884 | 2.3583 (1.074×) | 1.9445 (1.092×) |
+| **auto** | 1.4909 | **2.2845** | **1.8729** |
+
+- **DET 在 k=4 触底**（与 mma 路径 P3-4f、MLA P3-4k 一致）：Hopper 快路的 `--det` 从此比 P3-4g
+  的「锁 k=1」**快 1.11×（fp32 partial）/ 1.13×（fp16 扇区化 partial）**。auto 精确选中 k=4。
+- **full 无三角偏斜**（S=1024 H16 full）：k=1 **0.3353ms** < k=4 0.3465ms ⇒ auto 取 k=1
+  （多切只增 Q/dO 重读 + dQ 跨 part 原子）。
+- **确定性保留**：所有 ks、单/两文件、causal/full 均 **`runs[1-2] bitwise dq/dk/dv = 0.00e+00`**；
+  `DET-vs-atomic` ~e-7–e-4（fp32 归约次序 / dq 的 fp8 容差），与历史一致。
+- **单/两文件一致**：onefile causal S4096 auto k=4 DET-fp32 2.3008 / DET-fp16 1.8985（与两文件
+  2.2860/1.8743 同档，run-to-run 噪声内），runs[1-2]=0。
+
+### 124.4 ncu：DET 的墙仍是二次归约的纯 DRAM 带宽
+
+`dkv_reduce_kernel<128,64>`（k=4，S=4096）：Duration **732.7µs**、**DRAM 91.31%** / L2 88.76% /
+Compute 12.97% / Achieved Occupancy 71.95% / **3.06 TB/s** —— 与 §56/§57/§68 逐项一致，**纯 DRAM
+带宽 bound**（partial 写 + 读的固有字节），与 split-K 无关。故 DET 的绝对代价仍主要落在 reduce。
+
+### 124.5 精度 / 回归
+
+- **默认（非 `--det`）路径一行未改**：causal S4096 total **1.6079ms/85.48 TF**、`ours vs fp32 ref`
+  max_abs **2.635/2.644/3.216e-1**（与历史逐位同档）；full S1024 5.521/5.310/4.025e-2；MLA
+  S1024H2 2.228/3.311/3.611e-1。`--doc-table-check` **OK（214 行）**。
+- MLA / varlen DET 回归：仍 k=1、`runs[1-2]=0`（F4 A/B 与历史同）。
+- DET 的 `fp16-vs-fp32 dk/dv` ~1e-3–2e-3（partial 过一趟 fp16，梯度 amax ~3–6），与 §68 同量级。
+
+### 124.6 结论 / 下一步
+
+- **判决：正结果（非默认路径，opt-in `--det`）**。Hopper 快路的确定性反向恢复 split-K：causal
+  D=128 DET **1.11×（fp32）/1.13×（fp16 扇区化）**、auto 默认 k=4、full 保持 k=1；确定性逐位保留。
+- **`partial/split` 的 full 标定至此全部收口**（LSE split = O101；DET partial/split = 本轮）。
+- **下一步候选**：① **换卡**（更大 smem/寄存器）——causal 旗舰 D=128 的 L2 `red` 主体墙仍是唯一
+  真杠杆，本卡无软件解（F3b/F4b/F6/F7/O90/O91/O92 全收口，见「阻塞」）；② 确定性路径仍可减
+  **partial 字节**（fp8 partial / 只存 causal 非零块）或提 reduce 效率（§68 候选 ②，非默认）；
+  ③ 覆盖型 backlog（`D=256` K/V-TMA、MLA 降 smem）受同一 smem 墙。
+- **原始输出**：`src/fp8/fa_bwd_fp8_p196_det_hopper_ksweep_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_p196_det_hopper_full_1file.out.txt`、
+  `src/fp8/fa_bwd_fp8_p196_default_regression.out.txt`、
+  `src/fp8/fa_bwd_fp8_p196_ncu_reduce_s4096.out.txt`。见 `docs/08` §5.110。
