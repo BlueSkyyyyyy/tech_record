@@ -3126,3 +3126,18 @@ auto-table 在 rtol=0.005 内不变）。详见 `docs/01` §25、`docs/01b` §6b
 `src/fp16/fa_bwd_fp16_o74_mla_lse_ab.out.txt`、`src/fp16/fa_bwd_fp16_mma_onefile_o74_mla.out.txt`、
 `src/bf16/fa_bwd_bf16_o74_mla_lse_ab.out.txt`、`src/bf16/fa_bwd_bf16_mma_onefile_o74_mla.out.txt`、
 `..._o74_ncu_lse_tma_s1024h2.out.txt`。
+
+## 48. O81（第一百七十六轮，正结果，默认）：fp8 GEMM5（dQ）切到 **wgmma RS**
+
+- **改动**：fp8 默认 Hopper（kvtma）main 的 GEMM5（dQ，M=BM=64）从 `mma.m16n8k32` 换到
+  `wgmma.m64n32k32` RS（A=dS2 寄存器、B=Kᵀ no-swizzle 描述符）；Kᵀ 由**从 SW128 K stage 逐字节
+  转置**得到、**复用 Kp 缓冲 ⇒ smem 零增长**。`-DFA_WGMMA5=0` 回退 A/B（默认 1）。
+- **数值**（不变）：S4096 vs fp32 ref dq/dk/dv max_abs = **2.635e-1 / 2.644e-1 / 3.216e-1**、
+  relL2 **8.15% / 8.26% / 6.49%**（护栏内）；S512 = 2.426e-1/2.972e-1/3.733e-1（与历史打印相同）；
+  GQA/full 亦过。`--ci --dtype fp8 --hopper` 全绿（gate 7.629e-6、docs check OK 198 行）。
+- **性能**（同 binary A/B，S4096 H16 causal）：main **1.5564→1.4810ms（1.051×）**、total
+  **1.7885→1.7235ms（1.038×，76.84→79.74 TF）**；ncu `smsp inst` −11.1%、HMMA −26.9%、
+  `lts read` −9.3%、`lts red` 114.52M 不变、regs 168 不变。相对 TE FP8 纯反向
+  （0.3025ms/908.7TF）**5.93×→5.70×**。
+- 详见 `docs/03` §104、`docs/08` §5.90；原始输出 `src/fp8/fa_bwd_fp8_o81_*`、
+  `src/fp8/fa_bwd_fp8_wgmma345_smoke.out.txt`。

@@ -1,0 +1,12 @@
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z12gemm5_kernelPKhS0_Pf' in line 1624
+ptxas info    : (C7517) wgmma.wait_group is injected in around line 369 by compiler to allow use of registers defined by GMMA in function '_Z12noswz_kernelPKhS0_iiPf'
+=== (A) no-swizzle K-major B 描述符（K=32） ===
+  no-swizzle (LBO_u=8,SBO_u=16): max_abs=0.000e+00 PASS
+  no-swizzle (LBO_u=16,SBO_u=16): max_abs=8.000e+01 fail
+  no-swizzle (LBO_u=8,SBO_u=32): max_abs=0.000e+00 PASS
+  no-swizzle (LBO_u=2,SBO_u=16): max_abs=1.150e+02 fail
+=== (B) 从 SW128 源逐字节转置 ===
+  SW128-src 转置 [32][128]->[128][32]: mismatches=0/4096 PASS
+  SW128-src 转置 [64][128]->[128][64]: mismatches=0/8192 PASS
+=== (C) 端到端 GEMM5（dQ） wgmma RS ===
+  GEMM5 dQ[m][d]=Σ_j dS2[m][j]·K[j][d] (BM64 BN32 HD128, A ldmatrix, B=Kᵀ no-swizzle from SW128): max_abs=0.000e+00 bad=0 PASS
