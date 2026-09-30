@@ -6103,6 +6103,18 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       }
     }
   }
+  // O99（第 193 轮）：**causal D=256 的 ksplit 重标定**（定长规则同源，用 `maxlen` 当串长）。
+  //   定长 causal D=256 的 O29 `target=S/2` 在小/中 S 严重欠切（见定长路径注释 / docs/03 §121），
+  //   变长沿用同一错；改为 `k = clamp(2*maxlen/base,1,16)` 再按 `nblk` 封顶。**当前无 D=256 变长
+  //   dump，本分支按定长实测外推、未单独测量**；只改跨 CTA atomicAdd 次序、数值逐位不变。
+  if (causal && D == 256) {
+    const long nblk256 = (long)((maxlen + BM - 1) / BM);
+    long k = (2L * maxlen) / base_grid;
+    if (k < 1) k = 1;
+    if (k > 16) k = 16;
+    if (k > nblk256) k = nblk256;
+    auto_k = k;
+  }
   // O97：`--ksplit=K` 也可用于 varlen（同 binary A/B；K>=1 直接覆盖自动档）。默认 -1 自动。
   const int ksplit = (vksplit >= 1) ? vksplit : (int)auto_k;
   const bool use_regdq = (D == 128) && ((long)(maxlen / 32) / (causal ? 2 : 1) / ksplit >= 4);
@@ -7483,6 +7495,19 @@ int main(int argc, char** argv) {
       if (k > 12) k = 12;
       ksplit = (int)k;
     }
+  }
+  // O99（第 193 轮）：**causal D=256 的 ksplit 重标定**（与两文件版同源，详见
+  //   `fa_bwd_fp8_main.cu` 同名注释 / docs/03 §121）。`target=S/2`（causal MLA 标定）套到
+  //   causal D=256（2 CTA/SM→264 槽）上 `k=32/(H*B)` 与 S 无关 ⇒ 小/中 S 欠切。实测 6 个
+  //   causal D=256 shape 的最优都落在「`grid≈2*S`」（`k≈128/(H*B)`），小 S 由 `k≤nblk` 封顶。
+  //   规则：`k = clamp(2*S/base,1,16)` 再按 `nblk` 封顶。`--ksplit=K` 显式时不覆盖。
+  if (ksplit_auto && causal && D == 256) {
+    const long nblk = (long)((S + 63) / 64);
+    long k = (2L * S) / base_grid;
+    if (k < 1) k = 1;
+    if (k > 16) k = 16;
+    if (k > nblk) k = nblk;
+    ksplit = (int)k;
   }
   // O93：hswap（跨 head 全局 LPT）启用时把自动 ksplit 收到 2（与两文件版同源）。
 #if defined(FA_WGMMA) && defined(FA_TMA)

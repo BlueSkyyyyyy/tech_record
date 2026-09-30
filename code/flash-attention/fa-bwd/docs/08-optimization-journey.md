@@ -2167,3 +2167,28 @@ O92 把 `fp8 专项冲刺 F6-①`（降 L2 搬运）的 ksplit 路径判为关�
   需「均匀 vs 混合长度」判据才能吃下（backlog）。
 
 见 `docs/03` §120；原始输出 `src/fp8/fa_bwd_fp8_o98_{varlen_full_ab,ksweep,ncu,fa3_baseline}.out.txt`。
+
+### 5.107 第 193 轮（O99）：**causal D=256** 的 ksplit 重标定 —— **正结果（默认）**
+
+**思路**：O96/O97/O98 只复核了 **full**，而 **causal D=256** 一直沿用 O29 的 `target_ctas=S/2`
+——那是按 **causal MLA（D=512，1 CTA/SM）** 标的。套到 D=256（2 CTA/SM⇒264 槽）上
+`k=S/2/base=32/(H*B)` 与 S 无关，小/中 S 严重欠切。
+
+- **全扫（6 个 causal D=256 shape，k∈[1,32]，iters=100）**：最优 k 一致落在 **`grid=base*k≈2*S`**
+  （`k≈128/(H*B)`）附近——s512H8→8、s1024H8→8/16（差 1.7%）、s2048H8→16、s4096H8→16、
+  s1024H16kv4→6（k=8 差 0.5%）、s2048H16→12（k=8 差 0.6%）。旧 auto（k=4/4/4/4/2/2）慢 5–14%。
+- **规则（纯 host、device 一行未改、单/两文件同源）**：`k = clamp(2*S/base,1,16)` 再按 `nblk` 封顶；
+  变长 `run_varlen` 同名分支用 `maxlen`（**无 D=256 变长 dump，按定长外推、未单独测量**）。
+- **性能（同 binary A/B，iters=100）**：s512H8 **1.068×**、s1024H8 **1.112×**、s2048H8 **1.104×**、
+  s4096H8 **1.055×**、s1024H16kv4 **1.143×**、s2048H16 **1.122×** ⇒ **6 shape 全 ≥1.05×、无回退**。
+- **ncu**：s2048H8 旧 k=4 769.6µs → 新 k=16 **681.5µs**（`op_read` 6.05M→8.41M、L2 67.1→76.4%）；
+  s1024H16kv4 旧 k=2 464.1µs → 新 k=8 **397.1µs**（L2 57.4→67.7%）。**两组 `op_red` 一字不变**
+  （dK/dV 主体与 ksplit 无关，续证 O83/O86/O95）⇒ 纯「加 k 买并发/藏延迟」。
+- **数值/回归**：只改 atomic 次序 ⇒ relL2 vs fp32 ref dq 8.15–8.33% / dk 8.33–8.48% /
+  dv 6.39–6.50%（护栏内）、`max_abs` O(0.21–0.62)；单/两文件**逐位相同**；**全量 `--ci`（93 case）**
+  三 dtype gate **OK**（fp8 6.676e-6），并顺带把 O96/O97/O98 遗留的 `docs/04` 表同步（198→214 行）；
+  D=128 causal（hswap k=2）/ D=512 causal / 定长 full 逐档不变。
+- **教训**：**causal 的 ksplit 也不能拿「别的 dtype（D=512 MLA）的 target」通用**。至此 fp8 的
+  ksplit 自动档在 causal/full × 定长/变长 × D=128/256/512 全部经实测复核。
+
+见 `docs/03` §121；原始输出 `src/fp8/fa_bwd_fp8_o99_{ab,ksweep,ncu,accuracy,fa3_baseline,ci}.out.txt`。
