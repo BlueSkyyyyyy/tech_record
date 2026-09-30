@@ -8611,3 +8611,96 @@ python3 harness/fa_bwd_run.py --varlen-only --dtype fp8 --iters 20   # 单/两�
   并把 fp16/bf16 varlen 构建也加上 `-DFA_TMA`——把「三 dtype × {定长, varlen} full D=128 LSE
   统一到 TMA」真正做全。
 - main 的 L2 `red` 墙仍受本卡寄存器/smem 硬墙锁定（F6/F7 全判死，见「阻塞」）。
+
+---
+
+## 97. F7 第十四步（第一百六十八轮）：KV-owner **column-owner**（每 CTA 拥有 RCOL 个连续 KV 块）—— 机制正结果 / 性能负结果
+
+### 97.1 动机（F7 单趟「减少贡献数」的最后一条未试路）
+
+§93.6 收口时记：「F7 单趟减少 dK/dV/dQ 贡献数的三条路（两 kernel / TMA store-reduce / BN≥BM）
+全部判决；唯一未试 = **跨 warpgroup 偏和 + 二次归约**」。本轮把这条里**最可行的一个形态**做成真实
+数据：**column-owner** —— 让同一个 CTA 拥有 **RCOL 个连续 KV 块**，并在一次 m-迭代里把它们对 dQ
+的偏和**先在本地累加、再只发一次原子**。
+
+为什么它不同于已判死的 **p160 BN≥BM**：p160 把 `BN` 从 32 放宽到 64，虽然 `red` 精确减半，但
+**GEMM1/2 的累加器也随 BN 翻倍**（`m64n32k32`→`m64n64k32`），叠加 `dK/dV` 累加器翻倍 ⇒ 顶穿
+255 寄存器文件。**column-owner 保持 BN=32**，GEMM1/2 累加器不变，**只**翻倍 `dK/dV` 累加器
+（RCOL 份）+ 一个跨列的 dQ 偏和累加器 —— 寄存器账更省，是 p160 教训的正面解。
+
+### 97.2 实现（`src/fp8/fa_bwd_fp8_kvowner_mma.cu` 新增 `fp8_kvowner_col_body` + 壳，默认路径一行未改）
+
+新增 device body `fp8_kvowner_col_body<HD,BM,BN,TMA,RCOL>`（`HD=128/BM=64/BN=32`，128 线程，
+causal，MHA）与 `__global__` 壳 `fp8_kvowner_dkv_col_tma_kernel`；host 加 `--only=col2` 与同
+binary 的 A/B、对拍、计时。grid.x = `ceil(S/(RCOL·BN))`。每 CTA：
+
+- **K/V/Kp（RCOL 份）常驻 smem**，只从 global 读一次；`dK/dV` **寄存器累加（RCOL 份）**，循环末
+  每块一次 plain store ⇒ dK/dV `red`=0；
+- Q/dO 的 4D-TMA staging 与 Qp/dOp 配对布局**每 m 一次、RCOL 列共享**（⇒ Q/dO 的跨 CTA 读放大
+  也随 grid 减半）；
+- 内层 `for cc in 0..RCOL`：GEMM1/2（wgmma 直读 SW128）→ P/S → fold(Ap/dS3/dS2，用本列 `ks` ) →
+  GEMM3/5（累加进 `dVacc[cc]/dKacc[cc]`）→ GEMM4（dQ 偏和累加进跨列的 `dqacc`，乘本列 `sds2·scale`）；
+- 内层退出后 `dqacc` 用 **一次** `red_add2` 写出 ⇒ **dQ 贡献数 ÷ RCOL**。
+
+**踩坑**：`Kp` 是 `uint16_t*` 而 `sz_Kp` 是字节数，`Kp + cc*sz_Kp` 的指针算术前进 2×（首次运行
+`dq` 错 max_abs=1.89）；改 `reinterpret_cast<unsigned char*>(Kp) + cc*sz_Kp` 后逐位修正。
+
+### 97.3 数值（三 shape 全通，逐位级一致）
+
+| case（S,H,D128 causal fp8） | dk/dv vs wgmma+TMA(BN=32) | dq vs wgmma+TMA |
+|---|---|---|
+| S512 H16 | **0.000e+00 / 0.000e+00** | 2.384e-07 |
+| S1024 H32 | 0.000e+00 / 0.000e+00 | 1.788e-07 |
+| S4096 H16 | 0.000e+00 / 0.000e+00 | 2.384e-07 |
+
+dk/dv **逐位相同**（同口径、只在本地累加），dq 仅差跨 CTA 加法次序（~2e-7，远小于 fp8 容差）；
+col-owner 三梯度 vs fp32 ref 与 wgmma+TMA **同量级**（如 S512 `2.976/3.732/2.426e-1`）。
+
+### 97.4 性能（同 binary A/B，Hopper+TMA，event）：**慢 0.72–0.77×**
+
+| case | wgmma+TMA BN=32（三梯度） | **col-owner RCOL=2** | 比 | smem |
+|---|---|---|---|---|
+| S512 H16 | 0.0749 ms | 0.1025 ms | **0.731×** | 87,616 B |
+| S1024 H32 | 0.3075 ms | 0.4281 ms | **0.718×** | 87,616 B |
+| S4096 H16 | 1.8352 ms | 2.3966 ms | **0.766×** | 87,616 B |
+
+### 97.5 ncu（S=4096 H16，`--only=` 单 kernel，`regex:wgmma_tma_kernel` vs `regex:col_tma`）—— 机制成立、被寄存器墙吃掉
+
+| 指标 | **wgmma+TMA BN=32** | **col-owner RCOL=2** | 说明 |
+|---|---|---|---|
+| `lts__t_sectors_op_red` | 102,236,160 | **51,118,080** | **精确减半**（设计目标达成） |
+| `l1tex…global_op_red`（red 请求） | 8,519,680 | **4,259,840** | dQ 原子数减半 |
+| `lts__t_sectors_op_read` | 52.78M | **105.69M（2.0×）** | Q/dO 重读**应减半**，但被 spill 读抵消 |
+| `lts__t_sectors_op_write` | 6.20M | **113.73M（18.3×）** | **寄存器溢出（local store）** |
+| registers/thread | 168 | **255（上限）** | `dVacc/dKacc` 翻倍 + `dqacc` |
+| occupancy limit（reg / smem） | 3 / 3 block | **2 / 2 block** | 2 CTA/SM |
+| Duration | 1.85 ms | 2.46 ms | |
+| `smsp__inst_executed` | 703.65M | 628.78M | −10.6% |
+| active warps | 17.77% | 11.93% | |
+
+### 97.6 判决
+
+**机制完全成立**：column-owner 把 dQ 的 L2 `red` **精确减半**（102.2M→51.1M）、L1 red 请求减半，
+并让 Q/dO 的跨 CTA 读放大随 grid 减半 —— 正是 F7 追的「减少每个输出元素的贡献 CTA 数」。**但
+`dK/dV` 累加器翻倍（RCOL 份）+ 跨列 `dqacc` 把寄存器顶到 255 上限**，每线程 112B 栈、local `write`
+扇区 6.2M→**113.7M（18.3×）**，溢出流量盖过省下的 `red`/读，净慢 0.72–0.77×。
+
+⇒ **与 p160（BN≥BM）、F6、O17b「放大 tile / 多 owner 撞 255 寄存器文件」是同一堵墙**：本卡
+（128KB reg/CTA 上限、`__launch_bounds__` 170 regs@3CTA）下，**任何「单 CTA 拥有更多 KV」以减少
+跨 CTA 贡献数的实现，都把 dK/dV 累加器翻倍 ⇒ 溢出**。至此 F7 单趟路线（两 kernel / TMA store-reduce
+/ BN≥BM / column-owner）**全部判决**；剩余只有**换卡**（寄存器/smem 更大）或**多 warpgroup 把累加器
+摊到更多线程**（256/384 线程，对标 TE 的 384 线程 1 CTA/SM —— 需先破 fp8 `wgmma` 无转置操作数的
+限制，见「阻塞」）。
+
+### 97.7 复现 / 原始输出
+
+```bash
+# 构建（Hopper+TMA）：含 --only=col2 的 ncu 单 kernel 剖析
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_kvowner_mma.cu --dir=<case>
+scripts/ncu.sh src/fp8/fa_bwd_fp8_kvowner_mma.cu --metrics <...> --launch-count 1 \
+  --kernel-name regex:col_tma -- --dir=<case> --only=col2
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_kvowner_col_p168_{s512,s1024h32,s4096}.out.txt`、
+`src/fp8/fa_bwd_fp8_kvowner_col_p168_ncu_s4096.out.txt`。

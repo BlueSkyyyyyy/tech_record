@@ -989,6 +989,493 @@ __device__ __forceinline__ void fp8_kvowner_dkv_wgmma_body(
       }
 }
 
+// =============================================================================
+// F7 第十四步：KV-owner **column-owner**（每 CTA 拥有 RCOL 个连续 KV 块）
+// =============================================================================
+// 动机（承接 §93.6「唯一未试 = 跨 warpgroup 偏和 + 二次归约」）：p157 的 KV-owner 把 dK/dV
+//   的跨 CTA `red` 打成 **0**，但 dQ 仍逐 lane `red_add2`，且 dQ 元素被**所有** KV 块各贡献
+//   一次（贡献数 = S/BN = 64）⇒ 总 `red` 又回到 ~102M ≈ 默认 Q-owner 的 114M（p157 判决）。
+//   要真正降 `red`，必须让同一 CTA 拥有**多个连续 KV 块**，并在一次 m-迭代里把它们对 dQ 的
+//   偏和**先在本地累加、再只发一次原子** ⇒ dQ 贡献数 ÷ RCOL。
+//   * p160 的 BN≥BM 也把 red 减半，但把 **GEMM1/2 累加器**（BN 32→64）一起翻倍 ⇒ 顶穿 255
+//     寄存器、溢出盖过收益。
+//   * 本方案 **BN 仍 32**，GEMM1/2 累加器不变；只翻倍 **dK/dV 累加器**（RCOL 份）+ 一个
+//     dQ 偏和累加器，寄存器更省（p160 的教训的正面解）。
+// 结构：grid.x = ceil(S/(RCOL·BN))，每 CTA：
+//   * K/V/Kp（RCOL 份）常驻 smem，只从 global 读一次；dK/dV 寄存器累加（RCOL 份），循环末
+//     每块一次 plain store ⇒ dK/dV `red`=0；
+//   * Q/dO staging（4D-TMA）与 Qp/dOp 配对布局**每 m 一次、RCOL 列共享**；
+//   * 内层 `for cc in 0..RCOL`：GEMM1/2(wgmma) → P/S → fold(Ap/dS3/dS2) → GEMM3/5（累加进
+//     `dVacc[cc]/dKacc[cc]`）→ GEMM4（dQ 偏和累加进 `dqacc`，乘 `sds2[m]·scale`）；
+//   * 内层退出后 `dqacc` 用 `red_add2` **一次**写出 ⇒ dQ 贡献数 ÷ RCOL。
+// 数值：与 KV-owner 单块版同口径（同一量化/折算/mma 布局），只差跨 CTA 加法次序 ⇒ dk/dv 对
+//   ref 与既有原型同量级，dq 与单块版差 fp8 噪声。
+#ifdef FA_WGMMA
+#ifndef FA_KV_COL_CTA
+#define FA_KV_COL_CTA 2
+#endif
+template <int HD, int BM, int BN, bool TMA, int RCOL>
+__device__ __forceinline__ void fp8_kvowner_col_body(
+    const unsigned char* __restrict__ q8, const float* __restrict__ qs,
+    const unsigned char* __restrict__ k8, const float* __restrict__ ks,
+    const unsigned char* __restrict__ v8, const float* __restrict__ vs,
+    const unsigned char* __restrict__ do8, const float* __restrict__ dos,
+    const float* __restrict__ lse, const float* __restrict__ delta,
+    float* __restrict__ dk, float* __restrict__ dv, float* __restrict__ dq, int S, int H,
+    float scale, int causal, const CUtensorMap* qmap, const CUtensorMap* dmap) {
+  using Cfg = Fp8Cfg<HD, BM, BN>;
+  constexpr int PSLD = Cfg::PSLD;
+  constexpr int QTS = Cfg::QTS;
+  constexpr int PSS = Cfg::PSS;
+  constexpr int NWM = 2, NWAR = 2;
+  constexpr int NTW = NWAR * 64;
+  constexpr int GM34 = BN / NWM, GN34 = NTW / NWAR;
+  constexpr int MTM34 = GM34 / 16, NTM34 = GN34 / 8;
+  constexpr int GM5 = BM / NWM, GN5 = NTW / NWAR;
+  constexpr int MTM5 = GM5 / 16, NTM5 = GN5 / 8;
+  constexpr int NTFOLD = BN / 32;
+  static_assert(HD == 128 && BM == 64 && BN == 32, "col-owner 固定 HD=128/BM=64/BN=32");
+
+  constexpr int sz_Ks = BN * HD;
+  constexpr int sz_Vs = BN * HD;
+  constexpr int sz_Qs = BM * HD;
+  constexpr int sz_dOs = BM * HD;
+  constexpr int sz_Qp = (BM / 2) * PSLD * (int)sizeof(uint16_t);
+  constexpr int sz_dOp = (BM / 2) * PSLD * (int)sizeof(uint16_t);
+  constexpr int sz_Ap = BN * QTS;
+  constexpr int sz_dS3 = BN * QTS;
+  constexpr int sz_Kp = (BN / 2) * PSLD * (int)sizeof(uint16_t);
+  constexpr int sz_dS2 = BM * Cfg::DSS2;
+  constexpr int sz_Ps = BM * PSS * (int)sizeof(float);
+  constexpr int sz_Ss = BM * PSS * (int)sizeof(float);
+  constexpr int sz_scales = (3 * BM + 2 * BN + 2 * RCOL * BN) * (int)sizeof(float);
+
+  extern __shared__ __align__(16) char smem[];
+  int off = 0;
+  unsigned char* Ks = reinterpret_cast<unsigned char*>(smem + off); off += RCOL * sz_Ks;
+  unsigned char* Vs = reinterpret_cast<unsigned char*>(smem + off); off += RCOL * sz_Vs;
+  unsigned char* Qs = reinterpret_cast<unsigned char*>(smem + off); off += sz_Qs;
+  unsigned char* dOs = reinterpret_cast<unsigned char*>(smem + off); off += sz_dOs;
+  uint16_t* Qp = reinterpret_cast<uint16_t*>(smem + off); off += sz_Qp;
+  uint16_t* dOp = reinterpret_cast<uint16_t*>(smem + off); off += sz_dOp;
+  unsigned char* Ap = reinterpret_cast<unsigned char*>(smem + off); off += sz_Ap;
+  unsigned char* dS3 = reinterpret_cast<unsigned char*>(smem + off); off += sz_dS3;
+  uint16_t* Kp = reinterpret_cast<uint16_t*>(smem + off); off += RCOL * sz_Kp;
+  unsigned char* dS2 = reinterpret_cast<unsigned char*>(smem + off); off += sz_dS2;
+  float* Ps = reinterpret_cast<float*>(smem + off); off += sz_Ps;
+  float* Ss = reinterpret_cast<float*>(smem + off); off += sz_Ss;
+  float* scales = reinterpret_cast<float*>(smem + off);
+  float* qs_s = scales;
+  float* dos_s = qs_s + BM;
+  float* sA = dos_s + BM;
+  float* sds3 = sA + BN;
+  float* sds2 = sds3 + BN;
+  float* ks_s = sds2 + BM;             // [RCOL*BN]
+  float* vs_s = ks_s + RCOL * BN;      // [RCOL*BN]
+  constexpr int WGBASE = RCOL * sz_Ks + RCOL * sz_Vs + sz_Qs + sz_dOs + sz_Qp + sz_dOp + sz_Ap +
+                         sz_dS3 + RCOL * sz_Kp + sz_dS2 + sz_Ps + sz_Ss + sz_scales;
+  uint64_t* qbars = reinterpret_cast<uint64_t*>(smem + ((WGBASE + 15) & ~15));
+  (void)qmap;
+  (void)dmap;
+
+  const int j0b = blockIdx.x * (RCOL * BN);
+  const int h = blockIdx.y;
+  const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  const int wr = wid / NWAR, wc = wid % NWAR;
+  const int g = lane >> 2, c2 = (lane & 3) * 2;
+  const int nd4 = HD / 4;
+
+  // ---- RCOL 个 KV 行块常驻 smem（SW128）：只从 global 读一次 ----
+  for (int cc = 0; cc < RCOL; ++cc) {
+    const int j0 = j0b + cc * BN;
+    unsigned char* Ksc = Ks + cc * sz_Ks;
+    unsigned char* Vsc = Vs + cc * sz_Vs;
+    for (int u = tid; u < (BN / 2) * nd4; u += THREADS) {
+      const int rp = u / nd4, d4 = (u % nd4) * 4;
+      const int jr = j0 + rp * 2;
+      uint32_t k0 = 0, k1 = 0, v0 = 0, v1 = 0;
+      if (jr < S) {
+        size_t i0 = (((size_t)jr) * H + h) * HD + d4;
+        k0 = *reinterpret_cast<const uint32_t*>(k8 + i0);
+        v0 = *reinterpret_cast<const uint32_t*>(v8 + i0);
+      }
+      if (jr + 1 < S) {
+        size_t i1 = (((size_t)(jr + 1)) * H + h) * HD + d4;
+        k1 = *reinterpret_cast<const uint32_t*>(k8 + i1);
+        v1 = *reinterpret_cast<const uint32_t*>(v8 + i1);
+      }
+      *reinterpret_cast<uint32_t*>(Ksc + sw128_off_fp8(rp * 2, d4, HD)) = k0;
+      *reinterpret_cast<uint32_t*>(Ksc + sw128_off_fp8(rp * 2 + 1, d4, HD)) = k1;
+      *reinterpret_cast<uint32_t*>(Vsc + sw128_off_fp8(rp * 2, d4, HD)) = v0;
+      *reinterpret_cast<uint32_t*>(Vsc + sw128_off_fp8(rp * 2 + 1, d4, HD)) = v1;
+    }
+    if (tid < BN) {
+      const int jg = j0 + tid;
+      ks_s[cc * BN + tid] = (jg < S) ? ks[((size_t)jg) * H + h] : 1.f;
+      vs_s[cc * BN + tid] = (jg < S) ? vs[((size_t)jg) * H + h] : 1.f;
+    }
+  }
+  __syncthreads();
+
+  // ---- K 的配对布局 Kp（每列一份），供 GEMM4 的 B（ldmatrix.x2.trans）----
+  for (int cc = 0; cc < RCOL; ++cc) {
+    const unsigned char* Ksc = Ks + cc * sz_Ks;
+    uint16_t* Kpc = reinterpret_cast<uint16_t*>(reinterpret_cast<unsigned char*>(Kp) + cc * sz_Kp);
+    for (int u = tid; u < (BN / 2) * nd4; u += THREADS) {
+      const int rp = u / nd4, d4 = (u % nd4) * 4;
+      const uint32_t k0 = *reinterpret_cast<const uint32_t*>(Ksc + sw128_off_fp8(rp * 2, d4, HD));
+      const uint32_t k1 = *reinterpret_cast<const uint32_t*>(Ksc + sw128_off_fp8(rp * 2 + 1, d4, HD));
+      uint32_t* kpw = reinterpret_cast<uint32_t*>(Kpc + rp * PSLD + d4);
+      kpw[0] = __byte_perm(k0, k1, 0x5140);
+      kpw[1] = __byte_perm(k0, k1, 0x7362);
+    }
+  }
+  __syncthreads();
+
+  // ---- dK/dV 寄存器累加器（RCOL 份）+ dQ 偏和（1 份，跨 cc）----
+  float dVacc[RCOL][MTM34][NTM34][4];
+  float dKacc[RCOL][MTM34][NTM34][4];
+#pragma unroll
+  for (int cc = 0; cc < RCOL; ++cc)
+#pragma unroll
+    for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+      for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) { dVacc[cc][i][j][q] = 0.f; dKacc[cc][i][j][q] = 0.f; }
+
+  const int mstart = (j0b / BM) * BM;
+  if constexpr (TMA) {
+    if (tid == 0) { mbar_init(qbars + 0, 1); mbar_init(qbars + 1, 1); }
+    __syncthreads();
+  }
+  uint32_t qph = 0;
+  for (int m0 = mstart; m0 < S; m0 += BM) {
+    // ---- Q/dO staging（每 m 一次，RCOL 列共享）----
+    if constexpr (TMA) {
+      if (tid == 0) {
+        mbar_arrive_expect(qbars + 0, (uint32_t)(BM * HD));
+        tma_load_4d(Qs, qmap, 0, m0, h, 0, qbars + 0);
+        mbar_arrive_expect(qbars + 1, (uint32_t)(BM * HD));
+        tma_load_4d(dOs, dmap, 0, m0, h, 0, qbars + 1);
+      }
+      mbar_wait(qbars + 0, qph);
+      mbar_wait(qbars + 1, qph);
+      qph ^= 1;
+      __syncthreads();
+    } else {
+      for (int u = tid; u < (BM / 2) * nd4; u += THREADS) {
+        const int rp = u / nd4, d4 = (u % nd4) * 4;
+        const int qa = m0 + rp * 2, qb = m0 + rp * 2 + 1;
+        uint32_t q0 = 0, q1 = 0, o0 = 0, o1 = 0;
+        if (qa < S) {
+          size_t idx = (((size_t)qa) * H + h) * HD + d4;
+          q0 = *reinterpret_cast<const uint32_t*>(q8 + idx);
+          o0 = *reinterpret_cast<const uint32_t*>(do8 + idx);
+        }
+        if (qb < S) {
+          size_t idx = (((size_t)qb) * H + h) * HD + d4;
+          q1 = *reinterpret_cast<const uint32_t*>(q8 + idx);
+          o1 = *reinterpret_cast<const uint32_t*>(do8 + idx);
+        }
+        *reinterpret_cast<uint32_t*>(Qs + sw128_off_fp8(rp * 2, d4, HD)) = q0;
+        *reinterpret_cast<uint32_t*>(Qs + sw128_off_fp8(rp * 2 + 1, d4, HD)) = q1;
+        *reinterpret_cast<uint32_t*>(dOs + sw128_off_fp8(rp * 2, d4, HD)) = o0;
+        *reinterpret_cast<uint32_t*>(dOs + sw128_off_fp8(rp * 2 + 1, d4, HD)) = o1;
+      }
+    }
+    // Q/dO 配对布局（SW128 → K 配对）
+    for (int u = tid; u < (BM / 2) * nd4; u += THREADS) {
+      const int rp = u / nd4, d4 = (u % nd4) * 4;
+      const uint32_t q0 = *reinterpret_cast<const uint32_t*>(Qs + sw128_off_fp8(rp * 2, d4, HD));
+      const uint32_t q1 = *reinterpret_cast<const uint32_t*>(Qs + sw128_off_fp8(rp * 2 + 1, d4, HD));
+      const uint32_t o0 = *reinterpret_cast<const uint32_t*>(dOs + sw128_off_fp8(rp * 2, d4, HD));
+      const uint32_t o1 =
+          *reinterpret_cast<const uint32_t*>(dOs + sw128_off_fp8(rp * 2 + 1, d4, HD));
+      uint32_t* qpw = reinterpret_cast<uint32_t*>(Qp + rp * PSLD + d4);
+      qpw[0] = __byte_perm(q0, q1, 0x5140);
+      qpw[1] = __byte_perm(q0, q1, 0x7362);
+      uint32_t* opw = reinterpret_cast<uint32_t*>(dOp + rp * PSLD + d4);
+      opw[0] = __byte_perm(o0, o1, 0x5140);
+      opw[1] = __byte_perm(o0, o1, 0x7362);
+    }
+    if (tid < BM) {
+      const int qi = m0 + tid;
+      qs_s[tid] = (qi < S) ? qs[((size_t)qi) * H + h] : 1.f;
+      dos_s[tid] = (qi < S) ? dos[((size_t)qi) * H + h] : 1.f;
+    }
+    bulk_reduce_fence();
+    __syncthreads();
+
+    // ---- LSE/D 预装寄存器 ----
+    const int r0w = wid * 16 + g;
+    const int qa_r = m0 + r0w, qb_r = m0 + r0w + 8;
+    const float lse_a = (qa_r < S) ? lse[((size_t)qa_r) * H + h] : 0.f;
+    const float lse_b = (qb_r < S) ? lse[((size_t)qb_r) * H + h] : 0.f;
+    const float del_a = (qa_r < S) ? delta[((size_t)qa_r) * H + h] : 0.f;
+    const float del_b = (qb_r < S) ? delta[((size_t)qb_r) * H + h] : 0.f;
+
+    float dqacc[MTM5][NTM5][4];
+#pragma unroll
+    for (int i = 0; i < MTM5; ++i)
+#pragma unroll
+      for (int j = 0; j < NTM5; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) dqacc[i][j][q] = 0.f;
+
+    for (int cc = 0; cc < RCOL; ++cc) {
+      const int j0 = j0b + cc * BN;
+      const unsigned char* Ksc = Ks + cc * sz_Ks;
+      const unsigned char* Vsc = Vs + cc * sz_Vs;
+      const float* ksc = ks_s + cc * BN;
+      const float* vsc = vs_s + cc * BN;
+
+      // GEMM1 S=scale·QKᵀ (e4e4) + GEMM2 dP=dO·Vᵀ (e5e4) + epilogue P/S
+      {
+        float sacc[BN / 2], dpacc[BN / 2];
+        wgmma_mn_issue<BN, 0>(reinterpret_cast<const char*>(Qs), reinterpret_cast<const char*>(Ksc),
+                              HD, sacc);
+        wgmma_mn_issue<BN, 1>(reinterpret_cast<const char*>(dOs), reinterpret_cast<const char*>(Vsc),
+                              HD, dpacc);
+        wgmma_wait0_fp8();
+#pragma unroll
+        for (int j = 0; j < BN / 8; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            const int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+            const int c = j * 8 + c2 + (q & 1);
+            const int qi = m0 + r, jg = j0 + c;
+            float p = 0.f;
+            if (qi < S && jg < S && !(causal && jg > qi)) {
+              const float lv = (q >= 2) ? lse_b : lse_a;
+              const float sval = sacc[j * 4 + q] * scale * qs_s[r] * ksc[c];
+              p = fexp(sval - lv);
+            }
+            Ps[r * PSS + c] = p;
+          }
+#pragma unroll
+        for (int j = 0; j < BN / 8; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            const int r = wid * 16 + g + (q >= 2 ? 8 : 0);
+            const int c = j * 8 + c2 + (q & 1);
+            const float dpv = dpacc[j * 4 + q] * dos_s[r] * vsc[c];
+            const float del = (q >= 2) ? del_b : del_a;
+            Ss[r * PSS + c] = Ps[r * PSS + c] * (dpv - del);
+          }
+      }
+      __syncthreads();
+
+      // fold：Ap=P·dos[m] (e4m3, per-j) / dS3=dS·qs[m] (e5m2, per-j) / dS2=dS·ks[j] (e5m2, per-m)
+      if (wid < 4) {
+        const int jl = lane >> 2, sub4 = lane & 3;
+#pragma unroll
+        for (int jh = 0; jh < NTFOLD; ++jh) {
+          const int j = wid * 8 + jl + jh * 32;
+          float amaxA = 0.f, amax3 = 0.f;
+#pragma unroll
+          for (int half = 0; half < 2; ++half)
+#pragma unroll
+            for (int t = 0; t < 8; ++t) {
+              const int m = sub4 * 8 + t + half * 32;
+              amaxA = fmaxf(amaxA, fabsf(Ps[m * PSS + j] * dos_s[m]));
+              amax3 = fmaxf(amax3, fabsf(Ss[m * PSS + j] * qs_s[m]));
+            }
+          amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 1));
+          amaxA = fmaxf(amaxA, __shfl_xor_sync(0xffffffffu, amaxA, 2));
+          amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 1));
+          amax3 = fmaxf(amax3, __shfl_xor_sync(0xffffffffu, amax3, 2));
+          float scA = (amaxA > 0.f) ? amaxA / kE4M3Max : 1.f;
+          float sc3 = (amax3 > 0.f) ? amax3 / kE5M2Max : 1.f;
+          if (sub4 == 0) {
+            sA[j] = scA;
+            sds3[j] = sc3;
+          }
+          scA = __shfl_sync(0xffffffffu, scA, jl * 4);
+          sc3 = __shfl_sync(0xffffffffu, sc3, jl * 4);
+          const float invA = __frcp_rn(scA);
+          const float inv3 = __frcp_rn(sc3);
+#pragma unroll
+          for (int half = 0; half < 2; ++half) {
+            uint32_t pa2[2], d32[2];
+#pragma unroll
+            for (int t4 = 0; t4 < 2; ++t4) {
+              const int m = sub4 * 8 + t4 * 4 + half * 32;
+              pa2[t4] = foldpack4<true, false>(
+                  Ps[(m + 0) * PSS + j] * dos_s[m + 0], Ps[(m + 1) * PSS + j] * dos_s[m + 1],
+                  Ps[(m + 2) * PSS + j] * dos_s[m + 2], Ps[(m + 3) * PSS + j] * dos_s[m + 3], scA,
+                  invA);
+              d32[t4] = foldpack4<true, true>(
+                  Ss[(m + 0) * PSS + j] * qs_s[m + 0], Ss[(m + 1) * PSS + j] * qs_s[m + 1],
+                  Ss[(m + 2) * PSS + j] * qs_s[m + 2], Ss[(m + 3) * PSS + j] * qs_s[m + 3], sc3,
+                  inv3);
+            }
+            *reinterpret_cast<uint2*>(Ap + j * QTS + sub4 * 8 + half * 32) =
+                make_uint2(pa2[0], pa2[1]);
+            *reinterpret_cast<uint2*>(dS3 + j * QTS + sub4 * 8 + half * 32) =
+                make_uint2(d32[0], d32[1]);
+          }
+        }
+        // dS2 fold（per-m, use ksc）
+        const int ml = lane >> 1, sub2 = lane & 1;
+        const int m = wid * 16 + ml;
+        float amax2 = 0.f;
+#pragma unroll
+        for (int jh = 0; jh < NTFOLD; ++jh)
+#pragma unroll
+          for (int t = 0; t < 16; ++t) {
+            const int j = sub2 * 16 + t + jh * 32;
+            amax2 = fmaxf(amax2, fabsf(Ss[m * PSS + j] * ksc[j]));
+          }
+        amax2 = fmaxf(amax2, __shfl_xor_sync(0xffffffffu, amax2, 1));
+        float sc2 = (amax2 > 0.f) ? amax2 / kE5M2Max : 1.f;
+        if (sub2 == 0) sds2[m] = sc2;
+        sc2 = __shfl_sync(0xffffffffu, sc2, ml * 2);
+        const float inv2 = __frcp_rn(sc2);
+#pragma unroll
+        for (int jh = 0; jh < NTFOLD; ++jh) {
+          uint32_t d2_4[4];
+#pragma unroll
+          for (int t4 = 0; t4 < 4; ++t4) {
+            const int j = sub2 * 16 + t4 * 4 + jh * 32;
+            d2_4[t4] = foldpack4<true, true>(
+                Ss[m * PSS + j + 0] * ksc[j + 0], Ss[m * PSS + j + 1] * ksc[j + 1],
+                Ss[m * PSS + j + 2] * ksc[j + 2], Ss[m * PSS + j + 3] * ksc[j + 3], sc2, inv2);
+          }
+          *reinterpret_cast<uint4*>(dS2 + m * Cfg::DSS2 + sub2 * 16 + jh * 32) =
+              make_uint4(d2_4[0], d2_4[1], d2_4[2], d2_4[3]);
+        }
+      }
+      __syncthreads();
+
+      // GEMM3 dV += sA·(Ap·dOᵀ)  —— 累加进 dVacc[cc]
+      {
+        float acc[MTM34][NTM34][4];
+#pragma unroll
+        for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+          for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+        mma_block_bt<GM34, GN34, BM, E4E5>(Ap, QTS, dOp, PSLD, acc, wr, wc, lane, 0);
+        const int r0 = wr * GM34;
+#pragma unroll
+        for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+          for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              dVacc[cc][i][j][q] += acc[i][j][q] * sA[r];
+            }
+      }
+      // GEMM5 dK += scale·sds3·(dS3·Qᵀ)  —— 累加进 dKacc[cc]
+      {
+        float acc[MTM34][NTM34][4];
+#pragma unroll
+        for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+          for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+        mma_block_bt<GM34, GN34, BM, E5E4>(dS3, QTS, Qp, PSLD, acc, wr, wc, lane, 0);
+        const int r0 = wr * GM34;
+#pragma unroll
+        for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+          for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              dKacc[cc][i][j][q] += acc[i][j][q] * sds3[r] * scale;
+            }
+      }
+      // GEMM4 dQ 偏和（本 cc）—— 累加进 dqacc
+      {
+        float acc[MTM5][NTM5][4];
+#pragma unroll
+        for (int i = 0; i < MTM5; ++i)
+#pragma unroll
+          for (int j = 0; j < NTM5; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) acc[i][j][q] = 0.f;
+        const uint16_t* Kpc =
+            reinterpret_cast<const uint16_t*>(reinterpret_cast<const unsigned char*>(Kp) + cc * sz_Kp);
+        mma_block_bt<GM5, GN5, BN, E5E4>(dS2, Cfg::DSS2, Kpc, PSLD, acc, wr, wc, lane, 0);
+        const int r0 = wr * GM5, c0 = wc * GN5;
+#pragma unroll
+        for (int i = 0; i < MTM5; ++i)
+#pragma unroll
+          for (int j = 0; j < NTM5; ++j)
+#pragma unroll
+            for (int q = 0; q < 4; ++q) {
+              const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              const int c = c0 + j * 8 + c2 + (q & 1);
+              const int qi = m0 + r;
+              if (qi < S) dqacc[i][j][q] += acc[i][j][q] * sds2[r] * scale;
+            }
+      }
+      __syncthreads();  // 下一 cc 覆写 Ps/Ss/Ap/dS3/dS2
+    }
+
+    // dQ：**每 m 一次** `red_add2`（跨 RCOL 列先本地累加）⇒ 贡献数 ÷ RCOL
+    {
+      const int r0 = wr * GM5, c0 = wc * GN5;
+#pragma unroll
+      for (int i = 0; i < MTM5; ++i)
+#pragma unroll
+        for (int j = 0; j < NTM5; ++j)
+#pragma unroll
+          for (int q = 0; q < 4; q += 2) {
+            const int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+            const int c = c0 + j * 8 + c2;
+            const int qi = m0 + r;
+            if (qi < S) red_add2(dq + (((size_t)qi) * H + h) * HD + c, dqacc[i][j][q],
+                                 dqacc[i][j][q + 1]);
+          }
+    }
+    __syncthreads();
+  }
+
+  // ---- 每列一次 plain store（无 atomic / 无 red）----
+#pragma unroll
+  for (int cc = 0; cc < RCOL; ++cc) {
+    const int j0 = j0b + cc * BN;
+#pragma unroll
+    for (int i = 0; i < MTM34; ++i)
+#pragma unroll
+      for (int j = 0; j < NTM34; ++j)
+#pragma unroll
+        for (int q = 0; q < 4; ++q) {
+          const int r = wr * GM34 + i * 16 + g + (q >= 2 ? 8 : 0);
+          const int d = wc * GN34 + j * 8 + c2 + (q & 1);
+          const int jg = j0 + r;
+          if (jg < S) {
+            dv[(((size_t)jg) * H + h) * HD + d] = dVacc[cc][i][j][q];
+            dk[(((size_t)jg) * H + h) * HD + d] = dKacc[cc][i][j][q];
+          }
+        }
+  }
+}
+
+#if defined(FA_TMA)
+template <int HD, int BM, int BN, int RCOL>
+__global__ void __launch_bounds__(THREADS, FA_KV_COL_CTA)
+fp8_kvowner_dkv_col_tma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
+                               const unsigned char* __restrict__ k8, const float* __restrict__ ks,
+                               const unsigned char* __restrict__ v8, const float* __restrict__ vs,
+                               const unsigned char* __restrict__ do8, const float* __restrict__ dos,
+                               const float* __restrict__ lse, const float* __restrict__ delta,
+                               float* __restrict__ dk, float* __restrict__ dv, float* __restrict__ dq,
+                               int S, int H, float scale, int causal,
+                               const __grid_constant__ CUtensorMap qmap,
+                               const __grid_constant__ CUtensorMap dmap) {
+  fp8_kvowner_col_body<HD, BM, BN, true, RCOL>(q8, qs, k8, ks, v8, vs, do8, dos, lse, delta, dk, dv,
+                                               dq, S, H, scale, causal, &qmap, &dmap);
+}
+#endif  // FA_TMA
+#endif  // FA_WGMMA
+
 // F7 第七步壳：非 TMA（标量 global gather staging）——行为与 p154 逐字一致。
 template <int HD, int BM, int BN>
 __global__ void __launch_bounds__(THREADS, FA_KV_CTA)
@@ -1918,6 +2405,14 @@ int main(int argc, char** argv) {
            BM64 * Cfg64::PSS * 4 + BM64 * Cfg64::PSS * 4 + (3 * BM64 + 4 * BN64) * 4;
   }();
   constexpr int wg_tma_smem64 = ((wg_smem64 + 15) & ~15) + 64;
+  // F7 第十四步：col-owner（RCOL=2）的 smem —— 只多 RCOL 份 K/V/Kp + 加宽的 scales。
+  constexpr int RCOL = 2;
+  constexpr int wg_col_smem = [] {
+    return RCOL * (BN * HD + BN * HD + (BN / 2) * Cfg::PSLD * 2) + BM * HD + BM * HD +
+           (BM / 2) * Cfg::PSLD * 2 + (BM / 2) * Cfg::PSLD * 2 + BN * Cfg::QTS + BN * Cfg::QTS +
+           BM * Cfg::DSS2 + BM * Cfg::PSS * 4 + BM * Cfg::PSS * 4 + (3 * BM + 2 * BN + 2 * RCOL * BN) * 4;
+  }();
+  constexpr int wg_col_smem_tma = ((wg_col_smem + 15) & ~15) + 64;
 #endif
 
   const int lse_smem = Cfg::lse_smem_bytes;
@@ -1994,6 +2489,9 @@ int main(int argc, char** argv) {
   // F7 第十三步：BN=64 实例（BN≥BM）。
   CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_wgmma_tma_kernel<HD, BM64, BN64>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, wg_tma_smem64));
+  // F7 第十四步：col-owner 实例（RCOL=2）。
+  CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_col_tma_kernel<HD, BM, BN, RCOL>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, wg_col_smem_tma));
   if (FA_KV_DQ_TMAR) {
     CUDA_CHECK(cudaFuncSetAttribute(fp8_kvowner_dkv_wgmma_tma_r_kernel<HD, BM, BN>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, wg_tmar_smem));
@@ -2056,6 +2554,14 @@ int main(int argc, char** argv) {
         d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, d_dq, S, H,
         scale, (int)causal, qmap_kv, dmap_kv);
   };
+  // F7 第十四步：col-owner（RCOL=2）——每 CTA 拥有 2 个连续 KV 块，dK/dV 本地累加（red=0），
+  //   dQ 跨列先本地累加再每 m 一次原子（贡献数 ÷ 2）。grid.x = ceil(S/(RCOL·BN))。
+  const dim3 kg_col((S + RCOL * BN - 1) / (RCOL * BN), H);
+  auto launch_col = [&]() {
+    fp8_kvowner_dkv_col_tma_kernel<HD, BM, BN, RCOL><<<kg_col, THREADS, wg_col_smem_tma>>>(
+        d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_lse, d_delta, d_dk, d_dv, d_dq, S, H,
+        scale, (int)causal, qmap_kv, dmap_kv);
+  };
   // F7 第十二步：dQ 归约换 **4D-TMA tensor store-reduce**（对标 TE `UTMAREDG.4D.ADD`）。
   // box 内维 = 64 列 fp32 = 256B（TMA box 上限）；body 沿 D 拆 2 个 chunk。
   CUtensorMap dqmap_kv = make_kvowner_dq_map_f32(d_dq, H, S, D, B, 64, BM);
@@ -2109,6 +2615,7 @@ int main(int argc, char** argv) {
       else if (only == "wgtma") launch_wgtma();
       else if (only == "wgtma64") launch_wgtma64();
       else if (only == "wgtmar") launch_wgtmar();
+      else if (only == "col2") launch_col();
     };
     fn();
     CUDA_CHECK(cudaDeviceSynchronize());
@@ -2252,6 +2759,28 @@ int main(int argc, char** argv) {
   printf("[对拍] BN=64 vs BN=32(wgmma+TMA): dk=%.4e dv=%.4e dq=%.4e（fp8 噪声，仅跨 CTA 加序/分块变）\n",
          diff_stat(b64_dk, q_dk).max_abs, diff_stat(b64_dv, q_dv).max_abs,
          diff_stat(b64_dq, q_dq).max_abs);
+  // F7 第十四步：col-owner（RCOL=2）三梯度 vs ref / vs wgmma+TMA（BN=32 单块）。
+  std::vector<float> c2_dk(nkv), c2_dv(nkv), c2_dq(nq);
+  CUDA_CHECK(cudaMemset(d_dk, 0, nkv * 4));
+  CUDA_CHECK(cudaMemset(d_dv, 0, nkv * 4));
+  CUDA_CHECK(cudaMemset(d_dq, 0, nq * 4));
+  launch_col();
+  CUDA_CHECK(cudaDeviceSynchronize());
+  CUDA_CHECK(cudaMemcpy(c2_dk.data(), d_dk, nkv * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(c2_dv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
+  CUDA_CHECK(cudaMemcpy(c2_dq.data(), d_dq, nq * 4, cudaMemcpyDeviceToHost));
+  printf("[对拍] ours(KV-owner **col-owner RCOL=2** 三梯度) vs fp32 ref:\n");
+  printf("  dk  max_abs=%.4e  max_rel=%.4e\n", diff_stat(c2_dk, rdk.data).max_abs,
+         diff_stat(c2_dk, rdk.data).max_rel);
+  printf("  dv  max_abs=%.4e  max_rel=%.4e\n", diff_stat(c2_dv, rdv.data).max_abs,
+         diff_stat(c2_dv, rdv.data).max_rel);
+  if (file_exists(dir + "/ref_dq.npy")) {
+    DiffStat cq = diff_stat(c2_dq, rdq.data);
+    printf("  dq  max_abs=%.4e  max_rel=%.4e\n", cq.max_abs, cq.max_rel);
+  }
+  printf("[对拍] col-owner RCOL=2 vs wgmma+TMA(BN=32): dk=%.4e dv=%.4e dq=%.4e（fp8 噪声，仅工作划分变）\n",
+         diff_stat(c2_dk, q_dk).max_abs, diff_stat(c2_dv, q_dv).max_abs,
+         diff_stat(c2_dq, q_dq).max_abs);
 #if FA_KV_DQ
   // F7 第十二步：dQ 走 4D-TMA tensor store-reduce（对标 TE `UTMAREDG.4D.ADD`）。
   {
@@ -2362,6 +2891,7 @@ int main(int argc, char** argv) {
 #if defined(FA_WGMMA) && defined(FA_TMA)
   float t_wgtma = bench(launch_wgtma, iters);
   float t_wgtma64 = bench(launch_wgtma64, iters);
+  float t_col = bench(launch_col, iters);
 #endif
 #if defined(FA_WGMMA) && defined(FA_TMA) && FA_KV_DQ && FA_KV_DQ_TMAR
   float t_wgtmar = bench(launch_wgtmar, iters);
@@ -2403,7 +2933,12 @@ int main(int argc, char** argv) {
           t_wgtma64, flops / t_wgtma64 / 1e9, t_wgtma / t_wgtma64, wg_tma_smem64,
           wg_tma_smem64 / 1024.0);
   printf("[计时] total BN=64 = %.4f ms | 峰值占比 = %.3f%%\n", t_wgtma64 + t_pre,
-         100.0 * flops / t_wgtma64 / 1e9 / 1978.8);
+          100.0 * flops / t_wgtma64 / 1e9 / 1978.8);
+  printf("[计时] main(三梯度) **col-owner RCOL=2** = %.4f ms (%.2f TF) | col/BN32 = %.3f× | smem=%d B (%.1f KB)\n",
+         t_col, flops / t_col / 1e9, t_wgtma / t_col, wg_col_smem_tma,
+         wg_col_smem_tma / 1024.0);
+  printf("[计时] total col-owner RCOL=2 = %.4f ms | 峰值占比 = %.3f%%\n", t_col + t_pre,
+          100.0 * flops / t_col / 1e9 / 1978.8);
   printf("[计时] total wgmma+TMA = %.4f ms | 峰值占比 = %.3f%%\n", t_wgtma + t_pre,
           100.0 * flops / t_wgtma / 1e9 / 1978.8);
 #if FA_KV_DQ_TMAR

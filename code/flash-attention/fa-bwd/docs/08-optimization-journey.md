@@ -1538,3 +1538,22 @@ smem 冲突 + 低 occ
 - **下一步**：main 的 L2 `red` 墙仍受本卡寄存器/smem 硬墙锁定（见「阻塞」）。
 - 详见 `docs/01` §24、`docs/01b` §6ba；原始输出 `src/fp16/fa_bwd_fp16_p167_lse_tma_ab.out.txt`、
   `..._p167_ncu_lse_tma.out.txt`、`src/bf16/fa_bwd_bf16_p167_*`、`src/fp16/fa_bwd_fp16_p33c_run.out.txt`。
+
+### 5.82 F7 第十四步：KV-owner **column-owner**（第一百六十八轮，机制正结果 / 性能负结果）
+
+- **一句话**：让每个 CTA 拥有 **RCOL=2 个连续 KV 块**，dK/dV 仍本地累加（red=0），dQ 跨列先在
+  本地累加再每 m 一次原子 ⇒ dQ 的 L2 `red` **精确减半**（102.2M→51.1M）；但 `dVacc/dKacc` 翻倍
+  + 跨列 `dqacc` 把寄存器顶到 **255 上限**、local spill（write 6.2M→113.7M 扇区）盖过收益，净
+  **慢 0.72–0.77×**。
+- **为什么值得一试**：这是 §93.6「唯一未试 = 跨 warpgroup 偏和 + 二次归约」的最可行形态。与已判死的
+  **p160 BN≥BM** 的关键差别：p160 把 BN 32→64 时**连 GEMM1/2 累加器一起翻倍**；column-owner
+  **BN 仍 32**，只翻倍 dK/dV 累加器，寄存器账更省 —— 结果证明**仍然不够**。
+- **数值**：三 shape（S512H16 / S1024H32 / S4096H16）dk/dv vs wgmma+TMA **逐位 0.000e+00**、dq
+  ~2e-7（仅跨 CTA 加法次序）；vs fp32 ref 与 wgmma+TMA 同量级。
+- **ncu（S4096）**：`lts op_red` 102,236,160→**51,118,080**、`l1tex op_red` 8.52M→4.26M、
+  registers 168→**255**、write 6.20M→**113.73M**、occupancy 3→2 CTA/SM、Duration 1.85→2.46ms、
+  inst 703.65M→628.78M。
+- **结论**：**与 p160 / F6 / O17b「放大 tile / 多 owner 撞 255 寄存器文件」同源**。F7 单趟路线
+  （两 kernel / TMA store-reduce / BN≥BM / column-owner）**全部判决**；剩余只有换卡或「多 warpgroup
+  摊累加器」（需先破 fp8 wgmma 无转置）。默认路径一行未改。
+- 详见 `docs/03` §97；原始输出 `src/fp8/fa_bwd_fp8_kvowner_col_p168_*`。

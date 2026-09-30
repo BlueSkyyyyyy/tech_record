@@ -1,0 +1,91 @@
+fa_bwd_fp8_kvowner_mma.cu(2906): warning #177-D: variable "t_wgtmar" was declared but never referenced
+    float t_wgtmar = 0.f;
+          ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp8_kvowner_mma.cu(157): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+fa_bwd_fp8_kvowner_mma.cu(1950): warning #177-D: variable "sz_scales" was declared but never referenced
+    constexpr int sz_scales = (2 * BM + 4 * BN) * (int)sizeof(float);
+                  ^
+
+fa_bwd_fp8_kvowner_mma.cu(1413): warning #177-D: variable "c" was declared but never referenced
+                const int c = c0 + j * 8 + c2 + (q & 1);
+                          ^
+          detected during instantiation of "void fp8_kvowner_dkv_col_tma_kernel<HD,BM,BN,RCOL>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, float, int, CUtensorMap, CUtensorMap) [with HD=128, BM=64, BN=32, RCOL=2]" at line 2493
+
+ptxas info    : (C7517) wgmma.wait_group is injected in around line 39186 by compiler to allow use of registers defined by GMMA in function '_Z30fp8_kvowner_dkv_col_tma_kernelILi128ELi64ELi32ELi2EEvPKhPKfS1_S3_S1_S3_S1_S3_S3_S3_PfS4_S4_iifi14CUtensorMap_stS5_'
+=== F7：fp8 mma KV-owner dK/dV 原型（base/pipe/persistent/**dynamic-wq**/**wgmma** A/B） ===
+case = /home/xieminglin/proj/output/fa-bwd/b1_s512_h16_d128_causal_fp8
+B=1 S=512 H=16 Hkv=16 D=128 causal=1 scale=0.088388
+grid = (16, 16); kvowner smem = 70144 B (68.5 KB); pipe smem = 105984 B (103.5 KB); wgmma smem = 74752 B (73.0 KB); lse smem = 18944 B
+[F7 persist] SM=132  total_tiles=256  pgrid=256（base 栅格 = 256 CTA）
+
+[对拍] ours(KV-owner mma base) vs fp32 ref:
+  dk  max_abs=2.9749e-01  max_rel=7.5965e+01
+  dv  max_abs=3.7347e-01  max_rel=1.0042e+02
+[对拍] ours(KV-owner mma **pipe**) vs fp32 ref:
+  dk  max_abs=2.9749e-01  max_rel=7.5965e+01
+  dv  max_abs=3.7347e-01  max_rel=1.0042e+02
+[对拍] pipe vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅搬运时序）
+[对拍] ours(KV-owner mma **persistent**) vs fp32 ref:
+  dk  max_abs=2.9749e-01  max_rel=7.5965e+01
+  dv  max_abs=3.7347e-01  max_rel=1.0042e+02
+[对拍] persistent vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[对拍] ours(KV-owner mma **dynamic wq**) vs fp32 ref:
+  dk  max_abs=2.9749e-01  max_rel=7.5965e+01
+  dv  max_abs=3.7347e-01  max_rel=1.0042e+02
+[对拍] dynamic vs base: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅换栅格映射）
+[对拍] ours(KV-owner mma **wgmma**) vs fp32 ref:
+  dk  max_abs=2.9757e-01  max_rel=7.5976e+01
+  dv  max_abs=3.7318e-01  max_rel=1.0023e+02
+  dq  max_abs=2.4262e-01  max_rel=1.9381e+02
+[对拍] wgmma vs base: dk max_abs=3.0582e-02  dv max_abs=5.6394e-02（同口径，应≈0）
+[对拍] ours(KV-owner mma **wgmma+Q/dO-TMA**) vs fp32 ref:
+  dk  max_abs=2.9757e-01  max_rel=7.5976e+01
+  dv  max_abs=3.7318e-01  max_rel=1.0023e+02
+  dq  max_abs=2.4262e-01  max_rel=1.9381e+02
+[对拍] wgmma+TMA vs wgmma: dk max_abs=0.0000e+00  dv max_abs=0.0000e+00（应=0，仅搬运通路）
+[对拍] ours(KV-owner **BN=64** 三梯度) vs fp32 ref:
+  dk  max_abs=2.9757e-01  max_rel=7.5976e+01
+  dv  max_abs=3.7318e-01  max_rel=1.0023e+02
+  dq  max_abs=2.4262e-01  max_rel=1.9381e+02
+[对拍] BN=64 vs BN=32(wgmma+TMA): dk=0.0000e+00 dv=0.0000e+00 dq=5.9272e-02（fp8 噪声，仅跨 CTA 加序/分块变）
+[对拍] ours(KV-owner **col-owner RCOL=2** 三梯度) vs fp32 ref:
+  dk  max_abs=2.9757e-01  max_rel=7.5976e+01
+  dv  max_abs=3.7318e-01  max_rel=1.0023e+02
+  dq  max_abs=2.4262e-01  max_rel=1.9381e+02
+[对拍] col-owner RCOL=2 vs wgmma+TMA(BN=32): dk=0.0000e+00 dv=0.0000e+00 dq=2.3842e-07（fp8 噪声，仅工作划分变）
+[对拍] ours(KV-owner mma **wgmma+Q/dO-TMA + dQ 4D-TMA-reduce**) vs fp32 ref:
+  dk  max_abs=3.2393e+00  max_rel=9.9969e-01
+  dv  max_abs=6.2161e+00  max_rel=9.9984e-01
+  dq  max_abs=2.9563e+00  max_rel=9.9966e-01
+[对拍] dQ 4D-TMA-reduce vs atomic(red_add2): dq max_abs=3.0688e+00（应≈0，仅归约加序）
+[对拍] 4D-TMA-reduce vs wgmma+TMA: dk max_abs=3.3312e+00  dv max_abs=6.0993e+00（应=0）
+[对拍] vs ours(Q-owner atomic) dk max_abs=3.9019e-02  dv max_abs=5.6436e-02
+[对拍] ref-vs-TE dk max_abs=4.0376e-01  dv max_abs=5.9056e-01 | ours-vs-TE dk=4.4292e-01 dv=8.5458e-01
+[对拍] ours(Q-owner **dQ-only** pass) vs fp32 ref: dq max_abs=2.4262e-01 max_rel=1.9381e+02
+[对拍] 同 binary 三梯度基线(kvtma, DQONLY=0): dq=2.4262e-01 dk=2.9757e-01 dv=3.7318e-01
+[对拍] dQ-only vs 三梯度基线 dq: max_abs=0.0000e+00（应≈0，dQ 路径逐字一致）
+
+[计时] main(dK/dV) base = 0.0575 ms (28.00 TF) | **pipe** = 0.0495 ms (32.56 TF) | A/B = 1.163×
+[计时] main(dK/dV) **persistent**(pgrid=256) = 0.0621 ms (25.95 TF) | persist/base = 0.927×
+[计时] main(dK/dV) **dynamic wq**(pgrid=256) = 0.0587 ms (27.42 TF) | dyn/base = 0.979× | dyn/persist = 1.057×
+[计时] preprocess = 0.1138 ms | total base = 0.1713 | total pipe = 0.1632 | total persist = 0.1758 | total dyn = 0.1725
+[计时] 说明：base/pipe/persist/dyn **仅 dK/dV**（2 GEMM）而 wgmma 档为**三梯度**（dK/dV/dQ，3 GEMM）；
+[计时]   `flops` 全按 3 GEMM 口径 ⇒ **base 档 TF 被高估 1.5×**，同档内 A/B 比值仍有效。
+[计时]   与 FP8 峰值 1978.8 TF 的占比 = 1.415% (base) / 1.645% (pipe) / 1.311% (persist) / 1.386% (dyn)
+[计时] main(dK/dV) **wgmma**(SW128+GEMM1/2 async) = 0.0854 ms (18.86 TF) | wg/base = 0.674× | wg/pipe = 0.579× | wg/dyn = 0.688×
+[计时] total wgmma = 0.1992 ms | 峰值占比 = 0.953%
+[计时] main(dK/dV/dQ 三梯度) **wgmma+Q/dO-TMA** = 0.0750 ms (21.49 TF) | tma/wg = 1.139× | tma/base = 0.768×
+[计时] main(三梯度) **BN=64 (BN≥BM)** = 0.0831 ms (19.37 TF) | BN64/BN32 = 0.902× | smem=111424 B (108.8 KB)
+[计时] total BN=64 = 0.1969 ms | 峰值占比 = 0.979%
+[计时] main(三梯度) **col-owner RCOL=2** = 0.1025 ms (15.71 TF) | col/BN32 = 0.731× | smem=87616 B (85.6 KB)
+[计时] total col-owner RCOL=2 = 0.2163 ms | 峰值占比 = 0.794%
+[计时] total wgmma+TMA = 0.1887 ms | 峰值占比 = 1.086%
+[计时] Q-owner **dQ-only** pass = 0.0549 ms | 同 binary 三梯度基线(kvtma) = 0.0960 ms
+[计时] F7 option(a) 两 kernel = KV-owner dK/dV 0.0750 + dQ-only 0.0549 = 0.1298 ms | vs 单 kernel 三梯度 0.740×
+[计时]   注：KV-owner 档须以 -DFA_KV_DQ=0 构建方为**纯 dK/dV**（当前 FA_KV_DQ=1）。
