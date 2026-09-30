@@ -2350,3 +2350,30 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 
 见 `docs/03` §127；原始输出 `src/fp8/fa_bwd_fp8_o105_ab.out.txt`、
 `..._o105_ncu_s1024h2_mrev{0,1}.out.txt`。
+
+### 5.114 第 200 轮（O106）：fp8 变长（varlen）causal 主 kernel 的 per-head LPT（`mrev_varlen`）—— **正结果（默认）**
+
+- **动机**：O89→O93→O104→O105 把「只改 CTA→m 块派发顺序、不改 L2 搬运量」的 LPT 调度杠杆逐个
+  补到 fp8 定长因果路径（D=128/256/512），**变长 causal 一直没接**。变长因果偏斜更重（短序列
+  产生早退死 CTA + 每序列 K 循环长 ∝`ceil(len_b/BM)`），默认非紧凑网格是 LPT 的反面（便宜块先跑、
+  贵块压尾）。LSE 早已按降序工作量排镜像对表，主 kernel 却没接。
+- **改动（纯 host、device 一行未改、单/两文件同源）**：`run_varlen` 加 `mrev_flag`（默认 1），建
+  `d_mrev_v`（`nblk_max` 项反转表），非紧凑网格把它当 `mt_m` 传入（`mt_b=null` ⇒ `b=blockIdx.z`；
+  `fp8_mma_body` 早已消费 `mt_m`）。`--compact` 不叠加。**形状门控**：
+  `... && nblk_max>=16 && total_mt < nblk_max*B`（名义 maxlen 网格被短序列 padding）。
+- **性能（同 binary A/B，iters=200，3× 复测）**：D=128 varlen causal **b4_t3840 1.015×**、
+  **b8_t2904 1.010×**、b5_t3968 1.008×（均不齐、maxlen=2048）；**D=512 b3_t1792 1.080×**；
+  等长 b4_t4096（无 padding、门控外）逐值不变（测得 mrev 为 −1.1% ⇒ 正是门控要挡的）；nblk=8 的
+  b1_t512 门控外中性。
+- **ncu**：b8 D128 main Duration **593.5→582.6µs**；b3 D512 main **203.8→180.96µs（1.126×）**；
+  两者 **`op_red` 一字不变**（30.29M / 8.95M）、`op_read` 噪声内不变、regs/warps 不变，L2 利用率
+  53.95→54.96% / 44.91→50.60% ⇒ 收益**纯来自尾波削平**（非降 L2 搬运量，同 O89/O105）。
+- **精度/回归**：`ours vs fp32 ref` max_abs 与 mrev=0 **逐位相同**（如 b3 D512 3.404/3.436/3.508e-1，
+  护栏内）；单/两文件 varlen fp8 一致性 gate **worst 1.907e-06 OK**；全量
+  `--ci --dtype fp8 --hopper`（45 case）gate **9.537e-06 OK**、`--check docs/04` OK（214 行）。
+- **判决**：正结果、默认。补齐 LPT 调度在 fp8（D=128/256/512 × 定长/变长 × causal）的最后一块。
+  `op_red` 主体墙仍无软件解（见「阻塞」）。
+
+见 `docs/03` §128；原始输出 `src/fp8/fa_bwd_fp8_o106_ab.out.txt`、
+`..._o106_ncu_b8_t2904_h16_d128.out.txt`、`..._o106_ncu_b3_t1792_h2_d512.out.txt`、
+`..._o106_consistency.out.txt`、`..._o106_ci.out.txt`。
