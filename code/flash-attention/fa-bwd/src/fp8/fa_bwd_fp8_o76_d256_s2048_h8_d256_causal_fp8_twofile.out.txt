@@ -1,0 +1,29 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s2048_h8_d256_causal_fp8
+B=1 S=2048 H=8 Hkv=8 D=256 causal=1 scale=0.062500
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 117760 bytes (115.0 KB); lse smem = 35328 bytes (34.5 KB)
+grid main = 128 x 8 x 1  (ksplit=4, base_grid=256)
+O19: wg2 grid = 256 x 8 x 1 (ksplit2=16, base_grid2=128)
+O7: use_regdq=0 (register dQ accumulation)
+O32: lse backend = wgmma/mma
+O37: main qd-tma = off
+O41: main kv-tma = off
+O38: lse k-split = auto(8)
+[timing] total(quant+pre+main+cvt) 1.1232 ms  30.59 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0528 ms | preprocess 0.0738 ms | main 0.9934 ms | convert 0.0032 ms (cvt_on=0, qfuse=1, dfuse=1)
+[O64 A/B] end2end fused(1 launch) 1.1238 ms | unfused(4 quant + 3 memset) 1.1409 ms (1.0152x) | max_abs(fused-vs-unfused) dq/dk/dv=1.192e-07/4.768e-07/7.153e-07
+[O66 A/B] end2end delta-fused 1.1108 ms | delta-separate 1.1210 ms (1.0092x) | max_abs(delta fused-vs-separate)=0.000e+00
+[O14 A/B] quant old(per-row) 0.0768 ms | new(warp-per-row) 0.0408 ms (1.880x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0136 ms | new(warp-per-row) 0.0055 ms (2.481x) | max_abs=3.815e-06 max_rel=5.076e-03
+[O21b A/B] end2end 保留convert 1.1778 ms | 直写输出(消convert) 1.1578 ms (1.0173x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.220e-01  max_rel=1.444e+02
+  dk   vs ref: max_abs=2.835e-01  max_rel=8.652e+01
+  dv   vs ref: max_abs=3.584e-01  max_rel=1.328e+02
+    dq[d   0..127] max_abs=1.980e-01
+    dq[d 128..255] max_abs=2.220e-01
+    dk[d   0..127] max_abs=2.520e-01
+    dk[d 128..255] max_abs=2.835e-01
+    dv[d   0..127] max_abs=3.584e-01
+    dv[d 128..255] max_abs=3.175e-01
+[compare] ours vs TE FP8

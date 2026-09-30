@@ -1606,3 +1606,30 @@ smem 冲突 + 低 occ
 - **下一步**：main 的 L2 `red` 墙仍受本卡寄存器/smem 硬墙锁定（见「阻塞」）。
 - 详见 `docs/01` §25、`docs/01b` §6bb；原始输出 `src/fp16/fa_bwd_fp16_o74_*`、
   `src/bf16/fa_bwd_bf16_o74_*`。
+
+### 5.85 O76：新增 **head_dim=256** 支持（fp8，第一百七十一轮，能力覆盖）
+
+- **一句话**：补齐 fa-bwd fp8 反向在 `D=128` 与 `D=512` 之间缺失的 **`head_dim=256`**（FA/TE
+  的反向都支持到 256）。**纯 host dispatch + 一个 `VPT=8` 量化实例**，device 通用代码一行未改
+  （单/两文件逐字同步）：放形状守卫、加 `Fp8Cfg<256,64,32>` smem 档、`quantize_*_warp_kernel<8>`
+  （`VPT=D/32`）、`lse_mma_kernel_bal<256,1>`（causal）/`<256,1,true>`（full）、
+  `launch_bwd_main<256,64,32,false>`（mma，4-warp；wgmma↑128、TMA↑128/512）。
+- **为什么值得**：主 kernel 对 `HD` 本就只要求 `HD%128==0`（`HD/NTW=2` 时 `kRegDq` 自动关、与
+  MLA 同），LSE/delta/quant 也全是 `HD`/`VPT` 模板，所以 256 是**几乎零 device 成本**的形状扩展。
+- **数值（ours vs fp32 ref）**：causal MHA `(1,1024,8,256)` 2.630/2.795/3.589e-1、
+  `(1,2048,8,256)` 2.220/2.835/3.584e-1、GQA kv4 `(1,1024,16,256)` 2.477/4.455/6.157e-1、
+  full `(1,1024,8,256)` 4.972/5.571/4.092e-2——与 `D=128` 的 fp8 噪声同量级；两半 `d[0..127]`/
+  `d[128..255]` 误差同量级。单/两文件一致性 worst **2.384e-6**（gate 1e-4 OK）；全量 `--ci`
+  77 case 三 dtype 全绿、`--check docs/04` OK（198 行）。
+- **性能**：main-only `(1,1024,8,256)` **29.7 TF（峰值 1.50%）**、`(1,2048,8,256)` **34.3 TF
+  （1.73%）**、GQA 30.9 TF、full 19.1 TF。FA/TE 的 **fp8 反向不支持 256**，同 shape 只给
+  fp16/bf16 参照：TE fp16 `(1,1024,8,256)` 216.3 TF、`(1,2048,8,256)` 320.1 TF（FA2 168.5/228.0；
+  FA3 本机只编 HDIM128 → NA）。
+- **ncu（S1024H8 causal 主 kernel）**：Duration 327µs、**Registers 254**、Dyn smem 117.76KB、
+  **Block Limit Shared Mem 1 → 1 CTA/SM、occ 6.25%**、Waves 3.88、Compute 15.97%、L2 41.41%、
+  DRAM 3.53%、L1/TEX 30.82%、**No Eligible 78.87%** ⇒ **低 occupancy + 延迟/并行度受限**（与
+  MLA `D=512` 同类：`HD` 翻倍让 GEMM3/4/5 累加器/P·S 缓冲把寄存器顶到 254、smem 115KB 卡 1 CTA）。
+- **下一步**：① 把 `D=256` dtype 化到 fp16/bf16（分派面大，留 backlog）；② `D=256` 的 fp8 main
+  接 wgmma/TMA（受 fp8 wgmma `HD=128` 锁死）；③ main 的 L2 `red` 墙（F7/F6 已判死，见「阻塞」）。
+- 详见 `docs/03` §99；原始输出 `src/fp8/fa_bwd_fp8_o76_d256_*.out.txt`、
+  `src/fp8/fa_bwd_fp8_o76_ncu_d256_main_s1024.out.txt`、`src/fa_bwd_o76_d256_baseline_fp16bf16.out.txt`。

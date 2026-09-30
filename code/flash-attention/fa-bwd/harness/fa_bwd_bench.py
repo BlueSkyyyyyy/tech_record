@@ -54,6 +54,18 @@ REQUESTED_SHAPES = [
     (1, 512, 4, 512, True, 4, 512),     # MLA head_dim=512
     (1, 1024, 2, 512, True, 2, 512),    # MLA head_dim=512
 ]
+# O76（第 171 轮）：head_dim=256 目前只有 **fp8** 支持（fa-bwd 的 fp16/bf16 仍在 128/512 上；
+#   见 ROADMAP backlog）。故**不放进 `REQUESTED_SHAPES`**（否则 `dump --requested` 会给
+#   fp16/bf16 也产出 D=256 case，让 CI 的 ours 运行报“不支持 256”）。新 shape 用显式命令 dump：
+#     python harness/fa_bwd_bench.py dump --dtype fp8 \
+#       --shape '1 1024 8 256 causal' --shape '1 2048 8 256 causal' \
+#       --shape '1 1024 16 256 kv=4 causal' --shape '1 1024 8 256 full'
+HD256_FP8_SHAPES = [
+    (1, 1024, 8, 256, True, 8, 256),    # MHA head_dim=256 causal
+    (1, 2048, 8, 256, True, 8, 256),    # MHA head_dim=256 causal（大 S）
+    (1, 1024, 16, 256, True, 4, 256),   # GQA kv=4 head_dim=256 causal
+    (1, 1024, 8, 256, False, 8, 256),   # MHA head_dim=256 full
+]
 
 
 # VARLEN（变长 / cu_seqlens）：内置生产形状（lengths, H, D, Hkv, Dv）。
