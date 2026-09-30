@@ -7401,6 +7401,23 @@ int main(int argc, char** argv) {
     while (kp * 2 <= k) kp *= 2;  // 向下取 2 的幂，让 grid 对齐到整数个波附近
     ksplit = (int)kp;
   }
+  // O96（第 190 轮）：full（非 causal）D=128 的 ksplit 重标定（与两文件版同源，详见
+  //   `fa_bwd_fp8_main.cu` 同名注释 / docs/03 §118）。O29 的 target 是按 causal 三角偏斜标的，
+  //   full 每块工作量相同 ⇒ 过细切分只剩 Q/dO 重读与 dQ 跨 part 原子。改为让 `grid=base*k`
+  //   最接近整数个并发波（396 槽 = 3 CTA/SM × 132 SM），k∈[1,8]。显式 `--ksplit=K` 不覆盖。
+  if (ksplit_auto && !causal && D == 128) {
+    const long SLOTS = 396L;
+    long best_k = 1, best_waste = -1;
+    for (long k = 1; k <= 8; ++k) {
+      const long g = base_grid * k;
+      const long waste = ((g + SLOTS - 1) / SLOTS) * SLOTS - g;
+      if (best_waste < 0 || waste < best_waste) {
+        best_waste = waste;
+        best_k = k;
+      }
+    }
+    ksplit = (int)best_k;
+  }
   // O93：hswap（跨 head 全局 LPT）启用时把自动 ksplit 收到 2（与两文件版同源）。
 #if defined(FA_WGMMA) && defined(FA_TMA)
   if (hswap_elig && ksplit_auto) ksplit = 2;
@@ -7408,7 +7425,8 @@ int main(int argc, char** argv) {
   // O7：只有 HD=128（dQ 一次铺满 N）且「平均每 CTA 的 nt tile 足够多」时才启用寄存器累加。
   // 因果下每 mblk 的 nt tile 数 ≈ (m0+BM)/BN，三角求和 /(mblk·ksplit) 后平均每 CTA
   // ≈ (S/BN)/2/ksplit；阈值取 4（实测 S=1024H32 平均=2、启用反而持平/略慢，S=4096=16 明显收益）。
-  bool use_regdq = (D == 128) && ((long)(S / 32) / 2 / ksplit >= 4);
+  // O96：full 无三角折半 ⇒ 不 `/2`（否则 k 偏大时误关 regdq，dQ 逐 tile 跨 CTA `red`）。
+  bool use_regdq = (D == 128) && ((long)(S / 32) / (causal ? 2 : 1) / ksplit >= 4);
   // O22：`--regdq=0/1` 强制开关（仅同 session A/B 用）；-1 = 用上面的启发式。
   if (regdq_opt >= 0) use_regdq = (D == 128) && (regdq_opt != 0);
   dim3 pg(S, H, B);

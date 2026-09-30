@@ -1,0 +1,22 @@
+=== ncu NEW full S1024H16 (kvtma main) ===
+    dram__bytes.sum                                           Mbyte        39.32
+    gpu__time_duration.sum                                       us       205.22
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %        63.09
+    lts__t_sectors.sum                                       sector     16850496
+    lts__t_sectors_op_read.sum                               sector      2965727
+    lts__t_sectors_op_red.sum                                sector     13762560
+    lts__t_sectors_op_write.sum                              sector        39780
+    lts__throughput.avg.pct_of_peak_sustained_elapsed             %        68.34
+    sm__throughput.avg.pct_of_peak_sustained_elapsed              %        39.88
+    sm__warps_active.avg.pct_of_peak_sustained_active             %        18.15
+=== ncu OLD full S1024H16 (kvtma main) ===
+    dram__bytes.sum                                           Mbyte        39.09
+    gpu__time_duration.sum                                       us       299.33
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed           %        56.50
+    lts__t_sectors.sum                                       sector     29239266
+    lts__t_sectors_op_read.sum                               sector      3987551
+    lts__t_sectors_op_red.sum                                sector     25165824
+    lts__t_sectors_op_write.sum                              sector         3554
+    lts__throughput.avg.pct_of_peak_sustained_elapsed             %        84.64
+    sm__throughput.avg.pct_of_peak_sustained_elapsed              %        31.12
+    sm__warps_active.avg.pct_of_peak_sustained_active             %        18.34

@@ -1,0 +1,23 @@
+=== O96 A/B: fp8 full D=128 main (S, H) 默认(auto,O29+causal标定) vs O96(full 重标定) ===
+cmd: fa_bwd_fp8_main.out --dir=.../<case> --full [--ksplit=K --regdq=R] --iters=60
+
+case                         config                             main(ms)   total?/TF 
+b1_s512_h16_d128_full_fp8    O96 default(ksplit=3)              0.0665     0.0921ms 23.31TF maxabs=6.930e-02/6.347e-02/6.495e-02/1.326e-01/
+b1_s512_h16_d128_full_fp8    OLD k=16 r=0(ksplit=16)            0.0928     0.1192ms 18.01TF maxabs=6.931e-02/6.347e-02/6.495e-02/1.326e-01/
+b1_s512_h32_d128_full_fp8    O96 default(ksplit=3)              0.1189     0.1650ms 26.03TF maxabs=6.468e-02/7.501e-02/6.535e-02/1.520e-01/
+b1_s512_h32_d128_full_fp8    OLD k=8 r=0(ksplit=8)              0.1581     0.2056ms 20.89TF maxabs=6.467e-02/7.501e-02/6.535e-02/1.519e-01/
+b1_s1024_h8_d128_full_fp8    O96 default(ksplit=3)              0.1091     0.1436ms 29.91TF maxabs=3.609e-02/4.141e-02/3.113e-02/1.095e-01/
+b1_s1024_h8_d128_full_fp8    OLD k=16 r=0(ksplit=16)            0.1670     0.2026ms 21.20TF maxabs=3.608e-02/4.141e-02/3.113e-02/1.094e-01/
+b1_s1024_h16_d128_full_fp8   O96 default(ksplit=3)              0.2064     0.2613ms 32.88TF maxabs=5.521e-02/5.310e-02/4.025e-02/1.148e-01/
+b1_s1024_h16_d128_full_fp8   OLD k=8 r=0(ksplit=8)              0.3010     0.3583ms 23.97TF maxabs=5.518e-02/5.310e-02/4.025e-02/1.148e-01/
+b1_s1024_h32_d128_full_fp8   O96 default(ksplit=3)              0.3943     0.4911ms 34.99TF maxabs=4.840e-02/4.145e-02/3.501e-02/1.009e-01/
+b1_s1024_h32_d128_full_fp8   OLD k=4 r=1(ksplit=4)              0.4172     0.5161ms 33.29TF maxabs=4.840e-02/4.145e-02/3.501e-02/1.009e-01/
+b1_s2048_h8_d128_full_fp8    O96 default(ksplit=3)              0.3813     0.4535ms 37.88TF maxabs=2.290e-02/2.743e-02/2.024e-02/5.951e-02/
+b1_s2048_h8_d128_full_fp8    OLD k=16 r=0(ksplit=16)            0.5968     0.6736ms 25.51TF maxabs=2.291e-02/2.743e-02/2.024e-02/5.957e-02/
+b1_s2048_h16_d128_full_fp8   O96 default(ksplit=3)              0.7159     0.8471ms 40.56TF maxabs=3.344e-02/3.481e-02/3.247e-02/6.399e-02/
+b1_s2048_h16_d128_full_fp8   OLD k=16 r=0(ksplit=16)            1.1361     1.2607ms 27.25TF maxabs=3.343e-02/3.481e-02/3.247e-02/6.400e-02/
+b1_s4096_h16_d128_full_fp8   O96 default(ksplit=5)              2.6601     3.0230ms 45.46TF maxabs=2.725e-02/2.214e-02/1.596e-02/3.868e-02/
+b1_s4096_h16_d128_full_fp8   OLD k=8 r=1(ksplit=8)              2.6713     3.0379ms 45.24TF maxabs=2.725e-02/2.214e-02/1.596e-02/3.868e-02/
+
+=== causal 回归见同目录 fa_bwd_fp8_o96_causal_reg.out.txt（本文件的 run() 恒带 --full，
+    故此处不再列 causal；见该文件：causal 仍 ksplit=2、S4096 main 1.36ms、maxabs 2.635/2.644/3.216e-1）===
