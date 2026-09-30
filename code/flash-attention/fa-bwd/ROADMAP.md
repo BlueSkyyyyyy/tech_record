@@ -3183,7 +3183,22 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百七十九轮）**：**O84——fp8 `head_dim=256` 主 kernel 默认切 wgmma（正结果，默认）**。
+> **最新（第一百八十轮）**：**O85——fp8 `head_dim=256` 的 Q/dO 切 4D-TMA（chunk-major）**
+> （**中性，默认关 / opt-in**）。落实 O84 候选 ①。TMA 一个 SW128 box 只搬 128 列 ⇒ `D=256`
+> 要 2 个 box、物理布局变 **chunk-major**，新增 `sw128c_*` + `wgmma_mn32_issue_cm`（A
+> chunk-major、B rg-major；`D=128` 逐位不变）；**坑**：`smem_bytes_wgmma_tma` 的 +64 对
+> `D=256` 把 2 CTA/SM 挤成 1（已修复为 `HD>128?0:64`）。数值 vs ref 与 O84 **逐位相同**
+> （8.332/8.435/6.464%）；**性能净中性**（S1024 +1.3–1.7%、S2048 −1.1%、GQA −3.7%；ncu
+> 隔离 245.5 vs 255.6µs=1.041×、指令 −3.2%）⇒ **默认关**，O84 档仍默认。见 `docs/03` §108、
+> `docs/08` §5.94、`docs/04` §50。
+> **下一步候选**：① **让 `D=256` TMA 转正**——把 K/V 也 TMA 化并让 TMA prologue 与 K/V
+> cp.async 重叠（当前 Q/dO TMA 等在 K/V 前、串行化）；K 双缓冲顶穿 116KB/2-CTA 门槛是主要障碍；
+> ② 复用 **chunk-major SW128 基建**到 `D>128` 的 K/V TMA 或 MLA；③ F4b/F6/F3b 剩余（工作划分
+> 减 `red`）仍受本卡寄存器/smem 硬墙锁定，见「阻塞」，正结果只剩「换卡」或「256/384 线程多
+> warpgroup KV-owner」。**fp8 基线（`D=128` S4096）仍是 O81 后的 ~1.48ms main / TE ~5.7×。**
+> 见 `docs/03` §108；原始输出 `src/fp8/fa_bwd_fp8_o85_*`。
+>
+> **（第一百七十九轮）**：**O84——fp8 `head_dim=256` 主 kernel 默认切 wgmma（正结果，默认）**。
 > 落实 O76 的「下一步候选 ②」前半：fp8 SW128 数据通路 helper 本就支持 `HD` 为 128 的整数倍
 > （`SBO=(HD/128)*1024`），真正的锁是一条保守 `static_assert`；放宽到 `HD==128||256`、host
 > `D==256` 接到 `launch_bwd_main<256,64,32,false,true>`（wgmma，非 TMA）即可。**4 个 D=256 case
@@ -7492,6 +7507,29 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     auto 表已同步（D=256 4 行，变化仅 fp8 原子次序噪声）。见 `docs/03` §107、`docs/08` §5.93；
     原始输出 `src/fp8/fa_bwd_fp8_o84_d256_wgmma_ab.out.txt`、`..._o84_ncu_d256_s1024.out.txt`、
     `..._o84_d256_onefile.out.txt`。
+
+- 2026-09-30（第一百八十轮）：**O85——fp8 `head_dim=256` 的 Q/dO 切 4D-TMA（chunk-major）**
+  （**中性，默认关 / opt-in**）。落实 O84 的「下一步候选 ①」。
+  - **难点**：TMA 一个 SW128 box 只能搬 128 列；`D=256` 要 2 个 box ⇒ smem 物理布局变
+    **chunk-major `[k/128][row/8][8][128]`**（与 LSE `wgmma_qkt64_fp8_chunked` 一致），主 kernel
+    的 rg-major 描述符不匹配。新增 `sw128c_off_fp8`/`sw128c_k32_addr` + `wgmma_mn32_issue_cm`
+    （**A 走 chunk-major、B 仍 rg-major**；`D=128` NCH=1 逐位相同）；TMA Q/dO 用 `NCH_Q` 个 box
+    落 `Qs+c*CHQ`；Qp/dOp 重建与 GEMM1/2 按 `kQChunk` 切 chunk-major。仅 `HD>128` 生效。
+  - **关键坑（smem 64B 门槛）**：`smem_bytes_wgmma_tma` 的 `+64`（qbar/dbar）其实落在 1024B
+    slack 内；对 `D=256` 多这 64B 把 allocated 116.74→116.86KB、**2 CTA/SM 掉成 1**
+    （ncu `occupancy_limit_shared_mem=1`、warps_active 11.7%→6.25%），首版慢 9–17%。改
+    `HD>128 ? 0 : 64` 后恢复 2 CTA/SM。
+  - **数值**：chunk-major 只改布局/搬运 ⇒ relL2 vs ref 与 O84 **逐位相同**（dq/dk/dv
+    **8.332%/8.435%/6.464%**，max_abs 2.633/2.797/3.572e-1；tma1-vs-tma0 max_abs ~1e-7）。
+  - **性能（同 binary event / ncu）**：S1024H8 causal total **+1.3–1.7%**、S1024H8 full
+    **+1.3%**、S2048H8 causal **−1.1%**、GQA h16kv4 **−3.7%**；ncu 隔离 Duration
+    **245.5 vs 255.6µs（1.041×）**、`smsp inst` **−3.2%**、2 CTA/SM。⇒ **净中性 ⇒ 默认关**
+    （`--d256tma=1` opt-in）；O84 的 cp.async wgmma 档仍是 `D=256` 默认。
+  - **保留价值**：`sw128c_*`/`wgmma_mn32_issue_cm` 是可复用的 **chunk-major SW128 基建**
+    （后续 `D>128` 的 K/V TMA / MLA）。要转正需把 K/V 也 TMA 化并与 cp.async 重叠（K 双缓冲
+    顶穿 116KB/2-CTA 门槛，backlog）。见 `docs/03` §108、`docs/08` §5.94、`docs/04` §50；
+    原始输出 `src/fp8/fa_bwd_fp8_o85_d256_ab.out.txt`、`..._o85_ncu_d256_s1024.out.txt`、
+    `..._o85_accuracy_d256.out.txt`。
 
 ## 灵感 / backlog
 

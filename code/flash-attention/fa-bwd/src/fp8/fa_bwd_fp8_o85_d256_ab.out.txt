@@ -1,0 +1,44 @@
+O85 (round 180) fp8 head_dim=256 Q/dO 4D-TMA A/B (same binary, --d256tma=1 vs 0)
+binary: fa_bwd_fp8_main.cu built with -gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda
+date: 2026-09-30T11:24:32Z
+
+===== b1_s1024_h8_d256_causal_fp8 =====
+  tma=1  [timing] total(quant+pre+main+cvt) 0.3003 ms  28.60 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=1  [timing] quant 0.0276 ms | preprocess 0.0278 ms | main 0.2425 ms | convert 0.0025 ms (cvt_on=0, qfuse=1, dfuse=1)
+  tma=0  [timing] total(quant+pre+main+cvt) 0.3054 ms  28.12 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=0  [timing] quant 0.0273 ms | preprocess 0.0276 ms | main 0.2446 ms | convert 0.0060 ms (cvt_on=0, qfuse=1, dfuse=1)
+  tma=1  [timing] total(quant+pre+main+cvt) 0.3032 ms  28.33 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=1  [timing] quant 0.0274 ms | preprocess 0.0277 ms | main 0.2442 ms | convert 0.0039 ms (cvt_on=0, qfuse=1, dfuse=1)
+  tma=0  [timing] total(quant+pre+main+cvt) 0.3066 ms  28.01 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=0  [timing] quant 0.0273 ms | preprocess 0.0276 ms | main 0.2460 ms | convert 0.0057 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+===== b1_s2048_h8_d256_causal_fp8 =====
+  tma=1  [timing] total(quant+pre+main+cvt) 0.9029 ms  38.06 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=1  [timing] quant 0.0526 ms | preprocess 0.0742 ms | main 0.7758 ms | convert 0.0002 ms (cvt_on=0, qfuse=1, dfuse=1)
+  tma=0  [timing] total(quant+pre+main+cvt) 0.8884 ms  38.68 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=0  [timing] quant 0.0527 ms | preprocess 0.0739 ms | main 0.7626 ms | convert -0.0008 ms (cvt_on=0, qfuse=1, dfuse=1)
+  tma=1  [timing] total(quant+pre+main+cvt) 0.8992 ms  38.21 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=1  [timing] quant 0.0528 ms | preprocess 0.0740 ms | main 0.7742 ms | convert -0.0018 ms (cvt_on=0, qfuse=1, dfuse=1)
+  tma=0  [timing] total(quant+pre+main+cvt) 0.8944 ms  38.42 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=0  [timing] quant 0.0525 ms | preprocess 0.0741 ms | main 0.7662 ms | convert 0.0016 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+===== b1_s1024_h16_d256_kv4_causal_fp8 =====
+  tma=1  [timing] total(quant+pre+main+cvt) 0.5651 ms  30.40 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=1  [timing] quant 0.0347 ms | preprocess 0.0477 ms | main 0.4662 ms | convert 0.0165 ms (cvt_on=0, qfuse=1, dfuse=1)
+  tma=0  [timing] total(quant+pre+main+cvt) 0.5430 ms  31.64 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=0  [timing] quant 0.0345 ms | preprocess 0.0478 ms | main 0.4552 ms | convert 0.0055 ms (cvt_on=0, qfuse=1, dfuse=1)
+  tma=1  [timing] total(quant+pre+main+cvt) 0.5650 ms  30.41 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=1  [timing] quant 0.0347 ms | preprocess 0.0481 ms | main 0.4811 ms | convert 0.0010 ms (cvt_on=0, qfuse=1, dfuse=1)
+  tma=0  [timing] total(quant+pre+main+cvt) 0.5462 ms  31.45 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=0  [timing] quant 0.0348 ms | preprocess 0.0481 ms | main 0.4597 ms | convert 0.0036 ms (cvt_on=0, qfuse=1, dfuse=1)
+
+===== b1_s1024_h8_d256_full_fp8 =====
+  tma=1  [timing] total(quant+pre+main+cvt) 0.3045 ms  28.21 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=1  [timing] quant 0.0275 ms | preprocess 0.0279 ms | main 0.2428 ms | convert 0.0063 ms (cvt_on=0, qfuse=1, dfuse=1)
+  tma=0  [timing] total(quant+pre+main+cvt) 0.3077 ms  27.92 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=0  [timing] quant 0.0274 ms | preprocess 0.0279 ms | main 0.2439 ms | convert 0.0085 ms (cvt_on=0, qfuse=1, dfuse=1)
+  tma=1  [timing] total(quant+pre+main+cvt) 0.3001 ms  28.63 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=1  [timing] quant 0.0273 ms | preprocess 0.0275 ms | main 0.2397 ms | convert 0.0057 ms (cvt_on=0, qfuse=1, dfuse=1)
+  tma=0  [timing] total(quant+pre+main+cvt) 0.3051 ms  28.15 TFLOPS (bwd FLOPs=4BS^2HD)
+  tma=0  [timing] quant 0.0273 ms | preprocess 0.0278 ms | main 0.2466 ms | convert 0.0033 ms (cvt_on=0, qfuse=1, dfuse=1)
+

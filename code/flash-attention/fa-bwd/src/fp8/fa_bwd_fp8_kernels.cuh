@@ -253,7 +253,9 @@ struct Fp8Cfg {
   static constexpr int smem_bytes_wgmma =
       fp8_bytes_wgmma + (kNScale + 2 * BM * PSS) * (int)sizeof(float) + 1024;
   // O37：Q/dO 4D-TMA 版在 wgmma 布局后再加 64B 放两个 mbarrier（qbar/dbar）。
-  static constexpr int smem_bytes_wgmma_tma = smem_bytes_wgmma + 64;
+  // O85：其实 qbar/dbar 落在 `smem_bytes_wgmma` 的 1024B 对齐 slack 内，故 HD>128 不再额外
+  //   +64（HD=256 时多这 64B 会把 2 CTA/SM 挤成 1——ncu `occupancy_limit_shared_mem=1`）。
+  static constexpr int smem_bytes_wgmma_tma = smem_bytes_wgmma + (HD > 128 ? 0 : 64);
   // O41：K/V 也走 4D-TMA（roadmap「下一步候选 ①」）。为让 K 双缓冲（TMA 的异步搬运能跨
   //   tile 重叠）而不掉出 3 CTA/SM（实测本卡 3-CTA 动态 smem 上限 = 76800B），布局做两处
   //   零成本折叠：**dS3 复用当前 K stage**（K 只被 GEMM1 读，fold 之后才写 dS3）、
@@ -454,6 +456,21 @@ __device__ __forceinline__ int sw128_off_fp8(int row, int k, int K) {
 // k32 块索引 s（沿 K）对应的描述符起始地址增量（字节）。
 __device__ __forceinline__ uint32_t sw128_k32_addr(uint32_t base, int s) {
   return base + (uint32_t)((s >> 2) * 1024 + (s & 3) * 32);
+}
+// O85（第 180 轮）：**chunk-major SW128** —— 物理布局 `[k/128][row/8][8][128]`，与 4D-TMA 的
+//   「一个 box = 128 列」逐 box 落位（`Qs + c*(nrows/8)*1024`）严格一致（对齐 O74 LSE 的
+//   `wgmma_qkt64_fp8_chunked`）。HD=128（nrows 任意、只有 1 个 chunk）时与 `sw128_off_fp8`
+//   逐字节相同；HD=256 时用于 4D-TMA 搬入的 Q/dO（TMA 一个 box 内维固定 128B=128 fp8，
+//   两个 box 各写一块 canonical [nrows][128]，故物理布局是 chunk-major 而非 rg-major）。
+__device__ __forceinline__ int sw128c_off_fp8(int row, int k, int nrows) {
+  const int rg = row >> 3, rr = row & 7;
+  const int kg = k >> 7, kk = k & 127;
+  const int cc = (kk >> 4) ^ rr;
+  return (kg * (nrows >> 3) + rg) * 1024 + (rr * 8 + cc) * 16 + (kk & 15);
+}
+// chunk-major 的 k32 起始地址：chunk 内 4 个 k32 步进 + 跨 chunk 的 (nrows/8)*1024 字节。
+__device__ __forceinline__ uint32_t sw128c_k32_addr(uint32_t base, int s, int nrows) {
+  return base + (uint32_t)((s >> 2) * ((nrows >> 3) * 1024) + (s & 3) * 32);
 }
 __device__ __forceinline__ uint64_t make_desc_sw128_fp8(uint32_t addr,
                                                         uint32_t sbo_bytes) {
@@ -717,6 +734,29 @@ __device__ __forceinline__ void wgmma_mn32_issue(const char* Asw, const char* Bs
 #pragma unroll
   for (int s = 0; s < HD / 32; ++s) {
     uint64_t da = make_desc_sw128_fp8(sw128_k32_addr(aa, s), sbo);
+    uint64_t db = make_desc_sw128_fp8(sw128_k32_addr(ba, s), sbo);
+    if (KIND == 0)
+      wgmma_m64n32k32_e4e4(d, da, db);
+    else
+      wgmma_m64n32k32_e5e4(d, da, db);
+  }
+  wgmma_commit_fp8();
+}
+
+// O85（第 180 轮）：GEMM1/2 的 **A 走 chunk-major**（4D-TMA 搬入的 Q/dO）、B 仍为 rg-major
+//   （cp.async 的 K/V）变体。仅 D=256 的 qd-tma 路径使用；D=128（NCH=1）与 `wgmma_mn32_issue`
+//   逐位相同。`AROWS`=A tile 的行数（Q/dO 为 BM），用于 chunk stride `(AROWS/8)*1024`。
+template <int KIND, int AROWS>
+__device__ __forceinline__ void wgmma_mn32_issue_cm(const char* Asw, const char* Bsw, int HD,
+                                                    float (&d)[16]) {
+#pragma unroll
+  for (int i = 0; i < 16; ++i) d[i] = 0.f;
+  wgmma_fence_fp8();
+  const uint32_t aa = smem_u32(Asw), ba = smem_u32(Bsw);
+  const uint32_t sbo = (uint32_t)((HD / 128) * 1024);
+#pragma unroll
+  for (int s = 0; s < HD / 32; ++s) {
+    uint64_t da = make_desc_sw128_fp8(sw128c_k32_addr(aa, s, AROWS), 1024);
     uint64_t db = make_desc_sw128_fp8(sw128_k32_addr(ba, s), sbo);
     if (KIND == 0)
       wgmma_m64n32k32_e4e4(d, da, db);
@@ -2817,6 +2857,13 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   constexpr int KS_SZ = WGMMA ? Cfg::ks_sw_bytes : BN * ASLD;
   // O41：K/V TMA 时 K 双缓冲（2 个 SW128 stage），V 单缓冲。O51：KVPIPE（mma）同样 K 双缓冲。
   constexpr int KSTAGES = (KVTMA || KVPIPE) ? 2 : 1;
+  // O85（第 180 轮）：HD>128 的 Q/dO 走 4D-TMA 时，一个 TMA box 只能搬 128 列 ⇒ smem 物理
+  //   布局是 chunk-major `[k/128][row/8][8][128]`（与 O74 LSE 一致）；用 `NCH=HD/128` 个 box、
+  //   每 box 落 `Qs + c*CHQ`（CHQ=(BM/8)*1024）。A 描述符改用 `wgmma_mn32_issue_cm`。
+  //   HD=128 时 NCH=1、chunk-major==rg-major，路径与历史逐位相同。
+  constexpr int NCH_Q = HD / 128;
+  constexpr int CHQ = (BM / 8) * 1024;
+  constexpr bool kQChunk = TMA && (HD > 128);
   // O84（第 179 轮）：放开 WGMMA 主 kernel 到 HD=256。SW128 K-major helper（`sw128_off_fp8`
   //   /`sw128_k32_addr`/`make_desc_sw128_fp8`）与 `wgmma_mn32_issue`/`wgmma_qkt64_fp8` 本就按
   //   `SBO=(HD/128)*1024`、k32 步进 `(s>>2)*1024+(s&3)*32` 编写，HD 为 128 的整数倍即正确
@@ -2974,10 +3021,15 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     }
     __syncthreads();
     if (tid == 0) {
+      // O37：fp8 一行 128B = 一个 SW128 atom 的整行 ⇒ HD=128 一次 box 搬完整块。
+      // O85：HD>128 时 `NCH_Q` 个 box 各搬 128 列（同一 mbarrier、expect 总量），
+      //   落位 `Qs + c*CHQ`，物理布局 chunk-major（与 LSE O74 同款）。
       mbar_arrive_expect(qbars + 0, QS_SZ);
-      tma_load_4d(Qs, qmap, 0, m0, h, b, qbars + 0);
+      for (int c = 0; c < NCH_Q; ++c)
+        tma_load_4d(Qs + c * CHQ, qmap, c * 128, m0, h, b, qbars + 0);
       mbar_arrive_expect(qbars + 1, QS_SZ);
-      tma_load_4d(dOs, dmap, 0, m0, h, b, qbars + 1);
+      for (int c = 0; c < NCH_Q; ++c)
+        tma_load_4d(dOs + c * CHQ, dmap, c * 128, m0, h, b, qbars + 1);
       if (KVTMA) {
         // K[nt_begin] -> stage 0；K[nt_begin+1] -> stage 1（如有）；V[nt_begin] -> Vs。
         mbar_arrive_expect(qbars + 2, KS_SZ);
@@ -3010,12 +3062,14 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       transpose_sw128_to_noswz<BM, HD>(reinterpret_cast<unsigned char*>(dOp), dOs, wid, lane);
       bulk_reduce_fence();
     } else {
+    // O85：Q/dO 若为 chunk-major（HD>128 的 4D-TMA），用 `sw128c_off_fp8` 读源；HD=128 退化相同。
+    auto qoff = [&](int r, int k) { return kQChunk ? sw128c_off_fp8(r, k, BM) : sw128_off_fp8(r, k, HD); };
     for (int u = tid; u < (BM / 2) * nd4t; u += NTH) {
       int rp = u / nd4t, dq = (u % nd4t) * 4;
-      uint32_t q0 = *reinterpret_cast<const uint32_t*>(Qs + sw128_off_fp8(rp * 2, dq, HD));
-      uint32_t q1 = *reinterpret_cast<const uint32_t*>(Qs + sw128_off_fp8(rp * 2 + 1, dq, HD));
-      uint32_t o0 = *reinterpret_cast<const uint32_t*>(dOs + sw128_off_fp8(rp * 2, dq, HD));
-      uint32_t o1 = *reinterpret_cast<const uint32_t*>(dOs + sw128_off_fp8(rp * 2 + 1, dq, HD));
+      uint32_t q0 = *reinterpret_cast<const uint32_t*>(Qs + qoff(rp * 2, dq));
+      uint32_t q1 = *reinterpret_cast<const uint32_t*>(Qs + qoff(rp * 2 + 1, dq));
+      uint32_t o0 = *reinterpret_cast<const uint32_t*>(dOs + qoff(rp * 2, dq));
+      uint32_t o1 = *reinterpret_cast<const uint32_t*>(dOs + qoff(rp * 2 + 1, dq));
       uint32_t* qpw = reinterpret_cast<uint32_t*>(Qp + rp * PSLD + dq);
       qpw[0] = __byte_perm(q0, q1, 0x5140);
       qpw[1] = __byte_perm(q0, q1, 0x7362);
@@ -3225,10 +3279,19 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       // O41：KVTMA 时 K 从当前 stage 缓冲读。
       const unsigned char* Kcur = KVTMA ? (Ks + stg * KS_SZ) : Ks;
       float sacc[16], dpacc[16];
-      wgmma_mn32_issue<0>(reinterpret_cast<const char*>(Qs),
-                          reinterpret_cast<const char*>(Kcur), HD, sacc);
-      wgmma_mn32_issue<1>(reinterpret_cast<const char*>(dOs),
-                          reinterpret_cast<const char*>(Vs), HD, dpacc);
+      // O85：HD>128 的 4D-TMA 把 Q/dO 存成 chunk-major ⇒ A 描述符走 `wgmma_mn32_issue_cm`
+      //   （B=K/V 仍是 cp.async 的 rg-major）。HD=128 走原 `wgmma_mn32_issue`（逐位相同）。
+      if constexpr (kQChunk) {
+        wgmma_mn32_issue_cm<0, BM>(reinterpret_cast<const char*>(Qs),
+                                   reinterpret_cast<const char*>(Kcur), HD, sacc);
+        wgmma_mn32_issue_cm<1, BM>(reinterpret_cast<const char*>(dOs),
+                                   reinterpret_cast<const char*>(Vs), HD, dpacc);
+      } else {
+        wgmma_mn32_issue<0>(reinterpret_cast<const char*>(Qs),
+                            reinterpret_cast<const char*>(Kcur), HD, sacc);
+        wgmma_mn32_issue<1>(reinterpret_cast<const char*>(dOs),
+                            reinterpret_cast<const char*>(Vs), HD, dpacc);
+      }
 #if FA_WS1
       // O50：只等 GEMM1（S），让 GEMM2（dP）与下面算 P（P 段只读 sacc）的 CUDA-core
       //   工作重叠；P 算完再 `wait0` 取 dP。`-DFA_WS1=0` 退回原单次 wait0。
@@ -4099,11 +4162,13 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
       dk_part, dv_part, nblk, dq_part, part_base);
 }
 
-// O37：Q/dO 4D-TMA 版（仅 `-DFA_WGMMA -DFA_TMA` 构建、HD=128/WGMMA 路径实例化）。
+// O37：Q/dO 4D-TMA 版（`-DFA_WGMMA -DFA_TMA` 构建、WGMMA 路径）。HD=128 与 HD=256 均实例化
+//   （O85：HD=256 的 Q/dO TMA，smem 115,712B ≤ 116,224B ⇒ 2 CTA/SM）。
 // P3-4g：`DET=true` 时复用同一 body 的确定性 dK/dV 路径（partial + 固定次序归约）。
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
           bool DET = false, bool DET_HALF = false>
-__global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
+__global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2)
+                                                       : ((HD == 256 && BN <= 32) ? 2 : 1))
 fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
                             const unsigned char* __restrict__ q8, const float* __restrict__ qs,

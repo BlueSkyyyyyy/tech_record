@@ -1,0 +1,31 @@
+O85 fp8 head_dim=256 ncu: qdtma (--d256tma=1) vs cp.async wgmma (--d256tma=0)
+case b1_s1024_h8_d256_causal_fp8; kernel regex fa_bwd_fp8_mma
+date: 2026-09-30T11:24:55Z
+
+===== --d256tma=1 =====
+==PROF== Profiling "fa_bwd_fp8_mma_qdtma_kernel": 0%....50%....100% - 5 passes
+  void fa_bwd_fp8_mma_qdtma_kernel<256, 64, 32, 0, 1, 1, 1, 0, 0>(CUtensorMap_st, CUtensorMap_st, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, float *, float *, int, float *, const int *) (64, 8, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                           us       245.47
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed               %        31.27
+    launch__occupancy_limit_registers                             block            2
+    launch__occupancy_limit_shared_mem                            block            2
+    launch__registers_per_thread                        register/thread          238
+    launch__shared_mem_per_block_allocated                  Kbyte/block       116.74
+    launch__shared_mem_per_block_dynamic                    Kbyte/block       115.71
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                 %        55.15
+    sm__warps_active.avg.pct_of_peak_sustained_active                 %        11.77
+    smsp__inst_executed.sum                                        inst     44519699
+
+===== --d256tma=0 =====
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 5 passes
+  void fa_bwd_fp8_mma_kernel<256, 64, 32, 0, 1, 1, 1, 1, 128, 2, 0, 0, 0, 0>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, const int *, const int *, float *, float *, int, float *, const int *) (64, 8, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                           us       255.58
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed               %        30.54
+    launch__occupancy_limit_registers                             block            2
+    launch__occupancy_limit_shared_mem                            block            2
+    launch__registers_per_thread                        register/thread          238
+    launch__shared_mem_per_block_allocated                  Kbyte/block       116.74
+    launch__shared_mem_per_block_dynamic                    Kbyte/block       115.71
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                 %        52.85
+    sm__warps_active.avg.pct_of_peak_sustained_active                 %        11.72
+    smsp__inst_executed.sum                                        inst     46008464

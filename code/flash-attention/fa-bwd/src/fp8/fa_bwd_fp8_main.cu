@@ -1615,6 +1615,10 @@ int main(int argc, char** argv) {
   //   0/1 由 `--d256wgm=` 强制（同 binary A/B）。数值与 mma 版同量级（只改 GEMM1/2 指令路径 +
   //   跨 CTA red 次序）。
   int d256wgm_opt = -1;
+  // O85（第 180 轮）：head_dim=256 主 kernel 的 Q/dO 是否走 **4D-TMA**（chunk-major，NCH=2；
+  //   K/V 仍 cp.async）。**A/B 中性 ⇒ 默认关**（`--d256tma=1` 开启，opt-in）。smem 与
+  //   O84 的 cp.async wgmma 档相同（115,712B）⇒ 仍 2 CTA/SM。
+  int d256tma_opt = -1;
   // O38：LSE 的 K 维 split 数（仅 D=128/causal/TMA 生效）。0=自动（目标 grid*split≈2048、上限 8），
   //   >=1 直接指定（`--lsesplit=N` 走「切片 partial + merge」；`--lsesplit=1` 退回 O32、保持历史逐位）。
   int lse_split = 0;
@@ -1702,6 +1706,8 @@ int main(int argc, char** argv) {
     else if (a == "--kvtma") kv_tma = 1;
     else if (a.rfind("--d256wgm=", 0) == 0) d256wgm_opt = atoi(a.c_str() + 10);
     else if (a == "--d256wgm") d256wgm_opt = 1;
+    else if (a.rfind("--d256tma=", 0) == 0) d256tma_opt = atoi(a.c_str() + 10);
+    else if (a == "--d256tma") d256tma_opt = 1;
     else if (a == "--wg2") wg2 = 1;
     else if (a == "--wg2wgmma") wg2wgmma = 1;
     else if (a == "--bn64") bn64_opt = 1;
@@ -2027,9 +2033,10 @@ int main(int argc, char** argv) {
   // O41：K/V TMA 默认开（依赖 Q/dO TMA；`--kvtma=0` 供 A/B）。
   if (kv_tma < 0) kv_tma = 1;
   CUtensorMap qmap_main, dmap_main;
-  // 注：O37 A/B 段无论 `--qdtma` 取值都会跑 TMA 版，故 D==128 时始终建描述符
+  // 注：O37 A/B 段无论 `--qdtma` 取值都会跑 TMA 版，故 D==128/256 时始终建描述符
   //     （否则 `--qdtma=0` 会拿未初始化 map 启动 TMA kernel → illegal instruction）。
-  if (D == 128) {
+  // O85：D=256 的 Q/dO 也走 4D-TMA（chunk-major，NCH=2），同样需要描述符。
+  if (D == 128 || D == 256) {
     qmap_main = make_lse_map_fp8(d_q8, H, S, D, B);
     dmap_main = make_lse_map_fp8(d_do8, H, S, D, B);
   }
@@ -2201,6 +2208,17 @@ int main(int argc, char** argv) {
     if (D == 256) {
 #ifdef FA_WGMMA
       const bool d256_wg = (d256wgm_opt < 0) ? true : (d256wgm_opt != 0);
+#if defined(FA_TMA)
+      // O85（第 180 轮）：D=256 的 Q/dO 4D-TMA（chunk-major，NCH=2；K/V 仍 cp.async）。
+      //   **A/B 判决为中性（±2%，见 docs/03 §108）⇒ 默认关**，`--d256tma=1` 复现。
+      const bool d256_tma = (d256tma_opt > 0);
+      if (d256_wg && d256_tma) {
+        launch_bwd_main_qdtma<256, 64, 32, false>(
+            mg, qmap_main, dmap_main, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
+            d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+        return;
+      }
+#endif
       if (d256_wg) {
         launch_bwd_main<256, 64, 32, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
                                                   d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,

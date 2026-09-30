@@ -3160,3 +3160,14 @@ auto-table 在 rtol=0.005 内不变）。详见 `docs/01` §25、`docs/01b` §6b
   （`-DFA_WGMMA34=1` 复现）。F3b 的「无 BN=64 时上 GEMM3/4 wgmma」子路线就此判负。
 - 详见 `docs/03` §105、`docs/08` §5.91；原始输出 `src/fp8/fa_bwd_fp8_o82_ab_wg34_{0,1}_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o82_ncu_wg34_{0,1}_s4096.out.txt`。
+
+## 50. O85（第一百八十轮，**中性，默认关**）：fp8 `head_dim=256` 的 Q/dO 切 4D-TMA（chunk-major）
+
+- **改动**：`D=256` 的 Q/dO 从 cp.async 改 4D-TMA（chunk-major `[k/128][row/8][8][128]`，
+  NCH=2）；新增 `sw128c_*` + `wgmma_mn32_issue_cm`（`D=128` 逐位不变）。`--d256tma=1` opt-in。
+- **数值**：relL2 vs fp32 ref 与 O84 档**逐位相同**（S1024H8 causal dq/dk/dv 8.332%/8.435%/6.464%，
+  max_abs 2.633/2.797/3.572e-1）；tma1-vs-tma0 max_abs ~1e-7。
+- **性能（同 binary A/B，event）**：S1024H8 causal total 0.3003–0.3032 vs 0.3054–0.3066ms
+  （**+1.3–1.7%**）、S1024H8 full **+1.3%**、S2048H8 causal **−1.1%**、GQA h16kv4 **−3.7%**；
+  ncu 隔离 Duration **245.5 vs 255.6µs（1.041×）**、指令 **−3.2%**、2 CTA/SM。**净中性 ⇒ 默认关**。
+- 详见 `docs/03` §108、`docs/08` §5.94；原始输出 `src/fp8/fa_bwd_fp8_o85_*`。
