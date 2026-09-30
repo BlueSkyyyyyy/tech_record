@@ -1,0 +1,61 @@
+==PROF== Connected to process 1438224 (/tmp/o105_twofile)
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 10 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp8
+B=1 S=1024 H=2 Hkv=2 D=512 causal=1 scale=0.044194
+FP8 mma: Q/K/V=E4M3, dO=E5M2, dS2/dS3=E5M2, Ap=E4M3 (rowwise); P/dS fp32
+smem = 207872 bytes (203.0 KB); lse smem = 68096 bytes (66.5 KB)
+grid main = 256 x 2 x 1  (ksplit=16, base_grid=32)
+O19: wg2 grid = 128 x 2 x 1 (ksplit2=16, base_grid2=16)
+O7: use_regdq=0 (register dQ accumulation)
+O32: lse backend = tma
+O37: main qd-tma = on
+O41: main kv-tma = on
+O38: lse k-split = auto(16)
+[timing] total(quant+pre+main+cvt) 0.3650 ms  11.77 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0713 ms | preprocess 0.1260 ms | main 0.1811 ms | convert -0.0133 ms (cvt_on=0, qfuse=1, dfuse=1)
+[O64 A/B] end2end fused(1 launch) 0.2481 ms | unfused(4 quant + 3 memset) 0.5029 ms (2.0270x) | max_abs(fused-vs-unfused) dq/dk/dv=1.192e-07/4.768e-07/4.768e-07
+[O66 A/B] end2end delta-fused 0.2586 ms | delta-separate 0.3048 ms (1.1788x) | max_abs(delta fused-vs-separate)=0.000e+00
+[O39 A/B] lse(D=512) split=1 0.1120 ms (1.000x vs split1) | max_abs vs split1=0.000e+00\n[O39 A/B] lse(D=512) split=2 0.1257 ms (0.891x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=4 0.1229 ms (0.911x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=8 0.1260 ms (0.889x vs split1) | max_abs vs split1=4.768e-07\n[O39 A/B] lse(D=512) split=16 0.1250 ms (0.896x vs split1) | max_abs vs split1=4.768e-07\n[O39] best lse split=1 0.1120 ms (1.000x)\n[O59 A/B] LSE MLA legacy(sp=16) 0.1239 ms | cfg6(sp=16) 0.1230 ms (1.008x) | max_abs(cfg6-vs-legacy)=4.768e-07
+[O12 A/B] main LSE/D preload off 0.2011 ms | on 0.2029 ms (0.991x) | max_abs(on-vs-off) dq=2.251e-04
+[O47 A/B] main MLA 4-warp 0.2018 ms | 8-warp 0.1255 ms (1.607x) | max_abs(8w-vs-4w) dq=1.192e-07 dk=4.768e-07 dv=4.768e-07
+[O51 A/B] main MLA 8w sync 0.1251 ms | kvpipe 0.1211 ms (1.033x) | max_abs(kvp-vs-sync) dq=1.192e-07 dk=2.980e-07 dv=4.768e-07
+[O14 A/B] quant old(per-row) 0.1932 ms | new(warp-per-row) 0.2442 ms (0.791x) | bitwise mismatch=0
+[O26 A/B] delta old(per-row) 0.0099 ms | new(warp-per-row) 0.0608 ms (0.163x) | max_abs=2.861e-06 max_rel=4.161e-04
+[O21b A/B] end2end 保留convert 0.6164 ms | 直写输出(消convert) 0.5012 ms (1.2300x)
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.228e-01  max_rel=5.071e+01
+  dk   vs ref: max_abs=3.311e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.611e-01  max_rel=5.323e+01
+    dq[d   0..127] max_abs=1.798e-01
+    dq[d 128..255] max_abs=1.419e-01
+    dq[d 256..383] max_abs=1.626e-01
+    dq[d 384..511] max_abs=2.228e-01
+    dk[d   0..127] max_abs=2.886e-01
+    dk[d 128..255] max_abs=3.311e-01
+    dk[d 256..383] max_abs=2.273e-01
+    dk[d 384..511] max_abs=2.719e-01
+    dv[d   0..127] max_abs=2.473e-01
+    dv[d 128..255] max_abs=2.426e-01
+    dv[d 256..383] max_abs=3.611e-01
+    dv[d 384..511] max_abs=2.735e-01
+[compare] ours vs TE FP8
+==PROF== Disconnected from process 1438224
+[1438224] o105_twofile@127.0.0.1
+  void fa_bwd_fp8_mma_kernel<512, 64, 32, 0, 0, 1, 1, 1, 256, 4, 1, 0, 0, 0, 0>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, const int *, const int *, float *, float *, int, float *, const int *) (256, 2, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    --------------------------------------------------- --------------- ------------
+    Metric Name                                             Metric Unit Metric Value
+    --------------------------------------------------- --------------- ------------
+    gpu__time_duration.sum                                           us       132.67
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed               %        33.24
+    launch__occupancy_limit_shared_mem                            block            1
+    launch__registers_per_thread                        register/thread          249
+    lts__t_sectors.sum                                           sector      8166823
+    lts__t_sectors_op_read.sum                                   sector      1412257
+    lts__t_sectors_op_red.sum                                    sector      6684672
+    lts__t_sectors_op_write.sum                                  sector         1084
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                 %        51.75
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                  %        23.08
+    sm__warps_active.avg.pct_of_peak_sustained_active                 %        12.48
+    --------------------------------------------------- --------------- ------------
+

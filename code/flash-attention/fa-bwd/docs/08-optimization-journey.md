@@ -2325,3 +2325,28 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 
 见 `docs/03` §126；原始输出 `src/fp8/fa_bwd_fp8_o104_ab.out.txt`、
 `..._o104_ncu_s1024h8.out.txt`、`..._o104_fa3_te_baseline.out.txt`、`..._o104_ci.out.txt`。
+
+### 5.113 第 199 轮（O105）：fp8 D=512（MLA）causal 的 per-head LPT（`mrev`）—— **正结果（默认）**
+
+- **动机**：落实 O104「下一步候选 ③」里不撞 smem 墙的一条。O104 把 O93 的跨 head 全局 LPT
+  （`HSWAP`，grid 轴对调）推广到 D=256，但大 `base_grid` 下因 L2 局部性受损变负；而 **D=512
+  （MLA）causal 一直没有任何 LPT**（`d_mrev=nullptr`）。MLA 1 CTA/SM、`target=S/2` 细切、
+  causal 偏斜 ⇒ 最贵 m 块落尾波。
+- **改动（host-only、device 一行未改、单/两文件同源）**：`mrev_elig` 加 **D=512**（`nblk>=16`
+  沿用 O89）；定长 D=512 的三个主 kernel launcher 透传 `d_mrev` 当 `mt_m`
+  （`fp8_mma_body` 早已消费 `mt_m`）。只做 **per-head 反转**（grid/head 排布不动，不改 L2 局部性）；
+  `--mrev=0` 回退锯齿序。D=256 大 `base_grid` 的 mrev-only 对照仅 1.003×（噪声内）⇒ 不纳入。
+- **性能（同 binary A/B，iters=300，3×400 复测）**：**S1024H2 D=512 causal main
+  0.1184→0.1106ms（1.071×）、total 0.1505→0.1464ms（1.028×）**，稳定 1.069–1.071×；
+  S512H4/H2（nblk=8）门控外中性；D=256 大 base/ D=128 O93 默认逐值不变。
+- **ncu（D=512 causal S1024H2 main，1 CTA/SM/249 regs）**：**Duration 130.1–132.7→126.0µs**、
+  **`op_read`/`op_red`/`op_write` 逐位不变（8.17M 扇区）**、L2 利用率 51.8→**54.5%**、warps 12.48%
+  ⇒ 收益**纯来自尾波削平**（与 O93/O104 降 `op_read` 的机制不同）。
+- **精度/回归**：relL2 vs fp32 ref **8.163/8.564/6.507%**（护栏内，与默认逐位同）；mrev-vs-mrev0
+  max_abs ~1e-7（atomic 次序）；单/两文件一致性 gate worst **5.722e-06 OK**、`--check docs/04` OK。
+  fp8 MLA 无 FA3/TE 列。
+- **判决**：正结果、默认。MLA causal 首条主 kernel 调度杠杆（不改 L2 搬运量）。`op_red` 主体墙
+  仍无软件解（见「阻塞」）。
+
+见 `docs/03` §127；原始输出 `src/fp8/fa_bwd_fp8_o105_ab.out.txt`、
+`..._o105_ncu_s1024h2_mrev{0,1}.out.txt`。

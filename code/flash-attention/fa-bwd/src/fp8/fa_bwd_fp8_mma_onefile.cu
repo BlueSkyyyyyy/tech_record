@@ -7323,8 +7323,16 @@ int main(int argc, char** argv) {
   //   （=`nblk*H*B ≤ 256`，即 K/V 工作集小、hswap 损 L2 局部性可忽略）时为正**——
   //   S1024H8 1.15×、S1024H16kv4 1.09×、S2048H8 1.02×；而 S2048H16（base=512）、S4096H8
   //   （base=512）为负（0.95×/0.84×）。故只在 `base_grid ≤ 256` 且 causal 定长 nblk≥16 时启用。
-  const bool mrev_elig = (D == 128) || (D == 256 && hswap_opt != 0 &&
-                                        (long)((S + 63) / 64) * H * B <= 256);
+  // O105（第 199 轮）：把 O89 的 **per-head LPT m 块反转**（`mblk = nblk-1-mt`，grid 与 head
+  //   排布都不变）从 D=128 推广到 **D=512（MLA）causal 定长**。对照实验：D=256 大 `base_grid`
+  //   （S2048H16/S4096H8）的 mrev 仅 1.003×（噪声内），故**不纳入 D=256 默认**（其小 base_grid
+  //   档已由 O104 的 hswap256 覆盖）；D=512 的 S1024H2（nblk=16，1 CTA/SM、`target=S/2` 切得细）
+  //   实测 main **1.068×**（反复重测稳定），是 O104 之后 MLA 主 kernel 的第一条调度正收益。
+  //   只改「哪个 CTA 算哪个 m 块」，dK/dV 的跨 CTA 原子次序略变 ⇒ 数值仍在 fp8 噪声内。
+  //   `--mrev=0` 回退历史（mt 升序、便宜块先跑）做同 binary A/B。
+  const bool mrev_elig = (D == 128) || (D == 512) ||
+                         (D == 256 && hswap_opt != 0 &&
+                          (long)((S + 63) / 64) * H * B <= 256);
   if (mrev_opt && causal && mrev_elig && (S + 63) / 64 >= 16) {  // O89：nblk>=16（S>=1024）才启用，避免小 S 噪声
     const int nblk_m = (S + 63) / 64;
     std::vector<int> hrev(nblk_m);
@@ -7333,7 +7341,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemcpy(d_mrev, hrev.data(), nblk_m * sizeof(int), cudaMemcpyHostToDevice));
     printf("O89: mrev on (nblk=%d, LPT expensive-first)\n", nblk_m);
   } else if (mrev_opt) {
-    printf("O89: mrev requested but ignored (need causal & D==128/256 & fixed-length)\n");
+    printf("O89/O105: mrev requested but ignored (need causal & D==128/256/512 & fixed-length & nblk>=16)\n");
   }
   // O93：跨 head 全局 LPT（轴对调）的启用条件（与 launch 分支一致）。仅 Hopper 构建生效。
   const bool hswap_elig = (hswap_opt != 0) && (mrev_opt != 0) && causal && D == 128 &&
@@ -7914,15 +7922,18 @@ int main(int argc, char** argv) {
               d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
           return;
         }
+        // O105：大 base_grid（hswap256 跳过）时也透传 O89 的 per-head LPT 反转表 `d_mrev`
+        //   （HSWAP=false：grid/head 排布不变，只有 m 块贵先跑）。`--mrev=0` 时 d_mrev=nullptr。
         launch_bwd_main<256, 64, 32, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
                                                   d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
-                                                  d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+                                                  d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit,
+                                                  nullptr, nullptr, d_mrev);
         return;
       }
 #endif
       launch_bwd_main<256, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
                                           d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
-                                          scale, (int)causal, ksplit);
+                                          scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
       return;
     }
     if (D == 128 && wg3) {
@@ -8052,30 +8063,31 @@ int main(int argc, char** argv) {
     if (D == 128) { launch128(use_regdq, false, prel_sel, f16b_sel, rcp_sel); return; }
     // O47：MLA（D=512）默认走 8-warp/256 线程几何（`--mla8w=0` 退回 4-warp 供 A/B）。
     // O51：8-warp 档下 K/V 默认走 cp.async 回填流水（`--mlakvp=0` 退回同步载入 A/B）。
+    // O105：定长 causal MLA 也透传 O89 的 per-head LPT 反转表 `d_mrev`（grid/head 排布不变）。
     const bool mla_kvp_sel = (mla_kvp_opt < 0) ? true : (mla_kvp_opt != 0);
     if (mla8w_sel) {
       if (prel_sel && mla_kvp_sel)
         launch_bwd_main_kvpipe<512, 64, 32, false, true, true, true, 256, 4>(
             mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
       else if (prel_sel)
         launch_bwd_main<512, 64, 32, false, false, true, true, true, 256, 4>(
             mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
       else
         launch_bwd_main<512, 64, 32, false, false, false, true, true, 256, 4>(
             mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
     } else if (prel_sel)
       launch_bwd_main<512, 64, 32, false, false, true, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
                                                        d_do8, d_dos, d_delta, d_lse, d_dq_acc,
                                                        d_dk_acc, d_dv_acc, S, H, Hkv, scale,
-                                                       (int)causal, ksplit);
+                                                       (int)causal, ksplit, nullptr, nullptr, d_mrev);
     else
       launch_bwd_main<512, 64, 32, false, false, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
                                                         d_do8, d_dos, d_delta, d_lse, d_dq_acc,
                                                         d_dk_acc, d_dv_acc, S, H, Hkv, scale,
-                                                        (int)causal, ksplit);
+                                                        (int)causal, ksplit, nullptr, nullptr, d_mrev);
   };
 
   auto run_all = [&]() {

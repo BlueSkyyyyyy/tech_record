@@ -3263,13 +3263,40 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       ⇒ **本 shape 的 fp8 main 已按「3 CTA/SM、8192 CTA 铺 20.7 波」调优，head/seq 切分必回尾波**；
       吃这 ~5% 只能「把 preprocess 融进 main」（WS prologue，同 F3b 大改）。默认逐位不变。
       见 `docs/03` §101、`docs/08` §5.87；原始输出 `src/fp8/fa_bwd_fp8_o78_*`。
+- [x] **O105**（第 199 轮，**正结果/默认**）**fp8 D=512（MLA）causal 的 per-head LPT（`mrev`）**
+      ——把 O89 的 per-head m 块反转从 D=128 扩到 D=512（`mrev_elig` 加 `D==512`，`nblk>=16`）；
+      定长 D=512 三个主 kernel launcher 透传 `d_mrev` 当 `mt_m`（**device 一行未改**）。
+      S1024H2 main **1.071×**、total 1.028×；ncu 证 **L2 扇区逐位不变、Duration −3~5%、L2 利用率
+      +2~3pt**（纯尾波削平）。D=256 大 base 的 mrev-only 对照 1.003×（噪声内）不纳入。
+      见 `docs/03` §127、`docs/08` §5.113。
 - [ ] 每步：`ncu` 复测 **L2 扇区/`red`/Duration**，与 TE（`harness/te_fp8_ncu.py`）同 session 对比；
       `harness/fa_vs_te_bwd_only.py` 纯反向验收；数值逐位/容差不变。
 - 目标：fp8 S4096 从 ~1.95ms（6.4× TE）→ 先到 **3× TE**，再逼近 **2×**。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百九十八轮）**：**O104——fp8 `head_dim=256` causal 的跨 head 全局 LPT
+> **最新（第一百九十九轮）**：**O105——fp8 D=512（MLA）causal 的 per-head LPT（`mrev`）
+> ——正结果，默认**。落实 O104「下一步候选 ③」里不撞 smem 墙的一条。O104 把 O93 的跨 head
+> 全局 LPT（`HSWAP`，grid 轴对调）推广到 D=256，但大 `base_grid` 下因 L2 局部性受损变负；
+> 而 **D=512（MLA）causal 一直没接任何 LPT**（`d_mrev=nullptr`）。MLA 每块工作量大、1 CTA/SM、
+> `target=S/2` 细切（S1024H2→k=16、132 槽≈4 波），causal 偏斜下贵块落尾波。**改动纯 host、
+> device 一行未改、单/两文件同源**：`mrev_elig` 加 `D==512`（`nblk>=16` 沿用 O89），定长
+> D=512 的三个主 kernel launcher（8-warp/4-warp、kvpipe/mma）把 `d_mrev` 当 `mt_m` 透传——
+> `fp8_mma_body` 早已消费 `mt_m`（`mblk=mt_m?mt_m[mt]:mt`）。只做 **per-head 反转**（grid/head
+> 排布不动、不改 L2 局部性），`--mrev=0` 回退。**性能（同 binary A/B，iters=300，3×400 复测）**：
+> **S1024H2 D=512 causal main 0.1184→0.1106ms（1.071×）、total 0.1505→0.1464ms（1.028×）**，
+> 稳定 1.069–1.071×；S512H4/H2（nblk=8）门控外中性；D=256 大 `base_grid` 的 mrev-only 对照仅
+> 1.003×（噪声内）⇒ 不纳入；D=128 O93 默认逐值不变。**ncu（S1024H2 main，1 CTA/SM/249 regs）**：
+> Duration **130.1–132.7→126.0µs**、**`op_read`/`op_red`/`op_write` 逐位不变（8.17M 扇区）**、
+> L2 利用率 51.8→**54.5%**、warps 12.48% ⇒ 收益**纯来自尾波削平**（与 O93/O104 降 `op_read`
+> 不同）。精度 relL2 vs ref **8.163/8.564/6.507%**（护栏内）、max_abs 与 mrev0 **逐位同**、
+> `mrev-vs-mrev0` ~1e-7；单/两文件 gate worst **5.722e-06 OK**、`--check docs/04` OK。fp8 MLA
+> 无 FA3/TE 列。见 `docs/03` §127、`docs/08` §5.113。
+> **下一步候选**：① **换卡**——`op_red`（dK/dV 主体墙）仍是唯一真杠杆，本卡无软件解
+> （F3b/F4b/F6/F7/O90/O91/O92/O95 全收口，见「阻塞」）；② `D>128` 的 `HSWAP`/多 warpgroup WS
+> 复用（换卡后）；③ 非 main backlog / `--det` partial。
+>
+> **（第一百九十八轮）**：**O104——fp8 `head_dim=256` causal 的跨 head 全局 LPT
 > （`hswap256`）——正结果，默认**。O93 的 `HSWAP` 此前只接在 `kvtma` 快路（D=128、需 TMA），
 > 而 **D=256 默认走通用 `fa_bwd_fp8_mma_kernel`**（wgmma 档、cp.async、非 TMA），一直没有 LPT
 > 排序。本轮给通用 kernel/launcher 加 `bool HSWAP` 并透传 `fp8_mma_body`（device 一行数学未改），
@@ -8297,6 +8324,33 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     `op_red`（dK/dV 主体墙）仍与 causal 旗舰 D=128 同源、本卡无软件解（见「阻塞」）。
     见 `docs/03` §126、`docs/08` §5.112；原始输出 `src/fp8/fa_bwd_fp8_o104_ab.out.txt`、
     `..._o104_ncu_s1024h8.out.txt`、`..._o104_fa3_te_baseline.out.txt`、`..._o104_ci.out.txt`。
+
+- 2026-10-01（第一百九十九轮）：**O105——fp8 D=512（MLA）causal 的 per-head LPT（`mrev`）
+  ——正结果，默认**。落实 O104「下一步候选 ③」里不撞 smem 墙的一条。O104 把 O93 的跨 head
+  全局 LPT（`HSWAP`，grid 轴对调）推广到 D=256，但大 `base_grid` 下因 L2 局部性受损变负；
+  **D=512（MLA）causal 一直没接任何 LPT**（`d_mrev=nullptr`）。MLA 1 CTA/SM、`target=S/2` 细切
+  （S1024H2→k=16、132 槽≈4 波），causal 偏斜下贵块落尾波。
+  - **改动（纯 host、device 一行未改、单/两文件同源）**：`mrev_elig` 加 `D==512`
+    （`nblk>=16` 沿用 O89）；定长 D=512 的三个主 kernel launcher（8-warp/4-warp、kvpipe/mma）
+    把 `d_mrev` 当 `mt_m` 透传——`fp8_mma_body` 早已消费 `mt_m`（`mblk=mt_m?mt_m[mt]:mt`）。
+    只做 **per-head 反转**（grid/head 排布不动、不改 L2 局部性），`--mrev=0` 回退历史锯齿序。
+  - **性能（同 binary A/B，iters=300，3×400 复测）**：**S1024H2 D=512 causal main
+    0.1184→0.1106ms（1.071×）、total 0.1505→0.1464ms（1.028×）**，稳定 1.069–1.071×；
+    S512H4/H2（nblk=8）门控外中性；D=256 大 `base_grid` 的 mrev-only 对照仅 1.003×（噪声内）
+    ⇒ 不纳入；D=128 O93 默认逐值不变。
+  - **ncu（D=512 causal S1024H2 main，1 CTA/SM/249 regs）**：Duration **130.1–132.7→126.0µs**、
+    **`op_read`/`op_red`/`op_write` 逐位不变（8.17M 扇区）**、L2 利用率 51.8→**54.5%**、
+    warps 12.48% ⇒ 收益**纯来自尾波削平**（与 O93/O104 降 `op_read` 的机制不同）。
+  - **精度/回归（护栏）**：`ours vs fp32 ref` relL2 S1024H2 causal **8.163/8.564/6.507%**
+    （护栏 ≤8.5/≤8.6/≤6.8）；mrev 前后 **max_abs 逐位相同 2.228/3.311/3.611e-1**、
+    `mrev-vs-mrev0` max_abs 1.19e-7/4.77e-7/9.54e-7（纯 atomic 次序）；单/两文件一致性 gate
+    （`--dtype fp8 --fixed-only --impls both --hopper --consistency`，32 case）**worst 5.722e-06
+    OK**；`--check docs/04` **OK（214 行）**；D=128/D=256/full/varlen 逐字不变。fp8 MLA 反向
+    FA3/TE 均无列（`fa_bwd_bench.py bench` 报 `fa=NA`/`te=NA`），只对 fp32 ref。
+  - **判决：正结果、默认开启**。MLA causal 的第一条主 kernel 调度杠杆（**不改 L2 搬运量**）。
+    `op_red`（dK/dV 主体墙）仍与 causal 旗舰 D=128 同源、本卡无软件解（见「阻塞」）。
+    见 `docs/03` §127、`docs/08` §5.113；原始输出 `src/fp8/fa_bwd_fp8_o105_ab.out.txt`、
+    `..._o105_ncu_s1024h2_mrev{0,1}.out.txt`。
 
 ## 灵感 / backlog
 

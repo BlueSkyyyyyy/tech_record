@@ -1,0 +1,90 @@
+### O105 (第199轮) fp8 D=512 MLA causal 的 per-head LPT m 块反转（mrev）A/B
+### 同 binary（-O3 sm90a + FA_WGMMA + FA_TMA），iters=300，同 session；main/total + 数值 vs fp32 ref
+
+===== b1_s1024_h2_d512_causal_fp8  mrev=0 =====
+grid main = 256 x 2 x 1  (ksplit=16, base_grid=32)
+[timing] total(quant+pre+main+cvt) 0.1505 ms  28.53 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0108 ms | preprocess 0.0159 ms | main 0.1184 ms | convert 0.0054 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.228e-01  max_rel=5.071e+01
+  dk   vs ref: max_abs=3.311e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.611e-01  max_rel=5.323e+01
+===== b1_s1024_h2_d512_causal_fp8  mrev=1 =====
+O89: mrev on (nblk=16, LPT expensive-first)
+grid main = 256 x 2 x 1  (ksplit=16, base_grid=32)
+[timing] total(quant+pre+main+cvt) 0.1464 ms  29.33 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0109 ms | preprocess 0.0157 ms | main 0.1106 ms | convert 0.0092 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.228e-01  max_rel=5.071e+01
+  dk   vs ref: max_abs=3.311e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.611e-01  max_rel=5.323e+01
+
+===== b1_s512_h4_d512_causal_fp8  mrev=0 =====
+grid main = 64 x 4 x 1  (ksplit=8, base_grid=32)
+[timing] total(quant+pre+main+cvt) 0.0980 ms  21.92 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0108 ms | preprocess 0.0113 ms | main 0.0710 ms | convert 0.0049 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.415e-01  max_rel=1.802e+02
+  dk   vs ref: max_abs=2.992e-01  max_rel=6.418e+01
+  dv   vs ref: max_abs=4.481e-01  max_rel=9.163e+01
+===== b1_s512_h4_d512_causal_fp8  mrev=1 =====
+O89/O105: mrev requested but ignored (need causal & D==128/256/512 & fixed-length & nblk>=16)
+grid main = 64 x 4 x 1  (ksplit=8, base_grid=32)
+[timing] total(quant+pre+main+cvt) 0.0972 ms  22.10 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0107 ms | preprocess 0.0113 ms | main 0.0708 ms | convert 0.0044 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.415e-01  max_rel=1.802e+02
+  dk   vs ref: max_abs=2.992e-01  max_rel=6.418e+01
+  dv   vs ref: max_abs=4.481e-01  max_rel=9.163e+01
+
+===== b1_s512_h2_d512_causal_fp8  mrev=0 =====
+grid main = 128 x 2 x 1  (ksplit=16, base_grid=16)
+[timing] total(quant+pre+main+cvt) 0.0685 ms  15.68 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0052 ms | preprocess 0.0108 ms | main 0.0498 ms | convert 0.0027 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.287e-01  max_rel=1.154e+02
+  dk   vs ref: max_abs=2.252e-01  max_rel=7.676e+01
+  dv   vs ref: max_abs=3.360e-01  max_rel=5.824e+01
+===== b1_s512_h2_d512_causal_fp8  mrev=1 =====
+O89/O105: mrev requested but ignored (need causal & D==128/256/512 & fixed-length & nblk>=16)
+grid main = 128 x 2 x 1  (ksplit=16, base_grid=16)
+[timing] total(quant+pre+main+cvt) 0.0679 ms  15.80 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0050 ms | preprocess 0.0105 ms | main 0.0497 ms | convert 0.0027 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.287e-01  max_rel=1.154e+02
+  dk   vs ref: max_abs=2.252e-01  max_rel=7.676e+01
+  dv   vs ref: max_abs=3.360e-01  max_rel=5.824e+01
+
+===== b1_s4096_h8_d256_causal_fp8  mrev=0 =====
+O104: hswap256 skipped for D=256 (base_grid=512 > 256: L2 locality loss > LPT gain)
+grid main = 1024 x 8 x 1  (ksplit=16, base_grid=512)
+[timing] total(quant+pre+main+cvt) 2.6644 ms  51.58 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1002 ms | preprocess 0.0782 ms | main 2.4840 ms | convert 0.0021 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.076e-01  max_rel=1.377e+02
+  dk   vs ref: max_abs=3.052e-01  max_rel=1.322e+02
+  dv   vs ref: max_abs=3.776e-01  max_rel=6.097e+01
+===== b1_s4096_h8_d256_causal_fp8  mrev=1 =====
+O89/O105: mrev requested but ignored (need causal & D==128/256/512 & fixed-length & nblk>=16)
+O104: hswap256 skipped for D=256 (base_grid=512 > 256: L2 locality loss > LPT gain)
+grid main = 1024 x 8 x 1  (ksplit=16, base_grid=512)
+[timing] total(quant+pre+main+cvt) 2.6648 ms  51.58 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1002 ms | preprocess 0.0783 ms | main 2.4836 ms | convert 0.0028 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.076e-01  max_rel=1.377e+02
+  dk   vs ref: max_abs=3.052e-01  max_rel=1.322e+02
+  dv   vs ref: max_abs=3.776e-01  max_rel=6.097e+01
+
+===== b1_s4096_h16_d128_causal_fp8  mrev=0 =====
+grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.7059 ms  80.57 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1062 ms | preprocess 0.1219 ms | main 1.4819 ms | convert -0.0042 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+  dq   vs te_dq: max_abs=4.525e-01  max_rel=1.051e+02
+  dk   vs te_dk: max_abs=5.325e-01  max_rel=1.158e+02
+  dv   vs te_dv: max_abs=6.806e-01  max_rel=1.078e+02
+===== b1_s4096_h16_d128_causal_fp8  mrev=1 =====
+O89: mrev on (nblk=64, LPT expensive-first)
+grid main = 128 x 16 x 1  (ksplit=2, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.5839 ms  86.77 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1056 ms | preprocess 0.1191 ms | main 1.3586 ms | convert 0.0006 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+  dq   vs te_dq: max_abs=4.525e-01  max_rel=1.051e+02
+  dk   vs te_dk: max_abs=5.325e-01  max_rel=1.158e+02
+  dv   vs te_dv: max_abs=6.806e-01  max_rel=1.078e+02
