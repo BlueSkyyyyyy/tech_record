@@ -3058,6 +3058,35 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
+**精度护栏（每次 fp8 性能改动都必须过；与提速同等重要）**
+
+- **对拍两把尺**：① `ours vs fp32 ref`——现基线 relL2（`‖a−b‖/‖b‖`）dq/dk/dv ≈ **8.2% / 8.3% / 6.5%**，
+  **不得变差**（允许 <0.3% 的浮点次序抖动）；② `ours vs TE FP8` relL2 ≤ **~15%**（现状 12–15%，是两个
+  独立 fp8 实现平方和开方的正常值）。`max_abs` 维持 **O(0.2–0.9)**（梯度 amax ~3–6）。
+- **禁止**用「降低累加精度」换速度而不复核误差：如 dK/dV 的 fp32 accum → fp16/bf16、partial 降精度、
+  减少 softmax 重算精度等，**必须 A/B 出误差数字**，超护栏即回滚或改 `--opt-in`。
+- **每轮证据**：性能（`ncu` L2 扇区/`red`/Duration + 纯反向时间）**和** 精度（vs ref / vs TE 的 relL2）
+  两组都要；用现成 `harness/fa_bwd_compare.py`、`--ci` 的容差 gate，以及本仓库 dump 的
+  `ours_*`/`te_*`/`ref_*.npy` 直接算 relL2。
+- 目标口径：**在 relL2 不回退的前提下**把 fp8 时间往下压；宁可慢一点也不牺牲精度。
+
+**下一批（fp8 继续 → 逼近 TE；本轮 autopilot 只做 fp8 性能）**
+
+已定位根因：ours fp8 与 TE **都是 L2 bound**，但 **ours 的 L2 搬运量 ≈ TE 的 6.9×**
+（`Duration×L2%`）——来源：3 CTA/SM 的 smem 限制靠 **ksplit=8** 凑并行度 ⇒ **Q/dO 被重复读** +
+dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线程 / grid=132（1 CTA/SM）/232KB smem
+把 L2 压得很低。任务（按预期收益）：
+
+- [ ] **F6 降 L2 流量（核心）**：① **降 ksplit**（消 Q/dO 重读）并同时保住并行度——试 TE 的
+      「**1 CTA/SM + 深流水/WS**」路子（smem 够则无需 ksplit 凑 grid）；② dK/dV 的跨 CTA `red` →
+      **分块 accum / column-owner**（把 O62 的扇区化/确定性三维思路移植到 fp8 非 det 默认）；
+      ③ 复核 `Q/dO` 的 **4D-TMA cache hint / L2 persist** 减少重读。
+- [ ] **F3b WS 完整化**：producer/consumer 分工 + 更深 mbarrier 流水（重叠 `wait`，降 L1/L2 压力）。
+- [ ] **F4b**：fp8 非 det 默认的 dK/dV 归约再优化（当前 red 仍是 74% L2）。
+- [ ] 每步：`ncu` 复测 **L2 扇区/`red`/Duration**，与 TE（`harness/te_fp8_ncu.py`）同 session 对比；
+      `harness/fa_vs_te_bwd_only.py` 纯反向验收；数值逐位/容差不变。
+- 目标：fp8 S4096 从 ~1.95ms（6.4× TE）→ 先到 **3× TE**，再逼近 **2×**。
+
 ## 下一步（明确到可执行）
 
 > **最新（第一百七十一轮）**：**O76——新增 `head_dim=256` 支持（fp8）：能力覆盖**。补齐
