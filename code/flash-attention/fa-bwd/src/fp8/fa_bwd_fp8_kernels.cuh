@@ -2845,7 +2845,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                       float* __restrict__ dk_part = nullptr,
                       float* __restrict__ dv_part = nullptr, int nblk = 0,
                       float* __restrict__ dq_part = nullptr,
-                      const int* __restrict__ part_base = nullptr) {
+                      const int* __restrict__ part_base = nullptr,
+                      const int* __restrict__ slot_tab = nullptr) {
   using Cfg = Fp8Cfg<HD, BM, BN>;
   // O47：warp 网格派生。默认 128/2 ⇒ NWM=2 与历史 2×2 一致（逐字等价）。
   constexpr int NWM = NTH / 32 / NWAR;
@@ -2982,8 +2983,23 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   //   并让最贵的 m 块先调度（削尾波）。`mt_b==nullptr` 时逐式退化为定长/旧 varlen 行为。
   // O93：`HSWAP` 时把 head 放到快轴（grid=(H, nblk*ksplit, B)）⇒ 跨 head 全局 LPT；
   //   历史路径 grid=(nblk*ksplit, H, B)。两者只在「哪个 CTA 算哪个 (h,mblk,part)」上不同。
-  const int part = HSWAP ? (blockIdx.y % ksplit) : (blockIdx.x % ksplit);
-  const int mt   = HSWAP ? (blockIdx.y / ksplit) : (blockIdx.x / ksplit);
+  // O95：`slot_tab` 非空时，`(ks,part,mt)` 从一个「slot → 编码」表解出（编码 = `mt<<8 | part<<4
+  //   | ks`，ks/part≤15、mt=nblk≤255）。表由 host 按全局 LPT 顺序构建，于是**同一 grid 上不同
+  //   m 块可有不同 ksplit**（贵块多切、便宜块少切）——在 O93 的 ksplit=2 平衡点上再省 Q/dO
+  //   重读。纯调度：非 DET 默认路径的 dQ/dK/dV 仍是可交换的跨 CTA `atomicAdd` ⇒ 数值只在
+  //   fp8 噪声内。`slot_tab==nullptr` 时逐式退化为 O93/历史路径（位不变）。
+  int ks_eff = ksplit;
+  int part, mt;
+  if (slot_tab) {
+    const int sidx = HSWAP ? blockIdx.y : blockIdx.x;
+    const int enc = slot_tab[sidx];
+    ks_eff = enc & 15;
+    part = (enc >> 4) & 15;
+    mt = enc >> 8;
+  } else {
+    part = HSWAP ? (blockIdx.y % ksplit) : (blockIdx.x % ksplit);
+    mt   = HSWAP ? (blockIdx.y / ksplit) : (blockIdx.x / ksplit);
+  }
   const int mblk = mt_m ? mt_m[mt] : mt;
   const int h = HSWAP ? blockIdx.x : blockIdx.y;
   const int b = mt_b ? mt_b[mt] : blockIdx.z;
@@ -3005,8 +3021,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 
   const int ncols = causal ? min(len, m0 + BM) : len;
   const int ntiles = (ncols + BN - 1) / BN;
-  const int nt_begin = part * ntiles / ksplit;
-  const int nt_end = (part + 1) * ntiles / ksplit;
+  const int nt_begin = part * ntiles / ks_eff;
+  const int nt_end = (part + 1) * ntiles / ks_eff;
   if (nt_end <= nt_begin) return;  // 该 part 无 tile（causal 下小 mblk 可能被切空）
 
   // ---- 载入 Q/dO：原始行 [m][d] 写 Qs/dOs（供 GEMM1/2 的 A）+ 打包行对写 Qp/dOp
@@ -4223,12 +4239,13 @@ fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             float* __restrict__ dv_part = nullptr, int nblk = 0,
                             float* __restrict__ dq_part = nullptr,
                             const int* __restrict__ part_base = nullptr,
-                            const int* __restrict__ mt_m = nullptr) {
+                            const int* __restrict__ mt_m = nullptr,
+                            const int* __restrict__ slot_tab = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true, THREADS, WN, false, DET,
                DET_HALF, DQONLY, HSWAP>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap, nullptr, mt_m,
-      dk_part, dv_part, nblk, dq_part, part_base);
+      dk_part, dv_part, nblk, dq_part, part_base, slot_tab);
 }
 
 // =============================================================================

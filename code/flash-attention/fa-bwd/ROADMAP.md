@@ -3167,8 +3167,11 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       → **① 的 ksplit 路径「在跨 head 全局 LPT 下重开」（第 188 轮 O93，正结果/默认）**：
       O89 的 per-head LPT 不足让低 ksplit 的尾波回本，但把它升级为 **跨 head 全局 LPT**
       （grid 轴对调，head 走快轴）后，**ksplit=2 首次成为最优**（S4096 main 1.4304→1.3742ms、
-      total 1.6686→1.6109ms；Q/dO 重读 8×→2×、ncu `read` −13%、`red` −8%）。**① 由「关闭」
-      转为「部分达成」**（dK/dV `red` 主体墙仍在）。见 `docs/03` §116、`docs/08` §5.102。
+       total 1.6686→1.6109ms；Q/dO 重读 8×→2×、ncu `read` −13%、`red` −8%）。**① 由「关闭」
+       转为「部分达成」**（dK/dV `red` 主体墙仍在）。见 `docs/03` §116、`docs/08` §5.102。
+       → **① 的「ksplit 随 m 变化」子项已判决（第 189 轮 O95）：中性/负结果**（表驱动 per-m ksplit，
+       槽位 −44% 但 L2 总扇区仅 −1.5%，因 `read` 主体是 K/V 读、与 ksplit 无关；MQA 例外 +2.6%）。
+       默认仍均匀 ksplit=2。见 `docs/03` §117、`docs/08` §5.103。
 - [~] **F3b**：① **GEMM3/4/5 上 RS wgmma（第一百七十四/一百七十五轮 O79/O80 打通）**——
       TE SASS 证其用 `QGMMA RS_TN`（A 在寄存器）+ `STSM/LDSM` 配对粒度转置；O79 冒烟证
       `ldmatrix.x4` 的 A 片段直接喂 `wgmma.m64n32k32` RS（max_abs=0 PASS）；**O80（第 175 轮）
@@ -3248,7 +3251,24 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百八十八轮）**：**O93——跨 head 全局 LPT（grid 轴对调）+ 低 ksplit——正结果，默认**。
+> **最新（第一百八十九轮）**：**O95——变 ks 调度（表驱动 per-m ksplit，`--ksm`）——中性/负结果，
+> opt-in，默认一行未改**。落实 O93 候选 ③ 的 ksplit 子项：给 `fp8_mma_body` 加运行期 `slot_tab`
+> （`(ks,part,mt)` 表解码；`--ksm=N --ksmhi=K` = 最贵 N 个 m 块 ks=K、其余 ks=1，host 按全局 LPT
+> 建表、`grid=(H,nslots,B)`），**device 一行数学未改**、默认 `nullptr` 逐位退化。
+> **S4096**：默认（均匀 k=2）main **1.3670ms**；`ksm=64`（表驱动均匀 k=2）1.3652（等价验证）；
+> **所有非均匀档更慢**（`ksm=8/16/32/48`=1.387/1.381/1.412/1.454ms、全 k=1 1.4488、同槽数重分配
+> `ksm=32 k=3` 1.4506）。ncu：槽位 −44% 但 L2 总扇区仅 **−1.5%**（`read`−2.1%、`red`−1.3%），
+> Duration 不降。**根因**：`read` 主体是 **K/V 读（=总 (m,kv) tile 数，与 ksplit 无关）**，ksplit
+> 只改 Q/dO 重读（小头）；`red` 的 dK/dV 主体不动 ⇒ 无空间。**唯一小正结果**：MQA q64/kv1
+> `ksm=8` **1.026×**（只此 shape，不做默认）。精度 relL2 8.1485/8.2633/6.4894%（逐位同 O93）、
+> `--ci --dtype fp8 --hopper` gate **7.629e-6 OK**。见 `docs/03` §117、`docs/08` §5.103。
+> **下一步候选**：① **换卡**（更大 smem/寄存器）——本卡 fp8 main 的 L2 `red` 墙仍是唯一真杠杆，
+> 且 F3b/F4b/F6/F7/O90/O91/O92 + O93/O95 调度空间已全部收口（见「阻塞」）；② **warp specialization
+> 完整化**（producer/consumer + mbarrier 流水替换 `__syncthreads`，对标 TE 384 线程/1 CTA/SM）——
+> 多轮工程，能改工作划分/藏延迟，但仍受同一 L2 墙；③ 覆盖型 backlog（`D=256` K/V-TMA、MLA 降
+> smem）均受同一 smem 墙；④ 非 main 项（preprocess/quant）均已达带宽墙；O78 的端到端重叠仍负。
+>
+> **（第一百八十八轮）**：**O93——跨 head 全局 LPT（grid 轴对调）+ 低 ksplit——正结果，默认**。
 > 落实 O89「下一步候选 ③」：`fp8_mma_body` 加 `bool HSWAP`（只改解码 `h/mt/part` 的 blockIdx 来源），
 > host 用 `grid=(H, nblk*ksplit, B)`（head 走快轴）⇒ 所有 head 的最贵 m 块一起先派发 = **全局 LPT**；
 > `hswap_elig` 时 auto ksplit 收到 **2**。**S4096 main 1.4304→1.3742ms（1.041×）/ total 1.6686→
@@ -7873,6 +7893,27 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     一字不变）。`red` 的 dK/dV 主体墙（O83/O91/O92 已收口）不变。见 `docs/03` §116、`docs/08`
     §5.102；原始输出 `src/fp8/fa_bwd_fp8_o93_{ab_s4096,ab_shapes,accuracy,tebench_s4096,
     ncu_hswap0_s4096,ncu_hswap1_s4096}.out.txt`。
+
+- 2026-10-01（第一百八十九轮）：**O95——变 ks 调度（`--ksm`，表驱动 per-m ksplit）——中性/负结果，
+  opt-in，默认一行未改**。落实 O93「下一步候选 ③」的「ksplit 随 m 变化（贵块多切、便宜块少切）」：
+  给 `fp8_mma_body` 加运行期 `slot_tab`（表驱动 `(ks,part,mt)` 解码，编码 `mt<<8|part<<4|ks`；
+  `--ksm=N --ksmhi=K` = 最贵 N 个 m 块 ks=K、其余 ks=1，host 按全局 LPT 序建表、`grid=(H,nslots,B)`）——
+  **device 一行数学未改**，默认 `slot_tab=nullptr` 逐位退化；单/两文件 device + host 同源。
+  - **性能（S4096 causal，同 binary A/B，iters=40）**：默认（均匀 k=2）main **1.3670ms/total
+    1.6068ms**；`ksm=64`（表驱动均匀 k=2）1.3652（**验证表解码等价**）；**所有非均匀档更慢**——
+    `ksm=8`(72 槽)1.3874、`ksm=16`1.3807、`ksm=32`1.4120、`ksm=0`(全 k=1)1.4488、同槽数重分配
+    `ksm=32 k=3`1.4506。S1024H32/GQA kv4 均中性偏负。
+  - **ncu（S4096）**：槽位 128→72（−44%）但 L2 总扇区 **129.81M→127.86M（−1.5%）、`read`−2.1%、
+    `red`−1.3%**，Duration 不降反略升。**根因（账）**：主 kernel `read` 主体是 **K/V 读 = 总
+    (m,kv) tile 数（与 ksplit 无关）**，ksplit 只改 **Q/dO 重读**（read 小头）；`red` 的 dK/dV
+    主体不随 ksplit 变 ⇒ 物理上无空间。**唯一小正结果**：MQA q64/kv1 `ksm=8` main
+    0.4308→**0.4198（1.026×，3 次稳定）**，但只此 shape、不做默认（会回退 MHA/GQA 1–7%）。
+  - **精度护栏**：默认 relL2 **8.1485/8.2633/6.4894%**（与 O93 逐位相同），`max_abs`
+    2.635/2.644/3.216e-1；`--ci --dtype fp8 --hopper` gate worst **7.629e-6 OK**、`--check docs/04`
+    OK。**判决：中性/负结果**，`--ksm` opt-in。⇒ O93 均匀 `ksplit=2` 仍是本卡默认最优点；
+    「下一步候选 ③」的 ksplit 子项关闭。对标同 session TE FP8 S4096 0.3025ms ⇒ ours total **5.31×**、
+    main **4.52×**（与 O93 持平）。见 `docs/03` §117、`docs/08` §5.103；原始输出
+    `src/fp8/fa_bwd_fp8_o95_{ab_s4096,ab_shapes,accuracy,ncu_s4096}.out.txt`。
 
 ## 灵感 / backlog
 

@@ -10230,3 +10230,90 @@ O92 的 ksplit 复扫（1/2/4/8/16 = 2.032/1.804/1.694/**1.667**/1.821ms）证�
   `red` 一字不变；O93 的 `read/red` 都降）。`red` 的 dK/dV 主体墙（O83/O91/O92 已收口）不变。
 - 原始输出：`src/fp8/fa_bwd_fp8_o93_{ab_s4096,ab_shapes,accuracy,tebench_s4096,
   ncu_hswap0_s4096,ncu_hswap1_s4096}.out.txt`。见 `docs/08` §5.102、`ROADMAP`「当前进度 第一百八十八轮」。
+
+## 117. O95（第 189 轮）：**变 ks 调度**（`--ksm`：表驱动 per-m ksplit）—— **中性/负结果，opt-in，默认一行未改**
+
+> 承接 `docs/03` §116（O93 跨 head 全局 LPT + 低 ksplit）与 ROADMAP「下一步候选 ③」的
+> **「ksplit 随 m 变化（贵块多切、便宜块少切），在 O93 平衡点上再省 Q/dO 重读」**。
+> 结论先行：**该子项判决为中性/负结果**——O93 的均匀 `ksplit=2` 已是全局最优点；
+> 变 ks 只能改动 **Q/dO 重读**（L2 总量的一小部分），动不了 dK/dV `red` 主体，收益 <1% 且
+> 常被「CTA 数下降 → 并行度/tail 变差」盖过。默认路径逐位不变；`--ksm` 保留为 opt-in 复现口。
+
+### 117.1 动机与机制
+
+O93 把 ksplit 从 8 收到 2，使 Q/dO 重读 8×→2×。一个自然猜想：**便宜 m 块不需要切**（它们
+的 K 区间本来就短），只给最贵的若干 m 块保留更高 ksplit，即可在不抬长尾的前提下进一步减少
+「Q/dO 重读 + dQ 跨 part 原子」。
+
+**先算账（关键负结论的根因）**：主 kernel 的 L2 `read` 不是 ∝ 槽位数。它主要是 **K/V 读**，
+而 K/V 读 = `Σ_slots (本 CTA 的 K tile 数) · BN·HD` = **总 (m,kv) tile 数 · BN·HD**（与 ksplit
+无关，是总工作量）。ksplit/槽位数只影响 **Q/dO 的按-CTA 重复读**（每槽 `BM·HD·2B` 固定）。
+S4096 H16：槽位 128→72（−44%）只省 `56·64·128·2·16 ≈ 14.7MB ≈ 0.46M` 扇区，占 L2 总量
+（129.8M）的 **~0.4%**；`red` 的 dK/dV 主体（105M 的绝大多数）**一字不变**。⇒ 物理上就没有
+空间。
+
+### 117.2 实现（device 一行数学未改；单/两文件 device 逐字同源）
+
+- **device（`fa_bwd_fp8_kernels.cuh`）**：`fp8_mma_body` 末尾加运行期参
+  `const int* slot_tab = nullptr`。非空时从表解出 `(ks,part,mt)`：
+  `enc = slot_tab[HSWAP ? blockIdx.y : blockIdx.x]`，`ks=enc&15`、`part=(enc>>4)&15`、
+  `mt=enc>>8`；`nt_begin/nt_end` 用解出的 `ks_eff` 而非全局 `ksplit`。`slot_tab==nullptr`
+  时逐式退化为 O93/历史路径（**位不变**）。非 DET 默认路径 dQ/dK/dV 仍是可交换跨 CTA
+  `atomicAdd` ⇒ 变 ks 只改加法次序、数值在 fp8 噪声内。
+- **host（`fa_bwd_fp8_main.cu`）**：`--ksm=N`（`-1`=关）+ `--ksmhi=K`。hswap eligible 时按
+  **mt 升序（= 全局 LPT）** 构建表：前 N 个（最贵的）m 块 `ks=K`、其余 `ks=1`，每槽编码
+  `(mt<<8)|(part<<4)|ks`，`grid=(H, nslots, B)`、`slot_tab` 传入 `kvtma` 主 kernel。`--ksm=64`
+  即「表驱动的均匀 ks=2」，用于验证表解码与 O93 等价。
+- **单文件** `fa_bwd_fp8_mma_onefile.cu` 手工同源（device 段与 host 段一并改）。
+
+### 117.3 性能（S=4096 H16 B1 causal，同 binary A/B，event iters=40）
+
+| 配置 | nslots | main (ms) | total (ms) | TFLOPS |
+|---|---|---|---|---|
+| `ksm=-1`（**O93 默认**，均匀 k=2） | 128 | **1.3670** | **1.6068** | 85.53 |
+| `ksm=64 ksmhi=2`（表驱动均匀 k=2） | 128 | 1.3652 | 1.5978 | 86.02 |
+| `ksm=8 ksmhi=2` | 72 | 1.3874 | 1.6187 | 84.91 |
+| `ksm=16 ksmhi=2` | 80 | 1.3807 | 1.6195 | 84.86 |
+| `ksm=32 ksmhi=2` | 96 | 1.4120 | 1.6431 | 83.64 |
+| `ksm=48 ksmhi=2` | 112 | 1.4543 | 1.6862 | 81.51 |
+| `ksm=0 ksmhi=2`（全 k=1） | 64 | 1.4488 | 1.6720 | 82.20 |
+| `ksm=32 ksmhi=3`（同槽数重分配） | 128 | 1.4506 | 1.6961 | 81.03 |
+| `ksm=16 ksmhi=4` | 112 | 1.4353 | 1.6814 | 81.74 |
+
+- **`ksm=64`（128 槽）与默认 `ksm=-1` 逐项吻合**（1.3652 vs 1.3670）⇒ 表解码正确、且说明
+  「变 ks 表本身」不是慢的原因。
+- **所有非均匀档都更慢**；同槽数重分配（`ksm=32 ksmhi=3`，128 槽、贵块切 3）也慢 6% ⇒
+  均匀 k=2 的**最小并行度最大**、负载最均衡。`ksplit=1`（64 槽）慢 6%，与 O93 一致。
+
+### 117.4 ncu（S4096 causal，同 session，`fa_bwd_fp8_mma_kvtma_kernel`）
+
+| 指标 | `ksm=-1`（默认） | `ksm=8`（nslots 72） | 变化 |
+|---|---|---|---|
+| Duration | 1.37 ms | 1.38 ms | ~中性 |
+| L2 总扇区 | 129.81 M | 127.86 M | −1.5% |
+| L2 `op_read` | 24.27 M | 23.74 M | −2.1% |
+| L2 `op_red` | 105.38 M | 104.01 M | −1.3% |
+| L2 `op_write` | 99 K | 59 K | — |
+| DRAM 字节 | 553 MB | 560 MB | — |
+| warps active | 18.66% | 18.56% | — |
+
+- **证实 117.1 的账**：槽位砍 44% 但 `read` 只降 2.1%（Q/dO 重读只占 read 的小头，K/V 读
+  不随 ksplit 变）；`red` 只降 1.3%（dQ 的跨 part 部分，dK/dV 主体不动）。**总 L2 降 1.5%
+  低于并行度损失，Duration 不降反略升。**
+
+### 117.5 其它形状
+
+- S1024H32：默认 main 0.2232；`ksm=8` 0.2360（慢）、`ksm=16` 0.2228、`ksm=16 k=3` 0.2226 ⇒ 中性。
+- GQA q32/kv4：默认 0.2112；`ksm=8` 0.2265（慢）、`ksm=16` 0.2101 ⇒ 中性。
+- MQA q64/kv1（H=64）：默认 0.4308；**`ksm=8` 0.4198（1.026×，3 次重复稳定 0.4192–0.4202）**
+  ⇒ **唯一的小正结果**，但也仅 ~2.6%，且只在此 MQA shape 观察到（H 越大、Q/dO 重读被 ×H 放大，
+  收益才勉强盖过并行度损失）。**不值得做默认**（会对 MHA/GQA 造成 1–7% 回退）。
+
+### 117.6 精度护栏与回归
+
+- 默认路径（ksm 关）S4096 `ours_hp vs fp32 ref` relL2 dq/dk/dv **8.1485/8.2633/6.4894%**，
+  `max_abs` 2.635/2.644/3.216e-1 —— 与 O93 **逐位相同**。
+- `--ci --dtype fp8 --hopper`：单/两文件一致性 gate worst **7.629e-6 OK**、`--check docs/04` OK。
+- **判决：中性/负结果**。`--ksm` 保留 opt-in（默认 `-1` 关，默认路径一行未改），ROADMAP
+  「下一步候选 ③」的「ksplit 随 m 变化」子项到此关闭；O93 均匀 `ksplit=2` 仍是本卡默认最优点。
+  原始输出 `src/fp8/fa_bwd_fp8_o95_{ab_s4096,ab_shapes,accuracy,ncu_s4096}.out.txt`。
