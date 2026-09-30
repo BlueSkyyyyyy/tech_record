@@ -1,0 +1,14 @@
+=== O78 ovlp sweep (fp8, S4096 causal MHA, main.cu, --iters=10) ===
+ovlp=0 :: [timing] total(quant+pre+main+cvt) 1.7956 ms  76.54 TFLOPS (bwd FLOPs=4BS^2HD)
+ovlp=2 :: O78: overlap ON, head chunks=2 (hc=8), LSE(sA) || main(sB)
+ovlp=2 :: [timing] total(quant+pre+main+cvt) 1.9032 ms  72.22 TFLOPS (bwd FLOPs=4BS^2HD)
+ovlp=4 :: O78: overlap ON, head chunks=4 (hc=4), LSE(sA) || main(sB)
+ovlp=4 :: [timing] total(quant+pre+main+cvt) 2.1194 ms  64.85 TFLOPS (bwd FLOPs=4BS^2HD)
+ovlp=8 :: O78: overlap ON, head chunks=8 (hc=2), LSE(sA) || main(sB)
+ovlp=8 :: [timing] total(quant+pre+main+cvt) 2.3798 ms  57.75 TFLOPS (bwd FLOPs=4BS^2HD)
+ovlp=16 :: O78: overlap ON, head chunks=16 (hc=1), LSE(sA) || main(sB)
+ovlp=16 :: [timing] total(quant+pre+main+cvt) 2.7310 ms  50.33 TFLOPS (bwd FLOPs=4BS^2HD)
+=== O78 control: chunked main serial (skip LSE launch) ===
+mainonly chunks=2 :: [timing] total(quant+pre+main+cvt) 1.7625 ms  77.98 TFLOPS (bwd FLOPs=4BS^2HD)
+mainonly chunks=4 :: [timing] total(quant+pre+main+cvt) 1.9258 ms  71.37 TFLOPS (bwd FLOPs=4BS^2HD)
+mainonly chunks=8 :: [timing] total(quant+pre+main+cvt) 2.1622 ms  63.56 TFLOPS (bwd FLOPs=4BS^2HD)

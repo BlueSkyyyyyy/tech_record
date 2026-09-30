@@ -1657,3 +1657,22 @@ smem 冲突 + 低 occ
   p168 五路全判死）、藏延迟只剩「换卡 / 多 warpgroup 摊累加器」。
 - 详见 `docs/03` §100；原始输出 `src/fp8/fa_bwd_fp8_o77_{l2promo_ab,ksplit_sweep,macro_ab,
   ptxas_spill,ncu_local_src}_s4096.out.txt`。
+
+### 5.87 O78：端到端 overlap（quant/LSE 与 main 跨 stream）—— 负结果（第一百七十三轮）
+
+- **一句话**：把 §100「下一步候选 ②（端到端重叠）」正式实现——按 head 分块把 LSE 与 main 放到
+  两条非阻塞 stream 流水——实测**单调更慢**（+6%~+52%），根因是**切分 main 栅格引入的尾波量化
+  损失**远大于被隐藏的 LSE。默认路径未改。
+- **机制/实现**（纯 host，`--ovlp=N`）：新 `make_map_fp8_chunk` 让 4D-TMA 描述符的 head 计数与
+  物理行距解耦（`dims[2]=hc`、`strides` 用全 H），配合指针偏移 ⇒ **device 一行未改**；`sA` 发
+  LSE(k)、`sB` 发 main(k)、event 依赖、quant 整体在 default 前置。
+- **诊断**（`--ovltest=1`，整块 main || 整块 LSE、只计时）：`main 1.555 + lse 0.121 = serial 1.676`
+  → `concurrent 1.594（0.951×）` ⇒ **内核级重叠可行**（LSE 藏住 ~0.082ms、67%）。
+- **实测**（S4096 causal MHA，同 binary）：ovlp=0/2/4/8/16 = **1.796 / 1.903 / 2.119 / 2.380 /
+  2.731 ms**（单调 +6%→+52%）。**控制**（`--ovlnolse=1` 只测分块 main 串行）：chunks=2/4/8 →
+  full main **+5%/+15%/+29%**。
+- **归因**：full main 是 8192 CTA / 20.7 波、尾波 ~5%；切 N 段后每段 10.3/5.2/2.6 波、尾波占比
+  ~10/19/38%。**尾波损失 > LSE 可藏量（4.5%）**；并发时 LSE 与 main 争 SM 又额外拖慢 main。
+- **结论**：本 shape 的 fp8 main 已按「3 CTA/SM、铺满 20.7 波」调优，head/seq 切分必回尾波；
+  吃这 ~5% 只能「把 preprocess 融进 main」（WS prologue，同 F3b 大改）。默认逐位不变。
+- 详见 `docs/03` §101；原始输出 `src/fp8/fa_bwd_fp8_o78_{ovltest,sweep,ncu_main,baseline_te}*`。
