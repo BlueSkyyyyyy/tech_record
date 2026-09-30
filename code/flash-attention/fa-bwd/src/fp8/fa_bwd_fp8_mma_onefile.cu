@@ -5941,8 +5941,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
                       bool lse_compact = false, int lse_split = 0, int mla8w = -1,
                       int mla_kvp = -1, int lseocc = 0, int lse8w = 0,
                       const std::string& dump = "", int det_ab = 0, int det_ksplit = 1,
-                      int fuse_reduce = 1, int part_compact = 0, int qfuseflag = 1,
-                      int dfuseflag = 1) {
+                       int fuse_reduce = 1, int part_compact = 0, int qfuseflag = 1,
+                       int dfuseflag = 1, int vksplit = -1) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -6066,8 +6066,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
                                : (long)(maxlen / 2);
   long kk = target_ctas / base_grid; if (kk < 1) kk = 1; if (kk > 16) kk = 16;
   long kp = 1; while (kp * 2 <= kk) kp *= 2;
-  const int ksplit = (int)kp;
-  const bool use_regdq = (D == 128) && ((long)(maxlen / 32) / 2 / ksplit >= 4);
+  // O97：`--ksplit=K` 也可用于 varlen（同 binary A/B；K>=1 直接覆盖自动档）。默认 -1 自动。
+  const int ksplit = (vksplit >= 1) ? vksplit : (int)kp;
+  const bool use_regdq = (D == 128) && ((long)(maxlen / 32) / (causal ? 2 : 1) / ksplit >= 4);
 
   // O40：varlen LSE 的 K 维 split auto（D=128 目标 `grid*split≈2048`、cap 8；D=512 `≈256`、
   //   cap 16，与定长 O38/O39 同标定）；`--lsesplit=N`（>0）直接指定。再按最大序列的 tile 数封顶。
@@ -7152,7 +7153,7 @@ int main(int argc, char** argv) {
   if (varlen)
     return run_varlen(dir, causal, iters, compact_opt, lse_compact_opt, lse_split, mla8w_opt,
                        mla_kvp_opt, lseocc_opt, lse8w_opt, dump_prefix, det_ab, det_ksplit,
-                       fuse_reduce, part_compact, qfuse, dfuse);
+                       fuse_reduce, part_compact, qfuse, dfuse, ksplit);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
@@ -7417,6 +7418,34 @@ int main(int argc, char** argv) {
       }
     }
     ksplit = (int)best_k;
+  }
+  // O97（第 191 轮）：full（非 causal）D=256 / D=512 的 ksplit 重标定（与两文件版同源，
+  //   详见 `fa_bwd_fp8_main.cu` 同名注释 / docs/03 §119）。D=256/512 共用 O29 的 `target=S/2`
+  //   （按 causal MLA 标定），对 full 不合适：D=512（1 CTA/SM→132 槽）base 小时过切到 k=16，
+  //   波对齐修正（main 1.15×）；D=256（2 CTA/SM→264 槽）`S/2/base=32/H` 与 S 无关 ⇒ 大 S
+  //   欠切，S≥2048 给足并发（grid≈8192，cap k=12），S<2048 按 264 槽波对齐。
+  if (ksplit_auto && !causal && (D == 256 || D == 512)) {
+    const bool wave = (D == 512) || (S < 2048);
+    if (wave) {
+      const long SLOTS = (D == 512) ? 132L : 264L;
+      const long KMAX = (D == 512) ? 16 : 8;
+      long best_k = 1, best_waste = -1;
+      for (long k = 1; k <= KMAX; ++k) {
+        const long g = base_grid * k;
+        const long waste = ((g + SLOTS - 1) / SLOTS) * SLOTS - g;
+        if (best_waste < 0 || waste < best_waste) {
+          best_waste = waste;
+          best_k = k;
+        }
+      }
+      if (D == 512 && best_k < 2) best_k = 2;  // 见两文件版注释：消除大 base 的 k=1 回退
+      ksplit = (int)best_k;
+    } else {
+      long k = 8192L / base_grid;
+      if (k < 1) k = 1;
+      if (k > 12) k = 12;
+      ksplit = (int)k;
+    }
   }
   // O93：hswap（跨 head 全局 LPT）启用时把自动 ksplit 收到 2（与两文件版同源）。
 #if defined(FA_WGMMA) && defined(FA_TMA)

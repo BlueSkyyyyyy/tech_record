@@ -2111,3 +2111,28 @@ O92 把 `fp8 专项冲刺 F6-①`（降 L2 搬运）的 ksplit 路径判为关�
   max_abs 2.635/2.644/3.216e-1）。`--check docs/04` OK。
 - **教训**：凡「按 causal 三角标定」的启发式（ksplit、regdq、未来的 partial/split）都要逐条
   复核 full/变长。见 `docs/03` §118；原始输出 `src/fp8/fa_bwd_fp8_o96_*.out.txt`。
+
+### 5.105 第 191 轮（O97）：full（非 causal）D=256 / D=512 的 ksplit 重标定 —— **正结果（默认）**
+
+**思路**：O96 的「凡按 causal 三角标定的启发式都要逐条复核 full」的同类审计，本轮落到
+**D=256 与 D=512（MLA）**——两者共用 O29 的 `target_ctas = S/2`（按 causal MLA 标定），
+而 D=128 早已单独重标定。**纯 host、device 一行未改、单/两文件同源**。
+
+- **两条路径错法相反**：① **D=512**（1 CTA/SM→132 槽）：`S/2/base = 32/H` 恒把 k 顶到 16，
+  base 小时**过切**——5 个 full shape 最优 k≈`128/base`（即「对齐一个波」），main 1.15×；
+  ② **D=256**（2 CTA/SM→264 槽）：`32/H` 与 S 无关 ⇒ S≥2048 时**欠切**——7 个 shape 最优
+  k=8–12（auto 只 1–4），main 5.7–7.9%。
+- **新规则**：D=512 / D=256(S<2048) 按并发槽做**波对齐**（SLOTS=132/264；D=512 设 k≥2 下限
+  消大 base 回退）；D=256(S≥2048) 取 `k=clamp(8192/base,1,12)`（grid≈8192）。`--ksplit` 仍可覆盖。
+- **性能（14 个 full shape，同 binary A/B，iters=60）**：**全部 ≥1.00×、无回退**；D=512 小 shape
+  **1.15×**（S512H2 0.0621→0.0541ms、S1024H2 0.2034→0.1771ms）、D=256 大 S 1.06–1.08×
+  （S2048H8 1.3347→1.2457ms）。D=512 端到端被 full MLA 的 LSE preprocess 盖住，只报 main。
+- **ncu（两条方向）**：D=512 S1024H2 k16→k4：`op_read` **−24%**、Duration **211→191µs**；
+  D=256 S2048H8 k4→k12：`op_read` **+44%** 但 L2 利用率 **72→80%**、Duration **1.38→1.26ms**；
+  两组 `op_red` 均**一字不变**（dK/dV 主体与 ksplit 无关，再次印证 O83/O86）。
+- **数值/回归**：只改 atomic 加法次序 ⇒ 5 个代表 shape 的 relL2 vs fp32 ref **逐位相同**，
+  全量 `--ci` 三 dtype gate **OK**（fp8 6.676e-6）、`--check docs/04` **OK**；causal 逐档不变。
+- **教训延续**：D=256 的「同 base 但不同 S」表现不同（S1024H16 要 k=1、S2048H8 要 k=12）——
+  **full 的 ksplit 不是纯波对齐能全包的**，大 S 还需要「足够的并行度/working-set 切分」。
+
+见 `docs/03` §119；原始输出 `src/fp8/fa_bwd_fp8_o97_{ab,ncu}.out.txt`。

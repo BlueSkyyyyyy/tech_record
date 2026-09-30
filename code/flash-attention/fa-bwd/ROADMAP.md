@@ -3251,7 +3251,21 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百九十轮）**：**O96——fp8 full（非 causal）D=128 的 ksplit/regdq 重标定——正结果，默认**。
+> **最新（第一百九十一轮）**：**O97——fp8 full（非 causal）D=256 / D=512（MLA）的 ksplit 重标定
+> ——正结果，默认**。O96「causal 标定的启发式要复核 full」的同类审计落到 D=256/D=512——两者
+> 共用 O29 的 `target_ctas=S/2`（按 causal MLA 标定）。**纯 host、device 一行未改、单/两文件同源**：
+> ① **D=512**（1 CTA/SM→132 槽）`S/2/base=32/H` 恒把 k 顶到 16 ⇒ **过切**，改为按 132 槽波对齐
+> （最优 k≈`128/base`），main **1.15×**（S512H2 0.0621→0.0541ms）；② **D=256**（2 CTA/SM→264 槽）
+> `32/H` 与 S 无关 ⇒ S≥2048 **欠切**，改为 `k=clamp(8192/base,1,12)`，main **1.06–1.08×**。
+> 14 个 full shape **全部 ≥1.00×、无回退**；ncu：D=512 `op_read −24%`、D=256 `op_read +44%` 但
+> L2 利用率 72→80%、Duration 各 −9%；两组 `op_red` **一字不变**。relL2 vs fp32 ref 逐位相同、
+> 全量 `--ci` 三 dtype gate OK、`--check docs/04` OK。见 `docs/03` §119、`docs/08` §5.105。
+> **下一步候选**：① 继续 O96/O97 的同类审计到**变长 full 的 ksplit**（本轮只把 `--ksplit` 接到
+> varlen 做 A/B，4 shape 中仅 b8_t2904 有 ~3.6% 空间）与 `partial/split` 的 full 标定；
+> ② 用全量 `--ci`（73 case）验收 O96/O97 并同步 `docs/04` perf 列；③ causal 旗舰的 L2 `red` 墙
+> 仍是唯一真杠杆，本卡无软件解（换卡/多 warpgroup，见「阻塞」）。
+>
+> **（第一百九十轮）**：**O96——fp8 full（非 causal）D=128 的 ksplit/regdq 重标定——正结果，默认**。
 > 审计「按 causal 三角标定、却被无条件套用到 full」的两条启发式：O29 的 ksplit target（细切分
 > 只为摊平三角尾波，full 下纯浪费 Q/dO 重读 + dQ 跨 part 原子）与 O7 的 `use_regdq` 阈值（`/2`
 > 让 full 误关 regdq）。**纯 host、device 一行未改、单/两文件同源**：full D=128 的 ksplit 改为让
@@ -7945,6 +7959,30 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     2.635/2.644/3.216e-1）；`--check docs/04` OK（198 行）。**样本用定向 A/B 核验，未重跑全量
     `--ci`（留作下一轮验收）。** 见 `docs/03` §118、`docs/08` §5.104；原始输出
     `src/fp8/fa_bwd_fp8_o96_{ab_full,causal_reg,ksweep,ncu_full_s1024}.out.txt`。
+
+- 2026-10-01（第一百九十一轮）：**O97——fp8 full（非 causal）D=256 / D=512（MLA）的 ksplit
+  重标定——正结果，默认**。O96「按 causal 标定的启发式要逐条复核 full」的同类审计落到
+  D=256/D=512——两者**共用 O29 的 `target_ctas=S/2`**（按 causal MLA 标定），D=128 早已单独改。
+  **纯 host、device 一行未改、单/两文件同源**（`--ksplit=K` 仍可覆盖）。
+  - **两条路径错法相反**：① **D=512**（MLA mma 8-warp、1 CTA/SM→**132 槽**）`S/2/base=32/H`
+    恒把 k 顶到 **16** ⇒ base 小时**过切**；5 个 full shape 最优 k≈`128/base`（即「对齐一个波」），
+    改为按 132 槽波对齐。② **D=256**（cp.async wgmma、2 CTA/SM→**264 槽**）`32/H` **与 S 无关**
+    ⇒ S≥2048 **欠切**；7 个 shape 最优 k=**8–12**（auto 只 1–4），S≥2048 取 `k=clamp(8192/base,1,12)`、
+    S<2048 按 264 槽波对齐。D=512 另设 k≥2 下限（消 S4096H2 的 k=1 回退）。
+  - **性能（14 个 full shape，同 binary A/B，iters=60）**：**全部 ≥1.00×、无回退**——D=512 小 shape
+    **1.15×**（S512H2 0.0621→0.0541ms、S1024H2 0.2034→0.1771ms）；D=256 大 S **1.06–1.08×**
+    （S2048H8 1.3347→1.2457ms、S2048H32 5.1815→4.8031ms）。D=512 端到端被 full MLA 的 LSE
+    preprocess 盖住（main 仅占 ~25%），只报 main。
+  - **ncu（两条方向）**：D=512 S1024H2 k16→k4：`op_read` 2.291M→1.750M（**−24%**）、
+    Duration **211.33→190.78µs**、L2 60.84→66.83%；D=256 S2048H8 k4→k12：`op_read` 8.69M→12.49M
+    （**+44%**）但 L2 利用率 **72.31→79.64%**、Duration **1.38→1.26ms**；两组 `op_red` **一字不变**
+    （dK/dV 主体与 ksplit 无关，印证 O83/O86）。
+  - **数值/回归**：只改 atomic 加法次序 ⇒ 5 个代表 shape 的 `ours vs fp32 ref` relL2 新旧**逐位相同**
+    （如 d256 S4096H16 8.151/8.302/6.759%），全量 `fa_bwd_run.py --ci` 三 dtype gate **OK**
+    （fp16 1.953e-3 / bf16 7.812e-3 / fp8 **6.676e-6**）、`--check docs/04` **OK（198 行）**；
+    causal 路径逐档不变；varlen `use_regdq` 的 `/2` 仅 full 分支去掉（当前 full varlen 本就 regdq=1）。
+  - **判决：正结果、默认开启**。仍属「纠正被 causal 经验错套的启发式」，不改数据通路。见
+    `docs/03` §119、`docs/08` §5.105；原始输出 `src/fp8/fa_bwd_fp8_o97_{ab,ncu}.out.txt`。
 
 ## 灵感 / backlog
 

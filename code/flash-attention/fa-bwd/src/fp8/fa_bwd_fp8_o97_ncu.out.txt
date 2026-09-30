@@ -1,0 +1,28 @@
+##### D=512 S1024H2 full, ksplit=16 #####
+    gpu__time_duration.sum                                     us       211.33
+    lts__t_sectors.sum                                     sector     14944896
+    lts__t_sectors_op_read.sum                             sector      2291411
+    lts__t_sectors_op_red.sum                              sector     12582912
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        60.84
+    sm__warps_active.avg.pct_of_peak_sustained_active           %        12.49
+##### D=512 S1024H2 full, ksplit=4 #####
+    gpu__time_duration.sum                                     us       190.78
+    lts__t_sectors.sum                                     sector     14405516
+    lts__t_sectors_op_read.sum                             sector      1749736
+    lts__t_sectors_op_red.sum                              sector     12582912
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        66.83
+    sm__warps_active.avg.pct_of_peak_sustained_active           %        12.50
+##### D=256 S2048H8 full, ksplit=4 #####
+    gpu__time_duration.sum                                     ms         1.38
+    lts__t_sectors.sum                                     sector    109440414
+    lts__t_sectors_op_read.sum                             sector      8690755
+    lts__t_sectors_op_red.sum                              sector    100663296
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        72.31
+    sm__warps_active.avg.pct_of_peak_sustained_active           %        12.47
+##### D=256 S2048H8 full, ksplit=12 #####
+    gpu__time_duration.sum                                     ms         1.26
+    lts__t_sectors.sum                                     sector    113252894
+    lts__t_sectors_op_read.sum                             sector     12489421
+    lts__t_sectors_op_red.sum                              sector    100663296
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        79.64
+    sm__warps_active.avg.pct_of_peak_sustained_active           %        12.37
