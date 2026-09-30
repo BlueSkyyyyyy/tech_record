@@ -1691,8 +1691,8 @@ int main(int argc, char** argv) {
   const int B = (int)q_np.shape[0], S = (int)q_np.shape[1];
   const int H = (int)q_np.shape[2], D = (int)q_np.shape[3];
   const int Hkv = (int)k_np.shape[2];   // P5-3：GQA/MQA 的 KV 头数（MHA 时 Hkv==H）
-  if (D != 128 && D != 512) {
-    fprintf(stderr, "本版本支持 head_dim=128（MHA/GQA）或 512（MLA）；当前 %d\n", D);
+  if (D != 128 && D != 256 && D != 512) {
+    fprintf(stderr, "本版本支持 head_dim=128（MHA/GQA）/ 256 / 512（MLA）；当前 %d\n", D);
     return 1;
   }
   if ((int)v_np.shape[2] != Hkv || (int)v_np.shape[3] != D) {
@@ -1710,10 +1710,14 @@ int main(int argc, char** argv) {
   const float scale = 1.0f / sqrtf((float)D);
 
   // 主 kernel tile 固定 BM=64,BN=32；smem 随 HD 变化。
-  const int smem_bytes = (D == 128) ? Fp8Cfg<128, 64, 32>::smem_bytes
-                                    : Fp8Cfg<512, 64, 32>::smem_bytes;
-  const int lse_smem = (D == 128) ? Fp8Cfg<128, 64, 32>::lse_smem_bytes
-                                  : Fp8Cfg<512, 64, 32>::lse_smem_bytes;
+  // O76（第 171 轮）：新增 head_dim=256（D=128 与 D=512 之间，FA/TE 反向支持到 256）；
+  //   走 mma 主 kernel（无 wgmma/TMA——fp8 wgmma 只做 HD=128），smem ≈115KB ⇒ 1 CTA/SM。
+  const int smem_bytes = (D == 128)   ? Fp8Cfg<128, 64, 32>::smem_bytes
+                         : (D == 256) ? Fp8Cfg<256, 64, 32>::smem_bytes
+                                      : Fp8Cfg<512, 64, 32>::smem_bytes;
+  const int lse_smem = (D == 128)   ? Fp8Cfg<128, 64, 32>::lse_smem_bytes
+                       : (D == 256) ? Fp8Cfg<256, 64, 32>::lse_smem_bytes
+                                    : Fp8Cfg<512, 64, 32>::lse_smem_bytes;
 
   printf("case = %s\n", dir.c_str());
   printf("B=%d S=%d H=%d Hkv=%d D=%d causal=%d scale=%.6f\n", B, S, H, Hkv, D, (int)causal,
@@ -1782,6 +1786,11 @@ int main(int argc, char** argv) {
       quantize_row_warp_kernel<4, false><<<gkv, 128>>>(d_k_f, d_k8, d_ks, rkv);
       quantize_row_warp_kernel<4, false><<<gkv, 128>>>(d_v_f, d_v8, d_vs, rkv);
       quantize_row_warp_kernel<4, true><<<gq, 128>>>(d_do_f, d_do8, d_dos, rq);
+    } else if (D == 256) {
+      quantize_row_warp_kernel<8, false><<<gq, 128>>>(d_q_f, d_q8, d_qs, rq);
+      quantize_row_warp_kernel<8, false><<<gkv, 128>>>(d_k_f, d_k8, d_ks, rkv);
+      quantize_row_warp_kernel<8, false><<<gkv, 128>>>(d_v_f, d_v8, d_vs, rkv);
+      quantize_row_warp_kernel<8, true><<<gq, 128>>>(d_do_f, d_do8, d_dos, rq);
     } else {
       quantize_row_warp_kernel<16, false><<<gq, 128>>>(d_q_f, d_q8, d_qs, rq);
       quantize_row_warp_kernel<16, false><<<gkv, 128>>>(d_k_f, d_k8, d_ks, rkv);
@@ -1799,6 +1808,10 @@ int main(int argc, char** argv) {
       quantize_zero_warp_kernel<4><<<grid, 128>>>(d_q_f, d_k_f, d_v_f, d_do_f, d_q8, d_k8, d_v8,
                                                   d_do8, d_qs, d_ks, d_vs, d_dos, d_dq_acc,
                                                   d_dk_acc, d_dv_acc, rq, rkv);
+    else if (D == 256)
+      quantize_zero_warp_kernel<8><<<grid, 128>>>(d_q_f, d_k_f, d_v_f, d_do_f, d_q8, d_k8, d_v8,
+                                                  d_do8, d_qs, d_ks, d_vs, d_dos, d_dq_acc,
+                                                  d_dk_acc, d_dv_acc, rq, rkv);
     else
       quantize_zero_warp_kernel<16><<<grid, 128>>>(d_q_f, d_k_f, d_v_f, d_do_f, d_q8, d_k8, d_v8,
                                                    d_do8, d_qs, d_ks, d_vs, d_dos, d_dq_acc,
@@ -1811,6 +1824,10 @@ int main(int argc, char** argv) {
     const int grid = (int)std::min<long long>((total + 3) / 4, 1048576);
     if (D == 128)
       quantize_zero_delta_warp_kernel<4><<<grid, 128>>>(
+          d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
+          d_dos, d_dq_acc, d_dk_acc, d_dv_acc, rq, rkv);
+    else if (D == 256)
+      quantize_zero_delta_warp_kernel<8><<<grid, 128>>>(
           d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
           d_dos, d_dq_acc, d_dk_acc, d_dv_acc, rq, rkv);
     else
@@ -2021,6 +2038,22 @@ int main(int argc, char** argv) {
         else
           delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
       }
+    } else if (D == 256) {
+      // O76（第 171 轮）：head_dim=256 的 LSE。走 O11 的镜像配对 mma 版（causal）/ 均衡
+      //   FULL 版（非 causal），即 D=128 在非 wgmma/TMA 下的同一套几何——`lse_mma_kernel_bal`
+      //   对 HD 是模板参数（D=512 已验证），HD=256 直接复用；不做 4D-TMA（只服务 128/512）。
+      if (causal)
+        launch_lse_bal<256, 1>(lg_bal, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, nullptr,
+                               d_lse_part, lse_split_eff);
+      else
+        launch_lse_bal<256, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, S, H, Hkv, scale, nullptr,
+                                     nullptr, 1);
+      if (do_delta) {
+        if (delta_warp_sel)
+          delta_warp_kernel<256><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+        else
+          delta_kernel<256><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+      }
     } else {
       // O39：D=512（MLA）causal LSE 也用 K 维 split（此前只有 D=128/TMA 有）。
       // O59：定长 causal MLA 默认走 O58 的 cfg6（PIPE1/LBN16，4 CTA/SM）；`--lseocc=4` 退回旧默认。
@@ -2100,6 +2133,15 @@ int main(int argc, char** argv) {
 #undef GO2
   };
   auto run_main = [&]() {
+    // O76（第 171 轮）：head_dim=256 走 mma 主 kernel（无 fp8 wgmma——它只做 HD=128；
+    //   无 4D-TMA）。HD/NTW=2 ⇒ 不启用寄存器 dQ 累加（kRegDq 由 device 自动关）。
+    //   与 D=512（MLA）同款 4-warp/128 线程几何；数值路径与其它 HD 逐字同源。
+    if (D == 256) {
+      launch_bwd_main<256, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
+                                          d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                          scale, (int)causal, ksplit);
+      return;
+    }
     if (D == 128 && wg2wgmma) {
 #ifdef FA_WGMMA
       launch_bwd_wgmma2<128>(mg2, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
@@ -3590,10 +3632,13 @@ int main(int argc, char** argv) {
         if (warp) {
           if (D == 128)
             delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+          else if (D == 256)
+            delta_warp_kernel<256><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
           else
             delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
         } else {
           if (D == 128) delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+          else if (D == 256) delta_kernel<256><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
           else delta_kernel<512><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
         }
       }
@@ -3606,11 +3651,14 @@ int main(int argc, char** argv) {
     bench_delta(false, &do_ms);
     bench_delta(true, &dw_ms);
     if (D == 128) delta_kernel<128><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
+    else if (D == 256) delta_kernel<256><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
     else delta_kernel<512><<<pg, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, S, H);
     std::vector<float> d_old(rows_q);
     CUDA_CHECK(cudaMemcpy(d_old.data(), d_delta, rows_q * 4, cudaMemcpyDeviceToHost));
     if (D == 128)
       delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+    else if (D == 256)
+      delta_warp_kernel<256><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
     else
       delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
     std::vector<float> d_new(rows_q);

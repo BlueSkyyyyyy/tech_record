@@ -286,6 +286,11 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
 > （`harness/fa_bwd_run.py` 的 `FP8_HOPPER_DEFAULT`）。SASS 为 **QGMMA 8 + HMMA 96 + LDSM 46
 > + UTMA 7**；GEMM3/4/5 因 fp8 `wgmma` 无转置操作数仍 `mma.sync`（见 ROADMAP「阻塞」）。
 > 详见 `docs/03` §67。
+>
+> **更新（第一百七十一轮，O76）**：fp8 反向的 **`head_dim` 覆盖补到 256**（此前仅 128/512）——
+> 主 kernel 只要求 `HD%128==0`、LSE/delta/quant 全是 `HD`/`VPT` 模板 ⇒ **纯 host dispatch**
+> 即可（`Fp8Cfg<256,64,32>`、`quantize_*<8>`、`lse_mma_kernel_bal<256>`、`launch_bwd_main<256,...>`）。
+> 256 走 **mma（非 wgmma/TMA）** 主 kernel，与 `D=128` 的 mma 档同源。见 `docs/03` §99。
 
 ---
 

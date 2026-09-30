@@ -3040,12 +3040,48 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
        数值与 mma 版**打印逐位相同**、`--ci` 三 dtype gate 全 OK、`--check docs/04` OK。
        **至此三 dtype × MLA 的 causal LSE 也统一到 4D-TMA。** 见 `docs/01` §25、`docs/01b` §6bb、
        `docs/04` §47、`docs/08` §5.84；原始输出 `src/{fp16,bf16}/fa_bwd_*_o74_*`。
+- [x] **O76**（第一百七十一轮，**能力覆盖**）**新增 `head_dim=256` 支持（fp8）**——补齐
+      `D=128` 与 `D=512` 之间缺失的 256（FA/TE 反向都支持到 256）。**纯 host dispatch + 一个
+      `VPT=8` 量化实例，device 通用代码一行未改**（单/两文件逐字同步）：放形状守卫、加
+      `Fp8Cfg<256,64,32>` smem 档、`quantize_*_warp_kernel<8>`（`VPT=D/32`）、
+      `lse_mma_kernel_bal<256,1>`（causal）/`<256,1,true>`（full）、
+      `launch_bwd_main<256,64,32,false>`（mma，4-warp；fp8 wgmma↑128、TMA↑128/512）。**数值**：
+      causal MHA `(1,1024,8,256)` 2.630/2.795/3.589e-1、`(1,2048,8,256)` 2.220/2.835/3.584e-1、
+      GQA kv4 2.477/4.455/6.157e-1、full 4.972/5.571/4.092e-2（与 `D=128` fp8 噪声同量级）；
+      单/两文件一致性 worst **2.384e-6 OK**、全量 `--ci` 77 case 三 dtype 全绿、
+      `--check docs/04` OK（198 行）。**性能**：main-only 29.7 TF（S1024H8，峰值 1.50%）/
+      34.3 TF（S2048H8，1.73%）——FA/TE fp8 不支持 256，同 shape fp16 参照 TE 216.3/320.1 TF。
+      **ncu**：主 kernel 254 regs / 117.76KB smem / Block Limit Shared Mem 1（**1 CTA/SM**、
+      occ 6.25%）/ No Eligible 78.87% / Compute 15.97% / L2 41.41% / DRAM 3.53% ⇒
+      **低 occupancy + 延迟受限**（同 MLA `D=512`）。见 `docs/03` §99、`docs/08` §5.85；
+      原始输出 `src/fp8/fa_bwd_fp8_o76_d256_*`、`src/fa_bwd_o76_d256_baseline_fp16bf16.out.txt`。
 > 每步：`harness/fa_vs_te_bwd_only.py`（纯反向三列）+ 同 session TE FP8 基准验收；数值不符即回退；
 > 更新 `docs/03`（fp8 实现）/`docs/04`（汇总）/`docs/08`（调优历程）。
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百七十轮）**：**F15/O75——MLA（`head_dim=512`）causal LSE 上 4D-TMA：fp16/bf16
+> **最新（第一百七十一轮）**：**O76——新增 `head_dim=256` 支持（fp8）：能力覆盖**。补齐
+> `D=128` 与 `D=512` 之间缺失的 256（FA/TE 的反向都支持到 256）。主 kernel 对 `HD` 本就只要求
+> `HD%128==0`（`HD/NTW=2` 时 `kRegDq` 自动关、与 MLA 同），LSE/delta/quant 也全是 `HD`/`VPT`
+> 模板 ⇒ **纯 host dispatch + 一个 `VPT=8` 量化实例，device 通用代码一行未改**（单/两文件逐字
+> 同步）：放形状守卫、加 `Fp8Cfg<256,64,32>` smem 档、`quantize_*_warp_kernel<8>`、
+> `lse_mma_kernel_bal<256,1>`（causal）/`<256,1,true>`（full）、`launch_bwd_main<256,64,32,false>`
+> （mma，4-warp；fp8 wgmma 只做 128、TMA 只做 128/512）。**数值**：causal MHA `(1,1024,8,256)`
+> 2.630/2.795/3.589e-1、`(1,2048,8,256)` 2.220/2.835/3.584e-1、GQA kv4 2.477/4.455/6.157e-1、
+> full `(1,1024,8,256)` 4.972/5.571/4.092e-2（与 `D=128` fp8 噪声同量级）；单/两文件一致性 worst
+> **2.384e-6 OK**、全量 `--ci` 77 case 三 dtype 全绿、`--check docs/04` OK（198 行）。**性能**：
+> main-only `(1,1024,8,256)` **29.7 TF（1.50%）**、`(1,2048,8,256)` **34.3 TF（1.73%）**
+> （FA/TE fp8 不支持 256；同 shape fp16 参照 TE 216.3/320.1 TF、FA2 168.5/228.0 TF）。
+> **ncu**：254 regs / 117.76KB smem / **1 CTA/SM（occ 6.25%）** / No Eligible 78.87% /
+> Compute 15.97% / L2 41.41% / DRAM 3.53% ⇒ **低 occupancy + 延迟受限**（同 MLA `D=512`）。见
+> `docs/03` §99、`docs/08` §5.85；原始输出 `src/fp8/fa_bwd_fp8_o76_d256_*`、
+> `src/fa_bwd_o76_d256_baseline_fp16bf16.out.txt`。
+> **下一步候选**：① **把 `D=256` dtype 化到 fp16/bf16**（其 `*_mma_main.cu` 的 `D==128/512`
+> 分派面 ~80–90 处，需为 256 选 `BM/BN/几何`；工作量大于 fp8，留 backlog）；② `D=256` 的 fp8 main
+> 接 wgmma/TMA（受 fp8 wgmma 只做 `HD=128`、SW128 atom 的 `HD` 约束锁死，见「阻塞」）；③ main 的
+> L2 `red` 墙（F7 全判死、F6 不可行，受本卡寄存器/smem 硬墙锁定，见「阻塞」）。
+>
+> **（第一百七十轮）**：**F15/O75——MLA（`head_dim=512`）causal LSE 上 4D-TMA：fp16/bf16
 > 泛化，正结果，默认**。落实 F14/O74 的「dtype 化」：把 fp8 的 `NCH=HD/128` 逐字搬到 fp16/bf16
 > （box 内维 128B=64 个 fp16/bf16 ⇒ `NCH=HD/64`，`HD=512` 用 **8 个 K=64 chunk**），`NCH==2`（HD=128）
 > 走原 `wgmma_qkt64_tma` ⇒ **HD=128 逐位不变**；新增 `wgmma_qkt64_tma_chunked`。host `lse_tma` 默认
@@ -7125,3 +7161,9 @@ dQ 累加/dK/dV 归约、causal 特化），**但计算后端与性能工程没�
     fp32→fp16 + O62 扇区化，覆盖定长/MLA/varlen）；归约读取的向量化也已完成（第 137 轮 F4-c：
     reduce 421→370µs、DRAM 78%→92.5%）。**
 - fp8：对比「只量化 dO」vs「dO 和 P 都量化」的精度/性能权衡。
+- **[ ] fp16/bf16 的 `head_dim=256`（O76 的 dtype 泛化，留 backlog）**：fp8 已于 **O76** 支持
+  `D=256`（host-only、device 未改）；fp16/bf16 的 `fa_bwd_{fp16,bf16}_mma_main.cu` 有 ~80–90 处
+  `D==128/512` 的 wg2/wgmma4/cluster 分派，需为 256 选 `BM/BN/几何`（或复用一个通用 mma 分支），
+  工作量明显大于 fp8。**注意**：`harness/fa_bwd_bench.py` 的 `REQUESTED_SHAPES` 暂不含 256，
+  否则 `dump --requested` 会给 fp16/bf16 也产出 D=256 case 让 CI 报「不支持 256」；用
+  `HD256_FP8_SHAPES` 的显式命令 dump（见该文件注释）。

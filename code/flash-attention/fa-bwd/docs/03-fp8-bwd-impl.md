@@ -8803,3 +8803,126 @@ host `lse_tma` 默认 `(D==512&&causal)?1:0`、causal 优先 `lse_mma_kernel_bal
 1.17× / S512H4 1.04× / S1024H2 1.07×，数值逐位相同、`--ci` 全绿**。见 `docs/01` §25、`docs/01b`
 §6bb。**至此三 dtype × MLA 的 causal LSE 也统一到 4D-TMA**；
 ② main 的 L2 `red` 墙（F7 全判死、F6 不可行，受本卡寄存器/smem 硬墙锁定，见「阻塞」）。
+
+## 99. O76（第一百七十一轮）：新增 **head_dim=256** 支持（fp8）—— 补齐 128/512 之间的形状
+
+### 99.1 动机
+
+此前 fa-bwd 的 fp8 反向只支持 `head_dim ∈ {128（MHA/GQA）, 512（MLA）}`（host 显式
+`if (D != 128 && D != 512) 报错`）。但 **FA/TE 的反向都支持到 `head_dim=256`**（`docs/00` §4.1、
+`docs/06`），256 是介于二者之间的一个标准档位（部分模型用 192/256）。本轮把 **fp8 的定长反向
+扩到 `D=256`**，是 ROADMAP「换形状/维度覆盖」这一唯一还能产出的正结果方向的第一步。
+
+为什么 fp8 的 `D=256` 可以「几乎零 device 改动」拿到：
+- 主 kernel `fp8_mma_body`（`fa_bwd_fp8_mma_kernel<HD,...>`）对 `HD` 本就有模板化约束
+  `HD % NTW == 0`（`NTW = WN*64 = 128`）⇒ **256 合法**；`HD/NTW = 2 ≠ 1` 时 `kRegDq` 自动关
+  （与 `HD=512` 同），GEMM3/4/5 的 N 维自动分 2 遍。
+- LSE 的 `lse_mma_kernel_bal<HD,...>`（D=512 在用的镜像配对/均衡 FULL 版）对 `HD` 是模板参数，
+  256 直接复用。
+- `delta_warp_kernel<HD>`、`quantize_*_warp_kernel<VPT>` 只需 `HD%4==0`、`VPT=D/32`（256→**8**）。
+
+所以本轮是 **纯 host dispatch + 一个 VPT=8 实例**；device 的通用代码一行未改（单/两文件共用）。
+
+### 99.2 实现（host，单/两文件逐字同步）
+
+`src/fp8/fa_bwd_fp8_main.cu` 与 `src/fp8/fa_bwd_fp8_mma_onefile.cu` 各改 7 处、逐字相同：
+
+1. 形状守卫：`D != 128 && D != 512` → 允许 **256**（报错信息同步）。
+2. smem 选择：`Fp8Cfg<256,64,32>::smem_bytes` / `::lse_smem_bytes`（新增一档）。
+3. `quant_new` / `quant_zero` / `quant_zero_delta`：`VPT=D/32`，256 走 **`<8>`** 实例
+   （`quantize_row_warp_kernel<8,false/true>`、`quantize_zero[_delta]_warp_kernel<8>`）。
+4. `run_preprocess` 新增 `else if (D==256)`：causal 走 `launch_lse_bal<256,1>`（镜像配对 + K 维
+   split）、full 走 `launch_lse_bal<256,1,true>`（均衡 FULL）；再跑 `delta_warp_kernel<256>`。
+   **不做 4D-TMA**（只有 128/512 有 TMA 版）。
+5. `run_main` 顶部新增 `if (D==256)`：`launch_bwd_main<256,64,32,false>`（mma，4-warp/128 线程；
+   wgmma 只做 128、TMA 只做 128）。
+6. O26 A/B 诊断把 `else <512>` 拆成 `else if (D==256) <256> else <512>`（否则拿 512 的核去跑
+   256 的缓冲 → 越界读、打印 5e30）。
+7. `lse_tma` 默认仍是 `(D==128)?1:(D==512&&causal?1:0)`，256 自动 **0**（无 TMA）；Q/K 与主
+   kernel 的 TMA 描述符只在 `D==128/512` 构建，256 跳过。
+
+> fp16/bf16 的 `D=256` **本轮未做**（其 `*_mma_main.cu` 有 ~80–90 处 `D==128/512` 的
+> wg2/wgmma4/cluster 分派，改动面大得多），留 backlog。故 `dump --requested` 不纳入 256
+> （见 `harness/fa_bwd_bench.py` 的 `HD256_FP8_SHAPES` 注释）。
+
+### 99.3 数值（ours vs fp32 ref，max_abs dq/dk/dv；单/两文件经 `fa_bwd_run.py` gate）
+
+| shape (B,S,H,D;Hkv) | 模式 | ours（两文件） | ours_sf（单文件） |
+|---|---|---|---|
+| (1,1024,8,256) MHA | causal | 2.630e-1 / 2.795e-1 / 3.589e-1 | 同（逐指标一致） |
+| (1,2048,8,256) MHA | causal | 2.220e-1 / 2.835e-1 / 3.584e-1 | 同 |
+| (1,1024,16,256) Hkv=4 | causal | 2.477e-1 / 4.455e-1 / 6.157e-1 | 同 |
+| (1,1024,8,256) MHA | full | 4.972e-2 / 5.571e-2 / 4.092e-2 | 同 |
+
+与 `D=128` 的 fp8 噪声同量级（2–4e-1 causal、~5e-2 full）；GQA 的 `dk/dv` 略大（每个 KV 头承载
+`H/Hkv=4` 个 Q 头的梯度，符合 `docs/06` §4.1 规律）。**FP8 的两半 `d[0..127]` / `d[128..255]` 误差
+量级相同**（无「只算了一半」的 N-tile bug）。**单/两文件一致性**（`our vs ours_sf`）4 个 shape 的
+worst = **2.384e-6**（fp8 gate tol 1e-4，**OK**）；全量 `--ci` 77 case 三 dtype gate 全绿
+（fp16 1.953e-3 / bf16 7.812e-3 / fp8 5.722e-6）、`--check docs/04` OK（198 行）。
+
+### 99.4 性能（CUDA event，iters 见原始输出；fp8 bwd FLOPs = `4BS2HD`）
+
+| shape | total | main | main-only TFLOPS | 占 FP8 峰值 1978.8 |
+|---|---|---|---|---|
+| (1,1024,8,256) causal | 0.364 ms / 23.6 TF | 0.289 ms | **29.7 TF** | 1.50% |
+| (1,2048,8,256) causal | 1.129 ms / 30.4 TF | 1.001 ms | **34.3 TF** | 1.73% |
+| (1,1024,16,256) kv=4 causal | 0.664 ms / 25.9 TF | 0.555 ms | 30.9 TF | 1.56% |
+| (1,1024,8,256) full | 0.558 ms / 15.4 TF | 0.449 ms | 19.1 TF | 0.97% |
+
+对标（`harness/fa_bwd_bench.py bench`，纯反向 CUPTI；**FA/TE 的 fp8 反向不支持 256**，故给
+同 shape 的 fp16/bf16 三列做量级参照）：
+
+| shape | FA2.7.4 (fp16) | TE2.14 (fp16) | FA3 | ours fp8 main-only |
+|---|---|---|---|---|
+| (1,1024,8,256) causal | 168.5 TF | 216.3 TF | NA（本机只编 HDIM128） | 29.7 TF |
+| (1,2048,8,256) causal | 228.0 TF | 320.1 TF | NA | 34.3 TF |
+
+⇒ ours fp8 `D=256` 的 main 约为 TE fp16 的 **14%（S1024）/11%（S1024 之外）**——因为 fp8 的
+`D=256` 走的是 **非 wgmma 的 mma.m16n8k32 路径 + 无 TMA**（`D=128` 才默认 wgmma+TMA），与
+`D=128` 的 mma 档同源；差距量级与 `D=128`「ours mma vs TE」一致。
+
+### 99.5 ncu（`(1,1024,8,256)` causal，主 kernel `regex:fa_bwd_fp8_mma_kernel`，`-c 1`）
+
+| Duration | Registers | Dyn smem | Block Limit Shared Mem | Achieved Occ | Waves/SM |
+|---|---|---|---|---|---|
+| 327.2 µs | **254** | 117.76 KB | **1** | 6.25% | 3.88 |
+
+| Compute | Memory | L2 | DRAM | L1/TEX | No Eligible | shared-store bank conflict |
+|---|---|---|---|---|---|---|
+| 15.97% | 40.85% | 41.41% | 3.53% | 30.82% | 78.87% | 1.6-way（26% 多余 wavefront） |
+
+**bound = 低 occupancy + 延迟/并行度受限**，与 `D=512`（MLA）同类：`HD` 翻倍使 GEMM3/4/5 的
+N 维分 2 遍，**寄存器顶到 254**（`Fp8Cfg` 的 fp32 累加器/P·S 缓冲随 `HD` 增大），加上 117.76KB
+动态 smem（`ASLD=HD+16`、`Qp/dOp` 随 `HD` 增大）把 **Block Limit Shared Mem 锁到 1 CTA/SM**、
+achieved occ 6.25%；`No Eligible 78.87%` 说明发射口大量空等。L2 仅 41%、DRAM 3.5%、Compute 16%
+⇒ **不是带宽/算力 bound**。下一步若要提`D=256` 的性能，需（与 MLA 相同）降 smem 冲 2 CTA/SM、
+或把 `D=256` 也接到 wgmma/TMA 快路（需先破 fp8 wgmma 只做 `HD=128` / SW128 atom 的 `HD` 约束）。
+
+### 99.6 复现 / 原始输出
+
+```bash
+# dump（仅 fp8；FA3 本机只编 HDIM128、TE fp8 不支持 256）
+python harness/fa_bwd_bench.py dump --dtype fp8 \
+  --shape '1 1024 8 256 causal' --shape '1 2048 8 256 causal' \
+  --shape '1 1024 16 256 kv=4 causal' --shape '1 1024 8 256 full'
+# 默认（Hopper 构建；D=256 在 host 内自动退回 mma 主 kernel）
+python harness/fa_bwd_run.py --dtype fp8 --glob '*d256*' --iters 20
+# 单/两文件原始运行输出
+scripts/run.sh src/fp8/fa_bwd_fp8_main.cu        --dir=.../b1_s1024_h8_d256_causal_fp8 --o=ref_o
+scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --dir=.../b1_s1024_h8_d256_causal_fp8 --o=ref_o
+# ncu
+scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full \
+  --kernel-name regex:fa_bwd_fp8_mma_kernel --launch-count 1 \
+  -- --dir=.../b1_s1024_h8_d256_causal_fp8 --o=ref_o --iters=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o76_d256_{s1024_h8_causal,s2048_h8_causal,s1024_h16_kv4_causal,
+s1024_h8_full}_{twofile,onefile}.out.txt`、`src/fp8/fa_bwd_fp8_o76_ncu_d256_main_s1024.out.txt`、
+`src/fa_bwd_o76_d256_baseline_fp16bf16.out.txt`。
+
+### 99.7 下一步
+
+① **把 `D=256` dtype 化到 fp16/bf16**（其 `*_mma_main.cu` 的 `D==128/512` 分派面较大：需为 256
+选 `BM/BN/几何`，或复用一个通用 mma 分支）；② `D=256` 的 fp8 main 接 wgmma/TMA（受 fp8
+wgmma `HD=128` 与 SW128 atom 约束，见「阻塞」）；③ main 的 L2 `red` 墙（F7 全判死、F6 不可行，
+受本卡寄存器/smem 硬墙锁定，见「阻塞」）。
