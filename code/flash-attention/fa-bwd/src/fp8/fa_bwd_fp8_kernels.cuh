@@ -3645,6 +3645,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 
       // ---- (5) dQ += scale·dS·K : A=dS2[m][j] (e5m2), B=Kp[j/2][d0+..] (e4m3, ldmatrix.trans) ----
       if constexpr (kWg5) {
+#ifdef FA_WGMMA
         // O81（F3b）：GEMM5 走 wgmma RS —— A=dS2 经 `ldmatrix.x4` 装入寄存器，
         //   B=Kᵀ（INTERLEAVE K-major，no-swizzle 描述符）从 Kp 缓冲（已由
         //   `transpose_sw128_to_inter` 从 SW128 的 K stage 重建）。m64n32k32 ×4（HD/32）。
@@ -3675,6 +3676,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
               const int r = wid * 16 + g + (q >= 2 ? 8 : 0);
               dqacc5[nn][j][q] += acc5[nn][j * 4 + q] * sds2[r] * scale;
             }
+#endif
       } else {
       {
         float acc[MTM5][NTM5][4];

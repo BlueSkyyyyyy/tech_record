@@ -7339,6 +7339,11 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       `src/fp8/fa_bwd_fp8_o81_ab_wgmma5_{0,1}_s4096.out.txt`、
       `src/fp8/fa_bwd_fp8_o81_ncu_wgmma5_{0,1}_s4096.out.txt`、`src/fp8/fa_bwd_fp8_o81_ci_fp8.out.txt`、
       `src/fp8/fa_bwd_fp8_o81_baseline_fa3_te.out.txt`。
+    - **顺带修复**：fp8 `fa_bwd_fp8_main.cu` 的**非 TMA（`sm_90`/`--mma`）构建自 O77/O78 起编译不过**
+      （`g_l2promo` 定义在 `#if defined(FA_WGMMA) && defined(FA_TMA)` 守卫内、却在守卫外被引用；
+      O78 overlap 块也未加守卫）。把 `g_l2promo` 定义移到守卫外、给 overlap 块加守卫后，
+      默认 `scripts/run.sh`（`ARCH=sm_90`，mma 路径）现可编译、S512 数值与历史一致
+      （2.426e-1/2.975e-1/3.735e-1）。默认 Hopper 路径逐位不变、`--ci --dtype fp8 --hopper` 仍全绿。
 
 ## 灵感 / backlog
 

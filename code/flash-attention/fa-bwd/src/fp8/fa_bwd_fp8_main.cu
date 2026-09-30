@@ -41,17 +41,16 @@ static int g_lse_full_opt = 1;
 // 第 166 轮 O72：varlen full D=128 的 LSE 是否走 4D-TMA（对齐定长 O70）。默认 1；`--lsetmavarlen=0`
 //   退回 O68 的 cp.async 均衡版做同 binary A/B。需要 `-DFA_WGMMA -DFA_TMA` 构建（否则恒 0）。
 static int g_lse_tma_varlen = 1;
+// F6-③（O77）：4D-TMA 描述符的 L2 promotion 档位（0=NONE/1=L2_128B/2=L2_256B）。
+// 定义在 `FA_TMA` 守卫外，好让非 TMA（sm_90/mma）构建也能编译（值不被使用）。
+static int g_l2promo = 0;
 
 #if defined(FA_WGMMA) && defined(FA_TMA)
 // O32：为 LSE 的 Q/K 建 4D TMA 描述符（dims={D,S,H,B}，SW128，box={128,64,1,1}）。
 // fp8 一行 = 128 字节 = SW128 atom 整行 ⇒ 一个 box 覆盖整个 head_dim（不像 fp16 需 2 chunk）。
 // dtype 用 UINT8（CUDA 13 驱动枚举无 FLOAT8_E4M3）。globalStride（字节）：dim1(S) 行距 = H*D，
 // dim2(H) 头距 = D，dim3(B) 批距 = S*H*D（元素即字节）。要求 16B 对齐（D=128 恒成立）。
-// F6-③（O77）：Q/dO/K/V 的 4D-TMA 描述符的 L2 promotion 档位。0=NONE（历史默认）、
-//   1=L2_128B、2=L2_256B。`--l2promo=N` 强制，用于同 binary A/B「TMA cache hint 能否降低
-//   跨 ksplit part 的 Q/dO 重读」。默认 0 ⇒ 描述符与历史逐字节相同。
-static int g_l2promo = 0;
-
+// F6-③（O77）：Q/dO/K/V 的 4D-TMA 描述符的 L2 promotion 档位（见上，定义在守卫外）。
 static CUtensorMap make_lse_map_fp8(const void* ptr, long long H, long long S, long long D,
                                     long long B, uint32_t boxR = 64) {
   CUtensorMap map;
@@ -2367,6 +2366,7 @@ int main(int argc, char** argv) {
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
     }
     if (ovlp_path) {
+#if defined(FA_WGMMA) && defined(FA_TMA)
       // O78：按 head 分块，LSE(sA) 与 main(sB) 流水。quant（含 delta/清零）已在 default stream
       //   整体完成，两条 stream 先等 `ov_eQ`。
       CUDA_CHECK(cudaEventRecord(ov_eQ));
@@ -2402,6 +2402,7 @@ int main(int argc, char** argv) {
       if (cvt_on)
         convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
                                                     d_dv, nq, nkv);
+#endif
       return;
     }
     // O66：delta 已在 quant 阶段算好时，preprocess 跳过独立 delta launch。
