@@ -1826,3 +1826,21 @@ smem 冲突 + 低 occ
   `D=256` 仍未上 4D-TMA（留 backlog）。详见 `docs/03` §107；原始输出
   `src/fp8/fa_bwd_fp8_o84_d256_wgmma_ab.out.txt`、`..._o84_ncu_d256_s1024.out.txt`、
   `..._o84_d256_onefile.out.txt`。
+
+### 5.94 第 180 轮（O85）：fp8 `head_dim=256` 的 Q/dO 切 **4D-TMA（chunk-major）**（中性，默认关）
+
+- **一句话**：落实 O84 的「D=256 Q/dO 上 4D-TMA」。因 TMA 一个 SW128 box 只能搬 128 列，
+  `D=256` 要 2 个 box ⇒ smem 物理布局变 **chunk-major `[k/128][row/8][8][128]`**（与 LSE
+  一致），主 kernel 新增 `sw128c_off_fp8`/`sw128c_k32_addr`/`wgmma_mn32_issue_cm`（A 走
+  chunk-major、B 仍 rg-major；`D=128` NCH=1 时逐位相同）。**结论：同 binary A/B 净中性**
+  （S1024 +1.3–1.7%、S1024 full +1.3%、S2048 −1.1%、GQA −3.7%；ncu 隔离 Duration 245.5
+  vs 255.6µs=1.041×、指令 −3.2%）⇒ **默认关**（`--d256tma=1` opt-in）。
+- **关键坑**：`smem_bytes_wgmma_tma = smem_bytes_wgmma + 64` 的 64B 对 `D=128` 无害，但对
+  `D=256` 把 launched smem 115,712→115,776B、allocated 116.74→116.86KB，**2 CTA/SM 直接掉到
+  1**（ncu `occupancy_limit_shared_mem=1`），首版慢 9–17%；改成 `HD>128 ? 0 : 64` 后恢复。
+- **数值**：chunk-major 只改 smem 布局/搬运，不变量化口径 ⇒ relL2 vs ref 与 O84 **逐位相同**
+  （dq/dk/dv 8.332%/8.435%/6.464%），tma1-vs-tma0 max_abs ~1e-7（atomic 次序）。
+- **保留价值**：chunk-major SW128 基建可复用于后续 `D>128` 的 K/V TMA 或 MLA；要让 D=256 TMA
+  转正需把 K/V 也 TMA 化并与 cp.async 重叠（K 双缓冲顶穿 116KB，backlog）。
+- 见 `docs/03` §108；原始输出 `src/fp8/fa_bwd_fp8_o85_d256_ab.out.txt`、
+  `..._o85_ncu_d256_s1024.out.txt`、`..._o85_accuracy_d256.out.txt`。

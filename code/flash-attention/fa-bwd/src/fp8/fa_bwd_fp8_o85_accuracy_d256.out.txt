@@ -1,0 +1,16 @@
+O85 fp8 D=256 accuracy: chunk-major Q/dO TMA (--d256tma=1) vs cp.async wgmma (--d256tma=0)
+case b1_s1024_h8_d256_causal_fp8; relL2 = ||a-b||/||b|| vs fp32 ref
+date: 2026-09-30T11:25:15Z
+== o85t1
+  dq vs ref relL2=8.332% max_abs=2.633e-01
+  dk vs ref relL2=8.435% max_abs=2.797e-01
+  dv vs ref relL2=6.464% max_abs=3.572e-01
+== o85t0
+  dq vs ref relL2=8.332% max_abs=2.633e-01
+  dk vs ref relL2=8.435% max_abs=2.797e-01
+  dv vs ref relL2=6.464% max_abs=3.572e-01
+== ours_hp
+  dq vs ref relL2=8.334% max_abs=2.630e-01
+  dk vs ref relL2=8.435% max_abs=2.795e-01
+  dv vs ref relL2=6.463% max_abs=3.589e-01
+tma1 vs tma0 max_abs: {'dq': 1.1920928955078125e-07, 'dk': 4.76837158203125e-07, 'dv': 7.152557373046875e-07}

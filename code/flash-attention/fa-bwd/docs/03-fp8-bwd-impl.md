@@ -9502,3 +9502,81 @@ mma 结果同量级（causal 2.630/2.795/3.589e-1、full 4.972/5.571/4.092e-2、
 **原始输出**：`src/fp8/fa_bwd_fp8_o84_d256_wgmma_ab.out.txt`（4 case × wgmma/mma A/B）、
 `src/fp8/fa_bwd_fp8_o84_ncu_d256_s1024.out.txt`（ncu + SASS 直方图）、
 `src/fp8/fa_bwd_fp8_o84_d256_onefile.out.txt`（单文件版）。
+
+## 108. O85（第一百八十轮）：fp8 `head_dim=256` 的 Q/dO 切 **4D-TMA**（chunk-major）—— **中性（±2%），默认关（opt-in）**
+
+> 落实 O84 的「下一步候选 ①」：把 `D=256` 的 Q/dO 也接 4D-TMA，继续减 L1/LDSM 指令与
+> 搬运延迟。**结论：A/B 中性偏负 ⇒ 默认关**（`--d256tma=1` opt-in），O84 的 cp.async
+> wgmma 档仍是 `D=256` 默认。
+
+### 108.1 动机与难点：`D>128` 的 TMA 布局与主 kernel 的 SW128 不一致
+
+- `D=128` 时 fp8 一行 = 128B = 一个 SW128 atom 的整行 ⇒ **一个 4D-TMA box 搬完整块**，
+  物理布局就是主 kernel `sw128_off_fp8` 的 `[row/8][8][128]`（rg-major），O37 直接生效。
+- `D=256` 时一行 256B、TMA 的 SW128 box 内维固定 128B ⇒ 需要 **2 个 box**，各写一块
+  canonical `[BM][128]` 到 `Qs + c*CHUNK`（`CHUNK=(BM/8)*1024`）。于是物理布局变成
+  **chunk-major `[k/128][row/8][8][128]`**，与主 kernel 的 rg-major 不同（LSE 的
+  `wgmma_qkt64_fp8_chunked` 早就走 chunk-major，主 kernel 一直没做）。
+- 本步新增两个纯整数 helper：`sw128c_off_fp8(row,k,nrows)`（chunk-major 偏移）与
+  `sw128c_k32_addr(base,s,nrows)`（跨 chunk 的 k32 起始地址，chunk stride `(nrows/8)*1024`），
+  以及 `wgmma_mn32_issue_cm<KIND,AROWS>`（**A 走 chunk-major、B 仍 rg-major**）——
+  `D=128`（NCH=1）与旧 `wgmma_mn32_issue` **逐位相同**。
+
+### 108.2 实现（仅 `HD>128` 生效；`D=128`/其它路径一行未改）
+
+- **device**（单/两文件 device 逐字一致，`sync_onefile_device.py` `identical: True`）：
+  - `fp8_mma_body` 的 TMA Q/dO 载入改成 `for (c<NCH_Q) tma_load_4d(Qs+c*CHQ, qmap, c*128, ...)`
+    （同一 mbarrier、expect 总量 `QS_SZ`）；
+  - Qp/dOp 重建读源用 `sw128c_off_fp8`（`kQChunk = TMA && HD>128`）；
+  - GEMM1/2 在 `kQChunk` 时走 `wgmma_mn32_issue_cm`；
+  - `fa_bwd_fp8_mma_qdtma_kernel` 的 `__launch_bounds__` 对 `HD=256` 放开到 2 CTA/SM。
+- **关键坑（smem 64B）**：`smem_bytes_wgmma_tma` 原为 `smem_bytes_wgmma + 64`（放 qbar/dbar）。
+  但这 64B 其实落在 `smem_bytes_wgmma` 的 1024B 对齐 slack 里；对 `HD=256` 多这 64B 会把
+  launched smem 从 115,712→115,776B、**allocated 从 116.74→116.86 KB，直接把 2 CTA/SM 挤成
+  1 CTA/SM**（ncu `occupancy_limit_shared_mem=1`、warps_active 11.7%→6.25%）⇒ 首版慢 **~9–17%**。
+  改成 `HD>128 ? 0 : 64` 后恢复 2 CTA/SM。
+- **host**（两文件 + 单文件同源）：`D==256` 也建 Q/dO 描述符（`make_lse_map_fp8(d_q8,H,S,D,B)`），
+  新增 CLI `--d256tma=1` 与同 binary A/B；`D==256 && wgmma && d256_tma` 分派到
+  `launch_bwd_main_qdtma<256,64,32,false>`。**默认关**。
+
+### 108.3 数值（护栏全过；chunk-major 不改变累加口径）
+
+`b1_s1024_h8_d256_causal_fp8`，relL2（`‖a−b‖/‖b‖`）vs fp32 ref：
+
+| 梯度 | tma=1 | tma=0（O84 档） | tma1-vs-tma0 max_abs |
+|---|---|---|---|
+| dq | **8.332%** | 8.332% | 1.19e-7 |
+| dk | **8.435%** | 8.435% | 4.77e-7 |
+| dv | **6.464%** | 6.464% | 7.15e-7 |
+
+max_abs 2.633e-1/2.797e-1/3.572e-1，与 O84 逐位一致；两档仅差跨 CTA atomic 次序（~1e-7）。
+
+### 108.4 性能（同 binary A/B / ncu；结论：中性）
+
+event（`[timing]`，两文件，同 binary 交替）：
+
+| case | main tma=1 / tma=0 | total tma=1 / tma=0 |
+|---|---|---|
+| S1024H8 causal | 0.2425–0.2442 / 0.2446–0.2460 ms | 0.3003–0.3032 / 0.3054–0.3066 ms（**+1.3–1.7%**） |
+| S1024H8 full | 0.2397–0.2428 / 0.2439–0.2466 ms | 0.3001–0.3045 / 0.3051–0.3077 ms（**+1.3%**） |
+| S2048H8 causal | 0.7742–0.7758 / 0.7626–0.7662 ms | 0.8992–0.9029 / 0.8884–0.8944 ms（**−1.1%**） |
+| GQA h16kv4 | 0.4662–0.4811 / 0.4552–0.4597 ms | 0.5650–0.5651 / 0.5430–0.5462 ms（**−3.7%**） |
+
+ncu（S1024H8 causal，单 kernel 隔离）：Duration **245.5 vs 255.6µs（1.041×）**、
+`smsp__inst_executed` **44.52M vs 46.01M（−3.2%）**、L1TEX 31.3 vs 30.5%、L2 55.2 vs 52.9%、
+regs 238、smem 115.71KB、**2 CTA/SM（两档相同）**。⇒ TMA 确实省了指令、隔离运行略快，
+但在真实 event 计时下 **小 shape 微正、大 shape/GQA 微负，净中性**（TMA 的 prologue
+barrier 等待与 K/V cp.async 未重叠，抵消了指令收益；`red`/工作划分一字未动）。
+
+### 108.5 判决与后续
+
+- `D=256` 的 Q/dO TMA **中性 ⇒ 默认关**；O84 的 cp.async wgmma 档仍是默认。代码保留为
+  opt-in（`-DFA_WGMMA -DFA_TMA` 构建 + `--d256tma=1`），供复用 chunk-major helper。
+- **保留的净收益**：`sw128c_*` / `wgmma_mn32_issue_cm` 是一套**可复用的 chunk-major SW128 基建**
+  （后续 K/V TMA for `D>128`、或 `D=128` 的 MLA 复用）。
+- **后续**：若要让 `D=256` TMA 转正，需把 K/V 也 TMA 化并让 TMA prologue 与 K/V cp.async 重叠
+  （当前 Q/dO TMA 等待在 K/V 之前，串行化）；但 K 双缓冲会顶穿 116KB/2-CTA 门槛，属 backlog。
+
+**原始输出**：`src/fp8/fa_bwd_fp8_o85_d256_ab.out.txt`（4 case × tma1/0 event 计时）、
+`src/fp8/fa_bwd_fp8_o85_ncu_d256_s1024.out.txt`（两档 ncu）、
+`src/fp8/fa_bwd_fp8_o85_accuracy_d256.out.txt`（relL2 / A/B 逐元素）。
