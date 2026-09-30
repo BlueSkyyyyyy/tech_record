@@ -175,6 +175,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 2. [数组与双指针](content/posts/leetcode-01-array/index.md)
 3. [哈希表](content/posts/leetcode-02-hash/index.md)
 4. [滑动窗口](content/posts/leetcode-03-sliding-window/index.md)
+5. [前缀和与差分](content/posts/leetcode-04-prefix-sum/index.md)
 
 配套代码：[code/leetcode/](code/leetcode/README.md)
 （各篇正文由 `docs/` 下的 Markdown 通过 `lc_include` shortcode 实时内联渲染）。

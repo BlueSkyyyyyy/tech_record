@@ -40,4 +40,5 @@ leetcode/
 
 见 [ROADMAP.md](ROADMAP.md) 的「任务清单」。当前：
 `array`（已完成 A-1 ~ A-3，共 13 题）、`hash`（已完成 B-1 ~ B-3，共 10 题）、
-`sliding-window`（已完成 C-1，基础 3 题），其余分类陆续补充。
+`sliding-window`（已完成 C-1 ~ C-3，共 10 题）、`prefix-sum`（已完成 D-1，基础 2 题 + 560 交叉），
+其余分类陆续补充。
