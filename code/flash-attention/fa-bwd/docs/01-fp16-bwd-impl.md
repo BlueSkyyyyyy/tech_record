@@ -5123,3 +5123,95 @@ docker exec kernel_lab .../fa_bwd_fp16_mma_main.out --dir=... --iters=50 --d256w
 原始输出：`src/fp16/fa_bwd_fp16_o131_d256_wgmma_ab.out.txt`（4 case × wgmma/mma）、
 `src/fp16/fa_bwd_fp16_o131_ncu_{wgmma,mma}_d256.out.txt`（ncu）；
 bf16 `src/bf16/fa_bwd_bf16_o131_d256_wgmma_ab.out.txt`。见 `docs/01b` §6be、`docs/08` §5.139。
+
+## 29. O132（第 226 轮，**能力覆盖，正结果**）：`head_dim=256` 反向扩到 **varlen**（fp16）
+
+### 29.1 动机：`D=256` 只做了定长，变长是 ROADMAP 明确的 `[ ]` 覆盖项
+
+O128/O131 把 fp16 的 `head_dim=256` 主 kernel 打通（定长：MHA/GQA × causal/full），但
+**变长（packed `[T,H,D]` + `cu_seqlens`）仍被 `run_varlen` 的形状守卫拒绝**
+（`if (D != 128 && D != 512)`）。fp8 的 `D=256` 变长早在 O108（causal）/O113（full）实装并
+单独标定 ksplit；fp16/bf16 是同一能力族里最后一块缺口（ROADMAP「下一批」候选 ⑤）。
+本轮把它补齐（本轮任务模板要求「只做 fp8 性能」，但 fp8 的性能杠杆已在 O116–O131 全部收口
+为「本卡无软件解」，故推进这一唯一明确开着的覆盖项，与 O128/O131 的处理一致）。
+
+### 29.2 改动（**纯 host dispatch/接线，device 一行未改**；单/两文件同步）
+
+`fa_bwd_fp16_mma_{main,onefile}.cu` 的 `run_varlen`：
+
+- 形状守卫 `D != 128 && D != 512` → `D != 128 && D != 256 && D != 512`；
+- LSE 新增 `D == 256` 分支（`cudaFuncSetAttribute`）：causal 走镜像配对
+  `lse_mma_kernel_bal<256,1>`、full 走均衡 FULL `lse_mma_kernel_bal<256,1,true>`；
+  LBM/LBN 不变、行距 `LD = 256+8 = 264`——**复用定长 D=256 的同一套模板，不做 4D-TMA**
+  （对齐 O128；fp8 的变长 D=256 LSE 也走该 mma 版）；
+- `main_bm`：`D==256` 取 **64**（通用 mma 几何），`mg.x = ceil(maxlen/64)·H·B`；
+- 主 kernel：`launch_bwd_mma<256,64,32,1,false,true>(mg, …, d_cu, ksplit=1)` =
+  O128 的 `fa_bwd_fp16_mma_kernel<256,64,32,1>`（**已带 `cu_seqlens` 入参**、`NDT=HD/128=2`
+  ⇒ dQ 在 GEMM5 里逐 ndt 全局 RMW）；
+- `run_all` 新增 `D == 256` 分支：LSE（causal/full，含 O40 的 K 维 split + 二次归约）
+  → `delta_warp_kernel<256>` → 主 kernel → `convert_kernel`；dQ 需 memset（`|| D == 256`）；
+- 顺带把 `VARLEN main backend` 打印修正为 `mma (HD=256, BM=64/BN=32)`。
+
+> **附带修复**：`fa_bwd_fp16_mma_onefile.cu` 此前**无法独立编译**（在 HEAD 上即如此）——
+> `sync_onefile_device.py` 早先用错 marker（`#ifndef FA_BWD_FP16_MMA_KERNELS_CUH_`）同步，
+> 导致 ① 头里的 `THREADS/WN` 与 include 被重复定义、② 文件守卫 `#endif` 丢失。本轮用正确
+> marker（`// ---- 编译期常量`）重新同步 device 区（`device region identical: True`），
+> 单文件恢复可编译。CI 的 `--ci --no-run` 不编译单文件，故此前未暴露。
+
+### 29.3 数值（`ours vs fp32 ref`，fp16 varlen；单/两文件逐位一致）
+
+6 个新 dump 的 `D=256` 变长 shape（3 causal + 3 full）。因果 shape 取 ROADMAP/fp8 同款
+`[512,1024,2048,256] h8 / [1024]×4 h8 / [2048,512,128,96,64,32,16,8] h8`；full 另有
+`[512,1024,2048,256] h16 / [128,256,512,1024,2048] h8`。
+
+| case（fp16, D=256 varlen） | dq max_abs | dk max_abs | dv max_abs |
+|---|---|---|---|
+| b4_t3840 h8 causal | 2.234e-3 | 2.439e-3 | 1.900e-3 |
+| b4_t4096 h8 causal（等长 1024） | 2.446e-3 | 2.226e-3 | 1.897e-3 |
+| b8_t2904 h8 causal（强倾斜） | 2.309e-3 | 2.409e-3 | 2.125e-3 |
+| b4_t3840 h16 full | 8.747e-4 | 1.031e-3 | 2.457e-4 |
+| b5_t3968 h8 full | 5.180e-4 | 6.371e-4 | 2.435e-4 |
+| b8_t2904 h8 full | 1.395e-3 | 1.378e-3 | 1.291e-3 |
+
+全部 **fp16 噪声量级**（与定长 D=256 `1.6–2.5e-3` 同档）。单/两文件一致性 gate
+`fp16 worst 1.953e-3`（容差 0.016）OK；bf16 同构 `worst 3.906e-3`（容差 0.032）OK。
+**FA3/FA2 反向变长均不支持 `head_dim=256`**（FA3 forward 即报
+`head_dim at most 128`）⇒ 只有 fp32 ref 可对。
+
+### 29.4 性能（CUDA event，iters=30；`sum_b 4·H·L²·D` 口径）
+
+| case（D=256 varlen） | fp16 total | fp16 TF | bf16 total | bf16 TF | fp8 total | fp8 TF |
+|---|---|---|---|---|---|---|
+| b4_t3840 h8 causal | 2.156 ms | 21.2 | 2.142 ms | 21.3 | 1.049 ms | 43.5 |
+| b4_t4096 h8 causal | 1.307 ms | 26.3 | 1.308 ms | 26.3 | 0.891 ms | 38.6 |
+| b8_t2904 h8 causal | 1.434 ms | 25.6 | 1.439 ms | 25.6 | 0.872 ms | 42.2 |
+| b4_t3840 h16 full | 5.279 ms | 17.3 | 5.276 ms | 17.3 | 3.572 ms | 25.6 |
+| b5_t3968 h8 full | 2.944 ms | 15.6 | 2.911 ms | 15.7 | 1.859 ms | 24.6 |
+| b8_t2904 h8 full | 2.092 ms | 17.6 | 2.090 ms | 17.6 | 1.519 ms | 24.2 |
+
+fp8（O108/O113，Hopper wgmma+TMA 快路）比 fp16/bf16 快 **~1.6–1.7×**（半字节宽 + wgmma）。
+变长 `D=256` 仍走通用 `mma.sync`（不是 O131 的 wgmma），相对定长同形略慢；wgmma+TMA 化
+（O131 的 `NH` 几何 + `cu_seqlens`）留 backlog。
+
+### 29.5 ncu（main，b4_t4096 h8 causal，mma 构建，`regex:fa_bwd_fp16_mma_kernel`）
+
+Duration **1.09 ms** / DRAM 7.04% / L1/TEX 46.65% / L2 42.30% / Compute 8.78% /
+**168 regs / 动态 smem 149.5KB → 1 CTA/SM、occ 6.25%** / Waves 3.88 / No Eligible 88.7%。
+⇒ **bound = 低 occupancy（smem 墙）+ 全局访存延迟**，与 O128/O131 定长 D=256 完全同源
+（fp16 2 字节使 Q/K/V tile 翻倍 ⇒ 1 CTA/SM）。
+
+### 29.6 复现 / 原始输出
+
+```bash
+# dump（fp16/bf16）：D=256 变长由 harness 的 --lengths/--H/--D/--full 生成
+python harness/fa_bwd_bench.py dump --dtype fp16 \
+  --lengths 512 1024 2048 256 --H 8 --D 256
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h8_d256_causal_fp16 --varlen --iters=30
+```
+
+原始输出：`src/fa_bwd_o132_d256_varlen.out.txt`（fp16/bf16 × 单/两文件 × 6 case）、
+`src/fp16/fa_bwd_fp16_o132_ncu_d256_varlen_s4096.out.txt`、
+`src/fa_bwd_o132_run_varlen_fp16bf16.out.txt`（harness 全 varlen 回归 + 一致性 gate）、
+`src/fa_bwd_compare_p33c_summary.out.txt`。见 `docs/01b` §6bf、`docs/04` §57、`docs/08` §5.140。

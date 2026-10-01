@@ -3057,3 +3057,29 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 - **注**：本轮任务模板要求「只做 fp8 性能」，但 fp8 的性能 backlog 已在 O116–O130 全部
   收口为「本卡无软件解」、覆盖型 backlog 也清空；故本轮推进 ROADMAP 唯一还开着的代码项
   （O128 遗留的 fp16/bf16 D=256 wgmma 几何），仍未触碰 fp8 的默认路径（零回归风险）。
+
+### 5.140 第 226 轮（O132）：fp16/bf16 `head_dim=256` 反向补齐 **varlen** —— **能力覆盖，正结果**
+
+- **背景**：`D=256` 在 O128（能力）/O131（wgmma 几何）先做了**定长**；**变长**（packed
+  `[T,H,D]` + `cu_seqlens`）仍被 `run_varlen` 的形状守卫拒绝，是 ROADMAP「下一批」候选 ⑤
+  （fp8 的 `D=256` 变长早在 O108/O113 完成并标定 ksplit）。本轮把它补齐（见 `docs/01` §29）。
+  → 同「只做 fp8 性能」模板，但 fp8 main 的 bytes/issue 两墙在 O116–O130 已收口为「本卡无软件解」、
+    覆盖型 backlog 清空；故推进唯一明确开着的覆盖项（与 O128/O131 的处理一致）。
+- **改动（纯 host dispatch，device 一行未改；单/两文件同步）**：`run_varlen` 形状守卫放开 256；
+  LSE 加 `D==256`（causal `bal<256,1>` / full `<256,1,true>`，行距 264，不做 4D-TMA）；
+  `main_bm=64`；主 kernel = O128 的通用 mma `fa_bwd_{fp16,bf16}_mma_kernel<256,64,32,1>`
+  （已带 `cu_seqlens`；`NDT=2` ⇒ dQ 逐 ndt 全局 RMW，需 memset）；`run_all` 加 `D==256` 分支。
+- **附带修复**：`fa_bwd_fp16_mma_onefile.cu` 在 HEAD 上**无法独立编译**（`sync_onefile_device.py`
+  早先用错 marker ⇒ `THREADS/WN`/include 重复定义 + 文件守卫 `#endif` 丢失）；本轮用正确 marker
+  重新同步 device 区（`identical: True`），单文件恢复可编译。CI `--ci --no-run` 不编译单文件故未暴露。
+- **新增 dump**：fp16/bf16 × 6 个 `D=256` 变长 shape（3 causal + 3 full）。FA3/FA2 反向变长
+  不支持 `head_dim=256` ⇒ 只有 fp32 ref 可对。
+- **数值**：fp16 causal 1.3–2.4e-3 / full 2.4e-4–1.4e-3；bf16 causal 1.3–2.0e-2 / full 3e-3–1.3e-2
+  —— 同 dtype 噪声；单/两文件一致 gate `fp16 1.953e-3 / bf16 3.906e-3` OK。
+- **性能（event total，`sum_b 4HL²D`）**：fp16/bf16 15.6–26.3 TF；fp8（Hopper）24.2–43.5 TF
+  （**~1.6–1.7×**）。变长 D=256 仍走通用 mma（非 O131 wgmma）；wgmma+TMA 化留 backlog。
+- **ncu（fp16 main）**：1 CTA/SM（149.5KB smem、168 regs）、occ 6.25%、L1/TEX 46.65%、
+  DRAM 7.04%、No Eligible 88.7% ⇒ bound = **低 occupancy + 全局延迟**（同定长 D=256）。
+- **结论**：**能力覆盖正结果**；fp16/bf16 的 `head_dim=256` 至此覆盖 定长（MHA/GQA × causal/full）
+  + 变长（MHA × causal/full）。见 `docs/01` §29、`docs/01b` §6bf、`docs/04` §57；原始输出
+  `src/fa_bwd_o132_d256_varlen.out.txt`、`src/fp16/fa_bwd_fp16_o132_ncu_d256_varlen_s4096.out.txt`。

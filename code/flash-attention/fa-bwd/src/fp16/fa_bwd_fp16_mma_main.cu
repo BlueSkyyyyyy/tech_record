@@ -365,8 +365,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
   const int T = (int)q_np.shape[0], H = (int)q_np.shape[1], D = (int)q_np.shape[2];
   const int Hkv = (int)k_np.shape[1];
   const int B = (int)cu_np.data.size() - 1;
-  if (D != 128 && D != 512) {
-    fprintf(stderr, "VARLEN 目前只做 HD=128/512；当前 %d\n", D);
+  if (D != 128 && D != 256 && D != 512) {
+    fprintf(stderr, "VARLEN 目前只做 HD=128/256/512；当前 %d\n", D);
     return 1;
   }
   int maxlen = 0;
@@ -446,7 +446,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
   const int varlen_tma_use = 0;
 #endif
   printf("VARLEN main backend = %s\n",
-         varlen_tma_use ? "wgmma2 TMA (Q/K/V/dO 4D-TMA)" : "wgmma2 cp.async");
+         (D == 256) ? "mma (HD=256, BM=64/BN=32)"
+                     : (varlen_tma_use ? "wgmma2 TMA (Q/K/V/dO 4D-TMA)" : "wgmma2 cp.async"));
 
   const int lse_nblk = (maxlen + LBM - 1) / LBM;
   // O56：full MLA varlen 的 LSE 用 8-warp/256 线程（LBM=128、LBN=32）几何——同 1 CTA/SM 下
@@ -494,6 +495,15 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal_tma<128, 1, true>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemTma1_v));
 #endif
+  } else if (D == 256) {
+    // O132（第 226 轮）：把 fp16 的 head_dim=256 支持从定长（O128/O131）扩到 **varlen**。
+    //   LSE 复用定长 D=256 的同一套模板（`lse_mma_kernel[_bal]<256>`，LBM/LBN 不变、
+    //   行距 LD=256+8=264）；causal 走镜像配对 `bal<256,1>`、full 走均衡 FULL
+    //   `bal<256,1,true>`——与 D=128 的 varlen LSE 路线完全同构（不做 4D-TMA，对齐 O128）。
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<256, 1>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<256, 1, true>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
   } else {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<512>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
@@ -528,7 +538,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
   const int d_rows = (int)rows_q;
   const int d_wpb = THREADS / 32;
   const int d_blocks = (d_rows + d_wpb - 1) / d_wpb;
-  const int main_bm = (D == 512) ? 32 : 128;   // D=512：MLA 主 kernel 几何（BM=32）
+  const int main_bm = (D == 512) ? 32 : ((D == 256) ? 64 : 128);   // D=512：MLA；D=256：通用 mma BM=64
   dim3 mg((maxlen + main_bm - 1) / main_bm, H, B);
 
   // O43：varlen 主 kernel（D==128 的 wgmma2）N 方向 split-K——短序列时 base grid 很小
@@ -604,7 +614,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
       (int)std::min<size_t>((std::max(nq, nkv) + cvt_threads - 1) / cvt_threads, 65535);
 
   auto run_all = [&]() {
-    if (D == 128 && wg2_ks > 1) CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * sizeof(float)));
+    if ((D == 128 && wg2_ks > 1) || D == 256)
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
     CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
     if (D == 128) {
@@ -658,6 +669,45 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
                                         dqo, d_cu, wg2_ks);
       convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, dq, dk, dv,
                                                   vq_direct ? 0 : nq, nkv);
+    } else if (D == 256) {
+      // O132（第 226 轮）：head_dim=256 的 **varlen**（把 O128/O131 的定长能力扩到 packed/
+      //   cu_seqlens）。LSE 与定长 D=256 同一套模板、LBM/LBN 不变、行距 LD=256+8=264：
+      //   causal 走镜像配对 `bal<256,1>`（+ O40 的 K 维 split）、full 走均衡 FULL
+      //   `bal<256,1,true>`。主 kernel 走 O128 的通用 mma `fa_bwd_fp16_mma_kernel<256,64,32,1>`
+      //   （已带 cu_seqlens 入参；NDT=HD/128=2 ⇒ dQ 在 GEMM5 里逐 ndt 全局 RMW，dq_acc 已 memset）。
+      if (causal) {
+        if (lse_split_eff > 1) {
+          dim3 gsp(lg_bal.x, lg_bal.y, (unsigned)(B * lse_split_eff));
+          lse_mma_kernel_bal<256, 1><<<gsp, THREADS, kLseSmemBal1>>>(
+              d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part, lse_split_eff);
+          const long long nrows = (long long)rows_q;
+          const int th = 256;
+          const long long bl = (nrows + th - 1) / th;
+          lse_split_merge_kernel<<<(unsigned)bl, th>>>(d_lse_part, d_lse, nrows, lse_split_eff);
+        } else {
+          lse_mma_kernel_bal<256, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(
+              d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
+        }
+      } else {
+        if (lse_split_eff > 1) {
+          dim3 gsp((unsigned)lse_nblk, H, (unsigned)(B * lse_split_eff));
+          lse_mma_kernel_bal<256, 1, true><<<gsp, THREADS, kLseSmemBal1>>>(
+              d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu, d_lse_part, lse_split_eff);
+          const long long nrows = (long long)rows_q;
+          const int th = 256;
+          const long long bl = (nrows + th - 1) / th;
+          lse_split_merge_kernel<<<(unsigned)bl, th>>>(d_lse_part, d_lse, nrows, lse_split_eff);
+        } else {
+          lse_mma_kernel_bal<256, 1, true><<<dim3(lse_nblk, H, B), THREADS, kLseSmemBal1>>>(
+              d_q, d_k, d_lse, maxlen, H, Hkv, scale, d_cu);
+        }
+      }
+      delta_warp_kernel<256><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
+      launch_bwd_mma<256, 64, 32, 1, false, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse,
+                                                  d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H, Hkv,
+                                                  scale, (int)causal, 0, d_cu, 1);
+      convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, dq, dk, dv, nq,
+                                                  nkv);
     } else {
       // HD=512（MLA）：causal LSE 走 mma 镜像配对版（带 cu_seqlens）；dQ 由主板 kernel 全局
       // 累加（NDT>1）⇒ 先清零 dq_acc，convert 转全部 nq/nkv。

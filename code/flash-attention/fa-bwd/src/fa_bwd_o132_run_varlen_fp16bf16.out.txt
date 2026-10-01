@@ -1,0 +1,312 @@
+=== fa-bwd 实现一致性（P3-3f/P3-3g）：ours vs ours_sf（max_abs，逐元素）===
+baseline-free：两者都算同一数学；期望差异仅跨 CTA atomicAdd 次序（dtype ulp）。
+判据（按 dtype）：max|ours-ours_sf| <= ctol；bf16=0.032, fp16=0.016（任一超出则退出码 1）
+
+[fp16]
+  varlen_b1_t512_h2_d512_causal_fp16              dq=1.221e-04  dk=2.441e-04  dv=2.441e-04
+  varlen_b1_t512_h2_d512_full_fp16                dq=1.221e-04  dk=1.221e-04  dv=1.221e-04
+  varlen_b2_t500_h16_d128_causal_fp16             dq=0.000e+00  dk=2.441e-04  dv=2.441e-04
+  varlen_b3_t1792_h2_d512_causal_fp16             dq=1.221e-04  dk=4.883e-04  dv=2.441e-04
+  varlen_b3_t1792_h2_d512_full_fp16               dq=1.221e-04  dk=1.221e-04  dv=1.221e-04
+  varlen_b4_t3840_h16_d128_causal_fp16            dq=0.000e+00  dk=4.883e-04  dv=4.883e-04
+  varlen_b4_t3840_h16_d128_full_fp16              dq=0.000e+00  dk=1.221e-04  dv=1.221e-04
+  varlen_b4_t3840_h16_d256_full_fp16              dq=0.000e+00  dk=1.221e-04  dv=2.441e-04
+  varlen_b4_t3840_h8_d256_causal_fp16             dq=0.000e+00  dk=4.883e-04  dv=9.766e-04
+  varlen_b4_t4096_h16_d128_causal_fp16            dq=0.000e+00  dk=4.883e-04  dv=9.766e-04
+  varlen_b4_t4096_h16_d128_full_fp16              dq=0.000e+00  dk=1.221e-04  dv=2.441e-04
+  varlen_b4_t4096_h8_d256_causal_fp16             dq=0.000e+00  dk=4.883e-04  dv=4.883e-04
+  varlen_b5_t3968_h32_d128_causal_fp16            dq=0.000e+00  dk=9.766e-04  dv=1.953e-03
+  varlen_b5_t3968_h32_d128_full_fp16              dq=0.000e+00  dk=2.441e-04  dv=2.441e-04
+  varlen_b5_t3968_h8_d256_full_fp16               dq=0.000e+00  dk=1.221e-04  dv=1.221e-04
+  varlen_b8_t2904_h16_d128_causal_fp16            dq=0.000e+00  dk=4.883e-04  dv=9.766e-04
+  varlen_b8_t2904_h16_d128_full_fp16              dq=0.000e+00  dk=1.221e-04  dv=6.104e-05
+  varlen_b8_t2904_h8_d256_causal_fp16             dq=0.000e+00  dk=4.883e-04  dv=4.883e-04
+  varlen_b8_t2904_h8_d256_full_fp16               dq=0.000e+00  dk=2.441e-04  dv=1.221e-04
+
+[bf16]
+  varlen_b1_t512_h2_d512_causal_bf16              dq=9.766e-04  dk=4.883e-04  dv=9.766e-04
+  varlen_b1_t512_h2_d512_full_bf16                dq=4.883e-04  dk=9.766e-04  dv=4.883e-04
+  varlen_b3_t1792_h2_d512_causal_bf16             dq=4.883e-04  dk=4.883e-04  dv=9.766e-04
+  varlen_b3_t1792_h2_d512_full_bf16               dq=4.883e-04  dk=9.766e-04  dv=9.766e-04
+  varlen_b4_t3840_h16_d128_causal_bf16            dq=0.000e+00  dk=9.766e-04  dv=3.906e-03
+  varlen_b4_t3840_h16_d128_full_bf16              dq=0.000e+00  dk=4.883e-04  dv=4.883e-04
+  varlen_b4_t3840_h16_d256_full_bf16              dq=0.000e+00  dk=9.766e-04  dv=9.766e-04
+  varlen_b4_t3840_h8_d256_causal_bf16             dq=0.000e+00  dk=1.953e-03  dv=3.906e-03
+  varlen_b4_t4096_h16_d128_causal_bf16            dq=0.000e+00  dk=1.953e-03  dv=1.953e-03
+  varlen_b4_t4096_h16_d128_full_bf16              dq=0.000e+00  dk=9.766e-04  dv=9.766e-04
+  varlen_b4_t4096_h8_d256_causal_bf16             dq=0.000e+00  dk=1.953e-03  dv=1.953e-03
+  varlen_b5_t3968_h32_d128_causal_bf16            dq=0.000e+00  dk=9.766e-04  dv=1.953e-03
+  varlen_b5_t3968_h32_d128_full_bf16              dq=0.000e+00  dk=9.766e-04  dv=1.953e-03
+  varlen_b5_t3968_h8_d256_full_bf16               dq=0.000e+00  dk=4.883e-04  dv=9.766e-04
+  varlen_b8_t2904_h16_d128_causal_bf16            dq=0.000e+00  dk=4.883e-04  dv=4.883e-04
+  varlen_b8_t2904_h16_d128_full_bf16              dq=0.000e+00  dk=4.883e-04  dv=9.766e-04
+  varlen_b8_t2904_h8_d256_causal_bf16             dq=0.000e+00  dk=9.766e-04  dv=9.766e-04
+  varlen_b8_t2904_h8_d256_full_bf16               dq=0.000e+00  dk=9.766e-04  dv=4.883e-04
+
+=== 小结（37 case 有 ours/ours_sf 双方；0 case 缺一侧）===
+  max|ours-ours_sf| over all cases: dq = 9.766e-04  (varlen_b1_t512_h2_d512_causal_bf16)
+  max|ours-ours_sf| over all cases: dk = 1.953e-03  (varlen_b4_t3840_h8_d256_causal_bf16)
+  max|ours-ours_sf| over all cases: dv = 3.906e-03  (varlen_b4_t3840_h16_d128_causal_bf16)
+  worst = 3.906e-03
+  gate[fp16] worst=1.953e-03  tol=0.016  -> OK
+  gate[bf16] worst=3.906e-03  tol=0.032  -> OK
+
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_consistency_p33g.out.txt
+[--consistency] OK：worst=3.906e-03（各 dtype 均在容差内）
+=== fa_bwd_run.py (P3-3c) 一键跑 ours + 汇总 ===
+cases=37 impls=['twofile', 'singlefile'] iters=5
+[run] bf16 twofile varlen_b1_t512_h2_d512_causal_bf16
+[run] bf16 singlefile varlen_b1_t512_h2_d512_causal_bf16
+[run] fp16 twofile varlen_b1_t512_h2_d512_causal_fp16
+[run] fp16 singlefile varlen_b1_t512_h2_d512_causal_fp16
+[run] bf16 twofile varlen_b1_t512_h2_d512_full_bf16
+[run] bf16 singlefile varlen_b1_t512_h2_d512_full_bf16
+[run] fp16 twofile varlen_b1_t512_h2_d512_full_fp16
+[run] fp16 singlefile varlen_b1_t512_h2_d512_full_fp16
+[run] fp16 twofile varlen_b2_t500_h16_d128_causal_fp16
+[run] fp16 singlefile varlen_b2_t500_h16_d128_causal_fp16
+[run] bf16 twofile varlen_b3_t1792_h2_d512_causal_bf16
+[run] bf16 singlefile varlen_b3_t1792_h2_d512_causal_bf16
+[run] fp16 twofile varlen_b3_t1792_h2_d512_causal_fp16
+[run] fp16 singlefile varlen_b3_t1792_h2_d512_causal_fp16
+[run] bf16 twofile varlen_b3_t1792_h2_d512_full_bf16
+[run] bf16 singlefile varlen_b3_t1792_h2_d512_full_bf16
+[run] fp16 twofile varlen_b3_t1792_h2_d512_full_fp16
+[run] fp16 singlefile varlen_b3_t1792_h2_d512_full_fp16
+[run] bf16 twofile varlen_b4_t3840_h16_d128_causal_bf16
+[run] bf16 singlefile varlen_b4_t3840_h16_d128_causal_bf16
+[run] fp16 twofile varlen_b4_t3840_h16_d128_causal_fp16
+[run] fp16 singlefile varlen_b4_t3840_h16_d128_causal_fp16
+[run] bf16 twofile varlen_b4_t3840_h16_d128_full_bf16
+[run] bf16 singlefile varlen_b4_t3840_h16_d128_full_bf16
+[run] fp16 twofile varlen_b4_t3840_h16_d128_full_fp16
+[run] fp16 singlefile varlen_b4_t3840_h16_d128_full_fp16
+[run] bf16 twofile varlen_b4_t3840_h16_d256_full_bf16
+[run] bf16 singlefile varlen_b4_t3840_h16_d256_full_bf16
+[run] fp16 twofile varlen_b4_t3840_h16_d256_full_fp16
+[run] fp16 singlefile varlen_b4_t3840_h16_d256_full_fp16
+[run] bf16 twofile varlen_b4_t3840_h8_d256_causal_bf16
+[run] bf16 singlefile varlen_b4_t3840_h8_d256_causal_bf16
+[run] fp16 twofile varlen_b4_t3840_h8_d256_causal_fp16
+[run] fp16 singlefile varlen_b4_t3840_h8_d256_causal_fp16
+[run] bf16 twofile varlen_b4_t4096_h16_d128_causal_bf16
+[run] bf16 singlefile varlen_b4_t4096_h16_d128_causal_bf16
+[run] fp16 twofile varlen_b4_t4096_h16_d128_causal_fp16
+[run] fp16 singlefile varlen_b4_t4096_h16_d128_causal_fp16
+[run] bf16 twofile varlen_b4_t4096_h16_d128_full_bf16
+[run] bf16 singlefile varlen_b4_t4096_h16_d128_full_bf16
+[run] fp16 twofile varlen_b4_t4096_h16_d128_full_fp16
+[run] fp16 singlefile varlen_b4_t4096_h16_d128_full_fp16
+[run] bf16 twofile varlen_b4_t4096_h8_d256_causal_bf16
+[run] bf16 singlefile varlen_b4_t4096_h8_d256_causal_bf16
+[run] fp16 twofile varlen_b4_t4096_h8_d256_causal_fp16
+[run] fp16 singlefile varlen_b4_t4096_h8_d256_causal_fp16
+[run] bf16 twofile varlen_b5_t3968_h32_d128_causal_bf16
+[run] bf16 singlefile varlen_b5_t3968_h32_d128_causal_bf16
+[run] fp16 twofile varlen_b5_t3968_h32_d128_causal_fp16
+[run] fp16 singlefile varlen_b5_t3968_h32_d128_causal_fp16
+[run] bf16 twofile varlen_b5_t3968_h32_d128_full_bf16
+[run] bf16 singlefile varlen_b5_t3968_h32_d128_full_bf16
+[run] fp16 twofile varlen_b5_t3968_h32_d128_full_fp16
+[run] fp16 singlefile varlen_b5_t3968_h32_d128_full_fp16
+[run] bf16 twofile varlen_b5_t3968_h8_d256_full_bf16
+[run] bf16 singlefile varlen_b5_t3968_h8_d256_full_bf16
+[run] fp16 twofile varlen_b5_t3968_h8_d256_full_fp16
+[run] fp16 singlefile varlen_b5_t3968_h8_d256_full_fp16
+[run] bf16 twofile varlen_b8_t2904_h16_d128_causal_bf16
+[run] bf16 singlefile varlen_b8_t2904_h16_d128_causal_bf16
+[run] fp16 twofile varlen_b8_t2904_h16_d128_causal_fp16
+[run] fp16 singlefile varlen_b8_t2904_h16_d128_causal_fp16
+[run] bf16 twofile varlen_b8_t2904_h16_d128_full_bf16
+[run] bf16 singlefile varlen_b8_t2904_h16_d128_full_bf16
+[run] fp16 twofile varlen_b8_t2904_h16_d128_full_fp16
+[run] fp16 singlefile varlen_b8_t2904_h16_d128_full_fp16
+[run] bf16 twofile varlen_b8_t2904_h8_d256_causal_bf16
+[run] bf16 singlefile varlen_b8_t2904_h8_d256_causal_bf16
+[run] fp16 twofile varlen_b8_t2904_h8_d256_causal_fp16
+[run] fp16 singlefile varlen_b8_t2904_h8_d256_causal_fp16
+[run] bf16 twofile varlen_b8_t2904_h8_d256_full_bf16
+[run] bf16 singlefile varlen_b8_t2904_h8_d256_full_bf16
+[run] fp16 twofile varlen_b8_t2904_h8_d256_full_fp16
+[run] fp16 singlefile varlen_b8_t2904_h8_d256_full_fp16
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/bf16/fa_bwd_bf16_p33c_run.out.txt
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_p33c_run.out.txt
+
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_run_p33c_summary.out.txt
+
+[consistency:auto] /tmp/opencode/bin/python /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_compare.py --consistency --ca ours --cb ours_sf --out /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_consistency_p33g.out.txt --case varlen_b1_t512_h2_d512_causal_bf16 varlen_b1_t512_h2_d512_causal_fp16 varlen_b1_t512_h2_d512_full_bf16 varlen_b1_t512_h2_d512_full_fp16 varlen_b2_t500_h16_d128_causal_fp16 varlen_b3_t1792_h2_d512_causal_bf16 varlen_b3_t1792_h2_d512_causal_fp16 varlen_b3_t1792_h2_d512_full_bf16 varlen_b3_t1792_h2_d512_full_fp16 varlen_b4_t3840_h16_d128_causal_bf16 varlen_b4_t3840_h16_d128_causal_fp16 varlen_b4_t3840_h16_d128_full_bf16 varlen_b4_t3840_h16_d128_full_fp16 varlen_b4_t3840_h16_d256_full_bf16 varlen_b4_t3840_h16_d256_full_fp16 varlen_b4_t3840_h8_d256_causal_bf16 varlen_b4_t3840_h8_d256_causal_fp16 varlen_b4_t4096_h16_d128_causal_bf16 varlen_b4_t4096_h16_d128_causal_fp16 varlen_b4_t4096_h16_d128_full_bf16 varlen_b4_t4096_h16_d128_full_fp16 varlen_b4_t4096_h8_d256_causal_bf16 varlen_b4_t4096_h8_d256_causal_fp16 varlen_b5_t3968_h32_d128_causal_bf16 varlen_b5_t3968_h32_d128_causal_fp16 varlen_b5_t3968_h32_d128_full_bf16 varlen_b5_t3968_h32_d128_full_fp16 varlen_b5_t3968_h8_d256_full_bf16 varlen_b5_t3968_h8_d256_full_fp16 varlen_b8_t2904_h16_d128_causal_bf16 varlen_b8_t2904_h16_d128_causal_fp16 varlen_b8_t2904_h16_d128_full_bf16 varlen_b8_t2904_h16_d128_full_fp16 varlen_b8_t2904_h8_d256_causal_bf16 varlen_b8_t2904_h8_d256_causal_fp16 varlen_b8_t2904_h8_d256_full_bf16 varlen_b8_t2904_h8_d256_full_fp16 --ctol auto
+
+[compare] /tmp/opencode/bin/python /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_compare.py --case varlen_b1_t512_h2_d512_causal_bf16 varlen_b1_t512_h2_d512_causal_fp16 varlen_b1_t512_h2_d512_full_bf16 varlen_b1_t512_h2_d512_full_fp16 varlen_b2_t500_h16_d128_causal_fp16 varlen_b3_t1792_h2_d512_causal_bf16 varlen_b3_t1792_h2_d512_causal_fp16 varlen_b3_t1792_h2_d512_full_bf16 varlen_b3_t1792_h2_d512_full_fp16 varlen_b4_t3840_h16_d128_causal_bf16 varlen_b4_t3840_h16_d128_causal_fp16 varlen_b4_t3840_h16_d128_full_bf16 varlen_b4_t3840_h16_d128_full_fp16 varlen_b4_t3840_h16_d256_full_bf16 varlen_b4_t3840_h16_d256_full_fp16 varlen_b4_t3840_h8_d256_causal_bf16 varlen_b4_t3840_h8_d256_causal_fp16 varlen_b4_t4096_h16_d128_causal_bf16 varlen_b4_t4096_h16_d128_causal_fp16 varlen_b4_t4096_h16_d128_full_bf16 varlen_b4_t4096_h16_d128_full_fp16 varlen_b4_t4096_h8_d256_causal_bf16 varlen_b4_t4096_h8_d256_causal_fp16 varlen_b5_t3968_h32_d128_causal_bf16 varlen_b5_t3968_h32_d128_causal_fp16 varlen_b5_t3968_h32_d128_full_bf16 varlen_b5_t3968_h32_d128_full_fp16 varlen_b5_t3968_h8_d256_full_bf16 varlen_b5_t3968_h8_d256_full_fp16 varlen_b8_t2904_h16_d128_causal_bf16 varlen_b8_t2904_h16_d128_causal_fp16 varlen_b8_t2904_h16_d128_full_bf16 varlen_b8_t2904_h16_d128_full_fp16 varlen_b8_t2904_h8_d256_causal_bf16 varlen_b8_t2904_h8_d256_causal_fp16 varlen_b8_t2904_h8_d256_full_bf16 varlen_b8_t2904_h8_d256_full_fp16 --out /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_compare_p33c_summary.out.txt
+=== fa-bwd numeric comparison (baseline = ref; max_abs / max_rel) ===
+case                                           impl  dq_abs    dq_rel    dk_abs    dk_rel    dv_abs    dv_rel   
+----------------------------------------------------------------------------------------------------------------
+[varlen_b1_t512_h2_d512_causal_bf16]  (bf16)
+  ours  8.042e-03 1.111e+00 1.097e-02 1.261e+00 1.391e-02 1.453e+00
+  ours_sf 8.042e-03 1.111e+00 1.097e-02 1.261e+00 1.391e-02 1.453e+00
+[varlen_b1_t512_h2_d512_causal_fp16]  (fp16)
+  ours  1.303e-03 2.341e-01 1.537e-03 3.035e-01 1.557e-03 6.257e-02
+  ours_sf 1.303e-03 2.341e-01 1.537e-03 3.035e-01 1.557e-03 6.257e-02
+[varlen_b1_t512_h2_d512_full_bf16]  (bf16)
+  ours  1.730e-03 3.453e-01 1.692e-03 5.078e-01 1.556e-03 4.279e-01
+  ours_sf 1.730e-03 3.453e-01 1.692e-03 5.078e-01 1.556e-03 4.279e-01
+[varlen_b1_t512_h2_d512_full_fp16]  (fp16)
+  ours  3.046e-04 1.119e-01 4.449e-04 7.726e-02 1.327e-04 2.655e-02
+  ours_sf 3.046e-04 1.119e-01 4.449e-04 7.726e-02 1.327e-04 2.655e-02
+[varlen_b2_t500_h16_d128_causal_fp16]  (fp16)
+  fa3   1.968e-03 3.505e-01 2.684e-03 3.925e-01 2.055e-03 1.152e-01
+  ours  1.832e-03 6.339e-01 1.593e-03 2.853e-01 2.055e-03 1.152e-01
+  ours_sf 1.832e-03 6.339e-01 1.593e-03 2.853e-01 2.055e-03 1.152e-01
+[varlen_b3_t1792_h2_d512_causal_bf16]  (bf16)
+  ours  1.267e-02 2.074e+00 1.217e-02 3.256e+00 1.796e-02 3.049e+00
+  ours_sf 1.267e-02 2.074e+00 1.217e-02 3.256e+00 1.796e-02 3.049e+00
+[varlen_b3_t1792_h2_d512_causal_fp16]  (fp16)
+  ours  2.415e-03 3.801e-01 1.834e-03 2.989e-01 1.856e-03 4.649e-02
+  ours_sf 2.415e-03 3.801e-01 1.834e-03 2.989e-01 1.856e-03 4.649e-02
+[varlen_b3_t1792_h2_d512_full_bf16]  (bf16)
+  ours  3.100e-03 5.370e-01 3.526e-03 4.539e-01 2.316e-03 4.690e-01
+  ours_sf 3.100e-03 5.370e-01 3.526e-03 4.539e-01 2.316e-03 4.690e-01
+[varlen_b3_t1792_h2_d512_full_fp16]  (fp16)
+  ours  5.516e-04 1.101e-01 4.451e-04 1.095e-01 2.385e-04 2.680e-02
+  ours_sf 5.516e-04 1.101e-01 4.451e-04 1.096e-01 2.385e-04 2.680e-02
+[varlen_b4_t3840_h16_d128_causal_bf16]  (bf16)
+  fa3   1.340e-02 3.906e+00 1.429e-02 4.269e+00 1.911e-02 3.402e+00
+  ours  1.340e-02 3.726e+00 1.276e-02 2.544e+00 1.911e-02 3.402e+00
+  ours_sf 1.340e-02 3.726e+00 1.276e-02 2.544e+00 1.911e-02 3.402e+00
+[varlen_b4_t3840_h16_d128_causal_fp16]  (fp16)
+  fa3   1.938e-03 3.173e-01 2.158e-03 4.583e-01 1.940e-03 4.312e-02
+  ours  3.163e-03 5.263e-01 2.158e-03 5.855e-01 1.966e-03 3.979e-02
+  ours_sf 3.163e-03 5.263e-01 2.158e-03 5.855e-01 1.966e-03 3.979e-02
+[varlen_b4_t3840_h16_d128_full_bf16]  (bf16)
+  fa3   5.764e-03 6.569e-01 3.851e-03 5.385e-01 3.031e-03 6.653e-01
+  ours  5.764e-03 5.462e-01 3.851e-03 5.324e-01 3.031e-03 6.653e-01
+  ours_sf 5.764e-03 5.462e-01 3.851e-03 5.324e-01 3.031e-03 6.653e-01
+[varlen_b4_t3840_h16_d128_full_fp16]  (fp16)
+  fa3   5.603e-04 1.069e-01 6.841e-04 1.152e-01 2.463e-04 3.663e-02
+  ours  5.603e-04 1.055e-01 6.841e-04 1.074e-01 2.338e-04 3.734e-02
+  ours_sf 5.603e-04 1.055e-01 6.841e-04 1.074e-01 2.338e-04 3.734e-02
+[varlen_b4_t3840_h16_d256_full_bf16]  (bf16)
+  ours  5.712e-03 7.503e-01 5.623e-03 5.864e-01 3.098e-03 6.071e-01
+  ours_sf 5.712e-03 7.503e-01 5.623e-03 5.864e-01 3.098e-03 6.071e-01
+[varlen_b4_t3840_h16_d256_full_fp16]  (fp16)
+  ours  8.747e-04 1.175e-01 1.031e-03 7.628e-02 2.457e-04 4.580e-02
+  ours_sf 8.747e-04 1.175e-01 1.031e-03 7.628e-02 2.457e-04 4.580e-02
+[varlen_b4_t3840_h8_d256_causal_bf16]  (bf16)
+  ours  1.323e-02 3.645e+00 1.471e-02 2.791e+00 1.861e-02 2.244e+00
+  ours_sf 1.323e-02 3.645e+00 1.471e-02 2.791e+00 1.861e-02 2.244e+00
+[varlen_b4_t3840_h8_d256_causal_fp16]  (fp16)
+  ours  2.234e-03 5.353e-01 2.439e-03 4.437e-01 1.900e-03 9.365e-02
+  ours_sf 2.234e-03 5.353e-01 2.439e-03 4.437e-01 1.900e-03 9.365e-02
+[varlen_b4_t4096_h16_d128_causal_bf16]  (bf16)
+  fa3   1.145e-02 2.472e+00 1.237e-02 2.866e+00 1.772e-02 1.981e+00
+  ours  1.355e-02 2.479e+00 1.207e-02 2.929e+00 1.772e-02 1.981e+00
+  ours_sf 1.355e-02 2.479e+00 1.207e-02 2.929e+00 1.772e-02 1.981e+00
+[varlen_b4_t4096_h16_d128_causal_fp16]  (fp16)
+  fa3   2.149e-03 6.652e-01 1.970e-03 5.910e-01 1.915e-03 7.835e-02
+  ours  2.112e-03 3.705e-01 2.252e-03 5.332e-01 1.915e-03 9.781e-02
+  ours_sf 2.112e-03 3.705e-01 2.252e-03 5.332e-01 1.915e-03 9.781e-02
+[varlen_b4_t4096_h16_d128_full_bf16]  (bf16)
+  fa3   3.237e-03 4.386e-01 2.137e-03 4.810e-01 2.013e-03 3.883e-01
+  ours  3.237e-03 4.371e-01 2.392e-03 4.570e-01 2.013e-03 3.883e-01
+  ours_sf 3.237e-03 4.371e-01 2.392e-03 4.570e-01 2.013e-03 3.883e-01
+[varlen_b4_t4096_h16_d128_full_fp16]  (fp16)
+  fa3   4.094e-04 7.343e-02 4.953e-04 9.515e-02 1.213e-04 2.365e-02
+  ours  4.094e-04 8.427e-02 4.953e-04 9.068e-02 1.213e-04 2.370e-02
+  ours_sf 4.094e-04 8.427e-02 4.953e-04 9.068e-02 1.234e-04 2.370e-02
+[varlen_b4_t4096_h8_d256_causal_bf16]  (bf16)
+  ours  1.893e-02 2.533e+00 1.848e-02 3.149e+00 2.021e-02 3.248e+00
+  ours_sf 1.893e-02 2.533e+00 1.848e-02 3.149e+00 2.021e-02 3.248e+00
+[varlen_b4_t4096_h8_d256_causal_fp16]  (fp16)
+  ours  2.446e-03 7.130e-01 2.226e-03 5.849e-01 1.897e-03 8.198e-02
+  ours_sf 2.446e-03 7.130e-01 2.226e-03 5.849e-01 1.897e-03 8.198e-02
+[varlen_b5_t3968_h32_d128_causal_bf16]  (bf16)
+  fa3   1.390e-02 3.265e+00 2.306e-02 4.703e+00 3.131e-02 4.273e+00
+  ours  1.398e-02 2.797e+00 2.396e-02 3.148e+00 3.131e-02 4.273e+00
+  ours_sf 1.398e-02 2.797e+00 2.396e-02 3.148e+00 3.131e-02 4.273e+00
+[varlen_b5_t3968_h32_d128_causal_fp16]  (fp16)
+  fa3   2.146e-03 4.692e-01 3.392e-03 4.868e-01 3.843e-03 8.592e-02
+  ours  2.438e-03 6.040e-01 3.433e-03 6.717e-01 3.843e-03 5.602e-02
+  ours_sf 2.438e-03 6.040e-01 3.433e-03 6.717e-01 3.843e-03 5.602e-02
+[varlen_b5_t3968_h32_d128_full_bf16]  (bf16)
+  fa3   5.324e-03 1.323e+00 5.454e-03 1.414e+00 5.881e-03 1.462e+00
+  ours  5.324e-03 6.485e-01 5.454e-03 1.444e+00 5.881e-03 1.462e+00
+  ours_sf 5.324e-03 6.485e-01 5.454e-03 1.444e+00 5.881e-03 1.462e+00
+[varlen_b5_t3968_h32_d128_full_fp16]  (fp16)
+  fa3   7.515e-04 1.571e-01 7.856e-04 2.002e-01 4.880e-04 5.407e-02
+  ours  7.341e-04 1.614e-01 7.906e-04 2.043e-01 4.880e-04 5.407e-02
+  ours_sf 7.341e-04 1.614e-01 7.906e-04 2.043e-01 4.880e-04 5.407e-02
+[varlen_b5_t3968_h8_d256_full_bf16]  (bf16)
+  ours  5.176e-03 6.747e-01 3.743e-03 8.181e-01 2.917e-03 8.332e-01
+  ours_sf 5.176e-03 6.747e-01 3.743e-03 8.181e-01 2.917e-03 8.332e-01
+[varlen_b5_t3968_h8_d256_full_fp16]  (fp16)
+  ours  5.180e-04 1.291e-01 6.371e-04 1.158e-01 2.435e-04 3.910e-02
+  ours_sf 5.180e-04 1.291e-01 6.371e-04 1.158e-01 2.435e-04 3.910e-02
+[varlen_b8_t2904_h16_d128_causal_bf16]  (bf16)
+  fa3   1.214e-02 5.396e+00 1.519e-02 2.628e+00 1.863e-02 3.071e+00
+  ours  1.464e-02 4.323e+00 1.566e-02 2.385e+00 1.863e-02 3.071e+00
+  ours_sf 1.464e-02 4.323e+00 1.566e-02 2.385e+00 1.863e-02 3.071e+00
+[varlen_b8_t2904_h16_d128_causal_fp16]  (fp16)
+  fa3   2.624e-03 6.537e-01 2.231e-03 4.850e-01 2.139e-03 2.412e-01
+  ours  2.624e-03 4.658e-01 2.158e-03 4.081e-01 2.139e-03 2.412e-01
+  ours_sf 2.624e-03 4.658e-01 2.158e-03 4.081e-01 2.139e-03 2.412e-01
+[varlen_b8_t2904_h16_d128_full_bf16]  (bf16)
+  fa3   1.153e-02 9.886e-01 9.529e-03 1.546e+00 1.083e-02 1.005e+00
+  ours  1.153e-02 1.344e+00 9.529e-03 1.583e+00 1.083e-02 1.005e+00
+  ours_sf 1.153e-02 1.344e+00 9.529e-03 1.583e+00 1.083e-02 1.005e+00
+[varlen_b8_t2904_h16_d128_full_fp16]  (fp16)
+  fa3   1.486e-03 3.229e-01 1.555e-03 2.112e-01 1.582e-03 1.655e-01
+  ours  1.486e-03 2.802e-01 1.555e-03 2.415e-01 1.582e-03 1.655e-01
+  ours_sf 1.486e-03 2.802e-01 1.555e-03 2.415e-01 1.582e-03 1.655e-01
+[varlen_b8_t2904_h8_d256_causal_bf16]  (bf16)
+  ours  1.525e-02 4.285e+00 1.560e-02 4.176e+00 1.873e-02 3.365e+00
+  ours_sf 1.525e-02 4.285e+00 1.560e-02 4.176e+00 1.873e-02 3.365e+00
+[varlen_b8_t2904_h8_d256_causal_fp16]  (fp16)
+  ours  2.309e-03 7.930e-01 2.409e-03 3.128e-01 2.125e-03 1.420e-01
+  ours_sf 2.309e-03 7.930e-01 2.409e-03 3.128e-01 2.125e-03 1.420e-01
+[varlen_b8_t2904_h8_d256_full_bf16]  (bf16)
+  ours  1.267e-02 1.484e+00 1.085e-02 1.918e+00 1.145e-02 1.467e+00
+  ours_sf 1.267e-02 1.484e+00 1.085e-02 1.918e+00 1.145e-02 1.467e+00
+[varlen_b8_t2904_h8_d256_full_fp16]  (fp16)
+  ours  1.395e-03 1.945e-01 1.378e-03 1.818e-01 1.291e-03 1.878e-01
+  ours_sf 1.395e-03 1.945e-01 1.378e-03 1.818e-01 1.291e-03 1.878e-01
+
+=== ours vs ref 小结（判据 max_abs）===
+  bf16  varlen_b1_t512_h2_d512_causal_bf16             dq=8.042e-03 dk=1.097e-02 dv=1.391e-02
+  bf16  varlen_b1_t512_h2_d512_full_bf16               dq=1.730e-03 dk=1.692e-03 dv=1.556e-03
+  bf16  varlen_b3_t1792_h2_d512_causal_bf16            dq=1.267e-02 dk=1.217e-02 dv=1.796e-02
+  bf16  varlen_b3_t1792_h2_d512_full_bf16              dq=3.100e-03 dk=3.526e-03 dv=2.316e-03
+  bf16  varlen_b4_t3840_h16_d128_causal_bf16           dq=1.340e-02 dk=1.276e-02 dv=1.911e-02
+  bf16  varlen_b4_t3840_h16_d128_full_bf16             dq=5.764e-03 dk=3.851e-03 dv=3.031e-03
+  bf16  varlen_b4_t3840_h16_d256_full_bf16             dq=5.712e-03 dk=5.623e-03 dv=3.098e-03
+  bf16  varlen_b4_t3840_h8_d256_causal_bf16            dq=1.323e-02 dk=1.471e-02 dv=1.861e-02
+  bf16  varlen_b4_t4096_h16_d128_causal_bf16           dq=1.355e-02 dk=1.207e-02 dv=1.772e-02
+  bf16  varlen_b4_t4096_h16_d128_full_bf16             dq=3.237e-03 dk=2.392e-03 dv=2.013e-03
+  bf16  varlen_b4_t4096_h8_d256_causal_bf16            dq=1.893e-02 dk=1.848e-02 dv=2.021e-02
+  bf16  varlen_b5_t3968_h32_d128_causal_bf16           dq=1.398e-02 dk=2.396e-02 dv=3.131e-02
+  bf16  varlen_b5_t3968_h32_d128_full_bf16             dq=5.324e-03 dk=5.454e-03 dv=5.881e-03
+  bf16  varlen_b5_t3968_h8_d256_full_bf16              dq=5.176e-03 dk=3.743e-03 dv=2.917e-03
+  bf16  varlen_b8_t2904_h16_d128_causal_bf16           dq=1.464e-02 dk=1.566e-02 dv=1.863e-02
+  bf16  varlen_b8_t2904_h16_d128_full_bf16             dq=1.153e-02 dk=9.529e-03 dv=1.083e-02
+  bf16  varlen_b8_t2904_h8_d256_causal_bf16            dq=1.525e-02 dk=1.560e-02 dv=1.873e-02
+  bf16  varlen_b8_t2904_h8_d256_full_bf16              dq=1.267e-02 dk=1.085e-02 dv=1.145e-02
+  fp16  varlen_b1_t512_h2_d512_causal_fp16             dq=1.303e-03 dk=1.537e-03 dv=1.557e-03
+  fp16  varlen_b1_t512_h2_d512_full_fp16               dq=3.046e-04 dk=4.449e-04 dv=1.327e-04
+  fp16  varlen_b2_t500_h16_d128_causal_fp16            dq=1.832e-03 dk=1.593e-03 dv=2.055e-03
+  fp16  varlen_b3_t1792_h2_d512_causal_fp16            dq=2.415e-03 dk=1.834e-03 dv=1.856e-03
+  fp16  varlen_b3_t1792_h2_d512_full_fp16              dq=5.516e-04 dk=4.451e-04 dv=2.385e-04
+  fp16  varlen_b4_t3840_h16_d128_causal_fp16           dq=3.163e-03 dk=2.158e-03 dv=1.966e-03
+  fp16  varlen_b4_t3840_h16_d128_full_fp16             dq=5.603e-04 dk=6.841e-04 dv=2.338e-04
+  fp16  varlen_b4_t3840_h16_d256_full_fp16             dq=8.747e-04 dk=1.031e-03 dv=2.457e-04
+  fp16  varlen_b4_t3840_h8_d256_causal_fp16            dq=2.234e-03 dk=2.439e-03 dv=1.900e-03
+  fp16  varlen_b4_t4096_h16_d128_causal_fp16           dq=2.112e-03 dk=2.252e-03 dv=1.915e-03
+  fp16  varlen_b4_t4096_h16_d128_full_fp16             dq=4.094e-04 dk=4.953e-04 dv=1.213e-04
+  fp16  varlen_b4_t4096_h8_d256_causal_fp16            dq=2.446e-03 dk=2.226e-03 dv=1.897e-03
+  fp16  varlen_b5_t3968_h32_d128_causal_fp16           dq=2.438e-03 dk=3.433e-03 dv=3.843e-03
+  fp16  varlen_b5_t3968_h32_d128_full_fp16             dq=7.341e-04 dk=7.906e-04 dv=4.880e-04
+  fp16  varlen_b5_t3968_h8_d256_full_fp16              dq=5.180e-04 dk=6.371e-04 dv=2.435e-04
+  fp16  varlen_b8_t2904_h16_d128_causal_fp16           dq=2.624e-03 dk=2.158e-03 dv=2.139e-03
+  fp16  varlen_b8_t2904_h16_d128_full_fp16             dq=1.486e-03 dk=1.555e-03 dv=1.582e-03
+  fp16  varlen_b8_t2904_h8_d256_causal_fp16            dq=2.309e-03 dk=2.409e-03 dv=2.125e-03
+  fp16  varlen_b8_t2904_h8_d256_full_fp16              dq=1.395e-03 dk=1.378e-03 dv=1.291e-03
+
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_compare_p33c_summary.out.txt
+
