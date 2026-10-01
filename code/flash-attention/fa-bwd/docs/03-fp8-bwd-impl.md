@@ -11518,3 +11518,86 @@ L2 `red` 墙（`red` 105.4M 扇区 = L2 的 ~80%、`short_scoreboard 1.85 + wait
 - **下一步候选**：① **换卡**；② causal 变长 ksplit 复核推广到 **fp16/bf16**；③ MLA 降 smem。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o109_ab.out.txt`、`..._o109_nsys_overlap.out.txt`、
   `..._o109_nsys_kernsum.out.txt`、`..._o109_macrosweep.out.txt`；见 `docs/08` §5.117。
+
+## 132. 第 204 轮：O110——量化分相/LSE 重叠扩到 D=256/D=512 + phase1 栅格封顶（端到端正结果，默认）
+
+### 132.1 动机（O109 只覆盖了 D=128；D>128 的非 main 占比更大）
+
+O109（§131）把定长 **D=128** 的「量化 Q/K → LSE(default) || dO+delta/V/清零(aux)」跨 stream 重叠
+默认化，但显式留了「D=256/512 与 varlen 未接入」。而 D>128 的**非 main 占比反而更大**（见下表
+`quant+preprocess` 列），且三者复用同一 `quantize_zero_delta_phase_kernel<VPT>`（`VPT=D/32`）——
+LSE 与 phase1 同样资源互补，故这是 O109 的自然覆盖推广。
+
+### 132.2 nsys 揭示的机制（重叠率才是瓶颈，不是「有没有重叠」）
+
+对 D=256 S1024H8 与 D=512 S1024H2 取 `nsys cuda_gpu_trace`（原始输出
+`src/fp8/fa_bwd_fp8_o110_nsys.out.txt`）：
+
+| case | 档 | phase1 时长 / grid | LSE 时长 | phase1↔LSE 重叠 |
+|---|---|---|---|---|
+| D=256 S1024H8 | 不封顶（`--ovlcap=-1`）| 14.5µs / 10240 CTA | 12.4µs | **≈0**（LSE 起于 phase1 结束后）|
+| D=256 S1024H8 | auto 封顶 | 16.1µs / **640** CTA | 14.5µs | **3.8µs** |
+| D=512 S1024H2 | 不封顶 | 8.0µs / 2560 CTA | 8.9µs | **≈0** |
+| D=512 S1024H2 | auto 封顶 | 12.5µs / **160** CTA | 10.2µs | **3.5µs** |
+
+即 phase1 的默认栅格巨大**几乎占满 SM**，LSE 只能等其尾部才开始（不封顶时**零重叠**），
+远小于 `min(phase1,LSE)` 的理论上界。⇒ **把 phase1 栅格封顶**，让它仍打满 DRAM、
+同时给 LSE 留出 SM 槽，是真重叠率的关键（封顶后 phase1 自身略慢，但净时间下降）。
+
+### 132.3 实现（device 数学一行未改；host + 一个 kernel 的 grid 参数）
+
+- **gating**：`ovlql_req = (D==128) || ((D==256||D==512) && rows_q=B*S*H >= 2048)`，且
+  `qfuse && qfast && dfuse && delta_warp_sel && qcap_opt<=0`（D=128 保持 O109 无条件默认，
+  逐值回归）。`rows_q>=2048` 门控掉「非 main 体量太小、分相 launch/event 开销盖过收益」的小
+  shape（如 D=512 S512H2 full，total 0.075ms，实测 0.993×）。
+- **phase1 栅格封顶**（`--ovlcap=N`：`0`=auto，`>0` 显式，`<0` 不封顶=O109 旧行为）：
+  auto = `clamp(ntask/64, 132, 4096)`（`ntask=2*rq+3*rkv`，即每 warp ~16 行）。封顶只改
+  `gridDim.x`，`quantize_zero_delta_phase_kernel` 本就是 grid-stride（`t += gridDim.x*NW`），
+  每行的 amax/scale/cvt/delta 与谁来做**无关** ⇒ 输出**逐位相同**。
+- **device 一行未改**：既有的 phase kernel / LSE / main 全部复用。单/两文件同步
+  （两文件 `fa_bwd_fp8_main.cu`、单文件 `fa_bwd_fp8_mma_onefile.cu`）。
+
+### 132.4 实测（同 binary A/B，iters=300，3× 取中位）
+
+| case | serial `--ovlql=0` (ms) | O110 `--ovlql=1` (ms) | 加速 |
+|---|---|---|---|
+| b1_s512_h16_d128_causal_fp8 | 0.0817 | **0.0772** | **1.058×** |
+| b1_s1024_h32_d128_causal_fp8 | 0.3106 | **0.3022** | **1.028×** |
+| b1_s4096_h16_d128_causal_fp8 | 1.5841 | 1.5771 | 1.004× |
+| b1_s1024_h64_d128_kv1_causal（MQA）| 0.5216 | **0.5060** | **1.031×** |
+| b1_s1024_h40_d128_kv8_causal（GQA q40/kv8）| 0.3311 | **0.3170** | **1.044×** |
+| b1_s1024_h8_d256_causal_fp8 | 0.2329 | **0.2287** | **1.018×** |
+| b1_s2048_h8_d256_causal_fp8 | 0.7437 | **0.7329** | **1.015×** |
+| b1_s1024_h16_d256_full_fp8 | 0.7359 | **0.7263** | **1.013×** |
+| b1_s512_h8_d256_full_fp8 | 0.1161 | 0.1163 | 0.998×（噪声）|
+| b1_s1024_h2_d512_causal_fp8 | 0.1466 | **0.1448** | **1.012×** |
+| b1_s512_h4_d512_causal_fp8 | 0.0978 | **0.0953** | **1.026×** |
+| b1_s2048_h2_d512_full_fp8 | 0.7578 | **0.7493** | **1.011×** |
+| b1_s1024_h2_d512_full_fp8 | 0.2192 | **0.2184** | **1.004×** |
+| b1_s512_h2_d512_full_fp8 | 0.0744 | 0.0749 | 0.993×（**门控外**，两路径同码 ⇒ 纯噪声 0.7%）|
+
+`--ovlcap` 扫描（`--ovlql=1`，iters=300；单位 ms）：
+
+| case | cap=0(auto) | 132 | 264 | 396 | 528 | 792 | 1056 | 2112 |
+|---|---|---|---|---|---|---|---|---|
+| b1_s1024_h8_d256 | 0.2291 | 0.2511 | 0.2366 | 0.2311 | 0.2297 | 0.2279 | **0.2276** | 0.2282 |
+| b1_s1024_h2_d512 | 0.1453 | **0.1428** | 0.1456 | 0.1456 | 0.1451 | 0.1453 | 0.1442 | 0.1447 |
+| b1_s512_h16_d128 | 0.0792 | 0.0943 | 0.0827 | 0.0792 | 0.0777 | 0.0773 | 0.0775 | **0.0765** |
+
+⇒ 过大的 `cap`（不封顶）与过小的 `cap`（132，D=128/256 的 phase1 供不上 DRAM）都差；
+auto 的 `ntask/64` 在 D=128（≈2560）/ D=256（≈640）/ D=512（≈160）各自都落在最优点附近。
+
+### 132.5 数值 / 回归（护栏）
+
+- `ours vs fp32 ref` 的 `max_abs` 在 `--ovlql=0` 与 `--ovlql=1` 之间**逐位相同**（14 case ×3 次
+  全部 `identical=True`）；封顶只改「哪根 warp 处理哪一行」，每行计算独立 ⇒ 输出不变。
+- 单/两文件一致性 gate 见 §132.6（CI）。D=128 的 O109 默认行为逐值回归。
+
+### 132.6 结论 / 下一步
+
+- **判决：正结果、默认**（`--ovlql=0` 退、`--ovlcap` 可调）。小/中 shape **1.5–5.8%**、旗舰 D=128
+  causal MHA/GQA/MQA **2.8–4.4%**、S=4096（main 主导）~0.4%。
+- **still blocked**：main 的 L2 `red`（dK/dV 跨 CTA 归约）仍是本卡无软件解的主体墙（见「阻塞」）。
+- **下一步候选**：① 换卡；② causal 变长 ksplit 复核推广到 fp16/bf16；③ MLA 降 smem；
+  ④ 把同款「分相 + 封顶重叠」推广到 **varlen** 路径（`run_varlen` 现仍是合并量化串行）。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o110_ab.out.txt`、`..._o110_ci.out.txt`。

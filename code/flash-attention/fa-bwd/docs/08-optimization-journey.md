@@ -2457,3 +2457,28 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 
 见 `docs/03` §131；原始输出 `src/fp8/fa_bwd_fp8_o109_ab.out.txt`、`..._o109_nsys_overlap.out.txt`、
 `..._o109_nsys_kernsum.out.txt`、`..._o109_macrosweep.out.txt`。
+
+### 5.118 第 204 轮（O110）：量化分相/LSE 重叠扩到 D=256/D=512 + phase1 栅格封顶 —— **正结果（默认）**
+
+- **动机**：落实 O109（§5.117）明确留下的「D=256/512 与 varlen 未接入」。D>128 的非 main 占比
+  更大，且三者复用同一 `quantize_zero_delta_phase_kernel<VPT=D/32>`——LSE 与 phase1 同样资源互补。
+- **nsys 揭示真瓶颈是「重叠率」而非「有没有重叠」**：phase1 默认栅格巨大（D=256 10240 CTA /
+  D=512 2560 CTA）几乎占满 SM，LSE 只能等其尾部，**不封顶时实测重叠 ≈0**（D=256 phase1
+  14.5µs/LSE 12.4µs 严格背靠背）。⇒ **给 phase1 栅格封顶**（auto `clamp(ntask/64,132,4096)`）
+  让 LSE 拿到 SM 槽，封顶后重叠 ~3.5–3.8µs（phase1 自身略慢但净时间下降）。
+- **改动（device 数学一行未改、单/两文件同源）**：① gating 放开到 `D∈{128,256,512}`，
+  但 D>128 加 `rows_q=B*S*H>=2048`（否则小 shape 的分相 launch/event 开销盖过收益，
+  如 D=512 S512H2 full 实测 0.993×）；② `quant_phase` 对 `phase1` 做 `grid=min(grid,cap)`，
+  `--ovlcap=0(auto)/N/<0(off)`；封顶只改 `gridDim.x`，kernel 本就 grid-stride ⇒ 输出逐位相同。
+- **性能（同 binary A/B，iters=300，3×）**：D=128 causal **S512 1.058× / S1024H32 1.028× /
+  MQA(kv1) 1.031× / GQA(kv8) 1.044× / S4096 1.004×**；D=256 causal S1024 1.018× / S2048 1.015×、
+  full S1024H16 1.013×；D=512 causal S1024H2 1.012× / S512H4 1.026×、full S2048H2 1.011×。
+- **数值/回归**：`ours vs ref` 的 `max_abs` 在 `--ovlql=0/1` 间**逐位相同**（14 case×3 全
+  `identical=True`）；单/两文件 gate 与 `--check docs/04` 见 `..._o110_ci.out.txt`。
+- **对标**：TE fp8 仅支持 D=128（S1024H32 0.0743ms / S4096 0.3022ms）= ours total 的
+  **4.07× / 5.22×**（O109 时 4.11× / 5.20×）；D=256/512 无 FA3/TE fp8 反向基线。
+- **判决**：正结果、默认。main 的 L2 `red` 主体墙仍无软件解（见「阻塞」）；
+  下一步候选：① 换卡；② causal 变长 ksplit 复核推广到 fp16/bf16；③ MLA 降 smem；
+  ④ 把分相+封顶重叠推广到 varlen。
+
+见 `docs/03` §132；原始输出 `src/fp8/fa_bwd_fp8_o110_ab.out.txt`、`..._o110_ci.out.txt`。
