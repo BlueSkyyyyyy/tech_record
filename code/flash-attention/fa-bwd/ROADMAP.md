@@ -9245,6 +9245,41 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     `src/fp8/fa_bwd_fp8_o124_ncu_{ours,redstore,te}_s4096.out.txt`、
     `..._o124_sass_hist.out.txt`、`..._o124_mlawgm_probe.out.txt`。
 
+- 2026-10-01（第二百一十九轮，补记）：**O125——fp8 `red` 墙的「表示无关性」终局核对**
+  （**诊断/收口，默认一行未改**）。三方 L2 `red` 计数钉死：默认 `kvtma` **请求==扇区==105.38M
+  （1 扇区/请求，字节 3.37GB）**；`-DFA_BULKRED=1` 把请求砍半（51.07M）但扇区 +12%、Duration
+  0.94×；TE `UTMAREDG.4D` **6.49M 请求 / 25.96M 扇区 / 0.83GB（4 扇区/请求）**。⇒ **L2 `red`
+  扇区 == 贡献字节/32B，只由「每 KV 元素被多少 CTA 贡献」决定**；交易粒度是正交且无收益维度。
+  见 `docs/03` §146、`docs/08` §5.133；原始输出
+  `src/fp8/fa_bwd_fp8_o125_ncu_{ours,bulkred,te}_s4096.out.txt`。
+
+- 2026-10-01（第二百二十轮，补记）：**O126——fp8 主 kernel 最后一条 mma 路径 MLA（D=512）
+  切 wgmma 几何**（**负结果，opt-in `--mlawgm`，默认 0**）。放开 `fp8_mma_body` 的 HD 断言到 512
+  + host `--mlawgm`（4-warp/1 WG）；SASS **32×QGMMA+384×HMMA**。数值同精度档（relL2 差 ≤0.02%、
+  护栏内）；**性能 S512/S1024/S4096 = 0.682/0.699/0.673×**。ncu：wgmma 使 `short_sb 1.39→0.70`、
+  L1 49.7→31.3%、L2 83.0→54.7%，**但 warp 8→4、寄存器 245→255、仍 1 CTA/SM** ⇒ 省下的 issue
+  填不满腰斩的 warp。**fp8 各 dtype/shape 的 wgmma 路径至此全部覆盖，正结果只剩换卡。**
+  见 `docs/03` §147、`docs/08` §5.134；原始输出 `src/fp8/fa_bwd_fp8_o126_mlawgm_ab.out.txt`。
+
+- 2026-10-01（第二百二十一轮）：**O127——fp8 主 kernel 的编译期占据率旋钮 `FA_MAIN_CTA`
+  （`__launch_bounds__` min-blocks）—— 负结果，默认 3，一行数学未改**。补上 O116/O117 只扫
+  **host/运行期**旋钮留下的**编译期**旋钮类：默认 `kvtma`/`qdtma`/通用 WGMMA 壳对 `HD==128/
+  BN<=32` 的 min-blocks 一直写死 3，从未在当前生产构建（全 TMA+hswap/k=2）做过 2/3/4 A/B。
+  `Fp8Cfg` 加 `FA_MAIN_CTA`（默认 3），只替换三壳的 `__launch_bounds__`；单/两文件 device 同步。
+  - **性能（S4096 H16 B1 causal，iters=30）**：CTA=3 main **1.3689ms / total 1.5797ms / 87.0TF**；
+    CTA=2 main **1.5890（0.861×）**、CTA=4 main **2.1110（0.648×）**。三者对拍**逐位相同**
+    （2.635/2.644/3.216e-1）⇒ 只改寄存器分配。
+  - **ncu（`regex:kvtma`）**：CTA=3 = 168 regs / **3 CTA/SM** / warps 18.67% / `red` 105,381,888 /
+    short_sb 1.48 / wait 1.54；**CTA=2 = 212 regs / 2 CTA/SM / warps 12.47% / `red` 一字不变 /
+    short_sb 1.03 / wait 1.41**；CTA=4 受 74816B smem 墙无占据率回报、只吃 128-reg spill。
+  - **机制**：更多寄存器确实压低 issue stall（`short_sb` −30%），**但 L2 搬运量一字不变**、少掉的
+    4 warp/SM 暴露的延迟补不回来 ⇒ 本 kernel 在 3 CTA/SM/12 warp 已是「寄存器 budget ↔
+    occupancy」最优点。**编译期占据率旋钮至此也收口**；与 O116/O117 +「正结果只剩换卡」一致。
+  - **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙无软件解）；② 覆盖型 backlog：
+    **fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；③ 非 main `--det`/量化（O116 无余量）。
+    见 `docs/03` §148、`docs/08` §5.135；原始输出 `src/fp8/fa_bwd_fp8_o127_cta_ab_s4096.out.txt`、
+    `..._o127_ncu_cta{2,3}_s4096.out.txt`。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
