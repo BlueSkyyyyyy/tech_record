@@ -7286,6 +7286,8 @@ int main(int argc, char** argv) {
   // O109：量化分相 + LSE 跨 stream 重叠（默认 -1=auto，定长 D=128 默认融合路径开）。
   //   `--ovlql=0` 退回原「合并量化 → LSE → main」串行做同 binary A/B。数值逐位相同。
   int ovl_ql = -1;
+  // O110：phase1 栅格封顶（0=auto，>0 显式，<0 不封顶）。
+  int ovl_cap = 0;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
@@ -7316,6 +7318,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--d128w=", 0) == 0) d128w_opt = atoi(a.c_str() + 8);
     else if (a == "--d128w") d128w_opt = 1;
     else if (a.rfind("--ovlql=", 0) == 0) ovl_ql = atoi(a.c_str() + 8);
+    else if (a.rfind("--ovlcap=", 0) == 0) ovl_cap = atoi(a.c_str() + 9);
     else if (a.rfind("--det=", 0) == 0) det_ab = atoi(a.c_str() + 6);
     else if (a == "--det") det_ab = 1;
     else if (a.rfind("--detk=", 0) == 0) det_ksplit = atoi(a.c_str() + 7);
@@ -7613,6 +7616,14 @@ int main(int argc, char** argv) {
     const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
     const long long ntask = (ph == 0) ? (rq + rkv) : (2 * rq + 3 * rkv);
     int grid = (int)std::min<long long>((ntask + 3) / 4, 1048576);
+    // O110：phase1 栅格封顶（0=auto=ntask/64 clamp[132,4096]；>0 显式；<0 不封顶）。见两文件版。
+    if (ph == 1) {
+      long long cap;
+      if (ovl_cap < 0) cap = grid;
+      else if (ovl_cap > 0) cap = ovl_cap;
+      else cap = std::min<long long>(std::max<long long>(132, ntask / 64), 4096);
+      grid = (int)std::min<long long>(grid, cap);
+    }
     if (D == 128)
       quantize_zero_delta_phase_kernel<4><<<grid, 128, 0, st>>>(
           d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
@@ -8249,9 +8260,12 @@ int main(int argc, char** argv) {
                                                         (int)causal, ksplit, nullptr, nullptr, d_mrev);
   };
 
-  // O109：量化分相 + LSE 跨 stream 重叠（定长 D=128 默认融合路径；`--ovlql=0` 关）。
-  const bool ovlql_req = (D == 128) && qfuse && qfast && dfuse && delta_warp_sel &&
-                         (qcap_opt <= 0);
+  // O109：量化分相 + LSE 跨 stream 重叠（定长融合路径；`--ovlql=0` 关）。
+  // O110（第 204 轮）：扩到 D=256 / D=512（同 `quantize_zero_delta_phase_kernel<VPT>`，VPT=D/32），
+  //   用 `rows_q=B*S*H ≥ 2048` 门控，避免小 shape 上分相 launch/event 开销盖过重叠收益。
+  //   D=128 保持 O109 无条件默认。
+  const bool ovlql_req = ((D == 128) || ((D == 256 || D == 512) && rows_q >= 2048)) && qfuse &&
+                         qfast && dfuse && delta_warp_sel && (qcap_opt <= 0);
   const bool ql_overlap = ovlql_req && (ovl_ql != 0);
   cudaStream_t sQuantAux = nullptr;
   cudaEvent_t ql_e0 = nullptr, ql_e1 = nullptr;
@@ -8259,7 +8273,7 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaStreamCreateWithFlags(&sQuantAux, cudaStreamNonBlocking));
     CUDA_CHECK(cudaEventCreateWithFlags(&ql_e0, cudaEventDisableTiming));
     CUDA_CHECK(cudaEventCreateWithFlags(&ql_e1, cudaEventDisableTiming));
-    printf("O109: quant-phase overlap ON (Q/K -> LSE(default) || dO+V+zero(aux))\n");
+    printf("O109/O110: quant-phase overlap ON (Q/K -> LSE(default) || dO+V+zero(aux)), D=%d\n", D);
   } else if (ovl_ql == 1) {
     printf("O109: overlap requested but conditions unmet (D=%d qfuse=%d qfast=%d dfuse=%d) -> serial\n",
            D, qfuse, qfast, dfuse);

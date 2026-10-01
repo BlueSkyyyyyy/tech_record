@@ -3273,16 +3273,34 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       的跨阶段串行（main 的 L2 `red` 已判无解）。新增 `quantize_zero_delta_phase_kernel<VPT>`
       （phase0=Q/K、phase1=dO+delta/V/清零；逐行例程与合并版逐字同款 ⇒ 输出逐位相同）+ host
       `phase0 → {phase1(aux) || LSE} → main`；S512 **1.030×**、S1024H32 1.017×、kv4 1.016×、
-      S4096 1.005×；nsys 证 LSE 与 phase1 区间重叠；`--ci --dtype fp8 --hopper` gate
+       S4096 1.005×；nsys 证 LSE 与 phase1 区间重叠；`--ci --dtype fp8 --hopper` gate
       **7.153e-06 OK**。见 `docs/03` §131、`docs/08` §5.117。
+- [x] **O110**（第 204 轮，**正结果/默认**）**量化分相/LSE 重叠扩到 D=256/D=512 + phase1 栅格
+      封顶**——nsys 证 phase1 默认栅格几乎占满 SM（不封顶重叠 ≈0），给 `phase1` 封顶后重叠 3.5–3.8µs
+      提重叠率；D=128 causal 1.004–1.058×、D=256 1.013–1.018×、D=512 1.004–1.026×；输出逐位
+      相同。见 `docs/03` §132、`docs/08` §5.118。
 - [ ] 每步：`ncu` 复测 **L2 扇区/`red`/Duration**，与 TE（`harness/te_fp8_ncu.py`）同 session 对比；
       `harness/fa_vs_te_bwd_only.py` 纯反向验收；数值逐位/容差不变。
 - 目标：fp8 S4096 从 ~1.95ms（6.4× TE）→ 先到 **3× TE**，再逼近 **2×**。**注**：main 的 L2
-  `red` 墙需换卡；O109 后 S4096 已 5.20× TE，剩余只能靠非 main 的进一步并行化。
+  `red` 墙需换卡；O109/O110 后 S4096 已 5.22× TE，剩余只能靠非 main 的进一步并行化。
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百零三轮）**：**O109——量化分相 + LSE 跨 stream 重叠（fp8 端到端，正结果/默认）**。
+> **最新（第二百零四轮）**：**O110——量化分相/LSE 重叠扩到 D=256/D=512 + phase1 栅格封顶
+> （fp8 端到端，正结果/默认）**。落实 O109 留的「D=256/512 未接入」。nsys 证 phase1 与 LSE
+> 确实重叠，但 phase1 默认栅格巨大（D=256 10240 CTA / D=512 2560 CTA）几乎占满 SM ⇒ LSE 只能
+> 等其尾部，**不封顶时实测重叠 ≈0**（D=256 phase1 14.5µs/LSE 12.4µs 背靠背）——真瓶颈是
+> **重叠率**。于是给 `phase1` 栅格封顶
+> （auto `clamp(ntask/64,132,4096)`，`--ovlcap=0/N/<0`；只改 `gridDim.x`，kernel 本就 grid-stride
+> ⇒ 输出逐位相同）。**性能（同 binary A/B，iters=300，3×）**：D=128 causal **1.004–1.058×**
+> （S512 1.058× / S1024H32 1.028× / MQA 1.031× / GQA 1.044×）、D=256 **1.013–1.018×**、
+> D=512 **1.004–1.026×**。`ours vs ref` `max_abs` 在 `--ovlql=0/1` 间**逐位相同**（14 case×3）。
+> TE fp8（仅 D=128）S1024H32 0.0743ms / S4096 0.3022ms = ours **4.07× / 5.22×**。
+> **下一步候选**：① **换卡**（main 的 L2 `red` 主体墙无软件解，见「阻塞」）；② 把 causal 变长
+> ksplit 复核推广到 **fp16/bf16**；③ MLA 降 smem；④ 把分相+封顶重叠推广到 varlen。见 `docs/03`
+> §132、`docs/08` §5.118。
+>
+> **（第二百零三轮）**：**O109——量化分相 + LSE 跨 stream 重叠（fp8 端到端，正结果/默认）**。
 > 本轮先钉死 fp8 **main** 已在平台期：ncu 复核默认 `kvtma`（ksplit=2 + 跨 head LPT）main
 > **1.38ms / L2 77.8% / `red` 105.4M / 张量核 11.65% / short 1.85 + wait 1.54**（与 O92 一致）；
 > 编译宏复扫 `FA_WS1` 中性、`ILV34` **0.911×**、`FA_R4` **0.951×**（`src/fp8/fa_bwd_fp8_o109_macrosweep.out.txt`）
@@ -8505,6 +8523,31 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     **下一步候选**：① 换卡；② causal 变长 ksplit 复核推广到 fp16/bf16；③ MLA 降 smem。
     见 `docs/03` §131、`docs/08` §5.117；原始输出 `src/fp8/fa_bwd_fp8_o109_ab.out.txt`、
     `..._o109_nsys_overlap.out.txt`、`..._o109_nsys_kernsum.out.txt`、`..._o109_macrosweep.out.txt`。
+
+- 2026-10-01（第二百零四轮）：**O110——量化分相/LSE 重叠扩到 D=256/D=512 + phase1 栅格封顶
+  （fp8 端到端，正结果/默认）**。落实 O109 明确留下的「D=256/512 未接入」。
+  - **动机 + nsys 机制**：D>128 非 main 占比更大，且三者复用同一
+    `quantize_zero_delta_phase_kernel<VPT=D/32>`。nsys（D=256/D=512）证 phase1 与 LSE 确实
+    区间重叠，但 phase1 默认栅格巨大（10240 / 2560 CTA）几乎占满 SM ⇒ LSE 只能等其尾部，
+    **不封顶时实测重叠 ≈0**（D=256 phase1 14.5µs/LSE 12.4µs 严格背靠背）。真瓶颈是**重叠率**。
+  - **改动（device 数学一行未改、单/两文件同源）**：① gating 放开到 `D∈{128,256,512}`，
+    D>128 加 `rows_q=B*S*H>=2048`；② `quant_phase` 的 `phase1` 栅格封顶
+    `grid=min(grid,cap)`，auto `cap=clamp(ntask/64,132,4096)`，`--ovlcap=0(auto)/N/<0(off)`。
+    封顶只改 `gridDim.x`，kernel 本就 grid-stride ⇒ 输出逐位相同。
+  - **性能（同 binary A/B，iters=300，3×）**：D=128 causal **S512 1.058× / S1024H32 1.028× /
+    MQA(kv1) 1.031× / GQA(kv8) 1.044× / S4096 1.004×**；D=256 causal S1024 1.018× / S2048
+    1.015×、full S1024H16 1.013×；D=512 causal S1024H2 1.012× / S512H4 1.026×、full S2048H2
+    1.011×；D=512 S512H2 full（门控外）0.993× 为噪声。
+  - **数值/回归（护栏）**：`ours vs fp32 ref` `max_abs` 在 `--ovlql=0/1` 间**逐位相同**（14
+    case×3 全 `identical=True`）；单/两文件 gate 与 `--check docs/04` 见
+    `..._o110_ci.out.txt`；D=128 O109 默认逐值回归。
+  - **对标**：TE fp8 仅 D=128（S1024H32 0.0743ms/462TF、S4096 0.3022ms/910TF）= ours total 的
+    **4.07× / 5.22×**；D=256/512 无 FA3/TE fp8 基线。
+  - **判决：正结果、默认开启**。压的仍是**非 main 串行**；main 的 L2 `red` 主体墙仍无软件解。
+    **下一步候选**：① 换卡；② causal 变长 ksplit 复核推广到 fp16/bf16；③ MLA 降 smem；
+    ④ 把分相+封顶重叠推广到 varlen（`run_varlen` 现仍是合并量化串行）。
+    见 `docs/03` §132、`docs/08` §5.118；原始输出 `src/fp8/fa_bwd_fp8_o110_ab.out.txt`、
+    `..._o110_ci.out.txt`。
 
 ## 灵感 / backlog
 
