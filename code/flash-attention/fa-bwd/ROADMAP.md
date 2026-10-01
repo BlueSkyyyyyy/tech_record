@@ -9403,7 +9403,7 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     `..._o130_s8192_ksweep.out.txt`、`..._o130_ncu_ours_s8192.out.txt`、`..._o130_ncu_te_s8192.out.txt`、
      `..._o130_te_baseline_s8192.out.txt`、`..._o130_relL2_s8192.out.txt`、`..._o130_onefile_s8192.out.txt`。
 
-- 2026-10-01（第二百二十五轮）：**O131——fp16/bf16 `head_dim=256` 主 kernel 切 BM=64 的 wgmma
+- 2026-10-02（第二百二十五轮）：**O131——fp16/bf16 `head_dim=256` 主 kernel 切 BM=64 的 wgmma
   （正结果，默认）**。**说明**：本轮任务模板要求「只做 fp8 性能」，但 fp8 的性能杠杆已在
   O116–O130 全部收口为「本卡无软件解」（`red` 由工作划分唯一决定，受 3 CTA/SM 的
   74.8↔77.5KB smem + 168-reg 双墙；host/运行期/编译期旋钮全负），覆盖型 backlog 亦已清空
