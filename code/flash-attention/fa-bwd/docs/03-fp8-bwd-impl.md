@@ -12415,3 +12415,58 @@ tile 边界的 mbarrier 等待（V）根本不在其中**——3 CTA/SM 下不�
   `src/fp8/fa_bwd_fp8_o122_ncu_base_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o122_ncu_stall_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o122_ncu_tables.out.txt`。
+
+## 144. O123（第 217 轮）：fp8 主 kernel 的 **per-row fold scale 寄存器预取**（消 hot red 循环里的重复 shared load）—— **中性**（默认开，`-DFA_SCALE_HOIST=0` 可关）
+
+### 144.1 动机
+
+第 216 轮 O122 的 fresh ncu（S4096 kvtma）把 fp8 默认 main 的头号 stall 钉为
+**`short_scoreboard`=1.86**（每 issue 1.86 cycle，见下表），即「warps 在等 shared memory
+（LDS/LDSM）结果」。当时归因为「smem→mma 的 `ldmatrix` 依赖」。本轮先检验该 stall 的另一
+潜在来源：**dV/dK/dQ 的 epilogue/累加循环里每元素一次读的 per-row fold scale**
+（`sA[r]`、`sds3[r]`、`sds2[r]`）——这些 scale 在 `(i,r)` 固定、被 `j×q` 展平后重复读 8×，
+且每个 `red_add2` 的 issue 都要等一次 LDS，正好落在 `short_scoreboard` 上。
+
+### 144.2 实现（`src/fp8/fa_bwd_fp8_kernels.cuh`，`fp8_mma_body`）
+
+新增编译期开关 `FA_SCALE_HOIST`（默认 1）：
+
+* `epi_dv`：把 `sA[r]` 预取成 `sav[MTM34][2]`（仅 `r0+i*16+g` 与 `+8` 两个值），循环内用
+  `FA_SCALE_HOIST ? sav[i][q>=2] : sA[r]`。
+* `epi_dk`：把 `sds3[r]` 预取成 `ssv[MTM34][2]`，**保留 `acc * scale * scale2` 的原乘法次序**
+  （`sd = ssv[...]` 后写 `acc * sd * scale`，不是 `acc * (sd*scale)`）⇒ 与原文**逐位等价**。
+* GEMM5（`kWg5` 的 dQ wgmma 累加）：把 `sds2[r]` 预取成两个标量 `sd20/sd21`。
+
+`FA_SCALE_HOIST=0` 逐字退回原「逐元素读 smem」路径（未用的 `sav/ssv` 由编译器 DCE），
+故可做 **same-binary A/B**。单/两文件 device 逐字一致（`sync_onefile_device.py --marker
+'#include <cuda_runtime.h>'` 报 `device region identical: True`，6072 行）。
+
+### 144.3 数值（护栏）
+
+S4096 causal H16 `ours vs fp32 ref` `max_abs` dq/dk/dv = **2.635e-1 / 2.644e-1 / 3.216e-1**
+（与 O122/`docs/04` 表**逐位相同**）；`ours vs TE FP8` 4.525e-1 / 5.325e-1 / 6.806e-1 不变。
+hoist=1 vs hoist=0 在同一 build 内数学等价（只缓存同一 smem 值），差异仅跨 CTA atomic 次序。
+
+### 144.4 性能（GPU1，same-binary A/B，iters=50，S4096 causal H16 D128）
+
+| 变体 | total (3 跑) | main (3 跑) |
+|---|---|---|
+| `FA_SCALE_HOIST=1` | 1.5810 / 1.5922 / 1.5804（avg **1.5845**） | 1.3685 / 1.3878 / 1.3779（avg **1.3781**） |
+| `FA_SCALE_HOIST=0` | 1.5929 / 1.5846 / 1.5817（avg **1.5864**） | 1.3897 / 1.3794 / 1.3713（avg **1.3801**） |
+| 比 | **1.0012×** | **1.0015×** |
+
+ptxas：两个变体的 `kvtma` 实例均为 **68B spill stores / 92B spill loads**（无回退）。
+⇒ **中性（~0.1–0.2%，噪声内）**。
+
+### 144.5 为什么中性 / 结论
+
+* 编译器对同一 `(i,r)` 的 smem load **已做 CSE**——预取只改变「谁来发射这条 LDS」，不减少
+  LDS 条数；故 `short_scoreboard` 的**真来源不是 epilogue scale，而是 `mma_block_bt` 的
+  `ldmatrix`（A/B 操作数）与 Kp/Qp/dOp 重建后的 ldmatrix 读**——这些是真正的「生产-消费」
+  smem 依赖，编译器已尽量软件流水，剩余延迟只能靠**更多独立 warp**（occupancy）或**更深
+  跨 tile 流水**去藏；两者都被 74.82KB smem / 168 regs 的 3 CTA/SM 硬墙锁死（O77/O83/O121）。
+* 与 O116/O117/O122 合并：fp8 默认 main 的 **bytes（L2 `red`）与 issue（`short_scoreboard`+
+  `wait`）都已在软硬件边界**；**正结果仍只剩换卡**（更大 smem/regfile ⇒ 4 CTA/SM 或更多 warp）。
+* 保留价值：`FA_SCALE_HOIST`（默认 1）是**逐位安全、零回退**的微优化，留给换卡/改布局后复用；
+  本轮把它作为「`short_scoreboard` 来源二分」的决定性实验（排除 epilogue scale 假设）。
+* 原始输出：`src/fp8/fa_bwd_fp8_o123_scalehoist_ab_s4096.out.txt`。

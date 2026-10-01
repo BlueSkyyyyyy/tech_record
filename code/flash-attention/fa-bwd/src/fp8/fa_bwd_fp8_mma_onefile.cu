@@ -199,6 +199,17 @@ struct Fp8Cfg {
 #define FA_VWAIT_TOP 0
 #endif
 
+  // O123（第 217 轮）：把 per-row fold scale（`sA`/`sds3`/`sds2`）从 hot red/累加循环里的
+  //   重复 shared load **预取进寄存器**。fresh ncu（S4096 kvtma）显示**头号 stall 是
+  //   `short_scoreboard`=1.86**（smem→mma/red 依赖），而这些 scale 在同一 `(i,r)` 上被
+  //   `j×q` 展平后重复读 8×；每个 red `float2` 的 issue 都要等一次 LDS，正好吃 short_scoreboard。
+  //   默认 1（开启）。`-DFA_SCALE_HOIST=0` 退回原「逐元素读 smem」做 same-binary A/B。
+  //   数值**逐位不变**：只缓存同一 smem 值，且保留 `acc * scale * scale2` 的原乘法次序。
+  //   仅作用于 KWg5 的 dQ 累加与 kWg34=0 的 mma GEMM3/4 epilogue（即默认 kvtma 快路）。
+#ifndef FA_SCALE_HOIST
+#define FA_SCALE_HOIST 1
+#endif
+
   // O4b：Kt/Qt/dOt 三个「逐字节 scatter 写的转置副本」→ Kp/Qp/dOp 三个 **K 配对布局**
   //   （uint16：[K/2][HD]，元素 = 2 个相邻 K 值），用 `ldmatrix.x2.trans` 读 B 片段。
   //   * Qp（[BM/2][HD]）供 GEMM4 的 B=Qᵀ；dOp 供 GEMM3 的 B=dOᵀ；Kp（[BN/2][HD]）供 GEMM5。
@@ -3805,6 +3816,16 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       auto epi_dv = [&](float (&acc)[MTM34][NTM34][4]) {
         const int r0 = wr * GM34, c0 = wc * GN34;
         float* wstg = pstg + wid * (STGR * STGS);
+        // O123（第 217 轮）：把 per-row 的 fold scale `sA[r]`（P 的行缩放）预取进寄存器——
+        //   fresh ncu 的**头号 stall 是 `short_scoreboard`=1.86**（smem→mma/red 依赖），
+        //   而本 epilogue 每个元素都要读一次 `sA[r]`（同一 (i,r) 在 j×q 展平后重复 8×）。
+        //   逐位不变（只缓存同一 smem 值）。
+        float sav[MTM34][2];
+#pragma unroll
+        for (int i = 0; i < MTM34; ++i) {
+          sav[i][0] = sA[r0 + i * 16 + g];
+          sav[i][1] = sA[r0 + i * 16 + g + 8];
+        }
 #pragma unroll
         for (int i = 0; i < MTM34; ++i)
 #pragma unroll
@@ -3812,6 +3833,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 #pragma unroll
             for (int q = 0; q < 4; ++q) {
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              const float sa = FA_SCALE_HOIST ? sav[i][(q >= 2) ? 1 : 0] : sA[r];
               int c = c0 + j * 8 + c2;
               int jg = j0 + r;
               if constexpr (FA_R4 && !kBulkRed && !DET) {
@@ -3821,15 +3843,15 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                   float b2 = __shfl_down_sync(0xffffffffu, acc[i][j][q + 1], 1);
                   if (jg < len && (lane & 1) == 0)
                     red_add4(dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
-                             acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r], a2 * sA[r],
-                             b2 * sA[r]);
+                             acc[i][j][q] * sa, acc[i][j][q + 1] * sa, a2 * sa,
+                             b2 * sa);
                 }
               } else if (jg < len) {
                 if constexpr (kBulkRed) {
                   // O42：写 per-warp staging（行=warp 内 KV 行，列=warp 内 64 列），
                   //   随后由 `bulk_flush` 一次性 coalesced 归约回 global。
                   wstg[(i * 16 + g + (q >= 2 ? 8 : 0)) * STGS + (j * 8 + c2 + (q & 1))] =
-                      acc[i][j][q] * sA[r];
+                      acc[i][j][q] * sa;
                 } else if constexpr (DET && DET_HALF) {
                   // F4：fp16 partial + O62 扇区化——把 group `j`、`j+1` 的两个 half2 拼成一次
                   //   8B 写（4 lane 覆盖连续 32B），列地址走 16 列块内置换（与 reduce 读回一致）。
@@ -3839,8 +3861,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                             ? ((size_t)part_base[b] + ((size_t)h * nblk_seq + mblk) * len + jg) * HD
                             : (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD;
                     const size_t dpo = rb + d0 + c0 + (j >> 1) * 16 + (lane & 3) * 4;
-                    dkv_det_store_h4(dv_part, dpo, acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r],
-                                     acc[i][j + 1][q] * sA[r], acc[i][j + 1][q + 1] * sA[r]);
+                    dkv_det_store_h4(dv_part, dpo, acc[i][j][q] * sa, acc[i][j][q + 1] * sa,
+                                     acc[i][j + 1][q] * sa, acc[i][j + 1][q + 1] * sa);
                   }
                 } else if constexpr (DET) {
                   // P3-4e：非原子写 partial（每元素本 CTA 唯一）→ 固定次序二次归约。
@@ -3851,7 +3873,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                             ? ((size_t)part_base[b] + ((size_t)h * nblk_seq + mblk) * len + jg) * HD +
                                   d0 + c
                             : (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + d0 + c;
-                    dkv_det_store(dv_part + dpo, acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r]);
+                    dkv_det_store(dv_part + dpo, acc[i][j][q] * sa, acc[i][j][q + 1] * sa);
                   }
                 } else if ((q & 1) == 0) {
                   // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
@@ -3859,10 +3881,10 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                   //   真机扇区未减，见宏说明 / `docs/03` §136）。
                   const size_t idx = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c;
                   if constexpr (FA_REDHALF)
-                    red_addh2(reinterpret_cast<__half*>(dv_acc) + idx, acc[i][j][q] * sA[r],
-                              acc[i][j][q + 1] * sA[r]);
+                    red_addh2(reinterpret_cast<__half*>(dv_acc) + idx, acc[i][j][q] * sa,
+                              acc[i][j][q + 1] * sa);
                   else
-                    red_add2(dv_acc + idx, acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r]);
+                    red_add2(dv_acc + idx, acc[i][j][q] * sa, acc[i][j][q + 1] * sa);
                 }
               }
             }
@@ -3870,6 +3892,13 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       auto epi_dk = [&](float (&acc)[MTM34][NTM34][4]) {
         const int r0 = wr * GM34, c0 = wc * GN34;
         float* wstg = pstg + wid * (STGR * STGS);
+        // O123：同 epi_dv，把 dS 的行缩放 `sds3[r]` 预取进寄存器（消 hot red 里的重复 shared load）。
+        float ssv[MTM34][2];
+#pragma unroll
+        for (int i = 0; i < MTM34; ++i) {
+          ssv[i][0] = sds3[r0 + i * 16 + g];
+          ssv[i][1] = sds3[r0 + i * 16 + g + 8];
+        }
 #pragma unroll
         for (int i = 0; i < MTM34; ++i)
 #pragma unroll
@@ -3877,13 +3906,14 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 #pragma unroll
             for (int q = 0; q < 4; ++q) {
               int r = r0 + i * 16 + g + (q >= 2 ? 8 : 0);
+              const float sd = FA_SCALE_HOIST ? ssv[i][(q >= 2) ? 1 : 0] : sds3[r];
               int c = c0 + j * 8 + c2;
               int jg = j0 + r;
               if constexpr (FA_R4 && !kBulkRed && !DET) {
                 // O67：非 DET/BULKRED 的 dK 归约走 16B `red_add4`（与 epi_dv 同款）。
                 if ((q & 1) == 0) {
-                  float a = acc[i][j][q] * sds3[r] * scale;
-                  float b = acc[i][j][q + 1] * sds3[r] * scale;
+                  float a = acc[i][j][q] * sd * scale;
+                  float b = acc[i][j][q + 1] * sd * scale;
                   float a2 = __shfl_down_sync(0xffffffffu, a, 1);
                   float b2 = __shfl_down_sync(0xffffffffu, b, 1);
                   if (jg < len && (lane & 1) == 0)
@@ -3893,7 +3923,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
               } else if (jg < len) {
                 if constexpr (kBulkRed) {
                   wstg[(i * 16 + g + (q >= 2 ? 8 : 0)) * STGS + (j * 8 + c2 + (q & 1))] =
-                      acc[i][j][q] * sds3[r] * scale;
+                      acc[i][j][q] * sd * scale;
                 } else if constexpr (DET && DET_HALF) {
                   // F4：fp16 partial + O62 扇区化（与 epi_dv 同布局；dK 额外乘 fold scale）。
                   if ((q & 1) == 0 && (j & 1) == 0 && (j + 1) < NTM34) {
@@ -3902,10 +3932,10 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                             ? ((size_t)part_base[b] + ((size_t)h * nblk_seq + mblk) * len + jg) * HD
                             : (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD;
                     const size_t dpo = rb + d0 + c0 + (j >> 1) * 16 + (lane & 3) * 4;
-                    dkv_det_store_h4(dk_part, dpo, acc[i][j][q] * sds3[r] * scale,
-                                     acc[i][j][q + 1] * sds3[r] * scale,
-                                     acc[i][j + 1][q] * sds3[r] * scale,
-                                     acc[i][j + 1][q + 1] * sds3[r] * scale);
+                    dkv_det_store_h4(dk_part, dpo, acc[i][j][q] * sd * scale,
+                                     acc[i][j][q + 1] * sd * scale,
+                                     acc[i][j + 1][q] * sd * scale,
+                                     acc[i][j + 1][q + 1] * sd * scale);
                   }
                 } else if constexpr (DET) {
                   if ((q & 1) == 0) {
@@ -3914,18 +3944,18 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                             ? ((size_t)part_base[b] + ((size_t)h * nblk_seq + mblk) * len + jg) * HD +
                                   d0 + c
                             : (((size_t)(b * H + h) * nblk + mblk) * (size_t)S + jg) * HD + d0 + c;
-                    dkv_det_store(dk_part + dpo, acc[i][j][q] * sds3[r] * scale,
-                                  acc[i][j][q + 1] * sds3[r] * scale);
+                    dkv_det_store(dk_part + dpo, acc[i][j][q] * sd * scale,
+                                  acc[i][j][q + 1] * sd * scale);
                   }
                 } else if ((q & 1) == 0) {
                   // O114：dK 与 dV 同款——`FA_REDHALF` 走 fp16 `red.global.add.f16x2`。
                   const size_t idx = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c;
                   if constexpr (FA_REDHALF)
-                    red_addh2(reinterpret_cast<__half*>(dk_acc) + idx, acc[i][j][q] * sds3[r] * scale,
-                              acc[i][j][q + 1] * sds3[r] * scale);
+                    red_addh2(reinterpret_cast<__half*>(dk_acc) + idx, acc[i][j][q] * sd * scale,
+                              acc[i][j][q + 1] * sd * scale);
                   else
-                    red_add2(dk_acc + idx, acc[i][j][q] * sds3[r] * scale,
-                             acc[i][j][q + 1] * sds3[r] * scale);
+                    red_add2(dk_acc + idx, acc[i][j][q] * sd * scale,
+                             acc[i][j][q + 1] * sd * scale);
                 }
               }
             }
@@ -4103,6 +4133,10 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
         uint32_t av[4];
         ldmatrix_x4(smem_u32(dS2 + (wid * 16 + arow) * DSS2 + d0 + acol), av);
         const uint32_t ba = smem_u32(reinterpret_cast<const unsigned char*>(Kp));
+        // O123：dQ 的 per-row 缩放 `sds2[r]`（仅 r=g 与 r=g+8 两值）预取进寄存器，
+        //   消掉 hot 累加循环里的重复 shared load（逐位不变：`acc5 * sds2 * scale` 次序保持）。
+        const float sd20 = sds2[wid * 16 + g];
+        const float sd21 = sds2[wid * 16 + g + 8];
         float acc5[4][16];
 #pragma unroll
         for (int nn = 0; nn < 4; ++nn)
@@ -4122,8 +4156,8 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
           for (int j = 0; j < 4; ++j)
 #pragma unroll
             for (int q = 0; q < 4; ++q) {
-              const int r = wid * 16 + g + (q >= 2 ? 8 : 0);
-              dqacc5[nn][j][q] += acc5[nn][j * 4 + q] * sds2[r] * scale;
+              const float sd2 = FA_SCALE_HOIST ? ((q >= 2) ? sd21 : sd20) : sds2[wid * 16 + g + (q >= 2 ? 8 : 0)];
+              dqacc5[nn][j][q] += acc5[nn][j * 4 + q] * sd2 * scale;
             }
 #endif
       } else {

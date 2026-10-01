@@ -1,0 +1,22 @@
+=== O123 fp8 scale-hoist same-binary A/B (GPU1, S4096 causal H16 D128) ===
+[h1 run1] [timing] total(quant+pre+main+cvt) 1.5810 ms  86.93 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1076 ms | preprocess 0.1218 ms | main 1.3685 ms | convert -0.0169 ms (cvt_on=0, qfuse=1, dfuse=1)
+[h0 run1] [timing] total(quant+pre+main+cvt) 1.5929 ms  86.28 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1078 ms | preprocess 0.1230 ms | main 1.3897 ms | convert -0.0275 ms (cvt_on=0, qfuse=1, dfuse=1)
+[h1 run2] [timing] total(quant+pre+main+cvt) 1.5922 ms  86.32 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1077 ms | preprocess 0.1232 ms | main 1.3878 ms | convert -0.0265 ms (cvt_on=0, qfuse=1, dfuse=1)
+[h0 run2] [timing] total(quant+pre+main+cvt) 1.5846 ms  86.73 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1079 ms | preprocess 0.1221 ms | main 1.3794 ms | convert -0.0248 ms (cvt_on=0, qfuse=1, dfuse=1)
+[h1 run3] [timing] total(quant+pre+main+cvt) 1.5804 ms  86.96 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1082 ms | preprocess 0.1220 ms | main 1.3779 ms | convert -0.0276 ms (cvt_on=0, qfuse=1, dfuse=1)
+[h0 run3] [timing] total(quant+pre+main+cvt) 1.5817 ms  86.89 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1073 ms | preprocess 0.1209 ms | main 1.3713 ms | convert -0.0178 ms (cvt_on=0, qfuse=1, dfuse=1)
+--- compare (h1) ---
+[compare] ours vs fp32 ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.635e-01  max_rel=1.396e+02
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=4.525e-01  max_rel=1.051e+02
+  dk   vs te_dk: max_abs=5.325e-01  max_rel=1.158e+02
+  dv   vs te_dv: max_abs=6.806e-01  max_rel=1.078e+02
