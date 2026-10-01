@@ -2532,3 +2532,27 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 
 见 `docs/03` §134；原始输出 `src/fp8/fa_bwd_fp8_o112_ab.out.txt`、`..._o112_default_sweep.out.txt`、
 `..._o112_onefile.out.txt`、`..._o112_ncu_s1024h2.out.txt`、`..._o112_ci.out.txt`。
+
+### 5.121 第 207 轮（O113）：fp8 full 变长 `head_dim=256` 的 ksplit 重标定 —— **正结果（默认）**
+
+- **缺口**：O96–O112 的 ksplit 复核几乎覆盖 fp8 全维度，唯独 **full（非 causal）变长
+  `D=256`** 沿用 O98 的「无 dump、套 O97 定长公式 `k=8192/base`」。本轮先补 dump 5 个
+  D=256 full 变长 shape，再单独全扫 `k∈[1,16]`（iters=200，min of 3）。
+- **做法（纯 host、device 一行未改、单/两文件同源）**：`!causal && D==256 && maxlen>=2048`
+  分支改为 `k=max(6, 2048/base_grid)`、cap 12（旧 `k=8192/base_grid`）。只改跨 CTA
+  `atomicAdd` 次序，数值在 fp8 噪声内；`--ksplit=K` 不覆盖。
+- **性能（同 binary，event）**：**b4_t3840_h8 1.899→1.859ms（1.022×，旧 k=8→6）、
+  b8_t2904_h8 1.554→1.504ms（1.033×，旧 k=4→6）、b4_t3840_h16 3.617→3.552ms（1.018×，
+  旧 k=4→6）**；b5_t3968_h8 中性（旧已 k=6）；等长 b4_t4096_h16（maxlen=1024）走既有波支路
+  k=9，不受影响。
+- **ncu（b8_t2904_h8 main，同 binary k=4/6/8）**：**`lts op_red` 逐位不变 107.77M**、
+  `op_read` 10.07/11.77/11.94M、Duration **1.38/1.33/1.39 ms**、warps_active 恒 ~12.4%
+  ⇒ 2 CTA/SM 的并行度/尾波 bound，ksplit 是「换并发」而非「减 Q/dO 重读」的旋钮（同 O112）。
+- **数值/回归**：5 个新 shape relL2 全在护栏内；`--ci --dtype fp8` 55 case 单/两文件
+  **worst 7.153e-06 OK**、`docs/04 --check` **OK（224 行，已同步新 case）**。
+- **判决**：正结果、默认。**fp8 的 ksplit 自动档至此 full/causal × 定长/变长 ×
+  D=128/256/512 全覆盖复核**。下一步：① 换卡（L2 `red` 主体墙无软件解）；② causal 变长
+  ksplit 推广 fp16/bf16；③ MLA 降 smem（实为寄存器墙）；④ `--det`/量化并行化。
+
+见 `docs/03` §135；原始输出 `src/fp8/fa_bwd_fp8_o113_varlen_full_d256_ksweep.out.txt`、
+`..._o113_ncu_kvtma_d256_full.out.txt`、`..._mma_onefile_o113_d256_full.out.txt`。

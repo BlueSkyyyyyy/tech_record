@@ -3292,7 +3292,27 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百零六轮）**：**O112——fp8 定长 causal `head_dim=512`（MLA）的 ksplit 重标定，
+> **最新（第二百零七轮）**：**O113——fp8 full（非 causal）变长 `head_dim=256` 的 ksplit
+> 重标定，正结果/默认**。落实 O112 留的 fp8 ksplit 复核最后一处缺口：O96–O112 已覆盖
+> full/causal × 定长/变长 × `D=128/256/512`，唯独 **full 变长 `D=256`** 仍沿用 O98 的
+> 「无 dump ⇒ 套 O97 定长公式 `k=8192/base`」。**改动（纯 host、device 一行未改、单/两文件
+> 同源）**：`run_varlen` 的 `!causal && D==256 && maxlen>=2048` 分支改为
+> `k=max(6, 2048/base_grid)`、cap 12（旧 `8192/base`）。**性能（同 binary，iters=200，min of 3，
+> 5 个新 dump 的 D=256 full 变长 shape）**：**b4_t3840_h8 1.899→1.859ms（1.022×，旧 k=8→6）、
+> b8_t2904_h8 1.554→1.504ms（1.033×，旧 k=4→6）、b4_t3840_h16 3.617→3.552ms（1.018×，旧
+> k=4→6）**；b5_t3968_h8 中性（旧已 k=6）；等长 b4_t4096_h16（maxlen=1024）走既有波支路 k=9
+> 不受影响。**ncu（b8_t2904_h8 main，k=4/6/8）**：`lts op_red` 逐位不变 **107.77M**、`op_read`
+> 10.07/11.77/11.94M、Duration **1.38/1.33/1.39ms**、warps_active 恒 ~12.4% ⇒ 2 CTA/SM 的
+> 并行度/尾波 bound，ksplit 是「换并发」而非「减 Q/dO 重读」的旋钮（同 O112/O93/O104）。
+> **数值/护栏**：5 个新 shape relL2 全在护栏内（dq≤8.16/dk≤8.32/dv≤6.75%）；`--ci --dtype fp8`
+> 55 case 单/两文件 **worst 7.153e-06 OK**、`docs/04 --check` **OK（224 行，已同步 5 新 case）**。
+> **fp8 的 ksplit 自动档至此 full/causal × 定长/变长 × D=128/256/512 全覆盖复核。** 见 `docs/03`
+> §135、`docs/08` §5.121；原始输出 `src/fp8/fa_bwd_fp8_o113_*`。
+> **下一步候选**：① **换卡**（main 的 L2 `red` 主体墙无软件解，见「阻塞」）；② causal 变长
+> ksplit 复核推广到 **fp16/bf16**；③ MLA 降 smem（实为 regs 249 → 1 CTA/SM 的寄存器墙）；
+> ④ 非 main 的 `--det`/量化进一步并行化。
+>
+> **（第二百零六轮）**：**O112——fp8 定长 causal `head_dim=512`（MLA）的 ksplit 重标定，
 > 正结果/默认**。落实 O111「下一步候选」里 **fp8 且默认路径、且能降 L2 搬运量**的一条：O96–O108
 > 的 ksplit 复核唯独漏了**定长 causal D=512**（仍用 O29 的 `target=S/2`，是 pre-O51/pre-O105
 > 的老标定；O107 已把变长 causal D=512 提到 cap 8）。**改动（纯 host、device 一行未改、单/两文件

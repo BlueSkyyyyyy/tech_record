@@ -1,0 +1,27 @@
+=== O113 ncu: fp8 full-varlen D=256 main kernel (fa_bwd_fp8_mma_kernel, wgmma) k=4/6/8 ===
+Thu Oct  1 12:13:42 PM CST 2026
+case: varlen_b8_t2904_h8_d256_full_fp8 (base_grid=2048, old auto k=4)
+
+--- ksplit=4 ---
+    gpu__time_duration.sum                                     ms         1.38
+    lts__t_sector_hit_rate.pct                                  %        97.46
+    lts__t_sectors_op_read.sum                             sector     10067831
+    lts__t_sectors_op_red.sum                              sector    107768832
+    lts__t_sectors_op_write.sum                            sector        10033
+    sm__warps_active.avg.pct_of_peak_sustained_active           %        12.45
+
+--- ksplit=6 ---
+    gpu__time_duration.sum                                     ms         1.33
+    lts__t_sector_hit_rate.pct                                  %        97.50
+    lts__t_sectors_op_read.sum                             sector     11774440
+    lts__t_sectors_op_red.sum                              sector    107768832
+    lts__t_sectors_op_write.sum                            sector         2772
+    sm__warps_active.avg.pct_of_peak_sustained_active           %        12.43
+
+--- ksplit=8 ---
+    gpu__time_duration.sum                                     ms         1.39
+    lts__t_sector_hit_rate.pct                                  %        97.34
+    lts__t_sectors_op_read.sum                             sector     11943544
+    lts__t_sectors_op_red.sum                              sector    107768832
+    lts__t_sectors_op_write.sum                            sector         1782
+    sm__warps_active.avg.pct_of_peak_sustained_active           %        12.43

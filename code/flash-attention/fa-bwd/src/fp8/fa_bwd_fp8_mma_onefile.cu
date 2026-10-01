@@ -6157,8 +6157,12 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       const long SLOTS = (D == 512) ? 132L : 264L;
       const long KMAX = (D == 512) ? 16L : 12L;
       if (D == 256 && maxlen >= 2048) {
-        long k = 8192L / base_grid;
-        if (k < 1) k = 1;
+        // O113（第 207 轮）：**D=256 full 变长的 ksplit 重标定**（与两文件 `fa_bwd_fp8_main.cu`
+        //   同源逐字）。O98 只给 D=128 标了 full 变长、D=256 沿用 O97 的定长公式，实测该档
+        //   大 base 欠切到 4、base=1024 过切到 8。5 个新 dump shape 全扫 k∈[1,16]：最优一致
+        //   k=6（每 CTA 约 `nblk/6≈5` 个 K tile），规则 `max(6, 2048/base)`、cap KMAX。
+        long k = 2048L / base_grid;
+        if (k < 6) k = 6;
         if (k > KMAX) k = KMAX;
         auto_k = k;
       } else {

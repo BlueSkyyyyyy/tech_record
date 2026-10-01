@@ -11776,3 +11776,87 @@ S1024H2 的 `sm__warps_active` 恒 12.5%、`sm__throughput` 只 23% ⇒ 仍是 1
   的寄存器墙，非 smem，降 smem 无效）；④ 非 main 的 `--det`/量化进一步并行化。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o112_ab.out.txt`、`..._o112_default_sweep.out.txt`、
   `..._o112_onefile.out.txt`、`..._o112_ncu_s1024h2.out.txt`、`..._o112_ci.out.txt`。
+
+## 135. 第 207 轮：O113——fp8 **full（非 causal）变长 `head_dim=256`** 的 ksplit 重标定——正结果，默认
+
+### 135.1 动机
+
+O96–O112 的 ksplit 复核把 fp8 的 `ksplit` 自动档几乎全扫了一遍——定长 full/causal ×
+`D=128/256/512`、变长 full `D=128/512`、变长 causal `D=128/256/512`——**唯独 `D=256` 的
+full（非 causal）变长**是缺口：O98 当年「`D=256` 无 varlen dump」直接沿用了 O97 的**定长**
+公式 `k=8192/base_grid`（DRAM 目标「grid≈8192」）。本轮先把该形状补 dump，再单独标定。
+
+### 135.2 做法（纯 host、device 一行未改、单/两文件同源）
+
+两条同源 host（`src/fp8/fa_bwd_fp8_main.cu`、`src/fp8/fa_bwd_fp8_mma_onefile.cu`）的
+`run_varlen` 里、`!causal && D==256 && maxlen>=2048` 分支：
+
+```
+// 旧（O97 定长启发式）: long k = 8192L / base_grid;
+long k = 2048L / base_grid;   // O113：保底并发
+if (k < 6) k = 6;             // O113：每 CTA 约 nblk/6≈5 个 K tile
+if (k > KMAX) k = KMAX;       // D=256 的 KMAX=12
+```
+
+只改「哪个 CTA 算哪段 K」⇒ `dK/dV/dQ` 仍是可交换的跨 CTA `atomicAdd`，数值仅在 fp8 噪声内。
+`--ksplit=K` 显式给出时不覆盖；`maxlen<2048`（如等长 1024）仍走既有 264-槽波对齐支路。
+
+本轮补 dump 的 5 个 D=256 full 变长 shape（fp8，容器内 `python harness/fa_bwd_bench.py`，
+**不放进 `VARLEN_SHAPES`**——否则 `dump --varlen-all` 会给不支持的 fp16/bf16 也产出 D=256 case）：
+
+```
+python harness/fa_bwd_bench.py dump --dtype fp8 --lengths 512 1024 2048 256     --H 8  --D 256 --full
+python harness/fa_bwd_bench.py dump --dtype fp8 --lengths 128 256 512 1024 2048 --H 8  --D 256 --full
+python harness/fa_bwd_bench.py dump --dtype fp8 --lengths 2048 512 128 96 64 32 16 8 --H 8 --D 256 --full
+python harness/fa_bwd_bench.py dump --dtype fp8 --lengths 512 1024 2048 256     --H 16 --D 256 --full
+python harness/fa_bwd_bench.py dump --dtype fp8 --lengths 1024 1024 1024 1024   --H 16 --D 256 --full
+```
+
+### 135.3 实测（5 个新 dump 的 fp8 full 变长 D=256 shape，event，iters=200，min of 3）
+
+| case | base_grid | maxlen | 旧 auto k | 新 auto k | 旧 total (ms) | 新 total (ms) | 比值 |
+|---|---|---|---|---|---|---|---|
+| b4_t3840_h8 `[512,1024,2048,256]` | 1024 | 2048 | 8 | **6** | 1.899 | **1.859** | **1.022×** |
+| b5_t3968_h8 `[128,256,512,1024,2048]` | 1280 | 2048 | 6 | 6 | 1.858 | 1.857 | 1.000× |
+| b8_t2904_h8 `[2048,512,128,96,64,32,16,8]` | 2048 | 2048 | 4 | **6** | 1.554 | **1.504** | **1.033×** |
+| b4_t3840_h16 `[512,1024,2048,256]` | 2048 | 2048 | 4 | **6** | 3.617 | **3.552** | **1.018×** |
+| b4_t4096_h16 `[1024]*4`（等长） | 1024 | 1024 | 9（波支路） | 9 | — | 2.838 | （不受影响） |
+
+- **4 个 entry 形状中 3 个提升 1.8–3.3%、1 个中性**；全扫 `k∈[1,16]` 时最优点一致落在
+  **k=6**（`nblk/6≈5.3` 个 K tile/CTA）。base=1024 的 `b4_t3840_h8` 上 `k=10` 还能再快 0.8%
+  （1.844 vs 1.858），但 `k=8` 是明显凹点（1.899）；`k=6` 是跨形状最稳的档。
+- 说明：`b4_t4096_h16` 各序列等长 1024 ⇒ `maxlen=1024<2048`，走既有波对齐支路（k=9），
+  **本轮改动不触碰**；这解释了为何它在表里「不受影响」。
+
+### 135.4 ncu（`varlen_b8_t2904_h8_d256_full_fp8`，main = `fa_bwd_fp8_mma_kernel`(wgmma)，同 binary k=4/6/8）
+
+| ksplit | Duration | `lts op_read` | `lts op_red` | L2 hit | warps_active |
+|---|---|---|---|---|---|
+| 4（旧 auto） | 1.38 ms | 10.07M | 107.77M | 97.46% | 12.45% |
+| 6（新 auto） | **1.33 ms** | 11.77M | **107.77M** | 97.50% | 12.43% |
+| 8 | 1.39 ms | 11.94M | 107.77M | 97.34% | 12.43% |
+
+⇒ **`op_red` 逐位不变**（dK/dV 的主体 `red` 与 ksplit 无关，O139/O112 结论）；`k=4→6` 的
+Duration 下降并非来自 Q/dO 重读（`op_read` 反而升），而是**更细切分带来的并行度/尾波削平**——
+与 O93/O104/O112 的 LPT/ksplit 机制同源：该 kernel 在 `D=256` 下 2 CTA/SM、`warps_active`
+仅 12.4%，是并行度/延迟 bound，ksplit 是「在可动范围内换并发」的旋钮。
+
+### 135.5 数值 / 回归（护栏）
+
+- 5 个新 shape 的 `ours vs fp32 ref` relL2 dq/dk/dv 全在护栏内（如 b8_t2904_h8
+  `8.057/8.216/6.608%`、b4_t3840_h8 `8.147/8.289/6.698%`、b4_t3840_h16 `8.133/8.287/6.750%`）。
+- **单/两文件一致性 gate**：`--ci --dtype fp8` 全 55 case 有双方，**worst `max|ours-ours_sf|`
+  = 7.153e-06 ≤ 1e-4 → OK**；`docs/04` auto-doc-table **`--check OK`（224 行）**，已同步 5 个
+  新 case 行。
+- fp8 `D=256` 变长无 FA3/TE 外部反向列（TE fp8 变长 segfault、FA3 fp8 反向不支持），仅 ours。
+
+### 135.6 结论 / 下一步
+
+- **判决：正结果、默认开启**。fp8 full 变长 `D=256` 的 ksplit 由 O97 定长公式改为
+  `max(6, 2048/base)`（cap 12）；3/4 entry 形状 **1.018–1.033×**、`op_red` 不变。
+  **fp8 的 ksplit 自动档至此 full/causal × 定长/变长 × D=128/256/512 全覆盖复核。**
+- **下一步候选**：① **换卡**（main 的 L2 `red` 主体墙无软件解，见「阻塞」）；② 把 causal
+  变长 ksplit 复核推广到 **fp16/bf16**；③ MLA 降 smem（实为 regs 249 → 1 CTA/SM 的寄存器墙）；
+  ④ 非 main 的 `--det`/量化进一步并行化。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o113_varlen_full_d256_ksweep.out.txt`、
+  `..._o113_ncu_kvtma_d256_full.out.txt`、`..._mma_onefile_o113_d256_full.out.txt`。
