@@ -12778,3 +12778,75 @@ O116/O117 把 fp8 主 kernel 的 **host/运行期**旋钮（ksplit / hswap / mre
   O116/O117 的 host 旋钮闭合互补，**编译期旋钮至此也收口**。）⇒ 与「正结果只剩换卡」一致。
 * 复现：见 §148.1；原始输出 `src/fp8/fa_bwd_fp8_o127_cta_ab_s4096.out.txt`、
   `..._o127_ncu_cta3_s4096.out.txt`、`..._o127_ncu_cta2_s4096.out.txt`。
+
+## 149. O129（第 223 轮）：fp8 causal MHA `S=8192` 覆盖 + 平台期延伸到 S4096 之外 —— **负结果**（默认一行未改）
+
+### 149.1 目的与做法
+
+`fp8 专项冲刺` 与 `下一批`（F6/F3b/F4b）在 O116–O127 已把 fp8 默认 main 的 host/运行期/编译期
+旋钮与工作划分全部收口为「正结果只剩换卡」；但所有标定/审计的**最大 MHA shape 只到 S=4096**
+（O93/O112/O117）。本轮把覆盖推到 **S=8192**（`(B,S,H,D)=(1,8192,16,128)` causal，nblk=128），
+在新尺度上复核「ksplit / LPT / 占位 / wgmma-GEMM3/4」是否仍以默认档最优，并取 ncu/对拍数据。
+
+* 新 shape dump（fp8）：`harness/fa_bwd_bench.py dump --dtype fp8 --shape '1 8192 16 128 causal'`
+  → `/home/xieminglin/proj/output/fa-bwd/b1_s8192_h16_d128_causal_fp8/`（含 `ref_*` / `te_*`）；
+  ours 单文件与两文件各落 `ours_sf_*` / `ours_*`。**无 device 改动**（纯覆盖 + 审计）。
+* 复核的旋钮：`--ksplit={1,2,4,8}`、`--hswap={0,1}`、`--mrev={0,1}`、`--ksm={32,64}`、`--det=1`、
+  `--wg2`、`--wg3`、`--bn64`、`--qdtma=0`、`--kvtma=0`、`-DFA_WGMMA34=1`。
+
+### 149.2 性能（同 binary，iters=10–20，S8192 causal H16，事件口径）
+
+默认（Hopper `-DFA_WGMMA -DFA_TMA`，ksplit auto=2 + hswap）：**total 5.84 ms / main 5.17 ms
+（≈94 TFLOPS，`4BS²HD` 口径）**；单文件 main 5.33 ms（与两文件同档）。
+
+| 配置 | main (ms) | 相对默认 |
+|---|---|---|
+| **默认（ksplit=2 + hswap）** | **5.171** | **1.00×** |
+| `--ksplit=1` | 5.325 | 0.971× |
+| `--ksplit=4` | 6.330 | 0.817× |
+| `--ksplit=8` | 8.931 | 0.579× |
+| `--hswap=0` | 5.336 | 0.969× |
+| `--mrev=0` | 5.475 | 0.945× |
+| `--ksm=32` / `--ksm=64` | 5.262 / 5.293 | 0.983× / 0.977× |
+| `--det=1` | 5.248 | 0.986× |
+| `--wg2` / `--wg3` | 10.67 / 8.84 | 0.485× / 0.585× |
+| `--bn64` | 7.839 | 0.660× |
+| `--qdtma=0` / `--kvtma=0` | 6.770 / 6.657 | 0.764× / 0.777× |
+| `-DFA_WGMMA34=1` | 5.648 | 0.916× |
+
+⇒ **ksplit=2 在 S8192 仍是最优**（与 O93 的 S4096 结论一致；S8192 的 nblk=128 已给足并行度，
+不需要靠加大 ksplit 凑并发；`--ksm`/`--det` 在噪声内），**全部其余旋钮中性或有损**。
+即 O116/O117 的「默认档全局最优」在 S8192 尺度继续成立。
+
+### 149.3 ncu / TE 对侧（同 session，S8192）
+
+| | kernel | Duration | L1 `red` 扇区 | L2 `red` 扇区 | L2 `read` | L2% | DRAM% | warps | regs |
+|---|---|---|---|---|---|---|---|---|---|
+| **ours** | `fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>` (3 CTA/SM) | **5.32 ms** | 274,726,912（8.0/req） | **412,090,368** | 93,466,813 | 79.0% | 13.0% | 18.72% | 168 |
+| **TE** | `..._flash_bprop_wgmma_f8_..._64x64x128` (1 CTA/SM, 384t, grid=132) | **0.966 ms** | 3,168（TMA 4D reduce 绕过 L1） | **102,240,944** | 38,664,223 | 70.9% | 22.4% | 15.6% | — |
+
+* **红字账与 S4096 完全同构**：`red` **4.03×**（S4096 4.06×）、`read` **2.42×**（2.38×）、
+  Duration **5.5×**（5.36×）；ours L1 `red` 从 S4096 的 70.25M→**274.7M**、L2 105.4M→**412.1M**，
+  **L1→L2 仍精确 1.50× 展宽**（8→12 扇区/请求）。⇒ `red` 由「每 KV 元素被多少 m-block 贡献」
+  （工作划分）唯一决定，与 S 绝无关；本卡无软件解（见「阻塞」）。
+* 数值：ours vs fp32 ref `max_abs` dq/dk/dv = **2.215e-01 / 2.680e-01 / 2.976e-01**（fp8 噪声、
+  ≤ TE-vs-ref 2.69e-1/4.34e-1/5.07e-1）；ours vs TE `max_abs` 3.83e-1/5.31e-1/6.67e-1。
+  单/两文件一致性 `max|ours-ours_sf|` dq/dk/dv = **0 / 1.19e-7 / 2.38e-7**（`--ci` gate OK）。
+
+### 149.4 结论与复现
+
+* **负结果、默认一行未改**。S8192 把 O116/O117 的 plataeu 结论从小 S 延伸到 8K 序列：
+  **ksplit=2 + hswap/mrev 已是本算法在本卡 3 CTA/SM（74.8KB smem / 168 regs）下的全局最优**，
+  L2 `red` 主体墙随 S² 缩放且相对 TE 的差距恒定。⇒ **正结果仍只剩换卡**（同「阻塞」）。
+* 覆盖价值：`S8192_FP8_SHAPES`（`harness/fa_bwd_bench.py`）+ dump 目录新增
+  `b1_s8192_h16_d128_causal_fp8`，CI 的 `--check docs/04` 已同步（242 行）。
+* 复现：
+  ```
+  nvcc -O3 -gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda \
+       src/fp8/fa_bwd_fp8_main.cu -o /tmp/fa_bwd_fp8_main.out
+  for k in 1 2 4 8; do /tmp/fa_bwd_fp8_main.out \
+       --dir=/home/xieminglin/proj/output/fa-bwd/b1_s8192_h16_d128_causal_fp8 --iters=10 --ksplit=$k; done
+  ```
+  原始输出 `src/fp8/fa_bwd_fp8_o129_s8192_default.out.txt`、
+  `..._o129_s8192_sweep.out.txt`、`..._o129_ncu_ours_s8192.out.txt`、
+  `..._o129_ncu_te_s8192.out.txt`、`..._o129_te_baseline_s8192.out.txt`。
