@@ -4524,8 +4524,10 @@ int main(int argc, char** argv) {
   int wg2bn_sel = 0;
   bool wg_forced = false;
   // O34：主 kernel（wgmma2b 几何）是否用逐 atom 4D-TMA 载入 Q/K/V/dO（仅 FA_TMA 构建、
-  //   D==128、wg2bn 路径）。opt-in（`--maintma=0/1`），与 cp.async 版同 binary A/B。
-  int maintma_sel = 0;
+  //   D==128、wg2bn 路径）。`-1`=自动（wg2bn 路径默认 TMA；BN=64 的 wg2 保持 cp.async）；
+  //   1=用 TMA、0=cp.async。同 binary A/B。见 O115（第 209 轮）：F8 后 fp16/bf16 定长默认
+  //   构建已是 Hopper，故把 S≥4096 的 BN=128 wgmma2b 主 kernel 默认切 TMA（+3%，见 docs/01b §7）。
+  int maintma_sel = -1;
   // O43：wgmma2（BN=64）主 kernel 的 N 方向 split-K。`-1`=自动（仅 D==128、非 maintma、未切块
   //   grid 不足一个波时按需切）；`1`=关（A/B）；`>=2`=强制。
   int wg2ksplit = -1;
@@ -4942,6 +4944,16 @@ int main(int argc, char** argv) {
   if (!wg_forced && D == 128) {
     if (S >= 4096) wg2bn_sel = 1; else wg2_sel = 1;
   }
+  // O115：maintma 自动档——仅在 **BN=128 的 wgmma2b**（S≥4096 快路）默认逐 atom 4D-TMA；
+  //   BN=64 的 wg2（小/中 S）在 grid/latency bound 下 TMA 中性偏负，保持 cp.async。
+  //   用户显式 `--maintma=0/1` 时不覆盖（`maintma_sel>=0`）。
+  if (maintma_sel < 0) {
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    maintma_sel = (D == 128 && wg2bn_sel) ? 1 : 0;
+#else
+    maintma_sel = 0;
+#endif
+  }
   // O23：LSE 预处理也默认走 Hopper wgmma 版（仅 causal / D==128；非 causal 自动落回 O8 原版）。
   if (!lse_forced && D == 128 && causal) lse_wgm = 1;
   // O43：只在「BN=64 的 wgmma2、非 TMA」上切 K。小 S（base grid < 132）按需「填满一个波」；
@@ -4958,6 +4970,7 @@ int main(int argc, char** argv) {
     }
   }
 #endif
+  if (maintma_sel < 0) maintma_sel = 0;   // O115：非 FA_WGMMA 构建无 TMA 路径
   // O31：TMA 版 LSE 需驱动 API（`cuTensorMapEncodeTiled`）⇒ 只有 `-DFA_TMA -lcuda` 构建才编译
   //   该路径；此时 D==128/causal 默认开（对齐 fp16 O30 的做法，wgmma+cp.async → 4D TMA）。
 #if defined(FA_WGMMA) && defined(FA_TMA)
@@ -4992,10 +5005,11 @@ int main(int argc, char** argv) {
     lse_split_eff = sp;
   }
   printf("[O38] lse k-split = %d%s\n", lse_split_eff, (lse_split <= 0 ? " (auto)" : ""));
-  printf("[O23] main backend = %s | lse = %s (D=%d S=%d)%s\n",
+  printf("[O23] main backend = %s | lse = %s (D=%d S=%d)%s%s\n",
          wg2bn_sel ? "wgmma2b(BN=128)" : (wg2_sel ? "wgmma2(BN=64)" : "mma"),
          (D == 128 && (lse_tma ? 1 : lse_wgm)) ? (lse_tma ? "tma" : "wgmma") : "mma",
-         D, S, (wg2_ksplit_eff > 1) ? " +ksplit" : "");
+         D, S, ((wg2bn_sel || wg2_sel) && maintma_sel) ? " +maintma" : "",
+         (wg2_ksplit_eff > 1) ? " +ksplit" : "");
   printf("[O43] wgmma2 k-split = %d\n", wg2_ksplit_eff);
   printf("[O65] prologue fusion (zero+delta) = %d\n", (int)(zfuse_sel && delta_warp_sel));
   bool dq_direct = false;

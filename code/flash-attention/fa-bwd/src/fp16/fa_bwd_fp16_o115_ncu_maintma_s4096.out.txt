@@ -1,0 +1,17 @@
+=== O115 ncu: fp16 wgmma2b S4096 causal, maintma=0 vs 1 (red 逐字节不变, inst −25%) ===
+##### maintma=0 #####
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %         6.24
+    gpu__time_duration.sum                                      us       955.74
+    lts__t_sectors_op_read.sum                              sector     18740250
+    lts__t_sectors_op_red.sum                               sector     51904512
+    lts__t_sectors_op_write.sum                             sector      1583163
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        57.77
+    sm__inst_executed.sum                                     inst    214772736
+##### maintma=1 #####
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %         6.48
+    gpu__time_duration.sum                                      us       918.62
+    lts__t_sectors_op_read.sum                              sector     19134453
+    lts__t_sectors_op_red.sum                               sector     51904512
+    lts__t_sectors_op_write.sum                             sector      2026570
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        60.43
+    sm__inst_executed.sum                                     inst    161438720

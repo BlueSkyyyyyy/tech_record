@@ -4883,3 +4883,81 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 `src/fp16/fa_bwd_fp16_mma_onefile_o74_mla.out.txt`、
 `src/fp16/fa_bwd_fp16_o74_ncu_lse_{tma,mma}_s1024h2.out.txt`；见 `docs/08` §5.84。
 **下一步**：main 的 L2 `red` 墙受本卡寄存器/smem 硬墙锁定（见 ROADMAP「阻塞」）。
+
+## 26. O115-fp16（第 209 轮，**正结果，默认**）：定长 causal D=128（S≥4096 的 `wgmma2b`）主 kernel 默认走逐 atom 4D-TMA（O33 的默认化）
+
+### 26.1 动机：O33 的 TMA 主 kernel 一直 opt-in，F8 之后已可默认
+
+O33（第七十四轮，§14s）把 **BN=128 的 `wgmma2b`** 主 kernel 的 Q/K/V/dO 载入改成
+**逐 atom 4D-TMA**（一个 `[8 行][64 列]` box = 一个 1024B SW128 atom，描述符零改动、搬的字节
+与 `cp.async` 逐字节相同），main **1.04×**、`red` 逐字节不变——但当时是 **`--maintma` opt-in
+（默认 0）**。之后 **F8（第 161 轮）** 把 fp16/bf16 定长**默认构建**切成 Hopper
+（`-DFA_WGMMA -DFA_TMA -lcuda`，§21），TMA 主 kernel 的编译/驱动符号已就绪，**但默认仍走
+`cp.async`**——即「main 切 TMA」这条 F1–F5 路线在 fp16/bf16 上只做了一半（默认没切）。
+本轮把 **`maintma` 改为自动档**：**仅当选中 BN=128 的 `wgmma2b`**（S≥4096 的快路）时默认 TMA；
+BN=64 的 `wgmma2`（小/中 S、GQA/MQA）在 grid/latency bound 下 TMA 中性偏负（§26.4），保持
+`cp.async`。`--maintma=0/1` 仍可强制 A/B。**改动纯 host（`fa_bwd_fp16_mma_{main,onefile}.cu`），
+device 一行未改。**
+
+### 26.2 改动
+
+```cpp
+int maintma_sel = -1;                       // -1 = 自动
+...
+if (maintma_sel < 0) {                      // 在 wg2bn/wg2 与 cluster 覆盖定型之后
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  maintma_sel = (D == 128 && wg2bn_sel) ? 1 : 0;
+#else
+  maintma_sel = 0;                          // 老 sm_90 构建逐字退化（无 FA_TMA 符号）
+#endif
+}
+```
+
+### 26.3 实测（同 binary A/B，S4096 causal，iters=200；两文件 + 单文件）
+
+| 实现 | `--maintma=0` total / main | **默认（auto=maintma=1）** total / main | 端到端 |
+|---|---|---|---|
+| 两文件 | 1.1665 / 0.9610 ms | **1.1222 / 0.9210 ms** | **1.039×** |
+| 单文件 | 1.1709 / 0.9600 ms | **1.1199 / 0.9217 ms** | **1.046×** |
+
+**数值**：`ours vs fp32 ref` 的 `max_abs` dq/dk/dv 在 `--maintma=0/1` 间**逐位相同**
+（`1.883/1.734/1.966e-3`，与历史一致）；仅差跨 CTA `atomicAdd` 次序（dk/dv ~2e-5，同 O33）。
+对标同 session FA3/TE：`max_abs` 与 ours 同量级（FA 1.883/1.734/1.966e-3、TE 1.883/1.858/1.966e-3）。
+
+### 26.4 ncu：TMA 只省搬运指令，动不了 `red` 墙（与 O33 逐项一致）
+
+`b1_s4096_h16_d128_causal_fp16`，`--kernel-name regex:wgmma2b --launch-count 1`：
+
+| | `lts op_red` | `lts op_read` | `lts op_write` | Duration | L2% | `sm__inst_executed` |
+|---|---|---|---|---|---|---|
+| `maintma=0` | **51,904,512** | 18.74M | 1.58M | 955.7 µs | 57.8% | 214.77M |
+| `maintma=1` | **51,904,512** | 19.13M | 2.03M | **918.6 µs** | 59.9% | **161.44M（−24.8%）** |
+
+`red` **逐字节不变** ⇒ 收益 100% 来自 TMA 省下的**载入指令/地址运算**（`sm__inst_executed` −25%），
+主墙（dK/dV 的 L2 `red`，见 ROADMAP「阻塞」）未动。这与 O33 的结论一致：**TMA 只省「搬运那一半」**。
+
+### 26.5 门控依据：BN=64 的 `wgmma2` 不默认开（小 S 反而慢）
+
+| case（auto=maintma=0；`--maintma=1` 强制） | total cp.async | total TMA | TMA/cp |
+|---|---|---|---|
+| S512 H16 causal（wgmma2 BN=64，grid=64<132） | 0.0588 ms | 0.0757 ms | **0.78×** |
+| S1024 H32 kv4 causal（wgmma2 BN=64） | 0.2279 ms | 0.2252 ms | 1.01× |
+| **S4096 H16 causal（wgmma2b BN=128，grid=512）** | 1.1568 ms | **1.1230 ms** | **1.030–1.037×** |
+
+⇒ 只有在 `wgmma2b`（S≥4096）上默认 TMA；`wgmma2` 保持 `cp.async`（与 O35 的「BN=64 小 S
+中性、大 S 才 1.02×」一致）。
+
+### 26.6 复现 / 原始输出
+
+```bash
+# 默认（auto）+ A/B（--maintma=0）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16 --iters=200
+# ncu：--kernel-name regex:wgmma2b --launch-count 1 --maintma=0/1
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_o115_maintma_ab.out.txt`（两文件/单文件 × 0/1 + 门控）、
+`src/fp16/fa_bwd_fp16_o115_ncu_maintma_s4096.out.txt`、`src/fa_bwd_o115_ci.out.txt`。
+单/两文件一致性 gate **fp16 worst 1.953e-3 OK**（容差 1.6e-2）、`docs/04 --check` OK（224 行）。
+见 `docs/08` §5.123。**下一步**：main 的 L2 `red` 墙仍受本卡寄存器/smem 硬墙锁定（见 ROADMAP「阻塞」）。

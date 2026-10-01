@@ -129,7 +129,9 @@
   均 1.06–1.36×、数值逐位不变）；**主 kernel 的 Q/K/V/dO TMA 化：fp16 已完成（O33 第七十四轮 /
   O35 第七十五轮补 BN=64）、bf16 已完成（O34 / O36 第七十五轮）**——**逐 atom TMA 复现 SW128
   交织布局**（描述符零改动），`--maintma`、main **1.04×**、`red` 逐字节不变、端到端为 FA3 的
-  **3.77×（fp16）/3.79×（bf16）**（见 `docs/01` §14s/§14t、`docs/01b` §6y/§6z）。
+   **3.77×（fp16）/3.79×（bf16）**（见 `docs/01` §14s/§14t、`docs/01b` §6y/§6z）。
+   **O115（第二百零九轮）已把 `wgmma2b`（S≥4096）的 `maintma` 默认化**（fp16 total 1.037×、
+   bf16 1.033×，`red` 逐字节不变、指令 −25%；`wgmma2` BN=64 小 S 保持 cp.async）。
   **剩余（下一步首选）**：fp8 主 kernel 的对应 TMA 化——fp8 一行 128B = 一个 SW128 atom 的整行
   （`UINT8` tensormap、一个 box 搬整块，O32 的 LSE 已示范），但 Kp/Qp/dOp 配对副本需在 smem 上
   重建、并处理 dS3/Ap 对 Ks/Vs 的复用。见 backlog。
@@ -3302,7 +3304,34 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百零八轮）**：**O114——fp8 `dK/dV` 跨 CTA `red` 的元素宽度收窄（fp32→fp16），
+> **最新（第二百零九轮）**：**O115——把 fp8 的「main 切 wgmma+TMA」默认化补到 fp16/bf16
+> （O33/O34 的逐 atom 4D-TMA 默认化），正结果/默认**。本轮先复核 fp8：默认 main 的 L2 `red`
+> 主体墙（占 L2 ~80%）已在 F3b/F4b/F6/F7/O90–O95/O114 全部收口为**本卡无软件解**（只剩换卡 /
+> 多 warpgroup WS），非 main（quant/LSE/convert）也已达带宽墙并被 O109–O111 重叠——
+> **fp8 默认路径无可动杠杆**。于是落实同一条「降搬运、逼近 TE」方法论里**被漏掉的默认化**：
+> fp8 的 Q/K/V/dO TMA 在 F1/F2/O37/O41 已默认全开，而 **fp16/bf16 的对应物 O33/O34
+> （BN=128 `wgmma2b` 逐 atom 4D-TMA）与 O35/O36（BN=64 `wgmma2`）一直是 `--maintma` opt-in**，
+> F8 之后默认构建已是 Hopper（`-DFA_TMA -lcuda`）却仍跑 `cp.async`。**改动纯 host、device
+> 一行未改、单/两文件 + fp16/bf16 同源**：`maintma_sel` 默认 `0`→`-1`，在 `wg2bn/wg2` 与 cluster
+> 覆盖定型后自动——**仅 `D==128 && wg2bn_sel`（S≥4096 的 `wgmma2b`）时=1**，其余 0（BN=64 的
+> `wgmma2` 小 S 是 grid/latency bound，TMA 反慢；无 `FA_TMA` 构建逐字退化）。**性能（同 binary
+> A/B，S4096 causal，iters=200）**：fp16 两文件 total **1.1665→1.1222ms（1.039×）** / 单文件
+> 1.1709→1.1199（1.046×）；bf16 两文件 **1.1581→1.1207（1.033×）** / 单文件 1.1581→1.1154（1.038×）。**门控证据**：BN=64 `wgmma2` 强制 TMA 时 S512 total **0.78×**、
+> S1024 kv4 1.01×。**ncu（fp16 `wgmma2b` S4096）**：`lts op_red` **51,904,512 逐字节不变**、
+> Duration 955.7→**918.6µs（1.040×）**、`sm__inst_executed` **−24.8%**、L2% 57.8→59.9 ⇒
+> 收益 100% = **TMA 省下的载入指令/地址运算**，主墙（dK/dV 的 L2 `red`）未动（同 O33）。
+> **数值/护栏**：`ours vs fp32 ref` `max_abs` 在 `--maintma=0/1` 间**逐位相同**（fp16
+> `1.883/1.734/1.966e-3`、bf16 `1.510/1.340/1.631e-2`），仅差 atomic 次序（~2e-5）；
+> `--ci --dtype fp16 bf16` gate **fp16 1.953e-3 OK / bf16 3.906e-3 OK**、`docs/04 --check` OK。
+> 见 `docs/01` §26、`docs/01b` §6bc、`docs/08` §5.123；原始输出
+> `src/{fp16,bf16}/fa_bwd_*_o115_maintma_ab.out.txt`、`src/fp16/fa_bwd_fp16_o115_ncu_maintma_s4096.out.txt`、
+> `src/fa_bwd_o115_ci.out.txt`。
+> **下一步候选**：① **换卡**（fp8 main 的 L2 `red` 主体墙无软件解，见「阻塞」）；② fp8 非 main
+> 的 `--det`/量化进一步并行化；③（fp16/bf16）`varlen` causal ksplit/mrev 已复核为**中性/负**
+> （第 209 轮附带 sweep：D=128 varlen causal k=1 最优、D=512 auto k=16 已近最优），无正结果；
+> ④ 覆盖型 backlog（fp16/bf16 的 `head_dim=256`、MLA 降 smem/寄存器墙）均受同一资源墙。
+>
+> **（第二百零八轮）**：**O114——fp8 `dK/dV` 跨 CTA `red` 的元素宽度收窄（fp32→fp16），
 > 负结果/opt-in**。本轮落实「阻塞」里**唯一还没明确排除的正交维度**：既有的 red 收口
 > （O42/O67/O83/O92/O139）都在**元素宽度恒 fp32** 下证明「与归约机制/归约宽度无关」，没人试过
 > **把被归约元素从 fp32 收窄到 fp16**（写入字节减半 ⇒ 若扇区按字节计，`red` 应减半）。
@@ -8705,7 +8734,32 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     复核推广到 fp16/bf16；③ MLA 降 smem（已判无效，见上）；④ 非 main 的 `--det`/量化进一步并行化。
     见 `docs/03` §134、`docs/08` §5.120；原始输出 `src/fp8/fa_bwd_fp8_o112_ab.out.txt`、
     `..._o112_default_sweep.out.txt`、`..._o112_onefile.out.txt`、`..._o112_ncu_s1024h2.out.txt`、
-    `..._o112_ci.out.txt`。
+     `..._o112_ci.out.txt`。
+
+- 2026-10-01（第二百零九轮）：**O115——把 fp8 的「main 切 wgmma+TMA」默认化补到 fp16/bf16
+  （O33/O34 的逐 atom 4D-TMA 默认化），正结果/默认**。本轮先复核 fp8 默认路径（main 的 L2
+  `red` 主体墙已在 F3b/F4b/F6/F7/O90–O95/O114 全部收口为「本卡无软件解」；非 main 已达带宽墙并
+  被 O109–O111 重叠 ⇒ **fp8 默认无可动杠杆**），转做同一方法论里**被漏掉的默认化**。
+  - **改动（纯 host、device 一行未改、单/两文件 + fp16/bf16 同源）**：`maintma_sel` 默认 `0`→`-1`；
+    在 `wg2bn/wg2` 与 cluster 覆盖定型后自动——**仅 `D==128 && wg2bn_sel`（S≥4096 的 `wgmma2b`）
+    时=1**，其余 0；`#if !(FA_WGMMA&&FA_TMA)` 逐字退化为 0。`--maintma=0/1` 仍可强制 A/B；
+    顺带补 bf16 的 `+maintma` 打印。
+  - **性能（同 binary A/B，S4096 causal，iters=200）**：fp16 两文件 total **1.1665→1.1222ms
+    （1.039×）** / 单文件 1.1709→1.1199（1.046×）；bf16 两文件
+    **1.1581→1.1207（1.033×）** / 单文件 1.1581→1.1154（1.038×）。
+    **门控**：BN=64 `wgmma2` 强制 TMA 时 S512 **0.78×**、S1024 kv4 1.01× ⇒ 保持 cp.async。
+  - **ncu（fp16 `wgmma2b` S4096）**：`lts op_red` **51,904,512 逐字节不变**、Duration
+    955.7→**918.6µs（1.040×）**、`sm__inst_executed` 214.77M→**161.44M（−24.8%）**、L2% 57.8→59.9
+    ⇒ 收益 100% = TMA 省下的载入指令/地址运算，主墙（dK/dV L2 `red`）未动。
+  - **数值/护栏**：`max_abs` 在 `--maintma=0/1` 间**逐位相同**（fp16 `1.883/1.734/1.966e-3`、
+    bf16 `1.510/1.340/1.631e-2`），仅差 atomic 次序（~2e-5）；`--ci --dtype fp16 bf16`
+    单/两文件 gate **fp16 1.953e-3 OK / bf16 3.906e-3 OK**、`docs/04 --check` OK（224 行）。
+  - **附带 sweep（候选 ②）**：fp16/bf16 `varlen` causal ksplit 复核——D=128（wgmma2 BM=128）k=1
+    最优（k>1 单调更慢）、D=512（MLA）auto k=16 已近最优（b3 k=8 仅 0.2% 差异）⇒ **无正结果**
+    （与 fp8 的 BM=64 几何不同，O107 的 k≥3 规律不迁移）。
+  - 见 `docs/01` §26、`docs/01b` §6bc、`docs/08` §5.123；原始输出
+    `src/{fp16,bf16}/fa_bwd_*_o115_maintma_ab.out.txt`、
+    `src/fp16/fa_bwd_fp16_o115_ncu_maintma_s4096.out.txt`、`src/fa_bwd_o115_ci.out.txt`。
 
 ## 灵感 / backlog
 

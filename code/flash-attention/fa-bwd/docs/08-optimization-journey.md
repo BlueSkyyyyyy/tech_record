@@ -2581,3 +2581,33 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 见 `docs/03` §136；原始输出 `src/fp8/fa_bwd_fp8_o114_redhalf_smoke.out.txt`、
 `..._o114_redhalf_smoke_ncu.out.txt`、`..._o114_sass.out.txt`、`..._o114_ab.out.txt`、
 `..._o114_ncu_ab_s4096.out.txt`。
+
+### 5.123 第 209 轮（O115）：fp16/bf16 定长 causal D=128（S≥4096 的 `wgmma2b`）主 kernel 默认走逐 atom 4D-TMA —— **正结果（默认）**
+
+- **背景**：fp8 的「main 切 wgmma+TMA」在 F1/F2/O37/O41 已**默认全开**；fp16/bf16 的
+  对应物 O33/O34（BN=128 的 `wgmma2b` 逐 atom 4D-TMA）与 O35/O36（BN=64 的 `wgmma2`）
+  却一直 **`--maintma` opt-in**。F8（第 161 轮）已把 fp16/bf16 定长**默认构建**切成 Hopper
+  （`-DFA_TMA -lcuda`），TMA 主 kernel 可默认用，却仍在跑 `cp.async` ⇒ 一条被漏掉的默认化。
+- **改动（纯 host、device 一行未改、单/两文件 + fp16/bf16 同源）**：`maintma_sel` 默认 `0`→`-1`，
+  在 `wg2bn/wg2` 与 cluster 覆盖定型后自动：**仅 `D==128 && wg2bn_sel`（S≥4096 的 `wgmma2b`）
+  时=1**，其余 0（BN=64 的 `wgmma2` 小 S 是 grid/latency bound，TMA 反慢）；无 `FA_TMA` 的老
+  sm_90 构建逐字退化为 0。`--maintma=0/1` 仍可强制 A/B；顺带补上 bf16 的 `+maintma` 打印。
+- **性能（同 binary A/B，S4096 causal，iters=200）**：fp16 两文件 total **1.1665→1.1222ms
+  （1.039×）** / 单文件 1.1709→1.1199（1.046×）；bf16 两文件
+  **1.1581→1.1207（1.033×）** / 单文件 1.1581→1.1154（1.038×）。
+- **门控证据**：BN=64 的 `wgmma2` 若强制 TMA，S512 total **0.0588→0.0757（0.78×）**、
+  S1024 kv4 1.01× ⇒ 保持 `cp.async`。
+- **ncu（fp16 `wgmma2b` S4096）**：`lts op_red` **51,904,512 逐字节不变**、Duration
+  955.7→**918.6µs（1.040×）**、`sm__inst_executed` 214.77M→**161.44M（−24.8%）**、L2% 57.8→59.9
+  ⇒ 收益 100% = **TMA 省下的载入指令/地址运算**，主墙（dK/dV 的 L2 `red`）未动（同 O33 结论）。
+- **数值/护栏**：`ours vs fp32 ref` `max_abs` 在 `--maintma=0/1` 间**逐位相同**（fp16
+  `1.883/1.734/1.966e-3`、bf16 `1.510/1.340/1.631e-2`），仅差跨 CTA atomic 次序（~2e-5）；
+  `--ci --dtype fp16 bf16` 单/两文件 gate **fp16 1.953e-3 OK / bf16 3.906e-3 OK**、
+  `docs/04 --check` OK（224 行）。
+- **与本轮 fp8 的关系**：fp8 默认 main 仍是本卡唯一真杠杆——L2 `red` 主体墙（占 L2 ~80%）已被
+  F3b/F4b/F6/F7/O90–O95/O114 全部收口为「无软件解」，只剩换卡/多 warpgroup WS；本轮因此把
+  fp8 的 main-TMA 默认化**补到 fp16/bf16**（同一「降搬运/逼近 TE」的方法论）。
+
+见 `docs/01` §26、`docs/01b` §6bc；原始输出 `src/fp16/fa_bwd_fp16_o115_maintma_ab.out.txt`、
+`src/bf16/fa_bwd_bf16_o115_maintma_ab.out.txt`、`src/fp16/fa_bwd_fp16_o115_ncu_maintma_s4096.out.txt`、
+`src/fa_bwd_o115_ci.out.txt`。
