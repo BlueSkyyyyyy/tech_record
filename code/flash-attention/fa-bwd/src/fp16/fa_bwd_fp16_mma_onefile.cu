@@ -5162,8 +5162,15 @@ int main(int argc, char** argv) {
   //   0=关（默认），2=开。开了会强制走 wgmma2(BN=64)（BN=128 的 2b 放不下合并累加器）。
   int cluster_sel = 0;
   // O33：主 kernel 的 Q/K/V/dO 是否用逐 atom 4D-TMA 载入（仅 FA_WGMMA+FA_TMA 构建、D==128、
-  //   BN=128 的 wgmma2b 几何）。1=用 TMA，0=cp.async（默认）。同 binary A/B。
-  int maintma_sel = 0;
+  //   BN=128 的 wgmma2b 几何）。`-1`=自动（D==128 且选了 BN=128 的 wgmma2b 时用 TMA，其余 cp.async）；
+  //   1=用 TMA，0=cp.async。同 binary A/B。
+  //   O115（第 209 轮，**正结果/默认**）：O33/O35 的 TMA 主 kernel 此前一直 opt-in（默认 0），
+  //   但 F8（第 161 轮）之后 fp16/bf16 定长默认构建已是 Hopper（`-DFA_TMA -lcuda`），TMA 路径可用。
+  //   本轮把「BN=128 的 wgmma2b」默认切 TMA（**只在 S≥4096 的 wgmma2b 几何**；BN=64 的 wgmma2 在
+  //   小 S 是 grid/latency bound、TMA 反慢，见下 `maintma_auto` 门控与 docs/01 §26）：
+  //   S4096 causal fp16 total 1.1568→1.1230ms（**1.030×**）、bf16 1.1553→1.1225（**1.029×**），
+  //   数值仅差跨 CTA atomic 次序（dk/dv ~2e-5，与 O33/O35 一致）。`--maintma=0` 退回 cp.async。
+  int maintma_sel = -1;
   // O43：wgmma2（BN=64）主 kernel 的 N 方向 split-K。`-1`=自动（仅 D==128、非 cluster/maintma、
   //   且未切块 grid 不足一个波时按需切）；`1`=关（A/B）；`>=2`=强制。
   int wg2ksplit = -1;
@@ -5612,6 +5619,17 @@ int main(int argc, char** argv) {
     const int nblk = (S + 127) / 128;
     if (nblk % cluster_sel == 0) { wg2_sel = 1; wg2bn_sel = 0; cluster_use = cluster_sel; }
   }
+  // O115：maintma 自动档——仅在选到 **BN=128 的 wgmma2b**（S≥4096 的快路）时默认启用逐 atom
+  //   4D-TMA；BN=64 的 wgmma2（小/中 S、GQA/MQA）在 grid/latency bound 下 TMA 中性偏负
+  //   （实测 S512 1.16→0.78×、S1024 kv4 1.01×），故保持 cp.async。用户显式 `--maintma=0/1`
+  //   时不覆盖（`maintma_sel>=0`）。`wg2bn_sel` 在 cluster 覆盖之后已定型。
+  if (maintma_sel < 0) {
+#if defined(FA_WGMMA) && defined(FA_TMA)
+    maintma_sel = (D == 128 && wg2bn_sel) ? 1 : 0;
+#else
+    maintma_sel = 0;
+#endif
+  }
   // O43：只在「BN=64 的 wgmma2、非 cluster、非 TMA」上切 K。小 S（base grid < 132）按需
   //   「填满一个波」；`--wg2ksplit=N` 可强制/关闭（=1）。大 S / BN=128 网格已够，不切。
   if (D == 128 && wg2_sel && !wg2bn_sel && cluster_use == 0 && !maintma_sel) {
@@ -5628,6 +5646,7 @@ int main(int argc, char** argv) {
   // O23：LSE 预处理也默认走 Hopper wgmma 版（仅 causal / D==128；非 causal 自动落回 O8 原版）。
   if (!lse_forced && D == 128 && causal) lse_wgm = 1;
 #endif
+  if (maintma_sel < 0) maintma_sel = 0;   // O115：非 FA_WGMMA 构建无 TMA 路径
   // O30：TMA 版 LSE 需驱动 API（`cuTensorMapEncodeTiled`）⇒ 只有 `-DFA_TMA -lcuda` 构建才编译
   //   该路径；此时 D==128/causal 默认开（1.30–1.36× 于 wgmma+cp.async，且逐位相同）。
 #if defined(FA_WGMMA) && defined(FA_TMA)

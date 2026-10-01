@@ -1,0 +1,43 @@
+=== O115 bf16 fixed D=128: maintma auto vs --maintma=0 (S4096 wgmma2b) + gate evidence ===
+
+----- bf16 mmamain S4096 causal --maintma=0 -----
+[O23] main backend = wgmma2b(BN=128) | lse = tma (D=128 S=4096)
+[timing] total(3 kernels) 1.1581 ms  118.68 TFLOPS (bwd FLOPs=4BS^2HD)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+
+----- bf16 mmamain S4096 causal --maintma=1 -----
+[O23] main backend = wgmma2b(BN=128) | lse = tma (D=128 S=4096) +maintma
+[timing] total(3 kernels) 1.1207 ms  122.63 TFLOPS (bwd FLOPs=4BS^2HD)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+
+----- bf16 mmaonefile S4096 causal --maintma=0 -----
+[O23] main backend = wgmma2b(BN=128) | lse = tma (D=128 S=4096)
+[timing] total(3 kernels) 1.1581 ms  118.67 TFLOPS (bwd FLOPs=4BS^2HD)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+
+----- bf16 mmaonefile S4096 causal --maintma=1 -----
+[O23] main backend = wgmma2b(BN=128) | lse = tma (D=128 S=4096) +maintma
+[timing] total(3 kernels) 1.1154 ms  123.22 TFLOPS (bwd FLOPs=4BS^2HD)
+  dq   vs ref: max_abs=1.510e-02  max_rel=1.420e+00
+  dk   vs ref: max_abs=1.340e-02  max_rel=1.218e+00
+  dv   vs ref: max_abs=1.631e-02  max_rel=1.980e+00
+
+=== gate: BN=64 wgmma2 (small/mid S) auto stays cp.async; forcing TMA regresses S512 ===
+----- bf16 b1_s512_h16_d128_causal_bf16 --maintma=0 -----
+[O23] main backend = wgmma2(BN=64) | lse = tma (D=128 S=512) +ksplit
+[timing] total(3 kernels) 0.0591 ms  36.36 TFLOPS (bwd FLOPs=4BS^2HD)
+----- bf16 b1_s512_h16_d128_causal_bf16 --maintma=1 -----
+[O23] main backend = wgmma2(BN=64) | lse = tma (D=128 S=512) +maintma
+[timing] total(3 kernels) 0.0766 ms  28.03 TFLOPS (bwd FLOPs=4BS^2HD)
+----- bf16 b1_s1024_h32_d128_kv4_causal_bf16 --maintma=0 -----
+[O23] main backend = wgmma2(BN=64) | lse = tma (D=128 S=1024)
+[timing] total(3 kernels) 0.2298 ms  74.77 TFLOPS (bwd FLOPs=4BS^2HD)
+----- bf16 b1_s1024_h32_d128_kv4_causal_bf16 --maintma=1 -----
+[O23] main backend = wgmma2(BN=64) | lse = tma (D=128 S=1024) +maintma
+[timing] total(3 kernels) 0.2282 ms  75.30 TFLOPS (bwd FLOPs=4BS^2HD)

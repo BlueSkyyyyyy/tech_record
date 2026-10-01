@@ -2476,3 +2476,24 @@ main 不变；MLA 反向 FA/TE 不支持，仅 ours。**ncu**：TMA **12.77 µs 
 / 1 CTA/SM**，与 fp16（12.99µs）逐项一致。**结论**同 fp16：搬迁方式升级，非 DRAM/L2/算力 bound。
 见 `docs/08` §5.84；原始输出 `src/bf16/fa_bwd_bf16_o74_mla_lse_ab.out.txt`、
 `src/bf16/fa_bwd_bf16_mma_onefile_o74_mla.out.txt`、`..._o74_ncu_lse_tma_s1024h2.out.txt`。
+
+## 6bc. O115-bf16（第 209 轮，**正结果，默认**）：定长 causal D=128（S≥4096 的 `wgmma2b`）主 kernel 默认走逐 atom 4D-TMA（O34 的默认化）
+
+O115 的 bf16 逐字 dtype 参数化（`__half`→`__nv_bfloat16`）：O34（第七十四轮，`docs/01b` §6y）
+把 **BN=128 的 `wgmma2b`** 主 kernel 的 Q/K/V/dO 改成**逐 atom 4D-TMA**，一直是 `--maintma`
+opt-in；F8（§6ax）后 bf16 定长默认构建已是 Hopper（`-DFA_TMA -lcuda`）。本轮把 `maintma` 改为
+**自动档**：**仅 BN=128 的 `wgmma2b`（S≥4096）默认 TMA**，BN=64 的 `wgmma2`（小/中 S）保持
+`cp.async`（同 fp16 门控）。**改动纯 host，device 一行未改。**
+
+**实测（同 binary A/B，S4096 causal，iters=200）**：
+
+| 实现 | `--maintma=0` total / main | **默认（auto）** total / main | 端到端 |
+|---|---|---|---|
+| 两文件 | 1.1581 / 0.9546 ms | **1.1207 / 0.9213 ms** | **1.033×** |
+| 单文件 | 1.1581 / 0.9542 ms | **1.1154 / 0.9213 ms** | **1.038×** |
+
+数值 `ours vs fp32 ref` `max_abs` dq/dk/dv 在 0/1 间**逐位相同**（`1.510/1.340/1.631e-2`，
+bf16 噪声；同 O34 的「仅 atomic 次序」）；单/两文件一致性 gate bf16 **worst 3.906e-3 OK**。
+对标 FA/TE：ours 与 FA（1.441/1.332/1.631e-2）、TE（1.524/1.763/1.631e-2）同量级。
+ncu 与 fp16 同构（`red` 逐字节不变、`sm__inst_executed` −25%）。见 `docs/01` §26、`docs/08` §5.123；
+原始输出 `src/bf16/fa_bwd_bf16_o115_maintma_ab.out.txt`、`src/fa_bwd_o115_ci.out.txt`。

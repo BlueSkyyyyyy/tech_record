@@ -290,8 +290,8 @@ TE-vs-ref**（ours 0.24–0.32 vs TE 0.37–0.67）——本版 dS/输出保留 
 >
 > **O33（主 kernel 的 Q/K/V/dO 4D-TMA，逐 atom，fp16，第七十四轮）**：TMA 一个 `[8 行][64 列]`
 > box = 一个 1024B SW128 atom，逐 atom 发 TMA 即可**原样复现 `sw128_off` 交织布局** ⇒ 所有
-> wgmma 描述符零改动、搬的字节与 cp.async 逐字节相同。`--maintma` opt-in（仅 BN=128 的
-> wgmma2b）。同 session A/B（S4096）：main **0.9638→0.9249ms（142.6→148.6 TF，1.042×）**、
+> wgmma 描述符零改动、搬的字节与 cp.async 逐字节相同。`--maintma`（仅 BN=128 的
+> wgmma2b；**自 O115 第 209 轮起该几何默认开启**，`--maintma=0` 退回 cp.async）。同 session A/B（S4096）：main **0.9638→0.9249ms（142.6→148.6 TF，1.042×）**、
 > 单文件 1.044×；端到端 total **1.2289ms / 111.8 TF**。ncu：Duration 969→**924µs**、
 > **`red` 51,904,512 逐字节不变**、regs/smem/occupancy（12.5%, 1 CTA/SM）全不变 ⇒ **TMA 只省
 > 搬运那一半，动不了主墙（dK/dV 的 L2 `red`）**。`max|diff|`：dq `0`（逐位）、dk/dv ~2e-5
