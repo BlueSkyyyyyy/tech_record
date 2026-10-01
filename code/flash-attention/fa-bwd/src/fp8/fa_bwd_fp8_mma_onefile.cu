@@ -6005,7 +6005,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
                       int mla_kvp = -1, int lseocc = 0, int lse8w = 0,
                       const std::string& dump = "", int det_ab = 0, int det_ksplit = 1,
                        int fuse_reduce = 1, int part_compact = 0, int qfuseflag = 1,
-                       int dfuseflag = 1, int vksplit = -1, int mrev_flag = 1) {
+                       int dfuseflag = 1, int vksplit = -1, int mrev_flag = 1, int ovl_ql = -1, int ovl_cap = 0) {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -6262,6 +6262,52 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   printf("O40: varlen lse k-split = %d (base=%ld)\n", lse_split_eff,
          (D == 128 && lse_compact) ? (long)total_pairs * H : (long)((nblk0 + 1) / 2) * H * B);
 
+  // O111（第 205 轮）：把 O109/O110 的「量化分相 + LSE 跨 stream 重叠 + phase1 栅格封顶」
+  //   推广到**变长**。变长 `run_all` 此前始终走合并量化（`quantize_zero_delta_warp_kernel`）
+  //   → 串行 LSE；而 LSE（SM bound）与 phase1（DRAM bound）资源互补。
+  //   与定长同源：phase0 量化 Q/K（LSE 就绪），phase1（dO+delta/V/清零）放 aux stream 与 LSE
+  //   重叠，主 kernel 前等 aux。逐行例程与合并版**逐字相同** ⇒ 数值**逐位不变**（device 一行
+  //   未改，复用 O109 的 `quantize_zero_delta_phase_kernel`）。门控：融合路径
+  //   （qfuseflag && dfuse）；D=256/512 需 `rows_q>=2048`（小 shape 分相 launch 开销盖过被藏的
+  //   phase1）；`--ovlql=0` 关、`-1/1`=auto/开；`--ovlcap` 同 O110（0=auto、>0 显式、<0 不封顶）。
+  const bool ql_overlap_v = (ovl_ql != 0) && qfuseflag && (dfuseflag != 0) &&
+                            ((D == 128) || (rows_q >= 2048));
+  cudaStream_t sQuantAuxV = nullptr;
+  cudaEvent_t ql_e0v = nullptr, ql_e1v = nullptr;
+  auto quant_phase_v = [&](int ph, cudaStream_t st) {
+    const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
+    const long long ntask = (ph == 0) ? (rq + rkv) : (2 * rq + 3 * rkv);
+    int grid = (int)std::min<long long>((ntask + 3) / 4, 1048576);
+    if (ph == 1) {
+      long long cap;
+      if (ovl_cap < 0) cap = grid;
+      else if (ovl_cap > 0) cap = ovl_cap;
+      else cap = std::min<long long>(std::max<long long>(132, ntask / 64), 4096);
+      grid = (int)std::min<long long>(grid, cap);
+    }
+    if (D == 128)
+      quantize_zero_delta_phase_kernel<4><<<grid, 128, 0, st>>>(
+          d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
+          d_dos, d_dq, d_dk, d_dv, rq, rkv, ph);
+    else if (D == 256)
+      quantize_zero_delta_phase_kernel<8><<<grid, 128, 0, st>>>(
+          d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
+          d_dos, d_dq, d_dk, d_dv, rq, rkv, ph);
+    else
+      quantize_zero_delta_phase_kernel<16><<<grid, 128, 0, st>>>(
+          d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
+          d_dos, d_dq, d_dk, d_dv, rq, rkv, ph);
+  };
+  if (ql_overlap_v) {
+    CUDA_CHECK(cudaStreamCreateWithFlags(&sQuantAuxV, cudaStreamNonBlocking));
+    CUDA_CHECK(cudaEventCreateWithFlags(&ql_e0v, cudaEventDisableTiming));
+    CUDA_CHECK(cudaEventCreateWithFlags(&ql_e1v, cudaEventDisableTiming));
+    printf("O111: varlen quant-phase overlap ON (Q/K -> LSE(default) || dO+V+zero(aux)), D=%d\n", D);
+  } else if (ovl_ql == 1) {
+    printf("O111: varlen overlap requested but conditions unmet (D=%d qfuse=%d dfuse=%d rows_q=%zu) -> serial\n",
+           D, qfuseflag, dfuseflag, (size_t)rows_q);
+  }
+
   auto run_all = [&]() {
     const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
     const int gq = (int)std::min<long long>((rq + 3) / 4, 65535);
@@ -6270,7 +6316,16 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     // O64：默认把 4 次量化 + 3 次清零融合成 1 个 launch（`qfuseflag=0` 退回旧路径做 A/B）。
     // O66：`dfuseflag`（默认 1）时把 delta 也算进 dO 的量化任务（省一次 delta launch）。
     const bool dfuse = (dfuseflag != 0);
-    if (qfuseflag) {
+    // O111：分相重叠仅在融合路径、且本次调用 qfuseflag 为真时生效（`time_all(false)` 走 unfused）。
+    const bool ql_ov = ql_overlap_v && qfuseflag;
+    if (ql_ov) {
+      // Q/K 先量化（LSE 就绪）→ 下面 default stream 跑 LSE，同时 phase1 在 aux stream 上
+      // 做 dO+delta / V / 清零；主 kernel 前等 aux 完成（见 LSE 块之后的 `ql_e1v` wait）。
+      quant_phase_v(0, nullptr);
+      CUDA_CHECK(cudaEventRecord(ql_e0v));
+      CUDA_CHECK(cudaStreamWaitEvent(sQuantAuxV, ql_e0v, 0));
+      quant_phase_v(1, sQuantAuxV);
+    } else if (qfuseflag) {
       const long long total = 3 * rq + 4 * rkv;
       const int g = (int)std::min<long long>((total + 3) / 4, 1048576);
       if (dfuse) {
@@ -6416,6 +6471,12 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
                                      d_cu, d_lse_part, lse_split_eff, (long long)rows_q);
       else
         launch_lse<512>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
+    }
+    // O111：LSE 已发在 default stream，此刻再等 aux 的 phase1（dO/delta/V/清零）——主 kernel
+    //   读 v8/do8/delta、写 dq/dk/dv，必须等 phase1。事件使两条 stream 在此汇合。
+    if (ql_ov) {
+      CUDA_CHECK(cudaEventRecord(ql_e1v, sQuantAuxV));
+      CUDA_CHECK(cudaStreamWaitEvent(nullptr, ql_e1v, 0));
     }
     const int d_rows = (int)rows_q;
     const int d_wpb = THREADS / 32;
@@ -7366,7 +7427,7 @@ int main(int argc, char** argv) {
   if (varlen)
     return run_varlen(dir, causal, iters, compact_opt, lse_compact_opt, lse_split, mla8w_opt,
                        mla_kvp_opt, lseocc_opt, lse8w_opt, dump_prefix, det_ab, det_ksplit,
-                       fuse_reduce, part_compact, qfuse, dfuse, ksplit, mrev_opt);
+                       fuse_reduce, part_compact, qfuse, dfuse, ksplit, mrev_opt, ovl_ql, ovl_cap);
 
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");

@@ -3286,7 +3286,27 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百零四轮）**：**O110——量化分相/LSE 重叠扩到 D=256/D=512 + phase1 栅格封顶
+> **最新（第二百零五轮）**：**O111——量化分相 + LSE 跨 stream 重叠推广到变长（varlen），
+> 端到端正结果/默认**。落实 O110 留的「`run_varlen` 仍是合并量化串行」（候选 ④）。变长非 main
+> 占比同样可观，且 LSE（SM bound、DRAM 4–7%）与量化 phase1（DRAM 78%、SM 30%）资源互补。
+> **改动（device 一行数学未改、单/两文件 host 同源）**：`run_varlen` 透传 `--ovlql/--ovlcap`，
+> 新增 `quant_phase_v(ph,stream)`（复用 O109 的 `quantize_zero_delta_phase_kernel<VPT=D/32>`）+
+> aux stream / 两个 event；`run_all` 量化段改为 `phase0(default) → {phase1(aux) || LSE(default)}
+> → default.wait(aux)`，未命中逐字走原串行。门控同 O110（D=128 无条件、D=256/512 需
+> `rows_q=T*H>=2048`、`qfuseflag && dfuseflag`），phase1 栅格封顶 auto `clamp(ntask/64,132,4096)`。
+> **性能（同 binary A/B，iters=200，3×，两文件）**：causal **b1_t512 d128 1.051× / b4_t3840 d128
+> 1.028× / b5_t3968 d128 1.029× / b4_t3840 d256 1.018× / b4_t4096 d256 1.012× / b3_t1792 d512
+> 1.030×**；full **1.005× / 1.001× / 1.000× / 1.000×**（10 shape 无回退）。单文件同码逐值一致。
+> **nsys**：稳态 `phase1(stream13, grid 4096, 69.7µs)` 与 `LSE(stream7, ~107µs)` 区间重叠。
+> **ncu**：phase1 DRAM 78.3%/SM 30.5%、phase0 77.7%/57.8%、LSE **7.4%/57.7%** ⇒ 资源互补。
+> **数值/护栏**：`max_abs`/`relL2` 在 `--ovlql=0/1` 间**逐位相同**（10 shape ×3），relL2 全在
+> 护栏内（causal ≤8.43/8.48/6.48%、full ≤8.23/8.36/6.76%）；`--ci --dtype fp8 --hopper`（49 case）
+> gate **5.722e-06 OK**、`docs/04 --check` OK（218 行）、rc=0。
+> **下一步候选**：① **换卡**（main 的 L2 `red` 主体墙仍无软件解，见「阻塞」）；② causal 变长
+> ksplit 复核推广到 **fp16/bf16**；③ MLA 降 smem；④ `--det` 确定性 partial/归约进一步并行化。
+> 见 `docs/03` §133、`docs/08` §5.119。
+>
+> **（第二百零四轮）**：**O110——量化分相/LSE 重叠扩到 D=256/D=512 + phase1 栅格封顶
 > （fp8 端到端，正结果/默认）**。落实 O109 留的「D=256/512 未接入」。nsys 证 phase1 与 LSE
 > 确实重叠，但 phase1 默认栅格巨大（D=256 10240 CTA / D=512 2560 CTA）几乎占满 SM ⇒ LSE 只能
 > 等其尾部，**不封顶时实测重叠 ≈0**（D=256 phase1 14.5µs/LSE 12.4µs 背靠背）——真瓶颈是
@@ -8546,8 +8566,35 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
   - **判决：正结果、默认开启**。压的仍是**非 main 串行**；main 的 L2 `red` 主体墙仍无软件解。
     **下一步候选**：① 换卡；② causal 变长 ksplit 复核推广到 fp16/bf16；③ MLA 降 smem；
     ④ 把分相+封顶重叠推广到 varlen（`run_varlen` 现仍是合并量化串行）。
-    见 `docs/03` §132、`docs/08` §5.118；原始输出 `src/fp8/fa_bwd_fp8_o110_ab.out.txt`、
-    `..._o110_ci.out.txt`。
+     见 `docs/03` §132、`docs/08` §5.118；原始输出 `src/fp8/fa_bwd_fp8_o110_ab.out.txt`、
+     `..._o110_ci.out.txt`。
+
+- 2026-10-01（第二百零五轮）：**O111——量化分相 + LSE 跨 stream 重叠推广到变长（varlen），
+  正结果/默认**。落实 O110 明确的候选 ④（`run_varlen` 仍是合并量化串行）。
+   - **动机**：变长非 main 占比同样可观；LSE（SM bound、DRAM 4–7%）与 phase1（DRAM 78%、
+     SM 30%）资源互补，且复用 O109 的 `quantize_zero_delta_phase_kernel<VPT=D/32>`。
+   - **改动（device 一行数学未改、单/两文件 host 同源）**：`run_varlen` 加 `ovl_ql/ovl_cap`
+     参数并从 `main()` 透传 `--ovlql/--ovlcap`；新增 `quant_phase_v(ph,stream)` + `sQuantAuxV`
+     /`ql_e0v`/`ql_e1v`；`run_all` 量化段改为 `phase0(default) → record e0 → aux.wait(e0) →
+     phase1(aux)`，LSE 块之后 `record e1(aux) → default.wait(e1)` 再进主 kernel。门控同 O110
+     （D=128 无条件、D=256/512 需 `rows_q=T*H>=2048`、`qfuseflag && dfuseflag`）；phase1 栅格
+     封顶 auto `clamp(ntask/64,132,4096)`。逐行例程与合并版逐字相同 ⇒ 输出**逐位相同**。
+   - **性能（同 binary A/B，iters=200，3×）**：causal b1_t512 d128 **1.051×**、b4_t3840 d128
+     **1.028×**、b5_t3968 d128 **1.029×**、b4_t3840 d256 **1.018×**、b4_t4096 d256 **1.012×**、
+     b3_t1792 d512 **1.030×**；full b4_t4096 d128 **1.005×** / b5_t3968 d128 **1.001×** /
+     b4_t3840 d256 **1.000×** / b3_t1792 d512 **1.000×**。10 shape 无回退；单文件逐值一致。
+   - **nsys**：稳态 `phase1(stream13, grid 4096, 69.7µs)` 与 `LSE(stream7, ~107µs)` **区间重叠**；
+     D=256 同构（phase0 15360 / phase1 2400 / LSE 16×8×16）。
+   - **ncu**：phase1 grid 4096 DRAM **78.3%** / SM 30.5%、phase0 grid 30720 DRAM 77.7% / SM
+     57.8%、LSE DRAM **7.4%** / SM **57.7%** ⇒ 资源互补是重叠收益来源。
+   - **数值/护栏**：`ours vs fp32 ref` 的 `max_abs`/`relL2` 在 `--ovlql=0/1` 间**逐位相同**
+     （10 shape ×3），relL2 全在护栏内；`--ci --dtype fp8 --hopper`（49 case）gate worst
+     **5.722e-06 OK**、`docs/04 --check` OK（218 行）、rc=0。单/两文件一致性 OK。
+   - **判决：正结果、默认（`--ovlql=0` 退）**。压的仍是**非 main 串行**；main 的 L2 `red` 主体墙
+     仍无软件解。**下一步候选**：① 换卡；② causal 变长 ksplit 复核推广到 fp16/bf16；③ MLA 降
+     smem；④ `--det` partial 并行化。见 `docs/03` §133、`docs/08` §5.119；原始输出
+     `src/fp8/fa_bwd_fp8_o111_ab.out.txt`、`..._o111_nsys.out.txt`、`..._o111_ncu.out.txt`、
+     `..._o111_ci.out.txt`。
 
 ## 灵感 / backlog
 
