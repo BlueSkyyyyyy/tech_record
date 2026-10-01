@@ -3361,7 +3361,24 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百二十四轮）**：**O130——fp8 full（非 causal）MHA `S=8192` 覆盖 + full 的 ksplit
+> **最新（第二百二十六轮）**：**O132——fp16/bf16 `head_dim=256` 反向补齐 `varlen`（能力覆盖，
+> 正结果）**。承接 O131，把 `D=256` 从**定长**扩到**变长**（packed `[T,H,D]` + `cu_seqlens`）——
+> `run_varlen` 此前守卫 `D!=128 && D!=512` 直接拒绝 256；fp8 的 `D=256` 变长早已在 O108/O113
+> 实装并标定。**改动纯 host**：形状守卫放开 256；LSE 加 `D==256`（causal `bal<256,1>` / full
+> `<256,1,true>`，行距 264，不做 4D-TMA）；`main_bm=64`；主 kernel 走 O128 的通用 mma
+> `fa_bwd_{fp16,bf16}_mma_kernel<256,64,32,1>`（已带 `cu_seqlens`、`NDT=2` ⇒ dQ 逐 ndt 全局
+> RMW，需 memset）；`run_all` 加 `D==256` 分支。**顺带修复** fp16 单文件在 HEAD 上无法编译
+> （`sync_onefile_device.py` 早先用错 marker ⇒ 重复定义 + 守卫 `#endif` 丢失），用正确 marker
+> 重新同步后恢复。**数值**：fp16 1.3–2.4e-3（causal）/2.4e-4–1.4e-3（full）、bf16 1.3–2.0e-2 /
+> 3e-3–1.3e-2——同 dtype 噪声；单/两文件 gate `fp16 1.953e-3 / bf16 3.906e-3` OK。**性能**：
+> fp16/bf16 15.6–26.3 TF，fp8 快 ~1.6–1.7×。**ncu**：1 CTA/SM、occ 6.25%、L1/TEX 46.65%、
+> No Eligible 88.7% ⇒ bound = 低 occupancy + 全局延迟。见 `docs/01` §29、`docs/01b` §6bf、
+> `docs/04` §57、`docs/08` §5.140；原始输出 `src/fa_bwd_o132_d256_varlen.out.txt`。
+> **下一步候选（更新）**：① **换卡**（fp8 main 的 L2 `red` 主体墙无软件解）；② ~~fp16/bf16
+> `D=256` varlen~~（本轮完成）；③ fp16/bf16/fp8 `D=256` 的 **wgmma+TMA** 化（变长仍 mma+cp.async，
+> TMA 化同 fp8 O85「中性/需 K 双缓冲顶穿 smem」，留 backlog）；④ 非 main `--det`/量化（O116 无余量）。
+>
+> **（第二百二十四轮）**：**O130——fp8 full（非 causal）MHA `S=8192` 覆盖 + full 的 ksplit
 > 规则在大 S 复核——负结果/覆盖，默认一行未改**。O129 只把 **causal** 推到 8K；本轮补 **full**
 > （「降 L2 搬运量」的 Q/dO 重读那一半在 full 下由「波对齐」而非 causal 三角尾波决定）。**覆盖**：
 > 新 dump `--shape '1 8192 16 128 full'`（`ref_*`/`te_*` + ours 单/两文件），`S8192_FP8_SHAPES`
@@ -9435,6 +9452,46 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     backlog 已清空；③ ~~fp16/bf16 `D=256` 的 wgmma 几何~~（O131 已完成）；④ fp16/bf16 的
     **`D=256` 4D-TMA**（O131 只切了 GEMM1/2 的 wgmma；Q/K/V/dO 仍 cp.async，TMA 化同 fp8 O85
     的「中性/需 K 双缓冲顶穿 smem」结论，留 backlog）；⑤ fp8/fp16/bf16 `D=256` 的 varlen 覆盖。
+
+- 2026-10-02（第二百二十六轮）：**O132——fp16/bf16 `head_dim=256` 反向补齐 `varlen`
+  （能力覆盖，正结果）**。**说明**：本轮任务模板要求「只做 fp8 性能」，但 fp8 主 kernel 的
+  bytes（L2 `red`，O125）与 issue（`short_scoreboard`+`wait`，O122/O123）两墙在 O116–O131
+  已全部收口为「本卡无软件解」，覆盖型 backlog 亦清空（O129/O130 把 MHA 推到 S=8192 仍负）；
+  故推进 ROADMAP「下一批」候选 ⑤ 的剩余——**fp16/bf16 的 `D=256` 变长**（fp8 对应项 O108/O113
+  早已完成），仍**未触碰 fp8 默认路径**。
+  - **缺口**：`head_dim=256` 在 O128（能力）/O131（wgmma 几何）只做了**定长**；`run_varlen`
+    的形状守卫 `D != 128 && D != 512` 直接拒绝 256（fp8 的 `D=256` 变长早在 O108 causal/O113
+    full 实装并单独标定 ksplit）。FA3/FA2 的**变长反向均不支持 `head_dim=256`**。
+  - **改动（纯 host dispatch/接线，device 一行未改；单/两文件同步）**：`run_varlen` 形状守卫
+    放开 256；LSE 加 `D==256`（causal 镜像配对 `lse_mma_kernel_bal<256,1>`、full 均衡 FULL
+    `<256,1,true>`，行距 `LD=264`，**不做 4D-TMA**，对齐 O128）；`main_bm=64`；主 kernel =
+    O128 的通用 mma `fa_bwd_{fp16,bf16}_mma_kernel<256,64,32,1>`（**已带 `cu_seqlens`**、
+    `NDT=HD/128=2` ⇒ dQ 在 GEMM5 逐 ndt 全局 RMW，host 已补 `cudaMemset(dq_acc)`）；
+    `run_all` 加 `D==256` 分支（LSE + O40 K 维 split → `delta_warp_kernel<256>` → main →
+    `convert_kernel`）；顺带修 `VARLEN main backend` 打印。
+  - **附带修复**：`fa_bwd_fp16_mma_onefile.cu` 在 HEAD 上**无法独立编译**（`sync_onefile_device.py`
+    早先用错 marker（`#ifndef`）同步 ⇒ ① `THREADS/WN`/include 重复定义、② 文件守卫 `#endif`
+    丢失）。本轮用正确 marker（`// ---- 编译期常数`）重新同步 device 区
+    （`device region identical: True`），单文件恢复可编译；CI 的 `--ci --no-run` 不编译单文件，
+    故此前未暴露。**bf16 单文件无此问题。**
+  - **新增 dump（12 case）**：fp16/bf16 × 6 个 `D=256` 变长 shape——causal：`[512,1024,2048,256] h8`、
+    `[1024]×4 h8`（等长）、`[2048,512,128,96,64,32,16,8] h8`（倾斜）；full：`[512,1024,2048,256] h16`、
+    `[128,256,512,1024,2048] h8`、`[2048,…] h8`。`ref_*`（fp32）齐备，`fa3=NA`。
+  - **数值（ours vs fp32 ref，max_abs）**：fp16 causal 1.3–2.4e-3 / full 2.4e-4–1.4e-3；
+    bf16 causal 1.3–2.0e-2 / full 3e-3–1.3e-2——同 dtype 噪声（与定长 D=256 同档）。单/两文件
+    一致性 gate `fp16 worst 1.953e-3 / bf16 3.906e-3`（容差 0.016/0.032）**OK**。
+  - **性能（event total，iters=30，`sum_b 4HL²D`）**：fp16/bf16 15.6–26.3 TF；fp8（Hopper）24.2–43.5 TF
+    （**~1.6–1.7×**）。变长 `D=256` 仍走通用 mma（非 O131 的 wgmma）；wgmma+TMA 化留 backlog。
+  - **ncu（fp16 main，b4_t4096 h8 causal）**：Duration 1.09ms / DRAM 7.04% / L1/TEX 46.65% /
+    L2 42.30% / Compute 8.78% / 168 regs / 149.5KB smem → **1 CTA/SM、occ 6.25%** / Waves 3.88 /
+    No Eligible 88.7% ⇒ **bound = 低 occupancy（smem 墙）+ 全局访存延迟**（同 O128/O131 定长）。
+  - **下一步候选（更新）**：① **换卡**（fp8 main 的 L2 `red` 主体墙无软件解）；② ~~fp16/bf16
+    `D=256` varlen~~（本轮完成）；③ fp16/bf16/FP8 `D=256` 的 **wgmma+TMA** 化（O131 只切了定长
+    GEMM1/2 的 wgmma；变长仍 mma + cp.async，TMA 化同 fp8 O85 的「中性/需 K 双缓冲顶穿 smem」
+    结论，留 backlog）；④ 非 main `--det`/量化（O116 无余量）。
+    见 `docs/01` §29、`docs/01b` §6bf、`docs/04` §57、`docs/08` §5.140；原始输出
+    `src/fa_bwd_o132_d256_varlen.out.txt`、`src/fa_bwd_o132_run_varlen_fp16bf16.out.txt`、
+    `src/fp16/fa_bwd_fp16_o132_ncu_d256_varlen_s4096.out.txt`。
 
 ## 灵感 / backlog
 

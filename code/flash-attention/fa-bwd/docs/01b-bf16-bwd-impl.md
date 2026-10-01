@@ -2548,3 +2548,27 @@ main S1024H8 0.385→0.212（**1.82×**）、S2048 1.206→0.680（**1.77×**）
 **ncu**：与 fp16 O131 同构（wgmma 直读 SW128，smem 波前与指令数同幅下降；fp16 2 字节 ⇒ 仍
 1 CTA/SM，非 fp8 O84 的 2 CTA/SM，但去 LDSM 即 1.6–1.7×）。见 `docs/01` §28、`docs/08` §5.139；
 原始输出 `src/bf16/fa_bwd_bf16_o131_d256_wgmma_ab.out.txt`。
+
+## 6bf. O132-bf16（第 226 轮，**能力覆盖，正结果**）：`head_dim=256` 反向扩到 **varlen**（bf16）
+
+与 fp16 O132 逐字 dtype 同构（详见 `docs/01` §29）。`fa_bwd_bf16_mma_{main,onefile}.cu` 的
+`run_varlen`：形状守卫放开 256；LSE 新增 `D==256`（causal `lse_mma_kernel_bal<256,1>` / full
+`<256,1,true>`，行距 `LD=264`，不做 4D-TMA）；`main_bm=64`；主 kernel 走 O128 的通用 mma
+`fa_bwd_bf16_mma_kernel<256,64,32,1>`（带 `cu_seqlens`、`NDT=2`）；`run_all` 加 `D==256` 分支
+（LSE→delta→main→convert，dQ 需 memset）。**device 一行未改**，单/两文件 host 同步。
+
+**数值**（`ours vs fp32 ref`，bf16 varlen；单/两文件逐位一致）：
+b4_t3840 h8 causal 1.323e-2/1.471e-2/1.861e-2、b4_t4096 h8 causal 1.893e-2/1.848e-2/2.021e-2、
+b8_t2904 h8 causal 1.525e-2/1.560e-2/1.873e-2；b4_t3840 h16 full 5.712e-3/5.623e-3/3.098e-3、
+b5_t3968 h8 full 5.176e-3/3.743e-3/2.917e-3、b8_t2904 h8 full 1.267e-2/1.085e-2/1.145e-2——
+全部 bf16 噪声（~1e-2）。一致性 gate `bf16 worst 3.906e-3`（容差 0.032）OK。
+FA3/FA2 反向变长不支持 `head_dim=256`，只有 fp32 ref 可对。
+
+**性能**（CUDA event total，iters=30；`sum_b 4HL²D`）：与 fp16 逐项同量级——b4_t3840 h8 causal
+2.142ms/21.3TF、b4_t4096 h8 causal 1.308ms/26.3TF、b8_t2904 h8 causal 1.439ms/25.6TF、
+b4_t3840 h16 full 5.276ms/17.3TF、b5_t3968 h8 full 2.911ms/15.7TF、b8_t2904 h8 full 2.090ms/17.6TF。
+fp8 同 shape 快 ~1.6–1.7×。
+
+**ncu**：与 fp16 O132 同源（1 CTA/SM、occ 6.25%、bound = 低 occupancy + 全局延迟）。
+见 `docs/01` §29、`docs/04` §57、`docs/08` §5.140；原始输出 `src/fa_bwd_o132_d256_varlen.out.txt`、
+`src/fa_bwd_o132_run_varlen_fp16bf16.out.txt`。
