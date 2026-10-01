@@ -3269,13 +3269,36 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       S1024H2 main **1.071×**、total 1.028×；ncu 证 **L2 扇区逐位不变、Duration −3~5%、L2 利用率
       +2~3pt**（纯尾波削平）。D=256 大 base 的 mrev-only 对照 1.003×（噪声内）不纳入。
       见 `docs/03` §127、`docs/08` §5.113。
+- [x] **O109**（第 203 轮，**正结果/默认**）**量化分相 + LSE 跨 stream 重叠**——fp8 **非 main**
+      的跨阶段串行（main 的 L2 `red` 已判无解）。新增 `quantize_zero_delta_phase_kernel<VPT>`
+      （phase0=Q/K、phase1=dO+delta/V/清零；逐行例程与合并版逐字同款 ⇒ 输出逐位相同）+ host
+      `phase0 → {phase1(aux) || LSE} → main`；S512 **1.030×**、S1024H32 1.017×、kv4 1.016×、
+      S4096 1.005×；nsys 证 LSE 与 phase1 区间重叠；`--ci --dtype fp8 --hopper` gate
+      **7.153e-06 OK**。见 `docs/03` §131、`docs/08` §5.117。
 - [ ] 每步：`ncu` 复测 **L2 扇区/`red`/Duration**，与 TE（`harness/te_fp8_ncu.py`）同 session 对比；
       `harness/fa_vs_te_bwd_only.py` 纯反向验收；数值逐位/容差不变。
-- 目标：fp8 S4096 从 ~1.95ms（6.4× TE）→ 先到 **3× TE**，再逼近 **2×**。
+- 目标：fp8 S4096 从 ~1.95ms（6.4× TE）→ 先到 **3× TE**，再逼近 **2×**。**注**：main 的 L2
+  `red` 墙需换卡；O109 后 S4096 已 5.20× TE，剩余只能靠非 main 的进一步并行化。
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百零一轮）**：**O107——fp8 变长 causal 主 kernel 的 ksplit 重标定（D=128/D=512）
+> **最新（第二百零三轮）**：**O109——量化分相 + LSE 跨 stream 重叠（fp8 端到端，正结果/默认）**。
+> 本轮先钉死 fp8 **main** 已在平台期：ncu 复核默认 `kvtma`（ksplit=2 + 跨 head LPT）main
+> **1.38ms / L2 77.8% / `red` 105.4M / 张量核 11.65% / short 1.85 + wait 1.54**（与 O92 一致）；
+> 编译宏复扫 `FA_WS1` 中性、`ILV34` **0.911×**、`FA_R4` **0.951×**（`src/fp8/fa_bwd_fp8_o109_macrosweep.out.txt`）
+> ⇒ 复证「只改指令/发射顺序、不改贡献 CTA 数不可能转正」。于是转向**非 main**：量化（99µs、
+> DRAM 84%/SM 62%）与 LSE（121µs、SM 73%/DRAM 4%）资源互补但被融合量化 kernel 串死。
+> **改动（device 数学一行未改、输出逐位不变 + host 一条 stream）**：新增
+> `quantize_zero_delta_phase_kernel<VPT>`（phase0 只做 Q/K 让 LSE 就绪；phase1 做
+> dO+delta/V/清零），host 流水 `phase0(default) → {phase1(aux) || LSE(default)} → main(wait e1)`；
+> 仅定长 D=128 默认路径、`--ovlql=0` 可退，单/两文件同步。**性能（同 binary A/B，iters=400，3×）**：
+> **S512 1.030×**、S1024H32 1.017×、S1024 kv4 1.016×、S4096 1.005×；nsys 证 LSE 与 phase1
+> **区间重叠**；quant 输出逐位相同 ⇒ `ours vs ref` `max_abs` 不变；`--ci --dtype fp8 --hopper`
+> （49 case）gate **worst 7.153e-06 OK**、`docs/04` `--check` OK。见 `docs/03` §131、`docs/08` §5.117。
+> **下一步候选**：① **换卡**（main 的 L2 `red` 主体墙无软件解，见「阻塞」）；② 把 causal 变长
+> ksplit 复核推广到 **fp16/bf16**；③ MLA 降 smem。
+>
+> **（第二百零一轮）**：**O107——fp8 变长 causal 主 kernel 的 ksplit 重标定（D=128/D=512）
 > ——正结果，默认**。把 O96–O100 的 ksplit 复核补齐到此前从未单独测量的 **causal 变长
 > D=128/D=512**（O106 只加了 mrev）。纯 host、device 一行未改、单/两文件同源：**D=128
 > `auto_k=max(auto_k,3)`**（O29 的固定 target 在 `base_grid>target` 时欠切到 1；b1 的 k=16 不动、
@@ -8450,7 +8473,38 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
   - **判决：正结果、默认开启**。fp8 变长覆盖补齐 `D=128/256/512 × causal/full`。`op_red` 主体墙仍
     无软件解；**下一步候选**：① 换卡；② causal 变长 ksplit 复核推广到 **fp16/bf16**；③ MLA 降 smem。
     见 `docs/03` §130、`docs/08` §5.116；原始输出 `src/fp8/fa_bwd_fp8_o108_ab.out.txt`、
-    `..._o108_ncu_d256_varlen.out.txt`、`..._o108_baseline.out.txt`、`..._o108_ci.out.txt`。
+   `..._o108_ncu_d256_varlen.out.txt`、`..._o108_baseline.out.txt`、`..._o108_ci.out.txt`。
+
+- 2026-10-01（第二百零三轮）：**O109——量化分相 + LSE 跨 stream 重叠（fp8 端到端）——正结果，默认**。
+  落实「fp8 专项冲刺」收口后唯一还剩的空间 = **非 main 的跨阶段串行**（main 的 L2 `red` 已判无解）。
+  - **先钉平台期**：ncu 复核当前默认 `kvtma`（ksplit=2 + 跨 head 全局 LPT）S4096 causal main =
+    **1.38ms / L2 77.8% / `red` 105.4M / `read` 24.3M / L1TEX 74.4% / 张量核 11.65% /
+    short 1.85 + wait 1.54**（与 O92 同档）；编译宏复扫 `FA_WS1` 1.3593（中性）、`FA_ILV34`
+    1.4801（**0.911×**）、`FA_R4` 1.4176（**0.951×**，基准 1.3483）⇒ 复证 O92。
+  - **改动（device 一行数学未改、单/两文件同源）**：新增
+    `quantize_zero_delta_phase_kernel<VPT>`——把 O64/O66 融合量化的 7 段任务拆两相（phase0=Q/K、
+    phase1=dO+delta/V/清零；逐行例程 amax/scale/cvt/delta 与合并版**逐字相同** ⇒ q8/qs/k8/ks/v8/vs/
+    do8/dos/delta/零值**逐位相同**）；host（`fa_bwd_fp8_main.cu` + 单文件）在定长 **D=128** 默认
+    融合路径加流水：`quant_phase(0,default) → record e0 → quant_phase(1,aux).wait(e0);
+    run_preprocess(false) → record e1(aux) → default.wait(e1) → run_main()`。`--ovlql=0` 关、
+    `-1`=auto；其余 D/变长/`qcap`/`--ovlp` 路径**逐字不变**。
+  - **性能（同 binary A/B，iters=400，3×）**：**b1_s512_h16_d128_causal 1.030×**
+    （0.0811→0.0788ms）、**b1_s1024_h32_d128_causal 1.017×**（0.3105→0.3052）、
+    **b1_s1024_h32_d128_kv4_causal 1.016×**（0.2766→0.2722）、**b1_s4096_h16_d128_causal 1.005×**
+    （1.5842→1.5766）；b1_s1024_h8_d256（门控外）1.000×。**S 越小收益越大**（非 main 占比越大）。
+  - **nsys（`--report cuda_gpu_trace`）**：一行迭代 `phase0(stream7, 34µs)` 之后
+    **`lse(stream7)` 与 `phase1(stream20, aux)` 起跑于同一区间**（LSE [6471833, 6600825]、
+    phase1 [6472249, 6640377]）⇒ SM-bound 的 LSE 与 DRAM-bound 的 phase1 真并发。
+  - **数值/回归（护栏）**：`ours vs ref` `max_abs` 与历史**逐位一致**（S4096 2.635/2.644/3.216e-1；
+    S512 2.426/2.972/3.733e-1；S1024H32 2.400/4.195/3.536e-1；kv4 2.517/5.408/7.072e-1）；
+    单/两文件一致性 gate **worst 7.153e-06 OK**；**全量 `--ci --dtype fp8 --hopper`（49 case）**
+    gate OK、`docs/04` auto-doc-table **218 行 `--check` OK**、rc=0。
+  - **对标**：同 session TE FP8 S4096 纯反向 **0.3030ms/907TF** ⇒ ours total 1.5766ms = TE 的
+    **5.20×**（O108 时 ~5.23×）；FA3 无 fp8 反向列。
+  - **判决：正结果、默认开启**。压的是**非 main 串行**；main 的 L2 `red` 主体墙仍无软件解。
+    **下一步候选**：① 换卡；② causal 变长 ksplit 复核推广到 fp16/bf16；③ MLA 降 smem。
+    见 `docs/03` §131、`docs/08` §5.117；原始输出 `src/fp8/fa_bwd_fp8_o109_ab.out.txt`、
+    `..._o109_nsys_overlap.out.txt`、`..._o109_nsys_kernsum.out.txt`、`..._o109_macrosweep.out.txt`。
 
 ## 灵感 / backlog
 

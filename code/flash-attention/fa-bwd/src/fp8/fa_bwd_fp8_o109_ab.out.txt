@@ -1,0 +1,20 @@
+### b1_s512_h16_d128_causal_fp8
+  run1 ovlql0(total ms)=0.0811  ovlql1(total ms)=0.0785
+  run2 ovlql0(total ms)=0.0811  ovlql1(total ms)=0.0788
+  run3 ovlql0(total ms)=0.0810  ovlql1(total ms)=0.0790
+### b1_s1024_h32_d128_causal_fp8
+  run1 ovlql0(total ms)=0.3114  ovlql1(total ms)=0.3055
+  run2 ovlql0(total ms)=0.3101  ovlql1(total ms)=0.3049
+  run3 ovlql0(total ms)=0.3099  ovlql1(total ms)=0.3052
+### b1_s1024_h32_d128_kv4_causal_fp8
+  run1 ovlql0(total ms)=0.2769  ovlql1(total ms)=0.2721
+  run2 ovlql0(total ms)=0.2767  ovlql1(total ms)=0.2730
+  run3 ovlql0(total ms)=0.2762  ovlql1(total ms)=0.2714
+### b1_s4096_h16_d128_causal_fp8
+  run1 ovlql0(total ms)=1.5835  ovlql1(total ms)=1.5809
+  run2 ovlql0(total ms)=1.5856  ovlql1(total ms)=1.5711
+  run3 ovlql0(total ms)=1.5835  ovlql1(total ms)=1.5779
+### b1_s1024_h8_d256_causal_fp8
+  run1 ovlql0(total ms)=0.2339  ovlql1(total ms)=0.2341
+  run2 ovlql0(total ms)=0.2346  ovlql1(total ms)=0.2326
+  run3 ovlql0(total ms)=0.2342  ovlql1(total ms)=0.2333

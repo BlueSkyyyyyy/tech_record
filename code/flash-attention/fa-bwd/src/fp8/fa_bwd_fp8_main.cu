@@ -1917,6 +1917,11 @@ int main(int argc, char** argv) {
   //   否则逐字退回原串行路径。`--ovlp=N`（N≥2）。见 docs/03 §101。
   int ovlp = 0;
   int ovl_nolse = 0;   // O78 诊断控制：1=跳过 LSE 发射，只测「分块 main 串行」的下界。
+  // O109：量化分相 + LSE 跨 stream 重叠。默认 -1=auto（定长 D=128 的默认融合路径上开启）：
+  //   先 phase=0 量化 Q/K（LSE 就绪），再在 default stream 跑 LSE，同时把 phase=1
+  //   （dO+delta / V / 清零）放到 aux stream 与 LSE 重叠。数值与合并版逐位相同。
+  //   `--ovlql=0` 退回原「合并量化 → LSE → main」串行做同 binary A/B。
+  int ovl_ql = -1;
   // P3-4e：1 = 跑「确定性 dK/dV（partial + 固定次序归约）」A/B（仅 D=128 定长 mma 默认路径，
   //   对齐 fp16/bf16 O7b；`--det` 或 `--det=1`）。默认关，不影响常规计时。
   int det_ab = 0;
@@ -1965,6 +1970,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("--ovltest=", 0) == 0) ovltest = atoi(a.c_str() + 10);
     else if (a.rfind("--ovlp=", 0) == 0) ovlp = atoi(a.c_str() + 7);
     else if (a.rfind("--ovlnolse=", 0) == 0) ovl_nolse = atoi(a.c_str() + 11);
+    else if (a.rfind("--ovlql=", 0) == 0) ovl_ql = atoi(a.c_str() + 8);
     else if (a == "--d128w") d128w_opt = 1;
     else if (a.rfind("--det=", 0) == 0) det_ab = atoi(a.c_str() + 6);
     else if (a == "--det") det_ab = 1;
@@ -2264,6 +2270,26 @@ int main(int argc, char** argv) {
       quantize_zero_delta_warp_kernel<16><<<grid, 128>>>(
           d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
           d_dos, d_dq_acc, d_dk_acc, d_dv_acc, rq, rkv);
+  };
+
+  // O109：分相量化（`quantize_zero_delta_phase_kernel`）。phase=0 只做 Q/K（LSE 就绪），
+  //   phase=1 做 dO+delta / V / 清零（可与 LSE 在不同 stream 重叠）。数值与合并版逐位相同。
+  auto quant_phase = [&](int ph, cudaStream_t st) {
+    const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
+    const long long ntask = (ph == 0) ? (rq + rkv) : (2 * rq + 3 * rkv);
+    int grid = (int)std::min<long long>((ntask + 3) / 4, 1048576);
+    if (D == 128)
+      quantize_zero_delta_phase_kernel<4><<<grid, 128, 0, st>>>(
+          d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
+          d_dos, d_dq_acc, d_dk_acc, d_dv_acc, rq, rkv, ph);
+    else if (D == 256)
+      quantize_zero_delta_phase_kernel<8><<<grid, 128, 0, st>>>(
+          d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
+          d_dos, d_dq_acc, d_dk_acc, d_dv_acc, rq, rkv, ph);
+    else
+      quantize_zero_delta_phase_kernel<16><<<grid, 128, 0, st>>>(
+          d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
+          d_dos, d_dq_acc, d_dk_acc, d_dv_acc, rq, rkv, ph);
   };
 
   // ---- O2b：自动选择 N 方向切块数 ksplit。base = 未切块时的 CTA 数；切块把小 S 时
@@ -2964,7 +2990,39 @@ int main(int argc, char** argv) {
   }
 #endif
 
+  // O109：量化分相 + LSE 跨 stream 重叠（定长 D=128 默认融合路径；`--ovlql=0` 关）。
+  const bool ovlql_req = (D == 128) && qfuse && qfast && dfuse && delta_warp_sel &&
+                         (qcap_opt <= 0) && !ovlp_path;
+  const bool ql_overlap = ovlql_req && (ovl_ql != 0);
+  cudaStream_t sQuantAux = nullptr;
+  cudaEvent_t ql_e0 = nullptr, ql_e1 = nullptr;
+  if (ql_overlap) {
+    CUDA_CHECK(cudaStreamCreateWithFlags(&sQuantAux, cudaStreamNonBlocking));
+    CUDA_CHECK(cudaEventCreateWithFlags(&ql_e0, cudaEventDisableTiming));
+    CUDA_CHECK(cudaEventCreateWithFlags(&ql_e1, cudaEventDisableTiming));
+    printf("O109: quant-phase overlap ON (Q/K -> LSE(default) || dO+V+zero(aux))\n");
+  } else if (ovl_ql == 1) {
+    printf("O109: overlap requested but conditions unmet (D=%d qfuse=%d qfast=%d dfuse=%d) -> serial\n",
+           D, qfuse, qfast, dfuse);
+  }
+
   auto run_all = [&]() {
+    if (ql_overlap) {
+      // O109：Q/K 先量化（LSE 就绪）→ LSE(default) 与 dO+delta/V/清零(aux) 重叠 → main。
+      quant_phase(0, nullptr);
+      CUDA_CHECK(cudaEventRecord(ql_e0));
+      CUDA_CHECK(cudaStreamWaitEvent(sQuantAux, ql_e0, 0));
+      // 先发 aux 的 phase1（大量小 CTA，DRAM bound）再发 LSE，让调度器尽早把两者并行铺开。
+      quant_phase(1, sQuantAux);
+      run_preprocess(false);
+      CUDA_CHECK(cudaEventRecord(ql_e1, sQuantAux));
+      CUDA_CHECK(cudaStreamWaitEvent(nullptr, ql_e1, 0));
+      run_main();
+      if (cvt_on)
+        convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
+                                                    d_dv, nq, nkv);
+      return;
+    }
     if (qfuse && qfast) {
       // O66：默认把 delta 也融进 quant kernel（`dfuse && delta_warp_sel`）。
       if (dfuse && delta_warp_sel)
