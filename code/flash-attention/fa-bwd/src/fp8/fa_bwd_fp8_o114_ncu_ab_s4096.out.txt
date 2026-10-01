@@ -1,0 +1,15 @@
+# O114 真实 main kernel ncu A/B (FA_REDHALF=0 vs 1), b1_s4096_h16_d128_causal_fp8, kvtma main
+===== fp8_rh0.out
+    gpu__time_duration.sum                                     ms         1.38
+    lts__t_sectors_op_read.sum                             sector     24243163
+    lts__t_sectors_op_red.sum                              sector    105381888
+    lts__t_sectors_op_write.sum                            sector        98366
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        78.06
+    sm__throughput.avg.pct_of_peak_sustained_elapsed            %        46.82
+===== fp8_rh1.out
+    gpu__time_duration.sum                                     ms         1.38
+    lts__t_sectors_op_read.sum                             sector     24055671
+    lts__t_sectors_op_red.sum                              sector    105381888
+    lts__t_sectors_op_write.sum                            sector        98861
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        78.00
+    sm__throughput.avg.pct_of_peak_sustained_elapsed            %        47.52

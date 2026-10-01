@@ -2556,3 +2556,28 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 
 见 `docs/03` §135；原始输出 `src/fp8/fa_bwd_fp8_o113_varlen_full_d256_ksweep.out.txt`、
 `..._o113_ncu_kvtma_d256_full.out.txt`、`..._mma_onefile_o113_d256_full.out.txt`。
+
+### 5.122 第 208 轮（O114）：fp8 `dK/dV` `red` 元素宽度收窄（fp32→fp16）—— **负结果（opt-in）**
+
+- **动机**：fp8 causal 旗舰的 L2 墙 = dK/dV 跨 CTA `red`（S4096 `lts op_red` 105.4M ≈ L2 的
+  80%）。「阻塞」把 `red` 判为工作划分决定、与归约机制无关——但前提是**元素宽度恒 fp32**。
+  本轮试正交维度：**元素 fp32→fp16**（写入字节减半 ⇒ 扇区应减半）。
+- **冒烟（决定性）**：`atomicAdd(__half2*)` 退化成 `ATOM`（读改写）；手写 PTX
+  `red.global.add.noftz.f16x2` 才是纯 RED。**连续地址模式减半扇区**（3.24M→1.62M、1.34×）；
+  **模仿 `mma.m16n8` 片段的行散列模式扇区一字不变**（3,244,032→3,244,032）。
+- **接线（`-DFA_REDHALF=1` opt-in）**：`fp8_mma_body` 非 DET/BULKRED/FA_R4 的 dK/dV red 走
+  `red_addh2`，主机换 fp16 累加缓冲 + `redhalf_finalize`。SASS 生效（新增 2144 条
+  `REDG.E.ADD.F16x2`）。
+- **真机 ncu（S4096 默认 kvtma main）**：`lts op_red` **105,381,888 → 105,381,888 逐位不变**、
+  Duration 1.38→1.38 ms。**根因**：mma 片段使一次 warp red 请求覆盖 8 个不同行 ⇒ 固定 8 扇区；
+  fp32 float2 (4 lane×8B=32B/行) 已填满扇区，fp16 f16x2 (4 lane×4B=16B/行) 仍占满但只写一半
+  ⇒ 扇区不减。要减半需「8 lane/行」或「64-bit fp16 RED」，PTX/`mma` 均不提供。
+- **精度/性能 A/B（6 shape）**：`max_abs` 变化 ≤0.01（护栏内）；total 一律更慢 1.3–20%
+  （多出的 memset+finalize），main 本体中性。ours S4096 87.2 TF（峰值 4.4%）、≈5.2× TE FP8
+  （与 O112/O113 持平）。
+- **判决**：负结果，默认 0（两文件定长 D=128/256 opt-in 探针）。「收窄元素宽度」四证关闭；
+  `red` 墙仍只剩换工作划分（已判死）或换卡。副产品：可复现的 `red` 扇区最小冒烟。
+
+见 `docs/03` §136；原始输出 `src/fp8/fa_bwd_fp8_o114_redhalf_smoke.out.txt`、
+`..._o114_redhalf_smoke_ncu.out.txt`、`..._o114_sass.out.txt`、`..._o114_ab.out.txt`、
+`..._o114_ncu_ab_s4096.out.txt`。

@@ -193,6 +193,20 @@ struct Fp8Cfg {
 #define FA_R4 0
 #endif
 
+  // O114（第 208 轮）：把 dK/dV 的跨 CTA 归约**元素宽度**从 fp32 收窄到 fp16——
+  //   `red.global.add.noftz.f16x2`（显式 PTX，走 RED 路径）而非 fp32 `red.global.add.v2.f32`。
+  //   动因：ROADMAP「阻塞」判「red 由工作划分决定、与归约机制（atomic/TMA/宽度 v2↔v4）无关」，
+  //   但前提是**元素宽度恒 fp32**。**实测判决：负结果**——冒烟在**连续地址**下扇区精确减半
+  //   （3,243,520→1,621,568、1.34×），但真实 `mma.m16n8` 片段使一次 warp red 请求覆盖 8 个
+  //   不同行 ⇒ 固定吃 8 扇区；fp32 float2（4 lane×8B=32B/行）已填满扇区，fp16 f16x2
+  //   （4 lane×4B=16B/行）仍占满但只写一半 ⇒ **真机 `lts op_red` 一字不变、Duration 中性**
+  //   （见 `docs/03` §136）。保留为 opt-in 探针 + 可复现冒烟，**默认 0**。改的是精度口径
+  //   （fp16 累加），A/B 误差护栏内（`max_abs` 变化 ≤0.01）。仅作用于 `fp8_mma_body` 非 DET/
+  //   非 BULKRED/非 FA_R4 的 dK/dV red 点；DET/BULKRED/MLA/varlen 逐字不变。
+#ifndef FA_REDHALF
+#define FA_REDHALF 0
+#endif
+
   // O42：dK/dV 的跨 CTA 归约从「逐元素 `red_add2`」改成「per-warp smem staging +
   //   `cp.reduce.async.bulk...add.f32`」。O42 实测 dK/dV 的 red 是 fp8 main 头号成本
   //   （短路掉 main 1.60→0.94ms，天花板 1.70×），但 bulk 版因 staging 的 smem 流量 +
@@ -840,6 +854,30 @@ __device__ __forceinline__ void red_add2(float* p, float a, float b) {
 //   本轮在 fp8（L2 `red` 占比更高）上复测。
 __device__ __forceinline__ void red_add4(float* p, float a, float b, float c, float d) {
   atomicAdd(reinterpret_cast<float4*>(p), make_float4(a, b, c, d));
+}
+
+// O114（第 208 轮）：fp16 版跨 CTA 归约——把同一对 (a,b) 先四舍五入到 fp16，再用
+//   **显式 PTX `red.global.add.noftz.f16x2`**（无返回、走 RED 路径）落盘。CUDA 的
+//   `atomicAdd(__half2*)` 头实现会退化成带返回的 `ATOM.E.ADD.F16x2`（读改写 → 反而多一次
+//   读扇区），故这里必须手写 PTX 才能拿到纯 RED（连续地址下扇区减半；mma 行散列下不减，
+//   见冒烟 `fa_bwd_fp8_redhalf_smoke` 与 `docs/03` §136）。
+__device__ __forceinline__ void red_addh2(__half* p, float a, float b) {
+  __half2 v = __floats2half2_rn(a, b);
+  unsigned packed = *reinterpret_cast<unsigned*>(&v);
+  asm volatile("red.global.add.noftz.f16x2 [%0], %1;" ::"l"(p), "r"(packed) : "memory");
+}
+
+// O114：`FA_REDHALF` 的收尾——把 fp16 的 dK/dV 累加缓冲读回并写成 fp32 输出（d_dk/d_dv）。
+//   dK/dV 的跨 CTA red 走 fp16；最终输出仍是 fp32（与本文件对拍口径一致）。
+//   （实测扇区未减 ⇒ 本路径为负结果探针，见 `docs/03` §136。）
+__global__ void redhalf_finalize_kernel(const __half* __restrict__ dk_h,
+                                        const __half* __restrict__ dv_h,
+                                        float* __restrict__ dk, float* __restrict__ dv, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) {
+    dk[i] = __half2float(dk_h[i]);
+    dv[i] = __half2float(dv_h[i]);
+  }
 }
 
 // ----------------------------- P3-4e：确定性 dK/dV 归约（`DET`） -----------------------------
@@ -3756,8 +3794,14 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                   }
                 } else if ((q & 1) == 0) {
                   // O4c：q/q+1 两列相邻且同 row → 一次 float2 red。
-                  red_add2(dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
-                           acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r]);
+                  // O114：`FA_REDHALF` 时改走 fp16 `red.global.add.f16x2`（负结果探针——
+                  //   真机扇区未减，见宏说明 / `docs/03` §136）。
+                  const size_t idx = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c;
+                  if constexpr (FA_REDHALF)
+                    red_addh2(reinterpret_cast<__half*>(dv_acc) + idx, acc[i][j][q] * sA[r],
+                              acc[i][j][q + 1] * sA[r]);
+                  else
+                    red_add2(dv_acc + idx, acc[i][j][q] * sA[r], acc[i][j][q + 1] * sA[r]);
                 }
               }
             }
@@ -3813,9 +3857,14 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
                                   acc[i][j][q + 1] * sds3[r] * scale);
                   }
                 } else if ((q & 1) == 0) {
-                  red_add2(dk_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c,
-                           acc[i][j][q] * sds3[r] * scale,
-                           acc[i][j][q + 1] * sds3[r] * scale);
+                  // O114：dK 与 dV 同款——`FA_REDHALF` 走 fp16 `red.global.add.f16x2`。
+                  const size_t idx = (((size_t)(qbase + jg)) * Hkv + hkv) * HD + d0 + c;
+                  if constexpr (FA_REDHALF)
+                    red_addh2(reinterpret_cast<__half*>(dk_acc) + idx, acc[i][j][q] * sds3[r] * scale,
+                              acc[i][j][q + 1] * sds3[r] * scale);
+                  else
+                    red_add2(dk_acc + idx, acc[i][j][q] * sds3[r] * scale,
+                             acc[i][j][q + 1] * sds3[r] * scale);
                 }
               }
             }

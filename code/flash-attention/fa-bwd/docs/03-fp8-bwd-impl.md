@@ -11860,3 +11860,83 @@ Duration 下降并非来自 Q/dO 重读（`op_read` 反而升），而是**更�
   ④ 非 main 的 `--det`/量化进一步并行化。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o113_varlen_full_d256_ksweep.out.txt`、
   `..._o113_ncu_kvtma_d256_full.out.txt`、`..._mma_onefile_o113_d256_full.out.txt`。
+
+## 136. 第 208 轮：O114——fp8 `dK/dV` 跨 CTA `red` 的元素宽度收窄（fp32→fp16）——**负结果**
+
+### 136.1 动机（`red` 墙的又一条候选）
+
+fp8 causal 旗舰（`D=128` S4096）默认 `kvtma` main 的 L2 已到平台期：ncu `lts__throughput`
+~78%、`lts op_red` **105.4M 扇区占 L2 ~80%**、DRAM ~4%。ROADMAP「阻塞」已把 `red` 收口为
+「由**工作划分**（每 KV 元素被多少 CTA 贡献）唯一决定，与归约**机制**（逐 lane 原子 / TMA
+4D 归约 / 归约宽度 **v2↔v4 f32**）无关」。但那一系列结论的前提是**被归约元素的宽度恒为
+fp32**。本轮检验一个此前未试过的正交维度：**把 dK/dV 归约的元素从 fp32 收窄到 fp16**
+（写入字节减半 ⇒ 若扇区按字节计，`red` 应减半）。
+
+### 136.2 冒烟（`src/fp8/fa_bwd_fp8_redhalf_smoke.cu`）：指令存在、但只对**连续**访问减扇区
+
+- CUDA 的 `atomicAdd(__half2*)` 头实现**不**走 RED：SASS 是 `ATOM.E.ADD.F16x2`（带返回、
+  读改写）；必须手写 PTX `red.global.add.noftz.f16x2` 才是纯 RED（SASS `REDG.E.ADD.F16x2`）。
+- **连续地址模式**（warp 内相邻 lane 写相邻地址）：`lts op_red` **3,243,520→1,621,568
+  （精确减半）**、red microbench **1.34×**（0.0257→0.0180 ms）；`atomicAdd(__half2*)` 则
+  0.94×（ATOM 读改写，更差）。
+- **模仿 `mma.m16n8` 累加器片段模式**（warp 内 `lane=4*g+c2` ⇒ 一次请求覆盖 **8 个不同行**，
+  行距 64 元素）：`lts op_red` **3,244,032 → 3,244,032（一字不变）** ⇒ 见 §136.4。
+
+### 136.3 接线（`-DFA_REDHALF=1`，opt-in、默认 0）
+
+`fp8_mma_body` 的**非 DET / 非 BULKRED / 非 FA_R4** dK/dV `red_add2` 点改走 `red_addh2`
+（PTX `red.global.add.f16x2`）；主机侧在定长 `D!=512` 路径把 dK/dV 累加缓冲换成 fp16
+（`d_dk_h/d_dv_h`），主 kernel 前 `cudaMemset`、主 kernel 后 `redhalf_finalize_kernel`
+读回 fp32 输出（dQ 仍 fp32；DET/BULKRED/MLA body 与其 varlen 逐字不变，varlen 显式拒绝）。
+SASS 确认生效：`REDG.E.ADD.F32x2` 5056→2912、新增 **`REDG.E.ADD.F16x2` 2144**。
+
+### 136.4 真实 main kernel：扇区一字不变（负结果）
+
+`b1_s4096_h16_d128_causal_fp8`，同 session、仅 `FA_REDHALF` 不同：
+
+| | `lts op_red` | `lts op_read` | Duration | `sm%` | `lts%` |
+|---|---|---|---|---|---|
+| `FA_REDHALF=0` | **105,381,888** | 24.24M | 1.38 ms | 46.8% | 78.1% |
+| `FA_REDHALF=1` | **105,381,888** | 24.06M | 1.38 ms | 47.5% | 78.0% |
+
+**`lts op_red` 逐位相同**（这正是 §136.2 的「mma 片段模式」微基准复现的现象）。**根因**：
+`mma.m16n8` 的累加器使一个 warp 的一次 red 请求覆盖 **8 个不同行**（每行仅 4 个 lane）⇒
+每次请求固定吃 **8 个 32B 扇区**。fp32 `red_add2`（float2，4 lane×8B=32B/行）恰好**填满**
+每行 1 扇区（`red` = 字节/32，已最优）；**fp16 `f16x2` 每行只有 4 lane×4B=16B < 32B**，
+**仍占满一个扇区但只写一半** ⇒ 扇区数不减。要减半需要「8 个 lane 写同一行填满 32B」或
+「64-bit 的 fp16 RED（4 个 half/lane/指令）」，二者 PTX/`mma` 片段布局都不提供
+（`red` 只有 `.f16x2` = 32-bit；`red_add4` 的 `.v4.f32` 只是把请求里的元素翻倍、扇区仍不变，见 O67）。
+
+### 136.5 精度与端到端（护栏内，但无收益）
+
+6 个定长 causal shape（D=128/D=256、含 GQA kv4）A/B：
+
+| shape | total F0→F1 | dk max_abs F0→F1 | dv max_abs F0→F1 |
+|---|---|---|---|
+| S512 H16 | 0.0769→0.0924 ms | 0.297→0.298 | 0.373→0.375 |
+| S1024 H32 | 0.3045→0.3291 | 0.418→0.418 | 0.354→0.354 |
+| S4096 H16 | 1.576→1.635 | 0.264→0.265 | 0.322→0.321 |
+| S1024 kv4 | 0.2687→0.2816 | 0.534→0.533 | 0.717→0.718 |
+| D256 S1024H8 | 0.2288→0.2483 | 0.280→0.280 | 0.358→0.359 |
+| D256 S2048H8 | 0.7358→0.7598 | 0.284→0.285 | 0.359→0.358 |
+
+- **精度**：`max_abs` 变化 ≤ 0.01（rel 量级也在噪声内）⇒ fp16 累加**未触护栏**（fp8 输出
+  口径下 dK/dV 误差由输入量化主导，fp16 累加（10 尾数位）可忽略）。
+- **性能**：total **一律更慢 1.3–20%**（小 shape 更明显）——多出的 `cudaMemset`+`finalize`
+  固定开销，而 main 本体中性（1.38→1.38 ms）。ours 端到端 S4096 baseline **87.2 TF**
+  （FP8 峰值 1978.8 TFLOPS 的 **4.4%**）；同 session TE FP8 S4096 ~0.303 ms/907 TF
+  ⇒ ours total ≈ **5.2×** TE（与 O112/O113 持平，未改善）。
+
+### 136.6 结论 / 下一步
+
+- **判决：负结果、默认 0（opt-in `-DFA_REDHALF=1`）**。「收窄归约元素宽度」这条路被
+  冒烟 + SASS + 真机 ncu（`op_red` 逐位不变）+ 精度/性能 A/B 四证关闭；**`red` 墙仍只剩
+  「换工作划分」（已判死）或换卡**，本条不构成新解。**`FA_REDHALF` 仅接在两文件定长
+  D=128/256**，是实验探针、不进单文件默认构建。
+- **副产品**：把「`red` 的扇区数 ∝ 请求数（每请求 8 扇区 = 8 行）」从 O67 的 f32 注释提升为
+  可复现的最小冒烟（连续 vs mma 片段两种模式），可作为后续任何 `red` 变体的前置判据。
+- **下一步候选**（不变）：① 换卡；② causal 变长 ksplit 复核推广 fp16/bf16；③ MLA 降 smem
+  （实为寄存器墙）；④ 非 main 的 `--det`/量化进一步并行化。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o114_redhalf_smoke.out.txt`、
+  `..._o114_redhalf_smoke_ncu.out.txt`、`..._o114_sass.out.txt`、`..._o114_ab.out.txt`、
+  `..._o114_ncu_ab_s4096.out.txt`；冒烟源码 `src/fp8/fa_bwd_fp8_redhalf_smoke.cu`。

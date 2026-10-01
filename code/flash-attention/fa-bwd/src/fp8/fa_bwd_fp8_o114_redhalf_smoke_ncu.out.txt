@@ -1,0 +1,21 @@
+# O114 redhalf smoke ncu: coalesced (red_f32/f16red) + mma-fragment scatter (scatter_f32/f16)
+===== red_f32
+    gpu__time_duration.sum                                    us        24.86
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                   270336
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum       sector      2162688
+    lts__t_sectors_op_red.sum                             sector      3243520
+===== red_f16red
+    gpu__time_duration.sum                                    us        18.53
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                   270336
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum       sector      1081344
+    lts__t_sectors_op_red.sum                             sector      1621568
+===== red_scatter_f32
+    gpu__time_duration.sum                                    us       137.79
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                   270336
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum       sector      2162688
+    lts__t_sectors_op_red.sum                             sector      3244032
+===== red_scatter_f16
+    gpu__time_duration.sum                                    us        98.11
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                   270336
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum       sector      2162688
+    lts__t_sectors_op_red.sum                             sector      3244032
