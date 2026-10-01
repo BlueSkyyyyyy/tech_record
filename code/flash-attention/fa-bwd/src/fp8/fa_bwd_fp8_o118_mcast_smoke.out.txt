@@ -1,0 +1,13 @@
+=== O118 TMA-cluster-multicast de-risk smoke ===
+--- (A) correctness R=1: multicast vs per-CTA TMA, byte-compare SW128 tile vs host swizzle ref ---
+=== fa_bwd_fp8_mcast_smoke (O118) ===
+S=4096 Hkv=16 D=128 BN=32 NT=128 KS_SZ=4096 reps=200
+CN=1  baseline: 0.0658 ms  mismatch=0  |  mcast: 0.0667 ms  mismatch=0  | speedup=0.9862x  read_bytes(base/mcast)=8.4/8.4 MB
+CN=2  baseline: 0.0672 ms  mismatch=0  |  mcast: 0.0685 ms  mismatch=0  | speedup=0.9816x  read_bytes(base/mcast)=16.8/8.4 MB
+CN=4  baseline: 0.1138 ms  mismatch=0  |  mcast: 0.1152 ms  mismatch=0  | speedup=0.9873x  read_bytes(base/mcast)=33.6/8.4 MB
+
+--- (B) representative R=128 (many clusters read same K), CN=2, copy=0 ---
+S=4096 Hkv=16 D=128 BN=32 NT=128 KS_SZ=4096 reps=50
+CN=2  baseline: 0.3749 ms  mismatch=0  |  mcast: 0.3755 ms  mismatch=0  | speedup=0.9983x  read_bytes(base/mcast)=2147.5/1073.7 MB
+
+--- (C) representative R=64, CN=4, copy=0 ---

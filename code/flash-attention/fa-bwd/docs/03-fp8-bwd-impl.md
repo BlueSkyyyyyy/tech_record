@@ -12038,3 +12038,71 @@ cluster 用 `cp.async.bulk.tensor` 的 `.multicast::cluster` 把 K/V 读减半�
 `red` 不受影响，工程量大）；其余只剩换卡或覆盖型 backlog（fp16/bf16 `head_dim=256`）。
 原始输出 `src/fp8/fa_bwd_fp8_o117_smallshape_sweep.out.txt`、
 `..._o117_ncu_ours_main_s4096.out.txt`、`..._o117_ncu_te_main_s4096.out.txt`、`..._o117_summary.out.txt`。
+
+## 139. 第 212 轮：O118——候选②「TMA multicast + cluster 共享 K/V 读」的 de-risk
+
+### 139.1 动机
+
+O117（§138）把 fp8 主 kernel 的 host/运行期旋钮前沿在所有 shape 尺度扫清，`red` 主体墙
+（105.4M 扇区 = L2 的 ~80%）经 F3b/F4b/F6/F7/O90–O95/O114/O117 收口为**本卡工作划分的硬件
+下界**。ROADMAP「下一步候选 ②」= **TMA cluster multicast**：同 cluster 内多个 CTA 若读同一块
+K/V，则由 leader 发一条 `cp.async.bulk.tensor...multicast::cluster` 广播到全 cluster，把 K/V 的
+L2 读扇区摊薄（直打 read 2.38× 差距里可动的那一半）。在改动极复杂的 `fp8_mma_body` 之前，先按
+O42/O79/O80 的一贯做法做**独立冒烟 de-risk**，把「机制是否成立 / prize 有多大 / 代价多大」钉死。
+
+### 139.2 冒烟设计（`src/fp8/fa_bwd_fp8_mcast_smoke.cu`）
+
+在**与主 kernel 完全相同的 K/V 4D-TMA 几何**上验证（O41 的 `kvtma` K/V 搬运）：
+
+- 描述符：`UINT8` dims={D,S,Hkv,B}、`SWIZZLE_128B`、box={128,32} ⇒ `KS_SZ=4096B`，
+  smem 落位按 `sw128_off_fp8`（[row/8][8 行][16B chunk ^ rr]）。
+- 协议（对齐 kernel-opt 26/36 篇）：leader（rank0）发 `...multicast::cluster` + mask=(1<<CN)-1；
+  **每个 CTA（含 leader）各自 `mbarrier.arrive.expect_tx` 并等自己本地的 mbarrier**；init 后
+  `fence.mbarrier_init.release.cluster` + `barrier.cluster`。cluster 由 `cudaLaunchKernelEx` 的
+  `clusterDim.x=CN` 指定。
+- 正确性：把每 CTA 每 tile 的 smem 原样落盘，与 host 端手工 `sw128_off_fp8` 参考**逐字节**比对。
+- 代表性负载：复制因子 `R`——`Hkv*R` 个 cluster 读同一批 K（模仿主 kernel「所有 m 块读同一份
+  K/V」），把 L2 压到非平凡水平。
+
+### 139.3 正确性
+
+| CN | baseline（逐 CTA 发 TMA） | multicast | mismatch |
+|---|---|---|---|
+| 1 / 2 / 4（R=1） | OK | OK | **0 / 0 / 0** |
+
+multicast 送进各 CTA smem 的 SW128 tile 与「逐 CTA 各自发 TMA」及 host swizzle 参考**逐字节相同**
+⇒ 机制在 fp8 的 K/V 几何上完全正确（CN=4 在 R=1 亦通过）。
+
+### 139.4 搬运量（ncu，CN=2，R=128，grid=4096，copy=0）
+
+| 指标 | baseline（mcast=0） | multicast（mcast=1） | 比 |
+|---|---|---|---|
+| `lts op_read` | **52.6–52.9 M** | **33.82 M** | **0.64×** |
+| `lts srcunit_tex op_read` | 52.4–52.7 M | **33.55 M** | 0.64× |
+| `lts` throughput | **49.2–49.7 %** | **31.4–31.6 %** | −36% |
+| `dram bytes_read` | 8.40 MB | 8.40 MB | 1.00×（K 常驻 L2） |
+| Duration | 391–392 µs | 393–395 µs | **1.00×** |
+
+⇒ **multicast 确实把 L2 读扇区砍到 0.64×、L2 利用率 49.6%→31.5%**（机制成立）；但该 microbench
+本身不在 L2 墙上（49.6%），时间不变。CN=4 的 ncu 复放在 cluster multicast 下会触发本工具链的
+replay 不稳定（残留死锁进程），故只给 CN=2 的定量 + CN=4 的正确性。
+
+### 139.5 为什么端到端 prize 有界（不集成的判据）
+
+1. **read 在 fp8 主 kernel 的 L2 里占比小**：S4096 causal ncu（§138.3）`op_red` 105.38M（~80%）
+   + `op_read` 24.24M + `op_write` 0.14M ≈ **130M**。`read` 只占 **~18.6%**。即便 read 精确减半
+   也只省 ~12M = L2 的 ~9%；本冒烟实测只到 0.64×（省 ~6% L2）。
+2. **multicast 不动 `red`**（占 L2 80% 的主体墙）——prize 上限被锁在「read 那一半」。
+3. **causal 的 cluster 配对不天然**：主 kernel `ntiles` 依赖 m 块（`ntiles=ceil(min(len,m0+BM)/BN)`），
+   cluster 内不同 m 块的 K tile 行程数不同（差 BM/BN=2），要 multicast 必须让 cluster 锁步到
+   `max ntiles`（小 m 块多算空 tile）或改成 LSE 式的镜像配对重设计——额外计算/工程量可观的改动。
+4. **cluster 调度约束 + 工具链脆弱**：CN≥4 在代表性负载下本工具链的 ncu replay 出现死锁残留
+   （需手动清进程），给调优带来额外风险。
+
+### 139.6 结论 / 下一步
+
+**de-risk 结论：机制正结果（L2 read 0.64×、L2 利用率 −36%），但端到端 prize 有界（read 只占主
+kernel L2 的 ~19%，且不动占 80% 的 `red`），叠加 causal cluster 锁步的工程量与 cluster≥4 的
+工具链风险，ROI 低 ⇒ 暂不集成，记为有数据支撑的 backlog。** 主 kernel/默认路径**一行未改**
+（本项为独立冒烟，不触数值）。`red` 主体墙仍只剩**换卡**或覆盖型 backlog（fp16/bf16 `head_dim=256`）。
+原始输出 `src/fp8/fa_bwd_fp8_o118_mcast_smoke.out.txt`、`src/fp8/fa_bwd_fp8_o118_mcast_ncu.out.txt`。

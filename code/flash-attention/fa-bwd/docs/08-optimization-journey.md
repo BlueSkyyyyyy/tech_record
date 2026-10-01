@@ -2677,3 +2677,29 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 - **原始输出**：`src/fp8/fa_bwd_fp8_o117_smallshape_sweep.out.txt`、
   `src/fp8/fa_bwd_fp8_o117_ncu_ours_main_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o117_ncu_te_main_s4096.out.txt`、`src/fp8/fa_bwd_fp8_o117_summary.out.txt`。
+
+### 5.126 第 212 轮（O118）：候选②「TMA multicast + cluster 共享 K/V 读」的 de-risk —— **机制正结果 / prize 有界、不集成（默认一行未改）**
+
+- **动机**：O117（§5.125）后，`red` 主体墙已收口；ROADMAP「下一步候选 ②」= TMA cluster
+  multicast（同 cluster 多 CTA 读同一 K/V 时 leader 发一条 `...multicast::cluster` 广播，摊薄
+  L2 读扇区）。在改 `fp8_mma_body` 前先按 O42/O79/O80 惯例做独立 de-risk。
+- **冒烟（`src/fp8/fa_bwd_fp8_mcast_smoke.cu`）**：在**与主 kernel 相同**的 K/V 4D-TMA 几何
+  （UINT8 / dims={D,S,Hkv,B} / SWIZZLE_128B / box={128,32} / `KS_SZ=4096` / `sw128_off_fp8`）上，
+  leader 发 multicast+mask、每 CTA 各自 `arrive.expect_tx`+等本地 mbar（kernel-opt 26/36 篇协议），
+  `cudaLaunchKernelEx` 指定 `clusterDim.x=CN`。
+- **正确性**：CN=1/2/4（R=1）multicast 的 SW128 tile 与「逐 CTA 各自发 TMA」及 host swizzle 参考
+  **逐字节相同（mismatch=0/0/0）** ⇒ 机制在 fp8 K/V 几何上完全正确。
+- **搬运量（ncu，CN=2，R=128，grid=4096，copy=0，同 binary A/B）**：`lts op_read`
+  **52.6–52.9M → 33.82M（0.64×，−36%）**、`srcunit_tex op_read` 52.4M→33.55M、**L2 利用率
+  49.6%→31.5%**；`dram bytes_read` 恒 8.40MB（K 常驻 L2）；**Duration 391→393µs（1.00×，该
+  microbench 不在 L2 墙上）**。CN=4 的 ncu replay 在本工具链下不稳定（残留死锁进程，需手动清理），
+  只留 CN=4 的正确性。
+- **不集成判据**：① 主 kernel L2 ≈ `op_red` 105.38M（~80%）+ `op_read` 24.24M（**~19%**）+ 写
+  0.14M，read 占 <1/5，且 multicast **不动 `red`** ⇒ prize 上限 ~9% L2、实测只到 ~6% L2；
+  ② causal 的 cluster 配对不天然（`ntiles` 随 m 块差 BM/BN=2，需锁步 padding 或镜像配对重设计）；
+  ③ cluster≥4 代表负载下 ncu replay 脆弱 + 残留进程风险。
+- **判决**：**de-risk 机制正结果、prize 有界、ROI 低 ⇒ 暂不集成，记为有数据支撑的 backlog；
+  默认路径一行未改（独立冒烟，不触数值）。** `red` 主体墙仍只剩换卡 / 覆盖型 backlog
+  （fp16/bf16 `head_dim=256`）。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o118_mcast_smoke.out.txt`、
+  `src/fp8/fa_bwd_fp8_o118_mcast_ncu.out.txt`。
