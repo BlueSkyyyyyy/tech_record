@@ -1,0 +1,17 @@
+# O126（第 220 轮）ncu：MLA（D=512）主 kernel——默认 8-warp mma+kvpipe（mlawgm=0）
+# 构建：-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda；case b1_s4096_h2_d512_causal_fp8
+  void fa_bwd_fp8_mma_kernel<512, 64, 32, 0, 0, 1, 1, 1, 256, 4, 1, 0, 0, 0, 0>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, const int *, const int *, float *, float *, int, float *, const int *) (512, 2, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %         2.90
+    gpu__time_duration.sum                                                                 ms         1.25
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        49.72
+    launch__registers_per_thread                                              register/thread          245
+    launch__shared_mem_per_block_dynamic                                          Kbyte/block       229.89
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        83.01
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        31.35
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        12.50
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         1.39
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.18
+    ------------------------------------------------------------------------- --------------- ------------

@@ -2074,6 +2074,9 @@ int main(int argc, char** argv) {
   // O51：MLA（D=512）主 kernel 的 K/V cp.async 回填流水。-1=自动（默认开），0/1 由 `--mlakvp=`
   //   强制（同 binary A/B；需 8-warp 几何）。
   int mla_kvp_opt = -1;
+  // O126（第 220 轮）：MLA（D=512）主 kernel 是否走 wgmma（GEMM1/2 换 wgmma、Q/dO/K/V 存 SW128，
+  //   非 TMA、cp.async 载入；128 线程/2 warpgroup 几何）。0=默认 mma（历史逐位），1=wgmma（A/B）。
+  int mlawgm_opt = 0;
   // O58：MLA（D=512）varlen LSE 的几何开关。`--lseocc=5/6`（2 CTA/SM：PIPE0/LBN32 或
   //   PIPE1/LBN16）、`--lse8w=1`（8-warp/256 线程/LBM=128/LBN=32）；默认 causal 走 cfg6、
   //   full 走 O54 旧路。`--lseocc=4` 退回 causal 旧默认（PIPE1/LBN64）做 A/B。
@@ -2147,6 +2150,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--mla8w=", 0) == 0) mla8w_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--mlakvp=", 0) == 0) mla_kvp_opt = atoi(a.c_str() + 9);
     else if (a == "--mlakvp") mla_kvp_opt = 1;
+    else if (a.rfind("--mlawgm=", 0) == 0) mlawgm_opt = atoi(a.c_str() + 9);
+    else if (a == "--mlawgm") mlawgm_opt = 1;
     else if (a.rfind("--lseocc=", 0) == 0) lseocc_opt = atoi(a.c_str() + 9);
     else if (a.rfind("--lse8w=", 0) == 0) lse8w_opt = atoi(a.c_str() + 8);
     else if (a == "--lse8w") lse8w_opt = 1;
@@ -3181,6 +3186,16 @@ int main(int argc, char** argv) {
     // O51：8-warp 档下 K/V 默认走 cp.async 回填流水（`--mlakvp=0` 退回同步载入 A/B）。
     // O105：定长 causal MLA 也透传 O89 的 per-head LPT 反转表 `d_mrev`（grid/head 排布不变）。
     const bool mla_kvp_sel = (mla_kvp_opt < 0) ? true : (mla_kvp_opt != 0);
+#ifdef FA_WGMMA
+    // O126（第 220 轮）：MLA（D=512）主 kernel 的 wgmma 路径 A/B——GEMM1/2 换 wgmma、Q/dO/K/V
+    //   存 SW128（cp.async，非 TMA），128 线程/2 warpgroup 几何（NTH/NWAR 取默认）。opt-in。
+    if (mlawgm_opt) {
+      launch_bwd_main<512, 64, 32, false, true, true, true, true>(
+          mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+          dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
+      return;
+    }
+#endif
     if (mla8w_sel) {
       if (prel_sel && mla_kvp_sel)
         launch_bwd_main_kvpipe<512, 64, 32, false, true, true, true, 256, 4>(

@@ -200,6 +200,15 @@
 
 ## 阻塞
 
+- **fp8 主 kernel 的「wgmma 化」已覆盖最后一条 mma 路径（MLA D=512），收益为负（第二百二十轮
+  O126）。** 把 `fp8_mma_body` 的 HD 断言放开到 512 + `--mlawgm` 后，MLA 主 kernel 的 GEMM1/2
+  可走 wgmma（SASS 32×QGMMA），数值同精度档（relL2 差 ≤0.02%），但 **main 慢 0.67–0.70×**
+  （S512/S1024/S4096）。ncu：省下 `ldmatrix`/HMMA 使 `short_scoreboard` 1.39→0.70、L1 49.7→31.3%、
+  L2 83.0→54.7%，**但 wgmma 是 warpgroup 级、锁 128t/1WG ⇒ warp 8→4（occ 12.5%→6.25%）**，
+  且寄存器 245→**255**、仍 1 CTA/SM；MLA 默认早已用 2 WG（8 warp）+ kvpipe 藏延迟，wgmma 省下的
+  issue 填不满腰斩的 warp。⇒ 与 F6/O91/O83「多 warpgroup/放大 BM 撞 1-CTA/SM 寄存器/smem 墙」
+  同源；**fp8 各 dtype/shape 的 wgmma 路径至此全部覆盖，正结果只剩换卡。** 见 `docs/03` §147。
+
 - **fp8 默认 main 的 L2 `red` 墙「终局收口」：由贡献字节唯一决定，交易粒度不可赢（第二百一十九轮
   O125）。** 三点同 session 计数（S=4096 causal H16）钉死：默认 `kvtma` 的 L2 `red`
   **请求 == 扇区 == 105.38M（1 扇区/请求）**（L1 8.78M 请求 / 70.25M 扇区，已每贡献最优；
@@ -3343,7 +3352,29 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百一十九轮）**：**O125——fp8 `red` 墙的「表示无关性」终局核对（default vs
+> **最新（第二百二十轮）**：**O126——fp8 主 kernel「最后一条 mma 路径」：MLA（D=512）的
+> wgmma 几何——负结果（opt-in `--mlawgm`，默认一行未改）**。落实 O124 候选 ④（当时记「需新写
+> 几何、工程量大、prize 仅 MLA 尺寸」）——把它真正实现并同 binary A/B。**device**：放开
+> `fp8_mma_body` 的 HD 断言到 512（SW128/`wgmma_qkt64_fp8` 本就按 `SBO=(HD/128)*1024` 写、
+> O84 已放开 256）；**host**：新增 CLI `--mlawgm=0/1`，定长 D=512 主 kernel 派发前插入
+> `launch_bwd_main<512,64,32,0,WGMMA=1,...>`（4-warp/1 warpgroup、非 TMA）。单/两文件 device
+> 逐字一致（`sync_onefile_device.py` identical）。SASS 确认新实例 **32×QGMMA + 384×HMMA**
+> （默认档 0×QGMMA）。**数值**：wgmma-vs-mma `max_abs` 差 ≤2e-3、relL2 差 ≤0.02%
+> （S1024 8.163/8.583/6.504%、S4096 8.389/8.489/6.623%，护栏内）。**性能（main，同 binary
+> A/B）**：S512 **0.682×**、S1024 **0.699×**、S4096 **0.673×**。**ncu（S4096）**：默认 8-warp
+> mma+kvpipe = 1.25ms/245reg/229.9KB/**occ 12.5%**/L2 83.0%/`short_sb` 1.39；wgmma = 1.90ms/
+> 255reg/205.8KB/**occ 6.25%**/L2 54.7%/`short_sb` 0.70 ⇒ **省下的 issue 填不满腰斩的 warp 数**
+> （wgmma 是 warpgroup 级、锁 128t/1WG；MLA 默认早已 2 WG+8warp 藏延迟），与 O39/O83/O91/F6/F7
+> 「1-CTA/SM 寄存器墙」同源。见 `docs/03` §147、`docs/08` §5.134；原始输出
+> `src/fp8/fa_bwd_fp8_o126_mlawgm_ab.out.txt`、`..._o126_ncu_{mma,wgmma}_s4096.out.txt`、
+> `..._o126_onefile_s512.out.txt`。
+> **下一步候选（更新）**：① **换卡**（fp8 main 的 bytes=O125 与 issue=O122/O123 均无软件解）；
+> ② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；
+> ③ 非 main `--det`/量化（O116 已证 host 旋钮无余量）；~~④ MLA HD=512 wgmma 几何~~
+> → **O126 已实现并判为负结果（0.67–0.70×）**；⑤ 若换卡前仍动 fp8：只剩「支持 wgmma 跨多
+> warpgroup（≥2 WG/256t）的 MLA 几何」——同样撞 1-CTA/SM 的 smem/regfile 墙，预期中性。
+>
+> **（第二百一十九轮）**：**O125——fp8 `red` 墙的「表示无关性」终局核对（default vs
 > bulk-reduce vs TE，诊断/收口，默认一行未改）**。补上 O124 缺的最后一块——**L2 交易粒度**：
 > 默认 `kvtma` 的 L2 `red` **请求 == 扇区 == 105.38M（1 扇区/请求）**，即 L1→L2 把 8-row 散布
 > 请求展宽成 ~12 个单扇区 L2 请求（O124「1.50×」的确切形态）；`-DFA_BULKRED=1`（O42）把 L1 red
@@ -3357,10 +3388,9 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 > 原始输出 `src/fp8/fa_bwd_fp8_o125_ncu_{ours,bulkred,te}_s4096.out.txt`、`..._o125_default_s4096.out.txt`。
 > **下一步候选（更新）**：① **换卡**（fp8 main 的 bytes 与 issue 均无软件解——见「阻塞」）；
 > ② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；
-> ③ 非 main `--det`/量化（O116 已证 host 旋钮无余量）；④ 若换卡前再动 fp8：为 MLA HD=512 新写
-> **128 线程单 warpgroup（BM=64）wgmma 几何**（GEMM1/2 走 `wgmma.m64n32k32`，需 HD=512 的 SW128
-> 描述符 + NCH=4 TMA chunk；**不是**放大 BM——BM 仍 64，难度在 128t 几何与 SW128/配对副本的
-> smem 账，工程量大、prize 仅 MLA 尺寸）。
+> ③ 非 main `--det`/量化（O116 已证 host 旋钮无余量）；~~④ 若换卡前再动 fp8：为 MLA HD=512 新写
+> **128 线程单 warpgroup（BM=64）wgmma 几何**~~ → **O126（第 220 轮）已实现并判为负结果
+> （0.67–0.70×，见「最新」块）**。
 >
 > **（第二百一十八轮）**：**O124——fp8 默认 main 的 `red` L1/L2 扇区分解 + MLA(D=512) 上
 > wgmma 探针（诊断/收口，默认一行未改）**。在真实默认 `kvtma` kernel 上做 `ncu` 分层：
@@ -3374,8 +3404,9 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 > WGMMA⇒HD∈{128,256}）拦死，需新写几何。⇒ 与 O116/O117/O122/O123 合并：**fp8 main 的 L1 贡献数
 > 与 L2 issue 都已在软硬件边界，正结果仍只剩换卡**。见 `docs/03` §145、`docs/08` §5.132。
 > **下一步候选（更新）**：① **换卡**；② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确
-> 的 `[ ]` 项）；③ 非 main `--det`/量化（O116 无余量）；④ 若换卡前再动 fp8：为 HD=512 新写 wgmma
-> 几何（128t/2warp）或放宽 body 断言（工程量大、prize 仅 MLA 尺寸）。
+> 的 `[ ]` 项）；③ 非 main `--det`/量化（O116 无余量）；~~④ 若换卡前再动 fp8：为 HD=512 新写 wgmma
+> 几何（128t/2warp）或放宽 body 断言~~ → **O126（第 220 轮）已实现（放断言 + `--mlawgm`）并判为
+> 负结果 0.67–0.70×**。
 >
 > **（第二百一十七轮）**：**O123——fp8 主 kernel 的 per-row fold scale 寄存器预取
 > （`sA`/`sds3`/`sds2`）——中性（默认开 `FA_SCALE_HOIST=1`，`=0` 可 A/B）**。承接 O122 ncu 的

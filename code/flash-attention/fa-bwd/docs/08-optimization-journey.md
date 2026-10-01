@@ -2899,3 +2899,28 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   **正结果只剩换卡**；覆盖型 backlog 见 ROADMAP「下一步」。
 - 原始输出：`src/fp8/fa_bwd_fp8_o125_ncu_{ours,bulkred,te}_s4096.out.txt`、`..._o125_bulkred_timing_s4096.out.txt`、
   `..._o125_default_s4096.out.txt`；实现细节 `docs/03` §146。
+
+### 5.134 第 220 轮（O126）：fp8 主 kernel「最后一条 mma 路径」——MLA（D=512）的 **wgmma 几何** —— **负结果（opt-in `--mlawgm`）**
+
+- **动机**：O124（§5.132）探针判定 fp8 主 kernel 里唯一仍走 `mma.sync` 的是 **MLA（HD=512）**，
+  被两处 `static_assert` 挡住、记为「需新写几何、工程量大、prize 仅 MLA 尺寸」。本轮把它
+  **真正实现并 A/B**，收口「把 fp8 main 全切 wgmma」的最后一块。
+- **实现**：device 放开 `fp8_mma_body` 的 HD 断言到 512（SW128/`wgmma_qkt64_fp8` 本就按
+  `SBO=(HD/128)*1024` 写、O84 已放开 256）；host 新增 `--mlawgm` opt-in，派发
+  `launch_bwd_main<512,64,32,0,WGMMA=1,...>`（4-warp/1 warpgroup、非 TMA）。SASS 确认新实例
+  **32×QGMMA + 384×HMMA**（默认档 0×QGMMA）。单/两文件 device 逐字一致。
+- **数值**：wgmma-vs-mma `max_abs` 差 ≤2e-3、relL2 差 ≤0.02%（S1024 8.163/8.583/6.504% vs
+  8.163/8.564/6.507%、S4096 8.389/8.489/6.623% vs 8.385/8.483/6.623%）⇒ **同精度档、护栏内**。
+- **性能（同 binary A/B，main）**：S512 **0.682×**、S1024 **0.699×**、S4096 **0.673×** ⇒ 负结果。
+- **ncu（S4096）**：默认 8-warp mma+kvpipe = 1.25ms / 245 reg / 229.9KB / **occ 12.5%** /
+  L2 83.0% / L1 49.7% / `short_sb` 1.39 / `wait` 1.18；**wgmma（4-warp/1WG）= 1.90ms / 255 reg /
+  205.8KB / occ 6.25% / L2 54.7% / L1 31.3% / `short_sb` 0.70 / `wait` 1.52**。
+- **机制**：切 wgmma 后 GEMM1/2 省掉 `ldmatrix`/HMMA（short_sb、L1/L2 都降），**但 warp 数腰斩
+  （8→4）**——`fp8_mma_body` 的 wgmma 是 **warpgroup 级、锁死 128t/1 WG**；而 MLA 默认档早已用
+  **2 个 warpgroup（8 warp）+ kvpipe** 藏延迟。省下的 issue 填不满少掉的一半 warp，寄存器反顶到
+  **255**，仍 1 CTA/SM。⇒ 与 O39/O83/O91/F6/F7「MLA / BM≥128 撞 1-CTA/SM 寄存器墙」同源。
+- **结论**：fp8 主 kernel 的「wgmma 化」至此覆盖**最后一条 mma 路径**——数值正确、**收益不存在**；
+  正结果只剩换卡（更大 smem/寄存器，或支持 wgmma 跨多 warpgroup 的几何）。代码 `--mlawgm`
+  保留 opt-in、默认 0、逐位安全。
+- 原始输出：`src/fp8/fa_bwd_fp8_o126_mlawgm_ab.out.txt`、`..._o126_ncu_{mma,wgmma}_s4096.out.txt`、
+  `..._o126_onefile_s512.out.txt`；实现细节 `docs/03` §147。
