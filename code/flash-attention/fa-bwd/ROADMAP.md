@@ -3188,8 +3188,14 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
         `bool HSWAP` 并透传，host 对 **D=256 定长 causal、`base_grid=nblk*H*B ≤ 256`、nblk≥16**
         建 O89 `d_mrev` + grid 轴对调 + ksplit=4。**S1024H8 1.141× / S1024H16kv4 1.093× /
         S2048H8 1.017×**（total）；大 base_grid（S2048H16/S4096H8）为负 ⇒ 门控在 `base_grid≤256`。
-        ncu：`op_read` −27%、`op_red` **一字不变**（无 regdq）、Duration 231.5→194.5µs。
-        `--hswap=0` A/B；数值逐位/护栏内。见 `docs/03` §126、`docs/08` §5.112。
+         ncu：`op_read` −27%、`op_red` **一字不变**（无 regdq）、Duration 231.5→194.5µs。
+         `--hswap=0` A/B；数值逐位/护栏内。见 `docs/03` §126、`docs/08` §5.112。
+        → **① 的「定长 causal D=512 ksplit 重标定」（第 206 轮 O112，正结果/默认）**：补齐
+        O96–O108 唯一漏掉的 **定长 causal D=512（MLA）**（仍用 O29 的 pre-O51 `target=S/2`）；
+        与 O107 的变长 causal D=512 统一为 `k=pow2floor(min(8,S/base_grid))`、下限 2。6 shape 全扫
+        k∈[2,32]，**S512H2 1.065–1.075×、S1024H2 1.020–1.024×、S2048H2 +3.6%、S4096H2 +2.7%**；
+        ncu `op_red` 逐位不变、`op_read` −16.3%、Duration −1.3%（= 降 Q/dO 重读）。见 `docs/03`
+        §134、`docs/08` §5.120。
 - [~] **F3b**：① **GEMM3/4/5 上 RS wgmma（第一百七十四/一百七十五轮 O79/O80 打通）**——
       TE SASS 证其用 `QGMMA RS_TN`（A 在寄存器）+ `STSM/LDSM` 配对粒度转置；O79 冒烟证
       `ldmatrix.x4` 的 A 片段直接喂 `wgmma.m64n32k32` RS（max_abs=0 PASS）；**O80（第 175 轮）
@@ -3286,7 +3292,23 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百零五轮）**：**O111——量化分相 + LSE 跨 stream 重叠推广到变长（varlen），
+> **最新（第二百零六轮）**：**O112——fp8 定长 causal `head_dim=512`（MLA）的 ksplit 重标定，
+> 正结果/默认**。落实 O111「下一步候选」里 **fp8 且默认路径、且能降 L2 搬运量**的一条：O96–O108
+> 的 ksplit 复核唯独漏了**定长 causal D=512**（仍用 O29 的 `target=S/2`，是 pre-O51/pre-O105
+> 的老标定；O107 已把变长 causal D=512 提到 cap 8）。**改动（纯 host、device 一行未改、单/两文件
+> 同源）**：定长自动档 O99 之后新增 `if (ksplit_auto && causal && D==512)`
+> `k=pow2floor(min(8, S/base_grid))`（下限 2），与 O107 逐字一致。**性能（同 binary sweep，iters=200，
+> 3×）**：6 个 causal D=512 全扫 k∈[2,32]（新 dump S2048/S4096 causal），最优稳定 k≈8；auto 旧档→
+> 新档 **S512H2 1.065–1.075×、S1024H2 1.020–1.024×、S2048H2 +3.6%、S4096H2 +2.7%**，S256H2/S512H4
+> 中性。**ncu（S1024H2，k16→k8）**：**`op_red` 逐位不变**、**`op_read` −16.3%**、Duration 124.8→
+> **123.1µs**、warps 恒 12.5% ⇒ 收益 = 减 Q/dO 重读 + 保并发（= L2 搬运量里可动的那一半）。
+> **数值/护栏**：k8 vs k16 `max_abs`/relL2 **逐位相同**；`--ci --dtype fp8 --hopper` gate
+> **5.722e-06 OK**、`docs/04 --check` OK（218 行）。**顺带厘清**：MLA 主 kernel 1 CTA/SM 的根因是
+> **regs 249（寄存器墙）非 smem**，故「MLA 降 smem」无效。见 `docs/03` §134、`docs/08` §5.120。
+> **下一步候选**：① **换卡**（main 的 L2 `red` 主体墙无软件解，见「阻塞」）；② causal 变长 ksplit
+> 复核推广到 **fp16/bf16**；③ MLA 降 smem（已判无效）；④ 非 main 的 `--det`/量化进一步并行化。
+>
+> **（第二百零五轮）**：**O111——量化分相 + LSE 跨 stream 重叠推广到变长（varlen），
 > 端到端正结果/默认**。落实 O110 留的「`run_varlen` 仍是合并量化串行」（候选 ④）。变长非 main
 > 占比同样可观，且 LSE（SM bound、DRAM 4–7%）与量化 phase1（DRAM 78%、SM 30%）资源互补。
 > **改动（device 一行数学未改、单/两文件 host 同源）**：`run_varlen` 透传 `--ovlql/--ovlcap`，
@@ -8593,8 +8615,43 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
    - **判决：正结果、默认（`--ovlql=0` 退）**。压的仍是**非 main 串行**；main 的 L2 `red` 主体墙
      仍无软件解。**下一步候选**：① 换卡；② causal 变长 ksplit 复核推广到 fp16/bf16；③ MLA 降
      smem；④ `--det` partial 并行化。见 `docs/03` §133、`docs/08` §5.119；原始输出
-     `src/fp8/fa_bwd_fp8_o111_ab.out.txt`、`..._o111_nsys.out.txt`、`..._o111_ncu.out.txt`、
-     `..._o111_ci.out.txt`。
+      `src/fp8/fa_bwd_fp8_o111_ab.out.txt`、`..._o111_nsys.out.txt`、`..._o111_ncu.out.txt`、
+      `..._o111_ci.out.txt`。
+
+- 2026-10-01（第二百零六轮）：**O112——fp8 定长 causal `head_dim=512`（MLA）的 ksplit 重标定
+  ——正结果，默认**。落实 O111「下一步候选」里 **fp8 且默认路径、且能降 L2 搬运量**的一条。
+  O96–O108 的 ksplit 复核把 full（D=128/256/512）、causal D=128/D=256、变长 causal/full 都审了，
+  唯独 **定长 causal D=512（MLA）** 一直沿用 **O29** 的 `target=S/2`——那是 **pre-O51**（MLA K/V
+  `cp.async` 回填流水）/ **pre-O105**（mrev）时代的标定；O107 已证**变长 causal D=512** 需把
+  target 从 `maxlen/2` 提到 `maxlen`（cap 8）⇒ 定长 causal D=512 是 O107 的未复核姊妹分支。
+  - **改动（纯 host、device 一行未改、单/两文件同源）**：定长自动档（`fa_bwd_fp8_main.cu` 的
+    `ksplit<1` 段、单文件同段）在 O99（causal D=256）之后新增
+    `if (ksplit_auto && causal && D == 512)`，规则与 O107 逐字一致
+    `k=pow2floor(min(8, S/base_grid))`、下限 2（`base_grid=ceil(S/64)*H*B`）。full→O97、
+    causal D=256→O99、causal D=128→O93/O96 均在本段之前判定、互不干扰；`--ksplit=K` 不覆盖。
+    只改「哪些 CTA 算哪段 K」⇒ 只改跨 CTA `atomicAdd` 次序，**数值逐位不变**。
+  - **性能（同 binary ksplit sweep，iters=200，3× 复测，两文件）**：6 个 causal D=512 定长 shape
+    全扫 `k∈[2,32]`（S2048H2/S4096H2 为本轮新 dump 的 causal，O29 从未覆盖），最优稳定 **k≈8**
+    （S2048/S4096 的 k=4 仅快 0.2–2.9%，不足改规则）。auto 旧档→新档：**S512H2 1.065–1.075×**
+    （0.0682→0.0636ms）、**S1024H2 1.020–1.024×**（0.1456→0.1427）、**S2048H2 +3.6%**、
+    **S4096H2 +2.7%**；S256H2/S512H4 中性（本就在/接近 k=8）。端到端 auto 新档
+    6.80/16.88/22.43/30.09/41.49/51.00 TFLOPS（`4BS²HD`）；**单文件逐值一致**。
+  - **ncu（S1024H2 main，同 binary `--ksplit=16` vs `8`）**：**`lts op_red` 逐位不变 6,684,672**、
+    **`op_read` 1,402,132→1,172,906（−16.3%）**、Duration 124.8→**123.1µs**、`op_write` ~不变、
+    `sm__warps_active` 恒 12.5%、SM 23% ⇒ 仍 1 CTA/SM 延迟 bound，收益 = **减 Q/dO 重读 + 保并发**
+    （即「降 L2 搬运量」里**可动的 Q/dO 重读那一半**；`red` 另一半受本卡寄存器/smem 墙锁定，
+    见「阻塞」）。**顺带厘清**：MLA 主 kernel 1 CTA/SM 的根因是 **regs 249**（寄存器墙），
+    **不是 smem**（其动态 smem ~109KB < 116KB），故「MLA 降 smem」候选**无效**。
+  - **数值/护栏**：k=8 vs k=16 `max_abs`/relL2 **逐位相同**（S1024H2 `2.228/3.311/3.611e-1`、
+    relL2 `8.163/8.564/6.507%`；S512H4 `2.415/2.992/4.481e-1`）；`--ci --dtype fp8 --hopper`
+    （含新 dump 的 2 个 causal D=512）**gate worst 5.722e-06 OK**、`docs/04 --check` **OK（218 行）**、
+    rc=0；D=128/D=256/full/varlen 逐字不变。fp8 `D=512` 无 FA3/TE 外部列（TE 报 invalid、FA3 无 fp8）。
+  - **判决：正结果、默认开启**。定长 causal D=512 与 O107 的变长 causal D=512 ksplit 统一为
+    `k≈8`。**下一步候选**：① **换卡**（main 的 L2 `red` 主体墙无软件解）；② causal 变长 ksplit
+    复核推广到 fp16/bf16；③ MLA 降 smem（已判无效，见上）；④ 非 main 的 `--det`/量化进一步并行化。
+    见 `docs/03` §134、`docs/08` §5.120；原始输出 `src/fp8/fa_bwd_fp8_o112_ab.out.txt`、
+    `..._o112_default_sweep.out.txt`、`..._o112_onefile.out.txt`、`..._o112_ncu_s1024h2.out.txt`、
+    `..._o112_ci.out.txt`。
 
 ## 灵感 / backlog
 

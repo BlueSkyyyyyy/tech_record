@@ -1,0 +1,26 @@
+# O112: one-file fp8 fixed causal D=512 default (auto k=8) — should match two-file bit-for-bit
+
+===== b1_s512_h2_d512_causal_fp8 =====
+grid main = 64 x 2 x 1  (ksplit=8, base_grid=16)
+[timing] total(quant+pre+main+cvt) 0.0632 ms  16.98 TFLOPS (bwd FLOPs=4BS^2HD)
+  dq   vs ref: max_abs=2.287e-01  max_rel=1.154e+02
+  dk   vs ref: max_abs=2.252e-01  max_rel=7.676e+01
+  dv   vs ref: max_abs=3.360e-01  max_rel=5.824e+01
+===== b1_s1024_h2_d512_causal_fp8 =====
+grid main = 128 x 2 x 1  (ksplit=8, base_grid=32)
+[timing] total(quant+pre+main+cvt) 0.1429 ms  30.07 TFLOPS (bwd FLOPs=4BS^2HD)
+  dq   vs ref: max_abs=2.228e-01  max_rel=5.071e+01
+  dk   vs ref: max_abs=3.311e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.611e-01  max_rel=5.323e+01
+===== b1_s2048_h2_d512_causal_fp8 =====
+grid main = 256 x 2 x 1  (ksplit=8, base_grid=64)
+[timing] total(quant+pre+main+cvt) 0.4136 ms  41.54 TFLOPS (bwd FLOPs=4BS^2HD)
+  dq   vs ref: max_abs=1.750e-01  max_rel=5.459e+01
+  dk   vs ref: max_abs=2.557e-01  max_rel=9.054e+01
+  dv   vs ref: max_abs=3.289e-01  max_rel=5.410e+01
+===== b1_s4096_h2_d512_causal_fp8 =====
+grid main = 512 x 2 x 1  (ksplit=8, base_grid=128)
+[timing] total(quant+pre+main+cvt) 1.3474 ms  51.00 TFLOPS (bwd FLOPs=4BS^2HD)
+  dq   vs ref: max_abs=1.857e-01  max_rel=1.009e+02
+  dk   vs ref: max_abs=2.544e-01  max_rel=6.042e+01
+  dv   vs ref: max_abs=3.790e-01  max_rel=4.231e+01
