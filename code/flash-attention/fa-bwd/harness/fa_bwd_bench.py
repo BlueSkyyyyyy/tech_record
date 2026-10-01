@@ -68,6 +68,16 @@ HD256_FP8_SHAPES = [
     (1, 1024, 8, 256, False, 8, 256),   # MHA head_dim=256 full
 ]
 
+# O129（第 223 轮）：fp8 causal MHA 的**超大 S（8192）**覆盖——把「平台期」延伸到 S4096 之外。
+#   结论：ksplit auto=2 仍最优（k=1/4/8 都更慢），hswap/mrev/ksm/det/wg2/wg3/bn64/qdtma/kvtma 全部
+#   中性或有损；ncu 与 S4096 同构（`red` 占 L2 81.5%、L1→L2 1.5× 展宽、3 CTA/SM/168 regs），
+#   相对 TE 的红字账保持一致（red 4.03× / read 2.42× / time 5.5×）。**默认一行未改。**
+#   不放进 `REQUESTED_SHAPES`（会让 `dump --requested` 重建全部 case）；显式 dump：
+#     python harness/fa_bwd_bench.py dump --dtype fp8 --shape '1 8192 16 128 causal'
+S8192_FP8_SHAPES = [
+    (1, 8192, 16, 128, True, 16, 128),
+]
+
 
 # VARLEN（变长 / cu_seqlens）：内置生产形状（lengths, H, D, Hkv, Dv）。
 VARLEN_SHAPES = [

@@ -2976,3 +2976,26 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   （wgmma 只做 HD=128），若要对标 fp8 O84 的 2 CTA/SM 需新写 HD=256 wgmma 几何（留 backlog）。
   默认路径一行未改（D=128/512 回归逐位不变）。见 `docs/01` §27、`docs/01b` §6bd、`docs/04` 表；
   原始输出 `src/{fp16,bf16}/fa_bwd_*_o128_*.out.txt`、`..._o128_ncu_main_s1024h8_d256.out.txt`。
+
+### 5.137 第 223 轮（O129）：fp8 causal MHA `S=8192` 覆盖 + 平台期延伸到 S4096 之外 —— **负结果**（默认一行未改）
+
+- **动机**：fp8 主 kernel 的性能杠杆在 O116–O127 已全部收口（host/运行期/编译期旋钮 + 工作划分
+  + wgmma 路径），但**所有标定的最大 MHA shape 只到 S=4096**（O93/O112/O117）。本轮把覆盖推到
+  **S=8192**（nblk=128），复核对新尺度是否出现「更低 ksplit 反超」等杠杆。
+- **做法（无 device 改动）**：新 dump `--shape '1 8192 16 128 causal'`（含 `ref_*`/`te_*`，
+  ours 单/两文件各落盘）；同 binary 扫 `--ksplit=1/2/4/8`、`--hswap/--mrev/--ksm/--det/--wg2/--wg3/
+  --bn64/--qdtma/--kvtma`，并 `-DFA_WGMMA34=1`。
+- **性能（S8192 H16，event）**：默认 total **5.84ms / main 5.17ms（≈94 TFLOPS）**；`--ksplit=1/4/8`
+  = 5.325/6.330/8.931ms（**0.971×/0.817×/0.579×**）⇒ **ksplit=2 仍最优**；`--hswap=0` 0.969×、
+  `--mrev=0` 0.945×、`--ksm` 0.98×、`--det` 0.986×、`--wg2/--wg3` 0.49/0.59×、`--bn64` 0.66×、
+  `--qdtma=0/--kvtma=0` 0.76/0.78×、`WGMMA34` 0.916× ⇒ **默认档全局最优在小 S 的结论延续到 8K**。
+- **ncu / TE 对侧（同 session）**：ours `kvtma<128,64,32>` **5.32ms / L1 red 274.7M（8.0/req）/
+  L2 red 412.1M（**精确 1.50× 展宽**）/ read 93.5M / L2 79.0% / DRAM 13.0% / warps 18.72% / 168 regs /
+  3 CTA/SM** vs TE `..._flash_bprop_wgmma_f8_..._64x64x128` **0.966ms / L1 red≈0 / L2 red 102.2M /
+  read 38.7M / L2 70.9% / DRAM 22.4%** ⇒ 红字账与 S4096 **完全同构**（red **4.03×**、read **2.42×**、
+  时间 **5.5×**）⇒ `red` 只由工作划分决定、随 S² 缩放；**本卡无软件解**。
+- **数值/护栏**：ours vs fp32 ref `max_abs` 2.215e-1/2.680e-1/2.976e-1（≤ TE-vs-ref）；
+  `--ci` 单/两文件一致性 worst 2.38e-7 OK；`--check docs/04` 同步（242 行）。
+- **结论**：**负结果、默认一行未改**；S8192 作为新覆盖 shape（`S8192_FP8_SHAPES`）纳入 harness。
+  **正结果仍只剩换卡**。见 `docs/03` §149、`docs/04` auto-doc-table；原始输出
+  `src/fp8/fa_bwd_fp8_o129_*`。

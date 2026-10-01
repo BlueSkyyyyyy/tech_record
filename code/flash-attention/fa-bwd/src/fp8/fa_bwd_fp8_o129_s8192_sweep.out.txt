@@ -1,0 +1,56 @@
+===== --ksplit=1 =====
+grid main = 128 x 16 x 1  (ksplit=1, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 5.8983 ms  93.21 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2071 ms | preprocess 0.4451 ms | main 5.3102 ms | convert -0.0642 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --ksplit=2 =====
+grid main = 256 x 16 x 1  (ksplit=2, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 5.8501 ms  93.97 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2064 ms | preprocess 0.4441 ms | main 5.2495 ms | convert -0.0499 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --ksplit=4 =====
+grid main = 512 x 16 x 1  (ksplit=4, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 7.1203 ms  77.21 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2078 ms | preprocess 0.4443 ms | main 6.4218 ms | convert 0.0464 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --ksplit=8 =====
+grid main = 1024 x 16 x 1  (ksplit=8, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 9.4686 ms  58.06 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2057 ms | preprocess 0.4395 ms | main 8.9594 ms | convert -0.1359 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --hswap=0 =====
+grid main = 512 x 16 x 1  (ksplit=4, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 5.9848 ms  91.86 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2065 ms | preprocess 0.4445 ms | main 5.3607 ms | convert -0.0269 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --mrev=0 =====
+grid main = 512 x 16 x 1  (ksplit=4, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 6.1479 ms  89.42 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2075 ms | preprocess 0.4471 ms | main 5.5159 ms | convert -0.0226 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --ksm=32 =====
+grid main = 256 x 16 x 1  (ksplit=2, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 5.8992 ms  93.19 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2070 ms | preprocess 0.4471 ms | main 5.2263 ms | convert 0.0187 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --ksm=64 =====
+grid main = 256 x 16 x 1  (ksplit=2, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 5.9464 ms  92.45 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2064 ms | preprocess 0.4440 ms | main 5.3196 ms | convert -0.0235 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --det=1 =====
+grid main = 256 x 16 x 1  (ksplit=2, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 5.8414 ms  94.11 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2077 ms | preprocess 0.4467 ms | main 5.2489 ms | convert -0.0619 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --wg2 =====
+grid main = 256 x 16 x 1  (ksplit=2, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 11.4855 ms  47.87 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2059 ms | preprocess 0.4364 ms | main 10.6911 ms | convert 0.1521 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --wg3 =====
+grid main = 256 x 16 x 1  (ksplit=2, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 9.5905 ms  57.32 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2067 ms | preprocess 0.4458 ms | main 8.8784 ms | convert 0.0597 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --bn64 =====
+grid main = 256 x 16 x 1  (ksplit=2, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 8.4820 ms  64.81 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2061 ms | preprocess 0.4415 ms | main 7.8376 ms | convert -0.0031 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --qdtma=0 =====
+grid main = 256 x 16 x 1  (ksplit=2, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 7.3476 ms  74.82 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2056 ms | preprocess 0.4410 ms | main 6.8098 ms | convert -0.1087 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== --kvtma=0 =====
+grid main = 256 x 16 x 1  (ksplit=2, base_grid=2048)
+[timing] total(quant+pre+main+cvt) 7.2384 ms  75.95 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.2072 ms | preprocess 0.4477 ms | main 6.6408 ms | convert -0.0573 ms (cvt_on=0, qfuse=1, dfuse=1)

@@ -3349,10 +3349,31 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
       `harness/fa_vs_te_bwd_only.py` 纯反向验收；数值逐位/容差不变。
 - 目标：fp8 S4096 从 ~1.95ms（6.4× TE）→ 先到 **3× TE**，再逼近 **2×**。**注**：main 的 L2
   `red` 墙需换卡；O109/O110 后 S4096 已 5.22× TE，剩余只能靠非 main 的进一步并行化。
+- [x] **O129（第二百二十三轮）S=8192 覆盖**：把平台期审计从 S≤4096 延伸到 8K（新 dump +
+  `S8192_FP8_SHAPES`）；ksplit/hswap/mrev/ksm/det/wg2/wg3/bn64/qdtma/kvtma/WGMMA34 全部中性或
+  有损、**ksplit=2 仍最优**；ncu/TE 红字账与 S4096 同构（red 4.03×/read 2.42×/time 5.5×）。
+  **负结果、默认一行未改**。见「当前进度 第二百二十三轮」、`docs/03` §149。
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百二十轮）**：**O126——fp8 主 kernel「最后一条 mma 路径」：MLA（D=512）的
+> **最新（第二百二十三轮）**：**O129——fp8 causal MHA `S=8192` 覆盖 + 平台期延伸到 S4096 之外
+> ——负结果/覆盖，默认一行未改**。承接 O116–O127「fp8 默认 main 的杠杆全部收口」，把**此前只标定
+> 到 S=4096** 的 MHA 推到 **S=8192**（nblk=128）复核新尺度杠杆。**覆盖**：新 dump
+> `--shape '1 8192 16 128 causal'`（`ref_*`/`te_*` + ours 单/两文件），harness 加
+> `S8192_FP8_SHAPES`，`--check docs/04` 同步（242 行）。**性能（event）**：默认 total
+> **5.84ms / main 5.17ms（≈94 TFLOPS）**；`--ksplit=1/4/8` = 0.971×/0.817×/0.579× ⇒ **auto=2 仍
+> 最优**；`--hswap/--mrev/--ksm/--det/--wg2/--wg3/--bn64/--qdtma/--kvtma` 及 `-DFA_WGMMA34=1`
+> 全部中性或有损（0.49–0.99×）⇒ 默认档全局最优延续到 8K。**ncu / TE 对侧（同 session）**：ours
+> `kvtma<128,64,32>` **5.32ms / L2 red 412.1M（81.5%，L1→L2 精确 1.50× 展宽）/ read 93.5M /
+> warps 18.72% / 168 regs / 3 CTA/SM** vs TE `..._flash_bprop_wgmma_f8_..._64x64x128` **0.966ms /
+> L2 red 102.2M / read 38.7M** ⇒ 红字账与 S4096 **完全同构**（red 4.03×、read 2.42×、时间 5.5×）。
+> **数值**：ours vs ref 2.215e-1/2.680e-1/2.976e-1（≤ TE-vs-ref）、单/两文件 worst 2.38e-7（CI OK）。
+> 见 `docs/03` §149、`docs/08` §5.137、`docs/04` §56；原始输出 `src/fp8/fa_bwd_fp8_o129_*`。
+> **下一步候选（更新）**：① **换卡**（fp8 main 的 L2 `red` 主体墙 + issue 墙无软件解）；
+> ② 覆盖型 backlog：~~fp16/bf16 `head_dim=256`~~（O128 已完成）；③ 非 main `--det`/量化
+> （O116 无余量）；④ fp16/bf16 `D=256` 的 wgmma+TMA 几何（O128 遗留，非 fp8）。
+>
+> **（第二百二十轮）**：**O126——fp8 主 kernel「最后一条 mma 路径」：MLA（D=512）的
 > wgmma 几何——负结果（opt-in `--mlawgm`，默认一行未改）**。落实 O124 候选 ④（当时记「需新写
 > 几何、工程量大、prize 仅 MLA 尺寸」）——把它真正实现并同 binary A/B。**device**：放开
 > `fp8_mma_body` 的 HD 断言到 512（SW128/`wgmma_qkt64_fp8` 本就按 `SBO=(HD/128)*1024` 写、
@@ -9306,6 +9327,31 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     HD=256 wgmma 壳，同 D=512 资源墙）；④ 非 main `--det`/量化（O116 无余量）。
     见 `docs/01` §27、`docs/01b` §6bd、`docs/08` §5.136；原始输出
     `src/{fp16,bf16}/fa_bwd_*_o128_*.out.txt`、`..._o128_ncu_main_s1024h8_d256.out.txt`。
+
+- 2026-10-01（第二百二十三轮）：**O129——fp8 causal MHA `S=8192` 覆盖 + 平台期延伸到 S4096 之外
+  ——负结果/覆盖，默认一行未改**。承接 O116–O127「fp8 默认 main 的杠杆全部收口」，把**此前只标定
+  到 S=4096** 的 MHA 推到 **S=8192**（nblk=128），检验是否出现「更低 ksplit 反超」等新尺度杠杆。
+  - **覆盖（无 device 改动）**：新 dump `--shape '1 8192 16 128 causal'`（`ref_*`/`te_*` +
+    ours 单/两文件 `ours_sf_*`/`ours_*`）；harness 加 `S8192_FP8_SHAPES`；`--check docs/04`
+    同步（242 行）。
+  - **性能（S8192 H16，event）**：默认 total **5.84ms / main 5.17ms（≈94 TFLOPS）**；`--ksplit=1/4/8`
+    = 5.325/6.330/8.931ms（**0.971×/0.817×/0.579×**）⇒ **ksplit=2 仍最优**；`--hswap=0` 0.969×、
+    `--mrev=0` 0.945×、`--ksm=32/64` 0.983/0.977×、`--det` 0.986×、`--wg2/--wg3` 0.485/0.585×、
+    `--bn64` 0.660×、`--qdtma=0/--kvtma=0` 0.764/0.777×、`-DFA_WGMMA34=1` 0.916× ⇒ **默认档全局
+    最优的结论延续到 8K**。
+  - **ncu / TE 对侧（同 session）**：ours `kvtma<128,64,32>` **5.32ms / L1 red 274.7M（8.0/req）/
+    L2 red 412.1M（精确 1.50× 展宽）/ read 93.5M / L2 79.0% / warps 18.72% / 168 regs / 3 CTA/SM**
+    vs TE `..._flash_bprop_wgmma_f8_..._64x64x128` **0.966ms / L1 red≈0 / L2 red 102.2M / read 38.7M**
+    ⇒ **红字账与 S4096 完全同构**（red **4.03×**、read **2.42×**、时间 **5.5×**）⇒ `red` 由工作划分
+    唯一决定、随 S² 缩放，**本卡无软件解**。
+  - **数值/护栏**：ours vs fp32 ref `max_abs` 2.215e-1/2.680e-1/2.976e-1（**≤ TE-vs-ref**）；
+    ours vs TE 3.83e-1/5.31e-1/6.67e-1；单/两文件一致性 worst 2.38e-7（`--ci` gate OK）。
+  - **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙 + issue 墙无软件解）；② 覆盖型
+    backlog：~~fp16/bf16 `head_dim=256`~~（O128 已完成）；③ 非 main `--det`/量化（O116 无余量）；
+    ④ fp16/bf16 `D=256` 的 wgmma+TMA 几何（O128 遗留，非 fp8）。见 `docs/03` §149、`docs/08`
+    §5.137、`docs/04` §56；原始输出 `src/fp8/fa_bwd_fp8_o129_s8192_default.out.txt`、
+    `..._o129_s8192_sweep.out.txt`、`..._o129_ncu_ours_s8192.out.txt`、`..._o129_ncu_te_s8192.out.txt`、
+    `..._o129_te_baseline_s8192.out.txt`。
 
 ## 灵感 / backlog
 
