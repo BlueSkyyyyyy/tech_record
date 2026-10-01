@@ -74,8 +74,13 @@ HD256_FP8_SHAPES = [
 #   相对 TE 的红字账保持一致（red 4.03× / read 2.42× / time 5.5×）。**默认一行未改。**
 #   不放进 `REQUESTED_SHAPES`（会让 `dump --requested` 重建全部 case）；显式 dump：
 #     python harness/fa_bwd_bench.py dump --dtype fp8 --shape '1 8192 16 128 causal'
+# O130（第 224 轮）：再补 **full（非 causal）S=8192**——full 的 ksplit 最优由「波对齐」而非
+#   「causal 三角尾波」决定（O96），在 8K 复核该自动档仍最优（k=5≈4/6/8，k=1 慢 8.5%）；ncu 红字账
+#   与 causal 同构（red 4.08× / read 3.68× / time 5.6×），且 full 的 red 恰为 causal 的 2.00×。
+#   显式 dump：`--shape '1 8192 16 128 full'`。**默认一行未改。**
 S8192_FP8_SHAPES = [
     (1, 8192, 16, 128, True, 16, 128),
+    (1, 8192, 16, 128, False, 16, 128),
 ]
 
 

@@ -12850,3 +12850,80 @@ O116/O117 把 fp8 主 kernel 的 **host/运行期**旋钮（ksplit / hswap / mre
   原始输出 `src/fp8/fa_bwd_fp8_o129_s8192_default.out.txt`、
   `..._o129_s8192_sweep.out.txt`、`..._o129_ncu_ours_s8192.out.txt`、
   `..._o129_ncu_te_s8192.out.txt`、`..._o129_te_baseline_s8192.out.txt`。
+
+## 150. O130（第 224 轮）：fp8 **full（非 causal）MHA `S=8192`** 覆盖 + full 的 ksplit 规则在大 S 复核 —— **负结果**（默认一行未改）
+
+### 150.1 目的与做法
+
+O129 只用 **causal** MHA 把平台期延伸到 S=8192；而 `fp8 专项冲刺` 的核心命题「降 L2 搬运量 = 降
+Q/dO 重读（ksplit 那一半）+ 跨 CTA `red`（工作划分那一半）」里，**Q/dO 重读那一半的最优 ksplit
+由「causal 三角偏斜」还是「full 均匀工作量」决定完全不同**——`full` 每块工作量相同，尾波只由
+「grid 是否落在整数个并发波」决定，过细切分只剩 Q/dO 重读（O96）。本轮把 **full** 也推到 S=8192，
+在新尺度复核 O96 的「波对齐」自动档是否仍最优、并取 ncu/TE 红字账。
+
+* 新 shape dump（fp8）：`harness/fa_bwd_bench.py dump --dtype fp8 --shape '1 8192 16 128 full'`
+  → `/home/xieminglin/proj/output/fa-bwd/b1_s8192_h16_d128_full_fp8/`（含 `ref_*` / `te_*`）；
+  ours 落 `ours_o130_*`。**无 device 改动**（纯覆盖 + 审计）。
+* 复核的旋钮：`--ksplit={1,2,3,4,5,6,8,12,16}`（O96 自动档落 k=5）；`--hswap` / `--mrev` 对 full
+  **ineligible**（需 causal，代码已打印忽略）；其余内置 A/B（`--kvtma/--qdtma`、`--bn64`、
+  `--d128w`、`--wg2`）在默认运行里一并输出。
+
+### 150.2 性能（同 binary，iters=30，S8192 full H16，事件口径）
+
+默认（Hopper `-DFA_WGMMA -DFA_TMA`，ksplit auto=**5**，grid=`640×16`）：**total 11.43 ms /
+main 10.44 ms（48.1 TFLOPS，`4BS²HD` 口径）**；preprocess 0.82 ms / quant 0.20 ms。
+
+| ksplit | main (ms) | total (ms) | 相对默认 |
+|---|---|---|---|
+| 1 | 11.410 | 12.469 | 0.915× |
+| 2 | 10.696 | 11.691 | 0.976× |
+| 3 | 10.469 | 11.473 | 0.997× |
+| 4 | 10.444 | 11.432 | 1.000× |
+| **5（auto）** | **10.442** | **11.431** | **1.00×** |
+| 6 | 10.424 | 11.415 | 1.002× |
+| 8 | 10.457 | 11.420 | 0.999× |
+| 12 | 10.568 | 11.526 | 0.988× |
+| 16 | 10.631 | 11.671 | 0.982× |
+
+⇒ **O96 的「波对齐」自动档（k=5）在 S8192 full 仍最优**（k=4–8 全在 ~0.3% 噪声内；k=1 因并行度
+不足慢 8.5%，k≥12 因 Q/dO 重读慢 1–2%）。内置 A/B 同样确认默认档：`kvtma` 比 `qdtma` **1.188×**、
+`BN=32` 比 `BN=64` **1.14×**、4-warp 比 8-warp **1.50×**、BM=64 比 `wg2`(BM=128) **1.58×**。
+即 **full 的「Q/dO 重读」杠杆在 8K 已由 O96 规则吃尽**，没有新的 ksplit/LPT 空间。
+
+### 150.3 ncu / TE 对侧（同 session，S8192 full）
+
+| | kernel | Duration | L1 `red` 扇区 | L2 `red` 扇区 | L2 `read` | L2% | DRAM% | warps | regs |
+|---|---|---|---|---|---|---|---|---|---|
+| **ours** | `fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>` (3 CTA/SM, grid=640×16) | **10.59 ms** | 547,356,672（8.0/req） | **821,035,008** | 177,119,457 | 79.2% | 1.36% | 18.59% | 168 |
+| **TE** | `..._flash_bprop_wgmma_f8_..._64x64x128` (1 CTA/SM, 384t, grid=132) | **1.89 ms** | 3,168（TMA 4D reduce 绕过 L1） | **201,331,392** | 48,089,116 | 69.9% | 3.74% | 15.62% | — |
+
+* **红字账与 causal/S4096 同构**：`red` **4.08×**、`read` **3.68×**、Duration **5.6×**。
+  ours L2 `red` 821.0M 恰为 **causal S8192（412.1M）的 2.00×**——因为 full 下每个 KV 元素被**全部**
+  m-block 贡献（causal 只被三角形内的贡献）⇒ **再次坐实 `red` 扇区 == 贡献字节/32B、只由「每 KV
+  元素被多少 m-block 贡献」（工作划分）唯一决定**，与因果性/机制/归约宽度都无关。L1→L2 仍
+  **12.0/8.0 = 1.50× 精确展宽**（同 O124/O129）。
+* 数值（护栏）：ours vs fp32 ref `relL2` dq/dk/dv = **8.114% / 8.236% / 6.635%**（≤ 8.2/8.3/6.5 +
+  ±0.3 内），`max_abs` 1.56e-2/1.69e-2/1.29e-2。**注**：该 full shape 下 **TE 自身的 dv 不可信**——
+  TE-vs-ref `relL2` dq/dk/dv = 10.8% / 10.8% / **88.1%**（TE dv 的 L2 范数 53.3 vs ref/ours 75.0，
+  amax 却相同 ⇒ TE full fp8 的 dv 系统性偏小），故 `ours-vs-TE` dv 的 124% 不构成精度问题；
+  ours 的 dv 范数 74.9 ≈ ref 75.0。ours-vs-TE dq/dk `relL2` 13.55% / 13.60%（≤15%）。
+* TE 纯反向基线（CUPTI，同机）：**2.00 ms / 549 TF** ；ours total 11.43 ms / 48.1 TF ⇒ 时间
+  **5.71×**、TFLOPS 为 TE 的 **8.8%**（与 causal S8192 的 5.5×/8.7% 同档）。
+
+### 150.4 结论与复现
+
+* **负结果、默认一行未改**。full S8192 把 O96/O129 的结论补齐到「full 的最大尺度」：**full 的
+  ksplit 自动档（波对齐）在 8K 仍最优**，`red` 主体墙随「贡献字节」缩放、相对 TE 差距恒定。
+  **正结果仍只剩换卡**（同「阻塞」）。
+* 覆盖价值：`S8192_FP8_SHAPES` 增加 full 形状（`harness/fa_bwd_bench.py`）+ dump 目录新增
+  `b1_s8192_h16_d128_full_fp8`。
+* 复现：
+  ```
+  nvcc -O3 -gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda \
+       src/fp8/fa_bwd_fp8_main.cu -o /tmp/fa_bwd_fp8_main.out
+  for k in 1 2 3 4 5 6 8 12 16; do /tmp/fa_bwd_fp8_main.out \
+       --dir=/home/xieminglin/proj/output/fa-bwd/b1_s8192_h16_d128_full_fp8 --full --iters=30 --ksplit=$k; done
+  ```
+  原始输出 `src/fp8/fa_bwd_fp8_o130_full_s8192_default.out.txt`、
+  `..._o130_s8192_ksweep.out.txt`、`..._o130_ncu_ours_s8192.out.txt`、
+  `..._o130_ncu_te_s8192.out.txt`、`..._o130_te_baseline_s8192.out.txt`、`..._o130_relL2_s8192.out.txt`。

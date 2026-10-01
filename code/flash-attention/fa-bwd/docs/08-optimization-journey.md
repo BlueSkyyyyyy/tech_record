@@ -2999,3 +2999,29 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 - **结论**：**负结果、默认一行未改**；S8192 作为新覆盖 shape（`S8192_FP8_SHAPES`）纳入 harness。
   **正结果仍只剩换卡**。见 `docs/03` §149、`docs/04` auto-doc-table；原始输出
   `src/fp8/fa_bwd_fp8_o129_*`。
+
+### 5.138 第 224 轮（O130）：fp8 **full（非 causal）MHA `S=8192`** 覆盖 + full 的 ksplit 规则在大 S 复核 —— **负结果**（默认一行未改）
+
+- **动机**：O129 只用 **causal** 把平台期延伸到 S=8192；但 `fp8 专项冲刺` 的「降 L2 搬运量」有两个
+  正交维度——**Q/dO 重读（ksplit）** 与 **跨 CTA `red`（工作划分）**。其中 ksplit 的最优在
+  **causal（三角偏斜）** 与 **full（均匀工作量）** 下由不同目标决定（O96：full 只需「波对齐」）。
+  本轮把 **full** 也推到 S=8192，复核 O96 自动档是否仍最优、并取 ncu/TE 红字账。
+- **做法（无 device 改动）**：新 dump `--shape '1 8192 16 128 full'`（`ref_*`/`te_*` + ours
+  `ours_o130_*`）；同 binary 扫 `--ksplit=1/2/3/4/5/6/8/12/16`（O96 自动档落 **k=5**）。
+  `--hswap/--mrev` 对 full **ineligible**（需 causal，代码已打印忽略）。
+- **性能（S8192 full H16，event）**：默认 total **11.43ms / main 10.44ms（48.1 TFLOPS）**；
+  ksplit 1/2/3/4/**5**/6/8/12/16 → main 11.410/10.696/10.469/10.444/**10.442**/10.424/10.457/
+  10.568/10.631ms ⇒ **auto k=5 ≈ 4–8（噪声内）最优**（k=1 并行度不足慢 8.5%、k≥12 Q/dO 重读慢 1–2%）。
+  内置 A/B：`kvtma` 比 `qdtma` **1.188×**、`BN=32` 比 `BN=64` 1.14×、4-warp 比 8-warp 1.50×、
+  BM=64 比 `wg2`(BM=128) 1.58× ⇒ **默认档最优**。
+- **ncu / TE 对侧（同 session）**：ours `kvtma<128,64,32>` **10.59ms / L1 red 547.4M（8.0/req）/
+  L2 red 821.0M（精确 1.50× 展宽）/ read 177.1M / L2 79.2% / DRAM 1.36% / warps 18.59% / 168 regs /
+  3 CTA/SM** vs TE `..._flash_bprop_wgmma_f8_..._64x64x128` **1.89ms / L1 red≈0 / L2 red 201.3M /
+  read 48.1M / L2 69.9% / DRAM 3.74%** ⇒ 红字账与 causal 同构（red **4.08×**、read **3.68×**、
+  时间 **5.6×**）。**关键**：ours full 的 L2 `red` 821.0M 恰为 **causal S8192（412.1M）的 2.00×**
+  ⇒ 再次坐实 `red` 扇区 == 贡献字节/32B、只由「每 KV 元素被多少 m-block 贡献」唯一决定。
+- **数值/护栏**：ours vs fp32 ref `relL2` dq/dk/dv = **8.114% / 8.236% / 6.635%**（护栏内）、
+  `max_abs` 1.56e-2/1.69e-2/1.29e-2。**注**：该 full shape 下 TE 自身 dv 不可信（TE-vs-ref
+  `relL2` dv **88.1%**、TE dv L2 范数 53.3 vs ref/ours 75.0）；ours 的 dv 范数 74.9 ≈ ref。
+- **结论**：**负结果、默认一行未改**；full S8192 纳入 `S8192_FP8_SHAPES` 覆盖。
+  **正结果仍只剩换卡**。见 `docs/03` §150；原始输出 `src/fp8/fa_bwd_fp8_o130_*`。
