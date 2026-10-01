@@ -1,0 +1,22 @@
+    Memory Throughput                 %        78.21
+    DRAM Throughput                   %        11.27
+    Duration                         ms         1.37
+    L1/TEX Cache Throughput           %        74.03
+    L2 Cache Throughput               %        78.21
+    Compute (SM) Throughput           %        46.27
+    Memory Throughput                           Gbyte/s       377.95
+    L2 Hit Rate                                       %        93.03
+    Avg. Executed Instructions Per Scheduler        inst   1155147.64
+    Executed Instructions                           inst    609917955
+    Registers Per Thread             register/thread             168
+    Dynamic Shared Memory Per Block      Kbyte/block           74.82
+    Waves Per SM                                                5.17
+    Achieved Occupancy                        %        18.67
+    sm__inst_executed_pipe_lsu.avg.pct_of_peak_sustained_active                         %        33.29
+    sm__issue_active.avg.pct_of_peak_sustained_active                                   %        47.19
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active              %        11.87
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.43
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.59
+    smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio            inst         0.44
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         1.48
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.54
