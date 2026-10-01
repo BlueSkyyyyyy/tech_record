@@ -1,0 +1,10 @@
+=== O116: S4096 causal fp8 relL2 (vs fp32 ref) ===
+dq  ours     relL2= 8.149%  max_abs=2.635e-01
+dq  ours_sf  relL2= 8.149%  max_abs=2.635e-01
+dq  te       relL2=10.574%  max_abs=3.763e-01
+dk  ours     relL2= 8.263%  max_abs=2.644e-01
+dk  ours_sf  relL2= 8.263%  max_abs=2.644e-01
+dk  te       relL2=10.546%  max_abs=3.686e-01
+dv  ours     relL2= 6.489%  max_abs=3.216e-01
+dv  ours_sf  relL2= 6.489%  max_abs=3.216e-01
+dv  te       relL2=27.452%  max_abs=6.688e-01

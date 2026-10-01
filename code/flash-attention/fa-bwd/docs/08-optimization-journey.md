@@ -2651,7 +2651,9 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 - **判决**：**负结果、默认一行未改**。fp8 主 kernel 的 host 旋钮前沿至此全部扫清；真差距 =
   TE 的「大 tile（384 线程 / 232KB smem / 1 CTA/SM）+ 更好的工作划分」把每元素贡献 CTA 数压到
   ours 的 ~1/4，本卡寄存器/smem 装不下（F6/F7/p160/O83/O86/O90/O91/O114 同源）。
-- **数值/护栏**：默认档本轮未改任何 device/host 默认；`--ci --no-run --dtype fp8` **55 case
+- **数值/护栏**：默认档本轮未改任何 device/host 默认；对 dump 的 ref/te npy（S4096 causal）
+  ours relL2 **8.149/8.263/6.489%**（全在 fp8 硬护栏 8.2/8.3/6.5%±0.3 内、且优于 TE 的
+  10.574/10.546/27.452%）、`max_abs` O(0.26–0.32)；`--ci --no-run --dtype fp8` **55 case
   单/两文件 gate worst 5.722e-06 OK**、`docs/04 --check` OK（224 行）。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o116_knob_sweep.out.txt`、
   `src/fp8/fa_bwd_fp8_o116_ncu_ours_main_s4096.out.txt`、
