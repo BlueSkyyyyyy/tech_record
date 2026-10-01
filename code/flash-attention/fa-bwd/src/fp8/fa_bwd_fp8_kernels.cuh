@@ -2570,6 +2570,39 @@ __device__ __forceinline__ void tma_load_4d(void* dst, const CUtensorMap* map, i
   (void)dst; (void)map; (void)k0; (void)r0; (void)hd; (void)b; (void)bar;
 #endif
 }
+// O119：TMA cluster multicast（GQA/MQA 的 K/V 读摊薄）。leader 发一条，硬件按同一 smem 偏移把
+//   数据复制进 mask 内各 CTA，并对**每个** CTA 的本地 mbarrier 补 `complete_tx`（各自 KS_SZ）。
+__device__ __forceinline__ uint32_t fp8_cluster_rank() {
+#if FA_FP8_HAS_TMA
+  uint32_t r;
+  asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(r));
+  return r;
+#else
+  return 0;
+#endif
+}
+__device__ __forceinline__ void fp8_cluster_sync() {
+#if FA_FP8_HAS_TMA
+  asm volatile("barrier.cluster.arrive.aligned;\nbarrier.cluster.wait.aligned;\n" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void fp8_fence_mbar_init() {
+#if FA_FP8_HAS_TMA
+  asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+#endif
+}
+__device__ __forceinline__ void tma_load_4d_mc(void* dst, const CUtensorMap* map, int k0,
+                                               int r0, int hd, int b, uint64_t* bar,
+                                               uint16_t mask) {
+#if FA_FP8_HAS_TMA
+  asm volatile(
+      "cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes"
+      ".multicast::cluster [%0], [%1, {%2, %3, %4, %5}], [%6], %7;\n" ::"r"(smem_u32(dst)),
+      "l"((uint64_t)map), "r"(k0), "r"(r0), "r"(hd), "r"(b), "r"(smem_u32(bar)), "h"(mask));
+#else
+  (void)dst; (void)map; (void)k0; (void)r0; (void)hd; (void)b; (void)bar; (void)mask;
+#endif
+}
 
 // O38/O39：把 K 维 split 的 LSE 部分结果 `(m_ks, l_ks)` 沿 `ks` 二次归约成最终 LSE。
 //   `part` 布局 `[row][ks] -> (m,l)`（每行 `2*ksplit` 个 fp32），输出 `lse[row]=m+log(l)`。
@@ -2908,10 +2941,17 @@ __global__ void delta_warp_kernel(const float* __restrict__ o,
 //   跨 CTA 原子（可交换）⇒ 数值只在 fp8 噪声内。仅定长（`mt_b==nullptr`）用；`HSWAP=false`
 //   与历史逐位相同。代价：相邻 CTA 落在不同 head ⇒ 理论损 L2 读局部性（S4096 的 K/V 全体
 //   ~17MB 仍装得下 50MB L2，实测见 docs）。
+// O119（第 213 轮）：`MCAST` = TMA cluster multicast 宽度（1=关）。沿 grid.x（HSWAP 时 = Q 头）
+//   组 cluster，同 cluster 内各 CTA 读**同一 KV 头**的同一批 K/V tile（GQA/MQA：G=H/Hkv 个 Q 头
+//   共享一份 K/V）⇒ 由 leader（rank0）发一条 `...multicast::cluster` 广播，K/V 的 L2 读扇区按
+//   宽度摊薄（直打 O117 的 read 2.38× 差距里「K/V 重复读」那一半）。只动 K/V 的 4D-TMA，
+//   数学/累加/reshape 一行未改；仅 `HSWAP && KVTMA && TMA && WGMMA && HD==128` 实例化。
+//   **正确性前提**：cluster 内各 CTA 的 (mt,part) 相同 ⇒ causal 的 nt 调度逐迭代一致；每 tile
+//   出/入 TMA 点用 `barrier.cluster` 锁步（否则 leader 可能比 follower 超前而串 tile）。
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
            bool RCP = true, bool TMA = false, bool KVTMA = false, int NTH = THREADS,
            int NWAR = WN, bool KVPIPE = false, bool DET = false, bool DET_HALF = false,
-           bool DQONLY = false, bool HSWAP = false>
+           bool DQONLY = false, bool HSWAP = false, int MCAST = 1>
 __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q8,
                       const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8,
@@ -2967,6 +3007,10 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   static_assert(!WGMMA || (HD == 128 || HD == 256), "WGMMA 主 kernel 只做 HD=128/256");
   static_assert(!KVTMA || (TMA && WGMMA && HD == 128),
                 "K/V TMA 只在 Q/dO-TMA + WGMMA + HD=128 路径");
+  // O119：multicast 只对「HSWAP（head=blockIdx.x）+ KVTMA」实例化（cluster 沿 x 分组 Q 头）。
+  static_assert(MCAST == 1 || (KVTMA && TMA && WGMMA && HD == 128 && HSWAP),
+                "MCAST>1 只在 HSWAP+KVTMA+TMA+WGMMA+HD=128 路径");
+  constexpr uint16_t kMCMask = (uint16_t)((1u << (MCAST > 1 ? MCAST : 1)) - 1);
   // O51：K/V cp.async 回填流水只用于 mma 后端（非 WGMMA/TMA），目前实例化于 MLA（HD=512）。
   static_assert(!KVPIPE || (!WGMMA && !TMA && !KVTMA), "KVPIPE 只用于 mma 后端");
   // GEMM3/4/5 的输出 N 维 = head_dim；每遍处理 NTW = WN*64 = 128 列，共 HD/NTW 遍。
@@ -3131,8 +3175,10 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       mbar_init(qbars + 0, 1);
       mbar_init(qbars + 1, 1);
       if (KVTMA) { mbar_init(qbars + 2, 1); mbar_init(qbars + 3, 1); mbar_init(qbars + 4, 1); }
+      if (MCAST > 1) fp8_fence_mbar_init();
     }
     __syncthreads();
+    if (MCAST > 1) fp8_cluster_sync();  // 远端 mbarrier 必须已 init+可见，才能被 multicast 补 tx
     if (tid == 0) {
       // O37：fp8 一行 128B = 一个 SW128 atom 的整行 ⇒ HD=128 一次 box 搬完整块。
       // O85：HD>128 时 `NCH_Q` 个 box 各搬 128 列（同一 mbarrier、expect 总量），
@@ -3145,14 +3191,27 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
         tma_load_4d(dOs + c * CHQ, dmap, c * 128, m0, h, b, qbars + 1);
       if (KVTMA) {
         // K[nt_begin] -> stage 0；K[nt_begin+1] -> stage 1（如有）；V[nt_begin] -> Vs。
+        // O119：MCAST>1 时本 CTA 仍各自 arrive_expect（本地 mbarrier），但只有 leader(rank0) 发
+        //   multicast，硬件按同一 smem 偏移广播到 cluster 内各 CTA 的 Ks/Vs 与各自 mbarrier。
+        const bool ld = (MCAST == 1) || (fp8_cluster_rank() == 0);
         mbar_arrive_expect(qbars + 2, KS_SZ);
-        tma_load_4d(Ks, kmap, 0, nt_begin * BN, hkv, b, qbars + 2);
+        if (ld) {
+          if (MCAST > 1) tma_load_4d_mc(Ks, kmap, 0, nt_begin * BN, hkv, b, qbars + 2, kMCMask);
+          else tma_load_4d(Ks, kmap, 0, nt_begin * BN, hkv, b, qbars + 2);
+        }
         if (nt_begin + 1 < nt_end) {
           mbar_arrive_expect(qbars + 3, KS_SZ);
-          tma_load_4d(Ks + KS_SZ, kmap, 0, (nt_begin + 1) * BN, hkv, b, qbars + 3);
+          if (ld) {
+            if (MCAST > 1) tma_load_4d_mc(Ks + KS_SZ, kmap, 0, (nt_begin + 1) * BN, hkv, b,
+                                          qbars + 3, kMCMask);
+            else tma_load_4d(Ks + KS_SZ, kmap, 0, (nt_begin + 1) * BN, hkv, b, qbars + 3);
+          }
         }
         mbar_arrive_expect(qbars + 4, KS_SZ);
-        tma_load_4d(Vs, vmap, 0, nt_begin * BN, hkv, b, qbars + 4);
+        if (ld) {
+          if (MCAST > 1) tma_load_4d_mc(Vs, vmap, 0, nt_begin * BN, hkv, b, qbars + 4, kMCMask);
+          else tma_load_4d(Vs, vmap, 0, nt_begin * BN, hkv, b, qbars + 4);
+        }
       }
     }
     if (tid < BM) {
@@ -4128,14 +4187,30 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
     //       （本迭代 Ap 已读完）」，再等 K[nt+1]（上一迭代已发）并重建 Kp；V 的 TMA 与
     //       Kp 重建重叠。----
     if constexpr (KVTMA) {
+      // O119：MCAST>1 时先让 cluster 锁步——保证 leader 发的 tile 与每个 follower 当前 nt 一致，
+      //   且 leader 覆写 stage 前所有 CTA 都已消费完该 stage 的旧 tile（否则串 tile/覆写协程）。
+      //   实测去掉锁步会串 tile/死锁 ⇒ 锁步是 multicast 正确性的硬前提。
+      if (MCAST > 1) fp8_cluster_sync();
       if (tid == 0) {
+        const bool ld = (MCAST == 1) || (fp8_cluster_rank() == 0);
         if (nt + 2 < nt_end) {
           mbar_arrive_expect(qbars + 2 + stg, KS_SZ);
-          tma_load_4d(Ks + stg * KS_SZ, kmap, 0, (nt + 2) * BN, hkv, b, qbars + 2 + stg);
+          if (ld) {
+            if (MCAST > 1)
+              tma_load_4d_mc(Ks + stg * KS_SZ, kmap, 0, (nt + 2) * BN, hkv, b,
+                             qbars + 2 + stg, kMCMask);
+            else
+              tma_load_4d(Ks + stg * KS_SZ, kmap, 0, (nt + 2) * BN, hkv, b, qbars + 2 + stg);
+          }
         }
         if (nt + 1 < nt_end) {
           mbar_arrive_expect(qbars + 4, KS_SZ);
-          tma_load_4d(Vs, vmap, 0, (nt + 1) * BN, hkv, b, qbars + 4);
+          if (ld) {
+            if (MCAST > 1)
+              tma_load_4d_mc(Vs, vmap, 0, (nt + 1) * BN, hkv, b, qbars + 4, kMCMask);
+            else
+              tma_load_4d(Vs, vmap, 0, (nt + 1) * BN, hkv, b, qbars + 4);
+          }
         }
       }
       if (nt + 1 < nt_end) {
@@ -4322,7 +4397,8 @@ fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
 // P3-4g：`DET=true` 时复用同一 body 的确定性 dK/dV 路径（partial + 固定次序归约），
 //   把 `--det` 从默认 mma 路径扩到 Hopper TMA 快路。
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
-           bool DET = false, bool DET_HALF = false, bool DQONLY = false, bool HSWAP = false>
+           bool DET = false, bool DET_HALF = false, bool DQONLY = false, bool HSWAP = false,
+           int MCAST = 1>
 __global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
 fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
@@ -4343,7 +4419,7 @@ fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const int* __restrict__ mt_m = nullptr,
                             const int* __restrict__ slot_tab = nullptr) {
   fp8_mma_body<HD, BM, BN, REGDQ, true, PREL, F16B, RCP, true, true, THREADS, WN, false, DET,
-               DET_HALF, DQONLY, HSWAP>(
+               DET_HALF, DQONLY, HSWAP, MCAST>(
       q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit, cu_seqlens, &qmap, &dmap, &kmap, &vmap, nullptr, mt_m,
       dk_part, dv_part, nblk, dq_part, part_base, slot_tab);

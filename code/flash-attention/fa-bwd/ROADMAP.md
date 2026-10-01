@@ -3304,7 +3304,25 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百一十二轮）**：**O118——候选②「TMA multicast + cluster 共享 K/V 读」的 de-risk，
+> **最新（第二百一十三轮）**：**O119——fp8 K/V TMA cluster multicast 落地集成（Q 头轴 / GQA-MQA）
+> ——负结果，opt-in `--mcast`、默认关**。承接 O118 候选②，换**天然锁步的 Q 头轴**（O93 HSWAP：
+> head=blockIdx.x）避开 m 轴因果锁步：cluster 沿 x 的 Q 头同属一个 `(mt,part)`，对 GQA/MQA
+> （`G=H/Hkv>1` 共享 KV 头）即读同一批 K/V tile。`fp8_mma_body`/`kvtma` kernel 加 `int MCAST=1`，
+> leader 发 `...multicast::cluster`、每 CTA 各自 `arrive.expect_tx` 等本地 mbar，**每 tile 回填前一次
+> `barrier.cluster` 锁步**（去锁步→串 tile/死锁）；host 用 `cudaLaunchKernelEx`
+> +`cudaLaunchAttributeClusterDimension`（`cudaFuncAttributeRequiredClusterWidth` 在 `<<<>>>` 下报
+> `cluster misconfiguration`）；`--mcast=C`（2/4/8）/auto，门控 `HSWAP && kv_tma && D==128 && causal`。
+> **正确性逐位不变**（MQA/GQA `4.101e-01/1.572/2.126`，单/两文件一致，MHA G=1 退回历史）。
+> **L2（ncu，MQA q64kv1 S1024）**：`op_read` **6,264,250→2,464,328（0.39×，−60.7%）**、`op_red`
+> 逐位不变、Duration **450.3→585.7µs（1.30×）**；计时 main `0.4156→0.4524/0.5117/0.5640`（W2/4/8）、
+> GQA q64kv4 `0.3946→0.5517`。⇒ **机制完全成立但每-tile 锁步代价 > 读节省 ⇒ 判死、默认关**；
+> 复活需完整 WS+persistent（用 mbarrier 做跨 CTA 同步）。见 `docs/03` §140、`docs/08` §5.127；
+> 原始输出 `src/fp8/fa_bwd_fp8_o119_ab.out.txt`、`..._o119_ncu_mqa_kv1_mcast{1,8}.out.txt`。
+> **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙无软件解）；② 候选② multicast 在
+> 当前非-WS Q-owner 主体上判死（O118+O119，见上）；③ 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**
+> （唯一明确的 `[ ]` 项）；④ 非 main 的 `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）。
+>
+> **（第二百一十二轮）**：**O118——候选②「TMA multicast + cluster 共享 K/V 读」的 de-risk，
 > 机制正结果 / prize 有界、不集成（默认一行未改）**。在改极复杂的 `fp8_mma_body` 前先做独立冒烟
 > （`src/fp8/fa_bwd_fp8_mcast_smoke.cu`），在**与主 kernel 相同的 K/V 4D-TMA 几何**
 > （UINT8 / dims={D,S,Hkv,B} / SWIZZLE_128B / box={128,32} / `sw128_off_fp8`）上验证：
@@ -8884,6 +8902,36 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
   - **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙无软件解）；② 候选② multicast 已
     de-risk 为「机制正、prize 有界、暂不做」；③ 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**；
     ④ 非 main 的 `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）。
+
+- 2026-10-01（第二百一十三轮）：**O119——fp8 K/V TMA cluster multicast 落地集成（Q 头轴 / GQA-MQA）
+  ——负结果，opt-in `--mcast`、默认关**。承接 O118 的候选②，换**天然锁步的 Q 头轴**避开 m 轴因果锁步：
+  在 O93 HSWAP 快路（head=blockIdx.x）上 cluster 沿 x 分组同属一个 `(mt,part)` ⇒ 行程一致；对
+  GQA/MQA（`G=H/Hkv>1` 共享 KV 头）同 cluster 读同一批 K/V tile ⇒ 直接 multicast。
+  - **改动（device 单/两文件逐字一致）**：`fp8_mma_body`/`kvtma` kernel 加模板参 `int MCAST=1`；
+    新增 `fp8_cluster_rank/sync`、`fp8_fence_mbar_init`、`tma_load_4d_mc`；K/V 4D-TMA 由
+    leader(rank0) 发 multicast（mask=`(1<<W)-1`），每 CTA 各自 `arrive.expect_tx` 等本地 mbar；
+    **每 tile 回填前一次 `barrier.cluster` 锁步**（去锁步→串 tile、实测死锁）。host 用
+    `cudaLaunchKernelEx`+`cudaLaunchAttributeClusterDimension` 启动（**坑**：
+    `cudaFuncAttributeRequiredClusterWidth` 在 `<<<>>>` 下报 `cluster misconfiguration`）。
+    `--mcast=C`（2/4/8）或 `--mcast`=auto（最大 2 的幂 ≤ min(G,8)），门控
+    `HSWAP && kv_tma && qd_tma && D==128 && causal && H%W==0 && G%W==0`。
+  - **正确性/护栏**：MQA/GQA 的 `ours vs fp32 ref` 三梯度 `max_abs` 在 `--mcast=1/2/4/8` 间**逐位
+    相同**（MQA `4.101e-01/1.572/2.126`）；单/两文件一致（`4.101e-01/1.572/2.126`）；MHA `G=1`
+    auto ineligible、路径逐字退回（S4096 `2.635/2.644/3.216e-1`、total 1.5796ms 与历史一致）；
+    `--ci --no-run --dtype fp8` gate **worst 5.722e-06 OK**、`docs/04 --check` OK（224 行）。
+  - **L2 / 性能（ncu + 计时，MQA q64kv1 S1024，同 binary A/B，GPU1）**：`lts op_read`
+    **6,264,250 → 2,464,328（0.39×，−60.7%）**、`op_red` **逐位不变** 29,884,416、Duration
+    **450.3→585.7µs（1.30×）**；计时 main **0.4156→0.4524(W2)/0.5117(W4)/0.5640(W8)**、
+    GQA q64kv4 main `0.3946→0.5517(W8)`（W 越大锁步越贵）。
+  - **判决：负结果、`--mcast` opt-in、默认关**。**机制完全成立（MQA K/V 读砍到 0.39×），但
+    multicast 正确性必需的每-tile `barrier.cluster` 锁步代价 > 读节省（结构性倒亏 8–40%）。**
+    与 O118 合并 ⇒ 候选② multicast 在**本卡当前非-WS、非-persistent 的 Q-owner 主体**上判死；
+    解锁需**完整 warp specialization + persistent**（用 mbarrier 而非 `barrier.cluster` 做跨 CTA
+    生产/消费同步）。数值逐位不变、默认逐字退回。**下一步候选**：① **换卡**（main 的 L2 `red`
+    主体墙无软件解）；② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；
+    ③ 非 main 的 `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）；④ 若复活 multicast，
+    需先上完整 WS+persistent（大改）。见 `docs/03` §140、`docs/08` §5.127；原始输出
+    `src/fp8/fa_bwd_fp8_o119_ab.out.txt`、`src/fp8/fa_bwd_fp8_o119_ncu_mqa_kv1_mcast{1,8}.out.txt`。
 
 ## 灵感 / backlog
 
