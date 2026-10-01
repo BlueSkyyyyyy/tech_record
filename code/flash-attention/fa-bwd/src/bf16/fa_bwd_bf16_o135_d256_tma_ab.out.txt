@@ -1,0 +1,48 @@
+=== O135 bf16 D=256 main Q/K/V/dO 4D-TMA A/B (--maintma), iters=300 ===
+date: 2026-10-01T19:47:10Z
+
+### b1_s1024_h8_d256_causal_bf16
+--- --maintma=0
+[O131] D=256 main backend = wgmma(BN=64)
+[timing] total(3 kernels) 0.2447 ms  35.11 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0494 ms | main 0.1772 ms | convert 0.0181 ms
+  dq   vs ref: max_abs=1.039e-02  max_rel=2.075e+00
+  dk   vs ref: max_abs=1.213e-02  max_rel=2.070e+00
+  dv   vs ref: max_abs=1.460e-02  max_rel=2.114e+00
+--- --maintma=1
+[O131] D=256 main backend = wgmma(BN=64)
+[timing] total(3 kernels) 0.2538 ms  33.84 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0484 ms | main 0.1845 ms | convert 0.0210 ms
+  dq   vs ref: max_abs=1.039e-02  max_rel=2.075e+00
+  dk   vs ref: max_abs=1.213e-02  max_rel=2.070e+00
+  dv   vs ref: max_abs=1.460e-02  max_rel=2.114e+00
+### b1_s2048_h8_d256_causal_bf16
+--- --maintma=0
+[O131] D=256 main backend = wgmma(BN=64)
+[timing] total(3 kernels) 0.7054 ms  48.71 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1046 ms | main 0.5781 ms | convert 0.0228 ms
+  dq   vs ref: max_abs=7.978e-03  max_rel=1.553e+00
+  dk   vs ref: max_abs=1.114e-02  max_rel=2.253e+00
+  dv   vs ref: max_abs=1.681e-02  max_rel=1.509e+00
+--- --maintma=1
+[O131] D=256 main backend = wgmma(BN=64)
+[timing] total(3 kernels) 0.7385 ms  46.52 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1045 ms | main 0.6052 ms | convert 0.0288 ms
+  dq   vs ref: max_abs=7.978e-03  max_rel=1.553e+00
+  dk   vs ref: max_abs=1.114e-02  max_rel=2.253e+00
+  dv   vs ref: max_abs=1.681e-02  max_rel=1.509e+00
+### b1_s1024_h16_d256_kv4_causal_bf16
+--- --maintma=0
+[O131] D=256 main backend = wgmma(BN=64)
+[timing] total(3 kernels) 0.3917 ms  43.85 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0662 ms | main 0.3082 ms | convert 0.0173 ms
+  dq   vs ref: max_abs=1.300e-02  max_rel=2.274e+00
+  dk   vs ref: max_abs=1.843e-02  max_rel=2.463e+00
+  dv   vs ref: max_abs=3.075e-02  max_rel=1.991e+00
+--- --maintma=1
+[O131] D=256 main backend = wgmma(BN=64)
+[timing] total(3 kernels) 0.4116 ms  41.74 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0664 ms | main 0.3208 ms | convert 0.0244 ms
+  dq   vs ref: max_abs=1.300e-02  max_rel=2.274e+00
+  dk   vs ref: max_abs=1.843e-02  max_rel=2.463e+00
+  dv   vs ref: max_abs=3.075e-02  max_rel=1.991e+00

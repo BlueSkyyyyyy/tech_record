@@ -315,6 +315,26 @@ static void launch_bwd_wgmma2_tma(dim3 mg, CUtensorMap qmap, CUtensorMap kmap,
       qmap, kmap, vmap, dmap, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
       dq_h, cu_seqlens);
 }
+
+// O135（第 229 轮）：**BM=64 的 wgmma 主 kernel**（HD=128/256）的 Q/K/V/dO 逐 atom 4D-TMA 版。
+//   smem 与 cp.async 版 `launch_bwd_wgmma` 同（+ 4 个 mbarrier 32B），故 CTA/SM 不变。
+template <int HD, bool OW = false>
+static void launch_bwd_wgmma_tma(dim3 mg, CUtensorMap qmap, CUtensorMap kmap,
+                                 CUtensorMap vmap, CUtensorMap dmap, const float* delta,
+                                 const float* lse, float* dq_acc, float* dk_acc,
+                                 float* dv_acc, int S, int H, int Hkv, float scale,
+                                 int causal, int sched) {
+  static_assert(HD == 128 || HD == 256, "wgmma TMA 只做 HD=128/256");
+  constexpr int BM = 64, BN = 64;
+  constexpr int TILE  = (BM / 8) * (HD / 64) * 1024;
+  constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
+  constexpr int smem = 1024 + TILE * 2 + KTILE * 3 + 2 * BM * BN * (int)sizeof(__half) + 128;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma_tma_kernel<HD, OW>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  fa_bwd_fp16_wgmma_tma_kernel<HD, OW><<<mg, THREADS, smem>>>(
+      qmap, kmap, vmap, dmap, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
+      sched);
+}
 #endif
 
 // O17b：4 warpgroup（BM=256）wgmma 主 kernel（只 HD=128）。Q/dO/P/dS SW128，K/V 单缓冲 + 后段预取。
@@ -1533,8 +1553,9 @@ int main(int argc, char** argv) {
     kmap_lse = make_lse_map(d_k, Hkv, S, D, B);
   }
   // O33：主 kernel 的 Q/K/V/dO 描述符（box={64,8}，逐 atom）。
+  // O135：D=256 的 BM=64 wgmma 主 kernel 也走同一套逐 atom 描述符（`--maintma`）。
   CUtensorMap qmap_m, kmap_m, vmap_m, dmap_m;
-  if (D == 128) {
+  if (D == 128 || D == 256) {
     qmap_m = make_main_map(d_q, H, S, D, B);
     kmap_m = make_main_map(d_k, Hkv, S, D, B);
     vmap_m = make_main_map(d_v, Hkv, S, D, B);
@@ -1894,6 +1915,20 @@ int main(int argc, char** argv) {
     //   退回 mma 做同 binary A/B。D=128 路径一行未改。
     if (D == 256 && d256wgm_opt != 0) {
       dim3 g((S + 63) / 64, H, B);
+#if defined(FA_WGMMA) && defined(FA_TMA)
+      // O135：`--maintma` 时 D=256 的 BM=64 wgmma 主 kernel 走逐 atom 4D-TMA（同 binary A/B）。
+      if (maintma_sel) {
+        if (ow_sel)
+          launch_bwd_wgmma_tma<256, true>(g, qmap_m, kmap_m, vmap_m, dmap_m, d_delta, d_lse,
+                                          d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                          (int)causal, sched);
+        else
+          launch_bwd_wgmma_tma<256, false>(g, qmap_m, kmap_m, vmap_m, dmap_m, d_delta, d_lse,
+                                           d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                           (int)causal, sched);
+        return;
+      }
+#endif
       if (ow_sel)
         launch_bwd_wgmma<256, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
                                     d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
