@@ -2476,6 +2476,21 @@ int main(int argc, char** argv) {
     if (k > nblk) k = nblk;
     ksplit = (int)k;
   }
+  // O112（第 206 轮）：**causal D=512（MLA）的 ksplit 重标定**（定长；O107 的姊妹审计）。
+  //   O29 的 `target=S/2` 是 **pre-O51** 时代标的（彼时 MLA 走同步 K/V 载入、且无 per-head
+  //   LPT），O51（K/V `cp.async` 回填流水）+ O105（mrev）之后已次优。6 个 causal D=512 定长
+  //   shape 全扫 k∈[2,32]（同 binary，100–300 iters，3× 复测）：S512H2/S1024H2 的 auto k=16
+  //   实测比 k=8 慢 **6.5%/2.2%**，S2048H2/S4096H2（新 dump 的 causal，O29 未覆盖）慢
+  //   **3.6%/2.7%**；最优稳定在 `k≈8`（S2048/S4096 的 k=4 仅快 0.2–2.4%，不足以改规则）。
+  //   与 O107 给 **causal 变长 D=512** 的规则逐字一致 ⇒ 定长沿用
+  //   `k=pow2floor(min(8, S/base_grid))`、下限 2。只改「哪些 CTA 算哪段 K」⇒ 只改跨 CTA
+  //   atomicAdd 次序，数值逐位不变（relL2 与旧档同量级）。`--ksplit=K` 显式时不覆盖。
+  if (ksplit_auto && causal && D == 512) {
+    long k = 1;
+    while (k * 2 <= S / base_grid && k < 8) k *= 2;
+    if (k < 2) k = 2;
+    ksplit = (int)k;
+  }
   // O93：hswap（跨 head 全局 LPT）启用时把自动 ksplit 收到 2——全局 LPT 使低 ksplit 的负载
   //   均衡足够好（S4096 main 1.443→1.373ms，Q/dO 重读 8×→2×；S1024H32/GQA 同向 1.10–1.12×）。
   //   仅默认 Hopper kvtma 构建生效；`--ksplit=K` 显式给出时不覆盖。（`hswap_elig` 定义见上。）

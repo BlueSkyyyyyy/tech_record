@@ -2505,3 +2505,30 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 
 见 `docs/03` §133；原始输出 `src/fp8/fa_bwd_fp8_o111_ab.out.txt`、`..._o111_nsys.out.txt`、
 `..._o111_ncu.out.txt`、`..._o111_ci.out.txt`。
+
+### 5.120 第 206 轮（O112）：fp8 定长 causal `head_dim=512`（MLA）的 ksplit 重标定 —— **正结果（默认）**
+
+- **动机**：O96–O108 的 ksplit 复核把 full、causal D=128/256、变长 causal/full 都审计了，唯独
+  **定长 causal `D=512`（MLA）** 一直沿用 **O29** 的 `target=S/2`——那是 **pre-O51**（MLA K/V
+  `cp.async` 回填流水）/ **pre-O105**（mrev）时代的标定。O107 已证明变长 causal `D=512` 需把
+  target 提到 `maxlen`（cap 8）⇒ 定长 causal `D=512` 是其未复核姊妹。
+- **做法（纯 host、device 一行未改、单/两文件同源）**：定长自动档 O99 之后新增
+  `if (ksplit_auto && causal && D==512)`，规则与 O107 逐字一致
+  `k=pow2floor(min(8, S/base_grid))`、下限 2（`base_grid=ceil(S/64)*H*B`）。full→O97、
+  causal D=256→O99、causal D=128→O93/O96 均在本段前判定；`--ksplit=K` 不覆盖。只改跨 CTA
+  `atomicAdd` 次序。
+- **性能（同 binary ksplit sweep，iters=200，3× 复测）**：6 个 causal D=512 定长 shape 全扫
+  `k∈[2,32]`（S2048H2/S4096H2 为本轮新 dump 的 causal），最优稳定 **k≈8**。auto 旧档→新档：
+  **S512H2 1.065–1.075×、S1024H2 1.020–1.024×，S2048H2 +3.6%、S4096H2 +2.7%**，S256H2/S512H4
+  中性（本就在/接近 k=8）。端到端 auto 新档 S512H2 0.0636 / S1024H2 0.1427 / S4096H2 1.3474 ms。
+- **ncu（S1024H2 main，同 binary k=16 vs k=8）**：**`lts op_red` 逐位不变 6,684,672**、
+  **`lts op_read` 1,402,132→1,172,906（−16.3%）**、Duration 124.8→**123.1µs**；`sm__warps_active`
+  恒 12.5%、SM 23% ⇒ 仍 1 CTA/SM 延迟 bound，收益来自「减 Q/dO 重读 + 保并发」。
+- **数值/回归**：k=8 vs k=16 `max_abs`/relL2 **逐位相同**（纯 atomic 次序）；`--ci --dtype fp8
+  --hopper` gate **5.722e-06 OK**、`docs/04 --check` OK（218 行）。D=512 无 FA3/TE fp8 外部列。
+- **判决**：正结果、默认。**这是「降 L2 搬运量」里可动的 Q/dO 重读那一半**（`red` 另一半受本卡
+  寄存器/smem 墙锁定，见「阻塞」）。下一步候选：① 换卡；② causal 变长 ksplit 推广 fp16/bf16；
+  ③ MLA 降 smem（实测为 **regs 249 → 1 CTA/SM 的寄存器墙，非 smem**）；④ `--det` 并行化。
+
+见 `docs/03` §134；原始输出 `src/fp8/fa_bwd_fp8_o112_ab.out.txt`、`..._o112_default_sweep.out.txt`、
+`..._o112_onefile.out.txt`、`..._o112_ncu_s1024h2.out.txt`、`..._o112_ci.out.txt`。

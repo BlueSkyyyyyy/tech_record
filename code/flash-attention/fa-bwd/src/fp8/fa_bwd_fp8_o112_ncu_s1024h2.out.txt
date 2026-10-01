@@ -1,0 +1,21 @@
+# O112 ncu: fixed causal D=512 S1024H2 main (fa_bwd_fp8_mma_kernel<512,64,32,...>), same binary
+# k=16 (old O29 auto) vs k=8 (new O112 auto): Q/dO reread L2 read drops, red unchanged
+
+===== k=8 =====
+  void fa_bwd_fp8_mma_kernel<512, 64, 32, 0, 0, 1, 1, 1, 256, 4, 1, 0, 0, 0, 0>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, const int *, const int *, float *, float *, int, float *, const int *) (128, 2, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                     us       123.10
+    lts__t_sectors_op_read.sum                             sector      1172906
+    lts__t_sectors_op_red.sum                              sector      6684672
+    lts__t_sectors_op_write.sum                            sector         2864
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        55.50
+    sm__throughput.avg.pct_of_peak_sustained_elapsed            %        22.75
+    sm__warps_active.avg.pct_of_peak_sustained_active           %        12.49
+===== k=16 =====
+  void fa_bwd_fp8_mma_kernel<512, 64, 32, 0, 0, 1, 1, 1, 256, 4, 1, 0, 0, 0, 0>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, const int *, const int *, float *, float *, int, float *, const int *) (256, 2, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                     us       124.77
+    lts__t_sectors_op_read.sum                             sector      1402132
+    lts__t_sectors_op_red.sum                              sector      6684672
+    lts__t_sectors_op_write.sum                            sector         3009
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        55.02
+    sm__throughput.avg.pct_of_peak_sustained_elapsed            %        24.23
+    sm__warps_active.avg.pct_of_peak_sustained_active           %        12.48

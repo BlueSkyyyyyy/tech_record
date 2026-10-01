@@ -7789,6 +7789,17 @@ int main(int argc, char** argv) {
     if (k > nblk) k = nblk;
     ksplit = (int)k;
   }
+  // O112（第 206 轮）：**causal D=512（MLA）的 ksplit 重标定**（定长；O107 的姊妹审计，
+  //   与两文件版同源，详见 `fa_bwd_fp8_main.cu` 同名注释 / docs/03 §134）。O29 的 `target=S/2`
+  //   在 O51（K/V `cp.async` 回填流水）+ O105（mrev）之后已次优：S512H2/S1024H2 auto k=16 比
+  //   k=8 慢 2.2–6.5%，S2048H2/S4096H2 慢 2.7–3.6%；最优稳定在 k≈8 ⇒ 定长沿用 O107 给 causal
+  //   变长 D=512 的 `k=pow2floor(min(8, S/base_grid))`、下限 2。只改跨 CTA atomicAdd 次序。
+  if (ksplit_auto && causal && D == 512) {
+    long k = 1;
+    while (k * 2 <= S / base_grid && k < 8) k *= 2;
+    if (k < 2) k = 2;
+    ksplit = (int)k;
+  }
   // O93：hswap（跨 head 全局 LPT）启用时把自动 ksplit 收到 2（与两文件版同源）。
 #if defined(FA_WGMMA) && defined(FA_TMA)
   if (hswap_elig && ksplit_auto) ksplit = 2;
