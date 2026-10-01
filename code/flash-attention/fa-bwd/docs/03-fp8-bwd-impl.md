@@ -12725,3 +12725,56 @@ ncu --kernel-name-base mangled --kernel-name regex:Li512ELi64ELi32ELb0ELb1 -c 1 
 原始输出：`src/fp8/fa_bwd_fp8_o126_mlawgm_ab.out.txt`（3 shape × m=0/1）、
 `..._o126_ncu_mma_s4096.out.txt`、`..._o126_ncu_wgmma_s4096.out.txt`、
 `..._o126_onefile_s512.out.txt`（单文件）。
+
+## 148. O127（第 221 轮）：fp8 主 kernel 的**编译期占据率旋钮** `FA_MAIN_CTA`（`__launch_bounds__` 的 min-blocks）—— **负结果**（默认 3，一行数学未改）
+
+O116/O117 把 fp8 主 kernel 的 **host/运行期**旋钮（ksplit / hswap / mrev / ovlql / ovlcap）
+在全部 shape 尺度上扫清并判「默认档全局最优」；但 **编译期**的占据率策略
+（默认 `kvtma`/`qdtma`/通用 WGMMA 壳的 `__launch_bounds__(THREADS, _)` 对 `HD==128/BN<=32`
+写死 **3**）从未在**当前生产构建**（全 TMA + hswap/ksplit=2 + `FA_WS1`/`FA_SCALE_HOIST`）上做过
+2/3/4 的 same-session A/B。O122/O123 把主 kernel 的头号 stall 定位为
+`short_scoreboard`+`wait`（issue/流水），而 O79 的寄存器账显示 3 CTA/SM 下每线程序 ≤170、实例
+用 168 regs + 60–92B spill——**CTA=2 会把预算提到 256**，ptxas 通常据此加深软件流水/消 spill。
+本轮补上这最后一个旋钮类。
+
+### 148.1 实现
+
+* `src/fp8/fa_bwd_fp8_kernels.cuh` 的 `Fp8Cfg` 加编译期宏 **`FA_MAIN_CTA`（默认 3）**，只替换
+  默认三个壳（`fa_bwd_fp8_mma_kernel` / `..._qdtma_kernel` / `..._kvtma_kernel`）里
+  `HD==128 && BN<=32` 那一档的 `__launch_bounds__` min-blocks。`-DFA_MAIN_CTA=N` 同源码 A/B。
+  单/两文件 device 由 `sync_onefile_device.py` 同步（`identical: True`）。**`__launch_bounds__`
+  只影响寄存器分配，一行数学/数值不动。**
+* 构建：`ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -DFA_MAIN_CTA=N -lcuda"`。
+
+### 148.2 结果（S4096 H16 B1 causal，同源码，iters=30）
+
+| FA_MAIN_CTA | ptxas regs | 实际 CTA/SM | main ms | total ms | TFLOPS |
+|---|---|---|---|---|---|
+| **3（默认）** | 168（72B stack / 68B st / 92B ld spill） | **3** | **1.3689** | **1.5797** | **87.00** |
+| 2 | 212 | 2 | 1.5890（**0.861×**） | 1.8079（0.874×） | 76.02 |
+| 4 | 128（248B stack / 280B st / 684B ld spill） | 3（smem 封顶） | 2.1110（**0.648×**） | 2.3114（0.684×） | 59.46 |
+
+* 三者 `ours vs fp32 ref` **逐位相同**（dq/dk/dv `max_abs=2.635/2.644/3.216e-1`）——印证只改寄存器分配。
+* **CTA=2**：ptxas 确实用到 212 regs、并把 issue stall 显著压低（见下），但 **warp/SM 从 18.67% 掉到
+  12.47%**，TLP 损失盖过 issue 收益 ⇒ 慢 14%。
+* **CTA=4**：`74816B` 动态 smem 把实际驻留锁在 3 CTA/SM（动态 smem 上限 `76800B`），min-blocks=4
+  只让 ptxas 把寄存器 cap 到 128 → **纯 spill 惩罚、零占据率回报** ⇒ 慢 35%。
+
+### 148.3 ncu 证据（S4096，`--kernel-name regex:kvtma --launch-count 1`）
+
+| 配置 | Duration | regs | occ limit(reg/smem) | warps_active | `lts red` | `lts read` | tensor | short_sb | wait |
+|---|---|---|---|---|---|---|---|---|---|
+| **CTA=3（默认）** | **1.37 ms** | 168 | 3 / 3 | **18.67%** | 105,381,888 | 24,235,564 | 11.89% | 1.48 | 1.54 |
+| CTA=2 | 1.62 ms | **212** | 2 / 2 | 12.47% | 105,381,888 | 24,052,951 | 10.06% | **1.03** | **1.41** |
+
+⇒ **CTA=2 的机制确认了 O122/O123 的归因**：给出更多寄存器后，ptxas 把 `short_scoreboard`
+1.48→**1.03（−30%）**、`wait` 1.54→1.41，**但 L2 搬运量一字不变**（`red` 105,381,888、`read` 同档），
+而少掉的 4 个 warp/SM 暴露的延迟无法被 issue 节省补回。**结论：本 kernel 在 3 CTA/SM 的
+12 warp 下已把「寄存器 budget ↔ occupancy」用到该旋钮的最优点；编译期占据率策略无正结果。**
+
+### 148.4 结论
+
+* **负结果、默认 `FA_MAIN_CTA=3` 一行未改**（数值逐位不变、单/两文件同步）。（注：此 plot 与
+  O116/O117 的 host 旋钮闭合互补，**编译期旋钮至此也收口**。）⇒ 与「正结果只剩换卡」一致。
+* 复现：见 §148.1；原始输出 `src/fp8/fa_bwd_fp8_o127_cta_ab_s4096.out.txt`、
+  `..._o127_ncu_cta3_s4096.out.txt`、`..._o127_ncu_cta2_s4096.out.txt`。

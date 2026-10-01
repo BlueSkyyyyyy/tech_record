@@ -2924,3 +2924,27 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   保留 opt-in、默认 0、逐位安全。
 - 原始输出：`src/fp8/fa_bwd_fp8_o126_mlawgm_ab.out.txt`、`..._o126_ncu_{mma,wgmma}_s4096.out.txt`、
   `..._o126_onefile_s512.out.txt`；实现细节 `docs/03` §147。
+
+### 5.135 第 221 轮（O127）：fp8 主 kernel 的 **编译期占据率旋钮** `FA_MAIN_CTA`（`__launch_bounds__` min-blocks）—— **负结果（默认 3，一行数学未改）**
+
+- **动机**：O116/O117（§5.124/§5.125）把 fp8 主 kernel 的 **host/运行期**旋钮在全部 shape 扫清；
+  本轮补最后一个旋钮类——**编译期** `__launch_bounds__` 的 min-blocks（默认 `kvtma`/`qdtma`/
+  通用 WGMMA 壳对 `HD==128/BN<=32` 写死 **3**）。O122/O123 判定头号 stall 是
+  `short_scoreboard`+`wait`（issue），而 O79 寄存器账显示 3 CTA/SM 下实例 168 regs + 60–92B
+  spill——`CTA=2` 把预算提到 256，ptxas 通常据此加深流水/消 spill。
+- **实现**：`Fp8Cfg` 加 `FA_MAIN_CTA`（默认 3），只替换默认三壳的 `__launch_bounds__`
+  min-blocks；`-DFA_MAIN_CTA=2/3/4` 同源码 A/B。单/两文件 device 逐字同步（`identical: True`）。
+  **只改寄存器分配、一行数学未动**（三者对拍逐位相同 dq/dk/dv 2.635/2.644/3.216e-1）。
+- **性能（S4096 H16 B1 causal，iters=30）**：CTA=3 main **1.3689ms / total 1.5797ms / 87.0TF**；
+  **CTA=2 main 1.5890（0.861×）/ total 1.8079**；**CTA=4 main 2.1110（0.648×）/ total 2.3114**。
+- **ncu（S4096，`regex:kvtma`）**：CTA=3 = 1.37ms / **168 regs** / occ 3 / **warps 18.67%** /
+  `red` 105,381,888 / `read` 24,235,564 / tensor 11.89% / `short_sb` 1.48 / `wait` 1.54；
+  **CTA=2 = 1.62ms / 212 regs / occ 2 / warps 12.47% / `red` 一字不变 / `short_sb` 1.03 /
+  `wait` 1.41**。CTA=4 受 `74816B` 动态 smem 墙无占据率回报，唯一变化是 ptxas 把寄存器 cap 到 128
+  → 248B stack / 280B spill stores（纯惩罚）。
+- **机制/结论**：给出更多寄存器后 ptxas 确实把 issue stall 压低（`short_sb` −30%），但
+  **L2 搬运量一字不变**、少掉的 4 warp/SM 暴露的延迟无法被 issue 节省补回；本 kernel 在
+  3 CTA/SM（12 warp）已把「寄存器 budget ↔ occupancy」用到最优点。⇒ **编译期占据率旋钮也无正结果**，
+  与 O116/O117 + 「正结果只剩换卡」一致。默认 `FA_MAIN_CTA=3` 一行未改。
+- 原始输出：`src/fp8/fa_bwd_fp8_o127_cta_ab_s4096.out.txt`、`..._o127_ncu_cta{2,3}_s4096.out.txt`；
+  细节 `docs/03` §148。

@@ -250,6 +250,19 @@ struct Fp8Cfg {
 #define FA_SCALE_HOIST 1
 #endif
 
+  // O127（第 221 轮）：默认 `kvtma`（及 `qdtma`/通用 WGMMA）主 kernel 的**每 SM 驻留 CTA 数**
+  //   编译期旋钮。此前该 kernel 的 `__launch_bounds__(THREADS, _)` 对 `HD==128/BN<=32` 写死 3
+  //   （168 regs + ~60B spill，见 O77 寄存器账），从未在**当前**（hswap/ksplit=2 + TMA 全开 +
+  //   WS1/SCALE_HOIST）生产构建上做过 2/3/4 的 same-session A/B。动机：O122/O123 把主 kernel 的
+  //   头号 stall 归因于 `short_scoreboard`+`wait`（issue/流水），而 CTA=2 会把每线程寄存器预算从
+  //   `65536/(3*128)=170` 提到 `256`，ptxas 通常据此加深软件流水/消 spill，可能用更少的 warp
+  //   换取更少的 issue stall；反之 CTA=4 需 ≤128 regs（smem 74816B 也超 58112B，必掉）只作反证。
+  //   本宏只改 launch_bounds，一行数学/数值不动（`__launch_bounds__` 只影响寄存器分配）。
+  //   `-DFA_MAIN_CTA=2/3/4` 做同源码 A/B，默认 3（与历史逐位一致）。
+#ifndef FA_MAIN_CTA
+#define FA_MAIN_CTA 3
+#endif
+
   // O4b：Kt/Qt/dOt 三个「逐字节 scatter 写的转置副本」→ Kp/Qp/dOp 三个 **K 配对布局**
   //   （uint16：[K/2][HD]，元素 = 2 个相邻 K 值），用 `ldmatrix.x2.trans` 读 B 片段。
   //   * Qp（[BM/2][HD]）供 GEMM4 的 B=Qᵀ；dOp 供 GEMM3 的 B=dOᵀ；Kp（[BN/2][HD]）供 GEMM5。
@@ -4430,7 +4443,7 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
 template <int HD, int BM, int BN, bool REGDQ, bool WGMMA = false, bool PREL = true, bool F16B = true,
            bool RCP = true, int NTH = THREADS, int NWAR = WN, bool KVPIPE = false, bool DET = false,
            bool DET_HALF = false, bool DQONLY = false, bool HSWAP = false>
-__global__ void __launch_bounds__(NTH, (NTH == THREADS && HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
+__global__ void __launch_bounds__(NTH, (NTH == THREADS && HD == 128) ? (BN <= 32 ? FA_MAIN_CTA : 2) : 1)
 fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restrict__ qs,
                       const unsigned char* __restrict__ k8, const float* __restrict__ ks,
                       const unsigned char* __restrict__ v8, const float* __restrict__ vs,
@@ -4457,7 +4470,7 @@ fa_bwd_fp8_mma_kernel(const unsigned char* __restrict__ q8, const float* __restr
 // P3-4g：`DET=true` 时复用同一 body 的确定性 dK/dV 路径（partial + 固定次序归约）。
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
           bool DET = false, bool DET_HALF = false>
-__global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2)
+__global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? FA_MAIN_CTA : 2)
                                                        : ((HD == 256 && BN <= 32) ? 2 : 1))
 fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
@@ -4487,7 +4500,7 @@ fa_bwd_fp8_mma_qdtma_kernel(const __grid_constant__ CUtensorMap qmap,
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
            bool DET = false, bool DET_HALF = false, bool DQONLY = false, bool HSWAP = false,
            int MCAST = 1>
-__global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? 3 : 2) : 1)
+__global__ void __launch_bounds__(THREADS, (HD == 128) ? (BN <= 32 ? FA_MAIN_CTA : 2) : 1)
 fa_bwd_fp8_mma_kvtma_kernel(const __grid_constant__ CUtensorMap qmap,
                             const __grid_constant__ CUtensorMap dmap,
                             const __grid_constant__ CUtensorMap kmap,
