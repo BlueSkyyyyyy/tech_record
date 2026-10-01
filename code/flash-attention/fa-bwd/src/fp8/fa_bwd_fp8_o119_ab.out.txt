@@ -1,0 +1,35 @@
+=== O119 fp8 K/V TMA multicast A/B (same binary, hopper, GPU1) ===
+# MQA q64kv1 S1024
+[timing] total(quant+pre+main+cvt) 0.5071 ms  67.76 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0579 ms | preprocess 0.0426 ms | main 0.4156 ms | convert -0.0091 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=4.101e-01  max_rel=1.537e+02
+  dk   vs ref: max_abs=1.572e+00  max_rel=2.272e+02
+  dv   vs ref: max_abs=2.126e+00  max_rel=2.830e+02
+O119: mcast width=2 (G=64 H=64 Hkv=1)
+[timing] total(quant+pre+main+cvt) 0.5442 ms  63.14 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0580 ms | preprocess 0.0426 ms | main 0.4524 ms | convert -0.0087 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=4.101e-01  max_rel=1.537e+02
+  dk   vs ref: max_abs=1.572e+00  max_rel=2.272e+02
+  dv   vs ref: max_abs=2.126e+00  max_rel=2.830e+02
+O119: mcast width=4 (G=64 H=64 Hkv=1)
+[timing] total(quant+pre+main+cvt) 0.5997 ms  57.30 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0580 ms | preprocess 0.0434 ms | main 0.5117 ms | convert -0.0134 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=4.101e-01  max_rel=1.537e+02
+  dk   vs ref: max_abs=1.572e+00  max_rel=2.272e+02
+  dv   vs ref: max_abs=2.126e+00  max_rel=2.830e+02
+O119: mcast width=8 (G=64 H=64 Hkv=1)
+[timing] total(quant+pre+main+cvt) 0.6498 ms  52.88 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0580 ms | preprocess 0.0433 ms | main 0.5640 ms | convert -0.0155 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=4.101e-01  max_rel=1.537e+02
+  dk   vs ref: max_abs=1.572e+00  max_rel=2.272e+02
+  dv   vs ref: max_abs=2.126e+00  max_rel=2.830e+02
+# GQA q64kv4 S1024
+[timing] total(quant+pre+main+cvt) 0.4866 ms  70.62 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0607 ms | preprocess 0.0428 ms | main 0.3946 ms | convert -0.0115 ms (cvt_on=0, qfuse=1, dfuse=1)
+O119: mcast width=8 (G=16 H=64 Hkv=4)
+[timing] total(quant+pre+main+cvt) 0.6483 ms  53.00 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0608 ms | preprocess 0.0436 ms | main 0.5517 ms | convert -0.0078 ms (cvt_on=0, qfuse=1, dfuse=1)
+# MHA S4096 (G=1, auto ineligible)
+O119: mcast requested but ineligible (G=1 H=16 W=1)
+[timing] total(quant+pre+main+cvt) 1.5791 ms  87.04 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1065 ms | preprocess 0.1217 ms | main 1.3612 ms | convert -0.0104 ms (cvt_on=0, qfuse=1, dfuse=1)

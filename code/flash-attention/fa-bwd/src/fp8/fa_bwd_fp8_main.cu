@@ -303,6 +303,58 @@ static void launch_bwd_main_qdtma(dim3 mg, const CUtensorMap& qmap, const CUtens
 
 // O41：Q/dO/K/V 全 4D-TMA 版主 kernel（roadmap「下一步候选 ①」；仅 `-DFA_WGMMA -DFA_TMA`
 //   构建、HD=128、WGMMA 路径）。K 双缓冲、V 单缓冲，Kp 由 SW128 K tile 重建。
+// O119：K/V TMA cluster multicast 宽度（1=关）。由 `main()` 依 `--mcast` 与形状门控设置；
+//   所有 `launch_bwd_main_kvtma` 调用点共用（默认路径/重叠/A/B 一致）。
+static int g_mcast_width = 1;
+
+template <int MC, int HD, int BM, int BN, bool REGDQ, bool PREL, bool F16B, bool RCP, bool HSWAP>
+static void launch_kvtma_mc(dim3 mg, const CUtensorMap& qmap, const CUtensorMap& dmap,
+                            const CUtensorMap& kmap, const CUtensorMap& vmap,
+                            const unsigned char* q8, const float* qs, const unsigned char* k8,
+                            const float* ks, const unsigned char* v8, const float* vs,
+                            const unsigned char* do8, const float* dos, const float* delta,
+                            const float* lse, float* dq_acc, float* dk_acc, float* dv_acc,
+                            int S, int H, int Hkv, float scale, int causal, int ksplit,
+                            cudaStream_t st, const int* mt_m, const int* slot_tab) {
+  using Cfg = Fp8Cfg<HD, BM, BN>;
+  constexpr int kSmem = Cfg::smem_bytes_wgmma_kvtma;
+  if constexpr (MC == 1) {
+    CUDA_CHECK(cudaFuncSetAttribute(
+        fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP, false, false, false, HSWAP,
+                                    1>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+    fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP, false, false, false, HSWAP, 1>
+        <<<mg, THREADS, kSmem, st>>>(qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos,
+                                     delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
+                                     ksplit, nullptr, nullptr, nullptr, 0, nullptr, nullptr, mt_m,
+                                     slot_tab);
+  } else {
+    CUDA_CHECK(cudaFuncSetAttribute(
+        fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP, false, false, false, HSWAP,
+                                    MC>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+    // O119：cluster 版的正式启动方式（`cudaLaunchKernelEx` + `cudaLaunchAttributeClusterDimension`）。
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = mg;
+    cfg.blockDim = dim3(THREADS);
+    cfg.dynamicSmemBytes = kSmem;
+    cfg.stream = st;
+    cudaLaunchAttribute attr[1];
+    attr[0].id = cudaLaunchAttributeClusterDimension;
+    attr[0].val.clusterDim.x = MC;
+    attr[0].val.clusterDim.y = 1;
+    attr[0].val.clusterDim.z = 1;
+    cfg.attrs = attr;
+    cfg.numAttrs = 1;
+    CUDA_CHECK(cudaLaunchKernelEx(
+        &cfg, fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP, false, false, false,
+                                          HSWAP, MC>,
+        qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
+        dv_acc, S, H, Hkv, scale, causal, ksplit, nullptr, nullptr, nullptr, 0, nullptr, nullptr,
+        mt_m, slot_tab));
+  }
+}
+
 template <int HD, int BM, int BN, bool REGDQ, bool PREL = true, bool F16B = true, bool RCP = true,
           bool HSWAP = false>
 static void launch_bwd_main_kvtma(dim3 mg, const CUtensorMap& qmap, const CUtensorMap& dmap,
@@ -316,16 +368,31 @@ static void launch_bwd_main_kvtma(dim3 mg, const CUtensorMap& qmap, const CUtens
                                   float scale, int causal, int ksplit,
                                   cudaStream_t st = nullptr, const int* mt_m = nullptr,
                                   const int* slot_tab = nullptr) {
-  using Cfg = Fp8Cfg<HD, BM, BN>;
-  constexpr int kSmem = Cfg::smem_bytes_wgmma_kvtma;
-  CUDA_CHECK(cudaFuncSetAttribute(
-      fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP, false, false, false, HSWAP>,
-      cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
-  fa_bwd_fp8_mma_kvtma_kernel<HD, BM, BN, REGDQ, PREL, F16B, RCP, false, false, false, HSWAP>
-      <<<mg, THREADS, kSmem, st>>>(qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos,
-                               delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
-                               ksplit, nullptr, nullptr, nullptr, 0, nullptr, nullptr, mt_m,
-                               slot_tab);
+  // O119：MCAST>1 只在 HSWAP 实例化（否则 static_assert 挡）；用 `if constexpr` 避免为
+  //   HSWAP=false 的调用点实例化 MC>1 的 body。
+  if constexpr (HSWAP) {
+    const int mc = g_mcast_width;
+    if (mc == 2)
+      launch_kvtma_mc<2, HD, BM, BN, REGDQ, PREL, F16B, RCP, HSWAP>(
+          mg, qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
+          dv_acc, S, H, Hkv, scale, causal, ksplit, st, mt_m, slot_tab);
+    else if (mc == 4)
+      launch_kvtma_mc<4, HD, BM, BN, REGDQ, PREL, F16B, RCP, HSWAP>(
+          mg, qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
+          dv_acc, S, H, Hkv, scale, causal, ksplit, st, mt_m, slot_tab);
+    else if (mc == 8)
+      launch_kvtma_mc<8, HD, BM, BN, REGDQ, PREL, F16B, RCP, HSWAP>(
+          mg, qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
+          dv_acc, S, H, Hkv, scale, causal, ksplit, st, mt_m, slot_tab);
+    else
+      launch_kvtma_mc<1, HD, BM, BN, REGDQ, PREL, F16B, RCP, HSWAP>(
+          mg, qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
+          dv_acc, S, H, Hkv, scale, causal, ksplit, st, mt_m, slot_tab);
+  } else {
+    launch_kvtma_mc<1, HD, BM, BN, REGDQ, PREL, F16B, RCP, HSWAP>(
+        mg, qmap, dmap, kmap, vmap, q8, qs, k8, ks, v8, vs, do8, dos, delta, lse, dq_acc, dk_acc,
+        dv_acc, S, H, Hkv, scale, causal, ksplit, st, mt_m, slot_tab);
+  }
 }
 
 // P3-4g：把 `--det` 从默认 mma 路径扩到 Hopper TMA 快路（`launch_bwd_main_kvtma` 的
@@ -1944,6 +2011,9 @@ int main(int argc, char** argv) {
   int regdq_opt = -1; // O22：-1 自动；0/1 强制关/开寄存器 dQ 累加（同 session A/B）
   // F6-③（O77）：TMA 描述符的 L2 promotion 档（0=NONE/1=L2_128B/2=L2_256B，仅 A/B）。
   int l2promo_opt = 0;
+  // O119（第 213 轮）：K/V TMA cluster multicast 宽度。`--mcast=C`（C∈{2,4,8}）显式；
+  //   `--mcast` 或 `--mcast=-1` = auto（取最大 2 的幂 ≤ min(G=H/Hkv, 8)）；默认 1 = 关。
+  int mcast_opt = 1;
   // O32：LSE 是否用 TMA 版（仅 FA_TMA 构建、D==128、causal）。-1=自动（默认开），0/1 由
   //   `--lsetma=` 强制。
   int lse_tma = -1;
@@ -2081,6 +2151,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--deltawarp=", 0) == 0) delta_warp_opt = atoi(a.c_str() + 12);
     else if (a.rfind("--regdq=", 0) == 0) regdq_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--l2promo=", 0) == 0) l2promo_opt = atoi(a.c_str() + 10);
+    else if (a.rfind("--mcast=", 0) == 0) mcast_opt = atoi(a.c_str() + 8);
+    else if (a == "--mcast") mcast_opt = -1;
     else if (a.rfind("--prel=", 0) == 0) prel_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--f16b=", 0) == 0) f16b_opt = atoi(a.c_str() + 7);
     else if (a.rfind("--o=", 0) == 0) o_name = a.substr(4);
@@ -2691,6 +2763,29 @@ int main(int argc, char** argv) {
 #endif
   printf("O37: main qd-tma = %s\n", qd_tma ? "on" : "off");
   printf("O41: main kv-tma = %s\n", kv_tma ? "on" : "off");  printf("O38: lse k-split = auto(%d)\n", lse_split_eff);
+
+  // O119：解析 multicast 宽度并做形状门控。只在 HSWAP 快路（causal D=128 Hopper kvtma，
+  //   head=blockIdx.x）+ GQA/MQA（G=H/Hkv>1，同 cluster 内 Q 头共享 KV 头）时开。
+#if defined(FA_WGMMA) && defined(FA_TMA)
+  if (mcast_opt != 1 && hswap_elig && kv_tma && qd_tma && D == 128 && causal) {
+    const int G = H / Hkv;
+    int W = 1;
+    if (mcast_opt > 1) {
+      W = mcast_opt;
+    } else {
+      while (W * 2 <= G && W * 2 <= 8) W *= 2;
+    }
+    if (W > 1 && W <= 8 && (W & (W - 1)) == 0 && (H % W) == 0 && (G % W) == 0) {
+      g_mcast_width = W;
+      printf("O119: mcast width=%d (G=%d H=%d Hkv=%d)\n", W, G, H, Hkv);
+    } else {
+      printf("O119: mcast requested but ineligible (G=%d H=%d W=%d)\n", G, H, W);
+    }
+  } else if (mcast_opt != 1) {
+    printf("O119: mcast requested but conditions unmet (D=%d causal=%d hswap=%d kv_tma=%d)\n", D,
+           (int)causal, (int)hswap_elig, kv_tma);
+  }
+#endif
 
   // O66：`do_delta=false` 时跳过 delta（融合路径已在 quant kernel 内算好）。
   auto run_preprocess = [&](bool do_delta = true) {

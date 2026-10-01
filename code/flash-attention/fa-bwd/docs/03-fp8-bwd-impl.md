@@ -12106,3 +12106,75 @@ kernel L2 的 ~19%，且不动占 80% 的 `red`），叠加 causal cluster 锁�
 工具链风险，ROI 低 ⇒ 暂不集成，记为有数据支撑的 backlog。** 主 kernel/默认路径**一行未改**
 （本项为独立冒烟，不触数值）。`red` 主体墙仍只剩**换卡**或覆盖型 backlog（fp16/bf16 `head_dim=256`）。
 原始输出 `src/fp8/fa_bwd_fp8_o118_mcast_smoke.out.txt`、`src/fp8/fa_bwd_fp8_o118_mcast_ncu.out.txt`。
+
+## 140. 第 213 轮：O119——fp8 主 kernel K/V TMA cluster multicast **落地集成**（Q 头轴；负结果，opt-in）
+
+### 140.1 动机 / 与 O118 的关系
+
+O118（§139）把「TMA cluster multicast + cluster 共享 K/V 读」作为候选② de-risk：机制成立
+（L2 read 0.64×），但当时判「不集成」的理由之一是 **causal 的 m 轴 cluster 配对不天然**
+（cluster 内不同 m 块的 `ntiles` 差 BM/BN=2，需锁步 padding 或镜像配对）。本轮换一个**天然锁步**
+的配对轴——**Q 头轴**：在 O93 的 HSWAP 快路（`grid=(H, nblk*ksplit, B)`，head=blockIdx.x）上，
+cluster 沿 x 分组的 Q 头**同属一个 (mt,part)** ⇒ causal 行程 `ntile/nt_begin/nt_end` 逐 CTA
+完全一致；对 **GQA/MQA**（`G=H/Hkv>1` 个 Q 头共享同一 KV 头）而言，同 cluster 各 CTA 读的是
+**同一 KV 头**的同一批 K/V tile ⇒ multicast 可把 K/V 的 L2 读精确摊薄 `≤W×`。这是 O118「不做」
+之后，唯一能**直接落地到真实主 kernel**且不撞 m 轴因果锁步的 multicast 方案。
+
+### 140.2 实现（单/两文件 device 逐字一致）
+
+- `fp8_mma_body`/`fa_bwd_fp8_mma_kvtma_kernel` 末尾加模板参 `int MCAST = 1`（1=关）。`MCAST>1`
+  时 `static_assert` 锁 `KVTMA && TMA && WGMMA && HD==128 && HSWAP`。
+- 新增 device helper：`fp8_cluster_rank()`（`%cluster_ctarank`）、`fp8_cluster_sync()`
+  （`barrier.cluster.arrive/wait.aligned`）、`fp8_fence_mbar_init()`、`tma_load_4d_mc()`
+  （`...multicast::cluster` + mask）。
+- **协议**：prologue 里 tid0 `mbar_init` + `fence.mbarrier_init.release.cluster` →
+  `__syncthreads` → `barrier.cluster`（远端 mbar 可见）；K/V 的 4D-TMA（prologue 与每-tile 回填）
+  由**每个 CTA 各自 `mbarrier.arrive.expect_tx` 等本地 mbar**，但**只有 leader(`rank==0`) 发
+  multicast**（mask=`(1<<W)-1`）；smem 目标偏移与描述符坐标各 CTA 相同（同 `hkv`）。
+- **锁步**：每个 tile 的 K/V 回填前加一次 `fp8_cluster_sync()`。这是**正确性硬前提**——leader 发
+  的 tile 必须与每个 follower 当前 `nt` 一致，且覆写 stage 前所有 CTA 都已消费旧 tile；去掉锁步
+  会串 tile，实测直接**死锁**（`-DFA_MCAST_NOSYNC` 仅作证，已回退）。
+- **host**：`launch_kvtma_mc<MC,...>` 用 `cudaLaunchKernelEx` + `cudaLaunchAttributeClusterDimension`
+  启动（**踩坑**：`cudaFuncAttributeRequiredClusterWidth` 在 `<<<>>>` 下报
+  `cluster misconfiguration`，必须走 `cudaLaunchKernelEx`）。`--mcast=C`（C∈{2,4,8}）或
+  `--mcast`/-1=auto（最大 2 的幂 ≤ min(G,8)）；门控 `HSWAP && kv_tma && qd_tma && D==128 && causal
+  && H%W==0 && G%W==0`。`g_mcast_width` 由 `main()` 设定，所有 `launch_bwd_main_kvtma` 调用点共用。
+  默认 `--mcast=1`（关）。
+
+### 140.3 正确性（数值逐位不变）
+
+MQA `b1_s1024_h64_d128_kv1_causal_fp8`：`--mcast=1/2/4/8` 的 `ours vs fp32 ref` 三梯度
+`max_abs` **完全相同**（`dq 4.101e-01 / dk 1.572e+00 / dv 2.126e+00`）；单文件与两文件
+逐位一致（`4.101e-01/1.572/2.126`，main 0.5604 vs 0.5640ms）。GQA/MHA 同。MHA `G=1` 时
+auto 判 ineligible、路径逐字退回（S4096 `2.635/2.644/3.216e-1`、total 1.5796ms 与历史一致）。
+
+### 140.4 性能（同 binary A/B，GPU1，iters=300）
+
+| case | main off (ms) | W=2 | W=4 | W=8 |
+|---|---|---|---|---|
+| MQA q64kv1 S1024 | **0.4156** | 0.4524 (0.92×) | 0.5117 (0.81×) | 0.5640 (0.74×) |
+| GQA q64kv4 S1024 | **0.3946** | — | — | 0.5517 (0.72×) |
+
+### 140.5 ncu（MQA S1024，`kvtma<128,64,32,1,1,1,1,0,0,0,1,MC>`）
+
+| 指标 | mcast=1 | mcast=8 | 比 |
+|---|---|---|---|
+| `lts op_read` | **6,264,250** | **2,464,328** | **0.39×（−60.7%）** |
+| `lts op_red` | 29,884,416 | 29,884,416 | **1.00×（不动）** |
+| `lts op_write` | 100,685 | 100,762 | ~1.00× |
+| `sm inst` | 167,177,216 | 167,903,328 | +0.4% |
+| Duration | **450.3 µs** | **585.7 µs** | **1.30×** |
+
+⇒ **机制完全成立**：MQA 的 K/V 读被 8 个 Q 头重复，multicast 把它精确砍到 0.39×；但**每-tile 的
+`barrier.cluster` 锁步**（跨 SM、每 tile 一次）把省下的读时间全部吃掉还倒亏 30%。W 越大锁步越贵。
+
+### 140.6 结论 / 下一步
+
+**负结果：K/V TMA multicast 在 Q 头轴（GQA/MQA）上正确、且把 MQA L2 读砍到 0.39×，但 multicast
+正确性所必需的每-tile `barrier.cluster` 锁步代价 > 读节省（main W=2/8 = 0.92×/0.74×）⇒ 保持
+`--mcast` opt-in、默认关。** 与 O118 的 de-risk 合并后，候选②「TMA multicast」在**本卡当前
+非-WS、非-persistent 的 Q-owner 主体**上判死（锁步成本结构性）；除非将来上**完整 warp
+specialization + persistent**（用 mbarrier 而非 `barrier.cluster` 做跨 CTA 生产/消费同步），
+否则 multicast 不划算。`red` 主体墙仍只剩**换卡**或覆盖型 backlog（fp16/bf16 `head_dim=256`）。
+数值逐位不变、单/两文件一致、默认路径逐字退回。原始输出：`src/fp8/fa_bwd_fp8_o119_ab.out.txt`、
+`src/fp8/fa_bwd_fp8_o119_ncu_mqa_kv1_mcast{1,8}.out.txt`。

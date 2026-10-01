@@ -2703,3 +2703,32 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   （fp16/bf16 `head_dim=256`）。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o118_mcast_smoke.out.txt`、
   `src/fp8/fa_bwd_fp8_o118_mcast_ncu.out.txt`。
+
+### 5.127 第 213 轮（O119）：fp8 K/V TMA cluster multicast **落地集成**（Q 头轴 / GQA-MQA） —— **负结果（opt-in，默认关）**
+
+- **动机**：O118（§5.126）把候选② multicast de-risk 为「机制正、prize 有界、不集成」，其顾虑之一是
+  causal 的 **m 轴** cluster 配对不天然（`ntiles` 随 m 块差 BM/BN=2）。本轮换**天然锁步的 Q 头轴**：
+  O93 的 HSWAP 快路（head=blockIdx.x）上，cluster 沿 x 分组的 Q 头同属一个 `(mt,part)` ⇒ 行程完全
+  一致；对 **GQA/MQA**（`G=H/Hkv>1` 共享 KV 头）即读同一批 K/V tile ⇒ 直接可 multicast。
+- **改动（device 单/两文件逐字一致）**：`fp8_mma_body`/`kvtma` kernel 加模板参 `int MCAST=1`；
+  新增 `fp8_cluster_rank/sync`、`fp8_fence_mbar_init`、`tma_load_4d_mc`；K/V 的 4D-TMA 由
+  leader(rank0) 发 multicast（mask=`(1<<W)-1`），每 CTA 各自 `arrive.expect_tx` 等本地 mbar；
+  **每 tile 回填前一次 `barrier.cluster` 锁步**（去锁步会串 tile、实测死锁）。host 用
+  `cudaLaunchKernelEx`+`cudaLaunchAttributeClusterDimension` 启动（`cudaFuncAttributeRequiredClusterWidth`
+  在 `<<<>>>` 下报 `cluster misconfiguration`）。`--mcast=C`（2/4/8）或 `--mcast`=auto
+  （最大 2 的幂 ≤ min(G,8)），门控 `HSWAP && kv_tma && D==128 && causal && H%W==0 && G%W==0`；
+  默认 `--mcast=1`（关）。
+- **正确性**：MQA/GQA 的 `ours vs fp32 ref` 三梯度 `max_abs` 在 `--mcast=1/2/4/8` 间**逐位相同**
+  （`4.101e-01/1.572/2.126`）；单/两文件一致；MHA `G=1` auto ineligible、路径逐字退回
+  （S4096 `2.635/2.644/3.216e-1`、total 1.5796ms 与历史一致）。
+- **L2 / 性能（ncu + 计时，MQA q64kv1 S1024，同 binary A/B）**：`lts op_read`
+  **6,264,250 → 2,464,328（0.39×，−60.7%）**、`op_red` **逐位不变** 29,884,416、Duration
+  **450.3→585.7µs（1.30×）**；计时 main **0.4156 → 0.4524(W2) / 0.5117(W4) / 0.5640(W8)**、
+  GQA q64kv4 main `0.3946 → 0.5517(W8)`。⇒ **读确实大幅摊薄，但 multicast 正确性必需的每-tile
+  `barrier.cluster` 锁步代价 > 读节省（结构性倒亏 8–40%）。**
+- **判决**：**负结果、`--mcast` opt-in、默认关**。与 O118 合并：候选② multicast 在**本卡当前
+  非-WS、非-persistent 的 Q-owner 主体**上判死（锁步成本结构性）；解锁需**完整 warp specialization
+  + persistent**（用 mbarrier 而非 `barrier.cluster` 做跨 CTA 生产/消费同步）。`red` 主体墙仍只剩
+  换卡 / 覆盖型 backlog（fp16/bf16 `head_dim=256`）。数值逐位不变、默认逐字退回。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o119_ab.out.txt`、
+  `src/fp8/fa_bwd_fp8_o119_ncu_mqa_kv1_mcast{1,8}.out.txt`。
