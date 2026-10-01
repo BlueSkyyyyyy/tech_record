@@ -2761,3 +2761,31 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   （重排 GEMM3/4/5 的 warp 归属 + 全 mbarrier 化）。默认路径一行未改。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o120_ws_smoke.out.txt`、
   `src/fp8/fa_bwd_fp8_o120_ncu_{sync,ws}.out.txt`。
+
+### 5.129 第 215 轮（O121）：F3b 主体化第一步 —— 把 O120 的 WS 落进 `wgmma2_tma`（BM=128）—— **中性/负结果（opt-in `--wg2ws`）**
+
+- **动机**：O120（§5.128）在独立冒烟上证明「把 K/V TMA 的 producer 移出 `__syncthreads` 域」值
+  **2.0×**（同 L2 字节、同 warp），据此立项 F3b 主体化——把该 producer/consumer 模式落进
+  `wgmma2`（BM=128、`red` 已砍半到 58.2M），预期把 O90 的 0.54× 默认档拉回 ~1.7–1.8×。
+- **改动**（`src/fp8/fa_bwd_fp8_kernels.cuh` §3e 新增 `fa_bwd_fp8_wgmma2_ws_kernel`；`main.cu`
+  加 launcher + `[O121 A/B]`）：**384 线程 = 2 compute WG + 1 producer WG**；compute 侧 5 个
+  `__syncthreads` → 3 个命名 barrier `bar.sync 1,256`；K/V 双 ring 用 `full/empty` mbarrier
+  （empty count=256）；GEMM 数据通路逐字沿用 O90。`--wg2ws` opt-in、默认一行未改。
+  首测死锁坑：K/V 若写成两个独立前瞻循环会把 producer 卡在 `emptyK`、V 后继永不发出 ⇒ consumer
+  等 `fullV` 死锁（S512 `NT≤2` 不触发、S4096 必现）；合并成单循环交替推进即解。
+- **数值**：ws vs tma `max_abs` dq/dk/dv = 1.19e-7/2.38e-7/4.77e-7（仅原子/归约次序）；
+  **ws vs fp32 ref relL2** S512 **8.18/8.41/6.36%**、S4096 **8.15/8.39/6.52%** ⇒ 护栏内。
+- **性能（同 session A/B，iters=100）**：S512 **0.1052→0.1050ms（1.002×）**、
+  S4096 **2.6999→2.6877ms（1.005×）** ⇒ **中性**，远不及 O120 冒烟的 2.0×。
+- **ncu（S4096，同 binary）**：wg2tma vs wg2ws —— Duration **2.72 vs 2.71ms**、`lts op_red`
+  **58,195,968 逐位相同**、SM **32.5 vs 32.9%**、L2 **22.0 vs 23.6%**、warps **12.5 vs 13.9%**、
+  **stall `barrier` 仅 0.29 vs 0.26**、主导 stall = `short_scoreboard 1.22/1.22` + `wait 1.32/1.46`。
+- **判决**：**F3b 主体化中性/负结果**。真实反向在 BM=128、1 CTA/SM 下的墙是 **compute 流水延迟**
+  （只有 8 个 compute warp 跑 5 个 GEMM+fold，无可填延迟的第二个独立 CTA），**不是 O91/O120 归因的
+  「单一 barrier 域」**（ncu `barrier` stall 实测 ~0.28，本就极低）。O120 冒烟的 consumer 每 tile
+  只做 1 个 wgmma（纯访存延迟 bound）故 WS 值 2×，真实 kernel 的 compute 已足够长去藏 K/V 延迟。
+  副归因：384 线程的 170-reg 上限把 O90 的 208 regs 压到 168（68B spill）⇒ `lts op_write`
+  1.3K→8.44M，producer 第 3 个 WG 与 compute 抢同一 regfile。⇒ 与「阻塞」里 F6/F7/O83/O91
+  「本卡 fp8 BM≥128 撞 smem/寄存器墙」同源，**正结果仍只剩换卡**。
+- 原始输出：`src/fp8/fa_bwd_fp8_o121_ab_{s512,s4096}.out.txt`、
+  `src/fp8/fa_bwd_fp8_o121_ncu_{ws,tma}_s4096.out.txt`；实现细节 `docs/03` §142。

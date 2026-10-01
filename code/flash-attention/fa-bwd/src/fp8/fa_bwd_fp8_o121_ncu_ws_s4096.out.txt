@@ -1,0 +1,26 @@
+### O121 ncu — fa_bwd_fp8_wgmma2_ws_kernel<128,128,32,2,2> S4096 H16 causal fp8（384 线程 = 2 compute WG + 1 producer WG）
+### 命令：ARCH="" GPU=1 NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+###        scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --launch-count 1 -k regex:wgmma2_ws_kernel \
+###        --metrics <见下> -- --dir=.../b1_s4096_h16_d128_causal_fp8 --iters=2
+  void fa_bwd_fp8_wgmma2_ws_kernel<128, 128, 32, 2, 2>(...) (128, 16, 1)x(384, 1, 1), CC 9.0
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %         2.48
+    gpu__time_duration.sum                                                                 ms         2.71
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                     109265153
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        48.09
+    launch__occupancy_limit_shared_mem                                                  block            1
+    launch__registers_per_thread                                              register/thread          168
+    lts__t_sectors_op_read.sum                                                         sector     14921515
+    lts__t_sectors_op_red.sum                                                          sector     58195968
+    lts__t_sectors_op_write.sum                                                        sector      8443502
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        23.64
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        32.89
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        13.86
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.26
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         0.75
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         1.22
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.46
+    ------------------------------------------------------------------------- --------------- ------------
+### ptxas -v: 168 regs, 72B stack frame, 68B spill stores / 92B spill loads（384 线程 @1 CTA/SM 的
+###   170-reg 上限把 O90 的 208 regs 压到 168 ⇒ 少量 spill，ncu 的 `write` 8.44M 扇区即本地溢写）。

@@ -3249,9 +3249,21 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
        成立、WS 是 1 CTA/SM 的解锁路径**（副结论：单靠预取深度只得 1.50×，多出的 1.33× 来自
        「把 producer 移出 `__syncthreads` 域」）。**下一步 = F3b 主体化**（把该 producer/consumer
        模式落进 `wgmma2`/`wg3`，把红 0.43× 的 BM≥128 从延迟 bound 拉回 L2 bound，理论上界
-       ~默认档 1.7–1.8×，逼近 TE）。数值一致性 ~1e-6、`compute-sanitizer` 0 errors。见
-       `docs/03` §141、`docs/08` §5.128；原始输出 `src/fp8/fa_bwd_fp8_o120_ws_smoke.out.txt`、
-       `src/fp8/fa_bwd_fp8_o120_ncu_{sync,ws}.out.txt`。
+        ~默认档 1.7–1.8×，逼近 TE）。数值一致性 ~1e-6、`compute-sanitizer` 0 errors。见
+         `docs/03` §141、`docs/08` §5.128；原始输出 `src/fp8/fa_bwd_fp8_o120_ws_smoke.out.txt`、
+         `src/fp8/fa_bwd_fp8_o120_ncu_{sync,ws}.out.txt`。
+        → **O121（第 215 轮，F3b 主体化第一步，中性/负结果，opt-in `--wg2ws`、默认关）**：把 O120
+        的 producer/consumer 模式落进 `wgmma2_tma`——**384 线程 = 2 compute WG + 1 producer WG**、
+        compute 侧 5 个 `__syncthreads`→3 个命名 barrier、K/V 双 ring mbarrier（empty=256）、GEMM
+        数据通路逐字沿用 O90。**数值** ws vs tma `max_abs` ~1e-7、ws vs ref relL2 S512 8.18/8.41/
+        6.36%、S4096 8.15/8.39/6.52%（护栏内）。**性能** S512 1.002×、S4096 1.005×（中性）。
+        **ncu** Duration 2.72/2.71ms、`red` 58.20M 逐位相同、**`barrier` stall 仅 0.29/0.26**、
+        主导 = `short_scoreboard 1.22` + `wait 1.3–1.46`、SM 32%、L2 22% ⇒ **BM=128 的 1 CTA/SM
+        墙是 compute 流水延迟，不是「单一 barrier 域」**（修正 O91/O120；O120 冒烟 consumer 每 tile
+        只 1 wgmma 故纯访存 bound）。副归因：384 线程 170-reg 上限把 208 regs 压到 168（68B spill）。
+        ⇒ F3b 主体化判为中性/负、与 F6/O83/O91 同源的 smem/寄存器墙一致。见 `docs/03` §142、
+        `docs/08` §5.129；原始输出 `src/fp8/fa_bwd_fp8_o121_ab_{s512,s4096}.out.txt`、
+        `..._o121_ncu_{ws,tma}_s4096.out.txt`。
 - [x] **F4b**：fp8 非 det 默认的 dK/dV 归约再优化（当前 red 仍是 74% L2）。
       → **O83（第 178 轮）分解**：`red` 114.5M 扇区中 ~29% 是写流量本身、~8% 是原子 RMW；
       O42/O67/O83 三证「与归约指令/宽度/机制无关」⇒ 唯一杠杆=减少贡献 CTA 数（工作划分），
@@ -3319,7 +3331,29 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百一十四轮）**：**O120——F3b② 的 warp specialization de-risk ——「1 CTA/SM 单一
+> **最新（第二百一十五轮）**：**O121——F3b 主体化第一步：把 O120 的 WS 落进 `wgmma2_tma`（BM=128）
+> ——中性/负结果，opt-in `--wg2ws`、默认关**。承接 O120（冒烟证 WS 在 1 CTA/SM 下值 2.0×）与
+> 其『下一步首选 = F3b 主体化』：新增 `fa_bwd_fp8_wgmma2_ws_kernel`——**384 线程 = 2 个 compute
+> warpgroup + 1 个 producer warpgroup**，compute 侧 5 个 `__syncthreads` 换成 3 个命名 barrier
+> (`bar.sync 1,256`)，K/V 双 ring 用 `full/empty` mbarrier（empty count=256），GEMM 数据通路逐字
+> 沿用 O90 `wgmma2_tma`。**数值**：ws vs tma `max_abs` ~1e-7（仅归约次序），**ws vs fp32 ref relL2**
+> S512 8.18/8.41/6.36%、S4096 8.15/8.39/6.52%（护栏内）。**性能（同 session A/B）**：S512
+> 0.1052→0.1050ms（1.002×）、S4096 2.6999→2.6877ms（1.005×）⇒ **中性**，远不及 O120 冒烟的 2.0×。
+> **ncu（S4096 同 binary）**：wg2tma vs wg2ws 的 Duration 2.72/2.71ms、`lts op_red` 58,195,968
+> **逐位相同**、SM 32.5/32.9%、L2 22.0/23.6%、warps 12.5/13.9%、**stall `barrier` 仅 0.29/0.26**、
+> 主导 stall = `short_scoreboard 1.22/1.22` + `wait 1.32/1.46` ⇒ **BM=128 的 1 CTA/SM 墙是 compute
+> 流水延迟（8 个 compute warp 跑 5 GEMM+fold），不是 O91/O120 归因的「单一 barrier 域」**（O120 冒烟
+> consumer 每 tile 只 1 个 wgmma、纯访存 bound 故 WS 值 2×）。副归因：384 线程的 170-reg 上限把 O90
+> 的 208 regs 压到 168（68B spill）⇒ `lts op_write` 1.3K→8.44M。⇒ 与 F6/F7/O83/O91「本卡 fp8
+> BM≥128 撞 smem/寄存器墙」同源，**正结果仍只剩换卡**。见 `docs/03` §142、`docs/08` §5.129；
+> 原始输出 `src/fp8/fa_bwd_fp8_o121_ab_{s512,s4096}.out.txt`、`..._o121_ncu_{ws,tma}_s4096.out.txt`。
+> **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙 + BM≥128 的 1-CTA/SM compute 流水墙
+> 均无软件解）；② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；
+> ③ 非 main 的 `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）；④（若换卡前想再压 fp8 默认档）
+> 复核 `wait`+`short_scoreboard` 能否用更深 `wgmma` 流水/更少 barrier 的 fold 拆解缓解（预期中性，
+> 因 L2 已 22%、SM 32% 但 1 CTA/SM 只有 8 warp 可填）。
+>
+> **（第二百一十四轮）**：**O120——F3b② 的 warp specialization de-risk ——「1 CTA/SM 单一
 > barrier 域」病因的直接检验——机制正结果，独立冒烟、默认一行未改**。承接 O90/O91（BM=128/192
 > 让 `red` 砍半/砍到 0.43×，但 1 CTA/SM 下时间反翻倍，病因归为「每 tile 5 个 `__syncthreads` 把
 > warp 串成依赖链、K/V 搬运与 wgmma 不重叠」）。此前只从「改多 warpgroup 后变慢」间接推断，本轮
@@ -8990,8 +9024,35 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     吞吐的解锁路径（2.0×、L2 字节不变）**；副结论：仅预取深度只得 1.50×，多出的 1.33× 来自
     「把 producer 移出 `__syncthreads` 域」。**下一步 = F3b 主体化**（落进 `wgmma2`/`wg3`，红
     0.43× 的 BM≥128 从延迟 bound 拉回 L2 bound，理论上界 ~默认档 1.7–1.8×）。默认路径一行未改。
-    见 `docs/03` §141、`docs/08` §5.128；原始输出 `src/fp8/fa_bwd_fp8_o120_ws_smoke.out.txt`、
-    `src/fp8/fa_bwd_fp8_o120_ncu_{sync,ws}.out.txt`。
+     见 `docs/03` §141、`docs/08` §5.128；原始输出 `src/fp8/fa_bwd_fp8_o120_ws_smoke.out.txt`、
+     `src/fp8/fa_bwd_fp8_o120_ncu_{sync,ws}.out.txt`。
+
+- 2026-10-01（第二百一十五轮）：**O121——F3b 主体化第一步：把 O120 的 WS 落进 `wgmma2_tma`
+  （BM=128）——中性/负结果（opt-in `--wg2ws`、默认关）**。落实 O120『下一步首选』。
+  - **实现**（`src/fp8/fa_bwd_fp8_kernels.cuh` §3e 新增 `fa_bwd_fp8_wgmma2_ws_kernel`；
+    `main.cu` 加 `launch_bwd_wgmma2ws` + `[O121 A/B]`/护栏打印）：**384 线程 = 2 个 compute
+    warpgroup（wid 0..7，GEMM 数据通路逐字沿用 O90）+ 1 个 producer warpgroup（wid 8..11，
+    只发 K/V 4D-TMA）**；compute 侧 5 个 `__syncthreads` → 3 个命名 barrier `bar.sync 1,256`；
+    K（KSTAGE=2）/V（VSTAGE=2）双 ring，`full/empty` mbarrier（empty count=256 = 全部 compute
+    线程逐线程 arrive）。**踩坑**：K/V 若写成两个独立前瞻循环会把 producer 卡在 `emptyK`、V 后继
+    永不发出 ⇒ consumer 等 `fullV` 死锁（S512 `NT≤2` 不触发、S4096 必现）；合并成一个循环交替推进
+    即解。默认路径一行未改。
+  - **数值（护栏）**：ws vs tma `max_abs` dq/dk/dv = 1.19e-7/2.38e-7/4.77e-7（仅 fp32 归约次序）；
+    **ws vs fp32 ref relL2** S512 **8.18/8.41/6.36%**、S4096 **8.15/8.39/6.52%** ⇒ 护栏内。
+  - **性能（同 session A/B，iters=100）**：S512 0.1052→**0.1050ms（1.002×）**、
+    S4096 2.6999→**2.6877ms（1.005×）** ⇒ **中性**，远不及 O120 冒烟的 2.0×。
+  - **ncu（S4096，同 binary，`--launch-count 1`）**：wg2tma vs wg2ws —— Duration **2.72/2.71ms**、
+    `lts op_red` **58,195,968 逐位相同**、`op_read` 14.40/14.92M、`op_write` **1.3K/8.44M**（WS 本地
+    溢写）、SM **32.5/32.9%**、L2 **22.0/23.6%**、DRAM 2.4/2.5%、warps **12.5/13.9%**、
+    **stall `barrier` 仅 0.29/0.26**、主导 = `short_scoreboard 1.22/1.22` + `wait 1.32/1.46`。
+    ptxas `-v`：WS 168 regs / 68B spill（384 线程 @1 CTA/SM 上限 170，把 O90 的 208 regs 压下来）。
+  - **判决**：**F3b 主体化中性/负结果**。真实反向在 BM=128、1 CTA/SM 下的墙是 **compute 流水延迟**
+    （只有 8 个 compute warp 跑 5 个 GEMM+fold，1 CTA/SM 没有第二个独立 CTA 填延迟），**不是
+    O91/O120 归因的「单一 barrier 域」**（ncu `barrier` stall ~0.28 本就极低）。O120 冒烟 consumer
+    每 tile 只 1 个 wgmma（纯访存延迟 bound）故 WS 值 2×，真实 kernel 的 compute 已足够长去藏 K/V
+    延迟。⇒ 修正 O91/O120；与 F6/F7/O83「本卡 fp8 BM≥128 撞 smem/寄存器墙」同源，**正结果仍只剩
+    换卡**。见 `docs/03` §142、`docs/08` §5.129；原始输出
+    `src/fp8/fa_bwd_fp8_o121_ab_{s512,s4096}.out.txt`、`..._o121_ncu_{ws,tma}_s4096.out.txt`。
 
 ## 灵感 / backlog
 
