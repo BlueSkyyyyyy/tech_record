@@ -1494,8 +1494,9 @@ fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
                          const float* __restrict__ delta, const float* __restrict__ lse,
                          float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                          float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
-                         int causal, int sched) {
+                         int causal, int sched, const int* __restrict__ cu_seqlens = nullptr) {
   // O131：放开到 HD=128/256（见 fp16 两文件版同处注释）。NH=HD/64 泛化 GEMM3/4/5 与 dQ 列遍数。
+  // O133：加 `cu_seqlens` —— VARLEN 支持（见 fp16 同处，S 传 maxlen、qbase/len 定界、短 tile 早退）。
   static_assert(HD == 128 || HD == 256, "wgmma 主 kernel 只做 HD=128/256");
   constexpr int NH = HD / 64;
   constexpr int BM = 64, BN = 64;
@@ -1527,27 +1528,31 @@ fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
   const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
   const int g = lane >> 2, c2 = (lane & 3) * 2;
   const int m0 = mblk * BM;
+  // O133：VARLEN 定界（cu=nullptr 时退化定长：qbase=b*S、len=S，逐位不变）。
+  const int qbase = cu_seqlens ? cu_seqlens[b] : b * S;
+  const int len   = cu_seqlens ? (cu_seqlens[b + 1] - qbase) : S;
+  if (m0 >= len) return;   // maxlen 网格里超出本序列的 tile
 
-  qdo_issue_async_sw<HD, BM>(q, do_, m0, S, H, h, b, tid, Qs, dOs);
+  qdo_issue_async_sw<HD, BM>(q, do_, m0, len, H, h, b, tid, Qs, dOs, qbase);
 
-  const int ncols = causal ? min(S, m0 + BM) : S;
+  const int ncols = causal ? min(len, m0 + BM) : len;
   const int ntiles = (ncols + BN - 1) / BN;
   if (ntiles > 0) {
-    kv_issue_async_sw<HD, BN, true, false>(k, v, 0, S, Hkv, hkv, b, tid, Ks, Vs);
-    kv_issue_async_sw<HD, BN, false, true>(k, v, 0, S, Hkv, hkv, b, tid, Ks, Vs);
+    kv_issue_async_sw<HD, BN, true, false>(k, v, 0, len, Hkv, hkv, b, tid, Ks, Vs, qbase);
+    kv_issue_async_sw<HD, BN, false, true>(k, v, 0, len, Hkv, hkv, b, tid, Ks, Vs, qbase);
   }
 
   // LSE/D 预装：wgmma m64n64 的累加器里，warp wid 持行 [16*wid,16*wid+16)，每线程两行。
   const int r_lo = wid * 16 + g, r_hi = r_lo + 8;
   const int qi_lo = m0 + r_lo, qi_hi = m0 + r_hi;
   float lse_lo = 0.f, lse_hi = 0.f, del_lo = 0.f, del_hi = 0.f;
-  if (qi_lo < S) {
-    const size_t idx = ((size_t)(b * S + qi_lo)) * H + h;
+  if (qi_lo < len) {
+    const size_t idx = ((size_t)(qbase + qi_lo)) * H + h;
     lse_lo = lse[idx];
     del_lo = delta[idx];
   }
-  if (qi_hi < S) {
-    const size_t idx = ((size_t)(b * S + qi_hi)) * H + h;
+  if (qi_hi < len) {
+    const size_t idx = ((size_t)(qbase + qi_hi)) * H + h;
     lse_hi = lse[idx];
     del_hi = delta[idx];
   }
@@ -1570,8 +1575,8 @@ fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
     asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
     if (nt + 1 < ntiles)
-      kv_issue_async_sw<HD, BN, true, false>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid,
-                                             Ks + ((nt + 1) & 1) * KTILE, Vs);
+      kv_issue_async_sw<HD, BN, true, false>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid,
+                                             Ks + ((nt + 1) & 1) * KTILE, Vs, qbase);
 
     // ---- (1)(2) S=QKᵀ 与 dP=dO·Vᵀ 两条 wgmma 一起发、统一 wait0（重叠异步 mma）----
     float sacc[32], dpacc[32];
@@ -1588,7 +1593,7 @@ fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
         const int jg = j0 + j * 8 + c2 + (qq & 1);
         const float lv = (qq >= 2) ? lse_hi : lse_lo;
         float p = 0.f;
-        if (qi < S && jg < S && !(causal && jg > qi)) p = fexp(sacc[j * 4 + qq] * scale - lv);
+        if (qi < len && jg < len && !(causal && jg > qi)) p = fexp(sacc[j * 4 + qq] * scale - lv);
         pval[j][qq] = p;
       }
 #pragma unroll
@@ -1610,7 +1615,7 @@ fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
     // barrier：P/dS 对所有 warp 可见；同时保证 GEMM2 已读完 V[nt]，可覆盖 V。
     __syncthreads();
     if (nt + 1 < ntiles)
-      kv_issue_async_sw<HD, BN, false, true>(k, v, (nt + 1) * BN, S, Hkv, hkv, b, tid, Ks, Vs);
+      kv_issue_async_sw<HD, BN, false, true>(k, v, (nt + 1) * BN, len, Hkv, hkv, b, tid, Ks, Vs, qbase);
 
     // ---- O9b-2：(3) dV=Pᵀ·dO、(4) dK=scale·dSᵀ·Q、(5) dQ+=scale·dS·K 全上 wgmma ----
     // 三条 GEMM 的 A/B 均为「K-major 存储 + MN-major 描述符（转置读）」，唯一例外是 (5) 的
@@ -1646,8 +1651,8 @@ fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
           const int rr = r0 + (qq >= 2 ? 8 : 0);
           const int jg = j0 + rr;
           const int c = nh * 64 + j * 8 + c2;
-          if (jg < S)
-            red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+          if (jg < len)
+            red_add2(dv_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c,
                      accv[j * 4 + qq], accv[j * 4 + qq + 1]);
         }
       // (4) dK = scale·dSᵀ·Q epilogue
@@ -1658,8 +1663,8 @@ fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
           const int rr = r0 + (qq >= 2 ? 8 : 0);
           const int jg = j0 + rr;
           const int c = nh * 64 + j * 8 + c2;
-          if (jg < S)
-            red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+          if (jg < len)
+            red_add2(dk_acc + (((size_t)(qbase + jg)) * Hkv + hkv) * HD + c,
                      acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
         }
       // (5) dQ += scale·dS·K（寄存器累加，循环结束后一次写出）
@@ -1679,8 +1684,8 @@ fa_bwd_bf16_wgmma_kernel(const bf16* __restrict__ q, const bf16* __restrict__ k,
         const int rr = r0 + (qq >= 2 ? 8 : 0);
         const int qi = m0 + rr;
         const int c = nh * 64 + j * 8 + c2;
-        if (qi < S) {
-          float* base = dq_acc + (((size_t)(b * S + qi)) * H + h) * HD + c;
+        if (qi < len) {
+          float* base = dq_acc + (((size_t)(qbase + qi)) * H + h) * HD + c;
           *reinterpret_cast<float2*>(base) =
               make_float2(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
         }

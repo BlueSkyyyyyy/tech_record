@@ -5215,3 +5215,93 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 `src/fp16/fa_bwd_fp16_o132_ncu_d256_varlen_s4096.out.txt`、
 `src/fa_bwd_o132_run_varlen_fp16bf16.out.txt`（harness 全 varlen 回归 + 一致性 gate）、
 `src/fa_bwd_compare_p33c_summary.out.txt`。见 `docs/01b` §6bf、`docs/04` §57、`docs/08` §5.140。
+
+## 30. O133（第 227 轮，**正结果，默认**）：`head_dim=256` 变长主 kernel 切 BM=64/BN=64 的 wgmma
+
+承接 O132 的遗留（变长 `D=256` 仍走通用 `mma.sync`，成为与定长 O131 之间最后一块
+「wgmma 覆盖」缺口）。O128/O131 已把 **定长** `D=256` 的 GEMM1/2 切上 `wgmma`（`NH=HD/64`），
+但 `run_varlen` 的 `D==256` 分支一直调用通用 mma `fa_bwd_fp16_mma_kernel<256,64,32,1>`。
+
+### 30.1 动机（O132 ncu 的墙）
+
+O132 ncu 证变长 `D=256` 的 main 是 **L1TEX/LDSM + 低 occupancy**（L1/TEX 46.65%、
+168 regs / 149.5KB smem → 1 CTA/SM）。这正是 `wgmma`（无 `ldmatrix`、直读 SW128 描述符）
+能打的方向——与 O131 在定长上取得 1.77–1.86× 完全同源。
+
+### 30.2 改动（单/两文件 device 逐字一致，`sync_onefile_device.py` identical=True）
+
+* **device**：给 `fa_bwd_fp16_wgmma_kernel<HD,OW>` 加 `const int* cu_seqlens = nullptr`——
+  `qbase=cu?cu[b]:b*S`、`len=cu?cu[b+1]-qbase:S`，超出本序列的 tile（maxlen 网格里的死 CTA）
+  `if (m0 >= len) return`；所有 `b*S` token 索引改 `qbase`、所有 `S` bound 改 `len`，两个
+  搬运 helper（`qdo_issue_async_sw`/`kv_issue_async_sw`）传 `qbase`（helper 早已支持该参数，
+  与 fp8 O108 / fp16 wgmma2 的 varlen 写法同源）。**`cu_seqlens==nullptr` 时 `qbase=b*S`、
+  `len=S` ⇒ 定长路径逐位不变。**
+* **host**：`launch_bwd_wgmma` 加 `cu_seqlens` 透传；`run_varlen` 加 `d256wgm` 参数，`D==256`
+  分支默认 `launch_bwd_wgmma<256,true>(..., maxlen, H, Hkv, scale, causal, 0, d_cu)`，
+  `--d256wgm=0` 退回 O128 mma 做同 binary A/B；主 `--d256wgm` 选项透传（与定长同开关）。
+
+### 30.3 数值（`ours vs fp32 ref`，fp16 varlen；单/两文件逐位一致）
+
+6 个 dump 的 `D=256` 变长 shape，wgmma 与 mma 两条路径的 `max_abs` **逐值相同**（fp16 噪声）：
+
+| case（fp16, D=256 varlen） | dq max_abs | dk max_abs | dv max_abs |
+|---|---|---|---|
+| b4_t3840 h8 causal | 2.234e-3 | 2.439e-3 | 1.900e-3 |
+| b4_t4096 h8 causal（等长 1024） | 2.446e-3 | 2.226e-3 | 1.897e-3 |
+| b8_t2904 h8 causal（强倾斜） | 2.309e-3 | 2.409e-3 | 2.125e-3 |
+| b4_t3840 h16 full | 8.747e-4 | 1.031e-3 | 2.457e-4 |
+| b5_t3968 h8 full | 5.180e-4 | 6.371e-4 | 2.435e-4 |
+| b8_t2904 h8 full | 1.395e-3 | 1.378e-3 | 1.291e-3 |
+
+与 O132 的 mma 记录逐位一致；单/两文件一致性 gate `fp16 worst 1.953e-3`（容差 0.016）OK、
+`bf16 worst 7.812e-3`（容差 0.032）OK；定长 `D=256` / `D=128` / MLA 回归逐位不变
+（S1024H8 causal 1.657/1.405/1.447e-3 等）。FA3/FA2 反向变长不支持 `head_dim=256` ⇒ 仅 fp32 ref。
+
+### 30.4 性能（CUDA event total，同 binary A/B，iters=50；`sum_b 4HL²D`）
+
+| case（fp16, D=256 varlen） | mma total (ms) | wgmma total (ms) | 提速 | mma TF | wgmma TF |
+|---|---|---|---|---|---|
+| b4_t4096 h8 causal | 1.3036 | **0.6658** | **1.96×** | 26.4 | 51.6 |
+| b4_t3840 h8 causal | 2.1297 | **0.9078** | **2.35×** | 21.4 | 50.3 |
+| b8_t2904 h8 causal（倾斜） | 1.4246 | **0.7796** | **1.83×** | 25.8 | 47.2 |
+| b4_t3840 h16 full | 5.2574 | **2.2878** | **2.30×** | 17.4 | 39.9 |
+| b5_t3968 h8 full | 2.9118 | **1.2247** | **2.38×** | 15.7 | 37.4 |
+| b8_t2904 h8 full | 2.0797 | **0.9989** | **2.08×** | 17.7 | 36.8 |
+
+wgmma 使 fp16/bf16 变长 `D=256` 追平/略超 fp8（O108/O113 的 wgmma+TMA 快路 24–44 TF）。
+bf16 同构（1.94–2.35×；b4_t4096 1.3097→0.6763ms）。**变长 `D=256` 与定长 O131 至此都走 wgmma。**
+
+### 30.5 ncu（main，b4_t3840 h8 causal，同 binary）
+
+| 指标 | mma（`--d256wgm=0`） | wgmma（默认） |
+|---|---|---|
+| Duration | 1.89 ms | **0.672 ms（2.81×）** |
+| `smsp__inst_executed` | 201.98 M | **88.90 M（−56%）** |
+| shared-load bank conflict | 10.77 M | **0** |
+| shared-load wavefronts | 75.79 M | **0** |
+| `lts op_read` | 36.10 M | **13.56 M（0.375×）** |
+| `lts op_red` | 62.42 M | **34.90 M（0.56×）** |
+| L1/TEX / L2 | 49.6% / 48.8% | 48.2% / 60.4% |
+| Compute / tensor pipe | 11.1% / 10.6% | 14.1% / 13.3% |
+| regs / smem / occupancy | 168 / 149.5KB / 6.25% | 255 / 181.25KB / 6.25% |
+| Waves Per SM | 7.76 | 7.76 |
+
+**机制**：wgmma 直读 SW128 描述符，`ldmatrix` 整体消失（`smsp inst` −56%、LDSM bank conflict
+10.77M→0），与 O131 同源；额外收益来自 BN=64（vs mma 的 BN=32）⇒ `lts op_read` 0.375×、
+`op_red` 0.56×（每 KV 元素的贡献/重读减少）。仍 1 CTA/SM（fp16 2 字节、smem 181KB），
+bound 与 O128/O131 同：**低 occupancy + L2/L1 搬运**（非 DRAM/算力）。
+
+### 30.6 复现 / 原始输出
+
+```bash
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --varlen --dir=/home/xieminglin/proj/output/fa-bwd/varlen_b4_t4096_h8_d256_causal_fp16 --iters=50
+# A/B：加 --d256wgm=0 退回 mma
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_o133_ncu_wgmma_d256_varlen_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_o133_ncu_mma_d256_varlen_s4096.out.txt`、
+`src/fp16/fa_bwd_fp16_o133_ncu_metrics_d256_varlen_s4096.out.txt`（ncu 指标 A/B）、
+`src/fa_bwd_o133_d256_varlen_ab.out.txt`（6 case × wgmma/mma 计时+数值）、
+`src/fa_bwd_o133_ci_fp16bf16.out.txt`（CI 全量回归 + gate）。见 `docs/01b` §6bg、`docs/04` §58、`docs/08` §5.141。
