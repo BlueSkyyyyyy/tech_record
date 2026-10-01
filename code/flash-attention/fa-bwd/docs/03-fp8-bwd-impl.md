@@ -12335,3 +12335,83 @@ smem/寄存器墙」同源。
   的收口一致。默认路径一行未改、数值/CI 不受影响。
 - 原始输出：`src/fp8/fa_bwd_fp8_o121_ab_{s512,s4096}.out.txt`、
   `src/fp8/fa_bwd_fp8_o121_ncu_{ws,tma}_s4096.out.txt`。
+
+## 143. O122（第 216 轮）：fp8 主 kernel 的 **V 等待前移**（KVTMA tile 边界去关键化）—— **中性/负结果**（opt-in `FA_VWAIT_TOP`，默认关）
+
+### 143.1 动机（O121 后的唯一剩余「同步/等待」子项）
+
+O121 把 F3b 主体化判为中性后，`ROADMAP` 的 `下一步候选 ④` 是「复核 `wait`+`short_scoreboard`
+能否用**更深 wgmma 流水 / 更少 barrier 的 fold 拆解**缓解」。既有 `FA_WS1/ILV/ILV34/R4`
+（改 wait 时机 / mma 交错 / 归约加宽）已在 O77/O87/O88/O109/O121 反复复扫为中性/有损，
+但它们都作用于 **tile 内**；**tile 边界**（K/V 的 TMA 等待 + Kp 重建）从未单独拆过。本轮定位：
+
+* K/V TMA 快路里 **K 双缓冲** ⇒ K[nt+1] 在 tile nt−1 末即发起、tile nt 末才等 ⇒ **不等**；
+* **V 单缓冲**（`Ap` 复用 `Vs`，O41 的零成本折叠）⇒ V[nt+1] 只能在 tile nt 末（GEMM3/4 读完
+  `Ap` 后）才发起，且**紧接着**在 tile 末等它（中间只隔 K[nt+1] 的 wait + Kp 重建）——V 的
+  TMA 延迟几乎完全暴露在 tile 边界的临界路径上。
+
+⇒ 假设：把该 `mbar_wait(vbar)` 从 tile 末**前移到下一 tile 的 GEMM1 之后、GEMM2 之前**，
+让异步 wgmma（GEMM1 只读 `Qs`/`Kcur`，与 V 无关）掩盖 V 的 TMA 延迟。
+
+### 143.2 实现（单/两文件 device 逐字一致，`sync_onefile_device.py` 核对 `identical: True`）
+
+新增编译期探针 `FA_VWAIT_TOP`（`Fp8Cfg` 内，默认 0）。置 1（仅 KVTMA + D=128 Hopper 快路）：
+
+1. 在 `fp8_mma_body` 的 GEMM1/GEMM2 `wgmma_mn32_issue<0/1>` 之间插入 `vwait_top()`：
+   `if (nt > nt_begin) { mbar_wait(qbars+4, vuse&1); vuse++; }`（GEMM1 已发、GEMM2 未发）；
+2. 把 tile 末 KVTMA 块里的同一 `mbar_wait/vuse++` 用 `#if` 关掉（等待只发生一次，相位计数
+   仍一一对应：prologue 等 `nt_begin`，之后每 tile 等前一 tile 发的 V，不会 over-wait）。
+
+数学与数值**逐位不变**——只改「何时等 V」，不改 V/Q 的字节、Kp 重建、fold、5 个 GEMM。
+`FA_VWAIT_TOP=0` 与历史逐字相同（默认）。
+
+### 143.3 数值（护栏）
+
+S4096 causal H16，ours vs fp32 ref：`dq/dk/dv max_abs = 2.635/2.644/3.216e-1`，与默认档
+**逐位相同**；单/两文件一致（单文件由 sync 同步，核对 `identical: True`）。
+
+### 143.4 性能（同 session A/B，`iters=50`，S4096 causal H16）
+
+| 配置 | total (quant+pre+main+cvt) | main |
+|---|---|---|
+| 默认（`FA_VWAIT_TOP=0`） | 1.5820 ms | 1.3540 ms |
+| `FA_VWAIT_TOP=1` | 1.5741 ms | 1.3711 ms |
+| `FA_VWAIT_TOP=1 + FA_WS1=1` | 1.5806 ms | 1.3497 ms |
+
+→ **全在 ~1.5% 噪声内（中性）**，V 等待前移**无收益**。
+
+### 143.5 为什么中性：fresh ncu 钉死真墙（S4096 causal H16，`--set full --launch-count 1`）
+
+`fa_bwd_fp8_mma_kvtma_kernel`：**Duration 1.38 ms**、**L2 77.87%**、L1/TEX 76.10%、
+**DRAM 11.38%**、Compute(SM) 46.88%、occupancy 18.67%（3 CTA/SM，168 regs，74.82KB）、
+Waves 5.17、L2 hit 93.0%。L2 扇区：`op_red` **105,381,888** / `op_read` 24,282,536 /
+`op_write` 100,037（`red` 占 L2 的 ~81%）。
+
+stall（`per_issue_active`）：**`short_scoreboard` 1.85（头号）** + **`wait` 1.54** +
+`not_selected` 0.42 + `barrier` 0.41 + `long_scoreboard` 0.30 + `mio_throttle` 0.10 +
+`math_pipe_throttle` 0.09。
+
+⇒ **头号 stall 是 `short_scoreboard`（smem→mma 的 `ldmatrix` 依赖）+ `wait`（wgmma 依赖），
+tile 边界的 mbarrier 等待（V）根本不在其中**——3 CTA/SM 下不同 CTA 的 tile 边界本就互相错开、
+互相填补，故 V 等待前移无可测收益。这与 O121 的结论同源：真实反向的墙是 **compute 流水延迟**。
+
+### 143.6 顺带收口：shared-store bank conflict **不是瓶颈**（避免下一轮误判）
+
+同一 fresh ncu 的 shared 表：shared **store** 2.4-way 冲突、17,202,064 冲突数 = store wavefronts
+的 **46.4%**（ncu `Est. Speedup 46%`）；shared **load** 1.4-way、15,632,646 = 12.75%。但——
+`l1tex__data_pipe_lsu_wavefronts_mem_shared_op_st` 只有 **11.18% of peak**（`op_ld` 36.97%、
+合计 51.48%）⇒ **store 冲突吃的是远未饱和的 pipe，不是墙**。据此**排除**「抠 shared-store 冲突」
+这一类方向（ps/s 的 PSS 已在 O4d/O7e 调到 ~2-way，边际很小）。真墙仍是 L2 的 `red` 字节（工作划分）。
+
+### 143.7 结论 / 下一步
+
+- **中性/负结果、`FA_VWAIT_TOP` opt-in 默认关。** tile 边界的 V 等待**不在临界路径**，
+  `ROADMAP` 候选 ④（「更深 wgmma 流水 / 更少 barrier」）在 fp8 默认档**判处关闭**。
+- 结合 O116/O117/O121：fp8 主 kernel 的 **bytes（L2 `red`，工作划分）与 issue（`short_scoreboard`
+  + `wait`）两个维度都已在软硬件边界**；`short_scoreboard` 想再压需「B 操作数寄存器预取」（每 warp
+  GEMM3/4/5 的 B 片段 ~24 regs，而当前 168/170 regs 已无余量 ⇒ 必 spill），`wait` 想再压需
+  `FA_WS1`（中性）。⇒ **正结果仍只剩换卡**（更大 smem/regfile 允许多 CTA/SM 或更多 warp）。
+- 原始输出：`src/fp8/fa_bwd_fp8_o122_vwait_ab_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o122_ncu_base_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o122_ncu_stall_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o122_ncu_tables.out.txt`。

@@ -2789,3 +2789,31 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   「本卡 fp8 BM≥128 撞 smem/寄存器墙」同源，**正结果仍只剩换卡**。
 - 原始输出：`src/fp8/fa_bwd_fp8_o121_ab_{s512,s4096}.out.txt`、
   `src/fp8/fa_bwd_fp8_o121_ncu_{ws,tma}_s4096.out.txt`；实现细节 `docs/03` §142。
+
+### 5.130 第 216 轮（O122）：fp8 主 kernel 的 **V 等待前移**（KVTMA tile 边界去关键化）—— **中性/负结果（opt-in `FA_VWAIT_TOP`，默认关）**
+
+- **动机**：O121 后 `ROADMAP` 候选 ④ =「复核 `wait`+`short_scoreboard` 能否用更深 wgmma 流水 /
+  更少 barrier 的 fold 拆解缓解」。既有 `FA_WS1/ILV/ILV34/R4` 都作用于 tile 内且已反复判中性；
+  本轮单独拆 **tile 边界**：K 双缓冲故 K 不等，**V 单缓冲**（`Ap` 复用 `Vs`）⇒ V[nt+1] 只能在 tile
+  末发起、紧接着在 tile 末等（中间只隔 K[nt+1] 的 wait + Kp 重建），V 的 TMA 延迟暴露在边界临界路径。
+- **改动**（`kernels.cuh` `Fp8Cfg` 加 `FA_VWAIT_TOP` 默认 0；单文件 `sync_onefile_device.py` 同步
+  `identical: True`）：把 V 的 `mbar_wait` 从 tile 末前移到**下一 tile 的 GEMM1 之后、GEMM2 之前**，
+  用异步 wgmma（GEMM1 只读 Qs/Kcur）掩盖 V 延迟；等待仍一一对应（prologue 等 nt_begin，之后每 tile
+  等前一 tile 发的 V）。数学/数值**逐位不变**。
+- **数值**：S4096 ours vs fp32 ref `2.635/2.644/3.216e-1`（与默认档逐位相同）。
+- **性能（同 session A/B，iters=50，S4096）**：默认 total 1.5820 / main 1.3540ms；
+  `FA_VWAIT_TOP=1` **1.5741 / 1.3711ms**；`FA_VWAIT_TOP=1+FA_WS1=1` 1.5806 / 1.3497ms
+  ⇒ **全在 ~1.5% 噪声内（中性）**。
+- **fresh ncu（S4096，1.38ms）**：L2 **77.87%**、L1/TEX 76.10%、DRAM 11.38%、SM 46.88%、
+  occ 18.67%（3 CTA/SM/168reg/74.82KB）、`op_red` **105.38M** / `op_read` 24.28M / `op_write` 0.10M；
+  stall = **`short_scoreboard` 1.85 + `wait` 1.54** + not_selected 0.42 + barrier 0.41 +
+  long_scoreboard 0.30 ⇒ **头号是 smem→mma 的 `ldmatrix` 依赖 + wgmma 依赖，tile 边界的 V 等待不在其中**
+  （3 CTA/SM 的边界互相错开填补）。与 O121 同源：墙是 compute 流水延迟，非同步机制。
+- **副收口**：shared **store** 2.4-way 冲突 = store wavefronts 的 46%（ncu Est 46%），但
+  `wavefronts_mem_shared_op_st` 仅 **11.18% of peak** ⇒ **store 冲突吃的是远未饱和的 pipe，不是墙**，
+  排除「抠 shared-store 冲突」方向。
+- **判决**：**中性/负、`FA_VWAIT_TOP` opt-in 默认关**。候选 ④ 在 fp8 默认档**关闭**；fp8 主 kernel
+  的 bytes（L2 `red`）与 issue（`short_scoreboard`+`wait`）都已在边界，`short_scoreboard` 再压需
+  B 操作数寄存器预取（~24 regs，168/170 无余量⇒必 spill）。**正结果仍只剩换卡。**
+- 原始输出：`src/fp8/fa_bwd_fp8_o122_vwait_ab_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o122_ncu_{base,stall,tables}_s4096.out.txt`；实现细节 `docs/03` §143。
