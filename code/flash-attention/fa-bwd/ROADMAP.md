@@ -3304,7 +3304,28 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百零九轮）**：**O115——把 fp8 的「main 切 wgmma+TMA」默认化补到 fp16/bf16
+> **最新（第二百一十轮）**：**O116——fp8 主 kernel 的 host/运行期旋钮系统复核（ksplit / hswap /
+> mrev / ovlql / ovlcap × 4 形状）＋ TE-vs-ours L2 红字账，负结果、默认一行未改**。动机：O115 后
+> fp8 默认路径的 main（L2 `red` 主体墙 F3b/F4b/F6/F7/O90–O95/O114）与非 main（O109–O111 量化分相 +
+> LSE 重叠）都已收口，**唯一没系统复核的是纯 host 旋钮的联合最优性**。新工具
+> `harness/fa_fp8_main_sweep.py`（纯 harness，把 Hopper 构建的 `fa_bwd_fp8_main.out` 按
+> 「4 case × 9 配置」矩阵跑并解析 `[timing]`）：默认 auto（hswap→ksplit=2）在 4 shape（MHA S4096 /
+> GQA q32kv4 / q40kv8 / MQA q64kv1）**全最优**；`hswap=0`/`mrev=0` 全负（total 慢 3.2–11.7%，
+> grid 512→128）、`ovlql=0` 慢 0.2–4.8%、`ovlcap` 各档 ~1% 噪声内 ⇒ **五类 host 旋钮默认档全局最优**。
+> **同 session ncu（S4096 causal）**：ours `kvtma<128,64,32>`（3 CTA/SM/74.82KB/168r）**1.37ms /
+> `op_red` 105.38M / `op_read` 24.27M / L2 78.20%** vs TE `..._flash_bprop_wgmma_f8_..._64x64x128`
+> （1 CTA/SM/232KB/384 线程）**257.9µs / 25.96M / 10.23M / 70.86%** —— **同 BM=64，差距全在搬运量
+> （red 4.06×、read 2.37×、时间 5.31×）**。**red 扇区账**：理论下界 68.2M（每元素 8 扇区已填满、
+> O114 已证无浪费），实测 105.4M = **1.545×**，多出的 ~37M 纯来自「每 KV 元素被多少 m-block 归约」
+> = 工作划分；与 read 侧同源，要压只能放大 BM / KV-owner（本卡寄存器/smem 墙）。**护栏**：
+> `--ci --no-run --dtype fp8` 55 case gate **5.722e-06 OK**、`docs/04 --check` OK（224 行）。
+> 见 `docs/08` §5.124、`docs/03` §137；原始输出 `src/fp8/fa_bwd_fp8_o116_knob_sweep.out.txt`、
+> `..._o116_ncu_{ours,te}_main_s4096.out.txt`。
+> **下一步候选（不变）**：① **换卡**（main 的 L2 `red` 主体墙无软件解，见「阻塞」）；② fp16/bf16
+> causal 变长 ksplit（O115 已判中性/负）；③ MLA 降 smem（实为 regs 249 的寄存器墙）；④ 非 main 的
+> `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）。
+>
+> **（第二百零九轮）**：**O115——把 fp8 的「main 切 wgmma+TMA」默认化补到 fp16/bf16
 > （O33/O34 的逐 atom 4D-TMA 默认化），正结果/默认**。本轮先复核 fp8：默认 main 的 L2 `red`
 > 主体墙（占 L2 ~80%）已在 F3b/F4b/F6/F7/O90–O95/O114 全部收口为**本卡无软件解**（只剩换卡 /
 > 多 warpgroup WS），非 main（quant/LSE/convert）也已达带宽墙并被 O109–O111 重叠——
@@ -8757,9 +8778,29 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
   - **附带 sweep（候选 ②）**：fp16/bf16 `varlen` causal ksplit 复核——D=128（wgmma2 BM=128）k=1
     最优（k>1 单调更慢）、D=512（MLA）auto k=16 已近最优（b3 k=8 仅 0.2% 差异）⇒ **无正结果**
     （与 fp8 的 BM=64 几何不同，O107 的 k≥3 规律不迁移）。
-  - 见 `docs/01` §26、`docs/01b` §6bc、`docs/08` §5.123；原始输出
-    `src/{fp16,bf16}/fa_bwd_*_o115_maintma_ab.out.txt`、
-    `src/fp16/fa_bwd_fp16_o115_ncu_maintma_s4096.out.txt`、`src/fa_bwd_o115_ci.out.txt`。
+   - 见 `docs/01` §26、`docs/01b` §6bc、`docs/08` §5.123；原始输出
+     `src/{fp16,bf16}/fa_bwd_*_o115_maintma_ab.out.txt`、
+     `src/fp16/fa_bwd_fp16_o115_ncu_maintma_s4096.out.txt`、`src/fa_bwd_o115_ci.out.txt`。
+
+- 2026-10-01（第二百一十轮）：**O116——fp8 主 kernel 的 host/运行期旋钮系统复核（负结果，
+  默认一行未改）**。补上 O93/O96–O113「每轮只审一条分支」留下的**联合复核**：同一 Hopper binary、
+  同一 session 把 ksplit/hswap/mrev/ovlql/ovlcap 在 4 个形状（MHA S4096 / GQA q32kv4 / q40kv8 /
+  MQA q64kv1）上一起扫。
+  - **新工具 `harness/fa_fp8_main_sweep.py`**（纯 harness）：把 `fa_bwd_fp8_main.out` 按
+    「case × 配置」矩阵跑、解析 `[timing]`，给默认 vs 每档的 total×/main×。
+  - **结果**：默认 auto（hswap→ksplit=2）在 4 shape **全最优**；`hswap=0`/`mrev=0` 全负
+    （total 慢 3.2–11.7%，grid 512→128）、`ovlql=0` 慢 0.2–4.8%、`ovlcap`(-1/1024/4096) ~1% 噪声内
+    ⇒ **五类 host 旋钮默认档全局最优、无一条可转正**。
+  - **TE-vs-ours L2 红字账（同 session ncu，S4096 causal）**：ours `kvtma<128,64,32>`
+    （3 CTA/SM/74.82KB/168r）**1.37ms / `op_red` 105.38M / `op_read` 24.27M / L2 78.20%** vs TE
+    `..._flash_bprop_wgmma_f8_...`（1 CTA/SM/232KB/384 线程）**257.9µs / 25.96M / 10.23M / 70.86%**
+    ——同 BM=64，差距全在搬运量（red 4.06×、read 2.37×、时间 5.31×）。**red 扇区账**：理论下界
+    68.2M（每元素 8 扇区已填满、无浪费），实测 105.4M = 1.545×，多出的 ~37M 纯来自「每 KV 元素被
+    多少 m-block 归约」= 工作划分，与 read 侧同源，要压只能放大 BM / KV-owner（本卡寄存器/smem 墙）。
+  - **护栏**：`--ci --no-run --dtype fp8` 55 case 单/两文件 gate **worst 5.722e-06 OK**、
+    `docs/04 --check` OK（224 行）。
+  - 见 `docs/08` §5.124、`docs/03` §137；原始输出 `src/fp8/fa_bwd_fp8_o116_knob_sweep.out.txt`、
+    `..._o116_ncu_ours_main_s4096.out.txt`、`..._o116_ncu_te_main_s4096.out.txt`。
 
 ## 灵感 / backlog
 

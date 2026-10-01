@@ -11940,3 +11940,39 @@ SASS 确认生效：`REDG.E.ADD.F32x2` 5056→2912、新增 **`REDG.E.ADD.F16x2`
 - **原始输出**：`src/fp8/fa_bwd_fp8_o114_redhalf_smoke.out.txt`、
   `..._o114_redhalf_smoke_ncu.out.txt`、`..._o114_sass.out.txt`、`..._o114_ab.out.txt`、
   `..._o114_ncu_ab_s4096.out.txt`；冒烟源码 `src/fp8/fa_bwd_fp8_redhalf_smoke.cu`。
+
+## 137. 第 210 轮：O116——fp8 主 kernel host/运行期旋钮系统复核（负结果）
+
+### 137.1 动机
+
+O93/O96–O113 每次只审一条 ksplit/hswap/mrev 分支，**没有把 host 旋钮放在同一 binary、同一
+session、同一批形状上联合扫过**。本轮补这一刀，并用 TE 同 session ncu 把「L2 `red` 到底还能不能动」
+再钉一次。
+
+### 137.2 工具与结果
+
+新增 `harness/fa_fp8_main_sweep.py`（纯 harness）：把 Hopper 构建的 `fa_bwd_fp8_main.out` 按
+「case × 配置」矩阵跑，解析 `[timing]`。4 case（MHA S4096 / GQA q32kv4 / GQA q40kv8 / MQA q64kv1）×
+9 配置（default / ksplit=1,4 / hswap=0 / mrev=0 / ovlql=0 / ovlcap=-1,1024,4096）：
+
+- 默认 auto（hswap→ksplit=2）在 4 个 shape 上**全最优**；hswap=0、mrev=0 全负（慢 3.2–11.7%）；
+  ovlql=0 慢 0.2–4.8%；ovlcap 各档在 ~1% 噪声内。
+- ⇒ **默认档已是这五类 host 旋钮的全局最优，无一条可转正**（`docs/08` §5.124）。
+
+### 137.3 TE-vs-ours L2 红字账（S4096 causal，同 session ncu）
+
+| | Duration | `op_red` | `op_read` | L2% |
+|---|---|---|---|---|
+| ours `kvtma<128,64,32>`（3 CTA/SM，74.82KB，168r） | **1.37 ms** | **105.38M** | 24.27M | 78.20 |
+| TE `..._flash_bprop_wgmma_f8_..._64x64x128`（1 CTA/SM，232KB，384 线程） | **257.9 µs** | **25.96M** | 10.23M | 70.86 |
+
+同 BM=64，差距全在搬运量：`red` 4.06×、`read` 2.37×、时间 5.31×。**red 扇区账**：理论下界
+68.2M（每元素 8 扇区已填满、无浪费），实测 105.4M = 1.545×，多出的 ~37M 纯来自「每 KV 元素被
+多少 m-block 归约」= 工作划分；要压只能放大 BM / KV-owner（寄存器/smem 墙）。
+
+### 137.4 结论
+
+**负结果、默认一行未改。** host 旋钮前沿扫清；主 kernel 的 L2 `red` 是本卡工作划分的硬件下界。
+`--ci --no-run --dtype fp8` 55 case gate **worst 5.722e-06 OK**、`docs/04 --check` OK（224 行）。
+原始输出 `src/fp8/fa_bwd_fp8_o116_knob_sweep.out.txt`、
+`..._o116_ncu_{ours,te}_main_s4096.out.txt`。
