@@ -542,6 +542,39 @@ static void launch_bwd_wgmma2tma(dim3 mg, const CUtensorMap& kmap, const CUtenso
       kmap, vmap, q8, qs, ks, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
       scale, causal, ksplit);
 }
+
+// O121（F3b 主体化）：O120 的 warp specialization 主 kernel 化——384 线程（2 compute WG +
+//   1 producer WG）、K/V mbarrier ring、compute 侧用命名 barrier。`--wg2ws` opt-in。
+template <int HD, int KSTAGE = 2, int VSTAGE = 2>
+static constexpr int wgmma2ws_smem_bytes() {
+  constexpr int BM = 128, BN = 32;
+  constexpr int PSLD = HD + 8, QTS = BM + 16, DSS2 = BN + 16, PSS = BN + 5;
+  constexpr int kNScale = 3 * BM + 4 * BN;
+  constexpr int QS_SZ = (BM / 8) * (HD / 128) * 1024, KS_SZ = (BN / 8) * (HD / 128) * 1024;
+  constexpr int qp_bytes = (BM / 2) * PSLD * 2, kp_bytes = (BN / 2) * PSLD * 2;
+  constexpr int NBAR = 2 * (KSTAGE + VSTAGE);
+  // 2 块 Q/dO SW128 + K,V ring + Qp/dOp/Kp + dS2 + scales/Ps/Ss + Ap/dS3 + NBAR*8(bar) + slack。
+  return 2 * QS_SZ + (KSTAGE + VSTAGE) * KS_SZ + 2 * qp_bytes + kp_bytes + BM * DSS2 +
+         (kNScale + 2 * BM * PSS) * (int)sizeof(float) + 2 * BN * QTS + NBAR * 8 + 1024;
+}
+
+template <int HD>
+static void launch_bwd_wgmma2ws(dim3 mg, const CUtensorMap& kmap, const CUtensorMap& vmap,
+                                const unsigned char* q8, const float* qs,
+                                const unsigned char* k8, const float* ks,
+                                const unsigned char* v8, const float* vs,
+                                const unsigned char* do8, const float* dos,
+                                const float* delta, const float* lse, float* dq_acc,
+                                float* dk_acc, float* dv_acc, int S, int H, int Hkv,
+                                float scale, int causal, int ksplit) {
+  (void)k8; (void)v8;   // K/V 由 4D-TMA 搬入
+  constexpr int kSmem = wgmma2ws_smem_bytes<HD>();
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp8_wgmma2_ws_kernel<HD, 128, 32>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, kSmem));
+  fa_bwd_fp8_wgmma2_ws_kernel<HD, 128, 32><<<mg, 384, kSmem>>>(
+      kmap, vmap, q8, qs, ks, vs, do8, dos, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv,
+      scale, causal, ksplit);
+}
 #endif  // FA_WGMMA && FA_TMA
 #endif  // FA_WGMMA
 
@@ -4939,6 +4972,39 @@ int main(int argc, char** argv) {
            "max_abs(KVTMA-vs-wgmma2) dq/dk/dv=%.3e/%.3e/%.3e\n",
            t_wg2wg, t_wg2tma, t_wg2wg / t_wg2tma, maxd2(c_dq, b_dq), maxd2(c_dk, b_dk),
            maxd2(c_dv, b_dv));
+    // O121（F3b 主体化）：wg2tma（256 线程、__syncthreads）vs wg2ws（384 线程、producer WG +
+    //   mbarrier ring + 命名 barrier）。只换同步结构，GEMM 数据通路逐字一致。
+    auto run_wg2ws = [&]() {
+      CUDA_CHECK(cudaMemset(d_dq_acc, 0, nq * 4));
+      CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * 4));
+      CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * 4));
+      launch_bwd_wgmma2ws<128>(mg2, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
+                               d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                               Hkv, scale, (int)causal, ksplit2);
+    };
+    float t_wg2ws = 0.f;
+    bench_sel2(run_wg2ws, &t_wg2ws);
+    std::vector<float> w_dq(nq), w_dk(nkv), w_dv(nkv);
+    run_wg2ws();
+    CUDA_CHECK(cudaMemcpy(w_dq.data(), d_dq_acc, nq * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(w_dk.data(), d_dk_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(w_dv.data(), d_dv_acc, nkv * 4, cudaMemcpyDeviceToHost));
+    auto relL2 = [](const std::vector<float>& a, const std::vector<float>& b) {
+      double d2 = 0.0, b2 = 0.0;
+      for (size_t i = 0; i < a.size(); ++i) {
+        double d = (double)a[i] - (double)b[i];
+        d2 += d * d;
+        b2 += (double)b[i] * (double)b[i];
+      }
+      return 100.0 * std::sqrt(d2) / std::max(1e-30, std::sqrt(b2));
+    };
+    printf("[O121 A/B] main wg2tma %.4f ms | wg2ws(WS: prod WG+mbar ring+bar.sync) %.4f ms "
+           "(%.3fx) | max_abs(ws-vs-tma) dq/dk/dv=%.3e/%.3e/%.3e\n",
+           t_wg2tma, t_wg2ws, t_wg2tma / t_wg2ws, maxd2(w_dq, c_dq), maxd2(w_dk, c_dk),
+           maxd2(w_dv, c_dv));
+    printf("[O121 护栏] wg2ws vs fp32 ref relL2 dq/dk/dv = %.2f%%/%.2f%%/%.2f%% "
+           "(ws-vs-tma max_abs=1e-7 ⇒ 与 O90 同口径)\n",
+           relL2(w_dq, rdq.data), relL2(w_dk, rdk.data), relL2(w_dv, rdv.data));
 #endif
     // O91（F6-step4）：wgmma2（BM=128, 2WG）vs wg3（BM=192, 3WG, 384 线程）同 session A/B。
     //   只改几何/归约结构（BM 64→192 由泛化的 NWG 核承接），数学口径不变，差异应只有 fp32 归约次序。

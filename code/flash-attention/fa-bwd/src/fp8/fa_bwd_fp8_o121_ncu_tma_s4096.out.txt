@@ -1,0 +1,26 @@
+### O121 ncu 对照 — fa_bwd_fp8_wgmma2_tma_kernel<128,128,32> S4096 H16 causal fp8（O90，256 线程）
+### 命令：ARCH="" GPU=1 NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+###        scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --launch-count 1 -k regex:wgmma2_tma_kernel \
+###        --metrics <同上> -- --dir=.../b1_s4096_h16_d128_causal_fp8 --iters=2
+  void fa_bwd_fp8_wgmma2_tma_kernel<128, 128, 32>(...) (128, 16, 1)x(256, 1, 1), CC 9.0
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                      %         2.38
+    gpu__time_duration.sum                                                                 ms         2.72
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                     108966062
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        47.34
+    launch__registers_per_thread                                              register/thread          208
+    lts__t_sectors_op_read.sum                                                         sector     14399933
+    lts__t_sectors_op_red.sum                                                          sector     58195968
+    lts__t_sectors_op_write.sum                                                        sector         1326
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        22.00
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        32.46
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %        12.50
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.29
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         0.18
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         1.22
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.32
+    ------------------------------------------------------------------------- --------------- ------------
+### 结论：两者 Duration 2.72 vs 2.71ms、red 58.2M 逐位相同、stall 结构相同（short_scoreboard 1.22
+###   + wait 1.32~1.46、barrier 仅 0.26~0.29）、L2 22~24%、SM 32% ⇒ **wgmma2 的 1 CTA/SM 墙不是
+###   `__syncthreads`（barrier stall 本就极低），而是 compute 流水延迟**；WS 换同步结构不改此墙。
