@@ -3083,3 +3083,30 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 - **结论**：**能力覆盖正结果**；fp16/bf16 的 `head_dim=256` 至此覆盖 定长（MHA/GQA × causal/full）
   + 变长（MHA × causal/full）。见 `docs/01` §29、`docs/01b` §6bf、`docs/04` §57；原始输出
   `src/fa_bwd_o132_d256_varlen.out.txt`、`src/fp16/fa_bwd_fp16_o132_ncu_d256_varlen_s4096.out.txt`。
+
+### 5.141 第 227 轮（O133）：fp16/bf16 `head_dim=256` **变长**主 kernel 切 wgmma —— **正结果，默认**
+
+- **背景**：O132（第 226 轮）把 `D=256` 从定长扩到变长，但变长仍走通用 `mma.sync`（O131 只切了
+  **定长** GEMM1/2 的 wgmma）——这是 fp16/bf16 `D=256` 与「wgmma 全路径」之间最后一块缺口，
+  也是 ROADMAP「下一步候选 ③」的剩余。本轮补上（见 `docs/01` §30）。
+  → 同「只做 fp8 性能」模板，但 fp8 main 的 bytes（L2 `red`）与 issue 两墙在 O116–O130 已全部
+    收口为「本卡无软件解」、覆盖型 backlog 也清空（O132 同处理）；故继续推进唯一明确开着的
+    代码项（O132 遗留的变长 wgmma），仍未触碰 fp8 默认路径（零回归风险）。
+- **改动（device + host；单/两文件同步）**：`fa_bwd_{fp16,bf16}_wgmma_kernel` 加
+  `const int* cu_seqlens`——`qbase=cu?cu[b]:b*S`、`len=cu?cu[b+1]-qbase:S`、`if (m0>=len) return`
+  （maxlen 网格里的死 CTA）、所有 `b*S` token 索引改 `qbase`、所有 `S` bound 改 `len`，两个搬运
+  helper（`qdo_issue_async_sw`/`kv_issue_async_sw`）传 `qbase`；`launch_bwd_wgmma` 透传；
+  `run_varlen` 的 `D==256` 默认 `launch_bwd_wgmma<256,true>(..., d_cu)`，`--d256wgm=0` 退回 O128 mma
+  做同 binary A/B。`cu_seqlens==nullptr` 时定长逐位不变。
+- **数值**：wgmma 与 mma 两条路径 `max_abs` **逐值相同**（fp16 causal 1.9–2.4e-3 / full 2.4e-4–1.4e-3；
+  bf16 causal 1.3–2.0e-2 / full 2.9e-3–1.3e-2）；单/两文件一致 gate `fp16 1.953e-3 / bf16 7.812e-3` OK；
+  定长 D=256/D=128/MLA 回归逐位不变。FA3/FA2 反向变长不支持 `D=256`，仅 fp32 ref 可对。
+- **性能（event total，`sum_b 4HL²D`，同 binary A/B）**：fp16 **1.83–2.38×**、bf16 **1.82–2.33×**
+  （b4_t3840 h8 causal 2.13→0.91ms；b5_t3968 h8 full 2.91→1.23ms），追平/略超 fp8 同 shape。
+- **ncu（fp16 main）**：Duration **1.89→0.672ms（2.81×）**、`smsp inst` **−56%**、shared-load
+  bank conflict **10.77M→0**、`lts op_read` **0.375×**、`op_red` **0.56×** ⇒ `wgmma` 直读 SW128
+  去掉 `ldmatrix`（同 O131），额外收益来自 BN=64（vs mma 的 BN=32）减少重读/贡献。仍 1 CTA/SM
+  （fp16 2 字节、smem 181KB）⇒ bound = **低 occupancy + L2/L1 搬运**（同 O128/O131）。
+- **结论**：**正结果、默认**（`--d256wgm=0` opt-out）。**fp16/bf16 `head_dim=256` 至此定长+变长
+  全走 wgmma**；fp8 侧仍只剩换卡。见 `docs/01` §30、`docs/01b` §6bg、`docs/04` §58；原始输出
+  `src/fa_bwd_o133_d256_varlen_ab.out.txt`、`src/fp16/fa_bwd_fp16_o133_ncu_*`。

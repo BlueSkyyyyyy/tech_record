@@ -1,0 +1,16 @@
+===== wgmma  (varlen b4_t3840 h8 d256 causal fp16) =====
+    gpu__time_duration.sum                                                          us       671.90
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                      0
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                          0
+    lts__t_sectors_op_read.sum                                                  sector     13559926
+    lts__t_sectors_op_red.sum                                                   sector     34897920
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active           %        13.25
+    smsp__inst_executed.sum                                                       inst     88903360
+===== mma  (varlen b4_t3840 h8 d256 causal fp16) =====
+    gpu__time_duration.sum                                                          ms         1.89
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                               10769073
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                   75793073
+    lts__t_sectors_op_read.sum                                                  sector     36103650
+    lts__t_sectors_op_red.sum                                                   sector     62423040
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active           %        10.63
+    smsp__inst_executed.sum                                                       inst    201980544

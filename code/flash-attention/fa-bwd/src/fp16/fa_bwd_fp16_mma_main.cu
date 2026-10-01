@@ -192,7 +192,8 @@ template <int HD, bool OW = false>
 static void launch_bwd_wgmma(dim3 mg, const __half* q, const __half* k, const __half* v,
                              const __half* do_, const float* delta, const float* lse,
                              float* dq_acc, float* dk_acc, float* dv_acc, int S, int H,
-                             int Hkv, float scale, int causal, int sched) {
+                             int Hkv, float scale, int causal, int sched,
+                             const int* cu_seqlens = nullptr) {
   constexpr int BM = 64, BN = 64;
   constexpr int TILE  = (BM / 8) * (HD / 64) * 1024;
   constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
@@ -201,7 +202,7 @@ static void launch_bwd_wgmma(dim3 mg, const __half* q, const __half* k, const __
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
   fa_bwd_fp16_wgmma_kernel<HD, OW><<<mg, THREADS, smem>>>(q, k, v, do_, delta, lse, dq_acc,
                                                           dk_acc, dv_acc, S, H, Hkv, scale,
-                                                          causal, sched);
+                                                          causal, sched, cu_seqlens);
 }
 
 // O17：2 warpgroup（BM=128）wgmma 主 kernel（只 HD=128）。Q/dO/K/V + P/dS 全 SW128。
@@ -348,7 +349,7 @@ static void launch_bwd_wgmma4(dim3 mg, const __half* q, const __half* k, const _
 static int run_varlen(const std::string& dir, bool causal, int iters, int varlen_tma = 0,
                       int lse_split = 0, int wg2ksplit = -1, int mla8w = -1,
                       int mlaksplit = -1, int lse8w = 0, int lseocc = 0,
-                      const std::string& dump = "") {
+                      int d256wgm = -1, const std::string& dump = "") {
   auto q_np = load_npy_f32(dir + "/q.npy");
   auto k_np = load_npy_f32(dir + "/k.npy");
   auto v_np = load_npy_f32(dir + "/v.npy");
@@ -446,7 +447,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
   const int varlen_tma_use = 0;
 #endif
   printf("VARLEN main backend = %s\n",
-         (D == 256) ? "mma (HD=256, BM=64/BN=32)"
+         (D == 256) ? (d256wgm != 0 ? "wgmma (HD=256, BM=64/BN=64)"
+                                    : "mma (HD=256, BM=64/BN=32)")
                      : (varlen_tma_use ? "wgmma2 TMA (Q/K/V/dO 4D-TMA)" : "wgmma2 cp.async"));
 
   const int lse_nblk = (maxlen + LBM - 1) / LBM;
@@ -703,9 +705,16 @@ static int run_varlen(const std::string& dir, bool causal, int iters, int varlen
         }
       }
       delta_warp_kernel<256><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
-      launch_bwd_mma<256, 64, 32, 1, false, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse,
-                                                  d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H, Hkv,
-                                                  scale, (int)causal, 0, d_cu, 1);
+      // O133（第 227 轮）：D=256 变长主 kernel 默认切 O131 的 BM=64/BN=64 wgmma（带 cu_seqlens），
+      //   把 O132 变长仍走通用 mma 的 L1TEX/LDSM 墙换成 wgmma 直读 SW128 描述符；`--d256wgm=0`
+      //   退回 mma 做同 binary A/B。dQ 由 wgmma 寄存器累加、每 Q 块唯一 CTA 直写（无跨 CTA 原子）。
+      if (d256wgm != 0)
+        launch_bwd_wgmma<256, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                    d_dv_acc, maxlen, H, Hkv, scale, (int)causal, 0, d_cu);
+      else
+        launch_bwd_mma<256, 64, 32, 1, false, true>(mg, d_q, d_k, d_v, d_do, d_delta, d_lse,
+                                                    d_dq_acc, d_dk_acc, d_dv_acc, maxlen, H, Hkv,
+                                                    scale, (int)causal, 0, d_cu, 1);
       convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, dq, dk, dv, nq,
                                                   nkv);
     } else {
@@ -1404,7 +1413,7 @@ int main(int argc, char** argv) {
 #ifdef FA_WGMMA
     if (varlen_tma < 0) varlen_tma = 0;   // 本轮判决：varlen TMA 中性/偏负 ⇒ opt-in
     return run_varlen(dir, causal, iters, varlen_tma, lse_split, wg2ksplit, mla8w, mlaksplit,
-                      lse8w, lseocc, dump_prefix);
+                      lse8w, lseocc, d256wgm_opt, dump_prefix);
 #else
     fprintf(stderr, "VARLEN 需要 -DFA_WGMMA（sm_90a）构建\n");
     return 1;

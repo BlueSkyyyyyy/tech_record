@@ -2572,3 +2572,31 @@ fp8 同 shape 快 ~1.6–1.7×。
 **ncu**：与 fp16 O132 同源（1 CTA/SM、occ 6.25%、bound = 低 occupancy + 全局延迟）。
 见 `docs/01` §29、`docs/04` §57、`docs/08` §5.140；原始输出 `src/fa_bwd_o132_d256_varlen.out.txt`、
 `src/fa_bwd_o132_run_varlen_fp16bf16.out.txt`。
+
+## 6bg. O133-bf16（第 227 轮，**正结果，默认**）：`head_dim=256` 变长主 kernel 切 BM=64/BN=64 的 wgmma
+
+与 fp16 O133 逐字 dtype 同构（详见 `docs/01` §30）。承接 O132-bf16（变长 `D=256` 仍走通用
+`mma.sync`）。改动只在 device 的 `fa_bwd_bf16_wgmma_kernel` 加 `cu_seqlens`（`qbase`/`len`
+定界、`if (m0>=len) return`、所有 `b*S`→`qbase`、`S`→`len`）与 host 的 D==256 变长派发
+（默认 `launch_bwd_wgmma<256,true>(..., d_cu)`，`--d256wgm=0` 退回 O128 mma 做 A/B）；
+`cu_seqlens==nullptr` 时定长路径逐位不变。单/两文件 device `sync_onefile_device.py` identical=True。
+
+**数值**（`ours vs fp32 ref`，bf16 varlen；wgmma 与 mma 两条路径 `max_abs` 逐值相同、单/两文件一致）：
+b4_t3840 h8 causal 1.323e-2/1.471e-2/1.861e-2、b4_t4096 h8 causal 1.893e-2/1.848e-2/2.021e-2、
+b8_t2904 h8 causal 1.525e-2/1.560e-2/1.873e-2；b4_t3840 h16 full 5.712e-3/5.623e-3/3.098e-3、
+b5_t3968 h8 full 5.176e-3/3.743e-3/2.917e-3、b8_t2904 h8 full 1.267e-2/1.085e-2/1.145e-2
+——全部 bf16 噪声（~1e-2，与 O132-bf16 逐位一致）。一致性 gate `bf16 worst 7.812e-3`（容差 0.032）OK。
+
+**性能**（CUDA event total，同 binary A/B，iters=50；`sum_b 4HL²D`）：
+
+| case（bf16, D=256 varlen） | mma total (ms) | wgmma total (ms) | 提速 | mma TF | wgmma TF |
+|---|---|---|---|---|---|
+| b4_t4096 h8 causal | 1.2952 | **0.6736** | **1.92×** | 26.5 | 51.0 |
+| b4_t3840 h8 causal | 2.1256 | **0.9132** | **2.33×** | 21.5 | 50.0 |
+| b8_t2904 h8 causal（倾斜） | 1.4280 | **0.7863** | **1.82×** | 25.7 | 46.8 |
+| b4_t3840 h16 full | 5.2438 | **2.3344** | **2.25×** | 17.4 | 39.1 |
+| b5_t3968 h8 full | 2.9042 | **1.2574** | **2.31×** | 15.8 | 36.4 |
+| b8_t2904 h8 full | 2.0696 | **1.0045** | **2.06×** | 17.8 | 36.6 |
+
+与 fp16 逐项同量级。见 `docs/01` §30、`docs/04` §58、`docs/08` §5.141；
+原始输出 `src/fa_bwd_o133_d256_varlen_ab.out.txt`。
