@@ -1,0 +1,13 @@
+# O124: cuobjdump -sass -fun <fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>> (默认 kvtma 实例)
+# 指令直方图（与 F1 TE 对标一致）
+QGMMA   8      (仅 GEMM1/2；FA_WGMMA5=1 的 GEMM5 见不同实例)
+HMMA    96     (GEMM3/4 仍 mma.sync)
+LDSM    46
+UTMA    7
+REDG    32
+LDS     334
+STS     70
+F2FP    296
+PRMT    25
+MUFU    29
+BAR     9

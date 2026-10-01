@@ -868,8 +868,11 @@ __device__ __forceinline__ void red_add2(float* p, float a, float b) {
 
 // O67（第 147 轮）：把 dK/dV 的 `red_add2`（8B `red.global.add.v2.f32`）再提升到
 //   `red_add4`（16B `red.global.add.v4.f32`）。动机：默认 fp8 `kvtma` main 的 L2 墙里
-//   `red` 占 114.5M 扇区（74%），而每个 red **请求**固定吃 8 个 L2 扇区（mma.m16n8 累加器
-//   的 8 行分散在 8 个 32B 扇区）⇒ 扇区数正比于请求数。fp8 `m16n8k32` 的累加器里一个 quad
+//   `red` 占 114.5M 扇区（74%）。**O124（第 218 轮）修正**：L1 请求与 L2 扇区并不成正比——
+//   实测（S4096）L1 8.78M 请求 × 8 扇区 = **70.25M L1 扇区（已=每贡献下界 68.2M）**，而
+//   L2 侧 105.38M ≈ **12 扇区/请求（1.50×）**；且 `FA_RED_STORE`（plain store 同址）的
+//   L2 写扇区 107.2M 与 atomic red 105.4M 几乎相同 ⇒ **L2 扇区由写地址模式决定、与归约
+//   宽度/机制无关**，故加宽请求（v2→v4）改不动 L2 扇区（O67 实测亦如此）。fp8 `m16n8k32` 的累加器里一个 quad
 //   （`lane&3`=0..3）的 `c2=(lane&3)*2` 恰是 0/2/4/6 —— 同 row 的**连续 8 列**；把 quad 的
 //   float2 用 `__shfl_down_sync(...,1)` 拼成两个 float4（列 0-3 由 lane0 写、列 4-7 由 lane2
 //   写），请求数与 L2 扇区数再减半。调用者须保证 shfl 在整个 warp 上执行（在 `jg<len` guard

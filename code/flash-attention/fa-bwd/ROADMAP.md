@@ -3331,7 +3331,22 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百一十七轮）**：**O123——fp8 主 kernel 的 per-row fold scale 寄存器预取
+> **最新（第二百一十八轮）**：**O124——fp8 默认 main 的 `red` L1/L2 扇区分解 + MLA(D=512) 上
+> wgmma 探针（诊断/收口，默认一行未改）**。在真实默认 `kvtma` kernel 上做 `ncu` 分层：
+> `l1tex op_red` 请求 **8.78M** / 扇区 **70.25M（8/req，≈每贡献下界 68.2M，1.03×）**，而
+> `lts op_red` 扇区 **105.38M（12/req = 1.50× L1）** ⇒ **L1 已最优，1.5× 在 L1→L2 之间**，
+> 修正 O116「1.545× = 工作划分」的归因；`-DFA_RED_STORE=1`（plain store 同址）L2 写扇区
+> **107.21M ≈ atomic 105.38M** ⇒ 坐实「L2 `red` 与归约机制无关」。同 session TE
+> （`..._flash_bprop_wgmma_f8_..._64x64x128`）：Duration **258.7µs**、**L1 red≈0（TMA 4D reduce
+> 绕过 L1）**、L2 red **25.96M（1/4.06）**、read 1/2.40 ⇒ 差距=**贡献次数（持久 KV-owner）**。
+> MLA(D=512) 切 wgmma 探针（`--mlawgm`）被两处 `static_assert`（WGMMA⇒128t/2warp 与
+> WGMMA⇒HD∈{128,256}）拦死，需新写几何。⇒ 与 O116/O117/O122/O123 合并：**fp8 main 的 L1 贡献数
+> 与 L2 issue 都已在软硬件边界，正结果仍只剩换卡**。见 `docs/03` §145、`docs/08` §5.132。
+> **下一步候选（更新）**：① **换卡**；② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确
+> 的 `[ ]` 项）；③ 非 main `--det`/量化（O116 无余量）；④ 若换卡前再动 fp8：为 HD=512 新写 wgmma
+> 几何（128t/2warp）或放宽 body 断言（工程量大、prize 仅 MLA 尺寸）。
+>
+> **（第二百一十七轮）**：**O123——fp8 主 kernel 的 per-row fold scale 寄存器预取
 > （`sA`/`sds3`/`sds2`）——中性（默认开 `FA_SCALE_HOIST=1`，`=0` 可 A/B）**。承接 O122 ncu 的
 > 头号 stall `short_scoreboard`=1.86，检验其是否含「epilogue per-row scale 的重复 LDS」。改动后
 > **ncu 证 short_scoreboard 1.86→1.48（−20.4%）、指令 −1.25%**（预取确有效），**但 kernel 是
@@ -9143,6 +9158,30 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
   - **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙 + `short_scoreboard`/`wait` 的
     issue 墙均无软件解）；② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；
     ③ 非 main 的 `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）。
+
+- 2026-10-01（第二百一十八轮）：**O124——fp8 默认 main 的 `red` L1/L2 扇区分解 + MLA(D=512)
+  上 wgmma 探针（诊断/收口，默认一行未改）**。落实 O116『1.545× 来自工作划分』的复核。
+  - **证据一（L1 vs L2）**：S4096 causal H16 `fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>`：
+    `l1tex op_red` 请求 **8.78M** / 扇区 **70.25M（8.0/req，≈每贡献下界 68.2M，1.03×）**；
+    `lts op_red` 扇区 **105.38M（12.0/req = 1.50× L1）**；`op_read` 24.24M；L2 78.24%、1.37ms。
+    ⇒ **L1 已最优，1.5× 在 L1→L2 之间，不是贡献次数**（修正 O116 归因）。
+  - **证据二（机制无关）**：`-DFA_RED_STORE=1`（plain store 同址）L2 写扇区 **107.21M ≈ atomic
+    105.38M**、red=0、Duration 1.26ms ⇒ 坐实 O83/O159「L2 `red` 与归约机制无关」；atomic 在
+    L1 请求粒度更优（8.78M vs store 100.9M）；plain store 快的 ~8% = 原子语义成本（O83 吻合）。
+  - **证据三（同 session TE）**：`..._flash_bprop_wgmma_f8_..._64x64x128`（grid=132/384t）Duration
+    **258.7µs**、**L1 red 3,168/3,168（TMA 4D reduce 绕过 L1）**、L2 red **25.96M（1/4.06）**、
+    read 10.08M（1/2.40）⇒ 差距=**贡献次数（持久 KV-owner）**，非机制；要接近只能放大 BM /
+    KV-owner，已被 O83/O91/O157/O160/O168 判「本卡无软件解」。
+  - **探针（MLA D=512 wgmma）**：fp8 主 kernel 仅剩 MLA 走 mma（`WGMMA=false` 写死）。试
+    `--mlawgm=1` → 编译期被 `static_assert(WGMMA ⇒ NTH==THREADS&&NWAR==WN)`（只支持 128t/2warp，
+    MLA 用 256t/8-warp）与 `static_assert(WGMMA ⇒ HD∈{128,256})`（HD=512 未接线）拦死；**默认
+    一行未改、探针未留源码**。⇒ 需新写 HD=512 wgmma 几何，非「只换指令」。
+  - **判决/下一步候选（更新）**：与 O116/O117/O122/O123 合并——fp8 默认 main 的 **L1 贡献数
+    （工作划分）与 L2 issue 都已在软硬件边界，正结果仍只剩换卡**；② 覆盖型 backlog：
+    **fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；③ 非 main `--det`/量化（O116 无余量）。
+    见 `docs/03` §145、`docs/08` §5.132；原始输出
+    `src/fp8/fa_bwd_fp8_o124_ncu_{ours,redstore,te}_s4096.out.txt`、
+    `..._o124_sass_hist.out.txt`、`..._o124_mlawgm_probe.out.txt`。
 
 ## 灵感 / backlog
 
