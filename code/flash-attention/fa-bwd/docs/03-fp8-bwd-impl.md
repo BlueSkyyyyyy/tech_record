@@ -12641,3 +12641,87 @@ lts__t_{requests,sectors}_op_red.sum,lts__t_sectors_op_read.sum \
 原始输出：`src/fp8/fa_bwd_fp8_o125_ncu_ours_s4096.out.txt`、`..._o125_ncu_bulkred_s4096.out.txt`、
 `..._o125_ncu_te_s4096.out.txt`、`..._o125_bulkred_timing_s4096.out.txt`、
 `..._o125_default_s4096.out.txt`（timing + 对拍）。
+
+## 147. O126（第 220 轮）：fp8 主 kernel「最后一条 mma 路径」——MLA（D=512）的 **wgmma 几何** —— **负结果**（opt-in `--mlawgm`）
+
+O124 的探针（§145）判定：fp8 主 kernel 里唯一仍走 `mma.sync` 的是 **MLA（HD=512）**，而它被
+两处 `static_assert`（`WGMMA⇒128t/2warp`、`WGMMA⇒HD∈{128,256}`）挡在门外；当时记为
+「需新写几何、工程量大、prize 仅 MLA 尺寸」。本轮把这个几何**真正实现并实测 A/B**，把这条
+「最后一条 mma 路径切 wgmma」的方向收口（**负结果，默认一行未改、代码 opt-in 保留**）。
+
+### 147.1 实现
+
+* **device（`fa_bwd_fp8_kernels.cuh`，单/两文件逐字一致，`sync_onefile_device.py` 核对
+  `identical: True`）**：把 `fp8_mma_body` 的 HD 断言放开到 512——
+  `static_assert(!WGMMA || (HD == 128 || HD == 256 || HD == 512))`。依据：SW128 helper
+  （`sw128_off_fp8`/`sw128_k32_addr`/`make_desc_sw128_fp8`）与 `wgmma_qkt64_fp8`/
+  `wgmma_mn32_issue` 本就按 `SBO=(HD/128)*1024`、k32 步进编写（O84 已放开 256），HD 为 128
+  的整数倍即正确；`kQChunk = TMA && HD>128` 仍成立，**非 TMA 的 HD=512 走 rg-major SW128**，
+  与 O84 的 D=256 同一路径。GEMM3/4/5 仍 mma（逐 `NTW=WN*64=128` 列、`HD/NTW=4` 遍）。
+* **host（`fa_bwd_fp8_main.cu` / `fa_bwd_fp8_mma_onefile.cu`）**：新增 CLI `--mlawgm=0/1`
+  （默认 0），在定长 D=512 主 kernel 派发前插入 opt-in 分支
+  `launch_bwd_main<512,64,32,false,/*WGMMA=*/true,true,true,true>`（`NTH=THREADS=128`、
+  `NWAR=WN=2`，即 **4 warp = 1 个 warpgroup**；K/V/dO 走 `cp.async` 非 TMA）。
+  `--mlawgm=0` 逐字走历史 8-warp/256 线程 + kvpipe 默认档。
+* SASS（`cuobjdump -sass`）确认新实例
+  `fa_bwd_fp8_mma_kernel<512,64,32,0,1,...128,2>` = **32×QGMMA + 384×HMMA**
+  （默认 8-warp 档 = 0×QGMMA）。
+
+### 147.2 数值（护栏内，仅跨 CTA 归约次序噪声）
+
+| case | 路径 | max_abs dq/dk/dv | relL2 vs fp32 ref dq/dk/dv |
+|---|---|---|---|
+| S512 H2 causal | mma（默认） | 2.287/2.252/3.360e-1 | — |
+| S512 H2 causal | **wgmma** | 2.289/2.254/3.360e-1 | — |
+| S1024 H2 causal | mma | 2.228/3.311/3.611e-1 | 8.163/8.564/6.507% |
+| S1024 H2 causal | **wgmma** | 2.237/3.311/3.601e-1 | 8.163/**8.583**/6.504% |
+| S4096 H2 causal | mma | 1.857/2.544/3.790e-1 | 8.385/8.483/6.623% |
+| S4096 H2 causal | **wgmma** | 1.860/2.523/3.791e-1 | 8.389/8.489/6.623% |
+
+wgmma-vs-mma 的 max_abs 差 ≤2e-3、relL2 差 ≤0.02% ⇒ **同一精度档**（都在
+8.2/8.3/6.5%±0.3 护栏内）。单/两文件在 `--mlawgm=1` 下逐位一致（S512 max_abs 同）。
+
+### 147.3 性能（同 binary A/B，event，iters=100）：**0.67–0.70×，负结果**
+
+| case | mma 默认 main | **wgmma main** | 比值 | total（mma→wgmma） |
+|---|---|---|---|---|
+| S512 H2 causal | 0.0465 ms | 0.0682 ms | **0.682×** | 0.0637→0.0870 ms |
+| S1024 H2 causal | 0.1142 ms | 0.1633 ms | **0.699×** | 0.1421→0.2131 ms |
+| S4096 H2 causal | 1.2386 ms | 1.8393 ms | **0.673×** | 1.3401→1.9701 ms |
+
+### 147.4 ncu 证据（S4096 H2 causal，同 binary）
+
+| kernel | Duration | regs | smem | warps active | L2% | L1/TEX% | SM% | short_sb | wait |
+|---|---|---|---|---|---|---|---|---|---|
+| 默认 8-warp mma+kvpipe | **1.25 ms** | 245 | 229.9 KB | **12.50%** | 83.0% | 49.7% | 31.4% | 1.39 | 1.18 |
+| **wgmma（4-warp/1 WG）** | **1.90 ms** | **255** | 205.8 KB | **6.25%** | 54.7% | 31.3% | 17.7% | 0.70 | 1.52 |
+
+**机制**：切 wgmma 后 GEMM1/2 不再需要 `ldmatrix`/HMMA，`short_scoreboard` 1.39→0.70、
+L1/TEX 49.7→31.3%、L2 83.0→54.7%——**但代价是 warp 数腰斩**（8→4）。原因：`fp8_mma_body` 的
+wgmma 路径是 **warpgroup 级、锁死 128 线程/1 个 warpgroup**（`static_assert(WGMMA==false ||
+(NTH==THREADS && NWAR==WN))`）；而默认 MLA 档早已用 **2 个 warpgroup（8 warp）+ kvpipe** 把
+延迟藏住（`wait` 1.52 vs 1.18）。wgmma 的 issue 节省**填不满**少掉的一半 warp 所暴露的
+延迟，且寄存器反而顶满 **255**（比 mma 245 更高），仍是 **1 CTA/SM（occ 6.25%）**。⇒ 与
+O39/O83/O91/F6/F7「本卡 fp8 的 MLA / BM≥128 撞 1-CTA/SM 的寄存器墙」同源。
+
+### 147.5 结论与复现
+
+* **结论**：MLA（D=512）主 kernel 切 wgmma **数值正确但慢 0.67–0.70×**；O124 候选 ④ 的可实现性
+  已确认、**性能收益不存在**。fp8 主 kernel 的「wgmma 化」至此覆盖到 **最后一条 mma 路径**，
+  统一收口为：**正结果只剩换卡**（更大 smem/寄存器，或允许 wgmma 跨多 warpgroup 的几何）。
+  代码保留 `--mlawgm` opt-in（默认 0，逐位安全），不影响任何现有路径。
+* **复现**：
+
+```bash
+# 编译（Hopper 默认档）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp8/fa_bwd_fp8_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h2_d512_causal_fp8 --mlawgm=1 --iters=100
+# ncu（只看 HD=512 wgmma 主 kernel）
+ncu --kernel-name-base mangled --kernel-name regex:Li512ELi64ELi32ELb0ELb1 -c 1 \
+  --metrics gpu__time_duration.sum,launch__registers_per_thread,... ./fa_bwd_fp8_main.out -- --mlawgm=1
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o126_mlawgm_ab.out.txt`（3 shape × m=0/1）、
+`..._o126_ncu_mma_s4096.out.txt`、`..._o126_ncu_wgmma_s4096.out.txt`、
+`..._o126_onefile_s512.out.txt`（单文件）。

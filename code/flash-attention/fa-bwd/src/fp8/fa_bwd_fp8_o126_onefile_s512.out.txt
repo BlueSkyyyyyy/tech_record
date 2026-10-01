@@ -1,0 +1,7 @@
+# O126（第 220 轮）：单文件 fa_bwd_fp8_mma_onefile.cu 的 --mlawgm=1（MLA D=512 wgmma）——与两文件逐位一致
+# 构建：-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda
+[timing] total(quant+pre+main+cvt) 0.0867 ms  12.39 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0052 ms | preprocess 0.0107 ms | main 0.0676 ms | convert 0.0032 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.289e-01  max_rel=1.163e+02
+  dk   vs ref: max_abs=2.254e-01  max_rel=7.679e+01
+  dv   vs ref: max_abs=3.360e-01  max_rel=5.810e+01

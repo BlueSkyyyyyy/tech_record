@@ -3049,7 +3049,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   //   `SBO=(HD/128)*1024`、k32 步进 `(s>>2)*1024+(s&3)*32` 编写，HD 为 128 的整数倍即正确
   //   （K=256 的 canonical 布局 [row/8][2 k-blocks][8][128]，rg 跨步 = 2048 = SBO）。此前只
   //   在 HD=128 实例化过（D=256 走 mma 后端），故加锁保守。GEMM3/4/5 仍 mma（见 kWg5/kWg34）。
-  static_assert(!WGMMA || (HD == 128 || HD == 256), "WGMMA 主 kernel 只做 HD=128/256");
+  // O126（第 220 轮）：放开 WGMMA 到 HD=512（MLA）——SW128 helper / `wgmma_qkt64_fp8` /
+  //   `wgmma_mn32_issue` 本就按 `SBO=(HD/128)*1024`、k32 步进编写，HD 为 128 的整数倍即正确
+  //   （O84 已放开 256）。HD=512 的 GEMM1/2 用 128 线程/2 warpgroup 几何（NTH=THREADS/NWAR=WN），
+  //   GEMM3/4/5 仍 mma（逐 NTW=128 列、HD/NTW=4 遍）。由 `--mlawgm` opt-in 触发 A/B。
+  static_assert(!WGMMA || (HD == 128 || HD == 256 || HD == 512),
+                "WGMMA 主 kernel 只做 HD=128/256/512");
   static_assert(!KVTMA || (TMA && WGMMA && HD == 128),
                 "K/V TMA 只在 Q/dO-TMA + WGMMA + HD=128 路径");
   // O119：multicast 只对「HSWAP（head=blockIdx.x）+ KVTMA」实例化（cluster 沿 x 分组 Q 头）。

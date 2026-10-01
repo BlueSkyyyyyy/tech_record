@@ -828,8 +828,11 @@ __device__ __forceinline__ void red_add2(float* p, float a, float b) {
 
 // O67（第 147 轮）：把 dK/dV 的 `red_add2`（8B `red.global.add.v2.f32`）再提升到
 //   `red_add4`（16B `red.global.add.v4.f32`）。动机：默认 fp8 `kvtma` main 的 L2 墙里
-//   `red` 占 114.5M 扇区（74%），而每个 red **请求**固定吃 8 个 L2 扇区（mma.m16n8 累加器
-//   的 8 行分散在 8 个 32B 扇区）⇒ 扇区数正比于请求数。fp8 `m16n8k32` 的累加器里一个 quad
+//   `red` 占 114.5M 扇区（74%）。**O124（第 218 轮）修正**：L1 请求与 L2 扇区并不成正比——
+//   实测（S4096）L1 8.78M 请求 × 8 扇区 = **70.25M L1 扇区（已=每贡献下界 68.2M）**，而
+//   L2 侧 105.38M ≈ **12 扇区/请求（1.50×）**；且 `FA_RED_STORE`（plain store 同址）的
+//   L2 写扇区 107.2M 与 atomic red 105.4M 几乎相同 ⇒ **L2 扇区由写地址模式决定、与归约
+//   宽度/机制无关**，故加宽请求（v2→v4）改不动 L2 扇区（O67 实测亦如此）。fp8 `m16n8k32` 的累加器里一个 quad
 //   （`lane&3`=0..3）的 `c2=(lane&3)*2` 恰是 0/2/4/6 —— 同 row 的**连续 8 列**；把 quad 的
 //   float2 用 `__shfl_down_sync(...,1)` 拼成两个 float4（列 0-3 由 lane0 写、列 4-7 由 lane2
 //   写），请求数与 L2 扇区数再减半。调用者须保证 shfl 在整个 warp 上执行（在 `jg<len` guard
@@ -3006,7 +3009,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
   //   `SBO=(HD/128)*1024`、k32 步进 `(s>>2)*1024+(s&3)*32` 编写，HD 为 128 的整数倍即正确
   //   （K=256 的 canonical 布局 [row/8][2 k-blocks][8][128]，rg 跨步 = 2048 = SBO）。此前只
   //   在 HD=128 实例化过（D=256 走 mma 后端），故加锁保守。GEMM3/4/5 仍 mma（见 kWg5/kWg34）。
-  static_assert(!WGMMA || (HD == 128 || HD == 256), "WGMMA 主 kernel 只做 HD=128/256");
+  // O126（第 220 轮）：放开 WGMMA 到 HD=512（MLA）——SW128 helper / `wgmma_qkt64_fp8` /
+  //   `wgmma_mn32_issue` 本就按 `SBO=(HD/128)*1024`、k32 步进编写，HD 为 128 的整数倍即正确
+  //   （O84 已放开 256）。HD=512 的 GEMM1/2 用 128 线程/2 warpgroup 几何（NTH=THREADS/NWAR=WN），
+  //   GEMM3/4/5 仍 mma（逐 NTW=128 列、HD/NTW=4 遍）。由 `--mlawgm` opt-in 触发 A/B。
+  static_assert(!WGMMA || (HD == 128 || HD == 256 || HD == 512),
+                "WGMMA 主 kernel 只做 HD=128/256/512");
   static_assert(!KVTMA || (TMA && WGMMA && HD == 128),
                 "K/V TMA 只在 Q/dO-TMA + WGMMA + HD=128 路径");
   // O119：multicast 只对「HSWAP（head=blockIdx.x）+ KVTMA」实例化（cluster 沿 x 分组 Q 头）。
@@ -8056,6 +8064,9 @@ int main(int argc, char** argv) {
   // O51：MLA（D=512）主 kernel 的 K/V cp.async 回填流水。-1=自动（默认开），0/1 由 `--mlakvp=`
   //   强制（同 binary A/B；需 8-warp 几何）。
   int mla_kvp_opt = -1;
+  // O126（第 220 轮）：MLA（D=512）主 kernel 是否走 wgmma（GEMM1/2 换 wgmma、Q/dO/K/V 存 SW128，
+  //   非 TMA、cp.async 载入；128 线程/2 warpgroup 几何）。0=默认 mma（历史逐位），1=wgmma（A/B）。
+  int mlawgm_opt = 0;
   // O58：MLA（D=512）varlen LSE 的几何开关。`--lseocc=5/6`（2 CTA/SM：PIPE0/LBN32 或
   //   PIPE1/LBN16）、`--lse8w=1`（8-warp/256 线程/LBM=128/LBN=32）；默认 causal 走 cfg6、
   //   full 走 O54 旧路。`--lseocc=4` 退回 causal 旧默认（PIPE1/LBN64）做 A/B。
@@ -8112,6 +8123,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--mla8w=", 0) == 0) mla8w_opt = atoi(a.c_str() + 8);
     else if (a.rfind("--mlakvp=", 0) == 0) mla_kvp_opt = atoi(a.c_str() + 9);
     else if (a == "--mlakvp") mla_kvp_opt = 1;
+    else if (a.rfind("--mlawgm=", 0) == 0) mlawgm_opt = atoi(a.c_str() + 9);
+    else if (a == "--mlawgm") mlawgm_opt = 1;
     else if (a.rfind("--lseocc=", 0) == 0) lseocc_opt = atoi(a.c_str() + 9);
     else if (a.rfind("--lse8w=", 0) == 0) lse8w_opt = atoi(a.c_str() + 8);
     else if (a == "--lse8w") lse8w_opt = 1;
@@ -9075,6 +9088,16 @@ int main(int argc, char** argv) {
     // O51：8-warp 档下 K/V 默认走 cp.async 回填流水（`--mlakvp=0` 退回同步载入 A/B）。
     // O105：定长 causal MLA 也透传 O89 的 per-head LPT 反转表 `d_mrev`（grid/head 排布不变）。
     const bool mla_kvp_sel = (mla_kvp_opt < 0) ? true : (mla_kvp_opt != 0);
+#ifdef FA_WGMMA
+    // O126（第 220 轮）：MLA（D=512）主 kernel 的 wgmma 路径 A/B——GEMM1/2 换 wgmma、Q/dO/K/V
+    //   存 SW128（cp.async，非 TMA），128 线程/2 warpgroup 几何（NTH/NWAR 取默认）。opt-in。
+    if (mlawgm_opt) {
+      launch_bwd_main<512, 64, 32, false, true, true, true, true>(
+          mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
+          d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
+      return;
+    }
+#endif
     if (mla8w_sel) {
       if (prel_sel && mla_kvp_sel)
         launch_bwd_main_kvpipe<512, 64, 32, false, true, true, true, 256, 4>(

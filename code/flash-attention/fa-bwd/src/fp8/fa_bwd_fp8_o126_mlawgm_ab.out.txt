@@ -1,0 +1,47 @@
+# O126（第 220 轮）：MLA（D=512）主 kernel 的 wgmma 路径（--mlawgm）A/B —— 负结果
+# 构建：-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda（Hopper 默认档）
+# 口径：[timing] 为 event 计时（iters=100，min 未取）；[compare] 为 ours vs fp32 ref max_abs。
+# kernel：mlawgm=0 → fa_bwd_fp8_mma_kernel<512,64,32,0,0,...,256,4,KVPIPE=1>（默认 8-warp mma）
+#         mlawgm=1 → fa_bwd_fp8_mma_kernel<512,64,32,0,1,1,1,1,128,2,...>（4-warp/1 WG，GEMM1/2 QGMMA）
+
+############ case=b1_s512_h2_d512_causal_fp8
+---- mlawgm=0 ----
+[timing] total(quant+pre+main+cvt) 0.0637 ms  16.86 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0051 ms | preprocess 0.0107 ms | main 0.0465 ms | convert 0.0014 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.287e-01  max_rel=1.154e+02
+  dk   vs ref: max_abs=2.252e-01  max_rel=7.676e+01
+  dv   vs ref: max_abs=3.360e-01  max_rel=5.824e+01
+---- mlawgm=1 ----
+[timing] total(quant+pre+main+cvt) 0.0870 ms  12.34 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0053 ms | preprocess 0.0109 ms | main 0.0682 ms | convert 0.0027 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.289e-01  max_rel=1.163e+02
+  dk   vs ref: max_abs=2.254e-01  max_rel=7.679e+01
+  dv   vs ref: max_abs=3.360e-01  max_rel=5.810e+01
+
+############ case=b1_s1024_h2_d512_causal_fp8
+---- mlawgm=0 ----
+[timing] total(quant+pre+main+cvt) 0.1421 ms  30.23 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0114 ms | preprocess 0.0162 ms | main 0.1142 ms | convert 0.0003 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.228e-01  max_rel=5.071e+01
+  dk   vs ref: max_abs=3.311e-01  max_rel=5.289e+01
+  dv   vs ref: max_abs=3.611e-01  max_rel=5.323e+01
+---- mlawgm=1 ----
+[timing] total(quant+pre+main+cvt) 0.2131 ms  20.16 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0115 ms | preprocess 0.0159 ms | main 0.1633 ms | convert 0.0225 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=2.237e-01  max_rel=5.073e+01
+  dk   vs ref: max_abs=3.311e-01  max_rel=5.298e+01
+  dv   vs ref: max_abs=3.601e-01  max_rel=5.324e+01
+
+############ case=b1_s4096_h2_d512_causal_fp8
+---- mlawgm=0 ----
+[timing] total(quant+pre+main+cvt) 1.3401 ms  51.28 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0533 ms | preprocess 0.0506 ms | main 1.2386 ms | convert -0.0024 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=1.857e-01  max_rel=1.009e+02
+  dk   vs ref: max_abs=2.544e-01  max_rel=6.042e+01
+  dv   vs ref: max_abs=3.790e-01  max_rel=4.231e+01
+---- mlawgm=1 ----
+[timing] total(quant+pre+main+cvt) 1.9701 ms  34.88 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.0534 ms | preprocess 0.0500 ms | main 1.8393 ms | convert 0.0273 ms (cvt_on=0, qfuse=1, dfuse=1)
+  dq   vs ref: max_abs=1.860e-01  max_rel=1.006e+02
+  dk   vs ref: max_abs=2.523e-01  max_rel=6.584e+01
+  dv   vs ref: max_abs=3.791e-01  max_rel=4.211e+01
