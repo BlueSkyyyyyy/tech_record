@@ -2377,3 +2377,31 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 见 `docs/03` §128；原始输出 `src/fp8/fa_bwd_fp8_o106_ab.out.txt`、
 `..._o106_ncu_b8_t2904_h16_d128.out.txt`、`..._o106_ncu_b3_t1792_h2_d512.out.txt`、
 `..._o106_consistency.out.txt`、`..._o106_ci.out.txt`。
+
+### 5.115 第 201 轮（O107）：fp8 变长 causal 主 kernel 的 ksplit 重标定（D=128/D=512）—— **正结果（默认）**
+
+- **动机**：O96/O97/O98/O99/O100 复核了定长/变长 full 与 causal D=256 的 ksplit，但 **causal 变长
+  D=128/D=512 一直用 O29 原始档、从未单独测量**。O29 的 D=128 target 固定 8192，当
+  `base_grid > target` 时 `kk<1` ⇒ **欠切到 k=1**（O106 A/B 里 b5_t3968 默认就是 k=1）；
+  D=512 的 `target=maxlen/2` 同理。
+- **改动（纯 host、device 一行未改、单/两文件同源）**：7 个 dumped casual 变长 shape 全扫
+  k∈[1,16]（150–250 iters，3×）。
+  · **D=128**：`auto_k = max(auto_k, 3)`（只抬下限，对齐 O100 full 的 k=3；**不按 nblk 封顶**）。
+  · **D=512**：`target` 从 `maxlen/2` 提到 `maxlen`、`k = pow2floor(min(8, maxlen/base_grid))`、
+    下限 2 ⇒ b3/b1 均取 8。
+- **性能（同 binary A/B，iters=250，3× 复测）**：**D=128 b5_t3968 1.102× / b8_t2904 1.062×**；
+  **D=512 b3_t1792 1.113× / b1_t512 1.060×**；b1_t512（k=16）、b4_t3840（k=4）auto 未变 ⇒ 中性。
+- **ncu（main, launch-skip 1/count 1）**：b5 D=128 **1.42→1.28ms（1.109×）**、`op_read`
+  19.29M→**23.50M**、`op_red` 73.1→79.0M、L2 53.6→**65.7%**；b8 **589.5→546.1µs（1.079×）**、
+  L2 54.4→61.1%；b3 D=512 **182.9→163.0µs（1.122×）**、**`op_red` 8,945,664 一字不变**、L2
+  50.2→56.5% ⇒ **机制 = 加 ksplit 换并行度/占用率**（`op_read` 上升、per-CTA K 循环变短），
+  **不是** O89/O105/O106 的纯尾波。
+- **精度/回归**：`ours vs fp32 ref` max_abs 与新/旧 ksplit **逐位相同**；relL2 D=128
+  8.11–8.25/8.21–8.37/6.20–6.38%、D=512 8.42/8.48/6.47%（护栏内）。单/两文件一致性 gate
+  **worst 5.722e-06 OK**；**全量 `--ci --dtype fp8 --hopper`（45 case）gate OK**、
+  `--check docs/04` OK（214 行）；定长与 full 路径逐字不变。
+- **判决**：正结果、默认。`op_red` 主体墙仍无软件解（见「阻塞」）；下一步候选：① 换卡；
+  ② 把同类复核推广到 fp16/bf16 的 causal 变长；③ 覆盖型 backlog（D=256 变长 / MLA 降 smem）。
+
+见 `docs/03` §129；原始输出 `src/fp8/fa_bwd_fp8_o107_ab.out.txt`、`..._o107_ncu.out.txt`、
+`..._o107_ci.out.txt`。

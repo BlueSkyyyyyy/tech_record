@@ -3275,7 +3275,21 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第一百九十九轮）**：**O105——fp8 D=512（MLA）causal 的 per-head LPT（`mrev`）
+> **最新（第二百零一轮）**：**O107——fp8 变长 causal 主 kernel 的 ksplit 重标定（D=128/D=512）
+> ——正结果，默认**。把 O96–O100 的 ksplit 复核补齐到此前从未单独测量的 **causal 变长
+> D=128/D=512**（O106 只加了 mrev）。纯 host、device 一行未改、单/两文件同源：**D=128
+> `auto_k=max(auto_k,3)`**（O29 的固定 target 在 `base_grid>target` 时欠切到 1；b1 的 k=16 不动、
+> 不按 nblk 封顶）；**D=512 `target` 由 `maxlen/2` 提到 `maxlen`、`k=pow2floor(min(8,maxlen/base))`、
+> 下限 2**（b3/b1 均取 8）。**性能（同 binary，iters=250，3×）**：D=128 b5_t3968 **1.102×**、
+> b8_t2904 **1.062×**；D=512 b3_t1792 **1.113×**、b1_t512 **1.060×**。ncu 证机制 = **加 ksplit 换
+> 并行度**（`op_read` 升、`op_red` D512 一字不变/D128 略升、Duration 降 8–12%、L2 利用率升）。
+> relL2 与新档逐位同量级（护栏内）、单/两文件 gate 5.722e-6 OK、`--ci --dtype fp8 --hopper` 全绿、
+> `--check docs/04` OK。见 `docs/03` §129、`docs/08` §5.115。
+> **下一步候选**：① **换卡**（`op_red` 主体墙仍唯一真杠杆，本卡无软件解，见「阻塞」）；
+> ② **把同一 causal 变长 ksplit 复核推广到 fp16/bf16**（其 varlen 主 kernel 只有 O43 的小 grid
+> ksplit，没有 D=128/512 的 causal 变长档）；③ 覆盖型 backlog（`D=256` 变长支持、MLA 降 smem）。
+>
+> **（第一百九十九轮）**：**O105——fp8 D=512（MLA）causal 的 per-head LPT（`mrev`）
 > ——正结果，默认**。落实 O104「下一步候选 ③」里不撞 smem 墙的一条。O104 把 O93 的跨 head
 > 全局 LPT（`HSWAP`，grid 轴对调）推广到 D=256，但大 `base_grid` 下因 L2 局部性受损变负；
 > 而 **D=512（MLA）causal 一直没接任何 LPT**（`d_mrev=nullptr`）。MLA 每块工作量大、1 CTA/SM、
@@ -8382,6 +8396,33 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     （见「阻塞」）。见 `docs/03` §128、`docs/08` §5.114；原始输出
     `src/fp8/fa_bwd_fp8_o106_ab.out.txt`、`..._o106_ncu_b8_t2904_h16_d128.out.txt`、
     `..._o106_ncu_b3_t1792_h2_d512.out.txt`、`..._o106_consistency.out.txt`、`..._o106_ci.out.txt`。
+
+- 2026-10-01（第二百零一轮）：**O107——fp8 变长 causal 主 kernel 的 ksplit 重标定
+  （D=128/D=512）——正结果，默认**。把 O96/O97（定长 full）、O98/O99/O100（变长 full / causal
+  D=256）的 ksplit 复核补齐到此前**从未单独测量**的 causal 变长 D=128/D=512（O106 只在这条路上
+  加了 mrev、没动 ksplit）。O29 的 D=128 target 固定 8192，当 `base_grid>target` 时 `kk<1`
+  ⇒ **欠切到 k=1**；D=512 的 `target=maxlen/2` 同理。
+  - **改动（纯 host、device 一行未改、单/两文件同源）**：7 个 dumped casual 变长 shape 全扫
+    k∈[1,16]（150–250 iters、3×）。**D=128**：`auto_k = max(auto_k, 3)`（只抬下限、对齐 O100
+    full 的 k=3；**不按 nblk 封顶**——b1 D128 的 k=16>nblk=8 实测仍最优）。**D=512**：`target`
+    从 `maxlen/2` 提到 `maxlen`、`k = pow2floor(min(8, maxlen/base_grid))`、下限 2 ⇒ b3/b1 均取 8。
+    `--ksplit=K` 显式给出时不覆盖。
+  - **性能（同 binary A/B，iters=250，3× 复测）**：**D=128 b5_t3968(H32·kv8) 1.102×**
+    （1.6929→1.5364ms）、**b8_t2904 1.062×**（0.7335→0.6909）；
+    **D=512 b3_t1792 1.113×**（0.2354→0.2115）、**b1_t512 1.060×**（0.0760→0.0717）；
+    b1/b4（auto 未变）中性。**这是 O106 之后最大的一组 scheduler 收益**。
+  - **ncu（main，launch-skip 1/count 1）**：b5 D=128 Duration **1.42→1.28ms（1.109×）**、
+    `op_read` 19.29M→**23.50M**、`op_red` 73.1→79.0M、L2 54%→**66%**；b8 **589.5→546.1µs
+    （1.079×）**、L2 54.4→61.1%；b3 D512 **182.9→163.0µs（1.122×）**、**`op_red` 8,945,664
+    一字不变**、L2 50.2→56.5%。⇒ 机制 = **加 ksplit 换并行度/占用率**（`op_read` 升、per-CTA
+    K 循环变短），**不是** O89/O105/O106 的纯尾波。
+  - **数值/回归（护栏）**：`ours vs fp32 ref` max_abs 与新/旧 ksplit **逐位相同**（只改 atomic
+    次序）；relL2 D=128 8.11–8.25/8.21–8.37/6.20–6.38%、D=512 8.42/8.48/6.47%（护栏内）；
+    单/两文件一致性 gate **worst 5.722e-06 OK**；**全量 `--ci --dtype fp8 --hopper`（45 case）
+    gate OK**、`--check docs/04` **OK（214 行）**；定长与 full 路径逐字不变。
+  - **判决：正结果、默认开启**。`op_red`（dK/dV 主体墙）仍无软件解（见「阻塞」）。见 `docs/03`
+    §129、`docs/08` §5.115；原始输出 `src/fp8/fa_bwd_fp8_o107_ab.out.txt`、
+    `..._o107_ncu.out.txt`、`..._o107_ci.out.txt`。
 
 ## 灵感 / backlog
 
