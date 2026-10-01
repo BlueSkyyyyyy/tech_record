@@ -2658,3 +2658,22 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 - **原始输出**：`src/fp8/fa_bwd_fp8_o116_knob_sweep.out.txt`、
   `src/fp8/fa_bwd_fp8_o116_ncu_ours_main_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o116_ncu_te_main_s4096.out.txt`；工具 `harness/fa_fp8_main_sweep.py`。
+
+### 5.125 第 211 轮（O117）：fp8 主 kernel 平台期**最终收口**（小 shape host 旋钮 + 更细 ksplit 探针）—— **负结果（默认一行未改）**
+
+- **动机**：O116（§5.124）把 5 类 host 旋钮在 4 个 S≥1024 shape 上判定默认最优，但**没覆盖
+  小 shape（S512、D=256）与 ksplit=8/32/64 更细档**。本轮补这一刀并用 fresh 同 session ncu 复证。
+- **结果**：默认 auto ksplit 在 MHA/GQA/MQA × D=128/256 × S512–4096 **全部最优**；
+  `b1_s512_h16_d128` k=64 与 default 齐平（0.0785 vs 0.0767）、k=8/32 的 2× 波动系共享 GPU
+  邻容器负载（k=64 两次一致）；`b1_s512_h8_d256` 各档全在 ~1.6% 噪声内；S1024 GQA/MQA 与
+  S4096 flagship 的 k=8/32/64 单调更慢（同 O116）。⇒ **host 旋钮前沿在所有 shape 尺度扫清。**
+- **fresh ncu（ours vs TE，S4096 causal）**：ours `kvtma<128,64,32>`（3 CTA/SM/128 线程）
+  **1.38ms / `op_red` 105,381,888 / `op_read` 24,238,059 / `sm inst` 617,655,296 / L2 78.09%**
+  vs TE（1 CTA/SM/384 线程）**257.63µs / 25,957,024 / 10,197,700 / 108,334,714 / 70.97%** ——
+  同 BM=64，差距全在搬运量（red **4.06×**、read **2.38×**、指令 **5.70×**、时间 **5.36×**）。
+- **判决**：**负结果、默认一行未改**。`red` 主体墙 = 本卡工作划分的硬件下界。**唯一未试的
+  搬运量杠杆 = TMA multicast + cluster 共享 K/V 读**（直打 read 2.38× 差距，工程量大）；否则
+  换卡 / 覆盖型 backlog（fp16/bf16 `head_dim=256`）。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o117_smallshape_sweep.out.txt`、
+  `src/fp8/fa_bwd_fp8_o117_ncu_ours_main_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o117_ncu_te_main_s4096.out.txt`、`src/fp8/fa_bwd_fp8_o117_summary.out.txt`。

@@ -3304,7 +3304,21 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百一十轮）**：**O116——fp8 主 kernel 的 host/运行期旋钮系统复核（ksplit / hswap /
+> **最新（第二百一十一轮）**：**O117——fp8 主 kernel 平台期最终收口（小 shape host 旋钮覆盖 +
+> 更细 ksplit 探针），负结果、默认一行未改**。把 O116 的 host 旋钮复核补到**小 shape**
+> （S512 D=128/D=256）与 **ksplit=8/32/64** 更细档：默认 auto 在 MHA/GQA/MQA × D=128/256 ×
+> S512–4096 **全部最优**（无新档转正；S512 的个别 2× 波动系邻容器负载）。**fresh 同 session ncu
+> （S4096 causal）**：ours `kvtma<128,64,32>`（3 CTA/SM/128 线程）**1.38ms / `op_red` 105.38M /
+> `op_read` 24.24M / 617.7M 指令** vs TE `..._flash_bprop_wgmma_f8_..._64x64x128`（1 CTA/SM/384
+> 线程）**257.6µs / 25.96M / 10.20M / 108.3M** —— 同 BM=64，差距全在搬运量（red 4.06×、read
+> 2.38×、指令 5.70×、时间 5.36×）。数值护栏：ours vs ref `max_abs` 2.635/2.644/3.216e-1。
+> 见 `docs/08` §5.125、`docs/03` §138；原始输出 `src/fp8/fa_bwd_fp8_o117_*`。
+> **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙无软件解）；② **TMA multicast +
+> cluster 共享 K/V 读**（唯一未试的搬运量杠杆：2-CTA cluster 用 `cp.async.bulk.tensor` 的
+> `.multicast::cluster` 把 K/V 读减半，直打 read 2.38× 差距；`red` 不受影响，工程量大）；③
+> 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；④ 非 main `--det`/量化。
+>
+> **（第二百一十轮）**：**O116——fp8 主 kernel 的 host/运行期旋钮系统复核（ksplit / hswap /
 > mrev / ovlql / ovlcap × 4 形状）＋ TE-vs-ours L2 红字账，负结果、默认一行未改**。动机：O115 后
 > fp8 默认路径的 main（L2 `red` 主体墙 F3b/F4b/F6/F7/O90–O95/O114）与非 main（O109–O111 量化分相 +
 > LSE 重叠）都已收口，**唯一没系统复核的是纯 host 旋钮的联合最优性**。新工具
@@ -8801,6 +8815,33 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     `docs/04 --check` OK（224 行）。
   - 见 `docs/08` §5.124、`docs/03` §137；原始输出 `src/fp8/fa_bwd_fp8_o116_knob_sweep.out.txt`、
     `..._o116_ncu_ours_main_s4096.out.txt`、`..._o116_ncu_te_main_s4096.out.txt`。
+
+- 2026-10-01（第二百一十一轮）：**O117——fp8 主 kernel 平台期最终收口（小 shape host 旋钮覆盖 +
+  更细 ksplit 探针）——负结果，默认一行未改**。补上 O116 未覆盖的**小 shape**（S512 D=128、
+  S512 D=256）与**更细 ksplit 档**（8/32/64），并对同一 HEAD 做 fresh 同 session ncu 复证。
+   - **小 shape host 旋钮矩阵**（iters=100，共享 GPU）：`b1_s512_h16_d128` auto k=16 最优
+     （default 0.0767ms；k=64 0.0785、k=8/32 两次独立测量差 2×系邻容器负载）；`b1_s512_h8_d256`
+     auto k=8 与 k=8/32/64 全在 ~1.6% 噪声内；`b1_s1024_h32_kv4`、`b1_s1024_h64_kv1`（MQA）、
+     `b1_s4096_h16` auto k 均最优（k=8/32/64 单调更慢，与 O116 同）⇒ **默认 auto 在
+     MHA/GQA/MQA × D=128/256 × S512–4096 全部最优，无新档可转正**。
+   - **fresh ncu（ours vs TE，S4096 causal，同 HEAD）**：ours `kvtma<128,64,32>`
+     （3 CTA/SM/128 线程）**1.38ms / `op_red` 105,381,888 / `op_read` 24,238,059 /
+     `sm inst` 617,655,296 / L2 78.09% / warps 18.67%** vs TE
+     `..._flash_bprop_wgmma_f8_..._64x64x128`（1 CTA/SM/384 线程）**257.63µs / 25,957,024 /
+     10,197,700 / 108,334,714 / 70.97% / 15.61%** ⇒ 同 BM=64，差距全在搬运量
+     （red **4.06×**、read **2.38×**、指令 **5.70×**、时间 **5.36×**）。`red` 扇区 105.4M =
+     理论下界 68.2M 的 1.545×，多出部分**纯由「每 KV 元素被多少 m-block 归约」= 工作划分**决定。
+   - **判决**：**负结果、默认一行未改**。fp8 主 kernel 的 host/运行期旋钮前沿**在所有 shape 尺度上
+     扫清**；`red` 主体墙 = 本卡工作划分的硬件下界。数值护栏：ours vs dump ref `max_abs`
+     2.635/2.644/3.216e-1，单/两文件/Hopper 构建逐位一致。
+   - 见 `docs/08` §5.125、`docs/03` §138；原始输出 `src/fp8/fa_bwd_fp8_o117_smallshape_sweep.out.txt`、
+     `..._o117_ncu_ours_main_s4096.out.txt`、`..._o117_ncu_te_main_s4096.out.txt`、
+     `..._o117_summary.out.txt`。
+   - **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙无软件解）；② **TMA multicast +
+     cluster 共享 K/V 读**（唯一未试的搬运量杠杆：2-CTA cluster 用 `cp.async.bulk.tensor` 的
+     `.multicast::cluster` 把 K/V 读减半，直打 read 2.38× 差距；`red` 不受影响，工程量大、有风险，
+     需先 de-risk）；③ 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项，
+     FA3/TE 均支持 256，工作量大）；④ 非 main 的 `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）。
 
 ## 灵感 / backlog
 
