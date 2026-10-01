@@ -1,0 +1,51 @@
+=== O118 ncu: L2 read sectors baseline (mcast=0) vs cluster multicast (mcast=1) ===
+geometry: S=4096 Hkv=16 D=128 BN=32 NT=128 box=128x32 SW128; R=128; grid=Hkv*R*CN
+
+  void mcast_kernel<2, 0>(CUtensorMap_st, unsigned char *, int, int, int) (4096, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                    Mbyte         8.40
+    gpu__time_duration.sum                                     us       390.88
+    lts__t_sectors_op_read.sum                             sector     52924076
+    lts__t_sectors_srcunit_tex_op_read.sum                 sector     52657588
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        49.66
+  void mcast_kernel<2, 0>(CUtensorMap_st, unsigned char *, int, int, int) (4096, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                    Mbyte         8.40
+    gpu__time_duration.sum                                     us       391.78
+    lts__t_sectors_op_read.sum                             sector     52570163
+    lts__t_sectors_srcunit_tex_op_read.sum                 sector     52303268
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        49.19
+  void mcast_kernel<2, 0>(CUtensorMap_st, unsigned char *, int, int, int) (4096, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                    Mbyte         8.40
+    gpu__time_duration.sum                                     us       392.32
+    lts__t_sectors_op_read.sum                             sector     52847808
+    lts__t_sectors_srcunit_tex_op_read.sum                 sector     52581140
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        49.38
+  void mcast_kernel<2, 0>(CUtensorMap_st, unsigned char *, int, int, int) (4096, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                    Mbyte         8.40
+    gpu__time_duration.sum                                     us       391.78
+    lts__t_sectors_op_read.sum                             sector     52653457
+    lts__t_sectors_srcunit_tex_op_read.sum                 sector     52386844
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        49.26
+  void mcast_kernel<2, 1>(CUtensorMap_st, unsigned char *, int, int, int) (4096, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                    Mbyte         8.41
+    gpu__time_duration.sum                                     us       392.80
+    lts__t_sectors_op_read.sum                             sector     33822364
+    lts__t_sectors_srcunit_tex_op_read.sum                 sector     33554432
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        31.59
+  void mcast_kernel<2, 1>(CUtensorMap_st, unsigned char *, int, int, int) (4096, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                    Mbyte         8.40
+    gpu__time_duration.sum                                     us       394.34
+    lts__t_sectors_op_read.sum                             sector     33821308
+    lts__t_sectors_srcunit_tex_op_read.sum                 sector     33554432
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        31.46
+  void mcast_kernel<2, 1>(CUtensorMap_st, unsigned char *, int, int, int) (4096, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                    Mbyte         8.40
+    gpu__time_duration.sum                                     us       394.91
+    lts__t_sectors_op_read.sum                             sector     33823235
+    lts__t_sectors_srcunit_tex_op_read.sum                 sector     33554432
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        31.42
+  void mcast_kernel<2, 1>(CUtensorMap_st, unsigned char *, int, int, int) (4096, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                    Mbyte         8.40
+    gpu__time_duration.sum                                     us       394.72
+    lts__t_sectors_op_read.sum                             sector     33822650
+    lts__t_sectors_srcunit_tex_op_read.sum                 sector     33554432
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        31.45
