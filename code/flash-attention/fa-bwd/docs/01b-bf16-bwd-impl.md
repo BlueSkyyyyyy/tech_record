@@ -2497,3 +2497,35 @@ bf16 噪声；同 O34 的「仅 atomic 次序」）；单/两文件一致性 gat
 对标 FA/TE：ours 与 FA（1.441/1.332/1.631e-2）、TE（1.524/1.763/1.631e-2）同量级。
 ncu 与 fp16 同构（`red` 逐字节不变、`sm__inst_executed` −25%）。见 `docs/01` §26、`docs/08` §5.123；
 原始输出 `src/bf16/fa_bwd_bf16_o115_maintma_ab.out.txt`、`src/fa_bwd_o115_ci.out.txt`。
+
+## 6bd. O128-bf16（第 222 轮，**能力覆盖，正结果**）：新增 `head_dim=256` 支持（bf16）
+
+O128（`docs/01` §27）的 bf16 逐字 dtype 参数化：**把 fp16 的 host 改动搬到 bf16 的
+`fa_bwd_bf16_mma_main.cu` / `fa_bwd_bf16_mma_onefile.cu`，device 代码一行未改**——形状守卫放开
+256、`lse_mma_kernel<256>` / `lse_mma_kernel_bal<256,0/1/1,true>` 设 smem 属性、`run_pre()`
+新增 `D==256` 分支（causal 镜像配对 / full 均衡 FULL）、主 kernel 走通用 mma
+`fa_bwd_bf16_mma_kernel<256,64,32,1>`、`cudaMemset(dq_acc)` 条件补 `|| D==256`。
+
+### 数值（`ours vs fp32 ref` / FA2 / TE，bf16；单/两文件逐位一致）
+
+| case（B1, D=256） | ours max_abs dq/dk/dv | FA2 | TE2.14 |
+|---|---|---|---|
+| S1024 H8 causal | **1.039/1.213/1.460e-2** | 1.010/1.213/1.460e-2 | 1.010/1.213/1.460e-2 |
+| S2048 H8 causal | **7.978/11.14/16.81e-3** | 7.978/13.00/16.81e-3 | 7.978/13.00/16.81e-3 |
+| S1024 H16 kv4 causal | **13.00/18.43/30.75e-3** | 11.90/18.00/32.75e-3 | 11.90/18.00/32.75e-3 |
+| S1024 H8 full | **1.491/1.597/2.454e-3** | 1.491/1.597/2.454e-3 | 1.491/1.501/2.454e-3 |
+
+全部 bf16 噪声量级（~1e-2），无系统误差。FA3 反向不支持 D=256（同 fp16）。
+
+### 性能（CUDA event total；FA2/TE 同机 CUPTI 纯反向）
+
+| case（bf16, D=256） | ours total / TF | FA2 | TE2.14 | ours/TE |
+|---|---|---|---|---|
+| S1024 H8 causal | 0.4518 ms / 19.01 | 0.1020 ms / 168.4 | 0.0805 ms / 213.4 | 5.7× |
+| S2048 H8 causal | 1.3473 ms / 25.50 | 0.3026 ms / 227.1 | 0.2148 ms / 319.9 | 6.3× |
+| S1024 H16 kv4 causal | 0.7660 ms / 22.43 | 0.1909 ms / 180.0 | 0.1478 ms / 232.4 | 5.2× |
+| S1024 H8 full | 0.4909 ms / 17.50 | 0.1041 ms / 165.0 | 0.0827 ms / 207.7 | 6.0× |
+
+与 fp16 逐项同量级（同通用 mma 壳）。ncu 与 fp16 同构（`fa_bwd_bf16_mma_kernel<256,64,32,1>`，
+1 CTA/SM、低 occupancy + 全局延迟 bound）。见 `docs/01` §27、`docs/08` §5.136；
+原始输出 `src/bf16/fa_bwd_bf16_o128_*.out.txt`、`src/fa_bwd_compare_p33c_summary.out.txt`。

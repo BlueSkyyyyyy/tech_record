@@ -4640,8 +4640,8 @@ int main(int argc, char** argv) {
   const int B = (int)q_np.shape[0], S = (int)q_np.shape[1];
   const int H = (int)q_np.shape[2], D = (int)q_np.shape[3];
   const int Hkv = (int)k_np.shape[2];
-  if (D != 128 && D != 512) {
-    fprintf(stderr, "O5b bf16 mma 版支持 head_dim=128/512；当前 %d\n", D);
+  if (D != 128 && D != 256 && D != 512) {
+    fprintf(stderr, "O5b bf16 mma 版支持 head_dim=128/256/512；当前 %d\n", D);
     return 1;
   }
   if (H % Hkv != 0) {
@@ -4753,6 +4753,18 @@ int main(int argc, char** argv) {
   // O69：full D=128 的 LSE 走 O54 均衡版（FULL=true）。
   CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<128, 1, true>,
                                   cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
+  // O128（第 222 轮）：head_dim=256（bf16）的 LSE 属性——LSE kernel 对 HD 是模板参数
+  //   （D=512 已验证），256 直接复用同一套几何（LD=HD+8=264；LBM/LBN 不变）。
+  if (D == 256) {
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<256>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<256, 0>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal0));
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<256, 1>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
+    CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel_bal<256, 1, true>,
+                                    cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmemBal1));
+  }
   if (D == 512) {
     CUDA_CHECK(cudaFuncSetAttribute(lse_mma_kernel<512>,
                                     cudaFuncAttributeMaxDynamicSharedMemorySize, kLseSmem));
@@ -4789,6 +4801,14 @@ int main(int argc, char** argv) {
   if (D == 512) {
     // MLA（HD=512）：BM=64 时 K/V 双缓冲会超 smem；BM=32 + PIPE=1 仍 ≤232KB 且最快。
     auto_bm = 32;
+    auto_bn = 32;
+    auto_pipe = 1;
+  }
+  // O128：head_dim=256 走通用 mma 主 kernel（HD%128==0 ⇒ NDT=2；非 wgmma——wgmma 路径
+  //   只做 HD=128）。默认 BM=64/BN=32/PIPE=1，`--bm/--bn/--pipe` 可覆盖；D=256 的 dQ 在
+  //   GEMM5 里直接全局 RMW（NDT>1），host 需预先 memset dq_acc。
+  if (D == 256) {
+    auto_bm = 64;
     auto_bn = 32;
     auto_pipe = 1;
   }
@@ -4895,6 +4915,25 @@ int main(int argc, char** argv) {
         } else {
           LAUNCH_CFG(512, 32, 32, 0);
         }
+      }
+      return;
+    }
+    // O128（第 222 轮）：head_dim=256 的通用 mma 主 kernel（NDT=HD/128=2；dQ 在 GEMM5 里
+    //   直接全局 RMW，ksplit==1 无竞争，host 预先 memset dq_acc）。4-warp（128 线程）。
+    if (D == 256) {
+      if (bm == 32) {
+        if (pp == 2) LAUNCH_CFG(256, 32, 32, 2);
+        else if (pp == 1) LAUNCH_CFG(256, 32, 32, 1);
+        else LAUNCH_CFG(256, 32, 32, 0);
+      } else if (bn == 64) {
+        if (pp == 2) LAUNCH_CFG(256, 64, 64, 2);
+        else LAUNCH_CFG(256, 64, 64, 1);
+      } else if (pp == 2) {
+        LAUNCH_CFG(256, 64, 32, 2);
+      } else if (pp == 1) {
+        LAUNCH_CFG(256, 64, 32, 1);
+      } else {
+        LAUNCH_CFG(256, 64, 32, 0);
       }
       return;
     }
@@ -5135,6 +5174,39 @@ int main(int argc, char** argv) {
         delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
       else
         delta_kernel<512><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
+    } else if (D == 256) {
+      // O128（第 222 轮）：head_dim=256 的 LSE——因果走 O8b 镜像配对 mma 版（+O40 K 维 split），
+      //   非因果走 O54 均衡 FULL 版；与 D=128 在非 wgmma/TMA 下的同一套几何
+      //   （`lse_mma_kernel_bal` 对 HD 是模板参数，D=512 已验证）。不做 4D-TMA（只服务 128/512）。
+      if (causal) {
+        if (lse_split_eff > 1) {
+          dim3 gsp(lg_bal.x, lg_bal.y, (unsigned)(B * lse_split_eff));
+          lse_mma_kernel_bal<256, 1><<<gsp, THREADS, kLseSmemBal1>>>(
+              d_q, d_k, d_lse, S, H, Hkv, scale, nullptr, d_lse_part, lse_split_eff);
+          const long long nrows = (long long)B * S * H;
+          const int th = 256;
+          const long long bl = (nrows + th - 1) / th;
+          lse_split_merge_kernel<<<(unsigned)bl, th>>>(d_lse_part, d_lse, nrows, lse_split_eff);
+        } else {
+          lse_mma_kernel_bal<256, 1><<<lg_bal, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
+                                                                        Hkv, scale);
+        }
+      } else {
+        lse_mma_kernel_bal<256, 1, true><<<lg, THREADS, kLseSmemBal1>>>(d_q, d_k, d_lse, S, H,
+                                                                        Hkv, scale);
+      }
+      if (zfuse_sel && delta_warp_sel) {
+        const size_t nq0 = n;   // O128：D=256 的 dQ 全局 RMW（NDT>1）⇒ 需清零
+        const size_t zops = (nq0 >> 2) + (nkv >> 2);
+        int zblk = (int)std::min<size_t>((zops + THREADS - 1) / THREADS, 528);
+        int zfblk = std::max(zblk, d_blocks);
+        if (zfblk < 1) zfblk = 1;
+        zero_delta_warp_kernel<256><<<zfblk, THREADS>>>(d_dq_acc, nq0, d_dk_acc, d_dv_acc, nkv,
+                                                        d_o, d_do, d_delta, d_rows);
+      } else if (delta_warp_sel)
+        delta_warp_kernel<256><<<d_blocks, THREADS>>>(d_o, d_do, d_delta, d_rows);
+      else
+        delta_kernel<256><<<pg, THREADS>>>(d_o, d_do, d_delta, S, H);
     } else {
 #if defined(FA_WGMMA) && defined(FA_TMA)
       if (causal && lse_tma) {
@@ -5223,7 +5295,7 @@ int main(int argc, char** argv) {
     // O13：HD=128（NDT==1）时 dQ 由主 kernel 覆盖写，无需清零；只有 MLA（HD=512）走 RMW 累加才 memset。
     // O65：`zfuse_sel` 时改用 `zero_delta_warp_kernel`（在 run_pre 的 delta 位置）一并清零。
     if (!(zfuse_sel && delta_warp_sel)) {
-      if (D == 512 || wg2_ksplit_eff > 1)
+      if (D == 512 || D == 256 || wg2_ksplit_eff > 1)
         CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
       CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
@@ -5256,7 +5328,8 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaEventElapsedTime(&ms_pre, ev0, ev1));
   ms_pre /= iters;
 
-  if (D == 512 || wg2_ksplit_eff > 1) CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
+  if (D == 512 || D == 256 || wg2_ksplit_eff > 1)
+    CUDA_CHECK(cudaMemset(d_dq_acc, 0, n * sizeof(float)));
   CUDA_CHECK(cudaMemset(d_dk_acc, 0, nkv * sizeof(float)));
   CUDA_CHECK(cudaMemset(d_dv_acc, 0, nkv * sizeof(float)));
   CUDA_CHECK(cudaEventRecord(ev0));

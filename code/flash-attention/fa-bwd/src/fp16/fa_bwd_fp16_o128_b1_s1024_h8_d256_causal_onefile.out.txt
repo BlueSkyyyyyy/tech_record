@@ -1,0 +1,82 @@
+fa_bwd_fp16_mma_onefile.cu(5130): warning #550-D: variable "lse_forced" was set but never used
+    bool lse_forced = false;
+         ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+fa_bwd_fp16_mma_onefile.cu(5137): warning #550-D: variable "wgmma_sel" was set but never used
+    int wgmma_sel = 0;
+        ^
+
+fa_bwd_fp16_mma_onefile.cu(5145): warning #550-D: variable "wg_forced" was set but never used
+    bool wg_forced = false;
+         ^
+
+fa_bwd_fp16_mma_onefile.cu(5147): warning #550-D: variable "wg2split_sel" was set but never used
+    int wg2split_sel = 1;
+        ^
+
+fa_bwd_fp16_mma_onefile.cu(5149): warning #550-D: variable "wg4_sel" was set but never used
+    int wg4_sel = 0;
+        ^
+
+fa_bwd_fp16_mma_onefile.cu(5153): warning #550-D: variable "det_ab" was set but never used
+    int det_ab = 0;
+        ^
+
+fa_bwd_fp16_mma_onefile.cu(5160): warning #550-D: variable "dq_direct_sel" was set but never used
+    int dq_direct_sel = 1;
+        ^
+
+fa_bwd_fp16_mma_onefile.cu(5163): warning #550-D: variable "cluster_sel" was set but never used
+    int cluster_sel = 0;
+        ^
+
+fa_bwd_fp16_mma_onefile.cu(5176): warning #550-D: variable "wg2ksplit" was set but never used
+    int wg2ksplit = -1;
+        ^
+
+fa_bwd_fp16_mma_onefile.cu(5188): warning #550-D: variable "lse8w" was set but never used
+    int lse8w = 0;
+        ^
+
+fa_bwd_fp16_mma_onefile.cu(5201): warning #550-D: variable "varlen_tma" was set but never used
+    int varlen_tma = -1;
+        ^
+
+fa_bwd_fp16_mma_onefile.cu(5361): warning #177-D: variable "kLseSmemTma1" was declared but never referenced
+    const int kLseSmemTma1 = 1024 + kLseTileWgm * 3 + 64;
+              ^
+
+fa_bwd_fp16_mma_onefile.cu(5641): warning #177-D: variable "ow_sel" was declared but never referenced
+    const bool ow_sel = (ow_opt > 0);
+               ^
+
+fa_bwd_fp16_mma_onefile.cu(5643): warning #177-D: variable "wg4seq_sel" was declared but never referenced
+    const bool wg4seq_sel = (wg4seq_opt > 0);
+               ^
+
+fa_bwd_fp16_mma_onefile.cu(4289): warning #550-D: variable "g_lse_tma_varlen" was set but never used
+  static int g_lse_tma_varlen = 1;
+             ^
+
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h8_d256_causal_fp16
+B=1 S=1024 H=8 Hkv=8 D=256 causal=1 scale=0.062500
+[O6c] main grid=128 auto=(BM=64,BN=32,PIPE=1) sel=(BM=64,BN=32,PIPE=1)
+[O49] d128 8-warp = 0 (d128w=-1, grid=128, sm=132)
+[O38] lse k-split = 8 (auto)
+[O23] main backend = mma | lse = mma (D=256 S=1024)
+[O43] wgmma2 k-split = 1
+[O65] prologue fusion (zero+delta) = 1
+[timing] total(3 kernels) 0.4507 ms  19.06 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0493 ms | main 0.3880 ms | convert 0.0134 ms
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.657e-03  max_rel=4.417e-01
+  dk   vs ref: max_abs=1.405e-03  max_rel=2.022e-01
+  dv   vs ref: max_abs=1.447e-03  max_rel=4.495e-02
+  fa_dq     vs ref: max_abs=1.372e-03  max_rel=3.100e-01
+  fa_dk     vs ref: max_abs=1.398e-03  max_rel=1.375e-01
+  fa_dv     vs ref: max_abs=1.447e-03  max_rel=4.495e-02
+  te_dq     vs ref: max_abs=1.372e-03  max_rel=3.100e-01
+  te_dk     vs ref: max_abs=1.398e-03  max_rel=1.315e-01
+  te_dv     vs ref: max_abs=1.447e-03  max_rel=4.495e-02

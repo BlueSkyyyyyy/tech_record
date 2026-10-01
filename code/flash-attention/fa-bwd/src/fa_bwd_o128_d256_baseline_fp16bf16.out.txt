@@ -1,0 +1,10 @@
+=== bench CUPTI device time (pure-bwd, dtype=fp16) ===
+[b1_s1024_h8_d256_causal_fp16] fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)  fa=0.1019ms/168.61TF  te=0.0805ms/213.46TF
+[b1_s2048_h8_d256_causal_fp16] fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)  fa=0.3031ms/226.73TF  te=0.2143ms/320.73TF
+[b1_s1024_h16_d256_kv4_causal_fp16] fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)  fa=0.1908ms/180.06TF  te=0.1483ms/231.63TF
+[b1_s1024_h8_d256_full_fp16] fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)  fa=0.1056ms/162.75TF  te=0.0826ms/208.09TF
+=== bench CUPTI device time (pure-bwd, dtype=bf16) ===
+[b1_s1024_h8_d256_causal_bf16] fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)  fa=0.1020ms/168.43TF  te=0.0805ms/213.35TF
+[b1_s2048_h8_d256_causal_bf16] fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)  fa=0.3026ms/227.06TF  te=0.2148ms/319.91TF
+[b1_s1024_h16_d256_kv4_causal_bf16] fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)  fa=0.1909ms/180.03TF  te=0.1478ms/232.41TF
+[b1_s1024_h8_d256_full_bf16] fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)  fa=0.1041ms/165.03TF  te=0.0827ms/207.69TF

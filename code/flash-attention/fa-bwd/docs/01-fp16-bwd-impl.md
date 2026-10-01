@@ -4961,3 +4961,83 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -l
 `src/fp16/fa_bwd_fp16_o115_ncu_maintma_s4096.out.txt`、`src/fa_bwd_o115_ci.out.txt`。
 单/两文件一致性 gate **fp16 worst 1.953e-3 OK**（容差 1.6e-2）、`docs/04 --check` OK（224 行）。
 见 `docs/08` §5.123。**下一步**：main 的 L2 `red` 墙仍受本卡寄存器/smem 硬墙锁定（见 ROADMAP「阻塞」）。
+
+## 27. O128-fp16（第 222 轮，**能力覆盖，正结果**）：新增 `head_dim=256` 支持（fp16）
+
+### 27.1 动机：补齐 `D=128` 与 `D=512` 之间的 256（ROADMAP 唯一明确的 `[ ]` backlog）
+
+fp8 已于 O76（`docs/03` §99）支持 `head_dim=256`，O84 又默认切了 wgmma；而 fp16/bf16 反向
+只有 `D=128`（MHA/GQA）与 `D=512`（MLA），`D=256` 会在 host 的 `if (D != 128 && D != 512)` 被直接拒绝。
+`D=256` 是 FA2/TE 都支持、且生产里存在（如部分长上下文 head 切分）的形状，是 fp16/bf16 唯一
+未覆盖的 head_dim。本轮把它补上，**纯 host dispatch，device 代码一行未改**（`lse_mma_kernel` /
+`lse_mma_kernel_bal` / `fa_bwd_fp16_mma_kernel` 对 HD 本来就是模板参数，`D=512` 已验证）。
+
+### 27.2 改动（单/两文件 host 同步，device 逐字未动）
+
+1. **形状守卫**：`D != 128 && D != 256 && D != 512` → 接受 256。
+2. **LSE**：`D==256` 时给 `lse_mma_kernel<256>` / `lse_mma_kernel_bal<256,0>` / `<256,1>` /
+   `<256,1,true>` 设 `MaxDynamicSharedMemorySize`（`kLseSmem`/`kLseSmemBal0/1` 都按 `LDl=D+8=264`
+   算了，随 D 变）；`run_pre()` 里新增 `D==256` 分支——**causal 走 O8b 镜像配对
+   `lse_mma_kernel_bal<256,1>`（+O40 K 维 split）**、**非 causal 走 O54 均衡 FULL 版
+   `lse_mma_kernel_bal<256,1,true>`**（与 `D=128` 在非 wgmma 构建下的同一套几何）。
+   `D=256` 的 LSE **不做 4D-TMA**（TMA 只接线到 128/512；`D=256` 无 TMA 描述符分支）。
+3. **主 kernel**：`D==256` 走**通用 mma 主 kernel**（`fa_bwd_fp16_mma_kernel<256,...>`，
+   `HD%128==0 ⇒ NDT=2`，4-warp/128 线程），默认 `BM=64/BN=32/PIPE=1`（对齐 fp8 O76 的 D=256 档），
+   `--bm/--bn/--pipe` 可覆盖。`D=256` 的 dQ 由 GEMM5 直接全局 RMW（`NDT>1 ⇒` 无寄存器累加），
+   故 host 把 `cudaMemset(dq_acc)` 的条件补上 `|| D == 256`（与 `D==512` 同）。
+4. 单文件由同样的 host 改动手工保持同步（device 段逐字一致）。
+
+### 27.3 数值（`ours vs fp32 ref` / FA2 / TE，fp16；单/两文件逐位一致）
+
+| case（B1, D=256） | ours max_abs dq/dk/dv | FA2 | TE2.14 |
+|---|---|---|---|
+| S1024 H8 causal | **1.657/1.405/1.447e-3** | 1.372/1.398/1.447e-3 | 1.372/1.398/1.447e-3 |
+| S2048 H8 causal | **2.023/1.481/1.614e-3** | 2.023/1.664/1.614e-3 | 2.023/1.664/1.614e-3 |
+| S1024 H16 kv4 causal | **2.480/2.816/1.976e-3** | 1.983/2.434/3.971e-3 | 1.983/2.434/3.971e-3 |
+| S1024 H8 full | **1.850/2.775/2.109e-4** | 1.673/1.299/2.109e-4 | 1.523/1.405/2.109e-4 |
+
+全部 fp16 噪声量级，**dk/dv 多数情形 ≤ FA/TE**，无系统误差；单/两文件逐位一致。
+**FA3（3.0.0，本机 Hopper）反向只支持 `head_dim≤128`**（`FlashAttention forward only supports head
+dimension at most 128`）⇒ D=256 无 FA3 列，只能对 FA2/TE。
+
+### 27.4 性能（CUDA event，3-kernel total；FA2/TE 为同机 CUPTI 纯反向）
+
+| case（fp16, D=256） | ours total / TF | FA2 | TE2.14 | ours/TE |
+|---|---|---|---|---|
+| S1024 H8 causal | 0.4604 ms / 18.66 | 0.1019 ms / 168.6 | 0.0805 ms / 213.5 | 5.7× |
+| S2048 H8 causal | 1.3546 ms / 25.36 | 0.3031 ms / 226.7 | 0.2143 ms / 320.7 | 6.3× |
+| S1024 H16 kv4 causal | 0.7644 ms / 22.48 | 0.1908 ms / 180.1 | 0.1483 ms / 231.6 | 5.2× |
+| S1024 H8 full | 0.4910 ms / 17.49 | 0.1056 ms / 162.8 | 0.0826 ms / 208.1 | 6.0× |
+
+`D=256` 的 main 是**通用 mma（HMMA/ldmatrix）**而非 wgmma（wgmma 路径只做 HD=128），故与
+`D=512` MLA 类似属于「先打通正确性」的覆盖档；单/两文件 total 差 <1%（session 噪声）。
+（bf16 同构，见 `docs/01b` §6bd。）
+
+### 27.5 ncu（main, S1024 H8 causal，mma 构建）
+
+Duration **382.3 µs**、DRAM **3.84%** / L1/TEX **48.46%** / L2 30.01% / Compute **6.33%** /
+Mem 30.01%；**168 regs / 动态 smem 149.50 KB / 静态 0** → **Block Limit Shared Mem=1 ⇒ 1 CTA/SM、
+occ 6.25%**、Waves **0.97**（grid=128 < 132 SM）、`No Eligible 88.29%`、Warp Cycles/Inst 8.55。
+头号 stall = **L1TEX scoreboard ~41.3%**（全局读延迟）；local spilling 占 L1 sector **7.76%**
+（60.9% 的 LDL/STL 来自寄存器 spill）。⇒ **bound = 低 occupancy（smem 墙）+ 全局访存延迟**，
+与 `D=512` MLA（O21/§14）同源：`D=256` 把 Q/K/V 的 smem tile 翻倍 ⇒ 通用 mma 壳 1 CTA/SM，
+grid 又不足一满波。非带宽/算力 bound（DRAM 3.8%、Tensor Core 空转）。
+
+### 27.6 复现 / 原始输出
+
+```bash
+# 默认（sm_90，mma）构建
+scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h8_d256_causal_fp16 --iters=100
+# 非 causal 必须带 --full（否则按 causal 算、对不上 full ref）
+scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s1024_h8_d256_full_fp16 --full
+# 一键（含 dump ours / 汇总）：python3 harness/fa_bwd_run.py --dtype fp16 --glob '*d256*'
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_o128_*.out.txt`（两文件/单文件 × causal/GQA/full/S2048）、
+`src/fp16/fa_bwd_fp16_o128_ncu_main_s1024h8_d256.out.txt`（ncu）、
+`src/fp16/fa_bwd_fp16_o128_reg_*.out.txt`（D=128 回归）、`src/fa_bwd_compare_p33c_summary.out.txt`
+（含 FA/TE 对比）。见 `docs/08` §5.136、`docs/04` 表。
+**下一步**：`D=256` 的 main 仍是 mma/1-CTA-per-SM，若要走 wgmma+TMA（对标 fp8 O84 的 2 CTA/SM）
+需新写 HD=256 的 wgmma 几何（同 `D=512` MLA 的资源墙），留 backlog。

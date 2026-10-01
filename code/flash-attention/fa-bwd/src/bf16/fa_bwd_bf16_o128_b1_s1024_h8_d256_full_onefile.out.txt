@@ -1,0 +1,20 @@
+case = /home/xieminglin/proj/output/fa-bwd/b1_s1024_h8_d256_full_bf16
+B=1 S=1024 H=8 Hkv=8 D=256 causal=0 scale=0.062500
+[O6c] main grid=128 auto=(BM=64,BN=32,PIPE=1) sel=(BM=64,BN=32,PIPE=1)
+[O49] d128 8-warp = 0 (d128w=-1, grid=128, sm=132)
+[O38] lse k-split = 8 (auto)
+[O23] main backend = mma | lse = mma (D=256 S=1024)
+[O43] wgmma2 k-split = 1
+[O65] prologue fusion (zero+delta) = 1
+[timing] total(3 kernels) 0.4892 ms  17.56 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0688 ms | main 0.4000 ms | convert 0.0204 ms
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=1.491e-03  max_rel=3.490e-01
+  dk   vs ref: max_abs=1.597e-03  max_rel=3.370e-01
+  dv   vs ref: max_abs=2.454e-03  max_rel=3.839e-01
+  fa_dq     vs ref: max_abs=1.491e-03  max_rel=3.424e-01
+  fa_dk     vs ref: max_abs=1.597e-03  max_rel=3.575e-01
+  fa_dv     vs ref: max_abs=2.454e-03  max_rel=3.839e-01
+  te_dq     vs ref: max_abs=1.491e-03  max_rel=3.737e-01
+  te_dk     vs ref: max_abs=1.501e-03  max_rel=3.370e-01
+  te_dv     vs ref: max_abs=2.454e-03  max_rel=3.839e-01
