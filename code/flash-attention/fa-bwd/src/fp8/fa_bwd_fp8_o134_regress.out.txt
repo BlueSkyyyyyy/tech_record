@@ -1,0 +1,24 @@
+=== b1_s512_h16_d128_causal_fp8 rep1 _o134_base_main ===
+[timing] total(quant+pre+main+cvt) 0.0774 ms  27.74 TFLOPS (bwd FLOPs=4BS^2HD)
+=== b1_s512_h16_d128_causal_fp8 rep1 _o134_new_main ===
+[timing] total(quant+pre+main+cvt) 0.0775 ms  27.70 TFLOPS (bwd FLOPs=4BS^2HD)
+=== b1_s512_h16_d128_causal_fp8 rep2 _o134_base_main ===
+[timing] total(quant+pre+main+cvt) 0.0775 ms  27.70 TFLOPS (bwd FLOPs=4BS^2HD)
+=== b1_s512_h16_d128_causal_fp8 rep2 _o134_new_main ===
+[timing] total(quant+pre+main+cvt) 0.0774 ms  27.75 TFLOPS (bwd FLOPs=4BS^2HD)
+=== b1_s4096_h16_d128_causal_fp8 rep1 _o134_base_main ===
+[timing] total(quant+pre+main+cvt) 1.5769 ms  87.16 TFLOPS (bwd FLOPs=4BS^2HD)
+=== b1_s4096_h16_d128_causal_fp8 rep1 _o134_new_main ===
+[timing] total(quant+pre+main+cvt) 1.5735 ms  87.34 TFLOPS (bwd FLOPs=4BS^2HD)
+=== b1_s4096_h16_d128_causal_fp8 rep2 _o134_base_main ===
+[timing] total(quant+pre+main+cvt) 1.5742 ms  87.31 TFLOPS (bwd FLOPs=4BS^2HD)
+=== b1_s4096_h16_d128_causal_fp8 rep2 _o134_new_main ===
+[timing] total(quant+pre+main+cvt) 1.5731 ms  87.37 TFLOPS (bwd FLOPs=4BS^2HD)
+=== b1_s1024_h8_d256_causal_fp8 rep1 _o134_base_main ===
+[timing] total(quant+pre+main+cvt) 0.2294 ms  37.44 TFLOPS (bwd FLOPs=4BS^2HD)
+=== b1_s1024_h8_d256_causal_fp8 rep1 _o134_new_main ===
+[timing] total(quant+pre+main+cvt) 0.2292 ms  37.48 TFLOPS (bwd FLOPs=4BS^2HD)
+=== b1_s1024_h8_d256_causal_fp8 rep2 _o134_base_main ===
+[timing] total(quant+pre+main+cvt) 0.2293 ms  37.47 TFLOPS (bwd FLOPs=4BS^2HD)
+=== b1_s1024_h8_d256_causal_fp8 rep2 _o134_new_main ===
+[timing] total(quant+pre+main+cvt) 0.2300 ms  37.35 TFLOPS (bwd FLOPs=4BS^2HD)

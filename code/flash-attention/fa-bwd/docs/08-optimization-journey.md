@@ -3110,3 +3110,26 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 - **结论**：**正结果、默认**（`--d256wgm=0` opt-out）。**fp16/bf16 `head_dim=256` 至此定长+变长
   全走 wgmma**；fp8 侧仍只剩换卡。见 `docs/01` §30、`docs/01b` §6bg、`docs/04` §58；原始输出
   `src/fa_bwd_o133_d256_varlen_ab.out.txt`、`src/fp16/fa_bwd_fp16_o133_ncu_*`。
+
+### 5.142 第 228 轮（O134）：fp8 `D=256` Q/dO 4D-TMA prologue 与 K/V `cp.async` 重叠 —— **中性/负结果（默认一行未改，实验版本回滚）**
+
+- **背景**：fp8 main 的 bytes（L2 `red`，O125）与 issue（`short_scoreboard`/`wait`，O122/O123）
+  两墙在 O116–O130 已全部收口为「本卡无软件解」、覆盖型 backlog 清空；本轮检验 **O85 §108.5 留下
+  的唯一 fp8 性能假设**——「`D=256` 的 Q/dO TMA 中性是因为 Q/dO TMA 等待在 K/V cp.async 之前、
+  两段访存串行」。任务模板仍写「只做 fp8 性能」，故推进该项（未触碰 fp8 默认路径）。
+- **改动（实验版，随后回滚；单/两文件 device 逐字一致）**：把 `fp8_mma_body` 的 K/V prologue
+  （`KVTMA` 只补 scale / `KVPIPE` / `kPrefetch` / `kv_load_pair`）逐字收进 lambda
+  `issue_kv_prologue`；TMA 分支在 `mbar_wait(qbars+0/1)`（等 Q/dO TMA）**之前**调用它，非 TMA 分支
+  在其 Q/dO 载入后调用——让 K/V 的 global 读与 Q/dO 的 TMA 传输重叠。
+- **实测（base=串行 TMA / new=重叠，两个 binary 同 session 交替，iters=100，2 rep，`--d256tma=1`）**：
+  main new/base = S1024H8 causal **1.000×** / full 0.994× / S2048H8 causal 1.00× / GQA kv4 1.000× /
+  S2048H16 causal **0.995×**；total 同构（≤0.5%）。ncu（S1024H8 causal）：Duration
+  **256.58→254.78µs（1.007× 噪声内）**、`long_scoreboard` 2.15→2.16、`barrier` 0.18→0.21、
+  `wait` 1.33 不动、**L2 `op_red` 13,369,344 逐字节不变**、regs 242、**2 CTA/SM**。
+- **数值/回归**：与 O85 逐位一致（max_abs 2.632/2.799/3.584e-1，relL2 8.332/8.435/6.464%）；
+  默认档（`D=128` S512/S4096、`D=256` S1024）±0.2% 噪声内、无数值变化。
+- **结论**：**中性/负结果，默认一行未改**。明确否定 O85 的假设：`D=256` TMA 的中性**不是** prologue
+  串行化造成，而是 **2 CTA/SM 已把 prologue 延迟藏住**（与 tile 数无关的真中性）；真墙仍是 L2 ~53%
+  + `short_scoreboard`/`wait`。O85 的「D=256 TMA 转正」两条子路（K/V TMA 顶穿 smem=O88；prologue
+  重叠=本轮）**全部收口**。见 `docs/03` §151；原始输出
+  `src/fp8/fa_bwd_fp8_o134_{d256_tma_ab,ncu,regress}.out.txt`。
