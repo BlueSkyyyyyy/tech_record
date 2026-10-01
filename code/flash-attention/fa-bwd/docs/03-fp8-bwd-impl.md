@@ -12927,3 +12927,70 @@ main 10.44 ms（48.1 TFLOPS，`4BS²HD` 口径）**；preprocess 0.82 ms / quant
   原始输出 `src/fp8/fa_bwd_fp8_o130_full_s8192_default.out.txt`、
   `..._o130_s8192_ksweep.out.txt`、`..._o130_ncu_ours_s8192.out.txt`、
   `..._o130_ncu_te_s8192.out.txt`、`..._o130_te_baseline_s8192.out.txt`、`..._o130_relL2_s8192.out.txt`。
+
+## 151. O134（第 228 轮）：fp8 `D=256` 的 Q/dO 4D-TMA prologue 与 K/V `cp.async` 重叠 —— **中性/负结果**（默认一行未改，实验后回滚）
+
+### 151.1 目的：闭合 O85 §108.5 留下的唯一假设
+
+O85（§108）把 `D=256` 的 Q/dO 接 4D-TMA 后判为「净中性」并**默认关**，留给后续的判据是：
+> 让 `D=256` TMA 转正需把 TMA prologue 与 K/V cp.async 重叠（当前 Q/dO TMA 等待在 K/V 之前，串行化）。
+
+本轮直接检验这条假设：把 `D=256`（TMA 且非 KVTMA）路径的 K/V prologue 提到**等待 Q/dO TMA 之前**发出去，
+让 K/V 的 global 读延迟与 Q/dO 的 TMA 传输重叠。判断标准是：若串行化确为中性主因，重叠后应转正；
+否则说明 2 CTA/SM 已把 prologue 延迟藏住，O85 的判决是规模无关的真中性。
+
+### 151.2 实现（实验版本，已回滚）
+
+* 把 `fp8_mma_body` 的 K/V prologue（`KVTMA` 只补 rowwise scale / `KVPIPE` cp.async / `kPrefetch` /
+  `kv_load_pair`，及 `!KVTMA` 的 scale 装载）**逐字收进一个 lambda `issue_kv_prologue`**；
+* TMA 分支在 `mbar_wait(qbars+0/1)`（等 Q/dO TMA）**之前**调用它；非 TMA 分支在其 Q/dO 载入之后调用
+  （调用点对调，逻辑/地址/数值逐字不变）；
+* 寄存器预取缓冲 `pk0/pk1/pv0/pv1` 仍在函数作用域声明（主 nt 循环继续复用）。
+  `D=128` 的 KVTMA 默认路径调度随之微调（scale 装载前移），但这与 TMA 传输无依赖。
+* **单/两文件 device 逐字一致**（`sync_onefile_device.py` `identical: True`）；实验完成后**已 `git checkout`
+  回滚**，默认路径一行未改（见 §151.4 复现）。
+
+### 151.3 实测（两个 binary：base=串行 TMA / new=重叠；同 session 交替，iters=100，2 次重复）
+
+`main`（event，`--d256tma=1`）：
+
+| case | main base (ms) | main new (ms) | new/base |
+|---|---|---|---|
+| S1024H8 causal | 0.2398 / 0.2387 | 0.2391 / 0.2377 | ~1.000× |
+| S1024H8 full | 0.2386 / 0.2385 | 0.2402 / 0.2399 | ~0.994× |
+| S2048H8 causal | 0.7661 / 0.7683 | 0.7645 / 0.7768 | 1.00×（噪声内） |
+| GQA h16kv4 | 0.4129 / 0.4141 | 0.4132 / 0.4127 | ~1.000× |
+| S2048H16 causal | 1.3284 / 1.3276 | 1.3344 / 1.3345 | ~0.995× |
+
+`total` 同构（差异 ≤0.5%）。**ncu（S1024H8 causal，单 kernel 隔离，同 binary）**：
+
+| | Duration | regs | CTA/SM | L1TEX% | L2% | `long_sb` | `barrier` | `short_sb` | `wait` | L2 `op_red` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| base | 256.58 µs | 242 | 2 | 29.5 | 52.6 | 2.15 | 0.18 | 1.43 | 1.33 | 13,369,344 |
+| new | **254.78 µs** | 242 | 2 | 29.6 | 53.1 | 2.16 | 0.21 | 1.46 | 1.33 | 13,369,344 |
+
+⇒ 重叠**没有**降任何 stall（`long_scoreboard`/`barrier` 基本不动）、`red` 逐字节不变，Duration 仅
+**1.007×（噪声内）**。数值与 O85 完全一致（max_abs dq/dk/dv = **2.632e-1 / 2.799e-1 / 3.584e-1**，
+vs fp32 ref `relL2` 8.332/8.435/6.464%）。
+
+**默认路径回归（base vs new，无 `--d256tma`）**：`D=128` S512 total 0.0774/0.0775 ms、
+S4096 1.5769/1.5742 ms；`D=256` S1024 total 0.2294/0.2293 ms —— 全部 ±0.2% 噪声内、无数值变化。
+
+### 151.4 结论
+
+* **中性/负结果，默认一行未改（实验版本已回滚）。** 明确否定 O85 §108.5 的假设：`D=256` Q/dO TMA 的
+  中性**不是** prologue 串行化造成的——`D=256` wgmma 路径是 **2 CTA/SM**（`launch__occupancy_limit_shared_mem=2`），
+  一个 CTA 的 Q/dO TMA 等待被同 SM 上另一个 CTA 的指令流完全盖住，prologue 延迟对 16–128 个 tile 的
+  主循环摊销后可忽略。真墙仍是 **L2 吞吐（~53%）+ `short_scoreboard`/`wait`**（同 O84/O85），与「降 L2
+  搬运量」的工作划分墙同源（见「阻塞」）。
+* 至此 O85 的「`D=256` TMA 转正」两条子路（K/V TMA 顶穿 smem = O88 判死；prologue 重叠 = 本轮判中/负）
+  **全部收口**；`D=256` 默认仍是 O84 的 cp.async wgmma 档，`--d256tma=1` 保留为复现用 opt-in。
+* 复现（实验版本）：
+  ```
+  # base：HEAD 原样；new：把 K/V prologue 收进 issue_kv_prologue 并在 mbar_wait 前调用
+  nvcc -O3 -gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda \
+       src/fp8/fa_bwd_fp8_main.cu -o /tmp/o134_{base,new}_main.out
+  /tmp/o134_new_main.out --dir=.../b1_s1024_h8_d256_causal_fp8 --d256tma=1 --iters=100
+  ```
+  原始输出 `src/fp8/fa_bwd_fp8_o134_d256_tma_ab.out.txt`（5 case × 2 rep × base/new 的 main/total）、
+  `..._o134_ncu.out.txt`（base/new 的 Duration/stall/red）、`..._o134_regress.out.txt`（默认档回归）。

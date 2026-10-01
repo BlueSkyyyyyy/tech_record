@@ -1,0 +1,30 @@
+=== _o134_base_main ===
+==PROF== Profiling "fa_bwd_fp8_mma_qdtma_kernel": 0%....50%....100% - 11 passes
+  void fa_bwd_fp8_mma_qdtma_kernel<256, 64, 32, 0, 1, 1, 1, 0, 0>(CUtensorMap_st, CUtensorMap_st, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, float *, float *, int, float *, const int *) (64, 8, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                                                 us       256.58
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        29.49
+    launch__occupancy_limit_shared_mem                                                  block            2
+    launch__registers_per_thread                                              register/thread          242
+    lts__t_sectors_op_read.sum                                                         sector      1729121
+    lts__t_sectors_op_red.sum                                                          sector     13369344
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        52.62
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        17.83
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.18
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         2.15
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         1.43
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.33
+=== _o134_new_main ===
+==PROF== Profiling "fa_bwd_fp8_mma_qdtma_kernel": 0%....50%....100% - 11 passes
+  void fa_bwd_fp8_mma_qdtma_kernel<256, 64, 32, 0, 1, 1, 1, 0, 0>(CUtensorMap_st, CUtensorMap_st, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, float *, float *, int, float *, const int *) (64, 8, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    gpu__time_duration.sum                                                                 us       254.78
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                     %        29.63
+    launch__occupancy_limit_shared_mem                                                  block            2
+    launch__registers_per_thread                                              register/thread          242
+    lts__t_sectors_op_read.sum                                                         sector      1708161
+    lts__t_sectors_op_red.sum                                                          sector     13369344
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                       %        53.05
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                        %        17.92
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.21
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         2.16
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         1.46
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.33
