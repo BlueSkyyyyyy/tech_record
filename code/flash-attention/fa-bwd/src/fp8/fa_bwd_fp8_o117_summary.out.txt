@@ -1,0 +1,59 @@
+O117 (第二百一十一轮) —— fp8 主 kernel 平台期最终收口（小 shape host 旋钮覆盖 + 更细 ksplit 探针）
+================================================================================================
+
+背景：O116（第 210 轮）已把 5 类 host/运行期旋钮（ksplit/hswap/mrev/ovlql/ovlcap）在
+4 个 shape（MHA S4096 / GQA q32kv4 / q40kv8 / MQA q64kv1）上判定「默认档全局最优」。
+本轮补上 O116 未覆盖的**小 shape**（S512 D=128、S512 D=256）与**更细 ksplit 档**（8/32/64），
+并对同一 HEAD 做 fresh 同 session ncu（ours vs TE）复证「L2 `red` 主体墙 = 本卡工作划分下界」。
+
+------------------------------------------------------------------------------------------------
+[1] 小 shape host 旋钮矩阵（`fa_bwd_fp8_main.out`，Hopper 构建，iters=100，宿主机共享 GPU，
+    绝对时间受邻容器负载影响；关键判据是**同一 binary 内的相对比**）。
+    原始：src/fp8/fa_bwd_fp8_o117_smallshape_sweep.out.txt
+
+  case b1_s512_h16_d128_causal_fp8（ksplit auto=16, grid 2048）:
+    default  0.0767 ms  28.01 TF   <- 最优
+    ksplit=8 0.1568 ms  13.70 TF   (受负载噪声污染，见下注)
+    ksplit=32 0.1508 ms 14.24 TF   (受负载噪声污染)
+    ksplit=64 0.0785 ms 27.37 TF
+  case b1_s512_h8_d256_causal_fp8（ksplit auto=8, grid 512）:
+    default 0.0926 / k=8 0.0928 / k=32 0.0937 / k=64 0.0922 ms  —— 全在 ~1.6% 噪声内
+  case b1_s1024_h32_d128_kv4_causal_fp8（auto k=2, grid 1024）:
+    default 0.2675 / k=8 0.3616 / k=32 0.3957 / k=64 0.3960 ms   —— 默认最优（k↑ 单调更慢）
+  case b1_s1024_h64_d128_kv1_causal_fp8（MQA, auto k=2, grid 2048）:
+    default 0.5079 / k=8 0.7519 / k=32 0.8103 / k=64 0.8164 ms   —— 默认最优
+  case b1_s4096_h16_d128_causal_fp8（flagship, auto k=2, grid 2048）:
+    default 1.5773 / k=8 2.0757 / k=32 3.0739 / k=64 3.1902 ms    —— 默认最优（同 O116）
+
+  ⇒ 覆盖结论：默认 auto k 在**小/中/大 shape、MHA/GQA/MQA、D=128/256 上全部最优**，
+    更细的 ksplit=32/64 无正结果；S512 的 k=8/32 两次独立测量差 2×（0.083/0.156ms），
+    系共享 GPU 邻容器负载，非配置效应（k=64 两次一致 0.0785/0.0787）。
+
+[2] fresh ncu（ours vs TE，S4096 causal，同 HEAD）——复证 O116/O92：
+    原始：src/fp8/fa_bwd_fp8_o117_ncu_ours_main_s4096.out.txt
+          src/fp8/fa_bwd_fp8_o117_ncu_te_main_s4096.out.txt
+
+  指标                         ours (kvtma<128,64,32>)     TE (flash_bprop_wgmma_f8_64x64x128)
+  ------------------------------------------------------------  -----
+  Duration                     1.38 ms                      257.63 µs          (5.36x)
+  lts op_red                   105,381,888 sector           25,957,024 sector  (4.06x)
+  lts op_read                  24,238,059                   10,197,700         (2.38x)
+  lts op_write                 138,653                      797,573
+  lts throughput               78.09%                       70.97%
+  dram throughput              11.64% (含邻容器负载)         17.96%
+  sm inst executed             617,655,296                  108,334,714        (5.70x)
+  warps active                 18.67%                       15.61%
+  grid/threads                 128x16 / 128 (3 CTA/SM)      132 / 384 (1 CTA/SM)
+
+  ⇒ 同为 BM=64，差距全在**搬运量**（red 4.06x、read 2.38x）。`red` 扇区账（O116 已给）：
+    理论下界 2(dK/dV)·Σntiles·(BN·HD/8)·H = 68.2M，实测 105.4M；多出的 ~37M 纯来自
+    「每个 KV 元素被多少 m-block 归约」= **工作划分**，与归约机制/宽度无关（O42/O67/O83/O114
+    四证），要压只能放大 BM / KV-owner，本卡寄存器/smem 墙锁定（F6/F7/p160/O83/O86/O90/O91）。
+
+[3] 数值护栏（S4096 causal，ours vs dump 的 ref npy）：max_abs 2.635/2.644/3.216e-1；
+    单/两文件/Hopper 构建逐位一致。默认一行未改。
+
+判决：负结果（无新正结果），默认路径一行未改。fp8 主 kernel 的 host/运行期旋钮前沿在
+      **所有 shape 尺度**上均已扫清；主 kernel 的 L2 `red` 是**本卡工作划分的硬件下界**，
+      剩余唯一杠杆 = 换卡（更大 smem/寄存器）或硬件 scatter-reduce / TMA-multicast-cluster
+      （有 `cp.async.bulk.tensor` multicast 未被试，见 ROADMAP「下一步」）。

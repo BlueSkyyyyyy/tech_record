@@ -11985,3 +11985,56 @@ ours 全部落在 fp8 硬护栏（8.2/8.3/6.5% ±0.3）内，且**优于 TE-vs-r
 `--ci --no-run --dtype fp8` 55 case gate **worst 5.722e-06 OK**、`docs/04 --check` OK（224 行）。
 原始输出 `src/fp8/fa_bwd_fp8_o116_knob_sweep.out.txt`、
 `..._o116_ncu_{ours,te}_main_s4096.out.txt`。
+
+## 138. 第 211 轮：O117——fp8 主 kernel 平台期最终收口（小 shape host 旋钮 + 更细 ksplit）
+
+### 138.1 动机
+
+O116（第 210 轮）把 5 类 host/运行期旋钮在 **4 个 S≥1024 的 shape** 上判定默认最优；但
+**小 shape（S512、D=256）与更细的 ksplit 档（8/32/64）**没进矩阵。本轮补这一刀，并对同一 HEAD
+做 fresh 同 session ncu 复证「L2 `red` 主体墙 = 本卡工作划分下界」。
+
+### 138.2 小 shape host 旋钮矩阵（iters=100；共享 GPU，关键看同 binary 相对比）
+
+| case（auto k） | default | ksplit=8 | ksplit=32 | ksplit=64 |
+|---|---|---|---|---|
+| S512 H16 D128（k=16，grid 2048） | **0.0767 ms** | 0.1568* | 0.1508* | 0.0785 |
+| S512 H8 D256（k=8，grid 512） | **0.0926** | 0.0928 | 0.0937 | 0.0922 |
+| S1024 H32 kv4（k=2，grid 1024） | **0.2675** | 0.3616 | 0.3957 | 0.3960 |
+| S1024 H64 kv1（MQA，k=2） | **0.5079** | 0.7519 | 0.8103 | 0.8164 |
+| S4096 H16（flagship，k=2） | **1.5773** | 2.0757 | 3.0739 | 3.1902 |
+
+\* S512 的 k=8/32 两次独立测量差 2×（0.083/0.156ms），系宿主机共享 GPU 的邻容器负载，
+非配置效应（k=64 两次一致 0.0785/0.0787）。⇒ **默认 auto k 在小/中/大 × MHA/GQA/MQA ×
+D=128/256 上全部最优，无新档可转正。**
+
+### 138.3 fresh ncu（ours vs TE，S4096 causal）
+
+| 指标 | ours `kvtma<128,64,32>` | TE `..._flash_bprop_wgmma_f8_..._64x64x128` | 比 |
+|---|---|---|---|
+| Duration | **1.38 ms** | **257.63 µs** | 5.36× |
+| `lts op_red` | **105,381,888** | **25,957,024** | 4.06× |
+| `lts op_read` | 24,238,059 | 10,197,700 | 2.38× |
+| `lts op_write` | 138,653 | 797,573 | — |
+| `lts` throughput | 78.09% | 70.97% | — |
+| `sm inst executed` | 617,655,296 | 108,334,714 | 5.70× |
+| warps active | 18.67% | 15.61% | — |
+| grid / threads | 128×16 / 128（3 CTA/SM） | 132 / 384（1 CTA/SM） | — |
+
+同 BM=64，差距全在**搬运量**。`red` 扇区 105.4M = 理论下界 68.2M（O116 推导）的 1.545×，
+多出部分纯来自「每个 KV 元素被多少 m-block 归约」= **工作划分**，与归约机制/宽度无关
+（O42/O67/O83/O114 四证）；要压只能放大 BM / KV-owner，被本卡寄存器/smem 墙锁定。
+
+### 138.4 数值护栏
+
+ours vs dump 的 ref npy（S4096 causal）`max_abs` **2.635/2.644/3.216e-1**；单/两文件与 Hopper
+构建逐位一致；默认路径一行未改。
+
+### 138.5 结论 / 下一步
+
+**负结果、默认一行未改。** host/运行期旋钮前沿在所有 shape 尺度上扫清；`red` 主体墙是本卡
+工作划分的硬件下界。**唯一未试的搬运量杠杆 = TMA multicast + cluster 共享 K/V 读**（2-CTA
+cluster 用 `cp.async.bulk.tensor` 的 `.multicast::cluster` 把 K/V 读减半，直打 read 2.38× 差距；
+`red` 不受影响，工程量大）；其余只剩换卡或覆盖型 backlog（fp16/bf16 `head_dim=256`）。
+原始输出 `src/fp8/fa_bwd_fp8_o117_smallshape_sweep.out.txt`、
+`..._o117_ncu_ours_main_s4096.out.txt`、`..._o117_ncu_te_main_s4096.out.txt`、`..._o117_summary.out.txt`。

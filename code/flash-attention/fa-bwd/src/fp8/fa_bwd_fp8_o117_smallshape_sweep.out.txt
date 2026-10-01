@@ -1,0 +1,60 @@
+===== b1_s512_h16_d128_causal_fp8  --default =====
+grid main = 128 x 16 x 1  (ksplit=16, base_grid=128)
+[timing] total(quant+pre+main+cvt) 0.0767 ms  28.01 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s512_h16_d128_causal_fp8  --ksplit=8 =====
+grid main = 64 x 16 x 1  (ksplit=8, base_grid=128)
+[timing] total(quant+pre+main+cvt) 0.1568 ms  13.70 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s512_h16_d128_causal_fp8  --ksplit=32 =====
+grid main = 256 x 16 x 1  (ksplit=32, base_grid=128)
+[timing] total(quant+pre+main+cvt) 0.1508 ms  14.24 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s512_h16_d128_causal_fp8  --ksplit=64 =====
+grid main = 512 x 16 x 1  (ksplit=64, base_grid=128)
+[timing] total(quant+pre+main+cvt) 0.0785 ms  27.37 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s512_h8_d256_causal_fp8  --default =====
+grid main = 64 x 8 x 1  (ksplit=8, base_grid=64)
+[timing] total(quant+pre+main+cvt) 0.0926 ms  23.19 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s512_h8_d256_causal_fp8  --ksplit=8 =====
+grid main = 64 x 8 x 1  (ksplit=8, base_grid=64)
+[timing] total(quant+pre+main+cvt) 0.0928 ms  23.14 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s512_h8_d256_causal_fp8  --ksplit=32 =====
+grid main = 256 x 8 x 1  (ksplit=32, base_grid=64)
+[timing] total(quant+pre+main+cvt) 0.0937 ms  22.91 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s512_h8_d256_causal_fp8  --ksplit=64 =====
+grid main = 512 x 8 x 1  (ksplit=64, base_grid=64)
+[timing] total(quant+pre+main+cvt) 0.0922 ms  23.28 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s1024_h32_d128_kv4_causal_fp8  --default =====
+grid main = 32 x 32 x 1  (ksplit=2, base_grid=512)
+[timing] total(quant+pre+main+cvt) 0.2675 ms  64.23 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s1024_h32_d128_kv4_causal_fp8  --ksplit=8 =====
+grid main = 128 x 32 x 1  (ksplit=8, base_grid=512)
+[timing] total(quant+pre+main+cvt) 0.3616 ms  47.50 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s1024_h32_d128_kv4_causal_fp8  --ksplit=32 =====
+grid main = 512 x 32 x 1  (ksplit=32, base_grid=512)
+[timing] total(quant+pre+main+cvt) 0.3957 ms  43.41 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s1024_h32_d128_kv4_causal_fp8  --ksplit=64 =====
+grid main = 1024 x 32 x 1  (ksplit=64, base_grid=512)
+[timing] total(quant+pre+main+cvt) 0.3960 ms  43.38 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s1024_h64_d128_kv1_causal_fp8  --default =====
+grid main = 32 x 64 x 1  (ksplit=2, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 0.5079 ms  67.65 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s1024_h64_d128_kv1_causal_fp8  --ksplit=8 =====
+grid main = 128 x 64 x 1  (ksplit=8, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 0.7519 ms  45.70 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s1024_h64_d128_kv1_causal_fp8  --ksplit=32 =====
+grid main = 512 x 64 x 1  (ksplit=32, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 0.8103 ms  42.40 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s1024_h64_d128_kv1_causal_fp8  --ksplit=64 =====
+grid main = 1024 x 64 x 1  (ksplit=64, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 0.8164 ms  42.09 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s4096_h16_d128_causal_fp8  --default =====
+grid main = 128 x 16 x 1  (ksplit=2, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.5773 ms  87.13 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s4096_h16_d128_causal_fp8  --ksplit=8 =====
+grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 2.0757 ms  66.21 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s4096_h16_d128_causal_fp8  --ksplit=32 =====
+grid main = 2048 x 16 x 1  (ksplit=32, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 3.0739 ms  44.71 TFLOPS (bwd FLOPs=4BS^2HD)
+===== b1_s4096_h16_d128_causal_fp8  --ksplit=64 =====
+grid main = 4096 x 16 x 1  (ksplit=64, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 3.1902 ms  43.08 TFLOPS (bwd FLOPs=4BS^2HD)
