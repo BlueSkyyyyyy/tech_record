@@ -12572,3 +12572,72 @@ fp8 主 kernel 的 D=128（F1/F8）与 D=256（O84）默认已走 wgmma，**只�
   更少贡献次数），受本卡寄存器/smem 墙锁定。
 * 原始输出：`src/fp8/fa_bwd_fp8_o124_ncu_{ours,redstore,te}_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o124_sass_hist.out.txt`、`src/fp8/fa_bwd_fp8_o124_mlawgm_probe.out.txt`。
+
+---
+
+## 146. O125（第 219 轮）：fp8 `red` 墙的「表示无关性」终局核对 —— **bytes / sectors / requests**（default vs bulk-reduce vs TE）
+
+O124 把默认 `kvtma` main 的 `red` 在 L1/L2 上做了分层；本轮补上最后一块拼图——**L2 侧的交易粒度
+（request）**，并用 O42 的 `-DFA_BULKRED=1`（smem staging + `cp.reduce.async.bulk`）与同 session TE
+做三点对照，把「L2 `red` 到底由什么决定」彻底钉死。默认路径**一行未改**、数值逐位不变。
+
+### 146.1 三方 L2 `red` 计数（S=4096 causal H16，同 session）
+
+命令：`ncu --kernel-name regex:kvtma --launch-count 1 --metrics ...`（ours/bulk）；
+`harness/te_fp8_ncu.py '1 4096 16 128 causal'`（TE）。
+
+| kernel | Duration | L1 red req / sect | **L2 red req** | **L2 red sect** | sect/req | red bytes |
+|---|---|---|---|---|---|---|
+| ours `kvtma<128,64,32>`（默认） | 1.37 ms | 8.78M / 70.25M（8.0/req） | **105.38M** | **105.38M** | **1.0** | 3.37 GB |
+| ours `-DFA_BULKRED=1`（O42） | **1.45 ms** | 0.26M / 2.10M | **51.07M** | **118.16M** | 2.3 | 3.78 GB |
+| TE `..._flash_bprop_wgmma_f8_..._64x64x128` | **0.259 ms** | 3.2K / 3.2K（绕过 L1） | **6.49M** | **25.96M** | **4.0** | 0.83 GB |
+
+要点：
+1. **默认 ours 的每个 L2 `red` 请求恰好 1 个扇区**（请求数 == 扇区数 == 105.38M）。L1 每请求
+   8 扇区（8 个不同行、已满扇区），但 L1→L2 接口把 8-row 散布请求**展宽成 ~12 个单扇区 L2 请求**
+   （105.38M / 8.78M）。这正是 O124「L2 = 1.50× L1」的确切形态：**不是字节多了，而是 L2 请求粒度碎了**。
+2. **TE 的 `UTMAREDG.4D.ADD` 是 4 扇区（128B）/请求**，且总字节只有 ours 的 **1/4.06**——两个维度同时赢：
+   粒度粗 4×、字节少 4×。
+3. **O42 的 `-DFA_BULKRED=1` 只买到了「粒度」这一维**：L1 red 请求 8.78M→**0.26M**、L2 red 请求
+   105.38M→**51.07M（2.06× 少）**，但 **L2 扇区反而 105.38M→118.16M（+12%）**、Duration
+   1.37→**1.45 ms（0.94× 更慢）**。即：交易粒度可以换粗，但**字节数不减反增**（256B/行的 staging
+   与 padding），且 smem 往返的 L1/TEX 成本（O42 实测 L1/TEX 已 71.8%）把省下的请求吞吐吃掉。
+
+### 146.2 结论：L2 `red` 墙由「贡献字节」唯一决定；交易粒度不可赢
+
+* **L2 `red` 的扇区数 == 贡献字节 / 32B**（默认 3.37GB → 105.38M）。要降它只有一条路：
+  **减少每个 KV 元素被多少个 CTA 贡献**（= 放大单 CTA 拥有的 KV 范围），即工作划分。
+* **交易粒度（request）是正交维度且已证无收益**：O42 bulk 把请求砍半、O67 `red.v4` / O114 fp16
+  收窄、O124 plain store（107.21M 单扇区）都改变/不改变请求形态，**扇区字节与 Duration 均不改善**。
+* **对照 TE**：TE 同 BM=64 却 `red` 字节少 4.06×，纯因**持久 KV-owner 的单一 owner 划分**
+  （每个 dK/dV 元素只被 1 个 CTA 累加一次，无跨 CTA RMW）；这是 F7 的目标，已被
+  O83/O91/O157/O160/O168 判为**本卡寄存器/smem 墙**（255 regs / 3 CTA/SM 的 77.5KB 上限
+  容不下多 owner 的翻倍累加器）。
+* **护栏复核**：默认 `kvtma`（本轮 bin）`ours vs fp32 ref` relL2 dq/dk/dv =
+  **8.149 / 8.263 / 6.489%**、`max_abs` 2.635/2.644/3.216e-1（在 8.2/8.3/6.5%±0.3 内）；
+  GQA q40kv8 8.181/8.353/6.363%、MQA q64kv1 8.176/8.441/6.449%、D=256 8.332/8.434/6.464%、
+  MLA D=512 8.163/8.564/6.507%——**全部在护栏内**。单/两文件一致性 gate worst **7.629e-06 OK**、
+  `docs/04 --check` OK（224 行）。
+* **性能**：total 1.576 ms / 87.2 TF（纯反向口径）；同 session TE FP8 main **0.259 ms**
+  ⇒ main 时间比 **5.29×**、total 端到端 **~6.1×**。FA3 无 FP8 反向，无 FA3 列。
+
+### 146.3 复现
+
+```bash
+# ours 默认（L2 red 请求/扇区）
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:kvtma --launch-count 1 \
+  --metrics gpu__time_duration.sum,l1tex__t_requests_pipe_lsu_mem_global_op_red.sum,\
+l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum,lts__t_requests_op_red.sum,lts__t_sectors_op_red.sum \
+  -- --dir=/home/xieminglin/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --causal --iters=10
+# O42 bulk 对照：同上，NVCC_FLAGS 追加 -DFA_BULKRED=1，另加 lts__t_{requests,sectors}_op_write.sum
+# TE 对照
+ncu --launch-skip 3 --launch-count 1 --kernel-name-base demangled --kernel-name regex:flash_bprop \
+  --metrics gpu__time_duration.sum,l1tex__t_{requests,sectors}_pipe_lsu_mem_global_op_red.sum,\
+lts__t_{requests,sectors}_op_red.sum,lts__t_sectors_op_read.sum \
+  python3 harness/te_fp8_ncu.py '1 4096 16 128 causal'
+```
+
+原始输出：`src/fp8/fa_bwd_fp8_o125_ncu_ours_s4096.out.txt`、`..._o125_ncu_bulkred_s4096.out.txt`、
+`..._o125_ncu_te_s4096.out.txt`、`..._o125_bulkred_timing_s4096.out.txt`、
+`..._o125_default_s4096.out.txt`（timing + 对拍）。
