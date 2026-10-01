@@ -1,3 +1,201 @@
+=== fa_bwd_run.py (P3-3c) 一键跑 ours + 汇总 ===
+cases=49 impls=['twofile', 'singlefile'] iters=5
+[run] fp8 twofile b1_s1024_h16_d128_full_fp8
+[run] fp8 singlefile b1_s1024_h16_d128_full_fp8
+[run] fp8 twofile b1_s1024_h16_d256_full_fp8
+[run] fp8 singlefile b1_s1024_h16_d256_full_fp8
+[run] fp8 twofile b1_s1024_h16_d256_kv4_causal_fp8
+[run] fp8 singlefile b1_s1024_h16_d256_kv4_causal_fp8
+[run] fp8 twofile b1_s1024_h2_d512_causal_fp8
+[run] fp8 singlefile b1_s1024_h2_d512_causal_fp8
+[run] fp8 twofile b1_s1024_h2_d512_full_fp8
+[run] fp8 singlefile b1_s1024_h2_d512_full_fp8
+[run] fp8 twofile b1_s1024_h32_d128_causal_fp8
+[run] fp8 singlefile b1_s1024_h32_d128_causal_fp8
+[run] fp8 twofile b1_s1024_h32_d128_kv4_causal_fp8
+[run] fp8 singlefile b1_s1024_h32_d128_kv4_causal_fp8
+[run] fp8 twofile b1_s1024_h40_d128_kv8_causal_fp8
+[run] fp8 singlefile b1_s1024_h40_d128_kv8_causal_fp8
+[run] fp8 twofile b1_s1024_h64_d128_kv1_causal_fp8
+[run] fp8 singlefile b1_s1024_h64_d128_kv1_causal_fp8
+[run] fp8 twofile b1_s1024_h64_d128_kv4_causal_fp8
+[run] fp8 singlefile b1_s1024_h64_d128_kv4_causal_fp8
+[run] fp8 twofile b1_s1024_h8_d256_causal_fp8
+[run] fp8 singlefile b1_s1024_h8_d256_causal_fp8
+[run] fp8 twofile b1_s1024_h8_d256_full_fp8
+[run] fp8 singlefile b1_s1024_h8_d256_full_fp8
+[run] fp8 twofile b1_s2048_h16_d256_causal_fp8
+[run] fp8 singlefile b1_s2048_h16_d256_causal_fp8
+[run] fp8 twofile b1_s2048_h16_d256_full_fp8
+[run] fp8 singlefile b1_s2048_h16_d256_full_fp8
+[run] fp8 twofile b1_s2048_h2_d512_full_fp8
+[run] fp8 singlefile b1_s2048_h2_d512_full_fp8
+[run] fp8 twofile b1_s2048_h32_d256_full_fp8
+[run] fp8 singlefile b1_s2048_h32_d256_full_fp8
+[run] fp8 twofile b1_s2048_h8_d256_causal_fp8
+[run] fp8 singlefile b1_s2048_h8_d256_causal_fp8
+[run] fp8 twofile b1_s2048_h8_d256_full_fp8
+[run] fp8 singlefile b1_s2048_h8_d256_full_fp8
+[run] fp8 twofile b1_s256_h2_d512_causal_fp8
+[run] fp8 singlefile b1_s256_h2_d512_causal_fp8
+[run] fp8 twofile b1_s4096_h16_d128_causal_fp8
+[run] fp8 singlefile b1_s4096_h16_d128_causal_fp8
+[run] fp8 twofile b1_s4096_h16_d256_full_fp8
+[run] fp8 singlefile b1_s4096_h16_d256_full_fp8
+[run] fp8 twofile b1_s4096_h2_d512_full_fp8
+[run] fp8 singlefile b1_s4096_h2_d512_full_fp8
+[run] fp8 twofile b1_s4096_h8_d256_causal_fp8
+[run] fp8 singlefile b1_s4096_h8_d256_causal_fp8
+[run] fp8 twofile b1_s4096_h8_d256_full_fp8
+[run] fp8 singlefile b1_s4096_h8_d256_full_fp8
+[run] fp8 twofile b1_s512_h16_d128_causal_fp8
+[run] fp8 singlefile b1_s512_h16_d128_causal_fp8
+[run] fp8 twofile b1_s512_h16_d256_full_fp8
+[run] fp8 singlefile b1_s512_h16_d256_full_fp8
+[run] fp8 twofile b1_s512_h2_d512_causal_fp8
+[run] fp8 singlefile b1_s512_h2_d512_causal_fp8
+[run] fp8 twofile b1_s512_h2_d512_full_fp8
+[run] fp8 singlefile b1_s512_h2_d512_full_fp8
+[run] fp8 twofile b1_s512_h4_d512_causal_fp8
+[run] fp8 singlefile b1_s512_h4_d512_causal_fp8
+[run] fp8 twofile b1_s512_h4_d512_full_fp8
+[run] fp8 singlefile b1_s512_h4_d512_full_fp8
+[run] fp8 twofile b1_s512_h8_d256_causal_fp8
+[run] fp8 singlefile b1_s512_h8_d256_causal_fp8
+[run] fp8 twofile b1_s512_h8_d256_full_fp8
+[run] fp8 singlefile b1_s512_h8_d256_full_fp8
+[run] fp8 twofile varlen_b1_t512_h16_d128_causal_fp8
+[run] fp8 singlefile varlen_b1_t512_h16_d128_causal_fp8
+[run] fp8 twofile varlen_b1_t512_h2_d512_causal_fp8
+[run] fp8 singlefile varlen_b1_t512_h2_d512_causal_fp8
+[run] fp8 twofile varlen_b1_t512_h2_d512_full_fp8
+[run] fp8 singlefile varlen_b1_t512_h2_d512_full_fp8
+[run] fp8 twofile varlen_b3_t1792_h2_d512_causal_fp8
+[run] fp8 singlefile varlen_b3_t1792_h2_d512_causal_fp8
+[run] fp8 twofile varlen_b3_t1792_h2_d512_full_fp8
+[run] fp8 singlefile varlen_b3_t1792_h2_d512_full_fp8
+[run] fp8 twofile varlen_b4_t3840_h16_d128_causal_fp8
+[run] fp8 singlefile varlen_b4_t3840_h16_d128_causal_fp8
+[run] fp8 twofile varlen_b4_t3840_h16_d128_full_fp8
+[run] fp8 singlefile varlen_b4_t3840_h16_d128_full_fp8
+[run] fp8 twofile varlen_b4_t3840_h8_d256_causal_fp8
+[run] fp8 singlefile varlen_b4_t3840_h8_d256_causal_fp8
+[run] fp8 twofile varlen_b4_t3840_h8_d256_full_fp8
+[run] fp8 singlefile varlen_b4_t3840_h8_d256_full_fp8
+[run] fp8 twofile varlen_b4_t4096_h16_d128_causal_fp8
+[run] fp8 singlefile varlen_b4_t4096_h16_d128_causal_fp8
+[run] fp8 twofile varlen_b4_t4096_h16_d128_full_fp8
+[run] fp8 singlefile varlen_b4_t4096_h16_d128_full_fp8
+[run] fp8 twofile varlen_b4_t4096_h8_d256_causal_fp8
+[run] fp8 singlefile varlen_b4_t4096_h8_d256_causal_fp8
+[run] fp8 twofile varlen_b5_t3968_h32_d128_causal_fp8
+[run] fp8 singlefile varlen_b5_t3968_h32_d128_causal_fp8
+[run] fp8 twofile varlen_b5_t3968_h32_d128_full_fp8
+[run] fp8 singlefile varlen_b5_t3968_h32_d128_full_fp8
+[run] fp8 twofile varlen_b8_t2904_h16_d128_causal_fp8
+[run] fp8 singlefile varlen_b8_t2904_h16_d128_causal_fp8
+[run] fp8 twofile varlen_b8_t2904_h16_d128_full_fp8
+[run] fp8 singlefile varlen_b8_t2904_h16_d128_full_fp8
+[run] fp8 twofile varlen_b8_t2904_h8_d256_causal_fp8
+[run] fp8 singlefile varlen_b8_t2904_h8_d256_causal_fp8
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_p33c_run.out.txt
+
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_run_p33c_summary.out.txt
+
+[compare --apply] /usr/bin/python3 /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_compare.py --apply /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/docs/04-numerics-and-perf-summary.md
+[--apply] 已更新 /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/docs/04-numerics-and-perf-summary.md 的 auto-doc-table 块（218 行）
+--- /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/docs/04-numerics-and-perf-summary.md:current
++++ /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/docs/04-numerics-and-perf-summary.md:expected
+@@ -201,13 +201,17 @@
+ | varlen B=1 T=512 [512] H=2 D=512 causal | **ours（两文件）** | 1.613e-01 | 2.238e-01 | 3.864e-01 |
+ | varlen B=1 T=512 [512] H=16 D=128 causal | **ours（两文件）** | 2.280e-01 | 3.108e-01 | 3.422e-01 |
+ | varlen B=3 T=1792 [256,512,1024] H=2 D=512 causal | **ours（两文件）** | 3.404e-01 | 3.436e-01 | 3.508e-01 |
++| varlen B=8 T=2904 [2048,512,128,96...] H=8 D=256 causal | **ours（两文件）** | 3.416e-01 | 4.407e-01 | 4.290e-01 |
+ | varlen B=8 T=2904 [2048,512,128,96...] H=16 D=128 causal | **ours（两文件）** | 3.136e-01 | 3.584e-01 | 4.030e-01 |
++| varlen B=4 T=3840 [512,1024,2048,256] H=8 D=256 causal | **ours（两文件）** | 3.619e-01 | 3.385e-01 | 4.002e-01 |
+ | varlen B=4 T=3840 [512,1024,2048,256] H=16 D=128 causal | **ours（两文件）** | 2.935e-01 | 2.938e-01 | 4.179e-01 |
+ | varlen B=5 T=3968 [128,256,512,1024...] H=32 D=128 Hkv=8 causal | **ours（两文件）** | 3.094e-01 | 5.567e-01 | 6.203e-01 |
++| varlen B=4 T=4096 [1024,1024,1024,1024] H=8 D=256 causal | **ours（两文件）** | 3.382e-01 | 3.485e-01 | 3.868e-01 |
+ | varlen B=4 T=4096 [1024,1024,1024,1024] H=16 D=128 causal | **ours（两文件）** | 2.651e-01 | 3.026e-01 | 3.920e-01 |
+ | varlen B=1 T=512 [512] H=2 D=512 full | **ours（两文件）** | 5.260e-02 | 5.222e-02 | 4.218e-02 |
+ | varlen B=3 T=1792 [256,512,1024] H=2 D=512 full | **ours（两文件）** | 7.994e-02 | 9.629e-02 | 4.148e-02 |
+ | varlen B=8 T=2904 [2048,512,128,96...] H=16 D=128 full | **ours（两文件）** | 2.412e-01 | 2.057e-01 | 2.512e-01 |
++| varlen B=4 T=3840 [512,1024,2048,256] H=8 D=256 full | **ours（两文件）** | 7.204e-02 | 6.616e-02 | 8.387e-02 |
+ | varlen B=4 T=3840 [512,1024,2048,256] H=16 D=128 full | **ours（两文件）** | 1.011e-01 | 9.656e-02 | 7.032e-02 |
+ | varlen B=5 T=3968 [128,256,512,1024...] H=32 D=128 Hkv=8 full | **ours（两文件）** | 1.428e-01 | 1.597e-01 | 1.082e-01 |
+ | varlen B=4 T=4096 [1024,1024,1024,1024] H=16 D=128 full | **ours（两文件）** | 8.881e-02 | 7.043e-02 | 5.721e-02 |
+
+=== fa-bwd 实现一致性（P3-3f/P3-3g）：ours_hp vs ours_sf_hp（max_abs，逐元素）===
+baseline-free：两者都算同一数学；期望差异仅跨 CTA atomicAdd 次序（dtype ulp）。
+判据（按 dtype）：max|ours_hp-ours_sf_hp| <= ctol；fp8=0.0001（任一超出则退出码 1）
+
+[fp8]
+  b1_s1024_h16_d128_full_fp8                      dq=2.980e-08  dk=1.192e-07  dv=5.960e-08
+  b1_s1024_h16_d256_full_fp8                      dq=0.000e+00  dk=8.941e-08  dv=7.451e-08
+  b1_s1024_h16_d256_kv4_causal_fp8                dq=1.192e-07  dk=4.768e-07  dv=9.537e-07
+  b1_s1024_h2_d512_causal_fp8                     dq=1.192e-07  dk=2.384e-07  dv=4.768e-07
+  b1_s1024_h2_d512_full_fp8                       dq=7.451e-08  dk=8.941e-08  dv=5.960e-08
+  b1_s1024_h32_d128_causal_fp8                    dq=0.000e+00  dk=2.384e-07  dv=2.384e-07
+  b1_s1024_h32_d128_kv4_causal_fp8                dq=0.000e+00  dk=9.537e-07  dv=1.907e-06
+  b1_s1024_h40_d128_kv8_causal_fp8                dq=0.000e+00  dk=4.768e-07  dv=9.537e-07
+  b1_s1024_h64_d128_kv1_causal_fp8                dq=0.000e+00  dk=3.815e-06  dv=6.676e-06
+  b1_s1024_h64_d128_kv4_causal_fp8                dq=0.000e+00  dk=1.431e-06  dv=2.861e-06
+  b1_s1024_h8_d256_causal_fp8                     dq=1.192e-07  dk=1.192e-07  dv=2.384e-07
+  b1_s1024_h8_d256_full_fp8                       dq=7.451e-08  dk=8.941e-08  dv=5.960e-08
+  b1_s2048_h16_d256_causal_fp8                    dq=1.788e-07  dk=5.960e-07  dv=4.768e-07
+  b1_s2048_h16_d256_full_fp8                      dq=8.941e-08  dk=6.706e-08  dv=4.470e-08
+  b1_s2048_h2_d512_full_fp8                       dq=5.960e-08  dk=6.706e-08  dv=6.706e-08
+  b1_s2048_h32_d256_full_fp8                      dq=8.941e-08  dk=8.941e-08  dv=7.451e-08
+  b1_s2048_h8_d256_causal_fp8                     dq=1.192e-07  dk=2.384e-07  dv=4.768e-07
+  b1_s2048_h8_d256_full_fp8                       dq=7.451e-08  dk=5.960e-08  dv=5.960e-08
+  b1_s256_h2_d512_causal_fp8                      dq=1.192e-07  dk=2.384e-07  dv=2.384e-07
+  b1_s4096_h16_d128_causal_fp8                    dq=0.000e+00  dk=1.192e-07  dv=2.384e-07
+  b1_s4096_h16_d256_full_fp8                      dq=6.706e-08  dk=4.470e-08  dv=5.960e-08
+  b1_s4096_h2_d512_full_fp8                       dq=5.588e-08  dk=6.706e-08  dv=5.215e-08
+  b1_s4096_h8_d256_causal_fp8                     dq=1.192e-07  dk=4.768e-07  dv=7.153e-07
+  b1_s4096_h8_d256_full_fp8                       dq=6.706e-08  dk=5.960e-08  dv=5.960e-08
+  b1_s512_h16_d128_causal_fp8                     dq=1.192e-07  dk=3.576e-07  dv=4.768e-07
+  b1_s512_h16_d256_full_fp8                       dq=8.941e-08  dk=1.192e-07  dv=1.788e-07
+  b1_s512_h2_d512_causal_fp8                      dq=1.192e-07  dk=2.384e-07  dv=7.153e-07
+  b1_s512_h2_d512_full_fp8                        dq=8.941e-08  dk=5.960e-08  dv=5.960e-08
+  b1_s512_h4_d512_causal_fp8                      dq=1.192e-07  dk=4.768e-07  dv=4.768e-07
+  b1_s512_h4_d512_full_fp8                        dq=8.941e-08  dk=5.960e-08  dv=5.960e-08
+  b1_s512_h8_d256_causal_fp8                      dq=1.192e-07  dk=3.576e-07  dv=7.153e-07
+  b1_s512_h8_d256_full_fp8                        dq=8.941e-08  dk=8.941e-08  dv=5.960e-08
+  varlen_b1_t512_h16_d128_causal_fp8              dq=1.192e-07  dk=4.768e-07  dv=4.768e-07
+  varlen_b1_t512_h2_d512_causal_fp8               dq=1.192e-07  dk=2.384e-07  dv=3.576e-07
+  varlen_b1_t512_h2_d512_full_fp8                 dq=1.192e-07  dk=8.941e-08  dv=5.960e-08
+  varlen_b3_t1792_h2_d512_causal_fp8              dq=1.192e-07  dk=2.384e-07  dv=4.768e-07
+  varlen_b3_t1792_h2_d512_full_fp8                dq=1.192e-07  dk=5.960e-08  dv=5.960e-08
+  varlen_b4_t3840_h16_d128_causal_fp8             dq=1.192e-07  dk=3.576e-07  dv=4.768e-07
+  varlen_b4_t3840_h16_d128_full_fp8               dq=1.192e-07  dk=1.192e-07  dv=1.192e-07
+  varlen_b4_t3840_h8_d256_causal_fp8              dq=1.192e-07  dk=2.980e-07  dv=4.768e-07
+  varlen_b4_t3840_h8_d256_full_fp8                dq=1.341e-07  dk=8.941e-08  dv=1.192e-07
+  varlen_b4_t4096_h16_d128_causal_fp8             dq=1.192e-07  dk=4.768e-07  dv=9.537e-07
+  varlen_b4_t4096_h16_d128_full_fp8               dq=5.960e-08  dk=1.192e-07  dv=8.941e-08
+  varlen_b4_t4096_h8_d256_causal_fp8              dq=2.384e-07  dk=5.960e-07  dv=9.537e-07
+  varlen_b5_t3968_h32_d128_causal_fp8             dq=1.192e-07  dk=9.537e-07  dv=1.907e-06
+  varlen_b5_t3968_h32_d128_full_fp8               dq=5.960e-08  dk=2.384e-07  dv=2.980e-07
+  varlen_b8_t2904_h16_d128_causal_fp8             dq=1.192e-07  dk=4.768e-07  dv=7.153e-07
+  varlen_b8_t2904_h16_d128_full_fp8               dq=1.192e-07  dk=1.192e-07  dv=7.451e-08
+  varlen_b8_t2904_h8_d256_causal_fp8              dq=1.192e-07  dk=4.768e-07  dv=9.537e-07
+
+=== 小结（49 case 有 ours_hp/ours_sf_hp 双方；0 case 缺一侧）===
+  max|ours_hp-ours_sf_hp| over all cases: dq = 2.384e-07  (varlen_b4_t4096_h8_d256_causal_fp8)
+  max|ours_hp-ours_sf_hp| over all cases: dk = 3.815e-06  (b1_s1024_h64_d128_kv1_causal_fp8)
+  max|ours_hp-ours_sf_hp| over all cases: dv = 6.676e-06  (b1_s1024_h64_d128_kv1_causal_fp8)
+  worst = 6.676e-06
+  gate[fp8 ] worst=6.676e-06  tol=0.0001  -> OK
+
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_consistency_p33g.out.txt
+[--consistency] OK：worst=6.676e-06（各 dtype 均在容差内）
+[--check] OK：/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/docs/04-numerics-and-perf-summary.md 的 auto-doc-table 块与实测一致（218 行，rtol=0.005）
+
+[consistency:auto] /usr/bin/python3 /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_compare.py --consistency --ca ours_hp --cb ours_sf_hp --out /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_consistency_p33g.out.txt --case b1_s1024_h16_d128_full_fp8 b1_s1024_h16_d256_full_fp8 b1_s1024_h16_d256_kv4_causal_fp8 b1_s1024_h2_d512_causal_fp8 b1_s1024_h2_d512_full_fp8 b1_s1024_h32_d128_causal_fp8 b1_s1024_h32_d128_kv4_causal_fp8 b1_s1024_h40_d128_kv8_causal_fp8 b1_s1024_h64_d128_kv1_causal_fp8 b1_s1024_h64_d128_kv4_causal_fp8 b1_s1024_h8_d256_causal_fp8 b1_s1024_h8_d256_full_fp8 b1_s2048_h16_d256_causal_fp8 b1_s2048_h16_d256_full_fp8 b1_s2048_h2_d512_full_fp8 b1_s2048_h32_d256_full_fp8 b1_s2048_h8_d256_causal_fp8 b1_s2048_h8_d256_full_fp8 b1_s256_h2_d512_causal_fp8 b1_s4096_h16_d128_causal_fp8 b1_s4096_h16_d256_full_fp8 b1_s4096_h2_d512_full_fp8 b1_s4096_h8_d256_causal_fp8 b1_s4096_h8_d256_full_fp8 b1_s512_h16_d128_causal_fp8 b1_s512_h16_d256_full_fp8 b1_s512_h2_d512_causal_fp8 b1_s512_h2_d512_full_fp8 b1_s512_h4_d512_causal_fp8 b1_s512_h4_d512_full_fp8 b1_s512_h8_d256_causal_fp8 b1_s512_h8_d256_full_fp8 varlen_b1_t512_h16_d128_causal_fp8 varlen_b1_t512_h2_d512_causal_fp8 varlen_b1_t512_h2_d512_full_fp8 varlen_b3_t1792_h2_d512_causal_fp8 varlen_b3_t1792_h2_d512_full_fp8 varlen_b4_t3840_h16_d128_causal_fp8 varlen_b4_t3840_h16_d128_full_fp8 varlen_b4_t3840_h8_d256_causal_fp8 varlen_b4_t3840_h8_d256_full_fp8 varlen_b4_t4096_h16_d128_causal_fp8 varlen_b4_t4096_h16_d128_full_fp8 varlen_b4_t4096_h8_d256_causal_fp8 varlen_b5_t3968_h32_d128_causal_fp8 varlen_b5_t3968_h32_d128_full_fp8 varlen_b8_t2904_h16_d128_causal_fp8 varlen_b8_t2904_h16_d128_full_fp8 varlen_b8_t2904_h8_d256_causal_fp8 --ctol auto
+
+[ci doc-table-check] /usr/bin/python3 /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_compare.py --check /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/docs/04-numerics-and-perf-summary.md
+
+[compare] /usr/bin/python3 /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_compare.py --case b1_s1024_h16_d128_full_fp8 b1_s1024_h16_d256_full_fp8 b1_s1024_h16_d256_kv4_causal_fp8 b1_s1024_h2_d512_causal_fp8 b1_s1024_h2_d512_full_fp8 b1_s1024_h32_d128_causal_fp8 b1_s1024_h32_d128_kv4_causal_fp8 b1_s1024_h40_d128_kv8_causal_fp8 b1_s1024_h64_d128_kv1_causal_fp8 b1_s1024_h64_d128_kv4_causal_fp8 b1_s1024_h8_d256_causal_fp8 b1_s1024_h8_d256_full_fp8 b1_s2048_h16_d256_causal_fp8 b1_s2048_h16_d256_full_fp8 b1_s2048_h2_d512_full_fp8 b1_s2048_h32_d256_full_fp8 b1_s2048_h8_d256_causal_fp8 b1_s2048_h8_d256_full_fp8 b1_s256_h2_d512_causal_fp8 b1_s4096_h16_d128_causal_fp8 b1_s4096_h16_d256_full_fp8 b1_s4096_h2_d512_full_fp8 b1_s4096_h8_d256_causal_fp8 b1_s4096_h8_d256_full_fp8 b1_s512_h16_d128_causal_fp8 b1_s512_h16_d256_full_fp8 b1_s512_h2_d512_causal_fp8 b1_s512_h2_d512_full_fp8 b1_s512_h4_d512_causal_fp8 b1_s512_h4_d512_full_fp8 b1_s512_h8_d256_causal_fp8 b1_s512_h8_d256_full_fp8 varlen_b1_t512_h16_d128_causal_fp8 varlen_b1_t512_h2_d512_causal_fp8 varlen_b1_t512_h2_d512_full_fp8 varlen_b3_t1792_h2_d512_causal_fp8 varlen_b3_t1792_h2_d512_full_fp8 varlen_b4_t3840_h16_d128_causal_fp8 varlen_b4_t3840_h16_d128_full_fp8 varlen_b4_t3840_h8_d256_causal_fp8 varlen_b4_t3840_h8_d256_full_fp8 varlen_b4_t4096_h16_d128_causal_fp8 varlen_b4_t4096_h16_d128_full_fp8 varlen_b4_t4096_h8_d256_causal_fp8 varlen_b5_t3968_h32_d128_causal_fp8 varlen_b5_t3968_h32_d128_full_fp8 varlen_b8_t2904_h16_d128_causal_fp8 varlen_b8_t2904_h16_d128_full_fp8 varlen_b8_t2904_h8_d256_causal_fp8 --out /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_compare_p33c_summary.out.txt
 === fa-bwd numeric comparison (baseline = ref; max_abs / max_rel) ===
 case                                           impl  dq_abs    dq_rel    dk_abs    dk_rel    dv_abs    dv_rel   
 ----------------------------------------------------------------------------------------------------------------
@@ -353,3 +551,6 @@ case                                           impl  dq_abs    dq_rel    dk_abs 
   fp8   varlen_b8_t2904_h16_d128_causal_fp8            dq=3.136e-01 dk=3.584e-01 dv=4.030e-01
   fp8   varlen_b8_t2904_h16_d128_full_fp8              dq=2.412e-01 dk=2.057e-01 dv=2.512e-01
   fp8   varlen_b8_t2904_h8_d256_causal_fp8             dq=3.416e-01 dk=4.407e-01 dv=4.290e-01
+
+[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fa_bwd_compare_p33c_summary.out.txt
+

@@ -630,8 +630,11 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   const int T = (int)q_np.shape[0], H = (int)q_np.shape[1], D = (int)q_np.shape[2];
   const int Hkv = (int)k_np.shape[1];
   const int B = (int)cu_np.data.size() - 1;
-  if (D != 128 && D != 512) {
-    fprintf(stderr, "VARLEN 目前只做 HD=128/512；当前 %d\n", D);
+  // O108（第 202 轮）：补齐 fp8 变长覆盖的最后一块 —— **D=256 变长**（此前 guard 只放行
+  //   128/512，D=256 的 ksplit 分支虽已按定长外推写好却永不生效）。LSE/delta/主 kernel 的
+  //   D=256 实例在定长路径早已存在（O76/O84/O99/O103），varlen 只需接线 + 量化 VPT=8。
+  if (D != 128 && D != 256 && D != 512) {
+    fprintf(stderr, "VARLEN 只做 HD=128/256/512；当前 %d\n", D);
     return 1;
   }
   int maxlen = 0;
@@ -783,11 +786,19 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   // O99（第 193 轮）：**causal D=256 的 ksplit 重标定**（定长规则同源，用 `maxlen` 当串长）。
   //   与 O98 的 full 分支并列：定长 causal D=256 的 `target=S/2` 是小/中 S 严重欠切（见定长
   //   路径注释 / docs/03 §121），变长沿用同一错；改为 `k = clamp(2*maxlen/base,1,16)` 再按
-  //   `nblk(=`maxlen/64`)` 封顶。**当前无 D=256 变长 dump，本分支按定长实测外推、未单独测量**；
-  //   只改跨 CTA atomicAdd 次序、数值逐位不变。full 走上面的 O98 分支。
+  //   `nblk(=`maxlen/64`)` 封顶。
+  // O108（第 202 轮）：**D=256 变长首次实装并单独标定**。O99 的 `2*maxlen/base_grid` 用的是
+  //   **名义网格**（按 `maxlen`），大 H×B 时被短序列的早退死 CTA 严重高估 ⇒ 欠切。3 个 dumped
+  //   causal D=256 varlen 全扫 k∈[1,16]（250 iters）：b4_t3840(H8·B4,base=1024) 最优 **k=8**
+  //   （k=4→8 1.04×）、b4_t4096(等长 1024,base=512) 最优 **k=4**、b8_t2904(H8·B8,base=2048)
+  //   最优 **k=6**（k=2→6 1.20×）。三者共同点 = **每 CTA 约 4 个 K tile**（`nblk/k≈4`：32/8、
+  //   16/4、32/8）⇒ 在 O99 公式上再抬下限 `nblk/4`。只改跨 CTA atomicAdd 次序、数值逐位不变
+  //   （relL2 与 O99 档同量级）。full 走上面的 O98 分支（不变）。
   if (causal && D == 256) {
     const long nblk256 = (long)((maxlen + BM - 1) / BM);
     long k = (2L * maxlen) / base_grid;
+    const long kq = nblk256 / 4;   // O108：每 CTA 约 4 个 K tile（D=256 的 K tile 更重）
+    if (kq > k) k = kq;
     if (k < 1) k = 1;
     if (k > 16) k = 16;
     if (k > nblk256) k = nblk256;
@@ -832,7 +843,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   //   +1.5% / b5_t3968 +0.6%（均不齐、maxlen=2048），而**等长 b4_t4096（无 padding）为 −1.1%**
   //   （纯 LPT 打乱同序列相邻 m 的 K/V 微局部性、收益不抵）；D=512 b3_t1792 +7.1%。故门控在
   //   「有 padding」；等长档逐值不变。
-  const bool mrev_v_elig = (mrev_flag != 0) && causal && (D == 128 || D == 512) &&
+  //   O108：门控扩到 D=256（与定长 D=256 的 hswap256/mrev 同源；变长 D=256 此前无 LPT）。
+  const bool mrev_v_elig = (mrev_flag != 0) && causal && (D == 128 || D == 256 || D == 512) &&
                            nblk_mv >= 16 && (long)total_mt < (long)nblk_mv * B;
   if (mrev_v_elig) {
     std::vector<int> hrev(nblk_mv);
@@ -841,7 +853,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     CUDA_CHECK(cudaMemcpy(d_mrev_v, hrev.data(), nblk_mv * sizeof(int), cudaMemcpyHostToDevice));
     printf("O106: varlen mrev on (nblk=%d, LPT expensive-first)\n", nblk_mv);
   } else if (mrev_flag) {
-    printf("O106: varlen mrev requested but ignored (need causal & D==128/512 & nblk>=16)\n");
+    printf("O106: varlen mrev requested but ignored (need causal & D==128/256/512 & nblk>=16)\n");
   }
 
   // O40：varlen LSE 的 K 维 split auto（D=128 目标 `grid*split≈2048`、cap 8；D=512 `≈256`、
@@ -888,6 +900,10 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
           quantize_zero_delta_warp_kernel<4><<<g, 128>>>(
               d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks,
               d_vs, d_dos, d_dq, d_dk, d_dv, rq, rkv);
+        else if (D == 256)  // O108：VPT = D/32 = 8（与定长 D=256 同）
+          quantize_zero_delta_warp_kernel<8><<<g, 128>>>(
+              d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks,
+              d_vs, d_dos, d_dq, d_dk, d_dv, rq, rkv);
         else
           quantize_zero_delta_warp_kernel<16><<<g, 128>>>(
               d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks,
@@ -896,6 +912,10 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
         quantize_zero_warp_kernel<4><<<g, 128>>>(d_q_f, d_k_f, d_v_f, d_do_f, d_q8, d_k8, d_v8,
                                                  d_do8, d_qs, d_ks, d_vs, d_dos, d_dq, d_dk,
                                                  d_dv, rq, rkv);
+      else if (D == 256)
+        quantize_zero_warp_kernel<8><<<g, 128>>>(d_q_f, d_k_f, d_v_f, d_do_f, d_q8, d_k8, d_v8,
+                                                  d_do8, d_qs, d_ks, d_vs, d_dos, d_dq, d_dk,
+                                                  d_dv, rq, rkv);
       else
         quantize_zero_warp_kernel<16><<<g, 128>>>(d_q_f, d_k_f, d_v_f, d_do_f, d_q8, d_k8, d_v8,
                                                   d_do8, d_qs, d_ks, d_vs, d_dos, d_dq, d_dk,
@@ -906,6 +926,11 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
         quantize_row_warp_kernel<4, false><<<gkv, 128>>>(d_k_f, d_k8, d_ks, rkv);
         quantize_row_warp_kernel<4, false><<<gkv, 128>>>(d_v_f, d_v8, d_vs, rkv);
         quantize_row_warp_kernel<4, true><<<gq, 128>>>(d_do_f, d_do8, d_dos, rq);
+      } else if (D == 256) {
+        quantize_row_warp_kernel<8, false><<<gq, 128>>>(d_q_f, d_q8, d_qs, rq);
+        quantize_row_warp_kernel<8, false><<<gkv, 128>>>(d_k_f, d_k8, d_ks, rkv);
+        quantize_row_warp_kernel<8, false><<<gkv, 128>>>(d_v_f, d_v8, d_vs, rkv);
+        quantize_row_warp_kernel<8, true><<<gq, 128>>>(d_do_f, d_do8, d_dos, rq);
       } else {
         quantize_row_warp_kernel<16, false><<<gq, 128>>>(d_q_f, d_q8, d_qs, rq);
         quantize_row_warp_kernel<16, false><<<gkv, 128>>>(d_k_f, d_k8, d_ks, rkv);
@@ -964,7 +989,12 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
         launch_lse_bal<512, 1, false, 256, 32>(dim3((lse_nblk8 + 1) / 2, H, B), d_q8, d_qs, d_k8,
                                                d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
                                                d_lse_part, lse_split_eff, (long long)rows_q);
-      } else
+      } else if (D == 256)
+        // O108：D=256 变长 causal 的 LSE——走通用 mma 镜像配对版（HD=256 无 SW128 wgmma 快路），
+        //   与定长 D=256 causal 的非 TMA 档同源；`d_cu` 逐序列定界、`lse_split_eff` 复用 O40 split。
+        launch_lse_bal<256, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
+                               d_lse_part, lse_split_eff, (long long)rows_q);
+      else
         launch_lse_bal<512, 1>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, d_cu,
                                d_lse_part, lse_split_eff, (long long)rows_q);
     } else {
@@ -986,6 +1016,11 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
         else if (!did_tma_v)
           launch_lse<128>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale, 0, d_cu);
       }
+      else if (D == 256)
+        // O108：D=256 变长 full 的 LSE——通用 mma 均衡版（FULL=true），与定长 D=256 full 的
+        //   非 TMA 档同源；`d_cu` 逐序列定界。
+        launch_lse_bal<256, 1, true>(lg, d_q8, d_qs, d_k8, d_ks, d_lse, maxlen, H, Hkv, scale,
+                                     d_cu, d_lse_part, lse_split_eff, (long long)rows_q);
       else if (lseocc == 5 || lseocc == 6)
         // O58：full MLA varlen 的 LSE「2 CTA/SM」几何（O57 的 fp8 同构；默认仍是 O54 旧路）。
         if (lseocc == 5)
@@ -1014,6 +1049,8 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     if (!(qfuseflag && dfuse)) {
       if (D == 128)
         delta_warp_kernel<128><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
+      else if (D == 256)  // O108：D=256 变长的 delta（VPT=8 布局，定长同款）
+        delta_warp_kernel<256><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
       else
         delta_warp_kernel<512><<<d_blocks, THREADS>>>(d_o_f, d_do8, d_dos, d_delta, d_rows);
     }
@@ -1042,7 +1079,14 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
         launch_bwd_main<512, 64, 32, false, false, true, true>(
             mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
             d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu, mtb, mtm);
-    } else if (use_regdq)
+    } else if (D == 256)
+      // O108：D=256 变长主 kernel —— wgmma（SW128，GEMM1/2）+ cp.async K/V/dO，与定长 D=256
+      //   默认档同源（O84）；核内 `cu_seqlens/mt_b/mt_m` 逐序列定界（与 D=128 varlen 同一 body）。
+      //   REGDQ=false（HD=256 的 dQ 一次铺不满 N，与定长一致）。
+      launch_bwd_main<256, 64, 32, false, true>(
+          mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
+          d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu, mtb, mtm);
+    else if (use_regdq)
       launch_bwd_main<128, 64, 32, true, true, true, true, true>(
           mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq, d_dk,
           d_dv, maxlen, H, Hkv, scale, (int)causal, ksplit, d_cu, mtb, mtm);
@@ -1718,7 +1762,7 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   CUDA_CHECK(cudaMemcpy(h_dv.data(), d_dv, nkv * 4, cudaMemcpyDeviceToHost));
   auto report = [](const char* nm, const std::vector<float>& a, const NpyF32& b) {
     size_t n = std::min(a.size(), b.data.size());
-    double ma = 0.0, mr = 0.0, ao = 0.0, ar = 0.0;
+    double ma = 0.0, mr = 0.0, ao = 0.0, ar = 0.0, l2r = 0.0;
     size_t arg = 0;
     for (size_t i = 0; i < n; ++i) {
       double d = fabs((double)a[i] - (double)b.data[i]);
@@ -1728,9 +1772,20 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       double den = std::max(1e-3, fabs((double)b.data[i]));
       double r = d / den;
       if (r > mr) mr = r;
+      // O108：补 relL2（护栏口径：relL2 dq/dk/dv ≤ 8.2%/8.3%/6.5%）。
+      l2r += (double)b.data[i] * (double)b.data[i];
     }
-    printf("  %-3s vs ref: max_abs=%.3e  max_rel=%.3e  (ours_amax=%.3e ref_amax=%.3e @%zu)\n",
-           nm, ma, mr, ao, ar, arg);
+    const double diff_l2 = [&] {
+      double s = 0.0;
+      for (size_t i = 0; i < n; ++i) {
+        double d = (double)a[i] - (double)b.data[i];
+        s += d * d;
+      }
+      return sqrt(s);
+    }();
+    printf("  %-3s vs ref: max_abs=%.3e  max_rel=%.3e  relL2=%.3f%%  "
+           "(ours_amax=%.3e ref_amax=%.3e @%zu)\n",
+           nm, ma, mr, 100.0 * diff_l2 / std::max(1e-30, sqrt(l2r)), ao, ar, arg);
   };
   printf("[compare] VARLEN ours vs fp32 ref\n");
   report("dq", h_dq, rdq);

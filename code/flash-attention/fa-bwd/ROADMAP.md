@@ -8420,9 +8420,37 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     次序）；relL2 D=128 8.11–8.25/8.21–8.37/6.20–6.38%、D=512 8.42/8.48/6.47%（护栏内）；
     单/两文件一致性 gate **worst 5.722e-06 OK**；**全量 `--ci --dtype fp8 --hopper`（45 case）
     gate OK**、`--check docs/04` **OK（214 行）**；定长与 full 路径逐字不变。
-  - **判决：正结果、默认开启**。`op_red`（dK/dV 主体墙）仍无软件解（见「阻塞」）。见 `docs/03`
-    §129、`docs/08` §5.115；原始输出 `src/fp8/fa_bwd_fp8_o107_ab.out.txt`、
-    `..._o107_ncu.out.txt`、`..._o107_ci.out.txt`。
+   - **判决：正结果、默认开启**。`op_red`（dK/dV 主体墙）仍无软件解（见「阻塞」）。见 `docs/03`
+     §129、`docs/08` §5.115；原始输出 `src/fp8/fa_bwd_fp8_o107_ab.out.txt`、
+     `..._o107_ncu.out.txt`、`..._o107_ci.out.txt`。
+
+- 2026-10-01（第二百零二轮）：**O108——fp8 `head_dim=256` 变长支持 + ksplit 标定——正结果，默认**。
+  落实 O107「下一步候选 ③」的覆盖型 backlog **`D=256` 变长**。此前 `run_varlen` guard 只放行
+  `HD=128/512`，而 O99 已按定长写好 causal D=256 的 ksplit 公式（注释「无 D=256 变长 dump、按定长
+  外推」）——公式挂在**跑不了的路径**上；D=256 的 LSE/delta/主 kernel 实例在**定长**早已存在。
+  - **改动（host 为主、设备数学一行未改、单/两文件同源）**：① guard 放行 256；② 量化 **VPT=8**
+    （fused/non-fused 各加一支）；③ `delta_warp_kernel<256>`；④ LSE causal
+    `launch_lse_bal<256,1>` / full `<256,1,true>`（同定长非 TMA 档 + `d_cu` 定界）；⑤ 主 kernel
+    `launch_bwd_main<256,64,32,false,true>`（wgmma SW128 + cp.async，同定长默认档）；⑥ O106 的
+    per-head mrev 门控扩到 **`D∈{128,256,512}`**；⑦ **ksplit 下限 `nblk/4`**（每 CTA 约 4 个 K
+    tile）；⑧ 对拍打印加 `relL2` 护栏列。
+  - **性能（同 binary A/B，iters=250，3×）**：O99 旧档→新档：b4_t3840 causal（k4→8）1.109→1.069ms
+    **1.038×**；b4_t4096 等长（k4→4）中性；**b8_t2904 causal（k2→8）1.060→0.893ms 1.186×**；
+    full（O98，k=8）不变 1.898ms。ours 端到端 24–43 TF（`sum_b 4HL²D`）；D=256 变长**无外部基线**
+    （TE fp8 D=256 causal 报 invalid、FA3 不支持 fp8、FA3 fp16 varlen D=256 本机 `fa3=NA`）。
+  - **ncu（b4_t3840 causal main）**：**L2 79.4%**、`op_red` 69.80M（**占 L2 87%**）、`op_read`
+    10.59M、DRAM 6.83%、SM 29.7%、warps 12.4%（238 regs / 115.71KB smem → 2 CTA/SM）；stall
+    `long 1.77 / short 1.47 / wait 1.35`。bound = **dK/dV 跨 CTA `red`**（与 D=128/256 定长旗舰
+    同源，本卡无软件解，见「阻塞」）；ksplit/LPT 只买并行度、不动 `red` 总量。
+  - **数值/回归（护栏）**：relL2 dq/dk/dv = 8.31/8.42/6.41、8.23/8.38/6.44、8.25/8.40/6.29、
+    full 8.15/8.29/6.70% —— **全部在护栏内**（dq≤8.5 / dk≤8.6 / dv≤6.8）；`max_abs` O(0.066–0.44)、
+    与 D=128/512 同量级；**单/两文件逐位一致**（≤1.4e-6）；**全量 `--ci --dtype fp8 --hopper`
+    （49 case）**一致性 gate **worst 6.676e-06 OK**、`docs/04` 表同步 **218 行**、`--check` OK、
+    rc=0；D=128/512 varlen 与定长/full 路径逐字不变。
+  - **判决：正结果、默认开启**。fp8 变长覆盖补齐 `D=128/256/512 × causal/full`。`op_red` 主体墙仍
+    无软件解；**下一步候选**：① 换卡；② causal 变长 ksplit 复核推广到 **fp16/bf16**；③ MLA 降 smem。
+    见 `docs/03` §130、`docs/08` §5.116；原始输出 `src/fp8/fa_bwd_fp8_o108_ab.out.txt`、
+    `..._o108_ncu_d256_varlen.out.txt`、`..._o108_baseline.out.txt`、`..._o108_ci.out.txt`。
 
 ## 灵感 / backlog
 

@@ -1,0 +1,3 @@
+### baseline: FA3/TE fp16 varlen (D=256, same lengths) for magnitude (fp8 has no external ref)
+=== VARLEN bench（pure-bwd，CUPTI device time）===
+[varlen_b4_t3840_h8_d256_causal_fp16] lengths=[512, 1024, 2048, 256]  fa3=NA(mha_fwd, /home/xieminglin/github/flash-a)

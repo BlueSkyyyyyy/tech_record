@@ -11364,3 +11364,82 @@ b1_t512 1.060×**；b1/b4（auto 未变）中性。这 4 个是 O106 之后**最
   没有 D=128/512 的 causal 变长档）；③ 余下覆盖型 backlog（`D=256` 变长支持、MLA 降 smem）。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o107_ab.out.txt`、`src/fp8/fa_bwd_fp8_o107_ncu.out.txt`、
   `src/fp8/fa_bwd_fp8_o107_ci.out.txt`；见 `docs/08` §5.115。
+
+## 130. 第 202 轮：O108——fp8 `head_dim=256` **变长**支持 + ksplit 标定——正结果，默认
+
+### 130.1 动机
+
+O107 的「下一步候选 ③」列的 fp8 覆盖型 backlog 是 **`D=256` 变长**。彼时 `run_varlen` 的
+guard 只放行 `HD=128/512`（`D != 128 && D != 512` 直接 `return 1`），而 O99 却已按定长把
+`causal D=256` 的 ksplit 公式写好、注释明写「无 D=256 变长 dump、按定长外推」——即**公式挂在一个
+从未能运行的路径上**。D=256 的 LSE/delta/主 kernel 实例在**定长**路径早已存在（O76 建 D=256、
+O84 默认切 wgmma、O99/O103 标定 ksplit/LSE、O104 hswap256），varlen 只是缺 host 接线。本轮把它接通
+并首次单独测量/标定，补齐 fp8 变长在 **`D=128/256/512` × `causal/full`** 上的最后一块。
+
+### 130.2 改动（host 为主，设备数学一行未改；单/两文件同源）
+
+1. **guard** 放宽到 `128/256/512`。
+2. **量化 VPT**：`D=256` 用 `VPT=D/32=8`（此前 `else` 落 16）——fused 的
+   `quantize_zero_delta_warp_kernel<8>`、`quantize_zero_warp_kernel<8>`、非 fused 的
+   `quantize_row_warp_kernel<8,{false,true}>` 各加一支（模板实例定长路径已存在）。
+3. **delta**：`delta_warp_kernel<256>`（VPT=8 布局，逐序列 packed 定界）。
+4. **LSE**：causal 走 `launch_lse_bal<256,1>`（通用 mma 镜像配对版 + `d_cu` 逐序列定界 +
+   O40 的 `lse_split_eff`）、full 走 `launch_lse_bal<256,1,true>`（均衡 FULL 版）——均与定长
+   D=256 的非 TMA 档同源（HD=256 无 SW128 wgmma 快路，故不走 `lse_mma_kernel_bal_wgmma`）。
+5. **主 kernel**：`launch_bwd_main<256,64,32,false,true>`（wgmma SW128 GEMM1/2 + cp.async
+   K/V/dO，`REGDQ=false`；与定长 D=256 默认档同源），核内 `cu_seqlens/mt_b/mt_m` 复用 D=128
+   varlen 同一 body。
+6. **LPT**：把 O106 的 per-head mrev 门控从 `D∈{128,512}` 扩到 **`{128,256,512}`**（变长 D=256
+   此前无任何 LPT）。
+7. **ksplit 标定**：O99 的 `k=clamp(2*maxlen/base_grid,1,16)` 用**名义网格**（按 `maxlen`），大
+   `H×B` 时被短序列的早退死 CTA 严重高估 ⇒ 欠切。新增下限 `nblk/4`（每 CTA 约 4 个 K tile）：
+   `k = clamp(max(2*maxlen/base_grid, nblk/4), 1, nblk)`。
+8. **诊断**：varlen 对拍打印项增加 `relL2`（护栏口径）。
+
+### 130.3 标定 / 性能（同 binary A/B，iters=250，3× 复测）
+
+4 个新 dumped causal/full shape（`D=256, H=8`）：
+
+| case | lengths | base/nblk | O99 旧 k | O108 新 k | old ms | new ms | 加速 |
+|---|---|---|---|---|---|---|---|
+| b4_t3840 causal | 512,1024,2048,256 | 1024 / 32 | 4 | **8** | 1.109 | 1.069 | **1.038×** |
+| b4_t4096 causal | 1024×4（等长） | 512 / 16 | 4 | 4 | 0.904 | 0.904 | 1.000× |
+| b8_t2904 causal | 2048,512,128,96,64,32,16,8 | 2048 / 32 | 2 | **8** | 1.060 | 0.893 | **1.186×** |
+| b4_t3840 **full** | 512,1024,2048,256 | 1024 / 32 | 8（O98，不变） | 8 | — | 1.898 | — |
+
+- 3 个 causal 的最优点分别 **k=8 / k=4 / k=6**，共同点 = **每 CTA 约 4 个 K tile**（32/8、16/4、
+  32/6–8）⇒ `nblk/4` 下限；等长档（无 padding、`total_mt==nblk*B`）mrev 门控外、ksplit 也不变 ⇒
+  逐值中性。full 走 O98 不含本下限，保持 8。
+- ours 端到端 TFLOPS：b4_t3840 causal 42.7、b4_t4096 causal 38.1、b8_t2904 causal 41.1、
+  full 24.0（`sum_b 4HL²D` 口径）。**D=256 变长无外部基线**：TE fp8 D=256 causal 直接报
+  invalid（O99 已证）、FA3 不支持 fp8，fp16 FA3 varlen D=256 在本机构建报错（`fa3=NA`）⇒ 只对
+  fp32 ref。
+
+### 130.4 ncu（main，`b4_t3840_h8_d256_causal`）
+
+- **bound = L2 吞吐（79.4%）**：`op_red` **69,795,840**、`op_read` 10,586,187、`op_write` 2,854
+  ⇒ **`red` 占 L2 扇区 87%**（dK/dV 跨 CTA `atomicAdd`）；DRAM **6.83%**、SM 29.7%、
+  warps_active 12.4%（238 regs / **115.71KB smem** ⇒ 2 CTA/SM）。
+- stall：`long_scoreboard 1.77`、`short 1.47`、`wait 1.35`、barrier 0.19、`issue_active 30.2%`。
+- ⇒ 与 D=128/256 定长旗舰**同源**：墙是 dK/dV 的跨 CTA `red`（每 KV 元素被多个 m-block CTA
+  贡献），ksplit/LPT 只买并行度、不动 `red` 总量（本卡无软件解，见「阻塞」）。
+
+### 130.5 数值 / 回归（护栏）
+
+- `ours vs fp32 ref`（relL2，护栏 dq≤8.5 / dk≤8.6 / dv≤6.8）：
+  b4_t3840 causal **8.313 / 8.416 / 6.411%**、b4_t4096 causal **8.228 / 8.379 / 6.444%**、
+  b8_t2904 causal **8.254 / 8.397 / 6.291%**、b4_t3840 full **8.147 / 8.289 / 6.698%** —— **全部在护栏内**；
+  `max_abs` O(0.066–0.44)，与 D=128/D=512 fp8 同量级。
+- **单/两文件逐位一致**（`ours vs ours_sf` max_abs ≤1.4e-6，纯 atomic 次序）。
+- **全量 `--ci --dtype fp8 --hopper`（49 case）**：一致性 gate **worst 6.676e-06 OK**、
+  `docs/04` auto-doc-table 同步 **218 行**、`--check` OK、rc=0；定长（D=128 kvtma / D=256
+  hswap256 / D=512 mrev / MLA）与 D=128/512 varlen 路径逐字不变。
+
+### 130.6 结论 / 下一步
+
+- **判决：正结果、默认开启**。fp8 变长覆盖补齐到 `D=128/256/512 × causal/full`；causal D=256
+  的 ksplit 下限 + per-head LPT 首次实测（大 `H×B` 档最高 **1.186×**）。
+- `op_red`（dK/dV 主体墙）仍无软件解；本轮的收益来自「欠切补足 + 覆盖」，不是降 L2 搬运量。
+- **下一步候选**：① **换卡**；② 把 causal 变长 ksplit 复核推广到 **fp16/bf16**；③ MLA 降 smem。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o108_ab.out.txt`、`..._o108_ncu_d256_varlen.out.txt`、
+  `..._o108_baseline.out.txt`、`..._o108_ci.out.txt`；见 `docs/08` §5.116。

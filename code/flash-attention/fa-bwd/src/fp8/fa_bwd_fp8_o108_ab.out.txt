@@ -1,0 +1,11 @@
+=== varlen_b4_t3840_h8_d256_causal_fp8  (O99 old k=4) ===
+  old(O99 k=4) total 1.1089 ms
+  new(O108 auto)   total 1.0685 ms   speedup=1.0378x
+=== varlen_b4_t4096_h8_d256_causal_fp8  (O99 old k=4) ===
+  old(O99 k=4) total 0.9041 ms
+  new(O108 auto)   total 0.9038 ms   speedup=1.0003x
+=== varlen_b8_t2904_h8_d256_causal_fp8  (O99 old k=2) ===
+  old(O99 k=2) total 1.0596 ms
+  new(O108 auto)   total 0.8932 ms   speedup=1.1863x
+=== varlen_b4_t3840_h8_d256_full_fp8 (full, O98 unchanged k=8) ===
+  auto total 1.8976 ms

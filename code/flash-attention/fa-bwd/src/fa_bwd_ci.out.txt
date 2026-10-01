@@ -1,5 +1,5 @@
 === fa_bwd_run.py (P3-3c) 一键跑 ours + 汇总 ===
-cases=45 impls=['twofile', 'singlefile'] iters=5
+cases=49 impls=['twofile', 'singlefile'] iters=5
 [run] fp8 twofile b1_s1024_h16_d128_full_fp8
 [run] fp8 singlefile b1_s1024_h16_d128_full_fp8
 [run] fp8 twofile b1_s1024_h16_d256_full_fp8
@@ -78,10 +78,16 @@ cases=45 impls=['twofile', 'singlefile'] iters=5
 [run] fp8 singlefile varlen_b4_t3840_h16_d128_causal_fp8
 [run] fp8 twofile varlen_b4_t3840_h16_d128_full_fp8
 [run] fp8 singlefile varlen_b4_t3840_h16_d128_full_fp8
+[run] fp8 twofile varlen_b4_t3840_h8_d256_causal_fp8
+[run] fp8 singlefile varlen_b4_t3840_h8_d256_causal_fp8
+[run] fp8 twofile varlen_b4_t3840_h8_d256_full_fp8
+[run] fp8 singlefile varlen_b4_t3840_h8_d256_full_fp8
 [run] fp8 twofile varlen_b4_t4096_h16_d128_causal_fp8
 [run] fp8 singlefile varlen_b4_t4096_h16_d128_causal_fp8
 [run] fp8 twofile varlen_b4_t4096_h16_d128_full_fp8
 [run] fp8 singlefile varlen_b4_t4096_h16_d128_full_fp8
+[run] fp8 twofile varlen_b4_t4096_h8_d256_causal_fp8
+[run] fp8 singlefile varlen_b4_t4096_h8_d256_causal_fp8
 [run] fp8 twofile varlen_b5_t3968_h32_d128_causal_fp8
 [run] fp8 singlefile varlen_b5_t3968_h32_d128_causal_fp8
 [run] fp8 twofile varlen_b5_t3968_h32_d128_full_fp8
@@ -90,5 +96,7 @@ cases=45 impls=['twofile', 'singlefile'] iters=5
 [run] fp8 singlefile varlen_b8_t2904_h16_d128_causal_fp8
 [run] fp8 twofile varlen_b8_t2904_h16_d128_full_fp8
 [run] fp8 singlefile varlen_b8_t2904_h16_d128_full_fp8
+[run] fp8 twofile varlen_b8_t2904_h8_d256_causal_fp8
+[run] fp8 singlefile varlen_b8_t2904_h8_d256_causal_fp8
 [written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp8/fa_bwd_fp8_p33c_run.out.txt
 [ci] doc-table-check rc=0

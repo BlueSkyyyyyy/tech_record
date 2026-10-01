@@ -1,0 +1,29 @@
+### ncu @ D=256 varlen causal (varlen_b4_t3840_h8_d256_causal_fp8) main kernel
+### metrics set 1: throughput/occupancy
+  void fa_bwd_fp8_mma_kernel<256, 64, 32, 0, 1, 1, 1, 1, 128, 2, 0, 0, 0, 0, 0>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, const int *, const int *, float *, float *, int, float *, const int *) (256, 8, 4)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    -------------------------------------------------- --------------- ------------
+    Metric Name                                            Metric Unit Metric Value
+    -------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed               %         6.83
+    gpu__time_duration.sum                                          us       879.71
+    launch__registers_per_thread                       register/thread          238
+    launch__shared_mem_per_block_dynamic                   Kbyte/block       115.71
+    lts__t_sectors_op_read.sum                                  sector     10586187
+    lts__t_sectors_op_red.sum                                   sector     69795840
+    lts__t_sectors_op_write.sum                                 sector         2854
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                %        79.42
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                 %        29.69
+    sm__warps_active.avg.pct_of_peak_sustained_active                %        12.39
+    -------------------------------------------------- --------------- ------------
+
+### metrics set 2: stalls
+  void fa_bwd_fp8_mma_kernel<256, 64, 32, 0, 1, 1, 1, 1, 128, 2, 0, 0, 0, 0, 0>(const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, const int *, const int *, float *, float *, int, float *, const int *) (256, 8, 4)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.19
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         1.77
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         1.47
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.35
+    smsp__issue_active.avg.pct_of_peak_sustained_active                                 %        30.24
+    ------------------------------------------------------------------------- ----------- ------------
