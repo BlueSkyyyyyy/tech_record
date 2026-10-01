@@ -767,8 +767,17 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
       const long SLOTS = (D == 512) ? 132L : 264L;
       const long KMAX = (D == 512) ? 16L : 12L;
       if (D == 256 && maxlen >= 2048) {
-        long k = 8192L / base_grid;
-        if (k < 1) k = 1;
+        // O113（第 207 轮）：**D=256 full 变长的 ksplit 重标定**。O98 只给 D=128 标了 full
+        //   变长（k=3）、D=256 直接沿用 O97 的**定长**公式 `k=8192/base`（本轮实测该档在
+        //   大 base 下欠切到 4、在 base=1024 又过切到 8）。5 个新 dump 的 D=256 full 变长
+        //   shape 全扫 k∈[1,16]（iters=200，3× 取 min，见 docs/03 §135）：最优点一致落在
+        //   **k=6**（每 CTA 约 `nblk/6≈5` 个 K tile）——base=1024 → k=6 1.858ms vs auto 8
+        //   1.899（1.022×，且 k=10 再快 0.7%）、base=1280 → k=6 1.857 vs auto 6（已最优）、
+        //   base=2048 → k=6 2.825/1.505/3.543 vs auto 4 2.888/1.554/3.616（1.02–1.03×）。
+        //   规则 = `max(kmin=6, 2048/base)`（小 base 仍靠 `2048/base` 保并发），cap KMAX；
+        //   只改「哪个 CTA 算哪段 K」⇒ 跨 CTA atomicAdd 次序略变，数值仅在 fp8 噪声内。
+        long k = 2048L / base_grid;
+        if (k < 6) k = 6;
         if (k > KMAX) k = KMAX;
         auto_k = k;
       } else {

@@ -1,0 +1,42 @@
+=== O113 single-file fp8 full-varlen D=256 (auto k=6) ===
+Thu Oct  1 12:13:57 PM CST 2026
+
+##### varlen_b4_t3840_h8_d256_full_fp8
+[timing] VARLEN total 1.8616 ms  24.51 TFLOPS (sum_b 4HL^2D)
+[O64 A/B] VARLEN total fused(1 launch) 1.8553 ms | unfused(4 quant + 3 memset) 1.8972 ms (1.0226x)
+grid main = 192 x 8 x 4 (nocompact, ksplit=6, total_mt=60) | use_regdq=0 | T=3840
+  dq  vs ref: max_abs=7.204e-02  max_rel=3.649e+01  relL2=8.147%  (ours_amax=8.863e-01 ref_amax=8.991e-01 @7360931)
+  dk  vs ref: max_abs=6.616e-02  max_rel=3.281e+01  relL2=8.289%  (ours_amax=1.332e+00 ref_amax=1.396e+00 @623436)
+  dv  vs ref: max_abs=8.387e-02  max_rel=2.839e+01  relL2=6.698%  (ours_amax=9.218e-01 ref_amax=9.092e-01 @7566609)
+
+##### varlen_b4_t4096_h16_d256_full_fp8
+[timing] VARLEN total 2.8382 ms  24.21 TFLOPS (sum_b 4HL^2D)
+[O64 A/B] VARLEN total fused(1 launch) 2.8375 ms | unfused(4 quant + 3 memset) 2.8775 ms (1.0141x)
+grid main = 144 x 16 x 4 (nocompact, ksplit=9, total_mt=64) | use_regdq=0 | T=4096
+  dq  vs ref: max_abs=7.234e-02  max_rel=2.509e+01  relL2=8.160%  (ours_amax=6.580e-01 ref_amax=6.985e-01 @1094523)
+  dk  vs ref: max_abs=6.459e-02  max_rel=2.911e+01  relL2=8.306%  (ours_amax=7.263e-01 ref_amax=7.734e-01 @15388047)
+  dv  vs ref: max_abs=4.302e-02  max_rel=1.930e+01  relL2=6.734%  (ours_amax=5.562e-01 ref_amax=5.715e-01 @5131009)
+
+##### varlen_b5_t3968_h8_d256_full_fp8
+[timing] VARLEN total 1.8580 ms  24.63 TFLOPS (sum_b 4HL^2D)
+[O64 A/B] VARLEN total fused(1 launch) 1.8617 ms | unfused(4 quant + 3 memset) 1.9278 ms (1.0355x)
+grid main = 192 x 8 x 5 (nocompact, ksplit=6, total_mt=62) | use_regdq=0 | T=3968
+  dq  vs ref: max_abs=1.135e-01  max_rel=5.311e+01  relL2=8.193%  (ours_amax=1.161e+00 ref_amax=1.138e+00 @236373)
+  dk  vs ref: max_abs=1.285e-01  max_rel=4.580e+01  relL2=8.318%  (ours_amax=1.177e+00 ref_amax=1.135e+00 @70412)
+  dv  vs ref: max_abs=8.087e-02  max_rel=3.346e+01  relL2=6.727%  (ours_amax=9.269e-01 ref_amax=8.747e-01 @70566)
+
+##### varlen_b8_t2904_h8_d256_full_fp8
+[timing] VARLEN total 1.5044 ms  24.44 TFLOPS (sum_b 4HL^2D)
+[O64 A/B] VARLEN total fused(1 launch) 1.5022 ms | unfused(4 quant + 3 memset) 1.5400 ms (1.0252x)
+grid main = 192 x 8 x 8 (nocompact, ksplit=6, total_mt=48) | use_regdq=0 | T=2904
+  dq  vs ref: max_abs=1.874e-01  max_rel=7.352e+01  relL2=8.057%  (ours_amax=2.694e+00 ref_amax=2.557e+00 @5933831)
+  dk  vs ref: max_abs=2.067e-01  max_rel=1.081e+02  relL2=8.216%  (ours_amax=2.674e+00 ref_amax=2.618e+00 @5944786)
+  dv  vs ref: max_abs=2.334e-01  max_rel=8.687e+01  relL2=6.608%  (ours_amax=2.939e+00 ref_amax=2.705e+00 @5941504)
+
+##### varlen_b4_t3840_h16_d256_full_fp8
+[timing] VARLEN total 3.5544 ms  25.68 TFLOPS (sum_b 4HL^2D)
+[O64 A/B] VARLEN total fused(1 launch) 3.5501 ms | unfused(4 quant + 3 memset) 3.6006 ms (1.0142x)
+grid main = 192 x 16 x 4 (nocompact, ksplit=6, total_mt=60) | use_regdq=0 | T=3840
+  dq  vs ref: max_abs=8.477e-02  max_rel=3.423e+01  relL2=8.133%  (ours_amax=1.394e+00 ref_amax=1.443e+00 @15550699)
+  dk  vs ref: max_abs=7.903e-02  max_rel=3.742e+01  relL2=8.287%  (ours_amax=1.278e+00 ref_amax=1.254e+00 @14711823)
+  dv  vs ref: max_abs=6.954e-02  max_rel=3.149e+01  relL2=6.750%  (ours_amax=8.087e-01 ref_amax=8.774e-01 @15647135)
