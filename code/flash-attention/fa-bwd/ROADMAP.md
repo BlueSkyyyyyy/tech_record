@@ -9280,6 +9280,33 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     见 `docs/03` §148、`docs/08` §5.135；原始输出 `src/fp8/fa_bwd_fp8_o127_cta_ab_s4096.out.txt`、
     `..._o127_ncu_cta{2,3}_s4096.out.txt`。
 
+- 2026-10-01（第二百二十二轮）：**O128——fp16/bf16 反向新增 `head_dim=256` 支持——能力覆盖，
+  正结果**。fp8 的性能杠杆已在 O116–O127 全部收口为「正结果只剩换卡」，本轮做 backlog 里唯一
+  明确的 `[ ]` 项（候选 ② 覆盖型）：把 fp8 O76 的 `D=256` 能力泛化到 fp16/bf16。
+  - **改动（纯 host dispatch，device 一行未改）**：fp16/bf16 的 `*_mma_main.cu` +
+    `*_mma_onefile.cu` 各加 `D==256` 分支——形状守卫放开 256；`lse_mma_kernel<256>` /
+    `lse_mma_kernel_bal<256,0/1/1,true>` 按 `LDl=D+8` 设 `MaxDynamicSharedMemorySize`；
+    `run_pre()` 新增 `D==256`（causal 走 O8b 镜像配对 `bal<256,1>`+O40 K-split、非 causal 走
+    O54 均衡 FULL `bal<256,1,true>`，**不做 4D-TMA**）；主 kernel 走**通用 mma**
+    `fa_bwd_{fp16,bf16}_mma_kernel<256,64,32,1>`（`NDT=HD/128=2`，4-warp）、host
+    `cudaMemset(dq_acc)` 条件补 `|| D==256`（GEMM5 全局 RMW）。单/两文件 host 同步、device 逐字一致。
+  - **数值**：fp16 ours vs fp32 ref `max_abs` S1024 1.657/1.405/1.447e-3、S2048
+    2.023/1.481/1.614e-3、GQA kv4 2.480/2.816/1.976e-3、full 1.850/2.775/2.109e-4；bf16 同构
+    （1.039/1.213/1.460e-2 … full 1.491/1.597/2.454e-3）——同 dtype 噪声、**dk/dv 多数 ≤ FA/TE**；
+    单/两文件逐位一致。**FA3（3.0.0）反向只支持 `head_dim≤128`** ⇒ D=256 无 FA3 列，只对 FA2/TE。
+  - **性能（event total；FA2/TE 同机 CUPTI 纯反向）**：fp16 S1024 0.4604ms/18.7TF、S2048
+    1.3546/25.4、GQA 0.7644/22.5、full 0.4910/17.5；bf16 同量级 0.4518/1.3473/0.7660/0.4909。
+    ours/TE **5.2–6.3×**、ours/FA2 4.0–4.7×（D=256 main 仍是通用 mma、非 wgmma）。
+  - **ncu（fp16 main S1024 causal）**：Duration **382µs**、DRAM 3.84% / L1/TEX 48.46% / L2 30.0% /
+    Compute 6.33%、**168 regs / 动态 smem 149.5KB → 1 CTA/SM、occ 6.25%**、Waves 0.97、
+    `No Eligible 88.3%`、头号 stall = L1TEX scoreboard 41.3% ⇒ **bound = 低 occupancy（smem 墙）
+    + 全局访存延迟**（同 `D=512` MLA）；local spill 占 L1 sector 7.76%。
+  - **下一步候选（更新）**：① **换卡**（fp8 main 的 L2 `red` 主体墙无软件解）；② fp8 main 覆盖型
+    backlog 已清空；③ **fp16/bf16 `D=256` 的 wgmma+TMA 几何**（对标 fp8 O84 的 2 CTA/SM，需新写
+    HD=256 wgmma 壳，同 D=512 资源墙）；④ 非 main `--det`/量化（O116 无余量）。
+    见 `docs/01` §27、`docs/01b` §6bd、`docs/08` §5.136；原始输出
+    `src/{fp16,bf16}/fa_bwd_*_o128_*.out.txt`、`..._o128_ncu_main_s1024h8_d256.out.txt`。
+
 ## 灵感 / backlog
 
 - [~] **（第九十九轮发现，第一百轮更正）三 dtype 非 causal（full）MLA varlen「HEAD 偏差」**：
@@ -9371,11 +9398,17 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     fp32→fp16 + O62 扇区化，覆盖定长/MLA/varlen）；归约读取的向量化也已完成（第 137 轮 F4-c：
     reduce 421→370µs、DRAM 78%→92.5%）。**
 - fp8：对比「只量化 dO」vs「dO 和 P 都量化」的精度/性能权衡。
-- **[ ] fp16/bf16 的 `head_dim=256`（O76 的 dtype 泛化，留 backlog）**：fp8 已于 **O76** 支持
-  `D=256`（host-only、device 未改），并已于 **O84（第 179 轮）**默认切到 **wgmma**（`D=256`
-  首次 2 CTA/SM、main 1.15–1.29×，见「当前进度 第一百七十九轮」）；fp16/bf16 的
-  `fa_bwd_{fp16,bf16}_mma_main.cu` 有 ~80–90 处
-  `D==128/512` 的 wg2/wgmma4/cluster 分派，需为 256 选 `BM/BN/几何`（或复用一个通用 mma 分支），
-  工作量明显大于 fp8。**注意**：`harness/fa_bwd_bench.py` 的 `REQUESTED_SHAPES` 暂不含 256，
-  否则 `dump --requested` 会给 fp16/bf16 也产出 D=256 case 让 CI 报「不支持 256」；用
-  `HD256_FP8_SHAPES` 的显式命令 dump（见该文件注释）。
+- **[x] fp16/bf16 的 `head_dim=256`（O76 的 dtype 泛化）→ 已完成（第 222 轮 O128）**：fp8 早已
+  支持 `D=256`（O76 host-only；O84 默认 wgmma、2 CTA/SM）。本轮把 fp16/bf16 也补齐：
+  **纯 host dispatch、device 一行未改**（`lse_mma_kernel[_bal]` 与 `fa_bwd_*_mma_kernel` 对 HD
+  本就是模板参数）——形状守卫放开 256；LSE 走 `bal<256,1>`（causal，镜像配对+K-split）/ 
+  `<256,1,true>`（full，均衡 FULL）、不做 4D-TMA；主 kernel 走**通用 mma** `<256,64,32,1>`
+  （`NDT=2`，4-warp）、`cudaMemset(dq_acc)` 条件补 `|| D==256`。**数值** fp16/bf16 causal/full/GQA
+  全同 dtype 噪声（fp16 S1024 1.657/1.405/1.447e-3、full 1.850/2.775/2.109e-4；bf16 同构），
+  单/两文件逐位一致；**FA3 反向只支持 head_dim≤128** ⇒ D=256 只对 FA2/TE。**性能** ours/TE
+  5.2–6.3×、ours/FA2 4.0–4.7×；ncu（fp16 main S1024）1 CTA/SM（149.5KB smem）、occ 6.25%、
+  bound = 低 occupancy + 全局延迟（同 D=512 MLA）。见 `docs/01` §27、`docs/01b` §6bd、
+  `docs/08` §5.136。**剩余**：`D=256` 主 kernel 仍是 mma/1-CTA-per-SM，若要对标 fp8 O84 的
+  wgmma/2 CTA/SM，需新写 HD=256 的 wgmma 几何（同 D=512 资源墙，留 backlog）。
+  **注**：`harness/fa_bwd_bench.py` 的 `REQUESTED_SHAPES` 仍不含 256（D=256 的 case 已在
+  dump 目录里、CI 会扫到）；新形状用 `HD256_FP8_SHAPES` 的显式命令 dump（见该文件注释）。
