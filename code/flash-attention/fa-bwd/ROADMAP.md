@@ -3333,12 +3333,13 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 > **最新（第二百一十七轮）**：**O123——fp8 主 kernel 的 per-row fold scale 寄存器预取
 > （`sA`/`sds3`/`sds2`）——中性（默认开 `FA_SCALE_HOIST=1`，`=0` 可 A/B）**。承接 O122 ncu 的
-> 头号 stall `short_scoreboard`=1.86，做**决定性二分**：排除「epilogue 的 per-row scale 重复
-> LDS」假设（编译器已 CSE）——真来源是 `mma_block_bt` 的 `ldmatrix` 与 Kp/Qp/dOp 重建后的
-> ldmatrix 读。**数值逐位不变**（`acc*sd*scale` 次序保持）；**性能 1.0012×（same-binary A/B 3 跑，
-> 噪声内，中性）**；单/两文件 `identical: True`。⇒ 与 O116/O117/O122 合并：**fp8 默认 main 的
-> bytes 与 issue 都已在软硬件边界，正结果仍只剩换卡**。见 `docs/03` §144、`docs/08` §5.131；
-> 原始输出 `src/fp8/fa_bwd_fp8_o123_scalehoist_ab_s4096.out.txt`。
+> 头号 stall `short_scoreboard`=1.86，检验其是否含「epilogue per-row scale 的重复 LDS」。改动后
+> **ncu 证 short_scoreboard 1.86→1.48（−20.4%）、指令 −1.25%**（预取确有效），**但 kernel 是
+> L2 吞吐 bound（78.2%）⇒ 计时中性 1.0012×（same-binary A/B 3 跑）**；剩余短 scoreboard 主体是
+> `mma_block_bt` 的 `ldmatrix`。**数值逐位不变**（`acc*sd*scale` 次序保持）；单/两文件
+> `identical: True`。⇒ 与 O116/O117/O122 合并：**fp8 默认 main 的 bytes 与 issue 都已在软硬件
+> 边界，正结果仍只剩换卡**。见 `docs/03` §144、`docs/08` §5.131；原始输出
+> `src/fp8/fa_bwd_fp8_o123_scalehoist_ab_s4096.out.txt`、`..._o123_ncu_s4096.out.txt`。
 > **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙 + issue 墙均无软件解）；
 > ② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；
 > ③ 非 main 的 `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）。
@@ -9128,13 +9129,17 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
   - **性能（GPU1，same-binary A/B，iters=50，S4096 causal H16）**：hoist=1 total avg **1.5845ms** /
     main **1.3781ms**；hoist=0 total avg **1.5864ms** / main **1.3801ms** ⇒ **1.0012×/1.0015×
     （噪声内，中性）**；两变体 ptxas 同为 68B spill stores / 92B spill loads。
-  - **判决**：**中性**。编译器对同一 `(i,r)` 的 LDS **已 CSE** ⇒ 预取不减少 LDS 条数；
-    `short_scoreboard` 的**真来源是 `mma_block_bt` 的 `ldmatrix`（A/B 操作数）与 Kp/Qp/dOp
-    重建后的 ldmatrix 读**，不是 epilogue scale。该依赖只能靠更多独立 warp（occupancy）或更深
-    跨-tile 流水去藏，均被 3 CTA/SM 的 74.82KB/168reg 硬墙锁死。**fp8 默认 main 的 bytes（L2
-    `red`）与 issue（`short_scoreboard`+`wait`）都已在边界，正结果仍只剩换卡。** `FA_SCALE_HOIST`
-    作为逐位安全微优化保留（默认 1）。见 `docs/03` §144、`docs/08` §5.131；原始输出
-    `src/fp8/fa_bwd_fp8_o123_scalehoist_ab_s4096.out.txt`。
+  - **ncu（同 binary）**：预取**确实**打掉 hot red 里的 LDS——`short_scoreboard` **1.86→1.48
+    （−20.4%）**、指令 **617.66M→609.92M（−1.25%）**、LSU pipe 35.72%→33.29% ⇒ O122 的 1.86 里
+    epilogue scale 是**真实一部分**（非编译器已 CSE）。
+  - **判决**：**计时中性，但 issue 侧确有正收益**。kernel 是 **L2 吞吐 bound**（ncu L2 78.2%、
+    Duration 1.37ms 不变）⇒ 省下的发射槽被 L2 吞吐吃掉、落不到时间。剩余 `short_scoreboard`（1.48）
+    主体是 `mma_block_bt` 的 `ldmatrix`（A/B 操作数）与 Kp/Qp/dOp 重建后的 ldmatrix 读，只能靠更多
+    独立 warp（occupancy）或更深跨-tile 流水去藏，均被 3 CTA/SM 的 74.82KB/168reg 硬墙锁死。
+    **fp8 默认 main 的 bytes（L2 `red`）与 issue（`short_scoreboard`+`wait`）都已在边界，正结果仍
+    只剩换卡。** `FA_SCALE_HOIST` 作为逐位安全微优化保留（默认 1）。见 `docs/03` §144、
+    `docs/08` §5.131；原始输出 `src/fp8/fa_bwd_fp8_o123_scalehoist_ab_s4096.out.txt`、
+    `..._o123_ncu_s4096.out.txt`。
   - **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙 + `short_scoreboard`/`wait` 的
     issue 墙均无软件解）；② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；
     ③ 非 main 的 `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）。

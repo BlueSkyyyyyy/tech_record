@@ -2833,9 +2833,13 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 - **性能（GPU1，same-binary A/B，iters=50，S4096）**：hoist=1 total avg **1.5845ms** / main **1.3781ms**；
   hoist=0 total avg **1.5864ms** / main **1.3801ms** ⇒ **1.0012× / 1.0015×（噪声内，中性）**。
   两变体 ptxas 同为 68B spill stores / 92B spill loads。
-- **判决**：**中性**。编译器对同一 `(i,r)` 的 LDS **已 CSE**——预取不减少 LDS 条数。⇒ 决定性二分：
-  `short_scoreboard` 的**真来源是 `mma_block_bt` 的 `ldmatrix`（A/B 操作数）与 Kp/Qp/dOp 重建后的
-  ldmatrix 读**，不是 epilogue scale。该依赖只能靠**更多独立 warp（occupancy）或更深跨-tile 流水**
-  去藏，两者均被 3 CTA/SM 的 74.82KB/168reg 硬墙锁死。**fp8 默认 main 的 bytes 与 issue 都已在
-  软硬件边界，正结果仍只剩换卡。** `FA_SCALE_HOIST` 作为逐位安全微优化保留（默认 1）。
+- **ncu（同 binary，`--set full`+stall）**：预取**确实**打掉 hot red 里的 LDS——`short_scoreboard`
+  **1.86→1.48（−20.4%）**、Executed Instructions **617.66M→609.92M（−1.25%）**、LSU pipe
+  35.72%→33.29%（即 O122 的 1.86 里 epilogue scale 是**真实的一部分**，非编译器已 CSE）。
+- **判决**：**计时中性，但 issue 侧确有正收益**。kernel 是 **L2 吞吐 bound**（ncu L2 78.2%、
+  Duration 1.37ms 不变）——省下的发射槽被 L2 吞吐吃掉，落不到时间上。剩余 `short_scoreboard`（1.48）
+  主体是 `mma_block_bt` 的 `ldmatrix`（A/B 操作数）与 Kp/Qp/dOp 重建后的 ldmatrix 读，只能靠**更多
+  独立 warp（occupancy）或更深跨-tile 流水**去藏，两者均被 3 CTA/SM 的 74.82KB/168reg 硬墙锁死。
+  **fp8 默认 main 的 bytes 与 issue 都已在软硬件边界，正结果仍只剩换卡。** `FA_SCALE_HOIST` 作为
+  逐位安全微优化保留（默认 1）。
 - 原始输出：`src/fp8/fa_bwd_fp8_o123_scalehoist_ab_s4096.out.txt`；实现细节 `docs/03` §144。

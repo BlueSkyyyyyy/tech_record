@@ -12456,15 +12456,32 @@ hoist=1 vs hoist=0 在同一 build 内数学等价（只缓存同一 smem 值）
 | 比 | **1.0012×** | **1.0015×** |
 
 ptxas：两个变体的 `kvtma` 实例均为 **68B spill stores / 92B spill loads**（无回退）。
-⇒ **中性（~0.1–0.2%，噪声内）**。
+⇒ 计时 **中性（~0.1–0.2%，噪声内）**。
 
-### 144.5 为什么中性 / 结论
+### 144.4b ncu（同 binary，S4096，`--set full` + stall 比率）
 
-* 编译器对同一 `(i,r)` 的 smem load **已做 CSE**——预取只改变「谁来发射这条 LDS」，不减少
-  LDS 条数；故 `short_scoreboard` 的**真来源不是 epilogue scale，而是 `mma_block_bt` 的
-  `ldmatrix`（A/B 操作数）与 Kp/Qp/dOp 重建后的 ldmatrix 读**——这些是真正的「生产-消费」
-  smem 依赖，编译器已尽量软件流水，剩余延迟只能靠**更多独立 warp**（occupancy）或**更深
-  跨 tile 流水**去藏；两者都被 74.82KB smem / 168 regs 的 3 CTA/SM 硬墙锁死（O77/O83/O121）。
+| 指标 | O122 base（未 hoist） | O123 hoist=1 | 变化 |
+|---|---|---|---|
+| `short_scoreboard` | **1.86** | **1.48** | **−20.4%** |
+| `wait` | 1.54 | 1.54 | 0 |
+| `long_scoreboard` | 0.30 | 0.59 | + |
+| barrier / not_selected | 0.40 / 0.42 | 0.43 / 0.44 | ~ |
+| Executed Instructions | 617.66M | **609.92M** | **−1.25%** |
+| LSU pipe | 35.72% | 33.29% | − |
+| issue_active / tensor | 47.96% / 11.91% | 47.19% / 11.87% | ~ |
+| Duration / L2 / DRAM | 1.38ms / 77.7% / 11.3% | **1.37ms / 78.2% / 11.3%** | ~ |
+
+⇒ **预取确实打掉了 hot red 循环里的 LDS**（`short_scoreboard` 降 20%、指令 −1.25%、LSU pipe 下降），
+证明 epilogue 的 per-row scale 是 O122 那 1.86 里**真实的一部分**（并非编译器已 CSE）。
+
+### 144.5 为什么计时仍中性 / 结论
+
+* issue 侧确有改善（`short_scoreboard` −20%），但 **kernel 是 L2 吞吐 bound**（ncu L2 78.2%、
+  `Duration` 不变）——省下的发射槽被 L2 依赖/吞吐吃掉，**落不到时间上**。
+* 剩余 `short_scoreboard`（1.48）的主体是 `mma_block_bt` 的 `ldmatrix`（A/B 操作数）与
+  Kp/Qp/dOp 重建后的 ldmatrix 读——真正的「生产-消费」smem 依赖，编译器已尽量软件流水，
+  剩余延迟只能靠**更多独立 warp**（occupancy）或**更深跨 tile 流水**去藏；两者都被 74.82KB smem
+  / 168 regs 的 3 CTA/SM 硬墙锁死（O77/O83/O121）。
 * 与 O116/O117/O122 合并：fp8 默认 main 的 **bytes（L2 `red`）与 issue（`short_scoreboard`+
   `wait`）都已在软硬件边界**；**正结果仍只剩换卡**（更大 smem/regfile ⇒ 4 CTA/SM 或更多 warp）。
 * 保留价值：`FA_SCALE_HOIST`（默认 1）是**逐位安全、零回退**的微优化，留给换卡/改布局后复用；
