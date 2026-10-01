@@ -9575,10 +9575,38 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     （K/V TMA 顶穿 smem = O88；prologue 重叠 = 本轮）**全部收口**；`D=256` 默认仍是 O84 的
     cp.async wgmma 档，`--d256tma=1` 保留 opt-in。见 `docs/03` §151。
   - **下一步候选（更新）**：① **换卡**（fp8 main 的 L2 `red` 主体墙无软件解）；② ~~fp8 `D=256`
-    TMA 转正~~（O88 + 本轮全部收口）；③ 覆盖型 backlog：fp16/bf16 `D=256` 的 Q/K/V/dO TMA
-    （同 O85 的中性结论，留 backlog）；④ 非 main `--det`/量化（O116 无余量）。
+    TMA 转正~~（O88 + 本轮全部收口）；③ ~~覆盖型 backlog：fp16/bf16 `D=256` 的 Q/K/V/dO TMA~~
+    （**O135 第 229 轮收口：~0.95× 负结果，opt-in `--maintma` 默认关**，见下条）；④ 非 main
+    `--det`/量化（O116 无余量）。
     原始输出 `src/fp8/fa_bwd_fp8_o134_d256_tma_ab.out.txt`、`..._o134_ncu.out.txt`、
     `..._o134_regress.out.txt`。
+
+- 2026-10-02（第二百二十九轮）：**O135——fp16/bf16 `head_dim=256` 主 kernel 的 Q/K/V/dO 4D-TMA
+  ——负结果（opt-in `--maintma`，默认关）**。**说明**：本轮任务模板仍要求「只做 fp8 性能」，
+  但 fp8 main 的 bytes（L2 `red`，O125）与 issue（`short_scoreboard`/`wait`，O122/O123）两墙在
+  O116–O134 已全部收口为「本卡无软件解」、覆盖型 backlog 亦清空；故推进 ROADMAP「下一批」
+  候选 ④（fp16/bf16 `D=256` 主 kernel 的 Q/K/V/dO TMA 化，O131 只切了 GEMM1/2 的 wgmma），
+  **仍未触碰 fp8 默认路径**（零回归风险），与 O131–O134 的处理一致。
+  - **改动（单/两文件 device 逐字一致 `identical=True`）**：新增
+    `fa_bwd_{fp16,bf16}_wgmma_tma_kernel<HD[,OW]>`（BM=64/BN=64，与 O131 的 wgmma 主 kernel
+    同几何/同数学/同 SW128 布局，仅把 `cp.async` 换 `tma_fill_sw128`：Q/dO 一次 TMA、K 双缓冲、
+    V 单缓冲后段预取；描述符与 D=128 同款 box={64,8}）；host `if (D==128||D==256)` 建主 kernel
+    描述符，D=256 且 `--maintma=1` 走该内核（**默认 0**、定长专用；varlen 仍走 cp.async）。
+  - **数值**：`--maintma=0/1` 打印**逐位相同**（fp16 S1024 1.657/1.405/1.447e-3、S2048
+    2.023/1.481/1.614e-3、GQA kv4 2.480/2.816/1.976e-3；bf16 同 O131 记录）；`--ci --no-run
+    --dtype fp16 bf16` gate fp16 1.953e-3 / bf16 7.812e-3 **OK**、`--check docs/04` OK（256 行）。
+  - **性能（CUDA event，同 binary A/B，iters=300，main）**：fp16 S1024 **0.962×**、S2048
+    **0.955×**、GQA kv4 **0.949×**；bf16 0.959×/0.957×/0.961× ⇒ **一致负结果（~0.95×）**。
+  - **ncu（fp16 main S2048 H8 causal，同 binary）**：Duration 571.8→**610.5µs**、`sm inst`
+    **65.3M→48.0M（−26.6%）**、L1 global-ld 9.21M→**0.033M**（TMA 绕 L1），但 L2 `op_read`
+    ≈同、`op_red` **逐位** 25,952,256、**`long_scoreboard` 1.34→2.14、`wait` 1.47→1.66、
+    `barrier` 0.30→0.47**、255 regs / 181KB smem / warps 6.25% ⇒ **墙 = D=256 的 1 CTA/SM +
+    255 reg / 128 线程低 occupancy**：TMA 的 mbarrier 等待没有别的 CTA 可填，把省下的发射全
+    吃掉（O33 的 D=128 TMA 正收益来自 256 线程/BM=128 的余量）。
+  - **判决**：**负结果、`--maintma` opt-in 默认关**。ROADMAP「下一批」候选 ④ 收口（与 fp8
+    O85 的中性结论同源、本卡上更差）；fp8 侧仍只剩换卡。见 `docs/01` §31、`docs/01b` §6bh、
+    `docs/08` §5.143；原始输出 `src/fp16/fa_bwd_fp16_o135_d256_tma_ab.out.txt`、
+    `..._o135_ncu_d256_{cpasync,tma}.out.txt`、`src/bf16/fa_bwd_bf16_o135_d256_tma_ab.out.txt`。
 
 ## 灵感 / backlog
 

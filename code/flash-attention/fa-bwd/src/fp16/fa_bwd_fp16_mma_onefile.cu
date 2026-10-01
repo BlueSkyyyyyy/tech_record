@@ -2594,6 +2594,226 @@ __device__ __forceinline__ void tma_fill_sw128(char* tile, const CUtensorMap* ma
 #endif
 }
 
+// O135（第 229 轮）：fp16 `head_dim=128/256` 主 kernel 的 **Q/K/V/dO 4D-TMA** 版
+//   （BM=64/BN=64，THREADS=128）——与 `fa_bwd_fp16_wgmma_kernel` 同几何/同数学/同 SW128 布局，
+//   只把 cp.async 搬运换成「逐 atom 4D-TMA」（`tma_fill_sw128`，描述符零改动、搬同样字节）。
+//   这是 O33/O35（D=128 的 wgmma2/wgmma2b 逐 atom TMA）在 **BM=64 几何 + D=256** 上的补齐；
+//   补上 ROADMAP「下一批」候选 ④「fp16/bf16 D=256 的 Q/K/V/dO TMA 化」。
+//   * Q/dO 一次性 TMA（一个 mbarrier、expect 2*TILE）；K 双缓冲（2 mbarrier）、V 单缓冲后段
+//     预取（1 mbarrier），与 wgmma2b_tma 同协议；OOB 行由 TMA 自动补 0。
+//   * 仅 `-DFA_WMMA -DFA_TMA -lcuda` 构建；**定长专用**（varlen 仍走 cp.async 的
+//     `fa_bwd_fp16_wgmma_kernel`，其 `cu_seqlens` 语义与 packed map 不同）。
+//   * 数值应与 cp.async 版**逐位相同**（搬同样字节，只差跨 CTA atomic 次序）。
+template <int HD, bool OW = false>
+__global__ void __launch_bounds__(THREADS, 2)
+fa_bwd_fp16_wgmma_tma_kernel(
+    const __grid_constant__ CUtensorMap qmap, const __grid_constant__ CUtensorMap kmap,
+    const __grid_constant__ CUtensorMap vmap, const __grid_constant__ CUtensorMap dmap,
+    const float* __restrict__ delta, const float* __restrict__ lse,
+    float* __restrict__ dq_acc, float* __restrict__ dk_acc, float* __restrict__ dv_acc,
+    int S, int H, int Hkv, float scale, int causal, int sched) {
+  static_assert(HD == 128 || HD == 256, "wgmma TMA 主 kernel 只做 HD=128/256");
+  constexpr int NH = HD / 64;                          // head_dim 的 64 列组数
+  constexpr int BM = 64, BN = 64;
+  constexpr int TILE  = (BM / 8) * (HD / 64) * 1024;   // Q/dO SW128 tile
+  constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;   // K/V SW128 tile
+  constexpr int PSZ   = BM * BN * 2;                   // P/dS SW128 tile
+
+  extern __shared__ char smem_raw[];
+  const uint32_t a0 = smem_u32(smem_raw);
+  const uint32_t pad = (1024u - (a0 & 1023u)) & 1023u;
+  char* smem = smem_raw + pad;
+  char* Qs  = smem;
+  char* dOs = Qs + TILE;
+  char* Ks  = dOs + TILE;                 // 双缓冲 2*KTILE
+  char* Vs  = Ks + 2 * KTILE;             // 单缓冲 KTILE
+  char* Ps  = Vs + KTILE;
+  char* dSs = Ps + PSZ;
+  uint64_t* bars = reinterpret_cast<uint64_t*>(dSs + PSZ);  // qbar,kbar0,kbar1,vbar
+
+  const int bx = blockIdx.x;
+  const int nblk = (S + BM - 1) / BM;
+  int mblk = bx;
+  if (causal) {
+    if (sched == 1) mblk = (bx & 1) ? (nblk - 1 - (bx >> 1)) : (bx >> 1);
+    else if (sched == 2) mblk = nblk - 1 - bx;
+  }
+  const int h = blockIdx.y, b = blockIdx.z;
+  const int hkv = h / (H / Hkv);
+  const int tid = threadIdx.x, wid = tid >> 5, lane = tid & 31;
+  const int g = lane >> 2, c2 = (lane & 3) * 2;
+  const int m0 = mblk * BM;
+
+  if (tid == 0) {
+    mbar_init(bars + 0, 1);
+    mbar_init(bars + 1, 1);
+    mbar_init(bars + 2, 1);
+    mbar_init(bars + 3, 1);
+  }
+  __syncthreads();
+  if (tid == 0) {
+    mbar_arrive_expect(bars + 0, 2 * TILE);
+    tma_fill_sw128<BM, HD>(Qs, &qmap, m0, h, b, bars + 0);
+    tma_fill_sw128<BM, HD>(dOs, &dmap, m0, h, b, bars + 0);
+  }
+  const int ncols = causal ? min(S, m0 + BM) : S;
+  const int ntiles = (ncols + BN - 1) / BN;
+  if (ntiles > 0 && tid == 0) {
+    mbar_arrive_expect(bars + 1, KTILE);
+    tma_fill_sw128<BN, HD>(Ks, &kmap, 0, hkv, b, bars + 1);
+    mbar_arrive_expect(bars + 3, KTILE);
+    tma_fill_sw128<BN, HD>(Vs, &vmap, 0, hkv, b, bars + 3);
+  }
+
+  const int r_lo = wid * 16 + g, r_hi = r_lo + 8;
+  const int qi_lo = m0 + r_lo, qi_hi = m0 + r_hi;
+  float lse_lo = 0.f, lse_hi = 0.f, del_lo = 0.f, del_hi = 0.f;
+  if (qi_lo < S) {
+    const size_t idx = ((size_t)(b * S + qi_lo)) * H + h;
+    lse_lo = lse[idx]; del_lo = delta[idx];
+  }
+  if (qi_hi < S) {
+    const size_t idx = ((size_t)(b * S + qi_hi)) * H + h;
+    lse_hi = lse[idx]; del_hi = delta[idx];
+  }
+
+  float dqacc[NH][8][4];
+#pragma unroll
+  for (int nh = 0; nh < NH; ++nh)
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+      for (int qq = 0; qq < 4; ++qq) dqacc[nh][j][qq] = 0.f;
+
+  const uint32_t Qa = smem_u32(Qs), dOa = smem_u32(dOs);
+  const uint32_t Pa = smem_u32(Ps), DSa = smem_u32(dSs);
+  const int r0 = wid * 16 + g;
+
+  int ku[2] = {0, 0}, vu = 0, qu = 0;
+  for (int nt = 0; nt < ntiles; ++nt) {
+    const int j0 = nt * BN;
+    const int st = nt & 1;
+    char* Kt = Ks + st * KTILE;
+    if (nt == 0) { mbar_wait(bars + 0, (uint32_t)(qu & 1)); qu++; }
+    mbar_wait(bars + 1 + st, (uint32_t)(ku[st] & 1)); ku[st]++;
+    mbar_wait(bars + 3, (uint32_t)(vu & 1)); vu++;
+    __syncthreads();
+    if (nt + 1 < ntiles && tid == 0) {
+      mbar_arrive_expect(bars + 1 + (st ^ 1), KTILE);
+      tma_fill_sw128<BN, HD>(Ks + (st ^ 1) * KTILE, &kmap, (nt + 1) * BN, hkv, b,
+                             bars + 1 + (st ^ 1));
+    }
+
+    // ---- (1)(2) S=QKᵀ、dP=dO·Vᵀ 一起发、统一 wait ----
+    float sacc[32], dpacc[32];
+    wgmma_mn64_issue(Qs, Kt, HD, sacc);
+    wgmma_mn64_issue(dOs, Vs, HD, dpacc);
+    if constexpr (OW) wgmma_wait_group<1>(); else wgmma_wait0();
+    float pval[8][4];
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+      for (int qq = 0; qq < 4; ++qq) {
+        const int qi = m0 + r0 + (qq >= 2 ? 8 : 0);
+        const int jg = j0 + j * 8 + c2 + (qq & 1);
+        const float lv = (qq >= 2) ? lse_hi : lse_lo;
+        float p = 0.f;
+        if (qi < S && jg < S && !(causal && jg > qi)) p = fexp(sacc[j * 4 + qq] * scale - lv);
+        pval[j][qq] = p;
+      }
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+      pds_store_sw128(Ps, j, r0, lane, c2, BN,
+                       __float2half(pval[j][0]), __float2half(pval[j][1]),
+                       __float2half(pval[j][2]), __float2half(pval[j][3]));
+    if constexpr (OW) wgmma_wait0();
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      const float d0 = pval[j][0] * (dpacc[j * 4 + 0] - del_lo);
+      const float d1 = pval[j][1] * (dpacc[j * 4 + 1] - del_lo);
+      const float d2 = pval[j][2] * (dpacc[j * 4 + 2] - del_hi);
+      const float d3 = pval[j][3] * (dpacc[j * 4 + 3] - del_hi);
+      pds_store_sw128(dSs, j, r0, lane, c2, BN,
+                      __float2half(d0), __float2half(d1),
+                      __float2half(d2), __float2half(d3));
+    }
+    __syncthreads();
+    if (nt + 1 < ntiles && tid == 0) {
+      mbar_arrive_expect(bars + 3, KTILE);
+      tma_fill_sw128<BN, HD>(Vs, &vmap, (nt + 1) * BN, hkv, b, bars + 3);
+    }
+
+    // ---- (3)(4)(5) dV/dK/dQ，按 64 列组分遍 ----
+    wgmma_fence();
+#pragma unroll
+    for (int nh = 0; nh < NH; ++nh) {
+      const uint32_t dOn = dOa + (uint32_t)(nh * 1024);
+      const uint32_t Qn  = Qa  + (uint32_t)(nh * 1024);
+      const uint32_t Kn  = smem_u32(Kt) + (uint32_t)(nh * 1024);
+      float accv[32], acck[32], accq[32];
+#pragma unroll
+      for (int i = 0; i < 32; ++i) { accv[i] = 0.f; acck[i] = 0.f; accq[i] = 0.f; }
+#pragma unroll
+      for (int s = 0; s < BM / 16; ++s)
+        wgmma_m64n64k16_t<1, 1>(accv, desc_k16_mn(Pa, s, BN), desc_k16_mn(dOn, s, HD));
+      wgmma_commit();
+#pragma unroll
+      for (int s = 0; s < BM / 16; ++s)
+        wgmma_m64n64k16_t<1, 1>(acck, desc_k16_mn(DSa, s, BN), desc_k16_mn(Qn, s, HD));
+      wgmma_commit();
+#pragma unroll
+      for (int s = 0; s < BN / 16; ++s)
+        wgmma_m64n64k16_t<0, 1>(accq, desc_k16_k(DSa, s, BN), desc_k16_mn(Kn, s, HD));
+      wgmma_commit();
+      if constexpr (OW) wgmma_wait_group<2>(); else wgmma_wait0();
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int qq = 0; qq < 4; qq += 2) {
+          const int rr = r0 + (qq >= 2 ? 8 : 0);
+          const int jg = j0 + rr;
+          const int c = nh * 64 + j * 8 + c2;
+          if (jg < S)
+            red_add2(dv_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                     accv[j * 4 + qq], accv[j * 4 + qq + 1]);
+        }
+      if constexpr (OW) wgmma_wait_group<1>();
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int qq = 0; qq < 4; qq += 2) {
+          const int rr = r0 + (qq >= 2 ? 8 : 0);
+          const int jg = j0 + rr;
+          const int c = nh * 64 + j * 8 + c2;
+          if (jg < S)
+            red_add2(dk_acc + (((size_t)(b * S + jg)) * Hkv + hkv) * HD + c,
+                     acck[j * 4 + qq] * scale, acck[j * 4 + qq + 1] * scale);
+        }
+      wgmma_wait0();
+#pragma unroll
+      for (int j = 0; j < 8; ++j)
+#pragma unroll
+        for (int qq = 0; qq < 4; ++qq) dqacc[nh][j][qq] += accq[j * 4 + qq] * scale;
+    }
+  }
+
+#pragma unroll
+  for (int nh = 0; nh < NH; ++nh)
+#pragma unroll
+    for (int j = 0; j < 8; ++j)
+#pragma unroll
+      for (int qq = 0; qq < 4; qq += 2) {
+        const int rr = r0 + (qq >= 2 ? 8 : 0);
+        const int qi = m0 + rr;
+        const int c = nh * 64 + j * 8 + c2;
+        if (qi < S) {
+          float* base = dq_acc + (((size_t)qi) * H + h) * HD + c;
+          *reinterpret_cast<float2*>(base) =
+              make_float2(dqacc[nh][j][qq], dqacc[nh][j][qq + 1]);
+        }
+      }
+}
+
 template <int HD, bool SPLIT = true>
 __global__ void __launch_bounds__(256, 1)
 fa_bwd_fp16_wgmma2b_tma_kernel(
@@ -4272,6 +4492,26 @@ static void launch_bwd_wgmma2_tma(dim3 mg, CUtensorMap qmap, CUtensorMap kmap,
       qmap, kmap, vmap, dmap, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
       dq_h, cu_seqlens);
 }
+
+// O135（第 229 轮）：**BM=64 的 wgmma 主 kernel**（HD=128/256）的 Q/K/V/dO 逐 atom 4D-TMA 版。
+//   smem 与 cp.async 版 `launch_bwd_wgmma` 同（+ 4 个 mbarrier 32B），故 CTA/SM 不变。
+template <int HD, bool OW = false>
+static void launch_bwd_wgmma_tma(dim3 mg, CUtensorMap qmap, CUtensorMap kmap,
+                                 CUtensorMap vmap, CUtensorMap dmap, const float* delta,
+                                 const float* lse, float* dq_acc, float* dk_acc,
+                                 float* dv_acc, int S, int H, int Hkv, float scale,
+                                 int causal, int sched) {
+  static_assert(HD == 128 || HD == 256, "wgmma TMA 只做 HD=128/256");
+  constexpr int BM = 64, BN = 64;
+  constexpr int TILE  = (BM / 8) * (HD / 64) * 1024;
+  constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;
+  constexpr int smem = 1024 + TILE * 2 + KTILE * 3 + 2 * BM * BN * (int)sizeof(__half) + 128;
+  CUDA_CHECK(cudaFuncSetAttribute(fa_bwd_fp16_wgmma_tma_kernel<HD, OW>,
+                                  cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
+  fa_bwd_fp16_wgmma_tma_kernel<HD, OW><<<mg, THREADS, smem>>>(
+      qmap, kmap, vmap, dmap, delta, lse, dq_acc, dk_acc, dv_acc, S, H, Hkv, scale, causal,
+      sched);
+}
 #endif
 
 // O17b：4 warpgroup（BM=256）wgmma 主 kernel（只 HD=128）。Q/dO/P/dS SW128，K/V 单缓冲 + 后段预取。
@@ -5459,8 +5699,9 @@ int main(int argc, char** argv) {
     kmap_lse = make_lse_map(d_k, Hkv, S, D, B);
   }
   // O33：主 kernel 的 Q/K/V/dO 描述符（box={64,8}，逐 atom）。
+  // O135：D=256 的 BM=64 wgmma 主 kernel 也走同一套逐 atom 描述符（`--maintma`）。
   CUtensorMap qmap_m, kmap_m, vmap_m, dmap_m;
-  if (D == 128) {
+  if (D == 128 || D == 256) {
     qmap_m = make_main_map(d_q, H, S, D, B);
     kmap_m = make_main_map(d_k, Hkv, S, D, B);
     vmap_m = make_main_map(d_v, Hkv, S, D, B);
@@ -5817,6 +6058,20 @@ int main(int argc, char** argv) {
     // O131：head_dim=256 主 kernel 走 BM=64/BN=64 wgmma 版（见两文件版同处注释）。
     if (D == 256 && d256wgm_opt != 0) {
       dim3 g((S + 63) / 64, H, B);
+#if defined(FA_WGMMA) && defined(FA_TMA)
+      // O135：`--maintma` 时 D=256 的 BM=64 wgmma 主 kernel 走逐 atom 4D-TMA（同 binary A/B）。
+      if (maintma_sel) {
+        if (ow_sel)
+          launch_bwd_wgmma_tma<256, true>(g, qmap_m, kmap_m, vmap_m, dmap_m, d_delta, d_lse,
+                                          d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                          (int)causal, sched);
+        else
+          launch_bwd_wgmma_tma<256, false>(g, qmap_m, kmap_m, vmap_m, dmap_m, d_delta, d_lse,
+                                           d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                           (int)causal, sched);
+        return;
+      }
+#endif
       if (ow_sel)
         launch_bwd_wgmma<256, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
                                     d_dv_acc, S, H, Hkv, scale, (int)causal, sched);

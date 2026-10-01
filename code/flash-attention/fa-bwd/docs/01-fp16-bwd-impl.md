@@ -5305,3 +5305,80 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA" \
 `src/fp16/fa_bwd_fp16_o133_ncu_metrics_d256_varlen_s4096.out.txt`（ncu 指标 A/B）、
 `src/fa_bwd_o133_d256_varlen_ab.out.txt`（6 case × wgmma/mma 计时+数值）、
 `src/fa_bwd_o133_ci_fp16bf16.out.txt`（CI 全量回归 + gate）。见 `docs/01b` §6bg、`docs/04` §58、`docs/08` §5.141。
+
+## 31. O135（第 229 轮，**负结果，opt-in `--maintma`，默认关**）：`head_dim=256` 主 kernel 的 Q/K/V/dO 4D-TMA
+
+### 31.1 动机与背景
+
+ROADMAP「下一批」候选 ④ 是 fp16/bf16 `D=256` 主 kernel 的 **Q/K/V/dO TMA 化**：O131 只把
+`head_dim=256` 的 **GEMM1/2 换成 wgmma**，Q/K/V/dO 仍是 `cp.async`；而 O33/O34/O35 已证明
+D=128 的 `wgmma2/wgmma2b` 逐 atom 4D-TMA 是 1.04× 正结果。本轮把该模式补齐到 **BM=64/BN=64
+的 wgmma 主 kernel + D=256**（也是最后一个未 TMA 化的主 kernel 几何）。
+
+### 31.2 改动（单/两文件 device 逐字一致，`sync_onefile_device.py` identical=True）
+
+新增 `fa_bwd_fp16_wgmma_tma_kernel<HD, OW>`（`fa_bwd_fp16_mma_kernels.cuh`）：与
+`fa_bwd_fp16_wgmma_kernel` **同几何/同数学/同 SW128 布局**，仅把 `qdo_issue_async_sw`/
+`kv_issue_async_sw` 换成 `tma_fill_sw128`（逐 atom 4D-TMA，描述符零改动）：
+- Q/dO 一次性 TMA（一个 mbarrier、`expect 2*TILE`）；K 双缓冲（2 mbarrier）、V 单缓冲后段
+  预取（1 mbarrier），与 `wgmma2b_tma` 同协议；OOB 行 TMA 自动补 0。
+- host：`if (D==128||D==256)` 建 `qmap_m/kmap_m/vmap_m/dmap_m`；D=256 分支加
+  `if (maintma_sel) launch_bwd_wgmma_tma<256,...>`（`--maintma` 开关，**默认 0**，定长专用；
+  varlen 仍走 cp.async）。仅 `-DFA_WGMMA -DFA_TMA -lcuda` 构建。
+
+### 31.3 数值（`ours vs fp32 ref`，3 shape；单/两文件逐位一致）
+
+| case（fp16, D=256 causal） | dq max_abs | dk max_abs | dv max_abs |
+|---|---|---|---|
+| S1024 H8 | 1.657e-3 | 1.405e-3 | 1.447e-3 |
+| S2048 H8 | 2.023e-3 | 1.481e-3 | 1.614e-3 |
+| S1024 H16 kv4 | 2.480e-3 | 2.816e-3 | 1.976e-3 |
+
+`--maintma=0/1` 打印**逐位相同**（搬同样字节，只差 atomic 次序），与 O131 记录一致。
+
+### 31.4 性能（CUDA event，同 binary A/B，iters=300）
+
+| case | main cp.async (ms) | main TMA (ms) | TMA/cp.async | total 比 |
+|---|---|---|---|---|
+| S1024 H8 | 0.1770 | 0.1840 | **0.962×** | 0.951× |
+| S2048 H8 | 0.5782 | 0.6055 | **0.955×** | 0.950× |
+| S1024 H16 kv4 | 0.3056 | 0.3221 | **0.949×** | 0.957× |
+
+⇒ **一致负结果（~0.95×）**，与 O85 对 fp8 `D=256` TMA 的「中性」相比更差。
+
+### 31.5 ncu（main，S2048 H8 causal，同 binary）
+
+| 指标 | cp.async | TMA |
+|---|---|---|
+| Duration | 571.8 µs | 610.5 µs |
+| regs / dyn smem / warps | 255 / 181.25KB / 6.25% | 255 / 181.38KB / 6.25% |
+| `l1tex` global-ld sectors | 9.21M | **0.033M**（TMA 绕过 L1） |
+| L2 `op_read` sectors | 7.54M | 7.82M（≈同） |
+| L2 `op_red` sectors | 25,952,256 | 25,952,256（逐位） |
+| `sm inst` | 65.3M | **48.0M（−26.6%）** |
+| stall `long_scoreboard` | 1.34 | **2.14** |
+| stall `wait` | 1.47 | **1.66** |
+| stall `barrier` | 0.30 | **0.47** |
+
+**机制**：TMA 去掉了 cp.async 的 17.4M 条载入指令，但 `D=256` BM=64 主 kernel 是
+**1 CTA/SM + 128 线程（4 warp）**，且 255 regs 顶格 ⇒ 4 个 warp 没有别的 CTA 填延迟，
+TMA 的 mbarrier 完成等待（`long_scoreboard` 1.34→2.14、`barrier` 0.30→0.47、`wait` 1.47→1.66）
+把省下的发射全部吃掉。这与 O131 的结论一致：**D=256 的墙是 1 CTA/SM 的低 occupancy**，
+TMA 不改变 occupancy。O33 的 D=128 TMA 能正收益，是因为 `wgmma2b` 是 256 线程/BM=128 的
+1 CTA/SM、且小 S 时网格足够；BM=64/128 线程的 D=256 没有这个余量。
+
+### 31.6 结论 / 复现 / 原始输出
+
+**负结果，`--maintma` opt-in、默认关**（D=256 默认仍 O131 的 cp.async wgmma）。ROADMAP
+「下一批」候选 ④「fp16/bf16 D=256 的 Q/K/V/dO TMA」至此**收口**（与 fp8 O85 的中性结论同源、
+本卡上更差）。解锁需先破 D=256 的 1 CTA/SM（smem 181KB / 255 regs）——同 F6/F7/O83 的
+smem/寄存器墙。
+
+```bash
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s2048_h8_d256_causal_fp16 --iters=300 --maintma=1
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_o135_d256_tma_ab.out.txt`、
+`src/fp16/fa_bwd_fp16_o135_ncu_d256_{cpasync,tma}.out.txt`。见 `docs/01b` §6bh、`docs/08` §5.143。

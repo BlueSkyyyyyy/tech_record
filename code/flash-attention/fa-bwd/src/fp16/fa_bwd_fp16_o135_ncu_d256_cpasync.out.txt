@@ -1,0 +1,44 @@
+==PROF== Connected to process 1636747 (/ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_mma_main.out)
+==PROF== Profiling "void fa_bwd_fp16_wgmma_kernel<(int)256, (bool)0>(const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *)": 0%....50%....100% - 3 passes
+case = /home/xieminglin/proj/output/fa-bwd/b1_s2048_h8_d256_causal_fp16
+B=1 S=2048 H=8 Hkv=8 D=256 causal=1 scale=0.062500
+[O6c] main grid=256 auto=(BM=64,BN=32,PIPE=1) sel=(BM=64,BN=32,PIPE=1)
+[O49] d128 8-warp = 0 (d128w=-1, grid=256, sm=132)
+[O38] lse k-split = 4 (auto)
+[O23] main backend = mma | lse = mma (D=256 S=2048)
+[O43] wgmma2 k-split = 1
+[O131] D=256 main backend = wgmma(BN=64)
+[O65] prologue fusion (zero+delta) = 1
+[timing] total(3 kernels) 0.7655 ms  44.89 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.2164 ms | main 0.5958 ms | convert -0.0466 ms
+[compare] ours vs ref (O from ref_o.npy)
+  dq   vs ref: max_abs=2.023e-03  max_rel=4.463e-01
+  dk   vs ref: max_abs=1.481e-03  max_rel=3.601e-01
+  dv   vs ref: max_abs=1.614e-03  max_rel=2.555e-02
+  fa_dq     vs ref: max_abs=2.023e-03  max_rel=4.797e-01
+  fa_dk     vs ref: max_abs=1.664e-03  max_rel=4.850e-01
+  fa_dv     vs ref: max_abs=1.614e-03  max_rel=3.041e-02
+  te_dq     vs ref: max_abs=2.023e-03  max_rel=4.797e-01
+  te_dk     vs ref: max_abs=1.664e-03  max_rel=4.852e-01
+  te_dv     vs ref: max_abs=1.614e-03  max_rel=2.955e-02
+==PROF== Disconnected from process 1636747
+[1636747] fa_bwd_fp16_mma_main.out@127.0.0.1
+  void fa_bwd_fp16_wgmma_kernel<256, 0>(const __half *, const __half *, const __half *, const __half *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *) (32, 8, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                   Metric Unit Metric Value
+    ------------------------------------------------------------------------- --------------- ------------
+    gpu__time_duration.sum                                                                 us       571.84
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                     sector      9207808
+    launch__registers_per_thread                                              register/thread          255
+    launch__shared_mem_per_block_dynamic                                          Kbyte/block       181.25
+    lts__t_sectors_op_red.sum                                                          sector     25952256
+    lts__t_sectors_srcunit_tex_op_read.sum                                             sector      7537808
+    sm__inst_executed.sum                                                                inst     65323008
+    sm__warps_active.avg.pct_of_peak_sustained_active                                       %         6.25
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                     inst         0.30
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio             inst         1.34
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio            inst         0.17
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                        inst         1.47
+    ------------------------------------------------------------------------- --------------- ------------
+

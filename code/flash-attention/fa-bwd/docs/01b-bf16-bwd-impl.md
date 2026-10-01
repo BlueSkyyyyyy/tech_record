@@ -2600,3 +2600,19 @@ b5_t3968 h8 full 5.176e-3/3.743e-3/2.917e-3、b8_t2904 h8 full 1.267e-2/1.085e-2
 
 与 fp16 逐项同量级。见 `docs/01` §30、`docs/04` §58、`docs/08` §5.141；
 原始输出 `src/fa_bwd_o133_d256_varlen_ab.out.txt`。
+
+## 6bh. O135-bf16（第 229 轮，**负结果，opt-in `--maintma`，默认关**）：`head_dim=256` 主 kernel 的 Q/K/V/dO 4D-TMA
+
+fp16 `docs/01` §31 的逐字 dtype 同构：新增 `fa_bwd_bf16_wgmma_tma_kernel<HD>`
+（`fa_bwd_bf16_mma_kernels.cuh`，与 fp16 版逐字同构、无 OW），host 在 D=256 且 `--maintma=1`
+时走逐 atom 4D-TMA（默认关，定长专用）。
+
+- **数值**：与 cp.async 版**逐位相同**（bf16 S1024 1.039/1.213/1.460e-2、S2048
+  7.978e-3/1.114e-2/1.681e-2、GQA kv4 1.300/1.843/3.075e-2，与 O131 记录一致）。
+- **性能**（同 binary A/B，iters=300，main）：S1024 0.1798→0.1874ms（**0.959×**）、
+  S2048 0.5789→0.6049ms（**0.957×**）、GQA kv4 0.3082→0.3208ms（**0.961×**）。
+- **结论**：与 fp16 同源负结果（~0.96×）。机制见 `docs/01` §31.5：D=256 主 kernel 是
+  **1 CTA/SM + 255 regs + 128 线程**，TMA 去掉载入指令（−26%）但 mbarrier 等待
+  （`long_scoreboard`↑）吃光收益。fp16/bf16 `D=256` 的 TMA 化至此收口。
+
+原始输出 `src/bf16/fa_bwd_bf16_o135_d256_tma_ab.out.txt`。见 `docs/01` §31、`docs/08` §5.143。
