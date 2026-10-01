@@ -1,0 +1,11 @@
+=== fa_bwd_fp8_ws_smoke (O120) ===
+S=4096 Hkv=16 D=128 BN=32 KS_SZ=4096  grid=132(1 CTA/SM)  NT=4096/CTA  reps=20
+read bytes/launch = 2214.6 MB ; L2 峰值按 ~5.0 TB/s 参考
+
+[A] SYNC (__syncthreads, 1 stage)     : 1.6485 ms    1343.4 GB/s   sink=8.7092e+10
+[A2] SYNC-PREFETCH NSTAGE=2 (syncth)  : 1.0890 ms    2033.6 GB/s   sink=8.7093e+10
+[A2] SYNC-PREFETCH NSTAGE=4           : 1.0878 ms    2035.8 GB/s   sink=8.7093e+10
+[A2] SYNC-PREFETCH NSTAGE=8           : 1.0869 ms    2037.5 GB/s   sink=8.7094e+10
+[B] WS NSTAGE=2 (producer/consumer)   : 0.8596 ms    2576.3 GB/s   sink=8.7093e+10
+[B] WS NSTAGE=4                       : 0.8166 ms    2711.9 GB/s   sink=8.7092e+10  (dvsN2=-3.604e+05)
+[B] WS NSTAGE=8                       : 0.7982 ms    2774.6 GB/s   sink=8.7094e+10  (dvsN2=7.782e+05)

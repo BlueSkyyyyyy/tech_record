@@ -2732,3 +2732,32 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   换卡 / 覆盖型 backlog（fp16/bf16 `head_dim=256`）。数值逐位不变、默认逐字退回。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o119_ab.out.txt`、
   `src/fp8/fa_bwd_fp8_o119_ncu_mqa_kv1_mcast{1,8}.out.txt`。
+
+### 5.128 第 214 轮（O120）：F3b② 的 **warp specialization de-risk** —— 「单一 barrier 域」病因的直接检验 —— **机制正结果（独立冒烟，默认一行未改）**
+
+- **动机**：fp8 main 的 `red` 墙唯一软件杠杆是放大 BM（red 砍半），但 BM≥128 ⇒ 1 CTA/SM。O90
+  （`wgmma2` BM=128 0.66×）/O91（`wg3` BM=192 0.52×）实测：red 真降到 0.43×、时间反翻倍，O91 把
+  病因钉为「**1 CTA/SM 单一 barrier 域**：每 tile 5 个 `__syncthreads` 把 12 warp 串成依赖链、
+  K/V 搬运与 wgmma 不重叠」。但此前**只从『改多 warpgroup 后变慢』间接推断，从未把同步机制换掉
+  直接检验**。F3b② 留的「WS 完整化（producer/consumer + mbarrier 替换 `__syncthreads`）」是本卡
+  fp8 主 kernel 上唯一未判决的软件杠杆。
+- **方法**：独立冒烟 `src/fp8/fa_bwd_fp8_ws_smoke.cu`，在与主 kernel 相同的 fp8 K/V 几何
+  （UINT8 / SW128 / 4D-TMA box={128,32} / KS_SZ=4096B）上比较三种同步机制的流水吞吐（1 CTA/SM、
+  grid=132、K 常驻 L2）：**(A) SYNC** 每 tile TMA + `__syncthreads`（O91 形态）；**(A2)
+  SYNC-PREFETCH** ring buffer + thread0 预取但仍全 CTA `__syncthreads`；**(B) WS** 独立 producer
+  warpgroup 预取 + consumer 只等 mbarrier(full)→wgmma→arrive(empty)，无 `__syncthreads`。
+  正确性：三者 sink 在 fp32 原子次序噪声内一致（~1e-6）、`compute-sanitizer` **0 errors**。
+- **性能（GPU1，iters=20，read=2214.6MB/launch）**：A SYNC **1.648ms / 1343GB/s**；
+  A2 **1.087–1.089ms / 2035GB/s（1.50×）**；**B WS 0.798–0.860ms / 2576–2775GB/s
+  （1.89× NS=2 → 2.04× NS=8）**。
+- **ncu（同 binary A/B，1 CTA/SM，12.5% warps）**：`lts op_read` **19,330,267 vs 19,403,553
+  （≈1.00×，同字节）**、`dram bytes_read` **8.40 vs 8.41MB（K 常驻 L2）**、warps 12.50 vs 12.49%、
+  **Duration 1.67ms → 0.824ms（2.03×）**。⇒ **同一份 L2 字节、同样 warp 占用，纯延迟暴露差异**。
+- **判决**：**机制正结果**——O91「单一 barrier 域」病因被直接检验成立，**warp specialization 是
+  1 CTA/SM 下恢复吞吐的解锁路径（2.0×，L2 字节不变）**。副结论：单靠预取深度（A2）只得 1.50×，
+  多出的 1.33× 来自「把 producer 移出 `__syncthreads` 域」。**下一步 = F3b 主体化**：把该
+  producer/consumer 模式落进 `wgmma2`/`wg3`（BM=128/192、1 CTA/SM），把 O90/O91 的延迟 bound
+  拉回 L2 bound（结合 `wg3` 的 red 0.43×，理论上界 ~默认档 1.7–1.8×，逼近 TE），工程量中等偏大
+  （重排 GEMM3/4/5 的 warp 归属 + 全 mbarrier 化）。默认路径一行未改。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o120_ws_smoke.out.txt`、
+  `src/fp8/fa_bwd_fp8_o120_ncu_{sync,ws}.out.txt`。
