@@ -1,0 +1,13 @@
+# O124: 同 session TE fp8 反向 ncu（harness/te_fp8_ncu.py '1 4096 16 128 causal'）
+# kernel: cudnn_generated_..._flash_bprop_wgmma_f8_knob_26_64x64x128_1x4x1_cga1x1x1  grid=(132,1,1)x(384,1,1)
+Metric Name                                                Metric Value
+gpu__time_duration.sum                                      258.66 us
+l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                 3,168
+l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum                  3,168   (TMA 4D reduce 绕过 L1)
+lts__t_sectors_op_read.sum                               10,081,227
+lts__t_sectors_op_red.sum                                25,957,112
+lts__t_sectors_op_write.sum                                 789,594
+lts__throughput.avg.pct_of_peak_sustained_elapsed             70.79 %
+sm__throughput.avg.pct_of_peak_sustained_elapsed              45.10 %
+=> TE 的 L1 red ≈ 0（用 UTMAREDG/TMA 4D reduce 直发 L2）；L2 red 25.96M = ours 105.38M 的 1/4.06。
+   TE L2 red 扇区数 25.96M 对应「持久 KV-owner 下每元素更少次归约」——纯工作划分差异。

@@ -1,0 +1,14 @@
+# O124: -DFA_RED_STORE=1（plain store 替 atomic，诊断用，数值错误）
+# 目的：分离「原子语义」与「写流量本身」的 L2 扇区——两者是否同量。
+Metric Name                                                Metric Value
+l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                    0
+l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum                     0
+lts__t_requests_op_write.sum                             100,942,596  (~1.06 sectors/req, 无合并)
+lts__t_sectors_op_write.sum                              107,209,882
+lts__t_sectors_op_write_lookup_hit.sum                   107,208,747
+lts__t_sectors_op_red.sum                                           0
+gpu__time_duration.sum                                        1.26 ms
+lts__throughput.avg.pct_of_peak_sustained_elapsed             66.41 %
+=> plain store 把 red=0，但 L2 写扇区 107.2M ≈ atomic red 105.4M：**L2 扇区与归约机制无关**
+   （O83/O159 结论在真实默认 kernel 上再确认）。Duration 1.26 vs 1.37ms ⇒ 原子语义 ~8%（O83 吻合）。
+   但 plain store 的 L1 请求涨到 100.9M（每条 ~1 扇区，未合并），故 atomic v2 在请求粒度反而更优。

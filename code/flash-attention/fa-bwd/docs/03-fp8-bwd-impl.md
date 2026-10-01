@@ -12487,3 +12487,88 @@ ptxas：两个变体的 `kvtma` 实例均为 **68B spill stores / 92B spill load
 * 保留价值：`FA_SCALE_HOIST`（默认 1）是**逐位安全、零回退**的微优化，留给换卡/改布局后复用；
   本轮把它作为「`short_scoreboard` 来源二分」的决定性实验（排除 epilogue scale 假设）。
 * 原始输出：`src/fp8/fa_bwd_fp8_o123_scalehoist_ab_s4096.out.txt`。
+
+---
+
+## 145. O124（第 218 轮）：fp8 默认 main 的 `red` L1/L2 扇区分解 + MLA(D=512) 上 wgmma 的可行性探针
+
+本轮不再改默认路径（`main` 的 L2 `red` 墙已在 F3b/F4b/F6/F7/O90–O95/O114/O116/O121 收口），
+而是用 `ncu` 把「`red` 为什么是 105M」在**真实默认 `kvtma` kernel** 上做一次决定性的
+**L1/L2 扇区分层**，并顺手探一次 fp8 主 kernel 里**最后一条仍走 mma 的路径（MLA D=512）**
+能否只换指令切 wgmma。
+
+### 145.1 证据一：L1 扇区已=每贡献最优，L2 的 1.5× 是 L2 层固有
+
+命令：`ncu --kernel-name regex:kvtma --launch-skip 3 --launch-count 1`（S=4096 causal H16，
+grid=(16,128,1)×(128,1,1)，`fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>`）。
+
+| 计数 | 值 | 说明 |
+|---|---|---|
+| `l1tex__t_requests_pipe_lsu_mem_global_op_red` | **8,781,824** | red 指令级请求 |
+| `l1tex__t_sectors_pipe_lsu_mem_global_op_red` | **70,254,592** | **8.0 扇区/请求** |
+| `lts__t_sectors_op_red` | **105,381,888** | **12.0 扇区/请求 = 1.50× L1** |
+| `lts__t_sectors_op_read / op_write` | 24,235,779 / 100,229 | read 占 L2 的 ~19% |
+| `gpu__time_duration` / `lts__throughput` | 1.37 ms / **78.24%** | L2 吞吐 bound |
+
+**关键**：`dK/dV` 的理论下界（每 `(m-block, kv-block)` 贡献把 `[BN=32,HD=128]` fp32 tile 写满
+扇区、BM=64/BN=32/causal）经解析为 **≈68.2M L1 扇区**，而实测 **L1 = 70.25M（≈1.03×）**——
+**L1 侧已经最优、无冗余**。因此 O116 把「实测 105.4M = 1.545× 理论」归因为「每 KV 元素被多少
+m-block 归约 = 工作划分」**并不准确**：多出的 ~35M 扇区发生在 **L1→L2 之间**，不是贡献次数。
+
+### 145.2 证据二：`FA_RED_STORE`（plain store 同址）—— L2 扇区与归约机制无关
+
+用 `-DFA_RED_STORE=1`（plain store 替 atomic，诊断用、数值错误）同址重测：
+
+| 指标 | atomic（默认） | plain store |
+|---|---|---|
+| L1 red 请求 / 扇区 | 8.78M / 70.25M | 0 / 0 |
+| L2 red 扇区 | **105.38M** | 0 |
+| L2 write 请求 / 扇区 | — | 100.94M / **107.21M（≈1.06 扇区/请求）** |
+| Duration | 1.37 ms | **1.26 ms** |
+
+⇒ **同一批写地址，用 atomic 还是 plain store，L2 侧扇区几乎相同（105.4M vs 107.2M）**——
+坐实 O83/O159「L2 `red` 与归约机制无关」。副结论：atomic 版在 **L1 请求粒度反而更优**
+（8.78M 请求 vs store 的 100.9M 单扇区请求）；plain store 快的 ~8% 只是省掉原子语义
+（与 O83「~8% 在原子语义」吻合），但正确性要求归约、无法采用。
+
+### 145.3 证据三：同 session TE —— 差距是「贡献次数」，不是机制
+
+`harness/te_fp8_ncu.py '1 4096 16 128 causal'`
+（`..._flash_bprop_wgmma_f8_..._64x64x128_1x4x1`，grid=132、384 线程、1 CTA/SM）：
+
+| 指标 | ours `kvtma<128,64,32>` | TE fp8 | 比 |
+|---|---|---|---|
+| Duration | 1.37 ms | **258.7 µs** | 5.3× |
+| L1 red 请求/扇区 | 8.78M / 70.25M | **3,168 / 3,168** | TMA 4D reduce **绕过 L1** |
+| L2 red 扇区 | 105.38M | **25.96M** | **4.06×** |
+| L2 read 扇区 | 24.24M | 10.08M | 2.40× |
+| L2 利用率 | 78.24% | 70.79% | 同为 L2 bound |
+
+TE 的 `UTMAREDG.4D.ADD`（TMA 4D 张量归约）**直发 L2、L1 red≈0**；其 L2 red 25.96M 对应
+「**持久 KV-owner 下每元素更少次归约**」——纯工作划分差异（同 BM=64）。ours 的 L1 侧已最优，
+**要接近 TE 只能减少贡献 CTA 数**（→ 放大 BM / 持久 KV-owner），而这条路已被
+O83/O91/O157/O160/O168 判为「本卡寄存器/smem 墙」：**无软件解，需换卡**。
+
+### 145.4 探针：MLA（D=512）主 kernel 切 wgmma —— 结构性不可行（编译期）
+
+fp8 主 kernel 的 D=128（F1/F8）与 D=256（O84）默认已走 wgmma，**只有 MLA（D=512）仍是
+`mma.sync`**（`launch_bwd_main_kvpipe<512,64,32,false,...>` 把 `WGMMA=false` 写死）。尝试在
+`D==512` 分支加 `--mlawgm=1` → `launch_bwd_main<512,64,32,false,/*WGMMA=*/true,...,256,4>`，
+**编译期被两处 `static_assert` 拦住**：
+
+1. `fa_bwd_fp8_kernels.cuh:3023`：`static_assert(WGMMA == false || (NTH == THREADS && NWAR == WN))`
+   ——WGMMA 主体**只支持默认 128 线程 / 2 warp** 几何，MLA 的 8-warp/256 几何不满足。
+2. `fa_bwd_fp8_kernels.cuh:3049`：`static_assert(!WGMMA || (HD == 128 || HD == 256))`
+   ——WGMMA 主 kernel **只做 HD=128/256**；HD=512 未接线（SBO/SW128 描述符几何未验证）。
+
+⇒ 不是「只换指令」能解决，需为 HD=512 新写 wgmma 几何（128 线程）或放宽 body 断言 + 完整回归，
+工程量超出本轮。**默认一行未改**，`--mlawgm` 探针未保留在源码（会破坏普通构建）。
+
+### 145.5 结论
+
+* fp8 默认 main 的 `red` 在 **L1 侧已达每贡献最优（70.25M≈68.2M）**；L2 侧 105M（1.5×）是
+  L2 对 8-row 散布写请求的固有计数，**与归约机制/宽度无关**（atomic≡plain store）。
+* 与 TE 的 4.06× `red`、2.40× `read`、5.3× 时间差**全部来自工作划分**（持久 KV-owner 的
+  更少贡献次数），受本卡寄存器/smem 墙锁定。
+* 原始输出：`src/fp8/fa_bwd_fp8_o124_ncu_{ours,redstore,te}_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o124_sass_hist.out.txt`、`src/fp8/fa_bwd_fp8_o124_mlawgm_probe.out.txt`。

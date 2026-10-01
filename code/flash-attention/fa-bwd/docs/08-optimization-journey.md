@@ -2843,3 +2843,30 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   **fp8 默认 main 的 bytes 与 issue 都已在软硬件边界，正结果仍只剩换卡。** `FA_SCALE_HOIST` 作为
   逐位安全微优化保留（默认 1）。
 - 原始输出：`src/fp8/fa_bwd_fp8_o123_scalehoist_ab_s4096.out.txt`；实现细节 `docs/03` §144。
+
+### 5.132 第 218 轮（O124）：fp8 默认 main 的 `red` L1/L2 扇区分解 + MLA(D=512) 上 wgmma 探针 —— **诊断/收口（默认一行未改）**
+
+- **动机**：O116 把默认 `kvtma` main 的 L2 `red` 105.4M 相对「理论下界 68.2M」的 **1.545×**
+  归因为「每 KV 元素被多少 m-block 归约 = 工作划分」。本轮在**真实默认 kernel**上做
+  `ncu` 的 **L1/L2 分层**，检验该归因。
+- **证据一（L1 vs L2）**：S4096 causal H16 `fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>`：
+  `l1tex op_red` 请求 **8.78M**、扇区 **70.25M（8.0/req，≈每贡献下界 68.2M、1.03×）**；
+  `lts op_red` 扇区 **105.38M（12.0/req = 1.50× L1）**；`op_read` 24.24M、L2 78.24%、1.37ms。
+  ⇒ **L1 侧已最优**，多出的 1.5× 在 L1→L2 之间，**不是贡献次数**。
+- **证据二（机制无关）**：`-DFA_RED_STORE=1`（plain store 同址）L2 写扇区 **107.21M ≈ atomic
+  105.38M**、L2 red=0、Duration 1.26ms。⇒ 坐实 O83/O159「L2 `red` 与归约机制无关」；
+  atomic 在 L1 请求粒度更优（8.78M vs store 100.9M 单扇区请求）；plain store 快的 ~8% = 原子语义成本。
+- **证据三（同 session TE）**：`harness/te_fp8_ncu.py` = `..._flash_bprop_wgmma_f8_..._64x64x128`
+  （grid=132/384t）：Duration **258.7µs**、**L1 red 请求/扇区各 3,168（TMA 4D reduce 绕过 L1）**、
+  L2 red **25.96M（ours 的 1/4.06）**、read 10.08M（1/2.40）。⇒ 差距=**贡献次数（持久 KV-owner）**，
+  非机制；ours 要接近只能放大 BM / 持久 KV-owner，已被 O83/O91/O157/O160/O168 判「本卡无软件解」。
+- **探针（MLA D=512 wgmma）**：fp8 主 kernel 仅剩 MLA 走 mma（`WGMMA=false` 写死）。尝试
+  `--mlawgm=1` → 编译期被两处 `static_assert` 拦：`WGMMA ⇒ NTH==THREADS && NWAR==WN`
+  （只支持 128 线程/2 warp；MLA 用 256/8-warp）与 `WGMMA ⇒ HD∈{128,256}`（HD=512 未接线几何）。
+  ⇒ 非「只换指令」，需新写 HD=512 wgmma 几何；**默认一行未改、探针未留源码**。
+- **判决/下一步**：与 O116/O117/O122/O123 合并——fp8 默认 main 的 **L1 贡献数（工作划分）与
+  L2 issue 都已在软硬件边界，正结果仍只剩换卡**（更大 smem/regfile）。
+
+- 原始输出：`src/fp8/fa_bwd_fp8_o124_ncu_{ours,redstore,te}_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o124_sass_hist.out.txt`、`src/fp8/fa_bwd_fp8_o124_mlawgm_probe.out.txt`；
+  实现细节 `docs/03` §145。

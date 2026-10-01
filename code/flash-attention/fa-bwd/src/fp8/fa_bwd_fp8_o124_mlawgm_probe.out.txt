@@ -1,0 +1,9 @@
+# O124: MLA（D=512）主 kernel 切 wgmma 的探针 —— 结构性不可行（编译期 static_assert）
+# 改动：D==512 分支加 `--mlawgm=1` → launch_bwd_main<512,64,32,false,/*WGMMA=*/true,...,256,4>
+# 结果：编译失败（两处 device static_assert）：
+#  1) fa_bwd_fp8_kernels.cuh:3023  static_assert(WGMMA == false || (NTH == THREADS && NWAR == WN))
+#     ——WGMMA 主体**只支持默认 128 线程/2 warp 几何**；MLA 的 8-warp/256 几何不满足。
+#  2) fa_bwd_fp8_kernels.cuh:3049  static_assert(!WGMMA || (HD == 128 || HD == 256))
+#     ——WGMMA 主 kernel **只做 HD=128/256**；HD=512 未接线（sbo/sw128 描述符几何）。
+# => fp8 主 kernel 里「最后一条仍走 mma 的路径（MLA D=512）」不能只换指令；
+#    需新写 HD=512 的 wgmma 几何（128 线程）或放宽 body 断言，工程量 > 本轮。默认一行未改。

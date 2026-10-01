@@ -1,0 +1,22 @@
+# O124 (第218轮) fp8 默认 main `kvtma` 的 L1/L2 red 扇区分解（S=4096 causal H16）
+# 命令: ncu --kernel-name regex:kvtma --launch-skip 3 --launch-count 1 \
+#        --metrics l1tex__t_requests_pipe_lsu_mem_global_op_red.sum,
+#                 l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum,
+#                 lts__t_sectors_op_red.sum,lts__t_sectors_op_red_lookup_hit.sum,
+#                 lts__t_sectors_op_red_lookup_miss.sum,...
+#        ./fa_bwd_fp8_main.out --dir=.../b1_s4096_h16_d128_causal_fp8
+# kernel: fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>  grid=(16,128,1)x(128,1,1)
+Metric Name                                                Metric Value
+l1tex__t_requests_pipe_lsu_mem_global_op_red.sum            8,781,824   (8.0 sectors/req)
+l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum            70,254,592  (= 每贡献最优 68.2M)
+lts__t_sectors_op_red.sum                               105,381,888
+lts__t_sectors_op_red_lookup_hit.sum                    100,318,512
+lts__t_sectors_op_red_lookup_miss.sum                     6,767,700
+lts__t_sectors_op_read.sum                               24,235,779
+lts__t_sectors_op_write.sum                                 100,229
+dram__bytes_read.sum                                        284.64 Mbyte
+dram__bytes_write.sum                                       254.40 Mbyte
+gpu__time_duration.sum                                        1.37 ms
+lts__throughput.avg.pct_of_peak_sustained_elapsed             78.24 %
+=> L1 red 扇区 70.25M 已=「每 (m-block,kv-block) 贡献写满扇区」的理论下界 68.2M（无冗余）；
+   L2 侧 105.38M = 1.50x L1，为 L2 对 8-row 散布 red 请求的固有扇区计数（非软件浪费）。
