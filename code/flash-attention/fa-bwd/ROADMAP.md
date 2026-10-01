@@ -3353,10 +3353,31 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
   `S8192_FP8_SHAPES`）；ksplit/hswap/mrev/ksm/det/wg2/wg3/bn64/qdtma/kvtma/WGMMA34 全部中性或
   有损、**ksplit=2 仍最优**；ncu/TE 红字账与 S4096 同构（red 4.03×/read 2.42×/time 5.5×）。
   **负结果、默认一行未改**。见「当前进度 第二百二十三轮」、`docs/03` §149。
+- [x] **O130（第二百二十四轮）full S=8192 覆盖**：把 8K 审计从 causal 补齐到 **full**（新 dump +
+  `S8192_FP8_SHAPES` 增 full）；**ksplit 波对齐自动档（k=5≈4–8）仍最优**，`--hswap/--mrev` 对 full
+  ineligible；ncu/TE 红字账与 causal 同构（red 4.08×/read 3.68×/time 5.6×），且 full 的 `red` 恰为
+  causal 的 **2.00×**（贡献字节翻倍）。**负结果、默认一行未改**。见「当前进度 第二百二十四轮」、
+  `docs/03` §150。
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百二十三轮）**：**O129——fp8 causal MHA `S=8192` 覆盖 + 平台期延伸到 S4096 之外
+> **最新（第二百二十四轮）**：**O130——fp8 full（非 causal）MHA `S=8192` 覆盖 + full 的 ksplit
+> 规则在大 S 复核——负结果/覆盖，默认一行未改**。O129 只把 **causal** 推到 8K；本轮补 **full**
+> （「降 L2 搬运量」的 Q/dO 重读那一半在 full 下由「波对齐」而非 causal 三角尾波决定）。**覆盖**：
+> 新 dump `--shape '1 8192 16 128 full'`（`ref_*`/`te_*` + ours 单/两文件），`S8192_FP8_SHAPES`
+> 增 full。**性能（event）**：默认（ksplit auto=5）**total 11.43ms / main 10.44ms（48.1 TFLOPS）**；
+> ksplit 1/2/3/4/**5**/6/8/12/16 = 11.410/10.696/10.469/10.444/**10.442**/10.424/10.457/10.568/
+> 10.631ms ⇒ **auto k=5≈4–8 最优**（k=1 慢 8.5%、k≥12 慢 1–2%）。**ncu / TE 对侧**：ours
+> `kvtma<128,64,32>` **10.59ms / L2 red 821.0M（79.2%，L1→L2 精确 1.50×）/ read 177.1M / 168 regs /
+> 3 CTA/SM** vs TE **1.89ms / L2 red 201.3M / read 48.1M** ⇒ 红字账同构（red 4.08×/read 3.68×/
+> time 5.6×）；ours full 的 `red` **= causal S8192 的 2.00×**。**数值**：ours vs ref relL2
+> 8.114%/8.236%/6.635%（护栏内）、单/两文件 worst 7.629e-06（CI OK）、`docs/04` 244 行 OK。
+> 见 `docs/03` §150、`docs/08` §5.138；原始输出 `src/fp8/fa_bwd_fp8_o130_*`。
+> **下一步候选（更新）**：① **换卡**（fp8 main 的 L2 `red` 主体墙 + issue 墙无软件解）；
+> ② 覆盖型 backlog：~~fp16/bf16 `head_dim=256`~~（O128 已完成）；③ 非 main `--det`/量化
+> （O116 无余量）；④ fp16/bf16 `D=256` 的 wgmma+TMA 几何（O128 遗留，非 fp8）。
+>
+> **（第二百二十三轮）**：**O129——fp8 causal MHA `S=8192` 覆盖 + 平台期延伸到 S4096 之外
 > ——负结果/覆盖，默认一行未改**。承接 O116–O127「fp8 默认 main 的杠杆全部收口」，把**此前只标定
 > 到 S=4096** 的 MHA 推到 **S=8192**（nblk=128）复核新尺度杠杆。**覆盖**：新 dump
 > `--shape '1 8192 16 128 causal'`（`ref_*`/`te_*` + ours 单/两文件），harness 加
@@ -9351,7 +9372,34 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     ④ fp16/bf16 `D=256` 的 wgmma+TMA 几何（O128 遗留，非 fp8）。见 `docs/03` §149、`docs/08`
     §5.137、`docs/04` §56；原始输出 `src/fp8/fa_bwd_fp8_o129_s8192_default.out.txt`、
     `..._o129_s8192_sweep.out.txt`、`..._o129_ncu_ours_s8192.out.txt`、`..._o129_ncu_te_s8192.out.txt`、
-    `..._o129_te_baseline_s8192.out.txt`。
+     `..._o129_te_baseline_s8192.out.txt`。
+
+- 2026-10-01（第二百二十四轮）：**O130——fp8 full（非 causal）MHA `S=8192` 覆盖 + full 的 ksplit
+  规则在大 S 复核——负结果/覆盖，默认一行未改**。O129 只用 **causal** 把平台期延伸到 8K；本轮把
+  **full** 也推到 S=8192——因为「降 L2 搬运量」的 Q/dO 重读那一半，其最优 ksplit 由 **full 的
+  「均匀工作量 ⇒ 波对齐」** 而非 causal 的三角尾波决定（O96）。
+  - **覆盖（无 device 改动）**：新 dump `--shape '1 8192 16 128 full'`（`ref_*`/`te_*` +
+    ours 单/两文件 `ours_sf_*`/`ours_*`）；`S8192_FP8_SHAPES` 增加 full 形状。
+  - **性能（S8192 full H16，event）**：默认（ksplit auto=**5**，grid `640×16`）**total 11.43ms /
+    main 10.44ms（48.1 TFLOPS）**；ksplit 1/2/3/4/**5**/6/8/12/16 = 11.410/10.696/10.469/10.444/
+    **10.442**/10.424/10.457/10.568/10.631ms ⇒ **O96 的波对齐自动档（k=5≈4–8）仍最优**（k=1 并行度
+    不足慢 8.5%、k≥12 Q/dO 重读慢 1–2%）；`--hswap/--mrev` 对 full **ineligible**。
+  - **ncu / TE 对侧（同 session）**：ours `kvtma<128,64,32>` **10.59ms / L1 red 547.4M（8.0/req）/
+    L2 red 821.0M（精确 1.50× 展宽）/ read 177.1M / L2 79.2% / DRAM 1.36% / warps 18.59% / 168 regs /
+    3 CTA/SM** vs TE `..._flash_bprop_wgmma_f8_..._64x64x128` **1.89ms / L1 red≈0 / L2 red 201.3M /
+    read 48.1M** ⇒ 红字账与 causal 同构（red **4.08×**、read **3.68×**、时间 **5.6×**）；且 ours
+    full 的 L2 `red` **恰为 causal S8192（412.1M）的 2.00×** ⇒ 再次坐实 `red` 只由「每 KV 元素被
+    多少 m-block 贡献」唯一决定。TE 纯反向基线 2.00ms/549TF（ours/TE 5.71×、8.8%）。
+  - **数值/护栏**：ours vs fp32 ref `relL2` dq/dk/dv = **8.114% / 8.236% / 6.635%**（护栏内），
+    `max_abs` 1.56e-2/1.69e-2/1.29e-2；单/两文件一致性 `--ci` gate worst **7.629e-06 OK**、
+    `--check docs/04` OK（244 行）。**注**：该 full shape 下 TE 自身 dv 不可信（TE-vs-ref relL2 dv
+    **88.1%**、TE dv L2 范数 53.3 vs ref/ours 75.0）。
+  - **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙 + issue 墙无软件解）；② 覆盖型
+    backlog：~~fp16/bf16 `head_dim=256`~~（O128 已完成）；③ 非 main `--det`/量化（O116 无余量）；
+    ④ fp16/bf16 `D=256` 的 wgmma+TMA 几何（O128 遗留，非 fp8）。见 `docs/03` §150、`docs/08`
+    §5.138；原始输出 `src/fp8/fa_bwd_fp8_o130_full_s8192_default.out.txt`、
+    `..._o130_s8192_ksweep.out.txt`、`..._o130_ncu_ours_s8192.out.txt`、`..._o130_ncu_te_s8192.out.txt`、
+    `..._o130_te_baseline_s8192.out.txt`、`..._o130_relL2_s8192.out.txt`、`..._o130_onefile_s8192.out.txt`。
 
 ## 灵感 / backlog
 

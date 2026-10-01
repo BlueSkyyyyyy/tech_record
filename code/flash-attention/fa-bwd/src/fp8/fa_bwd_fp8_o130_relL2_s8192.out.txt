@@ -1,0 +1,4 @@
+full S8192 H16 D128 fp8: relL2 (%)
+dq: ours-vs-ref=8.114%  ours-vs-TE=13.552%  TE-vs-ref=10.802%  max_abs(o-r)=1.5634e-02
+dk: ours-vs-ref=8.236%  ours-vs-TE=13.596%  TE-vs-ref=10.757%  max_abs(o-r)=1.6937e-02
+dv: ours-vs-ref=6.635%  ours-vs-TE=123.992%  TE-vs-ref=88.084%  max_abs(o-r)=1.2909e-02

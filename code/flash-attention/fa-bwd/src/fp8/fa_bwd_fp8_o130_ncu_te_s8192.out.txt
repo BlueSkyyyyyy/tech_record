@@ -1,0 +1,21 @@
+==PROF== Connected to process 1590208 (/usr/bin/python3.12)
+==PROF== Profiling "cudnn_generated_fort_native_sdpa_sm90_flash_bprop_wgmma_f8_knob_26_64x64x128_1x4x1_cga1x1x1_kernel0_0": 0%....50%....100% - 6 passes
+==PROF== Disconnected from process 1590208
+[1590208] python3.12@127.0.0.1
+  cudnn_generated_fort_native_sdpa_sm90_flash_bprop_wgmma_f8_knob_26_64x64x128_1x4x1_cga1x1x1_kernel0_0 (132, 1, 1)x(384, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    -------------------------------------------------- ----------- ------------
+    Metric Name                                        Metric Unit Metric Value
+    -------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %         3.74
+    gpu__time_duration.sum                                      ms         1.89
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                       3168
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum         sector         3168
+    lts__t_requests_op_red.sum                             request     50336412
+    lts__t_sectors_op_read.sum                              sector     48089116
+    lts__t_sectors_op_red.sum                               sector    201331392
+    lts__t_sectors_op_write.sum                             sector      1580457
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        69.87
+    sm__warps_active.avg.pct_of_peak_sustained_active            %        15.62
+    -------------------------------------------------- ----------- ------------
+
