@@ -1833,6 +1833,55 @@ quantize_zero_delta_warp_kernel(const float* __restrict__ q, const float* __rest
       zero_row_warp<VPT>(dv, t - b6, lane);
   }
 }
+// O109：`quantize_zero_delta_warp_kernel` 的**分相版**（phase split）。
+//   动机：LSE（`lse_mma_kernel_bal_tma`，SM 73%、DRAM 4%）与量化（DRAM 84%、SM 62%）
+//   在资源上互补，但 LSE 依赖 q8/k8——只要先量化 Q/K，LSE 即可与「dO+delta / V / 清零」
+//   的重活在不同 stream 上重叠。本 kernel 只把 O64/O66 的 7 段任务拆成两相：
+//     phase==0：[0,rq) 量化 Q(E4M3)  [rq,rq+rkv) 量化 K(E4M3)
+//     phase==1：[0,rq) 量化 dO(E5M2)+delta  [rq,rq+rkv) 量化 V(E4M3)
+//               [..,+rq) 清零 dQ  [..,+rkv) 清零 dK  [..,+rkv) 清零 dV
+//   每段的逐行例程（amax/scale/cvt/delta 次序）与合并版**逐字相同** ⇒ q8/k8/v8/do8/qs/ks/
+//   vs/dos/delta 与合并版**逐位相同**，零值也相同。只改「谁在哪个 stream 上跑」。
+template <int VPT>
+__global__ void __launch_bounds__(128)
+quantize_zero_delta_phase_kernel(const float* __restrict__ q, const float* __restrict__ kf,
+                                 const float* __restrict__ v, const float* __restrict__ dof,
+                                 const float* __restrict__ o, float* __restrict__ delta,
+                                 unsigned char* __restrict__ q8, unsigned char* __restrict__ k8,
+                                 unsigned char* __restrict__ v8, unsigned char* __restrict__ do8,
+                                 float* __restrict__ qs, float* __restrict__ ks,
+                                 float* __restrict__ vs, float* __restrict__ dos,
+                                 float* __restrict__ dq, float* __restrict__ dk,
+                                 float* __restrict__ dv, long long rq, long long rkv, int phase) {
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  constexpr int NW = 4;  // 128 线程 = 4 个 warp
+  if (phase == 0) {
+    const long long n0 = rq + rkv;
+    for (long long t = (long long)blockIdx.x * NW + warp; t < n0;
+         t += (long long)gridDim.x * NW) {
+      if (t < rq)
+        quant_row_warp<VPT, false>(q, q8, qs, t, lane);
+      else
+        quant_row_warp<VPT, false>(kf, k8, ks, t - rq, lane);
+    }
+  } else {
+    const long long b1 = rq, b2 = rq + rkv, b3 = b2 + rq, b4 = b3 + rkv, b5 = b4 + rkv;
+    for (long long t = (long long)blockIdx.x * NW + warp; t < b5;
+         t += (long long)gridDim.x * NW) {
+      if (t < b1)
+        quant_delta_row_warp<VPT>(dof, do8, dos, o, delta, t, lane);
+      else if (t < b2)
+        quant_row_warp<VPT, false>(v, v8, vs, t - b1, lane);
+      else if (t < b3)
+        zero_row_warp<VPT>(dq, t - b2, lane);
+      else if (t < b4)
+        zero_row_warp<VPT>(dk, t - b3, lane);
+      else
+        zero_row_warp<VPT>(dv, t - b4, lane);
+    }
+  }
+}
 
 // =============================================================================
 // 2a) lse_mma_kernel【O1 优化】：用 mma 分块 Q·Kᵀ 求 LSE
@@ -7234,6 +7283,9 @@ int main(int argc, char** argv) {
   int varlen = 0;   // VARLEN：1 = packed [T,H,D] + cu_seqlens.npy（fp8/HD=128/causal）
   int compact_opt = 0;  // 第八十二轮：1 = varlen 主 kernel 紧凑均衡网格（opt-in；实测中性偏负）
   int lse_compact_opt = 0;  // 第八十二轮：1 = varlen causal LSE 紧凑对网格（opt-in，A/B）
+  // O109：量化分相 + LSE 跨 stream 重叠（默认 -1=auto，定长 D=128 默认融合路径开）。
+  //   `--ovlql=0` 退回原「合并量化 → LSE → main」串行做同 binary A/B。数值逐位相同。
+  int ovl_ql = -1;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--full") causal = false;
@@ -7263,6 +7315,7 @@ int main(int argc, char** argv) {
     else if (a == "--lse8w") lse8w_opt = 1;
     else if (a.rfind("--d128w=", 0) == 0) d128w_opt = atoi(a.c_str() + 8);
     else if (a == "--d128w") d128w_opt = 1;
+    else if (a.rfind("--ovlql=", 0) == 0) ovl_ql = atoi(a.c_str() + 8);
     else if (a.rfind("--det=", 0) == 0) det_ab = atoi(a.c_str() + 6);
     else if (a == "--det") det_ab = 1;
     else if (a.rfind("--detk=", 0) == 0) det_ksplit = atoi(a.c_str() + 7);
@@ -7554,6 +7607,24 @@ int main(int argc, char** argv) {
       quantize_zero_delta_warp_kernel<16><<<grid, 128>>>(
           d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
           d_dos, d_dq_acc, d_dk_acc, d_dv_acc, rq, rkv);
+  };
+  // O109：分相量化（phase=0 只做 Q/K，phase=1 做 dO+delta/V/清零）。数值逐位同合并版。
+  auto quant_phase = [&](int ph, cudaStream_t st) {
+    const long long rq = (long long)rows_q, rkv = (long long)rows_kv;
+    const long long ntask = (ph == 0) ? (rq + rkv) : (2 * rq + 3 * rkv);
+    int grid = (int)std::min<long long>((ntask + 3) / 4, 1048576);
+    if (D == 128)
+      quantize_zero_delta_phase_kernel<4><<<grid, 128, 0, st>>>(
+          d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
+          d_dos, d_dq_acc, d_dk_acc, d_dv_acc, rq, rkv, ph);
+    else if (D == 256)
+      quantize_zero_delta_phase_kernel<8><<<grid, 128, 0, st>>>(
+          d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
+          d_dos, d_dq_acc, d_dk_acc, d_dv_acc, rq, rkv, ph);
+    else
+      quantize_zero_delta_phase_kernel<16><<<grid, 128, 0, st>>>(
+          d_q_f, d_k_f, d_v_f, d_do_f, d_o_f, d_delta, d_q8, d_k8, d_v8, d_do8, d_qs, d_ks, d_vs,
+          d_dos, d_dq_acc, d_dk_acc, d_dv_acc, rq, rkv, ph);
   };
 
   // ---- O2b：自动选择 N 方向切块数 ksplit。base = 未切块时的 CTA 数；切块把小 S 时
@@ -8178,7 +8249,38 @@ int main(int argc, char** argv) {
                                                         (int)causal, ksplit, nullptr, nullptr, d_mrev);
   };
 
+  // O109：量化分相 + LSE 跨 stream 重叠（定长 D=128 默认融合路径；`--ovlql=0` 关）。
+  const bool ovlql_req = (D == 128) && qfuse && qfast && dfuse && delta_warp_sel &&
+                         (qcap_opt <= 0);
+  const bool ql_overlap = ovlql_req && (ovl_ql != 0);
+  cudaStream_t sQuantAux = nullptr;
+  cudaEvent_t ql_e0 = nullptr, ql_e1 = nullptr;
+  if (ql_overlap) {
+    CUDA_CHECK(cudaStreamCreateWithFlags(&sQuantAux, cudaStreamNonBlocking));
+    CUDA_CHECK(cudaEventCreateWithFlags(&ql_e0, cudaEventDisableTiming));
+    CUDA_CHECK(cudaEventCreateWithFlags(&ql_e1, cudaEventDisableTiming));
+    printf("O109: quant-phase overlap ON (Q/K -> LSE(default) || dO+V+zero(aux))\n");
+  } else if (ovl_ql == 1) {
+    printf("O109: overlap requested but conditions unmet (D=%d qfuse=%d qfast=%d dfuse=%d) -> serial\n",
+           D, qfuse, qfast, dfuse);
+  }
+
   auto run_all = [&]() {
+    if (ql_overlap) {
+      // O109：Q/K 先量化（LSE 就绪）→ LSE(default) 与 dO+delta/V/清零(aux) 重叠 → main。
+      quant_phase(0, nullptr);
+      CUDA_CHECK(cudaEventRecord(ql_e0));
+      CUDA_CHECK(cudaStreamWaitEvent(sQuantAux, ql_e0, 0));
+      quant_phase(1, sQuantAux);
+      run_preprocess(false);
+      CUDA_CHECK(cudaEventRecord(ql_e1, sQuantAux));
+      CUDA_CHECK(cudaStreamWaitEvent(nullptr, ql_e1, 0));
+      run_main();
+      if (cvt_on)
+        convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
+                                                    d_dv, nq, nkv);
+      return;
+    }
     if (qfuse && qfast) {
       // O66：默认把 delta 也融进 quant kernel（`dfuse && delta_warp_sel`）。
       if (dfuse && delta_warp_sel)

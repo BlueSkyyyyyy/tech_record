@@ -2436,3 +2436,24 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 
 见 `docs/03` §130；原始输出 `src/fp8/fa_bwd_fp8_o108_ab.out.txt`、
 `..._o108_ncu_d256_varlen.out.txt`、`..._o108_baseline.out.txt`、`..._o108_ci.out.txt`。
+
+### 5.117 第 203 轮（O109）：量化分相 + LSE 跨 stream 重叠 —— **正结果（默认）**
+
+- **背景**：fp8 main 的 L2 `red` 墙（105.4M 扇区 / L2 77.8%）已由 F3b/F4b/F6/F7/O83/O90/O91/
+  O92/O95 收口为本卡无软件解。本轮 ncu 复核默认（main 1.38ms、L2 77.8%、张量核 11.65%）+
+  编译宏复扫（`FA_WS1` 中性、`ILV34` 0.911×、`FA_R4` 0.951×）确认后，**转向非 main**。
+- **观察**：S=4096 非 main 223µs 中，量化（99µs，DRAM 84%/SM 62%）与 LSE（121µs，SM 73%/DRAM 4%）
+  资源互补却串行——O64/O66 的单颗融合量化 kernel 同时产出 LSE 与 main 的全部输入。
+- **做法（device 一行数学未改 + host 一条 stream）**：新增
+  `quantize_zero_delta_phase_kernel<VPT>`（phase0 = Q/K；phase1 = dO+delta/V/清零，逐行例程与
+  合并版逐字同款 ⇒ 输出逐位相同）；host 令 `phase0(default) → {phase1(aux) || LSE(default)} →
+  main(default.wait e1)`。仅定长 D=128 默认融合路径；`--ovlql=0` 关。单/两文件同步。
+- **性能（同 binary A/B，iters=400，3×）**：**S512 1.030×**、S1024H32 1.017×、S1024 **kv4(GQA)
+  1.016×**、S4096 1.005×；D=256（门控外）1.000×。
+- **nsys**：一行迭代里 `phase0(34µs)` 后 `lse(stream7)` 与 `phase1(stream20)` **区间重叠**。
+- **数值/回归**：quant 输出逐位相同 ⇒ `max_abs` 与历史逐位一致；`--ci --dtype fp8 --hopper`
+  （49 case）gate **worst 7.153e-06 OK**、`docs/04` `--check` OK、rc=0。
+- **判决**：正结果、默认。压的是**非 main 串行**，不动 main 的 `red` 墙（后者仍需换卡）。
+
+见 `docs/03` §131；原始输出 `src/fp8/fa_bwd_fp8_o109_ab.out.txt`、`..._o109_nsys_overlap.out.txt`、
+`..._o109_nsys_kernsum.out.txt`、`..._o109_macrosweep.out.txt`。

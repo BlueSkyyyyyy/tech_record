@@ -1873,6 +1873,55 @@ quantize_zero_delta_warp_kernel(const float* __restrict__ q, const float* __rest
       zero_row_warp<VPT>(dv, t - b6, lane);
   }
 }
+// O109：`quantize_zero_delta_warp_kernel` 的**分相版**（phase split）。
+//   动机：LSE（`lse_mma_kernel_bal_tma`，SM 73%、DRAM 4%）与量化（DRAM 84%、SM 62%）
+//   在资源上互补，但 LSE 依赖 q8/k8——只要先量化 Q/K，LSE 即可与「dO+delta / V / 清零」
+//   的重活在不同 stream 上重叠。本 kernel 只把 O64/O66 的 7 段任务拆成两相：
+//     phase==0：[0,rq) 量化 Q(E4M3)  [rq,rq+rkv) 量化 K(E4M3)
+//     phase==1：[0,rq) 量化 dO(E5M2)+delta  [rq,rq+rkv) 量化 V(E4M3)
+//               [..,+rq) 清零 dQ  [..,+rkv) 清零 dK  [..,+rkv) 清零 dV
+//   每段的逐行例程（amax/scale/cvt/delta 次序）与合并版**逐字相同** ⇒ q8/k8/v8/do8/qs/ks/
+//   vs/dos/delta 与合并版**逐位相同**，零值也相同。只改「谁在哪个 stream 上跑」。
+template <int VPT>
+__global__ void __launch_bounds__(128)
+quantize_zero_delta_phase_kernel(const float* __restrict__ q, const float* __restrict__ kf,
+                                 const float* __restrict__ v, const float* __restrict__ dof,
+                                 const float* __restrict__ o, float* __restrict__ delta,
+                                 unsigned char* __restrict__ q8, unsigned char* __restrict__ k8,
+                                 unsigned char* __restrict__ v8, unsigned char* __restrict__ do8,
+                                 float* __restrict__ qs, float* __restrict__ ks,
+                                 float* __restrict__ vs, float* __restrict__ dos,
+                                 float* __restrict__ dq, float* __restrict__ dk,
+                                 float* __restrict__ dv, long long rq, long long rkv, int phase) {
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  constexpr int NW = 4;  // 128 线程 = 4 个 warp
+  if (phase == 0) {
+    const long long n0 = rq + rkv;
+    for (long long t = (long long)blockIdx.x * NW + warp; t < n0;
+         t += (long long)gridDim.x * NW) {
+      if (t < rq)
+        quant_row_warp<VPT, false>(q, q8, qs, t, lane);
+      else
+        quant_row_warp<VPT, false>(kf, k8, ks, t - rq, lane);
+    }
+  } else {
+    const long long b1 = rq, b2 = rq + rkv, b3 = b2 + rq, b4 = b3 + rkv, b5 = b4 + rkv;
+    for (long long t = (long long)blockIdx.x * NW + warp; t < b5;
+         t += (long long)gridDim.x * NW) {
+      if (t < b1)
+        quant_delta_row_warp<VPT>(dof, do8, dos, o, delta, t, lane);
+      else if (t < b2)
+        quant_row_warp<VPT, false>(v, v8, vs, t - b1, lane);
+      else if (t < b3)
+        zero_row_warp<VPT>(dq, t - b2, lane);
+      else if (t < b4)
+        zero_row_warp<VPT>(dk, t - b3, lane);
+      else
+        zero_row_warp<VPT>(dv, t - b4, lane);
+    }
+  }
+}
 
 // =============================================================================
 // 2a) lse_mma_kernel【O1 优化】：用 mma 分块 Q·Kᵀ 求 LSE

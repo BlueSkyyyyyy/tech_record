@@ -1,0 +1,8 @@
+O109 macro re-sweep on the post-O93 default (S4096 H16 B1 causal fp8, `[timing] main` ms)
+binary: `-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda`, iters=200, host --dir=...
+  default (no macro)   main 1.3483 ms
+  -DFA_WS1=1           main 1.3593 ms   (neutral / within session noise)
+  -DFA_ILV34=1         main 1.4801 ms   (NEGATIVE, 0.911x)
+  -DFA_R4=1            main 1.4176 ms   (NEGATIVE, 0.951x)
+=> 复证 O92：只改指令发射顺序 / red 宽度、不改「每元素贡献 CTA 数」的编译宏不可能转正
+   （post-O93 的 ksplit=2 + 跨 head LPT 工作点下同样全负/中性）。

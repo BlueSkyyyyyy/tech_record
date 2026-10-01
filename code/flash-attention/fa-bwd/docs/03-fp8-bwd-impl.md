@@ -11443,3 +11443,78 @@ O84 默认切 wgmma、O99/O103 标定 ksplit/LSE、O104 hswap256），varlen 只
 - **下一步候选**：① **换卡**；② 把 causal 变长 ksplit 复核推广到 **fp16/bf16**；③ MLA 降 smem。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o108_ab.out.txt`、`..._o108_ncu_d256_varlen.out.txt`、
   `..._o108_baseline.out.txt`、`..._o108_ci.out.txt`；见 `docs/08` §5.116。
+
+## 131. 第 203 轮：O109——量化分相 + LSE 跨 stream 重叠（端到端正结果，默认）
+
+### 131.1 动机（为什么这是 fp8 端到端仍能压的一处）
+
+`fp8 专项冲刺`（F1→F5）+ `下一批`（F6/F3b/F4b）+ F7/O83/O90/O91/O92/O95 已把 **main** 的
+L2 `red` 墙（`red` 105.4M 扇区 = L2 的 ~80%、`short_scoreboard 1.85 + wait 1.54`）收口为
+「本卡无软件解」。第 203 轮先用 ncu 复核当前默认（`kvtma`、ksplit=2、跨 head LPT）：main
+**1.38ms / L2 77.8% / `red` 105.4M / 张量核 11.65%**，与 O92 一致；再用编译宏复扫
+（`FA_WS1/ILV34/FA_R4`）**全中性或负**（见 `fa_bwd_fp8_o109_macrosweep.out.txt`）。
+
+于是转向**非 main**（占端到端 14%，且此前从未被并行化）：S=4096 时
+**量化 99µs（DRAM 84%、SM 62%）** 与 **LSE 121µs（SM 73%、DRAM 4%）** 是**资源互补**的两段，
+但被依赖链**串行**：`quantize_zero_delta_warp_kernel`（O64/O66 融合：q/dO/k/v 量化 + delta +
+清零 dQ/dK/dV）一次性产出 LSE 与 main 都要的全部缓冲，LSE 必须等整颗量化 kernel 结束。
+
+### 131.2 实现（device 新增一个分相 kernel；host 加一条 stream 流水）
+
+- **`quantize_zero_delta_phase_kernel<VPT>`**：把 O64/O66 的 7 段任务拆成两相，逐行例程
+  （`quant_row_warp` / `quant_delta_row_warp` / `zero_row_warp`，amax/scale/cvt/delta 的
+  **求和与写回次序逐字未改**）：
+  - `phase==0`：`[0,rq)` 量化 Q(E4M3)、`[rq,rq+rkv)` 量化 K(E4M3) —— **LSE 就绪**；
+  - `phase==1`：`[0,rq)` 量化 dO(E5M2)+delta、`[rq,rq+rkv)` 量化 V(E4M3)、
+    `[..,+rq)` 清零 dQ、`[..,+rkv)` 清零 dK、`[..,+rkv)` 清零 dV。
+- **host**（`fa_bwd_fp8_main.cu` + 单文件 `fa_bwd_fp8_mma_onefile.cu`，仅定长 **D=128** 默认
+  融合路径；`--ovlql=0` 关、`-1`=auto）：
+  ```
+  quant_phase(0, default);                 // Q/K
+  record e0; aux.wait(e0);
+  quant_phase(1, aux);                     // dO+delta/V/清零  ┐ 与 LSE 并发
+  run_preprocess(false);                   // LSE on default   ┘（run_preprocess 不再算 delta）
+  record e1 on aux; default.wait(e1);
+  run_main();
+  ```
+  依赖：LSE 只需 q8/k8（phase0）；main 需 phase1 的 v8/do8/delta/清零，故 default 等 `e1`。
+  quantum 输出与合并 kernel **逐位相同**（同一评价函数、同一次序），因此
+  `ours vs fp32 ref` 的 `max_abs` 与历史**逐位一致**。
+
+### 131.3 实测（同 binary A/B，iters=400，3×）
+
+| case | ovlql=0 (ms) | ovlql=1 (ms) | 加速 |
+|---|---|---|---|
+| b1_s512_h16_d128_causal_fp8 | 0.0811 | **0.0788** | **1.030×** |
+| b1_s1024_h32_d128_causal_fp8 | 0.3105 | **0.3052** | **1.017×** |
+| b1_s1024_h32_d128_**kv4**_causal_fp8 | 0.2766 | **0.2722** | **1.016×** |
+| b1_s4096_h16_d128_causal_fp8 | 1.5842 | **1.5766** | **1.005×** |
+| b1_s1024_h8_d256_causal_fp8（门控外） | 0.2342 | 0.2341 | 1.000× |
+
+原始输出 `src/fp8/fa_bwd_fp8_o109_ab.out.txt`。**S512 收益最大（3.0%）**（非 main 占比最大），
+大 S 因 main 主导只 ~0.5%。D=256/512 与 varlen 未接入（门控在 D=128 定长），逐位不变。
+
+### 131.4 nsys 证据（重叠确实发生）
+
+`src/fp8/fa_bwd_fp8_o109_nsys_overlap.out.txt`（`nsys stats --report cuda_gpu_trace`）一行迭代：
+`phase0(stream7, grid32768, 34.3µs)` → 随后 **`lse(stream7)` 与 `phase1(stream20, grid81920)` 同时
+起跑**（示例：LSE 起于 6471833µs、phase1 起于 6472249µs，二者区间重叠），main 在其后。即
+「SM bound 的 LSE」与「DRAM bound 的 phase1」被调度到不同资源上并发。
+
+### 131.5 数值 / 回归（护栏）
+
+- 合并量化的输出（q8/qs/k8/ks/v8/vs/do8/dos/delta + 零值）与分相版**逐位相同** ⇒
+  `ours vs ref` `max_abs` 不变：S4096 `2.635/2.644/3.216e-1`、S512 `2.426/2.972/3.733e-1`、
+  S1024H32 `2.400/4.195/3.536e-1`、kv4 `2.517/5.408/7.072e-1`。
+- **单/两文件一致性 gate**：`--ci --dtype fp8 --hopper`（49 case）**worst 7.153e-06 OK**；
+  `docs/04` auto-doc-table **218 行与实测一致（`--check` OK）**、rc=0。
+- **对标**：同 session TE FP8 S4096 纯反向 **0.3030ms/907TF** ⇒ ours total 1.5766ms 为 TE 的
+  **5.20×**（O108 时 ~5.23×）；FA3 无 fp8 反向列。
+
+### 131.6 结论 / 下一步
+
+- **判决：正结果、默认开启**（`--ovlql=0` 可退）。这次压的是**非 main 的串行**（资源互补的
+  quant||LSE 重叠），**不动** main 的 L2 `red` 墙——后者仍是本卡无软件解（见「阻塞」）。
+- **下一步候选**：① **换卡**；② causal 变长 ksplit 复核推广到 **fp16/bf16**；③ MLA 降 smem。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o109_ab.out.txt`、`..._o109_nsys_overlap.out.txt`、
+  `..._o109_nsys_kernsum.out.txt`、`..._o109_macrosweep.out.txt`；见 `docs/08` §5.117。
