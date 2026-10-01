@@ -1,0 +1,9 @@
+===== CFG 0 flags=[] =====
+[timing] total(quant+pre+main+cvt) 1.5820 ms  86.88 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1066 ms | preprocess 0.1195 ms | main 1.3540 ms | convert 0.0019 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== CFG 1 flags=[-DFA_VWAIT_TOP=1] =====
+[timing] total(quant+pre+main+cvt) 1.5741 ms  87.31 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1067 ms | preprocess 0.1210 ms | main 1.3711 ms | convert -0.0248 ms (cvt_on=0, qfuse=1, dfuse=1)
+===== CFG 2 flags=[-DFA_VWAIT_TOP=1 -DFA_WS1=1] =====
+[timing] total(quant+pre+main+cvt) 1.5806 ms  86.96 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1068 ms | preprocess 0.1218 ms | main 1.3497 ms | convert 0.0022 ms (cvt_on=0, qfuse=1, dfuse=1)

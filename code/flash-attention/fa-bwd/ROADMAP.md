@@ -3331,7 +3331,27 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百一十五轮）**：**O121——F3b 主体化第一步：把 O120 的 WS 落进 `wgmma2_tma`（BM=128）
+> **最新（第二百一十六轮）**：**O122——fp8 主 kernel 的「V 等待前移」（KVTMA tile 边界去关键化）
+> ——中性/负结果，opt-in `FA_VWAIT_TOP`、默认关**。落实第 215 轮『候选 ④』。K 双缓冲故 K 不等，
+> 但 **V 单缓冲**（`Ap` 复用 `Vs`）⇒ V[nt+1] 只能在 tile 末发起、紧接着在 tile 末等（中间仅 K[nt+1]
+> 的 wait + Kp 重建）⇒ V 的 TMA 延迟暴露在边界临界路径。把该 `mbar_wait` 前移到**下一 tile 的
+> GEMM1（异步 wgmma）之后、GEMM2 之前**（等待计数/相位仍一一对应）。**数值**：S4096 ours vs fp32 ref
+> `2.635/2.644/3.216e-1`（**逐位不变**）。**性能（同 session A/B，iters=50）**：默认 total 1.5820 /
+> main 1.3540ms；`FA_VWAIT_TOP=1` **1.5741 / 1.3711ms**；`+FA_WS1=1` 1.5806 / 1.3497ms ⇒ **全在
+> ~1.5% 噪声内（中性）**。**fresh ncu（S4096，1.38ms）**：L2 **77.87%**、L1/TEX 76.10%、DRAM 11.38%、
+> SM 46.88%、occ 18.67%（3 CTA/SM/168reg/74.82KB）、`op_red` **105.38M**/`op_read` 24.28M；
+> stall = **`short_scoreboard` 1.85 + `wait` 1.54** + barrier 0.41 + long 0.30 ⇒ **头号是 smem→mma 的
+> `ldmatrix` 依赖 + wgmma 依赖，tile 边界的 V 等待不在其中**。**副收口**：shared **store** 冲突 46%
+> 但 `op_st` 仅 **11.18% of peak** ⇒ 不是墙，排除抠冲突方向。⇒ 候选 ④ 在 fp8 默认档**关闭**；
+> fp8 main 的 bytes（L2 `red`）与 issue（`short_scoreboard`+`wait`）都已在边界。见 `docs/03` §143、
+> `docs/08` §5.130；原始输出 `src/fp8/fa_bwd_fp8_o122_vwait_ab_s4096.out.txt`、
+> `..._o122_ncu_{base,stall,tables}_s4096.out.txt`。
+> **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙 + `short_scoreboard`/`wait` 的 issue 墙
+> 均无软件解）；② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；
+> ③ 非 main 的 `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）。~~④ 复核 wait/short_scoreboard~~
+> → **O122 已判关闭（中性）**。
+>
+> **（第二百一十五轮）**：**O121——F3b 主体化第一步：把 O120 的 WS 落进 `wgmma2_tma`（BM=128）
 > ——中性/负结果，opt-in `--wg2ws`、默认关**。承接 O120（冒烟证 WS 在 1 CTA/SM 下值 2.0×）与
 > 其『下一步首选 = F3b 主体化』：新增 `fa_bwd_fp8_wgmma2_ws_kernel`——**384 线程 = 2 个 compute
 > warpgroup + 1 个 producer warpgroup**，compute 侧 5 个 `__syncthreads` 换成 3 个命名 barrier
@@ -9053,6 +9073,36 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     延迟。⇒ 修正 O91/O120；与 F6/F7/O83「本卡 fp8 BM≥128 撞 smem/寄存器墙」同源，**正结果仍只剩
     换卡**。见 `docs/03` §142、`docs/08` §5.129；原始输出
     `src/fp8/fa_bwd_fp8_o121_ab_{s512,s4096}.out.txt`、`..._o121_ncu_{ws,tma}_s4096.out.txt`。
+
+- 2026-10-01（第二百一十六轮）：**O122——fp8 主 kernel 的「V 等待前移」（KVTMA tile 边界
+  去关键化）——中性/负结果（opt-in `FA_VWAIT_TOP`、默认关）**。落实 O121『下一步候选 ④』
+  （「复核 `wait`+`short_scoreboard` 能否用更深 wgmma 流水/更少 barrier 的 fold 拆解缓解」）。
+  - **动机**：既有 `FA_WS1/ILV/ILV34/R4` 都作用于 tile 内且已反复判中性；本轮单独拆 **tile 边界**。
+    K/V TMA 快路里 **K 双缓冲**（K[nt+1] 早发起、不等），但 **V 单缓冲**（`Ap` 复用 `Vs`，O41 零成本
+    折叠）⇒ V[nt+1] 只能在 tile 末（GEMM3/4 读完 `Ap` 后）发起、且**紧接着**在 tile 末等它
+    （中间仅 K[nt+1] 的 wait + Kp 重建）⇒ V 的 TMA 延迟暴露在边界临界路径。
+  - **改动**（`kernels.cuh` `Fp8Cfg` 加 `FA_VWAIT_TOP` 默认 0；`main.cu`/单文件
+    `sync_onefile_device.py` 核对 `identical: True`）：把 V 的 `mbar_wait` 从 tile 末前移到
+    **下一 tile 的 GEMM1（异步 wgmma，只读 Qs/Kcur）之后、GEMM2 之前**，用 wgmma 掩盖 V 延迟；
+    等待计数/相位仍一一对应。数学/数值**逐位不变**（只改等待时机）。
+  - **数值/护栏**：S4096 ours vs fp32 ref `2.635/2.644/3.216e-1`（与默认档**逐位相同**）；
+    单/两文件 device 逐字一致。
+  - **性能（同 session A/B，iters=50，S4096 causal H16）**：默认 total 1.5820 / main 1.3540ms；
+    `FA_VWAIT_TOP=1` **1.5741 / 1.3711ms**；`+FA_WS1=1` 1.5806 / 1.3497ms ⇒ **全在 ~1.5% 噪声内
+    （中性）**。
+  - **fresh ncu（S4096，1.38ms）**：L2 **77.87%**、L1/TEX 76.10%、DRAM 11.38%、SM 46.88%、
+    occ 18.67%（3 CTA/SM/168 regs/74.82KB）、`op_red` **105,381,888** / `op_read` 24,282,536 /
+    `op_write` 100,037；stall = **`short_scoreboard` 1.85 + `wait` 1.54** + not_selected 0.42 +
+    barrier 0.41 + long_scoreboard 0.30 ⇒ **头号是 smem→mma 的 `ldmatrix` 依赖 + wgmma 依赖，
+    tile 边界的 V 等待不在其中**（3 CTA/SM 的 tile 边界互相错开填补）。
+  - **副收口**：shared **store** 2.4-way 冲突 = store wavefronts 的 **46%**（ncu Est 46%），但
+    `wavefronts_mem_shared_op_st` 仅 **11.18% of peak**（`op_ld` 36.97%）⇒ **store 冲突吃的是
+    远未饱和的 pipe、不是墙**，据此**排除**「抠 shared-store 冲突」方向。
+  - **判决**：**中性/负、`FA_VWAIT_TOP` opt-in 默认关**。`ROADMAP` 候选 ④ 在 fp8 默认档**关闭**；
+    fp8 主 kernel 的 bytes（L2 `red`，工作划分）与 issue（`short_scoreboard`+`wait`）都已在软硬件
+    边界（`short_scoreboard` 再压需 B 操作数寄存器预取 ~24 regs，168/170 无余量 ⇒ 必 spill）。
+    **正结果仍只剩换卡**。见 `docs/03` §143、`docs/08` §5.130；原始输出
+    `src/fp8/fa_bwd_fp8_o122_vwait_ab_s4096.out.txt`、`..._o122_ncu_{base,stall,tables}_s4096.out.txt`。
 
 ## 灵感 / backlog
 

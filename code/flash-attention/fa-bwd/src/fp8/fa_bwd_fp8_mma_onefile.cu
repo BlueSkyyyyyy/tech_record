@@ -186,6 +186,19 @@ struct Fp8Cfg {
 #define FA_WS1 0
 #endif
 
+  // O122：KVTMA 路径的 **V 等待前移** 探针。默认 0（行为/数值逐位不变）。
+  //   现状：V 单缓冲（`Ap` 复用 `Vs`）⇒ V[nt+1] 只能在 tile nt 末尾（GEMM3/4/5 读完 Ap 后）
+  //   才发起，且**紧接着**在 tile 末等它（中间只隔 K[nt+1] 的 wait + Kp 重建），V 的 TMA 延迟
+  //   几乎完全暴露在 tile 边界的临界路径上（K 双缓冲故 K 的等待不 stall）。
+  //   本开关把该 `mbar_wait(vbar)` 从 tile 末移到**下一 tile 的 GEMM1 之后、GEMM2 之前**——
+  //   GEMM1 是异步 wgmma（只读 Qs/Kcur），可在等 V 的同一段时间里执行，于是 V 的等待被 GEMM1
+  //   的发射/执行掩盖。数学与数值**逐位不变**（只是等待时机；V/Q 的字节、Kp 重建、fold 均未动）。
+  //   注意：Waits 计数与 mbarrier 相位仍一一对应（prologue 等 nt_begin，之后每 tile 等前一
+  //   tile 发的 V），故不会 over-wait。`-DFA_VWAIT_TOP=1` 复现；仅 KVTMA（D=128 Hopper 快路）生效。
+#ifndef FA_VWAIT_TOP
+#define FA_VWAIT_TOP 0
+#endif
+
   // O4b：Kt/Qt/dOt 三个「逐字节 scatter 写的转置副本」→ Kp/Qp/dOp 三个 **K 配对布局**
   //   （uint16：[K/2][HD]，元素 = 2 个相邻 K 值），用 `ldmatrix.x2.trans` 读 B 片段。
   //   * Qp（[BM/2][HD]）供 GEMM4 的 B=Qᵀ；dOp 供 GEMM3 的 B=dOᵀ；Kp（[BN/2][HD]）供 GEMM5。
@@ -3429,16 +3442,27 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
       // O41：KVTMA 时 K 从当前 stage 缓冲读。
       const unsigned char* Kcur = KVTMA ? (Ks + stg * KS_SZ) : Ks;
       float sacc[16], dpacc[16];
+      // O122：KVTMA 时把 V 的等待从 tile 末移到 GEMM1 之后（见 FA_VWAIT_TOP 说明）。GEMM1
+      //   只读 Qs/Kcur，与 V 无关；先发 GEMM1 再等 V，可让异步 wgmma 掩盖 V 的 TMA 延迟。
+      auto vwait_top = [&]() {
+#if FA_VWAIT_TOP
+        if constexpr (KVTMA) {
+          if (nt > nt_begin) { mbar_wait(qbars + 4, (uint32_t)(vuse & 1)); vuse++; }
+        }
+#endif
+      };
       // O85：HD>128 的 4D-TMA 把 Q/dO 存成 chunk-major ⇒ A 描述符走 `wgmma_mn32_issue_cm`
       //   （B=K/V 仍是 cp.async 的 rg-major）。HD=128 走原 `wgmma_mn32_issue`（逐位相同）。
       if constexpr (kQChunk) {
         wgmma_mn32_issue_cm<0, BM>(reinterpret_cast<const char*>(Qs),
                                    reinterpret_cast<const char*>(Kcur), HD, sacc);
+        vwait_top();
         wgmma_mn32_issue_cm<1, BM>(reinterpret_cast<const char*>(dOs),
                                    reinterpret_cast<const char*>(Vs), HD, dpacc);
       } else {
         wgmma_mn32_issue<0>(reinterpret_cast<const char*>(Qs),
                             reinterpret_cast<const char*>(Kcur), HD, sacc);
+        vwait_top();
         wgmma_mn32_issue<1>(reinterpret_cast<const char*>(dOs),
                             reinterpret_cast<const char*>(Vs), HD, dpacc);
       }
@@ -4221,8 +4245,12 @@ __device__ __forceinline__ void fp8_mma_body(const unsigned char* __restrict__ q
           }
         }
         __syncthreads();
+#if FA_VWAIT_TOP
+        // O122：V 的等待已前移到下一 tile 的 GEMM1 之后（见 FA_VWAIT_TOP）。
+#else
         mbar_wait(qbars + 4, (uint32_t)(vuse & 1));
         vuse++;
+#endif
       }
     } else if constexpr (KVPIPE) {
       // O51：本 tile 的 K/V 已在 GEMM1/2 后由 cp.async 发起；这里等它落地并从行主序 Ks
