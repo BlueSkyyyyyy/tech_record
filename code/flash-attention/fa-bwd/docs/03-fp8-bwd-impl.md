@@ -11601,3 +11601,87 @@ auto 的 `ntask/64` 在 D=128（≈2560）/ D=256（≈640）/ D=512（≈160）
 - **下一步候选**：① 换卡；② causal 变长 ksplit 复核推广到 fp16/bf16；③ MLA 降 smem；
   ④ 把同款「分相 + 封顶重叠」推广到 **varlen** 路径（`run_varlen` 现仍是合并量化串行）。
 - **原始输出**：`src/fp8/fa_bwd_fp8_o110_ab.out.txt`、`..._o110_ci.out.txt`。
+
+## 133. 第 205 轮：O111——量化分相 + LSE 跨 stream 重叠推广到**变长（varlen）**（端到端正结果，默认）
+
+### 133.1 动机（落实 O110 §132.6 的下一步候选 ④）
+
+O109（§131）/O110（§132）把「量化分相 + LSE 跨 stream 重叠 + phase1 栅格封顶」做进了**定长**
+`run()` 的默认融合路径，但显式留下 **varlen 未接入**：`run_varlen` 的 `run_all` 始终调用
+合并量化 `quantize_zero_delta_warp_kernel`（Q/dO/K/V + 清零 + delta 一个 launch）→ 串行 LSE。
+而变长的**非 main 占比同样可观**，且 LSE（SM bound、DRAM 4–7%）与量化 phase1（DRAM bound、
+SM 30–58%）资源互补。device 数学与 O109 完全同源（同一个 `quantize_zero_delta_phase_kernel`），
+故这一步是**纯 host 覆盖推广**（device 一行未改）。
+
+### 133.2 实现（单/两文件 host 同步；device 一行未改）
+
+- `run_varlen(...)` 增加参数 `int ovl_ql = -1, int ovl_cap = 0`（从 `main()` 透传 `--ovlql`/
+  `--ovlcap`，与定长同一对 CLI）。
+- 在 `run_varlen` 里新增 `quant_phase_v(ph, stream)` lambda（VPT = D/32：D=128→4 / 256→8 /
+  512→16，与定长、与合并版逐行例程逐字相同）与 `sQuantAuxV`/`ql_e0v`/`ql_e1v`（aux stream +
+  两个 `DisableTiming` event）。
+- `run_all()` 的量化段：命中重叠时改为 `phase0(default) → record e0 → aux.wait(e0) →
+  phase1(aux)`，随后 default stream 正常发 LSE；**LSE 块之后**再加 `record e1(aux) →
+  default.wait(e1)`，使主 kernel 前两条 stream 汇合（主 kernel 读 v8/do8/delta、写 dq/dk/dv）。
+  未命中时逐字走原「合并量化 → LSE → main」串行路径。
+- **门控**（与 O110 同口径）：`ovl_ql != 0 && qfuseflag && dfuseflag && ((D==128) ||
+  rows_q >= 2048)`；D=128 无条件、D=256/512 需非 main 体量够（`rows_q = T*H`）。`--ovlql=0` 关、
+  `-1/1`=auto/开。phase1 栅格封顶沿用 O110（auto `clamp(ntask/64,132,4096)`；`ntask=2*rq+3*rkv`）。
+- **逐位保证**：phase kernel 每行的 amax/scale/cvt/delta 与「谁在哪个 stream 跑」无关（本就
+  grid-stride），phase0/phase1 与合并版任务集合一一对应 ⇒ 输出**逐位相同**。
+
+### 133.3 实测（同 binary A/B：`--ovlql=0` vs `--ovlql=1`，iters=200，3×；两文件）
+
+| case | serial (ms) | O111 (ms) | 加速 |
+|---|---|---|---|
+| varlen_b1_t512_h16_d128_causal | 0.0902 | **0.0858** | **1.051×** |
+| varlen_b4_t3840_h16_d128_causal | 0.8496 | **0.8262** | **1.028×** |
+| varlen_b5_t3968_h32_d128_causal | 1.5551 | **1.5106** | **1.029×** |
+| varlen_b4_t3840_h8_d256_causal | 1.0697 | **1.0506** | **1.018×** |
+| varlen_b4_t4096_h8_d256_causal | 0.9026 | **0.8918** | **1.012×** |
+| varlen_b3_t1792_h2_d512_causal | 0.2125 | **0.2064** | **1.030×** |
+| varlen_b4_t4096_h16_d128_full | 1.1170 | **1.1110** | **1.005×** |
+| varlen_b5_t3968_h32_d128_full | 2.6956 | **2.6916** | **1.001×** |
+| varlen_b4_t3840_h8_d256_full | 1.8998 | **1.8989** | **1.000×** |
+| varlen_b3_t1792_h2_d512_full | 0.3088 | **0.3089** | 1.000×（噪声）|
+
+10 个 shape **无回退**；causal **1.2–5.1%**、full 0–0.5%（full 的 LSE 体量更大、phase1 相对更小）。
+单文件 `fa_bwd_fp8_mma_onefile.cu` 同码、逐值一致（见原始输出）。
+
+### 133.4 nsys：phase1 与 LSE 真并发
+
+`nsys cuda_gpu_trace`（原始输出 `src/fp8/fa_bwd_fp8_o111_nsys.out.txt`）——以
+`varlen_b4_t3840_h16_d128_causal` 为例，一行迭代稳态：
+`phase1(stream13, grid 4096, 69.7µs)` 与 `LSE(stream7, grid 16×16×8, ~107µs)` **区间重叠**
+（phase1 起于 LSE 开始后 ~22µs，两者各跑 ~90–107µs）；`phase0(stream7, grid 30720)` 在 LSE 前。
+D=256 同构（`phase0 grid 15360 / phase1 grid 2400 / LSE 16×8×16`）。
+
+### 133.5 ncu：资源互补（phase1 = DRAM bound，LSE = SM bound）
+
+`ncu --section SpeedOfLight`（两文件，`--ovlql=1`；原始输出 `src/fp8/fa_bwd_fp8_o111_ncu.out.txt`）：
+
+| kernel | grid | DRAM throughput | Compute (SM) | Duration |
+|---|---|---|---|---|
+| `quantize_zero_delta_phase_kernel<4>`（phase1）| 4096（stream13）| **78.3%** | 30.5% | 69.7µs |
+| `quantize_zero_delta_phase_kernel<4>`（phase0）| 30720（stream7）| **77.7%** | 57.8% | 28.3µs |
+| `lse_mma_kernel_bal_wgmma<128,1>` | 16×16×8 | **7.4%** | **57.7%** | 67.6µs |
+
+⇒ phase1 吃满 DRAM、几乎不用 SM；LSE 用 SM、几乎不碰 DRAM——两者放两条 stream 上可完全并行，
+这正是重叠收益的来源。
+
+### 133.6 数值 / 回归（护栏）
+
+- `ours vs fp32 ref` 的 `max_abs`/`relL2` 在 `--ovlql=0/1` 间**逐位相同**（10 shape ×3 全同）。
+  relL2 全部在护栏内（causal dq/dk/dv ≤ 8.43/8.48/6.48%；full ≤ 8.23/8.36/6.76%，各相对
+  8.2/8.3/6.5% 的余量 <0.3% 且与 `--ovlql=0` 无差）。
+- `--ci --dtype fp8 --hopper`（49 case）**gate worst 5.722e-06 OK**、`docs/04` `--check` OK
+  （218 行）、rc=0；单/两文件一致性 OK。
+
+### 133.7 结论 / 下一步
+
+- **判决：正结果、默认**（`--ovlql=0` 退）。压的是**非 main 串行**；main 的 L2 `red` 主体墙仍
+  受本卡寄存器/smem 锁定（见 ROADMAP「阻塞」）。
+- **下一步候选**：① 换卡；② causal 变长 ksplit 复核推广到 fp16/bf16；③ MLA 降 smem；
+  ④ 非 main 的确定性 `--det` partial/归约进一步并行化。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o111_ab.out.txt`、`..._o111_nsys.out.txt`、
+  `..._o111_ncu.out.txt`、`..._o111_ci.out.txt`。

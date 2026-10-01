@@ -272,6 +272,15 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
       SBO=1024 累加，对齐 fp16 的 2-chunk 写法）。**LSE-only 1.50–1.80×、端到端 S256H2 1.20× /
       S512H4 1.08× / S1024H2 1.06×**；ncu LSE **19.62→10.34µs（1.90×）、Waves 0.48→0.97**；
       D=128 逐位不变。见 `docs/03` §98、`docs/08` §5.83。
+      → **量化分相 + LSE 跨 stream 重叠（O109/O110/O111，第 203–205 轮，正结果/默认）**：
+      main 的 L2 `red` 墙收口后，转压**非 main 的跨阶段串行**。O64/O66 的融合量化 kernel 同时产出
+      LSE 与 main 的全部输入；拆成 `quantize_zero_delta_phase_kernel<VPT>`（phase0=Q/K→LSE 就绪、
+      phase1=dO+delta/V/清零；逐行例程与合并版逐字同款 ⇒ 输出逐位相同），host 令
+      `phase0(default) → {phase1(aux) || LSE(default)} → main(default.wait aux)`。**资源互补**：
+      phase1 DRAM ~78% / SM ~30%，LSE DRAM ~7% / SM ~58% ⇒ 两条 stream 可完全并行。O109 定长
+      D=128（1.005–1.030×），O110 扩到 D=256/512 并**给 phase1 栅格封顶**（auto
+      `clamp(ntask/64,132,4096)`：不封顶时 phase1 占满 SM、重叠≈0），O111 推广到**变长**
+      （causal 1.2–5.1×10⁻²、full 0–0.5%）。见 `docs/03` §131/§132/§133、`docs/08` §5.117–§5.119。
 
 
 ### 4.3 我们的 FP8 反向实现路线（计划）

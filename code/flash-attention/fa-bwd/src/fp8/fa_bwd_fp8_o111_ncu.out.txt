@@ -1,0 +1,17 @@
+# O111 ncu (two-file, --ovlql=1): phase0/phase1 DRAM-bound, LSE SM-bound (resource complementarity)
+  void quantize_zero_delta_phase_kernel<4>(const float *, const float *, const float *, const float *, const float *, float *, unsigned char *, unsigned char *, unsigned char *, unsigned char *, float *, float *, float *, float *, float *, float *, float *, long long, long long, int) (4096, 1, 1)x(128, 1, 1), Context 1, Stream 13, Device 0, CC 9.0
+    DRAM Throughput                   %        78.27
+    Duration                         us        69.73
+    Compute (SM) Throughput           %        30.47
+  void quantize_zero_delta_phase_kernel<4>(const float *, const float *, const float *, const float *, const float *, float *, unsigned char *, unsigned char *, unsigned char *, unsigned char *, float *, float *, float *, float *, float *, float *, float *, long long, long long, int) (30720, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    DRAM Throughput                   %        77.74
+    Duration                         us        28.32
+    Compute (SM) Throughput           %        57.84
+  void quantize_zero_delta_phase_kernel<4>(const float *, const float *, const float *, const float *, const float *, float *, unsigned char *, unsigned char *, unsigned char *, unsigned char *, float *, float *, float *, float *, float *, float *, float *, long long, long long, int) (4096, 1, 1)x(128, 1, 1), Context 1, Stream 13, Device 0, CC 9.0
+    DRAM Throughput                   %        78.36
+    Duration                         us        69.76
+    Compute (SM) Throughput           %        30.51
+  void lse_mma_kernel_bal_wgmma<128, 1>(const unsigned char *, const float *, const unsigned char *, const float *, float *, int, int, int, float, const int *, const int *, const int *, float *, int) (16, 16, 8)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    DRAM Throughput                   %         7.40
+    Duration                         us        67.58
+    Compute (SM) Throughput           %        57.68

@@ -2482,3 +2482,26 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   ④ 把分相+封顶重叠推广到 varlen。
 
 见 `docs/03` §132；原始输出 `src/fp8/fa_bwd_fp8_o110_ab.out.txt`、`..._o110_ci.out.txt`。
+
+### 5.119 第 205 轮（O111）：量化分相 + LSE 跨 stream 重叠推广到变长（varlen）—— **正结果（默认）**
+
+- **动机**：落实 O110（§5.118）明确留下的「`run_varlen` 仍是合并量化串行」。变长非 main 占比
+  同样可观，且 LSE（SM bound、DRAM 4–7%）与量化 phase1（DRAM 78%、SM 30%）资源互补。
+- **做法（device 一行未改、单/两文件 host 同源）**：`run_varlen` 透传 `--ovlql/--ovlcap`，新增
+  `quant_phase_v(ph,stream)`（复用 O109 的 `quantize_zero_delta_phase_kernel<VPT=D/32>`）+
+  aux stream/两个 event；`run_all` 的量化段改为 `phase0(default) → {phase1(aux) || LSE(default)}
+  → default.wait(aux)`。门控同 O110（D=128 无条件、D=256/512 需 `rows_q=T*H>=2048`、
+  `qfuseflag && dfuseflag`）；phase1 栅格封顶沿用 auto `clamp(ntask/64,132,4096)`。
+- **性能（同 binary A/B，iters=200，3×）**：causal **b1_t512 d128 1.051× / b4_t3840 d128 1.028× /
+  b5_t3968 d128 1.029× / b4_t3840 d256 1.018× / b4_t4096 d256 1.012× / b3_t1792 d512 1.030×**；
+  full 0–0.5%（**1.005× / 1.001× / 1.000× / 1.000×**）。10 shape 无回退。
+- **nsys**：稳态一行 `phase1(stream13, grid 4096, 69.7µs)` 与 `LSE(stream7, ~107µs)` **区间重叠**。
+- **ncu**：phase1 DRAM **78.3%** / SM 30.5%，phase0 DRAM 77.7% / SM 57.8%，LSE DRAM **7.4%** /
+  SM **57.7%** ⇒ 资源互补正是重叠收益来源。
+- **数值/回归**：`max_abs`/`relL2` 在 `--ovlql=0/1` 间**逐位相同**（10 shape ×3），relL2 全在
+  护栏内；`--ci --dtype fp8 --hopper`（49 case）gate **5.722e-06 OK**、`docs/04 --check` OK。
+- **判决**：正结果、默认。main 的 L2 `red` 主体墙仍无软件解（见「阻塞」）；下一步候选：
+  ① 换卡；② causal 变长 ksplit 复核推广到 fp16/bf16；③ MLA 降 smem；④ `--det` partial 并行化。
+
+见 `docs/03` §133；原始输出 `src/fp8/fa_bwd_fp8_o111_ab.out.txt`、`..._o111_nsys.out.txt`、
+`..._o111_ncu.out.txt`、`..._o111_ci.out.txt`。
