@@ -730,6 +730,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   // ksplit / REGDQ 自动档：与定长路径同公式（O29），用 maxlen 作为串长。
   //   D==128：S>=2048 → 8192，否则 max(2048, 4*base_grid)；
   //   D==512（MLA）：target = len/2（O29 标定），regdq 恒关（HD=512 的 dQ 一次铺不满 N）。
+  //   **O107（第 201 轮）**：causal 变长的 O29 档从未复核（O96-O100 只审了 full），
+  //   D=128 在 `base_grid > 8192`（大 H·B / 长序列）时被欠切到 k=1、D=512 的 `maxlen/2`
+  //   也被欠切。见下面 `if (causal …)` 分支（只改调度，数值逐位不变）。
   constexpr int BM = 64;
   const long base_grid = (long)((maxlen + BM - 1) / BM) * H * B;
   const long target_ctas = (D == 128)
@@ -788,6 +791,27 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     if (k < 1) k = 1;
     if (k > 16) k = 16;
     if (k > nblk256) k = nblk256;
+    auto_k = k;
+  }
+  // O107（第 201 轮）：**causal 变长的 ksplit 重标定（D=128 / D=512）**——把 O96/O97（定长 full）
+  //   与 O98/O99/O100（变长 full / causal D=256）的审计补齐到此前从未复核的 **causal 变长
+  //   D=128/D=512**（O106 只在此处加了 per-head LPT mrev，没动 ksplit）。7 个 dumped fp8 causal
+  //   变长 shape 全扫 k∈[1,16]（同 binary，150–250 iters，3× 复测，docs/03 §129）：
+  //   · **D=128**：O29 的绝对 target（`maxlen≥2048→8192`）在 `base_grid > target` 时把 k 欠切到
+  //     **1**——b5_t3968(H32·kv8) base=5120、b8_t2904(H16) base=4096 实测最优 k=3/4，k=1→k=3
+  //     分别 **1.10×/1.06×**（k=1 是历史默认）。小 base（b1_t512 base=128）沿用 target 得 k=16
+  //     且已最优 ⇒ 只抬**下限**：`auto_k = max(auto_k, 3)`（对齐 O100 full 的 k=3）。
+  //   · **D=512（MLA）**：O29 的 `target=maxlen/2` 在 1 CTA/SM 下欠切（b3_t1792 base=96→k=4、
+  //     b1_t512 base=16→k=16），实测两者最优一致 **k=8**。改为 `target=maxlen`（翻倍）、
+  //     cap=8、下限 2：`k=pow2floor(min(8, maxlen/base_grid))`，b3/b1 均取 8（**1.10×/1.06×**）。
+  //   只改「哪个 CTA 算哪段 K」⇒ dK/dV/dQ 仍是可交换的跨 CTA `atomicAdd`，数值仅在 fp8 噪声内
+  //   （relL2 与旧档逐位同量级）。`--ksplit=K` 显式给出时不覆盖。
+  if (causal && D == 128) {
+    if (auto_k < 3) auto_k = 3;   // 大 H·B（base_grid>target）时 O29 欠切，抬下限（不按 nblk 封顶——小 grid 靠加 k 填波）
+  } else if (causal && D == 512) {
+    long k = 1;
+    while (k * 2 <= maxlen / base_grid && k < 8) k *= 2;
+    if (k < 2) k = 2;
     auto_k = k;
   }
   // O97：`--ksplit=K` 也可用于 varlen（同 binary A/B；K>=1 直接覆盖自动档）。默认 -1 自动。

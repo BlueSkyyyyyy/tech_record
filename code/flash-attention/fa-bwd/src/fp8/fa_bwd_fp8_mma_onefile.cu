@@ -6073,6 +6073,9 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
   // ksplit / REGDQ 自动档：与定长路径同公式（O29），用 maxlen 作为串长。
   //   D==128：S>=2048 → 8192，否则 max(2048, 4*base_grid)；
   //   D==512（MLA）：target = len/2（O29 标定），regdq 恒关（HD=512 的 dQ 一次铺不满 N）。
+  //   **O107（第 201 轮）**：causal 变长的 O29 档从未复核（O96-O100 只审了 full），
+  //   D=128 在 `base_grid > 8192`（大 H·B / 长序列）时被欠切到 k=1、D=512 的 `maxlen/2`
+  //   也被欠切。见下面 `if (causal …)` 分支（只改调度，数值逐位不变）。
   constexpr int BM = 64;
   const long base_grid = (long)((maxlen + BM - 1) / BM) * H * B;
   const long target_ctas = (D == 128)
@@ -6130,6 +6133,20 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     if (k < 1) k = 1;
     if (k > 16) k = 16;
     if (k > nblk256) k = nblk256;
+    auto_k = k;
+  }
+  // O107（第 201 轮）：**causal 变长的 ksplit 重标定（D=128 / D=512）**——同两文件版
+  //   `fa_bwd_fp8_main.cu`（device 逐字同源；此处为 host 自动档，两文件须一致）。
+  //   · **D=128**：O29 的绝对 target 在 `base_grid > target` 时欠切到 k=1，抬下限到 3
+  //     （b5_t3968 1.10× / b8_t2904 1.06×；小 base 的 k=16 仍最优，不受影响）。
+  //   · **D=512**：`target=maxlen/2` 欠切，改 `target=maxlen`、cap=8、下限 2 ⇒ b3/b1 均取 8
+  //     （1.10×/1.06×）。只改调度，数值逐位不变。
+  if (causal && D == 128) {
+    if (auto_k < 3) auto_k = 3;   // 大 H·B（base_grid>target）时 O29 欠切，抬下限（不按 nblk 封顶——小 grid 靠加 k 填波）
+  } else if (causal && D == 512) {
+    long k = 1;
+    while (k * 2 <= maxlen / base_grid && k < 8) k *= 2;
+    if (k < 2) k = 2;
     auto_k = k;
   }
   // O97：`--ksplit=K` 也可用于 varlen（同 binary A/B；K>=1 直接覆盖自动档）。默认 -1 自动。

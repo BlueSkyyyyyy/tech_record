@@ -1,0 +1,70 @@
+### O107 ncu: fp8 causal varlen 主 kernel（fa_bwd_fp8_mma_kernel, launch-skip 1, launch-count 1）
+### 目的：新 ksplit（更多 K split）应只改调度/并行度，op_red 一字不变
+
+=== varlen_b5_t3968_h32_d128_causal_fp8 ===
+--- 旧 k=1 ---
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 6 passes
+    launch__registers_per_thread                      register/thread          168
+    lts__t_sectors_op_read.sum                                 sector     19182527
+    lts__t_sectors_op_red.sum                                  sector     73138176
+    lts__t_sectors_op_write.sum                                sector      2904630
+    lts__throughput.avg.pct_of_peak_sustained_elapsed               %        53.15
+    sm__warps_active.avg.pct_of_peak_sustained_active               %        17.29
+--- 新 auto(k=3) ---
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 6 passes
+    launch__registers_per_thread                      register/thread          168
+    lts__t_sectors_op_read.sum                                 sector     23523109
+    lts__t_sectors_op_red.sum                                  sector     78987264
+    lts__t_sectors_op_write.sum                                sector      4311518
+    lts__throughput.avg.pct_of_peak_sustained_elapsed               %        66.08
+    sm__warps_active.avg.pct_of_peak_sustained_active               %        18.19
+
+=== varlen_b8_t2904_h16_d128_causal_fp8 ===
+--- 旧 k=2 ---
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 6 passes
+    gpu__time_duration.sum                                         us       589.50
+    launch__registers_per_thread                      register/thread          168
+    lts__t_sectors_op_read.sum                                 sector      8482028
+    lts__t_sectors_op_red.sum                                  sector     30292992
+    lts__t_sectors_op_write.sum                                sector      1627554
+    lts__throughput.avg.pct_of_peak_sustained_elapsed               %        54.36
+    sm__warps_active.avg.pct_of_peak_sustained_active               %        17.89
+--- 新 auto(k=3) ---
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 6 passes
+    gpu__time_duration.sum                                         us       546.05
+    launch__registers_per_thread                      register/thread          168
+    lts__t_sectors_op_read.sum                                 sector      9310515
+    lts__t_sectors_op_red.sum                                  sector     31263744
+    lts__t_sectors_op_write.sum                                sector      1976187
+    lts__throughput.avg.pct_of_peak_sustained_elapsed               %        61.06
+    sm__warps_active.avg.pct_of_peak_sustained_active               %        18.36
+
+=== varlen_b3_t1792_h2_d512_causal_fp8 ===
+--- 旧 k=4 ---
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 6 passes
+    gpu__time_duration.sum                                         us       182.91
+    launch__registers_per_thread                      register/thread          249
+    lts__t_sectors_op_read.sum                                 sector      1571297
+    lts__t_sectors_op_red.sum                                  sector      8945664
+    lts__t_sectors_op_write.sum                                sector         2950
+    lts__throughput.avg.pct_of_peak_sustained_elapsed               %        50.16
+    sm__warps_active.avg.pct_of_peak_sustained_active               %        12.49
+--- 新 auto(k=8) ---
+==PROF== Profiling "fa_bwd_fp8_mma_kernel": 0%....50%....100% - 6 passes
+    gpu__time_duration.sum                                         us       162.98
+    launch__registers_per_thread                      register/thread          249
+    lts__t_sectors_op_read.sum                                 sector      1782438
+    lts__t_sectors_op_red.sum                                  sector      8945664
+    lts__t_sectors_op_write.sum                                sector         3180
+    lts__throughput.avg.pct_of_peak_sustained_elapsed               %        56.54
+    sm__warps_active.avg.pct_of_peak_sustained_active               %        12.48
+=== b5_t3968_h32 k=1 ===
+    gpu__time_duration.sum                                     ms         1.42
+    lts__t_sectors_op_read.sum                             sector     19288710
+    lts__t_sectors_op_red.sum                              sector     73138176
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        53.64
+=== b5_t3968_h32 k=3 ===
+    gpu__time_duration.sum                                     ms         1.28
+    lts__t_sectors_op_read.sum                             sector     23501141
+    lts__t_sectors_op_red.sum                              sector     78987264
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        65.73

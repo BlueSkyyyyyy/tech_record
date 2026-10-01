@@ -11285,3 +11285,82 @@ causal 偏斜下最后几个贵 m 块的尾波），与 O89/O105 同源、**不�
   `src/fp8/fa_bwd_fp8_o106_ncu_b8_t2904_h16_d128.out.txt`、
   `src/fp8/fa_bwd_fp8_o106_ncu_b3_t1792_h2_d512.out.txt`、`src/fp8/fa_bwd_fp8_o106_consistency.out.txt`、
   `src/fp8/fa_bwd_fp8_o106_ci.out.txt`；见 `docs/08` §5.114。
+
+## 129. 第 201 轮：O107——fp8 变长 causal 主 kernel 的 ksplit 重标定（D=128 / D=512）——正结果，默认
+
+### 129.1 动机
+
+O96/O97（定长 full）、O98/O99/O100（变长 full / causal D=256）逐个复核了「按 causal 三角标定、
+却被套用到其它情形」的 ksplit 启发式，但**causal 变长 D=128/D=512 一直沿用 O29 的原始档、从未
+单独测量**（O106 只在这条路上加了 per-head LPT `mrev`，没动 ksplit）。O29 的 D=128 target 是
+「`maxlen≥2048` → 固定 8192、否则 `max(2048, 4·base_grid)`」，当 `base_grid > target` 时
+`kk = target/base < 1` ⇒ **被欠切到 k=1**；D=512 的 `target = maxlen/2` 同理。O106 的 A/B 里
+b5_t3968（H32·kv8）与 b8_t2904（H16）默认就是 `ksplit=1/2`，是明显的并行度不足。
+
+### 129.2 改动（纯 host、device 一行未改、单/两文件同源）
+
+7 个 dumped fp8 causal 变长 shape 全扫 `k∈[1,16]`（同 binary，150–250 iters，3× 复测）：
+
+| case | base_grid | 旧 k | 实测最优 k | 旧 total | 新 total | 收益 |
+|---|---|---|---|---|---|---|
+| b1_t512 D=128 (H16) | 128 | 16 | 16 | 0.0904 | 0.0901 | 1.00× |
+| b4_t3840 D=128 (H16) | 2048 | 4 | 4 | 0.8487 | 0.8526 | 中性 |
+| b4_t4096 D=128 (H16) | 1024 | 4 | 3 | 0.7160 | 0.7156 | 1.00× |
+| **b5_t3968 D=128 (H32·kv8)** | 5120 | **1** | **3** | 1.6929 | **1.5364** | **1.102×** |
+| **b8_t2904 D=128 (H16)** | 4096 | **2** | **3** | 0.7335 | **0.6909** | **1.062×** |
+| **b3_t1792 D=512 (H2)** | 96 | **4** | **8** | 0.2354 | **0.2115** | **1.113×** |
+| **b1_t512 D=512 (H2)** | 16 | **16** | **8** | 0.0760 | **0.0717** | **1.060×** |
+
+⇒ 规则（mirror O98/O100 的「只抬下限」与 O97 的波对齐）：
+
+- **D=128 causal 变长**：`auto_k = max(auto_k, 3)`——大 H·B（`base_grid > 8192`）时 O29 欠切，
+  抬下限到 3（对齐 O100 full 的 k=3）；小 base（b1）沿用 O29 的 k=16 不动。**不按 `nblk` 封顶**
+  （与 O99 的 D=256 不同：b1 D128 的 k=16 > nblk=8 实测仍最优，小 grid 靠加 k 填满波）。
+- **D=512 causal 变长**：`target` 从 O29 的 `maxlen/2` 提到 **`maxlen`**（翻倍），
+  `k = pow2floor(min(8, maxlen/base_grid))`、下限 2 ⇒ b3/b1 均取 8（1 CTA/SM 下长 K 循环
+  偏好更多并发）。
+
+`--ksplit=K` 显式给出时不覆盖。只改「哪个 CTA 算哪段 K」⇒ dK/dV/dQ 仍是可交换的跨 CTA
+`atomicAdd`。
+
+### 129.3 性能（同 binary A/B，iters=250，3× 复测）
+
+见 §129.2 表：**D=128 b5_t3968 1.102×、b8_t2904 1.062×；D=512 b3_t1792 1.113×、
+b1_t512 1.060×**；b1/b4（auto 未变）中性。这 4 个是 O106 之后**最大的一组** scheduler 收益
+（O106 同 shape 的 mrev 只有 1.0–1.08×）。
+
+### 129.4 ncu（main，`--launch-skip 1 --launch-count 1`）
+
+- **b5_t3968 D=128**：Duration **1.42→1.28ms（1.109×）**、`op_read` 19.29M→**23.50M**（Q/dO
+  重读随 k 上升，符合预期）、`op_red` 73.14M→78.99M、L2 利用率 **53.6%→65.7%**；
+- **b8_t2904 D=128**：Duration **589.5→546.1µs（1.079×）**、`op_read` 8.48M→9.31M、
+  `op_red` 30.29M→31.26M、L2 **54.4%→61.1%**；
+- **b3_t1792 D=512**：Duration **182.9→163.0µs（1.122×）**、**`op_red` 8,945,664 一字不变**、
+  `op_read` 1.57M→1.78M、L2 **50.2%→56.5%**；regs 168 / 249 不变。
+
+⇒ 机制 = **加 ksplit 换并行度/占用率**：`op_read` 上升（Q/dO 重读）、`op_red` 基本不动
+（D512 完全不变；D128 的 dQ 跨 part 原子随 k 略升），但 per-CTA K 循环变短、波被填满 ⇒ Duration
+降。**不是** O89/O105/O106 的「纯尾波」机制，而是「欠切的 ksplit 补到并行度足够」。
+
+### 129.5 数值 / 回归（护栏）
+
+- `ours vs fp32 ref` 的 `max_abs` 与新/旧 ksplit **逐位相同**（只改 atomic 次序）：
+  b5 3.094/5.567/6.203e-1、b8 3.136/3.584/4.030e-1、b3 D512 3.404/3.436/3.508e-1；relL2 与新档
+  逐位同量级（D=128 dq/dk/dv 8.11–8.25 / 8.21–8.37 / 6.20–6.38%；D=512 8.42/8.48/6.47%），
+  **全部在护栏内**（dq ≤8.5、dk ≤8.6、dv ≤6.8）。
+- 单/两文件一致性 gate（`--dtype fp8 --hopper --consistency`，45 case）：**worst 5.722e-06 OK**
+  （ours_hp vs ours_sf_hp 四列逐位一致）；**`--check docs/04` OK（214 行）**；定长（D=128 kvtma /
+  D=256 hswap256 / D=512 mrev / MLA）与 full 路径逐字不变。
+- fp8 变长 causal 无 FA3/TE 外部列（FA3 不支持 fp8、TE fp8 变长不可用），只对 fp32 ref。
+
+### 129.6 结论 / 下一步
+
+- **判决：正结果、默认开启**。causal 变长的 O29 ksplit 档是 fp8 变长上最后一块未测量的并行度
+  启发式；本轮补齐 **D=128（下限 3）/ D=512（target=maxlen, cap 8）**。
+- 仍**不是**降 L2 `red` 主体墙（dK/dV-over-KV 的工作划分墙仍无软件解，见「阻塞」）；它是在
+  「ksplit 可调」这条**已存在**的路上把欠切补足，代价是 Q/dO 重读上升、收益来自并行度。
+- **下一步候选**：① **换卡**（更大 smem/寄存器，解 `op_red` 主体墙）；② 把同一「causal 变长
+  D=128/D=512 ksplit 复核」推广到 **fp16/bf16**（其 varlen 主 kernel 只有 O43 的小 grid ksplit，
+  没有 D=128/512 的 causal 变长档）；③ 余下覆盖型 backlog（`D=256` 变长支持、MLA 降 smem）。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o107_ab.out.txt`、`src/fp8/fa_bwd_fp8_o107_ncu.out.txt`、
+  `src/fp8/fa_bwd_fp8_o107_ci.out.txt`；见 `docs/08` §5.115。
