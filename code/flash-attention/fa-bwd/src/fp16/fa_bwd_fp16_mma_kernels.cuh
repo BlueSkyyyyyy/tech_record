@@ -1658,7 +1658,11 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
                          float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                          float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                          int causal, int sched) {
-  static_assert(HD == 128, "wgmma 主 kernel 目前只做 HD=128");
+  // O131：放开到 HD=128/256。SW128 tile/描述符/搬运 helper 本就按 `(HD/64)` 参数化，
+  //   唯一的 HD 硬编码是 GEMM3/4/5 与 dQ 累加器的「N=64 半」遍数 `nh<2` —— 泛化为
+  //   `NH=HD/64`（每遍覆盖 1 个 K-major atom = 64 个 head_dim 列，SW128 偏移 +nh*1024）。
+  static_assert(HD == 128 || HD == 256, "wgmma 主 kernel 只做 HD=128/256");
+  constexpr int NH = HD / 64;                          // head_dim 的 64 列组数（128→2、256→4）
   constexpr int BM = 64, BN = 64;
   constexpr int TILE  = (BM / 8) * (HD / 64) * 1024;   // Q/dO SW128 tile（16KB）
   constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;   // K/V SW128 tile（16KB）
@@ -1714,9 +1718,9 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
   }
 
   // dQ 寄存器累加（每个 Q 块唯一 CTA、无跨 CTA 原子）：dqacc[nh][j][q] ↔ wgmma 累加器布局。
-  float dqacc[2][8][4];
+  float dqacc[NH][8][4];
 #pragma unroll
-  for (int nh = 0; nh < 2; ++nh)
+  for (int nh = 0; nh < NH; ++nh)
 #pragma unroll
     for (int j = 0; j < 8; ++j)
 #pragma unroll
@@ -1779,10 +1783,11 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
 
     // ---- O9b-2：(3) dV=Pᵀ·dO、(4) dK=scale·dSᵀ·Q、(5) dQ+=scale·dS·K 全上 wgmma ----
     // 三条 GEMM 的 A/B 均为「K-major 存储 + MN-major 描述符（转置读）」，唯一例外是 (5) 的
-    // A=dS 用 K-major。按 N 半（nh=0/1）分两遍，每遍三条一起发、统一 wait0。
+    // A=dS 用 K-major。按 64 列组（NH=HD/64 遍，每遍 1 个 SW128 atom）分遍，每遍三条
+    // 一起发、统一 wait0。
     wgmma_fence();
 #pragma unroll
-    for (int nh = 0; nh < 2; ++nh) {
+    for (int nh = 0; nh < NH; ++nh) {
       const uint32_t dOn = dOa + (uint32_t)(nh * 1024);
       const uint32_t Qn  = Qa  + (uint32_t)(nh * 1024);
       const uint32_t Kn  = smem_u32(Kt) + (uint32_t)(nh * 1024);
@@ -1839,7 +1844,7 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
   }
 
 #pragma unroll
-  for (int nh = 0; nh < 2; ++nh)
+  for (int nh = 0; nh < NH; ++nh)
 #pragma unroll
     for (int j = 0; j < 8; ++j)
 #pragma unroll

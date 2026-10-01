@@ -5041,3 +5041,85 @@ scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
 （含 FA/TE 对比）。见 `docs/08` §5.136、`docs/04` 表。
 **下一步**：`D=256` 的 main 仍是 mma/1-CTA-per-SM，若要走 wgmma+TMA（对标 fp8 O84 的 2 CTA/SM）
 需新写 HD=256 的 wgmma 几何（同 `D=512` MLA 的资源墙），留 backlog。
+
+## 28. O131（第 225 轮，**正结果，默认**）：`head_dim=256` 主 kernel 切 BM=64 的 wgmma（1.6–1.7× 端到端）
+
+### 28.1 动机：O128 的唯一遗留 = D=256 仍走通用 mma（LDSM 墙）
+
+O128 补齐了 `head_dim=256` 的能力，但主 kernel 走的是 `fa_bwd_fp16_mma_kernel<256,64,32,1>`
+（通用 `mma.sync` + `ldmatrix`，`NDT=HD/128=2` 两遍）。ncu 显示它的墙是 **L1TEX/LDSM**
+（S1024H8：L1/TEX 48.46%、头号 stall = L1TEX scoreboard 41.3%、Compute 仅 6.33%）——不是
+L2/DRAM/算力。这正是 `wgmma`（操作数直读 smem 描述符、无 `ldmatrix`）能打的方向。
+O128 留的结论是「需新写 HD=256 的 wgmma 几何（同 D=512 的资源墙）」。
+
+### 28.2 关键发现：BM=64 的 wgmma kernel 本就按 `HD/64` 参数化
+
+复核 `fa_bwd_fp16_wgmma_kernel`（O9b，BM=64/BN=64/128 线程）发现：SW128 tile 尺寸
+（`TILE=(BM/8)*(HD/64)*1024`）、搬运 helper（`qdo_issue_async_sw<HD,BM>` 等）、描述符
+（`sbo=(HD/64)*1024`、k16 步进）**全部按 `HD/64` 参数化**，GEMM1/2 的 K 归约维经
+`wgmma_mn64_issue(Qs,Kt,HD,sacc)` 的 `Kd/16` 循环天然支持 `K=256`。唯一的 HD 硬编码是
+**GEMM3/4/5 与 dQ 累加器的「64 列组」遍数写死 `nh<2`**（HD=128 有 2 个 SW128 atom）。
+
+### 28.3 改动（单/两文件 device 逐字一致；`sync_onefile_device.py` identical=True）
+
+- `static_assert(HD==128)` → `HD==128||256`；新增 `constexpr int NH = HD/64`；
+- `dqacc[2][8][4]` → `dqacc[NH][8][4]`，初始化/累加/末尾写回的 `nh<2` → `nh<NH`；
+- GEMM3/4/5 的 `nh<2` → `nh<NH`（每遍 1 个 SW128 atom，偏移 `+nh*1024`，`c=nh*64+...` 已通用）；
+- host（`*_mma_main.cu` + `*_mma_onefile.cu`）：D==256 默认派发 `launch_bwd_wgmma<256>`（BM=64、
+  cp.async 载入、非 TMA），`--d256wgm=0` 退回 O128 的 mma 做同 binary A/B；打印
+  `[O131] D=256 main backend`。**D=128/D=512 路径一行未改**（派发门 `D==256`）。
+
+smem = `1024 + TILE*2 + KTILE*3 + 2*BM*BN*2` = **181,248B**（HD=256）⇒ **1 CTA/SM**
+（fp16 是 2 字节，Q/K/V tile 翻倍；不像 fp8 O84 能进 2 CTA/SM）。收益来自**去 LDSM + 指令路径**。
+
+### 28.4 数值（`ours vs fp32 ref`，fp16；单/两文件逐位一致，与 O128 记录**完全一致**）
+
+| case | dq max_abs | dk max_abs | dv max_abs |
+|---|---|---|---|
+| S1024 H8 causal | 1.657e-3 | 1.405e-3 | 1.447e-3 |
+| S2048 H8 causal | 2.023e-3 | 1.481e-3 | 1.614e-3 |
+| S1024 H16 kv4 causal | 2.480e-3 | 2.816e-3 | 1.976e-3 |
+| S1024 H8 full | 1.850e-4 | 2.775e-4 | 2.109e-4 |
+
+与 mma 版同 dtype 噪声；一致性 gate `fp16 worst 9.766e-4 / bf16 1.953e-3`（容差 0.016/0.032）OK。
+
+### 28.5 性能（CUDA event，同 binary A/B；main / total，iters=50）
+
+| case（fp16, D=256） | mma main | wgmma main | main 加速 | total 加速 |
+|---|---|---|---|---|
+| S1024 H8 causal | 0.384 ms | **0.214 ms** | **1.79×** | 1.63× |
+| S2048 H8 causal | 1.208 ms | **0.681 ms** | **1.77×** | 1.66× |
+| S1024 H8 full | 0.382 ms | **0.214 ms** | **1.78×** | 1.66× |
+| S1024 H16 kv4 causal | 0.666 ms | **0.362 ms** | **1.84×** | 1.71× |
+
+bf16 逐项同量级（S1024H8 main 0.385→0.212 = 1.82×，S2048 1.206→0.680 = 1.77×，GQA
+0.673→0.361 = 1.86×）。相对 FA2/TE 差距由 ~5.2–6.3× 压到 ~3.1–3.8×。
+
+### 28.6 ncu（main，S2048 H8 causal，同 session A/B）
+
+| 指标 | mma（O128） | wgmma（O131） | 变化 |
+|---|---|---|---|
+| Duration | 1.21 ms | **0.688 ms** | **1.76×** |
+| shared wavefronts（`l1tex__data_pipe_lsu_wavefronts_mem_shared`） | 34.43 M | **13.13 M** | **2.62×↓** |
+| `smsp__inst_executed` | 88.47 M | **71.98 M** | −18.6% |
+| L1/TEX | 32.08% | **24.92%** | ↓ |
+| L2 | 36.07% | 44.41% | ↑（更快 ⇒ 单位时间吞吐更高） |
+| DRAM / Compute / warps | 2.95% / 7.63% / 6.24% | 4.46% / 10.99% / **6.25%** | 1 CTA/SM 不变 |
+
+⇒ **O128 的 L1TEX/LDSM 墙被 `wgmma` 直读 SW128 描述符打掉**（smem 波前 −2.62×、指令 −19%）；
+仍是 1 CTA/SM（fp16 2 字节的 smem 墙），故没吃到 fp8 O84 的 2 CTA/SM 红利，但 LDSM 一省即
+1.6–1.7× 端到端。
+
+### 28.7 复现 / 原始输出
+
+```bash
+# wgmma（默认）vs mma（--d256wgm=0），同 binary A/B
+ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
+  scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
+  --dir=/home/xieminglin/proj/output/fa-bwd/b1_s2048_h8_d256_causal_fp16 --iters=50
+docker exec kernel_lab .../fa_bwd_fp16_mma_main.out --dir=... --iters=50 --d256wgm=0
+```
+
+原始输出：`src/fp16/fa_bwd_fp16_o131_d256_wgmma_ab.out.txt`（4 case × wgmma/mma）、
+`src/fp16/fa_bwd_fp16_o131_ncu_{wgmma,mma}_d256.out.txt`（ncu）；
+bf16 `src/bf16/fa_bwd_bf16_o131_d256_wgmma_ab.out.txt`。见 `docs/01b` §6be、`docs/08` §5.139。

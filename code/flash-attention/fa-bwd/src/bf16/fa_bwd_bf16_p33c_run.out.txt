@@ -7,9 +7,10 @@ B=1 S=1024 H=16 Hkv=4 D=256 causal=1 scale=0.062500
 [O38] lse k-split = 4 (auto)
 [O23] main backend = mma | lse = mma (D=256 S=1024)
 [O43] wgmma2 k-split = 1
+[O131] D=256 main backend = wgmma(BN=64)
 [O65] prologue fusion (zero+delta) = 1
-[timing] total(3 kernels) 0.7660 ms  22.43 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0671 ms | main 0.6834 ms | convert 0.0154 ms
+[timing] total(3 kernels) 0.4475 ms  38.39 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0672 ms | main 0.3578 ms | convert 0.0224 ms
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h16_d256_kv4_causal_bf16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.300e-02  max_rel=2.274e+00
@@ -21,24 +22,25 @@ B=1 S=1024 H=16 Hkv=4 D=256 causal=1 scale=0.062500
   te_dq     vs ref: max_abs=1.190e-02  max_rel=2.081e+00
   te_dk     vs ref: max_abs=1.800e-02  max_rel=2.087e+00
   te_dv     vs ref: max_abs=3.275e-02  max_rel=2.328e+00
-fa_bwd_bf16_mma_kernels.cuh(2383): warning #177-D: variable "NTH" was declared but never referenced
+fa_bwd_bf16_mma_kernels.cuh(2386): warning #177-D: variable "NTH" was declared but never referenced
     constexpr int NTH = 256;
                   ^
-          detected during instantiation of "void launch_bwd_wgmma2b_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 1643 of fa_bwd_bf16_mma_main.cu
+          detected during instantiation of "void launch_bwd_wgmma2b_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 1656 of fa_bwd_bf16_mma_main.cu
 
 Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
 
-fa_bwd_bf16_mma_kernels.cuh(2660): warning #177-D: variable "NTH" was declared but never referenced
+fa_bwd_bf16_mma_kernels.cuh(2663): warning #177-D: variable "NTH" was declared but never referenced
     constexpr int NTH = 256;
                   ^
-          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 1670 of fa_bwd_bf16_mma_main.cu
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 1683 of fa_bwd_bf16_mma_main.cu
 
-fa_bwd_bf16_mma_kernels.cuh(2662): warning #177-D: variable "NG" was declared but never referenced
+fa_bwd_bf16_mma_kernels.cuh(2665): warning #177-D: variable "NG" was declared but never referenced
     constexpr int NG = BN / 8;
                   ^
-          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 1670 of fa_bwd_bf16_mma_main.cu
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 1683 of fa_bwd_bf16_mma_main.cu
 
-ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 968728
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 976031
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi256EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 920409
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h16_d256_kv4_causal_bf16/ours_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=1.300e-02  max_rel=2.274e+00
   | dk   vs ref: max_abs=1.843e-02  max_rel=2.463e+00
@@ -58,9 +60,10 @@ B=1 S=1024 H=16 Hkv=4 D=256 causal=1 scale=0.062500
 [O38] lse k-split = 4 (auto)
 [O23] main backend = mma | lse = mma (D=256 S=1024)
 [O43] wgmma2 k-split = 1
+[O131] D=256 main backend = wgmma(BN=64)
 [O65] prologue fusion (zero+delta) = 1
-[timing] total(3 kernels) 0.7628 ms  22.52 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0673 ms | main 0.6733 ms | convert 0.0222 ms
+[timing] total(3 kernels) 0.4460 ms  38.52 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0672 ms | main 0.3613 ms | convert 0.0176 ms
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h16_d256_kv4_causal_bf16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.300e-02  max_rel=2.274e+00
@@ -72,24 +75,25 @@ B=1 S=1024 H=16 Hkv=4 D=256 causal=1 scale=0.062500
   te_dq     vs ref: max_abs=1.190e-02  max_rel=2.081e+00
   te_dk     vs ref: max_abs=1.800e-02  max_rel=2.087e+00
   te_dv     vs ref: max_abs=3.275e-02  max_rel=2.328e+00
-fa_bwd_bf16_mma_onefile.cu(2375): warning #177-D: variable "NTH" was declared but never referenced
+fa_bwd_bf16_mma_onefile.cu(2378): warning #177-D: variable "NTH" was declared but never referenced
     constexpr int NTH = 256;
                   ^
-          detected during instantiation of "void launch_bwd_wgmma2b_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 5064
+          detected during instantiation of "void launch_bwd_wgmma2b_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 5080
 
 Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
 
-fa_bwd_bf16_mma_onefile.cu(2652): warning #177-D: variable "NTH" was declared but never referenced
+fa_bwd_bf16_mma_onefile.cu(2655): warning #177-D: variable "NTH" was declared but never referenced
     constexpr int NTH = 256;
                   ^
-          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 5091
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 5107
 
-fa_bwd_bf16_mma_onefile.cu(2654): warning #177-D: variable "NG" was declared but never referenced
+fa_bwd_bf16_mma_onefile.cu(2657): warning #177-D: variable "NG" was declared but never referenced
     constexpr int NG = BN / 8;
                   ^
-          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 5091
+          detected during instantiation of "void launch_bwd_wgmma2_tma<HD,SPLIT>(dim3, CUtensorMap, CUtensorMap, CUtensorMap, CUtensorMap, const float *, const float *, float *, float *, float *, int, int, int, float, int, bf16 *) [with HD=128, SPLIT=true]" at line 5107
 
-ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 968728
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi128EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 976031
+ptxas info    : (C7519) Potential Performance Loss: wgmma.mma_async instructions are serialized due to program dependence on compiler-inserted WG.AR in divergent path in the function '_Z24fa_bwd_bf16_wgmma_kernelILi256EEvPK13__nv_bfloat16S2_S2_S2_PKfS4_PfS5_S5_iiifii' in line 920409
   | [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h16_d256_kv4_causal_bf16/ours_sf_{dq,dk,dv}.npy
   | dq   vs ref: max_abs=1.300e-02  max_rel=2.274e+00
   | dk   vs ref: max_abs=1.843e-02  max_rel=2.463e+00
@@ -109,9 +113,10 @@ B=1 S=1024 H=8 Hkv=8 D=256 causal=1 scale=0.062500
 [O38] lse k-split = 8 (auto)
 [O23] main backend = mma | lse = mma (D=256 S=1024)
 [O43] wgmma2 k-split = 1
+[O131] D=256 main backend = wgmma(BN=64)
 [O65] prologue fusion (zero+delta) = 1
-[timing] total(3 kernels) 0.4518 ms  19.01 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0494 ms | main 0.3891 ms | convert 0.0133 ms
+[timing] total(3 kernels) 0.2766 ms  31.05 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0500 ms | main 0.2126 ms | convert 0.0140 ms
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h8_d256_causal_bf16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.039e-02  max_rel=2.075e+00
@@ -142,9 +147,10 @@ B=1 S=1024 H=8 Hkv=8 D=256 causal=1 scale=0.062500
 [O38] lse k-split = 8 (auto)
 [O23] main backend = mma | lse = mma (D=256 S=1024)
 [O43] wgmma2 k-split = 1
+[O131] D=256 main backend = wgmma(BN=64)
 [O65] prologue fusion (zero+delta) = 1
-[timing] total(3 kernels) 0.4499 ms  19.09 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0498 ms | main 0.3924 ms | convert 0.0076 ms
+[timing] total(3 kernels) 0.2770 ms  31.02 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0498 ms | main 0.2132 ms | convert 0.0139 ms
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h8_d256_causal_bf16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.039e-02  max_rel=2.075e+00
@@ -175,9 +181,10 @@ B=1 S=1024 H=8 Hkv=8 D=256 causal=0 scale=0.062500
 [O38] lse k-split = 8 (auto)
 [O23] main backend = mma | lse = mma (D=256 S=1024)
 [O43] wgmma2 k-split = 1
+[O131] D=256 main backend = wgmma(BN=64)
 [O65] prologue fusion (zero+delta) = 1
-[timing] total(3 kernels) 0.4909 ms  17.50 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0691 ms | main 0.3949 ms | convert 0.0268 ms
+[timing] total(3 kernels) 0.3086 ms  27.83 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0693 ms | main 0.2212 ms | convert 0.0182 ms
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h8_d256_full_bf16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.491e-03  max_rel=3.490e-01
@@ -208,9 +215,10 @@ B=1 S=1024 H=8 Hkv=8 D=256 causal=0 scale=0.062500
 [O38] lse k-split = 8 (auto)
 [O23] main backend = mma | lse = mma (D=256 S=1024)
 [O43] wgmma2 k-split = 1
+[O131] D=256 main backend = wgmma(BN=64)
 [O65] prologue fusion (zero+delta) = 1
-[timing] total(3 kernels) 0.4903 ms  17.52 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.0689 ms | main 0.4017 ms | convert 0.0198 ms
+[timing] total(3 kernels) 0.3064 ms  28.04 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0694 ms | main 0.2215 ms | convert 0.0155 ms
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s1024_h8_d256_full_bf16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=1.491e-03  max_rel=3.490e-01
@@ -241,9 +249,10 @@ B=1 S=2048 H=8 Hkv=8 D=256 causal=1 scale=0.062500
 [O38] lse k-split = 4 (auto)
 [O23] main backend = mma | lse = mma (D=256 S=2048)
 [O43] wgmma2 k-split = 1
+[O131] D=256 main backend = wgmma(BN=64)
 [O65] prologue fusion (zero+delta) = 1
-[timing] total(3 kernels) 1.3473 ms  25.50 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.1034 ms | main 1.2129 ms | convert 0.0309 ms
+[timing] total(3 kernels) 0.8213 ms  41.84 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1039 ms | main 0.6860 ms | convert 0.0313 ms
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s2048_h8_d256_causal_bf16/ours_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=7.978e-03  max_rel=1.553e+00
@@ -274,9 +283,10 @@ B=1 S=2048 H=8 Hkv=8 D=256 causal=1 scale=0.062500
 [O38] lse k-split = 4 (auto)
 [O23] main backend = mma | lse = mma (D=256 S=2048)
 [O43] wgmma2 k-split = 1
+[O131] D=256 main backend = wgmma(BN=64)
 [O65] prologue fusion (zero+delta) = 1
-[timing] total(3 kernels) 1.3497 ms  25.46 TFLOPS (bwd FLOPs=4BS^2HD)
-[timing] preprocess 0.1035 ms | main 1.2231 ms | convert 0.0231 ms
+[timing] total(3 kernels) 0.8189 ms  41.96 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1049 ms | main 0.6803 ms | convert 0.0337 ms
 [dump] ours -> /home/xieminglin/proj/output/fa-bwd/b1_s2048_h8_d256_causal_bf16/ours_sf_{dq,dk,dv}.npy
 [compare] ours vs ref (O from ref_o.npy)
   dq   vs ref: max_abs=7.978e-03  max_rel=1.553e+00

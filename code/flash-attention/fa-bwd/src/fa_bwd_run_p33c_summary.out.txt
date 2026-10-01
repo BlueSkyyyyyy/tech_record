@@ -1,20 +1,11 @@
 === fa_bwd_run.py (P3-3c) 一键跑 ours + 汇总 ===
-cases=8 impls=['twofile', 'singlefile'] iters=5
+cases=4 impls=['twofile', 'singlefile'] iters=5
 [run] bf16 twofile b1_s1024_h16_d256_kv4_causal_bf16
 [run] bf16 singlefile b1_s1024_h16_d256_kv4_causal_bf16
-[run] fp16 twofile b1_s1024_h16_d256_kv4_causal_fp16
-[run] fp16 singlefile b1_s1024_h16_d256_kv4_causal_fp16
 [run] bf16 twofile b1_s1024_h8_d256_causal_bf16
 [run] bf16 singlefile b1_s1024_h8_d256_causal_bf16
-[run] fp16 twofile b1_s1024_h8_d256_causal_fp16
-[run] fp16 singlefile b1_s1024_h8_d256_causal_fp16
 [run] bf16 twofile b1_s1024_h8_d256_full_bf16
 [run] bf16 singlefile b1_s1024_h8_d256_full_bf16
-[run] fp16 twofile b1_s1024_h8_d256_full_fp16
-[run] fp16 singlefile b1_s1024_h8_d256_full_fp16
 [run] bf16 twofile b1_s2048_h8_d256_causal_bf16
 [run] bf16 singlefile b1_s2048_h8_d256_causal_bf16
-[run] fp16 twofile b1_s2048_h8_d256_causal_fp16
-[run] fp16 singlefile b1_s2048_h8_d256_causal_fp16
 [written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/bf16/fa_bwd_bf16_p33c_run.out.txt
-[written] /ssd/home/xieminglin/proj/tech_record/code/flash-attention/fa-bwd/src/fp16/fa_bwd_fp16_p33c_run.out.txt

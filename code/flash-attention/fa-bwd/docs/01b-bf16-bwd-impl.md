@@ -2529,3 +2529,22 @@ O128（`docs/01` §27）的 bf16 逐字 dtype 参数化：**把 fp16 的 host �
 与 fp16 逐项同量级（同通用 mma 壳）。ncu 与 fp16 同构（`fa_bwd_bf16_mma_kernel<256,64,32,1>`，
 1 CTA/SM、低 occupancy + 全局延迟 bound）。见 `docs/01` §27、`docs/08` §5.136；
 原始输出 `src/bf16/fa_bwd_bf16_o128_*.out.txt`、`src/fa_bwd_compare_p33c_summary.out.txt`。
+
+## 6be. O131-bf16（第 225 轮，**正结果，默认**）：`head_dim=256` 主 kernel 切 BM=64 的 wgmma
+
+落实 O128-bf16 的遗留（与 fp16 O131 逐字 dtype 同构）。改动只在 device 的
+`fa_bwd_bf16_wgmma_kernel`（`static_assert` 放开 256、`NH=HD/64` 泛化 GEMM3/4/5 与 dQ 列遍数）
+与两个 host 的 D==256 派发（默认 `launch_bwd_wgmma<256>`，`--d256wgm=0` 退回 O128 mma 做 A/B）。
+单/两文件 device `sync_onefile_device.py` identical=True；D=128/512 一行未改。
+
+**数值**（`ours vs fp32 ref`，bf16；与 O128 记录逐位一致、单/两文件一致）：
+S1024H8 causal 1.039e-2/1.213e-2/1.460e-2、S2048 7.978e-3/1.114e-2/1.681e-2、
+GQA kv4 1.300e-2/1.843e-2/3.075e-2、full 1.491e-3/1.597e-3/2.454e-3。
+
+**性能**（CUDA event total，同 binary A/B，iters=50）：S1024H8 causal 0.4631→**0.2772 ms（1.67×）**、
+S2048H8 1.3557→**0.8198（1.65×）**、full 0.4555→**0.2778（1.64×）**、GQA kv4 0.7637→**0.4476（1.71×）**；
+main S1024H8 0.385→0.212（**1.82×**）、S2048 1.206→0.680（**1.77×**）、GQA 0.673→0.361（**1.86×**）。
+
+**ncu**：与 fp16 O131 同构（wgmma 直读 SW128，smem 波前与指令数同幅下降；fp16 2 字节 ⇒ 仍
+1 CTA/SM，非 fp8 O84 的 2 CTA/SM，但去 LDSM 即 1.6–1.7×）。见 `docs/01` §28、`docs/08` §5.139；
+原始输出 `src/bf16/fa_bwd_bf16_o131_d256_wgmma_ab.out.txt`。

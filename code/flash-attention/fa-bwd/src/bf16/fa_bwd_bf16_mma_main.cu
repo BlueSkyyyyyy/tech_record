@@ -1094,6 +1094,8 @@ int main(int argc, char** argv) {
   int lse_tma = -1;
   // O38（bf16 版）：LSE 的 K 维 split（0=auto，1=关；>1=切片数）。仅 TMA/causal 路径生效。
   int lse_split = 0;
+  // O131：head_dim=256 的主 kernel 是否走 BM=64 的 wgmma 版（仅 FA_WGMMA 构建、D==256 生效）。
+  int d256wgm_opt = -1;
   // O9b：主 kernel 是否用 wgmma（仅 FA_WGMMA 构建、D==128 且 sel=(64,64) 时生效）。
   int wgmma_sel = 0;
   // O17：2 warpgroup（BM=128，跨 wg 归约）wgmma 主 kernel（仅 FA_WGMMA 构建、D==128）。
@@ -1164,6 +1166,8 @@ int main(int argc, char** argv) {
     else if (a.rfind("--lsetmavarlen=", 0) == 0) g_lse_tma_varlen = atoi(a.c_str() + 15);
     else if (a == "--lsetmavarlen") g_lse_tma_varlen = 1;
     else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
+    else if (a.rfind("--d256wgm=", 0) == 0) d256wgm_opt = atoi(a.c_str() + 10);
+    else if (a == "--d256wgm") d256wgm_opt = 1;
     else if (a == "--wgmma") wgmma_sel = 1;
     else if (a.rfind("--wg2=", 0) == 0) { wg2_sel = atoi(a.c_str() + 6); wg_forced = true; }
     else if (a.rfind("--wg2split=", 0) == 0) wg2split_sel = atoi(a.c_str() + 11);
@@ -1629,10 +1633,19 @@ int main(int argc, char** argv) {
          D, S, ((wg2bn_sel || wg2_sel) && maintma_sel) ? " +maintma" : "",
          (wg2_ksplit_eff > 1) ? " +ksplit" : "");
   printf("[O43] wgmma2 k-split = %d\n", wg2_ksplit_eff);
+  if (D == 256)
+    printf("[O131] D=256 main backend = %s\n", d256wgm_opt != 0 ? "wgmma(BN=64)" : "mma");
   printf("[O65] prologue fusion (zero+delta) = %d\n", (int)(zfuse_sel && delta_warp_sel));
   bool dq_direct = false;
   auto run_main = [&]() {
 #ifdef FA_WGMMA
+    // O131：head_dim=256 主 kernel 走 BM=64/BN=64 wgmma 版（见 fp16 两文件版同处注释）。
+    if (D == 256 && d256wgm_opt != 0) {
+      dim3 g((S + 63) / 64, H, B);
+      launch_bwd_wgmma<256>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                            d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      return;
+    }
     if (wg2bn_sel && D == 128) {
       dim3 g((S + 127) / 128, H, B);
       dq_direct = dq_direct_sel;

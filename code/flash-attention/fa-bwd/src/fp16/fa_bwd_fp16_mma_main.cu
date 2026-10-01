@@ -1216,6 +1216,9 @@ int main(int argc, char** argv) {
   int lse_tma = -1;
   // O38（fp16 版）：LSE 的 K 维 split（0=auto，1=关；>1=切片数）。仅 TMA/causal 路径生效。
   int lse_split = 0;
+  // O131：head_dim=256 的主 kernel 是否走 BM=64 的 wgmma 版（仅 FA_WGMMA 构建、D==256 生效）。
+  //   -1=自动（默认开），0=`--d256wgm=0` 退回 O128 的通用 mma（A/B）。
+  int d256wgm_opt = -1;
   // O9b：主 kernel 是否用 wgmma（仅 FA_WGMMA 构建、D==128 且 sel=(64,64) 时生效）。
   int wgmma_sel = 0;
   // O16：wgmma 主 kernel 是否用「分段 wait_group」重叠 epilogue（-1=自动/开，0=关，1=开）。
@@ -1311,6 +1314,8 @@ int main(int argc, char** argv) {
     else if (a == "--lsetmavarlen") g_lse_tma_varlen = 1;
     else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
     else if (a == "--wgmma") wgmma_sel = 1;
+    else if (a.rfind("--d256wgm=", 0) == 0) d256wgm_opt = atoi(a.c_str() + 10);
+    else if (a == "--d256wgm") d256wgm_opt = 1;
     else if (a.rfind("--ow=", 0) == 0) ow_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--wg2=", 0) == 0) { wg2_sel = atoi(a.c_str() + 6); wg_forced = true; }
     else if (a.rfind("--wg2split=", 0) == 0) wg2split_sel = atoi(a.c_str() + 11);
@@ -1816,12 +1821,28 @@ int main(int argc, char** argv) {
          ((wg2bn_sel || wg2_sel) && maintma_sel) ? " +maintma" : "",
          (wg2_ksplit_eff > 1) ? " +ksplit" : "");
   printf("[O43] wgmma2 k-split = %d\n", wg2_ksplit_eff);
+  if (D == 256)
+    printf("[O131] D=256 main backend = %s\n", d256wgm_opt != 0 ? "wgmma(BN=64)" : "mma");
   printf("[O65] prologue fusion (zero+delta) = %d\n", (int)(zfuse_sel && delta_warp_sel));
   // O24：D==128 的 wgmma2/wgmma2b 路径里 dQ 唯一拥有 ⇒ 主 kernel 直接写 fp16 `dq`，
   // `convert_kernel` 跳过 dQ（n_q 传 0）。其它路径（mma/wgmma/wgmma4/MLA）仍写 fp32 dq_acc。
   bool dq_direct = false;
   auto run_main = [&]() {
 #ifdef FA_WGMMA
+    // O131：head_dim=256 的主 kernel 走 BM=64/BN=64 的 wgmma 版（K=HD 的 GEMM1/2 + NH=HD/64 的
+    //   GEMM3/4/5/dQ）。目的是把 O128 通用 mma 路径的 L1TEX/LDSM 墙（ncu L1/TEX 48%、身位 stall
+    //   41%）换成 wgmma 直读 SW128 描述符。smem 181KB ⇒ 1 CTA/SM（与 mma 档同）。`--d256wgm=0`
+    //   退回 mma 做同 binary A/B。D=128 路径一行未改。
+    if (D == 256 && d256wgm_opt != 0) {
+      dim3 g((S + 63) / 64, H, B);
+      if (ow_sel)
+        launch_bwd_wgmma<256, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                    d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      else
+        launch_bwd_wgmma<256, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                     d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      return;
+    }
     if (wg4_sel && D == 128) {
       dim3 g((S + 255) / 256, H, B);
       if (wg4seq_sel)
