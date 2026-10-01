@@ -1,0 +1,6 @@
+# O114 SASS: dK/dV red instruction counts (REDG) baseline vs FA_REDHALF
+===== fp8_rh0.out
+   5056 REDG.E.ADD.F32x2.FTZ.RN.STRONG.GPU
+===== fp8_rh1.out
+   2912 REDG.E.ADD.F32x2.FTZ.RN.STRONG.GPU
+   2144 REDG.E.ADD.F16x2.RN.STRONG.GPU

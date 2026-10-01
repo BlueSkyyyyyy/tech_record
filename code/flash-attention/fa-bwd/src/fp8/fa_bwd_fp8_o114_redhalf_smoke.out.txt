@@ -1,0 +1,11 @@
+smoke: blocks=528 threads=256 NINST=64 cols=131072 rows=134 elems=17.56M
+device: NVIDIA H100 80GB HBM3 sm_90
+[red.f32x2] 0.0250 ms  elems=17.3M  write=0.069 GB  eff=2.77 TB/s
+[red.f16x2(atom)] 0.0244 ms  elems=17.3M  write=0.035 GB  eff=1.42 TB/s
+[red.f16x2(red)] 0.0179 ms  elems=17.3M  write=0.035 GB  eff=1.93 TB/s
+f16(atom)/f32 = 0.978 | f16(red)/f32 = 0.717
+scatter: nrows=2162688 rowstride=64 (每请求 8 行⇒预期 8 扇区/请求，与宽度无关)
+[scatter.f32x2] 0.1456 ms  write=0.069 GB eff=0.48 TB/s
+[scatter.f16x2] 0.1025 ms  write=0.035 GB eff=0.34 TB/s
+scatter f16/f32 time ratio = 0.704 (字节减半但扇区数同⇒时间应≈1.0)
+PASS

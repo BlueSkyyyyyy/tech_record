@@ -198,6 +198,16 @@
 
 ## 阻塞
 
+- **fp8 dK/dV `red` 的「元素宽度收窄（fp32→fp16）」判死（第二百零八轮 O114）。** 既有 red
+  收口（O42/O67/O83/O92/O139）都在**元素宽度恒 fp32** 下证明「与机制/宽度 v2↔v4 无关」，
+  O114 检验正交维度 fp16：冒烟证 PTX `red.global.add.noftz.f16x2` 在**连续地址**下扇区精确
+  减半（3.24M→1.62M、1.34×），但真实 `mma.m16n8` 片段使一次 warp red 请求覆盖 **8 个不同行**
+  ⇒ 固定吃 8 个扇区；fp32 float2（4 lane×8B=32B/行）**恰好填满**扇区（`red` 已=字节/32 最优），
+  fp16 f16x2（4 lane×4B=16B/行）仍占满但只写一半 ⇒ **扇区不减**（真机 `lts op_red`
+  105,381,888→105,381,888 逐位不变、Duration 1.38→1.38ms；行散列冒烟同）。减半需「8 lane/行」
+  或「64-bit fp16 RED」，PTX/`mma` 布局均不提供 ⇒ 与「工作划分」并列，`red` 墙**无软件解**。
+  `-DFA_REDHALF=1` 为 opt-in 探针（两文件定长 D=128/256），默认 0。见 `docs/03` §136。
+
 - **「多 warpgroup / 放大 BM」在本卡 fp8 主 kernel 上判死（第一百八十六轮 O91）。** 把 `wgmma2`
   泛化为 `NWG` 个 warpgroup（`BM=NWG*64`），用 **NWG=3 / BM=192 / 384 线程 / 1 CTA/SM** 实测：
   `red` **114.52M→49.64M（0.43×）**、L2 总搬运 0.56×、L2 利用率 81%→**21%**、**warps 已追平默认
@@ -3292,7 +3302,31 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百零七轮）**：**O113——fp8 full（非 causal）变长 `head_dim=256` 的 ksplit
+> **最新（第二百零八轮）**：**O114——fp8 `dK/dV` 跨 CTA `red` 的元素宽度收窄（fp32→fp16），
+> 负结果/opt-in**。本轮落实「阻塞」里**唯一还没明确排除的正交维度**：既有的 red 收口
+> （O42/O67/O83/O92/O139）都在**元素宽度恒 fp32** 下证明「与归约机制/归约宽度无关」，没人试过
+> **把被归约元素从 fp32 收窄到 fp16**（写入字节减半 ⇒ 若扇区按字节计，`red` 应减半）。
+> **冒烟（`fa_bwd_fp8_redhalf_smoke.cu`，决定性）**：① `atomicAdd(__half2*)` 头实现退化成
+> `ATOM.E.ADD.F16x2`（读改写，更差），必须手写 PTX `red.global.add.noftz.f16x2` 才是纯 RED；
+> ② **连续地址模式** `lts op_red` 3,243,520→**1,621,568（精确减半）**、microbench **1.34×**；
+> ③ **模仿 `mma.m16n8` 片段的行散列模式**（一次 warp 请求覆盖 8 个不同行）扇区
+> **3,244,032→3,244,032 一字不变**。**接线（`-DFA_REDHALF=1`，opt-in、两文件定长 D=128/256）**：
+> `fp8_mma_body` 非 DET/BULKRED/FA_R4 的 dK/dV red 走 `red_addh2`，主机换 fp16 累加缓冲
+> `d_dk_h/d_dv_h` + `redhalf_finalize_kernel`（SASS 生效：`REDG.E.ADD.F16x2` 新增 2144 条）。
+> **真机 ncu（S4096 默认 kvtma main）**：**`lts op_red` 105,381,888→105,381,888 逐位不变**、
+> Duration 1.38→1.38 ms ⇒ **根因** = mma 片段使一次 red 请求固定吃 **8 个扇区**（8 行）；
+> fp32 float2（4 lane×8B=32B/行）**恰好填满**扇区（已最优），fp16 f16x2（4 lane×4B=16B/行）
+> **仍占满但只写一半** ⇒ 扇区不减（要减半需「8 lane/行」或「64-bit fp16 RED」，PTX/`mma`
+> 都不提供）。**精度/性能 A/B（6 shape，D=128/256）**：`max_abs` 变化 ≤0.01（**护栏内**）、
+> total **一律更慢 1.3–20%**（多出的 memset+finalize；main 本体中性）。**判决：负结果、
+> 默认 0（opt-in 探针，不进单文件默认构建）**；「收窄元素宽度」四证关闭，`red` 墙仍只剩
+> 换工作划分（已判死）或换卡。见 `docs/03` §136、`docs/08` §5.122；原始输出
+> `src/fp8/fa_bwd_fp8_o114_{redhalf_smoke,redhalf_smoke_ncu,sass,ab,ncu_ab_s4096}.out.txt`。
+> **下一步候选**：① **换卡**（main 的 L2 `red` 主体墙无软件解）；② causal 变长 ksplit 复核
+> 推广到 **fp16/bf16**；③ MLA 降 smem（实为 regs 249 → 1 CTA/SM 的寄存器墙）；④ 非 main 的
+> `--det`/量化进一步并行化。
+>
+> **（第二百零七轮）**：**O113——fp8 full（非 causal）变长 `head_dim=256` 的 ksplit
 > 重标定，正结果/默认**。落实 O112 留的 fp8 ksplit 复核最后一处缺口：O96–O112 已覆盖
 > full/causal × 定长/变长 × `D=128/256/512`，唯独 **full 变长 `D=256`** 仍沿用 O98 的
 > 「无 dump ⇒ 套 O97 定长公式 `k=8192/base`」。**改动（纯 host、device 一行未改、单/两文件

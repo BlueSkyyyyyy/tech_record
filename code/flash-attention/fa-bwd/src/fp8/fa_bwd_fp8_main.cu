@@ -637,6 +637,12 @@ static int run_varlen(const std::string& dir, bool causal, int iters, bool compa
     fprintf(stderr, "VARLEN 只做 HD=128/256/512；当前 %d\n", D);
     return 1;
   }
+#if FA_REDHALF
+  // O114：`FA_REDHALF` 只接线到定长 D=128/256（`fp8_mma_body`）。varlen 的 acc 直接是 fp32
+  //   输出指针、无 fp16 累加缓冲 ⇒ 此实验开关暂不支持 varlen，显式拒绝以免静默写坏。
+  fprintf(stderr, "FA_REDHALF 暂不支持 varlen（仅定长 D=128/256）\n");
+  return 2;
+#endif
   int maxlen = 0;
   for (int b = 0; b < B; ++b) {
     int L = (int)cu_np.data[b + 1] - (int)cu_np.data[b];
@@ -2193,6 +2199,27 @@ int main(int argc, char** argv) {
   CUDA_CHECK(cudaFree(d_dk_acc)); d_dk_acc = d_dk;
   CUDA_CHECK(cudaFree(d_dv_acc)); d_dv_acc = d_dv;
 
+  // O114（第 208 轮）：`FA_REDHALF` 时 dK/dV 的跨 CTA red 走 fp16（`red.global.add.f16x2`，
+  //   命中 PTX RED；实测扇区未减，为负结果探针），主 kernel 写进 fp16 累加缓冲
+  //   `d_dk_h/d_dv_h`，收尾 `redhalf_finalize`
+  //   读回 fp32 输出（d_dk/d_dv）。dQ 仍 fp32（`d_dq`）；DET/BULKRED/MLA（其它 body）逐字不变。
+  //   `dk_use/dv_use` 是 run_main 实际传的累加指针（REDHALF 时 = fp16 缓冲转 float*）。
+  __half *d_dk_h = nullptr, *d_dv_h = nullptr;
+#if FA_REDHALF
+  CUDA_CHECK(cudaMalloc(&d_dk_h, (size_t)nkv * sizeof(__half)));
+  CUDA_CHECK(cudaMalloc(&d_dv_h, (size_t)nkv * sizeof(__half)));
+  CUDA_CHECK(cudaMemset(d_dk_h, 0, (size_t)nkv * sizeof(__half)));
+  CUDA_CHECK(cudaMemset(d_dv_h, 0, (size_t)nkv * sizeof(__half)));
+  if (cvt_on) {
+    fprintf(stderr, "FA_REDHALF 需 --cvt=0（默认）\n");
+    std::exit(2);
+  }
+#endif
+  //   D=512（MLA）走独立 body（未接 REDHALF）⇒ 仍 fp32；D=128/256 走 `fp8_mma_body`。
+  const bool use_redhalf = (FA_REDHALF != 0) && (D != 512);
+  float* dk_use = use_redhalf ? reinterpret_cast<float*>(d_dk_h) : d_dk_acc;
+  float* dv_use = use_redhalf ? reinterpret_cast<float*>(d_dv_h) : d_dv_acc;
+
   // O89：定长 causal 的 LPT m 块调度序（`--mrev=1`）。构建反转的 mt→mblk 查询表，透传给
   //   默认 kvtma 主 kernel（稠密网格 grid.x = nblk*ksplit，mt = blockIdx.x/ksplit）。
   //   只改「哪个 CTA 算哪个 m 块」；dK/dV 的跨 CTA 原子顺序略变 ⇒ 数值在 fp8 噪声内。
@@ -2834,11 +2861,11 @@ int main(int argc, char** argv) {
     if (rcp) {                                                                               \
       launch_bwd_main<128, 64, 32, REG_, WG_, PREL_, F16_, true>(                            \
           mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,    \
-          d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);                         \
+          dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit);                         \
     } else {                                                                                 \
       launch_bwd_main<128, 64, 32, REG_, WG_, PREL_, F16_, false>(                           \
           mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,    \
-          d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);                         \
+          dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit);                         \
     }
 #define GO1(REG_, WG_, PREL_)                                                                \
     if (f16) { GO2(REG_, WG_, PREL_, true); } else { GO2(REG_, WG_, PREL_, false); }
@@ -2866,7 +2893,7 @@ int main(int argc, char** argv) {
       if (d256_wg && d256_tma) {
         launch_bwd_main_qdtma<256, 64, 32, false>(
             mg, qmap_main, dmap_main, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
-            d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+            d_delta, d_lse, d_dq_acc, dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit);
         return;
       }
 #endif
@@ -2878,20 +2905,20 @@ int main(int argc, char** argv) {
           dim3 mgh256(H, mg.x, mg.z);
           launch_bwd_main<256, 64, 32, false, true, true, true, true, THREADS, WN, true>(
               mgh256, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
+              dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
           return;
         }
         // O105：大 base_grid（hswap256 跳过）时也透传 O89 的 per-head LPT 反转表 `d_mrev`
         //   （HSWAP=false：grid/head 排布不变，只有 m 块贵先跑）。`--mrev=0` 时 d_mrev=nullptr。
         launch_bwd_main<256, 64, 32, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
-                                                  d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc,
-                                                  d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit,
+                                                  d_dos, d_delta, d_lse, d_dq_acc, dk_use,
+                                                  dv_use, S, H, Hkv, scale, (int)causal, ksplit,
                                                   nullptr, nullptr, d_mrev);
         return;
       }
 #endif
       launch_bwd_main<256, 64, 32, false>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
-                                          d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+                                          d_delta, d_lse, d_dq_acc, dk_use, dv_use, S, H, Hkv,
                                           scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
       return;
     }
@@ -2899,7 +2926,7 @@ int main(int argc, char** argv) {
 #ifdef FA_WGMMA
       // O91（F6-step4）：BM=192 / 3 warpgroup（384 线程）主 kernel，opt-in。
       launch_bwd_wgmma_nw<128, 192, 32, 3>(mg3, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8,
-                                           d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc,
+                                           d_dos, d_delta, d_lse, d_dq_acc, dk_use, dv_use,
                                            S, H, Hkv, scale, (int)causal, ksplit3);
       return;
 #else
@@ -2910,7 +2937,7 @@ int main(int argc, char** argv) {
     if (D == 128 && wg2wgmma) {
 #ifdef FA_WGMMA
       launch_bwd_wgmma2<128>(mg2, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
-                             d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                             d_lse, d_dq_acc, dk_use, dv_use, S, H, Hkv, scale, (int)causal,
                              ksplit2);
       return;
 #else
@@ -2920,7 +2947,7 @@ int main(int argc, char** argv) {
     }
     if (D == 128 && wg2) {
       launch_bwd_wg2<128>(mg2, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta,
-                          d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+                          d_lse, d_dq_acc, dk_use, dv_use, S, H, Hkv, scale, (int)causal,
                           ksplit2);
       return;
     }
@@ -2928,7 +2955,7 @@ int main(int argc, char** argv) {
     if (D == 128 && wg2tma) {
       // O90（F6-step3）：wgmma2（BM=128, 2 warpgroup）+ K/V 4D-TMA（K 双缓冲）。
       launch_bwd_wgmma2tma<128>(mg2, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
-                                d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H,
+                                d_do8, d_dos, d_delta, d_lse, d_dq_acc, dk_use, dv_use, S, H,
                                 Hkv, scale, (int)causal, ksplit2);
       return;
     }
@@ -2941,20 +2968,20 @@ int main(int argc, char** argv) {
         if (use_regdq)
           launch_bwd_main<128, 64, 64, true, false, true, true, true, 256, 4>(
               mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+              dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit);
         else
           launch_bwd_main<128, 64, 64, false, false, true, true, true, 256, 4>(
               mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+              dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit);
       } else {
         if (use_regdq)
           launch_bwd_main<128, 64, 32, true, false, true, true, true, 256, 4>(
               mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+              dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit);
         else
           launch_bwd_main<128, 64, 32, false, false, true, true, true, 256, 4>(
               mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-              d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+              dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit);
       }
       return;
     }
@@ -2963,11 +2990,11 @@ int main(int argc, char** argv) {
       if (use_regdq)
         launch_bwd_main<128, 64, 64, true, false, true, true>(
             mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+            dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit);
       else
         launch_bwd_main<128, 64, 64, false, false, true, true>(
             mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit);
+            dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit);
       return;
     }
     const bool rcp_sel = (foldrcp_opt != 0);
@@ -2982,24 +3009,24 @@ int main(int argc, char** argv) {
         if (use_regdq)
           launch_bwd_main_kvtma<128, 64, 32, true, true, true, true, true>(
               mgh, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
-              d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+              d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, dk_use, dv_use, S, H, Hkv,
               scale, (int)causal, ksplit, nullptr, d_mrev, d_ksm);
         else
           launch_bwd_main_kvtma<128, 64, 32, false, true, true, true, true>(
               mgh, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
-              d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+              d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, dk_use, dv_use, S, H, Hkv,
               scale, (int)causal, ksplit, nullptr, d_mrev, d_ksm);
         return;
       }
       if (use_regdq)
         launch_bwd_main_kvtma<128, 64, 32, true>(
             mg, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
-            d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+            d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, dk_use, dv_use, S, H, Hkv,
             scale, (int)causal, ksplit, nullptr, d_mrev);
       else
         launch_bwd_main_kvtma<128, 64, 32, false>(
             mg, qmap_main, dmap_main, kmap_main, vmap_main, d_q8, d_qs, d_k8, d_ks, d_v8,
-            d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv,
+            d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc, dk_use, dv_use, S, H, Hkv,
             scale, (int)causal, ksplit, nullptr, d_mrev);
       return;
     }
@@ -3008,12 +3035,12 @@ int main(int argc, char** argv) {
       if (use_regdq)
         launch_bwd_main_qdtma<128, 64, 32, true>(
             mg, qmap_main, dmap_main, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
-            d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+            d_delta, d_lse, d_dq_acc, dk_use, dv_use, S, H, Hkv, scale, (int)causal,
             ksplit);
       else
         launch_bwd_main_qdtma<128, 64, 32, false>(
             mg, qmap_main, dmap_main, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos,
-            d_delta, d_lse, d_dq_acc, d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal,
+            d_delta, d_lse, d_dq_acc, dk_use, dv_use, S, H, Hkv, scale, (int)causal,
             ksplit);
       return;
     }
@@ -3030,24 +3057,24 @@ int main(int argc, char** argv) {
       if (prel_sel && mla_kvp_sel)
         launch_bwd_main_kvpipe<512, 64, 32, false, true, true, true, 256, 4>(
             mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
+            dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
       else if (prel_sel)
         launch_bwd_main<512, 64, 32, false, false, true, true, true, 256, 4>(
             mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
+            dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
       else
         launch_bwd_main<512, 64, 32, false, false, false, true, true, 256, 4>(
             mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs, d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-            d_dk_acc, d_dv_acc, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
+            dk_use, dv_use, S, H, Hkv, scale, (int)causal, ksplit, nullptr, nullptr, d_mrev);
     } else if (prel_sel)
       launch_bwd_main<512, 64, 32, false, false, true, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
                                                        d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-                                                       d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                                       dk_use, dv_use, S, H, Hkv, scale,
                                                        (int)causal, ksplit, nullptr, nullptr, d_mrev);
     else
       launch_bwd_main<512, 64, 32, false, false, false, true>(mg, d_q8, d_qs, d_k8, d_ks, d_v8, d_vs,
                                                         d_do8, d_dos, d_delta, d_lse, d_dq_acc,
-                                                        d_dk_acc, d_dv_acc, S, H, Hkv, scale,
+                                                        dk_use, dv_use, S, H, Hkv, scale,
                                                         (int)causal, ksplit, nullptr, nullptr, d_mrev);
   };
 
@@ -3112,6 +3139,20 @@ int main(int argc, char** argv) {
            D, qfuse, qfast, dfuse);
   }
 
+  // O114：`FA_REDHALF` 时——主 kernel 前清零 fp16 的 dK/dV 累加缓冲，主 kernel 后收尾
+  //   （fp16→fp32 输出）。量化 kernel 清的仍是 fp32 别名（`d_dk/d_dv`，仅作 scratch/输出）。
+  auto run_main_r = [&]() {
+    if (use_redhalf) {
+      CUDA_CHECK(cudaMemsetAsync(d_dk_h, 0, (size_t)nkv * sizeof(__half)));
+      CUDA_CHECK(cudaMemsetAsync(d_dv_h, 0, (size_t)nkv * sizeof(__half)));
+    }
+    run_main();
+    if (use_redhalf) {
+      const int th = 256, bl = (int)((nkv + th - 1) / th);
+      redhalf_finalize_kernel<<<bl, th>>>(d_dk_h, d_dv_h, d_dk, d_dv, nkv);
+    }
+  };
+
   auto run_all = [&]() {
     if (ql_overlap) {
       // O109：Q/K 先量化（LSE 就绪）→ LSE(default) 与 dO+delta/V/清零(aux) 重叠 → main。
@@ -3123,7 +3164,7 @@ int main(int argc, char** argv) {
       run_preprocess(false);
       CUDA_CHECK(cudaEventRecord(ql_e1, sQuantAux));
       CUDA_CHECK(cudaStreamWaitEvent(nullptr, ql_e1, 0));
-      run_main();
+      run_main_r();
       if (cvt_on)
         convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
                                                     d_dv, nq, nkv);
@@ -3183,7 +3224,7 @@ int main(int argc, char** argv) {
     }
     // O66：delta 已在 quant 阶段算好时，preprocess 跳过独立 delta launch。
     run_preprocess(!(qfuse && qfast && dfuse && delta_warp_sel));
-    run_main();
+    run_main_r();
     if (cvt_on)
       convert_kernel<<<cvt_blocks, cvt_threads>>>(d_dq_acc, d_dk_acc, d_dv_acc, d_dq, d_dk,
                                                   d_dv, nq, nkv);
