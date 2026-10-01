@@ -1,0 +1,50 @@
+=== fa_fp8_main_sweep (O116) ===
+cases=['b1_s4096_h16_d128_causal_fp8', 'b1_s1024_h32_d128_kv4_causal_fp8', 'b1_s1024_h64_d128_kv1_causal_fp8', 'b1_s1024_h40_d128_kv8_causal_fp8']  configs=['default', 'ksplit=1', 'ksplit=4', 'hswap=0', 'mrev=0', 'ovlql=0', 'ovlcap=-1', 'ovlcap=1024', 'ovlcap=4096']
+
+--- b1_s4096_h16_d128_causal_fp8 (iters=50) ---
+config          total ms   main ms  total×   main×  grid
+default           1.5936    1.3598   1.000   1.000  grid main = 128 x 16 x 1  (ksplit=2, base_grid=1024)
+ksplit=1          1.6709    1.4418   1.049   1.060  grid main = 64 x 16 x 1  (ksplit=1, base_grid=1024)
+ksplit=4          1.6118    1.3948   1.011   1.026  grid main = 256 x 16 x 1  (ksplit=4, base_grid=1024)
+hswap=0           1.6445    1.4233   1.032   1.047  grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+mrev=0            1.6776    1.4612   1.053   1.075  grid main = 512 x 16 x 1  (ksplit=8, base_grid=1024)
+ovlql=0           1.5965    1.3644   1.002   1.003  grid main = 128 x 16 x 1  (ksplit=2, base_grid=1024)
+ovlcap=-1         1.5822    1.3582   0.993   0.999  grid main = 128 x 16 x 1  (ksplit=2, base_grid=1024)
+ovlcap=1024       1.5768    1.3614   0.989   1.001  grid main = 128 x 16 x 1  (ksplit=2, base_grid=1024)
+ovlcap=4096       1.5792    1.3649   0.991   1.004  grid main = 128 x 16 x 1  (ksplit=2, base_grid=1024)
+
+--- b1_s1024_h32_d128_kv4_causal_fp8 (iters=100) ---
+config          total ms   main ms  total×   main×  grid
+default           0.2686    0.2114   1.000   1.000  grid main = 32 x 32 x 1  (ksplit=2, base_grid=512)
+ksplit=1          0.3113    0.2503   1.159   1.184  grid main = 16 x 32 x 1  (ksplit=1, base_grid=512)
+ksplit=4          0.2758    0.2192   1.027   1.037  grid main = 64 x 32 x 1  (ksplit=4, base_grid=512)
+hswap=0           0.2929    0.2346   1.090   1.110  grid main = 64 x 32 x 1  (ksplit=4, base_grid=512)
+mrev=0            0.2964    0.2372   1.103   1.122  grid main = 64 x 32 x 1  (ksplit=4, base_grid=512)
+ovlql=0           0.2751    0.2108   1.024   0.997  grid main = 32 x 32 x 1  (ksplit=2, base_grid=512)
+ovlcap=-1         0.2724    0.2101   1.014   0.994  grid main = 32 x 32 x 1  (ksplit=2, base_grid=512)
+ovlcap=1024       0.2679    0.2111   0.997   0.999  grid main = 32 x 32 x 1  (ksplit=2, base_grid=512)
+ovlcap=4096       0.2686    0.2098   1.000   0.992  grid main = 32 x 32 x 1  (ksplit=2, base_grid=512)
+
+--- b1_s1024_h64_d128_kv1_causal_fp8 (iters=100) ---
+config          total ms   main ms  total×   main×  grid
+default           0.5077    0.4180   1.000   1.000  grid main = 32 x 64 x 1  (ksplit=2, base_grid=1024)
+ksplit=1          0.5154    0.4243   1.015   1.015  grid main = 16 x 64 x 1  (ksplit=1, base_grid=1024)
+ksplit=4          0.5404    0.4509   1.064   1.079  grid main = 64 x 64 x 1  (ksplit=4, base_grid=1024)
+hswap=0           0.5356    0.4438   1.055   1.062  grid main = 64 x 64 x 1  (ksplit=4, base_grid=1024)
+mrev=0            0.5392    0.4481   1.062   1.072  grid main = 64 x 64 x 1  (ksplit=4, base_grid=1024)
+ovlql=0           0.5223    0.4176   1.029   0.999  grid main = 32 x 64 x 1  (ksplit=2, base_grid=1024)
+ovlcap=-1         0.5140    0.4175   1.012   0.999  grid main = 32 x 64 x 1  (ksplit=2, base_grid=1024)
+ovlcap=1024       0.5123    0.4179   1.009   1.000  grid main = 32 x 64 x 1  (ksplit=2, base_grid=1024)
+ovlcap=4096       0.5091    0.4178   1.003   1.000  grid main = 32 x 64 x 1  (ksplit=2, base_grid=1024)
+
+--- b1_s1024_h40_d128_kv8_causal_fp8 (iters=100) ---
+config          total ms   main ms  total×   main×  grid
+default           0.3177    0.2533   1.000   1.000  grid main = 32 x 40 x 1  (ksplit=2, base_grid=640)
+ksplit=1          0.3229    0.2604   1.016   1.028  grid main = 16 x 40 x 1  (ksplit=1, base_grid=640)
+ksplit=4          0.3358    0.2722   1.057   1.075  grid main = 64 x 40 x 1  (ksplit=4, base_grid=640)
+hswap=0           0.3532    0.2878   1.112   1.136  grid main = 64 x 40 x 1  (ksplit=4, base_grid=640)
+mrev=0            0.3548    0.2901   1.117   1.145  grid main = 64 x 40 x 1  (ksplit=4, base_grid=640)
+ovlql=0           0.3328    0.2533   1.048   1.000  grid main = 32 x 40 x 1  (ksplit=2, base_grid=640)
+ovlcap=-1         0.3227    0.2521   1.016   0.995  grid main = 32 x 40 x 1  (ksplit=2, base_grid=640)
+ovlcap=1024       0.3199    0.2526   1.007   0.997  grid main = 32 x 40 x 1  (ksplit=2, base_grid=640)
+ovlcap=4096       0.3170    0.2520   0.998   0.995  grid main = 32 x 40 x 1  (ksplit=2, base_grid=640)

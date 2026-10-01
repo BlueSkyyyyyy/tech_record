@@ -2611,3 +2611,48 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 见 `docs/01` §26、`docs/01b` §6bc；原始输出 `src/fp16/fa_bwd_fp16_o115_maintma_ab.out.txt`、
 `src/bf16/fa_bwd_bf16_o115_maintma_ab.out.txt`、`src/fp16/fa_bwd_fp16_o115_ncu_maintma_s4096.out.txt`、
 `src/fa_bwd_o115_ci.out.txt`。
+
+### 5.124 第 210 轮（O116）：fp8 主 kernel 的 host/运行期旋钮**系统复核**（ksplit / hswap / mrev / 端到端量化重叠 / 栅格封顶 × 4 形状）＋ TE-vs-ours L2 红字账 —— **负结果（默认一行未改）**
+
+- **动机**：O115 之后 fp8 默认路径被逐条收口（main 的 L2 `red` 主体墙 = F3b/F4b/F6/F7/O90–O95/O114
+  全部「无软件解」；非 main 已被 O109–O111 的量化分相 + LSE 跨 stream 重叠压到带宽墙）。**唯一
+  还没系统复核的维度是「纯 host/运行期旋钮的联合最优性」**——O93/O96–O113 每次只审一条分支，
+  没有把 ksplit / hswap / mrev / ovlql / ovlcap 放在同一 binary、同一 session、同一批形状上一起扫。
+  本轮补这一刀，并顺带把「主 kernel 的 L2 `red` 到底还能不能动」用 TE 同 session ncu 再钉一次。
+- **方法（新工具 `harness/fa_fp8_main_sweep.py`，纯 harness）**：把 Hopper 构建
+  （`-DFA_WGMMA -DFA_TMA`）出的 `src/fp8/fa_bwd_fp8_main.out` 在 kernel_lab 容器里按
+  「4 case × 9 配置」矩阵跑，解析 `[timing] total` / `quant|preprocess|main`，给出「默认 vs 每档」
+  的 total×/main×。case 覆盖 MHA S4096、大 H GQA（q32/kv4、q40/kv8）、MQA（q64/kv1）。
+- **结果（`src/fp8/fa_bwd_fp8_o116_knob_sweep.out.txt`，iters=50/100）**：
+  * **ksplit**：默认 auto（`hswap` 生效时=2）在 4 个 shape 上**全最优**；k=1 慢 1.5–15.9%、
+    k=4 慢 2.7–6.4%（S4096 例外：k=4 仅慢 1.1%）。
+  * **hswap=0 / mrev=0**：4 个 shape **全负**（total 慢 3.2–11.7%），且默认档自动把 ksplit
+    从 8 收到 2（grid 512→128）——证实 O93 的「跨 head 全局 LPT + 低 ksplit」在 MQA/GQA 上同向。
+  * **ovlql=0**（关量化分相/LSE 重叠）：4 个 shape total 慢 0.2–4.8% ⇒ O109/O110/O111 默认开正确。
+  * **ovlcap**(-1/1024/4096)：与 auto 档（`ntask/64` clamp [132,4096]）在 ~1% 噪声内，无稳定赢家。
+  * ⇒ **默认档已是这五类 host 旋钮的全局最优，无一条可转正**；默认一行未改。
+- **TE-vs-ours L2 红字账（S4096 causal，同 session ncu；`_o116_ncu_{ours,te}_main_s4096.out.txt`）**：
+
+  | | kernel | grid/线程 | smem | regs | Duration | `op_red` | `op_read` | L2% | SM% | warps% |
+  |---|---|---|---|---|---|---|---|---|---|---|
+  | ours | `fa_bwd_fp8_mma_kvtma_kernel<128,64,32,...>` | 128×16 / 128 | 74.82KB(3 CTA/SM) | 168 | **1.37 ms** | **105,381,888** | 24,266,474 | 78.20 | 46.92 | 18.66 |
+  | TE | `..._flash_bprop_wgmma_f8_..._64x64x128` | 132 / **384** | **232.45KB(1 CTA/SM)** | 168 | **257.9 µs** | **25,957,064** | 10,232,698 | 70.86 | 45.07 | 15.61 |
+
+  **同为 BM=64；差距全在「搬运量」**：`red` **4.06×**、`read` **2.37×**、时间 **5.31×**。
+  ours 的 `red` 占其 L2 总量 `24.27+105.38+0.10=129.75M` 的 **81.2%**。
+- **red 扇区账（本轮把 1.5× 说清）**：causal S4096 下 `ntiles(mblk)=2(mblk+1)`、
+  `Σ_{mblk=0}^{63} ntiles = 4160`/head；每 tile 的 dV/dK 各写 `BN×HD=32×128` 个元素、
+  warp 内 8 行 × 8 列 = 256B = **8 扇区（刚好填满、无浪费，O114 已证）** ⇒ 理论下界
+  `2(dK/dV)·4160·(4096元素/8)·16头 = 68.2M` 扇区。实测 **105.4M = 1.545×** —— 多出的
+  ~37M 扇区来自**跨 CTA 贡献（每个 KV 元素被多少 m-block 归约）**，不是扇区浪费、也不是归约机制；
+  要压只能减「每元素贡献 CTA 数」= 放大 BM / KV-owner（寄存器/smem 墙，见「阻塞」）。
+- **L2 读侧同理**：`op_read` 24.27M = 777MB，其中 K/V 因「每 (m,nt) tile 重读一次」占 ~545MB、
+  Q/dO（ksplit=2）~34MB；要压也需放大 BM（同一堵墙）。
+- **判决**：**负结果、默认一行未改**。fp8 主 kernel 的 host 旋钮前沿至此全部扫清；真差距 =
+  TE 的「大 tile（384 线程 / 232KB smem / 1 CTA/SM）+ 更好的工作划分」把每元素贡献 CTA 数压到
+  ours 的 ~1/4，本卡寄存器/smem 装不下（F6/F7/p160/O83/O86/O90/O91/O114 同源）。
+- **数值/护栏**：默认档本轮未改任何 device/host 默认；`--ci --no-run --dtype fp8` **55 case
+  单/两文件 gate worst 5.722e-06 OK**、`docs/04 --check` OK（224 行）。
+- **原始输出**：`src/fp8/fa_bwd_fp8_o116_knob_sweep.out.txt`、
+  `src/fp8/fa_bwd_fp8_o116_ncu_ours_main_s4096.out.txt`、
+  `src/fp8/fa_bwd_fp8_o116_ncu_te_main_s4096.out.txt`；工具 `harness/fa_fp8_main_sweep.py`。

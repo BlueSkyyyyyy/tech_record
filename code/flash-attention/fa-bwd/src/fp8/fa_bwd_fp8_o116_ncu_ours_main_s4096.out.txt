@@ -1,0 +1,17 @@
+    Section: Command line profiler metrics
+    -------------------------------------------------- --------------- ------------
+    Metric Name                                            Metric Unit Metric Value
+    -------------------------------------------------- --------------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed               %        11.69
+    gpu__time_duration.sum                                          ms         1.37
+    launch__occupancy_limit_shared_mem                           block            3
+    launch__registers_per_thread                       register/thread          168
+    launch__shared_mem_per_block_dynamic                   Kbyte/block        74.82
+    lts__t_sectors_op_read.sum                                  sector     24266474
+    lts__t_sectors_op_red.sum                                   sector    105381888
+    lts__t_sectors_op_write.sum                                 sector       101180
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                %        78.20
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                 %        46.92
+    sm__warps_active.avg.pct_of_peak_sustained_active                %        18.66
+    -------------------------------------------------- --------------- ------------
+
