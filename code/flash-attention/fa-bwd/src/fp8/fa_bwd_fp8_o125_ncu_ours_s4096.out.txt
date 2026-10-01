@@ -1,0 +1,25 @@
+  dk   vs ref: max_abs=2.644e-01  max_rel=8.537e+01
+  dv   vs ref: max_abs=3.216e-01  max_rel=4.239e+01
+[compare] ours vs TE FP8
+  dq   vs te_dq: max_abs=4.525e-01  max_rel=1.051e+02
+  dk   vs te_dk: max_abs=5.325e-01  max_rel=1.158e+02
+  dv   vs te_dv: max_abs=6.806e-01  max_rel=1.078e+02
+==PROF== Disconnected from process 1571213
+[1571213] fa_bwd_fp8_main.out@127.0.0.1
+  void fa_bwd_fp8_mma_kvtma_kernel<128, 64, 32, 1, 1, 1, 1, 0, 0, 0, 1, 1>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const unsigned char *, const float *, const float *, const float *, float *, float *, float *, int, int, int, float, int, int, const int *, float *, float *, int, float *, const int *, const int *, const int *) (16, 128, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ---------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                            Metric Unit Metric Value
+    ---------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                               %        11.47
+    gpu__time_duration.sum                                                          ms         1.36
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                                        8781824
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum                             sector     70254592
+    lts__t_requests_op_red.sum                                                 request    105381888
+    lts__t_sectors_op_read.sum                                                  sector     24315806
+    lts__t_sectors_op_red.sum                                                   sector    105381888
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                %        78.83
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_active           %        11.87
+    sm__warps_active.avg.pct_of_peak_sustained_active                                %        18.67
+    ---------------------------------------------------------------------- ----------- ------------
+

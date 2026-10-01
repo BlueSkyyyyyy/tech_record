@@ -1,0 +1,6 @@
+smem = 72704 bytes (71.0 KB); lse smem = 18944 bytes (18.5 KB)
+main wgmma smem = 70656 bytes (69.0 KB)
+grid main = 128 x 16 x 1  (ksplit=2, base_grid=1024)
+[timing] total(quant+pre+main+cvt) 1.6517 ms  83.21 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] quant 0.1061 ms | preprocess 0.1205 ms | main 1.4499 ms | convert -0.0248 ms (cvt_on=0, qfuse=1, dfuse=1)
+[O41 A/B] main Q/dO-TMA 1.9707 ms | Q/dO/K/V-TMA 1.7415 ms (1.132x) | max_abs(kvtma-vs-qdtma) dq/dk/dv=2.183e-04/6.557e-07/9.537e-07

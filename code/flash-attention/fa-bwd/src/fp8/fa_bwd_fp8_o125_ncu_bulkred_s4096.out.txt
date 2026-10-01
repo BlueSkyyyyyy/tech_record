@@ -1,0 +1,14 @@
+    Section: Command line profiler metrics
+    ------------------------------------------------- ----------- ------------
+    Metric Name                                       Metric Unit Metric Value
+    ------------------------------------------------- ----------- ------------
+    gpu__time_duration.sum                                     ms         1.46
+    l1tex__t_requests_pipe_lsu_mem_global_op_red.sum                    262144
+    l1tex__t_sectors_pipe_lsu_mem_global_op_red.sum        sector      2097152
+    lts__t_requests_op_red.sum                            request     51068928
+    lts__t_requests_op_write.sum                          request        25732
+    lts__t_sectors_op_red.sum                              sector    118161408
+    lts__t_sectors_op_write.sum                            sector        99518
+    lts__throughput.avg.pct_of_peak_sustained_elapsed           %        57.80
+    ------------------------------------------------- ----------- ------------
+

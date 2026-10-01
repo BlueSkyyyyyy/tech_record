@@ -2870,3 +2870,32 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
 - 原始输出：`src/fp8/fa_bwd_fp8_o124_ncu_{ours,redstore,te}_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o124_sass_hist.out.txt`、`src/fp8/fa_bwd_fp8_o124_mlawgm_probe.out.txt`；
   实现细节 `docs/03` §145。
+
+### 5.133 第 219 轮（O125）：fp8 `red` 墙的「表示无关性」终局核对 —— **bytes / sectors / requests**（default vs bulk-reduce vs TE）—— **诊断/收口（默认一行未改）**
+
+- **动机**：O124 报了 L1/L2 扇区，但没报 **L2 的交易粒度（request）**；本轮补上这最后一块，
+  并用 O42 的 `-DFA_BULKRED=1`（smem staging + `cp.reduce.async.bulk`）与同 session TE 三方对照，
+  把「L2 `red` 由什么决定」钉死。
+- **三方计数（S=4096 causal H16）**：
+  | kernel | Duration | L1 red req/sect | L2 red **req** | L2 red **sect** | sect/req | red bytes |
+  |---|---|---|---|---|---|---|
+  | ours `kvtma<128,64,32>` | 1.37ms | 8.78M / 70.25M | **105.38M** | **105.38M** | **1.0** | 3.37GB |
+  | ours `-DFA_BULKRED=1` | **1.45ms** | 0.26M / 2.10M | **51.07M** | **118.16M** | 2.3 | 3.78GB |
+  | TE `flash_bprop_wgmma_f8` | **0.259ms** | 3.2K / 3.2K | **6.49M** | **25.96M** | **4.0** | 0.83GB |
+- **判决**：
+  1. 默认 ours **每个 L2 `red` 请求恰好 1 扇区**（req==sect==105.38M）；L1 每请求 8 扇区（已满），
+     L1→L2 把 8-row 散布展宽成 ~12 个单扇区请求——O124「1.50×」的确切形态。
+  2. **L2 `red` 扇区 == 贡献字节 / 32B**，只由「每 KV 元素被多少 CTA 贡献」（工作划分）决定。
+  3. **交易粒度是正交维度且无收益**：bulk 把 L2 请求砍半（105.38M→51.07M）但**扇区反升 12%**、
+     且 smem 往返的 L1/TEX 成本（O42 已 71.8%）使其 **0.94× 更慢**；O67/O114/O124 同结论。
+  4. TE 同 BM=64 的 4.06× 字节优势**纯来自持久 KV-owner**（F7 目标），被本卡 255-reg/77.5KB
+     的 smem/regfile 墙锁定（O83/O91/O157/O160/O168）。
+- **护栏**：默认档 `ours vs fp32 ref` relL2 dq/dk/dv = 8.149/8.263/6.489%（MHA S4096）、
+  GQA q40kv8 8.181/8.353/6.363%、MQA q64kv1 8.176/8.441/6.449%、D=256 8.332/8.434/6.464%、
+  MLA D=512 8.163/8.564/6.507% ⇒ **全部在护栏内**；单/两文件 gate worst **7.629e-06 OK**、
+  `docs/04 --check` OK（224 行）。性能 total **1.576ms / 87.2TF**，同 session TE FP8 main 0.259ms
+  ⇒ main **5.29×**、端到端 ~6.1×（FA3 无 FP8 反向）。
+- **下一步**：fp8 主 kernel 的 bytes（`red`）与 issue（O122/O123）都已在软硬件边界，
+  **正结果只剩换卡**；覆盖型 backlog 见 ROADMAP「下一步」。
+- 原始输出：`src/fp8/fa_bwd_fp8_o125_ncu_{ours,bulkred,te}_s4096.out.txt`、`..._o125_bulkred_timing_s4096.out.txt`、
+  `..._o125_default_s4096.out.txt`；实现细节 `docs/03` §146。
