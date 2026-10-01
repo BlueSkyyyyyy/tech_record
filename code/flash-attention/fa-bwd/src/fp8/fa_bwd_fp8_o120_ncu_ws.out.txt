@@ -1,0 +1,9 @@
+==PROF== Profiling "ws_pipe_kernel" - 0 (1/1): 0%....50%....100% - 1 pass
+  void ws_pipe_kernel<4>(CUtensorMap_st, float *, int, int) (132, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Metric Name                                       Metric Unit Metric Value
+    dram__bytes_read.sum                                    Mbyte         8.41
+    gpu__time_duration.sum                                     us       824.13
+    lts__t_sectors_op_read.sum                             sector     19403553
+    lts__t_sectors_op_red.sum                              sector        25344
+    lts__t_sectors_op_write.sum                            sector     26066132
+    sm__warps_active.avg.pct_of_peak_sustained_active           %        12.49

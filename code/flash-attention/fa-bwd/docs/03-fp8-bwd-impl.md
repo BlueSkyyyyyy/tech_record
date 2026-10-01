@@ -12178,3 +12178,69 @@ specialization + persistent**（用 mbarrier 而非 `barrier.cluster` 做跨 CTA
 否则 multicast 不划算。`red` 主体墙仍只剩**换卡**或覆盖型 backlog（fp16/bf16 `head_dim=256`）。
 数值逐位不变、单/两文件一致、默认路径逐字退回。原始输出：`src/fp8/fa_bwd_fp8_o119_ab.out.txt`、
 `src/fp8/fa_bwd_fp8_o119_ncu_mqa_kv1_mcast{1,8}.out.txt`。
+
+---
+
+## 141. O120（第 214 轮）：F3b② 的 warp specialization de-risk —— 「单一 barrier 域」病因的直接检验
+
+### 141.1 动机
+
+fp8 默认 main 的墙是 dK/dV 跨 CTA 的 L2 `red`（105.4M 扇区、占 L2 ~80%）。唯一能改「每 KV
+元素被多少 m-block 归约」的软件杠杆是**放大 BM**（64→128/192 ⇒ `red` 砍半/砍到 1/3），但放大
+BM 后 smem/寄存器翻倍 ⇒ **1 CTA/SM**。O90（`wgmma2` BM=128 0.66×）/O91（`wg3` BM=192 0.52×）
+实测：`red` 确实降到 0.43×，时间却翻倍。O91 把病因钉为「**1 CTA/SM 的单一 barrier 域**：每 tile
+的 5 个 `__syncthreads` 把 12 个 warp 串成依赖链，K/V 搬运与 wgmma 计算无法重叠」。**但这条结论
+只被『改成多 warpgroup 后变慢』间接支持，还没有把同步机制本身换掉来直接检验。** F3b② 明确留的
+「WS 完整化（producer/consumer + 更深 mbarrier 流水替换 `__syncthreads`）」正是这件事——它是本卡
+fp8 主 kernel 上唯一还没判决的软件杠杆。
+
+### 141.2 方法（独立冒烟，不动默认路径）
+
+`src/fp8/fa_bwd_fp8_ws_smoke.cu`：在**与主 kernel 相同的 fp8 K/V 几何**（UINT8 / SW128 / 4D-TMA
+box={128,32} / `KS_SZ=4096B`）上，比较三种同步机制下「K/V TMA → wgmma(`m64n32k32`, SW128 直读)」
+的流水吞吐（1 CTA/SM，grid=132，每 CTA 扫 4096 个 tile，K 常驻 L2 ⇒ 纯测 L2 读带宽 + 延迟暴露）：
+
+- **(A) SYNC**：每 tile 一条 TMA + 全 CTA `__syncthreads` 等到齐再消费，无跨 tile 预取（= O91 形态）。
+- **(A2) SYNC-PREFETCH**：NSTAGE ring buffer + thread0 提前发 TMA，但**仍用全 CTA `__syncthreads`**。
+- **(B) WS**：**独立 producer warpgroup** 跑 ring buffer 预取，**consumer warpgroup** 只等
+  `mbarrier(full)` → wgmma → `arrive(empty)`；**无全 CTA `__syncthreads`**。
+
+数值一致性：三者的 wgmma 累加和 `sink` 在 fp32 原子次序噪声内一致（8.7092–8.7094e10，相对
+~1e-6）；`compute-sanitizer --tool memcheck` **0 errors**。
+
+### 141.3 性能（GPU1，iters=20，read=2214.6MB/launch）
+
+| 变体 | 深度 | ms | 有效读带宽 | vs SYNC |
+|---|---|---|---|---|
+| A SYNC（`__syncthreads`, 1 stage） | 1 | **1.648** | 1343 GB/s | 1.00× |
+| A2 SYNC-PREFETCH（syncth） | 2 | 1.089 | 2034 GB/s | **1.50×** |
+| A2 SYNC-PREFETCH（syncth） | 4 | 1.088 | 2036 GB/s | 1.50× |
+| A2 SYNC-PREFETCH（syncth） | 8 | 1.087 | 2037 GB/s | 1.50× |
+| B WS producer/consumer | 2 | 0.860 | 2576 GB/s | **1.89×** |
+| B WS producer/consumer | 4 | 0.813 | 2712 GB/s | **2.00×** |
+| B WS producer/consumer | 8 | 0.798 | 2775 GB/s | **2.04×** |
+
+### 141.4 ncu（同 binary A/B，S4096 几何，1 CTA/SM，12.5% warps）
+
+| 指标 | A SYNC | B WS(NSTAGE=4) | 比 |
+|---|---|---|---|
+| `lts op_read` 扇区 | 19,330,267 | 19,403,553 | **≈1.00×**（同字节） |
+| `dram bytes_read` | 8.40 MB | 8.41 MB | ≈1.00×（K 常驻 L2） |
+| `sm warps_active` | 12.50% | 12.49% | 同 |
+| Duration | **1.67 ms** | **0.824 ms** | **2.03×** |
+
+**同一份 L2 读字节、同样的 warp 占用，WS 快 2.03×** ⇒ 差别**纯粹是延迟暴露**：`__syncthreads`
+把 TMA 完成串进全 CTA 的依赖链，1 CTA/SM 下没有第二个独立 CTA 填这段延迟；WS 用
+producer/consumer + mbarrier 把搬运与计算解耦后，延迟被彻底藏住（→ 2775 GB/s，逼近 1 CTA/SM 的
+可达上限）。
+
+### 141.5 结论 / 下一步
+
+**机制正结果：O91「单一 barrier 域」的病因被直接检验成立，warp specialization 是 1 CTA/SM 下
+恢复吞吐的解锁路径（2.0×，且 L2 字节不变）。** 副结论：仅「预取深度」（A2）只能拿到 1.50×；真正
+多出来的 1.33× 来自**把 producer 移出 `__syncthreads` 域**（WS）。⇒ **下一轮（F3b 主体化）**：把
+这一 producer/consumer 模式落进 `wgmma2`/`wg3`（BM=128/192、1 CTA/SM），预期把 O90/O91 的
+0.52–0.68×（延迟 bound）拉回 L2 bound；若结合 `wg3` 的 `red` 0.43×，理论上可到默认档的 ~1.7–1.8×
+（prize = 逼近 TE），但工程量中等偏大（要重排 GEMM3/4/5 的 warp 归属 + 全 mbarrier 化）。本项
+为独立冒烟，默认路径一行未改。原始输出：`src/fp8/fa_bwd_fp8_o120_ws_smoke.out.txt`、
+`src/fp8/fa_bwd_fp8_o120_ncu_{sync,ws}.out.txt`。

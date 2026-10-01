@@ -3235,8 +3235,23 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
        `short_scoreboard 1.82→1.41` 但 **`red` 一字不变、`wait` 不降、Duration 反升** ⇒
        **任何只改指令/wait、不改「每元素贡献 CTA 数」的改动不可能转正**。**F3b 的「无 BN=64 时
        GEMM3/4 切 wgmma」路线在 wait 维度再无空间；唯一剩余真 m64 路 = BN=64 + 多 warpgroup
-       （256/384 线程），被 3 CTA/SM 的 77,482B/170-reg 硬墙锁死（O83）**。见 `docs/03` §110、
-       `docs/08` §5.96。
+        （256/384 线程），被 3 CTA/SM 的 77,482B/170-reg 硬墙锁死（O83）**。见 `docs/03` §110、
+        `docs/08` §5.96。
+       → **O120（第 214 轮，机制正结果 / 独立冒烟，默认一行未改）：F3b② 的 warp specialization
+       de-risk 落地**。在**与主 kernel 相同的 fp8 K/V 几何**（UINT8 / SW128 / 4D-TMA box={128,32}
+       / KS_SZ=4096B）上直接检验 O91 的「1 CTA/SM 单一 barrier 域」病因：`(A) SYNC`（每 tile TMA
+       + `__syncthreads`）、`(A2) SYNC-PREFETCH`（ring buffer + thread0 预取但仍全 CTA syncth）、
+       `(B) WS`（独立 producer warpgroup 预取 + consumer 只等 mbarrier(full)→wgmma→arrive(empty)）。
+       **性能（1 CTA/SM，grid=132，K 常驻 L2）**：A `1.648ms/1343GB/s`、A2 `1.087ms/2035GB/s
+       （1.50×）`、**B `0.798–0.860ms/2576–2775GB/s（1.89× NS=2 → 2.04× NS=8）**。**ncu**：
+       `lts op_read` **1993万 vs 1940万（≈1.00×，同字节）**、Duration **1.67ms→0.824ms（2.03×）**、
+       warps 恒 12.5% ⇒ **同一份 L2 字节、同样 warp，纯延迟暴露差异**。⇒ **O91 病因被直接检验
+       成立、WS 是 1 CTA/SM 的解锁路径**（副结论：单靠预取深度只得 1.50×，多出的 1.33× 来自
+       「把 producer 移出 `__syncthreads` 域」）。**下一步 = F3b 主体化**（把该 producer/consumer
+       模式落进 `wgmma2`/`wg3`，把红 0.43× 的 BM≥128 从延迟 bound 拉回 L2 bound，理论上界
+       ~默认档 1.7–1.8×，逼近 TE）。数值一致性 ~1e-6、`compute-sanitizer` 0 errors。见
+       `docs/03` §141、`docs/08` §5.128；原始输出 `src/fp8/fa_bwd_fp8_o120_ws_smoke.out.txt`、
+       `src/fp8/fa_bwd_fp8_o120_ncu_{sync,ws}.out.txt`。
 - [x] **F4b**：fp8 非 det 默认的 dK/dV 归约再优化（当前 red 仍是 74% L2）。
       → **O83（第 178 轮）分解**：`red` 114.5M 扇区中 ~29% 是写流量本身、~8% 是原子 RMW；
       O42/O67/O83 三证「与归约指令/宽度/机制无关」⇒ 唯一杠杆=减少贡献 CTA 数（工作划分），
@@ -3304,7 +3319,29 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百一十三轮）**：**O119——fp8 K/V TMA cluster multicast 落地集成（Q 头轴 / GQA-MQA）
+> **最新（第二百一十四轮）**：**O120——F3b② 的 warp specialization de-risk ——「1 CTA/SM 单一
+> barrier 域」病因的直接检验——机制正结果，独立冒烟、默认一行未改**。承接 O90/O91（BM=128/192
+> 让 `red` 砍半/砍到 0.43×，但 1 CTA/SM 下时间反翻倍，病因归为「每 tile 5 个 `__syncthreads` 把
+> warp 串成依赖链、K/V 搬运与 wgmma 不重叠」）。此前只从「改多 warpgroup 后变慢」间接推断，本轮
+> **把同步机制本身换掉直接检验**：独立冒烟 `src/fp8/fa_bwd_fp8_ws_smoke.cu` 在与主 kernel 相同的
+> fp8 K/V 几何（UINT8/SW128/4D-TMA box={128,32}/KS_SZ=4096B）比较 `(A) SYNC`（每 tile TMA +
+> `__syncthreads`）、`(A2) SYNC-PREFETCH`（ring + thread0 预取但仍全 CTA syncth）、`(B) WS`
+> （独立 producer warpgroup 预取 + consumer 只等 mbarrier(full)→wgmma→arrive(empty)，无
+> `__syncthreads`）。**性能（1 CTA/SM，grid=132，K 常驻 L2）**：A `1.648ms/1343GB/s`、A2
+> `1.087ms/2035GB/s（1.50×）`、**B `0.798–0.860ms/2576–2775GB/s（1.89× NS=2 → 2.04× NS=8）`**；
+> **ncu**：`lts op_read` **1993万 vs 1940万（≈1.00×，同字节）**、Duration **1.67ms→0.824ms
+> （2.03×）**、warps 恒 12.5% ⇒ **同一份 L2 字节、同样 warp，纯延迟暴露差异**。⇒ **O91 病因
+> 成立、warp specialization 是 1 CTA/SM 的解锁路径**（副结论：单靠预取深度只得 1.50×，多出的
+> 1.33× 来自把 producer 移出 `__syncthreads` 域）。数值一致性 ~1e-6、`compute-sanitizer` 0 errors。
+> 见 `docs/03` §141、`docs/08` §5.128；原始输出 `src/fp8/fa_bwd_fp8_o120_ws_smoke.out.txt`、
+> `src/fp8/fa_bwd_fp8_o120_ncu_{sync,ws}.out.txt`。
+> **下一步候选（更新）**：① **F3b 主体化**（首选）——把 O120 的 producer/consumer 模式落进
+> `wgmma2`/`wg3`（BM=128/192、1 CTA/SM），把红 0.43× 的 BM≥128 从延迟 bound 拉回 L2 bound
+> （理论上界 ~默认档 1.7–1.8×，逼近 TE；工程量中等偏大：重排 GEMM3/4/5 的 warp 归属 + 全
+> mbarrier 化）；② **换卡**（更大 smem/寄存器）；③ 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**
+> （唯一明确的 `[ ]` 项）；④ 非 main 的 `--det`/量化（O116 已证 host 旋钮无余量）。
+>
+> **（第二百一十三轮）**：**O119——fp8 K/V TMA cluster multicast 落地集成（Q 头轴 / GQA-MQA）
 > ——负结果，opt-in `--mcast`、默认关**。承接 O118 候选②，换**天然锁步的 Q 头轴**（O93 HSWAP：
 > head=blockIdx.x）避开 m 轴因果锁步：cluster 沿 x 的 Q 头同属一个 `(mt,part)`，对 GQA/MQA
 > （`G=H/Hkv>1` 共享 KV 头）即读同一批 K/V tile。`fp8_mma_body`/`kvtma` kernel 加 `int MCAST=1`，
@@ -8931,7 +8968,30 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     主体墙无软件解）；② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；
     ③ 非 main 的 `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）；④ 若复活 multicast，
     需先上完整 WS+persistent（大改）。见 `docs/03` §140、`docs/08` §5.127；原始输出
-    `src/fp8/fa_bwd_fp8_o119_ab.out.txt`、`src/fp8/fa_bwd_fp8_o119_ncu_mqa_kv1_mcast{1,8}.out.txt`。
+     `src/fp8/fa_bwd_fp8_o119_ab.out.txt`、`src/fp8/fa_bwd_fp8_o119_ncu_mqa_kv1_mcast{1,8}.out.txt`。
+
+- 2026-10-01（第二百一十四轮）：**O120——F3b② 的 warp specialization de-risk ——「1 CTA/SM 单一
+  barrier 域」病因的直接检验——机制正结果（独立冒烟，默认一行未改）**。承接 O90/O91：BM=128/192
+  让 `red` 砍半/砍到 0.43×，但 1 CTA/SM 下时间反翻倍，O91 归因「每 tile 5 个 `__syncthreads` 把
+  warp 串成依赖链、K/V 搬运与 wgmma 不重叠」——此前只从「改多 warpgroup 后变慢」间接推断。
+  - **方法**：`src/fp8/fa_bwd_fp8_ws_smoke.cu`，与主 kernel 相同的 fp8 K/V 几何
+    （UINT8/SW128/4D-TMA box={128,32}/KS_SZ=4096B），三种同步机制：`(A) SYNC` 每 tile TMA +
+    `__syncthreads`；`(A2) SYNC-PREFETCH` ring buffer + thread0 预取、但仍全 CTA syncth；
+    `(B) WS` 独立 producer warpgroup 预取 + consumer 只等 `mbarrier(full)`→wgmma→`arrive(empty)`、
+    无 `__syncthreads`。正确性：三者 sink 在 fp32 原子次序噪声内一致（~1e-6）、
+    `compute-sanitizer --tool memcheck` **0 errors**。
+  - **性能（GPU1，iters=20，read=2214.6MB/launch，1 CTA/SM grid=132，K 常驻 L2）**：A SYNC
+    **1.648ms/1343GB/s**；A2 **1.087–1.089ms/2035GB/s（1.50×）**；**B WS 0.798–0.860ms/
+    2576–2775GB/s（1.89× NS=2 → 2.04× NS=8）**。
+  - **ncu（同 binary A/B）**：`lts op_read` **19,330,267 vs 19,403,553（≈1.00×，同字节）**、
+    `dram bytes_read` 8.40 vs 8.41MB、`sm warps_active` 12.50 vs 12.49%、**Duration 1.67ms →
+    0.824ms（2.03×）** ⇒ **同一份 L2 字节、同样 warp，纯延迟暴露差异**。
+  - **判决：机制正结果**——O91 病因被直接检验成立，**warp specialization 是 1 CTA/SM 下恢复
+    吞吐的解锁路径（2.0×、L2 字节不变）**；副结论：仅预取深度只得 1.50×，多出的 1.33× 来自
+    「把 producer 移出 `__syncthreads` 域」。**下一步 = F3b 主体化**（落进 `wgmma2`/`wg3`，红
+    0.43× 的 BM≥128 从延迟 bound 拉回 L2 bound，理论上界 ~默认档 1.7–1.8×）。默认路径一行未改。
+    见 `docs/03` §141、`docs/08` §5.128；原始输出 `src/fp8/fa_bwd_fp8_o120_ws_smoke.out.txt`、
+    `src/fp8/fa_bwd_fp8_o120_ncu_{sync,ws}.out.txt`。
 
 ## 灵感 / backlog
 
