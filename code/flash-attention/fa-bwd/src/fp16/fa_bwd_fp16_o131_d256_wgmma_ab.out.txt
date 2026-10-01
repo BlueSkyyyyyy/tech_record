@@ -1,0 +1,44 @@
+# O131 (第225轮) fp16 head_dim=256 主 kernel 切 BM=64 wgmma（wgmma vs mma 同 binary A/B）
+# 命令: ./fa_bwd_fp16_mma_main.out --dir=<case> --iters=50 [--d256wgm=0]
+# 构建: ARCH='' NVCC_FLAGS='-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda'
+Thu Oct  1 11:55:52 PM CST 2026
+
+===== b1_s1024_h8_d256_causal_fp16 =====
+--- default (wgmma) ---
+[O131] D=256 main backend = wgmma(BN=64)
+[timing] total(3 kernels) 0.2794 ms  30.75 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0499 ms | main 0.2147 ms | convert 0.0148 ms
+--- --d256wgm=0 (mma) ---
+[O131] D=256 main backend = mma
+[timing] total(3 kernels) 0.4553 ms  18.87 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0497 ms | main 0.3903 ms | convert 0.0154 ms
+
+===== b1_s2048_h8_d256_causal_fp16 =====
+--- default (wgmma) ---
+[O131] D=256 main backend = wgmma(BN=64)
+[timing] total(3 kernels) 0.8221 ms  41.80 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1036 ms | main 0.6805 ms | convert 0.0379 ms
+--- --d256wgm=0 (mma) ---
+[O131] D=256 main backend = mma
+[timing] total(3 kernels) 1.3664 ms  25.15 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.1042 ms | main 1.2219 ms | convert 0.0404 ms
+
+===== b1_s1024_h8_d256_full_fp16 =====
+--- default (wgmma) ---
+[O131] D=256 main backend = wgmma(BN=64)
+[timing] total(3 kernels) 0.2765 ms  31.07 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0494 ms | main 0.2120 ms | convert 0.0151 ms
+--- --d256wgm=0 (mma) ---
+[O131] D=256 main backend = mma
+[timing] total(3 kernels) 0.4593 ms  18.70 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0492 ms | main 0.3842 ms | convert 0.0259 ms
+
+===== b1_s1024_h16_d256_kv4_causal_fp16 =====
+--- default (wgmma) ---
+[O131] D=256 main backend = wgmma(BN=64)
+[timing] total(3 kernels) 0.4491 ms  38.25 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0668 ms | main 0.3598 ms | convert 0.0225 ms
+--- --d256wgm=0 (mma) ---
+[O131] D=256 main backend = mma
+[timing] total(3 kernels) 0.7660 ms  22.43 TFLOPS (bwd FLOPs=4BS^2HD)
+[timing] preprocess 0.0676 ms | main 0.6720 ms | convert 0.0264 ms

@@ -47,6 +47,27 @@ static constexpr int WN      = 2;     // N 方向 warp 数（2×2 warp 网格）
 // fixed-latency 占 2.04、LSE Compute 60%）。FA2/FA3 用的是硬件 `exp2f`（MUFU.EX2）。
 // 这里把 `expf`/`logf` 换成硬件内建 `__expf`/`__logf`（MUFU.EX2/LG2，相对误差 ~2^-21），
 // 对 fp16（容差 ~1e-3）绰绰有余。用 `FAST_EXP` 宏做 A/B（-DFAST_EXP=0 走精确版）。
+#ifndef FA_BWD_FP16_MMA_KERNELS_CUH_
+#define FA_BWD_FP16_MMA_KERNELS_CUH_
+
+#include <cuda_runtime.h>
+#include <cuda.h>
+#include <cuda_fp16.h>
+
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+
+// ----------------------------- 编译期常量 -----------------------------
+static constexpr int THREADS = 128;   // 4 warps
+static constexpr int WN      = 2;     // N 方向 warp 数（2×2 warp 网格）
+
+// ----------------------------- O11：快速指数/对数 -----------------------------
+// 原实现用 libdevice 的精确 `expf`/`logf`（软件多项式，~10 多条指令），而 softmax 的
+// exp/log 在主 kernel 与 LSE 预处理里都是**每元素**要算的热点（ncu：main 的 `wait`
+// fixed-latency 占 2.04、LSE Compute 60%）。FA2/FA3 用的是硬件 `exp2f`（MUFU.EX2）。
+// 这里把 `expf`/`logf` 换成硬件内建 `__expf`/`__logf`（MUFU.EX2/LG2，相对误差 ~2^-21），
+// 对 fp16（容差 ~1e-3）绰绰有余。用 `FAST_EXP` 宏做 A/B（-DFAST_EXP=0 走精确版）。
 #ifndef FAST_EXP
 #define FAST_EXP 1
 #endif
@@ -1649,7 +1670,11 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
                          float* __restrict__ dq_acc, float* __restrict__ dk_acc,
                          float* __restrict__ dv_acc, int S, int H, int Hkv, float scale,
                          int causal, int sched) {
-  static_assert(HD == 128, "wgmma 主 kernel 目前只做 HD=128");
+  // O131：放开到 HD=128/256。SW128 tile/描述符/搬运 helper 本就按 `(HD/64)` 参数化，
+  //   唯一的 HD 硬编码是 GEMM3/4/5 与 dQ 累加器的「N=64 半」遍数 `nh<2` —— 泛化为
+  //   `NH=HD/64`（每遍覆盖 1 个 K-major atom = 64 个 head_dim 列，SW128 偏移 +nh*1024）。
+  static_assert(HD == 128 || HD == 256, "wgmma 主 kernel 只做 HD=128/256");
+  constexpr int NH = HD / 64;                          // head_dim 的 64 列组数（128→2、256→4）
   constexpr int BM = 64, BN = 64;
   constexpr int TILE  = (BM / 8) * (HD / 64) * 1024;   // Q/dO SW128 tile（16KB）
   constexpr int KTILE = (BN / 8) * (HD / 64) * 1024;   // K/V SW128 tile（16KB）
@@ -1705,9 +1730,9 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
   }
 
   // dQ 寄存器累加（每个 Q 块唯一 CTA、无跨 CTA 原子）：dqacc[nh][j][q] ↔ wgmma 累加器布局。
-  float dqacc[2][8][4];
+  float dqacc[NH][8][4];
 #pragma unroll
-  for (int nh = 0; nh < 2; ++nh)
+  for (int nh = 0; nh < NH; ++nh)
 #pragma unroll
     for (int j = 0; j < 8; ++j)
 #pragma unroll
@@ -1770,10 +1795,11 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
 
     // ---- O9b-2：(3) dV=Pᵀ·dO、(4) dK=scale·dSᵀ·Q、(5) dQ+=scale·dS·K 全上 wgmma ----
     // 三条 GEMM 的 A/B 均为「K-major 存储 + MN-major 描述符（转置读）」，唯一例外是 (5) 的
-    // A=dS 用 K-major。按 N 半（nh=0/1）分两遍，每遍三条一起发、统一 wait0。
+    // A=dS 用 K-major。按 64 列组（NH=HD/64 遍，每遍 1 个 SW128 atom）分遍，每遍三条
+    // 一起发、统一 wait0。
     wgmma_fence();
 #pragma unroll
-    for (int nh = 0; nh < 2; ++nh) {
+    for (int nh = 0; nh < NH; ++nh) {
       const uint32_t dOn = dOa + (uint32_t)(nh * 1024);
       const uint32_t Qn  = Qa  + (uint32_t)(nh * 1024);
       const uint32_t Kn  = smem_u32(Kt) + (uint32_t)(nh * 1024);
@@ -1830,7 +1856,7 @@ fa_bwd_fp16_wgmma_kernel(const __half* __restrict__ q, const __half* __restrict_
   }
 
 #pragma unroll
-  for (int nh = 0; nh < 2; ++nh)
+  for (int nh = 0; nh < NH; ++nh)
 #pragma unroll
     for (int j = 0; j < 8; ++j)
 #pragma unroll
@@ -5133,6 +5159,8 @@ int main(int argc, char** argv) {
   int lse_tma = -1;
   // O38（fp16 版）：LSE 的 K 维 split（0=auto，1=关；>1=切片数）。仅 TMA/causal 路径生效。
   int lse_split = 0;
+  // O131：head_dim=256 的主 kernel 是否走 BM=64 的 wgmma 版（仅 FA_WGMMA 构建、D==256 生效）。
+  int d256wgm_opt = -1;
   // O9b：主 kernel 是否用 wgmma（仅 FA_WGMMA 构建、D==128 且 sel=(64,64) 时生效）。
   int wgmma_sel = 0;
   // O16：wgmma 主 kernel 是否用「分段 wait_group」重叠 epilogue（-1=自动/开，0=关，1=开）。
@@ -5227,6 +5255,8 @@ int main(int argc, char** argv) {
     else if (a == "--lsetmavarlen") g_lse_tma_varlen = 1;
     else if (a.rfind("--wgmma=", 0) == 0) wgmma_sel = atoi(a.c_str() + 8);
     else if (a == "--wgmma") wgmma_sel = 1;
+    else if (a.rfind("--d256wgm=", 0) == 0) d256wgm_opt = atoi(a.c_str() + 10);
+    else if (a == "--d256wgm") d256wgm_opt = 1;
     else if (a.rfind("--ow=", 0) == 0) ow_opt = atoi(a.c_str() + 5);
     else if (a.rfind("--wg2=", 0) == 0) { wg2_sel = atoi(a.c_str() + 6); wg_forced = true; }
     else if (a.rfind("--wg2split=", 0) == 0) wg2split_sel = atoi(a.c_str() + 11);
@@ -5732,12 +5762,25 @@ int main(int argc, char** argv) {
          ((wg2bn_sel || wg2_sel) && maintma_sel) ? " +maintma" : "",
          (wg2_ksplit_eff > 1) ? " +ksplit" : "");
   printf("[O43] wgmma2 k-split = %d\n", wg2_ksplit_eff);
+  if (D == 256)
+    printf("[O131] D=256 main backend = %s\n", d256wgm_opt != 0 ? "wgmma(BN=64)" : "mma");
   printf("[O65] prologue fusion (zero+delta) = %d\n", (int)(zfuse_sel && delta_warp_sel));
   // O24：D==128 的 wgmma2/wgmma2b 路径里 dQ 唯一拥有 ⇒ 主 kernel 直接写 fp16 `dq`，
   // `convert_kernel` 跳过 dQ（n_q 传 0）。其它路径（mma/wgmma/wgmma4/MLA）仍写 fp32 dq_acc。
   bool dq_direct = false;
   auto run_main = [&]() {
 #ifdef FA_WGMMA
+    // O131：head_dim=256 主 kernel 走 BM=64/BN=64 wgmma 版（见两文件版同处注释）。
+    if (D == 256 && d256wgm_opt != 0) {
+      dim3 g((S + 63) / 64, H, B);
+      if (ow_sel)
+        launch_bwd_wgmma<256, true>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                    d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      else
+        launch_bwd_wgmma<256, false>(g, d_q, d_k, d_v, d_do, d_delta, d_lse, d_dq_acc, d_dk_acc,
+                                     d_dv_acc, S, H, Hkv, scale, (int)causal, sched);
+      return;
+    }
     if (wg4_sel && D == 128) {
       dim3 g((S + 255) / 256, H, B);
       if (wg4seq_sel)

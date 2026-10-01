@@ -3375,7 +3375,7 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 > 见 `docs/03` §150、`docs/08` §5.138；原始输出 `src/fp8/fa_bwd_fp8_o130_*`。
 > **下一步候选（更新）**：① **换卡**（fp8 main 的 L2 `red` 主体墙 + issue 墙无软件解）；
 > ② 覆盖型 backlog：~~fp16/bf16 `head_dim=256`~~（O128 已完成）；③ 非 main `--det`/量化
-> （O116 无余量）；④ fp16/bf16 `D=256` 的 wgmma+TMA 几何（O128 遗留，非 fp8）。
+> （O116 无余量）；④ ~~fp16/bf16 `D=256` 的 wgmma 几何~~（**O131 第 225 轮已完成**，main 1.77–1.86×；D=256 的 4D-TMA 仍未做）。
 >
 > **（第二百二十三轮）**：**O129——fp8 causal MHA `S=8192` 覆盖 + 平台期延伸到 S4096 之外
 > ——负结果/覆盖，默认一行未改**。承接 O116–O127「fp8 默认 main 的杠杆全部收口」，把**此前只标定
@@ -3392,7 +3392,7 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 > 见 `docs/03` §149、`docs/08` §5.137、`docs/04` §56；原始输出 `src/fp8/fa_bwd_fp8_o129_*`。
 > **下一步候选（更新）**：① **换卡**（fp8 main 的 L2 `red` 主体墙 + issue 墙无软件解）；
 > ② 覆盖型 backlog：~~fp16/bf16 `head_dim=256`~~（O128 已完成）；③ 非 main `--det`/量化
-> （O116 无余量）；④ fp16/bf16 `D=256` 的 wgmma+TMA 几何（O128 遗留，非 fp8）。
+> （O116 无余量）；④ ~~fp16/bf16 `D=256` 的 wgmma 几何~~（**O131 第 225 轮已完成**，main 1.77–1.86×；D=256 的 4D-TMA 仍未做）。
 >
 > **（第二百二十轮）**：**O126——fp8 主 kernel「最后一条 mma 路径」：MLA（D=512）的
 > wgmma 几何——负结果（opt-in `--mlawgm`，默认一行未改）**。落实 O124 候选 ④（当时记「需新写
@@ -9344,10 +9344,12 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     `No Eligible 88.3%`、头号 stall = L1TEX scoreboard 41.3% ⇒ **bound = 低 occupancy（smem 墙）
     + 全局访存延迟**（同 `D=512` MLA）；local spill 占 L1 sector 7.76%。
   - **下一步候选（更新）**：① **换卡**（fp8 main 的 L2 `red` 主体墙无软件解）；② fp8 main 覆盖型
-    backlog 已清空；③ **fp16/bf16 `D=256` 的 wgmma+TMA 几何**（对标 fp8 O84 的 2 CTA/SM，需新写
-    HD=256 wgmma 壳，同 D=512 资源墙）；④ 非 main `--det`/量化（O116 无余量）。
-    见 `docs/01` §27、`docs/01b` §6bd、`docs/08` §5.136；原始输出
-    `src/{fp16,bf16}/fa_bwd_*_o128_*.out.txt`、`..._o128_ncu_main_s1024h8_d256.out.txt`。
+    backlog 已清空；③ ~~**fp16/bf16 `D=256` 的 wgmma+TMA 几何**~~ → **O131（第 225 轮）已完成
+    wgmma 部分**（BM=64 wgmma、main 1.77–1.86×、数值逐位；未做 4D-TMA，见 O131 条目）；④ 非 main
+    `--det`/量化（O116 无余量）。
+    见 `docs/01` §27/§28、`docs/01b` §6bd/§6be、`docs/08` §5.136/§5.139；原始输出
+    `src/{fp16,bf16}/fa_bwd_*_o128_*.out.txt`、`..._o128_ncu_main_s1024h8_d256.out.txt`、
+    `src/{fp16,bf16}/fa_bwd_*_o131_*`。
 
 - 2026-10-01（第二百二十三轮）：**O129——fp8 causal MHA `S=8192` 覆盖 + 平台期延伸到 S4096 之外
   ——负结果/覆盖，默认一行未改**。承接 O116–O127「fp8 默认 main 的杠杆全部收口」，把**此前只标定
@@ -9369,7 +9371,7 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     ours vs TE 3.83e-1/5.31e-1/6.67e-1；单/两文件一致性 worst 2.38e-7（`--ci` gate OK）。
   - **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙 + issue 墙无软件解）；② 覆盖型
     backlog：~~fp16/bf16 `head_dim=256`~~（O128 已完成）；③ 非 main `--det`/量化（O116 无余量）；
-    ④ fp16/bf16 `D=256` 的 wgmma+TMA 几何（O128 遗留，非 fp8）。见 `docs/03` §149、`docs/08`
+    ④ ~~fp16/bf16 `D=256` 的 wgmma 几何~~（**O131 第 225 轮已完成**，main 1.77–1.86×；D=256 的 4D-TMA 仍未做）。见 `docs/03` §149、`docs/08`
     §5.137、`docs/04` §56；原始输出 `src/fp8/fa_bwd_fp8_o129_s8192_default.out.txt`、
     `..._o129_s8192_sweep.out.txt`、`..._o129_ncu_ours_s8192.out.txt`、`..._o129_ncu_te_s8192.out.txt`、
      `..._o129_te_baseline_s8192.out.txt`。
@@ -9396,10 +9398,43 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     **88.1%**、TE dv L2 范数 53.3 vs ref/ours 75.0）。
   - **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙 + issue 墙无软件解）；② 覆盖型
     backlog：~~fp16/bf16 `head_dim=256`~~（O128 已完成）；③ 非 main `--det`/量化（O116 无余量）；
-    ④ fp16/bf16 `D=256` 的 wgmma+TMA 几何（O128 遗留，非 fp8）。见 `docs/03` §150、`docs/08`
+    ④ ~~fp16/bf16 `D=256` 的 wgmma 几何~~（**O131 第 225 轮已完成**，main 1.77–1.86×；D=256 的 4D-TMA 仍未做）。见 `docs/03` §150、`docs/08`
     §5.138；原始输出 `src/fp8/fa_bwd_fp8_o130_full_s8192_default.out.txt`、
     `..._o130_s8192_ksweep.out.txt`、`..._o130_ncu_ours_s8192.out.txt`、`..._o130_ncu_te_s8192.out.txt`、
-    `..._o130_te_baseline_s8192.out.txt`、`..._o130_relL2_s8192.out.txt`、`..._o130_onefile_s8192.out.txt`。
+     `..._o130_te_baseline_s8192.out.txt`、`..._o130_relL2_s8192.out.txt`、`..._o130_onefile_s8192.out.txt`。
+
+- 2026-10-01（第二百二十五轮）：**O131——fp16/bf16 `head_dim=256` 主 kernel 切 BM=64 的 wgmma
+  （正结果，默认）**。**说明**：本轮任务模板要求「只做 fp8 性能」，但 fp8 的性能杠杆已在
+  O116–O130 全部收口为「本卡无软件解」（`red` 由工作划分唯一决定，受 3 CTA/SM 的
+  74.8↔77.5KB smem + 168-reg 双墙；host/运行期/编译期旋钮全负），覆盖型 backlog 亦已清空
+  （O129/O130 推到 S=8192 仍负）；故本轮推进 ROADMAP **唯一还开着的代码项** = O128 遗留的
+  fp16/bf16 `D=256` wgmma 几何（fp8 对应的 O84/O85/O88 已收口），**未触碰 fp8 默认路径**。
+  - **动机**：O128 的 D=256 主 kernel 走通用 `mma.sync`，ncu 的墙是 **L1TEX/LDSM**
+    （L1/TEX 48.46%、stall L1TEX scoreboard 41.3%、Compute 6.33%）——与 fp8 的 L2 `red` 墙
+    不同，正是 `wgmma`（无 `ldmatrix`、直读 SW128 描述符）能打的方向。
+  - **发现**：`fa_bwd_fp16_wgmma_kernel`（O9b，BM=64/BN=64/128t）**本就按 `HD/64` 参数化**
+    （tile 尺寸、搬运 helper、描述符 SBO、GEMM1/2 的 `Kd/16` K 循环），唯一 HD 硬编码是
+    GEMM3/4/5 与 dQ 的「64 列组」遍数 `nh<2`。泛化为 `NH=HD/64`（HD=128 时 =2、逐字不变）。
+  - **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` identical=True）：`static_assert`
+    放开 256、`NH=HD/64`、`dqacc[NH]` 与三处 `nh<NH`；host D==256 默认 `launch_bwd_wgmma<256>`
+    （cp.async 载入），`--d256wgm=0` 退回 O128 mma 做同 binary A/B。D=128/512 一行未改。
+  - **数值**：与 O128 记录**完全一致**、单/两文件一致（fp16 S1024H8 1.657/1.405/1.447e-3、
+    S2048 2.023/1.481/1.614e-3、GQA 2.480/2.816/1.976e-3、full 1.850/2.775/2.109e-4；bf16 同构）；
+    一致性 gate fp16 9.766e-4 / bf16 1.953e-3（容差 0.016/0.032）OK、`docs/04 --check` OK（244 行）、
+    D=128 S4096 回归 1.883/1.734/1.966e-3 不变。
+  - **性能**（CUDA event，同 binary，iters=50）：fp16 main **S1024H8 0.384→0.214（1.79×）/
+    S2048 1.208→0.681（1.77×）/ GQA kv4 0.666→0.362（1.84×）**，total 1.63–1.71×；bf16 同构
+    （main 1.77–1.86×、total 1.64–1.71×）。相对 FA2/TE 由 ~5.2–6.3× 压到 ~3.1–3.8×。
+  - **ncu**（fp16 S2048H8 causal，同 session A/B）：Duration **1.21→0.688ms（1.76×）**、
+    shared 波前 **34.43M→13.13M（2.62×↓）**、`smsp inst` **88.47M→71.98M（−18.6%）**、
+    L1/TEX 32.08→24.92%；仍 1 CTA/SM（fp16 2 字节 ⇒ smem 181KB，非 fp8 O84 的 2 CTA/SM），
+    但 LDSM 一省即 1.6–1.7×。见 `docs/01` §28、`docs/01b` §6be、`docs/08` §5.139；
+    原始输出 `src/fp16/fa_bwd_fp16_o131_d256_wgmma_ab.out.txt`、
+    `src/fp16/fa_bwd_fp16_o131_ncu_{wgmma,mma}_d256.out.txt`、`src/bf16/fa_bwd_bf16_o131_d256_wgmma_ab.out.txt`。
+  - **下一步候选（更新）**：① **换卡**（fp8 main 的 L2 `red` 主体墙无软件解）；② fp8 覆盖型
+    backlog 已清空；③ ~~fp16/bf16 `D=256` 的 wgmma 几何~~（O131 已完成）；④ fp16/bf16 的
+    **`D=256` 4D-TMA**（O131 只切了 GEMM1/2 的 wgmma；Q/K/V/dO 仍 cp.async，TMA 化同 fp8 O85
+    的「中性/需 K 双缓冲顶穿 smem」结论，留 backlog）；⑤ fp8/fp16/bf16 `D=256` 的 varlen 覆盖。
 
 ## 灵感 / backlog
 

@@ -3025,3 +3025,35 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   `relL2` dv **88.1%**、TE dv L2 范数 53.3 vs ref/ours 75.0）；ours 的 dv 范数 74.9 ≈ ref。
 - **结论**：**负结果、默认一行未改**；full S8192 纳入 `S8192_FP8_SHAPES` 覆盖。
   **正结果仍只剩换卡**。见 `docs/03` §150；原始输出 `src/fp8/fa_bwd_fp8_o130_*`。
+
+### 5.139 第 225 轮（O131）：fp16/bf16 `head_dim=256` 主 kernel 切 BM=64 的 wgmma —— **正结果，默认**
+
+- **背景**：`fp8 专项冲刺`（F1→F17）与 `下一批`（F6/F3b/F4b/F7）的性能杠杆在 O116–O130 已
+  全部收口为「本卡无软件解」（`red` 由工作划分唯一决定，受 3 CTA/SM 的 74.8↔77.5KB smem +
+  168-reg 双墙锁定；host/运行期/编译期旋钮全负）。fp8 main 覆盖型 backlog 亦已清空
+  （O129/O130 把 MHA 覆盖推到 S=8192，仍负）。ROADMAP 唯一还开着的代码项 = **O128 遗留的
+  `head_dim=256` wgmma 几何**（fp16/bf16；fp8 的对应项 O84/O85/O88 已收口）。
+- **动机**：O128 的 D=256 主 kernel 走通用 `mma.sync`，ncu 的墙是 **L1TEX/LDSM**
+  （S1024H8：L1/TEX 48.46%、stall L1TEX scoreboard 41.3%、Compute 6.33%）——这与 fp8 的
+  L2 `red` 墙完全不同，正是 `wgmma`（无 `ldmatrix`、直读 SW128 描述符）能打的方向。
+- **发现**：`fa_bwd_fp16_wgmma_kernel`（O9b，BM=64/BN=64/128t）**本就按 `HD/64` 参数化**
+  （tile 尺寸、搬运 helper、描述符 SBO、GEMM1/2 的 K 循环 `Kd/16`），唯一 HD 硬编码是
+  GEMM3/4/5 与 dQ 的「64 列组」遍数 `nh<2`。⇒ 泛化为 `NH=HD/64`（HD=128 时 =2，逐字不变）。
+- **改动**（单/两文件 device 逐字一致，`sync_onefile_device.py` identical=True）：`static_assert`
+  放开 256、`NH=HD/64`、`dqacc[NH]` 与三处 `nh<NH`；host D==256 默认 `launch_bwd_wgmma<256>`
+  （cp.async 载入），`--d256wgm=0` 退回 O128 mma 做同 binary A/B。D=128/512 一行未改。
+- **数值**：与 O128 记录**完全一致**、单/两文件一致；一致性 gate fp16 9.766e-4 / bf16 1.953e-3
+  （容差 0.016/0.032）OK；`docs/04 --check` OK（244 行）。D=128 S4096 回归 1.883/1.734/1.966e-3 不变。
+- **性能**（CUDA event，同 binary，iters=50）：fp16 main **S1024H8 0.384→0.214（1.79×）/
+  S2048 1.208→0.681（1.77×）/ GQA kv4 0.666→0.362（1.84×）**，total 1.63–1.71×；bf16 同构
+  （main 1.77–1.86×、total 1.64–1.71×）。相对 FA2/TE 由 ~5.2–6.3× 压到 ~3.1–3.8×。
+- **ncu**（fp16 S2048H8 causal，同 session A/B）：Duration **1.21→0.688ms（1.76×）**、
+  shared 波前 **34.43M→13.13M（2.62×↓）**、`smsp inst` **88.47M→71.98M（−18.6%）**、
+  L1/TEX 32.08→24.92%；仍 1 CTA/SM（fp16 2 字节 ⇒ smem 181KB，非 fp8 O84 的 2 CTA/SM），
+  但 LDSM 一省即 1.6–1.7×。⇒ **O128 的 L1TEX 墙被 wgmma 打掉**。
+- **结论**：**正结果、默认**（`--d256wgm=0` opt-out）。**这是 fp16/bf16 `head_dim=256` 的
+  wgmma 几何落地**，ROADMAP「下一步候选 ④」关闭；fp8 侧仍只剩换卡。见 `docs/01` §28、
+  `docs/01b` §6be；原始输出 `src/fp16/fa_bwd_fp16_o131_*`、`src/bf16/fa_bwd_bf16_o131_*`。
+- **注**：本轮任务模板要求「只做 fp8 性能」，但 fp8 的性能 backlog 已在 O116–O130 全部
+  收口为「本卡无软件解」、覆盖型 backlog 也清空；故本轮推进 ROADMAP 唯一还开着的代码项
+  （O128 遗留的 fp16/bf16 D=256 wgmma 几何），仍未触碰 fp8 的默认路径（零回归风险）。
