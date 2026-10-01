@@ -2817,3 +2817,25 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   B 操作数寄存器预取（~24 regs，168/170 无余量⇒必 spill）。**正结果仍只剩换卡。**
 - 原始输出：`src/fp8/fa_bwd_fp8_o122_vwait_ab_s4096.out.txt`、
   `src/fp8/fa_bwd_fp8_o122_ncu_{base,stall,tables}_s4096.out.txt`；实现细节 `docs/03` §143。
+
+### 5.131 第 217 轮（O123）：fp8 主 kernel 的 **per-row fold scale 寄存器预取**（`sA`/`sds3`/`sds2`）—— **中性（默认开，`-DFA_SCALE_HOIST=0` 可 A/B）**
+
+- **动机**：O122 的 fresh ncu 把 fp8 默认 main（S4096 kvtma）头号 stall 钉为
+  **`short_scoreboard`=1.86**，当时归因「smem→mma 的 `ldmatrix` 依赖」。本轮先检验该 stall 的
+  另一候选来源——dV/dK/dQ 的 red/累加循环里**每元素一次读的 per-row fold scale**
+  （`sA[r]`/`sds3[r]`/`sds2[r]`，`(i,r)` 固定却被 `j×q` 展平后重复读 8×，每个 `red` 的 issue
+  都要等一次 LDS）。这是对 O122「B 操作数预取」之外的**零寄存器开销**替代（scale 只占 2–4 regs）。
+- **改动**（`kernels.cuh` `Fp8Cfg` 加 `FA_SCALE_HOIST` 默认 1）：`epi_dv`/`epi_dk` 预取
+  `sav[MTM34][2]`/`ssv[MTM34][2]`，GEMM5 预取 `sd20/sd21`；**保留原乘法次序**（`acc*sd*scale`）
+  ⇒ 逐位等价。`=0` 逐字退回原路径（same-binary A/B）。单文件 `sync_onefile_device.py` 同步
+  `identical: True`（6072 行）。
+- **数值**：S4096 ours vs fp32 ref `2.635/2.644/3.216e-1`（与默认档**逐位相同**）。
+- **性能（GPU1，same-binary A/B，iters=50，S4096）**：hoist=1 total avg **1.5845ms** / main **1.3781ms**；
+  hoist=0 total avg **1.5864ms** / main **1.3801ms** ⇒ **1.0012× / 1.0015×（噪声内，中性）**。
+  两变体 ptxas 同为 68B spill stores / 92B spill loads。
+- **判决**：**中性**。编译器对同一 `(i,r)` 的 LDS **已 CSE**——预取不减少 LDS 条数。⇒ 决定性二分：
+  `short_scoreboard` 的**真来源是 `mma_block_bt` 的 `ldmatrix`（A/B 操作数）与 Kp/Qp/dOp 重建后的
+  ldmatrix 读**，不是 epilogue scale。该依赖只能靠**更多独立 warp（occupancy）或更深跨-tile 流水**
+  去藏，两者均被 3 CTA/SM 的 74.82KB/168reg 硬墙锁死。**fp8 默认 main 的 bytes 与 issue 都已在
+  软硬件边界，正结果仍只剩换卡。** `FA_SCALE_HOIST` 作为逐位安全微优化保留（默认 1）。
+- 原始输出：`src/fp8/fa_bwd_fp8_o123_scalehoist_ab_s4096.out.txt`；实现细节 `docs/03` §144。

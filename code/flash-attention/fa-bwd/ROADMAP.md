@@ -3331,7 +3331,19 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 
 ## 下一步（明确到可执行）
 
-> **最新（第二百一十六轮）**：**O122——fp8 主 kernel 的「V 等待前移」（KVTMA tile 边界去关键化）
+> **最新（第二百一十七轮）**：**O123——fp8 主 kernel 的 per-row fold scale 寄存器预取
+> （`sA`/`sds3`/`sds2`）——中性（默认开 `FA_SCALE_HOIST=1`，`=0` 可 A/B）**。承接 O122 ncu 的
+> 头号 stall `short_scoreboard`=1.86，做**决定性二分**：排除「epilogue 的 per-row scale 重复
+> LDS」假设（编译器已 CSE）——真来源是 `mma_block_bt` 的 `ldmatrix` 与 Kp/Qp/dOp 重建后的
+> ldmatrix 读。**数值逐位不变**（`acc*sd*scale` 次序保持）；**性能 1.0012×（same-binary A/B 3 跑，
+> 噪声内，中性）**；单/两文件 `identical: True`。⇒ 与 O116/O117/O122 合并：**fp8 默认 main 的
+> bytes 与 issue 都已在软硬件边界，正结果仍只剩换卡**。见 `docs/03` §144、`docs/08` §5.131；
+> 原始输出 `src/fp8/fa_bwd_fp8_o123_scalehoist_ab_s4096.out.txt`。
+> **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙 + issue 墙均无软件解）；
+> ② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；
+> ③ 非 main 的 `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）。
+>
+> **（第二百一十六轮）**：**O122——fp8 主 kernel 的「V 等待前移」（KVTMA tile 边界去关键化）
 > ——中性/负结果，opt-in `FA_VWAIT_TOP`、默认关**。落实第 215 轮『候选 ④』。K 双缓冲故 K 不等，
 > 但 **V 单缓冲**（`Ap` 复用 `Vs`）⇒ V[nt+1] 只能在 tile 末发起、紧接着在 tile 末等（中间仅 K[nt+1]
 > 的 wait + Kp 重建）⇒ V 的 TMA 延迟暴露在边界临界路径。把该 `mbar_wait` 前移到**下一 tile 的
@@ -9103,6 +9115,29 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     边界（`short_scoreboard` 再压需 B 操作数寄存器预取 ~24 regs，168/170 无余量 ⇒ 必 spill）。
     **正结果仍只剩换卡**。见 `docs/03` §143、`docs/08` §5.130；原始输出
     `src/fp8/fa_bwd_fp8_o122_vwait_ab_s4096.out.txt`、`..._o122_ncu_{base,stall,tables}_s4096.out.txt`。
+
+- 2026-10-01（第二百一十七轮）：**O123——fp8 主 kernel 的 per-row fold scale 寄存器预取
+  （`sA`/`sds3`/`sds2`）——中性（默认开，`-DFA_SCALE_HOIST=0` 可 A/B）**。承接 O122 的 fresh ncu
+  （头号 stall `short_scoreboard`=1.86，归因「smem→mma 的 ldmatrix 依赖」），本轮做**决定性二分**：
+  检验该 stall 的另一候选来源——dV/dK/dQ 的 red/累加循环里**每元素一次读的 per-row fold scale**
+  （`(i,r)` 固定却被 `j×q` 展平后重复读 8×，每个 `red` 的 issue 都要等一次 LDS）。改动：
+  `epi_dv`/`epi_dk` 预取 `sav[MTM34][2]`/`ssv[MTM34][2]`、GEMM5 预取 `sd20/sd21`，**保留原乘法
+  次序（`acc*sd*scale`）⇒ 逐位等价**；`FA_SCALE_HOIST`（默认 1）`=0` 逐字退回。单/两文件 device
+  逐字一致（`sync_onefile_device.py` `identical: True`，6072 行）。
+  - **数值**：S4096 ours vs fp32 ref `2.635/2.644/3.216e-1`（与默认档**逐位相同**）。
+  - **性能（GPU1，same-binary A/B，iters=50，S4096 causal H16）**：hoist=1 total avg **1.5845ms** /
+    main **1.3781ms**；hoist=0 total avg **1.5864ms** / main **1.3801ms** ⇒ **1.0012×/1.0015×
+    （噪声内，中性）**；两变体 ptxas 同为 68B spill stores / 92B spill loads。
+  - **判决**：**中性**。编译器对同一 `(i,r)` 的 LDS **已 CSE** ⇒ 预取不减少 LDS 条数；
+    `short_scoreboard` 的**真来源是 `mma_block_bt` 的 `ldmatrix`（A/B 操作数）与 Kp/Qp/dOp
+    重建后的 ldmatrix 读**，不是 epilogue scale。该依赖只能靠更多独立 warp（occupancy）或更深
+    跨-tile 流水去藏，均被 3 CTA/SM 的 74.82KB/168reg 硬墙锁死。**fp8 默认 main 的 bytes（L2
+    `red`）与 issue（`short_scoreboard`+`wait`）都已在边界，正结果仍只剩换卡。** `FA_SCALE_HOIST`
+    作为逐位安全微优化保留（默认 1）。见 `docs/03` §144、`docs/08` §5.131；原始输出
+    `src/fp8/fa_bwd_fp8_o123_scalehoist_ab_s4096.out.txt`。
+  - **下一步候选（更新）**：① **换卡**（main 的 L2 `red` 主体墙 + `short_scoreboard`/`wait` 的
+    issue 墙均无软件解）；② 覆盖型 backlog：**fp16/bf16 的 `head_dim=256`**（唯一明确的 `[ ]` 项）；
+    ③ 非 main 的 `--det`/量化进一步并行化（O116 已证 host 旋钮无余量）。
 
 ## 灵感 / backlog
 
