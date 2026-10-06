@@ -38,7 +38,7 @@ categories: ["算法"]
 | 11 | [回溯与递归]({{< relref "leetcode-11-backtracking" >}}) | 决策树、剪枝、排列组合 | 连载中 |
 | 12 | [分治法]({{< relref "leetcode-12-divide-conquer" >}}) | 归并、划分、递归分解 | 连载中 |
 | 13 | [动态规划]({{< relref "leetcode-13-dynamic-programming" >}}) | 状态设计、转移、背包/序列/区间 | 连载中 |
-| 14 | 贪心 | 局部最优、交换论证 | 计划中 |
+| 14 | [贪心]({{< relref "leetcode-14-greedy" >}}) | 局部最优、交换论证 | 连载中 |
 | 15 | 字符串 | 匹配、编辑距离、回文 | 计划中 |
 | 16 | 位运算 | 位技巧、状态压缩 | 计划中 |
 
