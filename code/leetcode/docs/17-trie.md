@@ -8,7 +8,9 @@
 这种结构最大的价值，是把「字符串的集合」从「一堆彼此独立的值」变成了「一棵能按前缀剪枝
 的树」。因此只要题目里出现**前缀、补全、通配符、词根替换、按前缀聚合**这些信号，就应该先想
 前缀树。本篇先用 208 立起最基础的节点与三个操作，再用 211 加上通配符、用 212 把它和网格
-回溯拼在一起，最后用 648 与 677 展示它作为「索引结构」的两种常见用法。
+回溯拼在一起，再用 648 与 677 展示它作为「索引结构」的两种常见用法，最后用 720、1268、
+1032、745、421 把「沿前缀找最长链、节点挂 Top-K、反向匹配后缀、同时匹配前后缀、按位贪心」
+这几副新面孔补齐。
 
 | 模式 | 题目 | 难度 |
 |---|---|---|
@@ -17,6 +19,11 @@
 | 模式三：前缀树 + 网格回溯 | 212. 单词搜索 II | 困难 |
 | 模式四：找最短词根 | 648. 单词替换 | 中等 |
 | 模式五：维护前缀聚合值 | 677. 键值映射 | 中等 |
+| 模式六：沿前缀树找最长链 | 720. 词典中最长的单词 | 简单 |
+| 模式七：节点挂 Top-K 推荐 | 1268. 搜索推荐系统 | 中等 |
+| 模式八：反向插入做后缀匹配 | 1032. 字符流 | 困难 |
+| 模式九：双向前缀（前缀 + 后缀） | 745. 前缀和后缀搜索 | 困难 |
+| 模式十：0/1 字典树与按位贪心 | 421. 数组中两个数的最大异或值 | 中等 |
 
 读这几题时抓住一条主线：**前缀树节点不是存「一个单词」，而是存「走到这里的一条前缀」**。
 理解了这一点，节点的 `children`（下一个字符到子节点）、`is_end`（是否在此结束），以及
@@ -583,6 +590,494 @@ class MapSum {
 
 ---
 
+---
+
+## 模式六：沿前缀树找最长链
+
+**适用信号**：要求在字符串集合里找一个最长的词，且它的**每一个前缀**也都必须是集合里的词。
+
+**核心动作**：把词全部建树后做一次 DFS，只沿着「也是单词」的孩子往下走，走出来的路径天然
+满足「每层前缀都是单词」。
+
+### 720. 词典中最长的单词（简单）
+
+**题目**：给定单词数组 `words`，找出其中能由其它单词「每次加一个字母」逐步拼成的最长单词
+（即每个前缀都在 `words` 里），并列时取字典序最小者；没有则返回空串。
+
+**思路**：建树时在单词结尾打 `is_end` 标记。从根 DFS：若当前孩子带 `is_end`（说明它是一个
+词），才递归下去；每走到一个词节点就按「更长，或等长但字典序更小」更新答案。起点是空串，
+所以任何以 `is_end` 开头的第一层字母都能作为链的开端。
+
+**为什么可以整枝砍掉**：题目要求每一步的中间结果都是词。若某个孩子不是词，说明从它再往下
+的任何串都会出现「前缀不是词」这一步，全都不合法，于是直接不进入这条分支。这和 212 用
+「当前前缀是否在树上」剪枝是同一个思路，只不过这里的剪枝条件更强——必须是完整单词。
+
+**代码**（完整可运行版见 `src/trie/longest_word.py` / `.cpp`）：
+
+```python
+def longest_word(words):
+    trie = {}
+    for word in words:
+        node = trie
+        for ch in word:
+            node = node.setdefault(ch, {})
+        node["#"] = True
+
+    best = ""
+
+    def dfs(node, path):
+        nonlocal best
+        if "#" in node:
+            if len(path) > len(best) or (len(path) == len(best) and path < best):
+                best = path
+        for ch, child in node.items():
+            if ch != "#" and "#" in child:
+                dfs(child, path + ch)
+
+    dfs(trie, "")
+    return best
+```
+
+```cpp
+struct TrieNode {
+    std::array<TrieNode *, 26> child;
+    bool isEnd = false;
+    TrieNode() { child.fill(nullptr); }
+};
+
+class LongestWord {
+  public:
+    std::string longestWord(const std::vector<std::string> &words) {
+        TrieNode *root = new TrieNode();
+        for (const std::string &word : words) {
+            TrieNode *node = root;
+            for (char ch : word) {
+                int i = ch - 'a';
+                if (!node->child[i]) node->child[i] = new TrieNode();
+                node = node->child[i];
+            }
+            node->isEnd = true;
+        }
+        std::string best;
+        dfs(root, "", best);
+        return best;
+    }
+
+  private:
+    void dfs(TrieNode *node, const std::string &path, std::string &best) {
+        if (node->isEnd) {
+            if (path.size() > best.size() ||
+                (path.size() == best.size() && path < best))
+                best = path;
+        }
+        for (int i = 0; i < 26; ++i) {
+            TrieNode *child = node->child[i];
+            if (child && child->isEnd) dfs(child, path + char('a' + i), best);
+        }
+    }
+};
+```
+
+- **复杂度**：建树 O(总字符数)；DFS O(总字符数)。空间 O(总字符数)。
+- **易错点**：判严格更长 / 等长更小时要用「长优先、字典序次之」的两段比较，只比长度会
+  漏掉并列取字典序的要求；DFS 向下时只走 `is_end` 孩子，但「更新答案」要在进入节点后
+  先做（根不是单词，第一次更新发生在第一层）；C++ 递归里 `path + char(...)` 要传新串，
+  不要直接改原串。
+- **相似题**：212 也是「沿树剪枝」，但那里的条件弱一些（前缀在树上即可）；1268 是同一棵树
+  上按前缀取推荐；它体现的「顺序即长度」与 648 找最短词根正好一头一尾。
+
+---
+
+## 模式七：节点挂 Top-K 推荐
+
+**适用信号**：对每个前缀，都要返回「字典序最小的若干个」候选词，且结果随前缀加长而收缩。
+
+**核心动作**：把候选词排序后建树，在每个节点上缓存「最早经过这里的至多 K 个词」，查询时
+沿前缀下行、把节点缓存直接抄出来。
+
+### 1268. 搜索推荐系统（中等）
+
+**题目**：给定产品 `products` 与搜索词 `search_word`，用户每多输入一个字母，返回以当前
+输入为前缀、字典序最小的至多 3 个产品（不足 3 个就返回全部）。
+
+**思路**：先把 `products` 按字典序排序，再插入前缀树。每到一层就往该节点的推荐列表里追加
+当前产品，列表满 3 个就不再追加。查询时逐字符沿树下行，把当前节点的列表复制进答案；一旦
+某个字符走不通，后面所有更长前缀都不存在，直接补空列表。
+
+**为什么排个序就够了**：插入顺序就是字典序，某个节点上的 3 个名额会被字典序最小的 3 个词
+优先占满；后来的词字典序不可能更小，自然挤不进来。于是每个节点缓存的就是「该前缀下字典序
+最小的至多 3 个」，查询无需再排序。这也是「用插入顺序预计算、把查询变廉价」的常见套路。
+
+**代码**（完整可运行版见 `src/trie/suggested_products.py` / `.cpp`）：
+
+```python
+def suggested_products(products, search_word):
+    trie = {}
+    for product in sorted(products):
+        node = trie
+        for ch in product:
+            node = node.setdefault(ch, {})
+            node.setdefault("_suggest", [])
+            if len(node["_suggest"]) < 3:
+                node["_suggest"].append(product)
+
+    result = []
+    node = trie
+    for ch in search_word:
+        if node is not None and ch in node:
+            node = node[ch]
+            result.append(list(node["_suggest"]))
+        else:
+            node = None
+            result.append([])
+    return result
+```
+
+```cpp
+struct TrieNode {
+    std::array<TrieNode *, 26> child;
+    std::vector<std::string> suggest;
+    TrieNode() { child.fill(nullptr); }
+};
+
+class Solution {
+  public:
+    std::vector<std::vector<std::string>>
+    suggestedProducts(std::vector<std::string> products, const std::string &searchWord) {
+        std::sort(products.begin(), products.end());
+        TrieNode *root = new TrieNode();
+        for (const std::string &product : products) {
+            TrieNode *node = root;
+            for (char ch : product) {
+                int i = ch - 'a';
+                if (!node->child[i]) node->child[i] = new TrieNode();
+                node = node->child[i];
+                if (node->suggest.size() < 3) node->suggest.push_back(product);
+            }
+        }
+
+        std::vector<std::vector<std::string>> result;
+        TrieNode *node = root;
+        for (char ch : searchWord) {
+            if (node) node = node->child[ch - 'a'];
+            result.push_back(node ? node->suggest : std::vector<std::string>{});
+        }
+        return result;
+    }
+};
+```
+
+- **复杂度**：排序 O(n log n)；建树 O(总字符数)；查询 O(L + 答案总量)。空间 O(总字符数)。
+- **易错点**：必须**先排序**再插入，否则节点缓存的不一定是字典序最小的 3 个；节点里的
+  推荐列表要在每层都追加（不是只在词尾）；查询结果要返回列表的**副本**，避免后续被改动；
+  C++ 里 `node->suggest` 是引用，输出时按值拷贝成新 `vector`。
+- **相似题**：720 在同一棵树上找最长链；211 是它的通配符版本；347 前 K 个高频元素
+  （`heap` 篇）是「在另一维度上取 Top-K」，思路都是「提前维护一小撮候选」。
+
+---
+
+## 模式八：反向插入做后缀匹配
+
+**适用信号**：查询「当前流 / 串的某个**后缀**是否命中给定单词」，且查询是流式的、一次
+只追加一个字符。
+
+**核心动作**：把单词**倒着**插入前缀树，于是「后缀匹配」变成「反转串的前缀匹配」，查询
+时从最新字符往前沿树走即可。
+
+### 1032. 字符流（困难）
+
+**题目**：初始化给一批单词。每次 `query(letter)` 往流末尾追加一个字母，判断流中是否存在
+某个后缀恰好等于给定单词之一。
+
+**思路**：建树时把每个单词逆序插入。查询时先把新字母追加进流，然后从流的最后一个字符开始
+往前遍历，同时沿树下行：一旦遇到 `is_end` 节点，说明这一段后缀正好是一个单词，返回真；
+中途某个字符不在树上就返回假。
+
+**为什么倒着插**：题目的关键词是「后缀」，而后缀的定义就是「从末尾往前读」。把单词反转后
+存进前缀树，流的一个后缀就对应反转流的一个前缀，于是又能用「沿树下行、查 `is_end`」的
+标准手法。反过来若正着插、正着走，就得枚举所有起点，代价大得多。
+
+**为什么单次查询不会随流变长**：从末尾往前的路径一旦在树上断开就立即返回，而树的高度就是
+最长单词的长度，所以遍历深度有上界，与流的总长无关。流本身只需一直往后追加字符。
+
+**代码**（完整可运行版见 `src/trie/stream_checker.py` / `.cpp`）：
+
+```python
+class StreamChecker:
+    def __init__(self, words):
+        self.trie = {}
+        for word in words:
+            node = self.trie
+            for ch in reversed(word):
+                node = node.setdefault(ch, {})
+            node["#"] = True
+        self.stream = []
+
+    def query(self, letter):
+        self.stream.append(letter)
+        node = self.trie
+        for ch in reversed(self.stream):
+            if ch not in node:
+                return False
+            node = node[ch]
+            if node.get("#"):
+                return True
+        return False
+```
+
+```cpp
+struct TrieNode {
+    std::array<TrieNode *, 26> child;
+    bool isEnd = false;
+    TrieNode() { child.fill(nullptr); }
+};
+
+class StreamChecker {
+  public:
+    explicit StreamChecker(const std::vector<std::string> &words) {
+        root_ = new TrieNode();
+        for (const std::string &word : words) {
+            TrieNode *node = root_;
+            for (auto it = word.rbegin(); it != word.rend(); ++it) {
+                int i = *it - 'a';
+                if (!node->child[i]) node->child[i] = new TrieNode();
+                node = node->child[i];
+            }
+            node->isEnd = true;
+        }
+    }
+
+    bool query(char letter) {
+        stream_ += letter;
+        TrieNode *node = root_;
+        for (auto it = stream_.rbegin(); it != stream_.rend(); ++it) {
+            int i = *it - 'a';
+            if (!node->child[i]) return false;
+            node = node->child[i];
+            if (node->isEnd) return true;
+        }
+        return false;
+    }
+
+  private:
+    TrieNode *root_ = nullptr;
+    std::string stream_;
+};
+```
+
+- **复杂度**：初始化 O(总字符数)；每次查询 O(L)，L 为最长单词长度。空间 O(总字符数)。
+- **易错点**：`is_end` 要在每走一步后立刻检查，因为「先出现的更短后缀」也算命中；返回假
+  不能清空流，流是持续累积的；单个字母的单词也要能命中（它是自己的后缀）。
+- **相似题**：745 也把后缀搬进前缀树，但要多匹配一个前缀；720 用的是正向插入。此题是
+  「后缀 → 反向 → 前缀」这条转化的最纯粹例子。
+
+---
+
+## 模式九：双向前缀（前缀 + 后缀）
+
+**适用信号**：同时要求「以某前缀开头」且「以某后缀结尾」，还要在所有命中的词里取某个最优。
+
+**核心动作**：对每个词枚举它的所有后缀 `s`，把 `s + 分隔符 + word` 插入前缀树，插入时沿路
+记录下标；查询走 `suffix + 分隔符 + prefix`，一步到位验证两个条件。
+
+### 745. 前缀和后缀搜索（困难）
+
+**题目**：初始化给一批单词。查询 `f(prefix, suffix)` 返回「既是 `prefix` 开头、又是 `suffix`
+结尾」的单词中下标最大者的下标，没有返回 -1。
+
+**思路**：分隔符选一个不会出现在单词里的字符（这里用 `'{'`，排在 `'z'` 之后）。对每个词、
+每个后缀 `s`，插入 `s + '{' + word`，沿途每个节点都记下当前下标；因为按下标从小到大插入，
+节点上留下的就是最大下标。查询时走 `suffix + '{' + prefix`：能走通就返回终点记录的下标，
+走不通返回 -1。
+
+**为什么一条路径能同时表达前后缀**：插入的键是 `s + '{' + word`，分隔符把「后缀」和「词身」
+分开。查询键里 `'{'` 必须正好落在它与插入键相同的位置上，才能走过分隔符——这就要求插入键的
+后缀 `s` 恰是查询的 `suffix`。过了分隔符之后继续走 `prefix`，就是在要求 `word` 以 `prefix`
+开头。于是终点节点记录的，正是「后缀、前缀都匹配」的词里下标最大的那个。
+
+**为什么不用两次查询求交集**：分别查前缀、后缀会得到两个集合，再按下标求交既要做集合运算、
+又要额外存每个词的索引；把两个条件拼成一条键，一次查询就解决，代价只是初始化时多枚举后缀。
+
+**代码**（完整可运行版见 `src/trie/word_filter.py` / `.cpp`）：
+
+```python
+class WordFilter:
+    def __init__(self, words):
+        self.trie = {}
+        for index, word in enumerate(words):
+            for start in range(len(word) + 1):
+                key = word[start:] + "{" + word
+                node = self.trie
+                for ch in key:
+                    node = node.setdefault(ch, {})
+                    node["#"] = index
+
+    def f(self, prefix, suffix):
+        node = self.trie
+        for ch in suffix + "{" + prefix:
+            if ch not in node:
+                return -1
+            node = node[ch]
+        return node.get("#", -1)
+```
+
+```cpp
+struct TrieNode {
+    std::array<TrieNode *, 27> child;  // 0..25 为 a..z，26 存分隔符 '{'
+    int best = -1;
+    TrieNode() { child.fill(nullptr); }
+};
+
+class WordFilter {
+  public:
+    explicit WordFilter(const std::vector<std::string> &words) {
+        root_ = new TrieNode();
+        for (int index = 0; index < static_cast<int>(words.size()); ++index) {
+            const std::string &word = words[index];
+            for (size_t start = 0; start <= word.size(); ++start) {
+                std::string key = word.substr(start) + "{" + word;
+                TrieNode *node = root_;
+                for (char ch : key) {
+                    int idx = indexOf(ch);
+                    if (!node->child[idx]) node->child[idx] = new TrieNode();
+                    node = node->child[idx];
+                    node->best = index;
+                }
+            }
+        }
+    }
+
+    int f(const std::string &prefix, const std::string &suffix) const {
+        TrieNode *node = root_;
+        for (char ch : suffix + "{" + prefix) {
+            if (!node) return -1;
+            node = node->child[indexOf(ch)];
+        }
+        return node ? node->best : -1;
+    }
+
+  private:
+    TrieNode *root_ = nullptr;
+
+    static int indexOf(char ch) { return ch == '{' ? 26 : ch - 'a'; }
+};
+```
+
+- **复杂度**：初始化枚举所有后缀，O(总字符数²)（记为 O(N)）；查询 O(|prefix| + |suffix|)。
+  空间 O(总字符数²)。
+- **易错点**：分隔符必须选一个不会出现在词里的字符；插入时下标要写在**沿途每个节点**上
+  （不是只在词尾），否则查询停在中途会取不到；插入按大小到小顺序可让「后来者覆盖」天然
+  得到最大下标；C++ 用 27 长度的数组，分隔符映射到下标 26。
+- **相似题**：1032 只匹配后缀，是它的单向版；677 在节点上挂的是聚合值，这里挂的是最优下标，
+  都属于「节点额外字段 = 额外能力」。
+
+---
+
+## 模式十：0/1 字典树与按位贪心
+
+**适用信号**：在整数集合里找「异或最大 / 最小」的配对，或者任何按二进制位逐层决策的问题。
+
+**核心动作**：把每个数按「高位到低位」插进一棵每个节点只有 0、1 两个孩子的字典树，求答案
+时从高位往低位「尽量走向相反的分支」。
+
+### 421. 数组中两个数的最大异或值（中等）
+
+**题目**：给定整数数组 `nums`，返回 `nums[i] XOR nums[j]` 的最大值。
+
+**思路**：把所有数按二进制从第 31 位到第 0 位插入 0/1 字典树。对每个数 `num`，从高位往
+低位走：如果当前位存在与它**相反**的孩子，就走过去，并把答案的这一位记成 1；否则只能走
+相同的位，这一位为 0。对所有数取最大值。
+
+**为什么能按位贪心**：异或结果的某一位是 1，当且仅当两个数该位不同。从最高位开始，越高的
+位权重越大（是低位的两倍之和还多），所以只要当前位存在相反的分支，选它得到的数一定比不选
+更大，低位的选择无关紧要。这就是按位贪心的标准依据。
+
+**为什么比暴力快**：暴力两两异或是 O(n²)。字典树把「和某个数异或最大的搭档」变成一次
+「每层尽量走反方向」的 O(位数) 查询，总复杂度降到 O(n·位数)，本质是用空间把逐位决策组织
+成一棵树。
+
+**代码**（完整可运行版见 `src/trie/maximum_xor.py` / `.cpp`）：
+
+```python
+BITS = 31
+
+
+def find_maximum_xor(nums):
+    trie = {}
+    for num in nums:
+        node = trie
+        for i in range(BITS, -1, -1):
+            bit = (num >> i) & 1
+            node = node.setdefault(bit, {})
+
+    best = 0
+    for num in nums:
+        node = trie
+        current = 0
+        for i in range(BITS, -1, -1):
+            bit = (num >> i) & 1
+            want = 1 - bit
+            if want in node:
+                current |= 1 << i
+                node = node[want]
+            else:
+                node = node[bit]
+        best = max(best, current)
+    return best
+```
+
+```cpp
+struct TrieNode {
+    std::array<TrieNode *, 2> child;
+    TrieNode() { child.fill(nullptr); }
+};
+
+class Solution {
+  public:
+    int findMaximumXOR(const std::vector<int> &nums) {
+        TrieNode *root = new TrieNode();
+        for (int num : nums) {
+            TrieNode *node = root;
+            for (int i = BITS; i >= 0; --i) {
+                int bit = (num >> i) & 1;
+                if (!node->child[bit]) node->child[bit] = new TrieNode();
+                node = node->child[bit];
+            }
+        }
+
+        int best = 0;
+        for (int num : nums) {
+            TrieNode *node = root;
+            int current = 0;
+            for (int i = BITS; i >= 0; --i) {
+                int bit = (num >> i) & 1;
+                int want = 1 - bit;
+                if (node->child[want]) {
+                    current |= 1 << i;
+                    node = node->child[want];
+                } else {
+                    node = node->child[bit];
+                }
+            }
+            if (current > best) best = current;
+        }
+        return best;
+    }
+
+  private:
+    static constexpr int BITS = 31;
+};
+```
+
+- **复杂度**：O(n·B)，B 为位数（本题 31）。空间 O(n·B)。
+- **易错点**：位序必须**从高到低**，否则贪心失效；一定要固定位数 `${BITS}`，只遍历到
+  最高有效位会让不同数的高度不一致、路径错位；查询时若相反分支不存在，必须退回相同分支
+  并继续（不能不更新 `node`）。
+- **相似题**：`bit` 篇 136 异或消消乐、338 比特位计数都是按位思考；`trie` 篇 208 把字符
+  换成 0/1 就是本题的骨架。凡是对一串「位」做逐层决策，都可以套用 0/1 字典树。
+
+---
+
 ## 规律总结
 
 1. **前缀树节点描述的是「一条前缀」，不是一个单词**：`children` 负责分叉，`is_end`
@@ -619,3 +1114,21 @@ class MapSum {
 9. **前缀树与其它结构的交汇**：它和哈希表都能存字符串，但哈希表答不了前缀问题；
    它和回溯天然契合（212），和聚合维护天然契合（677）。判断该不该用前缀树，就问一句：
    **问题里有没有「前缀」二字，或者能不能被翻译成前缀问题。**
+
+10. **后缀问题先想「反转」**：把单词反过来插入，后缀就变成了前缀（1032）。这是一条几乎
+    零成本的转化——只要题目问的是「以某段结尾」，就先试试把串反转，把陌生问题归约成
+    已经会的前缀问题。
+
+11. **多个条件可以拼进同一条键**：745 把「前缀」和「后缀」用一个不出现在字母表里的
+    分隔符拼成一条路径，一次查询同时校验两个条件。遇到「同时满足几个字符串约束」的题，
+    不妨想：能不能把它们按固定顺序接成一个键，让「走通这条路径」等价于「全部满足」。
+    分隔符的作用是固定边界，防止前后两段互相错位匹配。
+
+12. **查询要反复做，就在建树时预计算**：1268 先把候选排序、在每个节点缓存最小的 3 个，
+    查询时直接抄；745 在沿途节点缓存最大下标。把「每次查询都要做的事」提前到插入阶段做
+    一次，是前缀树（以及所有索引结构）最常用的提速手段。
+
+13. **字典树的「孩子」不一定是字符**：421 的每个节点只有 0、1 两个孩子，存的是二进制位。
+    只要能把对象拆成「一层一层的离散选择」，就能用字典树组织，再配合「从最重要的那一位
+    开始贪心」（如按位从高到低）逼近最优解。前缀树是「字符版」，0/1 字典树是「比特版」，
+    思想完全一致。
