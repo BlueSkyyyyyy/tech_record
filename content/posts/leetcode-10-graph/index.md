@@ -1,5 +1,5 @@
 ---
-title: "LeetCode 题解精讲（十）：图与搜索（网格 DFS / BFS 入门）"
+title: "LeetCode 题解精讲（十）：图与搜索（网格遍历 / 拓扑排序 / 并查集）"
 date: 2026-10-06
 draft: false
 weight: 11
