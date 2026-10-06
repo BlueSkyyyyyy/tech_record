@@ -54,6 +54,7 @@ categories: ["算法"]
 | 27 | [随机化与采样]({{< relref "leetcode-27-randomized" >}}) | 洗牌、加权抽样、水塘抽样、拒绝采样 | 连载中 |
 | 28 | [计算几何]({{< relref "leetcode-28-geometry" >}}) | 矩形相交、叉积、凸包、三维形体、最小矩形 | 连载中 |
 | 29 | [区间与扫描线]({{< relref "leetcode-29-interval" >}}) | 区间合并/求交/相减、扫描线、矩形面积覆盖 | 连载中 |
+| 30 | [队列与双端队列]({{< relref "leetcode-30-queue" >}}) | 队列模拟、双端队列设计、单调队列 | 连载中 |
 
 > 各篇正文由仓库 `code/leetcode/docs/` 下的 Markdown **实时内联**渲染，随配套代码一起更新。
 
