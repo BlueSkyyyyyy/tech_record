@@ -50,6 +50,7 @@ categories: ["算法"]
 | 23 | [并查集]({{< relref "leetcode-23-union-find" >}}) | 连通分量、判环、等价约束、关系建模 | 连载中 |
 | 24 | [树状数组]({{< relref "leetcode-24-fenwick" >}}) | 单点修改+区间和、值域计数、前缀和转差值 | 连载中 |
 | 25 | [线段树]({{< relref "leetcode-25-segment-tree" >}}) | 单点/区间修改、懒标记、动态开点、区间合并信息 | 连载中 |
+| 26 | [博弈论]({{< relref "leetcode-26-game-theory" >}}) | 必胜必败态、分差 DP、minimax、状态压缩 | 连载中 |
 
 > 各篇正文由仓库 `code/leetcode/docs/` 下的 Markdown **实时内联**渲染，随配套代码一起更新。
 
