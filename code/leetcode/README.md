@@ -38,9 +38,10 @@ leetcode/
 
 ## 分类进度
 
-见 [ROADMAP.md](ROADMAP.md) 的「任务清单」。当前 19 个分类已全部铺开：
+见 [ROADMAP.md](ROADMAP.md) 的「任务清单」。当前 20 个分类已全部铺开：
 `array`（13 题）、`hash`（10 题）、`sliding-window`（10 题）、`prefix-sum`（10 题）、
 `binary-search`（10 题）、`linked-list`（11 题）、`stack`（10 题 + 42 交叉）、
-`heap`（10 题）、`binary-tree`（23 题）、`graph`（11 题）、`backtracking`（12 题）、
-`divide-conquer`（10 题）、`dynamic-programming`（36 题）、`greedy`（10 题）、
-`string`（10 题）、`bit`（10 题）、`trie`（11 题）、`math`（10 题）、`design`（5 题，连载中）。
+`heap`（10 题）、`binary-tree`（22 题）、`graph`（11 题）、`backtracking`（12 题）、
+`divide-conquer`（10 题）、`dynamic-programming`（35 题）、`greedy`（10 题）、
+`string`（10 题）、`bit`（10 题）、`trie`（10 题）、`math`（10 题）、`design`（10 题）、
+`matrix`（10 题）。
