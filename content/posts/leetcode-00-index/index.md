@@ -47,6 +47,7 @@ categories: ["算法"]
 | 20 | [矩阵与二维数组]({{< relref "leetcode-20-matrix" >}}) | 原地变换、螺旋/对角遍历、结构化查找 | 连载中 |
 | 21 | [排序]({{< relref "leetcode-21-sort" >}}) | 自定义顺序/比较器、频率排序、桶排序 | 连载中 |
 | 22 | [最短路径]({{< relref "leetcode-22-shortest-path" >}}) | BFS/Dijkstra/0-1 BFS/Bellman-Ford/Floyd、二分答案 | 连载中 |
+| 23 | [并查集]({{< relref "leetcode-23-union-find" >}}) | 连通分量、判环、等价约束、关系建模 | 连载中 |
 
 > 各篇正文由仓库 `code/leetcode/docs/` 下的 Markdown **实时内联**渲染，随配套代码一起更新。
 
