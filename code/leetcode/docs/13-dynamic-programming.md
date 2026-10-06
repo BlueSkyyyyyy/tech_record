@@ -1,4 +1,4 @@
-# 动态规划（一）：线性、序列、背包、网格与区间
+# 动态规划（一）：线性、序列、背包、网格、区间与状态机
 
 动态规划（dynamic programming, DP）听起来吓人，其实做的事很朴素：**把一个问题拆成一串互相
 重叠的小问题，先算出小问题的答案存起来，再用它们拼出大问题的答案。** 它和分治最大的区别
@@ -30,6 +30,7 @@
 | 模式十一：把状态切成「前缀 + 尾段」 | 139. 单词拆分 | 中等 |
 | 模式十二：网格上的二维 DP | 62. 不同路径 · 63. 不同路径 II · 64. 最小路径和 · 221. 最大正方形 | 中等 |
 | 模式十三：区间 DP（枚举「最后一步」） | 312. 戳气球 · 516. 最长回文子序列 · 647. 回文子串 | 中等 / 困难 |
+| 模式十四：状态机 DP（股票买卖） | 121 · 122 · 123 · 188 · 309 · 714 买卖股票系列 | 简单 ~ 困难 |
 
 同一模式下的题目放在一起，先读第一道、再体会第二道只多了哪一点。**学 DP 的重点不是背题，
 而是练熟「定义状态 → 写转移 → 定初值 → 排顺序」这条流水线。**
@@ -39,7 +40,8 @@
 状态还是「容量」，但把「一件物品取几次」「前缀能不能被切开」这些新语义安进转移里，又会
 看到「正序还是倒序」「物品在外还是容量在外」这类只差一行的新讲究。最后模式十二、十三把
 状态从「一条线」推向**二维网格与闭区间**：转移开始在「上方 / 左方」和「区间内部的一点」
-上做文章。
+上做文章。最后的模式十四换一种视角——状态不再是「某个下标」，而是**手的姿态**（持股 / 空仓
+/ 冷冻），一天一天地对这些姿态做切换，这就是「状态机 DP」。
 
 ---
 
@@ -1837,6 +1839,356 @@ int countSubstrings(const std::string &s) {
 
 ---
 
+## 模式十四：状态机 DP（股票买卖）
+
+**适用信号**：每天要做「买 / 卖 / 不动」的决策，而「今天能不能买、能不能卖」只取决于
+手上有没有股票，或者再多几个附加状态（刚卖过、还能交易几次）。决策的收益逐日累加，要求
+最终最大收益。
+
+**核心动作**：把「手头的姿态」定义成有限个状态，每个状态记录**到达该姿态时的最大累计
+收益**；每读到一天的价格，就对所有状态做一轮松弛（保持不动，或从别的状态切换过来）。
+一天之内多个状态可以同时更新——因为同一天先卖后买是允许的。
+
+最朴素的骨架只有两个状态：`hold`（持股）和 `cash`（空仓）。
+
+```
+hold = max(hold, cash - p)   # 保持持股，或用已实现的收益买入
+cash = max(cash, hold + p)   # 保持空仓，或把股票卖出
+```
+
+整个买卖股票系列都是这套骨架：**121 只改一个入口（买入从 0 起算），122 放开次数，
+123 / 188 把状态按「第几笔」摊开，309 多一个「刚卖出」的中间态，714 在卖出时扣手续费。**
+
+### 121. 买卖股票的最佳时机（简单）
+
+**题目**：给定价格数组 `prices`，只能选择某一天买入、之后某一天卖出，**最多完成一笔**
+交易，求最大利润；不能获利返回 0。
+
+**思路**：
+
+把「手上有没有股票」当成两个状态，边走边维护各自的最大累计收益：
+
+- `hold`：目前持有股票时的最大收益（负数表示已经花了多少钱买入）；
+- `cash`：目前不持有股票时的最大收益。
+
+每读到一个价格 `p`，两个状态各自可以「保持」或「切换」：
+
+```
+hold = max(hold, -p)          # 保持持股，或今天买入（第一笔，从 0 收益扣 p）
+cash = max(cash, hold + p)    # 保持空仓，或今天把股票卖掉（加 p）
+```
+
+**为什么这样就能保证只买一次**：`hold` 的买入来源是常数 `-p`，而不是接在已实现收益
+之上；也就是说 `hold` 里永远只含一笔买入的成本。把它卖掉得到 `cash`，恰好完成一笔完整
+交易。空仓一定不比持仓差（可以卖掉落袋），所以返回 `cash`。
+
+**代码**（`src/dynamic-programming/best_time_to_buy_and_sell_stock.py` / `.cpp`）：
+
+```python
+def max_profit(prices):
+    hold = float("-inf")
+    cash = 0
+    for p in prices:
+        hold = max(hold, -p)
+        cash = max(cash, hold + p)
+    return cash
+```
+
+```cpp
+int maxProfit(const std::vector<int> &prices) {
+    const long long NEG = -1e18;
+    long long hold = NEG, cash = 0;
+    for (int p : prices) {
+        hold = std::max(hold, -static_cast<long long>(p));
+        cash = std::max(cash, hold + p);
+    }
+    return static_cast<int>(cash);
+}
+```
+
+- **复杂度**：时间 O(n)，空间 O(1)。
+- **易错点**：`hold` 初值要用负无穷（一开始没股票，不能持有）；买入那一步必须写
+  `-p` 而不是 `cash - p`，否则会变成允许多笔（= 122）；最后的答案取 `cash` 而非
+  `hold`（空仓落袋）。
+- **相似题**：122（放开交易次数，买入改成从 `cash` 扣，见下）；买卖股票系列其余各题
+  （见下）；本题也常用「记录历史最低价，边扫边算差价」的贪心写法，二者等价。
+
+### 122. 买卖股票的最佳时机 II（简单）
+
+**题目**：同样的价格数组，但可以完成**任意多笔**交易（买入前必须先卖掉手上的股票，
+同一天可以先卖后买），求最大利润。
+
+**思路**：
+
+状态定义与 121 完全一样，仍是 `hold` 和 `cash`。区别只在**买入时的资金来源**：既然允许
+反复交易，今天买入可以动用之前赚到的钱，于是从 `cash` 里扣：
+
+```
+hold = max(hold, cash - p)
+cash = max(cash, hold + p)
+```
+
+`cash - p` 表示「用前面几笔赚到的收益，今天再买一只」。这样每一段上涨都能被完整吃下，
+结果等价于「把所有相邻上涨的差额相加」。最后返回 `cash`。
+
+**代码**（`src/dynamic-programming/best_time_to_buy_and_sell_stock_ii.py` / `.cpp`）：
+
+```python
+def max_profit_ii(prices):
+    hold = float("-inf")
+    cash = 0
+    for p in prices:
+        hold = max(hold, cash - p)
+        cash = max(cash, hold + p)
+    return cash
+```
+
+```cpp
+int maxProfitII(const std::vector<int> &prices) {
+    const long long NEG = -1e18;
+    long long hold = NEG, cash = 0;
+    for (int p : prices) {
+        hold = std::max(hold, cash - static_cast<long long>(p));
+        cash = std::max(cash, hold + p);
+    }
+    return static_cast<int>(cash);
+}
+```
+
+- **复杂度**：时间 O(n)，空间 O(1)。
+- **易错点**：与 121 只差买入一处（`-p` → `cash - p`），抄错就把无限笔退化成了一笔；
+  同一天允许「先卖后买」，所以先更新 `hold` 再更新 `cash` 没有问题。
+- **相似题**：121（限一笔，是本题的收紧版）；714（无限笔但每笔扣手续费，见下）；
+  188（把次数设成参数 k，k 足够大时等价于本题）。
+
+### 123. 买卖股票的最佳时机 III（困难）
+
+**题目**：最多完成**两笔**交易，求最大利润。
+
+**思路**：
+
+一笔交易由「买入」「卖出」两个动作组成。最多两笔，就自然有四个阶段，每个阶段各设一个
+状态记录其最大收益：
+
+- `buy1`：第一笔已买入、尚未卖出；
+- `sell1`：第一笔已完成；
+- `buy2`：第二笔已买入、尚未卖出；
+- `sell2`：第二笔已完成（答案）。
+
+每读到一个价格 `p`，四个状态**依次**松弛——这个顺序天然满足「先买后卖、先卖后买」：
+
+```
+buy1  = max(buy1,  -p)          # 第一次买入
+sell1 = max(sell1, buy1 + p)    # 第一次卖出
+buy2  = max(buy2,  sell1 - p)   # 第二次买入（动用第一笔的收益）
+sell2 = max(sell2, buy2 + p)    # 第二次卖出
+```
+
+**为什么「最多两笔」会自动成立**：`buy2` 的初值是负无穷，只有第一笔卖出后 `sell1` 变
+非负才可能被激活；若第一笔不划算，`buy2` / `sell2` 就一直不触发，等价于只做一笔；四态
+都可以保持不动，所以一笔不做也允许。
+
+**代码**（`src/dynamic-programming/best_time_to_buy_and_sell_stock_iii.py` / `.cpp`）：
+
+```python
+def max_profit_iii(prices):
+    neg = float("-inf")
+    buy1 = buy2 = neg
+    sell1 = sell2 = 0
+    for p in prices:
+        buy1 = max(buy1, -p)
+        sell1 = max(sell1, buy1 + p)
+        buy2 = max(buy2, sell1 - p)
+        sell2 = max(sell2, buy2 + p)
+    return sell2
+```
+
+```cpp
+int maxProfitIII(const std::vector<int> &prices) {
+    const long long NEG = -1e18;
+    long long buy1 = NEG, sell1 = 0, buy2 = NEG, sell2 = 0;
+    for (int p : prices) {
+        buy1 = std::max(buy1, -static_cast<long long>(p));
+        sell1 = std::max(sell1, buy1 + p);
+        buy2 = std::max(buy2, sell1 - p);
+        sell2 = std::max(sell2, buy2 + p);
+    }
+    return static_cast<int>(sell2);
+}
+```
+
+- **复杂度**：时间 O(n)，空间 O(1)（状态数恒为 4）。
+- **易错点**：四行松弛的顺序不能乱——`sell1` 要用更新后的 `buy1`、`buy2` 要用更新后的
+  `sell1`，写反就漏掉「今天买今天卖」的情形；`sell1` / `sell2` 初值为 0（可以一笔不做）。
+- **相似题**：188（把两笔推广成 k 笔，见下）；121（k=1）；122（k 不限）；309 / 714
+  （状态机骨架上再各加一个约束，见下）。
+
+### 188. 买卖股票的最佳时机 IV（困难）
+
+**题目**：给定价格数组和整数 `k`，最多完成 `k` 笔交易，求最大利润。
+
+**思路**：
+
+把 123 的四个状态推广成 `2k` 个。用两个长度为 `k+1` 的数组维护每个阶段的最优收益：
+
+- `buy[j]`：已完成 `j-1` 笔、且第 `j` 笔已买入时的最大收益；
+- `sell[j]`：已完成 `j` 笔时的最大收益。
+
+每读到一个价格 `p`，按 `j` 从小到大滚动更新这一天的所有阶段：
+
+```
+buy[j]  = max(buy[j],  sell[j-1] - p)   # 第 j 笔买入，接在第 j-1 笔收益之后
+sell[j] = max(sell[j], buy[j] + p)      # 第 j 笔卖出
+```
+
+边界靠 `sell[0] = 0`（一笔都不做）自然兜住：`j = 1` 时 `buy[1] = max(buy[1], -p)` 正是
+第一笔买入。因为 `buy[j]` 只用到 `sell[j-1]`、`sell[j]` 只用到 `buy[j]`，从左到右滚动即可，
+同一天先卖再买也合法。答案是 `sell[k]`。
+
+**代码**（`src/dynamic-programming/best_time_to_buy_and_sell_stock_iv.py` / `.cpp`）：
+
+```python
+def max_profit_iv(k, prices):
+    if k <= 0 or not prices:
+        return 0
+    neg = float("-inf")
+    buy = [neg] * (k + 1)
+    sell = [0] * (k + 1)
+    for p in prices:
+        for j in range(1, k + 1):
+            buy[j] = max(buy[j], sell[j - 1] - p)
+            sell[j] = max(sell[j], buy[j] + p)
+    return sell[k]
+```
+
+```cpp
+int maxProfitIV(int k, const std::vector<int> &prices) {
+    if (k <= 0 || prices.empty()) return 0;
+    const long long NEG = -1e18;
+    std::vector<long long> buy(k + 1, NEG), sell(k + 1, 0);
+    for (int p : prices) {
+        for (int j = 1; j <= k; ++j) {
+            buy[j] = std::max(buy[j], sell[j - 1] - static_cast<long long>(p));
+            sell[j] = std::max(sell[j], buy[j] + p);
+        }
+    }
+    return static_cast<int>(sell[k]);
+}
+```
+
+- **复杂度**：时间 O(n·k)，空间 O(k)。
+- **易错点**：`k = 0` 直接返回 0；数组长度为 `k+1` 是为了容纳哨兵 `sell[0]`；`j` 必须
+  从 1 开始（没有「第 0 笔交易」）；`buy` 初值为负无穷、`sell` 初值为 0。
+- **相似题**：123（k=2 的展开版，可对照四个变量的写法）；121（k=1，但用更省的常数状态）；
+  122（k 不限）；k 大于「天数的一半」时，本题也会退化成 122。
+
+### 309. 买卖股票的最佳时机含冷冻期（中等）
+
+**题目**：可以完成任意多笔交易，但**卖出股票的第二天不能买入**（有一天冷冻期），求最大利润。
+
+**思路**：
+
+122 只有「持仓 / 空仓」两态，是因为卖出后可以立刻再买。冷冻期把「卖出」拉成了一个必须
+停留一天的中间态，于是设三个状态：
+
+- `hold`：目前持有股票；
+- `sold`：今天刚卖出（明天必须冷冻，不能买）；
+- `rest`：空仓且已脱离冷冻期，随时可以买。
+
+每读到价格 `p`，用**旧值**同时更新三态（避免互相污染）：
+
+```
+hold = max(hold, rest - p)   # 只有 rest 才允许买入
+sold = hold + p              # 今天卖出，必然来自持仓
+rest = max(rest, sold)       # 昨天的 sold 今天解冻，并入 rest
+```
+
+关键就一处：**买入的来源从 122 的 `cash` 换成了 `rest`**——`sold` 当天不能买，冷冻期便
+表达清楚了。答案是空仓态的最大值 `max(rest, sold)`（最后一天卖出也是合法收尾）。
+
+**代码**（`src/dynamic-programming/best_time_to_buy_and_sell_stock_with_cooldown.py` / `.cpp`）：
+
+```python
+def max_profit_cooldown(prices):
+    neg = float("-inf")
+    hold, sold, rest = neg, neg, 0
+    for p in prices:
+        hold, sold, rest = max(hold, rest - p), hold + p, max(rest, sold)
+    return max(rest, sold)
+```
+
+```cpp
+int maxProfitCooldown(const std::vector<int> &prices) {
+    const long long NEG = -1e18;
+    long long hold = NEG, sold = NEG, rest = 0;
+    for (int p : prices) {
+        long long new_hold = std::max(hold, rest - p);
+        long long new_sold = hold + p;
+        long long new_rest = std::max(rest, sold);
+        hold = new_hold;
+        sold = new_sold;
+        rest = new_rest;
+    }
+    return static_cast<int>(std::max(rest, sold));
+}
+```
+
+- **复杂度**：时间 O(n)，空间 O(1)。
+- **易错点**：三态必须**同时**用旧值更新；Python 用元组同时赋值，C++ 要用临时变量中转，
+  否则 `rest` 会读到本天刚解冻的 `sold`、或 `sold` 读到本天新买的 `hold`；返回
+  `max(rest, sold)` 而不是只看 `rest`。
+- **相似题**：122（无冷冻期的对照）；714（把冷冻期换成手续费，见下）；买卖股票 I~IV
+  （状态机骨架相同）。
+
+### 714. 买卖股票的最佳时机含手续费（中等）
+
+**题目**：可以完成任意多笔交易，但每笔交易（一次买入 + 一次卖出）需支付固定手续费
+`fee`，求最大利润。
+
+**思路**：
+
+骨架与 122 完全一致，仍是 `hold` / `cash` 两态。唯一的区别是卖出时要扣手续费：
+
+```
+hold = max(hold, cash - p)
+cash = max(cash, hold + p - fee)
+```
+
+手续费只在卖出时扣一次，天然对应「每笔完整交易收费一次」。因为收益已扣过费，价格涨幅
+必须大于手续费才值得交易，DP 会自动在「继续持有」与「落袋付小费」之间取舍。
+
+**代码**（`src/dynamic-programming/best_time_to_buy_and_sell_stock_with_fee.py` / `.cpp`）：
+
+```python
+def max_profit_fee(prices, fee):
+    neg = float("-inf")
+    hold, cash = neg, 0
+    for p in prices:
+        hold = max(hold, cash - p)
+        cash = max(cash, hold + p - fee)
+    return cash
+```
+
+```cpp
+int maxProfitFee(const std::vector<int> &prices, int fee) {
+    const long long NEG = -1e18;
+    long long hold = NEG, cash = 0;
+    for (int p : prices) {
+        hold = std::max(hold, cash - static_cast<long long>(p));
+        cash = std::max(cash, hold + p - fee);
+    }
+    return static_cast<int>(cash);
+}
+```
+
+- **复杂度**：时间 O(n)，空间 O(1)。
+- **易错点**：手续费只能扣一次，要放在**卖出**那一步（`hold + p - fee`），不能在买入
+  和卖出各扣一次；`fee = 0` 时退化成 122；`hold` 初值负无穷。
+- **相似题**：122（`fee = 0` 的特例）；309（用「冷冻」而非「收费」限制交易，见上）；
+  188（次数受限的版本）。
+
+---
+
 ## 规律总结
 
 1. **DP 四步走：定义状态 → 写转移 → 定初值 → 排顺序。** 拿到一题先别写代码，先用一句话说清
@@ -1920,3 +2272,18 @@ int countSubstrings(const std::string &s) {
     则缩进一格（子序列 `+2`、子串判真），不等则丢一边取 `max`（子序列）或直接判假（子串）。
     `i` 从大到小、`j` 从小到大，`j - i < 2` 用来兜住空串 / 单字符的 base case。516 和
     647 是同一张表的「求长度」与「数个数」两个问法。
+
+21. **当状态是「手的姿态」时，用状态机 DP。** 买卖股票系列里，`dp` 记录的不是「第 i 天
+    的答案」，而是「以某种姿态结束第 i 天时的最大收益」。状态少则两个（`hold` / `cash`，
+    121/122/714），多则按交易笔数摊开（123 四个、188 有 `2k` 个），或再加一个中间态
+    （309 的 `sold`）。**每天对所有状态做一轮松弛**，是这类题的统一动作。
+
+22. **一天内先卖后买是允许的，所以多状态可以同时更新。** `hold` 与 `cash` 的松弛顺序
+    （先更新谁）在无冷冻期时不影响答案；但一旦状态之间存在「当天不能互相转化」的约束
+    （309 的 `sold` 当天不能变 `hold`），就必须**用旧值同时更新**——Python 靠元组同时
+    赋值、C++ 靠临时变量中转。
+
+23. **同族题的差别，几乎都落在「转移里的一个符号」。** 121→122 把买入的 `-p` 改成
+    `cash - p`（一个交易变无限笔）；122→714 在卖出加 `-fee`；123→188 把写死的四个状态
+    换成 `2k` 个循环变量；122→309 把买入来源 `cash` 换成 `rest` 并多一个中间态。
+    **读这类题不要从头推，先问「它比最简骨架多改了什么」。**
