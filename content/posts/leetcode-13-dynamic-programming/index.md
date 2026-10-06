@@ -1,5 +1,5 @@
 ---
-title: "LeetCode 题解精讲（十三）：动态规划（一）线性、序列、背包与编辑距离"
+title: "LeetCode 题解精讲（十三）：动态规划（一）线性、序列、背包、网格与区间"
 date: 2026-10-06
 draft: false
 weight: 14
