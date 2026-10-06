@@ -45,4 +45,4 @@ leetcode/
 `stack`（G-1 ~ G-3，共 11 题）、`heap`（H-1 ~ H-3，共 10 题）、
 `binary-tree`（I-1 ~ I-4，共 20 题）、`graph`（J-1 ~ J-3，共 11 题）、
 `backtracking`（K-1 ~ K-3，共 12 题）、`divide-conquer`（L-1 ~ L-3，共 10 题）、
-`dynamic-programming`（M-1 ~ M-2，共 13 题），其余分类陆续补充。
+`dynamic-programming`（M-1 ~ M-6，共 35 题），其余分类陆续补充。
