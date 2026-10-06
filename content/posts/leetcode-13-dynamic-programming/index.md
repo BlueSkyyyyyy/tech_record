@@ -1,5 +1,5 @@
 ---
-title: "LeetCode 题解精讲（十三）：动态规划（一）基础线性 DP"
+title: "LeetCode 题解精讲（十三）：动态规划（一）线性、序列与编辑距离"
 date: 2026-10-06
 draft: false
 weight: 14

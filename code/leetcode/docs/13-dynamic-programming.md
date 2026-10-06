@@ -1,4 +1,4 @@
-# 动态规划（一）：基础线性 DP
+# 动态规划（一）：线性、序列与编辑距离
 
 动态规划（dynamic programming, DP）听起来吓人，其实做的事很朴素：**把一个问题拆成一串互相
 重叠的小问题，先算出小问题的答案存起来，再用它们拼出大问题的答案。** 它和分治最大的区别
@@ -21,9 +21,17 @@
 | 模式二：结果本身就是一张表 | 118. 杨辉三角 | 简单 |
 | 模式三：带权递推（取 min / max） | 746. 使用最小花费爬楼梯 · 198. 打家劫舍 | 简单 / 中等 |
 | 模式四：把「环」剪成「线」 | 213. 打家劫舍 II | 中等 |
+| 模式五：以「我」结尾的连续段 | 53. 最大子数组和 · 674. 最长连续递增序列 · 718. 最长重复子数组 | 中等 |
+| 模式六：不要求连续的子序列 | 300. 最长递增子序列 · 1143. 最长公共子序列 | 中等 |
+| 模式七：回文类区间问题 | 5. 最长回文子串 | 中等 |
+| 模式八：两个前缀之间的距离 | 72. 编辑距离 | 困难 |
 
 同一模式下的题目放在一起，先读第一道、再体会第二道只多了哪一点。**学 DP 的重点不是背题，
 而是练熟「定义状态 → 写转移 → 定初值 → 排顺序」这条流水线。**
+
+前半部分（模式一~四）是一维线性 DP，后半部分（模式五~八）进入**序列与双序列 DP**：状态
+从「一个下标」变成「一个下标」或「两个下标」，但四步走的流水线没有任何变化。读完前半部分
+再看后半部分，会明显感到「新题」只是换了状态定义。
 
 ---
 
@@ -405,6 +413,503 @@ int rob(const std::vector<int> &nums) {
 
 ---
 
+## 模式五：以「我」结尾的连续段
+
+**适用信号**：题目要的是「连续子数组 / 子串 / 子段」的最优值，连续性意味着候选区间由
+左右两个端点确定。
+
+**核心动作**：把状态钉在**右端点**上，定义 `dp[i]` 为「以第 i 个元素结尾的答案」。这样每个
+连续段都有唯一结尾，枚举所有结尾就不会重复也不会遗漏。转移时只问一句：前一个结尾的最优
+结果要不要接过来。
+
+### 53. 最大子数组和（中等）
+
+**题目**：给定整数数组 `nums`，找出一个具有最大和的连续子数组（至少一个元素），返回其最大和。
+
+**思路**：
+
+要求「连续」，就把它钉在结尾上。设 `dp[i] = 以 nums[i] 结尾的最大子数组和`。对当前元素，
+只有两种选择：把前面以 `i-1` 结尾的最优段接上来，或者从自己重新开一段：
+
+```
+dp[i] = max(nums[i], dp[i-1] + nums[i])
+```
+
+前面那段的和 `dp[i-1]` 若为正，接上更划算；若为负，它就是拖累，不如撇掉从 `nums[i]` 另起。
+因为只看前一项，用一个 `cur` 滚动即可。**但答案不是 `cur`**——最大子数组可能在任何位置结束，
+所以再用一个 `best` 在每个位置顺手更新。
+
+**为什么不能只返回最后一个状态**：`dp[i]` 的语义只保证「以 i 结尾」最大，并不保证全局最大。
+这是「以结尾为状态」这类题共有的提醒：**结尾状态是过程，全局最优要另外维护。**
+
+**代码**（`src/dynamic-programming/maximum_subarray.py` / `.cpp`）：
+
+```python
+def max_subarray_sum(nums):
+    best = cur = nums[0]
+    for x in nums[1:]:
+        cur = max(x, cur + x)
+        best = max(best, cur)
+    return best
+```
+
+```cpp
+int maxSubArray(const std::vector<int> &nums) {
+    int best = nums[0], cur = nums[0];
+    for (size_t i = 1; i < nums.size(); ++i) {
+        cur = std::max(nums[i], cur + nums[i]);
+        best = std::max(best, cur);
+    }
+    return best;
+}
+```
+
+- **复杂度**：时间 O(n)，空间 O(1)。
+- **易错点**：`best`、`cur` 都要用 `nums[0]` 初始化（题目保证至少一个元素，不能从 0 起步，
+  否则全负数会错）；转移是 `max(x, cur + x)`，不是 `max(cur, cur + x)`；数组只有一个元素时
+  循环不执行，直接返回它。
+- **相似题**：674. 最长连续递增序列、718. 最长重复子数组（同为「以结尾为状态」的连续段，
+  见下）；152. 乘积最大子数组（负数会让最小值翻成大，需要同时维护最大/最小两个状态）；
+  与 `divide-conquer` 篇的分治解（左右最优 + 跨中点）对照，体会两种思路的差异。
+
+### 674. 最长连续递增序列（简单）
+
+**题目**：给定未经排序的整数数组 `nums`，找出最长且连续递增的子序列的长度。
+
+**思路**：
+
+和 300 只差「连续」二字，状态同样钉在结尾：`dp[i] = 以 nums[i] 结尾的连续递增序列长度`。
+此时前驱只有一个——紧挨着的前一个元素：
+
+```
+dp[i] = dp[i-1] + 1   若 nums[i] > nums[i-1]
+dp[i] = 1             否则（递增在 i 处断开，从 i 重新开始）
+```
+
+只依赖前一项，滚动变量即可。**和 300 对照**：不连续时要枚举前面所有更小的 `j`，是 O(n²)；
+连续时前驱唯一，降到 O(n)。「连续」这个约束，往往能把枚举前驱的成本压掉。
+
+**代码**（`src/dynamic-programming/longest_continuous_increasing_subsequence.py` / `.cpp`）：
+
+```python
+def find_length_of_lcis(nums):
+    if not nums:
+        return 0
+    best = cur = 1
+    for i in range(1, len(nums)):
+        if nums[i] > nums[i - 1]:
+            cur += 1
+        else:
+            cur = 1
+        best = max(best, cur)
+    return best
+```
+
+```cpp
+int findLengthOfLCIS(const std::vector<int> &nums) {
+    if (nums.empty()) return 0;
+    int best = 1, cur = 1;
+    for (size_t i = 1; i < nums.size(); ++i) {
+        if (nums[i] > nums[i - 1]) {
+            ++cur;
+        } else {
+            cur = 1;
+        }
+        best = std::max(best, cur);
+    }
+    return best;
+}
+```
+
+- **复杂度**：时间 O(n)，空间 O(1)。
+- **易错点**：空数组返回 0，别让 `best = 1` 的初值泄漏；用「严格大于」判断递增（题目要
+  `nums[i] > nums[i-1]`）；断链时 `cur` 必须重置为 1 而不是 0。
+- **相似题**：300. 最长递增子序列（去掉「连续」，前驱从唯一变成任意，见下）；53. 最大子数组和
+  （结构相同，只是聚合对象从「长度」换成「和」，见上）。
+
+### 718. 最长重复子数组（中等）
+
+**题目**：给两个整数数组 `nums1` 和 `nums2`，返回两个数组中公共的、长度最长的连续子数组的长度。
+
+**思路**：
+
+两个数组、又要求连续，把「以结尾为状态」直接升到二维：
+
+```
+dp[i][j] = nums1 以第 i 个元素结尾、nums2 以第 j 个元素结尾的最长公共后缀长度
+```
+
+只有两个结尾相等时这段公共后缀才有意义，且可以在去掉这两个结尾的基础上再接一格：
+
+```
+nums1[i-1] == nums2[j-1]  ->  dp[i][j] = dp[i-1][j-1] + 1
+否则                      ->  dp[i][j] = 0
+```
+
+**和 1143 的关键区别**：这里不相等时**不能**从 `dp[i-1][j]` / `dp[i][j-1]` 继承，因为公共
+子数组必须连续，一旦结尾对不上，以这对位置结尾的公共后缀长度只能归零。答案取整张表的最大值，
+而不是 `dp[m][n]`。
+
+**代码**（`src/dynamic-programming/maximum_length_of_repeated_subarray.py` / `.cpp`）：
+
+```python
+def find_length(nums1, nums2):
+    m, n = len(nums1), len(nums2)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    best = 0
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if nums1[i - 1] == nums2[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+                best = max(best, dp[i][j])
+    return best
+```
+
+```cpp
+int findLength(const std::vector<int> &nums1, const std::vector<int> &nums2) {
+    int m = static_cast<int>(nums1.size());
+    int n = static_cast<int>(nums2.size());
+    std::vector<std::vector<int>> dp(m + 1, std::vector<int>(n + 1, 0));
+    int best = 0;
+    for (int i = 1; i <= m; ++i) {
+        for (int j = 1; j <= n; ++j) {
+            if (nums1[i - 1] == nums2[j - 1]) {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+                best = std::max(best, dp[i][j]);
+            }
+        }
+    }
+    return best;
+}
+```
+
+- **复杂度**：时间 O(m·n)，空间 O(m·n)（滚动数组可降到 O(n)）。
+- **易错点**：`dp` 开 `(m+1) × (n+1)` 且下标偏移一位，`dp[0][*]`、`dp[*][0]` 是空后缀的
+  0；不相等时保持 0，绝不能写 `max(dp[i-1][j], dp[i][j-1])`（那是 1143 的写法，会破坏
+  连续性）；答案是全表最大值。
+- **相似题**：1143. 最长公共子序列（不要求连续，不相等时可以继承邻格，见下）；674. 最长连续
+  递增序列（单数组版，见上）；718 用滚动数组优化时要注意从右往左更新 `j`。
+
+---
+
+## 模式六：不要求连续的子序列
+
+**适用信号**：题目说「子序列」，明确元素可以不连续、只要保持相对顺序。
+
+**核心动作**：不连续意味着前驱不再唯一——单序列里可以是**前面任意一个**满足条件的元素，
+双序列里可以是**跳过某一端的某个字符**。于是要么枚举前驱（单序列 O(n²)），要么用二维表把
+「两个前缀的答案」记下来（双序列 O(m·n)）。
+
+### 300. 最长递增子序列（中等）
+
+**题目**：给定整数数组 `nums`，找到其中最长严格递增子序列的长度（子序列不要求连续）。
+
+**思路**：
+
+不连续时不能只盯前一个。那就反过来问：**以当前元素结尾**的最长递增子序列能有多长？设
+`dp[i] = 以 nums[i] 结尾的最长递增子序列长度`。它至少是 1（只有自己）；只要前面有比
+`nums[i]` 小的元素 `nums[j]`，都可以把以 `j` 结尾的最优解接过来：
+
+```
+dp[i] = 1 + max(dp[j])   对所有 j < i 且 nums[j] < nums[i]
+```
+
+答案为 `max(dp)`。外层 i 从小到大，保证算 `dp[i]` 时所有 `j < i` 都已就绪。
+
+**为什么可以「枚举前面任意一个」**：因为子序列不要求连续，`nums[i]` 接在哪个较小的元素后面
+都合法，所以要把所有可行前驱都试一遍取最大——这正是 O(n²) 的来源，也是和 674 的分水岭。
+
+**代码**（`src/dynamic-programming/longest_increasing_subsequence.py` / `.cpp`）：
+
+```python
+def length_of_lis(nums):
+    if not nums:
+        return 0
+    dp = [1] * len(nums)
+    for i in range(len(nums)):
+        for j in range(i):
+            if nums[j] < nums[i]:
+                dp[i] = max(dp[i], dp[j] + 1)
+    return max(dp)
+```
+
+```cpp
+int lengthOfLIS(const std::vector<int> &nums) {
+    if (nums.empty()) return 0;
+    std::vector<int> dp(nums.size(), 1);
+    int best = 1;
+    for (size_t i = 0; i < nums.size(); ++i) {
+        for (size_t j = 0; j < i; ++j) {
+            if (nums[j] < nums[i]) {
+                dp[i] = std::max(dp[i], dp[j] + 1);
+            }
+        }
+        best = std::max(best, dp[i]);
+    }
+    return best;
+}
+```
+
+- **复杂度**：时间 O(n²)，空间 O(n)。另有贪心 + 二分的 O(n log n) 解法（维护每个长度对应的
+  最小结尾，用二分替换），但把状态藏进了数据结构，这里只作了解。
+- **易错点**：条件是严格小于 `<`（题目要求严格递增），写成 `<=` 会算成非递减；`dp` 全部初始
+  为 1；答案是 `max(dp)` 不是 `dp[-1]`；空数组返回 0。
+- **相似题**：674. 最长连续递增序列（加上「连续」后前驱唯一、降到 O(n)，见上）；354. 俄罗斯
+  套娃信封（先排序再对第二维做 LIS）；1143. 最长公共子序列（换成双序列，见下）。
+
+### 1143. 最长公共子序列（中等）
+
+**题目**：给定两个字符串 `text1`、`text2`，返回它们最长公共子序列的长度（不要求连续）；无公共
+子序列返回 0。
+
+**思路**：
+
+两个字符串、可以跳字符，用二维表记录「两个前缀的答案」：
+
+```
+dp[i][j] = text1 的前 i 个字符与 text2 的前 j 个字符的最长公共子序列长度
+```
+
+只看两个前缀各自的最后一个字符：
+
+- **相等**：它们一定可以配成公共子序列的末尾，接在各自去掉一个字符之后：
+
+  ```
+  dp[i][j] = dp[i-1][j-1] + 1
+  ```
+
+- **不等**：二者不可能同时作为末尾，至少舍弃一个，取两种舍弃里更优的：
+
+  ```
+  dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+  ```
+
+边界 `dp[0][*] = dp[*][0] = 0`（一边为空，公共长度为 0）。两个方向都从小到大填，答案 `dp[m][n]`。
+
+**为什么不等时要取两个方向的最大**：`text1[i-1]` 和 `text2[j-1]` 谁能派上用场是个选择，
+跳过 `text1` 的末尾（`dp[i-1][j]`）和跳过 `text2` 的末尾（`dp[i][j-1]`）都有可能，所以要都看，
+不能只沿对角线走。
+
+**代码**（`src/dynamic-programming/longest_common_subsequence.py` / `.cpp`）：
+
+```python
+def longest_common_subsequence(text1, text2):
+    m, n = len(text1), len(text2)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if text1[i - 1] == text2[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1] + 1
+            else:
+                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+    return dp[m][n]
+```
+
+```cpp
+int longestCommonSubsequence(const std::string &text1, const std::string &text2) {
+    int m = static_cast<int>(text1.size());
+    int n = static_cast<int>(text2.size());
+    std::vector<std::vector<int>> dp(m + 1, std::vector<int>(n + 1, 0));
+    for (int i = 1; i <= m; ++i) {
+        for (int j = 1; j <= n; ++j) {
+            if (text1[i - 1] == text2[j - 1]) {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+            } else {
+                dp[i][j] = std::max(dp[i - 1][j], dp[i][j - 1]);
+            }
+        }
+    }
+    return dp[m][n];
+}
+```
+
+- **复杂度**：时间 O(m·n)，空间 O(m·n)（可滚动到 O(n)，滚动时注意保存左上角旧值）。
+- **易错点**：`dp` 尺寸是 `(m+1)×(n+1)`，字符串下标要减 1；不等时忘记取 `max` 会漏掉跳过
+  某一端的可能；答案就是右下角 `dp[m][n]`，不需要再取全表最大。
+- **相似题**：718. 最长重复子数组（要求连续，不等时状态归零，见上）；72. 编辑距离（同一张
+  表，把「相等继承 / 不等取 max」换成带代价的 min，见下）；583. 两个字符串的删除操作、
+  1035. 不相交的线（都是 LCS 的换皮）。
+
+---
+
+## 模式七：回文类区间问题
+
+**适用信号**：题目围绕「回文」——一个子串正着读反着读相同，或要求把字符串切分成回文段。
+
+**核心动作**：回文的判定天然是从中心向两侧或从两端向中间收缩，所以有两条路：**中心扩展**
+（枚举 2n-1 个中心向两边长，时间 O(n²)、空间 O(1)）和**区间 DP**（`dp[i][j]` 表示
+`s[i..j]` 是否回文，由 `s[i]==s[j]` 且 `dp[i+1][j-1]` 推出，时间 O(n²)、空间 O(n²)）。
+
+### 5. 最长回文子串（中等）
+
+**题目**：给定字符串 `s`，找到 `s` 中最长的回文子串。
+
+**思路**：
+
+回文有一个「中心」，从中心向两边对称展开时字符始终相等。中心分两种：
+
+- **奇数长度**：中心是一个字符，如 `"aba"` 的中心是 `'b'`；
+- **偶数长度**：中心是两个字符之间的空隙，如 `"abba"` 的中心在 `'b'` 与 `'b'` 之间。
+
+枚举全部 `2n-1` 个中心（`n` 个字符 + `n-1` 个空隙），各自向两边扩展到不能扩展，记录最长的一段。
+代码里 `expand(i, i)` 处理奇中心，`expand(i, i+1)` 处理偶中心。
+
+**为什么这里详展中心扩展而不是区间 DP**：两者时间同为 O(n²)，但中心扩展只用 O(1) 额外空间，
+且「向两边长」的物理图像比填表更直观。区间 DP 的价值在需要复用回文判定的题（如 131 分割
+回文串、516 最长回文子序列），这里只作一句话了解。
+
+**代码**（`src/dynamic-programming/longest_palindromic_substring.py` / `.cpp`）：
+
+```python
+def longest_palindrome(s):
+    if not s:
+        return ""
+
+    def expand(left, right):
+        while left >= 0 and right < len(s) and s[left] == s[right]:
+            left -= 1
+            right += 1
+        return left + 1, right - 1
+
+    start, end = 0, 0
+    for i in range(len(s)):
+        l1, r1 = expand(i, i)
+        l2, r2 = expand(i, i + 1)
+        if r1 - l1 > end - start:
+            start, end = l1, r1
+        if r2 - l2 > end - start:
+            start, end = l2, r2
+    return s[start:end + 1]
+```
+
+```cpp
+std::string longestPalindrome(const std::string &s) {
+    if (s.empty()) return "";
+    int n = static_cast<int>(s.size());
+
+    auto expand = [&](int left, int right) {
+        while (left >= 0 && right < n && s[left] == s[right]) {
+            --left;
+            ++right;
+        }
+        return std::make_pair(left + 1, right - 1);
+    };
+
+    int start = 0, end = 0;
+    for (int i = 0; i < n; ++i) {
+        auto odd = expand(i, i);
+        auto even = expand(i, i + 1);
+        if (odd.second - odd.first > end - start) {
+            start = odd.first;
+            end = odd.second;
+        }
+        if (even.second - even.first > end - start) {
+            start = even.first;
+            end = even.second;
+        }
+    }
+    return s.substr(start, end - start + 1);
+}
+```
+
+- **复杂度**：时间 O(n²)（每个中心最多扩展 O(n)，共 O(n) 个中心），空间 O(1)。
+- **易错点**：必须同时枚举奇、偶两类中心，漏掉偶中心就找不出 `"bb"`；`expand` 退出时
+  `left`、`right` 已越界一格，返回时要 `left+1, right-1`；空串要先挡掉。
+- **相似题**：516. 最长回文子序列（不要求连续，用区间 DP，见 M-4）；647. 回文子串（数回文
+  子串个数，中心扩展同样是标准解）；131. 分割回文串（见回溯篇，回文判定可复用本节）。
+
+---
+
+## 模式八：两个前缀之间的距离
+
+**适用信号**：把一串字符改成另一串，问最少几步操作（增、删、改），或任何「两个前缀之间的
+最小代价」问题。
+
+**核心动作**：`dp[i][j]` 表示「第一个串前 i 个字符」变成「第二个串前 j 个字符」的最少代价。
+两个结尾相等时零代价继承对角；不等时把三种操作分别翻译成「去掉某个结尾」的子问题，取最小。
+边界就是「一方为空」的语义。
+
+### 72. 编辑距离（困难）
+
+**题目**：给两个单词 `word1`、`word2`，返回将 `word1` 转换成 `word2` 的最少操作数。允许
+插入、删除、替换各一个字符。
+
+**思路**：
+
+又是双序列，但每步都有代价，用 DP 记前缀之间的距离：
+
+```
+dp[i][j] = 把 word1 前 i 个字符变成 word2 前 j 个字符的最少操作数
+```
+
+看两个前缀的最后一个字符：
+
+- **相等**：这一步不用操作，问题缩小到去掉这两个字符，`dp[i][j] = dp[i-1][j-1]`。
+- **不等**：三种操作各对应一个「消掉某个结尾」的子问题，取最小再加 1：
+  - **删除** `word1[i-1]`：`dp[i-1][j]`（word1 少一个字符，仍要匹配 word2 的前 j 个）；
+  - **插入** `word2[j-1]`：`dp[i][j-1]`（word2 少一个待匹配字符，word1 不变）；
+  - **替换** `word1[i-1]` 为 `word2[j-1]`：`dp[i-1][j-1]`（两个结尾一起消掉）。
+
+  ```
+  dp[i][j] = 1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
+  ```
+
+边界是「一方为空」的语义：`dp[i][0] = i`（把前 i 个删空要删 i 次）、`dp[0][j] = j`（从空串
+插入 j 个字符要插 j 次）。答案 `dp[m][n]`。
+
+**为什么插入对应 `dp[i][j-1]` 而不是别的**：把 word1 变成 word2 时，「插入 word2[j-1]」意味着
+word2 还剩前 `j-1` 个字符没匹配，而 word1 一个都没消耗——所以是同一行往左挪一格。理解每个
+操作对应哪个方向，是这道题的关键，也是它常被拿来当双序列 DP 模板的原因。
+
+**代码**（`src/dynamic-programming/edit_distance.py` / `.cpp`）：
+
+```python
+def min_distance(word1, word2):
+    m, n = len(word1), len(word2)
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    for i in range(m + 1):
+        dp[i][0] = i
+    for j in range(n + 1):
+        dp[0][j] = j
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if word1[i - 1] == word2[j - 1]:
+                dp[i][j] = dp[i - 1][j - 1]
+            else:
+                dp[i][j] = 1 + min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1])
+    return dp[m][n]
+```
+
+```cpp
+int minDistance(const std::string &word1, const std::string &word2) {
+    int m = static_cast<int>(word1.size());
+    int n = static_cast<int>(word2.size());
+    std::vector<std::vector<int>> dp(m + 1, std::vector<int>(n + 1, 0));
+    for (int i = 0; i <= m; ++i) dp[i][0] = i;
+    for (int j = 0; j <= n; ++j) dp[0][j] = j;
+    for (int i = 1; i <= m; ++i) {
+        for (int j = 1; j <= n; ++j) {
+            if (word1[i - 1] == word2[j - 1]) {
+                dp[i][j] = dp[i - 1][j - 1];
+            } else {
+                dp[i][j] = 1 + std::min({dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]});
+            }
+        }
+    }
+    return dp[m][n];
+}
+```
+
+- **复杂度**：时间 O(m·n)，空间 O(m·n)（可滚动到 O(n)）。
+- **易错点**：边界必须显式初始化成 `i` / `j`，不能留 0；相等时**不加 1**，直接继承对角；
+  不等时是三项取 min 再 `+1`，容易漏掉「替换」那一项；C++ 用 `std::min({a,b,c})` 需要
+  `#include <algorithm>`。
+- **相似题**：1143. 最长公共子序列（同一张表，去掉了操作代价，可看作它的带权版，见上）；
+  583. 两个字符串的删除操作（只允许删除，`dp` 变成两串长度和减 2·LCS）；10. 正则表达式
+  匹配、44. 通配符匹配（双序列匹配的进阶，转移随模式字符展开）。
+
+---
+
 ## 规律总结
 
 1. **DP 四步走：定义状态 → 写转移 → 定初值 → 排顺序。** 拿到一题先别写代码，先用一句话说清
@@ -433,3 +938,23 @@ int rob(const std::vector<int> &nums) {
 7. **环状问题，剪一刀展成线。** 首尾相连时，先想「合法方案不可能同时满足什么」，然后在那个
    位置剪开，枚举少数几种「谁缺席」的情形分别做线性 DP。213 剪在首尾之间只需跑两遍；更复杂
    的环（如环形子数组最大和、下一步更大元素）也遵循同一个「化环为线 + 分类讨论」的思路。
+
+8. **「连续」就把状态钉在结尾。** 连续子数组 / 子串的候选由右端点唯一确定，于是定义
+   `dp[i] = 以第 i 个元素结尾的答案`；枚举所有结尾即覆盖所有候选。53（和）、674（长度）、
+   718（公共后缀）是同一个骨架。**这类题的答案通常不是最后一个状态**，要再用全局最优变量
+   收集，因为「以 i 结尾」只保证局部最优。
+
+9. **「可不连续」就枚举前驱或升维。** 去掉连续性后，单序列的前驱变成「前面任意满足条件的
+   元素」，于是 300 要 O(n²) 枚举；双序列则用 `dp[i][j]` 记录两个前缀的答案（1143/718/72）。
+   判断该用哪种：**一个序列看结尾、两个序列看对角和邻格**。
+
+10. **双序列 DP，先想「两个前缀的最后一个字符怎么配」。** 相等时通常零代价继承左上角；
+    不等时看两个方向：跳过第一个串的末尾（左）、跳过第二个串的末尾（上）。1143 取
+    `max`，72 取带代价的 `min`。把操作翻译成方向，是这类题的通用钥匙。
+
+11. **边界就是「某一维为空」的语义。** 双序列的 `dp[0][j]`、`dp[i][0]` 往往不是 0，而是
+    「从空串长出 j 个字符要几步」（72 里是 `j`）；三思边界含义，比死记初值可靠。
+
+12. **滚动数组能省空间，但要先看清依赖方向。** 只依赖「上一行 + 本行左边」时，可以只留一
+    行；此时若再依赖左上角，就必须在覆盖前先把旧值存下来。连续型的 718 滚动时更要小心从右
+    往左更新 `j`，否则会用到本行刚被改写的数据。
