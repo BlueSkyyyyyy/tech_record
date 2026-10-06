@@ -54,6 +54,9 @@ struct TreeNode {
 | BST 的中序与建树 | 230. 二叉搜索树中第 K 小的元素 | 中等 |
 | BST 的中序与建树 | 108. 将有序数组转换为二叉搜索树 | 简单 |
 | 原地改造 | 114. 二叉树展开为链表 | 中等 |
+| 根到叶路径（携带参数） | 112. 路径总和 | 简单 |
+| 根到叶路径（携带参数） | 113. 路径总和 II | 中等 |
+| 树上任意路径和（前缀和） | 437. 路径总和 III | 中等 |
 
 ---
 
@@ -1187,6 +1190,200 @@ void flatten(TreeNode *root) {
 
 ---
 
+## 模式九：根到叶子的路径（把「还差多少」带下去）
+
+**适用信号**：题目出现「从根节点到叶子节点的路径」「路径和」「找出所有这样的路径」。
+关键词常带「根到叶」「路径之和」。
+
+这一类是模式二「后序把结果往上汇」的**镜像**：它关心的是沿一条链一路累加的结果，
+父节点需要把自己算出的累计量告诉孩子，于是用**前序携带参数往下走**。
+判断该「携带参数」还是「返回结果」，只需问一句：**父节点要给孩子什么，还是等孩子给父节点什么？**
+路径类显然属于前者。
+
+### 112. 路径总和（简单）
+
+**题目**：给定二叉树的根 `root` 与目标和 `target_sum`，判断是否存在一条从根到叶子、
+节点值之和等于 `target_sum` 的路径。叶子指没有左右孩子的节点。
+
+**思路（前序递归，携带「剩余和」）**：
+对当前节点而言，它只关心「从根走到我之后，还差多少才凑够目标」。把 `target_sum`
+减去沿途每个节点的值，进入左右子树时把新的剩余量传下去；走到叶子时，看剩余量是否恰为 0。
+
+为什么用「传参数」而不是「返回值汇总」：路径和是沿单条链累加出来的，父节点要把累计值
+告诉子节点，而不是等子节点把结果汇总回来。这与 104 那种后序由下往上汇总量正好相反。
+一个易错点是**叶子判定**：必须同时保证左右孩子都为空才算叶子，不能一碰到 `None` 分支
+就下结论；另外剩余量在传参时可以先算好，让叶子只需比较是否为 0。
+
+**代码**（`src/binary-tree/path_sum.py` / `.cpp`）：
+
+```python
+def has_path_sum(root, target_sum):
+    if root is None:
+        return False
+    remaining = target_sum - root.val
+    if root.left is None and root.right is None:
+        return remaining == 0
+    return has_path_sum(root.left, remaining) or has_path_sum(root.right, remaining)
+```
+
+```cpp
+bool hasPathSum(TreeNode *root, int targetSum) {
+    if (root == nullptr) return false;
+    int remaining = targetSum - root->val;
+    if (root->left == nullptr && root->right == nullptr)
+        return remaining == 0;
+    return hasPathSum(root->left, remaining) ||
+           hasPathSum(root->right, remaining);
+}
+```
+
+- **复杂度**：时间 O(n)（每个节点最多访问一次），空间 O(h)。
+- **易错点**：判断叶子要 `left` 和 `right` 都为空，只判一侧会把「单孩子的中间节点」误当叶子；空树要返回 `False`（而不是「和为 0 就 True」）；题目给的目标和可能很大，但路径和不会溢出 32 位有符号范围，用 `int` 即可。
+- **相似题**：113. 路径总和 II（找出所有这样的路径，见下）；437. 路径总和 III（起点终点都任意，改用前缀和，见模式十）；124. 二叉树中的最大路径和（同样沿路径累加，但用后序汇总量）。
+
+### 113. 路径总和 II（中等）
+
+**题目**：给定二叉树的根 `root` 与目标和 `target_sum`，找出所有从根到叶子、
+节点值之和等于 `target_sum` 的路径。
+
+**思路（前序递归 + 可撤销的当前路径）**：
+112 只问「有没有」，113 要把「每一条」都找出来，于是需要一边往下走、一边记录当前走过的节点。
+做法仍是携带剩余和，只是多维护一个 `path` 列表：进入节点时把它的值记进 `path` 并从剩余和中扣掉；
+到叶子且剩余为 0 时，把 `path` 的**一份快照**收进答案。
+
+关键在**回溯**：同一层里先走左、再走右，走完左边回到当前节点时，`path` 里不能还残留左路的节点，
+否则右路会基于错误的前缀继续拼。所以在离开当前节点前要 `path.pop()` 还原状态，
+这正是回溯「做选择 → 递归 → 撤销选择」的标准骨架。
+另外结果必须存快照：`path` 全程复用、递归返回后会被修改，直接引用会被后续改动串改。
+
+**代码**（`src/binary-tree/path_sum_ii.py` / `.cpp`）：
+
+```python
+def path_sum(root, target_sum):
+    result = []
+    path = []
+
+    def dfs(node, remaining):
+        if node is None:
+            return
+        path.append(node.val)
+        remaining -= node.val
+        if node.left is None and node.right is None:
+            if remaining == 0:
+                result.append(path.copy())
+        else:
+            dfs(node.left, remaining)
+            dfs(node.right, remaining)
+        path.pop()
+
+    dfs(root, target_sum)
+    return result
+```
+
+```cpp
+void dfs(TreeNode *node, int remaining, std::vector<int> &path,
+         std::vector<std::vector<int>> &result) {
+    if (node == nullptr) return;
+    path.push_back(node->val);
+    remaining -= node->val;
+    if (node->left == nullptr && node->right == nullptr) {
+        if (remaining == 0) result.push_back(path);
+    } else {
+        dfs(node->left, remaining, path, result);
+        dfs(node->right, remaining, path, result);
+    }
+    path.pop_back();
+}
+
+std::vector<std::vector<int>> pathSum(TreeNode *root, int targetSum) {
+    std::vector<std::vector<int>> result;
+    std::vector<int> path;
+    dfs(root, targetSum, path, result);
+    return result;
+}
+```
+
+- **复杂度**：时间最坏 O(n^2)（每个节点访问一次；若有很多长路径，每收集一条要复制 O(路径长)，如「梳子形」树），空间 O(h)（递归栈 + 当前路径）。
+- **易错点**：Python 存结果必须 `path.copy()`，C++ 的 `result.push_back(path)` 本身就是拷贝；`path.pop()` 要放在**左右递归都完成之后**，提前弹出会漏掉右子树；只在叶子且剩余为 0 时收集，非叶子即使剩余为 0 也不算（路径必须以叶子结尾）；节点值可能是负数，因此不能靠「剩余已经小于 0 就剪枝」。
+- **相似题**：112. 路径总和（只问存在性）；257. 二叉树的所有路径（改为收集所有根到叶路径，与目标无关）；437. 路径总和 III（起点终点任意）；129. 求根节点到叶节点数字之和。
+
+---
+
+## 模式十：树上任意两点间的路径和（前缀和搬到树上）
+
+**适用信号**：题目放宽了路径限制——「不需要从根开始，也不需要在叶子结束」，
+只要求方向向下（从祖先到后代），问满足条件的路径**有多少条**。
+
+### 437. 路径总和 III（中等）
+
+**题目**：给定二叉树的根 `root` 与目标和 `target_sum`，求树中方向向下（从某个祖先到一个后代）
+且节点值之和等于 `target_sum` 的路径数目。路径不需要从根开始，也不一定在叶子结束。
+
+**思路（前缀和 + 哈希表）**：
+数组里我们做过「和为 K 的子数组」：维护「到当前位置为止的前缀和」，用哈希表记录各前缀和
+出现的次数；一段区间和为 `target`，等价于「当前前缀 − 更早的某个前缀 = target」。
+树上的情形完全一样，只是「前缀」变成了**从根一路走到当前节点的路径和**。
+
+沿用前序，携带 `cur = 从根到当前节点的路径和`。以当前节点为终点、向下的某段路径和恰为
+`target`，当且仅当存在一个祖先，其前缀和等于 `cur - target`。于是答案累加
+`prefix_count[cur - target]`，再把 `cur` 的计数加一，递归左右子树，回溯时把计数减一。
+初始放入 `{0: 1}`，代表「从根开始」的那条路径也有一个虚拟的零前缀。
+
+**为什么必须回溯**：哈希表记录的是「当前这条根到节点路径上」出现过的前缀和。一旦离开某个
+节点去走兄弟分支，它就不再位于当前路径上，必须把它的计数撤销，否则会把不在同一条链上的
+前缀也配进来，答案偏大。这与 113 的 `path.pop()` 是同一个「撤销选择」骨架。
+之所以不能沿用「到叶子结算」，是因为这里的起点、终点都任意，用前缀和一次性统计
+「以每个节点为终点」的所有合法起点，避免了「枚举起点再各做一次 DFS」的 O(n^2)。
+另外路径和可能超出 32 位，C++ 里前缀和用 `long long` 更稳妥。
+
+**代码**（`src/binary-tree/path_sum_iii.py` / `.cpp`）：
+
+```python
+def path_sum_iii(root, target_sum):
+    prefix_count = {0: 1}
+
+    def dfs(node, cur):
+        if node is None:
+            return 0
+        cur += node.val
+        total = prefix_count.get(cur - target_sum, 0)
+        prefix_count[cur] = prefix_count.get(cur, 0) + 1
+        total += dfs(node.left, cur)
+        total += dfs(node.right, cur)
+        prefix_count[cur] -= 1
+        return total
+
+    return dfs(root, 0)
+```
+
+```cpp
+long long dfs(TreeNode *node, long long cur, int targetSum,
+              std::unordered_map<long long, int> &prefixCount) {
+    if (node == nullptr) return 0;
+    cur += node->val;
+    long long total = prefixCount.count(cur - targetSum)
+                          ? prefixCount[cur - targetSum]
+                          : 0;
+    prefixCount[cur] += 1;
+    total += dfs(node->left, cur, targetSum, prefixCount);
+    total += dfs(node->right, cur, targetSum, prefixCount);
+    prefixCount[cur] -= 1;
+    return total;
+}
+
+int pathSum(TreeNode *root, int targetSum) {
+    std::unordered_map<long long, int> prefixCount;
+    prefixCount[0] = 1;
+    return static_cast<int>(dfs(root, 0, targetSum, prefixCount));
+}
+```
+
+- **复杂度**：时间 O(n)（每个节点访问一次，哈希表操作均摊 O(1)），空间 O(n)（哈希表 + 递归栈）。
+- **易错点**：`prefix_count` 的更新顺序——先查 `cur - target_sum` 再登记 `cur`，否则当 `target_sum == 0` 时会把自己也算进去；递归左右子树时要传的是**新的** `cur`（已在进入本节点时加过当前值），不能传旧值；回溯的 `prefix_count[cur] -= 1` 必须执行；Python 的 `prefix_count` 在函数内新建，多次调用互不干扰，但若把它提到模块级就会跨用例污染。
+- **相似题**：560. 和为 K 的子数组（数组版前缀和模板，与 `04-prefix-sum` 交叉）；112/113. 路径总和与 II（限制为根到叶，用携带参数而非前缀和）；面试题 04.12. 求和路径（与本题同题不同号）。
+
+---
+
 ## 规律总结
 
 1. **二叉树 = 递归结构，先想递归函数的两件事**：一是它对「以某节点为根的子树」负责做什么；
@@ -1253,3 +1450,13 @@ void flatten(TreeNode *root) {
     下的实现保持完全一致，以经过自测的 `src` 为准，文档只做粘贴。
     C++ 自测时不要把 `{1, 2}` 这类初值列表直接写进 `assert` 实参——花括号里的逗号会被
     当成宏参数分隔符；先把期望值存进变量再比较。
+
+15. **「携带参数往下走」与「返回结果往上汇」是一对镜像**。根到叶的路径和（112/113）把
+    「还差多少」当参数带下去，到叶子结算；深度、直径、最大路径和（104/543/124）把子树结果
+    当返回值往上汇。遇到「沿一条链累加」想携带参数，遇到「要综合左右子树」想返回值。
+    携带参数时，凡是会随分支变化的中间状态（当前路径、当前和），走完一个分支后都要**撤销**。
+
+16. **数组上的「前缀和 + 哈希」可以原样搬到树上**。437 把「从根到当前节点的路径和」当前缀，
+    哈希表记录当前链上各前缀出现的次数，`cur - target` 命中几次就有几条以当前节点结尾的合法
+    路径；离开节点时务必把计数减回去（回溯）。树上的「区间」就是一段向下的链，
+    前缀和照样成立——这也是把数组技巧迁移到树结构的一个漂亮例子。
