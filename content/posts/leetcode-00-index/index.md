@@ -56,6 +56,7 @@ categories: ["算法"]
 | 29 | [区间与扫描线]({{< relref "leetcode-29-interval" >}}) | 区间合并/求交/相减、扫描线、矩形面积覆盖 | 连载中 |
 | 30 | [队列与双端队列]({{< relref "leetcode-30-queue" >}}) | 队列模拟、双端队列设计、单调队列 | 连载中 |
 | 31 | [数位 DP]({{< relref "leetcode-31-digit-dp" >}}) | 按位枚举、tight/前导零、掩码、相邻位、数位和 | 连载中 |
+| 32 | [状态压缩]({{< relref "leetcode-32-bitmask" >}}) | 位掩码当集合、枚举子集、覆盖集合、TSP 状压 | 连载中 |
 
 > 各篇正文由仓库 `code/leetcode/docs/` 下的 Markdown **实时内联**渲染，随配套代码一起更新。
 
