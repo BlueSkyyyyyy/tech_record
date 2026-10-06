@@ -45,6 +45,7 @@ categories: ["算法"]
 | 18 | [数学]({{< relref "leetcode-18-math" >}}) | 逐位处理、进制映射、数论结论 | 连载中 |
 | 19 | [设计题]({{< relref "leetcode-19-design" >}}) | 组合基础结构、哈希+链表、O(1) 容器 | 连载中 |
 | 20 | [矩阵与二维数组]({{< relref "leetcode-20-matrix" >}}) | 原地变换、螺旋/对角遍历、结构化查找 | 连载中 |
+| 21 | [排序]({{< relref "leetcode-21-sort" >}}) | 自定义顺序/比较器、频率排序、桶排序 | 连载中 |
 
 > 各篇正文由仓库 `code/leetcode/docs/` 下的 Markdown **实时内联**渲染，随配套代码一起更新。
 
