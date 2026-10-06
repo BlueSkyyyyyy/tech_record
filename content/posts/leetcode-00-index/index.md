@@ -42,6 +42,7 @@ categories: ["算法"]
 | 15 | [字符串]({{< relref "leetcode-15-string" >}}) | 反转、匹配、编辑距离、回文 | 连载中 |
 | 16 | [位运算]({{< relref "leetcode-16-bit" >}}) | 异或抵消、清最低位 1、位递推、位枚举 | 连载中 |
 | 17 | [前缀树]({{< relref "leetcode-17-trie" >}}) | 共享前缀、通配符搜索、前缀聚合 | 连载中 |
+| 18 | [数学]({{< relref "leetcode-18-math" >}}) | 逐位处理、进制映射、数论结论 | 连载中 |
 
 > 各篇正文由仓库 `code/leetcode/docs/` 下的 Markdown **实时内联**渲染，随配套代码一起更新。
 
