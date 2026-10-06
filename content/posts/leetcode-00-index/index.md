@@ -40,7 +40,7 @@ categories: ["算法"]
 | 13 | [动态规划]({{< relref "leetcode-13-dynamic-programming" >}}) | 状态设计、转移、背包/序列/区间 | 连载中 |
 | 14 | [贪心]({{< relref "leetcode-14-greedy" >}}) | 局部最优、交换论证 | 连载中 |
 | 15 | [字符串]({{< relref "leetcode-15-string" >}}) | 反转、匹配、编辑距离、回文 | 连载中 |
-| 16 | [位运算]({{< relref "leetcode-16-bit" >}}) | 异或抵消、清最低位 1、位递推 | 连载中 |
+| 16 | [位运算]({{< relref "leetcode-16-bit" >}}) | 异或抵消、清最低位 1、位递推、位枚举 | 连载中 |
 
 > 各篇正文由仓库 `code/leetcode/docs/` 下的 Markdown **实时内联**渲染，随配套代码一起更新。
 
