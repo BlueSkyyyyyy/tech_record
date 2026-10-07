@@ -37,7 +37,7 @@ categories: ["算法"]
 | 10 | [图与搜索]({{< relref "leetcode-10-graph" >}}) | BFS/DFS、并查集、拓扑排序 | 连载中 |
 | 11 | [回溯与递归]({{< relref "leetcode-11-backtracking" >}}) | 决策树、剪枝、排列组合 | 连载中 |
 | 12 | [分治法]({{< relref "leetcode-12-divide-conquer" >}}) | 归并、划分、递归分解 | 连载中 |
-| 13 | [动态规划]({{< relref "leetcode-13-dynamic-programming" >}}) | 状态设计、转移、背包/序列/区间 | 连载中 |
+| 13 | [动态规划（一）]({{< relref "leetcode-13-dynamic-programming" >}}) | 状态设计、转移、背包/序列/区间/状态机 | 连载中 |
 | 14 | [贪心]({{< relref "leetcode-14-greedy" >}}) | 局部最优、交换论证 | 连载中 |
 | 15 | [字符串]({{< relref "leetcode-15-string" >}}) | 反转、匹配、编辑距离、回文 | 连载中 |
 | 16 | [位运算]({{< relref "leetcode-16-bit" >}}) | 异或抵消、清最低位 1、位递推、位枚举 | 连载中 |
@@ -58,6 +58,8 @@ categories: ["算法"]
 | 31 | [数位 DP]({{< relref "leetcode-31-digit-dp" >}}) | 按位枚举、tight/前导零、掩码、相邻位、数位和 | 连载中 |
 | 32 | [状态压缩]({{< relref "leetcode-32-bitmask" >}}) | 位掩码当集合、枚举子集、覆盖集合、TSP 状压 | 连载中 |
 | 33 | [字符串匹配]({{< relref "leetcode-33-string-matching" >}}) | KMP 前缀函数、滚动哈希、Manacher 回文 | 连载中 |
+| 34 | [树形 DP]({{< relref "leetcode-34-tree-dp" >}}) | 后序返回状态、选/不选、净流量、单臂、覆盖状态机 | 连载中 |
+| 35 | [动态规划（二）DP 优化]({{< relref "leetcode-35-dp-optimization" >}}) | 前缀和、哈希表、二分、单调队列、滚动数组 | 连载中 |
 
 > 各篇正文由仓库 `code/leetcode/docs/` 下的 Markdown **实时内联**渲染，随配套代码一起更新。
 

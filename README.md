@@ -171,12 +171,16 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 把 LeetCode 高频经典题按数据结构/算法模式分类，由易到难、相似题成组，
 每道题配 Python 与 C++ 可运行代码，并总结可迁移的通用规律。路线图见 [code/leetcode/ROADMAP.md](code/leetcode/ROADMAP.md)。
 
-1. [专题导读：分类目录与学习路线](content/posts/leetcode-00-index/index.md)
+1. [专题导读：分类目录与学习路线](content/posts/leetcode-00-index/index.md)（全 35 篇目录）
 2. [数组与双指针](content/posts/leetcode-01-array/index.md)
 3. [哈希表](content/posts/leetcode-02-hash/index.md)
 4. [滑动窗口](content/posts/leetcode-03-sliding-window/index.md)
 5. [前缀和与差分](content/posts/leetcode-04-prefix-sum/index.md)
 6. [二分查找](content/posts/leetcode-05-binary-search/index.md)
+
+动态规划专题（多篇）：[动态规划（一）线性/序列/背包/网格/区间/状态机](content/posts/leetcode-13-dynamic-programming/index.md)、
+[数位 DP](content/posts/leetcode-31-digit-dp/index.md)、[状态压缩](content/posts/leetcode-32-bitmask/index.md)、
+[树形 DP](content/posts/leetcode-34-tree-dp/index.md)、[动态规划（二）DP 优化](content/posts/leetcode-35-dp-optimization/index.md)。
 
 配套代码：[code/leetcode/](code/leetcode/README.md)
 （各篇正文由 `docs/` 下的 Markdown 通过 `lc_include` shortcode 实时内联渲染）。
