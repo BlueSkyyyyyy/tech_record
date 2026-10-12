@@ -184,8 +184,11 @@ FlashKDA K1 当场写的 workspace `kGTotal` 对到 1.6e-5~8.1e-5），四条支
 **P7-13**（`docs/07` §16）用 `ncu` 剖析 B1 的硬件 bound：它**不是** tensor/带宽/占用率 bound（tensor
 4.5–14.9%、DRAM ≤28.6%、achieved occ 一律 ~6.2%＝小 grid 症状），而是**延迟/并行度受限**——同 BT=64 下
 ours 比 FLA `dhu` 慢 2.14×，差在 **`long_scoreboard`（≈47–55% issue 间隔在等全局加载）+ 单一 `[128,BV]`
-依赖链 + `num_stages=1` 无流水**，FLA 用「K 拆两条 64 链 + `num_stages∈{2,3,4}` 流水」补上。故目标卡 CUDA
-B1 的优先级＝先镜像 K2 的 TMA 输入流水、再把 D=128 状态拆两条独立累加链。
+依赖链 + `num_stages=1` 无流水**，FLA 用「K 拆两条 64 链 + `num_stages∈{2,3,4}` 流水」补上。**P7-14**
+（`docs/07` §17）随后在 bf16 Triton 原型上把这两条分开量：单靠 **`tl.range` 软件流水**就把 B1 从 **1.96×**
+拉到 **1.00×（`B2T1024H8`）/ 0.85×（`B8T2048H8`）FLA**、`long_scoreboard` 5.27→**0.96**（≈FLA 1.06），
+而**拆 K 两条链单独负收益（慢 13%）、与流水叠加更慢**——故目标卡 CUDA B1 的优先级修正为 **只做「镜像 K2 的
+TMA 输入流水」**，拆累加链降级为不推荐。
 
 **反向性能（`docs/07` §10 P7-7 + §11 P7-8 更正）**：把上面那条 workspace 驱动反向链和
 `torch.autograd` 穿 `chunk_kda` 在统一口径（`wall`+CUPTI `dev`）下比，**只计反向**。四组 shape 实测

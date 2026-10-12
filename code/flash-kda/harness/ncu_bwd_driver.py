@@ -35,6 +35,7 @@ sys.path.insert(0, HARNESS)
 
 import check_bwd_dhu_kernel as K  # noqa: E402
 from check_bwd_dhu_dtype import build_kernel_bf16, dhu_triton_bf16  # noqa: E402
+from check_bwd_b1_ilp import build_kernel_ilp, dhu_ilp  # noqa: E402
 
 
 def synth_fi(B, T, H, BT, device, dtype):
@@ -58,6 +59,9 @@ def main():
     ap.add_argument("--H", type=int, default=8)
     ap.add_argument("--bt", type=int, default=16, help="chunk size for the 'ours' kernel")
     ap.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
+    ap.add_argument("--variant", choices=["base", "pipe", "splitk", "both"],
+                    default="base", help="P7-14 B1 kernel variant ('ours' only)")
+    ap.add_argument("--ns", type=int, default=1, help="loop num_stages for ILP variants")
     ap.add_argument("--warmup", type=int, default=3)
     ap.add_argument("--prof", type=int, default=1)
     ap.add_argument("--seed", type=int, default=0)
@@ -68,14 +72,21 @@ def main():
     dev = "cuda"
 
     if args.which == "ours":
-        k = build_kernel_bf16() if dt == torch.bfloat16 else K.build_kernel()
         fi, do, dv = synth_fi(args.B, args.T, args.H, args.bt, dev, dt)
+        if args.variant == "base":
+            k = build_kernel_bf16() if dt == torch.bfloat16 else K.build_kernel()
 
-        def call():
-            if dt == torch.bfloat16:
-                dhu_triton_bf16(k, fi, do, dv, scale, args.bt)
-            else:
-                K.dhu_triton(k, fi, do, dv, None, scale, args.bt)
+            def call():
+                if dt == torch.bfloat16:
+                    dhu_triton_bf16(k, fi, do, dv, scale, args.bt)
+                else:
+                    K.dhu_triton(k, fi, do, dv, None, scale, args.bt)
+        else:
+            k = build_kernel_ilp()
+            splitk = args.variant in ("splitk", "both")
+
+            def call():
+                dhu_ilp(k, fi, do, dv, scale, args.bt, split_k=splitk, ns=args.ns)
     else:
         from fla.ops.common.chunk_delta_h import chunk_gated_delta_rule_bwd_dhu
         q, kk, v, g_log2, beta, h0 = K.make_inputs(args.B, args.T, args.H, D, D, 64, dev, dt,
@@ -97,6 +108,7 @@ def main():
         call()
     torch.cuda.synchronize()
     print(f"DONE which={args.which} B={args.B} T={args.T} H={args.H} bt={args.bt} "
+          f"variant={args.variant} ns={args.ns} "
           f"dtype={args.dtype} (warmup={args.warmup} prof={args.prof})")
 
 
