@@ -127,6 +127,8 @@ NCCL Gin backend）。与 Mega MoE 相关的两条：
 
 > 说明：DeepEP 的 V2/V2.5 目标平台是 Hopper 及以上，但本专题把 dispatch/combine 与 symmetric
 > memory 的接口/数据流作为 P0-3 单独分析，与 SM100 专属的 Mega MoE 主体分开。
+> 这部分源码精读见 `docs/07-deepep-dispatch-combine.md`：对称显存（NCCL window）、
+> dispatch 的 notify/搬运 warp、dispatch copy epilogue 的 expanded layout、combine 的 bf16 加权归约。
 
 ## 6. 下一步
 

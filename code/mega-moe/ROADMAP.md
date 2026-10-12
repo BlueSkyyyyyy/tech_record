@@ -38,9 +38,11 @@
       → `docs/02-mega-moe-architecture.md`（commit `057ca59` 行号核实）。
 - [x] **P0-2** 补充线上资料：DeepGEMM README/release notes 中 Mega MoE 段落、PR #316；记录引用链接。
       → `docs/01` §5（版本时间线与链接）、`docs/02` §8（PR #316 基准表与解读）。
-- [ ] **P0-3** 访问 `~/github/DeepEP`：dispatch/combine kernel 与 symmetric memory 的接口与数据流。
+- [x] **P0-3** 访问 `~/github/DeepEP`：dispatch/combine kernel 与 symmetric memory 的接口与数据流。
+      → `docs/07-deepep-dispatch-combine.md`（真实行号核对，DeepEP commit `93eb6eb` / v2.5.0）。
 - [ ] **P0-4** 环境探测：`kernel_lab` 里能否编译/跑 DeepGEMM 的 SM90 部分（`pip install -e ~/github/DeepGEMM`，
-      注意 `DG_SKIP_CUDA_BUILD`）；确认 H100 上可用哪些 kernel。
+      注意 `DG_SKIP_CUDA_BUILD`）；确认 H100 上可用哪些 kernel。已知：CUDA 13.2 / PyTorch 2.12 达标，
+      但 `deep_ep` 未安装（见 `docs/07` §8）。
 
 ### P1 MoE / EP 基础（`docs/01-moe-ep-basics.md`）
 
@@ -101,12 +103,15 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0-1、P0-2 完成**。P0-1：读通 DeepGEMM Mega MoE 五个源文件，产出数据流脑图与架构解析
+- 当前进度：**P0-1、P0-2、P0-3 完成**。P0-1：读通 DeepGEMM Mega MoE 五个源文件，产出数据流脑图与架构解析
   `docs/02-mega-moe-architecture.md`（真实行号核对），P2-2/P2-3 一并覆盖。
   P0-2：`docs/01` §5 记录仓库/版本时间线/关键结论/DeepEP 侧真实链接；`docs/02` §8 补 PR #316
-  EP8 基准表（V4-Flash/Pro）与解读。P2-1 的 `transform_weights_for_mega_moe` 权重布局仍待补。
-- **下一步：P0-3** 访问 `~/github/DeepEP`，梳理 dispatch/combine kernel 与 symmetric memory 的接口与数据流
-  （注意与 SM100 专属的 Mega MoE 主体分开，DeepEP 侧 H100 可用）；顺带补 P2-1 权重布局。
+  EP8 基准表（V4-Flash/Pro）与解读。P0-3：精读 DeepEP v2.5 的对称显存（NCCL window）、
+  dispatch/combine kernel、dispatch copy epilogue 的 expanded layout，产出 `docs/07-deepep-dispatch-combine.md`
+  （真实行号核对）。P2-1 的 `transform_weights_for_mega_moe` 权重布局仍待补。
+- **下一步：P0-4** 环境探测：在 `kernel_lab`（H100）里确认能否编译/跑 DeepGEMM 的 SM90 部分、
+  能否安装 DeepEP 跑通单/多卡 dispatch/combine（决定后续 P4 数值实验与 DeepEP 实验的可行性）；
+  顺带补 P2-1 权重布局，再进入 P1/P3。
 
 ## 阻塞
 
