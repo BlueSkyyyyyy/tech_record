@@ -227,7 +227,7 @@
   dgrad ~600 FLOP/B（d2g 111.0us、tensor 65.5%、180.9MB/25.0MB）。根因：权重梯度大且 fp32 +
   SM90 `k_grouped_nt` 强制累积回读 D（`gemm.hpp:403`，读≈写+操作数）+ K=token 太浅；四 kernel 均达
   各自 roofline 下界 55–63%，下界之比 ~5× 与实测吻合。配套博客 `content/posts/mega-moe-15-backward-profiling`
-  （索引页新增第 15 篇）。Hugo `--gc --minify` 构建待验证。
+  （索引页新增第 15 篇）。Hugo `--gc --minify -d /tmp/megamoe_hugo_check` 构建 0 ERROR（第 15 篇已内联渲染）。
 - **下一步**：P0~P6 已全部完成，P7-1 已完成。后续若继续（均为增量、非承诺）：
   ② **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
   并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）；
