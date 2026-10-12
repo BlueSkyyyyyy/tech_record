@@ -77,8 +77,9 @@
 
 ### P6 反向 kernel 解析/实现（`docs/06-kda-bwd-kernel.md`）
 
-- [ ] **P6-1** 若 FLA 提供 CUDA 反向，逐 kernel 精读；否则基于 P5-4 给出自研 kernel 的设计。
-- [ ] **P6-2** （可选）在 `kernel_lab` 上写最小可运行反向 kernel 并与参考对拍。
+- [x] **P6-1** FLA `chunk_kda` 提供 **Triton** 反向（非 CUDA）：逐 kernel 精读其 5 个 kernel 分解，
+      并与 P5-4 的 chunked backward 逐式对照；同时基于 FlashKDA 前向 workspace 给出目标卡 CUDA 反向设计。
+- [ ] **P6-2** （可选）在 `kernel_lab` 上写最小可运行反向 kernel（先复刻状态伴随 `dhu`/B1）并与参考对拍。
 
 ### P7 性能与剖析（`docs/07-perf.md`）
 
@@ -111,7 +112,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0/P1/P2/P3 全部完成，P4 全部完成（前向 kernel vs fp64 golden 两方对拍 + golden/FlashKDA/FLA 三方对拍，多 shape/seed/门控区间）；**P5-1/P5-2/P5-3/P5-4 完成**（反向 adjoint 推导 + 不依赖 autograd 的显式参考实现 + 三方数值核验 + 与 FLA chunked 反向 bf16 对拍 + chunked backward 分块化推导/实现）。
+- 当前进度：P0/P1/P2/P3 全部完成，P4 全部完成（前向 kernel vs fp64 golden 两方对拍 + golden/FlashKDA/FLA 三方对拍，多 shape/seed/门控区间）；**P5-1/P5-2/P5-3/P5-4 完成**（反向 adjoint 推导 + 不依赖 autograd 的显式参考实现 + 三方数值核验 + 与 FLA chunked 反向 bf16 对拍 + chunked backward 分块化推导/实现）；**P6-1 完成**（FLA Triton 反向 5 kernel 精读 + 记号映射实测 + 目标卡 CUDA 反向设计；见 `docs/06`）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -178,9 +179,28 @@
     naive `STSM+LDSM_N`（不转置）max_rel=1.26（全错），**证明转置是数学必需**；延迟微基准
     4×`MOVM_T`=18.0 cyc vs `STSM+syncwarp+LDSM`=21.8 cyc（1.21×），真正收益是省 4096B U 缓冲与
     Phase 3→4→6 对 U 复用的零同步。
-- **下一步：P6-1 反向 kernel 设计/解析**。FlashKDA 无开源反向，基于 P5-4 的分块反向给出自研
-  kernel 数据流（复用 K1 落盘的 $L/P/M_{qk}$，块内全 GEMM + 块间状态伴随传递），并对照 FLA
-  Triton `chunk_kda` 的 `chunk_bwd_d*` 结构。
+  - P6-1：新增 `docs/06-kda-bwd-kernel.md` + `harness/check_bwd_kernel_map.py`
+    （`harness/check_bwd_kernel_map.out.txt`）+ 博客 post `flash-kda-06-bwd-kernel` 并更新 index。
+    **Part A（记号映射实测，fp32）**：跑 FLA 前向子函数，取它给反向保存的 `qg,kg,Aqk,Akk,w,v_new,h`
+    与 `src/kda_ref.py` 分块符号对拍，钉死映射——`qg=q_dec/scale`(7e-8)、`kg=k_rest`(5e-7)、
+    `tril(Aqk)=M_qk`(8.5e-4)、**`Akk=P=(I+L)^{-1}`**(1.5e-4，而非 $P\,diag(β)$，后者 rel≈1)、
+    `w=P·diag(β)·k_dec`(7e-4)、`v_new=U`(7e-4)、`h=S_in`(块0 逐位相等、末块 1.8e-3)。
+    **Part B（kernel 分解实测）**：`torch.profiler` 抓真跑 $B1,T512,H4,D128$ bf16 的
+    `chunk_kda` fwd+bwd，CUDA kernel 级确认反向=3 专用 kernel（`dAv`/`dhu_blockdim64`/`intra`）
+    + `recompute_w_u_fwd_kda_kernel`(×2) + `chunk_local_cumsum`(×2)，耗时与前向同阶。
+    文档逐 kernel 精读并贴真实行号：编排 `chunk_bwd.py:434-615`（重算 463-506 / dAv 510 / dhu 541 /
+    wy_dqkg 557 / intra 576 / 反向 cumsum 599 / gate 604），`dAv` 43-114（Aqk 存未 mask 全阵、用时
+    mask 89-90）、`dhu` 359-671（逆序 476，式 7.13 在 585-587）、`wy_dqkg` 133-310（253-256、264/281、
+    302-304 的 $P$ 伴随）、`intra` 395-667、前向 `inter_solve_fused` 43-379。**设计**：目标卡 CUDA
+    反向复用 K1 workspace 六字段（`utils.cuh:70-76`：`kd/qd/kr/gt/INV(P)/Mqk`），只缺 `beta`/门 logits
+    → 补一个 B0 门控重算，再落 B3 intra / B2 dqkg / B1 state-adjoint（B1 直接镜像前向 K2，逆序扫）。
+    精度待验证项：$P$ 的伴随（式 7.5）与 bf16 存储 $\bar S$。
+    **踩坑**：验证 $P$ 时用 fp32 `torch.linalg.solve(I+L,I)` 稠密解在未归一化随机 k 上会把单位下三角
+    逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
+    另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
+
+- **下一步：P6-2（可选）最小反向 kernel**。在 `kernel_lab` 复刻状态伴随 kernel（FLA `dhu`/设计 B1）
+  并与 `src/kda_bwd_ref.py` 对拍；补 bf16 存 $\bar S$ 的受控消融。若跳过 P6-2，则进入 P7（性能/ncu）。
   - P5-4：新增 `docs/05` §7「反向分块化（chunked backward）推导」+ `src/kda_bwd_ref.py::kda_chunked_backward`
     + `harness/check_bwd_chunked.py`（`harness/check_bwd_chunked.out.txt`）。把逐 token adjoint（式 5.2–5.8）
     折叠成块内形式：输出支路 $S_{in}+=qd^\top\bar o$、状态更新支路 $S_{in}+=E^{tot}\odot\bar S_{out}$、
