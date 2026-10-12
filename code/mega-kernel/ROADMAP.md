@@ -704,6 +704,42 @@
   判据：六档全为 kernel-per-operator 降级项，**均不满足 C1–C5**。同步在 `docs/03` §2.6 交叉引用。
   **本轮新增实验。**
 
+### P33 SM100 2SM 协作原语：`cta_group::2` TMA load + tcgen05 2-SM MMA 的 sm90 投影（`docs/04-experiments.md` §22）
+
+- [x] **P33-1** 补齐 §20.6 / 「下一步」都点名的两条 **SM100 专属原语**：`SM100_TMA_2SM_LOAD`
+      （`cp.async.bulk.tensor ... .cta_group::2`，一个 CTA 发、tile 按 2 个 SM 分区投递）与
+      **tcgen05 2-SM MMA**（`tcgen05.mma.cta_group::2`，一对 SM 协作算一次、TMEM 各持 M 的一半）。
+      这两条只在 SM100 可执行，故分两步：**(a) 资料分析** CUTLASS（DeepGEMM 内
+      `third-party/cutlass`，commit `057ca59`）一手语义；**(b) sm90 投影实测**。见
+      `docs/04-experiments.md` §22，源码 `src/two_sm_load.cu`，脚本 `harness/two_sm_load.sh`，
+      原始输出 `harness/two_sm_load.out.txt`（目标卡 H100/sm90a、**固定空闲 device 2**、nvcc 13.2、
+      cluster 恒 C=2、每配置独立进程）。核心结论：
+      - **资料分析**：`copy_sm100_tma.hpp` 的 `SM100_TMA_2SM_LOAD_{1D..5D}`（`:52/78/104/130/156`）、
+        dispatcher `:182`、`_MULTICAST_*`（`:229` 起）、`_IM2COL_*`（`:402` 起）；PTX 带 `.cta_group::2`
+        （`:92`）；障碍句柄 `& Sm100MmaPeerBitMask(0xFEFFFFFF)`（`:45/63`）注释 *"Executed by both CTAs.
+        Set peer bit to 0 so that the transaction bytes will update CTA0's barrier."*；集体层
+        `sm100_mma_warpspecialized.hpp:234` *"Only one thread issues the TMA and updates the barriers in a
+        2SM MMA"*；MMA 侧 `SM100_MMA_{TF32,F16BF16}_2x1SM_SS`（`mma_sm100_umma.hpp:382/422`，
+        `static_assert(M==128||256,"...for 2 CTA cluster MMA.")` `:384`）由 `elect_one_sync()`
+        单线程发 `tcgen05.mma.cta_group::2`（`:406/446`），`umma_arrive_2x1SM`（`barrier.h:779-789`）
+        单点到达一对 SM 的屏障。DeepGEMM Mega MoE/Gate `cluster_dim` 的最小单位就是 2SM
+        （`sm100_bf16_mega_moe.hpp:138`/`sm100_bf16_mega_gate.hpp:74`，交叉引用 `docs/02` §1.2/§1.5）。
+      - **sm90 投影（一个 2-CTA cluster 把 tile A+B 装进两个 SM）** 三模式：mode0 `indep`（两 CTA
+        各发各的）、mode1 `mcast`（rank0 TMA multicast 复制投递）、mode2 `split`（rank0 两个
+        `cp.async.bulk.shared::cluster` 把 A 发自己、B 发对端，`mapa` 求对端 SMEM/mbarrier；=
+        `cta_group::2` 投影）。全部 case `maxerr=0.00000`。
+      - **结果**：多 pair（grid=128）chunk 4→32KB，**mcast 越大越占优**（`m1/m0` 0.964→**0.825**，
+        32KB 快 1.21×），**split 越大越吃亏**（`m2/m0` 1.032→**1.130**）；三模式随 R **严格线性**。
+      - **ncu 源侧字节（grid=128/chunk=8KB/R=200）**：mode0/mode2 DRAM 读 **209.76/209.73 MB**、
+        L2 read sectors **6,553,600**（完全相同），mode1 **104.89 MB / 3,276,800**（**恰减半**）。
+        ⇒ **multicast 减半的是源流量；分区投递不省源流量**（A、B 各读一次与发出者数量无关），
+        2SM 的价值在硬件层（一次发、一个屏障、一对 SM 分持 TMEM），**不在**减流量；sm90 缺席
+        `.cta_group::2`，软件投影（单发连发含远端）反而慢 ~13%。
+      - 判据：满足 C1–C3、`cta_group::2`/multicast 细化 C4，**仍非 C5**（与 §18/§19 同档）。
+      - 局限：sm90 投影非 SM100 本体（两套独立 mbarrier，非 CTA0 单点）、未测 tcgen05 2SM MMA、
+        mode1 与 mode0/2 语义不同（复制 vs 分区）、固定 C=2、测的是载入原语非端到端。
+      **本轮新增实验**；与 §18/§19/§20/§21 合成「跨 SM 协作原语」的 sm100 展望。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -726,7 +762,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P32-1 完成（1/1）**。补齐 `docs/04` §20.6 明留的「`cudaLaunchAttributeProgrammaticEvent`
+- 当前进度：**P33-1 完成（1/1）**。补齐 §20.6 / 「下一步」都点名的两条 **SM100 专属原语**
+  （`SM100_TMA_2SM_LOAD` / tcgen05 2-SM MMA）：先**资料分析** CUTLASS（DeepGEMM 内
+  `third-party/cutlass`，`057ca59`）——`copy_sm100_tma.hpp` 的 `SM100_TMA_2SM_LOAD_{1D..5D}`（`:52/78/…`）、
+  `.cta_group::2` PTX（`:92`）、障碍 `& Sm100MmaPeerBitMask(0xFEFFFFFF)`（`:45/63`，注释「两 CTA 都执行、
+  清 peer 位→事务字节更新 CTA0 屏障」）、`sm100_mma_warpspecialized.hpp:234`「2SM MMA 里只有一个线程
+  发 TMA/更新屏障」、`SM100_MMA_{TF32,F16BF16}_2x1SM_SS`（`mma_sm100_umma.hpp:382/422`，`elect_one_sync()`
+  单线程发 `tcgen05.mma.cta_group::2`）、`umma_arrive_2x1SM`（`barrier.h:779-789`）；再在 H100 上做
+  **sm90 投影实测**——`docs/04-experiments.md` 新增 **§22**，源码 `src/two_sm_load.cu`、脚本
+  `harness/two_sm_load.sh`、原始输出 `harness/two_sm_load.out.txt`（目标卡 H100/sm90a、固定空闲
+  device 2、nvcc 13.2、cluster 恒 C=2、每配置独立进程）。核心结论：一个 2-CTA cluster 装 tile A+B
+  三模式（mode0 indep / mode1 mcast / mode2 split=单 CTA 连发 A→己、B→对端 via `mapa`），全 `maxerr=0`；
+  **mcast 随 chunk 增大越占优**（grid=128、chunk 4→32KB，`m1/m0` 0.964→0.825，32KB 快 **1.21×**）、
+  **split 越大越吃亏**（`m2/m0` 1.032→1.130）；ncu 源侧 **mode0/mode2 DRAM 209.76/209.73 MB、L2 read
+  sectors 6,553,600 完全相同，mode1 恰减半（104.89 MB / 3,276,800）**——**multicast 减半的是源流量，
+  分区投递不省源流量**，2SM 的价值在硬件层（一次发、一个屏障、一对 SM 分持 TMEM）而非减字节，sm90
+  缺席 `.cta_group::2`、软件投影反慢 ~13%。判据满足 C1–C3、细化 C4，仍非 C5。**本轮新增实验。**
+  此前 **P32-1 完成（1/1）**。补齐 `docs/04` §20.6 明留的「`cudaLaunchAttributeProgrammaticEvent`
   未覆盖」尾巴，把 kernel 级「进度/事件」原语能前移到哪一点量出来——`docs/04-experiments.md` 新增
   **§21**，源码 `src/programmatic_event.cu`、脚本 `harness/programmatic_event.sh`、原始输出
   `harness/programmatic_event.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、
@@ -891,7 +943,10 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：全专题收尾（P0–P31 全部完成）**。P31-1 已把 §18.6/§19.6 的「未测 2D/3D cluster」补成
+- **下一步：全专题收尾（P0–P33 全部完成）**。P33-1 已把 §20.6 / 「下一步」都点名的两条
+  **SM100 专属原语**处理掉（`docs/04` §22：`SM100_TMA_2SM_LOAD` / tcgen05 2-SM MMA 的资料分析 +
+  sm90 投影实测——multicast 复制投递源流量恰减半、分区投递不省源流量、2SM 是硬件层把一对 SM 绑成
+  一个计算单元）。P31-1 已把 §18.6/§19.6 的「未测 2D/3D cluster」补成
   实测（`docs/04` §20：rank 布局 `x+y*cx+z*cx*cy`、2D DSM 与 1D 同档、multicast 逐行子集掩码精确、
   容量逐维约束）。P30-1 已把 §18.6 的「cluster 内 `mbarrier`/TMA 组合
   未覆盖」补成实测（`docs/04` §19：TMA multicast 一次读、C 个 SMEM 收——语义确认、delivery 打平、
@@ -938,7 +993,8 @@
    1.5–2.2×、cluster 上限 16 block/grid 须为 C 倍数；见 `docs/04` §18）。
    剩余可选：~~cluster 内 TMA multicast + `mbarrier` 组合~~（**P30-1 完成**：`docs/04` §19）、
    ~~2D/3D cluster + multicast 子集掩码~~（**P31-1 完成**：`docs/04` §20）、
-   SM100 `SM100_TMA_2SM_LOAD`、`cudaLaunchAttributeProgrammaticEvent`；
+   ~~SM100 `SM100_TMA_2SM_LOAD` / tcgen05 2-SM MMA~~（**P33-1 完成**：`docs/04` §22 资料分析 +
+   sm90 投影实测）、~~`cudaLaunchAttributeProgrammaticEvent`~~（**P32-1 完成**：`docs/04` §21）；
    把 DeepGEMM Mega Gate 的 `cluster_dim` 路径做一次 sm90 等价复刻（Mega Gate 本身是 SM100 专属）。
 - **本轮（P25-1 续）**：续做 P25-1 的「MPK 端到端跑通」，把上轮「执行不收敛」从玄学死锁推进到
   **可复现、可归因的时序竞态**。`docs/09-mpk-build.md` 新增 **§7**（收敛性诊断），新原始输出
@@ -968,6 +1024,36 @@
   - **局限**：未把根因收敛到某条 load/store 内存序；端到端延迟仍未测（只测正确性+收敛/挂起）。
     下一步候选：`compute-sanitizer --tool racecheck` 抓竞争、把自旋换成 `__nanosleep` 退避验证纯时序、
     向 MPK 上游核对 `f9eb70c` worker 抢跑路径。**不构成对上游的 bug 判定**。P25-1 仍记 `[~]`。
+- **本轮（P33-1）**：`docs/04-experiments.md` 新增 **§22**「2SM 协作：SM100 `cta_group::2` TMA load
+  与 tcgen05 2-SM MMA 的 sm90 投影」——新源码 `src/two_sm_load.cu`、脚本 `harness/two_sm_load.sh`、
+  原始输出 `harness/two_sm_load.out.txt`（目标卡 H100/sm90a、**固定空闲 device 2**、nvcc 13.2、
+  cluster 恒 C=2、128 线程/CTA、每配置独立进程）。分两步：
+  **(a) 资料分析**（CUTLASS，DeepGEMM 内 `third-party/cutlass`，commit `057ca59`）：
+  `include/cute/arch/copy_sm100_tma.hpp` 的 `SM100_TMA_2SM_LOAD_{1D..5D}`（`:52/78/104/130/156`）、
+  dispatcher `SM100_TMA_2SM_LOAD`（`:182`）、`_MULTICAST_*`（`:229` 起）、`_IM2COL_*`（`:402` 起）；
+  PTX 带 `.cta_group::2`（2D 在 `:92`）；障碍句柄 `& Sm100MmaPeerBitMask`（`=0xFEFFFFFF`，`:45/63`）
+  注释 *"Executed by both CTAs. Set peer bit to 0 so that the transaction bytes will update CTA0's
+  barrier."*；集体层 `include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:234` *"Only one thread
+  issues the TMA and updates the barriers in a 2SM MMA"*；MMA 侧 `SM100_MMA_TF32_2x1SM_SS`（`:382`）/
+  `SM100_MMA_F16BF16_2x1SM_SS`（`:422`）`static_assert(M==128||256,"...for 2 CTA cluster MMA.")`（`:384`）、
+  `tcgen05.mma.cta_group::2.kind::{tf32,f16}`（`mma_sm100_umma.hpp:406/446`）由 `elect_one_sync()` 单线程发、
+  `umma_arrive_2x1SM`（`include/cutlass/arch/barrier.h:779-789`）单点到达一对 SM 的屏障；DeepGEMM
+  Mega MoE/Gate `cluster_dim` 最小单位即 2SM（`sm100_bf16_mega_moe.hpp:138`/`sm100_bf16_mega_gate.hpp:74`）。
+  **(b) sm90 投影实测**：一个 2-CTA cluster 把逻辑 tile（chunk A+B）装进两个 SM 的 SMEM，三模式——
+  mode0 `indep`（两 CTA 各发各的 bulk）、mode1 `mcast`（rank0 TMA multicast 复制投递）、mode2 `split`
+  （rank0 两次 `cp.async.bulk.shared::cluster`：A→己、B→对端（`mapa` 求对端 SMEM 与 mbarrier）=
+  `cta_group::2` 投影）。全部 case `maxerr=0.00000`。核心结论：(1) **多 pair（grid=128）模式差随 chunk
+  放大**——chunk 4→32KB，`m1/m0` **0.964→0.825**（mcast 32KB 快 **1.21×**）、`m2/m0` **1.032→1.130**
+  （split 越大越慢）；三模式随 R **严格线性**（每轮固定成本恒定，无隐藏批处理）。(2) **ncu 源侧字节
+  是决定性证据**（grid=128/chunk=8KB/R=200）：mode0/mode2 DRAM 读 **209.76/209.73 MB**、L2 read
+  sectors **6,553,600**（**完全相同**），mode1 **104.89 MB / 3,276,800**（**恰减半**）——**multicast
+  减半的是源流量**（同一 tile 只从源读一次），**分区投递不省源流量**（A、B 各读一次与发出者数量无关）。
+  (3) **2SM 的价值在硬件层**（一次 TMA 发、一个屏障、一对 SM 分持 TMEM），**不在**减字节；sm90 缺席
+  `.cta_group::2`，软件投影（单 CTA 连发含远端 SMEM 写）在 32KB 反慢 ~13%——sm90 上「两 CTA 各发各的」
+  优于「单发分区」。判据：满足 C1–C3、`cta_group::2`/multicast 细化 C4（设备内协调），**仍非 C5**。
+  局限：sm90 投影非 SM100 本体（两套独立 mbarrier，非 CTA0 单点）、未测 tcgen05 2SM **算**侧、mode1
+  与 mode0/2 语义不同（复制 vs 分区）、固定 C=2、测的是载入原语非端到端。**本轮新增实验**；与
+  §18/§19/§20/§21 合成「跨 SM 协作原语」的 sm100 展望。
 - **本轮（P28-1）**：`docs/09-mpk-build.md` 新增 **§13**「设备侧数值证据：-G 调试构建 + cuda-gdb 读出事件
   计数」。新增补丁 `harness/mpk_debug_build.patch`（只给 `get_compile_command()` 拼 `MPK_EXTRA_DEFINES`，
   **不碰 kernel 代码**）、脚本 `harness/mpk_debug_counters.sh`、命令 `harness/mpk_debug_counters.cmds`，

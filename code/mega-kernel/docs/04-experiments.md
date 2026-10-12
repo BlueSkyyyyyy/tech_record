@@ -3059,3 +3059,181 @@ event record 多一类用途，但推进单位仍是 kernel。
 - **观察者与 G 上限**：Section B 的 G 最大 128 ≤ 132 SM，全部 block 同时常驻，`stagger` 语义干净；
   未测 G≫SM（此时 block 排队，`(G-1)*step` 模型需重算）。
 - **正确性哨兵**：三 Section 的消费 kernel 均 `dep==iters`（全部被真正执行），无漏放行/重复。
+
+## 22. 2SM 协作：SM100 `cta_group::2` TMA load 与 tcgen05 2-SM MMA 的 sm90 投影（P33-1）
+
+### 22.1 问题
+
+§18（Cluster + DSM）、§19（TMA multicast）、§20（2D/3D cluster / 子集掩码）、§21（进度前移原语）
+已经把 sm90 cluster 的四类原语量完。§20.6 与「下一步」都还点名**两条 SM100 专属原语**没覆盖：
+
+- **`SM100_TMA_2SM_LOAD`**（`cp.async.bulk.tensor ... .cta_group::2`）：一个 CTA 发起，把一块 tile
+  **按 2 个 SM 分区投递**（CTA0 得 M 上半、CTA1 得 M 下半），两个 CTA 共用一个事务屏障。
+- **tcgen05 2-SM MMA**（`tcgen05.mma.cta_group::2`）：**一对 SM 协作算一次 MMA**（2x1SM），
+  每 CTA 的 Tensor Memory（TMEM）各存自己那半 M 的累加器。
+
+这两条都**只在 SM100 可执行**，H100（sm90）上跑不了。但它们对 megakernel 的意义很直接：**2SM 把
+「SM 级调度」这一轴（`docs/00` §3 的 C5）又往下压了一级**——从「单 SM 内的 warp 角色划分」
+（P13-1 / P18-1）到「**两个 SM 当成一个逻辑计算单元**」。本节分两步：(a) 在 CUTLASS（DeepGEMM 内
+`third-party/cutlass`，commit `057ca59`）里核对 2SM 的**一手语义**；(b) 在 H100 上用 sm90 原语把
+「一次发、按 SM 分区投递」**投影**出来并实测量化它相对「各读各的」和「multicast 复制」的差异。
+
+### 22.2 资料分析：CUTLASS / DeepGEMM 里的 2SM
+
+**TMA 2SM load（`include/cute/arch/copy_sm100_tma.hpp`）**：一族 `SM100_TMA_2SM_LOAD_{1D..5D}`
+（`:52/78/104/130/156`）、dispatcher `SM100_TMA_2SM_LOAD`（`:182`），另有 `.multicast::cluster`
+变体 `SM100_TMA_2SM_LOAD_MULTICAST_*`（`:229` 起）与 im2col 变体（`:402` 起）。关键实现细节：
+
+- PTX 形如 `cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes`
+  （`:92`）——比 §19 的普通 multicast 多了 **`.cta_group::2`** 限定符。
+- 障碍句柄做了一次位与：`smem_int_mbar = cast_smem_ptr_to_uint(mbar_ptr) & Sm100MmaPeerBitMask`
+  （`Sm100MmaPeerBitMask = 0xFEFFFFFF`，`:45/63`），注释（`:62-63`）写明 *"Executed by both CTAs.
+  Set peer bit to 0 so that the transaction bytes will update CTA0's barrier."*——即**一对 CTA 的 TMA
+  完成字节都记到 CTA0 的同一个 mbarrier**（清掉 SMEM 地址里的 peer 位 = 指到对端 CTA0 的地址）。
+- 集体层 `include/cutlass/gemm/collective/sm100_mma_warpspecialized.hpp:234` 注释 *"Only one thread
+  issues the TMA and updates the barriers in a 2SM MMA, adjust bytes accordingly"*——**2SM 对里只有一个
+  线程发 TMA / 更新屏障**，故事务字节要按对（而非按 CTA）计。
+
+**tcgen05 2-SM MMA（`include/cute/arch/mma_sm100_umma.hpp`）**：如 `SM100_MMA_TF32_2x1SM_SS`
+（`:382`）与 `SM100_MMA_F16BF16_2x1SM_SS`（`:422`），`static_assert(M == 128 || M == 256,
+"...M-mode size should be 128 or 256 for 2 CTA cluster MMA.")`（`:384`）；PTX
+`tcgen05.mma.cta_group::2.kind::{tf32,f16,...}`（`:406/446/...`）由 `cute::elect_one_sync()` 单线程发出。
+配套的完成信号 `umma_arrive_2x1SM()`（`include/cutlass/arch/barrier.h:779-789`）用
+`tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.b64`——**一次 MMA 提交对发射一对
+SM 的屏障各到达一次**。2x1SM 的 M 枚举行（`AtomThrShapeMNK` 的 2 路）由两个 CTA 的 TMEM 各自持有。
+
+**DeepGEMM 自身**（commit `057ca59`）：Mega MoE 用 `cluster_dim=(2,1,1)`
+（`csrc/jit_kernels/impls/sm100_bf16_mega_moe.hpp:138`）、Mega Gate 用 `cluster_dim=num_mma_ctas`
+（`csrc/jit_kernels/impls/sm100_bf16_mega_gate.hpp:74`）——**2SM 对就是它们 cluster 的最小单位**
+（细节见 `docs/02` §1.2/§1.5，此处不重复）。
+
+**一句话**：SM100 的 2SM = **一次 TMA 发、一个屏障、一对 SM 的 TMEM 分持累加器**——把两个物理 SM
+在硬件层面绑成一个逻辑计算单元。sm90 没有 `.cta_group::2`，只能**软件投影**（下面）。
+
+### 22.3 方法（sm90 投影）
+
+程序 `src/two_sm_load.cu`，脚本 `harness/two_sm_load.sh`，原始输出 `harness/two_sm_load.out.txt`
+（目标卡 H100 / sm90a，SMs=132，**固定空闲 device 2**，nvcc 13.2，cluster 恒为 2 CTA，128 线程/CTA，
+每配置独立进程避免 cluster launch failure sticky）。一个 2-CTA cluster（一「pair」）每轮要把
+**逻辑 tile = chunk A + chunk B** 装进两个 SM 的 SMEM，三种投递策略公平对照：
+
+- **mode 0 `indep`**：CTA0 用 `cp.async.bulk` 把 A 载进自己 SMEM、CTA1 把 B 载进自己 SMEM
+  （**两个 CTA 各发各的**，2 次源读）。
+- **mode 1 `mcast`**：rank0 用 §19 的 **TMA multicast** 把 A 复制投递到两个 CTA 的 SMEM
+  （**1 次源读、复制**；两 CTA 拿到同一份）。
+- **mode 2 `split`**：rank0 用 **2 次 `cp.async.bulk.shared::cluster.global` 把 A 发给自己 SMEM、
+  B 发给对端 SMEM**（`mapa.shared::cluster` 求对端地址与**对端 mbarrier**；**1 个 CTA 发起、按 SM 分区**，
+  2 次源读）——这是 **`cta_group::2` TMA load 的 sm90 投影**。
+
+每 CTA 在 `mbarrier` 上等到自己的 chunk 后，读 SMEM 的 `[0]`、`[128]` 两元素求和写入 `out[blockIdx.x]`，
+核对解析参考（mode0/2 期望 CTA0=A、CTA1=B，mode1 期望两者=A）。四 Section：
+**A** 单 pair（grid=2）扫 chunk（4/8/16/32 KB）、**B** 多 pair（grid=128，64 pair）扫 chunk、
+**C** grid=128 扫轮数 R、**D** ncu 量源侧 L2/DRAM 字节。
+
+### 22.4 结果
+
+**A. 单 pair（grid=2，R=500）：三模式同量级，mode2 略慢**
+
+```text
+ chunk |   mode0 indep |   mode1 mcast |   mode2 split | (deliver GB/s: m0/m1/m2)
+-------+---------------+---------------+---------------+
+  4 KB |    308.0 us   |    318.8 us   |    328.9 us   |   13.3 / 12.8 / 12.5
+  8 KB |    317.2 us   |    327.3 us   |    340.1 us   |   25.8 / 25.0 / 24.1
+ 16 KB |    335.6 us   |    345.9 us   |    374.3 us   |   48.8 / 47.4 / 43.8
+ 32 KB |    462.9 us   |    384.3 us   |    548.2 us   |   70.8 / 85.3 / 59.8
+```
+
+单 pair 下三模式被「2 CTA cluster 的 mbar 等待 + `cluster.sync()` 逐轮固定成本」主导，只在 chunk=32KB
+拉开：**mcast 反而最快（384 vs 463 µs）**——它 1 次源读、且没有「一个 CTA 连发两个远端 bulk」的
+issue 压力；**split（mode2）最慢（548 µs）**。
+
+**B. 多 pair（grid=128，R=500）：multicast 越大越占优，split 越大越吃亏**
+
+```text
+ chunk |   mode0 indep |   mode1 mcast |   mode2 split | m1/m0 | m2/m0
+-------+---------------+---------------+---------------+-------+------
+  4 KB |    476.7 us   |    459.3 us   |    491.8 us   | 0.964 | 1.032
+  8 KB |    501.8 us   |    495.8 us   |    522.7 us   | 0.988 | 1.042
+ 16 KB |    562.3 us   |    529.6 us   |    602.6 us   | 0.942 | 1.072
+ 32 KB |    732.7 us   |    604.2 us   |    828.2 us   | 0.825 | 1.130
+```
+
+**multicast 相对「各读各的」在 32KB 快 1.21×（`m1/m0=0.825`）**，且优势随 chunk 增大；**split 在 32KB
+慢 1.13×（`m2/m0=1.130`）**。对照 §19：multicast 的收益来自**源侧流量减半**；split 与 indep 的源侧流量
+**其实一样**（都是 A、B 各读一次），差异纯粹在**发起端/落点**——sm90 上「一个 CTA 连发两次、其中一次
+写远端 SMEM」比「两 CTA 各发一次、各写本地 SMEM」多花约 13%（单 SM 的 TMA issue 端口 + 远端 SMEM 写路径）。
+
+**C. grid=128，chunk=8KB，扫 R：稳态下三模式差 ~5%**
+
+```text
+    R |   mode0 indep |   mode1 mcast |   mode2 split
+------+---------------+---------------+---------------
+  100 |    104.0 us   |    102.9 us   |    108.0 us
+  500 |    502.1 us   |    495.8 us   |    522.3 us
+ 2000 |   1995.1 us   |   1969.5 us   |   2076.4 us
+```
+
+三模式随 R **严格线性**（每轮固定成本恒定），说明没有隐藏的批处理效应。
+
+**D. ncu 源侧字节：multicast 让 DRAM/L2 读**恰**减半，split 与 indep 完全相同**
+
+```text
+ mode | dram__bytes_read | lts__t_bytes | lts read sectors |  = sectors*32B
+------+------------------+--------------+------------------+--------------
+    0 |      209.76 MB   |   448.08 MB  |      6,553,600   |  209.72 MB
+    1 |      104.89 MB   |   290.60 MB  |      3,276,800   |  104.86 MB
+    2 |      209.73 MB   |   447.84 MB  |      6,553,600   |  209.72 MB
+```
+
+（grid=128、chunk=8KB、R=200：indep/split 每 pair 读 A、B 两块 = `64×8192×200×2 = 209.7 MB`；
+mcast 只读 A = `104.9 MB`。）
+
+- **mcast 的 DRAM 读 209.76→104.89 MB（恰 2.00×）**、L2 read sectors 6553600→3276800（**恰好一半**）——
+  与 §19（P30-1）在 sm90 multicast 上量到的「源侧 L2 减半、DRAM 随场景」同源：**复制投递下同一个 tile
+  只从源读一次**（L2 命中接力），故 32KB 时快 1.21×。
+- **split 的源侧字节与 indep 完全相同**（209.73 vs 209.76 / sectors 一致）。这坐实了 **`cta_group::2`
+  的分区投递并不省源流量**——A、B 是两份不同的数据，无论由几个 CTA 发起，每个字节都只读一次。2SM load
+  的价值在 **硬件层**（一次发、一个屏障、一对 SM 分持累加器），**不在**减少 HBM/L2 流量；sm90 缺席
+  `cta_group::2`，只能靠软件连发——而这恰恰在 sm90 上**更慢**。
+
+### 22.5 读法
+
+1. **「复制」与「分区」是两个正交方向，别混**。两个 SM 需要**同一份**数据 → `multicast` 复制投递，
+   源流量减半（mode1，本机 32KB 1.21×）。两个 SM 需要**各持一半** → `partition` 分区投递，源流量不变
+   （mode0/2），省的是协调而非字节。SM100 `cta_group::2` 把**分区**做进了硬件（一次 TMA 发、一个屏障、
+   一对 SM 的 TMEM），sm90 只能用软件投影，且投影有 ~13% 代价。
+2. **sm90 上「让两个 CTA 共享一次载入」正解是 multicast 而非「单发分区」**：若数据相同，multicast
+   又快又省源；若数据不同，还是**两 CTA 各发各的**（mode0）比「一个 CTA 连发两块（含远端）」便宜。
+   split 唯一必要的场合是「必须由单一 issuer 保证原子性/顺序」。
+3. **2SM 是「SM 级调度」轴（C5）的下一级**：§18–§21 的 cluster 原语都是**软件协作**（SM 之间约定
+   mapa / mbarrier / multicast）；2SM 则是**硬件把一对 SM 绑成一个计算单元**（共享屏障、分摊 TMEM、
+   单线程发 MMA）。对 megakernel 的含义：生产级 SM100 mega-kernel（DeepGEMM Mega MoE/Gate）把
+   `cluster_dim` 的最小单位设为 2，正是为了拿到这一级**免软件协调**的原子性。
+
+### 22.6 与判据 / MPK / 生产案例的关系
+
+- **判据（C1–C5，`docs/00` §3）**：本节的 2SM load 是**段内**原语，与 §18/§19 同档——满足 C1–C3、
+  `cta_group::2`/multicast 细化 C4（设备内协调），**仍非 C5**（无 worker/scheduler 动态派发）。
+  真正的 C5 由 P15-1 §9 / P22-1 §15 的去中心化队列覆盖。
+- **与 MPK 的关系**：MPK 论文假设的并行单元是「一个 task = 一个 thread block」（`docs/01` §4.2、
+  `docs/07` §0）。2SM 意味着**一个 task 可以占一对 SM 并硬件绑定**——这是 MPK §7 未展开的硬件轴；
+  对「寄存器固定为各 task 最大值」（P14-1）而言，2SM 用 **TMEM 分摊**规避了 SMEM/寄存器的一部分压力
+  （tcgen05 累加器不在寄存器里）。
+- **与生产案例**：DeepGEMM Mega MoE `cluster_dim=(2,1,1)`、Mega Gate `cluster_dim=num_mma_ctas`
+  （`057ca59`，`docs/02` §1.2/§1.5）的最小 cluster 就是 2SM 对；本节的 mode1（multicast）与 mode0
+  （各发各的）对应它们在 cluster 内的两条载入路径，Mega MoE 的「**Always multicast on A**」正是选
+  mode1 那一路（被多 CTA 共享、最值省源带宽）。
+
+### 22.7 局限与踩到的坑
+
+- **这是 sm90 投影，不是 SM100 `cta_group::2` 本体**：sm90 没有 `.cta_group::2`，mode2 用「单 CTA
+  连发两次 bulk（含一次写远端 SMEM）」近似「一次发、分区投递」；真实 2SM 由硬件在一个事务里完成分区，
+  且**屏障在 CTA0 单点**（`Sm100MmaPeerBitMask` 清 peer 位），本投影是两套独立 mbarrier。故 mode2
+  的 ~13% 代价**不能**推广到 SM100 本体。
+- **未测 tcgen05 2-SM MMA**：H100 无 tcgen05，2x1SM 的**算**侧（TMEM 分持、`umma_arrive_2x1SM`
+  单点到达）仅为资料分析，未实测。
+- **mode1 的语义与 mode0/2 不同**（复制 vs 分区），三者是在「把 2 个张量搬进 2 个 SM」这一目标下的
+  三条实现路径，不是同一份数据的三种搬法；正确性各按各自语义核对（全部 `maxerr=0.00000`）。
+- **未扫 cluster > 2**：本节固定 C=2（2SM 的对应形态）；§19/§20 已扫过 C=4/8/16 的 multicast/DSM。
+- **效率上限不高**：本节测的是「载入原语」而非「端到端 task」，带宽只到几 TB/s（受 SMEM 写入与
+  TMA issue 限），是相对比较，不是绝对性能。
