@@ -1,0 +1,38 @@
+# P5-1 小实验原始输出：N 次 launch 的三种执行策略（eager / CUDA Graph / persistent）
+# date: 2026-10-12T21:30:43+08:00
+# cmd: scripts/lab.sh exec "nvcc -O3 -arch=sm_90 src/launch_overhead.cu -o launch_overhead && ./launch_overhead 200"
+# gpu: H100 80GB HBM3 x8, sm90, driver 570.211.01
+# cuda: nvcc release 13.2, V13.2.78
+
+== device ==
+NVIDIA H100 80GB HBM3, sm_90, SMs=132
+iters=200, persistent grid=132 blocks x 32 threads
+
+== Section A: per-unit work K=0 (launch-bound) ==
+     N |    eager ms |    graph ms |  persist ms | eager ns/u | persist ns/u |      e/g |      e/p
+-------+-------------+-------------+-------------+-----------+-----------+----------+---------
+     4 |      0.0075 |      0.0047 |      0.0020 |    1885.1 |     487.7 |    1.60x |    3.87x
+    16 |      0.0294 |      0.0144 |      0.0019 |    1838.7 |     119.8 |    2.04x |   15.35x
+    64 |      0.1123 |      0.0537 |      0.0020 |    1754.0 |      30.5 |    2.09x |   57.45x
+   256 |      0.4490 |      0.2107 |      0.0020 |    1753.7 |       7.7 |    2.13x |  227.07x
+  1024 |      1.7960 |      0.8381 |      0.0024 |    1753.9 |       2.3 |    2.14x |  752.35x
+  4096 |      9.1736 |      3.4129 |      0.0046 |    2239.6 |       1.1 |    2.69x | 1987.83x
+
+== Section B: N=256, per-unit work K sweep (crossover) ==
+K (per unit) |    eager ms |    graph ms | persist1 ms | persistG ms |      e/g |     e/p1 |     e/pG
+-----------+-------------+-------------+-------------+-------------+----------+---------+--------
+         0 |      0.6286 |      0.2109 |      0.0128 |      0.0026 |    2.98x |  48.92x | 239.46x
+        64 |      0.6284 |      0.2398 |      0.0504 |      0.0025 |    2.62x |  12.46x | 251.79x
+       256 |      0.6298 |      0.2817 |      0.0920 |      0.0026 |    2.24x |   6.84x | 239.61x
+      1024 |      0.6966 |      0.4482 |      0.2583 |      0.0039 |    1.55x |   2.70x | 177.59x
+      4096 |      1.3446 |      1.1141 |      0.9239 |      0.0091 |    1.21x |   1.46x | 147.05x
+     16384 |      4.0047 |      3.7745 |      3.5846 |      0.0299 |    1.06x |   1.12x | 133.82x
+
+work check (eager + persist1 + persistG, each N=256): sink[0]=768 (expect 768)
+
+>> 读法：K=0 时 eager 的 per-unit 时间≈host launch 间隔(~1.8us)，
+>> graph 把 N 次 launch 压成一次提交；persistent 直接=一次 launch 内跑完，
+>> 连设备侧 N 次 grid 启动都省掉。Section B 里 persist1(单 block 串行) 与
+>> eager 设备侧工作等价，K 增大时二者收敛→证明差额本就是 launch 开销；
+>> persistG 靠 132 block 并行度继续领先。megakernel 只治 launch-bound
+>> 区间，纯计算主导且并行度已饱和时收益自然消失。
