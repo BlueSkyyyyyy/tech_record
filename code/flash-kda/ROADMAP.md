@@ -208,6 +208,20 @@
       **结论**：§16.5 第 (2) 条（拆累加链）在本原型上**冗余**（流水已填满 ILP），降级为「不推荐」；
       第 (1) 条（镜像 K2 的 TMA 输入流水）是**全部**收益来源。目标卡 CUDA B1 第一优先级＝照抄 K2 流水。
       见 `docs/07` §17。
+- [x] **P7-15** 用**手写纯 CUDA** B1（`nvcuda::wmma` bf16 m16n16k16，fp32 状态，per-warp V 列，
+  `cp.async` 预取深度 `NSTAGE` 为超参）补 §17.4 留下的边界（「手写 CUDA 显式化预取后是否还需拆链」）：
+  新增 `harness/b1_cuda_probe.cu` + `harness/check_bwd_b1_cuda.py`（`harness/check_bwd_b1_cuda.out.txt`）
+  + `harness/ncu_b1_cuda_driver.py`；`docs/07` §18。**Part A**：与 FLA `dhu` **逐位相同
+  （`dh/dv2/dh0` max_abs=0）**，BT=32/64、含非整除 T=250（两侧同为 bf16 mma + fp32 累加且逐条 op 序
+  相同）。**Part B**：本原型绝对速度差 FLA `dhu` **4.3–9.6×**、`NSTAGE` 预取只值 **2–6%**（小 shape
+  0.92–0.98×），**大 shape 反而 1.40–1.45× 变慢**（NS=2/3 的 smem 到 168–226KB → 占用 2→1 CTA/SM）。
+  **结论**：裸 wmma 版**根本没到 load-bound**（每 CTA 2 warp、~108KB smem→每 SM 2 warp、3 GEMM/chunk
+  仅 ~1.9 TFLOP/s≈峰值 0.2%），故 §17 的「流水杠杆」**不是可单独加上的开关**——它只在 kernel **已是 K2
+  形状**（warp-specialized + TMA 大块搬运 + 足够占用）时才兑现；「拆链」在 CUDA 里无从单独消融（warp 内
+  `[K,16]` 状态本就是 8 条独立 mma m-tile，与 §17「拆链冗余」一致）。**两坑**：(a) warp-local 的
+  `S/duf/du` 切片必须用 warp 内 lane（步长 32）索引，用 block 级 `lane+blockDim.x` 会漏写一半（全零输入
+  通过、`dv2/dh0` 差 O(1)）；(b) ring buffer 的 stage 号须按处理序 `i%NSTAGE` 而非 chunk 号 `c%NSTAGE`
+  （NSTAGE=1 恒等、藏住 bug）。
 
 ### P8 小结 / 一页纸
 
@@ -239,7 +253,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14 补测**。
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15 补测**。
+  - P7-15（本轮）：新增 `docs/07` §18 + 手写纯 CUDA B1 原型 `harness/b1_cuda_probe.cu` +
+    `harness/check_bwd_b1_cuda.py`（`harness/check_bwd_b1_cuda.out.txt`）+ `harness/ncu_b1_cuda_driver.py`。
+    补 §17.4 的边界（手写 CUDA 显式化预取后是否还需拆链）。**Part A**：与 FLA `dhu` **逐位相同**
+    （`dh/dv2/dh0` max_abs=**0**，BT=32/64、含非整除 T=250）。**Part B（关键）**：本原型绝对速度差 FLA
+    `dhu` **4.3–9.6×**，`NSTAGE` 预取只值 **2–6%**（小 shape 0.92–0.98×），**大 shape 反而 1.40–1.45×
+    变慢**（smem 168–226KB → 占用 2→1 CTA/SM）。**结论**：裸 wmma 版根本没到 load-bound（每 CTA 2 warp、
+    每 SM 2 warp、3 GEMM/chunk 仅 ~1.9 TFLOP/s≈峰值 0.2%），故 §17 的「流水杠杆」**不是可单独加上的
+    开关**——只在 kernel 已是 K2 形状（warp-specialized + TMA 大块搬运 + 足够占用）时才兑现；「拆链」在
+    CUDA 里无从单独消融（warp 内状态本就是 8 条独立 mma m-tile）。smem 足迹 `BT=16/32/64`、`NS=1` =
+    58.9/76.3/111.1 KB。两坑见 `docs/07` §18.5。**待验证**：本原型是研究用最小实现，`xFLA` 绝对数字
+    不代表目标卡天花板，只可下「裸 wmma 版非 load-bound」的定性结论。
   - P7-14：新增 `docs/07` §17 + `harness/check_bwd_b1_ilp.py`（`harness/check_bwd_b1_ilp.out.txt`）+
     `harness/probe_bwd_ilp_ncu.sh` / `ncu_bwd_driver.py --variant`（`harness/probe_bwd_ilp_ncu.out.txt`，
     空闲卡）。**在动 CUDA 重写前，先用 bf16 Triton B1 原型量清 §16.5 两条设计输入各值多少**。四变体：base
@@ -471,7 +496,7 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
   - **下一步工程化＝把 B1 做成目标卡 CUDA**（唯一剩下的实际工作）。P7-13（`docs/07` §16）已用 `ncu` 把它的
     硬件动机量化清楚：B1 是**延迟/并行度受限**（非 tensor/带宽/占用率），与 FLA `dhu` 的 2.14×（同 BT=64）
     差距＝**没有 loads 流水（long_scoreboard 47–55%）+ 单一 `[128,BV]` 依赖链**，FLA 用「K 拆两条 64 链 +
@@ -479,8 +504,12 @@
     单靠**流水**就把 B1 从 1.96× 拉到 **1.00×/0.85× FLA**（`long_sb` 5.27→0.96≈FLA），而**拆链单独负收益、
     叠加更慢**——故 CUDA 版优先级修正为：**(1) 镜像前向 K2 的 TMA 输入流水（`docs/03` §8/§10）是唯一必需项 →
     (2) 不为小 shape 拆 BV → (3) 维持 16 块链**；**「拆 2 条累加链」降级为不推荐**（Triton 自动流水已填满
-    ILP）。这也是 `docs/06` §5.2 早写下的设计，现在有了硬件证据 + 原型验证。边界（待验证）：手写 CUDA/TMA
-    显式化预取后是否仍需手工拆链增 ILP，须在目标卡再测。
+    ILP）。这也是 `docs/06` §5.2 早写下的设计，现在有了硬件证据 + 原型验证。**P7-15（`docs/07` §18）用
+    手写纯 CUDA B1 补了「显式预取后是否还需拆链」的边界**：裸 wmma 版与 FLA `dhu` **逐位相同**（含非整除
+    T），但**根本没到 load-bound**（每 CTA 2 warp、~108KB smem，3 GEMM/chunk ~1.9 TFLOP/s），故 `cp.async`
+    预取只值 2–6%、大 shape 反被占用率损失反噬（1.40–1.45×）——**结论：流水杠杆只在 kernel 已是 K2 形状
+    （warp-specialized + TMA 大块搬运 + 足够占用）时才兑现；裸 wmma 版要先把结构做到 K2**。手写 CUDA/TMA
+    显式化预取后是否仍需手工拆链增 ILP，仍须在目标卡上、且以 K2 结构为基座再测（待验证）。
   §5.2 的 **B0/B1/B2/B3/dAv 五段已全部做成最小 kernel，P6-7 已把四段组装成端到端反向核到
   tf32 底噪，P6-8 又把整条反向直接架在 FlashKDA K1 workspace 上端到端核到 bf16 底噪**；
   **P7-7 又把它和 FLA 反向在同一口径下比（wall/dev 0.40–0.80× 反超，因复用 workspace 省掉

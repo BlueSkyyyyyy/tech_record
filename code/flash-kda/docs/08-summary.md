@@ -188,7 +188,11 @@ ours 比 FLA `dhu` 慢 2.14×，差在 **`long_scoreboard`（≈47–55% issue �
 （`docs/07` §17）随后在 bf16 Triton 原型上把这两条分开量：单靠 **`tl.range` 软件流水**就把 B1 从 **1.96×**
 拉到 **1.00×（`B2T1024H8`）/ 0.85×（`B8T2048H8`）FLA**、`long_scoreboard` 5.27→**0.96**（≈FLA 1.06），
 而**拆 K 两条链单独负收益（慢 13%）、与流水叠加更慢**——故目标卡 CUDA B1 的优先级修正为 **只做「镜像 K2 的
-TMA 输入流水」**，拆累加链降级为不推荐。
+TMA 输入流水」**，拆累加链降级为不推荐。**P7-15**（`docs/07` §18）又用**手写纯 CUDA** B1 补了「显式预取后
+是否还需拆链」的边界：该原型与 FLA `dhu` **逐位相同**（含非整除 T），但裸 wmma 版**根本没到 load-bound**
+（每 CTA 2 warp、~108KB smem、3 GEMM/chunk ~1.9 TFLOP/s），`cp.async` 预取只值 **2–6%**、大 shape 反被占用率
+损失反噬（1.40–1.45×）——**「镜像 K2 流水」不是可单独加上的开关，只在 kernel 已是 K2 形状时兑现**；裸 wmma
+版要先把结构做到 K2。
 
 **反向性能（`docs/07` §10 P7-7 + §11 P7-8 更正）**：把上面那条 workspace 驱动反向链和
 `torch.autograd` 穿 `chunk_kda` 在统一口径（`wall`+CUPTI `dev`）下比，**只计反向**。四组 shape 实测

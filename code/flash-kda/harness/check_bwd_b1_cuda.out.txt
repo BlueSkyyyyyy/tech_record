@@ -1,0 +1,81 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared ~/proj/tech_record/code/flash-kda/harness/b1_cuda_probe.cu -o /tmp/b1_cuda.so
+
+====================================================================================
+Part C: smem footprint (bytes) per (BT, NSTAGE)
+====================================================================================
+  BT= 16   ns=1:  58880   ns=2:  73728   ns=3:  88576
+  BT= 32   ns=1:  76288   ns=2: 105472   ns=3: 134656
+  BT= 64   ns=1: 111104   ns=2: 168960   ns=3: 226816
+
+====================================================================================
+Part A: CUDA B1 vs FLA dhu (bf16, same BT) — correctness
+====================================================================================
+  B=1 T=512 H=4 BT=32
+  dh  cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.766e-02
+  dv2 cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.118e-01
+  dh0 cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=8.920e-02
+  B=1 T=512 H=4 BT=64
+  dh  cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.766e-02
+  dv2 cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.118e-01
+  dh0 cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=8.921e-02
+  B=2 T=1024 H=8 BT=32
+  dh  cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.138e-01
+  dv2 cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.084e-01
+  dh0 cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.501e-02
+  B=2 T=1024 H=8 BT=64
+  dh  cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.138e-01
+  dv2 cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.079e-01
+  dh0 cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.501e-02
+  B=1 T=250 H=3 BT=32
+  dh  cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.961e-02
+  dv2 cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.221e-01
+  dh0 cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.026e-02
+  B=1 T=250 H=3 BT=64
+  dh  cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.668e-02
+  dv2 cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.226e-01
+  dh0 cuda vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.027e-02
+
+====================================================================================
+Part B: kernel-only CUPTI us/call, NSTAGE sweep vs FLA dhu
+====================================================================================
+  B1 T512 H4  BT=16   FLA dhu =    n/a  
+      NSTAGE=1      197.1us   xFLA=  n/a  xNS1= 1.00
+      NSTAGE=2      196.3us   xFLA=  n/a  xNS1= 1.00
+      NSTAGE=3      194.2us   xFLA=  n/a  xNS1= 0.99
+  B1 T512 H4  BT=32   FLA dhu =    20.6us
+      NSTAGE=1      137.2us   xFLA= 6.67  xNS1= 1.00
+      NSTAGE=2      134.6us   xFLA= 6.54  xNS1= 0.98
+      NSTAGE=3      135.8us   xFLA= 6.60  xNS1= 0.99
+  B1 T512 H4  BT=64   FLA dhu =    12.9us
+      NSTAGE=1      106.8us   xFLA= 8.31  xNS1= 1.00
+      NSTAGE=2      104.6us   xFLA= 8.14  xNS1= 0.98
+      NSTAGE=3      104.5us   xFLA= 8.13  xNS1= 0.98
+  B2 T1024 H8  BT=16   FLA dhu =    n/a  
+      NSTAGE=1      416.6us   xFLA=  n/a  xNS1= 1.00
+      NSTAGE=2      390.6us   xFLA=  n/a  xNS1= 0.94
+      NSTAGE=3      382.3us   xFLA=  n/a  xNS1= 0.92
+  B2 T1024 H8  BT=32   FLA dhu =    37.2us
+      NSTAGE=1      284.4us   xFLA= 7.65  xNS1= 1.00
+      NSTAGE=2      265.2us   xFLA= 7.13  xNS1= 0.93
+      NSTAGE=3      267.8us   xFLA= 7.20  xNS1= 0.94
+  B2 T1024 H8  BT=64   FLA dhu =    22.7us
+      NSTAGE=1      217.4us   xFLA= 9.58  xNS1= 1.00
+      NSTAGE=2      205.9us   xFLA= 9.07  xNS1= 0.95
+      NSTAGE=3      206.3us   xFLA= 9.09  xNS1= 0.95
+  B8 T2048 H8  BT=16   FLA dhu =    n/a  
+      NSTAGE=1      976.6us   xFLA=  n/a  xNS1= 1.00
+      NSTAGE=2      918.4us   xFLA=  n/a  xNS1= 0.94
+      NSTAGE=3      914.2us   xFLA=  n/a  xNS1= 0.94
+  B8 T2048 H8  BT=32   FLA dhu =   170.2us
+      NSTAGE=1      729.3us   xFLA= 4.29  xNS1= 1.00
+      NSTAGE=2      687.6us   xFLA= 4.04  xNS1= 0.94
+      NSTAGE=3     1059.9us   xFLA= 6.23  xNS1= 1.45
+  B8 T2048 H8  BT=64   FLA dhu =   119.9us
+      NSTAGE=1      574.1us   xFLA= 4.79  xNS1= 1.00
+      NSTAGE=2      806.6us   xFLA= 6.73  xNS1= 1.40
+      NSTAGE=3      815.8us   xFLA= 6.81  xNS1= 1.42
+
+DONE
