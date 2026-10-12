@@ -61,7 +61,13 @@
       见 `docs/01-mpk-paper.md` §2（逐条贴 §3 快照行号 345–448）：task/event 交替语义（行 360–370）、
       MatMul→AllReduce 细粒度重叠（行 371–386）、同图多解与图 4(c) 反例（行 387–401）、
       与 CUDA Graphs 五维对比表（行 402–414）、Figure 5 预告（行 415–448）。纯资料分析。
-- [ ] **P2-2** MPK 编译器（§4）：tGraph 生成、每个 task 的 CUDA 实现生成。
+- [x] **P2-2** MPK 编译器（§4）：tGraph 生成、每个 task 的 CUDA 实现生成。
+      见 `docs/01-mpk-paper.md` §3（逐条贴 §4 行号 449–1146）：§4.1 五步流水线——operator decomposition
+      （行 462–468，§6.7 每算子 32–47 task、Qwen3-8B 293→13,867 task）、dependency analysis（行 469–519，
+      「输出 tile 重叠」即插 event）、event fusion（Def 4.1/4.2 行 520–779，§6.7 37–118×）、
+      normalization（行 780–951，Figure 6 空 task 把 event 扇入/扇出压到 1，<1%）、linearization
+      （Algorithm 1 行 952–1098，BFS 保证同 event 触发 task 连续，§6.7 4.4–15×）；§4.2（行 1126–1146）
+      以 **thread block** 为单位复用 Mirage superoptimizer 生成 CUDA。纯资料分析。
 - [ ] **P2-3** in-kernel 并行运行时（§5）：去中心化调度、跨算子软件流水、计算-通信重叠。
 - [ ] **P2-4** 评估（§6）：相对 PyTorch/vLLM/SGLang 的 1.0–1.7× 延迟、TP 下最高 10× 吞吐；
       复现要点与局限（模型/GPU 代际/batch）。（注：评估实际在 §6，非早期误记的 §5。）
@@ -112,7 +118,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 进行中（1/4）**。
+- 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 进行中（2/4）**。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -132,10 +138,15 @@
     （快照行 345–448）：task/event 交替语义与激活规则（行 360–370）、MatMul→AllReduce 细粒度重叠
     （行 371–386）、同图多解与图 4(c) 反例（行 387–401）、与 CUDA Graphs 五维对比（行 402–414）、
     Figure 5 normalization/linearization 预告（行 415–448）；纯资料分析，复用 P1-2 实测作佐证。
-- **下一步：P2-2** MPK 编译器（`docs/01-mpk-paper.md` §3）：§4.1 tGraph 生成
-  （operator decomposition→dependency analysis→event fusion（Def 4.1/4.2）→normalization→
-  linearization，快照行 458–1125），以及 §4.2 task 实现生成（以 thread block 为单位做
-  superoptimization，快照行 1126–1146）；随后 P2-3 runtime（§5）、P2-4 评估（§6）。
+  - **P2-2** MPK 编译器（§4）完成：`docs/01-mpk-paper.md` §3 精读论文 §4（快照行 449–1146）与 §6.7
+    （行 1629–1737）：tGraph 生成五步（decomposition→dependency analysis→event fusion（Def 4.1/4.2）
+    →normalization（Figure 6 空 task 降扇入/扇出到 1）→linearization（Algorithm 1 BFS 连续区间编码）），
+    以及 §4.2 以 thread block 为单位的 Mirage superoptimization；量化：32–47 task/op、fusion 37–118×、
+    linearization 4.4–15×（B200，Table 2）。纯资料分析。
+- **下一步：P2-3** in-kernel 并行运行时（`docs/01-mpk-paper.md` §4）：§5 去中心化调度（SM 分为
+  schedulers/workers）、事件驱动执行（§5.1）、JIT/AOT 混合 task launch（§5.2）、runtime 优化
+  （§5.3 paged shared memory / cross-task software pipelining / task descriptor 预取）；随后
+  P2-4 评估（§6、§6.3/§6.5/§6.6 消融）。
 
 ## 阻塞
 
