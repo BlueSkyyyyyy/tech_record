@@ -1,0 +1,46 @@
+== 真实头文件 sha256 ==
+a8c3ba2421655c60f65eb9eb0f3fa943c3a6c462c241c4fe2fdab0aead9fe86b  ~/github/DeepGEMM/deep_gemm/include/deep_gemm/common/probe.cuh
+
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+
+########## DG_PROBE_ENABLE=1 ##########
+kEnabled<8>=1 kEnabled<0>=0 kNumBytesPerRecord=8 kNumBytes=64 get_num_bytes(3)=192
+trace written (64 records)
+calib: c0=30058036030946 c1=30058056030990 g0=1791842372024298784 g1=1791842372034399872
+advance: [0x0000000100000000] [0x0000000000000000] [0x0000fff300000008]
+overhead: 63.5160 ms/kernel (iters=200000 work=20)
+probe_only: 0.0947 ms/kernel (4 warps x 4096 records)
+done
+
+########## DG_PROBE_ENABLE=0 (默认) ##########
+kEnabled<8>=0 kEnabled<0>=0 kNumBytesPerRecord=8 kNumBytes=64 get_num_bytes(3)=192
+trace written (64 records)
+calib: c0=30061922422856 c1=30061942422911 g0=1791842373987134400 g1=1791842373997235488
+advance: [0x0000000000000000] [0x0000000000000000] [0x0000000000000000]
+overhead: 56.7928 ms/kernel (iters=200000 work=20)
+probe_only: 0.0017 ms/kernel (4 warps x 4096 records)
+done
+
+== Python 侧解析记录流 + 判定 ==
+B) trace: payload=True clock_monotone=True fill_ok=True globaltimer_mono=True
+   clocks r0/r2/r3/r4/r5/r8/r9 = [30058031241278, 30058031241388, 30058031241408, 30058031241421, 30058031241423, 30058031304289, 30058031304309]
+   globaltimer mark0=1791842372021879712 mark1=1791842372021911552 (Δns=31840)
+B2) DG_PROBE_ENABLE=0 trace 全零: True
+C) calib: cycles=20000044 ns=10101088 -> 1.9800 GHz ; from marks 1.9796 GHz
+   频率落在 1~3 GHz: True
+E) advance: [0x0000000100000000] [0x0000000000000000] [0x0000fff300000008] 期望 [0x0000000100000000] [0x0] [0x0000fff300000008] -> True
+   关闭时 advance 为 no-op（cursor 保持 0）: True
+D) is_valid_buffer/get_num_bytes: True
+   real_aligned         got=1      exp=1
+   real_misaligned8     got=0      exp=0
+   odd_records          got=0      exp=0
+   crosses_4gib         got=0      exp=0
+   near_but_inside      got=1      exp=1
+   inside_window        got=1      exp=1
+   multi_stream_stay    got=1      exp=1
+   num_bytes_1          got=512    exp=512
+   num_bytes_3          got=1536   exp=1536
+F) overhead: fma loop on=63.5160 off=56.7928 ms -> +33.6 ns/record (单线程, idle clock)
+   probe_only: on=0.0947 off=0.0017 ms (4warp x 4096) -> 5.68 ns/record(含 4 warp 并发墙时间)
+
+总判定: ALL PASS

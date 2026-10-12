@@ -1361,6 +1361,34 @@
       `kNumDeviceLocalityDomains` 全对。
       配套博客 `content/posts/mega-moe-54-deepgemm-device-math-utils`（索引页新增第 54 篇）。
 
+### P45 增量（opt-in，补齐一段「公开版无调用点」的休眠观测设施）
+
+- [x] **P45-1** **per-warp `%clock64` 追踪探针 `common/probe.cuh`**（`deep_gemm/include/deep_gemm/
+      common/probe.cuh`，91 行；对照 `csrc/runtime/jit.hpp:13-33` 的 JIT flag、`impls/sm100_locality_domain.cuh`
+      / 第 24/26/34/52 篇的各处 `clock64` 用法）。前面各篇多次依赖 `clock64` 做时序/标定，DeepGEMM
+      自己其实有一套**通用 per-warp trace 设施**，却因 `DG_PROBE_ENABLE` JIT 从不定义而**在公开仓库里
+      没有任何调用点**——本篇把这层休眠基础设施单独拆透。**全文件架构无关**（`mov %clock64`/
+      `mov %globaltimer`/`st.global`/`add.u32`），H100 真机同源编两个二进制实测。
+      → `docs/55-deepgemm-probe-clock64.md`（真实行号核对）：`DG_PROBE_ENABLE` 默认 0（`:8-11`）、
+      `kEnabled = DG_PROBE_ENABLE and kNumRecords>0`（`:19`）→ `if constexpr` 整段消除；三个静态量
+      `kNumBytesPerRecord=8`/`kNumBytes` 与 `get_num_bytes(num_streams)`（`:17-25`）；**`is_valid_buffer`
+      三条安全约束**（`:27-31`：容量偶数 / `base%16==0` / **`base>>32==end>>32` 同一 4 GiB 窗口**）；
+      ctor（`:33-38`，关闭时不设 cursor）；`record<off>` 写 `cursor+off*8` **不改 cursor**、`"n"` 立即数、
+      「先 advance 再负偏移回填」约定（`:40-50`）；`record_payload` 的 `st.global.v4.b32` + `DG_STATIC_ASSERT(off%2==0)`
+      （`:52-61`）；`mark()` 两条 8B store 写 `%clock64`+`%globaltimer` 再 `advance<2>`（`:63-75`）；
+      **`advance<N>` 只加低 32 位、单条 `IADD3`**（`:77-88`）。**三处「为什么」**：① 4 GiB 窗口约束的根因
+      就是 `advance` 放弃高 32 位进位（伪指针实证：起始 `0x00000001_FFFFFFF0` 加 16 → `0x00000001_00000000`）；
+      ② 负偏移回填让 ptxas 保留基址加法、压低打点开销；③ `mark` 用纳秒挂钟标定 SM 周期。
+      H100 实测 `src/probe_clock64.cu` + `harness/exp_probe_clock64.{sh,out.txt}`（`probe.cuh` sha256
+      `a8c3ba24…`，**总判定 ALL PASS**）：A) `kEnabled<8>=1`/`<0>=0`、`get_num_bytes(3)=192`；B) trace
+      记录流 payload 四字精确还原、clock 严格单调、负偏移回填 `r4≥r3 & r5≥r4`、globaltimer 单调；
+      B2) `DG_PROBE_ENABLE=0` 时 trace **全零**；C) `mark` 标定 `cycles=20000044/ns=10101088` →
+      **1.9800 GHz**（trace 两端 marks 1.9796 GHz）；D) `is_valid_buffer` 六例逐条命中（真指针 1、`+8` 0、
+      奇数容量 0、跨 4 GiB 0、窗口内 1）；E) `advance` 伪指针精确命中 `[0x0000000100000000] [0x0]
+      [0x0000fff300000008]`、关闭时 cursor 恒 0；F) 纯记录开销 **~5.7 ns/条**（4 warp×4096，开 0.0947 /
+      关 0.0017 ms），fma 循环版 +33.6 ns/条（单线程受 idle clock 主导）。配套博客
+      `content/posts/mega-moe-55-deepgemm-probe-clock64`（索引页新增第 55 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1385,8 +1413,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P44 各增量完成（P15-1…P41-1、P42-1、P43-1、P44-1）。**
-  本轮 P44-1：新建 `docs/54-deepgemm-device-math-utils.md`（+`src/device_math_utils.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P45 各增量完成（P15-1…P41-1、P42-1、P43-1、P44-1、P45-1）。**
+  本轮 P45-1：新建 `docs/55-deepgemm-probe-clock64.md`（+`src/probe_clock64.cu`、
+  `harness/exp_probe_clock64.{sh,out.txt}`）——补上一段**公开仓库里没有任何调用点、JIT 也从不启用**
+  的休眠观测设施 `deep_gemm/include/deep_gemm/common/probe.cuh`（per-warp `%clock64` 追踪探针）。
+  **三处「为什么」**：① **4 GiB 窗口约束的根因**——`advance<N>` 只用**一条 `IADD3` 加低 32 位**
+  （伪指针实证 `0x00000001_FFFFFFF0` +16 → `0x00000001_00000000`，高 32 位永不进位），故
+  `is_valid_buffer` 才要求整段落在同一 4 GiB 窗口（另两条：容量偶数、16B 对齐）；② **「先 advance
+  再负偏移回填」**让 ptxas 保留基址加法、压低打点开销；③ **`mark()` 写 `%clock64`+`%globaltimer`
+  两条 8B 记录做挂钟标定**（实测两组独立标定都 **1.98 GHz**）。`DG_PROBE_ENABLE` 默认 0 → `if constexpr`
+  整段消除（关闭时 trace 缓冲全零、`advance` no-op）。**全文件架构无关内联 asm，H100 真机同源编
+  两个二进制 + numpy 解析记录流 ALL PASS**（记录顺序/单调/回填/标定/安全判据逐条命中；纯记录开销
+  ~5.7 ns/条）。上一轮 P44-1：新建 `docs/54-deepgemm-device-math-utils.md`（+`src/device_math_utils.cu`、
   `harness/exp_device_math_utils.{sh,out.txt}`）——补上前面 0~43 篇**每个 kernel 都在调、却从没系统
   讲过**的公共地板：`common/{math,utils,types,packing,compile,exception,cute_tie}.cuh`。
   **除 `fma2` 的 SM100 快路外全部架构无关，H100 真机直接 include 真实头文件跑真实设备代码 ALL PASS**。
@@ -1832,7 +1870,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P44 已完成（新增 **P44-1 DeepGEMM 的设备端数学与工具层**：
+- **下一步**：P0~P45 已完成（新增 **P45-1 per-warp `%clock64` 追踪探针 `common/probe.cuh`**：
+  一段**公开版无调用点、JIT 也不启用**的休眠观测设施——三处「为什么」（4 GiB 窗口约束源于
+  `advance` 单条 `IADD3` 只加低 32 位；负偏移回填让 ptxas 保留基址加法；`mark` 用 `%globaltimer`
+  挂钟标定 SM 频率）；`DG_PROBE_ENABLE=0` 时整段消除；全架构无关内联 asm，H100 真机同源编两个
+  二进制 + numpy 解析记录流 **ALL PASS**（含伪指针实证 advance 高 32 位不进位、标定 1.98 GHz、
+  纯记录 ~5.7 ns/条）；见上）。
+  上一轮 P44-1：**P44-1 DeepGEMM 的设备端数学与工具层**——
   补上每个 kernel 都在调、却从没系统讲过的 `common/{math,utils,types,packing,...}.cuh`——
   UE8M0 取整的整数进位技巧（与 Python `ceil_to_ue8m0` 逐位等价）、`SF*SF_inv` 精确为 1、
   bf16/FP8 打包、`fma2`/`fast_rcp`、`warp_reduce` 的 intra/inter 两种语义、`cta_exclusive_sum`
@@ -1896,7 +1940,7 @@
     精确、bf16/FP8 打包、`fma2`/`fast_rcp`、`warp_reduce` intra/inter、`cta_exclusive_sum`）+
     `utils.cuh`/`types.cuh`/`packing.cuh`/`compile.cuh`/`exception.cuh`/`cute_tie.cuh`；架构无关，
     H100 真机直接 include 真实头文件跑真实设备代码 ALL PASS。至此「上层 kernel → 公共设备函数」的
-    最后一层地板讲清。可再补：`common/probe.cuh`（per-warp `clock64` 追踪基础设施，当前公开版无调用点）。
+    最后一层地板讲清。**`common/probe.cuh`（per-warp `clock64` 追踪基础设施）已由 P45-1 补齐**（第 55 篇）。
   ⑰ **Mega MoE host 编排层已补齐（P32-1）**：`deep_gemm/mega/__init__.py` 的 `SymmBuffer` 生命周期 +
     `csrc/apis/mega_moe.hpp` 的 `get_symm_buffer_size_for_mega_moe`（ring 容量、12 view）+ `layout/
     mega_moe.cuh` 的 `MegaMoEBuffer` 链式字节分配 + scheduler `get_num_max_live_pool_blocks`；
