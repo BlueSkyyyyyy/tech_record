@@ -534,7 +534,9 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P24-1 完成（1/1）**（本轮新增：用 ncu 直接测量损失三的 HBM 字节，把 P5-2 的算术推断
+- 当前进度：**P25-1 续 3 完成**（根因再定位：挂起是 launch/握手层面的时序敏感竞态，只被前置
+  dtype 转换 kernel 避开；证伪「worker 轮询循环内存序」——详见 `docs/09` §9 与下方本轮条目）。
+  此前 **P24-1 完成（1/1）**（用 ncu 直接测量损失三的 HBM 字节，把 P5-2 的算术推断
   升级为实测）。此前：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**；
   **P3 全部完成（3/3）**；**P4 全部完成（4/4）**；**P5 全部完成（3/3）**；**P6 全部完成（1/1）**；
   **P7 源码走读（1/1）完成**（本轮新增，对应「下一步」可选方向③）。
@@ -621,11 +623,12 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：P25-1 收尾（根因内存序）**（P0–P24 全部完成；P25-1 已构建+launch+**收敛+正确性+
-  **端到端延迟**）。剩余：① 用 `compute-sanitizer --tool racecheck` 抓 worker/scheduler 的数据竞争，
-  把根因钉到具体 load/store 内存序；② 把自旋计数换成 `__nanosleep` 退避，验证是纯时序而非缺 fence；
-  ③ 向 MPK 上游核对 `f9eb70c` 的 worker 抢跑路径。注意 z3 版本互斥（「阻塞」B2）。已完成的
-  「端到端延迟」见 `docs/09-mpk-build.md` §8。
+- **下一步：P25-1 收尾（根因：launch/握手 而非 worker 循环内存序）**（P0–P24 全部完成；P25-1 已构建
+  + launch + **收敛 + 正确性 + 端到端延迟**；**续 3 已把 §7.5「竞态在 worker 轮询循环」证伪**：循环内
+  内存序类改动都不修复，只有前置 dtype 转换 kernel 能避开）。剩余：① 用 `nsys` 抓 host 侧 launch/流
+  时序（对照 prewarm=cast vs none）；② 把前置 cast 放到独立非默认流，验证「设备全局态 vs 默认流历史」；
+  ③ launcher 在 `prepare_kernel` 后显式同步 / 让常驻 kernel 继承当前流；④ 向 MPK 上游核对 `f9eb70c`
+  启动路径。注意 z3 版本互斥（「阻塞」B2）。现象刻画见 `docs/09` §7–§9，延迟见 §8。
 - 其它可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
@@ -673,6 +676,41 @@
   - **局限**：未把根因收敛到某条 load/store 内存序；端到端延迟仍未测（只测正确性+收敛/挂起）。
     下一步候选：`compute-sanitizer --tool racecheck` 抓竞争、把自旋换成 `__nanosleep` 退避验证纯时序、
     向 MPK 上游核对 `f9eb70c` worker 抢跑路径。**不构成对上游的 bug 判定**。P25-1 仍记 `[~]`。
+- **本轮（P25-1 续 3）**：续做 P25-1 的**根因再定位**，把 §7.5 的「竞态在 worker 轮询循环」**降级**
+  为「launch/握手层面的时序敏感竞态」。`docs/09-mpk-build.md` 新增 **§9**（判据矩阵 + 与 §7 的关系 +
+  机制候选 + 局限），新原始输出 `harness/mpk_race_attr.out.txt`（前置工作矩阵 + grid）、
+  `harness/mpk_race_sweep.out.txt`（**修正后**的循环内变体消融，替换上轮 device 0 的作废结果）、
+  `harness/mpk_wlwatch.out.txt`（printf-only 守门狗）；脚本 `harness/mpk_race_attr.sh`、
+  `harness/mpk_wlwatch.py`（`mpk_race_probe.py` 扩了 `cast/copyto32/to_half/to64/to_same/alloc/addrow`
+  等前置工作）。快照 `f9eb70c`、目标卡 H100/sm90、`CUDA_VISIBLE_DEVICES=7` 隔离空闲卡（**GPU 0 当时
+  被占满，上轮 device 0 的 sweep 已作废**）。核心结论：
+  - **[判据一] 只有「dtype 转换 kernel」能避开挂起**：`cast`(bf16→fp32)/`copyto32`/`to_half`(→fp16)/
+    `to64`(→fp64) 全 **PASS**；而 `sync`/`sleep`(300ms)/`copy`/`mul`/`clamp`/`addrow`/`matmul`/`alloc`
+    全 **HANG**；`to_same`(同 dtype、**不发射 kernel**) 亦 **HANG**。含 cast 的规约
+    `sumall/sumrows/mean/softmax/rmsnorm` 全 PASS。→ **不是纯时间、不是分配、不是访存/计算、不是规约
+    本身**，决定变量是「前置流上真的跑过一个 dtype 转换 kernel」（与输出尺寸无关）。
+  - **[判据二] grid 无关**：`4:4 / 16:16 / 64:16 / 128:16` **四档全 HANG**（worker kernel ~1 block/SM
+    的 205824 B SMEM，但小 grid 也挂 → 排除 occupancy）。
+  - **[判据三] worker 轮询循环的**内存序类**改动都不修复**：修正 `mpk_race_sweep.py`（上轮 `counter`
+    变体把 `_dbg_spins` 误声明在循环体内、被编译器折叠，且跑在 device 0 污染），在 device 7 重跑
+    `plain/counter/sleep0/sleep1000/compiler_barrier/threadfence/relaxed` 各 2 次，**全部 HANG ×2**。
+    → 排除「编译器把 `next_task_pos` load 提升出循环」（`mpk_atoms.cuh:50-54` 的 `ld_acquire_gpu_u64`
+    确实缺 `"memory"` clobber，但加 `asm volatile("" ::: "memory")` 不修复）、「缺 fence」
+    （`__threadfence` 不修复）、「acquire 语义」（`ld.relaxed` 不修复）、「自旋节奏」（改 `__nanosleep` 值
+    不修复）。
+  - **[判据四] worker 轮询循环不是 worker[0] 长时间等待处**：新 `mpk_wlwatch.py` 在循环内插
+    **只 `printf` 不 `trap`** 的守门狗（每 2×10⁷ 轮打印 `next/last/ready0`）→ **PASS 且无任何 STUCK
+    打印**（trap 变体无法区分，因 scheduler kernel 仍自旋、`synchronize()` 仍不返回）。
+  - **[与 §7 的关系]** §7.5 的修复（`_dbg_spins`+`printf`+阈值 2×10⁸）收敛，而同语义的 `counter`
+    变体（`_dbg_spins`+`__trap`+阈值 2×10⁷）HANG——**同一处逻辑的两种写法给出相反结果**，说明它是
+    **对 worker kernel codegen/调度敏感的时序扰动式偶然修复**，不能升级为「竞态在 worker 等 task」。
+  - **[机制候选，假设]** `worker_kernel`/`scheduler_kernel` 在两条每次调用新建的 `cudaStreamNonBlocking`
+    流上 launch（`persistent_kernel.cuh:1932-1935`），与 torch 默认流仅靠 `prepare_kernel` + 
+    `prepare_done_event` + `cudaStreamWaitEvent` 排序（`:1963-1969`、`:1981-1986`）；最可能是
+    **launch/握手时序**（一个紧邻的 dtype 转换 kernel 改变了驱动把这几条 launch 下发/共驻的次序）。
+    **不构成对上游的 bug 判定**。P25-1 仍记 `[~]`。
+  - **下一步候选**：nsys 抓 host 侧 launch/流时序；把前置 cast 放到独立非默认流验证「设备全局态 vs
+    默认流历史」；launcher 在 `prepare_kernel` 后显式同步或让常驻 kernel 继承当前流；向 MPK 上游核对。
 - **本轮（P25-1 续 2）**：续做 P25-1 的「端到端延迟」。在**收敛构建**（把 §7.5 的最小修复固化成
   `harness/mpk_latency_run.patch`：`execute_worker` 取 task 轮询循环加 `MPK_DBG_WATCHDOG` 门控的
   自旋计数、编译命令加 `-DMPK_DBG_WATCHDOG`）上，用新脚本 `harness/mpk_latency.py` 测
@@ -1066,10 +1104,17 @@
   抢跑），非 task 单体内 TMA/mbarrier 卡住（H2 排除），也非事件计数"凑不满"（H1 该形态排除）**。
    **本轮（P25-1 续 2）已补齐端到端延迟**（`docs/09` §8）：收敛构建上单层 RMSNorm megakernel
    36.4–39.1 µs/次调用（对照 PyTorch 朴素 54.0 µs），128/16 连跑 3/3 收敛、plain 复现挂起
-   （`EXIT=124`）。仍未做：把根因钉到具体内存序（建议 `compute-sanitizer --tool racecheck`）、
-   非 Hopper-TMA task 隔离 H2。
-   patch：`harness/mpk_watchdog.patch`（全量插桩）／`harness/mpk_workaround_only.patch`（最小修复）／
-   `harness/mpk_latency_run.patch`（延迟实验用的收敛修复 + 编译宏）。
+    （`EXIT=124`）。**本轮（P25-1 续 3）把根因从「worker 轮询循环内存序」再定位到
+   「launch/握手层面的时序敏感竞态」**（`docs/09` §9，device 7、替换上轮 device 0 的作废 sweep）：
+   循环内**内存序类**改动（`asm memory` 屏障 / `__threadfence` / `ld.relaxed` / 改 `__nanosleep` 值）
+   **全部不修复**；只有**前置的 dtype 转换 kernel**（`x.to(fp32/fp16/fp64)`、`copy_` 跨 dtype）能避开，
+   而同 dtype 的 `sync`/`sleep`/`copy`/`mul`/`matmul`/`alloc`/`to_same` 都不能；grid `4:4`–`128:16`
+   四档全挂。故 §7.5 的「自旋计数修复」是**对 worker kernel codegen 敏感的时序扰动式偶然修复**，
+   不能作为「竞态在 worker 等 task」的证据。仍未做：nsys 级别的 host 侧 launch/流时序证据、
+   非 Hopper-TMA task 隔离 H2。patch：`harness/mpk_watchdog.patch`（全量插桩）／
+   `harness/mpk_workaround_only.patch`（最小修复）／`harness/mpk_latency_run.patch`（延迟实验用的
+   收敛修复 + 编译宏）；新证据 `harness/mpk_race_attr.out.txt`、`harness/mpk_race_sweep.out.txt`、
+   `harness/mpk_wlwatch.out.txt`。
   **不阻塞本专题其余任务**（纯资料分析均已完成）。
 - **B2（环境）z3-solver 版本互斥**：mirage 需 `z3-solver==4.16.0.0`，容器内 `tilelang` 需
   `<4.15.5`。本轮跑完 mirage 后已恢复 `4.15.4.0`，因此当前 `import mirage` 会失败；下次使用

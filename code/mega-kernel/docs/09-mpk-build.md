@@ -371,3 +371,133 @@ task（`:1424-1448`）→ 16 个 task 各触发一次 event 2（`nt=16`）凑满
 - **P25-1 状态**：构建 + JIT + launch + **收敛 + 正确性 + 端到端延迟**均已打通；仍未做的是
   §7.6 的根因内存序定位与「非 Hopper-TMA task 隔离 H2」，故 P25-1 继续记 `[~]`，但「端到端延迟」
   这一条已补齐。
+
+## 9. 根因再定位（续做 P25-1）：挂起对「前置 dtype 转换 kernel」敏感，且不来自 worker 轮询循环的内存序
+
+§7.5 把挂起归因到「`execute_worker` 取 task 轮询循环里加一处无害自旋计数即修复」，并据此判断
+「竞态就在 worker 侧等 task 的抢跑/丢失唤醒上」。本轮把这条结论**降级**：同一个循环里的**内存序类**
+改动（编译器屏障、`__threadfence`、`ld.relaxed`、改 `__nanosleep` 值）**都不修复**；修复与否只与
+**「在这次 launch 之前，流上是否跑过一个 dtype 转换 kernel」**高度相关，而**与 worker:scheduler 的
+grid 大小无关**。这更像 **launch/握手层面的时序敏感竞态**（宿主侧两条新建 stream 与 torch 默认流的
+排序），而不是 device 侧某条 load/store 的内存序。
+
+> 全部实验在**目标卡 H100/sm90**、快照 `mirage-project/mirage@f9eb70c`、`CUDA_VISIBLE_DEVICES=7`
+> **隔离空闲卡**上完成（GPU 0 当时被其它任务占满，早期在 device 0 上跑的结果已作废）；每次
+> `timeout` 单跑，退出码 `0=PASS / 1=WRONG / 124=HANG`。
+
+### 9.1 判据一：只有「dtype 转换 kernel」能避开挂起
+
+用 `harness/mpk_race_attr.sh` 驱动 `harness/mpk_race_probe.py`，在 `pk()` **之前**做不同的
+「前置 GPU 工作」（`prewarm`），每次 `torch.cuda.synchronize()` 后再 launch（原始输出
+`harness/mpk_race_attr.out.txt`）：
+
+| 前置工作 | 类别 | 结果 |
+|---|---|---|
+| none / sync | 无 / 仅同步 | **HANG** |
+| sleep（`_sleep` 300ms） | 纯时间延迟 | **HANG** |
+| copy / mul / clamp / addrow | 同 dtype 逐元素 | **HANG** |
+| matmul（cuBLAS bf16） | 纯计算 | **HANG** |
+| alloc（`empty` 2× 大小） | 仅分配、无计算 | **HANG** |
+| sumall / sumrows / mean / rmsnorm / softmax | 规约（内部含 cast） | **PASS** |
+| **cast**（`x.to(float32)`） | dtype 转换 | **PASS** |
+| **copyto32**（`y.copy_(x)`，bf16→fp32） | dtype 转换 | **PASS** |
+| **to_half**（bf16→fp16，收窄） | dtype 转换 | **PASS** |
+| **to64**（bf16→fp64，加宽） | dtype 转换 | **PASS** |
+| to_same（`x.to(bf16)`，**不产生 kernel**） | 无操作 | **HANG** |
+
+读法：
+
+- **不是纯时间**：`sleep` 300 ms 不修复，`sync` 不修复 → 与「冷启动/预热时钟」无关。
+- **不是分配**：`alloc` 造出与 `cast` 输出同尺寸的 buffer 但不修复 → 与 caching allocator 无关。
+- **不是访存/计算**：`copy`/`mul`/`clamp`/`addrow`/`matmul` 全 HANG。
+- **不是规约本身**：`sumall`/`sumrows`/`mean`/`softmax`/`rmsnorm` 全部**以 `x.to(float32)` 开头**，
+  与 `cast`/`copyto32`/`to_half`/`to64` 同属**dtype 转换**这一类；而 `to_same`（同 dtype，PyTorch
+  直接返回自身、不发射 kernel）HANG → **决定变量是「真的跑了一个 dtype 转换 kernel」**，与输出尺寸
+  （`to_half` 与输入同宽）也无关。
+- 把 `to_same` 作为阴性对照，排除了「`.to()` Python 包装 / TensorIterator 调度本身」。
+
+**grid 无关**（判据二）：`harness/mpk_race_attr.sh` 的 B 段扫 `worker:scheduler = 4:4 / 16:16 /
+64:16 / 128:16`，**四档全部 HANG** → 挂起与常驻 grid 大小、SM 占用量无关。（worker kernel 用
+`MAX_DYNAMIC_SHARED_MEMORY_SIZE = 205824 B`，约 1 block/SM，但 4:4 也挂，排除 occupancy。）
+
+### 9.2 判据三：worker 轮询循环的**内存序类**改动都不修复
+
+§7.6 提出的候选是「缺 fence / 缺 `"memory"` clobber / 编译器 hoist」。快照里确有可疑的不对称：
+`include/mirage/persistent_kernel/mpk_atoms.cuh` 的 `ld_acquire_gpu_u64`（`:50-54`）**没有**
+`"memory"` clobber，而 `ld_acquire_sys_u64`（`:56-64`）有。为验证，`harness/mpk_race_sweep.py`
+对 worker 取 task 轮询循环（`persistent_kernel.cuh:1013-1026`）做**仅循环内、语义等价**的最小改动
+各跑 2 次（原始输出 `harness/mpk_race_sweep.out.txt`，device 7）：
+
+| 变体 | 改动 | 结果 |
+|---|---|---|
+| plain | 无 | HANG ×2 |
+| counter | 累加自旋计数（+`__trap`） | HANG ×2 |
+| sleep0 | `__nanosleep(10)` → `__nanosleep(0)` | HANG ×2 |
+| sleep1000 | `__nanosleep(10)` → `__nanosleep(1000)` | HANG ×2 |
+| compiler_barrier | 循环内插 `asm volatile("" ::: "memory")` | HANG ×2 |
+| threadfence | 循环内插 `__threadfence()` | HANG ×2 |
+| relaxed | 循环内 `ld_acquire`→`ld_relaxed` | HANG ×2 |
+
+- **`compiler_barrier` 不修复** → 排除「编译器把 `next_task_pos` 的 load 提升出循环」的 hoist 假设
+  （否则加了编译器屏障就该好）；**`threadfence` 不修复** → 排除「缺硬件内存序/fence」；
+  **`relaxed` 不修复** → 排除「acquire 语义过强/过弱」。**改 `__nanosleep` 值也不修复** → 不是循环
+  自旋节奏。
+- 这与 §9.1 的「dtype 转换 kernel」签名互相印证：**问题不在 worker 轮询循环的 load/store 内存序**。
+
+### 9.3 判据四：worker 轮询循环**不是** worker[0] 长时间等待的地方
+
+§7.5 的「自旋计数」是带 `printf`+`__trap` 的守门狗。`__trap()` 只会让 worker kernel 出错，但**另一条
+常驻的 scheduler kernel 仍会自旋**，`torch.cuda.synchronize()` 因此仍不返回——所以「trap 变体 HANG」
+无法区分。本轮改用 `harness/mpk_wlwatch.py`：在 worker 轮询循环内插一个**只 `printf` 不 `trap`** 的
+守门狗（每 2×10⁷ 轮打印一次 `next/last/ready0`，原始输出 `harness/mpk_wlwatch.out.txt`）。结果：
+
+- **该变体收敛（`RESULT=PASS`）**，且**没有任何 `[WL] worker0 STUCK` 打印** → worker[0] 从未在该循环
+  里连续自旋到 2×10⁷ 轮（约 0.2 s）。**worker[0] 的长时间等待不在这个循环里**，挂起发生在别处
+  （scheduler 侧或两条常驻 kernel 的握手）。
+- 与 §9.2 合看：**能修复的插桩都显著改变了 worker kernel 的 codegen/调度**（`printf` 分支 vs 纯自增
+  分支），**不改变语义**。这说明 §7.5 的「自旋计数」是一处**时序扰动式的偶然修复**，而非命中某条
+  内存序 bug——把它升级为「竞态在 worker 等 task」的证据是不成立的。
+
+### 9.4 与 §7 的关系：为什么 §7.5 会看起来「修好了」
+
+| | §7.5 修复（`mpk_workaround_only.patch` / `mpk_latency_run.patch`） | 本轮同语义变体（`counter`） |
+|---|---|---|
+| worker 循环内 | `long _dbg_spins; ++_dbg_spins;`＋`printf`（阈值 2×10⁸，从未触发） | `++_dbg_spins; __trap()`（阈值 2×10⁷） |
+| 结果 | 3/3 收敛 | 2/2 HANG |
+
+两者都只是「循环里多一点代码」，差别在于 `printf` 分支让 worker kernel 的**寄存器/指令调度**变化更大，
+并且 `__trap` 路径与「继续自旋」路径的 codegen 不同。**同一处逻辑的两种写法给出相反结果**，正说明
+这是一个**对 codegen/调度敏感的时序竞态**，而不是「加了自旋计数就修好了某条内存序」。§7.5 的结论
+应表述为：**「一处 worker 侧的无害扰动足以避开该竞态」**，而不是「竞态位于 worker 轮询循环」。
+
+### 9.5 机制候选（标注为假设，非对上游的 bug 判定）
+
+结合宿主侧源码（`persistent_kernel.cuh`）：
+
+1. `worker_kernel` 与 `scheduler_kernel` 被 launch 在**两条每次调用新建的 `cudaStreamNonBlocking`
+   stream** 上（`:1932-1935`）；与 torch 默认流（legacy default stream）的排序靠
+   `prepare_kernel<<<…, default_stream>>>` + `cudaEventRecord(prepare_done_event, default_stream)`
+   + `cudaStreamWaitEvent(worker/scheduler_stream, prepare_done_event)`（`:1963-1969`、`:1981-1986`）。
+   `default_stream` 即 `torch.cuda.current_stream()`（`persistent_kernel.py:3574-3592`）。
+2. **最可能的机制是 launch/握手时序**：两条 `NonBlocking` 新流与 legacy 默认流的**隐式同步关系**
+   很弱，`prepare_done_event` 之外没有把常驻 kernel 与「默认流上刚发生的事」进一步绑定；一个**紧挨着
+   的 dtype 转换 kernel**（读 A 写 B、访存受限、时长与 launch 同量级）恰好改变了驱动把这几条 launch
+   下发/共驻的次序，从而避开竞态。这与「sleep/copy/matmul 都不行、只有转换 kernel 行」的签名一致
+   （需要“短、同时进出两条流”的那种前置 kernel），但仍属**待验证假设**。
+3. **可立即排除**：occupancy/网格（§9.1 B 段）、纯时间（`sleep`）、分配（`alloc`）、worker 循环内存序
+   （§9.2）、worker 循环长时间自旋（§9.3）。
+
+### 9.6 局限与下一步
+
+- **未钉死根因**：本节把「worker 轮询循环内存序」这条 §7.6 候选**证伪**，并给出 dtype 转换 kernel 的
+  强签名，但**没有**定位到具体那条 launch/握手路径。不构成对上游 `f9eb70c` 的 bug 判定。
+- 下一步候选（按性价比）：① 用 `nsys` 抓 host 侧 launch/流时序（对照 prewarm=cast vs none 的
+  D2D/CUDA API 序列）；② 把前置 cast 放到**独立非默认流**上，验证是否仍能避开（区分「设备全局态」
+  与「默认流历史」）；③ 在 launcher 的 `prepare_kernel` 后显式加一次 `cudaStreamSynchronize(default)`
+  或把 worker/scheduler 改成继承当前流，看是否消除；④ 向 MPK 上游核对 `f9eb70c` 的这条启动路径。
+- 原始输出：`harness/mpk_race_attr.out.txt`（前置工作矩阵 + grid）、
+  `harness/mpk_race_sweep.out.txt`（循环内变体消融）、`harness/mpk_wlwatch.out.txt`（printf 守门狗）；
+  脚本 `harness/mpk_race_attr.sh`、`harness/mpk_race_probe.py`、`harness/mpk_race_sweep.py`、
+  `harness/mpk_wlwatch.py`。
+- **P25-1 仍记 `[~]`**：§8 的端到端延迟与本节的现象刻画已足够；根因（launch/握手 vs device 侧）尚需
+  nsys 级别证据。

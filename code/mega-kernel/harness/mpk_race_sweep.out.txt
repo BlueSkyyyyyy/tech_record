@@ -1,0 +1,23 @@
+  [plain] rep 0: HANG (rc=124)
+  [plain] rep 1: HANG (rc=124)
+  [counter] rep 0: HANG (rc=124)
+  [counter] rep 1: HANG (rc=124)
+  [sleep0] rep 0: HANG (rc=124)
+  [sleep0] rep 1: HANG (rc=124)
+  [sleep1000] rep 0: HANG (rc=124)
+  [sleep1000] rep 1: HANG (rc=124)
+  [compiler_barrier] rep 0: HANG (rc=124)
+  [compiler_barrier] rep 1: HANG (rc=124)
+  [threadfence] rep 0: HANG (rc=124)
+  [threadfence] rep 1: HANG (rc=124)
+  [relaxed] rep 0: HANG (rc=124)
+  [relaxed] rep 1: HANG (rc=124)
+
+==== SWEEP SUMMARY (2 reps each) ====
+  plain              ['HANG', 'HANG']  -> {'HANG': 2}
+  counter            ['HANG', 'HANG']  -> {'HANG': 2}
+  sleep0             ['HANG', 'HANG']  -> {'HANG': 2}
+  sleep1000          ['HANG', 'HANG']  -> {'HANG': 2}
+  compiler_barrier   ['HANG', 'HANG']  -> {'HANG': 2}
+  threadfence        ['HANG', 'HANG']  -> {'HANG': 2}
+  relaxed            ['HANG', 'HANG']  -> {'HANG': 2}

@@ -1,0 +1,34 @@
+########## PASS 1 ##########
+===== A. preceding-work (prewarm) sensitivity =====
+  prewarm=none           EXIT=124 HANG after 20s
+  prewarm=mul            EXIT=124 HANG after 20s
+  prewarm=clamp          EXIT=124 HANG after 20s
+  prewarm=matmul         EXIT=124 HANG after 20s
+  prewarm=softmax        EXIT=0   RESULT=PASS
+  prewarm=sumrows        EXIT=0   RESULT=PASS
+  prewarm=sumall         EXIT=0   RESULT=PASS
+  prewarm=mean           EXIT=0   RESULT=PASS
+  prewarm=rmsnorm        EXIT=0   RESULT=PASS
+
+===== B. worker:scheduler grid-size sensitivity (no prewarm) =====
+  grid=4:4               EXIT=124 HANG after 20s
+  grid=16:16             EXIT=124 HANG after 20s
+  grid=64:16             EXIT=124 HANG after 20s
+  grid=128:16            EXIT=124 HANG after 20s
+########## PASS 2 ##########
+===== A. preceding-work (prewarm) sensitivity =====
+  prewarm=none           EXIT=124 HANG after 20s
+  prewarm=mul            EXIT=124 HANG after 20s
+  prewarm=clamp          EXIT=124 HANG after 20s
+  prewarm=matmul         EXIT=124 HANG after 20s
+  prewarm=softmax        EXIT=0   RESULT=PASS
+  prewarm=sumrows        EXIT=0   RESULT=PASS
+  prewarm=sumall         EXIT=0   RESULT=PASS
+  prewarm=mean           EXIT=0   RESULT=PASS
+  prewarm=rmsnorm        EXIT=0   RESULT=PASS
+
+===== B. worker:scheduler grid-size sensitivity (no prewarm) =====
+  grid=4:4               EXIT=124 HANG after 20s
+  grid=16:16             EXIT=124 HANG after 20s
+  grid=64:16             EXIT=124 HANG after 20s
+  grid=128:16            EXIT=124 HANG after 20s
