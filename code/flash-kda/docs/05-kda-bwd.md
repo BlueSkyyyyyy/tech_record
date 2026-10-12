@@ -3,8 +3,8 @@
 > 本文是「Kimi Delta Attention（KDA）前向 / 反向算子实现解析」的第 5 篇。前四篇把前向的数学
 > （`01`）、K1/K2 kernel（`02`/`03`）、数值对拍（`04`）讲完。从本篇起进入**反向**：先给出
 > 逐 token gated delta rule 的 **adjoint（伴随/反向递推）** 完整推导，再用纯 PyTorch 写一个
-> **不依赖 autograd** 的显式反向参考 `src/kda_bwd_ref.py`，最后与 `torch.autograd` 和中心差分
-> 三方对齐，确认推导无误（P5-1 / P5-2）。
+> **不依赖 autograd** 的显式反向参考 `src/kda_bwd_ref.py`，先与 `torch.autograd` 和中心差分
+> 三方对齐（P5-1 / P5-2），再与 FLA `chunk_kda` 的 chunked 反向在真实 bf16 规模上对拍（P5-3）。
 >
 > 说明：FlashKDA 目前只开源**前向**（`csrc/smxx/fwd_kernel*.cuh`），仓库内没有 CUDA 反向；
 > 因此反向的「真值」以逐 token 数学 + autograd 为准，分块化反向（chunked backward）与 kernel
@@ -204,18 +204,77 @@ $g$ 尺度 $\{0,1,2,4\}$、多 seed、fp64/fp32）：
 （`kda_gate` 内部 `.float()`，autograd 也只到 fp32，故 max_abs $\sim10^{-7}$ 即机器精度。）
 至此，**从 $\bar o$ 一路到原始 `g` logits / `A_log` / `dt_bias` 的完整反向链**数值闭环。
 
-## 6. 小结与下一步
+## 6. 与 FLA `chunk_kda` 反向对拍（P5-3 结果）
+
+§5 已经把「显式 adjoint ↔ `torch.autograd`（同一前向）」对齐到逐位相等。这一步换**独立实现**
+的真值：FLA 的 Triton `chunk_kda` 前向 + 它自带的 chunked 反向（`torch.autograd` 穿过该前向），
+在真实的 $D=128$/多头 **bf16** 上对拍，量化「把逐 token adjoint 搬到 chunk 算法并降到 bf16」的误差。
+原始输出 `harness/check_bwd_fla.out.txt`。
+
+### 6.1 对拍设置（让两侧作用于**同一份**数值）
+
+为把「算法差异」与「输入/门控/l2norm 的约定差异」分开，两侧吃完全相同的操作数：
+
+- `use_qk_l2norm_in_kernel=False`：先在 fp32 里做 `l2_normalize`，再把**归一化后的 bf16**
+  同时喂给 FLA 与参考实现（`kda_ref.l2_normalize`）。
+- `use_gate_in_kernel=False`：直接传**自然对数衰减** `g_fla = g_log2 · ln2`（FLA 的状态衰减
+  为 `exp(g_fla) = 2^{g_log2}`，与参考的 log2 衰减逐位同义）。门激活链（`g_logits/A_log/dt_bias`）
+  已在 P5-2 §5.3 单独核验，这里不混入。
+- `use_beta_sigmoid_in_kernel=False`：直接传 `sigmoid(beta_logits)`。
+- `initial_state` 用默认布局 $[N,H,K,V]$，即参考里的 $S$（$[K,V]$）。
+
+损失 $L=\langle o,\bar o\rangle+\langle S_T,\bar S_T\rangle$。参考实现跑 **fp64**，所以报告的是
+**FLA bf16 反向**的误差而不是我们的；同时并列一个 fp32 显式反向，用来证明「fp32/fp64 参考彼此一致、
+误差全部来自 FLA 的 bf16」。
+
+### 6.2 结果
+
+5 组 case（$T=128/512/1024/1023$、$H=2/4/8$、$g\sim N(0,1/2)$、含 $g=0$），逐 head 对拍
+`dq,dk,dv,dg,dbeta,dh0`，取各 case 的 `max_rel`（vs fp64 参考）：
+
+| case | dq | dk | dv | dg | dbeta | dh0 |
+|---|---|---|---|---|---|---|
+| T=128 H=2 g=N(0,1) | 3.9e-3 | 5.9e-3 | 8.2e-3 | 3.4e-3 | 5.7e-3 | 2.5e-3 |
+| T=512 H=4 g=N(0,2) | 4.0e-3 | 3.9e-3 | 5.6e-3 | 6.1e-3 | 4.2e-3 | 2.4e-3 |
+| T=1024 H=2 g=N(0,2) | 3.6e-3 | 4.7e-3 | 4.3e-3 | 3.9e-3 | 3.5e-3 | 1.9e-3 |
+| T=1023 H=8 g=N(0,1) | 3.6e-3 | 3.8e-3 | 5.1e-3 | 6.8e-3 | 7.6e-3 | 7.2e-3 |
+| T=512 g=0 | 4.1e-3 | 3.4e-3 | 3.2e-3 | 3.5e-3 | 4.8e-3 | 2.8e-3 |
+| **worst** | **4.1e-3** | **5.9e-3** | **8.2e-3** | **6.8e-3** | **7.6e-3** | **7.2e-3** |
+
+关键观察：
+
+- **六项全部落在 bf16 底噪**（$\sim3\times10^{-3}\sim8\times10^{-3}$），与 §5、`04` 篇前向
+  bf16 误差（$o$ 4e-3$\sim$7e-3、状态 5e-3$\sim$1.4e-2）同量级；**没有哪一项出现算法级偏差**
+  （若 chunked backward 公式或状态伴随传递写错，会出现 10%+ 或随 $T$ 增长的漂移，实测没有）。
+- 同一 case 里 **fp64 参考与 fp32 参考给出到打印精度相同的结果**（差异 $<10^{-6}$），说明对拍误差
+  由 FLA 的 bf16 主导，参考实现本身的数值精度不是瓶颈。
+- 前向 sanity（FLA bf16 vs 同输入 fp64 token-recurrent）$o$ `max_rel` 5e-3$\sim$8.5e-3、$S$
+  3.4e-3$\sim$6e-3，和反向同量级——**反向误差 ≈ 前向误差**，符合「反向是前向的线性伴随、
+  误差同阶传递」的预期，而非反向单独放大。
+- $g=0$（无衰减）时六项依然 $\sim3\sim5\times10^{-3}$，没有像前向状态那样因累加而抬升——因为 $g=0$
+  时衰减链 $\bar g=\bar\alpha\cdot\ln2\cdot 2^{g}$ 是个**局部**（逐 token、逐通道）缩放，不沿时间累积。
+
+### 6.3 踩坑：log2 vs 自然对数的 $\ln 2$ 缩放
+
+FLA 的 `g` 是**自然对数**衰减（`alpha=exp(g)`），参考是 **log2** 衰减（`alpha=2**g`），换算
+`g_fla = g_log2·ln2`，于是 $\partial L/\partial g_{\log2} = (\partial L/\partial g_{\text{fla}})\cdot\ln2$。
+第一次对拍**误写成除以** $\ln2$，`dg` 的 `max_rel` 立刻稳定停在 **0.52**（$\approx 1-1/\ln^2 2$
+的比值差），而其余五项正常——这类「整体缩放错一个常数」的 bug 只体现在**一项**上，很容易被当成
+「反向算法有问题」。改回乘 $\ln2$ 后 `dg` 立即降到 3e-3$\sim$7e-3（见 §6.2），五项其余项不变。
+教训：跨实现比梯度时，先把**换元常数**（此处 $\ln2$）写进注释并单独断言一项。
+
+## 7. 小结与下一步
 
 - 推导层面：式 (5.2)–(5.8) 给出逐 token gated delta rule 的完整 adjoint，六个梯度全解析；
   式 (5.9)–(5.10) 补齐门激活链。
 - 实现层面：`src/kda_bwd_ref.py` 不依赖 autograd，fp64 与 `torch.autograd` **逐位相等**，
   中心差分独立确认到 $\sim10^{-10}$。
+- 跨实现层面（P5-3）：与 FLA `chunk_kda` 的 chunked 反向（bf16、$D=128$、多头）六项梯度全部
+  落在 bf16 底噪 $3\times10^{-3}\sim8\times10^{-3}$，与前向误差同阶，确认推导在真实规模下成立。
 - 反向的结构特征：**token 维串行**（状态伴随 $G$ 沿时间前传），块内可并行——这正是 chunked
   backward 的设计空间。
 
 下一步：
 
-- **P5-3**：与 FLA `chunk_kda` 的 autograd（`torch.autograd` 穿过 Triton 前向）在真实
-  $D=128$/多 bf16 输入上对拍，把逐 token adjoint 的 bf16 误差量化。
 - **P5-4**：反向分块化推导——复用前向的 $L=(I+L)^{-1}$ 型下三角求逆与 $M_{qk}$，把状态
- 伴随沿 chunk 反向传递，给出 chunked backward 的公式（为 P6 的 kernel 设计铺路）。
+  伴随沿 chunk 反向传递，给出 chunked backward 的公式（为 P6 的 kernel 设计铺路）。
