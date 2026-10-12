@@ -337,6 +337,25 @@
       「多而杂」是同时规避两层足迹的同一个设计选择（对上 DeepGEMM `docs/02`）。判据不变（C1–C3，
       无 C5）。**本轮新增实验**；与 P14-1/P16-1 合成成本侧完整链条。
 
+### P18 实验扩展 9：寄存器足迹的可绕开性（`docs/04-experiments.md`）
+
+- [x] **P18-1** megakernel 寄存器足迹的**可绕开性**：用 `setmaxnreg` warp 级寄存器再平衡收回
+      P14-1 的代价（补齐 §8.6 / §11.6 两条「未测 setmaxnreg 动态重配置」尾巴，并兑现 §11.5 的假设；
+      对应「下一步」可选方向④延伸）。见 `docs/04-experiments.md` §12，源码 `src/setmaxnreg_rebalance.cu`，
+      原始输出 `harness/setmaxnreg_rebalance.out.txt`（目标卡 H100/sm90，**`-gencode arch=compute_90a,
+      code=sm_90a`**，device 3，iters=30，G=528，T=256，n=537 MB ≫ L2）。三组对照（`separate` /
+      `fused_naive` / `ws(U0)` 不调 setmaxnreg / `ws(U1)` 调）：
+      **A** `ws<*,lb2,U1>` 的 `numRegs` 被 `__launch_bounds__(256,2)` 压到 **128**（2 block/SM，是
+      `fused_naive` 的 2 倍），但 `heavy<192>` 重路径 **localB=0（无 spill）**——ptxas 因 setmaxnreg
+      而不压重路径寄存器；`ws<128,U0>` 同样 128 regs 但 **spill 32 B**；
+      **B** 复现 §8-B（naive 轻访存带宽掉 1.34×–2.29×）；
+      **C**（收益侧）`ws(U1)` 相对 `fused_naive` **0.54×–0.77×**（快 1.3×–1.8×）、逼近甚至优于
+      `separate`（**0.92×–1.24×**，H≤192 因轻重 warpgroup 同 kernel 并发而反超）；而 `ws(U0)` 在
+      H≥192 因 spill 爆炸（比 U1 慢 **7.7×**）。核心结论：**warp-specialized 只是前提，真正避免
+      spill、收回代价的是 setmaxnreg**；它要求「显式 warp 角色 + 入口寄存器预算」，故 MPK 自动
+      路径（`docs/07` §2 注释掉 setmaxnreg）与「一个 task=一个 CTA」的粒度用不上，而 DeepGEMM
+      手工角色正好用熟。判据不变（C1–C3，无 C5）。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -379,7 +398,9 @@
   这条只有资料分析的**指令足迹/成本侧**局限量化出来，与 P14-1 的寄存器足迹合成「双层足迹」）。
   **P17-1 双层足迹叠加（1/1）完成**（本轮新增，把 P14-1 的寄存器足迹与 P16-1 的代码足迹编进**
   同一个 kernel** 测合成律，补齐 §8.6 / §10.6 两条「未叠加」尾巴）。
-  **本专题任务清单（P0–P17）全部完成**，无未完成子项。
+  **P18-1 寄存器足迹的可绕开性（1/1）完成**（本轮新增，用 `setmaxnreg` warp 级再平衡把 P14-1 的
+  代价基本收回，补齐 §8.6 / §11.6「未测 setmaxnreg」两条尾巴并兑现 §11.5 的假设）。
+  **本专题任务清单（P0–P18）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -428,7 +449,7 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P17 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
+- **下一步：无**（P0–P18 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
   **P10-1 完成 P5-1 §1.6「扫 persistent 网格大小」**；**P12-1 完成 P5-3 §3.6 / P10-1 §5.5「多 block
@@ -436,7 +457,23 @@
   **P14-1 完成 megakernel 成本侧「寄存器固定为各 task 最大值」实测**；**P15-1 完成 C5 去中心化调度最小实现**）；
   ③ ~~走读 `tasks/hopper/*.cuh` 单 task 内部实现~~（P11-1 完成）；剩「在容器内 `pip install -e .`
   构建 mirage sm90 路径并跑 `demo/qwen3/demo.py --use-mirage` 取本机 MPK 端到端数字」（构建成本高，未做）；
-  ④ ~~megakernel 成本侧「代码足迹 / 指令缓存」实测~~（**P16-1 完成**，与 P14-1 寄存器足迹合成双层足迹）。
+  ④ ~~megakernel 成本侧「代码足迹 / 指令缓存」实测~~（**P16-1 完成**，与 P14-1 寄存器足迹合成双层足迹）；
+  ⑤ ~~megakernel 成本侧「寄存器足迹的可绕开性」：`setmaxnreg` 实测~~（**P18-1 完成**，收回 P14-1 的代价）。
+- **本轮（P18-1）**：`docs/04-experiments.md` 新增 §12「megakernel 寄存器足迹的『可绕开性』：
+  `setmaxnreg` warp 级再平衡」——新建 `src/setmaxnreg_rebalance.cu` +
+  `harness/setmaxnreg_rebalance.out.txt`（目标卡 H100/sm90，`-gencode arch=compute_90a,code=sm_90a`，
+  device 3，iters=30，G=528，T=256，n=537 MB ≫ L2）。三组对照（`separate` = kernel-per-operator /
+  `fused_naive` = P14-1 朴素融合 / `ws(U0)` = warp-specialized **不调** setmaxnreg / `ws(U1)` = 调）：
+  **A** `__launch_bounds__(256,2)` 把 `ws<*,U1>` 入口寄存器压到 **128**（2 block/SM，`fused_naive` 的
+  2 倍），但 `heavy<192>` **localB=0 无 spill**（ptxas 因 setmaxnreg 不压重路径）；`ws<128,U0>` 同 128
+  regs 却 **spill 32 B**；**B** 复现 §8-B（naive 轻访存带宽 1.34×–2.29×）；**C**（收益侧）`ws(U1)`
+  相对 `fused_naive` **0.54×–0.77×**（快 1.3×–1.8×）、相对 `separate` **0.92×–1.24×**（H≤192 因轻重
+  warpgroup 同 kernel 并发而反超），而 `ws(U0)` 在 H≥192 因 spill 爆炸（比 U1 慢 **7.7×**）。核心：
+  **warp-specialized 是前提，setmaxnreg 才是收回寄存器足迹代价的关键**；它要求「显式 warp 角色 +
+  入口寄存器预算」，故 MPK 自动路径（`docs/07` §2 注释掉 setmaxnreg、一 task=一 CTA）用不上，
+  DeepGEMM 手工角色正好用熟。判据不变（C1–C3，无 C5）。**本轮新增实验**，补齐 §8.6 / §11.6 两条尾巴、
+  兑现 §11.5 的假设。另记编译坑：`setmaxnreg` 只在 `sm90a` 可用，且无入口寄存器数时 ptxas 打印
+  `(C7508) 'setmaxnreg' ignored` 并静默忽略。
 - **本轮（P17-1）**：`docs/04-experiments.md` 新增 §11「megakernel『双层足迹』的叠加：寄存器足迹 ×
   代码足迹」——新建 `src/two_layer_footprint.cu` + `harness/two_layer_footprint.out.txt`（目标卡
   H100/sm90，**固定在空闲的 device 3**，iters=30，G=528=4 block/SM，T=256，steps/block=512，访存数组

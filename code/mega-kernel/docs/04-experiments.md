@@ -1478,3 +1478,143 @@ branch-resolving 停顿占比做归因。
 - 代码路径的 P 只取 1/16/256；未与 §10 的 spread/sticky 隔离组合，也未用 `ncu` 对 `both` 场景做
   `no_instruction` × occupancy 的联合归因（当前用时间分解推断加法性）。
 - 单卡、固定 `G=528`（4 block/SM）、`blockDim=256`；未扫网格/blockDim（可对照 P10-1/P12-1）。
+
+## 12. megakernel 寄存器足迹的「可绕开性」：`setmaxnreg` warp 级再平衡（P18-1）
+
+### 12.1 问题
+
+§8（P14-1）把 MPK §7（论文快照行 1740–1748）点名的唯一例外——「per-thread 寄存器被固定为各
+task 类型的最大值」——量化了出来：把一个重 task 编进单 kernel，轻访存 task 的带宽损失
+**1.33×–2.29×**（占用率被拉低）。§8.5/§8.6 又指出，生产案例（DeepGEMM mega 家族）用**手工
+warp 角色 + `setmaxnreg` 式动态寄存器重配置**在工程上绕开这一项，但本专题一直**只在 `docs/02`
+资料层面**提到它，**没有实测**（§8.6 末条、§11.6 末条两次记为尾巴；§11.5 也只是把「用 setmaxnreg
+把重 task 的寄存器在时间上摊开」列为假设）。
+
+本节把这条尾巴补上：**`setmaxnreg` 到底能不能收回 P14-1 那 1.33×–2.29× 的寄存器足迹代价？**
+
+### 12.2 方法
+
+程序 `src/setmaxnreg_rebalance.cu`（目标卡 H100 / sm90，原始输出
+`harness/setmaxnreg_rebalance.out.txt`）。`G=528`（4 block/SM）、`T=256`（8 warp = 2 warpgroup）、
+`n=128Mi float = 537 MB ≫ L2`、`heavy reps=200`、`iters=30`。
+
+**机制**（Hopper / `sm90a`）：`setmaxnreg.inc/dec.sync.aligned.u32 N` 让一个 **warpgroup（128 线程）**
+动态增减自己的寄存器分配（`N∈[24,256]`，8 的倍数）。它必须配合一个**显式的「入口」寄存器数**才能生效：
+`__launch_bounds__(T, minBlocks)` 给 kernel 一个入口值 `= 65536/(T·minBlocks)`，占用率（blocks/SM）
+按这个入口值计算；运行时重 task 的 warpgroup `inc` 到高位、其余 `dec` 到低位，**在同一 block 内换手**，
+ptxas 因此不再给重路径 spill。这正是 CUTLASS/DeepGEMM warp-specialized kernel 的做法
+（`docs/02` §1.2/§1.3；线上 MPK `tasks/hopper/utils.cuh:19-46` 的 `wg_increase/decrease_regs`
+包 setmaxnreg，但在 `linear_hopper.cuh:217/265` 里被注释掉，见 `docs/07` §2——**默认路径没做
+warpgroup 级再平衡**）。
+
+**编译注意（实测踩坑）**：`setmaxnreg` 只在 `sm90a` 上可用，必须
+`nvcc -gencode arch=compute_90a,code=sm_90a`（用 `-arch=sm_90` 会报
+`Instruction 'setmaxnreg.dec' not supported on .target 'sm_90'`）；若不加 `__launch_bounds__`
+（或 `-maxrregcount`）给出入口寄存器数，ptxas 会打印
+`(C7508) Potential Performance Loss: 'setmaxnreg' ignored; unable to determine register count at entry.`
+并**静默忽略**该指令——即 setmaxnreg 不是「免费」的运行时魔法，它要求编译器知道入口分配。
+
+**对照**（同一个「每 block 读整段 + 做 heavy 计算」的融合工作负载，工作总量对齐）：
+
+| kernel | 说明 |
+|---|---|
+| `separate` | 两次 launch：`light_kernel` + `heavy_kernel<H>`，各自按自己占用率跑（kernel-per-operator 上界） |
+| `fused_naive<H>` | 单 kernel，**所有线程**都背 heavy 的寄存器（P14-1 的朴素融合，occupancy 被拉低） |
+| `ws<H,U0>` | 单 kernel，warp-specialized（WG0 heavy / WG1 light），`__launch_bounds__(256,2)`，**不调** setmaxnreg |
+| `ws<H,U1>` | 同上 + **setmaxnreg**（WG0 `inc→232`、WG1 `dec→24`） |
+
+对齐方式：`naive` 用 256 线程各做 `reps=200` 次 heavy；`ws` 用 128 个 heavy 线程各做 `2·reps=400`
+次（同总 FLOPs），light warpgroup 用 128 线程覆盖整段（同总访存）。
+
+### 12.3 结果
+
+**Section A：寄存器 / 溢出 / 占用率（T=256）**
+
+| kernel | regs | localB | blocks/SM | warps/SM |
+|---|---|---|---|---|
+| `light_kernel` | 26 | 0 | 8 | 64 |
+| `heavy_kernel<128>` | 168 | 0 | 1 | 8 |
+| `heavy_kernel<192>` | 254 | 0 | 1 | 8 |
+| `heavy_kernel<232>` | 255 | 0 | 1 | 8 |
+| `fused_naive<128>` | 168 | 0 | 1 | 8 |
+| `fused_naive<192>` | 254 | 0 | 1 | 8 |
+| `fused_naive<232>` | 254 | 0 | 1 | 8 |
+| `ws<128,lb2,U0>` | **128** | **32** | **2** | **16** |
+| `ws<128,lb2,U1>` | **128** | **0** | **2** | **16** |
+| `ws<192,lb2,U1>` | **128** | **0** | **2** | **16** |
+| `ws<232,lb2,U1>` | 128 | 40 | 2 | 16 |
+
+**Section B：轻访存带宽 —— `fused_naive<H>`(heavy=0) vs `light_kernel`（复现 §8-B）**
+
+| H | light ms | fused ms | GB/s | 比率 |
+|---|---|---|---|---|
+| base | 0.2070 | 0.2070 | 2593 | 1.00× |
+| 64 | 0.2070 | 0.2767 | 1941 | 1.34× |
+| 128 | 0.2070 | 0.4733 | 1134 | **2.29×** |
+| 192 | 0.2070 | 0.4735 | 1134 | 2.29× |
+| 232 | 0.2070 | 0.4741 | 1132 | 2.29× |
+
+**Section C：融合工作负载（读整段 + heavy）总时间（ms）**
+
+| H | separate | naive | ws(U0) | ws(U1) | U1/sep | U1/naive |
+|---|---|---|---|---|---|---|
+| 128 | 0.3260 | 0.5828 | 0.4312 | **0.3165** | **0.97×** | **0.54×** |
+| 192 | 0.3793 | 0.6367 | 2.6855 | **0.3503** | **0.92×** | **0.55×** |
+| 232 | 0.4128 | 0.6684 | 3.9625 | 0.5122 | 1.24× | 0.77× |
+
+正确性：`light_kernel` 全线程求和 = 68786352，`light_wg`（仅 WG1 读取） = 68786504，
+相对差 **2.21e-6**（浮点归约序不同）；`ws<128,U1>` 融合输出有限值。
+
+### 12.4 读法
+
+1. **`setmaxnreg` 确实能把 P14-1 的寄存器足迹代价基本收回。** Section C：朴素融合
+   `fused_naive` 相对 `separate` 慢 **1.79×/1.68×/1.62×**（H=128/192/232，即 Section B 的
+   带宽代价在融合工作负载上的兑现），而 warp-specialized + setmaxnreg 的 `ws(U1)` 把
+   `U1/naive` 压到 **0.54×–0.77×**（融合反而比朴素单 kernel **快 1.3×–1.8×**），并逼近甚至
+   优于 kernel-per-operator 的 `separate`（**0.92×–1.24×**）。H≤192 时 `ws(U1)` 比 `separate`
+   **更快**（0.97×/0.92×），因为它让轻 warpgroup 与重 warpgroup **在同一常驻 kernel 内并发**
+   （`separate` 是 light→heavy 串行两次 launch），这正是 megakernel 融合本该拿到的收益。
+2. **关键在于「占用率按低入口值算，重路径靠 inc 不 spill」。** Section A：`ws<*,lb2,U1>` 的
+   `numRegs` 被 `__launch_bounds__(256,2)` 压到 **128**（→ 2 block/SM、16 warp/SM，是
+   `fused_naive` 的两倍），但 `heavy<192>` 的重路径 **localB=0（无 spill）**——ptxas 知道 WG0
+   会在运行时 `inc→232`，于是不把重路径的寄存器压到 128。对照 `ws<128,lb2,U0>`（**不调**
+   setmaxnreg）：同样 128 regs / 2 block/SM，但重路径 **localB=32**（spill）。
+3. **不调 setmaxnreg 的 warp-specialized kernel，一旦重路径超出入口预算就会灾难性 spill。**
+   Section C 的 `ws(U0)`：H=128 时靠 2 block/SM 的高占用率还略有优势（0.4312 vs naive 0.5828），
+   但 H=192/232 时 spill 使其**爆炸到 2.69/3.96 ms**（比 `ws(U1)` 慢 **7.7×**）。这说明
+   **warp-specialized 只是前提，真正避免 spill 的是 setmaxnreg**——两者必须成对使用。
+4. **代价侧结论修正**：§11.5 曾把「用 setmaxnreg 把重 task 寄存器在时间上摊开」列为**假设**，
+   本节给出实测——它**不是免费午餐但确实有效**：需要一个**显式的 warp 角色划分 + 入口寄存器预算**
+   （`__launch_bounds__`/`-maxrregcount`），运行时按角色 `inc/dec` 换手。H=232 时 `ws(U1)` 仍有
+   残余 spill（localB=40、`U1/sep=1.24×`），说明当重 task 的寄存器需求**逼近入口预算的 2 倍**时，
+   再平衡的余量开始不够。
+
+### 12.5 与判据 / MPK / 生产案例的关系
+
+- **补齐 §8.6 / §11.6 两条「未测 setmaxnreg」尾巴，并兑现 §11.5 的假设**：P14-1 只测出寄存器
+  足迹的**代价**，本节测出它的**可绕开性**——生产用的 `setmaxnreg` warp 级再平衡能把代价从
+  `1.6×–1.8×` 降到 `≈1.0×`（甚至因并发而更快）。
+- **对上 MPK §7（行 1740–1748）与线上实现**：MPK 把「寄存器固定为各 task 最大值」留作唯一例外，
+  其自动路径**没有**做 warpgroup 级再平衡（`docs/07` §2：`linear_hopper.cuh` 里
+  `wg_decrease_regs<32>()` / `wg_increase_regs<160>()` 被**注释**）。本节解释了为什么：
+  setmaxnreg 要求「哪个 warpgroup 跑哪个 task」这一**静态角色结构**，而 MPK 的自动 codegen
+  以「一个 task = 一个 CTA」为单位（`docs/07` §0），CTA 内不做异构角色拆分，因此用不上它。
+  这与 MPK §4.2 行 1126–1146「以 thread block 为单位复用 superoptimizer」的粒度选择一致。
+- **与生产案例（`docs/02`）对照**：DeepGEMM mega 家族正是**手工**写出静态 warp 角色
+  （warp0 TMA / warp1 MMA / gate warps…）并配 `setmaxnreg` 式寄存器重配置——本节在目标卡上
+  用原生 CUDA 复现并量化了这套做法的收益（C 表）。**「静态角色 + setmaxnreg」是自动 megakernel
+  合成器尚未采纳、但生产已用熟的一条成本侧优化路径。**
+- **判据（C1–C5，`docs/00` §3）**：`ws` 是单次 launch、常驻、含两类 task（C1+C2+C3），
+  且块内用 warp 角色做寄存器再平衡——但仍**无**去中心化 event queue 调度（C5）。与 §8/§10/§11
+  一样是**成本侧**度量。
+
+### 12.6 局限
+
+- 合成 workload：轻路径是标量 grid-stride 求和、重路径是规则 FMA 链；**不含张量核 / TMA /
+  真实混比**，绝对倍率会变。
+- 只用单一 `__launch_bounds__(256,2)`（入口 128 regs）与固定 `inc=232/dec=24`；未扫
+  `minBlocks`、`INC/DEC` 值、`blockDim` 或 warp 角色配比（如 1 重 + 3 轻的 512 线程块）。
+- 角色是**静态**的（WG0 永远重、WG1 永远轻），非 MPK 的去中心化 event queue 按依赖动态派发；
+  测的是**寄存器再平衡这一机制**，不是调度行为。
+- `setmaxnreg` 是 Hopper（`sm90a`）专属；Blackwell 起寄存器再平衡机制不同（`tcgen05` 路径），
+  本节结论只对目标卡 H100 / sm90 有效。
