@@ -307,7 +307,7 @@
   6 项契约非法输入全部被拒。配套博客 `content/posts/mega-moe-19-attention-mqa-logits`
   （索引页新增第 19 篇）。Hugo 构建 0 ERROR。
 - **下一步**：P0~P9 已完成。后续若继续（均为增量、非承诺）：
-  ① **signed attention 系列**：`fp8_fp4_mqa_logits` 的 SM100 MXFP4/MXFP8、`get_mqa_logits_metadata`
+  ① **sparse attention 系列**：`fp8_fp4_mqa_logits` 的 SM100 MXFP4/MXFP8、`get_mqa_logits_metadata`
   负载均衡调度、`fp8_fp4_sparse_mqa_logits`（top-k 块）、`fp8_fp4_paged_sparse_mqa_logits`
   （arch10 专属，仅分析；sparse 版还有 SM90 可试的部分吗需查）；
   ② **einsum 家族 FP8 投影**：`fp8_einsum` 的 `bhd,hdr->bhr` / `bhd,bhr->hdr`（arch10 专属，
