@@ -1,0 +1,41 @@
+# P0-3 环境探测原始输出
+# date: 2026-10-12T20:53:18+08:00
+# cmd: scripts/lab.sh exec "nvcc -O3 -arch=sm_90 -rdc=true src/probe_env.cu -o probe_env && ./probe_env 200"
+# gpu: H100 80GB HBM3 x8, sm90, driver 570.211.01
+# cuda: nvcc release 13.2, V13.2.78 (runtime 13020)
+
+BUILD_OK
+== device ==
+name                : NVIDIA H100 80GB HBM3
+compute capability  : 9.0
+SM count            : 132
+shared mem / block  : 49152 bytes
+shared mem / SM     : 233472 bytes
+regs / SM           : 65536
+driver / runtime CUDA: 13020 / 13020
+cooperativeLaunch   : YES
+memoryPoolsSupported: YES
+
+== (1) persistent kernel + cooperative grid sync ==
+cooperativeLaunch supported : YES
+persistent_kernel occupancy  : 16 blocks/SM @128 threads
+persistent kernel (grid=132, 200 iters, grid sync each): 0.330 ms
+trivial kernels   (200 separate launches, no sync):     0.575 ms
+RESULT: SUPPORTED & RAN
+
+== (2) CUDA Graph capture/replay ==
+graph nodes                  : 32 kernels
+plain  200 x 32 launches      : 18.007 ms
+graph  200 replays            : 11.567 ms
+speedup (plain/graph)        : 1.56x
+RESULT: SUPPORTED & RAN
+
+== (3) PDL (Programmatic Dependent Launch) ==
+precheck                     : likely YES (sm90+, CUDA 13.2)
+launch producer (PDL)        : ok
+launch consumer (PDL)        : ok
+device sync                  : ok
+flags after run              : producer=1 consumer=1
+RESULT: SUPPORTED & RAN (both kernels completed)
+
+== done ==

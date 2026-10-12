@@ -34,7 +34,9 @@
 - [x] **P0-1** 通读 MPK 论文快照，产出章节地图与关键图/表清单（进 `docs/00` §6「MPK 论文导航」）。
 - [x] **P0-2** 收集案例：`~/github/DeepGEMM`（mega_moe/mega_gate/mega_mhc）、`~/github/hpc-ops`、Kimi K3 报告相关段落。
       产出 `docs/02-production-cases.md`（案例源码坐标清单，含 commit 与核对过的行号）。
-- [ ] **P0-3** 环境探测：`kernel_lab` 能否跑 persistent kernel / CUDA Graph / PDL 小实验（H100 支持 PDL）。
+- [x] **P0-3** 环境探测：`kernel_lab` 能否跑 persistent kernel / CUDA Graph / PDL 小实验（H100 支持 PDL）。
+      结果见 `docs/04-experiments.md` §0，源码 `src/probe_env.cu`，原始输出 `harness/probe_env.out.txt`：
+      三项均**可编译可运行**（cooperative grid sync 0.330ms/200 轮；CUDA Graph 1.56×；PDL ok）。
 
 ### P1 动机与背景（`docs/00-megakernel-overview.md`）
 
@@ -95,11 +97,15 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：脚手架就绪；**P0-1 完成**（MPK 论文章节地图见 `docs/00` §6）；**P0-2 完成**——案例源码坐标清单
-  写入 `docs/02-production-cases.md`：DeepGEMM mega 家族（`057ca59`）的 api/heuristics/impl/scheduler/layout
-  文件与行号、hpc-ops Megakernel roadmap（`ab1a402` README 行 230）、Kimi K3 §4.2.4（快照行 1069–1081）。
-- **下一步：P0-3** 环境探测：在 `kernel_lab`（H100）确认能否编译/运行 persistent kernel、CUDA Graph、PDL
-  小实验（`code/mega-kernel/scripts/lab.sh exec "..."`），为 P4/P5 实验铺垫；跑不了的标注「仅资料分析」。
+- 当前进度：脚手架就绪；**P0 全部完成**。
+  - **P0-1** MPK 论文章节地图见 `docs/00` §6；
+  - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
+    hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
+  - **P0-3** 环境探测完成，见 `docs/04-experiments.md` §0：H100/sm90 + CUDA 13.2 上
+    persistent kernel（cooperative grid sync）、CUDA Graph、PDL **三项均实测可编译可运行**，
+    后续 P4/P5 无降级项。
+- **下一步：P1-1** kernel-per-operator 执行模型与三类损失（kernel barrier / launch 开销 / 中间张量 HBM 往返），
+  写入 `docs/00-megakernel-overview.md`（补 §1 的量化与论文章节/行号引用，可复用 P0-3 实测作佐证）。
 
 ## 阻塞
 
