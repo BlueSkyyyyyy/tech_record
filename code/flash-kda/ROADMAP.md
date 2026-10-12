@@ -31,8 +31,9 @@
 
 ### P0 侦察与环境（先做）
 
-- [ ] **P0-1** 读通 FlashKDA：`csrc/flash_kda.cpp`（API/形状）、`fwd.h`（launch 模板）、
-      `smxx/fwd_kernel1.cuh`、`smxx/fwd_kernel2.cuh`、`smxx/utils.cuh`，产出结构脑图（进 `docs/01`）。
+- [x] **P0-1** 读通 FlashKDA：`csrc/flash_kda.cpp`（API/形状）、`fwd.h`（launch 模板）、
+      `smxx/fwd_kernel1.cuh`、`smxx/fwd_kernel2.cuh`、`smxx/utils.cuh`、`fwd_launch.cu`、deep-dive，
+      产出结构脑图（`docs/01` §5，含真实行号）。
 - [ ] **P0-2** 环境打通：`scripts/lab.sh` 起容器；确认 import torch/FlashKDA；`pip install flash-linear-attention`
       并确认 `chunk_kda` 可跑（拿反向参照）。
 - [ ] **P0-3** `harness/probe_refs.py`：跑通 FlashKDA forward 与 FLA `chunk_kda`，确认两者量级一致的相同输入。
@@ -108,8 +109,11 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：脚手架就绪（README/ROADMAP/docs/scripts/posts/skill），autopilot 待首轮侦察。
-- **下一步：P0-1** 读通 FlashKDA 源码并产出结构脑图 `docs/01-kda-theory.md` 初稿（数学部分）。
+- 当前进度：P0-1 完成——通读 FlashKDA host/launch/K1/K2/utils 五个源文件与 deep-dive，
+  在 `docs/01-kda-theory.md` §5 写出「文件职责 + K1/K2 阶段流 + warp 分工 + workspace 布局」结构脑图（行号已核对）。
+  `docs/01` 同时已含数学定义与 CHUNK=16 分块公式初稿。
+- **下一步：P0-2/P0-3** 起 `kernel_lab` 容器确认环境与 FlashKDA/FLA 可跑（需要 GPU）；
+  无 GPU 时可先做 P1-4（`src/kda_ref.py` 两种实现 CPU 互拍）。
 
 ## 阻塞
 

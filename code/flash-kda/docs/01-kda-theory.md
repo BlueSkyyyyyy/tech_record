@@ -120,7 +120,98 @@ FlashKDA 把前向拆成两个 kernel（见 `docs/20260420-flashkda-v1-deep-dive
 单 kernel 版本里，K1 的 token 并行度会被 K2 很低的并行度拖住，大量 SM 空转；拆开后至少快 **15%**，
 而且两段可各自调优。这里是后文精读 K1/K2 的动机。
 
-## 5. 下一步
+## 5. FlashKDA 源码结构脑图
+
+这一节把仓库里每个文件「负责什么、边界在哪」先钉死，后面精读 K1/K2 时不再迷路。
+所有行号均为核对过的真实行号（`~/github/FlashKDA`）。
+
+### 5.1 文件与职责
+
+| 文件 | 职责 | 关键入口 |
+|---|---|---|
+| `csrc/flash_kda.cpp` | host 侧 API：校验、workspace 大小、形状规整、按状态/varlen 分派 | `get_workspace_size`（L5）、`fwd`（L28） |
+| `csrc/fwd.h` | launch 模板声明（$D$/状态/varlen 作为编译期参数） | `launch_fwd`（L6） |
+| `csrc/smxx/fwd_launch.cu` | 建 TMA descriptor、切 workspace 指针、真正 `<<<>>>` 两次 | `launch_fwd`（L7） |
+| `csrc/smxx/fwd_kernel1.cuh` | **K1 prepare**：门激活/归一化/衰减/构 $L,M_{qk}$/求逆 → 写 workspace | `_flash_kda_fwd_prepare`（L120） |
+| `csrc/smxx/fwd_kernel2.cuh` | **K2 recurrence**：逐 chunk delta 递推 + 输出 + 状态更新 | `_flash_kda_fwd_recurrence`（L133） |
+| `csrc/smxx/utils.cuh` | PTX 近似函数、workspace 尺寸、warp 角色、pipeline 工厂、求逆/状态转换例程 | 见 §5.4 |
+
+「host → descriptor → kernel」三层是分离的：`flash_kda.cpp` 只做 tensor 检查与 reshape，不碰
+cute/TMA；所有 descriptor 构造都在 `fwd_launch.cu`，kernel 模板只收 descriptor 常量。
+
+### 5.2 K1（prepare）阶段流
+
+`_flash_kda_fwd_prepare`（`fwd_kernel1.cuh:120`）是**单次 TMA load、无 pipeline** 的短 kernel，
+一个 CTA 处理一个 `(head, tile)`：
+
+1. **定位 tile**（L168–199）：`grid = total_tiles × H`。非 varlen 直接整除（L187–195）；
+   varlen 用预生成的 `tile_prefix` 做 $O(\log N)$ 二分（L175–186）。多出的 CTA 在 L199 提前 `return`。
+2. **TMA 载入**（L200–255）：`threadIdx.x==0` 一次发起 q/k/beta/g_bf16/dt_bias 五个 copy（L231–254），
+   `kTmaTransactionBytes` 在 L158–161 累加。注意 beta 做了 `& ~7` 对齐（L223），因为 1D TMA 的最小粒度是 8。
+3. **归一化**（L265–304）：$D=128$ 行内 16 线程、每线程 8 元素，先逐元素平方和，
+   再 5 步 `__shfl_xor_sync` 树归约（L290–293），`rsqrtf(x+1e-6)`（L295–296），回写。
+4. **门激活 + cumsum**（L306–338）：128 线程按列并行，`g = a_log_exp*g + dt_bias` →
+   `gate_scale*sigmoid`（L321–323）→ 逐行累加得 prefix（L327–328），末值写 `g_total`（L330）。
+   另 128 线程把尾部越界行的 k 置零（L331–337）。**没有任何跨行同步**——因为按列并行天然串行。
+5. **decay_apply**（L360–475）：把 q/k 乘 $2^{g^{cum}}$ 等四种变体写回（L449–471）。
+   用 union 复用 smem（下面 §5.3）。
+6. **$L$ / $M_{qk}$ 两个 GEMM**（L481–487）：warp 0 算 fp32 累加的 $L$，warp 1 算 bf16 的 $M_{qk}$。
+7. **tril 掩码 + beta**（L493–508）：$L$ 严格下三角乘 $\beta$（L499–503），$M_{qk}$ 抹上三角（L504–506）。
+8. **求逆**（L510–511）：`inv_fwd_subst_fused_1warp`（`utils.cuh:214`）。
+9. **写 workspace**（L515–583）：`threadIdx.x==0` 连发 6 个 TMA store，`tma_store_wait<0>`（L584）。
+
+### 5.3 K2（recurrence）阶段流与 warp 分工
+
+`_flash_kda_fwd_recurrence`（`fwd_kernel2.cuh:133`），`grid = N × H`，**一个 CTA 串完整个序列**，
+所以是 head 并行、token 串行。
+
+- **warp 角色**（L188–197）：`kComputeThreads=128`（4 个 MMA warp），第 4 个 warp 是 `LOAD_QKG`，
+  第 5 个是 `STORE`；线程总数 `32*2+128=192`（`fwd_launch.cu:186`）。
+- **双 pipeline**（L199–213）：load 用 `PipelineTmaAsync<3>`（3 stages），store 用 `PipelineAsync<2>`（2 stages），
+  pipeline 工厂见 `utils.cuh:88`/`utils.cuh:120`。
+- **初始状态**（L239–318）：bf16 直接 TMA 进 `state_acc`（L241–266）；fp32 先进 union 缓冲再
+  `smem_cvt_fp32_to_bf16`（L267–304）；无状态则清零（L305–317）。
+- **LOAD warp**（L323–422）：按 stage 轮转，一次发起 v/beta/k_decayed/q_decayed/k_restored/g_total/INV/Mqk
+  共 8 个 TMA（L346–420）。
+- **MMA warp 的六个 Phase**（L426–743）：
+  1. 双 GEMM `k@s`、`q@s`（L533–568）；
+  2. cast 输出到 bf16 并载入 v/INV/beta（L570–587）；
+  3. $u=(v-u)\beta$，再 `u = INV @ u`，用 `MOVM_T` 把 u 从 C 片段直接当 B 操作数（L589–623）；
+  4. `Mqk @ U + out`（L625–650）；
+  5. 写 out 回 smem（L652–657）；
+  6. 状态更新 `s_acc = s_acc*g_total + k_restored^T @ U`（L659–731）。
+  之后 `compute_barrier.arrive_and_wait()` + 提交 pipeline（L733–741）。
+- **STORE warp**（L746–802）：整 tile 走 TMA store（L767–779），尾 tile 手动逐元素写（L757–766）；
+  最后按 `HasStateOut`/`StateFP32` 分支存 state（L786–835）。
+
+### 5.4 `utils.cuh` 的可复用小件
+
+- 近似函数：`ex2_approx_ftz_f32`（L38）、`tanh_approx_f32`（L44）、`sigmoid_tanh_approx_f32`（L50）、
+  `bf16_to_f32`（L55）。这些是 fp32 精度的关键——gate 路径全走它们。
+- `WorkspaceSizes`（L64–77）：与 `flash_kda.cpp:get_workspace_size` 的逐字段字节数一一对应
+  （`kKDecayed=kQDecayed=kKRestored=4096`、`kGTotal=512`、`kINV=kMqk=512`）。
+- `WarpRole`（L79–84）与 pipeline 工厂 `make_load_pipeline`（L88）/`make_store_pipeline`（L120）。
+- 单 warp 16×16 GEMM 封装：`mma_m16n16_bf16bf16bf16_1warp`（L146，$M_{qk}$ 用）、
+  `mma_m16n16_bf16bf16fp32_1warp`（L168，$L$ 用 fp32 累加）。
+- `inv_fwd_subst_fused_1warp`（L214）：**K1 最烧脑的一段**——8×8 fp32 前代（L229–252）+
+  两次 bf16 HMMA 合并 off-diagonal（L330–341）+ 元素加（L343–355）。
+- 状态 layout 转换 `smem_cvt_fp32_to_bf16`（L379）/`smem_cvt_bf16_to_fp32`（L410），按 8×8 atom 处理。
+
+### 5.5 workspace 布局（对上 host 计算）
+
+`get_workspace_size`（`flash_kda.cpp:5`）与 `launch_fwd` 的指针切分（`fwd_launch.cu:62–71`）必须一致：
+
+$$
+\text{per\_tile} = \underbrace{3\cdot CHUNK\cdot D\cdot2}_{k^{dec},q^{dec},k^{rest}}
++ \underbrace{D\cdot4}_{g^{total}}
++ \underbrace{2\cdot CHUNK^2\cdot2}_{INV,\,M_{qk}},
+$$
+
+按 `kKDecayed → kQDecayed → kKRestored → kGTotal → kINV → Mqk` 六段分开排布（不是结构体数组），
+最后留 `tile_prefix`（varlen 用，L22–23、L71）。**这个「SoA 而非 AoS」的排布让每个字段能独立配 TMA
+descriptor，且都能 128B 对齐**（L16–18 的 `static_assert`）。
+
+## 6. 下一步
 
 - 精读 K1（`docs/02-kda-fwd-k1.md`）：TMA 载入、L2 norm、cumsum、decay、$L/M_{qk}$、求逆。
 - 精读 K2（`docs/03-kda-fwd-k2.md`）：warp specialization、八个 Phase、状态更新。
