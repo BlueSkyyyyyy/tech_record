@@ -1,0 +1,25 @@
+deep_gemm 2.8.1, arch_major=9, device=NVIDIA H100 80GB HBM3
+============================================================================================
+A. H100 (sm90) m-grouped dgrad API 语义（linear2: A=dY, B=W2, D=dA）
+  A1 contiguous dgrad: G=6 m=1024 n(I)=256 k(H)=512 alignment=128
+     grouped_layout: len=1024, gap rows(layout==-1)=303/1024 (30%)
+     relerr(dA valid) vs dY_e@W2_e^T = 3.701e-02
+  A2 masked dgrad: G=6 max_m=160 expected_m=115 n=256 k=512
+     A shape=(6, 160, 512) (稠密 [G,max_m,K]；无效行只占空间、kernel 跳过)
+     masked_m=[84, 100, 92, 102, 102, 103] -> 有效 583 行 / 存储 960 行 (61%)
+     relerr(dA valid) = 3.667e-02
+  A3 PSUM dgrad: G=6 m=1152 n=256 k=512 alignment=128
+     grouped_layout(prefix-sum ends)=[156, 393, 608, 756, 880, 1057]
+     decoded (idx, physical_start, valid_end)=[(0, 0, 156), (1, 256, 393), (2, 512, 608), (3, 640, 756), (4, 768, 880), (5, 896, 1057)]
+     relerr(dA valid) = 3.671e-02
+  A4 contiguous grouped_layout len=383 != m=384: rejected as expected
+     -> RuntimeError: Assertion error (csrc/apis/gemm.hpp:218): m == m__
+  A5 perf dgrad: G=8 m=4352 n=2048 k=7168 t=349 us  366 TFLOPS
+============================================================================================
+B. 三种布局同一性（同一份 dgrad 数据）
+  B same dgrad data through 3 layouts: G=6 total valid=575 total_m(physical)=768 n=256 k=512
+     masked   vs dY@W2^T ref : relerr=3.692e-02
+     PSUM     vs dY@W2^T ref : relerr=3.692e-02
+     contiguous vs ref       : relerr=3.692e-02
+     masked vs PSUM          : relerr=0.000e+00
+     PSUM   vs contiguous    : relerr=0.000e+00
