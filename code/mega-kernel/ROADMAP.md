@@ -394,6 +394,28 @@
       block**，同步必须**批量/环形化**（MPK ring buffer、DeepGEMM ring barrier）而非每 tile 原子。
       **本轮新增实验**，补齐损失一的**跨算子**形态。
 
+### P21 MPK 依赖分析器源码走读（`docs/08-mpk-compiler.md`）
+
+- [x] **P21-1** 补齐 `docs/06`（运行层，从 tGraph 之后讲起）与 `docs/07`（单 task device）
+      **上游**的编译层：论文 §4.1 的「算子图 → tGraph」五步（分解/依赖分析/event fusion/
+      normalization/linearization）在线上实现里到底长什么样。见 `docs/08-mpk-compiler.md`
+      （快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与 `docs/06`/`docs/07` 同快照；
+      主文件 `src/kernel/annotated_graph.cc` 1014 行 + 头 `include/mirage/kernel/annotated_graph.h` 198 行）。
+      §0 定位（`runtime.cc:243` 调用、`:642` 按 `ordered_layers` emit）与十步流水线 (a)–(j)；§1 IR
+      （`TaskView` 的 `event_dim`（张量维）vs `last3`（网格轴）、`derive_last3`、边身份 =
+      `(prod_layer,out_slot,cons_layer,in_slot)` 而非 guid）；§2 Step (a) **最近写者 SSA** + bbox
+      `intersect/subtract` **阴影覆盖**（`:119-425`）+ view 引发的 barrier 边（`:391-400`）；§3 Step (b)
+      Kahn 环检测 / (c) **残余边剥离=传递规约**（`:429-551`，一次可达性再原子剥离）；§4 Step (d) distinct
+      计数 / (e) **case 2/3 拒绝**（`:553-662`）——论文 normalization 是 Figure 6 空-task 重写，实现是
+      **拒绝非法角色组合 + LCM 降级**；§5 Step (f) 两趟 Kahn（depth,index 定序，`:664-745`）=论文
+      Algorithm 1 linearization；§6 Step (g) 逐边 **GCD**（`:770`）+ (h) **fork LCM**（`:786-885`）+
+      (i) **join LCM**（`:887-958`）=论文 successor/predecessor-set fusion（Def 4.1/4.2），论文用集合论、
+      实现用分块算术，目标一致；§7 `runtime.cc` 把 IR 展开成 `EventDesc`/`FullTaskDesc`
+      （`dfs_create_events_add_tasks:76-219`、fork 交错 emit `:748-795`、join `:810-872`）；§8 与论文
+      §4.1 逐条对照表；§9 局限（纯走读未构建、`parallel_path_design.md` 在快照里不存在、normalization
+      口径差异）。**纯源码走读（资料分析），本轮无新实验。** 配套博客 post `mega-kernel-09-mpk-compiler`
+      （weight 10）并更新 `mega-kernel-00-index` 目录。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -442,7 +464,10 @@
   Graph 叠加」与 `docs/03` §2.3「可叠加」论断：capture 保留 PDL 语义、叠加次乘非相乘、上限独立）。
   **P20-1 跨算子细粒度重叠（1/1）完成**（本轮新增，把 MPK §2.1 Figure 3 的 `MatMul→AllGather` 型
   跨算子细粒度依赖实测出来：数值安全但静态切 block 重叠恒慢于屏障，重叠需 SM 共驻而非分块）。
-  **本专题任务清单（P0–P20）全部完成**，无未完成子项。
+  **P21-1 MPK 依赖分析器源码走读（1/1）完成**（本轮新增，补齐 `docs/06`/`docs/07` 上游的编译层：
+  论文 §4.1 的「算子图 → tGraph」五步在 `src/kernel/annotated_graph.cc` 的真实实现——最近写者 SSA +
+  bbox 阴影覆盖、残余边剥离、case 2/3 拒绝、fork/join LCM event fusion、按 depth 的 Kahn linearization）。
+  **本专题任务清单（P0–P21）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -491,7 +516,7 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P20 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
+- **下一步：无**（P0–P21 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
   **P10-1 完成 P5-1 §1.6「扫 persistent 网格大小」**；**P12-1 完成 P5-3 §3.6 / P10-1 §5.5「多 block
@@ -504,6 +529,23 @@
   ⑥ ~~`docs/04` §6.6「未测 PDL 与 CUDA Graph 叠加」~~（**P19-1 完成**，测出 capture 保留 PDL 语义、
   叠加次乘非相乘、上限独立）；剩「在容器内 `pip install -e .` 构建 mirage sm90 路径并跑端到端数字」
   （构建成本高，未做）。
+- **本轮（P21-1）**：新建 `docs/08-mpk-compiler.md`（MPK 依赖分析器 / tGraph 构建源码走读，**纯源码走读、
+  无新实验**）+ 博客 post `mega-kernel-09-mpk-compiler`（weight 10）并更新 `mega-kernel-00-index` 目录第 9 项。
+  快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`（与 `docs/06`/`docs/07` 同一快照，行号已核对）。
+  补齐 `docs/06`（从 tGraph 之后讲起）上游的编译层：论文 §4.1 五步在 `src/kernel/annotated_graph.cc`
+  （1014 行）+ `include/mirage/kernel/annotated_graph.h`（198 行）的真实实现。§0 定位（`runtime.cc:243`
+  调用、`:642` 按 `ordered_layers` emit）与十步流水线 (a)–(j)；§1 IR（`TaskView` 的 `event_dim`（张量维）
+  vs `last3`（网格轴）、`derive_last3:42-58`、边身份 = `(prod,out_slot,cons,in_slot)` 而非 guid）；
+  §2 Step (a) **最近写者 SSA**（`last_writers:154`）+ bbox `intersect/subtract` **阴影覆盖**（`:331-369`）
+  + view 引发 barrier 边（`:391-400`）；§3 Step (b) Kahn 环检测 / (c) **残余边剥离=传递规约**
+  （`:488-550`，一次可达性再原子剥离）；§4 Step (d) distinct 计数 / (e) **case 2/3 拒绝**（`:583-662`）
+  ——**论文 normalization 是 Figure 6 空-task 重写，实现是「拒绝非法角色组合 + LCM 降级」**；§5 Step (f)
+  两趟 Kahn（depth,index 定序 `:664-745`）= 论文 Algorithm 1 linearization；§6 Step (g) 逐边 **GCD**
+  （`:770`）+ (h) **fork LCM**（`:786-885`）+ (i) **join LCM**（`:887-958`）= 论文 successor/predecessor-set
+  fusion（Def 4.1/4.2），论文用集合论、实现用分块算术，目标一致；§7 `runtime.cc` 把 IR 展开成
+  `EventDesc`/`FullTaskDesc`（`dfs_create_events_add_tasks:76-219`、fork 交错 emit `:748-795`、join
+  `:810-872`）；§8 与论文 §4.1 逐条对照表；§9 局限（纯走读未构建、`parallel_path_design.md` 在快照里
+  并不存在、normalization 口径差异是硬边界）。**本轮纯资料分析，无新实验。**
 - **本轮（P20-1）**：`docs/04-experiments.md` 新增 §14「跨算子细粒度重叠：为什么『切 block 做重叠』
   赢不过算子级屏障」——新建 `src/cross_op_overlap.cu` + `harness/cross_op_overlap.out.txt`（目标卡
   H100/sm90，device 3，iters=30，G=132=SM，T=256，NT=8192 tile×TS=4096 float=134 MB/数组）。

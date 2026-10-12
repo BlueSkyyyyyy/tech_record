@@ -26,5 +26,6 @@ categories: ["算子开发"]
 6. [MegaKernel 一页纸总结：原理、设计 checklist 与适用边界]({{< relref "mega-kernel-06-summary" >}}) —— 收官汇总
 7. [MPK 线上实现源码走读：worker/scheduler 运行层]({{< relref "mega-kernel-07-mpk-source" >}}) —— 论文落到可核对源码
 8. [MPK 单 task device 实现走读：Hopper task 内部流水]({{< relref "mega-kernel-08-mpk-tasks" >}}) —— 一个 task = 一个 CTA 的 TMA/wgmma 流水
+9. [MPK 源码走读：依赖分析器与 tGraph 构建]({{< relref "mega-kernel-09-mpk-compiler" >}}) —— 最近写者 SSA、event fusion、linearization
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
