@@ -653,6 +653,38 @@
       （4096×7168×7168：**1407 vs 957 TFLOPS**；bf16/无 reduce-add/BLOCK_M=256/SFB 直读）。配套博客
       `content/posts/mega-moe-32-sm90-fp8-gemm`（索引页新增第 32 篇）。
 
+### P23 增量（opt-in，贯穿所有 kernel 的 JIT 运行时）
+
+- [x] **P23-1** **DeepJIT 运行时：编译 / 缓存 / 加载 / 发射管线**
+      （`csrc/runtime/jit.hpp`、`deep_gemm/__init__.py:122`、`csrc/python_api.cpp`，
+      DeepJIT `third-party/deep_jit` 的 `runtime/{runtime,config}.hpp`、`cache/{disk,memory}.hpp`、
+      `utils/{hash,parser,env}.hpp`、`backend/cuda/{backend,kernel,options,device}.hpp`、
+      `utils/lazy.hpp`）。前 32 篇一直把「JIT」当黑盒：本篇补上「为什么安装时不编译 CUDA、
+      首次调用才现编」，以及缓存键五段构成与跨进程/跨节点复用。**架构无关，H100 真机可跑**。
+      → `docs/33-deepjit-runtime.md`（真实行号核对）：DeepGEMM 接入点
+      `jit.hpp:13-33`（`Config(root, "DG", "cutlass-<ver>", {include}, {"deep_gemm/"})` + 追加两条 nvcc flag；
+      `deep_gemm/__init__.py:122` `_C.init(包目录)`）、`LazyInit`（`lazy.hpp:15-38`）、
+      `register_python_api`（`python_api.hpp:12-20`）。`Runtime`（`runtime.hpp:19-98`）**五段式缓存键**
+      （`:46-53`/`:92-98`：extra_signature + compiler_version + `get_flags()` + post_hook + 源码/include 摘要；
+      源码摘要返回 hex 字符串又被外层再哈希）；两级缓存（mem `memory.hpp:9-22`；disk `<root>/cache/<tag>.<digest>/`
+      `disk.hpp:79-134`，`.committed` 标记、原子 rename 发布 `:42-67`、`:` 多根 `:87-109`）。
+      哈希 `hash.hpp:10-42`（双 state FNV1a + 长度前缀 `:21-24` + splitmix 输出 32 hex）与
+      `parser.hpp:37-120`（只跟踪 `include_prefixes` 的递归 include、循环检测）。
+      CUDA 后端 `backend.hpp:77-168`（nvcc `--cubin`、`cd` 临时目录、`check_no_spills/local_memory` 正则
+      `:120-127`、dump PTX/SASS、写 `meta.json`）、`options.hpp:39-156`（默认 flag、`get_flags`、
+      `update_hash` 只哈希 join(flags) → debug 的 `--generate-line-info` 也换键）、`device.hpp:68-80`（`sm_90a`/`sm_100f`）；
+      加载发射 `kernel.hpp:48-171`（`cuLibraryLoadFromFile`「恰好一个 kernel」断言、`cuLaunchKernelEx` +
+      cluster/PDL/cooperative 属性、默认当前流）。`get_compiled_dim`（`runtime_utils.hpp:31-40`）与
+      `compiled_dims="nk"` 的调用形态（`sm90_fp8_gemm_1d2d.hpp:30-56` 微源码）。
+      **H100 实测** `harness/exp_deepjit.{py,sh,out.txt}`：① 缓存条目 = `kernel.cu`(407B)+`cubin`+`meta.json`+`.committed`，
+      一次 `fp8_gemm_nt` 生成 2 条（`transpose_fp32`+`sm90_fp8_gemm_1d2d`）；② **纯 Python 逐位复刻缓存键**
+      `8fbcaf5d…` `MATCH=True`（递归哈希 **16 个** `deep_gemm/` 头、`nvcc --version` 原文含行尾换行）；
+      ③ 编译 vs 命中：首进程 JIT ~4.98s → 二进程磁盘加载 ~0.20s（**~25×**），单 kernel 载入 0.5–2.3ms；
+      ④ 抓真实 11 个 nvcc flag；⑤ `DG_JIT_DEBUG` 多 dump ptx/sass 且因 `--generate-line-info` **换键**，
+      `sm90_fp8_gemm_1d2d` 168 寄存器/10 barrier/0 spill；⑥ digest 敏感性：`"nk"` 使 m 不显式进模板，
+      但 m 经启发式 block config 仍区分条目，`ignore_compile_dims` 使维度行全 0；⑦ `CHECK_NO_SPILLS` rc=0；
+      ⑧ FNV1a 长度前缀消歧成立。配套博客 `content/posts/mega-moe-33-deepjit-runtime`（索引页新增第 33 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -677,8 +709,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P22 各增量完成（P15-1、P16-1、P17-1、P18-1、P19-1、P20-1、P21-1、P22-1）。**
-  本轮 P22-1：新建 `docs/32-sm90-fp8-gemm.md`
+- 当前进度：**P0~P14 全部完成；P15~P23 各增量完成（P15-1…P22-1、P23-1）。**
+  本轮 P23-1：新建 `docs/33-deepjit-runtime.md`（+`harness/exp_deepjit.{py,sh,out.txt}`）
+  ——补上前 32 篇一直当黑盒的一层：**DeepGEMM 为什么安装时不编译 CUDA、首次调用才现编**。
+  DeepGEMM 通过 `csrc/runtime/jit.hpp:13-33` 接入 DeepJIT（`Config(root,"DG","cutlass-<ver>",
+  {include},{"deep_gemm/"})`，`deep_gemm/__init__.py:122` 在 import 时传包目录）。
+  核心是 `Runtime`（`runtime.hpp:19-98`）的**五段式缓存键**（`extra_signature` + `compiler_version`
+  + `get_flags()` + `post_hook` + 源码/include 摘要）与**内存/磁盘两级缓存**
+  （`<root>/cache/<tag>.<digest>/`，`.committed` 标记 + 原子 rename 发布 + `:` 多根共享）。
+  哈希是**双 state FNV1a**（长度前缀消歧，`hash.hpp:21-24`）；include 递归解析只跟踪
+  `deep_gemm/` 前缀（`parser.hpp:37-120`），这解释了「400B 微源码却哈希 16 个头文件」。
+  调用形态：每个 config 生成「只 include 一个 `deep_gemm/…cuh` + 强制实例化一个模板」的微源码
+  （`sm90_fp8_gemm_1d2d.hpp:30-56`）；`compiled_dims="nk"` 使 m 不是显式编译维度
+  （`runtime_utils.hpp:31-40`）。**H100 真机**：纯 Python **逐位复刻缓存键**（`8fbcaf5d…` MATCH、
+  16 个头、nvcc 原文含行尾）；首进程 JIT ~4.98s → 二进程磁盘加载 ~0.20s（**~25×**）；
+  抓到真实 11 个 nvcc flag；`DG_JIT_DEBUG` 因 `--generate-line-info` **换键**；
+  digest 敏感性 + `CHECK_NO_SPILLS` rc=0；FNV1a 性质逐条验证。行号全部核对过。
+  配套博客 `content/posts/mega-moe-33-deepjit-runtime`（索引页新增第 33 篇）。
+  上一轮 P22-1：新建 `docs/32-sm90-fp8-gemm.md`
   （+`harness/exp_fp8_sm90_gemm.{py,sh,out.txt}`）——补齐第 29 篇（SM90 **BF16** 主 kernel）的另一半：
   DeepGEMM 立身的 **FP8** 在 SM90 上是**两个**主 kernel。一句话结论：**两者算同一数学
   `D=(A·sfa)@(B·sfb)ᵀ`，只差 B 的 block-scale 粒度**——`1D1D` 是 A/B 都 per-token（`gran_n=1`），
@@ -813,10 +861,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P22 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+- **下一步**：P0~P23 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
   P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子、
-  P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel）。
+  P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel、P23-1 DeepJIT 编译/缓存/加载/发射管线）。
   后续若继续（均为增量、非承诺）：
+  ⑪ **JIT 运行时已讲清（P23-1）**：五段式缓存键、两级缓存、原子发布、递归 include 哈希、微源码调用形态、
+  加载/发射（`cuLaunchKernelEx` + cluster/PDL 属性）。可再补 DeepJIT 的 Ascend 后端对照、
+  「cache warmup from history / Python 编译 API」两个 WIP 特性（当前不可用）、或 post-hook 后处理机制。
   ⓪ **SM90 kernel 覆盖已接近完整**：FP8（1D1D/1D2D，P22-1）、BF16（P19-1）、wgrad/dgrad grouped
   （P4-2/P4-3）、MQA logits（P19/P20）、einsum（P8/P11）、prenorm（P7-2）、SF 布局（P15/P16）
   均已系统拆解；可补的 SM90 缺口已很少（如 `sm90_tf32_hc_prenorm_gemm`、`sm90_bmk_bnk_mn` 的更细粒度）。
