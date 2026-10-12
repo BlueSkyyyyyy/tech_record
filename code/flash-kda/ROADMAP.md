@@ -88,7 +88,8 @@
 
 ### P8 小结 / 一页纸
 
-- [ ] **P8-1** `docs/08-summary.md`：公式、结构、误差、性能、反向要点一页纸汇总。
+- [x] **P8-1** `docs/08-summary.md`：公式、结构、误差、性能、反向要点一页纸汇总
+      （含踩坑速查、交付物索引、待验证项；博客 post `flash-kda-08-summary` 并更新 index）。
 
 ## 每轮增量流程（autopilot）
 
@@ -112,7 +113,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0/P1/P2/P3 全部完成，P4 全部完成（前向 kernel vs fp64 golden 两方对拍 + golden/FlashKDA/FLA 三方对拍，多 shape/seed/门控区间）；**P5-1/P5-2/P5-3/P5-4 完成**（反向 adjoint 推导 + 不依赖 autograd 的显式参考实现 + 三方数值核验 + 与 FLA chunked 反向 bf16 对拍 + chunked backward 分块化推导/实现）；**P6-1/P6-2 完成**（FLA Triton 反向 5 kernel 精读 + 记号映射实测 + 目标卡 CUDA 反向设计；并在 H100 上写出最小可运行 Triton **B1 状态伴随 kernel**，与 FLA `dhu`/`src/kda_bwd_ref.py` 三方对拍，见 `docs/06` §5/§6）；**P7-1 完成**（FlashKDA 前向 vs FLA `chunk_kda` 统一口径实测：CUPTI device + wall，扫 T/H/B，见 `docs/07`）；**P7-2 完成**（`ncu` 逐 kernel 剖析 K1/K2 bound：TensorCore 均非瓶颈、放大后都撞 L2 带宽、K1 次瓶颈是 barrier+smem 冲突、K2 被 smem 钉在 2 CTA/SM，见 `docs/07` §5）。
+- 当前进度：**P0–P8 全部完成，专题收尾**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel 完成；P7 前向性能 + ncu bound 剖析完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -199,8 +200,15 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：P8-1**（`docs/08-summary.md`：公式、结构、误差、性能、反向要点一页纸汇总）。
-  P0–P7 全部完成；更完整的 CUTLASS/TMA 版反向 B1/B2/B3 属更大工程，留待有明确需求时再做。
+- **下一步：专题 P0–P8 全部完成**，进入收尾/维护。后续可选（有明确需求时再做）：更完整的
+  CUTLASS/TMA 版反向 B1/B2/B3 工程化；P7-2 遗留的 nsys 流量拆分与 K2 突破 2 CTA/SM 实验。
+  - P8-1：新增 `docs/08-summary.md`（一页纸汇总：一句话总览 / 数学两套形式 / 前向 K1-K2 结构对比表 /
+    数值误差汇总表 / 性能汇总表 / 反向推导-分块-设计要点 / 8 条踩坑速查 / 交付物索引 / 待验证项），
+    数字全部复用 `docs/01`–`07` 的本机实测，未新增实验。新增博客 post `flash-kda-08-summary`
+    并更新 `flash-kda-00-index` 目录（原「8. ncu 剖析反向 kernel（待写）」替换为本篇），hugo 构建无 ERROR。
+    踩坑：新 post 的 `date` 若晚于系统当前时间（本轮 23:03 CST，先写了 23:20）会被 Hugo 当 future
+    页面排除，`relref` 报 `REF_NOT_FOUND`——把 date 调到当前时间之前即修复（buildFuture 默认 false）。
+
   - P7-2：`docs/07` 新增 §5「ncu 剖析：K1/K2 到底 bound 在什么上」+ `harness/probe_ncu.sh`
     （`harness/probe_ncu.out.txt`）+ `harness/ncu_driver.py`，更新博客 post `flash-kda-07-perf` 标题。
     ncu 2026.1.1、每 kernel 单独 profile（`-k regex -c 1 --launch-skip 3`，replay 12–20 passes，
