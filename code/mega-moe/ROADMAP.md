@@ -89,7 +89,16 @@
       combine buffer、combine top-k fp32 归约。H100 数值实验 `harness/exp_ue8m0_sf.py`（+`.out.txt`）：
       位运算 SF 25009 样本 0 不符、scale×inv 精确 1、幂次 scale/理想 ≤1.9977 且 0 溢出、bf16-round
       SwiGLU 相对误差 4.5e-3。配套博客 `content/posts/mega-moe-07-mma-epilogue`。
-- [ ] **P3-4** dispatch / combine 段与 NVLink 读写；locality domain 的作用。
+- [x] **P3-4** dispatch / combine 段与 NVLink 读写；locality domain 的作用。
+      → `docs/11-mega-moe-dispatch-combine.md`（真实行号核对）：dispatch（`:342-689`）分布式前缀和
+      计数 + 写远端源索引 + NVLink barrier + 无锁 round-robin 认领（`:480-528`）+ 分 chunk TMA
+      远端 pull（`:552-576`）与远端 weight/SF（`:579-599`）+ 清 workspace；combine L2 直写远端
+      （`:1346-1351`）+ grid-index readiness 水位线（`:1405-1441`）+ fp32 chunk 归约（`:1447-1519`）；
+      `SymBuffer::map` / TMA / sys 原子 / rel-acq / `grid_sync` / `nvlink_barrier` 原语表；
+      locality domain 分域调度（`scheduler:344-370`）与片上 pointer-chase 探针标定
+      （`csrc/apis/locality_domain.hpp`）。H100 实测 `src/nvlink_access.cu` +
+      `harness/exp_nvlink_access.{sh,out.txt}`：远端裸延迟 ~991ns ≈ 本地 ~350ns 的 **2.83×**、
+      远端读/写带宽 ~368 GB/s ≈ 本地 ~2.85 TB/s 的 **1/8**，同 socket/跨 socket 无差异（NV18 平面）。
 
 ### P4 反向实现解析（`docs/04-moe-backward.md`）
 
@@ -131,7 +140,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0 全部完成（P0-1/2/3/4）；P1-1、P1-2 完成（P1 全部完成）；P2 全部完成；P3-1、P3-2、P3-3 完成。**
+- 当前进度：**P0 全部完成；P1 全部完成；P2 全部完成；P3 全部完成（P3-1/2/3/4）。**
+  P3-4：新建 `docs/11-mega-moe-dispatch-combine.md`——通信两段逐段精读 + H100 访存实测。
+  **dispatch**：分布式前缀和一次原子加（高位计数、低位负载，`kernel:374-381`）→ `grid_sync` 后
+  SM0 push `peer_grid_idx`（`:399-404`）→ `nvlink_barrier`（`:422-428`）→ 无锁 round-robin
+  min-peeling 认领 token（`:480-528`）→ 环空等待（`:544-550`）→ 分 chunk `tma_load_1d` 远端 pull
+  token（`:552-576`）+ 远端 topk weight（`:579-581`）+ 远端 SF 逐块搬并 UTCCP 转置写位（`:584-599`）
+  → 写元数据/`red_add_rel` 通知（`:602-618`）→ 清 workspace 并与 combine 重叠（`:621-689`）。
+  **combine**：L2 epilogue 读回 `cached_src_metadata`（`:1281-1290`）后经 `sym_buffer.map` 直写
+  远端 combine buffer（`:1346-1351`）；readiness 用「每 launch 唯一 grid index」当水位线
+  （peer push `:403` ↔ `st_rel_sys`:1419 ↔ `ld_acq_sys` 自旋 `:1436-1441`）；归约双缓冲 TMA 拉
+  top-k、fp32 累加（`:1477-1490`）、BF16 写 `y`（`:1512-1518`）。**原语表**：`SymBuffer::map`
+  （`layout/sym_buffer.cuh:33-40`）、`grid_sync`/`nvlink_barrier`（`comm/barrier.cuh:33-92`，加减式
+  相位信号免复位）。**locality domain**：`kNumDeviceLocalityDomains=2`（`types.cuh:54`），
+  调度器按域分任务计数 + 少量任务不偷域（`scheduler:344-370`、`kNumMinStealWaves=2`），域标签由
+  片上 pointer-chase 延迟探针标定（`csrc/apis/locality_domain.hpp:74-142`）。H100 实测
+  `src/nvlink_access.cu` + `harness/exp_nvlink_access.{sh,out.txt}`：远端裸延迟 ~991ns ≈ 本地
+  ~350ns 的 **2.83×**，远端读/写带宽 ~368 GB/s ≈ 本地 ~2.85 TB/s 的 **1/8**，同/跨 socket 相同。
   P3-3：新建 `docs/10-mega-moe-mma-epilogue.md`——计算本体与 epilogue 逐段精读。**MMA**：只有
   leader CTA 的一个 warp 发 UMMA（`kernel:819-938`）；`A/B 互换 + 2-CTA` 使 `UMMA_M=256`、
   `UMMA_N=BLOCK_M`（token 维），按 `valid_m` 动态缩 N（`update_instr_desc_with_umma_n`，
@@ -193,11 +218,10 @@
   （`smxx_layout.hpp:133`、kernel `:774`/`:788`）；L2 权重不交错只转 SF。实验
   `harness/exp_weight_transform.py`（+`.out.txt`，H100）：行号映射/SwiGLU 等价/UTCCP 映射全部 0 误差，
   与 deep_gemm 内部实现逐元素一致。**P2 全部完成。**
-- **下一步：P3-4** 精读 dispatch / combine 段与 NVLink 读写、locality domain 的作用
-  （`kernel:341-818` 的 dispatch warp、`workspace`/ring buffer 的 `ld/st`、`sym_buffer.map` 的远端
-  访问、`sched::MegaMoEScheduler` 的 device locality domain 选择）。随后进入 **P4 反向**：
-  P4-1（反向数学）/P4-2（`k_grouped_fp8_gemm_tn_contiguous` wgrad API）/P4-3（dgrad `m_grouped_*`）/
-  P4-4（H100 上用 SM90 `nt` wgrad 做 grouped GEMM / backward 数值对拍 vs PyTorch）。
+- **下一步：进入 P4 反向**：P4-1（MoE 反向数学：linear2/linear1 的 dgrad/wgrad、SwiGLU 反向、
+  router/topk 反向）/ P4-2（`k_grouped_fp8_gemm_tn_contiguous` wgrad API 精读）/
+  P4-3（dgrad `m_grouped_*` 与 contiguous/masked 布局在训练中的用法）/ P4-4（H100 上用 SM90
+  `nt` wgrad 做 grouped GEMM / backward 数值对拍 vs PyTorch，出真实数字）。
   也可并行推进 P5-1（Mega Gate）/P5-2（Mega mHC）。
 
 ## 阻塞
