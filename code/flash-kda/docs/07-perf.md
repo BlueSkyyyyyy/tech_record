@@ -1626,3 +1626,107 @@ kernel-only（CUPTI）`us/call`：
 > 说明：本节用 ncu 单次 replay 的 `Duration`，与 §18 的 CUPTI 均值同量级（small ours 111.6 vs 106.8、
 > FLA 15.0 vs 12.9；big ours 587.5 vs 574.1、FLA 120.0 vs 119.9），差异来自 replay 与首次冷启动。
 > 仍然：本原型是**研究用最小实现**，绝对数字不代表目标卡天花板；可下的是**定性/归因**结论。
+
+## 20. 隔离 CUDA B1 的 bank-conflict 项：smem padding 受控实验（P7-17）
+
+§19 用 `ncu` 在**手写 CUDA B1**（`harness/b1_cuda_probe.cu`）上量到 **76% 的 shared-load wavefront
+是 bank-conflict 重放**（FLA `dhu` 用 `ldmatrix` 只有 0.8%），§19.5 据此把「换掉 wmma-from-smem
+（ldmatrix/TMA 整块 + 提 mma 密度，消 bank conflict）」列为**量级项**、目标卡 CUDA B1 的第一优先级。
+本节用**最便宜的受控实验**检验「bank conflict 到底值多少」——不改内核结构，只把 smem 的行 stride
+**各加 8 个 bf16（16 B）**（编译宏 `B1_PAD`），让 16×16 操作数 tile 的每一行落在不同 bank 上。
+
+### 20.1 为什么 padding 就能消冲突
+
+原版 wmma 从 smem 取操作数，bf16 行 stride = `KD=128` 元素 = **256 B = 64 word ≡ 0 (mod 32)**，
+所以一个 16 行的 tile **每行都从同一个 bank 起步**——`ldmatrix`/`LDS` 一笔最多服务一个 bank，16 行
+全撞 ⇒ 重放。每个 warp 自己的 B 操作数（`Sb`/`du`）行 stride `BW=16` 元素 = 32 B ≡ 0 (mod 32) 同病。
+把 stride 分别改成 `KD+8=136`（272 B，每行移 4 bank）与 `BW+8=24`（48 B，每行移 12 bank），
+16 行覆盖 16×4=64 个 bank 槽 → 落满 32 个 bank、零冲突。这是 `ldmatrix` 常规 swizzle 的**退化版**
+（不改地址的 XOR、只加常量偏移），代价是 **smem 变大**。
+
+实现上把 `Stage`/`Shared` 里所有操作数数组的行 stride 换成 `KDS/BWS/BVSCTA`，`wmma::load_matrix_sync`
+的 `ldm` 参数同步改（`KD→KDS`、`BW→BWS`、`BV→BVSCTA`）；`k/q/w` 的 cp.async 落点、`duf/sacc` 的
+`store_matrix_sync`、以及 fp32 状态 `S` 的标量循环全部改成 `stride=BWS` 的二维索引。**数学一字未动**。
+
+### 20.2 Part A：padding 必须数值无感
+
+`harness/check_bwd_b1_pad.py`（输出 `harness/check_bwd_b1_pad.out.txt`）同源编译两次
+（`-DB1_PAD` 开/关），与 FLA `dhu` 同操作数比。三组 shape × BT=32/64（含非整除 T=250）：
+
+| 比较 | `dh` | `dh0` | `dv2` |
+|---|---|---|---|
+| pad vs **FLA `dhu`** | max_abs/max_rel = **0** | **0** | **0** |
+| pad vs nopad | **0** | **0** | **0** |
+
+即 padding **逐位相同**（两个 build 之间、以及与 FLA 之间），证明它只改 smem 地址、不改算术
+（与 §18 的「裸 wmma 与 FLA `dhu` 逐位相同」一致）。
+
+### 20.3 Part B：kernel-only 计时（CUPTI 均值）
+
+| shape | BT | nopad µs | pad µs | pad/nopad | FLA `dhu` µs | xFLA nopad → pad |
+|---|---|---|---|---|---|---|
+| B1 T512 H4 | 16 | 214.4 | 193.2 | **0.90×** | n/a | — |
+| B1 T512 H4 | 32 | 144.5 | 123.6 | **0.86×** | 20.6 | 7.03 → 6.01 |
+| B1 T512 H4 | 64 | 105.0 | 84.5 | **0.80×** | 12.9 | 8.16 → 6.56 |
+| B2 T1024 H8 | 32 | 301.3 | 259.3 | **0.86×** | 37.1 | 8.12 → 6.99 |
+| B2 T1024 H8 | 64 | 212.2 | 171.4 | **0.81×** | 22.8 | 9.32 → 7.52 |
+| B8 T2048 H8 | 32 | 719.9 | 551.9 | **0.77×** | 169.0 | 4.26 → 3.27 |
+| B8 T2048 H8 | 64 | 578.8 | 701.8 | **1.21×** | 118.5 | 4.88 → **5.92（变慢）** |
+
+除最后一格外，pad 一律快 **10–23%**。**最后一格是 smem 变大的副作用**：BT=64 的 padding 把
+`Shared` 从 111.1 KB 抬到 143.6 KB，`2×143.6=287 KB > 233 KB` ⇒ 占用率从 **2 CTA/SM 掉到 1**，
+冲突的收益被占用率损失反超（且这只在大 shape、grid 填满时暴露）。
+
+### 20.4 Part C：smem 足迹
+
+| BT | ns=1 | ns=2 | ns=3 |
+|---|---|---|---|
+| 16 | 58880 → 82944 | 73728 → 99072 | 88576 → 115200 |
+| 32 | 76288 → 103168 | 105472 → 134912 | 134656 → 166656 |
+| 64 | 111104 → **143616** | 168960 → 206592 | 226816 → 269568 |
+
+pad 一律 +29%（`KDS/KD=+6.25%`，`BWS/BW=+50%`）；BT=64/NS=1 正好跨过 2 CTA/SM 的 116.7 KB 门槛。
+
+### 20.5 Part D：`ncu` 复核——冲突确实被消掉，但 `wait` 纹丝不动
+
+`harness/probe_b1_cuda_pad_ncu.sh`（输出 `harness/probe_b1_cuda_pad_ncu.out.txt`）同场配对
+nopad/pad。bank-conflict 占比与**新的** stall 组成：
+
+| 配置 | bank-conflict / ld-wavefronts | L1/TEX% | DRAM% | `wait` | `short_sb` | `long_sb` | tensor% | theo/ach occ | Duration µs |
+|---|---|---|---|---|---|---|---|---|---|
+| BT64 T512H4 nopad | 827392/1083392 = **76.4%** | 43.4 | 0.72 | 1.79 | 0.70 | 0.50 | 2.31 | 6.25/3.12 | 110.1 |
+| BT64 T512H4 **pad** | 59392/315392 = **18.8%** | **23.7** | 0.89 | 1.77 | 0.64 | 0.24 | 2.85 | 3.12/3.12 | **89.5** |
+| BT64 B8T2048H8 nopad | 53115545/69401241 = **76.5%** | 65.0 | 13.4 | 1.82 | 1.37 | 0.64 | 3.46 | 6.25/6.08 | 595.5 |
+| BT64 B8T2048H8 **pad** | 3702784/19988480 = **18.5%** | **23.0** | 10.9 | 1.81 | 0.66 | 0.39 | 2.81 | 3.12/3.11 | 722.8 |
+| BT32 B2T1024H8 nopad | 6684672/9314304 = **71.8%** | 36.2 | 2.89 | 1.73 | 0.88 | 1.10 | 1.69 | 9.38/3.13 | 304.4 |
+| BT32 B2T1024H8 **pad** | 860160/3489792 = **24.6%** | 22.4 | 3.34 | 1.60 | 1.03 | 0.39 | 1.96 | 6.25/3.13 | 262.1 |
+
+三件事：
+
+1. **冲突确实被消掉**：76% → 19–25%（残留来自 fp32 状态的标量 smem 访问与 `e` 数组，非 mma 操作数），
+   L1/TEX 吞吐从 43–65% 掉到 22–24%。注意 `wavefronts_mem_shared_op_ld` **总量也从 1.08M→315K、
+   69.4M→20.0M**——冲突重放本就计入 wavefront 总数，去掉重放后只剩 ~260K 底数（小 shape），
+   与「base≈256K」吻合，即 **3.2× 的 shared-load 量确实是纯重放**。
+2. **但 `wait` 几乎不动**（1.79→1.77、1.82→1.81、1.73→1.60）：`wait` 是**等 mma 的固定流水延迟**，
+   与 smem 取数是否冲突无关。小 shape 的 pad 提速（110→89.5）来自 L1/TEX 压力下降（43%→24%）、
+   而非 `wait`；大 shape 的 pad **变慢**则是占用率 2→1。
+3. **占用率/并行度仍是天花板**：`Eligible Warps Per Scheduler` 全程 0.15–0.26、`No Eligible` 74–85%、
+   tensor 密度 1.7–2.9%（FLA 14%）。每 CTA 只有 2 warp、每 warp 一条 mma 依赖链，即使冲突清零，
+   `wait`+`short_sb` 仍主导。
+
+### 20.6 结论：bank conflict 是 ~1.2× 项，不是量级项（修正 §19.5）
+
+用 padding 把 bank-conflict 从 76% 打到 ~19%，**端到端只快 10–23%**（且大 shape BT=64 因 smem 膨胀
+反而慢 21%）。这与 §19.5 把「消 76% bank conflict」列为**量级项**的说法**不符**——真正的量级差
+（对 FLA 4.9–8×）来自**并行度/mma 密度**（tensor 2.3% vs 14%、每 scheduler 0.2 个 eligible warp），
+bank conflict 只是其中一个 ~1.2× 的分项。修正后的目标卡 CUDA B1 优先级：
+
+1. **先补并行度**：把「每 CTA 2 warp、每 warp 一条 mma 链」做到 K2 形状（多 warp / warp-specialized、
+   每 chunk 更高的 mma 密度）——这是**量级项**，§18.4 早已指出的方向；
+2. **bank conflict 用零成本的 swizzle 消**（XOR 地址 swizzle 或 `ldmatrix`），**不要用 padding**——
+   本节证明 padding 的 smem 代价（+29%）会在 BT=64 把占用率打掉一级、把收益吃回去；
+3. `cp.async`/TMA 预取仍只是「不退化」保底（§19.4）。
+
+> 说明：本节仍是**研究用最小 CUDA 原型**的受控消融，`xFLA` 绝对值不代表目标卡天花板；可下的结论是
+> 「bank conflict 的量级」与「residual 在 mma 延迟 + 并行度」，而非具体加速比。ncu 的 `Duration`
+> （110.1/89.5 等）与 CUPTI 均值（105.0/84.5）同量级，差异来自 replay 与冷启动（同 §19 说明）。

@@ -198,7 +198,11 @@ TMA 输入流水」**，拆累加链降级为不推荐。**P7-15**（`docs/07` �
 占用率**（与 FLA 同为 6.25% theo / 6.1% achieved 却慢 4.9×），而是 **`wait`（mma 固定延迟，1.80 拍≈36% 发射
 间隔）+ `short_sb`（smem 操作数取数）+ 76% shared-load bank conflict**（FLA ldmatrix 仅 0.8%）。故目标卡
 CUDA B1 的第一优先级是**换掉 wmma-from-smem（ldmatrix/TMA 整块、提 mma 密度）**，`cp.async`/TMA 预取只是
-「不退化」保底。
+「不退化」保底。**P7-17**（`docs/07` §20）再用 smem padding（行 stride +8 bf16）的受控实验**修正了这条排序**：
+把 bank conflict 从 76% 打到 19%（数值逐位不变）端到端**只快 10–23%**，大 shape BT=64 因 smem +29% 掉占用率
+反慢 1.21×；ncu 显示 **`wait` 纹丝不动**——故 bank conflict 是 **~1.2× 分项、不是量级项**，量级差来自**并行度/
+mma 密度**。目标卡 CUDA B1 真实优先级＝**(1) 补并行度/warp-specialization、(2) 零成本 XOR swizzle/`ldmatrix`
+消冲突（勿用 padding）、(3) 预取保底**。
 
 **反向性能（`docs/07` §10 P7-7 + §11 P7-8 更正）**：把上面那条 workspace 驱动反向链和
 `torch.autograd` 穿 `chunk_kda` 在统一口径（`wall`+CUPTI `dev`）下比，**只计反向**。四组 shape 实测

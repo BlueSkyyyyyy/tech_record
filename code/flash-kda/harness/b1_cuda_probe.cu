@@ -51,6 +51,20 @@ constexpr int BV = B1_BV;    // columns handled per CTA
 constexpr int NW = B1_NW;    // warps per CTA (blockDim = NW*32)
 constexpr int BW = BV / NW;  // columns per warp == wmma n (must be 16)
 
+// P7-17: smem pad to kill the shared-load bank conflicts measured by ncu in §19.4
+// (76% of shared-load wavefronts were replays).  With no pad the row stride of the bf16
+// operands is KD=128 elems = 256 B == 64 words == 0 (mod 32) -> every row of a 16x16 tile
+// hits the same banks; same story for the per-warp B operand stride BW=16 elems = 32 B.
+// B1_PAD=8 elems (16 B) shifts consecutive rows by 4 (K) / 12 (V) banks -> conflict-free.
+#ifdef B1_PAD
+constexpr int PAD = 8;
+#else
+constexpr int PAD = 0;
+#endif
+constexpr int KDS    = KD + PAD;   // padded row stride for k/q/w (bf16 elems)
+constexpr int BWS    = BW + PAD;   // padded row stride for per-warp V operands
+constexpr int BVSCTA = BV + PAD;   // padded row stride for per-CTA do/dv
+
 __device__ __forceinline__ float f2f(bf16 x) { return __bfloat162float(x); }
 __device__ __forceinline__ bf16 f2b(float x) { return __float2bfloat16(x); }
 
@@ -65,22 +79,22 @@ __device__ __forceinline__ void load16(void* dst, const void* src) {
 
 template <int BT>
 struct Stage {
-    bf16 k[BT][KD];
-    bf16 q[BT][KD];
-    bf16 w[BT][KD];
-    bf16 dO[BT][BV];   // do
-    bf16 dV[BT][BV];   // dv
+    bf16 k[BT][KDS];
+    bf16 q[BT][KDS];
+    bf16 w[BT][KDS];
+    bf16 dO[BT][BVSCTA];   // do
+    bf16 dV[BT][BVSCTA];   // dv
     float e[KD];
 };
 
 template <int BT, int NSTAGE>
 struct alignas(128) Shared {
     Stage<BT> st[NSTAGE];
-    float    dh[NW][KD][BW];     // running state S (fp32)
-    bf16     sdh[NW][KD][BW];    // rounded S, mma B operand of op1
-    bf16     sdu[NW][BT][BW];    // du (mma B operand of op3 / dv2 source)
-    float    sduf[NW][BT][BW];   // du fp32 staging
-    float    sacc[NW][KD][BW];   // (q^T do * scale - w^T du) staging
+    float    dh[NW][KD][BWS];     // running state S (fp32)
+    bf16     sdh[NW][KDS][BWS];   // rounded S, mma B operand of op1
+    bf16     sdu[NW][BT][BWS];    // du (mma B operand of op3 / dv2 source)
+    float    sduf[NW][BT][BWS];   // du fp32 staging
+    float    sacc[NW][KD][BWS];   // (q^T do * scale - w^T du) staging
 };
 
 // --------------------------------------------------------------------------- prefetch
@@ -151,15 +165,16 @@ b1_dhu_cuda(const bf16* __restrict__ q, const bf16* __restrict__ k,
 
     const int vw = v0 + warp * BW;   // this warp's V column base
 
-    float (*S)[BW]   = sh->dh[warp];
-    bf16  (*Sb)[BW]  = sh->sdh[warp];
-    bf16  (*du)[BW]  = sh->sdu[warp];
-    float (*duf)[BW] = sh->sduf[warp];
-    float (*acc)[BW] = sh->sacc[warp];
+    float (*S)[BWS]   = sh->dh[warp];
+    bf16  (*Sb)[BWS]  = sh->sdh[warp];
+    bf16  (*du)[BWS]  = sh->sdu[warp];
+    float (*duf)[BWS] = sh->sduf[warp];
+    float (*acc)[BWS] = sh->sacc[warp];
 
     // zero the persistent state
     for (int idx = wl; idx < KD * BW; idx += 32) {
-        ((float*)S)[idx] = 0.f;
+        int kk = idx / BW, jj = idx % BW;
+        S[kk][jj] = 0.f;
     }
     __syncthreads();
 
@@ -199,7 +214,7 @@ b1_dhu_cuda(const bf16* __restrict__ q, const bf16* __restrict__ k,
             const int64_t base = ((int64_t)(n * NT + c) * H + h) * KD * VD;
             for (int idx = wl; idx < KD * BW; idx += 32) {
                 int kk = idx / BW, jj = idx % BW;
-                float v = ((float*)S)[idx];
+                float v = S[kk][jj];
                 Sb[kk][jj] = f2b(v);
                 dh_g[base + (int64_t)kk * VD + vw + jj] = f2b(v);
             }
@@ -212,12 +227,12 @@ b1_dhu_cuda(const bf16* __restrict__ q, const bf16* __restrict__ k,
             for (int m = 0; m < MT1; ++m) wmma::fill_fragment(cdu[m], 0.f);
             for (int m = 0; m < MT1; ++m)
                 for (int kk = 0; kk < KT1; ++kk) {
-                    FA a; wmma::load_matrix_sync(a, &st->k[m * 16][kk * 16], KD);
-                    FB b; wmma::load_matrix_sync(b, &Sb[kk * 16][0], BW);
+                    FA a; wmma::load_matrix_sync(a, &st->k[m * 16][kk * 16], KDS);
+                    FB b; wmma::load_matrix_sync(b, &Sb[kk * 16][0], BWS);
                     wmma::mma_sync(cdu[m], a, b, cdu[m]);
                 }
             for (int m = 0; m < MT1; ++m)
-                wmma::store_matrix_sync(&duf[m * 16][0], cdu[m], BW, wmma::mem_row_major);
+                wmma::store_matrix_sync(&duf[m * 16][0], cdu[m], BWS, wmma::mem_row_major);
         }
         __syncthreads();
 
@@ -242,25 +257,25 @@ b1_dhu_cuda(const bf16* __restrict__ q, const bf16* __restrict__ k,
                 wmma::fill_fragment(cq, 0.f);
                 wmma::fill_fragment(cw, 0.f);
                 for (int kk = 0; kk < KT2; ++kk) {
-                    FAT aq; wmma::load_matrix_sync(aq, &st->q[kk * 16][m * 16], KD);
-                    FB  bd; wmma::load_matrix_sync(bd, &st->dO[kk * 16][warp * BW], BV);
+                    FAT aq; wmma::load_matrix_sync(aq, &st->q[kk * 16][m * 16], KDS);
+                    FB  bd; wmma::load_matrix_sync(bd, &st->dO[kk * 16][warp * BW], BVSCTA);
                     wmma::mma_sync(cq, aq, bd, cq);
 
-                    FAT aw; wmma::load_matrix_sync(aw, &st->w[kk * 16][m * 16], KD);
-                    FB  bu; wmma::load_matrix_sync(bu, &du[kk * 16][0], BW);
+                    FAT aw; wmma::load_matrix_sync(aw, &st->w[kk * 16][m * 16], KDS);
+                    FB  bu; wmma::load_matrix_sync(bu, &du[kk * 16][0], BWS);
                     wmma::mma_sync(cw, aw, bu, cw);
                 }
                 for (int j = 0; j < FC::num_elements; ++j)
                     cq.x[j] = cq.x[j] * scale - cw.x[j];
-                wmma::store_matrix_sync(&acc[m * 16][0], cq, BW, wmma::mem_row_major);
+                wmma::store_matrix_sync(&acc[m * 16][0], cq, BWS, wmma::mem_row_major);
             }
         }
         __syncthreads();
 
         // ---- step 3: S = S * e + acc ----
         for (int idx = wl; idx < KD * BW; idx += 32) {
-            int kk = idx / BW;
-            ((float*)S)[idx] = ((float*)S)[idx] * st->e[kk] + ((float*)acc)[idx];
+            int kk = idx / BW, jj = idx % BW;
+            S[kk][jj] = S[kk][jj] * st->e[kk] + acc[kk][jj];
         }
         __syncthreads();
     }
@@ -270,7 +285,7 @@ b1_dhu_cuda(const bf16* __restrict__ q, const bf16* __restrict__ k,
         const int64_t base = ((int64_t)nh) * KD * VD;
         for (int idx = wl; idx < KD * BW; idx += 32) {
             int kk = idx / BW, jj = idx % BW;
-            dh0_g[base + (int64_t)kk * VD + vw + jj] = ((float*)S)[idx];
+            dh0_g[base + (int64_t)kk * VD + vw + jj] = S[kk][jj];
         }
     }
 }

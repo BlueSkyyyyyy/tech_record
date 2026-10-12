@@ -237,6 +237,20 @@
    叠加 FLA tensor 密度 **14.1% vs ours 2.28%**。**设计输入修正**：目标卡 CUDA B1 第一优先级＝**换掉
    wmma-from-smem（ldmatrix/TMA 整块 + 提 mma 密度，消 bank conflict）**，`cp.async`/TMA 预取只是「不退化」
    保底（与 §17 的 Triton 结论相反，因裸 wmma 的 global 等待本就被同步+小 tile 掩盖）。见 `docs/07` §19。
+- [x] **P7-17** 用**最便宜的受控实验**隔离 CUDA B1 的 bank-conflict 项，检验 §19.5「消 76% bank
+  conflict 是量级项」的说法：只把 smem 行 stride 各 +8 bf16（宏 `B1_PAD`，退化版 swizzle），
+  同源编译两次。新增 `harness/check_bwd_b1_pad.py`（`harness/check_bwd_b1_pad.out.txt`）+
+  `harness/probe_b1_cuda_pad_ncu.sh`（`harness/probe_b1_cuda_pad_ncu.out.txt`）+ `docs/07` §20。
+  **Part A**：pad 与 nopad、与 FLA `dhu` **逐位相同（`dh/dh0/dv2` max_abs=0）**。**Part B/C**：
+  pad 一律快 **10–23%**（BT=64 小 shape 105.0→84.5）且 smem **+29%**，但 **B8T2048H8 BT=64 pad 反慢
+  1.21×**——143.6 KB > 116.7 KB 门槛把占用率从 2 打到 1 CTA/SM。**Part D（ncu）**：bank-conflict
+  从 **76%→19–25%**（残留=fp32 状态标量访问/`e`）、L1/TEX 43–65%→22–24%、shared-load wavefront
+  总量 1.08M→315K（证明 ~3.2× 是纯重放），**但 `wait` 纹丝不动（1.79→1.77 等）**——`wait` 是 mma 固定
+  流水延迟、与 smem 冲突无关；`Eligible Warps/Scheduler` 仍 0.15–0.26。**结论（修正 §19.5）**：
+  bank conflict 是 **~1.2× 分项、不是量级项**；量级差（xFLA 4.9–8×）来自**并行度/mma 密度**（tensor
+  2.3% vs FLA 14%）。目标卡 CUDA B1 优先级改为：**(1) 先补并行度/warp-specialization（量级项）、
+  (2) bank conflict 用零成本 XOR swizzle/`ldmatrix` 而非 padding（padding 的 +29% smem 会反噬占用率）、
+  (3) 预取保底**。
 
 ### P8 小结 / 一页纸
 
@@ -268,8 +282,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16 补测**。
-  - P7-16（本轮）：`ncu` 剖析 P7-15 的手写 CUDA B1，把 §18.4 归因量化并**修正**：新增
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16/P7-17 补测**。
+  - P7-17（本轮）：用最便宜的受控实验（smem 行 stride 各 +8 bf16，宏 `B1_PAD`，退化版 swizzle）隔离
+    CUDA B1 的 bank-conflict 项，**修正 §19.5**。新增 `harness/check_bwd_b1_pad.py`
+    （`harness/check_bwd_b1_pad.out.txt`）+ `harness/probe_b1_cuda_pad_ncu.sh`
+    （`harness/probe_b1_cuda_pad_ncu.out.txt`）+ `docs/07` §20。**Part A**：pad 与 nopad、与 FLA `dhu`
+    **逐位相同**（max_abs=0）。**Part B**：pad 快 10–23%（BT64 小 shape CUPTI 105.0→84.5），**除
+    B8T2048H8 BT=64 反慢 1.21×**（smem 111→143.6 KB，2→1 CTA/SM）。**Part D（ncu）**：bank-conflict
+    76%→19–25%、L1/TEX 65%→23%、shared-load wavefront 1.08M→315K，**但 `wait` 不变（1.79→1.77）**。
+    **结论**：bank conflict 是 ~1.2× 分项、非量级项；量级差来自并行度/mma 密度。目标卡 CUDA B1 优先级 =
+    (1) 补并行度/warp-specialization、(2) 零成本 XOR swizzle/`ldmatrix` 消冲突（不用 padding）、(3) 预取保底。
+  - P7-16：`ncu` 剖析 P7-15 的手写 CUDA B1，把 §18.4 归因量化并**修正**：新增
     `harness/ncu_b1_cuda_driver.py`（参数化 `--which/--bt/--ns/--no-build`）+ `harness/probe_b1_cuda_ncu.sh`
     （`harness/probe_b1_cuda_ncu.out.txt`）+ `docs/07` §19。7 配置（ours BT64 NS=1/3、`-DB1_SYNC`、BT16、
     大 shape + FLA `dhu` 对照）。**结论**：ours 的 `cp.async` 已把 `long_sb` 压到 0.66/0.57（换取同步写 = 3.96、
@@ -520,7 +543,7 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16/P7-17 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
   - **下一步工程化＝把 B1 做成目标卡 CUDA**（唯一剩下的实际工作）。P7-13（`docs/07` §16）已用 `ncu` 把它的
     硬件动机量化清楚：B1 是**延迟/并行度受限**（非 tensor/带宽/占用率），与 FLA `dhu` 的 2.14×（同 BT=64）
     差距＝**没有 loads 流水（long_scoreboard 47–55%）+ 单一 `[128,BV]` 依赖链**，FLA 用「K 拆两条 64 链 +
@@ -539,7 +562,11 @@
     （`cp.async` 已把 `long_sb` 压到 0.66；换同步写则 3.96、慢 64%）、**不是**同步（`barrier` 仅 0.02）、
     **不是**占用率（与 FLA 同为 6.25% theo 却慢 4.9×）。故目标卡 CUDA B1 的**第一优先级＝换掉
     wmma-from-smem（ldmatrix/TMA 整块 + 提 mma 密度，消 bank conflict）**，`cp.async`/TMA 预取只是「不退化」
-    保底；「拆链」仍不作为独立手段。
+    保底；「拆链」仍不作为独立手段。**P7-17（`docs/07` §20）用 smem padding 受控实验修正了上条的排序**：
+    把 bank conflict 从 76% 打到 19%（数值逐位不变）端到端**只快 10–23%**（大 shape BT=64 因 smem +29%
+    掉占用率反慢 1.21×），且 ncu 显示 **`wait` 纹丝不动**——bank conflict 是 ~1.2× 分项、**不是量级项**；
+    量级差来自**并行度/mma 密度**。故目标卡 CUDA B1 真实第一优先级＝**(1) 补并行度/warp-specialization
+    （量级项）、(2) 用零成本 XOR swizzle/`ldmatrix` 消冲突（勿用 padding）、(3) 预取保底**。
   §5.2 的 **B0/B1/B2/B3/dAv 五段已全部做成最小 kernel，P6-7 已把四段组装成端到端反向核到
   tf32 底噪，P6-8 又把整条反向直接架在 FlashKDA K1 workspace 上端到端核到 bf16 底噪**；
   **P7-7 又把它和 FLA 反向在同一口径下比（wall/dev 0.40–0.80× 反超，因复用 workspace 省掉

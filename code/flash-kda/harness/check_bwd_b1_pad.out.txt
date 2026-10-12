@@ -1,0 +1,94 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared ~/proj/tech_record/code/flash-kda/harness/b1_cuda_probe.cu -o /tmp/b1_cuda_nopad.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB1_PAD ~/proj/tech_record/code/flash-kda/harness/b1_cuda_probe.cu -o /tmp/b1_cuda_pad.so
+
+====================================================================================
+Part A: padding must be numerically inert (both builds vs FLA dhu)
+====================================================================================
+  B=1 T=512 H=4 BT=32
+  dh  pad  vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.766e-02
+  dh0  pad  vs FLA               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=8.920e-02
+  dv2  pad  vs FLA               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.118e-01
+  dh  pad vs nopad               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.766e-02
+  dv2 pad vs nopad               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.118e-01
+  B=1 T=512 H=4 BT=64
+  dh  pad  vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.766e-02
+  dh0  pad  vs FLA               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=8.921e-02
+  dv2  pad  vs FLA               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.118e-01
+  dh  pad vs nopad               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.766e-02
+  dv2 pad vs nopad               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.118e-01
+  B=2 T=1024 H=8 BT=32
+  dh  pad  vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.138e-01
+  dh0  pad  vs FLA               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.501e-02
+  dv2  pad  vs FLA               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.084e-01
+  dh  pad vs nopad               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.138e-01
+  dv2 pad vs nopad               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.084e-01
+  B=2 T=1024 H=8 BT=64
+  dh  pad  vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.138e-01
+  dh0  pad  vs FLA               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.501e-02
+  dv2  pad  vs FLA               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.079e-01
+  dh  pad vs nopad               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.138e-01
+  dv2 pad vs nopad               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.079e-01
+  B=1 T=250 H=3 BT=32
+  dh  pad  vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.961e-02
+  dh0  pad  vs FLA               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.026e-02
+  dv2  pad  vs FLA               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.221e-01
+  dh  pad vs nopad               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.961e-02
+  dv2 pad vs nopad               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.221e-01
+  B=1 T=250 H=3 BT=64
+  dh  pad  vs FLA                max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.668e-02
+  dh0  pad  vs FLA               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.027e-02
+  dv2  pad  vs FLA               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.226e-01
+  dh  pad vs nopad               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.668e-02
+  dv2 pad vs nopad               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.226e-01
+
+====================================================================================
+Part C: smem footprint (bytes) per (BT, NSTAGE): nopad vs pad
+====================================================================================
+  BT= 16   ns=1:  58880-> 82944   ns=2:  73728-> 99072   ns=3:  88576->115200
+  BT= 32   ns=1:  76288->103168   ns=2: 105472->134912   ns=3: 134656->166656
+  BT= 64   ns=1: 111104->143616   ns=2: 168960->206592   ns=3: 226816->269568
+
+====================================================================================
+Part B: kernel-only CUPTI us/call — nopad vs pad vs FLA dhu
+====================================================================================
+  B1 T512 H4  BT=16   FLA dhu =    n/a  
+      nopad     214.4us   xFLA=  n/a
+      pad       193.2us   xFLA=  n/a
+      -> pad/nopad = 0.901x
+  B1 T512 H4  BT=32   FLA dhu =    20.6us
+      nopad     144.5us   xFLA= 7.03
+      pad       123.6us   xFLA= 6.01
+      -> pad/nopad = 0.855x
+  B1 T512 H4  BT=64   FLA dhu =    12.9us
+      nopad     105.0us   xFLA= 8.16
+      pad        84.5us   xFLA= 6.56
+      -> pad/nopad = 0.805x
+  B2 T1024 H8  BT=16   FLA dhu =    n/a  
+      nopad     448.3us   xFLA=  n/a
+      pad       406.9us   xFLA=  n/a
+      -> pad/nopad = 0.908x
+  B2 T1024 H8  BT=32   FLA dhu =    37.1us
+      nopad     301.3us   xFLA= 8.12
+      pad       259.3us   xFLA= 6.99
+      -> pad/nopad = 0.860x
+  B2 T1024 H8  BT=64   FLA dhu =    22.8us
+      nopad     212.2us   xFLA= 9.32
+      pad       171.4us   xFLA= 7.52
+      -> pad/nopad = 0.807x
+  B8 T2048 H8  BT=16   FLA dhu =    n/a  
+      nopad    1038.6us   xFLA=  n/a
+      pad       828.8us   xFLA=  n/a
+      -> pad/nopad = 0.798x
+  B8 T2048 H8  BT=32   FLA dhu =   169.0us
+      nopad     719.9us   xFLA= 4.26
+      pad       551.9us   xFLA= 3.27
+      -> pad/nopad = 0.767x
+  B8 T2048 H8  BT=64   FLA dhu =   118.5us
+      nopad     578.8us   xFLA= 4.88
+      pad       701.8us   xFLA= 5.92
+      -> pad/nopad = 1.213x
+
+DONE
