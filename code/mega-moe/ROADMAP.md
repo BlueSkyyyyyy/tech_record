@@ -963,6 +963,38 @@
       ring 容量阶梯坐实 `live*BM` 随 BLOCK_M 单调升（240 最大 119280→ring 120960）、SF ring max 在
       BLOCK_M=8（1935360）。配套博客 `content/posts/mega-moe-42-mega-moe-host-buffer`（索引页新增第 42 篇）。
 
+### P33 增量（opt-in，补齐测试栈的「更硬逐位断言」层）
+
+- [x] **P33-1** **DeepGEMM 测试断言辅助 `tests/utils.py`**（`assert_psum_zero_padding` /
+      `assert_direct_output_matches_fp32_accumulation` / `add_sf_k_padding` /
+      `assert_stochastic_bf16_matches_fp32_accumulation` / `convert_to_fp8` /
+      `to_cublaslt_vec16_sf_layout` / `make_cublas_gemm`）。第 40 篇拆了计时/判对基座、第 41 篇拆了
+      操作数生成器，本篇补上 `test_bf16`/`test_einsum`/`test_fp8_fp4` 共用的**「比 relerr 更硬的逐位
+      断言」**——它们正是每个 kernel 正确性判据的**可执行 oracle**。**架构无关，H100 真机逐位对拍**。
+      → `docs/43-deepgemm-test-utils.md`（真实行号核对）：`assert_direct_output_matches_fp32_accumulation`
+      `:20-38`（把同一零张量同时当 D/C → 累积退化成 `GEMM+0`；fp32 逐位、bf16 再 cast 一次逐位）；
+      `assert_stochastic_bf16_matches_fp32_accumulation` `:53-79`（纯 torch `:65-78` 复刻 device
+      `operators.cuh:35-48` 的 quartet 哈希，位序 `offset%2*16` ↔ `stack(h1&0xffff,h1>>16,h2&0xffff,h2>>16)`、
+      乘子 `q<2?0x846ca68b:0xd35a2d97` 逐一对应）；`assert_psum_zero_padding` `:9-17`（PSUM 逻辑尾
+      `current_m` 到 `align` 边界全零，A+D 都要）；`add_sf_k_padding` `:41-50`（**用 UE8M0 NaN `-1` 毒化
+      padding**，暴露 kernel 用紧凑 pitch 的越界读；非 k-grouped `(1,pitch)`/k-grouped `(pitch,1)`）；
+      `convert_to_fp8` `:82-95`（E4M3 精确表示 E2M1 的 LUT `:90` + 符号位 `(nibble&8)<<4` + LSB-first
+      解包，`-0` 码 `0x80`）；`to_cublaslt_vec16_sf_layout` `:98-110`（MXFP4 per-32 → NVFP4 per-16 UE4M3
+      `repeat_interleave(2)`，`exp>=-6?(exp+7)<<3:1<<(exp+9)`，分块 `[⌈mn/128⌉,⌈k/64⌉,32,4,4]`，契约
+      `sf` 必为正 2 的幂）；`make_cublas_gemm` `:113-120`（int8=NVFP4 分支 / FP8 分支，`kPackedFP4=kInt8`
+      `utils/math.hpp:11`）。device 对照 `epilogue/operators.cuh:32-63`。**H100 实测** `src/test_utils_sr.cu`
+      （把 device 哈希常数搬进 CUDA）+ `harness/exp_test_utils.{py,sh,out.txt}`：**27/27 PASS**——
+      ① `convert_to_fp8` 全 256 字节码 vs 独立参考逐位一致、MN-major 分支=转置后转换再转置、解包
+      LSB-first；② NVFP4 分块形状 `(2,10,32,4,4)`、与独立复刻逐位、padding 全 0、UE4M3 编解码回 2 的
+      幂 scale **零误差**；③ `add_sf_k_padding` 两 stride + 读底层 storage 确认 padding 全 `-1`；④ 真实
+      SM90 `bf16_gemm_nt`：direct fp32 == 累积 `GEMM+0` **逐位**、direct bf16 == 基线 cast 一次、篡改
+      1 bit 被 helper 检出；⑤ 随机舍入 oracle：device 哈希 vs torch 公式随机 bit/输出 **0/262144 不符**、
+      CUDA 输出直接喂**真实 helper 通过**、向上比例 0.4985 ≈ 平均小数 0.4993、与 RNE 差 130674/262144；
+      ⑥ cuBLASLt FP8 relerr 1.39e-6、`make_cublas_gemm` 一致；NVFP4 端到端因本机 cuBLASLt 返回
+      `NOT_SUPPORTED`（`smxx_cublaslt.hpp:89`，布局本身正确）而 SKIP；⑦ 真实 SM90 PSUM
+      `m_grouped_bf16_gemm_nt_contiguous`（G=4,m=34304,n=6144,k=7168）`calc_diff=0`、helper 通过、
+      非零 padding 被检出。配套博客 `content/posts/mega-moe-43-deepgemm-test-utils`（索引页新增第 43 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -987,8 +1019,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P32 各增量完成（P15-1…P31-1、P32-1）。**
-  本轮 P32-1：新建 `docs/42-mega-moe-host-buffer.md`（+`harness/exp_mega_moe_host_buffer.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P33 各增量完成（P15-1…P32-1、P33-1）。**
+  本轮 P33-1：新建 `docs/43-deepgemm-test-utils.md`（+`harness/exp_test_utils.{py,sh,out.txt}`、
+  `src/test_utils_sr.cu`）——补上测试栈里 **「比 relerr 更硬的逐位断言」层**：`tests/utils.py` 的 6 个
+  辅助是 `test_bf16`/`test_einsum`/`test_fp8_fp4` 共用的**可执行 oracle**。三个最硬性质：① **direct ==
+  累积**（`assert_direct_output_matches_fp32_accumulation:20-38`，把同一零张量同时当 D/C 使累积退化成
+  `GEMM+0`，fp32 逐位、bf16 再 cast 一次逐位）；② **随机舍入 == 确定性 oracle**
+  （`assert_stochastic_bf16_matches_fp32_accumulation:53-79`，纯 torch `:65-78` 复刻 device
+  `operators.cuh:35-48` 的 quartet 哈希）；③ **PSUM padding 全零**（`assert_psum_zero_padding:9-17`）。
+  另三个是构造/转换：`add_sf_k_padding:41-50`（**UE8M0 NaN `-1` 毒化 padding** 暴露紧凑 pitch 越界读）、
+  `convert_to_fp8:82-95`（E4M3 精确表示 E2M1）、`to_cublaslt_vec16_sf_layout:98-110`（MXFP4 per-32 →
+  NVFP4 per-16 UE4M3 分块）+ `make_cublas_gemm:113-120`。**H100 实测 27/27 PASS**：把 device 哈希常数
+  搬进 `src/test_utils_sr.cu` 后与 torch oracle 随机 bit/输出 **0/262144 逐位不符、CUDA 输出直接喂真实
+  helper 通过**；真实 SM90 `bf16_gemm_nt` direct==累积逐位、篡改 1 bit 被检出；真实 SM90 PSUM
+  `m_grouped_bf16_gemm_nt_contiguous`（G=4,m=34304,n=6144,k=7168）`calc_diff=0` 且 helper 通过、非零
+  padding 被检出；cuBLASLt FP8 relerr 1.39e-6。**环境边界**：NVFP4 端到端因本机 cuBLASLt 返回
+  `NOT_SUPPORTED`（`smxx_cublaslt.hpp:89`）而 SKIP（布局本身已逐位验证正确）。行号全部核对过。配套博客
+  `content/posts/mega-moe-43-deepgemm-test-utils`（索引页新增第 43 篇）。
+  上一轮 P32-1：新建 `docs/42-mega-moe-host-buffer.md`（+`harness/exp_mega_moe_host_buffer.{py,sh,out.txt}`）
   ——补上主 kernel 之前的**整层 host 编排**：Python `SymmBuffer` → C++
   `get_symm_buffer_size_for_mega_moe`（ring 容量）→ `layout::MegaMoEBuffer`（链式字节分配）→
   scheduler `get_num_max_live_pool_blocks`。这层**全纯 host、架构无关**，DeepGEMM 又 pybind 暴露了
@@ -1267,8 +1315,11 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P32 已完成（新增 **P32-1 Mega MoE host 编排层与对称缓冲区布局**：H100 逐字段
-  对拍 `num_bytes` 与 12 view；见上）。P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+- **下一步**：P0~P33 已完成（新增 **P33-1 测试断言辅助 `tests/utils.py`：逐位 oracle 层**：
+  direct==累积逐位、随机舍入 oracle 与 device 哈希逐位 0 不符、PSUM padding 全零+负例、SF 毒化、
+  E4M3 精确表示 E2M1、NVFP4 VEC16 分块；H100 27/27 PASS；见上）。P32-1 Mega MoE host 编排层与
+  对称缓冲区布局（H100 逐字段对拍 `num_bytes` 与 12 view）。
+  P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
   P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子、
   P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel、P23-1 DeepJIT 编译/缓存/加载/发射管线、
   P24-1 SM 局部域探针与内存域分配、P25-1 SM100 FP8/FP4 稠密 GEMM 主 kernel、
