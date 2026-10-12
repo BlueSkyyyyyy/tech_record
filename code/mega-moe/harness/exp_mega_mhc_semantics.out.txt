@@ -1,0 +1,45 @@
+~/proj/tech_record/code/mega-moe/src/mega_mhc_semantics.cu(652): warning #550-D: variable "dbg_target" was set but never used
+          int sf_mismatch = 0; double worst_ulp = 0; float dbg_target = 0, dbg_deq = 0; uint8_t dbg_byte = 0;
+                                                           ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/mega-moe/src/mega_mhc_semantics.cu(652): warning #550-D: variable "dbg_deq" was set but never used
+          int sf_mismatch = 0; double worst_ulp = 0; float dbg_target = 0, dbg_deq = 0; uint8_t dbg_byte = 0;
+                                                                           ^
+
+~/proj/tech_record/code/mega-moe/src/mega_mhc_semantics.cu(652): warning #550-D: variable "dbg_byte" was set but never used
+          int sf_mismatch = 0; double worst_ulp = 0; float dbg_target = 0, dbg_deq = 0; uint8_t dbg_byte = 0;
+                                                                                                ^
+
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+Mega mHC semantics port -- H100(sm90) numeric checks
+(Mega mHC 主体 sm100_mega_mhc.cuh 为 SM100 专属，本实验仅移植其架构无关的数值语义与位级布局)
+
+== A 残差混合 + RMSNorm (T=256, H=256, hc=4) ==
+   new_residual  rel 2.174e-02 / abs 9.766e-04   hc_sqr_sum rel 5.566e-07
+   X1(bf16)      rel 0.000e+00 / abs 0.000e+00   y_bf16(RMSNorm) rel 7.812e-03 / abs 3.125e-02
+   （rel 受 new_residual 近零点相消放大；abs 与 bf16 单 ulp 同量级）
+
+== B mix 系数 + Sinkhorn (T=4096, iters=10) ==
+   new_prev_mix max_rel_err = 1.731e-07   new_post_mix max_rel_err = 1.890e-07
+   new_comb_res_mix max_rel_err = 3.710e-07
+   Sinkhorn 输出 |行和-1| max = 2.116e-06, |列和-1| max = 2.101e-06 (double 参考稠密到 ~1e-3)
+
+== C 共享专家 SF 分页 get_shared_sf_row_idx (SF_BLOCK_M=224) ==
+   T=    1: 与 test extra_sf_rows 不符 0 / 1
+   T=   64: 与 test extra_sf_rows 不符 0 / 64
+   T=   65: 与 test extra_sf_rows 不符 0 / 65
+   T=  200: 与 test extra_sf_rows 不符 0 / 200
+   T= 1025: 与 test extra_sf_rows 不符 0 / 1025
+   T= 4096: 与 test extra_sf_rows 不符 0 / 4096
+   T=32768: 与 test extra_sf_rows 不符 0 / 32768
+   合计不符 0（期望 0）
+
+== D FP8 UE8M0 + 4-lane SF 打包 (T=512 packs) ==
+   pack 0: got=0x7a797a79 ref=0x7a797a79  ref_bytes=(121,122,121,122)
+   pack 1: got=0x79797a79 ref=0x79797a79  ref_bytes=(121,122,121,121)
+   pack 2: got=0x79797979 ref=0x79797979  ref_bytes=(121,121,121,121)
+   打包 int32 与参考（小端 exp0|exp1<<8|exp2<<16|exp3<<24）不符: 0 / 512
+   E4M3 量化误差 max = 0.5000 ulp （round-to-nearest 期望 <= 0.5）
+done.

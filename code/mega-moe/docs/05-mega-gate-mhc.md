@@ -1,18 +1,24 @@
-# Mega Gate：BF16 打分 GEMM 与 MoE top-k 路由的融合
+# Mega Gate 与 Mega mHC：MoE 相关的两个融合 mega-kernel
 
-> 本文是「DeepSeek Mega MoE 前向 / 反向算子实现解析」的 Mega-kernel 篇（路线图 **P5-1**）。
-> 前四篇（`docs/02`~`docs/11`）把主体 Mega MoE kernel 逐段读完了；本篇换一个算子：**Mega Gate**——
-> 把「router 打分 GEMM（`x @ W_gate^T`）」与「MoE top-k 路由（softplus→sqrt、加 bias 排名、选 top-k、
-> 归一化权重、物理专家映射）」融合进**一个 kernel**。参考实现
-> `~/github/DeepGEMM`（公开版 commit `057ca59`）：
-> `csrc/apis/mega_gate.hpp`、`deep_gemm/include/deep_gemm/impls/sm100_bf16_mega_gate.cuh`、
-> `layout/mega_gate.cuh`、`scheduler/mega_gate.cuh`、`epilogue/sm100_mega_gate.cuh`、
-> `csrc/jit_kernels/heuristics/mega_gate.hpp`、`tests/test_mega_gate.py`。
+> 本文是「DeepSeek Mega MoE 前向 / 反向算子实现解析」的 Mega-kernel 篇（路线图 **P5-1 / P5-2**）。
+> 前四篇（`docs/02`~`docs/11`）把主体 Mega MoE kernel 逐段读完了；本篇换两个外围算子：
 >
-> **约束提醒**：Mega Gate 是 **SM100 专属，仅分析**——`mega_gate.hpp:158-159` 硬断言 `arch_major == 10`，
-> H100(sm90) 端到端跑不了。但其中**架构无关**的路由数值语义（`sqrt_softplus`、warp 级 top-k 选择、
-> 破平规则、权重归一化、重复专家分散公式）可在 H100 上逐行移植并对拍，本文给出真实数字
-> （`src/mega_gate_routing.cu` + `harness/exp_mega_gate_routing.{sh,out.txt}`）。
+> - **第一部分（P5-1）Mega Gate**——把「router 打分 GEMM（`x @ W_gate^T`）」与「MoE top-k 路由
+>   （softplus→sqrt、加 bias 排名、选 top-k、归一化权重、物理专家映射）」融合进**一个 kernel**。
+> - **第二部分（P5-2）Mega mHC**——把「HyperConnection（HC）的残差多流混合 + mix 系数投影 +
+>   Sinkhorn 组合矩阵 + RMSNorm（+ 可选 FP8 量化）」融合进**一个 kernel**。
+>
+> 参考实现 `~/github/DeepGEMM`（公开版 commit `057ca59`）：
+> Mega Gate：`csrc/apis/mega_gate.hpp`、`impls/sm100_bf16_mega_gate.cuh`、`layout/mega_gate.cuh`、
+> `scheduler/mega_gate.cuh`、`epilogue/sm100_mega_gate.cuh`、`heuristics/mega_gate.hpp`、`tests/test_mega_gate.py`；
+> Mega mHC：`csrc/apis/mega_mhc.hpp`、`impls/sm100_mega_mhc.cuh`、`layout/mega_mhc.cuh`、
+> `scheduler/mega_mhc.cuh`、`epilogue/sm100_mega_mhc.cuh`、`tests/test_mega_mhc.py`。
+>
+> **约束提醒**：两个算子都是 **SM100 专属，仅分析**——`mega_gate.hpp:158-159` 与
+> `mega_mhc.hpp:223` 都硬断言 `arch_major == 10`，H100(sm90) 端到端跑不了。但其中**架构无关**的
+> 数值语义可在 H100 上逐行移植并对拍，本文给出真实数字：
+> Mega Gate 见 `src/mega_gate_routing.cu` + `harness/exp_mega_gate_routing.{sh,out.txt}`；
+> Mega mHC 见 `src/mega_mhc_semantics.cu` + `harness/exp_mega_mhc_semantics.{sh,out.txt}`。
 
 ## 1. 它融合了什么：从「GEMM + softmax + topk」到单 kernel
 
@@ -350,7 +356,7 @@ Mega Gate 的产物正是主体 Mega MoE 的输入：`topk_idx`（physical 专�
 | 架构 | **SM100 专属** | **SM100 专属** |
 | H100 可做 | 路由数值语义移植对拍（本文） | epilogue 数值原语对拍（`docs/10`） |
 
-## 12. 小结
+## 12. Mega Gate 小结
 
 - Mega Gate = **BF16 打分 GEMM + router 全链路**的单 kernel 融合，省掉 `[T,E]` 中间量的 global 往返。
 - 三个非平凡设计点：**① 累加器经 TMEM 直接喂给 gate warp**（避免打分落 global）；②
@@ -360,13 +366,371 @@ Mega Gate 的产物正是主体 Mega MoE 的输入：`topk_idx`（physical 专�
   完全一致（5 个案例、约 7 万条 top-k 全 0 不符），`sqrt_softplus` 阈值分支、重复专家分散公式
   也都有真实数字佐证。
 
-> **P5-2 预告**：下一个增量读 **Mega mHC**（`mega_mhc.hpp` / `sm100_mega_mhc.cuh`），
-> 讲 HyperConnection 相关的融合；完成后本节补入同一文档。
+---
+
+# 第二部分：Mega mHC —— HyperConnection 融合 kernel（P5-2）
+
+> README 把 **Mega mHC** 与 Sparse Indexer、Mega Gate 一起列在 2026.09.10 release
+> （`README.md:14`，对应 [PR #432](https://github.com/deepseek-ai/DeepGEMM/pull/432)）。
+> 它服务的不是 MoE 本身，而是**网络主干**：DeepSeek 的 HyperConnection（HC）把每一层的残差
+> 从单流扩成 `hc_mult` 条并行流，并让每条流按**逐 token 学习的混合系数**重新组合。mHC 就是
+> 这个模块的融合算子：**残差多流混合 + mix 系数投影 + Sinkhorn 组合矩阵 + RMSNorm（+ 可选 FP8）**
+> 全压进一个 kernel。参考：`csrc/apis/mega_mhc.hpp`、`impls/sm100_mega_mhc.cuh`、
+> `layout/mega_mhc.cuh`、`scheduler/mega_mhc.cuh`、`epilogue/sm100_mega_mhc.cuh`、
+> `tests/test_mega_mhc.py`。
+
+## 13. 计算图：以 `tests/test_mega_mhc.py` 的参考实现为权威
+
+kernel 的语义在测试里的 `mhc_reference`（`tests/test_mega_mhc.py:123-210`）写得最清楚，逐行读：
+
+**① 残差多流混合**（`:145-148`）：
+
+```
+new_residual[t,j,:] = post_mix[t,j] * x[t,:] + Σ_i comb_res_mix[t,j,i] * residual[t,i,:]
+new_residual = bf16(new_residual)          # 舍入到 bf16
+```
+
+即第 `j` 条新残差流 = 「新激活 `x` 按 `post_mix` 缩放」+「旧 `hc_mult` 条流按 `comb_res_mix[t,j,:]`
+加权组合」。`comb_res_mix` 是逐 token 的 `hc x hc` 矩阵。**这里 bf16 舍入是一次共享的数值边界**
+（kernel 侧 `epilogue:496-498` 的 `NOTES`）：之后所有消费者（mix 投影、RMSNorm、下一层）都读这个
+bf16 值。
+
+**② mix 系数投影 + 归一化 + 仿射**（`:155-170`）：
+
+```
+mixes = (new_residual.flatten(1) @ fn.mT) * rsqrt(Σ new_residual²/(hc*H) + hc_norm_eps) * scales + bases
+new_prev_mix  = sigmoid(mixes[:, :hc])              + hc_pre_eps
+new_post_mix  = sigmoid(mixes[:, hc:2hc]) * hc_post_scale
+new_comb_logit= mixes[:, 2hc:].view(hc, hc)
+```
+
+- `fn` 是 `[hc*(hc+2), hc*H]` 的**投影矩阵**：把 `hc*H` 维残差投到 `hc*(hc+2)` 个「混合系数」。
+  这是本 kernel 里唯一的 GEMM（一个**很窄的输出、很长的 K** 的矩阵乘）。
+- 投影结果先乘 `rsqrt(hc_sqr_sum/(hc*H)+eps)`（把残差整体尺度归一化掉），再逐段乘 `scales` 加 `bases`
+  （`scales` 长度 3 分别给 pre/post/comb 三块，`:161-166`）。
+- pre/post 系数经 sigmoid（pre 加 `hc_pre_eps`、post 乘 `hc_post_scale`）；comb 块是**原始 logits**，
+  后面过 Sinkhorn。
+
+**③ Sinkhorn 组合矩阵**（`_sinkhorn_reference`，`:114-120`）：
+
+```
+v = softmax(logits, dim=-1) + eps
+v = v / (v.sum(dim=-2, keepdim=True) + eps)          # 列归一化
+repeat (num_sinkhorn_iters-1) 次:
+    v = v / (v.sum(-1) + eps)                         # 行归一化
+    v = v / (v.sum(-2) + eps)                         # 列归一化
+```
+
+Sinkhorn 交替行/列归一化，把组合矩阵推向**双随机矩阵**（行和、列和都 → 1）。用双随机的 `comb`
+做残差混合，等价于「**不带缩放的能量再分配**」——每层混合不放大也不缩小残差总能量，是训练稳定性的
+关键。kernel 侧在 `epilogue:63-86` 用 warp 内归约实现（见 §18）。
+
+**④ `norm_input` 与 RMSNorm**（`:149-184`）：
+
+```
+norm_input = Σ_j mix_j * new_residual[:, j, :]        # mix = shifted_prev_mix 或 new_prev_mix
+norm_input = bf16(norm_input)
+y_bf16 = bf16( norm_input * rsqrt(mean(norm_input²)+rmsnorm_eps) * (rmsnorm_weight*rmsnorm_scale) )
+```
+
+`y` 是喂给下一层注意力的归一化激活。注意 **RMSNorm 的均方是 `mean` over `H`**（除以 H），
+与前面的 `hc_sqr_sum`（对所有 `hc*H` 求和）是**两个不同的统计量**。
+
+### 13.1 normal vs shifted：两个变体的区别
+
+kernel 有 `kIsShifted` 模板开关（`impls:38`）。差别只在**用哪套 pre 系数**以及**是否持久化**：
+
+- **normal mHC**：用刚算出的 `new_prev_mix` 形成 `norm_input`（`:176-177`），**不输出** pre 系数。
+- **shifted mHC**：输入 `shifted_prev_mix [T,hc,1]`，用它形成 `norm_input`（`:149-150`），并**输出**
+  `new_prev_mix` 供下一层用。API 契约是「全有或全无」：`shifted_prev_mix` 与 `new_prev_mix` 要么都给、
+  要么都不给（`mega_mhc.hpp:117-118`）。
+
+这对应两种执行编排：shifted 需要把 `new_residual` 物化到 global 再被 Norm 阶段读回并算
+`shifted_prev_mix·residual`；normal 则可以把 Mix→Pre→RMSNorm 融成一条 per-token 流水（§16）。
+
+## 14. API 与契约（`csrc/apis/mega_mhc.hpp`）
+
+host 入口 `mega_mhc(...)`（`:89-115`）的张量表（来自 `:41-88` 的 doc comment）：
+
+| 张量 | 形状 | 类型 | 含义 |
+|---|---|---|---|
+| `x` | `[T,H]` | BF16 | 本层新激活 |
+| `residual` | `[T,hc_mult,H]` | BF16 | `hc_mult` 条旧残差流 |
+| `shifted_prev_mix` | `[T,hc_mult,1]` | FP32 | shifted 的 pre 系数（normal 为 None） |
+| `post_mix` | `[T,hc_mult,1]` | FP32 | 本层 post 系数 |
+| `comb_res_mix` | `[T,hc_mult,hc_mult]` | FP32 | 组合矩阵 |
+| `fn` | `[hc_mult*(hc_mult+2),hc_mult*H]` | FP32 | 投影矩阵 |
+| `mix_scales` | `[3]` | FP32 | pre/post/comb 分段缩放 |
+| `mix_bases` | `[hc_mult*(hc_mult+2)]` | FP32 | 分段偏置 |
+| `rmsnorm_weight` | `[H]` | BF16 | RMSNorm 权重 |
+| `new_residual` | `[T,hc_mult,H]` | BF16 | 输出：新残差流 |
+| `new_prev_mix` | `[T,hc_mult,1]` | FP32 | 输出：shifted 的下一层 pre |
+| `new_post_mix` / `new_comb_res_mix` | `[T,hc_mult,1]` / `[T,hc_mult,hc_mult]` | FP32 | 输出系数 |
+| `y_bf16` / `y_fp8` | `[T,H]` | BF16 / E4M3 | 输出：归一化激活（至少给一个） |
+| `y_gemm_sf` / `y_routed_sf` / `y_shared_sf` | `[T,H/128]` | int32 | FP8 的 UE8M0 SF（三种布局，§20） |
+
+硬契约（`:116-158`）：
+
+- `hc_mult == kNumRoutes == 4`（`:138`，`layout:11`）；`num_hc_outputs = hc*(hc+2) = 24`（`layout:12`）。
+- `hidden % (kDefaultNumSplits*BLOCK_K) == 0` → **`hidden` 必须能被 `16*64 = 1024` 整除**（`:141`）。
+- `num_tokens <= kNumMaxTokens = 2^20`（`:140`）；`num_sinkhorn_iters >= 1`（`:142`）。
+- `arch_major == 10`（`:223`）——**SM100 专属**。
+- `y_bf16` 与 `y_fp8` **至少给一个**（`:121`）；给了 `y_fp8` 就必须给 SF，且 `y_gemm_sf` 与
+  `y_routed_sf` **互斥**（`:120,122`）。
+
+`get_split_barriers`（`:26-39`）按 **CUDA stream** 缓存跨 CTA 的 split barrier，并在第一次使用前
+断言**不在 graph capture 中**（`:33`）——和 Mega Gate 的 score barrier 一样，避免把一次性清零
+replay 进 CUDA graph。
+
+## 15. 物理坐标与任务分解
+
+### 15.1 编译期几何（`layout/mega_mhc.cuh`）
+
+```
+BLOCK_M = 64, BLOCK_N = kNumHCOutputs = 24, BLOCK_K = 64        (:19-21)
+kNumThreads = 6 * 4 * 32 = 768                                  (:31)   # 6 个 warpgroup
+```
+
+`hidden` 在 K 方向切成 `kNumSplits` 份，每份再切成 `BLOCK_K` 块；一个 **task = 一个 (m-block,
+split)** 对（`impls:28`）。`kDefaultNumSplits=16`、`kNumMaxSplits=64`（`layout:36-37`）。
+
+### 15.2 split 数启发式（`mega_mhc.hpp:15-24`）
+
+```
+num_k_blocks = hidden / BLOCK_K
+max_num_splits = min(64, max(16, num_sms / num_m_blocks))
+num_splits = ceil_div(num_k_blocks, ceil_div(num_k_blocks, max_num_splits))
+```
+
+即「**在不超过 `max_num_splits` 的前提下，用最少的 split 数**，让最长的 split task 尽量短」。
+确定性模式直接固定 16（`:16-17`）。
+
+## 16. kernel 结构：6 个 warpgroup 的静态角色 + split-K 归约
+
+`sm100_mega_mhc_impl`（`impls:37-701`）是持久化 kernel（`grid = num_sms`，`layout` 里 768 线程）。
+它把 6 个 warpgroup 硬绑成静态角色（`impls:78-85`）：
+
+| WG | 角色 | 干什么 |
+|---|---|---|
+| WG0 | TMA/MMA 生产者 | warp0 载 `residual`+`x`；warp1 载 `fn`；warp2 发 UMMA；warp3 写 `new_residual`+预取系数 |
+| WG1-2 | **Post workers** | 算 `new_residual = post*x + comb@residual`（bf16 舍入），写回 smem，累计统计量，把结果存进 TMEM 作为 UMMA 的 A 操作数 |
+| WG3 | **workspace-epilogue** | 从 TMEM 读 UMMA 累加器，把 `[BLOCK_M,24]` 部分分写进 global scratch |
+| WG4 | **Mix worker** | 归约 split 部分分 → 算 mix 系数（sigmoid + Sinkhorn）|
+| WG5 | **Norm worker** | RMSNorm（shifted：读 global `new_residual`；normal：被复用作融合 worker）|
+
+### 16.1 UMMA 是 **TF32**，A 在 TMEM、B 在 SMEM（`impls:233-285`）
+
+```cpp
+using umma_t = cute::SM100_MMA_TF32_TS<..., BLOCK_M, BLOCK_N, Major::K, Major::K>;   // :235-238
+...
+umma_t::fma(tmem_base + a_stage*kNumTmemColumnsPerAStage + route*UMMA_K,             // :273 A@TMEM
+            b_desc,                                                                   //  B@SMEM(fn)
+            tmem_base + kAccumTmemStartColumn + accum_stage*BLOCK_N,                  // 累加器@TMEM
+            k_block_idx>0 or umma_k_idx>0 or route_idx>0, runtime_instr_desc);        // :275 首条清零
+```
+
+- 这是 **TS 型**（A 来自 Tensor Memory、B 来自 Shared Memory）的 TF32 UMMA。`A` = Post worker
+  写进 TMEM 的 `new_residual`（BF16 舍入后的值，按 TF32 存）；`B` = TMA 载入的 `fn`（FP32）。
+- **为什么用 TF32 而不是 BF16？** TF32 有 10 位尾数（BF16 只有 7 位）。`fn` 是 FP32 权重，投影
+  系数直接进 sigmoid 和 Sinkhorn 的 logits，多 3 位尾数能显著减小系数误差；而 A 侧激活已在
+  `new_residual` 处**强制 bf16 舍入**（`epilogue:496-498` 的共享边界），所以用 TF32 承载它不损失
+  额外精度，却能让 GEMM 走 TF32 路径。
+- **为什么 A/B 这么摆**？把「宽 K、窄 N=24」的 GEMM 的 A（残差，按 route 分块累积）放 TMEM，
+  因为 Post worker 本来就在 TMEM 里写 A；B（`fn`）放 SMEM 由 TMA 流式载入。累加器也放 TMEM，
+  由 WG3 用 `SM100_TMEM_LOAD_*` 读回（`impls:603-606`）。
+
+### 16.2 Post worker：残差混合 + 统计 + A 存储（`impls:386-567`）
+
+Post worker 是这套流水的心脏。每 task 它做（`impls:482-530`）：
+
+```cpp
+post_value = x * post_coeff;                                     // :488
+for i: post_value = fma(residual[i], comb[i,j], post_value);     // :494 组合旧流
+post_value_bf16 = bf16_round(post_value);                        // :497 共享数值边界
+hc_norm_sqr_sums += post_value²;                                 // :501 Σnew_residual²
+if shifted: x1 += post_value * pre_coeff;                        // :505 X1 = Σ pre·new_residual
+SM100_TMEM_STORE_16dp256b4x::copy(..., tmem_addr);               // :512-515 写 TMEM 作为 UMMA 的 A
+```
+
+统计量（`hc_norm_sqr_sums`）随后经跨 WG barrier 汇聚，写进 `hc_norm_sqr_sum_partials`（`:634-642`），
+这正是 mix 系数归一化用的那个 `hc_sqr_sum`。
+
+### 16.3 WG3 workspace-epilogue：split-K 部分分落盘（`impls:569-655`）
+
+每个 task 一份 `[BLOCK_M, 24]` 的 UMMA 结果，从 TMEM 读回后按 `task_idx = m_block*num_splits+split`
+写进 global scratch（`:621-624`）。**为什么要落盘**？因为 split 把 K 切开后，同一个 token 的部分分
+分散在不同 task（甚至不同 SM）的 TMEM 里，必须落到同一块 global scratch 才能被 Mix 阶段跨 task 相加。
+
+## 17. Split-K scratch 与 Workspace 布局（`layout:73-120`）
+
+```
+gemm_partials            [num_m_blocks, kNumSplits, BLOCK_M, 24]
+hc_norm_sqr_sum_partials [num_m_blocks, kNumSplits, BLOCK_M]
+x1_sqr_sum_partials      [num_m_blocks, kNumSplits, BLOCK_M]
+task_idx = m_block_idx * kNumSplits + k_split_idx
+```
+
+三块连续排布，`get_num_scratch_bytes`（`:98-101`）= `num_tasks * (24*64 + 2*64) * 4` 字节。
+`x1_sqr_sum_partials` 只在 shifted 用（norm_input 的均方）。
+
+## 18. Mix 与 Norm 两条消费者路径
+
+### 18.1 Mix worker：warp 级仿射 + sigmoid + Sinkhorn（`epilogue:16-101`）
+
+`run_mix_task` 一次处理**一个 token**：一个 warp，lane 布局是
+`[Pre 4 | Post 4 | Comb 16 | inactive]`（`epilogue:45-49`）：
+
+```cpp
+// 归约 split 部分分（hc_sqr_sum 与 24 个 GEMM 输出）
+hc_norm_sqr_sum = warp_reduce_sum(Σ_split ...);                               // :28-33
+hc_output       = Σ_split gemm_partials[...];                                 // :37-41
+hc_rms_scale    = rsqrt(hc_norm_sqr_sum * (1/(hc*H)) + hc_norm_eps);          // :43
+// 每 lane 的仿射 + sigmoid
+affine = hc_output * hc_rms_scale * scales[idx] + bases[lane];                // :53
+pre  = sigmoid(affine) + hc_pre_eps;  post = sigmoid(affine)*hc_post_scale;   // :55-56
+```
+
+**Sinkhorn 的 warp 级实现**（`:63-86`）是本文最精巧的一段。comb 的 16 个 logits 按**行主序**放在
+lane 8..23（4 行 × 4 列）：
+
+- **行内归约**：`warp_reduce_max<4>` / `warp_reduce_sum<4>`（`math.cuh:203-220`）在**每 4 个相邻 lane**
+  内做 `shfl_xor(1,2)`，正好是一行的 4 个元素 → 得到 `softmax` 的行 max/和。
+- **列内归约**：`get_col_sum`（`:71-76`）用两次 `shfl_xor`：先 `xor kNumRoutes=4` 合并相邻两行，
+  再 `xor 6*kNumRoutes=24` 合并上下半（lane 8-15 ↔ 16-23），两步得到**同一列 4 个元素的和**。
+- 流程严格镜像参考实现：`softmax + eps` → 列归一化 → `(iters-1)` 轮 [行、列归一化]。
+
+### 18.2 Normal：Mix+Pre+RMSNorm 融合成 per-token worker（`epilogue:139-281`）
+
+normal 变体的 WG4-5 以及**退场后的生产者 WG**都变成 `run_normal_worker`（`impls:668-682`）。
+每个 task 由 `atomicAdd(&smem.next_norm_task_ticket,1)`（`:165-167`）动态认领一个 token，
+`token_idx = blockIdx.x + ticket*kNumSMs`（`:168`）。它在一个 warpgroup 内：
+
+1. 算 Pre 系数（`run_mix_task` 的 Pre 部分，`:172-177`），通过 named barrier 广播（`:179`）；
+2. 从 global `new_residual` 读回 4 条流，用 `pre_coeff` 加权成 `X1`（`:196-210`），**累加在 FP32、
+   再舍入到 BF16**（`:206-209`）；
+3. 归约得 RMS scale（`:213-220`）；
+4. `normalize_bf16_pair` 写 `y_bf16`（`:244`）；若开 FP8 则算 amax→UE8M0→写 fp8+SF（`:245-259`）。
+
+### 18.3 Shifted：两 token 一 task + 双重预取（`epilogue:291-426`）
+
+shifted 的 Norm 读**物化到 global 的 `new_residual`**，一个 task 处理**两个 token**（
+`kNumTokensPerShiftedNormTask=2`，`:284`），并把 hidden 切成若干 partition 以填满空闲 grid
+（`:296-300`）。它用 `load_pack` + `next_pack` + `prefetch_pack` 三级寄存器预取隐藏 BF16 回读延迟
+（`:315-321,341-344`）。两个 token 的 amax 打包成一个 BF16 pair 共用一个 warp 归约（`:362-365`，
+小优化）。
+
+## 19. 跨 CTA 的 SplitBarrier（`scheduler/mega_mhc.cuh`）
+
+Mix 和 Norm 都需要「同一 m-block 的所有 split 都算完」才能开始（因为要跨 split 相加）。这是
+`SplitBarrier`（`:13-49`）：
+
+```cpp
+encode_state(grid_idx, num_arrived) = (grid_idx+1) * 2 * kNumMaxSplits + num_arrived;   // :20-22
+init:       st_rel(encode_state(grid_idx, 0));                                          // :24-26
+wait_init:  while (ld_acq_gpu(ptr) - current_grid_base >= kNumSplits);                  // :29-34
+arrive:     red_async_inc_rel(ptr);                                                     // :37-41
+wait:       while (ld_acq_gpu(ptr) != encode_state(grid_idx, kNumSplits));              // :44-48
+```
+
+- 状态**一次原子地编码了「grid 序号 + 已到达数」**（`grid_idx` 每次 launch 自增）。`wait_init` 用
+  **无符号距离**拒绝上一 grid 的陈旧标签、接受本 grid 的任意到达数（`:32` 注释）——这样 barrier
+  内存被复用、上一轮残留也不会误判。
+- `arrive` 用 `red_async_inc_rel`（异步 release 归约，`:39` 注释：SM100 可以把 release 归约异步
+  退休，CTA 可以立刻开始下一 task）。
+- **两个独立 barrier**：`Norm = SplitBarrier<0>`、`Mix = SplitBarrier<1>`（`:52-53`）——shifted
+  的 Norm 与 Mix 是两个不同阶段的汇聚点。
+- 首次 `init` 由 Post 的某个 warp 按 grid-stride 做（`impls:171-180`），且必须在
+  `cudaGridDependencySynchronize()`（`:170`）之后——**局部初始化可以与前一个 grid 重叠，但持久化的
+  split barrier 不行**（`:169` 注释）。
+
+## 20. FP8 输出与三种 SF 布局（`mega_mhc.hpp:194-221`、`epilogue:117-136`）
+
+`y_fp8` 用 **gran_k=32、4 个 UE8M0 SF 打包进一个 int32**（`mega_mhc.hpp:81-82`）。三种 SF 布局由
+用途决定：
+
+- **`y_gemm_sf`**：列主序（`stride(0)==1`）+ TMA 对齐（`:204-206`），给后续 GEMM 直接当操作数。
+- **`y_routed_sf`**：行主序连续（`:210`），给 routed 路径。
+- **`y_shared_sf`**：**Mega MoE 共享专家页布局**（`:212-221`），行号由 `get_shared_sf_row_idx`
+  （`epilogue:117-122`）算出：每个 128 行页内**交错 4 个 32 行组**：
+
+```cpp
+idx = token % SF_BLOCK_M;
+row = token/SF_BLOCK_M * align128(SF_BLOCK_M) + (idx & ~127) + (idx&31)*4 + ((idx>>5)&3);
+```
+
+这正是测试 `extra_sf_rows`（`tests:96-104`）的公式，也是 Mega MoE 里 UTCCP 4x32 转置后的 SF 页布局
+（见 `docs/02` §3.4）——**mHC 直接把 SF 写成下游 MoE 能直接吃的页布局**。
+
+**`store_fp8_and_pack_sf`（`:124-136`）**：先 `scale_bf16x2_into_fp8x4`（乘幂次 `sf_inv` 精确无损，
+再转 4 个 E4M3），再用两次 `__byte_perm` 把 4 个 32-hidden 块的 exponent **打包成一个 int32**
+（lane 0/16 落盘）：`__byte_perm(sf_exp, shfl_xor(sf_exp,4), 0x1140)` 再
+`__byte_perm(paired, shfl_xor(paired,8), 0x5410)`，得到 `exp0 | exp1<<8 | exp2<<16 | exp3<<24`。
+
+## 21. 确定性与 CUDA Graph
+
+- 确定性模式固定 `num_splits=16`（`mega_mhc.hpp:16-17`），避免不同切分导致浮点加序变化。
+- split barrier 在 capture 前必须 warmup（`:32-33`），否则 graph replay 会把一次性清零也录进去。
+- 测试 `test_mega_mhc_api_contract`（`tests:241-315`）逐位断言：确定性模式下重复调用 bitwise 相同、
+  CUDA Graph 重放 bitwise 相同、多 stream 独立、FP8-only 调用在不同尺寸调用后 bitwise 稳定。
+
+## 22. H100 实测：架构无关语义与位级布局的忠实移植
+
+Mega mHC 主体是 SM100 专属（TF32 TS UMMA / TMEM / tcgen05，`mega_mhc.hpp:223` 硬断言），H100 跑不了。
+但它的**数学语义**和几处**位级布局**是架构无关的。实验 `src/mega_mhc_semantics.cu`
+（`harness/exp_mega_mhc_semantics.sh` + `.out.txt`，nvcc sm_90）把源码逐行搬到裸 CUDA，并用**独立的
+double 参考**（同一文件内实现）对拍：
+
+```
+== A 残差混合 + RMSNorm (T=256, H=256, hc=4) ==
+   new_residual  rel 2.174e-02 / abs 9.766e-04   hc_sqr_sum rel 5.566e-07
+   X1(bf16)      rel 0.000e+00 / abs 0.000e+00   y_bf16(RMSNorm) rel 7.812e-03 / abs 3.125e-02
+
+== B mix 系数 + Sinkhorn (T=4096, iters=10) ==
+   new_prev_mix  max_rel_err = 1.731e-07   new_post_mix max_rel_err = 1.890e-07
+   new_comb_res_mix max_rel_err = 3.710e-07
+   Sinkhorn 输出 |行和-1| max = 2.116e-06, |列和-1| max = 2.101e-06
+
+== C 共享专家 SF 分页 get_shared_sf_row_idx (SF_BLOCK_M=224) ==
+   T=1..32768: 与 test extra_sf_rows 不符 0 / 全部
+
+== D FP8 UE8M0 + 4-lane SF 打包 (T=512 packs) ==
+   打包 int32 与参考不符: 0 / 512
+   E4M3 量化误差 max = 0.5000 ulp
+```
+
+**逐项解读**：
+
+- **A**：`new_residual` 的 abs 误差 9.77e-4 与 **bf16 单 ulp**（在 O(1) 数值上 ~2^-9≈2e-3）同量级；
+  相对误差 2.17e-2 是被**近零点相消**放大的（`post*x + comb@residual` 可能过零），不是算法问题。
+  `hc_sqr_sum` 相对误差 5.6e-7（纯 fp32 累加 vs double）；`X1` 与参考**逐位相同**（rel/abs 全 0）。
+- **B**：Pre/Post 系数相对误差 ~2e-7、comb ~4e-7——纯 `__expf`/`fast_rcp` 近似（源码 `epilogue:55,69`）
+  带来的 fp32 级偏差。**Sinkhorn 输出行和、列和都稠密到 2.1e-6**，证实它确实收敛到双随机矩阵。
+- **C**：`get_shared_sf_row_idx` 与测试 `extra_sf_rows` 在 T∈{1,64,65,200,1025,4096,32768}
+  共 **4 万余行 0 不符**，坐实「4 个 32 行组交错进 128 行页」的页布局映射。
+- **D**：4 个 exponent 打包成 int32 与「小端 `exp0|exp1<<8|exp2<<16|exp3<<24`」参考 **0/512 不符**；
+  FP8 数值与「bf16 × 幂次 SF」的 E4M3 量化误差 **max = 0.5000 ulp**，即**完美 round-to-nearest**
+  （0.5 ulp 是理论最优），证明 `get_ue8m0_sf_exp` + `scale_bf16x2_into_fp8x4` 的量化是无偏的。
+
+## 23. Mega mHC 小结
+
+- Mega mHC = **HyperConnection 的残差多流混合 + mix 系数投影 + Sinkhorn 组合矩阵 + RMSNorm
+  （+FP8）**的单 kernel 融合。整个算子只有**一个窄输出、长 K 的 GEMM**（投影 `fn`），其余都是
+  逐 token 的小矩阵运算——很适合融合。
+- 三个非平凡设计点：**① UMMA 走 TF32 的 TS 形态**（A=残差在 TMEM、B=`fn` 在 SMEM），因为系数
+  投影需要比 BF16 更高的尾数精度，而激活已在 `new_residual` 处强制 bf16 舍入（共享数值边界）；
+  **② Sinkhorn 组合矩阵**用双随机矩阵做「无能量缩放」的残差再分配，kernel 里用 warp 内
+  `shfl_xor` 逐行/逐列归约实现；**③ 跨 CTA 的 `SplitBarrier`** 用「grid 序号 + 到达数」一次编码，
+  免复位、抗上层 grid 残留。
+- H100 上不能端到端跑（`arch_major==10`），但把架构无关的数值语义与位级布局逐行移植后与独立
+  double 参考完全一致：残差/RMSNorm 到 bf16 ulp、mix 系数 ~2e-7、Sinkhorn 双随机到 2e-6、
+  SF 页布局 0 不符、SF 打包 0 不符、E4M3 量化 0.5 ulp 最优。
 
 ---
 
 ### 本文件对应的实验与源码
 
-- 实验：`src/mega_gate_routing.cu`、`harness/exp_mega_gate_routing.sh`、`harness/exp_mega_gate_routing.out.txt`
-  （H100 真机，nvcc sm_90）。
+- Mega Gate 实验：`src/mega_gate_routing.cu`、`harness/exp_mega_gate_routing.sh`、
+  `harness/exp_mega_gate_routing.out.txt`（H100 真机，nvcc sm_90）。
+- Mega mHC 实验：`src/mega_mhc_semantics.cu`、`harness/exp_mega_mhc_semantics.sh`、
+  `harness/exp_mega_mhc_semantics.out.txt`（H100 真机，nvcc sm_90）。
 - 源码行号均核对自 `~/github/DeepGEMM` 公开版 commit `057ca59`。
