@@ -195,6 +195,22 @@
       55–63%，**下界之比 ~5×**（wgrad 访存下界 296/604us vs dgrad 计算下界 61/122us）与实测吻合。
       另记录单次 vs 持续（降频 ≈2×，比值稳定）。H100 实测 `harness/exp_backward_ncu.{py,sh,out.txt}`。
       配套博客 `content/posts/mega-moe-15-backward-profiling`（索引页新增第 15 篇）。
+- [x] **P7-2** HyperConnection prenorm GEMM（`tf32_hc_prenorm_gemm`）精读 + H100 实测：把 mHC 的
+      「mix 系数投影」与「RMSNorm 平方和」融进一个 TF32 kernel（**有 SM90 实现，本机可跑**）。
+      → `docs/16-hc-prenorm-gemm.md`（真实行号核对）：host 入口 `hyperconnection.hpp:10-55`
+      （dtype/major 契约、arch9→sm90/arch10→sm100 派发 `:47-54`），SM90 host 契约
+      `sm90_tf32_hc_prenorm_gemm.hpp:21-31`（block_m=64/block_k=64、2 warpgroup、`n<=32 and n%8==0`、
+      `k%64==0`），SM90 kernel `sm90_tf32_hc_prenorm_gemm.cuh`（`:107-115` split-K 网格；`:123-146`
+      TMA warp；`:179-203` **A 搬运时 bf16→fp32 顺路累加平方 = 融合支点**；`:205-231` TF32 WGMMA
+      A 在寄存器/B 在 smem；`:233-284` 归约+D 上屏）；SM100 分支**仅分析**（第三 warpgroup 把 A 转
+      fp32 写 TMEM、UMMA 走 `SM100_MMA_TF32_TS`，`sm100_...cuh:169-173/268-342`）。H100 实测
+      `harness/exp_hc_prenorm_gemm.{py,sh,out.txt}`：① **TF32 对 fp32 操作数是 RNE，不是截断**
+      （D.vs_RNE 比 D.vs_trunc 小 ~30×，如 (4096,24,7168) 1.665e-5 vs 4.982e-4）；② S 与 fp64 精确和
+      rel 8.3e-7（bf16 平方在 fp32 可精确表示）；③ 融合 kernel 166.7us vs torch「单独 matmul+sqr_sum」
+      3683.6us（~22×），且独立 sqr_sum 的**理想单遍 A 读**也要 ~165us；④ split-K=16 可加性
+      nerr 1.59e-5、小 M（137）从 1.5→5.4 TFLOPS；⑤ 契约 n>32 / k%64 被拒（hpp:30/31）；
+      ⑥ 性能大 M 达 2848 GB/s ≈ HBM 峰值 85%、AI≈17–31 → **访存受限**。配套博客
+      `content/posts/mega-moe-16-hc-prenorm-gemm`（索引页新增第 16 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -220,18 +236,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0/P1/P2/P3/P4/P5/P6 全部完成；P7-1（反向性能归因）完成。**
-  本轮 P7-1：新建 `docs/15-moe-backward-profiling.md`（+`harness/exp_backward_ncu.{py,sh,out.txt}`）——
-  用 `ncu` 把 P4-4 的「wgrad ~100 vs dgrad ~450 TFLOPS」归因到 **访存受限 vs 计算受限** 的 roofline：
-  wgrad 算术强度 ~120 FLOP/B（w2g Duration 499.9us、计算(SM) 12.4%、DRAM 读 530.7MB/写 460.1MB），
-  dgrad ~600 FLOP/B（d2g 111.0us、tensor 65.5%、180.9MB/25.0MB）。根因：权重梯度大且 fp32 +
-  SM90 `k_grouped_nt` 强制累积回读 D（`gemm.hpp:403`，读≈写+操作数）+ K=token 太浅；四 kernel 均达
-  各自 roofline 下界 55–63%，下界之比 ~5× 与实测吻合。配套博客 `content/posts/mega-moe-15-backward-profiling`
-  （索引页新增第 15 篇）。Hugo `--gc --minify -d /tmp/megamoe_hugo_check` 构建 0 ERROR（第 15 篇已内联渲染）。
-- **下一步**：P0~P6 已全部完成，P7-1 已完成。后续若继续（均为增量、非承诺）：
+- 当前进度：**P0/P1/P2/P3/P4/P5/P6 全部完成；P7-1（反向性能归因）、P7-2（HC prenorm GEMM）完成。**
+  本轮 P7-2：新建 `docs/16-hc-prenorm-gemm.md`（+`harness/exp_hc_prenorm_gemm.{py,sh,out.txt}`）——
+  拆解 HyperConnection 的 `tf32_hc_prenorm_gemm`（**有 SM90 实现，H100 可跑**）：把 mHC 的
+  「mix 系数投影 `D=A·Bᵀ`」与「RMSNorm 平方和 `S=ΣA²`」融进一个 TF32 kernel，S 在 A 的 bf16→fp32
+  搬运处顺路累加（`sm90_...cuh:179-203`）。H100 实测：**TF32 对 fp32 操作数是 RNE 而非截断**
+  （比截断小 ~30×）；S rel 8.3e-7；融合 166.7us vs torch 3674us；split-K 可加性 1.6e-5、小 M 1.5→5.4
+  TFLOPS；大 M 达 HBM 峰值 85%、AI≈17–31 → **访存受限**。配套博客
+  `content/posts/mega-moe-16-hc-prenorm-gemm`（索引页新增第 16 篇）。Hugo 构建 0 ERROR。
+- **下一步**：P0~P6、P7-1/P7-2 已完成。后续若继续（均为增量、非承诺）：
   ② **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
   并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）；
-  ③ **Mega MoE 端到端**：需 SM100 机器，当前不可行。若无新指令，可视为专题完结。
+  ③ **Mega MoE 端到端**：需 SM100 机器，当前不可行；
+  ④ 可继续扫 DeepGEMM 其余未覆盖算子（如 `einsum.hpp`、attention 系列）。
+  若无新指令，可视为专题完结。
 
   （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。
   **计算图**（以 `tests/test_mega_mhc.py:123-210`
