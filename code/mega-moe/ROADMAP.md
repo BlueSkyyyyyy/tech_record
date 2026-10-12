@@ -1100,6 +1100,39 @@
       默认走 cuBLASLt `nvjet_sm90_tst_..._TNT`（第 27 篇）。配套博客
       `content/posts/mega-moe-46-gemm-major-accumulation`（索引页新增第 46 篇）。
 
+### P37 增量（opt-in，补上 DeepJIT 缓存键「第四段」与后端抽象）
+
+- [x] **P37-1** **DeepJIT 的 post_hook 后处理机制 + 磁盘产物（meta.json / cubin）+
+      CUDA↔Ascend 后端抽象 + Python API**
+      （`third-party/deep_jit`：`backend/cuda/{options,backend}.hpp`、`runtime/{runtime,config}.hpp`、
+      `cache/{disk,memory}.hpp`、`python_api.hpp`、`backend/ascend/{options,backend}.hpp`；README §Post hook）。
+      第 33 篇把 DeepJIT 的编译/缓存/加载/发射讲清了，但缓存键「第四段」`post_hook` 一直是空列表项。
+      本篇把它拆透，并补齐同属该层的后端抽象与 Python API。**架构无关，H100 真机可跑**。
+      → `docs/47-deepjit-posthook.md`（真实行号核对）：① **post_hook 是什么**——`nvcc` 产出 cubin 后、
+      写 meta/提交缓存**之前**，跑 `python <abs hook> <abs cubin>` 子进程并**就地改写** cubin
+      （`cuda/backend.hpp:132-138`），相对路径由 `Config::python_library_root` 解析（`config.hpp:48-50`），
+      是 DeepJIT 唯一的「发布前注入用户代码」接口，DeepGEMM 默认不用（`jit.hpp` 只加 nvcc flags）；
+      ② **进键方式**——`get_post_hook_hash`（`cuda/options.hpp:141-156`）= `FNV1a(相对路径 + 文件内容)`，
+      且**按绝对路径线程内缓存**（`:146-149`，改 hook 要重启进程），无 hook 返回空串（`:143`）；
+      ③ **override 语义**（`:90-91`）——`nullopt` 是「继承」不是「关闭」、空串是「已配置」（会导致读目录报错），
+      默认设了 hook 就无法 per-kernel 关闭；④ **磁盘产物与发布顺序**（`disk.hpp:111-133`/`:42-67`，
+      `cuda/backend.hpp:160-167`）——hook 在 meta/commit 之前，故「hook 改的 cubin 即最终产物」「失败 hook
+      不发布」「命中不重跑 hook」三条均由顺序推出；⑤ **后端抽象**——`Runtime<Backend>` 只用五个类型别名 +
+      `load`/`compile`/`compiler_info`；CUDA 的 CompilerInfo 哈希是 nvcc 版本（`cuda/backend.hpp:39-41`），
+      Ascend 是 bisheng+ld.lld 两个版本（`ascend/backend.hpp:37-39/64-71`）、两步编译（`:100-124`）、
+      `-save-temps` dump（`:126-139`）、发射用 `num_blocks`/`ubuf`（`ascend/options.hpp:129-158`）；
+      **`post_hook` 是 CUDA 专属**（Ascend `get_post_hook_hash` 恒 `""`，`ascend/options.hpp:112`）；
+      ⑥ **Python API**——`register_python_api:12-20` 注册 `Runtime`（`module_local`）+ `get_jit()`（触发
+      LazyInit），README `:18-21` 的两个 WIP（cache warmup from history / Python compile API）当前不可用。
+      H100 实测 `harness/exp_deepjit_posthook.{sh,out.txt}`（源码 `src/deepjit_posthook.cpp`，`g++ -std=c++20`
+      直接 include 真实头文件、链接 torch+libpython，真跑 DeepJIT 代码）**8 组 ALL PASS**：基线产物 4/4 且
+      `meta.post_hook=null`；hook 改变 digest（`068c54b3…≠9a0a899a…`）且副作用落地、`meta.post_hook` 记录路径；
+      同进程改 hook 文件哈希不变（`threadlocal_cached=1`）、新路径→新键；`nullopt` 继承=1 / 空串已配置=1；
+      失败 hook 抛异常且 `published_hit=0`；破坏 hook 使产物 cubin 头=`HOOK` 且 `load_threw=1`；
+      `compile()` 加载+`launch` 后副作用仍 1 行、清内存缓存磁盘命中仍 1 行（不重跑）；跨进程冷读取
+      hookhash `73360241…` vs `5dcc60df…`、digest `5bb29276…` vs `e11ef00e…` 均不同。行号全部核对过。
+      配套博客 `content/posts/mega-moe-47-deepjit-posthook`（索引页新增第 47 篇）。Hugo 构建 0 ERROR。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1124,8 +1157,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P36 各增量完成（P15-1…P35-1、P36-1）。**
-  本轮 P36-1：新建 `docs/46-gemm-major-accumulation.md`（+`harness/exp_gemm_major_accum.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P37 各增量完成（P15-1…P35-1、P36-1、P37-1）。**
+  本轮 P37-1：新建 `docs/47-deepjit-posthook.md`（+`src/deepjit_posthook.cpp`、
+  `harness/exp_deepjit_posthook.{sh,out.txt}`）——补上第 33 篇缓存键「第四段」`post_hook` 一直空着的列表项：
+  DeepJIT 唯一的「编译产物发布前注入用户代码」接口。三个核心事实：① **运行时机与作用域**——`nvcc` 出 cubin 后、
+  写 meta/提交缓存前，跑 `python <abs hook> <abs cubin>` 并**就地改写**（`cuda/backend.hpp:132-138`），
+  相对路径基于 `python_library_root`；② **进键方式**——`FNV1a(相对路径+文件内容)` 且**按路径线程内缓存**
+  （`cuda/options.hpp:141-156`），所以「改 hook 要重启进程」「跨进程才区分内容」；③ **override 语义**——
+  `nullopt` 继承而非关闭、空串仍算已配置，默认设了 hook 后无法 per-kernel 关闭。再由「hook 在 meta/commit
+  之前」的顺序推出三条实证：hook 改的 cubin 即最终产物、失败 hook 不发布、缓存命中不重跑 hook。另补齐
+  `Runtime<Backend>` 的 CUDA↔Ascend 抽象（CompilerInfo 哈希、两步编译、dump、发射参数；`post_hook` 是
+  **CUDA 专属**，Ascend 恒空哈希）与 Python API（`get_jit()` + 两个 WIP 特性当前不可用）。**H100 实测**——
+  直接 `g++` include 真实 DeepJIT 头文件、链接 torch 跑真实代码，8 组 ALL PASS。行号全部核对过。配套博客
+  `content/posts/mega-moe-47-deepjit-posthook`（索引页新增第 47 篇）。Hugo 构建 0 ERROR。
+  上一轮 P36-1：新建 `docs/46-gemm-major-accumulation.md`（+`harness/exp_gemm_major_accum.{py,sh,out.txt}`）
   ——把前面各篇一直当术语用的 **GEMM 入口契约**单独拆透：`nt` 是唯一实现，`nn/tn/tt` 只是
   「转置操作数（含 SF）后转调 `nt`」的薄壳（转置只改 shape/stride、不改数学）；主序一句话
   `stride(-1)==1 ? K : MN`、输入双主序、输出强制 N-major；**SM90 FP8/FP4 必须 A/B 都 K-major**
@@ -1463,7 +1508,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P36 已完成（新增 **P36-1 GEMM API 的输入主序（nt/nn/tn/tt）与输出累积契约**：
+- **下一步**：P0~P37 已完成（新增 **P37-1 DeepJIT 的 post_hook 后处理 + 磁盘产物 + CUDA↔Ascend 后端抽象**：
+  第 33 篇缓存键「第四段」终于补齐——`nvcc` 出 cubin 后、发布前跑 `python <hook> <cubin>` 就地改写；
+  「路径+内容」FNV1a 进键且按路径线程内缓存；override `nullopt`=继承、空串=已配置；由发布顺序推出
+  「hook 改的 cubin 即最终产物 / 失败不发布 / 命中不重跑」；`post_hook` 是 CUDA 专属（Ascend 恒空哈希）；
+  H100 真机直接 include 真实头文件跑 8 组 ALL PASS；见上）。
+  上一轮 **P36-1 GEMM API 的输入主序（nt/nn/tn/tt）与输出累积契约**：
   `nt` 唯一实现 + 三个转置薄壳；major 判定与 SM90 K-major 硬约束；`early_return` 统一累积语义；
   `compiled_dims` 随入口变化；H100 四入口逐位相等 + profiler 抓主序模板实参；见上）。
   上一轮 **P35-1 Muon / 对称矩阵 batched 算子 `batched_syrk`/`batched_symm`**：
@@ -1509,8 +1559,10 @@
    MXF8F6F4/MXF4 两种 UMMA、TMEM 列预算与 overlap、UTCCP 搬 SF、五类 warp；与 P22-1（SM90）成对照。
    至此「SM90 两个主 kernel + SM100 唯一主 kernel」都已拆解。
   ⑪ **JIT 运行时已讲清（P23-1）**：五段式缓存键、两级缓存、原子发布、递归 include 哈希、微源码调用形态、
-  加载/发射（`cuLaunchKernelEx` + cluster/PDL 属性）。可再补 DeepJIT 的 Ascend 后端对照、
-  「cache warmup from history / Python 编译 API」两个 WIP 特性（当前不可用）、或 post-hook 后处理机制。
+  加载/发射（`cuLaunchKernelEx` + cluster/PDL 属性）。**post-hook 后处理机制、Ascend 后端对照、
+  Python API 与两个 WIP 特性均已由 P37-1 补齐**（`docs/47`）：post_hook 的运行时机/进键/override 语义、
+  磁盘产物与发布顺序、`Runtime<Backend>` 的 CUDA↔Ascend 抽象、`get_jit()` 与「历史预热 / Python 编译 API」
+  两个不可用 WIP；H100 真机 8 组 ALL PASS。
   ⓪ **SM90 kernel 覆盖已接近完整**：FP8（1D1D/1D2D，P22-1）、BF16（P19-1）、wgrad/dgrad grouped
   （P4-2/P4-3）、MQA logits（P19/P20）、einsum（P8/P11）、prenorm（P7-2）、SF 布局（P15/P16）
   均已系统拆解；可补的 SM90 缺口已很少（如 `sm90_tf32_hc_prenorm_gemm`、`sm90_bmk_bnk_mn` 的更细粒度）。
