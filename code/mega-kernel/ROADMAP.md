@@ -627,6 +627,34 @@
       `unspecified launch failure`（-O3 代码生成问题）**，改用固定索引单元素读规避。判据不变
       （C1–C3；cluster.sync/DSM 细化了 C4）。**本轮新增实验。**
 
+### P30 实验扩展 17：cluster 内 TMA multicast（`docs/04-experiments.md` §19）
+
+- [x] **P30-1** 补齐 `docs/04` §18.6 明确留的「cluster 内的 `mbarrier`/TMA 组合未覆盖」尾巴，
+  把 P29-1 的「已到片上后跨 SM 交换（DSM）」补上另一半「全局→C×SMEM 的**载入**」：
+  Hopper **TMA multicast**（`cp.async.bulk.tensor ... .multicast::cluster`）一次读、投递到 cluster
+  内 C 个 CTA 的 SMEM。见 `docs/04-experiments.md` §19，源码 `src/tma_multicast.cu`，脚本
+  `harness/tma_multicast.sh`，原始输出 `harness/tma_multicast.out.txt`（目标卡 H100/sm90a、
+  **固定空闲 device 3**、nvcc 13.2、每配置独立进程避免 sticky、`cuTensorMapEncodeTiled` 建 2D tmap、
+  `cudaLaunchKernelEx` + `cudaLaunchAttributeClusterDimension`）。kernel 把 SMEM 切 `L` 槽（≈192 KB）、
+  每轮对 `L` 槽各发一次 TMA、单 mbarrier 累计 `L·chunk` 一次等待（深度 L 全重叠）；两模式
+  `mode0`（每 CTA 各发）/`mode1`（仅 rank0 发 multicast，mask=全）。核心结论：
+  - **语义实测确认**：mode1 只 rank0 发、其余 CTA 什么都不发，却都在**自己的** mbarrier（同一
+    SMEM 偏移）等到、全部 case **`maxerr=0`**——证明 multicast 把 transaction bytes 记到 mask 内
+    每个目的 CTA 的 mbarrier（对上 DeepGEMM `common/tma_copy.cuh:77–86` leader-only + mask 用法）；
+  - **delivery 吞吐两模式打平**：单 cluster 扫 C=2/4/8/16 deliver 215→1563 GB/s（单 CTA ~97–105 GB/s、
+    随 C 线性），多 cluster grid=128 饱和在 ~6.2–6.8 TB/s（SMEM 写入/TMA issue 成瓶颈），
+    multicast 仅一致地**快 0.1–1.1%**（chunk 4–32 KB 稳定 ~0.8–1.0%）；
+  - **收益在源侧**：ncu（C=8/grid=128/8 KB）显示 L2 read sectors 少 **2.10×**、`lts__t_bytes` 少
+    **1.84×**，而 **DRAM 字节完全相同**（71.28 MB）——因 working set `R·L·chunk≈37.5 MB` 装进 50 MB L2
+    且各 CTA 同步读同一序列（L2 去重）；**指令级源读少 C×是上界模型，真值以 ncu 的 2× 为准**；
+  - **含义**：multicast 省的是 **L2 请求/带宽**（~2×），在 megakernel 里把这块省下的 L2 带宽让给
+    其它并发 task 的载入——正是 DeepGEMM Mega MoE「**Always multicast on A**」（`heuristics/mega_moe.hpp:141–143`、
+    `impls/sm100_bf16_mega_moe.cuh:130`、`cluster_dim=(2,1,1)` `impls/sm100_bf16_mega_moe.hpp:138`，
+    一手核对 `057ca59`）选「被多 CTA 共享、最值省源带宽」那一路的理由。
+  判据：cluster kernel 满足 C1–C3、multicast/`cluster.sync` 细化 C4，仍非 C5。踩坑：`.multicast::cluster`
+  在 `-arch=sm_90` 下 ptxas advisory（须 `sm_90a`）；DSM 手工扇出的 mode2 因远端 SMEM stride 循环
+  代码生成问题（§18.6 同类）成 strawman 已移除。**本轮新增实验**；与 P29-1（§18）合成「跨 SM 搬运两跳」。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -649,7 +677,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P29-1 完成（1/1）**。补齐 `docs/04` §6.6 明确留的「sm90 的 cluster 未覆盖」尾巴：
+- 当前进度：**P30-1 完成（1/1）**。补齐 `docs/04` §18.6 明确留的「cluster 内 `mbarrier`/TMA 组合
+  未覆盖」尾巴：**TMA multicast**（一次读、投递到 cluster 内 C 个 CTA 的 SMEM）——`docs/04-experiments.md`
+  新增 **§19**，源码 `src/tma_multicast.cu`、脚本 `harness/tma_multicast.sh`、原始输出
+  `harness/tma_multicast.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、每配置独立进程）。
+  核心结论：**语义实测确认**（仅 rank0 发 multicast、其余 CTA 在各自 mbarrier 等到、全部 `maxerr=0`，
+  对上 DeepGEMM `tma_copy.cuh:77–86`）；**delivery 吞吐两模式打平**（单 cluster 215→1563 GB/s 随 C 线性、
+  多 cluster 饱和 ~6.2–6.8 TB/s，multicast 仅快 0.1–1.1%）；**收益在源侧**（ncu：L2 read sectors 少
+  **2.10×**、L2 流量少 **1.84×**，DRAM 字节相同——working set 装进 L2 且同步读同序列，L2 去重；
+  指令级源读少 C× 是上界，真值以 ncu 的 2× 为准）。含义：multicast 省 **L2 请求/带宽**，把省下的
+  让给其它并发 task——正是 DeepGEMM Mega MoE「Always multicast on A」（一手核对 `057ca59`）的理由。
+  与 P29-1（§18 DSM）合成「跨 SM 搬运两跳」。**本轮新增实验。**
+  此前 **P29-1 完成（1/1）**。补齐 `docs/04` §6.6 明确留的「sm90 的 cluster 未覆盖」尾巴：
   **Thread Block Clusters + 分布式共享内存（DSM）** 作为跨 SM「不落 HBM」的中间量交换原语。
   `docs/04-experiments.md` 新增 **§18**，源码 `src/cluster_dsm.cu`、脚本 `harness/cluster_dsm.sh`、
   原始输出 `harness/cluster_dsm.out.txt`（目标卡 H100/sm90、SMs=132、**固定空闲 device 1**、nvcc 13.2、
@@ -774,7 +813,9 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：全专题收尾（P0–P29 全部完成）**。P29-1 已把 §6.6 的「sm90 cluster 未覆盖」补成实测
+- **下一步：全专题收尾（P0–P30 全部完成）**。P30-1 已把 §18.6 的「cluster 内 `mbarrier`/TMA 组合
+  未覆盖」补成实测（`docs/04` §19：TMA multicast 一次读、C 个 SMEM 收——语义确认、delivery 打平、
+  源侧 L2 少 2×、DRAM 不变）。P29-1 已把 §6.6 的「sm90 cluster 未覆盖」补成实测
   （`docs/04` §18：Cluster + DSM 跨 SM 交换原语、`cluster.sync` vs `grid.sync`、cluster 容量边界）。
   P28-1 已把 §11.7 的「读不出卡在哪个 event」用 `-G` +
   cuda-gdb 补成数值证据（`docs/09` §13）。P27-1 已把 MPK 转引的两个手工 mega-kernel 先例（FlashMoE、
@@ -815,7 +856,8 @@
    ⑨ ~~`docs/04` §6.6「sm90 cluster 未覆盖」~~（**P29-1 完成**：Thread Block Cluster + DSM 跨 SM
    交换原语实测——DSM 远端读 ≈ 本地 SMEM、dsm/hbm 1.06–1.27×、`cluster.sync` 比 `grid.sync` 便宜
    1.5–2.2×、cluster 上限 16 block/grid 须为 C 倍数；见 `docs/04` §18）。
-   剩余可选：cluster 内 TMA multicast + `mbarrier` 组合、2D/3D cluster、`cudaLaunchAttributeProgrammaticEvent`；
+   剩余可选：~~cluster 内 TMA multicast + `mbarrier` 组合~~（**P30-1 完成**：`docs/04` §19）、2D/3D cluster、
+   SM100 `SM100_TMA_2SM_LOAD`、`cudaLaunchAttributeProgrammaticEvent`；
    把 DeepGEMM Mega Gate 的 `cluster_dim` 路径做一次 sm90 等价复刻（Mega Gate 本身是 SM100 专属）。
 - **本轮（P25-1 续）**：续做 P25-1 的「MPK 端到端跑通」，把上轮「执行不收敛」从玄学死锁推进到
   **可复现、可归因的时序竞态**。`docs/09-mpk-build.md` 新增 **§7**（收敛性诊断），新原始输出

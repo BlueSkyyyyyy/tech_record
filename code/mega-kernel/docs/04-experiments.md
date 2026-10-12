@@ -2560,3 +2560,163 @@ C=16, grid=64 / C=4, grid=132       -> ok
   设备号；本节结论用「比例」，绝对数会随共驻负载小幅漂移。
 - 未覆盖 `cudaLaunchAttributeProgrammaticEvent`（PDL 的 cluster 版本）与 cluster 内的
   `mbarrier`/TMA 组合，留作后续。
+
+## 19. cluster 内 TMA multicast：一次读、C 个 SMEM 收的广播原语（P30-1）
+
+### 19.1 问题
+
+P29-1（§18）量的是 **DSM**——数据**已经到片上**之后，跨 SM 读邻居 block 的 SMEM。它明确留了两条
+尾巴，本条补其中一条（§18.6 末行）：
+
+> 未覆盖 …… cluster 内的 `mbarrier`/TMA 组合，留作后续。
+
+Hopper 的 **TMA multicast**（`cp.async.bulk.tensor ... .multicast::cluster`）是另一档原语：
+它做的是 **load path**——把一块**全局**数据**一次读入**，由拷贝引擎同时投递到 cluster 内 C 个
+CTA 的 SMEM（每个目的 CTA 的 `mbarrier` 各自收到一次完成信号）。这正是 megakernel 里
+「权重 / 打分 / 掩码一次读、多 CTA 共享」的机制。生产案例已经在用：**DeepGEMM Mega MoE** 的
+heuristics 写死「**Always multicast on A**」并把 token 维按 `LOAD_BLOCK_M = BLOCK_M/2` 切给
+2-CTA cluster（`csrc/jit_kernels/heuristics/mega_moe.hpp:141–143`、
+`deep_gemm/include/deep_gemm/impls/sm100_bf16_mega_moe.cuh:130`，`cluster_dim=(2,1,1)` 见
+`csrc/jit_kernels/impls/sm100_bf16_mega_moe.hpp:138`）；DeepGEMM 的普通 sm90 GEMM 也按
+`kIsTMAMulticastOnA` 在 A/B 之间选一路做 multicast（`impls/sm90_fp8_gemm_1d2d.cuh:127–202`）。
+
+本节回答三件事：(1) multicast 广播写出来的结果对不对、语义是什么？(2) 相对「每个 CTA 各自 TMA
+载入同一块」，delivery 吞吐与源侧（L2/DRAM）流量差多少？(3) 墙钟收益有多大、取决于什么？
+
+### 19.2 方法
+
+程序 `src/tma_multicast.cu`，脚本 `harness/tma_multicast.sh`，原始输出
+`harness/tma_multicast.out.txt`（目标卡 H100 / sm90a，SMs=132，**固定空闲 device 3**，nvcc 13.2，
+**每配置独立进程**——cluster launch failure 会 sticky 污染 context）。host 用
+`cuTensorMapEncodeTiled` 建 2D tensor map（`{256, rows}`，box `{256, box1}`，swizzle/interleave
+全 off），设备用 `cudaLaunchKernelEx` + `cudaLaunchAttributeClusterDimension` 设 cluster 维。
+
+kernel 把 SMEM 切成 `L` 个 chunk 槽（≈192 KB），**每轮**对 `L` 个槽各发一次 TMA（同一源的 `L`
+个不同分段），用一个 `mbarrier` 累计 `L·chunk` 字节后**一次等待**——于是 TMA 完全重叠（深度 = L），
+测的是峰值广播吞吐而非单跳延迟。`R` 轮后线程 0 把累加和写出，对照解析参考算 `maxerr`。两种模式：
+
+- **mode 0（独立）**：每个 CTA 各发 `L` 次普通 TMA（`shared::cluster.global...mbarrier`，无 multicast），
+  C 个 CTA 各读同一块一遍。
+- **mode 1（multicast）**：**仅 rank0** 发 `L` 次
+  `...shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster`，`mask = (1<<C)-1`；
+  所有 CTA 在自己的 `mbarrier`（**同一 SMEM 偏移**）上等待。
+
+两个指标：**deliver**（全 grid 实际写进 SMEM 的字节 / 时间，程序计时）与 **源侧读取**
+（ncu 的 `lts__t_sectors_srcunit_tex_op_read.sum` / `lts__t_bytes.sum` / `dram__bytes_read.sum`）。
+注意程序里 `src-read` 那一列是**指令级模型**（mode 1 = 每 cluster 一份、mode 0 = 每 CTA 一份），
+**ncu 才是真值**（见 §19.4）。
+
+### 19.3 结果
+
+**A. 单 cluster（grid=C）扫 C（chunk=8KB, R=500）**
+
+```text
+   C | mode0 deliver GB/s | mode1 deliver GB/s | mode1/mode0
+ ----+---------------------+---------------------+------------
+   2 |       215.6         |       216.0         |   1.002
+   4 |       429.8         |       430.3         |   1.001
+   8 |       845.2         |       850.1         |   1.006
+  16 |      1553.9         |      1562.7         |   1.006
+```
+
+delivery 吞吐**随 C 线性放大**（单 CTA ≈ 97–105 GB/s），两模式墙钟几乎相同（差 ≤0.6%）。
+**所有配置 `maxerr = 0.00000`**——multicast 逐位正确。
+
+**A2. 多 cluster（grid=128）扫 C（chunk=8KB, R=500）**
+
+```text
+   C | mode0 GB/s | mode1 GB/s | mode1/mode0
+ ----+------------+------------+------------
+   4 |  6730.9    |  6746.9    |   0.998
+   8 |  6692.0    |  6767.9    |   0.989
+  16 |  6188.7    |  6194.0    |   0.999
+```
+
+两模式都在 ~6.2–6.8 TB/s **饱和**（SMEM 写入 / TMA issue 成瓶颈），multicast 一致地**快 0.1–1.1%**。
+
+**B. chunk 扫描（C=8, grid=128, R=500）**
+
+```text
+ chunk | mode0 GB/s | mode1 GB/s | mode1/mode0
+ ------+------------+------------+------------
+   4KB |  5494.3    |  5551.5    |   0.990
+   8KB |  6693.9    |  6762.5    |   0.990
+  16KB |  6692.5    |  6744.1    |   0.992
+  32KB |  6689.5    |  6742.7    |   0.992
+```
+
+multicast 稳定快 ~0.8–1.0%；delivery 吞吐在 8KB 后饱和。
+
+**D. ncu 源侧流量（C=8, grid=128, chunk=8KB, R=200；`-c 1`）**
+
+```text
+                       |    mode0    |    mode1    | mode0/mode1
+ ----------------------+-------------+-------------+------------
+ L2 read sectors       |  41,219,228 |  19,660,800 |    2.10x
+ lts__t_bytes.sum      |   1.51 GB   |   821.8 MB  |    1.84x
+ dram__bytes_read.sum  |   71.28 MB  |   71.28 MB  |    1.00x
+```
+
+**C. cluster.sync() sanity（对比 P29-1）**：C=2/8/16 = 399.8 / 428.7 / 469.2 ns/sync
+（P29-1 在 grid=128 时是 504–767 ns，本节 grid=C 更小故更低）。
+
+### 19.4 读法
+
+1. **multicast 语义被实测确认**：mode 1 只有 rank0 发指令、其余 CTA 什么都不发，却都在**自己的**
+   `mbarrier`（同一 SMEM 偏移）上等到——且 `maxerr=0`。这证明
+   **`.multicast::cluster` 把 transaction bytes 记到 mask 内每个目的 CTA 的 `mbarrier` 上**
+   （拷贝引擎按 mask 把数据分别写进各 CTA 同偏移的 SMEM）。这与 DeepGEMM 的用法一致：
+   `common/tma_copy.cuh:77–86` 正是「`block_rank_in_cluster()==0` 才发 `LoadMulticast`、
+   mask=`(1<<num_tma_multicast)-1`、barrier 用 leader 自己的 `mbarrier` 指针」。
+2. **delivery 吞吐两模式打平**：广播循环跑到饱和时，瓶颈在 **SMEM 写入 / TMA issue**，不在源侧，
+   故 multicast 只赢 ~1%（6.2–6.8 TB/s vs 同样量级）。**广播的能量守恒**——无论怎么读，
+   最终都要往 C 个 SMEM 各写 `chunk` 字节。
+3. **multicast 的收益在源侧，且比「C×」小**：ncu 显示 L2 read sectors 少 **2.10×**、L2 流量少
+   **1.84×**；而 **DRAM 字节完全相同**（71.28 MB）。原因两点：
+   - 本实验 `grid=128` 个 CTA 读的是**同一序列**的分段、且被 barrier 同步到同一时刻，mode 0 的 C
+     份重复读**被 L2 合并/命中**（首读命中 L2 后其余命中），故 **DRAM 并不因 multicast 而减少**；
+   - L2 对并发同址请求本身有合并，使 mode 0 的**实测** L2 transaction 只比 mode 1 多 ~2×，
+     而非指令级的 C=8×。**指令级 `src-read` 列（mode1 少 ~8×）是上界模型，真值以 ncu 为准。**
+4. **所以墙钟收益取决于瓶颈落在哪一档**：SMEM-write 主导 → 两模式打平（本实验）。
+   multicast 真正省的是 **L2 请求/带宽**（2×）——在 megakernel 里，这块被省下的 L2 带宽可以给
+   **其它并发 task 的载入**用（DeepGEMM Mega MoE 把 A 的 multicast 与 B/权重的独立载入叠在一起，
+   heuristics 注释 `Always multicast on A` 就是选「被多 CTA 共享、最值得省源带宽」的那一路）。
+
+### 19.5 与判据 / MPK / 生产案例的关系
+
+- **对上 P29-1（§18）**：P29-1 量「已到片上后跨 SM 交换」（DSM，dsm/hbm 1.06–1.27×、`cluster.sync`
+  便宜 1.5–2.2×）；本节量「**从全局到多个 SMEM 的载入**」（TMA multicast：L2 事务少 2×、指令级源读
+  少 C×、DRAM 不变）。**两条合起来是「跨 SM 数据搬运」的完整两跳**：global→C×SMEM（本节）与
+  SMEM→邻居 SMEM（§18）。
+- **对上 P24-1（§17）**：§17 量「落/不落 HBM」的全张量往返；本节量「同一块**同时**投递给 C 个
+  CTA」时源侧 L2 请求的减少——是**不落 HBM**之外、**跨 SM 复用**这一维上的省流量。
+- **对上 MPK**：MPK 的粒度是「一个 task = 一个 CTA」（`docs/07` §0），跨 task 中间量走 paged
+  SMEM / ring buffer（§5.3 行 1312–1325），**不以 Hopper cluster 为一等公民**；论文/快照未见对
+  TMA multicast 的显式使用。故本节是**实现层可选的一档**，与 MPK「局部、片上交换」目标一致
+  （`docs/03` §3.3、`docs/06` §3）。
+- **对上生产案例（一手核对，DeepGEMM `057ca59`）**：Mega MoE **2-CTA cluster + multicast on A**
+  （`heuristics/mega_moe.hpp:141–143`、`impls/sm100_bf16_mega_moe.cuh:130`、`impls/sm100_bf16_mega_moe.hpp:138`），
+  且 DeepGEMM 把 cluster multicast 收敛成一个 `tma::copy(...num_tma_multicast)` 包装
+  （`common/tma_copy.cuh:56–106`，leader-only + mask，正是本节验证的形态）。fp8/fp4 版
+  Mega MoE（`impls/sm100_fp8_fp4_mega_moe.cuh:165`）同。**Mega Gate** 用 `cluster_dim=num_mma_ctas`
+  （`docs/02` §1.2）但本节未在其源码里核到 A/B 的 multicast 使用，故不声称。
+- **判据（C1–C5，`docs/00` §3）**：cluster kernel 满足 C1+C2+C3，`cluster.sync`/multicast 细化了
+  **C4**；**仍不是 C5**（无固定 worker/scheduler 动态派发）。与 P29-1 同档。
+
+### 19.6 局限与踩到的坑
+
+- **ptxas advisory**：`.multicast::cluster` 在 `-arch=sm_90` 下会告警「应使用 `sm_90a`/`sm_100a` 等
+  目标，否则在未来架构上可能大幅降速」。本实验用 **`-arch=sm_90a`**（告警仍在，因为 PTX target 串
+  打成 `compute_90`，属 advisory，H100 上功能/性能正常）。
+- **DRAM 不变是本实验设置的产物**：working set（`R·L·chunk = 200·24·8KB ≈ 37.5 MB`）**装得进 50 MB
+  L2**，且所有 CTA 同步读同一序列 → L2 去重。若数据大到反复跨 L2，multicast 才会在 **DRAM** 层面
+  显现（但也依赖各 CTA 读的时刻是否分散，故本条**未给出 DRAM 收益的数字**，只给 L2 层面的实测）。
+- **deliver 饱和在 ~6.6 TB/s**：这是 SMEM 写入 / TMA issue 的上限，不是源侧带宽；故「墙钟打平」
+  是**饱和区间**的结论，launch/延迟受限区间另论。
+- **单跳延迟未单独测**：本节只测了重叠后的峰值吞吐；`L`（流水深度）人为取到 ≈192 KB SMEM 上限，
+  未扫 `L`。cluster 上限仍是 16 block、grid 须为 C 的倍数（P29-1 §18.3），故 `grid=132` 非法。
+- **DSM 手工扇出未纳入对照**：曾实现「rank0 读 + 各 CTA 用 DSM 把数据拷进本地 SMEM」的 mode 2，
+  但逐元素/`float4` 的远端 SMEM stride 循环受 §18.6 同类代码生成问题拖累（比 multicast 慢 ~19×），
+  属**不平等的 strawman**，已移除；「读一次 + 片上扇出」的成本以 P29-1 的 DSM 数字为准。
+- 未测 2D/3D cluster、`cudaLaunchAttributeProgrammaticEvent`（PDL 的 cluster 版）与 SM100 的
+  `SM100_TMA_2SM_LOAD`（DeepGEMM sm100 路径用的是后者）。留作后续。
