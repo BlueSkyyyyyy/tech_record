@@ -1070,6 +1070,36 @@
       ⑥ `einsum("bhd,bhr->hdr")` `calc_diff=3.33e-16`/relerr 2.14e-8、两次逐位相等、266.6us/8 TFLOPS/2020 GB/s
       （K=batch 极小 → 访存受限）。配套博客 `content/posts/mega-moe-45-muon-syrk-symm`（索引页新增第 45 篇）。
 
+### P36 增量（opt-in，补齐前面各篇一直当术语用的 GEMM 入口契约）
+
+- [x] **P36-1** **GEMM API 的输入主序（nt/nn/tn/tt）与输出累积（early_return）契约**
+      （`csrc/apis/gemm.hpp`：`early_return`、fp8_fp4/bf16 的 nt/nn/tn/tt、m_grouped 的 nn 变体、
+      k_grouped 的 tn/nt；`csrc/utils/layout.hpp`：`major_check`/`get_major_type_ab`/
+      `check_major_type_cd`/`fp8_fp4_requires_k_major`/`check_ab_fp8_fp4`）。
+      第 10/12/13/22/27/28/32/35 篇反复用 `nt`/`K-major`/`C/D 累积`/`compiled_dims` 却从没系统讲过，
+      本篇把 GEMM 入口层单独拆透。**H100 真机可跑**。
+      → `docs/46-gemm-major-accumulation.md`（真实行号核对）：**`nt` 是唯一实现，`nn/tn/tt` 全是
+      「把操作数（含 SF）转置后转调 `nt`」的薄壳**（`gemm.hpp:135-179`/`:537-565`）；主序判定一句话
+      `stride(-1)==1 ? K : MN`（`utils/layout.hpp:29-33`，`major_check :18-27` 要求两维之一连续、
+      3D 默认 batch 连续）、**输出强制 N-major**（`check_major_type_cd :35-40`）；**SM90 的 FP8/FP4
+      必须 A/B 都 K-major**（`fp8_fp4_requires_k_major :42-45` = arch9 恒真 / SM100 仅 FP4×FP4，
+      因 SM90 WGMMA 只有 K-major B 路径），推论 `fp8_fp4_gemm_nn` 对连续 `[K,N]` B 在 H100 必被拒
+      （`gemm.hpp:94`）；packed FP4 的**逻辑形状随主序翻倍**（`check_ab_fp8_fp4 :66-73`）。
+      grouped：`m_grouped_*_nn_contiguous`（`:252-267`/`:625-633`）沿 `(1,2)` 转置 B、不支持 PSUM；
+      wgrad 的 K-grouped 在 SM90 是 `nt`+`Major::K,K`（`:373-427`）在 SM100 是 `tn`+`Major::MN,MN`
+      （`:320-371`，`:366`），BF16 只有 `tn`（`:676-722`，SM90 `:714` 且 C 必填 `:710`）。
+      **`early_return`（`:17-53`）统一输出累积**：m/n==0 空转（`:21-22`）、量化 D 永不累积（`:26`）、
+      C==D 原地 / C≠D 先拷（`:27-29/50-51`）、k==0 退化 copy/zero 且清零 SFD（`:40-47`）、FP8 D 必带
+      SFD（`:33`）、C 同 dtype/主序（`:35-36`）；`compiled_dims` 默认随入口变（nt/nn=`nk`、tn/tt=`mn`，
+      `:842/850/858/866/935/947/953`）。H100 实测 `harness/exp_gemm_major_accum.{py,sh,out.txt}`：
+      ① bf16 四入口输出**逐位相等**、`nt` 用 `.T.contiguous().T` 造 MN-major A/B 也逐位相等；
+      ② `fp8 nt` relerr 7.0e-4（SF 全 1 隔离纯 FP8 舍入）、`fp8 nn` 被拒在 `gemm.hpp:94`；
+      ③ m_grouped nt/nn B=K/MN 都算对且逐位相等；④ 累积契约：分离 C 与原地 C==D **逐位相等**、
+      k==0 全零/D==C、m/n==0 空转、C dtype/主序不符被拒；⑤ profiler 抓 `sm90_bf16_gemm_impl` 的
+      主序模板实参 `(K,K)/(K,MN)/(MN,MN)/(MN,K)` 与 `compiled_dims` 化的维 `(0,384,256)/(512,384,0)`，
+      默认走 cuBLASLt `nvjet_sm90_tst_..._TNT`（第 27 篇）。配套博客
+      `content/posts/mega-moe-46-gemm-major-accumulation`（索引页新增第 46 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1094,8 +1124,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P35 各增量完成（P15-1…P34-1、P35-1）。**
-  本轮 P35-1：新建 `docs/45-muon-syrk-symm.md`（+`harness/exp_muon_syrk_symm.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P36 各增量完成（P15-1…P35-1、P36-1）。**
+  本轮 P36-1：新建 `docs/46-gemm-major-accumulation.md`（+`harness/exp_gemm_major_accum.{py,sh,out.txt}`）
+  ——把前面各篇一直当术语用的 **GEMM 入口契约**单独拆透：`nt` 是唯一实现，`nn/tn/tt` 只是
+  「转置操作数（含 SF）后转调 `nt`」的薄壳（转置只改 shape/stride、不改数学）；主序一句话
+  `stride(-1)==1 ? K : MN`、输入双主序、输出强制 N-major；**SM90 FP8/FP4 必须 A/B 都 K-major**
+  （WGMMA，`fp8_fp4_requires_k_major` 在 arch9 恒真），推论 `fp8 nn` 在 H100 必被拒；packed FP4
+  逻辑形状随主序翻倍；`early_return` 统一输出累积（m/n==0 空转、k==0 退化、C==D 原地、C≠D 先拷、
+  量化 D 不累积）；`compiled_dims` 随入口 `nk`/`mn`。**H100 实测**：bf16 四入口逐位相等、`nt`
+  双主序通吃、`fp8 nn` 被拒 `gemm.hpp:94`、分离 C 与原地 C==D 逐位相等、profiler 抓到主序模板实参
+  `(K,K)/(K,MN)/(MN,MN)/(MN,K)` 与编译维。行号全部核对过。配套博客
+  `content/posts/mega-moe-46-gemm-major-accumulation`（索引页新增第 46 篇）。
+  上一轮 P35-1：新建 `docs/45-muon-syrk-symm.md`（+`harness/exp_muon_syrk_symm.{py,sh,out.txt}`）
   ——补上 DeepGEMM 里**两个从头到尾就是 cuBLASLt-only 的窄接口**：`deep_gemm.batched_syrk`
   （`D=A·Aᵀ`）与 `deep_gemm.batched_symm`（`D=A·B`，A 对称），面向 **Muon 优化器的 Newton-Schulz
   迭代**。它们在第 27 篇的「可回退 / 无条件 / cuBLASLt-only」三分里属于第三类：无自研 kernel、
@@ -1423,7 +1463,10 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P35 已完成（新增 **P35-1 Muon / 对称矩阵 batched 算子 `batched_syrk`/`batched_symm`**：
+- **下一步**：P0~P36 已完成（新增 **P36-1 GEMM API 的输入主序（nt/nn/tn/tt）与输出累积契约**：
+  `nt` 唯一实现 + 三个转置薄壳；major 判定与 SM90 K-major 硬约束；`early_return` 统一累积语义；
+  `compiled_dims` 随入口变化；H100 四入口逐位相等 + profiler 抓主序模板实参；见上）。
+  上一轮 **P35-1 Muon / 对称矩阵 batched 算子 `batched_syrk`/`batched_symm`**：
   DeepGEMM 里两个 cuBLASLt-only 的窄接口——2D↔3D 统一、放宽 batch 连续性（strided-batch）、
   强制 FAST_TF32；H100 真机 8 个真实 Muon 形状实测 + 契约检查 + kernel 名；见上）。
   上一轮 P34-1 共享专家分支：Mega MoE 里唯一「不走 dispatch 却走

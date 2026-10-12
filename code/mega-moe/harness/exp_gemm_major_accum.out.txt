@@ -1,0 +1,70 @@
+NVIDIA H100 80GB HBM3, 9.0
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 | NVIDIA H100 80GB HBM3 | cc=(9, 0) | arch_major=9 | device_num_sms=132
+
+==============================================================================
+A) bf16 nt / nn / tn / tt：四个入口算同一数学 D = A @ B^T（转置薄壳）
+==============================================================================
+entry | eff.a eff.b |    passed a    passed b |  calc_diff     relerr
+  nt |     K     K |    (256, 1)    (256, 1) |  3.892e-11  8.823e-06
+  nn |     K    MN |    (256, 1)    (384, 1) |  3.892e-11  8.823e-06
+  tn |    MN    MN |    (512, 1)    (384, 1) |  3.892e-11  8.823e-06
+  tt |    MN     K |    (512, 1)    (256, 1) |  3.892e-11  8.823e-06
+  nt vs nn  逐位相等 = True
+  nt vs tn  逐位相等 = True
+  nt vs tt  逐位相等 = True
+  nt(MN-A,K-B)     calc_diff=3.892e-11  与 nt 逐位相等=True
+  nt(K-A,MN-B)     calc_diff=3.892e-11  与 nt 逐位相等=True
+  nt(MN-A,MN-B)    calc_diff=3.892e-11  与 nt 逐位相等=True
+  → 四个入口数学一致（转置只改 shape/stride，不改数值）；nt 本身也支持两种主序。
+
+==============================================================================
+B) major 检测（stride(-1)==1 → K-major）与 SM90 的 K-major 硬约束
+==============================================================================
+  get_major_type_ab 只看最后一维 stride（csrc/utils/layout.hpp:30-33）：
+    A   [m,k] 连续     stride=    (256, 1)  → K-major
+    A   [m,k] MN-major(.T.contig().T) stride=    (1, 512)  → MN-major
+    A.mT[k,m] 连续     stride=    (512, 1)  → K-major
+    B   [n,k] 连续     stride=    (256, 1)  → K-major
+    B   [n,k] MN-major(.T.contig().T) stride=    (1, 384)  → MN-major
+    B.mT[k,n] 连续     stride=    (384, 1)  → K-major
+
+  fp8_fp4_gemm_* 在 SM90 要求 A/B 都 K-major（fp8_fp4_requires_k_major，layout.hpp:42-45）：
+    fp8 nt (A/B 都 K-major)      → 通过  relerr=7.015e-04  （SF 全 1，隔离出纯 FP8 舍入）
+    fp8 nn (B→MN-major)          → 被拒 RuntimeError: Assertion error (csrc/apis/gemm.hpp:94): major_b == cute::UMMA::Major::K
+
+==============================================================================
+C) m_grouped bf16 nt_contiguous vs nn_contiguous（B 沿 (1,2) 转置）
+==============================================================================
+  alignment=128  G=2 m=256 n=256 k=512
+  nt: major_b=K  calc_diff=2.203e-09  relerr=6.637e-05
+  nn: major_b=MN  calc_diff=2.203e-09  relerr=6.637e-05
+  nt vs nn 逐位相等 = True
+
+==============================================================================
+D) 输出累积契约（early_return，csrc/apis/gemm.hpp:17-53）
+==============================================================================
+  D1 无 C            : relerr=1.665e-03（纯乘积）
+  D2 分离 C          : relerr=2.341e-03  (C+AB)  vs  纯 AB relerr=8.776e-02
+  D3 原地 C==D       : relerr=2.341e-03  与 D2(分离C) 逐位相等 = True
+  D4 k==0, c=None    : D 全零 = True
+  D5 k==0, c=C       : D==C 逐位 = True
+  D6 m==0            : launch 空转、无异常（D 形状 [0,256]）
+  D7 n==0            : launch 空转、无异常（D 形状 [256,0]）
+  D8 C dtype 不符     : 被拒 RuntimeError
+  D9 C 非行主序       : 被拒 RuntimeError
+  D10 bf16 入口给 FP8 D : 被拒 RuntimeError（fp8_fp4_gemm_nt 只收 bf16/fp32 D）
+
+==============================================================================
+E) 抓真实发射的 kernel 名（torch.profiler）
+==============================================================================
+  deterministic=False（默认，bf16 稠密→cuBLASLt）:
+    nvjet_sm90_tst_64x40_64x16_2x4_h_bz_TNT
+  deterministic=True（强制 DeepGEMM）:
+    nt : void deep_gemm::sm90_bf16_gemm_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 0u, 384u, 256u, 1u, 64u, 32u, 64u, 128u, 128u, 64u, 16u, 128u, 128u, 1u, false, 132u, (deep_gemm::GemmType)0, false, cutlass::bfloat16_t>(int*, unsigned int, unsigned int, unsigned int, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st)
+    nn : void deep_gemm::sm90_bf16_gemm_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)1, 0u, 384u, 256u, 1u, 64u, 32u, 64u, 128u, 64u, 64u, 16u, 128u, 128u, 1u, false, 132u, (deep_gemm::GemmType)0, false, cutlass::bfloat16_t>(int*, unsigned int, unsigned int, unsigned int, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st)
+    tn : void deep_gemm::sm90_bf16_gemm_impl<(cute::UMMA::Major)1, (cute::UMMA::Major)1, 512u, 384u, 0u, 1u, 64u, 32u, 64u, 128u, 64u, 64u, 16u, 128u, 128u, 1u, false, 132u, (deep_gemm::GemmType)0, false, cutlass::bfloat16_t>(int*, unsigned int, unsigned int, unsigned int, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st)
+    tt : void deep_gemm::sm90_bf16_gemm_impl<(cute::UMMA::Major)1, (cute::UMMA::Major)0, 512u, 384u, 0u, 1u, 64u, 32u, 64u, 128u, 128u, 64u, 16u, 128u, 128u, 1u, false, 132u, (deep_gemm::GemmType)0, false, cutlass::bfloat16_t>(int*, unsigned int, unsigned int, unsigned int, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st)
+
+全域完成。
