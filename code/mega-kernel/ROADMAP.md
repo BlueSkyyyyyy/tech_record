@@ -77,8 +77,14 @@
       task description 预取 行 1364–1368）；实现/配置（44K C++/42K CUDA/10K Python、semaphore、
       环形缓冲 atomicAdd、Table 1 行 1437–1460）；§6.6 三消融（pipeline 1.2–1.3×、overlap 1.1×、
       launch reduction 293→0.28%）。纯资料分析。
-- [ ] **P2-4** 评估（§6）：相对 PyTorch/vLLM/SGLang 的 1.0–1.7× 延迟、TP 下最高 10× 吞吐；
-      复现要点与局限（模型/GPU 代际/batch）。（注：评估实际在 §6，非早期误记的 §5。）
+- [x] **P2-4** 评估（§6）完成：见 `docs/01-mpk-paper.md` §5（逐条贴 §6 行 1369–1737 + §7 行 1739–1764）。
+      §6.3 单 batch 相对 SGLang/vLLM **1.0–1.7×**（Qwen3-8B/A100 14.5→12.5ms，逼近 ~10ms 硬件下界；
+      vs 原生 PyTorch >10×）；§6.4 MoE 混合负载均衡 + fused gather-GEMM（gather 占 SGLang 11%）；
+      §6.5 TP 下 8×H100 相对 PyTorch 最高 **10×**、相对 SGLang/vLLM **1.1–1.4×**；
+      §6.6/§6.7 消融表格化归档；§7 Discussion 边界（寄存器固定为各 task 最大值、per-task codegen
+      是唯一硬件相关组件、手写 kernel 可包成 task）；§5.8 给复现要点与 **8 条局限**
+      （仅 LLM serving / offline batched / batch≤16 / 多 GPU 只测 dense TP / 每 batch size 一张静态图 /
+      去中心化调度未探全局协调 / 寄存器上限 / page size 固定）。纯资料分析。
 
 ### P3 生产案例（`docs/02-production-cases.md`）
 
@@ -126,7 +132,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 进行中（3/4）**。
+- 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -156,11 +162,19 @@
     事件驱动执行、JIT/AOT 混合下发（两步 vs 一步同步、global barrier 分界）、三项运行时优化
     （paged shared memory / cross-task software pipelining / task descriptor 预取）、
     §6.6 消融（pipeline 1.2–1.3×、compute–comm overlap 1.1×、launch 293→in-kernel scheduler 0.28%）。
-    纯资料分析，复用 P0-3/P1-2 实测佐证。
-- **下一步：P2-4** 评估（`docs/01-mpk-paper.md` §5）：§6 总览（四大问题）、§6.3 端到端
-  （相对 vLLM/SGLang 的 1.0–1.7× 延迟、TP 下最高 10× 吞吐）、§6.4 动态负载、§6.5 多 GPU 扩展、
-  §6.6 运行时消融（已在 P2-3 引用）、§6.7 编译期消融（已在 P2-2 引用）；给出复现要点与局限
-  （模型/GPU 代际/batch）。纯资料分析。
+     纯资料分析，复用 P0-3/P1-2 实测佐证。
+  - **P2-4** 评估（§6 + §7）完成：`docs/01-mpk-paper.md` §5。§6 四问组织（行 1371–1390）；
+    §6.1/§6.2 实现与设定（`torch.compile(backend=MPK)`、offline batched、batch 1–16、
+    prompt 64/生成 1024、page 32KB、5 模型×3 代 GPU）；§6.3 单 batch 1.0–1.7×
+    （Qwen3-8B/A100 14.5→12.5ms；vs 原生 PyTorch >10×）；§6.4 MoE 混合负载均衡 + fused
+    gather-GEMM（11%）；§6.5 TP/8×H100 相对 PyTorch 最高 10×、相对 SGLang/vLLM 1.1–1.4×；
+    §6.6/§6.7 消融归档；§7 Discussion（寄存器固定为各 task 最大值、per-task codegen 唯一硬件相关、
+    手写 kernel 可包成 task）；§5.8 复现要点 + 8 条局限（仅 LLM serving / offline / batch≤16 /
+    多 GPU 只测 dense TP / 每 batch size 一张静态图 / 去中心化调度 / 寄存器上限 / page size 固定）。
+- **下一步：P3-1** DeepGEMM **Mega MoE**（`docs/02-production-cases.md`）：dispatch+GEMM+SwiGLU+combine
+  单 kernel、symmetric memory、ring buffer 调度；与 `../mega-moe/` 专题交叉引用、避免重复。
+  随后 P3-2（Mega Gate / Mega mHC）、P3-3（Kimi K3 fused mega-kernels、hpc-ops roadmap），
+  再 P4（相关技术对照）、P5（launch 开销等本机实验）、P6（汇总）。
 
 ## 阻塞
 

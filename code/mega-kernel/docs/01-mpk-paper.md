@@ -10,7 +10,7 @@
 > DeepGEMM MoE 的前/反向实现细节见 `../mega-moe/` 专题——本文遇到时只给坐标、不展开。
 >
 > 进度：**P2-1 已完成**（§3，下文 §2）；**P2-2 已完成**（§4，下文 §3）；
-> **P2-3 已完成**（§5 + §6.1/§6.6，下文 §4）；P2-4 评估（§6）待续。
+> **P2-3 已完成**（§5 + §6.1/§6.6，下文 §4）；**P2-4 已完成**（§6 + §7，下文 §5）。
 
 ## 1. 全篇结构一页（方便定位）
 
@@ -446,6 +446,164 @@ event、至多一个 triggering event** 的形式。这样每个 task descriptor
 > （`harness/mitigations.out.txt`）；把「N 小 kernel 串行 vs CUDA Graph vs 单 persistent kernel」的
 > **端到端 launch 开销对比实验**留给 P5。
 
-## 5. P2-4 评估（§6）
+## 5. P2-4 评估（§6，行 1369–1737）
 
-（待续）
+> 承接：§4（P2-3）已拆开 in-kernel runtime 的三个机制，本节看这些机制在**真实 LLM serving** 上的
+> 端到端收益，并划清「论文证明了什么、没证明什么」。§6 的运行时消融（§6.6）与编译期消融（§6.7）
+> 已分别在 P2-3、P2-2 引用，本节只做**汇总回顾**，不重复展开；重点放在端到端（§6.3）、
+> MoE 动态负载（§6.4）、多 GPU（§6.5）三块，以及 §7 Discussion（行 1739–1764）给出的**边界**。
+
+### 5.1 §6 组织：四个问题（行 1371–1390）
+
+原文（行 1371–1383）明确 §6 要回答**四个问题**，对应四个小节：
+
+| 问题 | 小节 | 快照行 | 一句话 |
+|---|---|---|---|
+| mega-kernel vs kernel-per-operator | §6.3 端到端 | 1467–1517 | 相对 vLLM/SGLang 的延迟/吞吐 |
+| 支持动态负载 | §6.4 MoE 案例 | 1520–1553 | 混合负载均衡 + fused gather-GEMM |
+| 多 GPU 可扩展性 | §6.5 多 GPU | 1556–1580 | TP 下 8×H100 |
+| 运行时优化贡献 | §6.6 消融 | 1583–1628 | pipelining / overlap / launch |
+
+论文把评测**聚焦在 LLM serving**（行 1384–1390），两个理由：一是 serving 有 SGLang/vLLM
+这类高度优化的 kernel-per-operator 基线，对照「严格」；二是 serving 天然动态（batch size、序列长度、
+prefill/decode 混合逐轮变化），能同时压测编译器与运行时。论文强调二者与模型无关
+（「the MPK compiler and runtime are model-agnostic」，行 1390），但**未给出 serving 之外的评测**。
+
+### 5.2 §6.1–§6.2 实现与实验设定（复现要点，行 1391–1464）
+
+- **接入方式**（§6.1，行 1393–1395）：MPK 作为 **PyTorch compiler backend**，用法即
+  `torch.compile(backend=MPK)`；生成 mega-kernel 并返回一个可调用的 PyTorch function，
+  **每次调用只发一次 launch**。这是「最小改动 mega-kernel 化」（行 1514 呼应）。
+- **实现规模**（行 1396–1407，P2-3 已引）：约 44K C++ / 42K CUDA / 10K Python；
+  in-kernel runtime 用 CUDA + device-memory semaphore；compute task 由 **Mirage superoptimizer**
+  生成；跨 GPU 通信走 **NVSHMEM**。
+- **评测模型与硬件**（§6.2，行 1457–1464）：**5 个 LLM**（含 dense 与 MoE，跨多个规模），
+  **三代 NVIDIA GPU：A100 / H100 / B200**；配置见表 1（行 1437–1460，P2-3 已引：
+  A100 108 SM、H100 132 SM、B200 148 SM，均预留 4 SM / 16 scheduler warp）；
+  shared-memory page size 统一 **32 KB**（A100/H100/B200 → 5/7/7 页/SM）。
+- **负载设定**（行 1464）：**offline batched-inference**，最大 batch size 在 **1–16** 间扫；
+  每条请求 **prompt 64 token、生成 1024 token**。论文用 offline 设定「消除请求并发不足引起的
+  服务端停顿」，以获得可控对比——这同时意味着**未覆盖在线到达分布（arrival pattern）**。
+
+### 5.3 §6.3 端到端：单 batch 延迟 1.0–1.7×（行 1467–1517）
+
+- **基线**（行 1469–1497）：SGLang 与 vLLM，二者都是 kernel-per-operator，依赖 FlashInfer /
+  FlashAttention（attention）、cuBLAS/cuTLASS（GEMM）、CUDA/Triton（其余）；均 bf16、启用
+  paged attention 与 continuous batching。**关键架构差异**：MPK 把 **page allocation 与 request
+  scheduling 直接做进 mega-kernel**，而两个基线在 **CPU** 上做，额外承担 host–device 同步与下发开销。
+- **主结果**（行 1499–1504）：单 batch 推理下，MPK 跨模型/硬件提升 **1.0–1.7×**；
+  **越小的模型、越新的 GPU 代际收益越明显**——因为每 token 计算量越小、GPU 越快，三类开销越突出：
+  (1) kernel-switch 开销（即便用了 CUDA Graphs）；(2) kernel 边界造成 pipeline bubble、阻断
+  cross-task pipelining（Figure 2）；(3) 基线在 CPU 上做 page allocation + request scheduling。
+- **绝对锚点**（行 1513）：Qwen3-8B 在 **A100** 上，MPK 把 per-token decode 从
+  vLLM/SGLang 的 **14.5 ms 降到 12.5 ms**，逼近论文估算的**硬件下界 ~10 ms**
+  （按 16 GB 参数 @ 1.6 TB/s 带宽）。这个「离下界还有 25%」的量级很关键：说明端到端
+  已非常接近纯内存搬运极限，剩余差距即计算/通信/调度。
+- **可编程性**（行 1514–1517）：论文额外主张 MPK 的**开发效率**优势——基线需大量工程为新模型
+  接专用 kernel，MPK 只需几行 PyTorch 改动即可 mega-kernel 化；相对**原生 PyTorch** 超过 **10×**。
+  （注：10× 是 vs 原生 PyTorch，不是 vs vLLM/SGLang；后者是 1.0–1.7×。）
+
+### 5.4 §6.4 MoE 案例：动态负载两项优化（行 1520–1553）
+
+- **MoE 用同一套 task 抽象表达**（行 1523–1536）：一个 MoE block 被 lower 成
+  routing → dispatch → expert compute → combine 的 **SM 级 task 链**；dispatch/combine 的
+  all-to-all 通信**与 expert 计算放进同一张 tGraph、由同一事件驱动 scheduler 分发**——
+  于是通信-计算在事件触发时**自动重叠，不依赖 CUDA stream 或 host 侧同步**。这是把
+  `docs/00` §2.5「通信-计算 overlap 的双 kernel 方案」（DeepEP/FlashMLA）对照到 MPK 范式的位置。
+- **Hybrid workload balancer**（行 1537–1550）：每专家 token 数只有运行时才知道，静态划分
+  在倾斜路由下会严重不均，全动态 Grouped-GEMM 又有细粒度同步开销。MPK 取**混合策略**：
+  编译期按专家切 task，运行时每一 task 拿到 `topk-softmax` 产出的 **meta-tensor**
+  （含激活专家数、各专家 token 数），据此**动态微调**负载分配。Figure 10（行 1518–1519）
+  报告：该策略**在所有 batch size 上胜过纯静态划分**。
+- **Fused gather-GEMM**（行 1551–1553）：Hopper/Blackwell 上用 TMA 需先把路由到同一专家的
+  token **gather 成连续布局**；Qwen3-30B-A3B、batch=1 下该预处理在 SGLang 上**占总 MoE 时间
+  高达 11%**。MPK 把 TMA gather 换成**直接融进 GEMM task 数据加载阶段的异步 token 级拷贝**，
+  消掉独立 gather kernel 与额外调度点。这项与 DeepGEMM Mega MoE 的「dispatch+GEMM 融合」
+  （见 `docs/02` §1、`../mega-moe/`）是**同一动机的两种实现**：消除 gather 这类「只为对齐布局」
+  的搬运。
+
+### 5.5 §6.5 多 GPU：TP 下最高 10×（行 1556–1580）
+
+- **设定**（行 1558–1566）：NVIDIA **H100 DGX**，采用 **tensor model parallelism**（Megatron-LM），
+  用户只需在 attention 与 gated MLP 后插入 `AllReduce`；MPK 自动把 collective 编成两类 task：
+  **inter-GPU 数据传输 task**（用 NVSHMEM `nvshmem_signal_wait_until` 实现）+ **local reduction task**，
+  从而把同步 collective 变成可并入事件驱动 runtime 的**异步 task**。
+- **结果**（Figure 11 行 1554–1555，行 1567–1577）：相对 **PyTorch**（手写 kernel + CUDA Graphs
+  + `torch.compile` 组合）最高 **10×**；相对 **SGLang/vLLM**，扩展到 **8×H100** 时 **1.1–1.4×**。
+  论文归因于基线缺失的三点：(1) page allocation + request scheduling 进 mega-kernel，消 CPU 下发；
+  (2) 异步模型让 compute 与 collective **重叠**；(3) 消除 kernel barrier、启用 cross-task pipelining。
+- **一个值得注意的边界**：多 GPU 主结果（Figure 11）用的是 **Qwen3-1.7B（dense）+ TP**；
+  MoE 的 **expert parallelism** 虽有机制描述（§6.4），但**未作为多 GPU 端到端图表呈现**。
+  也就是说「EP 的 all-to-all 重叠」是机制论证，端到端数字主要在 TP。
+
+### 5.6 §6.6 / §6.7 消融回顾（行 1583–1737）
+
+两块消融已分别在 P2-3、P2-2 展开，此处只做**表格化归档**，便于与生产案例对照：
+
+**§6.6 运行时三消融**（行 1583–1628）：
+
+| 优化 | 平台/模型 | 结果 | 行 |
+|---|---|---|---|
+| cross-task pipelining | B200 / Qwen3-8B final linear | **1.2–1.3×**，胜过 cuBLAS compiled kernel | 1586–1596 |
+| compute–communication overlap | 4×H100 TP / Qwen3-1.7B | **1.1×** | 1597–1615 |
+| kernel-launch reduction | B200 / Qwen3-8B | 每 token **293** launch；eager **3.8µs→1.1ms**、Graph **0.8µs→0.2ms**；in-kernel scheduler 仅 **0.28%** | 1618–1628 |
+
+**§6.7 编译期三消融**（Table 2，行 1629–1737）：Qwen3-1.7B / 8B / 30B-A3B 三模型上：
+
+| 阶段 | 指标 | Qwen3-1.7B | Qwen3-8B | Qwen3-30B-A3B | 行 |
+|---|---|---|---|---|---|
+| operator decomposition | tasks/op | 35.6 | 47.3 | 32.2 | 1638–1642 |
+| （ops / tasks 总量） | ops | 229 | 293 | 533 | Table 2 |
+| event fusion | 事件数 / 缩减 | 1,870 / 37× | 2,366 / 68× | 1,142 / **118×** | 1643–1653 |
+| normalization | 变更 | 三模型 forward tGraph **近乎全顺序**，无 fork/join；开销 <1%，仅为正确性保留 | | | 1656–1674 |
+| linearization | footprint 缩减 | 4.4× | **5.9×**（110,932→18,928 B） | **15.0×** | 1677–1686 |
+
+一句话：**计算越多/MoE 越重，编译期收益越大**（MoE 的 118× fusion、15.0× linearization 都是峰值）；
+而 normalization 在真实 LLM forward 上**几乎不动图**——印证 `docs/01` §3.4 所说它是「表示性问题而非性能问题」。
+
+### 5.7 §7 Discussion：论文自己划的边界（行 1739–1764）
+
+§7 虽不是评测，但直接给出「megakernel 常见顾虑」的论文回答，是复现/落地时最该读的两段：
+
+- **Resource footprint（行 1740–1748）**：mega-kernel 的常见担忧是「单 kernel 必须在每个 SM 上
+  预留所有被融合算子的资源之和」。MPK 的回答：task 在 SM 上是**时分复用而非静态划分**，
+  每个 SM 只用**当前 task** 所需资源（§5）；shared memory 走 paged 抽象（§5.3）按 task 粒度
+  acquire/release。**唯一例外是 per-thread register**——它固定在所有 task 类型的最大值。
+  → 落地时**寄存器压力**是 mega-kernel 融合范围的硬约束，shared memory 则被 paged 抽象化解。
+- **集成手写 kernel 与移植新硬件（行 1749–1764）**：每个 task 是统一调用约定的 CUDA device function，
+  因此 (1) 手写 kernel 可**包成一个 task** 直接进事件驱动调度，运行时与 tGraph 不用改——
+  MPK 能「手写 + 自动」混用；(2) 移植新 GPU **只需改 per-task code generator**，
+  tGraph 表示、图级变换、运行时、scheduler 都不变——**per-task codegen 是唯一硬件相关组件**。
+  这与 `docs/02`/`../mega-moe/` 里 DeepGEMM 的**全手工** mega-kernel 形成对照：MPK 把
+  「硬件相关」收缩到最底层 codegen，其余抽象跨代共享。
+
+### 5.8 复现要点与局限（小结）
+
+**复现要点**（能照着做的）：
+1. 接入面：`torch.compile(backend=MPK)`；模型架构从 HuggingFace 载入，bf16。
+2. 设定：offline batched-inference，batch 1–16，prompt 64 / 生成 1024；page size 32 KB；
+   预留 4 SM / 16 scheduler warp；TP 时在 attention 与 gated MLP 后插 `AllReduce`。
+3. 基线：SGLang / vLLM（均 paged attention + continuous batching）+ 原生 PyTorch；
+   多 GPU 时 PyTorch 基线是「手写 kernel + CUDA Graphs + `torch.compile`」组合。
+4. 报告口径：MPK 的 **1.0–1.7×**（单 batch）与 **1.1–1.4×@8GPU** 是 **vs SGLang/vLLM**；
+   **10×** 是 **vs PyTorch**，两者不可混用。
+
+**局限 / 未覆盖**（论文范围之外或明确未做）：
+- **只在 LLM serving 上评测**（行 1390、1457–1464）；论文自称 model-agnostic，但无训练/其它 DNN 数据。
+- **offline batched**（行 1464）——未覆盖真实在线服务的 **arrival pattern** 与尾延迟。
+- **batch 上界仅 16、prompt 64、生成 1024**——长上下文 / 大 batch / 变长生成未评估。
+- **多 GPU 端到端只在 TP + dense（Qwen3-1.7B）**（行 1554、1568）；**EP 的 all-to-all 重叠是机制论证**，
+  无端到端图表。
+- **动态仍依赖「每 batch size 一张静态 tGraph」**（§6.1 行 1427–1436：按 2 的幂生成多张图，
+  运行时按当前 batch size 选图）——是**有限离散的动态**，不是任意变长形状。
+- **decoupled 调度的取舍未探**：当前默认**去中心化调度**，论文自己把「全局协调调度及其 trade-off」
+  列为**未来工作**（行 1413）。
+- **寄存器固定为各 task 最大值**（行 1748）——融合的算子越多，寄存器上限越可能成为瓶颈。
+- **page size 固定 32 KB**（行 1460），论文未给 page size 的自适应/调优分析。
+
+> 实测说明：P2-4 为**纯资料分析**（论文 §6 + §7 精读），无 H100 实验；
+> §6.3/§6.4/§6.5 的 1.0–1.7×、14.5→12.5 ms、up to 10×、1.1–1.4× 与 §6.6/§6.7 消融
+> 均为论文报告值。与本机相关的**可跑佐证**（launch 开销、CUDA Graph 1.56×、
+> 「多流只并行无依赖、Graph 不破串行」）见 `docs/04-experiments.md` §0 与
+> `harness/probe_env.out.txt`、`harness/mitigations.out.txt`；把「N 小 kernel 串行 vs CUDA Graph vs
+> 单 persistent kernel」的**端到端 launch 对比**留给 P5 本机复现。
