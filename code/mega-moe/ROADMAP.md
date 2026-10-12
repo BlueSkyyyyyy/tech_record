@@ -102,7 +102,12 @@
 
 ### P4 反向实现解析（`docs/04-moe-backward.md`）
 
-- [ ] **P4-1** MoE 反向数学：linear2/linear1 的 dgrad 与 wgrad，SwiGLU 反向，router/topk 反向。
+- [x] **P4-1** MoE 反向数学：linear2/linear1 的 dgrad 与 wgrad，SwiGLU 反向，router/topk 反向。
+      → `docs/04-moe-backward.md`：逐层反向推导 (1)–(8) + 「wgrad=k_grouped / dgrad=m_grouped」形状角色表
+      （`gemm.hpp:320-371`/`:55-76`/`:340-349`、`generators.py:583-587`、README `:80`）；H100 float64 对拍
+      `harness/exp_moe_backward_math.py`（+`.out.txt`）：手写反向 vs autograd 四项梯度 relerr ≤2.9e-16、
+      中心差分 ≤5.7e-8，k_grouped 逐组 `A_e^T@B_e` 复现 wgrad relerr ≤1.3e-16。配套博客
+      `content/posts/mega-moe-09-backward`。
 - [ ] **P4-2** DeepGEMM 的 wgrad API `k_grouped_fp8_gemm_tn_contiguous`（K 轴分组、M/N 固定）精读。
 - [ ] **P4-3** dgrad（`m_grouped_*`）与 contiguous/masked 布局在训练中的用法。
 - [ ] **P4-4** 在 H100 上做 grouped GEMM / backward 的数值对拍实验（vs PyTorch）。
@@ -140,7 +145,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0 全部完成；P1 全部完成；P2 全部完成；P3 全部完成（P3-1/2/3/4）。**
+- 当前进度：**P0/P1/P2/P3 全部完成；P4 进行中（P4-1 完成）。**
+  P4-1：新建 `docs/04-moe-backward.md`——MoE 反向数学。**全景**：`dz`→combine 反向
+  （`dY=w⊙dz`、`q=<Y,dz>`）→linear2（`dW2=A^T dY` wgrad / `dA=dY W2^T` dgrad）→SwiGLU
+  （`dG_G=dA⊙G_U⊙silu'`、`dG_U=dA⊙silu`）→linear1（`dW1=x^T dG` / `dX=dG W1^T`）→router。
+  **router/topk 反向**：归一化 topk 权重把 softmax 概率除以 `P=Σ_{i∈S}p_i`，得
+  `dp_j=(q_j P-A)/P²`（`A=Σ q_i p_i`）再走 softmax Jacobian；**坑**：`P` 必须是原始 softmax 概率
+  在选中集上的和（不是归一化权重之和，后者恒为 1），第一版因此让 `dx`/`dWg` 偏到 1e-2。**映射**：
+  wgrad 的不等长轴是收缩维 K（token）→ `k_grouped`；dgrad 的不等长轴是 M（token）→ `m_grouped`，
+  给出了 (M,N,K) 角色表与 `gemm.hpp`/`generators.py` 真实行号。H100 实验
+  `harness/exp_moe_backward_math.py`（+`.out.txt`，float64）：四项梯度 vs autograd relerr ≤2.9e-16、
+  中心差分 ≤5.7e-8，按 `k_alignment=128` 逐组 `A_e^T@B_e` 复现 `dW1/dW2` relerr ≤1.3e-16。
+  配套博客 `content/posts/mega-moe-09-backward`。**反向无 mega-kernel**：融合价值主要在前向重叠；
+  反向由独立 grouped GEMM 组成，wgrad 天然留守专家本地 rank。
+  （P0/P1/P2/P3 进展见下）
   P3-4：新建 `docs/11-mega-moe-dispatch-combine.md`——通信两段逐段精读 + H100 访存实测。
   **dispatch**：分布式前缀和一次原子加（高位计数、低位负载，`kernel:374-381`）→ `grid_sync` 后
   SM0 push `peer_grid_idx`（`:399-404`）→ `nvlink_barrier`（`:422-428`）→ 无锁 round-robin
@@ -218,10 +236,11 @@
   （`smxx_layout.hpp:133`、kernel `:774`/`:788`）；L2 权重不交错只转 SF。实验
   `harness/exp_weight_transform.py`（+`.out.txt`，H100）：行号映射/SwiGLU 等价/UTCCP 映射全部 0 误差，
   与 deep_gemm 内部实现逐元素一致。**P2 全部完成。**
-- **下一步：进入 P4 反向**：P4-1（MoE 反向数学：linear2/linear1 的 dgrad/wgrad、SwiGLU 反向、
-  router/topk 反向）/ P4-2（`k_grouped_fp8_gemm_tn_contiguous` wgrad API 精读）/
+- **下一步：继续 P4 反向**：P4-2（`k_grouped_fp8_gemm_tn_contiguous` wgrad API 精读：
+  `tn`/`nt` 的 major 差异、`ks_cpu`/`grouped_layout`/PSUM、SF 的 `transform_k_grouped_*` 打包；
+  真实行号 `gemm.hpp:320-371` / `layout.hpp:89-113` / `smxx_layout.hpp:218-286`）/
   P4-3（dgrad `m_grouped_*` 与 contiguous/masked 布局在训练中的用法）/ P4-4（H100 上用 SM90
-  `nt` wgrad 做 grouped GEMM / backward 数值对拍 vs PyTorch，出真实数字）。
+  `k_grouped_fp8_gemm_nt_contiguous` 做 wgrad 的 kernel 级数值对拍 vs PyTorch，出真实数字）。
   也可并行推进 P5-1（Mega Gate）/P5-2（Mega mHC）。
 
 ## 阻塞

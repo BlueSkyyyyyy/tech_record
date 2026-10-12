@@ -1,0 +1,18 @@
+== manual backward vs autograd (float64) ==
+grad   shape                  relerr      max_abs
+dx     (11, 16)            2.891e-16    1.705e-13
+dWg    (16, 5)             2.521e-16    1.137e-13
+dW1    (5, 16, 16)         1.296e-16    1.421e-14
+dW2    (5, 8, 16)          0.000e+00    0.000e+00
+== central finite-difference spot check (3 entries each) ==
+dx     max_abs_fd_err=5.707e-08
+dWg    max_abs_fd_err=1.869e-08
+dW1    max_abs_fd_err=3.915e-08
+dW2    max_abs_fd_err=4.226e-08
+== grouped GEMM view (per expert) ==
+experts=5 tokens=11 topk=2 per-expert #tokens=[5, 4, 5, 5, 3] (sum=22)
+wgrad linear1 k_grouped: dW1[e]=X_e^T@dG_e  K=640 M=16 N=16 relerr_vs_autograd=1.296e-16
+wgrad linear2 k_grouped: dW2[e]=A_e^T@dY_e  K=640 M=8 N=16   relerr_vs_autograd=0.000e+00
+dgrad linear1 m_grouped: dX_e=dG_e@W1_e^T  M=per-expert tokens N=16 K=16
+dgrad linear2 m_grouped: dA_e=dY_e@W2_e^T  M=per-expert tokens N=8 K=16
+k_alignment=128: linear1 sum_k=640 (real tokens=22), linear2 sum_k=640 (real tokens=22)
