@@ -490,7 +490,40 @@
       恒 `nvjet_*`；⑤ 显式 `cublaslt_gemm_nt/tt`(relerr 2e-4)/`+C`(6.6e-4)/`batched_syrk`(1.7e-3)/
       `batched_symm`(1.7e-3) 正确性；⑥ **性能打平**：8 组形状 cuBLASLt vs DeepGEMM 0.97–1.02×
       （4096×7168×7168 均 ~377 TFLOPS）——解释为何默认敢回退。配套博客
-      `content/posts/mega-moe-27-cublaslt-fallback`（索引页新增第 27 篇）。
+       `content/posts/mega-moe-27-cublaslt-fallback`（索引页新增第 27 篇）。
+
+### P18 增量（opt-in，DeepGEMM 的选核启发式）
+
+- [x] **P18-1** **`get_best_config` 选核启发式**（`csrc/jit_kernels/heuristics/`
+      的 `common.hpp` / `sm90.hpp` / `sm100.hpp` / `config.hpp` / `runtime.hpp` / `utils.hpp`）：
+      第 27 篇讲了「什么时候不用自家 kernel（cuBLASLt 回退）」，本篇补另一半——**用自家 kernel 时
+      block_m/n/k、cluster、stage、线程数怎么选**。**纯 host 启发式、架构无关，H100 可跑**。
+      → `docs/28-deepgemm-best-config.md`（真实行号核对）：`get_best_config` 三步
+      （`common.hpp:18-56`「枚举候选 → 打分 → 取最小」，严格小于、并列取先者；`:43-54`
+      `DG_PRINT_CONFIGS` 按 desc 去重打印）；五数据结构（`config.hpp:12-188`，`expected_*` 为 0
+      则回退真实形状 `:30-33`，`check_validity` 要求 `num_sms%2==0` `:60`）。**SM90 候选枚举**
+      `sm90.hpp:16-118`：block_m（小 m 才加 16/32；`cd_dtype!=Float` 才允许 256；m-grouped
+      contiguous 钉死 `mk_alignment`=128 `:33`）、block_n（`lcm(16,multiple)` 步长；1D1D+FP32 输出
+      `start=24` 避 bank conflict `:43-48`；上限 1D2D=192/1D1D=160/NoSF=256）、block_k 唯一
+      `128*8/bits`、multicast 关闭条件（K 分组>4 或 batched `:62-67`）、cluster 只到 2、合法性过滤
+      （1D2D unroll、masked 多播整除、寄存器、swizzle≥64B、stage≥3/小矩阵≥4）。**派生配置**
+      `get_storage_config :120-146`（K-major 用 block_k 定 swizzle、FP32 输出不给 swizzle）、
+      `get_pipeline_config :148-188`（smem 232448 硬约束、stage≤16、K-grouped 多留 4 tensormap）、
+      `get_launch_config :190-200`（block_m≤64→128 math 线程否则 256）。**代价模型**
+      `get_layout_info :202-239`：只建 L1/L2 周期（HBM/总算量近似不变），显式建模 multicast
+      省 L2 读（`bm/cn+bn/cm`）、累积模式 D 回读翻倍、尾波效率惩罚、**单波禁多播置 INT64_MAX**；
+      `compare :241-244` 单键取最小。**SM100 对照（仅分析）** `sm100.hpp`：swap AB 进入决策、
+      m-grouped 单候选快路（`:34-46`）、TMEM 容量约束（`:126-132`）、强制 128B swizzle
+      （`:137-141`）、k-grouped 单级 TMA store（`:193-207`）、代价模型 `num_cycles` 恒 0
+      （`:271-272` TODO）改用**词典序 tie-break**（`:275-301`：单波→多播→少波→尾波→小块）。
+      H100 实测 `harness/exp_best_config.py`（+`.sh`/`.out.txt`，`DG_PRINT_CONFIGS=1` 抓真实选核）：
+      用 Python **逐行重写** SM90 那套，对 **20 组形状 × 15 字段逐项对拍 0 不符**
+      （覆盖 Normal/1D2D、Normal/NoSF、MGroupedContiguous/Psum/Masked、KGrouped/1D1D、Batched）；
+      候选排序显示大形状在 **90 个合法配置**里按 L1/L2 周期近似最优（次优差 2.7–9.3%）；
+      坐实 bm=16/32 小 m 分支、大形状 bm256+cn2（BF16 输出+多播）、k-grouped FP32 的
+      bn=136/152（`start=24`）、m-contig 钉 128 vs masked 可 64、`block_mult=(32,32)` 把 bn 从 16
+      变 32、batched 恒 cm=cn=1。配套博客 `content/posts/mega-moe-28-deepgemm-best-config`
+      （索引页新增第 28 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -516,8 +549,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15-1、P16-1、P17-1 完成。**
-  本轮 P17-1：新建 `docs/27-cublaslt-fallback.md`（+`harness/exp_cublaslt_fallback.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15-1、P16-1、P17-1、P18-1 完成。**
+  本轮 P18-1：新建 `docs/28-deepgemm-best-config.md`（+`harness/exp_best_config.{py,sh,out.txt}`）
+  ——补上**「用自家 kernel 时怎么选 block_m/n/k/cluster/stage/线程」**（第 27 篇讲了「何时不用自家
+  kernel」，两篇合起来才是完整选核）。`get_best_config` = 枚举候选 → 逐个打分 → 取最小
+  （`common.hpp:18-56`）；SM90 是「**L1/L2 周期最小化**」的定量模型（multicast 省 L2 读、累积模式
+  D 回读翻倍、尾波效率惩罚、单波禁多播），SM100 退化成**词典序 tie-break**（单波→多播→少波→
+  尾波→小块，`num_cycles` 恒 0 TODO）。**H100 真机对拍**（`DG_PRINT_CONFIGS=1` 抓真实选核，Python
+  逐行重写 SM90 那套）：**20 组形状 × 15 字段逐项 0 不符**，覆盖 7 类算子；候选排序显示大形状在
+  **90 个合法配置**里近似最优。配套博客 `content/posts/mega-moe-28-deepgemm-best-config`
+  （索引页新增第 28 篇）。Hugo 构建 0 ERROR。
+  上一轮 P17-1：新建 `docs/27-cublaslt-fallback.md`（+`harness/exp_cublaslt_fallback.{py,sh,out.txt}`）
   ——补上**「DeepGEMM 什么时候不用自家 kernel」**这条一直没讲清的选核规则。**H100 真机实测**
   （`torch.profiler` 抓真实发射的 kernel 名）：稠密 BF16 `bf16_gemm_nt` 与按头 batched BF16 einsum
   （`bhr,hdr->bhd`/`bhd,hdr->bhr`）在「非确定性 ∧ 未限制 SM 数 ∧ plain-store epilogue」时**默认交给
@@ -606,9 +648,10 @@
   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
     shared expert 分支的更深精读；端到端需 SM100，当前不可行。
   ⑤ **k-grouped SF 打包**：P16-1 已完成（host 契约 + device 逐行对拍，H100 真实设备代码）。
-  ⑥ **cuBLASLt 回退/选核**：P17-1 已完成。可再补 `sm90.hpp`/`sm100.hpp` 的
-   `get_layout_candidates` 全量枚举 + `get_best_config` 成本模型精读（选核的另一半：回退之外，
-   走自家 kernel 时 block_m/n/k/stage/cluster 如何选）。
+   ⑥ **cuBLASLt 回退/选核**：P17-1 已完成。
+   ⑦ **选核启发式 `get_best_config`**：P18-1 已完成（SM90 定量代价模型 + SM100 词典序，
+    H100 上 Python 复刻 20 组形状 15 字段逐项对拍 0 不符）。至此「用不用自家 kernel」与「用自家
+    kernel 时怎么配」都已讲清。
    若无新指令，可视为专题完结。
 
   （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。
