@@ -34,9 +34,9 @@
 - [x] **P0-1** 读通 FlashKDA：`csrc/flash_kda.cpp`（API/形状）、`fwd.h`（launch 模板）、
       `smxx/fwd_kernel1.cuh`、`smxx/fwd_kernel2.cuh`、`smxx/utils.cuh`、`fwd_launch.cu`、deep-dive，
       产出结构脑图（`docs/01` §5，含真实行号）。
-- [ ] **P0-2** 环境打通：`scripts/lab.sh` 起容器；确认 import torch/FlashKDA；`pip install flash-linear-attention`
+- [x] **P0-2** 环境打通：`scripts/lab.sh` 起容器；确认 import torch/FlashKDA；`pip install flash-linear-attention`
       并确认 `chunk_kda` 可跑（拿反向参照）。
-- [ ] **P0-3** `harness/probe_refs.py`：跑通 FlashKDA forward 与 FLA `chunk_kda`，确认两者量级一致的相同输入。
+- [x] **P0-3** `harness/probe_refs.py`：跑通 FlashKDA forward 与 FLA `chunk_kda`，确认两者量级一致的相同输入。
 
 ### P1 数学与分块公式（`docs/01-kda-theory.md`）
 
@@ -109,11 +109,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0-1 完成——通读 FlashKDA host/launch/K1/K2/utils 五个源文件与 deep-dive，
-  在 `docs/01-kda-theory.md` §5 写出「文件职责 + K1/K2 阶段流 + warp 分工 + workspace 布局」结构脑图（行号已核对）。
-  `docs/01` 同时已含数学定义与 CHUNK=16 分块公式初稿。
-- **下一步：P0-2/P0-3** 起 `kernel_lab` 容器确认环境与 FlashKDA/FLA 可跑（需要 GPU）；
-  无 GPU 时可先做 P1-4（`src/kda_ref.py` 两种实现 CPU 互拍）。
+- 当前进度：P0-1～P0-3 完成。
+  - P0-1：通读 FlashKDA host/launch/K1/K2/utils 五个源文件与 deep-dive，
+    在 `docs/01-kda-theory.md` §5 写出结构脑图（行号已核对）；`docs/01` 同时含数学定义与 CHUNK=16 分块公式初稿。
+  - P0-2：`kernel_lab` 容器（H100 sm90，torch 2.12）确认可用；FlashKDA 的 `cutlass` 子模块
+    浅克隆后以 `FLASH_KDA_CUDA_ARCHS=90a pip install -e . --no-build-isolation` 编译成功，
+    `import flash_kda` OK；`pip install flash-linear-attention==0.5.2` 后 `fla.ops.kda.chunk_kda` 可用。
+  - P0-3：`harness/probe_refs.py`（结果 `harness/probe_refs.out.txt`）在同一输入上对拍三路：
+    FlashKDA `fwd`、FLA `chunk_kda`、FLA `fused_recurrent_kda`(fp64 gold)。两个 case
+    （`g=N(0,4)`、`g=0`，B1 T512 H4 D128，非零初态）下：`chunk_kda`/`flash_kda` 输出对 gold 的
+    max_abs≈6e-4～8e-4、max_rel≈4e-3～9e-3，两者互差 max_abs≈8e-4～1e-3，量级（|o|max≈0.15）一致，
+    确认三方实现同一套 KDA 数学。
+- **下一步：P1-1/P1-2** 正式写 `docs/01` 的逐 token 定义与 chunk 公式（补全 KDA vs GLA/DeltaNet 的
+  区分点），随后 **P1-4** 落地 `src/kda_ref.py`（逐 token 递推 vs 分块两种实现 CPU 互拍）。
+  反向（P5）可用已装好的 FLA `chunk_kda` autograd 作对拍参照。
 
 ## 阻塞
 

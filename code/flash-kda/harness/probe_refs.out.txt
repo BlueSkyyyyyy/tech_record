@@ -1,0 +1,28 @@
+
+==============================================================================
+Case [g=N(0,4)]  B=1 T=512 H=4 D=128
+  scale(o): gold=0.152 chunk=0.152 flash=0.152
+  scale(ht): gold=0.165 chunk=0.165 flash=0.166
+ output o vs fp64 gold:
+  chunk_kda                    max_abs=6.0675e-04  max_rel=3.9889e-03  mean_abs=5.4780e-05  rmse_ratio=3.3826e-03
+  flash_kda                    max_abs=8.1996e-04  max_rel=5.3906e-03  mean_abs=5.8653e-05  rmse_ratio=3.6139e-03
+  flash_kda vs chunk_kda       max_abs=9.7656e-04  max_rel=6.4103e-03  mean_abs=2.8762e-05  rmse_ratio=2.9599e-03
+ final state ht vs fp64 gold:
+  chunk_kda                    max_abs=1.0419e-03  max_rel=6.3282e-03  mean_abs=5.0824e-05  rmse_ratio=2.9767e-03
+  flash_kda                    max_abs=1.4767e-03  max_rel=8.9694e-03  mean_abs=7.7836e-05  rmse_ratio=4.7036e-03
+  flash_kda vs chunk_kda       max_abs=1.2231e-03  max_rel=7.4020e-03  mean_abs=6.0428e-05  rmse_ratio=3.7321e-03
+
+==============================================================================
+Case [g=0]  B=1 T=512 H=4 D=128
+  scale(o): gold=0.067 chunk=0.067 flash=0.066
+  scale(ht): gold=0.100 chunk=0.099 flash=0.099
+ output o vs fp64 gold:
+  chunk_kda                    max_abs=5.9988e-04  max_rel=8.9865e-03  mean_abs=5.1919e-05  rmse_ratio=3.9016e-03
+  flash_kda                    max_abs=5.9988e-04  max_rel=8.9865e-03  mean_abs=5.3032e-05  rmse_ratio=3.9702e-03
+  flash_kda vs chunk_kda       max_abs=7.3242e-04  max_rel=1.0949e-02  mean_abs=1.0860e-05  rmse_ratio=2.1417e-03
+ final state ht vs fp64 gold:
+  chunk_kda                    max_abs=7.2674e-04  max_rel=7.2990e-03  mean_abs=4.0175e-05  rmse_ratio=3.3912e-03
+  flash_kda                    max_abs=1.3051e-03  max_rel=1.3108e-02  mean_abs=5.8109e-05  rmse_ratio=4.8832e-03
+  flash_kda vs chunk_kda       max_abs=8.5405e-04  max_rel=8.5967e-03  mean_abs=4.0810e-05  rmse_ratio=3.5828e-03
+
+DONE
