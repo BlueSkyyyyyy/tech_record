@@ -590,6 +590,117 @@ B1 T512 H4 K128 → **86.9 µs**（FLA 86.4 µs）；B2 T2048 H8 K128 → **591.
 契约、四个阶段、转置/绝对-局部混淆的坑、bf16 误差底噪**钉死，供目标卡 CUDA B3（`CHUNK=16`、
 复用 K1 workspace 的 $P/M_{qk}/k^{dec}/q^{dec}/k^{rest}/E^{tot}$）对拍。
 
+### 6.8 P6-6：B0 门控重算最小可运行 kernel（把 K1 没落盘的门控补回来）
+
+§5.1 指出目标卡 CUDA 反向的唯一缺口：K1 把 `kd/qd/kr/gt/INV/Mqk` 六个字段落进 workspace
+（`csrc/smxx/utils.cuh:70-76`），但**原始门 logits 与 `beta` logits 没有落盘**——K1 只在 smem 里
+现算现用就丢了（`fwd_kernel1.cuh:306-331`）。本节把 §5.2 里那个轻量 **B0 `gate_bwd`** 落成最小
+可运行 Triton kernel，并把它的**正向重算**（得到 B1/B2/B3 都要吃的 $\beta$ 与 $g^{\text{cum}}$）
+与**反向门控链**（$\bar g\to\bar g_{\text{logits}},\ \bar A,\ \bar{\text{bias}}$）一起对拍。
+证据：`harness/check_bwd_b0_gate.py` / `harness/check_bwd_b0_gate.out.txt`。
+
+#### 6.8.1 契约：K1 当场算的到底是什么
+
+前向 K1 的门控段（`fwd_kernel1.cuh:306-331`，128 个线程按 key 列并行）逐行是：
+
+```
+316  float sum = 0.0f;
+321  g_val = bf16_to_f32(g_bf16_smem[row*D+col]) + dt;              // g + dt_bias
+322  g_val = a_log_exp * g_val;                                      // * exp(A_log)   (a_log_exp @ :258)
+323  g_val = gate_scale * sigmoid_tanh_approx_f32(g_val);            // * lower_bound   (gate_scale @ flash_kda.cpp:128)
+327  sum += g_val;
+328  g_smem[row*D+col] = sum;                                        // 块内前缀和（逐列）
+330  shared_storage.g_total.begin()[col] = sum;                      // 块尾和
+```
+
+其中 `gate_scale = lower_bound * 1.4426950408889634`（`flash_kda.cpp:128`，`1.4427 = log2(e)`），
+所以 `g_smem` 里存的累计值**已经是 log2 单位**的 $g^{\text{cum}}$；`g_total` 随后被
+`ex2_approx_ftz_f32` 变成 $E^{\text{tot}}=2^{g^{\text{cum}}[\text{last}]}$（`:356`）并写进 workspace
+（`:516` 的 `ws_idx`、`:550-558` 的 TMA store）。`beta` 则根本没进 workspace——K1 只在算 $L$ 时
+临时 `sigmoid(beta)` 用了一下（`:502`）。
+
+于是 B0 的**正向重算契约**（与 FLA `kda_gate_chunk_cumsum_vector_kernel`，`fla/ops/kda/gate.py:375`
+的 `:422/:425-431` 完全同构）就是：
+
+$$
+\text{inner}=e^{A_{\log}}\odot(g+\text{dt\_bias}),\quad
+\text{gate}=\text{lower\_bound}\cdot\sigma(\text{inner}),\quad
+g^{\text{cum}}=\operatorname{cumsum}_{\text{chunk}}(\text{gate})\cdot \log_2 e,\quad
+\beta=\sigma(\beta_{\text{logits}}).
+$$
+
+一句话：**B0 不重算任何 GEMM，只重算 4 个逐元素算子 + 一个块内前缀和**——这正是 K1「把重活落盘」的回报。
+
+#### 6.8.2 结果：B0 前向重算 vs torch / FLA（Part A/B）
+
+5 组 shape（含**非整除 T=250/513**、`g=0` 无衰减、B=2）实测：
+
+| 量 | vs 纯 torch 参考 | vs FLA kernel |
+|---|---|---|
+| `g_cum` | max_rel **1.5e-7~3.9e-7** | max_rel **2.2e-7~2.8e-7** |
+| `beta` | max_rel **6.3e-8~1.2e-7** | **逐位相同（max_abs=0）** |
+
+即 $10^{-7}$ 量级 = fp32 机器精度：B0 与公式、与 FLA 都一致，且**非整除 T 不破坏**（B0 的
+`m = o_t[:,None] < T` 把尾块 pad 行屏蔽，与 K1 的 `actual_len` 处理同理）。
+
+#### 6.8.3 反向门控链（Part C/D）与一个必须记住的 $\log_2 e$
+
+反向前缀和（B0 的 `APPLY_GATE=False, REVERSE=True`）vs FLA `chunk_local_cumsum(reverse=True)`
+实测 max_rel **1.2e-7~2.1e-7**。门控反向 `dyg→(dg_logits, dA, dbias)` 则与
+`torch.autograd`（对同一 `gate`/`g_cum` 公式求导）比：
+
+| 量 | B0 vs autograd |
+|---|---|
+| `dg_logits` | max_rel **2.3e-7~3.9e-7** |
+| `dA` | max_rel **2.3e-7~1.3e-6** |
+| `dbias` | max_rel **1.2e-7~1.9e-7** |
+
+**踩坑（$\log_2 e$ 住在反向前缀和里）**：$g^{\text{cum}}=\log_2 e\cdot\operatorname{cumsum}(\text{gate})$，
+所以给定上游 $\bar g^{\text{cum}}=\partial L/\partial g^{\text{cum}}$，回传第一跳必须是
+$\bar{\text{gate}}=\log_2 e\cdot\operatorname{cumsum}_{\text{reverse}}(\bar g^{\text{cum}})$，
+**这个 $\log_2 e$ 要乘在反向前缀和上**，再进门控激活的链式。第一版按 FLA `chunk_bwd.py:599` 那样
+用 `scale=1` 做反向前缀和，指纹是「归一化误差稳定停在 **0.3069**」——而
+$0.3069 = 1-1/\log_2 e = 1-\ln 2$，正好是一个缺掉的 $\log_2 e$ 因子。补上后立刻降到 $10^{-7}$。
+（FLA 自己的 `kda_gate_bwd` 也能对上：见下。）
+
+**另一个坑（FLA 的门控反向输出是 bf16）**：FLA `kda_gate_bwd`（`gate.py:252`）末尾
+`dg = dg.view_as(g).type_as(g)` 把 `dg` 转回**输入 dtype（bf16）**，于是它 vs fp32 autograd 的
+`dg_logits` 出现 **~3e-3** 的相对差（= bf16 舍入 $2^{-9}$）；把 autograd 也 round 到 bf16 后残差
+掉到 **max 1.0e-4~5.6e-4、mean ~1e-7**（剩个别大值来自 triton `exp/sigmoid` 的 fast-math）。
+**B0 保 fp32 输出**，所以 B0↔autograd 是 1e-7——这解释了「B0 vs FLA 3e-3」并非代数差异而是
+**FLA 的 bf16 出口**，也提示目标卡反向应像 B2/B3 一样把门控链留在 fp32。
+
+#### 6.8.4 交叉验证：对上 FlashKDA K1 当场算的 $E^{\text{tot}}$（Part E）
+
+**这是唯一能直接证明 B0 复现了前向 kernel 的地方**。用 `flash_kda._fwd_raw` + 自备 workspace 调
+K1，按 `fwd_launch.cu:64-71` 的 SoA 偏移读出 `kGTotal` 字段（head-major：`ws_idx=head*total_tiles+tile`，
+`fwd_kernel1.cuh:516`），再和 B0 重算的 $\exp_2(g^{\text{cum}}[\text{last}])$ 比：
+
+| config | `E_tot` B0 vs K1 workspace |
+|---|---|
+| B1 T128 H4 g=1.0 | max_rel **8.1e-5** |
+| B1 T250 H2 g=1.0（非整除 T） | max_rel **2.0e-5** |
+| B1 T512 H2 g=2.0 | max_rel **1.6e-5** |
+
+残差 $10^{-5}$ 不是 bug：K1 用的是 **`sigmoid_tanh_approx_f32`**（`fwd_kernel1.cuh:323`，`tanh.approx`
+近似 sigmoid，`docs/02` §11(c) 实测 max_abs 3.9e-6），B0 用的是**精确 `tl.sigmoid`**。把门控的
+单点近似沿 16 行累加、再被 `exp2` 放大，正好落在 $10^{-5}$——**B0 复现了 K1 的门控到 approx 底噪**。
+
+#### 6.8.5 计时（Part F）
+
+`kernel_lab`（H100）实测（event 对包 REPS=100 次取均值，含 host 派发）：
+
+| config | B0 | FLA `kda_gate_chunk_cumsum` | ratio |
+|---|---|---|---|
+| B1 T512 H4 D128 | 27.3 µs | 50.4 µs | 0.54× |
+| B4 T2048 H8 D128 | 46.6 µs | 67.9 µs | 0.69× |
+| B1 T2048 H64 D128 | 91.6 µs | 64.7 µs | 1.41× |
+
+同量级、各有胜负（FLA 用 `BS` 切列 + autotune，B0 是整列 `[BT, D]` 单 program 的朴素实现，
+`H=64` 时 grid 太小才被反超）。这不是性能交付，价值在把 **B0 的契约（前向 $\beta/g^{\text{cum}}$、
+反向 $\bar g_{\text{logits}}/\bar A/\bar{\text{bias}}$）、$\log_2 e$ 的位置、FLA 的 bf16 出口陷阱、
+以及「B0 与 K1 当场算的门控一致到 approx 底噪」**钉死，供目标卡 CUDA B0 对拍。
+
 ## 7. 小结与下一步
 
 - FLA `chunk_kda` 反向的 5 个 Triton kernel 与 `05` §7 的分块反向**逐式对应**：`dAv`=输出支路、
@@ -615,10 +726,16 @@ B1 T512 H4 K128 → **86.9 µs**（FLA 86.4 µs）；B2 T2048 H8 K128 → **591.
   朴素计时与 FLA 同速。三个踩坑点：漏 `b_dg2=b_q*b_dq2`（指纹=dq/dk/db 对、仅 dg 错）、
   Part C/D 转置读时把 chunk-局部行下标误写成绝对 `i_ti`（指纹=只有第 0 chunk 对）、
   `db` 跨 K-块的 atomic 归约。至此 §5.2 的 **B1/B2/B3 三条 GEMM 支路全部有最小可运行 kernel**。
+- §6.8（P6-6）把 §5.2 的 **B0 门控重算**做成最小可运行 Triton kernel：前向重算
+  $\beta/g^{\text{cum}}$ 与 torch/FLA 对到 **~2e-7**（含非整除 T、g=0、B=2），`beta` 与 FLA **逐位相同**；
+  反向门控链（反向前缀和 + `dg_logits/dA/dbias`）与 autograd 对到 **~3e-7**；并**交叉验证到 FlashKDA
+  K1 当场算的 workspace `kGTotal`（$E^{\text{tot}}$）max_rel 1.6e-5~8.1e-5**（差 = K1 的
+  `tanh.approx` sigmoid）。两个坑：**$\log_2 e$ 必须乘在反向前缀和上**（漏掉则误差稳停 0.3069=1−ln2）、
+  **FLA `kda_gate_bwd` 输出随输入 dtype 是 bf16**（故 B0 vs FLA 表面 3e-3 其实是 bf16 出口）。
 
 下一步：
 
-- P7：FlashKDA 前向 CUPTI 计时与 `ncu` 剖析。**P6 的三条 GEMM 支路（B1 状态伴随 / B2 `wy_dqkg`
-  / B3 `intra`）均已做成最小可运行 Triton kernel 并与 FLA 位级核验**；§5.2 剩余的是把这些
-  最小 kernel **工程化**为 CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、
-  `CHUNK=16`），以及 B0 门控重算 kernel——属更大工程，留待有明确需求时再做。
+- P7：FlashKDA 前向 CUPTI 计时与 `ncu` 剖析。**P6 的 B1 状态伴随 / B2 `wy_dqkg` / B3 `intra`
+  三条 GEMM 支路与 B0 门控重算均已做成最小可运行 Triton kernel 并与 FLA 位级/autograd 核验**；
+  §5.2 至此**四段全部有最小 kernel**，剩余的是把它们**工程化**为 CUTLASS/TMA + warp-specialization
+  的目标卡 CUDA（复用 K1 workspace、`CHUNK=16`），属更大工程，留待有明确需求时再做。

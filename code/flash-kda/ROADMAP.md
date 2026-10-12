@@ -92,6 +92,13 @@
       逐位相同（max_abs=0）、`db/dg` ~1e-7（atomic-add 顺序）；含非整除 T；bf16 四顶抬到
       1.1e-2~4.8e-2；朴素计时与 FLA 同速。至此 B1/B2/B3 三条 GEMM 支路全部位级可核验
       （`docs/06` §6.7）。
+- [x] **P6-6** B0 门控重算最小可运行 Triton kernel（对应 FLA `kda_gate_chunk_cumsum` +
+      `kda_gate_bwd`）：前向重算 β/`g_cum` 与 torch/FLA ~2e-7（含非整除 T、g=0、B=2），β 与 FLA
+      逐位相同；反向门控链（反向前缀和 + `dg_logits/dA/dbias`）与 autograd ~3e-7；**交叉验证到
+      FlashKDA K1 当场算的 workspace `kGTotal`（E^tot）max_rel 1.6e-5~8.1e-5**（差=K1 tanh.approx
+      sigmoid）。坑：`log2e` 必须乘在反向前缀和上（漏掉则误差稳停 0.3069=1−ln2）；FLA
+      `kda_gate_bwd` 输出随输入 dtype 是 bf16（B0 vs FLA 表面 3e-3 实为 bf16 出口）。至此 §5.2
+      的 B0/B1/B2/B3 四段全部有最小可核验 kernel（`docs/06` §6.8）。
 
 ### P7 性能与剖析（`docs/07-perf.md`）
 
@@ -134,7 +141,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P7-3/P7-4/P7-5 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ **B3 `intra` 最小 kernel（P6-5，新增）**完成，至此 B1/B2/B3 三条 GEMM 支路全部位级可核验；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P7-3/P7-4/P7-5 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6，新增）**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -221,11 +228,27 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P7-3/P7-4/P7-5 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
-  §5.2 的 **B3 `intra`（块内 $A$ 反向，P6-5）已做成最小 kernel**，至此 B1/B2/B3 三条 GEMM
-  支路全部位级可核验；剩余的是更完整的 CUTLASS/TMA + warp-specialization 版反向 B1/B2/B3
-  工程化与 B0 门控重算。P7-2 遗留的 nsys 流量拆分（P7-3 已用 ncu DRAM 计数替代、待验证 (b) 已关闭）。
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P7-3/P7-4/P7-5 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  §5.2 的 **B0 门控重算（P6-6）已做成最小 kernel**，至此 **B0/B1/B2/B3 四段全部位级/autograd 可核验**；
+  剩余的是更完整的 CUTLASS/TMA + warp-specialization 版反向 B0/B1/B2/B3 工程化。P7-2 遗留的 nsys
+  流量拆分（P7-3 已用 ncu DRAM 计数替代、待验证 (b) 已关闭）。
   **P7-5 已用实验关闭 P7-2/P7-4 待验证 (c)**（K2 突破 2 CTA/SM 后 L2 墙不后移，见下）。
+  - P6-6：新增 `docs/06` §6.8 + `harness/check_bwd_b0_gate.py`
+    （`harness/check_bwd_b0_gate.out.txt`）。把 §5.2 的 **B0 `gate_bwd`**（对应 FLA
+    `kda_gate_chunk_cumsum` `gate.py:375` + `kda_gate_bwd` `gate.py:252`）做成最小可运行 Triton
+    kernel：**前向重算** β 与 g_cum（`inner=exp(A_log)(g+dt_bias)`、`gate=LB·σ(inner)`、`g_cum=
+    cumsum_chunk(gate)·log2e`，与 K1 `fwd_kernel1.cuh:321-323/327-330` 同式）。**Part A/B**：g_cum
+    与 torch/FLA 对到 **max_rel 1.5e-7~3.9e-7（含非整除 T250/513、g=0、B=2）**，β 与 FLA **逐位相同**。
+    **Part C**：反向前缀和（`APPLY_GATE=False,REVERSE=True`）vs FLA `chunk_local_cumsum(reverse)` **1.2e-7~2.1e-7**。
+    **Part D**：门控反向 `dg_logits/dA/dbias` vs **torch.autograd 2.3e-7~1.3e-6**。**Part E（关键）**：
+    用 `flash_kda._fwd_raw` + 自备 workspace 读 K1 当场写下的 `kGTotal`（E^tot，SoA 偏移按
+    `fwd_launch.cu:64-71`），B0 的 exp2(g_cum[last]) 对上 **max_rel 1.6e-5~8.1e-5**——差即 K1 的
+    `tanh.approx` sigmoid（`fwd_kernel1.cuh:323`），**证明 B0 复现了前向 kernel 的门控**。**Part F**：
+    计时 B1T512H4 27.3µs(FLA 50.4)/B4T2048H8 46.6(67.9)/B1T2048H64 91.6(64.7)，同量级。
+    **踩坑**：(a) **log2e 必须乘在反向前缀和上**（g_cum=log2e·cumsum(gate)），漏掉指纹=归一化误差
+    稳停 **0.3069=1−ln2**；(b) **FLA `kda_gate_bwd` 末尾 `dg.type_as(g)` 把输出转回输入 dtype(bf16)**，
+    故「B0 vs FLA」表面 3e-3 实为 bf16 出口（round 到 bf16 后残差 max≤5.6e-4、mean~1e-7），B0 保 fp32 故
+    与 autograd 1e-7。至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可运行 kernel**。
   - P6-5：新增 `docs/06` §6.7 + `harness/check_bwd_intra_kernel.py`
     （`harness/check_bwd_intra_kernel.out.txt`）。把 §5.2 的 **B3 `bwd_intra`**（对应 FLA
     `chunk_kda_bwd_kernel_intra`，`chunk_intra.py:395-667`，非 `SAFE_GATE` 分支）做成最小可运行

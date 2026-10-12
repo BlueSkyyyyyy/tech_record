@@ -163,8 +163,9 @@ workspace 读 vs $o$/state 写占比~~（**已解决**，`docs/07` §6 P7-3：K2
 可整除回归逐位不变；「K 的 64 分段」经查是 FLA 同 program 内展开、非正确性约束）；~~K2 突破 2 CTA/SM 后
 L2 墙是否后移~~（**已解决**，`docs/07` §8 P7-5：不会后移——`sizeof` 被**无条件预留的 65536 B fp32 状态缓冲**
 钉死为 98,432 B，只减 pipeline stage 不动 smem；真进 3 CTA/SM 的配置必须砍 pipeline 深度，实测更慢
-`+14%~+40%`，且 `lts` 已 94% SOL、K2 是 L2 带宽 bound，占用率无可用余量）。**后续方向**：反向三个
-GEMM 里 B1（状态伴随，`docs/06` §6）、B2（`wy_dqkg`，`docs/06` §6.6 P6-4）、B3（`intra`，`docs/06`
-§6.7 P6-5）**均已做成最小可运行 Triton kernel**并三方/位级对拍，三条支路全覆盖；剩余的是把最小
-kernel 工程化为 CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、`CHUNK=16`）
-与 B0 门控重算 kernel，属更大工程，留待有明确需求时再做。
+`+14%~+40%`，且 `lts` 已 94% SOL、K2 是 L2 带宽 bound，占用率无可用余量）。**后续方向**：反向四个 kernel 里 B0（门控
+重算，`docs/06` §6.8 P6-6）、B1（状态伴随，`docs/06` §6）、B2（`wy_dqkg`，`docs/06` §6.6 P6-4）、
+B3（`intra`，`docs/06` §6.7 P6-5）**均已做成最小可运行 Triton kernel** 并三方/位级核验（B0 还额外与
+FlashKDA K1 当场写的 workspace `kGTotal` 对到 1.6e-5~8.1e-5），四条支路全覆盖；剩余的是把最小
+kernel 工程化为 CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、`CHUNK=16`），
+属更大工程，留待有明确需求时再做。
