@@ -599,6 +599,34 @@
         `next/last_task_pos` 两个 `__shared__` 游标仍 `<optimized out>`。**不构成对上游的 bug 判定**。
         **本轮新增实验**。
 
+### P29 实验扩展 16：Thread Block Clusters + DSM（`docs/04-experiments.md` §18）
+
+- [x] **P29-1** 补齐 `docs/04` §6.6 明确留的「sm90 的 cluster 未覆盖」尾巴，并把「跨 SM 中间量」
+      这一档从 P20-1（需 SM 共驻）与 P24-1（落/不落 HBM）**推进到硬件原语**：Hopper **Thread Block
+      Cluster + 分布式共享内存（DSM）**——cluster 内 block 用 `map_shared_rank` 直读邻居 SMEM，
+      中间量不落 L2/HBM；生产案例 DeepGEMM Mega Gate 已用 `cluster_dim = num_mma_ctas`（`docs/02`
+      §1.2）。见 `docs/04-experiments.md` §18，源码 `src/cluster_dsm.cu`，脚本
+      `harness/cluster_dsm.sh`，原始输出 `harness/cluster_dsm.out.txt`（目标卡 H100/sm90，
+      SMs=132，**固定空闲 device 1**，nvcc 13.2，**每配置独立进程**——一次 cluster launch failure
+      会污染 CUDA context/sticky）。主线三个 Section：
+      - **A（DSM 远端读 vs 本地 SMEM）**：`C=1` 退化为本地基线，16 KB/block、grid=128、R=20000。
+        **远端读与本地 SMEM 同量级**：`C=2` 0.99×、`C≥4` 只 ~1.17×（56.3→66.3 µs）；对照
+        plain 全局流式读（256 MB）仅 **690.8 GB/s**。
+      - **S（ring 段位移，双缓冲 ping-pong、1 `cluster.sync`/轮，段放 global scratch vs 自己 SMEM）**：
+        `maxerr=0` 与解析参考逐位一致、跨进程可复现。**DSM 恒快于 HBM/L2 往返且随段增大放大**：
+        seg 1/2/4/8 KB → `dsm/hbm` = **1.06 / 1.11 / 1.17 / 1.27×**（8 KB 时 dsm 1330 vs hbm 1049
+        GB/s；scratch 仅 2 MB 驻 L2，故这是 **L2 往返**对照；DSM 已超 L2）。
+      - **C（协调/容量）**：`cluster.sync()` = **504→767 ns**（C=2→16），比 grid-wide `grid.sync()`
+        （1113 ns）便宜 **1.5–2.2×**（只同步 cluster 内几个 SM）；**cluster 硬上限 16 block**
+        （C=32 `cluster misconfiguration`），且 **grid 必须是 C 的整数倍**（131 非 8 倍数即失败）。
+      核心结论：**DSM 是「SMEM 级」的跨 SM 通道**（局部、片上、局部屏障）；这给 P20-1 的「重叠需
+      SM 共驻」以硬件形态，给 P24-1 的损失三补「L2↔DSM」一级；但 **cluster 装不下整机（≤16 block，
+      限同一 GPC）→ 132 SM 整机 megakernel 只能切成 ~8 个 cluster，跨 cluster 仍走 L2/HBM**，与 MPK
+      去中心化 event queue / DeepGEMM ring barrier 的「按需局部同步」同目标。是 **C4 的更细实现，
+      非 C5**（无固定 worker/scheduler 动态派发）。踩坑：**变界 stride 循环读远端 SMEM 会稳定触发
+      `unspecified launch failure`（-O3 代码生成问题）**，改用固定索引单元素读规避。判据不变
+      （C1–C3；cluster.sync/DSM 细化了 C4）。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -621,7 +649,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P28-1 完成（1/1）**。本轮兑现「下一步」可选方向①：**用 `-G`（`--device-debug`）重建
+- 当前进度：**P29-1 完成（1/1）**。补齐 `docs/04` §6.6 明确留的「sm90 的 cluster 未覆盖」尾巴：
+  **Thread Block Clusters + 分布式共享内存（DSM）** 作为跨 SM「不落 HBM」的中间量交换原语。
+  `docs/04-experiments.md` 新增 **§18**，源码 `src/cluster_dsm.cu`、脚本 `harness/cluster_dsm.sh`、
+  原始输出 `harness/cluster_dsm.out.txt`（目标卡 H100/sm90、SMs=132、**固定空闲 device 1**、nvcc 13.2、
+  **每配置独立进程**避免 sticky context）。核心结论：**DSM 远端读与本地 SMEM 同量级**（C=2 0.99×、
+  C≥4 仅 1.17×；对照 plain 全局流式读 690.8 GB/s）；**ring 段位移交换 dsm/hbm = 1.06→1.27×**
+  （seg 1→8 KB，maxerr=0 逐位一致且可复现；scratch 仅 2 MB 驻 L2，故是 L2 往返对照，DSM 8 KB 时
+  1330 GB/s 已超 L2 的 1049 GB/s）；`cluster.sync()` = 504→767 ns 比 `grid.sync()`（1113 ns）便宜
+  **1.5–2.2×**；**cluster 硬上限 16 block、grid 必须是 C 的整数倍** → 132 SM 整机 megakernel 只能
+  切 ~8 个 cluster、跨 cluster 仍走 L2/HBM（= C4 的更细实现，非 C5）。踩坑：**变界 stride 循环读
+  远端 SMEM 稳定触发 `unspecified launch failure`（-O3 代码生成），改固定索引单元素读规避**。
+  相关机制与 P20-1（§14 SM 共驻）、P24-1（§17 损失三字节）交叉引用。**本轮新增实验。**
+  此前 **P28-1 完成（1/1）**：兑现「下一步」可选方向①：**用 `-G`（`--device-debug`）重建
   JIT 内核 + 保留 JIT 临时目录 + cuda-gdb attach 挂起进程**，把 §11.7 留下的「读不出卡在哪个 event 计数」
   补上——`docs/09-mpk-build.md` 新增 **§13**，脚本 `harness/mpk_debug_counters.sh`、命令
   `harness/mpk_debug_counters.cmds`、补丁 `harness/mpk_debug_build.patch`、探针
@@ -734,7 +774,9 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：全专题收尾（P0–P28 全部完成）**。P28-1 已把 §11.7 的「读不出卡在哪个 event」用 `-G` +
+- **下一步：全专题收尾（P0–P29 全部完成）**。P29-1 已把 §6.6 的「sm90 cluster 未覆盖」补成实测
+  （`docs/04` §18：Cluster + DSM 跨 SM 交换原语、`cluster.sync` vs `grid.sync`、cluster 容量边界）。
+  P28-1 已把 §11.7 的「读不出卡在哪个 event」用 `-G` +
   cuda-gdb 补成数值证据（`docs/09` §13）。P27-1 已把 MPK 转引的两个手工 mega-kernel 先例（FlashMoE、
   Llama-1B megakernel）回到一手资料（`docs/10`，纯资料分析）。P26-1 已在 clean scheduler-first 构建上把端到端延迟
   从单算子推进到 4 算子 DAG（`docs/09` §12），**兑现下面的可选方向③**。P25-1 已构建 + launch +
@@ -767,9 +809,14 @@
   ⑦ ~~P15-1 §9.6「未测扇入/扇出 DAG、批量/预取取 task」~~（**P22-1 完成**：分层扇入/扇出图 ×
    barrier/wave/decen/static 四机制、MPK §5.2 批量取 task 甜点 K≈W/G、静态分配随扇入变差）；
   剩「MPK 端到端执行收敛」的问题（构建已在 **P25-1** 打通，见「阻塞」B1）。
-  ⑧ ~~P22-1 §15.6「跨层流水/环形缓冲预取」~~（**P23-1 完成**：MPK §5.3 的 paged SMEM +
+   ⑧ ~~P22-1 §15.6「跨层流水/环形缓冲预取」~~（**P23-1 完成**：MPK §5.3 的 paged SMEM +
    cross-task software pipelining 实测——跨层预取峰值 1.19–1.20×（vs barrier）、深度按访存占比选
-   K≈4、纯访存时净亏；eager/barrier 1.25× 验证消 launch 主收益）。
+   K≈4、纯访存时净亏；eager/barrier 1.25× 验证消 launch 主收益）；
+   ⑨ ~~`docs/04` §6.6「sm90 cluster 未覆盖」~~（**P29-1 完成**：Thread Block Cluster + DSM 跨 SM
+   交换原语实测——DSM 远端读 ≈ 本地 SMEM、dsm/hbm 1.06–1.27×、`cluster.sync` 比 `grid.sync` 便宜
+   1.5–2.2×、cluster 上限 16 block/grid 须为 C 倍数；见 `docs/04` §18）。
+   剩余可选：cluster 内 TMA multicast + `mbarrier` 组合、2D/3D cluster、`cudaLaunchAttributeProgrammaticEvent`；
+   把 DeepGEMM Mega Gate 的 `cluster_dim` 路径做一次 sm90 等价复刻（Mega Gate 本身是 SM100 专属）。
 - **本轮（P25-1 续）**：续做 P25-1 的「MPK 端到端跑通」，把上轮「执行不收敛」从玄学死锁推进到
   **可复现、可归因的时序竞态**。`docs/09-mpk-build.md` 新增 **§7**（收敛性诊断），新原始输出
   `harness/mpk_converge_plain.out.txt` / `harness/mpk_converge_instrumented.out.txt` /

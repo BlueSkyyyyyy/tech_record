@@ -1,0 +1,116 @@
+# P29-1 小实验原始输出：Thread Block Clusters + DSM（跨 SM 中间量交换原语）
+# date: 2026-10-13
+# cmd: bash code/mega-kernel/harness/cluster_dsm.sh   （经 scripts/lab.sh exec 在 kernel_lab 容器内）
+#      -> nvcc -O3 -arch=sm_90 src/cluster_dsm.cu -o /tmp/cluster_dsm；每个配置单独进程
+# gpu: H100 80GB HBM3 x8, sm90, SMs=132（固定在空闲 device 1；每配置独立进程，因 cluster
+#      launch failure 会污染 CUDA context）
+# cuda: nvcc release 13.2, V13.2.78
+# 说明：
+#  A : cluster 内读「环形邻居」的 SMEM（C=1 退化为读自己 SMEM = 本地基线）；grid=128, 16KB/block,
+#      R=20000，每次一个 volatile load/线程/轮（变界 stride 循环会触发编译器问题，见文档 §18.6）。
+#  Lg: plain 全局流式读 256 MB（>50MB L2）作 HBM 参照。
+#  S : ring 段位移，双缓冲 ping-pong、1 次 cluster.sync/轮；段放 global scratch(hbm) 或自己 SMEM(dsm)。
+#      每轮读邻居整段 + 写自己整段（seg=K*256 float）；maxerr=0 表示与解析参考逐位一致。
+#  C1/C3: cluster.sync() vs grid.sync() 成本（R=200）。C2: cluster 容量/合法性。
+
+== A. DSM 远端读 vs 本地 SMEM 读（C=1 为本地基线；grid=128, SB=16KB, R=20000）==
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm A 1 128 4096 20000
+A C= 1 grid=128 SB= 16KB R=20000 |    56.088 us/launch |  2.804 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm A 2 128 4096 20000
+A C= 2 grid=128 SB= 16KB R=20000 |    56.088 us/launch |  2.804 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm A 4 128 4096 20000
+A C= 4 grid=128 SB= 16KB R=20000 |    66.005 us/launch |  3.300 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm A 8 128 4096 20000
+A C= 8 grid=128 SB= 16KB R=20000 |    65.829 us/launch |  3.291 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm A 16 128 4096 20000
+A C=16 grid=128 SB= 16KB R=20000 |    66.277 us/launch |  3.314 ns/lap
+
+== HBM 参照：plain 全局流式读（grid=132, 256 MB > 50 MB L2）==
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Lg 132 256
+Lg grid=132 MB=256 |    690.8 GB/s
+
+== B. 跨 SM ring 段位移（ping-pong, 1 屏障/轮，grid=128, R=200）：段放 HBM(scratch) vs DSM ==
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sh 2 128 1 200
+S hbm C= 2 grid=128 seg=  1KB R=200 |   0.1752 ms |   299.2 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sd 2 128 1 200
+S dsm C= 2 grid=128 seg=  1KB R=200 |   0.1658 ms |   316.1 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sh 4 128 1 200
+S hbm C= 4 grid=128 seg=  1KB R=200 |   0.1758 ms |   298.3 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sd 4 128 1 200
+S dsm C= 4 grid=128 seg=  1KB R=200 |   0.1654 ms |   316.9 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sh 8 128 1 200
+S hbm C= 8 grid=128 seg=  1KB R=200 |   0.1784 ms |   293.9 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sd 8 128 1 200
+S dsm C= 8 grid=128 seg=  1KB R=200 |   0.1681 ms |   311.8 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sh 2 128 2 200
+S hbm C= 2 grid=128 seg=  2KB R=200 |   0.2071 ms |   506.4 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sd 2 128 2 200
+S dsm C= 2 grid=128 seg=  2KB R=200 |   0.1870 ms |   560.7 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sh 4 128 2 200
+S hbm C= 4 grid=128 seg=  2KB R=200 |   0.2071 ms |   506.3 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sd 4 128 2 200
+S dsm C= 4 grid=128 seg=  2KB R=200 |   0.1855 ms |   565.4 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sh 8 128 2 200
+S hbm C= 8 grid=128 seg=  2KB R=200 |   0.2094 ms |   500.8 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sd 8 128 2 200
+S dsm C= 8 grid=128 seg=  2KB R=200 |   0.1888 ms |   555.5 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sh 2 128 4 200
+S hbm C= 2 grid=128 seg=  4KB R=200 |   0.2692 ms |   779.0 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sd 2 128 4 200
+S dsm C= 2 grid=128 seg=  4KB R=200 |   0.2298 ms |   912.4 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sh 4 128 4 200
+S hbm C= 4 grid=128 seg=  4KB R=200 |   0.2694 ms |   778.5 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sd 4 128 4 200
+S dsm C= 4 grid=128 seg=  4KB R=200 |   0.2282 ms |   919.1 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sh 8 128 4 200
+S hbm C= 8 grid=128 seg=  4KB R=200 |   0.2734 ms |   767.1 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sd 8 128 4 200
+S dsm C= 8 grid=128 seg=  4KB R=200 |   0.2287 ms |   917.1 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sh 2 128 8 200
+S hbm C= 2 grid=128 seg=  8KB R=200 |   0.4000 ms |  1048.6 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sd 2 128 8 200
+S dsm C= 2 grid=128 seg=  8KB R=200 |   0.3153 ms |  1330.2 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sh 4 128 8 200
+S hbm C= 4 grid=128 seg=  8KB R=200 |   0.4009 ms |  1046.2 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sd 4 128 8 200
+S dsm C= 4 grid=128 seg=  8KB R=200 |   0.3126 ms |  1341.7 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sh 8 128 8 200
+S hbm C= 8 grid=128 seg=  8KB R=200 |   0.3997 ms |  1049.3 GB/s | maxerr 0.0000
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm Sd 8 128 8 200
+S dsm C= 8 grid=128 seg=  8KB R=200 |   0.3133 ms |  1338.8 GB/s | maxerr 0.0000
+
+== C1. cluster.sync() 成本（grid=128, R=200）==
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C1 2 128 200
+C1 C= 2 grid=128 R=200 | cluster.sync 504.0 ns/sync
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C1 4 128 200
+C1 C= 4 grid=128 R=200 | cluster.sync 705.8 ns/sync
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C1 8 128 200
+C1 C= 8 grid=128 R=200 | cluster.sync 730.3 ns/sync
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C1 16 128 200
+C1 C=16 grid=128 R=200 | cluster.sync 767.3 ns/sync
+
+== C2. cluster 容量：单 cluster 尝试 launch（portable<=8, non-portable<=16）==
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C2 1 1
+C2 C= 1 grid=  1 | ok
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C2 2 2
+C2 C= 2 grid=  2 | ok
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C2 4 4
+C2 C= 4 grid=  4 | ok
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C2 8 8
+C2 C= 8 grid=  8 | ok
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C2 16 16
+C2 C=16 grid= 16 | ok
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C2 32 32
+C2 C=32 grid= 32 | a kernel launch error has occurred due to cluster misconfiguration
+
+== C2b. 硬边界：C 硬上限 16；grid 非 C 的整数倍非法 ==
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C2 8 132
+C2 C= 8 grid=132 | a kernel launch error has occurred due to cluster misconfiguration
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C2 16 64
+C2 C=16 grid= 64 | ok
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C2 4 132
+C2 C= 4 grid=132 | ok
+
+== C3. grid.sync() 成本（cooperative, grid=132, R=200）==
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_dsm C3 132 200
+C3 grid=132 R=200 | grid.sync 1113.3 ns/sync

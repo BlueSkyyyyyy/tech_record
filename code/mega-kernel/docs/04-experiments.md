@@ -2396,3 +2396,167 @@ Q=8:  eager 4129.6 MB / 1.5020 ms = 2.75 TB/s   fused 518.5 MB / 0.1889 ms = 2.7
 - `Q` 只扫到 8（再大只是同一线性律延伸）；只测 `float4`、只测单条逐元素链，未测非线性 DAG、
   未测 tile 级张量核场景。`barrier` 的写字节略高（+2–4%）未做进一步归因。
 - 计时用 device 3、`iters=30`；ncu 用一遍 `one` 运行采样，单次字节读数自带 ±0.1% 抖动。
+
+---
+
+## 18. Thread Block Clusters 与分布式共享内存（DSM）：跨 SM「不落 HBM」的中间量交换原语（P29-1）
+
+### 18.1 问题
+
+前面所有实验里，跨算子/跨 SM 的中间量只有两条出路：**落 HBM（损失三，P24-1 §17 量过字节）**
+或**靠 `grid.sync()` 在单内核里串起来（P13-1 §7 / P23-1 §16，但仍经 SMEM/HBM）**。而 §6.6
+明确留了一条尾巴：
+
+> `unspecified launch` 之外的 sm90 特性（如 cluster、`cudaLaunchAttributeProgrammaticEvent`）未覆盖。
+
+Hopper 的 **Thread Block Cluster + 分布式共享内存（DSM）** 恰恰是把「跨 SM 传中间量」做进硬件
+的原语：同一 cluster 内的 block 可用 `cluster.map_shared_rank(ptr, rank)` 直接**读邻居 block 的
+SMEM**，中间量完全不落 L2/HBM。生产案例已经在用——DeepGEMM **Mega Gate** 一次发出多 CTA 并带
+`cluster_dim = num_mma_ctas`（`docs/02` §1.2，`sm100_bf16_mega_gate.cuh:32` 一带），FlashMoE
+的非阻塞 NVSHMEM（`docs/10`）也是同一思路的跨卡版本。
+
+本节回答三件事：(1) DSM 远端读比本地 SMEM 贵多少？(2) 把「跨 SM 中间量」放 DSM vs 放
+HBM/L2 往返，快多少？(3) cluster 的**容量/拓扑边界**在哪——能不能把整张机器做成一个 cluster？
+
+### 18.2 方法
+
+程序 `src/cluster_dsm.cu`，脚本 `harness/cluster_dsm.sh`，原始输出 `harness/cluster_dsm.out.txt`
+（目标卡 H100 / sm90，SMs=132，**固定空闲 device 1**，nvcc 13.2）。用 `cudaLaunchKernelEx` +
+`cudaLaunchAttributeClusterDimension` 设置 cluster 维；kernel 内用
+`cooperative_groups::this_cluster()` 取 cluster、`map_shared_rank` 取邻居 SMEM 指针。
+**每个配置单独一次进程调用**——一次 cluster launch failure 会污染 CUDA context（sticky error），
+必须隔离，这也是复现脚本用 shell 循环逐配置调用的原因。
+
+四个 Section：
+
+- **A**：cluster 内读「环形邻居」的 SMEM（`src[threadIdx.x]`，每次一个 `volatile` load/线程/轮）。
+  `C=1` 时 `(rank+1)%1=0` 退化为读**自己** SMEM = 本地基线；`C≥2` 是**远端**读。`grid=128`、
+  16 KB/block、`R=20000`。
+- **Lg**：plain 全局流式读 256 MB（> 50 MB L2）作 HBM 参照。
+- **S**：跨 SM **ring 段位移**交换。C 个 block 组成 cluster，每 block 拥有 `seg=K·256` 个 float 的段，
+  初值 `gid·1000 + j`；双缓冲 ping-pong，第 `r` 轮读邻居槽 `r%2`、写自己槽 `(r+1)%2`、末尾一次
+  `cluster.sync()`，每轮把整段「向左搬一格」。段放 **global scratch（`Sh`，hbm）** 或**自己 SMEM
+  （`Sd`，dsm）**。`R` 轮后 block `gid` 的段 = 初始时 `(rank-R)%C` 的段，可与解析参考**逐位比较**。
+- **C1/C3**：`cluster.sync()` vs cooperative `grid.sync()` 成本；**C2/C2b**：cluster 容量/合法性。
+
+### 18.3 结果
+
+**A. DSM 远端读 vs 本地 SMEM（16 KB/block, grid=128, R=20000）**
+
+```text
+   C |  us/launch | ns/lap |   vs C=1
+-----+------------+--------+----------
+   1 |     56.33  |  2.817 |   1.000  （本地 SMEM 基线）
+   2 |     55.89  |  2.795 |   0.992
+   4 |     65.49  |  3.275 |   1.163
+   8 |     65.87  |  3.294 |   1.169
+  16 |     66.29  |  3.315 |   1.177
+```
+
+**DSM 远端读与本地 SMEM 读同量级**：`C=2` 甚至与本地一致（0.99×），`C≥4` 只慢约 **17%**。
+plain 全局流式读（256 MB）只有 **690.8 GB/s**（HBM 参照）。
+
+**S. ring 段位移：DSM vs HBM(scratch) 往返（grid=128, R=200, 1 屏障/轮）**
+
+```text
+ seg |  Sh hbm GB/s |  Sd dsm GB/s | dsm/hbm   （C=2；C=4/C=8 同值，见 out.txt）
+-----+--------------+--------------+---------
+ 1KB |    299.2     |    316.1     |  1.06x
+ 2KB |    506.4     |    560.7     |  1.11x
+ 4KB |    779.0     |    912.4     |  1.17x
+ 8KB |   1048.6     |   1330.2     |  1.27x
+```
+
+四档 `maxerr = 0.0000`（与解析参考**逐位一致**，且跨进程可复现）。**DSM 交换恒快于
+HBM/L2 往返，且随段增大优势放大到 1.27×**。注意 `Sh` 的 scratch 为 `grid·2·seg·4`（8 KB 时
+仅 2 MB），**驻留 L2**，所以 `Sh` 量的是 **L2 往返**而非 HBM；`Sd` 的 1330 GB/s 已超过 L2
+往返的 1049 GB/s。
+
+**C1. 协调成本（grid=128, R=200）**
+
+```text
+ C  | cluster.sync ns/sync |   对照：grid.sync (grid=132) = 1113.3 ns/sync
+----+----------------------+
+  2 |        504.0         |   cluster.sync ≈ grid.sync / 2.2
+  4 |        705.8         |
+  8 |        730.3         |
+ 16 |        767.3         |   cluster.sync ≈ grid.sync / 1.5
+```
+
+`cluster.sync()` 比 grid-wide 的 `grid.sync()` 便宜 **1.5–2.2×**，且随 cluster 增大缓慢上升
+（504→767 ns）——**群屏障 = 只同步 GPC 内的这几个 SM**。
+
+**C2/C2b. cluster 容量/合法性**
+
+```text
+C=1,2,4,8,16（单 cluster）          -> ok（16 需要 non-portable 属性）
+C=32（单 cluster）                  -> cluster misconfiguration（硬上限 16）
+C=8, grid=132（132 % 8 != 0）       -> cluster misconfiguration（grid 必须是 C 的整数倍）
+C=16, grid=64 / C=4, grid=132       -> ok
+```
+
+**cluster 有硬上限 16 个 block，且 grid 大小必须是 C 的整数倍。**
+
+### 18.4 读法
+
+1. **DSM 是「SMEM 级」的跨 SM 通道**：远端 SMEM 读只比本地 SMEM 贵 ~0–17%（`C=2` 几乎为零），
+   远快于任何经 L2/HBM 的路径。这解释了 Hopper 上为什么可以把「邻居 block 的中间结果」当作
+   本地 SMEM 用。
+2. **交换介质决定一档收益**：同为单 cluster kernel、同段大小、同屏障数，只把段从 global scratch
+   换成邻居 SMEM，`dsm/hbm` = **1.06→1.27×**（段越大越显著，因为 L2 往返的带宽/延迟开始展露）。
+   这是**损失三在「跨 SM」尺度**的对应物——P24-1 §17 量的是「落 / 不落 HBM」，这里量的是
+   「经 / 不经 L2 往返」。
+3. **屏障也便宜**：`cluster.sync()` 只有 `grid.sync()` 的 ~1/2，因为它只覆盖 cluster 内几个 SM，
+   不是全机器 rendezvous。对 megakernel 的含义：**把同步范围缩到「真正有依赖的那几个 SM」比
+   全机器屏障更划算**——这正是 MPK 去中心化 event queue（`docs/03` §3.3）与 DeepGEMM ring
+   barrier（`docs/02` §1.5）「按需局部同步」思想在 CUDA 原语层的等价物。
+4. **但 cluster 装不下整张机器**：上限 16 block（且必须落在同一 GPC 内、grid 是 C 的倍数）。
+   132 SM 的整机 megakernel **不可能是一个 cluster**，只能切成 ~8 个 cluster（每 GPC 一个），
+   跨 cluster 仍要走 L2/HBM 或全局 ring——**DSM 只把「最容易的那一跳」留在片上**。
+
+### 18.5 与判据 / MPK / 生产案例的关系
+
+- **对上 P20-1（§14）**：§14 的结论是「跨算子重叠的载体必须是**共享的 SM 内共驻**而非分块」，
+  因为静态切 block 的重叠恒慢于屏障。DSM 给出了「共享共驻」在 Hopper 上的**硬件形态**——
+  cluster 明确保证一组 block 共同驻留同一 GPC、且可互读 SMEM。它比 §14 的「同 kernel 分块」
+  更彻底：数据不经 L2，屏障只覆盖 cluster。
+- **对上 P24-1（§17）**：§17 证明「每融合一个算子消一趟全张量 HBM 往返」，本节证明
+  「每把一跳中间量从 L2 往返改到 DSM，省 6–21%」——**两条合起来是损失三的两级**：
+  HBM↔片上（§17 的主体）、L2↔DSM（本节）。
+- **对上 MPK**：论文的运行时把 worker/scheduler 划分到固定 SM（§5.1 行 1148–1174）、用
+  paged SMEM（§5.3 行 1312–1325）做跨 task 中间量、用去中心化 event queue 做局部同步
+  （`docs/03` §3.3）——这些正是「在单 kernel 内自己实现 cluster 式局部交换与局部屏障」。
+  MPK 论文/快照未见对 Hopper cluster 的显式使用（其粒度是「一个 task = 一个 CTA」，`docs/07`
+  §0），故这里的 cluster 是**实现层可选的一档加速**而非论文机制；但两者目标一致：**让有依赖的
+  SM 之间只做局部、片上的 rendezvous**。
+- **对上生产案例**：DeepGEMM Mega Gate 已用 `cluster_dim = num_mma_ctas`（`docs/02` §1.2）把
+  「打分行/排序/映射」几段绑在一个 cluster 里做 TMA multicast + DSM；本节的 1.06–1.27× 是这种
+  「段级 cluster 融合」相对「经 L2 的段间交换」的量化下界。FlashMoE 的对称张量 + 非阻塞 NVSHMEM
+  （`docs/10`）是同一机制在**跨卡**尺度的推广。
+- **判据（C1–C5，`docs/00` §3）**：cluster kernel 仍满足 C1（单 launch）+C2（常驻）+C3（多算子），
+  且 DSM/`cluster.sync` 给出了比 `grid.sync` 更细的 **C4（设备内协调）**；但它**不是 C5**——
+  没有固定的 worker/scheduler 角色去动态派发 task，也没有跨 cluster 的全局协调。**cluster 是
+  「C4 的更细实现」，C5 仍由 P15-1 §9 的去中心化队列覆盖。**
+
+### 18.6 局限与踩到的坑
+
+- **编译器坑（重要）**：用**变界 stride 循环**读远端 SMEM（`for (i=threadIdx.x;i<sb;i+=blockDim.x)
+  acc += src[i];`，含 `#pragma unroll`）会稳定触发 `unspecified launch failure`（同设备同参数
+  可复现，`C=1` 本地读却正常，环 kernel 的「每线程单元素读」也正常）——是 `-O3` 对该循环在
+  generic/remote 指针上的代码生成问题。本实验 A/Section 都改用**每线程固定索引的单元素读**
+  （`src[threadIdx.x]` / 展开的 `threadIdx.x + k·256`）规避。这是**实现坑，不是 DSM 语义问题**，
+  但说明「cluster + 变界远端读」在生产代码里需要小心中间表示（真实 megakernel 多用 TMA/固定 tile）。
+- **`Sh` 的对照是 L2 而非 HBM**：scratch 仅 1–2 MB（< 50 MB L2）。要测「DSM vs 真 HBM」需要把
+  scratch 撑过 L2，但 cluster 段受 SMEM 容量限制、DSM 无法搬运大段——**这本身就是 DSM 的边界**：
+  它只能交换「装得进 SMEM」的中间量。大中间量仍需分块或落 HBM（对应 P23-1 §16 的环形预取）。
+- **同步主导区间**：`S` 每轮 1 次 `cluster.sync`（~500–770 ns），段小时（1–2 KB）屏障占大头，
+  故 `dsm/hbm` 只 1.06×；段大（8 KB）才显出介质差（1.27×）。绝对带宽（1.3 TB/s）低于纯 SMEM，
+  因为每轮只有 `seg` 大小的一跳、屏障不能摊薄。
+- **忙等造流、单 cluster 模型**：`A` 用 `volatile` 单元素读测的是**每轮一跳的延迟/吞吐代理**，
+  非满带宽 streaming；`S` 是合成段位移，不含 TMA/张量核。只用 1D cluster（`clusterDim.x`），
+  未测 2D/3D cluster 与 cluster 内 TMA multicast。
+- **共享机器**：device 1 上有其它进程的 context，cluster 启动对 GPC 连续性敏感（早期一版 kernel
+  在 `grid≥8` 时间歇性 `unspecified launch failure`），故复现脚本每配置独立进程、并记录
+  设备号；本节结论用「比例」，绝对数会随共驻负载小幅漂移。
+- 未覆盖 `cudaLaunchAttributeProgrammaticEvent`（PDL 的 cluster 版本）与 cluster 内的
+  `mbarrier`/TMA 组合，留作后续。
