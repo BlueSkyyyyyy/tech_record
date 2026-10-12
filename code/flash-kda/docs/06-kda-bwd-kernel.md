@@ -289,7 +289,87 @@ $\sigma(\beta)$ 与 $\alpha=2^{g}$、$g^{\text{cum}}$（后向也需要 $\beta$ 
 | 求逆伴随 | 用保存的 bf16 `Akk` | 用 workspace 的 bf16 `kINV`（建议增存 fp32 版） |
 | 精度敏感点 | `chunk_intra.py:597` 注释禁 bf16 | 保持 fp32/tf32 |
 
-## 6. 小结与下一步
+## 6. P6-2：最小可运行反向 kernel——B1 状态伴随实测
+
+§5 的 B1 是整个反向里唯一**跨块串行**的部分（其余 B2/B3 都是逐块并行），也是最值得先落地
+验证的一块。本节在 `kernel_lab`（H100）上写了一个**最小可运行的 Triton 状态伴随 kernel**，
+复刻 FLA `dhu`（§3.2）与式 (7.13)，并与三方对拍。证据：
+`harness/check_bwd_dhu_kernel.py` / `harness/check_bwd_dhu_kernel.out.txt`。
+
+### 6.1 kernel 契约（与 `dhu` 逐式对应）
+
+对一个 head、沿 block 逆序扫，维护状态伴随 `dS[K,V]`（fp32）。每块 `c`：
+
+```
+dh[c] = dS                                  # 落盘给 B2（= 式 7.11 的状态伴随）
+dU    = k_rest @ dS + dU_in                  # = FLA dv2（输出支路 dU_in 来自 dAv）
+dS   <- E_tot[:,None] ⊙ dS                  # 式 (7.13) 的 E^tot 支（`dhu:577`）
+        + q_dec^T @ do · scale               # 输出支路（`dhu:585`）
+        - w^T @ dU                           # 预测支路（w = P diag(β) k_dec，`dhu:587`）
+dh0   = 完成 c=0 后的 dS                     # = ∂L/∂S_0
+```
+
+这四行与 `dhu`（`fla/ops/common/chunk_delta_h.py:576-587`）**逐行同构**：FLA 只是把
+`q_dec = qg` 与 `k_rest = kg` 通过 `g`/`gk` 的 `exp2` 缩放现算，并把 K 拆成 64、V 按 `BV` 分块。
+本 kernel 用 `tl.dot` 直实现：`tl.dot(k_rest, dS)`、`tl.dot(tl.trans(q_dec), do)`、
+`tl.dot(tl.trans(w), dU)`，grid `(cdiv(V,BV), B·HV)`（head 并行、V 分块，镜像 §5.2 的 B1）。
+
+**踩坑（坐标约定）**：`dhu` 的初始 `dS` 来自**终态梯度 `dht`**（无上游时为零），
+**不是**初态 `h0`——`h0` 只进 B2 的 `detot`。第一版误把 `h0` 当初始 `dS`，指纹是
+「`dh0` 逐位对（1e-3）、但**最后一个块**的 `dh`/`dv2` 全错而其余块全对」——因为只有最末块
+的 `dS` 直接由初值决定。改成从 0 起即归位。
+
+### 6.2 三方对拍（fp32）
+
+`A` 用**纯 torch 显式递推**（`dhu_torch`，ieee fp32 matmul）；`B` 是 Triton kernel；
+`C` 是 FLA `chunk_gated_delta_rule_bwd_dhu`（真跑）。两组配置，`do` 与 `dU_in` 取自
+FLA `dAv` 的真实输出：
+
+| 配置 | 对比 | `dh` max_rel | `dv2` max_rel | `dh0` max_rel |
+|---|---|---|---|---|
+| B1 T256 H2 D128 BT64 | torch vs FLA | 1.12e-3 | 8.68e-4 | 1.34e-3 |
+| | **Triton vs FLA** | **4.60e-5** | **2.07e-5** | **1.82e-5** |
+| | Triton vs torch | 1.13e-3 | — | — |
+| B1 T512 H4 D128 BT32 | torch vs FLA | 1.16e-2 | 5.23e-3 | 6.73e-3 |
+| | **Triton vs FLA** | **3.71e-5** | **3.88e-5** | **8.00e-6** |
+| | Triton vs torch | 1.16e-2 | — | — |
+
+**为什么 Triton 反而比 torch 更贴 FLA**：FLA `dhu` 的 `tl.dot` 默认走 **tf32**，torch 显式
+递推走 ieee fp32，两者差 ~1e-3（BT32 更长的块链放大到 ~1e-2）；而 Triton kernel 同样走
+tf32、还原序也一致，于是 **Triton↔FLA 落到 1e-5**。这本身是一条结论：**`dhu`/B1 的误差底噪
+由 tf32 决定（~1e-3），不是 fp32 机器精度**；目标卡 CUDA 若用 tf32 MMA，需接受同量级底噪，
+若需更准应保留 fp32 累加（对照 §3.3 的 `P` 伴随精度注释）。
+
+**与 P5-4 参考实现对齐**（Part A2）：把同一份 `q,k,v,g,beta,do` 喂给
+`src/kda_bwd_ref.py::kda_chunked_backward`（head 0），其 `dh0` 与 B1 的 `dh0` 差
+**max_rel 3.3e-4（BT64）/ 5.2e-3（BT32）**，与上面 torch-vs-FLA 同量级——说明 B1 递推就是
+`05` §7.3 分块反向里那条跨块状态伴随链，没有引入额外近似。
+
+### 6.3 精度消融：状态伴随存 bf16（回答 §5.3 的「待验证」）
+
+§5.3 标了「bf16 存 $\bar S$ 对 $dk,d\beta$ 的误差待验证」。B1 里做两个受控消融（fp32 golden）：
+
+- **(i) bf16 carry**（最坏情形：每块把运行中的 `dS` 量化成 bf16 再续传；FLA 实际保留 fp32）：
+  `dh` max_rel **2.72e-3 / 2.53e-3**（两组配置），`dh0` 1.83e-3 / 3.08e-3。
+- **(ii) bf16 storage**（FLA 的真实做法：`dS` 全程 fp32，只把**落盘的每块 `dh`** 存 bf16）：
+  `dh` max_rel **2.72e-3 / 2.53e-3**（与 (i) 相同，因为落盘量化与逐步量化同阶）。
+
+由于 B2（`wy_dqkg`）对 `dh` 是**线性**的（`b_dk += dot(v_new, dh)`、`b_dg += sum(h*dh)` 等，
+§3.3），这个 **~2.5e-3 的相对误差会原样传给 `dk/dβ/dA`**。结论：**bf16 存状态伴随可行**，
+其误差落在 bf16 GEMM 底噪（前向 `o`/`S` 已 3e-3~1e-2，P4-2/P5-3）之内，与 §5.3 的「同阶」
+判断一致；但若追求反向精度，`dh` 用 fp32 落盘（每 tile 多 64 KB @D128）是廉价保险。
+Triton 的 bf16-carry 变体与 torch bf16-carry 交叉验证到 5.9e-3 / 1.2e-2（含 tf32），自洽。
+
+### 6.4 计时与边界
+
+单 kernel 计时（`triton.testing.do_bench`，含 grid 启动）：T256 H2 → **107 µs**，
+T512 H4 → **191 µs**（`num_warps=4, num_stages=1, BV=32`）。这是「一个 CTA 持整条 K 轴、
+V 维只分 32 一路」的朴素实现，远未优化（FLA `dhu` 在 §3.6 的 profiler 里 ~14 µs）；
+它的价值是**先把契约和误差底噪钉死**，为后续 CUTLASS/TMA 版 B1（镜像前向 K2 的八个 Phase）
+提供可对拍的 golden。局限：BT 需整除 `tl.arange` 且 `K=128` 固定（本 kernel 未做 K 的 64 分段，
+故不是 §5.2 的最终形态）；pad 行用 mask 置零，正确性已由两组可整除配置覆盖，**非整除 T 待验证**。
+
+## 7. 小结与下一步
 
 - FLA `chunk_kda` 反向的 5 个 Triton kernel 与 `05` §7 的分块反向**逐式对应**：`dAv`=输出支路、
   `dhu`=跨块状态伴随、`wy_dqkg`=逐块 dq/dk/dv/db/dg、`intra`=块内 $A$ 反向、`cumsum(reverse)`+
@@ -298,10 +378,11 @@ $\sigma(\beta)$ 与 $\alpha=2^{g}$、$g^{\text{cum}}$（后向也需要 $\beta$ 
 - 目标卡 CUDA 反向的可行方案：**复用 K1 workspace**（11 个字段已含 $P,M_{qk},k^{\text{dec}},
   q^{\text{dec}},k^{\text{rest}},E^{\text{tot}}$），只补一个门控重算 kernel B0，再按
   「B3 intra / B2 dqkg / B1 state-adjoint」三个 GEMM kernel 落地，B1 直接镜像前向 K2。
-- 精度上最需要盯的是 $P$ 的伴随（式 7.5）与状态伴随的 bf16 存储，二者都标了**待验证**。
+- §6 已把 **B1 状态伴随**做成最小可运行 Triton kernel：与 FLA `dhu` 逐行同构，
+  Triton↔FLA 实测 **1e-5**（tf32 底噪），并与 `src/kda_bwd_ref.py` 的 `dh0` 对到 ~3e-4；
+  状态伴随 bf16 存储的受控消融给出 **~2.5e-3** 的相对误差（回答了 §5.3 的待验证项）。
 
 下一步：
 
-- **P6-2**（可选）：在 `kernel_lab` 上写最小可运行的反向 kernel（先用纯 Triton 或 CUDA 复刻
-  `dhu` / B1 状态伴随），与 `src/kda_bwd_ref.py` 对拍，拿到实测 max abs/rel。
-- 补一组受控消融：bf16 存 $\bar S$ 对 $dk/d\beta$ 的误差（对应 §5.3 的待验证项）。
+- P7：FlashKDA 前向 CUPTI 计时与 `ncu` 剖析（§5 的 B2/B3 与 CUTLASS/TMA 版 B1 属更大工程，
+  留待有明确需求时再做；P6-2 的「最小 kernel」目标已达成）。
