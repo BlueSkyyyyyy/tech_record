@@ -1197,6 +1197,42 @@
       `advance` 公式、累加器映射三者。配套博客 `content/posts/mega-moe-49-sm90-wgmma-descriptor`
       （索引页新增第 49 篇）。
 
+### P40 增量（opt-in，补齐 singleton 只讲「状态」没讲「生命周期」）
+
+- [x] **P40-1** **DeepGEMM 运行时对象的生命周期与资源所有权**
+      （`csrc/runtime/runtime.hpp`、`csrc/apis/config.hpp:12-14`、`deep_gemm/__init__.py:121-125`、
+      `third-party/deep_jit/include/deep_jit/utils/{lazy,env}.hpp`、
+      `csrc/jit_kernels/impls/smxx_cublaslt.hpp:73-77`、`csrc/runtime/jit.hpp`、
+      `csrc/jit_kernels/heuristics/runtime.hpp:67`、`tests/test_lazy_init.py`）。
+      第 48 篇（P38）只把 `Runtime` 当「装着 `num_sms`/`tc_util`/handle 字段的 singleton」，
+      本篇补它**什么时候创建、什么时候销毁、资源归谁、退出顺序为何危险、`shutdown()` 做了什么**。
+      **与 UMMA/TMA/WGMMA 无关，H100 真机逐项实测**。
+      → `docs/50-runtime-lifecycle.md`（真实行号核对）：`LazyInit`（`lazy.hpp:15-38`）三性质——
+      首次访问才构造（`operator->` `:26-32`）、**null factory = 终态**（`LazyInit(std::nullptr_t) :21`
+      + `:27` 断言）、**可整体替换即析构**（`shared_ptr` 覆盖 → `~Runtime()`）；`shutdown()`
+      （`config.hpp:13`）只是一行 `runtime = LazyInit<Runtime>(nullptr)`，故**终态、幂等、`_C.init`
+      不可恢复**（`init` 只调 `init_jit`，`jit.hpp:14-32`；`jit`/`heuristics_runtime` 是另外两个独立
+      singleton，`jit.hpp:12`/`heuristics/runtime.hpp:67`，不被动）。`Runtime`（`runtime.hpp:20-102`）
+      两类资源：① **cuBLASLt handle 默认自建**（`:41-43` 注释：`at::cuda::getCurrentCUDABlasLtHandle`
+      部分 PyTorch 版本 CPU 开销大）——`cublasLtCreate`（`:50-51`）在 ctor、`cublasLtDestroy`
+      （`:54-57`，`noexcept(false)`）在 dtor，`get_cublaslt_handle :59-65` 按
+      `DG_USE_PYTORCH_CUBLASLT_HANDLE` 切换托管/自建；② **workspace 每 stream 一份**（key 是
+      `c10::cuda::CUDAStream`，`:28,72-74`；注释 `:27`「cuBLASLt 可能异步用，不能共享」），
+      16 MiB（注释 `:25`：>16 MiB 会让 cuBLAS 选更差 heuristic），`DG_USE_TEMP_CUBLASLT_WORKSPACE`
+      （`:45-48,69-70`）每次现开现弃以避开 compute-sanitizer 的 `cudaErrorCudartUnloading`。
+      **退出顺序**：`__init__.py:123-125` 的 `atexit.register(shutdown)`——「原生 cuBLASLt 退出回调
+      可能早于 C++ 静态析构释放 handle 存储」，故在 Py/PyTorch/CUDA 尚存时提前释放，规避
+      use-after-free；上游 `test_lazy_init.py:22-52` 的 LD_PRELOAD 探针正是结算这件事
+      （6 组寿命用例 `:85-92/:101-113`，退出时 `live_handles==0` 才 `DG_PROBE_CLEAN`）。
+      `DG_USE_PYTORCH_CUBLASLT_HANDLE` 走 `get_env<int>`（`env.hpp:46-47`），故 `true/false/yes/no`
+      **反而非法**（`DJ_PANIC`）。H100 实测 `harness/exp_runtime_lifecycle.{py,sh,out.txt}`
+      **24 PASS / 0 FAIL**：A) 探针 6 例 create/destroy/clean 全对（`owned` 1/1、`managed` 0/0、
+      `explicit` 1/1、`unused` 0/0）；B) `shutdown` 后 `get_tc_util`/`get_num_sms` 抛
+      `lazy.hpp:27 factory != nullptr`、连调两次幂等、`_C.init` 仍报错；C) 显存账
+      **16/16/32 MiB**（首用 +16、同 stream 复用、换 stream 再 +16；temp 模式恒 0）；D) 整数解析
+      `0/1/2/-1` 与 `false/true/abc` 被拒；E) 上游 `test_lazy_init.py` 3 tests OK。行号全部核对过。
+      配套博客 `content/posts/mega-moe-50-runtime-lifecycle`（索引页新增第 50 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1221,8 +1257,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P39 各增量完成（P15-1…P38-1、P39-1）。**
-  本轮 P39-1：新建 `docs/49-sm90-wgmma-descriptor.md`（+`src/wgmma_desc.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P40 各增量完成（P15-1…P39-1、P40-1）。**
+  本轮 P40-1：新建 `docs/50-runtime-lifecycle.md`（+`harness/exp_runtime_lifecycle.{py,sh,out.txt}`）
+  ——补上第 48 篇只当「字段容器」一笔带过的 `Runtime` 的**生命周期与资源所有权**。三个核心事实：
+  ① **`LazyInit` 的「null factory = 终态」**（`lazy.hpp:21,27`）让 `shutdown()` 只需一行
+  `runtime = LazyInit(nullptr)`（`config.hpp:13`）：首次访问才构造、整体替换即析构、之后任何
+  `runtime->` 抛断言且 `_C.init` 救不回（它只重建 `jit`）；② **资源归属**——cuBLASLt handle
+  默认自建（逃避 PyTorch `getCurrentCUDABlasLtHandle` 的 CPU 开销），自建自毁、托管归 PyTorch；
+  workspace **每 CUDAStream 一份 16 MiB**（异步使用不能共享、>16 MiB 触发更差 heuristic），
+  `DG_USE_TEMP_CUBLASLT_WORKSPACE` 为 compute-sanitizer 卸载顺序逃生阀；③ **退出顺序**——
+  `atexit.register(shutdown)` 在 Py/PyTorch/CUDA 尚存时提前释放，规避「原生 cuBLASLt 退出回调
+  先释放存储、再被 C++ 静态析构 `cublasLtDestroy`」的 use-after-free。**H100 真机 24 PASS / 0 FAIL**：
+  LD_PRELOAD 探针 6 例 create/destroy/clean 全对、显存账 16/16/32 MiB、shutdown 终态逐条验证、
+  上游 `test_lazy_init.py` 3 tests OK。行号全部核对过。配套博客
+  `content/posts/mega-moe-50-runtime-lifecycle`（索引页新增第 50 篇）。Hugo 构建 0 ERROR。
+  上一轮 P39-1：新建 `docs/49-sm90-wgmma-descriptor.md`（+`src/wgmma_desc.cu`、
   `harness/exp_wgmma_desc.{sh,out.txt}`）——补上前面所有 SM90 kernel **每一行 MMA 都在调、
   却从没单独讲过**的底座（`mma/sm90.cuh` + `ptx/wgmma.cuh`）。三个核心事实：① **64 位描述符**
   （`start_addr>>4`/`LBO>>4`/`SBO>>4`/`base_offset`/`layout_type`）把「一块 swizzle 过的 smem」
@@ -1599,7 +1648,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P39 已完成（新增 **P39-1 SM90 WGMMA 层：共享内存描述符、选择器与异步组**：
+- **下一步**：P0~P40 已完成（新增 **P40-1 DeepGEMM 运行时对象生命周期与资源所有权**：
+  补上第 48 篇只当「字段容器」的 `Runtime` 的 lazy init / shutdown / cuBLASLt handle 与 per-stream
+  workspace 归属——`LazyInit` 的「null factory = 终态」、`shutdown()` 一行赋值即永久置空且 `init`
+  不可恢复、handle 默认自建自毁、workspace 每 stream 一份 16 MiB、`atexit(shutdown)` 规避退出
+  use-after-free；**H100 真机 24 PASS**（探针 create/destroy/clean、显存账 16/16/32、上游寿命测试
+  OK）；见上）。
+  上一轮 P39-1：P0~P39 已完成（新增 **P39-1 SM90 WGMMA 层：共享内存描述符、选择器与异步组**：
   补上所有 SM90 kernel 每一行 MMA 都在调、却从没单独讲过的底座（`mma/sm90.cuh` + `ptx/wgmma.cuh`）——
   64 位 `GmmaDescriptor` 五段位域与 `to_gmma_layout_type` 把字节 swizzle 编码进描述符、
   `make_gmma_desc` 的 K/MN 两分支闭式、`advance_gmma_desc_lo` 三段步进、三个选择器 `M=64`/`K`=32·16·8、

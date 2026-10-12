@@ -1,0 +1,57 @@
+NVIDIA H100 80GB HBM3, 9.0
+========================================================================
+DeepGEMM 运行时生命周期实验 (P40-1)
+  DeepGEMM dir : ~/github/DeepGEMM
+  torch        : 2.12.0a0+0291f960b6.nv26.04.48445190  cuda=13.2
+  GPU          : NVIDIA H100 80GB HBM3 cc=(9, 0)
+  deep_gemm    : 2.8.1
+========================================================================
+
+===== Part A：cuBLASLt handle 所有权（探针统计 create/destroy/clean）=====
+  [PASS] unused: managed=0 create/destroy/clean=0/0/1 (期望 0/0/1) rc=0  
+  [PASS] owned: managed=0 create/destroy/clean=1/1/1 (期望 1/1/1) rc=0  
+  [PASS] managed: managed=1 create/destroy/clean=0/0/1 (期望 0/0/1) rc=0  
+  [PASS] explicit: managed=0 create/destroy/clean=1/1/1 (期望 1/1/1) rc=0  
+  [PASS] managed_explicit: managed=1 create/destroy/clean=0/0/1 (期望 0/0/1) rc=0  
+  [PASS] unused_explicit: managed=0 create/destroy/clean=0/0/1 (期望 0/0/1) rc=0  
+
+===== Part B：shutdown() 终态语义 + init 不可恢复 =====
+B before: 100
+B get_tc_util after shutdown: Assertion error (third-party/deep_jit/include/deep_jit/utils/lazy.hpp:27): factory != nullptr: lazy object must be initialized before use
+B get_num_sms  after shutdown: Assertion error (third-party/deep_jit/include/deep_jit/utils/lazy.hpp:27): factory != nullptr: lazy object must be initialized before use
+B after _C.init: Assertion error (third-party/deep_jit/include/deep_jit/utils/lazy.hpp:27): factory != nullptr: lazy object must be initialized before use
+  [PASS] shutdown 后 get_tc_util 抛 lazy.hpp:27 "factory != null"  
+  [PASS] shutdown 后 get_num_sms 抛同一错误  
+  [PASS] 重复 shutdown 幂等（无异常）  
+  [PASS] _C.init 不重建 runtime（仍报错）  
+
+===== Part C：每 stream 一份 workspace 的显存账（H100）=====
+  held: stream0#1=16.0 MiB, stream0#2=16.0 MiB, stream1=32.0 MiB, out_ok=1
+  [PASS] held：首用 +16MiB（一份 workspace）  =16.0
+  [PASS] held：同 stream 复用不增长  =16.0
+  [PASS] held：换 stream 再 +16MiB（每 stream 一份）  =32.0
+  [PASS] held：cublaslt_gemm_nt 结果正确  
+  temp: stream0#1=0.0 MiB, stream0#2=0.0 MiB, stream1=0.0 MiB, out_ok=1
+  [PASS] temp：不持有 workspace（持续占用 0）  =0.0
+  [PASS] temp：cublaslt_gemm_nt 结果正确  
+
+===== Part D：DG_USE_PYTORCH_CUBLASLT_HANDLE 的整数解析 =====
+  [PASS] "0"：create=1（期望 1）  
+  [PASS] "1"：create=0（期望 0）  
+  [PASS] "2"：create=0（期望 0）  
+  [PASS] "-1"：create=1（期望 1）  
+  [PASS] "false"：非整数被拒（DJ_PANIC）  
+  [PASS] "true"：非整数被拒（DJ_PANIC）  
+  [PASS] "abc"：非整数被拒（DJ_PANIC）  
+
+===== Part E：交叉验证上游 tests/test_lazy_init.py =====
+...
+----------------------------------------------------------------------
+Ran 3 tests in 24.609s
+
+OK
+  [PASS] 上游寿命测试 3 tests OK  
+
+========================================================================
+SUMMARY: 24 PASS / 0 FAIL
+========================================================================
