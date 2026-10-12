@@ -108,7 +108,15 @@
       `harness/exp_moe_backward_math.py`（+`.out.txt`）：手写反向 vs autograd 四项梯度 relerr ≤2.9e-16、
       中心差分 ≤5.7e-8，k_grouped 逐组 `A_e^T@B_e` 复现 wgrad relerr ≤1.3e-16。配套博客
       `content/posts/mega-moe-09-backward`。
-- [ ] **P4-2** DeepGEMM 的 wgrad API `k_grouped_fp8_gemm_tn_contiguous`（K 轴分组、M/N 固定）精读。
+- [x] **P4-2** DeepGEMM 的 wgrad API `k_grouped_fp8_gemm_tn_contiguous`（K 轴分组、M/N 固定）精读。
+      → `docs/12-moe-backward-wgrad.md`（真实行号核对）：`tn`（SM100/MN-major `[sum_k,M]`，仅分析）
+      与 `nt`（SM90/K-major 每组 `[M,k_g]`）同一数学 `D[e]=A_e^T B_e`；`ks_cpu`/`grouped_layout`
+      （contiguous=物理 K / PSUM=逻辑 K 结束，PSUM 仅 SM100）、`check_k_grouped_args`（`gemm.hpp:55-76`）、
+      SM90 按组原地改写 tensormap（`sm90_fp8_gemm_1d1d.cuh:193-215` + `tensor_map_buffer`）、
+      SF 逐组打包 UE8M0 4→int32（`smxx_layout.hpp:218-283`）、调度器 K 分组切块
+      （`scheduler/gemm.cuh:71-82/226-246`）。H100 实测 `harness/exp_kgrouped_api.py`（+`.out.txt`）：
+      nt 4 组 relerr 1.98e-2（FP8 噪声）、空组 OK、未对齐 ks 被拒、tn 在 sm90 被拒、
+      `m=4096,n=7168`（8 组）**425 TFLOPS**；纯 torch 布局等价 tn 0 误差 / nt 3.3e-8。
 - [ ] **P4-3** dgrad（`m_grouped_*`）与 contiguous/masked 布局在训练中的用法。
 - [ ] **P4-4** 在 H100 上做 grouped GEMM / backward 的数值对拍实验（vs PyTorch）。
 
@@ -145,7 +153,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0/P1/P2/P3 全部完成；P4 进行中（P4-1 完成）。**
+- 当前进度：**P0/P1/P2/P3 全部完成；P4 进行中（P4-1、P4-2 完成）。**
+  P4-2：新建 `docs/12-moe-backward-wgrad.md`——wgrad 的 K 轴分组 API 精读。**两条路径一个数学**：
+  `k_grouped_fp8_gemm_tn_contiguous`（SM100，A/B 为 `[sum_k,M]`/`[sum_k,N]` **MN-major**，
+  靠组坐标偏移取数，`sm100_fp8_fp4_gemm_1d1d.hpp:325-403`，**仅分析**）与
+  `k_grouped_fp8_gemm_nt_contiguous`（SM90，每组 `[M,k_g]` **K-major** 拼接，`gemm.hpp:373-427`）。
+  **SM90 为什么按组原地改 tensormap**：base tensormap 只能按首个非空组的 K 造
+  （`sm90_fp8_gemm_1d1d.hpp:159-195`），kernel 里切组时 patch 全局地址 `+k_start*M`
+  与 inner-dim stride，并用 `tma_desc_commit/wait_group` + release/acquire 防竞态
+  （`sm90_fp8_gemm_1d1d.cuh:193-215`，对应 PR #343）。**参数契约**：`ks_cpu` 每组 K 必须
+  `k_alignment` 对齐（`check_k_grouped_args`，`gemm.hpp:55-76`）；`grouped_layout` 在
+  contiguous=物理 K、PSUM=逻辑 K 结束（PSUM 仅 SM100，`scheduler/gemm.cuh:71-82`）；
+  SM90 `nt` 强制 accumulate（`gemm.hpp:403`）。**SF**：SM100 逐组把 FP32 打包成 MN-major
+  UE8M0 int32（每 4 个 gran_k 打 1 个，`smxx_layout.hpp:218-283`）。调度器按组切 K 块 +
+  独立计数 `current_sf_k_cumsum`（`scheduler/gemm.cuh:226-246`）。H100 实测
+  `harness/exp_kgrouped_api.py`（+`.out.txt`）：nt 4 组 relerr 1.98e-2、空组 D 全零、
+  未对齐 ks 被拒（`gemm.hpp:69`）、tn 在 sm90 被拒（`gemm.hpp:369`）、`m=4096,n=7168`（8 组）
+  4528us **425 TFLOPS**；纯 torch 布局等价：tn 0 误差、nt 3.3e-8。配套博客
+  `content/posts/mega-moe-10-wgrad`。
   P4-1：新建 `docs/04-moe-backward.md`——MoE 反向数学。**全景**：`dz`→combine 反向
   （`dY=w⊙dz`、`q=<Y,dz>`）→linear2（`dW2=A^T dY` wgrad / `dA=dY W2^T` dgrad）→SwiGLU
   （`dG_G=dA⊙G_U⊙silu'`、`dG_U=dA⊙silu`）→linear1（`dW1=x^T dG` / `dX=dG W1^T`）→router。
@@ -236,11 +261,10 @@
   （`smxx_layout.hpp:133`、kernel `:774`/`:788`）；L2 权重不交错只转 SF。实验
   `harness/exp_weight_transform.py`（+`.out.txt`，H100）：行号映射/SwiGLU 等价/UTCCP 映射全部 0 误差，
   与 deep_gemm 内部实现逐元素一致。**P2 全部完成。**
-- **下一步：继续 P4 反向**：P4-2（`k_grouped_fp8_gemm_tn_contiguous` wgrad API 精读：
-  `tn`/`nt` 的 major 差异、`ks_cpu`/`grouped_layout`/PSUM、SF 的 `transform_k_grouped_*` 打包；
-  真实行号 `gemm.hpp:320-371` / `layout.hpp:89-113` / `smxx_layout.hpp:218-286`）/
-  P4-3（dgrad `m_grouped_*` 与 contiguous/masked 布局在训练中的用法）/ P4-4（H100 上用 SM90
-  `k_grouped_fp8_gemm_nt_contiguous` 做 wgrad 的 kernel 级数值对拍 vs PyTorch，出真实数字）。
+- **下一步：继续 P4 反向**：P4-3（dgrad `m_grouped_*` 与 contiguous/masked/PSUM 布局在训练中的
+  用法；真实行号 `gemm.hpp:181-318` 与 `layout.hpp`）
+  / P4-4（H100 上用 SM90 `k_grouped_fp8_gemm_nt_contiguous` 做真实 MoE wgrad 的 kernel 级
+  数值对拍 vs PyTorch autograd，出误差与吞吐；P4-2 已完成 API 语义/布局等价前置核对）。
   也可并行推进 P5-1（Mega Gate）/P5-2（Mega mHC）。
 
 ## 阻塞
