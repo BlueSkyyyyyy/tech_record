@@ -280,7 +280,25 @@
       6 block/SM、160 KB→1）。核心结论：**异构 task 融合时，轻 task 因最重 task 的寄存器需求损失
       1.33×–2.29× 访存带宽（占用率被拉低）**；MPK 用时分复用 + paged SMEM（§5.3 行 1313–1325）规避
       了 SMEM 与计算资源，**唯寄存器不可分页**（§7 行 1748）——本节从正反两面量化印证该论断。
-      判据不变（C1–C3，无 C5）；是 megakernel 的**成本侧**度量，与 P5/P9/P13 收益侧互补。**本轮新增实验。**
+       判据不变（C1–C3，无 C5）；是 megakernel 的**成本侧**度量，与 P5/P9/P13 收益侧互补。**本轮新增实验。**
+
+### P15 实验扩展 6：最小去中心化调度 megakernel（`docs/04-experiments.md`）
+
+- [x] **P15-1** 把 MPK §5 的**去中心化调度（C5）**用原生 CUDA 真正跑起来（此前只有资料分析与
+      源码走读，本专题所有 persistent 骨架都停在 `grid.sync()` 集中式、明确「不满足 C5」）。
+      见 `docs/04-experiments.md` §9，源码 `src/decentralized_sched.cu`，原始输出
+      `harness/decentralized_sched.out.txt`（目标卡 H100/sm90，iters=100，G=132=1 block/SM，T=256）：
+      最简 DAG = C 条链×L 层串行依赖，三策略（eager L 次 launch / barrier 单 cooperative kernel +
+      逐层 `grid.sync()` / decen 单 kernel + 设备侧原子 ready 队列 + 每 task 事件计数器，无全局屏障）。
+      - **C5 机制可用且不动数值**：6 个 case 三策略**逐位一致**（互比误差 0.00e+00）。
+      - **均衡负载下 decen ≈ barrier ≈ eager**（0.99–1.02×）；**小负载（每层 task 数<block 数）
+        decen 慢到 0.556×**——空队列 `__nanosleep` 自旋开销。
+      - **收益在「task 多且异构」时的动态负载均衡**：C=528≫G=132、段长伪随机 1–8×，**barrier 仅
+        1.007×，decen 1.167×**（对上 MPK §6.4 行 1551–1553 混合负载均衡动机）。
+      - barrier 相对 eager 只快 1.007–1.033×，印证 P10-1 的 `grid.sync()` 在 132 block 上 ~1.1µs
+        **本就很便宜**——去中心化要赢在**均衡/结构**而非「省屏障」。
+      判据：decen 是 C1–C5 全满足的 T4 最小骨架。**本轮新增实验。**
+
 
 ## 每轮增量流程（autopilot）
 
@@ -318,7 +336,9 @@
   实测出来，补齐 P5-2 §2.6 / §5.6 的未覆盖项）。
   **P14-1 megakernel 资源足迹代价（1/1）完成**（本轮新增，把 MPK §7「寄存器固定为各 task 最大值」
   这条只有资料分析的**成本侧**局限量化出来，补齐 `docs/01` §5.8 / MPK §7 行 1740–1748）。
-  **本专题任务清单（P0–P14）全部完成**，无未完成子项。
+  **P15-1 最小去中心化调度 megakernel（1/1）完成**（本轮新增，把 MPK §5 的 **C5 机制**用原生
+  CUDA 跑起来，补齐此前所有 persistent 骨架「不满足 C5」的空白）。
+  **本专题任务清单（P0–P15）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -367,14 +387,28 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P14 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
+- **下一步：无**（P0–P15 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
   **P10-1 完成 P5-1 §1.6「扫 persistent 网格大小」**；**P12-1 完成 P5-3 §3.6 / P10-1 §5.5「多 block
   PDL occupancy 资源约束」**；**P13-1 完成 P5-2 §2.6 / §5.6「跨 tile software pipelining」的损失一实测**；
-  **P14-1 完成 megakernel 成本侧「寄存器固定为各 task 最大值」实测**）；
+  **P14-1 完成 megakernel 成本侧「寄存器固定为各 task 最大值」实测**；**P15-1 完成 C5 去中心化调度最小实现**）；
   ③ ~~走读 `tasks/hopper/*.cuh` 单 task 内部实现~~（P11-1 完成）；剩「在容器内 `pip install -e .`
   构建 mirage sm90 路径并跑 `demo/qwen3/demo.py --use-mirage` 取本机 MPK 端到端数字」（构建成本高，未做）。
+- **本轮（P15-1）**：`docs/04-experiments.md` 新增 §9「最小『去中心化 in-kernel 调度』megakernel：把
+  C5 机制跑起来」——新建 `src/decentralized_sched.cu` + `harness/decentralized_sched.out.txt`（目标卡
+  H100/sm90，iters=100，G=132=1 block/SM，T=256）。最简 DAG = C 条链×L 层串行依赖，三策略公平对照：
+  **eager**（L 次 launch）/ **barrier**（单 cooperative kernel + 逐层 `grid.sync()`）/ **decen**
+  （单 kernel + **设备侧原子 ready 队列 + 每 task 事件计数器、无全局屏障**，= MPK §5 去中心化调度微缩版）。
+  核心结论：(1) **C5 机制可用且不动数值**——6 个 case 三策略**逐位一致**（互比误差 0.00e+00），
+  vs 串行参考 max rel ≤ 4.1e-7（浮点累加序）；(2) **均衡负载下 decen ≈ barrier ≈ eager**（0.99–1.02×），
+  而**每层 task 数<block 数时 decen 慢到 0.556×**（空队列 `__nanosleep` 自旋）；(3) **收益在「task 多且
+  异构」时的动态负载均衡**——C=528≫G=132、段长伪随机 1–8×，**barrier 仅 1.007×、decen 1.167×**（对上
+  MPK §6.4 行 1551–1553 混合负载均衡）；(4) barrier 相对 eager 只快 1.007–1.033×，印证 P10-1 的
+  `grid.sync()` 在 132 block 上 ~1.1µs **本就很便宜**——**去中心化要赢在均衡/结构而非「省屏障」**。
+  判据：decen 是 C1–C5 全满足的 T4 最小骨架（此前所有 persistent 骨架都停在 `grid.sync()`、明确不满足 C5）。
+  **本轮新增实验**；补齐 C5 的实测空白，与 P13-1（损失一）、P14-1（成本侧）合起来覆盖 megakernel 的
+  「收益 / 成本 / 调度机制」三面。
 - **本轮（P14-1）**：`docs/04-experiments.md` 新增 §8「megakernel 的资源足迹代价：寄存器被固定为各
   task 最大值」——新建 `src/megakernel_footprint.cu` + `harness/megakernel_footprint.out.txt`（目标卡
   H100/sm90，iters=30，G=528=4 block/SM，T=256，轻输入 537 MB ≫ L2）。构造「轻访存 task（占用率敏感）

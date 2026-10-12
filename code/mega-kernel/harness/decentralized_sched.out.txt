@@ -1,0 +1,53 @@
+== decentralized_sched (目标卡 H100/sm90) ==
+iters=100  设备: 132 SM  cooperativeLaunch=1
+T(block)=256  G(decen/barrier)=132
+
+--- A: C=64 L=4  seg=32768 ---
+  C= 64 L=  4 tasks=  256  数据=33.6 MB
+  eager  :     0.107 ms  (=106.566 us/case, 4 launch/case)
+  barrier:     0.097 ms  ( 1.094×, 4 grid.sync/case)
+  decen  :     0.190 ms  ( 0.561×)
+  正确性 vs 串行参考 max rel|Δ|: eager=2.39e-07 fail=0 | barrier=2.39e-07 fail=0 | decen=2.39e-07 fail=0
+  一致性 vs eager max rel|Δ|: barrier=0.00e+00 | decen=0.00e+00
+
+--- A: C=64 L=16 seg=32768 ---
+  C= 64 L= 16 tasks= 1024  数据=134.2 MB
+  eager  :     0.844 ms  (=844.151 us/case, 16 launch/case)
+  barrier:     0.822 ms  ( 1.027×, 16 grid.sync/case)
+  decen  :     0.852 ms  ( 0.991×)
+  正确性 vs 串行参考 max rel|Δ|: eager=2.39e-07 fail=0 | barrier=2.39e-07 fail=0 | decen=2.39e-07 fail=0
+  一致性 vs eager max rel|Δ|: barrier=0.00e+00 | decen=0.00e+00
+
+--- A: C=64 L=64 seg=32768 ---
+  C= 64 L= 64 tasks= 4096  数据=536.9 MB
+  eager  :     3.372 ms  (=3372.446 us/case, 64 launch/case)
+  barrier:     3.274 ms  ( 1.030×, 64 grid.sync/case)
+  decen  :     3.305 ms  ( 1.020×)
+  正确性 vs 串行参考 max rel|Δ|: eager=4.18e-07 fail=0 | barrier=4.18e-07 fail=0 | decen=4.18e-07 fail=0
+  一致性 vs eager max rel|Δ|: barrier=0.00e+00 | decen=0.00e+00
+
+--- B: C=16 L=32 seg=32768 ---
+  C= 16 L= 32 tasks=  512  数据=67.1 MB
+  eager  :     1.670 ms  (=1670.014 us/case, 32 launch/case)
+  barrier:     1.634 ms  ( 1.022×, 32 grid.sync/case)
+  decen  :     1.650 ms  ( 1.012×)
+  正确性 vs 串行参考 max rel|Δ|: eager=2.98e-07 fail=0 | barrier=2.98e-07 fail=0 | decen=2.98e-07 fail=0
+  一致性 vs eager max rel|Δ|: barrier=0.00e+00 | decen=0.00e+00
+
+--- B: C=256 L=32 seg=32768 ---
+  C=256 L= 32 tasks= 8192  数据=1073.7 MB
+  eager  :     3.292 ms  (=3291.719 us/case, 32 launch/case)
+  barrier:     3.238 ms  ( 1.016×, 32 grid.sync/case)
+  decen  :     3.311 ms  ( 0.994×)
+  正确性 vs 串行参考 max rel|Δ|: eager=2.98e-07 fail=0 | barrier=2.98e-07 fail=0 | decen=2.98e-07 fail=0
+  一致性 vs eager max rel|Δ|: barrier=0.00e+00 | decen=0.00e+00
+
+--- C: C=528 L=16 seg=8192 不均衡(随机 1-8×) ---
+  C=528 L= 16 tasks= 8448  数据=1245.7 MB
+  eager  :     4.507 ms  (=4507.057 us/case, 16 launch/case)
+  barrier:     4.475 ms  ( 1.007×, 16 grid.sync/case)
+  decen  :     3.863 ms  ( 1.167×)
+  正确性 vs 串行参考 max rel|Δ|: eager=4.09e-07 fail=0 | barrier=4.09e-07 fail=0 | decen=4.09e-07 fail=0
+  一致性 vs eager max rel|Δ|: barrier=0.00e+00 | decen=0.00e+00
+
+done.

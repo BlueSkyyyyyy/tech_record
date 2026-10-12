@@ -1078,3 +1078,134 @@ vs 两次 launch）；D shared memory 足迹的占用率影响（对照 MPK 的 
 - 未用 `ncu` 分离「占用率」「L2 命中率」「DRAM 队列深度」对带宽下降的贡献（当前用 occupancy API +
   时间对照推断，未做 profiler 归因）。
 - 单卡、固定 `blockDim=256`、单一 `grid=528`；未扫 blockDim 与 grid，也未与 P10-1 的网格标度叠加。
+
+## 9. 最小「去中心化 in-kernel 调度」megakernel：把 C5 机制跑起来（P15-1）
+
+### 9.1 问题
+
+上面 §2（P5-2）和 §7（P13-1）都已经做出「单 kernel 内融合 + 单 kernel 内软件流水」，但两处的
+协调手段都是 **cooperative grid 的 `grid.sync()`——集中式会合**，因此都明确标注**不满足 C5**
+（无去中心化 worker/scheduler 调度）。§5（P10-1）又实测出 `grid.sync()` 有 **~1.1 µs 的固定地板**，
+并据此推断：生产级 mega-kernel 之所以走「异步原子 ring barrier / 去中心化 event queue」，正是为了
+绕开全局会合。`docs/01` §4 / `docs/03` §3.3 从 MPK 论文层面把去中心化调度讲清楚了（§5 总览行
+1147–1174、§5.1 事件驱动行 1175–1231、§5.2 JIT/AOT 混合下发行 1232–1308），但**本专题还没有把
+这套机制用原生 CUDA 真正跑起来过**——即 C5 此前只有资料分析与源码走读（`docs/06` §3/§4 的
+`execute_worker`/`execute_scheduler`），没有可复现的本机实验。
+
+本节补上这一格：写一个**最小而完整的 dataflow 调度器**——设备侧原子 ready 队列 + 每 task 事件
+计数器，worker 自取自执行，**全程没有 `grid.sync()`**——把 C5 机制落到目标卡 H100 / sm90 上，
+并与集中式 barrier 版、kernel-per-operator（eager）版做公平对照，量化「去中心化调度」的
+**收益与开销**。
+
+### 9.2 方法
+
+程序 `src/decentralized_sched.cu`（目标卡 H100 / sm90，原始输出
+`harness/decentralized_sched.out.txt`）。`G=132`（=1 block/SM）、`blockDim=256`、`iters=100`。
+
+**任务图**（「多链依赖」这一最简 DAG）：`C` 条独立链、每条链 `L` 个 task 串行依赖，
+`task(c,l)` 依赖 `task(c,l-1)`；`task(c,l)` 把输入第 `c` 条链第 `l` 段归约，累加到该链的运行和
+`chain_sum[c]`——依赖是**真依赖**（不可跳过、不能重排）。三种策略的**总工作量完全相同**：
+
+- **eager**：`L` 次 kernel launch，每次 kernel 以 grid-stride 处理该层全部 `C` 个 task，
+  流序保证「层 l-1 先于层 l」的依赖。这是 kernel-per-operator 的等价物。
+- **barrier**：单个 **cooperative persistent kernel**，逐层处理，每层后 `grid.sync()`。
+  = 本专题此前 P5-2/P13-1 的形态（集中式，非 C5）。
+- **decen**：单个 persistent kernel，**设备侧原子 ready 队列 + 每 task 事件计数器**，worker 自取。
+  = MPK §5 的去中心化调度微缩版（C5）。
+
+**去中心化调度器实现**（对应 MPK §5.1/§5.2 的 ring buffer + event，`docs/01` §4、`docs/06` §3）：
+
+- 全局 `dep_count[task]`：`l==0` 置 0、`l>0` 置 1。初始只把 `C` 个 `l==0` 的 task 预入队。
+- **入队** `q_enqueue`：`idx = atomicAdd(q_tail,1)` 预约槽位 → 写 `q_buf[idx]` → `__threadfence()`
+  → `atomicExch(&q_ready[idx],1)` 发布（值先可见再发布标志）。
+- **出队** `q_dequeue`：读 `q_head/q_tail`，`head<tail` 时用 `atomicCAS(q_head,h,h+1)` 认领槽位，
+  等价于 MPK 的原子 `atomicAdd` 环形缓冲；空且 `done_count>=total` 则退出，否则 `__nanosleep`。
+- **task 完成**：`atomicSub(&dep_count[succ],1)==1`（旧值 1→新值 0）时把后继入队；`atomicAdd(done_count,1)`。
+- 每 block 线程 0 负责出队/入队，`__syncthreads()` 在 task 边界对齐整块。
+- 终止条件：全局 `done_count == C*L`。
+
+**正确性**：三种策略都应得到同一条 `chain_sum[c]`（链内按层升序累加）。程序同时与**串行参考**
+（host 端逐链逐层同序累加）比 max 相对误差，并做**三策略互比**（barrier/decen vs eager）。
+随机输入 `in[i] = (i%1000)*1e-3`。
+
+### 9.3 结果
+
+**Section A：扫链深 L（C=64，seg=32768，数据 33.6→536.9 MB）**
+
+| case | tasks | eager ms | barrier | decen |
+|---|---|---|---|---|
+| C=64 L=4 | 256 | 0.106 | 1.082× | **0.556×** |
+| C=64 L=16 | 1024 | 0.846 | 1.029× | 0.993× |
+| C=64 L=64 | 4096 | 3.380 | 1.033× | 1.022× |
+
+**Section B：扫链数 C（L=32，seg=32768）**
+
+| case | tasks | eager ms | barrier | decen |
+|---|---|---|---|---|
+| C=16 L=32 | 512 | 1.675 | 1.026× | 1.016× |
+| C=256 L=32 | 8192 | 3.296 | 1.018× | 0.995× |
+
+**Section C：负载不均衡（C=528，L=16，seg=8192×伪随机 1–8×，数据 1245.7 MB）**
+
+| 策略 | ms | vs eager |
+|---|---|---|
+| eager | 4.507 | 1.000× |
+| barrier | 4.475 | 1.007× |
+| **decen** | **3.863** | **1.167×** |
+
+**正确性**：全部 case `fail=0`；三策略 vs 串行参考 max 相对误差 ≤ `4.1e-7`（纯浮点累加序差异），
+**三策略互比 max 相对误差 = 0.00e+00（逐位一致）**。
+
+### 9.4 读法
+
+1. **C5 机制本身是廉价且正确的。** decen 全程无 `grid.sync()`、纯设备侧原子队列，在 6 个 case 里
+   与 eager/barrier **逐位一致**（互比误差 0），说明事件计数器 + 原子 ready 队列这套 MPK 式
+   调度是**可实现且不动数值**的——C5 不再是「资料里的机制」。
+2. **对规则、均衡的负载，去中心化 ≈ 集中式 ≈ eager，且小负载时更慢。** Section A/B 里 decen 与
+   barrier 都在 1.0× 附近（0.99–1.02×），**看不出收益**；而 Section A 的 `C=64 L=4`（每层只有 64
+   个 task，却有 132 个 block）decen 反而慢到 **0.556×**——因为每层 task 数 < block 数时，
+   多余的 block 在空队列上 `__nanosleep` 轮询，**调度/自旋开销**摊在很小的有效工作量上。这说明
+   「去中心化」不是免费的：**task 太粗、并行度不足时，它比 `grid.sync()` 更亏。**
+3. **收益出现在「task 多且负载异构」时——动态负载均衡。** Section C 让 `C=528≫G=132`（每层
+   528 个 task、每 block 约 4 个）、每链段长伪随机 1–8×。此时 **barrier 只快 1.007×**（它的
+   grid-stride 静态分配把重/轻链固定绑到同一批 block，逐层同步只能等最慢 block），而 **decen
+   快 1.167×**——worker 自取就让快 block 连续吞下更多 task、把重链摊平。这正是 MPK §6.4 用混合
+   负载均衡处理 MoE 不均衡的同一动机在最小图上的复现（对照 `docs/01` §5 的 §6.4 行 1551–1553）。
+4. **与 P10-1 的 `grid.sync()` 地板对得上。** barrier 在 Section A/B/C 相对 eager 只快
+   1.007–1.033×：因为 `G=132` 时每次 `grid.sync()` 约 1.1 µs（P10-1 §5.3），而每层工作量通常
+   ≫ 1 µs，所以**逐层同步在 132 block 规模上本就很便宜**——去中心化要赢，必须赢在**均衡/重叠**
+   上，不能指望单纯「省掉 barrier」。这纠正了「C5 主要是为了省全局屏障」的直觉。
+5. **`grid.sync()` 的集中式限制是「结构性的」，不只是「成本」。** barrier 要求**所有 block 同时
+   进入下一层**，因此无法表达「快链先跑」；decen 的 ready 队列天然允许任意 DAG（不只分层链），
+   这正是 MPK 能处理真实算子图（§4 的 tGraph、`docs/01` §3）而 `grid.sync()` 骨架不能的原因。
+
+### 9.5 与判据 / MPK / 生产案例的关系
+
+- **补齐 C5 的实测空白**：此前 P5-2/P13-1 的 persistent 骨架都停在 C1–C4（`grid.sync()` 集中式），
+  明确「不满足 C5」。本节 decen 是**单次 launch（C1）+ 常驻（C2）+ 多 task（C3）+ 设备内协调（C4）
+  + 去中心化 worker 自取（C5）**的完整最小实现——即 `docs/00` §3 判据里的 T4 骨架，不再依赖全局屏障。
+- **对上 MPK §5（快照行 1147–1368）**：本实现是论文运行时的**极小同构物**——`dep_count`≈论文的
+  `EventDesc.num_triggers`、`q_buf/q_ready/q_head/q_tail`≈§5.2 的 atomic ring buffer、
+  「后继计数到 0 才入队」≈§5.1 的 event 激活。差异是 MPK 有**固定角色的 worker/scheduler**
+  （§5 行 1148–1174；`docs/06` §3/§4 的 `execute_worker`/`execute_scheduler`）与 **JIT/AOT 混合
+  下发**（§5.2 行 1232–1308），本实验用「所有 block 都是 worker、纯 JIT 取 task」近似——够验证
+  C5 机制，但省掉了 scheduler 的角色划分与预取。
+- **与生产案例（`docs/02`）对照**：DeepGEMM mega 家族用**静态 warp 角色 + 原子 barrier**
+  （MoE 的 `l2_full_mask` 位掩码依赖 + ring generation，`docs/02` §1.5）实现「设备内协调」，
+  本质上是**把 ready 判定编译成静态位掩码**的 decen 变体；MPK 则是**运行时 ready 队列**。
+  两者是「静态依赖 vs 动态依赖」的两条路，本节的 decen 对应后者。
+- **与本节其它实验的拼接**：P13-1 把**损失一**（跨 task 软件流水）测出来、P14-1 把**成本侧**
+  （寄存器足迹）测出来，本节把**C5 机制**测出来——三者合起来，本专题对 megakernel 的
+  「收益 / 成本 / 调度机制」三面都有了本机实测。
+
+### 9.6 局限
+
+- 任务图是**合成的分层链**：每链每层等长（除 Section C），无张量核 / TMA / 真实算子；最简 DAG
+  只用于隔离「调度机制」这一项，绝对倍率不代表真实模型。
+- decen 是**纯 JIT 自取**，没有实现 MPK 的 **scheduler 角色**（§5 行 1148–1174）与 **JIT/AOT
+  混合下发**（§5.2），也没有 descriptor 预取（§5.3 行 1364–1368）——空队列轮询用 `__nanosleep`
+  退避，与生产级两级队列/固定角色不同（故 Section A 小负载下偏慢）。
+- 每 block 用线程 0 单点出/入队，未做 MPK 的批量/预取；未测 task 数远超队列容量、多级依赖扇入
+  扇出（当前每 task 恰好 1 个后继）。
+- 未与 CUDA Graph 捕获 eager、也未与 PDL 组合对照；未用 `ncu` 归因自旋/原子流量。
+- 单卡、固定 `G=132`（1 block/SM）；未扫 `G` 或 `blockDim`（可对照 P10-1 的网格标度）。
