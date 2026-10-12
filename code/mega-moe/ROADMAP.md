@@ -780,6 +780,34 @@
       使实测利用率偏低、且 **H100 频率未随降载抬升**（降频意图依赖 SM100 tensor-core 功耗/热行为，无法复现）。
       行号全部核对过。配套博客 `content/posts/mega-moe-36-sm100-bf16-gemm-tc-util`（索引页新增第 36 篇）。
 
+### P27 增量（opt-in，贯穿所有 FP8/FP4 kernel 的量化语义基准）
+
+- [x] **P27-1** **测试参考量化器 `deep_gemm/utils/math.py`**：把「量化后的操作数是什么」单独讲透——
+  前面第 25/26/32/35 篇反复引用 `per_token_cast_to_fp8` / `per_block_cast_to_fp8` 却从没系统拆过，
+  而 DeepGEMM 全部 kernel 测试的正确性判据正是「精确等于这套参考定义的操作数上的 GEMM」。
+  **纯张量运算，架构无关，H100 真机可跑**。
+  → `docs/37-deepgemm-reference-quantizer.md`（真实行号核对）：`ceil_to_ue8m0:13-16`（fp32 位域：
+  指数 + 尾数非 0 进位 → 「>= |x| 的最小 2 的幂」，exp 域钳位 [1,254]）、`pack_ue8m0_to_int:19-23` /
+  `unpack_ue8m0_from_int:151-152`（4 字节小端、LSB-first；断言 scale 非负且尾数 0）、
+  `per_token_cast_to_fp8:26-49`（1×128、`amax/448`、`clamp(1e-4)`、`align` 补零后切回、UE8M0 上取整、
+  不足 4 的倍数补 1.0 再打包）、`per_channel_cast_to_fp8:52-59`、`per_block_cast_to_fp8:62-72`（128×128）、
+  `per_custom_dims_cast_to_fp8:75-81`、`_quantize_to_fp4_e2m1:84-96`（7 个中点 + `round_up` 标志 =
+  **按 E2M1 编码的 ties-to-even**；`sign=(x<0)&(code!=0)` 无负零）、`per_token_cast_to_fp4:99-125`
+  （`amax/6`、nibble 偶数下标在低 4 位 LSB-first）、`transpose_packed_fp4:128-141`、
+  `_dequantize_from_fp4_e2m1:144-148` / `cast_back_from_fp8|fp4:155-176`。
+  **在测试里的用途**：`tests/test_mega_moe.py:54`（激活 per-token FP8 gran32 + packed UE8M0，再重排成
+  UTCCP 4x32 交错行序 `:40-56`）、`:108`（FP4 gran32 权重）、`generators.py:317-346`（各 kernel 操作数布局）、
+  `test_attention.py:60-68`（`cast_back_*` 造 simulated 参考、隔离 kernel 误差与量化误差）。
+  H100 实测 `harness/exp_reference_quantizer.{py,sh,out.txt}` 七组 **ALL PASS**：
+  A) `ceil_to_ue8m0` 1040 样本（幂次/次正规/溢出/inf/nan）exp 域 **0 不符**、输出恒为 2 的幂、
+  仅溢出区 8 个样本 < |x|；B) 指数 `[124,132,138,132]`→`0x848a847c` LSB-first 一致、往返逐位一致；
+  C) 三粒度 relerr（非 UE8M0）2.81–3.47e-2、UE8M0 上取整后 4.15e-2、全零块 SF `2.232e-07`；
+  D) 7 个中点全部 ties-to-even、**20 万随机样本 vs 独立参考 0 不符**、vs ties-away 仅 4 个中点不同；
+  E) nibble 字节 `0x21,0x43,…` LSB-first、FP4 往返 relerr 1.2384e-1 vs FP8 2.2504e-2（~5.5×）；
+  F) `transpose_packed_fp4` 与独立转置重打包逐位一致且对合；G) 真跑 SM90 `fp8_gemm_nt` vs
+  「参考量化器反量化 + fp64 GEMM」relerr **1.4217e-03**（仅 bf16 舍入）、vs 原始 bf16 3.6969e-02。
+  配套博客 `content/posts/mega-moe-37-reference-quantizer`（索引页新增第 37 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -804,8 +832,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P26 各增量完成（P15-1…P24-1、P25-1、P26-1）。**
-  本轮 P26-1：新建 `docs/36-sm100-bf16-gemm-tc-util.md`（+`src/tc_util_throttle.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P27 各增量完成（P15-1…P24-1、P25-1、P26-1、P27-1）。**
+  本轮 P27-1：新建 `docs/37-deepgemm-reference-quantizer.md`（+`harness/exp_reference_quantizer.{py,sh,out.txt}`）
+  ——补上前面第 25/26/32/35 篇反复引用、却从没系统拆过的**量化语义基准** `deep_gemm/utils/math.py`：
+  它是 DeepGEMM 全部 FP8/FP4 kernel 测试的正确性判据（「精确等于参考量化器定义的操作数上的 GEMM」）。
+  `ceil_to_ue8m0` 是「>= |x| 的最小 2 的幂」（指数 + 尾数非 0 进位、exp 域钳位 [1,254]，UE8M0 只留 8 位指数）；
+  `per_token/per_channel/per_block_cast_to_fp8` 三种粒度（`448`/`6` 常数、`clamp(1e-4)` 地板、补零对齐）；
+  `_quantize_to_fp4_e2m1` 的 7 个中点 + `round_up` 标志 = **按 E2M1 编码的 ties-to-even**（无负零）；
+  nibble 与 UE8M0 打包均 **LSB-first**；`transpose_packed_fp4` 对合。**纯张量运算非 SM100 专属，H100 真机**
+  七组 **ALL PASS**：`ceil_to_ue8m0` 1040 样本 0 不符、FP4 20 万样本 0 不符、端到端 `fp8_gemm_nt` vs
+  「参考量化器反量化 fp64 GEMM」relerr 1.4217e-03。行号全部核对过。
+  配套博客 `content/posts/mega-moe-37-reference-quantizer`（索引页新增第 37 篇）。
+  上一轮 P26-1：新建 `docs/36-sm100-bf16-gemm-tc-util.md`（+`src/tc_util_throttle.cu`、
   `harness/exp_tc_util.{sh,out.txt}`、`harness/exp_tc_util_throttle.{sh,out.txt}`）——补上「稠密 GEMM 主 kernel」
   矩阵的**最后一格**：SM100 BF16 主 kernel `sm100_bf16_gemm`（与第 35 篇同一套 UMMA+TMEM 骨架、去掉 SF/UTCCP，
   `UMMA_K=16`、`BLOCK_K_=64`，host 六入口覆盖稠密/m-grouped/k-grouped/batched），并拆掉它独有的
@@ -1004,11 +1042,11 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P26 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+- **下一步**：P0~P27 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
   P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子、
   P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel、P23-1 DeepJIT 编译/缓存/加载/发射管线、
   P24-1 SM 局部域探针与内存域分配、P25-1 SM100 FP8/FP4 稠密 GEMM 主 kernel、
-  P26-1 SM100 BF16 主 kernel 与 `set_tc_util`）。
+  P26-1 SM100 BF16 主 kernel 与 `set_tc_util`、P27-1 测试参考量化器 FP8/FP4 block-scale 语义）。
   后续若继续（均为增量、非承诺）：
   ⑭ **「稠密 GEMM 主 kernel」矩阵已补齐（P26-1）**：SM90 FP8/1D1D-1D2D（P22）、SM90 BF16（P19）、
    SM100 FP8/FP4（P25）、SM100 BF16（P26）四格齐全；并拆清 `set_tc_util` 这一从 Python 直通模板参数的
