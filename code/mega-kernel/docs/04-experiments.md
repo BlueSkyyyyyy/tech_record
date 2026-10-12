@@ -195,3 +195,109 @@ Section A 固定每单元计算量 K=0（纯 launch 开销主导）扫 N；Secti
 - LCG 自旋是合成计算，不含访存/张量核，K 与真实算子的时间不能直接换算；此处只用它制造
   「计算主导」区间。
 - 单卡、单 stream；多 stream / 多卡下 launch 开销与重叠行为另算（见 P4-2/P4-4）。
+
+---
+
+## 2. 两算子融合成单 persistent kernel（P5-2）
+
+### 2.1 问题
+
+P5-1 量化了 **损失二（launch 开销）**，并给出结论：它只在 launch-bound 区间值得治。
+本节做 MPK 意义上的 **损失三（中间张量 HBM 往返）** 的最小示例——把两个有数据依赖的算子
+融合进**单个 persistent kernel**，让中间结果只活在寄存器里、不落 HBM，并实测收益。
+
+对应关系（`docs/00` §1 三类损失）：算子融合/单 kernel 同时触及损失二与损失三；本实验把
+二者**分开度量**，避免把两类收益混为一谈。
+
+### 2.2 方法
+
+程序 `src/two_op_fusion.cu`（目标卡 H100 / sm90，原始输出 `harness/two_op_fusion.out.txt`）。
+构造一对逐元素算子（float4 向量化）：
+
+- `op1`：`y = f(x) = 1.5·x + 0.25`（producer）
+- `op2`：`z = g(y) = sqrt(|y|) + 0.5·y`（consumer，全图依赖 op1）
+
+四种策略（设备侧算的 op1/op2/元素数完全相同）：
+
+| 策略 | launch 次数 | 设备侧 grid 启动 | 中间量 y | 依赖协调 |
+|---|---|---|---|---|
+| **eager2** | 2（host） | 2 | 落 HBM | 两次 launch 串行 |
+| **graph2** | 1（host，graph replay） | 2 | 落 HBM | 图示串行边 |
+| **barrier** | 1 | 1 | 落 HBM | kernel 内 `grid.sync()`（cooperative） |
+| **fused** | 1 | 1 | **寄存器，不落 HBM** | 无需协调（每 block 各管自己的 tile） |
+
+差分逻辑（都是干净的单一变量对照）：
+
+- `eager2 → barrier`：消掉第 2 次 launch / grid 启动 → **损失二收益**。
+- `barrier → fused`：中间量从 HBM 往返（读 x 写 y 读 y 写 z = 16 B/元素）降到只在
+  寄存器（读 x 写 z = 8 B/元素）→ **损失三收益**。
+- `eager2 → graph2`：只消 host 侧提交、设备侧与中间量都不变，作为对照。
+
+算子刻意选便宜、数组放大到 256 MB 量级，使 kernel 落在 **HBM 带宽主导** 区间——此时
+损失三应当显现为接近 **2×**（流量减半），而损失二应当**近乎看不见**（与 P5-1 结论一致）。
+
+### 2.3 结果
+
+| M (元素) | eager2 ms | graph2 ms | barrier ms | fused ms | eager2/graph2 | eager2/barrier | barrier/fused |
+|---|---|---|---|---|---|---|---|
+| 16 Mi | 0.0990 | 0.0972 | 0.1006 | 0.0504 | 1.02× | 0.98× | **2.00×** |
+| 64 Mi | 0.3796 | 0.3777 | 0.3816 | 0.1918 | 1.01× | 0.99× | **1.99×** |
+| 256 Mi | 1.5113 | 1.5092 | 1.4909 | 0.7682 | 1.00× | 1.01× | **1.94×** |
+
+表观显存带宽 @ M=256 Mi 元素：eager2 = 2842、graph2 = 2846、barrier = 2881 GB/s
+（按 16 B/elem 计），fused = 2796 GB/s（按 8 B/elem 计）——**四者的表观带宽一致
+（~2.8 TB/s，H100 量级），说明 fused 的 2× 时间优势确实来自流量减半，而非更快的内存路径**。
+正确性核对：`max|z_two − z_fused| = 0.000e+00`（100 万元素），融合不改变数值结果。
+
+### 2.4 读法
+
+1. **损失三是本区间的主导收益**：`barrier/fused ≈ 2.0×`，与「16 B/elem → 8 B/elem」的
+   预测精确吻合。这正是 MPK §2.2（快照行 311–331）「算子融合消掉中间张量落 HBM 的读写」
+   在最小规模上的复现，也和 §6.4（行 1551–1553）fused gather-GEMM 省下 gather 中间张量
+   （SGLang 中占 11%）同源。
+2. **损失二在本区间近乎为零**：`eager2/barrier ≈ 1.0`、`eager2/graph2 ≈ 1.0`。因为每
+   kernel ~0.75 ms 是内存时间，~2 µs 的 launch 与 grid barrier 被彻底淹没。这不是
+   「launch 不重要」，而是 **launch 只在 launch-bound 区间重要**（P5-1 结论的直接印证）：
+   要看到损失二，需要「很多个、每个都很轻」的算子（MPK 报告 293 launch/token、§6.6 行
+   1586–1628 把 launch 压到 0.28%，正是那种场景）。
+3. **graph 与 megakernel 的收益维度不同**：graph2 把 2 次 host 提交压成 1 次，但对
+   设备侧 grid 启动、中间量 HBM 往返、kernel 间 barrier 一无所改，故在本区间与 eager 持平。
+   megakernel 的价值在**设备侧**（少一次 grid 启动 + 中间量不落 HBM + kernel 内可跨算子
+   协调）。
+4. **单 kernel 内的设备侧协调成本可忽略**：`barrier` 用 cooperative `grid.sync()`（660
+   block × 256 线程）完成全 grid 屏障，相对 eager2 没有可见开销——说明「把多算子塞进一个
+   persistent kernel 并在里面协调」的基础设施在目标卡上**确实便宜**（呼应 P0-3：200 次
+   grid sync 0.330 ms，平均 ~1.65 µs/次）。
+
+### 2.5 与 megakernel 判据（C1–C5，见 `docs/00` §3）的映射
+
+| 策略 | C1 单 launch | C2 常驻 | C3 多算子 | C4 设备内协调 | C5 SM 级调度 |
+|---|---|---|---|---|---|
+| eager2 | ✗ | ✗ | ✗（2 kernel） | ✗（host 串行） | ✗ |
+| graph2 | ✓（1 次提交） | ✗ | ✗ | ✗（kernel 间仍 barrier） | ✗ |
+| barrier | ✓ | ✓ | ✓ | ✓（grid barrier） | 部分（grid-stride） |
+| fused | ✓ | ✓ | ✓ | （无需） | 部分（grid-stride） |
+
+- **fused 是最小的「单 kernel 多算子融合」**：满足 C1–C3，中间量不落 HBM；因为两个算子
+  逐元素、每 block 各管自己的 tile，**不需要** C4 的设备内协调——它更像「持久化版算子融合」
+  （`docs/00` §4 谱系 T2 的上限），而非完整 megakernel。
+- **barrier 展示了完整的设备侧协调能力**（C1–C4）：单 launch 内做两阶段 + 全 grid 屏障，
+  是「段级 megakernel」的最小骨架（对照 `docs/02` DeepGEMM MoE 的 ring barrier /
+  Mega Gate 的 ScoreBarrier——真实案例用**异步原子 barrier**而非 cooperative 全 grid
+  屏障，二者都是「单 kernel 内协调」，但前者可重叠、后者是硬同步）。
+- 与 `docs/03` §3 术语边界一致：persistent 只是机制（C1+C2），本节的 fused 正是靠
+  persistent 机制拿到「融合后不落 HBM」的收益。
+
+### 2.6 局限与未覆盖项
+
+- **只做了 2 个算子的逐元素融合**，未覆盖 MPK 真正的难点：跨算子 **software pipelining**
+  （§5.3 行 1326–1363）——本实验 op2 逐元素依赖 op1，无跨 tile 独立性可流水；也未做
+  in-kernel 去中心化调度（worker/scheduler 动态取任务，§5 行 1147–1308）。这两项在
+  bandwidth-bound 的逐元素融合里本来也难显现。
+- **barrier 用的是 cooperative 全 grid 同步**，与生产 megakernel 的**环形/异步原子
+  barrier**（DeepGEMM，见 `docs/02` §1.5）不同：前者每次同步要全 grid 会齐，后者可在
+  细粒度上重叠。本实验不宣称复现了生产级协调机制，只证明「单 kernel 内协调在本机可行且
+  便宜」。
+- 单卡、单 stream、合成算子；真实 MoE/Attention 的收益还取决于张量核占比与通信，需另一套
+  实验（与 `code/mega-moe/` 专题互补，本专题不重复）。
+- 未扫更小 M / 更多算子：那才是损失二显形的区间（见 2.4 第 2 点），可作为后续增量。
