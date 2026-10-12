@@ -1,0 +1,52 @@
+NVIDIA H100 80GB HBM3, 9.0
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+====================================================================================
+H100 sm90  num_sms=132  torch=2.12.0a0+0291f960b6.nv26.04.48445190  deep_gemm=['~/github/DeepGEMM/deep_gemm']
+====================================================================================
+
+[A] 语义：BF16 输出 vs 真值 / vs 隔离量化的 fp32 模拟（relerr）
+    b    h     r     d |     vs 真值(bf16)      vs 量化模拟       量化误差
+    4  128   512   128 |       3.286e-02    2.141e-03  3.263e-02
+   32  128   512   128 |       3.949e-02    2.361e-03  3.821e-02
+  128  128   512   128 |       3.951e-02    2.428e-03  3.931e-02
+ 4096  128   512   128 |       3.548e-02    1.948e-03  3.574e-02
+    4    8  4096  1024 |       3.790e-02    3.707e-03  3.736e-02
+   32    8  4096  1024 |       3.966e-02    3.167e-03  3.962e-02
+  128    8  4096  1024 |       3.507e-02    2.952e-03  3.508e-02
+ 4096    8  4096  1024 |       3.213e-02    2.550e-03  3.257e-02
+
+[B] 每头独立 GEMM 语义（头=独立 batch）
+  vs 逐头 fp32 bmm(量化后) relerr = 2.497e-03（仅 bf16 输出舍入）
+  头 0 的 B 置零 -> 输出头 0 全 0 = True；其余头逐位不变 = True
+
+[C] SF 布局（量化器给出的形状，即 host 侧契约）
+  A fp8=(4, 8, 1024) SF=(4, 8, 8)  -> per-token: 每 (b,h) 行沿 r 每 128 一个 UE8M0
+  B fp8=(8, 512, 1024) SF=(8, 4, 8)  -> per-block: 每头 (d/128, r/128) 一个 SF
+  逐头 SFB 基址 stride = shape_n_sfb*shape_k_scales = 4*8 = 32（batch=h 的第 3 维偏移）
+
+[D] host 契约拒绝项
+  FP8 输出对 on sm90 (einsum.hpp:224): 被拒 -> Assertion error (csrc/apis/einsum.hpp:224): jit->device.get_arch_major() == 10
+  A 非 K-major (einsum.hpp:206/291): 被拒 -> Assertion error (csrc/apis/einsum.hpp:206): a.stride(-1) == 1 or a.stride(-2) == 1
+  recipe gran_k=64 (layout.hpp:57/119, einsum.hpp:246): 被拒 -> Assertion error (csrc/apis/../jit_kernels/impls/../heuristics/../../utils/layout.hpp:119): sf.size(-
+  B 的 h 不匹配 (einsum.hpp:66): 被拒 -> Assertion error (csrc/apis/einsum.hpp:214): batch_size == batch_size_ and batch_size == batch_size__
+  bhd,hdr->bhr on sm90 (einsum.hpp:296): 被拒 -> Assertion error (csrc/apis/einsum.hpp:296): Unsupported einsum expression: bhd,hdr->bhr
+
+[E] use_deterministic_algorithms（False 且 cuBLASLt 可用时走 nvjet）
+  deterministic=True:      8.9 us  kernels=['void deep_gemm::sm90_fp8_gemm_1d2d_impl<(cute::UMMA::Major)0, 0u, 128u, 512u, 128u, 128u, 128u, 128u, 128u, 128u, 128u, 5u, 128u, 256u, 1u, false, 132u, (deep_gemm::GemmType)4, cutlass::bfloat16_t>(float*, int*, unsigned int, unsigned int, unsigned int, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st)', 'void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})']
+  deterministic=False:      8.9 us  kernels=['void deep_gemm::sm90_fp8_gemm_1d2d_impl<(cute::UMMA::Major)0, 0u, 128u, 512u, 128u, 128u, 128u, 128u, 128u, 128u, 128u, 5u, 128u, 256u, 1u, false, 132u, (deep_gemm::GemmType)4, cutlass::bfloat16_t>(float*, int*, unsigned int, unsigned int, unsigned int, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st)', 'void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1}>(at::TensorIteratorBase&, at::native::direct_copy_kernel_cuda(at::TensorIteratorBase&)::{lambda()#3}::operator()() const::{lambda()#7}::operator()() const::{lambda(float)#1} const&)::{lambda(int)#1})']
+
+[F] 性能（FLOPs = 2*b*h*r*d，输入均已量化）
+       b    h     r     d | deep_gemm us   TFLOPS     GB/s |   torch us      x
+       4    8  4096  1024 |         13.3       20     2536 |       25.7   1.93
+      32    8  4096  1024 |         12.4      173     2838 |       26.8   2.17
+     128    8  4096  1024 |         16.9      509     2369 |       30.1   1.78
+    4096    8  4096  1024 |        473.3      581      505 |      749.1   1.58
+    8192    8  4096  1024 |       1028.8      534      432 |     1544.3   1.50
+       4  128   512   128 |          6.8       10     1293 |        5.2   0.77
+      32  128   512   128 |          6.9       77     1675 |        5.8   0.83
+     128  128   512   128 |          8.9      241     2379 |        8.7   0.98
+    4096  128   512   128 |        373.9      184     1122 |      486.5   1.30
+    8192  128   512   128 |        735.2      187     1130 |     1011.3   1.38
+
+完成。
