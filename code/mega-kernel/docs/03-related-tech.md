@@ -133,5 +133,106 @@ MPK 论文专门给了 tGraph 与 CUDA Graphs 的对照（快照 §3 行 402–4
 
 ---
 
-<!-- 后续子项（P4-2 PDL、P4-3 persistent vs mega + in-kernel 调度、P4-4 通信-计算 overlap）
+## 2. PDL（Programmatic Dependent Launch，P4-2）
+
+### 2.1 机理：让同 stream 的相邻 kernel「部分重叠」
+
+CUDA 默认在同一 stream 的两个 kernel 之间插一道隐式 **kernel barrier**：上游所有线程退出后，
+下游才被硬件启动。**PDL**（Hopper sm90 起，CUDA 11.8+）允许下游 kernel **提前被启动**：它的
+block 可以先执行自己的「前导（prologue）」代码（算地址、预热、做与上游无关的准备工作），
+再显式地**等待上游依赖**后才读上游写的数据。三个关键原语：
+
+- **下游侧属性**：用 `cudaLaunchAttributeProgrammaticStreamSerialization`
+  （`cudaLaunchKernelEx`，值 `programmaticStreamSerializationAllowed=1`）声明「这个 kernel 接受
+  提前启动、由程序自己管依赖」。
+- **上游侧放行**：上游 kernel 调用 `cudaTriggerProgrammaticLaunchCompletion()`，表示「我的关键部分
+  已完成，下游可以越过 grid 依赖先行」。当上游**所有 block** 都触发（或上游整体结束）后，该触发生效。
+- **下游侧等待**：下游在真正读上游数据前调用 `cudaGridDependencySynchronize()`，阻塞到上游放行/完成。
+
+换言之，PDL 把「整 kernel 的隐式 barrier」细化为「**显式的、可提前启动的 kernel 对**」：下游不必
+空等上游最后一段，只要它自己有「可提前做的活」，这段活就能与上游尾部重叠。MPK 论文对此的定位是：
+PDL「允许同 stream 上 kernel 间部分重叠」，但「采用 PDL 需要显著工程改造，因为它从根本上改变 kernel
+结构与控制流」——**每个相关 kernel 都要按 PDL 语义重写**（上游主动放行、下游显式等待）。（快照 §1 行 78–84）
+
+> 真实资料：NVIDIA *CUDA C Programming Guide* 的 Programmatic Dependent Launch 一节
+> https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html
+> （即 MPK 论文的引用 [26]，见快照行 2242–2244）。它定义了上述三个原语与「触发在全体 block 都调用
+> `cudaTriggerProgrammaticLaunchCompletion` 或上游 kernel 退出时生效」的语义。
+
+### 2.2 它重叠了什么：下游 prologue 与上游 tail 的重叠（目标卡 H100/sm90 实测）
+
+实验 `src/pdl.cu`（原始输出 `harness/pdl.out.txt`）。模型：上游 `producer` = `pre` 段 → 写数据 →
+`cudaTriggerProgrammaticLaunchCompletion()` 放行 → `tail` 段；下游 `consumer` = `prologue` 段
+（不碰上游数据）→ `cudaGridDependencySynchronize()` → 读数据。固定 `pre=tail=200000` 周期，
+**对每个 prologue 值同时测「无 PDL」与「有 PDL」**（工作量相同，公平对照），iters=500：
+
+| prologue（cycles） | no-PDL ms/it | PDL ms/it | 加速 | 理论可省 overlap |
+|---|---|---|---|---|
+| 0 | 0.2045 | 0.2033 | 1.01× | 0 |
+| 100000 | 0.2573 | 0.2035 | 1.26× | 100000 |
+| 200000 | 0.3075 | 0.2036 | 1.51× | 200000 |
+| 400000 | 0.4052 | 0.3039 | 1.33× | 200000（被 tail 封顶）|
+
+读法（与 `no-PDL: pre+tail+prologue`、`PDL: pre+max(tail,prologue)` 的模型完全吻合）：
+
+- **prologue=0 时加速 1.01×**——下游没有可提前做的活，PDL 等于没用。这是最重要的一条：
+  **PDL 不是万能加速，它只重叠「下游本可提前完成的那部分」**。
+- **prologue 增大，收益增大，但被上游 tail 封顶**：`min(tail, prologue)` 就是能省下的时间。
+  prologue=200000 省满 200000 周期（1.51×）；prologue=400000 时 overlap 仍只有 200000（1.33×，
+  因为上游 tail 只有 200000）。
+- 数量级核对：`pre=200000` 周期在该卡约 0.104 ms（由 prologue=0 的 PDL 单轮 0.2033 ms ≈ pre+tail
+  反推），与 1.8 GHz 附近 SM clock 一致；A/B 差值 0.104 ms ≈ 200000 周期，验证「重叠量 = min(tail,prologue)」。
+
+对照 CUDA Graph（§1）：graph 治的是**损失二（launch 开销）**，不改变依赖串行（依赖链仅 1.05×）；
+PDL 治的是**损失一的一个特例**——它确实能让**相邻两个 kernel** 在时间上重叠，但前提是下游有 prologue、
+且上下游都按 PDL 重写。两者是**互补**的两种降级手段。
+
+### 2.3 它没有消除什么
+
+**(1) 粒度仍是「kernel 对」。** PDL 只在**相邻 kernel**之间做重叠，重叠的边界是「下游能提前跑多少
+prologue」。它无法表达 MPK §3 的 tGraph 那种「第 i 个 AllReduce fragment 只依赖第 i 个 MatMul tile」
+的**细粒度跨算子依赖**（快照 §2.1 行 241–293、§3 行 371–386）——PDL 里下游要么整体被放行、要么整体
+等待，没有 fragment/tile 级的 event。
+
+**(2) 需要逐 kernel 改造，且上游必须显式放行。** 每个 kernel 都要被改造为「prologue / 依赖点 /
+epilogue」结构，上游还要插入 trigger、下游插入 grid-dependency-sync。这正是 MPK 说的「显著工程改造、
+根本上改变 kernel 结构与控制流」（快照行 84）。对含数百个算子的模型，靠人工逐对改造不现实——
+这也是 MPK 选择「编译器自动生成单 mega-kernel」而非「PDL 化整图」的原因（`docs/00` §2.3）。
+
+**(3) 仍是 host 逐对 launch。** PDL 不减少 launch 次数（损失二不受影响），也不消除中间张量物化
+（损失三）。它与 CUDA Graphs 可叠加，但即便如此，粒度和依赖表示都停在 kernel 级。
+
+### 2.4 与 MegaKernel 的关系：判据映射
+
+| 判据 | PDL 是否满足 | 说明 |
+|---|---|---|
+| C1 单次 launch | 否 | 仍是 host 逐个 launch，只是相邻 kernel 可重叠启动 |
+| C2 常驻（persistent） | 否 | 每个 kernel 仍会结束、GPU 会 drain |
+| C3 多算子融合范围 | 否 | 不融合算子，只是让相邻 kernel 部分重叠 |
+| C4 设备内协调 | 否 | 依赖由 host 插入的 trigger/sync 管理，仍以 kernel 为推进单位 |
+| C5 SM 级调度 | 否 | 粒度停在 kernel 对，无法表达 tile/fragment 级依赖 |
+
+**结论**：PDL 是 kernel-per-operator 下**缓解损失一（kernel barrier / 依赖串行）的定向补丁**，
+能把「下游 prologue」与「上游 tail」重叠掉 `min(tail, prologue)`，实测收益 1.0–1.5×（取决于下游
+有多少可提前做的活）。但它是**逐 kernel 对**的局部优化，不满足 C1–C5——`docs/00` §3.2 给 mega-kernel
+的判据里，PDL 与多流同列「host 侧仍按 kernel 推进」的降级项。真正摆脱 kernel barrier 的是
+把调度下沉到 SM 级、用设备内事件驱动（P4-3）。
+
+### 2.5 小结
+
+| 维度 | PDL |
+|---|---|
+| 治哪类损失 | 损失一（kernel barrier）的**特例**：相邻 kernel 部分重叠 |
+| 本机实测（H100） | prologue=0 → 1.01×；prologue=tail → 1.51×；重叠量 = min(tail, prologue) |
+| 前提 | 上下游都按 PDL 重写；下游要有 prologue；上游要 trigger |
+| 不改变 | kernel 级粒度、launch 次数、中间张量物化 |
+| 判据 | 全不满足 C1–C5，是与多流同档的降级项 |
+| 与 MPK 的关系 | MPK 视其为「需重写 kernel 结构」的局部手段（快照行 78–84），故走整图 mega-kernel 路线 |
+
+> 与 `docs/00` §2.3 的分工：§2.3 只给「PDL 能跑通、生产难套用」的结论；本节补上**三个原语机理、
+> 本机量化（重叠量 = min(tail, prologue)）与判据映射**。
+
+---
+
+<!-- 后续子项（P4-3 persistent vs mega + in-kernel 调度、P4-4 通信-计算 overlap）
      将依次补入本文件，见 ROADMAP「当前进度/下一步」。 -->
