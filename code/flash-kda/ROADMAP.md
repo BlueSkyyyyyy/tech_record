@@ -60,7 +60,7 @@
 - [x] **P3-1** warp specialization（LOAD / MMA / STORE）与 TMA pipeline。
 - [x] **P3-2** 八个 Phase（dual GEMM k@s/q@s → cast → u=(v-u)β; u=INV@u → Mqk@U+out → store →
       s_acc update）逐条讲清数据流；`MOVM_T` 寄存器内转置消 smem 往返。
-- [ ] **P3-3** 状态更新 `s_acc = s_acc*g_total + k_restored^T @ U` 的分块含义与 bf16 状态精度验证。
+- [x] **P3-3** 状态更新 `s_acc = s_acc*g_total + k_restored^T @ U` 的分块含义与 bf16 状态精度验证。
 
 ### P4 数值对拍（`docs/04-numerics.md`）
 
@@ -111,8 +111,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0 全部完成，P1 全部完成，P2 全部完成，P3-1 完成（K2 执行结构：warp specialization + TMA pipeline），
-  P3-2 完成（K2 六个 Phase 数据流 + `MOVM_T` 寄存器转置，含 GPU 实测）。
+- 当前进度：P0 全部完成，P1 全部完成，P2 全部完成，P3 全部完成（K2 执行结构 + 八相数据流 + 状态更新分块含义与 bf16 精度）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -179,9 +178,24 @@
     naive `STSM+LDSM_N`（不转置）max_rel=1.26（全错），**证明转置是数学必需**；延迟微基准
     4×`MOVM_T`=18.0 cyc vs `STSM+syncwarp+LDSM`=21.8 cyc（1.21×），真正收益是省 4096B U 缓冲与
     Phase 3→4→6 对 U 复用的零同步。
-- **下一步：P3-3** 讲状态更新 `s_acc = s_acc*g_total + k_restored^T @ U` 的分块含义，
-  验证 bf16 状态存储 + fp32 FMA 更新的精度（对照 deep-dive §3）；再进 P4 数值对拍（golden 已有
-  `src/kda_ref.py`），反向（P5）可用已装好的 FLA `chunk_kda` autograd 对拍。
+- **下一步：P4 数值对拍**（golden 已有 `src/kda_ref.py`，P4-2/P4-3 把 FlashKDA forward 与 FLA `chunk_kda`
+  三方对比成表）；P3-3 新增的 `harness/check_state_bf16.py` 可作 bf16 侧补充。反向（P5）用已装好的
+  FLA `chunk_kda` autograd 对拍。
+
+  - P3-3：`docs/03` 新增 **Part III（§17–§20）**，全部贴真实行号：
+    (a) §17 分块含义：从逐 token gated delta rule 展开得 `S_C = diag(E_tot) S_0 + k_rest^T U`（式 17.2），
+    `k_restored = k⊙2^{-g_cum}⊙E_tot`（K1 `fwd_kernel1.cuh:453–468`）承载「写入点到块末剩余衰减」；
+    澄清 kernel smem `g_total` 已是 `E_tot=2^{sum g}`（`fwd_kernel1.cuh:330,353–356`；`gate_scale=lower_bound·log2e`
+    `flash_kda.cpp:128`），K2 逐 key 列缩放（`fwd_kernel2.cuh:684–685/706–707/718–719`），与
+    `kda_ref.py:135` 行缩放互为转置写法；块内前缀和沿 token、按 key 列独立（`fwd_kernel1.cuh:311–330`）。
+    (b) §18 新增 `harness/check_state_bf16.py`（纯 PyTorch 受控消融，fp32 工作精度、fp64 golden）：
+    隔离「bf16 状态存储」与「bf16 GEMM 操作数」——T=1024 g=1（衰减区）下 o max_rel：fp32 3.8e-07、
+    store_bf16 3.5e-04、gemm_bf16(st_fp32) 1.7e-03、kernel_bf16 1.7e-03；把状态 fp32→bf16 存储的**边际**
+    输出变化仅 o max_abs=2.8e-05。g=0（无衰减病态）时 bf16 存储边际升到 o ~2e-3。fp32-FMA vs bf16-FMA
+    更新算术：g=4 逐位相同、g=1 输出差 1.2e-4。结论支持 deep-dive §3「有衰减 regime 下 bf16 存储对输出
+    无可测量损失」，与 `probe_refs.out.txt` 端到端 FLA/FlashKDA 误差（状态 max_rel ~6–9e-3）量级互洽。
+    (c) §19 状态落盘 bf16/fp32 两条路径（`fwd_kernel2.cuh:786–801`、`804–835`，union `99–107`）；
+    §20 行号速查。更新博客 post `flash-kda-03-fwd-k2` 标题。
 
 ## 阻塞
 

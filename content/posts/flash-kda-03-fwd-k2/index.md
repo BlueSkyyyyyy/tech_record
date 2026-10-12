@@ -1,5 +1,5 @@
 ---
-title: "KDA 前反向算子实现解析（三）：前向 K2（recurrence）warp specialization 与 TMA pipeline"
+title: "KDA 前反向算子实现解析（三）：前向 K2（recurrence）warp specialization、TMA pipeline 与状态更新精度"
 date: 2026-10-12T21:20:00+08:00
 draft: false
 weight: 4

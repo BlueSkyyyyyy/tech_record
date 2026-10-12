@@ -1,6 +1,6 @@
 # KDA 前向 K2（recurrence）精读：执行结构与八相数据流
 
-> 本文是「Kimi Delta Attention 前向 / 反向算子实现解析」的第 3 篇，对应路线图 **P3-1 + P3-2**。
+> 本文是「Kimi Delta Attention 前向 / 反向算子实现解析」的第 3 篇，对应路线图 **P3-1 + P3-2 + P3-3**。
 > 聚焦 FlashKDA 前向第二个 kernel **K2 = `_flash_kda_fwd_recurrence`**（`csrc/smxx/fwd_kernel2.cuh`）。
 > **Part I（§0–§7，P3-1）**讲**执行结构**：warp specialization（4 个 MMA warp + 1 个 LOAD warp +
 > 1 个 STORE warp）、两级 TMA 流水线（输入 3-stage / 输出 2-stage）、初始/最终状态搬运、相位 rendezvous。
@@ -8,7 +8,10 @@
 > 从 dual GEMM、`u=(v-u)β`、`u=INV u`、`Mqk U+out` 到状态更新 `s_acc = s_acc*g_total + k_restoredᵀ U`，
 > 重点讲清 `SM75_U32x1_MOVM_T`（`movmatrix`）如何把 C 累加器片段**在寄存器内转置**成下一步的 B 操作数、
 > **消掉每一次中间 smem 往返**，以及 transposed smem 视图（`s_acc_T`/`k_restored_t`）如何在状态更新里
-> 复用同一块字节。公式记号沿用第 1 篇 `01-kda-theory.md`；行号均为 `~/github/FlashKDA` 下**核对过**的真实行号。
+> 复用同一块字节。**Part III（§17–§20，P3-3）**推导状态更新 `s_acc = s_acc⊙g_total + k_restoredᵀ U` 的
+> **分块含义**（逐 key 通道衰减、`k_restored` 的来历），并用纯 PyTorch 受控消融**实测 bf16 状态存储 +
+> fp32 FMA 更新的精度**（对照 deep-dive §3）。公式记号沿用第 1 篇 `01-kda-theory.md`；行号均为
+> `~/github/FlashKDA` 下**核对过**的真实行号。
 
 ## 0. K2 的职责、形状与 launch 配置
 
@@ -537,7 +540,200 @@ every intermediate shared-memory round trip」正指这条链。
 | Phase 6 state update（ring 预取/`LDSM_T`/`STSM_T`） | 同上 | `659–731` |
 | `MOVM_T` 指令封装 / `transpose_u32x4` 佐证 | `cutlass.../copy_sm75.hpp`、`utils.cuh` | `201–218`、`304–309` |
 
-## 17. 下一步
+---
 
-- **P3-3**：状态更新 $s\_acc = s\_acc*g^{\text{total}} + k^{\text{rest}\top}U$ 的分块含义与
-  **bf16 状态精度**验证（对照 deep-dive §3 的「state 存 bf16、更新用 fp32 FMA」给出实测误差）。
+# Part III：状态更新的分块含义与 bf16 状态精度（P3-3）
+
+## 17. $s\_acc = s\_acc\odot g^{\text{total}} + k^{\text{rest}\top}U$ 的分块含义
+
+### 17.1 从逐 token 递推到块末状态
+
+逐 token 的 gated delta rule（$S\in\mathbb{R}^{K\times V}$，$\alpha_t[k]=2^{g_t[k]}$）是
+（`src/kda_ref.py:66–71`）：
+
+$$
+S_t=\operatorname{diag}(\alpha_t)\,S_{t-1}+k_t\,\delta_t^\top,\qquad
+\delta_t=\beta_t\bigl(v_t-(k_t\odot\alpha_t)S_{t-1}\bigr).
+$$
+
+把块内 $C=16$ 步的递推展开（$t=1\ldots C$，块初态 $S_0$），第 $j$ 步写入的 rank-1 项
+每次再乘以之后所有步的逐通道衰减 $\prod_{i=j+1}^{C}\alpha_i[k]$：
+
+$$
+S_C=\underbrace{\operatorname{diag}\Bigl(\prod_{i=1}^{C}\alpha_i\Bigr)}_{D_C}\,S_0
++\sum_{j=1}^{C}\operatorname{diag}\Bigl(\prod_{i=j+1}^{C}\alpha_i\Bigr)\,k_j\,\delta_j^\top .
+\tag{17.1}
+$$
+
+记块内 log2 前缀和 $g^{\text{cum}}_{t}[k]=\sum_{i\le t}g_i[k]$、整块累计
+$g^{\text{tot}}[k]=\sum_{i=1}^{C}g_i[k]$，则 $\prod_{i=1}^{C}\alpha_i=2^{g^{\text{tot}}}=:E^{\text{tot}}$、
+$\prod_{i=j+1}^{C}\alpha_i=2^{g^{\text{tot}}-g^{\text{cum}}_j}$。于是 (17.1) 就是 kernel 的那一行：
+
+$$
+\boxed{\,S_C=\operatorname{diag}(E^{\text{tot}})\,S_0+k^{\text{rest}\top}U\,},\qquad
+k^{\text{rest}}_j:=k_j\odot 2^{\,g^{\text{tot}}-g^{\text{cum}}_j}.
+\tag{17.2}
+$$
+
+### 17.2 为什么写入项要用 `k_restored`（= $k/E\cdot E^{\text{tot}}$）
+
+`k_restored` 恰好实现 (17.2) 里的衰减因子 $2^{g^{\text{tot}}-g^{\text{cum}}}$。K1 的
+`decay_apply`（`fwd_kernel1.cuh:427–469`）一次性算出四个派生量，全部逐 key 通道、逐 token：
+
+| 张量 | 公式 | 代码行 |
+|---|---|---|
+| `k_decayed` | $k\odot 2^{g^{\text{cum}}}$ | `fwd_kernel1.cuh:453,455` |
+| `q_decayed` | $q\odot 2^{g^{\text{cum}}}\cdot\text{scale}$ | `fwd_kernel1.cuh:454` |
+| `k_inv` ($E^{-1}$ 后再规整为 $\beta L$ 的种子) | $k\odot 2^{-g^{\text{cum}}}$ | `fwd_kernel1.cuh:466,467` |
+| `k_restored` | $k\odot 2^{-g^{\text{cum}}}\odot E^{\text{tot}}$ | `fwd_kernel1.cuh:468` |
+
+其中 $E^{\text{tot}}$ 从 smem `g_total` 读入 `reg_gt`（`fwd_kernel1.cuh:396,411,418`），而 `g_total`
+在 K1 的 gate 阶段被就地 `exp2`（`fwd_kernel1.cuh:330,353–356`）。**所以 kernel 里的 `g_total` 就是
+$E^{\text{tot}}$ 本身（已取指数），不是 log2 的累计和**——名字略有误导，K2 Phase 6 直接把它当乘子用
+（`fwd_kernel2.cuh:718–719`）。
+
+直觉：块内每个 token 的贡献应以「它被写入后到块末还剩余的衰减」加权，才能像在块末一次性写入一样
+被状态带走。`k_restored` 把这一步预先吸收进 $k$，于是状态更新退化成一次**无时刻依赖**的普通 GEMM
+$k^{\text{rest}\top}U$——这正是 K2 能把状态更新作为 Phase 6 一次性完成的原因。
+
+### 17.3 `g_total` 是逐 **key** 通道的：decay 作用在 key 上
+
+注意 $g\in\mathbb{R}^{T\times D}$，$D$ 是 **key 通道**；K1 的前缀和是**沿 token、按列（key）独立**做的
+（`fwd_kernel1.cuh:311–330`：`compute_tid<128` 固定 `col=`key，循环 `row` 累加）。因此 $g^{\text{tot}}$
+是长度 $D$ 的向量、$E^{\text{tot}}[k]$ 逐 key 通道不同——这就是 KDA 相对 GLA/DeltaNet 的
+**per-channel decay** 在状态更新上的落点。
+
+K2 里 `s_acc = S^\top`（$[V,K]$，§8.1），所以「逐 key 缩放」表现为**逐列**缩放：
+
+```cpp
+// fwd_kernel2.cuh:684-685 (预取), 706-707 (滑窗预取), 718-719 (应用)
+ring_g0[i] = g_total(i * 16 + group_id);        // E_tot[key]
+ring_g1[i] = g_total(i * 16 + group_id + 8);
+ring_S_acc[bi][slot](c0) = BF16(bf16_to_f32(ring_S_acc[bi][slot](c0)) * g0 + u_acc[bi](c0));
+ring_S_acc[bi][slot](c1) = BF16(bf16_to_f32(ring_S_acc[bi][slot](c1)) * g1 + u_acc[bi](c1));
+```
+
+Phase 6 的外层循环下标 `m` 扫的是 **key 维**的 8 个 16-块，`warp_id*2+bi` 扫的是 **value 维**，
+`group_id=(lane/4)%8`（`fwd_kernel2.cuh:476`）给出块内 key 行偏移，于是 `g_total(m*16+group_id)`
+精确取到该行（key）的 $E^{\text{tot}}$（`684–685,706–707`）——**逐 key 通道缩放旧状态**，与 §17.1 的
+$\operatorname{diag}(E^{\text{tot}})S_0$ 完全一致。
+
+对照 `src/kda_ref.py:135`（$S$ 存 $[K,V]$，故为行缩放）：
+
+```python
+S = kr.transpose(0, 1) @ U + etot[:, None] * S   # (17.2)，行缩放 = 逐 key
+```
+
+两者是同一式的转置写法：K2 的列缩放 `*g_total` $\Leftrightarrow$ 参考的行缩放 `etot[:,None]*`。
+
+### 17.4 数值自检
+
+P1-4 的 `src/kda_ref.py` 自测已证明**分块式与逐 token 式在 fp64 下逐元素完全相等**
+（`harness/kda_ref_selftest.out.txt`，max_abs=0），其中
+`kda_chunked_fwd` 的那一行就是 (17.2)。因此 (17.2) 的分块含义不需要额外验证——它已被恒等对拍兜住；
+P3-3 剩下要回答的是**当状态在块之间以 bf16 落盘时，这个恒等关系还保多少精度**。
+
+## 18. bf16 状态存储 + fp32 FMA 更新的精度实测
+
+deep-dive §3 的原话是：FlashKDA 把 on-chip 递推状态存 **bf16**，只要**更新本身用 fp32 FMA**，
+「在推理基准上不引入可测量的精度损失」。P3-3 用纯 PyTorch 的**受控消融**把这个论断量化。
+
+### 18.1 实验设计（`harness/check_state_bf16.py`）
+
+固定一份 fp64 输入，用 5 个变体跑分块前向（工作精度统一 **fp32**，bf16 舍入由探针显式插入），
+全部对照 **fp64 逐 token golden**：
+
+| 变体 | 状态存储 | `@S` GEMM 读 | 其它算符(kd/qd/ki/kr/U/P/Mqk) | 更新算术 |
+|---|---|---|---|---|
+| `fp32` | fp32 | fp32 | fp32 | fp32 |
+| `store_bf16` | **bf16** | fp32 | fp32 | fp32 |
+| `gemm_bf16(st_fp32)` | fp32 | bf16 | bf16 | fp32 |
+| `kernel_bf16` | **bf16** | bf16 | bf16 | fp32 FMA |
+| `kernel_arith_bf16` | bf16 | bf16 | bf16 | **bf16 FMA** |
+
+`store_bf16`（只把块间状态降 bf16）隔离「状态存储」这一项；`gemm_bf16(st_fp32)` 是「gemm 操作数为
+bf16 但状态保 fp32」的反事实；两者的差就是 §3 论断真正要量化的「bf16 存储的边际代价」。
+
+### 18.2 结果（D=128；max_rel 相对 golden 的最大幅值）
+
+**T=1024、g~log2 衰减（decay 强，KDA 实际工作区）**
+
+| 变体 | o max_abs | o max_rel | S max_abs | S max_rel |
+|---|---|---|---|---|
+| `fp32` | 7.5e-08 | 3.8e-07 | 1.0e-07 | 2.8e-07 |
+| `store_bf16` | 6.8e-05 | 3.5e-04 | 9.6e-04 | 2.6e-03 |
+| `gemm_bf16(st_fp32)` | 3.4e-04 | 1.7e-03 | 1.2e-03 | 3.1e-03 |
+| `kernel_bf16` | 3.4e-04 | 1.7e-03 | 2.0e-03 | 5.4e-03 |
+
+- 纯 fp32 分块 ≈ 机器精度（1e-7），确认分块代数本身无误差。
+- **单独的 bf16 状态存储**只带来 o 3.5e-4 / S 2.6e-3 的 max_rel，比「bf16 GEMM 操作数」那一项
+  （`gemm_bf16` vs golden：o 1.7e-3）**小约 5×**。
+- 在 gemm 已是 bf16 的前提下，再把状态从 fp32 换成 bf16 存储（`gemm_bf16(st_fp32)` → `kernel_bf16`），
+  **输出只变化 o 2.8e-05（max_abs）**、最终状态变化 9.5e-04（max_abs）——即 §3 说的
+  「no measurable loss」在**输出**上成立；最终状态本身有 ~2.5e-3 的漂移，但它不进入下一步计算。
+
+**T=1024、g=0（无衰减，病态：状态单调累加到 |S|max≈2.8）**
+
+| 变体 | o max_abs | o max_rel | S max_abs | S max_rel |
+|---|---|---|---|---|
+| `fp32` | 1.2e-07 | 4.2e-07 | 6.3e-07 | 2.2e-07 |
+| `store_bf16` | 1.7e-03 | 6.0e-03 | 2.7e-02 | 9.5e-03 |
+| `gemm_bf16(st_fp32)` | 1.3e-03 | 4.4e-03 | 9.9e-03 | 3.5e-03 |
+| `kernel_bf16` | 1.7e-03 | 6.1e-03 | 2.5e-02 | 8.7e-03 |
+
+无衰减时误差不再被 decay 冲刷、逐块累积，bf16 存储的边际代价升到 o ~2e-3(max_abs)。
+但 KDA 实际用 `lower_bound=-5` 使衰减足够强（`flash_kda.cpp:128` 的 `gate_scale`），落在上一张表
+的 regime，不会一直贴着 g=0。
+
+### 18.3 fp32 FMA 更新 vs bf16 更新算术
+
+固定 `kernel_bf16`，只把「$\;E^{\text{tot}}\!\cdot\!S+\Delta$」这一步从 fp32 累加改成 bf16
+（`kernel_arith_bf16`）：T=1024、g=1 时输出差 **1.2e-04（max_abs）**、状态差 2.0e-3；g=4（强衰减）时
+两者**逐位相同**（差 ≤1e-6，旧状态已被衰减到可忽略）。可见 fp32 FMA 更新在强衰减区几乎免费，
+在长序列/弱衰减区把误差压低约一个量级——支持 deep-dive §3「用 fp32 FMA 更新」的选择。
+
+### 18.4 与真实实现的交叉印证
+
+`harness/probe_refs.out.txt`（T=512, H=4, D=128, bf16）里，FLA `chunk_kda` 的最终状态对 fp64 golden
+max_rel≈6.3e-3、输出≈4.0e-3，FlashKDA 内核分别为 9.0e-3 / 5.4e-3——与上表 `kernel_bf16` 的
+状态误差量级一致。也就是说端到端误差**主要由 bf16 操作数决定，而非状态存储**；把状态升级到 fp32
+最多改善 ~0.1%，却要付出 2× smem 与一次额外的 cast（§19）。
+
+### 18.5 结论与 caveat
+
+- **支持 §3**：在 KDA 实际的有衰减 regime，bf16 状态存储对**输出**的边际影响 ≤ ~1e-4（max_abs），
+  远小于 bf16 操作数误差本身；fp32 FMA 更新使该代价可忽略。
+- **待验证/边界**：以上是纯 PyTorch 消融，未逐位复现 kernel 的 smem/MMA 累加顺序；g→0 的
+  病态长序列误差会升到 ~0.5–1%，属已知 trade-off，而 KDA 的 gate 设计避开了该区。
+- 未验证「Neumann 级数 vs 前代求逆」等其它精度项——那是 P2-2(d) 的主题，此处不重复。
+
+## 19. 状态落盘的 bf16 / fp32 两条路径
+
+`_flash_kda_fwd_recurrence` 的末状态写回有两条编译期分支：
+
+- **bf16（默认，`StateFP32=false`）**：状态在 smem 里本就是 bf16，STORE warp 直接把
+  `state_acc` 用 TMA 一次发走（`fwd_kernel2.cuh:786–801`），**无转换、无额外同步**。
+- **fp32（`StateFP32=true`）**：全 block `__syncthreads()` 后走
+  `smem_cvt_bf16_to_fp32` 把 bf16 状态转成 fp32 到 `state_fp32_buf`，再
+  `fence_view_async_shared()` + `__syncthreads()`，最后 STORE warp TMA 发出（`fwd_kernel2.cuh:804–835`）。
+  该 fp32 缓冲与 pipeline 输入/输出共用同一 union（`fwd_kernel2.cuh:99–107`），因为转换发生在流水线
+  循环**之后**、生命周期不重叠。
+
+这解释了 §3 的工程动机：状态存 bf16 不只是「省一半 smem」（`state_acc` 64 KB → 32 KB，Part I §5.1），
+更省掉了每次喂 bf16 GEMM 前都需要的 fp32→bf16 cast（`state_fp32_buf` 路径里的
+`smem_cvt_bf16_to_fp32` 只在最终落盘做一次，而非每块做一次）。
+
+## 20. 行号速查（状态更新） & 下一步
+
+| 内容 | 位置 | 行号 |
+|---|---|---|
+| K1 逐 key 前缀和 `g_cum` / `g_total` 写入 | `fwd_kernel1.cuh` | `311–330` |
+| K1 `g_total` 就地 `exp2`（$E^{\text{tot}}$） | 同上 | `353–356` |
+| K1 `decay_apply`（kd/qd/ki/kr 四个派生量） | 同上 | `427–469` |
+| K2 `g_total` smem 字段 / Tensor 视图 | `fwd_kernel2.cuh` | `90`、`453` |
+| K2 Phase 6 更新（逐 key 缩放 + fp32 FMA + bf16 落盘） | 同上 | `659–731`（应用 `718–719`，g 取 `684–685,706–707`） |
+| 末状态写回 bf16 / fp32 | 同上 | `786–801`、`804–835`（union `99–107`） |
+| `gate_scale = lower_bound·log2(e)` | `flash_kda.cpp` | `128` |
+
+**下一步**：P4 数值对拍（golden 已有 `src/kda_ref.py`，本轮的 `check_state_bf16.py` 可作 bf16 侧补充）；
+随后 P5 反向，用已装好的 FLA `chunk_kda` autograd 对拍。
