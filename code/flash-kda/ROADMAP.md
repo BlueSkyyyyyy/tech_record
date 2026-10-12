@@ -149,6 +149,12 @@
       **操作数 dtype（fp32/tf32 vs bf16）**：同 BT 同 dtype 下 ours/FLA = **1.1–1.9×**（非 3.9×）；
       让 B1 吃 workspace 原生 bf16（不 `.float()`）→ **2.2–2.5×**，B2T1024H8 已快过 FLA `dhu`。
       修正归因并重排优化优先级。
+- [x] **P7-9** 把 P7-8 §11.4 的「B1 吃 workspace 原生 bf16」杠杆**落到真实组装链**（此前只在孤立
+      kernel 上手工验证）：新增 `harness/check_bwd_b1_bf16_e2e.py` + `docs/07` §12。只换 B1 的 mma
+      操作数（状态仍 fp32、`dh/dv2` 输出保持 fp32 以兼容 B2/B3 的 fp32 操作数），正确性整链仍落 bf16
+      底噪（六项 vs autograd ≤8.3e-3，与 P6-8 同阶；操作数换 bf16 自身增量 `dq` 逐位 0、其余 ≤3.8e-3）；
+      反向 dev 降到 fp32-B1 链的 **0.71–0.91×**、FLA 反向的 **0.51–0.60×**；B1 kernel 快 **1.68–2.09×**
+      （$B2\,T1024\,H8$ 208→119µs，已快过 FLA `dhu` 137.4µs）。§11.5 优化优先级第 (1) 步完成。
 - [x] **P7-5** 关闭 P7-2/P7-4 待验证 (c)：**K2 突破 2 CTA/SM 后 L2 墙是否后移**——实验=否。
       改造 `SharedStorageK2`（fp32 状态缓冲改按 `StateFP32` 条件预留）+ 扫 pipeline stage，编译 6 个变体，
       实测占用率/ncu SOL/K2 时间。结论：smem 被无条件预留的 65536 B fp32 缓冲钉死为 98432 B（只减
@@ -185,7 +191,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）+ **FLA host 税组成归因（P7-6）** + **反向性能与 host 税剖析（P7-7）**完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）+ **FLA host 税组成归因（P7-6）** + **反向性能与 host 税剖析（P7-7）**完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+  - P7-9：新增 `docs/07` §12 + `harness/check_bwd_b1_bf16_e2e.py`（`harness/check_bwd_b1_bf16_e2e.out.txt`）。
+    把 P7-8 §11.4 的「B1 吃 workspace 原生 bf16」从**孤立 kernel 的手工实验**落进 P6-8 的**真实组装链**
+    （此前 `reconstruct` 把整套 workspace `.float()`，B1 一直跑 tf32）。只换 B1 的 mma 操作数 dtype
+    （状态 `b_dh` 仍 fp32 累加、`dh`/`dv2` 输出**保持 fp32**——因为 B2 `wy_dqkg` 把 `dv` 与 fp32 `v`
+    放进同一 `tl.dot`、`dh` 与 fp32 `h` 进同一 `tl.sum`，落 bf16 会直接报 dtype mismatch；加速来自
+    mma 操作数、与输出 dtype 无关）。**Part A 正确性**（P6-8 同 6 组 case，含非整除 T=250/513、g=0、
+    B=2）：bf16-B1 链 vs `torch.autograd`(FLA) 六项 `dq 3.42e-3/dk 3.02e-3/dv 6.80e-3/dbeta 6.01e-3/
+    dg 7.06e-3/dh0 8.27e-3`，与 fp32-B1 基线**同阶**；操作数换 bf16 自身增量 `dq` **逐位 0**、其余
+    `dk≤1.03e-3/dv≤3.76e-3/dbeta≤2.30e-3/dg≤1.08e-3`，B1 的 `dh` bf16-vs-fp32 跨 case 6.4e-4–3.9e-3。
+    **Part B 性能**（空闲卡、wall+dev 同 P7-8 口径）：B1 kernel 快 **1.68–2.09×**（T512H4 101.5→53.2、
+    B2T1024H8 208.2→118.8、B8T2048H8 651.9→387.0、T250H3 46.9→22.4；B2T1024H8 的 118.8 已快过空闲卡
+    FLA `dhu` 137.4），**整链 dev 降到 fp32-B1 链的 0.71–0.91×、FLA 反向的 0.51–0.60×**。**坑**：
+    小 shape（T512H4）wall 反而略高（320 vs 306），是 harness 每个 timed call 对 fp32 `dv` 做一次
+    `.to(bf16)` 的 host 税被放大（小 shape 整链 wall 本就 host 主导，P7-6），真实实现里 `do/dv` 与
+    workspace 同为 bf16、无需运行期转换 → 以 dev 为口径。至此 §11.5 优化优先级第 (1) 步完成，
+    下一步是第 (2) 步「更大 chunk 重组消粒度损失」。
   - P6-7：新增 `docs/06` §6.9 + `harness/check_bwd_e2e.py`（`harness/check_bwd_e2e.out.txt`），
     并给 `harness/check_bwd_dhu_kernel.py` 的 B1 kernel 补 `dht`（终态上游梯度）入口（`HAS_DHT` 分支）。
     **Part A**：补齐反向第 5 个 kernel **`dAv`（输出支路）**（对应 FLA `chunk_kda_bwd_kernel_dAv`，
@@ -340,7 +362,9 @@
   的 Python launch 包装 + ~190 µs `dispatch` + ~75 µs driver launch，与 GPU/autograd/分配无关，见下）。
   **P7-7：新增 `docs/07` §10 + `harness/bench_bwd.py`（`harness/bench_bwd.out.txt`），见下。P7-8：
   更正其被污染的数字并重排 B1 优化优先级（`docs/07` §11 + `harness/bench_bwd_idle.out.txt` +
-  `harness/check_bwd_dhu_dtype.py`），见上。**
+  `harness/check_bwd_dhu_dtype.py`），见上。P7-9：把 §11.4 的 bf16-B1 杠杆落进真实组装链
+  （`docs/07` §12 + `harness/check_bwd_b1_bf16_e2e.py`），B1 快 1.68–2.09×、整链 dev 0.71–0.91×，
+  见上；§11.5 优先级第 (1) 步完成，下一步＝第 (2) 步「大 chunk 重组消粒度损失」。**
   - P6-6：新增 `docs/06` §6.8 + `harness/check_bwd_b0_gate.py`
     （`harness/check_bwd_b0_gate.out.txt`）。把 §5.2 的 **B0 `gate_bwd`**（对应 FLA
     `kda_gate_chunk_cumsum` `gate.py:375` + `kda_gate_bwd` `gate.py:252`）做成最小可运行 Triton
