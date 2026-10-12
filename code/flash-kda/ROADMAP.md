@@ -57,7 +57,7 @@
 
 ### P3 前向 K2 精读（`docs/03-kda-fwd-k2.md`）
 
-- [ ] **P3-1** warp specialization（LOAD / MMA / STORE）与 TMA pipeline。
+- [x] **P3-1** warp specialization（LOAD / MMA / STORE）与 TMA pipeline。
 - [ ] **P3-2** 八个 Phase（dual GEMM k@s/q@s → cast → u=(v-u)β; u=INV@u → Mqk@U+out → store →
       s_acc update）逐条讲清数据流；`MOVM_T` 寄存器内转置消 smem 往返。
 - [ ] **P3-3** 状态更新 `s_acc = s_acc*g_total + k_restored^T @ U` 的分块含义与 bf16 状态精度验证。
@@ -111,7 +111,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0 全部完成，P1 全部完成，P2 全部完成（P2-1/P2-2/P2-3）。
+- 当前进度：P0 全部完成，P1 全部完成，P2 全部完成，P3-1 完成（K2 执行结构：warp specialization + TMA pipeline）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -150,9 +150,25 @@
     而非分配上界（坑）。新增 `harness/check_workspace_layout.py`（`check_workspace_layout.out.txt`）三查：
     字段预算/对齐、9 组 `get_workspace_size` 对闭式（含 varlen N=2/4/7）全 OK、varlen 实跑
     `lens=[30,16,5,50]` 在预测偏移 304128 读出 `tile_prefix=[0,2,3,4,8]` 与期望一致、其后 108B canary 未被动。
-- **下一步：P3-1** 进入 K2 精读（`docs/03-kda-fwd-k2.md`）：先讲 warp specialization（LOAD/MMA/STORE
-  三分角色，`utils.cuh:79–84` 的 `WarpRole`）与 TMA pipeline（K2 3-stage 载入 / 2-stage 输出，
-  `fwd_launch.cu:29–30`），再逐 Phase 拆数据流。反向（P5）可用已装好的 FLA `chunk_kda` autograd 对拍。
+  - P3-1：新增 `docs/03-kda-fwd-k2.md` 前向 K2 的**执行结构**（warp specialization + TMA pipeline），
+    全部贴真实行号：
+    (a) warp 分工（`fwd_kernel2.cuh:169–197`）：4 MMA warp（tid 0–127）+ 1 LOAD（128–159）+ 1 STORE（160–191）
+    = 192 线程（`fwd_launch.cu:186`）；讲清为何 K1「高占用短 kernel」与 K2「专职分工深流水」取向相反。
+    (b) 流水线构造（`utils.cuh:86–143`）：输入 `PipelineTmaAsync<3>`（LOAD=Producer、MMA=Consumer，
+    `num_producers=1`/`num_consumers=128`；`transaction_bytes=17984`）、输出 `PipelineAsync<2>`
+    （MMA=Producer 128 / STORE=Consumer 1）；`pipeline_init_wait(1)`。
+    (c) producer/consumer 循环与 barrier：LOAD producer_acquire/producer_tail（`347,421`）、MMA
+    store_acquire(436)/consumer_wait(437)/commit(737)/consumer_release(738)、`compute_barrier`
+    `NamedBarrier(128,0)`（`427,733`）作为 4 MMA warp 的 rendezvous（因 `s_acc` 跨 warp 共享）。
+    (d) 状态搬运：独立 `state_acc_tma_barrier`（`111,240–317,786–835`）与 union（`99–107`，fp32 状态缓冲
+    65536B 比流水线 62144B 大，故 union 取 65536B）；尾块手动 store（`757–766`）。
+    (e) 实测（`harness/smem_k2_probe.cu`、`k2_res_usage.out.txt`）：每输入 stage 17984B、`sizeof
+    (SharedStorageK2<128,16;3,2>)=98432B`；K2 全部 14 个实例 `REG:74–80 STACK:0 LOCAL:0`（无 spill）；
+    占用率瓶颈是 smem → 2 CTA/SM（196864B≤233472B）。新增博客 post `flash-kda-03-fwd-k2` 并更新 index。
+- **下一步：P3-2** 继续 K2，拆解八个 Phase 的数据流（dual GEMM $k^{dec}S/q^{dec}S$ → cast →
+  $u=(v-u)\beta$ → $u=INV\,u$ → $M_{qk}U+$out → store → $s\_acc$ update），重点讲
+  `SM75_U32x1_MOVM_T` 寄存器内转置消 smem 往返；随后 P3-3 讲状态更新分块含义与 bf16 状态精度。
+  反向（P5）可用已装好的 FLA `chunk_kda` autograd 对拍。
 
 ## 阻塞
 

@@ -20,9 +20,10 @@ categories: ["算子开发"]
 
 1. [KDA 数学与分块公式]({{< relref "flash-kda-01-theory" >}}) —— gated delta rule、门控构造、CHUNK=16 分块前向
 2. [KDA 前向 K1 精读]({{< relref "flash-kda-02-fwd-k1" >}}) —— TMA 载入 / L2 norm / 门激活+cumsum / 衰减 / $L$、$M_{qk}$ / 块内求逆 / 写 workspace
-3. KDA 前向 K2 精读 —— warp specialization、八个 Phase、状态递推（待写）
-4. 数值对拍 —— 与逐 token 参考、FLA 对比（待写）
-5. KDA 反向推导与实现 —— adjoint、chunked backward（待写）
-6. 性能与 `ncu` 剖析（待写）
+3. [KDA 前向 K2 精读]({{< relref "flash-kda-03-fwd-k2" >}}) —— warp specialization（4 MMA + 1 LOAD + 1 STORE）、输入 3-stage / 输出 2-stage TMA pipeline、状态搬运
+4. KDA 前向 K2 八个 Phase 与状态递推（待写）
+5. 数值对拍 —— 与逐 token 参考、FLA 对比（待写）
+6. KDA 反向推导与实现 —— adjoint、chunked backward（待写）
+7. 性能与 `ncu` 剖析（待写）
 
 > 各篇正文由仓库 `code/flash-kda/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
