@@ -1065,3 +1065,98 @@ chunk 大小无关，`w64` 也≠重排后的 `w16`**（实测 `max_rel≈1.0`�
 - **优先级更新**：§11.5 第 (2) 步从「纯收益」细化为「B1 快 2.1–2.3×，但需 (i) 融一个 64 块重算 pass、
   (ii) 决定整链是否跟到 64」。在 (i)(ii) 落地前，第 (1) 步（吃原生 bf16）仍是唯一零算法改动的杠杆；
   第 (3) 步镜像 K2 warp specialization 依旧排最后。
+
+## 14. 把 16→64 re-chunk 恢复融成一个 Triton pass（P7-11）
+
+§13.5 把 P7-10 的硬伤定在「恢复本身」：torch 原型 `recover_operands_64` 用 ~2.0–5.7 ms 造 64-chunk
+操作数，比 B1 本体（10–187 µs）大一个多量级，且要求「必须像 K1 那样融成一个 Triton pass（数字为高估
+上界、待验证）」。本节兑现，并给出**不是上界、而是实测**的数字。新增 `harness/check_bwd_rechunk_pass.py`
+（输出 `harness/check_bwd_rechunk_pass.out.txt`，tf32 变体 `harness/check_bwd_rechunk_pass_tf32.out.txt`，
+空闲卡 `CUDA_VISIBLE_DEVICES=1`）。
+
+### 14.1 关键点：`P64` 不需要任何新的 16×16 求逆
+
+§13.1 只把「唯一需要新算的」记成了 `P64`；但 `L64` 的**对角 16×16 块恰好就是 K1 已在 16 块里求过逆的
+`L16`**——workspace 的 `INV` 字段即 $P16=(I+L16)^{-1}$（`docs/06` §6.2 已钉死 $Akk=P$）。于是
+$P64=(I+L64)^{-1}$ 用 **4×4 块前代**从 workspace `P16`（对角）与 6 个非对角块 $L_{ij}$ 直接拼出，与 FLA
+`merge_16x16_to_64x64_inverse_kernel`（`fla/ops/utils/solve_tril.py:200-344`）同构：
+
+$$
+P_{ii}=P_i,\quad
+P_{10}=-P_1L_{10}P_0,\quad
+P_{21}=-P_2L_{21}P_1,\quad
+P_{32}=-P_3L_{32}P_2,
+$$
+$$
+P_{20}=-P_2(L_{20}P_0+L_{21}P_{10}),\quad
+P_{31}=-P_3(L_{31}P_1+L_{32}P_{21}),\quad
+P_{30}=-P_3(L_{30}P_0+L_{31}P_{10}+L_{32}P_{20}).
+$$
+
+真正的新算只有 6 个非对角 $A_{ij}$ 与其 $\beta$ 掩码 $L_{ij}=A_{ij}\cdot\beta_j$（列 $u$）：
+
+$$
+A_{ij}=kd16_i\,\bigl(kr_j\cdot 2^{\,e_{ij}}\bigr)^{\!\top},\qquad
+e_{ij}=\sum_{s=j+1}^{i-1}G16_s\le 0 .
+$$
+
+把对偏移 $2^{e_{ij}}$（**恒 ≤0**）折进**更小的** $kr_j$ 因子，就绕开了 §13.4 坑 (1)「$ki16=kr\cdot2^{-G16}$
+溢 fp32」——任何中间量都被 $kr$ 界住，直接吃到 workspace 的 bf16 `kr`。$w64=P64\,\mathrm{diag}(\beta_t)\,kd64$
+（$kd64_j=kd16_j\cdot2^{off_j}$）。以上全部落进**一个** Triton kernel `_recover64_kernel`：grid
+`(NG, B*H)`，每 program 处理一个 64-group 的一个 head，把重标定（`qg/kg/g_cum64`）、6 个 $A_{ij}$、
+6 个 merge 式、4 段 `w` 一次算完。
+
+### 14.2 Part A：pass 产出 == torch 原型 & FLA fwd@64
+
+四组 case（含非整除 `T=250/513`、`g=0`），pass vs torch 原型（同一批 workspace 字段 + B0 门控）：
+
+| 量 | pass vs torch（fp32 代数） | pass vs FLA fwd@64 |
+|---|---|---|
+| `qg` | 8.05e-8 | 8.37e-3 |
+| `kg` | 7.77e-6 | 7.05e-3 |
+| `w` | 1.64e-2 | 1.10e-2 |
+| `g_cum` | 1.12e-7 | 5.91e-3 |
+
+`qg/kg/g_cum` 与 torch 原型到 1e-7~1e-6（同一条 fp32 代数，只差 `tl.dot` 的 ieee 舍入）；`w` 到 1.6e-2
+**不是 bug**：pass 的 $P64$ 对角块复用 **bf16 落盘的 `P16`**，与 §13/P7-10 记的 `w` 1.7e-2 同源；对
+FLA fwd@64 反而只 1.1e-2。全部落 bf16 底噪，**含非整除 T**。
+
+### 14.3 Part C：把 pass 操作数喂 bf16 B1@64（端到端）
+
+直接拿 pass 产出的 64 操作数喂 P7-9 的 bf16-mma B1 核（`BT=64`）与 FLA `dhu`@64 对拍：
+
+| 梯度 | 最坏 max_rel（4 组 case） |
+|---|---|
+| `dh` | 1.44e-2 |
+| `dv2` | 1.87e-3 |
+| `dh0` | 1.20e-2 |
+
+与 P7-10 在 **torch 原型操作数**上得到的结果同阶（dh 1.55e-2／dv2 1.87e-3／dh0 1.44e-2）——证明融成
+pass 后语义未变，整条「workspace → 恢复 → B1@64」端到端仍落 bf16 底噪（含 `T=250/513` 非整除、`g=0`）。
+
+### 14.4 Part B：性能——恢复不再是 ~ms 的硬伤
+
+| case | pass dev (ieee) | pass dev (tf32) | torch 原型 full | pass/torch |
+|---|---|---|---|---|
+| T=512 H=4 | 41.2 µs | 17.2 µs | 2482.7 µs | **0.12** |
+| B2 T=1024 H=8 | 117.7 µs | 62.9 µs | 2693.1 µs | **0.11** |
+| B8 T=2048 H=8 | 952.8 µs | 491.9 µs | 5627.8 µs | **0.25** |
+| T=250 H=3 非整除 | 175.5 µs | 16.2 µs | 2146.9 µs | **0.15** |
+
+（`pass dev` = 仅 `_recover64_kernel` 的 CUPTI device 时间；`torch full` = `recover_operands_64` 的
+wall。）**kernel 比 torch 原型快 4–9×**（0.11–0.25×）。把 `tl.dot` 的 `input_precision` 从 `ieee` 换
+`tf32` 再快 ~2.5×（量表列），Part C 的 `dh/dv2/dh0` 逐位不变（操作数反正要 round 到 bf16 再进 B1）。
+`pass wall`（298.8/300.6/1420.2/328.1 µs）比 `dev` 高一个量级的差，来自本研究里仍在 torch 侧做的
+**gather/`permute`/`b0_gate`/G16 前缀和**；真实集成中这些融进 K1 落盘与 B0 门控重算 kernel，故 `dev`
+才是 kernel 的贡献口径（同 §9「host 税」的教训）。
+
+### 14.5 结论与下一步
+
+- **兑现 P7-10 的「融成 pass」**：16→64 恢复从 torch 原型的 ~2.0–5.7 ms 降到 kernel-only 数十~数百 µs
+  （ieee 41–953 µs、tf32 16–492 µs），**相对 B1@64 已不是硬伤**；§13 记的「2.0–3.7 ms」确系 torch
+  逐算子 + `linalg.solve` 的 host/库开销，非算法成本。
+- **设计上仍守住「复用 K1 workspace」**：pass 只读 workspace 六个字段 + B0 门控，$P64$ 的对角块直接
+  复用落盘的 $P16$，**不重算任何 16×16 求逆**，也不碰 q/k 原始张量。
+- **局限 / 下一步**：(a) `w` 精度被 **bf16 的 `P16`** 顶到 1.6e-2，若要更准需让 K1 落盘 fp32 `INV`（或
+  重算对角块）；(b) §13.5 的 (ii) 仍未解——整链 B2/B3 还在 16 块上跑，要把整条反向端到端跟到 64 得让
+  B2/B3 一并重组（或 B1@64 额外吐子块 `dS`），这是把本节 kernel 真正接进生产反向的前提。

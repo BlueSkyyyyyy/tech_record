@@ -176,7 +176,11 @@ B3（`intra`，`docs/06` §6.7 P6-5）**均已做成最小可运行 Triton kerne
 FlashKDA K1 当场写的 workspace `kGTotal` 对到 1.6e-5~8.1e-5），四条支路全覆盖；且 P6-8（`06` §6.10）
 已把整条链**架在 FlashKDA 自己的 K1 workspace 上端到端跑通**（六项梯度对 autograd 最坏 6.4e-3）。
 剩余的是把最小 kernel 工程化为 CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、
-`CHUNK=16`），属更大工程，留待有明确需求时再做。
+`CHUNK=16`），属更大工程，留待有明确需求时再做。**B1 的 CHUNK=16 粒度损失**已由 P7-10 通过
+「从 16-chunk workspace 免重算恢复 64-chunk 操作数」消掉（B1@64 快 2.1–2.3×，但 torch 原型恢复 ~ms 是
+硬伤）；**P7-11**（`docs/07` §14）把该恢复融成**单个 Triton pass**（对角块复用落盘 $P16$、只新算 6 个
+非对角 $A_{ij}$ + 4×4 块前代合并 + $w64$），kernel-only 降到 **41–953 µs（ieee）/ 16–492 µs（tf32）**、
+为 torch 原型的 **0.11–0.25×**，B1@64 端到端仍落 bf16 底噪——恢复不再是相对 B1 的硬伤。
 
 **反向性能（`docs/07` §10 P7-7 + §11 P7-8 更正）**：把上面那条 workspace 驱动反向链和
 `torch.autograd` 穿 `chunk_kda` 在统一口径（`wall`+CUPTI `dev`）下比，**只计反向**。四组 shape 实测
