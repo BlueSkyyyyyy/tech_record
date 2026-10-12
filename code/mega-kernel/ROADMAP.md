@@ -552,6 +552,28 @@
       - 所有成功 case `max|out−ref|=1.56e-02`（bf16 容差内）；`Total tasks` 163/166/170/178 随 batch
         递增、events 恒 37。判据：C1 在多算子图成立（判据十二/十三/十四见 §12.5）。**本轮新增实验。**
 
+### P27 手工 mega-kernel 先例精读（`docs/10-megakernel-precedents.md`）
+
+- [x] **P27-1** 把 MPK 反复转引、但本专题此前只作转引的两个**手工 mega-kernel 先例**回到一手资料：
+      （a）**FlashMoE**（`arXiv:2506.04667`，NeurIPS '25；代码 `github.com/osayamenja/FlashMoE`）——
+      首个把**分布式 MoE 一整个算子段**融进单常驻 kernel（§1 **Table 1**：1 launch vs 最多 550），
+      §3 actor 模型（Processor/Subscriber/Scheduler，OS 块 4 warp）+ §3.1 tile 级统一 task（每 task 一个
+      `__device__` 函数）+ §3.2 对称张量布局的非阻塞 NVSHMEM（**Theorem 3.1** write-write conflict-free、
+      temporal buffering `2r=4×`、§3.2.1 in-place padding）；§4 结果 SM 利用率 **93.17%**（vs DeepEP 14%）、
+      8 卡延迟最高 **6.4×**、吞吐 **17.7 MTokens/s（5.7×）**、overlap **4×**、128 experts 领先 **6.6×**
+      （全程 FP32 对基线 FP16）；§5 自陈局限（工程复杂度、期待 compiler/DSL）。
+      （b）**Spector 等 Llama-1B megakernel**（Hazy Research 博客 2025-05-27 *Look Ma, No Bubbles!*；
+      代码 `github.com/HazyResearch/Megakernels`）——把**整个 Llama-1B 前向 ~100 算子**融进单 kernel，
+      三条 stall 对上三类损失（512 block/148 SM → 80 SM 空转；H100 stream launch **2.1 µs** / graph
+      **1.3 µs**；PDL `cudaGridDependencySynchronize` 太粗）；三套机制（设备内解释器 + 每 SM 指令序列 /
+      **SMEM 分页 13×16 KiB** / global 计数器细粒度依赖，MLP 分 4 chunk），H100 **<1 ms**、B200 **<680 µs**、
+      比 vLLM ~2.5×、78% 带宽，B200 600 µs 分解（激活 250 / 计算 200 / 等权重 30 / 同步 40 / 杂项 80）。
+      与 DeepGEMM / MPK 逐维对照表（四者均满足 C1–C5；分野=融合范围段级/整图 × 调度手工/自动；段级 T4
+      内部另有静态↔动态光谱）。见 `docs/10-megakernel-precedents.md`（新文档，§6 关键坐标含真实链接）。
+      配套博客 post `mega-kernel-11-precedents`（weight 12）并更新 `mega-kernel-00-index` 目录第 11 项。
+      **纯资料分析（两个先例分别需 8×H100+NVSHMEM 多进程 / 完整 Llama 权重与编译链，本机不具备），
+      本轮无新实验**；相关机制实测交叉引用 `docs/04` §1/§9/§14/§16/§17。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -574,8 +596,15 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P26-1 完成（1/1），本专题 P0–P26 全部完成**。P26-1 在 §11 的 clean
-  scheduler-first 构建上把 `docs/09` 的端到端延迟从单算子推进到 **4 算子 DAG 单 megakernel**
+- 当前进度：**P27-1 完成（1/1）**。本轮新建 `docs/10-megakernel-precedents.md`（**纯资料分析**）+ 博客
+  post `mega-kernel-11-precedents`（weight 12）并更新 `mega-kernel-00-index` 目录第 11 项：把 MPK §2.2
+  （快照行 325–344）与 §8（行 1851–1862）反复转引、但本专题此前只作转引的两个**手工 mega-kernel 先例**
+  回到一手资料——**FlashMoE**（`arXiv:2506.04667`，NeurIPS '25；§1 Table 1：1 launch vs ≤550、§3 actor
+  + tile task + Theorem 3.1 非阻塞 NVSHMEM、§4 SM 利用率 93.17%/8 卡 6.4×）与 **Llama-1B megakernel**
+  （Hazy Research 2025-05-27；~100 算子单 kernel、H100 <1 ms/B200 <680 µs、SMEM 分页 + global 计数器）。
+  与 DeepGEMM/MPK 逐维对照（四者均满足 C1–C5，分野=融合范围 × 手工/自动）。**本轮无新实验**，相关机制
+  实测交叉引用 `docs/04` §1/§9/§14/§16/§17。此前 **P26-1 完成（1/1），P0–P26 全部完成**。P26-1 在 §11 的
+  clean scheduler-first 构建上把 `docs/09` 的端到端延迟从单算子推进到 **4 算子 DAG 单 megakernel**
   （`docs/09` §12，`harness/mpk_latency_multi.py/.sh` + `harness/mpk_latency_multi{,_config}.out.txt`）：
   多算子延迟 41.5–49.6 µs、比单算子只慢 ~1.2×，相对 kernel-per-operator 从单算子 1.38× 升到
   **3.5–4.8×**，并记录快照 `linear_swapAB_hopper.cuh:71` 的 **batch≤16 编译期硬约束**。
@@ -671,7 +700,8 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：全专题收尾（P0–P26 全部完成）**。P26-1 已在 clean scheduler-first 构建上把端到端延迟
+- **下一步：全专题收尾（P0–P27 全部完成）**。P27-1 已把 MPK 转引的两个手工 mega-kernel 先例（FlashMoE、
+  Llama-1B megakernel）回到一手资料（`docs/10`，纯资料分析）。P26-1 已在 clean scheduler-first 构建上把端到端延迟
   从单算子推进到 4 算子 DAG（`docs/09` §12），**兑现下面的可选方向③**。P25-1 已构建 + launch +
   **收敛 + 正确性 + 端到端延迟**，并且「不收敛」根因已由 `docs/09` §11 钉死：**cuda-gdb attach**
   证据（挂起时只有 `worker_kernel` 常驻、spinning 在取 task 的 `ld_acquire`；`scheduler_kernel`
@@ -731,6 +761,25 @@
   - **局限**：未把根因收敛到某条 load/store 内存序；端到端延迟仍未测（只测正确性+收敛/挂起）。
     下一步候选：`compute-sanitizer --tool racecheck` 抓竞争、把自旋换成 `__nanosleep` 退避验证纯时序、
     向 MPK 上游核对 `f9eb70c` worker 抢跑路径。**不构成对上游的 bug 判定**。P25-1 仍记 `[~]`。
+- **本轮（P27-1）**：新建 `docs/10-megakernel-precedents.md`（手工 mega-kernel **先例精读**，
+  **纯资料分析、无新实验**）+ 博客 post `mega-kernel-11-precedents`（weight 12）并更新
+  `mega-kernel-00-index` 目录第 11 项。补齐本专题此前只作**转引**的一手材料：MPK §2.2（快照行 325–344）
+  与 §8（行 1851–1862）点名的两个手工 mega-kernel——**(a) FlashMoE**（`arXiv:2506.04667`，NeurIPS '25，
+  代码 `github.com/osayamenja/FlashMoE`）：§1 Table 1「单 MoE 层 1 launch vs COMET 33 / Megatron-CUTLASS
+  85 / Megatron-TE 261 / +DeepEP 432 / DeepSpeedMoE 550」，§3 actor 模型（Processor/Subscriber/Scheduler，
+  OS 块 4 warp）+ §3.1 统一 task（每 task 一个 `__device__` 函数）+ §3.2 对称张量布局的非阻塞 NVSHMEM
+  （**Theorem 3.1** write-write conflict-free、temporal buffering `2r=4×`、§3.2.1 in-place padding），
+  §4 结果 **SM 利用率 93.17%**（vs DeepEP 14%）、8 卡延迟最高 **6.4×**、吞吐 **17.7 MTokens/s（5.7×）**、
+  overlap **4×**、128 experts **6.6×**（全程 FP32 对基线 FP16），§5 局限（工程复杂度、期待 compiler/DSL）；
+  **(b) Llama-1B megakernel**（Hazy Research 博客 2025-05-27 *Look Ma, No Bubbles!*，代码
+  `github.com/HazyResearch/Megakernels`）：整图 ~100 算子单 kernel，三条 stall（512 block/148 SM→80 SM
+  空转；H100 stream launch **2.1 µs**/graph **1.3 µs**；PDL `cudaGridDependencySynchronize` 太粗）、三套
+  机制（设备内解释器 + 每 SM 指令序列 / **SMEM 分页 13×16 KiB** / global 计数器细粒度依赖、MLP 分 4 chunk），
+  结果 H100 **<1 ms**、B200 **<680 µs**、比 vLLM ~2.5×、78% 带宽，B200 600 µs 分解（激活 250/计算 200/
+  等权重 30/同步 40/杂项 80）。§3 与 DeepGEMM/MPK **逐维对照表**：四者均满足 C1–C5，分野=融合范围
+  （段级/整图）× 调度（手工/自动），段级 T4 内部另有静态（DeepGEMM/Llama 指令）↔动态（FlashMoE actor）
+  光谱；两篇先例的自陈局限正是 MPK 编译器路线的立足点。§6 给出可核对的真实链接与 MPK 快照行号。
+  相关机制实测交叉引用 `docs/04` §1/§9/§14/§16/§17。**本轮无新实验。**
 - **本轮（P26-1）**：`docs/09-mpk-build.md` 新增 **§12**「多算子 megakernel 的端到端延迟」——新建
   `harness/mpk_latency_multi.py`（4 算子 DAG 单 megakernel + batch 扫描 + torch kernel-per-operator
   参照）、运行器 `harness/mpk_latency_multi.sh`（clean 绕过 `harness/mpk_sched_first.patch`，**不动
