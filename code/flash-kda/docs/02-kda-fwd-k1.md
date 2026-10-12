@@ -272,12 +272,117 @@ max abs $\approx 2.5\times10^{-3}\!\sim\!5.9\times10^{-3}$——与 bf16 输入�
 对近共线 key（$|L|$ 接近 1）的构造，fp64 仍 $\le5.6\times10^{-17}$，bf16 量化 $\approx1.7\times10^{-3}$，
 没有 Neumann 级数那种放大。这验证了求逆例程的代数（`utils.cuh:213–369`）确实产出块内注意力矩阵的逆。
 
-> 优化细节（smem union 尺寸、`__launch_bounds__`、`ex2.approx`/`tanh.approx` 的选择理由、
-> 前代求逆的精度取舍）留到 **P2-2**；workspace 逐字段字节数与 host 对齐留到 **P2-3**（本文已给出
-> 对应行号）。K2 递推见第 3 篇。
+> workspace 逐字段字节数与 host 对齐留到 **P2-3**（本文 §9 已给出对应行号）。K2 递推见第 3 篇。
 
-## 11. 下一步
+## 11. 关键优化逐条量化（P2-2）
 
-- **P2-2** 关键优化逐条量化（union 省多少 smem、近似指令误差）。
-- **P2-3** workspace 布局逐字段与 `get_workspace_size` 对齐。
+本节把 §5–§8 提到的几处「为什么这么写」全部换成**本机实测数字**。探针：
+`harness/smem_probe.cu`（编译期 `sizeof`/`cosize`）、`harness/approx_probe.cu`（近似指令误差）、
+`harness/check_inv_precision.py`（求逆精度路径对比）、以及对已编译 `.so` 的
+`cuobjdump -res-usage`（真实寄存器/占用）。原始输出见同目录 `*.out.txt`。
+
+### 11.1 smem union 到底省了多少
+
+用 `smem_probe.cu` 打印 `K1Layouts<128,16>` 各布局的 `cosize`（`fwd_kernel1.cuh:5–42`）：
+
+| 缓冲 | 布局 | cosize | 字节 |
+|---|---|---|---|
+| `q`,`k` | `QKLayout` bf16 $16{\times}128$ | 2048 | 4096 各 |
+| `g` | `GLayout` fp32 $16{\times}128$ | 2048 | 8192 |
+| `k_decayed`,`q_decayed`,`k_inv` | `MMALayout` bf16 $16{\times}128$ | 2048 | 4096 各 |
+| `L` | `LF32Layout` fp32 $16{\times}16$ | 256 | 1024 |
+| `INV`,`Mqk` | `LMLayout` bf16 $16{\times}16$ | 256 | 512 各 |
+| `beta` | `BetaSmemLayout` bf16 32 | 32 | 64 |
+| `dt_bias`,`g_total` | `GTotalLayout` fp32 128 | 128 | 512 各 |
+
+- **Phase A（`q,k,g`）** = `2·4096 + 8192` = **16384 B**；
+- **Phase B（`k_dec,q_dec,k_inv,L,INV,Mqk`）** = `3·4096 + 1024 + 2·512` = **14336 B**；
+- 两者 union 后取 **max = 16384 B**，即省 **14336 B ≈ 14 KB**——正是 `fwd_kernel1.cuh:56`
+  注释里的「~14KB」。
+- 还有两个小 union：`g_bf16`/`k_restored` 各 4096 B，省 4096；`dt_bias`/`g_total` 各 512 B，省 512。
+- 若完全不做 union，总和 = `16384 + 14336 + 4096 + 64 + 4096 + 512 + 512` = **39936 B**；
+  实测 `sizeof(SharedStorageK1<128,16>)` = **21248 B**（含 128B 对齐填充与 barrier）。
+  即 **union 共省 18688 B ≈ 18.25 KB**，smem 单块从 39 KB 压到 **21.2 KB**。
+
+省这 18 KB 直接决定了 §11.2 的占用率：不做 union 时单块 39 KB，SM 的 228 KB 只放得下 5 块；
+做了之后 `8 × 21248 = 169984 B = 166 KB`，才够 8 块。
+
+### 11.2 `__launch_bounds__(256,8)`：占满 SM
+
+`fwd_kernel1.cuh:120` 写死 `__launch_bounds__(NumThreads, 8)`（`NumThreads=256`），
+第二个参数是**每 SM 最少 8 个 CTA**。在 H100（sm90）上逐项核对（`fwd_launch.cu:149–172`）：
+
+| 约束 | 上限（sm90 每 SM） | 8 CTA 需求 | 满足 |
+|---|---|---|---|
+| 线程 | 2048 | `8 × 256 = 2048` | 恰好占满 |
+| smem | 228 KB | `8 × 21248 B = 166 KB` | ✓ |
+| 寄存器 | 65536 | `65536 / 2048 = 32`/线程 | 编译器按此封顶 |
+
+实测（`cuobjdump -res-usage` 对已编译 `.so`，`harness/k1_res_usage.out.txt`）K1 的两个
+varlen 变体均为 **`REG:32 STACK:0 LOCAL:0`**——正好压在 32 寄存器上限、**零 spill**。这说明
+`__launch_bounds__` 的寄存器约束对 K1 不痛：K1 只有 2 个 warp 做 MMA（§6），其余 6 个 warp
+主要搬数据/求逆，寄存器压力本就不大；用 ILP 换满占用率（8 CTA/SM = 100%）是对的——K1 是
+**访存延迟受限的短 kernel**（单次 TMA load、无 pipeline，§0），高占用才能在等 TMA 时切到别的
+CTA。（对比 K2 是长 kernel、warp specialization，寄存器达 74–80，第 3 篇讲。）
+
+### 11.3 `ex2.approx` / `tanh.approx` 的误差：可以忽略
+
+`harness/approx_probe.cu` 在 sm90 上对 2×10⁶ 个点与双精度参照对比
+（`harness/approx_probe.out.txt`）：
+
+| 指令（出处） | 测试范围 | max abs | max rel |
+|---|---|---|---|
+| `ex2_approx_ftz_f32`（`utils.cuh:38`） | $x\in[-30,0]$ | $1.14\times10^{-7}$ | $1.42\times10^{-7}$ |
+| `tanh.approx.f32`（`utils.cuh:44`） | $x\in[-30,30]$ | $7.63\times10^{-6}$ | $9.88\times10^{-6}$ |
+| `sigmoid_tanh_approx_f32`（`utils.cuh:50`） | $x\in[-10,10]$ | $3.85\times10^{-6}$ | $8.77\times10^{-3}$ |
+
+`sigmoid` 的 max rel 大是因为小 $x$ 处 $\sigma\to0$、分母极小，看 **abs** 更公平：全区间
+$\le 3.85\times10^{-6}$。真正要关心的是**门控衰减乘子的端到端误差**
+$\text{decay}=2^{\,\text{gate\_scale}\cdot\sigma(x)}$（kernel 路径用 `ex2_approx(gate_scale * sig_approx(x))`，
+`fwd_kernel1.cuh:321–323,453`）：
+
+| `lower_bound`（`gate_scale = lb·log₂e`） | max abs | max rel |
+|---|---|---|
+| −1.0 | $3.54\times10^{-6}$ | $3.85\times10^{-6}$ |
+| −2.0 | $6.53\times10^{-6}$ | $7.71\times10^{-6}$ |
+| −5.0 | $1.31\times10^{-5}$ | $1.93\times10^{-5}$ |
+
+即衰减乘子的相对误差 $\lesssim2\times10^{-5}$，比 bf16 表示 $q/k$ 本身的舍入（~$4\times10^{-3}$）
+**小两个数量级**，所以这两处近似是「免费」的。注意 `ex2` 是 **base-2**：`gate_scale` 在 host
+侧已经乘过 $\log_2 e$（`flash_kda.cpp:128`），kernel 里一条 `ex2.approx` 就够，省掉换底乘法。
+
+### 11.4 前代求逆的精度取舍：为什么值得
+
+`harness/check_inv_precision.py` 对同一 seed $L$ 比较四条路径（golden = fp64 `inv(I+L)`）：
+
+- **A** 纯公式：fp32 前代 + fp32 Schur 合并（无量化上界）；
+- **B** **kernel 实际路径**：seed $L$、8×8 前代全程 fp32，仅 HMMA 输入 $P/M$ 量化 bf16（`utils.cuh:254–296`）；
+- **C** 反面：把 seed 也量化 bf16 再求逆；
+- **D** 旧实现：fp16/bf16 **Neumann 级数** $(I-L)(I+L^2)(I+L^4)(I+L^8)$。
+
+| 场景 | A fp32 | B kernel | C bf16 seed | D Neumann fp16 | D Neumann bf16 |
+|---|---|---|---|---|---|
+| 随机 $\lvert L\rvert\sim0.3$ | $7\times10^{-8}$ | $3.6\!\sim\!5.9\times10^{-3}$ | 同 B | $5.6\!\sim\!7.0\times10^{-4}$ | $3.1\!\sim\!4.2\times10^{-3}$ |
+| 完全共线 $c=0.7$ | $2.5\times10^{-8}$ | $7.8\times10^{-4}$ | $7.8\times10^{-4}$ | $1.7\times10^{-2}$ | $1.6\times10^{-1}$ |
+| 完全共线 $c=0.9$ | $3.0\times10^{-8}$ | $1.6\times10^{-3}$ | $1.6\times10^{-3}$ | $\mathbf{5.8\times10^{-1}}$ | $\mathbf{2.8}$ |
+
+三个结论：
+
+1. **纯公式（A）在 fp32 下就到 $10^{-8}$**——Schur 补 + 前代的代数严格正确（§8、`check_inv_identity`）。
+2. **误差来源是「HMMA 输入量化 bf16」，不是 seed**（B≈C，且都 ~$10^{-3}\sim10^{-2}$，与 bf16 的
+   $\varepsilon\approx7.8\times10^{-3}$ 同量级）。把 seed 保 fp32 的价值在「完全共线 c=0.9」之外的
+   强相关场景才显现（C 略大于 B）；这里 A/B 的差距说明真正买精度的是**把 seed 留在 fp32 走前代**，
+   而不是把合并也做成 fp32。
+3. **Neumann 在强共线时崩溃**（D 在 $c=0.9$ 时 fp16 误差 $0.58$、bf16 误差 $2.83$，而 $\lvert X^{-1}\rvert_{\max}=1$）：
+   $L^k$ 的元素是 $\binom{14}{7}c^7\approx1.7\times10^3$，在 16-bit 里相减灾难性相消。
+   前代 + Schur **从不构造 $L^k$**，所以对近共线 key 也稳——这正是 `utils.cuh:194–212` 注释里
+   「Neumann powers reach ~1e3 there」的实测确认。
+
+代价（取舍）：为了用 bf16 HMMA 做合并，$P/M$ 被量化 bf16，使结果误差从 $10^{-8}$ 退到
+$\sim10^{-3}$；但比块内求逆的**用途**（$k^{\text{inv}}$ 只做 bf16 衰减变体、$M_{qk}$ 只做输出投影，
+§5/§6）所需要的精度已经足够，且避免了 Neumann 的失稳。
+
+## 12. 下一步
+
+- **P2-3** workspace 布局逐字段与 `get_workspace_size` 对齐（本文 §9 已列行号）。
 - **P3** K2 精读（warp specialization + 八个 Phase）。

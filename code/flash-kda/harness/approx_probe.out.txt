@@ -1,0 +1,9 @@
+ex2.approx  x in [-30,0] : max abs=1.140e-07  max rel=1.417e-07
+tanh.approx x in [-30,30]: max abs=7.626e-06  max rel=9.881e-06
+sigmoid_tanh_approx x in [-30,30]: max abs=3.852e-06  max rel=1.000e+00
+sigmoid_tanh_approx x in [-10,10]: max abs=3.852e-06  max rel=8.773e-03
+
+decay = 2^(gate_scale*sigmoid(x)), x in [-10,10]
+  lower_bound=-1.0: max abs=3.540e-06  max rel=3.852e-06
+  lower_bound=-2.0: max abs=6.532e-06  max rel=7.705e-06
+  lower_bound=-5.0: max abs=1.306e-05  max rel=1.926e-05

@@ -51,7 +51,7 @@
 
 - [x] **P2-1** 阶段拆解：TMA 载入 → QK L2 norm → gate 激活+cumsum → decay_apply → L/Mqk →
       8×8 fp32 前代求逆 + 16×16 bf16-HMMA 合并 → 写 workspace；贴行号。
-- [ ] **P2-2** 关键优化逐条：smem union 复用、`__launch_bounds__(256,8)`、base-2 `ex2.approx`、
+- [x] **P2-2** 关键优化逐条：smem union 复用、`__launch_bounds__(256,8)`、base-2 `ex2.approx`、
       `tanh.approx` sigmoid、前代求逆的精度取舍。
 - [ ] **P2-3** workspace 布局逐字段解释（对上 `flash_kda.cpp:get_workspace_size`）。
 
@@ -109,7 +109,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0 全部完成，P1 全部完成，P2-1 完成。
+- 当前进度：P0 全部完成，P1 全部完成，P2-1/P2-2 完成。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -125,9 +125,21 @@
     varlen 二分、beta 8 对齐、列并行前缀和免同步、Schur 补求逆代数。新增 `harness/check_inv_identity.py`
     （纯 PyTorch 复现 8×8 前代+Schur 补），实测 fp64 max_abs≤2.2e-16、bf16 量化≈2.5e-3~5.9e-3
     （`harness/check_inv_identity.out.txt`）。新增博客 post `flash-kda-02-fwd-k1` 并更新 index 目录。
-- **下一步：P2-2** 关键优化逐条量化：smem union 省多少 smem（估算 ~14KB）、`__launch_bounds__(256,8)`、
-  base-2 `ex2.approx` 与 `tanh.approx` sigmoid 的误差、前代求逆精度取舍。随后 P2-3 workspace 布局逐字段
-  对上 `flash_kda.cpp:get_workspace_size`。反向（P5）可用已装好的 FLA `chunk_kda` autograd 作对拍参照。
+  - P2-2：`docs/02` 新增 §11「关键优化逐条量化」，全部本机实测：
+    (a) smem union：`harness/smem_probe.cu` 编译期 `cosize`/`sizeof` 实测 Phase A=16384B、
+    Phase B=14336B、union 省 14336B(≈14KB)，含另两处小 union 共省 18688B；`sizeof(SharedStorageK1)=21248B`。
+    (b) `__launch_bounds__(256,8)`：对已编译 `.so` 跑 `cuobjdump -res-usage`（`harness/k1_res_usage.out.txt`）
+    实测 K1 两变体均 `REG:32 STACK:0 LOCAL:0`（正好压 32 寄存器上限、零 spill）；8×256=2048=max 线程、
+    8×21248=166KB≤228KB，即 8 CTA/SM 占满。
+    (c) `ex2.approx`/`tanh.approx`：`harness/approx_probe.cu`（`approx_probe.out.txt`）实测 ex2 max rel
+    1.4e-7、tanh max abs 7.6e-6、sigmoid max abs 3.9e-6；门控衰减端到端 max rel≤1.9e-5（lb=-5），
+    比 bf16 q/k 舍入(~4e-3)小两个量级。
+    (d) 前代求逆精度：`harness/check_inv_precision.py`（`check_inv_precision.out.txt`）对比 A纯fp32/B kernel
+    (seed fp32+bf16 合并)/C bf16 seed/D Neumann(fp16/bf16)：完全共线 c=0.9 时 Neumann fp16=0.58、bf16=2.83
+    而 kernel 路径仅 1.6e-3，量化确认「放弃 Neumann 级数」的稳定性收益。
+- **下一步：P2-3** workspace 布局逐字段字节数对上 `flash_kda.cpp:get_workspace_size`（`3*16*128*2 + 128*4 +
+  2*16*16*2`）与 `utils.cuh:64–77` 的 `WorkspaceSizes`，核对 host 侧指针切分（`fwd_launch.cu:64–71`）与
+  §9 的 6 个 TMA store 偏移一致。随后进入 P3（K2 精读）。反向（P5）可用已装好的 FLA `chunk_kda` autograd 对拍。
 
 ## 阻塞
 

@@ -1,0 +1,12 @@
+torch 2.12.0a0+0291f960b6.nv26.04.48445190
+seed=0 rand |L|~0.3          |X^-1|max=   1.000  A(fp32)=7.00e-08  B(kernel,bf16 merge)=3.62e-03  C(bf16 seed)=3.62e-03  D(neumann fp16)=5.57e-04  D(neumann bf16)=3.05e-03
+seed=1 rand |L|~0.3          |X^-1|max=   1.564  A(fp32)=6.62e-08  B(kernel,bf16 merge)=5.94e-03  C(bf16 seed)=5.94e-03  D(neumann fp16)=6.96e-04  D(neumann bf16)=4.24e-03
+seed=2 rand |L|~0.3          |X^-1|max=   1.267  A(fp32)=6.46e-08  B(kernel,bf16 merge)=2.52e-03  C(bf16 seed)=4.10e-03  D(neumann fp16)=6.31e-04  D(neumann bf16)=4.10e-03
+
+seed=0 近共线 |L|~0.9           |X^-1|max=   1.000  A(fp32)=2.06e-08  B(kernel,bf16 merge)=1.56e-03  C(bf16 seed)=1.56e-03  D(neumann fp16)=2.01e-04  D(neumann bf16)=2.89e-03
+seed=1 近共线 |L|~0.9           |X^-1|max=   1.000  A(fp32)=4.12e-08  B(kernel,bf16 merge)=1.56e-03  C(bf16 seed)=1.56e-03  D(neumann fp16)=2.82e-04  D(neumann bf16)=1.56e-03
+seed=2 近共线 |L|~0.9           |X^-1|max=   1.000  A(fp32)=1.92e-08  B(kernel,bf16 merge)=1.87e-03  C(bf16 seed)=3.16e-03  D(neumann fp16)=1.61e-04  D(neumann bf16)=2.19e-03
+
+完全共线 c=0.5                   |X^-1|max=   1.000  A(fp32)=0.00e+00  B(kernel,bf16 merge)=0.00e+00  C(bf16 seed)=0.00e+00  D(neumann fp16)=0.00e+00  D(neumann bf16)=0.00e+00
+完全共线 c=0.7                   |X^-1|max=   1.000  A(fp32)=2.53e-08  B(kernel,bf16 merge)=7.81e-04  C(bf16 seed)=7.81e-04  D(neumann fp16)=1.72e-02  D(neumann bf16)=1.55e-01
+完全共线 c=0.9                   |X^-1|max=   1.000  A(fp32)=3.04e-08  B(kernel,bf16 merge)=1.57e-03  C(bf16 seed)=1.56e-03  D(neumann fp16)=5.76e-01  D(neumann bf16)=2.83e+00
