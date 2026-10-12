@@ -367,7 +367,47 @@ T512 H4 → **191 µs**（`num_warps=4, num_stages=1, BV=32`）。这是「一�
 V 维只分 32 一路」的朴素实现，远未优化（FLA `dhu` 在 §3.6 的 profiler 里 ~14 µs）；
 它的价值是**先把契约和误差底噪钉死**，为后续 CUTLASS/TMA 版 B1（镜像前向 K2 的八个 Phase）
 提供可对拍的 golden。局限：BT 需整除 `tl.arange` 且 `K=128` 固定（本 kernel 未做 K 的 64 分段，
-故不是 §5.2 的最终形态）；pad 行用 mask 置零，正确性已由两组可整除配置覆盖，**非整除 T 待验证**。
+故不是 §5.2 的最终形态）。
+
+### 6.5 非整除 T 的边界：P6-2 的「待验证」已关闭（`harness/check_bwd_dhu_boundary.py`）
+
+§6.4 末尾留了「非整除 T 待验证」。补测后结论：**kernel 本体本来就是 T-general，只有 host 侧
+`E_tot` 记账假设了整除**——这是一处真实的、此前未被覆盖的边界 bug。
+
+**根因**：P6-2 的两个 wrapper 用 `.view(B, NT, BT, H, K)` 把逐 token 张量折叠成按块视图。
+当 $T\not\equiv 0\pmod{BT}$ 时这个 reshape 直接抛
+`RuntimeError: shape '[1,4,64,2,128]' is invalid for input of size 64000`（$T=250$：尾巴 58 行）。
+也就是说尾块的 **$E^{\text{tot}}$ 根本没被寻址过**。而 FLA 的前向量是**不给 pad** 的
+（`g_cum` 形状 $[B,T,H,K]$，$T=250$ 实测 size $=250\cdot H\cdot K$），FLA 自己的 `dhu`
+靠 mask 处理非整除 T，是合法参照。
+
+**修法**：$E^{\text{tot}}_c = 2^{g\_cum[\min((c{+}1)BT,T)-1]}$——按块的**最后一个有效 token** 取
+（`g_cum` 是块内局部 cumsum，最后有效行天然等于该块有效行的门控和），尾块 pad 行直接丢弃。
+kernel 侧不用改：`m_t = o_t < T` 已把每个 token load 置零，pad 行对 `tl.dot` 贡献为 0。
+
+**实测**（fp32，Triton↔FLA `max_rel`；`harness/check_bwd_dhu_boundary.out.txt`）：
+
+| config | NT | tail | `dh` | `dv2` | `dh0` |
+|---|---|---|---|---|---|
+| T=256 BT=64（可整除，回归 P6-2） | 4 | 0 | 4.60e-5 | 2.07e-5 | 1.82e-5 |
+| T=250 BT=64 | 4 | 58 | 4.60e-5 | 2.07e-5 | 1.82e-5 |
+| T=100 BT=64 | 2 | 36 | 9.12e-8 | 2.74e-5 | 7.17e-6 |
+| T=250 BT=32 | 8 | 26 | 1.41e-5 | 3.78e-5 | 2.75e-5 |
+| B2 T=130 H3 BT=64 | 3 | 2 | 8.56e-6 | 1.96e-5 | 1.46e-5 |
+| T=513 BT=64 | 9 | 1 | 2.49e-5 | 2.48e-5 | 1.84e-5 |
+| T=31 BT=32（单块） | 1 | 31 | 0 | **0** | 1.07e-7 |
+
+- 可整除的 T=256 与 P6-2 数字**逐位相同**（4.60e-5/2.07e-5/1.82e-5）——修法是纯 no-op，不改变
+  已有结论。
+- 非整除各例 `dh/dv2/dh0` 都落在 **1e-8~4e-5**，与可整除同量级（tf32 底噪），说明尾块处理正确。
+- 单块 `T=31`：`dh≡0`（$NT=1$ 时 `dh[0]=dS=0`，无跨块伴随），`dv2` **逐位等于** FLA（$dU=k^{rest}{\cdot}0+dv$，
+  tf32 下 $0$ 加法精确）——这是尾块 mask 的最干净证据。
+
+**关于「K 的 64 分段」**：查 FLA `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64` 的
+`grid=(cdiv(V,BV), N*HV)`（`fla/ops/common/chunk_delta_h.py` 的 `chunk_gated_delta_rule_bwd_dhu`），
+它**按 V 分块、K 不占 grid**，`K=64/128/192/256` 是同 program 内 `o_k1..o_k4` 的**展开**（`K>64` 才
+多算一组），属寄存器压力取舍而非正确性约束。本 kernel 以 `K=128` 单块实现，与其数学等价，故
+「K 的 64 分段」不是待补的正确性缺口（若做目标卡 CUDA B1，K 轴如何切是性能问题，见 §5.2 设计）。
 
 ## 7. 小结与下一步
 
@@ -380,7 +420,8 @@ V 维只分 32 一路」的朴素实现，远未优化（FLA `dhu` 在 §3.6 的
   「B3 intra / B2 dqkg / B1 state-adjoint」三个 GEMM kernel 落地，B1 直接镜像前向 K2。
 - §6 已把 **B1 状态伴随**做成最小可运行 Triton kernel：与 FLA `dhu` 逐行同构，
   Triton↔FLA 实测 **1e-5**（tf32 底噪），并与 `src/kda_bwd_ref.py` 的 `dh0` 对到 ~3e-4；
-  状态伴随 bf16 存储的受控消融给出 **~2.5e-3** 的相对误差（回答了 §5.3 的待验证项）。
+  状态伴随 bf16 存储的受控消融给出 **~2.5e-3** 的相对误差（回答了 §5.3 的待验证项）；
+  §6.5 关闭「非整除 T」边界（尾块 `E_tot` 取最后有效 token，Triton↔FLA 仍 1e-8~4e-5）。
 
 下一步：
 

@@ -80,6 +80,9 @@
 - [x] **P6-1** FLA `chunk_kda` 提供 **Triton** 反向（非 CUDA）：逐 kernel 精读其 5 个 kernel 分解，
       并与 P5-4 的 chunked backward 逐式对照；同时基于 FlashKDA 前向 workspace 给出目标卡 CUDA 反向设计。
 - [x] **P6-2** （可选）在 `kernel_lab` 上写最小可运行反向 kernel（复刻状态伴随 `dhu`/B1）并与参考对拍。
+- [x] **P6-3** 关闭 P6-2 的「非整除 T」边界：定位 host 侧 `E_tot` 记账假设整除的 bug（尾块 58 行
+      未被寻址），改为按最后有效 token 取 $E^{tot}$；非整除 T 实测 Triton↔FLA 仍 1e-8~4e-5；
+      澄清「K 的 64 分段」是 FLA 同 program 内展开、非正确性约束。
 
 ### P7 性能与剖析（`docs/07-perf.md`）
 
@@ -117,7 +120,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P7-3/P7-4 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel 完成；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+- 当前进度：**P0–P8 全部完成 + P6-3/P7-3/P7-4 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）完成；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -204,7 +207,7 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P7-3/P7-4 补测**，进入收尾/维护。后续可选（有明确需求时再做）：更完整的
+- **下一步：专题 P0–P8 全部完成 + P6-3/P7-3/P7-4 补测**，进入收尾/维护。后续可选（有明确需求时再做）：更完整的
   CUTLASS/TMA 版反向 B1/B2/B3 工程化；P7-2 遗留的 nsys 流量拆分（P7-3 已用 ncu DRAM 计数替代、
   待验证 (b) 已关闭）与 K2 突破 2 CTA/SM 实验。
   - P7-4：`docs/07` 新增 §7「K1 那条 4/32 bytes/sector 的 global load 是谁」+ `harness/probe_k1_gload.sh`
@@ -290,6 +293,16 @@
     伴随可行**。**踩坑**：`dhu` 初始 `dS` 来自终态梯度 `dht`（此处为 0）而非初态 `h0`（`h0` 只进 B2 的 `detot`）；
     第一版误用 `h0`，指纹是「`dh0` 对但**仅最末块**的 `dh`/`dv2` 全错」。计时：107 µs（T256 H2）/191 µs
     （T512 H4），朴素实现、未优化，价值在钉死契约与误差底噪（非整除 T、K 的 64 分段**待验证**）。
+  - P6-3：新增 `docs/06` §6.5 + `harness/check_bwd_dhu_boundary.py`（`harness/check_bwd_dhu_boundary.out.txt`），
+    关闭 P6-2 的「非整除 T」待验证。**根因**：kernel 本体已 T-general（`m_t=o_t<T` 把 pad 行置零），
+    只有 host wrapper 用 `.view(B,NT,BT,H,K)` 折块、假设 T 整除 BT；$T=250$ 尾巴 58 行时直接
+    `RuntimeError: shape '[1,4,64,2,128]' invalid for input of size 64000`，即**尾块的 $E^{tot}$ 从未被寻址**。
+    FLA 前向量不给 pad（`g_cum` $[B,T,H,K]$），其 `dhu` 靠 mask 处理非整除 T，是合法参照。**修法**：
+    $E^{tot}_c=2^{g\_cum[\min((c+1)BT,T)-1]}$（块内局部 cumsum，末有效行即该块门控和）。实测 fp32
+    Triton↔FLA：T=256（可整除）**逐位回归 P6-2**（dh 4.60e-5/dv2 2.07e-5/dh0 1.82e-5）；非整除
+    T=250/100/513、B2T130H3、T250BT32 六组 `dh/dv2/dh0` 全落 **9e-8~4e-5**；单块 T=31 时 `dh≡0`、
+    `dv2` 逐位等于 FLA（$dU=k\cdot0+dv$，tf32 下 0 精确）；另检 FLA `dhu` 的 `grid=(cdiv(V,BV),N*HV)`，
+    **K 不占 grid**、`K=64/128/…` 是同 program 内 `o_k1..o_k4` 展开→「K 的 64 分段」非正确性缺口。
   - P5-4：新增 `docs/05` §7「反向分块化（chunked backward）推导」+ `src/kda_bwd_ref.py::kda_chunked_backward`
     + `harness/check_bwd_chunked.py`（`harness/check_bwd_chunked.out.txt`）。把逐 token adjoint（式 5.2–5.8）
     折叠成块内形式：输出支路 $S_{in}+=qd^\top\bar o$、状态更新支路 $S_{in}+=E^{tot}\odot\bar S_{out}$、

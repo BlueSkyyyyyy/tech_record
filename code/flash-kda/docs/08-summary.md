@@ -154,5 +154,7 @@ B1 已做成最小可运行 Triton kernel：与 FLA `dhu` 逐行同构、实测 
 P7-4：唯一标量 load = `fwd_kernel1.cuh:258` 的 `A_log_ptr[head_idx]`，是 warp 内地址一致的**广播**
 标量读，`Sectors Global == Ideal`、`Excessive=0`，`4/32` 为启发式误报，DRAM 占比 <2%）；~~K2 的 L2 流量中
 workspace 读 vs $o$/state 写占比~~（**已解决**，`docs/07` §6 P7-3：K2 读 ≈ 75% workspace + 22.5% `v`，
-写 ≈ `o` 为主，DRAM 读与闭式预测吻合 1.000–1.010）；K2 突破 2 CTA/SM 后 L2 墙是否后移；完整的
-CUTLASS/TMA 版 B1/B2/B3 属更大工程。
+写 ≈ `o` 为主，DRAM 读与闭式预测吻合 1.000–1.010）；~~B1 状态伴随 kernel 的「非整除 T」边界~~（**已解决**，
+`docs/06` §6.5 P6-3：尾块 `E_tot` 按最后一个有效 token 取，非整除 T 下 Triton↔FLA `max_rel` 1e-8~4e-5，
+可整除回归逐位不变；「K 的 64 分段」经查是 FLA 同 program 内展开、非正确性约束）；K2 突破 2 CTA/SM 后
+L2 墙是否后移；完整的 CUTLASS/TMA 版 B1/B2/B3 属更大工程。

@@ -1,0 +1,71 @@
+==============================================================================
+'before' (P6-2 wrappers, `.view`-based): non-divisible T
+==============================================================================
+  RuntimeError: shape '[1, 4, 64, 2, 128]' is invalid for input of size 64000
+  -> `.view` cannot absorb the 58-row tail; the tail's `E_tot` was never
+     addressed at all.  The fix gathers `E_tot[c]` at the last *valid* row.
+
+##############################################################################
+config: B=1 T=256 H=2 K=128 V=128 BT=64 BV=32 NT=4 tail=0 dtype=fp32
+  FLA dh shape=(1, 4, 2, 128, 128)  ours dh shape=(1, 4, 2, 128, 128)
+  FLA dv2 shape=(1, 256, 2, 128)  ours dv2 shape=(1, 256, 2, 128)
+  dh   torch vs FLA                  max_abs=9.328e-05  max_rel=1.124e-03  ref_max=8.301e-02
+  dh   triton vs FLA                 max_abs=3.815e-06  max_rel=4.595e-05  ref_max=8.301e-02
+  dv2  triton vs FLA                 max_abs=1.790e-06  max_rel=2.068e-05  ref_max=8.656e-02
+  dh0  triton vs FLA                 max_abs=1.354e-06  max_rel=1.824e-05  ref_max=7.423e-02
+
+##############################################################################
+config: B=1 T=250 H=2 K=128 V=128 BT=64 BV=32 NT=4 tail=58 dtype=fp32
+  FLA dh shape=(1, 4, 2, 128, 128)  ours dh shape=(1, 4, 2, 128, 128)
+  FLA dv2 shape=(1, 250, 2, 128)  ours dv2 shape=(1, 250, 2, 128)
+  dh   torch vs FLA                  max_abs=9.328e-05  max_rel=1.124e-03  ref_max=8.301e-02
+  dh   triton vs FLA                 max_abs=3.815e-06  max_rel=4.595e-05  ref_max=8.301e-02
+  dv2  triton vs FLA                 max_abs=1.790e-06  max_rel=2.068e-05  ref_max=8.656e-02
+  dh0  triton vs FLA                 max_abs=1.354e-06  max_rel=1.824e-05  ref_max=7.423e-02
+
+##############################################################################
+config: B=1 T=100 H=2 K=128 V=128 BT=64 BV=32 NT=2 tail=36 dtype=fp32
+  FLA dh shape=(1, 2, 2, 128, 128)  ours dh shape=(1, 2, 2, 128, 128)
+  FLA dv2 shape=(1, 100, 2, 128)  ours dv2 shape=(1, 100, 2, 128)
+  dh   torch vs FLA                  max_abs=9.386e-05  max_rel=1.148e-03  ref_max=8.174e-02
+  dh   triton vs FLA                 max_abs=7.451e-09  max_rel=9.115e-08  ref_max=8.174e-02
+  dv2  triton vs FLA                 max_abs=2.136e-06  max_rel=2.737e-05  ref_max=7.807e-02
+  dh0  triton vs FLA                 max_abs=5.323e-07  max_rel=7.170e-06  ref_max=7.423e-02
+
+##############################################################################
+config: B=1 T=250 H=2 K=128 V=128 BT=32 BV=32 NT=8 tail=26 dtype=fp32
+  FLA dh shape=(1, 8, 2, 128, 128)  ours dh shape=(1, 8, 2, 128, 128)
+  FLA dv2 shape=(1, 250, 2, 128)  ours dv2 shape=(1, 250, 2, 128)
+  dh   torch vs FLA                  max_abs=1.373e-03  max_rel=1.654e-02  ref_max=8.301e-02
+  dh   triton vs FLA                 max_abs=1.170e-06  max_rel=1.409e-05  ref_max=8.301e-02
+  dv2  triton vs FLA                 max_abs=3.274e-06  max_rel=3.782e-05  ref_max=8.656e-02
+  dh0  triton vs FLA                 max_abs=2.044e-06  max_rel=2.754e-05  ref_max=7.423e-02
+
+##############################################################################
+config: B=2 T=130 H=3 K=128 V=128 BT=64 BV=32 NT=3 tail=2 dtype=fp32
+  FLA dh shape=(2, 3, 3, 128, 128)  ours dh shape=(2, 3, 3, 128, 128)
+  FLA dv2 shape=(2, 130, 3, 128)  ours dv2 shape=(2, 130, 3, 128)
+  dh   torch vs FLA                  max_abs=8.976e-05  max_rel=8.763e-04  ref_max=1.024e-01
+  dh   triton vs FLA                 max_abs=8.764e-07  max_rel=8.555e-06  ref_max=1.024e-01
+  dv2  triton vs FLA                 max_abs=1.728e-06  max_rel=1.955e-05  ref_max=8.836e-02
+  dh0  triton vs FLA                 max_abs=1.196e-06  max_rel=1.459e-05  ref_max=8.195e-02
+
+##############################################################################
+config: B=1 T=513 H=4 K=128 V=128 BT=64 BV=32 NT=9 tail=1 dtype=fp32
+  FLA dh shape=(1, 9, 4, 128, 128)  ours dh shape=(1, 9, 4, 128, 128)
+  FLA dv2 shape=(1, 513, 4, 128)  ours dv2 shape=(1, 513, 4, 128)
+  dh   torch vs FLA                  max_abs=1.259e-04  max_rel=1.305e-03  ref_max=9.649e-02
+  dh   triton vs FLA                 max_abs=2.399e-06  max_rel=2.486e-05  ref_max=9.649e-02
+  dv2  triton vs FLA                 max_abs=2.486e-06  max_rel=2.484e-05  ref_max=1.001e-01
+  dh0  triton vs FLA                 max_abs=1.337e-06  max_rel=1.836e-05  ref_max=7.286e-02
+
+##############################################################################
+config: B=1 T=31 H=1 K=128 V=128 BT=32 BV=32 NT=1 tail=31 dtype=fp32
+  FLA dh shape=(1, 1, 1, 128, 128)  ours dh shape=(1, 1, 1, 128, 128)
+  FLA dv2 shape=(1, 31, 1, 128)  ours dv2 shape=(1, 31, 1, 128)
+  dh   torch vs FLA                  max_abs=0.000e+00  max_rel=0.000e+00  ref_max=0.000e+00
+  dh   triton vs FLA                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=0.000e+00
+  dv2  triton vs FLA                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.690e-02
+  dh0  triton vs FLA                 max_abs=7.451e-09  max_rel=1.072e-07  ref_max=6.951e-02
+
+DONE
