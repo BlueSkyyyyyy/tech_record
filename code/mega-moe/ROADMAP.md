@@ -897,6 +897,40 @@
        ~11336us（本机无 Fabric Manager 关了 NVLS，~73 GB/s）。配套博客
        `content/posts/mega-moe-40-testing-harness`（索引页新增第 40 篇）。
 
+### P31 增量（opt-in，前面各篇「操作数长什么样」的来源：生成器）
+
+- [x] **P31-1** **DeepGEMM 测试的操作数/布局生成器 `tests/generators.py`**（608 行；被
+       `test_bf16/fp8_fp4/einsum/attention/mega_moe/layout…` 全部 `import`）。
+       第 40 篇拆了判对/计时基座（`deep_gemm/testing/`），但每篇里出现的 `major_a/major_b`、
+       `grouped_layout`、`use_psum_layout`、`ks_cpu` 到底长什么样从没讲清——本篇补上
+       **「测试怎么造操作数」**，它是 kernel 操作数契约的可执行参考。**纯 Python、非 kernel，
+       H100 真机可跑真机实测**。
+       → `docs/41-deepgemm-test-generators.md`（真实行号核对）：三层测试栈（test → generators →
+       `utils/math.py` 参考量化器 / `deep_gemm/testing/`）；三个基础类型（`KernelType`
+       `:18-30`/`get_kernel_types :101-105` sm90 只 1D2D、sm100 只 1D1D；`MajorTypeAB :33-41`/
+       `get_major_ab :108-115`；`QuantConfig :44-86`——legacy 前向 recipe `None`、wgrad `(1,1,128)`、
+       B recipe 在 `is_fp4_b or is_wgrad` 时退化成 `(1,gran_k)`、`max_diff` 按精度 1e-3/1e-2/2e-2、
+       `get_list_from_dtype` 仅 SM100 追加 FP8 配置）。**mk-alignment 的全局副作用**：枚举器
+       `:258/:284/:297` 每次迭代都 `set_mk_alignment_for_contiguous_layout`（实测末值 384），
+       test 必须显式设；sm90=128 / sm100=256（`heuristics/runtime.hpp:57-64`）。**operand major
+       物理编码** `cast_fp8_fp4_with_major :318-326`：FP8 MN-major=`.T.contiguous().T`（换 stride，
+       `(128,1)`→`(1,64)`，转置后逐位一致）、FP4 MN-major=`transpose_packed_fp4(x).T`（重打包，
+       `(M,K/2)→(K,M/2).T`，因 K 配对变 MN 配对无法只靠 stride），**SF 与 major 无关**。
+       **三种 grouped 布局**：`generate_m_grouped_contiguous :378-419`（contiguous=逐行组号+`-1`
+       padding+padding 行置零 `:406`；PSUM=长度 G 逻辑结束偏移）、`generate_m_grouped_masked
+       :446-485` + 两个转换器 `layout_masked_to_psum :422-431`（gap 故意不初始化）/
+       `masked_valid_mask_to_psum :434-443`（gap 必须 False）；PSUM 语义等价
+       `build_psum_layout_from_ks :542-548`（`align(prev)+k`）。**K 轴分组** `generate_k_grouped_
+       contiguous :551-608`：contiguous=`host_ks`（物理 K）/PSUM=`logical_group_ends`，A/B 仅组
+       开头 logical_k 行非零，K-major data 是 1D 展平，**SF 用 `per_channel_cast_to_fp8`
+       （`(K/gran_k, MN)`，沿收缩维 K）**、每组 SF 行独立对齐补零，变体枚举含空组/单组。H100 实测
+       `harness/exp_test_generators.py`（+`.sh`/`.out.txt`）八组 **41 PASS / 0 FAIL**：枚举器普查
+       （normal 42/m-contig 16/m-masked 32/k-contig 7/transpose 60/sf_layout 108/k-sf 48/psum-sf 48）、
+       alignment 副作用、major 编码三条、三种布局语义全对；**四个真实 SM90 kernel 端到端对拍**
+       （`fp8_fp4_gemm_nt` / `m_grouped_..._contiguous` / `..._masked` / `k_grouped_..._contiguous`）
+       `calc_diff` 6.7e-4/6.8e-4/6.8e-4/2.2e-4 全部 < `max_diff`。SM100 专属分支仅分析。
+       配套博客 `content/posts/mega-moe-41-test-generators`（索引页新增第 41 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -921,8 +955,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P30 各增量完成（P15-1…P29-1、P30-1）。**
-  本轮 P30-1：新建 `docs/40-deepgemm-testing-harness.md`（+`harness/exp_testing_harness.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P31 各增量完成（P15-1…P30-1、P31-1）。**
+  本轮 P31-1：新建 `docs/41-deepgemm-test-generators.md`（+`harness/exp_test_generators.{py,sh,out.txt}`）
+  ——补上前面 0~30 篇每个测试里 **「操作数到底长什么样」** 的来源 `tests/generators.py`（608 行，
+  所有 `tests/test_*.py` 都 import）。它是 kernel 操作数契约的**可执行参考**：① 三个基础类型
+  （`KernelType`/`MajorTypeAB`/`QuantConfig`，后者的 `get_recipes` 把 legacy 前向给 `None`、wgrad
+  给 `(1,1,128)`、B 侧在 `is_fp4_b or is_wgrad` 时退化成 `(1,gran_k)`）；② **operand major 的物理
+  编码**（FP8 MN-major=`.T.contiguous().T` 换 stride、FP4 MN-major=`transpose_packed_fp4(x).T`
+  重打包、SF 与 major 无关）；③ **三种 grouped 布局**（contiguous 逐行组号 + `-1` padding、
+  masked 3D+`masked_m`、PSUM 长度 G 逻辑结束偏移 = `align(prev)+k` 递推）；④ **K 分组**用
+  `per_channel_cast_to_fp8`（`(K/gran_k,MN)`）、每组 SF 行独立对齐补零。另发现一个真坑：
+  **枚举器会改写全局 mk-alignment**（`set_mk_alignment_for_contiguous_layout` 藏在每次迭代里，
+  实测末值 384），故 test 必须先显式设；sm90=128 / sm100=256。**纯 Python 非 kernel，H100 真机**
+  八组 **41 PASS / 0 FAIL**：枚举器普查（normal 42/m-contig 16/m-masked 32/k-contig 7/…）、
+  major 三条、三种布局语义全对；**四个真实 SM90 kernel** 用生成器操作数对拍 `calc_diff`
+  6.7e-4/6.8e-4/6.8e-4/2.2e-4 全部 < `max_diff`。行号全部核对过。配套博客
+  `content/posts/mega-moe-41-test-generators`（索引页新增第 41 篇）。
+  上一轮 P30-1：新建 `docs/40-deepgemm-testing-harness.md`（+`harness/exp_testing_harness.{py,sh,out.txt}`）
   ——补上前面 0~29 篇**全部数字的来源**：DeepGEMM 的**测试基座** `deep_gemm/testing/`
   （每个 `tests/test_*.py` 都 `import *`）。三件套：① **`calc_diff`**（`numeric.py:5-11`）——实测它
   **恒等于归一化平方误差** `‖x−y‖²/(‖x‖²+‖y‖²)`（升 fp64 保证判据干净），由此得：对称、∈[0,2]、
@@ -1171,21 +1220,26 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P30 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+- **下一步**：P0~P31 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
   P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子、
   P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel、P23-1 DeepJIT 编译/缓存/加载/发射管线、
   P24-1 SM 局部域探针与内存域分配、P25-1 SM100 FP8/FP4 稠密 GEMM 主 kernel、
   P26-1 SM100 BF16 主 kernel 与 `set_tc_util`、P27-1 测试参考量化器 FP8/FP4 block-scale 语义、
   P28-1 PTX 原语底座（内存序/原子/搬运/warp 通信）、P29-1 legacy A100 Triton grouped GEMM 家族、
-  P30-1 测试基座 `deep_gemm/testing/` 的 `calc_diff`/`bench_kineto`/`uneven_all_gather`）。
+  P30-1 测试基座 `deep_gemm/testing/` 的 `calc_diff`/`bench_kineto`/`uneven_all_gather`、
+  P31-1 操作数/布局生成器 `tests/generators.py`）。
   后续若继续（均为增量、非承诺）：
+  ⑯ **操作数生成器已补齐（P31-1）**：`tests/generators.py` 的枚举器 / `QuantConfig` / operand
+    major 物理编码 / 三种 grouped 布局 / PSUM 递推 / K 分组 per-channel SF + 按组零填充；纯 Python，
+    H100 真机 41 PASS，四个真实 SM90 kernel 端到端对拍。可再补：`tests/generators.py` 的
+    `enumerate_batched_syrk_symm`（Muon 形状）与 `deep_gemm/legacy/` 的生成器交叉、
+    `deep_gemm/testing/bench.py` 在真实 SM100 上的 `set_tc_util` 影响（需目标卡）。
   ⑮ **legacy Triton MoE grouped GEMM 已补齐（P29-1）**：`deep_gemm/legacy/` 的四个 kernel
     （dgrad `m_grouped`/`a_fused_m`、wgrad `a_fused_k`/`b_fused_k`）与「显式索引 gather」语义、
     与现代 C++（`grouped_layout`+对齐）的对照表；Triton 架构无关。**测试基座已补齐（P30-1）**：
     `deep_gemm/testing/`（`calc_diff` 判据 = 归一化平方误差、`bench`/`bench_kineto` 计时）与
     `deep_gemm/utils/dist.py` 的 `uneven_all_gather`/`init_dist`；`deep_gemm/testing/utils.py` 的
-    `test_filter`/`ignore_env`。可再补：`tests/generators.py` 的操作数/布局生成器总览、
-    `deep_gemm/testing/bench.py` 在真实 SM100 上的 `set_tc_util` 影响（需目标卡）。
+    `test_filter`/`ignore_env`。**操作数生成器已补齐（P31-1）**：`tests/generators.py`。
   ⑭ **「稠密 GEMM 主 kernel」矩阵已补齐（P26-1）**：SM90 FP8/1D1D-1D2D（P22）、SM90 BF16（P19）、
    SM100 FP8/FP4（P25）、SM100 BF16（P26）四格齐全；并拆清 `set_tc_util` 这一从 Python 直通模板参数的
    tensor-core 节流开关（只有 SM100 BF16 实现）。可再补 SM100 BF16 的 `kSwapAB` dgrad 分支数值细节，

@@ -1,0 +1,158 @@
+NVIDIA H100 80GB HBM3, 9.0
+arch_major = 9 (H100=9)
+deep_gemm  = ~/github/DeepGEMM/deep_gemm/__init__.py
+generators = ~/github/DeepGEMM/tests/generators.py
+初始 mk-alignment（任何枚举器调用之前） = 128
+
+==============================================================================
+A. 枚举器普查：arch 条件分支如何缩小候选集
+==============================================================================
+get_kernel_types(bf16)      = ['KernelNoSF']
+get_kernel_types(e4m3)      = ['Kernel1D2D']
+get_ue8m0_usage(1D1D)       = False
+get_ue8m0_usage(1D2D)       = False
+get_psum_layout_usage()     = (True, False)
+QuantConfig.get_list_from_dtype(bf16)  = [None]
+QuantConfig.get_list_from_dtype(e4m3)  = [(128, 128, False, False)]
+enumerate_normal(e4m3): 42 cases
+  kernel_type 分布: {'Kernel1D2D': 28, 'Kernel1D1D': 14}
+  m_fwd_list 见 129 行 ^, 例 m=1 的 case 数 = 7
+enumerate_m_grouped_contiguous(e4m3): 16 cases
+enumerate_m_grouped_masked(e4m3): 32 cases
+enumerate_k_grouped_contiguous(e4m3): 7 cases
+enumerate_transpose(): 60 cases
+enumerate_sf_layout(): 108 cases
+enumerate_k_grouped_sf_layout(): 48 cases
+enumerate_k_grouped_psum_sf_layout(): 48 cases
+  [side-effect] 枚举器会改写全局 mk-alignment（进程初始 128）：normal 后=128, k_contiguous 后=128, sf_layout 后=128, k_grouped_sf_layout 后=384
+  [PASS] enumerate_k_grouped_contiguous 把全局 alignment 改成 k_alignment 候选值 
+  m-contiguous (major_a, major_b) 组合: [('KMajor', 'KMajor')]
+  [PASS] sm90 fp8 m-contiguous 的 B 恒 KMajor（无 MNMajor） 
+  k-contiguous 样例 case: (8, 768, 2048, <MajorTypeAB.KMajor: 0>, <MajorTypeAB.KMajor: 0>, [154, 147, 121, 109, 128, 120, 149, 112], [256, 256, 128, 128, 128, 128, 256, 128], 128, 128, 128, False, True, torch.float32)
+
+==============================================================================
+B. QuantConfig：recipe / max_diff 语义
+==============================================================================
+legacy config = (128, 128, False, False), is_legacy=True
+  前向 recipe (is_wgrad=False) = (None, None, None)
+  wgrad recipe (is_wgrad=True) = ((1, 1, 128), None, None)
+  [PASS] legacy 前向 recipe 全 None（走默认 (1,128,128)） 
+  [PASS] legacy wgrad recipe = (1,1,128) 
+fp4/fp4 config recipes fwd = (None, (1, 32), (1, 32))
+fp4/fp4 config recipes wgrad = (None, (1, 32), (1, 32))
+  [PASS] fp4/fp4 wgrad 时 B recipe 退化为 (1,gran_k)（K 分组需 per-channel） 
+legacy fp8 max_diff = 0.001
+fp8/fp4 max_diff    = 0.01
+fp4/fp4 max_diff    = 0.02
+  [PASS] max_diff 随精度提高而收紧 (fp4fp4>fp8fp4>fp8fp8) 
+
+==============================================================================
+C. mk-alignment：默认 / theoretical（C++ 侧 arch 判定）+ set/get
+==============================================================================
+进程初始值 INITIAL_ALIGN                             = 128
+get_mk_alignment_for_contiguous_layout()（已还原）   = 128
+get_theoretical_mk_alignment_for_contiguous_layout()= 128
+  [PASS] sm90 进程初始 alignment == 理论值 == 128 
+  [PASS] set/get roundtrip 
+（SM100 上 theoretical 恒 256，见 heuristics/runtime.hpp:57-64，本机仅验证 sm90=128）
+
+==============================================================================
+D. operand major 编码：fp8 用 .T.contiguous().T，fp4 用 transpose_packed_fp4
+==============================================================================
+K-major fp8 data shape/stride = (64, 128) / (128, 1) contig=True
+MN-major fp8 data shape/stride= (64, 128) / (1, 64) contig=False
+  [PASS] MN-major fp8 data 与 K-major 的转置逐位一致（storage 是 (k,m)） 
+  [PASS] fp8 SF 与 major 无关 
+K-major fp4 packed shape = (64, 64) = (M, K/2)
+MN-major fp4 packed shape= (32, 128) = (M/2, K)
+  [PASS] transpose_packed_fp4 把 (M,K/2) 变 (K,M/2) 
+  [PASS] MN-major fp4 == transpose_packed_fp4(K-major).T 
+  [PASS] MN-major fp4 可由 transpose_packed_fp4(f_mn.T) 无损还原 
+
+==============================================================================
+E. generate_normal：ref_d 公式 + 真实 SM90 kernel 端到端
+==============================================================================
+ref_d dtype = torch.bfloat16, d dtype = torch.bfloat16
+fp8_fp4_gemm_nt  vs ref_d  calc_diff = 6.722e-04
+  [PASS] 真实 SM90 fp8 kernel 与 generator ref_d 一致 diff=6.722e-04
+
+==============================================================================
+F. generate_m_grouped_contiguous：三种 grouped 布局语义
+==============================================================================
+
+-- use_psum_layout=False: m=768, grouped_layout.shape=(768,) dtype=torch.int32, valid=531/768
+   grouped_layout(逐行组号): 唯一值=[-1, 0, 1, 2, 3], padding(-1) 行数=237
+  [PASS] contiguous grouped_layout ∈ [-1, G) 
+  [PASS] contiguous padding 行恰好是 valid_mask 之外的行 
+  [PASS] contiguous 有效行组号单调不减 
+
+-- use_psum_layout=True: m=768, grouped_layout.shape=(4,) dtype=torch.int32, valid=531/768
+   grouped_layout(每组逻辑结束偏移) = [154, 403, 633, 749]  (alignment=128, m=768)
+  [PASS] PSUM grouped_layout 单调不减 
+  [PASS] PSUM align(末个结束偏移)==m 
+  [PASS] PSUM valid_mask == [align(prev_end), end) 区间 
+  [PASS] PSUM grouped_layout == build_psum_layout_from_ks(actual_ms) 
+  [PASS] contiguous A padding 行量化后全零 
+
+m_grouped_fp8_fp4_gemm_nt_contiguous vs ref_d (valid rows) calc_diff = 6.829e-04
+  [PASS] 真实 SM90 m-grouped kernel 与 generator ref_d 一致 diff=6.829e-04
+
+==============================================================================
+G. generate_m_grouped_masked + PSUM 转换（layout_masked_to_psum）
+==============================================================================
+masked: a.shape=(3, 4096, 128) (G,max_m,k), masked_m=[241, 230, 190], valid=661
+psum_m=[241, 486, 702]
+psum a.shape=(768, 128), valid=661
+  [PASS] masked valid 总数 == psum valid 总数 
+  [PASS] 逐组 masked 有效行 == psum 对应区间（gap 跳过） 
+
+m_grouped_fp8_fp4_gemm_nt_masked vs ref (valid) calc_diff = 6.847e-04
+  [PASS] 真实 SM90 masked kernel 与 generator ref_d 一致 diff=6.847e-04
+
+==============================================================================
+H. generate_k_grouped_contiguous：按组零填充 + PSUM + SF
+==============================================================================
+
+-- k-grouped psum=False: real_ks=[100, 200, 260, 300]
+   host_ks(对齐后)=[128, 256, 384, 384]  total_k=1152  grouped_layout=[128, 256, 384, 384]
+  [PASS] host_ks = align(real_ks, 128) 
+  [PASS] total_k = sum(host_ks) 
+  [PASS] contiguous grouped_layout == host_ks 
+
+-- k-grouped psum=True: real_ks=[100, 200, 260, 300]
+   host_ks(对齐后)=[128, 256, 384, 384]  total_k=1152  grouped_layout=[100, 328, 644, 1068]
+  [PASS] host_ks = align(real_ks, 128) 
+  [PASS] total_k = sum(host_ks) 
+   build_psum_layout_from_ks = [100, 328, 644, 1068]
+  [PASS] PSUM grouped_layout == build_psum_layout_from_ks 
+
+MN-major A data shape = (1152, 128) (total_k, mn)
+  [PASS] MN-major A 非零行恰为每组开头 logical_k 行（尾部 padding 全零） nonzero=860 expected=860
+  [PASS] PSUM A 仅在逻辑组区间内非零（gap 全零） 
+  [PASS] build_psum_layout_from_ks == align(prev)+k 递推 
+
+K-major SF shape=(128, 9)；预期 (mn, Σ ceil_div(host_k,128)) = (128, 9)
+  [PASS] K-major SF 列数 == Σ ceil_div(host_k, 128) 
+k_grouped_fp8_gemm_nt_contiguous vs ref_d calc_diff = 2.217e-04
+  [PASS] 真实 SM90 k-grouped kernel 与 generator ref_d 一致 diff=2.217e-04
+
+==============================================================================
+I. enumerate_k_grouped_contiguous_test_variants：空组/单组变体
+==============================================================================
+  variant[0] = [100, 200, 260, 300]
+  variant[1] = [0, 200, 260, 300]
+  variant[2] = [0, 0, 260, 0]
+  [PASS] variant[0] == 原 ks 
+  [PASS] variant empty 的首/末强制 [0, 非0] 
+  [PASS] single-group 变体恰有一个非零 
+
+==============================================================================
+J. transpose_packed_fp4 (K-major fp4 生成用)
+==============================================================================
+packed (64, 64) (M, K/2) -> transpose_packed_fp4 (128, 32) (K, M/2)
+  [PASS] transpose_packed_fp4: (M, K/2) -> (K, M/2) 
+
+==============================================================================
+总结: 41 PASS / 0 FAIL
+==============================================================================
+（架构无关，H100 sm90 真机运行；SM100 专属分支已标注未执行）
