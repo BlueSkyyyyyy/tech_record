@@ -266,6 +266,22 @@
       （无去中心化 worker/scheduler 调度）。**本轮新增实验**；对应当前「下一步」可选方向②/③之外的
       机制补测（损失一此前只有资料分析）。
 
+### P14 实验扩展 5：megakernel 的成本侧（`docs/04-experiments.md`）
+
+- [x] **P14-1** megakernel 的资源足迹代价：**寄存器被固定为各 task 类型所需的最大值**
+      （MPK §7 行 1740–1748 明确点名的唯一例外，此前仅资料分析）。
+      见 `docs/04-experiments.md` §8，源码 `src/megakernel_footprint.cu`，原始输出
+      `harness/megakernel_footprint.out.txt`（目标卡 H100/sm90，iters=30，G=528=4 block/SM，T=256，
+      轻输入 537 MB ≫ L2）。四个 Section：A 寄存器/占用率表（`fused_light<H>` 的 numRegs **恰等于**
+      `heavy_kernel<H>` = `max(light,heavy)`，无 spill）；B 轻路径代价扫描（同一轻工作，kernel 里带
+      重 task 就让带宽掉：H≤48→1.00×、H=64→**1.33×**（24 warp/SM）、H≥128→**2.29×**（8 warp/SM），
+      对应占用率 32→24→8）；C 时分复用场景（单 kernel 轻后重 vs 两次 launch：H=64→**1.27×**、
+      H=128→**1.79×**，账 = 轻阶段被降速部分 + 重阶段）；D SMEM 足迹 occupancy 敏感性（32 KB/block→
+      6 block/SM、160 KB→1）。核心结论：**异构 task 融合时，轻 task 因最重 task 的寄存器需求损失
+      1.33×–2.29× 访存带宽（占用率被拉低）**；MPK 用时分复用 + paged SMEM（§5.3 行 1313–1325）规避
+      了 SMEM 与计算资源，**唯寄存器不可分页**（§7 行 1748）——本节从正反两面量化印证该论断。
+      判据不变（C1–C3，无 C5）；是 megakernel 的**成本侧**度量，与 P5/P9/P13 收益侧互补。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -300,7 +316,9 @@
   两条尾巴，完成「下一步」可选方向②中最后一点）。
   **P13-1 单 kernel 内跨 task 软件流水（1/1）完成**（本轮新增，把此前只有资料分析的**损失一**
   实测出来，补齐 P5-2 §2.6 / §5.6 的未覆盖项）。
-  **本专题任务清单（P0–P13）全部完成**，无未完成子项。
+  **P14-1 megakernel 资源足迹代价（1/1）完成**（本轮新增，把 MPK §7「寄存器固定为各 task 最大值」
+  这条只有资料分析的**成本侧**局限量化出来，补齐 `docs/01` §5.8 / MPK §7 行 1740–1748）。
+  **本专题任务清单（P0–P14）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -349,13 +367,27 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P13 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
+- **下一步：无**（P0–P14 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
   **P10-1 完成 P5-1 §1.6「扫 persistent 网格大小」**；**P12-1 完成 P5-3 §3.6 / P10-1 §5.5「多 block
-  PDL occupancy 资源约束」**；**P13-1 完成 P5-2 §2.6 / §5.6「跨 tile software pipelining」的损失一实测**）；
+  PDL occupancy 资源约束」**；**P13-1 完成 P5-2 §2.6 / §5.6「跨 tile software pipelining」的损失一实测**；
+  **P14-1 完成 megakernel 成本侧「寄存器固定为各 task 最大值」实测**）；
   ③ ~~走读 `tasks/hopper/*.cuh` 单 task 内部实现~~（P11-1 完成）；剩「在容器内 `pip install -e .`
   构建 mirage sm90 路径并跑 `demo/qwen3/demo.py --use-mirage` 取本机 MPK 端到端数字」（构建成本高，未做）。
+- **本轮（P14-1）**：`docs/04-experiments.md` 新增 §8「megakernel 的资源足迹代价：寄存器被固定为各
+  task 最大值」——新建 `src/megakernel_footprint.cu` + `harness/megakernel_footprint.out.txt`（目标卡
+  H100/sm90，iters=30，G=528=4 block/SM，T=256，轻输入 537 MB ≫ L2）。构造「轻访存 task（占用率敏感）
+  + 重计算 task（H 个常驻寄存器）」并把两类编进同一 kernel，隔离出 MPK §7（行 1740–1748）点名的**唯一
+  例外——per-thread 寄存器固定为各 task 最大值**。四个 Section：A 寄存器/占用率表（**`fused_light<H>`
+  的 numRegs 恰等于 `heavy_kernel<H>` = `max(light, heavy)`**、无 spill）；B 轻路径代价扫描（同一 537 MB
+  轻访存，kernel 里带重 task 就让带宽 2589→1944→1132 GB/s：H≤48→**1.00×**、H=64→**1.33×**（24 warp/SM）、
+  H≥128→**2.29×**（8 warp/SM），对应占用率 32→24→8）；C 时分复用场景（单 kernel「轻后重」vs 两次 launch：
+  H=64→**1.27×**、H=128→**1.79×**，账 = `light_降速(0.474)+heavy(0.117)`≈0.583 与实测吻合）；D SMEM 足迹
+  occupancy 敏感性（32 KB/block→6 block/SM、100 KB→2、160 KB→1）。核心结论：**异构 task 融合时轻 task 因
+  最重 task 的寄存器需求损失 1.33×–2.29× 访存带宽（占用率被拉低、无 spill）**；MPK 用时分复用 + paged
+  SMEM（§5.3 行 1313–1325）规避了 SMEM 与计算资源，**唯寄存器不可分页**——本节从正反两面量化印证 §7 论断。
+  判据不变（C1–C3，无 C5）；是 megakernel 的**成本侧**度量，与 P5/P9/P13 收益侧互补。**本轮新增实验。**
 - **本轮（P13-1）**：`docs/04-experiments.md` 新增 §7「单 kernel 内跨 task 软件流水：把损失一测出来」——
   新建 `src/in_kernel_pipeline.cu` + `harness/in_kernel_pipeline.out.txt`（目标卡 H100/sm90，iters=30，
   G=132，T=256，E=8，输入 276 MB ≫ L2）。同一 kernel 内「`cp.async` 载入 chunk → R 轮 FMA 消费」依赖链，

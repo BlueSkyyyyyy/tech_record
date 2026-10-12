@@ -929,3 +929,152 @@ pipelining 把 task 运行时降 **1.2–1.3×**，甚至胜过 cuBLAS。线上�
 - 单卡、固定 `grid=#SM`、固定 `blockDim=256`；未扫 grid/blockDim，也未与 P12-1 的 occupancy
   约束叠加（多 block/SM 时常驻与流水的交互留待后续）。
 - 未用 profiler 分离「SMEM 读延迟」「cp.async 引擎占用」「syncthreads 成本」对 1.18× 天花板的贡献。
+
+## 8. megakernel 的资源足迹代价：寄存器被固定为各 task 最大值（P14-1）
+
+### 8.1 问题
+
+前面 P5/P9/P13 都在量 megakernel 的**收益**（省 launch、省中间张量 HBM 往返、回收跨 task 软件流水）。
+但 megakernel 有一项公认的**代价**：单个 kernel 必须在每个 SM 上容纳所有被融合算子的资源并集。
+MPK §7 Discussion「Resource footprint」（论文快照行 1740–1748）专门回应这个顾虑：
+
+> A common concern with mega-kernels is that a single kernel must reserve, on every SM, the
+> combined resources required by all fused operators. MPK avoids this issue: tasks are
+> **time-multiplexed** across SMs rather than statically partitioned, so each SM uses only the
+> resources required by the task it is currently executing（行 1741–1745）。Shared memory
+> follows the same pattern: the **paged abstraction**（§5.3）acquires and releases pages at task
+> granularity. **The main exception is per-thread register usage, which is fixed for the
+> mega-kernel at the maximum required across task types.**（行 1745–1748）
+
+即：MPK 用**时分复用**化解了「资源并集常驻」——SMEM 靠 **paged abstraction**（§5.3，快照行
+1313–1325）按 task 粒度申请/释放，不必按最大值常驻；**唯独 per-thread 寄存器不能规避**：一个
+megakernel 编出来的寄存器数是「所有 task 类型的最大值」，于是**所有 task——包括本来很轻的——都被
+按最重 task 的占用率运行**。这条代价此前在本专题只有资料分析（`docs/01` §5.8 的 8 条局限之一），
+本节把它在目标卡 H100 / sm90 上**量化**出来。
+
+### 8.2 方法
+
+程序 `src/megakernel_footprint.cu`（目标卡 H100 / sm90，原始输出
+`harness/megakernel_footprint.out.txt`）。`grid=528`（=4 block/SM @132 SM，让占用率真正起作用）、
+`blockDim=256`、轻输入 537 MB（≫ L2）、`iters=30`。三个角色：
+
+- **轻 task** `light_kernel`：纯访存（grid-stride 求和 + block 归约），访存受限，**占用率越高
+  带宽越高**（藏 HBM 延迟靠驻留 warp）。
+- **重 task** `heavy_kernel<H>`：`H` 个常驻寄存器做长 FMA 链（`H=16…192`），寄存器需求随 `H` 增大。
+- **融合 kernel** `fused_light_kernel<H>` / `fused_two_kernel<H>`：**同一个 kernel** 里同时含
+  轻、重两条路径（重路径用运行时 `heavy` 开关，取值 0 时只走轻路径），模拟 megakernel 把两类
+  task 编进一个 kernel。这样「同样的轻工作，唯一变量是这个 kernel 里有没有重 task」。
+
+四个 Section：A 寄存器/占用率表（`cudaFuncGetAttributes` + `cudaOccupancy…`）；B 轻路径代价扫描
+（`fused_light<H>` 只走轻路径 vs `light_kernel`）；C 时分复用场景（`fused_two<H>` 单 kernel 轻后重
+vs 两次 launch）；D shared memory 足迹的占用率影响（对照 MPK 的 paged SMEM）。
+
+### 8.3 结果
+
+**参照**：`light_kernel` 满占用（4 block/SM、32 warp/SM）读 537 MB = **0.2074 ms → 2589 GB/s**。
+
+**Section A：寄存器 / 占用率（T=256，regs/SM=65536）**
+
+| kernel | regs | spill | blocks/SM | warps/SM |
+|---|---|---|---|---|
+| `light_kernel` | 26 | 0 | 8 | 64 |
+| `heavy_kernel<32>` | 40 | 0 | 6 | 48 |
+| `heavy_kernel<64>` | 71 | 0 | 3 | 24 |
+| `heavy_kernel<128>` | 168 | 0 | 1 | 8 |
+| `heavy_kernel<192>` | 254 | 0 | 1 | 8 |
+| `fused_light<32>` | 40 | 0 | 6 | 48 |
+| `fused_light<64>` | 72 | 0 | 3 | 24 |
+| `fused_light<128>` | 168 | 0 | 1 | 8 |
+| `fused_light<192>` | 254 | 0 | 1 | 8 |
+
+> `fused_light<H>` 的寄存器数**恰好等于** `heavy_kernel<H>`——即 megakernel 的 per-thread 寄存器
+> 被抬到 `max(light=26, heavy=H)`，轻 task 完全继承重 task 的占用率。无 spill。
+
+**Section B：轻访存路径的代价（`fused_light<H>` heavy=0 vs `light_kernel`）**
+
+| H | light ms | fused ms | GB/s | 比率 |
+|---|---|---|---|---|
+| base | 0.2074 | 0.2074 | 2589.1 | 1.00× |
+| 16 | 0.2074 | 0.2080 | 2581.0 | 1.00× |
+| 32 | 0.2074 | 0.2079 | 2582.2 | 1.00× |
+| 48 | 0.2074 | 0.2080 | 2581.0 | 1.00× |
+| 64 | 0.2074 | 0.2762 | 1943.7 | **1.33×** |
+| 96 | 0.2074 | 0.2758 | 1946.7 | 1.33× |
+| 128 | 0.2074 | 0.4740 | 1132.7 | **2.29×** |
+| 144 | 0.2074 | 0.4743 | 1131.9 | 2.29× |
+| 192 | 0.2074 | 0.4744 | 1131.7 | 2.29× |
+
+**Section C：轻+重时分复用——单 kernel（fused_two）vs 两次 launch**
+
+| H | separate ms | fused ms | 比率 | heavy ms |
+|---|---|---|---|---|
+| 32 | 0.2387 | 0.2293 | 0.96× | 0.0308 |
+| 64 | 0.2671 | 0.3394 | **1.27×** | 0.0587 |
+| 128 | 0.3250 | 0.5829 | **1.79×** | 0.1172 |
+| 192 | 0.3784 | 0.6358 | 1.68× | 0.1708 |
+
+**Section D：shared memory 足迹的占用率影响（SMEM/SM=233472 B）**
+
+| smem/block | blocks/SM | smem used/SM |
+|---|---|---|
+| 0 KB | 8 | 0 KB |
+| 16 KB | 8 | 128 KB |
+| 32 KB | 6 | 192 KB |
+| 64 KB | 3 | 192 KB |
+| 100 KB | 2 | 200 KB |
+| 160 KB | 1 | 160 KB |
+| 220 KB | 1 | 220 KB |
+
+### 8.4 读法
+
+1. **寄存器足迹是 megakernel 一项真实、可测的代价。** Section B：同样的 537 MB 轻访存工作，
+   只要 kernel 里编进了一个重 task，轻 task 的带宽就从 2589 GB/s 掉到 1944（H=64）乃至
+   1132 GB/s（H≥128），**慢 1.33×–2.29×**；`H≤48` 时 `max(light,heavy)` 仍是轻 task 自己，
+   所以 1.00×。这个拐点正对 Section A 的 `fused_light` 寄存器/occupancy 台阶（32→24→8 warp/SM）。
+2. **它随「最重 task 的寄存器需求」单调上升，并在占用率见底后饱和。** H 从 64→128，occupancy
+   24→8 warp/SM，带宽再掉一档；H≥128 后 numRegs 撞到 254（sm90 上限 255）封顶，代价饱和在 2.29×。
+   Section A 证实无 spill——所以这不是溢出开销，纯粹是**占用率被重 task 拉低**。
+3. **时分复用的 megakernel 会为此付账，kernel-per-operator 不会。** Section C：把「轻后重」两阶段
+   合进单 kernel（模拟 MPK §7 行 1742 的时分复用），随 H 从 32→128 总时间比两次 launch 慢
+   **1.27×→1.79×**。账能对上：`separate ≈ light(0.207)+heavy`，`fused ≈ light_降速后(0.474, H=128)
+   +heavy(0.117)` ≈ 0.583，与实测 0.5829 吻合——**差值几乎全是轻阶段被寄存器拖慢的那部分**。
+   H=32 时 fused 反而略快（0.96×），因为占用率未受显著影响、单 kernel 省了一次 launch。
+4. **SMEM 与寄存器的分野正是 MPK §7 的论点（Section D）。** SMEM 足迹若按各 task 最大值常驻，
+   同样会把占用率从 8 block/SM 压到 1（32 KB/block 起就掉到 6，100 KB→2，160 KB→1）。
+   MPK 用 **paged SMEM**（§5.3）按 task 粒度申请/释放来规避这一项（§6.1 行 1460：H100 上
+   32 KB page → 每 SM 7 页）；**唯独寄存器无法分页**，只能固定为各 task 最大值——这就是本节的量化对象。
+
+### 8.5 与判据 / MPK / 生产案例的关系
+
+- **补齐 `docs/01` §5.8 / MPK §7（行 1740–1748）的「寄存器上限」局限**：P2-4 把它列为 8 条局限之一，
+  但只是资料分析。本节给出该局限在目标卡上的**量化**：异构 task 融合时，轻 task 的访存带宽可因
+  最重 task 的寄存器需求损失 **1.33×–2.29×（占用率 32→24→8 warp/SM）**；时分复用 megakernel 相对
+  kernel-per-operator 慢 **1.27×–1.79×**。
+- **对上 MPK §7「为什么只有寄存器是例外」**：MPK 的论证是「计算资源与 SMEM 都按 task 时分复用/分页，
+  所以不按并集常驻，唯寄存器例外」。Section D 用 occupancy API 复现了「SMEM 若按最大值常驻会压占用率」
+  这一前提，Section A/B 则验证「寄存器确实等于 max」——两条实验合起来**从正反两面印证了 §7 的论断**。
+- **对上 P12-1（多 block PDL 的 occupancy 约束）与 P10-1（网格选占用率）**：三者都指向同一条设备内
+  事实——**占用率是许多重叠/并行机制的硬约束**。P12-1 说 PDL 是「向上游借 occupancy 余量」，
+  P10-1 说 persistent 网格应按占用上限选；本节补充：**megakernel 自己会主动吃掉占用率余量**
+  （重 task 抬寄存器），所以它更需要 MPK 式的时分复用 + 分页来把「资源并集」拆开。
+- **与生产案例（`docs/02`）对照**：DeepGEMM 的 mega MoE / Mega Gate / Mega mHC 都是 SM100 专属，
+  用**固定的 warp 角色**（warp0 TMA / warp1 MMA / gate warps…）和 `setmaxnreg` 式的寄存器重配置
+  （`docs/02` §1.2/§1.3、`docs/07` §2 的 `utils.cuh` setmaxnreg，注意线上实现里它被注释）。这正是
+  在**工程上手工绕开**本节所测的限制：让不同角色按需增减寄存器，而不是被动接受「一个 kernel 一个
+  寄存器数」。MPK 的自动路径（`docs/06`/`docs/07`）尚未做动态寄存器重配置，故保留这条上限。
+- **判据（C1–C5，`docs/00` §3）**：本节是一个单次 launch、常驻、含多 task 类型的 kernel（C1+C2+C3），
+  但**没有**去中心化调度（C5），也不改变判据——它是 megakernel 的**成本侧**度量，与收益实验互补。
+
+### 8.6 局限
+
+- 合成 workload：轻 task 是标量 grid-stride 求和、重 task 是规则 FMA 链，**不含张量核 / TMA / 真实
+  混比**；真实 kernel 的最重 task（如超大 MMA 分块）寄存器需求与访存模式都不同，绝对倍率会变。
+- 只测了**寄存器**这一项；未复现 MPK 的 paged SMEM 运行时（Section D 只给 occupancy 敏感性，
+  没实现「按 task 粒度 acquire/release 页」）。
+- `fused_two` 的时分复用是**每 block 固定先轻后重**，不是 MPK 的**去中心化 event queue 按依赖调度**；
+  因此它测的是「资源足迹」而非调度行为。
+- 重 task 的寄存器需求用 `H` 常驻累加器硬造，且 sm90 单线程寄存器上限 255 使 H≥128 后封顶；
+  未测「重 task 也重访存」或多种重 task 并存的组合。
+- 未用 `ncu` 分离「占用率」「L2 命中率」「DRAM 队列深度」对带宽下降的贡献（当前用 occupancy API +
+  时间对照推断，未做 profiler 归因）。
+- 单卡、固定 `blockDim=256`、单一 `grid=528`；未扫 blockDim 与 grid，也未与 P10-1 的网格标度叠加。

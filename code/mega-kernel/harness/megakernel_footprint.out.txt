@@ -1,0 +1,68 @@
+# P14-1 小实验原始输出：megakernel 的资源足迹代价（寄存器固定为各 task 最大值）
+# date: 2026-10-12T14:19:30+00:00
+# cmd: scripts/lab.sh exec "nvcc -O3 -arch=sm_90 src/megakernel_footprint.cu -o megakernel_footprint && ./megakernel_footprint 30 128 528"
+# gpu: H100 80GB HBM3 x8, sm90, driver 570.211.01
+# cuda: Cuda compilation tools, release 13.2, V13.2.78
+
+== device ==
+NVIDIA H100 80GB HBM3, sm_90, SMs=132, regs/SM=65536, smem/SM=233472 B
+grid G=528, blockDim T=256, light n=134217728 floats (537 MB), heavy reps=200, iters=30
+
+== reference ==
+light_kernel (全占用): 0.2074 ms  ->  2589.1 GB/s (HBM read)
+
+== Section A: 寄存器 / 占用率 (T=256) ==
+kernel                 |   regs |   localB |   blocks/SM |   warps/SM
+-----------------------+--------+----------+-------------+-----------
+light_kernel           |     26 |        0 |           8 |         64
+heavy_kernel<32>       |     40 |        0 |           6 |         48
+heavy_kernel<64>       |     71 |        0 |           3 |         24
+heavy_kernel<128>      |    168 |        0 |           1 |          8
+heavy_kernel<192>      |    254 |        0 |           1 |          8
+fused_light<32>        |     40 |        0 |           6 |         48
+fused_light<64>        |     72 |        0 |           3 |         24
+fused_light<128>       |    168 |        0 |           1 |          8
+fused_light<192>       |    254 |        0 |           1 |          8
+
+== Section B: 轻访存路径的代价 —— fused<H>(heavy=0) vs light_kernel ==
+     H |    light ms |    fused ms |      GB/s |    比率 |  vs基线
+-------+-------------+-------------+-----------+-----------+----------
+  base |      0.2074 |      0.2074 |    2589.1 |     1.00x |     1.00x
+    16 |      0.2074 |      0.2080 |    2581.0 |     1.00x |     1.00x
+    32 |      0.2074 |      0.2079 |    2582.2 |     1.00x |     1.00x
+    48 |      0.2074 |      0.2080 |    2581.0 |     1.00x |     1.00x
+    64 |      0.2074 |      0.2762 |    1943.7 |     1.33x |     1.33x
+    96 |      0.2074 |      0.2758 |    1946.7 |     1.33x |     1.33x
+   128 |      0.2074 |      0.4740 |    1132.7 |     2.29x |     2.29x
+   144 |      0.2074 |      0.4743 |    1131.9 |     2.29x |     2.29x
+   192 |      0.2074 |      0.4744 |    1131.7 |     2.29x |     2.29x
+
+== Section C: 轻+重时分复用 —— 单 kernel(fused_two) vs 两次 launch ==
+     H |  separate ms |     fused ms |    比率 |  heavy ms
+-------+--------------+--------------+-----------+-----------
+    32 |       0.2387 |       0.2293 |     0.96x |    0.0308
+    64 |       0.2671 |       0.3394 |     1.27x |    0.0587
+   128 |       0.3250 |       0.5829 |     1.79x |    0.1172
+   192 |       0.3784 |       0.6358 |     1.68x |    0.1708
+
+== Section D: shared memory 足迹的占用率影响（SMEM/SM=233472 B） ==
+smem/block |    smem/blk |   blocks/SM | smem used/SM
+-----------+-------------+-------------+------------
+      0 KB |           0 |           8 |        0 KB
+      8 KB |        8192 |           8 |       64 KB
+     16 KB |       16384 |           8 |      128 KB
+     32 KB |       32768 |           6 |      192 KB
+     64 KB |       65536 |           3 |      192 KB
+    100 KB |      102400 |           2 |      200 KB
+    160 KB |      163840 |           1 |      160 KB
+    220 KB |      225280 |           1 |      220 KB
+
+>> 读法：
+>> A: fused<H> 的 numRegs = max(light, heavy<H>)，即 megakernel 的 per-thread 寄存器
+>>    被固定为各 task 最大值（MPK §7 行 1748）；occupancy 随最重 task 下降。
+>> B: 同样的轻访存工作，只要 kernel 里编进了重 task，轻 task 的带宽就下降 —— 隔离出
+>>    寄存器足迹这一项的代价（占用率低 -> 驻留 warp 少 -> 藏不住 HBM 延迟）。
+>> C: 时分复用（每 block 轻后重）下单 kernel vs 两次 launch：单 kernel 的轻阶段被重 task
+>>    的寄存器拖累，而两次 launch 让 light 按自己的高占用率跑。差值即 megakernel 此项代价。
+>> D: SMEM 足迹同样会压占用率（若按各 task 最大值常驻）；MPK 用 paged SMEM(§5.3 行 1313-1325)
+>>    按 task 粒度申请/释放来规避，**唯独寄存器不能规避**（§7 行 1748）。
