@@ -1163,6 +1163,40 @@
       模板实参 `ignore_compile_dims` 由 `<0,4096,4096>` 变 `<0,0,0>`。行号全部核对过。
       配套博客 `content/posts/mega-moe-48-runtime-switches`（索引页新增第 48 篇）。Hugo 构建 0 ERROR。
 
+### P39 增量（opt-in，补齐所有 SM90 kernel 共同的 MMA 底座）
+
+- [x] **P39-1** **SM90 WGMMA 层：共享内存描述符、选择器与异步组**
+      （`deep_gemm/include/deep_gemm/mma/sm90.cuh`、`deep_gemm/include/deep_gemm/ptx/wgmma.cuh`、
+      `cute/arch/mma_sm90_desc.hpp`、`cute/atom/mma_traits_sm90_gmma.hpp`）。
+      前面第 12/13/16/19/29/30/32 篇把每个 SM90 kernel 都拆了，但**它们每一行 MMA 都在调同一套底座**
+      ——描述符构造与 WGMMA 选择器/异步组——却从没单独讲过。本篇补上。**描述符与选择器都是 SM90
+      设备代码，H100（sm90a）真机直接跑真实 WGMMA 指令**。
+      → `docs/49-sm90-wgmma-descriptor.md`（真实行号核对）：64 位 `GmmaDescriptor`
+      （`cute/arch/mma_sm90_desc.hpp:80-126`：`start_address`[0,14)、`LBO`[16,30)、`SBO`[32,46)、
+      `base_offset`[49,52)、`layout_type`[62,64)=INTERLEAVE0/B128/B64/B32 `:48-53`）；
+      `make_smem_desc`（`mma/sm90.cuh:194-209`，默认 LBO=0/SBO=1024）；
+      `to_gmma_layout_type`（`:222-235`，把字节 swizzle 0/16/32/64/128 编码进 layout_type）；
+      `get_inner_block_atom_size`（`:211-214`）/`get_gmma_desc_stride_k`（`:216-220`，K-major=1/MN-major=atom）；
+      `make_gmma_desc`（`:243-279`）两分支——**K-major 断言 `kSwizzleMode==BLOCK_K*sizeof`**、
+      `SBO=8·BLOCK_K·sizeof/LBO=0`（`:249-259`），**MN-major** `SBO=8·atom/LBO=BLOCK_K·atom`、
+      interleave 时交换（`:260-278`，`:265` 断言 mn_idx 落在原子边界）；
+      `advance_gmma_desc_lo`（`:237-241`）只改低 32 位的三段步进（K 步进 `k_idx*stride_k`、多 warpgroup
+      的 `mn_idx*BLOCK_K`、合并 stage 原子偏移 `atom_k_idx*BLOCK_M*BLOCK_ATOM_K`，见
+      `sm90_bf16_gemm.cuh:59/219-220/266-270`）。三个选择器 `FP8MMASelector`（`:32-75`，`K=32`）/
+      `BF16MMASelector`（`:101-148`，`K=16`，主序进模板）/`TF32MMASelector`（`:168-192`，`K=8`），
+      `M=64`、`kNumAccum=M*N/128=N/2`。`ptx/wgmma.cuh:7-23` 的 `arrive/commit/fence_operand/wait<N>`
+      异步组语义（`wait<N>`=未完成组数≤N）。fp32 累加器 `CLayout_64xN`
+      （`mma_traits_sm90_gmma.hpp:433-435`）的寄存器→(m,n) **列主序**映射（`offset=n*64+m`）。
+      **H100 实测** `src/wgmma_desc.cu` + `harness/exp_wgmma_desc.{sh,out.txt}`（真实头文件，
+      sha256 `mma/sm90.cuh 548fe0c6…`/`ptx/wgmma.cuh dad341b3…`，**总判定 ALL PASS**）：
+      ① 描述符位域 **13 项**全对（`make_smem_desc` 的 INTERLEAVE/B128/显式 LBO·SBO、`make_gmma_desc`
+      K-major/MN-major/sw16、`advance` 的 +2/+0x80/+0x200/+0x20、`>>4` 截断）；② 选择器静态属性
+      `BF16 K=16`/`FP8 K=32`/`TF32 K=8`、stride_k、atom；③ **真实 WGMMA 数值 5 用例逐位相等**
+      （BF16 N=128/BLOCK_N=64、FP8 N=128/BLOCK_K=128、A 为 MN-major、分两批 `commit`+`wait<1>`），
+      手工铺 TMA 128B swizzle（`chunk'=chunk XOR (row%8)`）——同时坐实描述符与 swizzle 物理布局对应、
+      `advance` 公式、累加器映射三者。配套博客 `content/posts/mega-moe-49-sm90-wgmma-descriptor`
+      （索引页新增第 49 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1187,8 +1221,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P38 各增量完成（P15-1…P35-1、P36-1、P37-1、P38-1）。**
-  本轮 P38-1：新建 `docs/48-runtime-switches.md`（+`harness/exp_runtime_switches.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P39 各增量完成（P15-1…P38-1、P39-1）。**
+  本轮 P39-1：新建 `docs/49-sm90-wgmma-descriptor.md`（+`src/wgmma_desc.cu`、
+  `harness/exp_wgmma_desc.{sh,out.txt}`）——补上前面所有 SM90 kernel **每一行 MMA 都在调、
+  却从没单独讲过**的底座（`mma/sm90.cuh` + `ptx/wgmma.cuh`）。三个核心事实：① **64 位描述符**
+  （`start_addr>>4`/`LBO>>4`/`SBO>>4`/`base_offset`/`layout_type`）把「一块 swizzle 过的 smem」
+  讲给 tensor core，`to_gmma_layout_type` 直接把字节 swizzle 模式编码进 `layout_type`，
+  所以 FP8 kernel 的 `make_smem_desc(ptr,1)` 其实是在说「B128」；② **`make_gmma_desc` 的 K/MN
+  两分支**给出 LBO/SBO 的闭式（K-major 必须 `kSwizzleMode==BLOCK_K*sizeof`），
+  `advance_gmma_desc_lo` 只改低 32 位的三段步进（K 步进 / 多 warpgroup MN 偏移 / 合并 stage 原子偏移）；
+  ③ 三个选择器 `M=64`、`K`=FP8 32/BF16 16/TF32 8，`ptx/wgmma.cuh` 的 `arrive/commit/wait<N>` 是
+  异步组语义，fp32 累加器 `CLayout_64xN` 是**列主序**的寄存器→(m,n) 映射。
+  **H100（sm90a）真机**枚举：**描述符位域 13 项全对 + 5 个真实 WGMMA GEMM 逐位相等**（BF16/FP8/
+  MN-major/分两批 `commit`+`wait<1>`）——13 项里包括显式 LBO/SBO、`>>4` 截断、MN-major 的 atom；
+  5 个 GEMM 用手工 TMA 128B swizzle 铺 smem，逐位 0 误差。行号全部核对过。配套博客
+  `content/posts/mega-moe-49-sm90-wgmma-descriptor`（索引页新增第 49 篇）。Hugo 构建 0 ERROR。
+  上一轮 P38-1：新建 `docs/48-runtime-switches.md`（+`harness/exp_runtime_switches.{py,sh,out.txt}`）
   ——补上前面 47 篇每个 kernel 都读、却从没单独讲过的**顶层全局开关面**。两份可变 singleton
   （`Runtime` 管设备资源、`HeuristicsRuntime` 管选核/编译）经 `config::register_apis` 平铺成
   `deep_gemm.set_*`/`get_*`；逐个拆「状态→消费点→为什么」：`num_sms` 是上限且 `0`=懒取设备数，
@@ -1551,7 +1599,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P38 已完成（新增 **P38-1 DeepGEMM 的全局运行时/编译开关面**：
+- **下一步**：P0~P39 已完成（新增 **P39-1 SM90 WGMMA 层：共享内存描述符、选择器与异步组**：
+  补上所有 SM90 kernel 每一行 MMA 都在调、却从没单独讲过的底座（`mma/sm90.cuh` + `ptx/wgmma.cuh`）——
+  64 位 `GmmaDescriptor` 五段位域与 `to_gmma_layout_type` 把字节 swizzle 编码进描述符、
+  `make_gmma_desc` 的 K/MN 两分支闭式、`advance_gmma_desc_lo` 三段步进、三个选择器 `M=64`/`K`=32·16·8、
+  `ptx/wgmma.cuh` 异步组、`CLayout_64xN` 列主序累加器映射；**H100 真机直接跑真实 WGMMA**，
+  描述符位域 13 项全对 + 5 个 GEMM 逐位相等；见上）。
+  上一轮 **P38-1 DeepGEMM 的全局运行时/编译开关面**：
   两份可变全局 singleton（`Runtime`+`HeuristicsRuntime`）→ `config.hpp` pybind 面；七个开关的
   「状态/消费点/为什么」——`num_sms` 顺带关 cuBLASLt 回退、`tc_util==0` 当默认 100、
   `deterministic` 三落点（关回退 + 禁 split-K + 钉死 mHC splits，batch invariance）、
