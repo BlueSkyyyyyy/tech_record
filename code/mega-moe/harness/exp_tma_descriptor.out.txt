@@ -1,0 +1,58 @@
+== 环境坐标 ==
+057ca59 Public release 26/09/30 (#462)
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+runtime_utils.hpp
+math.hpp
+swizzle.hpp
+Build cuda_13.2.r13.2/compiler.37668154_0
+
+== 编译（nvcc 直接 include 真实 runtime_utils.hpp + torch）==
+build OK
+
+== 主实验 ==
+nfp4=1 kPackedFP4_is_int8=1
+swizzle_enum: 0->0 16->0 32->1 64->2 128->3 base32->4
+== Part 1: 参数翻译等价（wrapper vs 直连编码，128 字节逐字节）==
+  2d_bf16_sw128      MATCH  0000e0cb857f00001065060010000000
+  2d_bf16_sw64       MATCH  0000e0cb857f00001045060010000000
+  2d_bf16_sw32       MATCH  0000e0cb857f00001025060010000000
+  2d_bf16_sw0        MATCH  0000e0cb857f00001005060010000000
+  2d_bf16_sw16       MATCH  0000e0cb857f00001005060010000000
+  2d_fp32_tf32       MATCH  0040e0cb857f00009063070020000000
+  2d_e4m3_sw128      MATCH  00c0e0cb857f00001060060008000000
+  2d_sw128_base32    THREW (Panic error (~/github/Dee)  [base=32 的 ATOM swizzle 在 H100 被驱动拒绝]
+  a_K_g1_sw128       MATCH
+  a_MN_g1_sw128      MATCH
+  a_K_g2_sw128       MATCH
+  b_K_g2_sw128       MATCH
+  b_MN_g1_sw128      MATCH
+  cd_Nmajor_g2       MATCH
+  sf_mn_fp32         MATCH (shape_mn=132)
+  bf16               dtype_enum=9
+  fp32               dtype_enum=7
+  tf32               dtype_enum=11
+  e4m3               dtype_enum=0
+  fp4_un             dtype_enum=14
+  fp4_pk             dtype_enum=13
+  weights2d_4d       MATCH (num_domains=2)
+
+== Part 2: 真实 TMA 载入 vs cute::Swizzle<B,4,3> 预测布局 ==
+  swizzle=0   box_outer=8 smem_off=0    mismatch=0/1024
+  swizzle=32  box_outer=8 smem_off=0    mismatch=0/256
+  swizzle=64  box_outer=8 smem_off=0    mismatch=0/512
+  swizzle=128 box_outer=8 smem_off=0    mismatch=0/1024
+  swizzle=128 smem_off=+128(仅128B对齐)  base预测0 mismatch=512/1024, base预测1 mismatch=0/1024
+
+== Part 3: 128 字节描述符指纹（变一个输入 → XOR 掩码）==
+  base_dump 0000e0cb857f00001065060010000000000000000000000000000000000000007f0000003f0000000000000000000000000000000000003f070000000000000000040000000000000004000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+  diff swz128->64       bytes: 9 55 65 73
+  diff swz128->0        bytes: 9 72 73
+  diff dtype->fp32      bytes: 1 8 9 12 55
+  diff dtype->e4m3      bytes: 1 9 12 55
+  diff gi128->256       bytes: 32
+  diff go64->128        bytes: 36
+  diff so8->16          bytes: 56 65
+  diff stride128->256   bytes: 12
+  diff addr(ptr)        bytes: 1 2
+
+总判定: ALL PASS (pass=32 fail=0)

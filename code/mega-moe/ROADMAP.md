@@ -1389,6 +1389,42 @@
       关 0.0017 ms），fma 循环版 +33.6 ns/条（单线程受 idle clock 主导）。配套博客
       `content/posts/mega-moe-55-deepgemm-probe-clock64`（索引页新增第 55 篇）。
 
+### P46 增量（opt-in，补齐所有 SM90 kernel 前面那个 128 字节 tensormap 的来源）
+
+- [x] **P46-1** **DeepGEMM 的 TMA 描述符构造层 `runtime_utils.hpp` 的 `make_tma_*`**
+      （`csrc/jit_kernels/impls/runtime_utils.hpp`；`csrc/utils/math.hpp` 的 `get_tma_aligned_size`、
+      `csrc/utils/layout.hpp:11` 的 `kPackedFP4`；调用点 `sm100_fp8_fp4_gemm_1d1d.hpp:124-133`；
+      `cute/arch/copy_sm90_desc.hpp:255-259` 的 swizzle 映射）。前面 55 篇每个 SM90 kernel 的每一行
+      `cp.async.bulk.tensor` 前面都站着一个 128 字节 `CUtensorMap`，却从没讲过它**从哪来、被填了什么**。
+      **纯 host、架构无关，H100 真机逐字节验证**。
+      → `docs/56-tma-descriptor-layer.md`（真实行号核对）：**本质 = 确定性参数翻译**——
+      `get_inner_outer_dims:23-25`（major==K?`(k,mn)`:`(mn,k)`）与 `get_non_contiguous_dim:27-29`
+      给出「内层永远连续维」的二分；`aten_dtype_to_tensor_map_dtype:85-100`（e4m3→`UINT8`、
+      FP4 unpacked→`ALIGN16B`/packed→`ALIGN8B`）；`mode_into_tensor_map_swizzle:102-117`
+      （**0 与 16 都→NONE**、`base=32`→`128B_ATOM_32B`）。`make_tma_2d_desc:119-159` 的三个隐藏规整：
+      ① **swizzle 非 0 时无条件把内层 box 覆盖成 `swizzle/elem`**（`:130-131`）；② FP4 的
+      ALIGN16B 要求 `gmem_inner%128==0`、ALIGN8B 紧凑态 box 元素数 **×2**（`:133-140`）；
+      ③ 全局步长以字节计且 16B 对齐（`:128-129`），外层 stride 取 `get_non_contiguous_dim`。
+      3/4/5D 同构展开（`:161/204/249`）。五个角色封装：`make_tma_a_desc:325-344`
+      （groups 放 inner、`num_groups>1` 断言 K-major）、`make_tma_b_desc:346-365`（groups 放 outer）、
+      `make_tma_cd_desc:367-382`（**恒 N-major**）、`make_tma_sf_desc:384-402`（仅 MN、无 swizzle、
+      `gran_k` 折 **4** 的进行 packed UE8M0 分组、`shape_mn` 经 `get_tma_aligned_size` 对齐）、
+      `make_tma_weights_2d/3d_desc:297-323`（4D `(k, n_per_domain, num_domains, 1)` 承载 locality
+      domain 分域）。**H100 实测** `src/tma_descriptor.cu` + `harness/exp_tma_descriptor.{sh,out.txt}`
+      （nvcc 直接 include 真实 `runtime_utils.hpp` + torch，32 项 **ALL PASS**）：
+      **Part 1** 16 个包装用例（2D/A/B/C/D/SF/weights × dtype × swizzle × major × groups）与我们
+      独立复刻的编码器参数经 `cuTensorMapEncodeTiled` 输出 **逐字节相等**（坐实 wrapper 无隐藏字段操作），
+      dtype 枚举 `bf16=9 fp32=7 tf32=11 e4m3=0 fp4_un=14 fp4_pk=13` 全对；
+      **Part 2** 真实 `cp.async.bulk.tensor.2d` 载入与 `cute::Swizzle<B,4,3>` 预测布局
+      **0/256、0/512、0/1024 全对**，并暴露一条**看代码看不出来、只有真机才现**的约束——
+      **swizzle 的 XOR 键取自 smem 的绝对地址 bits[7:10)**，故目的地只满足 128B 对齐不够、
+      必须对齐到整个 swizzle 原子（128B swizzle→1024B），否则布局整体平移一个原子行
+      （smem_off=+128：按 base=0 预测 mismatch 512/1024、按 base[7:10)=1 预测 0/1024）；
+      **Part 3** 128 字节指纹（地址落 byte1-2、dtype 落 byte1/8/9、swizzle 落 byte9、全局维
+      byte32/36、box 维 byte55/56/65）——**别手工拼描述符**。`base=32` 的 `128B_ATOM_32B` 在本机
+      （H100/驱动 570）被 `cuTensorMapEncodeTiled` 直接拒（`CUDA_ERROR_INVALID_VALUE`，SM100 专属）。
+      配套博客 `content/posts/mega-moe-56-tma-descriptor-layer`（索引页新增第 56 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1413,8 +1449,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P45 各增量完成（P15-1…P41-1、P42-1、P43-1、P44-1、P45-1）。**
-  本轮 P45-1：新建 `docs/55-deepgemm-probe-clock64.md`（+`src/probe_clock64.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P46 各增量完成（P15-1…P41-1、P42-1、P43-1、P44-1、P45-1、P46-1）。**
+  本轮 P46-1：新建 `docs/56-tma-descriptor-layer.md`（+`src/tma_descriptor.cu`、
+  `harness/exp_tma_descriptor.{sh,out.txt}`）——补上前面 55 篇每个 SM90 kernel 的每一行
+  `cp.async.bulk.tensor` 前面那个 128 字节 `CUtensorMap` 的**来源**：
+  `csrc/jit_kernels/impls/runtime_utils.hpp` 的 `make_tma_*` 是一层**确定性参数翻译**
+  （major→inner/outer 二分、dtype 枚举、swizzle 映射、三个隐藏规整），最终只落到一次
+  `cuTensorMapEncodeTiled`。**纯 host、架构无关，H100 真机逐字节验证 32 项 ALL PASS**：
+  16 个包装用例与独立直连编码**逐字节相等**；真实 `cp.async.bulk.tensor.2d` 载入与
+  `cute::Swizzle<B,4,3>` 预测布局 **0/256、0/512、0/1024 全对**；并暴露一条只有真机才现的约束——
+  **swizzle 的 XOR 键取自绝对 smem 地址 bits[7:10)**，故目的地要对齐到整个 swizzle 原子
+  （128B swizzle→1024B），否则布局整体平移（smem_off=+128：base=0 预测 512/1024、base=1 预测 0/1024）。
+  `base=32` 的 `128B_ATOM_32B` 在 H100 被驱动直接拒（SM100 专属）。上一轮 P45-1：新建
+  `docs/55-deepgemm-probe-clock64.md`（+`src/probe_clock64.cu`、
   `harness/exp_probe_clock64.{sh,out.txt}`）——补上一段**公开仓库里没有任何调用点、JIT 也从不启用**
   的休眠观测设施 `deep_gemm/include/deep_gemm/common/probe.cuh`（per-warp `%clock64` 追踪探针）。
   **三处「为什么」**：① **4 GiB 窗口约束的根因**——`advance<N>` 只用**一条 `IADD3` 加低 32 位**
@@ -1870,7 +1917,11 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P45 已完成（新增 **P45-1 per-warp `%clock64` 追踪探针 `common/probe.cuh`**：
+- **下一步**：P0~P46 已完成（新增 **P46-1 TMA 描述符构造层 `runtime_utils.hpp` 的 `make_tma_*`**：
+  128 字节 `CUtensorMap` 是「确定性参数翻译」——major→inner/outer、dtype/swizzle 映射、三个隐藏规整；
+  H100 真机 16 个包装用例与直连编码逐字节相等、真实 TMA 载入与 `cute::Swizzle` 预测布局全对，
+  并发现 **swizzle XOR 键取自绝对 smem 地址 bits[7:10)**（目的地要对齐到整个 swizzle 原子）；见上）。
+  上一轮 P45-1：**P45-1 per-warp `%clock64` 追踪探针 `common/probe.cuh`**：
   一段**公开版无调用点、JIT 也不启用**的休眠观测设施——三处「为什么」（4 GiB 窗口约束源于
   `advance` 单条 `IADD3` 只加低 32 位；负偏移回填让 ptxas 保留基址加法；`mark` 用 `%globaltimer`
   挂钟标定 SM 频率）；`DG_PROBE_ENABLE=0` 时整段消除；全架构无关内联 asm，H100 真机同源编两个
