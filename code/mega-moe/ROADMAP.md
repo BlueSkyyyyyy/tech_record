@@ -173,7 +173,12 @@
 
 ### P6 汇总
 
-- [ ] **P6-1** `docs/06-summary.md`：数据流图、关键机制、与朴素实现的开销对比、反向要点一页纸。
+- [x] **P6-1** `docs/06-summary.md`：数据流图、关键机制、与朴素实现的开销对比、反向要点一页纸。
+      → `docs/06-summary.md`（专题总览）：前向数据流图（dispatch→L1→SwiGLU→L2→combine 单 kernel）、
+      关键机制坐标表、串行/chunked/Mega 三方案开销对比（通信 K 倍放大 + 官方 PR #316 解读）、
+      主体 kernel 四篇索引、反向一页纸（四 GEMM + 路由坑 + 三布局）、Mega Gate/mHC 表、
+      **H100 实测证据台账**（13 项真机数字汇总）、线上资料链接、结论与边界。
+      配套博客 `content/posts/mega-moe-14-summary`（索引页同步更新：13 篇并入 mHC、新增总结篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -199,8 +204,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0/P1/P2/P3/P4 全部完成；P5-1（Mega Gate）、P5-2（Mega mHC）完成。**
-  P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。**计算图**（以 `tests/test_mega_mhc.py:123-210`
+- 当前进度：**P0/P1/P2/P3/P4/P5/P6 全部完成——任务清单已清空。**
+  P6-1：新建 `docs/06-summary.md`（专题收尾总览）+ `content/posts/mega-moe-14-summary`（索引页同步：
+  13 篇并入 mHC、新增总结篇）。内容：**前向数据流图**（dispatch→linear1→SwiGLU→linear2→combine
+  单 kernel、ring buffer + 细粒度 `l2_full_mask` 依赖）、**关键机制坐标表**（对称显存/ring/warp
+  specialization/tcgen05/UTCCP/UE8M0/locality domain/DeepEP 预取冗余专家，均附真实行号）、
+  **与朴素实现的开销对比**（串行 $\approx2.2$ms vs 重叠 $\max$；通信 K 倍放大模型 + 官方 PR #316
+  batch=1 纯延迟/大 batch 2038–2438 TFLOPS 解读）、**主体 kernel 四篇索引**、**反向一页纸**
+  （四 GEMM 表 + wgrad/dgrad 判据 + router 反向 $P_t$ 坑 + 三布局分工 + 为何无 mega-kernel）、
+  **Mega Gate / mHC 三非平凡点表**、**H100 实测证据台账**（13 项实验的真机数字汇总）、
+  9 条真实线上链接、结论与边界。Hugo `--gc --minify` 构建 0 ERROR。
+- **下一步**：路线图 P0~P6 已全部完成，无未完成子项。后续若继续该专题，可考虑（均为增量、非承诺）：
+  ① **H100 侧反向可视化**：把 `exp_moe_backward_kernels` 的四个 grouped GEMM 与 Nsight/ncu 指标
+  （occupancy、TMA/DRAM 吞吐、warp stall）结合，解释 wgrad ~100 vs dgrad ~450 TFLOPS 的硬件归因；
+  ② **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
+  并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）；
+  ③ **Mega MoE 端到端**：需 SM100 机器，当前不可行。若无新指令，可视为专题完结。
+
+  （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。
+  **计算图**（以 `tests/test_mega_mhc.py:123-210`
   参考为权威）：残差多流混合 `new_residual[t,j]=post_mix·x + Σ_i comb[t,j,i]·residual[t,i]`（bf16 舍入 =
   所有消费者的共享数值边界 `epilogue:496-498`）→ mix 投影 `mixes = (new_residual.flatten @ fn^T)·rsqrt(hc_sqr/(hc·H)+eps)·scales + bases`
   → `sigmoid` pre/post + **Sinkhorn 双随机** comb（`epilogue:63-86`）→ `norm_input=Σ_j mix_j·new_residual_j`
