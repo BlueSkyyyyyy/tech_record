@@ -1540,3 +1540,89 @@ kernel-only（CUPTI）`us/call`：
 2. **ring buffer 的 stage 号必须按「处理序」算（`i % NSTAGE`），不能按 chunk 号（`c % NSTAGE`）**：
    否则 `NSTAGE≥2` 时会去读一个**尚未装载**（或已被覆盖）的 stage——`NSTAGE=1` 时两者恒等，把 bug 藏住。
    指纹：只有 `NSTAGE=2/3` 结果错、`NSTAGE=1` 正确。
+
+## 19. ncu 剖析**手写 CUDA B1**（P7-16）：把 §18.4 的「非 load-bound」变成定量
+
+§18 只做了**计时**：裸 wmma CUDA B1 的 `cp.async` 预取只值 ~2–6%，且大 shape 反被 smem 占用反噬。
+§18.4 由此*定性*断定「瓶颈在占用率/发射/同步，不在等 global」——但**没有剖析过这个 kernel**（P7-13/§16
+剖析的是 Triton B1，§17/§18 都是计时）。本节用 `ncu` 把它的硬件 bound 钉死，并**修正其中的一个猜测**。
+
+### 19.1 设置
+
+`harness/probe_b1_cuda_ncu.sh`（输出 `harness/probe_b1_cuda_ncu.out.txt`）在同一空闲卡上剖析 7 个
+单次 launch。每个配置**先在 ncu 外预编译**（`nvcc` 在 ncu 下会挂起），再 `--no-build` 进 ncu（`-k regex`,
+`-c 1 --launch-skip 3`）。驱动 `harness/ncu_b1_cuda_driver.py` 的 `ours` 路径**直接合成** workspace 形状
+操作数、不碰 FLA/Triton（后者一次 setup 会拉起几十个 kernel，在 ncu 下把 wall time 撑爆）：
+
+- ours-CUDA `b1_dhu_cuda`：BT=64 NS=1 / NS=3 / `-DB1_SYNC`（把 `cp.async` 换成同步 smem 写）/ BT=16；
+- FLA `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64`（其原生 BT=64）作为参照。
+
+### 19.2 SpeedOfLight / 占用 / 资源
+
+| 配置 (T512 H4 除注明) | Duration µs | tensor% | fma% | L1/TEX% | DRAM% | reg | smem KB | theo/ach occ | waves |
+|---|---|---|---|---|---|---|---|---|---|
+| ours BT=64 NS=1       | 111.6 | 2.28 | 2.78 | 42.9 | 0.71 | 106 | 111.1 | 6.25 / **3.11** | 0.06 |
+| ours BT=64 NS=3       | 107.2 | 2.39 | 2.87 | 45.1 | 0.74 | 104 | 226.8 | 3.12 / 3.12 | 0.12 |
+| ours BT=64 NS=1 SYNC  | 183.3 | 1.38 | 1.64 | 27.9 | 0.43 | 128 | 111.1 | 6.25 / 3.13 | 0.06 |
+| **FLA `dhu` BT=64**   | **15.0** | **14.09** | 7.37 | 54.3 | 5.29 | 146 | 180.2 | 6.25 / 6.17 | 0.12 |
+| ours BT=16 NS=1       | 208.8 | 1.25 | 2.85 | 33.3 | 0.39 | 64 | 58.9 | 9.38 / 3.13 | 0.04 |
+| ours BT=64 NS=1 (B8 T2048 H8) | 587.5 | 3.47 | 4.13 | **65.3** | 13.5 | 106 | 111.1 | 6.25 / 6.09 | 0.97 |
+| FLA `dhu` BT=64 (B8 T2048 H8) | **120.0** | **14.38** | — | 41.8 | **64.9** | 146 | 180.2 | 6.25 / 6.19 | 1.94 |
+
+两件事立刻可见：(a) **两侧的理论占用率都是 6.25%**（都被 smem 钉在 1–2 block/SM），achieved 也都在
+3–6%——**占用率不是 ours 落后的原因**（大 shape ours 已 0.97 wave、achieved 6.09% 几乎与 FLA 6.19% 持平，
+仍慢 4.9×）；(b) **FLA 的 tensor 吞吐是 ours 的 6×**（14.1% vs 2.28%）。大 shape 两者同样是「谁 bound」：
+**FLA 撞 DRAM（64.9%，2.17 TB/s）**，而 **ours 撞 L1/TEX（65.3%）却只有 13.5% DRAM**——ours 把内存管线
+的预算烧在 shared-memory 重放上，不是 DRAM 带宽。
+
+### 19.3 stall 组成（每发射间隔的 warp 平均 stall 拍数）
+
+| 配置 | `wait` | `short_sb` | `long_sb` | `barrier` | `lg_throttle` | bank-conflict / shared-load wavefronts |
+|---|---|---|---|---|---|---|
+| ours BT=64 NS=1       | **1.80** | 0.87 | 0.66 | 0.02 | 0.33 | 827520 / 1083520 = **76.4%** |
+| ours BT=64 NS=3       | **1.83** | 0.77 | 0.57 | 0.02 | 0.31 | 830287 / 1086287 = **76.4%** |
+| ours BT=64 NS=1 SYNC  | **1.87** | 0.75 | **3.96** | 0.09 | 0.37 | 827392 / 1083392 = 76.4% |
+| FLA `dhu` BT=64       | 0.96 | 0.58 | 0.91 | 0.96 | 0.16 | 154 / 18586 = **0.8%** |
+| ours BT=16 NS=1       | 1.65 | **1.03** | 0.96 | 0.04 | 0.00 | 853504 / 1330688 = 64.1% |
+| ours BT=64 NS=1 (B8 T2048 H8) | **1.82** | 1.56 | 0.87 | 0.04 | 0.92 | 53096676 / 69382372 = **76.5%** |
+| FLA `dhu` BT=64 (B8 T2048 H8) | 0.96 | 0.49 | **2.19** | — | — | 2411 / 1083755 = 0.2% |
+
+`wait` = 等一条**固定延迟**执行依赖（这里是 mma/wmma 的流水延迟）；`long_sb` = 等**全局加载**；
+`short_sb` = 等 **shared/L1 操作数取数**。
+
+### 19.4 三个结论
+
+1. **全局加载早已被 `cp.async` 隐藏，不是瓶颈**。NS=1→NS=3 只把 `long_sb` 从 0.66 挪到 0.57
+   （预取几乎无事可做），而**把 `cp.async` 换成同步写（SYNC）后 `long_sb` 暴涨到 3.96、Duration 从 111.6
+   涨到 183.3 µs（+64%）**——即 `cp.async` 确实在干活、且已经把可隐藏的加载延迟吃干净了，剩下的只是
+   1.65–1.87 拍的 `wait`（mma 延迟）。这从 stall 侧**证实了 §18 的「非 load-bound」**，也解释了 NS 只值
+   2–6%：没有 global 等待可省。
+2. **瓶颈也不是同步**。§18.4 猜的「占用率/发射/同步」里，**`barrier` 只占 0.02–0.09 拍**（每 chunk 5 次
+   `__syncthreads`，但 2 warp 下代价可忽略）——**这个猜测要更正**。真正的 grinder 是 **`wait`（1.80–1.87，
+   约占 5.0 拍发射间隔的 36%）+ `short_sb`（0.87–1.56）**，也就是**每 warp 只有 1 条 mma 依赖链、每
+   scheduler 只驻 1 个 warp**，延迟无处躲（`Eligible Warps Per Scheduler` 仅 0.15–0.21、`No Eligible` 80–85%）。
+3. **shared-memory bank conflict 是 ours 独有的、量级上的浪费**。ours 每次 chunk 用 `wmma::load_matrix_sync`
+   从 smem 逐 16×16 tile 取操作数（`k`/`q`/`w` 行 stride `KD=128` bf16=256B、`Sb` stride `BW=16` bf16=32B），
+   **76% 的 shared-load wavefront 是冲突重放**（small 827K/1.08M；big 53.1M/69.4M），而 FLA 用 ldmatrix 只有
+   **0.8%/0.2%**。这解释了为什么大 shape ours 撞 L1/TEX（65%）而 FLA 撞 DRAM：ours 的内存管线被 smem
+   重放占满。再叠加 FLA 的 tensor 密度（14% vs ours 2.3%）与 `wait` 更低（0.96 vs 1.80），构成 4.9–7.4×
+   的差距。
+
+### 19.5 对目标卡 CUDA B1 的设计输入（修正 §18.4）
+
+§18.4 把待办概括为「把结构做到 K2」。ncu 把「K2 结构」具体化成**两条并列的必要条件**，且**顺序不依赖
+「先加流水」**：
+
+1. **换掉 wmma-from-smem**：用 `ldmatrix`/TMA 的整块操作数（消 76% bank conflict），并提高每 chunk 的
+   mma 密度（FLA 的 tensor 14% vs ours 2.3%）——这是**量级项**，不是流水能替代的。
+2. **`cp.async`/TMA 预取只是「不再退化」的保底**（SYNC→cp.async 省 39%），**不是收益来源**——与 §17 的
+   Triton 结论相反，因为裸 wmma 版的 global 等待本就被 5 次同步+小 tile 掩盖。只有当结构已是 K2
+   （大 tile + ldmatrix + 足够 warp）时，把预取升到 TMA 才像 §17 那样值钱。
+
+这**再次印证 §18.4**：流水杠杆**不能单独加上**；但它也**修正**了 §18.4 的归因——不是「占用率/同步」，
+而是**mma 依赖延迟（`wait`）+ smem 取数（`short_sb`/bank conflict）**。占用率与 FLA 同为 6.25%、barrier
+0.02，都不是抓手。
+
+> 说明：本节用 ncu 单次 replay 的 `Duration`，与 §18 的 CUPTI 均值同量级（small ours 111.6 vs 106.8、
+> FLA 15.0 vs 12.9；big ours 587.5 vs 574.1、FLA 120.0 vs 119.9），差异来自 replay 与首次冷启动。
+> 仍然：本原型是**研究用最小实现**，绝对数字不代表目标卡天花板；可下的是**定性/归因**结论。

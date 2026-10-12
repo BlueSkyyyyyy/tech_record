@@ -192,7 +192,13 @@ TMA 输入流水」**，拆累加链降级为不推荐。**P7-15**（`docs/07` �
 是否还需拆链」的边界：该原型与 FLA `dhu` **逐位相同**（含非整除 T），但裸 wmma 版**根本没到 load-bound**
 （每 CTA 2 warp、~108KB smem、3 GEMM/chunk ~1.9 TFLOP/s），`cp.async` 预取只值 **2–6%**、大 shape 反被占用率
 损失反噬（1.40–1.45×）——**「镜像 K2 流水」不是可单独加上的开关，只在 kernel 已是 K2 形状时兑现**；裸 wmma
-版要先把结构做到 K2。
+版要先把结构做到 K2。**P7-16**（`docs/07` §19）再用 `ncu` 剖析同一支 CUDA B1，把 §18.4 的定性归因量化并
+**修正一处**：瓶颈**不是全局加载**（`cp.async` 已把 `long_sb` 压到 0.66；换成同步写则暴涨到 3.96、慢 64%）、
+**不是同步**（`barrier` 仅 0.02，§18.4 猜的「占用率/发射/同步」要改成「mma 依赖 + smem 取数」）、**也不是
+占用率**（与 FLA 同为 6.25% theo / 6.1% achieved 却慢 4.9×），而是 **`wait`（mma 固定延迟，1.80 拍≈36% 发射
+间隔）+ `short_sb`（smem 操作数取数）+ 76% shared-load bank conflict**（FLA ldmatrix 仅 0.8%）。故目标卡
+CUDA B1 的第一优先级是**换掉 wmma-from-smem（ldmatrix/TMA 整块、提 mma 密度）**，`cp.async`/TMA 预取只是
+「不退化」保底。
 
 **反向性能（`docs/07` §10 P7-7 + §11 P7-8 更正）**：把上面那条 workspace 驱动反向链和
 `torch.autograd` 穿 `chunk_kda` 在统一口径（`wall`+CUPTI `dev`）下比，**只计反向**。四组 shape 实测

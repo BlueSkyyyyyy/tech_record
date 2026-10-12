@@ -221,7 +221,22 @@
   `[K,16]` 状态本就是 8 条独立 mma m-tile，与 §17「拆链冗余」一致）。**两坑**：(a) warp-local 的
   `S/duf/du` 切片必须用 warp 内 lane（步长 32）索引，用 block 级 `lane+blockDim.x` 会漏写一半（全零输入
   通过、`dv2/dh0` 差 O(1)）；(b) ring buffer 的 stage 号须按处理序 `i%NSTAGE` 而非 chunk 号 `c%NSTAGE`
-  （NSTAGE=1 恒等、藏住 bug）。
+   （NSTAGE=1 恒等、藏住 bug）。
+- [x] **P7-16** 用 `ncu` 剖析 P7-15 的**手写 CUDA B1**（此前只剖析过 Triton B1），把 §18.4「非 load-bound
+   但瓶颈在占用率/发射/同步」的**定性归因量化并修正**。新增 `harness/ncu_b1_cuda_driver.py` 参数化改造
+   （`--which ours|fla --bt --ns --no-build`）+ `harness/probe_b1_cuda_ncu.sh`
+   （`harness/probe_b1_cuda_ncu.out.txt`，7 配置：ours BT64 NS=1/3、`-DB1_SYNC`、BT16、大 shape + FLA
+   `dhu` 对照）。**坑**：`nvcc` 在 ncu 下会挂起（每次 run 卡 >20 min、只留 header），改为 ncu 外预编译 +
+   `--no-build`；ours 路径直接合成操作数、不碰 FLA/Triton（后者 setup 拉起几十 kernel 撑爆 profile）。
+   **结论（三个）**：(1) **不是全局加载**——`cp.async` 已把 `long_sb` 压到 0.66（NS=1）/0.57（NS=3），换成
+   同步写（SYNC）则暴涨到 **3.96**、Duration 111.6→**183.3µs（+64%）**，即预取确实在隐藏加载、且已无事可
+   做（与 §18 的 NS 只值 2–6% 自洽）；(2) **不是同步、不是占用率**——`barrier` 仅 0.02–0.09 拍（§18.4 猜的
+   「同步」要更正），theoretical occ 与 FLA 同为 **6.25%**、大 shape achieved 6.09% vs FLA 6.19% 仍慢
+   **4.9×**；(3) **真瓶颈 = `wait`（mma 固定延迟 1.80 拍≈36% 发射间隔）+ `short_sb`（smem 操作数取数
+   0.87–1.56）+ 76% shared-load bank conflict**（ours 827520/1083520；FLA ldmatrix 仅 154/18586=0.8%），
+   叠加 FLA tensor 密度 **14.1% vs ours 2.28%**。**设计输入修正**：目标卡 CUDA B1 第一优先级＝**换掉
+   wmma-from-smem（ldmatrix/TMA 整块 + 提 mma 密度，消 bank conflict）**，`cp.async`/TMA 预取只是「不退化」
+   保底（与 §17 的 Triton 结论相反，因裸 wmma 的 global 等待本就被同步+小 tile 掩盖）。见 `docs/07` §19。
 
 ### P8 小结 / 一页纸
 
@@ -253,8 +268,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15 补测**。
-  - P7-15（本轮）：新增 `docs/07` §18 + 手写纯 CUDA B1 原型 `harness/b1_cuda_probe.cu` +
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16 补测**。
+  - P7-16（本轮）：`ncu` 剖析 P7-15 的手写 CUDA B1，把 §18.4 归因量化并**修正**：新增
+    `harness/ncu_b1_cuda_driver.py`（参数化 `--which/--bt/--ns/--no-build`）+ `harness/probe_b1_cuda_ncu.sh`
+    （`harness/probe_b1_cuda_ncu.out.txt`）+ `docs/07` §19。7 配置（ours BT64 NS=1/3、`-DB1_SYNC`、BT16、
+    大 shape + FLA `dhu` 对照）。**结论**：ours 的 `cp.async` 已把 `long_sb` 压到 0.66/0.57（换取同步写 = 3.96、
+    慢 64%），**非 load-bound**；`barrier` 仅 0.02（**§18.4 猜的「同步」更正**）、occupancy 与 FLA 同为
+    **6.25%** 却慢 **4.9×**；真瓶颈 = **`wait`（mma 固定延迟 1.80≈36%）+ `short_sb`（smem 取数）+ 76% smem
+    bank conflict**（FLA ldmatrix 0.8%），叠加 FLA tensor 14.1% vs ours 2.28%。**设计输入修正**：目标卡
+    CUDA B1 第一优先级＝换掉 wmma-from-smem（ldmatrix/TMA 整块 + 提 mma 密度），预取只是保底。**坑**：
+    `nvcc` 在 ncu 下挂起，须 ncu 外预编译 + `--no-build`；ours 路径勿碰 FLA/Triton（setup 撑爆 profile）。
+  - P7-15：新增 `docs/07` §18 + 手写纯 CUDA B1 原型 `harness/b1_cuda_probe.cu` +
     `harness/check_bwd_b1_cuda.py`（`harness/check_bwd_b1_cuda.out.txt`）+ `harness/ncu_b1_cuda_driver.py`。
     补 §17.4 的边界（手写 CUDA 显式化预取后是否还需拆链）。**Part A**：与 FLA `dhu` **逐位相同**
     （`dh/dv2/dh0` max_abs=**0**，BT=32/64、含非整除 T=250）。**Part B（关键）**：本原型绝对速度差 FLA
@@ -496,7 +520,7 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
   - **下一步工程化＝把 B1 做成目标卡 CUDA**（唯一剩下的实际工作）。P7-13（`docs/07` §16）已用 `ncu` 把它的
     硬件动机量化清楚：B1 是**延迟/并行度受限**（非 tensor/带宽/占用率），与 FLA `dhu` 的 2.14×（同 BT=64）
     差距＝**没有 loads 流水（long_scoreboard 47–55%）+ 单一 `[128,BV]` 依赖链**，FLA 用「K 拆两条 64 链 +
@@ -509,7 +533,13 @@
     T），但**根本没到 load-bound**（每 CTA 2 warp、~108KB smem，3 GEMM/chunk ~1.9 TFLOP/s），故 `cp.async`
     预取只值 2–6%、大 shape 反被占用率损失反噬（1.40–1.45×）——**结论：流水杠杆只在 kernel 已是 K2 形状
     （warp-specialized + TMA 大块搬运 + 足够占用）时才兑现；裸 wmma 版要先把结构做到 K2**。手写 CUDA/TMA
-    显式化预取后是否仍需手工拆链增 ILP，仍须在目标卡上、且以 K2 结构为基座再测（待验证）。
+    显式化预取后是否仍需手工拆链增 ILP，仍须在目标卡上、且以 K2 结构为基座再测（待验证）。**P7-16（`docs/07`
+    §19）用 `ncu` 剖析这支 CUDA B1，把上面的归因量化并修正**：裸 wmma 版真正卡在 **`wait`（mma 固定延迟
+    1.80≈36% 发射间隔）+ `short_sb`（smem 取数）+ 76% shared-load bank conflict**，而**不是** global 加载
+    （`cp.async` 已把 `long_sb` 压到 0.66；换同步写则 3.96、慢 64%）、**不是**同步（`barrier` 仅 0.02）、
+    **不是**占用率（与 FLA 同为 6.25% theo 却慢 4.9×）。故目标卡 CUDA B1 的**第一优先级＝换掉
+    wmma-from-smem（ldmatrix/TMA 整块 + 提 mma 密度，消 bank conflict）**，`cp.async`/TMA 预取只是「不退化」
+    保底；「拆链」仍不作为独立手段。
   §5.2 的 **B0/B1/B2/B3/dAv 五段已全部做成最小 kernel，P6-7 已把四段组装成端到端反向核到
   tf32 底噪，P6-8 又把整条反向直接架在 FlashKDA K1 workspace 上端到端核到 bf16 底噪**；
   **P7-7 又把它和 FLA 反向在同一口径下比（wall/dev 0.40–0.80× 反超，因复用 workspace 省掉
