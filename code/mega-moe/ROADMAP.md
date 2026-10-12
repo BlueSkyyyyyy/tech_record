@@ -1038,6 +1038,38 @@
       只加一次）relerr **3.448e-3**、反例（共享项重复 topk 次）**8.747e-1**。配套博客
       `content/posts/mega-moe-44-mega-moe-shared-expert`（索引页新增第 44 篇）。
 
+### P35 增量（opt-in，DeepGEMM 里两个「cuBLASLt-only」的窄接口）
+
+- [x] **P35-1** **Muon / 对称矩阵 batched 算子 `batched_syrk` / `batched_symm`**
+      （`csrc/apis/gemm.hpp:791-832`、`csrc/apis/einsum.hpp:128-148`、
+      `csrc/jit_kernels/impls/smxx_cublaslt.hpp:14-25/137-164/223-234`、
+      `csrc/utils/layout.hpp:19-40`、`tests/generators.py:176-191`、`tests/test_bf16.py:247-320`）。
+      第 27 篇讲了「什么时候把稠密 GEMM 交给 cuBLASLt（可回退）」，本篇补**另外两个从头到尾就是
+      cuBLASLt-only 的 API**（无自研 kernel、无回退、不进选核启发式）：`deep_gemm.batched_syrk`
+      （`D=A·Aᵀ`）与 `deep_gemm.batched_symm`（`D=A·B`，A 对称），面向 **Muon 优化器的
+      Newton-Schulz 迭代**。**H100 可跑，真机实测**。
+      → `docs/45-muon-syrk-symm.md`（真实行号核对）：**三分类表**（可回退 / 无条件 / cuBLASLt-only）；
+      形状来源 `generators.py:176-191`（5120/7168 真实模型、batch 上限 16、`rows=min(m,k)`/`cols=max`）；
+      host 三件套 `get_cublaslt_batched_view:791-794`（2D→3D unsqueeze）、`batched_syrk:796-810`
+      （同一 `a_3d` 当 lhs/rhs）、`batched_symm:812-832`（**内部 `b_3d.transpose(1,2)`**、对转置后 B
+      重新取 major、A 对称仅契约不校验）；**放宽 batch 连续性**——`get_major_type_ab<false>` /
+      `check_major_type_cd<false>`（`layout.hpp:19-28` 的 `if constexpr` 跳过 `stride(0)==rows·cols`）
+      + cuBLASLt `CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET`（`smxx_cublaslt.hpp:14-25`）；
+      翻译层 `cublaslt_batched_gemm:137-164`（`trans_a` 由 `b_major`/`trans_b` 由 `a_major` 决定 =
+      操作数交换 `(A Bᵀ)ᵀ=B Aᵀ`、batch offset 取 `stride(0)`、`accumulate=false`）；
+      **计算类型固定 `CUBLAS_COMPUTE_32F_FAST_TF32`**（`:45-46`，只有 block-SF NVFP4 才用纯 FP32）；
+      测试形态（major × batch_shape × padding 三枚举、symm 显式 `a+aᵀ`、threshold 6e-7）；
+      相邻的 `bhd,bhr->hdr`（`einsum.hpp:128-148` 无条件 cuBLASLt、`:146` TODO determinism、
+      `smxx_cublaslt.hpp:223-234` `m=r,n=d,k=b`/`trans_b=OP_T`/输出 R_32F）。H100 实测
+      `harness/exp_muon_syrk_symm.{py,sh,out.txt}`：① 真实形状 ×{bf16,fp32}——syrk bf16 峰值
+      **529 TFLOPS**（512×512×32768）典型 ~355–380、fp32 ~180，symm bf16 ~350、fp32 ~156；
+      ② relerr bf16 ~1.4e-4–8.6e-4（输出舍入）、**fp32 ~1.0e-4–2.9e-4（TF32 尾数，非全精度）**；
+      ③ 布局/形态：K-major 与 MN-major 都对、**2D 与 batch=1 的 3D 逐位相等**、连续/非连续 batch
+      （`stride(0)=16809999`）都算对；④ 四类非法输入（D 非行主序 / 形状 / dtype / batch 数）全拒；
+      ⑤ profiler 抓 `nvjet_sm90_tst_320x128_64x3_1x2_h_bz_coopB_TNT`（syrk）/ `..._256x128_64x4_1x2_h_bz_coopA_NNT`（symm）；
+      ⑥ `einsum("bhd,bhr->hdr")` `calc_diff=3.33e-16`/relerr 2.14e-8、两次逐位相等、266.6us/8 TFLOPS/2020 GB/s
+      （K=batch 极小 → 访存受限）。配套博客 `content/posts/mega-moe-45-muon-syrk-symm`（索引页新增第 45 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1062,8 +1094,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P34 各增量完成（P15-1…P33-1、P34-1）。**
-  本轮 P34-1：新建 `docs/44-mega-moe-shared-expert.md`（+`harness/exp_mega_moe_shared_expert.{py,sh,out.txt}`、
+- 当前进度：**P0~P14 全部完成；P15~P35 各增量完成（P15-1…P34-1、P35-1）。**
+  本轮 P35-1：新建 `docs/45-muon-syrk-symm.md`（+`harness/exp_muon_syrk_symm.{py,sh,out.txt}`）
+  ——补上 DeepGEMM 里**两个从头到尾就是 cuBLASLt-only 的窄接口**：`deep_gemm.batched_syrk`
+  （`D=A·Aᵀ`）与 `deep_gemm.batched_symm`（`D=A·B`，A 对称），面向 **Muon 优化器的 Newton-Schulz
+  迭代**。它们在第 27 篇的「可回退 / 无条件 / cuBLASLt-only」三分里属于第三类：无自研 kernel、
+  不进选核启发式、唯一实现就是 `cublaslt_batched_gemm`。三处设计要点：① **2D↔3D 统一**
+  （`get_cublaslt_batched_view:791-794` 把 2D unsqueeze 成 batch=1）；② **放宽 batch 连续性**
+  （`get_major_type_ab<false>`/`check_major_type_cd<false>` 跳过 `layout.hpp:19-28` 里
+  `stride(0)==rows·cols` 的断言，批 stride 经 `CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET`
+  交给 cuBLASLt）；③ **强制 `CUBLAS_COMPUTE_32F_FAST_TF32`**（`smxx_cublaslt.hpp:45-46`），
+  所以 fp32 输入实际只有 TF32 精度。另两个非平凡点：`batched_symm` **内部把 B 转置**
+  （`:830`，「A 对称」只是契约不校验）、翻译层用 `(A Bᵀ)ᵀ=B Aᵀ` 交换操作数（`:137-164`，
+  `trans_a` 由 `b_major`、`trans_b` 由 `a_major` 决定）。**H100 实测**：真实 Muon 形状
+  ×{bf16,fp32}——syrk bf16 峰值 **529 TFLOPS**、典型 ~355–380、fp32 ~180；symm bf16 ~350、
+  fp32 ~156；fp32 relerr ~1e-4–2.9e-4 坐实 TF32；2D 与 batch=1 的 3D **逐位相等**；连续/非连续
+  batch 都算对；四类非法输入全被 `RuntimeError` 拒；profiler 抓 `nvjet_sm90_*`；相邻
+  `einsum("bhd,bhr->hdr")` `calc_diff=3.33e-16`、两次逐位相等、2020 GB/s（K=batch 极小→访存受限）。
+  行号全部核对过。配套博客 `content/posts/mega-moe-45-muon-syrk-symm`（索引页新增第 45 篇）。
+  上一轮 P34-1：新建 `docs/44-mega-moe-shared-expert.md`（+`harness/exp_mega_moe_shared_expert.{py,sh,out.txt}`、
   `src/mega_moe_shared_schedule.cu`）——补上 Mega MoE 一直缺席的**共享专家（shared expert）分支**：
   DeepSeek 每层在 top-k 路由专家外还有一个**每 token 恒激活**的共享专家，Mega MoE 把它融进同一个
   mega-kernel，它是唯一「不走 dispatch、却走完整 L1/SwiGLU/L2/combine」的通路。**主 kernel SM100 专属，
@@ -1374,7 +1423,10 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P34 已完成（新增 **P34-1 共享专家分支**：Mega MoE 里唯一「不走 dispatch 却走
+- **下一步**：P0~P35 已完成（新增 **P35-1 Muon / 对称矩阵 batched 算子 `batched_syrk`/`batched_symm`**：
+  DeepGEMM 里两个 cuBLASLt-only 的窄接口——2D↔3D 统一、放宽 batch 连续性（strided-batch）、
+  强制 FAST_TF32；H100 真机 8 个真实 Muon 形状实测 + 契约检查 + kernel 名；见上）。
+  上一轮 P34-1 共享专家分支：Mega MoE 里唯一「不走 dispatch 却走
   完整计算」的通路——共享 L1 与 dispatch 重叠、L1 沿 N/L2 沿 K 变宽、结果写 combine 的额外槽无权重加一次；
   主 kernel SM100 仅分析，host/调度器/UTCCP/数学 H100 真机实测；见上）。
   P33-1 测试断言辅助 `tests/utils.py`：逐位 oracle 层（direct==累积逐位、随机舍入 oracle 与 device
@@ -1396,9 +1448,10 @@
     的整条 host 链已讲清（此前一直从 kernel 内部讲起）。
   ⑯ **操作数生成器已补齐（P31-1）**：`tests/generators.py` 的枚举器 / `QuantConfig` / operand
     major 物理编码 / 三种 grouped 布局 / PSUM 递推 / K 分组 per-channel SF + 按组零填充；纯 Python，
-    H100 真机 41 PASS，四个真实 SM90 kernel 端到端对拍。可再补：`tests/generators.py` 的
-    `enumerate_batched_syrk_symm`（Muon 形状）与 `deep_gemm/legacy/` 的生成器交叉、
-    `deep_gemm/testing/bench.py` 在真实 SM100 上的 `set_tc_util` 影响（需目标卡）。
+    H100 真机 41 PASS，四个真实 SM90 kernel 端到端对拍。**`enumerate_batched_syrk_symm`（Muon 形状）
+    已由 P35-1 补齐**（`batched_syrk`/`batched_symm`，H100 8 个真实形状实测）。可再补：
+    `deep_gemm/legacy/` 的生成器交叉、`deep_gemm/testing/bench.py` 在真实 SM100 上的
+    `set_tc_util` 影响（需目标卡）。
   ⑮ **legacy Triton MoE grouped GEMM 已补齐（P29-1）**：`deep_gemm/legacy/` 的四个 kernel
     （dgrad `m_grouped`/`a_fused_m`、wgrad `a_fused_k`/`b_fused_k`）与「显式索引 gather」语义、
     与现代 C++（`grouped_layout`+对齐）的对照表；Triton 架构无关。**测试基座已补齐（P30-1）**：
