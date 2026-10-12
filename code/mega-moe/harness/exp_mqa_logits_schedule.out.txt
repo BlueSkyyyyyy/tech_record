@@ -1,0 +1,65 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+P13-1 SM100 dense MQA logits 调度器：H100 真实设备代码验证
+GPU: NVIDIA H100 80GB HBM3  sm_90  SMs=132
+
+== 用例组 A：BLOCK_Q=2（H=64 的 Q tile）==
+  [uniform S=4096        ] BQ=2 NQ=4096 NKV=4096  blocks=2048  total_work=22528 total_cost=51200 seg:split=3:2
+      spans match=YES (0 mismatch)   per-SM boundary match=YES (start 0 / count 0 mismatch)
+      scheduled : covered=22528/22528 dup=0 miss=0 bad=0  tasks=2151  per-SM work [169..172]
+      gridstride: covered=22528/22528 dup=0 miss=0 bad=0  tasks=2048  per-SM work [165..176]
+      => result: PASS
+  [uniform kstart%4!=0   ] BQ=2 NQ=4096 NKV=4096  blocks=2048  total_work=22528 total_cost=51200 seg:split=3:2
+      spans match=YES (0 mismatch)   per-SM boundary match=YES (start 0 / count 0 mismatch)
+      scheduled : covered=22528/22528 dup=0 miss=0 bad=0  tasks=2151  per-SM work [169..172]
+      gridstride: covered=22528/22528 dup=0 miss=0 bad=0  tasks=2048  per-SM work [165..176]
+      => result: PASS
+  [uniform tail          ] BQ=2 NQ=4096 NKV=3970  blocks=2048  total_work=22528 total_cost=51200 seg:split=3:2
+      spans match=YES (0 mismatch)   per-SM boundary match=YES (start 0 / count 0 mismatch)
+      scheduled : covered=22528/22528 dup=0 miss=0 bad=0  tasks=2151  per-SM work [169..172]
+      gridstride: covered=22528/22528 dup=0 miss=0 bad=0  tasks=2048  per-SM work [165..176]
+      => result: PASS
+  [skewed+empty S=8192   ] BQ=2 NQ=4096 NKV=8192  blocks=2048  total_work=24876 total_cost=55896 seg:split=3:2
+      spans match=YES (0 mismatch)   per-SM boundary match=YES (start 0 / count 0 mismatch)
+      scheduled : covered=24876/24876 dup=0 miss=0 bad=0  tasks=2153  per-SM work [185..191]
+      gridstride: covered=24876/24876 dup=0 miss=0 bad=0  tasks=2048  per-SM work [99..352]
+      => result: PASS
+  [few-split skewed      ] BQ=2 NQ=4096 NKV=700  blocks=2048  total_work=2926 total_cost=11996 seg:split=3:2
+      spans match=YES (0 mismatch)   per-SM boundary match=YES (start 0 / count 0 mismatch)
+      scheduled : covered=2926/2926 dup=0 miss=0 bad=0  tasks=2065  per-SM work [21..23]
+      gridstride: covered=2926/2926 dup=0 miss=0 bad=0  tasks=2048  per-SM work [17..32]
+      => result: PASS
+  [ragged num_q_tokens   ] BQ=2 NQ=4103 NKV=4096  blocks=2052  total_work=22572 total_cost=51300 seg:split=3:2
+      spans match=YES (0 mismatch)   per-SM boundary match=YES (start 0 / count 0 mismatch)
+      scheduled : covered=22572/22572 dup=0 miss=0 bad=0  tasks=2158  per-SM work [170..172]
+      gridstride: covered=22572/22572 dup=0 miss=0 bad=0  tasks=2052  per-SM work [165..176]
+      => result: PASS
+
+== 用例组 B：BLOCK_Q=4（H=32 的 Q tile）==
+  [uniform S=4096        ] BQ=4 NQ=4096 NKV=4096  blocks=1024  total_work=11264 total_cost=25600 seg:split=3:2
+      spans match=YES (0 mismatch)   per-SM boundary match=YES (start 0 / count 0 mismatch)
+      scheduled : covered=11264/11264 dup=0 miss=0 bad=0  tasks=1130  per-SM work [84..87]
+      gridstride: covered=11264/11264 dup=0 miss=0 bad=0  tasks=1024  per-SM work [77..88]
+      => result: PASS
+  [skewed+empty S=8192   ] BQ=4 NQ=4096 NKV=8192  blocks=1024  total_work=19316 total_cost=41704 seg:split=3:2
+      spans match=YES (0 mismatch)   per-SM boundary match=YES (start 0 / count 0 mismatch)
+      scheduled : covered=19316/19316 dup=0 miss=0 bad=0  tasks=1139  per-SM work [144..149]
+      gridstride: covered=19316/19316 dup=0 miss=0 bad=0  tasks=1024  per-SM work [110..176]
+      => result: PASS
+
+== 用例组 C：少 SM（kNumSMs=8，便于观察边界）==
+  [skewed 8 SMs          ] BQ=2 NQ=128 NKV=4096  blocks=64  total_work=414 total_cost=1020 seg:split=3:2
+      spans match=YES (0 mismatch)   per-SM boundary match=YES (start 0 / count 0 mismatch)
+      scheduled : covered=414/414 dup=0 miss=0 bad=0  tasks=69  per-SM work [50..55]
+      gridstride: covered=414/414 dup=0 miss=0 bad=0  tasks=64  per-SM work [28..88]
+      => result: PASS
+  [tiny 8 SMs            ] BQ=2 NQ=40 NKV=3000  blocks=20  total_work=160 total_cost=380 seg:split=3:2
+      spans match=YES (0 mismatch)   per-SM boundary match=YES (start 0 / count 0 mismatch)
+      scheduled : covered=160/160 dup=0 miss=0 bad=0  tasks=24  per-SM work [19..21]
+      gridstride: covered=160/160 dup=0 miss=0 bad=0  tasks=20  per-SM work [16..24]
+      => result: PASS
+
+== metadata 缓冲区字数公式 ==
+  T=4096: num_words = align(3*132,2)+2*2048 = 396+4096 = 4492 words (17968 bytes)
+  T=4103: num_words = align(3*132,2)+2*2052 = 396+4104 = 4500 words (18000 bytes)
+
+ALL PASS

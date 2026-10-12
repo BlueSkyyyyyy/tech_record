@@ -41,5 +41,6 @@ categories: ["算子开发"]
 20. [BF16 Mega MoE 变体精读：`bf16_mega_moe`]({{< relref "mega-moe-20-bf16-mega-moe" >}}) —— 一套骨架两种 MmaKind、去掉 SF/UTCCP/UE8M0、block_k=64、L1 in-place SwiGLU（bf16 in/out）、L2 RNE cast、host 配置与缓冲区实测
 21. [DeepGEMM FP8 einsum MLA 投影 `bhr,hdr->bhd`：block-scale 版按头 batched GEMM]({{< relref "mega-moe-21-fp8-einsum-projection" >}}) —— A per-token 1D / B per-block 2D SF、复用 `1d2d` 的 Batched 分支、逐头 SFB 基址、gran 128 契约、SM100 独占 FP8 输出对、H100 实测 581 TFLOPS
 22. [稀疏 MQA logits：稀疏注意力 indexer 的第二级打分]({{< relref "mega-moe-22-sparse-mqa-logits" >}}) —— 选中 KV 块内打分并压缩输出、metadata 合并去重与负载均衡调度、contiguous TMA 快路、SM100 仅分析 + H100 语义实测（压缩列映射逐位对齐）
+23. [SM100 dense MQA logits：主 kernel 与连续版负载均衡调度器]({{< relref "mega-moe-23-mqa-logits-schedule" >}}) —— KV span 并集、代价模型 `2·split+3` 与 split 粒度边界二分、`SM100MQALogitsScheduler` 双模式；调度器与 UMMA 无关，H100 上跑真实设备代码 10 用例全通过（覆盖/均衡/边界对拍）
 
 > 各篇正文由仓库 `code/mega-moe/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
