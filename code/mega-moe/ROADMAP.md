@@ -49,8 +49,10 @@
 
 ### P1 MoE / EP 基础（`docs/01-moe-ep-basics.md`）
 
-- [ ] **P1-1** MoE 计算图：router → topk → grouped GEMM（linear1/SwiGLU/linear2）→ combine；
-      解释 grouped contiguouse vs masked 两种布局。
+- [x] **P1-1** MoE 计算图：router → topk → grouped GEMM（linear1/SwiGLU/linear2）→ combine；
+      解释 grouped contiguous vs masked 两种布局。→ `docs/01` §1（含真实行号：`gemm.hpp:181/209-246/269-318`、
+      `runtime.hpp:57-64`、README `76-86`），并补 **PSUM（前缀和）第三布局**；H100 实测三种布局数值等价
+      （`harness/exp_grouped_layout.py` + `.out.txt`）。
 - [ ] **P1-2** EP（专家并行）通信：all-to-all dispatch / combine 的语义与开销；为何要与计算重叠。
 
 ### P2 Mega MoE 架构（`docs/02-mega-moe-architecture.md`）
@@ -109,7 +111,11 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0 全部完成（P0-1/2/3/4）**。
+- 当前进度：**P0 全部完成（P0-1/2/3/4）；P1-1 完成**。
+  P1-1：细化 `docs/01` §1——MoE 计算图 + 三种 grouped 布局（contiguous / masked / PSUM）的真实 API 与行号，
+  解释对齐（SM90=128 / SM100=256）与 gap 行的「为什么」；新增 §1.5 H100 实测（`harness/exp_grouped_layout.py`，
+  三布局 relerr 一致 ≈3.7e-2）。
+  （P0 进展见下）
   P0-1：读通 DeepGEMM Mega MoE 五个源文件，产出 `docs/02-mega-moe-architecture.md`（真实行号核对），P2-2/P2-3 一并覆盖。
   P0-2：`docs/01` §5 记录仓库/版本时间线/关键结论/DeepEP 侧真实链接；`docs/02` §8 补 PR #316 EP8 基准与解读。
   P0-3：精读 DeepEP v2.5 对称显存/dispatch/combine，产出 `docs/07-deepep-dispatch-combine.md`。
@@ -119,8 +125,9 @@
   但 `EPBuffer` 因 NCCL 版本（PyTorch 链 2.29.7 vs 需求 ≥2.31/2.32.3）运行期段错误。
   产出 `docs/08-h100-environment.md` + `harness/probe_h100_env.py` / `harness/probe_deepep.py`（含 *.out.txt）。
   P2-1 的 `transform_weights_for_mega_moe` 权重布局仍待补。
-- **下一步：P1** MoE/EP 基础补全（`docs/01` 已有骨架，需按最新 API 与 grouped 布局细化），
-  顺带补 **P2-1** 权重布局；随后启动 **P4-4** 的 H100 数值对拍（用 SM90 的 `nt` wgrad 替代 SM100 `tn`）。
+- **下一步：P1-2** EP（专家并行）通信语义与开销、为何与计算重叠（`docs/01` §2 现为骨架，需结合实际
+  DeepEP dispatch/combine 的字节数与 NVLink 带宽细化）；顺带补 **P2-1** `transform_weights_for_mega_moe`
+  权重布局；随后启动 **P4-4** 的 H100 数值对拍（用 SM90 的 `nt` wgrad 替代 SM100 `tn`）。
 
 ## 阻塞
 

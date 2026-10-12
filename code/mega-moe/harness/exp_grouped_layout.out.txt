@@ -1,0 +1,18 @@
+deep_gemm 2.8.1, arch_major=9, device=NVIDIA H100 80GB HBM3
+--------------------------------------------------------------------------------------------
+[contiguous] groups=6 total_m=768 n=256 k=512 layout.numel()=768
+[contiguous] per-group valid M     = [91, 117, 123, 89, 81, 73]
+[contiguous] gap rows (layout == -1) = 194 / 768
+[contiguous] relerr(valid rows)      = 3.691e-02
+--------------------------------------------------------------------------------------------
+[masked] groups=6 max_m=160 expected_m=115 n=256 k=512
+[masked] A shape=(6, 160, 512) (dense [G, max_m, k], 无效行只是被 kernel 跳过)
+[masked] per-group masked_m = [93, 86, 119, 84, 106, 76]
+[masked] relerr(valid rows) = 3.686e-02
+--------------------------------------------------------------------------------------------
+[psum] groups=6 total_m=768 n=256 k=512 alignment=128
+[psum] grouped_layout (prefix-sum ends) = [81, 240, 334, 462, 582, 730]
+[psum] decoded per group (idx, start, valid_end) = [(0, 0, 81), (1, 128, 240), (2, 256, 334), (3, 384, 462), (4, 512, 582), (5, 640, 730)]
+[psum] d.numel()/n = 768 rows (含组间 gap 行)
+[psum] relerr(valid rows) = 3.691e-02
+--------------------------------------------------------------------------------------------

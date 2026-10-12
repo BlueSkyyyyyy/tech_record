@@ -3,7 +3,9 @@
 > 本文是「DeepSeek Mega MoE 前向 / 反向算子实现解析」的第 1 篇。先把 MoE 的计算图与专家并行
 > （Expert Parallel）通信语义讲清楚，后面精读 DeepGEMM / DeepEP 的融合实现时才有坐标系。
 
-## 1. MoE 的计算图
+## 1. MoE 的计算图与 grouped GEMM 布局
+
+### 1.1 计算图
 
 一个标准 MoE 层（如 DeepSeek 系列）对每个 token $x\in\mathbb{R}^{H}$ 做：
 
@@ -25,12 +27,72 @@ $H$ 是 hidden，专家中间维 $I$（含 SwiGLU 门与值两条线性层，故
 - **linear2**：`[tokens, I] @ [I, H]` → `[tokens, H]`。
 
 因为不同专家处理的 token 数不等，工程上把「每个专家一段 token」拼成一个大矩阵做 **grouped GEMM**：
-**只分组 M 轴，N/K 固定**（各专家形状相同）。DeepGEMM 提供两种布局：
+**只分组 M 轴，N/K 固定**（各专家形状相同，如 DeepSeek-V3 所有专家都是 `[7168, 2*2048]`）。
+DeepGEMM 的 grouped API 命名规则是 `m_grouped_*`（分组 M 轴，前向 / dgrad）与
+`k_grouped_*`（分组 K 轴，wgrad），分 G 组时输入是 `[G, N, K]` 的权重栈
+（`csrc/apis/gemm.hpp:181` 顶部注释 `[M, K] @ [G, N, K].mT`）。注意新版 API 把数据与量化
+scale factor 打包成 tuple 传入，例如 `a=(a_data, a_sf)`、`b=(b_data, b_sf)`。
 
-- **contiguous**：各专家段连续拼接，段首对齐到块大小 `get_mk_alignment_for_contiguous_layout()`；
-  用于训练前向与推理 prefill（token 数已知）。
-- **masked**：给一个 mask 张量，kernel 只算有效部分；用于解码阶段 CUDA graph 下 CPU 不知道各专家 token 数
-  的情形（可用 DeepEP 低延迟 kernel 的输出）。
+### 1.2 布局一：contiguous（连续拼接）
+
+**语义**：把 G 个专家的 token 段**首尾相接**成一个 `[sum_m, K]` 的 A，`grouped_layout` 是长度
+`sum_m` 的 int 张量，`grouped_layout[row] = 专家号`（无效填充行记 `-1`）。
+
+**硬约束**：**每段的起始行必须对齐到 `get_mk_alignment_for_contiguous_layout()`**
+（README §Grouped GEMMs (contiguous layout)，`README.md:76-78`）。这个对齐值在 SM90 是历史值
+**128**，在 SM100 上理论值提高到 **256**——因为 SM100 新增 `UMMA_N=256`，固定 256 对齐同时对
+MoE cast / M-grouped / K-grouped 都更友好（`csrc/jit_kernels/heuristics/runtime.hpp:57-64`）。
+这正是「segment 之间会有 gap 行」的来源。
+
+**为什么需要对齐**：kernel 按 `BLOCK_M` 切 tile，且 A 的 scale factor（SFA）在转换/打包时按块布局；
+若段起点任意，一个 `BLOCK_M` tile 会跨两个专家、无法用同一个权重。对齐到块大小保证**每个 M tile
+只属于一个专家**，从而整个 tile 能用同一份 `[N, K]` 权重，kernel 内无需 per-row 的专家分支
+（`csrc/apis/gemm.hpp:230-246`；SM90 走 `sm90_m_grouped_fp8_gemm_contiguous_1d2d`，
+SM100 走 `sm100_m_grouped_fp8_fp4_gemm_contiguous_1d1d`）。
+
+用于**训练前向与推理 prefill**：此时 token 数已知，host 端能精确算出各段并对齐。
+
+### 1.3 布局二：masked（掩码）
+
+**语义**：A/D 是稠密的 `[G, max_m, K]` / `[G, max_m, N]`，另给 `masked_m`（长度 G 的 int，
+每组有效 M），kernel 对每组只算前 `masked_m[i]` 行（`csrc/apis/gemm.hpp:269-318`）。
+这里的 `masked_m` 与 contiguous 用**同一个 `grouped_layout` 变量名**，但含义完全不同：
+masked 下它是「每组有效行数」，contiguous 下它是「每行的组号」。API 入口也不同
+（`m_grouped_fp8_gemm_nt_masked` vs `..._contiguous`）。
+
+**为什么要 masked**：解码阶段开 **CUDA graph** 时，CPU 无法在 launch 前知道每个专家收到多少 token
+（token 数由 GPU 上的 DeepEP dispatch 决定），预先做不对齐的 contiguous 拼接不可能。于是固定
+`[G, max_m, K]` 形状（图捕获友好），把「有效行数」作为 GPU 张量传进去，kernel 在 device 端读。
+典型输入就是 DeepEP 低延迟 dispatch 的输出（README §Grouped GEMMs (masked layout)，`README.md:82-86`）。
+
+### 1.4 布局三：PSUM（前缀和，动态段大小）
+
+contiguous 要求每段对齐、`grouped_layout` 是每行的组号；但很多场景（如 DeepEP 的输出）只知道
+**每组的结束位置**、且组大小不齐。PSUM 布局让 `grouped_layout[i]` 直接是**第 i 组有效 token 的
+前缀和结束行号**，组的起点是 `align(上一组的结束, alignment)`，组间 gap 行由 kernel 跳过
+（`docs/scaling-factor-format.md:203-215`）。它把「masked 的动态信息」重新塞回 contiguous 的
+单张量表示，于是推理侧 masked 场景也能走**更高效的 contiguous kernel**——`tests/test_fp8_fp4.py:203-205`
+里 `use_psum_layout=True` 时正是用 `m_grouped_fp8_fp4_gemm_nt_contiguous(..., use_psum_layout=True,
+expected_m_for_psum_layout=...)` 替代 masked 入口。映射到 Mega MoE：dispatch 产出的正是这种
+「每专家结束位置 + 对齐拼接」的形态（`docs/02` §3 的 pooled buffer）。
+
+> 三种布局等价于对「组边界信息」的三层抽象：**contiguous**（host 已知，行级组号）→
+> **masked**（device 已知，组级计数）→ **PSUM**（device 已知，组级前缀和 + 连续存储）。
+
+### 1.5 H100 实测：三种布局的数字
+
+`harness/exp_grouped_layout.py`（输出 `harness/exp_grouped_layout.out.txt`）在 H100 上用
+DeepGEMM 自带 generators 造数据、与 PyTorch 参考对拍。取 G=6、n=256、k=512，FP8（SM90 1D2D）：
+
+| 布局 | 有效 M（各组） | 物理存储 | relerr |
+|---|---|---|---|
+| contiguous | 91/117/123/89/81/73 | `[768, 512]`，其中 **194/768 是 gap 行**（对齐到 128） | 3.69e-2 |
+| masked | 93/86/119/84/106/76 | `[6, 160, 512]` 稠密，`max_m=160` | 3.69e-2 |
+| PSUM | 前缀和 `[81,240,334,462,582,730]` | `[768, 512]`，组起点 0/128/256/384/512/640 | 3.69e-2 |
+
+三种布局**残差一致**（都是 FP8 per-128 块量化的约 3.7e-2），说明只是「同一计算的不同边界表示」，
+数值上等价。contiguous 的 gap 行占比（194/768≈25%）正是对齐代价；masked 存储按 `max_m` 放大
+（160×6=960 行 vs 实际 559 行），二者都是「用空间/对齐换 kernel 简单与图捕获友好」。
 
 ## 2. 专家并行（EP）与 all-to-all
 
