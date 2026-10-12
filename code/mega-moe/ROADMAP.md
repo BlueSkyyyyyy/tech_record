@@ -685,6 +685,37 @@
       但 m 经启发式 block config 仍区分条目，`ignore_compile_dims` 使维度行全 0；⑦ `CHECK_NO_SPILLS` rc=0；
       ⑧ FNV1a 长度前缀消歧成立。配套博客 `content/posts/mega-moe-33-deepjit-runtime`（索引页新增第 33 篇）。
 
+### P24 增量（opt-in，Mega MoE 调度器按域分区的前置步骤）
+
+- [x] **P24-1** **SM 局部域（locality domain）探针与内存域分配**
+      （`deep_gemm/include/deep_gemm/impls/sm100_locality_domain.cuh`、
+      `csrc/jit_kernels/impls/sm100_locality_domain.hpp`、`csrc/apis/locality_domain.hpp`、
+      `csrc/runtime/locality_domain.hpp`、`csrc/runtime/mlopart.hpp`、`deep_gemm/utils/mlopart.py`、
+      `deep_gemm/locality_domain.py`、`deep_gemm/include/deep_gemm/common/types.cuh:54`、
+      `scheduler/mega_moe.cuh`）。第 03/09/11 篇反复出现 `num_locality_domains=2`（调度器按域分区、
+      少量任务不跨域偷取、权重 `localize` 到各域），但「哪个 SM 属于哪个域、怎么测出来的」一直没讲。
+      **探针设备代码只用 `%smid`/`ld.global.cg`/`clock64`（架构无关），H100 真机可跑**；host 逻辑纯张量。
+      → `docs/34-locality-domain-probe.md`（真实行号核对）：域模型 `kNumDeviceLocalityDomains=2`
+      （`types.cuh:54`）、两条实现路线（CUDA 13.4 前的 MPS MLOPart 双 device instance `:35/:52 TODO`
+      对照 13.4 起 `CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN`）；全链路
+      `mega_moe.hpp:266/373` → `sm100_*.hpp:221` → `kernel:79/945` → `scheduler:440`，
+      域在调度器里的三处作用（任务计数按域 `:344-360`、`>=2` 波次才允许跨域偷 `:366-369`、
+      shared L2 等所有域 L1 `:395-401`）。探针原理：一 SM 一 4KB chunk、步长 7 与 32 行互质、
+      `ld.global.cg` 绕 L1、`clock64`/跳、uint16；host `flush_l2 :69-71` / `get_probe_chain :73-79` /
+      `probe :82-90`（median(-1)）→ `try_probe :93-100` 两闸门（`kMinFarNearRatio=1.25 :66`、
+      TPC 内一致）→ 最多 5 次（`:67`）→ `get_even :103-106` + warn。
+      **`balance :126-136` 的语义陷阱**：只在「一个域占满」时给精确 50/50。本地化内存：
+      `LocalityDomainAllocator`（reserve/map/release/get_locality_domain `:65-105`）+ MLOPart IPC
+      （Python 起 MPS + `-mlopart`，`cuMemCreate/Export/Import` `mlopart.hpp:24-35`、`mlopart.py:94-130`）、
+      粒度 2 MiB；按域 TMA 描述符 `(1,2,N/2,K)`（`runtime_utils.hpp:297-323`）。
+      **H100 实测** `src/locality_domain_probe.cu` + `harness/exp_locality_domain_probe.{sh,out.txt}`：
+      ① 原样 include 真实设备代码；链置换性质 YES；② 两域都在 HBM → 延迟 ~624 周期/跳、
+      ratio 1.000、`clear=F` **正确拒绝**；③ domain1=host-pinned 模拟远端 → ratio **3.265**、
+      准确检出并给出 TPC 一致划分；④ host 逻辑 9 个边界用例 **9 PASS/0 FAIL**（含 ratio=1.25 边界、
+      TPC 不一致拒绝、`balance(50/66)=17/49` 记录陷阱）；⑤ 真实 API：`is_localization_available=False`、
+      `get_granularity=2MiB`、`get_sm_locality_domains()` **逐位等于** `get_even`（66/66）。
+      配套博客 `content/posts/mega-moe-34-locality-domain-probe`（索引页新增第 34 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -709,8 +740,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P23 各增量完成（P15-1…P22-1、P23-1）。**
-  本轮 P23-1：新建 `docs/33-deepjit-runtime.md`（+`harness/exp_deepjit.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P24 各增量完成（P15-1…P23-1、P24-1）。**
+  本轮 P24-1：新建 `docs/34-locality-domain-probe.md`（+`src/locality_domain_probe.cu`、
+  `harness/exp_locality_domain_probe.{sh,out.txt}`）——补上第 03/09/11 篇反复出现却从没讲清的
+  `num_locality_domains=2` 的**前置步骤**：**哪个 SM 属于哪个域、这件事怎么测出来的**。
+  探针设备代码 `sm100_locality_domain.cuh:8-24` 只依赖 `%smid`/`ld.global.cg`/`clock64`
+  （**架构无关，H100 真机可跑**）：一 SM 一 4KB chunk、全身步长 7 与 32 行互质（每行恰访问一次）、
+  `ld.global.cg` 绕 L1、`clock64` 除跳数。host `apis/locality_domain.hpp`：
+  `probe :82-90`（median(-1)）→ `try_probe :93-100` 两闸门（far/near ≥ `1.25`（`:66`）、TPC 内一致）
+  → 最多 5 次（`:67`）→ `get_even :103-106` + warn；`balance :126-136` **只在「一个域占满」时
+  给精确 50/50**（函数名有欺骗性，本实验显式测出 50/66→17/49）。本地化内存走 CUDA VMM + MLOPart
+  IPC（`cuMemCreate/Export/Import` + reserve/map/set_access，粒度 2 MiB），TMA 权重描述符把域当外维
+  `(1,2,N/2,K)`。**H100 真机**（原样 include 真实设备代码）：两域都在 HBM → ~624 周期/跳、ratio 1.000、
+  `clear=F` **正确拒绝**；domain1=host-pinned 模拟远端 → ratio **3.265**、准确检出 + TPC 一致；
+  host 逻辑 9 边界用例 **9 PASS/0 FAIL**；真实 API `get_sm_locality_domains()` **逐位等于** `get_even`
+  （66/66）、`is_localization_available=False`、粒度 2 MiB。行号全部核对过。
+  配套博客 `content/posts/mega-moe-34-locality-domain-probe`（索引页新增第 34 篇）。
+  上一轮 P23-1：新建 `docs/33-deepjit-runtime.md`（+`harness/exp_deepjit.{py,sh,out.txt}`）
   ——补上前 32 篇一直当黑盒的一层：**DeepGEMM 为什么安装时不编译 CUDA、首次调用才现编**。
   DeepGEMM 通过 `csrc/runtime/jit.hpp:13-33` 接入 DeepJIT（`Config(root,"DG","cutlass-<ver>",
   {include},{"deep_gemm/"})`，`deep_gemm/__init__.py:122` 在 import 时传包目录）。
@@ -893,6 +939,10 @@
     ⑩ **SM90 FP8 两个主 kernel（1D1D/1D2D）**：P22-1 已完成（同一数学、只差 SFB 粒度；分派规则、
     十处差异对照、两个 kernel 逐段精读；H100 真机抓 kernel 实参 + 交叉验证逐位 0 误差 + 性能 ~1.5×）。
     与 P19-1（BF16）、P4-2/P4-3（wgrad/dgrad）、P11（FP8 einsum）互补，**SM90 FP8 主 kernel 路径补齐**。
+    ⑫ **SM 局部域探针与内存域分配**：P24-1 已完成（pointer-chase 延迟探针 + `try_probe` 两闸门 +
+    MLOPart/CUDA VMM 本地化分配 + 按域 TMA 描述符；探针设备代码架构无关，H100 真机跑真实设备代码，
+    无本地化正确拒绝并回退、host-pinned 远端域被检出）。这是第 03/09/11 篇 `num_locality_domains=2`
+    调度分区的前置步骤。
     若无新指令，可视为专题完结。
 
   （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。

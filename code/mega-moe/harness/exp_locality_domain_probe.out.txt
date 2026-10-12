@@ -1,0 +1,51 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+=== P24-1 SM locality domain probe (real device kernel, H100) ===
+device=NVIDIA H100 80GB HBM3  sm_90  num_sms=132  L2=50 MB
+
+[A] probe chain: stride=7 lines/chunk=32 -> visits all lines once = YES
+
+[B] two DEVICE-memory domains (no MLOPart -> expect no stable mapping)
+    domain0       min=  591.0  med=  625.0  max=  665.0
+    domain1       min=  584.0  med=  624.0  max=  662.0
+    try_probe: clear=F consistent=F valid=F  worst ratio=1.000 (need >=1.25)
+    -> fallback get_even_sm_locality_domains: 66/66 SMs per domain, TPC-consistent=by construction
+
+[C] domain0=HBM, domain1=HOST-PINNED (simulated far domain -> expect detection)
+    domain0(HBM)  min=  588.0  med=  627.0  max=  686.0
+    domain1(HOST) min= 2186.0  med= 2333.0  max= 2484.0
+    try_probe: clear=T consistent=T valid=T  worst ratio=3.265
+    derived sm_domain: domain0=132 domain1=0 SMs (should be all 0: HBM is near)
+    balance: domain0=66 domain1=66 SMs, moved 66 SMs (~minimal to even split)
+
+[D] host-side try_probe / get_even / balance edge cases
+    clear & TPC-consistent mapping accepted        PASS
+      -> 66/66 SMs per domain                      PASS
+    ratio 1.10 < 1.25 rejected                     PASS
+    ratio exactly 1.25 accepted                    PASS
+    TPC-inconsistent (SM0!=SM1) rejected           PASS
+    balance(all-0) -> 66/66 SMs                    PASS
+    balance(all-1) -> 66/66 SMs                    PASS
+    balance(50/66) NOT a general balancer (17/49) [documented] PASS
+    get_even(8) == [0,0,1,1,0,0,1,1]               PASS
+    edge cases: 9 PASS / 0 FAIL
+
+done.
+
+=== [E] real DeepGEMM API (python) ===
+~/github/DeepGEMM/deep_gemm/utils/mlopart.py:37: UserWarning: MLOPart is unavailable; localization has been disabled
+  warnings.warn('MLOPart is unavailable; localization has been disabled')
+Traceback (most recent call last):
+  File "~/github/DeepGEMM/deep_gemm/utils/mlopart.py", line 134, in <module>
+    main(int(sys.argv[1]), sys.argv[2])
+  File "~/github/DeepGEMM/deep_gemm/utils/mlopart.py", line 127, in main
+    serve(sock)
+  File "~/github/DeepGEMM/deep_gemm/utils/mlopart.py", line 99, in serve
+    assert num_devices.value == NUM_LOCALITY_DOMAINS, f'{num_devices.value} MLOPart devices'
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 1 MLOPart devices
+get_num_locality_domains  = 2
+get_granularity           = 2097152
+is_localization_available = False
+num_sms = 132  get_even = [0, 0, 1, 1, 0, 0, 1, 1]
+sm_domains[:8] = [0, 0, 1, 1, 0, 0, 1, 1]  sum = 66  == get_even: True
+balanced[:8] = [0, 0, 1, 1, 0, 0, 1, 1]  sum = 66
