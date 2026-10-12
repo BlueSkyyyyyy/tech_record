@@ -818,3 +818,102 @@ smem）先启动后独占了设备的 kernel 派发通道，使随后在另一�
 **P25-1 状态**：构建 + JIT + launch + 收敛 + 正确性 + 端到端延迟**全部打通**，「不收敛」的根因也已由
 §11.4 的消融钉死（launch 顺序，而非内存序 / dtype / host 排序 / 频率 / occupancy）；本节给出可复现的
 绕过（`mpk_sched_first.patch`）。
+
+## 12. 多算子 megakernel 的端到端延迟（P26-1，clean scheduler-first 构建）
+
+§8 只测了**单层 RMSNorm**这一个算子的 megakernel，§11.6 在 clean 构建上复核也是单算子。本节把
+`docs/09` 的端到端延迟从「1 个算子」推进到「**一条 4 算子 DAG 编进同一个常驻 kernel**」，并扫 batch，
+补上 P25-1「下一步」可选方向③（「在 clean scheduler-first 构建上重跑多算子 / 更大 batch 的端到端延迟」）。
+
+### 12.1 方法
+
+- **被测图（4 算子、单 megakernel）**：一个 Qwen3 dense MLP block
+  `x --rmsnorm--> h --linear(gate+up)--> mid --silu_mul--> silu --linear_with_residual--> out`。
+  算子 API 与快照自带 `tests/runtime_python/test_mode/test_qwen3_mlp_testmode.py` 一致
+  （`linear` / `silu_mul` / `linear_with_residual`），前面再接一个 `rmsnorm_layer`：
+  `hidden=4096`、`intermediate=2048`（fused gate+up 输出维 4096）、bf16。
+- **clean 构建**：沿用 §11 的**唯一绕过**——`harness/mpk_sched_first.patch`（只交换 worker/scheduler
+  两条 launch 的顺序，**不动任何 kernel 代码**）+ `MPK_EXTRA_DEFINES=-DMPK_DBG_SCHED_FIRST`。
+  不使用 §7/§8 的内核侧时序插桩。
+- **脚本**：`harness/mpk_latency_multi.py`（在 `mpk_latency.py` 基础上把单算子换成 4 算子 DAG、加
+  batch 扫描与 torch kernel-per-operator 参照）；运行器 `harness/mpk_latency_multi.sh`（apply patch →
+  跑 → `trap EXIT` 还原）。
+- **计时口径**：与 §8.1 完全一致——每次 `pk()` 前后各记一对 CUDA event（`pk()` 内部把 default stream
+  `cudaStreamWaitEvent` 到 worker/scheduler 的 done event），读到的是「host 提交 → 双常驻 kernel
+  执行 → 终止 → stream 就绪」的一次调用完整往返。20 次 warmup + 200 次计时。
+- 环境：目标卡 H100/sm90、`CUDA_VISIBLE_DEVICES=7` 隔离空闲卡、快照 `f9eb70c`。
+  原始输出 `harness/mpk_latency_multi.out.txt`（batch 扫描）与
+  `harness/mpk_latency_multi_config.out.txt`（worker 数扫描）。
+
+### 12.2 结果
+
+**A) batch 扫描（128 worker / 16 scheduler = 论文 §5.1 / 官方 `get_configurations_from_gpu`）**
+
+| batch | tasks / events | max\|out−ref\| | mean (µs) | median | min | max | sd | torch k-o (µs) | MPK 相对 torch |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 163 / 37 | 1.56e-02 | **49.62** | 48.83 | 37.38 | 80.64 | 8.27 | 175.52 | **3.54×** |
+| 4 | 166 / 37 | 1.56e-02 | **46.29** | 43.57 | 38.53 | 71.04 | 6.29 | 195.95 | **4.23×** |
+| 8 | 170 / 37 | 1.56e-02 | **41.48** | 41.41 | 39.52 | 50.53 | 0.91 | 200.01 | **4.82×** |
+| 16 | 178 / 37 | 1.56e-02 | **46.43** | 46.37 | 44.93 | 56.74 | 0.95 | 201.85 | **4.35×** |
+| 32 | — | — | **BUILD_FAIL** | — | — | — | — | 204.26 | — |
+
+**B) worker 数扫描（batch=16，固定图 178 task / 37 event）**
+
+| workers / sched | max\|out−ref\| | mean (µs) | median | sd | torch k-o (µs) | MPK 相对 torch |
+|---|---|---|---|---|---|---|
+| 128 / 16 | 1.56e-02 | 47.08 | 47.07 | 1.18 | 200.72 | 4.26× |
+| 64 / 16 | 1.56e-02 | **41.58** | 41.55 | 1.44 | 204.60 | 4.92× |
+| 16 / 16 | 1.56e-02 | **42.51** | 42.50 | 1.12 | 204.39 | 4.81× |
+
+- **正确性**：所有成功 case `max|out−ref| = 1.56e-02`（bf16，与 §7/§11 用 0.05 容差一致）。
+- **回归对照**：`[MPK INIT] Total tasks: 163/166/170/178, Total events: 37` 随 batch 递增（rmsnorm
+  是 `grid=(batch,1,1)`，多出 batch 个 rmsnorm task）；线性/ silu 部分固定 64+32+64 = 160 task。
+- **一个真实编译约束（batch=32 失败）**：`linear_swapAB_hopper.cuh:71` 的
+  `static_assert(BATCH_SIZE <= 16, "Batch size must be smaller or equal to 16 in swapAB")`
+  （源码注释 `:69-70` 写「Assume batch size is smaller than 16, and padding the batch size to 16」）
+  ——该快照的 swapAB 线性路径**在编译期就把 batch 上限定死为 16**，故 batch=32 的 MLP 图**根本编不出**。
+  脚本对每档用 try/except 捕获、打印 `BUILD_FAIL` 后继续，故整轮仍 `exit=0`。
+
+### 12.3 读法：从算子粒度损失到「算子数」的标度
+
+1. **多算子延迟与单算子同量级——增算子的边际成本极低**。4 算子的块在 128/16、batch=16 是
+   **46.4 µs**，而 §8 的单算子 RMSNorm 是 **39.05 µs**（同构建口径不同之处见 §12.4）：**多编进
+   3 个算子（约 +160 个 task）只让一次调用慢 ~7.4 µs（1.19×）**。原因是它们全在**同一个常驻
+   kernel** 里（判据 C1：`pk()` 仍只提交一对常驻 kernel），算子之间不再有 host launch 与
+   kernel barrier，只有设备内 event 依赖。
+2. **对 kernel-per-operator 的加速随算子数放大**。torch 的同一块：单算子 RMSNorm 是 **53.99 µs**
+   （§8），4 算子块涨到 **175–205 µs**（每个 `linear`/`silu`/`residual` 各自展开成多个小 kernel、
+   中间量落 HBM、逐个 host 提交）；MPK 只从 ~39 涨到 ~41–49 µs。于是比值从单算子的 **1.38×**
+   （§8）升到 4 算子的 **3.5–4.8×**。**「加 3 个算子的代价」MPK ≈ 7.4 µs vs torch ≈ 148 µs
+   （约 5%）**，正是 §8.3 预言「**算子数与中间量越大，MPK 优势越大**」的实测兑现，也再次对上
+   `docs/04` §9/§17 的损失二（launch）与损失三（中间张量 HBM 往返）。
+3. **延迟对 batch 与 worker 数都近乎不敏感**。batch 1→16 延迟基本持平（41.5–49.6 µs，无单调趋势），
+   worker 128→16 也只差 ~10%（47.1→42.5 µs）。**主导项仍是「双常驻 kernel 的启动 + 设备内
+   scheduler 冷启动 + done-event 终止握手」**（§8.3），不是本用例的计算量——batch=16、hidden=4096
+   的 MLP 只有几 MFLOP，本可忽略。
+4. **单算子 vs 多算子差的那 ~7 µs**：既含真实多出的 event 依赖链与线性/silu task，也含
+   「更多 task 类型 → 更大的 kernel 镜像」的一点点进场成本；本用例量级太小，无法把二者拆开，
+   但方向与 `docs/04` §10/§11 的代码足迹一致（task 类型越多，执行代码工作集越大）。
+
+### 12.4 局限与定性
+
+- **仍是单 block 微内核**（1 个 norm + 1 个 MLP，共 4 算子），不是论文 §6 的整模型端到端；
+  `hidden`/`intermediate` 未扫；`offline`/`test_mode` 下一 batch 即终止，**不含** serving 稳态。
+- **torch 参照是 kernel-per-operator 朴素实现**（未做 `torch.compile` / 算子融合），故 3.5–4.8× 是
+  相对「最朴素」的比值；换成融合/`compile` 的 torch 会缩小，但本文关心的是「同一 DAG 上
+  megakernel vs 一算子一 kernel」的机制差。
+- **依赖 scheduler-first 绕过**：根因（设备侧 worker 先启动饿死 scheduler 派发）见 §11；本节所有数字
+  来自该 clean 绕过构建，不是上游默认 launch 顺序的构建。
+- **batch 上界 16 来自快照编译期 `static_assert`**（§12.2），不是运行时限制——换非 swapAB 线性路径或
+  改该常量可能解锁更大 batch，本轮未做。
+
+### 12.5 判据小结（本节新增）
+
+| 判据 | 内容 | 结论 |
+|---|---|---|
+| 十二 | 4 算子编进单常驻 kernel，`pk()` 仍单次提交、逐位正确 | C1 在多算子图成立 |
+| 十三 | 增 3 算子的边际延迟 ~7.4 µs（MPK）vs ~148 µs（kernel-per-operator） | 损失二/三随算子数放大 |
+| 十四 | 延迟对 batch(1→16) 与 worker(128→16) 均近乎不敏感 | 主导项是启动/终止协议 |
+
+**P26-1 完成**：在 §11 的 clean scheduler-first 构建上，把端到端延迟从单算子推进到 4 算子 DAG，
+给出 batch / worker 扫描、正确性、与 kernel-per-operator 的加速标度，并记录快照的 batch≤16 编译约束。

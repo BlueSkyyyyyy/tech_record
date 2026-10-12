@@ -1,0 +1,14 @@
+[env] multi-op megakernel: rmsnorm -> linear(gate+up) -> silu_mul -> linear+residual; hidden=4096 inter=2048 dtype=torch.bfloat16 iters=200 warmup=20
+ batch workers sched   max|out-ref|   mean(us)   median      min      max      sd  torch(us)
+[MPK INIT] Total tasks: 163, Total events: 37
+     1     128    16   1.562500e-02     49.620   48.832   37.376   80.640   8.265    175.524  (compile 27.5s)
+[MPK INIT] Total tasks: 166, Total events: 37
+     4     128    16   1.562500e-02     46.288   43.568   38.528   71.040   6.285    195.946  (compile 29.2s)
+[MPK INIT] Total tasks: 170, Total events: 37
+     8     128    16   1.562500e-02     41.477   41.408   39.520   50.528   0.906    200.010  (compile 28.3s)
+[MPK INIT] Total tasks: 178, Total events: 37
+    16     128    16   1.562500e-02     46.433   46.368   44.928   56.736   0.949    201.850  (compile 28.9s)
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/tasks/hopper/linear_swapAB_hopper.cuh(71): error: static assertion failed with "Batch size must be smaller or equal to 16 in swapAB"
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/tasks/hopper/linear_swapAB_hopper.cuh(71): error: static assertion failed with "Batch size must be smaller or equal to 16 in swapAB"
+    32     128    16     BUILD_FAIL    204.261  <-- CalledProcessError: Command '['/usr/local/cuda/bin/nvcc', '/tmp/tmpxh4qwb1z/test.cu', '-O3', '-lineinfo', '-I/usr/include/python3.12', '-I/s
+exit=0

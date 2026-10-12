@@ -525,6 +525,33 @@
         `harness/mpk_latency_schedfirst.out.txt`。**P25-1 记 `[x]`**：构建+JIT+launch+收敛+正确性+延迟
         全打通，不收敛根因由 §11.4 的顺序消融钉死（launch 顺序，非内存序/dtype/host 排序/频率/occupancy）。
 
+### P26 实验扩展 15：多算子 megakernel 的端到端延迟（`docs/09-mpk-build.md` §12）
+
+- [x] **P26-1** 把 `docs/09` 的端到端延迟从「单层 RMSNorm」推进到「**一条 4 算子 DAG 编进同一个
+      常驻 kernel**」，并扫 batch，兑现阶段「下一步」可选方向③（clean scheduler-first 构建上重跑
+      多算子/更大 batch 延迟）。见 `docs/09-mpk-build.md` §12，源码/脚本
+      `harness/mpk_latency_multi.py`、运行器 `harness/mpk_latency_multi.sh`，原始输出
+      `harness/mpk_latency_multi.out.txt`（batch 扫描）与 `harness/mpk_latency_multi_config.out.txt`
+      （worker 数扫描）（目标卡 H100/sm90，device 7，iters=200，warmup=20，`f9eb70c`，clean 绕过
+      `harness/mpk_sched_first.patch`，**不动 kernel 代码**）。
+      被测图 = Qwen3 dense MLP block：`rmsnorm → linear(gate+up) → silu_mul → linear_with_residual`
+      （hidden=4096、inter=2048、bf16），API 同快照 `test_qwen3_mlp_testmode.py`。核心结论：
+      - **多算子延迟与单算子同量级**：4 算子块 128/16、batch=16 = **46.4 µs**，比 §8 单算子 39.05 µs
+        只慢 ~7.4 µs（1.19×）——3 个算子（~+160 task）全在**同一个常驻 kernel** 内（C1 仍单次提交、
+        设备内 event 依赖、无 host launch/kernel barrier）。
+      - **对 kernel-per-operator 的加速随算子数放大**：torch 朴素同块 175–205 µs（vs 单算子 54 µs），
+        故比值从单算子 **1.38×**（§8）升到 4 算子 **3.5–4.8×**；「加 3 算子的边际代价」MPK ~7.4 µs
+        vs torch ~148 µs（约 5%），兑现 §8.3「算子数/中间量越大 MPK 优势越大」，对上 `docs/04`
+        §9/§17 损失二/三。
+      - **延迟对 batch 与 worker 数均近乎不敏感**：batch 1→16 在 41.5–49.6 µs 间无单调趋势、worker
+        128→16 只差 ~10%——主导项仍是「双常驻 kernel 启动 + scheduler 冷启动 + done-event 终止协议」
+        （§8.3），非本用例计算量。
+      - **快照硬约束（batch≤16）**：batch=32 的 MLP 图**编译期**就失败——`linear_swapAB_hopper.cuh:71`
+        的 `static_assert(BATCH_SIZE <= 16, "…in swapAB")`（注释 `:69-70`），脚本 try/except 记
+        `BUILD_FAIL` 后继续（整轮 `exit=0`）。
+      - 所有成功 case `max|out−ref|=1.56e-02`（bf16 容差内）；`Total tasks` 163/166/170/178 随 batch
+        递增、events 恒 37。判据：C1 在多算子图成立（判据十二/十三/十四见 §12.5）。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -547,7 +574,12 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P25-1（续 5）根因钉死、P25-1 记 `[x]`，本专题 P0–P25 全部完成**。用 **cuda-gdb
+- 当前进度：**P26-1 完成（1/1），本专题 P0–P26 全部完成**。P26-1 在 §11 的 clean
+  scheduler-first 构建上把 `docs/09` 的端到端延迟从单算子推进到 **4 算子 DAG 单 megakernel**
+  （`docs/09` §12，`harness/mpk_latency_multi.py/.sh` + `harness/mpk_latency_multi{,_config}.out.txt`）：
+  多算子延迟 41.5–49.6 µs、比单算子只慢 ~1.2×，相对 kernel-per-operator 从单算子 1.38× 升到
+  **3.5–4.8×**，并记录快照 `linear_swapAB_hopper.cuh:71` 的 **batch≤16 编译期硬约束**。
+  此前 **P25-1（续 5）根因钉死、P25-1 记 `[x]`**：用 **cuda-gdb
   attach** 拿到设备侧证据（挂起时只 `worker_kernel` 常驻、spinning 在取 task 的 `ld_acquire`；
   `scheduler_kernel` 从未被派发，4:4 下 128 SM 空闲亦如此），并用**只交换 launch 顺序**的消融
   （scheduler 先于 worker）让 plain 构建 **4/4 收敛且正确**——详见 `docs/09` §11 与下方本轮条目。
@@ -639,14 +671,19 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：全专题收尾（P0–P25 全部完成）**。P25-1 已构建 + launch + **收敛 + 正确性 + 端到端延迟**，
-  并且「不收敛」根因已由 `docs/09` §11 钉死：**cuda-gdb attach** 证据（挂起时只有 `worker_kernel` 常驻、
-  spinning 在取 task 的 `ld_acquire`；`scheduler_kernel` 从未被派发，4:4 下 128 SM 空闲亦如此）+
-  **launch 顺序消融**（scheduler 先于 worker launch → plain 构建 4/4 收敛且正确，`mpk_sched_first.patch`）。
-  §9/§10 追的 dtype 转换只是「扰动 scheduler 派发时机」的同一旋钮。**无遗留必做项**；如再增量可选：
+- **下一步：全专题收尾（P0–P26 全部完成）**。P26-1 已在 clean scheduler-first 构建上把端到端延迟
+  从单算子推进到 4 算子 DAG（`docs/09` §12），**兑现下面的可选方向③**。P25-1 已构建 + launch +
+  **收敛 + 正确性 + 端到端延迟**，并且「不收敛」根因已由 `docs/09` §11 钉死：**cuda-gdb attach**
+  证据（挂起时只有 `worker_kernel` 常驻、spinning 在取 task 的 `ld_acquire`；`scheduler_kernel`
+  从未被派发，4:4 下 128 SM 空闲亦如此）+ **launch 顺序消融**（scheduler 先于 worker launch →
+  plain 构建 4/4 收敛且正确，`mpk_sched_first.patch`）。§9/§10 追的 dtype 转换只是「扰动 scheduler
+  派发时机」的同一旋钮。**无遗留必做项**；如再增量可选：
   ① 用 `-G`（设备调试信息）重编译以读取 `config.all_event_counters`，把「卡在哪个 event」的数值也钉死；
-  ② 把 scheduler-first 的顺序离线报告给 MPK 上游核对（不构成 bug 判定）；③ 在 clean scheduler-first 构建上
-  重跑多算子/更大 batch 的端到端延迟。注意 z3 版本互斥（「阻塞」B2）。现象刻画见 `docs/09` §7–§11，延迟见 §8/§11.6。
+  ② 把 scheduler-first 的顺序离线报告给 MPK 上游核对（不构成 bug 判定）；
+  ③ ~~在 clean scheduler-first 构建上重跑多算子/更大 batch 的端到端延迟~~（**P26-1 完成**：4 算子
+  43–50 µs / 相对 kernel-per-operator 3.5–4.8×，并记录 batch≤16 编译期约束；更大 batch>16 受
+  `linear_swapAB_hopper.cuh:71` 阻，未做）。
+  注意 z3 版本互斥（「阻塞」B2）。现象刻画见 `docs/09` §7–§11，延迟见 §8/§11.6/§12。
 - 其它可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
@@ -694,6 +731,25 @@
   - **局限**：未把根因收敛到某条 load/store 内存序；端到端延迟仍未测（只测正确性+收敛/挂起）。
     下一步候选：`compute-sanitizer --tool racecheck` 抓竞争、把自旋换成 `__nanosleep` 退避验证纯时序、
     向 MPK 上游核对 `f9eb70c` worker 抢跑路径。**不构成对上游的 bug 判定**。P25-1 仍记 `[~]`。
+- **本轮（P26-1）**：`docs/09-mpk-build.md` 新增 **§12**「多算子 megakernel 的端到端延迟」——新建
+  `harness/mpk_latency_multi.py`（4 算子 DAG 单 megakernel + batch 扫描 + torch kernel-per-operator
+  参照）、运行器 `harness/mpk_latency_multi.sh`（clean 绕过 `harness/mpk_sched_first.patch`，**不动
+  kernel 代码**），原始输出 `harness/mpk_latency_multi.out.txt`（batch 扫描）与
+  `harness/mpk_latency_multi_config.out.txt`（worker 数扫描）。被测图 = Qwen3 dense MLP block
+  `rmsnorm → linear(gate+up) → silu_mul → linear_with_residual`（hidden=4096、inter=2048、bf16），
+  目标卡 H100/sm90、device 7、iters=200、快照 `f9eb70c`。核心结论：
+  (1) **多算子延迟与单算子同量级**——4 算子块 128/16、batch=16 = **46.4 µs**，比 §8 单算子 39.05 µs
+  只慢 ~7.4 µs（1.19×），因 3 个新增算子（~+160 task）全在**同一个常驻 kernel** 内（C1 仍单次提交、
+  设备内 event 依赖、无 host launch / kernel barrier）；(2) **对 kernel-per-operator 的加速随算子数
+  放大**——torch 朴素同块 175–205 µs，比值从单算子 **1.38×**（§8）升到 4 算子 **3.5–4.8×**，
+  「加 3 算子的边际代价」MPK ~7.4 µs vs torch ~148 µs（约 5%），兑现 §8.3「算子数/中间量越大 MPK
+  优势越大」，对上 `docs/04` §9/§17 损失二/三；(3) **延迟对 batch(1→16) 与 worker(128→16) 均近乎
+  不敏感**（41.5–49.6 µs / ~10%），主导项仍是「双常驻 kernel 启动 + scheduler 冷启动 + done-event
+  终止协议」；(4) **快照硬约束**——batch=32 的 MLP 图**编译期**失败于 `linear_swapAB_hopper.cuh:71`
+  的 `static_assert(BATCH_SIZE <= 16, "…in swapAB")`（注释 `:69-70`），脚本记 `BUILD_FAIL` 后继续。
+  所有成功 case `max|out−ref|=1.56e-02`；`Total tasks` 163/166/170/178、events 恒 37。判据 C1 在多算子
+  图成立（§12.5 判据十二/十三/十四）。**本轮新增实验**；兑现「下一步」可选方向③。z3 已按 B2 用后
+  恢复 `4.15.4.0`。
 - **本轮（P25-1 续 5，根因钉死）**：续做 P25-1 的**根因定位**（§10.7 候选①「设备侧事件级证据」），
   用 **cuda-gdb attach 已挂起的进程**（非侵入式，避免 §9.3/§9.4 的插桩扰动），把「不收敛」钉死到
   **launch 顺序**。`docs/09-mpk-build.md` 新增 **§11**；新脚本 `harness/mpk_cudagdb_probe.py`、
