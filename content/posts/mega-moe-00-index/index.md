@@ -38,5 +38,6 @@ categories: ["算子开发"]
 17. [DeepGEMM einsum 批归约 GEMM `bmk,bnk->mn`：跨 batch/rank 的权重梯度融合]({{< relref "mega-moe-17-einsum-batch-reduced-gemm" >}}) —— batch 并入收缩轴、split-K + atomicAdd 归约（非确定性实测）、SM100 TMA reduce-add、H100 性能
 18. [DeepGEMM einsum MLA 投影 `bhr,hdr->bhd` / `bhd,hdr->bhr`：按头 batched GEMM]({{< relref "mega-moe-18-einsum-mla-batched-gemm" >}}) —— 头=group 的 3D TMA、K/MN-major 角色、带 padding 的权重、TMA reduce-add 累加、H100 性能
 19. [DeepGEMM 稀疏注意力 indexer 的 MQA logits：连续 / 分页路径]({{< relref "mega-moe-19-attention-mqa-logits" >}}) —— 加权 ReLU MQA 打分、Q 在 B 侧/KV 在 A 侧、逐 token fp32 KV scale、两级 warp 归约、PDL、H100 实测
+20. [BF16 Mega MoE 变体精读：`bf16_mega_moe`]({{< relref "mega-moe-20-bf16-mega-moe" >}}) —— 一套骨架两种 MmaKind、去掉 SF/UTCCP/UE8M0、block_k=64、L1 in-place SwiGLU（bf16 in/out）、L2 RNE cast、host 配置与缓冲区实测
 
 > 各篇正文由仓库 `code/mega-moe/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

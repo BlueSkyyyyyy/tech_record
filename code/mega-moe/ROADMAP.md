@@ -269,6 +269,31 @@
       分页 3 组 `vs_sim` ~2e-3、230–370 TFLOPS；6 项契约非法输入全部按预期被拒（行号见 `attention.hpp`）。
       配套博客 `content/posts/mega-moe-19-attention-mqa-logits`（索引页新增第 19 篇）。
 
+### P10 增量（opt-in，Mega MoE 的 BF16 变体）
+
+- [x] **P10-1** **BF16 Mega MoE**（`bf16_mega_moe` / `sm100_bf16_mega_moe.cuh`）：Mega MoE 的
+      第二个主 kernel——同一套骨架（dispatch→L1→SwiGLU→L2→combine、ring、通信-计算重叠）
+      换 `MmaKind::BF16`，去掉整条 block-scale 通路。**SM100 专属，仅分析**（`mega_moe.hpp:367`
+      只在 arch10 派发；`kernel:68` 整段 `#if __CUDA_ARCH__>=1000`）。
+      → `docs/20-bf16-mega-moe.md`（真实行号核对）。**要点**：host 入口 `mega_moe.hpp:285-369`
+      （只收 BF16 权重 `:313-315`、无 `recipe`、`get_symm_buffer_size(..., "bf16xbf16", ...)` `:352`、
+      `with_sf=false` → 切片 `x_sf=None`）；启发式 `heuristics/mega_moe.hpp:73-86` 的 `MmaKind`
+      分流、`:88-127` 的 `block_k=128/elem_bytes`（**BF16=64、FP8=128**）与
+      `store_block_m_l1` 240 行取 40（FP8/FP4 取 24）、`:223-229` 的 `num_bytes_per_pull`
+      （BF16 cap 4096B）。kernel `sm100_bf16_mega_moe.cuh`：模板 `:21-51`、`with_sf=false` `:111`、
+      `a/b/d=bfloat16` `:119-121`、TMEM 只放累加器 `:158-160`、**唯一 UMMA**
+      `SM100_MMA_F16BF16_2x1SM_SS` `:795`（无 UTCCP/SF）、`UMMA_BLOCK_K/UMMA_K=64/16` `:128-129`；
+      L1 epilogue in-place SwiGLU `:883-1027`（gate/up 先 round bf16 `:949-950`、clamp `:953-957`、
+      `kFastMath` 用 `__expf`+`fast_rcp` `:961-969`、输出 bf16 `:971-972`）；L2 epilogue bf16 直写
+      远端 `:1133-1138`（`cast_into_bf16_and_pack`=RNE）；combine `:1152-1308` 与 FP8 版逐行复用。
+      H100 实测 `harness/exp_bf16_mega_moe.{py,sh,out.txt}` + `src/bf16_mega_moe_epilogue.cu`：
+      ① `block_m` 13 组形状 BF16/FP8 **全一致**、仅 `block_k` 64/128 分化；② symm buffer
+      BF16 2713.5MB vs FP8 2145.3MB（**1.265×**）、`x_sf=None`；③ `num_bytes_per_pull`
+      7168→3584/3584；④ 权重重排 diff **0.0**、l2 同对象；⑤ L1 SwiGLU「bf16 in→fp32 silu→
+      bf16 out」vs fp64 rel 3.89e-3（输出 1 ulp），fast-math 叠加 7.0e-3，clamp 生效；
+      ⑥ L2 cast 2.1M 对 **vs RNE 不符 0**、vs 截断 1.57M。配套博客
+      `content/posts/mega-moe-20-bf16-mega-moe`（索引页新增第 20 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -293,8 +318,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0/P1/P2/P3/P4/P5/P6 全部完成；P7-1/P7-2、P8-1/P8-2、P9-1 完成。**
-  本轮 P9-1：新建 `docs/19-attention-mqa-logits.md`（+`harness/exp_mqa_logits.{py,sh,out.txt}`）
+- 当前进度：**P0~P9 全部完成；P10-1 完成。**
+  本轮 P10-1：新建 `docs/20-bf16-mega-moe.md`（+`harness/exp_bf16_mega_moe.{py,sh,out.txt}`、
+  `src/bf16_mega_moe_epilogue.cu`）——补上 Mega MoE 的**第二个主 kernel** `bf16_mega_moe`
+  （`sm100_bf16_mega_moe.cuh`）。同一套骨架（dispatch→L1→SwiGLU→L2→combine、ring、重叠）
+  换 `MmaKind::BF16`，**去掉整条 block-scale（SF/UTCCP/UE8M0）通路**：`a/b/d=bfloat16`、
+  `block_k=64`（FP8=128）、唯一 UMMA `SM100_MMA_F16BF16_2x1SM_SS`、L1 epilogue 直接产出
+  bf16（gate/up 先 round bf16 再 silu，`kFastMath`=__expf+rcp.approx）、L2 bf16 直写远端
+  combine；combine 段与 FP8 版逐行复用。host 侧 `get_symm_buffer_size(..., "bf16xbf16")`
+  `with_sf=false`（切片 `x_sf=None`）。**SM100 专属，仅分析**（`mega_moe.hpp:367`；kernel:68）。
+  H100 实测：block_m 13 组 BF16/FP8 全一致、buffer 1.265×、权重重排 0.0、L1 SwiGLU
+  「bf16 in→fp32 silu→bf16 out」rel 3.89e-3（输出 1 ulp）、L2 cast vs RNE 不符 0。
+  配套博客 `content/posts/mega-moe-20-bf16-mega-moe`（索引页新增第 20 篇）。Hugo 构建 0 ERROR。
+  上一轮 P9-1：新建 `docs/19-attention-mqa-logits.md`（+`harness/exp_mqa_logits.{py,sh,out.txt}`）
   ——拆出 DeepSeek 稀疏注意力 **indexer 的 MQA logits**（`fp8_fp4_mqa_logits` 连续 /
   `fp8_fp4_paged_mqa_logits` 分页；**SM90 有实现，H100 可跑**）。语义
   `out_ij = Σ_h relu(<q[i,h,:], kv_j>)·w[i,h]`（README `:100-108`）、KV 每 token 一个 fp32 scale、
@@ -306,7 +342,7 @@
   `vs_ref` 3–5e-2、掩码逐位一致、重复逐位相等，H=64,D=128 **497 TFLOPS**；分页 230–370 TFLOPS；
   6 项契约非法输入全部被拒。配套博客 `content/posts/mega-moe-19-attention-mqa-logits`
   （索引页新增第 19 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P9 已完成。后续若继续（均为增量、非承诺）：
+- **下一步**：P0~P10 已完成。后续若继续（均为增量、非承诺）：
   ① **sparse attention 系列**：`fp8_fp4_mqa_logits` 的 SM100 MXFP4/MXFP8、`get_mqa_logits_metadata`
   负载均衡调度、`fp8_fp4_sparse_mqa_logits`（top-k 块）、`fp8_fp4_paged_sparse_mqa_logits`
   （arch10 专属，仅分析；sparse 版还有 SM90 可试的部分吗需查）；
@@ -314,7 +350,8 @@
   仅分析；`bhr,hdr->bhd` 的 fp8 版 SM90 可试跑）；
   ③ **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
   并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）；
-  ④ **Mega MoE 端到端**：需 SM100 机器，当前不可行。
+  ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
+   shared expert 分支的更深精读，或 `transform_sf_into_required_layout` 通用布局；端到端需 SM100，当前不可行。
   若无新指令，可视为专题完结。
 
   （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。
