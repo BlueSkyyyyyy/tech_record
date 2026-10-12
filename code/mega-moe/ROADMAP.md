@@ -33,8 +33,9 @@
 
 ### P0 侦察与基础
 
-- [ ] **P0-1** 读通 DeepGEMM：`csrc/apis/mega_moe.hpp`、`deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh`、
+- [x] **P0-1** 读通 DeepGEMM：`csrc/apis/mega_moe.hpp`、`deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh`、
       `scheduler/mega_moe.cuh`、`layout/mega_moe.cuh`、`tests/test_mega_moe.py`，产出数据流脑图。
+      → `docs/02-mega-moe-architecture.md`（commit `057ca59` 行号核实）。
 - [ ] **P0-2** 补充线上资料：DeepGEMM README/release notes 中 Mega MoE 段落、PR #316；记录引用链接。
 - [ ] **P0-3** 访问 `~/github/DeepEP`：dispatch/combine kernel 与 symmetric memory 的接口与数据流。
 - [ ] **P0-4** 环境探测：`kernel_lab` 里能否编译/跑 DeepGEMM 的 SM90 部分（`pip install -e ~/github/DeepGEMM`，
@@ -48,10 +49,11 @@
 
 ### P2 Mega MoE 架构（`docs/02-mega-moe-architecture.md`）
 
-- [ ] **P2-1** 整体设计：单 kernel 融合 5 段；symmetric buffer、`transform_weights_for_mega_moe` 布局。
-- [ ] **P2-2** 「通信-计算重叠」机制：ring buffer / pool blocks / task 调度（`scheduler/mega_moe.cuh`）、
-      dispatch warp 与 MMA/epilogue warp 的分工。
-- [ ] **P2-3** 与「先通信后计算」「chunked 分步」方案的对比（为什么更快）。
+- [~] **P2-1** 整体设计：单 kernel 融合 5 段；symmetric buffer、`transform_weights_for_mega_moe` 布局。
+      → `docs/02` §2-§3 已给数据流脑图与 `MegaMoEBuffer` 布局；`transform_weights_for_mega_moe` 权重布局待补。
+- [x] **P2-2** 「通信-计算重叠」机制：ring buffer / pool blocks / task 调度（`scheduler/mega_moe.cuh`）、
+      dispatch warp 与 MMA/epilogue warp 的分工。→ `docs/02` §4-§5。
+- [x] **P2-3** 与「先通信后计算」「chunked 分步」方案的对比（为什么更快）。→ `docs/02` §7。
 
 ### P3 主体 kernel 精读（`docs/03-mega-moe-kernel.md`）
 
@@ -98,8 +100,11 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：脚手架就绪（README/ROADMAP/docs/scripts/posts/skill），autopilot 待首轮侦察。
-- **下一步：P0-1** 读通 DeepGEMM Mega MoE 相关源码，产出数据流脑图 `docs/02-mega-moe-architecture.md` 初稿。
+- 当前进度：**P0-1 完成**——已读通 DeepGEMM Mega MoE 五个源文件，产出数据流脑图与架构解析
+  `docs/02-mega-moe-architecture.md`（含 `layout`/`scheduler`/主体 kernel 的真实行号核对），
+  P2-2/P2-3 一并覆盖；P2-1 的 `transform_weights_for_mega_moe` 权重布局留待补。
+- **下一步：P0-2** 补充线上资料（DeepGEMM README/release notes 的 Mega MoE 段落、PR #316），
+  记录真实引用链接；并补 `transform_weights_for_mega_moe` 布局。
 
 ## 阻塞
 

@@ -20,7 +20,7 @@ categories: ["算子开发"]
 ## 目录
 
 1. [MoE 与专家并行（EP）基础]({{< relref "mega-moe-01-basics" >}}) —— 计算图、grouped GEMM、dispatch/combine
-2. Mega MoE 整体架构与通信-计算重叠（待写）
+2. [Mega MoE 整体架构与通信-计算重叠]({{< relref "mega-moe-02-architecture" >}}) —— 数据流、缓冲区、调度器、warp 分工
 3. `sm100_fp8_fp4_mega_moe.cuh` 逐段精读（待写）
 4. MoE 反向：wgrad / dgrad grouped GEMM（待写）
 5. Mega Gate / Mega mHC（待写）
