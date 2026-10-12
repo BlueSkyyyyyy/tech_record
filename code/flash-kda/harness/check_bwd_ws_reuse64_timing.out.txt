@@ -1,0 +1,22 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+
+============================================================================================
+Part C: backward-only timing — workspace->64 chain vs workspace->16 chain (P6-8)
+============================================================================================
+  case               | ours64 wall ours64 dev | ours16 wall ours16 dev | dev 64/16
+  T=512 H=4          |       516.6      241.3 |       361.1      120.6 |      2.00
+       64: _dav_kernel=7.0  _dhu_kernel=20.8  wy_dqkg=62.1  intra=82.8  chunk_local_cumsum=2.4
+       16: _dav_kernel=3.5  _dhu_kernel=45.7  wy_dqkg=21.7  intra=15.1  chunk_local_cumsum=2.1
+  B2 T=1024 H=8      |       906.2      856.2 |       471.4      432.2 |      1.98
+       64: _dav_kernel=15.6  _dhu_kernel=55.0  wy_dqkg=223.7  intra=381.4  chunk_local_cumsum=6.7
+       16: _dav_kernel=11.1  _dhu_kernel=119.9  wy_dqkg=125.7  intra=80.2  chunk_local_cumsum=6.0
+  B8 T=2048 H=8      |      6157.8     6124.3 |      2517.9     2476.3 |      2.47
+       64: _dav_kernel=101.0  _dhu_kernel=193.5  wy_dqkg=1730.1  intra=3003.5  chunk_local_cumsum=45.8
+       16: _dav_kernel=75.7  _dhu_kernel=385.9  wy_dqkg=900.6  intra=559.1  chunk_local_cumsum=46.0
+  T=250 H=3 nondiv   |       540.8      202.6 |       449.2       80.0 |      2.53
+       64: _dav_kernel=6.0  _dhu_kernel=11.2  wy_dqkg=56.1  intra=80.2  chunk_local_cumsum=2.2
+       16: _dav_kernel=2.6  _dhu_kernel=22.8  wy_dqkg=14.1  intra=12.4  chunk_local_cumsum=1.6
+
+DONE

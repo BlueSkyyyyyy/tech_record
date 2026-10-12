@@ -1,0 +1,95 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+============================================================================================
+Part A: recovered 64-chunk operands (16-chunk workspace) vs FLA forward@64
+============================================================================================
+
+# T=256 H=2  B=1 T=256 H=2  Tp=256  NT64=4
+  rec64  qg                  max_abs=8.020e-04  max_rel=4.563e-03  ref_max=1.758e-01
+  rec64  kg                  max_abs=1.953e-03  max_rel=7.042e-03  ref_max=2.773e-01
+  rec64  w                   max_abs=7.373e-04  max_rel=8.436e-03  ref_max=8.740e-02
+  rec64  g_cum               max_abs=1.776e-01  max_rel=6.252e-04  ref_max=2.840e+02
+  rec64  v_new(U64)          max_abs=5.099e-02  max_rel=1.656e-02  ref_max=3.078e+00
+  rec64  Akk(P64)            max_abs=1.779e-02  max_rel=1.779e-02  ref_max=1.000e+00
+  rec64  h(S_in)             max_abs=2.916e-03  max_rel=6.464e-03  ref_max=4.512e-01
+
+# T=250 H=3 non-div  B=1 T=250 H=3  Tp=256  NT64=4
+  rec64  qg                  max_abs=1.460e-03  max_rel=7.829e-03  ref_max=1.865e-01
+  rec64  kg                  max_abs=1.953e-03  max_rel=6.579e-03  ref_max=2.969e-01
+  rec64  w                   max_abs=5.747e-04  max_rel=7.265e-03  ref_max=7.910e-02
+  rec64  g_cum               max_abs=2.344e-01  max_rel=7.930e-04  ref_max=2.956e+02
+  rec64  v_new(U64)          max_abs=5.245e-02  max_rel=1.637e-02  ref_max=3.203e+00
+  rec64  Akk(P64)            max_abs=2.489e-02  max_rel=2.489e-02  ref_max=1.000e+00
+  rec64  h(S_in)             max_abs=5.053e-03  max_rel=5.934e-03  ref_max=8.516e-01
+
+# B2 T=513 H=2 non-div  B=2 T=513 H=2  Tp=576  NT64=9
+  rec64  qg                  max_abs=7.589e-04  max_rel=3.096e-03  ref_max=2.451e-01
+  rec64  kg                  max_abs=1.953e-03  max_rel=6.061e-03  ref_max=3.223e-01
+  rec64  w                   max_abs=1.053e-03  max_rel=8.727e-03  ref_max=1.206e-01
+  rec64  g_cum               max_abs=2.201e-01  max_rel=7.548e-04  ref_max=2.915e+02
+  rec64  v_new(U64)          max_abs=7.325e-02  max_rel=1.803e-02  ref_max=4.062e+00
+  rec64  Akk(P64)            max_abs=2.950e-02  max_rel=2.950e-02  ref_max=1.000e+00
+  rec64  h(S_in)             max_abs=5.018e-03  max_rel=6.907e-03  ref_max=7.266e-01
+
+# T=192 H=2 g=0  B=1 T=192 H=2  Tp=192  NT64=3
+  rec64  qg                  max_abs=2.295e-04  max_rel=8.283e-03  ref_max=2.771e-02
+  rec64  kg                  max_abs=9.766e-04  max_rel=3.125e-03  ref_max=3.125e-01
+  rec64  w                   max_abs=1.273e-04  max_rel=8.477e-03  ref_max=1.501e-02
+  rec64  g_cum               max_abs=7.203e-01  max_rel=2.628e-03  ref_max=2.741e+02
+  rec64  v_new(U64)          max_abs=1.507e-02  max_rel=4.593e-03  ref_max=3.281e+00
+  rec64  Akk(P64)            max_abs=5.286e-03  max_rel=5.286e-03  ref_max=1.000e+00
+  rec64  h(S_in)             max_abs=2.362e-03  max_rel=6.794e-03  ref_max=3.477e-01
+
+worst-case max_rel across cases:
+  qg           8.283e-03
+  kg           7.042e-03
+  w            8.727e-03
+  g_cum        2.628e-03
+  v_new(U64)   1.803e-02
+  Akk(P64)     2.950e-02
+  h(S_in)      6.907e-03
+
+============================================================================================
+Part B: full chain @64 (workspace-recovered) vs torch.autograd(FLA), T=Tp
+============================================================================================
+
+# T=256 H=2  B=1 T=256 H=2  Tp=256
+  64 dq                      max_abs=2.332e-03  max_rel=3.469e-03  ref_max=6.721e-01
+  64 dk                      max_abs=2.399e-03  max_rel=3.527e-03  ref_max=6.802e-01
+  64 dv                      max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+  64 dbeta                   max_abs=2.856e-03  max_rel=5.642e-03  ref_max=5.062e-01
+  64 dg                      max_abs=7.551e-05  max_rel=1.463e-03  ref_max=5.159e-02
+  64 dh0                     max_abs=2.068e-04  max_rel=4.982e-03  ref_max=4.150e-02
+
+# T=250 H=3 non-div  B=1 T=250 H=3  Tp=256
+  64 dq                      max_abs=3.117e-03  max_rel=6.017e-03  ref_max=5.180e-01
+  64 dk                      max_abs=3.529e-03  max_rel=6.779e-03  ref_max=5.206e-01
+  64 dv                      max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+  64 dbeta                   max_abs=2.678e-03  max_rel=5.508e-03  ref_max=4.863e-01
+  64 dg                      max_abs=3.221e-04  max_rel=5.191e-03  ref_max=6.205e-02
+  64 dh0                     max_abs=2.924e-04  max_rel=5.322e-03  ref_max=5.493e-02
+
+# B2 T=513 H=2 non-div  B=2 T=513 H=2  Tp=576
+  64 dq                      max_abs=5.930e-03  max_rel=9.846e-03  ref_max=6.022e-01
+  64 dk                      max_abs=5.267e-03  max_rel=7.901e-03  ref_max=6.666e-01
+  64 dv                      max_abs=7.167e-04  max_rel=1.313e-02  ref_max=5.460e-02
+  64 dbeta                   max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+  64 dg                      max_abs=3.179e-04  max_rel=7.718e-03  ref_max=4.118e-02
+  64 dh0                     max_abs=1.691e-04  max_rel=6.996e-03  ref_max=2.417e-02
+
+# T=192 H=2 g=0  B=1 T=192 H=2  Tp=192
+  64 dq                      max_abs=1.544e-03  max_rel=2.892e-03  ref_max=5.337e-01
+  64 dk                      max_abs=1.642e-03  max_rel=2.838e-03  ref_max=5.784e-01
+  64 dv                      max_abs=3.565e-04  max_rel=5.438e-03  ref_max=6.556e-02
+  64 dbeta                   max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+  64 dg                      max_abs=1.235e-05  max_rel=2.033e-03  ref_max=6.074e-03
+  64 dh0                     max_abs=5.197e-05  max_rel=8.267e-03  ref_max=6.287e-03
+
+worst-case max_rel across cases (chain@64 vs autograd):
+  dq     9.846e-03
+  dk     7.901e-03
+  dv     1.313e-02
+  dbeta  6.012e-03
+  dg     7.718e-03
+  dh0    8.267e-03
+
+DONE
