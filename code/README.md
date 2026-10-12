@@ -11,3 +11,6 @@
 | [H100 上 TE 算子的性能与 Roofline 对比](../content/posts/te-perf-roofline/) | [te-perf/](te-perf/) | `bench_te.py`：TE 原生 kernel（rmsnorm / bwd / bwd_add / fused_attn）微基准 + launch overhead |
 | [CUDA 算子调优系列](../content/posts/cuda-kernel-opt-01-overview/) | [kernel-opt/](kernel-opt/README.md) | CUDA 手写算子系列：公共头 `cuda_utils.cuh` + 容器/编译/`ncu` 脚本 + 每篇实验（vector add、计时陷阱…） |
 | [LeetCode 题解精讲](../content/posts/leetcode-00-index/) | [leetcode/](leetcode/README.md) | 分类刷题题解 + Python/C++ 自测代码，统一入口 `scripts/run_all.py`，长期自驱 |
+| [KDA 前反向算子实现解析](../content/posts/flash-kda-00-index/) | [flash-kda/](flash-kda/README.md) | 以 FlashKDA 为参考拆解 Kimi Delta Attention 前向/反向算子，长期自驱 |
+| [DeepSeek Mega MoE 前反向算子实现解析](../content/posts/mega-moe-00-index/) | [mega-moe/](mega-moe/README.md) | 以 DeepGEMM/DeepEP 为参考分析 Mega MoE 前向与 MoE 反向，长期自驱 |
+| [MegaKernel 资料与实现分析](../content/posts/mega-kernel-00-index/) | [mega-kernel/](mega-kernel/README.md) | MPK 论文 + DeepGEMM mega 家族等 MegaKernel 范式分析，长期自驱 |

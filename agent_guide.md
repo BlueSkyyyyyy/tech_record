@@ -57,3 +57,6 @@ static/katex/                   # 自托管 KaTeX，勿删
 | [kernel-opt](agent_skills/kernel-opt.md) | 推进「CUDA 算子调优」系列（长期自驱：写代码→实测→ncu→写文章→发布） |
 | [fa-bwd](agent_skills/fa-bwd.md) | 推进「FlashAttention 反向工程」项目（GPUkernel 实现/对标 TE/移植目标卡） |
 | [leetcode](agent_skills/leetcode.md) | 推进「LeetCode 题解精讲」专题（分类题解 + Python/C++ 代码，长期自驱） |
+| [flash-kda](agent_skills/flash-kda.md) | 推进「KDA 前向/反向算子实现解析」专题（以 FlashKDA 为参考，长期自驱） |
+| [mega-moe](agent_skills/mega-moe.md) | 推进「DeepSeek Mega MoE 前向/反向算子解析」专题（DeepGEMM/DeepEP，长期自驱） |
+| [mega-kernel](agent_skills/mega-kernel.md) | 推进「MegaKernel 资料与实现分析」专题（MPK 论文 + DeepGEMM mega 家族，长期自驱） |

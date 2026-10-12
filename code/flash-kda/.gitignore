@@ -1,0 +1,12 @@
+# 编译/运行产物
+*.out
+*.o
+*.cubin
+*.ptx
+*.ncu-rep
+
+# autopilot 运行时文件
+autopilot.log
+autopilot.lock
+autopilot.pid
+AUTOPILOT_STOP
