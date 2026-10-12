@@ -808,6 +808,37 @@
   「参考量化器反量化 + fp64 GEMM」relerr **1.4217e-03**（仅 bf16 舍入）、vs 原始 bf16 3.6969e-02。
   配套博客 `content/posts/mega-moe-37-reference-quantizer`（索引页新增第 37 篇）。
 
+### P28 增量（opt-in，贯穿所有 kernel 的 PTX 原语底座）
+
+- [x] **P28-1** **DeepGEMM 的 PTX 原语底座：内存序 / 原子 / 共享内存搬运 / warp 通信**
+       （`deep_gemm/include/deep_gemm/ptx/ld_st.cuh` / `ptx/utils.cuh` / `ptx/tma.cuh` /
+       `common/tma_copy.cuh` / `common/ring_pipeline.cuh` / `comm/barrier.cuh`）。
+       前面 0~27 篇把上层 kernel 全拆了，却从没系统讲过它们共同踩的**裸 PTX 原语层**——而 Mega MoE 的
+       dispatch/combine 正确性、跨 SM/rank 的 readiness、`grid_sync`、tensormap 原地改全依赖它。
+       **原语皆 `__device__` 内联、架构无关，H100 真机可跑**。→ `docs/38-deepgemm-ptx-primitives.md`
+       （真实行号核对）：内存序阶梯表（`ld_acq[_gpu/_sys]`、`st_rel[_sys]`、`st_relaxed_sys`、
+       `ld_volatile`、`atom[_rel/_sys]`、`red[_add/or/xor/_rel/_sys/_async]`，每个给真实调用点：
+       `comm/barrier.cuh:42/45/75/82`、`scheduler/mega_moe.cuh:157/164/294/402/412`、
+       `sm100_fp8_fp4_mega_moe.cuh:613/1243/1419/1440/245`）+ 三个「为什么」（combine 必须 `sys`、
+       `red` vs `atom`、轮询用 `ld_volatile`）；`ptx/ld_st.cuh` 逐段（LDSM/STSM、`cp_async_cg[_zfill]`/`ca_zfill`、
+       `mapa_shared`+`st_async_cluster`、`st_shared_bulk`、`ld_evict_first`+cache hint、`ld_gez_pred`、fence）；
+       `ptx/utils.cuh`（`smid/laneid/gridid`、`bar.sync` vs `barrier.sync`、`exchange`、`redux.sync.max.f32` 仅 SM100、
+       `cvt_relu_bf16x2`/`accumulate(_square)` 的 SM100 融合 `add/fma.rn.f32.bf16` 与回退）；
+       `ptx/tma.cuh`（tensormap `release/acquire` + **原地改基址/stride** 对应第 12 篇 wgrad、mbarrier 五原语 +
+       相位翻转、`tma_load/store_1d/2d/3d`、`tma_gather4`）；`common/tma_copy.cuh`（2~5D `copy_nd` 与
+       `Load`/`Load2SM`/`LoadMulticast` 三分支）；`common/ring_pipeline.cuh`（幂次容量位运算快路 + 相位翻转）。
+       **H100 实测** `src/ptx_primitives.cu` + `harness/exp_ptx_primitives.{sh,out.txt}`（真实头文件，
+       sha256 `ld_st 912e9f9a…`/`utils 8a9d5e03…`/`ring_pipeline d231e0ce…`，总判定 **ALL PASS**）：
+       A) `st.release.gpu`+`ld.acquire.gpu` 生产者-消费者 200 轮×64 slot×128 word **fail=0**（弱序对照也 0，
+       注明单卡 L2 强、非 ISA 保证）；B) `atomic_add` vs `red_add`/`red_add_rel` 三条求和都 =524800，
+       `atomic` 返回的 1024 个旧值**互不相同** 1024/1024；C) `RingPipeline` ns∈{1,2,4,8} 40 步轨迹与 Python
+       复刻**逐项 0 不符**；D) `cp_async_cg<256>`+`cg_zfill<256>`(8B) 128 块、`ca_zfill`(0/4B) 64 块 **mismatch=0**；
+       E) `ld_evict_first` 256 MiB 流式读 0.210ms/**1279 GB/s** vs 普通 `ld` 0.238ms/**1129 GB/s**（约 +13%）；
+       F) `cvt_relu_bf16x2` 回退 vs 独立 RNE **0/65536**、`accumulate(_square)` 与「bf16→f32 精确」一致。
+       **未能测**：`redux.sync.max.f32`（SM100 专属）；`grid_sync` 整体语义需全 grid 常驻而本机 GPU 被多个
+       自驱任务共享会死锁（已移除，仅源码解读）。配套博客
+       `content/posts/mega-moe-38-deepgemm-ptx-primitives`（索引页新增第 38 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -832,8 +863,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P27 各增量完成（P15-1…P24-1、P25-1、P26-1、P27-1）。**
-  本轮 P27-1：新建 `docs/37-deepgemm-reference-quantizer.md`（+`harness/exp_reference_quantizer.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P28 各增量完成（P15-1…P24-1、P25-1、P26-1、P27-1、P28-1）。**
+  本轮 P28-1：新建 `docs/38-deepgemm-ptx-primitives.md`（+`src/ptx_primitives.cu`、
+  `harness/exp_ptx_primitives.{sh,out.txt}`）——补上前面 0~27 篇**上层 kernel 全都踩、却从没系统讲过**的
+  **裸 PTX 原语层**（`ptx/{ld_st,utils,tma}.cuh`、`common/{tma_copy,ring_pipeline}.cuh`、`comm/barrier.cuh`）。
+  Mega MoE 的 dispatch/combine 正确性全系于此：combine 用 `st_rel_sys`/`ld_acq_sys`（**sys 作用域**跨 rank）发布
+  readiness（`mega_moe.cuh:1419/1440`）、`grid_sync` 用 `atomic_add_rel`「完成和」+ `ld_acq` 自旋
+  （`comm/barrier.cuh:42/45`）、L1→L2 用 `red_xor_rel` 翻转 64 位位图 + `ld_acq_gpu` 读回（`scheduler:157/164`）。
+  文档给出**内存序阶梯表**（`ld_acq[_gpu/_sys]`/`st_rel[_sys]`/`atom`/`red`/`red.async`/`ld_volatile`，逐条真实调用点）
+  与 `ptx/{ld_st,utils,tma}`、`tma_copy`（`copy_nd` 2~5D + `Load`/`Load2SM`/`LoadMulticast`）、`ring_pipeline`
+  （相位翻转位运算）逐段精读。**架构无关，H100 真机**跑真实设备代码 **ALL PASS**：acq/rel 生产者-消费者 0 失败、
+  `atomic` 旧值互不相同 1024/1024、RingPipeline ns∈{1,2,4,8} 轨迹逐项 0 不符、`cp.async`/`zfill` 0 不符、
+  `ld_evict_first` 流式读 **1279 vs 1129 GB/s**（+13%）、`cvt_relu_bf16x2` vs 独立 RNE **0/65536**。
+  行号全部核对过。配套博客 `content/posts/mega-moe-38-deepgemm-ptx-primitives`（索引页新增第 38 篇）。
+  上一轮 P27-1：新建 `docs/37-deepgemm-reference-quantizer.md`（+`harness/exp_reference_quantizer.{py,sh,out.txt}`）
   ——补上前面第 25/26/32/35 篇反复引用、却从没系统拆过的**量化语义基准** `deep_gemm/utils/math.py`：
   它是 DeepGEMM 全部 FP8/FP4 kernel 测试的正确性判据（「精确等于参考量化器定义的操作数上的 GEMM」）。
   `ceil_to_ue8m0` 是「>= |x| 的最小 2 的幂」（指数 + 尾数非 0 进位、exp 域钳位 [1,254]，UE8M0 只留 8 位指数）；
@@ -1042,11 +1085,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P27 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+- **下一步**：P0~P28 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
   P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子、
   P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel、P23-1 DeepJIT 编译/缓存/加载/发射管线、
   P24-1 SM 局部域探针与内存域分配、P25-1 SM100 FP8/FP4 稠密 GEMM 主 kernel、
-  P26-1 SM100 BF16 主 kernel 与 `set_tc_util`、P27-1 测试参考量化器 FP8/FP4 block-scale 语义）。
+  P26-1 SM100 BF16 主 kernel 与 `set_tc_util`、P27-1 测试参考量化器 FP8/FP4 block-scale 语义、
+  P28-1 PTX 原语底座（内存序/原子/搬运/warp 通信））。
   后续若继续（均为增量、非承诺）：
   ⑭ **「稠密 GEMM 主 kernel」矩阵已补齐（P26-1）**：SM90 FP8/1D1D-1D2D（P22）、SM90 BF16（P19）、
    SM100 FP8/FP4（P25）、SM100 BF16（P26）四格齐全；并拆清 `set_tc_util` 这一从 Python 直通模板参数的
