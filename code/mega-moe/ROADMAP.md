@@ -1533,6 +1533,42 @@
       坐实 `cvt.rs` 在 `sm_90a` 被 ptxas 拒（`Feature '.rs' not supported`）、`sm_100a` 通过。
       配套博客 `content/posts/mega-moe-59-deepep-ptx-primitives`（索引页新增第 59 篇）。
 
+### P50 增量（opt-in，补齐 MQA logits 一直缺席的「验收测试即正确性规范」）
+
+- [x] **P50-1** **MQA logits 的端到端验收测试与正确性 oracle**（`tests/test_attention.py`；
+      `deep_gemm/testing/{numeric,utils}.py`；`deep_gemm/utils/math.py`；调用点
+      `csrc/apis/attention.hpp:18-44/45-134/136-282/303-442`；kernel
+      `impls/sm90_fp8_mqa_logits.cuh:307-310`）。第 19 篇（P9-1）拆过连续/分页主 kernel、
+      第 30 篇（P20-1）拆过 SM90 分页调度器、第 22/23/24 篇拆过 SM100 sparse/dense/paged 调度器，
+      但「MQA logits 算什么对」的**唯一规范** `tests/test_attention.py`（715 行）一直没被单独拆过。
+      **与 Mega MoE / Mega Gate 不同：MQA logits 的 SM90 用例（`fmt='fp8'`、fp32 logits）在 H100 上
+      真的能跑**（只有 SM100 的 mxfp4/mxfp8 与 sparse 用例被 `@test_filter` 跳过）。
+      → `docs/60-mqa-logits-test-oracle.md`（真实行号核对）：三个入口（`test_mqa_logits:104`、
+      `test_paged_mqa_logits:299`、`test_sparse_mqa_logits:477` 带 arch==10 门控 `:476`）与三个
+      架构分支 helper（`mqa_logits_formats:45`、`mqa_logits_heads:51`、`quantize_mqa_q:59`）。
+      **连续版 oracle** `ref_mqa_logits:78-101`：`out_ij=Σ_h relu(<q_i,kv_j>)·w_{i,h}`、按 head 加权
+      **先 relu·w 再对 head 求和**、按 KV 分块只改显存不改结果、`-inf` 掩码落在 `[ks_i,ke_i)`、`cost`
+      为有效计数；`generate_ks_ke_tests:106-121` 的 disable_cp/CP 两种 KS/KE 生成；kernel **压缩输出**
+      `[seq_len,max_seqlen_k]`（测试 `:185-189` 展开回稠密，kernel 写回偏移 `-seq_k_start`
+      `sm90_fp8_mqa_logits.cuh:307-310`）。**判据两层**：`-inf` 掩码逐位（`:194`）+ 20 次逐位自洽
+      （`:173-175`）+ `calc_diff` vs 原始参考（fp8 `1e-3`）与 vs **隔离量化**参考（fp8 `5e-6`，
+      `mqa_logits_tolerances:74`）——把「实现误差」与「FP8 量化误差」分开。
+      **分页版** `ref_paged_mqa_logits:225-253` + 三种 KV cache 融合布局（`kv_cache_cast_to_fp8:270`
+      SM90 E4M3+每 token fp32 scale、`_mxfp8:285`、`_mxfp4:256` MXFP4/8+packed UE8M0）+ `to_mqa_weights:29`
+      的每行 TMA 16B padding。**稀疏版**逐位判据 `:669`（稀疏块内打分 == 全量 gather）；`make_sparse_kv_block_indices:442`
+      同请求保留 ~80% 上一 token 的块。host 契约 `attention.hpp:18-44`（`is_mx_sf==arch10:32`、
+      weights dtype `:43`、输出 dtype `:80/192`、分页 block_kv `:201`、varlen 仅 arch10 `:233`）。
+      **H100 实测** `harness/exp_mqa_logits_test.py` + `.sh`/`.out.txt`（**直接 import 真实 test 复用
+      helper 并调用真实 `test_mqa_logits`/`test_paged_mqa_logits`**）**42 PASS / 0 FAIL**：
+      ① 连续/分页真实测试在 H100 跑通（100/191 TFLOPS 连续、46/122 TFLOPS 分页、metadata 4us）；
+      ② `ref_mqa_logits` vs 朴素三重循环有效区间 `calc_diff=1.110e-16`、`-inf` 掩码逐位、`cost==sum(ke-ks)==878`；
+      ③ `generate_ks_ke_tests` CP `(2048,8192)` 前后段 `ke∈[1024,2048)/[6144,7168)`；
+      ④ `to_mqa_weights` 公式逐点（含 `h=5→stride 8`）；⑤ `quantize_mqa_q` fp8 往返 rel `0.0266`；
+      ⑥ fp8 KV 布局逐位重构 + scale `==amax/448`、mxfp4/8 往返 `0.1157/0.0269`；⑦ 判据工具行为；
+      ⑧ sparse 被 arch==10 门控跳过；⑨ `make_sparse_kv_block_indices` 语义。SM100 主 kernel/调度器
+      仅分析（第 22/23/24 篇已用真实设备代码验证其调度器）。配套博客
+      `content/posts/mega-moe-60-mqa-logits-test-oracle`（索引页新增第 60 篇）。
+
 
 ## 每轮增量流程（autopilot）
 
@@ -1558,8 +1594,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P49 各增量完成（P15-1…P41-1、P42-1、P43-1、P44-1、P45-1、P46-1、P47-1、P48-1、P49-1）。**
-  本轮 P49-1：新建 `docs/59-deepep-ptx-primitives.md`（+`src/deepep_ptx_primitives.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P50 各增量完成（P15-1…P41-1、P42-1…P50-1）。**
+  本轮 P50-1：新建 `docs/60-mqa-logits-test-oracle.md`（+`harness/exp_mqa_logits_test.{py,sh,out.txt}`）
+  ——补上 DeepSeek 稀疏注意力 indexer 第一级打分「算什么对」的**唯一规范** `tests/test_attention.py`
+  （715 行），也是第 19/22 篇里 TFLOPS/GB/s 数字的出处。**与 Mega MoE/Mega Gate 不同：MQA logits 的
+  SM90 用例（`fmt='fp8'`、fp32 logits）在 H100 上真的能跑**（只有 mxfp4/mxfp8 与 sparse 被 `@test_filter`
+  跳过）。要点：① 连续版 `ref_mqa_logits:78-101`（按 head 加权**先 relu·w 再对 head 求和**、KV 分块只改
+  显存、`-inf` 掩码在 `[ks_i,ke_i)`、`cost` 计数）+ kernel **压缩输出** `[seq_len,max_seqlen_k]`（写回偏移
+  `-seq_k_start`，`sm90_fp8_mqa_logits.cuh:307-310`）；② 判据两层——`-inf` 掩码逐位 + 20 次逐位自洽 +
+  `calc_diff` vs 原始参考（fp8 `1e-3`）/ vs **隔离量化**参考（`5e-6`），把「实现误差」与「FP8 量化误差」
+  分开；③ 分页版三种 KV cache 融合布局（SM90 E4M3+每 token fp32 scale、SM100 MXFP8/MXFP4+packed UE8M0）
+  与 `to_mqa_weights` 的每行 TMA 16B padding；稀疏版逐位对齐全量 gather。**H100 真机 42 PASS/0 FAIL**：
+  直接 import 真实 test 复用 helper 并调用真实 `test_mqa_logits`/`test_paged_mqa_logits`（跑出连续
+  100/191 TFLOPS、分页 46/122 TFLOPS），oracle 每一项（参考数学 vs 朴素三重循环 1.11e-16、CP 分片、
+  掩码、cost、三种布局逐位、判据工具）都独立复核。配套博客 `content/posts/mega-moe-60-mqa-logits-test-oracle`
+  （索引页新增第 60 篇）。
+  上一轮 P49-1：新建 `docs/59-deepep-ptx-primitives.md`（+`src/deepep_ptx_primitives.cu`、
   `harness/exp_deepep_ptx_primitives.{sh,out.txt}`）——补上 **DeepEP 所有 kernel 共用的设备端公共层**
   `common/ptx.cuh`（612 行）+ `math.cuh`/`utils.cuh`/`layout/common/barrier.cuh`；第 7/11/53/58 篇里
   每一行 `mbarrier`/`cp.async`/`TMA`/`red.release.sys`/`__match_any_sync` 都源于此却从没单独拆过。
@@ -2070,7 +2120,11 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P49 已完成（新增 **P49-1 DeepEP 的设备端公共层** `common/ptx.cuh` 等：
+- **下一步**：P0~P50 已完成（新增 **P50-1 MQA logits 的端到端验收测试与正确性 oracle**：
+  `tests/test_attention.py`——连续版 head 加权语义与压缩输出、`-inf` 掩码逐位 + 两层 `calc_diff`
+  （原始 vs 隔离量化）、分页版三种 KV cache 融合布局与 TMA 16B 行 padding、稀疏版逐位对齐全量 gather；
+  H100 真机直接 import 真实 test 跑通 SM90 用例 42 PASS/0 FAIL；见上）。
+  上一轮 P49-1：**P49-1 DeepEP 的设备端公共层** `common/ptx.cuh` 等：
   mbarrier 五原语 + `cp.async.mbarrier.arrive` 计数模型、TMA 三条搬运路径（含 `cp.reduce...add.f32`）、
   NVLink 多播 `multimem.*`、谓词化访存 + `iterate_ld_st`、`gpu`/`sys` 两档内存序、
   `warpgroup_reg_realloc`、warp 内建、浮点打包 + `encode_decode_positive`/`BarrierSignals`；
