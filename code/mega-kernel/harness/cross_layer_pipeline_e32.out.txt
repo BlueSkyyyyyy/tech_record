@@ -1,0 +1,53 @@
+### P23-1 cross_layer_pipeline: E=32 (tile 32KB, 更重的访存) 敏感性 run
+### build: nvcc -O3 -arch=sm_90 -DELEM=32 cross_layer_pipeline.cu -o clp32
+### run  : MK_DEV=3 ./clp32 30 64 64 132 256
+
+== device ==
+NVIDIA H100 80GB HBM3, sm_90, SMs=132, clock=1980 MHz (dev 3)
+L=64 layers, G=132 workers, T=256, E=32, R=64, tile=8192 floats (32 KB), weight(alloc LMAX=256)=1056 MB, iters=30
+
+1-page occupancy=5 block/SM; cooperative capacity=5 block * 132 SM = 660, grid=132
+
+== correctness (all strategies must be bitwise equal on act[L][*]) ==
+act[L][0]=268703.031250  eager vs barrier max rel=0.00e+00, vs decen=0.00e+00, vs ring=0.00e+00
+
+== Section A: L=64, G=132, sweep compute intensity R (ring K=4) ==
+    R |   eager ms |    barrier |      decen |      ringK |      d/b |      r/b
+------+------------+------------+------------+------------+----------+---------
+    0 |     0.3955 |     0.3006 |     0.2574 |     0.4137 |   0.856x |   1.376x
+    8 |     0.6068 |     0.5097 |     0.4615 |     0.4252 |   0.905x |   0.834x
+   16 |     0.6188 |     0.5146 |     0.4720 |     0.4335 |   0.917x |   0.842x
+   32 |     0.6944 |     0.5804 |     0.5415 |     0.5055 |   0.933x |   0.871x
+   64 |     0.9385 |     0.7954 |     0.7626 |     0.7444 |   0.959x |   0.936x
+  128 |     1.4286 |     1.2607 |     1.2148 |     1.2040 |   0.964x |   0.955x
+  256 |     2.3687 |     2.2082 |     2.1217 |     2.1199 |   0.961x |   0.960x
+
+== Section B: L=64, R=16 (访存占比较高), G=132, sweep ring depth K ==
+  K | barrier ms |   decen ms |    ring ms |      r/d |   us/layer
+----+------------+------------+------------+----------+-----------
+  1 |     0.5146 |     0.4721 |     0.4577 |   0.970x |     7.152
+  2 |     0.5146 |     0.4721 |     0.4457 |   0.944x |     6.963
+  3 |     0.5146 |     0.4721 |     0.4363 |   0.924x |     6.817
+  4 |     0.5146 |     0.4721 |     0.4338 |   0.919x |     6.777
+  6 |     0.5146 |     0.4721 |     0.4360 |   0.924x |     6.813
+  8 | (SMEM 超单 block optin 上限，跳过)
+
+== Section C: R=64, G=132, sweep layer count L (ring K=4) ==
+    L |   eager ms |    barrier |      ringK |      r/b
+------+------------+------------+------------+----------
+    8 |     0.1101 |     0.0969 |     0.0961 |   0.992x
+   16 |     0.2349 |     0.2011 |     0.1910 |   0.950x
+   32 |     0.4712 |     0.3991 |     0.3759 |   0.942x
+   64 |     0.9409 |     0.7955 |     0.7457 |   0.937x
+  128 |     1.8795 |     1.5873 |     1.4781 |   0.931x
+  256 |     3.7659 |     3.1714 |     2.9388 |   0.927x
+
+>> 读法：
+>> eager  = kernel-per-operator：L 次 launch，层间由 stream 串行，SMEM 随 kernel 释放（不可预取）；
+>> barrier= 单 kernel + 每层 grid.sync（集中式会合，层间串行化其上还有全图屏障）；
+>> decen  = 单 kernel + 逐槽事件计数器（细粒度依赖，但不预取权重）；
+>> ringK  = decen + K 页环形 SMEM 跨 task 预取（MPK §5.3 跨 task 软件流水）。
+>> 预期：ring 相对 barrier/decen 把「下一层权重 tile 的 HBM 延迟」藏进「本层计算」，
+>>   收益上界 ≈ (Tload+Tcomp)/max(Tload,Tcomp)，随 R（计算占比）变化。
+>> 注意：R=0（纯访存、无可藏的计算）时流水反而更慢；重载 tile（-DELEM=32）才显出
+>>   流水深度 K 的收益（Section B 单调到 K≈4 饱和），轻载（E=16）时事件等待已够藏访存。

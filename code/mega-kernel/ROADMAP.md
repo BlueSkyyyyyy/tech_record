@@ -436,6 +436,32 @@
       （MPK §5.1 event 同构）才稳。判据：四者均无固定角色 worker/scheduler，仍差 C5 一步。
       **本轮新增实验。**
 
+### P23 实验扩展 13：跨层软件流水 + 环形缓冲预取（`docs/04-experiments.md` §16）
+
+- [x] **P23-1** 把 MPK §5.3（快照行 1312–1368）的 **paged shared memory + cross-task software
+      pipelining** 实测出来（补齐 P22-1 §15.6 明确留的尾巴「真正的跨层流水需要环形缓冲/预取」）。
+      见 `docs/04-experiments.md` §16，源码 `src/cross_layer_pipeline.cu`，原始输出
+      `harness/cross_layer_pipeline.out.txt`（E=16 主运行）与 `harness/cross_layer_pipeline_e32.out.txt`
+      （E=32 重载敏感性）（目标卡 H100/sm90，device 3，iters=30，L=64，G=132=SM，T=256，
+      tile=16KB/32KB，权重 528MB/1056MB ≫ L2）。依赖模型：层 `l`、worker `j` 的 task = 私有权重
+      tile（cp.async 载入、**与 DAG 无关可预取**）+ 跨层激活值（读 worker `(j+1)%G` 在层 `l-1`
+      写的 `act[l][(j+1)%G]`，**必须等**）+ `E` 链 ×`R` 轮 FMA 归约。四策略公平对照：`eager`
+      （L 次 launch，kernel-per-operator）/`barrier`（单 kernel + 每层 grid.sync）/`decen`（单 kernel
+      + 逐槽事件计数器，无预取）/`ring`（decen + K 页环形 SMEM 跨 task 预取）。三 Section：A 扫 R、
+      B 扫环形深度 K（R=16）、C 扫层数 L。核心结论：(1) 四策略对 `act[L][*]` **逐位一致**
+      （互比 `max rel|Δ|=0.00e+00`）；(2) **单内核相对 kernel-per-operator 的主收益仍是消 launch**
+      ——`eager/barrier` 随 L 8→256 从 1.14× 升到 **1.25×**（对上 P5-1/P9-1 损失二）；(3) **细粒度
+      事件调度 `decen` 稳定优于每层 `grid.sync()` 的 `barrier` 约 3–14%**（`d/b` 0.856–0.972×，
+      访存越重优势越大；解释 P22-1「barrier 恒快」为何只在每层 `W≥256` 的图成立——本节 `W=G`）；
+      (4) **跨层预取 `ring` 相对 `barrier` 峰值快 1.19–1.20×**（E=16 R=8 `r/b`=0.844×、E=32 R=8
+      `r/b`=0.834×），收益 ≈ 访存时间占比、随计算强度 R 衰减（R=256 仅 1.03×），落在 MPK §6.6
+      （行 1593）的 **1.2–1.3×** 区间；(5) **纯访存（R=0）时流水净亏**（`r/b` 1.036–1.376×，
+      无计算可藏）；(6) **环形深度 K 的收益取决于 task 访存占比**——轻载 E=16 时 K=1→8 的 `r/d`
+      恒 0.933–0.941×（前驱事件等待已够藏 16KB），重载 E=32 时 K=1→4 单调改善
+      （0.970→**0.919×**）、K≈4 饱和。判据：`ring` 满足 C1–C4，按静态序列取 task、无固定角色
+      worker/scheduler，仍差 C5 一步（C5 由 P15-1 §9 覆盖）。**本轮新增实验**，补齐 P22-1 §15.6、
+      并与 P13-1（单 task 内流水）/P20-1（跨算子静态分块重叠）合成「软件流水三层」画像。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -487,9 +513,11 @@
   **P21-1 MPK 依赖分析器源码走读（1/1）完成**（本轮新增，补齐 `docs/06`/`docs/07` 上游的编译层：
   论文 §4.1 的「算子图 → tGraph」五步在 `src/kernel/annotated_graph.cc` 的真实实现——最近写者 SSA +
    bbox 阴影覆盖、残余边剥离、case 2/3 拒绝、fork/join LCM event fusion、按 depth 的 Kahn linearization）。
-  **P22-1 去中心化调度的 DAG 形状敏感性（1/1）完成**（本轮新增，把 P15-1 的链推广到分层扇入/
+  **P22-1 去中心化调度的 DAG 形状敏感性（1/1）完成**（把 P15-1 的链推广到分层扇入/
   扇出图、对照 barrier/wave/decen/static 四机制、实现 MPK §5.2 批量取 task 的甜点标度）。
-  **本专题任务清单（P0–P22）全部完成**，无未完成子项。
+  **P23-1 跨层软件流水 + 环形缓冲预取（1/1）完成**（本轮新增，把 MPK §5.3 的 paged SMEM +
+  cross-task software pipelining 实测出来，补齐 P22-1 §15.6 明留的尾巴）。
+  **本专题任务清单（P0–P23）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -538,7 +566,7 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P21 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
+- **下一步：无**（P0–P23 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
   **P10-1 完成 P5-1 §1.6「扫 persistent 网格大小」**；**P12-1 完成 P5-3 §3.6 / P10-1 §5.5「多 block
@@ -551,9 +579,32 @@
   ⑥ ~~`docs/04` §6.6「未测 PDL 与 CUDA Graph 叠加」~~（**P19-1 完成**，测出 capture 保留 PDL 语义、
   叠加次乘非相乘、上限独立）；
   ⑦ ~~P15-1 §9.6「未测扇入/扇出 DAG、批量/预取取 task」~~（**P22-1 完成**：分层扇入/扇出图 ×
-  barrier/wave/decen/static 四机制、MPK §5.2 批量取 task 甜点 K≈W/G、静态分配随扇入变差）；
+   barrier/wave/decen/static 四机制、MPK §5.2 批量取 task 甜点 K≈W/G、静态分配随扇入变差）；
   剩「在容器内 `pip install -e .` 构建 mirage sm90 路径并跑端到端数字」（构建成本高，未做）；
-  剩「跨层流水/环形缓冲预取」（P22-1 §15.6 标注未做，是 MPK §5.3 的下一层机制）。
+  ⑧ ~~P22-1 §15.6「跨层流水/环形缓冲预取」~~（**P23-1 完成**：MPK §5.3 的 paged SMEM +
+   cross-task software pipelining 实测——跨层预取峰值 1.19–1.20×（vs barrier）、深度按访存占比选
+   K≈4、纯访存时净亏；eager/barrier 1.25× 验证消 launch 主收益）。
+- **本轮（P23-1）**：`docs/04-experiments.md` 新增 §16「跨层软件流水 + 环形缓冲预取：kernel-per-operator
+  与持久化内核的真正分野」——新建 `src/cross_layer_pipeline.cu` + `harness/cross_layer_pipeline.out.txt`
+  （E=16 主运行）与 `harness/cross_layer_pipeline_e32.out.txt`（E=32 重载敏感性）（目标卡 H100/sm90，
+  固定空闲 device 3，iters=30，L=64，G=132=SM，T=256，tile 16KB/32KB，权重 528MB/1056MB ≫ L2）。
+  把 MPK §5.3（快照行 1312–1368）的 paged shared memory + cross-task software pipelining、即
+  P22-1 §15.6 明留的「跨层流水」尾巴实测出来：层 l、worker j 的 task = 私有权重 tile（cp.async 载入、
+  与 DAG 无关可预取）+ 跨层激活值（读 worker (j+1)%G 在层 l-1 写的槽，必须等）+ E 链 ×R 轮 FMA 归约。
+  四策略公平对照 **eager**（L 次 launch，kernel-per-operator）/ **barrier**（单 kernel + 每层 grid.sync）/
+  **decen**（单 kernel + 逐槽事件计数器，无预取）/ **ring**（decen + K 页环形 SMEM 跨 task 预取）。
+  三 Section：A 扫 R（0→256）、B 扫环形深度 K（R=16）、C 扫层数 L（8→256）。核心结论：
+  (1) **四策略对 act[L][*] 逐位一致**（互比 max rel|Δ|=0.00e+00）；(2) **单内核相对 kernel-per-operator
+  的主收益仍是消 launch**——eager/barrier 随 L 8→256 由 1.14× 升到 1.25×（对上 P5-1/P9-1 损失二）；
+  (3) **细粒度事件调度 decen 稳定优于每层 grid.sync 的 barrier 约 3–14%**（d/b 0.856–0.972×，访存越重
+  优势越大），解释 P22-1「barrier 恒快」为何只在每层 W≥256 的图成立（本节 W=G=132）；
+  (4) **跨层预取 ring 相对 barrier 峰值快 1.19–1.20×**（E=16 R=8 r/b=0.844×、E=32 R=8 r/b=0.834×），
+  收益 ≈ 访存时间占比、随计算强度 R 衰减（R=256 仅 1.03×），落在 MPK §6.6（行 1593）的 1.2–1.3× 区间；
+  (5) **纯访存（R=0）时流水净亏**（r/b 1.036–1.376×，无计算可藏）；(6) **环形深度 K 的收益取决于 task
+  访存占比**——轻载 E=16 时 K=1→8 的 r/d 恒 0.933–0.941×（前驱事件等待已够藏 16KB），重载 E=32 时
+  K=1→4 单调改善（0.970→0.919×）、K≈4 饱和。判据：ring 满足 C1–C4，按静态序列取 task、无固定角色
+  worker/scheduler，仍差 C5 一步（C5 由 P15-1 §9 覆盖）。**本轮新增实验**，补齐 P22-1 §15.6，并与
+  P13-1（单 task 内流水）/P20-1（跨算子静态分块重叠）合成「软件流水三层」画像。
 - **本轮（P22-1）**：`docs/04-experiments.md` 新增 §15「去中心化调度的 DAG 形状敏感性：扇入/扇出 ×
   静态分配 vs 动态队列」——新建 `src/fanin_sched.cu` + `harness/fanin_sched.out.txt`（目标卡 H100/sm90，
   device 3，iters=20，G=132=#SM，T=256）。把 P15-1 的链推广成**分层扇入/扇出图**（`t=l*W+j`，前驱 =
