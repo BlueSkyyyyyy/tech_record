@@ -165,7 +165,10 @@
 
 ### P6 汇总
 
-- [ ] **P6-1** `docs/05-summary.md`：原理一页纸 + 设计 checklist + 何时该/不该用 megakernel。
+- [x] **P6-1** `docs/05-summary.md`：原理一页纸（§1）+ 设计 checklist（§2）+ 何时该/不该用 megakernel（§3）
+      + 本专题实测校准表（§4）+ 关键坐标（§5）。汇总 `docs/00`–`docs/04` 全部结论，不展开新资料、
+      不产生新实验；配套博客 post `mega-kernel-06-summary` 并更新 `mega-kernel-00-index` 目录。
+      **P6 完成、本专题任务清单全部完成。**
 
 ## 每轮增量流程（autopilot）
 
@@ -190,7 +193,8 @@
 ## 当前进度 / 下一步
 
 - 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**；
-  **P3 全部完成（3/3）**；**P4 全部完成（4/4）**；**P5 全部完成（3/3）**；**下一步 P6-1**。
+  **P3 全部完成（3/3）**；**P4 全部完成（4/4）**；**P5 全部完成（3/3）**；**P6 全部完成（1/1）**；
+  **本专题任务清单（P0–P6）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -239,8 +243,18 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：P6-1**（`docs/05-summary.md`：原理一页纸 + 设计 checklist + 何时该/不该用 megakernel）。
-  P4 已收官，P5 三项（P5-1/2/3）全部完成。
+- **下一步：无**（P0–P6 全部完成）。后续可选的增量方向（不属现有清单）：① 为 `docs/02`/`03`/`04`
+  补建对应博客 post（目前仅 `docs/00`/`01`/`05` 有 post）；② 补做 P5-2 §2.6 / P5-1 §1.6 提到的
+  「更小 M / 更多算子 / 多 block」实验；③ MPK 线上实现的源码走读（`https://github.com/mirage-project/mirage`，
+  目前仅论文精读）。
+- **本轮（P6-1）**：新建 `docs/05-summary.md`（收官汇总，**纯资料汇总、无新实验**）——§1 原理一页纸
+  （三类损失 ↔ C1–C5 判据 ↔ MPK 编译层/运行层两层结构 ↔ 收益因果链 ↔ 谱系与两种落地路径 ↔ 与既有手段
+  边界）；§2 设计 checklist（判定/融合边界/依赖调度/资源正确性/落地工程五组，每行对应已查证机制或坑，
+  如 precise 依赖、event fusion、normalization 定长编码、warmup wave 防死锁、grid idx generation、
+  寄存器上限、paged SMEM）；§3 何时该/不该用（各 6 条 + 决策速查表）；§4 本专题实测校准表
+  （P0-3/P1-2/P4-1/P5-1/P5-2/P5-3，原始输出 `harness/*.out.txt`）；§5 关键坐标。新建博客 post
+  `content/posts/mega-kernel-06-summary/index.md`（weight 7，`doc_include` 内联）并更新
+  `mega-kernel-00-index` 目录第 6 项。**P6 完成、P0–P6 全部收官。**
 - **本轮（P5-3）**：`docs/04-experiments.md` 新增 §3「PDL 链式流水（P5-3）」——新建 `src/pdl_pipeline.cu`
   + `harness/pdl_pipeline.out.txt`（目标卡 H100/sm90，iters=30，K=1/2/4/8/16）。把 P4-2 的「一对 kernel」
   推广到「K 个 kernel 用 PDL 串成链」，每 kernel = `[prologue]→gridDependencySync→[临界段 crit]→trigger→[tail]`，

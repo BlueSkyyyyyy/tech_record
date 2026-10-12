@@ -23,6 +23,6 @@ categories: ["算子开发"]
 3. 生产案例：DeepGEMM mega 家族、Kimi K3（待写）
 4. 相关技术对照：CUDA Graphs / PDL / persistent kernel（待写）
 5. 实验：launch 开销、persistent kernel、PDL（待写）
-6. 一页纸总结（待写）
+6. [MegaKernel 一页纸总结：原理、设计 checklist 与适用边界]({{< relref "mega-kernel-06-summary" >}}) —— 收官汇总
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
