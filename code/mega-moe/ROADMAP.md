@@ -866,6 +866,37 @@
        （官方更大形状 m-grouped 285–361、k-grouped 104–109）。配套博客
        `content/posts/mega-moe-39-legacy-grouped-gemm`（索引页新增第 39 篇）。
 
+### P30 增量（opt-in，前面各篇全部数字的来源：测试基座）
+
+- [x] **P30-1** **DeepGEMM 的测试基座**（`deep_gemm/testing/{bench,numeric,utils}.py`、
+       `deep_gemm/utils/dist.py`；`tests/test_bf16.py:45/56`、`tests/test_mega_moe.py:11/76/354`）。
+       前面 0~29 篇每一个「对拍 / relerr / TFLOPS GB/s」数字都出自这套基座，却从没系统拆过。
+       **架构无关（非 kernel），H100 真机可跑真机实测**。
+       → `docs/40-deepgemm-testing-harness.md`（真实行号核对）：`bench.py:7-33` `bench`（event 计时、
+       256MB L2 flush、`high_precision` 用 `8192²` fp32 大核藏 CPU 发射）、`:79-146` `bench_kineto`
+       （`DG_USE_NVIDIA_TOOLS` 旁路 `:88-90`、schedule `wait=0/warmup=1/active=1` 两批取第二批
+       `:101-105`、`flush_l2` 每次清 256MB `:107-108`、`barrier` 用 `cuda._sleep(2e7)` `:109-113`、
+       按名字子串匹配 + ms/us 单位换算 `:130-143`、tuple 多 kernel + `with_multiple_kernels` 断言
+       `:84/121-123`）。`numeric.py:5-11` **`calc_diff` 实测恒等于归一化平方误差**
+       `‖x−y‖²/(‖x‖²+‖y‖²)`（升 fp64 `:6`）：对称、∈[0,2]、`=0` 当且仅当逐元素相等、
+       **同步缩放不变 / 单侧缩放不不变**、小误差 `≈ rel_l2²/2`、DC 平移敏感；`:14-21` `count_bytes`
+       递归数 `(data,sf)` 对、跳过 `None`；`:24-44` `assert_bitwise_equal`（逐位 + 首个差异字节/elem/coord/
+       byte_in_elem 定位）。`utils.py:6-8` `get_arch_major`（H100=9/SM100=10）、`:11-22` `test_filter`
+       （假条件跳过并打印）、`:25-37` `ignore_env`（临时 pop 环境变量）；**两 wrapper 都不 `return`**
+       （只适合副作用函数，实测装饰后返回值恒 `None`）。`utils/dist.py:38-66` `uneven_all_gather`
+       （**交换长度→pad→all_gather→trim→cat**，MoE 测试 `:354` 拼不等长 `topk_idx` 做参考统计）、
+       `:10-35` `init_dist`（tcp + 兼容 `device_id` 签名）。H100 实测
+       `harness/exp_testing_harness.{py,sh,out.txt}` 六组 **ALL PASS**：① `calc_diff` 性质逐条核过；
+       ② `bench` vs `bench_kineto`（真实 `fp8_gemm_nt`）：小 kernel event 含发射明显偏大
+       （`high_precision` 本次 29.3→5.3us 生效、但共享 GPU 下抖动）、大 `4096³` 冷/热 L2
+       （flush 300.7 vs noflush 224.8us，~34%）、tuple 分出 `transpose` 1.7/2.5us；
+       `DG_USE_NVIDIA_TOOLS=1` 返回 1/(1,1) 跳过 profiling；③ `count_bytes` 递归对上；④
+       `assert_bitwise_equal` 改一个 bf16 元素定位到 `(3,5)`/`byte_in_elem=0`；⑤ `get_arch_major=9`、
+       `test_filter`/`ignore_env` 语义（含 wrapper 不 return）；⑥ `uneven_all_gather` 8×H100
+       `n_tok=[17,512,4096,3,2048,100,777,64]` 拼接正确且各 rank 一致、`dim=1` 正确；117.4MB 时
+       ~11336us（本机无 Fabric Manager 关了 NVLS，~73 GB/s）。配套博客
+       `content/posts/mega-moe-40-testing-harness`（索引页新增第 40 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -890,8 +921,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P29 各增量完成（P15-1…P24-1、P25-1、P26-1、P27-1、P28-1、P29-1）。**
-  本轮 P29-1：新建 `docs/39-legacy-grouped-gemm.md`（+`harness/exp_legacy_grouped_gemm.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P30 各增量完成（P15-1…P29-1、P30-1）。**
+  本轮 P30-1：新建 `docs/40-deepgemm-testing-harness.md`（+`harness/exp_testing_harness.{py,sh,out.txt}`）
+  ——补上前面 0~29 篇**全部数字的来源**：DeepGEMM 的**测试基座** `deep_gemm/testing/`
+  （每个 `tests/test_*.py` 都 `import *`）。三件套：① **`calc_diff`**（`numeric.py:5-11`）——实测它
+  **恒等于归一化平方误差** `‖x−y‖²/(‖x‖²+‖y‖²)`（升 fp64 保证判据干净），由此得：对称、∈[0,2]、
+  `=0` 当且仅当逐元素相等、**同步缩放不变但单侧缩放不不变**（`1−calc_diff = cosθ·2ab/(a²+b²)`）、
+  小误差 `≈ rel_l2²/2`（relerr 1e-2↔calc_diff 5e-5）、对 DC 平移敏感；② **`bench`**（`bench.py:7-33`，
+  event 计时含发射，`high_precision` 用 `8192²` 大核藏 CPU 发射）vs **`bench_kineto`**（`:79-146`，
+  profiler 取**纯 kernel 时长**：`DG_USE_NVIDIA_TOOLS` 旁路、schedule 两批取第二批、256MB `flush_l2`、
+  `barrier` 用 `cuda._sleep(2e7)` 藏发射、tuple 分别计时 + 至多一行的断言、ms/us 单位换算）；
+  ③ `count_bytes`（递归数 `(data,sf)` 对）与 `assert_bitwise_equal`（逐位 + 首个差异字节定位）。
+  另拆 `testing/utils.py`（`get_arch_major`/`test_filter`/`ignore_env`，**两 wrapper 都不 return**）
+  与 `utils/dist.py`（`uneven_all_gather` 的**交换长度→pad→all_gather→trim→cat**、MoE 测试拼不等长
+  `topk_idx`；`init_dist`）。**架构无关，H100 真机**六组 **ALL PASS**：calc_diff 性质逐条核过；
+  `bench` vs `bench_kineto` 小 kernel ~10×、大 `4096³` 冷/热 L2 差 ~34%（300.7 vs 224.8us）；
+  `DG_USE_NVIDIA_TOOLS=1` 跳过 profiling；8×H100 `uneven_all_gather` 不等长（`[17,512,4096,3,2048,100,777,64]`）
+  拼接正确且各 rank 一致。行号全部核对过。配套博客 `content/posts/mega-moe-40-testing-harness`
+  （索引页新增第 40 篇）。
+  上一轮 P29-1：新建 `docs/39-legacy-grouped-gemm.md`（+`harness/exp_legacy_grouped_gemm.{py,sh,out.txt}`）
   ——补上第 10~13 篇拆的**现代 C++ grouped GEMM 取代掉的那套 A100 时代纯 Triton 兜底**（`deep_gemm/legacy/`，
   官方注释即「Legacy Triton kernels for A100」，`__init__.py:117`）。核心是**「分组表示」的差异**：
   legacy 用**逐元素索引张量**（`m_indices`/`m_row_indices`/`k_indices`）做**任意 gather**，现代用
@@ -1123,17 +1171,21 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P29 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+- **下一步**：P0~P30 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
   P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子、
   P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel、P23-1 DeepJIT 编译/缓存/加载/发射管线、
   P24-1 SM 局部域探针与内存域分配、P25-1 SM100 FP8/FP4 稠密 GEMM 主 kernel、
   P26-1 SM100 BF16 主 kernel 与 `set_tc_util`、P27-1 测试参考量化器 FP8/FP4 block-scale 语义、
-  P28-1 PTX 原语底座（内存序/原子/搬运/warp 通信）、P29-1 legacy A100 Triton grouped GEMM 家族）。
+  P28-1 PTX 原语底座（内存序/原子/搬运/warp 通信）、P29-1 legacy A100 Triton grouped GEMM 家族、
+  P30-1 测试基座 `deep_gemm/testing/` 的 `calc_diff`/`bench_kineto`/`uneven_all_gather`）。
   后续若继续（均为增量、非承诺）：
   ⑮ **legacy Triton MoE grouped GEMM 已补齐（P29-1）**：`deep_gemm/legacy/` 的四个 kernel
-   （dgrad `m_grouped`/`a_fused_m`、wgrad `a_fused_k`/`b_fused_k`）与「显式索引 gather」语义、
-   与现代 C++（`grouped_layout`+对齐）的对照表；Triton 架构无关。可再补：`deep_gemm/testing/`
-   基准设施（`bench_kineto`/`calc_diff` 判据）、`deep_gemm/utils/dist.py` 的 `uneven_all_gather`。
+    （dgrad `m_grouped`/`a_fused_m`、wgrad `a_fused_k`/`b_fused_k`）与「显式索引 gather」语义、
+    与现代 C++（`grouped_layout`+对齐）的对照表；Triton 架构无关。**测试基座已补齐（P30-1）**：
+    `deep_gemm/testing/`（`calc_diff` 判据 = 归一化平方误差、`bench`/`bench_kineto` 计时）与
+    `deep_gemm/utils/dist.py` 的 `uneven_all_gather`/`init_dist`；`deep_gemm/testing/utils.py` 的
+    `test_filter`/`ignore_env`。可再补：`tests/generators.py` 的操作数/布局生成器总览、
+    `deep_gemm/testing/bench.py` 在真实 SM100 上的 `set_tc_util` 影响（需目标卡）。
   ⑭ **「稠密 GEMM 主 kernel」矩阵已补齐（P26-1）**：SM90 FP8/1D1D-1D2D（P22）、SM90 BF16（P19）、
    SM100 FP8/FP4（P25）、SM100 BF16（P26）四格齐全；并拆清 `set_tc_util` 这一从 Python 直通模板参数的
    tensor-core 节流开关（只有 SM100 BF16 实现）。可再补 SM100 BF16 的 `kSwapAB` dgrad 分支数值细节，

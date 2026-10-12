@@ -1,0 +1,96 @@
+NVIDIA H100 80GB HBM3, 9.0
+torch 2.12.0a0+0291f960b6.nv26.04.48445190  device NVIDIA H100 80GB HBM3  cc (9, 0)
+
+==============================================================================
+A) testing/utils.py：get_arch_major / test_filter / ignore_env（:6-8/:11-22/:25-37）
+==============================================================================
+  get_arch_major() = 9（= torch.cuda.get_device_capability()[0]；H100=9）
+  test_filter(condition=False) 调用：
+filtered:
+ > Filtered by <function part_a.<locals>.<lambda> at 0x7f3609deaac0>
+
+  test_filter(condition=True)  调用：
+  实际执行的函数体次数 = 1（应为 1，False 的被过滤）
+  ignore_env(cond=True)  函数内读到 = None（被临时移除）
+  ignore_env(cond=False) 函数内读到 = 'sentinel'（保留）
+  返回后环境变量恢复 = 'sentinel'
+  **注意**：wrapper 不 return（源码两分支都裸调 func），返回 12345 的函数经装饰后返回 None
+  判定：PASS
+
+==============================================================================
+B) calc_diff（numeric.py:5-11）= ||x-y||^2 / (||x||^2+||y||^2)？
+==============================================================================
+  calc_diff(x,y) = 5.00210553e-05  vs  ||x-y||^2/(||x||^2+||y||^2) = 5.00210553e-05  -> 一致
+  对称性 |calc_diff(x,y)-calc_diff(y,x)| = 0.00e+00
+  calc_diff(x,x) = 0.00e+00（=0 当且仅当逐元素相等）；calc_diff(x,-x) = 2.000000（≈2）；calc_diff(x,0) = 1.000000（=1）
+  同步缩放不变：calc_diff(3.7x, 3.7y) = 5.00210553e-05 = calc_diff(x,y) = 5.00210553e-05
+  单侧缩放**不**不变：calc_diff(x, 3.7y) = 4.9630e-01 ≠ 5.0021e-05（分子 |x-cy|^2、分母 |x|^2+c^2|y|^2 只在 c=1 时相等）
+  e=1e-03: calc_diff=3.177973e-07   rel_l2^2/2=3.177974e-07  比值 1.0000
+  e=1e-02: calc_diff=3.185586e-05   rel_l2^2/2=3.185679e-05  比值 1.0000
+  e=5e-02: calc_diff=7.952427e-04   rel_l2^2/2=7.959002e-04  比值 0.9992
+  平移 0.1 后 calc_diff = 4.9776e-03（度量对常量偏移敏感，非零均值差会被计入）
+  判定：PASS
+
+==============================================================================
+C) count_bytes（numeric.py:14-21）：递归统计元素字节、跳过 None
+==============================================================================
+  count_bytes(((fp8,bf16),[fp32,None],None)) = 2304  vs  2304  -> 一致
+  单张量与 tuple 视为同级：count_bytes(a,b) = 2048 = 2048
+  判定：PASS
+
+==============================================================================
+D) assert_bitwise_equal（numeric.py:24-44）：逐位判等 + 失败定位首个不一致字节
+==============================================================================
+  相同张量：通过（无异常）
+  改变一个元素：抛出 AssertionError，消息：
+    bitwise mismatch (one_elem): num_bytes=256, num_mismatch=2, first_byte=106, elem=53, coord=(3, 5), byte_in_elem=0, x_byte=132, y_byte=0, x_val=-1.03125, y_val=-0.03125
+  形状不符先断言：True；dtype 不符先断言：True
+  判定：PASS
+
+==============================================================================
+E) bench（bench.py:7-33）vs bench_kineto（:79-146）：event 计时 vs 纯 kernel 时长
+==============================================================================
+  真实算子：deep_gemm.fp8_gemm_nt（内含 transpose_fp32 + sm90_fp8_gemm_1d2d）
+  DG_USE_NVIDIA_TOOLS=1：bench_kineto 跳过 profiling，单名返回 1，tuple 返回 (1, 1)（与 nsys/ncu 冲突保护，:88-90）
+
+  [小 256x256x512]
+    bench(event, 含发射)          =    29.254 us
+    bench(event, high_precision)  =     5.311 us
+    bench_kineto(纯 kernel,flush) =     2.717 us   ->    24.7 TFLOPS
+    bench_kineto(纯 kernel,noflush)=     2.351 us
+    bench_kineto(tuple) transpose =     1.684 us | fp8_gemm =     2.715 us
+    bench / bench_kineto 比值      =  10.77x
+
+  [大 4096x4096x4096]
+    bench(event, 含发射)          =   226.094 us
+    bench(event, high_precision)  =   228.821 us
+    bench_kineto(纯 kernel,flush) =   300.691 us   ->   457.1 TFLOPS
+    bench_kineto(纯 kernel,noflush)=   224.848 us
+    bench_kineto(tuple) transpose =     2.480 us | fp8_gemm =   301.141 us
+    bench / bench_kineto 比值      =   0.75x
+
+  结论：① 小 kernel 的 event 计时通常显著大于 kineto 纯 kernel 时长（CPU 逐次发射暴露；`high_precision` 的意图是用一个大核占满 GPU、让 CPU 趁机排队以隐藏发射开销，本机改善不稳定——
+         GPU 被多个自驱任务共享，数字有抖动）；
+        ② kineto 取**纯 kernel 时长**，并在 (transpose, fp8_gemm) 下把两个 kernel 分开计时；
+        ③ `flush_l2` 每次清 256MB L2：大 GEMM 冷启（读操作数）比缓存命中明显慢，小 kernel 影响小。
+
+==============================================================================
+F) uneven_all_gather（utils/dist.py:38-66）：不等长 all_gather 的正确性与开销（8xH100）
+==============================================================================
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+  8 rank 拼接正确（逐段 rank 编号 + 总长 7617，每 rank 结果一致）：True
+  dim=1 不等长拼接正确：True
+  H=7168、每 rank 8192 tok（117.4 MB）：11335.8 us，每 rank 发出 72.5 GB/s，拼接结果吞吐 82.9 GB/s（未开 NVLS）
+  判定：PASS
+
+==============================================================================
+汇总
+==============================================================================
+  A: PASS
+  B: PASS
+  C: PASS
+  D: PASS
+  E: PASS
+  F: PASS
+  ALL PASS
