@@ -110,7 +110,11 @@
 
 ### P4 相关技术对照（`docs/03-related-tech.md`）
 
-- [ ] **P4-1** CUDA Graphs：消除 launch 开销但仍有 kernel barrier；与 megakernel 的关系。
+- [x] **P4-1** CUDA Graphs：消除 launch 开销但仍有 kernel barrier；与 megakernel 的关系。
+      见 `docs/03-related-tech.md` §1（机理/API 三步/capture 模式/显式构图；MPK §1 行 87–89、§3 行 402–414；
+      本机实测 `src/cuda_graph.cu` + `harness/cuda_graph.out.txt`：eager ~1.7–2.3 µs/kernel 近恒定、
+      graph per-kernel 摊到 ~0.78 µs（不归零）、1024 节点 2.98×、单次 `cudaGraphLaunch` 固定 ~3.1 µs、
+      capture+instantiate 一次 ~104 µs；device graph launch 仍停在 kernel 级；判据仅部分满足 C1）。
 - [ ] **P4-2** PDL（Programmatic Dependent Launch）：跨 kernel 重叠；H100 实测。
 - [ ] **P4-3** persistent kernel vs megakernel；in-kernel 调度（decentralized scheduling）。
 - [ ] **P4-4** 与「通信-计算 overlap」（DeepEP / FlashMLA 双 kernel）的对比。
@@ -148,7 +152,7 @@
 ## 当前进度 / 下一步
 
 - 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**；
-  **P3 全部完成（3/3）**。
+  **P3 全部完成（3/3）**；**P4 进行中（1/4）**。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -197,9 +201,16 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：P4** 相关技术对照 `docs/03-related-tech.md`：P4-1 CUDA Graphs、P4-2 PDL（H100 实测）、
+- **下一步：P4** 相关技术对照 `docs/03-related-tech.md`：P4-2 PDL（H100 实测）、
   P4-3 persistent kernel vs megakernel + in-kernel 调度、P4-4 与通信-计算 overlap（DeepEP/FlashMLA）对比；
   随后 P5（launch 开销等本机实验）、P6（汇总）。
+- **本轮（P4-1）**：新建 `docs/03-related-tech.md` §1「CUDA Graphs」——机理（capture→instantiate→replay，
+  三种 capture 模式、显式构图 API、节点/子图/device graph launch）、真实资料（NVIDIA 2019 博客 9.6→3.8→3.4 µs）、
+  本机实测（新 `src/cuda_graph.cu`、`harness/cuda_graph.out.txt`：eager per-kernel 近恒定 ~1.7–2.3 µs，
+  graph 摊到 ~0.78 µs 不归零，N=1024 2.98×，单次图提交固定 ~3.1 µs，capture+instantiate ~104 µs）、
+  未消除项（kernel barrier/依赖串行沿用 P1-2 D 对照 1.05×、图静态、device graph launch 仍 kernel 级）、
+  与 MPK tGraph 对照（§3 行 402–414）及 C1–C5 判据映射（仅部分满足 C1）。P4-1 标记完成；
+  纯 §1 完成，P4-2/3/4 待续。
 - **本轮（P3-3）**：`docs/02-production-cases.md` §2/§3 扩为 P3-3 精读；P3-3 标记完成、P3 收官；
   纯资料分析，未产生新实验。
 
