@@ -1,0 +1,108 @@
+== fanin_sched (目标卡 H100/sm90) ==
+device=3  SMs=132  cooperativeLaunch=1  iters=20  T=256  G=132
+
+--- A: L=16 W=256  FIN=2 ---
+  L=16 W=256 FIN=2 tasks=4096  SEG=4096 数据=67.1 MB  边=7680
+  barrier:     0.282 ms   (1.000×)
+  wave  :     0.289 ms   ( 0.975× vs barrier)
+  decen :     0.874 ms   ( 0.322× vs barrier)
+  static:     0.301 ms   ( 0.935× vs barrier)
+  正确性 max rel|Δ|: barrier=1.19e-07(w=0) wave=1.19e-07(w=0) decen=1.19e-07(w=0) static=1.19e-07(w=0)
+
+--- A: L=16 W=512  FIN=2 ---
+  L=16 W=512 FIN=2 tasks=8192  SEG=4096 数据=134.2 MB  边=15360
+  barrier:     0.490 ms   (1.000×)
+  wave  :     0.545 ms   ( 0.900× vs barrier)
+  decen :     1.761 ms   ( 0.278× vs barrier)
+  static:     0.574 ms   ( 0.853× vs barrier)
+  正确性 max rel|Δ|: barrier=1.19e-07(w=0) wave=1.19e-07(w=0) decen=1.19e-07(w=0) static=1.19e-07(w=0)
+
+--- A: L=16 W=1024 FIN=2 ---
+  L=16 W=1024 FIN=2 tasks=16384  SEG=4096 数据=268.4 MB  边=30720
+  barrier:     0.954 ms   (1.000×)
+  wave  :     1.053 ms   ( 0.906× vs barrier)
+  decen :     3.451 ms   ( 0.277× vs barrier)
+  static:     1.126 ms   ( 0.848× vs barrier)
+  正确性 max rel|Δ|: barrier=1.19e-07(w=0) wave=1.19e-07(w=0) decen=1.19e-07(w=0) static=1.19e-07(w=0)
+
+--- C: L=16 W=1024 FIN=2 — wave 批量取 task 扫描 ---
+  batch=  1:     1.053 ms  ( 1.000× vs batch=1)  max rel|Δ|=1.19e-07 fail=0
+  batch=  2:     1.028 ms  ( 1.024× vs batch=1)  max rel|Δ|=1.19e-07 fail=0
+  batch=  4:     1.024 ms  ( 1.029× vs batch=1)  max rel|Δ|=1.19e-07 fail=0
+  batch=  8:     1.030 ms  ( 1.022× vs batch=1)  max rel|Δ|=1.19e-07 fail=0
+  batch= 16:     1.986 ms  ( 0.530× vs batch=1)  max rel|Δ|=1.19e-07 fail=0
+  batch= 32:     3.900 ms  ( 0.270× vs batch=1)  max rel|Δ|=1.19e-07 fail=0
+
+--- A: L=16 W=2048 FIN=2 ---
+  L=16 W=2048 FIN=2 tasks=32768  SEG=4096 数据=536.9 MB  边=61440
+  barrier:     1.874 ms   (1.000×)
+  wave  :     2.054 ms   ( 0.912× vs barrier)
+  decen :     6.955 ms   ( 0.269× vs barrier)
+  static:     2.238 ms   ( 0.837× vs barrier)
+  正确性 max rel|Δ|: barrier=1.19e-07(w=0) wave=1.19e-07(w=0) decen=1.19e-07(w=0) static=1.19e-07(w=0)
+
+--- B: L=16 W=1024 FIN=1 ---
+  L=16 W=1024 FIN=1 tasks=16384  SEG=4096 数据=268.4 MB  边=15360
+  barrier:     0.953 ms   (1.000×)
+  wave  :     1.054 ms   ( 0.904× vs barrier)
+  decen :     3.492 ms   ( 0.273× vs barrier)
+  static:     1.119 ms   ( 0.852× vs barrier)
+  正确性 max rel|Δ|: barrier=1.20e-07(w=0) wave=1.20e-07(w=0) decen=1.20e-07(w=0) static=1.20e-07(w=0)
+
+--- B: L=16 W=1024 FIN=4 ---
+  L=16 W=1024 FIN=4 tasks=16384  SEG=4096 数据=268.4 MB  边=61440
+  barrier:     0.955 ms   (1.000×)
+  wave  :     1.092 ms   ( 0.874× vs barrier)
+  decen :     3.455 ms   ( 0.276× vs barrier)
+  static:     1.135 ms   ( 0.842× vs barrier)
+  正确性 max rel|Δ|: barrier=8.95e-08(w=0) wave=8.95e-08(w=0) decen=8.95e-08(w=0) static=8.95e-08(w=0)
+
+--- B: L=16 W=1024 FIN=8 ---
+  L=16 W=1024 FIN=8 tasks=16384  SEG=4096 数据=268.4 MB  边=122880
+  barrier:     0.988 ms   (1.000×)
+  wave  :     1.154 ms   ( 0.856× vs barrier)
+  decen :     3.508 ms   ( 0.282× vs barrier)
+  static:     1.203 ms   ( 0.821× vs barrier)
+  正确性 max rel|Δ|: barrier=1.04e-07(w=0) wave=1.04e-07(w=0) decen=1.04e-07(w=0) static=1.04e-07(w=0)
+
+--- D: L=16 W=512 FIN=2 SEG=16384 ---
+  L=16 W=512 FIN=2 tasks=8192  SEG=16384 数据=536.9 MB  边=15360
+  barrier:     1.674 ms   (1.000×)
+  wave  :     1.707 ms   ( 0.981× vs barrier)
+  decen :     2.227 ms   ( 0.752× vs barrier)
+  static:     1.724 ms   ( 0.971× vs barrier)
+  正确性 max rel|Δ|: barrier=1.19e-07(w=0) wave=1.19e-07(w=0) decen=1.19e-07(w=0) static=1.19e-07(w=0)
+
+--- D: L=16 W=512 FIN=2 SEG=32768 ---
+  L=16 W=512 FIN=2 tasks=8192  SEG=32768 数据=1073.7 MB  边=15360
+  barrier:     3.237 ms   (1.000×)
+  wave  :     3.252 ms   ( 0.996× vs barrier)
+  decen :     3.386 ms   ( 0.956× vs barrier)
+  static:     3.255 ms   ( 0.995× vs barrier)
+  正确性 max rel|Δ|: barrier=1.19e-07(w=0) wave=1.19e-07(w=0) decen=1.19e-07(w=0) static=1.19e-07(w=0)
+
+--- E: L=32  W=256 FIN=2 SEG=8192 ---
+  L=32 W=256 FIN=2 tasks=8192  SEG=8192 数据=268.4 MB  边=15872
+  barrier:     0.909 ms   (1.000×)
+  wave  :     0.950 ms   ( 0.957× vs barrier)
+  decen :     1.931 ms   ( 0.471× vs barrier)
+  static:     0.958 ms   ( 0.949× vs barrier)
+  正确性 max rel|Δ|: barrier=5.97e-08(w=0) wave=5.97e-08(w=0) decen=5.97e-08(w=0) static=5.97e-08(w=0)
+
+--- E: L=64  W=256 FIN=2 SEG=8192 ---
+  L=64 W=256 FIN=2 tasks=16384  SEG=8192 数据=536.9 MB  边=32256
+  barrier:     1.810 ms   (1.000×)
+  wave  :     1.881 ms   ( 0.962× vs barrier)
+  decen :     3.823 ms   ( 0.473× vs barrier)
+  static:     1.899 ms   ( 0.953× vs barrier)
+  正确性 max rel|Δ|: barrier=5.97e-08(w=0) wave=5.97e-08(w=0) decen=5.97e-08(w=0) static=5.97e-08(w=0)
+
+--- E: L=128 W=256 FIN=2 SEG=8192 ---
+  L=128 W=256 FIN=2 tasks=32768  SEG=8192 数据=1073.7 MB  边=65024
+  barrier:     3.612 ms   (1.000×)
+  wave  :     3.742 ms   ( 0.965× vs barrier)
+  decen :     7.647 ms   ( 0.472× vs barrier)
+  static:     3.781 ms   ( 0.955× vs barrier)
+  正确性 max rel|Δ|: barrier=0.00e+00(w=0) wave=0.00e+00(w=0) decen=0.00e+00(w=0) static=0.00e+00(w=0)
+
+done.

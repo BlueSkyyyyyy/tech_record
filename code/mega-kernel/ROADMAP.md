@@ -416,6 +416,26 @@
       口径差异）。**纯源码走读（资料分析），本轮无新实验。** 配套博客 post `mega-kernel-09-mpk-compiler`
       （weight 10）并更新 `mega-kernel-00-index` 目录。
 
+### P22 实验扩展 12：去中心化调度的 DAG 形状敏感性（`docs/04-experiments.md` §15）
+
+- [x] **P22-1** 把 P15-1 的「C 条链」推广到**分层扇入/扇出图**（L 层 × W 宽 × FIN 前驱），
+      同一图/工作量上对照四种设备内协调机制：`barrier`（逐层 grid.sync）/`wave`（层软屏障 +
+      原子工作计数器，可批量取 task）/`decen`（逐 task 原子 ready 队列 + 事件计数器，P15-1 机制
+      + 扇入扇出）/`static`（静态 grid-stride + 事件计数器轮询，无中央队列）。见
+      `docs/04-experiments.md` §15，源码 `src/fanin_sched.cu`，原始输出
+      `harness/fanin_sched.out.txt`（目标卡 H100/sm90，device 3，iters=20，G=132，T=256）。
+      五 Section：A 扫 W、B 扫 FIN、C 扫 wave 批量 K、D 扫 task 长度 SEG、E 扫层数 L。核心结论：
+      (1) 四机制在 12 case 上 **fail=0**、vs 串行参考 max rel|Δ| 6e-8–1.2e-7（C5 机制对任意
+      扇入/扇出正确）；(2) **严格分层均衡图上集中式 `barrier` 恒最快**（wave/static 0.82–0.99×、
+      decen 0.27–0.47×），且 `grid.sync` 地板相对每层工作量占比小而「多而薄」的层数增加（E，
+      L 32→128）也不翻盘——去中心化要赢在均衡/结构（对上 P15-1、P10-1）；(3) **`decen` 的每 task
+      固定开销**：固定 W=512 把 SEG 4096→32768，`decen/b` 从 **0.278×→0.956×**（长 task 摊薄），
+      解释 P15-1「小负载慢」；(4) MPK §5.2 **批量取 task 甜点 K≈W/G**（K=4 1.028×、K=16 骤降
+      0.530×、K=32 0.270×）；(5) `static` 无 work-stealing，随扇入 FIN 变差（0.852→0.821×）；
+      (6) 实现坑：自拼「数据写 + 独立 done flag 发布」在大扇入下间歇读错，改用逐 task 事件计数器
+      （MPK §5.1 event 同构）才稳。判据：四者均无固定角色 worker/scheduler，仍差 C5 一步。
+      **本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -466,8 +486,10 @@
   跨算子细粒度依赖实测出来：数值安全但静态切 block 重叠恒慢于屏障，重叠需 SM 共驻而非分块）。
   **P21-1 MPK 依赖分析器源码走读（1/1）完成**（本轮新增，补齐 `docs/06`/`docs/07` 上游的编译层：
   论文 §4.1 的「算子图 → tGraph」五步在 `src/kernel/annotated_graph.cc` 的真实实现——最近写者 SSA +
-  bbox 阴影覆盖、残余边剥离、case 2/3 拒绝、fork/join LCM event fusion、按 depth 的 Kahn linearization）。
-  **本专题任务清单（P0–P21）全部完成**，无未完成子项。
+   bbox 阴影覆盖、残余边剥离、case 2/3 拒绝、fork/join LCM event fusion、按 depth 的 Kahn linearization）。
+  **P22-1 去中心化调度的 DAG 形状敏感性（1/1）完成**（本轮新增，把 P15-1 的链推广到分层扇入/
+  扇出图、对照 barrier/wave/decen/static 四机制、实现 MPK §5.2 批量取 task 的甜点标度）。
+  **本专题任务清单（P0–P22）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -527,8 +549,29 @@
   ④ ~~megakernel 成本侧「代码足迹 / 指令缓存」实测~~（**P16-1 完成**，与 P14-1 寄存器足迹合成双层足迹）；
   ⑤ ~~megakernel 成本侧「寄存器足迹的可绕开性」：`setmaxnreg` 实测~~（**P18-1 完成**，收回 P14-1 的代价）；
   ⑥ ~~`docs/04` §6.6「未测 PDL 与 CUDA Graph 叠加」~~（**P19-1 完成**，测出 capture 保留 PDL 语义、
-  叠加次乘非相乘、上限独立）；剩「在容器内 `pip install -e .` 构建 mirage sm90 路径并跑端到端数字」
-  （构建成本高，未做）。
+  叠加次乘非相乘、上限独立）；
+  ⑦ ~~P15-1 §9.6「未测扇入/扇出 DAG、批量/预取取 task」~~（**P22-1 完成**：分层扇入/扇出图 ×
+  barrier/wave/decen/static 四机制、MPK §5.2 批量取 task 甜点 K≈W/G、静态分配随扇入变差）；
+  剩「在容器内 `pip install -e .` 构建 mirage sm90 路径并跑端到端数字」（构建成本高，未做）；
+  剩「跨层流水/环形缓冲预取」（P22-1 §15.6 标注未做，是 MPK §5.3 的下一层机制）。
+- **本轮（P22-1）**：`docs/04-experiments.md` 新增 §15「去中心化调度的 DAG 形状敏感性：扇入/扇出 ×
+  静态分配 vs 动态队列」——新建 `src/fanin_sched.cu` + `harness/fanin_sched.out.txt`（目标卡 H100/sm90，
+  device 3，iters=20，G=132=#SM，T=256）。把 P15-1 的链推广成**分层扇入/扇出图**（`t=l*W+j`，前驱 =
+  层 l-1 的 `(j*FIN+k) mod W`，FIN 路汇聚；数值 = 本地段和 + Σ前驱），四机制公平对照：
+  **barrier**（逐层 grid.sync）/ **wave**（层软屏障 + 原子工作计数器，支持批量领 K 个）/
+  **decen**（逐 task 原子 ready 队列 + 事件计数器，P15-1 机制 + 扇入扇出）/ **static**（静态 grid-stride
+  + 事件计数器轮询，无中央队列）。五 Section：A 扫 W（256→2048）、B 扫 FIN（1/4/8）、C 扫 wave 批量 K、
+  D 扫 task 长度 SEG（4096→32768）、E 扫层数 L（32/64/128）。核心结论：(1) **12 case 四机制全 fail=0**、
+  vs 串行参考 max rel|Δ| 6e-8–1.2e-7（C5 机制对任意扇入/扇出正确）；(2) **严格分层均衡图上 `barrier`
+  恒最快**（wave/static 0.82–0.99×、decen 0.27–0.47×），Section E 层数 32→128 不翻盘——每层工作量
+  ≥ 几 µs 时 `grid.sync` 地板（~1.1µs，P10-1）占比小，去中心化要赢在均衡/结构（对上 P15-1 §9.4）；
+  (3) **`decen` 是每 task 固定开销**：W=512 固定、SEG 4096→32768，`decen/b` **0.278×→0.956×**（长
+  task 摊薄固定开销），给 P15-1 §9.4「小负载慢到 0.556×」一般化解释；(4) MPK §5.2 **批量取 task 甜点
+  K≈W/G**（K=4 →1.028×；K=16 骤降 **0.530×**、K=32 **0.270×**，因超每 worker 每层均摊 task 数导致
+  层末尾空转）；(5) `static` 无 work-stealing，随扇入 FIN 变差（0.852→**0.821×**）；(6) 实现坑：
+  自拼「写 val → threadfence → 独立 done flag」发布在大扇入下间歇读错（rel 1e-2–1e0），改用逐 task
+  事件计数器（`atomicSub` 归零，= MPK §5.1 event、`docs/06` §3）才稳。判据：四机制均满足 C1–C4、
+  无固定角色 worker/scheduler，仍差 C5 一步。**本轮新增实验**，补齐 P15-1 §9.6 两条尾巴。
 - **本轮（P21-1）**：新建 `docs/08-mpk-compiler.md`（MPK 依赖分析器 / tGraph 构建源码走读，**纯源码走读、
   无新实验**）+ 博客 post `mega-kernel-09-mpk-compiler`（weight 10）并更新 `mega-kernel-00-index` 目录第 9 项。
   快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`（与 `docs/06`/`docs/07` 同一快照，行号已核对）。
