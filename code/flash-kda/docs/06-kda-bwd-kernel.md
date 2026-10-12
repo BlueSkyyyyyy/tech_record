@@ -409,6 +409,95 @@ kernel 侧不用改：`m_t = o_t < T` 已把每个 token load 置零，pad 行�
 多算一组），属寄存器压力取舍而非正确性约束。本 kernel 以 `K=128` 单块实现，与其数学等价，故
 「K 的 64 分段」不是待补的正确性缺口（若做目标卡 CUDA B1，K 轴如何切是性能问题，见 §5.2 设计）。
 
+### 6.6 P6-4：最小可运行 B2（`wy_dqkg`）kernel——`dq/dk/dv/dβ/dg/dA` 实测
+
+§6 落地了 B1（跨块状态伴随）。反向里第二块「逐块并行、又要吃状态」的是 **B2 `bwd_dqkg`**
+（对应 FLA `chunk_kda_bwd_kernel_wy_dqkg_fused`，`chunk_bwd.py:133-310`，即 `05` §7.2~7.5、
+7.7~7.10 的逐块公式）。本节把它做成最小可运行 Triton kernel 并三方对拍。
+证据：`harness/check_bwd_dqkg_kernel.py` / `harness/check_bwd_dqkg_kernel.out.txt`。
+
+#### 6.6.1 kernel 契约（寄存器的转置约定是关键）
+
+B2 的输入就是 B1 的输出加前向 workspace：`k,q,v,g(块内 log2 cumsum),beta,A(P),h(S_in)`、
+`do`、`dh`（B1 落盘的每块 $\bar S$）、`dv`（`dAv` 的输出支路 $\bar U$）；输出
+`dq,dk,dv2,db,dg,dA`。与 `05` §7 公式一一对应（`chunk_bwd.py` 真实行号）：
+
+| 代码（`chunk_bwd.py`） | 公式 |
+|---|---|
+| `b_dgk += tl.sum(b_h * b_dh, axis=0)`（`253`） | $\bar E^{\text{tot}}=\sum_v \bar S\odot S_{\text{in}}$ |
+| `b_dq += tl.dot(b_do, b_h)`（`254`） | $\bar q^{\text{dec}}=\bar o\,S_{\text{in}}^\top$（式 7.2） |
+| `b_dk += tl.dot(b_v_new, b_dh)`（`255`） | 状态项 $\bar k^{\text{rest}}=U\,\bar S$（式 7.3） |
+| `b_dw += tl.dot(b_dv, b_h)`（`256`） | 预测支路 $\bar w$（式 7.7） |
+| `b_dA += tl.dot(b_dv, tl.trans(b_v))`（`264`） | 块内 $\bar L$ 第一支 |
+| `b_dw=-b_dw.to(A.dtype); b_dA+=tl.dot(b_dw, tl.trans(b_kg))`（`280-281`） | $\bar L$ 第二支（式 7.6/7.8） |
+| `b_dA=dot(dA,A); b_dA=dot(A,b_dA); b_dA=-b_dA`（`302-304`） | $\bar L=-P^\top\bar P\,P^\top$（式 7.5） |
+
+一个容易踩的细节：kernel 里**所有「矩阵」在载入寄存器时都被转置了**——`b_A[i,j]=A^{\text{T}}[i,j]`
+（`p_A` 用 `o_A` 行 `o_t` 列，`chunk_bwd.py:205-208`）、`b_h[v,k]=h[k,v]=S_{\text{in}}^\top`、
+`b_dh=dS^\top`。原因是这些片段随后要当 `tl.dot` 的 B 操作数（列主序），等价于 host 侧的
+`S.transpose(-1,-2)`。`harness` 里的 torch 参考（`wy_dqkg_torch`）用 `einsum` 把这些转置显式写出并与
+kernel 对齐，A 张量按 `[B,T,H,BT]`（`A4[b,o_t,h,o_A]`）布局——`b_A` 即其 chunk 内转置。
+
+#### 6.6.2 三方对拍：Part A（torch，ieee fp32）与 Part B（Triton，tf32）
+
+`Part A` 是纯 torch 逐块实现（ieee fp32），`Part B` 是本 kernel，参照是 FLA 的 Triton 内核
+（本机 FLA 默认会把 `@dispatch('kda')` 路由到 **TileLang** 后端，见 6.6.5；这里用
+`FLA_DISABLE_BACKEND_DISPATCH=1` 钉回文档所读的 Triton 实现）。实测
+（`check_bwd_dqkg_kernel.out.txt`）：
+
+| config | 对比 | `dq` | `dk` | `dv` | `db` | `dg` | `dA` |
+|---|---|---|---|---|---|---|---|
+| B1 T256 H2 D64 | torch vs FLA（rel） | 8.3e-4 | 8.3e-4 | 6.7e-4 | 5.8e-4 | 8.0e-4 | 2.1e-3 |
+| | **Triton vs FLA** | **0** | **0** | **0** | **0** | **0** | **0** |
+| B2 T512 H4 D128 | torch vs FLA（rel） | 9.6e-4 | 8.4e-4 | 6.2e-4 | 7.0e-4 | 8.7e-4 | 1.9e-3 |
+| | **Triton vs FLA** | **0** | **0** | **0** | **0** | **0** | **0** |
+| B1 T1024 H8 D128 | torch vs FLA（rel） | 9.1e-4 | 9.8e-4 | 6.2e-4 | 5.7e-4 | 9.1e-4 | 1.7e-3 |
+| | **Triton vs FLA** | **0** | **0** | **0** | **0** | **0** | **0** |
+| B1 T250 H3 D64×128（非整除） | Triton vs FLA | 0 | 0 | 0 | 0 | 0 | 0 |
+| B2 T513 H2 D64（非整除） | Triton vs FLA | 0 | 0 | 0 | 0 | 0 | 0 |
+
+两条结论：
+
+- **Part A 的 ~1e-3 就是 `tl.dot` 的 tf32 误差**：torch 参考走 ieee fp32、FLA 内核走 tf32，六项相对
+  误差都落在 **5.8e-4~2.1e-3**，与 `05`/§6.2 里「`dhu` 的误差底噪是 tf32」完全同一量级。这说明
+  `wy_dqkg_torch` 与 kernel 的**代数完全一致**（若有某个转置写反，会出现 O(1) 的相对误差）。
+- **Part B 逐位相同（max_abs=0）**：本 kernel 是 FLA `wy_dqkg` 的忠实移植（BK/BV 分块、`i_k==0`
+  分支、`tl.debug_barrier()`、求逆伴随的 bf16 cast 都照搬），因此 fp32 输入下与 FLA 位级相同。
+  这既验证了移植的正确性，也说明「B2 的算术路径 = FLA 的路径」。**非整除 T（尾块）也逐位相同**，
+  即 `wy_dqkg` 是 per-chunk 独立的、不依赖 `T` 的分块（与 B1 的 host 侧非整除 bug 不同）。
+
+#### 6.6.3 精度底噪：bf16 操作数（Part C）
+
+把全部输入量化到 bf16 再喂本 kernel（模拟目标卡 bf16 GEMM），对 fp32 FLA 参照：
+
+| config | `dq` | `dk` | `dv` | `db` | `dg` | `dA` |
+|---|---|---|---|---|---|---|
+| B1 T256 H2 D64 | 2.9e-3 | 5.0e-2 | 3.2e-3 | 2.5e-3 | 4.3e-2 | 5.5e-3 |
+| B2 T512 H4 D128 | 2.8e-3 | 4.6e-2 | 3.6e-3 | 2.4e-3 | 3.3e-2 | 6.4e-3 |
+
+`dq/dv/db/dA` 落在 **2.3e-3~6.4e-3**（bf16 GEMM 底噪），但 **`dk`/`dg` 明显更高
+（3.3e-2~5.0e-2）**：因为 `dk` 的衰减链 $\exp_2(g^{\text{tot}}-g)$ 和 `dg` 的
+`b_dg = q*dq - k*dk + ...` 都是**小量相减 / 指数放大**，对操作数量化更敏感。这解释了为什么 FLA
+在 `chunk_intra.py:597` 专门留了「这里不要用 bf16」的注释（§3.3）——**`g`/`k` 相关通道应保
+fp32/tf32**。目标卡 B2 的设计（§5.2）因此建议门控链与 `dk/dg` 的合成走 fp32。
+
+#### 6.6.4 计时（Part D，朴素实现）
+
+`triton.testing.do_bench`（naive，`num_warps=4, num_stages=1`，BK=BV=64）：
+B1 T512 H4 D128 → **97.8 µs**（FLA 88.4 µs）；B2 T2048 H8 D128 → **496.8 µs**（FLA 452.8 µs）。
+本 kernel 比 FLA 慢约 10%，符合「同结构、未调 autotune」的预期；它不是性能交付，价值在把
+**B2 的契约、转置约定、误差底噪**钉死，供目标卡 CUDA B2（CHUNK=16，复用 K1 workspace 的
+$P/M_{qk}/k^{\text{dec}}/q^{\text{dec}}/k^{\text{rest}}/E^{\text{tot}}$）对拍。
+
+#### 6.6.5 踩坑：运行期 FLA 会路由到 TileLang 后端
+
+本机 `fla` 0.5.x 里 `chunk_kda_bwd_wy_dqkg_fused` 被 `@dispatch('kda')` 装饰，运行时会优先选中
+**TileLang** 实现（`fla/ops/kda/backends/tilelang/chunk_bwd_dqkg.py`），而它当前 **fp32 路径会编译
+失败**（无 fp32 MMA：`tl::mma_sync: unsupported configuration`）。两条对策：(a) 对拍时设
+`FLA_DISABLE_BACKEND_DISPATCH=1` 回到文档所精读的 Triton 内核（本篇即如此）；(b) 若必须用
+TileLang 后端，用 bf16 输入（fp32 会撞上面的 unsupported 配置）。这也提醒：**文档 `06` §3 精读的
+Triton 代码在运行期不一定是被执行的那一份**——精读与实测要同时交代后端。
+
 ## 7. 小结与下一步
 
 - FLA `chunk_kda` 反向的 5 个 Triton kernel 与 `05` §7 的分块反向**逐式对应**：`dAv`=输出支路、
@@ -422,8 +511,13 @@ kernel 侧不用改：`m_t = o_t < T` 已把每个 token load 置零，pad 行�
   Triton↔FLA 实测 **1e-5**（tf32 底噪），并与 `src/kda_bwd_ref.py` 的 `dh0` 对到 ~3e-4；
   状态伴随 bf16 存储的受控消融给出 **~2.5e-3** 的相对误差（回答了 §5.3 的待验证项）；
   §6.5 关闭「非整除 T」边界（尾块 `E_tot` 取最后有效 token，Triton↔FLA 仍 1e-8~4e-5）。
+- §6.6（P6-4）已把 **B2 `wy_dqkg`** 做成最小可运行 Triton kernel：torch 独立参考 vs FLA 内核
+  六项梯度 **5.8e-4~2.1e-3**（=tf32 底噪，证明代数一致），本 kernel vs FLA **逐位相同（含非整除
+  T）**；bf16 操作数下 `dq/dv/db/dA` **2.3e-3~6.4e-3** 而 `dk/dg` 抬到 **3.3e-2~5.0e-2**
+  （门控/衰减链对量化敏感，印证 §3.3 的「不要 bf16」注释）；并记录运行期 FLA 路由到 TileLang
+  后端（fp32 路径编译失败）这一实测陷阱。
 
 下一步：
 
-- P7：FlashKDA 前向 CUPTI 计时与 `ncu` 剖析（§5 的 B2/B3 与 CUTLASS/TMA 版 B1 属更大工程，
-  留待有明确需求时再做；P6-2 的「最小 kernel」目标已达成）。
+- P7：FlashKDA 前向 CUPTI 计时与 `ncu` 剖析（§5 的 B3 intra 与 CUTLASS/TMA 版 B1/B2/B0
+  属更大工程，留待有明确需求时再做；P6-2 的 B1 与 P6-4 的 B2「最小 kernel」目标已达成）。

@@ -83,6 +83,10 @@
 - [x] **P6-3** 关闭 P6-2 的「非整除 T」边界：定位 host 侧 `E_tot` 记账假设整除的 bug（尾块 58 行
       未被寻址），改为按最后有效 token 取 $E^{tot}$；非整除 T 实测 Triton↔FLA 仍 1e-8~4e-5；
       澄清「K 的 64 分段」是 FLA 同 program 内展开、非正确性约束。
+- [x] **P6-4** B2 `wy_dqkg` 最小可运行 Triton kernel（对应 FLA `chunk_kda_bwd_wy_dqkg_fused`）：
+      独立 torch 参考 vs FLA 六项梯度 5.8e-4~2.1e-3（=tf32 底噪，证代数一致）；本 kernel vs FLA
+      逐位相同（含非整除 T）；bf16 操作数下 `dq/dv/db/dA` 2.3e-3~6.4e-3、`dk/dg` 3.3e-2~5.0e-2；
+      记录运行期 FLA 路由到 TileLang 后端（fp32 编译失败）的陷阱（`docs/06` §6.6）。
 
 ### P7 性能与剖析（`docs/07-perf.md`）
 
@@ -125,7 +129,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P7-3/P7-4/P7-5 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）完成；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P7-3/P7-4/P7-5 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）完成；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -212,10 +216,10 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P7-3/P7-4/P7-5 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
-  更完整的 CUTLASS/TMA 版反向 B1/B2/B3 工程化；P7-2 遗留的 nsys 流量拆分（P7-3 已用 ncu DRAM 计数替代、
-  待验证 (b) 已关闭）。**P7-5 已用实验关闭 P7-2/P7-4 待验证 (c)**（K2 突破 2 CTA/SM 后 L2 墙不后移，
-  见下）。
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P7-3/P7-4/P7-5 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  §5.2 里仅剩 **B3 `intra`**（块内 $A$ 反向）未做成最小 kernel；以及更完整的 CUTLASS/TMA 版
+  反向 B1/B2/B3 工程化。P7-2 遗留的 nsys 流量拆分（P7-3 已用 ncu DRAM 计数替代、待验证 (b) 已关闭）。
+  **P7-5 已用实验关闭 P7-2/P7-4 待验证 (c)**（K2 突破 2 CTA/SM 后 L2 墙不后移，见下）。
   - P7-5：`docs/07` 新增 §8「K2 突破 2 CTA/SM 后 L2 墙会不会后移？」+ `harness/_build_k2_occ.py`
     （把 `fwd_kernel2.cuh` 的 union 第二臂改 `ReserveFP32 = StateFP32` 并宏参 stage，编译 6 个变体：
     orig/plain(3,2)/plain(2,1)/cond(3,2)/cond(2,2)/cond(2,1)/cond(1,2)）+ `harness/bench_k2_occ.py`
@@ -324,6 +328,20 @@
     T=250/100/513、B2T130H3、T250BT32 六组 `dh/dv2/dh0` 全落 **9e-8~4e-5**；单块 T=31 时 `dh≡0`、
     `dv2` 逐位等于 FLA（$dU=k\cdot0+dv$，tf32 下 0 精确）；另检 FLA `dhu` 的 `grid=(cdiv(V,BV),N*HV)`，
     **K 不占 grid**、`K=64/128/…` 是同 program 内 `o_k1..o_k4` 展开→「K 的 64 分段」非正确性缺口。
+  - P6-4：新增 `docs/06` §6.6 + `harness/check_bwd_dqkg_kernel.py`
+    （`harness/check_bwd_dqkg_kernel.out.txt`）。把 §5.2 的 **B2 `bwd_dqkg`** 做成最小可运行 Triton
+    kernel（grid `(NT,B·H)`、BK=BV=64、逐 `i_k`/`i_v` 分块、`i_k==0` 分支存 `dv2`/`db`/`dA` 第一支、
+    `tl.debug_barrier()`、求逆伴随两次 bf16 `tl.dot` 照搬 FLA `chunk_bwd.py:133-310`）。**Part A**：
+    独立纯 torch（ieee fp32）逐块参考 vs FLA Triton 内核，六项 `dq/dk/dv/db/dg/dA` 相对误差
+    **5.8e-4~2.1e-3**＝tf32 底噪（替身证明代数一致：转置写反会是 O(1) 误差）。**Part B**：本 kernel
+    vs FLA **逐位相同（max_abs=0）**，含非整除 T=250/513（`wy_dqkg` per-chunk 独立，无 B1 那样的
+    host 非整除 bug）。**Part C**：全 bf16 操作数 → `dq/dv/db/dA` **2.3e-3~6.4e-3**、`dk/dg`
+    **3.3e-2~5.0e-2**（门控/衰减链小量相减+指数放大，印证 §3.3「不要 bf16」注释）。**Part D**：
+    朴素计时 T512H4D128 97.8µs（FLA 88.4µs）、T2048H8D128 496.8µs（FLA 452.8µs）。**踩坑**：本机
+    FLA 0.5.x 把 `@dispatch('kda')` 路由到 **TileLang** 后端（`fla/ops/kda/backends/tilelang/
+    chunk_bwd_dqkg.py`），其 fp32 路径编译失败（无 fp32 MMA）；对拍须 `FLA_DISABLE_BACKEND_DISPATCH=1`
+    钉回文档精读的 Triton 内核。另踩坑：早先非整除测试的巨值（3.6e6）是自己 `[:, :T]` 切片造成
+    **非连续**张量、破坏 FLA 假设的 batch stride，`.contiguous()` 后归位——非 FLA 的 bug。
   - P5-4：新增 `docs/05` §7「反向分块化（chunked backward）推导」+ `src/kda_bwd_ref.py::kda_chunked_backward`
     + `harness/check_bwd_chunked.py`（`harness/check_bwd_chunked.out.txt`）。把逐 token adjoint（式 5.2–5.8）
     折叠成块内形式：输出支路 $S_{in}+=qd^\top\bar o$、状态更新支路 $S_{in}+=E^{tot}\odot\bar S_{out}$、

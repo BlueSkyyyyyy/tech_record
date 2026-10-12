@@ -161,5 +161,7 @@ workspace 读 vs $o$/state 写占比~~（**已解决**，`docs/07` §6 P7-3：K2
 可整除回归逐位不变；「K 的 64 分段」经查是 FLA 同 program 内展开、非正确性约束）；~~K2 突破 2 CTA/SM 后
 L2 墙是否后移~~（**已解决**，`docs/07` §8 P7-5：不会后移——`sizeof` 被**无条件预留的 65536 B fp32 状态缓冲**
 钉死为 98,432 B，只减 pipeline stage 不动 smem；真进 3 CTA/SM 的配置必须砍 pipeline 深度，实测更慢
-`+14%~+40%`，且 `lts` 已 94% SOL、K2 是 L2 带宽 bound，占用率无可用余量）；完整的 CUTLASS/TMA 版
-B1/B2/B3 属更大工程。
+`+14%~+40%`，且 `lts` 已 94% SOL、K2 是 L2 带宽 bound，占用率无可用余量）。**后续方向**：反向三个
+GEMM 里 B1（状态伴随，`docs/06` §6）、B2（`wy_dqkg`，`docs/06` §6.6 P6-4）已做成最小可运行 Triton
+kernel 并三方对拍；仅剩 **B3 `intra`**（块内 $A$ 反向）未落地，加上完整的 CUTLASS/TMA 版 B0–B3
+工程化，属更大工程，留待有明确需求时再做。
