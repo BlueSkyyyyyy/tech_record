@@ -1,0 +1,326 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190  triton=3.6.0
+==============================================================================
+Part A: chain with pipelined bf16-mma B1 vs FLA and vs NS=1 chain
+==============================================================================
+
+# T=128 H=2  B=1 T=128 H=2 seed=0 g_scale=1.0
+  -- NS=1 vs FLA / vs NS=1 --
+    NS1 dq vs FLA            max_abs=9.900e-04  max_rel=1.473e-03  ref_max=6.721e-01
+    NS1 dk vs FLA            max_abs=5.912e-04  max_rel=8.692e-04  ref_max=6.802e-01
+    NS1 dv vs FLA            max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    NS1 dbeta vs FLA         max_abs=1.733e-03  max_rel=4.356e-03  ref_max=3.977e-01
+    NS1 dg vs FLA            max_abs=9.607e-05  max_rel=2.775e-03  ref_max=3.462e-02
+    NS1 dh0 vs FLA           max_abs=2.068e-04  max_rel=4.982e-03  ref_max=4.150e-02
+  -- NS=2 vs FLA / vs NS=1 --
+    NS2 dq vs FLA            max_abs=9.900e-04  max_rel=1.473e-03  ref_max=6.721e-01
+    NS2 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.723e-01
+    NS2 dk vs FLA            max_abs=5.912e-04  max_rel=8.692e-04  ref_max=6.802e-01
+    NS2 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.804e-01
+    NS2 dv vs FLA            max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    NS2 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.915e-02
+    NS2 dbeta vs FLA         max_abs=1.733e-03  max_rel=4.356e-03  ref_max=3.977e-01
+    NS2 dbeta vs NS1         max_abs=3.725e-09  max_rel=9.327e-09  ref_max=3.994e-01
+    NS2 dg vs FLA            max_abs=9.607e-05  max_rel=2.775e-03  ref_max=3.462e-02
+    NS2 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.462e-02
+    NS2 dh0 vs FLA           max_abs=2.068e-04  max_rel=4.982e-03  ref_max=4.150e-02
+  -- NS=3 vs FLA / vs NS=1 --
+    NS3 dq vs FLA            max_abs=9.900e-04  max_rel=1.473e-03  ref_max=6.721e-01
+    NS3 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.723e-01
+    NS3 dk vs FLA            max_abs=5.912e-04  max_rel=8.692e-04  ref_max=6.802e-01
+    NS3 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.804e-01
+    NS3 dv vs FLA            max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    NS3 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.915e-02
+    NS3 dbeta vs FLA         max_abs=1.733e-03  max_rel=4.356e-03  ref_max=3.977e-01
+    NS3 dbeta vs NS1         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.994e-01
+    NS3 dg vs FLA            max_abs=9.607e-05  max_rel=2.775e-03  ref_max=3.462e-02
+    NS3 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.462e-02
+    NS3 dh0 vs FLA           max_abs=2.068e-04  max_rel=4.982e-03  ref_max=4.150e-02
+  -- NS=4 vs FLA / vs NS=1 --
+    NS4 dq vs FLA            max_abs=9.900e-04  max_rel=1.473e-03  ref_max=6.721e-01
+    NS4 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.723e-01
+    NS4 dk vs FLA            max_abs=5.912e-04  max_rel=8.692e-04  ref_max=6.802e-01
+    NS4 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.804e-01
+    NS4 dv vs FLA            max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    NS4 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.915e-02
+    NS4 dbeta vs FLA         max_abs=1.733e-03  max_rel=4.356e-03  ref_max=3.977e-01
+    NS4 dbeta vs NS1         max_abs=1.164e-10  max_rel=2.915e-10  ref_max=3.994e-01
+    NS4 dg vs FLA            max_abs=9.607e-05  max_rel=2.775e-03  ref_max=3.462e-02
+    NS4 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.462e-02
+    NS4 dh0 vs FLA           max_abs=2.068e-04  max_rel=4.982e-03  ref_max=4.150e-02
+
+# T=256 H=4  B=1 T=256 H=4 seed=1 g_scale=1.0
+  -- NS=1 vs FLA / vs NS=1 --
+    NS1 dq vs FLA            max_abs=1.445e-03  max_rel=2.092e-03  ref_max=6.908e-01
+    NS1 dk vs FLA            max_abs=1.200e-03  max_rel=1.504e-03  ref_max=7.980e-01
+    NS1 dv vs FLA            max_abs=2.517e-04  max_rel=4.128e-03  ref_max=6.098e-02
+    NS1 dbeta vs FLA         max_abs=3.258e-03  max_rel=5.521e-03  ref_max=5.900e-01
+    NS1 dg vs FLA            max_abs=2.127e-04  max_rel=6.192e-03  ref_max=3.436e-02
+    NS1 dh0 vs FLA           max_abs=2.451e-04  max_rel=7.172e-03  ref_max=3.418e-02
+  -- NS=2 vs FLA / vs NS=1 --
+    NS2 dq vs FLA            max_abs=1.445e-03  max_rel=2.092e-03  ref_max=6.908e-01
+    NS2 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.907e-01
+    NS2 dk vs FLA            max_abs=1.200e-03  max_rel=1.504e-03  ref_max=7.980e-01
+    NS2 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.983e-01
+    NS2 dv vs FLA            max_abs=2.517e-04  max_rel=4.128e-03  ref_max=6.098e-02
+    NS2 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.093e-02
+    NS2 dbeta vs FLA         max_abs=3.258e-03  max_rel=5.521e-03  ref_max=5.900e-01
+    NS2 dbeta vs NS1         max_abs=1.490e-08  max_rel=2.518e-08  ref_max=5.918e-01
+    NS2 dg vs FLA            max_abs=2.127e-04  max_rel=6.192e-03  ref_max=3.436e-02
+    NS2 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.438e-02
+    NS2 dh0 vs FLA           max_abs=2.451e-04  max_rel=7.172e-03  ref_max=3.418e-02
+  -- NS=3 vs FLA / vs NS=1 --
+    NS3 dq vs FLA            max_abs=1.445e-03  max_rel=2.092e-03  ref_max=6.908e-01
+    NS3 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.907e-01
+    NS3 dk vs FLA            max_abs=1.200e-03  max_rel=1.504e-03  ref_max=7.980e-01
+    NS3 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.983e-01
+    NS3 dv vs FLA            max_abs=2.517e-04  max_rel=4.128e-03  ref_max=6.098e-02
+    NS3 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.093e-02
+    NS3 dbeta vs FLA         max_abs=3.258e-03  max_rel=5.521e-03  ref_max=5.900e-01
+    NS3 dbeta vs NS1         max_abs=1.490e-08  max_rel=2.518e-08  ref_max=5.918e-01
+    NS3 dg vs FLA            max_abs=2.127e-04  max_rel=6.192e-03  ref_max=3.436e-02
+    NS3 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.438e-02
+    NS3 dh0 vs FLA           max_abs=2.451e-04  max_rel=7.172e-03  ref_max=3.418e-02
+  -- NS=4 vs FLA / vs NS=1 --
+    NS4 dq vs FLA            max_abs=1.445e-03  max_rel=2.092e-03  ref_max=6.908e-01
+    NS4 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.907e-01
+    NS4 dk vs FLA            max_abs=1.200e-03  max_rel=1.504e-03  ref_max=7.980e-01
+    NS4 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.983e-01
+    NS4 dv vs FLA            max_abs=2.517e-04  max_rel=4.128e-03  ref_max=6.098e-02
+    NS4 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.093e-02
+    NS4 dbeta vs FLA         max_abs=3.258e-03  max_rel=5.521e-03  ref_max=5.900e-01
+    NS4 dbeta vs NS1         max_abs=1.490e-08  max_rel=2.518e-08  ref_max=5.918e-01
+    NS4 dg vs FLA            max_abs=2.127e-04  max_rel=6.192e-03  ref_max=3.436e-02
+    NS4 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.438e-02
+    NS4 dh0 vs FLA           max_abs=2.451e-04  max_rel=7.172e-03  ref_max=3.418e-02
+
+# T=250 H=3 (non-div)  B=1 T=250 H=3 seed=2 g_scale=1.0
+  -- NS=1 vs FLA / vs NS=1 --
+    NS1 dq vs FLA            max_abs=1.773e-03  max_rel=3.423e-03  ref_max=5.180e-01
+    NS1 dk vs FLA            max_abs=7.557e-04  max_rel=1.452e-03  ref_max=5.206e-01
+    NS1 dv vs FLA            max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    NS1 dbeta vs FLA         max_abs=2.717e-03  max_rel=5.587e-03  ref_max=4.863e-01
+    NS1 dg vs FLA            max_abs=3.221e-04  max_rel=5.191e-03  ref_max=6.205e-02
+    NS1 dh0 vs FLA           max_abs=2.924e-04  max_rel=5.322e-03  ref_max=5.493e-02
+  -- NS=2 vs FLA / vs NS=1 --
+    NS2 dq vs FLA            max_abs=1.773e-03  max_rel=3.423e-03  ref_max=5.180e-01
+    NS2 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.181e-01
+    NS2 dk vs FLA            max_abs=7.557e-04  max_rel=1.452e-03  ref_max=5.206e-01
+    NS2 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.208e-01
+    NS2 dv vs FLA            max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    NS2 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.824e-02
+    NS2 dbeta vs FLA         max_abs=2.717e-03  max_rel=5.587e-03  ref_max=4.863e-01
+    NS2 dbeta vs NS1         max_abs=4.657e-10  max_rel=9.578e-10  ref_max=4.862e-01
+    NS2 dg vs FLA            max_abs=3.221e-04  max_rel=5.191e-03  ref_max=6.205e-02
+    NS2 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.225e-02
+    NS2 dh0 vs FLA           max_abs=2.924e-04  max_rel=5.322e-03  ref_max=5.493e-02
+  -- NS=3 vs FLA / vs NS=1 --
+    NS3 dq vs FLA            max_abs=1.773e-03  max_rel=3.423e-03  ref_max=5.180e-01
+    NS3 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.181e-01
+    NS3 dk vs FLA            max_abs=7.557e-04  max_rel=1.452e-03  ref_max=5.206e-01
+    NS3 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.208e-01
+    NS3 dv vs FLA            max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    NS3 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.824e-02
+    NS3 dbeta vs FLA         max_abs=2.717e-03  max_rel=5.587e-03  ref_max=4.863e-01
+    NS3 dbeta vs NS1         max_abs=1.863e-09  max_rel=3.831e-09  ref_max=4.862e-01
+    NS3 dg vs FLA            max_abs=3.221e-04  max_rel=5.191e-03  ref_max=6.205e-02
+    NS3 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.225e-02
+    NS3 dh0 vs FLA           max_abs=2.924e-04  max_rel=5.322e-03  ref_max=5.493e-02
+  -- NS=4 vs FLA / vs NS=1 --
+    NS4 dq vs FLA            max_abs=1.773e-03  max_rel=3.423e-03  ref_max=5.180e-01
+    NS4 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.181e-01
+    NS4 dk vs FLA            max_abs=7.557e-04  max_rel=1.452e-03  ref_max=5.206e-01
+    NS4 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.208e-01
+    NS4 dv vs FLA            max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    NS4 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.824e-02
+    NS4 dbeta vs FLA         max_abs=2.717e-03  max_rel=5.587e-03  ref_max=4.863e-01
+    NS4 dbeta vs NS1         max_abs=1.863e-09  max_rel=3.831e-09  ref_max=4.862e-01
+    NS4 dg vs FLA            max_abs=3.221e-04  max_rel=5.191e-03  ref_max=6.205e-02
+    NS4 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.225e-02
+    NS4 dh0 vs FLA           max_abs=2.924e-04  max_rel=5.322e-03  ref_max=5.493e-02
+
+# T=512 H=4 g=2  B=1 T=512 H=4 seed=3 g_scale=2.0
+  -- NS=1 vs FLA / vs NS=1 --
+    NS1 dq vs FLA            max_abs=1.722e-03  max_rel=2.600e-03  ref_max=6.623e-01
+    NS1 dk vs FLA            max_abs=1.951e-03  max_rel=3.024e-03  ref_max=6.452e-01
+    NS1 dv vs FLA            max_abs=3.343e-04  max_rel=4.933e-03  ref_max=6.776e-02
+    NS1 dbeta vs FLA         max_abs=2.704e-03  max_rel=5.286e-03  ref_max=5.115e-01
+    NS1 dg vs FLA            max_abs=2.371e-04  max_rel=3.495e-03  ref_max=6.785e-02
+    NS1 dh0 vs FLA           max_abs=3.859e-04  max_rel=5.489e-03  ref_max=7.031e-02
+  -- NS=2 vs FLA / vs NS=1 --
+    NS2 dq vs FLA            max_abs=1.722e-03  max_rel=2.600e-03  ref_max=6.623e-01
+    NS2 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.625e-01
+    NS2 dk vs FLA            max_abs=1.951e-03  max_rel=3.024e-03  ref_max=6.452e-01
+    NS2 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.454e-01
+    NS2 dv vs FLA            max_abs=3.343e-04  max_rel=4.933e-03  ref_max=6.776e-02
+    NS2 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.782e-02
+    NS2 dbeta vs FLA         max_abs=2.704e-03  max_rel=5.286e-03  ref_max=5.115e-01
+    NS2 dbeta vs NS1         max_abs=1.490e-08  max_rel=2.928e-08  ref_max=5.090e-01
+    NS2 dg vs FLA            max_abs=2.371e-04  max_rel=3.495e-03  ref_max=6.785e-02
+    NS2 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.787e-02
+    NS2 dh0 vs FLA           max_abs=3.859e-04  max_rel=5.489e-03  ref_max=7.031e-02
+  -- NS=3 vs FLA / vs NS=1 --
+    NS3 dq vs FLA            max_abs=1.722e-03  max_rel=2.600e-03  ref_max=6.623e-01
+    NS3 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.625e-01
+    NS3 dk vs FLA            max_abs=1.951e-03  max_rel=3.024e-03  ref_max=6.452e-01
+    NS3 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.454e-01
+    NS3 dv vs FLA            max_abs=3.343e-04  max_rel=4.933e-03  ref_max=6.776e-02
+    NS3 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.782e-02
+    NS3 dbeta vs FLA         max_abs=2.704e-03  max_rel=5.286e-03  ref_max=5.115e-01
+    NS3 dbeta vs NS1         max_abs=1.490e-08  max_rel=2.928e-08  ref_max=5.090e-01
+    NS3 dg vs FLA            max_abs=2.371e-04  max_rel=3.495e-03  ref_max=6.785e-02
+    NS3 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.787e-02
+    NS3 dh0 vs FLA           max_abs=3.859e-04  max_rel=5.489e-03  ref_max=7.031e-02
+  -- NS=4 vs FLA / vs NS=1 --
+    NS4 dq vs FLA            max_abs=1.722e-03  max_rel=2.600e-03  ref_max=6.623e-01
+    NS4 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.625e-01
+    NS4 dk vs FLA            max_abs=1.951e-03  max_rel=3.024e-03  ref_max=6.452e-01
+    NS4 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.454e-01
+    NS4 dv vs FLA            max_abs=3.343e-04  max_rel=4.933e-03  ref_max=6.776e-02
+    NS4 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.782e-02
+    NS4 dbeta vs FLA         max_abs=2.704e-03  max_rel=5.286e-03  ref_max=5.115e-01
+    NS4 dbeta vs NS1         max_abs=7.451e-09  max_rel=1.464e-08  ref_max=5.090e-01
+    NS4 dg vs FLA            max_abs=2.371e-04  max_rel=3.495e-03  ref_max=6.785e-02
+    NS4 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.787e-02
+    NS4 dh0 vs FLA           max_abs=3.859e-04  max_rel=5.489e-03  ref_max=7.031e-02
+
+# B2 T=513 H=2 (non-div)  B=2 T=513 H=2 seed=4 g_scale=1.0
+  -- NS=1 vs FLA / vs NS=1 --
+    NS1 dq vs FLA            max_abs=1.761e-03  max_rel=2.925e-03  ref_max=6.022e-01
+    NS1 dk vs FLA            max_abs=1.213e-03  max_rel=1.820e-03  ref_max=6.666e-01
+    NS1 dv vs FLA            max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    NS1 dbeta vs FLA         max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    NS1 dg vs FLA            max_abs=2.909e-04  max_rel=7.064e-03  ref_max=4.118e-02
+    NS1 dh0 vs FLA           max_abs=1.691e-04  max_rel=6.996e-03  ref_max=2.417e-02
+  -- NS=2 vs FLA / vs NS=1 --
+    NS2 dq vs FLA            max_abs=1.761e-03  max_rel=2.925e-03  ref_max=6.022e-01
+    NS2 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.026e-01
+    NS2 dk vs FLA            max_abs=1.213e-03  max_rel=1.820e-03  ref_max=6.666e-01
+    NS2 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.670e-01
+    NS2 dv vs FLA            max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    NS2 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.469e-02
+    NS2 dbeta vs FLA         max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    NS2 dbeta vs NS1         max_abs=7.451e-09  max_rel=8.450e-09  ref_max=8.817e-01
+    NS2 dg vs FLA            max_abs=2.909e-04  max_rel=7.064e-03  ref_max=4.118e-02
+    NS2 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.120e-02
+    NS2 dh0 vs FLA           max_abs=1.691e-04  max_rel=6.996e-03  ref_max=2.417e-02
+  -- NS=3 vs FLA / vs NS=1 --
+    NS3 dq vs FLA            max_abs=1.761e-03  max_rel=2.925e-03  ref_max=6.022e-01
+    NS3 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.026e-01
+    NS3 dk vs FLA            max_abs=1.213e-03  max_rel=1.820e-03  ref_max=6.666e-01
+    NS3 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.670e-01
+    NS3 dv vs FLA            max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+    NS3 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.469e-02
+    NS3 dbeta vs FLA         max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    NS3 dbeta vs NS1         max_abs=7.451e-09  max_rel=8.450e-09  ref_max=8.817e-01
+    NS3 dg vs FLA            max_abs=2.909e-04  max_rel=7.064e-03  ref_max=4.118e-02
+    NS3 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.120e-02
+    NS3 dh0 vs FLA           max_abs=1.691e-04  max_rel=6.996e-03  ref_max=2.417e-02
+  -- NS=4 vs FLA / vs NS=1 --
+    NS4 dq vs FLA            max_abs=1.761e-03  max_rel=2.925e-03  ref_max=6.022e-01
+    NS4 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.026e-01
+    NS4 dk vs FLA            max_abs=1.213e-03  max_rel=1.820e-03  ref_max=6.666e-01
+    NS4 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.670e-01
+    NS4 dv vs FLA            max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    NS4 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.469e-02
+    NS4 dbeta vs FLA         max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    NS4 dbeta vs NS1         max_abs=7.451e-09  max_rel=8.450e-09  ref_max=8.817e-01
+    NS4 dg vs FLA            max_abs=2.909e-04  max_rel=7.064e-03  ref_max=4.118e-02
+    NS4 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.120e-02
+    NS4 dh0 vs FLA           max_abs=1.691e-04  max_rel=6.996e-03  ref_max=2.417e-02
+
+# T=192 H=2 g=0  B=1 T=192 H=2 seed=5 g_scale=0.0
+  -- NS=1 vs FLA / vs NS=1 --
+    NS1 dq vs FLA            max_abs=3.464e-04  max_rel=6.491e-04  ref_max=5.337e-01
+    NS1 dk vs FLA            max_abs=3.378e-04  max_rel=5.840e-04  ref_max=5.784e-01
+    NS1 dv vs FLA            max_abs=3.922e-04  max_rel=5.982e-03  ref_max=6.556e-02
+    NS1 dbeta vs FLA         max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    NS1 dg vs FLA            max_abs=2.060e-05  max_rel=3.391e-03  ref_max=6.074e-03
+    NS1 dh0 vs FLA           max_abs=5.197e-05  max_rel=8.267e-03  ref_max=6.287e-03
+  -- NS=2 vs FLA / vs NS=1 --
+    NS2 dq vs FLA            max_abs=3.464e-04  max_rel=6.491e-04  ref_max=5.337e-01
+    NS2 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.339e-01
+    NS2 dk vs FLA            max_abs=3.378e-04  max_rel=5.840e-04  ref_max=5.784e-01
+    NS2 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.785e-01
+    NS2 dv vs FLA            max_abs=3.922e-04  max_rel=5.982e-03  ref_max=6.556e-02
+    NS2 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.577e-02
+    NS2 dbeta vs FLA         max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    NS2 dbeta vs NS1         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.024e-01
+    NS2 dg vs FLA            max_abs=2.060e-05  max_rel=3.391e-03  ref_max=6.074e-03
+    NS2 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.076e-03
+    NS2 dh0 vs FLA           max_abs=5.197e-05  max_rel=8.267e-03  ref_max=6.287e-03
+  -- NS=3 vs FLA / vs NS=1 --
+    NS3 dq vs FLA            max_abs=3.464e-04  max_rel=6.491e-04  ref_max=5.337e-01
+    NS3 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.339e-01
+    NS3 dk vs FLA            max_abs=3.378e-04  max_rel=5.840e-04  ref_max=5.784e-01
+    NS3 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.785e-01
+    NS3 dv vs FLA            max_abs=3.922e-04  max_rel=5.982e-03  ref_max=6.556e-02
+    NS3 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.577e-02
+    NS3 dbeta vs FLA         max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    NS3 dbeta vs NS1         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.024e-01
+    NS3 dg vs FLA            max_abs=2.060e-05  max_rel=3.391e-03  ref_max=6.074e-03
+    NS3 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.076e-03
+    NS3 dh0 vs FLA           max_abs=5.197e-05  max_rel=8.267e-03  ref_max=6.287e-03
+  -- NS=4 vs FLA / vs NS=1 --
+    NS4 dq vs FLA            max_abs=3.464e-04  max_rel=6.491e-04  ref_max=5.337e-01
+    NS4 dq vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.339e-01
+    NS4 dk vs FLA            max_abs=3.378e-04  max_rel=5.840e-04  ref_max=5.784e-01
+    NS4 dk vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.785e-01
+    NS4 dv vs FLA            max_abs=3.922e-04  max_rel=5.982e-03  ref_max=6.556e-02
+    NS4 dv vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.577e-02
+    NS4 dbeta vs FLA         max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    NS4 dbeta vs NS1         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.024e-01
+    NS4 dg vs FLA            max_abs=2.060e-05  max_rel=3.391e-03  ref_max=6.074e-03
+    NS4 dg vs NS1            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.076e-03
+    NS4 dh0 vs FLA           max_abs=5.197e-05  max_rel=8.267e-03  ref_max=6.287e-03
+
+worst-case max_rel across cases (pipelines vs FLA):
+  dq      3.423e-03
+  dk      3.024e-03
+  dv      6.795e-03
+  dbeta   6.012e-03
+  dg      7.064e-03
+  dh0     8.267e-03
+
+==============================================================================
+Part B: backward-only chain timing, wall + dev (CUPTI), NS sweep + FLA
+==============================================================================
+  case               | FLA wall  FLA dev | NS1 wall / dev / (dev/FLA) | NS2 wall / dev / (dev/FLA) | NS3 wall / dev / (dev/FLA) | NS4 wall / dev / (dev/FLA) |
+  T=512 H=4          |    782.4    203.4 |  384.6  116.8 (0.57x) |  383.2  101.6 (0.50x) |  382.0   97.5 (0.48x) |  385.3   96.8 (0.48x) |
+  B2 T=1024 H=8      |    871.8    657.0 |  432.3  397.5 (0.61x) |  400.9  366.9 (0.56x) |  391.5  340.4 (0.52x) |  387.5  338.7 (0.52x) |
+  B8 T=2048 H=8      |   4150.5   4119.1 | 2317.2 2291.9 (0.56x) | 2261.9 2231.4 (0.54x) | 2252.7 2223.9 (0.54x) | 2259.1 2229.7 (0.54x) |
+  T=250 H=3 nondiv   |    851.7    143.7 |  389.3   74.6 (0.52x) |  383.5   70.2 (0.49x) |  384.6   70.0 (0.49x) |  384.5   70.0 (0.49x) |
+
+  B1 kernel-only (device us/call) per NS:
+  T=512 H=4          FLA_dhu=54.0  ours=NS1:54.4 NS2:39.3 NS3:34.9 NS4:34.5
+  B2 T=1024 H=8      FLA_dhu=137.1  ours=NS1:122.1 NS2:87.3 NS3:61.9 NS4:61.9
+  B8 T=2048 H=8      FLA_dhu=567.0  ours=NS1:387.3 NS2:327.6 NS3:318.9 NS4:326.3
+  T=250 H=3 nondiv   FLA_dhu=27.7  ours=NS1:23.5 NS2:19.2 NS3:19.0 NS4:19.0
+
+==============================================================================
+Part C: isolated B1 kernel-only, BT (16 deploy / 64) x NS sweep
+==============================================================================
+  (CUPTI device us/call for the B1 kernel alone, BV=32)
+  case                BT | NS 1 NS 2 NS 3 NS 4
+  T=512 H=4           16 |   54.4   45.5   44.7   45.0 
+  T=512 H=4           32 |   36.9   32.8   33.3   33.4 
+  T=512 H=4           64 |   29.1   24.2   24.5    OOM 
+  B2 T=1024 H=8       16 |  143.1  106.2   80.0   80.3 
+  B2 T=1024 H=8       32 |   91.3   72.0   60.3   60.5 
+  B2 T=1024 H=8       64 |   75.0   55.0   46.3    OOM 
+  B8 T=2048 H=8       16 |  443.0  384.7  364.9  379.2 
+  B8 T=2048 H=8       32 |  284.4  258.0  267.8  240.2 
+  B8 T=2048 H=8       64 |  241.1  229.9  187.4    OOM 
+  T=250 H=3 nondiv    16 |   32.8   28.4   28.2   28.3 
+  T=250 H=3 nondiv    32 |   23.9   22.0   21.7   21.7 
+  T=250 H=3 nondiv    64 |   20.1   17.8   18.1    OOM 
+
+==============================================================================
+Part D: isolated vs back-to-back (after dav) attribution of the B1 kernel alone
+==============================================================================
+  case         | isolated dev | combo B1 attrib (count)
+  T512 H4 NS1 |         59.2 |            44.6 (15)
+  T512 H4 NS3 |         49.7 |            35.1 (15)
+
+DONE

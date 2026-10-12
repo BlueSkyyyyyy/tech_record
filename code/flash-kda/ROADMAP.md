@@ -324,7 +324,24 @@
      下一步＝CUTLASS `PipelineTmaAsync` 或转向 Triton。**坑**：3D TMA 的 `globalStrides` 从 **dim1**
      起算（首版把 dim0 元素大小也算进去→`cuTensorMapEncodeTiled` 报错后**静默**用坏图启动、并污染
      后续 CUDA 状态使 reg 内核 `cudaFuncSetAttribute` 报 `rc=-3`）；fp32 `[128]` 行=512B>128B 故必须
-     `SWIZZLE_NONE`。
+      `SWIZZLE_NONE`。
+
+- [x] **P7-22** 把 §17 的 Triton 软件流水从**孤立原型**落进**真实组装链**（§12 的链此前写死
+      `num_stages=1`）：只把 B1 的反向 chunk 循环 `range(NT-1,-1,-1)` 换成前向
+      `tl.range(0,NT,num_stages=NS)`（`c=NT-1-cc`，算术一字未动）。新增
+      `harness/check_bwd_b1_pipe_e2e.py`（`harness/check_bwd_b1_pipe_e2e.out.txt`，空闲卡）
+      + `docs/07` §25。**Part A**：`NS∈{2,3,4}` 链与 `NS=1` 链 `dq/dk/dv/dg/dh0` **逐位相同
+      （max_abs=0）**、`dbeta` ≤1.5e-8（B2 `db` 的 `atomic_add` 序），vs FLA 最坏 max_rel 与 §12
+      逐位一致（`dq 3.42e-3 … dh0 8.27e-3`，含非整除 T=250/513、g=0、B=2）。**Part B（链级）**：
+      `NS=3` 让 B1 **在所有 shape 反超 FLA `dhu`**（`T512H4` 54.4→**34.9** vs FLA 54.0、`B2T1024H8`
+      122.1→**61.9** vs 137.1=`2.2×`、`B8T2048H8` 387.3→**318.9** vs 567.0=`1.78×`、`T250H3`
+      23.5→**19.0** vs 27.7），整条反向 `dev/FLA` 从 §12 的 **0.51–0.61×** 收到 **0.48–0.54×**
+      （`NS≥3` 到平台）。**Part C（孤立 BT×NS 扫描）**：BT=16 部署粒度亦有效（`B2T1024H8`
+      143→80），`BT=64/NS=4` **OOM**（`Required 243200 > 232448`）。**Part D（方法学）**：受控诊断
+      证明**孤立小 grid launch 的 CUPTI 归因比链内背靠背高 ~1.3×**（`T512H4 NS3` 孤立 49.7 vs 链内
+      归因 35.1）——固定启停/排空被算进 device-active 窗口，故**链级口径一律用链内归因**。**结论**：
+      兑现「直接接受 Triton 版」这条路线的链级落地，**Triton 侧 B1 工程化收敛**；链级瓶颈从 B1
+      **明确转向 B2/B3**（`B8T2048H8` 上 B1 只占 ~0.32/2.22 ms，且 §15 已证整链跟到 64 净亏）。
 
 ### P8 小结 / 一页纸
 
@@ -356,8 +373,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-21 补测**。
-  - P7-21（本轮）：把 TMA B1 残差的第一块钉死。§23 相对 §22 的 K2 形状把 `long_sb` 从 2.25 抬到
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-22 补测**。
+  - P7-22（本轮）：把 §17 的 Triton 软件流水从孤立原型落进真实组装链（§12 的链此前写死
+    `num_stages=1`）——只把 B1 反向 chunk 循环换成前向 `tl.range(0,NT,num_stages=NS)`（算术一字
+    未动）。新增 `harness/check_bwd_b1_pipe_e2e.py`（`..._pipe_e2e.out.txt`，空闲卡）+ `docs/07` §25。
+    **Part A**：`NS∈{2,3,4}` 与 `NS=1` 链 `dq/dk/dv/dg/dh0` **逐位相同**、`dbeta` ≤1.5e-8；vs FLA
+    最坏 max_rel 与 §12 逐位一致（含非整除 T、g=0、B=2）。**Part B**：`NS=3` 让 B1 **全 shape
+    反超 FLA `dhu`**（`B2T1024H8` 122→**61.9** vs 137=`2.2×`、`B8T2048H8` 387→**319** vs 567=
+    `1.78×`），整链 `dev/FLA` 从 **0.51–0.61×** 收到 **0.48–0.54×**。**Part C**：BT=16 亦有效，
+    `BT=64/NS=4` OOM。**Part D**：孤立小 grid kernel 的 CUPTI 归因比链内背靠背高 ~1.3×（方法学）。
+    **结论**：兑现「直接接受 Triton 版」的链级落地，Triton 侧 B1 工程化收敛，链级瓶颈转向 B2/B3。
+    见 `docs/07` §25。
+  - P7-21（上轮）：把 TMA B1 残差的第一块钉死。§23 相对 §22 的 K2 形状把 `long_sb` 从 2.25 抬到
     3.52，回读发现 TMA 版在 mma 循环里**逐 chunk 直读 global `E^tot`**（reg 版 `cp.async` 预取，
     `b1_reg_probe.cu:150`）——§23.1「省一次 TMA」引入的关键路径 global 标量读。新增 `-DB1T_ETMA`：
     `Stage` 加 `float e[KD]`、3D 张量图（`{KD,NT*H,B}`、`SWIZZLE_NONE`、box `{KD,1,1}`）每 chunk 多发
@@ -663,7 +690,14 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-21 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-22 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-22（`docs/07` §25）把 §17 的 Triton 软件流水从孤立原型落进真实组装链**：§12 的链此前写死
+    `num_stages=1`，本轮只把 B1 反向 chunk 循环换成前向 `tl.range(0,NT,num_stages=NS)`（算术一字
+    未动）。`NS=3` 下 B1 **全 shape 反超 FLA `dhu`**（`B2T1024H8` 122→**61.9 µs** vs 137=`2.2×`、
+    `B8T2048H8` 387→**319** vs 567=`1.78×`），整链 `dev/FLA` 从 **0.51–0.61×** 收到 **0.48–0.54×**，
+    且 `dq/dk/dv/dg/dh0` 与 `NS=1` **逐位相同**（`dbeta` ≤1.5e-8）。**方法学**：孤立小 grid kernel 的
+    CUPTI 归因比链内背靠背高 ~1.3×，链级口径一律用链内归因。**结论**：兑现「**直接接受 Triton 版**」
+    这条路线（§24.5 的第二选项）的链级落地——Triton 侧 B1 工程化收敛，**链级瓶颈从 B1 转向 B2/B3**。
   - **P7-21（`docs/07` §24）把 TMA B1 残差的第一块钉死**：定位到 §23 相对 §22 的 `long_sb` 抬升
     （2.25→3.52）来自 §23.1「省一次 TMA」而在 mma 循环里**逐 chunk 直读 global `E^tot`**；用一条
     512 B 的 `cp.async.bulk.tensor.3d`（`-DB1T_ETMA`）搬回 smem 后 `long_sb` 降 0.6–0.8、`wait`

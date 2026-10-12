@@ -239,3 +239,13 @@ ours **wall 0.40–0.62×、dev 0.61–0.80×** FLA 反向（端到端前向+反
 bf16（不 `.float()`）→ B1 快 2.2–2.5×，B2T1024H8 已快过 FLA dhu**；其次才是按更大 chunk 重组操作数、
 最后才是镜像 K2 的 warp specialization。`dAv/B2/B3` 已领先或接近。反向 host 税非主要矛盾
 （ours 数的百 µs、FLA 500–730 µs/次，大 shape 全被 GPU 时间隐藏）。
+
+**P7-22（`docs/07` §25）**：把 §17 的 **Triton 软件流水**从孤立原型**落进真实组装链**（§12 的
+链此前写死 `num_stages=1`）——只把 B1 的反向 chunk 循环从 `range(NT-1,-1,-1)` 换成前向
+`tl.range(0,NT,num_stages=NS)`（算术一字未动），`NS=3` 下 **B1 在所有 shape 反超 FLA `dhu`**
+（`B2T1024H8` 122→**61.9 µs** vs FLA 137，2.2×；`B8T2048H8` 387→**319** vs FLA 567，1.78×），
+整条反向 `dev/FLA` 从 **0.51–0.61×** 收到 **0.48–0.54×**，且 `dq/dk/dv/dg/dh0` 与 `NS=1` **逐位
+相同**（`dbeta` ≤1.5e-8 = `atomic_add` 序）。这是「**直接接受 Triton 版**」那条路线的链级落地：
+**Triton 侧 B1 的工程化已收敛**，链级瓶颈明确转向 B2/B3（§15 已证整链跟到 64 净亏）。
+方法学：`docs/07` §25.5 指出**孤立小 grid kernel 的 CUPTI 归因比链内背靠背高 ~1.3×**（固定启停/
+排空被算进 device-active 窗口），此后 kernel-only 微观基准须以**链内归因**为链级口径。
