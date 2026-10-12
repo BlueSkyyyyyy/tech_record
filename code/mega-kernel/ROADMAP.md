@@ -479,6 +479,26 @@
       **完全 = 省下的 DRAM 字节比**（对上 P5-2 推断的 ~2.8 TB/s，把推断升级为实测）。判据不变
       （`fused` C1–C3、`barrier` +C4，无 C5）。**本轮新增实验**；与 P9-1（时间标度）互为表里。
 
+### P25 线上实现构建与端到端冒烟（`docs/09-mpk-build.md`）
+
+- [~] **P25-1** 在 `kernel_lab`（目标卡 H100/sm90，CUDA 13.2）容器里**从零构建 mirage**
+      （快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`），并用 `PersistentKernel` API
+      生成/编译/launch 一个**最小 megakernel**（单层 RMSNorm，随机张量，无 HF 权重），补齐
+      `docs/06` §0「构建成本过高、未做」的尾巴。见 `docs/09-mpk-build.md`、脚本
+      `harness/mpk_smoke.py`、原始输出 `harness/mpk_build_run.out.txt`（构建）与
+      `harness/mpk_smoke.out.txt`（运行）：
+      - **主机侧全链路成功**：`pip install -e .`（`mirage_runtime` + cython 扩展）成功、
+        `import mirage`→0.2.4；生成 18 task / 3 event 的 megakernel；nvcc JIT 编译 sm_90a
+        成功（~27 s）；`worker kernel & scheduler kernel` 双 stream launch 成功。
+      - **设备侧未收敛**：`torch.cuda.synchronize()` 永不返回、GPU 100% 自旋；4 worker 也复现
+        （排除 SM 占用不足）。**本轮无法给出端到端延迟/正确性数字**，记为**部分完成 + 一条阻塞**。
+      - 关键技术坑：运行期依赖 `tg4perfetto@git` 直连 github 超时（改用 PyPI 同名包 +
+        `--no-deps --no-build-isolation` 绕过）；mirage 钉 `z3-solver==4.16.0.0` 与容器内
+        `tilelang`（要求 `<4.15.5`）互斥——**跑完已把 z3 恢复 4.15.4.0**（故当前 `import mirage`
+        失败，下次需重钉 4.16，用完再切回）。
+      - 假设（**待验证**）：H1 iteration/事件计数错位、H2 sm90 `MPK_ENABLE_TMA`/`GRACE_HOPPER`
+        task 单体内同步卡住、H3 快照 offline/test 路径不完整。下轮见 ROADMAP「阻塞」与 §「下一步」。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -535,7 +555,9 @@
   扇出图、对照 barrier/wave/decen/static 四机制、实现 MPK §5.2 批量取 task 的甜点标度）。
   **P23-1 跨层软件流水 + 环形缓冲预取（1/1）完成**（本轮新增，把 MPK §5.3 的 paged SMEM +
   cross-task software pipelining 实测出来，补齐 P22-1 §15.6 明留的尾巴）。
-  **本专题任务清单（P0–P24）全部完成**，无未完成子项。
+  **P0–P24 全部完成**。**P25-1（线上实现构建与端到端冒烟）部分完成**：目标卡 H100/sm90 上
+  mirage（`f9eb70c`）**构建 + JIT 编译 + launch 成功**，但 kernel 执行不收敛（见「阻塞」B1），
+  故记为 `[~]`；后续（下轮）见「阻塞」与「下一步」。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -584,24 +606,47 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P24 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
+- **下一步：P25-1 收尾**（P0–P24 全部完成；P25-1 已构建+launch、执行未收敛）。优先把「MPK 端到端
+  跑通」做完：① 开 `-DMPK_ENABLE_VERBOSE`（或加 event 计数打印）对 `test_rank0.cu` 逐事件 trace，
+  定位 `all_event_counters` 到不了的 event（验 `docs/09` §4 H1）；② 换非 Hopper-TMA 的最小 task
+  隔离 H2；③ 直接用官方 CI 入口复现。注意 z3 版本互斥（「阻塞」B2）。详见 `docs/09-mpk-build.md` §6。
+- 其它可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
   **P10-1 完成 P5-1 §1.6「扫 persistent 网格大小」**；**P12-1 完成 P5-3 §3.6 / P10-1 §5.5「多 block
   PDL occupancy 资源约束」**；**P13-1 完成 P5-2 §2.6 / §5.6「跨 tile software pipelining」的损失一实测**；
   **P14-1 完成 megakernel 成本侧「寄存器固定为各 task 最大值」实测**；**P15-1 完成 C5 去中心化调度最小实现**）；
-  ③ ~~走读 `tasks/hopper/*.cuh` 单 task 内部实现~~（P11-1 完成）；剩「在容器内 `pip install -e .`
-  构建 mirage sm90 路径并跑 `demo/qwen3/demo.py --use-mirage` 取本机 MPK 端到端数字」（构建成本高，未做）；
+  ③ ~~走读 `tasks/hopper/*.cuh` 单 task 内部实现~~（P11-1 完成）；~~「在容器内 `pip install -e .`
+  构建 mirage sm90 路径并跑端到端数字」~~（**P25-1 已构建 + JIT 编译 + launch 成功**，端到端执行
+  未收敛，见「阻塞」B1）；
   ④ ~~megakernel 成本侧「代码足迹 / 指令缓存」实测~~（**P16-1 完成**，与 P14-1 寄存器足迹合成双层足迹）；
   ⑤ ~~megakernel 成本侧「寄存器足迹的可绕开性」：`setmaxnreg` 实测~~（**P18-1 完成**，收回 P14-1 的代价）；
   ⑥ ~~`docs/04` §6.6「未测 PDL 与 CUDA Graph 叠加」~~（**P19-1 完成**，测出 capture 保留 PDL 语义、
   叠加次乘非相乘、上限独立）；
   ⑦ ~~P15-1 §9.6「未测扇入/扇出 DAG、批量/预取取 task」~~（**P22-1 完成**：分层扇入/扇出图 ×
    barrier/wave/decen/static 四机制、MPK §5.2 批量取 task 甜点 K≈W/G、静态分配随扇入变差）；
-  剩「在容器内 `pip install -e .` 构建 mirage sm90 路径并跑端到端数字」（构建成本高，未做）；
+  剩「MPK 端到端执行收敛」的问题（构建已在 **P25-1** 打通，见「阻塞」B1）。
   ⑧ ~~P22-1 §15.6「跨层流水/环形缓冲预取」~~（**P23-1 完成**：MPK §5.3 的 paged SMEM +
    cross-task software pipelining 实测——跨层预取峰值 1.19–1.20×（vs barrier）、深度按访存占比选
    K≈4、纯访存时净亏；eager/barrier 1.25× 验证消 launch 主收益）。
+- **本轮（P25-1）**：新建 `docs/09-mpk-build.md`（MPK 线上实现的**构建与端到端冒烟**，与 `docs/06`/`07`/`08`
+  同一快照 `f9eb70c`）+ 博客 post `mega-kernel-10-mpk-build`（weight 11）并更新 `mega-kernel-00-index`
+  目录第 10 项；脚本 `harness/mpk_smoke.py`，原始输出 `harness/mpk_build_run.out.txt`（构建）与
+  `harness/mpk_smoke.out.txt`（运行）。把 `docs/06` §0「构建成本过高、未做」的尾巴推进到实机：
+  - **主机侧全链路成功**：`git submodule update`（cutlass/json/z3，github 需重试）→ `pip install -e .`
+    （`mirage_runtime` 原生库 + cython 扩展 + Rust `abstract_subexpr`/`formal_verifier`）→
+    `import mirage` 0.2.4；用 `PersistentKernel`（`persistent_kernel.py:669` 默认参数、`test_mode=True`）
+    搭单层 RMSNorm 最小 megakernel，生成 **18 task / 3 event**（`runtime_header.h:229-235`：
+    `EVENT_TERMINATION`=911×1 / `EVENT_LAUNCH_DEPENDENT_TASKS`=903×1 / `EVENT_END_OF_TASK_GRAPH`=910×16），
+    nvcc JIT 编译 **sm_90a 成功（~27 s/次）**，`worker kernel & scheduler kernel` 双 stream launch 成功
+    （`persistent_kernel.cuh:1977`，`split_worker_scheduler` 恒 true `:1795`）。
+  - **设备侧未收敛**：`pk()` 后 `torch.cuda.synchronize()` 永不返回、GPU 100% 自旋；**4 worker/4 scheduler
+    也复现**（排除 SM 占用不足）。**本轮无法给出端到端延迟/正确性数字**，P25-1 记为 `[~]`，并新增
+    「阻塞」B1/B2。
+  - 关键坑：运行期依赖 `tg4perfetto@git` 直连 github 超时 → 改用 PyPI 同名包 + `--no-deps
+    --no-build-isolation`；mirage 钉 `z3-solver==4.16.0.0` 与容器内 `tilelang`（`<4.15.5`）互斥 →
+    跑完已恢复 `4.15.4.0`（B2）。假设（**待验证**）H1 iteration/事件计数错位、H2 sm90
+    `MPK_ENABLE_TMA`/`GRACE_HOPPER` task 单体内同步、H3 快照 offline/test 路径不完整，下轮见 §「下一步」。
 - **本轮（P24-1）**：`docs/04-experiments.md` 新增 §17「损失三的直接字节证据：用 ncu 量化『融合消掉
   多少 HBM 流量』」——新建 `src/dram_traffic.cu` + `harness/dram_traffic.out.txt`（计时）与
   `harness/dram_traffic_ncu.out.txt`（ncu 字节 + 原始 CSV）（目标卡 H100/sm90，固定空闲 device 3，
@@ -946,4 +991,12 @@
 
 ## 阻塞
 
-- （空）
+- **B1（P25-1）MPK 端到端执行不收敛**：在目标卡 H100/sm90 上 mirage（`f9eb70c`）**能构建、
+  能 JIT 编译、能 launch**，但常驻 kernel 的 worker/scheduler 事件循环**不终止**（`pk()` 后
+  `torch.cuda.synchronize()` 永不返回、GPU 100% 自旋）；4 worker/4 scheduler 亦复现，排除
+  SM 占用不足。详见 `docs/09-mpk-build.md` §3–§4 与 `harness/mpk_smoke.out.txt`。
+  下一轮可尝试：开 `-DMPK_ENABLE_VERBOSE` 逐事件 trace（验 H1）／换非 Hopper-TMA 的最小 task
+  隔离 H2／用官方 CI 入口复现。**不阻塞本专题其余任务**（纯资料分析均已完成）。
+- **B2（环境）z3-solver 版本互斥**：mirage 需 `z3-solver==4.16.0.0`，容器内 `tilelang` 需
+  `<4.15.5`。本轮跑完 mirage 后已恢复 `4.15.4.0`，因此当前 `import mirage` 会失败；下次使用
+  mirage 前需重钉 `4.16.0.0`（用完切回），避免影响其它并行专题。

@@ -1,0 +1,49 @@
+# MPK (Mirage Persistent Kernel) build + minimal megakernel smoke test
+# 目标卡 H100 80GB HBM3 / sm90 / 132 SM，kernel_lab 容器
+# nvcc 13.2 (V13.2.78), torch 2.12.0a0, CUDA 13.2
+# 快照: mirage-project/mirage 分支 mpk commit f9eb70c （与 docs/06/07/08 同一快照）
+# 构建根目录（容器内）: /ssd/mirage_mpk_build
+# 脚本: code/mega-kernel/harness/mpk_smoke.py  (CUDA_VISIBLE_DEVICES=1)
+
+## 一、构建安装（pip install -e .）
+# 关键步骤（原生库 build 成功后，唯一失败点是运行期依赖 tg4perfetto@git 的 github 连接超时；
+# 改用 PyPI 的 tg4perfetto 后，用 --no-deps --no-build-isolation 完成安装）：
+#   git submodule update --init --recursive        # cutlass/json/z3（github 需重试）
+#   pip install tg4perfetto                         # PyPI，避开 git 直连
+#   pip install 'accelerate==1.8.0' graphviz tqdm protobuf cuda-python fastapi uvicorn 'z3-solver==4.16.0.0'
+#   MIRAGE_HOME=/ssd/mirage_mpk_build pip install -e . --no-deps --no-build-isolation
+# CMakeLists 的 CMAKE_CUDA_ARCHITECTURES 由 "75;80;86;89;90" 收窄为 "90" 以省编译时间。
+#
+# 结果（build2.log 尾部）:
+#   [100%] Built target mirage_runtime
+#   Mirage runtime library built successfully.
+#   Created wheel for mirage-project: filename=mirage_project-0.2.4-0.editable-cp312-cp312-linux_x86_64.whl
+#   Successfully built mirage-project
+#   Successfully installed mirage-project-0.2.4
+#
+# 校验: python3 -c 'import mirage' -> mirage 0.2.4
+
+## 二、最小 megakernel 冒烟测试（单层 RMSNorm PersistentKernel）
+# python3 harness/mpk_smoke.py --workers 4 --schedulers 4
+# 生成的 megakernel（test_rank0.cu，JIT by nvcc，target sm_90a）:
+#   [MPK INIT] Total tasks: 18, Total events: 3
+#   task_graph: 18 tasks / 3 events; event0=EVENT_TERMINATION(911) num_triggers=1,
+#               event1=EVENT_LAUNCH_DEPENDENT_TASKS(903) num_triggers=1,
+#               event2=EVENT_END_OF_TASK_GRAPH(910) num_triggers=16
+#   nvcc flags: -gencode=arch=compute_90a,code=sm_90a -DMPK_ENABLE_TMA -DMIRAGE_GRACE_HOPPER
+#               -DMODE_OFFLINE -DMPK_TEST_MODE -DMIRAGE_USE_CUTLASS_KERNEL=0
+#               (一个 task = 一个 CTA，与 docs/07 一致)
+#
+# 运行输出（每次 JIT 编译 ~27 s; 之后挂起）:
+#   [cfg] workers=4 schedulers=4 target_cc=90 shape=(16,4096)
+#   [MPK INIT] Total tasks: 18, Total events: 3
+#   [compile] 27.1 s
+#   [run] launching persistent kernel ...
+#   worker kernel & scheduler kernel
+#   smem size: 205824
+#   Finished Launching Persistent Kernel (Async)
+#   <挂起：torch.cuda.synchronize() 永不返回；nvidia-smi 显示该卡 100% 占用/自旋>
+#
+# 带缓存运行时 stdout 的诊断记录见 harness/mpk_smoke.out.txt（stdbuf -oL）。
+# 结论: 主机侧构建/编译/launch 全部成功；设备侧 worker/scheduler 事件循环不终止（device-side spin）。
+# 详见 docs/09-mpk-build.md。

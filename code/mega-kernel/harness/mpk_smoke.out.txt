@@ -1,0 +1,24 @@
+# MPK 最小 megakernel 运行日志（原始，stdbuf -oL 行缓冲）
+# 目标卡 H100/sm90，CUDA_VISIBLE_DEVICES=1，command:
+#   MIRAGE_HOME=/ssd/mirage_mpk_build \
+#   stdbuf -oL -eL timeout 90 python3 -u harness/mpk_smoke.py --workers 4 --schedulers 4 --iters 5 --warmup 2
+# EXIT=124 (timeout) —— 主机侧 launch 成功后，设备侧不终止。
+[cfg] workers=4 schedulers=4 target_cc=90 shape=(16,4096)
+Compiling megakernel using the following command line:
+['/usr/local/cuda/bin/nvcc', '/tmp/tmpwre0qugb/test.cu', '-O3', '-lineinfo', '-I/usr/include/python3.12', '-I/ssd/mirage_mpk_build/python/mirage/../../include', '-I/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/tools/util/include', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/json/include', '-DMAX_WORKER_PER_SCHEDULER=2', '-DMIRAGE_USE_CUTLASS_KERNEL=0', '-gencode=arch=compute_90a,code=sm_90a', '-DMPK_ENABLE_TMA', '-DMIRAGE_GRACE_HOPPER', '-DNDEBUG', '-shared', '-std=c++20', '-rdc=false', '-use_fast_math', '-lcuda', '-lcudart', '-lstdc++fs', '-Xcompiler=-fPIC', '--expt-relaxed-constexpr', '-o', '/tmp/tmpwre0qugb/test.cpython-312-x86_64-linux-gnu.so', '-DMPK_TARGET_CC=90', '-DMIRAGE_BACKEND_USE_CUDA', '-DMPK_TEST_MODE', '-DMODE_OFFLINE', '-DMPK_MAX_NUM_BATCHED_REQUESTS=1', '-DMPK_MAX_NUM_BATCHED_TOKENS=1', '-DMPK_MAX_TOKENS_PER_REQUEST=1', '-DMPK_MAX_NUM_PAGES=1', '-DMPK_NUM_KV_GROUPS=1', '-DMPK_MAX_SEQ_LENGTH=1']
+<cutlass sm100/sm103 warning 若干，省略>
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(326): warning #177-D: variable "step_advance" was declared but never referenced
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(944): warning #177-D: variable "num_schedulers" was declared but never referenced
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(946): warning #177-D: variable "num_schedulers_per_sm" was declared but never referenced
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(1128): warning #177-D: variable "_trace_t" was declared but never referenced
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(969): warning #20054-D: dynamic initialization is not supported for a function-scope static __shared__ variable within a __device__/__global__ function
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(1639): warning #177-D: variable "expected_num_meta" was declared but never referenced
+Saved compiled kernel to: /ssd/mirage_mpk_build/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
+Finished megakernel compilation...
+[MPK INIT] Total tasks: 18, Total events: 3
+[compile] 27.1 s
+[run] launching persistent kernel ...
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+<此后 torch.cuda.synchronize() 永不返回；nvidia-smi 显示该卡 100% 占用/自旋>

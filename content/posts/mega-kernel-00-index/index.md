@@ -27,5 +27,6 @@ categories: ["算子开发"]
 7. [MPK 线上实现源码走读：worker/scheduler 运行层]({{< relref "mega-kernel-07-mpk-source" >}}) —— 论文落到可核对源码
 8. [MPK 单 task device 实现走读：Hopper task 内部流水]({{< relref "mega-kernel-08-mpk-tasks" >}}) —— 一个 task = 一个 CTA 的 TMA/wgmma 流水
 9. [MPK 源码走读：依赖分析器与 tGraph 构建]({{< relref "mega-kernel-09-mpk-compiler" >}}) —— 最近写者 SSA、event fusion、linearization
+10. [MPK 构建与端到端冒烟测试]({{< relref "mega-kernel-10-mpk-build" >}}) —— 在目标卡 H100 上从零构建 mirage 并 launch 最小 megakernel
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
