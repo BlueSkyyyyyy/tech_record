@@ -181,6 +181,14 @@
       （`utils.py:25-29`，H100 128 worker/16 scheduler 对上论文 §5.1）。与论文逐项对照表 + C1–C5 全满足；
       **纯源码走读（资料分析），本轮未构建/运行 mirage**。
 
+### P8 博客发布
+
+- [x] **P8-1** 补全博客 post 与目录：为 `docs/02`/`03`/`04`/`06` 补建 `content/posts/mega-kernel-*`
+      的 `doc_include` 内联页，并更新 `mega-kernel-00-index` 目录（原第 3/4/5 项「待写」）。
+      新增 post：`mega-kernel-03-cases`（weight 4，docs/02）、`mega-kernel-04-related`（weight 5，docs/03）、
+      `mega-kernel-05-experiments`（weight 6，docs/04）、`mega-kernel-07-mpk-source`（weight 8，docs/06）。
+      纯发布接线，不新增资料/实验。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -206,7 +214,8 @@
 - 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**；
   **P3 全部完成（3/3）**；**P4 全部完成（4/4）**；**P5 全部完成（3/3）**；**P6 全部完成（1/1）**；
   **P7 源码走读（1/1）完成**（本轮新增，对应「下一步」可选方向③）。
-  **本专题任务清单（P0–P7）全部完成**，无未完成子项。
+  **P8 博客发布（1/1）完成**（本轮新增，对应「下一步」可选方向①）。
+  **本专题任务清单（P0–P8）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -255,11 +264,18 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P7 全部完成）。后续可选的增量方向（不属现有清单）：① 为 `docs/02`/`03`/`04`/`06`
-  补建对应博客 post（目前仅 `docs/00`/`01`/`05` 有 post）；② 补做 P5-2 §2.6 / P5-1 §1.6 提到的
+- **下一步：无**（P0–P8 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`
+  补建对应博客 post~~（本轮 P8-1 已完成）；② 补做 P5-2 §2.6 / P5-1 §1.6 提到的
   「更小 M / 更多算子 / 多 block」实验；③ 在容器内 `pip install -e .` 构建 mirage sm90 路径并跑
   `demo/qwen3/demo.py --use-mirage` 取本机 MPK 端到端数字，或继续走读 `tasks/hopper/*.cuh` 单 task
   内部实现（P7-1 已走通运行层骨架，见 `docs/06`）。
+- **本轮（P8-1）**：博客发布接线——为 `docs/02`/`03`/`04`/`06` 补建 4 个 `doc_include` 内联 post
+  （`mega-kernel-03-cases`/`-04-related`/`-05-experiments`/`-07-mpk-source`，weight 4/5/6/8），
+  并更新 `mega-kernel-00-index` 目录（原 3/4/5 项「待写」→ 真实 relref 链接，新增第 7 项源码走读）。
+  **纯发布接线，无新资料、无新实验**。`hugo` 构建：8 个 mega-kernel 页面全部生成、本专题**无 ERROR**
+  （唯一站点 ERROR 是另一并行专题 flash-kda 的在途文件 `flash-kda-04-numerics`，不属本专题路径）。
+  踩坑：post `date` 初填当晚 21:48–21:51（写入后数分钟的未来时间）触发 **REF_NOT_FOUND**，
+  回填到过去后消失（印证「date 不要写成未来时间」坑）。P8-1 完成。
 - **本轮（P7-1）**：新建 `docs/06-mpk-source.md`（MPK 线上实现运行层源码走读，**纯资料分析**）。
   快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`（2026-10-05）。走通「Python 构图 →
   `runtime.cc` 生成 `_init_persistent_kernel`/`_execute_task` → `init_persistent_kernel` 分配队列/事件 →

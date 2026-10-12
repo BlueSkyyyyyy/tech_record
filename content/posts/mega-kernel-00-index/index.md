@@ -20,9 +20,10 @@ categories: ["算子开发"]
 
 1. [MegaKernel 是什么：动机、定义与谱系]({{< relref "mega-kernel-01-overview" >}}) —— kernel-per-operator 的损失、定义、谱系
 2. [MPK 论文精读（一）：SM 级图表示 tGraph]({{< relref "mega-kernel-02-paper" >}}) —— task/event 交替、与 CUDA Graphs 对比
-3. 生产案例：DeepGEMM mega 家族、Kimi K3（待写）
-4. 相关技术对照：CUDA Graphs / PDL / persistent kernel（待写）
-5. 实验：launch 开销、persistent kernel、PDL（待写）
+3. [生产案例：DeepGEMM mega 家族、Kimi K3 与 hpc-ops]({{< relref "mega-kernel-03-cases" >}}) —— 段级 mega-kernel 的源码坐标与范式
+4. [相关技术对照：CUDA Graphs / PDL / persistent kernel]({{< relref "mega-kernel-04-related" >}}) —— 各类缓解手段消了什么、没消什么
+5. [实验：launch 开销、两算子融合、PDL 链式流水]({{< relref "mega-kernel-05-experiments" >}}) —— 目标卡 H100 实测
 6. [MegaKernel 一页纸总结：原理、设计 checklist 与适用边界]({{< relref "mega-kernel-06-summary" >}}) —— 收官汇总
+7. [MPK 线上实现源码走读：worker/scheduler 运行层]({{< relref "mega-kernel-07-mpk-source" >}}) —— 论文落到可核对源码
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
