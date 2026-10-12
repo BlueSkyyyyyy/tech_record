@@ -1,0 +1,34 @@
+torch 2.12.0a0+0291f960b6.nv26.04.48445190
+== A. per-tile byte budget ==
+   k_decayed      4096 B   128B-aligned
+   q_decayed      4096 B   128B-aligned
+   k_restored     4096 B   128B-aligned
+   g_total         512 B   128B-aligned
+   INV             512 B   128B-aligned
+   Mqk             512 B   128B-aligned
+   per_tile = 13824 B  (kd 4096 + qd 4096 + kr 4096 + gt 512 + INV 512 + Mqk 512)
+   -> 6 SoA arrays concatenated, each 128B aligned => no padding inside a tile
+
+== B. get_workspace_size vs closed form ==
+   [OK ] T=   256 H=  1 N= 1  tiles= 17  ws=235136  (tiles*H*per_tile=235008 + prefix=128)
+   [OK ] T=   512 H=  4 N= 1  tiles= 33  ws=1824896  (tiles*H*per_tile=1824768 + prefix=128)
+   [OK ] T=  1024 H=  8 N= 1  tiles= 65  ws=7188608  (tiles*H*per_tile=7188480 + prefix=128)
+   [OK ] T=  4096 H= 16 N= 1  tiles=257  ws=56844416  (tiles*H*per_tile=56844288 + prefix=128)
+   [OK ] T=  1000 H=  4 N= 1  tiles= 64  ws=3539072  (tiles*H*per_tile=3538944 + prefix=128)
+   [OK ] T= 12345 H=  8 N= 2  tiles=774  ws=85598336  (tiles*H*per_tile=85598208 + prefix=128)
+   [OK ] T=   101 H=  2 N= 4  tiles= 11  ws=304256  (tiles*H*per_tile=304128 + prefix=128)
+   [OK ] T=    77 H=  3 N= 7  tiles= 12  ws=497792  (tiles*H*per_tile=497664 + prefix=128)
+   [OK ] T=  2048 H= 12 N= 1  tiles=129  ws=21399680  (tiles*H*per_tile=21399552 + prefix=128)
+   all rows match the host closed form
+
+== C. live varlen forward: tile_prefix at predicted offset ==
+   lens=[30, 16, 5, 50]  T_total=101  N=4
+   launch total_tiles=11  n_ht=22
+   allocation=304256 B, per_tile region=304128 B, prefix tail=128 B
+   tile counts/seq = [2, 1, 1, 4]  expected prefix = [0, 2, 3, 4, 8]
+   read int32 @ 304128 = [0, 2, 3, 4, 8]
+   canary beyond prefix tail untouched: True (108 B still 0xAA)
+   per-tile SoA region nonzero bytes: 259423/304128 (kernels wrote data)
+   C OK: tile_prefix lands exactly at H*launch_tiles*per_tile
+
+DONE

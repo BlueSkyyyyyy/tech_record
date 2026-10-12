@@ -272,7 +272,7 @@ max abs $\approx 2.5\times10^{-3}\!\sim\!5.9\times10^{-3}$——与 bf16 输入�
 对近共线 key（$|L|$ 接近 1）的构造，fp64 仍 $\le5.6\times10^{-17}$，bf16 量化 $\approx1.7\times10^{-3}$，
 没有 Neumann 级数那种放大。这验证了求逆例程的代数（`utils.cuh:213–369`）确实产出块内注意力矩阵的逆。
 
-> workspace 逐字段字节数与 host 对齐留到 **P2-3**（本文 §9 已给出对应行号）。K2 递推见第 3 篇。
+> workspace 逐字段字节数与 host 对齐见 **§12（P2-3）**。K2 递推见第 3 篇。
 
 ## 11. 关键优化逐条量化（P2-2）
 
@@ -382,7 +382,119 @@ $\text{decay}=2^{\,\text{gate\_scale}\cdot\sigma(x)}$（kernel 路径用 `ex2_ap
 $\sim10^{-3}$；但比块内求逆的**用途**（$k^{\text{inv}}$ 只做 bf16 衰减变体、$M_{qk}$ 只做输出投影，
 §5/§6）所需要的精度已经足够，且避免了 Neumann 的失稳。
 
-## 12. 下一步
+## 12. workspace 逐字段字节账与 SoA 指针切分（P2-3）
 
-- **P2-3** workspace 布局逐字段与 `get_workspace_size` 对齐（本文 §9 已列行号）。
+§9 讲了 K1「往哪些数组写」，这一节把**每个数组占多少字节、基址落在哪、总分配怎么算**逐字对上，
+并用实跑验证。三方口径必须一致：host 的 `get_workspace_size`（`flash_kda.cpp:5–26`）、
+C++ 常量 `WorkspaceSizes`（`utils.cuh:63–77`）、host 指针切分（`fwd_launch.cu:61–71`）。
+
+### 12.1 每 tile 字节预算
+
+workspace 是 **SoA**（六个独立大数组），每个 tile 把六个字段**顺序**排一遍
+（`utils.cuh:70–76` 的 `kKDecayed…kMqk` / `kPerTile`）：
+
+| 字段 | 元素类型 | 每 tile 形状 | 字节 | 出处 |
+|---|---|---|---|---|
+| `k_decayed` | bf16 | $[16,128]$ | 4096 | `utils.cuh:70` |
+| `q_decayed` | bf16 | $[16,128]$ | 4096 | `utils.cuh:71` |
+| `k_restored` | bf16 | $[16,128]$ | 4096 | `utils.cuh:72` |
+| `g_total` | fp32 | $[128]$ | 512 | `utils.cuh:73` |
+| `INV` | bf16 | $[16,16]$ | 512 | `utils.cuh:74` |
+| `Mqk` | bf16 | $[16,16]$ | 512 | `utils.cuh:75` |
+| **`kPerTile`** | | | **13824** | `utils.cuh:76` |
+
+host 用等价的一行硬编码这个和（`flash_kda.cpp:20`）：
+`3*CHUNK*D*2 + D*4 + 2*CHUNK*CHUNK*2 = 3·4096 + 512 + 2·512 = 13824`。
+三个 `static_assert`（`flash_kda.cpp:16–18`）保证每个字段都是 **128 B 的整数倍**——
+这一点直接决定了 §12.2 的「六个基址天然 128 B 对齐、字段之间零填充」。
+
+**为什么是 13824 而不是把 K1 smem 里那 6 块照搬？** K1 的 smem Phase B（§11.1）是
+`3·4096 + 1024(fp32 L) + 2·512 = 14336`，比 13824 **多 512 B**：因为 smem 里 $L$ 是 fp32
+（1024 B，求逆要用），而 workspace 只存求逆**之后**的 bf16 `INV`（512 B），$L$ 本身不必落盘。
+换句话说 workspace 只保留 K2 递推真正要读的东西：三个衰减变体 + 块累积门 + 块内逆 + $M_{qk}$。
+
+### 12.2 SoA 基址切分与对齐
+
+host 侧 `n_ht = H * total_tiles`（`fwd_launch.cu:62`），六个基址是**前缀和偏移**
+（`fwd_launch.cu:64–71`）：
+
+| 指针 | 偏移（字节） | 代码 |
+|---|---|---|
+| `ws_kd` | `ws + 0` | `fwd_launch.cu:64` |
+| `ws_qd` | `ws + n_ht·4096` | `fwd_launch.cu:65` |
+| `ws_kr` | `ws + n_ht·8192` | `fwd_launch.cu:66` |
+| `ws_gt` | `ws + n_ht·12288` | `fwd_launch.cu:67` |
+| `ws_inv` | `ws + n_ht·12800` | `fwd_launch.cu:68` |
+| `ws_mqk` | `ws + n_ht·13312` | `fwd_launch.cu:69` |
+| `ws_tile_prefix` | `ws + n_ht·13824` | `fwd_launch.cu:71` |
+
+因为 `n_ht·(每个字段大小)` 里字段大小都是 128 的倍数，只要 `ws` 基址按 128 B 对齐
+（`torch.empty(uint8)` 给 256 B 对齐），**六个基址全部 128 B 对齐**，且一个 tile 内部无填充
+（13824 也是 128 的倍数）。这正是 §0 表里「$k^{\text{dec}}/q^{\text{dec}}/k^{\text{rest}}/E^{\text{tot}}/
+\text{INV}/M_{qk}$ 每个都能单独配 TMA descriptor」（`fwd_launch.cu:98–103`）的前提。
+
+**为什么用 SoA 不用 AoS？** 这六个字段在 K2 里的访问模式、想要的 smem swizzle
+都不同：`k/q_decayed/k_restored` 走 $16{\times}128$ 的 `TMAVOLayout`（`MMALayout` K-major），
+`g_total` 是 1D `GTotalLayout`，`INV/Mqk` 走 $16{\times}16$ 的 `TMALMLayout`
+（`fwd_kernel1.cuh:98–103` 的 store descriptor 各自独立）。若做成 AoS（结构体数组），
+每个字段的 stride 被一个结构体尺寸钉死，凑不出各自最优的 TMA 布局，也难保证字段级 128 B 对齐。
+SoA 让「布局、对齐、descriptor」三者解耦，代价只是 host 要多算几个前缀和偏移。
+
+**索引顺序**：`ws_idx = head_idx * total_tiles + global_tile_idx`（`fwd_kernel1.cuh:516`）——
+**head 在外、tile 在内**。K2 的 grid 是 `dim3(N, H)`（`fwd_launch.cu:203`），一个 CTA 负责
+一个 `(seq, head)` 并**顺序**跑完该 head 的所有 tile；head-major 让这个 CTA 读 workspace 时
+`ws_idx` 逐块 +1、地址连续，正好是 TMA/缓存的顺读。若反过来 tile-major，同一 CTA 每步要跨
+`H·kPerTile` 步进，白白浪费预取。
+
+### 12.3 总分配 = 上界，launch = 精确/上界
+
+`get_workspace_size(T_total,H,N)`（`flash_kda.cpp:5–26`）**永远按上界**算：
+
+$$
+\text{tiles}_{\text{alloc}} = \left\lceil \tfrac{T_{\text{total}}}{16}\right\rceil + N,\qquad
+\text{bytes} = H\cdot\text{tiles}_{\text{alloc}}\cdot 13824 + \left\lceil\tfrac{4(N+1)}{128}\right\rceil\!\cdot\!128 .
+$$
+
+尾部的 `tile_prefix_bytes = ceil(4(N+1)/128)*128`（`flash_kda.cpp:23`）是 varlen 才用到的
+每序列 tile 累计数（$N+1$ 个 int32，向上取整到 128 B）。
+
+**关键：分配用上界、launch 有时用精确值，两者可以差。** `fwd` 里
+（`flash_kda.cpp:176–181`）：
+
+- 非 varlen：`total_tiles = N·ceil(T_seq/16)`（精确，`flash_kda.cpp:180`）；
+- varlen：`total_tiles = ceil(T_total/16) + N`（上界，`flash_kda.cpp:178`）。
+
+非 varlen 的精确值不超过上界：因 $T_{\text{total}}=N\cdot T_{\text{seq}}$，
+
+$$
+N\left\lceil \tfrac{T_{\text{seq}}}{16}\right\rceil \;\le\; N\left(\tfrac{T_{\text{seq}}}{16}+1\right)
+= \tfrac{T_{\text{total}}}{16}+N \;\le\; \left\lceil\tfrac{T_{\text{total}}}{16}\right\rceil + N .
+$$
+
+所以按上界分配一定够。但注意 §12.2 里 `n_ht`、以及 `ws_tile_prefix` 的绝对偏移，用的是
+**launch 的** `total_tiles`（`fwd_launch.cu:62,71` 传的是 `total_tiles` 参数）。非 varlen 时它比
+分配上界小，于是 `tile_prefix` 落在分配区**内部偏前**的位置——因为非 varlen 根本不写、不读
+`tile_prefix`（只有 varlen 的 `_flash_kda_build_tile_prefix` 写它，`fwd_launch.cu:164–167`），
+这段「错位」无害。**这是一个容易踩的坑**：`ws_tile_prefix` 的偏移不能按分配上界去猜，
+必须按真正 launch 的 `total_tiles`。下面 §12.4 的实跑就专门验证了 varlen 下三者对齐。
+
+### 12.4 实跑验证
+
+`harness/check_workspace_layout.py`（原始输出 `harness/check_workspace_layout.out.txt`）
+在 `kernel_lab` 里对**已编译**扩展做三项核对：
+
+1. **A 字段预算**：六个字段全部 128 B 对齐，`kPerTile=13824` 与 `flash_kda.cpp:20` 的
+   `3*16*128*2+128*4+2*16*16*2` 相等。
+2. **B `get_workspace_size` vs 闭式**：9 组 `(T,H,N)`（含 varlen `N=2/4/7` 与不整除 `T=1000/12345/101/77`）
+   全部 `OK`。例：`T=512,H=4,N=1 → tiles=33, ws=4·33·13824+128 = 1,824,896 B`（≈1.74 MB）。
+3. **C 实跑 varlen**：`lens=[30,16,5,50]`（$T_{\text{total}}=101$、$N=4$），把 workspace 用 `0xAA`
+   填满后跑 `fwd`，在预测偏移 `H·launch_tiles·13824 = 2·11·13824 = 304128` 读 int32：
+   得到 `[0, 2, 3, 4, 8]`，与每序列 tile 数 `[ceil(30/16),1,1,ceil(50/16)]=[2,1,1,4]`
+   的累计前缀**完全一致**；其后 108 B 仍是 `0xAA`（kernel 没有越界写），前 304128 B 里有
+   259423 B 被写过（六个数组确实落盘）。
+
+这三项把「host 公式 ↔ C++ 常量 ↔ kernel 实际写入位置」钉死在同一套字节账上。
+
+## 13. 下一步
+
 - **P3** K2 精读（warp specialization + 八个 Phase）。

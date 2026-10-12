@@ -53,7 +53,7 @@
       8×8 fp32 前代求逆 + 16×16 bf16-HMMA 合并 → 写 workspace；贴行号。
 - [x] **P2-2** 关键优化逐条：smem union 复用、`__launch_bounds__(256,8)`、base-2 `ex2.approx`、
       `tanh.approx` sigmoid、前代求逆的精度取舍。
-- [ ] **P2-3** workspace 布局逐字段解释（对上 `flash_kda.cpp:get_workspace_size`）。
+- [x] **P2-3** workspace 布局逐字段解释（对上 `flash_kda.cpp:get_workspace_size`）。
 
 ### P3 前向 K2 精读（`docs/03-kda-fwd-k2.md`）
 
@@ -105,11 +105,13 @@
 - 目标卡代号敏感：写「目标卡」。
 - 被内联的 `docs/*.md` 里**不要写 `{{< >}}` 短代码**；站内链接只在 `content/posts` 里用 `relref`。
 - 行号引用必须真实核对过；宁可不标也不标错。
+- workspace：分配（`get_workspace_size`）恒用**上界** `ceil(T/16)+N`，而非 varlen launch 用**精确**
+  `N·ceil(T_seq/16)`（更小）；`ws_tile_prefix` 偏移按 launch 的 total_tiles 算，勿按分配上界猜。
 - 容器 workdir 是 `code/kernel-opt`，`docker exec` 跑脚本要用**绝对路径**。
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0 全部完成，P1 全部完成，P2-1/P2-2 完成。
+- 当前进度：P0 全部完成，P1 全部完成，P2 全部完成（P2-1/P2-2/P2-3）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -137,9 +139,20 @@
     (d) 前代求逆精度：`harness/check_inv_precision.py`（`check_inv_precision.out.txt`）对比 A纯fp32/B kernel
     (seed fp32+bf16 合并)/C bf16 seed/D Neumann(fp16/bf16)：完全共线 c=0.9 时 Neumann fp16=0.58、bf16=2.83
     而 kernel 路径仅 1.6e-3，量化确认「放弃 Neumann 级数」的稳定性收益。
-- **下一步：P2-3** workspace 布局逐字段字节数对上 `flash_kda.cpp:get_workspace_size`（`3*16*128*2 + 128*4 +
-  2*16*16*2`）与 `utils.cuh:64–77` 的 `WorkspaceSizes`，核对 host 侧指针切分（`fwd_launch.cu:64–71`）与
-  §9 的 6 个 TMA store 偏移一致。随后进入 P3（K2 精读）。反向（P5）可用已装好的 FLA `chunk_kda` autograd 对拍。
+  - P2-3：`docs/02` 新增 §12「workspace 逐字段字节账与 SoA 指针切分」，全部本机实测与源码核对：
+    (a) 每 tile 六字段字节（`utils.cuh:70–76`）= 3×4096 + 512 + 2×512 = **13824 B**，与 host 硬编码
+    `flash_kda.cpp:20` 一致，且各字段均 128B 对齐（`flash_kda.cpp:16–18` static_assert）；解释为何
+    workspace 13824B 比 K1 smem Phase B 14336B 少 512B（$L$ 的 fp32 512B 不必落盘，只存求逆后的 bf16 INV）。
+    (b) SoA 六基址前缀和偏移（`fwd_launch.cu:64–71`）、`ws_idx=head*total_tiles+tile`（`fwd_kernel1.cuh:516`）
+    head-major 让 K2 单 CTA 顺读；讲清「为何 SoA 而非 AoS」（各字段 TMA 布局/对齐/descriptor 解耦）。
+    (c) 总分配恒取上界 `tiles=ceil(T/16)+N`（`flash_kda.cpp:14`），非 varlen launch 用精确 `N·ceil(T_seq/16)`
+    （`flash_kda.cpp:180`）并给不等式证明 ≤ 上界；点明 `ws_tile_prefix` 偏移必须按 **launch** 的 total_tiles
+    而非分配上界（坑）。新增 `harness/check_workspace_layout.py`（`check_workspace_layout.out.txt`）三查：
+    字段预算/对齐、9 组 `get_workspace_size` 对闭式（含 varlen N=2/4/7）全 OK、varlen 实跑
+    `lens=[30,16,5,50]` 在预测偏移 304128 读出 `tile_prefix=[0,2,3,4,8]` 与期望一致、其后 108B canary 未被动。
+- **下一步：P3-1** 进入 K2 精读（`docs/03-kda-fwd-k2.md`）：先讲 warp specialization（LOAD/MMA/STORE
+  三分角色，`utils.cuh:79–84` 的 `WarpRole`）与 TMA pipeline（K2 3-stage 载入 / 2-stage 输出，
+  `fwd_launch.cu:29–30`），再逐 Phase 拆数据流。反向（P5）可用已装好的 FLA `chunk_kda` autograd 对拍。
 
 ## 阻塞
 
