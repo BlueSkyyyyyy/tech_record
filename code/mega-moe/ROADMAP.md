@@ -378,6 +378,40 @@
       缓冲区字数公式与边界用例（`kstart%4≠0`、非 384 尾块、ragged tokens、空 span、8 SM）全通过。
       配套博客 `content/posts/mega-moe-23-mqa-logits-schedule`（索引页新增第 23 篇）。
 
+### P14 增量（opt-in，SM100 dense MQA logits 的【分页版】调度器）
+
+- [x] **P14-1** **SM100 dense MQA logits 分页版 metadata 负载均衡调度器**
+      （`scheduler/sm100_paged_mqa_logits.cuh` / `sm100_mqa_logits.hpp:26-61,297-381` /
+      `attention.hpp:136-282`）。第 23 篇做了连续版调度器，本篇补**分页版**：同一套主 kernel
+      （block-scaled UMMA + TMEM，**SM100 专属，仅分析**），调度换成 varlen 请求模型。
+      分页调度器与 UMMA 无关，在 H100 上**直接编译运行真实设备代码**逐条验证。
+      → `docs/24-mqa-logits-paged-schedule.md`（真实行号核对）：host `attention.hpp:136-172`
+      （`get_paged_mqa_logits_metadata` 仅 SM100、强制 varlen/next_n=1、block_kv∈{32,64,128}、
+      indices 8B 对齐 `:160`；SM90 拒 varlen `:164`）、`:258-264`（out=bf16、split=384、1024B 行对齐）、
+      `sm100_mqa_logits.hpp:13-18`（`kMQALogitsSplitKV=384`/`kMQALogitsSplitsPerChunk=8`）、
+      `:32`（metadata 固定 `block_q=4`，注释 Tuned for H32）、`:318-333` 分页 tensor map、
+      `:359/362` 实例化放开 `page_kv`/chunk。`scheduler/sm100_paged_mqa_logits.cuh`：
+      `RequestInfo`（`:13-47`，请求 = indices run-length、context 取**最后一个 token** `:38`、
+      Q token **均分** `:42-46`）；metadata kernel（`:50-159`）：`uint2` 两 token 扫描两遍
+      （数起点→`cta_exclusive_sum`→写起点，`:71-98`）、代价模型 `split_cost=2·BQ·blocks+tokens`
+      （`:110-112`）、**溢出回退**（单值 >2³² / 前缀回绕 → 借 `num_requests` 最高位标志位，
+      回退 token 代价；`:114-141`）、**只在请求 split 粒度切边界**（无段启动代价，`:144-158`）；
+      `SM100PagedMQALogitsScheduler`（`:162-281`）：`kNumPagesPerSplit`/`kNumCachedPages=32`
+      （`:166-170`）、每 SM 用 `meta[sm]..meta[sm+1]` 作起止（`:202-205`）、
+      `next_q_block` 按 **Q block→chunk→请求**推进（`:221-251`，`num_q_blocks==1` 不分块 `:232`、
+      `kv_shared_with_prev` `:233`、「同一 KV 段的多个 Q block」一拍 `:239-241`）、
+      每 token KV 上界（`:254-266`）、**每 lane 缓存一页的滑动窗口** `get_kv_page_coords`
+      （`:269-280`，refill `:272`、越界映射 0 `:275`、`ptx::exchange` 广播 `:279`）。
+      H100 实测 `src/mqa_logits_paged_schedule.cu` + `harness/exp_mqa_logits_paged_schedule.{sh,out.txt}`：
+      **直接编译运行真实设备代码**——10 用例 **ALL PASS**：metadata 每-SM 边界 vs host 独立复刻
+      （含 132/8 SM、空 SM）**逐字段 0 不符**；真实 scheduler 发射任务**所有 (请求,Q-block,split)
+      恰好覆盖一次**（dup/miss/bad=0）；`kv_shared_with_prev`/块大小≤8/每 token KV 上界全对；
+      **分页查表含 mid-refill**（PAGE_KV=32、chunk=8 单任务 96 页 > 32 缓存）与 host **0 不符**；
+      **代价溢出回退**用例（4096 token、ctx=1.56e8，split 代价 4.99e9>2³²）`use_token_cost=Y`、
+      total_cost=1.664e9、边界仍完全一致；坐实 metadata `block_q=4` 与主 kernel `BLOCK_Q=128/H`
+      解耦（H=64 sched/meta slots **432/288**、H=128 **864/288**，均衡只估计、正确性靠 `has_work`）。
+      配套博客 `content/posts/mega-moe-24-mqa-logits-paged-schedule`（索引页新增第 24 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -402,8 +436,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P12 全部完成；P13-1 完成。**
-  本轮 P13-1：新建 `docs/23-mqa-logits-sm100-schedule.md`（+`harness/exp_mqa_logits_schedule.{sh,out.txt}`、
+- 当前进度：**P0~P13 全部完成；P14-1 完成。**
+  本轮 P14-1：新建 `docs/24-mqa-logits-paged-schedule.md`（+`harness/exp_mqa_logits_paged_schedule.{sh,out.txt}`、
+  `src/mqa_logits_paged_schedule.cu`）——补上 SM100 dense MQA logits 的**分页版** metadata 调度器
+  （第 23 篇连续版的分页对照）。主 kernel 仍是 block-scaled UMMA + TMEM，**SM100 专属，仅分析**；
+  但 `scheduler/sm100_paged_mqa_logits.cuh` 的调度逻辑（varlen 请求 run-length 分组、请求内 Q block
+  **均分**、代价模型 `2·BQ·blocks+tokens`、**溢出回退借 `num_requests` 最高位**、同一请求多 Q block
+  **复用同一段 KV**（`kv_shared_with_prev`+`kSplitsPerChunk`）、**每 lane 缓存一页的滑动窗口**
+  `get_kv_page_coords`）**与 UMMA 无关**，在 H100 上**直接编译运行真实设备代码**：10 用例 ALL PASS——
+  metadata 每-SM 边界 vs host 独立复刻逐字段 0 不符（含 132/8 SM、空 SM）；真实 scheduler 发射任务
+  **所有 (请求,Q-block,split) 恰好覆盖一次**（dup/miss/bad=0）；分页查表含 **mid-refill** 与 host 0 不符；
+  代价溢出回退用例（split 代价 4.99e9>2³²）`use_token_cost=Y` 边界仍一致；坐实 metadata `block_q=4`
+  与主 kernel `BLOCK_Q=128/H` 解耦（H=64 sched/meta slots **432/288**、H=128 **864/288**）。
+  配套博客 `content/posts/mega-moe-24-mqa-logits-paged-schedule`（索引页新增第 24 篇）。Hugo 构建 0 ERROR。
+  上一轮 P13-1：新建 `docs/23-mqa-logits-sm100-schedule.md`（+`harness/exp_mqa_logits_schedule.{sh,out.txt}`、
   `src/mqa_logits_schedule.cu`）——补上 SM100 dense MQA logits 的主 kernel + **连续版负载均衡调度器**
   （第 19 篇 SM90 dense、第 22 篇 SM100 sparse 之间的缺口）。主 kernel 是 block-scaled UMMA + TMEM，
   **SM100 专属，仅分析**；但 `scheduler/sm100_mqa_logits.cuh`（KV span 并集 / 偶奇交错前缀和 /
@@ -434,11 +480,10 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P13 已完成。后续若继续（均为增量、非承诺）：
-  ① **sparse attention 系列（P12/P13 已开）**：`fp8_fp4_sparse_mqa_logits` 与 dense 的 SM100
-  主 kernel + 调度器均已做；可再补 **分页版** metadata 调度器（`sm100_paged_mqa_logits.cuh`
-  的代价溢出回退 / 页坐标滑动缓存）在 H100 上的真实设备代码验证，或 `sm100_mqa_logits.cuh`
-  SIMT epilogue 的更多数值特性；
+- **下一步**：P0~P14 已完成。后续若继续（均为增量、非承诺）：
+  ① **sparse attention 系列（P12/P13/P14 已开）**：SM90 dense、SM100 sparse、SM100 dense 连续版/
+  分页版调度器均已做；可再补 `sm100_mqa_logits.cuh` SIMT epilogue 的更多数值特性，或
+  `impls/sm100_sparse_mqa_logits.cuh` 主 kernel 的 TMA 快路 / 尾裁剪细节精读；
   ② **einsum 家族 FP8 投影（P11 已开）**：`bhr,hdr->bhd` 已做；`bhd,hdr->bhr` / `bhd,bhr->hdr`
   是 arch10 专属（仅分析）。可再补 `fp8_einsum` 的 FP8 输出对（SM100 `Kernel1D1D`）精读；
   ③ **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine

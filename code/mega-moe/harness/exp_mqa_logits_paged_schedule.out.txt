@@ -1,0 +1,65 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+P14-1 SM100 paged MQA logits 调度器：H100 真实设备代码验证
+GPU: NVIDIA H100 80GB HBM3  sm_90  SMs=132
+
+== 用例组 A：BLOCK_Q=4（H=32），PAGE_KV=64，132 SM ==
+  [uniform req=8 ctx=2048  ] BQ=4 H=32 nq=512 reqs=64 pkv=64  slots(sched/meta)=768/768  use_token_cost=n
+      meta boundary match=YES (0 mismatch)  total_cost=9216
+      scheduler: tasks=348 slots=768 dup=0 miss=0 bad=0  seq/shared/chunk bad=0/0/0
+      pages : checked=4608 mismatch=0   per-SM work [4..6]
+      => result: PASS
+  [skewed req/ctx          ] BQ=4 H=32 nq=84 reqs=9 pkv=64  slots(sched/meta)=152/152  use_token_cost=n
+      meta boundary match=YES (0 mismatch)  total_cost=1812
+      scheduler: tasks=152 slots=152 dup=0 miss=0 bad=0  seq/shared/chunk bad=0/0/0
+      pages : checked=888 mismatch=0   per-SM work [0..8]
+      => result: PASS
+  [mixed heavy/light       ] BQ=4 H=32 nq=580 reqs=200 pkv=64  slots(sched/meta)=1250/1250  use_token_cost=n
+      meta boundary match=YES (0 mismatch)  total_cost=14612
+      scheduler: tasks=1122 slots=1250 dup=0 miss=0 bad=0  seq/shared/chunk bad=0/0/0
+      pages : checked=3546 mismatch=0   per-SM work [3..18]
+      => result: PASS
+
+== 用例组 B：PAGE_KV=32 / 128（同一 metadata，不同页大小）==
+  [PAGE_KV=32              ] BQ=4 H=32 nq=320 reqs=40 pkv=32  slots(sched/meta)=320/320  use_token_cost=n
+      meta boundary match=YES (0 mismatch)  total_cost=3840
+      scheduler: tasks=280 slots=320 dup=0 miss=0 bad=0  seq/shared/chunk bad=0/0/0
+      pages : checked=3840 mismatch=0   per-SM work [2..4]
+      => result: PASS
+  [PAGE_KV=128             ] BQ=4 H=32 nq=320 reqs=40 pkv=128  slots(sched/meta)=640/640  use_token_cost=n
+      meta boundary match=YES (0 mismatch)  total_cost=7680
+      scheduler: tasks=312 slots=640 dup=0 miss=0 bad=0  seq/shared/chunk bad=0/0/0
+      pages : checked=1920 mismatch=0   per-SM work [4..6]
+      => result: PASS
+
+== 用例组 C：头数改变 BLOCK_Q（metadata 仍固定 block_q=4）==
+  [H=64 -> BLOCK_Q=2       ] BQ=2 H=64 nq=288 reqs=48 pkv=64  slots(sched/meta)=432/288  use_token_cost=n
+      meta boundary match=YES (0 mismatch)  total_cost=3168
+      scheduler: tasks=396 slots=432 dup=0 miss=0 bad=0  seq/shared/chunk bad=0/0/0
+      pages : checked=2592 mismatch=0   per-SM work [3..6]
+      => result: PASS
+  [H=128 -> BLOCK_Q=1      ] BQ=1 H=128 nq=288 reqs=48 pkv=64  slots(sched/meta)=864/288  use_token_cost=n
+      meta boundary match=YES (0 mismatch)  total_cost=3168
+      scheduler: tasks=792 slots=864 dup=0 miss=0 bad=0  seq/shared/chunk bad=0/0/0
+      pages : checked=3456 mismatch=0   per-SM work [6..12]
+      => result: PASS
+
+== 用例组 D：少 SM（8），便于观察边界与空 SM ==
+  [skewed 8 SM             ] BQ=4 H=32 nq=70 reqs=6 pkv=64  slots(sched/meta)=238/238  use_token_cost=n
+      meta boundary match=YES (0 mismatch)  total_cost=2854
+      scheduler: tasks=66 slots=238 dup=0 miss=0 bad=0  seq/shared/chunk bad=0/0/0
+      pages : checked=744 mismatch=0   per-SM work [24..33]
+      => result: PASS
+  [few reqs -> empty SM    ] BQ=4 H=32 nq=24 reqs=3 pkv=64  slots(sched/meta)=66/66  use_token_cost=n
+      meta boundary match=YES (0 mismatch)  total_cost=792
+      scheduler: tasks=20 slots=66 dup=0 miss=0 bad=0  seq/shared/chunk bad=0/0/0
+      pages : checked=396 mismatch=0   per-SM work [8..10]
+      => result: PASS
+
+== 用例组 E：代价溢出 -> 回退到 token 代价（只验证 metadata 边界）==
+  [cost overflow -> token  ] BQ=4 H=32 nq=4096 reqs=1 pkv=64  slots(sched/meta)=416000000/416000000  use_token_cost=Y
+      meta boundary match=YES (0 mismatch)  total_cost=1664000000
+      scheduler: tasks=0 slots=0 dup=0 miss=0 bad=0  seq/shared/chunk bad=0/0/0
+      pages : checked=0 mismatch=0   per-SM work [0..0]
+      => result: PASS
+
+ALL PASS
