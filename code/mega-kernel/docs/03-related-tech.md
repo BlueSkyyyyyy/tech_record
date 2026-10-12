@@ -232,6 +232,17 @@ epilogue」结构，上游还要插入 trigger、下游插入 grid-dependency-sy
 > 与 `docs/00` §2.3 的分工：§2.3 只给「PDL 能跑通、生产难套用」的结论；本节补上**三个原语机理、
 > 本机量化（重叠量 = min(tail, prologue)）与判据映射**。
 
+### 2.6 补：事件的「可见性边界」（P32-1）
+
+PDL 的 trigger 是「请求重叠」的信号，但**它不是给 stream/host 的提前放行**。`docs/04` §21（P32-1）
+用 `cudaLaunchAttributeProgrammaticEvent` / `cudaLaunchAttributeLaunchCompletionEvent` 把这条边界
+量了出来：cross-stream `cudaStreamWaitEvent` 观察 ProgrammaticEvent（含 `triggerAtBlockStart`）时，
+放行点仍落在**上游完成**；只有 `LaunchCompletionEvent` 能在**所有 block 开始**（≈0）时放行，而它又
+**不能**被 `cudaGridDependencySynchronize()` 当作 programmatic 依赖。同 stream PDL 里 trigger 的作用
+只是「允许下游 grid 提前被调度」（重叠下游 prologue `min(tail, prologue)`），`gridDependencySynchronize`
+依旧等上游完成。含义：kernel 级**没有**「中间进度早于完成、可被别的执行体看到」的原语，这正是生产
+mega-kernel 与 MPK 必须把协调下沉到**设备内 event counter / 原子 ring barrier** 的原因（`docs/03` §3.3）。
+
 ---
 
 ## 3. persistent kernel vs megakernel 与 in-kernel 调度（P4-3）

@@ -1,0 +1,52 @@
+$ CUDA_VISIBLE_DEVICES=3 /tmp/programmatic_event 30 100000 100000 20000
+== device ==
+NVIDIA H100 80GB HBM3, sm_90, SMs=132, clock=1.980 GHz
+iters=30  pro=100000  tail=100000  step=20000 cycles
+
+=== Section A: 单 block（G=1），event 触发点 vs A 时间轴 ===
+A = prologue(100000 cyc) -> [trigger] -> tail(100000 cyc)，C 在另一 stream 等 evX
+    mode | A_start->C(us) |    A_total(us) |    C-Ahead(us) |      dep
+---------+----------------+----------------+----------------+---------
+     seq |         111.88 |         119.36 |        -111.88 |       30
+    post |         108.38 |         115.93 |           0.00 |       30
+   early |         108.32 |         115.84 |           0.06 |       30
+    none |         108.29 |         115.76 |           0.09 |       30
+  bstart |         108.22 |         115.81 |           0.17 |       30
+     lce |           7.37 |         106.33 |         101.01 |       30
+
+=== Section B: 多 block 错峰（block i 的 prologue 加 i*step）===
+step=10.10 us，tail=50.51 us；若事件在完成点放行，A_start->C ≈ (G-1)*step+pro+tail
+    G | (G-1)*step(us) |      early(us) |     bstart(us) |       post(us) |        lce(us)
+------+------------+----------------+----------------+----------------+----------------
+    1 |       0.00 |         108.22 |         108.15 |         108.22 |           7.46
+    2 |      10.10 |         118.35 |         118.45 |         118.33 |           7.47
+    4 |      30.30 |         138.64 |         138.46 |         138.57 |           7.42
+    8 |      70.71 |         179.01 |         179.02 |         179.03 |           7.37
+   16 |     151.52 |         259.80 |         259.86 |         259.80 |           7.57
+   32 |     313.13 |         421.72 |         421.49 |         421.45 |           7.65
+   64 |     636.36 |         744.84 |         744.71 |         744.76 |           7.54
+  128 |    1282.83 |        1391.22 |        1391.24 |        1391.20 |           7.32
+
+=== Section C: 同 stream PDL，A=pro(100000)->[可选 trigger]->tail(100000)，B=prol(100000)->gridDependencySync->crit(100000)===
+B 用 cudaLaunchAttributeProgrammaticStreamSerialization；看 stream 总耗时：
+  无 trigger  -> B 不能被提前调度，B 整段排在 A 之后
+  有 trigger  -> B 的 prologue 与 A 的 tail 重叠（sync 仍等 A 完成，只重叠 prologue）
+case                                           | stream total(us)
+-----------------------------------------------+--------------
+A 不调 trigger                               |       208.46
+A 调 early trigger（无事件属性）       |       157.63
+A 调 early trigger + ProgrammaticEvent 属性 |       157.64
+期望：无 trigger ≈ pro+tail+prol+crit=202.0；有 trigger ≈ pro+max(tail,prol)+crit=151.5
+结论：trigger 的作用是**允许下游 grid 提前被调度**（省下 min(tail,prol) 的重叠），
+      但下游的 cudaGridDependencySynchronize() 仍等上游**完成**——trigger 不放行 sync；
+      挂不挂 ProgrammaticEvent 事件属性结果相同（设备端口由 trigger 本身提供，事件属性
+      只是把同一端口额外记录到 cudaEvent，供图 PROGRAMMATIC 边使用）。
+
+>> 读法：A_start->C 越小 = 下游越早被放行（cross-stream cudaStreamWaitEvent）。
+>> seq/post ≈ A 整段 = 完成点放行（基线）；
+>> programmatic（early/none/bstart）经 cross-stream wait **也落在完成点**——
+>>   ProgrammaticEvent 的提前 trigger 不放行 stream/host 依赖（见正文，与 CUDA 文档
+>>   '依赖方不保证在 trigger 时刻观察到放行' 一致）；它是 PDL 的『可提前调度』port，
+>>   供设备内 cudaGridDependencySynchronize() 与图 PROGRAMMATIC 边使用（见 Section C）。
+>> 只有 lce（LaunchCompletionEvent）真正提前：所有 block 一启动即放行 ~= 0；
+>> Section B 里 lce 恒 ~0 不随 G 变，而 early/bstart/post 随 (G-1)*step 线性增长。

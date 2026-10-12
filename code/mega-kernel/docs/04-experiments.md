@@ -2916,6 +2916,146 @@ seg 512B/1KB/2KB/4KB → **230.9 / 392.5 / 555.1 / 723.8 GB/s**，与 §18 的�
   带宽；multicast 的墙钟收益在饱和区间被掩盖，要看 ncu 的 L2 计数。
 - **cluster 上限仍 16 block**：3D cluster 可用但总量不变（`(8,8,1)=64` 失败）；故 132 SM 整机仍只能
   切 ~8 个 cluster。DSM 的「变界远端读」代码生成坑（§18.6）在本节同样规避（每线程固定索引读）。
-- **仍未覆盖**：`cudaLaunchAttributeProgrammaticEvent`（PDL 的 cluster 版）与 SM100 专属的
-  `SM100_TMA_2SM_LOAD`（DeepGEMM sm100 路径用的是后者），留作后续；本节只测到 sm90a 的 cluster
-  原语。
+- **仍未覆盖**：SM100 专属的 `SM100_TMA_2SM_LOAD`（DeepGEMM sm100 路径用的是后者），留作后续；
+  本节只测到 sm90a 的 cluster 原语。~~`cudaLaunchAttributeProgrammaticEvent`（PDL 的 cluster 版）~~
+  已由 **P32-1（§21）** 单独覆盖。
+
+## 21. 事件可见性的前移原语：ProgrammaticEvent / LaunchCompletionEvent 能把「进度」提前到哪一点（P32-1）
+
+### 21.1 问题
+
+P4-2 / P5-3 / P12-1 / P19-1 已经把 **PDL（Programmatic Dependent Launch）** 测透：下游 grid 靠
+`cudaGridDependencySynchronize()` 与上游 tail 重叠，重叠量 = `min(tail, prologue)`。但有一个
+kernel 级原语一直没覆盖（§20.6 明留的尾巴）：CUDA 还提供**两种把「一个 cudaEvent 的触发点前移」的
+launch attribute**——
+
+- `cudaLaunchAttributeProgrammaticEvent`（`driver_types.h:3999`，值 7）：事件在**所有 block 都调用过
+  `cudaTriggerProgrammaticLaunchCompletion()`（PTX `griddepcontrol.launch_dependents`）**后触发；
+  也可用 `triggerAtBlockStart=1`（`driver_types.h:4182`）让每个 block 在**启动时**自动触发。
+- `cudaLaunchAttributeLaunchCompletionEvent`（`driver_types.h:4067`，值 12）：在所有 block
+  **开始**执行时触发（best effort）。
+
+这对 megakernel 是核心问题：**「中间进度」能不能被别的执行体更早看到？** MPK 用 in-kernel event
+counter + 设备内原子 ring buffer 把依赖粒度压到 **task**（`docs/06` §3、`docs/03` §3.3），是不满足
+C1–C5 的 kernel 级原语做不到的。本节把 kernel 级能做到的程度量化出来：事件可见性到底停在
+**完成点**、**block 启动点**，还是**中间某点**。
+
+### 21.2 方法
+
+程序 `src/programmatic_event.cu`，脚本 `harness/programmatic_event.sh`，原始输出
+`harness/programmatic_event.out.txt`（目标卡 H100 / sm90，SMs=132，**固定空闲 device 3**，
+nvcc 13.2，`iters=30`，`pro=tail=100000` SM cycles，`step=20000`）。三个 Section：
+
+- **Section A（单 block，事件触发点在时间轴上的位置）**：A 一个 kernel =
+  `[prologue 自旋 pro]` → `[可选 trigger]` → `[tail 自旋 tail]`；C 一个极短消费 kernel 放在**另一条
+  stream**，靠 `cudaStreamWaitEvent(C, evX)` 等某个事件。用两个**计时事件** `evA0`（A 之前 record）与
+  `evC1`（C 之后 record）测「A 启动 → C 被放行开始」的 GPU 时间轴间隔 = **放行信号的时间位置**。六档：
+  `seq`（同 stream 直接排 C）/ `post`（普通 `cudaEventRecord`，完成点）/ `early`（ProgrammaticEvent +
+  在 prologue 后调 trigger）/ `none`（ProgrammaticEvent 不调 trigger）/ `bstart`（ProgrammaticEvent +
+  `triggerAtBlockStart=1`）/ `lce`（LaunchCompletionEvent）。
+- **Section B（多 block 错峰，G 扫描）**：block i 的 prologue 加 `i*step`，看 cross-stream 放行点随
+  G 怎么变。若事件在完成点放行，`A_start→C ≈ (G-1)*step + pro + tail`。
+- **Section C（同 stream PDL，trigger 到底放行了什么）**：A 后紧跟 B（B 用
+  `cudaLaunchAttributeProgrammaticStreamSerialization`，结构 `prol → cudaGridDependencySynchronize →
+  crit`），看 stream 总耗时随「A 是否调 trigger / 是否挂 ProgrammaticEvent 属性」怎么变。
+
+programmatic / LCE 事件必须 `cudaEventDisableTiming`（`cuda.h` 明确要求），故用**计时事件 evA0/evC1
+夹住**来给 GPU 时间轴定位，而不是给事件本身计时。
+
+### 21.3 结果
+
+**A. 单 block：只有 LaunchCompletionEvent 真正前移了 cross-stream 放行点**
+
+```text
+    mode | A_start->C(us) |    A_total(us) | C-Ahead(us) |  dep
+---------+----------------+----------------+-------------+------
+     seq |         112.76 |         120.95 |     -112.76 |   30
+    post |         108.26 |         116.51 |        0.00 |   30
+   early |         108.21 |         116.45 |        0.05 |   30
+    none |         108.15 |         116.36 |        0.11 |   30
+  bstart |         108.21 |         116.39 |        0.05 |   30
+     lce |           7.77 |         106.43 |      100.49 |   30
+```
+
+`post`/`early`/`none`/`bstart` 四档的 `A_start→C` **都在 ~108 µs ≈ A 整段（116 µs）**——即
+**ProgrammaticEvent 的提前 trigger（包括 `triggerAtBlockStart`）并不放行 cross-stream 的
+`cudaStreamWaitEvent`/host 依赖**。只有 `lce` 落到 **7.77 µs**：所有 block 一启动就放行，下游 C 立即
+开始（差的 ~100 µs 就是 A 的 prologue+tail）。这与 CUDA 文档一致——`cuda.h:2227` 明说
+ProgrammaticEvent 的依赖方（**含调用 `cuEventSynchronize()` 的 host 线程**）「不保证在 release 时刻
+观察到放行，可能直到 kernel 完成后才观察到」；`driver_types.h:4082` 又补一句 LCE「名义上类似
+`triggerAtBlockStart` 的 programmatic event，**只是对 `cudaGridDependencySynchronize()` 不可见**」。
+
+**B. 多 block 错峰：lce 的放行点恒定，其余随 (G-1)*step 线性**
+
+```text
+    G | (G-1)*step(us) |  early(us) | bstart(us) |  post(us) |  lce(us)
+------+----------------+------------+------------+-----------+---------
+    1 |           0.00 |     108.18 |     108.18 |    108.34 |     7.50
+    4 |          30.30 |     138.48 |     138.43 |    138.42 |     7.78
+   16 |         151.52 |     259.73 |     260.06 |    259.75 |     7.76
+   64 |         636.36 |     744.73 |     744.62 |    744.59 |     7.70
+  128 |        1282.83 |    1391.19 |    1391.02 |   1391.09 |     7.64
+```
+
+`early`/`bstart`/`post` 三条线**完全重合**、随 `(G-1)*step` 线性增长（= 完成点放行）；`lce` 恒定
+~7.5 µs、与 G 无关——**cross-stream 下唯一真正「全 block 开始即放行」的信号是 LCE**。
+（这也顺带说明：无法用 cross-stream wait 去验证 ProgrammaticEvent 的「等所有 block 触发」语义，
+因为那个 port 根本不向 stream/host 放行。）
+
+**C. 同 stream PDL：trigger 的作用是「允许下游 grid 提前被调度」，不放行 `gridDependencySynchronize`**
+
+```text
+case                                           | stream total(us)
+-----------------------------------------------+-----------------
+A 不调 trigger                                  |           208.51
+A 调 early trigger（无事件属性）                 |           157.72
+A 调 early trigger + ProgrammaticEvent 属性      |           157.74
+期望：无 trigger ≈ pro+tail+prol+crit = 202.0；有 trigger ≈ pro+max(tail,prol)+crit = 151.5
+```
+
+有 trigger 时 stream 总耗时 ≈ `pro + max(tail, prol) + crit`——**下游 B 的 prologue 与上游 A 的 tail
+重叠**了 `min(tail, prol)`；无 trigger 时 ≈ `pro+tail+prol+crit`，B 整段排在 A 之后。两类 case 里 B 的
+`cudaGridDependencySynchronize()` **都是等 A 完成才返回**（把 B 的 prologue 置 0、crit 拉长即回到
+§21 的 `A_start→C ≈ A_total`）。**挂不挂 ProgrammaticEvent 事件属性结果相同**（157.72 vs 157.74）——
+设备端口由 `cudaTriggerProgrammaticLaunchCompletion()` 本身提供，事件属性只是把同一个端口额外
+**记录**到一个 `cudaEvent`，供 CUDA Graph 的 `PROGRAMMATIC` 边使用（`cuda.h:2047/2060`
+`CU_GRAPH_KERNEL_NODE_PORT_PROGRAMMATIC`）。
+
+### 21.4 讨论：三类事件的「可见性受众」
+
+| 事件形态 | 触发点 | stream/host 可见的放行点 | 设备内 programmatic port |
+|---|---|---|---|
+| 普通 `cudaEventRecord` | 上游完成 | **完成** | 无 |
+| `ProgrammaticEvent`（trigger / `triggerAtBlockStart`） | 运行中 / block 启动 | **完成**（文档：不保证在 release 时刻观察到） | 有，供 PDL「允许提前调度」+ 图 PROGRAMMATIC 边 |
+| `LaunchCompletionEvent` | 所有 block 开始 | **block 启动（≈0）** | 无（文档：对 `cudaGridDependencySynchronize()` 不可见） |
+
+换句话说，kernel 级原语里**没有**「中间进度可被 stream/host 看到、且早于完成」的通用信号：
+- 想要「下游尽早启动（做自己的 prologue）」，用 **PDL / ProgrammaticEvent port**，但同步点仍是完成；
+- 想要「下游尽早知道上游已开始」，用 **LCE**，但它只表达「started」，不能当数据依赖；
+- 想要「上游写到第 i 个 tile 就放行第 i 个 task」，kernel 级原语**做不到**——只能把执行体放进**同一个
+  常驻 kernel**、用**设备内 event counter / 原子 ring buffer** 表达（MPK `docs/06` §3；本专题
+  P15-1 §9 的 decen 骨架）。
+
+这正好解释了生产案例的设计：DeepGEMM mega 家族用「**warmup wave + `ScoreBarrier`（异步原子 + grid
+标签）/ ring barrier**」在单 kernel 内做**比完成更细**的协调（`docs/02` §1.5/§1.2），而不是指望
+kernel 级事件——因为本节的 A/B 表明那样的粒度根本不存在。
+
+**判据（C1–C5，`docs/00` §3）**：本节六档全部是 kernel-per-operator 的降级项，**均不满足 C1–C5**
+（仍需 host 逐个 launch、kernel 仍会结束）。`lce` 是唯一能「提前启动下游」的 kernel 级信号，比普通
+event record 多一类用途，但推进单位仍是 kernel。
+
+### 21.5 局限与踩到的坑
+
+- **口径 necessity**：programmatic/LCE 事件禁用计时，故本节的「放行点」是**用一对计时事件夹住下游
+  kernel 的起点**间接测出的（下游开始 = 放行 + 下游自身启动延迟），不是事件本身的硬件时间戳。
+  Section A 的绝对差（0 vs 100 µs）远大于该延迟，结论不受影响。
+- **Section C 只证到「允许提前调度」**：本机实测始终是 `gridDependencySynchronize()` 等**上游完成**，
+  未构造出「sync 在 trigger 时刻返回」的用例——这与 CUDA 头文件对 `cudaGridDependencySynchronize`
+  的描述（「block until all direct grid dependencies have completed」）一致，也解释了 P5-3 的
+  `min(tail, prologue)`（重叠的只能是**下游 prologue**）。
+- **未测 CUDA Graph 的 `PROGRAMMATIC` 边**：cross-stream 的 programmatic 依赖在 **stream** 上不
+  提前放行，但 CUDA Graph 用 `CU_GRAPH_KERNEL_NODE_PORT_PROGRAMMATIC` 边是可以表达的
+  （`cuda.h:2055–2065`）——本节只在 stream 上测，图版本留后续。
+- **观察者与 G 上限**：Section B 的 G 最大 128 ≤ 132 SM，全部 block 同时常驻，`stagger` 语义干净；
+  未测 G≫SM（此时 block 排队，`(G-1)*step` 模型需重算）。
+- **正确性哨兵**：三 Section 的消费 kernel 均 `dep==iters`（全部被真正执行），无漏放行/重复。

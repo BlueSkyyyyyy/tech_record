@@ -677,6 +677,33 @@
   首版沿用 1D 公式给 C=16 的假 `maxerr=40000`。判据不变（C1–C3，`cluster.sync`/multicast 细化 C4，
   仍非 C5）。**本轮新增实验**；与 P29-1（§18）/P30-1（§19）合成「跨 SM 搬运」的多维形态。
 
+### P32 实验扩展 19：事件可见性的前移原语（`docs/04-experiments.md` §21）
+
+- [x] **P32-1** 补齐 `docs/04` §20.6 明留的「`cudaLaunchAttributeProgrammaticEvent` 未覆盖」尾巴，
+  把 kernel 级「进度/事件」原语能前移到哪一点量出来（直接回答 megakernel「中间进度能否被别的执行体
+  更早看到」）。见 `docs/04-experiments.md` §21，源码 `src/programmatic_event.cu`、脚本
+  `harness/programmatic_event.sh`、原始输出 `harness/programmatic_event.out.txt`（目标卡 H100/sm90、
+  **固定空闲 device 3**、nvcc 13.2、`iters=30`、`pro=tail=100000` cyc、`step=20000`）。三 Section：
+  - **A（单 block，事件触发点 vs A 时间轴）**：用一对计时事件夹住 cross-stream 消费 kernel 的起点。
+    `post`/`early`/`none`/`bstart` **全 ≈ A 整段（108 vs 116 µs）= 完成点放行**，只有 `lce`
+    （`LaunchCompletionEvent`）落到 **7.77 µs**（全 block 启动即放行）。即 **ProgrammaticEvent 的
+    提前 trigger（含 `triggerAtBlockStart`）不放行 stream/host 依赖**，与 `cuda.h:2227` 的
+    「依赖方（含 host）不保证在 release 时刻观察到」一致；`driver_types.h:4082` 又补 LCE「名义上类似
+    `triggerAtBlockStart` 的 programmatic event，只是对 `cudaGridDependencySynchronize()` 不可见」。
+  - **B（多 block 错峰扫 G）**：`early`/`bstart`/`post` **完全重合**、随 `(G-1)*step` 线性（G=128 →
+    1391 µs），`lce` 恒定 ~7.5 µs——cross-stream 下唯一真正「全 block 开始即放行」的是 LCE。
+  - **C（同 stream PDL，trigger 到底放行了什么）**：无 trigger 208.5 µs / 有 trigger 157.7 µs ≈
+    `pro+max(tail,prol)+crit`——**trigger 只允许下游 prologue 与上游 tail 重叠**，B 的
+    `cudaGridDependencySynchronize()` 仍等 A **完成**；**挂不挂 ProgrammaticEvent 属性结果相同**
+    （157.72 vs 157.74），设备端口由 trigger 本身给，事件属性只是把端口记录到 cudaEvent 供图
+    `PROGRAMMATIC` 边（`cuda.h:2047/2060`）用。
+  含义：kernel 级**没有**「中间进度早于完成、可被别的执行体看到」的通用信号——「下游尽早启动」要靠
+  PDL port、同步点仍是完成；「下游知道上游已开始」靠 LCE、但它不能当数据依赖；「第 i 个 tile 放行第 i
+  个 task」只能把执行体放进**同一常驻 kernel** 用设备内 event counter/原子 ring barrier（MPK
+  `docs/06` §3、本专题 P15-1 §9；DeepGEMM 的 warmup wave/`ScoreBarrier` 即此，`docs/02` §1.5/§1.2）。
+  判据：六档全为 kernel-per-operator 降级项，**均不满足 C1–C5**。同步在 `docs/03` §2.6 交叉引用。
+  **本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -699,7 +726,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P31-1 完成（1/1）**。补齐 `docs/04` §18.6 / §19.6 两条都留的「**未测 2D/3D cluster**」
+- 当前进度：**P32-1 完成（1/1）**。补齐 `docs/04` §20.6 明留的「`cudaLaunchAttributeProgrammaticEvent`
+  未覆盖」尾巴，把 kernel 级「进度/事件」原语能前移到哪一点量出来——`docs/04-experiments.md` 新增
+  **§21**，源码 `src/programmatic_event.cu`、脚本 `harness/programmatic_event.sh`、原始输出
+  `harness/programmatic_event.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、
+  `iters=30`、`pro=tail=100000` cyc、`step=20000`）。核心结论（三 Section）：
+  - **A** 单 block：`post`/`early`/`none`/`bstart` 全 ≈ A 整段（108 vs 116 µs）= **完成点放行**，
+    只有 `lce`（`LaunchCompletionEvent`）落到 **7.77 µs**（全 block 启动即放行）→ **ProgrammaticEvent
+    的提前 trigger（含 `triggerAtBlockStart`）不放行 stream/host 依赖**（对上 `cuda.h:2227`；
+    `driver_types.h:4082` 说 LCE 只是对 `cudaGridDependencySynchronize()` 不可见）。
+  - **B** 多 block 错峰：`early`/`bstart`/`post` 完全重合、随 `(G-1)*step` 线性（G=128→1391 µs），
+    `lce` 恒定 ~7.5 µs。
+  - **C** 同 stream PDL：无 trigger 208.5 / 有 trigger 157.7 µs ≈ `pro+max(tail,prol)+crit`——**trigger
+    只允许下游 prologue 与上游 tail 重叠**，`gridDependencySynchronize()` 仍等上游完成；挂不挂
+    ProgrammaticEvent 属性结果相同（157.72 vs 157.74），端口由 trigger 本身给、事件属性只为图
+    PROGRAMMATIC 边记录（`cuda.h:2047/2060`）。
+  含义：kernel 级**没有**「中间进度早于完成、可被别的执行体看到」的通用信号，这正是 MPK/DeepGEMM 把
+  协调下沉到设备内 event counter/原子 ring barrier 的原因。同步 `docs/03` §2.6 交叉引用。**本轮新增实验。**
+  此前 **P31-1 完成（1/1）**。补齐 `docs/04` §18.6 / §19.6 两条都留的「**未测 2D/3D cluster**」
   尾巴，把 P29-1（§18 DSM）/ P30-1（§19 TMA multicast）从 1D 推广到**多维**，并补上 §19 未测的
   **multicast 子集掩码**——`docs/04-experiments.md` 新增 **§20**，源码 `src/cluster_2d.cu`、脚本
   `harness/cluster_2d.sh`、原始输出 `harness/cluster_2d.out.txt`（目标卡 H100/sm90a、**固定空闲
