@@ -142,7 +142,21 @@
 
 ### P5 相关 mega-kernel（`docs/05-mega-gate-mhc.md`）
 
-- [ ] **P5-1** Mega Gate（`mega_gate.hpp` / `sm100_bf16_mega_gate.cuh`）：做什么融合、怎么实现。
+- [x] **P5-1** Mega Gate（`mega_gate.hpp` / `sm100_bf16_mega_gate.cuh`）：做什么融合、怎么实现。
+      → `docs/05-mega-gate-mhc.md`（真实行号核对）：把「BF16 打分 GEMM + softplus/sqrt + bias 排名 +
+      top-k + logical→physical 映射」压进单 kernel。**三个非平凡点**：① UMMA 累加器写 TMEM、
+      gate warp 用 `tmem_load_32dp32b` 读回（`epilogue:39-78`、`impls:279-303`），split-K 时先落
+      global score scratch 再用 `ScoreBarrier` 跨 CTA 汇聚（`scheduler:13-39`）；② **带 bias 排名、
+      不带 bias 出权重**（`impls:379-399` + `epilogue:187-216`）；③ **warp 内排序网络 + 3-bit 游标
+      归并**的确定性 top-k（`epilogue:88-152`，破平取最小专家号，`redux.sync.max`+`__reduce_min_sync`）。
+      任务分解 `num_logical_ctas=expert_groups*cta*splitk`（`heuristics:21,106-187`）；`sqrt_softplus`
+      阈值 20 分支（`epilogue:19-23`）；重复专家分散 `(rank+t*23333)%d`（`epilogue:205`）；shared-as-routed、
+      mask/fix_routing/force_random/image_bias。**SM100 专属，仅分析**（`mega_gate.hpp:158-159`）。
+      H100 实测 `src/mega_gate_routing.cu` + `harness/exp_mega_gate_routing.{sh,out.txt}`：把架构无关
+      路由语义逐行移植——`sqrt_softplus` vs double relerr 1.4e-7、阈值分支连续；5 个案例
+      （含重平局/3-wave/4-wave padded）共 ~7 万条 top-k **0 不符**、权重 relerr ≤1.5e-7；
+      重复专家分散 d∈{1,2,4,32} 下 **max/min=1.0000** 完全均衡。配套博客
+      `content/posts/mega-moe-13-mega-gate`。
 - [ ] **P5-2** Mega mHC（`mega_mhc.hpp` / `sm100_mega_mhc.cuh`）：HyperConnection 相关。
 
 ### P6 汇总
@@ -173,21 +187,33 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0/P1/P2/P3 全部完成；P4 反向全部完成（P4-1~P4-4）。**
+- 当前进度：**P0/P1/P2/P3/P4 全部完成；P5-1 完成（Mega Gate）。**
+  P5-1：新建 `docs/05-mega-gate-mhc.md`——Mega Gate（`mega_gate.hpp` / `sm100_bf16_mega_gate.cuh`）
+  源码精读 + H100 语义对拍。**融合链路**：BF16 打分 GEMM（UMMA，A=weight/B=x，累加器写 TMEM，
+  `impls:213-226`）→ gate warp `tmem_load_32dp32b` 读出（`epilogue:39-78`）→ split-K 时经 global
+  score scratch + `ScoreBarrier` 跨 CTA 汇聚（`scheduler:13-39`）→ 每 token 排名。**三个非平凡点**：
+  ① TMEM 打分直读（省 `[T,E]` global 往返）；② 排名用 `score+bias`、权重用 `score` 再归一化
+  （`impls:379-399`/`epilogue:187-216`，bias 只做负载均衡）；③ warp 内 **sort4 排序网络 + 3-bit 游标
+  归并**的确定性 top-k（破平=最小专家号，`epilogue:88-152`）。任务分解
+  `num_logical_ctas=expert_groups*cta*splitk` 且必须同驻留（`heuristics:21,134`）；`sqrt_softplus`
+  阈值 20（`epilogue:19-23`）；重复专家 `(rank+t*23333)%d`（`epilogue:205`）；shared-as-routed、
+  mask/fix_routing/force_random/image_bias 四开关。**SM100 专属，仅分析**（`mega_gate.hpp:158-159`）。
+  H100 实测 `src/mega_gate_routing.cu`（+`harness/exp_mega_gate_routing.{sh,out.txt}`）：架构无关路由
+  语义逐行移植——`sqrt_softplus` vs double relerr 1.4e-7、阈值分支连续；5 案例（含重平局、3-wave、
+  4-wave padded）**~7 万条 top-k 全 0 不符**、权重 relerr ≤1.5e-7；重复专家分散 **max/min=1.0000**。
+  配套博客 `content/posts/mega-moe-13-mega-gate`。
   P4-4：新建 `docs/14-moe-backward-kernels.md`——把 H100 可跑的 SM90 grouped GEMM **接进真实 MoE 的
   完整反向图**并与 PyTorch autograd 对拍。**四个大 GEMM**：`dW2=A^T dY`、`dW1=x^T dG` 走
   `k_grouped_*_nt_contiguous`（不等长在 K=token）；`dA=dY W2^T`、`dX=dG W1^T` 走
   `m_grouped_*_nt_contiguous`（不等长在 M=token）；其余（combine/SwiGLU/router 反向）保持 torch。
-  **gather**：按 `sel` 取各专家 token 行，wgrad 沿 K 拼接（per-channel cast、补齐 128、组内
-  `.T.flatten()` 成 1D data + SF 转置）、dgrad 沿 M 拼接（per-token A + per-block B、gap 行 0、
-  `grouped_layout` 长度=m）。**两层对拍**（区分量化噪声 vs kernel bug）：`vs deq` 用喂进 kernel 的
-  FP8 反量化后 fp32 重算，四项 relerr **~2.6e-4**（仅 bf16 输出舍入）证明 kernel+布局正确；
-  `vs autograd` 含 per-128 FP8 量化，2.46e-2~5.08e-2、**cos 全部 >0.999**。端到端
-  `dW2/dW1/dx_ffn`（+torch router）对 autograd relerr 3.5e-2~5.1e-2。**吞吐**（单 rank
-  T=2048,H=7168,I=2048,E=8,topk=2，仅 kernel 本体）：wgrad ~103/106 TFLOPS（K=token 偏小、
-  算术强度低=瓶颈）、dgrad ~449/543 TFLOPS（K 是隐藏维）。**结论**：反向无 mega-kernel——通信规模小、
-  可分解为独立 grouped GEMM、wgrad 留守专家本地 rank。配套博客 `content/posts/mega-moe-12-backward-kernels`。
-  （P0/P1/P2/P3 进展见下）
+  **两层对拍**：`vs deq` 四项 relerr **~2.6e-4**（仅 bf16 输出舍入）证明 kernel+布局正确；
+  `vs autograd` 含 per-128 FP8 量化，2.46e-2~5.08e-2、**cos 全部 >0.999**。**吞吐**（单 rank
+  T=2048,H=7168,I=2048,E=8,topk=2）：wgrad ~103/106 TFLOPS（K=token 偏小）、dgrad ~449/543 TFLOPS。
+  配套博客 `content/posts/mega-moe-12-backward-kernels`。**结论**：反向无 mega-kernel——通信规模小、
+  可分解为独立 grouped GEMM、wgrad 留守专家本地 rank。
+- **下一步：P5-2（Mega mHC，`mega_mhc.hpp` / `sm100_mega_mhc.cuh`）**，完成后补入
+  `docs/05-mega-gate-mhc.md` 并写 P6-1 汇总 `docs/06-summary.md`。
+  （P4 进展见下）
   P4-3：新建 `docs/13-moe-backward-dgrad.md`——dgrad 的 M 轴分组 API 精读。**全景**：dgrad
   （`dA=dY·W2^T`、`dX=dG·W1^T`）不等长在 **M（token）轴**、N/K 固定，故复用前向的 `m_grouped` 族；
   A（激活）必须 K-major、D 固定 BF16（`gemm.hpp:197/209`）。**两入口**：
@@ -313,9 +339,6 @@
   （`smxx_layout.hpp:133`、kernel `:774`/`:788`）；L2 权重不交错只转 SF。实验
   `harness/exp_weight_transform.py`（+`.out.txt`，H100）：行号映射/SwiGLU 等价/UTCCP 映射全部 0 误差，
   与 deep_gemm 内部实现逐元素一致。**P2 全部完成。**
-- **下一步：P4 反向全部完成 → 转入 P5 相关 mega-kernel**：P5-1（Mega Gate，
-  `mega_gate.hpp` / `sm100_bf16_mega_gate.cuh`：做什么融合、怎么实现）与 P5-2（Mega mHC，
-  `mega_mhc.hpp` / `sm100_mega_mhc.cuh`）。随后 P6-1 汇总。
 
 ## 阻塞
 
