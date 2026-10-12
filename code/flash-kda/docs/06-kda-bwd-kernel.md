@@ -701,6 +701,93 @@ K1，按 `fwd_launch.cu:64-71` 的 SoA 偏移读出 `kGTotal` 字段（head-majo
 反向 $\bar g_{\text{logits}}/\bar A/\bar{\text{bias}}$）、$\log_2 e$ 的位置、FLA 的 bf16 出口陷阱、
 以及「B0 与 K1 当场算的门控一致到 approx 底噪」**钉死，供目标卡 CUDA B0 对拍。
 
+### 6.9 P6-7：补齐 `dAv` 并做「端到端组装」`dAv→B1→B2→B3` 对拍 FLA autograd
+
+§6.2–§6.8 把 B0/B1/B2/B3 四段各自做成了最小 kernel，但它们都是**逐段孤立**验证的：每段吃的
+中间量由 FLA 直接喂（例如 B2 的 `dh` 用 FLA 的 `dhu` 输出），**从没验证过「一段的输出接下一段的输入」
+这条链**；而且反向 5 个 kernel 里还差一个 **B-dAv（输出支路）** 没落地（`chunk_kda_bwd_kernel_dAv`，
+`chunk_bwd.py:44-114`，式 (7.2) 的 $\bar M_{qk}=\bar o\,U^\top$、$\bar U=M_{qk}^\top\bar o$）。
+本节补上这两块：新增 `harness/check_bwd_e2e.py`（`harness/check_bwd_e2e.out.txt`）。
+
+#### 6.9.1 `dAv` 最小 kernel 与契约（Part A）
+
+`_dav_kernel`（grid `(NT, B·HV)`，非 varlen）逐式复刻 FLA：
+
+- 载入 $M_{qk}$（FLA `Aqk`）：A 的布局是 `[B,T,HV,BT]`、末轴为 chunk-局部 key 下标，
+  在 $[o_A,o_t]$ 朝向里保 `o_t[:,None] <= o_t[None,:]`（上三角含对角，`chunk_bwd.py:83-90`）；
+- $\bar M_{qk}\mathrel{+}=\bar o\,v_{\text{new}}^\top$（`b_v` 以 $v^\top$ 载入 `[BV,BT]`，
+  `tl.dot(b_do[BT,BV], b_v[BV,BT])`），最后按 `o_t[:,None] >= o_t[None,:]` 保下三角含对角、乘 `scale`；
+- $\bar U=M_{qk}\,\bar o$（`tl.dot(b_A, b_do)`）落盘为 `dv`。
+
+**实测（Part A）**：4 组配置（T=256/512/1024/250）下 `dAqk`、`dv` 与本 kernel 输出 **`max_abs=0`、
+`max_rel=0`（逐位相同）**——包括非整除 T=250。这与 §6.6/§6.7 里 B2/B3 的「Triton↔FLA 逐位」同一性质：
+两者算术路径完全一致。
+
+#### 6.9.2 端到端链条（Part B）
+
+输入构造沿用 `check_bwd_fla`（P5-3）的约定：`use_qk_l2norm_in_kernel/use_gate_in_kernel/
+use_beta_sigmoid_in_kernel` 全 `False`，两侧吃**同一份 fp32 操作数**（归一化后 q/k、`sigmoid(beta)`、
+自然对数衰减 `g_fla = g_dec·ln2`），损失 $L=\langle o,\bar o\rangle+\langle S_T,\bar S_T\rangle$，
+**因此 `dht=S_T` 的上游梯度非零**。链条为
+
+```
+dAv → B1(dhu) → B2(wy_dqkg) → B3(intra) → 反向 chunk-local cumsum(B0)
+```
+
+与 `chunk_kda_bwd`（`chunk_bwd.py:434-615`）逐段同构。注意 B2 的 `dv` 输入 = B1 的 `dv2`、
+B2 的 `dA`（即 `dAkk`）与 dAv 的 `dA`（即 `dAqk`）一起喂 B3，B3 的 `dq/dk/db/dg` 是**叠加**在
+B2 之上（本实现分别跑后相加，与 kernel 内 `tl.load(p_dq)+...` / `atomic_add` 等价）。
+
+**实测（Part B，链 vs `torch.autograd` 穿 `chunk_kda`，max_rel）**：
+
+| config | dq | dk | dv | dg | dbeta | dh0 |
+|---|---|---|---|---|---|---|
+| B1 T256 H2 | **0** | 1.01e-5 | 1.19e-4 | 3.51e-6 | 3.07e-5 | 5.06e-6 |
+| B2 T512 H4 | **0** | 1.51e-5 | 3.90e-4 | 1.10e-5 | 5.67e-5 | 1.84e-6 |
+| B1 T1024 H8 | **0** | 8.12e-6 | 1.87e-4 | 1.64e-6 | 1.09e-4 | 7.58e-7 |
+| B1 T250 H3（非整除） | **0** | 1.42e-5 | 2.72e-4 | 4.11e-6 | 6.38e-5 | 2.19e-6 |
+| **worst** | **0** | 1.51e-5 | 3.90e-4 | 1.10e-5 | 1.09e-4 | 5.06e-6 |
+
+六项全部落在 **tf32 底噪（`tl.dot`）** 之内；`dq` 逐位相同（其两条支路都不经过 B1 的 `dh`）。
+这就是把 §5.2 的四段**组装起来**后，对「真实前向中间量 + 真实上游梯度」的端到端核对。
+
+#### 6.9.3 两条佐证：setup 校验 + swap 隔离（Part C/D）
+
+要把「链的残差」与「我们的 kernel 与 FLA 不一致」分开，脚本又加了两条对照：
+
+- **Part C**：把 FLA 自己的子 kernel 按 `chunk_kda_bwd` 的顺序手动串起来，与 autograd 对拍——
+  `dq/dk/dv/dg/db/dh0` **全部 `max_abs=0`（逐位相同）**。这证明「golden 就是 FLA 的分解」，
+  Part B 的 $10^{-5}$ 残差不是 setup 偏差。
+- **Part D（swap）**：把 FLA 的 B1 输出（`dh/dv2`）FLA 的 dAv 输出（`dAqk`）、FLA 的 `dAkk` 喂给
+  **我们的** B2/B3，再与 FLA 的 `wy_dqkg+intra` 比——`dk` 与反向 cumsum 后的 `dg` 落到
+  **8.4e-8~1.2e-7**（数据集 4 组均 $<1.3\times10^{-7}$）。这说明 **B2/B3 在给定相同输入时与 FLA
+  代数完全一致**；Part B 的残差来自我们独立的 B1（tf32 累加序）经由衰减链放大，而非 kernel 语义差异。
+  （例如 T=512 时 B1 的 `dh` 相对误差 9.9e-6，`dv2` 8.3e-5，落进 B2 的 `exp2` 衰减链后成为
+  `dk` 1.5e-5、`dg` 1.1e-5。）
+
+#### 6.9.4 两个必须记住的坑（都是这次组装抓出来的）
+
+1. **B2 要吃的是 `v_new`（`fwd_h` 输出），不是 `u`（`fwd_intra` 输出）**。FLA 前向同时存了
+   `u` 与 `v_new`（`chunk.py` 的 `save_for_backward`），`chunk_kda_bwd` 传给 `wy_dqkg`/`dAv` 的是
+   **`v_new`**（`= u - w\,S$ 求解后的 $v$）。第一版误用 `u`，指纹是**「`dq` 逐位相同、`dk`/`dg`
+   大面积错（max_rel≈1e-2，且随 T 增大）」**——因为 `dq=do\,S^\top` 不碰 `v_new`，而
+   `dk=v_{\text{new}}\,dh^\top`、`dg` 依赖 `dk`。修正后四项全落到 tf32 底噪。
+2. **B0 反向前缀和不要额外乘 $\ln 2$**。FLA 的 `chunk_local_cumsum(..., scale=None)` **默认
+   `scale=RCP_LN2`**，故其 `reverse=True` 已把「对 log2 的 `g_cum` 的梯度」直接映回「对自然对数
+   `g` 输入的梯度」= `ga.grad`。第一版照搬 P5-3 的 `*LN2`（那里是为了换算到 fp64 参考的 log2 门控
+   单位）而**多乘了一次**，指纹是「`dg` 与其余五项差一个**均匀常数因子**」（线性拟合
+   `gold/ours≈1.44=RCP_LN2`，`max_rel` 稳停 0.44）。这与 §6.8 的「$\log_2 e$ 必须落在反向前缀和上」
+   是同一件事的两面：先确认**基准的 `g` 单位**，再决定是否补因子。
+
+#### 6.9.5 小结
+
+P6-7 把 §5.2 的四段 GEMM（dAv/B1/B2/B3）+ B0 尾接成**一条完整反向**，用 `torch.autograd` 穿
+`chunk_kda` 做端到端核对：六项梯度全部落 tf32 底噪（`dq` 逐位），并用 Part C（FLA 自分解==autograd）
+与 Part D（swap 后 B2/B3==FLA 到 1e-7）把残差来源钉死到「B1 独立 tf32 舍入」。至此反向五段
+**不再只是各自最小可跑，而是能组装出一条与 FLA 数值一致的完整链**——这是目标卡 CUDA 反向
+（§5.2）在落地前的最后一道组合正确性关卡。B1 也顺带补上了 `dht`（终态上游梯度）入口
+（`check_bwd_dhu_kernel.py::_dhu_kernel` 的 `HAS_DHT` 分支），使其覆盖带 `final_state` 上游的损失。
+
 ## 7. 小结与下一步
 
 - FLA `chunk_kda` 反向的 5 个 Triton kernel 与 `05` §7 的分块反向**逐式对应**：`dAv`=输出支路、
@@ -732,10 +819,19 @@ K1，按 `fwd_launch.cu:64-71` 的 SoA 偏移读出 `kGTotal` 字段（head-majo
   K1 当场算的 workspace `kGTotal`（$E^{\text{tot}}$）max_rel 1.6e-5~8.1e-5**（差 = K1 的
   `tanh.approx` sigmoid）。两个坑：**$\log_2 e$ 必须乘在反向前缀和上**（漏掉则误差稳停 0.3069=1−ln2）、
   **FLA `kda_gate_bwd` 输出随输入 dtype 是 bf16**（故 B0 vs FLA 表面 3e-3 其实是 bf16 出口）。
+- §6.9（P6-7）补齐反向 5 个 kernel 里最后没落地的 **`dAv`（输出支路）**，并把 dAv→B1→B2→B3→B0
+  **组装成一条完整反向**对拍 `torch.autograd`：`dAv` 与 FLA **逐位相同**；端到端六项梯度全部落
+  **tf32 底噪（`dq` 逐位、`dk≤1.5e-5`、`dv≤3.9e-4`、`dg≤1.1e-5`、`dbeta≤1.1e-4`、`dh0≤5.1e-6`，
+  含非整除 T）**；再用「FLA 自分解==autograd（逐位）」与「swap 后我们的 B2/B3==FLA 到 1e-7」两条对照
+  把残差来源钉死到「B1 独立 tf32 舍入经衰减链放大」。两个组装才暴露的坑：**B2 吃 `v_new` 而非 `u`**
+  （指纹=dq 逐位、dk/dg 随 T 大面积错）、**反向 cumsum 不要额外乘 ln2**（FLA `chunk_local_cumsum`
+  默认 `scale=RCP_LN2`；指纹=dg 差一个均匀 1.44 因子）。B1 也补了 `dht` 入口。
 
 下一步：
 
 - P7：FlashKDA 前向 CUPTI 计时与 `ncu` 剖析。**P6 的 B1 状态伴随 / B2 `wy_dqkg` / B3 `intra`
-  三条 GEMM 支路与 B0 门控重算均已做成最小可运行 Triton kernel 并与 FLA 位级/autograd 核验**；
-  §5.2 至此**四段全部有最小 kernel**，剩余的是把它们**工程化**为 CUTLASS/TMA + warp-specialization
-  的目标卡 CUDA（复用 K1 workspace、`CHUNK=16`），属更大工程，留待有明确需求时再做。
+  三条 GEMM 支路、B0 门控重算、以及 P6-7 的 `dAv` 都已做成最小可运行 Triton kernel 并与 FLA
+  位级/autograd 核验，且已把四段组装成端到端反核对到 tf32 底噪**；
+  §5.2 至此**五段全部有最小 kernel、且链已端到端核验**，剩余的是把它们**工程化**为
+  CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、`CHUNK=16`），
+  属更大工程，留待有明确需求时再做。

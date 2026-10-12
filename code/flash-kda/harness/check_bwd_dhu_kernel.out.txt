@@ -21,7 +21,7 @@ Part B: Triton dhu kernel  vs  FLA `dhu`  (fp32)
   dh   vs torch(fp32-ieee)           max_abs=9.426e-05  max_rel=1.134e-03  ref_max=8.309e-02
   [note] FLA dhu uses tf32 `tl.dot`; the torch golden uses ieee fp32, so
          torch-vs-FLA ~1e-3 is tf32 rounding, not a formula difference.
-  Triton dhu: B=1 T=256 H=2 K=128 V=128 BT=64 -> 106.8 us/call
+  Triton dhu: B=1 T=256 H=2 K=128 V=128 BT=64 -> 96.1 us/call
 
 ==============================================================================
 Part C: controlled ablations of state-adjoint storage precision
@@ -59,7 +59,7 @@ Part B: Triton dhu kernel  vs  FLA `dhu`  (fp32)
   dh   vs torch(fp32-ieee)           max_abs=1.121e-03  max_rel=1.161e-02  ref_max=9.654e-02
   [note] FLA dhu uses tf32 `tl.dot`; the torch golden uses ieee fp32, so
          torch-vs-FLA ~1e-3 is tf32 rounding, not a formula difference.
-  Triton dhu: B=1 T=512 H=4 K=128 V=128 BT=32 -> 191.1 us/call
+  Triton dhu: B=1 T=512 H=4 K=128 V=128 BT=32 -> 179.0 us/call
 
 ==============================================================================
 Part C: controlled ablations of state-adjoint storage precision

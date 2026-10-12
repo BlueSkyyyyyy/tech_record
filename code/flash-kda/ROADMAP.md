@@ -99,6 +99,13 @@
       sigmoid）。坑：`log2e` 必须乘在反向前缀和上（漏掉则误差稳停 0.3069=1−ln2）；FLA
       `kda_gate_bwd` 输出随输入 dtype 是 bf16（B0 vs FLA 表面 3e-3 实为 bf16 出口）。至此 §5.2
       的 B0/B1/B2/B3 四段全部有最小可核验 kernel（`docs/06` §6.8）。
+- [x] **P6-7** 补齐反向第 5 个 kernel `dAv`（输出支路）并做**端到端组装**核对：
+      新增 `harness/check_bwd_e2e.py` + `docs/06` §6.9。`dAv` 与 FLA 逐位相同；把
+      `dAv→B1→B2→B3→反向 cumsum(B0)` 串成完整反向 vs `torch.autograd` 穿 `chunk_kda`，
+      六项梯度全落 tf32 底噪（dq 逐位、dk≤1.5e-5、dv≤3.9e-4、dg≤1.1e-5、dbeta≤1.1e-4、
+      dh0≤5.1e-6，含非整除 T）；Part C（FLA 自分解==autograd 逐位）+ Part D（swap 后 B2/B3==FLA
+      到 1e-7）把残差钉死到 B1 的 tf32 舍入。两个组装才暴露的坑：B2 吃 `v_new` 而非 `u`、
+      反向 cumsum 不要额外乘 ln2（FLA `chunk_local_cumsum` 默认 `scale=RCP_LN2`）。B1 补 `dht` 入口。
 
 ### P7 性能与剖析（`docs/07-perf.md`）
 
@@ -141,7 +148,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P7-3/P7-4/P7-5 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6，新增）**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P7-3/P7-4/P7-5 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对（新增）**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，且四段能组装成一条与 FLA 数值一致的完整反向链**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+  - P6-7：新增 `docs/06` §6.9 + `harness/check_bwd_e2e.py`（`harness/check_bwd_e2e.out.txt`），
+    并给 `harness/check_bwd_dhu_kernel.py` 的 B1 kernel 补 `dht`（终态上游梯度）入口（`HAS_DHT` 分支）。
+    **Part A**：补齐反向第 5 个 kernel **`dAv`（输出支路）**（对应 FLA `chunk_kda_bwd_kernel_dAv`，
+    `chunk_bwd.py:44-114`），`dAqk=do·U^⊤·scale`、`dv=M_qk·do`；4 组配置（T=256/512/1024/250）
+    下与 FLA **逐位相同（max_abs=0）**。**Part B（关键）**：把 `dAv→B1(dhu)→B2(wy_dqkg)→B3(intra)
+    →反向 cumsum(B0)` 串成完整反向，与 `torch.autograd` 穿 `chunk_kda` 对拍（P5-3 同款 setup：全
+    `use_*_in_kernel=False`、同一份 fp32 操作数、损失含 `final_state` 上游 → `dht≠0`）：六项梯度
+    **全落 tf32 底噪**——`dq` 逐位、`dk≤1.51e-5`、`dv≤3.90e-4`、`dg≤1.10e-5`、`dbeta≤1.09e-4`、
+    `dh0≤5.06e-6`，**含非整除 T=250**。**Part C**：FLA 自己的子 kernel 按 `chunk_kda_bwd` 顺序手串
+    与 autograd **逐位相同**（证明 golden=分解）。**Part D（swap）**：把 FLA 的 B1/dAv/dAkk 输出喂
+    我们的 B2/B3 再比 FLA 分解，`dk`/反 cumsum `dg` 到 **8.4e-8~1.2e-7** → 证明 B2/B3 在相同输入下
+    与 FLA 代数一致，Part B 残差来自 B1 独立 tf32 舍入经衰减链放大（如 T=512：dh 9.9e-6、dv2 8.3e-5
+    → dk 1.5e-5、dg 1.1e-5）。**两个组装才暴露的坑**：(a) **B2 要吃 `v_new`（`fwd_h` 输出）而非 `u`
+    （`fwd_intra` 输出）**，误用指纹=「dq 逐位、dk/dg 随 T 大面积错」；(b) **反向 cumsum 不要额外乘 ln2**
+    （FLA `chunk_local_cumsum` 默认 `scale=RCP_LN2`，其 reverse 已直接给 `ga.grad`），误乘指纹=
+    「dg 与其余五项差一个均匀常数因子」（线性拟合 `gold/ours≈1.44=RCP_LN2`、max_rel 稳停 0.44）。
+    回归：B1 自身自测（`check_bwd_dhu_kernel.py`）改后仍与旧数字一致（dh 4.6e-5 等），无退化。
+
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -228,9 +253,9 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P7-3/P7-4/P7-5 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
-  §5.2 的 **B0 门控重算（P6-6）已做成最小 kernel**，至此 **B0/B1/B2/B3 四段全部位级/autograd 可核验**；
-  剩余的是更完整的 CUTLASS/TMA + warp-specialization 版反向 B0/B1/B2/B3 工程化。P7-2 遗留的 nsys
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P7-3/P7-4/P7-5 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  §5.2 的 **B0/B1/B2/B3/dAv 五段已全部做成最小 kernel，且 P6-7 已把四段组装成端到端反向核到
+  tf32 底噪**；剩余的是更完整的 CUTLASS/TMA + warp-specialization 版反向工程化。P7-2 遗留的 nsys
   流量拆分（P7-3 已用 ncu DRAM 计数替代、待验证 (b) 已关闭）。
   **P7-5 已用实验关闭 P7-2/P7-4 待验证 (c)**（K2 突破 2 CTA/SM 后 L2 墙不后移，见下）。
   - P6-6：新增 `docs/06` §6.8 + `harness/check_bwd_b0_gate.py`

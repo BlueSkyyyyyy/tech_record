@@ -1,0 +1,139 @@
+device: NVIDIA H100 80GB HBM3 torch 2.12.0a0+0291f960b6.nv26.04.48445190
+
+##############################################################################
+# config: T=256  H=2 BT=64  B=1 H=2 D=128 seed=0
+##############################################################################
+  -- Part A: dAv kernel vs FLA chunk_kda_bwd_dAv --
+  dAqk                       max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.077e+00
+  dv  (Mqk@do)               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.432e-02
+  -- Part B: chain dAv -> B1 -> B2 -> B3 -> rev-cumsum  vs  torch.autograd --
+  dq                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=8.370e-01
+  dk                         max_abs=7.132e-06  max_rel=1.006e-05  ref_max=7.093e-01
+  dv                         max_abs=5.750e-06  max_rel=1.192e-04  ref_max=4.825e-02
+  dg                         max_abs=5.674e-07  max_rel=3.506e-06  ref_max=1.618e-01
+  dbeta                      max_abs=1.639e-05  max_rel=3.065e-05  ref_max=5.348e-01
+  dh0                        max_abs=2.384e-07  max_rel=5.055e-06  ref_max=4.716e-02
+     (|o|max=0.063,  |S|max=0.387)
+  -- Part C: FLA internal decomposition vs torch.autograd --
+  dq                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=8.370e-01
+  dk                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.093e-01
+  dv                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.825e-02
+  dg                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.618e-01
+  db                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.348e-01
+  dh0                        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.716e-02
+  -- intermediate-level: ours vs FLA decomposition --
+  dh                         max_abs=7.451e-09  max_rel=7.706e-08  ref_max=9.668e-02
+  dv2                        max_abs=5.763e-08  max_rel=7.754e-07  ref_max=7.432e-02
+  dAqk                       max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.077e+00
+  dAkk (b2.dA)               max_abs=1.221e-04  max_rel=2.458e-04  ref_max=4.966e-01
+  dg_cum (b2 only)           max_abs=5.541e-08  max_rel=3.823e-07  ref_max=1.450e-01
+  dg (rev-cumsum)            max_abs=5.674e-07  max_rel=3.506e-06  ref_max=1.618e-01
+  -- swap: our B2/B3 fed FLA's B1 outputs (vs FLA decomposition) --
+  dk                         max_abs=5.960e-08  max_rel=8.404e-08  ref_max=7.093e-01
+  dg (rev-cumsum)            max_abs=1.676e-08  max_rel=1.036e-07  ref_max=1.618e-01
+
+##############################################################################
+# config: T=512  H=4 BT=64  B=2 H=4 D=128 seed=1
+##############################################################################
+  -- Part A: dAv kernel vs FLA chunk_kda_bwd_dAv --
+  dAqk                       max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.352e+00
+  dv  (Mqk@do)               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.565e-02
+  -- Part B: chain dAv -> B1 -> B2 -> B3 -> rev-cumsum  vs  torch.autograd --
+  dq                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.751e+00
+  dk                         max_abs=2.037e-05  max_rel=1.506e-05  ref_max=1.352e+00
+  dv                         max_abs=2.455e-05  max_rel=3.897e-04  ref_max=6.299e-02
+  dg                         max_abs=5.558e-06  max_rel=1.101e-05  ref_max=5.049e-01
+  dbeta                      max_abs=4.655e-05  max_rel=5.671e-05  ref_max=8.209e-01
+  dh0                        max_abs=2.328e-07  max_rel=1.843e-06  ref_max=1.263e-01
+     (|o|max=0.089,  |S|max=0.877)
+  -- Part C: FLA internal decomposition vs torch.autograd --
+  dq                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.751e+00
+  dk                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.352e+00
+  dv                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.299e-02
+  dg                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.049e-01
+  db                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=8.209e-01
+  dh0                        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.263e-01
+  -- intermediate-level: ours vs FLA decomposition --
+  dh                         max_abs=2.025e-06  max_rel=9.915e-06  ref_max=2.042e-01
+  dv2                        max_abs=7.946e-06  max_rel=8.308e-05  ref_max=9.565e-02
+  dAqk                       max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.352e+00
+  dAkk (b2.dA)               max_abs=1.221e-04  max_rel=1.857e-04  ref_max=6.572e-01
+  dg_cum (b2 only)           max_abs=4.888e-06  max_rel=1.931e-05  ref_max=2.531e-01
+  dg (rev-cumsum)            max_abs=5.558e-06  max_rel=1.101e-05  ref_max=5.049e-01
+  -- swap: our B2/B3 fed FLA's B1 outputs (vs FLA decomposition) --
+  dk                         max_abs=1.192e-07  max_rel=8.818e-08  ref_max=1.352e+00
+  dg (rev-cumsum)            max_abs=5.960e-08  max_rel=1.181e-07  ref_max=5.049e-01
+
+##############################################################################
+# config: T=1024 H=8 BT=64  B=1 H=8 D=128 seed=2
+##############################################################################
+  -- Part A: dAv kernel vs FLA chunk_kda_bwd_dAv --
+  dAqk                       max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.631e+00
+  dv  (Mqk@do)               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.292e-02
+  -- Part B: chain dAv -> B1 -> B2 -> B3 -> rev-cumsum  vs  torch.autograd --
+  dq                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.568e+00
+  dk                         max_abs=7.659e-06  max_rel=8.121e-06  ref_max=9.431e-01
+  dv                         max_abs=1.370e-05  max_rel=1.873e-04  ref_max=7.314e-02
+  dg                         max_abs=7.525e-07  max_rel=1.642e-06  ref_max=4.582e-01
+  dbeta                      max_abs=6.720e-05  max_rel=1.093e-04  ref_max=6.146e-01
+  dh0                        max_abs=1.006e-07  max_rel=7.581e-07  ref_max=1.327e-01
+     (|o|max=0.072,  |S|max=0.779)
+  -- Part C: FLA internal decomposition vs torch.autograd --
+  dq                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.568e+00
+  dk                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=9.431e-01
+  dv                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.314e-02
+  dg                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.582e-01
+  db                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.146e-01
+  dh0                        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.327e-01
+  -- intermediate-level: ours vs FLA decomposition --
+  dh                         max_abs=9.346e-07  max_rel=6.002e-06  ref_max=1.557e-01
+  dv2                        max_abs=8.726e-07  max_rel=9.388e-06  ref_max=9.296e-02
+  dAqk                       max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.631e+00
+  dAkk (b2.dA)               max_abs=2.441e-04  max_rel=3.911e-04  ref_max=6.242e-01
+  dg_cum (b2 only)           max_abs=1.583e-07  max_rel=1.137e-06  ref_max=1.393e-01
+  dg (rev-cumsum)            max_abs=7.525e-07  max_rel=1.642e-06  ref_max=4.582e-01
+  -- swap: our B2/B3 fed FLA's B1 outputs (vs FLA decomposition) --
+  dk                         max_abs=5.960e-08  max_rel=6.320e-08  ref_max=9.431e-01
+  dg (rev-cumsum)            max_abs=5.960e-08  max_rel=1.301e-07  ref_max=4.582e-01
+
+##############################################################################
+# config: T=250  H=3 BT=64 (non-div T)  B=1 H=3 D=128 seed=3
+##############################################################################
+  -- Part A: dAv kernel vs FLA chunk_kda_bwd_dAv --
+  dAqk                       max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.288e+00
+  dv  (Mqk@do)               max_abs=0.000e+00  max_rel=0.000e+00  ref_max=8.660e-02
+  -- Part B: chain dAv -> B1 -> B2 -> B3 -> rev-cumsum  vs  torch.autograd --
+  dq                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.329e+00
+  dk                         max_abs=1.448e-05  max_rel=1.422e-05  ref_max=1.019e+00
+  dv                         max_abs=1.317e-05  max_rel=2.719e-04  ref_max=4.843e-02
+  dg                         max_abs=1.108e-06  max_rel=4.105e-06  ref_max=2.700e-01
+  dbeta                      max_abs=3.421e-05  max_rel=6.381e-05  ref_max=5.362e-01
+  dh0                        max_abs=2.788e-07  max_rel=2.186e-06  ref_max=1.276e-01
+     (|o|max=0.080,  |S|max=0.591)
+  -- Part C: FLA internal decomposition vs torch.autograd --
+  dq                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.329e+00
+  dk                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.019e+00
+  dv                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.843e-02
+  dg                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.700e-01
+  db                         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.362e-01
+  dh0                        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.276e-01
+  -- intermediate-level: ours vs FLA decomposition --
+  dh                         max_abs=3.185e-07  max_rel=2.818e-06  ref_max=1.130e-01
+  dv2                        max_abs=1.611e-07  max_rel=1.820e-06  ref_max=8.854e-02
+  dAqk                       max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.288e+00
+  dAkk (b2.dA)               max_abs=2.441e-04  max_rel=4.578e-04  ref_max=5.333e-01
+  dg_cum (b2 only)           max_abs=1.341e-07  max_rel=7.064e-07  ref_max=1.899e-01
+  dg (rev-cumsum)            max_abs=1.108e-06  max_rel=4.105e-06  ref_max=2.700e-01
+  -- swap: our B2/B3 fed FLA's B1 outputs (vs FLA decomposition) --
+  dk                         max_abs=5.960e-08  max_rel=5.852e-08  ref_max=1.019e+00
+  dg (rev-cumsum)            max_abs=2.980e-08  max_rel=1.104e-07  ref_max=2.700e-01
+
+==============================================================================
+worst-case max_rel across cases (our chain vs FLA autograd):
+  dq     0.000e+00
+  dk     1.506e-05
+  dv     3.897e-04
+  dg     1.101e-05
+  dbeta  1.093e-04
+  dh0    5.055e-06
+DONE

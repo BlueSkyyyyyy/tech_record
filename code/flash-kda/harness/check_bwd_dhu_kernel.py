@@ -139,11 +139,12 @@ def build_kernel():
 
     @triton.jit
     def _dhu_kernel(
-        q_ptr, k_ptr, w_ptr, do_ptr, dv_ptr, etot_ptr,
+        q_ptr, k_ptr, w_ptr, do_ptr, dv_ptr, etot_ptr, dht_ptr,
         dh_ptr, dh0_ptr, dv2_ptr,
         T, NT, scale,
         HV: tl.constexpr, K: tl.constexpr, V: tl.constexpr,
-        BT: tl.constexpr, BV: tl.constexpr, CARRY_BF16: tl.constexpr,
+        BT: tl.constexpr, BV: tl.constexpr,
+        CARRY_BF16: tl.constexpr, HAS_DHT: tl.constexpr,
     ):
         i_v = tl.program_id(0)
         i_nh = tl.program_id(1)
@@ -152,7 +153,13 @@ def build_kernel():
         o_v = i_v * BV + tl.arange(0, BV)
         m_v = o_v < V
         o_k = tl.arange(0, K)
-        b_dh = tl.zeros([K, BV], dtype=tl.float32)
+        # adjoint of the chunk-OUTPUT state chain is seeded by the final-state
+        # gradient ``dht`` (=[N,HV,K,V]); zero when the loss has no final-state term.
+        if HAS_DHT:
+            p_dht = dht_ptr + i_nh * K * V + o_k[:, None] * V + o_v[None, :]
+            b_dh = tl.load(p_dht, mask=m_v[None, :], other=0.0).to(tl.float32)
+        else:
+            b_dh = tl.zeros([K, BV], dtype=tl.float32)
         for c in range(NT - 1, -1, -1):
             p_dh = dh_ptr + ((i_n * NT + c) * HV + i_h) * K * V + o_k[:, None] * V + o_v[None, :]
             tl.store(p_dh, b_dh.to(dh_ptr.dtype.element_ty), mask=m_v[None, :])
@@ -186,21 +193,24 @@ def build_kernel():
     return _dhu_kernel
 
 
-def dhu_triton(kernel, fi, do, dv, h0, scale, BT, BV=32, carry_bf16=False):
+def dhu_triton(kernel, fi, do, dv, h0, scale, BT, BV=32, carry_bf16=False, dht=None):
     qg, kg, w, g_cum = fi["qg"], fi["kg"], fi["w"], fi["g_cum"]
     B, T, HV, K = qg.shape
     V = do.shape[-1]
     NT = triton_cdiv(T, BT)
-    gc = g_cum.float().view(B, NT, BT, HV, K)
-    etot = torch.exp2(gc[:, :, -1]).contiguous()          # [B,NT,HV,K]
+    # T-general chunk-tail index: min((c+1)*BT, T)-1 == the last valid token of chunk c
+    last_idx = torch.clamp((torch.arange(NT, device=qg.device) + 1) * BT - 1, max=T - 1)
+    etot = torch.exp2(g_cum.float()[:, last_idx]).contiguous()   # [B,NT,HV,K]
     dh = torch.empty(B, NT, HV, K, V, dtype=qg.dtype, device=qg.device)
     dh0 = torch.empty(B, HV, K, V, dtype=torch.float32, device=qg.device)
     dv2 = torch.empty_like(do)
+    has_dht = dht is not None
+    dht_arg = dht.contiguous() if has_dht else dh0
     grid = (triton_cdiv(V, BV), B * HV)
     kernel[grid](
         qg.contiguous(), kg.contiguous(), w.contiguous(), do.contiguous(),
-        dv.contiguous(), etot, dh, dh0, dv2, T, NT, scale,
-        HV=HV, K=K, V=V, BT=BT, BV=BV, CARRY_BF16=carry_bf16,
+        dv.contiguous(), etot, dht_arg, dh, dh0, dv2, T, NT, scale,
+        HV=HV, K=K, V=V, BT=BT, BV=BV, CARRY_BF16=carry_bf16, HAS_DHT=has_dht,
         num_warps=4, num_stages=1,
     )
     return dh, dh0, dv2
@@ -265,8 +275,9 @@ def part_b(kernel, fi, do, dv, h0, scale, BT):
     dh0_t = torch.empty(B, HV, K, V, dtype=torch.float32, device=qg.device)
     dv2_t = torch.empty_like(do)
     grid = (triton_cdiv(V, 32), B * HV)
-    fn = lambda: kernel[grid](qg, kg, w, do, dv, etot, dh_t, dh0_t, dv2_t, T, NT, scale,
-                              HV=HV, K=K, V=V, BT=BT, BV=32, CARRY_BF16=False, num_warps=4, num_stages=1)
+    fn = lambda: kernel[grid](qg, kg, w, do, dv, etot, dh0_t, dh_t, dh0_t, dv2_t, T, NT, scale,
+                              HV=HV, K=K, V=V, BT=BT, BV=32, CARRY_BF16=False, HAS_DHT=False,
+                              num_warps=4, num_stages=1)
     ms = triton.testing.do_bench(fn, warmup=25, rep=100)
     print(f"  Triton dhu: B={B} T={T} H={HV} K={K} V={V} BT={BT} -> {ms*1e3:.1f} us/call")
     print()
