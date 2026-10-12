@@ -1,0 +1,103 @@
+diff --git a/include/mirage/persistent_kernel/persistent_kernel.cuh b/include/mirage/persistent_kernel/persistent_kernel.cuh
+index dc65870..e8f2bb7 100644
+--- a/include/mirage/persistent_kernel/persistent_kernel.cuh
++++ b/include/mirage/persistent_kernel/persistent_kernel.cuh
+@@ -1011,6 +1011,9 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
+     if (queue_pos == queue_len) {
+       int queue_idx = 0;
+       if (threadIdx.x == 0) {
++#ifdef MPK_DBG_WATCHDOG
++        long _dbg_spins = 0;
++#endif
+         while (next_task_pos[queue_idx] == last_task_pos[queue_idx]) {
+           last_task_pos[queue_idx] =
+               ld_acquire_gpu_u64(&config.worker_queue_last_ready_task_id
+@@ -1023,6 +1026,17 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
+           }
+           // nanosleep to avoid overwhelming I/O
+           __nanosleep(10);
++#ifdef MPK_DBG_WATCHDOG
++          if (worker_id == 0 && ++_dbg_spins > 20000000L) {
++            printf("[WDBG] worker0 STALL next(%llu) last(%llu) lr0(%llu) "
++                   "nworkers(%d) nsched(%d) mygpu(%d)\n",
++                   next_task_pos[0], last_task_pos[0],
++                   ld_acquire_gpu_u64(&config.worker_queue_last_ready_task_id[0]),
++                   config.num_workers, config.num_local_schedulers,
++                   config.my_gpu_id);
++            __trap();
++          }
++#endif
+         }
+         assert(next_task_pos[queue_idx] + config.per_worker_queue_len >
+                last_task_pos[queue_idx]);
+@@ -1331,6 +1345,7 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
+     // }
+     int next_worker = my_first_worker;
+     int queue_idx = 0;
++    size_t _dbg_sched_spins = 0;
+     while (true) {
+       while (cur_event_pos[queue_idx] == last_event_pos[queue_idx]) {
+         //__threadfence();
+@@ -1348,6 +1363,23 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
+         }
+         // nanosleep to avoid overwhelming I/O
+         __nanosleep(10);
++#ifdef MPK_DBG_WATCHDOG
++        if (sched_id == 0 && ++_dbg_sched_spins > 20000000L) {
++          printf("[SDBG] sched0 STALL q(%d) cur(%llu) last(%llu) "
++                 "nworkers(%d) nsched(%d) mygpu(%d)\n",
++                 queue_idx, cur_event_pos[queue_idx], last_event_pos[queue_idx],
++                 config.num_workers, config.num_local_schedulers,
++                 config.my_gpu_id);
++          printf("[SDBG] counters: e0(%llu) e1(%llu) e2(%llu)\n",
++                 ld_acquire_gpu_u64(&config.all_event_counters[0]),
++                 ld_acquire_gpu_u64(&config.all_event_counters[1]),
++                 ld_acquire_gpu_u64(&config.all_event_counters[2]));
++          printf("[SDBG] sq_lr0(%llu) sq_free0(%llu)\n",
++                 ld_acquire_gpu_u64(&config.sched_queue_last_ready_event_id[0]),
++                 ld_acquire_gpu_u64(&config.sched_queue_next_free_event_id[0]));
++          __trap();
++        }
++#endif
+       }
+       // Make sure the schedule queue is not overflow
+       assert(cur_event_pos[queue_idx] + config.per_sched_queue_len >
+@@ -1358,6 +1390,14 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
+           &sched_queues[queue_idx]
+                        [cur_event_pos[queue_idx] % config.per_sched_queue_len]);
+       EventDesc e = config.all_events[event_id];
++#ifdef MPK_DBG_WATCHDOG
++      if (sched_id == 0) {
++        printf("[SDBG] sched0 got event_id(%llu) etype(%d) nt(%d) iter(%llu) "
++               "cur0(%llu) last0(%llu)\n",
++               event_id, e.event_type, e.num_triggers, iteration_num,
++               cur_event_pos[0], last_event_pos[0]);
++      }
++#endif
+       if (is_termination_event(event_id, e)) {
+         // terminate all workers
+         if (sched_id < config.num_local_schedulers) {
+@@ -1390,6 +1430,11 @@ __device__ __forceinline__ void execute_scheduler(RuntimeConfig config,
+         {
+ #ifdef MPK_ENABLE_PROFILING
+           PROFILER_EVENT_END(TASK_SCHD_PREPARE_BATCH, sched_profiling_cnt++);
++#endif
++#ifdef MPK_DBG_WATCHDOG
++          if (sched_id == 0) {
++            printf("[SDBG] prepare_next_batch -> FALSE (terminate)\n");
++          }
+ #endif
+           terminate_schedulers(config);
+         } else {
+diff --git a/python/mirage/mpk/persistent_kernel.py b/python/mirage/mpk/persistent_kernel.py
+index 5d76a0d..869944b 100644
+--- a/python/mirage/mpk/persistent_kernel.py
++++ b/python/mirage/mpk/persistent_kernel.py
+@@ -368,6 +368,7 @@ def get_compile_command(
+             "-DMPK_ENABLE_TMA",
+             "-DMIRAGE_GRACE_HOPPER",
+             "-DNDEBUG",
++            "-DMPK_DBG_WATCHDOG",
+         ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
+     elif target_cc == 100:
+         specific_cmd = [

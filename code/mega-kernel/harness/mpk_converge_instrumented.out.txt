@@ -1,0 +1,244 @@
+=== RUN 1 start 17:12:44 ===
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_sparse_mma_warpspecialized.hpp(902): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_warpspecialized.hpp(717): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_array_warpspecialized.hpp(716): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_mixed_tma_cpasync_warpspecialized.hpp(554): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm103_blockscaled_mma_warpspecialized.hpp(682): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(params.layout_SFB));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm103_blockscaled_mma_array_warpspecialized.hpp(810): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(326): warning #177-D: variable "step_advance" was declared but never referenced
+        int step_advance = num_tokens;
+            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(944): warning #177-D: variable "num_schedulers" was declared but never referenced
+    int const num_schedulers =
+              ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(946): warning #177-D: variable "num_schedulers_per_sm" was declared but never referenced
+    int const num_schedulers_per_sm = SCHEDULERS_PER_BLOCK;
+              ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(1142): warning #177-D: variable "_trace_t" was declared but never referenced
+        bool _trace_t =
+             ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(969): warning #20054-D: dynamic initialization is not supported for a function-scope static __shared__ variable within a __device__/__global__ function
+    __attribute__((shared)) TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
+                                     ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(1684): warning #177-D: variable "expected_num_meta" was declared but never referenced
+    size_t expected_num_meta = 7 + 1 * 4;
+           ^
+
+[MPK INIT] Total tasks: 18, Total events: 3
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[SDBG] sched0 got event_id(2) etype(910) nt(16) iter(0) cur0(0) last0(1)
+[SDBG] sched0 got event_id(1) etype(903) nt(1) iter(0) cur0(1) last0(1)
+[SDBG] sched0 got event_id(2) etype(910) nt(16) iter(1) cur0(1) last0(2)
+[SDBG] prepare_next_batch -> FALSE (terminate)
+[SDBG] sched0 got event_id(0) etype(911) nt(1) iter(1) cur0(2) last0(3)
+sm_cnt:  132
+Compiling test kernel...
+Compiling megakernel using the following command line:
+['/usr/local/cuda/bin/nvcc', '/tmp/tmp8qrsp6b8/test.cu', '-O3', '-lineinfo', '-I/usr/include/python3.12', '-I/ssd/mirage_mpk_build/python/mirage/../../include', '-I/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/tools/util/include', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/json/include', '-DMAX_WORKER_PER_SCHEDULER=9', '-DMIRAGE_USE_CUTLASS_KERNEL=0', '-gencode=arch=compute_90a,code=sm_90a', '-DMPK_ENABLE_TMA', '-DMIRAGE_GRACE_HOPPER', '-DNDEBUG', '-DMPK_DBG_WATCHDOG', '-shared', '-std=c++20', '-rdc=false', '-use_fast_math', '-lcuda', '-lcudart', '-lstdc++fs', '-Xcompiler=-fPIC', '--expt-relaxed-constexpr', '-o', '/tmp/tmp8qrsp6b8/test.cpython-312-x86_64-linux-gnu.so', '-DMPK_TARGET_CC=90', '-DMIRAGE_BACKEND_USE_CUDA', '-DMPK_TEST_MODE', '-DMODE_OFFLINE', '-DMPK_MAX_NUM_BATCHED_REQUESTS=1', '-DMPK_MAX_NUM_BATCHED_TOKENS=1', '-DMPK_MAX_TOKENS_PER_REQUEST=1', '-DMPK_MAX_NUM_PAGES=1', '-DMPK_NUM_KV_GROUPS=1', '-DMPK_MAX_SEQ_LENGTH=1']
+Saved compiled kernel to: /ssd/mirage_mpk_build/tests/runtime_python/test_mode/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
+Finished megakernel compilation...
+Running test kernel...
+Output:
+tensor([[-0.0630,  0.2227, -0.3633, -0.1689,  1.1172, -0.9102, -0.4023,  2.1719],
+        [-0.2109,  0.1426, -0.0549, -0.0923, -0.1309,  0.3047,  2.8594, -0.7539]],
+       device='cuda:0', dtype=torch.bfloat16)
+Reference:
+tensor([[-0.0630,  0.2227, -0.3633, -0.1689,  1.1172, -0.9102, -0.4023,  2.1719],
+        [-0.2109,  0.1426, -0.0549, -0.0923, -0.1309,  0.3047,  2.8594, -0.7539]],
+       device='cuda:0', dtype=torch.bfloat16)
+Max absolute difference: 0.015625
+PASSED: rmsnorm test_mode produces correct output
+Test completed successfully!
+EXIT=0
+=== RUN 2 start 17:13:14 ===
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_sparse_mma_warpspecialized.hpp(902): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_warpspecialized.hpp(717): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_array_warpspecialized.hpp(716): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_mixed_tma_cpasync_warpspecialized.hpp(554): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm103_blockscaled_mma_warpspecialized.hpp(682): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(params.layout_SFB));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm103_blockscaled_mma_array_warpspecialized.hpp(810): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(326): warning #177-D: variable "step_advance" was declared but never referenced
+        int step_advance = num_tokens;
+            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(944): warning #177-D: variable "num_schedulers" was declared but never referenced
+    int const num_schedulers =
+              ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(946): warning #177-D: variable "num_schedulers_per_sm" was declared but never referenced
+    int const num_schedulers_per_sm = SCHEDULERS_PER_BLOCK;
+              ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(1142): warning #177-D: variable "_trace_t" was declared but never referenced
+        bool _trace_t =
+             ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(969): warning #20054-D: dynamic initialization is not supported for a function-scope static __shared__ variable within a __device__/__global__ function
+    __attribute__((shared)) TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
+                                     ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(1684): warning #177-D: variable "expected_num_meta" was declared but never referenced
+    size_t expected_num_meta = 7 + 1 * 4;
+           ^
+
+[MPK INIT] Total tasks: 18, Total events: 3
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[SDBG] sched0 got event_id(2) etype(910) nt(16) iter(0) cur0(0) last0(1)
+[SDBG] sched0 got event_id(1) etype(903) nt(1) iter(0) cur0(1) last0(1)
+[SDBG] sched0 got event_id(2) etype(910) nt(16) iter(1) cur0(1) last0(2)
+[SDBG] prepare_next_batch -> FALSE (terminate)
+[SDBG] sched0 got event_id(0) etype(911) nt(1) iter(1) cur0(2) last0(3)
+sm_cnt:  132
+Compiling test kernel...
+Compiling megakernel using the following command line:
+['/usr/local/cuda/bin/nvcc', '/tmp/tmp1n47gi2z/test.cu', '-O3', '-lineinfo', '-I/usr/include/python3.12', '-I/ssd/mirage_mpk_build/python/mirage/../../include', '-I/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/tools/util/include', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/json/include', '-DMAX_WORKER_PER_SCHEDULER=9', '-DMIRAGE_USE_CUTLASS_KERNEL=0', '-gencode=arch=compute_90a,code=sm_90a', '-DMPK_ENABLE_TMA', '-DMIRAGE_GRACE_HOPPER', '-DNDEBUG', '-DMPK_DBG_WATCHDOG', '-shared', '-std=c++20', '-rdc=false', '-use_fast_math', '-lcuda', '-lcudart', '-lstdc++fs', '-Xcompiler=-fPIC', '--expt-relaxed-constexpr', '-o', '/tmp/tmp1n47gi2z/test.cpython-312-x86_64-linux-gnu.so', '-DMPK_TARGET_CC=90', '-DMIRAGE_BACKEND_USE_CUDA', '-DMPK_TEST_MODE', '-DMODE_OFFLINE', '-DMPK_MAX_NUM_BATCHED_REQUESTS=1', '-DMPK_MAX_NUM_BATCHED_TOKENS=1', '-DMPK_MAX_TOKENS_PER_REQUEST=1', '-DMPK_MAX_NUM_PAGES=1', '-DMPK_NUM_KV_GROUPS=1', '-DMPK_MAX_SEQ_LENGTH=1']
+Saved compiled kernel to: /ssd/mirage_mpk_build/tests/runtime_python/test_mode/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
+Finished megakernel compilation...
+Running test kernel...
+Output:
+tensor([[-0.0352, -0.2656,  0.0571,  1.1484, -1.4844,  1.0781, -0.0374,  0.9727],
+        [ 0.0522, -0.3789,  0.2559,  0.5273, -0.2383,  0.3770,  0.0179, -2.3906]],
+       device='cuda:0', dtype=torch.bfloat16)
+Reference:
+tensor([[-0.0352, -0.2656,  0.0571,  1.1484, -1.4844,  1.0781, -0.0374,  0.9727],
+        [ 0.0522, -0.3789,  0.2559,  0.5273, -0.2383,  0.3770,  0.0179, -2.3906]],
+       device='cuda:0', dtype=torch.bfloat16)
+Max absolute difference: 0.015625
+PASSED: rmsnorm test_mode produces correct output
+Test completed successfully!
+EXIT=0
+=== RUN 3 start 17:13:44 ===
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_sparse_mma_warpspecialized.hpp(902): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_warpspecialized.hpp(717): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_array_warpspecialized.hpp(716): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_mixed_tma_cpasync_warpspecialized.hpp(554): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm103_blockscaled_mma_warpspecialized.hpp(682): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(params.layout_SFB));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm103_blockscaled_mma_array_warpspecialized.hpp(810): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(326): warning #177-D: variable "step_advance" was declared but never referenced
+        int step_advance = num_tokens;
+            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(944): warning #177-D: variable "num_schedulers" was declared but never referenced
+    int const num_schedulers =
+              ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(946): warning #177-D: variable "num_schedulers_per_sm" was declared but never referenced
+    int const num_schedulers_per_sm = SCHEDULERS_PER_BLOCK;
+              ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(1142): warning #177-D: variable "_trace_t" was declared but never referenced
+        bool _trace_t =
+             ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(969): warning #20054-D: dynamic initialization is not supported for a function-scope static __shared__ variable within a __device__/__global__ function
+    __attribute__((shared)) TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
+                                     ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(1684): warning #177-D: variable "expected_num_meta" was declared but never referenced
+    size_t expected_num_meta = 7 + 1 * 4;
+           ^
+
+[MPK INIT] Total tasks: 18, Total events: 3
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[SDBG] sched0 got event_id(2) etype(910) nt(16) iter(0) cur0(0) last0(1)
+[SDBG] sched0 got event_id(1) etype(903) nt(1) iter(0) cur0(1) last0(1)
+[SDBG] sched0 got event_id(2) etype(910) nt(16) iter(1) cur0(1) last0(2)
+[SDBG] prepare_next_batch -> FALSE (terminate)
+[SDBG] sched0 got event_id(0) etype(911) nt(1) iter(1) cur0(2) last0(3)
+sm_cnt:  132
+Compiling test kernel...
+Compiling megakernel using the following command line:
+['/usr/local/cuda/bin/nvcc', '/tmp/tmpq9px8yuj/test.cu', '-O3', '-lineinfo', '-I/usr/include/python3.12', '-I/ssd/mirage_mpk_build/python/mirage/../../include', '-I/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/tools/util/include', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/json/include', '-DMAX_WORKER_PER_SCHEDULER=9', '-DMIRAGE_USE_CUTLASS_KERNEL=0', '-gencode=arch=compute_90a,code=sm_90a', '-DMPK_ENABLE_TMA', '-DMIRAGE_GRACE_HOPPER', '-DNDEBUG', '-DMPK_DBG_WATCHDOG', '-shared', '-std=c++20', '-rdc=false', '-use_fast_math', '-lcuda', '-lcudart', '-lstdc++fs', '-Xcompiler=-fPIC', '--expt-relaxed-constexpr', '-o', '/tmp/tmpq9px8yuj/test.cpython-312-x86_64-linux-gnu.so', '-DMPK_TARGET_CC=90', '-DMIRAGE_BACKEND_USE_CUDA', '-DMPK_TEST_MODE', '-DMODE_OFFLINE', '-DMPK_MAX_NUM_BATCHED_REQUESTS=1', '-DMPK_MAX_NUM_BATCHED_TOKENS=1', '-DMPK_MAX_TOKENS_PER_REQUEST=1', '-DMPK_MAX_NUM_PAGES=1', '-DMPK_NUM_KV_GROUPS=1', '-DMPK_MAX_SEQ_LENGTH=1']
+Saved compiled kernel to: /ssd/mirage_mpk_build/tests/runtime_python/test_mode/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
+Finished megakernel compilation...
+Running test kernel...
+Output:
+tensor([[-0.1670, -1.5391,  0.3008, -0.5312,  0.9453, -0.2793, -0.2305,  1.5469],
+        [ 1.5547, -3.8125, -0.1777, -0.4355,  0.8164, -0.2637, -0.2461, -0.4980]],
+       device='cuda:0', dtype=torch.bfloat16)
+Reference:
+tensor([[-0.1670, -1.5391,  0.3008, -0.5312,  0.9453, -0.2793, -0.2305,  1.5469],
+        [ 1.5547, -3.8125, -0.1777, -0.4355,  0.8164, -0.2637, -0.2461, -0.4980]],
+       device='cuda:0', dtype=torch.bfloat16)
+Max absolute difference: 0.03125
+PASSED: rmsnorm test_mode produces correct output
+Test completed successfully!
+EXIT=0
+ALLDONE

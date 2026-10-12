@@ -498,6 +498,11 @@
         失败，下次需重钉 4.16，用完再切回）。
       - 假设（**待验证**）：H1 iteration/事件计数错位、H2 sm90 `MPK_ENABLE_TMA`/`GRACE_HOPPER`
         task 单体内同步卡住、H3 快照 offline/test 路径不完整。下轮见 ROADMAP「阻塞」与 §「下一步」。
+      - **续做（P25-1 续）见 `docs/09` §7**：官方 `test_rmsnorm_testmode.py`（128/16）plain **3/3
+        挂起**；加 worker 轮询自旋计数插桩后 **3/3 收敛且正确**；消融把根因定位到 **worker 取 task
+        轮询循环（`persistent_kernel.cuh:1013`）的时序竞态**（H2 与 H1-阈值形态均排除）。原始输出
+        `harness/mpk_converge_{plain,instrumented,attribution}.out.txt`、`harness/mpk_dbg_trace.out.txt`，
+        patch `harness/mpk_watchdog.patch`（全量）/`harness/mpk_workaround_only.patch`（最小修复）。
 
 ## 每轮增量流程（autopilot）
 
@@ -557,7 +562,9 @@
   cross-task software pipelining 实测出来，补齐 P22-1 §15.6 明留的尾巴）。
   **P0–P24 全部完成**。**P25-1（线上实现构建与端到端冒烟）部分完成**：目标卡 H100/sm90 上
   mirage（`f9eb70c`）**构建 + JIT 编译 + launch 成功**，但 kernel 执行不收敛（见「阻塞」B1），
-  故记为 `[~]`；后续（下轮）见「阻塞」与「下一步」。
+  故记为 `[~]`。**本轮（P25-1 续）**把「不收敛」诊断到底：官方 test_mode 用例 plain 3/3 挂起、
+  加一处 worker 轮询自旋计数后 3/3 收敛且正确（`docs/09` §7），根因定位到 **worker 取 task 轮询
+  循环的时序竞态**；端到端**延迟**仍未测。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -606,10 +613,13 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：P25-1 收尾**（P0–P24 全部完成；P25-1 已构建+launch、执行未收敛）。优先把「MPK 端到端
-  跑通」做完：① 开 `-DMPK_ENABLE_VERBOSE`（或加 event 计数打印）对 `test_rank0.cu` 逐事件 trace，
-  定位 `all_event_counters` 到不了的 event（验 `docs/09` §4 H1）；② 换非 Hopper-TMA 的最小 task
-  隔离 H2；③ 直接用官方 CI 入口复现。注意 z3 版本互斥（「阻塞」B2）。详见 `docs/09-mpk-build.md` §6。
+- **下一步：P25-1 收尾（端到端延迟）**（P0–P24 全部完成；P25-1 已构建+launch；**本轮续做已把
+  官方用例跑通**：plain 3/3 挂起、加 worker 轮询插桩后 3/3 收敛且正确，见 `docs/09` §7）。
+  剩余：① 在**收敛**（加最小插桩）的构建上测**端到端延迟**与多 iter 稳定性（`harness/mpk_smoke.py`
+  的 `--iters`）；② 用 `compute-sanitizer --tool racecheck` 抓 worker/scheduler 的数据竞争，把根因
+  钉到具体 load/store 内存序；③ 把自旋计数换成 `__nanosleep` 退避，验证是纯时序而非缺 fence；
+  ④ 向 MPK 上游核对 `f9eb70c` 的 worker 抢跑路径。注意 z3 版本互斥（「阻塞」B2）。详见
+  `docs/09-mpk-build.md` §7。
 - 其它可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
@@ -629,6 +639,34 @@
   ⑧ ~~P22-1 §15.6「跨层流水/环形缓冲预取」~~（**P23-1 完成**：MPK §5.3 的 paged SMEM +
    cross-task software pipelining 实测——跨层预取峰值 1.19–1.20×（vs barrier）、深度按访存占比选
    K≈4、纯访存时净亏；eager/barrier 1.25× 验证消 launch 主收益）。
+- **本轮（P25-1 续）**：续做 P25-1 的「MPK 端到端跑通」，把上轮「执行不收敛」从玄学死锁推进到
+  **可复现、可归因的时序竞态**。`docs/09-mpk-build.md` 新增 **§7**（收敛性诊断），新原始输出
+  `harness/mpk_converge_plain.out.txt` / `harness/mpk_converge_instrumented.out.txt` /
+  `harness/mpk_converge_attribution.out.txt` / `harness/mpk_dbg_trace.out.txt`，patch
+  `harness/mpk_watchdog.patch`（全量插桩）与 `harness/mpk_workaround_only.patch`（最小修复）。
+  快照仍为 `f9eb70c`，目标卡 H100/sm90，**`CUDA_VISIBLE_DEVICES=7` 隔离空闲卡**，单次 `timeout 200s`。
+  核心结论：
+  - **[复现] 用快照自己的用例排除自建脚本因素**：直接跑官方
+    `tests/runtime_python/test_mode/test_rmsnorm_testmode.py`（官方 `get_configurations_from_gpu(0)`
+    = **128 worker/16 scheduler**），plain 构建 **3/3 挂起**（`EXIT=124`、GPU 100% 自旋）——
+    与 `mpk_smoke.py` 无关，是「快照 + 本机」的行为。
+  - **[修好] 插桩后收敛且正确**：在 `persistent_kernel.cuh` 的 worker 取 task 等待循环（`:1013`）与
+    scheduler 事件等待循环（`:1335`）加自旋计数守门狗（`printf`+`__trap()`）＋ scheduler 0 逐事件打印，
+    经 `persistent_kernel.py:365-371` 加 `-DMPK_DBG_WATCHDOG`；full instrumented **3/3 收敛**
+    （`EXIT=0`），`max|out-ref|`=0.015625/0.015625/0.03125（bf16 容差内）；**守门狗从未触发**。
+  - **[trace] 完整事件序列实锤**：`harness/mpk_dbg_trace.out.txt` 显示
+    seed `event2(910,nt16,iter0)` → `event1(903,nt1)` → 16 个 rmsnorm 触发 `event2(910,iter1)` →
+    `prepare_next_batch->FALSE` → `event0(911)` 终止，与 `docs/09` §4 的收敛路径逐步吻合。
+  - **[判别] 排除 H2、排除 H1 的"阈值凑不满"**：16 个 task 全部触发 event2（否则到不了 nt16、
+    不会二次派发 event2、也就不会有 `prepare_next_batch->FALSE`），故非 task 单体内 TMA/mbarrier 卡住。
+  - **[归因] 消融定位到 worker 轮询循环**：A plain 3/3 挂、B prints-only 2/2 挂、
+    C worker-spin-only(no prints) 2/2 收敛、D worker-spin+prints 2/2 收敛、E full 3/3 收敛。
+    **唯一决定性变量 = `execute_worker` 取 task 等待循环里"每轮多一次自旋自增+分支"的时序扰动**；
+    scheduler 侧逐事件 printf（B）不足以修复。最小修复 patch 只加该自旋计数即让官方用例稳定收敛，
+    **反证竞态在 worker 侧"等 task"的抢跑/丢失唤醒**上。
+  - **局限**：未把根因收敛到某条 load/store 内存序；端到端延迟仍未测（只测正确性+收敛/挂起）。
+    下一步候选：`compute-sanitizer --tool racecheck` 抓竞争、把自旋换成 `__nanosleep` 退避验证纯时序、
+    向 MPK 上游核对 `f9eb70c` worker 抢跑路径。**不构成对上游的 bug 判定**。P25-1 仍记 `[~]`。
 - **本轮（P25-1）**：新建 `docs/09-mpk-build.md`（MPK 线上实现的**构建与端到端冒烟**，与 `docs/06`/`07`/`08`
   同一快照 `f9eb70c`）+ 博客 post `mega-kernel-10-mpk-build`（weight 11）并更新 `mega-kernel-00-index`
   目录第 10 项；脚本 `harness/mpk_smoke.py`，原始输出 `harness/mpk_build_run.out.txt`（构建）与
@@ -995,8 +1033,14 @@
   能 JIT 编译、能 launch**，但常驻 kernel 的 worker/scheduler 事件循环**不终止**（`pk()` 后
   `torch.cuda.synchronize()` 永不返回、GPU 100% 自旋）；4 worker/4 scheduler 亦复现，排除
   SM 占用不足。详见 `docs/09-mpk-build.md` §3–§4 与 `harness/mpk_smoke.out.txt`。
-  下一轮可尝试：开 `-DMPK_ENABLE_VERBOSE` 逐事件 trace（验 H1）／换非 Hopper-TMA 的最小 task
-  隔离 H2／用官方 CI 入口复现。**不阻塞本专题其余任务**（纯资料分析均已完成）。
+  **本轮（P25-1 续）已诊断到根因层面（`docs/09` §7）**：官方 test_mode 用例 plain **3/3 挂起**，
+  在 `execute_worker` 取 task 轮询循环（`persistent_kernel.cuh:1013`）加一处**无害的自旋计数**
+  即 **3/3 收敛且正确**（`max|out-ref|≤0.03125`）；消融显示决定性变量就是这个 wheel loop 的时序扰动，
+  scheduler 侧逐事件 printf 不足以修复。**判定：这是 worker↔scheduler 的时序敏感同步竞态（丢失唤醒/
+  抢跑），非 task 单体内 TMA/mbarrier 卡住（H2 排除），也非事件计数"凑不满"（H1 该形态排除）**。
+  仍未做：端到端**延迟**数字、把根因钉到具体内存序（建议 `compute-sanitizer --tool racecheck`）。
+  patch：`harness/mpk_watchdog.patch`（全量插桩）／`harness/mpk_workaround_only.patch`（最小修复）。
+  **不阻塞本专题其余任务**（纯资料分析均已完成）。
 - **B2（环境）z3-solver 版本互斥**：mirage 需 `z3-solver==4.16.0.0`，容器内 `tilelang` 需
   `<4.15.5`。本轮跑完 mirage 后已恢复 `4.15.4.0`，因此当前 `import mirage` 会失败；下次使用
   mirage 前需重钉 `4.16.0.0`（用完切回），避免影响其它并行专题。

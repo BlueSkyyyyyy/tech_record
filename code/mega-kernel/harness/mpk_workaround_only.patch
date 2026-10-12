@@ -1,0 +1,32 @@
+diff --git a/include/mirage/persistent_kernel/persistent_kernel.cuh b/include/mirage/persistent_kernel/persistent_kernel.cuh
+index dc65870..b1e6b1e 100644
+--- a/include/mirage/persistent_kernel/persistent_kernel.cuh
++++ b/include/mirage/persistent_kernel/persistent_kernel.cuh
+@@ -1011,6 +1011,9 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
+     if (queue_pos == queue_len) {
+       int queue_idx = 0;
+       if (threadIdx.x == 0) {
++#ifdef MPK_DBG_WATCHDOG
++        long _dbg_spins = 0;
++#endif
+         while (next_task_pos[queue_idx] == last_task_pos[queue_idx]) {
+           last_task_pos[queue_idx] =
+               ld_acquire_gpu_u64(&config.worker_queue_last_ready_task_id
+@@ -1023,6 +1026,17 @@ __device__ __forceinline__ void execute_worker(RuntimeConfig config) {
+           }
+           // nanosleep to avoid overwhelming I/O
+           __nanosleep(10);
++#ifdef MPK_DBG_WATCHDOG
++          if (worker_id == 0 && ++_dbg_spins > 20000000L) {
++            printf("[WDBG] worker0 STALL next(%llu) last(%llu) lr0(%llu) "
++                   "nworkers(%d) nsched(%d) mygpu(%d)\n",
++                   next_task_pos[0], last_task_pos[0],
++                   ld_acquire_gpu_u64(&config.worker_queue_last_ready_task_id[0]),
++                   config.num_workers, config.num_local_schedulers,
++                   config.my_gpu_id);
++            __trap();
++          }
++#endif
+         }
+         assert(next_task_pos[queue_idx] + config.per_worker_queue_len >
+                last_task_pos[queue_idx]);

@@ -12,6 +12,9 @@
 > 定位：本文解决「线上 MPK 到底能不能在这台机器上跑起来、跑到哪一步」。**主机侧全链路成功**；
 > **设备侧 worker/scheduler 事件循环未终止**，本轮停在 launch 之后（下文 §3–§4 给出原始证据与
 > 假设），因此计为**部分完成 + 一条阻塞**（见 ROADMAP「阻塞」）。
+> **§7（续做 P25-1）**进一步用官方 test_mode 用例复现挂起（3/3），并以插桩消融把根因定位到
+> **`execute_worker` 取 task 轮询循环的时序竞态**：加一处无害的自旋计数即可让官方用例 3/3 收敛
+> （正确性 `max|out-ref| ≤ 0.03125`）。
 
 ## 0. 一句话结论
 
@@ -23,6 +26,7 @@
 | nvcc JIT 编译（sm_90a） | **成功**（~27 s / 次） | `harness/mpk_smoke.out.txt` |
 | 常驻 kernel launch（worker/scheduler 双 stream） | **成功**（host 打印 `Finished Launching Persistent Kernel (Async)`） | 同上 |
 | kernel 执行完成 / 终止 | **未完成**（`torch.cuda.synchronize()` 不返回、GPU 自旋 100%） | 同上 |
+| §7：官方用例收敛性 | plain 3/3 挂起；加 worker 轮询插桩后 3/3 收敛（`max abs diff ≤0.03125`） | `harness/mpk_converge_*.out.txt` |
 
 判据映射：到 launch 为止已经能看到 MPK 的 **C1（单次 launch）** 落地；但**执行不收敛**意味着本轮
 **无法给出端到端数值/延迟结论**，C2–C5 仍只有 `docs/06`–`docs/08` 的源码级证据。
@@ -200,3 +204,94 @@ Finished Launching Persistent Kernel (Async)
    （后者需要 Qwen 权重，本轮不具备）。
 
 **阻塞**（已记入 ROADMAP「阻塞」）：MPK 在本容器共享 GPU 上**执行不收敛**，本轮无法给出端到端实测。
+
+## 7. 收敛性诊断（续做 P25-1）：官方用例复现挂起 + 时序敏感性的定位
+
+§3–§6 的结论来自**自建** `mpk_smoke.py`（4 worker / 4 scheduler）。本轮（续做）先把"挂起"这件事
+钉死，再用插桩把它从「玄学死锁」推进到「可复现、可定位的时序竞态」。所有实验：
+目标卡 H100/sm90、**`CUDA_VISIBLE_DEVICES=7` 隔离到空闲卡**、快照 `f9eb70c`、每组用例内**顺序**跑
+若干次，单次 `timeout 200s`。原始输出见 `harness/mpk_converge_plain.out.txt`、
+`harness/mpk_converge_instrumented.out.txt`、`harness/mpk_converge_attribution.out.txt` 与
+`harness/mpk_dbg_trace.out.txt`。
+
+### 7.1 用快照自己的测试复现（排除自建脚本因素）
+
+直接跑快照自带用例 `tests/runtime_python/test_mode/test_rmsnorm_testmode.py`——它用官方
+`get_configurations_from_gpu(0)` 取 **128 worker / 16 scheduler**（与 `docs/06` §7 的 H100→128/16
+一致），构建同样的单层 RMSNorm 图。结果：
+
+- **[A] plain 组：3/3 挂起**（`EXIT=124`，GPU 100% 自旋、`torch.cuda.synchronize()` 不返回）。
+
+即挂起**与本专题自建脚本、与 4/4 的小配置无关**，是「快照 `f9eb70c` + 本机 H100/sm90」的行为。
+
+### 7.2 插桩：守门狗 + 逐事件 trace（patch 见 `harness/mpk_watchdog.patch`）
+
+在 `persistent_kernel.cuh` 两处轮询循环各加一个"自旋计数守门狗"（超阈值 `printf` 诊断后 `__trap()`），
+并在 scheduler 0 上打印每次取到的 event 与 `prepare_next_batch` 的返回：
+
+- `execute_worker` 取 task 等待循环（`persistent_kernel.cuh:1013` 一带，等
+  `worker_queue_last_ready_task_id`）；
+- `execute_scheduler` 事件等待循环（`:1335` 一带，等 `sched_queue_last_ready_event_id`）；
+- 通过 `get_compile_command`（`persistent_kernel.py:365-371`，`target_cc==90` 分支）加编译宏
+  `-DMPK_DBG_WATCHDOG` 打开。
+
+**[E] full instrumented 组：3/3 收敛**（`EXIT=0`），与 PyTorch 参考的 `max|out-ref|` =
+0.015625 / 0.015625 / 0.03125（bf16 容忍 0.05 内）。**守门狗 3 次都没触发**——说明收敛时两条
+轮询循环都没有"永久自旋等一个恒定不来的事件"。
+
+### 7.3 完整事件序列（trace 实证）
+
+收敛时的 scheduler 0 逐事件 trace（`harness/mpk_dbg_trace.out.txt`）：
+
+```
+[SDBG] sched0 got event_id(2) etype(910) nt(16) iter(0) cur0(0) last0(1)   # 种子: 图末事件
+[SDBG] sched0 got event_id(1) etype(903) nt(1)  iter(0) cur0(1) last0(1)   # LAUNCH_DEPENDENT
+[SDBG] sched0 got event_id(2) etype(910) nt(16) iter(1) cur0(1) last0(2)   # 16 个 rmsnorm 全部触发后
+[SDBG] prepare_next_batch -> FALSE (terminate)
+[SDBG] sched0 got event_id(0) etype(911) nt(1)  iter(1) cur0(2) last0(3)   # 终止
+```
+
+逐步对上 `docs/09` §2 的 18 task / 3 event 与 §4 的收敛路径：`prepare_kernel` 把图末事件
+（`end_of_task_graph_event_pos = num_events-1 = 2`）种进 `sched_queue[0]`（`:226-233`）→ scheduler 0
+取到它、`prepare_next_batch` 返回 true、派发 `compute_task_id(1, 1)`（begin task，`:1399-1405`）→
+begin task 触发 event 1（`EVENT_LAUNCH_DEPENDENT_TASKS`，`nt=1`）→ 派发 16 个 `type 154` rmsnorm
+task（`:1424-1448`）→ 16 个 task 各触发一次 event 2（`nt=16`）凑满阈值（`:1185`）→ scheduler 再次
+处理 event 2、`prepare_next_batch` 返回 **false**、`terminate_schedulers`（`:1394`）→ 各 scheduler
+在 `:1361` 终止、给 worker 写终止 task、双 kernel 退出。**与纯源码走读的预测完全一致**。
+
+### 7.4 判别：挂起到底是哪一类
+
+- **排除 H2（task 单体内 TMA/mbarrier 卡住）**：若某个 `type 154` 卡在 TMA/mbarrier，event 2 的
+  `all_event_counters` 到不了 `num_triggers=16`，就不会第二次派发 event 2，也就不会打印
+  `prepare_next_batch -> FALSE`。收敛组里它被打印，说明**16 个 task 全部跑完并触发**。
+- **排除 H1 的"阈值永远凑不满"形态**：收敛组事件计数完整到阈值。
+- **结论**：挂起是 **worker↔scheduler 之间的时序敏感同步竞态**，不是某个 task 体能卡住。
+
+### 7.5 归因：哪一段插桩才是决定性的（variation 实验）
+
+把插桩拆成三个正交部件，做消融（每组 2–3 次，见 `harness/mpk_converge_attribution.out.txt`）：
+
+| 组 | worker 轮询自旋计数 | scheduler 自旋计数 | scheduler 逐事件 printf | 结果 |
+|---|---|---|---|---|
+| A plain | – | – | – | **3/3 挂起** |
+| B prints-only | – | – | ✔ | **2/2 挂起** |
+| C worker-spin-only | ✔ | – | – | **2/2 收敛** |
+| D worker-spin + prints | ✔ | – | ✔ | 2/2 收敛 |
+| E full | ✔ | ✔ | ✔ | 3/3 收敛 |
+
+**决定性变量只有一个：`execute_worker` 取 task 等待循环（`:1013`）里"每轮多一次自旋自增+分支"
+这点时序扰动**。scheduler 侧的逐事件 `printf`（B 组，无任何自旋计数）**不足以**修复——对照组 C
+（只有 worker 侧自旋计数、**连 printf 都没有**）就已经收敛。最小修复 patch 见
+`harness/mpk_workaround_only.patch`：
+仅在 worker 轮询循环里加 `long _dbg_spins; ... ++_dbg_spins;`（打印分支不会触发），即可让官方用例
+稳定收敛——这**反证了竞态就在 worker 侧"等 task"的抢跑/丢失唤醒**上。
+
+### 7.6 局限与下一步
+
+- 本轮的强证据是**可复现 + 可归因到 worker 轮询循环**；**未**把根因收敛到某一条具体的 load/store
+  内存序（worker 的 `ld_acquire` 读计数、scheduler 的 `st_relaxed` 写 payload + `atom_add_release`
+  写计数已按序）。下一步候选：① 用 `compute-sanitizer --tool racecheck` 跑官方用例抓数据竞争；
+  ② 在 worker 侧把"每轮多一次自旋"换成等价语义的 `__nanosleep` 退避，确认是纯时序而非缺 fence；
+  ③ 向 MPK 上游核对 `f9eb70c` 的 worker 抢跑路径是否有已知修复。**不构成对上游的 bug 判定**，
+  仅为可复现的本机观察。
+- 端到端**延迟**仍未测（只测了正确性与收敛/挂起）。收敛组正确性 `max|out-ref| ≤ 0.03125`（bf16）。

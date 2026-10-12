@@ -1,0 +1,80 @@
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_sparse_mma_warpspecialized.hpp(902): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_warpspecialized.hpp(717): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_array_warpspecialized.hpp(716): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm100_blockscaled_mma_mixed_tma_cpasync_warpspecialized.hpp(554): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB_));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm103_blockscaled_mma_warpspecialized.hpp(682): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(params.layout_SFB));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include/cutlass/gemm/collective/sm103_blockscaled_mma_array_warpspecialized.hpp(810): warning #2908-D: the implicit by-copy capture of "this" is deprecated
+          Tensor mSFB_tmp = observed_tma_load_sfb_->get_tma_tensor(shape(layout_SFB));
+                            ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(326): warning #177-D: variable "step_advance" was declared but never referenced
+        int step_advance = num_tokens;
+            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(944): warning #177-D: variable "num_schedulers" was declared but never referenced
+    int const num_schedulers =
+              ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(946): warning #177-D: variable "num_schedulers_per_sm" was declared but never referenced
+    int const num_schedulers_per_sm = SCHEDULERS_PER_BLOCK;
+              ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(1142): warning #177-D: variable "_trace_t" was declared but never referenced
+        bool _trace_t =
+             ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(969): warning #20054-D: dynamic initialization is not supported for a function-scope static __shared__ variable within a __device__/__global__ function
+    __attribute__((shared)) TaskDesc task_descs[TASK_DESCS_BUFFER_LENGTH];
+                                     ^
+
+/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/persistent_kernel.cuh(1684): warning #177-D: variable "expected_num_meta" was declared but never referenced
+    size_t expected_num_meta = 7 + 1 * 4;
+           ^
+
+[MPK INIT] Total tasks: 18, Total events: 3
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[SDBG] sched0 got event_id(2) etype(910) nt(16) iter(0) cur0(0) last0(1)
+[SDBG] sched0 got event_id(1) etype(903) nt(1) iter(0) cur0(1) last0(1)
+[SDBG] sched0 got event_id(2) etype(910) nt(16) iter(1) cur0(1) last0(2)
+[SDBG] prepare_next_batch -> FALSE (terminate)
+[SDBG] sched0 got event_id(0) etype(911) nt(1) iter(1) cur0(2) last0(3)
+sm_cnt:  132
+Compiling test kernel...
+Compiling megakernel using the following command line:
+['/usr/local/cuda/bin/nvcc', '/tmp/tmp_nwxx4uv/test.cu', '-O3', '-lineinfo', '-I/usr/include/python3.12', '-I/ssd/mirage_mpk_build/python/mirage/../../include', '-I/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/include', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/cutlass/tools/util/include', '-I/ssd/mirage_mpk_build/python/mirage/../../deps/json/include', '-DMAX_WORKER_PER_SCHEDULER=9', '-DMIRAGE_USE_CUTLASS_KERNEL=0', '-gencode=arch=compute_90a,code=sm_90a', '-DMPK_ENABLE_TMA', '-DMIRAGE_GRACE_HOPPER', '-DNDEBUG', '-DMPK_DBG_WATCHDOG', '-shared', '-std=c++20', '-rdc=false', '-use_fast_math', '-lcuda', '-lcudart', '-lstdc++fs', '-Xcompiler=-fPIC', '--expt-relaxed-constexpr', '-o', '/tmp/tmp_nwxx4uv/test.cpython-312-x86_64-linux-gnu.so', '-DMPK_TARGET_CC=90', '-DMIRAGE_BACKEND_USE_CUDA', '-DMPK_TEST_MODE', '-DMODE_OFFLINE', '-DMPK_MAX_NUM_BATCHED_REQUESTS=1', '-DMPK_MAX_NUM_BATCHED_TOKENS=1', '-DMPK_MAX_TOKENS_PER_REQUEST=1', '-DMPK_MAX_NUM_PAGES=1', '-DMPK_NUM_KV_GROUPS=1', '-DMPK_MAX_SEQ_LENGTH=1']
+Saved compiled kernel to: /ssd/mirage_mpk_build/tests/runtime_python/test_mode/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
+Finished megakernel compilation...
+Running test kernel...
+Output:
+tensor([[ 0.1299, -0.0430, -0.9922, -0.0593,  0.0055,  0.5859, -0.8828,  0.3926],
+        [-0.1934,  0.0757, -0.4551,  0.1128, -0.0056, -0.8086,  0.2910, -0.5234]],
+       device='cuda:0', dtype=torch.bfloat16)
+Reference:
+tensor([[ 0.1299, -0.0430, -0.9922, -0.0593,  0.0055,  0.5859, -0.8828,  0.3926],
+        [-0.1934,  0.0757, -0.4551,  0.1128, -0.0056, -0.8086,  0.2910, -0.5234]],
+       device='cuda:0', dtype=torch.bfloat16)
+Max absolute difference: 0.015625
+PASSED: rmsnorm test_mode produces correct output
+Test completed successfully!
+EXIT=0
