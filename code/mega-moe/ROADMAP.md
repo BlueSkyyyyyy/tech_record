@@ -995,6 +995,49 @@
       `m_grouped_bf16_gemm_nt_contiguous`（G=4,m=34304,n=6144,k=7168）`calc_diff=0`、helper 通过、
       非零 padding 被检出。配套博客 `content/posts/mega-moe-43-deepgemm-test-utils`（索引页新增第 43 篇）。
 
+### P34 增量（opt-in，补上 Mega MoE 一直缺席的「共享专家」分支）
+
+- [x] **P34-1** **Mega MoE 的共享专家（shared expert）分支**（`csrc/apis/mega_moe.hpp`、
+      `deep_gemm/include/deep_gemm/layout/mega_moe.cuh`、
+      `deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh`、
+      `deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh`、`deep_gemm/mega/__init__.py`、
+      `tests/test_mega_moe.py`）。第 02/03/09/10/11/20/42 篇反复出现的「路由专家 + combine」一直漏了
+      **每 token 恒激活的共享专家**——它是 Mega MoE 里唯一「不走 dispatch、却走完整 L1/SwiGLU/L2/combine」
+      的通路。**主 kernel SM100 专属，仅分析**；host/调度器/UTCCP 映射/数学架构无关，H100 真机实测。
+      → `docs/44-mega-moe-shared-expert.md`（真实行号核对）：**host 契约** `mega_moe.hpp:206-228`
+      （共享权重是 2D `[2S,H]`/`[H,S]`、`E_s = S/I` 整除、`S%I==0`、**恒 FP8 e4m3** `:222-223`、
+      SF 检查传 `nullopt` `:224-227`）+ `get_symm_buffer_size_for_mega_moe` 的 `num_shared_experts`
+      （`:35/40/53/80-85`）+ 12 view 里的四个共享 view（`shared_l1_acts ≡ x` `:114`、shared SF K-major
+      `:115-128`）。**布局** `layout/mega_moe.cuh`：`get_num_max_shared_sf_tokens = ceil_div(T,8)*128`
+      （`:36-40`）、`MegaMoEBuffer` 的共享缓冲链式分配（`:384-424`，`shared_l1_token_buffer =
+      input_token_buffer` `:415`、combine 外层维 `num_topk+1` `:448`）、`Workspace` 的两条共享任务
+      计数器 + `shared_l2_full_count[kNumMaxSharedL2Blocks=32768]`（`:69-70/89/117/125`）。
+      **调度** `scheduler/mega_moe.cuh`：`BlockPhase::SharedLinear1/2`（`:83-89`）、`is_shared()` =
+      `phase>Linear2`（`:131-133`，`sizeof` 相等 `:136`）、形状关系
+      **`SHARED_L1_SHAPE_N = L1_SHAPE_N·E_s`（N 轴）/ `SHARED_L2_SHAPE_K = L2_SHAPE_K·E_s`（K 轴）**
+      （`:181-195`）、`shared_mainloop`（`:421-436`，`pool_block_idx=m_block_idx`、`expert_idx=0`、
+      `valid_m` 裁尾）、`mainloop` 的**共享 L1 无条件在 `fetch_expert_recv_count` 之前发布**（`:445-452`
+      重叠 dispatch）与 **`is_shared_l2_early` 启发式**（`:443-444`，`:467-471` 补尾）。**kernel**（仅分析）：
+      `shared_b_dtype_t = e4m3`（`:154`，`sizeof` 相等 `:839`）、TMA tensor map 四相位选择
+      （`:697-704/763-770`）、`expert_idx=is_shared()?0`（`:779`）、shared SF 无 per-expert 基址
+      （`:788`）、独立 `shared_instr_desc`（`:832-836/859`）、共享 L2 等 `shared_l2_full_count`
+      （`:717-720` expected `(SHARED_L2_SHAPE_K/BLOCK_N)*2`）、L1 epilogue **共享项权重恒 1.0**
+      （`:1068`；只有路由才重载 top-k 权重 `:1095`）、共享 L1 输出写 `tensor_map_shared_l1_output`
+      （`:1225`）、完成写 `shared_l2_full_count`（`:1242-1244`）、L2 epilogue 写 combine 的
+      **`kNumTopk` 槽**（`:1287-1288`）、combine 先取共享槽（`:1431-1433/1449-1450`）。
+      Test 参考（`test_mega_moe.py:277-302` 的两级 GEMM + `:333` 作 combine 的 `bias`；UTCCP 映射
+      `:36-50` 与 `kernel:145-149`）。**H100 实测**：`src/mega_moe_shared_schedule.cu`（**直接 include 真实
+      `scheduler/mega_moe.cuh` 编译运行设备代码**）+ `harness/exp_mega_moe_shared_expert.{sh,out.txt}`——
+      ① 共享 L1/L2 的 `get_next_task_idx` 枚举**恰好覆盖所有 `(m,n)` 一次**（32/32、64/64，去重相等，每域
+      只领自己那半）；② `get_num_max_live_pool_blocks`/`get_num_l1_warmup_waves`（`:17-80`）block∈{8,32,
+      128,512} code vs host 逐项一致（live 8/32/114/306）、`is_shared_l2_early`（`:443-444`）真机常量判定；
+      ③ host binding 5 组配置（shared∈{0,1,2}，fp8/bf16）**逐字段 ALL OK**（`shared_l1_acts is x`、shared
+      SF 行数 `ceil_div(Tmax,8)*128` + 列主序、`shared_l2_acts=(Tmax,E_s·I)`、shared=0 时三 view 全
+      undefined）；④ UTCCP 映射 device vs host 8 个 BLOCK_M **逐点 0 不符且单射**；⑤ 真实 SM90
+      `bf16_gemm_nt`：共享前向 vs fp64 relerr **3.447e-3**、combine `Σw_k·routed_k + shared`（无权重、
+      只加一次）relerr **3.448e-3**、反例（共享项重复 topk 次）**8.747e-1**。配套博客
+      `content/posts/mega-moe-44-mega-moe-shared-expert`（索引页新增第 44 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1019,8 +1062,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P33 各增量完成（P15-1…P32-1、P33-1）。**
-  本轮 P33-1：新建 `docs/43-deepgemm-test-utils.md`（+`harness/exp_test_utils.{py,sh,out.txt}`、
+- 当前进度：**P0~P14 全部完成；P15~P34 各增量完成（P15-1…P33-1、P34-1）。**
+  本轮 P34-1：新建 `docs/44-mega-moe-shared-expert.md`（+`harness/exp_mega_moe_shared_expert.{py,sh,out.txt}`、
+  `src/mega_moe_shared_schedule.cu`）——补上 Mega MoE 一直缺席的**共享专家（shared expert）分支**：
+  DeepSeek 每层在 top-k 路由专家外还有一个**每 token 恒激活**的共享专家，Mega MoE 把它融进同一个
+  mega-kernel，它是唯一「不走 dispatch、却走完整 L1/SwiGLU/L2/combine」的通路。**主 kernel SM100 专属，
+  仅分析**（kernel `:80` 整段 `__CUDA_ARCH__>=1000`）；**host/调度器/UTCCP 映射/数学架构无关，H100 真机实测**。
+  三个结构点：① **共享 L1 无条件在 dispatch 之前发布**（`scheduler:445-452`，因为 `shared_l1_acts ≡ x`），
+  天然与通信重叠，共享 L2 按 `is_shared_l2_early`（`:443-444`）决定提前或补尾；② **L1 沿 N 轴变宽
+  `2·E_s·I`、L2 沿 K 轴变宽 `E_s·I`**（`:181-195`），因为它是一个更宽的前馈层；③ **共享结果写进 combine
+  的 `kNumTopk` 槽、被 fp32 累加器无权重加一次**（`kernel:1287-1288/1431-1433/1449-1450`，对应 test
+  `:333` 作 combine `bias`）。另有三处「借道」：零拷贝复用 input buffer（`layout:415`）、两个相位两个
+  每域计数器（`scheduler:83-89/421-436`）、恒 FP8 共享权重（`kernel:154`，路由可 FP4）。**H100 实测**：
+  直接 include 真实 `scheduler/mega_moe.cuh` 跑设备代码——共享 L1/L2 任务枚举**恰好覆盖一次**
+  （32/32、64/64）；constexpr 公式与 `is_shared_l2_early` code vs host 逐项一致；host binding 5 组配置
+  逐字段 ALL OK；UTCCP 映射 device vs host 8 个 BLOCK_M 逐点 0 不符且单射；真实 SM90 `bf16_gemm_nt`
+  共享前向 vs fp64 relerr **3.447e-3**、combine 语义 **3.448e-3**、反例 **8.747e-1**。行号全部核对过。
+  配套博客 `content/posts/mega-moe-44-mega-moe-shared-expert`（索引页新增第 44 篇）。
+  上一轮 P33-1：新建 `docs/43-deepgemm-test-utils.md`（+`harness/exp_test_utils.{py,sh,out.txt}`、
   `src/test_utils_sr.cu`）——补上测试栈里 **「比 relerr 更硬的逐位断言」层**：`tests/utils.py` 的 6 个
   辅助是 `test_bf16`/`test_einsum`/`test_fp8_fp4` 共用的**可执行 oracle**。三个最硬性质：① **direct ==
   累积**（`assert_direct_output_matches_fp32_accumulation:20-38`，把同一零张量同时当 D/C 使累积退化成
@@ -1315,10 +1374,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P33 已完成（新增 **P33-1 测试断言辅助 `tests/utils.py`：逐位 oracle 层**：
-  direct==累积逐位、随机舍入 oracle 与 device 哈希逐位 0 不符、PSUM padding 全零+负例、SF 毒化、
-  E4M3 精确表示 E2M1、NVFP4 VEC16 分块；H100 27/27 PASS；见上）。P32-1 Mega MoE host 编排层与
-  对称缓冲区布局（H100 逐字段对拍 `num_bytes` 与 12 view）。
+- **下一步**：P0~P34 已完成（新增 **P34-1 共享专家分支**：Mega MoE 里唯一「不走 dispatch 却走
+  完整计算」的通路——共享 L1 与 dispatch 重叠、L1 沿 N/L2 沿 K 变宽、结果写 combine 的额外槽无权重加一次；
+  主 kernel SM100 仅分析，host/调度器/UTCCP/数学 H100 真机实测；见上）。
+  P33-1 测试断言辅助 `tests/utils.py`：逐位 oracle 层（direct==累积逐位、随机舍入 oracle 与 device
+  哈希逐位 0 不符、PSUM padding 全零+负例、SF 毒化、E4M3 精确表示 E2M1、NVFP4 VEC16 分块；H100 27/27
+  PASS）。P32-1 Mega MoE host 编排层与对称缓冲区布局（H100 逐字段对拍 `num_bytes` 与 12 view）。
   P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
   P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子、
   P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel、P23-1 DeepJIT 编译/缓存/加载/发射管线、
