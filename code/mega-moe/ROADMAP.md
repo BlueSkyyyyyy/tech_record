@@ -444,6 +444,29 @@
       裸 SF vs 显式变换 SF **逐位相等**（host API 内部本就调同一变换）。配套博客
       `content/posts/mega-moe-25-sf-layout-transform`（索引页新增第 25 篇）。
 
+### P16 增量（opt-in，P15 延伸：K-grouped SF 打包）
+
+- [x] **P16-1** **K-grouped SF 打包**：MoE wgrad 的**按组 block-scale 布局**
+      （`transform_k_grouped_sf_into_required_layout` / `get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor`
+      / `check_k_grouped_packed_ue8m0_tensor` / device `pack_fp32_into_ue8m0<kNumGroups>`）。
+      第 25 篇讲了单组 SF，第 10/12 篇讲了 K 轴分组 GEMM，本篇补交叉点：**每组 SF 行独立对齐补零**。
+      → `docs/26-k-grouped-sf-packing.md`（真实行号核对）：host 入口 `layout.hpp:89-116`
+      （recipe 必须 `(1,1,gran_k)` `:96`；SM90 只转置 `:104-105`、SM100 才打包 `:108-109`；
+      `k_alignment` 契约 SM90=128/SM100%128==0 `:100-101`）；`smxx_layout.hpp:218-283`
+      （`arch==10` 断言 `:224`、contiguous 精确 `packed_sf_k=Σ ceil_div(k/gran_k,4)` `:240-248`、
+      PSUM 上界 `(sf_k+3G)/4` `:249-253`、连续输出 `[packed_sf_k,mn]` `:257`）；
+      `check_k_grouped_packed_ue8m0_tensor :286-317`（`gran_k==32 :293`、`stride(0)%4==0 :300`、
+      `packed_sf_k>=Σ ceil_div(k,gran_k*4) :304-312`、PSUM `:313-314`）。device
+      `smxx_layout.cuh:193-293`：每 warp 一个 packed 行 `:214-219`，线性扫组找 owner
+      `:224-267`（PSUM 组起点 `align(prev,k_alignment)` `:246`、**break 在累加 padding 之前** `:256-261`），
+      取址**减累积 padding** `:275`、LSB-first 打包 `:287`、trap 只允许 2 的幂 `:279-282`。
+      **kernel 与 UMMA 无关**：H100 上**逐行原样抽取真实设备代码**编译运行（`harness/exp_kgrouped_sf_pack.{sh,out.txt}`）
+      + 独立 host 参考对拍，**ALL PASS**：A) ng=1 退化；B) contiguous gran32（无/有 padding、空组、8 组）；
+      C) gran128（kalign 128/256、行数 1/2/3 大量 padding）；D) PSUM（`ends={400,800,1024}` 实际 8 行、
+      上界 10，尾部 2 行 poison；`ends={256,640,1024}` 实际 3 行、上界 4）——mism=0；
+      E) 输出 K pitch=mn（连续）vs 非分组 TMA 对齐；F) host wrapper 在 sm90 被 `:224` 断言拒绝（RuntimeError）。
+      配套博客 `content/posts/mega-moe-26-k-grouped-sf-packing`（索引页新增第 26 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -468,8 +491,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P13 全部完成；P14-1、P15-1 完成。**
-  本轮 P15-1：新建 `docs/25-sf-layout-transform.md`（+`harness/exp_sf_layout.{py,sh,out.txt}`）
+- 当前进度：**P0~P13 全部完成；P14-1、P15-1、P16-1 完成。**
+  本轮 P16-1：新建 `docs/26-k-grouped-sf-packing.md`（+`harness/exp_kgrouped_sf_pack.{sh,out.txt}`、
+  `src/kgrouped_sf_pack.cu`）——补上 **P15（单组 SF 布局）与 P4-2（K 轴分组 wgrad）的交叉点**：
+  「每组 SF 行独立对齐补零」的按组 block-scale 打包。host `transform_k_grouped_sf_into_required_layout`
+  的 `(1,1,gran_k)` recipe、SM90 只转置/SM100 才打包、contiguous 精确 `Σ ceil_div(k/gran_k,4)` 与
+  PSUM 上界 `(sf_k+3G)/4`、已打包 INT 检查；device `pack_fp32_into_ue8m0<kNumGroups>` 的「每 warp 一个
+  packed 行 → 线性扫组找 owner（break 在累加 padding 之前）→ 取址减累积 padding → LSB-first 打包」。
+  **kernel 与 UMMA 无关**：H100 上把 `smxx_layout.cuh:193-293` **逐行原样抽取**后编译运行真实设备代码
+  （打印片段 sha256）+ 独立 host 参考逐行对拍，**ALL PASS**：contiguous 无/有 padding、**空组**、8 组、
+  gran128 大量 padding、**PSUM 尾部 poison**（上界宽松）、输出 K pitch=mn；host wrapper 在 sm90 被
+  `:224` 断言拒绝。配套博客 `content/posts/mega-moe-26-k-grouped-sf-packing`（索引页新增第 26 篇）。
+  Hugo 构建 0 ERROR。
+  上一轮 P15-1：新建 `docs/25-sf-layout-transform.md`（+`harness/exp_sf_layout.{py,sh,out.txt}`）
   ——补上**贯穿所有 FP8/FP4 kernel 的 SF 布局前置步骤**（前面第 10/12/13/21 篇都只是顺带提到）。
   `transform_sf_into_required_layout` 的四分派、recipe 的 2-tuple（断言 `not is_sfa`）/
   3-tuple（断言 `is_sfa`）契约、`check_sf_layout` 形状/stride 检查、`get_tma_aligned_size` 16B 对齐；
@@ -524,7 +558,7 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P15 已完成（P15-1 已把 `transform_sf_into_required_layout` 通用布局补完）。后续若继续（均为增量、非承诺）：
+- **下一步**：P0~P16 已完成（P16-1 已把 K-grouped SF 打包补完）。后续若继续（均为增量、非承诺）：
   ① **sparse attention 系列（P12/P13/P14 已开）**：SM90 dense、SM100 sparse、SM100 dense 连续版/
   分页版调度器均已做；可再补 `sm100_mqa_logits.cuh` SIMT epilogue 的更多数值特性，或
   `impls/sm100_sparse_mqa_logits.cuh` 主 kernel 的 TMA 快路 / 尾裁剪细节精读；
@@ -533,10 +567,8 @@
   ③ **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
   并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）；
   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
-   shared expert 分支的更深精读；端到端需 SM100，当前不可行。
-  ⑤ **k-grouped SF 打包（P15 延伸，仅分析）**：`transform_k_grouped_sf_into_required_layout`
-  （`layout.hpp:89-116`）/ `get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor`
-  （`smxx_layout.hpp:218-283`，host 断言 `arch==10`）的逐组 SF 打包与 PSUM 上界估算，SM100 专属。
+    shared expert 分支的更深精读；端到端需 SM100，当前不可行。
+  ⑤ **k-grouped SF 打包**：P16-1 已完成（host 契约 + device 逐行对拍，H100 真实设备代码）。
   若无新指令，可视为专题完结。
 
   （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。
