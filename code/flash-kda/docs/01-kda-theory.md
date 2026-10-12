@@ -19,7 +19,21 @@ $\alpha_t\in(0,1]^D$ 是**逐通道**的遗忘/衰减门。
 
 **KDA（Kimi Delta Attention）** 与 GLA / DeltaNet 的关键差别，就在这个门如何取：
 KDA 使用 **per-channel（逐通道）的 log-decay** $g_t\in\mathbb{R}^D$（而不是每个 head 一个标量），
-$\alpha_t=\exp(g_t)$ 在 $D$ 个通道上各不相同，表达能力更强。
+$\alpha_t=\exp(g_t)$ 在 $D$ 个通道上各不相同，表达能力更强。三者的定位可以这样对照：
+
+| 模型 | 状态更新 | 遗忘门 $\alpha$ | 写入门 $\beta$ |
+|---|---|---|---|
+| **DeltaNet** | $S_t=S_{t-1}(I-\beta_t k_tk_t^\top)+\beta_t v_tk_t^\top$ | 无（$\alpha\equiv1$） | 有（delta 强度） |
+| **GLA** | $S_t=S_{t-1}\operatorname{diag}(\alpha_t)+\text{(write)}$ | **每 head 一个标量**，数据相关 | 无（直接写入） |
+| **KDA** | $S_t=S_{t-1}\operatorname{diag}(\alpha_t)+\beta_t(v_t-\cdots)k_t^\top$ | **每通道**，数据相关 | 有（delta 强度） |
+
+也就是说：DeltaNet 有 $\beta$ 没有 $\alpha$，GLA 有 $\alpha$ 没有 $\beta$，KDA 两者兼有且
+$\alpha$ 是逐通道的。把式 (1) 展开成 $S_t=S_{t-1}\operatorname{diag}(\alpha_t)
+-\beta_t(S_{t-1}\operatorname{diag}(\alpha_t)k_t)k_t^\top+\beta_t v_tk_t^\top$ 即「先按当前 token 的门衰减旧状态，
+再做 delta 写回」——这正是 §3 分块公式里 $k^{\text{dec}}$ 与 $S_{\text{in}}\odot E^{\text{tot}}$ 两处的来历。
+
+> 逐 token 的等价递推实现见 `src/kda_ref.py::kda_token_recurrent`（$S$ 采用 $[K,V]$ 布局，
+> 输出 $o_t=\text{scale}\cdot q_t S_t$），分块实现见同文件 `kda_chunked_fwd`。
 
 ## 2. 输入、输出与门控构造
 
@@ -211,7 +225,33 @@ $$
 最后留 `tile_prefix`（varlen 用，L22–23、L71）。**这个「SoA 而非 AoS」的排布让每个字段能独立配 TMA
 descriptor，且都能 128B 对齐**（L16–18 的 `static_assert`）。
 
-## 6. 下一步
+## 6. 数值自检：逐 token 递推 vs 分块（P1-4）
+
+`src/kda_ref.py` 里放了两个**独立**的纯 PyTorch 前向：`kda_token_recurrent`（式 (1) 的逐 token
+gated delta rule，作 golden）与 `kda_chunked_fwd`（§3 的 CHUNK=16 分块公式）。二者用完全不同的
+计算顺序（逐 token 串行 vs 块内矩阵求逆），因此互拍能验证分块代数的正确性。把状态布局统一为
+$S\in\mathbb{R}^{K\times V}$、输出 $o_t=\text{scale}\cdot q_tS_t$ 后：
+
+- **fp64**：在所有试探的 $(T,H)\in\{(1,1),(16,1),(20,2),(48,3)\}$、有无初态、$g$ 尺度
+  $\{0,1,4\}$ 组合下，两种实现的 $o$ 与终态 $S$ **逐元素完全相等**（max_abs $=0$）——分块公式与
+  逐 token 递推在实数域严格等价。
+- **fp32**：同样的组合下 max_abs $\sim10^{-9}\!\sim\!10^{-7}$、max_rel $\sim10^{-8}\!\sim\!10^{-7}$
+  （机器精度量级），即误差只来自两种计算顺序的浮点舍入。
+
+进一步与 FLA 的 Triton `chunk_kda`（`harness/check_kda_ref.py`）对拍：同一输入（$D=128$，
+$T=20/64$，$H=2$，非零初态，raw logits 走 `use_gate_in_kernel` + `use_beta_sigmoid_in_kernel`），
+bf16 计算下 $o$ 的 max_rel $\approx4.7\times10^{-3}\!\sim\!5.9\times10^{-3}$、终态 $S$ 的 max_rel
+$\approx3.1\times10^{-3}\!\sim\!6.0\times10^{-3}$，与 bf16 输入本身的量化误差同量级。原始输出见
+`harness/kda_ref_selftest.out.txt` 与 `harness/check_kda_ref.out.txt`。
+
+**一个踩过的坑（layout）**：FLA `chunk_kda` 的 `transpose_state_layout=True`（新版改名
+`state_v_first`）不仅改变**返回**终态的布局，也会把传入的 `initial_state` 当作 V-first 重新解释。
+最初误用该开关后，除 $t=0$（唯一直接吃初态的 token）外一切正常、$t=0$ 误差却高达 $0.1$——误导性地
+像是「随机小误差」。默认 `transpose_state_layout=False` 时终态就是 $[N,H,K,V]$，与本文 $S$ 同布局，
+对拍一致。**待验证**：FlashKDA `fwd` 返回的终态是 $[V,K]$（`torch_ref.py` 里 `state_slice` 存的就是
+$S^\top$），与 FLA 默认布局互为转置——这一点留到 P4-2 对拍时钉死。
+
+## 7. 下一步
 
 - 精读 K1（`docs/02-kda-fwd-k1.md`）：TMA 载入、L2 norm、cumsum、decay、$L/M_{qk}$、求逆。
 - 精读 K2（`docs/03-kda-fwd-k2.md`）：warp specialization、八个 Phase、状态更新。

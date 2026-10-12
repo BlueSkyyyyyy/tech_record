@@ -40,12 +40,12 @@
 
 ### P1 数学与分块公式（`docs/01-kda-theory.md`）
 
-- [ ] **P1-1** 逐 token 的 gated delta rule 定义：状态 `S∈R^{D×D}`、log-decay `g`、写入门 `β`、
+- [x] **P1-1** 逐 token 的 gated delta rule 定义：状态 `S∈R^{D×D}`、log-decay `g`、写入门 `β`、
       输出 `o_t = q_t^T S_t`；解释 KDA 相对 GLA/DeltaNet 的区别（per-channel decay）。
-- [ ] **P1-2** chunk（CHUNK=16）分块形式推导：块内 `L`（下三角）、`Mqk`、`INV`（块内注意力矩阵求逆）、
+- [x] **P1-2** chunk（CHUNK=16）分块形式推导：块内 `L`（下三角）、`Mqk`、`INV`（块内注意力矩阵求逆）、
       `k_decayed/q_decayed/k_restored/g_total` 的来历与作用。
-- [ ] **P1-3** 前向两段式：为什么拆 K1（token 并行）+ K2（head 并行）而非单 kernel（引用 deep-dive）。
-- [ ] **P1-4** 数学自检：分块公式与逐 token 递推在 CPU 上逐元素一致（`src/kda_ref.py` 两种实现互拍）。
+- [x] **P1-3** 前向两段式：为什么拆 K1（token 并行）+ K2（head 并行）而非单 kernel（引用 deep-dive）。
+- [x] **P1-4** 数学自检：分块公式与逐 token 递推在 CPU 上逐元素一致（`src/kda_ref.py` 两种实现互拍）。
 
 ### P2 前向 K1 精读（`docs/02-kda-fwd-k1.md`）
 
@@ -109,19 +109,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0-1～P0-3 完成。
-  - P0-1：通读 FlashKDA host/launch/K1/K2/utils 五个源文件与 deep-dive，
-    在 `docs/01-kda-theory.md` §5 写出结构脑图（行号已核对）；`docs/01` 同时含数学定义与 CHUNK=16 分块公式初稿。
-  - P0-2：`kernel_lab` 容器（H100 sm90，torch 2.12）确认可用；FlashKDA 的 `cutlass` 子模块
-    浅克隆后以 `FLASH_KDA_CUDA_ARCHS=90a pip install -e . --no-build-isolation` 编译成功，
-    `import flash_kda` OK；`pip install flash-linear-attention==0.5.2` 后 `fla.ops.kda.chunk_kda` 可用。
-  - P0-3：`harness/probe_refs.py`（结果 `harness/probe_refs.out.txt`）在同一输入上对拍三路：
-    FlashKDA `fwd`、FLA `chunk_kda`、FLA `fused_recurrent_kda`(fp64 gold)。两个 case
-    （`g=N(0,4)`、`g=0`，B1 T512 H4 D128，非零初态）下：`chunk_kda`/`flash_kda` 输出对 gold 的
-    max_abs≈6e-4～8e-4、max_rel≈4e-3～9e-3，两者互差 max_abs≈8e-4～1e-3，量级（|o|max≈0.15）一致，
-    确认三方实现同一套 KDA 数学。
-- **下一步：P1-1/P1-2** 正式写 `docs/01` 的逐 token 定义与 chunk 公式（补全 KDA vs GLA/DeltaNet 的
-  区分点），随后 **P1-4** 落地 `src/kda_ref.py`（逐 token 递推 vs 分块两种实现 CPU 互拍）。
+- 当前进度：P0 全部完成，P1 全部完成。
+  - P0-1～P0-3：见下（历史记录）。
+  - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
+    GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
+  - P1-3：`docs/01` §4 给出 K1/K2 拆分动机（引用 deep-dive §2）。
+  - P1-4：新增 `src/kda_ref.py`（纯 PyTorch，`kda_token_recurrent` golden + `kda_chunked_fwd` 分块，均支持
+    初态/非整除 T）。自测（`harness/kda_ref_selftest.out.txt`）：fp64 下两种实现逐元素**完全相等**（max_abs=0），
+    fp32 下 max_abs~1e-9~1e-7（机器精度）。新增 `harness/check_kda_ref.py` 与 FLA `chunk_kda` 对拍
+    （`harness/check_kda_ref.out.txt`）：bf16 下 o/S 的 max_rel≈3e-3~6e-3。踩坑：FLA
+    `transpose_state_layout=True` 会把 `initial_state` 也当 V-first 重解释，曾导致仅 t=0 误差 0.1；默认布局
+    `[N,H,K,V]` 与本 ref 的 S 同布局。
+- **下一步：P2-1** 精读 K1（`docs/02-kda-fwd-k1.md`）：TMA 载入 → L2 norm → gate 激活+cumsum →
+  decay_apply → L/Mqk → 8×8 fp32 前代求逆 + 16×16 bf16-HMMA 合并 → 写 workspace，贴真实行号。
   反向（P5）可用已装好的 FLA `chunk_kda` autograd 作对拍参照。
 
 ## 阻塞

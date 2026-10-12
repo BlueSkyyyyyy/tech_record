@@ -1,0 +1,30 @@
+
+======================================================================
+Case [T=20 g=N(0,2)]  B=1 T=20 H=2 D=128
+  scale(o): ref|o|~1  fla|o|max=0.131  fla|s|max=0.567
+  -- head 0 --
+  o token vs fla             max_abs=1.726e-04  max_rel=4.694e-03  mean_abs=1.265e-05
+  o chunk  vs fla            max_abs=1.726e-04  max_rel=4.694e-03  mean_abs=1.265e-05
+  S token vs fla             max_abs=1.551e-03  max_rel=4.793e-03  mean_abs=7.349e-05
+  S chunk vs fla             max_abs=1.551e-03  max_rel=4.793e-03  mean_abs=7.349e-05
+  -- head 1 --
+  o token vs fla             max_abs=6.490e-04  max_rel=4.935e-03  mean_abs=4.109e-05
+  o chunk  vs fla            max_abs=6.490e-04  max_rel=4.935e-03  mean_abs=4.109e-05
+  S token vs fla             max_abs=3.207e-03  max_rel=5.649e-03  mean_abs=1.207e-04
+  S chunk vs fla             max_abs=3.207e-03  max_rel=5.649e-03  mean_abs=1.207e-04
+
+======================================================================
+Case [T=64 g=N(0,2)]  B=1 T=64 H=2 D=128
+  scale(o): ref|o|~1  fla|o|max=0.105  fla|s|max=0.812
+  -- head 0 --
+  o token vs fla             max_abs=4.817e-04  max_rel=4.566e-03  mean_abs=1.936e-05
+  o chunk  vs fla            max_abs=4.817e-04  max_rel=4.566e-03  mean_abs=1.936e-05
+  S token vs fla             max_abs=2.523e-03  max_rel=3.109e-03  mean_abs=1.129e-04
+  S chunk vs fla             max_abs=2.523e-03  max_rel=3.109e-03  mean_abs=1.129e-04
+  -- head 1 --
+  o token vs fla             max_abs=2.839e-04  max_rel=3.661e-03  mean_abs=1.610e-05
+  o chunk  vs fla            max_abs=2.839e-04  max_rel=3.661e-03  mean_abs=1.610e-05
+  S token vs fla             max_abs=2.545e-03  max_rel=5.949e-03  mean_abs=9.840e-05
+  S chunk vs fla             max_abs=2.545e-03  max_rel=5.949e-03  mean_abs=9.840e-05
+
+DONE
