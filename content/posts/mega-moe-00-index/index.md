@@ -49,5 +49,6 @@ categories: ["算子开发"]
 28. [DeepGEMM 的选核启发式 `get_best_config`]({{< relref "mega-moe-28-deepgemm-best-config" >}}) —— 用自家 kernel 时 block_m/n/k、cluster、stage、线程如何选：候选枚举的合法性与过滤器、L1/L2 周期代价模型与多播收益、SM90 定量 vs SM100 词典序 tie-break；H100 上 Python 复刻 20 组形状 15 字段逐项对拍 0 不符 + 候选排序
 29. [DeepGEMM 的 SM90 BF16 dense GEMM 主 kernel]({{< relref "mega-moe-29-sm90-bf16-gemm" >}}) —— 一套 kernel 服务五种 `GemmType`、`BLOCK_K=64`/`MMA_64xNx16`、BF16 专属的合并 stage、epilogue 两种输出 dtype（bf16 STSM+swizzle / fp32 裸 st.shared）、累积用 TMA reduce-add；H100 真机六类入口对拍，bf16 峰值 801 TFLOPS
 30. [SM90 paged MQA logits 的 metadata 负载均衡调度器]({{< relref "mega-moe-30-sm90-paged-mqa-logits-schedule" >}}) —— 补齐第 19 篇一笔带过的 SM90 分页调度器：单 warp metadata（varlen atom 配对分组 / warp 前缀和 / 反序均分 / 二分定位）+ `SM90PagedMQALogitsScheduler`（按 split 步进、`num_kv`/`advance` 刷新、`uint2` 起止）；与 UMMA 无关，H100 上跑真实设备代码 10 用例 ALL PASS（边界逐字段对拍 / 覆盖恰好一次 / 负载 ±1）
+31. [SM100 GEMM 的 epilogue：store 路径与四个 epilogue 算子]({{< relref "mega-moe-31-sm100-gemm-epilogue-operators" >}}) —— 所有 SM100 GEMM 共用的可插拔尾部：`EpilogueClass` 解析 + device 无状态算子（Identity / ScaleByAlpha / StochasticRoundToBF16 四元组哈希 + `cvt.rs` / QuantizeToFP8 先 bf16 再 per-32 UE8M0）+ `sm100_store_cd(_swap_ab)` 四条 store 分支；H100 上逐行抽取真实设备代码：ScaleByAlpha 逐位、随机舍入无偏性 vs RNE、D/SFD 逐位全 PASS
 
 > 各篇正文由仓库 `code/mega-moe/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

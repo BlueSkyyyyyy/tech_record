@@ -586,6 +586,39 @@
       配对语义（`req=8` 512 token→256 atom）、少 SM/空 SM 正确。配套博客
       `content/posts/mega-moe-30-sm90-paged-mqa-logits-schedule`（索引页新增第 30 篇）。
 
+### P21 增量（opt-in，贯穿所有 SM100 GEMM 的 epilogue 机制）
+
+- [x] **P21-1** **SM100 GEMM 的 epilogue：store 路径与四个 epilogue 算子**
+      （`deep_gemm/include/deep_gemm/epilogue/operators.cuh`、`.../sm100_store_cd.cuh`、
+      `.../sm100_store_cd_swap_ab.cuh`、`csrc/jit_kernels/impls/epilogue_class.hpp`、
+      `csrc/apis/epilogue_class.hpp`）：第 27 篇讲了「何时不用自家 kernel」（cuBLASLt 回退，含
+      plain-store epilogue 三与门），本篇补「用自家 kernel 时尾部到底干什么」——**所有 SM100 GEMM
+      共用的可插拔 epilogue**。`EpilogueClass`（`epilogue_class.hpp:19-39`）四类
+      （Identity/Alpha/FP8Quantization/BF16StochasticRounding，Python `deep_gemm.epilogue.*`，
+      `apis/epilogue_class.hpp:13-25`）经 `resolve_epilogue_class`（`:108-127` 三入口互斥）选一个
+      device `epilogue::operators` 算子（继承 `EpilogueOperatorArgs`，`types.cuh:47-52`，
+      **无状态**：`sm100_fp8_fp4_gemm_1d1d.cuh:57` 强制 `sizeof` 相等），随 kernel
+      `__grid_constant__` launch（`:41`）。四算子（`operators.cuh`）：`Identity` `:12-15`；
+      `ScaleByAlpha` `:20-30`（`__fmul2_rn` packed fp32x2，只缩放乘积项）；`StochasticRoundToBF16`
+      `:32-65`（**四元组哈希** `partial_hash:35-39` 四常数 + `select_random_bits:41-48` 雪崩 +
+      `cast_quartet:50-64` 共享 `h + quartet_n_idx`，硬件 `cvt.rs.bf16x2.f32`）；`QuantizeToFP8`
+      `:69-92`（`kSFGranN=32`、`store_sf` MN-major 4 字节打包寻址）。store：`sm100_store_cd.cuh`
+      `:34-50` 编译期判别+断言、`:124` `apply_values`、四条分支 `:144-174`（output SF：先 bf16 再
+      per-32 `get_packed_bf16_amax`+`get_ue8m0_sf_exp`/`_inv`+`scale_bf16x2_into_fp8x4`、整字
+      `sf_word`）、`:175-176` fp32、`:177-184` 随机舍入（每批 8 值=两 quartet）、`:185-193` 普通
+      bf16；swap-AB `sm100_store_cd_swap_ab.cuh:192-221` 用 **`shfl_xor` 跨 lane 归约哈希**。
+      接线：SM90 全部断言 `:119/238/308/385/528/611/664/712 "Custom epilogues require SM100"`；
+      FP8 输出对=`FP8Quantization`（`einsum.hpp:190-200/213-220`，Batched+不累积 E4M3）。
+      **SM100 专属，仅分析**（`cvt.rs` 在 sm90 ptxas 直接报 `Feature '.rs' not supported`；
+      `__fmul2_rn` 仅 sm_100_rt）。**H100 实测**：`harness/exp_epilogue_operators.{sh,out.txt}` +
+      `src/epilogue_operators.cu` 把 `operators.cuh:12-92` **逐行原样抽取**编译（sha256
+      `d00b6b6f…`），两个 SM100 原语用标注的等价模拟：① ScaleByAlpha(0.5) 1024 值**逐位 0 不符**；
+      ② 四元组哈希 n=2²⁰ 每 bit 偏离 0.5 ≤0.00118、64 桶卡方 86.1、offset 两两相等 ≈0（独立）；
+      ③ 随机舍入**无偏**（中点/1/8/3/8 偏差 ~1e-5、向上比例=0.500/0.126/0.377=小数部分）vs
+      **RNE 固定偏一侧**（-3.9e-3/-9.8e-4/-2.9e-3）；④ `QuantizeToFP8` D/SFD vs torch 参考
+      **逐位 0/8192、0/256**（极端行 SF exp=128、全零组=地板 105），ALL PASS。
+      配套博客 `content/posts/mega-moe-31-sm100-gemm-epilogue-operators`（索引页新增第 31 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -610,20 +643,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P20 各增量完成（P15-1、P16-1、P17-1、P18-1、P19-1、P20-1）。**
-  本轮 P20-1：新建 `docs/30-sm90-paged-mqa-logits-schedule.md`
-  （+`harness/exp_sm90_paged_mqa_logits_schedule.{sh,out.txt}`、`src/sm90_paged_mqa_logits_schedule.cu`）
-  ——补齐第 19 篇一笔带过的 **SM90 分页 MQA logits 调度器**
-  （`scheduler/sm90_paged_mqa_logits.cuh`：单 warp `sm90_paged_mqa_logits_metadata` +
-  `SM90PagedMQALogitsScheduler`）。它与 WGMMA/TMA/UMMA 无关，只依赖 `math.cuh`/`ptx`/PDL，
-  故 H100 上**直接编译运行真实设备代码**。要点：`split_kv=256`=4×block_kv（1 split=4 KV block）、
-  单 warp metadata（varlen **atom 配对分组** `indices[t]==indices[t+1]`、context 取 `[t+1]`、
-  warp `shfl_up` 前缀和、**反序均分** `q/r/pivot`、上界二分定位）、`SM90PagedMQALogitsScheduler`
-  （读 `uint2` 起止、按 split 步进、一次 `is_paired` 同时得 advance(2|1)+num_kv、`exist_q_atom_idx` 防越界）；
-  与 SM100 分页调度器对照（varlen/代价模型/溢出回退/Q 粒度/KV 复用/分页坐标）。**H100 真机 10 用例 ALL PASS**：
-  metadata 每-SM 边界 vs host 独立复刻逐字段 0 不符；真实 scheduler 发射任务所有 (atom,split) **恰好覆盖一次**
-  （dup/miss/bad=0）；负载 **±1**（`[3..4]`/`[7..8]`/`[15..16]`）；配对（512 token→256 atom）、少 SM/空 SM 正确。
-  行号全部核对过。配套博客 `content/posts/mega-moe-30-sm90-paged-mqa-logits-schedule`（索引页新增第 30 篇）。
+- 当前进度：**P0~P14 全部完成；P15~P21 各增量完成（P15-1、P16-1、P17-1、P18-1、P19-1、P20-1、P21-1）。**
+  本轮 P21-1：新建 `docs/31-sm100-gemm-epilogue-operators.md`
+  （+`src/epilogue_operators.cu`、`harness/exp_epilogue_operators.{sh,out.txt}`）
+  ——补齐第 27 篇「何时不用自家 kernel（cuBLASLt 回退）」的另一半：**用自家 kernel 时 SM100 GEMM
+  的尾部**。这是一套**所有 SM100 GEMM 共用的可插拔 epilogue**：host `EpilogueClass`
+  （`csrc/jit_kernels/impls/epilogue_class.hpp:19-39`，四类 Identity/Alpha/FP8Quantization/
+  BF16StochasticRounding，经 `resolve_epilogue_class:108-127` 三入口互斥解析，Python
+  `deep_gemm.epilogue.*`）选出一个 **device 无状态算子**（`epilogue/operators.cuh`，继承
+  `EpilogueOperatorArgs`，`sm100_fp8_fp4_gemm_1d1d.cuh:57` 强制 `sizeof` 相等），随 kernel
+  `__grid_constant__` launch，在 `sm100_store_cd.cuh:124` / `sm100_store_cd_swap_ab.cuh:100/112`
+  对从 TMEM 读回的寄存器批 `apply_values()`。四算子：`Identity`；`ScaleByAlpha`（`__fmul2_rn`，
+  只缩放乘积项）；`StochasticRoundToBF16`（**四元组哈希 PRNG**：`partial_hash` 四常数 →
+  `select_random_bits` 雪崩 → 四元组共享 `h + quartet_n_idx`，硬件 `cvt.rs.bf16x2.f32` 随机舍入）；
+  `QuantizeToFP8`（先 bf16 舍入 → per-32 `get_packed_bf16_amax`+`get_ue8m0_sf_exp`/`_inv` →
+  `scale_bf16x2_into_fp8x4` → E4M3，`store_sf` MN-major 4 字节打包）。swap-AB 版还用
+  `shfl_xor` 跨 lane 归约哈希。接线：SM90 全部断言 "Custom epilogues require SM100"；FP8 输出对
+  =`FP8Quantization`（`einsum.hpp:190-200`），补齐第 21 篇「SM100 独占 FP8 输出对」的落点。
+  **H100 真机**（`operators.cuh:12-92` 逐行抽取，sha256 `d00b6b6f…`）：`cvt.rs` 在 sm90 明确失败
+  （SM100 专属）；ScaleByAlpha 逐位 0 不符；四元组哈希 2²⁰ 样本均匀/独立；随机舍入**无偏** vs
+  RNE 固定偏一侧；`QuantizeToFP8` D/SFD vs torch **逐位 0/8192、0/256**，ALL PASS。行号全部核对过。
+  配套博客 `content/posts/mega-moe-31-sm100-gemm-epilogue-operators`（索引页新增第 31 篇）。
   Hugo 构建 0 ERROR。
   上一轮 P19-1：新建 `docs/29-sm90-bf16-gemm.md`（+`harness/exp_bf16_sm90_gemm.{py,sh,out.txt}`）
   ——补上**DeepGEMM SM90 BF16 稠密 GEMM 主 kernel**（前 28 篇里 BF16 只被顺带提到）。它是唯一一个
@@ -723,8 +763,8 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P20 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
-  P20-1 SM90 分页 MQA logits 调度器）。
+- **下一步**：P0~P21 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+  P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子）。
   后续若继续（均为增量、非承诺）：
   ① **sparse attention 系列（P12/P13/P14/P20 已开）**：SM90 dense + SM90 分页调度器、SM100 sparse、
   SM100 dense 连续版/分页版调度器均已做；可再补 `sm100_mqa_logits.cuh` SIMT epilogue 的更多数值特性，或
@@ -742,7 +782,10 @@
     kernel 时怎么配」都已讲清。
    ⑧ **SM90 BF16 主 kernel**：P19-1 已完成（五种 `GemmType` 一套 kernel、合并 stage、两种输出 dtype、
     TMA reduce-add；H100 六类入口实测）。与 P10-1（SM100 BF16 mega moe）、P20 篇互补，BF16 路径补齐。
-   若无新指令，可视为专题完结。
+   ⑨ **SM100 GEMM epilogue store 路径与四算子**：P21-1 已完成（`EpilogueClass` 选择 + 无状态算子 +
+   共享 store 路径；随机舍入四元组哈希/无偏性、`QuantizeToFP8` D/SFD 逐位对拍；H100 抽取真实设备代码）。
+    至此「何时不用自家 kernel / 怎么配 / 尾部干什么」三问都已讲清。
+    若无新指令，可视为专题完结。
 
   （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。
   **计算图**（以 `tests/test_mega_mhc.py:123-210`
