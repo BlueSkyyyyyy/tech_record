@@ -1,0 +1,75 @@
+FlashKDA K1/K2 memory traffic split (P7-3)
+per-tile workspace = 13824 B (utils.cuh:70-76)
+ncu flushes L2 per replay pass -> dram__bytes == unique bytes touched
+
+===== flash_kda_fwd_prepare  B=1 T=1024 H=4  grid B*H=4  tiles=256  dur=11.81us =====
+  DRAM read       3.18 MB   (predicted      3.15 MB, ratio 1.010)
+      - q,k,g,beta        3.15 MB  = 100.0% of read
+  DRAM write      0.00 MB   (predicted      3.54 MB, ratio 0.000)
+      - workspace         3.54 MB  = 100.0% of write
+  L2   read       5.07 MB   write     10.42 MB   (read/write = 0.49)
+
+===== flash_kda_fwd_recurrence  B=1 T=1024 H=4  grid B*H=4  tiles=256  dur=104.58us =====
+  DRAM read       4.76 MB   (predicted      4.73 MB, ratio 1.008)
+      - workspace         3.54 MB  =  74.9% of read
+      - v                 1.05 MB  =  22.2% of read
+      - beta              0.01 MB  =   0.2% of read
+      - h0                0.13 MB  =   2.8% of read
+  DRAM write      0.00 MB   (predicted      1.18 MB, ratio 0.000)
+      - o                 1.05 MB  =  88.9% of write
+      - final_state       0.13 MB  =  11.1% of write
+  L2   read      10.98 MB   write      3.54 MB   (read/write = 3.10)
+
+===== flash_kda_fwd_prepare  B=4 T=1024 H=64  grid B*H=256  tiles=16384  dur=249.09us =====
+  DRAM read     202.66 MB   (predicted    201.85 MB, ratio 1.004)
+      - q,k,g,beta      201.85 MB  = 100.0% of read
+  DRAM write    208.16 MB   (predicted    226.49 MB, ratio 0.919)
+      - workspace       226.49 MB  = 100.0% of write
+  L2   read     310.02 MB   write    668.58 MB   (read/write = 0.46)
+
+===== flash_kda_fwd_recurrence  B=4 T=1024 H=64  grid B*H=256  tiles=16384  dur=207.04us =====
+  DRAM read     302.61 MB   (predicted    302.51 MB, ratio 1.000)
+      - workspace       226.49 MB  =  74.9% of read
+      - v                67.11 MB  =  22.2% of read
+      - beta              0.52 MB  =   0.2% of read
+      - h0                8.39 MB  =   2.8% of read
+  DRAM write     65.10 MB   (predicted     75.50 MB, ratio 0.862)
+      - o                67.11 MB  =  88.9% of write
+      - final_state       8.39 MB  =  11.1% of write
+  L2   read     675.86 MB   write    226.53 MB   (read/write = 2.98)
+
+===== flash_kda_fwd_prepare  B=1 T=8192 H=64  grid B*H=64  tiles=32768  dur=482.50us =====
+  DRAM read     405.03 MB   (predicted    403.70 MB, ratio 1.003)
+      - q,k,g,beta      403.70 MB  = 100.0% of read
+  DRAM write    434.65 MB   (predicted    452.98 MB, ratio 0.960)
+      - workspace       452.98 MB  = 100.0% of write
+  L2   read     619.53 MB   write   1332.90 MB   (read/write = 0.46)
+
+===== flash_kda_fwd_recurrence  B=1 T=8192 H=64  grid B*H=64  tiles=32768  dur=790.69us =====
+  DRAM read     590.52 MB   (predicted    590.35 MB, ratio 1.000)
+      - workspace       452.98 MB  =  76.7% of read
+      - v               134.22 MB  =  22.7% of read
+      - beta              1.05 MB  =   0.2% of read
+      - h0                2.10 MB  =   0.4% of read
+  DRAM write    130.19 MB   (predicted    136.31 MB, ratio 0.955)
+      - o               134.22 MB  =  98.5% of write
+      - final_state       2.10 MB  =   1.5% of write
+  L2   read    1324.86 MB   write    409.05 MB   (read/write = 3.24)
+
+===== flash_kda_fwd_prepare  B=8 T=2048 H=8  grid B*H=64  tiles=8192  dur=130.82us =====
+  DRAM read     101.28 MB   (predicted    100.93 MB, ratio 1.003)
+      - q,k,g,beta      100.93 MB  = 100.0% of read
+  DRAM write     94.59 MB   (predicted    113.25 MB, ratio 0.835)
+      - workspace       113.25 MB  = 100.0% of write
+  L2   read     154.78 MB   write    333.74 MB   (read/write = 0.46)
+
+===== flash_kda_fwd_recurrence  B=8 T=2048 H=8  grid B*H=64  tiles=8192  dur=205.18us =====
+  DRAM read     149.21 MB   (predicted    149.16 MB, ratio 1.000)
+      - workspace       113.25 MB  =  75.9% of read
+      - v                33.55 MB  =  22.5% of read
+      - beta              0.26 MB  =   0.2% of read
+      - h0                2.10 MB  =   1.4% of read
+  DRAM write     29.38 MB   (predicted     35.65 MB, ratio 0.824)
+      - o                33.55 MB  =  94.1% of write
+      - final_state       2.10 MB  =   5.9% of write
+  L2   read     334.93 MB   write    106.96 MB   (read/write = 3.13)

@@ -288,7 +288,8 @@ T=8192 H=64 只有 **64 个 CTA < 132 SM**，achieved occupancy 仅 9.4%、`ncu`
 T=1024）后 achieved occupancy 18.06% ≈ 理论值、waves/SM≈1，此时 SOL 最大 pipe 是 **L2 = 91.6%**
 （DRAM 53.0%、L1TEX 59.5%），而 TensorCore 仍只有 24.1%。也就是说 K2 的稳态上限由
 **每 chunk 从 L2 读 workspace（kd/qd/kr/gt/INV/Mqk，13824B/tile）** 决定——同一份 workspace
-被 K2 沿 T 顺序读一遍，流量上不去就被 L2 卡住。
+被 K2 沿 T 顺序读一遍，流量上不去就被 L2 卡住。（§6 的逐字节实测给出修正：workspace 约占 K2 读流量
+的 **75%**，另有约 **22.5%** 来自 `v` 流——见 §6.2。）
 
 **结论四：K2 的 stall 以 `wait` 为主（~1.1 周期/发射），不是 barrier/scoreboard。** 与 K1 相反，
 K2 几乎不 `__syncthreads`（warp-specialized，只有跨 MMA warp 的 `NamedBarrier` 与流水线
@@ -311,5 +312,83 @@ MMA/LDSM 的结果），加上 occupancy 太低、可切换 warp 不足（`Eligi
 4. §2.1 的「FLA host 税」与本节的 GPU 结论不冲突：那部分收益在 host 端，本节量的是 GPU 端。
 
 **待验证**：(a) K1「global load 4/32 字节/sector」具体落在哪条 load（`beta`/`g`/标量参数？）；
-(b) K2 的 L2 流量里 workspace 读与 $o$/state 写各占多少（需 `nsys` 或按指针插桩）；
+(b) K2 的 L2 流量里 workspace 读与 $o$/state 写各占多少（需 `nsys` 或按指针插桩）——**已在 §6 解决**；
 (c) 把 K2 的 state 常驻寄存器/提高 smem 复用以突破 2 CTA/SM 后 L2 墙是否后移。
+
+## 6. K1/K2 的访存账：谁贡献了那 1.7–2.0GB 的 L2 流量（P7-3）
+
+§5 说「KDA 前向的硬成本是状态与 workspace 的搬运」，但那句里 workspace 读与 $o$/state 写各占多少、
+K1 到底读了哪些张量，都是推断而非实测（§5 待验证 (b)）。本节把这块账**逐字节**算清：用 `ncu` 抓
+DRAM 读写计数，再和闭式预测逐项对拍。复现脚本 `harness/check_traffic.py`、原始输出
+`harness/check_traffic.out.txt`。
+
+### 6.1 方法：为什么用 DRAM 计数而不是 L2 sector 计数
+
+`ncu` 默认在每次 replay 前**清空 L2**（`--cache-control all`），所以一次 kernel 调用的
+`dram__bytes_read/write` 就是它**唯一的、去重后的访存字节**——这正是「L2 流量」里真正来自外部的部分，
+且不受 L1/TMA 重发、swizzle、cache 命中的干扰。相比之下 `lts__t_sectors_*` 对 TMA 有系统性放大：
+实测在 K1 上 `lts` 读是 DRAM 读的 **1.5×**、`lts` 写是 workspace 的 **~3×**（同一份 workspace，
+TMA store 被重复计数），所以 `lts` 计数只能当**同 kernel 内相对量**看，不能当字节数。故本节以 DRAM 为准。
+
+预测模型（$D=128$，每 tile 的 workspace $=13824$ B，`utils.cuh:70–76`）：
+
+- **K1**：读 `q,k,g,beta`（**不读 v**，K1 只用 q/k/g/beta 算 kd/qd/kr/gt/INV/Mqk）；写 workspace
+  $=B\cdot H\cdot\lceil T/16\rceil\cdot 13824$。
+- **K2**：读 workspace $+$ `v` $+$ `beta` $+$ 初态 `h0`；写 `o` $+$ 终态。
+
+### 6.2 实测：DRAM 读基本精确，逐项归因
+
+四组 shape（含设计点、grid 填满 GPU、非整除 $T$ 旁证）。`ratio = 实测/预测`：
+
+| shape (B,T,H) | kernel | DRAM 读 MB | 预测 MB | ratio | workspace | v | beta | h0 |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1,1024,4 | K1 | 3.18 | 3.15 | **1.010** | — | — | q,k,g,β 100% | — |
+| 1,1024,4 | K2 | 4.76 | 4.73 | **1.008** | **74.9%** | 22.2% | 0.2% | 2.8% |
+| 4,1024,64 | K1 | 202.66 | 201.85 | **1.004** | — | — | 100% | — |
+| 4,1024,64 | K2 | 302.61 | 302.51 | **1.000** | **74.9%** | 22.2% | 0.2% | 2.8% |
+| 1,8192,64 | K1 | 405.03 | 403.70 | **1.003** | — | — | 100% | — |
+| 1,8192,64 | K2 | 590.52 | 590.35 | **1.000** | **76.7%** | 22.7% | 0.2% | 0.4% |
+| 8,2048,8 | K1 | 101.28 | 100.93 | **1.003** | — | — | 100% | — |
+| 8,2048,8 | K2 | 149.21 | 149.16 | **1.000** | **75.9%** | 22.5% | 0.2% | 1.4% |
+
+读这一侧**四组 shape、两个 kernel 全部落在 1.000–1.010**，即 DRAM 读计数与闭式预测**逐项吻合**，
+归因是硬的：
+
+1. **K1 唯一的外部输入就是 `q,k,g,beta`**（$3\times BTHD + BTH$ 元素），**从不读 `v`**——
+   与源码一致（`fwd_kernel1.cuh:231/233/235/243/253` 只 load q/k/beta/g/dt_bias，无 v 的 TMA 描述符）。
+2. **K2 的读里 workspace 只占 ~75%，`v` 占 ~22.5%**。这不是小项：K2 每 chunk 还要
+   `tma_load_v`/`tma_load_beta`（`fwd_kernel2.cuh:325/326, 358/367`）来算 $u=(v-u)\beta$。
+   所以 §5.3「K2 的稳态上限由每 chunk 读 workspace 决定」**需修正**：workspace 是大头但不是全部，
+   **`v` 的 22.5% 是不可省的输入流**，K2 一旦 grid 填满就同时被这两条流一起压。
+3. `beta` 几乎免费（0.2%），`h0` 随 $B\cdot H/T$ 变化（$1{\times}1024{\times}64$ 时因 $BH$ 大、$T$ 小
+   升到 2.8%，设计点 $1{\times}8192{\times}64$ 降到 0.4%）。
+
+### 6.3 实测：DRAM 写与「dirty 行滞留 L2」的解释
+
+写这一侧 `ratio` 小于 1：
+
+| shape (B,T,H) | kernel | DRAM 写 MB | 预测 MB | ratio | 归因 |
+|---|--:|--:|--:|--:|---|
+| 1,1024,4 | K1 | **0.00** | 3.54 | 0.00 | workspace 3.54MB ≪ L2(50MB)，dirty 行留在 L2 不落 DRAM |
+| 1,1024,4 | K2 | **0.00** | 1.18 | 0.00 | $o$+state 1.18MB 同样留在 L2 |
+| 4,1024,64 | K1 | 208.16 | 226.49 | 0.919 | workspace 226MB > L2，约 8% 仍滞留 |
+| 4,1024,64 | K2 | 65.10 | 75.50 | 0.862 | — |
+| 1,8192,64 | K1 | 434.65 | 452.98 | 0.960 | — |
+| 1,8192,64 | K2 | 130.19 | 136.31 | 0.955 | — |
+| 8,2048,8 | K1 | 94.59 | 113.25 | 0.835 | — |
+| 8,2048,8 | K2 | 29.38 | 35.65 | 0.824 | — |
+
+小 shape 下 DRAM 写为 0 是**测量上的必然**而非「没写」：写出的字节先变 dirty 行，kernel 结束时
+还没被换出，直到下一次调用或 flush 才落 DRAM。放大到 workspace ≫ L2 后，绝大部分在同一次调用内
+就被换出，`ratio` 升到 0.82–0.96，与预测同量级，证明**写的归因同样成立**：K1 写的就是 workspace
+（100%），K2 写的就是 `o`（94–98.5%）+ 终态（1.5–6%）。
+
+### 6.4 结论与闭环
+
+1. **K2 的读 ≈ 75% workspace + 22.5% `v`（+ β/h0 尾巴）**；把 §5.3 的「只读 workspace」修正为
+   「以 workspace 为主、`v` 为辅」。K2 撞 L2 的墙是**两条流叠加**，workspace 仍是首要优化对象。
+2. **K1 的读 = `q,k,g,β`，写 = workspace**，与 §3.2「K1 一次算完落盘」互为印证的字节账：
+   设计点 K1 读 405MB + 写 435MB，K2 读 590MB + 写 130MB，合计约 **1.56GB** 的外部流量——
+   与 §5.2/§5.3 用 `lts` 报的 1.7–2.0GB 同量级（差额即 TMA 的 `lts` 重发放大）。
+3. 方法学收获：**TMA 密集 kernel 不要用 `lts__t_sectors` 当字节**（读 ×1.5、写 ×3）；要字节就用
+   清 L2 后的 `dram__bytes`，且小 shape 的 DRAM 写会因 dirty 行滞留而读数为 0，须放大到超 L2 才有意义。
