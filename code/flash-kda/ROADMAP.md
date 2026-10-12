@@ -49,7 +49,7 @@
 
 ### P2 前向 K1 精读（`docs/02-kda-fwd-k1.md`）
 
-- [ ] **P2-1** 阶段拆解：TMA 载入 → QK L2 norm → gate 激活+cumsum → decay_apply → L/Mqk →
+- [x] **P2-1** 阶段拆解：TMA 载入 → QK L2 norm → gate 激活+cumsum → decay_apply → L/Mqk →
       8×8 fp32 前代求逆 + 16×16 bf16-HMMA 合并 → 写 workspace；贴行号。
 - [ ] **P2-2** 关键优化逐条：smem union 复用、`__launch_bounds__(256,8)`、base-2 `ex2.approx`、
       `tanh.approx` sigmoid、前代求逆的精度取舍。
@@ -109,7 +109,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0 全部完成，P1 全部完成。
+- 当前进度：P0 全部完成，P1 全部完成，P2-1 完成。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -120,9 +120,14 @@
     （`harness/check_kda_ref.out.txt`）：bf16 下 o/S 的 max_rel≈3e-3~6e-3。踩坑：FLA
     `transpose_state_layout=True` 会把 `initial_state` 也当 V-first 重解释，曾导致仅 t=0 误差 0.1；默认布局
     `[N,H,K,V]` 与本 ref 的 S 同布局。
-- **下一步：P2-1** 精读 K1（`docs/02-kda-fwd-k1.md`）：TMA 载入 → L2 norm → gate 激活+cumsum →
-  decay_apply → L/Mqk → 8×8 fp32 前代求逆 + 16×16 bf16-HMMA 合并 → 写 workspace，贴真实行号。
-  反向（P5）可用已装好的 FLA `chunk_kda` autograd 作对拍参照。
+  - P2-1：新增 `docs/02-kda-fwd-k1.md`：逐阶段精读 K1（tile 定位/TMA 载入/L2 norm/gate+cumsum/decay_apply/
+    L,Mqk/tril+beta/块内求逆/写 workspace），全部贴真实行号；讲清 union 复用「先入寄存器再覆写」的时序、
+    varlen 二分、beta 8 对齐、列并行前缀和免同步、Schur 补求逆代数。新增 `harness/check_inv_identity.py`
+    （纯 PyTorch 复现 8×8 前代+Schur 补），实测 fp64 max_abs≤2.2e-16、bf16 量化≈2.5e-3~5.9e-3
+    （`harness/check_inv_identity.out.txt`）。新增博客 post `flash-kda-02-fwd-k1` 并更新 index 目录。
+- **下一步：P2-2** 关键优化逐条量化：smem union 省多少 smem（估算 ~14KB）、`__launch_bounds__(256,8)`、
+  base-2 `ex2.approx` 与 `tanh.approx` sigmoid 的误差、前代求逆精度取舍。随后 P2-3 workspace 布局逐字段
+  对上 `flash_kda.cpp:get_workspace_size`。反向（P5）可用已装好的 FLA `chunk_kda` autograd 作对拍参照。
 
 ## 阻塞
 
