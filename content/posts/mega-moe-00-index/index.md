@@ -45,5 +45,6 @@ categories: ["算子开发"]
 24. [SM100 dense MQA logits 的分页版 metadata 调度器：varlen 请求与分页 KV]({{< relref "mega-moe-24-mqa-logits-paged-schedule" >}}) —— 请求 run-length 分组、请求内 Q block 均分、代价溢出回退（借计数位）、同请求 Q block 复用 KV、分页坐标滑动缓存；调度器与 UMMA 无关，H100 上跑真实设备代码全部 PASS（覆盖恰好一次 / 边界逐字段对拍 / 分页查表含 mid-refill）
 25. [DeepGEMM 块级 scale 布局转换与 UE8M0 打包]({{< relref "mega-moe-25-sf-layout-transform" >}}) —— 贯穿所有 FP8/FP4 kernel 的前置步骤：`transform_sf_into_required_layout` 四分派、recipe 2/3-tuple 契约、MN-major + 16B 对齐转置、UE8M0 只留指数 + 4 字节 LSB-first 打包、PSUM gap 行跳过；转置/打包 kernel 非 SM100 专属，H100 真机六组 ALL PASS
 26. [MoE wgrad 的按组 block-scale：K-grouped SF 打包]({{< relref "mega-moe-26-k-grouped-sf-packing" >}}) —— `(1,1,gran_k)` recipe、contiguous 精确 `Σ ceil_div(k/gran_k,4)` / PSUM 上界 `(sf_k+3G)/4`、device 找 owner 组 + 累积 padding + 减偏移取址 + LSB-first 打包、连续 `[packed,mn]` 输出；kernel 与 UMMA 无关，H100 上跑真实设备代码逐行对拍 ALL PASS（含空组/大量 padding/PSUM 尾部 poison）
+27. [DeepGEMM 的 cuBLASLt 回退路径与选核]({{< relref "mega-moe-27-cublaslt-fallback" >}}) —— 稠密 BF16 与按头 batched BF16 einsum 默认交给 cuBLASLt 的三与门（非确定性 / 未限制 SM 数 / plain-store epilogue）；row-major↔column-major 操作数交换、FAST_ACCUM/SM_COUNT_TARGET/16MiB workspace、NVFP4 VEC16 UE4M3、strided-batched；H100 真机 profiler 抓 kernel 名 + 选核切换 + 性能打平实测
 
 > 各篇正文由仓库 `code/mega-moe/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

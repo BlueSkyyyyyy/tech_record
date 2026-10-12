@@ -467,6 +467,31 @@
       E) 输出 K pitch=mn（连续）vs 非分组 TMA 对齐；F) host wrapper 在 sm90 被 `:224` 断言拒绝（RuntimeError）。
       配套博客 `content/posts/mega-moe-26-k-grouped-sf-packing`（索引页新增第 26 篇）。
 
+### P17 增量（opt-in，DeepGEMM 的 cuBLASLt 回退与选核）
+
+- [x] **P17-1** **cuBLASLt 回退路径与选核**（`csrc/apis/gemm.hpp` / `csrc/apis/einsum.hpp` /
+      `csrc/runtime/runtime.hpp` / `csrc/jit_kernels/impls/smxx_cublaslt.hpp` /
+      `csrc/jit_kernels/impls/epilogue_class.hpp`）：前面 26 篇拆的都是 DeepGEMM 自己的 JIT
+      kernel，本篇补上**它什么时候不用自家 kernel**。**H100 可跑，真机实测**。
+      → `docs/27-cublaslt-fallback.md`（真实行号核对）：**三与门** `gemm.hpp:518-523`
+      （`not deterministic_algorithms` ∧ `is_cublaslt_available()` ∧ `epilogue_alpha.has_value()`）；
+      `runtime.hpp:89-91 is_cublaslt_available` = `num_sms == device_num_sms`；epilogue→alpha 表
+      （`epilogue_class.hpp:35/41-48/50-65/67-89/91-106`：Identity→1.0 所以**默认也回退**、
+      FP8Quant/Stochastic→nullopt）；`bhd_bhr_hdr` **无条件** cuBLASLt（`einsum.hpp:128-148`）；
+      翻译层列主序交换 `(A Bᵀ)ᵀ=B Aᵀ`（`smxx_cublaslt.hpp:115-135`）、`FAST_ACCUM` 关、`SM_COUNT_TARGET`、
+      16MiB workspace（`runtime.hpp:25-26` 注释）、heuristic 只取 1 个、NVFP4 VEC16 UE4M3
+      （`smxx_cublaslt.hpp:165-185`）、strided-batched syrk/symm（`:137-163`）。
+      **FP8 dense/grouped 永不回退**（`gemm.hpp:108-132`/`:235-254`）。H100 实测
+      `harness/exp_cublaslt_fallback.{py,sh,out.txt}`（profiler 抓真实 kernel 名）：
+      ① 稠密 BF16 `bf16_gemm_nt` **默认 `nvjet_sm90_*`（cuBLASLt）**，`deterministic` 或
+      `set_num_sms(124)` → `deep_gemm::sm90_bf16_gemm_impl<…>`；② `alpha=0.5`/`epilogue.Alpha(2.0)`
+      仍回退；`epilogue.FP8Quantization` 在 sm90 被 `gemm.hpp:119` 拒；③ FP8 dense 恒
+      `sm90_fp8_gemm_1d2d_impl`（relerr 1.66e-3）；④ einsum 三个分支的默认/确定性切换，`bhd,bhr->hdr`
+      恒 `nvjet_*`；⑤ 显式 `cublaslt_gemm_nt/tt`(relerr 2e-4)/`+C`(6.6e-4)/`batched_syrk`(1.7e-3)/
+      `batched_symm`(1.7e-3) 正确性；⑥ **性能打平**：8 组形状 cuBLASLt vs DeepGEMM 0.97–1.02×
+      （4096×7168×7168 均 ~377 TFLOPS）——解释为何默认敢回退。配套博客
+      `content/posts/mega-moe-27-cublaslt-fallback`（索引页新增第 27 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -491,8 +516,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P13 全部完成；P14-1、P15-1、P16-1 完成。**
-  本轮 P16-1：新建 `docs/26-k-grouped-sf-packing.md`（+`harness/exp_kgrouped_sf_pack.{sh,out.txt}`、
+- 当前进度：**P0~P14 全部完成；P15-1、P16-1、P17-1 完成。**
+  本轮 P17-1：新建 `docs/27-cublaslt-fallback.md`（+`harness/exp_cublaslt_fallback.{py,sh,out.txt}`）
+  ——补上**「DeepGEMM 什么时候不用自家 kernel」**这条一直没讲清的选核规则。**H100 真机实测**
+  （`torch.profiler` 抓真实发射的 kernel 名）：稠密 BF16 `bf16_gemm_nt` 与按头 batched BF16 einsum
+  （`bhr,hdr->bhd`/`bhd,hdr->bhr`）在「非确定性 ∧ 未限制 SM 数 ∧ plain-store epilogue」时**默认交给
+  cuBLASLt**（`gemm.hpp:518-523` 三与门）；`Identity` epilogue 的 `get_alpha()=1.0`（而非 nullopt）
+  是「裸 GEMM 也回退」的关键；`set_num_sms(<device)` 通过 `is_cublaslt_available()`（`runtime.hpp:89-91`）
+  顺带禁用回退；`einsum("bhd,bhr->hdr")` **任何情况都走 cuBLASLt**（源码 TODO determinism）。
+  翻译层用 `(A Bᵀ)ᵀ = B Aᵀ` 把 row-major 变 column-major（`smxx_cublaslt.hpp:115-135`）；还讲了
+  FAST_ACCUM 关闭、SM_COUNT_TARGET、16 MiB workspace（`runtime.hpp:25-26` 注释）、NVFP4 VEC16 UE4M3、
+  strided-batched syrk/symm；FP8/grouped 永不回退。实测 8 组形状 **cuBLASLt vs DeepGEMM 0.97–1.02×**
+  （4096×7168×7168 均 ~377 TFLOPS）——解释默认为何敢回退。配套博客
+  `content/posts/mega-moe-27-cublaslt-fallback`（索引页新增第 27 篇）。Hugo 构建 0 ERROR。
+  上一轮 P16-1：新建 `docs/26-k-grouped-sf-packing.md`（+`harness/exp_kgrouped_sf_pack.{sh,out.txt}`、
   `src/kgrouped_sf_pack.cu`）——补上 **P15（单组 SF 布局）与 P4-2（K 轴分组 wgrad）的交叉点**：
   「每组 SF 行独立对齐补零」的按组 block-scale 打包。host `transform_k_grouped_sf_into_required_layout`
   的 `(1,1,gran_k)` recipe、SM90 只转置/SM100 才打包、contiguous 精确 `Σ ceil_div(k/gran_k,4)` 与
@@ -558,10 +595,10 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P16 已完成（P16-1 已把 K-grouped SF 打包补完）。后续若继续（均为增量、非承诺）：
+- **下一步**：P0~P17 已完成（P17-1 已把 cuBLASLt 回退/选核补完）。后续若继续（均为增量、非承诺）：
   ① **sparse attention 系列（P12/P13/P14 已开）**：SM90 dense、SM100 sparse、SM100 dense 连续版/
   分页版调度器均已做；可再补 `sm100_mqa_logits.cuh` SIMT epilogue 的更多数值特性，或
-  `impls/sm100_sparse_mqa_logits.cuh` 主 kernel 的 TMA 快路 / 尾裁剪细节精读；
+   `impls/sm100_sparse_mqa_logits.cuh` 主 kernel 的 TMA 快路 / 尾裁剪细节精读；
   ② **einsum 家族 FP8 投影（P11 已开）**：`bhr,hdr->bhd` 已做；`bhd,hdr->bhr` / `bhd,bhr->hdr`
   是 arch10 专属（仅分析）。可再补 `fp8_einsum` 的 FP8 输出对（SM100 `Kernel1D1D`）精读；
   ③ **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
@@ -569,7 +606,10 @@
   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
     shared expert 分支的更深精读；端到端需 SM100，当前不可行。
   ⑤ **k-grouped SF 打包**：P16-1 已完成（host 契约 + device 逐行对拍，H100 真实设备代码）。
-  若无新指令，可视为专题完结。
+  ⑥ **cuBLASLt 回退/选核**：P17-1 已完成。可再补 `sm90.hpp`/`sm100.hpp` 的
+   `get_layout_candidates` 全量枚举 + `get_best_config` 成本模型精读（选核的另一半：回退之外，
+   走自家 kernel 时 block_m/n/k/stage/cluster 如何选）。
+   若无新指令，可视为专题完结。
 
   （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。
   **计算图**（以 `tests/test_mega_mhc.py:123-210`

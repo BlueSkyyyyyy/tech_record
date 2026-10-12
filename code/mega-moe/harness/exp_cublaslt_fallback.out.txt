@@ -1,0 +1,56 @@
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 | NVIDIA H100 80GB HBM3 | sm_util=(9, 0) | device_num_sms=132
+
+====================================================================================
+A. 稠密 BF16 `bf16_gemm_nt`：默认 / deterministic / 限制 num_sms 的选核
+====================================================================================
+  默认                : cuBLASLt(nvjet)        | relerr=1.99e-04 | nvjet_sm90_tst_256x128_64x4_1x2_h_bz_coopA_TNT
+  deterministic=True  : DeepGEMM-SM90          | relerr=1.99e-04 | void deep_gemm::sm90_bf16_gemm_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 0u, 7168u, 7168u, 1u, 256u, 128u, 64u, 1
+  num_sms= 124   : DeepGEMM-SM90          | relerr=1.99e-04 | void deep_gemm::sm90_bf16_gemm_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 0u, 7168u, 7168u, 1u, 128u, 240u, 64u, 1
+  alpha=0.5           : cuBLASLt(nvjet)        | relerr_vs_0.5*ref=1.99e-04 | nvjet_sm90_tst_256x128_64x4_1x2_h_bz_coopA_TNT
+
+====================================================================================
+B. 自定义 epilogue：Identity/Alpha 可回退，FP8Quantization 在 SM90 被拒（需 SM100）
+====================================================================================
+  epilogue.Alpha(2.0) : cuBLASLt(nvjet)        | nvjet_sm90_tst_256x128_64x4_1x2_h_bz_coopA_TNT
+  epilogue.FP8Quant    : raised RuntimeError: Assertion error (csrc/apis/gemm.hpp:119): epilogue_class == nullptr and "Custom epilogues require SM
+
+====================================================================================
+C. 稠密 FP8 `fp8_gemm_nt`：永远走 DeepGEMM（无 cuBLASLt 回退）
+====================================================================================
+  fp8_gemm_nt default : DeepGEMM-SM90          | relerr=1.66e-03 | void deep_gemm::sm90_fp8_gemm_1d2d_impl<(cute::UMMA::Major)0, 0u, 7168u, 7168u, 1u, 256u, 128u, 128u, 128u, 128u, 128u, 
+  fp8_gemm_nt determ  : DeepGEMM-SM90          | void deep_gemm::sm90_fp8_gemm_1d2d_impl<(cute::UMMA::Major)0, 0u, 7168u, 7168u, 1u, 256u, 128u, 128u, 128u, 128u, 128u, 
+
+====================================================================================
+D. einsum（按头 batched BF16）：`bhr,hdr->bhd` 默认回退，`bhd,hdr->bhr` 同理；
+   `bhd,bhr->hdr` 无条件走 cuBLASLt（源码 TODO determinism）
+====================================================================================
+  bhr,hdr->bhd 默认   : cuBLASLt(nvjet)        | nvjet_sm90_tst_64x16_64x16_2x1_v_bz_TNT
+  bhr,hdr->bhd determ : DeepGEMM-SM90          | void deep_gemm::sm90_bf16_gemm_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 0u, 512u, 512u, 16u, 16u, 64u, 64u, 128u
+  bhd,hdr->bhr 默认   : cuBLASLt(nvjet)        | nvjet_sm90_tst_64x16_64x16_2x1_v_bz_NNT
+  bhd,hdr->bhr determ : DeepGEMM-SM90          | void deep_gemm::sm90_bf16_gemm_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)1, 0u, 512u, 512u, 16u, 16u, 64u, 64u, 128u
+  bhd,bhr->hdr 默认   : cuBLASLt(nvjet)        | nvjet_sm90_tss_128x256_64x4_2x1_v_bz_coopA_NTN
+
+====================================================================================
+E. 显式 `cublaslt_gemm_nt/tt` API：正确性与 C 累加（beta=1）
+====================================================================================
+  cublaslt_gemm_nt     : relerr=1.99e-04
+  cublaslt_gemm_nt+C   : relerr(acc)=6.58e-04
+  cublaslt_gemm_tt     : relerr=1.99e-04
+  -- strided-batched --
+  batched_syrk         : relerr=1.72e-03
+  batched_symm         : relerr=1.66e-03
+
+====================================================================================
+F. 性能对比：cuBLASLt（默认 bf16_gemm_nt）vs DeepGEMM SM90 kernel（deterministic）
+====================================================================================
+     M      N      K |  cuBLASLt TFLOPS       ms |  DeepGEMM TFLOPS       ms |  speedup
+     1   7168   7168 |              2.6    0.039 |              2.7    0.039 |    0.98x
+    16   7168   7168 |             43.5    0.038 |             42.1    0.039 |    1.03x
+   128   7168   7168 |            331.9    0.040 |            327.7    0.040 |    1.01x
+  1024   7168   7168 |            356.1    0.295 |            367.3    0.287 |    0.97x
+  4096   7168   7168 |            377.0    1.117 |            376.9    1.117 |    1.00x
+  8192   7168   7168 |            369.2    2.280 |            366.8    2.295 |    1.01x
+  4096  14336   7168 |            368.5    2.285 |            366.5    2.297 |    1.01x
+  4096   7168   2048 |            393.6    0.306 |            387.2    0.311 |    1.02x
+
+done.
