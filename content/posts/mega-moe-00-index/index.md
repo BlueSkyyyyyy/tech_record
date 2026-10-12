@@ -43,5 +43,6 @@ categories: ["算子开发"]
 22. [稀疏 MQA logits：稀疏注意力 indexer 的第二级打分]({{< relref "mega-moe-22-sparse-mqa-logits" >}}) —— 选中 KV 块内打分并压缩输出、metadata 合并去重与负载均衡调度、contiguous TMA 快路、SM100 仅分析 + H100 语义实测（压缩列映射逐位对齐）
 23. [SM100 dense MQA logits：主 kernel 与连续版负载均衡调度器]({{< relref "mega-moe-23-mqa-logits-schedule" >}}) —— KV span 并集、代价模型 `2·split+3` 与 split 粒度边界二分、`SM100MQALogitsScheduler` 双模式；调度器与 UMMA 无关，H100 上跑真实设备代码 10 用例全通过（覆盖/均衡/边界对拍）
 24. [SM100 dense MQA logits 的分页版 metadata 调度器：varlen 请求与分页 KV]({{< relref "mega-moe-24-mqa-logits-paged-schedule" >}}) —— 请求 run-length 分组、请求内 Q block 均分、代价溢出回退（借计数位）、同请求 Q block 复用 KV、分页坐标滑动缓存；调度器与 UMMA 无关，H100 上跑真实设备代码全部 PASS（覆盖恰好一次 / 边界逐字段对拍 / 分页查表含 mid-refill）
+25. [DeepGEMM 块级 scale 布局转换与 UE8M0 打包]({{< relref "mega-moe-25-sf-layout-transform" >}}) —— 贯穿所有 FP8/FP4 kernel 的前置步骤：`transform_sf_into_required_layout` 四分派、recipe 2/3-tuple 契约、MN-major + 16B 对齐转置、UE8M0 只留指数 + 4 字节 LSB-first 打包、PSUM gap 行跳过；转置/打包 kernel 非 SM100 专属，H100 真机六组 ALL PASS
 
 > 各篇正文由仓库 `code/mega-moe/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

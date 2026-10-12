@@ -412,6 +412,38 @@
       解耦（H=64 sched/meta slots **432/288**、H=128 **864/288**，均衡只估计、正确性靠 `has_work`）。
       配套博客 `content/posts/mega-moe-24-mqa-logits-paged-schedule`（索引页新增第 24 篇）。
 
+### P15 增量（opt-in，贯穿所有 FP8/FP4 kernel 的 SF 布局前置步骤）
+
+- [x] **P15-1** **DeepGEMM 块级 scale（SF）布局转换与 UE8M0 打包**
+      （`csrc/apis/layout.hpp` / `csrc/jit_kernels/impls/smxx_layout.hpp` /
+      `deep_gemm/include/deep_gemm/impls/smxx_layout.cuh` / `csrc/utils/layout.hpp`）。
+      前面第 10/12/13/21 篇反复出现「SF 要先 MN-major + TMA 对齐」，本篇把这条**贯穿所有
+      block-scale GEMM 的前置步骤**单独讲透。**转置/打包 kernel 都不是 SM100 专属，H100 可跑**。
+      → `docs/25-sf-layout-transform.md`（真实行号核对）：host 四分派 `layout.hpp:11-58`
+      （`:38-39` FP32 1×128 SM90 转置、`:42-43` FP32 128×128 SM90 仅 check、`:46-51` FP32 SM100
+      转置+UE8M0 打包、`:54-55` INT SM100 仅 check，其余 `:57` UNREACHABLE）；**recipe 契约**
+      （2-tuple `(gran_mn,gran_k)` 断言 `not is_sfa` `:28`；3-tuple `(a,b,k)` 断言 `is_sfa` `:24`）；
+      `transform_sf_pair_into_required_layout:60-87`（SFA 传 true / SFB 传 false）；
+      `get_default_recipe`（`utils/layout.hpp:86-98`，SM90 唯一 `(1,128,128)`）；
+      `check_sf_layout:101-140`（`:115` dim、`:118/119` 形状随 gran、`:122-130` TMA stride、
+      `:133-138` SM90 SFB 转置检查）；`get_tma_aligned_size`（`utils/math.hpp:23-27`）。
+      device `smxx_layout.cuh`：`transpose_fp32:10-72`（`:36` PDL、`:64` host 幂等早退、
+      `:70` 显式转置、`kSmemSFK+1` 防 bank 冲突）；`transpose_and_pack_fp32_into_ue8m0:76-191`
+      （`:99` PDL、`:107-126` PSUM 有效区间预计算、`:161-190` 打包、`:183-186` 4 字节 LSB-first
+      位运算、`:177-178` **只允许 2 的幂**（符号/尾数为 0）的 debug 陷阱）；
+      `pack_fp32_into_ue8m0:193-293`（已 MN-major 输入，`:227-267` 沿 grouped_layout 找组与
+      padding、`:279-282` 同款陷阱）。PSUM gap 行跳过（`:117-126`/`:142-149`/`:188`，写安全有限码
+      而非 NaN `0xff`）。H100 实测 `harness/exp_sf_layout.{py,sh,out.txt}` 六组 **ALL PASS**：
+      ① `get_tma_aligned_size` 公式逐点一致；② 转置 `val_diff=0`、stride `(1, aligned)`、**幂等**；
+      ③ UE8M0 CUDA==torch 参考**逐位一致**、`0x848a847c`→指数 `[124,132,138,132]` LSB-first、
+      `ceil_to_ue8m0` 尾数恒 0、`mn=137` torch 回退一致、**已 MN-major 走 pack kernel 与
+      transpose_and_pack 逐位一致**（两 kernel 互证）；④ PSUM `groups_end=[300,700,1024]`
+      152/1024 gap 行、有效行逐位一致、无 NaN 码；⑤ recipe 分派 `(1,128)/(128,128)` OK、
+      `(1,32)` 不论 `disable_ue8m0_cast` 都 `:57 Unknown SF transformation`（SM100 专属）、
+      `:24`/`:28` 契约反例被拦；⑥ 端到端 `fp8_gemm_nt`（m1024 n512 k1024）relerr 6.8e-4、
+      裸 SF vs 显式变换 SF **逐位相等**（host API 内部本就调同一变换）。配套博客
+      `content/posts/mega-moe-25-sf-layout-transform`（索引页新增第 25 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -436,8 +468,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P13 全部完成；P14-1 完成。**
-  本轮 P14-1：新建 `docs/24-mqa-logits-paged-schedule.md`（+`harness/exp_mqa_logits_paged_schedule.{sh,out.txt}`、
+- 当前进度：**P0~P13 全部完成；P14-1、P15-1 完成。**
+  本轮 P15-1：新建 `docs/25-sf-layout-transform.md`（+`harness/exp_sf_layout.{py,sh,out.txt}`）
+  ——补上**贯穿所有 FP8/FP4 kernel 的 SF 布局前置步骤**（前面第 10/12/13/21 篇都只是顺带提到）。
+  `transform_sf_into_required_layout` 的四分派、recipe 的 2-tuple（断言 `not is_sfa`）/
+  3-tuple（断言 `is_sfa`）契约、`check_sf_layout` 形状/stride 检查、`get_tma_aligned_size` 16B 对齐；
+  device 侧 `transpose_fp32`（MN-major + 幂等早退）、`transpose_and_pack_fp32_into_ue8m0` /
+  `pack_fp32_into_ue8m0`（UE8M0 只留指数、4 字节 LSB-first、PSUM gap 行跳过、只允许 2 的幂的
+  debug 陷阱）。**转置/打包 kernel 非 SM100 专属**，H100 真机六组 **ALL PASS**：转置 `val_diff=0` +
+  幂等；UE8M0 CUDA==torch 参考逐位一致 + LSB-first 拆包核对；已 MN-major 输入两 kernel 互证；
+  PSUM gap 行跳过且无 NaN 码；recipe 分派在 SM90 上 `(1,128)/(128,128)` OK、`(1,32)` 拒
+  （`layout.hpp:57`、SM100 专属）、`:24`/`:28` 契约反例被拦；端到端 `fp8_gemm_nt` relerr 6.8e-4、
+  裸 SF vs 显式变换 SF 逐位相等。配套博客 `content/posts/mega-moe-25-sf-layout-transform`
+  （索引页新增第 25 篇）。Hugo 构建 0 ERROR。
+  上一轮 P14-1：新建 `docs/24-mqa-logits-paged-schedule.md`（+`harness/exp_mqa_logits_paged_schedule.{sh,out.txt}`、
   `src/mqa_logits_paged_schedule.cu`）——补上 SM100 dense MQA logits 的**分页版** metadata 调度器
   （第 23 篇连续版的分页对照）。主 kernel 仍是 block-scaled UMMA + TMEM，**SM100 专属，仅分析**；
   但 `scheduler/sm100_paged_mqa_logits.cuh` 的调度逻辑（varlen 请求 run-length 分组、请求内 Q block
@@ -480,7 +524,7 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P14 已完成。后续若继续（均为增量、非承诺）：
+- **下一步**：P0~P15 已完成（P15-1 已把 `transform_sf_into_required_layout` 通用布局补完）。后续若继续（均为增量、非承诺）：
   ① **sparse attention 系列（P12/P13/P14 已开）**：SM90 dense、SM100 sparse、SM100 dense 连续版/
   分页版调度器均已做；可再补 `sm100_mqa_logits.cuh` SIMT epilogue 的更多数值特性，或
   `impls/sm100_sparse_mqa_logits.cuh` 主 kernel 的 TMA 快路 / 尾裁剪细节精读；
@@ -489,7 +533,10 @@
   ③ **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
   并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）；
   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
-   shared expert 分支的更深精读，或 `transform_sf_into_required_layout` 通用布局；端到端需 SM100，当前不可行。
+   shared expert 分支的更深精读；端到端需 SM100，当前不可行。
+  ⑤ **k-grouped SF 打包（P15 延伸，仅分析）**：`transform_k_grouped_sf_into_required_layout`
+  （`layout.hpp:89-116`）/ `get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor`
+  （`smxx_layout.hpp:218-283`，host 断言 `arch==10`）的逐组 SF 打包与 PSUM 上界估算，SM100 专属。
   若无新指令，可视为专题完结。
 
   （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。

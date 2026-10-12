@@ -1,0 +1,72 @@
+NVIDIA H100 80GB HBM3, 9.0
+torch 2.12.0a0+0291f960b6.nv26.04.48445190  device NVIDIA H100 80GB HBM3  cc (9, 0)
+
+==============================================================================
+A) get_tma_aligned_size：16 字节对齐（math.hpp:23-27）
+==============================================================================
+  16B 对齐公式 align(x, 16/elem_size) 逐点核对: PASS
+  get_tma_aligned_size(4095,4) = 4096  (= 4096, fp32 scale 行距)  (4095,1) = 4096 (= 4096, int8)
+
+==============================================================================
+B) get_mn_major_tma_aligned_tensor：行主序 -> MN-major + TMA 对齐（smxx_layout.cuh:10-72）
+==============================================================================
+  mn=  512 sf_k=  16: val_diff=0.00e+00 stride=(1,512) want=(1,512) contiguous=False idempotent_ptr_eq=True
+  mn= 4096 sf_k=  56: val_diff=0.00e+00 stride=(1,4096) want=(1,4096) contiguous=False idempotent_ptr_eq=True
+  mn=  137 sf_k=   9: val_diff=0.00e+00 stride=(1,140) want=(1,140) contiguous=False idempotent_ptr_eq=True
+  mn=  256 sf_k=  64: val_diff=0.00e+00 stride=(1,256) want=(1,256) contiguous=False idempotent_ptr_eq=True
+  转置 + 对齐 + 幂等: PASS
+
+==============================================================================
+C) UE8M0 打包：只留指数 + 4 字节 LSB-first（smxx_layout.cuh:161-190）
+==============================================================================
+  mn=  512 sf_k= 128 -> packed[512,32] stride=(1, 512) (want (1,512)): cuda==torch_ref True LSB-first True stride_ok True
+    例 out[0,0] = 0x848a847c -> 4 个 ue8m0 指数字节 = [124, 132, 138, 132]，对应 sf[0, 0:4] 指数 = [124, 132, 138, 132]
+  mn= 4096 sf_k= 256 -> packed[4096,64] stride=(1, 4096) (want (1,4096)): cuda==torch_ref True LSB-first True stride_ok True
+  mn=  256 sf_k=  64 -> packed[256,16] stride=(1, 256) (want (1,256)): cuda==torch_ref True LSB-first True stride_ok True
+  mn= 1024 sf_k=  32 -> packed[1024,8] stride=(1, 1024) (want (1,1024)): cuda==torch_ref True LSB-first True stride_ok True
+  torch 回退（mn=137 非 4 倍数）: cuda-vs-torch 逐位 True
+  已 MN-major 输入走 pack kernel：与 transpose_and_pack 逐位一致 True (stride in = (1, 1024))
+  ceil_to_ue8m0 结果只含指数（尾数=0）: True；且 raw <= pow2 < 2*raw: True
+  UE8M0 打包: PASS
+
+==============================================================================
+D) PSUM 布局：gap 行跳过、有效行正确（smxx_layout.cuh:106-126 / 187-189）
+==============================================================================
+  m_alignment=128 groups_end=[300, 700, 1024] gap_rows=152/1024
+  有效行 == 无条件打包: True；gap 行 == 原值: False（期望 False）
+  gap 行无 0xFF(NaN) 码: True
+  PSUM 布局: PASS
+
+==============================================================================
+E) transform_sf_into_required_layout 的 recipe 分派（SM90 可达性）
+==============================================================================
+  arch_major = 9
+  [OK  ] recipe=(1,128)   SFA形状[512,2]: in(512, 2) -> stride=(1, 512) dtype=torch.float32
+  [OK  ] recipe=(128,128) SFB形状[4,2]: in(4, 2) -> stride=(2, 1) dtype=torch.float32
+  [REJ ] recipe=(1,32)    [SM100 专属]: Assertion error (csrc/apis/layout.hpp:57): Unknown SF transformation
+  [REJ ] recipe=(1,32) disable_ue8m0_cast=True: Assertion error (csrc/apis/layout.hpp:57): Unknown SF transformation
+  [OK  ] recipe=(1,128,128) is_sfa=True: in(512, 2) -> stride=(1, 512) dtype=torch.float32
+  [REJ ] recipe=(1,1,32)   is_sfa=False: Assertion error (csrc/apis/layout.hpp:57): Unknown SF transformation
+  [REJ ] recipe=(128,128) 却传 SFA[512,2]: Assertion error (csrc/apis/../jit_kernels/impls/../heuristics/../../utils/layout.hpp:118): sf.si
+  [REJ ] recipe=(1,128) is_sfa=True [契约反例]: Assertion error (csrc/apis/layout.hpp:28): not is_sfa.has_value()
+  [REJ ] recipe=(1,128,128) 无 is_sfa [契约反例]: Assertion error (csrc/apis/layout.hpp:24): is_sfa.has_value()
+
+==============================================================================
+F) 端到端 SM90 fp8 gemm：裸 SF 与显式变换 SF 逐位一致
+==============================================================================
+  m=1024 n=512 k=1024: fp8 gemm vs fp32 ref relerr = 6.7984e-04（FP8 量化噪声量级）
+  显式变换 SFA stride=(1, 1024) dtype=torch.float32
+  显式变换 SFB stride=(8, 1) dtype=torch.float32
+  SFA 二次变换 ptr 相同（幂等）: True
+  裸 SF vs 显式变换 SF 输出逐位相等: True
+
+==============================================================================
+汇总
+==============================================================================
+  A: PASS
+  B: PASS
+  C: PASS
+  D: PASS
+  E: PASS
+  F: PASS
+  ALL PASS: True
