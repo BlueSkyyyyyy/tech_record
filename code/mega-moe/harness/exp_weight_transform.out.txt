@@ -1,0 +1,16 @@
+[interleave] 输入行序 (前 8 = gate, 后 8 = up):
+              ['G0', 'G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7', 'G8', 'G9', 'G10', 'G11', 'G12', 'G13', 'G14', 'G15', 'U0', 'U1', 'U2', 'U3', 'U4', 'U5', 'U6', 'U7', 'U8', 'U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15']
+[interleave] 输出行序:
+              ['G0', 'G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7', 'U0', 'U1', 'U2', 'U3', 'U4', 'U5', 'U6', 'U7', 'G8', 'G9', 'G10', 'G11', 'G12', 'G13', 'G14', 'G15', 'U8', 'U9', 'U10', 'U11', 'U12', 'U13', 'U14', 'U15']
+[interleave] 与期望 [G0..7,U0..7,G8..,U8..] 一致: True
+
+[SwiGLU] 交错前后 silu(gate)*up 最大绝对误差: 0.000e+00
+
+[utccp] 256 行里与 kernel `transform_sf_token_idx` 不符的行数: 0
+[utccp] 原行 -> 新行 (前 16):
+        [(0, 0), (1, 4), (2, 8), (3, 12), (4, 16), (5, 20), (6, 24), (7, 28), (8, 32), (9, 36), (10, 40), (11, 44), (12, 48), (13, 52), (14, 56), (15, 60)]
+
+[cross-check] vs deep_gemm.mega._interleave_weights 最大差: 0.0
+[cross-check] vs deep_gemm.mega._transpose_sf_for_utccp 最大差: 0
+
+ALL_OK = True

@@ -129,6 +129,72 @@ ring 大小不是拍脑袋定的。host 侧 `get_symm_buffer_size_for_mega_moe`
 作为 `num_ring_tokens`（`:57`-`:63`）。scheduler 里那个复杂的死锁上界推导（见 §4.3）正是
 为「ring 不能太小否则 L1/L2 互相等死」服务的。
 
+### 3.4 专家权重与 scale 布局（`transform_weights_for_mega_moe`，P2-1）
+
+路由专家的权重**不在**对称显存里，而是作为独立张量在 launch 前由 host 重排好，再经 TMA 描述符送进
+kernel。host 入口是 `deep_gemm.mega.transform_weights_for_mega_moe`（`mega/__init__.py:146`），它按
+`l1_weights` / `l2_weights` 是 **FP8/FP4 元组**还是 **BF16 张量**分成两条路径（`:153`）：
+
+| 权重 | BF16 路径（`:160`-`:163`） | FP8/FP4 路径（`:153`-`:159`） |
+|---|---|---|
+| L1 | `_interleave_weights(l1)` | weights `_interleave_weights` + SF `_transpose_sf_for_utccp(_interleave_weights(sf))` |
+| L2 | 不变 | weights 不变 + SF `_transpose_sf_for_utccp` |
+
+原始形状（`tests/test_mega_moe.py:130`-`:133`）：`l1_weights [E, 2I, H]`（前半 gate、后半 up），
+`l2_weights [E, H, I]`；FP8/FP4 时 SF 为 `[E, N, K/32]`（`:105`-`:118`，经
+`transform_sf_into_required_layout` 变成 packed-int + MN-major）。共享专家则是 2D 版本（`:147`-`:150`）。
+
+#### 3.4.1 为什么要按 8 粒度交错 gate/up
+
+`_interleave_weights(t, gran=8)`（`mega/__init__.py:112`）把 N 轴从前半/后半的 `[gate | up]`
+改成 `[gate0..7, up0..7, gate8..15, up8..15, ...]`。原因在 kernel 的 L1 epilogue：
+它用 `SM100_TMEM_LOAD_16dp256b1x`（`sm100_fp8_fp4_mega_moe.cuh:1017`-`:1020`）读 TMEM，
+注释（`:1066`-`:1067`）明确写着「SwiGLU in-place using granularity 8 interleaved weights」——
+交错后，同一个 8 行 atom 的相邻两个 256b 组就正好是「gate 8 个 / up 8 个」，epilogue 直接
+`bf16_gate` / `bf16_up` 配对做 `silu(gate)*up`（`:1112`-`:1134`），不需要跨半个 tile 去取 up。
+`gran=8` 与 `ATOM_M=8`（`:181`）、以及 4x32 的 UTCCP（见下）三者对齐。
+
+实测（`harness/exp_weight_transform.py` + `.out.txt`，H100 纯 PyTorch）：输入行序
+`G0..G15,U0..U15` 经交错后变为 `G0..7,U0..7,G8..15,U8..15`，与期望逐行一致；把交错 GEMM 输出按
+配对还原出的 `silu(gate)*up` 与原始布局结果**最大绝对误差 0**。
+
+#### 3.4.2 SF 的 UTCCP 4x32 转置
+
+FP8/FP4 的 scale 还要再转一次：`_transpose_sf_for_utccp(sf)`（`mega/__init__.py:129`）对每个 128
+行组做 `(4,32) -> (32,4)` 的转置。kernel 侧对应的映射是 `transform_sf_token_idx`
+（`sm100_fp8_fp4_mega_moe.cuh:145`-`:149`）：
+
+```
+new_idx = (idx & ~127) + (idx & 31) * 4 + ((idx >> 5) & 3)
+```
+
+即原行 `r`（组内 `r = b*32 + c`，`b∈[0,4)`、`c∈[0,32)`）落到新位置 `c*4 + b`。这是因为
+MMA 前要把 SF 从 smem 搬进 TMEM，走的是 `SM100_UTCCP_4x32dp128bit_2cta`
+（`:895`、`:900`、`:906`），这条指令按「4 行 × 32 列」的 pattern 分发 128 个 datapath，所以
+smem 里的 mn 顺序必须预先按这个 pattern 排好。实测：对 256 行做 `_transpose_sf_for_utccp` 后，
+用 kernel 公式逐行反查，**不符行数 = 0**；与 `deep_gemm.mega._transpose_sf_for_utccp` 的结果
+最大差 0（`.out.txt`）。
+
+#### 3.4.3 SF 张量在 kernel 里的索引
+
+`transform_sf_into_required_layout`（`csrc/apis/layout.hpp:11`）在 SM100、`gran_k=32` 时走
+`get_mn_major_tma_aligned_packed_ue8m0_tensor`（`csrc/jit_kernels/impls/smxx_layout.hpp:133`）：
+把 4 个 UE8M0 字节打成 1 个 int32，并排成 **MN-major + TMA 对齐**（元素 `(g,m,c)` 的 stride 为
+`{packed_k*aligned_mn, 1, aligned_mn}`，`smxx_layout.hpp:137`-`:138`）。于是 kernel 里：
+
+- `shape_sfb_k = ceil_div(shape_k, kGranK*4) = K/128`（`:774`）；
+- SFB 的 K 偏移是 `local_expert_idx * shape_sfb_k + k_block*(BLOCK_K/128)`（`:788`）——乘 expert
+  stride、按每 128 个 K 一个 int32 前进；
+- TMA 以 `<BLOCK_N, 1>`（`:805`-`:806`）从 MN-major 的连续 mn 方向取 128 行。
+
+权重本体的 TMA 描述符由 `make_tma_weights_3d_desc`（`csrc/jit_kernels/impls/runtime_utils.hpp:311`）
+把 `[E, N, K]` 变成 4D `(K, N/2, 2, E)`（N 被 locality domain 一分为二），SF 描述符见
+`make_tma_sf_desc`（`:384`）。TMA load 里 `half_n = shape_n/2`、`half_idx` 与 `n_block_idx`
+（`:775`、`:778`）就是配合「A/B swap + 2-CTA 各取一半 N」的寻址。
+
+> 以上变换均在 host 完成、不占 kernel 时间；kernel 只消费排好的权重与 SF。这些路径都需要 SM100
+> 的 UTCCP/tcgen05，**本机 H100 跑不了端到端**，本节仅为源码精读 + 纯 PyTorch 重排语义核对。
+
 ## 4. 调度器（`scheduler/mega_moe.cuh`）
 
 ### 4.1 任务与阶段
