@@ -142,6 +142,13 @@
       是瓶颈（占 ours dev 55.5–62.8%）且比 FLA `dhu` 慢 3.9×，是下一步工程化首要目标
       （应镜像前向 K2 的 warp specialization）。host 税非主要矛盾（ours 110–260µs、
       FLA 500–730µs/次，大 shape 全被隐藏）。
+- [x] **P7-8** 复核 P7-7 的反向计时：P7-7 表在**未隔离 GPU**（GPU 0 被另一容器打满）时测得，
+      两侧绝对值被抬高约 2×，关键两行不可复现（ours B1 @B2T1024H8 539.8→**214.3**、FLA `fwd_h`
+      578→**83.6**）；比值结论不变但「重算占 FLA 反向 dev 46.2%」更正为 **17.8%**。用控制变量脚本
+      （`check_bwd_dhu_dtype.py`）拆开 B1 与 FLA `dhu` 的两个混淆——**chunk 粒度（16 vs 64）** 与
+      **操作数 dtype（fp32/tf32 vs bf16）**：同 BT 同 dtype 下 ours/FLA = **1.1–1.9×**（非 3.9×）；
+      让 B1 吃 workspace 原生 bf16（不 `.float()`）→ **2.2–2.5×**，B2T1024H8 已快过 FLA `dhu`。
+      修正归因并重排优化优先级。
 - [x] **P7-5** 关闭 P7-2/P7-4 待验证 (c)：**K2 突破 2 CTA/SM 后 L2 墙是否后移**——实验=否。
       改造 `SharedStorageK2`（fp32 状态缓冲改按 `StateFP32` 条件预留）+ 扫 pipeline stage，编译 6 个变体，
       实测占用率/ncu SOL/K2 时间。结论：smem 被无条件预留的 65536 B fp32 缓冲钉死为 98432 B（只减
@@ -178,7 +185,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）+ **FLA host 税组成归因（P7-6）** + **反向性能与 host 税剖析（P7-7）**完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）+ **FLA host 税组成归因（P7-6）** + **反向性能与 host 税剖析（P7-7）**完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
   - P6-7：新增 `docs/06` §6.9 + `harness/check_bwd_e2e.py`（`harness/check_bwd_e2e.out.txt`），
     并给 `harness/check_bwd_dhu_kernel.py` 的 B1 kernel 补 `dht`（终态上游梯度）入口（`HAS_DHT` 分支）。
     **Part A**：补齐反向第 5 个 kernel **`dAv`（输出支路）**（对应 FLA `chunk_kda_bwd_kernel_dAv`，
@@ -196,6 +203,25 @@
     （FLA `chunk_local_cumsum` 默认 `scale=RCP_LN2`，其 reverse 已直接给 `ga.grad`），误乘指纹=
     「dg 与其余五项差一个均匀常数因子」（线性拟合 `gold/ours≈1.44=RCP_LN2`、max_rel 稳停 0.44）。
      回归：B1 自身自测（`check_bwd_dhu_kernel.py`）改后仍与旧数字一致（dh 4.6e-5 等），无退化。
+  - P7-8：新增 `docs/07` §11「复核 §10：GPU 竞争污染与两个混淆变量」+ `harness/check_bwd_dhu_dtype.py`
+    （`harness/check_bwd_dhu_dtype.out.txt`）+ `harness/bench_bwd_idle.out.txt`（`bench_bwd.py` 钉到
+    空闲卡 `CUDA_VISIBLE_DEVICES=1` 重跑）。**动机**：P7-7 的两个关键数字事后不可复现——ours B1
+    @B2T1024H8 报 539.8µs（→「慢 FLA 3.9×」）、FLA 前向重算 `fwd_h` 报 578.0µs（→「重算占 FLA
+    反向 dev 46.2%」）；重测机器上 GPU 0 正被另一容器打到 100%。**空闲卡重跑**：主表 ours dev 是 FLA
+    反向的 0.61–0.80×（比值同 §10），但绝对值低约 2×（B2T1024H8 ours dev 972.8→483.0、FLA
+    1322.8→652.3）；逐 kernel 只有两行对不上且都是「带串行递推的大头」：**ours B1 539.8→214.3**、
+    **FLA `fwd_h` 578.0→83.6**（其 FLA `dhu` 136.9→137.4 几乎没变）。重算占比更正为
+    (83.6+32.8)/652.3 = **17.8%**（T512H4 为 21.9%）。**控制变量**（`check_bwd_dhu_dtype.py`）：造一个
+    只改 `tl.dot` 操作数 dtype 的 bf16-mma 克隆 kernel（状态仍 fp32 累加，仅点积内 `.to(bf16)`，与
+    FLA 逐字一致），同操作数扫 {ours,FLA}×{fp32/tf32,bf16}×{BT=32,64}（CUPTI，空闲卡）：**同 BT 同
+    dtype 下 ours/FLA = 1.13–1.95×**（fp32 1.13–1.65×、bf16 1.24–1.95×），即 B1 与 FLA `dhu` 只差
+    一个常数因子；**chunk 粒度**（BT=16 vs 64）损失约 1.3–1.6×。**最便宜杠杆**：B1 操作数保持
+    workspace 原生 bf16（P6-8 的 `reconstruct` 把整套 `.float()` 了，使 B1 掉进最慢的 tf32 路径）→
+    T512H4 91.3→**37.2µs（2.45×）**、B2T1024H8 215.0→**97.9µs（2.20×，已快过 FLA `dhu` 137.4）**；
+    Part A 正确性 ours-bf16 vs FLA-bf16（同 BT=64）`dh/dv2` max_abs 6.1e-5–2.4e-4、`dh0` 7.5e-9–1.7e-7。
+    **更正**：B1 差距性质从「实现差 4×」变为「chunk 粒度 + 常数因子」；优化优先级重排为
+    (1) 吃原生 bf16 → (2) 更大 chunk 重组 → (3) 最后才镜像 K2 warp specialization。**方法学修正**：
+    本专题基准此后统一 `CUDA_VISIBLE_DEVICES=<空闲卡>`。
   - P6-8：新增 `docs/06` §6.10 + `harness/check_bwd_ws_reuse.py`（`harness/check_bwd_ws_reuse.out.txt`）。
     把整条反向**直接架在 FlashKDA 自己的 K1 workspace 上**（此前 P6-2～P6-7 都吃 FLA 中间量）：
     按 head-major SoA 偏移（`fwd_launch.cu:64-71`，`n_ht=H·total_tiles`）切出六字段 + B0 重算，
@@ -299,19 +325,22 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
   §5.2 的 **B0/B1/B2/B3/dAv 五段已全部做成最小 kernel，P6-7 已把四段组装成端到端反向核到
   tf32 底噪，P6-8 又把整条反向直接架在 FlashKDA K1 workspace 上端到端核到 bf16 底噪**；
-  **P7-7 又把它和 FLA 反向在同一口径下比（wall/dev 0.41–0.79× 反超，因复用 workspace 省掉
-  FLA 反向里占 22–46% dev 的前向状态重算），并把下一阶段的工程化目标收敛到 B1：B1 `dhu` 占
-  我们反向 dev 的 55–63%、比 FLA 同类 kernel 慢 3.9×，应镜像前向 K2 的 warp specialization +
-  TMA pipeline 重写**；`dAv/B2/B3` 已领先或接近，非瓶颈。剩余的是更完整的
+  **P7-7 又把它和 FLA 反向在同一口径下比（wall/dev 0.40–0.80× 反超，因复用 workspace 省掉
+  FLA 反向里重算前向状态那一块）**；**P7-8 复核发现 P7-7 的表受 GPU 竞争污染（关键两行不可复现），
+  并把下一阶段的工程化目标从「B1 慢 3.9× → 重写」更正为「B1 只差 FLA 1.6–1.9×，性质是 CHUNK=16
+  粒度 + 常数因子；最便宜杠杆是先吃 workspace 原生 bf16（2.2–2.5×），再考虑更大 chunk 重组，
+  最后才是镜像 K2 的 warp specialization」**；`dAv/B2/B3` 已领先或接近，非瓶颈。剩余的是更完整的
   CUTLASS/TMA + warp-specialization 版反向工程化（重点＝B1）。P7-2 遗留的 nsys
   流量拆分（P7-3 已用 ncu DRAM 计数替代、待验证 (b) 已关闭）。
   **P7-5 已用实验关闭 P7-2/P7-4 待验证 (c)**（K2 突破 2 CTA/SM 后 L2 墙不后移，见下）。
   **P7-6 已用 `process_time`+nsys 关闭 §4 待验证「FLA host 税组成」**（0.8 ms ≈ 12 次 Triton kernel
   的 Python launch 包装 + ~190 µs `dispatch` + ~75 µs driver launch，与 GPU/autograd/分配无关，见下）。
-  **P7-7：新增 `docs/07` §10 + `harness/bench_bwd.py`（`harness/bench_bwd.out.txt`）**，见下。
+  **P7-7：新增 `docs/07` §10 + `harness/bench_bwd.py`（`harness/bench_bwd.out.txt`），见下。P7-8：
+  更正其被污染的数字并重排 B1 优化优先级（`docs/07` §11 + `harness/bench_bwd_idle.out.txt` +
+  `harness/check_bwd_dhu_dtype.py`），见上。**
   - P6-6：新增 `docs/06` §6.8 + `harness/check_bwd_b0_gate.py`
     （`harness/check_bwd_b0_gate.out.txt`）。把 §5.2 的 **B0 `gate_bwd`**（对应 FLA
     `kda_gate_chunk_cumsum` `gate.py:375` + `kda_gate_bwd` `gate.py:252`）做成最小可运行 Triton

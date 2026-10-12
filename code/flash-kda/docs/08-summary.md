@@ -178,11 +178,16 @@ FlashKDA K1 当场写的 workspace `kGTotal` 对到 1.6e-5~8.1e-5），四条支
 剩余的是把最小 kernel 工程化为 CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、
 `CHUNK=16`），属更大工程，留待有明确需求时再做。
 
-**反向性能（`docs/07` §10 P7-7）**：把上面那条 workspace 驱动反向链和 `torch.autograd` 穿
-`chunk_kda` 在统一口径（`wall`+CUPTI `dev`）下比，**只计反向**。四组 shape 实测 ours **wall 0.41–0.76×、
-dev 0.60–0.79×** FLA 反向（端到端前向+反向 dev 0.5–0.8×），根因是 **FLA 反向里重算了前向状态
-（`...fwd_kernel_h` 578 µs + `recompute_w_u` 32.7 µs = 其 dev 的 46.2%，B2T1024H8），而我们复用
-K1 workspace 从不重算**——把「复用 K1 workspace」的设计收益从正确性（P6-8）兑现成性能。
-短板：**B1 `dhu` 占我们反向 dev 的 55–63%、比 FLA 同类 kernel 慢 3.9×**，是下一阶段工程化的
-首要目标（应镜像前向 K2 的 warp specialization + TMA pipeline）；`dAv/B2/B3` 已领先或接近。
-反向 host 税非主要矛盾（ours 110–260 µs、FLA 500–730 µs/次，大 shape 全被 GPU 时间隐藏）。
+**反向性能（`docs/07` §10 P7-7 + §11 P7-8 更正）**：把上面那条 workspace 驱动反向链和
+`torch.autograd` 穿 `chunk_kda` 在统一口径（`wall`+CUPTI `dev`）下比，**只计反向**。四组 shape 实测
+ours **wall 0.40–0.62×、dev 0.61–0.80×** FLA 反向（端到端前向+反向 dev 0.5–0.8×），根因是 **FLA
+反向里重算了前向状态**（`...fwd_kernel_h` + `recompute_w_u`，修正后占其 dev 的 **17.8%**，$T512H4$
+21.9%），而我们复用 K1 workspace 从不重算——把「复用 K1 workspace」的设计收益从正确性（P6-8）兑现
+成性能。注：P7-8 复核发现 P7-7 的表是在**未隔离 GPU**（GPU 0 被另一容器打满）时测的，两侧绝对值都
+被抬高约 2×，且关键两行（ours B1 @B2T1024H8 539.8→**214.3**、FLA `fwd_h` 578→**83.6**）不可复现；
+比值结论不变，但「重算占 46.2%」应改为 **17.8%**（`docs/07` §11）。**B1 `dhu` 仍是 ours 反向链最大
+单 kernel（占 dev 44–63%），但与 FLA 同类 kernel 的差距被更正为 1.6–1.9×（不是 3.9×）**，性质是
+「CHUNK=16 粒度（比 64 多 1.3–1.6×）+ 一个常数因子」；**最便宜的杠杆是让 B1 吃 workspace 原生
+bf16（不 `.float()`）→ B1 快 2.2–2.5×，B2T1024H8 已快过 FLA dhu**；其次才是按更大 chunk 重组操作数、
+最后才是镜像 K2 的 warp specialization。`dAv/B2/B3` 已领先或接近。反向 host 税非主要矛盾
+（ours 数的百 µs、FLA 500–730 µs/次，大 shape 全被 GPU 时间隐藏）。
