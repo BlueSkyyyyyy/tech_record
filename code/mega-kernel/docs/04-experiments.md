@@ -3602,3 +3602,162 @@ explicit PROGRAMMATIC    |     101.15 |      51.04 |     101.60 |    1.004 |    
   `type=Default` 的行为差异。
 - **device 3**：主运行与敏感性检查都在固定空闲 device 3；`%globaltimer` 已消除跨 SM 时钟差，
   但首轮图 instantiate 的固定开销未单独剔除（用 `iters=30` 平均摊薄）。
+
+## 25. CUDA Graph 的条件/循环节点：一张图能不能表达「数据相关 / 可变行程」控制流（P36-1）
+
+### 25.1 问题
+
+CUDA Graph 在本专题已被反复测成**静态 DAG**：P4-1（§1）量了 launch 摊薄、P19-1（§13）量了 capture
+保留 PDL 语义、P35-1（§24）量了 programmatic 边只把**调度点**前移。这条降级路线还有一条**没碰过的
+维度**——**控制流**：图能不能表达「按数据决定跑不跑、跑几轮」的**动态/迭代**工作流？
+
+这不是纯技法问题，它正对着 MPK 的一条**核心局限**：
+
+- MPK 的 tGraph 是**每 batch size 一张静态图**（`docs/01` §5.8 局限 5；MPK §6.1 行 1427–1436）、
+  Qwen3-8B 每 token 293 task（`docs/00` §1）；
+- 「多轮服务」不是靠图循环，而是靠运行层的 **`iteration` 计数**：TaskId 高 32 位 = iteration
+  （`docs/06` §2/tGraph，快照 `runtime_header.h:73-74`），事件阈值是 `num_triggers * iteration`
+  （`runtime_header`/`persistent_kernel.cuh:1090-1093`），`EVENT_END_OF_TASK_GRAPH` 触发
+  `prepare_next_batch` 会**在同一常驻 kernel 内**组织下一 batch（`docs/06` §4，`persistent_kernel.cuh:1378-1423`）。
+
+CUDA 12.3 起，CUDA Graph 原生支持 **conditional graph nodes**（IF / WHILE / SWITCH）：条件值**在设备侧
+求值**，允许**带循环/分支的工作流完全落在图内**（官方 CUDA Programming Guide §4.2.4「Conditional Graph
+Nodes」）。本节把这条能力放到和 MPK 同一张桌上量：**一张图/一个 graphExec 能否覆盖「可变行程 N」和
+「数据相关分支」？如果能，它的每行程成本是多少——和 MPK 的 in-kernel `iteration` 循环比，是更省还是更贵？**
+
+### 25.2 资料分析：条件节点的语义与边界（头文件一手核对，CUDA 13.2）
+
+- **三种条件节点**（`driver_types.h:3559-3561` 的 `cudaGraphCondTypeIf/While/Switch`）：
+  `If` = 条件非零跑一次 body（可带 else）；`While` = 条件非零就反复跑 body；`Switch` = 条件等于 n
+  就跑第 n 个 body。
+- **条件句柄**：`cudaGraphConditionalHandleCreate(&h, graph, defaultLaunchValue, flags)`
+  （`cuda_runtime_api.h:13362`），`flags=cudaGraphCondAssignDefault`（`driver_types.h:3551-3554`）
+  表示**每次图执行开始把条件重置为 default**——正是「每次调用都重新进循环、由 body 决定何时退出」所需。
+- **设备侧写条件**：`__device__ void cudaGraphSetConditional(handle, value)`
+  （`cuda_device_runtime_api.h:476-480`；注释警告**并发调用是 UB**，须单线程写）。
+- **body 图由驱动分配**：`cudaConditionalNodeParams` 的 `phGraph_out`（`driver_types.h:3413`）是
+  *"CUDA-owned array populated with conditional node child graphs during creation of the node"*——即
+  创建条件节点后从 `phGraph_out[0]` **读回**一张空 body 图，再用普通 kernel 节点填充（实测见 §25.4）。
+- **限制**（`driver_types.h:3616-3627`）：条件图**不能作为 child node**、**同一时刻只能有一个
+  instantiation**、**不能 clone**；body 节点类型仅限 kernel/empty/memcpy/memset/child graph/conditional。
+  这三条对「同一 graphExec 多流并发重放」「把 megakernel 图嵌进更大图」是硬边界。
+
+一句话：**条件节点把「控制流」从 host 搬进图/设备，但粒度仍是「kernel 节点级重分发」**——这一点决定了
+它和 MPK 的 in-kernel `iteration` 循环**不在同一成本档位**（§25.5）。
+
+### 25.3 方法
+
+程序 `src/graph_conditional.cu`，脚本 `harness/graph_conditional.sh`，原始输出
+`harness/graph_conditional.out.txt`（目标卡 H100 / sm90，SMs=132，**固定空闲 device 3**，nvcc 13.2，
+`iters=50`，`Nmax=64`，`G=32` blocks × `T=256` 线程，`work=64` FMA/线程/行程）。迭代体
+`iter_kernel`：每线程对自己独占的 `acc[i]` 做 `work` 轮 FMA → `thread0` 递增行程计数 `iterc`，
+（可选）按 `iterc < N` 写条件句柄——与持久化内核的一个 task body 同构。四策略**公平对照**
+（同一 workload、同一表达式与累加顺序）：
+
+| 策略 | 结构 | 行程 N 变化时 |
+|---|---|---|
+| `eager` | host 循环 N 次 `iter_kernel` launch | 需要 host 循环 |
+| `unroll` | **N 个串联 kernel 节点**的静态图 | **每个 N 重新 instantiate** |
+| `cwhile` | **1 个 WHILE 条件节点**（前置 reset 节点 + body 一个 `iter_kernel`） | **同一个 graphExec 服务任意 N** |
+| `kinternal` | **单 kernel 内 for 循环 N 次**（持久化内核微缩版） | 一次 launch |
+
+Section A 扫 N（work=64）；Section B 扫 N（work=0，纯控制）；Section C 实例化成本（host 时间）与
+数据相关分支（IF 节点）；Section D 四策略 `acc[]` 逐位交叉校验。
+
+### 25.4 结果
+
+**A. 行程 N 扫描（work=64，µs/调用）**
+
+```text
+     N |      eager(us) |     unroll(us) |     cwhile(us) |  kinternal(us)
+-------+----------------+----------------+----------------+----------------
+     1 |          2.509 |          2.332 |         11.780 |          2.287
+     2 |          4.810 |          3.687 |         16.301 |          2.418
+     4 |          9.411 |          6.482 |         25.626 |          2.854
+     8 |         18.628 |         11.534 |         42.762 |          3.808
+    16 |         37.701 |         21.517 |         80.589 |          5.627
+    32 |         73.946 |         41.615 |        154.188 |          9.313
+    64 |        142.824 |         82.033 |        301.716 |         16.729
+```
+
+四条曲线**全部对 N 线性**（斜率即每行程成本）：`eager` 2.23、`unroll` 1.27、`cwhile` **4.60**、
+`kinternal` **0.229 µs/行程**；`cwhile` 固定项 ~7.2 µs（条件节点簿记 + reset 节点）。N=64 时相对
+`eager`：`unroll` **0.574×**、`cwhile` **2.11×**、`kinternal` **0.117×**。
+
+**B. 纯控制开销（work=0，µs/调用）——把「每行程」的机器成本单独拎出来**
+
+```text
+     N |      eager(us) |     unroll(us) |     cwhile(us) |  kinternal(us)
+-------+----------------+----------------+----------------+----------------
+     1 |          2.260 |          2.198 |         11.418 |          2.134
+     8 |         17.508 |         10.004 |         41.391 |          2.139
+    64 |        140.156 |         70.608 |        282.419 |          2.138
+```
+
+`eager` 2.19、`unroll` 1.09、`cwhile` **4.30 µs/行程**；`kinternal` **恒定 ~2.14 µs**（N 无关——一次
+launch，循环在 kernel 内）。**关键**：`cwhile` 的每行程成本 ~4.3 µs **比 host `eager` 的一次 launch
+（~2.2 µs）还贵**——条件节点只是把「一次 kernel 分发」从 host 挪到了**设备/graph 侧**，并没有把它
+消掉。
+
+**C. 实例化成本与数据相关分支**
+
+```text
+   实例化(host)  |  unroll(us) |  cwhile(us)
+   --------------+-------------+-------------
+   N=1           |         5.9 |        16.1
+   N=64          |        66.5 |        15.7
+```
+
+`unroll` 的 instantiate 时间随 N **近线性**（~1.0 µs/节点；N=64 → 66.5 µs），`cwhile` **常数 ~15.5 µs**
+（图只有 2 个节点，与 N 无关；N=16 处 38.5 µs 是噪声）。**IF 节点**（条件由上游 `pred_kernel` 从数据
+`x[0]` 算出）：同一 graphExec，`x[0]=100>10` → body 执行（`flag=12345`），`x[0]=3` → body 跳过
+（`flag=0`）——**一张静态图按设备侧数据走不同分支**。
+
+**D. 正确性**：四策略在 N=64 的 `acc[]` **逐位一致**（`max|Δ|=0.000e+00`，`max rel|Δ|=0`）；
+`cwhile` 的行程计数恒 `== N`（A 表最后一列）。即：控制流换成条件节点**不动数值**。
+
+### 25.5 读法
+
+1. **条件节点解决的是「表达能力」，不是「性能」**。它让**一个 graphExec** 覆盖任意行程 N
+   （Section A/B 的 `cwhile`）和设备侧数据相关分支（Section C），从而在**结构上**解除 MPK
+   「每 batch size 一张静态图」的限制——不再需要按 2 的幂预生成多张图。但代价是**每行程一次
+   设备侧 kernel 重分发**（~4.3–4.6 µs），**比 host eager launch（~2.2 µs）还贵 ~2×**，
+   且含 ~7 µs 固定项。
+2. **`kinternal`（持久化内核内循环）是数量级更优的下限**：每行程 **~0.23 µs**（比 `cwhile` 便宜
+   **~20×**），且**纯控制下与 N 无关**（一次 launch）。这正解释了 MPK / DeepGEMM 为什么把「多轮」
+   做成 **in-kernel `iteration` 计数 + `prepare_next_batch`**（`docs/06` §4）而不是图循环——图循环
+   是「设备侧反复 launch kernel」，in-kernel 循环是「同一批 block 直接进下一轮」，两者差一个
+   **kernel 分发**的量级。
+3. **静态展开（`unroll`）仍然是纯 launch 摊薄的赢家**（~0.5–0.57× eager、~1.1–1.3 µs/节点，
+   与 P4-1 的 ~0.78 µs/节点同档），但**每个 N/形状要重新 instantiate**（~1 µs/节点，N=64 → 66 µs）。
+   对一个 293 launch/token、需按 batch size 切换的整图，instantiate 成本本身就是 MPK 把它搬进
+   常驻 kernel 的理由之一。
+4. **三条路线各有硬边界**：`unroll` = 便宜但需按形状重实例化；`cwhile` = 一图通用但每行程贵且
+   受「不能作 child、只能单 instantiation、不能 clone」限制（`driver_types.h:3616-3627`）；
+   `kinternal` = 最省但需要「常驻 kernel + 设备内调度」这一整套机制（C1–C5）。
+   CUDA Graph 的控制流**填不满** MPK 需要的那一格。
+
+### 25.6 与判据 / MPK / 生产案例的关系
+
+- **判据（C1–C5，`docs/00` §3）**：四策略**均不满足 C1–C5**——`eager`/`unroll` 是 host 提交的多次
+  kernel 边界；`cwhile` 虽由设备求值条件，但每次迭代仍是**一个 kernel 节点整体重分发**，kernel 仍会
+  结束，**无 task 级设备内调度**；`kinternal` 满足 C1/C2（单次 launch + 常驻）但**没有** C3（多算子
+  范围）/C4（算子间设备内协调）/C5（去中心化调度）——它只是「同一 kernel 内重复同一段代码」。
+- **与 MPK 的关系**：MPK 的 `iteration`（`docs/06` §2/§4）与本节 `cwhile` 是**同一诉求的两种实现**：
+  前者把「下一轮」做成常驻 kernel 内的**下一批 task**（零 kernel 边界，`kinternal` 档），后者做成
+  **图上的一次设备侧 kernel 重分发**（`cwhile` 档）。量级证据（~0.23 vs ~4.3 µs/行程）支持 MPK 的
+  选择。条件节点**只能补「表达变长/数据相关」，不能补「省下 launch」**。
+- **与其它降级项的关系**：§24 把 CUDA Graph 的**依赖**维度钉死在「调度级」；本节把**控制流**维度
+  钉死在「节点重分发级」。二者正交，合起来说明 **CUDA Graph 这条降级路线的天花板**：它能表达动态
+  依赖的*调度时机*与动态控制流，但**粒度恒停在 kernel 节点**，拿不到 task 级、in-kernel 的成本。
+
+### 25.7 局限与踩到的坑
+
+- **合成 workload / 单迭代体**：body 是 `G=32` block 的一次 FMA；`cwhile` 的固定项（~7 µs）与
+  `iter_kernel` 的 grid 大小/实现细节相关，绝对数**只作量级**，不比生产端到端。
+- **`cwhile` 的 instantiate 出现一个 N=16 离群点**（38.5 µs）：单次 host 计时噪声；趋势（unroll 线性、
+  cwhile 常数）在两轮运行一致。
+- **`G=32` 非整机**：未扫 grid 对条件节点每行程成本的影响（预期随 grid 增大而抬高，留待后续）。
+- **只测 IF / WHILE**：未测 SWITCH、嵌套条件、条件体内的 memcpy/memset/child graph（语义已由头文件
+  界定，未实测）。
+- **device 3**、`iters=50` 平均摊薄首个 launch 的冷启动。

@@ -789,6 +789,27 @@
       端口只由边提供。判据不变（四档均不满足 C1–C5），是 CUDA Graph 这条降级路线的**下界证据**。
       **本轮新增实验。**
 
+### P36 CUDA Graph 条件/循环节点（`docs/04-experiments.md` §25）
+
+- [x] **P36-1** 把 CUDA Graph 的**控制流**维度补齐：CUDA 12.3+ 的 **conditional graph nodes**
+      （IF/WHILE/SWITCH，设备侧求值条件）能否让**一张图**表达「数据相关 / 可变行程」控制流？——
+      对照 MPK「每 batch size 一张静态图」局限（`docs/01` §5.8）与运行层 in-kernel `iteration`
+      循环（`docs/06` §2/§4）。见 `docs/04-experiments.md` §25，源码 `src/graph_conditional.cu`、
+      脚本 `harness/graph_conditional.sh`、原始输出 `harness/graph_conditional.out.txt`（目标卡
+      H100/sm90、**固定空闲 device 3**、nvcc 13.2）。四策略公平对照 **eager**（host N 次 launch）/
+      **unroll**（N 节点静态图，每 N 重新 instantiate）/ **cwhile**（1 个 WHILE 条件节点，同一
+      graphExec 服务任意 N）/ **kinternal**（单 kernel 内 for N 次 = 持久化内核微缩版）。核心结论：
+      (A) 四条曲线对 N **全部线性**，每行程成本 eager 2.23 / unroll 1.27 / **cwhile 4.60** /
+      **kinternal 0.229 µs**——`cwhile` 每行程一次**设备侧 kernel 重分发**，**比 host launch 还贵
+      ~2×**，**比 in-kernel 循环贵 ~20×**；(B) 纯控制（work=0）同序：cwhile 4.30 vs eager 2.19 vs
+      kinternal **恒定 ~2.14 µs**（N 无关）；(C) instantiate：unroll 随 N 线性（~1 µs/节点，N=64→66 µs）、
+      cwhile 常数 ~15.5 µs；IF 节点同一 graphExec 按设备数据走不同分支；(D) 四策略 acc **逐位一致**
+      （max|Δ|=0）。**含义**：条件节点解决「表达能力」（一图覆盖变长/数据相关），**不解「性能」**
+      （每行程仍付一次 kernel 分发）；MPK 用 in-kernel `iteration` + `prepare_next_batch`（`kinternal`
+      档）而非图循环，量级证据支持这一选择。判据：四策略均不满足 C1–C5（kinternal 仅 C1/C2）。
+      与 §24（依赖维度→调度级）正交，合起来给出 CUDA Graph 降级路线的天花板。**本轮新增实验。**
+
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -811,7 +832,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P35-1 完成（1/1）**。补齐 `docs/04` §13.6「未测显式构图 API」与 §21.6「未测 CUDA Graph
+- 当前进度：**P36-1 完成（1/1）**。补齐 CUDA Graph 的**控制流**维度——CUDA 12.3+ 的
+  **conditional graph nodes**（IF/WHILE/SWITCH，设备侧求值条件）能否让**一张图**表达「数据相关 /
+  可变行程」控制流，对照 MPK「每 batch size 一张静态图」局限（`docs/01` §5.8）与运行层 in-kernel
+  `iteration` 循环（`docs/06` §2/§4）。`docs/04-experiments.md` 新增 **§25**，源码
+  `src/graph_conditional.cu`、脚本 `harness/graph_conditional.sh`、原始输出
+  `harness/graph_conditional.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、iters=50、
+  Nmax=64、G=32、T=256、work=64）。四策略公平对照 **eager**（host N 次 launch）/ **unroll**（N 节点
+  静态图，每 N 重新 instantiate）/ **cwhile**（1 个 WHILE 条件节点，同一 graphExec 服务任意 N）/
+  **kinternal**（单 kernel 内 for N 次 = 持久化内核微缩版）。核心结论：(A) 四条曲线对 N **全部线性**，
+  每行程成本 eager 2.23 / unroll 1.27 / **cwhile 4.60** / **kinternal 0.229 µs**——`cwhile` 每行程一次
+  **设备侧 kernel 重分发**，**比 host launch 还贵 ~2×**、**比 in-kernel 循环贵 ~20×**（N=64 时
+  cwhile/eager 2.11×、kinternal/eager 0.117×）；(B) 纯控制（work=0）同序：cwhile 4.30 vs eager 2.19 vs
+  kinternal **恒定 ~2.14 µs**（N 无关，一次 launch）；(C) instantiate（host 时间）：unroll 随 N 近线性
+  （~1 µs/节点，N=64→66.5 µs）、cwhile 常数 ~15.5 µs；**IF 节点**同一 graphExec 按设备侧数据
+  （`x[0]` vs 阈值）走「执行/跳过」两分支；(D) 四策略 `acc[]` **逐位一致**（max|Δ|=0.000e+00）。
+  **含义**：条件节点解决「**表达能力**」（一个 graphExec 覆盖变长行程 / 数据相关分支，结构上解除
+  「每 batch size 一张图」），但**不解「性能」**——每行程仍付一次 kernel 分发；MPK 用 in-kernel
+  `iteration` + `prepare_next_batch`（`kinternal` 档，~0.23 µs/行程）而非图循环，量级证据支持这一选择。
+  判据：四策略均不满足 C1–C5（`kinternal` 仅 C1/C2）。与 §24（依赖维度→调度级）正交，合起来给出
+  CUDA Graph 这条降级路线的天花板：**能表达动态依赖的调度时机与控制流，但粒度恒停在 kernel 节点**。
+  **本轮新增实验。** 此前 **P35-1 完成（1/1）**。补齐 `docs/04` §13.6「未测显式构图 API」与 §21.6「未测 CUDA Graph
   的 `PROGRAMMATIC` 边」两条尾巴——把「显式构图 + programmatic 边能否让下游在上游完成之前被调度」
   实测出来。`docs/04-experiments.md` 新增 **§24**，源码 `src/graph_programmatic.cu`、脚本
   `harness/graph_programmatic.sh`、原始输出 `harness/graph_programmatic.out.txt` +
@@ -1027,7 +1068,9 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：全专题收尾（P0–P35 全部完成）**。P35-1 已把 §13.6/§21.6 两条「Graph 显式构图 /
+- **下一步：全专题继续（P0–P36 全部完成）**。P36-1 已把 CUDA Graph 的**控制流**维度补成实测
+  （`docs/04` §25：conditional graph nodes 一图覆盖可变行程/数据相关分支，但每行程一次设备侧
+  kernel 重分发，比 in-kernel 循环贵 ~20×——「表达能力」而非「性能」）。P35-1 已把 §13.6/§21.6 两条「Graph 显式构图 /
   programmatic 边」的尾巴补成实测（`docs/04` §24：programmatic 边把下游**调度点**前移到上游完成之前、
   但 `gridDependencySynchronize` 仍等完成、capture ≡ 显式构图、节点级 PDL 属性被拒）。P33-1 已把
   §20.6 / 「下一步」都点名的两条
