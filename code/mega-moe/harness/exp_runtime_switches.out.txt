@@ -1,0 +1,53 @@
+NVIDIA H100 80GB HBM3, 9.0
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+==============================================================================
+DeepGEMM runtime/compile switchboard — H100 (sm90) 真机
+==============================================================================
+torch=2.12.0a0+0291f960b6.nv26.04.48445190  deep_gemm=2.8.1  device_sms=132
+
+§1  set_num_sms / get_num_sms（Runtime，runtime.hpp:78-91）
+  [PASS] 默认 num_sms == 设备 SM 数  :: get_num_sms()=132 dev=132
+  [PASS] 0 / -1 / >dev 越界被拒（:79 DG_HOST_ASSERT）  :: [True, True, True]
+  [PASS] set_num_sms(64) 生效  :: =64
+  [PASS] kernel 模板实参含 num_sms=64（+ 强制走自研 kernel）  :: 模板=<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 0u, 4096u, 4096u...>
+  [PASS] 恢复 num_sms=dev 后模板回到 132u
+
+§2  set_tc_util / get_tc_util（Runtime，runtime.hpp:93-100）
+  [PASS] 默认 get_tc_util()==100
+  [PASS] set_tc_util(50) 生效
+  [PASS] set_tc_util(0)==> getter 返回默认 100（:99）
+  [PASS] 101 / -1 越界被拒（:94）  :: [True, True]
+
+§3  set_pdl / get_pdl（config.hpp:27-32 → deep_jit LaunchOptions.enable_pdl）
+  [PASS] get_pdl() 为布尔  :: 默认=False
+  [PASS] set_pdl(True) 回读 True
+  [PASS] set_pdl(False) 回读 False
+  (PDL 落到 CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION，kernel.hpp:148-151；kernel 内用 cudaGridDependencySynchronize，如 sm90_bf16_gemm.cuh:131)
+
+§4  set/get_mk_alignment_for_contiguous_layout + theoretical（layout.hpp:133-141, runtime.hpp:57-64）
+  [PASS] 默认 alignment == 128（SM90 legacy）  :: =128
+  [PASS] theoretical(expected_m=None) == 128（非 arch10 恒 128）  :: =128
+  [PASS] set_mk_alignment(256) 回读 256
+  [PASS] 恢复后回读 128
+
+§5  set_block_size_multiple_of（config.hpp:39-47, sm90.hpp:40 / sm100.hpp:55,72）
+  [PASS] int 与 tuple 两种入参均被接受  :: (64) / (64,128)
+
+§6  use_deterministic_algorithms：关掉 cuBLASLt 回退（gemm.hpp:519 / einsum.hpp:81,115）
+  [PASS] 非确定性：bf16_gemm_nt 默认回退 cuBLASLt（nvjet）  :: kernel=nvjet_sm90_tst_256x128_64x4_1x2_h_bz_coopA_TNT
+  [PASS] 确定性：改走自研 SM90 kernel  :: kernel=void deep_gemm::sm90_bf16_gemm_impl
+  [PASS] 确定性：einsum('bhr,hdr->bhd') 也走自研（非 nvjet）  :: kernel=void deep_gemm::sm90_bf16_gemm_impl
+
+§7  DG_PRINT_CONFIGS 环境变量（heuristics/common.hpp:44）——子进程抓配置
+  [PASS] 默认 block_n=128  :: {'block_m': 256, 'block_n': 128, 'num_sms': 132, 'tc_util': 100}
+  [PASS] block_size_multiple_of=(256,256) → block_n 变为 256 的倍数  :: {'block_m': 128, 'block_n': 256, 'num_sms': 132, 'tc_util': 100}
+  [PASS] set_num_sms(32) → 打印的 LaunchConfig.num_sms=32  :: {'block_m': 128, 'block_n': 256, 'num_sms': 32, 'tc_util': 100}
+
+§8  set_ignore_compile_dims（config.hpp:36-38, runtime_utils.hpp:31-40）——抓模板实参
+  [PASS] 默认 compiled_dims=nk → 模板 <M=0,N=4096,K=4096>  :: (cute::UMMA::Major)0, (cute::UMMA::Major)0, 0u, 40
+  [PASS] ignore_compile_dims → 模板 <0,0,0>（N/K 也置 0，runtime_utils.hpp:32-33）  :: (cute::UMMA::Major)0, (cute::UMMA::Major)0, 0u, 0u
+
+==============================================================================
+TOTAL: 25 PASS / 0 FAIL
+==============================================================================

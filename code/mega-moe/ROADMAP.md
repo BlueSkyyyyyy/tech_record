@@ -1133,6 +1133,36 @@
       hookhash `73360241…` vs `5dcc60df…`、digest `5bb29276…` vs `e11ef00e…` 均不同。行号全部核对过。
       配套博客 `content/posts/mega-moe-47-deepjit-posthook`（索引页新增第 47 篇）。Hugo 构建 0 ERROR。
 
+### P38 增量（opt-in，补上贯穿所有 kernel 的全局运行时/编译开关面）
+
+- [x] **P38-1** **DeepGEMM 的全局运行时/编译开关面**（`csrc/apis/config.hpp`、`HeuristicsRuntime`、
+      `Runtime`、`deep_jit::Env`、`setup.py` 的 `persistent_envs`）。前面 47 篇把一个个 kernel 拆得很细，
+      但顶层那组**每个 kernel 都读的可变全局状态**从没单独讲过。本篇拆透：两份 singleton——
+      `Runtime`（`num_sms`/`tc_util`/cuBLASLt handle+workspace，`runtime.hpp:20-102`）与
+      `HeuristicsRuntime`（`deterministic`/`ignore_compile_dims`/`block_m/n_multiple_of`/
+      `mk_alignment`，`heuristics/runtime.hpp:10-67`），经 `config::register_apis`（`config.hpp:8-48`）
+      平铺成 `deep_gemm.set_*`/`get_*`。**七个开关的「状态→消费点→为什么」**：
+      ① `num_sms` 是上限且 `0`=懒取设备数（`:84-85`），改小会在 `is_cublaslt_available`（`:89-91`）
+      **顺带关掉 cuBLASLt 回退**（第 27 篇三与门第二项）；② `tc_util` 的 `0` 在 `:99` 当默认 100、
+      越界 `:94` 被拒，只有 SM100 BF16 主 kernel 消费（第 36 篇）；③ `use_deterministic_algorithms`
+      是三个正交落点——关 cuBLASLt 回退（`gemm.hpp:519`/`einsum.hpp:81,115`）+ 禁 Mega Gate split-K
+      （`mega_gate.hpp:111,126`，注释即 batch invariance）+ 钉死 Mega mHC splits
+      （`mega_mhc.hpp:15-17`）；④ `block_size_multiple_of` 只改候选步长（`sm90.hpp:40`、
+      `sm100.hpp:55,70-72`，swap/非 swap 分支分别用 m/n）；⑤ `mk_alignment` 默认 128
+      （`runtime.hpp:12`），理论值非 arch10 恒 128 / SM100 256（`:57-64`）；⑥ `ignore_compile_dims`
+      经 `get_compiled_dim`（`runtime_utils.hpp:31-40`）把全部编译维置 0（一核多形状）；
+      ⑦ `set_pdl` 落到 `deep_jit` 发射属性 `CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION`
+      （`deep_jit/.../kernel.hpp:148-151`，kernel 内 `cudaGridDependencySynchronize`）。
+      另拆 `DG_*` 环境变量的两级前缀解析（`deep_jit/utils/env.hpp:56-84`：`DG_` 优先、`DJ_` 兜底，
+      `DG_JIT_DEBUG=0` 可盖 `DJ_JIT_DEBUG=1`）与安装时固化的 `persistent_envs`
+      （`setup.py:148-155` → `deep_gemm/envs.py` → `__init__.py:6-13`）。
+      **架构无关，H100 真机** `harness/exp_runtime_switches.{py,sh,out.txt}` **25 PASS / 0 FAIL**：
+      越界/回读语义全对；profiler 抓到 `set_num_sms(64)` 进模板实参 `64u`、`deterministic` 把
+      `bf16_gemm_nt`/`einsum` 从 `nvjet` 切回 `sm90_bf16_gemm_impl`；`DG_PRINT_CONFIGS` 子进程抓到
+      `block_size_multiple_of=(256,256)` 使 block_n 128→256、`set_num_sms(32)` 进 `LaunchConfig`；
+      模板实参 `ignore_compile_dims` 由 `<0,4096,4096>` 变 `<0,0,0>`。行号全部核对过。
+      配套博客 `content/posts/mega-moe-48-runtime-switches`（索引页新增第 48 篇）。Hugo 构建 0 ERROR。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1157,8 +1187,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P37 各增量完成（P15-1…P35-1、P36-1、P37-1）。**
-  本轮 P37-1：新建 `docs/47-deepjit-posthook.md`（+`src/deepjit_posthook.cpp`、
+- 当前进度：**P0~P14 全部完成；P15~P38 各增量完成（P15-1…P35-1、P36-1、P37-1、P38-1）。**
+  本轮 P38-1：新建 `docs/48-runtime-switches.md`（+`harness/exp_runtime_switches.{py,sh,out.txt}`）
+  ——补上前面 47 篇每个 kernel 都读、却从没单独讲过的**顶层全局开关面**。两份可变 singleton
+  （`Runtime` 管设备资源、`HeuristicsRuntime` 管选核/编译）经 `config::register_apis` 平铺成
+  `deep_gemm.set_*`/`get_*`；逐个拆「状态→消费点→为什么」：`num_sms` 是上限且 `0`=懒取设备数，
+  改小会在 `is_cublaslt_available` **顺带关掉 cuBLASLt 回退**（第 27 篇三与门第二项）；
+  `tc_util==0` 当默认 100；`use_deterministic_algorithms` 是三个正交落点（关 cuBLASLt 回退 +
+  禁 Mega Gate split-K + 钉死 mHC splits，皆出于 batch invariance）；`block_size_multiple_of`/
+  `mk_alignment` 如何改 `get_best_config` 候选集；`ignore_compile_dims` 经 `get_compiled_dim` 把
+  全部编译维置 0（一核多形状）；`set_pdl` 落到 `CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION`。
+  另拆 `DG_*` 环境变量的两级前缀解析（`DG_` 优先、`DJ_` 兜底）与安装时固化的 `persistent_envs`。
+  **架构无关，H100 真机 25 PASS / 0 FAIL**（profiler 抓 num_sms/确定性选路、`DG_PRINT_CONFIGS`
+  抓选核、模板实参抓编译维）。行号全部核对过。配套博客 `content/posts/mega-moe-48-runtime-switches`
+  （索引页新增第 48 篇）。Hugo 构建 0 ERROR。
+  上一轮 P37-1：新建 `docs/47-deepjit-posthook.md`（+`src/deepjit_posthook.cpp`、
   `harness/exp_deepjit_posthook.{sh,out.txt}`）——补上第 33 篇缓存键「第四段」`post_hook` 一直空着的列表项：
   DeepJIT 唯一的「编译产物发布前注入用户代码」接口。三个核心事实：① **运行时机与作用域**——`nvcc` 出 cubin 后、
   写 meta/提交缓存前，跑 `python <abs hook> <abs cubin>` 并**就地改写**（`cuda/backend.hpp:132-138`），
@@ -1508,7 +1551,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P37 已完成（新增 **P37-1 DeepJIT 的 post_hook 后处理 + 磁盘产物 + CUDA↔Ascend 后端抽象**：
+- **下一步**：P0~P38 已完成（新增 **P38-1 DeepGEMM 的全局运行时/编译开关面**：
+  两份可变全局 singleton（`Runtime`+`HeuristicsRuntime`）→ `config.hpp` pybind 面；七个开关的
+  「状态/消费点/为什么」——`num_sms` 顺带关 cuBLASLt 回退、`tc_util==0` 当默认 100、
+  `deterministic` 三落点（关回退 + 禁 split-K + 钉死 mHC splits，batch invariance）、
+  `block_size_multiple_of`/`mk_alignment` 改候选集、`ignore_compile_dims` 一核多形状、
+  `set_pdl` 落发射属性；`DG_*` 两级前缀解析 + 安装时 `persistent_envs`；H100 真机 25 PASS；
+  见上）。
+  上一轮 **P37-1 DeepJIT 的 post_hook 后处理 + 磁盘产物 + CUDA↔Ascend 后端抽象**：
   第 33 篇缓存键「第四段」终于补齐——`nvcc` 出 cubin 后、发布前跑 `python <hook> <cubin>` 就地改写；
   「路径+内容」FNV1a 进键且按路径线程内缓存；override `nullopt`=继承、空串=已配置；由发布顺序推出
   「hook 改的 cubin 即最终产物 / 失败不发布 / 命中不重跑」；`post_hook` 是 CUDA 专属（Ascend 恒空哈希）；
