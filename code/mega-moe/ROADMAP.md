@@ -931,6 +931,38 @@
        `calc_diff` 6.7e-4/6.8e-4/6.8e-4/2.2e-4 全部 < `max_diff`。SM100 专属分支仅分析。
        配套博客 `content/posts/mega-moe-41-test-generators`（索引页新增第 41 篇）。
 
+### P32 增量（opt-in，补齐主 kernel 之前的整层 host 编排）
+
+- [x] **P32-1** **Mega MoE 的 host 编排层与对称缓冲区布局**（`deep_gemm/mega/__init__.py`；
+      `csrc/apis/mega_moe.hpp`；`deep_gemm/include/deep_gemm/layout/mega_moe.cuh`；
+      `deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh`；`csrc/jit_kernels/heuristics/mega_moe.hpp`）。
+      第 02/03/09/11/20 篇反复出现 `SymmBuffer`/`x_sf`/`num_ring_tokens` 却从没把「从 Python 到裸字节」
+      串起来。本篇补上**主 kernel 之前的一整层 host 编排**——它**全纯 host、架构无关**，DeepGEMM 还
+      pybind 暴露了 `_C.get_symm_buffer_size_for_mega_moe` 等，故 **H100 真机逐字段对拍**。
+      → `docs/42-mega-moe-host-buffer.md`（真实行号核对）：Python `SymmBuffer`（`:28` Tmax 对齐
+      `get_token_alignment_for_mega_moe()=kLCMCandidateBlockM=1920`；`:50-68` size-1 退化 `torch.empty`、
+      `base` 复用只校验字节数、分配后 `zero_/barrier/sync`；`:70-76` 12 view；`:112-164` 权重交错/UTCCP
+      转置）。C++ `get_symm_buffer_size_for_mega_moe:32-153`：ring 容量**遍历所有候选 BLOCK_M 取 max**
+      （`:56-63`，`num_experts_per_rank` padding + `align 1920`）、SF ring `max get_num_sf_ring_tokens`
+      （`:70-77`）、SF 断言（`:88-92`）；`slice_input_buffers:96-151` 的 12 个 view。layout
+      `MegaMoEBuffer:345-457`：`Data`（行字节 + TMA 对齐标志）、`Buffer.get_end_ptr` **链式加法**无空洞、
+      `Workspace:93-254` 的 `MegaMoESignals`（`:54-90`，`sizeof=21,140,864`、`:91` offset==128 static_assert）
+      + 元数据、`num_max_pool_tokens:20-28`。四个非平凡点：**`x`≡`shared_l1_acts`**（`:114`）、
+      **`x_sf` K-major vs `l1/l2_acts_sf` M-major**（注释 `:95`，第 10 篇 UTCCP）、**SF 行字节
+      `hidden/32` 与 shape `hidden/128` int32 两口径一致**（`:393`）、**combine buffer 外层维
+      `num_topk(+shared)` = K 倍放大**（`:447-449`）。scheduler `get_num_max_live_pool_blocks:48-80`
+      的保守闭式（`get_num_l1_warmup_waves:17-45` warmup 避免 L1→L2 死锁 + `frontier_growth` +
+      `wave_margin` + `min(total)`；注释 `:141` 指出相位翻转依赖 ring 容量）。`fp8_fp4/bf16_mega_moe`
+      入口（`:155-390`）：recipe `(1,1,32)`、权重/SF 检查、shared expert、缓冲校验、
+      **arch 派发只有 `arch_major==10`**（`:256/367`，H100 唯一闸门）、`DG_COMM_KERNEL_DEBUG` 清零；
+      `register_apis:392-398`。H100 实测 `harness/exp_mega_moe_host_buffer.{py,sh,out.txt}`：
+      **Python 逐字段复刻** `MegaMoESignals` 结构体布局 + `Workspace`/`Data`/`Buffer`/`MegaMoEBuffer`
+      链式 offset + ring 公式，与真实 binding 对拍——**7 组配置 `num_bytes` 全 MATCH、全部 view
+      (offset,shape,stride,dtype) 全 OK，总判定 ALL PASS**；真实 `SymmBuffer`（gloo ws=1）Tmax 512→1920、
+      `l1_acts_sf` stride `(1,153600)`、`shared_l1_acts is x`、写读回、小配置复用 OK / 大配置被拒；
+      ring 容量阶梯坐实 `live*BM` 随 BLOCK_M 单调升（240 最大 119280→ring 120960）、SF ring max 在
+      BLOCK_M=8（1935360）。配套博客 `content/posts/mega-moe-42-mega-moe-host-buffer`（索引页新增第 42 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -955,8 +987,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P31 各增量完成（P15-1…P30-1、P31-1）。**
-  本轮 P31-1：新建 `docs/41-deepgemm-test-generators.md`（+`harness/exp_test_generators.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P32 各增量完成（P15-1…P31-1、P32-1）。**
+  本轮 P32-1：新建 `docs/42-mega-moe-host-buffer.md`（+`harness/exp_mega_moe_host_buffer.{py,sh,out.txt}`）
+  ——补上主 kernel 之前的**整层 host 编排**：Python `SymmBuffer` → C++
+  `get_symm_buffer_size_for_mega_moe`（ring 容量）→ `layout::MegaMoEBuffer`（链式字节分配）→
+  scheduler `get_num_max_live_pool_blocks`。这层**全纯 host、架构无关**，DeepGEMM 又 pybind 暴露了
+  `_C.get_symm_buffer_size_for_mega_moe`，故 **H100 真机逐字段对拍**。三个「为什么」：① Tmax 对齐 1920
+  （`mega/__init__.py:28`）让任意候选 BLOCK_M 整除、ring/pool 无零头；② ring 容量**在所有候选
+  BLOCK_M 上取 max**（`mega_moe.hpp:56-63`）因 host 此刻不知 kernel 会选哪个 BLOCK_M；③ `x_sf` K-major
+  而 `l1/l2_acts_sf` M-major（注释 `:95`，第 10 篇 UTCCP）。四个非平凡点：`x`≡`shared_l1_acts`、
+  SF 行字节 `hidden/32` 与 shape `hidden/128` 两口径一致、combine buffer 外层维=`num_topk(+shared)`
+  （K 倍放大）、`MegaMoESignals` 固定 21,140,864 B（`:91` offset==128 static_assert）。**H100 实测**
+  Python 逐字段复刻结构体布局 + 链式 offset + ring 公式，与真实 binding 对拍：**7 组配置 `num_bytes`
+  全 MATCH、全部 view (offset,shape,stride,dtype) 全 OK，ALL PASS**；真实 `SymmBuffer`（gloo ws=1）
+  Tmax 512→1920、`shared_l1_acts is x`、小配置复用 OK/大配置被拒；ring 阶梯坐实 `live*BM` 随 BLOCK_M
+  单调升、SF ring max 在 BLOCK_M=8。**唯一挡住 H100 的是 `:256/367` 的 `arch_major==10` 派发**。
+  行号全部核对过。配套博客 `content/posts/mega-moe-42-mega-moe-host-buffer`（索引页新增第 42 篇）。
+  上一轮 P31-1：新建 `docs/41-deepgemm-test-generators.md`（+`harness/exp_test_generators.{py,sh,out.txt}`）
   ——补上前面 0~30 篇每个测试里 **「操作数到底长什么样」** 的来源 `tests/generators.py`（608 行，
   所有 `tests/test_*.py` 都 import）。它是 kernel 操作数契约的**可执行参考**：① 三个基础类型
   （`KernelType`/`MajorTypeAB`/`QuantConfig`，后者的 `get_recipes` 把 legacy 前向给 `None`、wgrad
@@ -1220,7 +1267,8 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P31 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+- **下一步**：P0~P32 已完成（新增 **P32-1 Mega MoE host 编排层与对称缓冲区布局**：H100 逐字段
+  对拍 `num_bytes` 与 12 view；见上）。P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
   P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子、
   P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel、P23-1 DeepJIT 编译/缓存/加载/发射管线、
   P24-1 SM 局部域探针与内存域分配、P25-1 SM100 FP8/FP4 稠密 GEMM 主 kernel、
@@ -1229,6 +1277,11 @@
   P30-1 测试基座 `deep_gemm/testing/` 的 `calc_diff`/`bench_kineto`/`uneven_all_gather`、
   P31-1 操作数/布局生成器 `tests/generators.py`）。
   后续若继续（均为增量、非承诺）：
+  ⑰ **Mega MoE host 编排层已补齐（P32-1）**：`deep_gemm/mega/__init__.py` 的 `SymmBuffer` 生命周期 +
+    `csrc/apis/mega_moe.hpp` 的 `get_symm_buffer_size_for_mega_moe`（ring 容量、12 view）+ `layout/
+    mega_moe.cuh` 的 `MegaMoEBuffer` 链式字节分配 + scheduler `get_num_max_live_pool_blocks`；
+    全纯 host、架构无关，H100 真机 7 组配置逐字段 ALL PASS。至此从「Python 调用」到「主 kernel 入口」
+    的整条 host 链已讲清（此前一直从 kernel 内部讲起）。
   ⑯ **操作数生成器已补齐（P31-1）**：`tests/generators.py` 的枚举器 / `QuantConfig` / operand
     major 物理编码 / 三种 grouped 布局 / PSUM 递推 / K 分组 per-channel SF + 按组零填充；纯 Python，
     H100 真机 41 PASS，四个真实 SM90 kernel 端到端对拍。可再补：`tests/generators.py` 的
