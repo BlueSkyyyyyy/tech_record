@@ -2286,7 +2286,7 @@ for cc in tl.range(0, NT, num_stages=NS):   # 本节的唯一改动
 | 流水链 vs FLA autograd（跨 6 case 最坏 `max_rel`） | `dq 3.42e-3 / dk 3.02e-3 / dv 6.80e-3 / dbeta 6.01e-3 / dg 7.06e-3 / dh0 8.27e-3` |
 
 末尾一行与 §12（P7-9）报的**逐位一致**——即本节 `NS=1` 精确复现了旧链，`NS>1` 只重排加载、
-零数值代价。（4 组 case 的逐项明细见 `*.out.txt`。）
+零数值代价。（6 组 case 的逐项明细见 `*.out.txt`。）
 
 ### 25.3 Part B：链级计时——流水把 B1 从「追平」推到「反超」FLA `dhu`
 
