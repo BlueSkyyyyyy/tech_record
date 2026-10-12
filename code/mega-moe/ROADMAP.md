@@ -132,7 +132,13 @@
       contiguous/masked/PSUM relerr 3.67–3.70e-2（FP8 噪声）、A4 布局长度不符被拒（`gemm.hpp:218`）、
       `G=8,m=4352,n=2048,k=7168` **366 TFLOPS**；三种布局两两 **逐位相等（0 误差）**。配套博客
       `content/posts/mega-moe-11-dgrad`。
-- [ ] **P4-4** 在 H100 上做 grouped GEMM / backward 的数值对拍实验（vs PyTorch）。
+- [x] **P4-4** 在 H100 上做 grouped GEMM / backward 的数值对拍实验（vs PyTorch）。
+      → `docs/14-moe-backward-kernels.md`：把 SM90 `k_grouped_*_nt_contiguous`（wgrad）与
+      `m_grouped_*_nt_contiguous`（dgrad）接进真实 MoE 反向图。H100 实测
+      `harness/exp_moe_backward_kernels.py`（+`.out.txt`）：四项梯度 `vs deq`（隔离 kernel+布局）
+      relerr ~2.6e-4、`vs autograd`（含 FP8）2.5e-2~5.1e-2 且 cos>0.999；吞吐单 rank
+      （T=2048,H=7168,I=2048,E=8,topk=2）wgrad ~103/106 TFLOPS、dgrad ~449/543 TFLOPS。
+      配套博客 `content/posts/mega-moe-12-backward-kernels`。
 
 ### P5 相关 mega-kernel（`docs/05-mega-gate-mhc.md`）
 
@@ -167,7 +173,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0/P1/P2/P3 全部完成；P4 进行中（P4-1、P4-2、P4-3 完成）。**
+- 当前进度：**P0/P1/P2/P3 全部完成；P4 反向全部完成（P4-1~P4-4）。**
+  P4-4：新建 `docs/14-moe-backward-kernels.md`——把 H100 可跑的 SM90 grouped GEMM **接进真实 MoE 的
+  完整反向图**并与 PyTorch autograd 对拍。**四个大 GEMM**：`dW2=A^T dY`、`dW1=x^T dG` 走
+  `k_grouped_*_nt_contiguous`（不等长在 K=token）；`dA=dY W2^T`、`dX=dG W1^T` 走
+  `m_grouped_*_nt_contiguous`（不等长在 M=token）；其余（combine/SwiGLU/router 反向）保持 torch。
+  **gather**：按 `sel` 取各专家 token 行，wgrad 沿 K 拼接（per-channel cast、补齐 128、组内
+  `.T.flatten()` 成 1D data + SF 转置）、dgrad 沿 M 拼接（per-token A + per-block B、gap 行 0、
+  `grouped_layout` 长度=m）。**两层对拍**（区分量化噪声 vs kernel bug）：`vs deq` 用喂进 kernel 的
+  FP8 反量化后 fp32 重算，四项 relerr **~2.6e-4**（仅 bf16 输出舍入）证明 kernel+布局正确；
+  `vs autograd` 含 per-128 FP8 量化，2.46e-2~5.08e-2、**cos 全部 >0.999**。端到端
+  `dW2/dW1/dx_ffn`（+torch router）对 autograd relerr 3.5e-2~5.1e-2。**吞吐**（单 rank
+  T=2048,H=7168,I=2048,E=8,topk=2，仅 kernel 本体）：wgrad ~103/106 TFLOPS（K=token 偏小、
+  算术强度低=瓶颈）、dgrad ~449/543 TFLOPS（K 是隐藏维）。**结论**：反向无 mega-kernel——通信规模小、
+  可分解为独立 grouped GEMM、wgrad 留守专家本地 rank。配套博客 `content/posts/mega-moe-12-backward-kernels`。
+  （P0/P1/P2/P3 进展见下）
   P4-3：新建 `docs/13-moe-backward-dgrad.md`——dgrad 的 M 轴分组 API 精读。**全景**：dgrad
   （`dA=dY·W2^T`、`dX=dG·W1^T`）不等长在 **M（token）轴**、N/K 固定，故复用前向的 `m_grouped` 族；
   A（激活）必须 K-major、D 固定 BF16（`gemm.hpp:197/209`）。**两入口**：
@@ -293,10 +313,9 @@
   （`smxx_layout.hpp:133`、kernel `:774`/`:788`）；L2 权重不交错只转 SF。实验
   `harness/exp_weight_transform.py`（+`.out.txt`，H100）：行号映射/SwiGLU 等价/UTCCP 映射全部 0 误差，
   与 deep_gemm 内部实现逐元素一致。**P2 全部完成。**
-- **下一步：继续 P4 反向**：P4-4（H100 上把 SM90 `k_grouped_fp8_gemm_nt_contiguous`（wgrad）与
-  `m_grouped_fp8_gemm_nt_contiguous`（dgrad）接到真实 MoE 的完整反向，与 PyTorch autograd 做
-  **kernel 级**数值对拍，出误差与吞吐；P4-2/P4-3 已完成 API 语义与布局等价前置核对）。
-  之后推进 P5-1（Mega Gate）/P5-2（Mega mHC）。
+- **下一步：P4 反向全部完成 → 转入 P5 相关 mega-kernel**：P5-1（Mega Gate，
+  `mega_gate.hpp` / `sm100_bf16_mega_gate.cuh`：做什么融合、怎么实现）与 P5-2（Mega mHC，
+  `mega_mhc.hpp` / `sm100_mega_mhc.cuh`）。随后 P6-1 汇总。
 
 ## 阻塞
 
