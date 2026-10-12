@@ -9,8 +9,8 @@
 > 不重复动机论证。生产案例（DeepGEMM mega 家族、Kimi K3）见 `docs/02-production-cases.md`，
 > DeepGEMM MoE 的前/反向实现细节见 `../mega-moe/` 专题——本文遇到时只给坐标、不展开。
 >
-> 进度：**P2-1 已完成**（§3，下文 §2）；**P2-2 已完成**（§4，下文 §3）；P2-3 in-kernel runtime（§5）、
-> P2-4 评估（§6）待续。
+> 进度：**P2-1 已完成**（§3，下文 §2）；**P2-2 已完成**（§4，下文 §3）；
+> **P2-3 已完成**（§5 + §6.1/§6.6，下文 §4）；P2-4 评估（§6）待续。
 
 ## 1. 全篇结构一页（方便定位）
 
@@ -297,9 +297,154 @@ event、至多一个 triggering event** 的形式。这样每个 task descriptor
 > 与 §4 表示层相关的本机实测佐证（CUDA Graph 只治 launch、不破依赖串行）见
 > `docs/04-experiments.md` §0 与 `harness/probe_env.out.txt`、`harness/mitigations.out.txt`。
 
-## 4. P2-3 in-kernel runtime（§5）
+## 4. P2-3 in-kernel parallel runtime（§5，行 1147–1368）
 
-（待续）
+> 承接：§4（P2-2）已把 tensor program 编译成 tGraph 并为每个 task 生成了 thread-block 级 CUDA 实现；
+> 本节精读 MPK 如何在一个**已 launch 的 mega-kernel 内部**把这些 task 真正跑起来。这是 MPK 与
+> CUDA Graphs / 静态融合的**范式分水岭**——调度不再发生 host 侧，而是常驻 device 内。
+
+### 4.1 §5 总览：SM 划分为 worker 与 scheduler（行 1148–1174）
+
+- **单次 launch、常驻**（行 1149–1154）：in-kernel parallel runtime 在**一个 mega-kernel 内**跨所有 SM
+  执行整张 tGraph；一旦 launch，该 kernel **持续管理计算与通信直到推理负载结束**。这直接消掉了
+  重复的 kernel launch（对应 §2 损失二）并暴露了对 scheduling / synchronization / execution order 的细粒度控制。
+- **两类角色**（行 1155–1164）：
+  - **worker**：每个 worker 占用**一个物理 SM**，维护一个独立的 **task queue**，跑一个轻量循环
+    （dequeue task → 执行计算/通信 → 通知该 task 的 triggering event）。worker 之间异步推进，
+    使 SM 保持满载。
+  - **scheduler**：以 **warp 粒度**组织，**每个 SM 承载 4 个 scheduler warp**；每个 scheduler 维护一个
+    **event queue**，反复轮询新激活的 event 并把对应 task 下发给 worker。
+- **角色固定在 launch 时确定**（行 1164）：调度/工作划分**在 kernel-launch 时固定并与 GPU 物理 SM 数匹配**，
+  从而**避免 kernel 内的动态角色切换开销**。
+- **本节组织**（行 1165–1174）：§5.1 事件驱动执行模型 → §5.2 两种 task launch（JIT/AOT）及其取舍 →
+  §5.3 进一步降开销的运行时优化。
+
+> **范式要点**：这里就是 `docs/00` §3 判据 **C4「设备内协调」+ C5「SM 级调度」** 的机制落地——
+> SMs 被显式切成「少数 scheduler + 多数 worker」，调度状态（event/task queue、semaphore）全在
+> device memory，host 在 launch 后不再参与。
+
+### 4.2 §5.1 事件驱动执行（行 1175–1231）
+
+- **起点**（行 1177–1198）：每张 tGraph 有一个**无前驱的 start event**（如 Figure 7 的 e0），最先入 scheduler
+  的 event queue；scheduler（如 s1）dequeue 后 launch 依赖它的所有 task（如 AT1…AT4）。
+- **推进闭环**（行 1211–1217）：每个被 launch 的 task 下发到某 worker；worker 执行完**通知该 task 的
+  triggering event**；当某 event 的**所有前驱都完成并累计触发到所需次数**时，event 变为 **activated**，
+  被入队到某 scheduler 的 event queue——于是执行沿图继续传播。**event 就是驱动 task 执行的机制**，
+  实现细粒度、异步调度。
+- **无需拓扑画像的自适应**（行 1218–1225）：计算与通信**统一表示为同一张 tGraph 里的 task**、由同一
+  scheduler 分发。依赖满足即可跑：**快的链路更早触发 event、更早释放下游；慢链路只拖它自己的下游**。
+  因此 scheduler **无需显式知道链路带宽/拓扑距离**，同一张 tGraph+scheduler 就能处理**异构互连**
+  （intra-node NVLink 与 inter-node 网络），靠「数据到达」而非「静态拓扑模型」反应。
+
+> 与 §3（P2-1）呼应：这正是 tGraph「以 SM 为粒度、MatMul→AllReduce 细粒度重叠」（快照行 371–386）
+> 在 runtime 侧的兑现方式；也解释了 §6.6 compute–communication overlap 消融为何能到 **1.1×**
+> （见下文 §4.5）。
+
+### 4.3 §5.2 混合任务下发：JIT 与 AOT（行 1232–1308）
+
+- **两种下发语义**（行 1234–1238）：
+  - **JIT（just-in-time）**：scheduler 在依赖 event **完全激活后**才把 task 派给 worker，task 可立即执行。
+  - **AOT（ahead-of-time）**：runtime 在**前驱 event 激活之前**就把 task **预入队**到某 worker 的 task queue；
+    worker 在本地**等到依赖满足**才执行。
+- **为何互补**（行 1239–1247）：
+  - JIT 能**适应负载不均**：LLM attention 因序列长度而耗时高度可变，静态分配无效；JIT 在 attention 完成后
+    才 launch 下游（MatMul/AllReduce），**先完成的 worker 多干活**，改善端到端时延并均衡 SM 负载（Figure 7）。
+  - 但 JIT 有**更高的下发时延**，因为多了一次 worker↔scheduler 往返。
+- **同步步数对比**（行 1247–1295，Figure 8 重点）：沿 `T1 → e → T2` 触发链，
+  - JIT（图 8a）：worker(T1) → scheduler 通知 → scheduler dequeue e、launch T2、入队 worker → worker dequeue T2，
+    共**两步同步**（worker→scheduler、scheduler→worker）。
+  - AOT（图 8b）：T2 已**预入队到预分配的 worker**，该 worker 只需**等 event e 激活**，
+    经 event trigger **一步同步**即可，**降低 per-task launch 时延**。
+- **混合策略（编译期分类）**（行 1296–1302）：
+  - 编译期按「执行时间是否数据相关、易致运行时不均」给**整个 operator** 打 JIT/AOT 标签（**operator 粒度**，
+    同一 operator 生成的所有 task 共享同一 mode）。
+  - **数据相关耗时的 operator（如 attention）标 JIT**，其下游**保持 JIT 直到遇到 global barrier**
+    （一个必须由**所有上游 task**触发的 event）；barrier 抹平累积不均，其后的 operator 适合 **AOT**。
+  - worker 维护 **JIT / AOT 两条 queue**，**优先 JIT**（就绪即可执行）；JIT 空了再检查 AOT 队首依赖是否已激活，
+    如此 worker **只在确实无就绪工作时才阻塞**。
+- **下发侧优化**（行 1303–1308）：scheduler **只处理会 launch JIT task 的 event**；AOT task **全部预入队**。
+  由于 operator 产生的 task 数通常与 worker 数成正比（§4），AOT task 按 **round-robin** 摊到各 worker 以均衡负载。
+  **预入队 AOT 降低了 scheduler 负载并摊薄下发开销**，同时 JIT 动态均衡 SM 工作。
+
+> **设计张力一句话**：JIT = **保负载均衡但贵**；AOT = **省下发但静态**。MPK 用「编译期标签 + global barrier
+> 分界 + worker 双队列优先级」把两者缝在一起，用静态图拿到动态负载均衡——这是纯 CUDA Graph
+> （`docs/00` §2.2）做不到的。
+
+### 4.4 §5.3 运行时优化（行 1309–1368）
+
+三个优化都服务于同一目标：**让比传统 kernel 细得多的 task 的下发/执行开销摊薄**。
+
+#### 4.4.1 Paged shared-memory abstraction（行 1312–1325）
+
+- **问题**（行 1313–1318）：常规模型下 shared memory 是 thread block 私有、**kernel 生命周期内**存在；
+  kernel-per-operator 下每个 kernel **独占**其 shared memory。该假设**阻碍 cross-task software pipelining**——
+  因为「为下一 task 预取数据」与「当前 task 计算」可能**同时需要 shared memory**。
+- **机制**（行 1319–1325）：把 shared memory 切成**固定大小页**，task 实现改为**按页**操作；
+  task **acquire** 若干页（按其 footprint）、不再需要时**release**。**一旦 release 过任何页，便不再允许
+  acquire 新页**（单调使用模式，简化调度）。当前 task 释放页后，MPK 即可把可用页分给**下一个 task 立即预取数据**。
+- 配置锚点（§6.1，行 1460）：page size **32 KB**，在 A100/H100/B200 上分别得 **5 / 7 / 7 页/SM**。
+
+#### 4.4.2 Cross-task software pipelining（行 1326–1363）
+
+- **拆分**（行 1330–1334）：把每个 task 拆成 **pre-loading 阶段**（发数据搬运指令，把 tensor 的一个 chunk
+  从 device memory 取到 shared memory，**不做计算**，用来初始化 intra-task 软件流水）与 **compute 阶段**。
+- **重叠条件**（行 1335–1363）：当**两条件同时成立**时，MPK 机会式地把当前 task **T1 的 compute** 与
+  后继 task **T2 的 pre-loading** 重叠：(1) T1 **已发出自己全部数据搬运指令**；(2) 有**足够页**给 T2 预取。
+  该流水**不干扰 T1**：MPK 插入必要的 **intra-SM 同步屏障**，确保 T2 的搬运不与 T1 正在进行的搬运冲突。
+- 消融（§6.6，行 1586–1596，Figure 12）：Qwen3-8B final linear、**B200** 上，cross-task pipelining 把
+  task 运行时降 **1.2–1.3×**，甚至**胜过 cuBLAS based compiled kernels**。
+
+#### 4.4.3 Pre-fetching task descriptions（行 1364–1368）
+
+- 每个 worker 在 device memory 维护 JIT/AOT 两条 task queue；每个 task 关联一份 **task description**
+  （输入/输出 tensor 与配置参数），**当前实现每份占 352 bytes**（§6.1）。
+- 为降低 enqueue/dequeue 时延并隐藏 device-memory 访问，MPK 用**轻量预取**把**即将用到的 task description
+  先取到 shared memory**。
+
+### 4.5 实现细节、配置与消融锚点
+
+- **实现规模与组件**（§6.1，行 1396–1407）：MPK 约 **44K 行 C++、42K 行 CUDA、10K 行 Python**；
+  in-kernel runtime 用 CUDA 编写，用 **device memory 中的 semaphore** 协调 worker 与 scheduler；
+  compute task 的 CUDA 实现由 **Mirage superoptimizer** 生成，跨 GPU 通信用 **NVSHMEM**。
+- **降 task-launch 开销**（行 1409–1413）：event/task queue 是 device memory 中的**环形缓冲**，
+  enqueue/dequeue **只用低成本的 `atomicAdd`**；采用**去中心化调度**（每个 scheduler 用本地状态分配 task），
+  避免全局协调的通信/同步开销。论文指出 runtime 也**支持改写为全局协调调度**（未来工作）。
+- **动态负载支持**（行 1414–1436）：扩展了 **continuous batching** 与 **paged attention**；
+  start event 的调度逻辑（移除已完成请求、接纳新请求、更新 per-request KV-cache 元数据）作为**单个 task** 执行，
+  KV-cache 元数据放 device memory 供 attention task 直接访问；并按 batch size 生成**多张 tGraph**
+  （2 的幂直到最大 batch），runtime 按当前 batch size 选图。
+- **配置（Table 1，行 1437–1460）**：scheduler 预留 **4 个 SM / 16 个 scheduler warp**（每 SM 最多 4 个活跃
+  scheduler warp），其余为 worker——A100 **108 SM（104 worker / 16 scheduler）**、
+  H100 **132 SM（128 / 16）**、B200 **148 SM（144 / 16）**。这组数字给出「几十个 worker、个位数百分比
+  scheduler 开销」的直观量级。
+
+**§6.6 运行时三消融（行 1583–1628）** —— 与本节机制一一对应：
+
+| 优化 | 机制所在 | 消融结果 | 行 |
+|---|---|---|---|
+| cross-task pipelining | §5.3（本文 §4.4.2） | Qwen3-8B final linear，B200：**1.2–1.3×**，胜过 cuBLAS | 1586–1596 |
+| compute–communication overlap | §5.1 事件驱动（本文 §4.2） | Qwen3-1.7B，4×H100 TP：**1.1×** | 1597–1615 |
+| kernel-launch reduction | §5 单次 launch（本文 §4.1） | Qwen3-8B 每 token **293** 次 launch；B200 eager **3.8µs/次→1.1ms/token**、Graph **0.8µs→0.2ms**；MPK in-kernel scheduler 仅占 **0.28%** 总运行时 | 1618–1628 |
+
+### 4.6 小结：in-kernel runtime 的四条要点
+
+1. **调度搬到 device 内**：SMs 固定切成少数 scheduler（4 SM/16 warp）+ 多数 worker（每 SM 一 worker），
+   状态（event/task queue、semaphore、task description）全在 device memory——这是「单次 launch 跑完整个模型」
+   的必要条件，也是与 CUDA Graphs（host 侧预录）最本质的差别。
+2. **event 驱动 + 统一表示**：计算与通信同为 task，靠「数据到达触发 event」推进，天然适配异构互连，
+   无需拓扑画像；细粒度 event 正是 §3 tGraph 的表达在 runtime 的兑现。
+3. **JIT/AOT 混合是「动态负载均衡 vs 下发开销」的折中**：编译期按 operator 打标签、以 global barrier 分界，
+   worker 双队列优先 JIT——用静态图拿到近似动态调度的效果。
+4. **§5.3 三优化都在服务「细粒度 task 开销摊薄」**：paged shared memory 解锁跨 task 流水、cross-task
+   software pipelining 偷出 1.2–1.3×、task descriptor 预取隐藏设备内存访问；叠加后 in-kernel scheduler
+   只占 0.28% 运行时——**证明「把调度做进 kernel」的额外开销是可忽略的**。
+
+> 实测说明：P2-3 为**纯资料分析**（论文 §5 + §6.1/§6.6 精读），无 H100 实验；
+> §6.6 的 1.2–1.3× / 1.1× / 0.28% / 293 launch 均为论文报告值（B200、H100、Qwen3）。
+> 与本机相关的佐证见 `docs/04-experiments.md` §0：persistent kernel（cooperative grid sync）可跑、
+> CUDA Graph 1.56×、PDL ok（`harness/probe_env.out.txt`），以及「多流只并行无依赖、Graph 不破依赖串行」
+> （`harness/mitigations.out.txt`）；把「N 小 kernel 串行 vs CUDA Graph vs 单 persistent kernel」的
+> **端到端 launch 开销对比实验**留给 P5。
 
 ## 5. P2-4 评估（§6）
 

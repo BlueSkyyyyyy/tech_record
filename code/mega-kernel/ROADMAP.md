@@ -68,7 +68,15 @@
       normalization（行 780–951，Figure 6 空 task 把 event 扇入/扇出压到 1，<1%）、linearization
       （Algorithm 1 行 952–1098，BFS 保证同 event 触发 task 连续，§6.7 4.4–15×）；§4.2（行 1126–1146）
       以 **thread block** 为单位复用 Mirage superoptimizer 生成 CUDA。纯资料分析。
-- [ ] **P2-3** in-kernel 并行运行时（§5）：去中心化调度、跨算子软件流水、计算-通信重叠。
+- [x] **P2-3** in-kernel 并行运行时（§5）：去中心化调度、跨算子软件流水、计算-通信重叠。
+      见 `docs/01-mpk-paper.md` §4（逐条贴 §5 行号 1147–1368 与 §6.1/§6.6）：§5 总览 worker/scheduler
+      划分（行 1148–1174，固定角色、SM 数匹配）；§5.1 事件驱动（行 1175–1231，start event、event 激活、
+      异构互连无需拓扑画像）；§5.2 混合下发 JIT/AOT（行 1232–1308，两步 vs 一步同步、编译期 operator 标签、
+      global barrier 分界、worker 双队列优先 JIT、AOT round-robin 预入队）；§5.3 三优化
+      （paged shared memory 行 1312–1325、cross-task software pipelining 行 1326–1363、
+      task description 预取 行 1364–1368）；实现/配置（44K C++/42K CUDA/10K Python、semaphore、
+      环形缓冲 atomicAdd、Table 1 行 1437–1460）；§6.6 三消融（pipeline 1.2–1.3×、overlap 1.1×、
+      launch reduction 293→0.28%）。纯资料分析。
 - [ ] **P2-4** 评估（§6）：相对 PyTorch/vLLM/SGLang 的 1.0–1.7× 延迟、TP 下最高 10× 吞吐；
       复现要点与局限（模型/GPU 代际/batch）。（注：评估实际在 §6，非早期误记的 §5。）
 
@@ -118,7 +126,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 进行中（2/4）**。
+- 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 进行中（3/4）**。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -143,10 +151,16 @@
     →normalization（Figure 6 空 task 降扇入/扇出到 1）→linearization（Algorithm 1 BFS 连续区间编码）），
     以及 §4.2 以 thread block 为单位的 Mirage superoptimization；量化：32–47 task/op、fusion 37–118×、
     linearization 4.4–15×（B200，Table 2）。纯资料分析。
-- **下一步：P2-3** in-kernel 并行运行时（`docs/01-mpk-paper.md` §4）：§5 去中心化调度（SM 分为
-  schedulers/workers）、事件驱动执行（§5.1）、JIT/AOT 混合 task launch（§5.2）、runtime 优化
-  （§5.3 paged shared memory / cross-task software pipelining / task descriptor 预取）；随后
-  P2-4 评估（§6、§6.3/§6.5/§6.6 消融）。
+  - **P2-3** in-kernel runtime（§5）完成：`docs/01-mpk-paper.md` §4 精读论文 §5（行 1147–1368）与
+    §6.1/§6.6：worker/scheduler 角色划分（4 SM/16 warp scheduler + 其余 worker，固定于 launch）、
+    事件驱动执行、JIT/AOT 混合下发（两步 vs 一步同步、global barrier 分界）、三项运行时优化
+    （paged shared memory / cross-task software pipelining / task descriptor 预取）、
+    §6.6 消融（pipeline 1.2–1.3×、compute–comm overlap 1.1×、launch 293→in-kernel scheduler 0.28%）。
+    纯资料分析，复用 P0-3/P1-2 实测佐证。
+- **下一步：P2-4** 评估（`docs/01-mpk-paper.md` §5）：§6 总览（四大问题）、§6.3 端到端
+  （相对 vLLM/SGLang 的 1.0–1.7× 延迟、TP 下最高 10× 吞吐）、§6.4 动态负载、§6.5 多 GPU 扩展、
+  §6.6 运行时消融（已在 P2-3 引用）、§6.7 编译期消融（已在 P2-2 引用）；给出复现要点与局限
+  （模型/GPU 代际/batch）。纯资料分析。
 
 ## 阻塞
 
