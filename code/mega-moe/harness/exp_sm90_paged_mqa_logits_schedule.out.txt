@@ -1,0 +1,53 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+P20-1 SM90 paged MQA logits 调度器：H100 真实设备代码验证
+GPU: NVIDIA H100 80GB HBM3  sm_90  SMs=132
+
+== 用例组 A：非 varlen，next_n=1，2D context lens（batch x 1）==
+  [uniform batch=64 ctx=2048   ] varlen=0 nextN=1 batch=64 atoms=64 segs=512  smem=256B
+      meta boundary match=YES (0 mismatch)
+      scheduler: tasks=512 segs=512 dup=0 miss=0 bad=0  ref_mismatch=0
+      per-SM splits [3..4]  => PASS
+  [skewed lens batch=60        ] varlen=0 nextN=1 batch=60 atoms=60 segs=450  smem=256B
+      meta boundary match=YES (0 mismatch)
+      scheduler: tasks=450 segs=450 dup=0 miss=0 bad=0  ref_mismatch=0
+      per-SM splits [3..4]  => PASS
+  [few batch=3 -> empty SM     ] varlen=0 nextN=1 batch=3 atoms=3 segs=18  smem=128B
+      meta boundary match=YES (0 mismatch)
+      scheduler: tasks=18 segs=18 dup=0 miss=0 bad=0  ref_mismatch=0
+      per-SM splits [0..1]  => PASS
+  [batch=37 (unaligned)        ] varlen=0 nextN=1 batch=37 atoms=37 segs=259  smem=256B
+      meta boundary match=YES (0 mismatch)
+      scheduler: tasks=259 segs=259 dup=0 miss=0 bad=0  ref_mismatch=0
+      per-SM splits [1..2]  => PASS
+
+== 用例组 B：非 varlen，next_n=2（每 atom 覆盖 2 个 token，2D context lens）==
+  [next_n=2 batch=40           ] varlen=0 nextN=2 batch=40 atoms=40 segs=400  smem=256B
+      meta boundary match=YES (0 mismatch)
+      scheduler: tasks=400 segs=400 dup=0 miss=0 bad=0  ref_mismatch=0
+      per-SM splits [3..4]  => PASS
+  [next_n=2 last-col wins      ] varlen=0 nextN=2 batch=8 atoms=8 segs=128  smem=128B
+      meta boundary match=YES (0 mismatch)
+      scheduler: tasks=128 segs=128 dup=0 miss=0 bad=0  ref_mismatch=0
+      per-SM splits [0..1]  => PASS
+
+== 用例组 C：varlen（indices 配对），next_n=1 ==
+  [varlen uniform req=8        ] varlen=1 nextN=1 batch=512 atoms=256 segs=2048  smem=6148B
+      meta boundary match=YES (0 mismatch)
+      scheduler: tasks=2048 segs=2048 dup=0 miss=0 bad=0  ref_mismatch=0
+      per-SM splits [15..16]  => PASS
+  [varlen paired ctx cols      ] varlen=1 nextN=1 batch=84 atoms=43 segs=443  smem=1156B
+      meta boundary match=YES (0 mismatch)
+      scheduler: tasks=443 segs=443 dup=0 miss=0 bad=0  ref_mismatch=0
+      per-SM splits [3..4]  => PASS
+  [varlen 3 req -> 8SM         ] varlen=1 nextN=1 batch=32 atoms=16 segs=224  smem=388B
+      meta boundary match=YES (0 mismatch)
+      scheduler: tasks=224 segs=224 dup=0 miss=0 bad=0  ref_mismatch=0
+      per-SM splits [28..28]  => PASS
+
+== 用例组 D：少 SM（8）观察边界 / 空 SM ==
+  [nonvarlen skewed 8 SM       ] varlen=0 nextN=1 batch=6 atoms=6 segs=60  smem=128B
+      meta boundary match=YES (0 mismatch)
+      scheduler: tasks=60 segs=60 dup=0 miss=0 bad=0  ref_mismatch=0
+      per-SM splits [7..8]  => PASS
+
+ALL PASS

@@ -556,6 +556,36 @@
       ⑧ 踩坑：PDL 让背靠背 kineto 计时系统性偏小（改用 per-call sync+event）。配套博客
       `content/posts/mega-moe-29-sm90-bf16-gemm`（索引页新增第 29 篇）。
 
+### P20 增量（opt-in，补齐 SM90 分页 MQA logits 的调度器）
+
+- [x] **P20-1** **SM90 paged MQA logits 的 metadata 负载均衡调度器**
+      （`scheduler/sm90_paged_mqa_logits.cuh`：`sm90_paged_mqa_logits_metadata` +
+      `SM90PagedMQALogitsScheduler`；`csrc/apis/attention.hpp:136-172`、
+      `csrc/jit_kernels/impls/sm90_fp8_mqa_logits.hpp:94-135`）。第 19 篇拆了 SM90 dense 的
+      连续/分页**主 kernel**，但分页调度器只一笔带过；第 23/24 篇做的是 **SM100** dense 的调度器。
+      本篇补 SM90 自己的分页调度器。`split_kv=256`=4×block_kv=4×64、单 warp、反序均分；
+      **与 WGMMA/TMA/UMMA 无关**，只依赖 `math.cuh`/`ptx`/PDL，故 H100 上**直接编译运行真实设备代码**。
+      → `docs/30-sm90-paged-mqa-logits-schedule.md`（真实行号核对）：host 入口 `attention.hpp:136-172`
+      （`[num_sms+1,2]` 元数据、SM90 非 varlen `:163-166`、`block_kv==64` `:165`）、
+      metadata host 壳 `sm90_fp8_mqa_logits.hpp:94-135`（`split_kv=256 :100`、单 warp `:101`、
+      `aligned_batch_size=align(batch,32) :102`、smem `:105-106`）；kernel `scheduler/sm90_paged_mqa_logits.cuh`：
+      **varlen atom 配对分组**（`indices[t]==indices[t+1]` 合成 2-token atom、context 取 `[t+1]`，`:26-45`）、
+      warp 内 `shfl_up` 前缀和（`:47-69`）、varlen 分配（`:72-95`，反序 `q/r/pivot` `:75-78` + 上界二分 `:79-95`、
+      `<=kNumSMs` 同趟写终止哨兵）、非 varlen 分配（`:96-126`，`next_n_atom/num_next_n_atoms` `:97-98`、
+      `q_atom_idx=q_idx`、`lane0` 写终止 `:122-125`）；`SM90PagedMQALogitsScheduler`：EBO 索引存储 `:130-136`、
+      `atom_to_token_idx`（`kNextNAtom` / `kPadOddN`）`:151-163`、`atom_to_block_table_row` `:165-171`、
+      `refresh_num_kv_and_advance`（一次 `is_paired` 得 advance+num_kv）`:179-192`、构造读 `uint2` 起止
+      `:203-206`、`should_refresh_num_kv` `:215-221`、`fetch_next_task` `:223-241`、
+      `exist_q_atom_idx` `:243-245`；主 kernel 消费 `impls/sm90_fp8_paged_mqa_logits.cuh:137-140`（`kNumMathWarpGroups=4`）
+      / `:195-198`（逐 KV block 查 block_table）。**与 SM100 分页调度器的对照表**（varlen/代价模型/溢出/Q 粒度/KV 复用/分页坐标）。
+      H100 实测 `src/sm90_paged_mqa_logits_schedule.cu` + `harness/exp_sm90_paged_mqa_logits_schedule.{sh,out.txt}`：
+      **直接编译运行真实设备代码**——10 用例 **ALL PASS**：metadata 每-SM 边界 vs host 独立复刻
+      （varlen atom 分组/前缀和/反序分配/二分）**逐字段 0 不符**（含 `batch=37` 补零、`varlen paired ctx`
+      取 `[t+1]`）；真实 scheduler 发射任务**所有 (atom,split) 恰好覆盖一次**（dup/miss/bad=0，`tasks==segs`），
+      `num_kv`/`advance`/token/block_table 行映射逐任务 0 不符；负载均衡 **±1**（`[3..4]`/`[7..8]`/`[15..16]`）；
+      配对语义（`req=8` 512 token→256 atom）、少 SM/空 SM 正确。配套博客
+      `content/posts/mega-moe-30-sm90-paged-mqa-logits-schedule`（索引页新增第 30 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -580,8 +610,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15-1、P16-1、P17-1、P18-1、P19-1 完成。**
-  本轮 P19-1：新建 `docs/29-sm90-bf16-gemm.md`（+`harness/exp_bf16_sm90_gemm.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P20 各增量完成（P15-1、P16-1、P17-1、P18-1、P19-1、P20-1）。**
+  本轮 P20-1：新建 `docs/30-sm90-paged-mqa-logits-schedule.md`
+  （+`harness/exp_sm90_paged_mqa_logits_schedule.{sh,out.txt}`、`src/sm90_paged_mqa_logits_schedule.cu`）
+  ——补齐第 19 篇一笔带过的 **SM90 分页 MQA logits 调度器**
+  （`scheduler/sm90_paged_mqa_logits.cuh`：单 warp `sm90_paged_mqa_logits_metadata` +
+  `SM90PagedMQALogitsScheduler`）。它与 WGMMA/TMA/UMMA 无关，只依赖 `math.cuh`/`ptx`/PDL，
+  故 H100 上**直接编译运行真实设备代码**。要点：`split_kv=256`=4×block_kv（1 split=4 KV block）、
+  单 warp metadata（varlen **atom 配对分组** `indices[t]==indices[t+1]`、context 取 `[t+1]`、
+  warp `shfl_up` 前缀和、**反序均分** `q/r/pivot`、上界二分定位）、`SM90PagedMQALogitsScheduler`
+  （读 `uint2` 起止、按 split 步进、一次 `is_paired` 同时得 advance(2|1)+num_kv、`exist_q_atom_idx` 防越界）；
+  与 SM100 分页调度器对照（varlen/代价模型/溢出回退/Q 粒度/KV 复用/分页坐标）。**H100 真机 10 用例 ALL PASS**：
+  metadata 每-SM 边界 vs host 独立复刻逐字段 0 不符；真实 scheduler 发射任务所有 (atom,split) **恰好覆盖一次**
+  （dup/miss/bad=0）；负载 **±1**（`[3..4]`/`[7..8]`/`[15..16]`）；配对（512 token→256 atom）、少 SM/空 SM 正确。
+  行号全部核对过。配套博客 `content/posts/mega-moe-30-sm90-paged-mqa-logits-schedule`（索引页新增第 30 篇）。
+  Hugo 构建 0 ERROR。
+  上一轮 P19-1：新建 `docs/29-sm90-bf16-gemm.md`（+`harness/exp_bf16_sm90_gemm.{py,sh,out.txt}`）
   ——补上**DeepGEMM SM90 BF16 稠密 GEMM 主 kernel**（前 28 篇里 BF16 只被顺带提到）。它是唯一一个
   **一套 kernel 服务 Normal / MGrouped(contiguous & masked) / KGrouped / Batched 五种 `GemmType`**
   的 SM90 kernel：没有 SF，骨架与 FP8 SM90 同构（TMA warp 铺流水 → math warpgroup 发
@@ -679,10 +723,11 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P19 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel）。
+- **下一步**：P0~P20 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+  P20-1 SM90 分页 MQA logits 调度器）。
   后续若继续（均为增量、非承诺）：
-  ① **sparse attention 系列（P12/P13/P14 已开）**：SM90 dense、SM100 sparse、SM100 dense 连续版/
-  分页版调度器均已做；可再补 `sm100_mqa_logits.cuh` SIMT epilogue 的更多数值特性，或
+  ① **sparse attention 系列（P12/P13/P14/P20 已开）**：SM90 dense + SM90 分页调度器、SM100 sparse、
+  SM100 dense 连续版/分页版调度器均已做；可再补 `sm100_mqa_logits.cuh` SIMT epilogue 的更多数值特性，或
   `impls/sm100_sparse_mqa_logits.cuh` 主 kernel 的 TMA 快路 / 尾裁剪细节精读；
   ② **einsum 家族 FP8 投影（P11 已开）**：`bhr,hdr->bhd` 已做；`bhd,hdr->bhr` / `bhd,bhr->hdr`
   是 arch10 专属（仅分析）。可再补 `fp8_einsum` 的 FP8 输出对（SM100 `Kernel1D1D`）精读；
