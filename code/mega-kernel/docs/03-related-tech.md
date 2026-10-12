@@ -242,6 +242,9 @@ PDL 的 trigger 是「请求重叠」的信号，但**它不是给 stream/host �
 只是「允许下游 grid 提前被调度」（重叠下游 prologue `min(tail, prologue)`），`gridDependencySynchronize`
 依旧等上游完成。含义：kernel 级**没有**「中间进度早于完成、可被别的执行体看到」的原语，这正是生产
 mega-kernel 与 MPK 必须把协调下沉到**设备内 event counter / 原子 ring barrier** 的原因（`docs/03` §3.3）。
+`docs/04` §24（P35-1）把同一条边界从 stream 推广到 **CUDA Graph**：显式构图的 `PROGRAMMATIC` 边能把
+下游 kernel 的**调度点**前移到上游完成之前（`prog`→trigger 点、`lce`→0），但下游一旦调用
+`gridDependencySynchronize()` 仍等**上游完成**——即图的 programmatic 边也只到**调度级**，与本节结论一致。
 
 ---
 

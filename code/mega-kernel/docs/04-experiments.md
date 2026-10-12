@@ -3430,3 +3430,175 @@ score 先落 SMEM staging 再 **coalesced** 写全局 scratch。四 Section：**
   `epilogue/sm100_mega_gate.cuh:107-152`）：本节的 top-k 是每线程一 token 的朴素插入排序。
 - **ScoreBarrier 的 grid 代次**由 host 每次 launch 递增传入（而非设备侧 `get_grid_idx()`）；
   语义（无符号距离去陈旧）与 `scheduler/mega_gate.cuh:17-29` 一致，实现细节不同。
+
+## 24. 显式构图 + PROGRAMMATIC 边：CUDA Graph 能把下游调度点前移到上游完成之前吗（P35-1）
+
+### 24.1 问题
+
+CUDA Graph 在本专题有两个**未覆盖**的尾巴，都指向同一件事——**图能不能表达「比完成更早」的依赖**：
+
+- `docs/04` §13.6（P19-1）只测了 **capture 方式**构造的图（`cudaStreamBeginCapture`），明确留了
+  「未测**显式构图** API（`cudaGraphAddKernelNode` + `cudaGraphKernelNodeSetAttribute` 的 PDL 属性）
+  以及 graph 内部的 programmatic edge，后者语义可能不同」。
+- `docs/04` §21.6（P32-1）在 **stream 上**测出：programmatic/LCE 事件的前移 trigger **不放行**
+  cross-stream `cudaStreamWaitEvent` 依赖（只在完成点放行），并留了「未测 CUDA Graph 的
+  `PROGRAMMATIC` 边」——`CU_GRAPH_KERNEL_NODE_PORT_PROGRAMMATIC`（`cuda.h:2060`）、
+  `CU_GRAPH_DEPENDENCY_TYPE_PROGRAMMATIC`（`cuda.h:2044`）。
+
+本节把这两条尾巴一起补上，回答一个问题：**用显式构图把一个「programmatic 边」做进图里，能否让下游
+kernel 在上游完成之前就被调度**？如果能，那它到底把放行点前移到哪一点、和 capture 图是否等价。
+
+### 24.2 资料分析：图的 programmatic 边（头文件一手核对，CUDA 13.2）
+
+图的依赖不只是布尔「有/无」，而是一条带**端口**的边（`cudaGraphEdgeData`，`driver_types.h:3719-3748`）：
+
+- `from_port`：**上游**在哪个端口触发这条边。kernel 节点定义了三个端口
+  （`driver_types.h:3750-3761`）：
+  - `cudaGraphKernelNodePortDefault = 0`：上游**执行完毕**（含内存可见性）；
+  - `cudaGraphKernelNodePortProgrammatic = 1`：**所有 block 都调用过**
+    `cudaTriggerProgrammaticLaunchCompletion()`（或已终止）；
+  - `cudaGraphKernelNodePortLaunchCompletion = 2`：**所有 block 都开始执行**。
+- `type`：`cudaGraphDependencyTypeDefault = 0`（普通边）或
+  `cudaGraphDependencyTypeProgrammatic = 1`（`driver_types.h:3708-3715`）。文档明确：
+  programmatic 类型「**允许下游节点使用 `cudaGridDependencySynchronize()`**」，且必须与
+  `Programmatic` 或 `LaunchCompletion` 端口搭配。
+- `to_port`：下游的哪个部分依赖上游——**当前无节点类型定义非零 `to_port`，必须为 0**
+  （`driver_types.h:3731-3734`）——即**下游永远是整块依赖**，没有「下游的某一片先跑」。
+
+构造 API：`cudaGraphAddKernelNode`（`cuda_runtime_api.h:9796`）加节点、
+`cudaGraphAddDependencies(graph, from, to, edgeData, n)`（`cuda_runtime_api.h:11783`）按端口加边。
+`cudaGraphKernelNodeSetAttribute`（`cuda_runtime_api.h:9924`）可设节点属性，但——关键——
+`cudaLaunchAttributeProgrammaticStreamSerialization`（=6）与 `cudaLaunchAttributeLaunchCompletionEvent`
+（=12）在头文件里都标着 **"Valid for launches"**（`driver_types.h:3988 / 4067`），**不在** graph node
+可用属性列表（`AccessPolicyWindow / Cooperative / ClusterDimension / …`）里。故本实验**预期**节点级
+PDL 属性会被驱动拒绝，programmatic 端口**只由边本身提供**——这由实测验证（见 §24.4）。
+
+### 24.3 方法
+
+程序 `src/graph_programmatic.cu`，脚本 `harness/graph_programmatic.sh`，原始输出
+`harness/graph_programmatic.out.txt`（主配置）与 `harness/graph_programmatic_sens.out.txt`
+（`pro > tail` 的敏感性检查）（目标卡 H100 / sm90，SMs=132，**固定空闲 device 3**，nvcc 13.2，
+`iters=30`）。一张图两个 kernel 节点 A→B，用 `%globaltimer`（**全局一致**的 ns 计时器；`clock64` 是
+per-SM、不能跨 block 比时间）打点：
+
+- **A（上游，G 个 block）**：开始打 `g[0]` → `prologue`（block `i` 额外加 `i*stagger`）→
+  **可选** `cudaTriggerProgrammaticLaunchCompletion()` → `tail` → 结束打 `g[1]`；
+- **B（下游，1 个 block）**：入口打 `g[2]` → `prologue` → `cudaGridDependencySynchronize()` → 打 `g[3]`
+  → `crit` → `atomicAdd(g[4])`（正确性哨兵，应恒 `== iters`）。
+
+观测量：`A_total = g[1]-g[0]`；**`sched = g[2]-g[0]`**（B **何时被调度拿到 SM**，本节的关键量）；
+`rel = g[3]-g[0]`（B 的 `gridDependencySynchronize` 何时返回）。四档边（同一 A/B workload 公平对照）：
+
+| 边 | `from_port` | `type` | A 是否 trigger |
+|---|---|---|---|
+| `block` | Default(0) | Default | 否（完成即放行） |
+| `prog_nt` | Programmatic(1) | Programmatic | **否**（端口在终止时激活） |
+| `prog` | Programmatic(1) | Programmatic | 是（prologue 后 trigger） |
+| `lce` | LaunchCompletion(2) | Programmatic | 否（全体 block 启动即激活） |
+
+### 24.4 结果
+
+**A. G=1，四档边：programmatic 边把 `sched` 前移到 trigger 点，但 `rel` 仍在完成点**
+
+```text
+    edge | A_total(us) |  sched(us) |    rel(us) |    rel/A |     done
+---------+------------+------------+------------+----------+---------
+   block |     101.15 |     101.86 |     152.42 |    1.507 |       30
+ prog_nt |     101.15 |     101.60 |     152.16 |    1.504 |       30
+    prog |     101.12 |      51.01 |     101.60 |    1.005 |       30
+     lce |     101.12 |       0.32 |     101.54 |    1.004 |       30
+```
+
+`pro=tail=100000` cycles（各 ≈50.5 µs），`A_total≈101.1 µs`。读法：
+
+- **`block` / `prog_nt`**：`sched≈A_total`——普通边（完成即放行）与「programmatic 边但 A 不 trigger」
+  都**要等 A 完成**才调度 B（`prog_nt` 的端口在 A 终止时才激活，等价于完成）；
+- **`prog`**：`sched=51.01 µs ≈ pro`——A 在 prologue 后 trigger，**B 在上游 tail 还没跑完时就被调度**，
+  其 prologue 与 A 的 tail 重叠。**这就是 stream 上 `cudaStreamWaitEvent` 做不到的前移**（§21）；
+- **`lce`**：`sched=0.32 µs ≈ 0`——全体 block 一启动就放行；
+- **但 `rel` 恒 `≈ A_total`**（1.004–1.507 里，`prog`/`lce` 都是 1.00）：`gridDependencySynchronize()`
+  **依旧等上游完成**。端口只决定下游**何时被调度**，不改变「等完成」的语义——与 §21 的 stream 结论
+  完全一致。`done` 四档恒 30。
+
+节点级 PDL 序列化属性确实被驱动**拒绝**（输出里 `[note] …（invalid argument）——端口只由 programmatic
+边提供`），印证 §24.2 的头文件判断。
+
+**B. 多 block + stagger：programmatic 端口在「所有 block 都 trigger」时激活**
+
+```text
+    G | (G-1)*stag(us) | block A(us) | prog_sched |   prog_rel |    lce_rel |  prog_done
+------+--------------+------------+------------+------------+------------+-----------
+    1 |         0.00 |     101.12 |      51.01 |     101.60 |     101.57 |         30
+    2 |        10.10 |     101.12 |      61.12 |     111.68 |     111.62 |         30
+    4 |        30.30 |     101.12 |      81.28 |     131.87 |     131.78 |         30
+    8 |        70.71 |     101.15 |     121.73 |     172.29 |     172.22 |         30
+   16 |       151.52 |     101.12 |     202.53 |     253.09 |     253.02 |         30
+   32 |       313.13 |     101.12 |     364.13 |     414.72 |     414.66 |         30
+```
+
+block `i` 的 prologue 加 `i*stagger`（`stagger=20000` cyc ≈10.1 µs）。**`prog_sched ≈ pro + (G-1)*stagger`**
+（51.0、61.1、81.3、121.7、202.5、364.1 对 50.5、60.6、80.8、121.2、202.0、363.6）——programmatic
+端口在**最后一个 block** 也 trigger 之后才激活（`driver_types.h:3753-3756` 的"all blocks"语义）。
+`prog_rel`/`lce_rel` 两列都随 `(G-1)*stagger` 增长并趋同（两者都 `= max(调度点+prologue, 最后一个 A
+block 完成)`；本配置里后者主导）。`block A(us)` 恒 101——`g[1]` 由 block0 写，只有公共段 `pro+tail`。
+
+**敏感性检查**（`harness/graph_programmatic_sens.out.txt`，`pro=200000, tail=100000`）：
+`prog` 的 `sched=101.54 ≈ pro=101.0 µs`、`rel=152.13 ≈ A_total=151.6 µs`——**`sched` 精确跟随
+trigger 点**（而非 `tail` 或别的时间量），确认它测的就是「上游端口激活 → 下游被调度」。
+
+**C. capture 图（P19-1 形态）vs 显式 programmatic 边：逐项一致**
+
+```text
+构图                   | A_total(us) |  sched(us) |    rel(us) |    rel/A |     done
+-------------------------+------------+------------+------------+----------+---------
+capture (PDL attr)       |     101.12 |      51.01 |     101.60 |    1.005 |       30
+explicit PROGRAMMATIC    |     101.15 |      51.04 |     101.60 |    1.004 |       30
+```
+
+`capture`（A 带 `ProgrammaticEvent` 事件属性 + B 带 PDL 序列化属性、同 stream capture）与
+`explicit`（`cudaGraphAddKernelNode` + programmatic 边）**`sched`/`rel`/`A_total` 逐项相同**
+（51.01 vs 51.04、101.60 vs 101.60）。即：**capture 与显式构图在 PDL 语义上等价**——显式构图
+多出来的能力是能**显式选端口**（`Programmatic` vs `LaunchCompletion` vs `Default`），capture 只能
+从被 capture 的 launch 属性推出唯一的 programmatic 端口。
+
+### 24.5 读法
+
+1. **图的 programmatic 边 = 「调度级前移」，不是「依赖级前移」**。它能把下游 kernel 的**调度点**
+   （`sched`）提前到上游完成之前（`prog`→trigger 点、`lce`→0），从而让下游 prologue 与上游 tail
+   重叠（`min(tail, prologue)`，与 P5-3/P19-1 的 PDL 收益同源）；但下游一旦调用
+   `cudaGridDependencySynchronize()`，**仍等上游完成**（`rel≈A_total`）。这与 §21 在 stream 上的结论
+   **完全一致**：kernel 级没有「中间进度早于完成、可被依赖方看到」的原语。
+2. **端口语义**：`Programmatic` 端口 = 「**所有** block 都 trigger」（故 `sched = pro + (G-1)*stagger`，
+   Section B）；`LaunchCompletion` 端口 = 「所有 block 都开始」（`sched≈0`）。想早放行，上游必须
+   **每个 block** 都到 trigger——单点 trigger 不够（这正是 MPK 把协调压到 task 级、DeepGEMM 用
+   ring barrier 的原因：kernel 级端口太粗、且要全体会合）。
+3. **capture ≡ 显式构图**（Section C），补齐 §13.6；**程序matic 边可用**、节点级 PDL 属性被拒
+   （补齐 §21.6）。三者合起来把「CUDA Graph 这条降级路线能走到哪」钉死在**调度级**。
+
+### 24.6 与判据 / MPK 的关系
+
+- **判据（C1–C5，`docs/00` §3）**：本节四档边全是 **kernel-per-operator 的降级项**，**均不满足 C1–C5**
+  （图仍是 host 提交的多次 kernel 边界，kernel 仍会结束，无设备内调度）。它补的是「Graph 能表达
+  哪一级依赖」这条**下界证据**：也就是说，把 PDL 升级成图的 programmatic 边，**仍然只到调度级**。
+- **与 MPK 的关系**：MPK 用 **in-kernel event counter**（`docs/01` §3、`docs/06` §3）把「一个 task
+  完成」做成设备内、可被**任意** worker 观察的细粒度信号，粒度是 **task**（比 kernel 的
+  「全体 block 会合」细得多），且**不需要全体块同步**。本节的 programmatic 边是它的**最粗版本**：
+  粒度 = 整个下游 kernel、触发 = 全体 block、可见性 = 只对设备内 `gridDependencySynchronize`。
+  这正是 `docs/03` §2.6 那句「kernel 级没有可被别的执行体看到的中间进度」的图版本复核。
+- **与生产案例**：DeepGEMM Mega 家族用**单 kernel 内的原子 ring barrier**（`docs/02` §1.5）而不是
+  kernel 级事件，理由与本节一致——kernel 级端口/事件无法提供 task 粒度的「谁做完了」；MPK §5.3 的
+  cross-task software pipelining（P23-1 §16）也建立在 task 级事件队列上。
+
+### 24.7 局限与踩到的坑
+
+- **合成 workload**：A/B 都是「自旋 + 打点」，测的是**边端口语义**，非端到端收益；`B` 只 1 个 block。
+- **`rel` 的口径**：`rel = 下游 gridDependencySync 返回`，它同时受「下游何时被调度 + 下游自身
+  prologue」影响，不是纯放行信号；故本节的结论量用 **`sched`**（下游调度点），`rel` 只作「sync 仍等
+  完成」的反证。
+- **只测 2 节点、单 kind 边**：未测「一条 programmatic 边扇出到多个下游」「下游再作为上游」的级联，
+  也未测 `to_port`（当前恒 0，见 §24.2）。
+- **`LaunchCompletion` 端口的边类型**：本节用 `type=Programmatic`（头文件对 Programmatic 端口规定
+  必须如此，`driver_types.h:3753-3756`；LaunchCompletion 端口未硬性要求），实测被接受；未对比
+  `type=Default` 的行为差异。
+- **device 3**：主运行与敏感性检查都在固定空闲 device 3；`%globaltimer` 已消除跨 SM 时钟差，
+  但首轮图 instantiate 的固定开销未单独剔除（用 `iters=30` 平均摊薄）。

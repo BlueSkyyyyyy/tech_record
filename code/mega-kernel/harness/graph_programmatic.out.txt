@@ -1,0 +1,44 @@
+$ CUDA_VISIBLE_DEVICES=3 /tmp/graph_programmatic 30 32 100000 100000 20000 0
+== device ==
+NVIDIA H100 80GB HBM3, sm_90, SMs=132 (device 0), clock=1.980 GHz
+iters=30  pro=100000  tail=100000  stagger=20000 cycles  (A_total_proj=101.0 us)
+打点用 %globaltimer（全局一致 ns）；sched=B 被调度时刻；rel=B 的 cudaGridDependencySynchronize 返回时刻（=放行点）。
+
+=== Section A: G=1，显式构图，四档边 ===
+A = pro(100000) -> [trigger?] -> tail(100000)；B = prologue(100000) -> sync -> crit(100000)
+    edge | A_total(us) |  sched(us) |    rel(us) |    rel/A |     done
+---------+------------+------------+------------+----------+---------
+  [note] 节点级 PDL 序列化属性被驱动拒绝（invalid argument）——端口只由 programmatic 边提供
+   block |     101.12 |     101.86 |     152.45 |    1.508 |       30
+ prog_nt |     101.12 |     101.57 |     152.16 |    1.505 |       30
+    prog |     101.12 |      51.04 |     101.60 |    1.005 |       30
+     lce |     101.12 |       0.32 |     101.54 |    1.004 |       30
+
+=== Section B: 多 block（G，block i prologue += i*stagger），prog vs lce vs block ===
+prog：端口在**所有 block trigger** 时激活；lce：所有 block 启动即激活。
+    G | (G-1)*stag(us) | block A(us) | prog_sched |   prog_rel |    lce_rel |  prog_done
+------+--------------+------------+------------+------------+------------+-----------
+    1 |         0.00 |     101.12 |      51.01 |     101.60 |     101.54 |         30
+    2 |        10.10 |     101.12 |      61.12 |     111.68 |     111.58 |         30
+    4 |        30.30 |     101.15 |      81.31 |     131.87 |     131.78 |         30
+    8 |        70.71 |     101.12 |     121.70 |     172.29 |     172.26 |         30
+   16 |       151.52 |     101.12 |     202.50 |     253.09 |     253.02 |         30
+   32 |       313.13 |     101.12 |     364.16 |     414.72 |     414.69 |         30
+
+=== Section C: capture 图（P19-1 形态）vs 显式 programmatic 边 ===
+同一条 A(trigger)->B 依赖，两种构图方式的放行点对比（G=1）。
+构图                   | A_total(us) |  sched(us) |    rel(us) |    rel/A |     done
+-------------------------+------------+------------+------------+----------+---------
+capture (PDL attr)       |     101.12 |      51.01 |     101.60 |    1.005 |       30
+explicit PROGRAMMATIC    |     101.12 |      51.01 |     101.60 |    1.005 |       30
+
+>> 读法：关键量是 **sched**（下游何时被调度拿到 SM），不是 rel。
+>> block：sched≈A_total（完成即放行，下游 prologue 不能与上游 tail 重叠）；
+>> prog_nt：A 不 trigger -> 端口在终止时激活，sched≈A_total；
+>> prog：A 在 prologue 后 trigger -> sched≈pro << A_total——**图的 programmatic 边
+>>   把下游的调度点前移到了上游完成之前**（下游 prologue 与上游 tail 重叠），
+>>   这正是 stream 上 cudaStreamWaitEvent 做不到的（§21）。
+>> lce：全体 block 启动即放行，sched≈0。
+>> 但 rel（下游 cudaGridDependencySynchronize 返回）恒 ≈ A_total——端口只决定
+>>   下游**何时被调度**，不改变 gridDependencySync 等**上游完成**的语义（与 §21 一致）。
+>> done 应恒 == iters。

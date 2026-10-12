@@ -767,6 +767,28 @@
         （静态 grid 角色）。**本轮新增实验。** 讲清 sm90 投影边界：无 tcgen05/TMEM/`cta_group::2`，
       软件 cluster + 独立 barrier 代替硬件 2SM。
 
+### P35 显式构图 + PROGRAMMATIC 边（`docs/04-experiments.md` §24）
+
+- [x] **P35-1** 补齐 `docs/04` §13.6「未测显式构图 API（`cudaGraphAddKernelNode` +
+      `cudaGraphKernelNodeSetAttribute` 的 PDL 属性）」与 §21.6「未测 CUDA Graph 的 `PROGRAMMATIC`
+      边」两条尾巴：**用显式构图把一个 programmatic 边做进图里，能否让下游 kernel 在上游完成之前
+      被调度**？见 `docs/04-experiments.md` §24，源码 `src/graph_programmatic.cu`，脚本
+      `harness/graph_programmatic.sh`，原始输出 `harness/graph_programmatic.out.txt`（主配置）与
+      `harness/graph_programmatic_sens.out.txt`（`pro>tail` 敏感性）（目标卡 H100/sm90、**固定空闲
+      device 3**、nvcc 13.2、iters=30）。一张图 A→B，`%globaltimer` 打点，四档边
+      `block`/`prog_nt`/`prog`/`lce`（`cudaGraphEdgeData.from_port` = Default/Programmatic/
+      Programmatic/LaunchCompletion）。核心结论：(A) **关键量是「下游调度点」`sched`**——
+      `block`/`prog_nt` 的 `sched≈A_total`（完成即放行），`prog`（A 在 prologue 后 trigger）的
+      `sched=51.0µs≈pro`、`lce` 的 `sched=0.32µs≈0`——**图的 programmatic 边把下游调度点前移到
+      上游完成之前**（下游 prologue 与上游 tail 重叠），这正是 stream 上 `cudaStreamWaitEvent`
+      做不到的；(B) **但 `rel`（下游 `cudaGridDependencySynchronize` 返回）恒 ≈ A_total**——端口只
+      决定下游**何时被调度**，sync 仍等**上游完成**，与 §21 完全一致；(C) Section B 证 programmatic
+      端口在**所有 block 都 trigger** 时激活（`prog_sched ≈ pro+(G-1)*stagger`）；(D) Section C 证
+      **capture 图与显式构图在 PDL 语义上逐项相同**（`sched` 51.01 vs 51.04）；(E) 节点级 PDL 序列化
+      属性被驱动**拒绝**（`driver_types.h:3988/4067` 标 "Valid for launches"，不在 graph node 列表），
+      端口只由边提供。判据不变（四档均不满足 C1–C5），是 CUDA Graph 这条降级路线的**下界证据**。
+      **本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -789,7 +811,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P34-1 完成（1/1）**。兑现「下一步」剩余可选方向「把 DeepGEMM Mega Gate 的
+- 当前进度：**P35-1 完成（1/1）**。补齐 `docs/04` §13.6「未测显式构图 API」与 §21.6「未测 CUDA Graph
+  的 `PROGRAMMATIC` 边」两条尾巴——把「显式构图 + programmatic 边能否让下游在上游完成之前被调度」
+  实测出来。`docs/04-experiments.md` 新增 **§24**，源码 `src/graph_programmatic.cu`、脚本
+  `harness/graph_programmatic.sh`、原始输出 `harness/graph_programmatic.out.txt` +
+  `harness/graph_programmatic_sens.out.txt`（目标卡 H100/sm90、固定空闲 device 3、nvcc 13.2、
+  iters=30）。一张图 A→B、`%globaltimer` 打点、四档边 `block`/`prog_nt`/`prog`/`lce`
+  （`cudaGraphEdgeData.from_port` = Default/Programmatic/Programmatic/LaunchCompletion、
+  `type` = Default/Programmatic）。核心结论：(A) **关键量是「下游调度点」`sched`**——`block`/`prog_nt`
+  的 `sched≈A_total`（完成即放行），`prog`（A 在 prologue 后 trigger）的 **`sched=51.0µs≈pro`**、
+  `lce` 的 **`sched=0.32µs≈0`**——**图的 programmatic 边把下游调度点前移到上游完成之前**（下游
+  prologue 与上游 tail 重叠），这正是 stream 上 `cudaStreamWaitEvent` 做不到的（§21）；(B) **但 `rel`
+  （下游 `cudaGridDependencySynchronize` 返回）恒 ≈ A_total**——端口只决定下游**何时被调度**，sync
+  仍等**上游完成**，与 §21 一致；(C) Section B 证 programmatic 端口在**所有 block 都 trigger** 时激活
+  （`prog_sched ≈ pro+(G-1)*stagger`，G=1→32）；(D) Section C 证 **capture 图与显式构图 PDL 语义逐项
+  相同**（`sched` 51.01 vs 51.04、`rel` 均 101.60）；(E) 节点级 PDL 序列化属性被驱动**拒绝**
+  （`driver_types.h:3988/4067` 标 "Valid for launches"，不在 graph node 属性列表），端口只由边提供。
+  敏感性检查（`pro=200000`）`prog_sched=101.5µs≈pro` 确认 `sched` 精确跟随 trigger 点。判据不变
+  （四档均不满足 C1–C5），是 CUDA Graph 这条降级路线的**下界证据**。**本轮新增实验。**
+  此前 **P34-1 完成（1/1）**。兑现「下一步」剩余可选方向「把 DeepGEMM Mega Gate 的
   `cluster_dim` 路径做一次 sm90 等价复刻」——`docs/04-experiments.md` 新增 **§23**，源码
   `src/mega_gate_cluster.cu`、脚本 `harness/mega_gate_cluster.sh`、原始输出
   `harness/mega_gate_cluster.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2）。
@@ -987,7 +1027,10 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：全专题收尾（P0–P34 全部完成）**。P33-1 已把 §20.6 / 「下一步」都点名的两条
+- **下一步：全专题收尾（P0–P35 全部完成）**。P35-1 已把 §13.6/§21.6 两条「Graph 显式构图 /
+  programmatic 边」的尾巴补成实测（`docs/04` §24：programmatic 边把下游**调度点**前移到上游完成之前、
+  但 `gridDependencySynchronize` 仍等完成、capture ≡ 显式构图、节点级 PDL 属性被拒）。P33-1 已把
+  §20.6 / 「下一步」都点名的两条
   **SM100 专属原语**处理掉（`docs/04` §22：`SM100_TMA_2SM_LOAD` / tcgen05 2-SM MMA 的资料分析 +
   sm90 投影实测——multicast 复制投递源流量恰减半、分区投递不省源流量、2SM 是硬件层把一对 SM 绑成
   一个计算单元）。P31-1 已把 §18.6/§19.6 的「未测 2D/3D cluster」补成
@@ -1039,9 +1082,11 @@
    ~~2D/3D cluster + multicast 子集掩码~~（**P31-1 完成**：`docs/04` §20）、
    ~~SM100 `SM100_TMA_2SM_LOAD` / tcgen05 2-SM MMA~~（**P33-1 完成**：`docs/04` §22 资料分析 +
     sm90 投影实测）、~~`cudaLaunchAttributeProgrammaticEvent`~~（**P32-1 完成**：`docs/04` §21）、
-    ~~把 DeepGEMM Mega Gate 的 `cluster_dim` 路径做一次 sm90 等价复刻~~（**P34-1 完成**：`docs/04` §23
-    ——CTA-pair 切专家维 + split-K score scratch + ScoreBarrier 的 sm90 等价复刻；multi-CTA 逻辑任务
-    的价值在「占满机器」，饱和后只剩协调开销）。
+     ~~把 DeepGEMM Mega Gate 的 `cluster_dim` 路径做一次 sm90 等价复刻~~（**P34-1 完成**：`docs/04` §23
+     ——CTA-pair 切专家维 + split-K score scratch + ScoreBarrier 的 sm90 等价复刻；multi-CTA 逻辑任务
+     的价值在「占满机器」，饱和后只剩协调开销）、~~显式构图 + CUDA Graph 的 `PROGRAMMATIC` 边~~
+     （**P35-1 完成**：`docs/04` §24——programmatic 边把下游**调度点**前移到上游完成之前、但
+     `cudaGridDependencySynchronize` 仍等完成、capture ≡ 显式构图、节点级 PDL 属性被驱动拒绝）。
     **至此「下一步」剩余可选方向全部完成，全专题无遗留必做项。**
 - **本轮（P25-1 续）**：续做 P25-1 的「MPK 端到端跑通」，把上轮「执行不收敛」从玄学死锁推进到
   **可复现、可归因的时序竞态**。`docs/09-mpk-build.md` 新增 **§7**（收敛性诊断），新原始输出
