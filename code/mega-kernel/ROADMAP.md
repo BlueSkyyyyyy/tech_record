@@ -49,7 +49,11 @@
       P1-2 实测：`src/mitigations.cu` + `harness/mitigations.out.txt`（目标卡 H100/sm90，64×17µs kernel）：
       无依赖 4 流 **3.65×**、有依赖链 4 流 **0.96×**（≈串行）、依赖链 CUDA Graph **1.05×**，
       实证「多流只并行无依赖算子、Graph 不破依赖串行」。
-- [ ] **P1-3** MegaKernel 的定义与谱系（从单算子融合 → 段融合 → 整图单 kernel），术语澄清。
+- [x] **P1-3** MegaKernel 的定义与谱系：`docs/00` §3 给定义（MPK §1 行 90–101 的三好处）+ **五条判据
+      C1–C5**（单次 launch / 常驻 / 多算子范围 / 设备内协调 / SM 级调度）+ §3.3 术语澄清（persistent /
+      cooperative / fusion / CUDA Graph / PDL / TileRT）；§4 给四档谱系 T1 单算子 → T2 局部/段融合 →
+      T3 通信-计算重叠 → T4 整图 mega-kernel（各档贴 MPK 快照真实行号），T4 内分手 `FlashDMoE`/`Spector`
+      与自动 `MPK`，并说明 DeepGEMM 三者为「段级 mega-kernel」。
 
 ### P2 MPK 论文精读（`docs/01-mpk-paper.md`）
 
@@ -103,7 +107,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：脚手架就绪；**P0 全部完成**；**P1 进行中（2/3）**。
+- 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -117,8 +121,11 @@
     2.5 通信-计算 overlap / 2.6 相关抽象 / 2.7 小结表，逐条贴 MPK 快照行号，并给出 P1-2 实测
     （`src/mitigations.cu`、`harness/mitigations.out.txt`）：无依赖 4 流 3.65×、有依赖 4 流 0.96×、
     依赖链 graph 1.05×。结论：这些手段停在算子粒度或静态图，未触及 SM 级跨算子调度。
-- **下一步：P1-3** MegaKernel 的定义与谱系（从单算子融合 → 段融合 → 整图单 kernel），术语澄清。
-  基础已在 `docs/00` §3/§4 起稿，本轮补齐谱系各档的代表工作与判据，并与 §2 缓解手段对齐。
+  - **P1-3** 定义与谱系完成：`docs/00` §3（定义 + 五条判据 C1–C5 + 术语澄清）、§4（四档谱系 T1–T4，
+    手工 FlashDMoE/Spector vs 自动 MPK；DeepGEMM 三者为段级 mega-kernel），判据与 §2 缓解手段对齐。
+- **下一步：P2-1** MPK 论文精读（`docs/01-mpk-paper.md`）：先做 §3 SM 级图表示（tGraph：task/event 交替、
+  fine-grained event、与 CUDA Graphs 的对比），快照行 345–448；随后 P2-2 编译器（§4）、P2-3 in-kernel
+  runtime（§5）、P2-4 评估（§6）。
 
 ## 阻塞
 

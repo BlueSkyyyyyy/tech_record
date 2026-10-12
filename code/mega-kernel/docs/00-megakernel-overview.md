@@ -189,7 +189,13 @@ TileRT 则把算子分解成细粒度 tile 级 task 放进单个持久化 kernel
 都没有触及**「以 SM 为粒度的跨算子调度与重叠」**这个根问题——即把依赖细到 SM task、在 device 内动态
 事件驱动地调度。这正是 MPK §3 的 tGraph 与 §5 的 in-kernel runtime 要解决的（后续 P2 展开）。
 
-## 3. MegaKernel 的定义
+## 3. MegaKernel 的定义与判据
+
+### 3.1 定义
+
+MPK 把 mega-kernel 与 **persistent kernel（持久化内核）** 当作同义（MPK §1，快照行 90–95）：
+把模型推理的**全部计算与通信**融合进**一个** kernel——「一次 launch 执行整个模型（含逐层计算与跨 GPU
+通信）、中途不中断」。据此给出本专题采用的定义：
 
 **MegaKernel（巨型内核 / persistent mega-kernel）**：把（一整段甚至整个模型的）多个算子
 **融合进一个持久化 kernel**——kernel 一次 launch、在 GPU 上长期驻留（persistent），
@@ -198,19 +204,94 @@ TileRT 则把算子分解成细粒度 tile 级 task 放进单个持久化 kernel
 
 关键词：**persistent**（一个 kernel 跑完所有任务）、**单 kernel**（消除 kernel barrier）、
 **SM 级调度**（粒度细到 SM）、**in-kernel 运行时**（调度在 device 上做，不靠 host 反复 launch）。
+注意「mega」指的是**融合范围**（整段/整图），不是 kernel 的代码体积或 grid 大小；一个只覆盖单算子的
+persistent kernel 并不因此成为 mega-kernel。
 
-## 4. 谱系（从融合到什么程度）
+MPK 把 mega-kernel 相对 kernel-per-operator 的好处归纳为**三点**（MPK §1，快照行 96–101），
+可与 §1 的三类损失一一对上：
 
-1. **单算子内部优化**：一个 kernel 内软件流水、warp specialization（如 FlashAttention、DeepGEMM GEMM）。
-2. **段融合 / 算子融合**：把相邻几个算子融成一个 kernel（如 fused MoE、fused norm+residual）。
-3. **通信-计算重叠的双 kernel**：如 DeepEP + GEMM 分步、FlashMLA split（两个 kernel，靠 stream 重叠）。
-4. **MegaKernel（整段/整图）**：整张图一个持久化 kernel、SM 级调度。代表：
-   - **MPK / Mirage Persistent Kernel**（论文 *MPK: A Compiler and Runtime for Mega-Kernelizing Tensor Programs*，
-     arXiv 2512.22219）：首个**自动**把多 GPU 模型推理编译成单个 mega-kernel 的编译器 + 运行时，
-     SM 级图表示 + 去中心化 in-kernel runtime，相对 vLLM/SGLang 最高 **1.7×** 更低延迟、TP 下最高 **10×** 吞吐。
-   - **DeepGEMM Mega MoE / Mega Gate / Mega mHC**：生产级「段级 mega-kernel」——把 dispatch + 两段 GEMM +
-     SwiGLU + combine 融进单个 kernel，重叠 NVLink 通信与 Tensor Core。
-   - **Kimi K3** 报告里把「fused mega-kernels」列为内核优化任务的一类。
+1. **消除重复 launch 开销**——用单次 kernel 调用取代多次算子级 launch（← §1.3 损失二）；
+2. **跨算子软件流水**——把全部算子融进一个 kernel 后，下一算子的数据可以在当前算子计算**尚未结束**时预取
+   （← §1.2 损失一，对应 MPK §2.1 Figure 2）；
+3. **计算-通信细粒度重叠**——同一 kernel 内让计算与跨 GPU 通信并发，更有效地隐藏通信延迟
+   （← §1.2 损失一中的 fine-grained overlap，对应 MPK §2.1 Figure 3）。
+
+### 3.2 判据：什么才算 MegaKernel
+
+把 §2 的缓解手段与本定义对照，可用**五条判据**区分「真 mega-kernel」与「只是压 launch/局部融合」。
+判据全部来自 §3.1 定义的可验证特征：
+
+| 判据 | 含义 | 不满足的代表 |
+|---|---|---|
+| **C1 单次 launch** | 整段/整图只调用一次 kernel | kernel-per-operator、CUDA Graph（图内仍是多次 kernel 调用） |
+| **C2 常驻执行（persistent）** | kernel 在整段执行期间持续驻留、SM 不因 kernel 边界而清空 | 普通多 kernel 串行 |
+| **C3 多算子融合范围** | 覆盖**跨算子的依赖链**，而非单个/几个相邻算子 | 单算子 persistent kernel、局部融合 |
+| **C4 设备内协调** | 用 **device memory 上的同步原语**（信号 / ring buffer / 原子）跨 SM 推进，而非 host 逐段 launch | 多流、PDL（host 侧仍按 kernel 推进） |
+| **C5 跨算子/通信调度** | 调度粒度细到 **SM/线程块级 task**，能表达跨算子流水与通信-计算重叠 | CUDA Graph / PDL（粒度停在整算子或 kernel 对） |
+
+对照结论（与 §2.7 小结一致）：算子融合满足 C3 但停在局部、且仍是多 kernel（不满足 C1/C2/C4）；
+CUDA Graphs 满足 C1（一个 graph）但在**语义上仍是多次 kernel 调用**（不满足 C2/C3/C4）；
+PDL、多流同样不满足 C2/C4。**只有同时满足 C1–C5 才是本专题意义的 MegaKernel**，
+其分水岭正是 **C4/C5**——调度权从 host 移到 device、粒度从算子细到 SM（§1.5 的「根问题」）。
+
+### 3.3 与相邻术语的澄清
+
+社区里 “mega-kernel / megakernel / mega kernel / persistent kernel” 常混用，本专题统一用 **MegaKernel**，
+并按下列边界使用邻近术语：
+
+- **persistent kernel**：只强调「一次 launch、长期驻留」（C1+C2）。它可以只承载单算子（如 persistent
+  GEMM、常驻采样器），此时**不是** mega-kernel。MPK 之所以把二者视为同义，是因为它的 mega-kernel
+  总是**整图**常驻（行 90–95），把 C3 也一并满足。
+- **cooperative kernel / cooperative groups**：用 grid-wide 同步实现跨 SM 协调，是满足 C4 的**手段之一**，
+  不等于 mega-kernel——它本身不决定融合范围（C3）。P0-3 的 `probe_env.cu` 正是用 cooperative grid sync
+  探测设备内同步可行性（`docs/04-experiments.md` §0）。
+- **operator fusion（算子融合）**：mega-kernel 的**必要不充分条件**——mega-kernel 一定融合（C3），
+  但局部融合（只融相邻几个算子）不满足 C1/C2/C4/C5，是谱系第 2 档（§4）。
+- **CUDA Graph**：把多次 kernel 调用录成静态序列，满足「一次提交」，但**语义上仍是逐 kernel 执行**，
+  依赖与 barrier 原样保留（P1-2 实测：依赖链 graph 仅 1.05×，见 §2.4）——不满足 C2/C3/C5。
+- **PDL（Programmatic Dependent Launch）**：让**相邻两个 kernel** 部分重叠，仍以 kernel 为单位推进，
+  不满足 C2/C4/C5（§2.3）。
+- **TileRT**：把算子分解成细粒度 tile 级 task 放进**单个持久化 kernel**（MPK §8，快照行 1873–1877），
+  与 MPK 核心判据 C1–C5 一致，属「手工/专用 vs 编译器自动」之差，而非范式之差。
+
+## 4. 谱系：从单算子优化到整图单 kernel
+
+### 4.1 四档谱系
+
+按「融合范围」（C3）与「调度权归属 / 调度粒度」（C4/C5）两条轴，把相关工作排成四档：
+
+| 档 | 融合范围 | 推进方式 | 调度粒度 | 代表工作（MPK 快照行号） |
+|---|---|---|---|---|
+| **T1 单算子内优化** | 单算子 | 单 kernel 内 software pipelining / warp specialization | warp | FlashAttention / FasterTransformer / FlashInfer（§8 行 1783–1798）、DeepGEMM GEMM |
+| **T2 局部/段融合** | 相邻几个算子 | 多 kernel 或单 kernel，host 启动 | 算子/kernel | 规则启发式：PyTorch / JAX / TVM（§2.2 行 314–321）；超优化：Mirage / TASO（行 322–327）；fused MoE、fused AllReduce+RMSNorm（`hpc-ops`） |
+| **T3 通信-计算重叠** | 通信 + 依赖计算 | host 协调的多 kernel 重叠 | 单 kernel / 单集合算子 | DeepEP（§8 行 1880–1885）、Triton-Distributed（行 1886–1890）、TokenWeave / FlashOverlap / ParallelKittens（行 1891–1903）、Google 早期集合算子分解（行 1906–1909） |
+| **T4 MegaKernel（整段/整图）** | 整图（含通信） | **单次 launch + 设备内 in-kernel 调度** | SM / 线程块级 task | 手工：FlashDMoE（§2.2 行 333–336、§8 行 1851–1854）、Spector LLaMA-1B（§2.2 行 337–343、§8 行 1855–1861）、TileRT（§8 行 1873–1877）；自动：**MPK** |
+
+读法：T1→T4 的演进**不是「kernel 越来越大」**，而是融合范围从单算子扩到整图、同时**调度权从 host 移到
+device、调度粒度从算子细到 SM**。T2/T3 都还在 host 逐 kernel 推进（不满足 C4），T4 才把推进也搬进 device。
+
+### 4.2 T4 内部：手工 vs 自动
+
+T4 这一档内部还有一条关键分野（MPK §2.2 行 332–344、§8 行 1850–1863）：
+
+- **手工 mega-kernel**：FlashDMoE（MoE 计算 + 跨 GPU 通信融进单 kernel，§2.2 行 333–336）、
+  Spector et al. 为 LLaMA-1B 手写的低延迟 mega-kernel（行 337–343）。MPK 指出这类做法
+  「需要大量工程投入与深厚 GPU 经验，且**不能泛化到别的模型或 GPU**」（§8 行 1862）。
+- **编译器自动 mega-kernel**：**MPK / Mirage Persistent Kernel**——首个把多 GPU 模型推理**自动**编译成
+  单个 mega-kernel 的编译器 + 运行时（Abstract 行 38、§1 行 133–138），SM 级 tGraph + 去中心化 in-kernel
+  runtime，相对 vLLM/SGLang 最高 **1.7×** 更低延迟、TP 下最高 **10×** 吞吐（§6.3/§6.5）。
+- **抽象层的互补工作**：ThunderKittens（tile 抽象）、PipeThreader（显式软件流水）仍要开发者自己决定融什么、
+  怎么流水（§8 行 1864–1872）；MPK 视其为**互补**——可作为 MPK runtime 里单个 task kernel 的实现手段。
+
+### 4.3 生产落地：段级 mega-kernel
+
+T4 在工业界的落地目前集中在**段级**而非整图。**DeepGEMM Mega MoE / Mega Gate / Mega mHC**
+（`~/github/DeepGEMM` @ `057ca59`）就是典型：把一段（MoE 段 / 路由打分段 / HyperConnection 段）内的
+多个算子融进一个持久化 kernel，用**设备内信号 + ring buffer**（满足 C1/C2/C4）驱动固定的 warp/CTA 角色
+（C4/C5），重叠 NVLink 通信与 Tensor Core。它们与 MPK 的差别是 **「手工静态角色 vs 编译器生成 +
+去中心化动态调度」**，以及**融合范围停在段级（C3 只到一段）**。源码坐标见 `docs/02-production-cases.md`
+（与 `../mega-moe/` 专题交叉引用，本文不重复实现细节）。**Kimi K3** 报告把「fused mega-kernels」列为
+内核优化任务的一类（`docs/02` §3），说明该范式已进入模型能力训练的产业视野。
 
 ## 5. 本专题怎么读
 
