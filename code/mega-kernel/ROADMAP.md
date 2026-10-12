@@ -101,7 +101,12 @@
       Mega mHC 拍平「HC pre-mix TF32 GEMM + post/comb mix + Sinkhorn + 残差更新 + RMSNorm + FP8 量化/SF
       + 下一层 mix 生成」，静态 WG0–WG5（Normal 模式回收退休 WG），双 `SplitBarrier`（Norm/Mix）+
       静态 Full/empty SMEM 环 + 寄存器重配置。均 SM100 专属，**仅资料分析**。
-- [ ] **P3-3** Kimi K3 的 fused mega-kernels（RL 内核任务套件）、hpc-ops 的 Megakernel roadmap。
+- [x] **P3-3** Kimi K3 的 fused mega-kernels（RL 内核任务套件）、hpc-ops 的 Megakernel roadmap。
+      见 `docs/02-production-cases.md` §2（hpc-ops：roadmap 行 230 未实现，命中损失二/三；已实现的
+      Fused MoE / AllReduce+RMSNorm / sampler 用 PDL+多 kernel，属 T2/T3）与 §3（Kimi K3 §4.2.4
+      快照行 1069–1081：single-operator→fused mega-kernels、多 DSL/精度、正确性门限+roofline 打分、
+      防 CUDA graph replay/精度缩减作弊）。给出「需求(K3)→路线(hpc-ops)→落地(DeepGEMM 段级)→
+      自动化(MPK 整图)」四段式工程结论。纯资料分析。
 
 ### P4 相关技术对照（`docs/03-related-tech.md`）
 
@@ -143,7 +148,7 @@
 ## 当前进度 / 下一步
 
 - 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**；
-  **P3 进行中（2/3）**。
+  **P3 全部完成（3/3）**。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -187,9 +192,15 @@
   框架。核心结论：**三者是同一套「持久化 CTA + 手工静态角色 + 设备内异步原子 barrier + SMEM 环形流水」
   的段级 mega-kernel，差别只在 barrier 数量与角色数**（MoE：位掩码 + ring generation；Gate：ScoreBarrier
   + split-K 归约；mHC：双 SplitBarrier + 注册重配置）。纯资料分析（SM100 专属，本机 H100/sm90 不运行）。
-- **下一步：P3-3** Kimi K3 fused mega-kernels（`docs/02` §3 已有坐标）+ hpc-ops roadmap，
-  汇总工程/产业侧视角；随后 P4（相关技术对照）、P5（launch 开销等本机实验）、P6（汇总）。
-- **本轮（P3-2）**：`docs/02-production-cases.md` §1.2/§1.3 扩为 P3-2 精读；P3-2 标记完成；
+- **P3-3** Kimi K3 + hpc-ops 工程视角完成：`docs/02` §2 扩为「roadmap 定位 / 已实现的 PDL 段融合 /
+  工程侧结论」，§3 扩为「原文要点（快照行 1069–1081）/ 对本专题的两个关键印证（CUDA Graph 被评测
+  系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
+  **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
+  自动化(MPK 整图 T4)」四段式**。纯资料分析。
+- **下一步：P4** 相关技术对照 `docs/03-related-tech.md`：P4-1 CUDA Graphs、P4-2 PDL（H100 实测）、
+  P4-3 persistent kernel vs megakernel + in-kernel 调度、P4-4 与通信-计算 overlap（DeepEP/FlashMLA）对比；
+  随后 P5（launch 开销等本机实验）、P6（汇总）。
+- **本轮（P3-3）**：`docs/02-production-cases.md` §2/§3 扩为 P3-3 精读；P3-3 标记完成、P3 收官；
   纯资料分析，未产生新实验。
 
 ## 阻塞

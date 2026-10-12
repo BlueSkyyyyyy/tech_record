@@ -364,37 +364,108 @@ pull → ring 满 count）手工编排。
 
 ## 2. hpc-ops Megakernel roadmap（`~/github/hpc-ops` @ `ab1a402`）
 
-- 核对基准：`git log --oneline -1` = `ab1a402 update hpc-ops build to C++20 (#76)`。
-- README 行 **230**（Roadmap 段）：
-  「**Megakernel**: Fuse multiple consecutive operators into a single kernel to reduce inter-kernel
-  launch overhead and intermediate memory traffic.」——仍是**路线图条目（未实现）**，
-  定位为「降 launch 开销 + 降中间张量流量」，与 P1 动机一致。
-- 已实现的相邻手段（可作为段融合的工程证据）：`Fused MoE`（README 行 103–105、表 行 162）、
-  `Fused AllReduce + Residual + RMSNorm`（行 120–132、表 行 163）、`Fused sampler`（行 137、表 行 164）。
+> 核对基准：`git log --oneline -1` = `ab1a402 update hpc-ops build to C++20 (#76)`。行号均在本机 clone
+> 逐行核对。
+
+### 2.1 roadmap 定位（未实现）
+
+README 行 **230**（Roadmap 段）：
+「**Megakernel**: Fuse multiple consecutive operators into a single kernel to reduce inter-kernel
+launch overhead and intermediate memory traffic.」——仍是**路线图条目（未实现）**，
+定位恰好命中 `docs/00` §1 的**损失二（launch 开销）+ 损失三（中间张量 HBM 往返）**，只差损失一的一体化调度。
+它被排在 Extended Quantization、Next-Gen Hardware、Low-Precision Communication 同级，说明业界仍把
+megakernel 当作**待攻克的下一阶段**，而非已落地手段——这与本专题「段级已落地、整图仍研究中」的判断一致。
+
+### 2.2 已实现的相邻段融合（工程证据）
+
+hpc-ops 虽然没实现「megakernel」，但已经把相邻算子做了**段级融合**，且用的是 PDL/双 kernel 而非持久化单 kernel，
+恰好是谱系 T2/T3 的工程样本：
+
+- **Fused MoE**（README 行 103–115；表 行 162，`hpc/fuse_moe.py`）：把 **routing + Gate-Up GEMM +
+  activation quantization + Down GEMM + top-k weighted reduction** 融成「一条 pipelined execution path」。
+  两点值得记：① 用 routing index **直接读原始 token**，省掉独立 gather 段（行 107–109）——与 DeepGEMM
+  Mega MoE 的「fused gather-GEMM」动机同源（`docs/00` §1.4 / MPK §6.4）；② 低延迟区**移除 Warp
+  Specialization**、改用 cp.async，把延迟隐藏从「CTA 内软件流水」下移到「**跨 CTA 硬件调度**」（行 112–114），
+  再用 **PDL 把各阶段串起来**减少 launch bubble（行 115）。这说明产业界选择的是「多 kernel + PDL」而非
+  「持久化单 kernel」——因为段内还有 host 友好的起步点。
+- **Fused AllReduce + Residual + RMSNorm**（行 120–132；表 行 163，`hpc/allreduce.py`）：把
+  AllReduce + 残差加 + RMSNorm 融成 NVLink-native kernel。**高吞吐模式**用 CUDA multicast 服务大 token
+  prefill；**低延迟模式**用 Lamport P2P **双 kernel** 设计 + PDL overlap 服务小 token decode（行 129–130）。
+  这是 T3（通信-计算重叠）——注意它**仍是多 kernel**，重叠靠 PDL/host，不是设备内 scheduler。
+- **Fused sampler**（行 137–151；表 行 164，`hpc/sampler.py`）：把 repetition penalty / temperature /
+  top-k / top-p / softmax / random sampling / penalty mask update 折成 **2 个 CUDA kernel**
+  （外加 temperature-only 快路径），用 shared-memory 计数、local heap/merge 选择等减少 global 往返与固定开销。
+
+### 2.3 工程侧结论
+
+hpc-ops 的路线图与已实现项共同画出一条清晰的演进台阶：**单算子 → 段融合（Fused MoE / AllReduce+RMSNorm /
+sampler，PDL + 多 kernel）→ [roadmap] megakernel（连续算子并成单 kernel）**。它落在谱系 T2/T3，
+而 §1 的 DeepGEMM mega 家族已经站上 T4（段级），MPK 则指向 T4（整图自动）。三者恰好覆盖
+`docs/00` §4 的完整谱系，且 hpc-ops 明确把「megakernel」写成下一步，是「段融合已成熟、整段单 kernel 仍在推进」
+这一判断的产业侧旁证。
 
 ## 3. Kimi K3 fused mega-kernels（`~/github/ai-infra-book/references/text/kimi-k3.txt`）
 
-- 章节 **§4.2.4 Kernel Optimization Tasks**，快照行 **1069–1081**。
-- 关键点（原文核对）：
-  - 行 1070：「a large-scale suite of kernel tasks ranging from single-operator kernels to **fused
-    mega-kernels**, sourced from high-quality GitHub repositories such as Flash Linear Attention」；
-  - 行 1071–1073：覆盖 CUDA / Triton / CuTe DSL / Gluon / ThunderKittens / TileLang 与 BF16/FP8/FP4；
-  - 行 1074–1078：奖励 = 正确性（对齐 PyTorch 参考，超误差阈值得 0）+ 性能（对齐专家实现得 0.5，
-    接近硬件 roofline 逼近 1）；
-  - 行 1078–1081：**防作弊**明确惩罚「CUDA graph replay、input caching、precision reduction」——
-    说明在评测语境里 CUDA Graph 被视作「绕过真实优化」的手段，这与本专题 P4「CUDA Graph 治 launch
-    开销但不改变串行性」的定位相互印证。
-- 用途：为 P3-3 提供「fused mega-kernels 已成为模型能力训练任务」的产业侧证据。
+> 章节 **§4.2.4 Kernel Optimization Tasks**，快照行 **1069–1081**（本机逐行核对）。
+
+### 3.1 原文要点
+
+- **任务谱宽**（行 1069–1071）：Kimi K3 为强化 GPU kernel 优化能力，构建了「a large-scale suite of kernel
+  tasks ranging from **single-operator kernels to fused mega-kernels**」，数据来源为高质量 GitHub 仓库
+  （如 **Flash Linear Attention**）。即：**fused mega-kernel 已经作为一种「能力标尺」写进大模型的训练任务集**。
+- **编程模型/精度覆盖**（行 1071–1073）：CUDA、Triton、CuTe DSL、Gluon、ThunderKittens、TileLang，
+  精度 BF16 / FP8 / FP4——与本专题关注的手写 CUDA（DeepGEMM）与编译器路径（Triton/TileLang）同域。
+- **奖励函数**（行 1073–1076）：每个 kernel 给一份 PyTorch 参考实现；数值误差超阈值 **得 0**（正确性硬门限）；
+  性能对齐专家实现得 **0.5**，逼近硬件 roofline 才向 **1** 逼近。即评估**同时压正确性与性能上限**，
+  不是「跑了就行」。
+- **防作弊**（行 1076–1078）：明确惩罚 reward-hacking 策略——「**CUDA graph replay、input caching、
+  precision reduction**」。
+- **模型能力外溢**（行 1062–1066，视觉推理段佐证同一套 agent 环境思路）：K3 在带 Python 沙箱的 agent 环境里
+  迭代写码/执行/验证，说明这里的 kernel 任务也是「在同一类闭环里自我提升」的训练信号。
+
+### 3.2 对本专题的两个关键印证
+
+1. **CUDA Graph 被评测系统视作「绕过真实优化」**（行 1077）。这与本专题 P4 的定位完全一致：CUDA Graph 只
+   消除 launch 开销、**不改变 kernel 间的串行依赖**，因此若用它刷分就等价于「用 host 侧 replay 掩盖没有真正
+   融合/重叠」，必须判为 hacking。反过来也说明：**megakernel 的价值被定义为「真融合 + 真重叠」，而非
+   launch 次数**——与 `docs/00` §4 判据 C4/C5（调度进设备、SM 级）同调。
+2. **精度缩减被判作弊**（行 1077）从侧面确认：megakernel 的性能收益应来自**调度/访存/重叠**，而不是降低数值
+   精度；这也呼应 MPK §7「手写 kernel 可包成 task」与 DeepGEMM 各 mega kernel 都坚持 BF16/FP8 精度语义。
+
+3. **产业需求侧信号**：把「single-operator → fused mega-kernels」做成规模化训练套件，意味着**「会写
+   mega-kernel」已成为被显式训练与考核的模型能力**，与 hpc-ops roadmap、DeepGEMM 三件套构成需求、路线、
+   落地三层证据链。
+
+### 3.3 与 DeepGEMM / MPK 的对照
+
+| 维度 | Kimi K3（训练任务套件） | DeepGEMM mega 家族 | MPK |
+|---|---|---|---|
+| 角色 | **需求/能力侧**：模型要会写 mega-kernel | **落地侧**：手工段级 mega-kernel | **方法侧**：编译器自动整图 |
+| 融合范围 | 任务从单算子覆盖到 fused mega-kernel | 段级（MoE / Gate / mHC） | 整图 |
+| 编程模型 | CUDA/Triton/CuTe/Gluon/TK/TileLang | 手写 CUDA（SM100 专属） | 编译器 + per-task codegen |
+| 评价 | 正确性硬门限 + roofline 打分 + 防作弊 | 生产性能（重叠 NVLink/Tensor Core 等） | 端到端 1.0–1.7× |
+| 对 CUDA Graph 态度 | **惩罚 replay**（视作绕过） | 用 CUDA graph 仅做过预热/捕获 | 超越 CUDA Graph（SM 级细粒度） |
+
+### 3.4 小结（P3-3）
+
+Kimi K3 §4.2.4 给出的是**需求侧**证据：融合 mega-kernel 已从「论文里的整图执行模型」下沉为「被规模
+训练的模型技能」，且评测系统用「防 CUDA graph replay / 防精度缩减」把「真融合」与「假绕过」区分开。
+结合 §2 的 hpc-ops 路线图（把 megakernel 列为下一步）与 §1 的 DeepGEMM 三件套（段级 T4 已落地），
+可以给出一条工程结论：**megakernel 的产业进展呈现「需求（K3 训练）→ 路线（hpc-ops roadmap）→ 落地
+（DeepGEMM 段级）→ 自动化（MPK 整图）」四段式**，本专题后续 P4（相关技术对照）与 P6（汇总）将据此展开。
 
 ---
 
-## 4. 下一步（承接 P3）
+## 4. 下一步（承接 P3 / 转入 P4）
 
-- **P3-1** ✅ 已精读 Mega MoE 的 megakernel 范式，见 §1.5（单 kernel 边界 / 静态 warp 角色 / ring buffer +
-  位掩码依赖 / 通信-计算重叠 / 与 MPK 逐维对照）。算子级细节仍以 `../mega-moe/` 为准。
-- **P3-2** ✅ Mega Gate（§1.2 的 P3-2 精读：路由段 7 算子融合 / ScoreBarrier + split-K 归约 /
-  Tensor Core 与 gate 排名重叠）与 Mega mHC（§1.3 的 P3-2 精读：HC 层 pre-mix GEMM + mix + Sinkhorn +
-  RMSNorm + FP8 量化融合 / 双 SplitBarrier + 静态 Full-empty 环 / Normal 模式回收退休 WG）。
-- **P3-3** 汇总 Kimi K3 §4.2.4 与 hpc-ops roadmap 的工程视角。
+- **P3-1** ✅ Mega MoE megakernel 范式，见 §1.5（单 kernel 边界 / 静态 warp 角色 / ring buffer + 位掩码依赖 /
+  通信-计算重叠 / 与 MPK 逐维对照）。算子级细节仍以 `../mega-moe/` 为准。
+- **P3-2** ✅ Mega Gate（§1.2：路由段 7 算子融合 / ScoreBarrier + split-K 归约 / Tensor Core 与 gate 排名重叠）
+  与 Mega mHC（§1.3：HC 层 pre-mix GEMM + mix + Sinkhorn + RMSNorm + FP8 量化融合 / 双 SplitBarrier +
+  静态 Full-empty 环 / Normal 模式回收退休 WG）。
+- **P3-3** ✅ Kimi K3 §4.2.4（需求/能力侧 + 防作弊对 CUDA Graph 的判定）与 hpc-ops roadmap（路线图 + 已实现的
+  PDL 段融合）工程视角，见 §2/§3。**P3 全部完成（3/3）**。
+- **下一步 P4**：相关技术对照 `docs/03-related-tech.md`——CUDA Graphs（P4-1）、PDL（P4-2，H100 实测）、
+  persistent kernel vs megakernel + in-kernel 调度（P4-3）、与通信-计算 overlap（DeepEP/FlashMLA）对比（P4-4）。
 
 > 说明：本文件坐标均在本机 clone 上逐行核对；如远端更新，行号可能漂移，以对应 commit 为准。
