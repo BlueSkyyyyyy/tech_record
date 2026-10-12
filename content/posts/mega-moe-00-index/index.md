@@ -33,5 +33,6 @@ categories: ["算子开发"]
 12. [MoE 反向 kernel 接入与端到端对拍（vs autograd）]({{< relref "mega-moe-12-backward-kernels" >}}) —— 四梯度接 grouped kernel、gather/量化、两层误差对拍、吞吐
 13. [Mega Gate 与 Mega mHC：两个 MoE 相关融合算子]({{< relref "mega-moe-13-mega-gate" >}}) —— 打分 GEMM+topk 路由、TMEM 打分、sqrt-softplus、warp 级确定性 top-k、重复专家映射；HC 残差混合、Sinkhorn、RMSNorm、H100 语义对拍
 14. [总结：前反向一页纸与实测证据台账]({{< relref "mega-moe-14-summary" >}}) —— 数据流图、关键机制、与朴素实现开销对比、反向要点、H100 实测汇总
+15. [反向 grouped GEMM 性能归因：wgrad 为何只有 dgrad 的 1/5]({{< relref "mega-moe-15-backward-profiling" >}}) —— ncu 硬指标、访存/计算受限的 roofline、fp32 权重梯度与累积读回
 
 > 各篇正文由仓库 `code/mega-moe/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
