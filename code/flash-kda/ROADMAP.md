@@ -70,8 +70,8 @@
 
 ### P5 反向的推导与实现（`docs/05-kda-bwd.md`）
 
-- [ ] **P5-1** 反向数学：从 `o_t=q_t^T S_t` 与状态递推逐 token 求 adjoint（`dq,dk,dv,dβ,dg, dstate`）。
-- [ ] **P5-2** `src/kda_bwd_ref.py`：逐 token 反向参考实现，与 `torch.autograd`（对 `kda_ref.py`）对拍一致。
+- [x] **P5-1** 反向数学：从 `o_t=q_t^T S_t` 与状态递推逐 token 求 adjoint（`dq,dk,dv,dβ,dg, dstate`）。
+- [x] **P5-2** `src/kda_bwd_ref.py`：逐 token 反向参考实现，与 `torch.autograd`（对 `kda_ref.py`）对拍一致。
 - [ ] **P5-3** 与 FLA `chunk_kda` 反向（`torch.autograd` 穿 `chunk_kda`）对拍；报 max abs/rel。
 - [ ] **P5-4** 反向分块化（chunked backward）推导：如何复用前向的 `L/INV/Mqk`、状态反向传递。
 
@@ -111,7 +111,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0/P1/P2/P3 全部完成，P4 全部完成（前向 kernel vs fp64 golden 两方对拍 + golden/FlashKDA/FLA 三方对拍，多 shape/seed/门控区间）。
+- 当前进度：P0/P1/P2/P3 全部完成，P4 全部完成（前向 kernel vs fp64 golden 两方对拍 + golden/FlashKDA/FLA 三方对拍，多 shape/seed/门控区间）；**P5-1/P5-2 完成**（反向 adjoint 推导 + 不依赖 autograd 的显式参考实现 + 三方数值核验）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -178,10 +178,22 @@
     naive `STSM+LDSM_N`（不转置）max_rel=1.26（全错），**证明转置是数学必需**；延迟微基准
     4×`MOVM_T`=18.0 cyc vs `STSM+syncwarp+LDSM`=21.8 cyc（1.21×），真正收益是省 4096B U 缓冲与
     Phase 3→4→6 对 U 复用的零同步。
-- **下一步：P5-1/P5-2 反向数学与参考实现**。从 `o_t=q_t^T S_t` 与状态递推逐 token 求 adjoint
-  （`dq,dk,dv,dβ,dg,dstate`），写到 `docs/05-kda-bwd.md`；在 `src/kda_bwd_ref.py` 实现逐 token
-  反向并与 `torch.autograd`（对 `kda_ref.py`）对拍（P5-2），随后与 FLA `chunk_kda` autograd 对拍
-  （P5-3）、再分块化（P5-4）。
+- **下一步：P5-3 / P5-4 反向对拍与分块化**。P5-3 与 FLA `chunk_kda` 的 autograd 在真实
+  $D=128$/多 bf16 输入上对拍，量化逐 token adjoint 的 bf16 误差；P5-4 推导 chunked backward
+  （复用前向 $L=(I+L)^{-1}$ 与 $M_{qk}$，状态伴随沿 chunk 反向传递），为 P6 的 kernel 设计铺路。
+  - P5-1/P5-2：新增 `docs/05-kda-bwd.md` + `src/kda_bwd_ref.py` + `harness/check_bwd_ref.py`
+    （`harness/check_bwd_ref.out.txt`）。**P5-1**：从逐 token gated delta rule 推导完整 adjoint——
+    状态伴随合成 $G_t=\bar S_t^{rec}+\text{scale}\,q_t^\top\bar o_t$、更新支路
+    （$\bar S_{t-1}{+}{=}\alpha_t\odot_{row}G$、$\bar k_t{+}{=}G\delta_t$、$\bar\delta_t=G^\top k_t$、
+    $\bar\alpha_t{+}{=}\sum_v G_{:v}\odot(S_{t-1})_{:v}$）、delta/pred 支路、衰减链
+    $\bar g=\bar\alpha\odot\ln2\cdot\alpha$，以及门激活链（$g=C\sigma(u)$，$u=a(g^{logit}+dt\_bias)$）
+    到 `g_logits/A_log/dt_bias`。**P5-2**：`src/kda_bwd_ref.py` 用纯 `torch`（**不调 autograd**）
+    实现反向核心循环（`kda_bwd_ref.py:75–106`）与 `kda_gate_backward`。实测 16 组 case
+    （T=1..512、D=16..64、g={0,1,2,4}、多 seed）fp64 下 `dq/dk/dv/dg/dbeta/dh0` 与 `torch.autograd`
+    **逐元素完全相等（max_abs=0）**，fp32 下 max_abs≤5.7e-6/max_rel≤6.4e-7（机器精度）；中心差分独立
+    核验（fp64，ε=1e-6）六项 $\bar q,\bar k,\bar v,\bar g,\bar\beta,\bar h_0$ 差 ~1e-10；gate 链对
+    `kda_gate` autograd max_rel≤1.1e-7。反向结构特征：token 维串行（状态伴随沿时间前传），块内可并行。
+    新增博客 post `flash-kda-05-bwd` 并更新 index 目录（hugo 构建无 ERROR）。
   - P4-3：新增 `harness/check_three_way.py`（`harness/check_three_way.out.txt`）：在同一批输入上对
     fp64 golden（`kda_ref.py::kda_token_recurrent`）/ FlashKDA `flash_kda.fwd`（CHUNK=16）/ FLA
     `chunk_kda`（chunk=64）做三方对拍，状态统一在 $S^\top$ 布局比。16 组 case（T=64..1024/1023、
