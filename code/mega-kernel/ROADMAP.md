@@ -300,6 +300,23 @@
       判据：decen 是 C1–C5 全满足的 T4 最小骨架。**本轮新增实验。**
 
 
+### P16 实验扩展 7：megakernel 的成本侧 2（`docs/04-experiments.md`）
+
+- [x] **P16-1** megakernel 的**代码足迹代价**：整图融合 = 许多「per-task device 函数」挤进一个
+      kernel 镜像（MPK §4.2 行 1138 / §7 行 1750、1760），被执行代码工作集超过 L1 指令缓存后
+      取指 miss。见 `docs/04-experiments.md` §10，源码 `src/code_footprint.cu`，原始输出
+      `harness/code_footprint.out.txt`（目标卡 H100/sm90，device 3，G=1056=8 block/SM，T=256，
+      steps/block=512，共 1.38 亿元素，iters=30；单 body=65 FFMA=1040 B SASS）。三个 Section：
+      A 代码足迹扫描（固定总工作量扫被执行 task 类型数 P=1…256）：P≤8 无代价、P=32 起 1.30×、
+      **P=256 达 2.18×（32.1→14.7 TFLOP/s）**，拐点对应执行工作集 ~8KB→33KB→266KB；
+      B **代码工作集隔离**（同表同调用数同工作量，spread=每流扫 P 个 body vs sticky=每流固定 1 个）：
+      **sticky 在所有 P 下恒 ~32.7 TFLOP/s（=基准）、spread 到 P=256 慢 2.21×**——代价来自每条
+      执行流的**时间代码工作集**而非分发表大小；C ncu 归因：spread P=1→256 的
+      `no_instruction`（取指停顿）**0.63%→59.19%**，而 `branch_resolving` 反降、`imc_miss`≈0、
+      指令数仅 +8%、周期 ×2.01，sticky P=256 回到 1.61%——**纯 L1i miss**。与 P14-1 的寄存器足迹
+      合为 megakernel 的**双层不可分页足迹**（寄存器按各 task 最大值 / 指令按各 task body 累积）；
+      对生产案例的解释：DeepGEMM mega 家族只融合**少数极重** task 类型正是对的方向。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -338,7 +355,9 @@
   这条只有资料分析的**成本侧**局限量化出来，补齐 `docs/01` §5.8 / MPK §7 行 1740–1748）。
   **P15-1 最小去中心化调度 megakernel（1/1）完成**（本轮新增，把 MPK §5 的 **C5 机制**用原生
   CUDA 跑起来，补齐此前所有 persistent 骨架「不满足 C5」的空白）。
-  **本专题任务清单（P0–P15）全部完成**，无未完成子项。
+  **P16-1 megakernel 代码足迹代价（1/1）完成**（本轮新增，把 MPK「每 task 一个 device function」
+  这条只有资料分析的**指令足迹/成本侧**局限量化出来，与 P14-1 的寄存器足迹合成「双层足迹」）。
+  **本专题任务清单（P0–P16）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -387,14 +406,33 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P15 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
+- **下一步：无**（P0–P16 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
   **P10-1 完成 P5-1 §1.6「扫 persistent 网格大小」**；**P12-1 完成 P5-3 §3.6 / P10-1 §5.5「多 block
   PDL occupancy 资源约束」**；**P13-1 完成 P5-2 §2.6 / §5.6「跨 tile software pipelining」的损失一实测**；
   **P14-1 完成 megakernel 成本侧「寄存器固定为各 task 最大值」实测**；**P15-1 完成 C5 去中心化调度最小实现**）；
   ③ ~~走读 `tasks/hopper/*.cuh` 单 task 内部实现~~（P11-1 完成）；剩「在容器内 `pip install -e .`
-  构建 mirage sm90 路径并跑 `demo/qwen3/demo.py --use-mirage` 取本机 MPK 端到端数字」（构建成本高，未做）。
+  构建 mirage sm90 路径并跑 `demo/qwen3/demo.py --use-mirage` 取本机 MPK 端到端数字」（构建成本高，未做）；
+  ④ ~~megakernel 成本侧「代码足迹 / 指令缓存」实测~~（**P16-1 完成**，与 P14-1 寄存器足迹合成双层足迹）。
+- **本轮（P16-1）**：`docs/04-experiments.md` 新增 §10「megakernel 的代码足迹代价：融合的 task
+  类型数 -> 执行代码工作集 -> I-cache」——新建 `src/code_footprint.cu` +
+  `harness/code_footprint.out.txt`（目标卡 H100/sm90，**固定在空闲的 device 3**，因 device 0 当时被
+  其它并行任务占满；G=1056=8 block/SM，T=256，steps/block=512，1.38 亿元素，iters=30；单个
+  task body = 65 条 FFMA = **1040 B SASS**，cuobjdump 核对）。构造「一个 kernel 内含 P 个互异
+  device function body、以 block 粒度经函数指针表间接调用」的 workload，**总工作量与 P 无关**，
+  唯一变量 P = 融合并实际执行的 task 类型数。三个 Section：**A**（固定工作量扫 P=1…256）P≤8 无代价、
+  P=16 起 1.10×、P=32 1.30×、**P=256 2.18×**（32.1→14.7 TFLOP/s），拐点对应执行代码工作集
+  ~8KB→33KB→266KB；**B**（同 P、同表、同调用数、同工作量；`spread` 每流扫 P 个 body vs `sticky`
+  每流固定 1 个）**sticky 在所有 P 下恒 ~32.7 TFLOP/s（= P=1 基准）、spread 到 P=256 慢 2.21×**
+  ——代价来自**每条执行流的时间代码工作集**而非分发表大小；**C**（ncu 归因）spread P=1→256 的
+  `smsp__warp_issue_stalled_no_instruction_per_warp_active` **0.63%→59.19%**，而 `branch_resolving`
+  反降（4.9%→2.2%）、`imc_miss`≈0、执行指令数仅 +8%（376.7→407.0M）、周期 ×2.01，sticky P=256
+  回到 1.61% / 基准周期——**纯 L1 指令缓存 miss / 取指带宽**。核心结论：**代码足迹是 megakernel 一项
+  真实、可测、且与寄存器足迹（P14-1）独立的不可分页代价**；MPK §6.7 只把 **元数据** footprint
+  降了 4.4–5.9×（行 1680、1701），per-task codegen 的**指令** footprint 未量化，本节补上。判据不变
+  （C1–C3，无 C5）；对生产案例的解释：DeepGEMM mega 家族只融合**少数极重** task 类型正是对的方向。
+  **本轮新增实验**；与 P14-1 合成 megakernel 的「双层足迹」成本画像。
 - **本轮（P15-1）**：`docs/04-experiments.md` 新增 §9「最小『去中心化 in-kernel 调度』megakernel：把
   C5 机制跑起来」——新建 `src/decentralized_sched.cu` + `harness/decentralized_sched.out.txt`（目标卡
   H100/sm90，iters=100，G=132=1 block/SM，T=256）。最简 DAG = C 条链×L 层串行依赖，三策略公平对照：

@@ -1209,3 +1209,135 @@ vs 两次 launch）；D shared memory 足迹的占用率影响（对照 MPK 的 
   扇出（当前每 task 恰好 1 个后继）。
 - 未与 CUDA Graph 捕获 eager、也未与 PDL 组合对照；未用 `ncu` 归因自旋/原子流量。
 - 单卡、固定 `G=132`（1 block/SM）；未扫 `G` 或 `blockDim`（可对照 P10-1 的网格标度）。
+
+## 10. megakernel 的代码足迹代价：融合的 task 类型数 -> 执行代码工作集 -> I-cache（P16-1）
+
+### 10.1 问题
+
+§8（P14-1）把 megakernel 的一项代价——**寄存器被固定为各 task 类型的最大值**（MPK §7 行 1748
+的「唯一例外」）——量化了出来。但资源足迹不止寄存器这一项。MPK 的每个 task 都是一个
+**CUDA device function**：
+
+> Each MPK task is a CUDA device function with a uniform calling convention defined by the tGraph.
+> … per-task code generation is the only hardware-specific component of MPK.（§7，快照行 1750、
+> 1760；§4.2 行 1138：以 thread block 为单位复用 Mirage superoptimizer 生成含软件流水/寄存器复用/
+> bank-conflict 优化的 CUDA 实现）
+
+于是整张 tGraph 的 task 都进**同一个常驻 kernel 镜像**。**融合的算子/task 类型越多、每个 task 的
+device 代码越专门化，单个 kernel 的代码就越多**。寄存器（§8）和 SMEM（MPK 用 paged abstraction，
+§5.3 行 1313–1325）之外，还有一条同样**无法分页**的足迹：**指令足迹**。一个 SM 在一段时间里若在
+多个 task body 之间来回执行（同一 SM 上并发的 block 各跑不同 task，或同一执行流依次扫过很多
+task），被执行的代码工作集一旦超过 L1 指令缓存（L1i）容量，取指就会 miss、出现停顿。这与 §8 的
+寄存器足迹是**两条独立的融合代价**，本节在目标卡 H100 / sm90 上把它量化出来。
+
+### 10.2 方法
+
+程序 `src/code_footprint.cu`（目标卡 H100 / sm90，原始输出 `harness/code_footprint.out.txt`；
+固定在空闲的 device 3 上跑，当时的 device 0 被其它并行任务占满）。`G=1056`（=8 block/SM @132 SM）、
+`blockDim=256`、`steps/block=512`、共 1.38 亿元素、`iters=30`。
+
+- **task body**：`body<I>` 是 `__device__ __noinline__` 模板函数，每个做同样 `R=64` 次 FMA
+  （**名义计算量相同**），但带各自不同的立即数常量，保证 SASS 互不折叠。一个 body = 65 条连续
+  FFMA = **1040 B SASS**（`cuobjdump -sass` 核对）。
+- **融合 kernel** `mega<P>`：一个 kernel 内含 P 个互异 body，运行时以 **block 粒度**从函数指针表选
+  一个 body 调用（类型只由步号/`blockIdx` 决定、不含 `threadIdx`，故 block 内无 warp divergence）。
+  **总工作量与 P 无关**（每元素一次 body 调用、R 次 FMA）；唯一变量是 **P**——即这个 workload 实际
+  扫过的 task 类型数。P=1 是「单个 task 类型（未融合）」基准。
+- `fill_tab<P>` 用编译期递归只实例化 `body<0..P-1>`：`mega<P>` 实际会被执行的代码集合严格是前 P 个
+  body，故**被执行代码工作集 ≈ P × 1.0 KB**（P=1→1 KB、P=32→33 KB、P=256→266 KB）。
+- 分发是**一次间接 call**（函数指针表），开销与 P 无关；P=1 时表里只有一个 body。
+
+两个 Section：A 代码足迹扫描（固定总工作量扫 P）；B **代码工作集隔离**——同一张 P 项函数指针表、
+同样多的间接调用、同样工作量，只改「每条执行流扫过的 body 数」：`spread` 随步号轮转（≈P 个 body）
+vs `sticky` 每 block 固定一个 body（=1 个 body）。另用 `ncu` 对 spread/sticky 采 instruction-fetch /
+branch-resolving 停顿占比做归因。
+
+### 10.3 结果
+
+**Section A：代码足迹扫描（固定总工作量，扫 P）**
+
+| P | ms | GFLOP/s | vs P=1 | 执行代码工作集 |
+|---|---|---|---|---|
+| 1 | 0.5523 | 32079.9 | 1.000× | ~1 KB |
+| 2 | 0.5884 | 30111.1 | 1.065× | ~2 KB |
+| 4 | 0.5883 | 30116.1 | 1.065× | ~4 KB |
+| 8 | 0.5810 | 30495.9 | 1.052× | ~8 KB |
+| 16 | 0.6079 | 29145.4 | 1.101× | ~17 KB |
+| 32 | 0.7180 | 24676.7 | 1.300× | ~33 KB |
+| 64 | 0.6448 | 27474.4 | 1.168× | ~67 KB |
+| 128 | 0.7860 | 22540.2 | 1.423× | ~133 KB |
+| 256 | 1.2017 | 14742.5 | **2.176×** | ~266 KB |
+
+**Section B：代码工作集隔离（同 P、同工作量；spread=每流扫 P 个 body，sticky=每流固定 1 个）**
+
+| P | spread ms | sticky ms | sticky GFLOP/s | spread/sticky |
+|---|---|---|---|---|
+| 1 | 0.5532 | 0.5541 | 31971.5 | 0.998× |
+| 16 | 0.6075 | 0.5470 | 32386.4 | 1.111× |
+| 64 | 0.6428 | 0.5421 | 32680.4 | 1.186× |
+| 256 | 1.1985 | 0.5424 | 32662.0 | **2.209×** |
+
+**ncu 归因（warp 停顿占比 / 周期 / 指令数）**
+
+| 场景 | no_instruction | branch_resolving | imc_miss | cycles | inst_executed |
+|---|---|---|---|---|---|
+| spread P=1 | 0.63% | 4.92% | 0.01% | 1,088,638 | 376.7 M |
+| spread P=256 | **59.19%** | 2.23% | 0.01% | 2,189,600 | 407.0 M |
+| sticky P=256 | 1.61% | 4.88% | 0.02% | 1,073,461 | 372.4 M |
+
+> `no_instruction` = 等待取指（instruction fetch）的停顿；`branch_resolving` = 等分支目标地址；
+> `imc_miss` = 等立即数常量缓存。三者是「指令交付」里不同的环节。
+
+### 10.4 读法
+
+1. **代码足迹是 megakernel 一项真实、可测的代价。** 总 FMA 量恒定，只把「融合进这个 kernel 的
+   task 类型数」P 从 1 拉到 256，整 kernel 就慢 **2.18×**（32.1 → 14.7 TFLOP/s）。拐点很清晰：
+   P≤8（执行工作集 ≲8 KB）几乎无代价；P=32（~33 KB）起 1.30×；P=256（~266 KB）2.18×。这与 §8
+   的寄存器足迹**独立**——本 kernel 的寄存器占用不随 P 变。
+2. **代价来自「每条执行流的时间代码工作集」，而非分发表的大小。** Section B 是干净的隔离：spread
+   与 sticky 用**同一张 P 项函数指针表**、同样多的间接调用、同样工作量，唯一差别是每条执行流扫过
+   的 body 数。sticky 在所有 P 下都稳在 **~32.7 TFLOP/s**（= P=1 基准），而 spread 一路掉到
+   **2.21×**。这正是 megakernel 的处境：一个 SM 的 warp 会随时间在多个 task body 之间轮转。
+3. **ncu 把归因钉死在取指。** 从 spread P=1 到 P=256，`no_instruction` 从 0.63% 飙到 **59.19%**，
+   而 `branch_resolving` 反而略降（4.9%→2.2%）、`imc_miss`≈0；执行的指令数只多 8%（376.7→407.0 M），
+   周期数却涨 2.01×。sticky P=256 把 `no_instruction` 拉回 1.61%、周期回到基准。**所以这不是分支
+   预测或常量缓存问题，而是纯粹的 L1 指令缓存 miss / 取指带宽**。1040 B/body 的台阶说明本机
+   有效 L1i 工作集大致在**数十 KB** 量级（P=16→32 之间开始明显 miss；P=32/64 的非单调来自
+   cache 组相联与 body 布局）。
+4. **它解释了 MPK 为什么把「每 task 一个 device function」当成需要小心的设计点。** MPK §6.7 用
+   event fusion / linearization 把 **successor 编码的 device-memory footprint 降了 4.4–5.9×**（行
+   1680、1701）——那是**元数据**足迹；而 **per-task codegen 带来的指令足迹**论文并未量化（§7 只把
+   「per-task codegen 是唯一硬件相关组件」当作灵活性优点）。本节补上：**融合的 distinct 代码体
+   （distinct (op, shape) 实例）越多，单 kernel 的取指压力越大**。
+
+### 10.5 与判据 / MPK / 生产案例的关系
+
+- **与 §8（P14-1）合成 megakernel 的「双层足迹」**：寄存器足迹（按各 task 最大值固定、合上占用率，
+  §8）与指令足迹（按各 task body 累积、合上 L1i，§10）是两条独立不可分页的成本。两者都随融合的
+  task **异构度/多样性**上升，且都无法用 MPK 的 paged SMEM 规避。
+- **对上 MPK §4.2 / §7（行 1138、1750–1760）**：论文把「每个 task = 一个 device function」「per-task
+  codegen」当作与硬件解耦的优点；本节量化了它的**暗面**——device function 越多，单 kernel 的
+  执行代码工作集越大。规模锚点：§6.7 报告每个算子被切成 **32–47 个 task**、Qwen3-8B 全图
+  **293 → 13,867 个 task**（`docs/01` §3）；虽然很多 task 同 shape、可共享同一份模板代码，但
+  **distinct 代码体数量**随「不同 (op, shape) 组合」增长——这正是本实验的 P。
+- **解释生产案例的设计取舍（`docs/02`）**：DeepGEMM 的 mega MoE / Mega Gate / Mega mHC **只融合
+  少数、但极重的 task 类型**（静态 warp 角色 + 大段 TMA/wgmma），不是「成百个小 task 类型」。按本节
+  结论，这是**对的方向**：融合少量大 body 的取指工作集可控，而把上百个互异小 body 塞进单 kernel
+  会先在 I-cache 上吃亏。反过来，MPK 的「自动把算子切成很多桶状 task」路线需要额外的**代码去重/
+  同类聚合**来压住指令足迹（如 shape-generic kernel、或把同类 task 调度到一起）。
+- **判据（C1–C5，`docs/00` §3）**：`mega<P>` 是单次 launch、常驻、含多 task 类型的 kernel
+  （C1+C2+C3），但没有去中心化调度（C5）——它和 §8 一样是**成本侧**度量，与收益实验（P5/P9/P13）互补。
+
+### 10.6 局限
+
+- 合成 workload：body 是**纯寄存器 FMA** 且**等长**（1040 B），刻意不含访存以隔离「指令交付」；
+  真实 task body（`docs/07` 的 `linear_hopper` 等）大得多、且混张量核/TMA/访存，绝对倍率与拐点会变。
+- `mega<P>` 是单 kernel 内的**间接调用/jump-table 分发**模型；MPK 用统一调用约定的 device function，
+  分发机制相近，但论文运行层的 JIT/AOT 队列（`docs/06`）有额外开销，未在本实验体现。
+- 静态镜像对所有 P 相同（nvcc 把小 body 内联/jump-table 化），本实验测的是**执行代码工作集**——
+  这恰对应「一个 workload 实际跑到的 task 类型数」，与 megakernel 的语义一致；但未单独测「静态
+  镜像大小」本身（如 link 时间、module 载入）。
+- 未精确测 L1i 容量/组相联；拐点（P=16→32）是行为观察，P=32/64 的非单调未深究。
+- 单卡、固定 `G=1056`（8 block/SM）、`blockDim=256`；未扫并发度对「同时执行的 body 数」的影响
+  （这点与 P10-1 的网格标度、P12-1 的 occupancy 约束相关，可作后续）。
+- 未与 §8 的寄存器足迹在**同一 kernel 内叠加**测（两者独立但真实 megakernel 会同时付）。
