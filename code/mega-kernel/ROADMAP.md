@@ -740,6 +740,33 @@
         mode1 与 mode0/2 语义不同（复制 vs 分区）、固定 C=2、测的是载入原语非端到端。
       **本轮新增实验**；与 §18/§19/§20/§21 合成「跨 SM 协作原语」的 sm100 展望。
 
+### P34 生产案例 sm90 等价复刻：Mega Gate 的 `cluster_dim` 路径（`docs/04-experiments.md` §23）
+
+- [x] **P34-1** 兑现「下一步」剩余可选方向「把 DeepGEMM Mega Gate 的 `cluster_dim` 路径做一次 sm90
+      等价复刻（Mega Gate 本身 SM100 专属）」。见 `docs/04-experiments.md` §23，源码
+      `src/mega_gate_cluster.cu`，脚本 `harness/mega_gate_cluster.sh`，原始输出
+      `harness/mega_gate_cluster.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2）。
+      复刻 Mega Gate 的**协调路径**（一手核对 `057ca59`）：
+      - **CTA pair 切专家维**：`num_mma_ctas=2` → `cluster_dim=2`，一对 CTA 把打分 GEMM 的专家维对半切
+        （`sm100_bf16_mega_gate.cuh:55-58,136-142`；`impls/sm100_bf16_mega_gate.hpp:74`）；
+      - **split-K + 全局 score scratch** `[token][split][expert]`（`layout/mega_gate.cuh:78-107`）；
+      - **ScoreBarrier**（64-bit 状态 `(grid+1)*kNumMaxLogicalCtas + arrived`，无符号距离去陈旧；
+        `scheduler/mega_gate.cuh:13-39`）会合后，跨 split 归约（`sm100_bf16_mega_gate.cuh:304-321`）
+        + `sqrt_softplus`/top-k（`epilogue/sm100_mega_gate.cuh:19-23,107-152`）。
+      对照变体 `fused`（分数留 SMEM、不写 scratch、不设 barrier）。四 Section：
+      - **A 正确性**：7 组 `SPLIT×MMA`(+fused) 与参考**逐 token 一致**（`idx_mismatch=0/16384`，
+        `wmax≤2.09e-07`）——CTA-pair + split-K + ScoreBarrier **不动数值**。
+      - **B 占满机器**：固定 token（NT=16）只增逻辑 CTA，`grid 16→128` 延迟 **3.51×**
+        （`SPLIT=2` 1.63× vs `MMA=2` 1.57×）——multi-CTA 逻辑任务的价值是**填 SM**，对上
+        Mega Gate heuristic `num_worker_groups=num_sms/num_logical_ctas`（`heuristics/mega_gate.hpp:137`）。
+      - **C 已饱和**（NT=128，grid≈#SM）：再 split 只增加波次与协调开销（SPLIT2 1.53×、gate 比 fused
+        慢 **~11%** / +24 µs）——饱和区间 multi-CTA 只剩开销。
+      - **D ncu**：fused vs gate SPLIT=1 的 **L2 写差 +0.39M sectors（≈+12.6 MB）**、SPLIT4×MMA2 的
+        DRAM 写 1.94→**19.84 MB**——split-K 部分分**必经 L2/DRAM 一次往返回合**（`docs/04` §17 损失三的
+        gate 形态，只是 Mega Gate 只走**一次** round-trip）。判据：gate 满足 C1–C4、仍非 C5
+        （静态 grid 角色）。**本轮新增实验。** 讲清 sm90 投影边界：无 tcgen05/TMEM/`cta_group::2`，
+      软件 cluster + 独立 barrier 代替硬件 2SM。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -762,7 +789,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P33-1 完成（1/1）**。补齐 §20.6 / 「下一步」都点名的两条 **SM100 专属原语**
+- 当前进度：**P34-1 完成（1/1）**。兑现「下一步」剩余可选方向「把 DeepGEMM Mega Gate 的
+  `cluster_dim` 路径做一次 sm90 等价复刻」——`docs/04-experiments.md` 新增 **§23**，源码
+  `src/mega_gate_cluster.cu`、脚本 `harness/mega_gate_cluster.sh`、原始输出
+  `harness/mega_gate_cluster.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2）。
+  把 Mega Gate 的**协调路径**（非 SM100 指令；一手核对 `057ca59`）用 sm90 复刻：**CTA pair 切专家维**
+  （`cluster_dim=num_mma_ctas`，`sm100_bf16_mega_gate.hpp:74` / `sm100_bf16_mega_gate.cuh:55-58,136-142`）、
+  **split-K 写全局 score scratch** `[token][split][expert]`（`layout/mega_gate.cuh:78-107`）、
+  **ScoreBarrier**（`(grid+1)*64+arrived` 无符号距离去陈旧；`scheduler/mega_gate.cuh:13-39`）会合后
+  跨 split 归约 + `sqrt_softplus`/top-k（`epilogue/sm100_mega_gate.cuh:19-23,107-152`）。对照变体
+  `fused`（分数留 SMEM、无 scratch/barrier）。核心结论：(A) **7 组 `SPLIT×MMA`(+fused) 与参考逐 token
+  一致**（`idx_mismatch=0/16384`，`wmax≤2.1e-07`）；(B) **占满机器**——固定 token（NT=16）只增逻辑
+  CTA，`grid 16→128` 延迟 **3.51×**（SPLIT=2 1.63× 略优于 MMA=2 1.57×），对上 Mega Gate heuristic
+  `num_worker_groups=num_sms/num_logical_ctas`（`heuristics/mega_gate.hpp:137`）；(C) **已饱和**
+  （NT=128，grid≈#SM）再 split 只增波次与协调开销（gate 比 fused 慢 **~11%** / +24 µs）；
+  (D) ncu：fused vs gate SPLIT=1 的 **L2 写差 +0.39M sectors（≈+12.6 MB）**、SPLIT4×MMA2 的 DRAM 写
+  1.94→**19.84 MB**——split-K 部分分必经 L2/DRAM 一次往返回合（`docs/04` §17 损失三的 gate 形态，
+  但 Mega Gate 只走**一次** round-trip）。判据：gate 满足 C1–C4、仍非 C5。**本轮新增实验。**
+  此前 **P33-1 完成（1/1）**。补齐 §20.6 / 「下一步」都点名的两条 **SM100 专属原语**
   （`SM100_TMA_2SM_LOAD` / tcgen05 2-SM MMA）：先**资料分析** CUTLASS（DeepGEMM 内
   `third-party/cutlass`，`057ca59`）——`copy_sm100_tma.hpp` 的 `SM100_TMA_2SM_LOAD_{1D..5D}`（`:52/78/…`）、
   `.cta_group::2` PTX（`:92`）、障碍 `& Sm100MmaPeerBitMask(0xFEFFFFFF)`（`:45/63`，注释「两 CTA 都执行、
@@ -943,7 +987,7 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：全专题收尾（P0–P33 全部完成）**。P33-1 已把 §20.6 / 「下一步」都点名的两条
+- **下一步：全专题收尾（P0–P34 全部完成）**。P33-1 已把 §20.6 / 「下一步」都点名的两条
   **SM100 专属原语**处理掉（`docs/04` §22：`SM100_TMA_2SM_LOAD` / tcgen05 2-SM MMA 的资料分析 +
   sm90 投影实测——multicast 复制投递源流量恰减半、分区投递不省源流量、2SM 是硬件层把一对 SM 绑成
   一个计算单元）。P31-1 已把 §18.6/§19.6 的「未测 2D/3D cluster」补成
@@ -994,8 +1038,11 @@
    剩余可选：~~cluster 内 TMA multicast + `mbarrier` 组合~~（**P30-1 完成**：`docs/04` §19）、
    ~~2D/3D cluster + multicast 子集掩码~~（**P31-1 完成**：`docs/04` §20）、
    ~~SM100 `SM100_TMA_2SM_LOAD` / tcgen05 2-SM MMA~~（**P33-1 完成**：`docs/04` §22 资料分析 +
-   sm90 投影实测）、~~`cudaLaunchAttributeProgrammaticEvent`~~（**P32-1 完成**：`docs/04` §21）；
-   把 DeepGEMM Mega Gate 的 `cluster_dim` 路径做一次 sm90 等价复刻（Mega Gate 本身是 SM100 专属）。
+    sm90 投影实测）、~~`cudaLaunchAttributeProgrammaticEvent`~~（**P32-1 完成**：`docs/04` §21）、
+    ~~把 DeepGEMM Mega Gate 的 `cluster_dim` 路径做一次 sm90 等价复刻~~（**P34-1 完成**：`docs/04` §23
+    ——CTA-pair 切专家维 + split-K score scratch + ScoreBarrier 的 sm90 等价复刻；multi-CTA 逻辑任务
+    的价值在「占满机器」，饱和后只剩协调开销）。
+    **至此「下一步」剩余可选方向全部完成，全专题无遗留必做项。**
 - **本轮（P25-1 续）**：续做 P25-1 的「MPK 端到端跑通」，把上轮「执行不收敛」从玄学死锁推进到
   **可复现、可归因的时序竞态**。`docs/09-mpk-build.md` 新增 **§7**（收敛性诊断），新原始输出
   `harness/mpk_converge_plain.out.txt` / `harness/mpk_converge_instrumented.out.txt` /

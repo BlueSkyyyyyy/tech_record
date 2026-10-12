@@ -3237,3 +3237,196 @@ mcast 只读 A = `104.9 MB`。）
 - **未扫 cluster > 2**：本节固定 C=2（2SM 的对应形态）；§19/§20 已扫过 C=4/8/16 的 multicast/DSM。
 - **效率上限不高**：本节测的是「载入原语」而非「端到端 task」，带宽只到几 TB/s（受 SMEM 写入与
   TMA issue 限），是相对比较，不是绝对性能。
+
+## 23. Mega Gate 的 `cluster_dim` 路径：sm90 等价复刻（P34-1）
+
+### 23.1 问题
+
+`docs/02` §1.2 已把 DeepGEMM **Mega Gate**（MoE 路由段段级 mega-kernel）精读到位，但它是 **SM100
+专属**（`sm100_bf16_mega_gate.cu` 的 tcgen05 / TMA / TMEM），本机 H100/sm90 跑不了。§22（P33-1）把
+SM100 的 **`cta_group::2` 载入**投影到了 sm90，但那只覆盖「把 tile 搬进一对 SM」的**硬件原语**，
+没有覆盖 Mega Gate 真正把多个 CTA 绑成**一个逻辑 CTA** 的**协调路径**——也就是
+`cluster_dim = num_mma_ctas` 这条线（`csrc/jit_kernels/impls/sm100_bf16_mega_gate.hpp:74`）。
+本节把这条**协调路径**（不是 SM100 指令）用 sm90 原语等价复刻出来并量化三件事：
+
+1. **CTA pair 切专家维**：`num_mma_ctas=2` 时，一个逻辑 CTA 是一对 CTA，把打分 GEMM 的**专家维（M）**
+   对半切开、各写自己那半（`sm100_bf16_mega_gate.cuh:55-58,136-142`）。
+2. **split-K + 全局 score scratch**：每个 split 只算 K 的一个切片，把**部分分**写进全局 scratch
+   `[token_global][split][expert]`（`layout/mega_gate.cuh:78-107`）。
+3. **ScoreBarrier**：一个 token block 的**所有逻辑 CTA** 各 arrive 一次，到齐后才允许读全部 split 部分分
+   做归约 + top-k（`scheduler/mega_gate.cuh:13-39`）。
+
+### 23.2 资料分析：Mega Gate 的 `cluster_dim` 路径（一手核对 `057ca59`）
+
+- **task 分解**：一个 token block 由
+  `num_logical_ctas = num_expert_groups * num_mma_ctas * num_split_k` 个 CTA 协作
+  （`heuristics/mega_gate.hpp:133`；device 侧 `constexpr uint32_t kNumLogicalCtas` 在
+  `sm100_bf16_mega_gate.cuh:55`）。`num_mma_ctas ∈ {1,2}`（`heuristics/mega_gate.hpp:122` 的循环），
+  `num_split_k` 到 `kNumMaxSplitK=8`（`:54,126`）。
+- **cluster_dim**：launch 时 `cluster_dim = dim3(config.num_mma_ctas, 1, 1)`
+  （`impls/sm100_bf16_mega_gate.hpp:74`）——**一个 CTA pair 就是一个 cluster**。
+- **CTA pair 的切分**：`LOAD_BLOCK_M = UMMA_N / kNumMmaCtas`（tokens/2）、
+  `LOAD_BLOCK_N = UMMA_M / kNumMmaCtas`（experts/2）（`sm100_bf16_mega_gate.cuh:57-58`）；
+  TMA 载入 warp 里 `expert_base_idx = expert_group_idx*kNumExpertsPerGroup + mma_cta_rank*LOAD_BLOCK_N`、
+  `x_token_idx = ... + mma_cta_rank*(effective_umma_n/kNumMmaCtas)`（`:136-142`），注释
+  *"A CTA pair splits both the experts (UMMA M) and the tokens (UMMA N) between its two CTAs"*（`:137`）。
+  MMA 只由 leader CTA 发（`warp_idx==1 and is_leader_cta`，`:168-169`），完成信号用
+  `umma_arrive_multicast_2x1SM` 一次性到达**一对 SM 的屏障**（`:191-197`）——这两点是 SM100 硬件行为，
+  sm90 无对应（见 §22）。
+- **ScoreBarrier 编码**（`scheduler/mega_gate.cuh:17-38`）：状态是一个 64-bit 全局字
+  `encode_state(grid_idx, arrived) = (grid_idx+1)*kNumMaxLogicalCtas + arrived`；`init` 写 `(grid+1)*64`，
+  `wait_init` 用**无符号距离**拒绝陈旧 grid 标签，`arrive = red.async.inc.release`，`wait` 等到达数
+  `== kNumLogicalCtas`。barrier 行占 128 B（`layout/mega_gate.cuh:22`），上限 `kNumMaxLogicalCtas=64`
+  （`:23`）。
+- **split-K 归约**：score scratch 视图 `[num_token_blocks*block_tokens, kNumSplits, kNumExperts]`
+  （`layout/mega_gate.cuh:78-102`）；gate warp 在 top-k 前 `load_scores` 把 `kNumSplitK` 个部分分
+  **跨 split 求和**（`sm100_bf16_mega_gate.cuh:304-321`）。softplus（`sqrt_softplus`，`epilogue/
+  sm100_mega_gate.cuh:19-23`）**只在 split 部分分求和之后**做一次（否则非线性不可换序，`:284-286` 注释）。
+- **为什么用 multi-CTA 逻辑任务**：`heuristics/mega_gate.hpp:137` 取
+  `num_worker_groups = num_sms / num_logical_ctas`——**逻辑 CTA 越多，同一时刻能并行处理的
+  token block 越少**；当 token 数很少（token block 数 < SM 数）时，用 split-K / CTA-pair 把机器**占满**，
+  这正是本节要实测的那个权衡。
+
+**一句话**：Mega Gate 的 `cluster_dim` 路径 = **split-K 写全局部分分 → ScoreBarrier 全逻辑 CTA 会合 →
+跨 split 归约 → top-k**，其中 CTA pair 是 SM100 硬件绑定的两个 SM。
+
+### 23.3 方法（sm90 等价复刻）
+
+程序 `src/mega_gate_cluster.cu`，脚本 `harness/mega_gate_cluster.sh`，原始输出
+`harness/mega_gate_cluster.out.txt`（目标卡 H100 / sm90a，SMs=132，**固定空闲 device 3**，nvcc 13.2）。
+复刻一个最小 gate task：`score[t][e] = x[t]·w[e]`（`T` tokens × `E` experts，K 维打分 GEMM），
+再按 Mega Gate 的语义做 top-k（`sqrt_softplus` 在归约后、加 bias、按 biased 排名、输出 unbiased 分数
+归一化）。两个变体：
+
+- **`gate`（忠实路径）**：`num_logical_ctas = SPLIT * MMA`；`MMA=2` 时用 **cluster（cluster_dim=2）**，
+  一对 CTA 把专家维对半切开（`Eper = E/2`，rank 各写自己那半）；每个逻辑 CTA 只算 K 的一个
+  `1/SPLIT` 切片，部分分写全局 scratch `[token_global][split][expert]`；`ScoreBarrier`（按 grid 标签 +
+  到达数编码）会合后，每个逻辑 CTA 认领自己那份 token，**跨 split 归约** + top-k。grid = `NT*SPLIT*MMA`。
+- **`fused`（对照）**：单 CTA（`SPLIT=1,MMA=1`），分数留在**一块 SMEM**里，**不写全局 scratch、不设
+  barrier**，直接在 SMEM 上 top-k。作为「不做 score round-trip」的上界。
+
+GEMM 用 smem 分块 + 寄存器 micro-tile（`TM=TN=4`，行 stride `KT+1` 避 bank conflict，float4 载入），
+score 先落 SMEM staging 再 **coalesced** 写全局 scratch。四 Section：**A** 正确性（6 组
+`SPLIT×MMA` + fused，对参考**逐 token** 核 top-k 专家集合与权重）；**B** 占满机器（固定 `NT=16`，
+靠 `SPLIT/MMA` 增加逻辑 CTA 数）；**C** 已饱和（`NT=128`，grid 已 ≈ #SM）；**D** ncu 量 score scratch
+的 L2/DRAM 流量。
+
+### 23.4 结果
+
+**A. 正确性：split-K / CTA pair / fused 与参考逐 token 一致**
+
+```text
+  SPLIT MMA mode  | grid | 延迟(us) | idx_mismatch | wmax
+ -----------------+------+----------+--------------+---------
+      1   1  gate |  128 |  232.9   |     0/16384  | 0.00e+00
+      2   1  gate |  256 |  356.6   |     0/16384  | 1.79e-07
+      4   1  gate |  512 |  673.2   |     0/16384  | 2.09e-07
+      1   2  gate |  256 |  260.3   |     0/16384  | 0.00e+00
+      2   2  gate |  512 |  395.4   |     0/16384  | 1.79e-07
+      4   2  gate | 1024 |  591.6   |     0/16384  | 2.09e-07
+      1   1  fused|  128 |  209.8   |     0/16384  | 0.00e+00
+```
+
+`NT=128, T=128, E=128, K=512, TOPK=4`。**所有配置 top-k 专家集合与参考完全一致**（`idx_mismatch=0`），
+权重最大误差仅在 split-K 浮点累加序差异量级（`~2e-7`）。C5 式的协调机制（cluster + 全局 barrier）
+**不动数值**。
+
+**B. 占满机器：固定少量 token（NT=16），靠 split-K / CTA-pair 增加逻辑 CTA 数**
+
+```text
+ SPLIT MMA | logical | grid | 延迟(us) | 相对 SPLIT=1
+ ----------+---------+------+----------+-------------
+   1   1   |    1    |   16 |  590.8   |   1.00×
+   2   1   |    2    |   32 |  361.8   |   1.63×
+   4   1   |    4    |   64 |  240.5   |   2.46×
+   1   2   |    2    |   32 |  376.8   |   1.57×
+   2   2   |    4    |   64 |  251.0   |   2.35×
+   4   2   |    8    |  128 |  168.2   |   3.51×
+```
+
+`NT=16, T=128, E=128, K=2048`（token 少 → SPLIT=1 时只 16 个 CTA、机器空转）。**token 数不变、
+只增加逻辑 CTA 数，延迟单调下降**：`grid 16→128` 拿到 **3.51×**。这正是 Mega Gate 在 token block
+数少时用 `num_logical_ctas`（split-K / CTA-pair）**填满 SM** 的动机（`heuristics/mega_gate.hpp:137-147`）。
+`grid=32` 处 `SPLIT=2`（1.63×）略优于 `MMA=2`（1.57×）——同样 2 个逻辑 CTA，split-K 把 K 也切了、
+单个 CTA 的 K 负载更小，故略快。
+
+**C. 已饱和（NT=128，grid 已 ≈ 132 SM）：split-K 不再填机器，只加协调开销**
+
+```text
+ SPLIT MMA mode  | grid | 延迟(us) | 相对 gate SPLIT=1
+ -----------------+------+----------+-------------------
+      1   1  gate |  128 |  232.9   |   1.00×
+      2   1  gate |  256 |  356.6   |   1.53×   (2 波)
+      4   2  gate | 1024 |  530.3   |   2.28×   (8 波)
+      1   1  fused|  128 |  209.2   |   0.90×
+```
+
+`K=512`。此时 `SPLIT=1` 已把 128 个 CTA 铺满机器，**再 split 只会让 grid 超过 SM 数、变成多波**
+（grid 256 = 2 波、1024 = 8 波），wall time 反而涨。**`fused`（无 scratch / 无 barrier）比
+`gate SPLIT=1` 快 ~11%**——这 ~24 µs 就是 score scratch 往返 + ScoreBarrier 在**饱和区间**的净成本。
+与 B 合并的结论：**multi-CTA 逻辑任务的价值在「填机器」，不在「更快」**；机器一旦被填满，
+它们只剩协调开销。
+
+**D. ncu：score scratch 的 L2 / DRAM 流量**
+
+```text
+ 配置             | L2 read sectors | L2 write sectors | DRAM read | DRAM write
+ -----------------+-----------------+------------------+-----------+-----------
+ gate SPLIT1 MMA1 |    2,100,297    |    2,687,074     | 33.86 MB  |  2.57 MB
+ gate SPLIT4 MMA2 |    3,966,044    |    4,000,361     | 33.87 MB  | 19.84 MB
+ fused SPLIT1     |    2,079,750    |    2,294,813     | 33.86 MB  |  1.94 MB
+ ```
+
+`NT=128, T=128, E=128, K=512`，取第 2 次 launch（`--launch-skip 1`，避开首次 L2 冷启动）。
+**`fused` 与 `gate SPLIT=1` 的 L2 读几乎相同**（2.08M vs 2.10M sectors），**写差 +0.39M sectors
+（≈+12.6 MB）**——score scratch 一次落盘的量级（`NTT*E*4 = 8.4 MB`，余下为写放大/对齐）；
+`SPLIT4 MMA2` 因 8× 逻辑 CTA + 4× split，L2 写升到 4.0M sectors、**DRAM 写从 1.94 MB 涨到
+19.84 MB**。含义：**split-K 的部分分必须经过 L2/DRAM 一次往返回合**，这正是 `docs/04` §17（P24-1）
+量到的「损失三」在 gate 里的具体形态——只不过 Mega Gate 用**一次** score round-trip（而非每算子一趟）
+把整段打分 + 排名压进单 kernel。
+
+### 23.5 读法
+
+1. **Mega Gate 的 `cluster_dim` 路径可整体投影到 sm90**：CTA pair 切专家维、split-K 写全局部分分、
+   ScoreBarrier（grid 标签编码的 64-bit 原子）会合、跨 split 归约 + top-k——**数值与参考逐 token 一致**。
+   真正 sm90 拿不到的是 §22 的 `cta_group::2`（一次 TMA、一个屏障、一对 SM 分持 TMEM），
+   本节用**软件 cluster + 独立 barrier** 代替。
+2. **multi-CTA 逻辑任务（split-K × CTA-pair）是「occupancy 填充器」**：token 少时 `grid 16→128`
+   快 **3.51×**（Section B）；token 多、机器已满时它只剩协调开销（Section C，fused 快 11%）。
+   这解释了 Mega Gate heuristic 为何按 `num_worker_groups = num_sms / num_logical_ctas` 选配置
+   （`heuristics/mega_gate.hpp:137`）——**逻辑 CTA 数 × worker group 数 ≈ SM 数**才最优。
+3. **split-K 的代价是「部分分往返回合」**：score 写全局 + barrier + 跨 split 读归约，在饱和区间约
+   +24 µs / +11%（Section C），L2 写 +0.39M sectors（Section D）。Mega Gate 接受它，是因为
+   整段打分 + 排名只走**一次** round-trip；若把它拆回 kernel-per-operator 会走多次（`docs/04` §17）。
+
+### 23.6 与判据 / MPK / 生产案例的关系
+
+- **判据（C1–C5，`docs/00` §3）**：本节的 gate 任务满足 C1（单 launch）、C2（CTA 常驻）、
+  C3（段内多算子范围）、C4（设备内协调：cluster + 全局 ScoreBarrier），仍**非 C5**（无 worker/scheduler
+  动态派发，按静态 grid 角色计算）。与 §18–§22 同档——它们都是**段级 T4 的设备内协调原语**；
+  完整 C5 由 P15-1 §9 / P22-1 §15 覆盖。
+- **与 MPK 的关系**：MPK 的 tGraph 用 event 计数器表达「同 event 触发的 task 连续」（`docs/01` §3）；
+  Mega Gate 的 ScoreBarrier 是它的**手工版**——一个 token block 的 `kNumLogicalCtas` 到达即放行下游
+  排名（`scheduler/mega_gate.cuh:31-38`）。MPK §5.1 的「consumer 等 `num_triggers*iteration`」与
+  `wait(state == (grid+1)*64 + kNumLogicalCtas)` 是同一个思路（精确计数 + grid 代次去陈旧）。
+- **与生产案例**：本节的 `Cluster ST1/2` 复刻了 Mega MoE `cluster_dim=(2,1,1)`
+  （`sm100_bf16_mega_moe.hpp:138`）、Mega Gate `cluster_dim=num_mma_ctas`
+  （`sm100_bf16_mega_gate.hpp:74`）的**最小单位 = 2SM 对**；Section B 的 filling 规律对应 Mega Gate
+  heuristic 的 `num_logical_ctas` 选择（`heuristics/mega_gate.hpp:133-147`）。细节见 `docs/02` §1.2。
+
+### 23.7 局限与踩到的坑
+
+- **这是 sm90 等价复刻，不是 SM100 Mega Gate 本体**：无 tcgen05、无 TMEM、无 `cta_group::2`；
+  CTA pair 用软件 cluster + 独立 SMEM/global barrier 代替硬件的「一次 MMA、一个屏障、一对 TMEM」。
+  绝对性能（~7 TFLOP/s 的朴素 fp32 GEMM）远低于 SM100 的 UMMA，故本节只做**相对**比较。
+- **GEMM 是 SIMT fp32**：打分用 register-tiled 朴素 GEMM，非 Tensor Core；`T*Eper` 受寄存器 micro-tile
+  限制（`T=128, Eper≤128`）。这里量的是**协调路径**，不是 GEMM 峰值。
+- **`lts__t_sectors_op_write` 绝对值偏大**：包含 score staging 之外的写放大与多波重复载入；
+  本节只用**配置间的差**（fused vs gate）与 DRAM 写做定性证据，不把绝对值当精确 scratch 字节。
+- **CTA pair 的切法是专家维（M），不是 Mega Gate 的「同时切 M 和 N」**：Mega Gate 的 2SM MMA
+  同时切 experts（M）与 tokens（N）（`sm100_bf16_mega_gate.cuh:137`），sm90 无 2SM MMA，
+  本节让两 CTA 都处理全部 token、各写半数专家——是对「切开 M」的忠实投影，但少了 N 方向的共享。
+- **未测 gate warp / top-k 的内部并行**（Mega Gate 的 gate warpgroup 之间的 transpose/top-k 分摊，
+  `epilogue/sm100_mega_gate.cuh:107-152`）：本节的 top-k 是每线程一 token 的朴素插入排序。
+- **ScoreBarrier 的 grid 代次**由 host 每次 launch 递增传入（而非设备侧 `get_grid_idx()`）；
+  语义（无符号距离去陈旧）与 `scheduler/mega_gate.cuh:17-29` 一致，实现细节不同。

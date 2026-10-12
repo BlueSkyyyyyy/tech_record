@@ -157,7 +157,9 @@ SM100 专属（`mega_gate.hpp:159` 断言 `arch_major == 10`）；`hidden % 256 
 MPK「编译期按形状自动建图」在通用性上的代价。
 
 > 说明：Mega Gate 为 SM100 专属，本机 H100/sm90 无法端到端运行，本节为**仅资料分析**
-> （行号均在 `~/github/DeepGEMM` @ `057ca59` 逐行核对）。
+> （行号均在 `~/github/DeepGEMM` @ `057ca59` 逐行核对）。其 `cluster_dim` 协调路径的 **sm90 等价复刻
+> 实测**见 `docs/04` §23（P34-1）——CTA-pair 切专家维 + split-K score scratch + ScoreBarrier 会合 +
+> 跨 split 归约 top-k，量化了「multi-CTA 逻辑任务的价值在占满机器」。
 
 ### 1.3 Mega mHC（HyperConnection）
 
