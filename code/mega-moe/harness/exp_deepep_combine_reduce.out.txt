@@ -1,0 +1,91 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+GPU: NVIDIA H100 80GB HBM3 (sm_90), CUDA 13020
+EP_NUM_TOPK_IDX_BITS=64, sizeof(topk_idx_t)=8, kNumTMAAlignmentBytes=32, kNumRDMAAlignmentBytes=64
+
+=== Part 0: host constexpr 语义（combine_utils.cuh:8-26）===
+    mult=false ranks=8   topk=4  -> use_rank_layout=false num_tokens_in_layout=4 
+    mult=true  ranks=1   topk=8  -> use_rank_layout=true  num_tokens_in_layout=1 
+    mult=true  ranks=2   topk=8  -> use_rank_layout=true  num_tokens_in_layout=2 
+    mult=true  ranks=4   topk=4  -> use_rank_layout=true  num_tokens_in_layout=4 
+    mult=true  ranks=8   topk=4  -> use_rank_layout=false num_tokens_in_layout=4 
+    mult=true  ranks=8   topk=2  -> use_rank_layout=false num_tokens_in_layout=2 
+    mult=true  ranks=16  topk=8  -> use_rank_layout=false num_tokens_in_layout=8 
+  [PASS] use_rank_layout / get_num_tokens_in_layout 表
+    get_max_unroll_factor<64,4>  = 2 (expect 2)
+  [PASS] unroll(64,4)=2
+    get_max_unroll_factor<512,4> = 4 (expect 4)
+  [PASS] unroll(512,4)=4
+    get_max_unroll_factor<256,4> = 4 (expect 4)
+  [PASS] unroll(256,4)=4
+    get_max_unroll_factor<32,4>  = 1 (expect 1)
+  [PASS] unroll(32,4)=1
+  [PASS] sm90 CombineVecTraits = int4 (16B)
+
+=== Part 1: 直接调用真实 combine_reduce（combine_utils.cuh:55-172）===
+    bypass(2 slot, bf16 add): mism=0/256
+  [PASS] bypass 路径 vs bf16 折叠 oracle 逐位
+    general(4 slot, fp32 累加): mism=0/256
+  [PASS] 通用路径 vs fp32 累加后一次舍入 oracle 逐位
+    general(2 slot + bias): mism=0/256
+  [PASS] 有 bias 强制通用路径 vs oracle 逐位
+    200k 随机 bf16 值对: bypass(单次 bf16 add) vs 通用 = 0 处不同
+  [PASS] ≤2 slot 时 bypass 与通用逐位一致（精确和再舍入）
+    200k 随机 bf16 三元组: 链式两次 bf16 add vs 一次舍入 = 44195 处不同（22.10%）
+  [PASS] 解释为何 bypass 只在 ≤2 slot 启用（>2 链式 bf16 会累积舍入）
+
+=== Part 2: 完整 combine_reduce_epilogue_impl（combine_reduce_epilogue.cuh:24-143）===
+
+-- A rank-layout(no bias) (use_rank_layout=true, num_tokens_in_layout=4) --
+  [PASS] A rank-layout(no bias): 输出 vs oracle 逐位 (mism=0/1280)
+  [PASS] A rank-layout(no bias): topk weights (mism=0/20)
+
+-- A rank-layout(with bias) (use_rank_layout=true, num_tokens_in_layout=4) --
+  [PASS] A rank-layout(with bias): 输出 vs oracle 逐位 (mism=0/1280)
+
+-- B topk-layout(no bias) (use_rank_layout=false, num_tokens_in_layout=4) --
+  [PASS] B topk-layout(no bias): 输出 vs oracle 逐位 (mism=0/1280)
+  [PASS] B topk-layout(no bias): topk weights (mism=0/20)
+
+================ 汇总: 16 PASS / 0 FAIL ================
+
+=== Python: 独立 host oracle（公式 + dedup 选择逻辑） ===
+=== host constexpr 公式（combine_utils.cuh:8-26）===
+  mult=False ranks=  1 topk= 8 -> use_rank_layout=False num_tokens_in_layout=8 OK
+  mult=False ranks=  2 topk= 8 -> use_rank_layout=False num_tokens_in_layout=8 OK
+  mult=False ranks=  4 topk= 4 -> use_rank_layout=False num_tokens_in_layout=4 OK
+  mult=False ranks=  8 topk= 4 -> use_rank_layout=False num_tokens_in_layout=4 OK
+  mult=False ranks=  8 topk= 2 -> use_rank_layout=False num_tokens_in_layout=2 OK
+  mult=False ranks= 16 topk= 8 -> use_rank_layout=False num_tokens_in_layout=8 OK
+  mult=True  ranks=  1 topk= 8 -> use_rank_layout=True  num_tokens_in_layout=1 OK
+  mult=True  ranks=  2 topk= 8 -> use_rank_layout=True  num_tokens_in_layout=2 OK
+  mult=True  ranks=  4 topk= 4 -> use_rank_layout=True  num_tokens_in_layout=4 OK
+  mult=True  ranks=  8 topk= 4 -> use_rank_layout=False num_tokens_in_layout=4 OK
+  mult=True  ranks=  8 topk= 2 -> use_rank_layout=False num_tokens_in_layout=2 OK
+  mult=True  ranks= 16 topk= 8 -> use_rank_layout=False num_tokens_in_layout=8 OK
+  get_max_unroll_factor<64,4> = 2 (expect 2) OK
+  get_max_unroll_factor<256,4> = 4 (expect 4) OK
+  get_max_unroll_factor<512,4> = 4 (expect 4) OK
+  get_max_unroll_factor<32,4> = 1 (expect 1) OK
+  PART-A PASS
+
+=== dedup + 双布局选择逻辑（combine_reduce_epilogue.cuh:73-95）===
+
+  -- A rank-layout (ranks=4, topk=4, use_rank_layout=True) --
+    t=0: experts=[0, 3, 16, 24] ranks=[0, 0, 2, 3] -> slots=[0, 2, 3, -1] distinct=[0, 2, 3] OK
+    t=1: experts=[8, 9, 10, 11] ranks=[1, 1, 1, 1] -> slots=[1, -1, -1, -1] distinct=[1] OK
+    t=2: experts=[0, 8, 16, 24] ranks=[0, 1, 2, 3] -> slots=[0, 1, 2, 3] distinct=[0, 1, 2, 3] OK
+    t=3: experts=[24, -1, -1, -1] ranks=[3, -1, -1, -1] -> slots=[3, -1, -1, -1] distinct=[3] OK
+    t=4: experts=[16, 24, 17, 25] ranks=[2, 3, 2, 3] -> slots=[2, 3, -1, -1] distinct=[2, 3] OK
+    PART-A PASS
+
+  -- B topk-layout (ranks=8, topk=4, use_rank_layout=False) --
+    t=0: experts=[0, 8, 16, 24] ranks=[0, 1, 2, 3] -> slots=[0, 1, 2, 3] distinct_ranks=[0, 1, 2, 3] OK
+    t=1: experts=[0, 1, 8, 16] ranks=[0, 0, 1, 2] -> slots=[1, 2, 3, -1] distinct_ranks=[0, 1, 2] OK
+    t=2: experts=[8, 9, 10, 11] ranks=[1, 1, 1, 1] -> slots=[3, -1, -1, -1] distinct_ranks=[1] OK
+    t=3: experts=[24, -1, 8, -1] ranks=[3, -1, 1, -1] -> slots=[0, 2, -1, -1] distinct_ranks=[1, 3] OK
+    t=4: experts=[0, 8, 16, 24] ranks=[0, 1, 2, 3] -> slots=[0, 1, 2, 3] distinct_ranks=[0, 1, 2, 3] OK
+    PART-B PASS
+
+  master_lane(ranks=[0, 0, 1, 2]) = [1, 2, 3, -1, -1, -1, -1, -1]（rank0->lane1, rank1->lane2, rank2->lane3）
+
+=== Python oracle: ALL PASS ===

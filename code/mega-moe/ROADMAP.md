@@ -1425,6 +1425,79 @@
       （H100/驱动 570）被 `cuTensorMapEncodeTiled` 直接拒（`CUDA_ERROR_INVALID_VALUE`，SM100 专属）。
       配套博客 `content/posts/mega-moe-56-tma-descriptor-layer`（索引页新增第 56 篇）。
 
+### P47 增量（opt-in，补齐 Mega Gate 一直缺席的「验收测试即正确性规范」）
+
+- [x] **P47-1** **Mega Gate 的端到端验收测试与路由 oracle**（`tests/test_mega_gate.py`；
+      `csrc/apis/mega_gate.hpp`；`deep_gemm/include/deep_gemm/layout/mega_gate.cuh`；
+      `deep_gemm/include/deep_gemm/epilogue/sm100_mega_gate.cuh`；
+      `csrc/jit_kernels/heuristics/mega_gate.hpp`；`csrc/jit_kernels/impls/sm100_bf16_mega_gate.hpp`）。
+      第 13 篇（P5-1）拆了 Mega Gate 的**实现**、第 51 篇（P41-1）拆了 **Mega MoE** 的端到端测试，
+      本篇补上 Mega Gate **自己的**验收测试——它是「Mega Gate 的输出算什么对」的唯一规范，也是
+      第 13 篇反复引用的「~7 万条 top-k 0 不符」判据的出处。**主体 kernel 是 SM100 专属，仅分析**
+      （`mega_gate.hpp:159` 断言 `arch_major == 10`）；**路由 oracle 纯 torch、架构无关，H100 真机实测**。
+      → `docs/57-mega-gate-test-oracle.md`（真实行号核对）：测试两个入口
+      `test_mega_gate_api_contract:256-313` / `test_mega_gate:204-225` 都被
+      `@test_filter(get_arch_major()==10)` 门控（H100 整体跳过）；用例矩阵 `enumerate_cases:27-37`
+      45 个形状（含 4-wave K 尾块 `(32768,4096,512)`）+ `GATE_CONFIGS:21-24` 11 组。
+      **判据 `check_topk_weights:105-173` 逐段**：① 打分 `scores=F.softplus(logits).sqrt():117`——
+      kernel `sqrt_softplus`（`epilogue:19-23`）的 threshold-20 折衷与 `F.softplus` **数值完全一致**
+      （默认 `threshold=20` 同分支规则）；② 排名 `ranking=scores+ranking_bias:130-135`，image token 用
+      image_bias **替换**（非叠加）bias；③ top-k 用**结构无关的 crossing 不等式**验收 `:145-156`
+      （选中最小分 ≥ 未选中最大分，容差 `1e-5+1e-5·|ranking|max`），与 sort4 网络/3-bit 游标解耦；
+      ④ 出权重 `scores/(sum+1e-20)*1.5:137-139` 对应 kernel `epilogue:210-213`，共享槽恒 `1.0:164-165`；
+      ⑤ 判据 **`calc_diff<1e-11:141-143`（非逐位）**因参考 logits 走 `cublaslt_gemm_nt:98-102`；
+      ⑥ logical→physical 逆映射 `p<E?p:p-E:121-128` **依赖 `make_physical_map:40-49` 的编号约定**
+      （副本槽=`E+logical`，第 0 列直通、第 1 列前 32 行 `E+arange`），kernel 侧选副本
+      `(rank+t·23333)%n_dup`（`epilogue:205`）只影响负载、不影响逆；⑦ 四个路由控制
+      mask(`:167-171`)/image_bias/fix_routing(`:246-247`，host `mega_gate.hpp:137-138` 依赖
+      unmapped)/force_random（无放回采样 `epilogue:218-253`）；⑧ 逐位重复 10 次
+      `assert_bitwise_equal:185-191` 的根据是确定性模式**从不 split K**
+      （`heuristics/mega_gate.hpp:110-111,126`）。H100 实测 `harness/exp_mega_gate_test.{py,sh,out.txt}`
+      **47 PASS/0 FAIL**（直接 import 真实 test 复用 helper；用一个完全正确的 torch 代理 gate 喂
+      `check_topk_weights` → `weight_diff=0`，再用扰动反例证明判据能抓错：权重偏 `1e-3`→`calc_diff
+      4.995e-7`、偏 `1e-6`→`4.543e-13` 仍过（阈值严而不溢）、换第 K+1 名专家→crossing 触发、
+      重复专家→唯一性触发、忽略 image_bias→53.1% token 选择不同、漏归一化→`calc_diff=0.713`；
+      另 `sqrt_softplus` vs fp64 `max rel 1.369e-7`（fp32 舍入）、副本分散均衡 `0.50000`）。
+      配套博客 `content/posts/mega-moe-57-mega-gate-test-oracle`（索引页新增第 57 篇）。
+
+### P48 增量（opt-in，补齐第 7 篇一笔带过的 combine 归约侧）
+
+- [x] **P48-1** **DeepEP combine 的归约 epilogue**（`impls/ep/combine_utils.cuh`、
+      `impls/ep/combine_reduce_epilogue.cuh`、`impls/ep/combine.cuh:145-177`、`layout/ep/token.cuh`、
+      `common/ptx.cuh`；`csrc/kernels/ep/combine.hpp:148-198`、`csrc/buffers/ep.hpp:925-950`）。
+      `docs/07` 只把 combine 归约侧一笔带过（一句 `combine_reduce` + `use_rank_layout`），
+      本篇补上「专家算完后把结果加回源 token」这一步的**逐行实现**——EP 归约侧的落点，
+      与 `docs/11` 的 DeepGEMM 自研 combine 成对照。**两段设备代码不依赖 NCCL GIN/UMMA/WGMMA，
+      H100 真机可跑真实设备代码**。
+      → `docs/58-deepep-combine-reduce.md`（真实行号核对）：**两阶段设计**——主 combine kernel
+      做搬运 + 本地归约（`combine.cuh:145-177`），`combine_reduce_epilogue_impl`
+      （`combine_reduce_epilogue.cuh:24-143`）可**延迟**到 compute stream 做跨 rank 求和（host 把
+      「分配输出 + 启动 epilogue」包成 lambda，`ep.hpp:925-950`；靠 **PDL**
+      `cudaGridDependencySynchronize`（`:57-59`）与主 kernel 建立顺序，故 epilogue 里读 metadata
+      **不能用 `__ldg`**（`:67`），host `enable_pdl=true`（`combine.hpp:182-189`）对应）。
+      **两张布局** `use_rank_layout = allow_multiple_reduction && num_ranks <= num_topk`
+      （`combine_utils.cuh:8-18`）→ rank 当外层维 vs topk 当外层维，主 kernel（`combine.cuh:26-27`）
+      与 epilogue（`:21-23`）**共用同一 constexpr** 保证缓冲一致。**top-k 去重**：`ptx::deduplicate`
+      （`ptx.cuh:544-546`，`__match_any_sync`+`bfind.u32` 取组内**最高** lane）+ `compute_topk_slots`
+      （`combine_utils.cuh:41-53`，`__ffs` 从低位挤到前、槽满仍无条件 `exchange` 避免 `BRA.DIV`、
+      多出槽置 `-1`）+ `ptx::ldg_with_ge_pred`（`ptx.cuh:223-236`）谓词跳过 `-1` 越界地址。
+      **`combine_reduce`（`combine_utils.cuh:55-172`）两条路径**：`enable_hadd_bypass`（`:67-70`）=
+      无 bias 且 `kNumValidTopk<=2 or slot[2]<0` 时 **bf16 直加**（`:73-109`，省两次类型转换），
+      否则 **fp32 累加一次舍入**（`:110-171`，`ptx::accumulate` 在 sm100 是融合 `add.rn.f32.bf16`
+      `ptx.cuh:594-597`、sm90 回退 `:599-601`）；`CombineVecTraits` 用 16B `int4`（`:28-39`，
+      32B `longlong4_t` 因性能退化被关 `:34`）。bias 走通用路径（`:54-55/111-114`，承载共享专家/残差，
+      README `:279`）；top-k 权重按 `rank` 或 `master_lane_idx` 回写（`:127-141`）。**H100 实测**
+      `src/deepep_combine_reduce.cu` + `harness/exp_deepep_combine_reduce.{sh,py,out.txt}`
+      （**直接 include 真实头文件编译运行真实设备代码**）**16 PASS / 0 FAIL**：
+      ① host constexpr 13 组 + 4 组 unroll + sm90 `int4` 全对；② 直接调真实 `combine_reduce`：
+      bypass/general/bias 三组 vs oracle **0/256**，20 万随机 bf16 值对 bypass==通用 **0 处不同**、
+      20 万三元组链式 bf16 vs 一次舍入 **44195 处（22.10%）**——坐实旁路为何卡在上界 2；
+      ③ 完整 `combine_reduce_epilogue_impl`：**rank-layout**（4 rank/experts32/topk4，含同 rank 重复
+      `0,0,2,3`→`{0,2,3}`、全同、互异、单 rank、两两重复五类）输出 **0/1280**、权重 **0/20**、
+      加 bias **0/1280**；**topk-layout**（8 rank>topk4）输出 **0/1280**、权重 **0/20**；
+      ④ Python 独立 oracle 重写 constexpr + `__ffs` 去重选择逻辑 ALL PASS。配套博客
+      `content/posts/mega-moe-58-deepep-combine-reduce`（索引页新增第 58 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1449,8 +1522,41 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P46 各增量完成（P15-1…P41-1、P42-1、P43-1、P44-1、P45-1、P46-1）。**
-  本轮 P46-1：新建 `docs/56-tma-descriptor-layer.md`（+`src/tma_descriptor.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P48 各增量完成（P15-1…P41-1、P42-1、P43-1、P44-1、P45-1、P46-1、P47-1、P48-1）。**
+  本轮 P48-1：新建 `docs/58-deepep-combine-reduce.md`（+`src/deepep_combine_reduce.cu`、
+  `harness/exp_deepep_combine_reduce.{py,sh,out.txt}`）——补上 `docs/07` 只一笔带过的 **DeepEP combine 归约侧**
+  （`combine_reduce` 家族）：专家算完后「把结果加回源 token」这一步的逐行实现，是 EP 归约侧的落点，
+  与 `docs/11` 的 DeepGEMM 自研 combine 成对照。三个核心事实：① **两阶段 + PDL**——主 combine kernel 做搬运+
+  本地归约，`combine_reduce_epilogue_impl` 可**延迟**到 compute stream 做跨 rank 求和（host 包 lambda
+  `ep.hpp:925-950`），靠 `cudaGridDependencySynchronize`（`:57-59`）与主 kernel 建立顺序，故 epilogue 里读
+  metadata **不能用 `__ldg`**；② **rank/topk 双布局**由 `use_rank_layout = allow_multiple_reduction &&
+  num_ranks <= num_topk` 决定（`combine_utils.cuh:8-18`），主 kernel 与 epilogue **共用同一 constexpr**；
+  ③ **top-k 去重 + bf16 直加旁路**——`ptx::deduplicate`（`__match_any_sync`+`bfind.u32` 取组内最高 lane）+
+  `compute_topk_slots`（`__ffs` 从低位挤前、`-1` 占位、`ldg_with_ge_pred` 谓词跳过越界），`enable_hadd_bypass`
+  在无 bias 且有效槽 ≤2 时走 bf16 直加（省两次类型转换），否则 fp32 累加一次舍入。**H100 真机 16 PASS / 0 FAIL**：
+  **直接 include 真实头文件编译运行真实设备代码**——rank/topk 两套布局的完整 `combine_reduce_epilogue_impl`（真实
+  对称 recv_buffer）输出与 top-k 权重 vs 独立 oracle **逐位 0 不符**（含同 rank 重复 token 的去重）；20 万随机
+  bf16 值对坐实「≤2 槽时 bypass==通用逐位一致」、20 万三元组「链式 bf16 有 22.10% 会偏」——这正是旁路卡在上界 2
+  的原因；Python 独立 oracle 重写 constexpr + 去重选择逻辑 ALL PASS。配套博客
+  `content/posts/mega-moe-58-deepep-combine-reduce`（索引页新增第 58 篇）。
+  上一轮 P47-1：新建 `docs/57-mega-gate-test-oracle.md`（+`harness/exp_mega_gate_test.{py,sh,out.txt}`）
+  ——补上 Mega Gate 一直缺席的「验收测试即正确性规范」：`tests/test_mega_gate.py` 定义了
+  「Mega Gate 的输出算什么对」。**主体 kernel SM100 专属，仅分析**（`mega_gate.hpp:159` arch==10，
+  H100 上两个用例整体被 `@test_filter(get_arch_major()==10)` 跳过）；**路由 oracle 纯 torch，H100 真机实测**。
+  判据 `check_topk_weights:105-173` 的五个要点：① `sqrt_softplus`（`epilogue:19-23` 的 threshold-20 折衷）
+  与参考 `F.softplus(·).sqrt():117` **数值完全一致**（默认 `threshold=20` 同分支）；② 排名带 bias、
+  出权重用无 bias 的 `scores` 归一化 `scores/(sum+1e-20)*1.5:137-139`，image token 的 bias 是**替换**非叠加；
+  ③ top-k 用**结构无关的 crossing 不等式**验收 `:145-156`（选中最小分 ≥ 未选中最大分，容差
+  `1e-5+1e-5·|ranking|max`），与 sort4 网络/3-bit 游标解耦；④ 判据 **`calc_diff<1e-11:141-143`（非逐位）**
+  因参考 logits 走 `cublaslt_gemm_nt:98-102`；⑤ logical→physical 逆映射 `p<E?p:p-E:121-128`
+  **依赖 `make_physical_map:40-49` 的编号约定**（副本槽=`E+logical`）。H100 实测
+  `harness/exp_mega_gate_test.{py,sh,out.txt}` **47 PASS/0 FAIL**：直接 import 真实 test 复用 helper，
+  用一个完全正确的 torch 代理 gate 喂 `check_topk_weights` → `weight_diff=0`，再用六类扰动反例证明
+  判据能抓错（权重偏 1e-3→`calc_diff 4.995e-7`、偏 1e-6→`4.543e-13` 仍过、换第 K+1 名→crossing 触发、
+  重复专家→唯一性触发、忽略 image_bias→53.1% 选择不同、漏归一化→`0.713`）；`sqrt_softplus` vs fp64
+  `max rel 1.369e-7`（fp32 舍入）、副本分散均衡 `0.50000`。配套博客
+  `content/posts/mega-moe-57-mega-gate-test-oracle`（索引页新增第 57 篇）。
+  上一轮 P46-1：新建 `docs/56-tma-descriptor-layer.md`（+`src/tma_descriptor.cu`、
   `harness/exp_tma_descriptor.{sh,out.txt}`）——补上前面 55 篇每个 SM90 kernel 的每一行
   `cp.async.bulk.tensor` 前面那个 128 字节 `CUtensorMap` 的**来源**：
   `csrc/jit_kernels/impls/runtime_utils.hpp` 的 `make_tma_*` 是一层**确定性参数翻译**
@@ -1917,7 +2023,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P46 已完成（新增 **P46-1 TMA 描述符构造层 `runtime_utils.hpp` 的 `make_tma_*`**：
+- **下一步**：P0~P48 已完成（新增 **P48-1 DeepEP combine 的归约 epilogue**：
+  补上 `docs/07` 一笔带过的 combine 归约侧（`combine_reduce` 家族）——两阶段 + PDL、rank/topk
+  双布局（主 kernel 与 epilogue 共用同一 constexpr）、top-k 去重（`deduplicate`+`compute_topk_slots`+
+  `-1` 谓词跳过）、bf16 直加旁路 vs fp32 累加；H100 真机直接 include 真实头文件跑真实
+  `combine_reduce_epilogue_impl`（真实对称 recv_buffer）16 PASS/0 FAIL，20 万随机样本坐实旁路为何卡在
+  上界 2；见上）。
+  上一轮 P46-1：**P46-1 TMA 描述符构造层 `runtime_utils.hpp` 的 `make_tma_*`**：
   128 字节 `CUtensorMap` 是「确定性参数翻译」——major→inner/outer、dtype/swizzle 映射、三个隐藏规整；
   H100 真机 16 个包装用例与直连编码逐字节相等、真实 TMA 载入与 `cute::Swizzle` 预测布局全对，
   并发现 **swizzle XOR 键取自绝对 smem 地址 bits[7:10)**（目的地要对齐到整个 swizzle 原子）；见上）。
