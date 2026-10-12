@@ -1319,6 +1319,48 @@
       反例（覆盖）0.782、`build_tasks` 领槽 10==非空映射 10 且无重复。配套博客
       `content/posts/mega-moe-53-deepep-eplb-redundancy`（索引页新增第 53 篇）。
 
+### P44 增量（opt-in，补齐所有 kernel 共用的设备端数学与工具层）
+
+- [x] **P44-1** **DeepGEMM 的设备端数学与工具层**（`deep_gemm/include/deep_gemm/common/`
+      ​`math.cuh` / `utils.cuh` / `types.cuh` / `packing.cuh` / `compile.cuh` / `exception.cuh` /
+      `cute_tie.cuh`）。前面 0~43 篇把一个个 kernel 都拆过，但每个 kernel 都在调**同一层没有系统
+      讲过**的设备端数学与工具函数。本篇把 `common/math.cuh`（236 行）为主的一层单独拆透。
+      **除 `fma2` 的 SM100 快路（`__ffma2_rn`）外全部架构无关，H100 真机跑真实设备代码**。
+      → `docs/54-deepgemm-device-math-utils.md`（真实行号核对）：**算术/指针** `advance_ptr:13-16`、
+      `ceil_div:19-22`、`align:29-32`（含向下对齐 `kDoCeilAlignment=false`）、`constexpr_gcd/min:39-47`；
+      **快速数学** `fma2:57-66`（目标卡 `__ffma2_rn`，sm90 回退两次 `__fmaf_rn`）、`fast_rcp:68-72`；
+      **bf16/FP8 打包** `cast_into_bf16x2:75-78`/`cast_into_bf16_and_pack:80-84`（RNE）、
+      `get_packed_bf16_amax:88-103`（HMNMX2 树，kNumPacked 必须 2 的幂）、
+      `scale_bf16x2_into_fp8x4:106-109`（幂次 scale 乘法精确 + E4M3 打包）；
+      **UE8M0 SF 指数** `get_ue8m0_sf_exp:111-135`——**用整数加法的进位**完成「把 amax/quant_max 向上
+      取到 2 的幂」（`rounded_exp=(amax_bits + kMantissaMask - kQuantMaxMantissa) >> kMantissaBits`，
+      进位 iff `amax` 尾数超过 quant_max 尾数 1.75/1.5；E4M3 quant_max=448=1.75·2^8、E2M1=6=1.5·2^2，
+      地板 `kMinSFExponent`=105/1），`get_ue8m0_sf_inv:137-147`（带偏指数互为倒数、和为 254，
+      所以 `SF*SF_inv` 精确为 1）；**归约/扫描** `warp_inclusive_sum:150-159`、
+      `cta_exclusive_sum:161-184`（块内互斥前缀和，MQA logits 三个调度器的偏移来源）、
+      `Reduce*` 仿函数 `:186-198`（**`ReduceMax/Min<float>` 特化为 `fmaxf/fminf`**，注释 `:187-189`
+      说明泛型三元会变 `FSETP+FSEL`）、`warp_reduce:200-221`（**intra = 连续 N lane 组内归约
+      （偏移 `2^j`，`N≥2^{j+1}`）；inter = lane 同余 mod N 之间归约（偏移 `N·2^j`）**）。
+      `common/utils.cuh`：`PatternVisitor:11-22`、`Vectorized<>::zeros:24-40`、
+      `get_num_aligned_tmem_cols:42-50`（TMEM 列取整到 {32,64,128,256,512}，第 25 篇 512 列预算的落点）。
+      `common/types.cuh`：`MmaKind:7-11`/`GemmType:13-21`（+`is_m_grouped_contiguous:23-29`/
+      `is_k_grouped_contiguous:31-37`，PSUM 变体也归入各族）/`KernelType:39-43`/
+      `EpilogueOperatorArgs:45-52`（第 21 篇无状态算子基类）/`kNumDeviceLocalityDomains:54`（第 24 篇）。
+      `common/packing.cuh`：`get_smem_pack_factor:8-12`（FP4 每字节 2 元素）。
+      `common/compile.cuh`（`DG_IN_CUDA_COMPILATION:5-7` 就是 `math.cuh:56` 守卫的来源）、
+      `exception.cuh`（`DG_DEVICE_ASSERT:15-23` 等）、`cute_tie.cuh`（`CUTE_TIE:42-50`）。
+      H100 实测 `src/device_math_utils.cu` + `harness/exp_device_math_utils.{sh,out.txt}`（**直接 include
+      真实头文件**编译运行，四头 sha256 见输出）**ALL PASS**：① `get_ue8m0_sf_exp` E4M3/E2M1 ×
+      FP32/BF16 **四组合 vs 真实 `deep_gemm.utils.math.ceil_to_ue8m0` 全 0/65536**（含 2 的幂、1.75/1.5
+      边界、0、均匀随机）、`SF*SF_inv` 恒 1.0；② `get_packed_bf16_amax<8>` vs `abs().amax()` **0/32768**；
+      ③ `cast_into_bf16_and_pack` vs torch bf16(RNE) **0/65536**；④ `scale_bf16x2_into_fp8x4` vs
+      fp32×2^e→E4M3 **0/32768**；⑤ `fma2`(sm90 回退) vs fp64 单次舍入 **0/131072**、`fast_rcp` max relerr
+      **1.192e-7**；⑥ `cta_exclusive_sum`/`warp_inclusive_sum` vs 参考 **0/256**；⑦ `warp_reduce`
+      intra/inter 7 组 vs 独立 host 分组模型 **0/32**（组大小与偏移逐条对）；⑧ `get_num_aligned_tmem_cols`
+      10 档、`Vectorized` 宽度、`get_smem_pack_factor`、`GemmType` 判定、`ceil_div/align/constexpr_*`、
+      `kNumDeviceLocalityDomains` 全对。
+      配套博客 `content/posts/mega-moe-54-deepgemm-device-math-utils`（索引页新增第 54 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1343,8 +1385,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P43 各增量完成（P15-1…P41-1、P42-1、P43-1）。**
-  本轮 P43-1：新建 `docs/53-deepep-eplb-redundancy.md`（+`src/eplb_redundancy.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P44 各增量完成（P15-1…P41-1、P42-1、P43-1、P44-1）。**
+  本轮 P44-1：新建 `docs/54-deepgemm-device-math-utils.md`（+`src/device_math_utils.cu`、
+  `harness/exp_device_math_utils.{sh,out.txt}`）——补上前面 0~43 篇**每个 kernel 都在调、却从没系统
+  讲过**的公共地板：`common/{math,utils,types,packing,compile,exception,cute_tie}.cuh`。
+  **除 `fma2` 的 SM100 快路外全部架构无关，H100 真机直接 include 真实头文件跑真实设备代码 ALL PASS**。
+  三个核心事实：① **UE8M0 取整用整数进位**——`get_ue8m0_sf_exp` 以
+  `(amax_bits + kMantissaMask - kQuantMaxMantissa) >> kMantissaBits` 的**进位**实现「把
+  amax/quant_max 向上取到 2 的幂」（进位 iff amax 尾数超过 1.75/1.5），与 Python
+  `ceil_to_ue8m0` **四组合（E4M3/E2M1 × FP32/BF16）0/65536 逐位等价**；`get_ue8m0_sf_inv` 的
+  带偏指数与 SF 互为倒数（和 254），故 `SF*SF_inv` 精确为 1，也解释了 `scale_bf16x2_into_fp8x4`
+  乘幂次 scale 为何精确；② **归约两种语义**——`warp_reduce` 的 intra=连续 N lane 组内
+  （偏移 `2^j`）、inter=lane 同余 mod N（偏移 `N·2^j`），实测 7 组 0/32；`cta_exclusive_sum`
+  是块内互斥前缀和（MQA logits 调度器的偏移来源）；③ **工具层**——`get_num_aligned_tmem_cols`
+  取整到 {32,64,128,256,512}（第 25 篇 512 列预算）、`get_smem_pack_factor`（FP4 每字节 2 元素）、
+  `GemmType` 判定、`fma2`/`fast_rcp`（sm90 回退逐位等于 fused、rcp 误差 ≤1.19e-7）。
+  上一轮 P43-1：新建 `docs/53-deepep-eplb-redundancy.md`（+`src/eplb_redundancy.cu`、
   `harness/exp_eplb_redundancy.{sh,py,out.txt}`）——补上专题「EP 反向通信」的空档：
   动态专家复制（MoonEP / UltraEP）下前向 `lb_prefetch_weights` 把主人权重（+scale）推到各 peer
   冗余槽、反向 `lb_reduce_grads` 把副本 FP32 梯度累加回主人。**两个 kernel 用 NCCL 设备 API
@@ -1570,55 +1626,7 @@
   上一轮 P27-1：新建 `docs/37-deepgemm-reference-quantizer.md`（+`harness/exp_reference_quantizer.{py,sh,out.txt}`）
   ——补上前面第 25/26/32/35 篇反复引用、却从没系统拆过的**量化语义基准** `deep_gemm/utils/math.py`：
   它是 DeepGEMM 全部 FP8/FP4 kernel 测试的正确性判据（「精确等于参考量化器定义的操作数上的 GEMM」）。
-  `ceil_to_ue8m0` 是「>= |x| 的最小 2 的幂」（指数 + 尾数非 0 进位、exp 域钳位 [1,254]，UE8M0 只留 8 位指数）；
-  `per_token/per_channel/per_block_cast_to_fp8` 三种粒度（`448`/`6` 常数、`clamp(1e-4)` 地板、补零对齐）；
-  `_quantize_to_fp4_e2m1` 的 7 个中点 + `round_up` 标志 = **按 E2M1 编码的 ties-to-even**（无负零）；
-  nibble 与 UE8M0 打包均 **LSB-first**；`transpose_packed_fp4` 对合。**纯张量运算非 SM100 专属，H100 真机**
-  七组 **ALL PASS**：`ceil_to_ue8m0` 1040 样本 0 不符、FP4 20 万样本 0 不符、端到端 `fp8_gemm_nt` vs
-  「参考量化器反量化 fp64 GEMM」relerr 1.4217e-03。行号全部核对过。
-  配套博客 `content/posts/mega-moe-37-reference-quantizer`（索引页新增第 37 篇）。
-  上一轮 P26-1：新建 `docs/36-sm100-bf16-gemm-tc-util.md`（+`src/tc_util_throttle.cu`、
-  `harness/exp_tc_util.{sh,out.txt}`、`harness/exp_tc_util_throttle.{sh,out.txt}`）——补上「稠密 GEMM 主 kernel」
-  矩阵的**最后一格**：SM100 BF16 主 kernel `sm100_bf16_gemm`（与第 35 篇同一套 UMMA+TMEM 骨架、去掉 SF/UTCCP，
-  `UMMA_K=16`、`BLOCK_K_=64`，host 六入口覆盖稠密/m-grouped/k-grouped/batched），并拆掉它独有的
-  **device 内合并 stage**（仅 K-major `Normal` 且 stage≥8，`BLOCK_K` 64→最多 256，少发 `umma_arrive`；
-  与第 19 篇 SM90 的 merge 同思想不同动机）与 **tensor-core 利用率控制 `set_tc_util`**。
-  后者是本专题一直没见过的机制：一个从 Python（`config.hpp:21-25`）经 `GemmDesc.tc_util` 直通到**模板参数**
-  `kTensorCoreUtilControl`（`sm100_bf16_gemm.cuh:35`）的运行时开关，**只有这个 kernel** 实现——
-  每次 UMMA 后用 `tensor_core_full_barrier` 等其做完，再按
-  `kNumUMMACycles=2·UMMA_M·UMMA_N·BLOCK_K/8192`（`:337`）、`kNumDummyCycles=(100-util)/util·kNumUMMACycles`（`:338`）
-  由单 lane `clock64` 空转，把占空比压到 `util%`（注释 `:325`「avoid frequency drop」）。
-  **SM100 专属，仅分析**（kernel `:43` 整段 `__CUDA_ARCH__>=1000`）；**架构无关的开关语义与节流机制 H100 真跑**：
-  ① `set_tc_util` 语义正确（默认 100、`set(0)→100`、越界在 `runtime.hpp:94` 被拒）；② **对 SM90 bf16/fp8 完全无效**
-  （4096³ bf16 在 100/50/10 下都 182 us/753 TFLOPS；fp8 都 107 us/1281 TFLOPS）、**不改 JIT 缓存键**
-  （冷缓存 2558 ms → 切 util 后 2.37 ms 命中）；③ 节流机制复刻：公式 `cyc/(cyc+dummy)=util/100` 精确成立，
-  真机 `work/total` 随 util 单调下降、墙时间按比例拉长，但空转超调使实测利用率偏低、且 H100 频率不随降载抬升
-  （降频意图依赖 SM100 tensor-core 功耗/热行为，无法复现）。行号全部核对过。
-  配套博客 `content/posts/mega-moe-36-sm100-bf16-gemm-tc-util`（索引页新增第 36 篇）。
-  上一轮 P25-1：新建 `docs/35-sm100-fp8-fp4-gemm.md`（+`src/sm100_fp8_fp4_geometry.cu`、
-  `harness/exp_sm100_fp8_fp4_geometry.{sh,out.txt}`）——补上第 3/10/21/31 篇一直当「黑盒后端」引用的
-  **目标卡上唯一 GEMM 后端**：`sm100_fp8_fp4_gemm_1d1d`。一套模板通吃稠密/m-grouped（dgrad，含 PSUM/masked）/
-  k-grouped（wgrad，FP8 钉 MN、FP4 钉 K+gran32）/batched（MLA），**MXF8F6F4（`UMMA_K=32`）与 MXF4
-  （`UMMA_K=64`、packed、K-major、gran32）共用骨架**。与 SM90（第 22 篇 WGMMA+寄存器累加+两种 SF 粒度分两个 kernel）
-  的本质差异是 **UMMA + TMEM + UTCCP**：累加器放 TMEM、SF 从 SMEM 经 UTCCP 搬进 TMEM 由硬件按 `gran_k` 应用；
-  **仅 leader CTA 单 warp** 发 `tcgen05.mma.block_scale`。**最值得记的「为什么」是 512 列 TMEM 预算与 overlap**：
-  `accum=2*UMMA_N`（双缓冲）+ SF，`overlap=max(x,512)-512` 后对齐到正好 512（kernel `:120-132`），
-  这解释了 host 合法性检查为何只写单级的 `umma_n+sf<=512`。还有 **SF 的 SMEM 内 warp 转置**（`:464-472`：
-  `out[lane*4+i]=in[i*32+lane]`）与 gran32/128 的 stage/sf_id 选择（`:96-97/416-431`）。
-  **SM100 专属，仅分析**（kernel `:47` 整段 `__CUDA_ARCH__>=1000`）；架构无关的几何/描述符设备代码在 H100 真机跑：
-  SF warp 转置 **128/128 全对**；smem 描述符 4 例（K-major stride_k=1 / MN-major=swizzle atom、FP4 pack=2 偏移减半、
-  SBO/LBO `>>4`）全对；指令描述符 5 例（E8M0、`n_dim=N>>3`/`m_dim=M>>4`、2-bit sf_id、packed `float_e2m1_t`→
-  `MXF4Format::E2M1=1`、`update_instr_desc_with_umma_n` 置 12）全对，**总判定 ALL PASS**。行号全部核对过。
-  配套博客 `content/posts/mega-moe-35-sm100-fp8-fp4-gemm`（索引页新增第 35 篇）。
-  上一轮 P24-1：新建 `docs/34-locality-domain-probe.md`（+`src/locality_domain_probe.cu`、
-  `harness/exp_locality_domain_probe.{sh,out.txt}`）——补上第 03/09/11 篇反复出现却从没讲清的
-  `num_locality_domains=2` 的**前置步骤**：**哪个 SM 属于哪个域、这件事怎么测出来的**。
-  探针设备代码 `sm100_locality_domain.cuh:8-24` 只依赖 `%smid`/`ld.global.cg`/`clock64`
-  （**架构无关，H100 真机可跑**）：一 SM 一 4KB chunk、全身步长 7 与 32 行互质（每行恰访问一次）、
-  `ld.global.cg` 绕 L1、`clock64` 除跳数。host `apis/locality_domain.hpp`：
-  `probe :82-90`（median(-1)）→ `try_probe :93-100` 两闸门（far/near ≥ `1.25`（`:66`）、TPC 内一致）
-  → 最多 5 次（`:67`）→ `get_even :103-106` + warn；`balance :126-136` **只在「一个域占满」时
-  给精确 50/50**（函数名有欺骗性，本实验显式测出 50/66→17/49）。本地化内存走 CUDA VMM + MLOPart
+  `ceil_to_MM + MLOPart
   IPC（`cuMemCreate/Export/Import` + reserve/map/set_access，粒度 2 MiB），TMA 权重描述符把域当外维
   `(1,2,N/2,K)`。**H100 真机**（原样 include 真实设备代码）：两域都在 HBM → ~624 周期/跳、ratio 1.000、
   `clear=F` **正确拒绝**；domain1=host-pinned 模拟远端 → ratio **3.265**、准确检出 + TPC 一致；
@@ -1776,13 +1784,16 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P42 已完成（新增 **P42-1 DeepGEMM 的 kernel 发射层**：
-  补上前面 51 篇都踩、却从没单独讲过的「发射那一下」——DeepJIT `Kernel::launch` 用 driver
-  `cuLaunchKernelEx` 装配至多 3 个 `CUlaunchAttribute`（cooperative / cluster / PDL）；
-  `LaunchOptions` 两级 `std::optional` merge、只有 `set_pdl` 全局可调；24 处
-  `cudaGridDependencySynchronize()` 的设备端半边；**H100 真机 PDL/cluster/dyn-smem 全部实测**
-  （半格 PDL 1.95×、缺同步读 stale 1.6%、cluster error 912 反例、dyn smem invalid argument 反例）；
-  见上）。
+- **下一步**：P0~P44 已完成（新增 **P44-1 DeepGEMM 的设备端数学与工具层**：
+  补上每个 kernel 都在调、却从没系统讲过的 `common/{math,utils,types,packing,...}.cuh`——
+  UE8M0 取整的整数进位技巧（与 Python `ceil_to_ue8m0` 逐位等价）、`SF*SF_inv` 精确为 1、
+  bf16/FP8 打包、`fma2`/`fast_rcp`、`warp_reduce` 的 intra/inter 两种语义、`cta_exclusive_sum`
+  与 TMEM 列取整；**H100 真机直接 include 真实头文件跑真实设备代码 ALL PASS**；见上）。
+  上一轮 P43-1：新建 `docs/53-deepep-eplb-redundancy.md`（+`src/eplb_redundancy.cu`、
+  `harness/exp_eplb_redundancy.{sh,py,out.txt}`）——补上专题「EP 反向通信」的空档（EPLB 冗余专家的
+  权重预取与梯度归约；两个 kernel 用 NCCL 设备 API，本机不提供 → 仅分析，切块/公式/归约语义
+  H100 真跑真实设备代码 ALL PASS）。上一轮 P42-1：DeepGEMM 的 kernel 发射层（PDL/cluster/动态
+  smem + 设备端 grid 依赖同步；H100 真机半格 PDL 1.95×、缺同步读 stale 反例等）。
   上一轮 P41-1：P0~P41 已完成（新增 **P41-1 Mega MoE 的端到端测试与逐位正确性判据**：
   补上 `tests/test_mega_moe.py`——`run_fused` vs `run_baseline` 用 `torch.equal` 逐位验收、
   三个测试侧 SF 布局变换（TMA 列主序对齐 / 共享专家 UTCCP 4×32 交错 / padding 广播）、
@@ -1833,6 +1844,11 @@
   P30-1 测试基座 `deep_gemm/testing/` 的 `calc_diff`/`bench_kineto`/`uneven_all_gather`、
   P31-1 操作数/布局生成器 `tests/generators.py`）。
   后续若继续（均为增量、非承诺）：
+  ⑱ **设备端数学与工具层已补齐（P44-1）**：`common/math.cuh`（UE8M0 整数进位取整/`SF*SF_inv`
+    精确、bf16/FP8 打包、`fma2`/`fast_rcp`、`warp_reduce` intra/inter、`cta_exclusive_sum`）+
+    `utils.cuh`/`types.cuh`/`packing.cuh`/`compile.cuh`/`exception.cuh`/`cute_tie.cuh`；架构无关，
+    H100 真机直接 include 真实头文件跑真实设备代码 ALL PASS。至此「上层 kernel → 公共设备函数」的
+    最后一层地板讲清。可再补：`common/probe.cuh`（per-warp `clock64` 追踪基础设施，当前公开版无调用点）。
   ⑰ **Mega MoE host 编排层已补齐（P32-1）**：`deep_gemm/mega/__init__.py` 的 `SymmBuffer` 生命周期 +
     `csrc/apis/mega_moe.hpp` 的 `get_symm_buffer_size_for_mega_moe`（ring 容量、12 view）+ `layout/
     mega_moe.cuh` 的 `MegaMoEBuffer` 链式字节分配 + scheduler `get_num_max_live_pool_blocks`；
@@ -2010,6 +2026,65 @@
   读完最后有效块即 `release_tmem`，`release_task_info` 提前（`:990`）；L1 分支 in-place SwiGLU
   （bf16 round，gran-8 交错权重让 gate/up 成对，`:1108-1135`）+ amax warp-pair 归约 + UE8M0
   量化（`get_ue8m0_sf_exp/inv`，`math.cuh:114-147`）+ STSM + TMA 转置上屏（就是 L2 激活）+
+  `l2_full_mask` bitmask 依赖；L2 分支 BF16 经 `sym_buffer.map` NVLink 直写远端 combine buffer；
+  combine 段 TMA 拉 top-k 贡献、fp32 累加、bf16 写 `y`。H100 数值实验 `harness/exp_ue8m0_sf.py`
+  （+`.out.txt`）：位运算 `get_ue8m0_sf_exp` 在 25009 样本（含 0/亚正规/幂次边界）上 0 不符、
+  `scale×inv` 精确为 1、幂次 scale/理想 ≤1.9977 且 0 溢出、bf16-round SwiGLU 相对误差 4.5e-3。
+  配套博客 `content/posts/mega-moe-07-mma-epilogue`。
+  P3-2：新建 `docs/09-mega-moe-mbarrier.md`——**两层解耦**（TMA↔MMA 的 full/empty，MMA↔epilogue 的
+  tmem_full/empty）+ 调度器 task 槽（task_info full/empty）的完整 mbarrier 清单与 init 计数
+  （`full.init(2*2)` / `empty.init(1)` / `tmem_empty.init(2*kNumEpilogueThreads)`，`kernel:209-285`）、
+  `advance_pipeline` 相位翻转（`:307-314`）与「生产者 phase=1（buffer 初空）」约定、
+  A/B loader 的坐标与 2-CTA multicast + FP4 half-bytes（`:690-818`）、MMA 的 UTCCP/UMMA/commit
+  （`:819-938`）、epilogue 的 `tmem_full.wait`→`release_task_info`（`:986-990`）与
+  「仅 epilogue release」的执行顺序论证、跨 SM `grid_sync` / 跨 rank `nvlink_barrier`
+  （`comm/barrier.cuh:33-92`）、L1→L2 位图依赖（`scheduler:140-166`）。H100 真机实验
+  `src/mbarrier_pipeline.cu`（`harness/exp_mbarrier_pipeline.sh` + `.out.txt`）：**实测坐实**相位约定
+  （全新 mbarrier `try_wait(parity=1)` 立即成功、`(0)` 阻塞），并量到多级流水重叠——96 MiB
+  `cp.async.bulk` 在 NSTAGES 1→4 下串行 5.58→3.44 ms（带校验 1.62×），去校验 2.29→0.79 ms
+  （2.88×，41→118 GiB/s，延迟受限）。配套博客文章 `content/posts/mega-moe-06-mbarrier`。
+  P3-1：新建 `docs/03-mega-moe-kernel.md`——一次 launch 的物理坐标（`grid=num_sms`、
+  `cluster=2`、512 线程/16 warp，`impls/sm100_fp8_fp4_mega_moe.hpp:149-198`）、BLOCK_N=128/BLOCK_K=128(fp8,bf16=64)、
+  BLOCK_M 启发式（`heuristics/mega_moe.hpp:88-127`，成本模型「M block 重载权重 ~128 行」+ 路由 `+sqrt` 余量）、
+  store block、SF 的 UTCCP 128 对齐、`get_pipeline_config_for_mega_moe` smem 预算→`num_stages`
+  （`:129-195`，`smem_capacity=232448`）、五类 warp 角色（dispatch/TMA-A/TMA-B/MMA/调度/epilogue+combine，
+  `kernel:341-948`）、寄存器两档再平衡（每档恰好 64512）。H100 真机对拍：`harness/exp_block_config.py`
+  复刻启发式并与 `deep_gemm.get_block_m_for_mega_moe` 逐点比较，9 组形状 block_m **全部一致**；
+  配套博客文章 `content/posts/mega-moe-05-kernel`。
+  （P0/P1/P2 进展见下）
+  P1-2：重写 `docs/01` §2——EP all-to-all 语义 + 「K 倍放大」通信量模型（dispatch $T{\cdot}d{\cdot}H$、
+  combine $T{\cdot}k{\cdot}H{\cdot}2$）+ 串行/重叠量化对比；新增 §2.3 **H100 实测**：
+  `harness/exp_ep_comm.py` / `.out.txt` 在 8×H100 上测 NCCL `all_to_all_single`（H=7168、EP=8），
+  渐近有效带宽 ~393 GB/s（达 `nvidia-smi nvlink` 硬件上限 ~478 GB/s 的 ~82%）、固定时延 ~50–90 us，
+  论证小 batch 延迟敏感与重叠必要性。
+  P1-1：细化 `docs/01` §1——MoE 计算图 + 三种 grouped 布局（contiguous / masked / PSUM）的真实 API 与行号，
+  解释对齐（SM90=128 / SM100=256）与 gap 行的「为什么」；新增 §1.5 H100 实测（`harness/exp_grouped_layout.py`，
+  三布局 relerr 一致 ≈3.7e-2）。
+  （P0 进展见下）
+  P0-1：读通 DeepGEMM Mega MoE 五个源文件，产出 `docs/02-mega-moe-architecture.md`（真实行号核对），P2-2/P2-3 一并覆盖。
+  P0-2：`docs/01` §5 记录仓库/版本时间线/关键结论/DeepEP 侧真实链接；`docs/02` §8 补 PR #316 EP8 基准与解读。
+  P0-3：精读 DeepEP v2.5 对称显存/dispatch/combine，产出 `docs/07-deepep-dispatch-combine.md`。
+  P0-4：在 `kernel_lab`（H100）实测 DeepGEMM 2.8.1 可用 kernel 矩阵——dense/grouped FP8、BF16、
+  **SM90 版 MoE wgrad（`k_grouped_*_nt_contiguous`）** 均 OK；`..._tn_contiguous`（wgrad TN）与
+  `fp8_fp4_mega_moe` 在 sm90 被 `gemm.hpp:369` 拒绝（SM100 专属）。DeepEP 2.5 可构建/import，
+  但 `EPBuffer` 因 NCCL 版本（PyTorch 链 2.29.7 vs 需求 ≥2.31/2.32.3）运行期段错误。
+  产出 `docs/08-h100-environment.md` + `harness/probe_h100_env.py` / `harness/probe_deepep.py`（含 *.out.txt）。
+  P2-1：补 `docs/02` §3.4——`transform_weights_for_mega_moe` 的三件事：L1 gate/up 按 8 粒度交错
+  （`mega/__init__.py:112`，配合 L1 epilogue 的 `SM100_TMEM_LOAD_16dp256b1x` 做 in-place SwiGLU，
+  kernel `:1066`-`:1134`）、SF 的 UTCCP 4x32 转置（`mega/__init__.py:129` ↔ kernel
+  `transform_sf_token_idx` `:145`-`:149`）、SM100 packed UE8M0 + MN-major SF 索引
+  （`smxx_layout.hpp:133`、kernel `:774`/`:788`）；L2 权重不交错只转 SF。实验
+  `harness/exp_weight_transform.py`（+`.out.txt`，H100）：行号映射/SwiGLU 等价/UTCCP 映射全部 0 误差，
+  与 deep_gemm 内部实现逐元素一致。**P2 全部完成。**
+
+## 阻塞
+
+- **DeepEP 运行期实验受阻（环境，非内核）**：本机 PyTorch 链接系统 **NCCL 2.29.7**，而 DeepEP 2.5 需要
+  **NCCL ≥ 2.31 的设备通信 API**（`ginSupport/ginMinStride/ginType`，`csrc/kernels/comm/context.cpp:71-142`）。
+  装 `nvidia-nccl-cu13 2.32.3` + `LD_PRELOAD` 可过 import 检查，但 `EPBuffer` 构造仍在
+  `ep.py:304` 段错误；用系统 2.29.7 头重建则编译失败。**需一个链接 NCCL ≥ 2.32.3 的 PyTorch 环境**。
+  因此在修复前，DeepEP 的 H100 dispatch/combine 实测暂不做（源码精读见 `docs/07`）。
+L2 激活）+
   `l2_full_mask` bitmask 依赖；L2 分支 BF16 经 `sym_buffer.map` NVLink 直写远端 combine buffer；
   combine 段 TMA 拉 top-k 贡献、fp32 累加、bf16 写 `y`。H100 数值实验 `harness/exp_ue8m0_sf.py`
   （+`.out.txt`）：位运算 `get_ue8m0_sf_exp` 在 25009 样本（含 0/亚正规/幂次边界）上 0 不符、
