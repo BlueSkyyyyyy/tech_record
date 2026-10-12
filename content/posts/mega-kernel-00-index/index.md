@@ -19,7 +19,7 @@ categories: ["算子开发"]
 ## 目录
 
 1. [MegaKernel 是什么：动机、定义与谱系]({{< relref "mega-kernel-01-overview" >}}) —— kernel-per-operator 的损失、定义、谱系
-2. MPK 论文精读：SM 级图表示 / 编译器 / in-kernel runtime（待写）
+2. [MPK 论文精读（一）：SM 级图表示 tGraph]({{< relref "mega-kernel-02-paper" >}}) —— task/event 交替、与 CUDA Graphs 对比
 3. 生产案例：DeepGEMM mega 家族、Kimi K3（待写）
 4. 相关技术对照：CUDA Graphs / PDL / persistent kernel（待写）
 5. 实验：launch 开销、persistent kernel、PDL（待写）
