@@ -833,11 +833,38 @@
        注明单卡 L2 强、非 ISA 保证）；B) `atomic_add` vs `red_add`/`red_add_rel` 三条求和都 =524800，
        `atomic` 返回的 1024 个旧值**互不相同** 1024/1024；C) `RingPipeline` ns∈{1,2,4,8} 40 步轨迹与 Python
        复刻**逐项 0 不符**；D) `cp_async_cg<256>`+`cg_zfill<256>`(8B) 128 块、`ca_zfill`(0/4B) 64 块 **mismatch=0**；
-       E) `ld_evict_first` 256 MiB 流式读 0.210ms/**1279 GB/s** vs 普通 `ld` 0.238ms/**1129 GB/s**（约 +13%）；
+       E)         `ld_evict_first` 256 MiB 流式读 0.210ms/**1279 GB/s** vs 普通 `ld` 0.238ms/**1129 GB/s**（约 +13%）；
        F) `cvt_relu_bf16x2` 回退 vs 独立 RNE **0/65536**、`accumulate(_square)` 与「bf16→f32 精确」一致。
        **未能测**：`redux.sync.max.f32`（SM100 专属）；`grid_sync` 整体语义需全 grid 常驻而本机 GPU 被多个
        自驱任务共享会死锁（已移除，仅源码解读）。配套博客
        `content/posts/mega-moe-38-deepgemm-ptx-primitives`（索引页新增第 38 篇）。
+
+### P29 增量（opt-in，补齐被现代 C++ 取代的 legacy grouped GEMM）
+
+- [x] **P29-1** **legacy Triton MoE grouped GEMM 家族**（`deep_gemm/legacy/`：`m_grouped_gemm.py` /
+       `a_fused_m_grouped_gemm.py` / `a_fused_k_grouped_gemm.py` / `b_fused_k_grouped_gemm.py` /
+       `tune_options.py`；`tests/test_legacy.py`、`tests/generators.py`）。第 10~13 篇拆的是现代 C++
+       的 `k_grouped`/`m_grouped`（`grouped_layout` + 强制对齐），本篇补上它**取代掉的那套 A100 时代
+       纯 Triton 兜底**——官方注释即「Legacy Triton kernels for A100」（`__init__.py:117`）。
+       **Triton 架构无关，H100 真机可跑真机实测**。
+       → `docs/39-legacy-grouped-gemm.md`（真实行号核对）：家族总览（dgrad 两个 + wgrad 两个）+
+       `tune_options.py:10-28` 的三条过滤（`get_config_smem_size<=166912` A100 预算、`BLOCK_M/K<=align`）、
+       `key=[]` + k-grouped 的 `restore_value=['d_ptr']`（因原地累加）。**核心是「分组表示」的差异**：
+       legacy 用**逐元素索引张量**（`m_indices`/`m_row_indices`/`k_indices`）做**任意 gather**，
+       现代用 `grouped_layout`（对齐连续段）。两个贯穿机制：① **BLOCK 首行定组**
+       （`m_grouped:36-40`、`a_fused_m:38-42`，首行 `-1` 整块写零）；② 对齐要求
+       （`m_grouped:72` `M%align==0`、`a_fused_k:80`/`b_fused_k:79` 非 gather 侧 `K%align==0`）。
+       **命名坐实**：`a_fused_k:53-57` 的 `rows` 索引 **A**、`b_fused_k:54-58` 索引 **B**；
+       `-1` 索引即行掩码（`(rows>=0)`）。空组 `k_start>=k_end`：`ACC=True` 保留 D / `ACC=False` 写零
+       （`a_fused_k:43-47`）。legacy **不裁每组 K 尾块**（`test_legacy.py:54`）→ 强制 `k_alignment==128`、
+       `ACC=True`、fp32 输出。H100 实测 `harness/exp_legacy_grouped_gemm.{py,sh,out.txt}`：**16/16 PASS**——
+       `m_grouped` 有效行**逐位**等于参考 + padding 全零；identity `m_row_indices` 与 `m_grouped`
+       **逐位相等**、置换 `m_row_indices` 复现任意逐行 gather（calc_diff 1.8e-10）、block 首行 `-1` 整块写零；
+       `a_fused_k`/`b_fused_k` identity **逐位相等**、非 identity 分别坐实「索引 A / 索引 B」、`-1` 掩码生效；
+       空组两种 `ACC` 语义；`M%align`/非 gather 侧 `K%align` 被断言拒绝。性能（Triton sm90）：
+       m-grouped `4096^3`（G=8）**142.9 TFLOPS**、k-grouped `K=16384`（G=4）**107.7 TFLOPS**
+       （官方更大形状 m-grouped 285–361、k-grouped 104–109）。配套博客
+       `content/posts/mega-moe-39-legacy-grouped-gemm`（索引页新增第 39 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -863,8 +890,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P28 各增量完成（P15-1…P24-1、P25-1、P26-1、P27-1、P28-1）。**
-  本轮 P28-1：新建 `docs/38-deepgemm-ptx-primitives.md`（+`src/ptx_primitives.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P29 各增量完成（P15-1…P24-1、P25-1、P26-1、P27-1、P28-1、P29-1）。**
+  本轮 P29-1：新建 `docs/39-legacy-grouped-gemm.md`（+`harness/exp_legacy_grouped_gemm.{py,sh,out.txt}`）
+  ——补上第 10~13 篇拆的**现代 C++ grouped GEMM 取代掉的那套 A100 时代纯 Triton 兜底**（`deep_gemm/legacy/`，
+  官方注释即「Legacy Triton kernels for A100」，`__init__.py:117`）。核心是**「分组表示」的差异**：
+  legacy 用**逐元素索引张量**（`m_indices`/`m_row_indices`/`k_indices`）做**任意 gather**，现代用
+  `grouped_layout`（对齐连续段）；两个贯穿机制——**BLOCK 首行定组**（首行 `-1` 整块写零）与
+  `M%128==0`/非 gather 侧 `K%128==0` 的对齐。家族 = dgrad 两个（`m_grouped`、A 逐行 gather 的 `a_fused_m`）
+  + wgrad 两个（`a_fused_k`/`b_fused_k` 分别 gather A/B，命名坐实）；`-1` 索引即行掩码、空组两种 `ACC` 语义、
+  原地累加需 `restore_value=['d_ptr']`、不裁 K 尾块（强制 `k_alignment==128`/`ACC=True`/fp32）。**Triton 架构无关，
+  H100 真机**跑真实设备代码 **16/16 PASS**（identity 与 `m_grouped` 逐位相等、`a_fused_k`/`b_fused_k` 逐位相等、
+  置换 gather、block 首行 -1 写零、掩码、空组全复现）；性能 m-grouped ~143 / k-grouped ~108 TFLOPS。
+  行号全部核对过。配套博客 `content/posts/mega-moe-39-legacy-grouped-gemm`（索引页新增第 39 篇）。
+  上一轮 P28-1：新建 `docs/38-deepgemm-ptx-primitives.md`（+`src/ptx_primitives.cu`、
   `harness/exp_ptx_primitives.{sh,out.txt}`）——补上前面 0~27 篇**上层 kernel 全都踩、却从没系统讲过**的
   **裸 PTX 原语层**（`ptx/{ld_st,utils,tma}.cuh`、`common/{tma_copy,ring_pipeline}.cuh`、`comm/barrier.cuh`）。
   Mega MoE 的 dispatch/combine 正确性全系于此：combine 用 `st_rel_sys`/`ld_acq_sys`（**sys 作用域**跨 rank）发布
@@ -1085,13 +1123,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P28 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+- **下一步**：P0~P29 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
   P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子、
   P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel、P23-1 DeepJIT 编译/缓存/加载/发射管线、
   P24-1 SM 局部域探针与内存域分配、P25-1 SM100 FP8/FP4 稠密 GEMM 主 kernel、
   P26-1 SM100 BF16 主 kernel 与 `set_tc_util`、P27-1 测试参考量化器 FP8/FP4 block-scale 语义、
-  P28-1 PTX 原语底座（内存序/原子/搬运/warp 通信））。
+  P28-1 PTX 原语底座（内存序/原子/搬运/warp 通信）、P29-1 legacy A100 Triton grouped GEMM 家族）。
   后续若继续（均为增量、非承诺）：
+  ⑮ **legacy Triton MoE grouped GEMM 已补齐（P29-1）**：`deep_gemm/legacy/` 的四个 kernel
+   （dgrad `m_grouped`/`a_fused_m`、wgrad `a_fused_k`/`b_fused_k`）与「显式索引 gather」语义、
+   与现代 C++（`grouped_layout`+对齐）的对照表；Triton 架构无关。可再补：`deep_gemm/testing/`
+   基准设施（`bench_kineto`/`calc_diff` 判据）、`deep_gemm/utils/dist.py` 的 `uneven_all_gather`。
   ⑭ **「稠密 GEMM 主 kernel」矩阵已补齐（P26-1）**：SM90 FP8/1D1D-1D2D（P22）、SM90 BF16（P19）、
    SM100 FP8/FP4（P25）、SM100 BF16（P26）四格齐全；并拆清 `set_tc_util` 这一从 Python 直通模板参数的
    tensor-core 节流开关（只有 SM100 BF16 实现）。可再补 SM100 BF16 的 `kSwapAB` dgrad 分支数值细节，
