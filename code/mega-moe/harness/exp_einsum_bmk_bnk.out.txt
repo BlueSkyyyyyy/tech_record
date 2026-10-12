@@ -1,0 +1,63 @@
+NVIDIA H100 80GB HBM3, 9.0
+==============================================================================
+H100 sm90  num_sms=132  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+==============================================================================
+
+[A] 语义: D[m,n] = sum_b sum_k A[b,m,k] B[b,n,k]  vs torch.bmm(...).sum(0)
+     s     m     n     k    dtype      reldiff num_mn  num_sk split   grid
+   129   128   384   128     FP32    3.856e-07      3     258     6    129
+   129   128   384   128     BF16    3.522e-03      3     258     6    129
+   129   256   256   256     FP32    7.394e-07      4     516    16    132
+   129   256   256   256     BF16    2.727e-03      4     516    16    132
+   129   384   128   384     FP32    8.125e-07      3     774    18    129
+   129   384   128   384     BF16    2.164e-03      3     774    18    129
+  4096   128   384   128     FP32    1.306e-05      3    8192   187    132
+  4096   128   384   128     BF16    2.250e-03      3    8192   187    132
+  4096   256   256   256     FP32    2.792e-05      4   16384   497    132
+  4096   256   256   256     BF16    3.280e-03      4   16384   497    132
+  4096   384   128   384     FP32    3.860e-05      3   24576   559    132
+  4096   384   128   384     BF16    2.932e-03      3   24576   559    132
+  8192   128   384   128     FP32    2.990e-05      3   16384   373    132
+  8192   128   384   128     BF16    2.927e-03      3   16384   373    132
+  8192   256   256   256     FP32    7.698e-05      4   32768   993    132
+  8192   256   256   256     BF16    2.648e-03      4   32768   993    132
+  8192   384   128   384     FP32    8.175e-05      3   49152  1118    132
+  8192   384   128   384     BF16    2.173e-03      3   49152  1118    132
+
+[B] 等价于把 (b,k) 展平成收缩轴的普通 GEMM: D == A.view(m,s*k) @ B.view(n,s*k).T
+  s=  512 m=256 n=256 k=256: reldiff(einsum, flattened-gemm) = 5.109e-06
+  s= 4096 m=384 n=128 k=384: reldiff(einsum, flattened-gemm) = 2.141e-04
+  s=  129 m=128 n=384 k=128: reldiff(einsum, flattened-gemm) = 1.157e-06
+
+[C] 等价于「s 个 rank 各算部分 wgrad P_r=A_r@B_r^T 再求和」（MoE EP 归约模型）
+  s=8 ranks: reldiff(einsum, sum_r P_r) = 2.274e-07
+  朴素 [s,m,n] fp32 中间量 = 1.6 MB；融合输出 D = 0.197 MB （省 8x 显存）
+
+[D] 非确定性：split-K 用 atomicAdd(float2)，fp32 累积顺序不固定
+  shape s=8192 m=256 n=256 k=256 -> (num_mn,num_sk,split,grid)=(4, 32768, 993, 132)
+  20 次运行 vs 首次: bit 级不同元素数 min/median/max = 47726/52780/53229 (总 65536)
+  非确定性幅度 max rel = 3.217e-07（数值上可忽略，但逐位复现不可保证）
+  对比 torch 求和（无 atomic 竞争）两次运行 bit 不同 = 0（恒为 0）
+
+[E] 性能（FLOPs = 2*s*m*n*k）
+     s     m     n     k |  einsum us   TFLOPS     GB/s |   torch us      x | flatgemm us
+   129   128   384   128 |       10.7      152     1604 |      122.1  11.45 |        21.9
+  4096   256   256   256 |      759.2      181     1415 |     6925.5   9.12 |      2269.5
+  8192   384   128   384 |     2543.2      122     1267 |    18339.6   7.21 |      5716.0
+  8192   256   256   256 |     1645.6      167     1305 |    13811.9   8.39 |      4533.8
+  4096   512   512   128 |      921.5      298     1166 |    11811.1  12.82 |      2121.1
+  4096  1024  1024    64 |     1670.5      329      645 |    31504.0  18.86 |      2839.3
+
+[F] 参数契约（host 端 DG_HOST_ASSERT）
+  k=96 (k%64!=0): 被拒 -> Assertion error (csrc/apis/../jit_kernels/impls/sm90_bmk_bnk_mn.hpp:24): k % blo
+  m=96 (m%64!=0): 被拒 -> Assertion error (csrc/apis/../jit_kernels/impls/sm90_bmk_bnk_mn.hpp:25): m % 64 
+  n=96 (n%64!=0): 被拒 -> Assertion error (csrc/apis/../jit_kernels/impls/sm90_bmk_bnk_mn.hpp:25): m % 64 
+  fp32 c!=d: 被拒 -> Assertion error (csrc/apis/einsum.hpp:26): c->data_ptr() == d.data_ptr() and c->
+  bf16 with c: 被拒 -> Assertion error (csrc/apis/einsum.hpp:29): not c.has_value()
+  d 形状 (128,128) 但实际 (m,n)=(64,64): d[64:,:] 全零 = True（m,n 取自 a/b，d 形状不校验）
+
+[G] PDL：deep_gemm.set_pdl(True) 前后语义/性能
+  set_pdl(False): reldiff=3.485e-05  818.5 us
+  set_pdl(True): reldiff=3.485e-05  756.6 us
+
+完成。

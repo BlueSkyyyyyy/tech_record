@@ -212,6 +212,26 @@
       ⑥ 性能大 M 达 2848 GB/s ≈ HBM 峰值 85%、AI≈17–31 → **访存受限**。配套博客
       `content/posts/mega-moe-16-hc-prenorm-gemm`（索引页新增第 16 篇）。
 
+### P8 增量（opt-in，扫 DeepGEMM 其余未覆盖算子）
+
+- [x] **P8-1** einsum `bmk,bnk->mn` 批归约 GEMM（跨 batch/rank 的 wgrad 融合，**有 SM90 实现，本机可跑**）。
+      → `docs/17-einsum-batch-reduced-gemm.md`（真实行号核对）：DeepGEMM 硬编码 einsum 家族总览
+      （`einsum.hpp:166-178` 四分派、`:22-58` bmk 入口、`:147` FP8 跨 batch wgrad 仅 cuBLASLt）；
+      `bmk_bnk_mn` 契约（fp32 `c==d` `:25-26` / bf16 走 fp32 workspace `:28-38` / `m,n,k` 取自 a,b
+      **d 形状不校验**）；SM90 host 调度 `sm90_bmk_bnk_mn.hpp`（block 128x128x64 `:19-25`、
+      split_factor `:32-35`、流水级数 `:38-53`、2D `[s*m,k]` TMA 描述符 `:64-65`）；SM90 kernel
+      `sm90_bmk_bnk_mn.cuh`（warp 角色/寄存器再平衡 `:84-85`、block 索引+`:94` 尾分片、
+      `:97` **PDL** `cudaGridDependencySynchronize`、TMA 生产者 `s_idx*SHAPE` 折算 batch `:104-124`、
+      WGMMA `:130-158`、epilogue **`atomicAdd(float2)` 归约到 D** `:160-174`）；SM100 变体**仅分析**
+      （`:255` **TMA reduce-add** 取代 atomicAdd、tcgen05/TMEM `:131-183/245-248`、单 warpgroup）。
+      H100 实测 `harness/exp_einsum_bmk_bnk.{py,sh,out.txt}`：① 语义 vs `bmm+sum` FP32 3.9e-7~7.7e-5、
+      BF16 ~3e-3；② **坐实「batch 并入收缩轴」**（vs `A.permute(1,0,2).reshape(m,s*k)@...` 1e-6~2e-4）
+      与**「部分 wgrad 再求和」**（s=8 rank 模型 2.8e-7、省 8x 显存）；③ **非确定性**：split=993 时
+      20 次运行 6.5 万个输出里 ~5.2 万 bit 级抖动、幅度 4e-7（对照 torch.sum 恒 0）；④ 性能
+      比 torch 朴素快 **7~18x**、`m=n=1024` 达 **314 TFLOPS**、`m=n=256` 因 num_mn=4 原子竞争仅
+      165 TFLOPS、GB/s 616~1599；⑤ 契约 k/m/n%64 被拒（hpp:24/25）、`d` 形状不校验；⑥ PDL on/off
+      语义一致、耗时噪声级（`:97` 太早同步）。配套博客 `content/posts/mega-moe-17-einsum-batch-reduced-gemm`。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -236,19 +256,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0/P1/P2/P3/P4/P5/P6 全部完成；P7-1（反向性能归因）、P7-2（HC prenorm GEMM）完成。**
-  本轮 P7-2：新建 `docs/16-hc-prenorm-gemm.md`（+`harness/exp_hc_prenorm_gemm.{py,sh,out.txt}`）——
-  拆解 HyperConnection 的 `tf32_hc_prenorm_gemm`（**有 SM90 实现，H100 可跑**）：把 mHC 的
-  「mix 系数投影 `D=A·Bᵀ`」与「RMSNorm 平方和 `S=ΣA²`」融进一个 TF32 kernel，S 在 A 的 bf16→fp32
-  搬运处顺路累加（`sm90_...cuh:179-203`）。H100 实测：**TF32 对 fp32 操作数是 RNE 而非截断**
-  （比截断小 ~30×）；S rel 8.3e-7；融合 166.7us vs torch 3674us；split-K 可加性 1.6e-5、小 M 1.5→5.4
-  TFLOPS；大 M 达 HBM 峰值 85%、AI≈17–31 → **访存受限**。配套博客
-  `content/posts/mega-moe-16-hc-prenorm-gemm`（索引页新增第 16 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P6、P7-1/P7-2 已完成。后续若继续（均为增量、非承诺）：
+- 当前进度：**P0/P1/P2/P3/P4/P5/P6 全部完成；P7-1/P7-2、P8-1 完成。**
+  本轮 P8-1：新建 `docs/17-einsum-batch-reduced-gemm.md`（+`harness/exp_einsum_bmk_bnk.{py,sh,out.txt}`）
+  ——拆解 DeepGEMM 硬编码 einsum `bmk,bnk->mn`（**有 SM90 实现，H100 可跑**）：它是
+  MoE wgrad 归约树的最后一环「跨 batch/rank 的权重梯度融合」`D[m,n]=Σ_b Σ_k A[b,m,k]B[b,n,k]`。
+  SM90 用 split-K + `atomicAdd(float2)` 把各分片部分和直接归约到全局 D（`:160-174`），
+  SM100 换成 TMA reduce-add（`:255`，仅分析）。H100 实测：坐实「batch 并入收缩轴」
+  （vs 展平 GEMM 1e-6~2e-4）与「部分 wgrad 再求和」（s=8 rank 2.8e-7、省 8x 显存）；
+  split=993 时 **6.5 万输出 ~5.2 万 bit 级抖动**（atomicAdd 非确定性，幅度 4e-7）；
+  比 torch 朴素快 **7~18x**、`m=n=1024` 达 **314 TFLOPS**。配套博客
+  `content/posts/mega-moe-17-einsum-batch-reduced-gemm`（索引页新增第 17 篇）。Hugo 构建 0 ERROR。
+- **下一步**：P0~P8 已完成。后续若继续（均为增量、非承诺）：
+  ① **einsum 家族其余分支**：`bhr,hdr->bhd` / `bhd,hdr->bhr`（MLA 投影，SM90 可跑）与
+   FP8 `fp8_einsum`（SM100 专属，仅分析）；
   ② **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
-  并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）；
+   并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）；
   ③ **Mega MoE 端到端**：需 SM100 机器，当前不可行；
-  ④ 可继续扫 DeepGEMM 其余未覆盖算子（如 `einsum.hpp`、attention 系列）。
+  ④ attention 系列（`fp8_fp4_mqa_logits` 等，DeepSeek 稀疏注意力）。
   若无新指令，可视为专题完结。
 
   （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。
