@@ -218,6 +218,22 @@
       划分；~1.1µs 硬屏障地板解释了生产 mega-kernel 为何用异步原子 ring barrier/去中心化
       event queue。正确性：三种网格 sink[0]=12288 一致。
 
+### P11 单 task device 实现源码走读（`docs/07-mpk-tasks.md`）
+
+- [x] **P11-1** MPK 单 task device 实现走读（Hopper）：补齐 `docs/06` 停在「worker 调用
+      `_execute_task`」的下一层——**一个 task 内部是一段怎样的 device 代码**。见
+      `docs/07-mpk-tasks.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与 `docs/06`
+      同快照）。§0 编译层映射（`task_register.cc:1181-1318`：形状→编译期常量→TMA 类型别名→
+      `linear_kernel_hopper<...>` 调用，一个 task = 一个 CTA）；§1 `linear_hopper.cuh` 精读
+      （warp specialization 生产者/消费者、`Kstages` K/N 双重流水、TMA+mbarrier transaction-count、
+      swizzled `smem_tma`/`mma_descriptor`、wgmma、寄存器内残差融合）；§2 支撑原语
+      （`barrier.cuh` mbarrier / `tma.cuh` / `wgmma.cuh` / `utils.cuh` setmaxnreg（被注释））；
+      §3 异构 task 形态（`rmsnorm_hopper` cp.async 归约 / `silu_mul_hopper` 纯逐元素 /
+      `allreduce.cuh` NVSHMEM 通信 task / `norm_linear_hopper` 段内融合）；§4 task 内同步
+      （mbarrier）vs task 间同步（原子队列）两套机制；§5 与论文 §4.2/§5.3 对照 + 实现延伸
+      （wait_group 0 流水浅、单 warp 发 TMA、纯 superoptimization→手写/CUTLASS 混合）；§6 判据映射
+      （task 层只贡献 C3）。**纯源码走读（资料分析），本轮无新实验**。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -245,8 +261,10 @@
   **P7 源码走读（1/1）完成**（本轮新增，对应「下一步」可选方向③）。
   **P8 博客发布（1/1）完成**（本轮新增，对应「下一步」可选方向①）。
   **P9-1 实验扩展（1/1）完成**（对应「下一步」可选方向②）。
-  **P10-1 实验扩展 2（1/1）完成**（本轮新增，续做「下一步」可选方向②中剩余的两点）。
-  **本专题任务清单（P0–P10）全部完成**，无未完成子项。
+  **P10-1 实验扩展 2（1/1）完成**（续做「下一步」可选方向②中剩余的两点）。
+  **P11-1 单 task device 实现走读（1/1）完成**（本轮新增，对应「下一步」可选方向③「走读
+  `tasks/hopper/` 具体 task 的 device 实现」）。
+  **本专题任务清单（P0–P11）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -295,13 +313,30 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P10 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`
-  补建对应博客 post~~（P8-1 已完成）；② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的
-  「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；**本轮 P10-1 完成
-  P5-1 §1.6「扫 persistent 网格大小」**；仍可补的是 P5-3 §3.6「多 block PDL 资源约束」——
+- **下一步：无**（P0–P11 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
+  补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；**本轮 P11-1 同时补建 `mega-kernel-08-mpk-tasks`**）；
+  ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
+  **P10-1 完成 P5-1 §1.6「扫 persistent 网格大小」**；仍可补的是 P5-3 §3.6「多 block PDL 资源约束」——
   P10-1 §5.5 已给多 block 网格资源可行的旁证）；
-  ③ 在容器内 `pip install -e .` 构建 mirage sm90 路径并跑 `demo/qwen3/demo.py --use-mirage`
-  取本机 MPK 端到端数字，或继续走读 `tasks/hopper/*.cuh` 单 task 内部实现（P7-1 已走通运行层骨架，见 `docs/06`）。
+  ③ ~~走读 `tasks/hopper/*.cuh` 单 task 内部实现~~（**本轮 P11-1 完成**）；剩「在容器内 `pip install -e .`
+  构建 mirage sm90 路径并跑 `demo/qwen3/demo.py --use-mirage` 取本机 MPK 端到端数字」（构建成本高，未做）。
+- **本轮（P11-1）**：新建 `docs/07-mpk-tasks.md`（MPK 单 task device 实现走读，**纯源码走读，无新实验**）
+  + 博客 post `mega-kernel-08-mpk-tasks`（weight 9）并更新 `mega-kernel-00-index` 目录第 8 项。
+  快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`（与 `docs/06` 同一快照，行号已核对）。
+  补齐 `docs/06` 停在「worker 调用 `_execute_task`」的下一层：§0 编译层映射
+  （`task_register.cc:1181-1318`，形状→`Kstages`/`output_atom_size`/TMA 类型别名→
+  `linear_kernel_hopper<...>` 调用；**一个 task = 一个 CTA**，Hopper 256 线程恰好铺满 worker block）；
+  §1 `linear_hopper.cuh` 精读（warp specialization：生产者单 warp lane0 发 TMA + mbarrier
+  transaction-count 预取 A/B/残差 `:219-260`，消费者 wgmma + swizzled descriptor `:274-308`，
+  **寄存器内融合残差** `:331-339`，TMA store 回写 `:342-357`；`Kstages=3/6` 做 K/N 双重流水）；
+  §2 支撑原语（`barrier.cuh` mbarrier、`tma.cuh`、`wgmma.cuh`、`utils.cuh` setmaxnreg **被注释**）；
+  §3 异构 task 形态（`rmsnorm_hopper` cp.async 两级归约、`silu_mul_hopper` 纯逐元素、
+  `allreduce.cuh` NVSHMEM 通信 task、`norm_linear_hopper` 段内融合）；§4 **task 内同步（mbarrier）
+  与 task 间同步（原子队列 + 事件计数器）是两套机制**，论文 §5.3 cross-task pipelining 由运行层负责；
+  §5 与论文 §4.2（行 1126–1146）/§5.3（行 1312–1368）对照 + 实现延伸（`mma_async_wait` wait_group 0
+  流水浅、单 warp 发 TMA、论文「纯 superoptimization」线上演化为手写模板 + CUTLASS 封装混合）；
+  §6 判据映射（**task 层只贡献 C3**，C1/C2 由运行层、C4/C5 由 worker/scheduler 给）。
+  与生产案例对照：`linear_hopper` 是 DeepGEMM mega 家族「单 task 尺度」的对应物（`docs/02` §1）。**P11 完成。**
 - **本轮（P10-1）**：`docs/04-experiments.md` 新增 §5「persistent kernel 的网格大小与设备内协调成本」——
   新建 `src/grid_sweep.cu` + `harness/grid_sweep.out.txt`（目标卡 H100/sm90，threads=256，iters=200），
   补齐 P5-1 §1.6（网格未扫）与 P0-3/P5-2（只测过一个网格点的屏障成本）。三个子实验：
