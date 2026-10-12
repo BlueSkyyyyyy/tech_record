@@ -619,6 +619,40 @@
       **逐位 0/8192、0/256**（极端行 SF exp=128、全零组=地板 105），ALL PASS。
       配套博客 `content/posts/mega-moe-31-sm100-gemm-epilogue-operators`（索引页新增第 31 篇）。
 
+### P22 增量（opt-in，补齐 SM90 FP8 稠密 GEMM 的两个主 kernel）
+
+- [x] **P22-1** **SM90 FP8 dense GEMM 主 kernel：1D1D vs 1D2D**
+      （`deep_gemm/include/deep_gemm/impls/sm90_fp8_gemm_1d1d.cuh` / `sm90_fp8_gemm_1d2d.cuh`；
+      `csrc/jit_kernels/impls/sm90_fp8_gemm_1d1d.hpp` / `sm90_fp8_gemm_1d2d.hpp`；
+      `csrc/apis/gemm.hpp` / `layout.hpp`；`heuristics/sm90.hpp`；`mma/sm90.cuh`；`scheduler/gemm.cuh`）。
+      第 29 篇补了 SM90 BF16 主 kernel，但 DeepGEMM 立身的 **FP8** 在 SM90 上是**两个**主 kernel，
+      前面 10/12/13/21/25 篇只各碰片段。**H100 可跑，真机实测**。
+      → `docs/32-sm90-fp8-gemm.md`（真实行号核对）：**同一数学 `D=(A·sfa)@(B·sfb)ᵀ`，只差 SFB 粒度**——
+      `1D1D`（A/B 都 per-token 1D scale，`gran_n=1`；D=**float 且必须 accumulate** `hpp:84`；
+      GemmType∈{Normal,KGroupedContiguous} `cuh:52`）与 `1D2D`（SFA per-token + SFB **per-128×128 块**
+      `gran_n=128`；D=**bf16 禁 accumulate** `hpp:81`；GemmType∈{Normal,MGrouped(contig/psum/masked),Batched}）。
+      **分派** `gemm.hpp:117-126` 按 `gran_n==1?1d1d:1d2d`；SM90 默认 recipe `(1,128,128)`（
+      `utils/layout.hpp:86-98`）→ 稠密默认 **1D2D**，wgrad K 分组恒 1D1D（`gemm.hpp:239/309/422`）。
+      **1D2D kernel**：`BLOCK_K==128` per-128 scaling `:56`、BF16 D `:62`、「too much B scales」
+      `:57-59`、SFB 单份非流水 `:119`、empty barrier 计数 `multicast*math/32` `:134`、第三 TMA warp
+      elect-one `:171`、B scale 由 **math warp 从 global 直读** `:239-248`、`num_former_iters` 处理
+      BLOCK_N 跨 scale 组 `:230-235`、predicate 选 `scale_b_0/1` `:331-345`、STSM+swizzle+TMA store
+      `:378-440`。**1D1D kernel**：`kNumTMAThreads==128` `:50`、多看一块 tensormap `:68`、
+      **K 分组原地改 tensormap**（`tensor_map_replace_global_addr/inner_dim_stride` `:198-201` +
+      commit/wait + release/acquire `:204-216`，即第 12 篇）、unroll 控制/寄存器重配
+      `:150-154`、每 k 重算 descriptor `:303`、fp32 裸 `st.shared` `:334-340`、
+      **`SM90_TMA_REDUCE_ADD_2D`** `:346-348`（必须 fp32+累加之根）。**十处差异对照表** + 选核
+      （fp32 输出 `block_n` 起点 24/上限 160、bf16 上限 192，`sm90.hpp:42-54`；fp32 输出无 `block_m=256`
+      `:29-30`）。H100 实测 `harness/exp_fp8_sm90_gemm.{py,sh,out.txt}`：① profiler 抓真实 kernel——
+      默认稠密 `sm90_fp8_gemm_1d2d_impl<…,256,128,128,…,3,128,256,2,true,132,…,bfloat16_t>`、
+      `recipe=(1,1,128)+acc` → `sm90_fp8_gemm_1d1d_impl<…,128,152,128,…,4,…,float>`（`BLOCK_N=152`
+      正是 fp32 避 bank conflict 分支）；② 契约精确拦在 `hpp:84`（1d1d 无 c/bf16）与 `hpp:81`
+      （1d2d+accumulate）；③ 语义 vs 反量化 fp32 参考：1d2d ~6.9e-4（bf16 输出舍入）、1d1d ~1.27e-4
+      （fp32 输出，仅 FP8 量化误差）；④ **交叉验证**：把 1d2d 的块 scale 广播成 per-column 喂 1d1d，
+      三个形状输出**逐位相等（relerr=0.000e+00）**，坐实「只差 SFB 粒度」；⑤ 性能 1d2d 恒快 ~1.5×
+      （4096×7168×7168：**1407 vs 957 TFLOPS**；bf16/无 reduce-add/BLOCK_M=256/SFB 直读）。配套博客
+      `content/posts/mega-moe-32-sm90-fp8-gemm`（索引页新增第 32 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -643,8 +677,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P21 各增量完成（P15-1、P16-1、P17-1、P18-1、P19-1、P20-1、P21-1）。**
-  本轮 P21-1：新建 `docs/31-sm100-gemm-epilogue-operators.md`
+- 当前进度：**P0~P14 全部完成；P15~P22 各增量完成（P15-1、P16-1、P17-1、P18-1、P19-1、P20-1、P21-1、P22-1）。**
+  本轮 P22-1：新建 `docs/32-sm90-fp8-gemm.md`
+  （+`harness/exp_fp8_sm90_gemm.{py,sh,out.txt}`）——补齐第 29 篇（SM90 **BF16** 主 kernel）的另一半：
+  DeepGEMM 立身的 **FP8** 在 SM90 上是**两个**主 kernel。一句话结论：**两者算同一数学
+  `D=(A·sfa)@(B·sfb)ᵀ`，只差 B 的 block-scale 粒度**——`1D1D` 是 A/B 都 per-token（`gran_n=1`），
+  D=**float 且必须 accumulate**（`sm90_fp8_gemm_1d1d.hpp:84`）、支持 Normal/KGroupedContiguous（即 wgrad，
+  用 `SM90_TMA_REDUCE_ADD_2D` 累加 `cuh:346`）；`1D2D` 是 B per-128×128 块（`gran_n=128`），
+  D=**bf16 禁 accumulate**（`sm90_fp8_gemm_1d2d.hpp:81`）、支持 Normal/MGrouped/Batched（即 dgrad）。
+  分派在 `gemm.hpp:117-126`（`gran_n==1?1d1d:1d2d`），SM90 默认 recipe `(1,128,128)`
+  （`utils/layout.hpp:86-98`）→ 普通稠密默认 **1D2D**。逐段精读两个 kernel（1D2D：SFB 单份非流水、
+  B scale 由 math warp 从 global 直读、`num_former_iters` 处理跨 scale 组、STSM+swizzle＋TMA store；
+  1D1D：K 分组原地改 tensormap、unroll 控制、fp32 裸 `st.shared`＋TMA reduce-add），并给「十处差异」对照表。
+  **H100 真机**：profiler 抓到两 kernel 的真实模板实参（`BLOCK_M/N`、stages、multicast，`BLOCK_N=152`
+  正是 fp32 避 bank conflict 分支）；契约精确拦在 `hpp:84`/`hpp:81`；语义 vs 反量化参考 1d2d ~6.9e-4
+  （bf16 舍入）/1d1d ~1.27e-4（fp32 输出）；**交叉验证**把 1d2d 块 scale 广播成 per-column 喂 1d1d，
+  逐位 0 误差；性能 1d2d 恒快 ~1.5×（4096×7168×7168 **1407 vs 957 TFLOPS**）。行号全部核对过。
+  配套博客 `content/posts/mega-moe-32-sm90-fp8-gemm`（索引页新增第 32 篇）。
+  上一轮 P21-1：新建 `docs/31-sm100-gemm-epilogue-operators.md`
   （+`src/epilogue_operators.cu`、`harness/exp_epilogue_operators.{sh,out.txt}`）
   ——补齐第 27 篇「何时不用自家 kernel（cuBLASLt 回退）」的另一半：**用自家 kernel 时 SM100 GEMM
   的尾部**。这是一套**所有 SM100 GEMM 共用的可插拔 epilogue**：host `EpilogueClass`
@@ -763,9 +813,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P21 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
-  P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子）。
+- **下一步**：P0~P22 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+  P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子、
+  P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel）。
   后续若继续（均为增量、非承诺）：
+  ⓪ **SM90 kernel 覆盖已接近完整**：FP8（1D1D/1D2D，P22-1）、BF16（P19-1）、wgrad/dgrad grouped
+  （P4-2/P4-3）、MQA logits（P19/P20）、einsum（P8/P11）、prenorm（P7-2）、SF 布局（P15/P16）
+  均已系统拆解；可补的 SM90 缺口已很少（如 `sm90_tf32_hc_prenorm_gemm`、`sm90_bmk_bnk_mn` 的更细粒度）。
   ① **sparse attention 系列（P12/P13/P14/P20 已开）**：SM90 dense + SM90 分页调度器、SM100 sparse、
   SM100 dense 连续版/分页版调度器均已做；可再补 `sm100_mqa_logits.cuh` SIMT epilogue 的更多数值特性，或
   `impls/sm100_sparse_mqa_logits.cuh` 主 kernel 的 TMA 快路 / 尾裁剪细节精读；
@@ -782,9 +836,12 @@
     kernel 时怎么配」都已讲清。
    ⑧ **SM90 BF16 主 kernel**：P19-1 已完成（五种 `GemmType` 一套 kernel、合并 stage、两种输出 dtype、
     TMA reduce-add；H100 六类入口实测）。与 P10-1（SM100 BF16 mega moe）、P20 篇互补，BF16 路径补齐。
-   ⑨ **SM100 GEMM epilogue store 路径与四算子**：P21-1 已完成（`EpilogueClass` 选择 + 无状态算子 +
-   共享 store 路径；随机舍入四元组哈希/无偏性、`QuantizeToFP8` D/SFD 逐位对拍；H100 抽取真实设备代码）。
+    ⑨ **SM100 GEMM epilogue store 路径与四算子**：P21-1 已完成（`EpilogueClass` 选择 + 无状态算子 +
+    共享 store 路径；随机舍入四元组哈希/无偏性、`QuantizeToFP8` D/SFD 逐位对拍；H100 抽取真实设备代码）。
     至此「何时不用自家 kernel / 怎么配 / 尾部干什么」三问都已讲清。
+    ⑩ **SM90 FP8 两个主 kernel（1D1D/1D2D）**：P22-1 已完成（同一数学、只差 SFB 粒度；分派规则、
+    十处差异对照、两个 kernel 逐段精读；H100 真机抓 kernel 实参 + 交叉验证逐位 0 误差 + 性能 ~1.5×）。
+    与 P19-1（BF16）、P4-2/P4-3（wgrad/dgrad）、P11（FP8 einsum）互补，**SM90 FP8 主 kernel 路径补齐**。
     若无新指令，可视为专题完结。
 
   （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。
