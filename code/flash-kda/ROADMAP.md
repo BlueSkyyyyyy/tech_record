@@ -84,7 +84,7 @@
 ### P7 性能与剖析（`docs/07-perf.md`）
 
 - [x] **P7-1** FlashKDA forward CUPTI 计时（不同 T/H），与 FLA 对比。
-- [ ] **P7-2** `ncu` 剖析 K1/K2 bound（smem/TensorCore/occupancy），逐项证据。
+- [x] **P7-2** `ncu` 剖析 K1/K2 bound（smem/TensorCore/occupancy），逐项证据。
 
 ### P8 小结 / 一页纸
 
@@ -112,7 +112,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0/P1/P2/P3 全部完成，P4 全部完成（前向 kernel vs fp64 golden 两方对拍 + golden/FlashKDA/FLA 三方对拍，多 shape/seed/门控区间）；**P5-1/P5-2/P5-3/P5-4 完成**（反向 adjoint 推导 + 不依赖 autograd 的显式参考实现 + 三方数值核验 + 与 FLA chunked 反向 bf16 对拍 + chunked backward 分块化推导/实现）；**P6-1/P6-2 完成**（FLA Triton 反向 5 kernel 精读 + 记号映射实测 + 目标卡 CUDA 反向设计；并在 H100 上写出最小可运行 Triton **B1 状态伴随 kernel**，与 FLA `dhu`/`src/kda_bwd_ref.py` 三方对拍，见 `docs/06` §5/§6）；**P7-1 完成**（FlashKDA 前向 vs FLA `chunk_kda` 统一口径实测：CUPTI device + wall，扫 T/H/B，见 `docs/07`）。
+- 当前进度：P0/P1/P2/P3 全部完成，P4 全部完成（前向 kernel vs fp64 golden 两方对拍 + golden/FlashKDA/FLA 三方对拍，多 shape/seed/门控区间）；**P5-1/P5-2/P5-3/P5-4 完成**（反向 adjoint 推导 + 不依赖 autograd 的显式参考实现 + 三方数值核验 + 与 FLA chunked 反向 bf16 对拍 + chunked backward 分块化推导/实现）；**P6-1/P6-2 完成**（FLA Triton 反向 5 kernel 精读 + 记号映射实测 + 目标卡 CUDA 反向设计；并在 H100 上写出最小可运行 Triton **B1 状态伴随 kernel**，与 FLA `dhu`/`src/kda_bwd_ref.py` 三方对拍，见 `docs/06` §5/§6）；**P7-1 完成**（FlashKDA 前向 vs FLA `chunk_kda` 统一口径实测：CUPTI device + wall，扫 T/H/B，见 `docs/07`）；**P7-2 完成**（`ncu` 逐 kernel 剖析 K1/K2 bound：TensorCore 均非瓶颈、放大后都撞 L2 带宽、K1 次瓶颈是 barrier+smem 冲突、K2 被 smem 钉在 2 CTA/SM，见 `docs/07` §5）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -199,9 +199,26 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：P7-2**（`ncu` 剖析 K1/K2 bound：smem/TensorCore/occupancy，逐项证据）。
-  至此反向的「推导（P5）→ FLA 精读与设计（P6-1）→ 最小 B1 kernel 实测（P6-2）」闭环；更完整的
-  CUTLASS/TMA 版 B1、B2、B3 属更大工程，留待有明确需求时再做。
+- **下一步：P8-1**（`docs/08-summary.md`：公式、结构、误差、性能、反向要点一页纸汇总）。
+  P0–P7 全部完成；更完整的 CUTLASS/TMA 版反向 B1/B2/B3 属更大工程，留待有明确需求时再做。
+  - P7-2：`docs/07` 新增 §5「ncu 剖析：K1/K2 到底 bound 在什么上」+ `harness/probe_ncu.sh`
+    （`harness/probe_ncu.out.txt`）+ `harness/ncu_driver.py`，更新博客 post `flash-kda-07-perf` 标题。
+    ncu 2026.1.1、每 kernel 单独 profile（`-k regex -c 1 --launch-skip 3`，replay 12–20 passes，
+    脚本裁掉超长 CUTLASS demangled 名）。三个 shape（T=1024 H=4 / T=8192 H=64 / B4 T=1024 H=64）
+    实测结论：(a) **K1/K2 都不是 TensorCore bound**——K1 tensor pipe 全程 ≤1.6%、K2 22–24%
+    （每活跃 SM），FMA 5–12%，故 §1.3 的 `TF/s` 只是相对算力；(b) 放大后两者都撞 **L2 带宽**：
+    K1 T=8192 H=64 SOL 最大 pipe 是 L2 88.2%（DRAM 52.1%，occupancy 98.4%），K2 在 grid 填满
+    （B4 H64，256 CTA→occ 18.06%）时 L2 **91.6%**（DRAM 53.0%、L1TEX 59.5%、tensor 仍 24.1%）
+    →KDA 前向硬成本是 13824B/tile workspace + D×D 状态的搬运（K1 写入 L2、K2 读回 L2，
+    流量 1.7–2.0GB），不是乘法；(c) **K1 第二瓶颈是 barrier stall**（大 shape 27.0 cyc/issue，
+    ncu 称占发射间隔 43.5cyc 的 61%），来自 `fwd_kernel1.cuh:425/476/487/508/514` 一圈
+    `__syncthreads()`（union 复用 smem 的先同步再覆写）+ shared **2.7-way/2.3-way bank conflict**
+    （占 shared wavefront 45–54%）；小 shape（T=1024 H=4 grid 256）则因 grid 太小 occ 仅 24.2%；
+    (d) **K2 被 shared memory 钉在 2 CTA/SM（98.43KB/block，theoretical occ 18.75%）**，设计点
+    T=8192 H=64 只有 64 CTA < 132 SM → achieved occ 9.4%、ncu 报「grid < SM，估 51.5% 加速空间」，
+    这正是 §2.4「per-CTA 串行延迟受限」的硬件证据；K2 的 stall 以 `wait`（固定延迟 MMA 依赖，
+    ~1.1）为主、几乎无 barrier（warp-specialized）。**待验证**：K1「global load 仅用 4/32 字节/sector」
+    具体落在哪条 load；K2 的 L2 流量中 workspace 读 vs $o$/state 写占比（需 nsys/插桩）。
   - P7-1：新增 `docs/07-perf.md` + `harness/bench_fwd.py`（`harness/bench_fwd.out.txt`）+ 博客 post
     `flash-kda-07-perf` 并更新 index。**统一计时口径**：`wall`（一个 CUDA event 对包 `REPS=50` 次取均值、
     3 轮取中位，含 host 派发）+ `dev`（`torch.profiler` CUPTI CUDA-activity，纯 kernel 时间），
