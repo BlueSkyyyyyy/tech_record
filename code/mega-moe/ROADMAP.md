@@ -36,7 +36,8 @@
 - [x] **P0-1** 读通 DeepGEMM：`csrc/apis/mega_moe.hpp`、`deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh`、
       `scheduler/mega_moe.cuh`、`layout/mega_moe.cuh`、`tests/test_mega_moe.py`，产出数据流脑图。
       → `docs/02-mega-moe-architecture.md`（commit `057ca59` 行号核实）。
-- [ ] **P0-2** 补充线上资料：DeepGEMM README/release notes 中 Mega MoE 段落、PR #316；记录引用链接。
+- [x] **P0-2** 补充线上资料：DeepGEMM README/release notes 中 Mega MoE 段落、PR #316；记录引用链接。
+      → `docs/01` §5（版本时间线与链接）、`docs/02` §8（PR #316 基准表与解读）。
 - [ ] **P0-3** 访问 `~/github/DeepEP`：dispatch/combine kernel 与 symmetric memory 的接口与数据流。
 - [ ] **P0-4** 环境探测：`kernel_lab` 里能否编译/跑 DeepGEMM 的 SM90 部分（`pip install -e ~/github/DeepGEMM`，
       注意 `DG_SKIP_CUDA_BUILD`）；确认 H100 上可用哪些 kernel。
@@ -100,11 +101,12 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0-1 完成**——已读通 DeepGEMM Mega MoE 五个源文件，产出数据流脑图与架构解析
-  `docs/02-mega-moe-architecture.md`（含 `layout`/`scheduler`/主体 kernel 的真实行号核对），
-  P2-2/P2-3 一并覆盖；P2-1 的 `transform_weights_for_mega_moe` 权重布局留待补。
-- **下一步：P0-2** 补充线上资料（DeepGEMM README/release notes 的 Mega MoE 段落、PR #316），
-  记录真实引用链接；并补 `transform_weights_for_mega_moe` 布局。
+- 当前进度：**P0-1、P0-2 完成**。P0-1：读通 DeepGEMM Mega MoE 五个源文件，产出数据流脑图与架构解析
+  `docs/02-mega-moe-architecture.md`（真实行号核对），P2-2/P2-3 一并覆盖。
+  P0-2：`docs/01` §5 记录仓库/版本时间线/关键结论/DeepEP 侧真实链接；`docs/02` §8 补 PR #316
+  EP8 基准表（V4-Flash/Pro）与解读。P2-1 的 `transform_weights_for_mega_moe` 权重布局仍待补。
+- **下一步：P0-3** 访问 `~/github/DeepEP`，梳理 dispatch/combine kernel 与 symmetric memory 的接口与数据流
+  （注意与 SM100 专属的 Mega MoE 主体分开，DeepEP 侧 H100 可用）；顺带补 P2-1 权重布局。
 
 ## 阻塞
 

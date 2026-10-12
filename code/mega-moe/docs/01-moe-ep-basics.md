@@ -73,8 +73,64 @@ DeepSeek 的 **Mega MoE** 把这五段——
 
 反向还要再走一遍 EP 通信（dgrad 前需要把上游梯度 dispatch 到专家所在 rank；wgrad 后需要 combine）。
 
-## 5. 下一步
+## 5. 线上资料与版本坐标（路线图 P0-2）
 
-- `docs/02-mega-moe-architecture.md`：Mega MoE 整体架构与通信-计算重叠机制。
+本专题参考的公开实现与发布说明。**所有链接均来自 GitHub 仓库的真实页面/PR**（核对于 2026-10-12）。
+
+### 5.1 仓库
+
+- DeepGEMM：https://github.com/deepseek-ai/DeepGEMM （本地 `~/github/DeepGEMM`，本文核对 commit `057ca59`）
+- DeepEP（EP 通信 / dispatch / combine）：https://github.com/deepseek-ai/DeepEP （本地 `~/github/DeepEP`）
+- DeepJIT（DeepGEMM / DeepEP 运行期 JIT 运行时）：https://github.com/deepseek-ai/DeepJIT
+
+### 5.2 版本时间线（DeepGEMM README「News」+ PR）
+
+| 日期 | 内容 | 链接 |
+|---|---|---|
+| 2025-05-14 | 首个 **weight gradient** kernel（dense + MoE backward） | [PR #95](https://github.com/deepseek-ai/DeepGEMM/pull/95) |
+| 2025-07-20 | 全量重构，SM90/SM100 双架构 + 低 CPU 开销 JIT | [PR #112](https://github.com/deepseek-ai/DeepGEMM/pull/112) |
+| 2026-04-17 | **引入 Mega MoE**、FP4 Indexer、**FP8xFP4 GEMM**、PDL | [PR #304](https://github.com/deepseek-ai/DeepGEMM/pull/304) |
+| 2026-04-24 | Mega MoE 优化 + **基准数据** | [PR #316](https://github.com/deepseek-ai/DeepGEMM/pull/316) |
+| 2026-09-10 | **Mega Gate / Mega mHC**、Sparse Indexer、MoE 反向提速 | [PR #432](https://github.com/deepseek-ai/DeepGEMM/pull/432) |
+| 2026-09-30 | **locality-aware Mega MoE**、epilogue 类、README 公开版 | [PR #462](https://github.com/deepseek-ai/DeepGEMM/pull/462) |
+
+### 5.3 关键结论（来自 PR 正文，直接支撑后续精读）
+
+- **Mega MoE 只支持 FP8 × FP4**，且要求 PyTorch ≥ 2.9（PR #304）。这解释了 kernel 名
+  `sm100_fp8_fp4_mega_moe` 与线性层激活量化（L1 epilogue 里 amax→UE8M0 那段）的必要性。
+- **融合范围**：dispatch + linear1 + SwiGLU + linear2 + combine 五段进单 kernel，重叠 NVLink 与
+  张量核（PR #304）。这正是 `docs/02` 的架构主线。
+- **Mega Gate**：把 routing GEMM + 多个 MoE routing 操作融合，提速 **30–75%**；
+  **Mega mHC**：融合多个 Hyper-Connection 操作 + RMSNorm，提速 **45–85%**（PR #432）。
+  这两个是本专题 `docs/05` 的对象。
+- **MoE 反向**：PR #432 称反向 GEMM 提速约 **20%**；而最早的 wgrad kernel（PR #95）即比内部
+  CUTLASS 实现快约 20%。对应 API 是 `wgrad_gemm_fp8_fp8_fp32_nt`（dense）与
+  `k_grouped_wgrad_gemm_fp8_fp8_fp32_nt`（MoE，K 轴分组），即路线图 P4-2 的
+  `k_grouped_fp8_gemm_tn_contiguous` 前身。
+- **正确性/竞态**：注意 [PR #343](https://github.com/deepseek-ai/DeepGEMM/pull/343)（SM90 contiguous
+  k-grouped GEMM 在切组时**就地改 tensormap** 与在途 TMA load 竞态，会算错）、
+  [PR #441](https://github.com/deepseek-ai/DeepGEMM/pull/441)（Mega MoE task-info slot 释放顺序）。
+  这两条是精读反向/调度器时不能忽略的「为什么这么写」。
+- **Locality-aware**（PR #462）：可选的**权重本地化 + domain-aware 调度**，通过 MLOPart 做本地化分配、
+  发现 SM locality，官方称重载下省约 100W、GPU 频率提升 5–10%。对应 `docs/02` §4.4 的
+  `locality domain` 与 kernel 里的 `sm_locality_domain_idx`。
+
+### 5.4 DeepEP 侧
+
+DeepEP README（核对于本地 `~/github/DeepEP`，V2.5）说明：提供高吞吐 / 低延迟的 **EP all-to-all**
+（dispatch / combine，含 FP8 dispatch），编译期走 DeepJIT，**不再依赖 NVSHMEM**（V2 起改用轻量
+NCCL Gin backend）。与 Mega MoE 相关的两条：
+
+- EPv2 把高吞吐与低延迟 API 统一到单个 `EPBuffer`，并给出**适配 grouped expert GEMM 的 expanded layout**；
+- `EPBuffer.lb_prefetch_weights` / `lb_reduce_grads` 支持**冗余专家**：前向经 NVLink 预取专家权重与量化
+  scale，反向把冗余专家的 FP32 梯度累加回原专家（对应 MoonEP / UltraEP 思路）。
+
+> 说明：DeepEP 的 V2/V2.5 目标平台是 Hopper 及以上，但本专题把 dispatch/combine 与 symmetric
+> memory 的接口/数据流作为 P0-3 单独分析，与 SM100 专属的 Mega MoE 主体分开。
+
+## 6. 下一步
+
+- `docs/02-mega-moe-architecture.md`：Mega MoE 整体架构与通信-计算重叠机制（已含线上基准坐标）。
 - `docs/03-mega-moe-kernel.md`：`sm100_fp8_fp4_mega_moe.cuh` 逐段精读。
 - `docs/04-moe-backward.md`：wgrad/dgrad 的 grouped GEMM 实现与数值实验。
+- `docs/05-mega-gate-mhc.md`：Mega Gate / Mega mHC。

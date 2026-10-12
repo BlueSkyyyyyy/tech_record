@@ -1,6 +1,6 @@
 # Mega MoE 整体架构与通信-计算重叠
 
-> 本文是「DeepSeek Mega MoE 前向 / 反向算子实现解析」的第 2 篇，对应路线图 **P0-1**。
+> 本文是「DeepSeek Mega MoE 前向 / 反向算子实现解析」的第 2 篇，对应路线图 **P0-1**（§8 为 P0-2 线上基准补充）。
 > 目标是把 DeepGEMM 里 Mega MoE 的**数据流**与**通信-计算重叠机制**先画清楚，作为后面逐段精读的坐标系。
 >
 > **重要**：Mega MoE 主实现 `sm100_fp8_fp4_mega_moe.cuh` 是 **SM100（Blackwell）专属**
@@ -269,7 +269,41 @@ L2 任务，它们会占满 ring 等待 L1，而 L1 任务又没被发出来。�
 代价是复杂度：ring 容量、warmup 波数、死锁上界都要在编译期/白盒推导出来（`get_num_max_live_pool_blocks`），
 稍有差池就死锁或浪费显存。
 
-## 8. 小结与下一步
+## 8. 线上基准坐标（PR #316，SM100 专属，仅分析）
+
+DeepGEMM [PR #316](https://github.com/deepseek-ai/DeepGEMM/pull/316) 公布了 Mega MoE 在
+**EP8（8 路专家并行）**下的实测，8 个 rank 取平均。两组配置（按官方描述）：
+
+- **V4-Flash**：256 专家、top-k=6、hidden 4096、intermediate 2048；
+- **V4-Pro**：384 专家、top-k=6、hidden 7168、intermediate 3072。
+
+| 配置 | Batch/rank | 时间 (us) | Compute (TFLOPS) | 显存 (GB/s) | 互联 (GB/s) | vs legacy |
+|---|---|---|---|---|---|---|
+| Flash | 1 | 56.5 | 5 | 1311 | 1 | 1.96x |
+| Flash | 512 | 146.5 | 1056 | 3192 | 266 | 1.73x |
+| Flash | 8192 | 1283.1 | 1928 | 998 | 499 | 1.56x |
+| Flash | 32768 | 4855.5 | 2038 | 794 | 529 | 1.62x |
+| Pro | 1 | 108.1 | 7 | 1758 | 1 | 1.61x |
+| Pro | 512 | 369.6 | 1098 | 4619 | 182 | 1.54x |
+| Pro | 8192 | 2818.5 | 2304 | 1094 | 393 | 1.50x |
+| Pro | 32768 | 10655.2 | 2438 | 692 | 417 | 1.54x |
+
+几点解读，正好呼应前面的机制：
+
+1. **低延迟（batch=1）时互联带宽近 0**：只有 1 个 token/rank，几十 us 里大部分是固定开销与
+   跨 rank 握手，compute 才 5–7 TFLOPS——说明这套 fused kernel 的瓶颈不在算力，而在
+   dispatch/combine 的往返延迟（§5.1 的全局计数 + NVLink barrier 是主要成本）。
+2. **大 batch 时 compute 高达 2038 / 2438 TFLOPS**：接近 FP8xFP4 峰值，此时互联也吃到
+   400–530 GB/s，说明 NVLink 与张量核确实在**重叠**（§7 的 ring slot 流水）。
+3. **显存带宽在中等 batch 反而最高**（Flash 512 达 3192 GB/s）：token 数适中时 ring 复用率高、
+   dispatch 搬运与 GEMM 读写并存；batch 再大则被 compute 主导。
+4. **相对 legacy 稳定 1.5–2x**：越小的 batch 收益越大（1.61–1.96x），因为 legacy 实现是
+   「通信→计算→通信」串行，低延迟下通信占比最高。
+
+> 这些数字来自官方 PR，**未在本机复现**（Mega MoE 是 SM100 专属）。本机 H100 只做可跑的
+> grouped GEMM / backward 数值实验，见 `docs/04`。
+
+## 9. 小结与下一步
 
 - Mega MoE = **对称显存做通信缓冲 + ring buffer 解耦通信与计算 + 细粒度 mask 依赖 + warp specialization**。
 - 本文建立了数据流与角色划分；细节（tcgen05/UTCCP、TMA 描述符、SwiGLU 量化、combine 累加精度）
