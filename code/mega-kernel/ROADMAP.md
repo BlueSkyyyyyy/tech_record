@@ -462,6 +462,23 @@
       worker/scheduler，仍差 C5 一步（C5 由 P15-1 §9 覆盖）。**本轮新增实验**，补齐 P22-1 §15.6、
       并与 P13-1（单 task 内流水）/P20-1（跨算子静态分块重叠）合成「软件流水三层」画像。
 
+### P24 实验扩展 14：损失三的直接字节证据（`docs/04-experiments.md` §17）
+
+- [x] **P24-1** 把「损失三=中间张量 HBM 往返」从 P5-2 的**算术推断**升级为 **ncu 直接测量**
+      （补齐 P5-2 §2.6 / P9-1「只测时间不测字节」的缺口）。见 `docs/04-experiments.md` §17，
+      源码 `src/dram_traffic.cu`，原始输出 `harness/dram_traffic.out.txt`（计时）与
+      `harness/dram_traffic_ncu.out.txt`（ncu 字节 + 原始 CSV）（目标卡 H100/sm90，device 3，iters=30，
+      N=64Mi elem=256 MB/数组 ≫ 50 MB L2，Q=1/2/4/8 逐元素算子链）。四策略
+      `eagerQ`/`graphQ`/`barrier`/`fused` 公平对照，`ncu -k regex:dt_` 取
+      `dram__bytes_read.sum`+`dram__bytes_write.sum`。核心结论：(1) **fused 的 DRAM 流量是常量**
+      `≈ 2×N×4B = 8 B/元素`（实测 518.5 MB，读 268.4+写 250.0），与 Q 无关；(2) **eager/graph 流量
+      `≈ Q × 517 MB`**，`vs_fused` = 1.99/3.98/7.96 = **精确等于 Q**——每融合一个算子消掉一趟完整
+      全张量 HBM 往返；(3) **barrier 与 eager 字节几乎相同**（仅写多 2–4%），证 `grid.sync()` 只省
+      launch 不省流量（损失二与损失三正交）；(4) **时间与字节严格成正比**——两档表观带宽同 ~2.75 TB/s，
+      `f/b` 时间比（0.50/0.25/0.12）与字节比（1/1.99/3.98/7.96 的倒数）吻合，fused 相对 eager 的加速
+      **完全 = 省下的 DRAM 字节比**（对上 P5-2 推断的 ~2.8 TB/s，把推断升级为实测）。判据不变
+      （`fused` C1–C3、`barrier` +C4，无 C5）。**本轮新增实验**；与 P9-1（时间标度）互为表里。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -484,7 +501,8 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**；
+- 当前进度：**P24-1 完成（1/1）**（本轮新增：用 ncu 直接测量损失三的 HBM 字节，把 P5-2 的算术推断
+  升级为实测）。此前：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**；
   **P3 全部完成（3/3）**；**P4 全部完成（4/4）**；**P5 全部完成（3/3）**；**P6 全部完成（1/1）**；
   **P7 源码走读（1/1）完成**（本轮新增，对应「下一步」可选方向③）。
   **P8 博客发布（1/1）完成**（本轮新增，对应「下一步」可选方向①）。
@@ -517,7 +535,7 @@
   扇出图、对照 barrier/wave/decen/static 四机制、实现 MPK §5.2 批量取 task 的甜点标度）。
   **P23-1 跨层软件流水 + 环形缓冲预取（1/1）完成**（本轮新增，把 MPK §5.3 的 paged SMEM +
   cross-task software pipelining 实测出来，补齐 P22-1 §15.6 明留的尾巴）。
-  **本专题任务清单（P0–P23）全部完成**，无未完成子项。
+  **本专题任务清单（P0–P24）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -566,7 +584,7 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P23 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
+- **下一步：无**（P0–P24 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
   **P10-1 完成 P5-1 §1.6「扫 persistent 网格大小」**；**P12-1 完成 P5-3 §3.6 / P10-1 §5.5「多 block
@@ -584,6 +602,22 @@
   ⑧ ~~P22-1 §15.6「跨层流水/环形缓冲预取」~~（**P23-1 完成**：MPK §5.3 的 paged SMEM +
    cross-task software pipelining 实测——跨层预取峰值 1.19–1.20×（vs barrier）、深度按访存占比选
    K≈4、纯访存时净亏；eager/barrier 1.25× 验证消 launch 主收益）。
+- **本轮（P24-1）**：`docs/04-experiments.md` 新增 §17「损失三的直接字节证据：用 ncu 量化『融合消掉
+  多少 HBM 流量』」——新建 `src/dram_traffic.cu` + `harness/dram_traffic.out.txt`（计时）与
+  `harness/dram_traffic_ncu.out.txt`（ncu 字节 + 原始 CSV）（目标卡 H100/sm90，固定空闲 device 3，
+  iters=30，N=64Mi elem=256 MB/数组 ≫ 50 MB L2，Q=1/2/4/8 逐元素算子链 `y_q=f(y_{q-1})`）。
+  四策略公平对照 **eagerQ**（Q 次 launch，中间量落 HBM）/ **graphQ**（capture 成图）/ **barrier**
+  （单 kernel + 逐算子 grid.sync，中间量仍落 HBM）/ **fused**（单 kernel，中间量只在寄存器）。
+  用 `ncu -k regex:dt_ --metrics dram__bytes_read.sum,dram__bytes_write.sum` 直接数 DRAM 物理字节。
+  核心结论：(1) **fused 流量常量** `= read 268.4 + write 250.0 ≈ 518.5 MB = 8 B/元素`，与 Q 无关；
+  (2) **eager/graph 流量 ≈ Q × 517 MB**，`total/fused` = **1.99/3.98/7.96 = 精确等于 Q**（Q=2/4/8）——
+  每融合一个算子消掉一趟完整全张量 HBM 往返（读 256+写 256 MB）；(3) **barrier ≈ eager 字节**
+  （仅写多 2–4%），证 `grid.sync()` 只省 launch、不省流量（损失二/三正交）；(4) **时间 ∝ 字节**——
+  两档表观带宽同 ~2.75 TB/s，fused 相对 eager 的加速（时间 4.0×/8.0×）**完全等于其省下的字节比**
+  （4.11×/8.25×），把 P5-2 的「表观带宽×假设字节」**算术推断升级为 ncu 字节实测**。计时表另证
+  `e/g≈1.0`、`b/e≈1.0`（256 MB 已带宽主导，损失二≈0，对上 P5-1/P5-2）。判据：`fused` C1–C3、
+  `barrier` +C4，均无 C5。正确性四档 `max|z_eager−z_fused|=0`。**本轮新增实验**；与 P9-1（时间标度）
+  互为表里，补齐 P5-2 §2.6 未直接量 HBM 字节的缺口。
 - **本轮（P23-1）**：`docs/04-experiments.md` 新增 §16「跨层软件流水 + 环形缓冲预取：kernel-per-operator
   与持久化内核的真正分野」——新建 `src/cross_layer_pipeline.cu` + `harness/cross_layer_pipeline.out.txt`
   （E=16 主运行）与 `harness/cross_layer_pipeline_e32.out.txt`（E=32 重载敏感性）（目标卡 H100/sm90，

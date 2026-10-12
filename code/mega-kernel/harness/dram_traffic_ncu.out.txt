@@ -1,0 +1,66 @@
+# P24-1 ncu 原始输出：用 dram__bytes_read.sum/dram__bytes_write.sum 直接测量损失三
+# date: 2026-10-12T23:57:35+08:00
+# cmd: for Q in 1 2 4 8; do for st in eager graph barrier fused; do
+#        CUDA_VISIBLE_DEVICES=3 ncu -k regex:dt_ --metrics dram__bytes_read.sum,dram__bytes_write.sum \
+#          --csv src/dram_traffic one $st $Q > /tmp/ncu_${st}_${Q}.csv; done; done
+# gpu: H100 80GB HBM3 x8, sm90, driver 570.211.01（固定 device 3）
+# cuda: ncu Version 2026.1.1.0, nvcc release 13.2
+# note: -k regex:dt_ 只抓目标 kernel（dt_step/dt_barrier/dt_fused），排除初始化 warm_fill。
+#       read/write 单位 byte。一次运行 = 一遍策略；eager/graph 各含 Q 个 dt_step（多行求和），
+#       barrier/fused 各 1 个 kernel。N=64Mi elem=256 MB/数组。
+
+== 汇总：DRAM 物理字节（每策略每 Q 求和）==
+
+   Q    strat      read_MB     write_MB     total_MB   B/elem   vs_fused
+   1    eager        268.4        249.9        518.3     7.72      1.00x
+   1    graph        268.4        249.6        518.0     7.72      1.00x
+   1  barrier        268.5        249.8        518.2     7.72      1.00x
+   1    fused        268.4        250.0        518.5     7.73      1.00x
+
+   2    eager        536.9        497.1       1034.0    15.41      1.99x
+   2    graph        536.9        497.2       1034.1    15.41      1.99x
+   2  barrier        536.9        519.0       1055.9    15.73      2.04x
+   2    fused        268.5        250.3        518.8     7.73      1.00x
+
+   4    eager       1073.8        992.0       2065.8    30.78      3.98x
+   4    graph       1073.8        992.3       2066.1    30.79      3.98x
+   4  barrier       1073.8       1056.3       2130.0    31.74      4.11x
+   4    fused        268.4        250.1        518.5     7.73      1.00x
+
+   8    eager       2147.6       1982.1       4129.6    61.54      7.96x
+   8    graph       2147.6       1983.0       4130.6    61.55      7.97x
+   8  barrier       2147.5       2129.7       4277.2    63.74      8.25x
+   8    fused        268.4        250.1        518.5     7.73      1.00x
+
+== 原始 ncu CSV：eager Q=4 ==
+"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","Section Name","Metric Name","Metric Unit","Metric Value"
+"0","1930466","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_read.sum","byte","268452096"
+"0","1930466","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_write.sum","byte","249862144"
+"1","1930466","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_read.sum","byte","268466944"
+"1","1930466","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_write.sum","byte","247204608"
+"2","1930466","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_read.sum","byte","268440832"
+"2","1930466","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_write.sum","byte","247527680"
+"3","1930466","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_read.sum","byte","268443648"
+"3","1930466","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_write.sum","byte","247393792"
+
+== 原始 ncu CSV：graph Q=4 ==
+"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","Section Name","Metric Name","Metric Unit","Metric Value"
+"0","1930505","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_read.sum","byte","268446720"
+"0","1930505","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_write.sum","byte","249704704"
+"1","1930505","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_read.sum","byte","268448512"
+"1","1930505","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_write.sum","byte","247447808"
+"2","1930505","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_read.sum","byte","268460544"
+"2","1930505","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_write.sum","byte","247606528"
+"3","1930505","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_read.sum","byte","268451840"
+"3","1930505","dram_traffic","127.0.0.1","dt_step(const float4 *, float4 *, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_write.sum","byte","247533824"
+
+== 原始 ncu CSV：barrier Q=4 ==
+"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","Section Name","Metric Name","Metric Unit","Metric Value"
+"0","1930544","dram_traffic","127.0.0.1","dt_barrier(const float4 *, float4 *, float4 *, float4 *, int, long)","1","13","(256, 1, 1)","(660, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_read.sum","byte","1073760768"
+"0","1930544","dram_traffic","127.0.0.1","dt_barrier(const float4 *, float4 *, float4 *, float4 *, int, long)","1","13","(256, 1, 1)","(660, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_write.sum","byte","1056256256"
+
+== 原始 ncu CSV：fused Q=4 ==
+"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","Section Name","Metric Name","Metric Unit","Metric Value"
+"0","1930746","dram_traffic","127.0.0.1","dt_fused(const float4 *, float4 *, int, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_read.sum","byte","268449024"
+"0","1930746","dram_traffic","127.0.0.1","dt_fused(const float4 *, float4 *, int, long)","1","13","(256, 1, 1)","(2112, 1, 1)","0","9.0","Command line profiler metrics","dram__bytes_write.sum","byte","250052608"
+
