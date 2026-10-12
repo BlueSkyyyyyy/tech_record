@@ -95,14 +95,99 @@ MPK **12.5 ms/token**，而按「16 GB 参数 ÷ 1.6 TB/s 带宽」估算的硬�
 
 ## 2. 已有缓解手段及其边界
 
-| 手段 | 治什么 | 局限 |
-|---|---|---|
-| 算子融合（fuse） | 减少中间张量与 launch | 手工、适配面窄，通常只融相邻小算子 |
-| CUDA Graphs | 消除 launch 开销 | **仍有 kernel barrier**，不改变串行性 |
-| PDL（Programmatic Dependent Launch） | 让相邻 kernel 部分重叠 | 粗粒度、需要 kernel 配合 |
-| 多 stream | 无依赖算子并行 | 有依赖的算子仍串行；调度粒度粗 |
+kernel barrier / launch 开销 / 中间张量往返这三类损失并非无人应对；工业界与编译器社区已有四类主流手段。
+但 MPK 指出它们各自只治一部分，且**都没有触及「以 SM 为粒度的跨算子调度与重叠」这个根问题**。
+下面逐条展开（引用 MPK 快照的真实章节号/行号），并用本专题 P1-2 实测（`src/mitigations.cu`，
+原始输出 `harness/mitigations.out.txt`，目标卡 H100/sm90）佐证。
 
-结论：这些手段都没有触及**「以 SM 为粒度的跨算子调度与重叠」**这个根问题。
+### 2.1 算子融合（operator fusion）
+
+融合把同一数据上**顺序执行**的多个 kernel 合并成语义等价的单个 kernel，收益是「避免中间结果物化、
+减少 device memory 访问、消除 launch 开销」，并顺带消除了被融合算子之间的 kernel barrier
+（MPK §2.2，快照行 313）。现状：
+
+- PyTorch / JAX / TVM 用**规则启发式**融合相邻算子（快照行 314–321）；
+- Mirage / TASO 用**超优化**自动发现融合规则（快照行 322–327）。
+
+**边界**：现有编译器**只能融合局部的小算子组**——因为「忠实实现整个复杂张量程序的单个 kernel」
+在计算上极难、常常不可行（MPK §2.2，快照行 328）。融合是**手工/局部**的，粒度停在「几个相邻算子」，
+无法跨越整张图；而 mega-kernel 范式把融合推到极致（整图 + 通信进一个持久化 kernel，用 device memory
+同步原语跨 SM 协调，快照行 329–331），并且现有 mega-kernel 都是**手工**为特定模型打造的
+（FlashDMoE、Spector 的 LLaMA-1B，快照行 332–344）。这也正是 MPK 想用编译器自动化取代的部分。
+
+### 2.2 CUDA Graphs
+
+CUDA Graphs 把一串 GPU 操作**捕获**下来、之后**低开销重放**，直接针对损失二（launch 开销）。
+MPK 承认它是当前系统压 launch 开销的主要手段，但明确指出其两个根本局限（MPK §1，快照行 87–89）：
+
+1. **本质静态**：控制流、张量形状或数据依赖一旦变化，就必须**重新实例化/修改**已捕获的图，
+   对推理中常见的动态负载不灵活（快照行 89）。
+2. **残留 kernel-switch 开销**：论文在 §6.3 指出，**即便用了 CUDA Graphs，kernel-per-operator 仍有
+   kernel-switch 开销**，并且这正是小模型 + 新 GPU 上更吃亏的三项开销之一（MPK §6.3，快照行 1504–1509）。
+
+更关键的是，CUDA Graph **不改变串行语义**：图中相邻节点之间仍是 kernel barrier，损失一（跨算子软件流水）
+与损失三（中间张量物化）原样保留。MPK 的量化锚点（§6.6，快照行 1618–1628）也显示 graph 把单次
+launch 从 3.8 µs 降到 0.8 µs、总量从 1.1 ms 降到 0.2 ms，但**不归零**。
+
+### 2.3 PDL（Programmatic Dependent Launch）
+
+PDL 允许**同一 stream** 上相邻 kernel **部分重叠**：下游 kernel 可以提前启动其「前导」部分，等上游数据
+就绪后再读取（MPK §1，快照行 78–84）。它本可缓解损失一。但 MPK 指出采用 PDL 需要**显著的工程改造**，
+因为它**从根本上改变了 kernel 结构与控制流**（快照行 84）——即它不是「加个属性就好」，而是要求每对
+上下游 kernel 都按 PDL 语义重写（producer 主动放行、consumer 显式等待依赖）。这也是 P0-3 探测里
+PDL 能跑通、但生产模型难以自动套用的原因（`docs/04-experiments.md` §0）。
+
+### 2.4 多流（multiple streams）
+
+多流把**互不依赖**的算子放到不同 stream 上并行。它的边界可以用一句话概括：**只并行「无依赖」的算子；
+有数据依赖的算子无论分到几个 stream，都必须串行**。根因是依赖只在**整个算子**粒度上表示，运行时无法
+表达「AllReduce 的第 i 个 fragment 只依赖 MatMul 的第 i 个输出」这种细粒度关系，于是必须等整个上游算子
+完成（MPK §1，快照行 85–86）。此外 stream 级调度仍是运行期**粗粒度**决策，无法做 SM 级负载均衡。
+
+**P1-2 实测**（`src/mitigations.cu`，64 个自旋约 17 µs 的小 kernel，目标卡 H100/sm90，30 轮均值）：
+
+| 对照 | 时间（每次 64 kernel） | 每 kernel | vs A |
+|---|---|---|---|
+| A 无依赖，1 stream | 1.076 ms | 16.81 µs | 1.00× |
+| B 无依赖，4 streams | 0.295 ms | 4.61 µs | **3.65×（有效并行）** |
+| C 有依赖链，4 streams（event 串接） | 1.125 ms | 17.57 µs | **0.96×（并行失效）** |
+| D 有依赖链，CUDA Graph | 1.025 ms | 16.01 µs | 1.05× |
+
+读法：B 说明多流对**无依赖**算子确实接近线性加速（3.65×，剩余损耗来自 launch 与共享 SM 争用）；
+**C≈A** 说明只要引入依赖，多流退化为串行，与单 stream 几乎无差别；D 只比 C 略低，说明 **CUDA Graph
+只降低 launch 开销、并不打破依赖串行**。这三条正好在真实硬件上复现了 §1 的论断：多流/Graph 都停在
+「算子粒度 + 静态」层面。
+
+### 2.5 通信-计算 overlap（双 kernel / 分步）
+
+另一条主流路线是把**通信**与**计算**在 kernel 边界处重叠：DeepEP 提供专家并行的 all-to-all kernel，
+Triton-Distributed 让 Triton 表达重叠的分布式 kernel，TokenWeave / FlashOverlap / ParallelKittens
+把通信与依赖它的计算 fuse 或 co-schedule，Google 早期工作把集合通信算子**分解**以便与依赖计算重叠
+（MPK §8，快照行 1878–1917）。**边界**：这些系统都在**单个 kernel 或单个集合算子的粒度**上实现重叠；
+MPK 则把通信与计算**统一表示成同一 tGraph 里的 task**，用同一套 in-kernel runtime 调度，于是重叠
+从全局 task 调度中**自然涌现**，并同时适用于张量并行集合通信与专家并行 all-to-all（快照行 1910–1917）。
+（与 `mega-moe` 专题聚焦的 DeepEP / FlashMLA 双 kernel 方案交叉引用，本专题不重复展开。）
+
+### 2.6 相关抽象工具
+
+还有一层「降低手工融合难度」的抽象：ThunderKittens 提供 tile 级抽象，PipeThreader 把软件流水的 kernel
+执行暴露给程序员；但它们仍要求开发者**自己决定融哪些算子、如何流水、如何协调**。MPK 认为这些抽象与
+自己是**互补**的——可作为 MPK runtime 内单个 task kernel 的实现手段（MPK §8，快照行 1864–1872）。
+TileRT 则把算子分解成细粒度 tile 级 task 放进单个持久化 kernel，与 MPK 的核心思路一致（快照行 1873–1877）。
+
+### 2.7 小结
+
+| 手段 | 治哪类损失 | 粒度 | 为什么仍不够 |
+|---|---|---|---|
+| 算子融合（fuse） | 中间张量往返 + launch + 局部 barrier | 几个相邻算子（手工/局部） | 只能融局部小算子组，无法覆盖整图（快照行 328） |
+| CUDA Graphs | launch 开销 | 整图（静态） | 仍有 kernel barrier 与 kernel-switch 开销；动态负载要重捕（行 87–89、1504–1509） |
+| PDL | 相邻 kernel 部分重叠（损失一） | kernel 对（需重写） | 根本改变 kernel 结构与控制流，改造成本高（行 78–84） |
+| 多流 | 无依赖算子并行 | 算子/stream（粗） | 有依赖即串行；依赖只在算子粒度表示（行 85–86；P1-2 实测 C≈A） |
+| 通信-计算 overlap | 隐藏通信延迟 | 单 kernel / 单集合算子 | 非统一调度；MPK 用同一 tGraph + runtime 让重叠自然涌现（行 1910–1917） |
+
+**结论**：这些手段要么停在**算子粒度**（融合、多流），要么停在**静态图/相邻 kernel**（CUDA Graphs、PDL），
+都没有触及**「以 SM 为粒度的跨算子调度与重叠」**这个根问题——即把依赖细到 SM task、在 device 内动态
+事件驱动地调度。这正是 MPK §3 的 tGraph 与 §5 的 in-kernel runtime 要解决的（后续 P2 展开）。
 
 ## 3. MegaKernel 的定义
 
