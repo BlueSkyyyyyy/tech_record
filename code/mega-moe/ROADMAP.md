@@ -53,7 +53,10 @@
       解释 grouped contiguous vs masked 两种布局。→ `docs/01` §1（含真实行号：`gemm.hpp:181/209-246/269-318`、
       `runtime.hpp:57-64`、README `76-86`），并补 **PSUM（前缀和）第三布局**；H100 实测三种布局数值等价
       （`harness/exp_grouped_layout.py` + `.out.txt`）。
-- [ ] **P1-2** EP（专家并行）通信：all-to-all dispatch / combine 的语义与开销；为何要与计算重叠。
+- [x] **P1-2** EP（专家并行）通信：all-to-all dispatch / combine 的语义与开销；为何要与计算重叠。
+      → `docs/01` §2 重写：通信量模型（dispatch ~$T{\cdot}d{\cdot}H{\cdot}1$B、combine ~$T{\cdot}k{\cdot}H{\cdot}2$B，
+      K 倍放大）+ 串行 vs 重叠量化 + **H100 实测**（`harness/exp_ep_comm.py`，8×H100 NCCL
+      all-to-all：渐近 ~393 GB/s、固定时延 ~50–90 us，达 NVLink 硬件上限 ~82%）。
 
 ### P2 Mega MoE 架构（`docs/02-mega-moe-architecture.md`）
 
@@ -111,7 +114,12 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0 全部完成（P0-1/2/3/4）；P1-1 完成**。
+- 当前进度：**P0 全部完成（P0-1/2/3/4）；P1-1、P1-2 完成**（P1 全部完成）。
+  P1-2：重写 `docs/01` §2——EP all-to-all 语义 + 「K 倍放大」通信量模型（dispatch $T{\cdot}d{\cdot}H$、
+  combine $T{\cdot}k{\cdot}H{\cdot}2$）+ 串行/重叠量化对比；新增 §2.3 **H100 实测**：
+  `harness/exp_ep_comm.py` / `.out.txt` 在 8×H100 上测 NCCL `all_to_all_single`（H=7168、EP=8），
+  渐近有效带宽 ~393 GB/s（达 `nvidia-smi nvlink` 硬件上限 ~478 GB/s 的 ~82%）、固定时延 ~50–90 us，
+  论证小 batch 延迟敏感与重叠必要性。
   P1-1：细化 `docs/01` §1——MoE 计算图 + 三种 grouped 布局（contiguous / masked / PSUM）的真实 API 与行号，
   解释对齐（SM90=128 / SM100=256）与 gap 行的「为什么」；新增 §1.5 H100 实测（`harness/exp_grouped_layout.py`，
   三布局 relerr 一致 ≈3.7e-2）。
@@ -125,9 +133,10 @@
   但 `EPBuffer` 因 NCCL 版本（PyTorch 链 2.29.7 vs 需求 ≥2.31/2.32.3）运行期段错误。
   产出 `docs/08-h100-environment.md` + `harness/probe_h100_env.py` / `harness/probe_deepep.py`（含 *.out.txt）。
   P2-1 的 `transform_weights_for_mega_moe` 权重布局仍待补。
-- **下一步：P1-2** EP（专家并行）通信语义与开销、为何与计算重叠（`docs/01` §2 现为骨架，需结合实际
-  DeepEP dispatch/combine 的字节数与 NVLink 带宽细化）；顺带补 **P2-1** `transform_weights_for_mega_moe`
-  权重布局；随后启动 **P4-4** 的 H100 数值对拍（用 SM90 的 `nt` wgrad 替代 SM100 `tn`）。
+- **下一步：P2-1** 补 `transform_weights_for_mega_moe` 权重布局（`docs/02` §2-§3 当前只剩这一缺口），
+  把「专家权重如何重排/量化成 Mega MoE 内层消费的 `[E, N, K]` + UE8M0 scale 布局」讲清；
+  随后按 P3 逐段精读 `sm100_fp8_fp4_mega_moe.cuh`（模板/block config、warp specialization、tcgen05）。
+  H100 数值对拍（P4-4，用 SM90 `nt` wgrad 替代 SM100 `tn`）可与 P3 并行推进。
 
 ## 阻塞
 

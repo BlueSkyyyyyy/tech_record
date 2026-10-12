@@ -106,6 +106,86 @@ DeepGEMM 自带 generators 造数据、与 PyTorch 参考对拍。取 G=6、n=25
 核心矛盾：**通信（NVLink all-to-all）与计算（Tensor Core）互相等待**。
 朴素实现是「dispatch → GEMM → combine」串行，NVLink 与 SM 轮流空闲。
 
+### 2.1 通信量模型：EP 通信相对 token 是「K 倍放大」的
+
+设每个 rank 本地 $T$ 个 token、hidden $H$、每个 token 选 $k$ 个专家、激活按 FP8（1 B）、
+专家输出按 BF16（2 B）。关键是**一个 token 会被复制多份**：
+
+- **dispatch**：token 的 $k$ 个专家可能落在 $d$ 个不同 rank 上（$d\le k$）。DeepEP 只在
+  **目标 rank 粒度去重**——若一个 token 的多个 topk 落同一 rank，只在线上传一份
+  （`dispatch.cuh:103`-`:105` 的 `ptx::deduplicate`），落地后再由 copy epilogue 展开成
+  「每专家一个槽」。于是**每个 rank 的发送量**约为
+
+  $$B_{\text{disp}} \;\approx\; T\cdot d\cdot H\cdot 1\text{ B}.$$
+
+- **combine**：专家输出是「每 (token, topk) 一行」，$k$ 份都要按原路送回源 rank 再做加权归约，
+  去重机会很小，故
+
+  $$B_{\text{comb}} \;\approx\; T\cdot k\cdot H\cdot 2\text{ B}.$$
+
+  注意这里 **combine 的系数是 $k$ 而不是 $d$**：dispatch 传的是「token ⊕ 一次」，combine 传的是
+  「$k$ 个专家各自的输出」，天然 $\sim k$ 倍放大（复合 topk 权重 $\tilde s_i$ 也在此时乘上，
+  见 `docs/07` §5 的 bf16 加权归约）。
+
+**为什么这条模型重要**：MoE 的**激活/输出通信量随 $k$ 线性增长**，而计算量只随「实际被选中的
+专家数」线性增长（每 token 只进 $k$ 个 FFN）。$k=8$ 时，通信的「数据放大」非常可观，一旦串行，
+NVLink 就会成为瓶颈。以 DeepSeek-V3 量级（$H=7168$、$I=2048$、$k=8$、EP=8，$d\approx k$）为例，
+每 rank $T=4096$ 个 token：
+
+| 项 | 字节数（每 rank） | 说明 |
+|---|---|---|
+| dispatch | $\approx 4096\times8\times7168\times1\text{B}\approx 235$ MB | FP8 激活，$d\approx k=8$ |
+| combine | $\approx 4096\times8\times7168\times2\text{B}\approx 470$ MB | BF16 输出 |
+| **通信合计** | $\approx 705$ MB | 单向出流量 |
+
+同一层的 Tensor Core 计算量（linear1 $[T,H]@[H,2I]$ + linear2 $[T,I]@[I,H]$）约
+$T\cdot H\cdot 2\cdot(2I+I)\approx 4096\times7168\times2\times6144\approx3.6\times10^{11}$ FLOP，
+在 H100 FP8 约 $0.99$ PFLOP/s 下单层约 **0.36 ms**；而通信 $705$ MB 按 §2.3 实测的
+$\approx390$ GB/s 有效带宽约 **1.8 ms**——**通信比计算还贵约 5 倍**。
+
+### 2.2 所以必须让通信与计算重叠
+
+- **串行**（dispatch → GEMM → combine）：每层 $\approx 0.36+1.8\approx2.2$ ms，NVLink 传完等 SM、
+  SM 算完等 NVLink。
+- **重叠**（本专题主线 Mega MoE、或 DeepEP 的 `async_with_compute_stream` + PDL，见 `docs/07` §6）：
+  通信与 GEMM 并行，理想下界降到 $\max(\text{comm},\text{compute})\approx1.8$ ms 再加一点固定时延，
+  省掉「较小那一侧」的全部时间。上例中即省下约 $0.36$ ms/层（$\sim16\%$）；当计算量更大（token 更多、
+  或 FP4 让计算更便宜、通信更贵）时收益更大。这正是 DeepSeek 要把这五段塞进**一个 mega-kernel**
+  并用 ring buffer 解耦通信/计算的理由。
+
+> 上面是**通信量的粗估模型**，不是实测内核数字：真实值取决于专家放置（$d$）、是否 FP8 combine、
+> 冗余专家、是否 scale-out（RDMA）等。下一节给出 H100 上 all-to-all 原语的真实带宽/时延坐标。
+
+### 2.3 H100 实测：all-to-all 原语的时延与有效带宽
+
+Mega MoE 主体是 SM100 专属（本机跑不了），但 EP all-to-all 这一**通信原语**在 H100 上是可测的。
+`harness/exp_ep_comm.py`（输出 `harness/exp_ep_comm.out.txt`）用本机 8×H100 + NCCL
+`all_to_all_single`（等价 dispatch/combine 的「每 rank 把所有本地 token 重新分配给所有 rank」）
+在 DeepSeek-V3 的 $H=7168$、EP=8 下测得：
+
+| 数据类型 | 本地 token | 每 rank 发送量 | 时延 | 有效带宽 |
+|---|---|---|---|---|
+| FP8 | 4 096 | 29.4 MB | 121.9 us | 240.9 GB/s |
+| FP8 | 16 384 | 117.4 MB | 354.1 us | 331.6 GB/s |
+| FP8 | 65 536 | 469.8 MB | 1 291.7 us | 363.7 GB/s |
+| FP8 | 262 144 | 1 879.0 MB | 4 840.4 us | 388.2 GB/s |
+| BF16 | 4 096 | 58.7 MB | 193.8 us | 303.0 GB/s |
+| BF16 | 262 144 | 3 758.1 MB | 9 582.7 us | 392.2 GB/s |
+
+两点观察（与「通信-计算重叠」直接相关）：
+
+1. **渐近带宽约 390–395 GB/s**（对「时延-消息量」做最小二乘拟合：
+   FP8 约 393 GB/s、BF16 约 395 GB/s）。同机 `nvidia-smi nvlink -s` 报每卡 18 条 link、
+   每条 26.562 GB/s，单向聚合硬件上限约 **478 GB/s**——实测达到约 **82%**，缺口来自 all-to-all
+   的多对多协议开销、每跳同步与通信域建立。
+2. **小消息有明显固定时延**：外推到 0 消息约 50–90 us（视拟合区间而定）。这解释了为何
+   **解码小 batch 时「带宽接近 0 但耗时几十 us」**（`docs/02` §8 的现象）：一次 all-to-all
+   的握手/同步成本与数据量几乎无关，此时唯一出路是与它重叠，而不是把消息做大。
+
+> 说明：DeepEP 的真实 dispatch/combine 会把上面的量再乘上 §2.1 的放大系数 $d$（dispatch）
+> 与 $k$（combine），并叠加上「全局计数握手」（`docs/07` §4.1）等延迟；本表量的是**原语裸开销**，
+> 属 H100 可跑的近似坐标，非 SM100 Mega MoE 的实测。
+
 ## 3. 为什么要「Mega MoE」
 
 DeepSeek 的 **Mega MoE** 把这五段——
