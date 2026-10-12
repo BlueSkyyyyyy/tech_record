@@ -189,6 +189,19 @@
       `mega-kernel-05-experiments`（weight 6，docs/04）、`mega-kernel-07-mpk-source`（weight 8，docs/06）。
       纯发布接线，不新增资料/实验。
 
+### P9 实验扩展（`docs/04-experiments.md`）
+
+- [x] **P9-1** 把 P5-2 的「两算子融合」推广到 **N 个依赖算子链**，看两类损失随 N / M 的标度
+      （对应「下一步」可选方向②，补 P5-1 §1.6 / P5-2 §2.6 的「更多算子 / 更小 M」）。
+      见 `docs/04-experiments.md` §4，源码 `src/n_op_fusion.cu`，原始输出
+      `harness/n_op_fusion.out.txt`（目标卡 H100/sm90，iters=100）：
+      Section A（N=8 扫 M 16Ki→16Mi）e/persist 1.43×→0.99×、e/fused ~7×；
+      Section B（M=16Mi 扫 N 1→32）eager 表观带宽恒 ~2.75 TB/s、fused 流量恒 8 B/elem，
+      **e/fused 随 N 近似线性（0.99→1.98→3.91→7.13×，N≤8）**，N≥16 因融合转入计算主导
+      饱和在 9.4→10.3×；Section C（M=16Ki 扫 N）launch 主导，e/persist 升到 **1.54×**、
+      e/graph 1.57×（graph≈persist）。结论：**损失三随 N 标度（融合收益上界≈N×）、
+      损失二只在轻负载+多算子时显形**。正确性 max|Δz|=0。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -215,7 +228,8 @@
   **P3 全部完成（3/3）**；**P4 全部完成（4/4）**；**P5 全部完成（3/3）**；**P6 全部完成（1/1）**；
   **P7 源码走读（1/1）完成**（本轮新增，对应「下一步」可选方向③）。
   **P8 博客发布（1/1）完成**（本轮新增，对应「下一步」可选方向①）。
-  **本专题任务清单（P0–P8）全部完成**，无未完成子项。
+  **P9-1 实验扩展（1/1）完成**（本轮新增，对应「下一步」可选方向②）。
+  **本专题任务清单（P0–P9）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -264,11 +278,21 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P8 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`
-  补建对应博客 post~~（本轮 P8-1 已完成）；② 补做 P5-2 §2.6 / P5-1 §1.6 提到的
-  「更小 M / 更多算子 / 多 block」实验；③ 在容器内 `pip install -e .` 构建 mirage sm90 路径并跑
-  `demo/qwen3/demo.py --use-mirage` 取本机 MPK 端到端数字，或继续走读 `tasks/hopper/*.cuh` 单 task
-  内部实现（P7-1 已走通运行层骨架，见 `docs/06`）。
+- **下一步：无**（P0–P9 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`
+  补建对应博客 post~~（P8-1 已完成）；② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的
+  「更小 M / 更多算子 / 多 block」实验~~（**本轮 P9-1 已完成 N 算子链 + 小 M**；仍可补的
+  是 P5-1 §1.6「扫 persistent 网格大小」与 P5-3 §3.6「多 block PDL 资源约束」）；
+  ③ 在容器内 `pip install -e .` 构建 mirage sm90 路径并跑 `demo/qwen3/demo.py --use-mirage`
+  取本机 MPK 端到端数字，或继续走读 `tasks/hopper/*.cuh` 单 task 内部实现（P7-1 已走通运行层骨架，见 `docs/06`）。
+- **本轮（P9-1）**：`docs/04-experiments.md` 新增 §4「N 算子链的融合：损失随 N 的标度」——
+  新建 `src/n_op_fusion.cu` + `harness/n_op_fusion.out.txt`（目标卡 H100/sm90，iters=100）。
+  把 P5-2 的两算子融合推广到 N 个依赖算子（eagerN / graphN / persistN / fusedN），
+  Section A（N=8 扫 M）、B（M=16Mi 扫 N）、C（M=16Ki 扫 N）。核心结论：
+  **损失三随 N 标度**——eagerN 表观带宽恒 ~2.75 TB/s、fusedN 流量恒 8 B/elem，故
+  e/fused 在 N≤8 近似 N×（1.98/3.91/7.13×），N≥16 因融合自身转入计算主导而饱和（9.4/10.3×）；
+  **损失二只在 launch-bound 区间显形**——大 M 下 e/persist≈1.00×，小 M+大 N 下升到 1.54×；
+  本机 graph≈persist（grid 启动代价 ≈ grid barrier 代价）。正确性 max|Δz|=0。
+  判据映射同 P5-2。**本轮新增实验**；对应的可选方向②（更多算子/更小 M）已完成。
 - **本轮（P8-1）**：博客发布接线——为 `docs/02`/`03`/`04`/`06` 补建 4 个 `doc_include` 内联 post
   （`mega-kernel-03-cases`/`-04-related`/`-05-experiments`/`-07-mpk-source`，weight 4/5/6/8），
   并更新 `mega-kernel-00-index` 目录（原 3/4/5 项「待写」→ 真实 relref 链接，新增第 7 项源码走读）。
