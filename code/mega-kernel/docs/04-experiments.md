@@ -2559,7 +2559,8 @@ C=16, grid=64 / C=4, grid=132       -> ok
   在 `grid≥8` 时间歇性 `unspecified launch failure`），故复现脚本每配置独立进程、并记录
   设备号；本节结论用「比例」，绝对数会随共驻负载小幅漂移。
 - 未覆盖 `cudaLaunchAttributeProgrammaticEvent`（PDL 的 cluster 版本）与 cluster 内的
-  `mbarrier`/TMA 组合，留作后续。
+  `mbarrier`/TMA 组合，留作后续（cluster 内 TMA 组合由 P30-1 §19 补齐；2D/3D cluster 与
+  子集掩码由 P31-1 §20 补齐）。
 
 ## 19. cluster 内 TMA multicast：一次读、C 个 SMEM 收的广播原语（P30-1）
 
@@ -2719,4 +2720,202 @@ multicast 稳定快 ~0.8–1.0%；delivery 吞吐在 8KB 后饱和。
   但逐元素/`float4` 的远端 SMEM stride 循环受 §18.6 同类代码生成问题拖累（比 multicast 慢 ~19×），
   属**不平等的 strawman**，已移除；「读一次 + 片上扇出」的成本以 P29-1 的 DSM 数字为准。
 - 未测 2D/3D cluster、`cudaLaunchAttributeProgrammaticEvent`（PDL 的 cluster 版）与 SM100 的
-  `SM100_TMA_2SM_LOAD`（DeepGEMM sm100 路径用的是后者）。留作后续。
+  `SM100_TMA_2SM_LOAD`（DeepGEMM sm100 路径用的是后者）。留作后续（2D/3D cluster 与 multicast
+  子集掩码由 P31-1 §20 补齐）。
+
+## 20. 2D/3D Thread Block Cluster：rank 布局、DSM 寻址与 TMA multicast 的子集掩码（P31-1）
+
+### 20.1 问题
+
+P29-1（§18）与 P30-1（§19）建立了「跨 SM 数据搬运」的两跳：**DSM**（数据已到片上后读邻居 SMEM）
+与 **TMA multicast**（一次读、投递到 C 个 SMEM）。但两者都只用 **1D cluster**（`clusterDim.x`），
+两条局限里写着同一个尾巴：
+
+> §18.6 / §19.6：未测 **2D/3D cluster**、cluster 内 TMA multicast 的（子集）掩码。
+
+这不是学术细节。生产案例的 cluster 恰恰是**多维**的：DeepGEMM **Mega MoE** 用
+`cluster_dim = (2,1,1)`（`csrc/jit_kernels/impls/sm100_bf16_mega_moe.hpp:138`）、把 token 维按
+`BLOCK_M/2` 切给 2-CTA cluster（`docs/02` §1.2、§19.1）；**Mega Gate** 用
+`cluster_dim = num_mma_ctas`。cluster 一旦不是 1D，就有两个新问题：
+
+1. **rank 到 (x,y,z) 的映射**——`map_shared_rank`（DSM）与 multicast 的 **16-bit mask 都是按线性
+   `block_rank()` 编址的**，要「只广播给某一行/某一列」必须知道 rank 怎么排。
+2. **子集广播**——真实 kernel（如 Gate 的「按行打分」）只想把数据发给 cluster 内的**一部分** CTA，
+   而不是整群。
+
+本节回答四件事：(1) 2D/3D cluster 的线性 rank 布局是什么？(2) DSM 环形交换在 2D cluster 下是否
+等同 1D？(3) TMA multicast 的**子集掩码**语义对不对、源侧流量差多少？(4) `cluster.sync` 成本随
+2D 形状怎么变、容量边界有没有变？
+
+### 20.2 方法
+
+程序 `src/cluster_2d.cu`，脚本 `harness/cluster_2d.sh`，原始输出 `harness/cluster_2d.out.txt`
+（目标卡 H100 / **sm90a**，SMs=132，**固定空闲 device 3**，nvcc 13.2，**每配置独立进程**——cluster
+launch failure 会 sticky 污染 context，与 §18/§19 同）。`cudaLaunchKernelEx` +
+`cudaLaunchAttributeClusterDimension` 设 `{x,y,z}` 三维 cluster。五个 Section：
+
+- **A（rank 布局）**：每个 block 打印 `block_rank()`，host 核对 `rank == x + y·cx + z·cx·cy`
+  （`x=blockIdx.x%cx` 等）。覆盖 `(2,2,1)`/`(4,2,1)`/`(4,4,1)`/`(2,2,2)`。
+- **S（2D DSM 环形段位移）**：与 §18 的 `Sd` 同机制（按线性 rank 环形搬、双缓冲 ping-pong、
+  每轮一次 `cluster.sync()`），但 cluster 是 `(cx,cy)`；grid 取 `(cx·kx, cy·ky)` 保持 128 block
+  （2D launch 要求**每个 grid 维都是对应 cluster 维的整数倍**）。R 轮后对解析参考逐位比较。
+- **M（multicast：整群 vs 逐行子集）**：cluster 内 SMEM 切 `L` 槽，每轮对 `L` 槽各发一次 TMA、
+  一个 `mbarrier` 累计 `L·chunk` 一次等待（深度 L 全重叠）。三模式：
+  - **mode 0（独立）**：每 CTA 各发普通 TMA（同 §19 mode 0）；
+  - **mode 1（整群）**：仅 `rank==0` 发 multicast，`mask=(1<<C)-1`（同 §19 mode 1）；
+  - **mode 2（逐行子集）**：**每个 row 的 rank0**（`rank%cx==0`）发 multicast，
+    `mask = ((1<<cx)-1) << (row·cx)`——只覆盖该行的 `cx` 个 rank；**且各 row 读各自不同**的源区域。
+- **P（`cluster.sync()` 成本）** 与 **C2（容量/合法性）**：2D/3D 扫描。
+- **D（ncu 源侧流量）**：mode 0/1/2 的 `lts__t_sectors_srcunit_tex_op_read.sum` / `lts__t_bytes.sum`
+  / `dram__bytes_read.sum`。
+
+mode 2 的**逐行不同源**是关键设计：如果 mask 语义正确，每个 CTA 只从**本行** leader 收到本行源区的
+数据；若 mask 失效（误发给整群），则一个 CTA 会收到多个 leader 的数据、`mbarrier` transaction 数
+对不上（挂起）或内容被踩（`maxerr≠0`）。故 `maxerr` 同时校验「投递范围」与「数据正确」。
+
+### 20.3 结果
+
+**A. rank 布局（全部 mismatch=0）**
+
+```text
+A cluster=(2,2,1) grid=(4,4,1)
+  by= 0:   0   1   0   1          rank = x + y*cx + z*cx*cy
+  by= 1:   2   3   2   3          （x 变化最快、其次 y、最后 z）
+  by= 2:   0   1   0   1
+  by= 3:   2   3   2   3
+  rank==x+y*cx+z*cx*cy ? YES (mismatch=0)
+A cluster=(4,4,1) grid=(8,8,1)   -> YES (0)
+A cluster=(2,2,2) grid=(4,4,2)   -> YES (0)   # 3D：rank 4..7 出现在 z=1 层
+```
+
+2D/3D cluster 的 `block_rank()` **就是行主序的线性下标**：`rank = x + y·cx + z·cx·cy`。
+这条是所有子集 mask 与 DSM 寻址的基础。
+
+**S. 2D cluster 的 DSM 环形段位移（K=4, seg=2KB, grid=128, R=200）**
+
+```text
+   cluster | C  |   GB/s | maxerr
+ ----------+----+--------+--------
+  (1,2)    |  2 |  587.9 | 0.0000
+  (2,2)    |  4 |  552.4 | 0.0000
+  (2,4)    |  8 |  533.0 | 0.0000
+  (4,4)    | 16 |  527.8 | 0.0000
+```
+
+**2D cluster 的 DSM 环形交换与 1D 完全同档**：`(2,2)`/`(4,4)` 为 552/528 GB/s，正落在 P29-1 §18
+1D `Sd` 在 seg=2KB 的 **560.7 GB/s** 上（差 <6%）；`maxerr=0` 逐位一致。K 扫描（cluster=(2,2)）：
+seg 512B/1KB/2KB/4KB → **230.9 / 392.5 / 555.1 / 723.8 GB/s**，与 §18 的「段越小、每轮 1 次屏障占比
+越大」趋势一致。
+
+**M. multicast：整群 vs 逐行子集（chunk=8KB, R=500）**
+
+```text
+   cluster (grid)      | mode0 独立 | mode1 整群 | mode2 逐行 | 全部 maxerr
+  ---------------------+------------+------------+------------+-----------
+  (2,2) grid=(8,8)=64  |  6707 GB/s |  6764 GB/s |  6194 GB/s | 0.00000
+  (4,4) grid=(8,8)=64  |  6108 GB/s |  6215 GB/s |  5981 GB/s | 0.00000
+```
+
+三模式 `maxerr` 全 **0.00000**——包括**逐行子集**掩码：证明 `.multicast::cluster` 的 mask 语义
+（按 `block_rank()` 的位）在 2D cluster 下**精确生效**，且「每个 CTA 只从本行 leader 收本行源区」
+成立。chunk 扫描（`(4,4)` mode2）：4KB/8KB/16KB/32KB → **5073 / 5979 / 5980 / 5980 GB/s**，
+与 §19 一样在 8KB 后饱和（SMEM 写入 / TMA issue 瓶颈）。
+
+**D. ncu 源侧流量（cluster=(4,4), grid=(8,8)=4 cluster×16 CTA, chunk=8KB, R=200）**
+
+```text
+                         |  mode0 独立 | mode1 整群 |  mode2 逐行
+  -----------------------+-------------+------------+-------------
+  L2 read sectors        |  21,536,076 |  4,915,200 |  19,660,800
+  lts__t_bytes.sum       |   795.93 MB |   264.07 MB|   853.88 MB
+  dram__bytes_read.sum   |    39.34 MB |    39.34 MB|   157.30 MB
+  vs mode0 (sectors)     |    1.00x    |    4.38x↓  |    1.10x↓
+```
+
+**P. `cluster.sync()` 成本（grid=(8,8)=64 block, R=200）**
+
+```text
+  cluster |  C  | ns/sync
+ ---------+-----+---------
+  (1,2)   |  2  |  448.1
+  (2,2)   |  4  |  451.0
+  (2,4)   |  8  |  463.0
+  (4,4)   | 16  |  504.6
+```
+
+**C2. 容量/合法性（2D/3D）**
+
+```text
+  cluster=(4,4,1) C=16 grid=(8,8,1) -> ok
+  cluster=(2,2,2) C=8  grid=(4,4,2) -> ok     （3D cluster 可用）
+  cluster=(4,4,2) C=32              -> cluster misconfiguration（仍硬上限 16）
+  cluster=(8,8,1) C=64              -> cluster misconfiguration
+  cluster=(4,4,1) grid=(8,6,1)      -> cluster misconfiguration（grid 各维须为 cluster 维整数倍）
+```
+
+### 20.4 读法
+
+1. **rank 是行主序线性下标**：`rank = x + y·cx + z·cx·cy`（A 段全部 mismatch=0）。所以「子集广播」
+   的实现就是**按 rank 位拼 mask**：想发给第 `y` 行（`x=0..cx-1`）就 `mask=((1<<cx)-1)<<(y·cx)`；
+   想发给第 `x` 列就 `mask = Σ_y 1<<(x+y·cx)`（步长为 `cx` 的位）。DSM 的 `map_shared_rank` 同理按
+   rank 取邻居。
+2. **DSM 是「按 rank」而非「按几何邻居」的**：2D cluster 的环形交换与 1D 完全同档（552/528 vs
+   560 GB/s），因为 `map_shared_rank` 只认线性 rank，cluster 的 2D 形状只影响 `rank` 怎么铺。
+   ⇒ 想把「2D 邻居」（上/下/左/右）做成 ring，需要在**设备端把 (dx,dy) 邻居换算成 rank**再取指针。
+3. **multicast 的子集掩码语义被实测钉死**（M 段 `maxerr=0`、逐行不同源）：mask 位 = 线性 rank，
+   **只发给 mask 命中的目的 CTA**，其余 CTA 的 `mbarrier` 收不到 transaction（故必须用**与投递范围
+   匹配的 `expect_tx`**，否则挂起）。这解释了 DeepGEMM 为什么敢写死 mask（§19.1 的
+   `tma_copy.cuh:77–86`）——mask 是**精确**的，不是「广播给整群再丢弃」。
+4. **子集广播是「源侧读取 vs 投递范围」的旋钮**：ncu 显示同一份工作，mode1（整群、1 个源区/cluster）
+   L2 read sectors 比 mode0 少 **4.38×**、DRAM 不变；mode2（逐行、`cy` 个源区/cluster）的
+   L2 sectors 恰是 mode1 的 **cy=4 倍**（19.66M/4.92M=4.00）、DRAM 是 mode0 的 4 倍——**因为各 row
+   读的是不同源区、没有 L2 去重**。要点：**multicast 省的是「同一块的重复读」，一旦各行读不同数据，
+   源侧流量就随之上升**；mode2 的价值在**投递范围正确**（Gate 的按行打分），不是省流量。
+5. **`cluster.sync` 与 cluster 形状无关，只与 block 数有关**：2D `(1,2)`→`(4,4)` 是 448→505 ns
+   （C 2→16），与 §18 的 1D 同量级（§18 grid=128 时 504→767 ns，绝对差来自本段 grid 更小)。
+   `cluster.sync` 覆盖的是「这个 cluster 的这几个 SM」，**怎么排成 2D 不改变它同步多少个 block**。
+6. **容量边界不变**：3D cluster 可用（`(2,2,2)=8` ok），但**硬上限仍是 16 block**（`(4,4,2)=32`
+   失败），且**grid 每个维度都必须是 cluster 对应维的整数倍**（`grid=(8,6)` 配 `cy=4` 失败——
+   1D 时代的「grid 是 C 的倍数」在多维下变成**逐维**约束）。⇒ 132 SM 的整机 megakernel 切成
+   cluster 时，切法必须让每个 grid 维对齐。
+
+### 20.5 与判据 / MPK / 生产案例的关系
+
+- **对上 P29-1（§18）/ P30-1（§19）**：本节把 §18 的 DSM 与 §19 的 multicast 从 1D 推广到 2D/3D，
+  并补上两节都留的「2D/3D cluster」与「子集掩码」尾巴。结论是**机制不变、多一层 rank 换算**：
+  DSM 与整群 multicast 行为同 1D；新增的只是「按线性 rank 拼子集 mask」这条实现细节。
+- **对上 P24-1（§17）**：§17 量「落/不落 HBM」；§19 量「整群 multicast 省 L2 请求」；本节进一步显示
+  **multicast 省不省取决于「被广播的块是否被多 CTA 共享」**——逐行不同源时（mode2）反而把 DRAM
+  拉到 4×。这是「跨 SM 复用」这一维上更精确的边界。
+- **对上 MPK**：MPK 的粒度是「一个 task = 一个 CTA」（`docs/07` §0），worker/scheduler 划分到固定
+  SM（§5.1 行 1148–1174），跨 task 中间量走 paged SMEM / ring buffer（§5.3 行 1312–1325），
+  **不以 Hopper cluster 为一等公民**，也未见对 2D cluster 的使用。故本节仍是**实现层可选的一档**，
+  与 MPK「按需局部同步」目标一致（`docs/03` §3.3、`docs/06` §3）。
+- **对上生产案例（一手核对，DeepGEMM `057ca59`）**：Mega MoE 的 `cluster_dim=(2,1,1)`
+  （`impls/sm100_bf16_mega_moe.hpp:138`）在形式上就是一个 2D cluster——其 rank 布局正好是本节
+  A 段验证的 `rank = x + y·cx` 在 `cy=1` 的退化；Mega Gate 的 `cluster_dim=num_mma_ctas`
+  （`docs/02` §1.2）同理。故 DeepGEMM 的 cluster 用法**只需要 1D 语义**，是本节的退化情形；
+  真正的多维子集广播（按行/列）在本机实测上**可用且精确**，但目前未见生产案例使用。
+- **判据（C1–C5，`docs/00` §3）**：cluster kernel 满足 C1+C2+C3，`cluster.sync` / multicast / DSM
+  细化了 **C4**；**仍不是 C5**（无固定 worker/scheduler 动态派发）。与 P29-1/P30-1 同档。
+
+### 20.6 局限与踩到的坑
+
+- **2D launch 的逐维对齐**：最初把 `S` 写成 1D grid（`grid=128`）配 2D cluster `(2,2)`，直接
+  `cluster misconfiguration`——**grid 的每个维度都必须是对应 cluster 维的整数倍**（`gridDim.y=1`
+  不是 `cy=2` 的倍数）。改成 `grid=(cx·kx, cy·ky)` 后正常。这是 1D（只要求 `grid % C == 0`）
+  在多维下的自然推广，容易踩。
+- **正确性基准要为多维重写**：DSM 环形的解析参考在 1D 下是「`gid` 的 cluster 连续一段」，2D 下
+  cluster 的 block 在全局线性 id 里**不连续**（`gid = by·gx+bx`），必须按 `(bx%cx, by%cy)` 反推
+  同 cluster 的邻居 id。首版沿用 1D 的 `cstart=g-(g%C)` 在 C=16 时给出 `maxerr=40000`（C≤4 时
+  碰巧连续才为 0）——**纯 host 基准 bug，不是 DSM 语义**，修正后全部 `maxerr=0`。
+- **mode2 的 DRAM 上升是实验设置**：逐行读**不同**源区是刻意为验证掩码而设的；真实 kernel 若各行
+  读同一块，DRAM 会与 mode0 相同（如 mode1）。故不要把 mode2 的 4× DRAM 读成「子集广播更贵」，
+  它是「源数据不同」的直接结果。
+- **deliver 仍饱和在 ~6 GB/s 档**：与 §19 一样，测的是 SMEM 写入 / TMA issue 的饱和吞吐，不是源侧
+  带宽；multicast 的墙钟收益在饱和区间被掩盖，要看 ncu 的 L2 计数。
+- **cluster 上限仍 16 block**：3D cluster 可用但总量不变（`(8,8,1)=64` 失败）；故 132 SM 整机仍只能
+  切 ~8 个 cluster。DSM 的「变界远端读」代码生成坑（§18.6）在本节同样规避（每线程固定索引读）。
+- **仍未覆盖**：`cudaLaunchAttributeProgrammaticEvent`（PDL 的 cluster 版）与 SM100 专属的
+  `SM100_TMA_2SM_LOAD`（DeepGEMM sm100 路径用的是后者），留作后续；本节只测到 sm90a 的 cluster
+  原语。

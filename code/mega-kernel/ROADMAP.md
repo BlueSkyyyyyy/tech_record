@@ -655,6 +655,28 @@
   在 `-arch=sm_90` 下 ptxas advisory（须 `sm_90a`）；DSM 手工扇出的 mode2 因远端 SMEM stride 循环
   代码生成问题（§18.6 同类）成 strawman 已移除。**本轮新增实验**；与 P29-1（§18）合成「跨 SM 搬运两跳」。
 
+### P31 实验扩展 18：2D/3D Thread Block Cluster（`docs/04-experiments.md` §20）
+
+- [x] **P31-1** 补齐 `docs/04` §18.6 / §19.6 两条都留的同一个尾巴「**未测 2D/3D cluster**」，
+  把 P29-1（§18 DSM）与 P30-1（§19 TMA multicast）从 1D cluster 推广到**多维**，并补上 §19 未测的
+  **multicast 子集掩码**。生产案例的 cluster 本就是多维的：DeepGEMM Mega MoE `cluster_dim=(2,1,1)`
+  （`impls/sm100_bf16_mega_moe.hpp:138`）、Mega Gate `cluster_dim=num_mma_ctas`（`docs/02` §1.2）。
+  见 `docs/04-experiments.md` §20，源码 `src/cluster_2d.cu`，脚本 `harness/cluster_2d.sh`，原始输出
+  `harness/cluster_2d.out.txt`（目标卡 H100/sm90a，**固定空闲 device 3**，nvcc 13.2，每配置独立进程）。
+  五 Section：(1) **rank 布局**——实测确认 `block_rank() == x + y*cx + z*cx*cy`（行主序线性下标；
+  `(2,2,1)`/`(4,2,1)`/`(4,4,1)`/`(2,2,2)` 全 mismatch=0）；(2) **2D DSM 环形段位移**与 1D 同档
+  （C=2/4/8/16 → 587.9/552.4/533.0/527.8 GB/s，对上 §18 1D seg2KB 的 560.7 GB/s；`maxerr=0`）；
+  (3) **TMA multicast 整群（mode1）vs 逐行子集（mode2）**——两模式 `maxerr=0`，证明 16-bit mask
+  按线性 rank **精确生效**（逐行只发给该行 `cx` 个 rank、各 CTA 只收本行 leader 的数据）；
+  (4) ncu 源侧：mode1 比 mode0 L2 read sectors 少 **4.38×**、DRAM 不变；mode2 的 L2 sectors 恰为
+  mode1 的 `cy=4` 倍、DRAM 为 mode0 的 4 倍（**因逐行读不同源区、无 L2 去重**——子集广播的价值在
+  **投递范围正确**而非省流量）；(5) `cluster.sync` 与 cluster 形状无关、只与 block 数有关
+  （448→505 ns @ C 2→16）；**容量边界不变**：3D cluster 可用（`(2,2,2)=8` ok），硬上限仍 16 block，
+  且 grid **每个维度**都须是 cluster 对应维的整数倍（1D 的「grid 是 C 的倍数」在多维下变逐维约束）。
+  踩坑：2D launch 逐维对齐、DSM 环形的解析参考在 2D 下 cluster block 全局线性 id **不连续**、
+  首版沿用 1D 公式给 C=16 的假 `maxerr=40000`。判据不变（C1–C3，`cluster.sync`/multicast 细化 C4，
+  仍非 C5）。**本轮新增实验**；与 P29-1（§18）/P30-1（§19）合成「跨 SM 搬运」的多维形态。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -677,7 +699,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P30-1 完成（1/1）**。补齐 `docs/04` §18.6 明确留的「cluster 内 `mbarrier`/TMA 组合
+- 当前进度：**P31-1 完成（1/1）**。补齐 `docs/04` §18.6 / §19.6 两条都留的「**未测 2D/3D cluster**」
+  尾巴，把 P29-1（§18 DSM）/ P30-1（§19 TMA multicast）从 1D 推广到**多维**，并补上 §19 未测的
+  **multicast 子集掩码**——`docs/04-experiments.md` 新增 **§20**，源码 `src/cluster_2d.cu`、脚本
+  `harness/cluster_2d.sh`、原始输出 `harness/cluster_2d.out.txt`（目标卡 H100/sm90a、**固定空闲
+  device 3**、nvcc 13.2、每配置独立进程）。核心结论：**rank 布局实测确认** `block_rank()==
+  x+y*cx+z*cx*cy`（行主序线性下标，4 组 cluster 全 mismatch=0）；**2D DSM 环形与 1D 同档**
+  （C=2/4/8/16→588/552/533/528 GB/s，对上 §18 的 560.7，maxerr=0）；**multicast 子集掩码精确生效**
+  （整群 mode1 与逐行 mode2 全 maxerr=0，逐行只发给该行 cx 个 rank）；**源侧** mode1 比 mode0 L2 read
+  sectors 少 **4.38×**、DRAM 不变，而 mode2 的 L2 恰为 mode1 的 cy=4 倍、DRAM 为 mode0 的 4 倍
+  （逐行读不同源、无去重——子集广播价值在**投递范围正确**）；`cluster.sync` 只与 block 数有关
+  （448→505 ns）；**容量边界不变**（3D 可用、仍 16 block 上限、grid 逐维对齐）。踩坑：2D launch
+  逐维对齐、2D 下 cluster block 的全局线性 id 不连续导致首版假 `maxerr`。**本轮新增实验。**
+  此前 **P30-1 完成（1/1）**。补齐 `docs/04` §18.6 明确留的「cluster 内 `mbarrier`/TMA 组合
   未覆盖」尾巴：**TMA multicast**（一次读、投递到 cluster 内 C 个 CTA 的 SMEM）——`docs/04-experiments.md`
   新增 **§19**，源码 `src/tma_multicast.cu`、脚本 `harness/tma_multicast.sh`、原始输出
   `harness/tma_multicast.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、每配置独立进程）。
@@ -813,7 +847,9 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：全专题收尾（P0–P30 全部完成）**。P30-1 已把 §18.6 的「cluster 内 `mbarrier`/TMA 组合
+- **下一步：全专题收尾（P0–P31 全部完成）**。P31-1 已把 §18.6/§19.6 的「未测 2D/3D cluster」补成
+  实测（`docs/04` §20：rank 布局 `x+y*cx+z*cx*cy`、2D DSM 与 1D 同档、multicast 逐行子集掩码精确、
+  容量逐维约束）。P30-1 已把 §18.6 的「cluster 内 `mbarrier`/TMA 组合
   未覆盖」补成实测（`docs/04` §19：TMA multicast 一次读、C 个 SMEM 收——语义确认、delivery 打平、
   源侧 L2 少 2×、DRAM 不变）。P29-1 已把 §6.6 的「sm90 cluster 未覆盖」补成实测
   （`docs/04` §18：Cluster + DSM 跨 SM 交换原语、`cluster.sync` vs `grid.sync`、cluster 容量边界）。
@@ -856,7 +892,8 @@
    ⑨ ~~`docs/04` §6.6「sm90 cluster 未覆盖」~~（**P29-1 完成**：Thread Block Cluster + DSM 跨 SM
    交换原语实测——DSM 远端读 ≈ 本地 SMEM、dsm/hbm 1.06–1.27×、`cluster.sync` 比 `grid.sync` 便宜
    1.5–2.2×、cluster 上限 16 block/grid 须为 C 倍数；见 `docs/04` §18）。
-   剩余可选：~~cluster 内 TMA multicast + `mbarrier` 组合~~（**P30-1 完成**：`docs/04` §19）、2D/3D cluster、
+   剩余可选：~~cluster 内 TMA multicast + `mbarrier` 组合~~（**P30-1 完成**：`docs/04` §19）、
+   ~~2D/3D cluster + multicast 子集掩码~~（**P31-1 完成**：`docs/04` §20）、
    SM100 `SM100_TMA_2SM_LOAD`、`cudaLaunchAttributeProgrammaticEvent`；
    把 DeepGEMM Mega Gate 的 `cluster_dim` 路径做一次 sm90 等价复刻（Mega Gate 本身是 SM100 专属）。
 - **本轮（P25-1 续）**：续做 P25-1 的「MPK 端到端跑通」，把上轮「执行不收敛」从玄学死锁推进到
