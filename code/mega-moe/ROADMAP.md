@@ -1283,6 +1283,42 @@
       smem 无属性 invalid argument→设属性成功；`LaunchOptions` 真实头文件 host 测试 ALL PASS。
       配套博客 `content/posts/mega-moe-52-kernel-launch-pdl`（索引页新增第 52 篇）。
 
+### P43 增量（opt-in，补上 EP 反向通信的空档）
+
+- [x] **P43-1** **DeepEP 的 EPLB 冗余专家：权重预取 `lb_prefetch_weights` 与梯度归约
+      `lb_reduce_grads`**（`deep_ep/include/deep_ep/layout/ep/eplb.cuh`、
+      `deep_ep/include/deep_ep/impls/ep/{prefetch_weights,reduce_grads}.cuh`、
+      `csrc/buffers/ep.hpp:984-1075`、`csrc/kernels/ep/{prefetch_weights,reduce_grads}.hpp`、
+      `deep_ep/buffers/ep.py:846-905`、`deep_ep/buffers/allocator.py`、`deep_ep/utils/envs.py:194-235`、
+      `tests/ep/test_{prefetch_weights,reduce_grads}.py`；README §Expert load balancing `:330-377`）。
+      专题 `docs/07` 讲了 DeepEP dispatch/combine、P4 讲了 MoE 反向 grouped GEMM，二者之间的
+      **反向通信**一直空着：动态专家复制（MoonEP / UltraEP）下前向要把主人权重（+量化 scale）
+      推到各 peer 冗余槽、反向要把副本 FP32 梯度累加回主人。**两个 kernel 用 NCCL 设备 API
+      （`ncclDevComm`/`ncclGin`），本机 NCCL 2.29.7 不提供 → 仅分析**；但 host 公式、负载均衡
+      切块、归约语义架构无关，H100 跑**真实设备代码**。→ `docs/53-deepep-eplb-redundancy.md`
+      （真实行号核对）：**数据模型** `redundancy_mapping[r][c]` = 域内专家 id 或 -1（`README:341`）。
+      **host** `lb_get_theoretical_num_sms`（`ep.py:846-852`）= `align(ceil(max(nvlink/180,
+      nvlink/45)),2)`（每 SM HBM 读/写 180/45 GB/s，`envs.py:194-204`；与冗余映射无关，只给 SM 容量
+      上界）+ `num_sms` 对齐偶数（`ep.py:43/65`）；`ep.hpp` 契约（prefetch 多权重 `num_weights<=16`、
+      reduce 单权重 FP32、每专家字节 `%32==0`、TMA 对齐 `compiled.cuh:67`）；launch 每 warp 私有
+      chunk（prefetch **12 KiB**、reduce **24 KiB**，`hpp:30/31`）+ `cluster_dim=2-(num_sms%2)`。
+      **负载均衡切块** `eplb.cuh`：`build_tasks:29-64` 用 `cub::BlockScan` 块内压缩、条件
+      `expert_idx/kNumLocalExperts==rank_idx`、任务表按映射顺序、`kNumMaxTasks=2730`（32 KiB smem）；
+      `EPWeightIterator:91-140` 用**全 rank 共享一个原子计数器**按 `weight→chunk→task` 顺序窃取，
+      权重单调推进（`num_skipped_chunks`）、`chunk_idx%num_tasks` 选任务、尾块 `min(CH,B-off)` 裁剪、
+      `src=本地/dst=远端`（`gin.get_sym_ptr<Lsa>`）。**两个 kernel 逐行镜像**：prefetch
+      `tma_load(src_ptr)→tma_store(dst_ptr)`（覆盖）、reduce `tma_load(dst_ptr)→
+      tma_store_reduce_add_f32(src_ptr)`（**元素级原子加、顺序无关**，故测试用整数 pattern +
+      `torch.equal`，`test_reduce_grads.py:31-33`）。H100 实测 `src/eplb_redundancy.cu` +
+      `harness/exp_eplb_redundancy.{sh,out.txt}`（逐行原样抽取 `build_tasks`/`EPWeightIterator`，
+      后者用等价对称指针桩）：① `build_tasks` **16/16 逐条一致**（含映射长>线程数 8×40=320>128、
+      `-1` 空槽、全空/全本地、末 rank）；② iterator 4 warp 并发 **77/77 认领**、src/dst 偏移逐条
+      一致、全局 counter 收尾 81=77+4（空领语义）、`bytes[0]%CH=500` 尾块正确；③ host 公式真机
+      `nvidia-smi nvlink -s` → `get_nvlink_gbs=430.3 GB/s`、写侧瓶颈 `ceil(430.3/45)=10` →
+      **10 SMs**，`align(num_sms,2)` 参数语义逐点对；④ 归约语义 vs 参考 relerr **0.000e+00**、
+      反例（覆盖）0.782、`build_tasks` 领槽 10==非空映射 10 且无重复。配套博客
+      `content/posts/mega-moe-53-deepep-eplb-redundancy`（索引页新增第 53 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1307,8 +1343,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P42 各增量完成（P15-1…P41-1、P42-1）。**
-  本轮 P42-1：新建 `docs/52-kernel-launch-pdl.md`（+`src/pdl_launch.cu`、`src/pdl_launch_host.cpp`、
+- 当前进度：**P0~P14 全部完成；P15~P43 各增量完成（P15-1…P41-1、P42-1、P43-1）。**
+  本轮 P43-1：新建 `docs/53-deepep-eplb-redundancy.md`（+`src/eplb_redundancy.cu`、
+  `harness/exp_eplb_redundancy.{sh,py,out.txt}`）——补上专题「EP 反向通信」的空档：
+  动态专家复制（MoonEP / UltraEP）下前向 `lb_prefetch_weights` 把主人权重（+scale）推到各 peer
+  冗余槽、反向 `lb_reduce_grads` 把副本 FP32 梯度累加回主人。**两个 kernel 用 NCCL 设备 API
+  （`ncclDevComm`/`ncclGin`），本机 NCCL 2.29.7 不提供 → 仅分析**；但三层架构无关机制 H100 真跑：
+  ① host 解析式带宽模型 `align(ceil(max(nvlink/180, nvlink/45)),2)`（与冗余映射无关，只给 SM 容量上界；
+  真机 `nvidia-smi nvlink` 430.3 GB/s → 写侧瓶颈 10 → **10 SMs**）；② 负载均衡切块——`build_tasks`
+  用 cub 块内压缩按 owner 过滤映射表、`EPWeightIterator` 用**全 rank 共享一个原子计数器**按
+  weight→chunk→task 窃取（**16/16 + 77/77 认领且偏移逐条一致**，逐行原样抽取真实设备代码）；
+  ③ 归约语义——reduce 用 `tma_store_reduce_add_f32`（**元素级原子加、顺序无关**）而非覆盖
+  （relerr 0 vs 反例 0.782）。`build_tasks`、iterator、host 公式、归约语义全部 H100 实测 ALL PASS。
+  上一轮 P42-1：新建 `docs/52-kernel-launch-pdl.md`（+`src/pdl_launch.cu`、`src/pdl_launch_host.cpp`、
   `harness/exp_pdl_launch.{sh,out.txt}`）——补上前面 51 篇都踩、却从没单独讲过的**发射那一下**：
   DeepJIT `Kernel::launch` 用 driver `cuLaunchKernelEx` 装配**至多 3 个 `CUlaunchAttribute`**
   （cooperative / cluster dimension / PDL），`LaunchOptions`（`options.hpp:178-233`）是「全局默认
