@@ -248,6 +248,24 @@
       而 megakernel 恰恰把余量占满（§5、MPK §5.1），故它改在单 kernel 内做 task 级重叠。
       正确性 fail=0。**本轮新增实验。**
 
+### P13 实验扩展 4（`docs/04-experiments.md`）
+
+- [x] **P13-1** 单 kernel 内跨 task 软件流水：把**损失一**（kernel barrier 禁止跨算子软件流水）
+      实测出来（补齐 P5-2 §2.6 / §5.6「未做跨 tile software pipelining」的尾巴）。
+      见 `docs/04-experiments.md` §7，源码 `src/in_kernel_pipeline.cu`，原始输出
+      `harness/in_kernel_pipeline.out.txt`（目标卡 H100/sm90，iters=30，G=132，T=256，E=8，
+      276 MB 输入 ≫ L2）：同一 kernel 内「`cp.async` 载入 chunk → R 轮 FMA 消费」依赖链，
+      唯一变量是流水深度 `K`（`K=1` 阶段串行 = kernel barrier / 不做流水的 persistent kernel）。
+      Section A（R=64 扫 K）：**K=1→2 拿到 1.18×、再加深无增益**（us/chunk 2.885→2.436→平）；
+      Section B（K=4 扫 R）：R=0 纯访存 **2.17×**（藏相邻拷贝延迟）、随 R 增大 speedup→理论上界
+      `(Tmem+Tcomp)/max(Tmem,Tcomp)`，R≥128 时 speedup/上界=1.00（访存完全藏进计算）；
+      Section C（R=64,K=4 扫 chunks）：16→256 收敛 1.06×→1.18×（序言填流水一次性成本）。
+      结论：**损失一在单 kernel 内可回收，量级 1.18×，正落在 MPK §6.6（行 1586–1596）报告的
+      1.2–1.3×**；增益几乎全在深度 1→2，解释了 MPK/DeepGEMM 为何用 `Kstages=3/6`（`docs/07` §1.2）；
+      比 P5-2 的 `grid.sync()` 形态更接近 megakernel（异步可重叠协调而非全局会合），但仍**不满足 C5**
+      （无去中心化 worker/scheduler 调度）。**本轮新增实验**；对应当前「下一步」可选方向②/③之外的
+      机制补测（损失一此前只有资料分析）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -280,7 +298,9 @@
   `tasks/hopper/` 具体 task 的 device 实现」）。
   **P12-1 多 block PDL occupancy 资源约束（1/1）完成**（本轮新增，补齐 P5-3 §3.6 / P10-1 §5.5
   两条尾巴，完成「下一步」可选方向②中最后一点）。
-  **本专题任务清单（P0–P12）全部完成**，无未完成子项。
+  **P13-1 单 kernel 内跨 task 软件流水（1/1）完成**（本轮新增，把此前只有资料分析的**损失一**
+  实测出来，补齐 P5-2 §2.6 / §5.6 的未覆盖项）。
+  **本专题任务清单（P0–P13）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -329,13 +349,25 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P12 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
+- **下一步：无**（P0–P13 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
   **P10-1 完成 P5-1 §1.6「扫 persistent 网格大小」**；**P12-1 完成 P5-3 §3.6 / P10-1 §5.5「多 block
-  PDL occupancy 资源约束」**）；
+  PDL occupancy 资源约束」**；**P13-1 完成 P5-2 §2.6 / §5.6「跨 tile software pipelining」的损失一实测**）；
   ③ ~~走读 `tasks/hopper/*.cuh` 单 task 内部实现~~（P11-1 完成）；剩「在容器内 `pip install -e .`
   构建 mirage sm90 路径并跑 `demo/qwen3/demo.py --use-mirage` 取本机 MPK 端到端数字」（构建成本高，未做）。
+- **本轮（P13-1）**：`docs/04-experiments.md` 新增 §7「单 kernel 内跨 task 软件流水：把损失一测出来」——
+  新建 `src/in_kernel_pipeline.cu` + `harness/in_kernel_pipeline.out.txt`（目标卡 H100/sm90，iters=30，
+  G=132，T=256，E=8，输入 276 MB ≫ L2）。同一 kernel 内「`cp.async` 载入 chunk → R 轮 FMA 消费」依赖链，
+  唯一变量是流水深度 `K`（`K=1` = 阶段串行 = kernel barrier / 不做流水的 persistent kernel）。三组扫描：
+  Section A（R=64 扫 K）：**K=1→2 拿到 1.18×、再加深无增益**（us/chunk 2.885→2.436→平）；
+  Section B（K=4 扫 R）：R=0 纯访存 **2.17×**（藏相邻拷贝延迟）、R 越大 speedup→理论上界
+  `(Tmem+Tcomp)/max(Tmem,Tcomp)`（R≥128 时 speedup/上界=1.00，访存完全藏进计算）；
+  Section C（R=64,K=4 扫 chunks）：16→256 收敛 1.06×→1.18×（序言填流水一次性成本）。
+  核心结论：**损失一在单 kernel 内可回收，量级 1.18×，正落在 MPK §6.6（行 1586–1596）报告的 1.2–1.3×**；
+  增益几乎全在深度 1→2，解释了 MPK/DeepGEMM 为何用 `Kstages=3/6`（`docs/07` §1.2 的 K/N 双重流水）；
+  比 P5-2 的 `grid.sync()` 形态更接近 megakernel（异步可重叠协调、无全局会合），但仍**不满足 C5**
+  （无去中心化 worker/scheduler 调度）。**本轮新增实验**；对应「补测损失一」这一机制空白（此前仅资料分析）。
 - **本轮（P12-1）**：`docs/04-experiments.md` 新增 §6「多 block PDL 的 occupancy 资源约束」——
   新建 `src/pdl_multiblock.cu` + `harness/pdl_multiblock.out.txt`（目标卡 H100/sm90，iters=30，
   blockDim=256/128 各一遍）。把 P4-2/P5-3 的 `grid=1` 一对 kernel 扩到多 block，三组扫描：
