@@ -31,7 +31,7 @@
 
 ### P0 侦察与框架
 
-- [ ] **P0-1** 通读 MPK 论文快照，产出章节地图与关键图/表清单（进 `docs/00`）。
+- [x] **P0-1** 通读 MPK 论文快照，产出章节地图与关键图/表清单（进 `docs/00` §6「MPK 论文导航」）。
 - [ ] **P0-2** 收集案例：`~/github/DeepGEMM`（mega_moe/mega_gate/mega_mhc）、`~/github/hpc-ops`、Kimi K3 报告相关段落。
 - [ ] **P0-3** 环境探测：`kernel_lab` 能否跑 persistent kernel / CUDA Graph / PDL 小实验（H100 支持 PDL）。
 
@@ -45,10 +45,10 @@
 ### P2 MPK 论文精读（`docs/01-mpk-paper.md`）
 
 - [ ] **P2-1** SM 级图表示（§3）：以 SM 为粒度的数据依赖；与 CUDA Graphs 的对比。
-- [ ] **P2-2** MPK 编译器（§4）：`t`Graph 生成、每个 task 的 CUDA 实现生成。
-- [ ] **P2-3** in-kernel 并行运行时：去中心化调度、跨算子软件流水、计算-通信重叠。
-- [ ] **P2-4** 评估（§5）：相对 PyTorch/vLLM/SGLang 的 1.0–1.7× 延迟、TP 下最高 10× 吞吐；
-      复现要点与局限（模型/GPU 代际/batch）。
+- [ ] **P2-2** MPK 编译器（§4）：tGraph 生成、每个 task 的 CUDA 实现生成。
+- [ ] **P2-3** in-kernel 并行运行时（§5）：去中心化调度、跨算子软件流水、计算-通信重叠。
+- [ ] **P2-4** 评估（§6）：相对 PyTorch/vLLM/SGLang 的 1.0–1.7× 延迟、TP 下最高 10× 吞吐；
+      复现要点与局限（模型/GPU 代际/batch）。（注：评估实际在 §6，非早期误记的 §5。）
 
 ### P3 生产案例（`docs/02-production-cases.md`）
 
@@ -94,8 +94,8 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：脚手架就绪（README/ROADMAP/docs/scripts/posts/skill），autopilot 待首轮侦察。
-- **下一步：P0-1** 通读 MPK 论文快照，产出章节地图并写 `docs/00-megakernel-overview.md` 初稿。
+- 当前进度：脚手架就绪；**P0-1 完成**——MPK 论文（arXiv 2512.22219v2，2717 行）章节地图、关键图/表/算法清单已写入 `docs/00` §6。
+- **下一步：P0-2** 收集案例源码坐标（`~/github/DeepGEMM` mega_moe/mega_gate/mega_mhc 的文件与行号、`~/github/hpc-ops` Megakernel roadmap、`~/github/ai-infra-book/references/text/kimi-k3.txt` 的 fused mega-kernels 段落），产出案例清单（暂存进 `docs/02` 草稿或 ROADMAP 记录），为 P3 铺垫。
 
 ## 阻塞
 
