@@ -1749,3 +1749,164 @@ kernel 边界上重叠。
   graph 内部的 programmatic event edge，后者语义可能不同。
 - 正确性检查用的是「下游读到上游哨兵」这一**存在性**判据（`fail==0` 即 PDL 排序保留），
   未构造更细的跨 fragment 依赖来压测 PDL 在 Graph 里的边界行为。
+
+## 14. 跨算子细粒度重叠：为什么「切 block 做重叠」赢不过算子级屏障（P20-1）
+
+### 14.1 问题
+
+本专题的**损失一（kernel barrier）**此前有两个实测侧面：
+
+- **P13-1**：单 kernel 内、**单个 task 内部**的访存-计算软件流水（`cp.async` 载入藏进 FMA），确认
+  损失一在单 kernel 内可回收 ~1.18×；
+- **P5-2 / P15-1**：单 kernel 内跨 task 的**集中式** `grid.sync()` 与**去中心化** ready-queue 调度。
+
+但 MPK §2.1（快照行 241–293，Figure 3）点名的是一类更具体的东西：**跨算子（cross-operator）细粒度
+kernel overlap**。以 `MatMul → AllGather` 为例，下游 AllGather 是逐元素算子，每个下游 block 只依赖
+**上游一个** block 的输出 tile；kernel barrier 却要求 AllGather 的**所有** block 等 MatMul 的**所有**
+block 完成。MPK §3（快照行 371–386）进一步以 `MatMul → AllReduce` 说明：把依赖精确到「一个 task 对应
+一个 task」后，compute-heavy 的 MatMul task 可与 communication-heavy 的 AllReduce task 重叠，
+**同时利用计算资源与通信/访存带宽**。
+
+这里有两个常在直觉里被混为一谈的问题：
+
+- **Q1（依赖表示）**：把算子级屏障换成**逐 tile 的 ready 标志**，数值上是否安全？
+- **Q2（收益来源）**：细粒度依赖本身是否就等于收益？还是说收益另有前提？在**固定 SM 数**的 GPU 上，
+  把机器按 block 静态切给「上游算子」和「下游算子」来做并发，到底能不能赢过算子级屏障？
+
+### 14.2 方法
+
+源码 `src/cross_op_overlap.cu`，原始输出 `harness/cross_op_overlap.out.txt`（目标卡 H100/sm90，
+device 3，iters=30，G=132=SM 数，threads/block=256）。构造 Figure 3 型的 workload：
+
+- **NT=8192 个 tile**，每 tile **TS=4096 float**（16 KB），共 M=33.5M float（134 MB/数组）；
+- **producer（上游算子）**：`buf[t] = src[t] + 1`，用 `float4` 向量化；`PR` 轮 FMA 决定它是**访存受限**
+  （PR=0）还是**计算受限**（PR 大）。`buf` 是下游要读的中间张量。
+- **consumer（下游算子）**：把本线程的 16 个元素**读进寄存器一次**，在寄存器上做 `R` 轮 FMA 归约
+  写回 `out[t]`——R 大时 consumer 是**计算受限**（不重复访问 HBM）。tile `t` 的 consumer **只依赖**
+  producer 的 tile `t`（1:1），与其它 tile 无关。
+
+三种策略（工作量完全相同）：
+
+| 策略 | 说明 | Figure 3 对应 |
+|---|---|---|
+| `serial` | 两个 eager kernel：producer 全体 -> consumer 全体（kernel barrier） | 3a |
+| `barrier` | 单个 cooperative persistent kernel：全体 produce -> `grid.sync()` -> 全体 consume | 3a（单 launch） |
+| `pipe` | 单个 persistent kernel：`Gp` 个 producer block + `Gc=G−Gp` 个 consumer block **并发**，每个 tile 一个 ready 标志（代次 `gen` 区分轮次），consumer 就绪即算 | 3b（细粒度重叠） |
+
+`ideal` 列给的是「静态分块 + **完美重叠**」的**理论下界** `max(Tp(Gp), Tc(Gc))`（分别用实际 block 数
+测得的单阶段时间）。四组扫描：**A** 扫 `R`（producer 访存受限）、**B** 扫 `PR`（producer 变计算受限）、
+**C** 扫 `Gp`、**D** 单阶段随 block 数 `GB` 的缩放。
+
+**正确性**：三策略的浮点运算顺序完全一致（同一 `produce_tile`、同一 block 归约树），`out[]` 应逐位相等；
+以 `serial` 为参考比较 `barrier`/`pipe`，报告 `max|Δ|`。
+
+### 14.3 结果
+
+**Section A（producer 访存受限 PR=0，Gp=32 / Gc=100；时间单位 ms，越小越快）**：
+
+| R | Tp | Tc | serial | barrier | pipe | s/b | pipe/b | ideal | p/ideal |
+|---|---|---|---|---|---|---|---|---|---|
+| 0 | 0.1031 | 0.0310 | 0.1346 | 0.1325 | 0.4518 | 1.016× | **0.293×** | 0.2057 | 2.196× |
+| 16 | 0.1032 | 0.1525 | 0.2539 | 0.2519 | 0.4567 | 1.008× | **0.552×** | 0.2059 | 2.218× |
+| 32 | 0.1035 | 0.1860 | 0.2873 | 0.2854 | 0.4573 | 1.007× | **0.624×** | 0.2416 | 1.893× |
+| 64 | 0.1034 | 0.2534 | 0.3541 | 0.3523 | 0.4606 | 1.005× | **0.765×** | 0.3290 | 1.400× |
+| 128 | 0.1035 | 0.3879 | 0.4884 | 0.4866 | 0.5587 | 1.004× | **0.871×** | 0.5040 | 1.108× |
+| 256 | 0.1033 | 0.6567 | 0.7573 | 0.7552 | 0.9140 | 1.003× | **0.826×** | 0.8537 | 1.071× |
+
+正确性（R=256）：`max|barrier−serial| = 0.000e+00`、`max|pipe−serial| = 0.000e+00`——**逐位一致**。
+
+**Section B（consumer 固定 R=80，扫 producer 计算量 PR）**：
+
+| PR | Tp | Tc | serial | barrier | pipe | s/b | pipe/b |
+|---|---|---|---|---|---|---|---|
+| 0 | 0.1031 | 0.2870 | 0.3878 | 0.3858 | 0.4641 | 1.005× | 0.831× |
+| 32 | 0.1955 | 0.2872 | 0.4807 | 0.4784 | 0.8106 | 1.005× | 0.590× |
+| 64 | 0.2242 | 0.2870 | 0.5111 | 0.5069 | 0.9267 | 1.008× | 0.547× |
+| 128 | 0.2930 | 0.2871 | 0.5806 | 0.5754 | 1.1820 | 1.009× | 0.487× |
+| 256 | 0.4392 | 0.2873 | 0.7276 | 0.7174 | 1.7413 | 1.014× | 0.412× |
+
+**Section C（R=80 下扫 pipe 的 Gp）**：
+
+| Gp | pipe | barrier | b/pipe |
+|---|---|---|---|
+| 8 | 1.6767 | 0.3860 | 0.230× |
+| 16 | 0.8716 | 0.3861 | 0.443× |
+| 32 | 0.4641 | 0.3862 | 0.832×（最优） |
+| 64 | 0.6358 | 0.3860 | 0.607× |
+
+**Section D（单阶段随 block 数 GB 缩放；比值 = 基准 G=132 的时间 / 该 GB 的时间）**：
+
+| GB | Tp | Tp(132)/Tp | Tc | Tc(132)/Tc |
+|---|---|---|---|---|
+| 16 | 0.3576 | 0.289× | 2.3021 | 0.125× |
+| 33 | 0.2006 | 0.515× | 1.1203 | 0.257× |
+| 66 | 0.1253 | 0.825× | 0.5647 | 0.509× |
+| 132 | 0.1032 | 1.001× | 0.2873 | 1.000× |
+| 264 | 0.0987 | 1.048× | 0.1540 | 1.866× |
+| 528 | 0.0972 | 1.064× | 0.1319 | 2.179× |
+| 1056 | 0.0971 | 1.065× | 0.1192 | 2.411× |
+
+### 14.4 读法
+
+**(1) Q1：逐 tile 的细粒度依赖在数值上完全安全。** `barrier`/`pipe` 相对 `serial` 的输出逐位一致
+（`max|Δ|=0.00e+00`），`s/b ≈ 1.00×` 也说明**单次 launch 在本区间不再带来收益**（损失二只在
+launch-bound 才显形，见 P5-1/P9-1）。逐 tile ready 标志（`atomicExch`+`gen` 代次 + `__threadfence`）
+正确表达了 Figure 3b 的依赖。
+
+**(2) Q2：但「细粒度依赖」本身不产生收益——`pipe` 在所有情况下都**慢于**算子级屏障
+（`pipe/b` 恒 < 1，0.29–0.87×）。** 原因有两层，且被 Section D 直接量出来：
+
+- **第一层：两个阶段都要「几乎整台机器」。** Section D 显示：
+  - **producer（访存受限）直到 GB≈132 才喂满 HBM**（Tp 从 16 block 的 0.358 ms 降到 132 block 的
+    0.103 ms，之后到 1056 block 才 1.07×、几乎平），即**访存受限阶段也需要 ~全部 132 个 SM 才能满带宽**
+    （H100 每 SM 仅 8 warp、256 线程/block 时占用率低，见 P10-1）；
+  - **consumer（计算受限）直到 1056 block 仍在加速**（Tc 0.287→0.119 ms，2.41×），**根本没饱和**。
+  于是把机器切成 `Gp`+`Gc`，两阶段各按 ≈`G/Gp`、`G/Gc` 反比变慢：`ideal = max(Tp(Gp), Tc(Gc))`
+  在 R≤64 时约 0.206–0.329 ms，而 `barrier = Tp+Tc` 约 0.25–0.35 ms——**「完美重叠」的理论下界
+  至多与屏障打平**（R=16 时 0.206 vs 0.252 仅 1.2×，R≥128 时 ideal 反而更大）。
+- **第二层：朴素逐 tile 同步的固定开销很大。** 实测 `pipe` 比它的 `ideal` 还慢 1.07–2.22×
+  （`p/ideal` 列，R 越小越糟）：每个 tile 一次 `atomicExch` + producer/consumer 各一次 `__threadfence`，
+  加上 `Gc` 个 consumer block 在 `flag[]` 上自旋轮询（即便 `__nanosleep(64)`），在 R 小时把
+  provider 过早完成留下的空档全吃掉。这说明**细粒度并不等于「零成本」**：要便宜，同步必须**批量化/
+  环形化**（MPK 的 ring buffer + 事件计数器，`docs/06` §3–§4；DeepGEMM 的位掩码 ring barrier，
+  `docs/02` §1.5），而不是每 tile 一次原子。
+
+**(3) producer 变计算受限（Section B）把 `pipe/b` 从 0.83× 进一步压到 0.41×。** 上游越重，
+`ideal` 越大、两阶段越抢同一资源（FMA 单元），叠加上第二层开销，`pipe` 越亏——**反向印证 MPK
+「overlap kernels that utilize different hardware resources」的前提**：只有资源互补且能**共驻**
+才谈得上重叠。
+
+**(4) Section C 有内点最优但仍不翻盘。** `Gp` 太小（8/16）producer 喂不满带宽、太大（64）挤占
+consumer，最优 `Gp=32` 时 `pipe=0.464 ms`，仍比 `barrier=0.386 ms` 慢（`pipe/b=0.83×`）。
+
+### 14.5 与判据 / MPK / 生产案例的关系
+
+- **补齐「跨算子细粒度重叠」这一损失一的跨算子形态**：P13-1 证**单 task 内**的访存-计算流水可回收
+  （~1.18×），本节证**跨算子的静态分块重叠在固定 SM 上结构性不划算**——两者合起来说明：MPK 的
+  fine-grained overlap 之所以成立，靠的不是「把依赖画细」，而是**SM 级 task 动态共驻 + 便宜的
+  ring/事件同步**（MPK §5，`docs/01` §4）。
+- **与 P15-1 呼应**：P15-1 里去中心化 ready-queue 在**均衡负载下 ≈ barrier**、只在**异构负载**时赢；
+  本节进一步显示，连「资源互补」的两算子静态分区都赢不过屏障——**去中心化的价值在动态负载均衡，
+  不在省屏障**。
+- **与 P13-1 / P18-1 呼应**：真正能拿到跨资源重叠的是**同一 SM 内的 warp 特化**（P18-1 用
+  `setmaxnreg` 让轻/重 warpgroup 共驻同一 kernel 并发，H≤192 时反超 `separate`）——即
+  **不切 SM，而在 SM 内时分/分 warp**。这正是本节负结果的镜像：重叠的载体必须是**共享的 SM**，
+  不是**分割的 block**。
+- **判据（C1–C5，`docs/00` §3）**：`serial` 是 T1；`barrier` 满足 C1/C2/C4（单 launch、常驻、
+  kernel 内协调）；`pipe` 额外把依赖做细（C3），但 `Gp`/`Gc` 是**静态**角色，且无去中心化调度
+  （无 C5）——三者都**不是**真正的 mega-kernel 调度。
+- **对生产案例（`docs/02`）的解释**：DeepGEMM mega 家族在同一 kernel 内让**固定 warp 角色**
+  各司其职（TMA warp / MMA warp / scheduler warp），用**异步原子 ring barrier**协调——正是
+  「SM 内共驻 + 批量同步」，而非「按 block 切算子」。本节从反面量化了这一设计选择的必要性。
+
+### 14.6 局限
+
+- 合成 workload：上游是 `copy+1`/FMA、下游是 FMA 归约，**不含张量核 / 真实算子 / 真实通信**；
+  测的是**依赖粒度与静态分区的机制**，非端到端收益。
+- `pipe` 用 cooperative launch 保证 `Gp+Gc` 全常驻；producer/consumer 用**静态 block 角色**，
+  未测**动态**任务分配（同一 block 池自取 produce/consume 任务，P15-1 的形态）。
+- consumer 归约要求 `TS = nthreads × 16`，规模固定在 33.5M float；未扫 tile 大小（TS）对
+  sync 开销/粒度的影响。
+- 「理想重叠下界」`ideal` 用的是**单独测**的单阶段时间，未考虑两阶段并发时的**相互带宽/占用率
+  干扰**（实测 `p/ideal > 1` 即含此干扰）；故 `p/ideal` 只能上界估计「并发干扰 + 同步开销」之和。
+- 未测 warp 特化版的**共驻重叠**（那是 P13-1/P18-1 的领域），本节只覆盖「静态切 block」这一反面。

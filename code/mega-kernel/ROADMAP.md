@@ -370,7 +370,29 @@
       （Graph 单独省 ~1.05µs/kernel，PDL 之下边际降到 ~0.28µs/kernel）；**Q3 上限独立**——
       A/B 大 span 下 `graph≈eager`（launch 可忽略）、PDL 上限仍是 `min(tail,prologue)/span`，
       加不加 Graph 都不变。判据不变（`graph`/`gPDL` 全不满足 C1–C5），是 kernel-per-operator 两块
-      降级拼一起也补不齐的降级项。**本轮新增实验**。
+      降级拼一起也补不齐的       降级项。**本轮新增实验**。
+
+### P20 实验扩展 11：跨算子细粒度重叠（`docs/04-experiments.md` §14）
+
+- [x] **P20-1** 把 MPK §2.1（快照行 241–293，Figure 3 的 `MatMul→AllGather`）与 §3（行 371–386）
+      点名的**跨算子细粒度 kernel overlap** 实测出来（P13-1 只覆盖「单 task 内」；P5-2/P15-1 的
+      DAG 是**整层**依赖）。见 `docs/04-experiments.md` §14，源码 `src/cross_op_overlap.cu`，原始输出
+      `harness/cross_op_overlap.out.txt`（目标卡 H100/sm90，device 3，iters=30，G=132，T=256，
+      NT=8192 tile×TS=4096，producer 访存受限/计算受限可调、consumer 寄存器内 R 轮 FMA）。
+      三策略公平对照：`serial`（2 eager kernel）/`barrier`（单 coop kernel + `grid.sync()`）/
+      `pipe`（单 kernel，`Gp` producer + `Gc` consumer block **并发** + 逐 tile ready 标志 `gen`）。
+      核心结论：(1) **逐 tile 细粒度依赖数值安全**——`barrier`/`pipe` 相对 `serial` 输出**逐位一致**
+      （max|Δ|=0），`s/b≈1.00×`（损失二在本区间不显形）；(2) **但静态切 block 的细粒度重叠在所有
+      情况下都慢于算子级屏障**（`pipe/b` 恒 <1，0.29–0.87×），原因两层且被量出：**(a) 两阶段都要
+      ~整台机器**——Section D 显示访存受限的 producer 直到 GB≈132 才喂满 HBM（256 线程/block 占用率低）、
+      计算受限的 consumer 到 1056 block 仍在加速（2.41×、未饱和），故「完美重叠下界」
+      `ideal=max(Tp(Gp),Tc(Gc))` 至多与 `Tp+Tc` 打平（R≥128 时反而更大）；**(b) 朴素逐 tile 同步开销大**
+      ——`pipe` 比 `ideal` 还慢 1.07–2.22×（每 tile 一次原子+两次 `threadfence`+`Gc` block 自旋）；
+      (3) producer 变计算受限（Section B）把 `pipe/b` 从 0.83× 压到 0.41×，反向印证 MPK「不同硬件资源」
+      前提；(4) Section C 有内点最优 `Gp=32`，仍不翻盘。判据：`barrier` C1/C2/C4、`pipe` 加 C3 但静态角色
+      无 C5。**含义**：跨算子重叠的载体必须是**共享的 SM 内共驻**（P13-1/P18-1 warp 特化）而非**分割的
+      block**，同步必须**批量/环形化**（MPK ring buffer、DeepGEMM ring barrier）而非每 tile 原子。
+      **本轮新增实验**，补齐损失一的**跨算子**形态。
 
 ## 每轮增量流程（autopilot）
 
@@ -418,7 +440,9 @@
   代价基本收回，补齐 §8.6 / §11.6「未测 setmaxnreg」两条尾巴并兑现 §11.5 的假设）。
   **P19-1 PDL × CUDA Graph 叠加（1/1）完成**（本轮新增，补齐 `docs/04` §6.6「未测 PDL 与 CUDA
   Graph 叠加」与 `docs/03` §2.3「可叠加」论断：capture 保留 PDL 语义、叠加次乘非相乘、上限独立）。
-  **本专题任务清单（P0–P19）全部完成**，无未完成子项。
+  **P20-1 跨算子细粒度重叠（1/1）完成**（本轮新增，把 MPK §2.1 Figure 3 的 `MatMul→AllGather` 型
+  跨算子细粒度依赖实测出来：数值安全但静态切 block 重叠恒慢于屏障，重叠需 SM 共驻而非分块）。
+  **本专题任务清单（P0–P20）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -467,7 +491,7 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P19 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
+- **下一步：无**（P0–P20 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
   **P10-1 完成 P5-1 §1.6「扫 persistent 网格大小」**；**P12-1 完成 P5-3 §3.6 / P10-1 §5.5「多 block
@@ -480,6 +504,25 @@
   ⑥ ~~`docs/04` §6.6「未测 PDL 与 CUDA Graph 叠加」~~（**P19-1 完成**，测出 capture 保留 PDL 语义、
   叠加次乘非相乘、上限独立）；剩「在容器内 `pip install -e .` 构建 mirage sm90 路径并跑端到端数字」
   （构建成本高，未做）。
+- **本轮（P20-1）**：`docs/04-experiments.md` 新增 §14「跨算子细粒度重叠：为什么『切 block 做重叠』
+  赢不过算子级屏障」——新建 `src/cross_op_overlap.cu` + `harness/cross_op_overlap.out.txt`（目标卡
+  H100/sm90，device 3，iters=30，G=132=SM，T=256，NT=8192 tile×TS=4096 float=134 MB/数组）。
+  构造 MPK §2.1 Figure 3 型 workload：producer（`buf=src+1`，`float4`，`PR` 轮 FMA 调访存/计算受限）
+  -> consumer（每线程 16 元素读进寄存器一次后 `R` 轮 FMA 归约）；tile 1:1 依赖。三策略：`serial`
+  （2 eager kernel）/`barrier`（单 coop kernel + `grid.sync()`）/`pipe`（单 kernel，`Gp` producer +
+  `Gc` consumer block 并发 + 逐 tile ready 标志（`atomicExch`+`gen`+`threadfence`））。四个 Section：
+  **A**（PR=0 扫 R）、**B**（R=80 扫 PR）、**C**（R=80 扫 Gp）、**D**（单阶段随 block 数缩放）。
+  核心结论：(1) **逐 tile 细粒度依赖数值安全**——`barrier`/`pipe` 相对 `serial` **逐位一致**
+  （max|Δ|=0.000e+00），`s/b≈1.00×`；(2) **静态切 block 的细粒度重叠恒慢于算子级屏障**
+  （`pipe/b` 0.29–0.87×），两层原因：**(a)** Section D 表明访存受限 producer 到 GB≈132 才喂满 HBM
+  （0.358→0.103 ms，256 线程/block 占用率低）、计算受限 consumer 到 1056 block 仍在加速
+  （0.287→0.119 ms，2.41×），故 `ideal=max(Tp(Gp),Tc(Gc))` 至多与 `Tp+Tc` 打平（R≥128 反而更大）；
+  **(b)** `pipe` 比 `ideal` 还慢 1.07–2.22×（每 tile 原子+两次 `threadfence`+`Gc` block 自旋）；
+  (3) Section B：producer 变计算受限把 `pipe/b` 从 0.83× 压到 **0.41×**，反向印证 MPK「不同硬件资源」
+  前提；(4) Section C 内点最优 `Gp=32`（`pipe/b=0.83×`）仍不翻盘。判据：`barrier` C1/C2/C4、
+  `pipe` 加 C3 但静态角色无 C5。**含义**：跨算子重叠的载体是**共享 SM 内共驻**（P13-1/P18-1 warp 特化）
+  而非**分割 block**，同步须**批量/环形化**（MPK ring buffer、DeepGEMM ring barrier）。
+  **本轮新增实验**，补齐损失一的**跨算子**形态。
 - **本轮（P19-1）**：`docs/04-experiments.md` 新增 §13「PDL 与 CUDA Graph 的叠加：两种降级手段能不能
   『相乘』？」——新建 `src/pdl_graph.cu` + `harness/pdl_graph.out.txt`（目标卡 H100/sm90，固定 device 3，
   iters=30）。K 个 `chain_kernel`（`[prologue]→gridDependencySync→[crit 校验/写 seq]→trigger→[tail]`）
