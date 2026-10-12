@@ -177,3 +177,12 @@ FlashKDA K1 当场写的 workspace `kGTotal` 对到 1.6e-5~8.1e-5），四条支
 已把整条链**架在 FlashKDA 自己的 K1 workspace 上端到端跑通**（六项梯度对 autograd 最坏 6.4e-3）。
 剩余的是把最小 kernel 工程化为 CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、
 `CHUNK=16`），属更大工程，留待有明确需求时再做。
+
+**反向性能（`docs/07` §10 P7-7）**：把上面那条 workspace 驱动反向链和 `torch.autograd` 穿
+`chunk_kda` 在统一口径（`wall`+CUPTI `dev`）下比，**只计反向**。四组 shape 实测 ours **wall 0.41–0.76×、
+dev 0.60–0.79×** FLA 反向（端到端前向+反向 dev 0.5–0.8×），根因是 **FLA 反向里重算了前向状态
+（`...fwd_kernel_h` 578 µs + `recompute_w_u` 32.7 µs = 其 dev 的 46.2%，B2T1024H8），而我们复用
+K1 workspace 从不重算**——把「复用 K1 workspace」的设计收益从正确性（P6-8）兑现成性能。
+短板：**B1 `dhu` 占我们反向 dev 的 55–63%、比 FLA 同类 kernel 慢 3.9×**，是下一阶段工程化的
+首要目标（应镜像前向 K2 的 warp specialization + TMA pipeline）；`dAv/B2/B3` 已领先或接近。
+反向 host 税非主要矛盾（ours 110–260 µs、FLA 500–730 µs/次，大 shape 全被 GPU 时间隐藏）。

@@ -1,5 +1,5 @@
 ---
-title: "KDA 前反向算子实现解析（七）：前向性能实测、ncu 剖析与 K2 占用率实验 —— FlashKDA vs FLA chunk_kda"
+title: "KDA 前反向算子实现解析（七）：前向性能实测、ncu 剖析、K2 占用率实验与反向性能对照 —— FlashKDA vs FLA chunk_kda"
 date: 2026-10-12T22:53:00+08:00
 draft: false
 weight: 8

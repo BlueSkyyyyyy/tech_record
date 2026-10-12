@@ -129,6 +129,19 @@
       掉 ~190 µs。nsys 稳态：FLA **12 个 kernel/次**（9 `cuLaunchKernelEx`+3 `cudaLaunchKernel`，
       driver 中位 ~6.3 µs）、FlashKDA **3 个**；结论＝那 0.8 ms 几乎全是 FLA 每 kernel 一次的 Python
       launch 包装，与 GPU 计算（~82 µs）/autograd/分配无关（`docs/07` §9）。
+- [x] **P7-7** 反向性能与 host 税剖析：把 P6-7/P6-8 组装的 workspace 驱动反向链
+      （`dAv→B1(dhu)→B2(wy_dqkg)→B3(intra)→反向 cumsum(B0)`）与 `torch.autograd` 穿
+      `chunk_kda` 放在统一口径（event-pair `wall` + CUPTI `dev`）下比，只计反向。新增
+      `harness/bench_bwd.py`（`harness/bench_bwd.out.txt`）+ `docs/07` §10。四组 shape
+      （1×512×4 / 2×1024×8 / 8×2048×8 / 1×250×3 非整除）实测：ours wall/dev **0.41–0.76×**、
+      **0.60–0.79×** FLA 反向（前向对照 `fwd` dev 63.5/128.2/668.7/42.9µs，端到端 fwd+bwd
+      dev 0.5–0.8×）。**关键归因**：FLA 反向 profile 里含**前向状态重算**
+      `chunk_gated_delta_rule_fwd_kernel_h_blockdim64`（B2T1024H8 578µs）+`recompute_w_u`（32.7µs）
+      =FLA 反向 dev 的 **46.2%**（T512H4 时 21.8%），我们复用 K1 workspace 从不重算——把 §5.2
+      「复用 K1 workspace」的设计收益从正确性（P6-8）兑现成性能。**短板**：B1 `_dhu_kernel`
+      是瓶颈（占 ours dev 55.5–62.8%）且比 FLA `dhu` 慢 3.9×，是下一步工程化首要目标
+      （应镜像前向 K2 的 warp specialization）。host 税非主要矛盾（ours 110–260µs、
+      FLA 500–730µs/次，大 shape 全被隐藏）。
 - [x] **P7-5** 关闭 P7-2/P7-4 待验证 (c)：**K2 突破 2 CTA/SM 后 L2 墙是否后移**——实验=否。
       改造 `SharedStorageK2`（fp32 状态缓冲改按 `StateFP32` 条件预留）+ 扫 pipeline stage，编译 6 个变体，
       实测占用率/ncu SOL/K2 时间。结论：smem 被无条件预留的 65536 B fp32 缓冲钉死为 98432 B（只减
@@ -165,7 +178,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）+ **FLA host 税组成归因（P7-6）**完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）+ **FLA host 税组成归因（P7-6）** + **反向性能与 host 税剖析（P7-7）**完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
   - P6-7：新增 `docs/06` §6.9 + `harness/check_bwd_e2e.py`（`harness/check_bwd_e2e.out.txt`），
     并给 `harness/check_bwd_dhu_kernel.py` 的 B1 kernel 补 `dht`（终态上游梯度）入口（`HAS_DHT` 分支）。
     **Part A**：补齐反向第 5 个 kernel **`dAv`（输出支路）**（对应 FLA `chunk_kda_bwd_kernel_dAv`，
@@ -286,14 +299,19 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
   §5.2 的 **B0/B1/B2/B3/dAv 五段已全部做成最小 kernel，P6-7 已把四段组装成端到端反向核到
   tf32 底噪，P6-8 又把整条反向直接架在 FlashKDA K1 workspace 上端到端核到 bf16 底噪**；
-  剩余的是更完整的 CUTLASS/TMA + warp-specialization 版反向工程化。P7-2 遗留的 nsys
+  **P7-7 又把它和 FLA 反向在同一口径下比（wall/dev 0.41–0.79× 反超，因复用 workspace 省掉
+  FLA 反向里占 22–46% dev 的前向状态重算），并把下一阶段的工程化目标收敛到 B1：B1 `dhu` 占
+  我们反向 dev 的 55–63%、比 FLA 同类 kernel 慢 3.9×，应镜像前向 K2 的 warp specialization +
+  TMA pipeline 重写**；`dAv/B2/B3` 已领先或接近，非瓶颈。剩余的是更完整的
+  CUTLASS/TMA + warp-specialization 版反向工程化（重点＝B1）。P7-2 遗留的 nsys
   流量拆分（P7-3 已用 ncu DRAM 计数替代、待验证 (b) 已关闭）。
   **P7-5 已用实验关闭 P7-2/P7-4 待验证 (c)**（K2 突破 2 CTA/SM 后 L2 墙不后移，见下）。
   **P7-6 已用 `process_time`+nsys 关闭 §4 待验证「FLA host 税组成」**（0.8 ms ≈ 12 次 Triton kernel
   的 Python launch 包装 + ~190 µs `dispatch` + ~75 µs driver launch，与 GPU/autograd/分配无关，见下）。
+  **P7-7：新增 `docs/07` §10 + `harness/bench_bwd.py`（`harness/bench_bwd.out.txt`）**，见下。
   - P6-6：新增 `docs/06` §6.8 + `harness/check_bwd_b0_gate.py`
     （`harness/check_bwd_b0_gate.out.txt`）。把 §5.2 的 **B0 `gate_bwd`**（对应 FLA
     `kda_gate_chunk_cumsum` `gate.py:375` + `kda_gate_bwd` `gate.py:252`）做成最小可运行 Triton

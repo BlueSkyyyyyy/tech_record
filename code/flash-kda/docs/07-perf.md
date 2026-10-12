@@ -684,3 +684,92 @@ CPU，且它只发 2–3 个 kernel（§9.4），CPU 完全能压在 GPU 后面�
 - 可迁移的经验：**逐 kernel 的 Python launch 开销是 Triton 类实现做小算子融合时最容易被忽视的
   成本**；KDA 这类「每个 chunk 一次小 kernel」的算法尤其敏感。（目标卡 CUDA 反向同理——§6 的
   B0/B1/B2/B3 每条支路一次 launch 已是最小化。）
+
+## 10. 反向性能：workspace 复用链 vs FLA autograd（P7-7）
+
+§1–§9 只剖析了**前向**。反向侧（`docs/06` P6-2…P6-8）此前只做过逐 kernel 的朴素秒表计时，
+既没有统一口径的 `wall`/`dev` 拆分，也没有和 FLA 反向的端到端对照。本节补上：把 P6-7/P6-8 组装出的
+**workspace 驱动反向链**（`dAv → B1(dhu) → B2(wy_dqkg) → B3(intra) → 反向 cumsum(B0)`）和
+`torch.autograd` 穿 `fla.ops.kda.chunk_kda` 放在同一口径下比。复现脚本 `harness/bench_bwd.py`，
+原始输出 `harness/bench_bwd.out.txt`；平台同 §5（H100 80GB、torch 2.12、FLA 0.5.2、triton 3.6、
+bf16、$D=128$、`CHUNK=16`）。
+
+### 10.1 口径：怎么只计「反向」
+
+- `wall` = 一个 CUDA event 对包 `REPS=30` 次取均值、3 轮取中位（含 host 派发）；`dev` = `torch.profiler`
+  （CUPTI）把所有 kernel 的 self time 求和再除以调用数（纯 GPU）。同 §1.1/§9.1。
+- **只计反向**：两条路径都把前向排除在计时区间外。FLA 侧先在区间外建好 autograd 图，区间内只跑
+  `loss.backward(retain_graph=True)`（随后清空 `.grad`，可反复重跑同一张图）；ours 侧把 FlashKDA
+  的 K1 workspace 与 `fi` 中间量在区间外预先重建好（`check_bwd_ws_reuse.py` 的
+  `flash_forward`+`reconstruct`），区间内只跑那条反向链的 closure。
+- `host = wall − dev` 即 Python/launch 开销；与 §9 的 `process_time` 不同，这里保留 event-pair
+  `wall` 口径以便和 GPU 时间直接相减（大 shape 下 host 会被队列隐藏，见下）。
+
+### 10.2 主表：反向 wall / dev，四组 shape
+
+单位 µs/次。`#k` = 一次反向发出的 CUDA kernel 数（CUPTI 计数）。`w-o/FLA`、`d-o/FLA` 越小越好。
+
+| case（B T H） | ours wall | ours dev | ours host | FLA wall | FLA dev | FLA host | w-o/FLA | d-o/FLA | #k ours/FLA |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 512 4 | 349.6 | 163.0 | 186.6 | 703.5 | 207.2 | 496.3 | **0.50** | **0.79** | 40 / 28 |
+| 2 1024 8 | 1085.7 | 972.8 | 113.0 | 1419.9 | 1322.8 | 97.2 | **0.76** | **0.74** | 40 / 28 |
+| 8 2048 8 | 5630.7 | 5513.4 | 117.3 | 9197.3 | 9119.6 | 77.7 | **0.61** | **0.60** | 40 / 28 |
+| 1 250 3（非整除 T） | 355.5 | 97.6 | 257.8 | 872.4 | 143.9 | 728.5 | **0.41** | **0.68** | 40 / 28 |
+
+三点观察：
+
+1. **我们的反向链在 wall 与 dev 上都快过 FLA 反向**（wall 0.41–0.76×、dev 0.60–0.79×），
+   尽管其中的 Triton 反向 kernel 都是**朴素实现**。原因见 §10.3：FLA 反向里包含了**前向状态重算**，
+   而我们直接吃 FlashKDA K1 落盘的 workspace。
+2. **host 税的量级**：FLA 反向的 host 成本约 **500–730 µs/次**（小 shape 下暴露、大 shape 下被
+   9120 µs 的 GPU 时间完全隐藏 → `host≈78 µs`）；我们那条链约 **110–260 µs/次**（同样在大 shape
+   下隐藏）。注意 ours 一次反向发 **40 个 kernel**（含十来条 torch elementwise 兜底，如各支路结果的
+   `+` 相加、`chunk_local_cumsum` 收尾），FLA 28 个——但两者 host 都远小于 §9 里 FLA *前向* 的
+   ~0.8 ms 固定税，因为反向的 GPU 时间更长、队列能把 host 藏住。
+3. 前向对照（同脚本）：FlashKDA `fwd` dev = 63.5 / 128.2 / 668.7 / 42.9 µs（3 kernel）；
+   `fwd+chain` 合计 dev = 226.5 / 1101.0 / 6182.1 / 140.5 µs，而 FLA `chunk_kda` **fwd+bwd** dev =
+   325.1 / 1907.9 / 12635.0 / 250.2 µs。即端到端（前向+反向）我们也快 **1.4–2.0× dev**。
+
+### 10.3 归因：FLA 反向重算了前向状态，我们复用了 K1 workspace
+
+`B2 T=1024 H=8` 的逐 kernel 分解（CUPTI，µs/次）：
+
+| ours chain | µs | | FLA backward | µs |
+|---|---|---|---|---|
+| `_dhu_kernel`（B1） | **539.8** | | `chunk_gated_delta_rule_fwd_kernel_h_blockdim64`（前向重算） | **578.0** |
+| `_wy_dqkg_kernel`（B2） | 125.1 | | `chunk_kda_bwd_kernel_wy_dqkg_fused`（B2） | 239.1 |
+| `_intra_kernel`（B3） | 80.4 | | `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64`（B1） | 136.9 |
+| `_dav_kernel`（dAv） | 11.3 | | `chunk_kda_bwd_kernel_intra`（B3） | 119.5 |
+| `chunk_local_cumsum`（B0 收尾） | 6.1 | | `chunk_kda_bwd_kernel_dAv`（dAv） | 18.3 |
+| torch elementwise（多支路相加/清零等） | ~45 | | `recompute_w_u_fwd_kda_kernel`（前向重算） | 32.7 |
+| | | | `chunk_local_cumsum` + reduce/elementwise | ~15 |
+| **合计** | **972.8** | | **合计** | **1322.8** |
+
+关键在**最上面两行**：FLA 的反向 profile 里出现了前向的状态 kernel
+`chunk_gated_delta_rule_fwd_kernel_h_blockdim64`（578.0 µs）与 `recompute_w_u_fwd_kda_kernel`
+（32.7 µs）——**FLA 在反向里重算了 chunk 状态与 `w/u`**（P6-1 §6.2 记录的重算策略），这两项合起来
+**610.7 µs = FLA 反向 dev 的 46.2%**（$B1\,T512\,H4$ 时是 21.8%）。我们的链**从不重算前向**：六个
+per-tile 字段（$k^{dec},q^{dec},k^{rest},E^{tot},P,M_{qk}$）直接从 FlashKDA K1 的 workspace 读，
+`U/h` 由它们逐块重放（`check_bwd_ws_reuse.reconstruct`）——只在计时区间外做一次。这正好把
+`docs/06` §5.2「复用 K1 workspace」的设计收益从**正确性**（P6-8 已核）兑现成了**性能**。
+
+也要诚实指出短板：我们自己的 **B1 `_dhu_kernel` 是整条链的瓶颈**（539.8 µs = ours dev 的 55.5%；
+$T512H4$ 时 102.3/163.0 = 62.8%），且比 FLA 的对应 kernel（136.9 µs）**慢 3.9×**。这是一条朴素 Triton
+实现（P6-2/P6-3，未做软件流水/共享内存搬运优化），而 FLA 的 `dhu` 已沿 T 分块并行。B1 在目标卡
+CUDA 里本应**直接镜像前向 K2 的 warp-specialized 八相递推**（`docs/06` §5.2），这正是下一步
+工程化的首要目标（见 §10.4）。
+
+### 10.4 结论
+
+- **复用 K1 workspace 的反向在设计上就省掉了 FLA 反向最大的一块（前向状态重算 ≈ dev 的 22–46%）。**
+  即便我们的四个 Triton 反向 kernel 都是朴素版，整条链的 dev 仍是 FLA 反向的 **0.60–0.79×**、
+  wall **0.41–0.76×**；端到端（前向+反向）dev 是 FLA 的 **0.5–0.8×**。
+- **下一步的优化空间集中在 B1（`dhu`）**：它占我们 dev 的 ~55–63%、且比 FLA 同类 kernel 慢近 4×；
+  把它做成目标卡 CUDA、复用前向 K2 的 warp specialization / TMA pipeline，是整条反向最大的单点收益。
+  B2（`wy_dqkg`，125 vs FLA 239，已更快）与 B3（`intra`，80 vs 120）反而已经领先，说明朴素实现
+  在块内小矩阵上吃亏不大，**跨块状态递推的并行/流水**才是要害。
+- **host 税不是反向的主要矛盾**：两条路径的 host 成本都在百 µs 量级且大 shape 下被隐藏，
+  与 §9 前向那 0.8 ms 的固定 Python 税不是一个量级。（可优化项：ours 的 40 个 kernel 里有十余条
+  torch elementwise 兜底，真实融合 CUDA 反向可把这些并入 kernel。）
+- 方法学提醒：本节 FLA 侧用 `retain_graph=True` 反复跑同一张图的 backward 来隔离反向；若不保留图，
+  就只能量到「fwd+bwd」的合并值，无法把前向重算从反向里区分出来。
