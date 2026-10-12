@@ -1,0 +1,202 @@
+[sh] probe pid(bash child)=2160760; waiting for LAUNCHED marker ...
+[sh] probe launched (python pid=2160760). tail of log:
+worker kernel & scheduler kernel
+smem size: 205824
+Finished Launching Persistent Kernel (Async)
+[probe] pk() returned in 51.3 ms
+[probe] LAUNCHED pid=2160760 alive=240s prewarm=none
+==================== cuda-gdb attach ====================
+[New LWP 2161180]
+[New LWP 2160833]
+[New LWP 2160832]
+[New LWP 2160831]
+[New LWP 2160827]
+[New LWP 2160826]
+[New LWP 2160825]
+[New LWP 2160824]
+[New LWP 2160823]
+[New LWP 2160822]
+[New LWP 2160821]
+[New LWP 2160820]
+[New LWP 2160819]
+[New LWP 2160818]
+[New LWP 2160817]
+[New LWP 2160816]
+[New LWP 2160815]
+[New LWP 2160814]
+[New LWP 2160813]
+[New LWP 2160812]
+[New LWP 2160811]
+[New LWP 2160810]
+[New LWP 2160809]
+[New LWP 2160808]
+[New LWP 2160807]
+[New LWP 2160806]
+[New LWP 2160805]
+[New LWP 2160804]
+[New LWP 2160803]
+[New LWP 2160802]
+[New LWP 2160801]
+[New LWP 2160800]
+[New LWP 2160799]
+[New LWP 2160798]
+[New LWP 2160797]
+[New LWP 2160796]
+[New LWP 2160795]
+[New LWP 2160794]
+[New LWP 2160793]
+[New LWP 2160792]
+[New LWP 2160791]
+[New LWP 2160790]
+[New LWP 2160789]
+[New LWP 2160788]
+[New LWP 2160787]
+[New LWP 2160786]
+[New LWP 2160785]
+[New LWP 2160784]
+[New LWP 2160783]
+[New LWP 2160782]
+[New LWP 2160781]
+[New LWP 2160780]
+[New LWP 2160779]
+[New LWP 2160778]
+[New LWP 2160777]
+[New LWP 2160776]
+[New LWP 2160775]
+[New LWP 2160774]
+[New LWP 2160773]
+[New LWP 2160772]
+[New LWP 2160771]
+[New LWP 2160770]
+[New LWP 2160769]
+[New LWP 2160768]
+[New LWP 2160767]
+[New LWP 2160766]
+[New LWP 2160765]
+
+warning: Failed to map shared library "/tmp/tmphs2t7th5/test.cpython-312-x86_64-linux-gnu.so"; skipping observers.
+
+warning: Could not load shared library symbols for /tmp/tmphs2t7th5/test.cpython-312-x86_64-linux-gnu.so.
+Do you need "set solib-search-path" or "set sysroot"?
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[New Thread 0x7f8b7ffe3e80 (LWP 2161230)]
+[New Thread 0x7f877bfff6c0 (LWP 2161231)]
+[Thread 0x7f8b78dff6c0 (LWP 2160765) exited]
+[Thread 0x7f8a12dc16c0 (LWP 2160827) exited]
+[Thread 0x7f8a1edc46c0 (LWP 2160824) exited]
+[Thread 0x7f8a22dc56c0 (LWP 2160823) exited]
+[Thread 0x7f8a16dc26c0 (LWP 2160826) exited]
+[Thread 0x7f8a2cdc76c0 (LWP 2160821) exited]
+[Thread 0x7f8a36dc96c0 (LWP 2160819) exited]
+[Thread 0x7f8a30dc86c0 (LWP 2160820) exited]
+[Thread 0x7f8a3cdca6c0 (LWP 2160818) exited]
+[Thread 0x7f8a48dcc6c0 (LWP 2160816) exited]
+[Thread 0x7f8a50dcd6c0 (LWP 2160815) exited]
+[Thread 0x7f8a44dcb6c0 (LWP 2160817) exited]
+[Thread 0x7f8a54dce6c0 (LWP 2160814) exited]
+[Thread 0x7f8a1adc36c0 (LWP 2160825) exited]
+[Thread 0x7f8a26dc66c0 (LWP 2160822) exited]
+[Thread 0x7f8a5adcf6c0 (LWP 2160813) exited]
+[Thread 0x7f8a60dd06c0 (LWP 2160812) exited]
+[Thread 0x7f8a66dd16c0 (LWP 2160811) exited]
+[Thread 0x7f8a6cdd26c0 (LWP 2160810) exited]
+[Thread 0x7f8a72dd36c0 (LWP 2160809) exited]
+[Thread 0x7f8a78dd46c0 (LWP 2160808) exited]
+[Thread 0x7f8a7edd56c0 (LWP 2160807) exited]
+[Thread 0x7f8a84dd66c0 (LWP 2160806) exited]
+[Thread 0x7f8a8cdd76c0 (LWP 2160805) exited]
+[Thread 0x7f8a90dd86c0 (LWP 2160804) exited]
+[Thread 0x7f8a96dd96c0 (LWP 2160803) exited]
+[Thread 0x7f8a9cdda6c0 (LWP 2160802) exited]
+[Thread 0x7f8aa2ddb6c0 (LWP 2160801) exited]
+[Thread 0x7f8aa8ddc6c0 (LWP 2160800) exited]
+[Thread 0x7f8aaeddd6c0 (LWP 2160799) exited]
+[Thread 0x7f8ab4dde6c0 (LWP 2160798) exited]
+[Thread 0x7f8abaddf6c0 (LWP 2160797) exited]
+[Thread 0x7f8ac2de06c0 (LWP 2160796) exited]
+[Thread 0x7f8ac6de16c0 (LWP 2160795) exited]
+[Thread 0x7f8accde26c0 (LWP 2160794) exited]
+[Thread 0x7f8ad2de36c0 (LWP 2160793) exited]
+[Thread 0x7f8ad8de46c0 (LWP 2160792) exited]
+[Thread 0x7f8adede56c0 (LWP 2160791) exited]
+[Thread 0x7f8ae4de66c0 (LWP 2160790) exited]
+[Thread 0x7f8aeade76c0 (LWP 2160789) exited]
+[Thread 0x7f8af0de86c0 (LWP 2160788) exited]
+[Thread 0x7f8af6de96c0 (LWP 2160787) exited]
+[Thread 0x7f8afcdea6c0 (LWP 2160786) exited]
+[Thread 0x7f8b02deb6c0 (LWP 2160785) exited]
+[Thread 0x7f8b08dec6c0 (LWP 2160784) exited]
+[Thread 0x7f8b0eded6c0 (LWP 2160783) exited]
+[Thread 0x7f8b14dee6c0 (LWP 2160782) exited]
+[Thread 0x7f8b1adef6c0 (LWP 2160781) exited]
+[Thread 0x7f8b20df06c0 (LWP 2160780) exited]
+[Thread 0x7f8b26df16c0 (LWP 2160779) exited]
+[Thread 0x7f8b2cdf26c0 (LWP 2160778) exited]
+[Thread 0x7f8b32df36c0 (LWP 2160777) exited]
+[Thread 0x7f8b38df46c0 (LWP 2160776) exited]
+[Thread 0x7f8b3edf56c0 (LWP 2160775) exited]
+[Thread 0x7f8b44df66c0 (LWP 2160774) exited]
+[Thread 0x7f8b4adf76c0 (LWP 2160773) exited]
+[Thread 0x7f8b50df86c0 (LWP 2160772) exited]
+[Thread 0x7f8b56df96c0 (LWP 2160771) exited]
+[Thread 0x7f8b5cdfa6c0 (LWP 2160770) exited]
+[Thread 0x7f8b62dfb6c0 (LWP 2160769) exited]
+[Thread 0x7f8b68dfc6c0 (LWP 2160768) exited]
+[Thread 0x7f8b70dfd6c0 (LWP 2160767) exited]
+[Thread 0x7f8b74dfe6c0 (LWP 2160766) exited]
+[Detaching after fork from child process 2161232]
+[Thread 0x7f8b7ffe3e80 (LWP 2161230) exited]
+
+Thread 1 "python3" stopped.
+[Switching focus to CUDA kernel 0, grid 16, block (0,0,0), thread (0,0,0), device 0, sm 128, warp 1, lane 0]
+0x00007f87db7bf980 in worker_kernel<<<(4,1,1),(256,1,1)>>> () at /ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/mpk_atoms.cuh:52 in _Z18ld_acquire_gpu_u64Py inlined from persistent_kernel.cuh:1016
+52	  asm volatile("ld.acquire.gpu.u64 %0, [%1];" : "=l"(val) : "l"(addr));
+
+===== cuda-gdb: devices =====
+  Dev PCI Bus/Dev ID                  Name Description SM Type SMs Warps/SM Lanes/Warp Max Regs/Lane                      Active SMs Mask 
+*   0        db:00.0 NVIDIA H100 80GB HBM3   GH100GL-A   sm_90 132       64         32           255 0x0550000000000000000000000000000000 
+
+===== cuda-gdb: kernels (all) =====
+  Kernel Parent Dev Grid Status                             SMs Mask GridDim  BlockDim Invocation      
+*      0      -   0   16 Active 0x0550000000000000000000000000000000 (4,1,1) (256,1,1) worker_kernel() 
+
+===== cuda-gdb: sms =====
+  SM  Active Warps Mask 
+Device 0
+  124 0x00000000000000ff 
+  126 0x00000000000000ff 
+* 128 0x00000000000000ff 
+  130 0x00000000000000ff 
+
+===== cuda-gdb: worker_kernel backtrace / pc =====
+CUDA focus unchanged.
+#0  0x00007f87db7bf980 in worker_kernel<<<(4,1,1),(256,1,1)>>> () at /ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/mpk_atoms.cuh:52 in _Z18ld_acquire_gpu_u64Py inlined from persistent_kernel.cuh:1016
+Line 52 of "/ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/mpk_atoms.cuh" starts at address 0x7f87db7bf970 <_Z13worker_kernelN6mirage7runtime13RuntimeConfigE+1648> and ends at 0x7f87db7bf9a0 <_Z13worker_kernelN6mirage7runtime13RuntimeConfigE+1696> inlined from _Z18ld_acquire_gpu_u64Py at line 1016 of persistent_kernel.cuh.
+$1 = 0x7f87db7bf980
+
+===== cuda-gdb: worker_kernel blocks =====
+  BlockIdx To BlockIdx Count   State 
+Kernel 0
+   (0,0,0)     (3,0,0)     4 running 
+
+===== cuda-gdb: worker kernel param config =====
+There is no member named num_workers.
+There is no member named num_local_schedulers.
+There is no member named num_remote_schedulers.
+There is no member named num_schedulers.
+
+===== cuda-gdb: runtime counters (worker focus) =====
+There is no member named all_event_counters.
+There is no member named all_event_counters.
+There is no member named all_event_counters.
+There is no member named sched_queue_last_ready_event_id.
+There is no member named sched_queue_next_free_event_id.
+There is no member named worker_queue_last_ready_task_id.
+
+===== cuda-gdb: try focusing scheduler kernel (may not exist) =====
+Invalid coordinates requested. CUDA focus unchanged.
+#0  0x00007f87db7bf980 in worker_kernel<<<(4,1,1),(256,1,1)>>> () at /ssd/mirage_mpk_build/python/mirage/../../include/mirage/persistent_kernel/mpk_atoms.cuh:52 in _Z18ld_acquire_gpu_u64Py inlined from persistent_kernel.cuh:1016
+[Inferior 1 (process 2160760) detached]
+==================== cuda-gdb done ======================
+[sh] probe killed

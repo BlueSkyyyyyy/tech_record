@@ -1,0 +1,46 @@
+diff --git a/include/mirage/persistent_kernel/persistent_kernel.cuh b/include/mirage/persistent_kernel/persistent_kernel.cuh
+index dc65870..596c203 100644
+--- a/include/mirage/persistent_kernel/persistent_kernel.cuh
++++ b/include/mirage/persistent_kernel/persistent_kernel.cuh
+@@ -1988,6 +1988,20 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
+     // The split kernel does not support NVSHMEM because
+     // nvshmemx_collective_launch launches kernels sequentially, which blocks
+     // the interaction between the worker kernel and the scheduler kernel
++#ifdef MPK_DBG_SCHED_FIRST
++    scheduler_kernel<<<
++        dim3(global_runtime_config.num_local_schedulers / SCHEDULERS_PER_BLOCK,
++             1,
++             1),
++        dim3(32 * SCHEDULERS_PER_BLOCK, 1, 1),
++        0 /*smem*/,
++        global_runtime_config.scheduler_stream>>>(global_runtime_config);
++    worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
++                    dim3(WORKER_NUM_THREADS, 1, 1),
++                    MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
++                    global_runtime_config.worker_stream>>>(
++        global_runtime_config);
++#else
+     worker_kernel<<<dim3(global_runtime_config.num_workers, 1, 1),
+                     dim3(WORKER_NUM_THREADS, 1, 1),
+                     MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
+@@ -2003,6 +2017,7 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
+         dim3(32 * SCHEDULERS_PER_BLOCK, 1, 1),
+         0 /*smem*/,
+         global_runtime_config.scheduler_stream>>>(global_runtime_config);
++#endif
+ 
+ #ifdef MODE_OFFLINE
+     cudaEventRecord(global_runtime_config.worker_done_event,
+diff --git a/python/mirage/mpk/persistent_kernel.py b/python/mirage/mpk/persistent_kernel.py
+index 5d76a0d..d2e19a1 100644
+--- a/python/mirage/mpk/persistent_kernel.py
++++ b/python/mirage/mpk/persistent_kernel.py
+@@ -383,7 +383,7 @@ def get_compile_command(
+     if profiling:
+         flags = flags + ["-DMPK_ENABLE_PROFILING"]
+ 
+-    return common_cmd + specific_cmd + flags
++    return common_cmd + specific_cmd + flags + __import__("os").environ.get("MPK_EXTRA_DEFINES", "").split()
+ 
+ 
+ def _page_stride_rows(*caches):

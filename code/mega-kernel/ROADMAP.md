@@ -481,7 +481,7 @@
 
 ### P25 线上实现构建与端到端冒烟（`docs/09-mpk-build.md`）
 
-- [~] **P25-1** 在 `kernel_lab`（目标卡 H100/sm90，CUDA 13.2）容器里**从零构建 mirage**
+- [x] **P25-1** 在 `kernel_lab`（目标卡 H100/sm90，CUDA 13.2）容器里**从零构建 mirage**
       （快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`），并用 `PersistentKernel` API
       生成/编译/launch 一个**最小 megakernel**（单层 RMSNorm，随机张量，无 HF 权重），补齐
       `docs/06` §0「构建成本过高、未做」的尾巴。见 `docs/09-mpk-build.md`、脚本
@@ -510,7 +510,20 @@
         128/16 连跑 **3/3 收敛**（37.6–38.1 µs，抖动 <1.5%），plain 构建复现挂起（`EXIT=124`）。
         延迟**几乎与 worker 数无关**（39.05→36.40 µs），由「双常驻 kernel 启动/终止协议」主导而非计算。
         脚本 `harness/mpk_latency.py`，原始输出 `harness/mpk_latency.out.txt` /
-        `harness/mpk_latency_repeat.out.txt`。**端到端延迟这一条已补齐**；根因内存序仍未钉死，P25-1 记 `[~]`。
+        `harness/mpk_latency_repeat.out.txt`。**端到端延迟这一条已补齐**。
+      - **续做 3（P25-1 续 5，根因钉死）见 `docs/09` §11**：用 **cuda-gdb attach**（非侵入式，避免
+        §9.3/§9.4 的「插桩会扰动竞态」）拿到**设备侧证据**——挂起时设备上**只有 `worker_kernel` 常驻**
+        （128 block 全在 `persistent_kernel.cuh:1016` 的取 task `ld_acquire` 上自旋），`scheduler_kernel`
+        **不在设备上**（`cuda kernel 1` → `Invalid coordinates`）；**4:4 下 worker 只占 4 个 SM、128 个
+        SM 空闲，scheduler 仍不在** → 与 occupancy 无关，死锁实为「**scheduler 从未被派发**」。再用一个
+        **只交换 launch 顺序**的消融 `harness/mpk_sched_first.patch`（`-DMPK_DBG_SCHED_FIRST`，不动任何
+        kernel 代码）钉死根因：把 scheduler 放到 worker **之前** launch，**plain 构建 4/4 收敛且正确**
+        （prewarm=none ×3 + cast_1elem ×1，`max|out-ref|≤0.03125`），默认顺序同会话复现 HANG。clean
+        （scheduler-first）构建端到端延迟 **39.1 / 43.5 µs**（与 §8 同量级，证明 §8 不是内插桩产物）。
+        脚本 `harness/mpk_cudagdb_probe.py`/`mpk_cudagdb.sh`/`mpk_cudagdb.cmds`/`mpk_sched_first.sh`，
+        原始输出 `harness/mpk_cudagdb.out.txt`/`_w4s4`、`harness/mpk_sched_first.out.txt`、
+        `harness/mpk_latency_schedfirst.out.txt`。**P25-1 记 `[x]`**：构建+JIT+launch+收敛+正确性+延迟
+        全打通，不收敛根因由 §11.4 的顺序消融钉死（launch 顺序，非内存序/dtype/host 排序/频率/occupancy）。
 
 ## 每轮增量流程（autopilot）
 
@@ -534,12 +547,14 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P25-1 续 4 完成**（根因再定位 2：挂起是**设备侧 worker↔scheduler 双向死锁**，
-  只被「前置 dtype 转换 kernel」这一个开关避开；证伪 §9 的「默认流历史」「host launch 排序」两条
-  候选、排除 co-residency 与频率——详见 `docs/09` §10 与下方本轮条目）。
-  此前 **P25-1 续 3 完成**（把挂起降到 launch/握手时序敏感竞态、证伪 worker 轮询循环内存序）。
-  此前 **P24-1 完成（1/1）**（用 ncu 直接测量损失三的 HBM 字节，把 P5-2 的算术推断
-  升级为实测）。此前：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**；
+- 当前进度：**P25-1（续 5）根因钉死、P25-1 记 `[x]`，本专题 P0–P25 全部完成**。用 **cuda-gdb
+  attach** 拿到设备侧证据（挂起时只 `worker_kernel` 常驻、spinning 在取 task 的 `ld_acquire`；
+  `scheduler_kernel` 从未被派发，4:4 下 128 SM 空闲亦如此），并用**只交换 launch 顺序**的消融
+  （scheduler 先于 worker）让 plain 构建 **4/4 收敛且正确**——详见 `docs/09` §11 与下方本轮条目。
+  此前 **P25-1 续 4 完成**（根因再定位 2：证伪 §9 的「默认流历史」「host launch 排序」两条候选、
+  排除 co-residency 与频率）。此前 **P25-1 续 3 完成**（把挂起降到 launch/握手时序敏感竞态、
+  证伪 worker 轮询循环内存序）。此前 **P24-1 完成（1/1）**（用 ncu 直接测量损失三的 HBM 字节，
+  把 P5-2 的算术推断升级为实测）。此前：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**；
   **P3 全部完成（3/3）**；**P4 全部完成（4/4）**；**P5 全部完成（3/3）**；**P6 全部完成（1/1）**；
   **P7 源码走读（1/1）完成**（本轮新增，对应「下一步」可选方向③）。
   **P8 博客发布（1/1）完成**（本轮新增，对应「下一步」可选方向①）。
@@ -572,11 +587,10 @@
   扇出图、对照 barrier/wave/decen/static 四机制、实现 MPK §5.2 批量取 task 的甜点标度）。
   **P23-1 跨层软件流水 + 环形缓冲预取（1/1）完成**（本轮新增，把 MPK §5.3 的 paged SMEM +
   cross-task software pipelining 实测出来，补齐 P22-1 §15.6 明留的尾巴）。
-  **P0–P24 全部完成**。**P25-1（线上实现构建与端到端冒烟）部分完成**：目标卡 H100/sm90 上
-  mirage（`f9eb70c`）**构建 + JIT 编译 + launch 成功**，但 kernel 执行不收敛（见「阻塞」B1），
-  故记为 `[~]`。**本轮（P25-1 续）**把「不收敛」诊断到底：官方 test_mode 用例 plain 3/3 挂起、
-  加一处 worker 轮询自旋计数后 3/3 收敛且正确（`docs/09` §7），根因定位到 **worker 取 task 轮询
-  循环的时序竞态**；端到端**延迟**仍未测。
+  **P0–P24 全部完成**。**P25-1（线上实现构建与端到端冒烟）完成 `[x]`**：目标卡 H100/sm90 上
+  mirage（`f9eb70c`）**构建 + JIT 编译 + launch + 收敛 + 正确性 + 端到端延迟**全部打通，
+  「不收敛」根因由 `docs/09` §11 的 **cuda-gdb 设备侧证据 + launch 顺序消融**钉死（scheduler 先于
+  worker launch 即 plain 构建 4/4 收敛；见「阻塞」B1 已解决）。**本专题 P0–P25 全部完成**。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -625,14 +639,14 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：P25-1 收尾（根因：设备侧双向死锁，仅前置 dtype 转换 kernel 可避开）**（P0–P24 全部完成；
-  P25-1 已构建 + launch + **收敛 + 正确性 + 端到端延迟**；**续 3 证伪 §7.5「竞态在 worker 轮询循环」**；
-  **续 4 证伪 §9「默认流历史 / host launch 排序」、排除 co-residency 与频率**，把死锁定位到**设备侧
-  worker↔scheduler 双向自旋**）。剩余：① 在收敛构建上给 worker/scheduler 各自的**事件等待点**加
-  printf 守门狗（不改语义）定位双方各卡在哪个 event 计数；② `compute-sanitizer --tool
-  synccheck/racecheck` 抓设备侧竞争；③ 向 MPK 上游核对 `f9eb70c` 的 `MODE_OFFLINE` 终止协议与事件计数。
-  （§9.6 候选①nsys 已尝试但失败——挂起用例 CUPTI 未 flush + nsys 在挂起 kernel 上不收敛；候选②③已完成
-  且均为阴/阳性结论。）注意 z3 版本互斥（「阻塞」B2）。现象刻画见 `docs/09` §7–§10，延迟见 §8。
+- **下一步：全专题收尾（P0–P25 全部完成）**。P25-1 已构建 + launch + **收敛 + 正确性 + 端到端延迟**，
+  并且「不收敛」根因已由 `docs/09` §11 钉死：**cuda-gdb attach** 证据（挂起时只有 `worker_kernel` 常驻、
+  spinning 在取 task 的 `ld_acquire`；`scheduler_kernel` 从未被派发，4:4 下 128 SM 空闲亦如此）+
+  **launch 顺序消融**（scheduler 先于 worker launch → plain 构建 4/4 收敛且正确，`mpk_sched_first.patch`）。
+  §9/§10 追的 dtype 转换只是「扰动 scheduler 派发时机」的同一旋钮。**无遗留必做项**；如再增量可选：
+  ① 用 `-G`（设备调试信息）重编译以读取 `config.all_event_counters`，把「卡在哪个 event」的数值也钉死；
+  ② 把 scheduler-first 的顺序离线报告给 MPK 上游核对（不构成 bug 判定）；③ 在 clean scheduler-first 构建上
+  重跑多算子/更大 batch 的端到端延迟。注意 z3 版本互斥（「阻塞」B2）。现象刻画见 `docs/09` §7–§11，延迟见 §8/§11.6。
 - 其它可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
@@ -680,6 +694,32 @@
   - **局限**：未把根因收敛到某条 load/store 内存序；端到端延迟仍未测（只测正确性+收敛/挂起）。
     下一步候选：`compute-sanitizer --tool racecheck` 抓竞争、把自旋换成 `__nanosleep` 退避验证纯时序、
     向 MPK 上游核对 `f9eb70c` worker 抢跑路径。**不构成对上游的 bug 判定**。P25-1 仍记 `[~]`。
+- **本轮（P25-1 续 5，根因钉死）**：续做 P25-1 的**根因定位**（§10.7 候选①「设备侧事件级证据」），
+  用 **cuda-gdb attach 已挂起的进程**（非侵入式，避免 §9.3/§9.4 的插桩扰动），把「不收敛」钉死到
+  **launch 顺序**。`docs/09-mpk-build.md` 新增 **§11**；新脚本 `harness/mpk_cudagdb_probe.py`、
+  `harness/mpk_cudagdb.sh`、`harness/mpk_cudagdb.cmds`、`harness/mpk_sched_first.sh`；patch
+  `harness/mpk_sched_first.patch`；新原始输出 `harness/mpk_cudagdb.out.txt`（128/16）、
+  `harness/mpk_cudagdb_w4s4.out.txt`（4/4）、`harness/mpk_sched_first.out.txt`（顺序消融矩阵）、
+  `harness/mpk_latency_schedfirst.out.txt`（clean 构建延迟）。快照 `f9eb70c`、目标卡 H100/sm90、
+  `CUDA_VISIBLE_DEVICES=7`。核心结论：
+  - **[设备侧证据] 挂起时只有 worker 常驻**：`info cuda kernels` 只列 `worker_kernel<<<(128,1,1),(256,1,1)>>>`
+    （128 block 全 `running`，占 128 SM），PC 落在 `persistent_kernel.cuh:1016` 的
+    `ld_acquire_gpu_u64(&config.worker_queue_last_ready_task_id[…])`（内联自 `mpk_atoms.cuh:52`）——
+    **worker 卡在取 task 的等待循环**。`cuda kernel 1` → `Invalid coordinates`：**`scheduler_kernel` 不在设备上**。
+  - **[排除 occupancy] 4:4 下 scheduler 仍不在**：worker 只用 4 个 block（至多 4 个 SM，132 SM 里 128 个空闲），
+    `scheduler_kernel` 依旧不出现 → 死锁实为「**scheduler 从未被派发**」，修正 §10.4「两常驻 kernel 同时自旋」。
+  - **[根因] 交换 launch 顺序即收敛**：`launch_persistent_kernel()` 默认先 worker 后 scheduler
+    （`:1991-2006`，代码注释已提示 scheduler 先启动也可）；用 `#ifdef MPK_DBG_SCHED_FIRST` 把 scheduler
+    放到 worker 之前 launch，**plain 构建 4/4 收敛且正确**（none ×3 + cast_1elem ×1，`max|out-ref|≤0.03125`），
+    同会话默认顺序复现 HANG。⇒ **根因 = worker 的整机持久化 grid 先启动后饿死了 scheduler 的派发**。
+  - **[统一前几轮]** §9 的 dtype 转换 / §9.3 的插桩敏感 / §10 的全 stream not-ready，都是**同一个
+    「扰动 scheduler 派发时机」**的旋钮的不同表现；循环内存序（§9.2）、host 排序（§10.3）、频率（§10.5）
+    均无关。
+  - **[延迟复核] clean 构建同量级**：scheduler-first（无任何 kernel 代码改动）128/16、200 iters
+    两次 mean 39.13 / 43.53 µs（median 39.12 / 40.54），与 §8 的 36.4–39.1 µs 一致 → §8 不是内插桩产物。
+  - **局限/定性**：无设备侧类型信息（只有 `-lineinfo`）未能读出「卡在哪个 event 计数」；仅本机单 operator；
+    **不构成对上游 bug 判定**（也可能是驱动对「整机持久化 kernel + 后继 kernel」的派发行为）。
+    **P25-1 记 `[x]`**。
 - **本轮（P25-1 续 4）**：续做 P25-1 的**根因再定位 2**，把 §9 的两条候选（「默认流历史」/「host
   launch 排序」）**都证伪**，并把挂起**定位到设备侧**。`docs/09-mpk-build.md` 新增 **§10**；新原始输出
   `harness/mpk_race_stream.out.txt`/`_stream2`/`_stream3`（流来源/规模/完成 + side-stream 非 cast 对照）、
@@ -1160,7 +1200,14 @@
    新证据 `harness/mpk_race_stream{,2,3}.out.txt`、`harness/mpk_launch_sync.out.txt`、
    `harness/mpk_wait_trace{,_grid}.out.txt`、`harness/mpk_clock_lock.out.txt`、`harness/mpk_nsys.out.txt`；
    新 patch `harness/mpk_launch_sync.patch`。
-   **不阻塞本专题其余任务**（纯资料分析均已完成）。
+    **本轮（P25-1 续 5）已解决（`docs/09` §11）**：用 **cuda-gdb attach**（非侵入式）拿到设备侧证据——
+    挂起时设备上**只有 `worker_kernel` 常驻**（PC 在 `persistent_kernel.cuh:1016` 取 task 的 `ld_acquire`），
+    `scheduler_kernel` **从未被派发**（`cuda kernel 1` → `Invalid coordinates`；4:4 下 128 SM 空闲亦然），
+    修正 §10.4「两 kernel 同时自旋」；再用**只交换 launch 顺序**的消融 `harness/mpk_sched_first.patch`
+    钉死根因：**scheduler 先于 worker launch → plain 构建 4/4 收敛且正确**（默认顺序同会话复现 HANG）。
+    clean（scheduler-first）构建延迟 39.1/43.5 µs（同 §8 量级），故 §8 的延迟亦非内插桩产物。
+    **B1 解除**（根因 = launch 顺序，绕过 = scheduler-first；不构成上游 bug 判定）。
+    **不阻塞本专题其余任务**（纯资料分析均已完成；P0–P25 全部完成）。
 - **B2（环境）z3-solver 版本互斥**：mirage 需 `z3-solver==4.16.0.0`，容器内 `tilelang` 需
   `<4.15.5`。本轮跑完 mirage 后已恢复 `4.15.4.0`，因此当前 `import mirage` 会失败；下次使用
   mirage 前需重钉 `4.16.0.0`（用完切回），避免影响其它并行专题。

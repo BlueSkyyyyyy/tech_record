@@ -1,0 +1,40 @@
+set pagination off
+set confirm off
+set print thread-events off
+set width 0
+
+printf "\n===== cuda-gdb: devices =====\n"
+info cuda devices
+
+printf "\n===== cuda-gdb: kernels (all) =====\n"
+info cuda kernels
+
+printf "\n===== cuda-gdb: sms =====\n"
+info cuda sms
+
+printf "\n===== cuda-gdb: worker_kernel backtrace / pc =====\n"
+cuda kernel 0
+bt
+info line *$pc
+print/x $pc
+
+printf "\n===== cuda-gdb: worker_kernel blocks =====\n"
+info cuda blocks
+
+printf "\n===== cuda-gdb: worker kernel param config =====\n"
+print config.num_workers
+print config.num_local_schedulers
+print config.num_remote_schedulers
+print config.num_schedulers
+
+printf "\n===== cuda-gdb: runtime counters (worker focus) =====\n"
+print config.all_event_counters[0]
+print config.all_event_counters[1]
+print config.all_event_counters[2]
+print config.sched_queue_last_ready_event_id[0]
+print config.sched_queue_next_free_event_id[0]
+print config.worker_queue_last_ready_task_id[0]
+
+printf "\n===== cuda-gdb: try focusing scheduler kernel (may not exist) =====\n"
+cuda kernel 1
+bt

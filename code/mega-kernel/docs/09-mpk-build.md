@@ -20,6 +20,10 @@
 > 降到「launch/握手时序敏感竞态」并给出 dtype 转换 kernel 的强签名。**§10（四续 P25-1）**再把 §9 的
 > 两条候选（默认流历史 / host 排序）**都证伪**：挂起是**设备侧 worker 与 scheduler 两个常驻 kernel
 > 同时自旋的双向死锁**，只被「前置 dtype 转换 kernel」这一个开关避开（与流 / 完成 / 规模 / 频率无关）。
+> **§11（五续 P25-1）**用 **cuda-gdb attach**（非侵入式）拿到设备侧证据并**改写了 §10 的结论**：挂起时
+> 设备上**只有 `worker_kernel` 常驻**（spinning 在取 task 的 `ld_acquire`）、`scheduler_kernel` **从未被
+> 派发**（4:4 下 128 个 SM 空闲也如此）；根因是 **launch 顺序**——把 scheduler 放到 worker **之前** launch
+> 即让 plain 构建 **4/4 收敛且正确**。前几轮追的 dtype 转换只是「扰动 scheduler 派发时机」的同一个旋钮。
 
 ## 0. 一句话结论
 
@@ -672,3 +676,145 @@ kernel」这一个可开关的旋钮。
 - **P25-1 仍记 `[~]`**：本轮把 §9 的两条候选（默认流历史 / host 排序）**都证伪**，并把死锁**定位到
   设备侧 worker↔scheduler 双向自旋**、触发条件收窄到「前置 dtype 转换 kernel」；端到端延迟（§8）与
   现象刻画已足够，**具体机制仍需 device 侧事件级/竞争检测证据**。
+
+## 11. 根因定位 3（续做 P25-1）：挂起 = worker kernel 抢占设备后 scheduler kernel 未被派发——交换 launch 顺序即收敛
+
+§10 用 host 侧 `cudaStreamQuery` 轮询看到「worker/scheduler 两条 stream 都持续不完成」，据此推断这是
+**worker↔scheduler 双向自旋死锁**，但明确留下「机制未钉死」与 §10.7 候选①（设备侧事件级证据）。
+本节把候选①做实：**不插桩、不 print**，而是用 **cuda-gdb 直接 attach 到已经挂起的进程**（此时挂起早已
+发生，attach 只是旁观），枚举设备上**真正在跑**的 kernel 及其 PC；再用一个**只改 launch 顺序**的消融
+把根因钉死。
+
+> 全部实验在**目标卡 H100/sm90**、快照 `mirage-project/mirage@f9eb70c`、`CUDA_VISIBLE_DEVICES=7`
+> **隔离空闲卡**上完成；plain（未打任何时序 patch）构建；`timeout` 单跑，退出码
+> `0=PASS / 1=WRONG / 124=HANG`。cuda-gdb 13.2。
+
+### 11.1 方法：attach 已挂起的进程（非侵入式设备侧观测）
+
+- 探针 `harness/mpk_cudagdb_probe.py`：与 `mpk_race_probe.py` 同构（plain 构建、128/16、随机张量单层
+  RMSNorm），但 `pk()` 之后**进程常驻**（主线程 sleep + 一个 daemon 线程 `torch.cuda.synchronize()`），
+  打印 `[probe] LAUNCHED pid=…` 供外部 attach。
+- 驱动 `harness/mpk_cudagdb.sh`：后台起探针 → 等 `LAUNCHED` 标记 → `cuda-gdb -p <pid> -batch`
+  执行 `harness/mpk_cudagdb.cmds`（`info cuda devices/kernels/sms/blocks`、对每个 kernel `bt` +
+  `info line *$pc` + `$pc`）→ detach 并杀掉探针。命令逐条 `-ex` 注入，某条失败不影响其余。
+- **为什么用 cuda-gdb 而不是内核 `printf` 守门狗**：§9.3/§9.4 已证任何**内核侧**观测都会扰动这个
+  codegen/调度敏感的竞态；cuda-gdb attach 是**进程外的**，不改变 worker/scheduler kernel 的指令与
+  资源足迹。原始输出 `harness/mpk_cudagdb.out.txt`（128/16）与 `harness/mpk_cudagdb_w4s4.out.txt`（4/4）。
+
+### 11.2 判据九：挂起时设备上**只有 `worker_kernel` 常驻**，`scheduler_kernel` 不在
+
+对 plain 构建 `prewarm=none`（必挂）attach，cuda-gdb 的 `info cuda kernels` 只列出**一个** kernel：
+
+```
+  Kernel Parent Dev Grid Status  SMs Mask   GridDim    BlockDim Invocation
+*      0      -   0   16 Active  0x0ff55f…  (128,1,1)  (256,1,1) worker_kernel()
+```
+
+- 该 `worker_kernel` 的 128 个 block **全部 `running`**（`info cuda blocks`：`(0,0,0)…(127,0,0) 128 running`），
+  占据 128 个 SM（`info cuda sms` 显示 SM 0–116/118/120/122/124–131 各 8 warp 活跃，**117/119/121/123 空闲**）。
+- 聚焦任一 worker 线程，`bt` + `info line *$pc` 显示它停在
+  `persistent_kernel.cuh:1016` 的 `ld_acquire_gpu_u64(&config.worker_queue_last_ready_task_id[…])`
+  （内联进 `mpk_atoms.cuh:52` 的 `asm volatile("ld.acquire.gpu.u64 …")`）——
+  **正是 worker 取 task 的等待循环**（`docs/06` §3）。
+- **`scheduler_kernel` 不存在**：`cuda kernel 1` 报 `Invalid coordinates requested`。
+
+### 11.3 判据十：不是 SM 资源不够——4:4 也只剩 worker、128 个 SM 空闲
+
+若挂起只是「worker 占满 SM、scheduler 挤不进去」，那把 worker 降到 4 个 block 应能放出 128 个 SM 给
+scheduler。实测（`harness/mpk_cudagdb_w4s4.out.txt`）：
+
+```
+*      0      -   0   16 Active  0x0550…  (4,1,1)  (256,1,1) worker_kernel()
+Kernel 0: (0,0,0)…(3,0,0) 4 running
+cuda kernel 1 → Invalid coordinates requested
+```
+
+**4 个 worker block（至多占 4 个 SM、铺满 132 SM 里 128 个空位）下，`scheduler_kernel` 依旧不在设备上。**
+→ 挂起与 occupancy/SM 占用**无关**（呼应 §9.1 判据二「grid 无关」）。
+
+把 §11.2/§11.3 与 §10.4 的 host 证据合看：默认顺序下 **scheduler stream 始终 not-ready**（§10.4）
+**且**设备上查不到 scheduler kernel（本节）⇒ **scheduler kernel 已入队、但从未被派发（pending）**，
+而不是「先跑完退出」。这**修正了 §10.4 的措辞**：并非「worker↔scheduler 两个常驻 kernel 同时自旋」，
+而是 **worker 单方面在自旋等 task，而唯一会派发 task 的 scheduler kernel 根本没跑起来**。
+
+### 11.4 判据十一（消融，根因）：**交换 launch 顺序**即从 HANG 变 PASS
+
+`launch_persistent_kernel()` 里先 launch `worker_kernel`、再 launch `scheduler_kernel`
+（`persistent_kernel.cuh:1991-2006`；scheduler 用 `0` smem、grid=`num_local_schedulers/SCHEDULERS_PER_BLOCK`）。
+代码注释本身写着「Pack scheduler warps into blocks so they leave enough SMs for workers, **even when CUDA
+starts the schedulers before the workers**」（`:1996-1997`），说明作者已意识到启动顺序问题，但默认仍是
+worker 先。
+
+用一个**只交换这两个 launch 顺序**的补丁 `harness/mpk_sched_first.patch`（`#ifdef MPK_DBG_SCHED_FIRST`
+分支，`MPK_EXTRA_DEFINES` 经 `persistent_kernel.py` 注入，**不动任何 kernel 代码**）做消融
+（脚本 `harness/mpk_sched_first.sh`，原始输出 `harness/mpk_sched_first.out.txt`）：
+
+| 顺序（prewarm=none，128/16，plain 构建） | 结果 |
+|---|---|
+| 默认：worker → scheduler（对照） | **HANG**（`EXIT=124`） |
+| 交换：scheduler → worker #1 | **PASS**（`max|out-ref|=0.015625`） |
+| 交换：scheduler → worker #2 | **PASS**（`max|out-ref|=0.015625`） |
+| 交换：scheduler → worker #3 | **PASS**（`max|out-ref|=0.015625`） |
+| 交换 + 前置 `cast_1elem` | **PASS**（`max|out-ref|=0.015625`） |
+
+**把 scheduler 先 launch 后，未打任何内核侧 patch 的 plain 快照 4/4 收敛且数值正确**（bf16 容差内）；
+默认顺序同会话内复现 HANG。⇒ **根因是 launch 顺序**：worker 的**整张持久化 grid**（128 block × 205824 B
+smem）先启动后独占了设备的 kernel 派发通道，使随后在另一条 stream 上入队的 scheduler kernel **拿不到
+派发**（即便有 4 个 SM 空闲）；反过来让 scheduler 先跑起来、再放 worker，二者即可正常共驻。
+
+### 11.5 与 §7–§10 的关系：前几轮追的 dtype 转换只是「扰动 scheduler 派发时机」的旋钮
+
+- **§9.2「循环内存序改动都不修复」** ✓ 一致——问题根本不在 worker 循环内部，循环只是「等不到 task 的表现」。
+- **§9.3/§9.4「内核侧插桩敏感、同语义两种写法相反」** ✓ 一致——插桩改变 kernel 的寄存器/指令/资源足迹，
+  从而改变驱动对 worker/scheduler 的**派发/共驻**次序，于是偶然避开。
+- **§10.1/§10.2「只有 dtype 转换 kernel 能避开」** ✓ 一致——它（短、同时进出两条流）恰好扰动了同一段
+  **scheduler 派发时机**，与「阻止设备级 worker→scheduler 派发饿死」是同一个可开关的旋钮的两种表现。
+- **§10.3「host 强制排序无效」** ✓ 一致——补的是 host 侧 prepare/handshake，管不到**设备侧 kernel 派发**。
+- **§10.4「两条 stream 都 not-ready」** ✓ 一致——scheduler stream 不完成正因它的 kernel 从未被派发。
+- **§10.5「锁频无关」** ✓ 一致——与频率/boost 无关。
+- 于是此前 §7.5「加自旋计数就修好」的正解是：那处改动改变了 worker kernel 的资源足迹，间接让 scheduler
+  排上了队，而**不是**命中了某条 worker 内存序 bug。
+
+### 11.6 端到端延迟（clean 构建复核）
+
+§8 的延迟是在**内核侧打过时序修复**的构建上测的，留有一条目 caveat。本节在**干净的 scheduler-first
+构建**（无任何 kernel 代码改动，只换 launch 顺序）上复测 128/16、200 iters
+（原始输出 `harness/mpk_latency_schedfirst.out.txt`）：
+
+| 运行 | mean (µs) | median | min | max | sd | max\|out−ref\| |
+|---|---|---|---|---|---|---|
+| #1 | **39.13** | 39.12 | 37.50 | 48.45 | 0.91 | 7.8e-03 |
+| #2 | **43.53** | 40.54 | 37.09 | 65.82 | 6.49 | 7.8e-03 |
+
+与 §8（36.4–39.1 µs，重复 37.6–38.1）同量级 ⇒ **§8 的延迟数字不是内插桩的产物**，clean 构建同量级。
+
+### 11.7 结论、定性与局限
+
+- **根因（可复现、可归因、有反例验证）**：在本机快照上，`launch_persistent_kernel()` 以
+  **worker 先 / scheduler 后**的顺序在两条 `cudaStreamNonBlocking` stream 上启动双常驻 kernel 时，
+  worker 的整张持久化 grid 先占满设备，导致 **scheduler kernel 在设备侧始终不被派发**，worker 取 task
+  等待循环（`persistent_kernel.cuh:1016`）永不满足。**把 scheduler 放到 worker 之前 launch 即稳定收敛
+  4/4**（数值正确，延迟与 §8 同量级）。
+- **定性**：这是**本机（H100 + CUDA 13.2 驱动 + 快照 `f9eb70c`）**上的一条可复现现象与一个有效绕过；
+  **不构成对上游的 bug 判定**（也可能是驱动对「先启动的整机持久化 kernel + 后继 kernel」的派发行为）。
+  上游代码注释已提示 scheduler 先于 worker 启动是可接受的。
+- **局限**：① cuda-gdb attach 原则上可能影响调度，但 attach 发生在**挂起早已成立之后**（launch 后 ≥5 s，
+  正常执行只需 ~40 µs），且 §11.4 的顺序消融不依赖 cuda-gdb；② 无设备侧类型信息（JIT 只带 `-lineinfo`），
+  `print config.*` 取不到事件计数，故本节**没有**读出「卡在哪个 event 计数」——但 `$pc` 已精确落在
+  worker 取 task 的 `ld_acquire` 上；③ 仅本机、单 operator、offline/test 路径。
+- 原始输出：`harness/mpk_cudagdb.out.txt`（128/16）、`harness/mpk_cudagdb_w4s4.out.txt`（4/4）、
+  `harness/mpk_sched_first.out.txt`（顺序消融矩阵）、`harness/mpk_latency_schedfirst.out.txt`（clean 延迟）。
+  脚本 `harness/mpk_cudagdb_probe.py`、`harness/mpk_cudagdb.sh`、`harness/mpk_cudagdb.cmds`、
+  `harness/mpk_sched_first.sh`；patch `harness/mpk_sched_first.patch`。
+
+### 11.8 判据小结（本节新增）
+
+| 判据 | 内容 | 结论 |
+|---|---|---|
+| 九 | attach 挂起进程，设备上只列 worker_kernel、PC 在取 task 的 `ld_acquire` | scheduler 未常驻 |
+| 十 | 4:4 下 worker 只占 4 SM、128 SM 空闲，scheduler 仍不在 | 与 occupancy 无关 |
+| 十一 | 交换 launch 顺序（scheduler 先），plain 构建 4/4 收敛 | **根因 = launch 顺序** |
+
+**P25-1 状态**：构建 + JIT + launch + 收敛 + 正确性 + 端到端延迟**全部打通**，「不收敛」的根因也已由
+§11.4 的消融钉死（launch 顺序，而非内存序 / dtype / host 排序 / 频率 / occupancy）；本节给出可复现的
+绕过（`mpk_sched_first.patch`）。
