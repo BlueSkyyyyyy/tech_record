@@ -25,8 +25,9 @@ categories: ["算子开发"]
 4. [H100 环境探测与 kernel 可用性清单]({{< relref "mega-moe-04-env" >}}) —— 哪些 kernel 本机可跑、哪些 SM100 专属
 5. [主体 kernel 精读（一）：模板参数与 block config]({{< relref "mega-moe-05-kernel" >}}) —— grid/cluster/线程、BLOCK_M 启发式、smem 流水
 6. [主体 kernel 精读（二）：warp specialization 与 mbarrier 同步]({{< relref "mega-moe-06-mbarrier" >}}) —— full/empty 相位、TMA 坐标、task 槽双缓冲
-7. `sm100_fp8_fp4_mega_moe.cuh` 逐段精读：tcgen05 MMA / UTCCP / SwiGLU / dispatch & combine（续，待写）
-8. MoE 反向：wgrad / dgrad grouped GEMM（待写）
-9. Mega Gate / Mega mHC（待写）
+7. [主体 kernel 精读（三）：tcgen05 MMA 与 L1/L2 epilogue]({{< relref "mega-moe-07-mma-epilogue" >}}) —— UMMA/UTCCP、UE8M0 block scale、in-place SwiGLU、combine
+8. `sm100_fp8_fp4_mega_moe.cuh` 逐段精读：dispatch / combine 段与 NVLink（待写）
+9. MoE 反向：wgrad / dgrad grouped GEMM（待写）
+10. Mega Gate / Mega mHC（待写）
 
 > 各篇正文由仓库 `code/mega-moe/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

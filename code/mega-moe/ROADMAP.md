@@ -78,7 +78,17 @@
       `advance_pipeline` 相位翻转 / 生产者 phase=1 约定、A/B loader 坐标与 2-CTA multicast、task 槽双缓冲
       与「仅 epilogue release」、跨 SM/rank barrier、L1→L2 位图依赖；H100 真机验证相位约定 +
       NSTAGES=1/4 流水重叠（`src/mbarrier_pipeline.cu`、`harness/exp_mbarrier_pipeline.{sh,out.txt}`）。
-- [ ] **P3-3** linear1 → SwiGLU → linear2 的 MMA 与 epilogue（tcgen05、UE8M0 scale、FP8xFP4）。
+- [x] **P3-3** linear1 → SwiGLU → linear2 的 MMA 与 epilogue（tcgen05、UE8M0 scale、FP8xFP4）。
+      → `docs/10-mega-moe-mma-epilogue.md`（真实行号核对）：leader CTA 单 warp 发 UMMA、A/B 互换
+      与 2-CTA（`UMMA_M=256/UMMA_N=BLOCK_M`）、动态缩 N（`valid_m` 16 对齐）、routed/shared 双
+      instruction descriptor、UTCCP 把 SF 从 smem 搬进 TMEM（`kernel:894-907`）、UMMA
+      `SM100_MMA_MXF8F6F4_2x1SM_SS::fma`（`tcgen05.cuh:67-86`）与 accumulate 首条清零、FP4 打包因子
+      （`packing.cuh:8-12`）、commit multicast 通知 empty/tmem_full；epilogue TMEM 双缓冲 + 提前
+      `release_task_info`/`release_tmem`、L1 in-place SwiGLU（bf16 round）+ UE8M0 量化（
+      `math.cuh:114-147`）+ TMA 转置上屏 + L2 K-block bitmask 依赖、L2 BF16 NVLink 直写远端
+      combine buffer、combine top-k fp32 归约。H100 数值实验 `harness/exp_ue8m0_sf.py`（+`.out.txt`）：
+      位运算 SF 25009 样本 0 不符、scale×inv 精确 1、幂次 scale/理想 ≤1.9977 且 0 溢出、bf16-round
+      SwiGLU 相对误差 4.5e-3。配套博客 `content/posts/mega-moe-07-mma-epilogue`。
 - [ ] **P3-4** dispatch / combine 段与 NVLink 读写；locality domain 的作用。
 
 ### P4 反向实现解析（`docs/04-moe-backward.md`）
@@ -121,7 +131,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0 全部完成（P0-1/2/3/4）；P1-1、P1-2 完成（P1 全部完成）；P2 全部完成；P3-1、P3-2 完成。**
+- 当前进度：**P0 全部完成（P0-1/2/3/4）；P1-1、P1-2 完成（P1 全部完成）；P2 全部完成；P3-1、P3-2、P3-3 完成。**
+  P3-3：新建 `docs/10-mega-moe-mma-epilogue.md`——计算本体与 epilogue 逐段精读。**MMA**：只有
+  leader CTA 的一个 warp 发 UMMA（`kernel:819-938`）；`A/B 互换 + 2-CTA` 使 `UMMA_M=256`、
+  `UMMA_N=BLOCK_M`（token 维），按 `valid_m` 动态缩 N（`update_instr_desc_with_umma_n`，
+  `mma/sm100.cuh:150-153`）；routed(FP8/FP4) 与 shared(FP8) 两个 block-scaled descriptor
+  （`:825-850`）；`UTCCP_4x32dp128bit_2cta` 把 SFA/SFB 从 smem 搬进 TMEM（`:894-907`）；
+  `SM100_MMA_MXF8F6F4_2x1SM_SS::fma`（`ptx/tcgen05.cuh:67-86`）内层按 `gran_k=32` 拆 4 条，
+  首条非累加清零、其余累加（`:920`）；FP4 打包因子 2（`packing.cuh:8-12`）；commit multicast
+  同时通知 `empty_barriers` 与（末 K block 时）`tmem_full_barriers`。**Epilogue**：TMEM 双缓冲，
+  读完最后有效块即 `release_tmem`，`release_task_info` 提前（`:990`）；L1 分支 in-place SwiGLU
+  （bf16 round，gran-8 交错权重让 gate/up 成对，`:1108-1135`）+ amax warp-pair 归约 + UE8M0
+  量化（`get_ue8m0_sf_exp/inv`，`math.cuh:114-147`）+ STSM + TMA 转置上屏（就是 L2 激活）+
+  `l2_full_mask` bitmask 依赖；L2 分支 BF16 经 `sym_buffer.map` NVLink 直写远端 combine buffer；
+  combine 段 TMA 拉 top-k 贡献、fp32 累加、bf16 写 `y`。H100 数值实验 `harness/exp_ue8m0_sf.py`
+  （+`.out.txt`）：位运算 `get_ue8m0_sf_exp` 在 25009 样本（含 0/亚正规/幂次边界）上 0 不符、
+  `scale×inv` 精确为 1、幂次 scale/理想 ≤1.9977 且 0 溢出、bf16-round SwiGLU 相对误差 4.5e-3。
+  配套博客 `content/posts/mega-moe-07-mma-epilogue`。
   P3-2：新建 `docs/09-mega-moe-mbarrier.md`——**两层解耦**（TMA↔MMA 的 full/empty，MMA↔epilogue 的
   tmem_full/empty）+ 调度器 task 槽（task_info full/empty）的完整 mbarrier 清单与 init 计数
   （`full.init(2*2)` / `empty.init(1)` / `tmem_empty.init(2*kNumEpilogueThreads)`，`kernel:209-285`）、
@@ -167,12 +193,12 @@
   （`smxx_layout.hpp:133`、kernel `:774`/`:788`）；L2 权重不交错只转 SF。实验
   `harness/exp_weight_transform.py`（+`.out.txt`，H100）：行号映射/SwiGLU 等价/UTCCP 映射全部 0 误差，
   与 deep_gemm 内部实现逐元素一致。**P2 全部完成。**
-- **下一步：P3-3** 继续精读计算本体——`sm100_fp8_fp4_mega_moe.cuh` 里 **tcgen05 MMA 的
-  `SM100_MMA_MXF8F6F4_2x1SM_SS` 调用与 UMMA descriptor / instruction descriptor**、
-  **UTCCP 把 SFA/SFB 从 smem 搬进 TMEM**（`kernel:894-907`）、**L1 的 in-place SwiGLU**
-  （`:1058-1134`，配合 P2-1 的 gate/up 交错权重）、**FP8xFP4 的 UE8M0 scale 索引**、
-  L2 epilogue 的 BF16 输出与 combine 写回。随后 P3-4（dispatch/combine 的 NVLink 读写与
-  locality domain）。H100 数值对拍（P4-4，用 SM90 `nt` wgrad 替代 SM100 `tn`）可与 P3 并行推进。
+- **下一步：P3-4** 精读 dispatch / combine 段与 NVLink 读写、locality domain 的作用
+  （`kernel:341-818` 的 dispatch warp、`workspace`/ring buffer 的 `ld/st`、`sym_buffer.map` 的远端
+  访问、`sched::MegaMoEScheduler` 的 device locality domain 选择）。随后进入 **P4 反向**：
+  P4-1（反向数学）/P4-2（`k_grouped_fp8_gemm_tn_contiguous` wgrad API）/P4-3（dgrad `m_grouped_*`）/
+  P4-4（H100 上用 SM90 `nt` wgrad 做 grouped GEMM / backward 数值对拍 vs PyTorch）。
+  也可并行推进 P5-1（Mega Gate）/P5-2（Mega mHC）。
 
 ## 阻塞
 

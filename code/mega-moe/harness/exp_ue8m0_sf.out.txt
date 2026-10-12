@@ -1,0 +1,18 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+== 1) `get_ue8m0_sf_exp` 位运算 vs 参考 (ceil(log2(amax/qmax))) ==
+   [e4m3] 25009 个样本，不符 0 个
+   [e2m1] 25009 个样本，不符 0 个
+
+== 2) UE8M0 scale 与 inverse 乘积 ==
+   sf_exp 范围 [105,136]，scale*inv 最大偏差 0.000e+00
+
+== 3) block-scale FP8 量化往返（K=256，按 32 分组，torch FP8） ==
+   kernel 幂次 scale : max abs err 9.886e-01, 相对 3.326e-02, 溢出 0
+   理想 amax/qmax    : max abs err 8.434e-01, 相对 2.838e-02, 溢出 0
+   幂次 scale / 理想 scale 最大比值 (应 <= 2): 1.9977
+
+== 4) L1 epilogue in-place SwiGLU 数值 ==
+   bf16-round gate/up vs 全 fp32：max abs 3.634e-01, 相对 4.524e-03
+   （不做 bf16 round 的自身 vs 参考应恒 0: 0.000e+00）
+
+ALL_OK = True
