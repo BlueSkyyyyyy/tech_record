@@ -503,6 +503,14 @@
         轮询循环（`persistent_kernel.cuh:1013`）的时序竞态**（H2 与 H1-阈值形态均排除）。原始输出
         `harness/mpk_converge_{plain,instrumented,attribution}.out.txt`、`harness/mpk_dbg_trace.out.txt`，
         patch `harness/mpk_watchdog.patch`（全量）/`harness/mpk_workaround_only.patch`（最小修复）。
+      - **续做 2（P25-1 续 2，端到端延迟）见 `docs/09` §8**：在收敛构建（patch
+        `harness/mpk_latency_run.patch`：worker 轮询自旋计数 + `-DMPK_DBG_WATCHDOG`）上测单层
+        RMSNorm megakernel 的**每次调用端到端延迟 36.4–39.1 µs**（扫 128/16、64/16、16/16，
+        逐 iter CUDA event 计时），对照 PyTorch 朴素 kernel-per-operator **54.0 µs**（约 1.4–1.5×）；
+        128/16 连跑 **3/3 收敛**（37.6–38.1 µs，抖动 <1.5%），plain 构建复现挂起（`EXIT=124`）。
+        延迟**几乎与 worker 数无关**（39.05→36.40 µs），由「双常驻 kernel 启动/终止协议」主导而非计算。
+        脚本 `harness/mpk_latency.py`，原始输出 `harness/mpk_latency.out.txt` /
+        `harness/mpk_latency_repeat.out.txt`。**端到端延迟这一条已补齐**；根因内存序仍未钉死，P25-1 记 `[~]`。
 
 ## 每轮增量流程（autopilot）
 
@@ -613,13 +621,11 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：P25-1 收尾（端到端延迟）**（P0–P24 全部完成；P25-1 已构建+launch；**本轮续做已把
-  官方用例跑通**：plain 3/3 挂起、加 worker 轮询插桩后 3/3 收敛且正确，见 `docs/09` §7）。
-  剩余：① 在**收敛**（加最小插桩）的构建上测**端到端延迟**与多 iter 稳定性（`harness/mpk_smoke.py`
-  的 `--iters`）；② 用 `compute-sanitizer --tool racecheck` 抓 worker/scheduler 的数据竞争，把根因
-  钉到具体 load/store 内存序；③ 把自旋计数换成 `__nanosleep` 退避，验证是纯时序而非缺 fence；
-  ④ 向 MPK 上游核对 `f9eb70c` 的 worker 抢跑路径。注意 z3 版本互斥（「阻塞」B2）。详见
-  `docs/09-mpk-build.md` §7。
+- **下一步：P25-1 收尾（根因内存序）**（P0–P24 全部完成；P25-1 已构建+launch+**收敛+正确性+
+  **端到端延迟**）。剩余：① 用 `compute-sanitizer --tool racecheck` 抓 worker/scheduler 的数据竞争，
+  把根因钉到具体 load/store 内存序；② 把自旋计数换成 `__nanosleep` 退避，验证是纯时序而非缺 fence；
+  ③ 向 MPK 上游核对 `f9eb70c` 的 worker 抢跑路径。注意 z3 版本互斥（「阻塞」B2）。已完成的
+  「端到端延迟」见 `docs/09-mpk-build.md` §8。
 - 其它可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
@@ -667,6 +673,26 @@
   - **局限**：未把根因收敛到某条 load/store 内存序；端到端延迟仍未测（只测正确性+收敛/挂起）。
     下一步候选：`compute-sanitizer --tool racecheck` 抓竞争、把自旋换成 `__nanosleep` 退避验证纯时序、
     向 MPK 上游核对 `f9eb70c` worker 抢跑路径。**不构成对上游的 bug 判定**。P25-1 仍记 `[~]`。
+- **本轮（P25-1 续 2）**：续做 P25-1 的「端到端延迟」。在**收敛构建**（把 §7.5 的最小修复固化成
+  `harness/mpk_latency_run.patch`：`execute_worker` 取 task 轮询循环加 `MPK_DBG_WATCHDOG` 门控的
+  自旋计数、编译命令加 `-DMPK_DBG_WATCHDOG`）上，用新脚本 `harness/mpk_latency.py` 测
+  「一次 megakernel 调用」从 host 提交到双常驻 kernel 终止的完整往返：`batch=16, hidden=4096` bf16、
+  `CUDA_VISIBLE_DEVICES=7`、快照 `f9eb70c`，每次 `pk()` 前后记一对 CUDA event，20 warmup + 200 timed
+  iters。核心结论：
+  - **端到端延迟 36.4–39.1 µs/次调用**，扫 128/16（= 论文 §5.1）、64/16、16/16 三档：
+    mean 39.05 / 37.59 / 36.40 µs、median 38.99 / 37.47 / 36.38、sd 2.14 / 1.27 / 1.34；
+    正确性三档 `max|out-ref| = 0.03125`（bf16 容差内）。
+  - **对照 PyTorch 朴素 kernel-per-operator RMSNorm 54.0 µs**（同 batch/hidden，同一计时循环）：
+    MPK 约 **1.4–1.5×**；本用例只 1 个算子、张量极小，故差距是 launch（C1 单次提交）+ 消除中间量
+    的固定收益量级，对上 `docs/04` §1/§17 的损失二/三。
+  - **延迟几乎与 worker 数无关**（132→32 block，只降 ~7%）：主导项是「双常驻 kernel 的启动 +
+    设备内 scheduler 冷启动 + done-event 终止握手」，不是计算/并行度。
+  - **重复稳定性**：128/16 连跑 3 次 **3/3 收敛 PASSED**，200-iter 均值 37.64 / 37.78 / 38.08 µs
+    （抖动 <1.5%）。**plain 对照**（仅删 `-DMPK_DBG_WATCHDOG`）复现挂起 `EXIT=124`。
+  - 原始输出 `harness/mpk_latency.out.txt`（config 扫描）/ `harness/mpk_latency_repeat.out.txt`
+    （重复 + plain 对照）；`docs/09-mpk-build.md` 新增 **§8**（含 §8.3 读法/§8.4 局限）。
+  - **局限**：单层微内核、单次调用（非论文 §6 整模型端到端）、延迟来自「打过时序修复的构建」、
+    batch/hidden 未扫。P25-1 **端到端延迟已补齐**，仍因根因内存序未钉死而记 `[~]`。
 - **本轮（P25-1）**：新建 `docs/09-mpk-build.md`（MPK 线上实现的**构建与端到端冒烟**，与 `docs/06`/`07`/`08`
   同一快照 `f9eb70c`）+ 博客 post `mega-kernel-10-mpk-build`（weight 11）并更新 `mega-kernel-00-index`
   目录第 10 项；脚本 `harness/mpk_smoke.py`，原始输出 `harness/mpk_build_run.out.txt`（构建）与
@@ -1038,8 +1064,12 @@
   即 **3/3 收敛且正确**（`max|out-ref|≤0.03125`）；消融显示决定性变量就是这个 wheel loop 的时序扰动，
   scheduler 侧逐事件 printf 不足以修复。**判定：这是 worker↔scheduler 的时序敏感同步竞态（丢失唤醒/
   抢跑），非 task 单体内 TMA/mbarrier 卡住（H2 排除），也非事件计数"凑不满"（H1 该形态排除）**。
-  仍未做：端到端**延迟**数字、把根因钉到具体内存序（建议 `compute-sanitizer --tool racecheck`）。
-  patch：`harness/mpk_watchdog.patch`（全量插桩）／`harness/mpk_workaround_only.patch`（最小修复）。
+   **本轮（P25-1 续 2）已补齐端到端延迟**（`docs/09` §8）：收敛构建上单层 RMSNorm megakernel
+   36.4–39.1 µs/次调用（对照 PyTorch 朴素 54.0 µs），128/16 连跑 3/3 收敛、plain 复现挂起
+   （`EXIT=124`）。仍未做：把根因钉到具体内存序（建议 `compute-sanitizer --tool racecheck`）、
+   非 Hopper-TMA task 隔离 H2。
+   patch：`harness/mpk_watchdog.patch`（全量插桩）／`harness/mpk_workaround_only.patch`（最小修复）／
+   `harness/mpk_latency_run.patch`（延迟实验用的收敛修复 + 编译宏）。
   **不阻塞本专题其余任务**（纯资料分析均已完成）。
 - **B2（环境）z3-solver 版本互斥**：mirage 需 `z3-solver==4.16.0.0`，容器内 `tilelang` 需
   `<4.15.5`。本轮跑完 mirage 后已恢复 `4.15.4.0`，因此当前 `import mirage` 会失败；下次使用

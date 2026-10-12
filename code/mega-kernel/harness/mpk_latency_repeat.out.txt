@@ -1,0 +1,45 @@
+###############################################################
+# MPK 端到端延迟：重复稳定性 + plain(无 workaround) 对照
+# 目标卡 H100/sm90，device 7，快照 f9eb70c
+###############################################################
+
+=== RUN 1 ===
+[cfg] workers=128 schedulers=16 target_cc=90 shape=(16,4096)
+[MPK INIT] Total tasks: 18, Total events: 3
+[compile] 27.1 s
+[run] launching persistent kernel ...
+[run] first call 0.052 s
+[check] max|out-ref| = 1.562500e-02
+[timing] 200 iters, 0.037642 ms/call (total 7.528 ms)
+[result] PASSED
+EXIT=0
+=== RUN 2 ===
+[cfg] workers=128 schedulers=16 target_cc=90 shape=(16,4096)
+[MPK INIT] Total tasks: 18, Total events: 3
+[compile] 27.5 s
+[run] launching persistent kernel ...
+[run] first call 0.053 s
+[check] max|out-ref| = 3.125000e-02
+[timing] 200 iters, 0.037780 ms/call (total 7.556 ms)
+[result] PASSED
+EXIT=0
+=== RUN 3 ===
+[cfg] workers=128 schedulers=16 target_cc=90 shape=(16,4096)
+[MPK INIT] Total tasks: 18, Total events: 3
+[compile] 27.2 s
+[run] launching persistent kernel ...
+[run] first call 0.050 s
+[check] max|out-ref| = 3.125000e-02
+[timing] 200 iters, 0.038075 ms/call (total 7.615 ms)
+[result] PASSED
+EXIT=0
+
+===== PLAIN（删掉 -DMPK_DBG_WATCHDOG，其余不变）=====
+=== PLAIN (no MPK_DBG_WATCHDOG) RUN ===
+[cfg] workers=128 schedulers=16 target_cc=90 shape=(16,4096)
+[MPK INIT] Total tasks: 18, Total events: 3
+[compile] 28.4 s
+[run] launching persistent kernel ...
+EXIT=0
+(无 [check]/[timing]/[result]，挂起在 'launching persistent kernel' 之后)
+TIMEOUT_EXIT=124

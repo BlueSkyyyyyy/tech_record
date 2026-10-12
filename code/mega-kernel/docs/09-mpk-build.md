@@ -14,7 +14,9 @@
 > 假设），因此计为**部分完成 + 一条阻塞**（见 ROADMAP「阻塞」）。
 > **§7（续做 P25-1）**进一步用官方 test_mode 用例复现挂起（3/3），并以插桩消融把根因定位到
 > **`execute_worker` 取 task 轮询循环的时序竞态**：加一处无害的自旋计数即可让官方用例 3/3 收敛
-> （正确性 `max|out-ref| ≤ 0.03125`）。
+> （正确性 `max|out-ref| ≤ 0.03125`）。**§8（再续 P25-1）**把「端到端延迟」补上：在收敛构建上测出
+> 单层 RMSNorm megakernel 的**每次调用 36.4–39.1 µs**（对照 PyTorch 朴素 54.0 µs），128/16 连跑 3/3
+> 收敛、plain 构建复现挂起（`EXIT=124`）。
 
 ## 0. 一句话结论
 
@@ -27,6 +29,7 @@
 | 常驻 kernel launch（worker/scheduler 双 stream） | **成功**（host 打印 `Finished Launching Persistent Kernel (Async)`） | 同上 |
 | kernel 执行完成 / 终止 | **未完成**（`torch.cuda.synchronize()` 不返回、GPU 自旋 100%） | 同上 |
 | §7：官方用例收敛性 | plain 3/3 挂起；加 worker 轮询插桩后 3/3 收敛（`max abs diff ≤0.03125`） | `harness/mpk_converge_*.out.txt` |
+| §8：端到端延迟（收敛构建） | **36.4–39.1 µs / 次调用**（1×RMSNorm 16×4096），对照 PyTorch 朴素 54.0 µs；128/16 连跑 3/3 收敛 | `harness/mpk_latency.out.txt` / `harness/mpk_latency_repeat.out.txt` |
 
 判据映射：到 launch 为止已经能看到 MPK 的 **C1（单次 launch）** 落地；但**执行不收敛**意味着本轮
 **无法给出端到端数值/延迟结论**，C2–C5 仍只有 `docs/06`–`docs/08` 的源码级证据。
@@ -295,3 +298,76 @@ task（`:1424-1448`）→ 16 个 task 各触发一次 event 2（`nt=16`）凑满
   ③ 向 MPK 上游核对 `f9eb70c` 的 worker 抢跑路径是否有已知修复。**不构成对上游的 bug 判定**，
   仅为可复现的本机观察。
 - 端到端**延迟**仍未测（只测了正确性与收敛/挂起）。收敛组正确性 `max|out-ref| ≤ 0.03125`（bf16）。
+
+## 8. 端到端延迟实测（续做 P25-1：「收敛后测延迟」）
+
+§7 把「不收敛」修成一类**可复现的 worker 轮询时序竞态**（加一处无害的自旋计数即收敛），但只测了
+正确性与收敛/挂起，**没有端到端延迟数字**。本节补上：在**收敛配置**上测「一次 megakernel 调用」
+从 host 提交到常驻 kernel 终止的墙钟，并扫 worker 数量、与 PyTorch「一算子一 kernel」参照对照。
+
+### 8.1 方法
+
+- **收敛配置**：把 §7.5 的最小修复固化成一个补丁 `harness/mpk_latency_run.patch`（对快照 `f9eb70c`
+  的两处最小改动）：
+  1. `include/mirage/persistent_kernel/persistent_kernel.cuh` 的 `execute_worker` 取 task 等待循环
+     （`:1013` 一带）加一个 `MPK_DBG_WATCHDOG` 门控的自旋计数（与 §7 patch 同源，只是把
+     `++_dbg_spins` 放到 `worker_id` 判断之外，让**每个 worker** 都受到同等时序扰动）；守门狗阈值
+     放宽到 `2e8`（本机从未触发）。
+  2. `python/mirage/mpk/persistent_kernel.py` 的 `target_cc==90` 编译命令（`:365-372`）追加
+     `-DMPK_DBG_WATCHDOG`。
+- **计时脚本**：`harness/mpk_latency.py`（`mpk_smoke.py` 的多 config 版）。每个 config：
+  `pk.compile()`（nvcc JIT sm_90a）→ 20 次 warmup → 200 次计时，**每次 `pk()` 前后各记一对
+  CUDA event**，循环后一次 `torch.cuda.synchronize()` 再读 `elapsed_time`。
+- **计时口径**：`pk()` 内部把 default stream `cudaStreamWaitEvent` 到 worker/scheduler 的 done
+  event（`persistent_kernel.cuh:2002-2008`），而 offline/test 模式下常驻 kernel 处理完一个 batch
+  即终止；因此一对 event 测到的是**「host 提交 → 双常驻 kernel 执行 → 终止 → stream 就绪」的完整
+  往返**，即一次 megakernel 调用的端到端墙钟。
+- 环境：目标卡 H100/sm90，`CUDA_VISIBLE_DEVICES=7` 隔离空闲卡，`batch=16, hidden=4096`（bf16），
+  快照 `f9eb70c`。原始输出 `harness/mpk_latency.out.txt`（config 扫描）与
+  `harness/mpk_latency_repeat.out.txt`（重复稳定性 + plain 对照）。
+
+### 8.2 结果：延迟 ~36–39 µs，且几乎与 worker 数无关
+
+| config (workers/sched) | max\|out−ref\| | mean (µs) | median | min | max | sd |
+|---|---|---|---|---|---|---|
+| 128 / 16（= 论文 §5.1 / 官方 `get_configurations_from_gpu`） | 3.13e-02 | **39.05** | 38.99 | 36.22 | 56.19 | 2.14 |
+| 64 / 16 | 3.13e-02 | **37.59** | 37.47 | 34.98 | 47.46 | 1.27 |
+| 16 / 16 | 3.13e-02 | **36.40** | 36.38 | 33.95 | 47.39 | 1.34 |
+| PyTorch 朴素 RMSNorm（kernel-per-operator 参照） | — | **53.99** | — | — | — | — |
+
+- **正确性**：三档 `max|out-ref| = 0.03125`，在 bf16 容差（§7 用 0.05）内；与 PyTorch 参考逐元素一致。
+- **重复稳定性**：`harness/mpk_latency_repeat.out.txt` 在 128/16 上连跑 3 次，**3/3 收敛且 PASSED**，
+  单次 200-iter 均值 **37.64 / 37.78 / 38.08 µs**（run-to-run 抖动 <1.5%），与上表 39.05 µs 同量级。
+- **plain 对照**：同一脚本、同一配置，仅删掉 `-DMPK_DBG_WATCHDOG`（回到快照原始头文件语义）后
+  再次运行——`TIMEOUT_EXIT=124`，停在 `[run] launching persistent kernel ...` 之后、无
+  `[check]/[timing]/[result]`，**复现 §7 的挂起**。二者合起来把「修复是否真的在起作用」钉死。
+
+### 8.3 读法：这 36–39 µs 是什么
+
+1. **延迟由「两个常驻 kernel 的启动/终止协议」主导，而非计算**。`batch=16, hidden=4096` 的 RMSNorm
+   只有 16 个 task、约 6.5 万元素，FLOP 与字节都可忽略；而把 worker 数从 128 降到 16（常驻 grid 由
+   132 block 降到 32 block）延迟只降 ~7%（39.05→36.40 µs）。**时间几乎全花在 launch + 设备内
+   scheduler 冷启动 + 终止握手（done event）**，不是 worker 并行度。
+2. **相对 kernel-per-operator 的朴素参照约 1.4–1.5×**（53.99 µs vs 36.40–39.05 µs）。PyTorch 的
+   RMSNorm 在这台机器上是**多个小 kernel（pow/mean/rsqrt/mul/mul）串行 + 中间量落 HBM**，每次调用
+   还叠加 host 侧逐 kernel 提交；MPK 侧是 **C1 单次 launch**（一条 `pk()` 提交双常驻 kernel），把
+   这些摊平。这与 `docs/04` §17「损失三 = 中间张量 HBM 往返」和 §1「损失二 = launch 开销」在
+   **真实 mirage 栈上**再次对上：**算子数与中间量越大，MPK 优势越大**；本用例只 1 个算子、张量极小，
+   所以只是 1.4× 量级的差距。
+3. **与论文口径的差异**：论文 §6.3（快照行 1501–1513）报的单 batch 端到端是**整个模型一次前向**
+   （Qwen3-8B/A100 14.5→12.5 ms），这里测的是**单层 RMSNorm 的一次 megakernel 调用**，二者不可直接
+   比较；本节的增量价值是把「MPK 栈在本机能**跑完并给出延迟**」这件事落地，给 C1（单次 launch）一个
+   真实的本机数字。
+
+### 8.4 局限
+
+- **单层微内核、单次调用**：不能当作论文 §6 的端到端推理延迟；`pk()` 每次重新 launch+终止
+  （offline/test 模式下一 batch 即终止），**不含**连续 serving 的稳态开销。
+- **收敛依赖一处时序扰动**（`harness/mpk_latency_run.patch`）：虽然守门狗从未触发、插桩只在
+  worker **空闲自旋**路径上多一个自增/分支，但**严格说这 36–39 µs 来自「打过时序修复的构建」**，
+  可能与上游 clean 构建略有出入；鉴于差异只在 idle 循环，影响应在亚 µs 级。根因（哪条 load/store
+  内存序）仍未钉死，见 §7.6。
+- `batch=16` 恰好等于 task 数，`grid_dim=(16,1,1)`；未扫 batch/hidden、未测更大模型。
+- **P25-1 状态**：构建 + JIT + launch + **收敛 + 正确性 + 端到端延迟**均已打通；仍未做的是
+  §7.6 的根因内存序定位与「非 Hopper-TMA task 隔离 H2」，故 P25-1 继续记 `[~]`，但「端到端延迟」
+  这一条已补齐。
