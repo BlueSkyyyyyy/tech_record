@@ -306,6 +306,25 @@
       （`Unknown Error` 定位在 `mbarrier.arrive`），须 lane 0 arrive 一次；(b) TMA 128 B swizzle 是
       `b^(((b>>7)&7)<<4)`，`ldmatrix` 漏套则「仅行 ≡0 mod 8 正确」（`dv2` 逐 token 的 mod-8 指纹）；
       (c) TMA 搬来的 `dV` 是 swizzled 的，逐标量读 `du+=dv` 必须走 `sw_read` 逆变换，且勿漏 `warp*BW`。
+- [x] **P7-21** 把 TMA B1 残差的第一块钉死：§23 相对 §22 的 K2 形状把 `long_sb` 从 2.25 抬到 3.52，
+     回读代码发现 TMA 版在 mma 循环里**逐 chunk 直读 global `E^tot`**（reg 版是 `cp.async` 预取，
+     `b1_reg_probe.cu:150`），是 §23.1「省一次 TMA」引入的**关键路径 global 标量读**。新增编译开关
+     `-DB1T_ETMA`：给 `Stage` 加 `float e[KD]`、用一张 **3D 张量图**（`{KD,NT*H,B}`、`SWIZZLE_NONE`、
+     box `{KD,1,1}`）每 chunk 多发一条 `cp.async.bulk.tensor.3d`，compute 改读 smem。新增
+     `harness/b1_tma_probe.cu` 的 `B1T_ETMA` 分支 + `harness/check_bwd_b1_tma.py` 的 tmae 列 +
+     `ncu_b1_tma_driver.py --which etma` / `probe_b1_tma_ncu.sh`（`docs/07` §24）。**Part A**：tmae
+     与基线 TMA **逐位相同（max_abs=0）**（含非整除 T=250）、vs FLA 仍 bf16 底噪。**Part B**：kernel-only
+     **0.77–0.98×** 基线 TMA（`NS=1`/BT=16/32 收益最大），**全表最好一行 xFLA=1.63**
+     （B8T2048H8 BT=64 **NS=1**：218.5→**195.0µs** vs FLA 119.4）。**Part D（ncu）**：`long_sb`
+     4.35→**3.86**（NS1）/3.46→**2.69**（NS2）/2.66→**2.05**（T512）、`wait` 1.60→1.24、tensor
+     9.68→**10.83%**（逼近 FLA 12.21%）；**占用率正式排除**——FLA achieved 占用 6.15% 比 ours
+     7.7% 还低却快 1.7×，且 `NS=1` 摸到 2 CTA/SM（theo 15.62%）也不成比例加速（grid 128<132 SM）。
+     **结论**：`E^tot` 进流水削掉 `long_sb` 0.6–0.8（证明那块就是 per-chunk 全局读）、「加深 pipeline」
+     作废（`E^tot` 修好后最优回到 `NS=1`），残差（1.63×）＝每 warp 发射效率（`wait`/`short_sb`），
+     下一步＝CUTLASS `PipelineTmaAsync` 或转向 Triton。**坑**：3D TMA 的 `globalStrides` 从 **dim1**
+     起算（首版把 dim0 元素大小也算进去→`cuTensorMapEncodeTiled` 报错后**静默**用坏图启动、并污染
+     后续 CUDA 状态使 reg 内核 `cudaFuncSetAttribute` 报 `rc=-3`）；fp32 `[128]` 行=512B>128B 故必须
+     `SWIZZLE_NONE`。
 
 ### P8 小结 / 一页纸
 
@@ -337,8 +356,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-20 补测**。
-  - P7-20（本轮）：兑现 §22.5 的下一步，在 K2 形状（P7-19）之上补 **TMA + warp-specialization**——
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-21 补测**。
+  - P7-21（本轮）：把 TMA B1 残差的第一块钉死。§23 相对 §22 的 K2 形状把 `long_sb` 从 2.25 抬到
+    3.52，回读发现 TMA 版在 mma 循环里**逐 chunk 直读 global `E^tot`**（reg 版 `cp.async` 预取，
+    `b1_reg_probe.cu:150`）——§23.1「省一次 TMA」引入的关键路径 global 标量读。新增 `-DB1T_ETMA`：
+    `Stage` 加 `float e[KD]`、3D 张量图（`{KD,NT*H,B}`、`SWIZZLE_NONE`、box `{KD,1,1}`）每 chunk 多发
+    一条 `cp.async.bulk.tensor.3d`，compute 改读 smem。新增 `harness/b1_tma_probe.cu` 的 `B1T_ETMA`
+    分支 + `harness/check_bwd_b1_tma.py` tmae 列 + `ncu_b1_tma_driver.py --which etma` /
+    `probe_b1_tma_ncu.sh` + `docs/07` §24。**Part A**：tmae vs 基线 TMA **逐位相同（max_abs=0）**、
+    vs FLA bf16 底噪（含非整除 T=250）。**Part B**：kernel-only **0.77–0.98×** 基线 TMA，
+    **全表最好 xFLA=1.63**（B8T2048H8 BT=64 **NS=1**：218.5→**195.0µs** vs FLA 119.4）。
+    **Part D（ncu）**：`long_sb` 4.35→**3.86**（NS1）/3.46→**2.69**（NS2）/2.66→**2.05**（T512）、
+    `wait` 1.60→1.24、tensor 9.68→**10.83%**（FLA 12.21%）；**占用率正式排除**（FLA achieved 6.15%
+    比 ours 7.7% 还低却快 1.7×；`NS=1` 摸到 2 CTA/SM 也不成比例加速）。**结论**：`E^tot` 进流水削掉
+    `long_sb` 0.6–0.8、「加深 pipeline」作废（修好后最优回到 `NS=1`）、残差 1.63× ＝每 warp 发射效率。
+    下一步＝CUTLASS `PipelineTmaAsync` 或转向 Triton。见 `docs/07` §24。
+  - P7-20（上轮）：兑现 §22.5 的下一步，在 K2 形状（P7-19）之上补 **TMA + warp-specialization**——
     q/k/w/dO/dV 由**专职 producer warp** 发 `cp.async.bulk.tensor`（5D 图、box `{64,1,1,BT,1}`、
     **128 B swizzle `Swizzle<3,4,3>`**），**per-stage `mbarrier`** 握手、稳态循环无 `__syncthreads()`、
     `e` 直读 global。新增 `harness/b1_tma_probe.cu` + `harness/check_bwd_b1_tma.py`
@@ -630,7 +663,17 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-20 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-21 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-21（`docs/07` §24）把 TMA B1 残差的第一块钉死**：定位到 §23 相对 §22 的 `long_sb` 抬升
+    （2.25→3.52）来自 §23.1「省一次 TMA」而在 mma 循环里**逐 chunk 直读 global `E^tot`**；用一条
+    512 B 的 `cp.async.bulk.tensor.3d`（`-DB1T_ETMA`）搬回 smem 后 `long_sb` 降 0.6–0.8、`wait`
+    降 0.16–0.36、tensor 逼近 FLA，**算术逐位不变**，kernel-only 0.77–0.98×、**全表最好 xFLA=1.63**
+    （198.8µs vs FLA 119.8，B8T2048H8 BT=64 **NS=1**）。**同时排除两条路线**：(a)「加深 pipeline」
+    作废（`E^tot` 修好后最优回到 `NS=1`，2 CTA/SM 比深 stage 值）；(b)「占用率」作废（FLA achieved
+    6.15% 比 ours 7.7% 还低却快 1.7×）。**残差 1.63× 已定位到每 warp 发射效率**（`wait` 1.24 vs
+    FLA 0.96、`short_sb` 0.90 vs 0.50）——手写 mbarrier 最小实现的结构上限。**下一步工程化＝要么换
+    CUTLASS `PipelineTmaAsync`（把 producer/consumer 与 `cp.async.bulk` 完成延迟交给成熟实现），
+    要么直接接受 Triton 版**（§14/§17 已到 1.0×/0.85×）；不再在 stage 深度/占用率/ILP/padding 上找。
   - **P7-20（`docs/07` §23）已兑现 P7-19 留下的「TMA + warp-specialization」**：专职 producer warp 发
     `cp.async.bulk.tensor`（128 B swizzle）、per-stage `mbarrier` 握手、无 `__syncthreads`，正确性
     **逐位保持**，achieved 占用 6.32→7.75%、tensor 8.85→10.73%、`short_sb`/`barrier` 降，`BT=64` 只快

@@ -2096,6 +2096,11 @@ TMA 路径把 `[BT,128]` 拆成 `[BT,64]×2` 的 swizzle atom，**不再需要 `
 - **可复用的副产品**：`sw_off` / `sw_read` / `ldsm_sw_*` 是一套经过验证（min 用例 mismatch=0、整核逐位）
   的 **128 B swizzle + ldmatrix 地址计算**，可直接搬去做目标卡上任何 K2 形状 kernel 的 TMA 输入路径。
 
+> **后续（P7-21，§24）**：本节的两条下一步里，第一条「加深 pipeline」已被数据证伪——`long_sb` 的一块
+> 其实来自 compute warp **逐 chunk 直读 global `E^tot`**（§23.1 省掉的那次 TMA）；把它用一条 512 B 的
+> TMA 搬回 smem 后，最优配置反而回到 **`NS=1`（2 CTA/SM）**，`long_sb` 降 0.6–0.8，全表最好
+> `xFLA=1.63`。见 §24。
+
 **本节踩坑**（都只有真写 TMA/mbarrier 才暴露）：
 
 1. **`mbarrier.arrive` 的到达数必须严格等于 init 的 count**。第一版让**每个 consumer warp 的全部 32
@@ -2113,3 +2118,127 @@ TMA 路径把 `[BT,128]` 拆成 `[BT,64]×2` 的 swizzle atom，**不再需要 `
 4. **别把 dV 的 offset 漏掉 `warp*BW`**：P7-19 的 reg 内核读 `dV[r0][warp*BW+cc]`，改写时漏了
    `warp*BW` 会让 warp 1–3 全读 warp 0 的列——指纹：**跨整个 V 维均匀 ~30× 抬高的误差**（不是局部错位）。
 5. `nvcc` 在 `ncu` 下会挂起，必须**预编译 + `--no-build`**（同 §18/§19）。
+
+## 24. 把 TMA B1 残差的第一块钉死：per-chunk 的 `E^tot` 必须进流水（P7-21）
+
+§23.6 把 TMA + warp-specialization 之后的残差重定位到「`long_sb`（TMA/mbarrier 完成延迟）
++ 浅 pipeline + swizzle 读的 bank-conflict」，并给出两条下一步：**加深 pipeline** 或换
+**CUTLASS `PipelineTmaAsync`**。本轮先做两件更便宜、可证伪的事：(A) 用现有数据把「加深 pipeline」
+这条排除掉；(B) 找出 `long_sb` 里**具体是哪一次 global 访问**——因为 §23 相对 §22 的 K2 形状把
+`long_sb` 从 2.25 抬到 3.52，而**同一批算术在 reg 内核里只有 2.25**，说明 TMA 版引入了一个新的
+关键路径 global 读。回读代码，`b1_tma_probe.cu` 在 mma 循环里**逐 chunk 读 `E^tot`**：
+
+```cpp
+// b1_tma_probe.cu（§23 版，op2/op3 循环内）
+float e0 = etot[((n*NT + c)*H + h)*KD + m*16 + g];
+float e1 = etot[((n*NT + c)*H + h)*KD + m*16 + g + 8];
+```
+
+而 reg 内核（P7-19）是把它 **`cp.async` 预取进 smem** 的（`b1_reg_probe.cu:150`）。§23.1 为了
+「省一次 TMA 与 512 B stage 分量」改成了 compute warp 直读 global——代价是**每个 chunk 的
+`S *= e` 都卡在一个冷的 global 标量读后面**（$E^{tot}$ 是 `[B,NT,H,KD]`，B8T2048H8 下 67 MB，
+每 chunk 新地址、L2 不命中），正是 `long_sb`。
+
+### 24.1 受控实验：把 `E^tot` 搬回 TMA 流水（`B1T_ETMA`）
+
+新增一个编译开关 `-DB1T_ETMA`：给 `Stage` 加 `float e[KD]`（512 B），用一张 **3D 张量图**
+（`dims={KD,NT*H,B}`、`stride={4,KD*4,NT*H*KD*4}`、`box={KD,1,1}`、`SWIZZLE_NONE`）**每 chunk
+多发一条 `cp.async.bulk.tensor.3d`**，`arrive.expect_tx` 的字节数 `+KD*4`；compute warp 从
+`st->e[...]` 读。**算术一字未动**——所以 §24.2 Part A 里 `tmae` 与基线 TMA **逐位相同**。
+（`harness/b1_tma_probe.cu`、`harness/check_bwd_b1_tma.py`、`harness/ncu_b1_tma_driver.py
+--which etma`、`harness/probe_b1_tma_ncu.sh`。）
+
+### 24.2 Part A：正确性——`E^tot` 走 TMA 不改变任何数值
+
+`harness/check_bwd_b1_tma.out.txt`，6 组 case（B1T512H4 / B2T1024H8 / B1T250H3，BT=32/64）：
+
+| 指标 | tmae vs **tma** | tmae vs FLA |
+|---|---|---|
+| `dh` / `dv2` / `dh0` max_abs | **0 / 0 / 0**（全部 case） | 4.88e-4 / 4.88e-4 / 2.12e-4（=bf16 底噪，同 §23） |
+
+即只换「`e` 从哪个内存读」不影响结果（与 §23.2 同样的「只换搬运方式」论证，含非整除 T=250）。
+
+### 24.3 Part B：kernel-only 计时（CUPTI 均值，µs/call）
+
+| shape | BT | ns | tma | **tmae** | xTMA | FLA `dhu` | tmae xFLA |
+|---|---|---|---|---|---|---|---|
+| B1 T512 H4 | 16 | 1 | 123.0 | **106.5** | **0.87** | n/a | — |
+| B1 T512 H4 | 16 | 2 | 111.1 | **103.0** | 0.93 | n/a | — |
+| B1 T512 H4 | 32 | 1 | 66.4 | 65.5 | 0.99 | n/a | — |
+| B1 T512 H4 | 64 | 2 | 44.9 | 43.4 | 0.97 | 12.9 | 3.36 |
+| B2 T1024 H8 | 16 | 1 | 280.9 | **234.1** | **0.83** | n/a | — |
+| B2 T1024 H8 | 32 | 2 | 145.7 | **133.1** | **0.91** | n/a | — |
+| B2 T1024 H8 | 64 | 2 | 87.8 | 84.3 | 0.96 | 22.7 | 3.71 |
+| B8 T2048 H8 | 16 | 1 | 635.7 | **492.4** | **0.77** | n/a | — |
+| B8 T2048 H8 | 32 | 1 | 325.7 | **290.3** | **0.89** | n/a | — |
+| B8 T2048 H8 | 64 | 1 | 218.5 | **195.0** | **0.89** | 119.4 | **1.63** |
+| B8 T2048 H8 | 64 | 2 | 205.6 | 205.5 | 1.00 | 119.4 | 1.72 |
+
+三点：
+
+1. **收益一致为正、且在 `NS=1` 与 BT=16/32 上最大**（0.77–0.91×）；BT=64 `NS=2` 打平（1.00×），
+   因为 stage 变大后里面已无余量、且下一条要讲的 bank-conflict 回升。
+2. **产生本轮全表最好的一行**：`B8T2048H8 BT=64 NS=1` 由 218.5→**195.0 µs**，`xFLA` 从 §23 的
+   1.72（该行 NS2）收到 **1.63**——把「TMA + warp-spec」的收益从 ~15–20% 再往前推。
+3. **`NS=1` 之所以赢**：`E^tot` 一进 smem，关键路径上再无暴露的 global 读，于是「浅 stage
+   （103 KB，**2 CTA/SM**）」比「深 stage（169 KB，1 CTA/SM）」更好——见 §24.4。
+
+### 24.4 Part D：`ncu` 复核——`long_sb` 确实被削掉，占用率被排除
+
+`harness/probe_b1_tma_ncu.out.txt`（空闲卡，同场配对）：
+
+| 配置 | long_sb | short_sb | wait | tensor% | bank-conflict | theo/ach occ | regs | Duration µs |
+|---|---|---|---|---|---|---|---|---|
+| reg64 BT64 NS1 B8T2048H8 | 2.22 | 1.62 | 1.50 | 8.83 | 0 | 12.50/6.25 | 128 | 244.0 |
+| **tma BT64 NS1 B8T2048H8** | **4.35** | 0.85 | 1.60 | 9.68 | 0 | **15.62**/7.75 | 166 | 224.4 |
+| **tmae BT64 NS1 B8T2048H8** | **3.86** | 0.90 | **1.24** | **10.83** | 0 | 15.62/7.75 | 167 | **198.8** |
+| tma BT64 NS2 B8T2048H8 | 3.46 | 0.91 | 1.42 | 10.75 | 261050 | 7.81/7.74 | 195 | 208.1 |
+| **tmae BT64 NS2 B8T2048H8** | **2.69** | 1.36 | 1.28 | **11.15** | 458011 | 7.81/7.68 | 196 | 207.8 |
+| tma BT64 NS2 T512H4 | 2.66 | 0.89 | 1.43 | 11.48 | 4829 | 7.81/7.39 | 195 | 49.0 |
+| **tmae BT64 NS2 T512H4** | **2.05** | 1.18 | 1.28 | **12.15** | 9618 | 7.81/7.35 | 196 | **45.3** |
+| FLA `dhu` B8T2048H8 | 2.07 | 0.50 | **0.96** | 12.21 | 1778 | 6.25/6.15 | 146 | 119.8 |
+
+四件事：
+
+1. **`E^tot` 进 TMA 把 `long_sb` 削掉 0.6–0.8**：`NS=1` 4.35→**3.86**、`NS=2` 3.46→**2.69**、
+   T512H4 2.66→**2.05**（已很接近 FLA 的 2.07）。`wait` 也随之下移（1.60→1.24、1.42→1.28）——
+   这直接**证明了 §23 的 `long_sb` 里有相当一块就是那个 per-chunk `e` 全局读**，而非纯 TMA 延迟。
+2. **mma 密度继续上台阶**：tensor `9.68→10.83%`（NS1）、`10.75→11.15%`（NS2）、`11.48→12.15%`
+   （T512），最接近 FLA 的 12.21%。这与「`e` 从关键路径移开→mma 更早发射」自洽。
+3. **占用率不是残差**（本轮最重要的排除）：FLA `dhu` 的 achieved 占用率 **6.15%**、理论 6.25%，
+   **比 ours（7.7% / 7.81–15.62%）还低**，却快 **1.7×**。同样地，`NS=1` 让 ours 摸到 **2 CTA/SM**
+   （theo 15.62%）却没换来成比例的加速（grid=128 CTA < 132 SM，多数 SM 只有 1 CTA）。**故「加
+   占用率/加 warp」可正式排除**——残差是**每 warp 的发射/指令效率**（FLA `wait` 0.96、`short_sb`
+   0.50，ours 即使最优也 1.24 / 0.90）。
+4. **代价是 bank-conflict 回升**（NS2: 261k→458k）：因为 stage 多了一个 `float e[128]`（512 B）
+   使 `sdh/sdu` 的 smem 基址平移、且 `NS=1` 的 2 CTA/SM 让同一 SM 上两 CTA 争用——仍只占
+   shared-load wavefront 个位数百分比（§23.5 量级），不是主因。
+
+### 24.5 结论与下一步
+
+- **钉死并修掉一块残差**：TMA 版把 per-chunk `E^tot` 从流水里拿掉，是 §23 相对 §22 的 `long_sb`
+  抬升（2.25→3.52）的一个**具体来源**；把它用一条 512 B 的 TMA 搬回 smem 后，`long_sb` 降
+  0.6–0.8、`wait` 降 0.16–0.36、tensor 密度逼近 FLA，**算术逐位不变**，kernel-only 快
+  **0.77–0.98×**，并把全表最好一行推到 **`xFLA = 1.63`**（B8T2048H8 BT=64 **NS=1**，195 µs）。
+- **「加深 pipeline」这条被数据排除**：§23 的 NS sweep 本就平坦（NS1≈NS2≈NS3），本轮 `ncu` 又证
+  占用率（含 2 CTA/SM）不是杠杆。**在 `E^tot` 修好之后，最优配置反而回到 `NS=1`**——浅 stage 带
+  来的 **2 CTA/SM** 比深 pipeline 更值。故 §23.6 的两条下一步里，「更多 stage」作废。
+- **剩下的 1.63× 残差**：落在 `wait`（1.24 vs FLA 0.96）、`short_sb`（0.90 vs 0.50）与 `long_sb`
+  （3.86 vs 2.07 尚余的 TMA/barrier 完成延迟）——即**指令级发射效率**，与占用率、stage 深度、
+  swizzle bank-conflict 都无关。这正是 §14/§17 在 Triton 上一路走到的位置：**手写 mbarrier +
+  `ldmatrix` 的最小实现已经逼近其结构上限，再往前要么换 CUTLASS `PipelineTmaAsync`（把
+  producer/consumer 与 `cp.async.bulk` 的完成延迟交给成熟实现），要么直接接受 Triton 版**。
+- **可复用副产品**：`make_map_e` / `tma3d`（3D、`SWIZZLE_NONE`、box `{KD,1,1}`）是「把一个
+  per-chunk 的 `[128]` fp32 向量塞进 TMA 流水」的最小样例，可搬到任何 K2 形状 kernel 的门控/缩放
+  因子载入，**替掉关键路径上的 global 标量读**。
+
+**本节踩坑**：
+
+1. **3D TMA 张量图的 `globalStrides` 从 dim1 起算，不是 dim0**。第一版写 `gstr={4, KD*4}`
+   （把 dim0 的元素大小也放进去了），`cuTensorMapEncodeTiled` 直接返回错误——**静默** `fprintf`
+   后 kernel 用未初始化的图启动（数值仍可能「看起来对」），且**污染后续 CUDA 状态**（同一进程里
+   紧接着的 reg 内核 `cudaFuncSetAttribute` 竟报 `rc=-3`）。正确写法 `gstr[0]=KD*4`（dim1
+   stride）、`gstr[1]=NT*H*KD*4`（dim2 stride）。修复后错误消失、reg 也恢复。
+2. `box` 含 fp32 的 `[128]` 一行 = 512 B > 128 B，故**不能用 128 B swizzle**（那要求 box 内维
+   ≤128 B），必须 `CU_TENSOR_MAP_SWIZZLE_NONE`；好在 `e` 是逐标量读（每 lane 同一地址），
+   本就不需要 `ldmatrix`。

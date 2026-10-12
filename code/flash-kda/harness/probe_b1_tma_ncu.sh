@@ -41,6 +41,8 @@ tag() { sed -e '/^==PROF==/d' -e '/^==WARNING==/d'; }
 # prebuild all extension .so once, outside ncu
 python "$DRIVER" --which tma   --B 1 --T 512  --H 4 --bt 64 --ns 2 >/dev/null 2>&1
 python "$DRIVER" --which tma   --B 8 --T 2048 --H 8 --bt 64 --ns 2 >/dev/null 2>&1
+python "$DRIVER" --which etma  --B 1 --T 512  --H 4 --bt 64 --ns 2 >/dev/null 2>&1
+python "$DRIVER" --which etma  --B 8 --T 2048 --H 8 --bt 64 --ns 2 >/dev/null 2>&1
 python "$DRIVER" --which reg64 --B 1 --T 512  --H 4 --bt 64 --ns 1 >/dev/null 2>&1
 python "$DRIVER" --which reg64 --B 8 --T 2048 --H 8 --bt 64 --ns 1 >/dev/null 2>&1
 
@@ -61,8 +63,12 @@ echo "ncu: $(ncu --version | grep -i 'version' | head -1)"
 
 run "REG64 B1 BT=64 NS=1 (T512 H4)"    reg64 1 512  4 64 1 b1_reg_cuda
 run "TMA   B1 BT=64 NS=2 (T512 H4)"    tma   1 512  4 64 2 b1_tma_kernel
+run "TMAE  B1 BT=64 NS=2 (T512 H4)"    etma  1 512  4 64 2 b1_tma_kernel
 run "REG64 B1 BT=64 NS=1 (B8 T2048H8)" reg64 8 2048 8 64 1 b1_reg_cuda
+run "TMA   B1 BT=64 NS=1 (B8 T2048H8)" tma   8 2048 8 64 1 b1_tma_kernel
+run "TMAE  B1 BT=64 NS=1 (B8 T2048H8)" etma  8 2048 8 64 1 b1_tma_kernel
 run "TMA   B1 BT=64 NS=2 (B8 T2048H8)" tma   8 2048 8 64 2 b1_tma_kernel
+run "TMAE  B1 BT=64 NS=2 (B8 T2048H8)" etma  8 2048 8 64 2 b1_tma_kernel
 run "FLA dhu BT=64 (B8 T2048H8)"       fla   8 2048 8 64 1 bwd_kernel_dhu
 
 echo ""

@@ -69,6 +69,19 @@ DEV void tma5d(const CUtensorMap* m, void* sm, int c0, int c1, int c2, int c3, i
           "r"(saddr(bar))
         : "memory");
 }
+#ifdef B1T_ETMA
+// P7-21: stage the per-chunk gate factor E^tot = 2^{g_cum[last]} ([128] fp32) via TMA
+// instead of reading it from global *inside* the mma loop.  The reg kernel already
+// prefetched it (`b1_reg_probe.cu:150`); §23.1 dropped it from the TMA stage, which
+// moved the whole chunk's `S *= e` behind a cold global load on the critical path.
+DEV void tma3d(const CUtensorMap* m, void* sm, int c0, int c1, int c2, uint64_t* bar) {
+    asm volatile(
+        "cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes "
+        "[%0], [%1, {%2,%3,%4}], [%5];\n"
+        ::"r"(saddr(sm)), "l"(m), "r"(c0), "r"(c1), "r"(c2), "r"(saddr(bar))
+        : "memory");
+}
+#endif
 
 // ---- swizzle (Swizzle<3,4,3>, 128 B) on a [rows][64] bf16 tile ------------------
 DEV uint32_t sw_off(int row, int col) {   // col in [0,64)
@@ -144,6 +157,9 @@ struct alignas(1024) Stage {
     alignas(1024) bf16 w[2][BT][64];
     alignas(1024) bf16 dO[BT][64];
     alignas(1024) bf16 dV[BT][64];
+#ifdef B1T_ETMA
+    alignas(1024) float e[KD];
+#endif
 };
 template <int BT, int NSTAGE>
 struct alignas(1024) Shared {
@@ -162,6 +178,9 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
               const __grid_constant__ CUtensorMap wmap,
               const __grid_constant__ CUtensorMap dOmap,
               const __grid_constant__ CUtensorMap dVmap,
+#ifdef B1T_ETMA
+              const __grid_constant__ CUtensorMap emap,
+#endif
               const float* __restrict__ etot,
               bf16* __restrict__ dh_g, float* __restrict__ dh0_g, bf16* __restrict__ dv2_g,
               int T, int NT, int H, float scale) {
@@ -191,7 +210,11 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                 const int s = i % NSTAGE;
                 const int t0 = c * BT;
                 if (i >= NSTAGE) mbar_wait(&sh->empty[s], ((i / NSTAGE) + 1) & 1);
+#ifdef B1T_ETMA
+                mbar_arrive_tx(&sh->full[s], BYTES + (uint32_t)(KD * 4));
+#else
                 mbar_arrive_tx(&sh->full[s], BYTES);
+#endif
                 Stage<BT>* st = &sh->st[s];
                 uint64_t* bar = &sh->full[s];
                 // box {64,1,1,BT,1}: dims {64,2,H,T,B} over [B,T,H,D]
@@ -204,6 +227,10 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                 int vhalf = v0 >> 6;   // BV == 64
                 tma5d(&dOmap, st->dO[0], 0, vhalf, h, t0, n, bar);
                 tma5d(&dVmap, st->dV[0], 0, vhalf, h, t0, n, bar);
+#ifdef B1T_ETMA
+                // E^tot tile [B,NT,H,KD] fp32: dims {KD, NT*H, B}, box {KD,1,1}
+                tma3d(&emap, st->e, 0, c * H + h, n, bar);
+#endif
             }
         }
     } else {
@@ -308,8 +335,13 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
             // ---- op2/op3: S = S*e + scale*(q^T @ do) - (w^T @ du) ----
             #pragma unroll
             for (int m = 0; m < MTK; ++m) {
+#ifdef B1T_ETMA
+                float e0 = st->e[m * 16 + g];
+                float e1 = st->e[m * 16 + g + 8];
+#else
                 float e0 = etot[((int64_t)(n * NT + c) * H + h) * KD + m * 16 + g];
                 float e1 = etot[((int64_t)(n * NT + c) * H + h) * KD + m * 16 + g + 8];
+#endif
                 #pragma unroll
                 for (int kk = 0; kk < KT2; ++kk) {
                     uint32_t aq[4], aw[4];
@@ -377,6 +409,22 @@ static void make_map(CUtensorMap* m, void* ptr, int H, int T, int B, int BT) {
         fprintf(stderr, "cuTensorMapEncodeTiled failed\n");
 }
 
+#ifdef B1T_ETMA
+// E^tot is [B, NT, H, KD] fp32 (contiguous).  dims {KD, NT*H, B}, box {KD,1,1}, no swizzle.
+static void make_map_e(CUtensorMap* m, void* ptr, int H, int NT, int B) {
+    cuuint64_t gdim[3] = {(cuuint64_t)KD, (cuuint64_t)NT * H, (cuuint64_t)B};
+    cuuint64_t gstr[2] = {(cuuint64_t)KD * 4, (cuuint64_t)NT * H * KD * 4};
+    cuuint32_t box[3] = {(cuuint32_t)KD, 1, 1};
+    cuuint32_t estr[3] = {1, 1, 1};
+    if (cuTensorMapEncodeTiled(m, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 3, ptr, gdim, gstr, box,
+                               estr, CU_TENSOR_MAP_INTERLEAVE_NONE,
+                               CU_TENSOR_MAP_SWIZZLE_NONE,
+                               CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                               CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS)
+        fprintf(stderr, "cuTensorMapEncodeTiled(e) failed\n");
+}
+#endif
+
 // ------------------------------------------------------------------------- launch
 template <int BT, int NSTAGE>
 static int launch_impl(void* q, void* k, void* w, void* do_, void* dv, void* etot, void* dh,
@@ -388,6 +436,10 @@ static int launch_impl(void* q, void* k, void* w, void* do_, void* dv, void* eto
     make_map(&wm, w, H, T, B, BT);
     make_map(&dom, do_, H, T, B, BT);
     make_map(&dvm, dv, H, T, B, BT);
+#ifdef B1T_ETMA
+    CUtensorMap em;
+    make_map_e(&em, etot, H, NT, B);
+#endif
     dim3 grid(VD / BV, B * H);
     int smem = (int)sizeof(Shared<BT, NSTAGE>);
     static int configured = 0;
@@ -398,7 +450,11 @@ static int launch_impl(void* q, void* k, void* w, void* do_, void* dv, void* eto
         configured = 1;
     }
     b1_tma_kernel<BT, NSTAGE><<<grid, (NW + 1) * 32, smem, s>>>(
-        qm, km, wm, dom, dvm, (const float*)etot, (bf16*)dh, (float*)dh0, (bf16*)dv2, T, NT, H,
+        qm, km, wm, dom, dvm,
+#ifdef B1T_ETMA
+        em,
+#endif
+        (const float*)etot, (bf16*)dh, (float*)dh0, (bf16*)dv2, T, NT, H,
         scale);
     return (int)cudaGetLastError();
 }

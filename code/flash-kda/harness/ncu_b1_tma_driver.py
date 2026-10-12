@@ -25,6 +25,7 @@ sys.path.insert(0, HARNESS)
 from check_bwd_b1_reg import build, load, run, REG_SO, BASE_SO            # noqa: E402
 
 TMA_SO = "/tmp/b1_tma.so"
+TMAE_SO = "/tmp/b1_tma_e.so"
 REG64_SO = "/tmp/b1_reg64.so"
 
 
@@ -41,7 +42,7 @@ def synth(B, T, H, device="cuda"):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--which", choices=["tma", "reg64", "reg", "fla"], default="tma")
+    ap.add_argument("--which", choices=["tma", "etma", "reg64", "reg", "fla"], default="tma")
     ap.add_argument("--B", type=int, default=8)
     ap.add_argument("--T", type=int, default=2048)
     ap.add_argument("--H", type=int, default=8)
@@ -61,11 +62,18 @@ def main():
             subprocess.run(["nvcc", "-std=c++17", "-O3", "-arch=sm_90a", "-Xcompiler", "-fPIC",
                             "-shared", HARNESS + "/b1_tma_probe.cu", "-o", TMA_SO, "-lcuda"],
                            check=True)
+        elif args.which == "etma":
+            subprocess.run(["nvcc", "-std=c++17", "-O3", "-arch=sm_90a", "-Xcompiler", "-fPIC",
+                            "-shared", "-DB1T_ETMA", HARNESS + "/b1_tma_probe.cu", "-o", TMAE_SO,
+                            "-lcuda"], check=True)
         elif args.which == "reg64":
             build("b1_reg_probe.cu", REG64_SO, extra=["-DB1R_BV=64", "-DB1R_NW=4"])
 
     if args.which == "tma":
         lib = load(TMA_SO, "b1t_launch", "b1t_smem_bytes")
+        call = lambda: run(lib, fi, do, dv, scale, args.bt, args.ns, "b1t_launch")
+    elif args.which == "etma":
+        lib = load(TMAE_SO, "b1t_launch", "b1t_smem_bytes")
         call = lambda: run(lib, fi, do, dv, scale, args.bt, args.ns, "b1t_launch")
     elif args.which == "reg64":
         lib = load(REG64_SO, "b1r_launch", "b1r_smem_bytes")
