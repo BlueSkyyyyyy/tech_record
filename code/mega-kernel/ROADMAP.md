@@ -32,7 +32,8 @@
 ### P0 侦察与框架
 
 - [x] **P0-1** 通读 MPK 论文快照，产出章节地图与关键图/表清单（进 `docs/00` §6「MPK 论文导航」）。
-- [ ] **P0-2** 收集案例：`~/github/DeepGEMM`（mega_moe/mega_gate/mega_mhc）、`~/github/hpc-ops`、Kimi K3 报告相关段落。
+- [x] **P0-2** 收集案例：`~/github/DeepGEMM`（mega_moe/mega_gate/mega_mhc）、`~/github/hpc-ops`、Kimi K3 报告相关段落。
+      产出 `docs/02-production-cases.md`（案例源码坐标清单，含 commit 与核对过的行号）。
 - [ ] **P0-3** 环境探测：`kernel_lab` 能否跑 persistent kernel / CUDA Graph / PDL 小实验（H100 支持 PDL）。
 
 ### P1 动机与背景（`docs/00-megakernel-overview.md`）
@@ -94,8 +95,11 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：脚手架就绪；**P0-1 完成**——MPK 论文（arXiv 2512.22219v2，2717 行）章节地图、关键图/表/算法清单已写入 `docs/00` §6。
-- **下一步：P0-2** 收集案例源码坐标（`~/github/DeepGEMM` mega_moe/mega_gate/mega_mhc 的文件与行号、`~/github/hpc-ops` Megakernel roadmap、`~/github/ai-infra-book/references/text/kimi-k3.txt` 的 fused mega-kernels 段落），产出案例清单（暂存进 `docs/02` 草稿或 ROADMAP 记录），为 P3 铺垫。
+- 当前进度：脚手架就绪；**P0-1 完成**（MPK 论文章节地图见 `docs/00` §6）；**P0-2 完成**——案例源码坐标清单
+  写入 `docs/02-production-cases.md`：DeepGEMM mega 家族（`057ca59`）的 api/heuristics/impl/scheduler/layout
+  文件与行号、hpc-ops Megakernel roadmap（`ab1a402` README 行 230）、Kimi K3 §4.2.4（快照行 1069–1081）。
+- **下一步：P0-3** 环境探测：在 `kernel_lab`（H100）确认能否编译/运行 persistent kernel、CUDA Graph、PDL
+  小实验（`code/mega-kernel/scripts/lab.sh exec "..."`），为 P4/P5 实验铺垫；跑不了的标注「仅资料分析」。
 
 ## 阻塞
 
