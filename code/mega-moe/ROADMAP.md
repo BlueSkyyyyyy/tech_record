@@ -322,6 +322,32 @@
       ⑥ 性能大收缩维 `r=4096,d=1024` 峰值 **581 TFLOPS**、小 `r=512,d=128` 仅 ~185 TFLOPS。
       配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。
 
+### P12 增量（opt-in，稀疏注意力 indexer 的稀疏 MQA logits）
+
+- [x] **P12-1** **稀疏 MQA logits**（`fp8_fp4_sparse_mqa_logits` / `fp8_fp4_paged_sparse_mqa_logits`；
+      indexer 第二级打分：在 `sparse_kv_block_indices` 选中的 KV 块内算细粒度 logits 并**压缩**输出
+      `[T, num_max_sparse_blocks*SB]`）。**SM100 专属，仅分析**（host `attention.hpp:313/380/414`
+      断言 `arch_major==10`）；语义可架构无关验证。
+      → `docs/22-sparse-mqa-logits.md`（真实行号核对）：四个入口 `attention.hpp:303-442`
+      （workspace `:284-301`、契约 `:380-433`）；layout `layout/sparse_mqa_logits.cuh`
+      （`MetadataHeader :23-29`、`KVSplitHeader :31-61` 的两个高位标志、`KVBlockInfo :63-72`
+      16+16 位打包槽、`ScheduleEntry :74-84`、`WorkspaceState :141-146` 三计数各占 L2 线、
+      `kBlockQ=2 :17`）；metadata 尺寸公式 `sm100_sparse_mqa_logits.hpp:20-36` + `SPLIT_KV`
+      fp8=512/fp4=640（`:15-18`）；metadata kernel `scheduler/sm100_sparse_mqa_logits_metadata.cuh`：
+      有效块前缀 `:222-229`、两 token 归并去重放 packed_slots `:273-326`、物理块三态映射
+      `:377-386`（对齐 `logical*SB` / 非对齐 `logical`（已含 `SB*blk+ks%SB`）/ 分页查 block_table）、
+      末 CTA 建调度（`:443-472`）——连续版均分+splice `:37-73`、分页版 `:124-161`、
+      `balance_wave_entries` 直方图排序+旋转 `:75-122`；主 kernel `impls/sm100_sparse_mqa_logits.cuh`：
+      五类 warp、`UMMA_M=128/UMMA_N=BLOCK_Q*H/UMMA_K=32|64/SPLIT_KV=WG*128` `:160-166`、
+      contiguous TMA 快路（仅 warp0 elect-one 发 TMA，其余 `arrive_count_pred` 释放）`:436-457`、
+      越界尾块 `cp_async_*_zfill` `:461-505`、math warpgroup `relu×w` bf16x2 归约 `:600-625`、
+      压缩列映射 `:627-633`。H100 实测 `harness/exp_sparse_mqa_logits.{py,sh,out.txt}`：
+      ① metadata 尺寸公式复刻（16/16/8/16/384/8B，例 T=4096/NB=64/SB=8/fp8 连续 2,230,288 B）；
+      ② 用真实 SM90 dense kernel 取全量 → 压缩输出 `gather==L` **逐位 True**、vs fp32 参考
+      relerr 3.5–4.1e-2（=dense 量化噪声层）；③ 两 token 归并去重省 ~12.5%、计算压缩比 28×/7×/14×；
+      ④ unaligned ks 块起点 `b*SB+ks%SB` 跨原块边界；⑤ 四个 host 入口在 sm90 全部被拒。
+      配套博客 `content/posts/mega-moe-22-sparse-mqa-logits`（索引页新增第 22 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -346,8 +372,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P10 全部完成；P11-1 完成。**
-  本轮 P11-1：新建 `docs/21-fp8-einsum-projection.md`（+`harness/exp_fp8_einsum.{py,sh,out.txt}`）
+- 当前进度：**P0~P11 全部完成；P12-1 完成。**
+  本轮 P12-1：新建 `docs/22-sparse-mqa-logits.md`（+`harness/exp_sparse_mqa_logits.{py,sh,out.txt}`）
+  ——补上稀疏注意力 indexer 的**第二级打分**：`fp8_fp4_sparse_mqa_logits` /
+  `fp8_fp4_paged_sparse_mqa_logits`（在 `sparse_kv_block_indices` 选中的 KV 块内算细粒度 logits，
+  压缩输出 `[T, num_max_sparse_blocks*SB]`）。**SM100 专属，仅分析**（host `attention.hpp:313/380/414`
+  断言 `arch_major==10`）：metadata 布局（`kBlockQ=2`、`KVBlockInfo` 16+16 位打包槽、`KVSplitHeader`
+  连续/尾块两标志）、metadata kernel（有效块前缀、两 token 归并去重、物理块三态映射、末 CTA 建
+  负载均衡调度）、主 kernel（五类 warp、block-scaled UMMA、contiguous TMA 快路 vs `cp.async`
+  尾裁剪、压缩列映射）。H100 实测（架构无关语义）：metadata 尺寸公式复刻、用真实 SM90 dense kernel
+  取全量 → 压缩输出 **`gather==L` 逐位 True**、vs fp32 参考 3.5–4.1e-2（=dense 量化层）、
+  去重 ~12.5%、压缩比 28×/7×/14×、unaligned ks 跨块边界、四个 host 入口在 sm90 全部被拒。
+  配套博客 `content/posts/mega-moe-22-sparse-mqa-logits`（索引页新增第 22 篇）。Hugo 构建 0 ERROR。
+  上一轮 P11-1：新建 `docs/21-fp8-einsum-projection.md`（+`harness/exp_fp8_einsum.{py,sh,out.txt}`）
   ——补上 BF16 MLA 投影（P8-2）的 **FP8 block-scale 版** `fp8_einsum('bhr,hdr->bhd')`
   （SM90 `sm90_fp8_bmm`，**H100 可跑**）。host `(b,h)` permute 成 `(h,b,d,r)`（`h`=batch、
   `b`=m），复用前向 `1d2d` 骨架的 `GemmType::Batched`（A per-token 1D SF + B per-128×128
@@ -356,21 +393,10 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-  上一轮 P10-1：新建 `docs/20-bf16-mega-moe.md`（+`harness/exp_bf16_mega_moe.{py,sh,out.txt}`、
-  `src/bf16_mega_moe_epilogue.cu`）——补上 Mega MoE 的**第二个主 kernel** `bf16_mega_moe`
-  （`sm100_bf16_mega_moe.cuh`）。同一套骨架（dispatch→L1→SwiGLU→L2→combine、ring、重叠）
-  换 `MmaKind::BF16`，**去掉整条 block-scale（SF/UTCCP/UE8M0）通路**：`a/b/d=bfloat16`、
-  `block_k=64`（FP8=128）、唯一 UMMA `SM100_MMA_F16BF16_2x1SM_SS`、L1 epilogue 直接产出
-  bf16（gate/up 先 round bf16 再 silu，`kFastMath`=__expf+rcp.approx）、L2 bf16 直写远端
-  combine；combine 段与 FP8 版逐行复用。host 侧 `get_symm_buffer_size(..., "bf16xbf16")`
-  `with_sf=false`（切片 `x_sf=None`）。**SM100 专属，仅分析**（`mega_moe.hpp:367`；kernel:68）。
-  H100 实测：block_m 13 组 BF16/FP8 全一致、buffer 1.265×、权重重排 0.0、L1 SwiGLU
-  「bf16 in→fp32 silu→bf16 out」rel 3.89e-3（输出 1 ulp）、L2 cast vs RNE 不符 0。
-  配套博客 `content/posts/mega-moe-20-bf16-mega-moe`（索引页新增第 20 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P11 已完成。后续若继续（均为增量、非承诺）：
-  ① **sparse attention 系列**：`fp8_fp4_mqa_logits` 的 SM100 MXFP4/MXFP8、`get_mqa_logits_metadata`
-  负载均衡调度、`fp8_fp4_sparse_mqa_logits`（top-k 块）、`fp8_fp4_paged_sparse_mqa_logits`
-  （arch10 专属，仅分析；sparse 版还有 SM90 可试的部分吗需查）；
+- **下一步**：P0~P12 已完成。后续若继续（均为增量、非承诺）：
+  ① **sparse attention 系列（P12 已开）**：`fp8_fp4_sparse_mqa_logits` 的元数据/SM100 主 kernel
+  已做；可再精读 `fp8_fp4_mqa_logits` 的 SM100 MXFP4/MXFP8 主 kernel
+  （`sm100_mqa_logits.cuh`）与 `get_mqa_logits_metadata` 的 SM100 负载均衡调度 kernel；
   ② **einsum 家族 FP8 投影（P11 已开）**：`bhr,hdr->bhd` 已做；`bhd,hdr->bhr` / `bhd,bhr->hdr`
   是 arch10 专属（仅分析）。可再补 `fp8_einsum` 的 FP8 输出对（SM100 `Kernel1D1D`）精读；
   ③ **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
