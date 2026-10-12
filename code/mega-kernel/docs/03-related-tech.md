@@ -362,4 +362,142 @@ queue + 原子 ring buffer** 是**两种不同的设备内协调方式**。MPK �
 
 ---
 
-<!-- 后续子项（P4-4 通信-计算 overlap）将补入本文件，见 ROADMAP「当前进度/下一步」。 -->
+## 4. 通信-计算 overlap（DeepEP / FlashMLA 双 kernel，P4-4）
+
+前面三节都是**单设备**视角（一个 kernel 内部/之间）。本节回答多设备场景的核心问题：**「通信-计算
+overlap」这条生产级主流路线，用双 kernel 把 all-to-all / 集合通信藏在计算后面，它到底重叠了什么、
+和 megakernel 差在哪。** 我们选两个**真实、可核对源码行号**的代表：
+
+- **DeepEP**（`~/github/DeepEP`，commit `93eb6eb2`，2026-09-30）——专家并行（EP）all-to-all 的
+  **dispatch / combine** 两个通信 kernel，用**独立通信流 + CUDA event** 与 MoE 计算重叠。
+- **FlashMLA**（`~/github/FlashMLA`，commit `ba89a346`，2026-09-15）——MLA 解码的 **`splitkv_mla`
+  + `combine`** 两个 kernel，用 **PDL** 做设备侧重叠。
+
+> 与 `../mega-moe/docs/07-deepep-dispatch-combine.md` 的分工：该文精读 DeepEP 的 dispatch/combine
+> **算子内部实现**（FP8、ring buffer、SM 分配）；本节只从 **megakernel 范式**看它的**重叠编排方式**
+> 与判据映射，不重复算子细节。
+
+### 4.1 两种重叠编排机制
+
+#### 4.1.1 DeepEP：通信流 + CUDA event（host 协调的双流重叠）
+
+DeepEP 把 dispatch / combine 放到**一条独立的通信流**上，通过 CUDA event 与计算流**部分串接**：
+
+- 调用方以 `async_with_compute_stream=True` 发起通信，**计算流不等待**通信结束；`previous_event`
+  用来告诉通信 kernel「输入何时就绪」（`deep_ep/buffers/ep.py` 的 `dispatch`/`combine`，
+  与 `README.md` 行 261 起的 overlap 示例）。
+- 通信 kernel 在独立流上跑，**专家 GEMM 在计算流上同时跑**；到真正需要通信结果时，调用方显式
+  `event.current_stream_wait()` 等待（`deep_ep/utils/event.py:39-60`）。
+- `EventOverlap` 还提供 `defer_epilogue=True` + `register_hook_after_wait()`（`event.py:66-71`）：
+  把 dispatch/combine 的**收尾（epilogue）推迟到等待点**再执行，等于让通信 kernel 的「主体」尽早
+  让位给计算、把不属于关键路径的收尾压到后面（`README.md` 行 285–289）。
+- 典型调用序列（`README.md` 行 261–280）：`dispatch → 独立计算 → wait(拿到 recv_x/handle) →
+  expert GEMM → combine → 独立计算 → wait`。
+
+关键点：这套 overlap 的**调度权仍在 host**——由 Python/host 侧决定两个流上发什么、在哪里插 event；
+device 不做任何跨 kernel 调度。
+
+#### 4.1.2 FlashMLA：PDL 重叠 splitkv_mla + combine（设备侧触发）
+
+FlashMLA 的分割-KV 解码天然是**两 kernel**：`splitkv_mla` 对每个 KV-split 写部分结果
+（`oaccum` / `softmax_lseaccum`），`combine` 再按 LSE 归并回最终输出。二者用 **PDL** 重叠
+（`docs/20250422-new-kernel-deep-dive.md:60`「We use programmatic dependent launch to overlap
+`splitkv_mla` and `combine` kernels」）：
+
+- **上游放行**：`splitkv_mla` 在提交完本轮 TMA store 后调用
+  `cudaTriggerProgrammaticLaunchCompletion()`，允许下一个 kernel（必须是 combine）提前启动
+  （`csrc/kernels/sm90/decode/dense/splitkv_mla.cuh:1223-1226`；稀疏版
+  `csrc/kernels/sm90/decode/sparse/splitkv_mla.cuh:282-283` 同位置触发）。
+- **下游等待**：`combine` 在**真正读 `oaccum` 之前**调用 `cudaGridDependencySynchronize()`
+  （`csrc/kernels/smxx/decode/combine/combine.cu:59`），其**预取段**
+  （`combine.cu:61-69`，注意注释「We don't use `__ldg` here since it is incompatible with PDL」）
+  可与上游尾部重叠。
+- **两侧都声明 PDL 属性**：`splitkv_mla` 用 `cudaLaunchKernelEx` +
+  `cudaLaunchAttributeProgrammaticStreamSerialization`（`splitkv_mla.cuh:1338-1348`），`combine`
+  同样声明（`combine.cu:207-219`）。
+
+这正好就是本专题 P4-2 **本机亲手跑过**的那套原语（`src/pdl.cu`、`harness/pdl.out.txt`）：FlashMLA
+是把 P4-2 的机制**用在真实 attention 的两 kernel 上**——上游 `splitkv_mla` 是 producer、下游
+`combine` 是 consumer，能省下的重叠量 = `min(上游 tail, 下游 prologue)`。
+
+> 值得注意的是 FlashMLA 的源码里**保留了不用 PDL 的注释**（如 `splitkv_mla.cuh:1339`、
+> `combine.cu` 所在的稀疏路径 `sparse/splitkv_mla.cuh:138-140`、SM100 `head64/kernel.cuh:897`）：
+> 说明 PDL 化这两 kernel 是**逐 kernel、逐架构的工程取舍**，与 P4-2 的结论一致。
+
+### 4.2 它们重叠了什么：隐藏通信/收尾延迟
+
+| 系统 | 重叠的两端 | 机制 | 锚点 |
+|---|---|---|---|
+| DeepEP | all-to-all 通信 kernel ↔ MoE 专家计算 | 通信流 + CUDA event（`async_with_compute_stream`/`previous_event`/deferred epilogue） | `event.py:39-71`、`ep.py` dispatch/combine、`README.md:261-289` |
+| FlashMLA | `splitkv_mla` ↔ `combine` | PDL（trigger / grid-dependency-sync / launch attribute） | `splitkv_mla.cuh:1226,1338-1348`、`combine.cu:59,207-219`、deep-dive `:60` |
+
+两者治的都是**损失一的一个多设备特例**：kernel-per-operator 下通信与计算被迫串行（或至少通信的
+暴露延迟无法被计算填满），通过让**两个 kernel 在时间上并行**把 exposed communication latency 藏掉。
+FlashMLA 的双 kernel 还有第二重收益：`combine` 本来要等 `splitkv_mla` **全部**结束，
+PDL 让它的预取段提前跑，吃掉「归并段前导」。
+
+**量级锚点**（生产报告，非本机复现）：
+
+- FlashMLA 新 kernel 在 H800 上 660 TFlops（compute-bound），并明确把 PDL 列为「other performance
+  improvements」之一（`README.md` 性能段 / deep-dive `:60`）——即 PDL 重叠是这套 660 TFlops 的
+  组成项之一，而非可有可无。
+- MPK 论文把这条路线归为「**在单个 kernel 或单个集合算子粒度**实现重叠」，并给出自己的对照：
+  开启**细粒度** compute–communication overlap 相对「每个集合算子只用**一个**粗粒度 event」的
+  版本，端到端延迟降 **1.1×**（快照 §6.3 行 1600–1613、Figure 13 行 1616）。也就是说 MPK 认为
+  仅在算子粒度做 overlap 还不够细。
+- 本机可核对的机理数字直接用 P4-2：重叠量 = `min(tail, prologue)`（`harness/pdl.out.txt`：
+  prologue=0→1.01×、prologue=tail→1.51×）。FlashMLA 的 `splitkv_mla`/`combine` 就是这条曲线的
+  一个工程实例。
+
+### 4.3 它没有消除什么
+
+**(1) 粒度仍是 kernel / 集合算子，不是 SM task。** DeepEP 的重叠单位是「一个 all-to-all kernel」，
+FlashMLA 是「一个 `splitkv_mla` + 一个 `combine`」。MPK 论文明确指出，这类系统「realize overlap at
+the granularity of individual kernels or collective operators」（快照 §8 行 1910–1911）。它们无法
+表达「第 i 个 AllReduce fragment 只依赖第 i 个 MatMul tile」这种 SM 级依赖（对照 §1.4、§2.3）。
+
+**(2) 调度权仍在 host（DeepEP）或靠逐 kernel PDL 改造（FlashMLA）。** DeepEP 靠 host 在两条流上
+插 event 决定重叠；FlashMLA 靠上游显式 `trigger` + 下游显式 `grid-dependency-sync`，**每对 kernel
+都要按 PDL 重写**（P4-2 §2.3）。两者都没有把调度下沉到 device 内事件驱动（对照 §3.3）。
+
+**(3) 中间张量仍要落 HBM。** DeepEP 的 dispatch/combine 需要对称显存里的收发缓冲；FlashMLA 的
+`splitkv_mla` 把部分输出写 `oaccum` workspace，`combine` 再从 HBM 读回归并（`combine.cu:64-69`）。
+损失三（中间张量 HBM 往返）原样保留——这与 megakernel 把中间结果留在片上/复用不同。
+
+**(4) launch 次数不变。** 双 kernel 就是两次 launch（DeepEP 每个 EP 操作一次、FlashMLA 每次解码
+两次），损失二不受影响；只靠 CUDA Graph/PDL 各自缓解（§1、§2）。
+
+### 4.4 与 MegaKernel 的关系：判据映射
+
+| 判据 | DeepEP 双流 overlap | FlashMLA PDL 双 kernel |
+|---|---|---|
+| C1 单次 launch | 否（dispatch/combine 各一次 launch） | 否（`splitkv_mla` + `combine` 两次 launch） |
+| C2 常驻 | 否 | 否 |
+| C3 多算子融合范围 | 否（不融合，只重叠通信与计算） | 否（两个 kernel 分工，不融合） |
+| C4 设备内协调 | 否（host 插 event 协调两流） | **部分**（PDL 的 trigger/sync 在 device 侧，但仍以 kernel 对为单位） |
+| C5 SM 级调度 | 否（粒度=集合算子） | 否（粒度=kernel 对） |
+
+**结论**：通信-计算 overlap 是 kernel-per-operator 下**隐藏多设备通信延迟的主力手段**，在生产里
+（MoE 的 DeepEP、attention 的 FlashMLA）已被证明能显著提升利用率。但它的**粒度上限是 kernel /
+集合算子**，调度权与依赖表示都停在设备外或 kernel 对上，不满足 C1–C5（FlashMLA 的 PDL 仅部分满足
+C4，且与 §2 的 PDL 是同一条降级项）。MPK 的差异化正在这里：它把**通信与计算统一表示成同一张
+tGraph 里的 task**，用**同一个 in-kernel runtime** 调度，于是 overlap **从全局 task 调度中自然涌现**，
+且对张量并行集合通信与专家并行 all-to-all **一视同仁**（快照 §8 行 1911–1917、§6.5）。换句话说，
+DeepEP/FlashMLA 是「**把 overlap 做进 kernel 编排**」，MPK 是「**取消 kernel 编排，让 overlap 成为
+调度副产品**」。
+
+### 4.5 小结
+
+| 维度 | 通信-计算 overlap（DeepEP / FlashMLA 双 kernel） |
+|---|---|
+| 治哪类损失 | 损失一的多设备特例：暴露的跨设备通信延迟（FlashMLA 另含归并前导） |
+| 粒度 | 单 kernel / 单集合算子（MPK §8 行 1910–1911） |
+| 机制代表 | DeepEP：通信流 + CUDA event；FlashMLA：PDL（上游 trigger + 下游 grid-dependency-sync） |
+| 本机佐证 | P4-2 `src/pdl.cu`：重叠量 = `min(tail, prologue)`（FlashMLA 正是此机制的真实用例） |
+| 不改变 | kernel 级粒度、launch 次数、中间张量落 HBM、host 调度权（FlashMLA 仅部分设备侧） |
+| 判据 | 全不满足 C1–C3/C5；FlashMLA 因 PDL 部分满足 C4 |
+| 与 MPK 的关系 | MPK 把通信+计算统一成同一 tGraph 的 task，用同一 runtime 调度，overlap 自然涌现（快照行 1911–1917） |
+
+> 与 `docs/00` §2.5 的分工：§2.5 只给「停在单 kernel/单集合算子、MPK 用统一 tGraph」的结论；
+> 本节补上 **DeepEP 通信流+event 与 FlashMLA PDL 两种真实源码机制、真实行号、与 P4-2 本机实测的
+> 对接、以及逐条判据映射**。DeepEP 算子内部细节见 `../mega-moe/docs/07-deepep-dispatch-combine.md`。
