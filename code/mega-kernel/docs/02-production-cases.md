@@ -92,6 +92,90 @@ DeepGEMM 的三个 mega kernel 都采用**「持久化 CTA + 静态角色 + 设�
 这正是 megakernel 范式在**段级**（MoE 段、Gate 段、HC 段）的工程落地，与 MPK 的**整图 + 编译器生成 +
 去中心化动态调度**形成「手工静态 vs 自动动态」的对照。
 
+### 1.5 P3-1 精读：Mega MoE 的 megakernel 范式
+
+> 本节只回答 megakernel 范式问题：**「一个 kernel 如何覆盖整段 MoE 前向」「谁在设备内调度」「如何不靠
+> host launch 推进」**。算子级数据流、SM100 tcgen05 / FP8xFP4 / UE8M0 等硬件细节见
+> `../mega-moe/docs/02-mega-moe-architecture.md`，本文不重复。行号均在 `~/github/DeepGEMM` @ `057ca59`
+> 逐行核对。
+
+#### (1) 单 kernel 边界：五段融进一次 launch
+
+MoE 前向朴素实现是五段串行：EP dispatch → linear1 → SwiGLU → linear2 → EP combine。Mega MoE 把五段
+**全部塞进一次 kernel launch**（README 行 112–114：「fuses and overlaps EP dispatch, linear 1 and linear 2,
+SwiGLU, and EP combine into a single mega-kernel」）。判据 C1（单次 launch）在段级成立：host 侧只负责
+准备对称显存 buffer 并调用 `fp8_fp4_mega_moe`（`csrc/apis/mega_moe.hpp:155`），kernel 内部不再有跨算子
+launch。与 MPK 的差别在**范围与生成方式**：MPK 由编译器把整张图切 task 并生成（`docs/01-mpk-paper.md` §3），
+Mega MoE 是手工写死的**段级** mega-kernel（判据 C3 = 段级多算子，非整图）。
+
+#### (2) 静态角色划分：warp 即「算子专属执行单元」
+
+kernel 用 `warp_idx` 一次性把执行单元划成固定角色（`sm100_fp8_fp4_mega_moe.cuh:342` 起）：
+- **dispatch warps**：`warp_idx < kNumDispatchWarps`（默认 `kNumDispatchThreads=128` → 4 warp，
+  heuristics 行 220），持久拉取远端 token / 统计 expert 计数 / 写 combine 元数据（行 342–689）。
+- **non-epilogue warps**（`kNumNonEpilogueThreads=128` → 4 warp，heuristics 行 221）：
+  - `warp_idx == kNumDispatchWarps`：GEMM **TMA load A**（activations+SFA，行 690）；
+  - `+1`：GEMM **TMA load B**（weights+SFB，行 756）；
+  - `+2`：**MMA issue**（仅 leader CTA 发 UMMA，行 819）；
+  - `+3`：**in-kernel scheduler mainloop**（仅 leader CTA，行 940）。
+- **epilogue / combine warps**：`warp_idx >= kNumDispatchWarps + kNumMMANonEpilogueWarps`（行 946 起），
+  按 `epilogue_wg_idx` 再分 WG。
+
+每类角色用 `warpgroup_reg_dealloc/alloc` 分配不同寄存器预算，并静态断言总数 ≤ 64K（行 326–335）——这就是
+「SM 上角色固定、寄存器按最重角色封顶」的手工版，对应 MPK §7「寄存器固定为各 task 最大值」的边界。
+**关键点**：`warp 7` 是设备内调度器，对应 MPK 的 scheduler SM（`docs/01-mpk-paper.md` §4）——即
+megakernel 必须有**一个不吃 Tensor Core 的调度角色**在设备内推进工作，而不是 host。
+
+#### (3) 设备内协调：静态任务表 + ring buffer + 位掩码依赖
+
+调度器 `sched::MegaMoEScheduler`（`scheduler/mega_moe.cuh:180`）以 **`TaskInfo`**（行 92）为单位下发任务，
+`BlockPhase` 枚举（行 83–89）区分 `Linear1/Linear2/SharedLinear1/SharedLinear2`。与 MPK 的 tGraph 相似，
+依赖被显式建模，但这里是**手工的两层**：
+
+- **L1→L2 细粒度依赖**：每个完成的 L1 N block 用 `red_xor` 翻转 `l2_full_mask` 的一个 bit，L2 的每个 K block
+  只需等自己那一段 bit 就绪（`L2KBlockDependency`，行 140–166）。这是「输出 tile 重叠即依赖」的手工特例。
+- **ring buffer 容量上界**：`get_num_max_live_pool_blocks`（行 48–80）给出「同时活着」的 pool block 上界，
+  host 侧 `mega_moe.hpp:41–64` 镜像同一公式来分配 ring 显存；ring 容量保证 `l2_full_mask` 的奇偶 generation
+  语义成立（行 141 注释）。
+- **L1→L2 死锁规避**：交错调度会让 L1 任务落后，若无 warmup wave 则 L2 可能先占满 SM 等不到 L1。
+  `get_num_l1_warmup_waves`（行 15–45）用闭式公式推导出必须**先集中发 L1** 的最小 wave 数。
+- **负载均衡**：locality domain + work stealing（`kNumMinStealWaves` 行 223–228；`get_next_task_idx` 行 363–370）。
+- **combine 就绪**：用每次 launch 唯一的 `grid idx` 标记 peer 是否写完（`layout/mega_moe.cuh:70–72`），
+  避免跨 launch 的信号复位。
+
+数据缓冲区同样用对称显存切片：`layout::Buffer::get_rank_buffer`（`layout/mega_moe.cuh`）按 rank 切分，
+dispatch/combine 读远端、写本地都走同一套布局。
+
+#### (4) 通信-计算重叠怎么落进单 kernel
+
+重叠不是靠多流，而是靠**(2) 的静态角色并发**：dispatch warps 持续做 NVLink pull（行 433 起，`nvlink_barrier` /
+`grid_sync` 只在阶段边界同步），与此同时 MMA/epilogue warps 持续吃本地 L1 ring 做 GEMM/SwiGLU——两组 warp
+在同一批 SM 上同时跑，NVLink 延迟被 Tensor Core 计算掩盖。这与 MPK §5.1「事件驱动、异构互连无需拓扑画像」
+的目标一致，但 MPK 由 tGraph event 自动触发，Mega MoE 由固定的阶段边界（dispatch 统计 → grid sync →
+pull → ring 满 count）手工编排。
+
+#### (5) 与 MPK 的逐维对照（段级手工 vs 整图自动）
+
+| 维度 | DeepGEMM Mega MoE | MPK |
+|---|---|---|
+| 融合范围 | **段级**（MoE 前向五段，C3 部分成立） | **整图**（每 batch size 一张 tGraph） |
+| 单次 launch | 是（C1） | 是（C1） |
+| 角色划分 | **手工静态**（warp 编号写死，行 342–960） | 编译器生成 task，worker/scheduler 固定两类 |
+| 依赖表示 | 手工：位掩码 `l2_full_mask` + ring generation | tGraph task/event（自动 dependency analysis + fusion） |
+| 调度 | 设备内 `MegaMoEScheduler`（warp 7）静态两层交错 + work stealing | 去中心化事件驱动，JIT/AOT 混合下发 |
+| host 职责 | 仅 launch + 预热/准备 buffer | 仅 launch；图与 codegen 全在编译期 |
+| 硬件相关 | 整个 kernel（SM100 专属，含 UMMA/TMA） | 仅 per-task codegen |
+
+结论：Mega MoE 是 megakernel 范式在**段级**的成功工程落地，验证了「单 launch + 设备内角色 + ring buffer
+调度 + 通信计算重叠」在真实生产模型上的可行性与收益；它没有回答的是 MPK 的**自动整图**问题——依赖仍是
+手工编码、融合范围仍是段。两者恰好构成「手工静态段级 → 自动动态整图」的完整谱系两端（见 `docs/00` §4 T3/T4）。
+
+#### (6) 落地约束
+
+需**多进程 + 对称显存**（README 行 114）、SM100 专属、`intermediate_hidden*2` 与 `hidden` 须是
+`2×128` 的整数倍（`scheduler/mega_moe.cuh:56–57` 的静态断言）。这些约束正是「段级手工 mega-kernel」
+相对 MPK「编译器自动生成」在通用性上的代价。
+
 ---
 
 ## 2. hpc-ops Megakernel roadmap（`~/github/hpc-ops` @ `ab1a402`）
@@ -122,8 +206,8 @@ DeepGEMM 的三个 mega kernel 都采用**「持久化 CTA + 静态角色 + 设�
 
 ## 4. 下一步（承接 P3）
 
-- **P3-1** 精读 Mega MoE：dispatch / ring buffer / L2 依赖（`scheduler/mega_moe.cuh` 行 140–170、
-  行 376–430）与 symmetric memory 布局（`layout/mega_moe.cuh`），与 `../mega-moe/` 交叉引用避免重复。
+- **P3-1** ✅ 已精读 Mega MoE 的 megakernel 范式，见 §1.5（单 kernel 边界 / 静态 warp 角色 / ring buffer +
+  位掩码依赖 / 通信-计算重叠 / 与 MPK 逐维对照）。算子级细节仍以 `../mega-moe/` 为准。
 - **P3-2** Mega Gate / Mega mHC 各写清「融了哪些算子、为什么、性能动机」。
 - **P3-3** 汇总 Kimi K3 §4.2.4 与 hpc-ops roadmap 的工程视角。
 

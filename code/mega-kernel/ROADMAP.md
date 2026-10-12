@@ -88,8 +88,11 @@
 
 ### P3 生产案例（`docs/02-production-cases.md`）
 
-- [ ] **P3-1** DeepGEMM **Mega MoE**：dispatch+GEMM+SwiGLU+combine 单 kernel、symmetric memory、
-      ring buffer 调度（与 `mega-moe` 专题交叉引用，避免重复）。
+- [x] **P3-1** DeepGEMM **Mega MoE**：dispatch+GEMM+SwiGLU+combine 单 kernel、symmetric memory、
+      ring buffer 调度（与 `mega-moe` 专题交叉引用，避免重复）。见 `docs/02` §1.5（megakernel 范式视角：
+      单 kernel 边界、静态 warp 角色含 warp7 in-kernel scheduler、`l2_full_mask` 位掩码依赖 +
+      `get_num_max_live_pool_blocks` ring 上界 + warmup wave 防死锁、对称显存 rank 切片、
+      与 MPK 逐维对照表；算子级细节交叉引用 `../mega-moe/docs/02-mega-moe-architecture.md`）。
 - [ ] **P3-2** DeepGEMM **Mega Gate** 与 **Mega mHC**（HyperConnection）：各自融合了什么、为什么。
 - [ ] **P3-3** Kimi K3 的 fused mega-kernels（RL 内核任务套件）、hpc-ops 的 Megakernel roadmap。
 
@@ -132,7 +135,8 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**。
+- 当前进度：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**；
+  **P3 进行中（1/3）**。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -171,10 +175,12 @@
     §6.6/§6.7 消融归档；§7 Discussion（寄存器固定为各 task 最大值、per-task codegen 唯一硬件相关、
     手写 kernel 可包成 task）；§5.8 复现要点 + 8 条局限（仅 LLM serving / offline / batch≤16 /
     多 GPU 只测 dense TP / 每 batch size 一张静态图 / 去中心化调度 / 寄存器上限 / page size 固定）。
-- **下一步：P3-1** DeepGEMM **Mega MoE**（`docs/02-production-cases.md`）：dispatch+GEMM+SwiGLU+combine
-  单 kernel、symmetric memory、ring buffer 调度；与 `../mega-moe/` 专题交叉引用、避免重复。
-  随后 P3-2（Mega Gate / Mega mHC）、P3-3（Kimi K3 fused mega-kernels、hpc-ops roadmap），
-  再 P4（相关技术对照）、P5（launch 开销等本机实验）、P6（汇总）。
+- **下一步：P3-2** DeepGEMM **Mega Gate / Mega mHC**（`docs/02-production-cases.md` §1.2/§1.3 展开为完整案例）：
+  各自融了哪些算子、为什么、性能动机；沿用 §1.5 的「静态 warp 角色 + 设备内同步」分析框架。
+  随后 P3-3（Kimi K3 fused mega-kernels、hpc-ops roadmap），再 P4（相关技术对照）、
+  P5（launch 开销等本机实验）、P6（汇总）。
+- **本轮（P3-1）**：`docs/02-production-cases.md` 新增 §1.5；P3-1 标记完成；纯资料分析（Mega MoE 为
+  SM100 专属，本机 H100/sm90 不运行端到端），未产生新实验。
 
 ## 阻塞
 
