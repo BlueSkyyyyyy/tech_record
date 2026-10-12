@@ -231,6 +231,21 @@
       比 torch 朴素快 **7~18x**、`m=n=1024` 达 **314 TFLOPS**、`m=n=256` 因 num_mn=4 原子竞争仅
       165 TFLOPS、GB/s 616~1599；⑤ 契约 k/m/n%64 被拒（hpp:24/25）、`d` 形状不校验；⑥ PDL on/off
       语义一致、耗时噪声级（`:97` 太早同步）。配套博客 `content/posts/mega-moe-17-einsum-batch-reduced-gemm`。
+- [x] **P8-2** einsum 家族投影分支 `bhr,hdr->bhd` / `bhd,hdr->bhr`（**按头 batched GEMM，有 SM90
+      实现，本机可跑**）：MLA 吸收投影 `A[:,h,:]@B[h]`。→ `docs/18-einsum-mla-batched-gemm.md`
+      （真实行号核对）：host 分派与契约 `einsum.hpp:60-92/94-126`（三个 `stride(2)==1`、cublaslt/
+      sm90/sm100 三分支），降维映射 `sm90_bf16_gemm.hpp:332-384/386-438`（`GemmType::Batched`、
+      `(m,n,k)=(b,d,r)/(b,r,d)`、`num_groups=h`、major `KK`/`K·MN`），3D TMA
+      `runtime_utils.hpp:161-202`（头=第三维 + 两个显式 stride）+ kernel `batch_idx`
+      （`sm90_bf16_gemm.cuh:186-199`）+ store `SM90_TMA_STORE_3D/REDUCE_ADD_3D`（`:374-379`）+
+      调度器 Batched（`scheduler/gemm.cuh:90/169-173/247-262`）+ 禁 multicast
+      （`heuristics/sm90.hpp:63-67`）；SM100 变体与 FP8 变体（`bhd,hdr->bhr` / `bhd,bhr->hdr`
+      arch10）**仅分析**。H100 实测 `harness/exp_einsum_mla.{py,sh,out.txt}`：16 组形状 bf16 输出与
+      `torch.einsum` **逐位相等**（relerr fp64 2.0–3.5e-3）；头独立性（置零头 0 不影响他头）；
+      `D=C+A@B`（TMA reduce-add）relerr 5.3e-3；**带 padding 权重 `fy[:,:,:r]` 与连续权重逐位相等**；
+      确定性开关实测切 kernel（True→`sm90_bf16_gemm_impl<…GemmType)4…>`、False→`nvjet_sm90_*`）；
+      契约非法输入被拒；性能与 torch 同速（0.84–1.09×），`b=128 h=128` 212 / `h=8 r=4096 d=1024 b=4096`
+      **360 TFLOPS**。配套博客 `content/posts/mega-moe-18-einsum-mla-batched-gemm`。
 
 ## 每轮增量流程（autopilot）
 
@@ -256,19 +271,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0/P1/P2/P3/P4/P5/P6 全部完成；P7-1/P7-2、P8-1 完成。**
-  本轮 P8-1：新建 `docs/17-einsum-batch-reduced-gemm.md`（+`harness/exp_einsum_bmk_bnk.{py,sh,out.txt}`）
-  ——拆解 DeepGEMM 硬编码 einsum `bmk,bnk->mn`（**有 SM90 实现，H100 可跑**）：它是
-  MoE wgrad 归约树的最后一环「跨 batch/rank 的权重梯度融合」`D[m,n]=Σ_b Σ_k A[b,m,k]B[b,n,k]`。
-  SM90 用 split-K + `atomicAdd(float2)` 把各分片部分和直接归约到全局 D（`:160-174`），
-  SM100 换成 TMA reduce-add（`:255`，仅分析）。H100 实测：坐实「batch 并入收缩轴」
-  （vs 展平 GEMM 1e-6~2e-4）与「部分 wgrad 再求和」（s=8 rank 2.8e-7、省 8x 显存）；
-  split=993 时 **6.5 万输出 ~5.2 万 bit 级抖动**（atomicAdd 非确定性，幅度 4e-7）；
-  比 torch 朴素快 **7~18x**、`m=n=1024` 达 **314 TFLOPS**。配套博客
-  `content/posts/mega-moe-17-einsum-batch-reduced-gemm`（索引页新增第 17 篇）。Hugo 构建 0 ERROR。
+- 当前进度：**P0/P1/P2/P3/P4/P5/P6 全部完成；P7-1/P7-2、P8-1/P8-2 完成。**
+  本轮 P8-2：新建 `docs/18-einsum-mla-batched-gemm.md`（+`harness/exp_einsum_mla.{py,sh,out.txt}`）
+  ——拆解 einsum 家族的**投影分支** `bhr,hdr->bhd` / `bhd,hdr->bhr`（**有 SM90 实现，H100 可跑**），
+  即 MLA 风格「每个头一个 GEMM、头当 batch」的 batched GEMM：`(m,n,k)=(b,d,r)` / `(b,r,d)`、
+  `num_groups=h`、`GemmType::Batched`；头编码进 **3D TMA 的第三维**（`runtime_utils.hpp:161-202`）
+  + kernel `batch_idx`（`sm90_bf16_gemm.cuh:186-199`），写回 `SM90_TMA_STORE_3D/REDUCE_ADD_3D`
+  （`:374-379`）；两条表达式只是 `(m,n,k)` 角色 + B 的 major（K / MN）不同；Batched 禁
+  multicast（`heuristics/sm90.hpp:63-67`）。FP8 变体 `bhd,hdr->bhr`/`bhd,bhr->hdr` 与 SM100 分支
+  **仅分析**。H100 实测：16 组形状 bf16 输出与 `torch.einsum` **逐位相等**（fp64 relerr 2–3.5e-3）、
+  头独立、`D=C+A@B`（TMA reduce-add）、**带 padding 权重 `fy[:,:,:r]` 与连续权重逐位相等**、
+  确定性开关实测切 kernel（nvjet ↔ 自家 kernel）、性能与 torch 同速（0.84–1.09×，最高 360 TFLOPS）。
+  配套博客 `content/posts/mega-moe-18-einsum-mla-batched-gemm`（索引页新增第 18 篇）。Hugo 构建 0 ERROR。
 - **下一步**：P0~P8 已完成。后续若继续（均为增量、非承诺）：
-  ① **einsum 家族其余分支**：`bhr,hdr->bhd` / `bhd,hdr->bhr`（MLA 投影，SM90 可跑）与
-   FP8 `fp8_einsum`（SM100 专属，仅分析）；
+  ① **einsum 家族 FP8 投影**：`fp8_einsum` 的 `bhd,hdr->bhr` / `bhd,bhr->hdr`（arch10 专属，
+  仅分析；`bhr,hdr->bhd` 的 fp8 版 SM90 可试跑）；
   ② **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
    并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）；
   ③ **Mega MoE 端到端**：需 SM100 机器，当前不可行；

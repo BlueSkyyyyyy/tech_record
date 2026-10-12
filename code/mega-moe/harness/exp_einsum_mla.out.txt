@@ -1,0 +1,74 @@
+NVIDIA H100 80GB HBM3, 9.0
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+==============================================================================
+H100 sm90  num_sms=132  torch=2.12.0a0+0291f960b6.nv26.04.48445190  deep_gemm=['~/github/DeepGEMM/deep_gemm']
+==============================================================================
+
+[A] 语义 vs torch.einsum(bf16, 逐位) 与 fp64 参考(relerr)
+          expr     b    h     r     d |  bitwise  relerr(fp64)
+  bhr,hdr->bhd     4  128   512   128 |     True     2.493e-03
+  bhd,hdr->bhr     4  128   512   128 |     True     2.060e-03
+  bhr,hdr->bhd    32  128   512   128 |     True     2.340e-03
+  bhd,hdr->bhr    32  128   512   128 |     True     2.039e-03
+  bhr,hdr->bhd   128  128   512   128 |     True     2.048e-03
+  bhd,hdr->bhr   128  128   512   128 |     True     2.032e-03
+  bhr,hdr->bhd  4096  128   512   128 |     True     2.134e-03
+  bhd,hdr->bhr  4096  128   512   128 |     True     3.469e-03
+  bhr,hdr->bhd     4    8  4096  1024 |     True     2.009e-03
+  bhd,hdr->bhr     4    8  4096  1024 |     True     3.126e-03
+  bhr,hdr->bhd    32    8  4096  1024 |     True     3.147e-03
+  bhd,hdr->bhr    32    8  4096  1024 |     True     3.020e-03
+  bhr,hdr->bhd   128    8  4096  1024 |     True     3.084e-03
+  bhd,hdr->bhr   128    8  4096  1024 |     True     3.244e-03
+  bhr,hdr->bhd  4096    8  4096  1024 |     True     2.828e-03
+  bhd,hdr->bhr  4096    8  4096  1024 |     True     2.642e-03
+
+[B] 等价于「逐头 GEMM」（h 个独立的小 GEMM）：
+  bhr,hdr->bhd: reldiff(vs 逐头 bmm fp32->bf16) = 2.304e-03  (逐头 bmm 与 einsum 语义一致)
+  头 0 的 B 置零 -> 输出头 0 全 0 = True；其余头逐位不变 = True
+
+[C] 累加语义（with_accumulation -> TMA REDUCE_ADD_3D）：D = C + A@B
+  bhr,hdr->bhd  D=C+A@B: reldiff(vs fp64) = 5.279e-03
+  bhd,hdr->bhr  D=C+A@B: reldiff(vs fp64) = 5.231e-03
+
+[D] B 的 K/N 维带 padding：fy[:, :, :r] 是 stride 视图（3D TMA outer stride）
+  padded B vs 连续 B 逐位相等 = True；vs torch.einsum 逐位相等 = True
+
+[E] use_deterministic_algorithms：True->自家 kernel，False->cuBLASLt(nvjet)
+  deterministic=True: reldiff(fp64)=2.165e-03      10.0 us  kernels=['void deep_gemm::sm90_bf16_gemm_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 0u, 128u, 512u, 128u, 128u, 128u, 64u, 128u, 128u, 128u, 6u, 128u, 256u, 1u, false, 132u, (deep_gemm::GemmType)4, false, cutlass::bfloat16_t>(int*, unsigned int, unsigned int, unsigned int, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st)']
+  deterministic=False: reldiff(fp64)=2.165e-03       9.5 us  kernels=['nvjet_sm90_tst_128x128_64x6_1x1_h_bz_TNT']
+
+[F] host 契约：A/B/D 必须 stride(2)==1、dtype 为 bf16、形状一致
+  A.stride(2)!=1: 被拒 -> Assertion error (csrc/apis/einsum.hpp:68): A.scalar_type() == torch::kBFloat16 and A.strid
+  A 为 fp32: 被拒 -> Assertion error (csrc/apis/einsum.hpp:156): a.scalar_type() == torch::kBFloat16
+  B 的 h 不匹配: 被拒 -> Assertion error (csrc/apis/einsum.hpp:66): b == b_ and h == h_ and r == r_ and d == d_ and
+  未知表达式: 被拒 -> Assertion error (csrc/apis/einsum.hpp:177): Unsupported einsum expression: abc->a
+
+[G] 性能（FLOPs = 2*b*h*r*d）
+  --- bhr,hdr->bhd ---
+       b    h     r     d | deep_gemm us   TFLOPS     GB/s |   torch us      x
+       4  128   512   128 |          5.7       12     3074 |        5.4   0.95
+      32  128   512   128 |          6.1       89     3631 |        5.9   0.98
+     128  128   512   128 |         10.3      208     3656 |        9.4   0.91
+    4096  128   512   128 |        490.8      140     1402 |      489.9   1.00
+    8192  128   512   128 |       1022.4      134     1329 |     1009.6   0.99
+       4    8  4096  1024 |         27.0       10     2493 |       25.8   0.95
+      32    8  4096  1024 |         27.7       78     2518 |       27.0   0.98
+     128    8  4096  1024 |         30.9      278     2509 |       30.1   0.97
+    4096    8  4096  1024 |        765.7      359      526 |      752.4   0.98
+    8192    8  4096  1024 |       1743.6      315      423 |     1548.5   0.89
+  --- bhd,hdr->bhr ---
+       b    h     r     d | deep_gemm us   TFLOPS     GB/s |   torch us      x
+       4  128   512   128 |          6.2       11     2827 |        5.7   0.92
+      32  128   512   128 |          6.3       85     3474 |        6.0   0.95
+     128  128   512   128 |         10.7      200     3515 |       11.4   1.06
+    4096  128   512   128 |        658.3      104     1045 |      557.1   0.85
+    8192  128   512   128 |       1302.9      105     1043 |     1102.5   0.85
+       4    8  4096  1024 |         26.7       10     2523 |       25.7   0.96
+      32    8  4096  1024 |         27.3       79     2553 |       27.0   0.99
+     128    8  4096  1024 |         31.9      269     2434 |       31.1   0.98
+    4096    8  4096  1024 |        830.7      331      485 |      832.3   1.00
+    8192    8  4096  1024 |       1734.7      317      426 |     1650.5   0.95
+
+完成。
