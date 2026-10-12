@@ -150,7 +150,9 @@ B1 已做成最小可运行 Triton kernel：与 FLA `dhu` 逐行同构、实测 
 | 对拍/基准 | `harness/check_*.py`、`bench_fwd.py`、`probe_ncu.sh`（原始输出 `*.out.txt`） |
 | 博客 | `content/posts/flash-kda-00-index` … `flash-kda-08-summary` |
 
-**待验证 / 后续方向**：K1「global load 4/32 字节/sector」具体落在哪条 load；~~K2 的 L2 流量中
+**待验证 / 后续方向**：~~K1「global load 4/32 字节/sector」具体落在哪条 load~~（**已解决**，`docs/07` §7
+P7-4：唯一标量 load = `fwd_kernel1.cuh:258` 的 `A_log_ptr[head_idx]`，是 warp 内地址一致的**广播**
+标量读，`Sectors Global == Ideal`、`Excessive=0`，`4/32` 为启发式误报，DRAM 占比 <2%）；~~K2 的 L2 流量中
 workspace 读 vs $o$/state 写占比~~（**已解决**，`docs/07` §6 P7-3：K2 读 ≈ 75% workspace + 22.5% `v`，
 写 ≈ `o` 为主，DRAM 读与闭式预测吻合 1.000–1.010）；K2 突破 2 CTA/SM 后 L2 墙是否后移；完整的
 CUTLASS/TMA 版 B1/B2/B3 属更大工程。

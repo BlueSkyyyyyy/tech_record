@@ -311,7 +311,8 @@ MMA/LDSM 的结果），加上 occupancy 太低、可切换 warp 不足（`Eligi
    于是 dev ∝ T、`spd(dev)` 在 H≤16 时 <1；H=64 时 grid 才刚够、L2 又成新墙。
 4. §2.1 的「FLA host 税」与本节的 GPU 结论不冲突：那部分收益在 host 端，本节量的是 GPU 端。
 
-**待验证**：(a) K1「global load 4/32 字节/sector」具体落在哪条 load（`beta`/`g`/标量参数？）；
+**待验证**：(a) K1「global load 4/32 字节/sector」具体落在哪条 load——**已在 §7 解决**（= `fwd_kernel1.cuh:258`
+的 `A_log_ptr[head_idx]`，广播标量读、`Excessive=0`、DRAM 占比 <2%，属启发式误报）；
 (b) K2 的 L2 流量里 workspace 读与 $o$/state 写各占多少（需 `nsys` 或按指针插桩）——**已在 §6 解决**；
 (c) 把 K2 的 state 常驻寄存器/提高 smem 复用以突破 2 CTA/SM 后 L2 墙是否后移。
 
@@ -392,3 +393,86 @@ TMA store 被重复计数），所以 `lts` 计数只能当**同 kernel 内相�
    与 §5.2/§5.3 用 `lts` 报的 1.7–2.0GB 同量级（差额即 TMA 的 `lts` 重发放大）。
 3. 方法学收获：**TMA 密集 kernel 不要用 `lts__t_sectors` 当字节**（读 ×1.5、写 ×3）；要字节就用
    清 L2 后的 `dram__bytes`，且小 shape 的 DRAM 写会因 dirty 行滞留而读数为 0，须放大到超 L2 才有意义。
+
+## 7. K1 那条「4/32 bytes/sector」的 global load 究竟是谁（P7-4）
+
+§5.2 留了个待验证：`ncu` 报 K1「global load 平均每 sector 只用 4/32 字节」，但没说是哪条指令。
+本节用「静态 SASS 计数 + `SourceCounters` 逐行归因 + DRAM 占比」把它钉死。复现脚本
+`harness/probe_k1_gload.sh`、原始输出 `harness/probe_k1_gload.out.txt`。
+
+### 7.1 静态：K1 里到底有几条「非 TMA」的 global load
+
+把装好的 `flash_kda_C.cpython-312-x86_64-linux-gnu.so` 反汇编（`cuobjdump -sass`），按函数切段统计
+**标量 global load `LDG.E`** 与 **TMA `UTMALDG`** 两类：
+
+| K1 变体 | `LDG.E`（标量） | `UTMALDG`（TMA） |
+|---|--:|--:|
+| `IsVarlen=false`（本轮 profiling 走这条） | **1** | 5 |
+| `IsVarlen=true` | **5** | 5 |
+
+5 条 `UTMALDG` 正是 q/k/g/beta/dt_bias 五个 TMA 描述符（`fwd_kernel1.cuh:231/233/235/243/253`）。
+非 varlen 只有 **1 条标量 global load**，SASS 是 `/*0a20*/ LDG.E R9, desc[UR14][R12.64]`，其前驱是
+
+```
+S2R  R2, SR_CTAID.Y              // R2 = blockIdx.y = head_idx
+LDC.64 R12, c[0x0][0xda0]        // R12 = A_log_ptr
+IMAD.WIDE R12, R2, 0x4, R12      // R12 = A_log_ptr + head_idx*4
+LDG.E R9, desc[UR14][R12.64]     // = A_log_ptr[head_idx]
+```
+
+即它唯一对应源码 `fwd_kernel1.cuh:258` 的 `float a_log_exp = expf(A_log_ptr[head_idx]);`。
+varlen 变体多出的 4 条（SASS `/*00e0*/ /*0190*/ /*01a0*/ /*01c0*/`）就是二分查找里的
+`tile_prefix[mid]`/`tile_prefix[lo]`/`cu_seqlens[seq_idx]`/`cu_seqlens[seq_idx+1]`
+（`fwd_kernel1.cuh:179/183/185/186`）。
+
+### 7.2 动态：`SourceCounters` 与那条 `LDG.E` 一一对应
+
+`ncu --section MemoryWorkloadAnalysis_Tables` 复现出的警告原文：
+
+```
+The memory access pattern for global loads from L1TEX might not be optimal. On average,
+only 4.0 of the 32 bytes transmitted per sector are utilized by each thread.
+This could possibly be caused by a stride between threads. ...
+```
+
+`ncu --section SourceCounters --page source` 里**整段 SASS 唯一一条 `Address Space=Global` 的 load**
+就是上面那条 `LDG.E`，它的计数是：
+
+| Source | Instructions Executed | Address Space | Access Size | L1 Tag Requests Global | L2 Sectors Global | Sectors Ideal | Excessive |
+|---|--:|---|--:|--:|--:|--:|--:|
+| `LDG.E R9, ...` | 2048 | Global | 32 | 2048 | 2048 | **2048** | **0** |
+
+`B=1,T=1024,H=4` 时 grid `= ceil(1024/16)·4 = 64×4 = 256` 个 CTA × 8 warp = **2048 个 warp**，
+每条 warp 恰好发射 1 条 `LDG.E`（`smsp__inst_executed_op_global_ld.sum` 实测也正好 =2048）。
+所以 §5.2 那个「global load」统计**100% 就是这一条 `A_log_ptr[head]`**。
+
+### 7.3 为什么是 4/32，以及为什么它其实没问题
+
+`A_log_ptr[head_idx]` 的地址对 warp 内 32 个 lane **完全相同**（`head_idx=blockIdx.y` 是 CTA 一致的）。
+硬件把它当**广播**处理：一个 warp 一条指令、只碰 **1 个 32B sector**（`Sectors Ideal` 也是 2048，
+`Excessive=0`），但 32 个 lane 合起来只用掉其中 4 字节（一个 fp32）。`ncu` 的启发式把「每线程用到的
+字节 / sector 字节」算成 `4.0/32` 并提示「可能有 stride」，这对**广播标量 load 是误报**——它已经是
+该访问的最小代价（1 sector/warp），`Excessive sectors = 0` 才是有意义的可优化余量，而它是 0。
+
+再做一次字节预算，看这条 load 值不值得动：
+
+| shape | inst_global_ld（=warp 数） | 该 load 的字节 | K1 DRAM 读 | 占比 |
+|---|--:|--:|--:|--:|
+| B=1 T=1024 H=4 | 2 048 | 0.06 MB | 3.18 MB | **1.97%** |
+| B=1 T=8192 H=64（设计点） | 262 144 | 8.00 MB | 405.02 MB | **1.98%** |
+
+即把这条 load 完全消掉（例如 host 侧预展开 `exp(A_log)` 或走 kernel 参数），最多省下 K1 DRAM 读的
+**~2%**；而 K1 本身在设计点只占总前向时间的约 8%（P7-1 §3.2），所以端到端收益 <0.2%。这解释了为什么
+放大的 K1（§5.2 结论二）依然稳稳撞 L2——**它的瓶颈从来不是这条标量 load**。
+
+### 7.4 结论与勘误
+
+1. §5.2「global load 4/32」的具体归属 = **`fwd_kernel1.cuh:258` 的 `A_log_ptr[head_idx]`**（非 varlen
+   是唯一一条标量 global load；varlen 再加 4 条同样是广播的二分查找标量 load）。
+2. 它**不是**未合并访存：`Sectors Global == Sectors Ideal`、`Excessive = 0`，广播 load 已是 1 sector/warp
+   的最小代价；`4/32` 是「每线程利用字节」启发式的误报。**勘误**：§5.2 记的「估 50% 局部加速空间」
+   在本次复现的 `MemoryWorkloadAnalysis_Tables` 输出里**没有**对应到这条 global-load 警告（紧随的
+   `Est. Local Speedup: 44.94%` 属于 shared-load bank conflict 警告），且与 `Excessive = 0` 矛盾，
+   应视为误记/未复现。
+3. 预算 <2% 且 K1 只占前向 ~8%，故 §5.4 的两条结论（**K1 = barrier stall + L2 带宽**）**不变**，
+   无需为这条 load 做任何优化。

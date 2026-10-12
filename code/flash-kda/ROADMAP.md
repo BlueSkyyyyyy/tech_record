@@ -87,6 +87,8 @@
 - [x] **P7-2** `ncu` 剖析 K1/K2 bound（smem/TensorCore/occupancy），逐项证据。
 - [x] **P7-3** K1/K2 访存字节拆分（DRAM 读/写逐项归因 workspace vs `v` vs `o`/state），
       解决 P7-2 待验证 (b)。
+- [x] **P7-4** 归因 K1「global load 4/32 bytes/sector」，解决 P7-2 待验证 (a)（静态 SASS 计数 +
+      `SourceCounters` 逐行 + DRAM 占比）。
 
 ### P8 小结 / 一页纸
 
@@ -115,7 +117,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P7-3 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel 完成；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+- 当前进度：**P0–P8 全部完成 + P7-3/P7-4 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel 完成；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -202,9 +204,24 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P7-3 补测**，进入收尾/维护。后续可选（有明确需求时再做）：更完整的
+- **下一步：专题 P0–P8 全部完成 + P7-3/P7-4 补测**，进入收尾/维护。后续可选（有明确需求时再做）：更完整的
   CUTLASS/TMA 版反向 B1/B2/B3 工程化；P7-2 遗留的 nsys 流量拆分（P7-3 已用 ncu DRAM 计数替代、
   待验证 (b) 已关闭）与 K2 突破 2 CTA/SM 实验。
+  - P7-4：`docs/07` 新增 §7「K1 那条 4/32 bytes/sector 的 global load 是谁」+ `harness/probe_k1_gload.sh`
+    （`harness/probe_k1_gload.out.txt`），关闭 P7-2 待验证 (a)。**静态**（`cuobjdump -sass` 按函数切段）：
+    K1 `IsVarlen=false` 只有 **1 条标量 `LDG.E`**（+ 5 条 TMA `UTMALDG` = q/k/g/beta/dt_bias），
+    `IsVarlen=true` 5 条（多出的 4 条 = 二分查找 `tile_prefix`/`cu_seqlens`，`fwd_kernel1.cuh:179/183/185/186`）。
+    非 varlen 那条的 SASS 前驱 `S2R R2,SR_CTAID.Y` + `LDC A_log_ptr` + `IMAD.WIDE R2*4`
+    ⇒ **`fwd_kernel1.cuh:258` 的 `A_log_ptr[head_idx]`**。**动态**（`ncu --section SourceCounters`）：
+    整段 SASS 唯一 `Address Space=Global` 的 load 即它，`Instructions=2048`、`L1 Tag Requests=2048`、
+    `Sectors Global=2048 == Ideal 2048`、`Excessive=0`——`B=1,T=1024,H=4` grid=256 CTA×8 warp=2048 个 warp，
+    **每 warp 恰好 1 条**（`smsp__inst_executed_op_global_ld=2048` 佐证）。**为什么是 4/32**：地址在
+    warp 内一致（`head_idx=blockIdx.y`）⇒ 硬件按**广播**处理，1 sector/warp 已是该访问的最小代价，
+    `ncu` 的「每线程利用字节」启发式对广播标量 load 误报。**字节预算**：设计点该 load = 262144 warp
+    × 32B = 8.0MB vs K1 DRAM 读 405MB = **1.98%**（小 shape 1.97%），且 K1 只占前向 ~8% ⇒ 端到端 <0.2%。
+    **勘误**：§5.2 记的「估 50% 局部加速空间」未在本次 `MemoryWorkloadAnalysis_Tables` 输出中复现
+    （紧随的 `Est. Local Speedup: 44.94%` 属 shared-load bank conflict），且与 `Excessive=0` 矛盾。
+    结论：§5.4「K1 = barrier stall + L2」不变，无需优化。
   - P7-3：`docs/07` 新增 §6「K1/K2 的访存账」+ `harness/check_traffic.py`
     （`harness/check_traffic.out.txt`）：用 `ncu`（默认每次 replay 前清 L2，故 `dram__bytes_*`
     = 唯一去重访存字节）对 K1/K2 的读/写逐项归因，与闭式预测对拍。四组 shape
