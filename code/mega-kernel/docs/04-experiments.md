@@ -679,3 +679,117 @@ grid-stride 消费的单元数只由 N 决定、与网格大小无关。
   计时/launch 残留未进一步分离（已用 warmup + 事件计时尽量排除）。
 - Section A 的 N=8192 固定，未扫 N 与 G 的联合；「G 应取 min(占用上限, N)」是结合 Section A/B
   的推断，未做二维网格。
+
+---
+
+## 6. 多 block PDL 的 occupancy 资源约束（P12-1）
+
+### 6.1 问题
+
+P4-2（`docs/03` §2）与 P5-3（§3）都用 **`grid=1` 的单个小 kernel** 造流，得到一条干净的结论：
+
+> PDL 每条边重叠 `min(上游 tail, 下游 prologue)`，收益由这段「下游可提前做的活」封顶。
+
+但真实算子的 grid 是**上百个 block**。于是在 P5-3 §3.6 与 P10-1 §5.5 各留了同一条尾巴：
+
+> **PDL 后继 grid 的 block 何时真正拿到 SM 资源？上游占满 SM 时，重叠还剩多少？**
+
+PDL 的硬件语义是「下游 grid 可以在上游触发后**提前被 lauch**」，但下游 block **仍要等某个 SM
+有空闲槽位才能开始跑它的 prologue**。本节把一对 producer/consumer 从 `grid=1` 扩到多 block，
+量化 **上游占用率（occupancy）** 对 PDL 有效重叠的约束。这直接关系到 megakernel：生产 megakernel
+用一个常驻 kernel **占满全部 SM**（MPK §5.1 行 1148–1174；本文件 §5），它到底还能不能靠 PDL 重叠？
+
+### 6.2 方法
+
+程序 `src/pdl_multiblock.cu`（目标卡 H100 / sm90，原始输出 `harness/pdl_multiblock.out.txt`）。
+一对 kernel，两段都可多 block：
+
+```
+producer: [pre 自旋] -> thread0 写 flag[0]=gen -> cudaTriggerProgrammaticLaunchCompletion -> [tail 自旋] -> exit
+consumer: [prologue 自旋] -> cudaGridDependencySynchronize -> 校验 flag[0]==gen
+```
+
+- `pre=tail=prologue=80000` SM 周期、`crit=2000`、`iters=30`；理想重叠 = `min(tail,prologue)=80000` 周期。
+- consumer 用 `cudaLaunchKernelEx` + `cudaLaunchAttributeProgrammaticStreamSerialization` 启动（与 P4-2/P5-3 同款）；
+  no-PDL 基线则两个 kernel 都普通 launch（同 stream 严格串行）。
+- **有效重叠** = `(no-PDL − PDL) / (no-PDL 每轮 ms/cycle)`；`ms/cycle` 由 no-PDL 跨度
+  （`pre+tail+prologue`）标定，故「有效重叠 / 理想重叠」是无量纲比值（低占用处应 ≈1.00）。
+- 两个 blockDim 各跑一遍以交叉验证：**256**（占用上限 `8 block/SM × 132 SM = 1056`）与
+  **128**（上限 `16 × 132 = 2112`），blocks/SM 由 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` 查询。
+- 正确性门限：consumer 只由 block0/thread0 校验 `flag[0]==gen`，期望每轮 +1；`fail=0` 表示内存可见性成立。
+
+X 轴分三组正交扫描：A 固定 `Gd=1` 扫上游 `Gu`；B 固定 `Gu=cap/2` 扫下游 `Gd`；C 上游占满 `Gu=cap` 扫 `prologue`。
+
+### 6.3 结果
+
+**blockDim=256（cap=1056）**
+
+| Section | 变量 | 结果 |
+|---|---|---|
+| A | `Gu` 1→528（0–0.5 cap） | 有效重叠 **0.99–1.00×ideal**、speedup 1.49–1.50× |
+| A | `Gu=1056`（=cap） | **0.74×ideal**、speedup 1.33× |
+| B | `Gu=528`，`Gd` 1→528 | **0.99×ideal 恒定**（下游 grid 大小无关） |
+| C | `Gu=cap`，`prologue` 0→320000 | 0→**0.75–0.86×ideal** 饱和（`prologue=0` 时 0.00×） |
+
+**blockDim=128（cap=2112）**
+
+| Section | 变量 | 结果 |
+|---|---|---|
+| A | `Gu` 1→528（0–0.25 cap） | 有效重叠 **0.99×ideal**、speedup 1.49× |
+| A | `Gu=1056`（0.5 cap） | 0.93×ideal、1.45× |
+| A | `Gu=1584`（0.75 cap） | **0.74×ideal**、1.33× |
+| B | `Gu=1056`，`Gd` 1→1056 | 0.89–0.96×ideal（下游 grid 大小几乎无关） |
+| C | `Gu=cap`，`prologue` 0→320000 | 0→**0.74–0.81×ideal** 饱和（`prologue=0` 时 0.00×） |
+
+两组所有点 `fail=0`；低占用处 no-PDL 单对 ≈ 240000 周期 / 1980 MHz ≈ 0.121 ms，
+与实测 0.125 ms 相符，确认无外部干扰（并行自驱任务会污染计时，本文件为无干扰复现）。
+
+### 6.4 读法
+
+1. **上游 occupancy 是 PDL 重叠的第一个约束。** Section A 里，只要上游 `Gu` 只占机器一小部分
+   （两种 blockDim 下都到 `Gu≈528`、约 4 block/SM），有效重叠就贴着理想值（~1.00×）：
+   下游 block 总能落脚、且所在 SM 不挤。上游 `Gu` 一旦逼近占用上限，重叠滑到 **~0.74×ideal**。
+2. **两种 blockDim 收敛到同一个天花板 ~0.74×ideal。** B=256 在 `Gu=cap`、B=128 在
+   `Gu=0.75cap` 处都降到 0.74——**当上游几乎占满机器时，PDL 只能拿回约 3/4 的理想重叠**，
+   剩下 1/4 被「下游 block 与满负荷上游争 SM（发射/L1/尾延迟）」吃掉。这条天花板与 blockDim 无关。
+3. **下游 grid 大小本身不是约束。** Section B 固定上游、把下游 grid 从 1 扫到空闲槽位上限，
+   重叠几乎不变：**只要「上游 + 下游」的总占用不超过 cap，下游 grid 开多大都不影响重叠**。
+   也就是说约束在**上游侧**（占不占得下、挤不挤），不在下游侧的 block 数。
+4. **重叠饱和而非随 prologue 增长。** Section C 把下游 prologue 拉到 4×tail，有效重叠仍停在
+   ~0.74–0.86×ideal，speedup 反而从 1.33× 回落到 1.17×（prologue 越长，未重叠的那部分也越长）。
+   且 `prologue=0` 时重叠≈0——**没有「可提前做的活」就没有 PDL 收益**，这与 P4-2 一致。
+5. **量级对照**：低占用处 PDL 让一对 kernel 从 `pre+tail+prologue` 压到 `pre+max(tail,prologue)`，
+   即 speedup 1.50×；满占用处只剩 1.33×。**同样的 prologue/tail，收益取决于上游给不给 occupancy 余量。**
+
+### 6.5 与判据 / MPK / 生产案例的关系
+
+- **补齐 P5-3 §3.6 与 P10-1 §5.5 的尾巴**：§3.6 说「未验证多 block 下 PDL 的资源约束，
+  后继 grid 的 block 何时真正获得 SM 资源」，本节给出答案——**受上游 occupancy 约束**：
+  上游不占满时重叠理想，占满时天花板 ~0.74×ideal；且与下游 grid 大小无关。
+- **对 megakernel 的直接含义**：生产 megakernel 恰恰**反常**——它用一个常驻 kernel **占满全部 SM**
+  来最大化吞吐（本文件 §5 的占用率结论；MPK §5.1 行 1148–1174 的 132 SM 划分）。本节说明
+  **在这个前提下 PDL 只能拿回约 3/4 的理想重叠**：跨 kernel 的 PDL 是「向上游借 occupancy 余量」，
+  而 mega-kernel 把余量全用光了。这正是它改在**单 kernel 内**做 task 级重叠的根本原因——
+  MPK §5.3（行 1326–1363）的 cross-task software pipelining 与去中心化 event queue（§5/§6.1）
+  在 kernel 内部调度，不需要向别的 kernel 借 SM 槽位。
+- **与 P5-3 的衔接**：P5-3 证明 PDL 收益**不随链长 K 累积**（每级只有 1 级流水）；本节进一步
+  证明**同一级的收益还会被上游占用率打折**（1.50×→1.33×）。两条合起来：PDL 的适用区间是
+  「上游轻、下游有长 prologue、且只有相邻一对」——这与整图融合的 server 负载正交。
+- **生产旁证**：DeepGEMM/FlashMLA 等用 PDL 时，upstream/downstream 都是**单个或少数**相对轻的
+  kernel（如 `splitkv_mla`+`combine`，见 `docs/03` §4.1）；没有谁把 PDL 架在一个占满 SM 的
+  persistent kernel 之上。这与本节结论一致。
+- **判据（C1–C5，`docs/00` §3）**：本节不改变映射。PDL 仍**全不满足 C1–C5**：即便多 block、
+  重叠理想，它也只是「相邻两个 kernel 的边界错位」，没有单次 launch、没有常驻、没有设备内调度。
+  本节只是把 PDL 的**收益边界**从 kernel 边界细化到 occupancy 边界。
+
+### 6.6 局限
+
+- 用 `spin_cycles`（`clock64` 忙等）造流，**不含访存/张量核**；真实 kernel 的 prologue 是访存/计算，
+  与上游 tail 争的资源不同（如争 HBM 带宽 vs 争发射槽），~0.74× 天花板可能移动。
+- 只测了 pair（K=2）、均匀段；**未与 P5-3 的链式结构叠加**（链上每一级的上游占用率不同），
+  也未测 PDL 与 CUDA Graph 叠加（`docs/03` §2.3 提到可叠加）。
+- **未用 profiler 归因**：把缩水归到「下游 prologue 与满负荷上游争 SM」是合理推断，但没拆成
+  发射 / L1 / 尾延迟；也没有直接读到「后继 grid 的 block 何时**排队/上 SM**」的硬件计数。
+- `Gu` 只扫到 `cap`，**未测上游过配**（`Gu>cap`，上游自身分多个 wave）对下游触发放行时机的影响；
+  上游分波会使触发事件延后，是另一条机制，留作后续。
+- `unspecified launch` 之外的 sm90 特性（如 cluster、`cudaLaunchAttributeProgrammaticEvent`）未覆盖。
