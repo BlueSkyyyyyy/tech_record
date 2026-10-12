@@ -166,7 +166,11 @@ workspace 读 vs $o$/state 写占比~~（**已解决**，`docs/07` §6 P7-3：K2
 可整除回归逐位不变；「K 的 64 分段」经查是 FLA 同 program 内展开、非正确性约束）；~~K2 突破 2 CTA/SM 后
 L2 墙是否后移~~（**已解决**，`docs/07` §8 P7-5：不会后移——`sizeof` 被**无条件预留的 65536 B fp32 状态缓冲**
 钉死为 98,432 B，只减 pipeline stage 不动 smem；真进 3 CTA/SM 的配置必须砍 pipeline 深度，实测更慢
-`+14%~+40%`，且 `lts` 已 94% SOL、K2 是 L2 带宽 bound，占用率无可用余量）。**后续方向**：反向四个 kernel 里 B0（门控
+`+14%~+40%`，且 `lts` 已 94% SOL、K2 是 L2 带宽 bound，占用率无可用余量）；~~FLA host 税的组成~~
+（**已解决**，`docs/07` §9 P7-6：FLA 前向 host CPU 固定 ~0.82–0.86 ms、与 T 无关，拆开 =
+**12 次 Triton kernel 的 Python launch 包装**（`l2norm_fwd` 单次 77 µs，而裸 launch 仅 2.4 µs）
+\+ **~190 µs 后端 `dispatch` 派发** \+ ~75 µs 真 driver launch；GPU 计算仅 ~82 µs、裸分配 0.07 µs；
+FlashKDA 3 个 launch、host ~34 µs 且 `wall≈dev`）。**后续方向**：反向四个 kernel 里 B0（门控
 重算，`docs/06` §6.8 P6-6）、B1（状态伴随，`docs/06` §6）、B2（`wy_dqkg`，`docs/06` §6.6 P6-4）、
 B3（`intra`，`docs/06` §6.7 P6-5）**均已做成最小可运行 Triton kernel** 并三方/位级核验（B0 还额外与
 FlashKDA K1 当场写的 workspace `kGTotal` 对到 1.6e-5~8.1e-5），四条支路全覆盖；且 P6-8（`06` §6.10）

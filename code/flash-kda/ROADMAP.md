@@ -122,6 +122,13 @@
       解决 P7-2 待验证 (b)。
 - [x] **P7-4** 归因 K1「global load 4/32 bytes/sector」，解决 P7-2 待验证 (a)（静态 SASS 计数 +
       `SourceCounters` 逐行 + DRAM 占比）。
+- [x] **P7-6** 关闭 P7-1/§4 待验证「FLA host 税的组成」：用 `process_time`（+warmup）实测
+      FLA 前向 host CPU **固定 ~0.82–0.86 ms/次、与 T 无关**（T=16…2048），拆开 =
+      `chunk_kda_fwd` ~525 µs + `l2norm_fwd`×2 ~154 µs（**单次 77 µs，而裸 Triton launch 仅 2.4 µs**）
+      + `fused_beta_sigmoid` ~63 µs + autograd/dispatch 杂项 ~95 µs；`FLA_DISABLE_BACKEND_DISPATCH=1`
+      掉 ~190 µs。nsys 稳态：FLA **12 个 kernel/次**（9 `cuLaunchKernelEx`+3 `cudaLaunchKernel`，
+      driver 中位 ~6.3 µs）、FlashKDA **3 个**；结论＝那 0.8 ms 几乎全是 FLA 每 kernel 一次的 Python
+      launch 包装，与 GPU 计算（~82 µs）/autograd/分配无关（`docs/07` §9）。
 - [x] **P7-5** 关闭 P7-2/P7-4 待验证 (c)：**K2 突破 2 CTA/SM 后 L2 墙是否后移**——实验=否。
       改造 `SharedStorageK2`（fp32 状态缓冲改按 `StateFP32` 条件预留）+ 扫 pipeline stage，编译 6 个变体，
       实测占用率/ncu SOL/K2 时间。结论：smem 被无条件预留的 65536 B fp32 缓冲钉死为 98432 B（只减
@@ -158,7 +165,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）+ **FLA host 税组成归因（P7-6）**完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
   - P6-7：新增 `docs/06` §6.9 + `harness/check_bwd_e2e.py`（`harness/check_bwd_e2e.out.txt`），
     并给 `harness/check_bwd_dhu_kernel.py` 的 B1 kernel 补 `dht`（终态上游梯度）入口（`HAS_DHT` 分支）。
     **Part A**：补齐反向第 5 个 kernel **`dAv`（输出支路）**（对应 FLA `chunk_kda_bwd_kernel_dAv`，
@@ -279,12 +286,14 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
   §5.2 的 **B0/B1/B2/B3/dAv 五段已全部做成最小 kernel，P6-7 已把四段组装成端到端反向核到
   tf32 底噪，P6-8 又把整条反向直接架在 FlashKDA K1 workspace 上端到端核到 bf16 底噪**；
   剩余的是更完整的 CUTLASS/TMA + warp-specialization 版反向工程化。P7-2 遗留的 nsys
   流量拆分（P7-3 已用 ncu DRAM 计数替代、待验证 (b) 已关闭）。
   **P7-5 已用实验关闭 P7-2/P7-4 待验证 (c)**（K2 突破 2 CTA/SM 后 L2 墙不后移，见下）。
+  **P7-6 已用 `process_time`+nsys 关闭 §4 待验证「FLA host 税组成」**（0.8 ms ≈ 12 次 Triton kernel
+  的 Python launch 包装 + ~190 µs `dispatch` + ~75 µs driver launch，与 GPU/autograd/分配无关，见下）。
   - P6-6：新增 `docs/06` §6.8 + `harness/check_bwd_b0_gate.py`
     （`harness/check_bwd_b0_gate.out.txt`）。把 §5.2 的 **B0 `gate_bwd`**（对应 FLA
     `kda_gate_chunk_cumsum` `gate.py:375` + `kda_gate_bwd` `gate.py:252`）做成最小可运行 Triton
@@ -332,6 +341,24 @@
     ncu「Est. Local Speedup 81.25%」是纯启发式，被实验证伪（占用率↑反而↓）。所有变体输出与上游**逐位相同**
     （`max|dO|=0`）。**结论**：L2 墙不后移；K2 无占用率维度余量，要更快只能减 L2 流量（workspace/`v` 复用）
     或改并行结构。同步更新 `docs/08` 待验证项与性能小结。博客 post `flash-kda-07-perf` 标题更新。
+  - P7-6：`docs/07` 新增 §9「FLA 那 0.8 ms『host 税』到底花在哪」+ `harness/probe_nsys.sh`
+    （内部 `probe_nsys.py` 四模式 `micro`/`cpu`/`profile`/`loop`）+ `harness/probe_nsys.out.txt`，
+    关闭 §4 待验证「FLA host 税组成」。**主口径 `time.process_time`**（单线程下==纯 CPU，已用忙循环
+    校验 `process_time≡wall`；`wall` 在队列填满后把 CPU 阻塞也算进去、`torch.profiler` CPU 活动会放大
+    device 时间，二者都不适合）。**实测**：(a) FLA 前向 host CPU **固定 ~0.82–0.86 ms/次、与 T 无关**
+    （T=16→821.5、2048→862.2 µs），FlashKDA 对照 ~34 µs/次（**~24×**）；(b) 分解（T=1024，dispatch ON）：
+    `chunk_kda_fwd` 529 + `l2norm_fwd`×2 154（**单次 77 µs**）+ `fused_beta_sigmoid` 63 + autograd/dispatch
+    杂项 ~95；`FLA_DISABLE_BACKEND_DISPATCH=1`（`fla/ops/backends/__init__.py:28`）总量掉 ~190 µs（22%），
+    且 `dispatch.wrapper` **每次调用都重跑**（`__init__.py:167`）；(c) **裸 Triton/torch launch 仅 2.4/2.0 µs**、
+    裸 `torch.empty(_like)` 0.07 µs ⇒ 多出的几十 µs 是 FLA 在 Triton 上叠的每调用 Python 包装
+    （`fla_cache_autotune`/`CachedAutotuner`/`AutotuneKey.build`）；(d) nsys 稳态（capture-range N=200，
+    用中位数避开首个调用 2.5 ms lazy 长尾）：FLA **12 kernel/次**（9 `cuLaunchKernelEx`+3 `cudaLaunchKernel`，
+    driver 中位 ~6.3 µs）、FlashKDA **3**（~5.6 µs）；稳态 GPU kernel 合计 FLA ~82 µs vs FlashKDA ~109 µs
+    （B1T1024H4）。**结论**：0.8 ms ≈ 12 次 Triton kernel 的 Python launch 包装 + ~190 µs `dispatch`
+    + ~75 µs 真 driver launch，与 GPU 计算 / autograd / 分配无关。**踩坑**：(1) **不预热会把 Triton 首次
+    JIT+autotune 的几十 ms 摊成 3843 µs/次的假 launch 税**，必须先 warmup 再计；(2) nsys 的 CUDA API
+    **总量**被首个调用的 lazy 初始化长尾污染（`cuLaunchKernelEx` avg 183 µs 而 med 5.5 µs），要**看中位数**。
+    同步更新 `docs/08` 待验证项。
   - P7-4：`docs/07` 新增 §7「K1 那条 4/32 bytes/sector 的 global load 是谁」+ `harness/probe_k1_gload.sh`
     （`harness/probe_k1_gload.out.txt`），关闭 P7-2 待验证 (a)。**静态**（`cuobjdump -sass` 按函数切段）：
     K1 `IsVarlen=false` 只有 **1 条标量 `LDG.E`**（+ 5 条 TMA `UTMALDG` = q/k/g/beta/dt_bias），

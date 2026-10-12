@@ -205,8 +205,9 @@ FlashKDA                                 FLA chunk_kda
   派发税**；大 `B·H` 时（如 B8 T2048 H8）FlashKDA 在 **wall 与 dev 同时**领先 ~2.2×，
   是真实 GPU 收益；大 T 小 `B·H`（T=8192 H=16）因 K2 沿 T 串行、并行度只有 `B·H` 而打平。
 * **待验证**（留待后续）：
-  - FLA 的 host 税组成（Python 派发 vs Triton launch）尚未用 `nsys`/host 插桩拆开，
-    只从「wall 恒定」推断为 host-bound；
+  - ~~FLA 的 host 税组成（Python 派发 vs Triton launch）尚未用 `nsys`/host 插桩拆开，
+    只从「wall 恒定」推断为 host-bound~~——**已在 §9（P7-6）拆开**：固定 ~0.82–0.86 ms/次全在
+    host，拆为 12 次 Triton kernel 的 Python launch 包装 + ~190 µs `dispatch` + ~75 µs driver launch；
   - FLOPs/bytes 模型是下界，未计 workspace 流量；
   - FlashKDA 的 `spd(dev)<1` 区间是否可通过加大 K2 的 T 维并行（如跨 chunk 扫描/两遍法）
     消除，属实现改进问题，非本专题范围。
@@ -591,3 +592,95 @@ OPT  Est. Local Speedup: 81.25%  ... theoretical occupancy limited by shared mem
 - 因此 §5.3/§5.4 的「K2 被 smem 钉在 2 CTA/SM、per-CTA 串行延迟受限」这一**描述**成立，但它
   **不是**「还可优化 51%」的意思——K2 已经没有占用率维度的余量可挖，要更快只能减少 L2 流量
   （workspace 体积/`v` 的复用，见 §6）或改并行结构。
+
+## 9. FLA 那 0.8 ms「host 税」到底花在哪（P7-6）
+
+§2.1 观察到 FLA `chunk_kda` 的 `wall` 恒定在 **~0.86 ms**、与 T 无关，由此推断它是 host-bound；
+§4 把「host 税的组成（Python 派发 vs Triton launch）」留成待验证。本节把它拆开量到底，并给出
+FlashKDA 的对照组。复现脚本 `harness/probe_nsys.sh`（内部调 `harness/probe_nsys.py` 的
+`micro` / `cpu` / `profile` / `loop` 四种模式），原始输出 `harness/probe_nsys.out.txt`。
+平台同 §5：H100 80GB、torch 2.12、FLA 0.5.2、triton 3.6、bf16、$D=128$。
+
+### 9.1 口径：为什么这里用 `time.process_time`
+
+`wall`（event 对）在 launch 队列被填满后会把 CPU 阻塞时间算进去，`torch.profiler` 的 CPU 活动
+又会串行化并放大 device 时间（§1.2 同款问题）。本节的主口径改成 **`time.process_time()`**：
+单线程进程里它等于真实消耗的 CPU 时间、不受 GPU 队列影响；已用「纯 Python 忙循环」校验
+`process_time≡wall`（259 ms vs 259 ms）、用「大 kernel 连发」校验无后台线程干扰（6.4 µs/次）。
+所有数字都先做 10 次 warmup（Triton 的 JIT/autotune 只发生一次，**不预热会把编译时间算进去**——
+这是本节踩的坑，见 §9.5）。
+
+另外用 `nsys profile --capture-range=cudaProfilerApi` 圈出稳态区间，拿到「每次调用到底发几个
+kernel、driver 侧发一次多少钱」。
+
+### 9.2 结论一：FLA 的 host CPU 是**固定 ~0.82–0.86 ms/次**，与 T 无关
+
+`B=1, H=4`，扫 `T=16…2048`（`process_time`，纯 host CPU）：
+
+| T | 16 | 128 | 512 | 1024 | 2048 |
+|---|---|---|---|---|---|
+| FLA `chunk_kda` 前向 | 821.5 | 827.8 | 857.8 | 843.2 | 862.2 µs |
+| FlashKDA `fwd`（对照） | 34.6 | 34.2 | 35.2 | 33.5 | 33.5 µs |
+
+两者都**与 T 无关**——但相差 **~24×**。T=16 时 GPU 只要几微秒，FLA 仍要烧 0.8 ms CPU，这直接
+坐实「FLA 前向是 host-bound，瓶颈在 Python/launch 而不是计算」。FlashKDA 每次调用只烧 ~34 µs
+CPU，且它只发 2–3 个 kernel（§9.4），CPU 完全能压在 GPU 后面（所以 §2 里 `wall≈dev`）。
+
+### 9.3 结论二：这 0.8 ms 的分解（`tt=1024`，`process_time`，单位 µs/次）
+
+在 `fla.ops.kda.chunk` 上给三个顶层子调用挂计时器：
+
+| 组成 | dispatch ON | dispatch OFF | 说明 |
+|---|---|---|---|
+| `chunk_kda_fwd` | 529 | 409 | 真正的递推+一堆 Triton kernel 的 launch |
+| `l2norm_fwd`（×2） | 154（≈77/次） | 130（≈65/次） | 只归一化 q/k，GPU 端 ~1.6 µs，**host 端 77 µs** |
+| `fused_beta_sigmoid` | 63 | 45 | 一个逐元素 kernel |
+| autograd/`dispatch`/`input_guard` 等杂项 | ~95 | ~70 | `ChunkKDAFunction.forward` 自身 Python |
+| **合计** | **~841** | **~654** | |
+
+`FLA_DISABLE_BACKEND_DISPATCH=1`（`fla/ops/backends/__init__.py:28` 的 `_DISPATCH_DISABLED`，
+`fla/modules/backends/__init__.py` 复用它）能让总量掉 **~190 µs**——即 FLA 那套「每次调用遍历
+注册后端、`is_available/enabled` + `verify(...)`」的 Python 后端派发占了约 **22%**。注意它**不是**
+一次性初始化：`dispatch` 的 `wrapper` 每次调用都重跑一遍（`__init__.py:167` 起）。
+
+> 关键点：**单个 Triton kernel 的 host 成本 ≈ 77 µs**（`l2norm_fwd`），而 §9.5 的裸 launch 只要
+> **2.4 µs**。多出来的几十 µs 是 FLA 在 Triton 之上叠的每调用 Python 包装（自己的
+> `fla_cache_autotune`/`CachedAutotuner`、`AutotuneKey.build` 的 dtype 序列化等），不是驱动、不是
+> 分配（裸 `torch.empty`/`empty_like` 实测 0.07 µs）。
+
+### 9.4 结论三：nsys 稳态——FLA 发 12 个 kernel/次，FlashKDA 3 个
+
+`nsys` 稳态（capture-range，N=200；driver API 用**中位数**，因为首个调用含 lazy 初始化的
+2.5 ms 长尾）：
+
+| | kernel 数/次 | driver launch API 中位 | 稳态 GPU kernel 合计* |
+|---|---|---|---|
+| FLA `chunk_kda`（B1 T1024 H4） | **12**（9 `cuLaunchKernelEx`+3 `cudaLaunchKernel`） | ~6.3 µs/次 | ~82 µs/次 |
+| FlashKDA `fwd`（B1 T1024 H4） | **3**（`cudaLaunchKernel`） | ~5.6 µs/次 | ~109 µs/次 |
+| FLA `chunk_kda`（B8 T2048 H8） | 12 | ~5.4–5.8 µs | ~728 µs/次 |
+| FlashKDA `fwd`（B8 T2048 H8） | 3 | ~5.5 µs | ~332 µs/次 |
+
+\* 取各 kernel 的 `Med`×实例数求和。
+
+于是 0.8 ms 的账很清楚：**纯 driver 侧只需 ~75 µs**（12 次 × ~6.3 µs），GPU 计算 ~82 µs，
+剩下 **~680 µs 全是 FLA 在 Python 里、每 kernel 一次地烧掉的 launch/包装开销**——12 个 kernel
+每多一个就多一份这套开销。FlashKDA 只有 3 个 launch（且直接走 torch 的 C launch，没有 Python
+包装栈），host 侧总成本 ~34 µs，完全被 GPU 时间盖住。
+
+### 9.5 一个必须避开的坑：不预热会把 JIT 编译算成「launch 开销」
+
+第一版直接在 `process_time` 区间里连续调 200 次未预热的 kernel，量到 **3843 µs/次**的荒唐值——
+那其实是 **Triton 首次 JIT 编译 + autotune 的几十毫秒摊到 200 次里**。改成「先 warmup 10 次再计
+时」后同一 kernel 稳定在 2.3–2.4 µs。所以本节所有 host 数字都带 warmup；谁做类似测量务必先
+预热，否则会把编译一次性成本误读成稳态 launch 税。
+
+### 9.6 小结（关闭 §4 待验证「FLA host 税组成」）
+
+- FLA 前向的 ~0.8 ms host 税 ≈ **12 次 Triton kernel 的 Python launch 包装**（每次几十 µs）
+  \+ **~190 µs 后端 `dispatch` 派发** \+ ~75 µs 真正的 driver launch；**与 GPU 计算、autograd、
+  张量分配都无关**（GPU ~82 µs、裸 launch 2.4 µs、裸分配 0.07 µs）。
+- 这正是 §2.1「FLA wall 被钉在 0.86 ms」的微观来源，也解释了 §3.2「融合成一个 K1、把 12 个
+  launch 压到 2–3 个」为何在中小 shape 上能带来数量级的 wall 收益。
+- 可迁移的经验：**逐 kernel 的 Python launch 开销是 Triton 类实现做小算子融合时最容易被忽视的
+  成本**；KDA 这类「每个 chunk 一次小 kernel」的算法尤其敏感。（目标卡 CUDA 反向同理——§6 的
+  B0/B1/B2/B3 每条支路一次 launch 已是最小化。）
