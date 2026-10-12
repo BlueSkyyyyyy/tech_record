@@ -247,6 +247,28 @@
       契约非法输入被拒；性能与 torch 同速（0.84–1.09×），`b=128 h=128` 212 / `h=8 r=4096 d=1024 b=4096`
       **360 TFLOPS**。配套博客 `content/posts/mega-moe-18-einsum-mla-batched-gemm`。
 
+### P9 增量（opt-in，DeepSeek 稀疏注意力 indexer）
+
+- [x] **P9-1** DeepSeek 稀疏注意力 indexer 的 **MQA logits**（`fp8_fp4_mqa_logits` 连续 /
+      `fp8_fp4_paged_mqa_logits` 分页；**SM90 有实现，H100 可跑**）：加权 ReLU MQA 打分。
+      → `docs/19-attention-mqa-logits.md`（真实行号核对）：语义（README `:100-108`）——
+      `out_ij = Σ_h relu(<q[i,h,:], kv_j>)·w[i,h]`、KV 每 token 一个 fp32 scale、输出压缩存有效区间。
+      host `attention.hpp`：共享检查 `check_mqa_logits_q_and_weights :18-44`（`is_mx_sf==arch10 :32`、
+      weights 行 16B 对齐 `:42`、dtype `:43`）；连续 `:67-134`（`out_dtype` `:80`、`kv_sf` dtype `:92-96`、
+      `block_q=128/heads :110`、stride 1024B 对齐 `:114-117`、SM90 分派 `:124-129`）；分页 `:174-282`
+      （融合 KV 布局 `:200-207`、`from_blob` 切 KV/SF `:212-223`、`block_kv==64`、SM90 无 varlen）。
+      **WGMMA M 钉死 128**（`block_q*heads==128`，kernel `:44`）。SM90 连续 kernel `:22-321`：
+      warp 分工/barrier 计数 1:512、寄存器 32/112、persistent 调度 + 有效区间并集（`start/4*4 :139`）、
+      PDL `:155`、**Q 在 B 侧 / KV 在 A 侧**的 WGMMA `:255-263`、ReLU+权重+KV scale 的两级 warp 归约
+      （intra `:282-293` + `shfl_xor` `:298-303`）、压缩偏移写回（`- seq_k_start :306-310`）。SM90 分页
+      kernel：`split_kv=256`/`mma_m=64` → 4 math WG 各管 64 KV、`not varlen :39`、每 KV 组独立 TMA 流水
+      `:92-106`、block table 用 `shfl` 广播 `:191-198`、3D TMA 定位物理块 `:205-211`。SM100（MXFP4/MXFP8、
+      varlen、`schedule_meta`、sparse top-k 块）**仅分析**。H100 实测
+      `harness/exp_mqa_logits.{py,sh,out.txt}`：连续 `vs_sim`（隔离 FP8 量化）~2e-3、`vs_ref` 3–5e-2、
+      `-inf` 掩码逐位一致、20 次重复逐位相等；性能 H=64,D=128 达 **497 TFLOPS**（D=64 掉到 316）；
+      分页 3 组 `vs_sim` ~2e-3、230–370 TFLOPS；6 项契约非法输入全部按预期被拒（行号见 `attention.hpp`）。
+      配套博客 `content/posts/mega-moe-19-attention-mqa-logits`（索引页新增第 19 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -271,25 +293,28 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0/P1/P2/P3/P4/P5/P6 全部完成；P7-1/P7-2、P8-1/P8-2 完成。**
-  本轮 P8-2：新建 `docs/18-einsum-mla-batched-gemm.md`（+`harness/exp_einsum_mla.{py,sh,out.txt}`）
-  ——拆解 einsum 家族的**投影分支** `bhr,hdr->bhd` / `bhd,hdr->bhr`（**有 SM90 实现，H100 可跑**），
-  即 MLA 风格「每个头一个 GEMM、头当 batch」的 batched GEMM：`(m,n,k)=(b,d,r)` / `(b,r,d)`、
-  `num_groups=h`、`GemmType::Batched`；头编码进 **3D TMA 的第三维**（`runtime_utils.hpp:161-202`）
-  + kernel `batch_idx`（`sm90_bf16_gemm.cuh:186-199`），写回 `SM90_TMA_STORE_3D/REDUCE_ADD_3D`
-  （`:374-379`）；两条表达式只是 `(m,n,k)` 角色 + B 的 major（K / MN）不同；Batched 禁
-  multicast（`heuristics/sm90.hpp:63-67`）。FP8 变体 `bhd,hdr->bhr`/`bhd,bhr->hdr` 与 SM100 分支
-  **仅分析**。H100 实测：16 组形状 bf16 输出与 `torch.einsum` **逐位相等**（fp64 relerr 2–3.5e-3）、
-  头独立、`D=C+A@B`（TMA reduce-add）、**带 padding 权重 `fy[:,:,:r]` 与连续权重逐位相等**、
-  确定性开关实测切 kernel（nvjet ↔ 自家 kernel）、性能与 torch 同速（0.84–1.09×，最高 360 TFLOPS）。
-  配套博客 `content/posts/mega-moe-18-einsum-mla-batched-gemm`（索引页新增第 18 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P8 已完成。后续若继续（均为增量、非承诺）：
-  ① **einsum 家族 FP8 投影**：`fp8_einsum` 的 `bhd,hdr->bhr` / `bhd,bhr->hdr`（arch10 专属，
+- 当前进度：**P0/P1/P2/P3/P4/P5/P6 全部完成；P7-1/P7-2、P8-1/P8-2、P9-1 完成。**
+  本轮 P9-1：新建 `docs/19-attention-mqa-logits.md`（+`harness/exp_mqa_logits.{py,sh,out.txt}`）
+  ——拆出 DeepSeek 稀疏注意力 **indexer 的 MQA logits**（`fp8_fp4_mqa_logits` 连续 /
+  `fp8_fp4_paged_mqa_logits` 分页；**SM90 有实现，H100 可跑**）。语义
+  `out_ij = Σ_h relu(<q[i,h,:], kv_j>)·w[i,h]`（README `:100-108`）、KV 每 token 一个 fp32 scale、
+  输出按有效区间压缩。host `attention.hpp` 三类检查 + 连续/分页两入口；SM90 连续 kernel
+  **Q 在 B 侧 / KV 在 A 侧**的 WGMMA（M 钉死 128 = `block_q*heads`）→ ReLU/权重/KV scale 的
+  两级 warp 归约（intra + `shfl_xor`）→ 压缩偏移写回；SM90 分页 = 每 math WG 一个 64-KV 子块 +
+  3D TMA 物理块寻址 + `shfl` 广播 block table。MXFP4/MXFP8、varlen、`schedule_meta`、
+  sparse top-k 块均为 SM100 专属（**仅分析**）。H100 实测：连续 `vs_sim` ~2e-3（隔离量化）、
+  `vs_ref` 3–5e-2、掩码逐位一致、重复逐位相等，H=64,D=128 **497 TFLOPS**；分页 230–370 TFLOPS；
+  6 项契约非法输入全部被拒。配套博客 `content/posts/mega-moe-19-attention-mqa-logits`
+  （索引页新增第 19 篇）。Hugo 构建 0 ERROR。
+- **下一步**：P0~P9 已完成。后续若继续（均为增量、非承诺）：
+  ① **signed attention 系列**：`fp8_fp4_mqa_logits` 的 SM100 MXFP4/MXFP8、`get_mqa_logits_metadata`
+  负载均衡调度、`fp8_fp4_sparse_mqa_logits`（top-k 块）、`fp8_fp4_paged_sparse_mqa_logits`
+  （arch10 专属，仅分析；sparse 版还有 SM90 可试的部分吗需查）；
+  ② **einsum 家族 FP8 投影**：`fp8_einsum` 的 `bhd,hdr->bhr` / `bhd,bhr->hdr`（arch10 专属，
   仅分析；`bhr,hdr->bhd` 的 fp8 版 SM90 可试跑）；
-  ② **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
-   并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）；
-  ③ **Mega MoE 端到端**：需 SM100 机器，当前不可行；
-  ④ attention 系列（`fp8_fp4_mqa_logits` 等，DeepSeek 稀疏注意力）。
+  ③ **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
+  并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）；
+  ④ **Mega MoE 端到端**：需 SM100 机器，当前不可行。
   若无新指令，可视为专题完结。
 
   （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。
