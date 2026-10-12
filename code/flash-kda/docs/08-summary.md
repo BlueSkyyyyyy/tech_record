@@ -128,8 +128,10 @@ $\bar S_{\text{out}}^{(c-1)}={q^{\text{dec}}}^\top\bar o+E^{\text{tot}}\odot\bar
 E^{\text{tot}},P,M_{qk}$），只缺 `beta`/门 logits → 补轻量 **B0 门控重算**，再落三个 GEMM kernel：
 **B3 intra**（token 并行，复用 K1 模板）/ **B2 dqkg**（per-tile，吃 B1 的 $\bar S$）/
 **B1 state-adjoint**（head 并行，**直接镜像前向 K2 的八个 Phase**，只是逆序扫）。
-B1 已做成最小可运行 Triton kernel：与 FLA `dhu` 逐行同构、实测 **1e-5**（tf32 底噪），
-状态伴随 **bf16 存储可行**（受控消融 ~2.5e-3，落 bf16 GEMM 底噪内）。
+**B1/B2/B3 均已做成最小可运行 Triton kernel**并位级核验：B1 与 FLA `dhu` 逐行同构、实测 **1e-5**
+（tf32 底噪），状态伴随 **bf16 存储可行**（受控消融 ~2.5e-3）；B2 `wy_dqkg` 与 FLA **逐位相同**
+（六项梯度 5.8e-4~2.1e-3 = tf32 底噪）；B3 `intra` 的 `dq/dk` 与 FLA **逐位相同**、`db/dg` ~1e-7
+（六项 3.0e-4~8.8e-4 = tf32 底噪），三者含非整除 T。
 
 ## 7. 踩坑速查
 
@@ -162,6 +164,7 @@ workspace 读 vs $o$/state 写占比~~（**已解决**，`docs/07` §6 P7-3：K2
 L2 墙是否后移~~（**已解决**，`docs/07` §8 P7-5：不会后移——`sizeof` 被**无条件预留的 65536 B fp32 状态缓冲**
 钉死为 98,432 B，只减 pipeline stage 不动 smem；真进 3 CTA/SM 的配置必须砍 pipeline 深度，实测更慢
 `+14%~+40%`，且 `lts` 已 94% SOL、K2 是 L2 带宽 bound，占用率无可用余量）。**后续方向**：反向三个
-GEMM 里 B1（状态伴随，`docs/06` §6）、B2（`wy_dqkg`，`docs/06` §6.6 P6-4）已做成最小可运行 Triton
-kernel 并三方对拍；仅剩 **B3 `intra`**（块内 $A$ 反向）未落地，加上完整的 CUTLASS/TMA 版 B0–B3
-工程化，属更大工程，留待有明确需求时再做。
+GEMM 里 B1（状态伴随，`docs/06` §6）、B2（`wy_dqkg`，`docs/06` §6.6 P6-4）、B3（`intra`，`docs/06`
+§6.7 P6-5）**均已做成最小可运行 Triton kernel**并三方/位级对拍，三条支路全覆盖；剩余的是把最小
+kernel 工程化为 CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、`CHUNK=16`）
+与 B0 门控重算 kernel，属更大工程，留待有明确需求时再做。

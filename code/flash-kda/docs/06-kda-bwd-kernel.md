@@ -498,6 +498,98 @@ $P/M_{qk}/k^{\text{dec}}/q^{\text{dec}}/k^{\text{rest}}/E^{\text{tot}}$）对拍
 TileLang 后端，用 bf16 输入（fp32 会撞上面的 unsupported 配置）。这也提醒：**文档 `06` §3 精读的
 Triton 代码在运行期不一定是被执行的那一份**——精读与实测要同时交代后端。
 
+### 6.7 P6-5：最小可运行 B3（`intra`）kernel——`dq/dk/dβ/dg` 的块内回传实测
+
+P6-4 之后，§5.2 的三段 GEMM 里只剩 **B3 `bwd_intra`**（FLA `chunk_kda_bwd_kernel_intra`，
+`chunk_intra.py:395-667`）没做成最小 kernel。它吃 `dAv`+`wy_dqkg` 产出的两张块内矩阵
+`dAqk`（$=\operatorname{tril}(\bar M_{qk}\cdot\text{scale})$）、`dAkk`（$A_L/\bar L$ 链的伴随），
+把它们回传到块内的 `dq, dk, dbeta, dg`（`05` §7 式 (7.6)、(7.8)、(7.10) 的 $q/k$ 链）。本节把它
+做成最小可运行 Triton kernel 并三方对拍。证据：`harness/check_bwd_intra_kernel.py` /
+`harness/check_bwd_intra_kernel.out.txt`。
+
+#### 6.7.1 kernel 契约与四个阶段（真实行号）
+
+grid `(NK*NC, NT, B*HV)`（`chunk_intra.py:928`），`BC=16`、`BK=min(32,2^⌈log2 K⌉)`；
+每个 program 处理**一个 query 子块**（`BC=16` 行）的一段 K。核心是四个阶段：
+
+| 阶段 | 行号 | 作用 |
+|---|---|---|
+| A 前序整块 | `473-496` | $\bar q^{dec}{+}{=}\bar A_{qk}k^{inv}$、$\bar k^{dec}{+}{=}\bar A_L k^{inv}$（式 7.8） |
+| B 对角块 | `534-546` | 同上，但对角子块按 `m_i=o_i≥j` 因果裁剪，逐 `j` 展开 |
+| C 后继整块 | `571-599` | $\bar k^{inv}{+}{=}\bar A_{qk}^\top q^{dec}$（**转置读**，见下），再 $E$ 缩放 |
+| D 对角块 | `639-660` | 同上，按 `m_i=o_i≤j` 反向裁剪 |
+
+末尾合成（`662-667`）：`dg = \bar q^{dec}\odot q + (\beta\bar k^{dec}-\bar k^{inv})\odot k + dg_{in}`、
+`dk = \beta\bar k^{dec}+\bar k^{inv}+dk_{in}`。注意 `db` 由 `b_dk2*b_k` 行和得到（`551`），且这是
+**逐 token 标量在 `NK` 个 K-块间求和**——FLA 用 `db2[NK,...].sum(0)`（`930/957`）避免写冲突。
+
+#### 6.7.2 三个容易踩的点（都靠对拍抓出来的）
+
+1. **漏了 `b_dg2 = b_q * b_dq2`（`chunk_intra.py:558`）。** 这是衰减链里 $\bar g{+}{=}\bar q^{dec}\odot q$
+   （式 7.10 的 $\bar E$ 项）。第一版漏掉它，指纹非常干净：**`dq/dk/db` 全对、只有 `dg` 大面积错
+   （`max_rel≈1.0`）**；补上后 `dg` 立刻归位。且它必须用**加回上游 `dq` 之前**的 `b_dq2`（`558` 在
+   `559` 之前），顺序写反会引入上游累积量的污染。
+2. **`Part C/D` 对 `dAqk/dAkk` 是「转置读」。** A/B 段按下标 `dAqk[query, key_local]` 直读
+   （`482`），而 C/D 段写成 `dAqk + (i_i*BC+o_i)[:,None] + o_j[None,:]*(HV*BT)`（`580`）——即
+   行是**块内局部列**、列是**绝对 token**，等价于取 $\bar A_{qk}^\top$。这里的关键坑是：**行下标
+   是 chunk-内局部量 `i_i*BC+o_i`，不是绝对量 `i_ti`**。第一版误用 `i_ti`（= `i_t*BT+i_i*BC`），
+   结果**只有第 0 个 chunk 对、其余 chunk 全错**（`dk` 错到 $\mathcal{O}(1)$）——因为 `i_t=0`
+   时两者恰好相等。这再次说明「单 chunk 测试会漏跨块/绝对-局部混淆」的 bug。
+3. **`db` 的跨 K-块归约。** 本 kernel 用 `tl.atomic_add` 落到一张 `db` 上（`intra_triton`），
+   与 FLA 的 `[NK,...].sum(0)` 数学等价但**加法顺序不同**，故 `db` 不是逐位相同而是停在
+   ~1e-7（fp32 尾数）。
+
+#### 6.7.3 三方对拍（fp32）
+
+`Part A` 是纯 torch 逐块实现（ieee fp32，`intra_torch`），`Part B` 是本 kernel，参照 FLA 的 Triton
+内核（`FLA_DISABLE_BACKEND_DISPATCH=1` 钉回文档所读实现，同 §6.6）。实测
+（`check_bwd_intra_kernel.out.txt`）：
+
+| config | 对比 | `dq` | `dk` | `db` | `dg` |
+|---|---|---|---|---|---|
+| B1 T256 H2 K64 | torch vs FLA（rel） | 5.5e-4 | 5.8e-4 | 6.0e-4 | 6.2e-4 |
+| | **Triton vs FLA** | **0** | **0** | 1.3e-7 | 8.2e-8 |
+| B2 T512 H4 K128 | torch vs FLA（rel） | 8.8e-4 | 7.0e-4 | 5.6e-4 | 6.2e-4 |
+| | **Triton vs FLA** | **0** | **0** | 1.1e-7 | 1.1e-7 |
+| B1 T1024 H8 K128 | torch vs FLA（rel） | 6.6e-4 | 7.8e-4 | 7.6e-4 | 6.9e-4 |
+| | **Triton vs FLA** | **0** | **0** | 1.0e-7 | 6.3e-8 |
+| B1 T64 H1 K32 | torch vs FLA（rel） | 5.3e-4 | 3.8e-4 | 3.0e-4 | 6.4e-4 |
+| | **Triton vs FLA** | **0** | **0** | 3.9e-8 | 5.2e-8 |
+| B1 T250 H3 K64（非整除）| **Triton vs FLA** | **0** | **0** | 1.1e-7 | 8.3e-8 |
+| B2 T513 H2 K64（非整除）| **Triton vs FLA** | **0** | **0** | 7.1e-8 | 7.1e-8 |
+
+两条结论：
+
+- **Part A 的 ~5e-4~9e-4 就是 `tl.dot` 的 tf32 误差**（torch 走 ieee fp32、FLA 走 tf32），与
+  `05`/§6.2/§6.6 的底噪同量级，说明 `intra_torch` 与 kernel **代数完全一致**（任一转置/`m_i`
+  写反都会是 $\mathcal{O}(1)$ 误差）。
+- **Part B 的 `dq/dk` 逐位相同（max_abs=0）**，`db/dg` 停在 ~1e-7；**非整除 T（250/513）也成立**，
+  即 `intra` 与 `wy_dqkg` 一样是 **per-query-subblock 独立**的分块，不依赖 `T` 整除（与 B1 的 host
+  侧非整除 bug 不同，§6.5）。至此三条 GEMM 支路（B1/B2/B3）全部有了位级可核验的最小 kernel。
+
+#### 6.7.4 精度底噪：bf16 操作数（Part C）
+
+把全部输入量化到 bf16 再喂本 kernel（模拟目标卡 bf16 GEMM，`tl.dot` 操作数 cast 到 bf16、
+累加 fp32），对 fp32 FLA 参照：
+
+| config | `dq` | `dk` | `db` | `dg` |
+|---|---|---|---|---|
+| B1 T256 H2 K64 | 4.8e-2 | 3.0e-2 | 1.1e-2 | 2.0e-2 |
+| B2 T512 H4 K128 | 2.8e-2 | 3.5e-2 | 2.1e-2 | 2.2e-2 |
+
+全部落在 **1.1e-2~4.8e-2**——比 §6.6 的 B2（`dq/dv/db/dA` 2.3e-3~6.4e-3）高约一个量级，因为
+`intra` 的 A/B/C/D 四段全是**指数衰减因子直接乘在操作数上**（`exp2(g-g)`），bf16 量化被指数放大，
+正是 `chunk_intra.py:597` 那条 `# important to not use bf16` 注释要防的。**结论**：B3 必须保
+fp32/tf32，目标卡的设计（§5.2）也据此把门控/衰减链留在 fp32。
+
+#### 6.7.5 计时（Part D，朴素实现）
+
+`triton.testing.do_bench`（naive，`num_warps=4, num_stages=1`，`BC=16`、`BK=32`）：
+B1 T512 H4 K128 → **86.9 µs**（FLA 86.4 µs）；B2 T2048 H8 K128 → **591.1 µs**（FLA 592.0 µs）。
+本 kernel 与 FLA 基本同速（差 <1%），符合「同结构」预期；它不是性能交付，价值在把 **B3 的
+契约、四个阶段、转置/绝对-局部混淆的坑、bf16 误差底噪**钉死，供目标卡 CUDA B3（`CHUNK=16`、
+复用 K1 workspace 的 $P/M_{qk}/k^{dec}/q^{dec}/k^{rest}/E^{tot}$）对拍。
+
 ## 7. 小结与下一步
 
 - FLA `chunk_kda` 反向的 5 个 Triton kernel 与 `05` §7 的分块反向**逐式对应**：`dAv`=输出支路、
@@ -516,8 +608,17 @@ Triton 代码在运行期不一定是被执行的那一份**——精读与实�
   T）**；bf16 操作数下 `dq/dv/db/dA` **2.3e-3~6.4e-3** 而 `dk/dg` 抬到 **3.3e-2~5.0e-2**
   （门控/衰减链对量化敏感，印证 §3.3 的「不要 bf16」注释）；并记录运行期 FLA 路由到 TileLang
   后端（fp32 路径编译失败）这一实测陷阱。
+- §6.7（P6-5）已把 **B3 `intra`** 做成最小可运行 Triton kernel：torch 独立参考 vs FLA 内核
+  `dq/dk/db/dg` **3.0e-4~8.8e-4**（=tf32 底噪，证明代数一致），本 kernel vs FLA 的 **`dq/dk`
+  逐位相同、`db/dg` ~1e-7（atomic-add 顺序）**，**含非整除 T**；bf16 操作数下四项抬到
+  **1.1e-2~4.8e-2**（指数衰减因子直接作用于操作数，印证 `chunk_intra.py:597` 的「不要 bf16」），
+  朴素计时与 FLA 同速。三个踩坑点：漏 `b_dg2=b_q*b_dq2`（指纹=dq/dk/db 对、仅 dg 错）、
+  Part C/D 转置读时把 chunk-局部行下标误写成绝对 `i_ti`（指纹=只有第 0 chunk 对）、
+  `db` 跨 K-块的 atomic 归约。至此 §5.2 的 **B1/B2/B3 三条 GEMM 支路全部有最小可运行 kernel**。
 
 下一步：
 
-- P7：FlashKDA 前向 CUPTI 计时与 `ncu` 剖析（§5 的 B3 intra 与 CUTLASS/TMA 版 B1/B2/B0
-  属更大工程，留待有明确需求时再做；P6-2 的 B1 与 P6-4 的 B2「最小 kernel」目标已达成）。
+- P7：FlashKDA 前向 CUPTI 计时与 `ncu` 剖析。**P6 的三条 GEMM 支路（B1 状态伴随 / B2 `wy_dqkg`
+  / B3 `intra`）均已做成最小可运行 Triton kernel 并与 FLA 位级核验**；§5.2 剩余的是把这些
+  最小 kernel **工程化**为 CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、
+  `CHUNK=16`），以及 B0 门控重算 kernel——属更大工程，留待有明确需求时再做。

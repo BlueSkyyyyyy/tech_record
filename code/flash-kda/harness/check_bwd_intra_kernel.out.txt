@@ -1,0 +1,103 @@
+device: NVIDIA H100 80GB HBM3 torch 2.12.0a0+0291f960b6.nv26.04.48445190
+
+=== B=1 T=256 H=2 K=64 BT=64 BC=16 seed=0 dtype=torch.float32 ===
+  -- Part A: torch ref vs FLA kernel --
+  dq                     max_abs=7.365e-04  max_rel=5.517e-04  ref_max=1.335e+00
+  dk                     max_abs=9.196e-04  max_rel=5.831e-04  ref_max=1.577e+00
+  db                     max_abs=5.464e-04  max_rel=5.959e-04  ref_max=9.169e-01
+  dg                     max_abs=2.229e-04  max_rel=6.160e-04  ref_max=3.619e-01
+  -- Part B: Triton vs FLA kernel --
+  dq                     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.335e+00
+  dk                     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.577e+00
+  db                     max_abs=1.192e-07  max_rel=1.300e-07  ref_max=9.169e-01
+  dg                     max_abs=2.980e-08  max_rel=8.235e-08  ref_max=3.619e-01
+  -- Part B2: Triton vs torch ref --
+  dq                     max_abs=7.365e-04  max_rel=5.516e-04  ref_max=1.335e+00
+  dk                     max_abs=9.196e-04  max_rel=5.830e-04  ref_max=1.577e+00
+  db                     max_abs=5.463e-04  max_rel=5.959e-04  ref_max=9.169e-01
+  dg                     max_abs=2.229e-04  max_rel=6.160e-04  ref_max=3.619e-01
+
+=== B=2 T=512 H=4 K=128 BT=64 BC=16 seed=1 dtype=torch.float32 ===
+  -- Part A: torch ref vs FLA kernel --
+  dq                     max_abs=1.250e-03  max_rel=8.822e-04  ref_max=1.417e+00
+  dk                     max_abs=9.431e-04  max_rel=7.048e-04  ref_max=1.338e+00
+  db                     max_abs=3.862e-04  max_rel=5.628e-04  ref_max=6.862e-01
+  dg                     max_abs=1.631e-04  max_rel=6.218e-04  ref_max=2.624e-01
+  -- Part B: Triton vs FLA kernel --
+  dq                     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.417e+00
+  dk                     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.338e+00
+  db                     max_abs=8.941e-08  max_rel=1.303e-07  ref_max=6.862e-01
+  dg                     max_abs=2.980e-08  max_rel=1.136e-07  ref_max=2.624e-01
+  -- Part B2: Triton vs torch ref --
+  dq                     max_abs=1.250e-03  max_rel=8.815e-04  ref_max=1.418e+00
+  dk                     max_abs=9.431e-04  max_rel=7.047e-04  ref_max=1.338e+00
+  db                     max_abs=3.862e-04  max_rel=5.625e-04  ref_max=6.866e-01
+  dg                     max_abs=1.631e-04  max_rel=6.213e-04  ref_max=2.625e-01
+
+=== B=1 T=250 H=3 K=64 BT=64 BC=16 seed=2 dtype=torch.float32 ===
+  (torch ref skipped: T not divisible by BT -> kernel-only check)
+  -- Part B: Triton vs FLA kernel --
+  dq                     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.505e+00
+  dk                     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.692e+00
+  db                     max_abs=8.941e-08  max_rel=1.126e-07  ref_max=7.943e-01
+  dg                     max_abs=2.980e-08  max_rel=8.280e-08  ref_max=3.599e-01
+
+=== B=1 T=1024 H=8 K=128 BT=64 BC=16 seed=3 dtype=torch.float32 ===
+  -- Part A: torch ref vs FLA kernel --
+  dq                     max_abs=8.441e-04  max_rel=6.563e-04  ref_max=1.286e+00
+  dk                     max_abs=1.108e-03  max_rel=7.790e-04  ref_max=1.422e+00
+  db                     max_abs=5.608e-04  max_rel=7.623e-04  ref_max=7.356e-01
+  dg                     max_abs=1.638e-04  max_rel=6.892e-04  ref_max=2.376e-01
+  -- Part B: Triton vs FLA kernel --
+  dq                     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.286e+00
+  dk                     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.422e+00
+  db                     max_abs=5.960e-08  max_rel=8.102e-08  ref_max=7.356e-01
+  dg                     max_abs=1.490e-08  max_rel=6.271e-08  ref_max=2.376e-01
+  -- Part B2: Triton vs torch ref --
+  dq                     max_abs=8.441e-04  max_rel=6.563e-04  ref_max=1.286e+00
+  dk                     max_abs=1.108e-03  max_rel=7.789e-04  ref_max=1.423e+00
+  db                     max_abs=5.608e-04  max_rel=7.620e-04  ref_max=7.359e-01
+  dg                     max_abs=1.638e-04  max_rel=6.891e-04  ref_max=2.376e-01
+
+=== B=2 T=513 H=2 K=64 BT=64 BC=16 seed=4 dtype=torch.float32 ===
+  (torch ref skipped: T not divisible by BT -> kernel-only check)
+  -- Part B: Triton vs FLA kernel --
+  dq                     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.539e+00
+  dk                     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.540e+00
+  db                     max_abs=6.706e-08  max_rel=7.057e-08  ref_max=9.502e-01
+  dg                     max_abs=2.980e-08  max_rel=7.113e-08  ref_max=4.190e-01
+
+=== B=1 T=64 H=1 K=32 BT=64 BC=16 seed=5 dtype=torch.float32 ===
+  -- Part A: torch ref vs FLA kernel --
+  dq                     max_abs=9.604e-04  max_rel=5.342e-04  ref_max=1.798e+00
+  dk                     max_abs=8.485e-04  max_rel=3.824e-04  ref_max=2.219e+00
+  db                     max_abs=4.590e-04  max_rel=3.023e-04  ref_max=1.518e+00
+  dg                     max_abs=3.660e-04  max_rel=6.411e-04  ref_max=5.710e-01
+  -- Part B: Triton vs FLA kernel --
+  dq                     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.798e+00
+  dk                     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.219e+00
+  db                     max_abs=5.960e-08  max_rel=3.926e-08  ref_max=1.518e+00
+  dg                     max_abs=2.980e-08  max_rel=5.220e-08  ref_max=5.710e-01
+  -- Part B2: Triton vs torch ref --
+  dq                     max_abs=9.604e-04  max_rel=5.342e-04  ref_max=1.798e+00
+  dk                     max_abs=8.485e-04  max_rel=3.824e-04  ref_max=2.219e+00
+  db                     max_abs=4.590e-04  max_rel=3.023e-04  ref_max=1.518e+00
+  dg                     max_abs=3.660e-04  max_rel=6.411e-04  ref_max=5.710e-01
+
+########## Part C: bf16 operand floor ##########
+
+--- bf16 operands B=1 T=256 H=2 K=64 ---
+  dq                     max_abs=6.404e-02  max_rel=4.797e-02  ref_max=1.335e+00
+  dk                     max_abs=4.660e-02  max_rel=2.955e-02  ref_max=1.577e+00
+  db                     max_abs=1.020e-02  max_rel=1.112e-02  ref_max=9.169e-01
+  dg                     max_abs=7.345e-03  max_rel=2.030e-02  ref_max=3.619e-01
+
+--- bf16 operands B=2 T=512 H=4 K=128 ---
+  dq                     max_abs=3.955e-02  max_rel=2.791e-02  ref_max=1.417e+00
+  dk                     max_abs=4.687e-02  max_rel=3.503e-02  ref_max=1.338e+00
+  db                     max_abs=1.461e-02  max_rel=2.129e-02  ref_max=6.862e-01
+  dg                     max_abs=5.716e-03  max_rel=2.178e-02  ref_max=2.624e-01
+
+########## Part D: timing (naive) ##########
+  B=1 T=512 H=4 K=128: triton 86.9us  fla 86.4us
+  B=2 T=2048 H=8 K=128: triton 591.1us  fla 592.0us
