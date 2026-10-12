@@ -73,7 +73,11 @@
 - [x] **P3-1** 模板参数与 block config（`get_block_config_for_mega_moe`）：BLOCK_M/N/K、cluster、stage、
       thread 划分（dispatch / non-epilogue / epilogue）。
       → `docs/03-mega-moe-kernel.md`（真实行号核对）；H100 对拍 `harness/exp_block_config.py` / `.out.txt`。
-- [ ] **P3-2** warp specialization 与同步（mbarrier）；TMA 载入激活/权重/scale。
+- [x] **P3-2** warp specialization 与同步（mbarrier）；TMA 载入激活/权重/scale。
+      → `docs/09-mega-moe-mbarrier.md`（真实行号核对）：五类 warp 两层解耦、全 mbarrier 清单与 init 计数、
+      `advance_pipeline` 相位翻转 / 生产者 phase=1 约定、A/B loader 坐标与 2-CTA multicast、task 槽双缓冲
+      与「仅 epilogue release」、跨 SM/rank barrier、L1→L2 位图依赖；H100 真机验证相位约定 +
+      NSTAGES=1/4 流水重叠（`src/mbarrier_pipeline.cu`、`harness/exp_mbarrier_pipeline.{sh,out.txt}`）。
 - [ ] **P3-3** linear1 → SwiGLU → linear2 的 MMA 与 epilogue（tcgen05、UE8M0 scale、FP8xFP4）。
 - [ ] **P3-4** dispatch / combine 段与 NVLink 读写；locality domain 的作用。
 
@@ -117,7 +121,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0 全部完成（P0-1/2/3/4）；P1-1、P1-2 完成（P1 全部完成）；P2 全部完成；P3-1 完成。**
+- 当前进度：**P0 全部完成（P0-1/2/3/4）；P1-1、P1-2 完成（P1 全部完成）；P2 全部完成；P3-1、P3-2 完成。**
+  P3-2：新建 `docs/09-mega-moe-mbarrier.md`——**两层解耦**（TMA↔MMA 的 full/empty，MMA↔epilogue 的
+  tmem_full/empty）+ 调度器 task 槽（task_info full/empty）的完整 mbarrier 清单与 init 计数
+  （`full.init(2*2)` / `empty.init(1)` / `tmem_empty.init(2*kNumEpilogueThreads)`，`kernel:209-285`）、
+  `advance_pipeline` 相位翻转（`:307-314`）与「生产者 phase=1（buffer 初空）」约定、
+  A/B loader 的坐标与 2-CTA multicast + FP4 half-bytes（`:690-818`）、MMA 的 UTCCP/UMMA/commit
+  （`:819-938`）、epilogue 的 `tmem_full.wait`→`release_task_info`（`:986-990`）与
+  「仅 epilogue release」的执行顺序论证、跨 SM `grid_sync` / 跨 rank `nvlink_barrier`
+  （`comm/barrier.cuh:33-92`）、L1→L2 位图依赖（`scheduler:140-166`）。H100 真机实验
+  `src/mbarrier_pipeline.cu`（`harness/exp_mbarrier_pipeline.sh` + `.out.txt`）：**实测坐实**相位约定
+  （全新 mbarrier `try_wait(parity=1)` 立即成功、`(0)` 阻塞），并量到多级流水重叠——96 MiB
+  `cp.async.bulk` 在 NSTAGES 1→4 下串行 5.58→3.44 ms（带校验 1.62×），去校验 2.29→0.79 ms
+  （2.88×，41→118 GiB/s，延迟受限）。配套博客文章 `content/posts/mega-moe-06-mbarrier`。
   P3-1：新建 `docs/03-mega-moe-kernel.md`——一次 launch 的物理坐标（`grid=num_sms`、
   `cluster=2`、512 线程/16 warp，`impls/sm100_fp8_fp4_mega_moe.hpp:149-198`）、BLOCK_N=128/BLOCK_K=128(fp8,bf16=64)、
   BLOCK_M 启发式（`heuristics/mega_moe.hpp:88-127`，成本模型「M block 重载权重 ~128 行」+ 路由 `+sqrt` 余量）、
@@ -151,11 +167,12 @@
   （`smxx_layout.hpp:133`、kernel `:774`/`:788`）；L2 权重不交错只转 SF。实验
   `harness/exp_weight_transform.py`（+`.out.txt`，H100）：行号映射/SwiGLU 等价/UTCCP 映射全部 0 误差，
   与 deep_gemm 内部实现逐元素一致。**P2 全部完成。**
-- **下一步：P3-2** 继续精读 warp specialization 与同步——梳理 `sm100_fp8_fp4_mega_moe.cuh` 中
-  dispatch warps ↔ TMA loader / MMA / epilogue warps 的 mbarrier 生产者-消费者关系（full/empty barrier
-  的 phase 翻转、`tmem_full/empty_barriers`、task_info full/empty），以及 TMA 载入激活/权重/scale 的
-  坐标与 2-CTA multicast。随后 P3-3（tcgen05/UTCCP/SwiGLU）、P3-4（dispatch/combine NVLink）。
-  H100 数值对拍（P4-4，用 SM90 `nt` wgrad 替代 SM100 `tn`）可与 P3 并行推进。
+- **下一步：P3-3** 继续精读计算本体——`sm100_fp8_fp4_mega_moe.cuh` 里 **tcgen05 MMA 的
+  `SM100_MMA_MXF8F6F4_2x1SM_SS` 调用与 UMMA descriptor / instruction descriptor**、
+  **UTCCP 把 SFA/SFB 从 smem 搬进 TMEM**（`kernel:894-907`）、**L1 的 in-place SwiGLU**
+  （`:1058-1134`，配合 P2-1 的 gate/up 交错权重）、**FP8xFP4 的 UE8M0 scale 索引**、
+  L2 epilogue 的 BF16 输出与 combine 写回。随后 P3-4（dispatch/combine 的 NVLink 读写与
+  locality domain）。H100 数值对拍（P4-4，用 SM90 `nt` wgrad 替代 SM100 `tn`）可与 P3 并行推进。
 
 ## 阻塞
 

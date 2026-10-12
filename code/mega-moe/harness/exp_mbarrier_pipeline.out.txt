@@ -1,0 +1,8 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+[probe] fresh mbarrier: try_wait(parity=0)=0 try_wait(parity=1)=1
+[probe] after 1 arrive: try_wait(parity=0)=1 try_wait(parity=1)=0
+[setup] per-stage=48 KiB iters=2048 total=96.0 MiB
+[pipe NSTAGES=1 verify=1] best=5.580 ms  eff_bw=16.8 GiB/s  checksum_ok=yes
+[pipe NSTAGES=4 verify=1] best=3.439 ms  eff_bw=27.3 GiB/s  checksum_ok=yes
+[pipe NSTAGES=1 verify=0] best=2.287 ms  eff_bw=41.0 GiB/s  checksum_ok=yes
+[pipe NSTAGES=4 verify=0] best=0.794 ms  eff_bw=118.1 GiB/s  checksum_ok=yes
