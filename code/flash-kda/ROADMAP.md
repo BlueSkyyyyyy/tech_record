@@ -249,8 +249,22 @@
   流水延迟、与 smem 冲突无关；`Eligible Warps/Scheduler` 仍 0.15–0.26。**结论（修正 §19.5）**：
   bank conflict 是 **~1.2× 分项、不是量级项**；量级差（xFLA 4.9–8×）来自**并行度/mma 密度**（tensor
   2.3% vs FLA 14%）。目标卡 CUDA B1 优先级改为：**(1) 先补并行度/warp-specialization（量级项）、
-  (2) bank conflict 用零成本 XOR swizzle/`ldmatrix` 而非 padding（padding 的 +29% smem 会反噬占用率）、
-  (3) 预取保底**。
+    (2) bank conflict 用零成本 XOR swizzle/`ldmatrix` 而非 padding（padding 的 +29% smem 会反噬占用率）、
+    (3) 预取保底**。
+- [x] **P7-18** 在动「K2 形状重写」之前，用**最便宜的受控实验**检验 §20.6 第一优先级「并行度/mma 密度
+    是量级项」里有多少是**免费的**：同一份 `b1_cuda_probe.cu` 上加两个免费旋钮——(A) warp 内 mma ILP
+    （编译宏 `B1_ILP1`/`B1_ILP2`，把 op1/op2·op3 的 `for m: for kk` 换成 `for kk: for m` 暴露独立累加链，
+    逐位不变）、(B) CTA 形状（`B1_BV`/`B1_NW`，`BW=16` 约束下扫 `BV=16/32/64`）。新增
+    `harness/check_bwd_b1_ilp_cuda.py`（`harness/check_bwd_b1_ilp_cuda.out.txt`）+
+    `harness/probe_b1_cuda_ilp_ncu.sh`（`harness/probe_b1_cuda_ilp_ncu.out.txt`）+ `docs/07` §21。
+    **Part A**：六份 build 与 base **逐位相同（max_abs=0，含非整除 T=250）**。**Part B**：`ilp1` 完全无效
+    （1.00–1.02×）、`ilp2` 稳定快 **6–12%（0.88–0.94×）**、叠加无额外收益；`bv16`/`bv64` 反慢
+    （占用率被 smem 钉死，多塞 warp/grid 换不到可用 warp）。**Part D**：`ilp2` REG 168 仍**零 spill**。
+    **`ncu`**：加 16 条独立 mma 链后 `wait` 仅 1.82→1.76、tensor 3.5%→3.9%（FLA 14%）、
+    `Eligible Warps/Scheduler` 仍 **0.16**——**每调度器只挂 ~1 个 active warp，warp 内 ILP 填不满**。
+    **结论（修正 §20.6 措辞）**：免费杠杆（bank conflict ~1.2× + 指令级 ILP ~1.1×）都只是分项；量级项的
+    落点是**提高每 warp 的有效 mma 密度**（`ldmatrix`/TMA 整块喂数 + 流水，把 2.3% 抬到 FLA 的 14%），
+    **不是**简单加 warp 数或加指令级并行。见 `docs/07` §21。
 
 ### P8 小结 / 一页纸
 
@@ -282,8 +296,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16/P7-17 补测**。
-  - P7-17（本轮）：用最便宜的受控实验（smem 行 stride 各 +8 bf16，宏 `B1_PAD`，退化版 swizzle）隔离
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16/P7-17/P7-18 补测**。
+  - P7-18（本轮）：在动「K2 形状重写」前，用最便宜的受控实验检验 §20.6 第一优先级「并行度/mma 密度是
+    量级项」里有多少**免费**。同一份 `b1_cuda_probe.cu` 加两个免费旋钮：warp 内 mma ILP（`B1_ILP1`/
+    `B1_ILP2`，op 循环 `for m: for kk`→`for kk: for m` 暴露独立累加链，**逐位不变**）与 CTA 形状
+    （`B1_BV`/`B1_NW`）。新增 `harness/check_bwd_b1_ilp_cuda.py`（`..._ilp_cuda.out.txt`）+
+    `harness/probe_b1_cuda_ilp_ncu.sh`（`..._ilp_ncu.out.txt`）+ `docs/07` §21。**Part A** 六 build
+    逐位相同；**Part B** `ilp1` 无效、`ilp2` **快 6–12%**、`bv16/bv64` 反慢；**Part D** `ilp2` REG168
+    零 spill；**ncu** 16 条独立链后 `wait` 1.82→1.76、tensor 3.5→3.9%（FLA 14%）、`Eligible W/S` 仍
+    **0.16**（每调度器只挂 ~1 warp，ILP 填不满）。**结论**：免费杠杆都是分项（conflict ~1.2× + ILP
+    ~1.1×）；量级项落点＝**提高每 warp 的有效 mma 密度**（`ldmatrix`/TMA + 流水，2.3%→14%），
+    不是加 warp 数/加指令级并行——修正 §20.6 措辞。
+  - P7-17：用最便宜的受控实验（smem 行 stride 各 +8 bf16，宏 `B1_PAD`，退化版 swizzle）隔离
     CUDA B1 的 bank-conflict 项，**修正 §19.5**。新增 `harness/check_bwd_b1_pad.py`
     （`harness/check_bwd_b1_pad.out.txt`）+ `harness/probe_b1_cuda_pad_ncu.sh`
     （`harness/probe_b1_cuda_pad_ncu.out.txt`）+ `docs/07` §20。**Part A**：pad 与 nopad、与 FLA `dhu`
@@ -543,7 +567,7 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16/P7-17 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16/P7-17/P7-18 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
   - **下一步工程化＝把 B1 做成目标卡 CUDA**（唯一剩下的实际工作）。P7-13（`docs/07` §16）已用 `ncu` 把它的
     硬件动机量化清楚：B1 是**延迟/并行度受限**（非 tensor/带宽/占用率），与 FLA `dhu` 的 2.14×（同 BT=64）
     差距＝**没有 loads 流水（long_scoreboard 47–55%）+ 单一 `[128,BV]` 依赖链**，FLA 用「K 拆两条 64 链 +
@@ -567,6 +591,14 @@
     掉占用率反慢 1.21×），且 ncu 显示 **`wait` 纹丝不动**——bank conflict 是 ~1.2× 分项、**不是量级项**；
     量级差来自**并行度/mma 密度**。故目标卡 CUDA B1 真实第一优先级＝**(1) 补并行度/warp-specialization
     （量级项）、(2) 用零成本 XOR swizzle/`ldmatrix` 消冲突（勿用 padding）、(3) 预取保底**。
+    **P7-18（`docs/07` §21）在动「K2 形状重写」前，用最便宜的受控实验检验「并行度/mma 密度是量级项」里
+    有多少免费**：同一份 `b1_cuda_probe.cu` 加 warp 内 mma ILP（`B1_ILP1`/`B1_ILP2`，op 循环换序暴露独立
+    累加链，**逐位不变**）与 CTA 形状（`B1_BV`/`B1_NW`）。**Part A** 六 build 逐位相同；**Part B** `ilp1`
+    无效、`ilp2` 快 **6–12%**、`bv16/bv64` 反慢；**ncu** 加 16 条独立链后 `wait` 仅 1.82→1.76、tensor
+    3.5→3.9%（FLA 14%）、`Eligible Warps/Scheduler` 仍 **0.16**（每调度器只挂 ~1 active warp，warp 内 ILP
+    填不满）。**结论（修正 §20.6 措辞）**：免费杠杆（bank conflict ~1.2× + 指令级 ILP ~1.1×）都只是分项；
+    量级项的落点＝**提高每 warp 的有效 mma 密度**（`ldmatrix`/TMA 整块喂数 + 流水，2.3%→14%），**不是**
+    简单加 warp 数或加指令级并行——即「K2 形状重写」的必要性被这两轮受控实验**双重确认**。
   §5.2 的 **B0/B1/B2/B3/dAv 五段已全部做成最小 kernel，P6-7 已把四段组装成端到端反向核到
   tf32 底噪，P6-8 又把整条反向直接架在 FlashKDA K1 workspace 上端到端核到 bf16 底噪**；
   **P7-7 又把它和 FLA 反向在同一口径下比（wall/dev 0.40–0.80× 反超，因复用 workspace 省掉

@@ -1,0 +1,99 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared ~/proj/tech_record/code/flash-kda/harness/b1_cuda_probe.cu -o /tmp/b1_cuda_base.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB1_ILP1 ~/proj/tech_record/code/flash-kda/harness/b1_cuda_probe.cu -o /tmp/b1_cuda_ilp1.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB1_ILP2 ~/proj/tech_record/code/flash-kda/harness/b1_cuda_probe.cu -o /tmp/b1_cuda_ilp2.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB1_ILP1 -DB1_ILP2 ~/proj/tech_record/code/flash-kda/harness/b1_cuda_probe.cu -o /tmp/b1_cuda_ilp12.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB1_BV=16 -DB1_NW=1 ~/proj/tech_record/code/flash-kda/harness/b1_cuda_probe.cu -o /tmp/b1_cuda_bv16.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB1_BV=64 -DB1_NW=4 ~/proj/tech_record/code/flash-kda/harness/b1_cuda_probe.cu -o /tmp/b1_cuda_bv64.so
+
+====================================================================================
+Part C: smem footprint (bytes, BT=64/NS=1) per variant
+====================================================================================
+  base   smem(BT64,NS1) =   111104   (BT32,NS1) =    76288
+  ilp1   smem(BT64,NS1) =   111104   (BT32,NS1) =    76288
+  ilp2   smem(BT64,NS1) =   111104   (BT32,NS1) =    76288
+  ilp12  smem(BT64,NS1) =   111104   (BT32,NS1) =    76288
+  bv16   smem(BT64,NS1) =    80384   (BT32,NS1) =    50688
+  bv64   smem(BT64,NS1) =   172544   (BT32,NS1) =   127488
+
+====================================================================================
+Part D: register spill (cuobjdump -res-usage), BT=64 instantiation
+====================================================================================
+  base   BT32/NS1  REG= 72 STACK=0 LOCAL=0
+  base   BT64/NS1  REG=128 STACK=0 LOCAL=0
+  ilp1   BT32/NS1  REG= 72 STACK=0 LOCAL=0
+  ilp1   BT64/NS1  REG= 96 STACK=0 LOCAL=0
+  ilp2   BT32/NS1  REG=168 STACK=0 LOCAL=0
+  ilp2   BT64/NS1  REG=168 STACK=0 LOCAL=0
+  ilp12  BT32/NS1  REG=168 STACK=0 LOCAL=0
+  ilp12  BT64/NS1  REG=168 STACK=0 LOCAL=0
+  bv16   BT32/NS1  REG= 72 STACK=0 LOCAL=0
+  bv16   BT64/NS1  REG=128 STACK=0 LOCAL=0
+  bv64   BT32/NS1  REG= 72 STACK=0 LOCAL=0
+  bv64   BT64/NS1  REG=128 STACK=0 LOCAL=0
+
+====================================================================================
+Part A: ILP loop reorder must be numerically inert (bit-identical to base / FLA)
+====================================================================================
+  B=1 T=512 H=4 BT=32
+      ilp1/ilp2/ilp12/bv16/bv64 vs base: 逐位相同（无输出=全 0）
+  B=1 T=512 H=4 BT=64
+      ilp1/ilp2/ilp12/bv16/bv64 vs base: 逐位相同（无输出=全 0）
+  B=2 T=1024 H=8 BT=32
+      ilp1/ilp2/ilp12/bv16/bv64 vs base: 逐位相同（无输出=全 0）
+  B=2 T=1024 H=8 BT=64
+      ilp1/ilp2/ilp12/bv16/bv64 vs base: 逐位相同（无输出=全 0）
+  B=1 T=250 H=3 BT=32
+      ilp1/ilp2/ilp12/bv16/bv64 vs base: 逐位相同（无输出=全 0）
+  B=1 T=250 H=3 BT=64
+      ilp1/ilp2/ilp12/bv16/bv64 vs base: 逐位相同（无输出=全 0）
+
+====================================================================================
+Part B: kernel-only CUPTI us/call — ILP axis (BT=64) and BV axis vs FLA dhu
+====================================================================================
+  B1 T512 H4  BT=32   FLA dhu =    20.5us
+      base      146.2us   xFLA= 7.13  xbase= 1.00
+      ilp1      145.8us   xFLA= 7.11  xbase= 1.00
+      ilp2      130.8us   xFLA= 6.38  xbase= 0.89
+      ilp12     131.0us   xFLA= 6.38  xbase= 0.90
+      bv16      149.1us   xFLA= 7.27  xbase= 1.02
+      bv64      186.5us   xFLA= 9.09  xbase= 1.28
+  B1 T512 H4  BT=64   FLA dhu =    12.9us
+      base      105.0us   xFLA= 8.15  xbase= 1.00
+      ilp1      107.1us   xFLA= 8.32  xbase= 1.02
+      ilp2       98.1us   xFLA= 7.62  xbase= 0.94
+      ilp12      98.2us   xFLA= 7.63  xbase= 0.94
+      bv16      110.7us   xFLA= 8.60  xbase= 1.05
+      bv64      150.6us   xFLA=11.70  xbase= 1.44
+  B2 T1024 H8  BT=32   FLA dhu =    37.3us
+      base      303.1us   xFLA= 8.13  xbase= 1.00
+      ilp1      302.8us   xFLA= 8.12  xbase= 1.00
+      ilp2      273.9us   xFLA= 7.35  xbase= 0.90
+      ilp12     273.0us   xFLA= 7.32  xbase= 0.90
+      bv16      308.9us   xFLA= 8.29  xbase= 1.02
+      bv64      387.1us   xFLA=10.38  xbase= 1.28
+  B2 T1024 H8  BT=64   FLA dhu =    22.7us
+      base      213.0us   xFLA= 9.37  xbase= 1.00
+      ilp1      217.2us   xFLA= 9.55  xbase= 1.02
+      ilp2      202.2us   xFLA= 8.89  xbase= 0.95
+      ilp12     201.0us   xFLA= 8.84  xbase= 0.94
+      bv16      225.4us   xFLA= 9.91  xbase= 1.06
+      bv64      307.0us   xFLA=13.50  xbase= 1.44
+  B8 T2048 H8  BT=32   FLA dhu =   169.8us
+      base      732.1us   xFLA= 4.31  xbase= 1.00
+      ilp1      743.4us   xFLA= 4.38  xbase= 1.02
+      ilp2      659.9us   xFLA= 3.89  xbase= 0.90
+      ilp12     654.8us   xFLA= 3.86  xbase= 0.89
+      bv16      760.8us   xFLA= 4.48  xbase= 1.04
+      bv64      771.4us   xFLA= 4.54  xbase= 1.05
+  B8 T2048 H8  BT=64   FLA dhu =   119.0us
+      base      578.7us   xFLA= 4.86  xbase= 1.00
+      ilp1      579.2us   xFLA= 4.87  xbase= 1.00
+      ilp2      511.3us   xFLA= 4.30  xbase= 0.88
+      ilp12     511.0us   xFLA= 4.30  xbase= 0.88
+      bv16     1024.2us   xFLA= 8.61  xbase= 1.77
+      bv64      606.8us   xFLA= 5.10  xbase= 1.05
+
+DONE

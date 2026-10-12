@@ -225,12 +225,24 @@ b1_dhu_cuda(const bf16* __restrict__ q, const bf16* __restrict__ k,
         {
             FC cdu[MT1];
             for (int m = 0; m < MT1; ++m) wmma::fill_fragment(cdu[m], 0.f);
+#ifdef B1_ILP1
+            // P7-18: kk outer / m inner -> the MT1 accumulator chains become independent
+            // in the instruction stream (each cdu[m] still accumulates kk in the *same*
+            // order -> bit-identical result), hiding the fixed mma pipeline latency.
+            for (int kk = 0; kk < KT1; ++kk)
+                for (int m = 0; m < MT1; ++m) {
+                    FA a; wmma::load_matrix_sync(a, &st->k[m * 16][kk * 16], KDS);
+                    FB b; wmma::load_matrix_sync(b, &Sb[kk * 16][0], BWS);
+                    wmma::mma_sync(cdu[m], a, b, cdu[m]);
+                }
+#else
             for (int m = 0; m < MT1; ++m)
                 for (int kk = 0; kk < KT1; ++kk) {
                     FA a; wmma::load_matrix_sync(a, &st->k[m * 16][kk * 16], KDS);
                     FB b; wmma::load_matrix_sync(b, &Sb[kk * 16][0], BWS);
                     wmma::mma_sync(cdu[m], a, b, cdu[m]);
                 }
+#endif
             for (int m = 0; m < MT1; ++m)
                 wmma::store_matrix_sync(&duf[m * 16][0], cdu[m], BWS, wmma::mem_row_major);
         }
@@ -252,6 +264,31 @@ b1_dhu_cuda(const bf16* __restrict__ q, const bf16* __restrict__ k,
 
         // ---- op2/op3: acc = scale*(q^T @ do) - (w^T @ du) ----
         {
+#ifdef B1_ILP2
+            // P7-18: kk outer / m inner, all MT2 (cq,cw) pairs live at once -> 2*MT2
+            // independent accumulator chains (bit-identical: each cq[m]/cw[m] still sums
+            // kk in the same order).  Costs 2*MT2 accumulator fragments in registers.
+            FC cq[MT2], cw[MT2];
+            for (int m = 0; m < MT2; ++m) {
+                wmma::fill_fragment(cq[m], 0.f);
+                wmma::fill_fragment(cw[m], 0.f);
+            }
+            for (int kk = 0; kk < KT2; ++kk)
+                for (int m = 0; m < MT2; ++m) {
+                    FAT aq; wmma::load_matrix_sync(aq, &st->q[kk * 16][m * 16], KDS);
+                    FB  bd; wmma::load_matrix_sync(bd, &st->dO[kk * 16][warp * BW], BVSCTA);
+                    wmma::mma_sync(cq[m], aq, bd, cq[m]);
+
+                    FAT aw; wmma::load_matrix_sync(aw, &st->w[kk * 16][m * 16], KDS);
+                    FB  bu; wmma::load_matrix_sync(bu, &du[kk * 16][0], BWS);
+                    wmma::mma_sync(cw[m], aw, bu, cw[m]);
+                }
+            for (int m = 0; m < MT2; ++m) {
+                for (int j = 0; j < FC::num_elements; ++j)
+                    cq[m].x[j] = cq[m].x[j] * scale - cw[m].x[j];
+                wmma::store_matrix_sync(&acc[m * 16][0], cq[m], BWS, wmma::mem_row_major);
+            }
+#else
             for (int m = 0; m < MT2; ++m) {
                 FC cq, cw;
                 wmma::fill_fragment(cq, 0.f);
@@ -269,6 +306,7 @@ b1_dhu_cuda(const bf16* __restrict__ q, const bf16* __restrict__ k,
                     cq.x[j] = cq.x[j] * scale - cw.x[j];
                 wmma::store_matrix_sync(&acc[m * 16][0], cq, BWS, wmma::mem_row_major);
             }
+#endif
         }
         __syncthreads();
 

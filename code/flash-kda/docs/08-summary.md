@@ -202,7 +202,12 @@ CUDA B1 的第一优先级是**换掉 wmma-from-smem（ldmatrix/TMA 整块、提
 把 bank conflict 从 76% 打到 19%（数值逐位不变）端到端**只快 10–23%**，大 shape BT=64 因 smem +29% 掉占用率
 反慢 1.21×；ncu 显示 **`wait` 纹丝不动**——故 bank conflict 是 **~1.2× 分项、不是量级项**，量级差来自**并行度/
 mma 密度**。目标卡 CUDA B1 真实优先级＝**(1) 补并行度/warp-specialization、(2) 零成本 XOR swizzle/`ldmatrix`
-消冲突（勿用 padding）、(3) 预取保底**。
+消冲突（勿用 padding）、(3) 预取保底**。**P7-18**（`docs/07` §21）在动「K2 形状重写」前用最便宜的受控实验
+检验「并行度/mma 密度是量级项」里有多少**免费**：同一份 CUDA 原型加 warp 内 mma ILP（循环换序暴露独立
+累加链，**逐位不变**，`ilp2` 快 6–12%）与 CTA 形状（`BV=16/64` 反慢）；ncu 显示加 16 条独立链后 `wait` 仅
+1.82→1.76、tensor 3.5→3.9%（FLA 14%）、`Eligible Warps/Scheduler` 仍 **0.16**（每调度器只挂 ~1 active
+warp，warp 内 ILP 填不满）。**结论**：免费杠杆（conflict ~1.2× + ILP ~1.1×）都只是分项，量级项的落点是
+**提高每 warp 的有效 mma 密度**（`ldmatrix`/TMA + 流水，2.3%→14%），不是加 warp 数或加指令级并行。
 
 **反向性能（`docs/07` §10 P7-7 + §11 P7-8 更正）**：把上面那条 workspace 驱动反向链和
 `torch.autograd` 穿 `chunk_kda` 在统一口径（`wall`+CUPTI `dev`）下比，**只计反向**。四组 shape 实测
