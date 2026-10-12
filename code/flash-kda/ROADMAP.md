@@ -155,6 +155,12 @@
       底噪（六项 vs autograd ≤8.3e-3，与 P6-8 同阶；操作数换 bf16 自身增量 `dq` 逐位 0、其余 ≤3.8e-3）；
       反向 dev 降到 fp32-B1 链的 **0.71–0.91×**、FLA 反向的 **0.51–0.60×**；B1 kernel 快 **1.68–2.09×**
       （$B2\,T1024\,H8$ 208→119µs，已快过 FLA `dhu` 137.4µs）。§11.5 优化优先级第 (1) 步完成。
+- [x] **P7-10** 兑现 §11.5 第 (2) 步「B1 更大 chunk 重组」：从 **16-chunk K1 workspace 免前向重算**地
+      恢复 64-chunk 操作数（`qg/kg/kd/ki/E64` 逐子块重标定 + 重算 `P64/w64`），喂 bf16 B1 核 @BT=64。
+      Part A：`qg/kg/w/g_cum` vs FLA forward@64 落 bf16 底噪（1e-3~1.7e-2，含非整除 T=250/513）；Part B：
+      B1@64 vs FLA `dhu`@64 `dh≤1.55e-2/dv2≤1.87e-3/dh0≤1.44e-2`；Part C：**B1 快 2.1–2.3×**
+      （T512H4 45.5→19.5µs 等）。硬伤：torch 原型恢复 ~2.0–5.7ms（`A64/P64/w64` 占 2.0–3.7ms），须融成
+      Triton pass；且整链不干净（B2/B3 仍 16、B1@64 只落 64 边界 `dh`）。见 `docs/07` §13。
 - [x] **P7-5** 关闭 P7-2/P7-4 待验证 (c)：**K2 突破 2 CTA/SM 后 L2 墙是否后移**——实验=否。
       改造 `SharedStorageK2`（fp32 状态缓冲改按 `StateFP32` 条件预留）+ 扫 pipeline stage，编译 6 个变体，
       实测占用率/ncu SOL/K2 时间。结论：smem 被无条件预留的 65536 B fp32 缓冲钉死为 98432 B（只减
@@ -191,7 +197,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）+ **FLA host 税组成归因（P7-6）** + **反向性能与 host 税剖析（P7-7）**完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）+ **FLA host 税组成归因（P7-6）** + **反向性能与 host 税剖析（P7-7）**完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+  - P7-10：新增 `docs/07` §13 + `harness/check_bwd_b1_rechunk.py`（`harness/check_bwd_b1_rechunk.out.txt`，空闲卡）。
+    兑现 §11.5 第 (2) 步「B1 更大 chunk 重组」：**从 16-chunk K1 workspace 免前向重算地恢复 64-chunk 操作数**。
+    **代数**：分块递推对任意 chunk 精确 ⇒ 64 块量只是 16 块的**逐子块重标定**——`q_dec64=qd·2^{off_s}`、
+    `k_rest64=kr·2^{G64−off_s−G16_s}`（指数≤0、有界）、`ki64=ki16·2^{−off_s}`、`E_tot64=Π E16`；
+    **唯一新算**是 64 块内逆 `P64=(I+tril(kd64@ki64^T,−1)β)^{-1}` 与 `w64=P64 diag(β) kd64`。
+    **Part A**：`qg/kg/w/g_cum` vs FLA forward@64 全落 bf16 底噪（1e-3~1.7e-2，含非整除 T=250/513、g=0）。
+    **Part B**：B1@64（bf16 核，token 轴补零 mask）vs FLA `dhu`@64，`dh≤1.55e-2/dv2≤1.87e-3/dh0≤1.44e-2`。
+    **Part C**：**B1 快 2.1–2.3×**（T512H4 45.5→19.5、B2T1024H8 122.2→54.8、B8T2048H8 393.2→187.4、
+    T250H3 23.4→10.8 µs；相对 FLA 仍 1.5–2.4× 常数因子）。**硬伤**：torch 原型恢复 ~2.0–5.7 ms（纯重标定
+    0.47–1.48 ms + `A64/P64/w64` 2.0–3.7 ms），远大于 B1，须融成 K1 式 Triton pass（数字为高估上界、待验证）；
+    且整链不干净（B2/B3 仍 16、B1@64 只落 64 边界 `dh`）。**坑**：(a) `ki16=kr·2^{−G16}` 溢 fp32（须逐子块
+    对把偏移折进较小因子做 `A64`）；(b) 非整除 T 零填充丢「累积进位」污染尾块前一子块（指纹 `kg` 尾块前 4
+    token `max_rel≈0.83`），须先补携带值再差分；(c) workspace 字段 `[B,NT,H,CHUNK,D]` 展平须 `permute(0,1,3,2,4)`。
+    **观察**：`w64`≠重排 `w16`（`max_rel≈1.0`），强衰减下 `E64` 小到 `3e-86`，64 块被末子块主导。
   - P7-9：新增 `docs/07` §12 + `harness/check_bwd_b1_bf16_e2e.py`（`harness/check_bwd_b1_bf16_e2e.out.txt`）。
     把 P7-8 §11.4 的「B1 吃 workspace 原生 bf16」从**孤立 kernel 的手工实验**落进 P6-8 的**真实组装链**
     （此前 `reconstruct` 把整套 workspace `.float()`，B1 一直跑 tf32）。只换 B1 的 mma 操作数 dtype
@@ -364,7 +384,10 @@
   更正其被污染的数字并重排 B1 优化优先级（`docs/07` §11 + `harness/bench_bwd_idle.out.txt` +
   `harness/check_bwd_dhu_dtype.py`），见上。P7-9：把 §11.4 的 bf16-B1 杠杆落进真实组装链
   （`docs/07` §12 + `harness/check_bwd_b1_bf16_e2e.py`），B1 快 1.68–2.09×、整链 dev 0.71–0.91×，
-  见上；§11.5 优先级第 (1) 步完成，下一步＝第 (2) 步「大 chunk 重组消粒度损失」。**
+  见上；§11.5 优先级第 (1) 步完成。**P7-10：兑现第 (2) 步（`docs/07` §13 +
+  `harness/check_bwd_b1_rechunk.py`）——64-chunk 操作数可从 16-chunk workspace 免重算恢复（逐子块重标定
+  + 重算 64 块内逆 `P64/w64`），B1@64 正确且快 **2.1–2.3×**；但恢复须融 Triton pass、整链需 B2/B3 一并
+  重组，故下一步＝把恢复融成 K1 式 pass 并决定整链是否跟到 64；第 (3) 步镜像 K2 仍排最后。**
   - P6-6：新增 `docs/06` §6.8 + `harness/check_bwd_b0_gate.py`
     （`harness/check_bwd_b0_gate.out.txt`）。把 §5.2 的 **B0 `gate_bwd`**（对应 FLA
     `kda_gate_chunk_cumsum` `gate.py:375` + `kda_gate_bwd` `gate.py:252`）做成最小可运行 Triton

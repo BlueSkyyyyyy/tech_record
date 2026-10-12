@@ -1,0 +1,88 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+==========================================================================================
+Part A: 64-chunk operands recovered from the 16-chunk workspace vs FLA forward@64
+==========================================================================================
+
+# T=256 H=2  B=1 T=256 H=2  |strict-lower A64|max=7.358e-02
+  qg     rec64 vs FLA64      max_abs=6.449e-04  max_rel=3.669e-03  ref_max=1.758e-01
+  kg     rec64 vs FLA64      max_abs=1.953e-03  max_rel=7.042e-03  ref_max=2.773e-01
+  w      rec64 vs FLA64      max_abs=7.373e-04  max_rel=8.436e-03  ref_max=8.740e-02
+  g_cum  rec64 vs FLA64      max_abs=2.672e-01  max_rel=9.410e-04  ref_max=2.840e+02
+
+# T=250 H=3 non-div  B=1 T=250 H=3  |strict-lower A64|max=1.276e-01
+  qg     rec64 vs FLA64      max_abs=1.460e-03  max_rel=7.829e-03  ref_max=1.865e-01
+  kg     rec64 vs FLA64      max_abs=1.953e-03  max_rel=6.579e-03  ref_max=2.969e-01
+  w      rec64 vs FLA64      max_abs=1.318e-03  max_rel=1.666e-02  ref_max=7.910e-02
+  g_cum  rec64 vs FLA64      max_abs=2.677e-01  max_rel=9.052e-04  ref_max=2.957e+02
+
+# B2 T=513 H=2 non-div  B=2 T=513 H=2  |strict-lower A64|max=6.338e-02
+  qg     rec64 vs FLA64      max_abs=1.233e-03  max_rel=5.030e-03  ref_max=2.451e-01
+  kg     rec64 vs FLA64      max_abs=1.953e-03  max_rel=6.061e-03  ref_max=3.223e-01
+  w      rec64 vs FLA64      max_abs=1.053e-03  max_rel=8.727e-03  ref_max=1.206e-01
+  g_cum  rec64 vs FLA64      max_abs=3.134e-01  max_rel=1.075e-03  ref_max=2.916e+02
+
+# T=192 H=2 g=0  B=1 T=192 H=2  |strict-lower A64|max=2.206e-02
+  qg     rec64 vs FLA64      max_abs=2.321e-04  max_rel=8.374e-03  ref_max=2.771e-02
+  kg     rec64 vs FLA64      max_abs=9.766e-04  max_rel=3.125e-03  ref_max=3.125e-01
+  w      rec64 vs FLA64      max_abs=1.657e-04  max_rel=1.104e-02  ref_max=1.501e-02
+  g_cum  rec64 vs FLA64      max_abs=1.621e+00  max_rel=5.912e-03  ref_max=2.741e+02
+
+worst-case max_rel across cases:
+  qg     8.374e-03
+  kg     7.042e-03
+  w      1.666e-02
+  g_cum  5.912e-03
+
+==========================================================================================
+Part B: our B1@64 on recovered operands vs FLA `dhu`@64 (same do/dv/dht)
+==========================================================================================
+
+# T=256 H=2  B=1 T=256 H=2  NT64=4
+  dh  O64-fp64 vs FLA64      max_abs=1.456e-03  max_rel=1.130e-02  ref_max=1.289e-01
+  dv2 O64-fp64 vs FLA64      max_abs=3.863e-03  max_rel=1.873e-03  ref_max=2.062e+00
+  dh0 O64-fp64 vs FLA64      max_abs=3.622e-04  max_rel=5.863e-03  ref_max=6.177e-02
+  dh  O64-fp32 vs FLA64      max_abs=9.872e-04  max_rel=7.658e-03  ref_max=1.289e-01
+  dv2 O64-fp32 vs FLA64      max_abs=3.855e-03  max_rel=1.869e-03  ref_max=2.062e+00
+  dh0 O64-fp32 vs FLA64      max_abs=3.622e-04  max_rel=5.863e-03  ref_max=6.177e-02
+
+# T=250 H=3 non-div  B=1 T=250 H=3  NT64=4
+  dh  O64-fp64 vs FLA64      max_abs=8.613e-04  max_rel=7.636e-03  ref_max=1.128e-01
+  dv2 O64-fp64 vs FLA64      max_abs=3.884e-03  max_rel=1.750e-03  ref_max=2.219e+00
+  dh0 O64-fp64 vs FLA64      max_abs=1.511e-03  max_rel=1.444e-02  ref_max=1.046e-01
+  dh  O64-fp32 vs FLA64      max_abs=8.613e-04  max_rel=7.636e-03  ref_max=1.128e-01
+  dv2 O64-fp32 vs FLA64      max_abs=3.883e-03  max_rel=1.750e-03  ref_max=2.219e+00
+  dh0 O64-fp32 vs FLA64      max_abs=1.511e-03  max_rel=1.444e-02  ref_max=1.046e-01
+
+# B2 T=513 H=2 non-div  B=2 T=513 H=2  NT64=9
+  dh  O64-fp64 vs FLA64      max_abs=1.945e-03  max_rel=1.101e-02  ref_max=1.768e-01
+  dv2 O64-fp64 vs FLA64      max_abs=3.928e-03  max_rel=1.699e-03  ref_max=2.312e+00
+  dh0 O64-fp64 vs FLA64      max_abs=8.021e-04  max_rel=4.535e-03  ref_max=1.769e-01
+  dh  O64-fp32 vs FLA64      max_abs=1.945e-03  max_rel=1.101e-02  ref_max=1.768e-01
+  dv2 O64-fp32 vs FLA64      max_abs=3.928e-03  max_rel=1.698e-03  ref_max=2.312e+00
+  dh0 O64-fp32 vs FLA64      max_abs=8.021e-04  max_rel=4.535e-03  ref_max=1.769e-01
+
+# T=192 H=2 g=0  B=1 T=192 H=2  NT64=3
+  dh  O64-fp64 vs FLA64      max_abs=3.306e-04  max_rel=1.548e-02  ref_max=2.136e-02
+  dv2 O64-fp64 vs FLA64      max_abs=3.614e-03  max_rel=1.573e-03  ref_max=2.297e+00
+  dh0 O64-fp64 vs FLA64      max_abs=1.242e-04  max_rel=1.197e-02  ref_max=1.038e-02
+  dh  O64-fp32 vs FLA64      max_abs=3.306e-04  max_rel=1.548e-02  ref_max=2.136e-02
+  dv2 O64-fp32 vs FLA64      max_abs=3.614e-03  max_rel=1.573e-03  ref_max=2.297e+00
+  dh0 O64-fp32 vs FLA64      max_abs=1.242e-04  max_rel=1.197e-02  ref_max=1.038e-02
+
+worst-case max_rel:
+  dh    1.548e-02
+  dv2   1.873e-03
+  dh0   1.444e-02
+
+==========================================================================================
+Part C: B1 timing — ours@64(recovered) vs ours@16(workspace, P7-9) vs FLA dhu@64
+==========================================================================================
+  case               | ours64 dev ours16 dev FLA64 dev |  o64/o16  o64/FLA |   recover   rescale
+  T=512 H=4          |       19.5       45.5      13.0 |     0.43     1.50 |    2460.6     473.5
+  B2 T=1024 H=8      |       54.8      122.2      23.2 |     0.45     2.36 |    2565.4     476.9
+  B8 T=2048 H=8      |      187.4      393.2     119.5 |     0.48     1.57 |    5675.2    1475.8
+  T=250 H=3 nondiv   |       10.8       23.4       7.4 |     0.46     1.46 |    2027.8     502.3
+
+DONE
