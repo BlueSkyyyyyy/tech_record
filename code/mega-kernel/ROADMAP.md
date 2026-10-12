@@ -40,8 +40,9 @@
 
 ### P1 动机与背景（`docs/00-megakernel-overview.md`）
 
-- [ ] **P1-1** kernel-per-operator 执行模型与三类损失：kernel barrier（跨算子无法软件流水）、
-      launch 开销、中间张量 HBM 往返。
+- [x] **P1-1** kernel-per-operator 执行模型与三类损失：kernel barrier（跨算子无法软件流水）、
+      launch 开销、中间张量 HBM 往返。见 `docs/00` §1（量化锚点：293 launch/token、3.8µs eager→1.1ms、
+      0.8µs graph→0.2ms、scheduler 0.28%、流水 1.2–1.3×、重叠 1.1×、gather 占 MoE 11%）+ P0-3 实测佐证。
 - [ ] **P1-2** 已有缓解手段与不足：算子融合、CUDA Graphs、PDL、多流；为什么还不够（跨算子细粒度重叠、SM 级调度）。
 - [ ] **P1-3** MegaKernel 的定义与谱系（从单算子融合 → 段融合 → 整图单 kernel），术语澄清。
 
@@ -97,15 +98,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：脚手架就绪；**P0 全部完成**。
+- 当前进度：脚手架就绪；**P0 全部完成**；**P1 进行中（1/3）**。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
   - **P0-3** 环境探测完成，见 `docs/04-experiments.md` §0：H100/sm90 + CUDA 13.2 上
     persistent kernel（cooperative grid sync）、CUDA Graph、PDL **三项均实测可编译可运行**，
     后续 P4/P5 无降级项。
-- **下一步：P1-1** kernel-per-operator 执行模型与三类损失（kernel barrier / launch 开销 / 中间张量 HBM 往返），
-  写入 `docs/00-megakernel-overview.md`（补 §1 的量化与论文章节/行号引用，可复用 P0-3 实测作佐证）。
+  - **P1-1** kernel-per-operator 三类损失完成：`docs/00` §1 按「损失一 kernel barrier / 损失二 launch 开销 /
+    损失三中间张量 HBM 往返」展开，逐条贴 MPK 快照真实行号（§1 行 74–89、§2.1 行 223–293、§2.2 行 311–331、
+    §6.4 行 1551–1553、§6.6 行 1586–1628、§6.3 行 1501–1513），并复用 P0-3 实测佐证。
+- **下一步：P1-2** 已有缓解手段与不足（算子融合 / CUDA Graphs / PDL / 多流），扩写 `docs/00` §2，
+  说明为什么这些手段都没有触及「SM 级跨算子调度与重叠」这个根问题。
 
 ## 阻塞
 

@@ -3,20 +3,95 @@
 > 本文是「MegaKernel 资料与实现分析」的第 1 篇。先讲清 **kernel-per-operator 执行模型**的损失、
 > MegaKernel 的定义与它想解决的问题，作为后续 MPK 论文精读与案例分析的坐标系。
 
-## 1. 现状：kernel-per-operator
+## 1. 现状：kernel-per-operator 及其三类系统性损失
 
-今天的推理/训练系统把模型表示为一张**张量程序 DAG**：节点是算子（matmul、attention、norm、activation…），
-边是张量。主流执行方式是**一个算子一个 kernel**：每个算子要么手写优化，要么由编译器生成，然后按依赖顺序
-依次 launch 到同一 stream 上。
+> 本文以 **MPK 论文**（*MPK: A Compiler and Runtime for Mega-Kernelizing Tensor Programs*，arXiv:2512.22219v2）
+> 的快照 `~/github/ai-infra-book/experiments/ch05/05-08/sources/mpk-v2.txt`（下称「快照」，共 2717 行）为准，
+> 引用的章节号/行号均为在该快照中逐行核对的结果。与本仓库 P0-3 实测（`docs/04-experiments.md` §0）互相印证。
 
-这套模型简单、模块化，但有三类系统性损失：
+### 1.1 执行模型：张量程序 DAG，一个算子一个 kernel
 
-1. **kernel barrier（内核间屏障）**：同一 stream 上相邻 launch 之间，GPU 会隐式等待前一个 kernel
-   **所有** thread 完成才开始下一个。这保证了正确性，却**禁止了跨算子的软件流水（software pipelining）**，
-   依赖算子只能严格串行。→ 计算与访存/通信无法跨算子重叠。
-2. **launch 开销**：每个 kernel 有固定的 launch 延迟；小算子多时，CPU/GPU 两侧的 launch 开销占比可观。
-   （CUDA Graphs 主要治这一项。）
-3. **中间张量 HBM 往返**：相邻算子之间通过 HBM 上的中间张量传数据，写入再读出，既耗带宽又耗时间。
+今天的推理/训练系统把模型表示为一张**张量程序 DAG**：节点是张量代数算子（matmul、attention、norm、
+activation…），边是算子生产/消费的 *n* 维张量（MPK §1，快照行 53–56）。主流执行方式是**一个算子一个
+kernel**（kernel-per-operator）：每个算子要么由领域专家手写优化，要么由 ML 编译器自动生成，然后按依赖
+顺序依次 launch 到同一 stream 上（MPK §1，快照行 57–73）。
+
+这套模型简单、模块化，但 MPK 明确指出它**限制了多项关键的跨算子 GPU 优化**（快照行 71–73）。下面把这三类损失
+逐条展开，并给出论文里的量化锚点。
+
+### 1.2 损失一：kernel barrier——禁止跨算子软件流水
+
+同一 stream 上相邻 launch 之间，GPU 会隐式插入一个 **kernel barrier（内核间屏障）**：必须等前一个 kernel
+的**所有** thread block 完成后，后一个 kernel 的 thread block 才能开始（MPK §1 快照行 74–77、§2.1
+快照行 223–226）。它保证了数据依赖正确，代价是：
+
+- **禁止跨算子软件流水（cross-operator software pipelining）**，迫使有依赖的算子严格串行；
+- 现代 GPU 已高度异构（Tensor Core 做矩阵计算、TMA 做异步搬运、CUDA Core 做辅助运算），充分的软件流水
+  需要把「数据搬运 / 矩阵计算 / 辅助运算」在**多个任务迭代之间**交错。而 kernel barrier 只允许在**单个
+  task 内部**做流水（intra-task pipelining），跨 task 就断流，留下 pipeline bubble 让硬件利用率下降
+  （MPK §2.1，快照行 227–240，对应 Figure 2a/2b，快照行 204–209）。
+- **禁止细粒度 kernel 重叠（fine-grained kernel overlap）**：依赖只在**整个算子**粒度上表示，运行时必须
+  等上游算子全部完成才能启动下游。以常见的 `MatMul`→`AllGather` 为例：AllGather 是逐元素操作，每个
+  AllGather block 只依赖**一个** MatMul block 的输出，本可让不同 SM 并行跑两种算子，但 kernel barrier 要求
+  AllGather 的所有 block 等 MatMul 的所有 block 完成（MPK §2.1，快照行 241–293，对应 Figure 3a/3b）。
+- 论文给出该优化被剥夺后的代价：开启跨任务流水相对关闭可把 Qwen3-8B 最后一层 linear 的任务运行时降低
+  **1.2–1.3×**（MPK §6.6，快照行 1586–1596，Figure 12）；开启细粒度计算-通信重叠相对关闭降低
+  每迭代延迟 **1.1×**（MPK §6.6，快照行 1597–1615，Figure 13，4×H100 TP）。
+
+NVIDIA 的 **PDL（Programmatic Dependent Launch）** 允许同 stream 上 kernel 间部分重叠，但 MPK 指出采用
+PDL 需要显著工程改造，因为它根本上改变 kernel 结构与控制流（MPK §1，快照行 78–84）。
+
+### 1.3 损失二：launch 开销——每 token 数百到上千次 launch
+
+kernel-per-operator 每次推理迭代要 launch **数百到上千个 kernel**（MPK §1，快照行 87–89）。论文给出一组
+可直接引用的量化锚点（MPK §6.6「Kernel-launch reduction」，快照行 1618–1628，测试于 B200）：
+
+| 项 | 数值 |
+|---|---|
+| Qwen3-8B 每 token 的 kernel launch 次数（kernel-per-operator） | **293 次** |
+| 单次 launch 成本（eager） | **3.8 µs** → 合计 **1.1 ms/token** |
+| 单次 launch 成本（CUDA Graph） | **0.8 µs** → 合计 **0.2 ms/token** |
+| MPK 的 in-kernel scheduler 占总运行时比例 | **0.28%** |
+
+这组数字说明两件事：(a) launch 开销随算子数线性累积，在 decode 这种「每 token 计算量小」的场景占比可观；
+(b) CUDA Graphs 能把单次成本压到约 1/5、总量压到约 1/5，但**并不能归零**——论文在 §6.3 明确指出，
+即便用了 CUDA Graphs，kernel-per-operator 仍有 **kernel-switch 开销**（快照行 1504–1509）。MPK 用「单次
+launch + device 内调度」把这部分开销换成一个占比 0.28%、由设备内原子操作与环形队列维护的轻量调度器
+（实现细节见 MPK §6.1，快照行 1409–1413）。
+
+**本机 P0-3 佐证**（`docs/04-experiments.md` §0，目标卡 H100/sm90）：200 个 trivial kernel 串行 launch
+耗时 **0.575 ms**（约 2.9 µs/次）；而在一个常驻 kernel 内做 200 次 cooperative grid-wide 屏障只要
+**0.330 ms**（约 1.65 µs/次）。虽是能力探测而非公平基准，量级上印证了「反复 launch 的固定成本 > 设备内同步」。
+
+### 1.4 损失三：中间张量 HBM 往返
+
+相邻算子之间通过 **HBM 上的中间张量**传数据：上游算子把结果写回 device memory，下游算子再读回来。
+kernel 融合的收益正是「避免中间结果物化、减少 device memory 访问、并消除 launch 开销」（MPK §2.2，
+快照行 311–313）。MPK 进一步指出现有编译器只能融合**局部小算子组**，因为「忠实实现整个复杂张量程序的
+单个 kernel」在计算上极难、常常不可行（MPK §2.2，快照行 314–328）。mega-kernel 范式则把融合推到极致：
+把整个张量程序的计算与通信融进一个持久化 kernel，用 device memory 上的同步原语跨 SM 协调（快照行 329–331）。
+
+一个具体案例：Qwen3-30B-A3B 在 batch=1、SGLang 上，「为 TMA 把路由到同一 expert 的 token 聚成连续布局」
+这一预处理步骤占 MoE 总执行时间的 **高达 11%**（MPK §6.4「Fused gather-GEMM」，快照行 1551–1553）。
+MPK 把它融进 GEMM 的异步 token 级拷贝，消除独立 gather kernel 与额外的调度点。
+
+### 1.5 三类损失与「已缓解但仍不够」的边界
+
+| 损失 | 症状 | 已有缓解（详见 §2） | 为什么仍不够 |
+|---|---|---|---|
+| kernel barrier | 跨算子无法软件流水、无法细粒度重叠 | PDL、算子融合 | PDL 需改 kernel 结构；融合只覆盖局部算子 |
+| launch 开销 | 每 token 293 次 launch，1.1 ms（eager） | CUDA Graphs（→0.2 ms） | 仍有 kernel-switch 开销；图是静态的，控制流/形状变化要重捕 |
+| 中间张量 HBM 往返 | 上游写、下游读中间结果 | 算子融合 | 只能融相邻小算子，无法覆盖整图 |
+
+MPK 在 §6.3 把这三项与「CPU 侧 page allocation / request scheduling 的 host–device 同步」并列为
+kernel-per-operator 在**小模型 + 新 GPU**上更吃亏的原因（快照行 1501–1513）：计算量/算子越小、GPU 越快，
+这些固定与串行开销占比越大。其给出的端到端锚点是 Qwen3-8B/A100：vLLM/SGLang 约 **14.5 ms/token**，
+MPK **12.5 ms/token**，而按「16 GB 参数 ÷ 1.6 TB/s 带宽」估算的硬件下界约 **10 ms**（快照行 1513）。
+
+> 观察：这三类损失并非独立——kernel barrier 让中间张量必须物化（损失三），物化 + 多次 launch 又共同
+> 造成 launch 与访存开销（损失二）。MegaKernel 的思路是用**单个持久化 kernel + SM 级调度**同时消解三者的
+> 共同根源：把「以整个算子为单位、靠 host 反复 launch 推进」换成「以 SM 任务为单位、在 device 内事件驱动
+> 推进」。这正是 MPK §3 的 tGraph 表示与 §5 的 in-kernel runtime 要解决的（后续 P2 展开）。
 
 ## 2. 已有缓解手段及其边界
 
