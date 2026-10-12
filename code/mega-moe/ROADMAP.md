@@ -716,6 +716,39 @@
       `get_granularity=2MiB`、`get_sm_locality_domains()` **逐位等于** `get_even`（66/66）。
       配套博客 `content/posts/mega-moe-34-locality-domain-probe`（索引页新增第 34 篇）。
 
+### P25 增量（opt-in，补齐 SM100 唯一的 GEMM 后端）
+
+- [x] **P25-1** **SM100 FP8/FP4 稠密 GEMM 主 kernel**（`deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh`；
+      `csrc/jit_kernels/impls/sm100_fp8_fp4_gemm_1d1d.hpp`；`deep_gemm/mma/sm100.cuh`；
+      `heuristics/sm100.hpp`；`cute/arch/mma_sm100_desc.hpp`）。第 22 篇拆了 SM90 的 FP8 主 kernel，
+      本篇补**目标卡上唯一**的 GEMM 后端——一套模板通吃稠密/m-grouped/k-grouped/batched，
+      MXF8F6F4（`UMMA_K=32`）与 MXF4（`UMMA_K=64`、packed、K-major、gran32）共用骨架。
+      **SM100 专属，仅分析**（kernel `:47` 整段 `__CUDA_ARCH__>=1000`）；架构无关的几何/描述符设备代码
+      在 H100 真机跑。
+      → `docs/35-sm100-fp8-fp4-gemm.md`（真实行号核对）：host `compile_and_launch :35-90`
+      （MXF4/MXF8F6F4 只差 dtype 字符串 `:36-39`、JIT 微源码 `:40-79`、launch `:82-89`）+ 六入口
+      `:101/169/254/325/483/405`（wgrad FP8 钉 MN `:337`、wgrad FP4 钉 K + gran32 `:496-497`、
+      `k_alignment%block_k==0 :357/515`、psum `:181-186`、masked `:316`、k-grouped 3D CD `:370-375`、
+      SF `sfa.size(0)*gran_k*4 :377-380`）+ `get_sf_block_config :93-99`。
+      kernel：模板 `:24-37`、arch 守卫 `:47`、MXF4/`kPackFactor`/`BLOCK_K` 断言 `:51-89`、
+      C/D+输出 SF `:60-66`、`UMMA_M=128*multicast`/`UMMA_N=BLOCK_M(swap)` `:68-85`、
+      **TMEM 列预算 + overlap 技巧** `:120-132`（`accum=2*UMMA_N`；`overlap=max(x,512)-512`；对齐到 512）、
+      epilogue 配置 `:106-118`；五类 warp（init `:167-192`、调度 `:197-210`、TMA `:213-300`、
+      **MMA `:301-459`**、UTCCP transposer `:460-496`、epilogue `:497-561`）——**仅 leader CTA 单 warp 发 UMMA**，
+      UTCCP 把 SF 搬进 TMEM（`:371-393`）、`tmem_overlap_barriers` 在 SF UTCCP 后/首条 UMMA 前等待
+      （`:399-408`）、每步算 `subblock_idx/sf_id/tmem_col`（`:416-431`）、`umma_arrive` 通知 empty/tmem_full
+      （`:335-350`）；gran32/128 的 stage 与 sf id（`:96-97/263-276/369-370/427-428`）；
+      **SF SMEM 内 warp 转置** `:464-472`。描述符：`mma/sm100.cuh`（`make_smem_desc :14-40`、
+      `get_umma_desc_stride_k :83-87`、`advance_umma_desc_lo :89-96`、`make_umma_desc :98-142`、
+      `make_runtime_instr_desc_with_sf_id :144-148`、`update_instr_desc_with_umma_n :150-158`）、
+      `packing.cuh:7-11`、`tma_copy.cuh:12-14`。H100 实测 `src/sm100_fp8_fp4_geometry.cu` +
+      `harness/exp_sm100_fp8_fp4_geometry.{sh,out.txt}`：**真实设备代码**（SF 转置逐行抽取 sha256 `ae0401ba`；
+      描述符/指令描述符用真实头文件）——A) SF warp 转置 **128/128 全对**；B/C) smem 描述符 4 例
+      （K-major stride_k=1 / MN-major = swizzle atom；FP4 pack=2 偏移减半；SBO/LBO `>>4`）全对；
+      D) 指令描述符 5 例（E8M0、`n_dim=N>>3`、`m_dim=M>>4`、2-bit sf_id、packed `float_e2m1_t`→`MXF4Format::E2M1=1`、
+      `update_instr_desc_with_umma_n` 置 12）全对，**总判定 ALL PASS**。配套博客
+      `content/posts/mega-moe-35-sm100-fp8-fp4-gemm`（索引页新增第 35 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -740,8 +773,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P24 各增量完成（P15-1…P23-1、P24-1）。**
-  本轮 P24-1：新建 `docs/34-locality-domain-probe.md`（+`src/locality_domain_probe.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P25 各增量完成（P15-1…P24-1、P25-1）。**
+  本轮 P25-1：新建 `docs/35-sm100-fp8-fp4-gemm.md`（+`src/sm100_fp8_fp4_geometry.cu`、
+  `harness/exp_sm100_fp8_fp4_geometry.{sh,out.txt}`）——补上第 3/10/21/31 篇一直当「黑盒后端」引用的
+  **目标卡上唯一 GEMM 后端**：`sm100_fp8_fp4_gemm_1d1d`。一套模板通吃稠密/m-grouped（dgrad，含 PSUM/masked）/
+  k-grouped（wgrad，FP8 钉 MN、FP4 钉 K+gran32）/batched（MLA），**MXF8F6F4（`UMMA_K=32`）与 MXF4
+  （`UMMA_K=64`、packed、K-major、gran32）共用骨架**。与 SM90（第 22 篇 WGMMA+寄存器累加+两种 SF 粒度分两个 kernel）
+  的本质差异是 **UMMA + TMEM + UTCCP**：累加器放 TMEM、SF 从 SMEM 经 UTCCP 搬进 TMEM 由硬件按 `gran_k` 应用；
+  **仅 leader CTA 单 warp** 发 `tcgen05.mma.block_scale`。**最值得记的「为什么」是 512 列 TMEM 预算与 overlap**：
+  `accum=2*UMMA_N`（双缓冲）+ SF，`overlap=max(x,512)-512` 后对齐到正好 512（kernel `:120-132`），
+  这解释了 host 合法性检查为何只写单级的 `umma_n+sf<=512`。还有 **SF 的 SMEM 内 warp 转置**（`:464-472`：
+  `out[lane*4+i]=in[i*32+lane]`）与 gran32/128 的 stage/sf_id 选择（`:96-97/416-431`）。
+  **SM100 专属，仅分析**（kernel `:47` 整段 `__CUDA_ARCH__>=1000`）；架构无关的几何/描述符设备代码在 H100 真机跑：
+  SF warp 转置 **128/128 全对**；smem 描述符 4 例（K-major stride_k=1 / MN-major=swizzle atom、FP4 pack=2 偏移减半、
+  SBO/LBO `>>4`）全对；指令描述符 5 例（E8M0、`n_dim=N>>3`/`m_dim=M>>4`、2-bit sf_id、packed `float_e2m1_t`→
+  `MXF4Format::E2M1=1`、`update_instr_desc_with_umma_n` 置 12）全对，**总判定 ALL PASS**。行号全部核对过。
+  配套博客 `content/posts/mega-moe-35-sm100-fp8-fp4-gemm`（索引页新增第 35 篇）。
+  上一轮 P24-1：新建 `docs/34-locality-domain-probe.md`（+`src/locality_domain_probe.cu`、
   `harness/exp_locality_domain_probe.{sh,out.txt}`）——补上第 03/09/11 篇反复出现却从没讲清的
   `num_locality_domains=2` 的**前置步骤**：**哪个 SM 属于哪个域、这件事怎么测出来的**。
   探针设备代码 `sm100_locality_domain.cuh:8-24` 只依赖 `%smid`/`ld.global.cg`/`clock64`
@@ -907,10 +955,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P23 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+- **下一步**：P0~P25 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
   P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子、
-  P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel、P23-1 DeepJIT 编译/缓存/加载/发射管线）。
+  P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel、P23-1 DeepJIT 编译/缓存/加载/发射管线、
+  P24-1 SM 局部域探针与内存域分配、P25-1 SM100 FP8/FP4 稠密 GEMM 主 kernel）。
   后续若继续（均为增量、非承诺）：
+  ⑬ **SM100 GEMM 后端已讲清（P25-1）**：一套模板通吃稠密/m-grouped/k-grouped/batched，
+   MXF8F6F4/MXF4 两种 UMMA、TMEM 列预算与 overlap、UTCCP 搬 SF、五类 warp；与 P22-1（SM90）成对照。
+   至此「SM90 两个主 kernel + SM100 唯一主 kernel」都已拆解。
   ⑪ **JIT 运行时已讲清（P23-1）**：五段式缓存键、两级缓存、原子发布、递归 include 哈希、微源码调用形态、
   加载/发射（`cuLaunchKernelEx` + cluster/PDL 属性）。可再补 DeepJIT 的 Ascend 后端对照、
   「cache warmup from history / Python 编译 API」两个 WIP 特性（当前不可用）、或 post-hook 后处理机制。
