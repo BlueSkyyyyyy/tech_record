@@ -1264,6 +1264,25 @@
       实测归约读带宽 ~2.6 TB/s。配套博客 `content/posts/mega-moe-51-mega-moe-test-correctness`
       （索引页新增第 51 篇）。
 
+- [x] **P42-1** **DeepGEMM 的 kernel 发射层：PDL / cluster / 动态共享内存与设备端 grid 依赖同步**
+      （`third-party/deep_jit/include/deep_jit/backend/cuda/kernel.hpp:92-170`、`options.hpp:178-233`、
+      `runtime/runtime.hpp:31/42/71-73`、`csrc/apis/config.hpp:27-31`；device 侧 24 处
+      `cudaGridDependencySynchronize()`）。
+      → `docs/52-kernel-launch-pdl.md`（真实行号核对）：DeepJIT 的 `Kernel::launch` 用 **driver API
+      `cuLaunchKernelEx` + 至多 3 个 `CUlaunchAttribute`**（cooperative / cluster dimension / PDL）；
+      `LaunchOptions` 是「全局 `default_launch_options` → 每 kernel 四字段 override」两级 merge
+      （`std::optional` 里显式 `false/0` 也算「已指定」），DeepGEMM 每 kernel 只填
+      `num_smem_bytes/grid/block/cluster_dim`，只有 `set_pdl` 是用户可全局切换的；`Kernel::launch`
+      的 8 个 `has_value` 断言、`MAX_DYNAMIC_SHARED_SIZE` 抬高、non-portable cluster「只设不撤」坑、
+      属性数组装配。设备侧 24 处 `griddepcontrol.wait` 总在「barrier/cluster 初始化之后、scheduler
+      消费前序输出之前」，而 `cudaTriggerProgrammaticLaunchCompletion`（`griddepcontrol.launch_dependents`）
+      全仓库**一次不用**（依赖隐式触发）。**H100 真机（PDL/cluster/dyn-smem 均非 SM100 专属）**：
+      PDL 全格（132+132）2.028→1.971 ms（1.03×）、半格（66+66）2.028→**1.042 ms（1.95×）**、
+      提前触发 1.042 vs 隐式末尾 2.027、缺 `griddepcontrol.wait` 静默读 stale **1,689,600/104857600**
+      （有则 0）；cluster cs=2/4 rank/size bad=0、cs=16 无属性 error 912→设属性成功；100 KiB 动态
+      smem 无属性 invalid argument→设属性成功；`LaunchOptions` 真实头文件 host 测试 ALL PASS。
+      配套博客 `content/posts/mega-moe-52-kernel-launch-pdl`（索引页新增第 52 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1288,8 +1307,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P41 各增量完成（P15-1…P40-1、P41-1）。**
-  本轮 P41-1：新建 `docs/51-mega-moe-test-correctness.md`（+`harness/exp_mega_moe_test.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P42 各增量完成（P15-1…P41-1、P42-1）。**
+  本轮 P42-1：新建 `docs/52-kernel-launch-pdl.md`（+`src/pdl_launch.cu`、`src/pdl_launch_host.cpp`、
+  `harness/exp_pdl_launch.{sh,out.txt}`）——补上前面 51 篇都踩、却从没单独讲过的**发射那一下**：
+  DeepJIT `Kernel::launch` 用 driver `cuLaunchKernelEx` 装配**至多 3 个 `CUlaunchAttribute`**
+  （cooperative / cluster dimension / PDL），`LaunchOptions`（`options.hpp:178-233`）是「全局默认
+  → 每 kernel 四字段 override」两级 `std::optional` merge（显式 `false/0` 也算「已指定」），
+  DeepGEMM 每 kernel 只填 `num_smem_bytes/grid/block/cluster_dim`、只有 `set_pdl`（`config.hpp:27-31`）
+  用户可全局切换。`Kernel::launch` 的 8 个 `has_value` 断言、`MAX_DYNAMIC_SHARED_SIZE` 抬高、
+  non-portable cluster「只设不撤」坑、属性数组装配。设备侧 **24 处** `cudaGridDependencySynchronize()`
+  （`griddepcontrol.wait`）总在「barrier/cluster 初始化之后、scheduler 消费前序输出之前」，
+  而 `cudaTriggerProgrammaticLaunchCompletion`（`griddepcontrol.launch_dependents`）全仓库**一次不用**
+  （依赖隐式触发）。**H100 真机**（PDL/cluster/dyn-smem 均 sm90 支持，非 SM100 专属）：PDL 全格
+  （132+132）2.028→1.971 ms（1.03×，无空闲 SM）、半格（66+66）2.028→**1.042 ms（1.95×）**、
+  提前触发 1.042 vs 隐式末尾 2.027、缺 `griddepcontrol.wait` 静默读 stale **1,689,600/104857600**
+  （有则 0）；cluster cs=2/4 bad=0、cs=16 无属性 error 912→设属性成功；100 KiB 动态 smem 无属性
+  invalid argument→设属性成功；`LaunchOptions` 真实头文件 host 测试 ALL PASS。行号全部核对过。
+  配套博客 `content/posts/mega-moe-52-kernel-launch-pdl`（索引页新增第 52 篇）。
+  上一轮 P41-1：新建 `docs/51-mega-moe-test-correctness.md`（+`harness/exp_mega_moe_test.{py,sh,out.txt}`）
   ——补上 Mega MoE 一直缺席的**端到端验收测试 `tests/test_mega_moe.py`**，它是「正确性判据」与
   前面各篇反复引用的「TFLOPS/HBM/NVLink/overlap 数字」的共同出处。三个核心事实：① **逐位判据**——
   `run_fused`（单 mega-kernel）与 `run_baseline`（DeepEP dispatch→`m_grouped`×2→SwiGLU→combine）
@@ -1694,7 +1729,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P41 已完成（新增 **P41-1 Mega MoE 的端到端测试与逐位正确性判据**：
+- **下一步**：P0~P42 已完成（新增 **P42-1 DeepGEMM 的 kernel 发射层**：
+  补上前面 51 篇都踩、却从没单独讲过的「发射那一下」——DeepJIT `Kernel::launch` 用 driver
+  `cuLaunchKernelEx` 装配至多 3 个 `CUlaunchAttribute`（cooperative / cluster / PDL）；
+  `LaunchOptions` 两级 `std::optional` merge、只有 `set_pdl` 全局可调；24 处
+  `cudaGridDependencySynchronize()` 的设备端半边；**H100 真机 PDL/cluster/dyn-smem 全部实测**
+  （半格 PDL 1.95×、缺同步读 stale 1.6%、cluster error 912 反例、dyn smem invalid argument 反例）；
+  见上）。
+  上一轮 P41-1：P0~P41 已完成（新增 **P41-1 Mega MoE 的端到端测试与逐位正确性判据**：
   补上 `tests/test_mega_moe.py`——`run_fused` vs `run_baseline` 用 `torch.equal` 逐位验收、
   三个测试侧 SF 布局变换（TMA 列主序对齐 / 共享专家 UTCCP 4×32 交错 / padding 广播）、
   性能账目公式（FLOP=3、fp4 权重 0.5B、overlap factor）；**H100 真机 37 PASS**（直接 import
