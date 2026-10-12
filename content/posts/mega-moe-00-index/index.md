@@ -47,5 +47,6 @@ categories: ["算子开发"]
 26. [MoE wgrad 的按组 block-scale：K-grouped SF 打包]({{< relref "mega-moe-26-k-grouped-sf-packing" >}}) —— `(1,1,gran_k)` recipe、contiguous 精确 `Σ ceil_div(k/gran_k,4)` / PSUM 上界 `(sf_k+3G)/4`、device 找 owner 组 + 累积 padding + 减偏移取址 + LSB-first 打包、连续 `[packed,mn]` 输出；kernel 与 UMMA 无关，H100 上跑真实设备代码逐行对拍 ALL PASS（含空组/大量 padding/PSUM 尾部 poison）
 27. [DeepGEMM 的 cuBLASLt 回退路径与选核]({{< relref "mega-moe-27-cublaslt-fallback" >}}) —— 稠密 BF16 与按头 batched BF16 einsum 默认交给 cuBLASLt 的三与门（非确定性 / 未限制 SM 数 / plain-store epilogue）；row-major↔column-major 操作数交换、FAST_ACCUM/SM_COUNT_TARGET/16MiB workspace、NVFP4 VEC16 UE4M3、strided-batched；H100 真机 profiler 抓 kernel 名 + 选核切换 + 性能打平实测
 28. [DeepGEMM 的选核启发式 `get_best_config`]({{< relref "mega-moe-28-deepgemm-best-config" >}}) —— 用自家 kernel 时 block_m/n/k、cluster、stage、线程如何选：候选枚举的合法性与过滤器、L1/L2 周期代价模型与多播收益、SM90 定量 vs SM100 词典序 tie-break；H100 上 Python 复刻 20 组形状 15 字段逐项对拍 0 不符 + 候选排序
+29. [DeepGEMM 的 SM90 BF16 dense GEMM 主 kernel]({{< relref "mega-moe-29-sm90-bf16-gemm" >}}) —— 一套 kernel 服务五种 `GemmType`、`BLOCK_K=64`/`MMA_64xNx16`、BF16 专属的合并 stage、epilogue 两种输出 dtype（bf16 STSM+swizzle / fp32 裸 st.shared）、累积用 TMA reduce-add；H100 真机六类入口对拍，bf16 峰值 801 TFLOPS
 
 > 各篇正文由仓库 `code/mega-moe/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

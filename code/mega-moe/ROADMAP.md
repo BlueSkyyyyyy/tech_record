@@ -525,6 +525,37 @@
       变 32、batched 恒 cm=cn=1。配套博客 `content/posts/mega-moe-28-deepgemm-best-config`
       （索引页新增第 28 篇）。
 
+### P19 增量（opt-in，DeepGEMM 的 SM90 BF16 稠密 GEMM 主 kernel）
+
+- [x] **P19-1** **SM90 BF16 dense GEMM 主 kernel**（`sm90_bf16_gemm.cuh` / `sm90_bf16_gemm.hpp` /
+      `mma/sm90.cuh` / `common/tma_copy.cuh`）：第 10/11/12/13/21 篇讲的是 FP8 SM90 kernel，
+      第 17/18/27 篇顺带用到 BF16 这条路却从没系统讲过。本篇补上 DeepGEMM **唯一一个同时服务
+      Normal / MGrouped(contiguous & masked) / KGrouped / Batched 五种 `GemmType`** 的 SM90 kernel。
+      **H100 可跑，真机实测**。
+      → `docs/29-sm90-bf16-gemm.md`（真实行号核对）：host 六入口 `sm90_bf16_gemm.hpp:77-130`（Normal）、
+      `:132-201`（MGroupedContiguous，A 必须 K-major/k%64）、`:203-262`（MGroupedMasked，A/B 都 K-major）、
+      `:264-330`（KGroupedContiguous，MN/MN/每组 k%128）、`:332-384`/`:386-438`（两个 batched MLA），
+      JIT 模板拼装 `:27-64`。kernel `sm90_bf16_gemm.cuh`：模板 21 参 `:27-37`、类型约束 `:64`、
+      **合并 stage**（`kDoMergeStages` stage≥10+Normal+K/K-major+128 math → `BLOCK_K*=kNumStagesPerMerge`，
+      `:44-56`，为减少 `warpgroup_wait<0>`）、smem 布局 `:71-109`、barrier init `:112-121`、PDL `:131`；
+      **TMA warp** `:147-209`（第三 warp elect-one、multicast 判定 `:163-166`、按 major 发 2D/3D TMA
+      `:188-199`、`expect_tx`）；**math warp** `:210-282`（`WGMMA=BF16MMASelector`：M=64/N=BLOCK_N/K=16、
+      `kNumAccum=N/2`，wave `WAVE_BLOCK_M` `:228`、跨 wave 交错的两个 warpgroup `:219`、
+      `advance_gmma_desc_lo` 前进 descriptor `:267-270`、`accum` 零初始化 + WGMMA `scale_d=1`）；
+      **epilogue** `:284-388`（`do_wgmma_store` `:234`；bf16 输出走 STSM+128B swizzle `:302-349`，
+      fp32 输出走裸 `st.shared` 且 `kSwizzleDMode=0` `:350-364`；`NamedBarrier` 后 TMA store，
+      `Batched` 走 3D、累积走 `SM90_TMA_REDUCE_ADD_2D/3D` `:371-387`）。与 FP8 SM90 的对照表（WGMMA `K`
+      16 vs 32、`BLOCK_K` 64 vs 128、有无 SF）。H100 实测 `harness/exp_bf16_sm90_gemm.{py,sh,out.txt}`：
+      ① 稠密 7 形状 × out∈{bf16,fp32} × acc，relerr fp32 ~1e-6 / bf16 ~1e-4 / bf16-acc ~2.9e-3，
+      峰值 **801 TFLOPS**（`4096×7168×7168` bf16）、fp32 略慢（关 swizzle + 双倍 store）；
+      ② 别名 nt/nn/tn/tt 一致（~1.66e-3）；③ MGrouped contiguous/masked relerr 1.5e-4、contiguous
+      **575 TFLOPS**；④ KGrouped MN/MN 强制 accumulate（`gemm.hpp:707-710`）relerr 1.7e-6、
+      **422 TFLOPS**、非 128 倍数 K 被拒；⑤ batched MLA `bhr,hdr->bhd` relerr 1.5e-4、**781 TFLOPS**；
+      ⑥ 抓到 `(128,128,512)` 触发合并 stage（`kNumStages_=16→per-merge 3`）、out=bf16 `kSwizzleDMode=128`
+      / out=fp32 `=0`；⑦ deterministic off→cuBLASLt、on→`sm90_bf16_gemm_impl`（对照 P17-1）；
+      ⑧ 踩坑：PDL 让背靠背 kineto 计时系统性偏小（改用 per-call sync+event）。配套博客
+      `content/posts/mega-moe-29-sm90-bf16-gemm`（索引页新增第 29 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -549,8 +580,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15-1、P16-1、P17-1、P18-1 完成。**
-  本轮 P18-1：新建 `docs/28-deepgemm-best-config.md`（+`harness/exp_best_config.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15-1、P16-1、P17-1、P18-1、P19-1 完成。**
+  本轮 P19-1：新建 `docs/29-sm90-bf16-gemm.md`（+`harness/exp_bf16_sm90_gemm.{py,sh,out.txt}`）
+  ——补上**DeepGEMM SM90 BF16 稠密 GEMM 主 kernel**（前 28 篇里 BF16 只被顺带提到）。它是唯一一个
+  **一套 kernel 服务 Normal / MGrouped(contiguous & masked) / KGrouped / Batched 五种 `GemmType`**
+  的 SM90 kernel：没有 SF，骨架与 FP8 SM90 同构（TMA warp 铺流水 → math warpgroup 发
+  `MMA_64xNx16` WGMMA → epilogue 经 smem 用 TMA store），差异在 **`BLOCK_K=64`**、
+  **合并 stage**（stage≥10+Normal+K/K-major+128 math → `BLOCK_K*=kNumStagesPerMerge`，减少
+  `warpgroup_wait<0>`）、**fp32 输出关 swizzle**（裸 `st.shared` vs bf16 的 STSM+128B swizzle）、
+  **累积用 TMA reduce-add**（不额外读回 D）。**H100 真机**六类入口全部对拍：峰值 **801 TFLOPS**
+  （bf16 4096×7168×7168）、k-grouped wgrad 422、batched MLA 781；抓到 `(128,128,512)` 触发合并 stage。
+  行号全部核对过。配套博客 `content/posts/mega-moe-29-sm90-bf16-gemm`（索引页新增第 29 篇）。
+  Hugo 构建 0 ERROR。
+  上一轮 P18-1：新建 `docs/28-deepgemm-best-config.md`（+`harness/exp_best_config.{py,sh,out.txt}`）
   ——补上**「用自家 kernel 时怎么选 block_m/n/k/cluster/stage/线程」**（第 27 篇讲了「何时不用自家
   kernel」，两篇合起来才是完整选核）。`get_best_config` = 枚举候选 → 逐个打分 → 取最小
   （`common.hpp:18-56`）；SM90 是「**L1/L2 周期最小化**」的定量模型（multicast 省 L2 读、累积模式
@@ -637,10 +679,11 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P17 已完成（P17-1 已把 cuBLASLt 回退/选核补完）。后续若继续（均为增量、非承诺）：
+- **下一步**：P0~P19 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel）。
+  后续若继续（均为增量、非承诺）：
   ① **sparse attention 系列（P12/P13/P14 已开）**：SM90 dense、SM100 sparse、SM100 dense 连续版/
   分页版调度器均已做；可再补 `sm100_mqa_logits.cuh` SIMT epilogue 的更多数值特性，或
-   `impls/sm100_sparse_mqa_logits.cuh` 主 kernel 的 TMA 快路 / 尾裁剪细节精读；
+  `impls/sm100_sparse_mqa_logits.cuh` 主 kernel 的 TMA 快路 / 尾裁剪细节精读；
   ② **einsum 家族 FP8 投影（P11 已开）**：`bhr,hdr->bhd` 已做；`bhd,hdr->bhr` / `bhd,bhr->hdr`
   是 arch10 专属（仅分析）。可再补 `fp8_einsum` 的 FP8 输出对（SM100 `Kernel1D1D`）精读；
   ③ **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
@@ -652,6 +695,8 @@
    ⑦ **选核启发式 `get_best_config`**：P18-1 已完成（SM90 定量代价模型 + SM100 词典序，
     H100 上 Python 复刻 20 组形状 15 字段逐项对拍 0 不符）。至此「用不用自家 kernel」与「用自家
     kernel 时怎么配」都已讲清。
+   ⑧ **SM90 BF16 主 kernel**：P19-1 已完成（五种 `GemmType` 一套 kernel、合并 stage、两种输出 dtype、
+    TMA reduce-add；H100 六类入口实测）。与 P10-1（SM100 BF16 mega moe）、P20 篇互补，BF16 路径补齐。
    若无新指令，可视为专题完结。
 
   （历史各轮进展见下）P5-2：`docs/05-mega-gate-mhc.md` 新增「第二部分：Mega mHC」。
