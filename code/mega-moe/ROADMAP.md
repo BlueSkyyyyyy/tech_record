@@ -749,6 +749,37 @@
       `update_instr_desc_with_umma_n` 置 12）全对，**总判定 ALL PASS**。配套博客
       `content/posts/mega-moe-35-sm100-fp8-fp4-gemm`（索引页新增第 35 篇）。
 
+### P26 增量（opt-in，补齐「稠密 GEMM 主 kernel」矩阵最后一格 + `set_tc_util`）
+
+- [x] **P26-1** **SM100 BF16 主 kernel（`sm100_bf16_gemm.cuh`）与 tensor-core 利用率控制**
+      （`deep_gemm/include/deep_gemm/impls/sm100_bf16_gemm.cuh`；
+      `csrc/jit_kernels/impls/sm100_bf16_gemm.hpp`；`csrc/apis/config.hpp`；
+      `csrc/runtime/runtime.hpp`；`csrc/jit_kernels/heuristics/{sm100.hpp,config.hpp}`；
+      `deep_gemm/include/deep_gemm/layout/gemm.cuh`；`deep_gemm/include/deep_gemm/ptx/tcgen05.cuh`）。
+      第 19 篇拆了 SM90 BF16、第 22 篇 SM90 FP8、第 35 篇 SM100 FP8/FP4，只差 **SM100 BF16**——
+      SM100 上所有 BF16 GEMM（稠密/m-grouped/k-grouped/batched，host 六入口
+      `sm100_bf16_gemm.hpp:82/138/210/268/335/387`）的唯一后端。与第 35 篇**同一套 UMMA+TMEM 骨架、去掉 SF/UTCCP**，
+      `UMMA_K=16`（`:69`）、`BLOCK_K_=64`（host `heuristics/sm100.hpp:32` 的 `128*8/bits`）。
+      **两个独有机制**：① **device 内合并 stage**（`:46-53`，仅 `GemmType::Normal` 且 A/B 都 K-major 且
+      stage≥8：`BLOCK_K = BLOCK_K_ * kNumStages_/8`，64→最多 256；`:45` 注释「reducing the `umma_arrive()` overhead」；
+      `BLOCK_ATOM_K`（`:244`）+ 两级 `atom_k_idx/inner_k_idx`（`:304-309`）——与第 19 篇 SM90 merge 同思想不同动机）；
+      ② **tensor-core 利用率控制 `set_tc_util`**（`:141-142/326-343`）：每次 UMMA 后用
+      `tensor_core_full_barrier` 等其做完，再按 `kNumUMMACycles = 2·UMMA_M·UMMA_N·BLOCK_K/8192`（`:337`）与
+      `kNumDummyCycles = (100-util)/util·kNumUMMACycles`（`:338`）由单 lane `clock64` 空转，把占空比压到 `util%`
+      （注释 `:325`「Let tensor cores relax for lower possibility of frequency drop」）。
+      **host 全链路**：Python `csrc/apis/config.hpp:21-25` → `runtime.hpp:22`（默认 0）/`:93-100`（get 把 0 翻 100）
+      → `config.hpp:22` 的 `GemmDesc.tc_util`（**每个** kernel 都填）→ **只有** `sm100_bf16_gemm.hpp:70` 把它当
+      模板实参 `kTensorCoreUtilControl`（`:35`）编进 kernel（`sm90_bf16_gemm.hpp:43`、`sm100_fp8_fp4_gemm_1d1d.hpp`
+      的模板列表都没有 → 不影响行为/缓存键）。
+      **SM100 专属，仅分析**（kernel `:43` 整段 `__CUDA_ARCH__>=1000`）；**架构无关的开关语义与节流机制 H100 真跑**：
+      `harness/exp_tc_util.{sh,out.txt}` + `harness/exp_tc_util_throttle.{sh,out.txt}`、`src/tc_util_throttle.cu`——
+      ① `set_tc_util` 语义（默认 100、`set(0)→100`、`-1/101` 在 `runtime.hpp:94` 被拒）；② **对 SM90 bf16 完全无效**
+      （4096³：100/50/10 都 182 us、753 TFLOPS；SM90 FP8 都 107 us、1281 TFLOPS）；③ 冷缓存下切 `tc_util` 后
+      第二次调用 **2558 ms→2.37 ms** 命中缓存（坐实不在 JIT 键里）；④ 节流机制复刻：公式 `cyc/(cyc+dummy)=util/100`
+      精确成立，真机 `work/total` 随 util 单调下降（util=50→0.32、25→0.19），墙时间按比例拉长，但**空转超调**
+      使实测利用率偏低、且 **H100 频率未随降载抬升**（降频意图依赖 SM100 tensor-core 功耗/热行为，无法复现）。
+      行号全部核对过。配套博客 `content/posts/mega-moe-36-sm100-bf16-gemm-tc-util`（索引页新增第 36 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -773,8 +804,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P25 各增量完成（P15-1…P24-1、P25-1）。**
-  本轮 P25-1：新建 `docs/35-sm100-fp8-fp4-gemm.md`（+`src/sm100_fp8_fp4_geometry.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P26 各增量完成（P15-1…P24-1、P25-1、P26-1）。**
+  本轮 P26-1：新建 `docs/36-sm100-bf16-gemm-tc-util.md`（+`src/tc_util_throttle.cu`、
+  `harness/exp_tc_util.{sh,out.txt}`、`harness/exp_tc_util_throttle.{sh,out.txt}`）——补上「稠密 GEMM 主 kernel」
+  矩阵的**最后一格**：SM100 BF16 主 kernel `sm100_bf16_gemm`（与第 35 篇同一套 UMMA+TMEM 骨架、去掉 SF/UTCCP，
+  `UMMA_K=16`、`BLOCK_K_=64`，host 六入口覆盖稠密/m-grouped/k-grouped/batched），并拆掉它独有的
+  **device 内合并 stage**（仅 K-major `Normal` 且 stage≥8，`BLOCK_K` 64→最多 256，少发 `umma_arrive`；
+  与第 19 篇 SM90 的 merge 同思想不同动机）与 **tensor-core 利用率控制 `set_tc_util`**。
+  后者是本专题一直没见过的机制：一个从 Python（`config.hpp:21-25`）经 `GemmDesc.tc_util` 直通到**模板参数**
+  `kTensorCoreUtilControl`（`sm100_bf16_gemm.cuh:35`）的运行时开关，**只有这个 kernel** 实现——
+  每次 UMMA 后用 `tensor_core_full_barrier` 等其做完，再按
+  `kNumUMMACycles=2·UMMA_M·UMMA_N·BLOCK_K/8192`（`:337`）、`kNumDummyCycles=(100-util)/util·kNumUMMACycles`（`:338`）
+  由单 lane `clock64` 空转，把占空比压到 `util%`（注释 `:325`「avoid frequency drop」）。
+  **SM100 专属，仅分析**（kernel `:43` 整段 `__CUDA_ARCH__>=1000`）；**架构无关的开关语义与节流机制 H100 真跑**：
+  ① `set_tc_util` 语义正确（默认 100、`set(0)→100`、越界在 `runtime.hpp:94` 被拒）；② **对 SM90 bf16/fp8 完全无效**
+  （4096³ bf16 在 100/50/10 下都 182 us/753 TFLOPS；fp8 都 107 us/1281 TFLOPS）、**不改 JIT 缓存键**
+  （冷缓存 2558 ms → 切 util 后 2.37 ms 命中）；③ 节流机制复刻：公式 `cyc/(cyc+dummy)=util/100` 精确成立，
+  真机 `work/total` 随 util 单调下降、墙时间按比例拉长，但空转超调使实测利用率偏低、且 H100 频率不随降载抬升
+  （降频意图依赖 SM100 tensor-core 功耗/热行为，无法复现）。行号全部核对过。
+  配套博客 `content/posts/mega-moe-36-sm100-bf16-gemm-tc-util`（索引页新增第 36 篇）。
+  上一轮 P25-1：新建 `docs/35-sm100-fp8-fp4-gemm.md`（+`src/sm100_fp8_fp4_geometry.cu`、
   `harness/exp_sm100_fp8_fp4_geometry.{sh,out.txt}`）——补上第 3/10/21/31 篇一直当「黑盒后端」引用的
   **目标卡上唯一 GEMM 后端**：`sm100_fp8_fp4_gemm_1d1d`。一套模板通吃稠密/m-grouped（dgrad，含 PSUM/masked）/
   k-grouped（wgrad，FP8 钉 MN、FP4 钉 K+gran32）/batched（MLA），**MXF8F6F4（`UMMA_K=32`）与 MXF4
@@ -955,11 +1004,16 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P25 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
+- **下一步**：P0~P26 已完成（P17-1 cuBLASLt 回退、P18-1 选核启发式、P19-1 SM90 BF16 主 kernel、
   P20-1 SM90 分页 MQA logits 调度器、P21-1 SM100 GEMM epilogue store 路径与四算子、
   P22-1 SM90 FP8 dense GEMM 的 1D1D/1D2D 两个主 kernel、P23-1 DeepJIT 编译/缓存/加载/发射管线、
-  P24-1 SM 局部域探针与内存域分配、P25-1 SM100 FP8/FP4 稠密 GEMM 主 kernel）。
+  P24-1 SM 局部域探针与内存域分配、P25-1 SM100 FP8/FP4 稠密 GEMM 主 kernel、
+  P26-1 SM100 BF16 主 kernel 与 `set_tc_util`）。
   后续若继续（均为增量、非承诺）：
+  ⑭ **「稠密 GEMM 主 kernel」矩阵已补齐（P26-1）**：SM90 FP8/1D1D-1D2D（P22）、SM90 BF16（P19）、
+   SM100 FP8/FP4（P25）、SM100 BF16（P26）四格齐全；并拆清 `set_tc_util` 这一从 Python 直通模板参数的
+   tensor-core 节流开关（只有 SM100 BF16 实现）。可再补 SM100 BF16 的 `kSwapAB` dgrad 分支数值细节，
+   或把「节流」在真实 SM100 上量化（需目标卡）。
   ⑬ **SM100 GEMM 后端已讲清（P25-1）**：一套模板通吃稠密/m-grouped/k-grouped/batched，
    MXF8F6F4/MXF4 两种 UMMA、TMEM 列预算与 overlap、UTCCP 搬 SF、五类 warp；与 P22-1（SM90）成对照。
    至此「SM90 两个主 kernel + SM100 唯一主 kernel」都已拆解。
