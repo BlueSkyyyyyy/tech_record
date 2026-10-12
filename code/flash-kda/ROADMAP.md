@@ -92,6 +92,11 @@
       解决 P7-2 待验证 (b)。
 - [x] **P7-4** 归因 K1「global load 4/32 bytes/sector」，解决 P7-2 待验证 (a)（静态 SASS 计数 +
       `SourceCounters` 逐行 + DRAM 占比）。
+- [x] **P7-5** 关闭 P7-2/P7-4 待验证 (c)：**K2 突破 2 CTA/SM 后 L2 墙是否后移**——实验=否。
+      改造 `SharedStorageK2`（fp32 状态缓冲改按 `StateFP32` 条件预留）+ 扫 pipeline stage，编译 6 个变体，
+      实测占用率/ncu SOL/K2 时间。结论：smem 被无条件预留的 65536 B fp32 缓冲钉死为 98432 B（只减
+      stage 不动 smem）；真进 3 CTA/SM 的配置必须砍 pipeline 深度，反而慢（`cond(2,1)` +14%、
+      `cond(1,2)` +40%）；K2 在 grid 填满时 `lts` 已 93–94% SOL，是 L2 带宽 bound，占用率无可用余量。
 
 ### P8 小结 / 一页纸
 
@@ -207,9 +212,25 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P7-3/P7-4 补测**，进入收尾/维护。后续可选（有明确需求时再做）：更完整的
-  CUTLASS/TMA 版反向 B1/B2/B3 工程化；P7-2 遗留的 nsys 流量拆分（P7-3 已用 ncu DRAM 计数替代、
-  待验证 (b) 已关闭）与 K2 突破 2 CTA/SM 实验。
+- **下一步：专题 P0–P8 全部完成 + P6-3/P7-3/P7-4/P7-5 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  更完整的 CUTLASS/TMA 版反向 B1/B2/B3 工程化；P7-2 遗留的 nsys 流量拆分（P7-3 已用 ncu DRAM 计数替代、
+  待验证 (b) 已关闭）。**P7-5 已用实验关闭 P7-2/P7-4 待验证 (c)**（K2 突破 2 CTA/SM 后 L2 墙不后移，
+  见下）。
+  - P7-5：`docs/07` 新增 §8「K2 突破 2 CTA/SM 后 L2 墙会不会后移？」+ `harness/_build_k2_occ.py`
+    （把 `fwd_kernel2.cuh` 的 union 第二臂改 `ReserveFP32 = StateFP32` 并宏参 stage，编译 6 个变体：
+    orig/plain(3,2)/plain(2,1)/cond(3,2)/cond(2,2)/cond(2,1)/cond(1,2)）+ `harness/bench_k2_occ.py`
+    （`bench_k2_occ.out.txt`）+ `harness/probe_k2_occ_ncu.sh` & `harness/ncu_driver_occ.py`
+    （`probe_k2_occ_ncu.out.txt`）+ `harness/_smem_probe.py`（`smem_k2_occ_probe.out.txt`）。**实测**：
+    (a) **smem 被无条件预留的 65536 B fp32 状态缓冲钉死为 98432 B**——`plain(2,1)`（只减 stage）仍 98432、
+    2 CTA/SM；去掉 fp32 缓冲的 `cond(3,2)` 只剩 3200 B（95232）；要摸 3 CTA/SM 必须同时砍 OUT/IN 到 1，
+    且 ncu 用「dynamic+driver 1.02KB/block」算，`cond(2,2)`=78,208 B×3=234,624 > 233,472 仍落回 2。
+    (b) **2→3 CTA/SM 没有加速**：`B8 T2048 H64`（grid 512）orig K2=773µs、`cond(2,2)`=775µs；
+    唯一真进 3/SM 的 `cond(2,1)` 反 **慢 14%（885µs）且 L2 SOL 从 94.0% 掉到 81.4%**；`cond(1,2)`（IN=1）
+    K2=1086µs。设计点 `B1 T8192 H64` grid=64<132 SM，2/3 CTA/SM 帽根本不起作用，`cond(2,2)` 793µs≈orig 801µs。
+    (c) orig K2 已 `lts__throughput=93–94%`、`dram=55%`、`sm=34%`、`warps_active=18.6%`——**L2 带宽 bound**，
+    ncu「Est. Local Speedup 81.25%」是纯启发式，被实验证伪（占用率↑反而↓）。所有变体输出与上游**逐位相同**
+    （`max|dO|=0`）。**结论**：L2 墙不后移；K2 无占用率维度余量，要更快只能减 L2 流量（workspace/`v` 复用）
+    或改并行结构。同步更新 `docs/08` 待验证项与性能小结。博客 post `flash-kda-07-perf` 标题更新。
   - P7-4：`docs/07` 新增 §7「K1 那条 4/32 bytes/sector 的 global load 是谁」+ `harness/probe_k1_gload.sh`
     （`harness/probe_k1_gload.out.txt`），关闭 P7-2 待验证 (a)。**静态**（`cuobjdump -sass` 按函数切段）：
     K1 `IsVarlen=false` 只有 **1 条标量 `LDG.E`**（+ 5 条 TMA `UTMALDG` = q/k/g/beta/dt_bias），

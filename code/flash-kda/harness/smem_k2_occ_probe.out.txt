@@ -1,0 +1,10 @@
+variant                smem_B  +driver CTA/SM(analytic)
+orig/plain (3,2)        98432    99456                2
+plain (2,1)             98432    99456                2
+cond (3,2) bf16         95232    96256                2
+cond (2,2) bf16         77184    78208                2
+cond (2,1) bf16         73088    74112                3
+cond (1,2) bf16         59136    60160                3
+
+Note: ncu 'Block Limit Shared Mem' == CTA/SM(analytic) (driver smem included);
+cond (2,2) is 77,184+1024 = 78,208 B -> 3*78,208 = 234,624 > 233,472 => still 2/SM.

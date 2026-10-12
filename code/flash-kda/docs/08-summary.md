@@ -105,6 +105,8 @@ $\sim10^{-9}\!\sim\!10^{-7}$，只是计算顺序的舍入。**KDA vs GLA/DeltaN
   **L2 带宽**（K1 SOL L2 88.2%、K2 填满 grid 时 L2 91.6%），硬成本是 13824 B/tile workspace 的搬运。
   K1 第二瓶颈是 **barrier stall**（27 cyc/issue，来自 union 复用的同步圈）+ 2.7-way smem bank
   conflict；K2 被 smem 钉在 **2 CTA/SM**，设计点 H=64 < 132 SM 时 achieved occ 仅 9.4%。
+  **占用率不是 K2 的可优化余量**（`docs/07` §8）：削 pipeline stage 不减 smem（被 64KB fp32 缓冲
+  钉死），强抬到 3 CTA/SM 反而更慢，因为 L2 已 94% SOL。
 
 ## 6. 反向要点
 
@@ -156,5 +158,8 @@ P7-4：唯一标量 load = `fwd_kernel1.cuh:258` 的 `A_log_ptr[head_idx]`，是
 workspace 读 vs $o$/state 写占比~~（**已解决**，`docs/07` §6 P7-3：K2 读 ≈ 75% workspace + 22.5% `v`，
 写 ≈ `o` 为主，DRAM 读与闭式预测吻合 1.000–1.010）；~~B1 状态伴随 kernel 的「非整除 T」边界~~（**已解决**，
 `docs/06` §6.5 P6-3：尾块 `E_tot` 按最后一个有效 token 取，非整除 T 下 Triton↔FLA `max_rel` 1e-8~4e-5，
-可整除回归逐位不变；「K 的 64 分段」经查是 FLA 同 program 内展开、非正确性约束）；K2 突破 2 CTA/SM 后
-L2 墙是否后移；完整的 CUTLASS/TMA 版 B1/B2/B3 属更大工程。
+可整除回归逐位不变；「K 的 64 分段」经查是 FLA 同 program 内展开、非正确性约束）；~~K2 突破 2 CTA/SM 后
+L2 墙是否后移~~（**已解决**，`docs/07` §8 P7-5：不会后移——`sizeof` 被**无条件预留的 65536 B fp32 状态缓冲**
+钉死为 98,432 B，只减 pipeline stage 不动 smem；真进 3 CTA/SM 的配置必须砍 pipeline 深度，实测更慢
+`+14%~+40%`，且 `lts` 已 94% SOL、K2 是 L2 带宽 bound，占用率无可用余量）；完整的 CUTLASS/TMA 版
+B1/B2/B3 属更大工程。

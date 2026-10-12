@@ -476,3 +476,118 @@ This could possibly be caused by a stride between threads. ...
    应视为误记/未复现。
 3. 预算 <2% 且 K1 只占前向 ~8%，故 §5.4 的两条结论（**K1 = barrier stall + L2 带宽**）**不变**，
    无需为这条 load 做任何优化。
+
+## 8. K2 突破 2 CTA/SM 后 L2 墙会不会后移？（P7-5）
+
+§5.4 留了最后一个待验证 (c)：「把 K2 的 state smem 复用/减小以突破 2 CTA/SM 后 L2 墙是否后移」。
+本节直接把它做成实验：**改造 K2 的 shared-memory 预算、编译出多个 pipeline 深度/占用率组合，
+实测占用率、访存 SOL 与 K2 时间**。结论先给：**墙不会后移**——K2 是 L2 带宽 bound，多出来的占用率
+用不上；而能真正把占用率抬到 3 CTA/SM 的配置都必须牺牲 pipeline 深度，反而更慢。
+复现脚本 `harness/_build_k2_occ.py`（编译变体）、`harness/bench_k2_occ.py`（计时，
+`bench_k2_occ.out.txt`）、`harness/probe_k2_occ_ncu.sh` + `harness/ncu_driver_occ.py`（ncu，
+`probe_k2_occ_ncu.out.txt`）、`harness/_smem_probe.py`（精确 `sizeof`，`smem_k2_occ_probe.out.txt`）。
+
+### 8.1 smem 预算：为什么「少放几个 pipeline stage」根本减不下去
+
+`SharedStorageK2`（`fwd_kernel2.cuh:72–112`）的字节账是（$D{=}128$，CHUNK$=16$，bf16）：
+
+```
+sizeof = 32768                       // state_acc: bf16 [D,D]
+       + max(IN*17984 + OUT*4096,    // union 第一臂：IN 个输入 stage + OUT 个输出 stage
+             65536)                  // union 第二臂：fp32 状态转换缓冲 [D,D]*4  <-- 无条件预留
+       + ~128                        // load/store pipeline + state barrier
+```
+
+每输入 stage `= v(4096) + beta(64) + 3*4096(kd/qd/kr) + g_total(512) + 2*512(INV/Mqk) = 17984` B，
+每输出 stage `= out[16,128] bf16 = 4096` B。关键在 union 第二臂：`state_fp32_buf`（`fwd_kernel2.cuh:106`）
+是 **65536 B 的 fp32 缓冲，只在 `StateFP32=true`（fp32 初/终态）时才用**，但对 bf16 路径也**原样预留**。
+
+所以只要 `IN*17984 + OUT*4096 ≤ 65536`，union 就恒等于 65536，`sizeof` 恒为 **98432 B**——**与 stage 数无关**。
+实测：
+
+| 变体 | `sizeof`(B) | +driver smem(1.02KB) | ncu Block Limit Shared Mem |
+|---|--:|--:|--:|
+| orig / plain (3,2) | **98432** | 99456 | **2** |
+| plain (2,1)（只减 stage） | **98432** | 99456 | **2** |
+| cond (3,2)（bf16 去掉 fp32 缓冲） | 95232 | 96256 | 2 |
+| cond (2,2) | 77184 | 78208 | **2**（3×78208=234624 > 233472）|
+| cond (2,1) | 73088 | 74112 | **3** |
+| cond (1,2) | 59136 | 60160 | **3** |
+
+`cond` = 在实验分支上把 union 第二臂改成 `ReserveFP32 ? [D*D*4] : [1]`（`ReserveFP32 = StateFP32`），
+即 bf16 路径不再预留那 64KB。可以看到：**只减 stage（plain 2,1）不动任何字节；去掉 fp32 缓冲（cond 3,2）
+也只省 3200 B，仍是 2 CTA/SM；要摸到 3 CTA/SM 必须同时把 OUT 或 IN 砍到 1**。注意 ncu 的
+`Block Limit Shared Mem` 严格用「dynamic + driver(1.02KB)/block」算，`cond(2,2)` 恰好差 384 B ×3 落回 2。
+
+> 精度不变量：所有变体的前向输出与上游**逐位相同**（下表 `max|dO|` 全 0），此改造只动 smem 布局，
+> 不改运算。
+
+### 8.2 实测：抬高占用率并没有让 K2 变快
+
+H100（132 SM），bf16，`CUDA_VISIBLE_DEVICES` 隔离空闲卡，wall = event 对包 50 次取 7 轮最小，
+CUPTI 取 3 遍最小（脚本见 §8 头部）。B*H=grid_k2：
+
+**B=1 T=8192 H=64（grid 64 < 132 SM，设计点：占用率上限根本用不到）**
+
+| 变体 | CTA/SM | occ(理论) | K2 µs |
+|---|--:|--:|--:|
+| orig | 2 | — | 801 |
+| plain (3,2) | 2 | — | 800 |
+| cond (3,2) | 2 | — | 800 |
+| **cond (2,2)** | **2** | — | **793** |
+| plain (2,1) | 2 | — | 929 |
+| cond (2,1) | 3 | — | 931 |
+| cond (1,2) | 3 | — | 1468 |
+
+grid 只有 64 个 CTA，`B*H<132`——**每个 SM 连 1 个 CTA 都分不到**，2 vs 3 CTA/SM 的帽根本不起作用；
+这组里 `cond(2,2)` 的 793µs 与 orig 801µs 在噪声内，而砍 pipeline 深度的 (2,1)/(1,2) 明显更慢。
+
+**B=8 T=2048 H=64（grid 512，真正能把 2/SM 用满）**
+
+| 变体 | CTA/SM | K2 µs | ncu L2 SOL | ncu Duration |
+|---|--:|--:|--:|--:|
+| **orig** | **2** | **773** | **94.0%** | 766 |
+| plain (3,2) | 2 | 771 | — | — |
+| plain (2,1)（2/SM，只减 stage） | 2 | 774 | 93.1% | 774 |
+| cond (3,2) | 2 | 772 | — | — |
+| cond (2,2) | 2 | 775 | 93.2% | 774 |
+| **cond (2,1)** | **3** | **885** | **81.4%** | 883 |
+| cond (1,2) | 3 | 1086 | — | — |
+
+三点：
+1. **2→3 CTA/SM 没有换来任何加速**。`cond(2,2)`（去掉 64KB 死缓冲，但仍是 2/SM）与 orig 同速；
+   唯一真正进 3/SM 的 `cond(2,1)` 反而 **慢 14%**（885 vs 773µs），而且它的 **L2 SOL 掉到 81.4%**
+   （orig 94.0%）——多驻留的 CTA 只在抢同一份 L2 带宽、没有做更多有用功。
+2. **占用率提升必须靠砍 pipeline 深度**（OUT2→1 或 IN→1），而深度才是 K2 的命门：`cond(1,2)`
+   在 grid 512 上 K2=1086µs（1.4× orig），grid 64 上 1468µs（1.8× orig）——输入 stage 掉到 1
+   后 MMA 每个 tile 都要等 LOAD，pipeline 断裂。
+3. **上游 K2 已经贴着 L2 上限在跑**：设计点/填满 grid 时 `lts__throughput = 93–94%`、`dram=55–56%`、
+   `sm=34%`，`sm__warps_active=18.6%`。这正是 §5 的结论——**K2 bound 在 L2 带宽**，不是延迟隐藏，
+   所以再多 CTA/SM 也没有下一层可喂。
+
+### 8.3 ncu 那句「Est. Local Speedup: 81.25%」怎么读
+
+ncu 的 Occupancy section 对 orig K2 报：
+
+```
+Block Limit Shared Mem   2      Theoretical Occupancy  18.75%   Achieved  18.56%
+OPT  Est. Local Speedup: 81.25%  ... theoretical occupancy limited by shared memory
+```
+
+这 81.25% 是**纯启发式**：它假设「占用率越高越快」，无视此时 L2 已 94% SOL。本节的实验直接证伪了
+这条建议对该 kernel 的适用性——**把占用率从 18.75% 提到 28.12%（`cond(2,1)`）后，K2 反而更慢**。
+正确的解读是：`Block Limit Registers = 4`、`Block Limit Warps = 10`、`Block Limit Barriers = 7`
+都远高于 `Block Limit Shared Mem = 2`，smem 确实是**占用率**的瓶颈，但**占用率不是性能的瓶颈**；
+性能的瓶颈是 `lts__throughput` 的 94%。
+
+### 8.4 结论（关闭 §5.4 待验证 (c)）
+
+- **L2 墙不会后移**。K2 在 grid 填满时 `lts` 已 93–94% SOL，是 L2 带宽 bound；实验证明把占用率
+  2→3 CTA/SM（`cond(2,1)`）后 K2 反而慢 14%、L2 利用降到 81%。
+- **想突破 2 CTA/SM，只能砍 pipeline 深度**（`sizeof` 由那个**无条件预留的 65536 B fp32 状态缓冲**
+  主导：`IN*17984+OUT*4096 ≤ 65536` 时 stage 数怎么改都不动 smem）；而砍深度的代价
+  （`cond(2,1) +14%`、`cond(1,2) +40%`）远大于任何占用率收益。唯一「免费」的改动是把 fp32 缓冲
+  改为按 `StateFP32` 条件预留（省 3.2KB），但不足以跨过 3/SM 门槛，也无性能变化。
+- 因此 §5.3/§5.4 的「K2 被 smem 钉在 2 CTA/SM、per-CTA 串行延迟受限」这一**描述**成立，但它
+  **不是**「还可优化 51%」的意思——K2 已经没有占用率维度的余量可挖，要更快只能减少 L2 流量
+  （workspace 体积/`v` 的复用，见 §6）或改并行结构。
