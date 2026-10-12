@@ -1,0 +1,198 @@
+
+==============================================================================
+Case [T=64]  B=1 T=64 H=4 g_scale=2.0 seed=0
+  --- output o ---
+  flash vs gold                  max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=2.894e-05
+  fla   vs gold                  max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=2.230e-05
+  flash vs fla                   max_abs=4.883e-04  max_rel=3.650e-03  mean_abs=2.230e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=2.964e-03  max_rel=4.981e-03  mean_abs=1.225e-04
+  fla   vs gold                  max_abs=2.934e-03  max_rel=4.930e-03  mean_abs=8.817e-05
+  flash vs fla                   max_abs=3.564e-03  max_rel=5.998e-03  mean_abs=1.032e-04
+
+==============================================================================
+Case [T=128]  B=1 T=128 H=4 g_scale=2.0 seed=0
+  --- output o ---
+  flash vs gold                  max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=2.532e-05
+  fla   vs gold                  max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=1.951e-05
+  flash vs fla                   max_abs=4.883e-04  max_rel=3.650e-03  mean_abs=2.005e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=6.028e-03  max_rel=8.739e-03  mean_abs=1.778e-04
+  fla   vs gold                  max_abs=7.064e-03  max_rel=1.024e-02  mean_abs=1.283e-04
+  flash vs fla                   max_abs=5.725e-03  max_rel=8.217e-03  mean_abs=1.577e-04
+
+==============================================================================
+Case [T=256]  B=1 T=256 H=4 g_scale=2.0 seed=0
+  --- output o ---
+  flash vs gold                  max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=2.393e-05
+  fla   vs gold                  max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=1.834e-05
+  flash vs fla                   max_abs=4.883e-04  max_rel=3.650e-03  mean_abs=1.912e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=4.224e-03  max_rel=8.807e-03  mean_abs=1.658e-04
+  fla   vs gold                  max_abs=3.720e-03  max_rel=7.756e-03  mean_abs=1.151e-04
+  flash vs fla                   max_abs=4.467e-03  max_rel=9.341e-03  mean_abs=1.371e-04
+
+==============================================================================
+Case [T=512]  B=1 T=512 H=4 g_scale=2.0 seed=0
+  --- output o ---
+  flash vs gold                  max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=2.347e-05
+  fla   vs gold                  max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=1.771e-05
+  flash vs fla                   max_abs=4.883e-04  max_rel=3.650e-03  mean_abs=1.913e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=5.286e-03  max_rel=7.340e-03  mean_abs=1.654e-04
+  fla   vs gold                  max_abs=4.006e-03  max_rel=5.562e-03  mean_abs=1.200e-04
+  flash vs fla                   max_abs=4.910e-03  max_rel=6.840e-03  mean_abs=1.592e-04
+
+==============================================================================
+Case [T=1024]  B=1 T=1024 H=4 g_scale=2.0 seed=0
+  --- output o ---
+  flash vs gold                  max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=2.287e-05
+  fla   vs gold                  max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=1.698e-05
+  flash vs fla                   max_abs=4.883e-04  max_rel=3.650e-03  mean_abs=1.893e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=5.480e-03  max_rel=8.622e-03  mean_abs=1.887e-04
+  fla   vs gold                  max_abs=3.015e-03  max_rel=4.743e-03  mean_abs=1.305e-04
+  flash vs fla                   max_abs=3.951e-03  max_rel=6.233e-03  mean_abs=1.506e-04
+
+==============================================================================
+Case [H=1]  B=1 T=256 H=1 g_scale=2.0 seed=0
+  --- output o ---
+  flash vs gold                  max_abs=5.474e-04  max_rel=5.316e-03  mean_abs=2.109e-05
+  fla   vs gold                  max_abs=5.053e-04  max_rel=4.907e-03  mean_abs=1.631e-05
+  flash vs fla                   max_abs=4.883e-04  max_rel=4.739e-03  mean_abs=1.663e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=2.818e-03  max_rel=9.275e-03  mean_abs=1.359e-04
+  fla   vs gold                  max_abs=2.038e-03  max_rel=6.707e-03  mean_abs=8.949e-05
+  flash vs fla                   max_abs=3.311e-03  max_rel=1.097e-02  mean_abs=1.133e-04
+
+==============================================================================
+Case [H=2]  B=1 T=256 H=2 g_scale=2.0 seed=0
+  --- output o ---
+  flash vs gold                  max_abs=5.474e-04  max_rel=4.127e-03  mean_abs=2.217e-05
+  fla   vs gold                  max_abs=5.053e-04  max_rel=3.810e-03  mean_abs=1.661e-05
+  flash vs fla                   max_abs=4.883e-04  max_rel=3.676e-03  mean_abs=1.797e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=3.779e-03  max_rel=9.696e-03  mean_abs=1.265e-04
+  fla   vs gold                  max_abs=2.786e-03  max_rel=7.150e-03  mean_abs=9.511e-05
+  flash vs fla                   max_abs=3.120e-03  max_rel=8.001e-03  mean_abs=1.134e-04
+
+==============================================================================
+Case [H=8]  B=1 T=256 H=8 g_scale=2.0 seed=0
+  --- output o ---
+  flash vs gold                  max_abs=7.846e-04  max_rel=5.916e-03  mean_abs=2.171e-05
+  fla   vs gold                  max_abs=8.062e-04  max_rel=6.079e-03  mean_abs=1.630e-05
+  flash vs fla                   max_abs=4.883e-04  max_rel=3.676e-03  mean_abs=1.723e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=5.615e-03  max_rel=7.757e-03  mean_abs=1.621e-04
+  fla   vs gold                  max_abs=4.427e-03  max_rel=6.115e-03  mean_abs=1.150e-04
+  flash vs fla                   max_abs=5.488e-03  max_rel=7.604e-03  mean_abs=1.441e-04
+
+==============================================================================
+Case [B=3]  B=3 T=128 H=2 g_scale=2.0 seed=0
+  --- output o ---
+  flash vs gold                  max_abs=9.995e-04  max_rel=7.138e-03  mean_abs=2.377e-05
+  fla   vs gold                  max_abs=5.595e-04  max_rel=3.995e-03  mean_abs=1.770e-05
+  flash vs fla                   max_abs=9.766e-04  max_rel=6.993e-03  mean_abs=1.889e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=5.593e-03  max_rel=9.992e-03  mean_abs=1.320e-04
+  fla   vs gold                  max_abs=2.786e-03  max_rel=4.978e-03  mean_abs=9.556e-05
+  flash vs fla                   max_abs=6.348e-03  max_rel=1.136e-02  mean_abs=1.088e-04
+
+==============================================================================
+Case [seed=1]  B=1 T=256 H=4 g_scale=2.0 seed=1
+  --- output o ---
+  flash vs gold                  max_abs=7.521e-04  max_rel=3.561e-03  mean_abs=2.133e-05
+  fla   vs gold                  max_abs=6.524e-04  max_rel=3.089e-03  mean_abs=1.626e-05
+  flash vs fla                   max_abs=9.766e-04  max_rel=4.630e-03  mean_abs=1.666e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=4.589e-03  max_rel=9.441e-03  mean_abs=1.470e-04
+  fla   vs gold                  max_abs=3.764e-03  max_rel=7.745e-03  mean_abs=9.693e-05
+  flash vs fla                   max_abs=3.841e-03  max_rel=7.883e-03  mean_abs=1.239e-04
+
+==============================================================================
+Case [seed=2]  B=1 T=256 H=4 g_scale=2.0 seed=2
+  --- output o ---
+  flash vs gold                  max_abs=9.771e-04  max_rel=5.659e-03  mean_abs=2.206e-05
+  fla   vs gold                  max_abs=5.661e-04  max_rel=3.278e-03  mean_abs=1.629e-05
+  flash vs fla                   max_abs=9.766e-04  max_rel=5.650e-03  mean_abs=1.775e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=3.939e-03  max_rel=9.436e-03  mean_abs=1.478e-04
+  fla   vs gold                  max_abs=2.459e-03  max_rel=5.891e-03  mean_abs=1.085e-04
+  flash vs fla                   max_abs=3.745e-03  max_rel=8.964e-03  mean_abs=1.330e-04
+
+==============================================================================
+Case [seed=3]  B=1 T=256 H=4 g_scale=2.0 seed=3
+  --- output o ---
+  flash vs gold                  max_abs=1.116e-03  max_rel=6.176e-03  mean_abs=2.568e-05
+  fla   vs gold                  max_abs=5.992e-04  max_rel=3.316e-03  mean_abs=1.931e-05
+  flash vs fla                   max_abs=9.766e-04  max_rel=5.405e-03  mean_abs=2.111e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=7.113e-03  max_rel=1.144e-02  mean_abs=2.064e-04
+  fla   vs gold                  max_abs=5.228e-03  max_rel=8.410e-03  mean_abs=1.443e-04
+  flash vs fla                   max_abs=5.825e-03  max_rel=9.370e-03  mean_abs=1.678e-04
+
+==============================================================================
+Case [g=0 (no decay)]  B=1 T=256 H=4 g_scale=0.0 seed=0
+  --- output o ---
+  flash vs gold                  max_abs=8.400e-04  max_rel=6.933e-03  mean_abs=4.087e-05
+  fla   vs gold                  max_abs=7.045e-04  max_rel=5.815e-03  mean_abs=3.019e-05
+  flash vs fla                   max_abs=9.766e-04  max_rel=8.097e-03  mean_abs=3.759e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=1.426e-02  max_rel=8.073e-03  mean_abs=2.263e-04
+  fla   vs gold                  max_abs=8.338e-03  max_rel=4.719e-03  mean_abs=1.577e-04
+  flash vs fla                   max_abs=1.462e-02  max_rel=8.266e-03  mean_abs=2.229e-04
+
+==============================================================================
+Case [g=N(0,1)]  B=1 T=256 H=4 g_scale=1.0 seed=0
+  --- output o ---
+  flash vs gold                  max_abs=9.508e-04  max_rel=7.591e-03  mean_abs=2.471e-05
+  fla   vs gold                  max_abs=4.995e-04  max_rel=3.988e-03  mean_abs=1.928e-05
+  flash vs fla                   max_abs=4.883e-04  max_rel=3.906e-03  mean_abs=2.095e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=5.557e-03  max_rel=7.329e-03  mean_abs=1.669e-04
+  fla   vs gold                  max_abs=3.397e-03  max_rel=4.481e-03  mean_abs=1.188e-04
+  flash vs fla                   max_abs=4.471e-03  max_rel=5.878e-03  mean_abs=1.550e-04
+
+==============================================================================
+Case [g=N(0,4)]  B=1 T=256 H=4 g_scale=4.0 seed=0
+  --- output o ---
+  flash vs gold                  max_abs=7.511e-04  max_rel=5.050e-03  mean_abs=2.592e-05
+  fla   vs gold                  max_abs=6.598e-04  max_rel=4.436e-03  mean_abs=1.935e-05
+  flash vs fla                   max_abs=9.766e-04  max_rel=6.579e-03  mean_abs=2.068e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=4.401e-03  max_rel=7.762e-03  mean_abs=1.769e-04
+  fla   vs gold                  max_abs=2.719e-03  max_rel=4.795e-03  mean_abs=1.265e-04
+  flash vs fla                   max_abs=3.047e-03  max_rel=5.383e-03  mean_abs=1.474e-04
+
+==============================================================================
+Case [T=1023]  B=1 T=1023 H=2 g_scale=2.0 seed=7
+  --- output o ---
+  flash vs gold                  max_abs=7.722e-04  max_rel=4.781e-03  mean_abs=2.704e-05
+  fla   vs gold                  max_abs=7.313e-04  max_rel=4.528e-03  mean_abs=2.041e-05
+  flash vs fla                   max_abs=9.766e-04  max_rel=6.061e-03  mean_abs=2.274e-05
+  --- final state S^T ---
+  flash vs gold                  max_abs=4.764e-03  max_rel=7.547e-03  mean_abs=2.234e-04
+  fla   vs gold                  max_abs=3.946e-03  max_rel=6.252e-03  mean_abs=1.629e-04
+  flash vs fla                   max_abs=4.883e-03  max_rel=7.727e-03  mean_abs=1.990e-04
+
+==============================================================================
+SUMMARY  (max_abs / max_rel; states in S^T layout)
+  case             |           o fl-gold |          o fla-gold |            o fl-fla |           S fl-gold |          S fla-gold |            S fl-fla
+  T=64             |   8.37e-04/6.22e-03 |   8.37e-04/6.22e-03 |   4.88e-04/3.65e-03 |   2.96e-03/4.98e-03 |   2.93e-03/4.93e-03 |   3.56e-03/6.00e-03
+  T=128            |   8.37e-04/6.22e-03 |   8.37e-04/6.22e-03 |   4.88e-04/3.65e-03 |   6.03e-03/8.74e-03 |   7.06e-03/1.02e-02 |   5.73e-03/8.22e-03
+  T=256            |   8.37e-04/6.22e-03 |   8.37e-04/6.22e-03 |   4.88e-04/3.65e-03 |   4.22e-03/8.81e-03 |   3.72e-03/7.76e-03 |   4.47e-03/9.34e-03
+  T=512            |   8.37e-04/6.22e-03 |   8.37e-04/6.22e-03 |   4.88e-04/3.65e-03 |   5.29e-03/7.34e-03 |   4.01e-03/5.56e-03 |   4.91e-03/6.84e-03
+  T=1024           |   8.37e-04/6.22e-03 |   8.37e-04/6.22e-03 |   4.88e-04/3.65e-03 |   5.48e-03/8.62e-03 |   3.01e-03/4.74e-03 |   3.95e-03/6.23e-03
+  H=1              |   5.47e-04/5.32e-03 |   5.05e-04/4.91e-03 |   4.88e-04/4.74e-03 |   2.82e-03/9.28e-03 |   2.04e-03/6.71e-03 |   3.31e-03/1.10e-02
+  H=2              |   5.47e-04/4.13e-03 |   5.05e-04/3.81e-03 |   4.88e-04/3.68e-03 |   3.78e-03/9.70e-03 |   2.79e-03/7.15e-03 |   3.12e-03/8.00e-03
+  H=8              |   7.85e-04/5.92e-03 |   8.06e-04/6.08e-03 |   4.88e-04/3.68e-03 |   5.62e-03/7.76e-03 |   4.43e-03/6.11e-03 |   5.49e-03/7.60e-03
+  B=3              |   9.99e-04/7.14e-03 |   5.59e-04/4.00e-03 |   9.77e-04/6.99e-03 |   5.59e-03/9.99e-03 |   2.79e-03/4.98e-03 |   6.35e-03/1.14e-02
+  seed=1           |   7.52e-04/3.56e-03 |   6.52e-04/3.09e-03 |   9.77e-04/4.63e-03 |   4.59e-03/9.44e-03 |   3.76e-03/7.74e-03 |   3.84e-03/7.88e-03
+  seed=2           |   9.77e-04/5.66e-03 |   5.66e-04/3.28e-03 |   9.77e-04/5.65e-03 |   3.94e-03/9.44e-03 |   2.46e-03/5.89e-03 |   3.75e-03/8.96e-03
+  seed=3           |   1.12e-03/6.18e-03 |   5.99e-04/3.32e-03 |   9.77e-04/5.41e-03 |   7.11e-03/1.14e-02 |   5.23e-03/8.41e-03 |   5.82e-03/9.37e-03
+  g=0 (no decay)   |   8.40e-04/6.93e-03 |   7.05e-04/5.82e-03 |   9.77e-04/8.10e-03 |   1.43e-02/8.07e-03 |   8.34e-03/4.72e-03 |   1.46e-02/8.27e-03
+  g=N(0,1)         |   9.51e-04/7.59e-03 |   5.00e-04/3.99e-03 |   4.88e-04/3.91e-03 |   5.56e-03/7.33e-03 |   3.40e-03/4.48e-03 |   4.47e-03/5.88e-03
+  g=N(0,4)         |   7.51e-04/5.05e-03 |   6.60e-04/4.44e-03 |   9.77e-04/6.58e-03 |   4.40e-03/7.76e-03 |   2.72e-03/4.79e-03 |   3.05e-03/5.38e-03
+  T=1023           |   7.72e-04/4.78e-03 |   7.31e-04/4.53e-03 |   9.77e-04/6.06e-03 |   4.76e-03/7.55e-03 |   3.95e-03/6.25e-03 |   4.88e-03/7.73e-03
+
+DONE

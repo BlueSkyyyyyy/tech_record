@@ -66,7 +66,7 @@
 
 - [x] **P4-1** 参考实现：`src/kda_ref.py` 逐 token 递推（fp32/fp64）作为 golden（P1-4 交付）。
 - [x] **P4-2** FlashKDA forward vs golden：多 shape（不同 T/H）、多 seed、多门控区间，报 max abs/rel。
-- [ ] **P4-3** 与 FLA `chunk_kda` 三方对比；给误差表。
+- [x] **P4-3** 与 FLA `chunk_kda` 三方对比；给误差表。
 
 ### P5 反向的推导与实现（`docs/05-kda-bwd.md`）
 
@@ -111,7 +111,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0/P1/P2/P3 全部完成，P4-1/P4-2 完成（前向 kernel vs fp64 golden 数值对拍，多 shape/seed/门控区间）。
+- 当前进度：P0/P1/P2/P3 全部完成，P4 全部完成（前向 kernel vs fp64 golden 两方对拍 + golden/FlashKDA/FLA 三方对拍，多 shape/seed/门控区间）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -178,9 +178,18 @@
     naive `STSM+LDSM_N`（不转置）max_rel=1.26（全错），**证明转置是数学必需**；延迟微基准
     4×`MOVM_T`=18.0 cyc vs `STSM+syncwarp+LDSM`=21.8 cyc（1.21×），真正收益是省 4096B U 缓冲与
     Phase 3→4→6 对 U 复用的零同步。
-- **下一步：P4-3 三方对比**（在 P4-2 的单 kernel 对拍上加入 FLA `chunk_kda`，给 golden / FlashKDA / FLA
-  三方误差表；`harness/check_kda_ref.py` 已有 FLA↔golden 两方对拍可复用）。随后进入反向（P5），
-  用已装好的 FLA `chunk_kda` autograd 对拍。
+- **下一步：P5-1/P5-2 反向数学与参考实现**。从 `o_t=q_t^T S_t` 与状态递推逐 token 求 adjoint
+  （`dq,dk,dv,dβ,dg,dstate`），写到 `docs/05-kda-bwd.md`；在 `src/kda_bwd_ref.py` 实现逐 token
+  反向并与 `torch.autograd`（对 `kda_ref.py`）对拍（P5-2），随后与 FLA `chunk_kda` autograd 对拍
+  （P5-3）、再分块化（P5-4）。
+  - P4-3：新增 `harness/check_three_way.py`（`harness/check_three_way.out.txt`）：在同一批输入上对
+    fp64 golden（`kda_ref.py::kda_token_recurrent`）/ FlashKDA `flash_kda.fwd`（CHUNK=16）/ FLA
+    `chunk_kda`（chunk=64）做三方对拍，状态统一在 $S^\top$ 布局比。16 组 case（T=64..1024/1023、
+    H=1/2/8、B=3、seed=0..3、g=N(0,0/1/2/4)）实测：`o` 三方 `max_rel` 均 $3\times10^{-3}\sim8\times10^{-3}$、
+    状态 $5\times10^{-3}\sim1.1\times10^{-2}$，同处 bf16 底噪；**`flash↔fla` 的 `o` 误差（4.88e-04/3.65e-03）
+    小于各自 vs golden（8.37e-04/6.22e-03）**，用**共模抵消**解释（两 bf16 实现共享同一份 bf16 输入量化，
+    互相之差把 bf16 输入舍入减掉，只剩算法/累加序差异）；`g=0` 无衰减时状态误差三方都抬到 $\sim1.4\times10^{-2}$
+    且不再共模（状态舍入噪声相互独立），与 §4/P3-3 §18 互洽。更新 `docs/04` 加 §6「三方对比」并把小结顺延为 §7。
 
   - P4-1/P4-2：新增 `docs/04-numerics.md` 与 `harness/check_fwd_numerics.py`
     （`harness/check_fwd_numerics.out.txt`）：以 `src/kda_ref.py::kda_token_recurrent` fp64 逐 token
