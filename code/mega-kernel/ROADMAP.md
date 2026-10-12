@@ -202,6 +202,22 @@
       e/graph 1.57×（graph≈persist）。结论：**损失三随 N 标度（融合收益上界≈N×）、
       损失二只在轻负载+多算子时显形**。正确性 max|Δz|=0。
 
+### P10 实验扩展 2（`docs/04-experiments.md`）
+
+- [x] **P10-1** 扫 persistent kernel 的网格大小 + 量化设备内协调成本随网格的标度
+      （对应「下一步」可选方向②：P5-1 §1.6「扫 persistent 网格大小」+ P5-3 §3.6「多 block
+      资源约束」）。见 `docs/04-experiments.md` §5，源码 `src/grid_sweep.cu`，原始输出
+      `harness/grid_sweep.out.txt`（目标卡 H100/sm90，threads=256，iters=200）：
+      Section A（固定 N=8192 单元扫 G 1→1056）speedup 123.5×(@#SM=132)→**212.9×(@占用上限
+      1056)**，故并行度**在占用率上限而非 #SM 处饱和**（256 线程/SM 只有 12.5% 占用）；
+      `ns/unit/blk` 在 G≤#SM 稳 ~2.2–2.4µs、G>#SM 抬升（1056→12.2µs）=墙钟/效率取舍；
+      Section B（N=64 扫 G 跨 N）speedup **恰在 G=N=64 封顶 33.8×**、G>N 持平（过配纯浪费）；
+      Section C（cooperative `grid.sync()` 扫 G）有 **~1.1µs 固定地板**（G=1 也 1133ns，来自
+      全局内存栅栏），G>#SM 后次线性增长（528→1.73µs、1056→2.40µs）。结论：persistent 网格
+      应按**占用率**选（`min(占用上限,N)`）而非按 SM 数选，对上 MPK §5.1 worker/scheduler
+      划分；~1.1µs 硬屏障地板解释了生产 mega-kernel 为何用异步原子 ring barrier/去中心化
+      event queue。正确性：三种网格 sink[0]=12288 一致。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -228,8 +244,9 @@
   **P3 全部完成（3/3）**；**P4 全部完成（4/4）**；**P5 全部完成（3/3）**；**P6 全部完成（1/1）**；
   **P7 源码走读（1/1）完成**（本轮新增，对应「下一步」可选方向③）。
   **P8 博客发布（1/1）完成**（本轮新增，对应「下一步」可选方向①）。
-  **P9-1 实验扩展（1/1）完成**（本轮新增，对应「下一步」可选方向②）。
-  **本专题任务清单（P0–P9）全部完成**，无未完成子项。
+  **P9-1 实验扩展（1/1）完成**（对应「下一步」可选方向②）。
+  **P10-1 实验扩展 2（1/1）完成**（本轮新增，续做「下一步」可选方向②中剩余的两点）。
+  **本专题任务清单（P0–P10）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -278,12 +295,25 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P9 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`
+- **下一步：无**（P0–P10 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`
   补建对应博客 post~~（P8-1 已完成）；② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的
-  「更小 M / 更多算子 / 多 block」实验~~（**本轮 P9-1 已完成 N 算子链 + 小 M**；仍可补的
-  是 P5-1 §1.6「扫 persistent 网格大小」与 P5-3 §3.6「多 block PDL 资源约束」）；
+  「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；**本轮 P10-1 完成
+  P5-1 §1.6「扫 persistent 网格大小」**；仍可补的是 P5-3 §3.6「多 block PDL 资源约束」——
+  P10-1 §5.5 已给多 block 网格资源可行的旁证）；
   ③ 在容器内 `pip install -e .` 构建 mirage sm90 路径并跑 `demo/qwen3/demo.py --use-mirage`
   取本机 MPK 端到端数字，或继续走读 `tasks/hopper/*.cuh` 单 task 内部实现（P7-1 已走通运行层骨架，见 `docs/06`）。
+- **本轮（P10-1）**：`docs/04-experiments.md` 新增 §5「persistent kernel 的网格大小与设备内协调成本」——
+  新建 `src/grid_sweep.cu` + `harness/grid_sweep.out.txt`（目标卡 H100/sm90，threads=256，iters=200），
+  补齐 P5-1 §1.6（网格未扫）与 P0-3/P5-2（只测过一个网格点的屏障成本）。三个子实验：
+  Section A（固定 N=8192 单元扫 grid 1→1056）证 **并行度在占用率上限饱和而非 #SM**——speedup
+  123.5×(@#SM=132)→212.9×(@1056)，因 256 线程/block 单 block/SM 只占 12.5% warp 槽位；
+  `ns/unit/blk` 在 G≤#SM 稳、G>#SM 抬升（墙钟/效率取舍）。Section B（N=64 扫 G 跨 N）证
+  **speedup 恰在 G=N 封顶、过配纯浪费**。Section C（cooperative `grid.sync()` 扫 G）证
+  **硬屏障有 ~1.1µs 固定地板**（G=1 也 1133ns，全局内存栅栏）、G>#SM 后次线性增长到 2.4µs。
+  工程结论：persistent 网格按占用率选 `min(占用上限,N)`（对上 MPK §5.1 worker/scheduler 划分），
+  ~1.1µs 硬屏障地板解释生产 mega-kernel 为何走异步原子 ring barrier / 去中心化 event queue
+  （MPK §5/§6.1，DeepGEMM 见 `docs/02` §1.5）。正确性 sink[0]=12288 一致。**本轮新增实验**；
+  对应「下一步」可选方向②中剩余两点之一（扫 persistent 网格）。
 - **本轮（P9-1）**：`docs/04-experiments.md` 新增 §4「N 算子链的融合：损失随 N 的标度」——
   新建 `src/n_op_fusion.cu` + `harness/n_op_fusion.out.txt`（目标卡 H100/sm90，iters=100）。
   把 P5-2 的两算子融合推广到 N 个依赖算子（eagerN / graphN / persistN / fusedN），
