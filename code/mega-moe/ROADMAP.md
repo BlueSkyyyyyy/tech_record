@@ -1569,6 +1569,35 @@
       仅分析（第 22/23/24 篇已用真实设备代码验证其调度器）。配套博客
       `content/posts/mega-moe-60-mqa-logits-test-oracle`（索引页新增第 60 篇）。
 
+### P51 增量（opt-in，补齐 DeepEP dispatch 的输出落盘侧）
+
+- [x] **P51-1** **DeepEP dispatch 的拷贝 epilogue**（`impls/ep/dispatch_copy_epilogue.cuh`；
+      `layout/ep/token.cuh`；`layout/ep/workspace.cuh`；`csrc/kernels/ep/dispatch.hpp:168-226`；
+      `csrc/buffers/ep.hpp:402-405/666-743`；`deep_ep/buffers/ep.py:161`）。第 7 篇讲了 dispatch/combine
+      数据流、第 48 篇（P48-1）拆了 **combine 的归约 epilogue**，本篇补上**对称的另一半**——主 dispatch
+      kernel 把 token 搬进对称缓冲后，由**独立的第二 kernel** `dispatch_copy_epilogue_impl` 落盘成下游张量
+      （`recv_x`/`recv_sf`/`recv_topk_idx`/`recv_topk_weights`/`recv_src_metadata`），并做专家区分组对齐、
+      零填充与链式列表。**关键：整段不碰 NCCL 设备 API**（无 `ncclDevComm`/`ncclGin`），故
+      **H100 真机直接 include 真实头文件跑真实设备代码**。→ `docs/61-deepep-dispatch-copy-epilogue.md`
+      （真实行号核对）。**要点**：① **两 kernel + PDL**——`:61` `cudaGridDependencySynchronize` 与主
+      dispatch 衔接（读前序数据不得用 `__ldg`，`:59-60`）；host 发射 `dispatch.hpp:188-214`（用 smem
+      反推 `num_warps`、`enable_pdl=true`）。② **三种纯结构体**——`TokenLayout`（`:10-82`，hidden/sf/
+      metadata 三段 32B 对齐，smem 视图多一个 mbarrier 的 32B，故 `<false>=256/<true>=288`）、
+      `BufferLayout`（`:84-144`，rank×token 网格 gmem↔smem 视图）、`EPWorkspaceLayout`（`:9-112`，
+      `sizeof(EPSignals)=15,831,168`）。③ **五种形态**（四个模板布尔开关 `cuh:12-22`）——非 expand
+      （dst=i）/ expand 非 cached（`atomicAdd(psum_per_expert+e,1)`）/ expand cached（读
+      `recv_src_metadata[+2+l]`）/ 零填充（`:232-325`，`st_bulk` 清零 smem hidden + `reduce_add`/
+      `warp_inclusive_sum`/`__ffs(__ballot)` 定位 `base_e+count_e+local_pad`）/ 链式列表（`:131-136`
+      `channel_linked_list[ll[master]]=i`，`:211-230` 尾部 `-1` 哨兵 + 清 `channel_scaleup_tail`）。
+      ④ 输出 SF 两种 stride（行主序 vs TMA 对齐列主序，`ep.hpp:688-698`）。**H100 实测**
+      `src/deepep_dispatch_copy_epilogue.cu` + `harness/exp_deepep_dispatch_copy_epilogue.{sh,py,out.txt}`
+      （**直接 include 真实头文件、构造真实 `BufferLayout<false>` token 缓冲、跑真实设备代码**）
+      **21 PASS / 0 FAIL**：布局偏移与字节数逐字段；非 expand 全部输出（含 SF 两种 stride、
+      `metadata[2+l]` 24/24 未触碰）；expand 原子分配（专家区内 token 集合正确、计数器到 `base+count`、
+      token 行 hidden 正确、padding 行 hidden/SF/权重全零、`metadata[2+l]` 指向区内）；cached
+      （严格按 metadata 行、`psum` 不变）；链式列表（写槽 + 尾哨兵 + workspace 归零）。Python oracle
+      独立复刻 `TokenLayout` 偏移、expand 对齐分配与零填充 dst 公式（含 `__ffs` 取**最低**满足 lane
+      这一关键点）。配套博客 `content/posts/mega-moe-61-deepep-dispatch-copy-epilogue`（索引页新增第 61 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -1594,8 +1623,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P50 各增量完成（P15-1…P41-1、P42-1…P50-1）。**
-  本轮 P50-1：新建 `docs/60-mqa-logits-test-oracle.md`（+`harness/exp_mqa_logits_test.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P51 各增量完成（P15-1…P41-1、P42-1…P51-1）。**
+  本轮 P51-1：新建 `docs/61-deepep-dispatch-copy-epilogue.md`（+`src/deepep_dispatch_copy_epilogue.cu`、
+  `harness/exp_deepep_dispatch_copy_epilogue.{sh,py,out.txt}`）——补上 DeepEP dispatch 的**输出落盘侧**：
+  主 dispatch kernel 把 token 搬进对称缓冲后，由**独立的第二 kernel** `dispatch_copy_epilogue_impl`
+  落盘成下游张量，是第 48 篇 combine 归约 epilogue 的**对称另一半**。**关键：整段不碰 NCCL 设备 API**，
+  故 H100 真机**直接 include 真实头文件跑真实设备代码**。要点：① 两 kernel 靠 **PDL**
+  （`cuh:61` `cudaGridDependencySynchronize`）衔接，读前序数据不得用 `__ldg`；② 三种纯结构体
+  `TokenLayout`（`<false>=256/<true>=288`，差一个 32B mbarrier）/`BufferLayout`/`EPWorkspaceLayout`；
+  ③ **一个 kernel 覆盖五种形态**（四个模板布尔开关）——非 expand / expand 非 cached（原子分配）/
+  expand cached（读缓存 metadata，逐位可复现）/ 零填充（`st_bulk` + warp 扫描定位 padding 行）/
+  链式列表（写槽 + 尾哨兵 + 清 `channel_scaleup_tail`）；④ SF 两种 stride。**H100 真机 21 PASS / 0 FAIL**
+  （布局偏移逐字段、非 expand 全部输出、expand 原子分配 + 零填充、cached 不写计数器、链式列表），
+  另有 Python oracle 独立复刻布局与零填充公式（含 `__ffs` 取最低满足 lane 这个关键点）。配套博客
+  `content/posts/mega-moe-61-deepep-dispatch-copy-epilogue`（索引页新增第 61 篇）。
+  上一轮 P50-1：新建 `docs/60-mqa-logits-test-oracle.md`（+`harness/exp_mqa_logits_test.{py,sh,out.txt}`）
   ——补上 DeepSeek 稀疏注意力 indexer 第一级打分「算什么对」的**唯一规范** `tests/test_attention.py`
   （715 行），也是第 19/22 篇里 TFLOPS/GB/s 数字的出处。**与 Mega MoE/Mega Gate 不同：MQA logits 的
   SM90 用例（`fmt='fp8'`、fp32 logits）在 H100 上真的能跑**（只有 mxfp4/mxfp8 与 sparse 被 `@test_filter`
@@ -2120,10 +2162,10 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P50 已完成（新增 **P50-1 MQA logits 的端到端验收测试与正确性 oracle**：
-  `tests/test_attention.py`——连续版 head 加权语义与压缩输出、`-inf` 掩码逐位 + 两层 `calc_diff`
-  （原始 vs 隔离量化）、分页版三种 KV cache 融合布局与 TMA 16B 行 padding、稀疏版逐位对齐全量 gather；
-  H100 真机直接 import 真实 test 跑通 SM90 用例 42 PASS/0 FAIL；见上）。
+- **下一步**：P0~P51 已完成（新增 **P51-1 DeepEP dispatch 的拷贝 epilogue**：
+  `dispatch_copy_epilogue_impl`——主 dispatch 之后的第二段 kernel，把对称缓冲里的 token 落盘成下游张量，
+  靠 PDL 衔接；一个 kernel 覆盖非 expand/expand(+cached)/零填充/链式列表五形态；整段不碰 NCCL，
+  H100 真机直接 include 真实头文件 21 PASS/0 FAIL；见上）。
   上一轮 P49-1：**P49-1 DeepEP 的设备端公共层** `common/ptx.cuh` 等：
   mbarrier 五原语 + `cp.async.mbarrier.arrive` 计数模型、TMA 三条搬运路径（含 `cp.reduce...add.f32`）、
   NVLink 多播 `multimem.*`、谓词化访存 + `iterate_ld_st`、`gpu`/`sys` 两档内存序、

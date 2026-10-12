@@ -1,0 +1,65 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+GPU: NVIDIA H100 80GB HBM3 (sm_90), CUDA 13020
+sizeof(topk_idx_t)=8  kNumTMAAlignmentBytes=32  kNumRDMAAlignmentBytes=64  kNumAlignedSFPacks=4
+
+=== Part 0: TokenLayout / BufferLayout / EPWorkspaceLayout 布局（token.cuh / workspace.cuh）===
+  TokenLayout: hidden=128B sf=16B topk=4 with_metadata=1
+    get_num_bytes<false>=256  get_num_bytes<true>=288
+    hidden_off=0 sf_off=128 metadata_off=160 topk_idx_off=160 weights_off=176 src_global_off=192 linked_list_off=196 mbarrier_off=256(=num_bytes<false>)
+  [PASS] TokenLayout 各字段偏移与 <true>/<false> 字节数
+    BufferLayout<false>: per_token=256 per_rank=2048 total=2048
+  [PASS] BufferLayout 每 rank / 总量与 smem 视图字节数
+    EPSignals::get_num_bytes()=15831168  sizeof(EPSignals)=15831168
+  [PASS] EPWorkspaceLayout.num_experts_per_rank
+
+=== Part 1: 非 expand 模式 dispatch_copy_epilogue_impl（cuh:70-209）===
+  hidden_mism=0/192  sf_mism=0/24  topk_idx_mism=0  weights_mism=0  metadata_mism=0
+  [PASS] recv_x 行 i = token i 的 hidden（TMA 载入→TMA 存出）
+  [PASS] recv_sf[i*token_stride + k*hidden_stride] = SF（含两种 stride）
+  [PASS] recv_topk_idx[i, l] = 本地专家号（expert - expert_start）
+  [PASS] recv_topk_weights[i, l] = 原始 top-k 权重
+  [PASS] recv_src_metadata[i,0]=源 token id、[i,1]=rank*topk+master_lane
+  metadata[2+l] 未被触碰: 24/24
+  [PASS] 非 expand 不写 metadata[2+l]（留待 expand 用）
+
+=== Part 2: expand + zero-padding（cuh:113-124, 232-325）===
+  counts=[4,3,3,4] aligned=[4,4,4,4] base=[0,4,8,12] rows=16
+  [PASS] expand: 每个专家对齐区内包含的 token 集合正确（atomicAdd 分配）
+  [PASS] expand: psum 计数器被 atomicAdd 到 base+count
+  fill_bad=0 (token 行 hidden), pad_zero_bad=0 (padding hidden), sf_pad_bad=0, w_pad_bad=0
+  [PASS] expand: token 行 hidden 正确
+  [PASS] expand: 对齐 padding 行 hidden 被 st_bulk+TMA 清零
+  [PASS] expand: padding 行 SF 清零
+  [PASS] expand: padding 行权重清零
+  [PASS] expand: recv_src_metadata[i,2+l] = 该 (i,l) 的 dst_tensor_idx（在专家区内）
+
+=== Part 3: expand + cached 模式（cuh:118-120, 189-208）===
+  [PASS] cached: 输出严格写到 metadata 指定的 dst 行
+  [PASS] cached: psum 计数器保持不变（不 atomicAdd）
+
+=== Part 4: linked list 创建与尾部清理（scaleout=2，cuh:132-136 / 211-230）===
+  channels[slot=10]=0 (期望 0=token index)  channels[tail=5]=-1 (期望 -1)  tail 清零后=0
+  [PASS] linked list: channel_linked_list[linked_list_idx[master]] = i
+  [PASS] linked list: 尾部槽写入 -1（链尾哨兵）
+  [PASS] linked list: channel_scaleup_tail 被清零（供 combine 复用）
+
+================ 汇总: 21 PASS / 0 FAIL ================
+
+=== Python: 独立 host oracle（TokenLayout 偏移 + expand 对齐分配公式） ===
+=== TokenLayout 偏移 vs C++ 实测 ===
+  hidden       off=   0  expect=   0  OK
+  sf           off= 128  expect= 128  OK
+  metadata     off= 160  expect= 160  OK
+  topk_idx     off= 160  expect= 160  OK
+  weights      off= 176  expect= 176  OK
+  src_global   off= 192  expect= 192  OK
+  linked_list  off= 196  expect= 196  OK
+  num_bytes<false>=256 (expect 256), <true>=288 (expect 288)
+=== BufferLayout（单 rank×8 token）===
+  per_token=256 per_rank=2048 total=2048
+=== expand 对齐分配 + 零填充 dst（复刻 cuh:232-325）===
+  counts=[4, 3, 3, 4] base=[0, 4, 8, 12] total_rows=16
+  padding (expert,dst)=[(1, np.int64(7)), (2, np.int64(11))]
+  期望 [(1, 7), (2, 11)]  OK
+
+==== ALL PASS ====
