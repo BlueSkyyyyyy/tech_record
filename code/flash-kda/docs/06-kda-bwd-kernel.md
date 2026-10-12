@@ -788,6 +788,70 @@ P6-7 把 §5.2 的四段 GEMM（dAv/B1/B2/B3）+ B0 尾接成**一条完整反�
 （§5.2）在落地前的最后一道组合正确性关卡。B1 也顺带补上了 `dht`（终态上游梯度）入口
 （`check_bwd_dhu_kernel.py::_dhu_kernel` 的 `HAS_DHT` 分支），使其覆盖带 `final_state` 上游的损失。
 
+### 6.10 P6-8：把反向链**直接架在 FlashKDA 自己的 K1 workspace 上**
+
+#### 6.10.1 为什么还差这一步
+
+§6.1/§5.2 的整个设计前提是：目标卡反向**不重算前向**，而是**复用 K1 落盘的 workspace**——
+六字段 `k_dec/q_dec/k_rest/E_tot/P/M_qk`（`csrc/smxx/utils.cuh:70–76`），只缺 `β` 与门控
+logits（K1 只在 smem 里用过就丢，`fwd_kernel1.cuh:306–331`），补一个轻量 **B0**（§6.8）即可。
+但 P6-2～P6-7 的所有对拍都**吃 FLA 前向保存的中间量**（`qg/kg/w/Akk/Aqk/v_new/h`），
+P6-6 Part E 也只用 workspace 的 `kGTotal`（$E^{\text{tot}}$）做了点对点核验。**没有人真正把
+整条反向架在 FlashKDA 自己的 workspace 上跑通**。本节的 `harness/check_bwd_ws_reuse.py` 补上
+这最后一道集成：完全在 FlashKDA 的前向产物上重建反向后，再与 `torch.autograd` 对拍。
+
+#### 6.10.2 方法：从 workspace 重建前向与全部反向操作数
+
+跑 FlashKDA `fwd`（bf16，`CHUNK=16`，`D=128`，含初态/终态），把六个 SoA 字段按字节偏移切出来。
+字段布局是 **head-major**：`n_ht = H·total_tiles`，`ws_idx = head·total_tiles + tile`
+（`fwd_kernel1.cuh:516`），读出后 reshape 成 `[H, total_tiles, CHUNK, D]`。有了 workspace 再加
+B0 重算的 `β/g_cum`，就按 `kda_ref` 公式逐块重建：
+
+- 状态递推（与 K2 同式）：$S_{c+1}=E^{\text{tot}}_c\odot S_c+k^{\text{rest}\top}_c U_c$；
+- $U_c=P_c\big((v_c-k^{\text{dec}}_cS_c)\odot\beta_c\big)$，$w_c=P_c\,\text{diag}(\beta_c)\,k^{\text{dec}}_c$；
+- 反向操作数：`qg=q_dec/scale`、`kg=k_rest`、`Akk=P`、`Aqk=Mqk`、`v_new=U`、`h=S_in`。
+
+然后按 `CHUNK=16` 跑 `dAv→B1→B2→B3→反向 cumsum(B0)`。
+
+#### 6.10.3 实测（`harness/check_bwd_ws_reuse.out.txt`）
+
+六组 case（`T=128/256/250/512/513/192`、`H=2/3/4`、`B=1/2`、`g_scale=0/1/2`，**含非整除 T**）。
+三部分：
+
+| 部分 | 对照 | 结果 |
+|---|---|---|
+| **A** 用 workspace 重算前向 `o=q_dec S_in+M_qk U`、`S_out=E_tot S_in+k_rest^T U` | FlashKDA 自己的 `out`/`final_state` | `o` max_rel **4.5e-3~8.9e-3**、终态 **4.5e-3~8.0e-3** |
+| **B** 七个反向操作数 | `kda_ref` 公式独立重算（fp32，CHUNK=16） | `qg/kg/w/Aqk/Akk/v_new/h` max_rel **1.3e-4~8.1e-3** |
+| **C** 完整反向 `dAv→B1→B2→B3→B0` | `torch.autograd`（FLA，同激活操作数，P6-7 setup） | 六项梯度 max_rel 见下 |
+
+六组 case 的**最坏** max_rel（workspace 驱动反向 vs FLA autograd）：
+
+```
+dq 3.42e-3   dk 2.98e-3   dv 6.34e-3   dbeta 5.97e-3   dg 7.05e-3   dh0 6.42e-3
+```
+
+全部落在 **bf16 输入舍入 / tf32 `tl.dot` 的底噪**，与 P6-7（吃 FLA 中间量）同阶。也就是说：
+**只要 workspace 六字段 + 一个 B0 重算，就足以驱动一条与 autograd 数值一致的完整反向**——
+§5.2/§6.1 的「复用 K1 workspace」设计前提被端到端证实，而不只是逐字段点对点。
+
+#### 6.10.4 四个只有「架到真 workspace 上」才会暴露的坑
+
+1. **字段展平要按 `(NT, CHUNK, H)` 重排**：workspace 字段是 `[H, total_tiles, CHUNK, D]`
+   （head-major），而 FLA 操作数布局是 token-major `[B, T, H, D]`（chunk-major、H 在里）。
+   直接 `reshape(B,T,H,D)` 会把 head 轴和 chunk 轴**交错**，指纹是「`qg/kg` 相对误差 ≈ 1.0」
+   （数值完全对不上但形状合法）。正确写法 `permute(0,1,3,2,4).reshape(...)`。
+2. **`INV` 就是 $P=(I+L)^{-1}$，不需转置**：字段按 $P[o_t,o_A]$ 存（与 `Akk` 同布局）；
+   前向重建用 $P_c$ 直接左乘 `uprime` 即正确（转置会把 `o` 误差从 8e-3 抬到 3e-2）。
+3. **golden 必须吃「激活后」操作数**：我们的链输出的是对 `qn/kn/β_act/g_fla` 的梯度，而
+   `use_*_in_kernel=True` 的 FLA golden 输出的是对**原始 logits** 的梯度，二者差一个
+   l2norm / sigmoid 的 Jacobian（直接比会看到 `dq/dbeta` 大面积 0.5+）。改用 P6-7 的
+   `use_qk_l2norm_in_kernel=False / use_gate_in_kernel=False / use_beta_sigmoid_in_kernel=False`
+   并喂同一份激活操作数即可。注意 `g_fla` 是**逐 token** 的自然对数门
+   （`lower_bound·σ(...)`，因 `log2(e)·ln2=1`），**不是** cumsum 后的 `g_cum`。
+4. **非整除 T 要按 K1 的方式补尾块**：K1 的 tile 恒为 `CHUNK=16` 宽，尾块用零填充；
+   重建时把 `v/β/g` 尾部 pad 到 `NT·CHUNK`（pad 置零使行惰性）、结果再切回 `T`。
+   与前面「last 有效 token 取 $E^{\text{tot}}$」（§6.5）配齐后，非整除 T 与整除 T 同精度。
+
 ## 7. 小结与下一步
 
 - FLA `chunk_kda` 反向的 5 个 Triton kernel 与 `05` §7 的分块反向**逐式对应**：`dAv`=输出支路、
@@ -826,6 +890,12 @@ P6-7 把 §5.2 的四段 GEMM（dAv/B1/B2/B3）+ B0 尾接成**一条完整反�
   把残差来源钉死到「B1 独立 tf32 舍入经衰减链放大」。两个组装才暴露的坑：**B2 吃 `v_new` 而非 `u`**
   （指纹=dq 逐位、dk/dg 随 T 大面积错）、**反向 cumsum 不要额外乘 ln2**（FLA `chunk_local_cumsum`
   默认 `scale=RCP_LN2`；指纹=dg 差一个均匀 1.44 因子）。B1 也补了 `dht` 入口。
+- §6.10（P6-8）把整条反向**直接架在 FlashKDA 自己的 K1 workspace 上**（不再借助 FLA 前向中间量）：
+  按 head-major SoA 偏移切出六字段 + B0 重算，逐块重建 $S_{\text{in}}/U/w/h$ 等全部反向操作数，
+  再跑 `dAv→B1→B2→B3→B0`。Part A 用 workspace 重算前向对 FlashKDA 自身 `out`/`final_state`
+  **4.5e-3~8.9e-3**，Part B 七个操作数对 `kda_ref` 独立重算 **1.3e-4~8.1e-3**，Part C 六项梯度对
+  `torch.autograd` 最坏 **6.4e-3**（六组含非整除 T / g=0 / B=2）。至此「复用 K1 workspace」不再
+  只是点对点核验（§6.8 Part E），而是**端到端驱动了一条完整反向**。四个集成坑见 §6.10.4。
 
 下一步：
 

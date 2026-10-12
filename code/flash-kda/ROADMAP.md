@@ -106,6 +106,13 @@
       dh0≤5.1e-6，含非整除 T）；Part C（FLA 自分解==autograd 逐位）+ Part D（swap 后 B2/B3==FLA
       到 1e-7）把残差钉死到 B1 的 tf32 舍入。两个组装才暴露的坑：B2 吃 `v_new` 而非 `u`、
       反向 cumsum 不要额外乘 ln2（FLA `chunk_local_cumsum` 默认 `scale=RCP_LN2`）。B1 补 `dht` 入口。
+- [x] **P6-8** 把整条反向**直接架在 FlashKDA 自己的 K1 workspace 上**（不再借助 FLA 前向中间量）：
+      新增 `harness/check_bwd_ws_reuse.py` + `docs/06` §6.10。按 head-major SoA 偏移切六字段
+      （`utils.cuh:70-76`）+ B0 重算，逐块重建 $S_{in}/U/w/h/Aqk/Akk$，跑 `dAv→B1→B2→B3→B0`。
+      Part A（workspace 重算前向 vs FlashKDA 自身 `out`/`final_state`）4.5e-3~8.9e-3；Part B（七个
+      操作数 vs `kda_ref` 独立重算）1.3e-4~8.1e-3；Part C（六项梯度 vs autograd）最坏 6.4e-3
+      （6 组含非整除 T、$g=0$、$B=2$）。四个集成坑：字段展平须按 `(NT,CHUNK,H)` 重排（错则 qg/kg rel≈1）、
+      `INV` 即 $P$ 不需转置、golden 须吃激活操作数、非整除 T 按 K1 补零尾块。
 
 ### P7 性能与剖析（`docs/07-perf.md`）
 
@@ -145,10 +152,13 @@
 - workspace：分配（`get_workspace_size`）恒用**上界** `ceil(T/16)+N`，而非 varlen launch 用**精确**
   `N·ceil(T_seq/16)`（更小）；`ws_tile_prefix` 偏移按 launch 的 total_tiles 算，勿按分配上界猜。
 - 容器 workdir 是 `code/kernel-opt`，`docker exec` 跑脚本要用**绝对路径**。
+- workspace 字段是 head-major `[H, total_tiles, CHUNK, D]`；展平到 FLA 的 token-major
+  `[B,T,H,D]` 必须 `permute(0,1,3,2,4)`（按 `(NT,CHUNK,H)`），直接 reshape 会交错 head/chunk 轴
+  （指纹：`qg/kg` 相对误差≈1.0）。`INV` 即 $P[o_t,o_A]$，不需转置。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P7-3/P7-4/P7-5 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对（新增）**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，且四段能组装成一条与 FLA 数值一致的完整反向链**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
   - P6-7：新增 `docs/06` §6.9 + `harness/check_bwd_e2e.py`（`harness/check_bwd_e2e.out.txt`），
     并给 `harness/check_bwd_dhu_kernel.py` 的 B1 kernel 补 `dht`（终态上游梯度）入口（`HAS_DHT` 分支）。
     **Part A**：补齐反向第 5 个 kernel **`dAv`（输出支路）**（对应 FLA `chunk_kda_bwd_kernel_dAv`，
@@ -165,7 +175,23 @@
     （`fwd_intra` 输出）**，误用指纹=「dq 逐位、dk/dg 随 T 大面积错」；(b) **反向 cumsum 不要额外乘 ln2**
     （FLA `chunk_local_cumsum` 默认 `scale=RCP_LN2`，其 reverse 已直接给 `ga.grad`），误乘指纹=
     「dg 与其余五项差一个均匀常数因子」（线性拟合 `gold/ours≈1.44=RCP_LN2`、max_rel 稳停 0.44）。
-    回归：B1 自身自测（`check_bwd_dhu_kernel.py`）改后仍与旧数字一致（dh 4.6e-5 等），无退化。
+     回归：B1 自身自测（`check_bwd_dhu_kernel.py`）改后仍与旧数字一致（dh 4.6e-5 等），无退化。
+  - P6-8：新增 `docs/06` §6.10 + `harness/check_bwd_ws_reuse.py`（`harness/check_bwd_ws_reuse.out.txt`）。
+    把整条反向**直接架在 FlashKDA 自己的 K1 workspace 上**（此前 P6-2～P6-7 都吃 FLA 中间量）：
+    按 head-major SoA 偏移（`fwd_launch.cu:64-71`，`n_ht=H·total_tiles`）切出六字段 + B0 重算，
+    逐块重建 $S_{in}/U/w/h/Aqk/Akk$，跑 `dAv→B1→B2→B3→反向 cumsum(B0)`。**Part A**（workspace
+    重算前向 `o=q_dec S_in+M_qk U`、`S_out=E_tot S_in+k_rest^T U` vs FlashKDA 自身 `out`/`fin`）
+    `o` max_rel 4.5e-3~8.9e-3、终态 4.5e-3~8.0e-3；**Part B**（七个操作数 vs `kda_ref` 独立重算，fp32，
+    CHUNK=16）1.3e-4~8.1e-3；**Part C**（六项梯度 vs `torch.autograd`，P6-7 setup 同一份激活操作数）
+    最坏 `dq 3.42e-3 / dk 2.98e-3 / dv 6.34e-3 / dbeta 5.97e-3 / dg 7.05e-3 / dh0 6.42e-3`——全落
+    bf16 输入 / tf32 `tl.dot` 底噪，6 组 case 含**非整除 T=250/513、g=0、B=2**。至此「复用 K1 workspace」
+    的设计前提**端到端成立**（不再只是 §6.8 Part E 的 `kGTotal` 点对点）。**四个只有架到真 workspace
+    才暴露的坑**：(a) 字段是 `[H,total_tiles,CHUNK,D]` head-major，展平到 FLA `[B,T,H,D]` 必须
+    `permute(0,1,3,2,4)` 按 `(NT,CHUNK,H)` 重排，错 reshape 指纹=「qg/kg rel≈1.0」；(b) `INV` 就是
+    $P[o_t,o_A]$（与 `Akk` 同布局）**不需转置**；(c) golden 必须吃**激活后**操作数（P6-7 的
+    `use_*_in_kernel=False`），否则与我们的激活单位梯度差一个 l2norm/sigmoid Jacobian（指纹=`dq/dbeta`
+    大面积 0.5+）；(d) 非整除 T 按 K1 补零尾块（`v/β/g` pad 到 `NT·CHUNK` 再切回 T），配合 §6.5 的
+    `E_tot` 末有效 token 取法，非整除与整除同精度。
 
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
@@ -253,9 +279,10 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P7-3/P7-4/P7-5 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
-  §5.2 的 **B0/B1/B2/B3/dAv 五段已全部做成最小 kernel，且 P6-7 已把四段组装成端到端反向核到
-  tf32 底噪**；剩余的是更完整的 CUTLASS/TMA + warp-specialization 版反向工程化。P7-2 遗留的 nsys
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  §5.2 的 **B0/B1/B2/B3/dAv 五段已全部做成最小 kernel，P6-7 已把四段组装成端到端反向核到
+  tf32 底噪，P6-8 又把整条反向直接架在 FlashKDA K1 workspace 上端到端核到 bf16 底噪**；
+  剩余的是更完整的 CUTLASS/TMA + warp-specialization 版反向工程化。P7-2 遗留的 nsys
   流量拆分（P7-3 已用 ncu DRAM 计数替代、待验证 (b) 已关闭）。
   **P7-5 已用实验关闭 P7-2/P7-4 待验证 (c)**（K2 突破 2 CTA/SM 后 L2 墙不后移，见下）。
   - P6-6：新增 `docs/06` §6.8 + `harness/check_bwd_b0_gate.py`

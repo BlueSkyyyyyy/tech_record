@@ -132,6 +132,9 @@ E^{\text{tot}},P,M_{qk}$），只缺 `beta`/门 logits → 补轻量 **B0 门控
 （tf32 底噪），状态伴随 **bf16 存储可行**（受控消融 ~2.5e-3）；B2 `wy_dqkg` 与 FLA **逐位相同**
 （六项梯度 5.8e-4~2.1e-3 = tf32 底噪）；B3 `intra` 的 `dq/dk` 与 FLA **逐位相同**、`db/dg` ~1e-7
 （六项 3.0e-4~8.8e-4 = tf32 底噪），三者含非整除 T。
+**且这条链已被端到端驱动在 FlashKDA 自己的 K1 workspace 上**（`06` §6.10 P6-8）：按 head-major
+SoA 偏移切六字段 + B0，重建全部反向操作数，六项梯度对 autograd 最坏 **6.4e-3**（含非整除 T、$g=0$、
+$B=2$）——「复用 K1 workspace」的设计前提**端到端成立**，不再是逐字段点对点核验。
 
 ## 7. 踩坑速查
 
@@ -166,6 +169,7 @@ L2 墙是否后移~~（**已解决**，`docs/07` §8 P7-5：不会后移——`s
 `+14%~+40%`，且 `lts` 已 94% SOL、K2 是 L2 带宽 bound，占用率无可用余量）。**后续方向**：反向四个 kernel 里 B0（门控
 重算，`docs/06` §6.8 P6-6）、B1（状态伴随，`docs/06` §6）、B2（`wy_dqkg`，`docs/06` §6.6 P6-4）、
 B3（`intra`，`docs/06` §6.7 P6-5）**均已做成最小可运行 Triton kernel** 并三方/位级核验（B0 还额外与
-FlashKDA K1 当场写的 workspace `kGTotal` 对到 1.6e-5~8.1e-5），四条支路全覆盖；剩余的是把最小
-kernel 工程化为 CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、`CHUNK=16`），
-属更大工程，留待有明确需求时再做。
+FlashKDA K1 当场写的 workspace `kGTotal` 对到 1.6e-5~8.1e-5），四条支路全覆盖；且 P6-8（`06` §6.10）
+已把整条链**架在 FlashKDA 自己的 K1 workspace 上端到端跑通**（六项梯度对 autograd 最坏 6.4e-3）。
+剩余的是把最小 kernel 工程化为 CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、
+`CHUNK=16`），属更大工程，留待有明确需求时再做。
