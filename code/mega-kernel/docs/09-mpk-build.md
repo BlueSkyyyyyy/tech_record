@@ -917,3 +917,124 @@ smem）先启动后独占了设备的 kernel 派发通道，使随后在另一�
 
 **P26-1 完成**：在 §11 的 clean scheduler-first 构建上，把端到端延迟从单算子推进到 4 算子 DAG，
 给出 batch / worker 扫描、正确性、与 kernel-per-operator 的加速标度，并记录快照的 batch≤16 编译约束。
+
+## 13. 设备侧数值证据（P28-1）：-G 调试构建 + cuda-gdb 读出事件计数，钉死「卡在哪一个 event」
+
+§11.7 留了一条局限：「无设备侧类型信息（JIT 只带 `-lineinfo`），`print config.*` 取不到事件计数，
+故本节**没有**读出『卡在哪个 event 计数』」。本节把这条尾巴补上——**用 `-G`（设备调试信息）重建
+JIT 内核**，让 cuda-gdb 能解析 `RuntimeConfig` 的字段类型，从而 attach 到挂起进程后把**数值**读出来。
+
+> 全部实验在**目标卡 H100/sm90**、快照 `mirage-project/mirage@f9eb70c`、`CUDA_VISIBLE_DEVICES=7`
+> **隔离空闲卡**、`cuda-gdb` 13.2 上完成。原始输出 `harness/mpk_debug_counters.out.txt`。
+
+### 13.1 方法：用 `-G` 重建 + 保留 JIT 临时目录 + 非侵入式 attach
+
+三个关键点（都不改任何 kernel 代码）：
+
+1. **`-G` 经编译命令注入**：新增补丁 `harness/mpk_debug_build.patch`，只把 `get_compile_command()`
+   的返回改成也拼接环境变量 `MPK_EXTRA_DEFINES`（与 §11 的 `mpk_sched_first.patch` 的 host 侧改动同款、
+   但**不碰** `persistent_kernel.cuh`）。运行脚本 `harness/mpk_debug_counters.sh` 里
+   `export MPK_EXTRA_DEFINES=-G`，于是 nvcc 以 `--device-debug` 编译（实测 ptxas 会打印
+   `Conflicting options --device-debug and --generate-line-info specified, ignoring --generate-line-info`，
+   即 `-G` 覆盖了原来那行 `-lineinfo`，见 `python/mirage/mpk/persistent_kernel.py:293-294`）。
+2. **保留 JIT 临时目录**：mirage 在 `tempfile.TemporaryDirectory()` 里生成并加载
+   `test.cpython-312-x86_64-linux-gnu.so`（`persistent_kernel.py:3220-3235,3368`），
+   该目录在 `compile()` 返回后即被回收，cuda-gdb attach 时**找不到模块文件**（报
+   `Failed to map shared library …/test.cpython-312-x86_64-linux-gnu.so`）。给探针
+   `harness/mpk_cudagdb_probe.py` 加 `MPK_KEEP_TEMPDIR=1`：把 `tempfile.TemporaryDirectory.cleanup`
+   改成 no-op，临时目录与 `.so` 得以存活，cuda-gdb 才能加载**设备端**类型信息（`print config.*` 随即可用）。
+3. **attach 已挂起的进程**：与 §11.1 同法（`cuda-gdb -p <pid> -batch`，进程外旁观，不扰动竞态）。
+   命令清单 `harness/mpk_debug_counters.cmds`：先 `thread 1; bt` 取**宿主线程**栈，再 `info cuda kernels`、
+   聚焦 `worker_kernel` 读 `info locals`，然后逐字段 `print config.*`。
+
+`-G` 构建下 `pk()` **不会返回**：宿主线程停在**第二次 `cudaLaunchKernel`**（见下），故脚本等的是 C 侧
+`smem size:` 打印（两条 launch 之前）而非 `[probe] LAUNCHED`。
+
+### 13.2 结果：宿主卡在第二次 `cudaLaunchKernel`，设备上只有 worker
+
+**宿主线程栈**（`thread 1; bt`，节选）：
+
+```
+#11 cuLaunchKernel () from /usr/local/cuda/compat/lib/libcuda.so.1
+#12 ?? () from /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so.13
+#13 cudaLaunchKernel () from /usr/local/cuda/targets/x86_64-linux/lib/libcudart.so.13
+#14 ?? ()          <-- 编译出的 launcher .so 里 launch_persistent_kernel 的第二次 launch
+#15 0x0000000000000000
+```
+
+`info cuda kernels` 仍**只有 `worker_kernel`**（GridDim `(128,1,1)`、BlockDim `(256,1,1)`、Active），
+`cuda kernel 1` → `Invalid coordinates requested`（scheduler 不在设备上）。→ 与 §11.2/§11.3 完全一致，
+但**更强**：在 `-G` 构建下，连**宿主都在第二次 `cudaLaunchKernel`（scheduler 的那次）里阻塞不返回**
+（非 `-G` 构建宿主会立刻返回、scheduler 只是 pending，见 §10.4）。worker 先占满设备，随后 scheduler
+的 `cuLaunchKernel` 拿不到派发，宿主调用本身被卡住。
+
+**worker 取 task 等待循环的局部变量**（`info locals`，`persistent_kernel.cuh:1015` 正在执行
+`last_task_pos[queue_idx] = ld_acquire_gpu_u64(&config.worker_queue_last_ready_task_id[…])`）：
+
+```
+worker_id = 0   queue_idx = 0   queue_pos = 0   queue_len = 0   num_worker_queues = 1
+```
+
+即 worker 0 处在「本地队列空、去取下一批 task」的分支（`queue_pos == queue_len`），
+`worker_queue_last_ready_task_id` 一直没长大（下段）。
+
+### 13.3 结果：事件/队列计数的数值
+
+| 字段 | 值 | 含义 |
+|---|---|---|
+| `config.num_workers` / `num_local_schedulers` / `num_remote_schedulers` | 128 / 16 / 0 | 与 §11 的官方 `get_configurations_from_gpu` 一致 |
+| `config.num_events` | **3** | 与 `[MPK INIT] Total events: 3` 一致 |
+| `config.per_worker_queue_len` / `per_sched_queue_len` | 8192 / 4096 | 队列容量（未满） |
+| `config.worker_queue_last_ready_task_id[0]` / `[1]` | **0 / 0** | **没有任何 task 曾被发布到任何 worker 队列** |
+| `config.sched_queue_last_ready_event_id[0]` | **1** | scheduler 队列里**已就绪 1 个 event** |
+| `config.sched_queue_next_free_event_id[0]` | **1** | 游标与上面相等 → 该 event **没人消费** |
+| `config.all_event_counters[0]` / `[1]` / `[2]` | **0 / 0 / 0** | **3 个事件一个都没触发** |
+| `config.all_event_num_triggers[0]` / `[1]` / `[2]` | **1 / 1 / 16** | 阈值：两个单触发、一个需 16 次 |
+
+对照 §4 的事件语义（`runtime_header.h:229-235`：`EVENT_TERMINATION`、`EVENT_LAUNCH_DEPENDENT_TASKS`、
+`EVENT_END_OF_TASK_GRAPH`=16，即 16 个 rmsnorm task）：**第三个事件 `num_triggers=16` 恰是那个把 16 个
+rmsnorm 收齐的 `END_OF_TASK_GRAPH`**，而它现在计数为 0。
+
+### 13.4 判断：卡的不是「某个 event 阈值」，而是**第一个 event 从未被派发**
+
+把上面拼起来：
+
+1. **worker 侧**：`worker_queue_last_ready_task_id[*] = 0` + `queue_pos == queue_len == 0` ⇒ worker 从启动
+   到现在**一个 task 都没收到**，一直空转在取 task 的等待循环。
+2. **scheduler 侧**：`sched_queue_last_ready_event_id == sched_queue_next_free_event_id == 1` ⇒
+   scheduler 队列里**已经躺着一个待处理 event**（`prepare_kernel` 预置的启动事件，`docs/06` §5.1），
+   但**没人把它取走**——因为 `scheduler_kernel` 根本不常驻。
+3. **全局**：`all_event_counters[*] = 0` ⇒ **没有任何一个 event 触发过**；特别是那个阈值 16 的
+   `END_OF_TASK_GRAPH` 停在 0，说明连「16 个 rmsnorm task 全部完成」这个条件都远未开始计。
+
+于是「卡在哪个 event」有了**数值答案**：不是某个 event 的计数器「差几个凑不满」，而是
+**scheduler 队列里的第一个（种子）event 从未被消费、因而没有任何 task 被派发、所有事件计数恒为 0**。
+这把 §11.4 的 launch-顺序根因从「设备上查不到 scheduler」推进到「**第一个 event 的派发前夜**」：
+**worker 已常驻并空转，event 队列已有货，但唯一的消费者（scheduler kernel）没起来**。
+
+### 13.5 与 §11 的关系、以及 `-G` 的口径 caveat
+
+- **一致**：设备侧（只 worker 常驻、PC 在取 task 的 `ld_acquire`、scheduler 缺席）与 §11.2/§11.3 相同；
+  launch 顺序消融（§11.4）仍是根因判定，本节只是把它补上**数值**。
+- **口径差异（必须标注）**：`-G` 是**代码生成层面的大改动**——它关掉优化并打开设备调试，会改变
+  worker/scheduler kernel 的寄存器/指令/资源足迹，因此**宿主行为与默认 `-O3` 构建不同**：默认构建里
+  宿主两次 launch 都立刻返回、scheduler 只是 pending（§10.4）；`-G` 构建里第二次
+  `cudaLaunchKernel` **在宿主侧阻塞**。故本节数值刻画的是 **`-G` 挂起态**，其**设备侧结构**与默认挂起态
+  相同（§11 已用非侵入式 attach 交叉验证），但**不能**当作默认构建的逐字计时/时序证据。
+- **局限**：仍只有本机、单 operator、`offline`+`test_mode`；`next_task_pos`/`last_task_pos` 两个
+  `__shared__` 游标在 `-G` 下仍被标 `<optimized out>`（`info locals` 只给出 `queue_idx/queue_pos/queue_len`）；
+  **不构成对上游 `f9eb70c` 的 bug 判定**（也可能是驱动对「整机持久化 kernel + 后继 kernel」的派发行为）。
+
+### 13.6 判据小结（本节新增）
+
+| 判据 | 内容 | 结论 |
+|---|---|---|
+| 十五 | `-G` 重建后 cuda-gdb 能 `print config.*`，读出 `worker_queue_last_ready_task_id=0` | worker 零 task |
+| 十六 | `all_event_counters[*]=0`（阈值 1/1/16），`sched_queue` 有 1 个未消费 event | 卡在「第一个 event 派发前」 |
+| 十七 | `-G` 构建宿主阻塞在第二次 `cudaLaunchKernel`；设备上仅 worker 常驻 | 与 §11 launch-顺序根因一致、且更强 |
+
+**P28-1 完成**（兑现「下一步」可选方向①）：用 `-G` + cuda-gdb 把「卡在哪个 event」的**数值**钉死——
+不是阈值差数，而是 scheduler 队列首个 event 从未被派遣、worker 收到 0 个 task、全局事件计数全 0。
+工件：脚本 `harness/mpk_debug_counters.sh`、命令 `harness/mpk_debug_counters.cmds`、补丁
+`harness/mpk_debug_build.patch`，探针 `harness/mpk_cudagdb_probe.py`（新增 `MPK_KEEP_TEMPDIR`），
+原始输出 `harness/mpk_debug_counters.out.txt`。

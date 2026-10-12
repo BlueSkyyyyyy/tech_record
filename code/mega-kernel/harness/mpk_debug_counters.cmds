@@ -1,0 +1,50 @@
+set pagination off
+set confirm off
+set print thread-events off
+set width 0
+
+printf "\n===== cuda-gdb: host thread backtrace (where is pk() stuck?) =====\n"
+thread 1
+bt
+
+printf "\n===== cuda-gdb: kernels actually resident =====\n"
+info cuda kernels
+
+printf "\n===== cuda-gdb: focus worker_kernel block/thread 0 =====\n"
+cuda kernel 0
+cuda block (0,0,0)
+cuda thread (0,0,0)
+info line *$pc
+print/x $pc
+
+printf "\n===== cuda-gdb: worker wait-loop locals (shared cursors) =====\n"
+info locals
+
+printf "\n===== cuda-gdb: RuntimeConfig topology (numeric) =====\n"
+print config.num_workers
+print config.num_local_schedulers
+print config.num_remote_schedulers
+print config.num_gpus
+print config.num_events
+print config.per_worker_queue_len
+print config.per_sched_queue_len
+
+printf "\n===== cuda-gdb: worker queue cursors (last task published) =====\n"
+print config.worker_queue_last_ready_task_id[0]
+print config.worker_queue_last_ready_task_id[1]
+
+printf "\n===== cuda-gdb: scheduler queue cursors =====\n"
+print config.sched_queue_last_ready_event_id[0]
+print config.sched_queue_next_free_event_id[0]
+
+printf "\n===== cuda-gdb: event counters vs thresholds =====\n"
+print config.all_event_counters[0]
+print config.all_event_counters[1]
+print config.all_event_counters[2]
+print config.all_event_num_triggers[0]
+print config.all_event_num_triggers[1]
+print config.all_event_num_triggers[2]
+
+printf "\n===== cuda-gdb: try focusing scheduler kernel (expected: absent) =====\n"
+cuda kernel 1
+bt

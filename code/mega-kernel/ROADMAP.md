@@ -574,6 +574,31 @@
       **纯资料分析（两个先例分别需 8×H100+NVSHMEM 多进程 / 完整 Llama 权重与编译链，本机不具备），
       本轮无新实验**；相关机制实测交叉引用 `docs/04` §1/§9/§14/§16/§17。
 
+### P28 设备侧数值证据：-G 调试构建 + cuda-gdb 读出事件计数（`docs/09-mpk-build.md` §13）
+
+- [x] **P28-1** 兑现「下一步」可选方向①：把 §11.7「无设备侧类型信息、读不出『卡在哪个 event 计数』」
+      的尾巴补上——**用 `-G`（`--device-debug`）重建 JIT 内核**，让 cuda-gdb 能解析 `RuntimeConfig`
+      字段类型，再 attach 挂起进程把**数值**读出来。见 `docs/09-mpk-build.md` §13；脚本
+      `harness/mpk_debug_counters.sh`、命令 `harness/mpk_debug_counters.cmds`、补丁
+      `harness/mpk_debug_build.patch`（只给 `get_compile_command()` 拼 `MPK_EXTRA_DEFINES`，不碰 kernel
+      代码）、探针 `harness/mpk_cudagdb_probe.py`（新增 `MPK_KEEP_TEMPDIR=1`，阻止 JIT 临时目录在
+      编译后被回收，cuda-gdb 才能加载模块符号），原始输出 `harness/mpk_debug_counters.out.txt`
+      （目标卡 H100/sm90，device 7，快照 `f9eb70c`）。核心结论：
+      - **[更强证据] `-G` 构建下宿主阻塞在第二次 `cudaLaunchKernel`**（栈 `cuLaunchKernel→cudaLaunchKernel
+        →launcher .so #14`，即 scheduler 那次 launch 不返回），设备上**只有 `worker_kernel`**、
+        `cuda kernel 1`→`Invalid coordinates`（与 §11.2/§11.3 一致且更强）。
+      - **[数值] worker 零 task**：`worker_queue_last_ready_task_id[0]=[1]=0`；worker0 局部
+        `worker_id=0, queue_idx=0, queue_pos=queue_len=0`（空队列取 task 分支）。
+      - **[数值] 卡在第一个 event 派发前**：`config.num_events=3`；`sched_queue_last_ready_event_id=
+        next_free_event_id=1`（队列有 1 个未消费 event）；`all_event_counters[0/1/2]=0/0/0`，
+        `all_event_num_triggers[0/1/2]=1/1/16`——连阈值 16 的 `END_OF_TASK_GRAPH` 都停在 0。
+      - **判断**：不是「某 event 阈值差几个凑不满」，而是 **scheduler 队列首个 event 从未被消费 →
+        无 task 派发 → 全部事件计数恒 0**，把 §11.4 的 launch-顺序根因推进到「第一个 event 派发前夜」。
+      - **口径 caveat**：`-G` 关闭优化会改变 codegen/宿主行为（默认构建宿主两次 launch 均返回、
+        scheduler 仅 pending），故数值刻画 **`-G` 挂起态**，其设备侧结构与默认挂起态相同（§11 交叉验证）；
+        `next/last_task_pos` 两个 `__shared__` 游标仍 `<optimized out>`。**不构成对上游的 bug 判定**。
+        **本轮新增实验**。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -596,7 +621,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P27-1 完成（1/1）**。本轮新建 `docs/10-megakernel-precedents.md`（**纯资料分析**）+ 博客
+- 当前进度：**P28-1 完成（1/1）**。本轮兑现「下一步」可选方向①：**用 `-G`（`--device-debug`）重建
+  JIT 内核 + 保留 JIT 临时目录 + cuda-gdb attach 挂起进程**，把 §11.7 留下的「读不出卡在哪个 event 计数」
+  补上——`docs/09-mpk-build.md` 新增 **§13**，脚本 `harness/mpk_debug_counters.sh`、命令
+  `harness/mpk_debug_counters.cmds`、补丁 `harness/mpk_debug_build.patch`、探针
+  `harness/mpk_cudagdb_probe.py`（`MPK_KEEP_TEMPDIR`），原始输出 `harness/mpk_debug_counters.out.txt`
+  （目标卡 H100/sm90、device 7、快照 `f9eb70c`，用时先把 z3 重钉 `4.16.0.0`、跑完按 B2 切回 `4.15.4.0`）：
+  ① `-G` 下宿主阻塞在**第二次** `cudaLaunchKernel`、设备上只有 `worker_kernel`（比 §11 更强）；
+  ② 数值：`worker_queue_last_ready_task_id[0/1]=0/0`（worker 零 task）、`sched_queue_last_ready=
+  next_free=1`（1 个未消费 event）、`all_event_counters[0/1/2]=0/0/0` 对阈值 `1/1/16`；③ 结论：不是阈值
+  凑不满，而是**首个 event 从未被派发**。此前 **P27-1 完成（1/1）**：新建 `docs/10-megakernel-precedents.md`（**纯资料分析**）+ 博客
   post `mega-kernel-11-precedents`（weight 12）并更新 `mega-kernel-00-index` 目录第 11 项：把 MPK §2.2
   （快照行 325–344）与 §8（行 1851–1862）反复转引、但本专题此前只作转引的两个**手工 mega-kernel 先例**
   回到一手资料——**FlashMoE**（`arXiv:2506.04667`，NeurIPS '25；§1 Table 1：1 launch vs ≤550、§3 actor
@@ -700,15 +734,18 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：全专题收尾（P0–P27 全部完成）**。P27-1 已把 MPK 转引的两个手工 mega-kernel 先例（FlashMoE、
+- **下一步：全专题收尾（P0–P28 全部完成）**。P28-1 已把 §11.7 的「读不出卡在哪个 event」用 `-G` +
+  cuda-gdb 补成数值证据（`docs/09` §13）。P27-1 已把 MPK 转引的两个手工 mega-kernel 先例（FlashMoE、
   Llama-1B megakernel）回到一手资料（`docs/10`，纯资料分析）。P26-1 已在 clean scheduler-first 构建上把端到端延迟
   从单算子推进到 4 算子 DAG（`docs/09` §12），**兑现下面的可选方向③**。P25-1 已构建 + launch +
   **收敛 + 正确性 + 端到端延迟**，并且「不收敛」根因已由 `docs/09` §11 钉死：**cuda-gdb attach**
   证据（挂起时只有 `worker_kernel` 常驻、spinning 在取 task 的 `ld_acquire`；`scheduler_kernel`
   从未被派发，4:4 下 128 SM 空闲亦如此）+ **launch 顺序消融**（scheduler 先于 worker launch →
   plain 构建 4/4 收敛且正确，`mpk_sched_first.patch`）。§9/§10 追的 dtype 转换只是「扰动 scheduler
-  派发时机」的同一旋钮。**无遗留必做项**；如再增量可选：
-  ① 用 `-G`（设备调试信息）重编译以读取 `config.all_event_counters`，把「卡在哪个 event」的数值也钉死；
+  派发时机」的同一旋钮。   **无遗留必做项**；如再增量可选：
+  ① ~~用 `-G`（设备调试信息）重编译以读取 `config.all_event_counters`，把「卡在哪个 event」的数值也钉死~~
+     （**P28-1 完成**：`-G` + 保留 JIT 临时目录 + cuda-gdb → worker 零 task、`all_event_counters` 全 0、
+     `sched_queue` 首个 event 未消费；见 `docs/09` §13）；
   ② 把 scheduler-first 的顺序离线报告给 MPK 上游核对（不构成 bug 判定）；
   ③ ~~在 clean scheduler-first 构建上重跑多算子/更大 batch 的端到端延迟~~（**P26-1 完成**：4 算子
   43–50 µs / 相对 kernel-per-operator 3.5–4.8×，并记录 batch≤16 编译期约束；更大 batch>16 受
@@ -761,6 +798,23 @@
   - **局限**：未把根因收敛到某条 load/store 内存序；端到端延迟仍未测（只测正确性+收敛/挂起）。
     下一步候选：`compute-sanitizer --tool racecheck` 抓竞争、把自旋换成 `__nanosleep` 退避验证纯时序、
     向 MPK 上游核对 `f9eb70c` worker 抢跑路径。**不构成对上游的 bug 判定**。P25-1 仍记 `[~]`。
+- **本轮（P28-1）**：`docs/09-mpk-build.md` 新增 **§13**「设备侧数值证据：-G 调试构建 + cuda-gdb 读出事件
+  计数」。新增补丁 `harness/mpk_debug_build.patch`（只给 `get_compile_command()` 拼 `MPK_EXTRA_DEFINES`，
+  **不碰 kernel 代码**）、脚本 `harness/mpk_debug_counters.sh`、命令 `harness/mpk_debug_counters.cmds`，
+  探针 `harness/mpk_cudagdb_probe.py` 增 `MPK_KEEP_TEMPDIR=1`（阻止 mirage 的 `TemporaryDirectory` 在
+  `compile()` 后回收 `test.cpython-…so`，否则 cuda-gdb 报 `Failed to map shared library`、拿不到类型），
+  原始输出 `harness/mpk_debug_counters.out.txt`（目标卡 H100/sm90、device 7、快照 `f9eb70c`、
+  `cuda-gdb` 13.2；用前重钉 z3 `4.16.0.0`、用后按 B2 切回 `4.15.4.0`）。核心结论：
+  (1) **`-G` 构建宿主阻塞在第二次 `cudaLaunchKernel`**（栈 `cuLaunchKernel→cudaLaunchKernel→launcher .so`），
+  设备上**只有 `worker_kernel`**、`cuda kernel 1`→`Invalid coordinates`——与 §11 设备侧证据一致且更强；
+  (2) **数值**：`worker_queue_last_ready_task_id[0]=[1]=0`、worker0 `queue_idx=queue_pos=queue_len=0`
+  （worker 一个 task 都没收到）；`sched_queue_last_ready_event_id=next_free_event_id=1`（1 个 event
+  未消费）；`all_event_counters[0/1/2]=0/0/0` 对阈值 `all_event_num_triggers[0/1/2]=1/1/16`；
+  (3) **判断**：不是「某 event 差数凑不满」，而是 **scheduler 队列首个（种子）event 从未被消费 →
+  worker 零 task → 所有事件计数恒 0**，把 §11.4 的 launch-顺序根因从「设备上查不到 scheduler」推进到
+  「第一个 event 派发前夜」；(4) **口径 caveat**：`-G` 关优化会改变 codegen 与宿主 launch 行为，
+  数值刻画 **`-G` 挂起态**，设备侧结构与默认挂起态相同（§11 已交叉验证），不构成对上游 bug 判定；
+  `next/last_task_pos` 两个 `__shared__` 游标仍 `<optimized out>`。**本轮新增实验**；兑现「下一步」①。
 - **本轮（P27-1）**：新建 `docs/10-megakernel-precedents.md`（手工 mega-kernel **先例精读**，
   **纯资料分析、无新实验**）+ 博客 post `mega-kernel-11-precedents`（weight 12）并更新
   `mega-kernel-00-index` 目录第 11 项。补齐本专题此前只作**转引**的一手材料：MPK §2.2（快照行 325–344）

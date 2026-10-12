@@ -49,6 +49,21 @@ def main():
                     default=os.environ.get("MIRAGE_HOME", "."))
     args = ap.parse_args()
 
+    # P28-1: the JIT-compiled launcher .so is built inside a
+    # tempfile.TemporaryDirectory() that mirage deletes as soon as compile()
+    # returns, so cuda-gdb cannot map its (debug) symbols on attach. With
+    # MPK_KEEP_TEMPDIR=1 we keep that dir alive so the -G build can be
+    # inspected. Set before PersistentKernel.compile().
+    if os.environ.get("MPK_KEEP_TEMPDIR") == "1":
+        import tempfile as _tf
+
+        class _KeepTempDir(_tf.TemporaryDirectory):
+            def cleanup(self):
+                import sys as _sys
+                print(f"[probe] keeping tempdir {self.name}", file=_sys.stderr, flush=True)
+
+        _tf.TemporaryDirectory = _KeepTempDir
+
     torch.cuda.set_device(args.device)
     device = f"cuda:{args.device}"
     dtype = torch.bfloat16

@@ -1,0 +1,13 @@
+diff --git a/python/mirage/mpk/persistent_kernel.py b/python/mirage/mpk/persistent_kernel.py
+index 5d76a0d..d2e19a1 100644
+--- a/python/mirage/mpk/persistent_kernel.py
++++ b/python/mirage/mpk/persistent_kernel.py
+@@ -383,7 +383,7 @@ def get_compile_command(
+     if profiling:
+         flags = flags + ["-DMPK_ENABLE_PROFILING"]
+ 
+-    return common_cmd + specific_cmd + flags
++    return common_cmd + specific_cmd + flags + __import__("os").environ.get("MPK_EXTRA_DEFINES", "").split()
+ 
+ 
+ def _page_stride_rows(*caches):
