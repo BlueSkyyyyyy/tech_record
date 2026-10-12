@@ -1,0 +1,125 @@
+
+==========================================================================
+Case [T=16]  B=1 T=16 H=4 g_scale=2.0 seed=0
+  o    kernel vs gold        max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=3.949e-05
+  S^T  kernel vs gold        max_abs=5.218e-03  max_rel=6.747e-03  mean_abs=1.845e-04
+  S (unchained) check        max_abs=5.218e-03  max_rel=6.747e-03  mean_abs=1.845e-04
+
+==========================================================================
+Case [T=17]  B=1 T=17 H=4 g_scale=2.0 seed=0
+  o    kernel vs gold        max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=3.817e-05
+  S^T  kernel vs gold        max_abs=5.114e-03  max_rel=7.307e-03  mean_abs=1.948e-04
+  S (unchained) check        max_abs=5.114e-03  max_rel=7.307e-03  mean_abs=1.948e-04
+
+==========================================================================
+Case [T=64]  B=1 T=64 H=4 g_scale=2.0 seed=0
+  o    kernel vs gold        max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=2.894e-05
+  S^T  kernel vs gold        max_abs=2.964e-03  max_rel=4.981e-03  mean_abs=1.225e-04
+  S (unchained) check        max_abs=2.964e-03  max_rel=4.981e-03  mean_abs=1.225e-04
+
+==========================================================================
+Case [T=128]  B=1 T=128 H=4 g_scale=2.0 seed=0
+  o    kernel vs gold        max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=2.532e-05
+  S^T  kernel vs gold        max_abs=6.028e-03  max_rel=8.739e-03  mean_abs=1.778e-04
+  S (unchained) check        max_abs=6.028e-03  max_rel=8.739e-03  mean_abs=1.778e-04
+
+==========================================================================
+Case [T=512]  B=1 T=512 H=4 g_scale=2.0 seed=0
+  o    kernel vs gold        max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=2.347e-05
+  S^T  kernel vs gold        max_abs=5.286e-03  max_rel=7.340e-03  mean_abs=1.654e-04
+  S (unchained) check        max_abs=5.286e-03  max_rel=7.340e-03  mean_abs=1.654e-04
+
+==========================================================================
+Case [T=1024]  B=1 T=1024 H=4 g_scale=2.0 seed=0
+  o    kernel vs gold        max_abs=8.367e-04  max_rel=6.215e-03  mean_abs=2.287e-05
+  S^T  kernel vs gold        max_abs=5.480e-03  max_rel=8.622e-03  mean_abs=1.887e-04
+  S (unchained) check        max_abs=5.480e-03  max_rel=8.622e-03  mean_abs=1.887e-04
+
+==========================================================================
+Case [H=1]  B=1 T=256 H=1 g_scale=2.0 seed=0
+  o    kernel vs gold        max_abs=5.474e-04  max_rel=5.316e-03  mean_abs=2.109e-05
+  S^T  kernel vs gold        max_abs=2.818e-03  max_rel=9.275e-03  mean_abs=1.359e-04
+  S (unchained) check        max_abs=2.818e-03  max_rel=9.275e-03  mean_abs=1.359e-04
+
+==========================================================================
+Case [H=2]  B=1 T=256 H=2 g_scale=2.0 seed=0
+  o    kernel vs gold        max_abs=5.474e-04  max_rel=4.127e-03  mean_abs=2.217e-05
+  S^T  kernel vs gold        max_abs=3.779e-03  max_rel=9.696e-03  mean_abs=1.265e-04
+  S (unchained) check        max_abs=3.779e-03  max_rel=9.696e-03  mean_abs=1.265e-04
+
+==========================================================================
+Case [H=8]  B=1 T=256 H=8 g_scale=2.0 seed=0
+  o    kernel vs gold        max_abs=7.846e-04  max_rel=5.916e-03  mean_abs=2.171e-05
+  S^T  kernel vs gold        max_abs=5.615e-03  max_rel=7.757e-03  mean_abs=1.621e-04
+  S (unchained) check        max_abs=5.615e-03  max_rel=7.757e-03  mean_abs=1.621e-04
+
+==========================================================================
+Case [B=3]  B=3 T=128 H=2 g_scale=2.0 seed=0
+  o    kernel vs gold        max_abs=9.995e-04  max_rel=7.138e-03  mean_abs=2.377e-05
+  S^T  kernel vs gold        max_abs=5.593e-03  max_rel=9.992e-03  mean_abs=1.320e-04
+  S (unchained) check        max_abs=5.593e-03  max_rel=9.992e-03  mean_abs=1.320e-04
+
+==========================================================================
+Case [seed=1]  B=1 T=256 H=4 g_scale=2.0 seed=1
+  o    kernel vs gold        max_abs=7.521e-04  max_rel=3.561e-03  mean_abs=2.133e-05
+  S^T  kernel vs gold        max_abs=4.589e-03  max_rel=9.441e-03  mean_abs=1.470e-04
+  S (unchained) check        max_abs=4.589e-03  max_rel=9.441e-03  mean_abs=1.470e-04
+
+==========================================================================
+Case [seed=2]  B=1 T=256 H=4 g_scale=2.0 seed=2
+  o    kernel vs gold        max_abs=9.771e-04  max_rel=5.659e-03  mean_abs=2.206e-05
+  S^T  kernel vs gold        max_abs=3.939e-03  max_rel=9.436e-03  mean_abs=1.478e-04
+  S (unchained) check        max_abs=3.939e-03  max_rel=9.436e-03  mean_abs=1.478e-04
+
+==========================================================================
+Case [seed=3]  B=1 T=256 H=4 g_scale=2.0 seed=3
+  o    kernel vs gold        max_abs=1.116e-03  max_rel=6.176e-03  mean_abs=2.568e-05
+  S^T  kernel vs gold        max_abs=7.113e-03  max_rel=1.144e-02  mean_abs=2.064e-04
+  S (unchained) check        max_abs=7.113e-03  max_rel=1.144e-02  mean_abs=2.064e-04
+
+==========================================================================
+Case [g=0 (no decay)]  B=1 T=256 H=4 g_scale=0.0 seed=0
+  o    kernel vs gold        max_abs=8.400e-04  max_rel=6.933e-03  mean_abs=4.087e-05
+  S^T  kernel vs gold        max_abs=1.426e-02  max_rel=8.073e-03  mean_abs=2.263e-04
+  S (unchained) check        max_abs=1.426e-02  max_rel=8.073e-03  mean_abs=2.263e-04
+
+==========================================================================
+Case [g=N(0,1)]  B=1 T=256 H=4 g_scale=1.0 seed=0
+  o    kernel vs gold        max_abs=9.508e-04  max_rel=7.591e-03  mean_abs=2.471e-05
+  S^T  kernel vs gold        max_abs=5.557e-03  max_rel=7.329e-03  mean_abs=1.669e-04
+  S (unchained) check        max_abs=5.557e-03  max_rel=7.329e-03  mean_abs=1.669e-04
+
+==========================================================================
+Case [g=N(0,4)]  B=1 T=256 H=4 g_scale=4.0 seed=0
+  o    kernel vs gold        max_abs=7.511e-04  max_rel=5.050e-03  mean_abs=2.592e-05
+  S^T  kernel vs gold        max_abs=4.401e-03  max_rel=7.762e-03  mean_abs=1.769e-04
+  S (unchained) check        max_abs=4.401e-03  max_rel=7.762e-03  mean_abs=1.769e-04
+
+==========================================================================
+Case [T=1023]  B=1 T=1023 H=2 g_scale=2.0 seed=7
+  o    kernel vs gold        max_abs=7.722e-04  max_rel=4.781e-03  mean_abs=2.704e-05
+  S^T  kernel vs gold        max_abs=4.764e-03  max_rel=7.547e-03  mean_abs=2.234e-04
+  S (unchained) check        max_abs=4.764e-03  max_rel=7.547e-03  mean_abs=2.234e-04
+
+==========================================================================
+SUMMARY  (o and S as S^T, the kernel layout)
+  case                o.max_abs    o.max_rel    S.max_abs    S.max_rel
+  T=16                8.367e-04    6.215e-03    5.218e-03    6.747e-03
+  T=17                8.367e-04    6.215e-03    5.114e-03    7.307e-03
+  T=64                8.367e-04    6.215e-03    2.964e-03    4.981e-03
+  T=128               8.367e-04    6.215e-03    6.028e-03    8.739e-03
+  T=512               8.367e-04    6.215e-03    5.286e-03    7.340e-03
+  T=1024              8.367e-04    6.215e-03    5.480e-03    8.622e-03
+  H=1                 5.474e-04    5.316e-03    2.818e-03    9.275e-03
+  H=2                 5.474e-04    4.127e-03    3.779e-03    9.696e-03
+  H=8                 7.846e-04    5.916e-03    5.615e-03    7.757e-03
+  B=3                 9.995e-04    7.138e-03    5.593e-03    9.992e-03
+  seed=1              7.521e-04    3.561e-03    4.589e-03    9.441e-03
+  seed=2              9.771e-04    5.659e-03    3.939e-03    9.436e-03
+  seed=3              1.116e-03    6.176e-03    7.113e-03    1.144e-02
+  g=0 (no decay)      8.400e-04    6.933e-03    1.426e-02    8.073e-03
+  g=N(0,1)            9.508e-04    7.591e-03    5.557e-03    7.329e-03
+  g=N(0,4)            7.511e-04    5.050e-03    4.401e-03    7.762e-03
+  T=1023              7.722e-04    4.781e-03    4.764e-03    7.547e-03
+
+DONE

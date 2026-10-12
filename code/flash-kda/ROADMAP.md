@@ -64,8 +64,8 @@
 
 ### P4 数值对拍（`docs/04-numerics.md`）
 
-- [ ] **P4-1** 参考实现：`src/kda_ref.py` 逐 token 递推（fp32）作为 golden。
-- [ ] **P4-2** FlashKDA forward vs golden：多 shape（不同 T/H）、多 seed，报 max abs/rel。
+- [x] **P4-1** 参考实现：`src/kda_ref.py` 逐 token 递推（fp32/fp64）作为 golden（P1-4 交付）。
+- [x] **P4-2** FlashKDA forward vs golden：多 shape（不同 T/H）、多 seed、多门控区间，报 max abs/rel。
 - [ ] **P4-3** 与 FLA `chunk_kda` 三方对比；给误差表。
 
 ### P5 反向的推导与实现（`docs/05-kda-bwd.md`）
@@ -111,7 +111,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0 全部完成，P1 全部完成，P2 全部完成，P3 全部完成（K2 执行结构 + 八相数据流 + 状态更新分块含义与 bf16 精度）。
+- 当前进度：P0/P1/P2/P3 全部完成，P4-1/P4-2 完成（前向 kernel vs fp64 golden 数值对拍，多 shape/seed/门控区间）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -178,9 +178,21 @@
     naive `STSM+LDSM_N`（不转置）max_rel=1.26（全错），**证明转置是数学必需**；延迟微基准
     4×`MOVM_T`=18.0 cyc vs `STSM+syncwarp+LDSM`=21.8 cyc（1.21×），真正收益是省 4096B U 缓冲与
     Phase 3→4→6 对 U 复用的零同步。
-- **下一步：P4 数值对拍**（golden 已有 `src/kda_ref.py`，P4-2/P4-3 把 FlashKDA forward 与 FLA `chunk_kda`
-  三方对比成表）；P3-3 新增的 `harness/check_state_bf16.py` 可作 bf16 侧补充。反向（P5）用已装好的
-  FLA `chunk_kda` autograd 对拍。
+- **下一步：P4-3 三方对比**（在 P4-2 的单 kernel 对拍上加入 FLA `chunk_kda`，给 golden / FlashKDA / FLA
+  三方误差表；`harness/check_kda_ref.py` 已有 FLA↔golden 两方对拍可复用）。随后进入反向（P5），
+  用已装好的 FLA `chunk_kda` autograd 对拍。
+
+  - P4-1/P4-2：新增 `docs/04-numerics.md` 与 `harness/check_fwd_numerics.py`
+    （`harness/check_fwd_numerics.out.txt`）：以 `src/kda_ref.py::kda_token_recurrent` fp64 逐 token
+    递推为 golden，对编译好的 FlashKDA 前向做端到端对拍。17 组 case（T=16/17/64/128/512/1024/1023、
+    H=1/2/8、B=3、seed=0..3、g=N(0,0/1/2/4)）实测：`o` 峰值相对误差 **4.0e-3~7.6e-3**、终态
+    **5.0e-3~1.4e-2**，与 bf16 有效精度一致；`o.max_abs` 随 T 不变（峰值误差在早期 token，无累积漂移）；
+    `g=0` 无衰减时状态误差升到 1.4e-2（bf16 累加），与 P3-3 §18 受控消融互洽。
+    **踩坑（重要布局约定）**：FlashKDA 的 `initial_state`/`final_state` 是 **$S^\top$==[N,H,V,K]**，
+    与 `kda_ref.py` 的 $S$==[K,V] 相反；方阵不触发形状检查，错布局只表现为「初态处误差大、有衰减时又收敛」。
+    新增 `harness/probe_state_layout.py`（`harness/probe_state_layout.out.txt`）三情形复现：零初态
+    o max_abs=2.3e-4；随机初态未转置时 t=0 误差 1.6e-1 逐 token 收敛到 1.1e-3；直接比状态
+    $S$ vs fin=0.511、$S^\top$ vs fin=3.98e-3，钉死布局。
 
   - P3-3：`docs/03` 新增 **Part III（§17–§20）**，全部贴真实行号：
     (a) §17 分块含义：从逐 token gated delta rule 展开得 `S_C = diag(E_tot) S_0 + k_rest^T U`（式 17.2），
