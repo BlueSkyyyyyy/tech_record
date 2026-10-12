@@ -58,7 +58,7 @@
 ### P3 前向 K2 精读（`docs/03-kda-fwd-k2.md`）
 
 - [x] **P3-1** warp specialization（LOAD / MMA / STORE）与 TMA pipeline。
-- [ ] **P3-2** 八个 Phase（dual GEMM k@s/q@s → cast → u=(v-u)β; u=INV@u → Mqk@U+out → store →
+- [x] **P3-2** 八个 Phase（dual GEMM k@s/q@s → cast → u=(v-u)β; u=INV@u → Mqk@U+out → store →
       s_acc update）逐条讲清数据流；`MOVM_T` 寄存器内转置消 smem 往返。
 - [ ] **P3-3** 状态更新 `s_acc = s_acc*g_total + k_restored^T @ U` 的分块含义与 bf16 状态精度验证。
 
@@ -111,7 +111,8 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0 全部完成，P1 全部完成，P2 全部完成，P3-1 完成（K2 执行结构：warp specialization + TMA pipeline）。
+- 当前进度：P0 全部完成，P1 全部完成，P2 全部完成，P3-1 完成（K2 执行结构：warp specialization + TMA pipeline），
+  P3-2 完成（K2 六个 Phase 数据流 + `MOVM_T` 寄存器转置，含 GPU 实测）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -165,10 +166,22 @@
     (e) 实测（`harness/smem_k2_probe.cu`、`k2_res_usage.out.txt`）：每输入 stage 17984B、`sizeof
     (SharedStorageK2<128,16;3,2>)=98432B`；K2 全部 14 个实例 `REG:74–80 STACK:0 LOCAL:0`（无 spill）；
     占用率瓶颈是 smem → 2 CTA/SM（196864B≤233472B）。新增博客 post `flash-kda-03-fwd-k2` 并更新 index。
-- **下一步：P3-2** 继续 K2，拆解八个 Phase 的数据流（dual GEMM $k^{dec}S/q^{dec}S$ → cast →
-  $u=(v-u)\beta$ → $u=INV\,u$ → $M_{qk}U+$out → store → $s\_acc$ update），重点讲
-  `SM75_U32x1_MOVM_T` 寄存器内转置消 smem 往返；随后 P3-3 讲状态更新分块含义与 bf16 状态精度。
-  反向（P5）可用已装好的 FLA `chunk_kda` autograd 对拍。
+  - P3-2：`docs/03` 新增 **Part II「MMA warp 六个 Phase 数据流」**（§8–§17），全部贴真实行号：
+    (a) §8 记号与 MMA 骨架：讲清 K2 里 `s_acc = Sᵀ`（$[V,K]$，对上 `torch_ref.py:227–239` 的 `.t()`）、
+    TN 约定下 `C=(M,N)`/`B=(N,K)` 的 lane→下标映射为何相反（`mma_traits_sm80.hpp:53`），
+    以及为何「C 片段当 B 必须做 8×8 转置」→ `movmatrix`。
+    (b) §9–§14 逐 Phase 数据流：Phase 1 dual GEMM（手动软件流水 `544–568`）、Phase 2 cast+载 v/INV/β
+    （β 按 token 逐行，`group_id=lane/4`）、Phase 3 $\tilde v\to P\tilde v$（`MOVM_T` 把 C 片段转 B，
+    转置被 gemm 代数「吃掉」`614–620`）、Phase 4 $M_{qk}U+$out（复用 U）、Phase 5 store、
+    Phase 6 状态更新（`s_acc_T`/`k_restored_t` 转置视图 + LDSM_T/STSM_T，`g_total` 逐 key 缩放 `684–719`）。
+    (c) §15 数据搬运预算表 + **GPU 实测** `harness/movm_probe.cu`（`harness/movm_probe.out.txt`）：
+    用与 K2 相同片段验证 **`MOVM_T` 路径 $U=P\tilde v$ vs host fp32 参考 max_abs=1.5e-8、max_rel=8.7e-8**；
+    naive `STSM+LDSM_N`（不转置）max_rel=1.26（全错），**证明转置是数学必需**；延迟微基准
+    4×`MOVM_T`=18.0 cyc vs `STSM+syncwarp+LDSM`=21.8 cyc（1.21×），真正收益是省 4096B U 缓冲与
+    Phase 3→4→6 对 U 复用的零同步。
+- **下一步：P3-3** 讲状态更新 `s_acc = s_acc*g_total + k_restored^T @ U` 的分块含义，
+  验证 bf16 状态存储 + fp32 FMA 更新的精度（对照 deep-dive §3）；再进 P4 数值对拍（golden 已有
+  `src/kda_ref.py`），反向（P5）可用已装好的 FLA `chunk_kda` autograd 对拍。
 
 ## 阻塞
 
