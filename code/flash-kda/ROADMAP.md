@@ -284,6 +284,28 @@
     （§21）或 padding（§20）。**三坑**：(a) `ldmatrix.x4.trans` 子块次序与非 trans 不同（`(0,0),(0,1),
     (1,0),(1,1)` vs `(0,0),(1,0),(0,1),(1,1)`），用错指纹=`max_rel≈1.0`；(b) B 操作数必须 `.trans`
     （否则每 lane 拿相邻 N 而非相邻 K，整片错位）；(c) `scale` 折进 bf16 操作数换来单累加器、但丢逐位。
+- [x] **P7-20** 兑现 §22.5 的下一步：在 K2 形状（P7-19）之上补 **TMA + warp-specialization**——
+      q/k/w/dO/dV 由**专职 producer warp** 发 `cp.async.bulk.tensor`（5D 张量图，box `{64,1,1,BT,1}`，
+      **128 B swizzle `Swizzle<3,4,3>`**，box 内维 ≤128 B 故把一行拆成两个 `[BT,64]` atom），
+      用 **per-stage `mbarrier`**（`full`/`empty`，`try_wait.parity`）做 producer/consumer 握手，
+      稳态循环**无 `__syncthreads()`**；`e` 改由 compute warp 直读 global。新增
+      `harness/b1_tma_probe.cu` + `harness/check_bwd_b1_tma.py`（`harness/check_bwd_b1_tma.out.txt`）+
+      `harness/ncu_b1_tma_driver.py`/`harness/probe_b1_tma_ncu.sh`（`harness/probe_b1_tma_ncu.out.txt`）+
+      `docs/07` §23。**Part A**：vs FLA 落 bf16 底噪（4.88e-4/5.0e-3），且 **vs P7-19 reg 内核逐位相同
+      （`dh/dv2/dh0` max_abs=0）**（含非整除 T=250，靠 TMA OOB 零填充）。**Part B**：新增同形状
+      `reg64`（`BV=64/NW=4`）对照隔离 TMA+warp-spec 本身——`BT=64` 三档 **xreg64=0.81–0.85×**（约 +15–20%），
+      `BT=32` 打平、`BT=16` 反略慢；`xFLA` 从 §22 的 2.10–3.75× 收到 **1.73–3.80×**
+      （`B8T2048H8 BT=64` 达 **1.73×**，全表最好）。**Part C**：smem 反而**变大**（BT64/NS1 81.4→**103.4KB**，
+      理论占用率 12.5→7.8%）——省了 padding、赔了 stage 粒度。**Part D（`ncu`）**：achieved 占用率
+      **6.32→7.75%**、tensor **8.85→10.73%**（逼近 FLA 12.12%）、`short_sb` 1.62→0.91、`barrier` 0.14→0，
+      但 `long_sb` 2.25→**3.52**（等 `full[s]` 完成）、bank-conflict 0→26.5 万（占 shared wavefront 3.3%）。
+      **结论**：TMA + warp-spec 是真实但**次线性**的一步，把 K2 形状再推 ~15%、**没有**吃掉 2× 残差；
+      残差重定位到 **`long_sb`（TMA/mbarrier 完成延迟）+ 浅 pipeline + swizzle 读冲突**，下一步是**加深
+      pipeline / K 拆半喂**或改用 CUTLASS `PipelineTmaAsync`。**三坑**：(a) `mbarrier.arrive` 到达数必须
+      **严格等于** init count——每 warp 全 32 lane arrive 一个 count=NW 的 barrier 会**硬件 fault**
+      （`Unknown Error` 定位在 `mbarrier.arrive`），须 lane 0 arrive 一次；(b) TMA 128 B swizzle 是
+      `b^(((b>>7)&7)<<4)`，`ldmatrix` 漏套则「仅行 ≡0 mod 8 正确」（`dv2` 逐 token 的 mod-8 指纹）；
+      (c) TMA 搬来的 `dV` 是 swizzled 的，逐标量读 `du+=dv` 必须走 `sw_read` 逆变换，且勿漏 `warp*BW`。
 
 ### P8 小结 / 一页纸
 
@@ -315,8 +337,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16/P7-17/P7-18/P7-19 补测**。
-  - P7-19（本轮）：兑现 §21.6 的量级项落点，把手写 CUDA B1 改成 **K2 形状**——运行态 $S$ **常驻寄存器**
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-20 补测**。
+  - P7-20（本轮）：兑现 §22.5 的下一步，在 K2 形状（P7-19）之上补 **TMA + warp-specialization**——
+    q/k/w/dO/dV 由**专职 producer warp** 发 `cp.async.bulk.tensor`（5D 图、box `{64,1,1,BT,1}`、
+    **128 B swizzle `Swizzle<3,4,3>`**），**per-stage `mbarrier`** 握手、稳态循环无 `__syncthreads()`、
+    `e` 直读 global。新增 `harness/b1_tma_probe.cu` + `harness/check_bwd_b1_tma.py`
+    （`..._b1_tma.out.txt`）+ `harness/ncu_b1_tma_driver.py` / `harness/probe_b1_tma_ncu.sh`
+    （`..._b1_tma_ncu.out.txt`）+ `docs/07` §23。**Part A**：vs P7-19 reg 内核 **逐位相同（max_abs=0）**、
+    vs FLA 落 bf16 底噪（含非整除 T=250，靠 TMA OOB 零填充）。**Part B**：新增同形状 `reg64`（BV=64/NW=4）
+    对照——`BT=64` **xreg64=0.81–0.85×**（+15–20%）、`BT=32` 打平、`BT=16` 略慢；`xFLA` 收到
+    **1.73–3.80×**（`B8T2048H8 BT=64` 1.73× 全表最好）。**Part C**：smem 反大（81.4→103.4KB，理论占用
+    12.5→7.8%）。**Part D（ncu）**：achieved 占用 **6.32→7.75%**、tensor **8.85→10.73%**（FLA 12.12%）、
+    `short_sb`/`barrier` 降，但 `long_sb` **2.25→3.52**、bank-conflict 0→26.5 万。**结论**：真实但**次线性**
+    （~15%），残差重定位到 `long_sb`/浅 pipeline/swizzle 读冲突 → 下一步加深 pipeline 或换 CUTLASS
+    `PipelineTmaAsync`。
+  - P7-19：兑现 §21.6 的量级项落点，把手写 CUDA B1 改成 **K2 形状**——运行态 $S$ **常驻寄存器**
     （不再有 fp32 smem 主副本/staging 往返），mma 换裸 `mma.sync.m16n8k16` + `ldmatrix`（XOR 填充无冲突），
     `scale` 折进 `do` 的 bf16 操作数使 $S$ 只需一组累加器。新增 `harness/b1_reg_probe.cu` +
     `harness/check_bwd_b1_reg.py`（`..._b1_reg.out.txt`）+ `harness/ncu_b1_reg_driver.py` /
@@ -595,12 +630,18 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16/P7-17/P7-18/P7-19 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-20 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-20（`docs/07` §23）已兑现 P7-19 留下的「TMA + warp-specialization」**：专职 producer warp 发
+    `cp.async.bulk.tensor`（128 B swizzle）、per-stage `mbarrier` 握手、无 `__syncthreads`，正确性
+    **逐位保持**，achieved 占用 6.32→7.75%、tensor 8.85→10.73%、`short_sb`/`barrier` 降，`BT=64` 只快
+    **~15–20%**（同形状 `xreg64=0.81–0.85×`）、`xFLA` 收到 **1.73×**。**结论：TMA+warp-spec 是次线性一步，
+    没吃掉 2× 残差**；残差重定位到 **`long_sb`（TMA/mbarrier 完成延迟）+ 浅 pipeline + swizzle 读的
+    bank-conflict**。**接续本轮的下一步工程化＝在这个 TMA 骨架上 (1) 加深 pipeline（更多 stage / K 方向拆
+    两半喂）、(2) 把手写 mbarrier 换成 CUTLASS `PipelineTmaAsync`（K2 已用的成熟实现）**；不再在
+    ILP/padding/加 warp 上找。
   - **P7-19（`docs/07` §22）已把「K2 形状重写」的第一步兑现**：手写 CUDA B1 从 wmma-from-smem 改成
-    **寄存器常驻状态 + `mma.sync`/`ldmatrix` + XOR swizzle**，比旧基线快 **2.3–2.7×**、`xFLA` 从 ~8×
-    收到 **2.1–3.75×**（bank conflict 归零、tensor 2.3→5.8%）。**剩余工程化＝在其上补 TMA（`cp.async.bulk`）
-    整块喂数 + warp-specialization 深流水**（学 K2/§17 的 Triton 1.0× 路径），把 `wait` 从 1.53 压向
-    FLA 的 0.96；这是接续本轮的实际工作。
+    寄存器常驻状态 + `mma.sync`/`ldmatrix` + XOR swizzle，比旧基线快 2.3–2.7×、`xFLA` 从 ~8× 收到 2.1–3.75×。
+    P7-20 已在其上补完 TMA 输入路径（见上）。
   - **下一步工程化＝把 B1 做成目标卡 CUDA**（唯一剩下的实际工作）。P7-13（`docs/07` §16）已用 `ncu` 把它的
     硬件动机量化清楚：B1 是**延迟/并行度受限**（非 tensor/带宽/占用率），与 FLA `dhu` 的 2.14×（同 BT=64）
     差距＝**没有 loads 流水（long_scoreboard 47–55%）+ 单一 `[128,BV]` 依赖链**，FLA 用「K 拆两条 64 链 +

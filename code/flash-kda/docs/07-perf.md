@@ -1982,3 +1982,134 @@ BT=64/NS=1 从 **111.1 KB → 81.4 KB**（少 27%），BT=16 从 58.9 → **30.0
 3. **`scale` 折进 bf16 操作数会丢「逐位相同」**：`round(scale·do)` 使结果落到 bf16 底噪（~1e-3），
    换来的是**只用一个累加器**（`S`）。若把 `scale` 留在 fp32 点积后，需要为 q/do 单开一组 $S$ 大小的
    fp32 暂存（+64 寄存器），本原型选择前者。
+
+## 23. 在 K2 形状之上补 **TMA + warp-specialization**（P7-20）
+
+§22.5 把「把 K2 形状再往前推」的下一步钉死为一条：**TMA（`cp.async.bulk.tensor`）整块喂数 +
+warp-specialization 的显式深流水**。本节**照做**：在 P7-19 的 K2 形状内核（$S$ 常驻寄存器 + 裸
+`mma.sync`/`ldmatrix`）之上，把「操作数怎么进 smem」从每线程 `cp.async` 换成 **一个专职 producer
+warp 发 TMA**，用 **per-stage `mbarrier`**（`mbarrier::complete_tx::bytes` + `try_wait.parity`）
+做 producer/consumer 握手，稳态循环里**不再有 `__syncthreads()`**。新增
+`harness/b1_tma_probe.cu` + `harness/check_bwd_b1_tma.py`（`harness/check_bwd_b1_tma.out.txt`）
++ `harness/ncu_b1_tma_driver.py` / `harness/probe_b1_tma_ncu.sh`
+（`harness/probe_b1_tma_ncu.out.txt`）。
+
+### 23.1 设计
+
+固定 `BV=64`（一个 128 B swizzle atom）、`NW=4` 个 compute warp，外加第 5 个 warp 作 producer；块内
+共 160 线程。与 `b1_reg_probe.cu` 的差异：
+
+- **TMA + 128 B swizzle 取代 `cp.async` + XOR padding**。q/k/w 的行是 256 B（KD=128 bf16），
+  TMA 的 128 B swizzle 要求 box 内维 ≤128 B，故用 **5D 张量图**
+  `globalDim={64,2,H,T,B}`（dim0 = 行内 64 列 = 一个 atom，dim1 = 两个半行），
+  `box={64,1,1,BT,1}`，两次 TMA 把一行拆成**两个独立 `[BT,64]` 区域** `q[0]/q[1]`（dO/dV 同理，
+  `vhalf=v0/64`）。TMA 的越界**自动零填充**顺带替掉非整除 T 的手工补零。
+- **smem 布局是 `Swizzle<3,4,3>` 逐字节异或**：`swizzled_b = b ^ (((b>>7)&7)<<4)`。`ldmatrix`
+  的每 lane 行地址据此改写（`ldsm_sw_x4` / `ldsm_sw_x4_t` / `ldsm_sw1_x2_t`）。
+- **producer/consumer mbarrier**：每 stage 两个 barrier——`full[s]`（producer `arrive.expect_tx`
+  1 次 + TMA 的 `complete_tx`）与 `empty[s]`（每个 compute warp **lane 0** arrive 1 次，count=NW）。
+  producer 在复用 stage 前 `try_wait.parity(empty[s])`，compute warp `try_wait.parity(full[s])`；
+  相位按 `i/NSTAGE` 交替。**`e`（$E^{tot}$）改由 compute warp 直接读 global**（每 chunk 两个标量，
+  L2 常驻），省掉一次 TMA 与一个 512 B 的 stage 分量。
+
+### 23.2 Part A：正确性——与 P7-19 的 reg 内核**逐位相同**（含非整除 T）
+
+`harness/check_bwd_b1_tma.py` 在同操作数上与 FLA `dhu`、以及 P7-19 的 reg 内核比 `dh`/`dv2`/`dh0`：
+
+| 指标（B1 T512 H4 / B2 T1024 H8 / B1 T250 H3，BT=32/64） | vs FLA | **vs reg（P7-19）** |
+|---|---|---|
+| `dh` max_abs / max_rel | 4.88e-4 / 5.0e-3 | **0 / 0** |
+| `dv2` max_abs / max_rel | 4.88e-4 / 4.4e-3 | **0 / 0** |
+| `dh0` max_abs / max_rel | 1.9e-4 / 2.1e-3 | **0 / 0** |
+
+即：TMA 只换「怎么把同一批字节搬进 smem」，**算术一字未动**，输出与 reg 内核**逐位相同**；而 vs FLA 的
+4.88e-4 = bf16 在 ~0.1 量级的 1 ulp（与 §22.2 同）。非整除 T（250）也用 TMA 的 OOB 零填充自然覆盖。
+
+### 23.3 Part B：计时——只值 ~0.8×（大 shape），BT=16 反被拖累
+
+`CUPTI` 均值（µs/call）。关键对照是**同 `BV=64`/`NW=4` 的 reg 内核** `reg64`（`-DB1R_BV=64 -DB1R_NW=4`），
+这样差的只是「TMA + 专职 producer + mbarrier 流水」这一项：
+
+| shape | BT | reg(BV32,NS1) | reg64(BV64,NS1) | **tma NS2** | tma xreg | **tma xreg64** | FLA `dhu` | tma xFLA |
+|---|---|---|---|---|---|---|---|---|
+| B1 T512 H4 | 32 | 56.5 | 72.2 | 71.6 | 1.27 | **0.99** | n/a | — |
+| B1 T512 H4 | 64 | 42.5 | 53.9 | 44.8 | 1.05 | **0.83** | 13.0 | 3.45 |
+| B2 T1024 H8 | 64 | 85.2 | 107.8 | 86.8 | 1.02 | **0.81** | 22.8 | 3.80 |
+| B8 T2048 H8 | 32 | 367.9 | 332.9 | 343.3 | 0.93 | **1.03** | n/a | — |
+| B8 T2048 H8 | 64 | 252.4 | 240.6 | **205.5** | 0.81 | **0.85** | 118.8 | **1.73** |
+| B2 T1024 H8 | 16 | 187.9 | 251.3 | 232.8 | 1.24 | 0.93 | n/a | — |
+
+三点：
+
+1. **同形状下 TMA + warp-spec 只值 ~15–20%**：`BT=64` 三档 `xreg64=0.81–0.85×`，`BT=32` 基本打平
+   （0.99–1.03），`BT=16` 反而略慢（0.93–1.14，producer warp 的固定开销 + 更小的 tile 摊不动）。
+2. **`xFLA` 从 §22 的 2.10–3.75× 收到 1.73–3.80×**（`B8T2048H8 BT=64` 达 **1.73×**，全表最好）。
+3. 因此「TMA + warp-specialization」是真实但**次线性**的一步：把 K2 形状再推 ~15%，**没有**把 2× 的残差吃掉。
+
+### 23.4 Part C：smem 足迹反而**变大**（XOR padding 省的那点被 stage 复制吃掉）
+
+| BT | NS | tma | reg |
+|---|---|---|---|
+| 64 | 1 / 2 | 103424 / 168960 | 81408 / 144384 |
+| 32 | 1 | 64512 | 47104 |
+| 16 | 1 | 45056 | 29952 |
+
+TMA 路径把 `[BT,128]` 拆成 `[BT,64]×2` 的 swizzle atom，**不再需要 `+8` padding**，但每 stage 因此多出
+半行对齐的零头；`BT=64/NS=1` **103 KB > reg 的 81 KB**，理论占用率从 12.5% 掉到 7.8%（见下）。这是
+「TMA 省 smem」直觉的反例——省的是 padding（~14%），赔的是 stage 粒度。
+
+### 23.5 Part D：`ncu` —— 占用率与 mma 密度都上来了，但 `long_sb` 变贵
+
+`harness/probe_b1_tma_ncu.sh`（`probe_b1_tma_ncu.out.txt`），同场配对 reg64 / tma / FLA：
+
+| 配置 | bank-conflict | tensor% | `wait` | `short_sb` | `long_sb` | barrier | theo/ach occ | Duration µs |
+|---|---|---|---|---|---|---|---|---|
+| reg64 BT64 B8T2048H8 | 0 | 8.85 | 1.50 | 1.62 | 2.25 | 0.14 | 12.5/6.32 | 240.3 |
+| **tma BT64 NS2 B8T2048H8** | 264781 | **10.73** | **1.42** | **0.91** | 3.52 | **0.00** | 7.81/**7.75** | **207.7** |
+| FLA `dhu` B8T2048H8 | 2032 | 12.12 | 0.96 | 0.49 | 2.10 | 0.94 | 6.25/6.23 | 118.1 |
+| reg64 BT64 T512H4 | 0 | 9.18 | 1.51 | 1.61 | 1.90 | 0.11 | 12.5/6.23 | 58.0 |
+| tma BT64 NS2 T512H4 | 4841 | 11.44 | 1.43 | 0.90 | 2.61 | 0.01 | 7.81/7.41 | 48.2 |
+
+四件事与 §23.3 自洽：
+
+1. **占用率被 producer-warp 结构抬起来了**：理论占用率虽降到 7.81%（smem 变大 + 每 CTA 多 1 warp），
+   但 **achieved 从 6.32% 升到 7.75%**（compute warp 不再被 `cp.async` 地址计算拖住，producer 专职取数）。
+2. **mma 密度上台阶**：tensor **8.85→10.73%**（小 shape 9.18→11.44），**逼近 FLA 的 12.12%**；
+   这正是 §22.5 想补的「每 warp 有效 mma 密度」。
+3. **`wait` 微降、`short_sb` 减半、`barrier` 归零**：`wait` 1.50→**1.42**（仍未到 FLA 0.96）、
+   `short_sb` 1.62→**0.91**（smem 取数变顺）、barrier 0.14→**0.00**（稳态无 `__syncthreads`）。
+4. **代价是 `long_sb` 变贵**（2.25→**3.52**）：compute warp 现在把「等操作数」从 `short_sb` 挪到了
+   `full[s]` 的 `try_wait` 上（TMA + mbarrier 完成延迟），且 bank-conflict 从 0 回升到 26.5 万
+   （占 shared-load wavefront 8.13M 的 **3.3%**，来自 i) dV 的**逐标量 swizzle 读** `sw_read`
+   与 ii) swizzle 后的 ldmatrix 残差）。这两项 + 更浅的 pipeline（NS2 vs FLA 的深层）合起来，就是
+   剩下 1.73× 的落点。
+
+### 23.6 结论与下一步
+
+- **兑现了 §22.5 的下一步**：在 K2 形状上补 TMA + warp-specialization，**正确性逐位保持**（vs reg=0），
+  把 achieved 占用率 6.32→7.75%、tensor 8.85→10.73%（逼近 FLA 12.1%）、`short_sb`/`barrier` 明显下降，
+  kernel 时间 `BT=64` 只降 **~15–20%**（`xreg64=0.81–0.85×`），`xFLA` 收到 **1.73×**（全表最好）。
+- **诚实定位**：这一步**没有**把 2× 的残差吃掉。残差已重新定位到 **`long_sb`（TMA/mbarrier 完成延迟）
+  + 浅 pipeline + swizzle 读的 bank-conflict**，而**不是**占用率或 smem 取数。下一步要么**加深 pipeline
+  （更多 stage / K 方向拆两半喂）**，要么换成 CUTLASS 的 `PipelineTmaAsync`（K2 用的那套）把 producer
+  与 consumer 的握手交给成熟实现，而不是继续在手写 mbarrier 上叠。
+- **可复用的副产品**：`sw_off` / `sw_read` / `ldsm_sw_*` 是一套经过验证（min 用例 mismatch=0、整核逐位）
+  的 **128 B swizzle + ldmatrix 地址计算**，可直接搬去做目标卡上任何 K2 形状 kernel 的 TMA 输入路径。
+
+**本节踩坑**（都只有真写 TMA/mbarrier 才暴露）：
+
+1. **`mbarrier.arrive` 的到达数必须严格等于 init 的 count**。第一版让**每个 consumer warp 的全部 32
+   lane** 都 `arrive` 一个 count=`NW` 的 `empty` barrier：一次握手内到达 128 > 4，**硬件在同一个 phase
+   内被超额到达后直接 fault**（`compute-sanitizer` 报 `Unknown Error`，定位在 `mbarrier.arrive` 指令，
+   而非后续的 TMA）。改成 **lane 0 arrive 1 次**（count=NW）即修复。指纹：kernel 立即
+   `unspecified launch failure`，且把 `arrive` 换成 `arrive.expect_tx` 或 `_` 汇都不影响——错的是**到达次数**。
+2. **TMA 128 B swizzle 是 `Swizzle<3,4,3>` 的字节异或**：`b ^ (((b>>7)&7)<<4)`。用最开始一版
+   `ldmatrix` 只做**线性 stride**（没套这个异或）时，**只有行号 ≡0 (mod 8) 的 lane 落在正确位置**——
+   指纹：`dv2` 逐 token 误差在「token 号 ≡0 (mod 8)」处=1e-4（1 ulp）、其余处 O(0.1)。先用一个
+   512 行以内的最小 TMA 用例（读回逐元素对拍，`mismatch=0/4096`）把公式钉死再进大核。
+3. **TMA 搬进来的 `dV` 是 swizzled 的，但 `du = k@S + dv` 那一步是「逐标量索引读」而非 `ldmatrix`**。
+   必须用 `sw_read(row,col)` 走一遍 swizzle 逆变换；直接用 `dV[row][col]` 会读到物理邻居——
+   指纹同 (2)（按 mod 8 周期性正确）。
+4. **别把 dV 的 offset 漏掉 `warp*BW`**：P7-19 的 reg 内核读 `dV[r0][warp*BW+cc]`，改写时漏了
+   `warp*BW` 会让 warp 1–3 全读 warp 0 的列——指纹：**跨整个 V 维均匀 ~30× 抬高的误差**（不是局部错位）。
+5. `nvcc` 在 `ncu` 下会挂起，必须**预编译 + `--no-build`**（同 §18/§19）。

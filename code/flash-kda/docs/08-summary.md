@@ -211,8 +211,13 @@ warp，warp 内 ILP 填不满）。**结论**：免费杠杆（conflict ~1.2× +
 **P7-19**（`docs/07` §22）**直接把这一步兑现**：手写 CUDA B1 从「wmma-from-smem」改成 **K2 形状**（运行态
 $S$ **常驻寄存器**、mma 换裸 `mma.sync.m16n8k16` + `ldmatrix`、操作数走 XOR 填充无冲突 smem），比旧 CUDA
 基线快 **2.3–2.7×**、`xFLA` 从 ~8× 收到 **2.1–3.75×**（BT=16 部署粒度 81.8 vs 旧 214.4 µs）；ncu 显示
-bank-conflict **827392→0**、tensor **2.3→5.8%**、`wait` 1.79→1.54。**剩余工程化**＝在其上补 TMA + warp
-specialization 深流水（学 K2/§17），把 `wait` 从 1.53 压向 FLA 的 0.96。
+bank-conflict **827392→0**、tensor **2.3→5.8%**、`wait` 1.79→1.54。**P7-20**（`docs/07` §23）在 K2
+形状上**补完 TMA + warp-specialization**（专职 producer warp 发 `cp.async.bulk.tensor`、128 B swizzle、
+per-stage `mbarrier`、无 `__syncthreads`），正确性**逐位保持**，achieved 占用 6.32→7.75%、tensor
+8.85→**10.73%**（FLA 12.12%）、`short_sb`/`barrier` 降，`BT=64` 只快 **~15–20%**（同形状 `xreg64=0.81–0.85×`）、
+`xFLA` 收到 **1.73×**。**结论**：TMA+warp-spec 是**真实但次线性**的一步，没吃掉 2× 残差；残差重定位到
+**`long_sb`（TMA/mbarrier 完成延迟）+ 浅 pipeline + swizzle 读的 bank-conflict**。**剩余工程化**＝加深
+pipeline（更多 stage / K 拆半）或换 CUTLASS `PipelineTmaAsync`。
 
 **反向性能（`docs/07` §10 P7-7 + §11 P7-8 更正）**：把上面那条 workspace 驱动反向链和
 `torch.autograd` 穿 `chunk_kda` 在统一口径（`wall`+CUPTI `dev`）下比，**只计反向**。四组 shape 实测
