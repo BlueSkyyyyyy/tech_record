@@ -179,7 +179,17 @@
        dh0 8.3e-3`，与 16 链同阶。**Part C（关键结论）**：整链@64 反向 **dev 反而慢 2.0–2.5×**——
        逐 kernel 归因 B1@64 快 2.1–2.2×，但 B2 `wy_dqkg`@64 慢 1.8–2.9×、B3 `intra`@64 慢 4.8–5.5×（块内
        intra 工作 $\propto T\cdot BT$），B1 的省被整个吃掉。**故 §13.5 (ii) 的答案是「不要把整链跟到 64」**，
-       反向维持 16 块链；B1@64 仅作孤立加速手段。见 `docs/07` §15。
+               反向维持 16 块链；B1@64 仅作孤立加速手段。见 `docs/07` §15。
+- [x] **P7-13** 用 `ncu` 剖析反向瓶颈 **B1**（此前只剖析过前向 K1/K2）：新增
+      `harness/ncu_bwd_driver.py` + `harness/probe_bwd_ncu.sh`（`harness/probe_bwd_ncu.out.txt`）。
+      B1 三种形态（ours-BT16/ours-BT64/FLA-`dhu`）**都不是任何硬件单元的 bound**（tensor 4.5–14.9%、
+      DRAM ≤28.6%、L2 ≤39.8%），achieved occupancy 一律 ~6.2% 是**小 grid（64/16 block ≪ 132 SM）**
+      的症状、非旋钮；本质是**延迟/并行度受限**。同 BT=64 下 ours 比 FLA 慢 2.14×，差距=`long_scoreboard`
+      3.88–5.29/8.19–9.68（≈47–55% issue 间隔在等全局加载）vs FLA 1.06/5.06，源于 ours **单条 `[128,BV]`
+      依赖链 + `num_stages=1` 无流水**，而 FLA 拆 K 为两条 64 链（`chunk_delta_h.py:401-415/585-604`）
+      + `num_stages∈{2,3,4}` 流水（`:350-352`，180KB smem/block、occ 6.25% 仍更快）。ours BT16→64 快
+      1.81× = 串行步数 ×4 + `dh` 落盘 DRAM 写 ×6（20.8→3.43MB）。**设计输入**：目标卡 CUDA 版优先做
+      (1) 镜像 K2 的 TMA 输入流水、(2) D=128 状态拆 2 条独立累加链，而非提占用率。见 `docs/07` §16。
 - [x] **P7-5** 关闭 P7-2/P7-4 待验证 (c)：**K2 突破 2 CTA/SM 后 L2 墙是否后移**——实验=否。
       改造 `SharedStorageK2`（fp32 状态缓冲改按 `StateFP32` 条件预留）+ 扫 pipeline stage，编译 6 个变体，
       实测占用率/ncu SOL/K2 时间。结论：smem 被无条件预留的 65536 B fp32 缓冲钉死为 98432 B（只减
@@ -216,7 +226,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12 补测**。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）+ **FLA host 税组成归因（P7-6）** + **反向性能与 host 税剖析（P7-7）**完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13 补测**。
+  - P7-13：新增 `docs/07` §16 + `harness/ncu_bwd_driver.py` + `harness/probe_bwd_ncu.sh`
+    （`harness/probe_bwd_ncu.out.txt`，空闲卡）。补上「**反向只计过时、没量过硬件 bound**」这块：用 `ncu`
+    剖析反向最大单 kernel **B1**（状态伴随 / FLA `dhu`）的三种形态。**结论一**：B1 不 bound 在任何硬件单元
+    （ours tensor 4.5–6.8%、FLA 14.9%；DRAM ≤28.6%、L2 ≤39.8%），achieved occ 一律 ~6.2% 是**小 grid
+    （64/16 block ≪ 132 SM）**的症状、非旋钮；本质**延迟/并行度受限**（`ncu` 的 occupancy/「grid too small」
+    建议是启发式误报，同 §8.4）。**结论二**：同 BT=64 ours 慢 FLA 2.14×（53.8 vs 25.2µs），差在 ours 的
+    `long_scoreboard` 3.88–5.29/8.19–9.68（≈47–55% issue 间隔等全局加载）vs FLA 1.06/5.06——ours 是
+    **单条 `[128,BV]` 依赖链 + `num_stages=1` 无流水**，FLA 拆 K 为两条 64 链（`chunk_delta_h.py:401-415/585-604`）
+    + `num_stages∈{2,3,4}` 流水（`:350-352`，180KB smem/block、theo occ 6.25% 仍更快）。**结论三**：ours
+    BT16→64 快 1.81× = 串行步数 ×4 + `dh` 落盘 DRAM 写 ×6（20.8→3.43MB，L2 ×1.68）。**设计输入**：
+    目标卡 CUDA B1 优先 (1) 镜像 K2 的 TMA 输入流水、(2) D=128 状态拆 2 条独立累加链、(3) 不为小 shape
+    拆 BV、(4) 维持 16 块链。这把 §11.5/§14.5/§15.5「下一步=镜像 K2 warp specialization」的**动机量化**了。P0/P1/P2/P3 完成，P4 前向三方对拍完成；P5 反向推导/显式与分块参考/三方核验完成；P6 FLA Triton 反向 5 kernel 精读 + B1 状态伴随最小 kernel（P6-2）+ 非整除 T 边界补测（P6-3）+ B2 `wy_dqkg` 最小 kernel（P6-4）+ B3 `intra` 最小 kernel（P6-5）+ **B0 门控重算最小 kernel（P6-6）** + **P6-7 补齐 `dAv` 并把 B0/B1/B2/B3/dAv 组装成端到端反向核对** + **P6-8 把整条反向直接架在 FlashKDA K1 workspace 上端到端跑通**完成，至此 §5.2 的 **B0/B1/B2/B3 四段全部有最小可核验 kernel，四段能组装成完整反向链，且该链已直接吃 FlashKDA 自己的 workspace**；P7 前向性能 + ncu bound 剖析 + K1/K2 访存字节拆分（P7-3）+ K1 标量 global load 归因（P7-4）+ K2 占用率实验（P7-5）+ **FLA host 税组成归因（P7-6）** + **反向性能与 host 税剖析（P7-7）**完成；**P8-1 完成**（`docs/08-summary.md`：一页纸汇总，见下）。
   - P7-12：新增 `docs/07` §15 + `harness/check_bwd_ws_reuse64.py`
     （`harness/check_bwd_ws_reuse64.out.txt` + `..._timing.out.txt`，空闲卡）。**闭合 §13.5 (ii)**：把整条反向
     `dAv→B1→B2→B3→反向 cumsum` **统一到 64 块**、仍只吃 FlashKDA 16-chunk K1 workspace。在 P7-11 的
@@ -422,7 +444,13 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-13 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **下一步工程化＝把 B1 做成目标卡 CUDA**（唯一剩下的实际工作）。P7-13（`docs/07` §16）已用 `ncu` 把它的
+    硬件动机量化清楚：B1 是**延迟/并行度受限**（非 tensor/带宽/占用率），与 FLA `dhu` 的 2.14×（同 BT=64）
+    差距＝**没有 loads 流水（long_scoreboard 47–55%）+ 单一 `[128,BV]` 依赖链**，FLA 用「K 拆两条 64 链 +
+    `num_stages` 流水」补上。故 CUDA 版优先级：**(1) 镜像前向 K2 的 TMA 输入流水（`docs/03` §8/§10）→
+    (2) D=128 状态拆两条独立累加链 → (3) 不为小 shape 拆 BV → (4) 维持 16 块链**。这也是 `docs/06` §5.2
+    早写下的设计，现在有了硬件证据。
   §5.2 的 **B0/B1/B2/B3/dAv 五段已全部做成最小 kernel，P6-7 已把四段组装成端到端反向核到
   tf32 底噪，P6-8 又把整条反向直接架在 FlashKDA K1 workspace 上端到端核到 bf16 底噪**；
   **P7-7 又把它和 FLA 反向在同一口径下比（wall/dev 0.40–0.80× 反超，因复用 workspace 省掉

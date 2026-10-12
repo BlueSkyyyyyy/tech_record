@@ -1277,3 +1277,102 @@ $\propto BT^2\times(NT=T/BT)\propto T\cdot BT$，把 `BT` 从 16 抬到 64 直�
 
 计时口径与 §9/§10 一致：`wall` 为 event-pair 包 30 次取中位；**`dev`（CUPTI）才是 kernel 贡献口径**，`wall`
 里 harness 侧每调用重建 Triton kernel 会引入假 host 税（本节已把 kernel 构建挪出计时闭包）。
+
+## 16. ncu 剖析反向瓶颈 B1：它到底 bound 在什么上（P7-13）
+
+P7-2 §5 只对**前向** K1/K2 做过 `ncu`；整条反向链（§10–§15）一直只用 CUPTI 计时，从没量过硬件 bound。
+而 §11.5/§14.5/§15.5 把「剩余工程化 = 把 B1 做成目标卡 CUDA、镜像 K2 的 warp specialization」立为下一步——
+**动它之前得先知道 B1 现在卡在哪**。本节补上这块：用 `ncu` 剖析 B1（跨块状态伴随 / FLA `dhu`）的
+三种形态，新增 `harness/ncu_bwd_driver.py` + `harness/probe_bwd_ncu.sh`
+（原始输出 `harness/probe_bwd_ncu.out.txt`，空闲卡 `CUDA_VISIBLE_DEVICES=1`）。
+
+被剖析的两个实现：
+
+- **ours** = Triton `_dhu_kernel_bf16`（P7-8/P7-9 的 bf16-mma 克隆，`harness/check_bwd_dhu_dtype.py:62-107`），
+  状态 `b_dh` 是**单个** `[K, BV]`（K=128）fp32 累加器（`:76`），每次递推三条 `tl.dot`（`:98,:101-103`），
+  `num_warps=4, num_stages=1`（`harness/check_bwd_dhu_kernel.py:214`）。喂 workspace 形状的 bf16 操作数，
+  `--bt 16`（FlashKDA `CHUNK`，实际部署）或 `--bt 64`（FLA 粒度）。
+- **fla** = `chunk_gated_delta_rule_bwd_dhu`（FLA 原生 `chunk=64`）。
+
+### 16.1 主表：五个配置的 SOL / 占用 / 停顿（`ncu`，B2 T1024 H8 / B1 T512 H4，bf16）
+
+| 配置 | grid | regs | smem/blk | theo occ | ach occ | dur µs | tensor% | SM% | L1% | L2% | DRAM% | warp cyc/issue | long_sb | wait |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ours B1 BT=16（部署） B2T1024H8 | 64 | 128 | 22.5 KB | 25% | **6.3** | **97.22** | 4.5 | 6.3 | 38.5 | 17.9 | 13.0 | 8.19 | **3.88** | 1.30 |
+| ours B1 BT=64 B2T1024H8 | 64 | 186 | 65.5 KB | 12.5% | 6.3 | **53.82** | 6.8 | 6.1 | 37.9 | 18.9 | 13.6 | 9.68 | **5.29** | 0.82 |
+| FLA `dhu` BT=64 B2T1024H8 | 64 | 146 | 180.2 KB | 6.25% | 6.2 | **25.15** | 14.9 | 8.7 | 53.7 | 39.8 | 28.6 | 5.06 | **1.06** | 0.96 |
+| ours B1 BT=16 B1T512H4 | 16 | 128 | 22.5 KB | 25% | 6.2 | **48.38** | 4.7 | 1.6 | 39.8 | 5.7 | 1.7 | 7.80 | 3.53 | 1.29 |
+| FLA `dhu` BT=64 B1T512H4 | 16 | 146 | 180.2 KB | 6.25% | 6.2 | **14.78** | 14.2 | 2.0 | 54.8 | 12.7 | 5.4 | 4.98 | 0.91 | 0.96 |
+
+（`long_sb`/`wait` 是 `smsp__average_warps_issue_stalled_*_per_issue_active.ratio`，单位「每次发射停顿的指令数」。
+ncu 的 `Duration` 与 P7-8 的 CUPTI 口径数值基本吻合：ours-BT16 = 97.2µs（P7-8 bf16 报 97.9）、
+ours-BT64 = 53.8（P7-8 报 41.8）、FLA = 25.2（P7-8 报 23.0）。）
+
+### 16.2 结论一：B1 三种形态**都不是任何硬件单元的 bound**——它是「并行度 / 延迟」受限
+
+- **不是 TensorCore bound**：ours tensor pipe 只 **4.5–6.8%**，FLA 14.2–14.9%；SM throughput 1.6–8.7%。
+- **不是带宽 bound**：DRAM 最高 28.6%、L2 最高 39.8%，都远未饱和（对比前向 K2 是 L2 94% SOL，§8.4）。
+- **也不是常规意义的占用率 bound**：theoretical occupancy 12.5–25%（ours）/ 6.25%（FLA），
+  而 **achieved occupancy 三种形态一律 ~6.2%**——它们被**同一个东西**钉住：**grid 太小**。
+  主表里 grid 只有 **64 个 block（B2H8）或 16 个（B1H4）**，而卡有 **132 个 SM**：
+  `ncu` 明确报「grid 只覆盖 0.48 wave / 0.12 wave，Est. Local Speedup 51.5%」。
+  B1 的 grid 结构是 `(cdiv(V,BV), B·H)`：并行度 = `B·H·(V/BV)`。$V{=}128$、$BV{=}32$ 时就是 `B·H·4`。
+  **沿 T 的跨块递推是串行的**（`for i_t in range(NT-1,-1,-1)`），唯一能加的并行只有切 V（BV）和切 K。
+  所以「ach occ 6%」是 **grid 小的症状，不是可调的旋钮**——`ncu` 那条 51.5%/74.9% 的 occupancy
+  建议和前向 §8.4 的 `Est. Local Speedup` 一样是**纯启发式**（低占用率在这里是并发不足的结果，
+  而不是原因）；强行拆 BV 只会把 tile 切碎、得不偿失。
+
+### 16.3 结论二：ours 与 FLA 的差距 = 长记分牌停顿（没有 load 流水）+ 单一依赖链
+
+在**同 BT=64** 下 ours 比 FLA 慢 2.14×（53.82 vs 25.15）；差在哪看两个数：
+
+- **停顿构成**：ours 每次发射要等 **8.19（BT16）/9.68（BT64）** cycle，其中 **long_scoreboard 占
+  3.88/5.29**（≈47%/55%）——即一半以上的等待是 `tl.dot` 在等 `k/q/w/do/dv` 的**全局加载**回来；
+  FLA 只有 **1.06/5.06 ≈ 21%**。`ncu` 对 ours-BT16 直接给出「long scoreboard 占 47.4% issue 间隔、
+  Est. Speedup 47.4%」。
+- **依赖链宽度**：ours 的状态是**单个** `[128, BV]` 累加器，每步 `b_do`/`b_k`/`b_q`/`b_w` 都流进**同一条**
+  `b_dh = b_dh*e + q^T do - w^T du` 链；FLA 把 K=128 拆成**两块 64**（`chunk_delta_h.py:401-415`
+  的 `b_dh1`/`b_dh2`，各自独立更新于 `:585-604`，`b_dv` 由两条链相加 `:532-544`），于是有**两条独立
+  累加链**可以交替发射。这正是 FLA `tensor%` 14.9 vs ours 6.8、`warp cyc/issue` 5.06 vs 9.68 的来源。
+
+而 ours 之所以在等内存，是因为它**没有对分块循环做软件流水**：`num_stages=1`
+（`check_bwd_dhu_kernel.py:214`），每轮的 5 个 `tl.load` 与紧随的 `tl.dot` 之间没有预取下一块的重叠。
+FLA 的 `dhu` 用 `@fla_cache_autotune` 在 **`num_stages ∈ {2,3,4}`**（`chunk_delta_h.py:350-352`）
+上自动调参，把 180 KB 动态 smem 全用在多级流水缓冲上——**代价是 occupancy 只有 6.25%（Block Limit
+Shared Mem = 1，`chunk_delta_h.py` 的 `BV=32` 配置）**，但它照样更快，再次印证 B1 的瓶颈是**延迟而非占用率**。
+
+### 16.4 结论三：BT=16 → BT=64 的 1.81× 来自「串行步数 ×4」和「`dh` 落盘 ×4」
+
+ours 自身 BT=16 比 BT=64 慢 **1.81×**（97.22 vs 53.82）。两个可量化的机制：
+
+- **串行步数**：NT = 64（BT=16）vs 16（BT=64），每步一轮加载 + 一轮三条 `tl.dot`，步数 ×4；
+  但因为每步 tile 也小 4×、部分延迟被重叠，净效果不是 4× 而是 1.81×（寄存器反而从 128 涨到 186，
+  因为 BT=64 的 `[BT,K]` 操作数更大、活跃区间更长）。
+- **`dh` 落盘量**：`dh` 形状 `[B,NT,H,K,V]`，BT=16 时 NT ×4 ⇒ **DRAM 写 20.80 MB vs BT=64 的 3.43 MB
+  （6.1×）**，`lts__t_bytes` 96.95 MB vs 57.56 MB（1.68×）。BT=16 那 1.7× 的额外 L2/DRAM 流量几乎全是
+  给 B2 逐 chunk 落 `dh` 的 ×4 冗余（B2 只吃 16 边界；§15 已论证整链跟到 64 不划算）。
+
+### 16.5 对目标卡 CUDA B1 的设计输入
+
+把上面三条翻成「该怎么做」：
+
+1. **流水化加载，而不是提高占用率。** B1 的收益来自把「下一块的 k/q/w/do/dv 预取」与「本块三条 `tl.dot`」
+   重叠，正对 ours 那 47–55% 的 long-scoreboard。目标卡 CUDA 版应直接镜像前向 **K2 的 TMA 输入流水**
+   （`docs/03` §8/§10，`utils.cuh:86-143` 的 `PipelineTmaAsync`）：逆序沿 chunk 走、TMA 预取、MMA
+   消费。这是 **`docs/06` §5.2 早就写下的设计**，本节给出了它的**硬件动机量化**。
+2. **把 D=128 状态拆成 2 条（或 4 条）独立累加链**，增加 ILP——FLA 用 K 两分（`:401-415`）已见效果；
+   K2 的 `s_acc` 本身是 `D×D` 整块，B1 可沿 K 或 V 二分。
+3. **不要为「小 shape 占用率」去拆 BV**：grid = `B·H·(V/BV)`，小 `B·H` 时（T512H4 grid=16）本就填不满，
+   但那时 B1 的绝对时间也小、不是端到端瓶颈；大 `B·H` 时（如 P7-10 的 B8T2048H8，grid=256）grid 已过
+   132。优先做 (1)(2)，它们对所有 shape 都收益。
+4. **维持 16 块链**：BT=64 省下的 B1 时间（1.81×）会被 `dh` 落盘的省与 B2/B3@64 的涨（§15.4）抵消，
+   §15.5 的结论不变。
+
+### 16.6 口径与坑
+
+- `ncu` 会 replay 并清 L2，绝对时间和 CUPTI 略有出入（本表与 P7-8 的 CUPTI 误差 ≤1.3×，结论一致）；
+  跨实现**相对比较**在同一 `ncu` 运行内才可靠。
+- `ncu` 的 occupancy / 「grid too small」建议是**启发式**，对「串行递推 + 天生小 grid」的 kernel 会误报
+  加速空间（同前向 §8.4）——必须结合 `long_sb`/`lts`/`dram` 这些**实测计数**判断真实 bound。
+- FLA 的 `num_stages` 实际取值被封在 `Heuristics` 包装后、`ncu` 从动态 smem（180.22 KB / block）推断其
+  ≥2；未直接读出具体 stage 数（**待验证**，不影响结论）。

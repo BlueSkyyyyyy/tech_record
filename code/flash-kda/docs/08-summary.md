@@ -181,6 +181,11 @@ FlashKDA K1 当场写的 workspace `kGTotal` 对到 1.6e-5~8.1e-5），四条支
 硬伤）；**P7-11**（`docs/07` §14）把该恢复融成**单个 Triton pass**（对角块复用落盘 $P16$、只新算 6 个
 非对角 $A_{ij}$ + 4×4 块前代合并 + $w64$），kernel-only 降到 **41–953 µs（ieee）/ 16–492 µs（tf32）**、
 为 torch 原型的 **0.11–0.25×**，B1@64 端到端仍落 bf16 底噪——恢复不再是相对 B1 的硬伤。
+**P7-13**（`docs/07` §16）用 `ncu` 剖析 B1 的硬件 bound：它**不是** tensor/带宽/占用率 bound（tensor
+4.5–14.9%、DRAM ≤28.6%、achieved occ 一律 ~6.2%＝小 grid 症状），而是**延迟/并行度受限**——同 BT=64 下
+ours 比 FLA `dhu` 慢 2.14×，差在 **`long_scoreboard`（≈47–55% issue 间隔在等全局加载）+ 单一 `[128,BV]`
+依赖链 + `num_stages=1` 无流水**，FLA 用「K 拆两条 64 链 + `num_stages∈{2,3,4}` 流水」补上。故目标卡 CUDA
+B1 的优先级＝先镜像 K2 的 TMA 输入流水、再把 D=128 状态拆两条独立累加链。
 
 **反向性能（`docs/07` §10 P7-7 + §11 P7-8 更正）**：把上面那条 workspace 驱动反向链和
 `torch.autograd` 穿 `chunk_kda` 在统一口径（`wall`+CUPTI `dev`）下比，**只计反向**。四组 shape 实测
