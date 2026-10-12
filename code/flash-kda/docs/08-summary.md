@@ -208,6 +208,11 @@ mma 密度**。目标卡 CUDA B1 真实优先级＝**(1) 补并行度/warp-speci
 1.82→1.76、tensor 3.5→3.9%（FLA 14%）、`Eligible Warps/Scheduler` 仍 **0.16**（每调度器只挂 ~1 active
 warp，warp 内 ILP 填不满）。**结论**：免费杠杆（conflict ~1.2× + ILP ~1.1×）都只是分项，量级项的落点是
 **提高每 warp 的有效 mma 密度**（`ldmatrix`/TMA + 流水，2.3%→14%），不是加 warp 数或加指令级并行。
+**P7-19**（`docs/07` §22）**直接把这一步兑现**：手写 CUDA B1 从「wmma-from-smem」改成 **K2 形状**（运行态
+$S$ **常驻寄存器**、mma 换裸 `mma.sync.m16n8k16` + `ldmatrix`、操作数走 XOR 填充无冲突 smem），比旧 CUDA
+基线快 **2.3–2.7×**、`xFLA` 从 ~8× 收到 **2.1–3.75×**（BT=16 部署粒度 81.8 vs 旧 214.4 µs）；ncu 显示
+bank-conflict **827392→0**、tensor **2.3→5.8%**、`wait` 1.79→1.54。**剩余工程化**＝在其上补 TMA + warp
+specialization 深流水（学 K2/§17），把 `wait` 从 1.53 压向 FLA 的 0.96。
 
 **反向性能（`docs/07` §10 P7-7 + §11 P7-8 更正）**：把上面那条 workspace 驱动反向链和
 `torch.autograd` 穿 `chunk_kda` 在统一口径（`wall`+CUPTI `dev`）下比，**只计反向**。四组 shape 实测

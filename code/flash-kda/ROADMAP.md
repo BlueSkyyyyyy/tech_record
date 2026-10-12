@@ -265,6 +265,25 @@
     **结论（修正 §20.6 措辞）**：免费杠杆（bank conflict ~1.2× + 指令级 ILP ~1.1×）都只是分项；量级项的
     落点是**提高每 warp 的有效 mma 密度**（`ldmatrix`/TMA 整块喂数 + 流水，把 2.3% 抬到 FLA 的 14%），
     **不是**简单加 warp 数或加指令级并行。见 `docs/07` §21。
+- [x] **P7-19** 兑现 §21.6 的量级项落点，把手写 CUDA B1 从「wmma-from-smem」改成 **K2 形状**：
+    运行态 $S$ **常驻寄存器**（不再有 fp32 smem 主副本与 fp32 staging 往返），mma 换裸
+    `mma.sync.m16n8k16`、操作数用 `ldmatrix(.x4/.trans/.x2.trans)` 从 **XOR 填充后无冲突**的 smem 整块喂入；
+    `scale` 折进 `do` 的 bf16 操作数、`-w^T` 用符号位 XOR，使 $S$ 更新只需**一组累加器寄存器**。新增
+    `harness/b1_reg_probe.cu` + `harness/check_bwd_b1_reg.py`（`harness/check_bwd_b1_reg.out.txt`）+
+    `harness/ncu_b1_reg_driver.py`/`harness/probe_b1_reg_ncu.sh`（`harness/probe_b1_reg_ncu.out.txt`）+
+    `docs/07` §22。**Part A**：vs FLA `dhu` 落 bf16 底噪（`dh/dv2` max_abs=4.88e-4=1 ulp bf16、
+    `dh0` max_rel~2.1e-3，含非整除 T=250；不再逐位——`scale` 折进 bf16 操作数所致）。**Part B**：
+    vs 旧 CUDA 基线稳定快 **2.3–2.7×**（`xbase` 0.37–0.43），`xFLA` 从 §18 的 4.3–9.6× 收到
+    **2.10–3.75×**（BT=64；BT=16 部署粒度 81.8 vs 旧 214.4µs）；`NSTAGE>1` 仍几乎无效、大 shape 反噬
+    （smem）。**Part C**：smem BT64/NS1 111.1→**81.4KB**（‑27%）、BT16 58.9→**30.0KB**（‑49%）。
+    **Part D（`ncu`）**：bank-conflict 小 shape **827392→0**、大 shape **53.1M→0.56M**（XOR stride）；
+    tensor **2.3%→5.8%**（小）/ **3.5%→8.3%**（大，FLA 12.2%）；`wait` 1.79→**1.54**/1.82→**1.53**；
+    但 `short_sb` 略升、占用率仍 6.25%、`Eligible W/S` 0.14–0.19——**残差在 `wait`/并行度/TMA 深度**。
+    **结论**：K2 形状（寄存器常驻 + `ldmatrix`/`mma.sync` + XOR swizzle）兑现约 **2.4×**、把量级项吃掉
+    大头但没吃干净；下一步是在其上补 **TMA + warp-specialization 深流水**（学 K2/§17），而非再加 ILP
+    （§21）或 padding（§20）。**三坑**：(a) `ldmatrix.x4.trans` 子块次序与非 trans 不同（`(0,0),(0,1),
+    (1,0),(1,1)` vs `(0,0),(1,0),(0,1),(1,1)`），用错指纹=`max_rel≈1.0`；(b) B 操作数必须 `.trans`
+    （否则每 lane 拿相邻 N 而非相邻 K，整片错位）；(c) `scale` 折进 bf16 操作数换来单累加器、但丢逐位。
 
 ### P8 小结 / 一页纸
 
@@ -296,8 +315,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16/P7-17/P7-18 补测**。
-  - P7-18（本轮）：在动「K2 形状重写」前，用最便宜的受控实验检验 §20.6 第一优先级「并行度/mma 密度是
+- 当前进度：**P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16/P7-17/P7-18/P7-19 补测**。
+  - P7-19（本轮）：兑现 §21.6 的量级项落点，把手写 CUDA B1 改成 **K2 形状**——运行态 $S$ **常驻寄存器**
+    （不再有 fp32 smem 主副本/staging 往返），mma 换裸 `mma.sync.m16n8k16` + `ldmatrix`（XOR 填充无冲突），
+    `scale` 折进 `do` 的 bf16 操作数使 $S$ 只需一组累加器。新增 `harness/b1_reg_probe.cu` +
+    `harness/check_bwd_b1_reg.py`（`..._b1_reg.out.txt`）+ `harness/ncu_b1_reg_driver.py` /
+    `harness/probe_b1_reg_ncu.sh`（`..._b1_reg_ncu.out.txt`）+ `docs/07` §22。**Part A** vs FLA 落 bf16
+    底噪（max_abs 4.88e-4=1 ulp）；**Part B** vs 旧基线快 **2.3–2.7×**、`xFLA` 从 ~8× 收到 **2.1–3.75×**
+    （BT=16 部署粒度 81.8 vs 旧 214.4µs）；**Part C** smem 111.1→81.4KB（BT64）；**Part D（ncu）**
+    bank-conflict **827392→0**、tensor **2.3→5.8%**、`wait` 1.79→1.54。**结论**：K2 形状兑现约 **2.4×**、
+    把量级项吃掉大头；残差在 `wait`/并行度/TMA 深度 → 下一步在其上补 TMA + warp-specialization 流水。
+  - P7-18：在动「K2 形状重写」前，用最便宜的受控实验检验 §20.6 第一优先级「并行度/mma 密度是
     量级项」里有多少**免费**。同一份 `b1_cuda_probe.cu` 加两个免费旋钮：warp 内 mma ILP（`B1_ILP1`/
     `B1_ILP2`，op 循环 `for m: for kk`→`for kk: for m` 暴露独立累加链，**逐位不变**）与 CTA 形状
     （`B1_BV`/`B1_NW`）。新增 `harness/check_bwd_b1_ilp_cuda.py`（`..._ilp_cuda.out.txt`）+
@@ -567,7 +595,12 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16/P7-17/P7-18 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3/P6-4/P6-5/P6-6/P6-7/P6-8/P7-3/P7-4/P7-5/P7-6/P7-7/P7-8/P7-9/P7-10/P7-11/P7-12/P7-13/P7-14/P7-15/P7-16/P7-17/P7-18/P7-19 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-19（`docs/07` §22）已把「K2 形状重写」的第一步兑现**：手写 CUDA B1 从 wmma-from-smem 改成
+    **寄存器常驻状态 + `mma.sync`/`ldmatrix` + XOR swizzle**，比旧基线快 **2.3–2.7×**、`xFLA` 从 ~8×
+    收到 **2.1–3.75×**（bank conflict 归零、tensor 2.3→5.8%）。**剩余工程化＝在其上补 TMA（`cp.async.bulk`）
+    整块喂数 + warp-specialization 深流水**（学 K2/§17 的 Triton 1.0× 路径），把 `wait` 从 1.53 压向
+    FLA 的 0.96；这是接续本轮的实际工作。
   - **下一步工程化＝把 B1 做成目标卡 CUDA**（唯一剩下的实际工作）。P7-13（`docs/07` §16）已用 `ncu` 把它的
     硬件动机量化清楚：B1 是**延迟/并行度受限**（非 tensor/带宽/占用率），与 FLA `dhu` 的 2.14×（同 BT=64）
     差距＝**没有 loads 流水（long_scoreboard 47–55%）+ 单一 `[128,BV]` 依赖链**，FLA 用「K 拆两条 64 链 +

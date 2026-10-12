@@ -1847,3 +1847,138 @@ warp 数卡死的调度器**。ILP2 的那点收益来自把「等 mma」的间�
 > 版把操作数取数留在了 `wmma::load_matrix_sync` 里，**流水杠杆只有在内核已是 K2 形状时才能兑现**
 > （§18.4 早已指出）。本节进一步证明：**连「加指令级 ILP」这种更便宜的形式也兑现不了**。
 > 所有数字仍是研究用最小原型，`xFLA` 绝对值不代表目标卡天花板。
+
+## 22. 把手写 CUDA B1 改成 **K2 形状**：寄存器常驻状态 + `mma.sync`/`ldmatrix`（P7-19）
+
+§21.6 把目标卡 CUDA B1 的**唯一量级项**定为「提高每 warp 的有效 mma 密度」（tensor 2.3% vs FLA 14%），
+并证明免费旋钮（bank conflict ~1.2×、warp 内 ILP ~1.1×、CTA 形状）都填不满它。本节**直接兑现**这条
+结论：不再在 `wmma`-from-smem 的骨架上调参，而是把它换成 **K2 形状**——运行态 $S$ **常驻寄存器**
+（不再有 fp32 smem 主副本与 fp32 staging 往返），mma 用裸 `mma.sync.m16n8k16`、操作数用
+`ldmatrix` 从 **XOR 填充后无冲突**的 smem 整块喂入。新增 `harness/b1_reg_probe.cu` +
+`harness/check_bwd_b1_reg.py`（`harness/check_bwd_b1_reg.out.txt`）+ `harness/ncu_b1_reg_driver.py`
+/ `harness/probe_b1_reg_ncu.sh`（`harness/probe_b1_reg_ncu.out.txt`）。
+
+### 22.1 设计：把「状态、累加器、操作数」全部搬进寄存器
+
+递推一字未动（逐 (n,h)、逐 16 列 V-块、逆序 chunk）：
+
+```
+for c = NT-1 .. 0:
+    dh[c] = bf16(S)                       # 状态进入 chunk c
+    du = k @ S + dv ;  dv2[c] = bf16(du)
+    S  = S*e + scale*(q^T @ do) - (w^T @ du)
+dh0 = S
+```
+
+与 `b1_cuda_probe.cu`（P7-15）的关键结构差异：
+
+- **$S$ 常驻寄存器**：每 warp 持 `[K=128, BW=16]`，按 mma 累加器布局组织成 `8` 个 m16 块 × `2` 个
+  n8 块 × `4` 个 fp32 = **64 个 fp32 寄存器**。旧版 $S$ 是 smem 里的 fp32 主副本（外加 bf16 镜像
+  `sdh`），每 chunk 还要把 `du`/`acc` 经 fp32 smem staging（`sduf`/`sacc`）绕一圈。
+- **`mma.sync` 而非 `wmma`**：`wmma::load_matrix_sync`/`mma_sync` 被替换为裸
+  `ldmatrix.sync.aligned.m8n8.x4(.trans)` + `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`，
+  A 操作数（`k` / $q^\top$ / $w^\top$）走 `ldmatrix`，B 操作数（$S$ 的 bf16 镜像 / `do` / `du`）走
+  `ldmatrix.x2.trans`。
+- **XOR 填充（退化 swizzle）**：操作数行 stride 从 `KD=128`/`BW=16` 改成 `+8`（`136`/`24` bf16），
+  使每个 `ldmatrix` 的 8 行落在不同 bank 上——**只改地址、不改算术**（§20.1 同理）。
+- **一个式子、一条累加链**：`S` 更新写成 `S = (S*e) + (scale*do-缩放后的 q^T do) + (-w^T du)`，
+  用 mma 的 C 输入把 `S*e` 直接当初始累加值（`scale` 折进 `do` 的 bf16 操作数：`q^T@(scale·do)`），
+  于是**只需一组 $S$ 累加器寄存器**（无需为 q/do、w/du 各开一组 fp32 暂存）。`-w^T` 用 bf16 符号位
+  XOR 精确取反。
+
+smem 足迹因此从「stage + fp32 状态 + 三块 fp32 staging」降到「stage + 每 warp 的 bf16 $S$/`du` 镜像」：
+BT=64/NS=1 从 **111.1 KB → 81.4 KB**（少 27%），BT=16 从 58.9 → **30.0 KB**（‑49%）。理论占用率仍是
+6.25%（被 stage 钉住，同 §16/§20）。
+
+### 22.2 Part A：正确性——落到 bf16 底噪（含非整除 T）
+
+`harness/check_bwd_b1_reg.py` 与 FLA `dhu`（bf16、同 BT）比 `dh`/`dv2`/`dh0`：
+
+| shape | BT | `dh` max_abs/max_rel | `dv2` max_abs/max_rel | `dh0` max_abs/max_rel |
+|---|---|---|---|---|
+| B1 T512 H4 | 32/64 | 4.88e-4 / 5.0e-3 | 4.88e-4 / 4.4e-3 | 1.9e-4 / 2.1e-3 |
+| B2 T1024 H8 | 32/64 | 4.88e-4 / 4.3e-3 | 4.88e-4 / 4.5e-3 | 2.1e-4 / 2.2e-3 |
+| B1 T250 H3（非整除） | 32/64 | 4.88e-4 / 4.9e-3 | 4.9e-4 / 4.0e-3 | 1.5e-4 / 2.1e-3 |
+
+`max_abs` 对所有 case 稳定在 **4.883e-4 = bf16 在 ~0.1 量级上的 1 ulp**，即落盘的 bf16 `dh`/`dv2`
+与 FLA 至多差 1 个 bf16 格；`dh0`（fp32）相对 ~2e-3。与 P7-15 的「裸 wmma 与 FLA **逐位相同**」不同，
+这里**不再逐位**：唯一原因是 `scale` 被折进 `do` 的 bf16 操作数（`round(scale·do)`）而非作用在 fp32
+点积上，引入 ~1e-3 的 bf16 舍入——与 P7-9 的 bf16-B1 端到端误差（6.4e-3）同阶，属 bf16 底噪，非代数偏差。
+
+### 22.3 Part B：kernel-only 计时——比 wmma 基线快 **2.3–2.7×**，xFLA 从 ~8× 收到 2.1–3.7×
+
+`CUPTI` 均值（µs/call；`xbase`=相对 `b1_cuda_probe.cu` 同 BT、`xFLA`=相对 FLA `dhu`，FLA 无 BT<64 实现）：
+
+| shape | BT | base(wmma,NS=1) | reg NS=1 | reg NS=2 | reg NS=3 | FLA `dhu` | reg NS=1 xFLA |
+|---|---|---|---|---|---|---|---|
+| B1 T512 H4 | 16 | 214.4 | 81.8 | 79.2 | 79.2 | n/a | — |
+| B1 T512 H4 | 32 | 145.1 | 56.4 | **53.7** | 56.8 | n/a | — |
+| B1 T512 H4 | 64 | 105.4 | 41.5 | 41.7 | 43.0 | 13.0 | **3.20** |
+| B2 T1024 H8 | 16 | 446.7 | 189.4 | 159.9 | 160.7 | n/a | — |
+| B2 T1024 H8 | 32 | 302.4 | 124.3 | **108.1** | 112.0 | n/a | — |
+| B2 T1024 H8 | 64 | 214.3 | 85.6 | 81.9 | 85.1 | 22.9 | **3.75** |
+| B8 T2048 H8 | 16 | 1029.3 | 616.9 | 700.7 | 700.5 | n/a | — |
+| B8 T2048 H8 | 32 | 716.2 | 368.3 | 387.0 | 367.8 | n/a | — |
+| B8 T2048 H8 | 64 | 585.5 | **251.0** | 327.3 | 402.1 | 119.3 | **2.10** |
+
+三点：
+
+1. **相对旧 CUDA 基线稳定快 2.3–2.7×**（`xbase` 0.37–0.43，全部 shape、全部 BT）。这是「K2 形状」
+   相对「wmma-from-smem」的直接红利，与 §21.6 预测的量级项落点一致。
+2. **`xFLA` 从 §18 的 4.3–9.6× 收到 2.10–3.75×**（BT=64）。BT=16（部署粒度）81.8 µs vs 旧 214.4。
+   **仍慢 FLA 2–3.7×**，说明「寄存器常驻 + ldmatrix」只吃掉了量级项的一部分，剩下的见 §22.4。
+3. **`NSTAGE>1` 仍几乎无效、且大 shape 反噬**（B8 251→327→402）：与 §18/§19.4 一致——本内核已非
+   global-load bound（见 §22.4 的 `long_sb`），预取加深度只增 smem 掉占用率。
+
+> 诚实定位：在实验 GPU 上，**Triton B1**（P7-14/§17）本就已到 1.00–1.96× FLA，比本节手写 CUDA 更接近
+> FLA；本节的产物是**纯 CUDA**（不依赖 CUTLASS/Triton 代码生成）的 K2 形状原型，供 Triton/CUTLASS
+> 支持不确定的目标卡使用，并把「K2 形状能兑现多少」量化到「~2.4×、xFLA 收到 ~2–3.7×」。
+
+### 22.4 Part D：`ncu` 复核——bank conflict 归零、tensor 密度翻倍、`wait` 下移
+
+`harness/probe_b1_reg_ncu.sh`（输出 `harness/probe_b1_reg_ncu.out.txt`）同场配对 reg / base / FLA：
+
+| 配置 | bank-conflict | tensor% | `wait` | `short_sb` | `long_sb` | barrier | theo/ach occ | Duration µs |
+|---|---|---|---|---|---|---|---|---|
+| base BT64 T512H4 | 827392 | 2.30 | 1.79 | 0.70 | 0.51 | 0.02 | 6.25/3.12 | 110.5 |
+| **reg BT64 T512H4** | **0** | **5.83** | **1.54** | 0.94 | 0.83 | 0.03 | 6.25/3.13 | **46.5** |
+| base BT64 B8T2048H8 | 53106635 | 3.48 | 1.82 | 1.42 | 0.64 | 0.03 | 6.25/6.10 | 591.1 |
+| **reg BT64 B8T2048H8** | **556239** | **8.29** | **1.53** | 1.83 | 1.68 | 0.08 | 6.25/6.13 | **257.2** |
+| FLA `dhu` B8T2048H8 | 2008 | 12.15 | 0.96 | 0.49 | 2.23 | 0.94 | 6.25/6.27 | 117.4 |
+
+三件事印证了归因，也暴露了残差：
+
+1. **bank conflict 被彻底消掉**：小 shape **827392 → 0**，大 shape **53.1M → 0.56M**（§20 的 padding
+   只能压到 19–25%，这里靠 XOR stride 到 ~1%）。这正是 §21.6 说的「零成本 XOR swizzle」。
+2. **每 warp mma 密度翻倍**：tensor **2.3% → 5.8%**（小）/ **3.5% → 8.3%**（大，逼近 FLA 的 12.2%），
+   `wait` 也从 1.79→1.54 / 1.82→1.53——把「等 smem 取数」的洞补上后，mma 背靠背发得更多。
+3. **残差在 `short_sb` 与并行度**：`short_sb` 反而略升（取数变密），且占用率仍是 6.25%、`Eligible
+   Warps/Scheduler` 0.14–0.19（每调度器 ~1 warp）——**仍未到 FLA 的 `wait`=0.96**。大 shape 下 reg 的
+   `lts` 已到 **82%**（旧 base 仅 15%），说明它已经把预算从「smem 重放」挪到了**真正的 L2 流量**上，
+   接近 FLA 的 DRAM（66%）形态；但 tensor 密度与 `wait` 还差 FLA 一截，对应 §22.3 的剩余 2–3.7×。
+
+### 22.5 结论与下一步
+
+- **兑现了 §21.6 的量级项落点**：把「wmma-from-smem + smem fp32 状态」换成「寄存器常驻状态 +
+  `mma.sync` + `ldmatrix` + XOR swizzle」后，bank conflict 归零、mma 密度翻倍、`wait` 下移，
+  kernel 快 **2.3–2.7×**，`xFLA` 从 ~8× 收到 **2.1–3.7×**（BT=64）。这是**纯 CUDA** 的 K2 形状原型。
+- **残差（仍慢 FLA 2–3.7×）的落点**：`wait`（1.53 vs 0.96）、`short_sb`、以及大 shape 的 stage smem
+  把占用率钉在 6.25%。要进一步逼近 FLA，方向是 **TMA（`cp.async.bulk`）整块喂数 + warp-specialization
+  的显式深流水**（§17 的 Triton 正是靠此到 1.0×），而非再加指令级并行（§21）或 padding（§20）。
+- **更新后的目标卡 CUDA B1 优先级**：(1) 本节的**寄存器常驻 + `ldmatrix`/`mma.sync` + XOR swizzle**
+  是已验证的起点（+2.4×）；(2) 在其上补 **TMA + warp-specialization 流水**（学 K2/§17）；(3) `CHUNK=16`
+  部署粒度下 BT=16 的 reg 版 81.8 µs 已远好于旧 214.4 µs，可作为部署基线。
+
+> 说明：本节仍是**研究用最小 CUDA 原型**；`xFLA` 绝对值不代表目标卡天花板（实验卡为 H100）。可下的
+> 结论是**归因**：K2 形状能兑现约 2.4×，把量级项吃掉了大头但没吃干净，剩余在 `wait`/并行度/TMA 深度。
+
+**本节踩坑**（都只有真写 `ldmatrix` 才暴露）：
+
+1. **`ldmatrix.x4.trans` 的 4 个子块次序与非 trans 不同**：非 trans 输出 `a0..a3` 对应内存子块
+   `(rowblk,colblk)=(0,0),(1,0),(0,1),(1,1)`；`.trans` 则对应 `(0,0),(0,1),(1,0),(1,1)`。用错次序的指纹是
+   **`max_rel≈1.0`（完全错位）**，而非小误差——本次第一版即踩此坑，把 `q^T`/`w^T` 的列块与行块调换。
+2. **B 操作数（`[K,N]` 行主序）必须用 `ldmatrix.x2.trans`**：非 trans 会让每 lane 拿到相邻 **N** 的两个
+   元素，而 mma 的 B 片段要求相邻 **K**——用非 trans 的指纹同样是整片错位。
+3. **`scale` 折进 bf16 操作数会丢「逐位相同」**：`round(scale·do)` 使结果落到 bf16 底噪（~1e-3），
+   换来的是**只用一个累加器**（`S`）。若把 `scale` 留在 fp32 点积后，需要为 q/do 单开一组 $S$ 大小的
+   fp32 暂存（+64 寄存器），本原型选择前者。
