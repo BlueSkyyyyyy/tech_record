@@ -1,0 +1,96 @@
+diff --git a/include/mirage/persistent_kernel/persistent_kernel.cuh b/include/mirage/persistent_kernel/persistent_kernel.cuh
+index dc65870..7bcf77c 100644
+--- a/include/mirage/persistent_kernel/persistent_kernel.cuh
++++ b/include/mirage/persistent_kernel/persistent_kernel.cuh
+@@ -1968,6 +1968,15 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
+     // cudaStreamSynchronize(NULL);
+     cudaEventRecord(global_runtime_config.prepare_done_event, default_stream);
+     // cudaDeviceSynchronize();
++#ifdef MPK_DBG_LAUNCH_SYNC
++    // P25-1 probe: force the host to wait until prepare_kernel (on the torch
++    // default stream) has actually completed before launching the worker /
++    // scheduler kernels on their NonBlocking streams.
++    cudaStreamSynchronize(default_stream);
++#endif
++#ifdef MPK_DBG_DEVICE_SYNC
++    cudaDeviceSynchronize();
++#endif
+ #ifdef USE_NVSHMEM
+     nvshmem_barrier_all();
+ #endif
+@@ -1993,6 +2002,10 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
+                     MAX_DYNAMIC_SHARED_MEMORY_SIZE /*smem*/,
+                     global_runtime_config.worker_stream>>>(
+         global_runtime_config);
++#ifdef MPK_DBG_WAIT_TRACE
++    printf("[LSYNC] worker launch err=%s\n",
++           cudaGetErrorString(cudaGetLastError()));
++#endif
+ 
+     // Pack scheduler warps into blocks so they leave enough SMs for workers,
+     // even when CUDA starts the schedulers before the workers.
+@@ -2003,6 +2016,10 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
+         dim3(32 * SCHEDULERS_PER_BLOCK, 1, 1),
+         0 /*smem*/,
+         global_runtime_config.scheduler_stream>>>(global_runtime_config);
++#ifdef MPK_DBG_WAIT_TRACE
++    printf("[LSYNC] sched  launch err=%s\n",
++           cudaGetErrorString(cudaGetLastError()));
++#endif
+ 
+ #ifdef MODE_OFFLINE
+     cudaEventRecord(global_runtime_config.worker_done_event,
+@@ -2014,6 +2031,39 @@ extern "C" void launch_persistent_kernel(cudaStream_t default_stream) {
+         default_stream, global_runtime_config.worker_done_event, 0);
+     cudaStreamWaitEvent(
+         default_stream, global_runtime_config.scheduler_done_event, 0);
++#endif
++#ifdef MPK_DBG_WAIT_TRACE
++    // Non-blocking poll of both persistent kernels (host side) so we can see
++    // *which* one (if any) never completes. Gated; never in a normal build.
++    {
++      int w_done = 0, s_done = 0;
++      for (int it = 0; it < 20; ++it) {
++        cudaError_t wq =
++            cudaStreamQuery(global_runtime_config.worker_stream);
++        cudaError_t sq =
++            cudaStreamQuery(global_runtime_config.scheduler_stream);
++        if (!w_done && wq == cudaSuccess) {
++          w_done = 1;
++          printf("[LSYNC] worker_stream DONE at it=%d\n", it);
++        }
++        if (!s_done && sq == cudaSuccess) {
++          s_done = 1;
++          printf("[LSYNC] scheduler_stream DONE at it=%d\n", it);
++        }
++        if (it % 4 == 0) {
++          printf("[LSYNC] it=%d worker=%s scheduler=%s\n", it,
++                 cudaGetErrorString(wq), cudaGetErrorString(sq));
++          fflush(stdout);
++        }
++        if (w_done && s_done) {
++          break;
++        }
++        usleep(100000);  // 100 ms
++      }
++      printf("[LSYNC] poll end: worker_done=%d scheduler_done=%d\n",
++             w_done, s_done);
++      fflush(stdout);
++    }
+ #endif
+     printf("Finished Launching Persistent Kernel (Async)\n");
+   } else {
+diff --git a/python/mirage/mpk/persistent_kernel.py b/python/mirage/mpk/persistent_kernel.py
+index 5d76a0d..6331ad1 100644
+--- a/python/mirage/mpk/persistent_kernel.py
++++ b/python/mirage/mpk/persistent_kernel.py
+@@ -368,7 +368,8 @@ def get_compile_command(
+             "-DMPK_ENABLE_TMA",
+             "-DMIRAGE_GRACE_HOPPER",
+             "-DNDEBUG",
+-        ] + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
++        ] + os.environ.get("MPK_EXTRA_DEFINES", "").split() \
++          + (["-DMIRAGE_ENABLE_PROFILER"] if profiling else [])
+     elif target_cc == 100:
+         specific_cmd = [
+             "-gencode=arch=compute_100a,code=sm_100a",

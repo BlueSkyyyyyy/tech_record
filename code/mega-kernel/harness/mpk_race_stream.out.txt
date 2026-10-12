@@ -1,0 +1,8 @@
+===== stream provenance of the dtype-conversion prewarm =====
+  prewarm=none       EXIT=124  HANG after 20s
+  prewarm=cast       EXIT=0    RESULT=PASS
+  prewarm=cast_s2    EXIT=0    RESULT=PASS
+  prewarm=cast_s2_nosync EXIT=0    RESULT=PASS
+  prewarm=copyto32_s2 EXIT=0    RESULT=PASS
+  prewarm=none_s2    EXIT=124  HANG after 20s
+  prewarm=cast_s2_keepalloc EXIT=0    RESULT=PASS

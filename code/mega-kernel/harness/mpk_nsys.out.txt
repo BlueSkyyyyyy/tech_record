@@ -1,0 +1,14 @@
+===== nsys profile prewarm=none =====
+  nsys wrapper exit=1
+    [1/1] [0%                          ] none.nsys-rep[1/1] [0%                          ] none.nsys-rep[1/1] [==========49%               ] none.nsys-rep[1/1] [========================98% ] none.nsys-rep[1/1] [========================99% ] none.nsys-rep[1/1] [========================100%] none.nsys-rep[1/1] [========================100%] none.nsys-rep
+    Generated:
+    	/tmp/mpkprof/none.nsys-rep
+  --- runtime API rows captured ---
+    # /tmp/mpkprof/none.sqlite: NO runtime API table (CUPTI buffer not flushed; tables=24)
+===== nsys profile prewarm=cast_1elem =====
+  nsys wrapper exit=1
+    [1/1] [0%                          ] cast_1elem.nsys-rep[1/1] [0%                          ] cast_1elem.nsys-rep[1/1] [==========49%               ] cast_1elem.nsys-rep[1/1] [========================98% ] cast_1elem.nsys-rep[1/1] [========================99% ] cast_1elem.nsys-rep[1/1] [========================100%] cast_1elem.nsys-rep[1/1] [========================100%] cast_1elem.nsys-rep
+    Generated:
+    	/tmp/mpkprof/cast_1elem.nsys-rep
+  --- runtime API rows captured ---
+    # /tmp/mpkprof/cast_1elem.sqlite: NO runtime API table (CUPTI buffer not flushed; tables=24)

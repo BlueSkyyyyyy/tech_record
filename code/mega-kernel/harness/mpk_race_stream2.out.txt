@@ -1,0 +1,4 @@
+  cast_s2_nosync     EXIT=0    RESULT=PASS
+  cast_1elem         EXIT=0    RESULT=PASS
+  cast_1elem_s2      EXIT=0    RESULT=PASS
+  none               EXIT=124  

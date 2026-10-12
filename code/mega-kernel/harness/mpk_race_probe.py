@@ -62,8 +62,16 @@ def main():
                              "mean", "mul", "copy", "matmul", "sleep",
                              "sumrows", "sumall", "softmax", "clamp",
                              "cast", "alloc", "cast_sum", "addrow",
-                             "to_same", "to_half", "copyto32", "to64"])
+                             "to_same", "to_half", "copyto32", "to64",
+                             "none_s2", "cast_s2", "cast_s2_nosync",
+                             "copyto32_s2", "cast_s2_keepalloc",
+                             "cast_1elem", "cast_1elem_s2",
+                             "mul_s2", "copy_s2", "sleep_s2",
+                             "matmul_s2", "clamp_s2"])
     ap.add_argument("--prewarm-ms", type=float, default=200.0)
+    ap.add_argument("--profiler-range", action="store_true",
+                    help="bracket pk() with cudaProfilerStart/Stop for nsys "
+                         "--capture-range=cudaProfilerApi")
     ap.add_argument("--device", type=int, default=7)
     ap.add_argument("--output-dir", type=str,
                     default=os.environ.get("MIRAGE_HOME", "."))
@@ -179,17 +187,105 @@ def main():
         elif args.prewarm == "sleep":
             torch.cuda._sleep(int(args.prewarm_ms * 1.5e6))
             torch.cuda.synchronize()
+        # ---- independent non-default stream variants (discriminate
+        # "device global state" vs "torch default-stream history") ----
+        elif args.prewarm == "none_s2":
+            s2 = torch.cuda.Stream()
+            s2.synchronize()
+            del s2
+            torch.cuda.synchronize()
+        elif args.prewarm == "cast_s2":
+            # Cast on a *non-default* stream, then sync only that stream.
+            s2 = torch.cuda.Stream()
+            with torch.cuda.stream(s2):
+                y = x.to(torch.float32)
+            s2.synchronize()
+            del y, s2
+            torch.cuda.synchronize()
+        elif args.prewarm == "cast_s2_nosync":
+            # Enqueue the cast on a side stream but do NOT synchronize: the
+            # cast may still be in flight when pk() launches. Isolates "a
+            # dtype-conversion kernel was issued somewhere on the device" from
+            # "it completed before launch".
+            s2 = torch.cuda.Stream()
+            with torch.cuda.stream(s2):
+                y = x.to(torch.float32)
+            _keep = (s2, y)
+            del s2
+        elif args.prewarm == "copyto32_s2":
+            s2 = torch.cuda.Stream()
+            with torch.cuda.stream(s2):
+                y = torch.empty(args.batch, args.hidden, dtype=torch.float32,
+                                device=device)
+                y.copy_(x)
+            s2.synchronize()
+            del y, s2
+            torch.cuda.synchronize()
+        elif args.prewarm in ("mul_s2", "copy_s2", "sleep_s2",
+                              "matmul_s2", "clamp_s2"):
+            # Same-dtype / compute / time kernels issued on an independent
+            # stream and synced there: does ANY preceding kernel on a side
+            # stream avoid the hang, or must it be a dtype conversion?
+            s2 = torch.cuda.Stream()
+            with torch.cuda.stream(s2):
+                if args.prewarm == "mul_s2":
+                    out.copy_(x * w)
+                elif args.prewarm == "copy_s2":
+                    out.copy_(x)
+                elif args.prewarm == "clamp_s2":
+                    torch.clamp(x, min=0.0)
+                elif args.prewarm == "sleep_s2":
+                    torch.cuda._sleep(int(args.prewarm_ms * 1.5e6))
+                elif args.prewarm == "matmul_s2":
+                    a = torch.randn(2048, 2048, dtype=dtype, device=device)
+                    for _ in range(50):
+                        a = a @ a.T
+            s2.synchronize()
+            del s2
+            torch.cuda.synchronize()
+        elif args.prewarm == "cast_1elem":
+            # Tiny dtype-conversion kernel (1 element) on the default stream.
+            z = torch.zeros(1, dtype=dtype, device=device)
+            z = z.to(torch.float32)
+            torch.cuda.synchronize()
+            del z
+        elif args.prewarm == "cast_1elem_s2":
+            # Tiny dtype-conversion kernel on an independent stream.
+            s2 = torch.cuda.Stream()
+            with torch.cuda.stream(s2):
+                z = torch.zeros(1, dtype=dtype, device=device)
+                z = z.to(torch.float32)
+            s2.synchronize()
+            del z, s2
+            torch.cuda.synchronize()
+        elif args.prewarm == "cast_s2_keepalloc":
+            # Cast on side stream, sync it, but keep the output tensor alive so
+            # the caching allocator's free path is not exercised before pk().
+            s2 = torch.cuda.Stream()
+            with torch.cuda.stream(s2):
+                y = x.to(torch.float32)
+            s2.synchronize()
+            torch.cuda.synchronize()
+            _keep = y
+            del s2
         print(f"[probe] prewarm={args.prewarm} done in "
               f"{time.time() - t0:.2f}s", flush=True)
 
     # Launch and require convergence within --hang-timeout.
+    cudart = torch.cuda.cudart()
+    if args.profiler_range:
+        cudart.cudaProfilerStart()
     t0 = time.time()
     pk()
     if not sync_with_timeout(args.hang_timeout):
         print(f"[probe] HANG after {args.hang_timeout:.0f}s "
               f"(launch returned in {(time.time() - t0) * 1e3:.1f} ms)",
               flush=True)
+        if args.profiler_range:
+            cudart.cudaProfilerStop()
         os._exit(124)
+    if args.profiler_range:
+        cudart.cudaProfilerStop()
     dt = (time.time() - t0) * 1e3
 
     ref = torch_rmsnorm(x, w)

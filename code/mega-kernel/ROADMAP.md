@@ -534,8 +534,10 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P25-1 续 3 完成**（根因再定位：挂起是 launch/握手层面的时序敏感竞态，只被前置
-  dtype 转换 kernel 避开；证伪「worker 轮询循环内存序」——详见 `docs/09` §9 与下方本轮条目）。
+- 当前进度：**P25-1 续 4 完成**（根因再定位 2：挂起是**设备侧 worker↔scheduler 双向死锁**，
+  只被「前置 dtype 转换 kernel」这一个开关避开；证伪 §9 的「默认流历史」「host launch 排序」两条
+  候选、排除 co-residency 与频率——详见 `docs/09` §10 与下方本轮条目）。
+  此前 **P25-1 续 3 完成**（把挂起降到 launch/握手时序敏感竞态、证伪 worker 轮询循环内存序）。
   此前 **P24-1 完成（1/1）**（用 ncu 直接测量损失三的 HBM 字节，把 P5-2 的算术推断
   升级为实测）。此前：脚手架就绪；**P0 全部完成**；**P1 全部完成（3/3）**；**P2 全部完成（4/4）**；
   **P3 全部完成（3/3）**；**P4 全部完成（4/4）**；**P5 全部完成（3/3）**；**P6 全部完成（1/1）**；
@@ -623,12 +625,14 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：P25-1 收尾（根因：launch/握手 而非 worker 循环内存序）**（P0–P24 全部完成；P25-1 已构建
-  + launch + **收敛 + 正确性 + 端到端延迟**；**续 3 已把 §7.5「竞态在 worker 轮询循环」证伪**：循环内
-  内存序类改动都不修复，只有前置 dtype 转换 kernel 能避开）。剩余：① 用 `nsys` 抓 host 侧 launch/流
-  时序（对照 prewarm=cast vs none）；② 把前置 cast 放到独立非默认流，验证「设备全局态 vs 默认流历史」；
-  ③ launcher 在 `prepare_kernel` 后显式同步 / 让常驻 kernel 继承当前流；④ 向 MPK 上游核对 `f9eb70c`
-  启动路径。注意 z3 版本互斥（「阻塞」B2）。现象刻画见 `docs/09` §7–§9，延迟见 §8。
+- **下一步：P25-1 收尾（根因：设备侧双向死锁，仅前置 dtype 转换 kernel 可避开）**（P0–P24 全部完成；
+  P25-1 已构建 + launch + **收敛 + 正确性 + 端到端延迟**；**续 3 证伪 §7.5「竞态在 worker 轮询循环」**；
+  **续 4 证伪 §9「默认流历史 / host launch 排序」、排除 co-residency 与频率**，把死锁定位到**设备侧
+  worker↔scheduler 双向自旋**）。剩余：① 在收敛构建上给 worker/scheduler 各自的**事件等待点**加
+  printf 守门狗（不改语义）定位双方各卡在哪个 event 计数；② `compute-sanitizer --tool
+  synccheck/racecheck` 抓设备侧竞争；③ 向 MPK 上游核对 `f9eb70c` 的 `MODE_OFFLINE` 终止协议与事件计数。
+  （§9.6 候选①nsys 已尝试但失败——挂起用例 CUPTI 未 flush + nsys 在挂起 kernel 上不收敛；候选②③已完成
+  且均为阴/阳性结论。）注意 z3 版本互斥（「阻塞」B2）。现象刻画见 `docs/09` §7–§10，延迟见 §8。
 - 其它可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
@@ -676,6 +680,35 @@
   - **局限**：未把根因收敛到某条 load/store 内存序；端到端延迟仍未测（只测正确性+收敛/挂起）。
     下一步候选：`compute-sanitizer --tool racecheck` 抓竞争、把自旋换成 `__nanosleep` 退避验证纯时序、
     向 MPK 上游核对 `f9eb70c` worker 抢跑路径。**不构成对上游的 bug 判定**。P25-1 仍记 `[~]`。
+- **本轮（P25-1 续 4）**：续做 P25-1 的**根因再定位 2**，把 §9 的两条候选（「默认流历史」/「host
+  launch 排序」）**都证伪**，并把挂起**定位到设备侧**。`docs/09-mpk-build.md` 新增 **§10**；新原始输出
+  `harness/mpk_race_stream.out.txt`/`_stream2`/`_stream3`（流来源/规模/完成 + side-stream 非 cast 对照）、
+  `harness/mpk_launch_sync.out.txt`（host 排序宏）、`harness/mpk_wait_trace.out.txt`/`_grid`（两 stream
+  轮询）、`harness/mpk_clock_lock.out.txt`（锁频）、`harness/mpk_nsys.out.txt`（nsys 尝试）；
+  脚本 `harness/mpk_race_stream.sh`、`harness/mpk_launch_sync.sh`、`harness/mpk_wait_trace.sh`、
+  `harness/mpk_nsys.sh`、`harness/mpk_nsys_parse.py`；patch `harness/mpk_launch_sync.patch`
+  （`MPK_DBG_LAUNCH_SYNC`/`MPK_DBG_DEVICE_SYNC`/`MPK_DBG_WAIT_TRACE`，经 `MPK_EXTRA_DEFINES` 注入）。
+  快照 `f9eb70c`、目标卡 H100/sm90、`CUDA_VISIBLE_DEVICES=7`。核心结论：
+  - **[判据五] 与默认流/完成/规模都无关**：cast 放到**独立非默认流**（`cast_s2`）、**完全不 sync**
+    （`cast_s2_nosync`，可能仍在飞）、**只 1 个元素**（`cast_1elem`）**全 PASS**；`none_s2`（只建流不
+    发 kernel）与 `none` **HANG** → §9.5「默认流历史」证伪，触发器是「设备上跑过一个 dtype 转换 kernel」。
+  - **[判据六] 不是「任意 side-stream kernel」**：把 `mul/copy/clamp/sleep/matmul` 全改到独立流再同步
+    （`mpk_race_stream3`）**全 HANG**，只有 `cast_s2` PASS → 签名**精确是 dtype 转换**这一类，与其他
+    逐元素 kernel / `cudaMemcpyAsync` / cuBLAS / 纯时间都无关。
+  - **[判据七] host 侧强制排序无效**：`prepare_kernel` 后插 `cudaStreamSynchronize(default)` 或
+    `cudaDeviceSynchronize()`（`MPK_DBG_LAUNCH_SYNC`/`MPK_DBG_DEVICE_SYNC`）**仍 HANG**（cast 仍 PASS）
+    → §9.5「launch/握手时序」假设也证伪，死锁在常驻 kernel 启动之后。
+  - **[判据八] 两个常驻 kernel 都在设备侧自旋**：host 侧 `cudaStreamQuery` 轮询（`MPK_DBG_WAIT_TRACE`）
+    显示 HANG 时 worker/scheduler **两条 stream 均 `no error` 启动、且 `device not ready` 持续 2s**
+    （都还在跑）；PASS 时二者 **it=1 即 DONE**。`4:4/16:16/64:16` 三档**全部两 stream 自旋** →
+    **排除 co-residency/SM 占用**，是 worker↔scheduler **双向死锁**。
+  - **[排除频率]** `nvidia-smi -lgc 1980` 锁频后 none 仍 HANG、cast 仍 PASS → 非频率/boost 时序竞态。
+  - **[nsys 失败]** 挂起用例经 `os._exit` 退出致 CUPTI 未 flush（只 3 条 API），改 `cudaProfilerStop`/
+    `--capture-range` 后 nsys 在挂起 kernel 上不收敛/超时；host API 时间线证据缺失，但已从行为上排除 host 排序。
+  - **机制候选（假设，非对上游 bug 判定）**：H-a 设备级「首次 dtype 转换」懒初始化路径（最可能）/
+    H-b 与 `__nanosleep` 自旋的 L2 状态交互（弱，§9.2 已证循环内改动不修复）/ H-c 快照 `MODE_OFFLINE`
+    + `test_mode` 终止协议本就依赖执行时序。**P25-1 仍记 `[~]`**，下一步：worker/scheduler 事件等待点
+    printf 守门狗、compute-sanitizer synccheck/racecheck、上游核对 `MODE_OFFLINE` 终止协议。
 - **本轮（P25-1 续 3）**：续做 P25-1 的**根因再定位**，把 §7.5 的「竞态在 worker 轮询循环」**降级**
   为「launch/握手层面的时序敏感竞态」。`docs/09-mpk-build.md` 新增 **§9**（判据矩阵 + 与 §7 的关系 +
   机制候选 + 局限），新原始输出 `harness/mpk_race_attr.out.txt`（前置工作矩阵 + grid）、
@@ -1114,8 +1147,20 @@
    非 Hopper-TMA task 隔离 H2。patch：`harness/mpk_watchdog.patch`（全量插桩）／
    `harness/mpk_workaround_only.patch`（最小修复）／`harness/mpk_latency_run.patch`（延迟实验用的
    收敛修复 + 编译宏）；新证据 `harness/mpk_race_attr.out.txt`、`harness/mpk_race_sweep.out.txt`、
-   `harness/mpk_wlwatch.out.txt`。
-  **不阻塞本专题其余任务**（纯资料分析均已完成）。
+    `harness/mpk_wlwatch.out.txt`。
+   **本轮（P25-1 续 4）把根因再定位到「设备侧双向死锁」**（`docs/09` §10）：§9 的「默认流历史」「host
+   launch 排序」两条候选**均被证伪**——前置 cast 放到独立非默认流/完全不 sync/只 1 元素仍能避开
+   （§10.1），只有 dtype 转换这一类 kernel 有效而同 dtype `mul/copy/clamp`、cuBLAS、`_sleep` 独立流均无效
+   （§10.2），`prepare_kernel` 后插 `cudaStreamSynchronize`/`cudaDeviceSynchronize` 仍挂（§10.3）；
+   host 侧 `cudaStreamQuery` 轮询显示 HANG 时 worker/scheduler **两条 stream 都持续 `device not ready`**
+   （PASS 时 it=1 即 DONE），`4:4/16:16/64:16` 三档皆然 → 排除 co-residency，是 worker↔scheduler
+   **双向自旋死锁**（§10.4）；锁频 `-lgc 1980` 不改变结果（§10.5）；nsys 因挂起用例 CUPTI 未 flush +
+   挂起 kernel 上不收敛而失败（§10.7）。机制候选见 §10.6（H-a 设备级首次 dtype 转换懒初始化 / H-c
+   快照 `MODE_OFFLINE`+`test_mode` 终止协议时序依赖），**仍不构成对上游 `f9eb70c` 的 bug 判定**。
+   新证据 `harness/mpk_race_stream{,2,3}.out.txt`、`harness/mpk_launch_sync.out.txt`、
+   `harness/mpk_wait_trace{,_grid}.out.txt`、`harness/mpk_clock_lock.out.txt`、`harness/mpk_nsys.out.txt`；
+   新 patch `harness/mpk_launch_sync.patch`。
+   **不阻塞本专题其余任务**（纯资料分析均已完成）。
 - **B2（环境）z3-solver 版本互斥**：mirage 需 `z3-solver==4.16.0.0`，容器内 `tilelang` 需
   `<4.15.5`。本轮跑完 mirage 后已恢复 `4.15.4.0`，因此当前 `import mirage` 会失败；下次使用
   mirage 前需重钉 `4.16.0.0`（用完切回），避免影响其它并行专题。

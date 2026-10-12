@@ -1,0 +1,7 @@
+  none           EXIT=124  
+  cast_s2        EXIT=0    RESULT=PASS
+  mul_s2         EXIT=124  
+  copy_s2        EXIT=124  
+  clamp_s2       EXIT=124  
+  sleep_s2       EXIT=124  
+  matmul_s2      EXIT=124  

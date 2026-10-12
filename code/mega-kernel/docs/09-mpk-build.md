@@ -16,7 +16,10 @@
 > **`execute_worker` 取 task 轮询循环的时序竞态**：加一处无害的自旋计数即可让官方用例 3/3 收敛
 > （正确性 `max|out-ref| ≤ 0.03125`）。**§8（再续 P25-1）**把「端到端延迟」补上：在收敛构建上测出
 > 单层 RMSNorm megakernel 的**每次调用 36.4–39.1 µs**（对照 PyTorch 朴素 54.0 µs），128/16 连跑 3/3
-> 收敛、plain 构建复现挂起（`EXIT=124`）。
+> 收敛、plain 构建复现挂起（`EXIT=124`）。**§9（三续 P25-1）**把根因从「worker 轮询循环内存序」
+> 降到「launch/握手时序敏感竞态」并给出 dtype 转换 kernel 的强签名。**§10（四续 P25-1）**再把 §9 的
+> 两条候选（默认流历史 / host 排序）**都证伪**：挂起是**设备侧 worker 与 scheduler 两个常驻 kernel
+> 同时自旋的双向死锁**，只被「前置 dtype 转换 kernel」这一个开关避开（与流 / 完成 / 规模 / 频率无关）。
 
 ## 0. 一句话结论
 
@@ -501,3 +504,171 @@ grid 大小无关**。这更像 **launch/握手层面的时序敏感竞态**（�
   `harness/mpk_wlwatch.py`。
 - **P25-1 仍记 `[~]`**：§8 的端到端延迟与本节的现象刻画已足够；根因（launch/握手 vs device 侧）尚需
   nsys 级别证据。
+
+## 10. 根因再定位 2（续做 P25-1）：挂起是「设备侧两个常驻 kernel 同时自旋」的双向死锁，且只被前置 dtype 转换 kernel 避开
+
+§9 把根因从「worker 轮询循环内存序」降到「launch/握手层面的时序敏感竞态」，并给出了 dtype 转换 kernel
+的强签名，但**没有**区分「默认流历史 vs 设备全局态」，也没排除 host 侧排序。本节把 §9.6 的候选项
+①②③ 全部做完，并把结论**再次改写**：挂起**不是 host 侧 launch/握手**（强制 host 排序无效），而是
+**设备侧 worker 与 scheduler 两个常驻 kernel 同时卡住不终止**；而 dtype 转换 kernel 只是**阻止该
+设备侧死锁发生**（而非「修好握手」）的一个充分条件。
+
+> 全部实验同样在**目标卡 H100/sm90**、快照 `mirage-project/mirage@f9eb70c`、`CUDA_VISIBLE_DEVICES=7`
+> **隔离空闲卡**上完成；每次 `timeout` 单跑，退出码 `0=PASS / 1=WRONG / 124=HANG`。除特别说明外
+> worker:scheduler = 128:16（论文 §5.1 的 H100 划分）。
+
+### 10.1 判据五：避开挂起与「默认流」「完成」「规模」都无关
+
+用 `harness/mpk_race_stream.sh` 把 cast 改到**独立、非默认的 torch 流**上再测（原始输出
+`harness/mpk_race_stream.out.txt`、`harness/mpk_race_stream2.out.txt`）：
+
+| 前置工作（prewarm） | 关键区别 | 结果 |
+|---|---|---|
+| none | 什么都不做 | **HANG** |
+| cast | bf16→fp32，默认流 | **PASS** |
+| cast_s2 | 同上，但跑在**独立非默认流**、同步该流 | **PASS** |
+| cast_s2_nosync | 同上，且**完全不 sync**（cast 可能仍在飞） | **PASS** |
+| copyto32_s2 | bf16→fp32 走 `copy_`，独立流 | **PASS** |
+| cast_s2_keepalloc | 独立流 + 保留输出张量 | **PASS** |
+| **cast_1elem** | **只 1 个元素**的 dtype 转换（默认流） | **PASS** |
+| cast_1elem_s2 | 1 元素 dtype 转换（独立流） | **PASS** |
+| none_s2 | 仅创建+同步一个独立流、**不发 kernel** | **HANG** |
+
+读法：
+
+- **与默认流无关**：cast 从来不在 torch 默认流上执行也照样避开（`cast_s2`、`cast_1elem_s2`），
+  故 §9.5 的「默认流历史」假设**证伪**；决定变量是**设备上真的跑过一个 dtype 转换 kernel**。
+- **与完成无关**：`cast_s2_nosync` 连 `sync` 都没有，cast 可能与 `pk()` 并发，仍 PASS → 不需要
+  「cast 先完成」。
+- **与规模无关**：`cast_1elem` 只有 1 个元素、几乎零工作量，仍 PASS → 不是「预热了带宽/时钟」，
+  也不是「改了 allocator/内存状态」的大小效应（§9.1 的 `alloc` 阴性对照已排除后者）。
+
+### 10.2 判据六：**不是**「任意独立流 kernel」——只有 dtype 转换 kernel 能避开
+
+`harness/mpk_race_stream3.out.txt` 把「同 dtype 逐元素 / 计算 / 纯时间」kernel 全部改到**独立流**上
+再测，排除「只要有个 side-stream kernel 就行」：
+
+| 前置工作（独立流，之后同步该流） | 结果 |
+|---|---|
+| none | **HANG** |
+| **cast_s2**（dtype 转换） | **PASS** |
+| mul_s2（bf16 逐元素乘，写 `out`） | **HANG** |
+| copy_s2（bf16→bf16 `copy_`，走 `cudaMemcpyAsync`） | **HANG** |
+| clamp_s2（bf16 逐元素 clamp） | **HANG** |
+| sleep_s2（`_sleep` 300 ms 纯时间 kernel） | **HANG** |
+| matmul_s2（cuBLAS bf16，50 次） | **HANG** |
+
+→ 签名**精确地是「dtype 转换」这一类**，与执行流、完成、规模、时间、带宽都无关；同类的逐元素
+kernel（`mul`/`clamp`）和 `cudaMemcpyAsync`（`copy_`）都**不能**避开。与 §9.1 合并：
+`sumall`/`sumrows`/`mean`/`softmax`/`rmsnorm` 之所以 PASS，正是因为它们内部**以 `x.to(float32)`
+开头**（判据一）。**这是一个非常窄的触发条件**。
+
+### 10.3 判据七：host 侧强制排序**无效**——不是 launch/握手
+
+§9.6 候选③（在 `prepare_kernel` 之后显式同步）用 `harness/mpk_launch_sync.patch` 实现：在
+`persistent_kernel.cuh:1968` 的 `cudaEventRecord(prepare_done_event, …)` 之后插入两个**环境变量门控**
+的宏（`MPK_EXTRA_DEFINES` 经 `persistent_kernel.py:371` 注入，语义等价、默认关闭）：
+
+- `-DMPK_DBG_LAUNCH_SYNC` → `cudaStreamSynchronize(default_stream)`（host 等到 `prepare_kernel`
+  真正做完再 launch worker/scheduler）；
+- `-DMPK_DBG_DEVICE_SYNC` → `cudaDeviceSynchronize()`。
+
+结果（`harness/mpk_launch_sync.out.txt`）：
+
+| 配置 | 结果 |
+|---|---|
+| baseline(none) | **HANG** |
+| **LAUNCH_SYNC**（host 等到 prepare 完成） | **HANG** |
+| **DEVICE_SYNC** | **HANG** |
+| cast(none) | PASS |
+| cast + LAUNCH_SYNC | PASS |
+
+→ 即使 host 已确保 `prepare_kernel` 完成、两个常驻 kernel 才启动，**仍然挂起**。故 §9.5 的
+「launch/握手时序」假设也**被证伪**：这不是「worker 抢跑读了未写完的队列指针」之类的 host/launch 排序
+问题（`cudaStreamSynchronize` 已把这条堵死），死锁在**常驻 kernel 启动之后**。
+
+### 10.4 判据八：两个常驻 kernel 都在设备侧自旋（无 launch error，4:4 亦然）
+
+把 host 侧诊断再加一个宏 `-DMPK_DBG_WAIT_TRACE`（`harness/mpk_launch_sync.patch`，在
+`launch_persistent_kernel` 里对两条 stream 做非阻塞 `cudaStreamQuery` 轮询 ~2 s 并打印）；
+`harness/mpk_wait_trace.sh` 对照 none vs cast_1elem（原始输出 `harness/mpk_wait_trace.out.txt`）：
+
+| | HANG（prewarm=none） | PASS（prewarm=cast_1elem） |
+|---|---|---|
+| worker launch | `no error` | `no error` |
+| scheduler launch | `no error` | `no error` |
+| worker_stream | `device not ready` at it=0…16（**始终在跑**） | **DONE at it=1** |
+| scheduler_stream | `device not ready` at it=0…16（**始终在跑**） | **DONE at it=1** |
+
+→ **两个 kernel 都成功 launch（无错误），且都一直不结束**：不是某个 kernel 没起来，而是
+worker 与 scheduler **互相等待**（`execute_worker` 等 task/事件、`execute_scheduler` 等事件），
+即**设备侧双向死锁**。`harness/mpk_wait_trace_grid.out.txt` 进一步在 `4:4 / 16:16 / 64:16`
+三档重复，**全部两个 stream 都自旋**：
+
+- **排除 co-residency / SM 占用**：4 worker + 4 scheduler 只占 8 个 BLOCK（远小于 132 SM 的
+  占用上限），两个 kernel 仍双双卡死 → 不是「worker 先占满 SM、scheduler 拿不到 SM」的启动顺序问题
+  （这也解释了为什么 §9.1 的 4:4 会挂）。
+
+### 10.5 排除项：不是频率/时序竞态
+
+若挂起是「worker 与 scheduler 相对速度」触发的竞态，锁频应能改变结果。用
+`nvidia-smi -i <gpu> -lgc 1980`（锁最高 SM 频率，`harness/mpk_clock_lock.out.txt`）：
+
+| 配置（锁频 1980 MHz） | 结果 |
+|---|---|
+| none | **HANG** |
+| cast_1elem | PASS |
+
+→ 锁频**不改变**结果（HANG 依旧），故不是 GPU 频率/boost 造成的时序竞态。（`cast` 能避开也**不是**
+因为它「唤醒了 GPU 时钟」——`sleep`/`matmul` 同样长时间占用 GPU 却不能避开，见 §10.2。）
+
+### 10.6 机制候选（标注为假设，非对上游的 bug 判定）
+
+把 §9 + 本节证据拼起来，事实是：
+
+1. 挂起 = **设备侧 worker↔scheduler 双向死锁**（10.4），与 host 排序无关（10.3）、与 grid 无关（10.4）、
+   与频率无关（10.5）。
+2. 触发与否只取决于**在 `pk()` 之前设备是否执行过「dtype 转换 kernel」**（10.1、10.2）——流/完成/规模
+   都不重要。
+3. 这是一个**极窄的充分条件**：`.to(dtype)` / 跨 dtype `copy_`；同 dtype 的 `mul/clamp/copy`、
+   cuBLAS `matmul`、`_sleep`、`cudaMemcpyAsync` 都不行。
+
+「一个 1 元素、在别的流上、甚至还没跑完的 dtype 转换 kernel，能决定一个 128-block 常驻 kernel 是否
+死锁」——这条签名的**机制仍未钉死**。可能的方向（均为**待验证假设**）：
+
+- **H-a（最可能）设备级「首次 dtype 转换」初始化路径**：跨 dtype 逐元素在 PyTorch 里可能触发某条
+  **懒初始化 / 一次性 driver 侧状态**（例如某个 `cudaFuncSetAttribute`、模块加载或内部事件/flag），
+  它改变了随后两个 `NonBlocking` 流上常驻 kernel 的**共驻/调度**；而 `sleep/matmul/同 dtype 逐元素`
+  不触发这条路径。要验证需抓 device 侧一次性状态（本轮 nsys 未成功，见下）。
+- **H-b 与 `__nanosleep` 自旋的交互**：dtype 转换 kernel 的**收窄/加宽写**可能改变了 L2/内存子系统的
+  **某些持久状态**，使 `execute_worker` 的自旋路径命中/不命中；但 §9.2 已证循环内改动（含
+  `__nanosleep` 值）都不修复，此假设较弱。
+- **H-c 快照自身的 test/offline 路径缺陷**：即 `MODE_OFFLINE` + `test_mode` 组合下的
+  `prepare_next_batch`/终止事件协议本就有一处**依赖执行时序**的缺陷，dtype 转换只是恰好扰动到能收敛的
+  分支。与「本用例只测了单个 operator、且是 offline/test 路径」一致。
+
+**无论如何，这不构成对上游 `f9eb70c` 的 bug 判定**；只是把可复现条件收窄到「有无前置 dtype 转换
+kernel」这一个可开关的旋钮。
+
+### 10.7 局限与下一步
+
+- **nsys 未成功**：`harness/mpk_nsys.sh` + `harness/mpk_nsys_parse.py` 尝试抓 host 侧 CUDA API/流
+  序列（§9.6 候选①）。挂起用例经 `os._exit` 退出，CUPTI 缓冲未 flush，只导出了 3 条 API 记录；
+  改用 `cudaProfilerStop()`、`--capture-range` 后 nsys 进程本身在挂起 kernel 上**不收敛/超时**
+  （原始输出 `harness/mpk_nsys.out.txt` 仅有两次运行的标题）。故 host API 时间线证据本轮**缺失**，
+  但 §10.3/§10.4 已从**行为**上排除了 host 排序。
+- **机制未钉死**：给出「设备侧双向死锁 + 仅 dtype 转换 kernel 可避开」的强刻画与三个假设，未落到
+  具体一条状态/指令。
+- 下一步候选（按性价比）：① 在**收敛构建**（`harness/mpk_latency_run.patch`）上对 worker 与 scheduler
+  各自的**事件等待点**做 `printf` 守门狗（不改语义、只观测），定位双方**各卡在哪个 event 计数**；
+  ② 用 `compute-sanitizer --tool synccheck` / `racecheck` 抓设备侧竞争；③ 对照 MPK 上游 `f9eb70c`
+  的 `MODE_OFFLINE` 终止协议核对事件计数。
+- 原始输出：`harness/mpk_race_stream.out.txt` / `harness/mpk_race_stream2.out.txt`（流来源/规模/完成）、
+  `harness/mpk_race_stream3.out.txt`（side-stream 非 cast 对照）、`harness/mpk_launch_sync.out.txt`
+  （host 排序宏）、`harness/mpk_wait_trace.out.txt` / `harness/mpk_wait_trace_grid.out.txt`
+  （两 stream 轮询）、`harness/mpk_clock_lock.out.txt`（锁频）、`harness/mpk_nsys.out.txt`（nsys 尝试）。
+  脚本 `harness/mpk_race_stream.sh`、`harness/mpk_launch_sync.sh`、`harness/mpk_wait_trace.sh`、
+  `harness/mpk_nsys.sh`、`harness/mpk_nsys_parse.py`；patch `harness/mpk_launch_sync.patch`。
+- **P25-1 仍记 `[~]`**：本轮把 §9 的两条候选（默认流历史 / host 排序）**都证伪**，并把死锁**定位到
+  设备侧 worker↔scheduler 双向自旋**、触发条件收窄到「前置 dtype 转换 kernel」；端到端延迟（§8）与
+  现象刻画已足够，**具体机制仍需 device 侧事件级/竞争检测证据**。
