@@ -40,9 +40,12 @@
       → `docs/01` §5（版本时间线与链接）、`docs/02` §8（PR #316 基准表与解读）。
 - [x] **P0-3** 访问 `~/github/DeepEP`：dispatch/combine kernel 与 symmetric memory 的接口与数据流。
       → `docs/07-deepep-dispatch-combine.md`（真实行号核对，DeepEP commit `93eb6eb` / v2.5.0）。
-- [ ] **P0-4** 环境探测：`kernel_lab` 里能否编译/跑 DeepGEMM 的 SM90 部分（`pip install -e ~/github/DeepGEMM`，
-      注意 `DG_SKIP_CUDA_BUILD`）；确认 H100 上可用哪些 kernel。已知：CUDA 13.2 / PyTorch 2.12 达标，
-      但 `deep_ep` 未安装（见 `docs/07` §8）。
+- [x] **P0-4** 环境探测：`kernel_lab` 里能否编译/跑 DeepGEMM 的 SM90 部分（`pip install -e ~/github/DeepGEMM`，
+      注意 `DG_SKIP_CUDA_BUILD`）；确认 H100 上可用哪些 kernel。已知：CUDA 13.2 / PyTorch 2.12 达标。
+      → `docs/08-h100-environment.md`（真机数字）；实验 `harness/probe_h100_env.py`、`harness/probe_deepep.py`。
+      结论：dense/grouped FP8、BF16、**SM90 版 MoE wgrad（`k_grouped_*_nt_contiguous`）** 均可跑；
+      `k_grouped_*_tn_contiguous` 与 `fp8_fp4_mega_moe` SM100 专属（`gemm.hpp:369` 拒绝）。DeepEP 可装可 import
+      但运行期受阻（NCCL 2.29.7 vs 需求 ≥2.31），见「阻塞」。
 
 ### P1 MoE / EP 基础（`docs/01-moe-ep-basics.md`）
 
@@ -100,19 +103,29 @@
 - 被内联的 `docs/*.md` 里**不要写 `{{< >}}` 短代码**；站内链接只在 `content/posts` 里用 `relref`。
 - 行号引用必须真实核对过。
 - 容器 workdir 是 `code/kernel-opt`，`docker exec` 跑脚本要用**绝对路径**。
+- DeepGEMM editable 安装后，JIT 需要 `deep_gemm/include/{cute,cutlass}`；editable 不会自动拷，
+  要手动 `cp -r third-party/cutlass/include/{cute,cutlass} deep_gemm/include/`（详见 `docs/08` §2）。
+  另需 `apt-get install -y libdw-dev`，并确保 `third-party/deep_jit` 子模块与 gitlink 一致（`2efdab4`）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0-1、P0-2、P0-3 完成**。P0-1：读通 DeepGEMM Mega MoE 五个源文件，产出数据流脑图与架构解析
-  `docs/02-mega-moe-architecture.md`（真实行号核对），P2-2/P2-3 一并覆盖。
-  P0-2：`docs/01` §5 记录仓库/版本时间线/关键结论/DeepEP 侧真实链接；`docs/02` §8 补 PR #316
-  EP8 基准表（V4-Flash/Pro）与解读。P0-3：精读 DeepEP v2.5 的对称显存（NCCL window）、
-  dispatch/combine kernel、dispatch copy epilogue 的 expanded layout，产出 `docs/07-deepep-dispatch-combine.md`
-  （真实行号核对）。P2-1 的 `transform_weights_for_mega_moe` 权重布局仍待补。
-- **下一步：P0-4** 环境探测：在 `kernel_lab`（H100）里确认能否编译/跑 DeepGEMM 的 SM90 部分、
-  能否安装 DeepEP 跑通单/多卡 dispatch/combine（决定后续 P4 数值实验与 DeepEP 实验的可行性）；
-  顺带补 P2-1 权重布局，再进入 P1/P3。
+- 当前进度：**P0 全部完成（P0-1/2/3/4）**。
+  P0-1：读通 DeepGEMM Mega MoE 五个源文件，产出 `docs/02-mega-moe-architecture.md`（真实行号核对），P2-2/P2-3 一并覆盖。
+  P0-2：`docs/01` §5 记录仓库/版本时间线/关键结论/DeepEP 侧真实链接；`docs/02` §8 补 PR #316 EP8 基准与解读。
+  P0-3：精读 DeepEP v2.5 对称显存/dispatch/combine，产出 `docs/07-deepep-dispatch-combine.md`。
+  P0-4：在 `kernel_lab`（H100）实测 DeepGEMM 2.8.1 可用 kernel 矩阵——dense/grouped FP8、BF16、
+  **SM90 版 MoE wgrad（`k_grouped_*_nt_contiguous`）** 均 OK；`..._tn_contiguous`（wgrad TN）与
+  `fp8_fp4_mega_moe` 在 sm90 被 `gemm.hpp:369` 拒绝（SM100 专属）。DeepEP 2.5 可构建/import，
+  但 `EPBuffer` 因 NCCL 版本（PyTorch 链 2.29.7 vs 需求 ≥2.31/2.32.3）运行期段错误。
+  产出 `docs/08-h100-environment.md` + `harness/probe_h100_env.py` / `harness/probe_deepep.py`（含 *.out.txt）。
+  P2-1 的 `transform_weights_for_mega_moe` 权重布局仍待补。
+- **下一步：P1** MoE/EP 基础补全（`docs/01` 已有骨架，需按最新 API 与 grouped 布局细化），
+  顺带补 **P2-1** 权重布局；随后启动 **P4-4** 的 H100 数值对拍（用 SM90 的 `nt` wgrad 替代 SM100 `tn`）。
 
 ## 阻塞
 
-- （空）
+- **DeepEP 运行期实验受阻（环境，非内核）**：本机 PyTorch 链接系统 **NCCL 2.29.7**，而 DeepEP 2.5 需要
+  **NCCL ≥ 2.31 的设备通信 API**（`ginSupport/ginMinStride/ginType`，`csrc/kernels/comm/context.cpp:71-142`）。
+  装 `nvidia-nccl-cu13 2.32.3` + `LD_PRELOAD` 可过 import 检查，但 `EPBuffer` 构造仍在
+  `ep.py:304` 段错误；用系统 2.29.7 头重建则编译失败。**需一个链接 NCCL ≥ 2.32.3 的 PyTorch 环境**。
+  因此在修复前，DeepEP 的 H100 dispatch/combine 实测暂不做（源码精读见 `docs/07`）。

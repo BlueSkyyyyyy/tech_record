@@ -1,0 +1,14 @@
+### 1) 直接 import（不设 LD_PRELOAD）：NCCL 版本检查失败
+  File "/usr/local/lib/python3.12/dist-packages/deep_ep/__init__.py", line 39, in check_nccl_so
+    assert filecmp.cmp(loaded_nccl_so, linked_nccl_so, shallow=False), \
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: Invalid NCCL versions: /usr/lib/x86_64-linux-gnu/libnccl.so.2.29.7 (loaded) v.s. /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2 (expected), please contact Chenggang or Shangyan to upgrade PyTorch NCCL version
+
+### 2) LD_PRELOAD 2.32.3 后 import 成功，但 EPBuffer 构造段错误（faulthandler）
+Fatal Python error: Segmentation fault
+
+Current thread 0x00007f14c4eeb000 (most recent call first):
+  File "/usr/local/lib/python3.12/dist-packages/deep_ep/buffers/ep.py", line 304 in __init__
+  File "<string>", line 7 in <module>
+
+Extension modules: numpy._core._multiarray_umath, numpy.linalg._umath_linalg, torch._C, torch._C._dynamo.autograd_compiler, torch._C._dynamo.eval_frame, torch._C._dynamo.guards, torch._C._dynamo.utils, torch._C._fft, torch._C._linalg, torch._C._nested, torch._C._nn, torch._C._sparse, torch._C._special, numpy.random._common, numpy.random.bit_generator, numpy.random._bounded_integers, numpy.random._mt19937, numpy.random.mtrand, numpy.random._philox, numpy.random._pcg64, numpy.random._sfc64, numpy.random._generator, markupsafe._speedups (total: 23)

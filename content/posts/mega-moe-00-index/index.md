@@ -22,8 +22,9 @@ categories: ["算子开发"]
 1. [MoE 与专家并行（EP）基础]({{< relref "mega-moe-01-basics" >}}) —— 计算图、grouped GEMM、dispatch/combine
 2. [Mega MoE 整体架构与通信-计算重叠]({{< relref "mega-moe-02-architecture" >}}) —— 数据流、缓冲区、调度器、warp 分工
 3. [DeepEP dispatch / combine 与 symmetric memory]({{< relref "mega-moe-03-deepep" >}}) —— 对称显存、expanded layout、通信实现
-4. `sm100_fp8_fp4_mega_moe.cuh` 逐段精读（待写）
-5. MoE 反向：wgrad / dgrad grouped GEMM（待写）
-6. Mega Gate / Mega mHC（待写）
+4. [H100 环境探测与 kernel 可用性清单]({{< relref "mega-moe-04-env" >}}) —— 哪些 kernel 本机可跑、哪些 SM100 专属
+5. `sm100_fp8_fp4_mega_moe.cuh` 逐段精读（待写）
+6. MoE 反向：wgrad / dgrad grouped GEMM（待写）
+7. Mega Gate / Mega mHC（待写）
 
 > 各篇正文由仓库 `code/mega-moe/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
