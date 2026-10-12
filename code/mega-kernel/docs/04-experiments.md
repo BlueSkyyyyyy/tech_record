@@ -301,3 +301,107 @@ P5-1 量化了 **损失二（launch 开销）**，并给出结论：它只在 la
 - 单卡、单 stream、合成算子；真实 MoE/Attention 的收益还取决于张量核占比与通信，需另一套
   实验（与 `code/mega-moe/` 专题互补，本专题不重复）。
 - 未扫更小 M / 更多算子：那才是损失二显形的区间（见 2.4 第 2 点），可作为后续增量。
+
+---
+
+## 3. PDL 链式流水：一对、一条链能省多少（P5-3）
+
+### 3.1 问题
+
+P4-2（`docs/03` §2）只量了**一对** kernel 的 PDL 重叠，得到结论「重叠量 = `min(上游 tail, 下游 prologue)`」，
+收益上限 1.5×。一个自然的追问是：如果把 **K 个 kernel 用 PDL 串成一条链**，这条「kernel 级流水线」
+能不能像真正的软件流水那样**随 K 累积收益**？本节用实验回答——结论是**不能**：
+
+> PDL 在链上的收益由**每条边的 `min(prologue, tail)`** 决定，**不随 K 叠加**；
+> 速度比只取决于 `min(prologue, tail)` 在单 kernel 全时长中的占比。
+
+这与 MPK 的跨算子软件流水（论文 §5.3 行 1326–1363）形成清晰对照：后者在**单个 kernel 内**、
+以 **task 为粒度**、靠设备内事件队列让不同 task 的计算/通信/访存相互重叠，收益可随流水深度累积；
+PDL 只是把**相邻两个 kernel** 沿时间轴错开，无法把重叠下沉到 task/SM 级。
+
+### 3.2 方法
+
+程序 `src/pdl_pipeline.cu`（目标卡 H100 / sm90，原始输出 `harness/pdl_pipeline.out.txt`）。
+构造一条 K 个 kernel 的链，链上第 i 个 kernel 的时间轴为：
+
+```
+[prologue 自旋 pl] -> cudaGridDependencySynchronize -> [临界段 crit: 校验上游 seq、写自己的 seq]
+    -> cudaTriggerProgrammaticLaunchCompletion -> [tail 自旋 tl]
+```
+
+- `idx=0` 无上游；`idx>=1` 的 kernel 用 `cudaLaunchKernelEx` +
+  `cudaLaunchAttributeProgrammaticStreamSerialization` 启动（与 P4-2 同款）。
+- 用 `gen` 代次与 `seq[K+1]` 数组做**正确性门限**：第 i 个 kernel 放行后校验 `seq[i]==gen`
+  （即上游确实把数据交过来了），失败则原子加 `fail`。每轮的链收尾用 `cudaStreamSynchronize`，
+  避免轮间重叠污染计时。
+- 扫 K = 1/2/4/8/16，固定 `pl=200000`、`crit=2000` 周期，测两组：
+  **A** `tl=200000`（prologue=tail）、**B** `tl=600000`（tail=3×prologue）。iters=30。
+
+### 3.3 结果
+
+**A 组：`prologue = tail = 200000`（crit=2000）**
+
+| K | no-PDL ms | PDL ms | speedup | no-PDL/K ms | PDL/K ms | 预测 PDL/K ms |
+|---|---|---|---|---|---|---|
+| 1 | 0.2094 | 0.2095 | 1.00× | 0.2094 | 0.2095 | —（单 kernel 无链边）|
+| 2 | 0.4132 | 0.3119 | 1.32× | 0.2066 | 0.1559 | 0.1038 |
+| 4 | 0.8207 | 0.5166 | 1.59× | 0.2052 | 0.1291 | 0.1031 |
+| 8 | 1.6360 | 0.9264 | 1.77× | 0.2045 | 0.1158 | 0.1028 |
+| 16 | 3.2665 | 1.7452 | 1.87× | 0.2042 | 0.1091 | 0.1026 |
+
+**B 组：`prologue = 200000`、`tail = 600000`（crit=2000）**
+
+| K | no-PDL ms | PDL ms | speedup | no-PDL/K ms | PDL/K ms | 预测 PDL/K ms |
+|---|---|---|---|---|---|---|
+| 1 | 0.4099 | 0.4099 | 1.00× | 0.4099 | 0.4099 | — |
+| 2 | 0.8142 | 0.7126 | 1.14× | 0.4071 | 0.3563 | 0.3056 |
+| 4 | 1.6226 | 1.3184 | 1.23× | 0.4056 | 0.3296 | 0.3045 |
+| 8 | 3.2403 | 2.5301 | 1.28× | 0.4050 | 0.3163 | 0.3040 |
+| 16 | 6.4716 | 4.9508 | 1.31× | 0.4045 | 0.3094 | 0.3036 |
+
+正确性：两组所有 K、所有轮次累计 `fail = 0`；链尾 `seq[16] == gen`，说明每个下游都正确
+读到了上游写入的值（PDL 的内存可见性语义成立，与 P4-2 checksum 一致）。
+
+### 3.4 读法
+
+1. **no-PDL 严格串行**：每 kernel 时间恒定 ≈ `pl+crit+tl`（A 组 ~0.204 ms ≈ 402000 周期，
+   B 组 ~0.405 ms ≈ 802000 周期），总时间随 K 线性增长。
+2. **PDL 把每条链边重叠掉恰好 `min(prologue, tail)`**。
+   - A 组稳态每 kernel ≈ 0.109 ms（≈ 215000 周期），比 no-PDL 少 ~200000 周期 = `min(200000,200000)`；
+   - B 组稳态每 kernel ≈ 0.309 ms（≈ 610000 周期），比 no-PDL 少 ~192000 周期 ≈ `min(200000,600000)`。
+   这正是 **P4-2 单对结论在链上的直接外推**：每条边独立重叠 `min(prologue, tail)`，边与边不叠加。
+   表中「预测 PDL/K」列即按 `span − min(prologue, tail)` 计，A 组预测 0.1026 vs 实测 0.1091、
+   B 组预测 0.3036 vs 实测 0.3094（差 ~6%，为链两端预热与 host 逐个 launch 的固定成本）。
+3. **speedup 趋于一个由 `min(prologue,tail)` 决定的常数，而非随 K 增长**：
+   A 组 → `402000/(402000−200000) ≈ 2.0×`（K=16 已达 1.87×）；
+   B 组 → `802000/(802000−200000) ≈ 1.33×`（K=16 已达 1.31×）。
+   **关键差异**：A 组 prologue=tail，重叠占半，接近 2×；B 组 tail 更长（看似「有更多可重叠的尾部」），
+   但重叠被**较短的 prologue** 封顶，收益反而更小。这与直觉「尾巴越长越能藏」相反——
+   因为能提前启动的是**下游的 prologue**，上游 tail 再长也无人来重叠它。
+4. **这解释了 PDL 的适用区间**：只有当下游 prologue 与上游 tail **相当且都足够长**时收益才大；
+   对「很多个、每个都很轻」的算子图（MPK 报告 293 launch/token 的场景，§6.6 行 1586–1628），
+   单 kernel 太短、prologue 更短，`min(prologue, tail)` 极小，PDL 基本无收益。
+
+### 3.5 与判据 / MPK 的关系
+
+- **仍是 kernel 级**：链上每个 kernel 都由 host 逐个 launch（launch 次数 = K 不变，损失二不受影响），
+  中间量若需跨 kernel 传递仍要落 HBM（损失三不受影响），重叠只发生在**相邻 kernel 边界**。
+  判据映射与 P4-2 完全一致：**全不满足 C1–C5**。
+- **与 MPK 软件流水的本质差别**：MPK §5.3（行 1326–1363）的 cross-task software pipelining 在
+  **单 kernel 内**让**不同 task**（可来自不同算子）的访存/计算/通信重叠，且因为这些 task 属于同一
+  常驻 kernel、由设备内事件驱动，流水可以**跨算子、跨流水级累积**；PDL 的流水线**级数永远只有
+  1 级**（第 i 个对第 i−1 个），且每一级都要 host 先 launch 好。这就是 `docs/03` §2.4「粒度停在
+  kernel 对」在链式场景下的量化证据。
+- **对 mega-moe 的旁证**：`code/mega-moe/` 专题会看到 DeepGEMM 在单 kernel 内用 `l2_full_mask` 位掩码
+  + ring generation 协调多个 CTA（属 T4 段级），其重叠正是 MPK 式「单 kernel 内、task/CTA 级」，
+  而非本节这种「kernel 级、host 逐对 launch」。两者不可混淆。
+
+### 3.6 局限
+
+- 用 `grid=1` 的单一小 kernel 造流，未验证多 block / 多 SM 下 PDL 的资源约束（如后继 grid 的
+  block 何时真正获得 SM 资源）；真实算子 block 更多，重叠边界可能被 occupancy 影响。
+- `spin_cycles` 是合成忙等，`prologue`/`tail` 是人为切分的段；真实算子的「可提前做的 prologue」
+  由 kernel 结构决定，未必能任意切。
+- 只测了「均匀链」（每个 kernel 同构）与两组参数；异构链、以及 PDL 与 CUDA Graph 叠加
+  （`docs/03` §2.3 提到可叠加）未覆盖，可作为后续增量。
+- 有 6% 左右的实测 vs 预测偏差未进一步归因（含 host 逐个 launch 与链首尾的固定成本）。
