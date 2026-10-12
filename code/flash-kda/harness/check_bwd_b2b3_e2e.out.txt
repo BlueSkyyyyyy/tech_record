@@ -1,0 +1,136 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190  triton=3.6.0
+==============================================================================
+Part A: per-kernel device-time split of the assembled chain (P7-22 pipe B1, NS=3)
+==============================================================================
+  case               | chain dev |  davkernel  dhukernel     wydqkg      intra chunklocalcumsum
+  T=512 H=4          |      98.0 |        3.5       35.0       21.7       15.0        2.0   B2+B3=37.4%
+  B2 T=1024 H=8      |     341.0 |       11.4       61.9      126.7       80.8        6.1   B2+B3=60.8%
+  B8 T=2048 H=8      |    2232.0 |       74.7      307.9      906.0      579.7       45.7   B2+B3=66.6%
+  T=250 H=3 nondiv   |      69.8 |        2.5       18.8       15.1       12.3        1.6   B2+B3=39.2%
+
+==============================================================================
+Part B: isolated B2/B3 sweep -- num_warps x num_stages and block tiling (BT=16)
+==============================================================================
+
+# T=512 H=4
+  B2 wy_dqkg  num_warps x num_stages:
+    nw=2: ns1=  32.1  ns2=  32.3  ns3=  32.2  
+    nw=4: ns1=  15.7  ns2=  15.5  ns3=  15.5  
+    nw=8: ns1=  13.6  ns2=  13.6  ns3=  13.6  
+  B3 intra   num_warps x num_stages:
+    nw=2: ns1=  16.6  ns2=  16.6  ns3=  18.0  
+    nw=4: ns1=  19.0  ns2=  19.0  ns3=  19.0  
+    nw=8: ns1=  20.9  ns2=  21.0  ns3=  20.9  
+
+# B2 T=1024 H=8
+  B2 wy_dqkg  num_warps x num_stages:
+    nw=2: ns1= 174.0  ns2= 174.1  ns3= 174.0  
+    nw=4: ns1= 121.7  ns2= 121.8  ns3= 121.7  
+    nw=8: ns1= 152.7  ns2= 152.8  ns3= 152.8  
+  B3 intra   num_warps x num_stages:
+    nw=2: ns1=  76.8  ns2=  77.2  ns3=  83.2  
+    nw=4: ns1=  89.3  ns2=  89.5  ns3=  89.9  
+    nw=8: ns1= 128.5  ns2= 128.6  ns3= 128.5  
+
+==============================================================================
+Part C: land B3 num_warps=2 into the chain -- correctness vs FLA and time
+==============================================================================
+
+# T=128 H=2
+    nw2 dq vs FLA            max_abs=9.900e-04  max_rel=1.473e-03  ref_max=6.721e-01
+    nw2 dq vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.723e-01
+    nw2 dk vs FLA            max_abs=5.912e-04  max_rel=8.692e-04  ref_max=6.802e-01
+    nw2 dk vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.804e-01
+    nw2 dv vs FLA            max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    nw2 dv vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.915e-02
+    nw2 dbeta vs FLA         max_abs=1.733e-03  max_rel=4.356e-03  ref_max=3.977e-01
+    nw2 dbeta vs nw4         max_abs=4.657e-10  max_rel=1.166e-09  ref_max=3.994e-01
+    nw2 dg vs FLA            max_abs=9.607e-05  max_rel=2.775e-03  ref_max=3.462e-02
+    nw2 dg vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.462e-02
+    nw2 dh0 vs FLA           max_abs=2.068e-04  max_rel=4.982e-03  ref_max=4.150e-02
+
+# T=256 H=4
+    nw2 dq vs FLA            max_abs=1.445e-03  max_rel=2.092e-03  ref_max=6.908e-01
+    nw2 dq vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.907e-01
+    nw2 dk vs FLA            max_abs=1.200e-03  max_rel=1.504e-03  ref_max=7.980e-01
+    nw2 dk vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.983e-01
+    nw2 dv vs FLA            max_abs=2.517e-04  max_rel=4.128e-03  ref_max=6.098e-02
+    nw2 dv vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.093e-02
+    nw2 dbeta vs FLA         max_abs=3.258e-03  max_rel=5.521e-03  ref_max=5.900e-01
+    nw2 dbeta vs nw4         max_abs=3.725e-09  max_rel=6.295e-09  ref_max=5.918e-01
+    nw2 dg vs FLA            max_abs=2.127e-04  max_rel=6.192e-03  ref_max=3.436e-02
+    nw2 dg vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.438e-02
+    nw2 dh0 vs FLA           max_abs=2.451e-04  max_rel=7.172e-03  ref_max=3.418e-02
+
+# T=250 H=3 (non-div)
+    nw2 dq vs FLA            max_abs=1.773e-03  max_rel=3.423e-03  ref_max=5.180e-01
+    nw2 dq vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.181e-01
+    nw2 dk vs FLA            max_abs=7.557e-04  max_rel=1.452e-03  ref_max=5.206e-01
+    nw2 dk vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.208e-01
+    nw2 dv vs FLA            max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    nw2 dv vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.824e-02
+    nw2 dbeta vs FLA         max_abs=2.717e-03  max_rel=5.587e-03  ref_max=4.863e-01
+    nw2 dbeta vs nw4         max_abs=1.863e-09  max_rel=3.831e-09  ref_max=4.862e-01
+    nw2 dg vs FLA            max_abs=3.221e-04  max_rel=5.191e-03  ref_max=6.205e-02
+    nw2 dg vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.225e-02
+    nw2 dh0 vs FLA           max_abs=2.924e-04  max_rel=5.322e-03  ref_max=5.493e-02
+
+# T=512 H=4 g=2
+    nw2 dq vs FLA            max_abs=1.722e-03  max_rel=2.600e-03  ref_max=6.623e-01
+    nw2 dq vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.625e-01
+    nw2 dk vs FLA            max_abs=1.951e-03  max_rel=3.024e-03  ref_max=6.452e-01
+    nw2 dk vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.454e-01
+    nw2 dv vs FLA            max_abs=3.343e-04  max_rel=4.933e-03  ref_max=6.776e-02
+    nw2 dv vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.782e-02
+    nw2 dbeta vs FLA         max_abs=2.704e-03  max_rel=5.286e-03  ref_max=5.115e-01
+    nw2 dbeta vs nw4         max_abs=1.490e-08  max_rel=2.928e-08  ref_max=5.090e-01
+    nw2 dg vs FLA            max_abs=2.371e-04  max_rel=3.495e-03  ref_max=6.785e-02
+    nw2 dg vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.787e-02
+    nw2 dh0 vs FLA           max_abs=3.859e-04  max_rel=5.489e-03  ref_max=7.031e-02
+
+# B2 T=513 H=2 (non-div)
+    nw2 dq vs FLA            max_abs=1.761e-03  max_rel=2.925e-03  ref_max=6.022e-01
+    nw2 dq vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.026e-01
+    nw2 dk vs FLA            max_abs=1.213e-03  max_rel=1.820e-03  ref_max=6.666e-01
+    nw2 dk vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.670e-01
+    nw2 dv vs FLA            max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    nw2 dv vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.469e-02
+    nw2 dbeta vs FLA         max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    nw2 dbeta vs nw4         max_abs=7.451e-09  max_rel=8.450e-09  ref_max=8.817e-01
+    nw2 dg vs FLA            max_abs=2.909e-04  max_rel=7.064e-03  ref_max=4.118e-02
+    nw2 dg vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.120e-02
+    nw2 dh0 vs FLA           max_abs=1.691e-04  max_rel=6.996e-03  ref_max=2.417e-02
+
+# T=192 H=2 g=0
+    nw2 dq vs FLA            max_abs=3.464e-04  max_rel=6.491e-04  ref_max=5.337e-01
+    nw2 dq vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.339e-01
+    nw2 dk vs FLA            max_abs=3.378e-04  max_rel=5.840e-04  ref_max=5.784e-01
+    nw2 dk vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.785e-01
+    nw2 dv vs FLA            max_abs=3.922e-04  max_rel=5.982e-03  ref_max=6.556e-02
+    nw2 dv vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.577e-02
+    nw2 dbeta vs FLA         max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    nw2 dbeta vs nw4         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.024e-01
+    nw2 dg vs FLA            max_abs=2.060e-05  max_rel=3.391e-03  ref_max=6.074e-03
+    nw2 dg vs nw4            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.076e-03
+    nw2 dh0 vs FLA           max_abs=5.197e-05  max_rel=8.267e-03  ref_max=6.287e-03
+
+worst-case max_rel (B3 nw=2 chain vs FLA):
+  dq      3.423e-03
+  dk      3.024e-03
+  dv      6.795e-03
+  dbeta   6.012e-03
+  dg      7.064e-03
+  dh0     8.267e-03
+
+==============================================================================
+Part C2: chain timing -- B3 warps 4 (default) vs 2, and per-kernel dev
+==============================================================================
+  case               |  FLA dev |  nw4 dev  nw2 dev  nw2/nw4 |
+  T=512 H=4          |    204.4 |     97.3     95.4    0.98x |  B3 nw4=  14.9 nw2=  12.9  B2=  21.3
+  B2 T=1024 H=8      |    661.7 |    340.8    328.3    0.96x |  B3 nw4=  81.0 nw2=  68.8  B2= 125.9
+  B8 T=2048 H=8      |   4113.3 |   2232.6   2109.0    0.94x |  B3 nw4= 573.9 nw2= 452.9  B2= 904.8
+  T=250 H=3 nondiv   |    144.1 |     68.4     66.5    0.97x |  B3 nw4=  12.2 nw2=  10.2  B2=  14.8
+
+DONE

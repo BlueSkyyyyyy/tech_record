@@ -341,7 +341,23 @@
       证明**孤立小 grid launch 的 CUPTI 归因比链内背靠背高 ~1.3×**（`T512H4 NS3` 孤立 49.7 vs 链内
       归因 35.1）——固定启停/排空被算进 device-active 窗口，故**链级口径一律用链内归因**。**结论**：
       兑现「直接接受 Triton 版」这条路线的链级落地，**Triton 侧 B1 工程化收敛**；链级瓶颈从 B1
-      **明确转向 B2/B3**（`B8T2048H8` 上 B1 只占 ~0.32/2.22 ms，且 §15 已证整链跟到 64 净亏）。
+       **明确转向 B2/B3**（`B8T2048H8` 上 B1 只占 ~0.32/2.22 ms，且 §15 已证整链跟到 64 净亏）。
+- [x] **P7-23** 第一次把链级新瓶颈 **B2/B3 单独量清楚**（此前 `ncu` 只剖析过 B1）：新增
+      `harness/check_bwd_b2b3_e2e.py`（`harness/check_bwd_b2b3_e2e.out.txt`，空闲卡）+
+      `harness/probe_b2b3_ncu.sh`/`harness/ncu_b2b3_driver.py`（`harness/probe_b2b3_ncu.out.txt`）+
+      `harness/probe_b2b3_hdh_bf16.py`（`harness/probe_b2b3_hdh_bf16.out.txt`）+ `docs/07` §26。
+      **Part A**：组装链按 kernel 归因，`B8T2048H8` 上 **B2+B3 = 66.6%**（B2 906 µs/B3 580 µs，
+      B1 只剩 13.8%），坐实 §25「别再压 B1」。**Part B**：免费旋钮已用尽——`num_stages` 对 B2/B3
+      **完全无效**（短归约/标量循环，与 B1 的长串行循环相反）；tiling 已最优（B2 `BK=BV=64`；
+      B3 `BC=16`，`BC=32`→2022 µs、`BK=BV=128`→37.8 ms）；唯一免费杠杆是 **B3 `num_warps=2`**
+      （1.16–1.27×）。**Part C**：B3 `nw=2` 落链 `dq/dk/dv/dg` **逐位相同（max_abs=0）**、`dbeta≤1.5e-8`、
+      vs FLA 最坏 max_rel 与 §25.2 逐位一致；B3 内核 0.79–0.87×、整链 dev **0.94–0.98×**。**Part D
+      （`ncu`）**：**B2 = DRAM-bound**（DRAM 59% SOL、L2 60%、tensor 4.9%、`long_sb` 6.61）+ **寄存器
+      压占用**（247 regs → Block Limit Reg 2 → occ 12.4%）；**B3 = 无 TensorCore 的 FMA/L1-bound**
+      （tensor **0.05%**、SM 82%、L1/TEX 71%、occ 49%），本质是逐元素外积、不走 MMA；B3 `BT=64` 掉到
+      **2.29 ms**（REG 201、occ 12.4%）解释 §15 的 4.8–5.5×。**Part E（结构性杠杆）**：B2 的 `h/dh`
+      换 bf16 只值 **1.08–1.16×**（非量级项）且给梯度加 ~1.5–2e-3。**结论**：B2/B3 性质不同须分别
+      处理（B2 减 DRAM/寄存器；B3 MMA 化），本轮为**纯剖析 + 免费旋钮收口**，结构性重写留下一步。
 
 ### P8 小结 / 一页纸
 
@@ -373,8 +389,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-22 补测**。
-  - P7-22（本轮）：把 §17 的 Triton 软件流水从孤立原型落进真实组装链（§12 的链此前写死
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-23 补测**。
+  - P7-23（本轮）：第一次把链级新瓶颈 **B2/B3 单独量清楚**。新增
+    `harness/check_bwd_b2b3_e2e.py`（`..._b2b3_e2e.out.txt`，空闲卡）+ `harness/probe_b2b3_ncu.sh` /
+    `harness/ncu_b2b3_driver.py`（`..._b2b3_ncu.out.txt`）+ `harness/probe_b2b3_hdh_bf16.py`
+    （`..._hdh_bf16.out.txt`）+ `harness/probe_bwd_chain_split.py`/`probe_b2b3_tiling.py`（诊断留档）
+    + `docs/07` §26。**Part A**：组装链按 kernel 归因，`B8T2048H8` 上 **B2+B3 = 66.6%**（B2 906/B3 580，
+    B1 13.8%）。**Part B**：免费旋钮已用尽——`num_stages` 对 B2/B3 **完全无效**（短归约/标量循环）、
+    tiling 已最优、只有 B3 `num_warps=2` 值 1.16–1.27×。**Part C**：B3 `nw=2` 落链 `dq/dk/dv/dg`
+    **逐位相同**、vs FLA 最坏 max_rel 与 §25.2 逐位一致，整链 dev **0.94–0.98×**。**Part D（ncu）**：
+    **B2 = DRAM-bound（59% SOL）+ 247 寄存器压占用（12.4%）+ `long_sb` 6.6**；**B3 = 无 TensorCore 的
+    FMA/L1-bound（tensor 0.05%、SM 82%）**（B3@64 掉到 2.29 ms 解释 §15）。**Part E**：B2 `h/dh` 换
+    bf16 只值 1.08–1.16×（非量级项，+1.5–2e-3 精度）。**结论**：B2/B3 性质不同须分别处理（B2 减
+    DRAM/寄存器、B3 MMA 化），本轮为**纯剖析 + 免费旋钮收口**，结构性重写留下一步。见 `docs/07` §26。
+  - P7-22（上轮）：把 §17 的 Triton 软件流水从孤立原型落进真实组装链（§12 的链此前写死
     `num_stages=1`）——只把 B1 反向 chunk 循环换成前向 `tl.range(0,NT,num_stages=NS)`（算术一字
     未动）。新增 `harness/check_bwd_b1_pipe_e2e.py`（`..._pipe_e2e.out.txt`，空闲卡）+ `docs/07` §25。
     **Part A**：`NS∈{2,3,4}` 与 `NS=1` 链 `dq/dk/dv/dg/dh0` **逐位相同**、`dbeta` ≤1.5e-8；vs FLA
@@ -690,7 +718,15 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-22 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-23 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-23（`docs/07` §26）第一次把链级新瓶颈 B2/B3 量清楚**：组装链按 kernel 归因，
+    `B8T2048H8` 上 **B2+B3 = 66.6%**（B2 906/B3 580/B1 只 13.8%）。免费旋钮已用尽（`num_stages`
+    对 B2/B3 **无效**、tiling 已最优、只有 B3 `num_warps=2` 值 1.16–1.27×，落链 `dq/dk/dv/dg`
+    **逐位相同**、整链 0.94–0.98×）。**`ncu`**：**B2 = DRAM-bound（59% SOL）+ 247 寄存器压占用
+    （12.4%）+ `long_sb` 6.6**；**B3 = 无 TensorCore 的 FMA/L1-bound（tensor 0.05%、SM 82%）**
+    （B3@64 掉到 2.29 ms）。B2 `h/dh` 换 bf16 只值 1.08–1.16×（非量级项）。**下一步（需新 kernel）**：
+    依 B2/B3 两种不同性质分别做**结构性重写**——B2 减 DRAM 流量（`h/dh` bf16/drop 按 `i_k` 重读/
+    拆 tile 降寄存器）与 B3 的 MMA 化（把逐元素外积改走 `tl.dot`），维持 BT=16 块链。
   - **P7-22（`docs/07` §25）把 §17 的 Triton 软件流水从孤立原型落进真实组装链**：§12 的链此前写死
     `num_stages=1`，本轮只把 B1 反向 chunk 循环换成前向 `tl.range(0,NT,num_stages=NS)`（算术一字
     未动）。`NS=3` 下 B1 **全 shape 反超 FLA `dhu`**（`B2T1024H8` 122→**61.9 µs** vs 137=`2.2×`、

@@ -1,0 +1,89 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3 torch=2.12.0a0+0291f960b6.nv26.04.48445190
+
+# T=512 H=4  chain dev=97.9 us
+    _dhu_kernel_bf16_pipe                                                     34.93 us
+    _wy_dqkg_kernel                                                           21.87 us
+    _intra_kernel                                                             14.95 us
+    void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunc     6.03 us
+    void at::native::vectorized_elementwise_kernel<4, at::native::FillFunc     4.43 us
+    _dav_kernel                                                                3.57 us
+    void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunc     2.33 us
+    chunk_local_cumsum_vector_kernel                                           2.05 us
+    void at::native::vectorized_gather_kernel<16, long>(char*, char*, long     1.60 us
+    void at::native::vectorized_elementwise_kernel<8, at::native::bfloat16     1.51 us
+    exp2_kernel_vectorized4_kernel                                             1.24 us
+    void at::native::vectorized_elementwise_kernel<2, at::native::(anonymo     1.23 us
+    void at::native::vectorized_elementwise_kernel<2, at::native::AUnaryFu     1.21 us
+    void (anonymous namespace)::elementwise_kernel_with_index<int, at::nat     0.95 us
+    Activity Buffer Request                                                    0.00 us
+    cuLaunchKernelEx                                                           0.00 us
+    cudaLaunchKernel                                                           0.00 us
+    cuLaunchKernel                                                             0.00 us
+    cudaDeviceSynchronize                                                      0.00 us
+
+# B2 T=1024 H=8  chain dev=339.7 us
+    _wy_dqkg_kernel                                                          126.24 us
+    _intra_kernel                                                             80.50 us
+    _dhu_kernel_bf16_pipe                                                     61.85 us
+    void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunc    28.30 us
+    _dav_kernel                                                               11.19 us
+    void at::native::vectorized_elementwise_kernel<4, at::native::FillFunc     9.98 us
+    chunk_local_cumsum_vector_kernel                                           6.07 us
+    void at::native::index_elementwise_kernel<128, 4, at::native::gpu_inde     5.09 us
+    void at::native::vectorized_elementwise_kernel<8, at::native::bfloat16     3.26 us
+    void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunc     2.41 us
+    exp2_kernel_vectorized4_kernel                                             1.43 us
+    void at::native::vectorized_elementwise_kernel<2, at::native::(anonymo     1.25 us
+    void at::native::vectorized_elementwise_kernel<2, at::native::AUnaryFu     1.25 us
+    void (anonymous namespace)::elementwise_kernel_with_index<int, at::nat     0.94 us
+    Activity Buffer Request                                                    0.00 us
+    cuLaunchKernelEx                                                           0.00 us
+    cudaLaunchKernel                                                           0.00 us
+    cuLaunchKernel                                                             0.00 us
+    cudaDeviceSynchronize                                                      0.00 us
+
+# B8 T=2048 H=8  chain dev=2226.1 us
+    _wy_dqkg_kernel                                                          904.41 us
+    _intra_kernel                                                            576.67 us
+    _dhu_kernel_bf16_pipe                                                    306.32 us
+    void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunc   202.46 us
+    _dav_kernel                                                               74.84 us
+    void at::native::vectorized_elementwise_kernel<4, at::native::FillFunc    63.48 us
+    chunk_local_cumsum_vector_kernel                                          45.79 us
+    void at::native::vectorized_elementwise_kernel<8, at::native::bfloat16    34.25 us
+    void at::native::index_elementwise_kernel<128, 4, at::native::gpu_inde     9.39 us
+    exp2_kernel_vectorized4_kernel                                             2.57 us
+    void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunc     2.44 us
+    void at::native::vectorized_elementwise_kernel<2, at::native::(anonymo     1.24 us
+    void at::native::vectorized_elementwise_kernel<2, at::native::AUnaryFu     1.24 us
+    void (anonymous namespace)::elementwise_kernel_with_index<int, at::nat     0.98 us
+    Activity Buffer Request                                                    0.00 us
+    cuLaunchKernelEx                                                           0.00 us
+    cudaLaunchKernel                                                           0.00 us
+    cuLaunchKernel                                                             0.00 us
+    cudaDeviceSynchronize                                                      0.00 us
+
+# T=250 H=3 nondiv  chain dev=69.9 us
+    _dhu_kernel_bf16_pipe                                                     18.86 us
+    _wy_dqkg_kernel                                                           14.93 us
+    _intra_kernel                                                             12.48 us
+    void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunc     5.58 us
+    void at::native::vectorized_elementwise_kernel<4, at::native::FillFunc     4.29 us
+    _dav_kernel                                                                2.46 us
+    void at::native::vectorized_elementwise_kernel<2, at::native::CUDAFunc     2.32 us
+    chunk_local_cumsum_vector_kernel                                           1.60 us
+    void at::native::vectorized_gather_kernel<16, long>(char*, char*, long     1.40 us
+    void at::native::vectorized_elementwise_kernel<8, at::native::bfloat16     1.40 us
+    exp2_kernel_vectorized4_kernel                                             1.22 us
+    void at::native::vectorized_elementwise_kernel<2, at::native::(anonymo     1.21 us
+    void at::native::vectorized_elementwise_kernel<2, at::native::AUnaryFu     1.19 us
+    void (anonymous namespace)::elementwise_kernel_with_index<int, at::nat     0.95 us
+    Activity Buffer Request                                                    0.00 us
+    cuLaunchKernelEx                                                           0.00 us
+    cudaLaunchKernel                                                           0.00 us
+    cuLaunchKernel                                                             0.00 us
+    cudaDeviceSynchronize                                                      0.00 us
+
+DONE

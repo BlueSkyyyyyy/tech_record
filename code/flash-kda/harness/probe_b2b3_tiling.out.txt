@@ -1,0 +1,46 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+
+# B2 T=512 H=4
+  BK= 64 BV= 64 nw=4:    18.6 us
+  BK= 64 BV= 64 nw=8:    14.7 us
+  BK=128 BV= 64 nw=4:    44.4 us
+  BK=128 BV= 64 nw=8:    51.5 us
+  BK= 64 BV=128 nw=4:    19.1 us
+  BK= 64 BV=128 nw=8:    15.0 us
+  BK=128 BV=128 nw=4:   601.2 us
+  BK=128 BV=128 nw=8:   761.8 us
+  BK= 32 BV=128 nw=4:    20.2 us
+  BK= 32 BV=128 nw=8:    20.9 us
+  BK=128 BV= 32 nw=4:    45.0 us
+  BK=128 BV= 32 nw=8:    51.3 us
+# B3 T=512 H=4
+  BC=  8 nw=2: ERR CompilationError
+  BC=  8 nw=4: ERR CompilationError
+  BC= 16 nw=2:    16.6 us
+  BC= 16 nw=4:    18.8 us
+  BC= 32 nw=2:    37.7 us
+  BC= 32 nw=4:    50.6 us
+
+# B2 B8 T=2048 H=8
+  BK= 64 BV= 64 nw=4:   900.5 us
+  BK= 64 BV= 64 nw=8:  1161.9 us
+  BK=128 BV= 64 nw=4:  2108.8 us
+  BK=128 BV= 64 nw=8:  3119.6 us
+  BK= 64 BV=128 nw=4:  1001.1 us
+  BK= 64 BV=128 nw=8:  1119.9 us
+  BK=128 BV=128 nw=4: 37820.7 us
+  BK=128 BV=128 nw=8: 47125.4 us
+  BK= 32 BV=128 nw=4:  1002.9 us
+  BK= 32 BV=128 nw=8:  1631.5 us
+  BK=128 BV= 32 nw=4:  2096.7 us
+  BK=128 BV= 32 nw=8:  3076.7 us
+# B3 B8 T=2048 H=8
+  BC=  8 nw=2: ERR CompilationError
+  BC=  8 nw=4: ERR CompilationError
+  BC= 16 nw=2:   510.0 us
+  BC= 16 nw=4:   622.8 us
+  BC= 32 nw=2:  1982.0 us
+  BC= 32 nw=4:  2371.7 us
+
+DONE
