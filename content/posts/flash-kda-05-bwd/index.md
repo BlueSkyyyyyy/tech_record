@@ -1,5 +1,5 @@
 ---
-title: "KDA 前反向算子实现解析（五）：反向 —— 逐 token adjoint 推导、参考实现与 FLA 对拍"
+title: "KDA 前反向算子实现解析（五）：反向 —— 逐 token adjoint、分块反向推导与 FLA 对拍"
 date: 2026-10-12T21:57:00+08:00
 draft: false
 weight: 6

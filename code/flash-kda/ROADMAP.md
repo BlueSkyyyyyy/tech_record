@@ -73,7 +73,7 @@
 - [x] **P5-1** 反向数学：从 `o_t=q_t^T S_t` 与状态递推逐 token 求 adjoint（`dq,dk,dv,dβ,dg, dstate`）。
 - [x] **P5-2** `src/kda_bwd_ref.py`：逐 token 反向参考实现，与 `torch.autograd`（对 `kda_ref.py`）对拍一致。
 - [x] **P5-3** 与 FLA `chunk_kda` 反向（`torch.autograd` 穿 `chunk_kda`）对拍；报 max abs/rel。
-- [ ] **P5-4** 反向分块化（chunked backward）推导：如何复用前向的 `L/INV/Mqk`、状态反向传递。
+- [x] **P5-4** 反向分块化（chunked backward）推导：如何复用前向的 `L/INV/Mqk`、状态反向传递。
 
 ### P6 反向 kernel 解析/实现（`docs/06-kda-bwd-kernel.md`）
 
@@ -111,7 +111,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0/P1/P2/P3 全部完成，P4 全部完成（前向 kernel vs fp64 golden 两方对拍 + golden/FlashKDA/FLA 三方对拍，多 shape/seed/门控区间）；**P5-1/P5-2/P5-3 完成**（反向 adjoint 推导 + 不依赖 autograd 的显式参考实现 + 三方数值核验 + 与 FLA chunked 反向 bf16 对拍）。
+- 当前进度：P0/P1/P2/P3 全部完成，P4 全部完成（前向 kernel vs fp64 golden 两方对拍 + golden/FlashKDA/FLA 三方对拍，多 shape/seed/门控区间）；**P5-1/P5-2/P5-3/P5-4 完成**（反向 adjoint 推导 + 不依赖 autograd 的显式参考实现 + 三方数值核验 + 与 FLA chunked 反向 bf16 对拍 + chunked backward 分块化推导/实现）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -178,8 +178,24 @@
     naive `STSM+LDSM_N`（不转置）max_rel=1.26（全错），**证明转置是数学必需**；延迟微基准
     4×`MOVM_T`=18.0 cyc vs `STSM+syncwarp+LDSM`=21.8 cyc（1.21×），真正收益是省 4096B U 缓冲与
     Phase 3→4→6 对 U 复用的零同步。
-- **下一步：P5-4 反向分块化推导**。把状态伴随沿 chunk 反向传递，复用前向 $L=(I+L)^{-1}$
-  与 $M_{qk}$ 给出 chunked backward 公式，为 P6 的 kernel 设计铺路。
+- **下一步：P6-1 反向 kernel 设计/解析**。FlashKDA 无开源反向，基于 P5-4 的分块反向给出自研
+  kernel 数据流（复用 K1 落盘的 $L/P/M_{qk}$，块内全 GEMM + 块间状态伴随传递），并对照 FLA
+  Triton `chunk_kda` 的 `chunk_bwd_d*` 结构。
+  - P5-4：新增 `docs/05` §7「反向分块化（chunked backward）推导」+ `src/kda_bwd_ref.py::kda_chunked_backward`
+    + `harness/check_bwd_chunked.py`（`harness/check_bwd_chunked.out.txt`）。把逐 token adjoint（式 5.2–5.8）
+    折叠成块内形式：输出支路 $S_{in}+=qd^\top\bar o$、状态更新支路 $S_{in}+=E^{tot}\odot\bar S_{out}$、
+    $U=P u'$、$P=(I+L)^{-1}$ 的伴随 $\bar L=-P^\top\bar P P^\top$（**复用前向 $P$，不再求逆**）、
+    两 GEMM $A_L=kd\,ki^\top$/$A_{qk}=qd\,ki^\top$、衰减链与反向前缀和，块间只传 $D\times D$ 状态伴随
+    （式 7.13）。对拍三方：逐 token 显式 adjoint（P5-2 已证与 autograd 逐位相等）/autograd 穿
+    `kda_chunked_fwd` 本体/autograd 穿 `kda_token_recurrent`。13 组 case（$T=16\to512$、$D=12\to128$、
+    $g\in\{0,1,2,4\}$、chunk $\{15,16\}$、含初态/终态上游）实测：**fp64 六项 $max\_rel\sim10^{-15}$（机器精度，
+    含 $D=128,T=512$）**；fp32（GPU）$\sim10^{-3}$、bf16（GPU）$\sim10^{-2}\sim3\times10^{-1}$。**踩坑**：$S_{in}$
+    出现在输出/状态更新/pred 三处，只有状态更新那支带 $E^{tot}$，第一版把输出支路的 $qd^\top\bar o$
+    并进状态伴随再整体乘 $E^{tot}$，指纹是「`dq` 逐位对、其余五项全错($max\_rel\approx0.3$)」，改成独立
+    累加器即 fp64 归零。fp32 的 $\sim10^{-3}$ 经定位是**参考实现块内求逆走 fp32 `torch.linalg.solve`**：
+    同输入下 `kda_chunked_fwd` 在 GPU 上与前向逐 token 就差 $\sim2.5\times10^{-4}$（CPU 仅 $\sim2\times10^{-7}$，
+    已写进 harness 输出），梯度再放大；「本实现 vs autograd(chunked)」仅 $\sim5\times10^{-4}$ 证明差异来自
+    $P$ 而非反向公式。更新博客 post `flash-kda-05-bwd` 标题。
   - P5-3：新增 `harness/check_bwd_fla.py`（`harness/check_bwd_fla.out.txt`）。用
     `use_qk_l2norm_in_kernel=False`/`use_gate_in_kernel=False`/`use_beta_sigmoid_in_kernel=False`
     让两侧吃**同一份** bf16 操作数（归一化后 q/k、`sigmoid(beta)`、自然对数衰减 `g_fla=g_log2·ln2`，

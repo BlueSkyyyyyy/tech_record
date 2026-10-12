@@ -77,6 +77,11 @@ def _chunk_inv(L):
     reference; the CUDA kernel uses an 8x8 forward substitution + HMMA merge."""
     C = L.shape[0]
     eye = torch.eye(C, dtype=L.dtype, device=L.device)
+    if L.dtype in (torch.bfloat16, torch.float16):
+        # cuSOLVER has no bf16/fp16 LU; solve in fp32 and cast back (the forward ref is
+        # an oracle, low-precision runs only probe error propagation).
+        e = eye.float()
+        return torch.linalg.solve(e + L.float(), e).to(L.dtype)
     return torch.linalg.solve(eye + L, eye)
 
 

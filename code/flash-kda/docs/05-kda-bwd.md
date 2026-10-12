@@ -7,8 +7,8 @@
 > 三方对齐（P5-1 / P5-2），再与 FLA `chunk_kda` 的 chunked 反向在真实 bf16 规模上对拍（P5-3）。
 >
 > 说明：FlashKDA 目前只开源**前向**（`csrc/smxx/fwd_kernel*.cuh`），仓库内没有 CUDA 反向；
-> 因此反向的「真值」以逐 token 数学 + autograd 为准，分块化反向（chunked backward）与 kernel
-> 设计留到 P5-4 / P6。
+> 因此反向的「真值」以逐 token 数学 + autograd 为准。§7 给出**分块化反向（chunked backward）**
+> 的完整推导与参考实现（P5-4），kernel 设计与 CUDA 实现留到 P6。
 
 ## 1. 记号与前向回顾
 
@@ -263,18 +263,213 @@ FLA 的 `g` 是**自然对数**衰减（`alpha=exp(g)`），参考是 **log2** �
 「反向算法有问题」。改回乘 $\ln2$ 后 `dg` 立即降到 3e-3$\sim$7e-3（见 §6.2），五项其余项不变。
 教训：跨实现比梯度时，先把**换元常数**（此处 $\ln2$）写进注释并单独断言一项。
 
-## 7. 小结与下一步
+## 7. 反向分块化（chunked backward）推导（P5-4）
+
+§2 的 adjoint 是逐 token 串行的；真实训练里要与分块前向（`01` §3、`03`）配套，就需要一个
+**块并行**的反向：每个 chunk 内部用矩阵运算做完，只把状态的伴随沿 chunk 从右往左传。本节把
+式 (5.2)–(5.8) 的逐 token adjoint 折叠成 chunk 形式，并说明它能**复用前向已经算好的
+$L,\ P=(I+L)^{-1},\ M_{qk},\ k^{dec},q^{dec},k^{inv},k^{rest},E,E^{tot}$**。
+
+### 7.1 单个 chunk 的前向（回顾，$S$ 采 $[K,V]$ 布局）
+
+沿用 `01` §3、`src/kda_ref.py::kda_chunked_fwd`。对块长 $C$、块起始状态 $S_{\text{in}}$，
+记 $g^{\text{cum}}_i=\sum_{j\le i}g_j$、$g^{\text{tot}}=g^{\text{cum}}_{C-1}$：
+
+$$
+\begin{aligned}
+E_i&=2^{\,g^{\text{cum}}_i},\quad E^{\text{tot}}=2^{\,g^{\text{tot}}},\\
+k^{\text{dec}}_i&=k_i\odot E_i,\quad q^{\text{dec}}_i=q_i\odot E_i\cdot\text{scale},\quad
+k^{\text{inv}}_i=k_i\odot E_i^{-1},\quad k^{\text{rest}}_i=k^{\text{inv}}_i\odot E^{\text{tot}},\\
+L&=\operatorname{tril}\!\big(k^{\text{dec}}{k^{\text{inv}}}^\top,-1\big)\odot\beta,\qquad
+M_{qk}=\operatorname{tril}\!\big(q^{\text{dec}}{k^{\text{inv}}}^\top\big),\qquad P=(I+L)^{-1},\\
+w&=v-k^{\text{dec}}S_{\text{in}},\qquad u'=w\odot\beta,\qquad U=P\,u',\\
+o&=q^{\text{dec}}S_{\text{in}}+M_{qk}U,\qquad
+S_{\text{out}}={k^{\text{rest}}}^\top U+E^{\text{tot}}\odot_{\text{row}}S_{\text{in}}.
+\end{aligned}
+\tag{7.1}
+$$
+
+（$\odot_{\text{row}}$ 表示 $E^{\text{tot}}\in\mathbb{R}^{K}$ 逐行缩放 $S$。）
+
+### 7.2 反向链式法则（单块）
+
+反向输入是输出上游 $\bar o\in\mathbb{R}^{C\times V}$ 和**本块输出状态**的上游
+$\bar S_{\text{out}}\in\mathbb{R}^{K\times V}$（= 下一块传回的 $S_{\text{in}}$ 伴随 + 终态支路）。
+按式 (7.1) 自外向内求伴随，全部是矩阵乘 + 逐元素：
+
+**(a) 输出支路** $o=q^{\text{dec}}S_{\text{in}}+M_{qk}U$：
+
+$$
+\bar q^{\text{dec}}=\bar o\,S_{\text{in}}^\top,\quad
+\bar M_{qk}=\bar o\,U^\top,\quad
+\bar U \mathrel{+}= M_{qk}^\top\bar o,\quad
+\boxed{\bar S_{\text{in}}\mathrel{+}= {q^{\text{dec}}}^\top\bar o}.
+\tag{7.2}
+$$
+
+**(b) 状态更新支路** $S_{\text{out}}={k^{\text{rest}}}^\top U+E^{\text{tot}}\odot_{\text{row}}S_{\text{in}}$：
+
+$$
+\bar k^{\text{rest}}=U\,\bar S_{\text{out}}^\top,\quad
+\bar U\mathrel{+}=k^{\text{rest}}\,\bar S_{\text{out}},\quad
+\bar E^{\text{tot}}=\sum_v \bar S_{\text{out}}\odot S_{\text{in}}\ (\text{逐行}),\quad
+\boxed{\bar S_{\text{in}}\mathrel{+}=E^{\text{tot}}\odot_{\text{row}}\bar S_{\text{out}}}.
+\tag{7.3}
+$$
+
+**(c) $U=P\,u'$：**
+
+$$
+\bar P=\bar U\,u'^\top,\qquad \bar u'=P^\top\bar U.
+\tag{7.4}
+$$
+
+**(d) 求逆 $P=(I+L)^{-1}$：** 因 $dP=-P\,dL\,P$，得 **复用前向 $P$ 即可**（只多两次矩阵乘，无需再求逆）：
+
+$$
+\boxed{\bar L=-P^\top\bar P\,P^\top}.
+\tag{7.5}
+$$
+
+**(e) 两个块内 GEMM** $L=\operatorname{tril}(A_L,-1)\odot\beta$（$A_L=k^{\text{dec}}{k^{\text{inv}}}^\top$）、
+$M_{qk}=\operatorname{tril}(A_{qk})$（$A_{qk}=q^{\text{dec}}{k^{\text{inv}}}^\top$）：
+
+$$
+\bar A_L=\operatorname{tril}\!\big(\bar L\odot\beta,\,-1\big),\qquad
+\bar A_{qk}=\operatorname{tril}\!\big(\bar M_{qk}\big),\qquad
+\bar\beta\mathrel{+}=\operatorname{rowsum}\!\big(\bar L\odot A_L\big).
+\tag{7.6}
+$$
+
+**(f) delta/pred 支路** $u'=w\odot\beta$、$w=v-k^{\text{dec}}S_{\text{in}}$：
+
+$$
+\bar w=\bar u'\odot\beta,\quad
+\bar\beta\mathrel{+}=\sum_v\bar u'\odot w,\quad
+\bar v=\bar w,\quad
+\bar k^{\text{dec}}\mathrel{+}=-\bar w\,S_{\text{in}}^\top,\quad
+\boxed{\bar S_{\text{in}}\mathrel{+}=-\,{k^{\text{dec}}}^\top\bar w}.
+\tag{7.7}
+$$
+
+**(g) 四个共享操作数的 GEMM**（注意 $k^{\text{inv}}$ 出现在两个 GEMM 里，要合并）：
+
+$$
+\bar q^{\text{dec}}\mathrel{+}=\bar A_{qk}k^{\text{inv}},\quad
+\bar k^{\text{inv}}\mathrel{+}=\bar A_{qk}^\top q^{\text{dec}},\quad
+\bar k^{\text{dec}}\mathrel{+}=\bar A_L k^{\text{inv}},\quad
+\bar k^{\text{inv}}\mathrel{+}=\bar A_L^\top k^{\text{dec}}.
+\tag{7.8}
+$$
+
+**(h) 衰减三兄弟** $k^{\text{rest}}=k^{\text{inv}}\odot E^{\text{tot}}$、$k^{\text{dec}}=k\odot E$、
+$q^{\text{dec}}=q\odot E\cdot\text{scale}$、$k^{\text{inv}}=k\odot E^{-1}$：
+
+$$
+\bar k^{\text{inv}}\mathrel{+}=\bar k^{\text{rest}}\odot E^{\text{tot}},\qquad
+\bar E^{\text{tot}}\mathrel{+}=\sum_i\bar k^{\text{rest}}\odot k^{\text{inv}},
+\tag{7.9}
+$$
+
+$$
+\bar k=\bar k^{\text{dec}}\odot E+\bar k^{\text{inv}}\odot E^{-1},\quad
+\bar q=\bar q^{\text{dec}}\odot E\cdot\text{scale},\quad
+\bar E=\bar k^{\text{dec}}\odot k+\bar q^{\text{dec}}\odot q\cdot\text{scale}
+-\bar k^{\text{inv}}\odot k\odot E^{-2}.
+\tag{7.10}
+$$
+
+**(i) 衰减与累积和** $E=2^{g^{\text{cum}}}$、$E^{\text{tot}}=2^{g^{\text{tot}}}$、
+$g^{\text{cum}}_i=\sum_{j\le i}g_j$：
+
+$$
+\bar g^{\text{cum}}=\bar E\odot(\ln 2)\,E,\qquad
+\bar g^{\text{tot}}=\bar E^{\text{tot}}\odot(\ln 2)\,E^{\text{tot}},
+\tag{7.11}
+$$
+
+$$
+\hat g^{\text{cum}}=\bar g^{\text{cum}}\ \text{且}\ \hat g^{\text{cum}}_{C-1}\mathrel{+}=\bar g^{\text{tot}},
+\qquad
+\boxed{\bar g_i=\sum_{j\ge i}\hat g^{\text{cum}}_j}\ (\text{反向前缀和}).
+\tag{7.12}
+$$
+
+### 7.3 跨块状态伴随传递
+
+把 $S_{\text{in}}$ 的三条直接支路（式 7.2/7.3/7.7 的方框）合成一个累加器 $\bar S_{\text{in}}$，
+它就是**上一块的 $\bar S_{\text{out}}$**：
+
+$$
+\bar S_{\text{out}}^{(c-1)}=\bar S_{\text{in}}^{(c)}
+=\underbrace{{q^{\text{dec}}}^\top\bar o}_{\text{输出}}
++\underbrace{E^{\text{tot}}\odot_{\text{row}}\bar S_{\text{out}}^{(c)}}_{\text{递推}}
+-\underbrace{{k^{\text{dec}}}^\top\bar w}_{\text{pred}} .
+\tag{7.13}
+$$
+
+最右块的初始 $\bar S_{\text{out}}^{(L-1)}=\bar S_T^{\text{out}}$（终态上游，可为零）。反向按
+$c=L-1\to0$ 扫块，块**内**全部是 GEMM，块**间**只有 $D\times D$ 的状态伴随传递——这正是
+chunked backward 能 block-parallel 的原因，也解释了 `03`/`05` §6 观察到的「反向误差 ≈ 前向误差」。
+
+### 7.4 参考实现与对拍（P5-4 结果）
+
+`src/kda_bwd_ref.py::kda_chunked_backward` 按式 (7.2)–(7.13) 逐行实现（块长默认 16），
+`harness/check_bwd_chunked.py` 把它与三个独立真值对拍：
+
+1. **`kda_token_backward`**：P5-2 已证与 autograd 逐位相等的逐 token 显式 adjoint；
+2. **autograd 穿过 `kda_chunked_fwd` 本体**（含 $(I+L)^{-1}$，直接校验对分块图求导是否写对）；
+3. **autograd 穿过 `kda_token_recurrent`**（不碰 $P/L$，独立对照）。
+
+13 组 case（$T=16\to512$、$D=12\to128$、$g$ 尺度 $\{0,1,2,4\}$、chunk $\{15,16\}$、含初态与
+终态上游），指标为 `max_rel`（vs 逐 token adjoint）。原始输出 `harness/check_bwd_chunked.out.txt`：
+
+| dtype | dq | dk | dv | dg | dbeta | dh0 |
+|---|---|---|---|---|---|---|
+| **fp64** | 4.2e-16 | 6.4e-16 | 3.9e-16 | 7.3e-16 | 7.5e-16 | 6.1e-16 |
+| fp32 (GPU) | 6.5e-4 | 8.5e-4 | 5.7e-4 | 5.3e-4 | 1.0e-3 | 4.8e-4 |
+| bf16 (GPU) | 1.8e-2 | 6.8e-2 | 2.4e-2 | 4.4e-2 | 2.3e-2 | 1.5e-2 |
+
+关键结论：
+
+- **fp64 下 13 组 case 全部到机器精度**（`max_rel` $\sim10^{-15}$，含 $D=128,T=512$ 的真实规模）。
+  因为分块公式与逐 token 递推在实数域严格等价（`01` §6），其 adjoint 也必然等价；这确认
+  「把逐 token adjoint 折叠成分块形式」没有丢项、没有符号错误。
+- fp32 的 $\sim10^{-3}$ 不是推导误差，而是**参考实现里块内求逆走的是 fp32 `torch.linalg.solve`**：
+  同样输入下 `kda_chunked_fwd` 在 **GPU 上** 与逐 token 前向就差 $\sim3\times10^{-4}$（CPU 上仅
+  $\sim2\times10^{-7}$，见 `harness/check_bwd_chunked.out.txt` 附注），梯度再放大到 $\sim10^{-3}$。
+  同一 case 里「本实现 vs autograd(chunked)」只有 $\sim5\times10^{-4}$（两者都吃同一个 fp32 $P$），
+  证明差异来自 $P$ 的 fp32 精度而非反向公式。**待验证**：真正的 kernel 用 8×8 前代 + HMMA 合并
+  （`02` §8）在 bf16 下是否比 cuSOLVER fp32 更稳，留到 P6。
+- bf16 下 $\sim10^{-2}\sim3\times10^{-1}$，与 `04`/`05` §6 的 bf16 底噪一致。
+
+### 7.5 两个容易写错的点（踩坑）
+
+- **$S_{\text{in}}$ 的伴随不能被 $E^{\text{tot}}$ 缩放。** $S_{\text{in}}$ 出现在三处：输出
+  $q^{\text{dec}}S_{\text{in}}$、状态更新 $E^{\text{tot}}\odot S_{\text{in}}$、pred
+  $k^{\text{dec}}S_{\text{in}}$。只有**状态更新**那支带 $E^{\text{tot}}$。第一版把输出支路的
+  ${q^{\text{dec}}}^\top\bar o$ 也并进了「状态伴随」再整体乘 $E^{\text{tot}}$，结果 `dq` 逐位正确
+  （$dq$ 不依赖状态伴随）而 `dk/dv/dg/dbeta/dh0` 全错、`max_rel≈0.3`——这种「一半对一半错」的
+  指纹正好指向**状态伴随的错误复合**。修法是把 $\bar S_{\text{in}}$ 独立累加（式 7.13），
+  不要与 $\bar S_{\text{out}}$ 混在一个变量里。
+- **式 (7.5) 的转置顺序。** $\bar L=-P^\top\bar P\,P^\top$（不是 $-\bar P^\top P\,\bar P^\top$ 之类）。
+  可以用「$\bar L$ 与 $L$ 同形状、$P$ 非对称时顺序敏感」单测一项来钉死。
+
+## 8. 小结与下一步
 
 - 推导层面：式 (5.2)–(5.8) 给出逐 token gated delta rule 的完整 adjoint，六个梯度全解析；
-  式 (5.9)–(5.10) 补齐门激活链。
-- 实现层面：`src/kda_bwd_ref.py` 不依赖 autograd，fp64 与 `torch.autograd` **逐位相等**，
-  中心差分独立确认到 $\sim10^{-10}$。
+  式 (5.9)–(5.10) 补齐门激活链；式 (7.2)–(7.13) 把它折叠成 chunked backward，只复用前向的
+  $L,P,M_{qk}$ 与衰减因子，状态伴随按块反传。
+- 实现层面：`src/kda_bwd_ref.py` 不依赖 autograd，逐 token 版 fp64 与 `torch.autograd` **逐位相等**，
+  中心差分独立确认到 $\sim10^{-10}$；分块版（`kda_chunked_backward`）fp64 与逐 token 版
+  **机器精度一致**（$max\_rel\sim10^{-15}$，13 组 case 含 $D=128$）。
 - 跨实现层面（P5-3）：与 FLA `chunk_kda` 的 chunked 反向（bf16、$D=128$、多头）六项梯度全部
   落在 bf16 底噪 $3\times10^{-3}\sim8\times10^{-3}$，与前向误差同阶，确认推导在真实规模下成立。
-- 反向的结构特征：**token 维串行**（状态伴随 $G$ 沿时间前传），块内可并行——这正是 chunked
-  backward 的设计空间。
+- 反向的结构特征：**块内并行（全 GEMM）、块间串行（只传 $D\times D$ 状态伴随）**——这正是
+  chunked backward 的设计空间。
 
 下一步：
 
-- **P5-4**：反向分块化推导——复用前向的 $L=(I+L)^{-1}$ 型下三角求逆与 $M_{qk}$，把状态
-  伴随沿 chunk 反向传递，给出 chunked backward 的公式（为 P6 的 kernel 设计铺路）。
+- **P6-1**：反向 kernel 设计/解析。FlashKDA 无开源反向，基于 §7 的分块反向给出自研 kernel
+  的数据流（复用 K1 落盘的 $L/P/M_{qk}$，块内 GEMM + 块间状态伴随；或先看 FLA Triton
+  `chunk_kda` 的 `chunk_bwd_d*` 结构对照）。

@@ -107,6 +107,164 @@ def kda_token_backward(q, k, v, g, beta, scale, dout, h0=None, dfinal_state=None
     return dict(dq=dq, dk=dk, dv=dv, dg=dg, dbeta=dbeta, dh0=dh0)
 
 
+def kda_chunked_backward(q, k, v, g, beta, scale, dout, h0=None, dfinal_state=None,
+                         chunk=16):
+    """Chunked (blocked) backward of the gated delta rule -- P5-4.
+
+    Differentiates the *blocked forward* (:func:`kda_ref.kda_chunked_fwd`) by hand.
+    Per chunk it reuses the forward quantities ``L``, ``P=(I+L)^-1``, ``M_qk`` and the
+    decay factors ``E=2**gc`` / ``etot=2**gtot``; the state adjoint ``dS`` is carried
+    **right-to-left across chunks**. Returns the same dict as
+    :func:`kda_token_backward` (``dq, dk, dv, dg, dbeta, dh0``). No autograd is used.
+
+    The full derivation (formulas (5.11)-(5.24) in ``docs/05``) is reproduced inline
+    step by step so each line is auditable against the doc.
+    """
+    import math
+
+    from kda_ref import _chunk_inv
+
+    T, D = q.shape
+    dt = q.dtype if q.dtype.is_floating_point else torch.float32
+    q = q.to(dt)
+    k = k.to(dt)
+    v = v.to(dt)
+    g = g.to(dt)
+    beta = beta.to(dt)
+    dout = dout.to(dt)
+    ln2 = math.log(2.0)
+
+    dq = torch.zeros_like(q)
+    dk = torch.zeros_like(k)
+    dv = torch.zeros_like(v)
+    dg = torch.zeros_like(g)
+    dbeta = torch.zeros_like(beta)
+
+    # ---- forward recompute, caching every per-chunk intermediate ----------------
+    caches = []
+    S = torch.zeros(D, D, dtype=dt, device=q.device) if h0 is None else h0.to(dt).clone()
+    for t0 in range(0, T, chunk):
+        C = min(chunk, T - t0)
+        sl = slice(t0, t0 + C)
+        qc, kc, vc, gc_, bc = q[sl], k[sl], v[sl], g[sl], beta[sl]
+        if C < chunk:
+            pad = chunk - C
+            qc = torch.cat([qc, qc.new_zeros(pad, D)], 0)
+            kc = torch.cat([kc, kc.new_zeros(pad, D)], 0)
+            vc = torch.cat([vc, vc.new_zeros(pad, D)], 0)
+            gc_ = torch.cat([gc_, gc_.new_zeros(pad, D)], 0)
+            bc = torch.cat([bc, bc.new_zeros(pad)], 0)
+
+        gcum = gc_.cumsum(dim=0)
+        gtot = gcum[-1]
+        E = torch.exp2(gcum)
+        etot = torch.exp2(gtot)
+        kd = kc * E
+        qd = qc * E * scale
+        ki = kc * torch.exp2(-gcum)
+        kr = ki * etot[None, :]
+        Aqk = qd @ ki.transpose(0, 1)
+        Mqk = torch.tril(Aqk)
+        ALtilde = torch.tril(kd @ ki.transpose(0, 1), diagonal=-1)
+        L = ALtilde * bc[:, None]
+        P = _chunk_inv(L)
+        w = vc - kd @ S
+        uprime = w * bc[:, None]
+        U = P @ uprime
+        S_in = S
+        S = kr.transpose(0, 1) @ U + etot[:, None] * S
+        caches.append(dict(C=C, sl=sl, qc=qc, kc=kc, vc=vc, bc=bc, E=E, etot=etot, kd=kd,
+                           qd=qd, ki=ki, kr=kr, ALtilde=ALtilde, Mqk=Mqk, P=P, w=w,
+                           uprime=uprime, U=U, S_in=S_in))
+
+    # ---- reverse pass over chunks; dS is the adjoint of the chunk-output state ---
+    dS = torch.zeros(D, D, dtype=dt, device=q.device)
+    if dfinal_state is not None:
+        dS = dS + dfinal_state.to(dt)
+
+    for c in reversed(caches):
+        sl = c["sl"]
+        C = c["C"]
+        Cp = c["vc"].shape[0]
+        bc = c["bc"]
+        do = torch.zeros(Cp, D, dtype=dt, device=q.device)
+        do[:C] = dout[sl]
+
+        dbeta_c = torch.zeros(Cp, dtype=dt, device=q.device)
+
+        # At loop entry ``dS`` is the adjoint of the chunk-OUTPUT state ``S_out``.
+        # ``S_in`` appears in three places (o, the state update, and pred), so its
+        # adjoint is accumulated separately in ``dS_in`` -- crucially NOT multiplied
+        # by ``etot`` (only the recurrence branch is).
+        dS_in = c["qd"].transpose(0, 1) @ do          # (a) o = qd @ S_in + Mqk @ U
+
+        # (a) output branch
+        dqd = do @ c["S_in"].transpose(0, 1)
+        dMqk = do @ c["U"].transpose(0, 1)
+        dU = c["Mqk"].transpose(0, 1) @ do
+
+        # (b) S_out = kr^T @ U + etot[:,None] * S_in
+        dkr = c["U"] @ dS.transpose(0, 1)
+        dU = dU + c["kr"] @ dS
+        detot = (dS * c["S_in"]).sum(dim=1)
+        dS_in = dS_in + c["etot"][:, None] * dS
+
+        # (c) U = P @ uprime
+        dP = dU @ c["uprime"].transpose(0, 1)
+        duprime = c["P"].transpose(0, 1) @ dU
+
+        # (d) P = (I + L)^-1  =>  dP = -P dL P  =>  dL = -P^T dP P^T
+        dL = -(c["P"].transpose(0, 1) @ dP @ c["P"].transpose(0, 1))
+
+        # (e) L = tril(AL, -1) * beta[:,None]
+        dLtilde = dL * bc[:, None]
+        dbeta_c = dbeta_c + (dL * c["ALtilde"]).sum(dim=1)
+        dAL = torch.tril(dLtilde, diagonal=-1)
+
+        # (f) Mqk = tril(qd @ ki^T)
+        dAqk = torch.tril(dMqk)
+
+        # (g) uprime = (v - kd @ S_in) * beta
+        dw = duprime * bc[:, None]
+        dbeta_c = dbeta_c + (duprime * c["w"]).sum(dim=1)
+        dvc = dw
+        dkd = -(dw @ c["S_in"].transpose(0, 1))
+        dS_in = dS_in + -(c["kd"].transpose(0, 1) @ dw)   # pred branch: w = v - kd S_in
+
+        # (h) two GEMMs sharing ki: Aqk = qd @ ki^T, AL = kd @ ki^T
+        dqd = dqd + dAqk @ c["ki"]
+        dki = dAqk.transpose(0, 1) @ c["qd"]
+        dkd = dkd + dAL @ c["ki"]
+        dki = dki + dAL.transpose(0, 1) @ c["kd"]
+
+        # (i) kr = ki * etot[None,:]
+        dki = dki + dkr * c["etot"][None, :]
+        detot = detot + (dkr * c["ki"]).sum(dim=0)
+
+        # (j) kd = kc*E ; qd = qc*E*scale ; ki = kc / E
+        dE = dkd * c["kc"] + dqd * c["qc"] * scale - dki * c["kc"] / (c["E"] * c["E"])
+        dkc = dkd * c["E"] + dki / c["E"]
+        dqc = dqd * c["E"] * scale
+
+        # (k) E = 2**gc ; etot = 2**gtot
+        dgc = dE * (ln2 * c["E"])
+        dgtot = detot * (ln2 * c["etot"])
+
+        # (l) gc = cumsum(g) ; gtot = gc[-1]
+        dgc[-1] = dgc[-1] + dgtot
+        dgc_ = torch.flip(torch.cumsum(torch.flip(dgc, [0]), dim=0), [0])
+
+        dq[sl] = dqc[:C]
+        dk[sl] = dkc[:C]
+        dv[sl] = dvc[:C]
+        dg[sl] = dgc_[:C]
+        dbeta[sl] = dbeta_c[:C]
+
+        dS = dS_in   # carry S_in adjoint to the previous chunk
+
+    return dict(dq=dq, dk=dk, dv=dv, dg=dg, dbeta=dbeta, dh0=dS)
+
+
 def kda_gate_backward(dg_decay, g_logits, A_log, dt_bias=None, lower_bound=-5.0,
                       LOG2E=LOG2E):
     """Chain the decay-level adjoint ``dg_decay`` back to the raw gate logits.
