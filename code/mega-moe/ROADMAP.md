@@ -1496,7 +1496,43 @@
       `0,0,2,3`→`{0,2,3}`、全同、互异、单 rank、两两重复五类）输出 **0/1280**、权重 **0/20**、
       加 bias **0/1280**；**topk-layout**（8 rank>topk4）输出 **0/1280**、权重 **0/20**；
       ④ Python 独立 oracle 重写 constexpr + `__ffs` 去重选择逻辑 ALL PASS。配套博客
-      `content/posts/mega-moe-58-deepep-combine-reduce`（索引页新增第 58 篇）。
+       `content/posts/mega-moe-58-deepep-combine-reduce`（索引页新增第 58 篇）。
+
+### P49 增量（opt-in，补齐 DeepEP 所有 kernel 共用的设备端公共层）
+
+- [x] **P49-1** **DeepEP 的设备端公共层**（`deep_ep/include/deep_ep/common/ptx.cuh` /
+      `common/math.cuh` / `common/utils.cuh` / `layout/common/barrier.cuh`）。第 7 篇拆了
+      dispatch/combine 数据流、第 53 篇 EPLB、第 58 篇 combine 归约，但**它们每一行
+      `mbarrier`/`cp.async`/`TMA`/`red.release.sys`/`__match_any_sync` 都来自这层，却从没单独拆过**。
+      **架构无关内联 asm，H100 真机可跑真实设备代码**；`multimem`/`cvt.rs` 仅语义 oracle。
+      → `docs/59-deepep-ptx-primitives.md`（真实行号核对）：八组原语——① **mbarrier 五原语**
+      `:49-83`（init+fence / invalidate / arrive / arrive.expect_tx / try_wait.parity + 相位翻转）
+      与 DeepEP 特有计数模型：`cp.async.mbarrier.arrive` 发射时 +1、完成时 −1（净零但卡住 mbarrier）
+      ⇒ dispatch 的 mbarrier init count 是 **1** 而非线程数（`dispatch.cuh:273/309/353-354`）；
+      ② **三条搬运路径**：`tma_load_1d` `:122-134`（`shared::cluster` + `kEvictFirst`）、
+      `tma_store_1d` `:136-146`（`bulk_group` + `kEvictNormal`）、`tma_store_reduce_add_f32`
+      `:148-156`（`cp.reduce.async.bulk…add.f32` 元素级归约，`reduce_grads.cuh:82` 等）、
+      `st_bulk` `:85-101`（SM100 `st.bulk`，sm90 回退）；③ **NVLink 多播 `multimem.*`** `:162-195`
+      （`bucket/all_reduce/nvlink.cuh:44-50` 把每 rank NVLink 流量从 O(N) 降到 O(1)）；
+      ④ **谓词化访存** `:223-362`（`*_with_{ge,gt}_pred` + `ld.global.nc` + `L1::no_allocate` +
+      L2 cache hint）+ `common/utils.cuh:14-75` 的 `iterate_ld_st` 网格步进 + 尾部裁剪；
+      ⑤ **内存序阶梯** `:364-478`（`red`/`red_add_rel_{gpu,sys}`/`ld_acquire_sys`/`st_release_sys`/
+      `st_relaxed_{gpu,sys}`/`ld_volatile`/`fence_*`）与「跨卡为什么必须 `sys`」；
+      ⑥ **`warpgroup_reg_realloc`** `:454-469`（`setmaxnreg`，初始预算 `(65536/t/8)*8`，
+      `hybrid_combine.cuh:112/358` 等）；⑦ **warp 内建** `:481-560`（`exchange`/`gather`/`match`/
+      `get_master_lane_idx`=`bfind.u32`/`deduplicate`/`warp_{inclusive,exclusive}_sum`/`ffs`）；
+      ⑧ **浮点打包** `:562-608`（`fadd4`/`fmul4`/`accumulate` 的 SM100 packed 快路 + sm90 回退、
+      `cvt_rs_bf16x2` 随机舍入）。另拆 `math.cuh:25-33` 的 `encode_decode_positive`（`-x-1` 对合，
+      「未就绪=0、已就绪=负数」，`dispatch.cuh:128/189-190/226` 跨 rank 计数就靠它）、
+      `math.cuh:44-66` 的 `pack2/unpack2`（低位在前）、`layout/common/barrier.cuh:11-22` 的
+      `BarrierSignals`（计数 + 双相位）。**H100 真机 41 PASS / 0 FAIL**（`src/deepep_ptx_primitives.cu`
+      + `harness/exp_deepep_ptx_primitives.{sh,out.txt}`，**直接 include 真实头文件、跑真实设备代码**）：
+      mbarrier 相位翻转、TMA 载入/`cp.reduce.add.f32` 归约写（init+a+b=110 vs 覆盖 3）、
+      `cp.async` 计数模型、谓词裁剪 + `iterate_ld_st` 1000 元素全对、`red_add×3`=768、
+      **2000 轮 release-acquire 生产者-消费者坏数据=0**、warp 内建逐项对拍、`setmaxnreg.dec` 实跑；
+      坐实 `cvt.rs` 在 `sm_90a` 被 ptxas 拒（`Feature '.rs' not supported`）、`sm_100a` 通过。
+      配套博客 `content/posts/mega-moe-59-deepep-ptx-primitives`（索引页新增第 59 篇）。
+
 
 ## 每轮增量流程（autopilot）
 
@@ -1522,10 +1558,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P48 各增量完成（P15-1…P41-1、P42-1、P43-1、P44-1、P45-1、P46-1、P47-1、P48-1）。**
-  本轮 P48-1：新建 `docs/58-deepep-combine-reduce.md`（+`src/deepep_combine_reduce.cu`、
-  `harness/exp_deepep_combine_reduce.{py,sh,out.txt}`）——补上 `docs/07` 只一笔带过的 **DeepEP combine 归约侧**
-  （`combine_reduce` 家族）：专家算完后「把结果加回源 token」这一步的逐行实现，是 EP 归约侧的落点，
+- 当前进度：**P0~P14 全部完成；P15~P49 各增量完成（P15-1…P41-1、P42-1、P43-1、P44-1、P45-1、P46-1、P47-1、P48-1、P49-1）。**
+  本轮 P49-1：新建 `docs/59-deepep-ptx-primitives.md`（+`src/deepep_ptx_primitives.cu`、
+  `harness/exp_deepep_ptx_primitives.{sh,out.txt}`）——补上 **DeepEP 所有 kernel 共用的设备端公共层**
+  `common/ptx.cuh`（612 行）+ `math.cuh`/`utils.cuh`/`layout/common/barrier.cuh`；第 7/11/53/58 篇里
+  每一行 `mbarrier`/`cp.async`/`TMA`/`red.release.sys`/`__match_any_sync` 都源于此却从没单独拆过。
+  八组原语（mbarrier 五原语 + `cp.async.mbarrier.arrive` 的「发射+1/完成−1」计数模型 ⇒ dispatch 的
+  mbarrier init count=1；TMA 三条搬运路径含 `cp.reduce.async.bulk…add.f32`；NVLink 多播 `multimem.*`；
+  谓词化访存 + `iterate_ld_st`；`gpu`/`sys` 两档内存序；`warpgroup_reg_realloc`；warp 内建；浮点打包
+  `fadd4`/`fmul4`/`accumulate`/`cvt_rs_bf16x2`）+ `encode_decode_positive`（未就绪=0、已就绪=负数）
+  与 `BarrierSignals`。**H100 真机 41 PASS/0 FAIL**：直接 include 真实头文件跑真实设备代码——
+  mbarrier 相位翻转、TMA 载入/归约写、`cp.async` 计数、谓词裁剪、2000 轮 release-acquire 坏数据=0、
+  warp 内建逐项、`setmaxnreg` 实跑；`multimem`/`cvt.rs` 仅语义 oracle（实证 `cvt.rs` sm90 被拒/sm100 通过）。
+  配套博客 `content/posts/mega-moe-59-deepep-ptx-primitives`（索引页新增第 59 篇）。
+  上一轮 P48-1：新建 `docs/58-deepep-combine-reduce.md`——补上 `docs/07` 只一笔带过的
+  **DeepEP combine 归约侧**（`combine_reduce` 家族）：专家算完后「把结果加回源 token」这一步的逐行实现，是 EP 归约侧的落点，
   与 `docs/11` 的 DeepGEMM 自研 combine 成对照。三个核心事实：① **两阶段 + PDL**——主 combine kernel 做搬运+
   本地归约，`combine_reduce_epilogue_impl` 可**延迟**到 compute stream 做跨 rank 求和（host 包 lambda
   `ep.hpp:925-950`），靠 `cudaGridDependencySynchronize`（`:57-59`）与主 kernel 建立顺序，故 epilogue 里读
@@ -2023,7 +2070,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P48 已完成（新增 **P48-1 DeepEP combine 的归约 epilogue**：
+- **下一步**：P0~P49 已完成（新增 **P49-1 DeepEP 的设备端公共层** `common/ptx.cuh` 等：
+  mbarrier 五原语 + `cp.async.mbarrier.arrive` 计数模型、TMA 三条搬运路径（含 `cp.reduce...add.f32`）、
+  NVLink 多播 `multimem.*`、谓词化访存 + `iterate_ld_st`、`gpu`/`sys` 两档内存序、
+  `warpgroup_reg_realloc`、warp 内建、浮点打包 + `encode_decode_positive`/`BarrierSignals`；
+  H100 真机直接 include 真实头文件跑真实设备代码 41 PASS/0 FAIL；`multimem`/`cvt.rs` 仅语义 oracle；见上）。
+  上一轮 P48-1：**P48-1 DeepEP combine 的归约 epilogue**：
   补上 `docs/07` 一笔带过的 combine 归约侧（`combine_reduce` 家族）——两阶段 + PDL、rank/topk
   双布局（主 kernel 与 epilogue 共用同一 constexpr）、top-k 去重（`deduplicate`+`compute_topk_slots`+
   `-1` 谓词跳过）、bf16 直加旁路 vs fp32 累加；H100 真机直接 include 真实头文件跑真实
@@ -2142,7 +2194,9 @@
   ② **einsum 家族 FP8 投影（P11 已开）**：`bhr,hdr->bhd` 已做；`bhd,hdr->bhr` / `bhd,bhr->hdr`
   是 arch10 专属（仅分析）。可再补 `fp8_einsum` 的 FP8 输出对（SM100 `Kernel1D1D`）精读；
   ③ **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
-  并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）；
+  并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）。**DeepEP 的设备端公共层
+  已由 P49-1 补齐**（`common/ptx.cuh` 等，H100 真机 41 PASS）；DeepEP 侧余下的运行期空档（bucket
+  集合通信 `all_gather/all_reduce/reduce_scatter`、`pp_send_recv`、`engram`）都要 NCCL 设备 API，待环境。
   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
     shared expert 分支的更深精读；端到端需 SM100，当前不可行。
   ⑤ **k-grouped SF 打包**：P16-1 已完成（host 契约 + device 逐行对拍，H100 真实设备代码）。
