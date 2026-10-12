@@ -1,0 +1,12 @@
+ranks  exp    tok topk        mma  blkM stL1 stL2  blkK   pull stages  smemKiB real_match
+    8  256   4096    8    fp8xfp4   240   24    8   128   7168      5    198.6         OK
+    8  256    512    8    fp8xfp4   192   32   32   128   7168      6    223.4         OK
+    8  256    128    8    fp8xfp4    64   16   16   128   7168      9    226.9         OK
+    8  256     32    8    fp8xfp4    16    8    8   128   7168     10    213.7         OK
+    8  256      8    8    fp8xfp4    16    8    8   128   7168     10    213.7         OK
+    8   64   4096    8    fp8xfp4   240   24    8   128   7168      5    198.6         OK
+    2   16   4096    4    fp8xfp8   240   40   40   128   7168      5    213.1         OK
+    8  256   4096    8  bf16xbf16   240   40   40    64   3584      6    221.4         OK
+   32  256   4096    8    fp8xfp4   240   24    8   128   7168      5    198.6         OK
+
+复刻 vs DeepGEMM binding：全部一致
