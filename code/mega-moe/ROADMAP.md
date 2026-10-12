@@ -1233,6 +1233,37 @@
       `0/1/2/-1` 与 `false/true/abc` 被拒；E) 上游 `test_lazy_init.py` 3 tests OK。行号全部核对过。
       配套博客 `content/posts/mega-moe-50-runtime-lifecycle`（索引页新增第 50 篇）。
 
+### P41 增量（opt-in，补上 Mega MoE 一直缺席的「验收测试即正确性规范」）
+
+- [x] **P41-1** **Mega MoE 的端到端测试与逐位正确性判据**（`tests/test_mega_moe.py`；
+      `deep_gemm/utils/math.py:26-52`；`deep_gemm/utils/dist.py:38-66`）；
+      `csrc/apis/mega_moe.hpp:21-31`；`impls/sm100_fp8_fp4_mega_moe.cuh:145-149`）。
+      第 40 篇拆了测试基座（`bench_kineto`/`calc_diff`）、第 41 篇拆了操作数生成器，本篇补上
+      Mega MoE **唯一的端到端验收测试**——它是「正确性判据（逐位相等）」与前面各篇反复引用的
+      「TFLOPS/HBM/NVLink/overlap 数字」的出处。**端到端 fused 对比 SM100 专属，仅分析**
+      （oracle 还依赖 DeepEP，本机 NCCL 受阻）；**测试侧变换/判据/参考数学/账目公式架构无关，
+      H100 真机实测**。
+      → `docs/51-mega-moe-test-correctness.md`（真实行号核对）：**一次 launch 比两套实现**——
+      `run_fused`（单 mega-kernel）vs `run_baseline`（DeepEP dispatch → `m_grouped` GEMM ×2 →
+      tilelang SwiGLU → combine），**`torch.equal` 逐位验收**（`:345-346`，非 `calc_diff`：重叠只是
+      调度变换、任何误差都是 bug）× `use_deterministic_algorithms(True)`（`:77`）；正确性对比被
+      `is_legacy_loaded`（`:15-33` 需 DeepEP+tilelang_ops）门控（`:339`），故 oracle 依赖 DeepEP。
+      三个测试侧 SF 布局变换：① `_cast_fp8_for_mega_moe`（`:53-59`）量化 + TMA 列主序对齐
+      （`per_token_cast_to_fp8` packed -> `(mn,k/32/4)` int32、`x_sf_tma` stride `(1,align(mn,4))`）；
+      ② `_to_shared_mega_moe_sf_layout`（`:36-50`）共享专家的 **UTCCP 4×32 交错**（与 kernel
+      `transform_sf_token_idx` `:145-149` 逐项等价）+ 按 `block_m` 分块补零；③ `_copy_fp8_sf`
+      （`:62-70`）padding 行**广播最后一行**。性能账目（`:368-401`）：FLOP 系数 **3=L1 gate+up+L2**、
+      HBM「权重+激活读写+输出」、`routed_weight_elem_size` 随 mma_type（bf16/2、fp8/1、**fp4/0.5**）、
+      NVLink `M_recv·H·3`、`t_reduction=M·H·2(1+topk)/6.5e12`（**经验常数**）、
+      `overlap_factor=elapsed/(elapsed-t_reduction)`。H100 实测 `harness/exp_mega_moe_test.{py,sh,out.txt}`
+      （**直接 import 真实 test 文件复用 helper**）：**37 PASS / 0 FAIL**——SF 变换对 4 组
+      `block_m∈{8,64,128,240}` 与 kernel 公式逐点相等/padding 全零/列主序；逐位判据用真实 SM90
+      `m_grouped_bf16_gemm_nt_contiguous`（两次逐位相等、改 1 元素即不等、组内重排对应行不变）；
+      单 rank 参考数学朴素循环 vs 分组向量化 fp64 `relerr 2.7e-16`、共享项无权重只加一次
+      （错乘 topk 权重和 relerr 0.687）、masked/clamp 生效；账目公式三 mma_type 复算、overlap 单调、
+      实测归约读带宽 ~2.6 TB/s。配套博客 `content/posts/mega-moe-51-mega-moe-test-correctness`
+      （索引页新增第 51 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1257,8 +1288,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P40 各增量完成（P15-1…P39-1、P40-1）。**
-  本轮 P40-1：新建 `docs/50-runtime-lifecycle.md`（+`harness/exp_runtime_lifecycle.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P41 各增量完成（P15-1…P40-1、P41-1）。**
+  本轮 P41-1：新建 `docs/51-mega-moe-test-correctness.md`（+`harness/exp_mega_moe_test.{py,sh,out.txt}`）
+  ——补上 Mega MoE 一直缺席的**端到端验收测试 `tests/test_mega_moe.py`**，它是「正确性判据」与
+  前面各篇反复引用的「TFLOPS/HBM/NVLink/overlap 数字」的共同出处。三个核心事实：① **逐位判据**——
+  `run_fused`（单 mega-kernel）与 `run_baseline`（DeepEP dispatch→`m_grouped`×2→SwiGLU→combine）
+  用 **`torch.equal`**（`:345-346`，非 `calc_diff`）验收，配合 `use_deterministic_algorithms(True)`
+  （`:77`），因为「通信-计算重叠」只是调度变换、不改变任何一次乘加；② **oracle 依赖 DeepEP**——
+  对比被 `is_legacy_loaded`（`:339`）门控，本机 DeepEP 受阻（第 0 篇/阻塞），故端到端在 H100 跑不了，
+  本篇只验证测试侧架构无关部分；③ **测试侧三个 SF 布局变换**——`_cast_fp8_for_mega_moe`（`:53-59`）
+  量化+TMA 列主序对齐、`_to_shared_mega_moe_sf_layout`（`:36-50`）共享专家的 UTCCP 4×32 交错
+  （与 kernel `transform_sf_token_idx` `:145-149` 逐项等价）、`_copy_fp8_sf`（`:62-70`）padding
+  广播最后一行。另拆性能账目（`:368-401`：FLOP 系数 3=L1 gate+up+L2、fp4 权重 0.5 字节、
+  `t_reduction` 的 6.5e12 经验常数、`overlap_factor` 定义）。**H100 真机 37 PASS / 0 FAIL**（直接
+  import 真实 test 复用它自己的 helper；逐位判据用真实 SM90 grouped BF16 kernel；参考数学 fp64
+  relerr 2.7e-16）。行号全部核对过。配套博客
+  `content/posts/mega-moe-51-mega-moe-test-correctness`（索引页新增第 51 篇）。
+  上一轮 P40-1：新建 `docs/50-runtime-lifecycle.md`（+`harness/exp_runtime_lifecycle.{py,sh,out.txt}`）
   ——补上第 48 篇只当「字段容器」一笔带过的 `Runtime` 的**生命周期与资源所有权**。三个核心事实：
   ① **`LazyInit` 的「null factory = 终态」**（`lazy.hpp:21,27`）让 `shutdown()` 只需一行
   `runtime = LazyInit(nullptr)`（`config.hpp:13`）：首次访问才构造、整体替换即析构、之后任何
@@ -1648,7 +1694,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P40 已完成（新增 **P40-1 DeepGEMM 运行时对象生命周期与资源所有权**：
+- **下一步**：P0~P41 已完成（新增 **P41-1 Mega MoE 的端到端测试与逐位正确性判据**：
+  补上 `tests/test_mega_moe.py`——`run_fused` vs `run_baseline` 用 `torch.equal` 逐位验收、
+  三个测试侧 SF 布局变换（TMA 列主序对齐 / 共享专家 UTCCP 4×32 交错 / padding 广播）、
+  性能账目公式（FLOP=3、fp4 权重 0.5B、overlap factor）；**H100 真机 37 PASS**（直接 import
+  真实 test 复用 helper）；端到端 fused 对比 SM100 专属且 oracle 依赖 DeepEP，仅分析；见上）。
+  上一轮 P40-1：P0~P40 已完成（新增 **P40-1 DeepGEMM 运行时对象生命周期与资源所有权**：
   补上第 48 篇只当「字段容器」的 `Runtime` 的 lazy init / shutdown / cuBLASLt handle 与 per-stream
   workspace 归属——`LazyInit` 的「null factory = 终态」、`shutdown()` 一行赋值即永久置空且 `init`
   不可恢复、handle 默认自建自毁、workspace 每 stream 一份 16 MiB、`atexit(shutdown)` 规避退出

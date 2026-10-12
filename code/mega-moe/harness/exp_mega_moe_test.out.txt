@@ -1,0 +1,79 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+arch_major = 9 (H100=9)
+deep_gemm  = ~/github/DeepGEMM/deep_gemm/__init__.py
+test module = ~/github/DeepGEMM/tests/test_mega_moe.py
+
+==============================================================================
+A. 测试侧的 SF 布局变换（纯 torch，H100 真机）
+==============================================================================
+A1 x_fp8.shape=(200, 7168) x_sf.shape=(200, 56) x_sf.dtype=torch.int32 x_sf_tma.shape=(200, 56)
+  [PASS] A1 x_fp8 shape == (mn, k) 
+  [PASS] A1 x_sf packed shape == (mn, k/32/4) expected (mn,56)
+  [PASS] A1 x_sf_tma 列主序 stride == (1, align(mn,4)) (1, 200)
+  [PASS] A2 x_sf_tma 内容 == x_sf 
+  [PASS] A2 x_sf == per_token_cast_to_fp8(packed) 
+
+A3 _to_shared_mega_moe_sf_layout：与 kernel 公式逐点对比
+  [PASS] A3 block_m=128 num_tokens=200: 逐点 == kernel 公式 
+  [PASS] A3 block_m=128: 未占用行全零 
+  [PASS] A3 block_m=128: 列主序 stride == (1, num_max) (1, 256)
+  [PASS] A3 block_m=64 num_tokens=137: 逐点 == kernel 公式 
+  [PASS] A3 block_m=64: 未占用行全零 
+  [PASS] A3 block_m=64: 列主序 stride == (1, num_max) (1, 384)
+  [PASS] A3 block_m=240 num_tokens=300: 逐点 == kernel 公式 
+  [PASS] A3 block_m=240: 未占用行全零 
+  [PASS] A3 block_m=240: 列主序 stride == (1, num_max) (1, 512)
+  [PASS] A3 block_m=8 num_tokens=8: 逐点 == kernel 公式 
+  [PASS] A3 block_m=8: 未占用行全零 
+  [PASS] A3 block_m=8: 列主序 stride == (1, num_max) (1, 128)
+
+A4 _copy_fp8_sf：padding 广播语义
+  [PASS] A4 num_tokens<dst: 前段 copy、后段广播最后一行 
+  [PASS] A4 num_tokens==0: 完全 no-op 
+  [PASS] A4 shape 相同: 直接 copy 
+
+==============================================================================
+B. 正确性判据：torch.equal（逐位）而非 calc_diff（tests/test_mega_moe.py:345-346）
+==============================================================================
+  [PASS] B1 同一 kernel 两次调用逐位相等 
+  [PASS] B1 calc_diff == 0 calc_diff=0.000e+00
+  [PASS] B2 改动 1 个输入元素 -> 逐位不等且 calc_diff>0 calc_diff=1.405e-05
+  [PASS] B2 组内 token 重排 -> 对应行逐位不变（行独立/确定性） 
+
+==============================================================================
+C. 单 rank 参考数学：dispatch -> L1 -> SwiGLU -> L2 -> combine(+shared)
+==============================================================================
+  [PASS] C1 向量化 grouped == 朴素循环 (fp64, 语义等价) relerr=2.695e-16
+C1 fp64 参考 norm=543133.6
+  [PASS] C2 共享项无权重、只加一次（反例 relerr 应很大） wrong relerr=0.687
+C3 masked: num_recv_expert_slots=64, neg_weights_all_zero=True
+  [PASS] C3 masked -1 -> 权重清零 
+  [PASS] C4 activation_clamp 生效（改变输出） clamp relerr=9.982e-01
+
+==============================================================================
+D. 测试里的性能账目公式（tests/test_mega_moe.py:368-401）
+==============================================================================
+D bf16xbf16 : routed=  6368.0 MiB shared=   446.0 MiB total=6.654 GiB  FLOPs=    2.16 T  NVLink=168.0 MiB
+  [PASS] D bf16xbf16 HBM/FLOP/NVL 为正 
+D fp8xfp8   : routed=  3240.0 MiB shared=   279.0 MiB total=3.437 GiB  FLOPs=    2.16 T  NVLink=168.0 MiB
+  [PASS] D fp8xfp8 HBM/FLOP/NVL 为正 
+D fp8xfp4   : routed=  1728.0 MiB shared=   279.0 MiB total=1.960 GiB  FLOPs=    2.16 T  NVLink=168.0 MiB
+  [PASS] D fp8xfp4 HBM/FLOP/NVL 为正 
+D elapsed=  300us -> t_reduction=126.5us, overlap_factor=1.729, raw 7216 TFLOPS -> overlap 12475 TFLOPS
+D elapsed=  500us -> t_reduction=126.5us, overlap_factor=1.339, raw 4329 TFLOPS -> overlap 5795 TFLOPS
+D elapsed= 1000us -> t_reduction=126.5us, overlap_factor=1.145, raw 2165 TFLOPS -> overlap 2478 TFLOPS
+  [PASS] D overlap_factor > 1 且随 elapsed 减小而增大 
+D H100 实测 reduce 读带宽 ~2621 GB/s（对照 t_reduction 用的 6.5e12 B/s 经验常数）
+
+==============================================================================
+E. 测试的分发/基准骨架（仅源码事实，SM100 端到端不可跑）
+==============================================================================
+  [PASS] E1 use_deterministic_algorithms(True) 
+  [PASS] E2 正确性判据 torch.equal(fused_y, baseline_y) 
+  [PASS] E3 bench_kineto(run_fused, "mega_moe") 
+  [PASS] E4 baseline 走 EP dispatch+grouped GEMM+combine 
+  [PASS] E5 端到端被 legacy(DeepEP) 加载门控 
+
+==============================================================================
+总判定: 37 PASS / 0 FAIL
+==============================================================================
