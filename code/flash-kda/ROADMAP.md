@@ -83,7 +83,7 @@
 
 ### P7 性能与剖析（`docs/07-perf.md`）
 
-- [ ] **P7-1** FlashKDA forward CUPTI 计时（不同 T/H），与 FLA 对比。
+- [x] **P7-1** FlashKDA forward CUPTI 计时（不同 T/H），与 FLA 对比。
 - [ ] **P7-2** `ncu` 剖析 K1/K2 bound（smem/TensorCore/occupancy），逐项证据。
 
 ### P8 小结 / 一页纸
@@ -112,7 +112,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：P0/P1/P2/P3 全部完成，P4 全部完成（前向 kernel vs fp64 golden 两方对拍 + golden/FlashKDA/FLA 三方对拍，多 shape/seed/门控区间）；**P5-1/P5-2/P5-3/P5-4 完成**（反向 adjoint 推导 + 不依赖 autograd 的显式参考实现 + 三方数值核验 + 与 FLA chunked 反向 bf16 对拍 + chunked backward 分块化推导/实现）；**P6-1/P6-2 完成**（FLA Triton 反向 5 kernel 精读 + 记号映射实测 + 目标卡 CUDA 反向设计；并在 H100 上写出最小可运行 Triton **B1 状态伴随 kernel**，与 FLA `dhu`/`src/kda_bwd_ref.py` 三方对拍，见 `docs/06` §5/§6）。
+- 当前进度：P0/P1/P2/P3 全部完成，P4 全部完成（前向 kernel vs fp64 golden 两方对拍 + golden/FlashKDA/FLA 三方对拍，多 shape/seed/门控区间）；**P5-1/P5-2/P5-3/P5-4 完成**（反向 adjoint 推导 + 不依赖 autograd 的显式参考实现 + 三方数值核验 + 与 FLA chunked 反向 bf16 对拍 + chunked backward 分块化推导/实现）；**P6-1/P6-2 完成**（FLA Triton 反向 5 kernel 精读 + 记号映射实测 + 目标卡 CUDA 反向设计；并在 H100 上写出最小可运行 Triton **B1 状态伴随 kernel**，与 FLA `dhu`/`src/kda_bwd_ref.py` 三方对拍，见 `docs/06` §5/§6）；**P7-1 完成**（FlashKDA 前向 vs FLA `chunk_kda` 统一口径实测：CUPTI device + wall，扫 T/H/B，见 `docs/07`）。
   - P0-1～P0-3：见下（历史记录）。
   - P1-1/P1-2：`docs/01` 写清逐 token gated delta rule、KDA vs GLA/DeltaNet 对照表（DeltaNet 有 β 无 α、
     GLA 有 α 无 β、KDA 两者兼有且 α 逐通道），以及 CHUNK=16 分块公式（`L/Mqk/INV/k_decayed/...`）。
@@ -199,9 +199,28 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：P7-1**（FlashKDA forward CUPTI 计时，不同 T/H，与 FLA 对比）＋ **P7-2**（`ncu` 剖析 K1/K2 bound）。
+- **下一步：P7-2**（`ncu` 剖析 K1/K2 bound：smem/TensorCore/occupancy，逐项证据）。
   至此反向的「推导（P5）→ FLA 精读与设计（P6-1）→ 最小 B1 kernel 实测（P6-2）」闭环；更完整的
   CUTLASS/TMA 版 B1、B2、B3 属更大工程，留待有明确需求时再做。
+  - P7-1：新增 `docs/07-perf.md` + `harness/bench_fwd.py`（`harness/bench_fwd.out.txt`）+ 博客 post
+    `flash-kda-07-perf` 并更新 index。**统一计时口径**：`wall`（一个 CUDA event 对包 `REPS=50` 次取均值、
+    3 轮取中位，含 host 派发）+ `dev`（`torch.profiler` CUPTI CUDA-activity，纯 kernel 时间），
+    `CUDA_VISIBLE_DEVICES` 隔离到空闲卡。18 组 case（T=128…8192、H=1/2/4/8/16/64、B=1…8、T=1023）
+    实测结论：(a) **FLA `chunk_kda` 的 wall 被 host 派发钉死在 ~0.86ms**（T=128 时 dev 仅 58µs，
+    wall 780µs），因其 Python 包装拆成 ~10 个独立 kernel launch；FlashKDA 单 host 调用（2 kernel），
+    `wall≈dev`（差 ~0.1%）→ 中小 shape FlashKDA wall 领先 2×–21×（**赢在省 host 税**）。
+    (b) 纯 GPU 时间 `dev` 上 FLA 在中等 shape 反而更小（T=2048 H=4：122.9 vs 204.8µs），因 FLA 的
+    状态递推 kernel `chunk_gated_delta_rule_fwd_kernel_h_blockdim64` 沿 T 并行，而 FlashKDA K2 沿 T 串行、
+    并行度只有 `B·H`；`B·H` 大时（B8 T2048 H8）FlashKDA **wall 与 dev 同时领先 2.2×/2.6×**，
+    T=8192 H=16 因 K2 只有 16 CTA 而打平（0.98×），H=64 反超 1.84×。(c) K2 沿 T 串行的定量证据：
+    固定 B=1,H=4 时 dev/T ≈ 100ns/token 恒定（1024→108.7、2048→204.8、4096→402.8µs），固定 T=1024 扫
+    H=1→16 dev 仅 106→126µs（per-CTA 串行延迟受限而非吞吐受限）。(d) kernel 级分解：FlashKDA=3 kernel
+    （K2 89%/K1 8%/init），FLA=10 kernel 拼装；T=8192 H=64 下 FLA 的非递推工作（intra 422+inter_solve 424+
+    recompute_w_u 358+o 340+l2norm 177+cumsum 147+elementwise 63≈1.93ms）远大于 FlashKDA 的 K1 480µs，
+    印证 K1「一次算完落盘」的融合收益。**方法学坑**：背靠背相邻 CUDA event 对的**中位数会读到真值一半**
+    （用 `torch.mm(4096³)` 对照：median 174µs 而 sum/N=CUPTI=341µs），必须用「一个 event 对包 N 次取均值」。
+    平台：H100 80GB HBM3、torch 2.12、FLA 0.5.2、triton 3.6、bf16、D=128。待验证项：FLA host 税组成
+    未用 nsys 拆开（仅由 wall 恒定推断 host-bound）；K2 的 smem/TensorCore 占用留 P7-2。
   - P6-2：新增 `docs/06` §6「P6-2 最小可运行反向 kernel——B1 状态伴随实测」+ `harness/check_bwd_dhu_kernel.py`
     （`harness/check_bwd_dhu_kernel.out.txt`）。在 H100 用 Triton 写出**最小可运行的状态伴随（B1/`dhu`）kernel**：
     grid `(cdiv(V,BV), B·HV)`，沿 block 逆序，每块 `dU=k_rest@dS+dU_in`（=FLA `dv2`）、
