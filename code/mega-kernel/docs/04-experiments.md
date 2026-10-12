@@ -1618,3 +1618,134 @@ warpgroup 级再平衡**）。
   测的是**寄存器再平衡这一机制**，不是调度行为。
 - `setmaxnreg` 是 Hopper（`sm90a`）专属；Blackwell 起寄存器再平衡机制不同（`tcgen05` 路径），
   本节结论只对目标卡 H100 / sm90 有效。
+
+---
+
+## 13. PDL 与 CUDA Graph 的叠加：两种降级手段能不能「相乘」？（P19-1）
+
+### 13.1 问题
+
+`docs/03` 把 kernel-per-operator 的两大降级手段分得很清楚：**CUDA Graph**（§1）治**损失二（launch
+开销）**、**PDL**（§2）治**损失一的一个特例**——相邻 kernel 重叠 `min(上游 tail, 下游 prologue)`
+（P4-2 / P5-3 已实测）。文档里写了一句「PDL 与 CUDA Graphs 可叠加」（`docs/03` §2.3），但
+本专题**从未实测**（`docs/04` §6.6 明确把它记为未覆盖项）。本节把这条尾巴补上，回答三个问题：
+
+- **Q1** CUDA Graph 的 `capture → instantiate → replay` 是否**保留** PDL 语义？也就是把一条 PDL
+  链 capture 成图后，replay 时程序化依赖（`cudaTriggerProgrammaticLaunchCompletion` /
+  `cudaGridDependencySynchronize`）还生效吗？
+- **Q2** 若都生效，两者是**相乘**互补，还是互相挤占？
+- **Q3** 谁封顶谁——Graph 消的是 launch 开销、PDL 消的是 `min(tail, prologue)`，两者的上限独立吗？
+
+### 13.2 方法
+
+源码 `src/pdl_graph.cu`，原始输出 `harness/pdl_graph.out.txt`（目标卡 H100/sm90，固定 device 3，
+iters=30）。把 P5-3 的 PDL 链原样搬过来：**K 个 `chain_kernel` 串成一条链**，每个 kernel 的 time 轴为
+
+```
+[prologue 自旋 pl] -> cudaGridDependencySynchronize -> [crit: 校验上游 seq, 写 seq] -> trigger -> [tail 自旋 tl]
+```
+
+`idx>=1` 的 kernel 用 `cudaLaunchKernelEx` 带 `cudaLaunchAttributeProgrammaticStreamSerialization`。
+对同一条链做**四种公平对照**（工作量完全相同）：
+
+| 策略 | 说明 |
+|---|---|
+| `eager` | K 次 host launch，无 PDL |
+| `ePDL` | K 次 host launch，`k>0` 带 PDL 属性（P5-3 的形态）|
+| `graph` | 把 `eager` 的 K 次 launch `cudaStreamBeginCapture` 成图、`cudaGraphInstantiate`、replay |
+| `gPDL` | 把 `ePDL` 的 K 次 launch（带 PDL 属性）capture 成图、instantiate、replay |
+
+**正确性门限（Q1 的硬证据）**：`expect=12345` 烘进 kernel；`seq` capture 前清 0。若 PDL 排序在
+图里被破坏，下游会读到 `0 != expect`，每轮 replay 都 `atomicAdd(fail)`；若排序保留，下游恒读到
+`12345`、`fail` 恒 0。三个 Section：**A** 大 span `pl=tail=200000`（launch 可忽略）、
+**B** 大 span `tail=3×pl`（overlap 被 prologue 封顶）、**C** 小 span `pl=tail=4000/crit=1000`
+（span≈9000 周期≈4.6 µs，与 launch 开销同量级，才能同时看见两种收益）。
+
+### 13.3 结果
+
+**Section A（pl=tail=200000，大 span；speedup 相对 eager）**：
+
+| K | eager ms | ePDL ms | graph ms | gPDL ms | e/ePDL | gPDL/g | e/gPDL | fail |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 0.2052 | 0.2053 | 0.2053 | 0.2052 | 1.00× | 1.00× | 1.00× | 0/0/0/0 |
+| 2 | 0.4106 | 0.3085 | 0.4096 | 0.3085 | 1.33× | 1.33× | 1.33× | 0/0/0/0 |
+| 4 | 0.8213 | 0.5148 | 0.8186 | 0.5140 | 1.60× | 1.59× | 1.60× | 0/0/0/0 |
+| 8 | 1.6421 | 0.9276 | 1.6354 | 0.9256 | 1.77× | 1.77× | 1.77× | 0/0/0/0 |
+| 16 | 3.2827 | 1.7528 | 3.2696 | 1.7487 | 1.87× | 1.87× | 1.88× | 0/0/0/0 |
+
+**Section B（tail=3×pl，overlap 被 prologue 封顶）**：
+
+| K | eager ms | ePDL ms | graph ms | gPDL ms | e/ePDL | gPDL/g | e/gPDL | fail |
+|---|---|---|---|---|---|---|---|---|
+| 16 | 6.5154 | 4.9827 | 6.5013 | 4.9790 | 1.31× | 1.31× | 1.31× | 0/0/0/0 |
+
+**Section C（pl=tail=4000/crit=1000，小 span，launch 可感）**：
+
+| K | eager ms | ePDL ms | graph ms | gPDL ms | e/ePDL | gPDL/g | e/gPDL | fail |
+|---|---|---|---|---|---|---|---|---|
+| 4 | 0.0264 | 0.0176 | 0.0244 | 0.0168 | 1.50× | 1.45× | 1.57× | 0/0/0/0 |
+| 16 | 0.1089 | 0.0626 | 0.0925 | 0.0573 | 1.74× | 1.61× | 1.90× | 0/0/0/0 |
+| 32 | 0.2172 | 0.1221 | 0.1845 | 0.1122 | 1.78× | 1.64× | 1.94× | 0/0/0/0 |
+| 64 | 0.4351 | 0.2393 | 0.3679 | 0.2211 | 1.82× | 1.66× | 1.97× | 0/0/0/0 |
+
+### 13.4 读法
+
+**(1) Q1：CUDA Graph capture 完整保留 PDL 语义——`gPDL/g` 在所有 K、A/B/C 三个 Section 里
+**逐行等于** `e/ePDL`（A：1.00→1.87×；B：1.31×），且**四策略的 `fail` 计数在 A/B/C 每一格恒为 0**。
+这意味着程序化依赖（上游 trigger、下游 grid-dependency-sync）在 `cudaStreamBeginCapture` /
+`cudaGraphInstantiate` 后仍按原语义生效——图并没有把 PDL 退化成「普通串行边」。
+（反之，若 capture 丢掉 PDL，`gPDL` 会退化成 `graph`，`gPDL/g` 应为 1.00×、`fail` 会爆炸。）
+
+**(2) Q2：两者**不是相乘**，而是**次乘性（sub-multiplicative）**。看 Section C 大 K 的分解：
+
+| K=64 | 每 kernel (µs) | 相对 eager 加速 |
+|---|---|---|
+| eager | 6.80 | 1.00× |
+| graph | 5.75 | **1.18×**（Graph 消损失二）|
+| ePDL | 3.74 | **1.82×**（PDL 消损失一特例）|
+| gPDL | 3.45 | **1.97×**（叠加）|
+| 「相乘」预测 | — | 1.18×1.82 = **2.15×** |
+
+实测叠加 **1.97×**，只有相乘预测的 **~0.92×**。原因是二者**挤占同一段「kernel 间串行缝」**：
+Graph 单独时每 kernel 省 ~1.05 µs（host 提交 + grid 启动缝隙），但在 PDL 之下这段缝隙已被
+「下游 grid 提前启动」部分吃掉，Graph 的边际收益降到 ~0.28 µs/kernel（`ePDL→gPDL`）。即
+**PDL 一旦把 grid 启动也重叠掉，Graph 能省的「launch 缝隙」就少了**——两种优化的作用域在
+kernel 边界上重叠。
+
+**(3) Q3：两者的上限彼此独立、各自封顶，不互相抬高。**
+- **Graph 的上限 = launch 开销占比**：Section A/B 的 span（0.2–0.8 ms）远大于 launch（~2 µs），
+  `graph ≈ eager`（差 <0.5%），Graph 毫无收益——正是 P5-1「损失二只在 launch-bound 区间有意义」
+  的又一次体现。Section C 把 span 压到 ~4.6 µs 才看见 Graph 的 1.18×。
+- **PDL 的上限 = `min(tail, prologue)/span`**：A 组 pl=tail → 1.87×（趋 2.0×）、B 组 tail=3×pl →
+  1.31×（被 prologue 封顶），与 P5-3 完全一致；加不加 Graph 都改不了这条上限
+  （A/B 里 `gPDL/g` 逐行等于 `e/ePDL`）。
+- 一句话：**Graph 只在 kernel 时长（span）短到 launch 占比可观时有用，PDL 只在有 prologue 可提前跑时有用；
+  两者可叠加但不相乘，因为它们在「kernel 间缝」上重叠。**
+
+### 13.5 与判据 / MPK / 生产案例的关系
+
+- **补齐 `docs/04` §6.6「未测 PDL 与 CUDA Graph 叠加」与 `docs/03` §2.3 的「可叠加」论断**：
+  本节给出硬证据——**在 CUDA Graph 里 PDL 语义被完整保留**（Q1），叠加收益**次乘**（Q2），
+  两者上限独立（Q3）。
+- **对 MPK 路线的含义**：Graph（消 launch）与 PDL（重叠相邻 kernel）都**停在 kernel 级**，
+  二者叠加后仍受 `min(tail, prologue)` 与 span 的约束，**不产生跨算子的 tile/fragment 级重叠**
+  （`docs/03` §2.3/§3）：MPK 走整图 mega-kernel（`docs/01` §3–§5）而非「Graph + PDL 化整图」，
+  正是因为这两种手段再怎么叠加都改不了 kernel 的粒度上限。
+- **判据（C1–C5，`docs/00` §3）**：`graph` / `gPDL` 仍由 host 提交、每个 kernel 仍会结束、
+  依赖仍是 kernel 级（哪怕 PDL 让它部分重叠）——**全不满足 C1–C5**，与 P4-1/P4-2/P5-3 同档，
+  是 kernel-per-operator 的两块拼在一起也补不齐的降级项。
+- **与生产案例（`docs/02`）对照**：DeepGEMM mega 家族**没有**依赖 Graph/PDL 的叠加，而是把
+  「单次 launch + 设备内异步原子 barrier + 常驻 CTA」做进一个 kernel——本节从反面量化了为什么：
+  Graph+PDL 叠加在最好的情况下也只有 ~2×，且随 span 增大立刻退化（A/B 段两者都 = 1.0×）。
+
+### 13.6 局限
+
+- 合成 workload：链上每 kernel 是「自旋 + 极简 seq 校验」，**不含张量核 / 真实算子**；测的是
+  **PDL × Graph 的机制交互**，非端到端收益。
+- `grid=1`（每 kernel 单 block）；未测多 block PDL（P12-1 已知上游 occupancy 是 PDL 的第一约束）
+  与 Graph 叠加时的资源交互。
+- 只测了 **capture 方式**构造的图（`cudaStreamBeginCapture`）；未测**显式构图** API
+  （`cudaGraphAddKernelNode` + `cudaGraphKernelNodeSetAttribute` 的 PDL 属性）以及
+  graph 内部的 programmatic event edge，后者语义可能不同。
+- 正确性检查用的是「下游读到上游哨兵」这一**存在性**判据（`fail==0` 即 PDL 排序保留），
+  未构造更细的跨 fragment 依赖来压测 PDL 在 Graph 里的边界行为。

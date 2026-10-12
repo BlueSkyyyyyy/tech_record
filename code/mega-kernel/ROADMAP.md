@@ -356,6 +356,22 @@
       路径（`docs/07` §2 注释掉 setmaxnreg）与「一个 task=一个 CTA」的粒度用不上，而 DeepGEMM
       手工角色正好用熟。判据不变（C1–C3，无 C5）。**本轮新增实验。**
 
+### P19 实验扩展 10：PDL × CUDA Graph 叠加（`docs/04-experiments.md` §13）
+
+- [x] **P19-1** 补齐 `docs/04` §6.6「未测 PDL 与 CUDA Graph 叠加」与 `docs/03` §2.3「可叠加」论断：
+      **把 PDL 链 capture 成 CUDA Graph，测二者能否『相乘』**。见 `docs/04-experiments.md` §13，
+      源码 `src/pdl_graph.cu`，原始输出 `harness/pdl_graph.out.txt`（目标卡 H100/sm90，固定 device 3，
+      iters=30）。K 个 `chain_kernel` 串成 PDL 链，四策略公平对照 `eager`/`ePDL`/`graph`/`gPDL`
+      （正确性哨兵 `expect=12345` 烘进 kernel，排序被破坏则 `fail` 累加）。三 Section：A 大 span
+      pl=tail=200000、B 大 span tail=3×pl、C 小 span pl=tail=4000（launch 可感）。结论：
+      **Q1 CUDA Graph capture 完整保留 PDL 语义**——`gPDL/g` 逐行等于 `e/ePDL`（A 到 1.87×、B 1.31×）、
+      四策略 `fail` 全 0；**Q2 叠加是次乘不是相乘**——C 段 K=64：`graph` 1.18×、`ePDL` 1.82×、
+      相乘预测 2.15×，实测 `gPDL` 仅 **1.97×（~0.92× 乘积）**，因二者挤占同一段「kernel 间串行缝」
+      （Graph 单独省 ~1.05µs/kernel，PDL 之下边际降到 ~0.28µs/kernel）；**Q3 上限独立**——
+      A/B 大 span 下 `graph≈eager`（launch 可忽略）、PDL 上限仍是 `min(tail,prologue)/span`，
+      加不加 Graph 都不变。判据不变（`graph`/`gPDL` 全不满足 C1–C5），是 kernel-per-operator 两块
+      降级拼一起也补不齐的降级项。**本轮新增实验**。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -398,9 +414,11 @@
   这条只有资料分析的**指令足迹/成本侧**局限量化出来，与 P14-1 的寄存器足迹合成「双层足迹」）。
   **P17-1 双层足迹叠加（1/1）完成**（本轮新增，把 P14-1 的寄存器足迹与 P16-1 的代码足迹编进**
   同一个 kernel** 测合成律，补齐 §8.6 / §10.6 两条「未叠加」尾巴）。
-  **P18-1 寄存器足迹的可绕开性（1/1）完成**（本轮新增，用 `setmaxnreg` warp 级再平衡把 P14-1 的
+  **P18-1 寄存器足迹的可绕开性（1/1）完成**（用 `setmaxnreg` warp 级再平衡把 P14-1 的
   代价基本收回，补齐 §8.6 / §11.6「未测 setmaxnreg」两条尾巴并兑现 §11.5 的假设）。
-  **本专题任务清单（P0–P18）全部完成**，无未完成子项。
+  **P19-1 PDL × CUDA Graph 叠加（1/1）完成**（本轮新增，补齐 `docs/04` §6.6「未测 PDL 与 CUDA
+  Graph 叠加」与 `docs/03` §2.3「可叠加」论断：capture 保留 PDL 语义、叠加次乘非相乘、上限独立）。
+  **本专题任务清单（P0–P19）全部完成**，无未完成子项。
   - **P0-1** MPK 论文章节地图见 `docs/00` §6；
   - **P0-2** 案例源码坐标清单见 `docs/02-production-cases.md`（DeepGEMM mega 家族 `057ca59`、
     hpc-ops `ab1a402` README 行 230、Kimi K3 §4.2.4 快照行 1069–1081）；
@@ -449,7 +467,7 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：无**（P0–P18 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
+- **下一步：无**（P0–P19 全部完成）。后续可选的增量方向（不属现有清单）：① ~~为 `docs/02`/`03`/`04`/`06`/`07`
   补建对应博客 post~~（P8-1 完成 `02`/`03`/`04`/`06`；P11-1 补建 `mega-kernel-08-mpk-tasks`）；
   ② ~~补做 P5-2 §2.6 / P5-1 §1.6 提到的「更小 M / 更多算子 / 多 block」实验~~（**P9-1 完成 N 算子链 + 小 M**；
   **P10-1 完成 P5-1 §1.6「扫 persistent 网格大小」**；**P12-1 完成 P5-3 §3.6 / P10-1 §5.5「多 block
@@ -458,7 +476,24 @@
   ③ ~~走读 `tasks/hopper/*.cuh` 单 task 内部实现~~（P11-1 完成）；剩「在容器内 `pip install -e .`
   构建 mirage sm90 路径并跑 `demo/qwen3/demo.py --use-mirage` 取本机 MPK 端到端数字」（构建成本高，未做）；
   ④ ~~megakernel 成本侧「代码足迹 / 指令缓存」实测~~（**P16-1 完成**，与 P14-1 寄存器足迹合成双层足迹）；
-  ⑤ ~~megakernel 成本侧「寄存器足迹的可绕开性」：`setmaxnreg` 实测~~（**P18-1 完成**，收回 P14-1 的代价）。
+  ⑤ ~~megakernel 成本侧「寄存器足迹的可绕开性」：`setmaxnreg` 实测~~（**P18-1 完成**，收回 P14-1 的代价）；
+  ⑥ ~~`docs/04` §6.6「未测 PDL 与 CUDA Graph 叠加」~~（**P19-1 完成**，测出 capture 保留 PDL 语义、
+  叠加次乘非相乘、上限独立）；剩「在容器内 `pip install -e .` 构建 mirage sm90 路径并跑端到端数字」
+  （构建成本高，未做）。
+- **本轮（P19-1）**：`docs/04-experiments.md` 新增 §13「PDL 与 CUDA Graph 的叠加：两种降级手段能不能
+  『相乘』？」——新建 `src/pdl_graph.cu` + `harness/pdl_graph.out.txt`（目标卡 H100/sm90，固定 device 3，
+  iters=30）。K 个 `chain_kernel`（`[prologue]→gridDependencySync→[crit 校验/写 seq]→trigger→[tail]`）
+  串成 PDL 链，四策略公平对照：`eager`（无 PDL）/`ePDL`（有 PDL）/`graph`（把 eager capture 成图）/
+  `gPDL`（把 ePDL capture 成图）；正确性哨兵 `expect=12345` 烘进 kernel、`seq` capture 前清 0，
+  PDL 排序被破坏则下游读到 0 → `fail` 累加。三 Section：A 大 span pl=tail=200000、B 大 span tail=3×pl、
+  C 小 span pl=tail=4000/crit=1000（span≈4.6µs，与 launch 同量级）。核心结论：
+  **Q1 CUDA Graph capture 完整保留 PDL 语义**——`gPDL/g` 在 A/B/C 逐行等于 `e/ePDL`（A 到 **1.87×**、
+  B **1.31×**），四策略 `fail` 全 0（否则 `gPDL` 会退化成 `graph`）；**Q2 叠加是次乘非相乘**——C 段 K=64：
+  `graph` **1.18×**、`ePDL` **1.82×**、相乘预测 2.15×，实测 `gPDL` 仅 **1.97×（~0.92× 乘积）**，因二者
+  挤占同一段「kernel 间串行缝」（Graph 单独省 ~1.05µs/kernel，PDL 之下边际降到 ~0.28µs/kernel）；
+  **Q3 上限独立**——A/B 大 span（0.2–0.8ms）下 `graph≈eager`（差<0.5%，损失二只在 launch-bound 显形）、
+  PDL 上限仍是 `min(tail,prologue)/span`，加不加 Graph 都改不了。判据：`graph`/`gPDL` 全不满足 C1–C5，
+  是 kernel-per-operator 两块降级拼一起也补不齐的降级项。**本轮新增实验**，补齐 §6.6 的尾巴。
 - **本轮（P18-1）**：`docs/04-experiments.md` 新增 §12「megakernel 寄存器足迹的『可绕开性』：
   `setmaxnreg` warp 级再平衡」——新建 `src/setmaxnreg_rebalance.cu` +
   `harness/setmaxnreg_rebalance.out.txt`（目标卡 H100/sm90，`-gencode arch=compute_90a,code=sm_90a`，

@@ -1,0 +1,56 @@
+# P19-1 小实验原始输出：PDL 与 CUDA Graph 叠加（目标卡 H100/sm90）
+# date: 2026-10-12T23:12:50+08:00
+# cmd: scripts/lab.sh exec "nvcc -O3 -arch=sm_90 src/pdl_graph.cu -o /tmp/pdl_graph \
+#        && /tmp/pdl_graph 30 16 200000 2000 200000 600000 3"
+# gpu: H100 80GB HBM3 x8, sm90, driver 570.211.01 (固定 device 3)
+# cuda: nvcc release 13.2, V13.2.78
+# 结构：K 个 chain_kernel 串成一条 PDL 链，每个 kernel =
+#        [prologue 自旋] -> gridDependencySynchronize -> [crit: 校验上游 seq, 写 seq]
+#        -> trigger -> [tail 自旋]；idx>=1 用 cudaLaunchKernelEx 带 PDL 属性。
+# 四策略：eager(无PDL) / ePDL(有PDL) / graph(把eager capture成图) / gPDL(把ePDL capture成图)。
+# 正确性：expect=12345 烘进 kernel；PDL 排序若被破坏，下游读到 0 而 fail 每轮累加。
+# A/B 段 span 大（~0.2-0.8ms）launch 可忽略；C 段 span 小（~4.6us）launch 可感。
+
+== device ==
+NVIDIA H100 80GB HBM3, sm_90, SMs=132 (device 3)
+iters=30 Kmax=16
+
+== A: tail == prologue (overlap 完全可放行) ==  prologue=200000 crit=2000 tail=200000 (SM cycles)
+   K |   eager ms |    ePDL ms |   graph ms |    gPDL ms |  e/ePDL |  gPDL/g |  e/gPDL | fail
+-----+------------+------------+------------+------------+---------+---------+---------+------
+   1 |     0.2052 |     0.2053 |     0.2053 |     0.2052 |   1.00x |   1.00x |   1.00x | 0/0/0/0
+   2 |     0.4106 |     0.3085 |     0.4096 |     0.3085 |   1.33x |   1.33x |   1.33x | 0/0/0/0
+   4 |     0.8213 |     0.5148 |     0.8186 |     0.5140 |   1.60x |   1.59x |   1.60x | 0/0/0/0
+   8 |     1.6421 |     0.9276 |     1.6354 |     0.9256 |   1.77x |   1.77x |   1.77x | 0/0/0/0
+  16 |     3.2827 |     1.7528 |     3.2696 |     1.7487 |   1.87x |   1.87x |   1.88x | 0/0/0/0
+fail 列 = eager/ePDL/graph/gPDL 的原子计数之和（0 = 下游都读到上游哨兵 12345）
+预测：eager 每 kernel = span；PDL 每条链边重叠 min(prologue,tail)=200000，稳态每 kernel = span-200000。
+
+== B: tail = 3x prologue (overlap 被 prologue 封顶) ==  prologue=200000 crit=2000 tail=600000 (SM cycles)
+   K |   eager ms |    ePDL ms |   graph ms |    gPDL ms |  e/ePDL |  gPDL/g |  e/gPDL | fail
+-----+------------+------------+------------+------------+---------+---------+---------+------
+   1 |     0.4072 |     0.4072 |     0.4073 |     0.4072 |   1.00x |   1.00x |   1.00x | 0/0/0/0
+   2 |     0.8146 |     0.7123 |     0.8137 |     0.7123 |   1.14x |   1.14x |   1.14x | 0/0/0/0
+   4 |     1.6289 |     1.3223 |     1.6268 |     1.3221 |   1.23x |   1.23x |   1.23x | 0/0/0/0
+   8 |     3.2578 |     2.5424 |     3.2517 |     2.5408 |   1.28x |   1.28x |   1.28x | 0/0/0/0
+  16 |     6.5154 |     4.9827 |     6.5013 |     4.9790 |   1.31x |   1.31x |   1.31x | 0/0/0/0
+fail 列 = eager/ePDL/graph/gPDL 的原子计数之和（0 = 下游都读到上游哨兵 12345）
+预测：eager 每 kernel = span；PDL 每条链边重叠 min(prologue,tail)=200000，稳态每 kernel = span-200000。
+
+== C: 小 span (launch 开销可感) tail == prologue ==  prologue=4000 crit=1000 tail=4000 (SM cycles)
+   K |   eager ms |    ePDL ms |   graph ms |    gPDL ms |  e/ePDL |  gPDL/g |  e/gPDL | fail
+-----+------------+------------+------------+------------+---------+---------+---------+------
+   1 |     0.0065 |     0.0065 |     0.0066 |     0.0064 |   1.00x |   1.02x |   1.01x | 0/0/0/0
+   2 |     0.0131 |     0.0103 |     0.0123 |     0.0102 |   1.28x |   1.21x |   1.29x | 0/0/0/0
+   4 |     0.0264 |     0.0176 |     0.0244 |     0.0168 |   1.50x |   1.45x |   1.57x | 0/0/0/0
+   8 |     0.0529 |     0.0322 |     0.0467 |     0.0306 |   1.64x |   1.53x |   1.73x | 0/0/0/0
+  16 |     0.1089 |     0.0626 |     0.0925 |     0.0573 |   1.74x |   1.61x |   1.90x | 0/0/0/0
+  32 |     0.2172 |     0.1221 |     0.1845 |     0.1122 |   1.78x |   1.64x |   1.94x | 0/0/0/0
+  64 |     0.4351 |     0.2393 |     0.3679 |     0.2211 |   1.82x |   1.66x |   1.97x | 0/0/0/0
+fail 列 = eager/ePDL/graph/gPDL 的原子计数之和（0 = 下游都读到上游哨兵 12345）
+预测：eager 每 kernel = span；PDL 每条链边重叠 min(prologue,tail)=4000，稳态每 kernel = span-4000。
+
+>> 读法：eager/ePDL=无 Graph；graph/gPDL=Graph replay。
+>> Q1 若 graph→gPDL 有加速且 gPDL 的 fail==0，则 CUDA Graph 保留了 PDL 语义；
+>> Q2 若 e/gPDL ≈ (e/graph)×(ePDL/e)，则 Graph 与 PDL 近似「相乘」互补；
+>> Q3 Graph 消的是损失二（launch），PDL 消的是损失一特例 min(tail,prologue)，二者上限独立。
