@@ -47,10 +47,10 @@
 ## 2. host 编排
 
 **入口 `BucketBuffer::all_gather`**（`csrc/buffers/bucket.hpp:245-330`）先把张量解包、校验，再把每个
-bucket 建出来——注意 `buckets[bucket_idx] = {offset, num_bytes = src.nbytes()}`（`:273-276`）里的
+bucket 建出来——注意 `buckets[bucket_idx] = {offset, num_bytes = src.nbytes()}`（`:286-290`）里的
 `num_bytes` 是**单 rank 的 shard 字节数**，不是收齐后的全量。`dst` 的整体输出是 `src.numel()*num_ranks`
-的 1-D 视图（`:303-307`）。`num_sms` 恒被断言为 `0`（`:257`）——all_gather 不需要用户指定 SM 数；
-host 发射后，`num_rdma_ranks > 1` 时在**计算流**上收一个 barrier epilogue（`:317-323`，注释即
+的 1-D 视图（`:301-304`）。`num_sms` 恒被断言为 `0`（`:257`）——all_gather 不需要用户指定 SM 数；
+host 发射后，`num_rdma_ranks > 1` 时在**计算流**上收一个 barrier epilogue（`:315-321`，注释即
 「hybrid 路径在 barrier 前已由 tail 信号确认每一次 put，无需 flush」）。
 
 **核心 `launch_all_gather`**（`csrc/kernels/bucket/all_gather.hpp:24-230`）：
