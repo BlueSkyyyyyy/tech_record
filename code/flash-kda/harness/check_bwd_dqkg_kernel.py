@@ -154,9 +154,14 @@ def wy_dqkg_torch(inp, scale, BT):
         b_dv = torch.where(m_t[None, :, None], dv4[:, c].permute(0, 2, 1, 3), torch.zeros_like(b_do))
         b_vn = torch.where(m_t[None, :, None], vn4[:, c].permute(0, 2, 1, 3), torch.zeros_like(b_do))
         b_v = torch.where(m_t[None, :, None], v4[:, c].permute(0, 2, 1, 3), torch.zeros_like(b_do))
-        b_k = torch.where(m_t[None, :, None], k4[:, c].permute(0, 2, 1, 3), torch.zeros_like(b_do))
-        b_q = torch.where(m_t[None, :, None], q4[:, c].permute(0, 2, 1, 3), torch.zeros_like(b_do))
-        b_g = torch.where(m_t[None, :, None], g4[:, c].permute(0, 2, 1, 3), torch.zeros_like(b_do))
+        # NOTE (P7-101): q/k/g are [B,H,BT,K] while do/dv/v are [B,H,BT,V]; the zero
+        # template must match the *K* width or the two only agree at K==V.
+        b_k = torch.where(m_t[None, :, None], k4[:, c].permute(0, 2, 1, 3),
+                          torch.zeros_like(k4[:, c].permute(0, 2, 1, 3)))
+        b_q = torch.where(m_t[None, :, None], q4[:, c].permute(0, 2, 1, 3),
+                          torch.zeros_like(q4[:, c].permute(0, 2, 1, 3)))
+        b_g = torch.where(m_t[None, :, None], g4[:, c].permute(0, 2, 1, 3),
+                          torch.zeros_like(g4[:, c].permute(0, 2, 1, 3)))
         # b_h[v,k] = h[k,v] => transpose
         b_h = hd[:, c].transpose(-1, -2)               # [B,H,V,K]
         b_dh = dhd[:, c].transpose(-1, -2)             # [B,H,V,K]

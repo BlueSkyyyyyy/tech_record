@@ -1709,7 +1709,24 @@
        只能靠 bf16 streamed staging（§98.3）、降 `V` 无用。**口径修订**：`ncu` 的 `gpu__time_duration.sum`
        每 launch 自选单位（`ns/us/ms`），解析须读单位（旧 `cross*.py` 一律按 `ms` 读只因恰好命中 `ms` 档；
        不影响任何 $S_{L1}$/字节结论）。**边界**：`K≠V`×`INTRA/DAMMA` 只在两种 `(K,V)`、`V=64` 只
-       `K∈{64,256}`、未叠 `TMA`/`BF16MMA`/`VECST`；`(K,V)` 双非 128 的独立数值核对标待验证。见 `docs/07` §103。
+        `K∈{64,256}`、未叠 `TMA`/`BF16MMA`/`VECST`；`(K,V)` 双非 128 的独立数值核对标待验证。见 `docs/07` §103。
+- [x] **P7-101** 关闭 §103.6（P7-100）明确留下的**两条边界**——**(1)** 生产核 `b2prod` 在 **`(K,V)` 两轴双非
+       128** 上的**独立数值核对**（此前 K 轴锚点全是「折叠自洽」，V 轴锚点只在裸 GEMM 核上）；**(2)**
+       `-DB2M_INTRA` 的 **`sizeof(Shared)` 量化**（此前 `(256,64)` `rc=-3` 只用代码路径归因、V 无关性未
+       机器验证）。新增 `harness/check_bwd_b2_kvcross.py`（`harness/check_bwd_b2_kvcross.out.txt`）；
+       **`b2_mma_probe.cu` 一行未改**。**Part A**：`(64,256)`/`(256,64)`（两极性双非 128）+ `(64,128)`/
+       `(128,64)` + `(128,128)` 控制，门前三梯度 `dqg/dkg/dg` + `db/dA` vs **pure-torch** `wy_dqkg_torch`
+       与 **FLA**：全局 worst `1.5e-4~3.7e-4`（torch）/ `8.9e-4~2.3e-3`（FLA）=tf32 底噪，双非 128 与单轴
+       同阶、无叠加；`(128,128)` 控制值与 §57 `check_bwd_b2_gate.out.txt` **逐值相同**。**Part A2**：
+       `-DB2M_DAMMA` 的门前三梯度 vs `prod` 在全部五个 `(K,V)` **逐位 0**（机器证实 §66 的代数）。**Part
+       A3**：`prod_intra.dqg/dkg` vs `prod + b3intra(K)` **逐位 0**、`dg/db ≤9.5e-7`（fp32 加法序），含非整除
+       `T=250`。**Part B（关键）**：`b2mma_smem_bytes()` 实测 `prod_intra-prod` **= `192K+1536` B、与 `V` 完全
+       无关**（K=64/128/256 跨 V 逐字节恒定：13824/26112/50688），机器验证 §103.6 的「强证据」；`K=256`
+       fp32 `prod_intra` = 266368/270464/278656 B > 227 KiB，**实 launch `rc=-3`**（贴确切字节）；`prod_bf16_intra`
+       在 `K=256` 三档 `V` 全 `≤206976 B`（OK）。**修参考 bug**：`wy_dqkg_torch`
+       （`check_bwd_dqkg_kernel.py:157-163`）的 `q/k/g` 零模板曾错用 V 形状 `b_do`、只在 `K==V` 上 index-correct，
+       已修（`K==V` 逐位不变）。**口径**：参考的 `scale` 参数须与核内 `SCALE=1/sqrt(128)` 逐位一致，否则带
+       `scale` 的输出出现 O(0.1) 伪差（首版探针踩坑）。见 `docs/07` §104。
 
 ### P8 小结 / 一页纸
 
@@ -1988,14 +2005,34 @@
 - **`ncu` 的 `gpu__time_duration.sum` 每次 launch 自选单位（`ns`/`us`/`ms`/`s`），解析必须读单位**（P7-100，
   §103.1）：`ncu --metrics gpu__time_duration.sum` 打印形如 `gpu__time_duration.sum  us  600.48`，单位在
   数值前一列。早前 `check_bwd_b2_write_cross.py`/`cross2.py` 一律把数值当 `ms` 读，只因那些配置恰好落入
-  `ms` 档而未暴露；本轮 `cross3.py` 改为按单位换算（`ns→1e-6/µs→1e-3/ms→1/s→1e3`）。**只影响 `dur` 的
-  合法性、不触及任何 $S_{L1}$/store 请求/字节整数计数**（那些与单位无关）。判据只用整数计数。
+   `ms` 档而未暴露；本轮 `cross3.py` 改为按单位换算（`ns→1e-6/µs→1e-3/ms→1/s→1e3`）。**只影响 `dur` 的
+   合法性、不触及任何 $S_{L1}$/store 请求/字节整数计数**（那些与单位无关）。判据只用整数计数。
+- **生产核 `b2prod` 的数值对拍：参考侧 `scale` 必须逐位等于核内 `SCALE`（`1/sqrt(128)`，`check_bwd_b2_prod.py:55`）**
+  （P7-101，§104.1）：`run_prod`/`run_prod_intra` 在 `b2_mma_probe.cu` 里**硬编码传入 `SCALE`**，若参考
+  (`fla_wy_dqkg`/`wy_dqkg_torch`) 用 `1/sqrt(K)` 而核用 `1/sqrt(128)`，则**带 `scale` 的输出**（`dqg`/`dg`）
+  出现 **O(0.29–0.41) 的伪差**，而不带 `scale` 的 `dkg`/`db`/`dA` 仍 ~1e-4 —— 极易误判为「核在 `K≠128` 翻车」。
+  指纹＝**误差只集中在 `dqg`/`dg`、`dkg/db/dA` 正常**。所有 `b2prod` 对拍一律用部署尺度。
+- **`wy_dqkg_torch` 的 `K≠V` 零模板**（P7-101，`check_bwd_dqkg_kernel.py:157-163`）：它用 V 形状的 `b_do` 作
+  `zeros_like` 模板 mask `q/k/g`（宽 `K`），故此前**只在 `K==V` 上 index-correct**（`K≠V` 报 shape mismatch
+  或静默错）。已修为 `q4/k4/g4` 形状；`K==V` 逐位不变。另它把 `[B,T,H,·]` view 成 `[B,NT,BT,H,·]`，故
+  **非整除 `T` 下不可用**（用 FLA 参考）。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-100 补测 + P8-3…P8-6**。
-  - P7-100 + P8-6（本轮）：**关闭 §102.7（P7-99）明确留的两条边界——`K≠V` 与 `INTRA`/`DAMMA` 的「同时」
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-101 补测 + P8-3…P8-6**。
+  - P7-101（本轮）：**关闭 §103.6（P7-100）明确留下的两条边界——`(K,V)` 双非 128 的生产核独立数值核对
+    与 `-DB2M_INTRA` 的 `sizeof(Shared)` 量化**。新增 `harness/check_bwd_b2_kvcross.py`
+    （`harness/check_bwd_b2_kvcross.out.txt`）；**`b2_mma_probe.cu` 一行未改**。**Part A**：`b2prod` 在
+    `(64,256)/(256,64)`（双非 128 两极性）+ 单轴 + `(128,128)` 控制上，`dqg/dkg/dg/db/dA` vs 纯 torch
+    `wy_dqkg_torch` 全局 worst **1.5e-4~3.7e-4**、vs FLA **8.9e-4~2.3e-3**（tf32 底噪），双非 128 与单轴
+    同阶无叠加；`(128,128)` 控制值逐值复现 §57。**Part A2**：`-DB2M_DAMMA` 门前三梯度 vs `prod` 全五点
+    **逐位 0**。**Part A3**：折叠 `intra` 在双非 128 可行点上 `dqg/dkg` vs `prod+b3intra(K)` **逐位 0**。
+    **Part B**：`prod_intra-prod` smem **=`192K+1536` B、与 `V` 无关**（机器验证 §103.6 强证据）；`K=256`
+    fp32 超 227 KiB、实 launch `rc=-3`；`prod_bf16_intra` `K=256` 可行。**修** `wy_dqkg_torch` 的 `K≠V`
+    零模板 bug（`check_bwd_dqkg_kernel.py:157-163`，`K==V` 逐位不变）。见 `docs/07` §104。**下一步（可选）**：
+    专题维持维护态；`docs/08-summary.md` 可补 P7-101 一行（§104）；或 `K≠V` 交叉补 `K/V` 非 2 的幂。
+  - P7-100 + P8-6（上轮）：**关闭 §102.7（P7-99）明确留的两条边界——`K≠V` 与 `INTRA`/`DAMMA` 的「同时」
     交叉、以及 `V=64`**；并把一页纸从 §100–§102 扩到 §100–§103。新增
     `harness/probe_b2_write_cross3_ncu.sh`（`probe_b2_write_cross3_ncu.out.txt`）+
     `harness/check_bwd_b2_write_cross3.py`（`check_bwd_b2_write_cross3.out.txt`）；`b2_mma_probe.cu` 一行未改。
