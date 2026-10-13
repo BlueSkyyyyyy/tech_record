@@ -4878,6 +4878,31 @@
    新留尾巴（§95.7）：真正的**重叠掩码**（同一 CTA 被多笔 multicast 打到**同一 SMEM 槽**的竞争序）
    未测、2D/3D cluster × 非连续掩码、multicast × 2SM 仍未测。
 
+### P171 实验扩展 72：TMA multicast 的「真正重叠掩码」（`docs/04-experiments.md` §96）
+
+- [x] **P171-1** 补掉 §95.7 明留的尾巴——**「真正的重叠掩码（同一 CTA 被多笔 multicast 打到
+      同一 SMEM 槽的竞争序）」**。§19/§20/§93/§94/§95 的 multicast 每接收者每轮**恰被投递一次**；
+      本节第一次让**多笔 multicast 落到同一槽**，量清语义与成本。见 `docs/04-experiments.md` **§96**，
+      源码 `src/multicast_overlap.cu`（§19/§93/§94/§95 `bcast_kernel`/`shape_kernel` 忠实复刻 +
+      五个 mode：`one`(N=1 基线)/`idem`(N 发起者同槽同 payload)/`race`(N 发起者同槽异 payload)/
+      `nslot`(N 发起者 N 槽 + 读回 N 槽)/`nslot1`(同 nslot 投递但只读槽0，诊断)，脚本
+      `harness/multicast_overlap.sh`、原始输出 `harness/multicast_overlap.out.txt`（目标卡 H100/sm90a、
+      numSM=132、**固定空闲 device 6**、nvcc 13.2、每配置独立进程；`overlap_kernel` 28 regs/0 spill）。
+      §A 语义（R=1, reps=16, grid=528, C=8, chunk=4KB）、§A2 竞争跨 launch 复核、§B 成本（chunk=4KB）、
+      §C 带宽区间（chunk=8KB, occ=6）、§D ncu 源侧、§E C=4/16 交叉、§F 复跑。核心结论：
+      **(1)（headline，语义）** multicast 重叠掩码**只在「写到同一槽的 payload 逐字节相同」时幂等、
+      确定正确**——`one`/`idem`/`nslot`/`nslot1` 全部 torn=0；**同槽多写不同 payload 是真正的竞争**
+      （`race` N=2 **8.9%**、N=4 **16.2%** 样本撕裂、胜者跨 launch 漂移）⇒ 调度器必须**每槽单一写者**
+      或让重叠写者投递**相同 payload**（「Always multicast on A」安全的前提）；
+      **(2)（headline，成本）** 投递成本**只认发送笔数 N、与目标槽是否重叠无关**——`idem`(1槽)≈
+      `race`(1槽)≈`nslot1`(N槽) 逐档重合（<0.5%），相对 N=1，4× 发送只慢 **×1.18**；硬件对同槽多写
+      **既不串行也不去重**（每笔 multicast 边际 ~0.06µs/轮），真正的差来自**读回几槽**（`nslot` 多 ~8%）；
+      **(3)（源侧）** 源侧 L2 读 sector **精确 ∝ N**（`675,840=4×168,960`）、与「同源行/异源行」无关
+      （同源行不被合并），仅靠 **L2 命中**省 DRAM（`idem` 91.65KB vs `race`/`nslot1` 337.41KB）；
+      **(4)** 结论随 `C=4/8/16`、chunk 4KB/8KB 一致。判据：cluster kernel C1+C2+C3、细化 **C4**、
+      **仍非 C5**。**本轮新增实验**；新留尾巴（§96.9）：只测 H100/sm90a、语义探针 `R=1`（R>1 的
+      逐轮竞争混合未分离）、撕裂判据只覆盖整 chunk 级交错、未测 SM100 `cta_group::2`/2D-3D cluster。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -5408,10 +5433,35 @@
   一致）同轮报 242 µs；独立复跑 3×3 后 `pattern2,g=8` 回到 **241.7–242.1 µs**，与其余 pattern 逐点重合。
   ⇒ 该离群是同机干扰，非机制效应。**比 §93/§94 记录的 ~13% 大得多**——对比同一内核内字节相同的变体，
   是识破这类离群最快的办法。
+- **多笔 multicast 写同一 SMEM 槽是「无定义竞争」而非「以某一笔为准」**（P171-1/§96）：`mbarrier`
+  只保证**字节数到达**，不保证**整个 chunk 原子**。同槽 + **同 payload** 才幂等（所有样本逐位相同）；
+  同槽 + **异 payload** 会**撕裂**（§96 实测 N=2 有 8.9%、N=4 有 16.2% 的样本既非 A 也非 B），且胜者
+  **跨 launch 漂移**。故 megakernel 里两笔 multicast 打到重叠接收集时**必须逐字节同 payload**，否则
+  要让每槽单一写者或分槽。另：**重叠写同一槽不额外花星、也不去重**——投递成本只认**发送笔数 N**
+  （`idem`/`race`/`nslot1` 墙钟 <0.5% 内重合），真正的差在**读回几槽**（读回 N 槽多 ~8%）。设计时别把
+  「逻辑 delivered 字节」当物理 SMEM 写带宽（同槽多写会把它虚增 N 倍）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P170-1 完成（1/1）**。补掉 §94.7 明留的尾巴——**「未测非连续 / 重叠子集掩码」**：
+- 当前进度：**P171-1 完成（1/1）**。补掉 §95.7 明留的尾巴——**「真正的重叠掩码（同一 CTA 被多笔
+  multicast 打到同一 SMEM 槽的竞争序）」**：§19/§20/§93/§94/§95 每接收者每轮恰被投递一次，本节第一次
+  让多笔 multicast 落到同一槽。见 `docs/04-experiments.md` **§96**，源码 `src/multicast_overlap.cu`、
+  脚本 `harness/multicast_overlap.sh`、原始输出 `harness/multicast_overlap.out.txt`（目标卡 H100/sm90a、
+  numSM=132、**固定空闲 device 6**、nvcc 13.2、每配置独立进程；`overlap_kernel` 28 regs/0 spill）。
+  三条 headline：**(1)** **语义**——multicast 重叠掩码**只在「写到同一槽的 payload 逐字节相同」时幂等、
+  确定正确**（`one`/`idem`/`nslot`/`nslot1` 全部 torn=0）；**同槽多写不同 payload 是真正的竞争**
+  （`race` N=2 **8.9%**、N=4 **16.2%** 样本撕裂、胜者跨 launch 漂移）；**(2)** **成本**——投递成本
+  **只认发送笔数 N、与目标槽是否重叠无关**（`idem`(1槽)≈`race`(1槽)≈`nslot1`(N槽) 逐档重合 <0.5%，
+  4× 发送只慢 ×1.18；真差来自读回几槽，`nslot` 多 ~8%）；**(3)** **源侧**——L2 读 sector 精确 ∝ N、
+  与同源行/异源行无关，同源行仅靠 L2 命中省 DRAM。判据 cluster C1+C2+C3、细化 **C4**、**仍非 C5**。
+  **本轮新增实验**；新留尾巴（§96.9）：语义探针 `R=1`、未测 SM100 `cta_group::2`/2D-3D cluster。
+- 下一步候选：可继续走实验侧**未叠加的组合**（`docs/04` 微基准到 §96）——如 **multicast × 2SM
+  （`cta_group::2`）**、**2D/3D cluster × 重叠/非连续掩码**、**cluster × 端到端骨架**（把 §62/§74
+  的骨架放进 cluster）、**用 `expect_tx`（TMA 事务计数）做每槽 done**（§89 §F 未测、§90–§96 仍未测）、
+  或 **ncu achieved occupancy 交叉验证**（§93–§96 用静态上界）；也可回到源码走读主线（`docs/35` §9 余的
+  「`bf16` 之外 SM100 task 家族未逐一走读」）。**其余旧候选**：`docs/46` §6 的 FLAT-CACHE draft attention
+  （已核零命中、**不可走读**，仅供静态落差记录）。
+- 此前：**P170-1 完成（1/1）**。补掉 §94.7 明留的尾巴——**「未测非连续 / 重叠子集掩码」**：
   把 §19/§20/§93/§94 的**连续**掩码换成**离散（交错）位图**，并把「一个组由单个发起者发」换成
   **多个组内 CTA 分头发**。见 `docs/04-experiments.md` **§95**，源码 `src/multicast_mask_shape.cu`、
   脚本 `harness/multicast_mask_shape.sh`、原始输出 `harness/multicast_mask_shape.out.txt`

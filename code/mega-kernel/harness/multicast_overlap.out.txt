@@ -1,0 +1,115 @@
+########## §96 TMA multicast 真正重叠掩码（P171-1） ##########
+# DEV=6  nvcc -O3 -arch=sm_90a
+
+===== ptxas -v：overlap_kernel 的寄存器 / spill =====
+ptxas info    : Function properties for _Z14overlap_kernel14CUtensorMap_stPfiiiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 28 registers, used 1 barriers, 128 bytes smem
+# numSM=132
+
+===== §A 语义 / 正确性探针（R=1，reps=16，逐次读回）：one/idem/nslot 确定性 vs race 竞争 =====
+#   mode=0(one) N=1 / mode=1(idem) N=2,4 / mode=3(nslot) N=2,4 / mode=4(nslot1) N=4 / mode=2(race) N=2,4
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap P 8 528 4 4 0 1 16
+P C= 8 grid= 528 chunk= 4KB L= 4 mode=0(one) N= 1 R=1 reps=16 | torn=0/8448 max_nearest=0.0000 | winner_hist=[8448]
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap P 8 528 4 4 1 2 16
+P C= 8 grid= 528 chunk= 4KB L= 4 mode=1(idem) N= 2 R=1 reps=16 | torn=0/8448 max_nearest=0.0000 | winner_hist=[8448,0]
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap P 8 528 4 4 1 4 16
+P C= 8 grid= 528 chunk= 4KB L= 4 mode=1(idem) N= 4 R=1 reps=16 | torn=0/8448 max_nearest=0.0000 | winner_hist=[8448,0,0,0]
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap P 8 528 4 4 3 2 16
+P C= 8 grid= 528 chunk= 4KB L= 4 mode=3(nslot) N= 2 R=1 reps=16 | torn=0/8448 max_nearest=0.0000 | winner_hist=[8448]
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap P 8 528 4 4 3 4 16
+P C= 8 grid= 528 chunk= 4KB L= 4 mode=3(nslot) N= 4 R=1 reps=16 | torn=0/8448 max_nearest=0.0000 | winner_hist=[8448]
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap P 8 528 4 4 4 4 16
+P C= 8 grid= 528 chunk= 4KB L= 4 mode=4(nslot1) N= 4 R=1 reps=16 | torn=0/8448 max_nearest=0.0000 | winner_hist=[8448,0,0,0]
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap P 8 528 4 4 2 2 16
+P C= 8 grid= 528 chunk= 4KB L= 4 mode=2(race) N= 2 R=1 reps=16 | torn=748/8448 max_nearest=0.0200 | winner_hist=[4898,2802]
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap P 8 528 4 4 2 4 16
+P C= 8 grid= 528 chunk= 4KB L= 4 mode=2(race) N= 4 R=1 reps=16 | torn=1368/8448 max_nearest=0.0200 | winner_hist=[1339,290,2236,3215]
+
+===== §A2 race 非确定性复核：mode2 N=4 独立跑 3 次（winner_hist 是否逐次不同）=====
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap P 8 528 4 4 2 4 16
+P C= 8 grid= 528 chunk= 4KB L= 4 mode=2(race) N= 4 R=1 reps=16 | torn=1476/8448 max_nearest=0.0200 | winner_hist=[1183,254,2159,3376]
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap P 8 528 4 4 2 4 16
+P C= 8 grid= 528 chunk= 4KB L= 4 mode=2(race) N= 4 R=1 reps=16 | torn=1302/8448 max_nearest=0.0200 | winner_hist=[1255,369,2207,3315]
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap P 8 528 4 4 2 4 16
+P C= 8 grid= 528 chunk= 4KB L= 4 mode=2(race) N= 4 R=1 reps=16 | torn=1395/8448 max_nearest=0.0200 | winner_hist=[1313,340,2200,3200]
+
+===== §B 成本：固定 issue 数 N，目标槽 1 个(idem/race) vs N 个(nslot1) —— chunk=4KB L=4 grid=numSM*4 R=200 it=20 =====
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 4 200 4 0 1 20
+B C= 8 grid= 528 chunk= 4KB L= 4 R= 200 mode=0(one) N= 1 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  209.944 us | deliver  2060.3 GB/s | per-blk    3.9 GB/s | src-issued   257.5 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 4 200 4 1 2 20
+B C= 8 grid= 528 chunk= 4KB L= 4 R= 200 mode=1(idem) N= 2 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  221.546 us | deliver  3904.7 GB/s | per-blk    7.4 GB/s | src-issued   488.1 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 4 200 4 1 4 20
+B C= 8 grid= 528 chunk= 4KB L= 4 R= 200 mode=1(idem) N= 4 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  247.536 us | deliver  6989.5 GB/s | per-blk   13.2 GB/s | src-issued   873.7 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 4 200 4 2 2 20
+B C= 8 grid= 528 chunk= 4KB L= 4 R= 200 mode=2(race) N= 2 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  221.906 us | deliver  3898.4 GB/s | per-blk    7.4 GB/s | src-issued   487.3 GB/s | maxerr -1.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 4 200 4 2 4 20
+B C= 8 grid= 528 chunk= 4KB L= 4 R= 200 mode=2(race) N= 4 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  248.464 us | deliver  6963.4 GB/s | per-blk   13.2 GB/s | src-issued   870.4 GB/s | maxerr -1.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 4 200 4 4 2 20
+B C= 8 grid= 528 chunk= 4KB L= 4 R= 200 mode=4(nslot1) N= 2 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  221.893 us | deliver  3898.6 GB/s | per-blk    7.4 GB/s | src-issued   487.3 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 4 200 4 4 4 20
+B C= 8 grid= 528 chunk= 4KB L= 4 R= 200 mode=4(nslot1) N= 4 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  248.245 us | deliver  6969.5 GB/s | per-blk   13.2 GB/s | src-issued   871.2 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 4 200 4 3 2 20
+B C= 8 grid= 528 chunk= 4KB L= 4 R= 200 mode=3(nslot) N= 2 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  246.714 us | deliver  3506.4 GB/s | per-blk    6.6 GB/s | src-issued   438.3 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 4 200 4 3 4 20
+B C= 8 grid= 528 chunk= 4KB L= 4 R= 200 mode=3(nslot) N= 4 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  268.498 us | deliver  6443.8 GB/s | per-blk   12.2 GB/s | src-issued   805.5 GB/s | maxerr 0.000000
+
+===== §C 带宽区间：chunk=8KB L=4（occupancy 降到 6）—— issue 数 vs 目标槽 =====
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 8 200 4 0 1 20
+B C= 8 grid= 528 chunk= 8KB L= 4 R= 200 mode=0(one) N= 1 it=20 | regs= 28 occ= 6 eff= 4 waves=1.00 |  221.963 us | deliver  3897.4 GB/s | per-blk    7.4 GB/s | src-issued   487.2 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 8 200 4 1 4 20
+B C= 8 grid= 528 chunk= 8KB L= 4 R= 200 mode=1(idem) N= 4 it=20 | regs= 28 occ= 6 eff= 4 waves=1.00 |  322.021 us | deliver 10745.6 GB/s | per-blk   20.4 GB/s | src-issued  1343.2 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 8 200 4 2 4 20
+B C= 8 grid= 528 chunk= 8KB L= 4 R= 200 mode=2(race) N= 4 it=20 | regs= 28 occ= 6 eff= 4 waves=1.00 |  320.346 us | deliver 10801.8 GB/s | per-blk   20.5 GB/s | src-issued  1350.2 GB/s | maxerr -1.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 8 200 4 4 4 20
+B C= 8 grid= 528 chunk= 8KB L= 4 R= 200 mode=4(nslot1) N= 4 it=20 | regs= 28 occ= 6 eff= 4 waves=1.00 |  320.822 us | deliver 10785.7 GB/s | per-blk   20.4 GB/s | src-issued  1348.2 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 8 200 4 3 4 20
+B C= 8 grid= 528 chunk= 8KB L= 4 R= 200 mode=3(nslot) N= 4 it=20 | regs= 28 occ= 6 eff= 4 waves=1.00 |  338.949 us | deliver 10208.9 GB/s | per-blk   19.3 GB/s | src-issued  1276.1 GB/s | maxerr 0.000000
+
+===== §D ncu：源侧 L2 读 sector（one N=1 vs idem N=4 同源行 vs nslot1 N=4 异源行）=====
+$ ncu ... B 8 grid=528 4 20 4 0 1 1  (mode=0 N=1)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Kbyte        91.65
+    lts__t_bytes.sum                             Mbyte        46.56
+    lts__t_sectors_op_read.sum                  sector       174442
+    lts__t_sectors_srcunit_tex_op_read.sum      sector       168960
+$ ncu ... B 8 grid=528 4 20 4 1 4 1  (mode=1 N=4)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Kbyte        91.65
+    lts__t_bytes.sum                             Mbyte        65.54
+    lts__t_sectors_op_read.sum                  sector       681322
+    lts__t_sectors_srcunit_tex_op_read.sum      sector       675840
+$ ncu ... B 8 grid=528 4 20 4 2 4 1  (mode=2 N=4)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Kbyte       337.41
+    lts__t_bytes.sum                             Mbyte        62.90
+    lts__t_sectors_op_read.sum                  sector       689002
+    lts__t_sectors_srcunit_tex_op_read.sum      sector       675840
+$ ncu ... B 8 grid=528 4 20 4 4 4 1  (mode=4 N=4)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Kbyte       337.41
+    lts__t_bytes.sum                             Mbyte        62.93
+    lts__t_sectors_op_read.sum                  sector       689002
+    lts__t_sectors_srcunit_tex_op_read.sum      sector       675840
+
+===== §E C×overlap 交叉：C=4/16，N=C/2，one/idem/race/nslot（chunk=4KB L=4 grid=numSM*4 R=200 it=20）=====
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 4 528 4 200 4 0 1 20
+B C= 4 grid= 528 chunk= 4KB L= 4 R= 200 mode=0(one) N= 1 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  203.797 us | deliver  2122.4 GB/s | per-blk    4.0 GB/s | src-issued   530.6 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 4 528 4 200 4 1 2 20
+B C= 4 grid= 528 chunk= 4KB L= 4 R= 200 mode=1(idem) N= 2 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  217.030 us | deliver  3986.0 GB/s | per-blk    7.5 GB/s | src-issued   996.5 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 4 528 4 200 4 2 2 20
+B C= 4 grid= 528 chunk= 4KB L= 4 R= 200 mode=2(race) N= 2 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  217.870 us | deliver  3970.6 GB/s | per-blk    7.5 GB/s | src-issued   992.6 GB/s | maxerr -1.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 4 528 4 200 4 3 2 20
+B C= 4 grid= 528 chunk= 4KB L= 4 R= 200 mode=3(nslot) N= 2 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  245.037 us | deliver  3530.4 GB/s | per-blk    6.7 GB/s | src-issued   882.6 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 16 528 4 200 4 0 1 20
+B C=16 grid= 528 chunk= 4KB L= 4 R= 200 mode=0(one) N= 1 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  225.128 us | deliver  1921.3 GB/s | per-blk    3.6 GB/s | src-issued   120.1 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 16 528 4 200 4 1 8 20
+B C=16 grid= 528 chunk= 4KB L= 4 R= 200 mode=1(idem) N= 8 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  370.270 us | deliver  9345.3 GB/s | per-blk   17.7 GB/s | src-issued   584.1 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 16 528 4 200 4 2 8 20
+B C=16 grid= 528 chunk= 4KB L= 4 R= 200 mode=2(race) N= 8 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  375.101 us | deliver  9225.0 GB/s | per-blk   17.5 GB/s | src-issued   576.6 GB/s | maxerr -1.000000
+
+===== §F 稳定性复跑：§B 的 mode1/mode4 N=4 各两点连跑 =====
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 4 200 4 1 4 20
+B C= 8 grid= 528 chunk= 4KB L= 4 R= 200 mode=1(idem) N= 4 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  247.907 us | deliver  6979.0 GB/s | per-blk   13.2 GB/s | src-issued   872.4 GB/s | maxerr 0.000000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_overlap B 8 528 4 200 4 4 4 20
+B C= 8 grid= 528 chunk= 4KB L= 4 R= 200 mode=4(nslot1) N= 4 it=20 | regs= 28 occ=13 eff= 4 waves=1.00 |  248.584 us | deliver  6960.0 GB/s | per-blk   13.2 GB/s | src-issued   870.0 GB/s | maxerr 0.000000
