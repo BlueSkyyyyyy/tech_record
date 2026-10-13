@@ -1884,8 +1884,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-94 补测 + P8-3/P8-4**。
-  - P8-4（本轮）：**补全一页纸 `docs/08-summary.md` 的后半段——此前正文收在 P7-81（`docs/07` §84），
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-95 补测 + P8-3/P8-4**。
+  - P7-95（本轮）：**关闭 §95.6（P7-92）明确留下的最后一个格子——bf16 原生入口 × `intra` 折叠 ×
+    `K≠128`（三者的交集从没建过），并回答「`intra` staging 在 bf16 build 下是否随之降 dtype」**。
+    新增 `harness/check_bwd_b2_k128_intra_bf16.py`（`check_bwd_b2_k128_intra_bf16.out.txt`，空闲卡）。
+    **`b2_mma_probe.cu`/`b3_intra_probe.cu` 一行未改**（纯组合 + 计时）。**源码答案**：`intra` 的三块
+    staging `siq/sik/sig/sda` **无条件声明 `float`**（`b2_mma_probe.cu:621-624`，无 `-DB2M_BF16` 分支），
+    故 **不降位**——`-DB2M_BF16` 只把五个 streamed 操作数（`do/vn/dv/h/dh`）换 bf16；于是这条组合的
+    位级等价是**推导**（P7-91 的 `prod_bf16==prod` ⊕ P7-92 的 `prod_intra==prod+b3`）。**Part A**：
+    `prod_bf16` vs `prod`（同 bf16 值）十项**逐位 0**；`prod_bf16_intra` vs `prod_intra`（K∈{64,128}）
+    十项**逐位 0**；`bf16_intra` vs `bf16 + 独立 b3intra(K)`——`dqg/dkg` **逐位 0**（K=64/128/256）、
+    `dg ≤4.77e-7/db ≤9.54e-7`（fp32 加法序 ulp）、未触及六项**逐位 0**；sanity contribution==`b3.dq` ≤1.2e-7；
+    四组 shape（含非整除 `T=250`、单 chunk `T=64`）。**Part B（关键/新）**：`prod_intra` fp32 在 **`K=256`
+    仍 smem 不可行**（**278656 B > 227 KiB**），但 **`prod_bf16_intra` = 206976 B（202.1 KiB）可行**——
+    streamed 操作数 bf16 减半（`prod` 227968→`prod_bf16` 156288，−71680 B）腾出足够空间容纳不变的 fp32
+    `intra` staging（50176 B）⟹ **bf16 入口把 `K=256` 折叠从「不可行」变成「可行」**（§95.3/§97.6 的
+    「K=256 不可行」**只在 fp32 成立**；§97.6 猜的「bf16 是容量杠杆」兑现，但机制是**操作数** staging
+    而非 `intra` staging）。**Part C（CUPTI dev）**：`fold/(bf16+b3)` `K=64` **0.884–0.915（净赢）**、
+    `K=128` 大 shape **1.333**/小 shape 0.869（同 §95/§96 的 `BT/K` crossover）、`K=256` 1.006/0.923
+    （打平/小赢；fp32 下它压根不可行）。**不改变 §45 的 `cf` 默认部署**；折叠「按 K 切换」判据不变，新增
+    「`K=256` + bf16 入口下折叠可行」。见 `docs/07` §98。
+  - P8-4（上轮）：**补全一页纸 `docs/08-summary.md` 的后半段——此前正文收在 P7-81（`docs/07` §84），
     缺失 `K≠V` 旋钮空间收口（P7-82…P7-87，§85–§90）与 `K≠128` lane 布局重写 + intra 折叠 × K 收口
     （P7-88…P7-94，§91–§97）**。新增两段（`K≠V`：TMA×K≠V 逐值相同 + 六段 `V` 轴 `BVW=VD/NW` 泛化 +
     bf16/intra 交叉逐位 + 四个旋钮 ncu + `BF16_VDW×TMA` 编译期 no-op；`K≠128`：base core 两处

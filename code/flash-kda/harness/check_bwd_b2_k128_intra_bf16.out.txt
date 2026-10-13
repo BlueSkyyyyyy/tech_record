@@ -1,0 +1,417 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+====================================================================================================
+Part A: bf16-native entry x intra fold x K!=128 (and intra staging dtype question)
+====================================================================================================
+
+#### K = V = 64   (prod_intra fp32 smem = 93568 B [OK]; prod_bf16_intra smem = 71040 B = 69.4 KiB <= 227 KiB OK) ####
+
+# K=64 B2 T1024 H8  NT=64
+    dropin prod_bf16.dv2 vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dvb vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkgb vs prod            max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.db vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dApre vs prod           max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dA vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dqg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dg vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dgk vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dv2 vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dvb vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkgb vs fp32_intra     max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.db vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dApre vs fp32_intra    max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dA vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dqg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dg vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dgk vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dqg vs bf16+b3.dq             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dkg vs bf16+b3.dk             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dg vs bf16+b3.dg              max_abs=4.768e-07  rel=7.180e-08  [DIFF]
+    bf16_intra.db vs bf16+b3.db              max_abs=4.768e-07  rel=1.179e-07  [DIFF]
+    sanity: (bf16_intra-bf16).dqg max_abs=1.756e+00 ; ==b3.dq max_abs=1.192e-07
+    unchanged bf16_intra.dv2 vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dvb vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dkgb vs bf16        max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dA vs bf16          max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dApre vs bf16       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dgk vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+
+# K=64 T512 H4  NT=32
+    dropin prod_bf16.dv2 vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dvb vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkgb vs prod            max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.db vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dApre vs prod           max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dA vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dqg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dg vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dgk vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dv2 vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dvb vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkgb vs fp32_intra     max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.db vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dApre vs fp32_intra    max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dA vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dqg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dg vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dgk vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dqg vs bf16+b3.dq             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dkg vs bf16+b3.dk             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dg vs bf16+b3.dg              max_abs=2.384e-07  rel=4.669e-08  [DIFF]
+    bf16_intra.db vs bf16+b3.db              max_abs=4.768e-07  rel=1.447e-07  [DIFF]
+    sanity: (bf16_intra-bf16).dqg max_abs=1.565e+00 ; ==b3.dq max_abs=1.192e-07
+    unchanged bf16_intra.dv2 vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dvb vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dkgb vs bf16        max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dA vs bf16          max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dApre vs bf16       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dgk vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+
+# K=64 T250 H3 (non-div)  NT=16
+    dropin prod_bf16.dv2 vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dvb vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkgb vs prod            max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.db vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dApre vs prod           max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dA vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dqg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dg vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dgk vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dv2 vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dvb vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkgb vs fp32_intra     max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.db vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dApre vs fp32_intra    max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dA vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dqg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dg vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dgk vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dqg vs bf16+b3.dq             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dkg vs bf16+b3.dk             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dg vs bf16+b3.dg              max_abs=2.384e-07  rel=5.211e-08  [DIFF]
+    bf16_intra.db vs bf16+b3.db              max_abs=2.384e-07  rel=8.337e-08  [DIFF]
+    sanity: (bf16_intra-bf16).dqg max_abs=1.558e+00 ; ==b3.dq max_abs=1.192e-07
+    unchanged bf16_intra.dv2 vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dvb vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dkgb vs bf16        max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dA vs bf16          max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dApre vs bf16       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dgk vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+
+# K=64 T64 H1 (single chunk)  NT=4
+    dropin prod_bf16.dv2 vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dvb vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkgb vs prod            max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.db vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dApre vs prod           max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dA vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dqg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dg vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dgk vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dv2 vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dvb vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkgb vs fp32_intra     max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.db vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dApre vs fp32_intra    max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dA vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dqg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dg vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dgk vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dqg vs bf16+b3.dq             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dkg vs bf16+b3.dk             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dg vs bf16+b3.dg              max_abs=2.384e-07  rel=5.746e-08  [DIFF]
+    bf16_intra.db vs bf16+b3.db              max_abs=1.192e-07  rel=6.427e-08  [DIFF]
+    sanity: (bf16_intra-bf16).dqg max_abs=1.226e+00 ; ==b3.dq max_abs=5.960e-08
+    unchanged bf16_intra.dv2 vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dvb vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dkgb vs bf16        max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dA vs bf16          max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dApre vs bf16       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dgk vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+
+#### K = V = 128   (prod_intra fp32 smem = 155264 B [OK]; prod_bf16_intra smem = 116352 B = 113.6 KiB <= 227 KiB OK) ####
+
+# K=128 B2 T1024 H8  NT=64
+    dropin prod_bf16.dv2 vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dvb vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkgb vs prod            max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.db vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dApre vs prod           max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dA vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dqg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dg vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dgk vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dv2 vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dvb vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkgb vs fp32_intra     max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.db vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dApre vs fp32_intra    max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dA vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dqg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dg vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dgk vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dqg vs bf16+b3.dq             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dkg vs bf16+b3.dk             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dg vs bf16+b3.dg              max_abs=4.768e-07  rel=9.235e-08  [DIFF]
+    bf16_intra.db vs bf16+b3.db              max_abs=9.537e-07  rel=1.911e-07  [DIFF]
+    sanity: (bf16_intra-bf16).dqg max_abs=1.325e+00 ; ==b3.dq max_abs=1.192e-07
+    unchanged bf16_intra.dv2 vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dvb vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dkgb vs bf16        max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dA vs bf16          max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dApre vs bf16       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dgk vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+
+# K=128 T512 H4  NT=32
+    dropin prod_bf16.dv2 vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dvb vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkgb vs prod            max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.db vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dApre vs prod           max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dA vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dqg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dg vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dgk vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dv2 vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dvb vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkgb vs fp32_intra     max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.db vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dApre vs fp32_intra    max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dA vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dqg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dg vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dgk vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dqg vs bf16+b3.dq             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dkg vs bf16+b3.dk             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dg vs bf16+b3.dg              max_abs=4.768e-07  rel=8.845e-08  [DIFF]
+    bf16_intra.db vs bf16+b3.db              max_abs=4.768e-07  rel=1.229e-07  [DIFF]
+    sanity: (bf16_intra-bf16).dqg max_abs=1.301e+00 ; ==b3.dq max_abs=5.960e-08
+    unchanged bf16_intra.dv2 vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dvb vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dkgb vs bf16        max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dA vs bf16          max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dApre vs bf16       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dgk vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+
+# K=128 T250 H3 (non-div)  NT=16
+    dropin prod_bf16.dv2 vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dvb vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkgb vs prod            max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.db vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dApre vs prod           max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dA vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dqg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dg vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dgk vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dv2 vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dvb vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkgb vs fp32_intra     max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.db vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dApre vs fp32_intra    max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dA vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dqg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dg vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dgk vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dqg vs bf16+b3.dq             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dkg vs bf16+b3.dk             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dg vs bf16+b3.dg              max_abs=4.768e-07  rel=1.088e-07  [DIFF]
+    bf16_intra.db vs bf16+b3.db              max_abs=4.768e-07  rel=1.298e-07  [DIFF]
+    sanity: (bf16_intra-bf16).dqg max_abs=1.106e+00 ; ==b3.dq max_abs=5.960e-08
+    unchanged bf16_intra.dv2 vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dvb vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dkgb vs bf16        max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dA vs bf16          max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dApre vs bf16       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dgk vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+
+# K=128 T64 H1 (single chunk)  NT=4
+    dropin prod_bf16.dv2 vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dvb vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkgb vs prod            max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.db vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dApre vs prod           max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dA vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dqg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dg vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dgk vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dv2 vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dvb vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkgb vs fp32_intra     max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.db vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dApre vs fp32_intra    max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dA vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dqg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dkg vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dg vs fp32_intra       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin bf16_intra.dgk vs fp32_intra      max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dqg vs bf16+b3.dq             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dkg vs bf16+b3.dk             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dg vs bf16+b3.dg              max_abs=2.384e-07  rel=7.063e-08  [DIFF]
+    bf16_intra.db vs bf16+b3.db              max_abs=2.384e-07  rel=9.917e-08  [DIFF]
+    sanity: (bf16_intra-bf16).dqg max_abs=9.997e-01 ; ==b3.dq max_abs=5.960e-08
+    unchanged bf16_intra.dv2 vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dvb vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dkgb vs bf16        max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dA vs bf16          max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dApre vs bf16       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dgk vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+
+#### K = V = 256   (prod_intra fp32 smem = 278656 B [INFEASIBLE]; prod_bf16_intra smem = 206976 B = 202.1 KiB <= 227 KiB OK) ####
+  NOTE: fp32 fold INFEASIBLE at K=256 -- skipping the fp32 drop-in comparison, but the bf16 fold is run (it fits).
+
+# K=256 B2 T1024 H8  NT=64
+    dropin prod_bf16.dv2 vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dvb vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkgb vs prod            max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.db vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dApre vs prod           max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dA vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dqg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dg vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dgk vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dqg vs bf16+b3.dq             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dkg vs bf16+b3.dk             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dg vs bf16+b3.dg              max_abs=4.768e-07  rel=7.488e-08  [DIFF]
+    bf16_intra.db vs bf16+b3.db              max_abs=9.537e-07  rel=1.306e-07  [DIFF]
+    sanity: (bf16_intra-bf16).dqg max_abs=9.500e-01 ; ==b3.dq max_abs=1.192e-07
+    unchanged bf16_intra.dv2 vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dvb vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dkgb vs bf16        max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dA vs bf16          max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dApre vs bf16       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dgk vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+
+# K=256 T512 H4  NT=32
+    dropin prod_bf16.dv2 vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dvb vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkgb vs prod            max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.db vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dApre vs prod           max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dA vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+    dropin prod_bf16.dqg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dg vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dgk vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dqg vs bf16+b3.dq             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dkg vs bf16+b3.dk             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dg vs bf16+b3.dg              max_abs=4.768e-07  rel=7.639e-08  [DIFF]
+    bf16_intra.db vs bf16+b3.db              max_abs=9.537e-07  rel=1.485e-07  [DIFF]
+    sanity: (bf16_intra-bf16).dqg max_abs=9.743e-01 ; ==b3.dq max_abs=1.192e-07
+    unchanged bf16_intra.dv2 vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dvb vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dkgb vs bf16        max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dA vs bf16          max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dApre vs bf16       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dgk vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+
+# K=256 T250 H3 (non-div)  NT=16
+    dropin prod_bf16.dv2 vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dvb vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkgb vs prod            max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.db vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dApre vs prod           max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dA vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dqg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dg vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dgk vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dqg vs bf16+b3.dq             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dkg vs bf16+b3.dk             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dg vs bf16+b3.dg              max_abs=4.768e-07  rel=9.631e-08  [DIFF]
+    bf16_intra.db vs bf16+b3.db              max_abs=9.537e-07  rel=1.852e-07  [DIFF]
+    sanity: (bf16_intra-bf16).dqg max_abs=8.330e-01 ; ==b3.dq max_abs=1.192e-07
+    unchanged bf16_intra.dv2 vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dvb vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dkgb vs bf16        max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dA vs bf16          max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dApre vs bf16       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dgk vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+
+# K=256 T64 H1 (single chunk)  NT=4
+    dropin prod_bf16.dv2 vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dvb vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkgb vs prod            max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.db vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dApre vs prod           max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dA vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dqg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dkg vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dg vs prod              max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    dropin prod_bf16.dgk vs prod             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dqg vs bf16+b3.dq             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dkg vs bf16+b3.dk             max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    bf16_intra.dg vs bf16+b3.dg              max_abs=2.384e-07  rel=6.770e-08  [DIFF]
+    bf16_intra.db vs bf16+b3.db              max_abs=2.384e-07  rel=5.782e-08  [DIFF]
+    sanity: (bf16_intra-bf16).dqg max_abs=5.248e-01 ; ==b3.dq max_abs=7.916e-08
+    unchanged bf16_intra.dv2 vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dvb vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dkgb vs bf16        max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dA vs bf16          max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dApre vs bf16       max_abs=0.000e+00  rel=0.000e+00  [OK ]
+    unchanged bf16_intra.dgk vs bf16         max_abs=0.000e+00  rel=0.000e+00  [OK ]
+
+----------------------------------------------------------------------------------------------------
+Part A: prod_bf16 vs prod (drop-in)          worst max_abs = 0.000e+00  [BIT-IDENTICAL]
+Part A: bf16_intra vs fp32_intra (drop-in)   worst max_abs = 0.000e+00  [BIT-IDENTICAL]
+Part A: bf16_intra vs bf16 + b3intra(K):
+  K= 64 dqg  0.000e+00  [BIT]
+  K= 64 dkg  0.000e+00  [BIT]
+  K= 64 dg   4.768e-07  [ulp]
+  K= 64 db   4.768e-07  [ulp]
+  K=128 dqg  0.000e+00  [BIT]
+  K=128 dkg  0.000e+00  [BIT]
+  K=128 dg   4.768e-07  [ulp]
+  K=128 db   9.537e-07  [ulp]
+  K=256 dqg  0.000e+00  [BIT]
+  K=256 dkg  0.000e+00  [BIT]
+  K=256 dg   4.768e-07  [ulp]
+  K=256 db   9.537e-07  [ulp]
+Part A: unchanged outputs worst max_abs = 0.000e+00  [BIT-IDENTICAL]
+
+====================================================================================================
+Part B: static cost -- prod / prod_intra / prod_bf16 / prod_bf16_intra at each K
+====================================================================================================
+  build                  K   regs   spill    smem(B)  block/SM
+  prod                  64     64       0      79744  feasible
+  prod_intra            64     90       0      93568  feasible
+  prod_bf16             64     78       0      57216  feasible
+  prod_bf16_intra       64     79      16      71040  feasible
+  prod                 128    112       0     129152  feasible
+  prod_intra           128    128       4     155264  feasible
+  prod_bf16            128    104       0      90240  feasible
+  prod_bf16_intra      128    128       8     116352  feasible
+  prod                 256    147       0     227968  feasible
+  prod_intra           256    180       0     278656  INFEASIBLE(>227KiB)
+  prod_bf16            256    142       0     156288  feasible
+  prod_bf16_intra      256    180       0     206976  feasible
+
+====================================================================================================
+Part C: timing (CUPTI dev) -- bf16 fold vs bf16 prod + standalone b3intra
+====================================================================================================
+  case                   |      bf16     bf16_intra |     bf16+b3 |   incl/bf16 fold/(bf16+b3)
+  K= 64 B2 T1024 H8      |      53.3           65.6 |        71.7 |       1.231         0.915
+  K= 64 T512 H4          |      10.2           12.8 |        14.5 |       1.258         0.884
+  K=128 B2 T1024 H8      |     122.8          209.4 |       157.1 |       1.705         1.333
+  K=128 T512 H4          |      19.6           22.7 |        26.1 |       1.159         0.869
+  K=256 B2 T1024 H8      |     421.3          509.7 |       506.8 |       1.210         1.006
+  K=256 T512 H4          |      54.3           62.4 |        67.7 |       1.149         0.923
+
+DONE
