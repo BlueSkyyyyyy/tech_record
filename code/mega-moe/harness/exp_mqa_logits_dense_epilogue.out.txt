@@ -1,0 +1,60 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+=== P103-1 SM100 dense MQA logits 主 kernel 架构无关逻辑验证 (H100/sm90) ===
+device: NVIDIA H100 80GB HBM3  SMs=132  sm=90
+
+## Part A. dispatch_num_block_tokens (:27-36)
+  BLOCK_Q=1:
+    N=0 -> Int<1>  expect 1  OK
+    N=1 -> Int<1>  expect 1  OK
+    N=2 -> Int<1>  expect 1  OK
+    N=3 -> Int<1>  expect 1  OK
+  BLOCK_Q=2:
+    N=0 -> Int<1>  expect 1  OK
+    N=1 -> Int<1>  expect 1  OK
+    N=2 -> Int<2>  expect 2  OK
+    N=3 -> Int<2>  expect 2  OK
+    N=4 -> Int<2>  expect 2  OK
+  BLOCK_Q=4:
+    N=0 -> Int<1>  expect 1  OK
+    N=1 -> Int<1>  expect 1  OK
+    N=2 -> Int<2>  expect 2  OK
+    N=3 -> Int<3>  expect 3  OK
+    N=4 -> Int<4>  expect 4  OK
+    N=5 -> Int<4>  expect 4  OK
+    N=6 -> Int<4>  expect 4  OK
+  结论：N 被夹到 [1, BLOCK_Q]；N=0（空 Q block）也退化为处理 1 个 token 的模板实例。
+
+## Part B. visit_tmem_head_chunks (:39-49) 的 16/8/4 头块分解
+  H        chunks(base,width)             sum    check
+  4        0/4                            4      OK
+  8        0/8                            8      OK
+  12       0/8 8/4                        12     OK
+  16       0/16                           16     OK
+  20       0/16 16/4                      20     OK
+  24       0/16 16/8                      24     OK
+  32       0/16 16/16                     32     OK
+  64       0/16 16/16 32/16 48/16         64     OK
+  128      0/16 16/16 32/16 48/16 64/16 80/16 96/16 112/16  128    OK
+  结论：分解按 16/8/4 贪心，起点连续、宽度和恰为 H；H%4==0（:441 静态断言）下不越读。
+
+## Part C. reduce_pairs + store_token (:473-489)：bf16x2 ReLU×w 归约 + 压缩写回
+  一次性 vs 分段 bit 不一致: 0 / 64
+  device vs host 逐位重放不一致: 0 / 64
+  bf16 累加误差 vs fp32 参考：max|Δ|=1.991e-01  mean|Δ|=5.460e-02
+  max 相对误差 |Δ|/|ref| = 1.692（ref 存在相消，可为 O(1)）；RMS(ref)=11.290
+  max 相对项幅 |Δ|/Σ|term| = 2.552e-03（=逐项 bf16 舍入的积累，≈2^-9 量级）
+  压缩写回 [0,32) 有效、其余保留 poison：窗口错 0、值错 0
+  Part C OK
+
+## Part D. issue_paged_split 的生产者均分算术 (:184-221)
+  SPLIT    PAGE     pages     gather   SF-TMAs      KV(SF/KV)    cover
+  384      32       12        12       3            4/8          OK
+  384      64       6         4        3            0/6          OK
+  384      128      3         0        3            0/3          OK
+  说明：SF 生产者发 kNumSFTMAs 条 SF TMA（每 4 页合并 1 条 gather4）；
+        仅当 pages > 2*SFTMAs 时把 (pages-SFTMAs)/2 页 KV 也交给它，使两生产者工作量≈对半。
+
+## Part E. utccp_required_smem_warp_transpose (:288-296) 4x32 -> 32x4
+  dst[lane*4+i] == src[i*32+lane]：不一致 0 / 128  OK
+
+=== 汇总: ALL PASS ===

@@ -3202,7 +3202,35 @@
       `AllGatherSignals`=524288(512KiB)/`BucketSignals`=794688 + 字段偏移；4 组 `(R,SMs)` 每非己 rank 恰 1 warp、
       每桶覆盖一次；10 组 chunk QP 拆分覆盖恰好一次/64B 对齐/尾段可非 64 倍数；完成协议四场景（每槽恰 R-1 /
       per-chunk 独立 / GEQ 过计通过 / 未达阈值不通过）；Python host 算术层独立复刻一致（2 带宽 × 5 拓扑 ×
-      6 shard）。配套博客 `content/posts/mega-moe-112-bucket-allgather-sm-backends`（索引页新增第 112 篇）。
+       6 shard）。配套博客 `content/posts/mega-moe-112-bucket-allgather-sm-backends`（索引页新增第 112 篇）。
+
+### P103 增量（opt-in，补齐第 23 篇对 SM100 dense MQA logits 主 kernel 只给的一页摘要）
+
+- [x] **P103-1** **SM100 dense MQA logits 主 kernel 逐段精读**
+      （`deep_gemm/include/deep_gemm/impls/sm100_mqa_logits.cuh`，609 行；`layout/mqa_logits.cuh`；
+      `csrc/apis/attention.hpp:18-282`、`csrc/jit_kernels/impls/sm100_mqa_logits.hpp:11-155`）。
+      第 19/23 篇拆的是它的**调度器**（H100 真机可跑），第 22 篇拆的是稀疏版主 kernel 概览；
+      第 23 篇 §5 只给主 kernel 一页摘要（列结论、没逐段读、没真机验证其架构无关部分）。本篇补全。
+      → `docs/113-mqa-logits-dense-kernel.md`（真实行号核对）：一次 launch 16 warp 五类角色
+      （math 0..11 `:430-533` / SF-Q 生产者 `:278-280` / KV 生产者 `:281-283` / UTCCP `:284-364` /
+      UMMA `:365-429`）；`BLOCK_Q=128/num_heads`、`UMMA_M=UMMA_N=128`、`SPLIT_KV=384`、
+      **`kNumTmemStages==kNumMathWarpGroups=3`**（`:99`）让一个 KV split 的 3 段 UMMA 被 3 个
+      math warpgroup 各吃一段；TMEM 三块列预算（`:101-108`）+ SF 的 128 对齐；`reuse_kv`
+      （`:151-153`/`:335-343`）跳过重复转置。**五段架构无关逻辑 H100(sm90a) 真机 ALL PASS**
+      （`src/mqa_logits_dense_epilogue.cu` + `harness/exp_mqa_logits_dense_epilogue.{sh,out.txt}`）：
+      **A** `dispatch_num_block_tokens`（`:27-36`）运行期 token 数→`Int<max(1,min(N,BLOCK_Q))>`
+      （N=0 也退化为处理 1 token；`BLOCK_Q∈{1,2,4}` 共 19 点全对）；**B** `visit_tmem_head_chunks`
+      （`:39-49`）按 16/8/4 贪心切头，起点连续、宽度和恰为 H（9 组 H 与 host 复刻逐项 0 不符，
+      `H%4==0` 不越读）；**C** `reduce_pairs`+`store_token`（`:473-489`）：`cvt.relu`+`__hfma2`+
+      两条 `sum_0/sum_1` bf16x2 累加器把 `Σ_h relu(acc_h)·w_h` **整个在 bf16 里做**，「一次性 vs
+      分段」归约**逐位相等 0/64**、device vs host 逐位重放 0/64、bf16 累加 vs fp32 参考
+      `max|Δ|=1.99e-1`/`max|Δ|/Σ|term|=2.55e-3`（≈2^-9；`max|Δ|/|ref|` 可达 O(1) 纯属相消），
+      压缩写回窗口与值 0 错且窗口外保留 poison；**D** `issue_paged_split`（`:184-221`）的
+      `kNumSFTMAs`/`kNumKVPagesFromSFProducer` 两生产者 KV 页均分（PAGE_KV 32/64/128 → 4/8、0/6、0/3，
+      `kv_from_sf+kv_from_kv==pages`）；**E** `utccp_required_smem_warp_transpose`（`:288-296`）的
+      `src[i*32+lane]→dst[lane*4+i]` 4×32→32×4 转置 128 元素 0 不符。与 SM90 版八维对照表。
+      **UMMA/tcgen05/UTCCP/2-SM TMA SM100 专属、仅分析**。配套博客
+      `content/posts/mega-moe-113-mqa-logits-dense-kernel`（索引页新增第 113 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3229,8 +3257,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P102 各增量完成（P15-1…P41-1、P42-1…P102-1）。**
-  本轮 P102-1：新建 `docs/112-bucket-allgather-sm-backends.md`
+- 当前进度：**P0~P14 全部完成；P15~P103 各增量完成（P15-1…P41-1、P42-1…P103-1）。**
+  本轮 P103-1：新建 `docs/113-mqa-logits-dense-kernel.md`
+  （+`src/mqa_logits_dense_epilogue.cu`、`harness/exp_mqa_logits_dense_epilogue.{sh,out.txt}`）
+  ——补齐第 23 篇 §5 对 **SM100 dense MQA logits 主 kernel**（`impls/sm100_mqa_logits.cuh`，
+  609 行）只给的「一页摘要」。要点：16 warp 五类角色；`BLOCK_Q=128/num_heads`、`UMMA_M=UMMA_N=128`、
+  `SPLIT_KV=384`、`kNumTmemStages==kNumMathWarpGroups=3`；TMEM 三块列预算 + SF 128 对齐；`reuse_kv`。
+  **五段架构无关逻辑 H100(sm90a) 真机 ALL PASS**：A 运行期 token 数折射 `Int<max(1,min(N,BQ))>`；
+  B TMEM 16/8/4 头块分解；C `cvt.relu`+`__hfma2` 两条 bf16x2 累加器的 `Σ_h relu·w`（一次性 vs 分段
+  逐位相等、device vs host 逐位、bf16 vs fp32 `max|Δ|/Σ|term|=2.55e-3`、压缩写回窗口/poison 0 错）；
+  D 分页两生产者 KV 页均分（4/8、0/6、0/3）；E 4×32→32×4 转置 0 不符。UMMA/tcgen05/UTCCP SM100
+  专属仅分析。索引页新增第 113 篇。
+  上一轮 P102-1：新建 `docs/112-bucket-allgather-sm-backends.md`
   （+`src/bucket_allgather_backends.cu`、`harness/exp_bucket_allgather_backends.{sh,py,out.txt}`）
   ——补齐 P54 只当「仅分析」4 行带过的 **DeepEP bucket all_gather 的两个 SM kernel 后端**
   （pure-RDMA `rdma_all_gather` / hybrid `hybrid_all_gather`），把「三类算子 × 三物理域」矩阵拼完。
