@@ -1,0 +1,57 @@
+DeepEP BucketSession（会话式临时张量注册 + 生命周期守卫）—— H100 真机
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 nccl (2, 29, 7)
+DeepEP 源码：93eb6eb
+
+==========================================================================================
+P83-1  DeepEP BucketSession（会话式临时张量注册 + 生命周期守卫）—— H100 真机
+==========================================================================================
+DeepEP source : ~/github/DeepEP
+  bucket.py   sha256 7657ac15c1673d365e54c215d879c0d505c284c35b913c775bf67c01c4fbbc1d
+  allocator.py sha256 ed9a6de985bb0933162e4ea1d5a07777fb0f96b09aeefd5e97c360ddb179d6de
+  event.py    sha256 db7e5b40d6e401104a2bb72a2cd7859c9d4cc6d8225677073c56356c75d4def9
+  bucket.hpp  sha256 75fc5212a9d078794514bb4e9936409b5ef3534b0ba996c34326e350cd4eef5a
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 / device NVIDIA H100 80GB HBM3
+
+--- A) BucketSession 的注册/暂存语义（真实 bucket.py + FakeBucket 承接 runtime）---
+  [PASS] A1 _allocate 按 64B(RDMA) 对齐推进偏移  num_allocated_bytes=256 (100->128 各一次)
+  [PASS] A1 返回 storage 的窄视图
+  [PASS] A1 越界抛 RuntimeError  BucketBuffer session out of storage, which has only 4096
+  [PASS] A2 allocate(shape) 返回正确 shape/dtype
+  [PASS] A2 batched 返回 tuple  alloc=192
+  [PASS] A3 会话内 collective 名被实例属性遮蔽
+  [PASS] A3 嵌套会话被断言拒绝  Nested sessions are not supported
+  [PASS] A3 跨组混用被断言拒绝  All collectives in a session must use the same gro
+  [PASS] A3 __exit__ 恢复类方法
+  [PASS] A4 已注册 src 直接以 storage 视图喂 runtime（无暂存、无分配）  alloc=0
+  [PASS] A5 未注册 src 被 _foreach_copy 暂存进 storage 后喂 runtime  alloc=256
+  [PASS] A6 all_gather(num_rdma==1) 把越界 src 原样传 runtime、dst 落 storage
+  [PASS] A7 all_gather(num_rdma>1) 越界 src 被暂存（dst 仍落 storage）
+
+--- B) _wrap_handle：把暂存结果回拷到外部 dst ---
+  [PASS] B _wrap_handle 回拷暂存结果到外部 dst 并返回 result
+  [PASS] B 同 data_ptr 的 dst 不重复拷贝（copy_pairs 为空、无 error）
+
+--- C) _pack_tensors / BufferAllocator（真实类）---
+  [PASS] C1 _pack_tensors(None) -> ([], is_packed=False)
+  [PASS] C1 _pack_tensors(single tensor) -> ([x], is_packed=True)
+  [PASS] C1 _pack_tensors([x], None) -> dst=[]（列表输入 is_packed=False）
+  [PASS] C1 长度不匹配被断言拒绝
+  [PASS] C2 BufferAllocator 规划期返回 meta 占位
+  [PASS] C2 num_bytes 按 2MiB 对齐  num_bytes=4194304
+  [PASS] C2 materialize 后占位原地换成真实 CUDA 张量
+  [PASS] C2 换入后可读写
+  [PASS] C2 二次 materialize 被拒绝
+  [PASS] C2 materialize 后禁止再规划
+
+--- D) 源码契约核对（行号 + 文件）---
+  [PASS] D1 bucket.hpp:48-56 生命周期守卫 stream_control_epilogue  guard@48 record_stream@55
+  [PASS] D1 EP_AVOID_RECORD_STREAM 让 tensors_to_record 取代 record_stream  @ 51
+  [PASS] D1 all_gather 把 srcs 交给守卫（越界 src 的存活保证）  @ 314
+  [PASS] D2 test_all_gather 先 del srcs 再 wait 验证存活守卫  @ 76
+  [PASS] D2 test_session 用 buffer.session() + session.allocate 就地调用
+  [PASS] D2 test_allocation 断言 meta->cuda + 单块 storage + data_ptr 对齐
+
+==========================================================================================
+RESULT: 31 PASS / 0 FAIL  (total 31)
+==========================================================================================

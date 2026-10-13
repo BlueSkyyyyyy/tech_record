@@ -2562,6 +2562,42 @@
       `sf_block_m*block_k/32`；C) BF16 与 FP8FP4 每 stage barrier 数都是 3、总字节 232 vs 240 均 ≤ 824。
       配套博客 `content/posts/mega-moe-92-smem-layout-struct`（索引页新增第 92 篇）。
 
+### P83 增量（opt-in，补齐 DeepEP bucket 一直当作细节略过的「会话式临时分配 + 生命周期守卫」）
+
+- [x] **P83-1** **DeepEP BucketBuffer 的会话机制（`BucketSession`）与临时张量注册**（
+      `deep_ep/buffers/bucket.py:19-181`（`BucketSession`）+ `:184-398`（`BucketBuffer`）；
+      `deep_ep/buffers/allocator.py`；`deep_ep/buffers/base.py`；`deep_ep/utils/event.py`；
+      `csrc/buffers/bucket.hpp:48-56/150/213/279/314`；`tests/bucket/test_session.py`、
+      `tests/buffer/test_allocation.py`、`tests/bucket/test_all_gather.py:74-80`）。
+      第 64 篇拆了 bucket 三类算子 × 三物理域、第 62 篇拆了 all_reduce/reduce_scatter 三后端，
+      但常规集合算子「**张量必须注册在对称 buffer 里**」（`bucket.hpp:150/213` 裸断言）这条约束
+      把临时 scratch 逼到死角——本篇补上封装它的 `BucketSession`。**纯 host Python，H100 真机**。
+      → `docs/93-deepep-bucket-session.md`（真实行号核对）：**会话开关**（`bucket.py:29-43`）用
+      **实例属性遮蔽类方法**（`__enter__` 装 `partial(_collective_func,name)`、`__exit__` 拆、
+      嵌套检测即检测该副作用 `:32`），故 `_call_original:45-46` 必须**从类**取原方法；`_parse_args:48-53`
+      用 `inspect.signature().bind` 统一 ABI。**临时分配** `_allocate:55-62` 是 **64B(RDMA) 对齐的
+      bump 分配器**（越界抛 RuntimeError），`allocate:90-101` 支持单/批量形状；与**规划期**
+      `BufferAllocator`（meta 占位 + 2MiB 对齐 + `torch.utils.swap_tensors` 原地物化，`allocator.py:10-35`）
+      互补。**`_collective_func:103-181`** 三步：`num_shards` 表 `:114-118`、越界 src 例外
+      `accept_unregistered_src = name=='all_gather' and num_rdma_ranks==1 :126`、逐 bucket 三分支
+      `:141-160`（已注册 src/dst 反推整块 view、否则 bump 分配）、暂存
+      `if not is_src_registered and not accept_unregistered_src: copy_tasks.append :162-163` +
+      `torch._foreach_copy_ :174`、发射 `:177-181`。**结果回拷** `_wrap_handle:72-88`：先取旧
+      `hook_after_wait` 再置空（因 `event.py:73` `assert ... is None`）、只对 `data_ptr` 不同的外部
+      dst `_foreach_copy`、返回原 result。**生命周期守卫** `BucketBuffer::stream_control_epilogue`
+      （`bucket.hpp:48-56`）对 src 默认 `record_stream(comm_stream)`（`EP_AVOID_RECORD_STREAM=1`
+      走 `event.tensors_to_record`，避开 CUDA Graph 不兼容），**只有 all_gather 把 srcs 交给它**
+      （`bucket.hpp:314`），`test_all_gather.py:74-80` 的 `del srcs` 再 `wait()` 即验收。组一致性
+      `_check_group:64-69`（一次会话只服务一个通信组）。真机实测 `harness/exp_deepep_bucket_session.{sh,py,out.txt}`：
+      **按文件路径加载真实 `bucket.py`/`allocator.py`/`base.py`/`event.py`**（`sys.modules` 注入合成
+      `deep_ep._C`/`comm`/`envs` 绕过 `check_nccl_so`）+ 同名方法签名的 `FakeBucket` 承接
+      `_call_original`，**31 PASS / 0 FAIL**——`_allocate` 100B×2→256B/越界抛错、batched 形状、
+      嵌套会话/跨组被断言拒、已注册 src `alloc=0` 零暂存、未注册 src `_foreach_copy` 暂存、
+      **纯 NVLink all-gather 越界 src 原样透传 vs 跨节点退回暂存**、`_wrap_handle` 回拷与同指针免拷、
+      `BufferAllocator` meta→CUDA 物化 4MiB、四份源码行号逐一命中。需要 NCCL GIN / 对称窗口的
+      `_C.BucketBuffer` kernel 侧**仅分析**。配套博客
+      `content/posts/mega-moe-93-deepep-bucket-session`（索引页新增第 93 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -2587,8 +2623,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P82 各增量完成（P15-1…P41-1、P42-1…P82-1）。**
-  本轮 P82-1：新建 `docs/92-smem-layout.md`（+`src/smem_layout.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P83 各增量完成（P15-1…P41-1、P42-1…P83-1）。**
+  本轮 P83-1：新建 `docs/93-deepep-bucket-session.md`（+`harness/exp_deepep_bucket_session.{sh,py,out.txt}`）
+  ——补齐 DeepEP bucket 一直当作细节略过的 **`BucketSession`（会话式临时张量注册 + 生命周期守卫）**。
+  常规集合算子要求张量注册在对称 buffer 里（`bucket.hpp:150/213` 裸断言），`BucketSession` 用
+  「**实例属性遮蔽类方法**（`:29-43`，嵌套检测即检测副作用）+ **64B 对齐 bump 分配器**（`:55-62`）+
+  **越界 src 只对纯 NVLink all-gather 透传**（`:126`）否则 `_foreach_copy` 暂存 + **`_wrap_handle`
+  结果回拷**（`:72-88`，只对 `data_ptr` 不同的外部 dst）+ **`stream_control_epilogue` 的
+  `record_stream` 守卫**（`bucket.hpp:48-56/314`）」把约束藏起来。**纯 host Python，H100 真机**
+  （按路径加载真实 `bucket.py`/`allocator.py`/`event.py` + 同名方法签名的 `FakeBucket` 承接 runtime）
+  **31 PASS / 0 FAIL**：注册/暂存/透传三分支、`_allocate` 对齐与越界、嵌套/跨组拒绝、回拷语义、
+  `BufferAllocator` meta→CUDA 物化、四份源码行号逐一命中。索引页新增第 93 篇。
+  上一轮 P82-1：新建 `docs/92-smem-layout.md`（+`src/smem_layout.cu`、
   `harness/exp_smem_layout.{sh,out.txt}`）——补齐所有 SM100 kernel 共用的**共享内存布局结构层**：
   `layout/gemm.cuh`（`SM100BF16GemmSharedStorage` / `SM100FP8FP4GemmSharedStorage`）与
   `layout/mqa_logits.cuh`（`MQALogitsSharedStorage`），即 `layout/` 里最后两个没被系统拆过的文件。
@@ -3531,7 +3577,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P82 已完成（最新 **P82-1 DeepGEMM 的共享内存布局结构层**：
+- **下一步**：P0~P83 已完成（最新 **P83-1 DeepEP BucketBuffer 的会话机制（`BucketSession`）**：
+  `deep_ep/buffers/bucket.py:19-181` + `csrc/buffers/bucket.hpp:48-56/150/213/279/314`——常规集合算子
+  要求张量注册在对称 buffer 里，`BucketSession` 用「实例属性遮蔽类方法 + 64B bump 分配器 + 越界 src
+  仅纯 NVLink all-gather 透传 + 结果回拷 + `record_stream` 生命周期守卫」把约束藏起来；纯 host Python，
+  H100 真机（真实源码 + FakeBucket 承接 runtime）**31 PASS / 0 FAIL**；详见上）。
+  上一轮 P82-1：P0~P82 已完成（最新 **P82-1 DeepGEMM 的共享内存布局结构层**：
   `layout/gemm.cuh` + `layout/mqa_logits.cuh`——`SharedStorage` 用「成员顺序 + `alignas`」把共享内存
   布局变成类型属性，host 两条策略（MQA 精确镜像 + JIT `static_assert` / 稠密 GEMM 保守预算 824B）；
   H100 直接 include 真实头文件逐字段核验 **42 PASS / 0 FAIL**，`used<=host` 且 `slack==824−barrier`
