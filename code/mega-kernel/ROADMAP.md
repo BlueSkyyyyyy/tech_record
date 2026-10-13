@@ -3797,6 +3797,35 @@
   （动态拼名已人工复核）；`single_batch_decoding` 的单测编译单元能否解析裸 include 未核；
   `docs/44` §10 仍余的 `smem_row`/`ldsm`/`dmem_row` 布局内部未逐行（继续留作下一步）。**本轮新增增量。**
 
+### P136 多卡残差/输出契约源码走读（`docs/50-mpk-multigpu-residual.md`）
+
+- [x] **P136-1** 兑现阶段「下一步候选」——补掉 `docs/48` **§7 明留的尾巴**（原话）：「`my_gpu_id==0` 作
+  `residual` 的 TP 语义：从实参静态读出『只有 rank0 加残差』，但**未追 `runtime_config.my_gpu_id` 在
+  多卡下的赋值链**」。见 `docs/50-mpk-multigpu-residual.md`（快照 `mirage-project/mirage` 分支 `mpk`
+  commit `f9eb70c`，与 `docs/06`–`docs/49` 同快照；**纯源码走读（资料分析），本轮无新实验**——多卡需
+  ≥2 张 NVLink 卡 + NVSHMEM + MPI，本机不具备，与 `docs/17` 同）。三条 headline：
+  **(A)** `my_gpu_id` 有**两个互不相通的来源**——运行期 `runtime_config.my_gpu_id`（`persistent_kernel.cuh`
+  `:1727` `mype=nvshmem_my_pe()` → `:1793` 写入；单卡 `:1766-1768` 恒 0）与编译期 `params`（AllReduce 的
+  `register_reduction_task` `task_register.cc:1009-1010/1054` 读前端 `self.mpi_rank`
+  `persistent_kernel.py:2500-2508`）；**残差走运行期、AllReduce rank 走编译期**，代码里无断言钉住
+  `nvshmem_my_pe()==mpi_rank`（`docs/17` §7 未覆盖的口径分离）。
+  **(B)（headline）「只有 rank0 加残差」在三层用三种机制实现**：前端 `enable_residual` 参数
+  （`persistent_kernel.py:2471-2474`，SM100/Hopper 发射器读 `params[0]`：`task_register.cc:1596/2025/3556`）；
+  Ampere `linear_with_residual`/`silu_mul_linear_with_residual` **丢弃前端参数**（`assert(params.size()==0)`）
+  改**硬编码** `runtime_config.my_gpu_id == 0`（`:866/918`）——故 Ampere 这两条路**只能表达
+  `add_residual_once=True` 一种约定**；MoE 输出用 `add_residual_once`（`:2360`）在前端**选**「只加一次」
+  还是「每 rank 加自己那份」（DeepSeek-V3 `models/deepseek_v3/builder.py:1158/1646` 传 `False`）。
+  **(C)** 各代 device 残差契约统一为「**空指针 = 不加**」——Ampere `linear.cuh:99-103`（`bool residual` +
+  `assert(!residual)` 当指针空）、`silu_mul_linear.cuh:40-42/83-84`、Hopper `linear_hopper.cuh:47`
+  （TMA 残差空指针）、SM100 `mul_sum_add_sm100.cuh:27-37` 与线性 `task_register.cc:2149/2160`
+  （`nullptr` + `skip_residual=true` 模板）；差别只在「谁来置空」（Hopper/SM100 由前端参数、Ampere 由
+  硬编码）。另记 `get_event_gpu_id(eid)==config.my_gpu_id` 的设备侧 owner 约束（`persistent_kernel.cuh:1088/1161`）
+  与 NVSHMEM 张量 `my_gpu_id*num_elements` 的 rank 切片（`runtime.cc:1643`）。判据只贡献 **C3（残差/输出
+  契约这一格）+ C4（owner 约束）**。配套博客 post `mega-kernel-51-mpk-multigpu-residual`（weight 52）并
+  更新 `mega-kernel-00-index` 第 51 项。P136-1 新留尾巴（文档 §7）：未构建多卡、`nvshmem_pe==mpi_rank`
+  一致性只作推断、Ampere 无 params 通道「不能表达部分和」系静态推断、未追 `linear_with_bias_sm100`
+  等其它残差约定。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4095,7 +4124,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P135-1 完成（1/1）**。兑现阶段「下一步候选」第三条残留（`docs/48` §7）——把「是否还残留
+- 当前进度：**P136-1 完成（1/1）**。兑现阶段「下一步候选」——补掉 `docs/48` **§7 明留的尾巴**「`my_gpu_id==0`
+  作 `residual` 的 TP 语义：未追 `runtime_config.my_gpu_id` 在多卡下的赋值链」。见
+  `docs/50-mpk-multigpu-residual.md`（快照 `f9eb70c`，**纯源码走读、无新实验**——多卡需 ≥2 张 NVLink 卡 +
+  NVSHMEM + MPI，本机不具备，与 `docs/17` 同）。三条 headline：**(A)** `my_gpu_id` 有两个互不相通来源——
+  运行期 `runtime_config.my_gpu_id`（`persistent_kernel.cuh:1727` `nvshmem_my_pe()` → `:1793`）与编译期
+  `params`（AllReduce 的 `register_reduction_task` `task_register.cc:1009-1010/1054` 读前端
+  `self.mpi_rank`），残差走前者、AllReduce rank 走后者，无断言钉住二者一致；**(B)（headline）「只有
+  rank0 加残差」在三层三种机制**——前端 `enable_residual`（SM100/Hopper 读 `params[0]`）、Ampere 融合/线性
+  task **硬编码** `runtime_config.my_gpu_id == 0`（`:866/918`，无 params 通道、只能表达一种约定）、MoE
+  `add_residual_once` 在前端选「只加一次」或「每 rank 加部分和」（DeepSeek-V3 `builder.py:1158/1646` 传
+  False）；**(C)** 各代 device 残差契约统一「空指针=不加」（Ampere bool、Hopper TMA 空指针、SM100
+  `nullptr+skip_residual`），并记 `get_event_gpu_id(eid)==my_gpu_id` 的跨卡 event owner 约束与 NVSHMEM
+  张量 rank 切片（`runtime.cc:1643`）。判据只贡献 C3+C4。配套博客 post
+  `mega-kernel-51-mpk-multigpu-residual`（weight 52）并更新 `mega-kernel-00-index` 第 51 项。
+- 此前：**P135-1 完成（1/1）**。兑现阶段「下一步候选」第三条残留（`docs/48` §7）——把「是否还残留
   其它『无生产者』融合算子」升格为**一次全仓、跨层的接线可达性审计**。见
   `docs/49-mpk-wiring-audit.md`（快照 `f9eb70c`，**纯源码走读、无新实验**），脚本/输出
   `harness/mpk_wiring_audit.py`/`.out.txt`。四层 = L1 登记（95 名/92 `TaskType`）→ L2 前端发射
@@ -4150,10 +4193,10 @@
   4 条必要条件系推断、slot-0 分歧未复现、注释落差只记不判）。
 - 下一步候选：可继续走其一——`docs/35` §9 遗留的其它未走读相邻层（CUTLASS `collective_builder` 侧
   QK/PV atom——`mla_sm100_2sm.cuh` 的 CUTLASS 内部，`docs/36` §8 明留）；或 `docs/44` §10 仍余的
-  `smem_row`/`ldsm`/`dmem_row` 布局内部（`docs/48` §7 亦记为尾巴，P135-1 亦再留）；或 `docs/48` §7 的
-  `my_gpu_id==0` 作 residual 的 TP 语义追链（「无生产者融合算子扫描」已由 **P135-1/`docs/49`** 全仓覆盖）；
+  `smem_row`/`ldsm`/`dmem_row` 布局内部（`docs/48` §7 亦记为尾巴，P135-1 亦再留）；
   或 `docs/46` §6 的 FLAT-CACHE draft attention 设计的完整追述（`docs/47` 已补
-  `_prepare_weights`/`_attach_weights`）。
+  `_prepare_weights`/`_attach_weights`）。**`docs/48` §7 的「`my_gpu_id==0` 作 residual 的 TP 语义追链」
+  已由 P136-1/`docs/50` 补掉**（「无生产者融合算子扫描」已由 **P135-1/`docs/49`** 全仓覆盖）。
 - 此前：**P131-1 完成（1/1）**。补掉 `docs/37` §4（P123-1 对 SM100 norm/rope 只给摘要）、
   `docs/07` §3.1（只走 `rms_norm_hopper_impl`）与 `docs/44` §10（P130-1 明留「`rms_norm_sm100`/
   `rotary_embedding_hopper` 内部未逐行」）三处空白：把 norm/rope 当成**跨 Ampere/Hopper/Blackwell
