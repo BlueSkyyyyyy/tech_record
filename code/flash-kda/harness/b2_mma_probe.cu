@@ -139,6 +139,23 @@ DEV void st2(float* p, float a, float b) {
 #ifndef B2M_BF16
 #define B2M_BF16 0
 #endif
+// P7-74: `-DB2M_BF16MMA` replaces the GEMM core's tf32 `mma.sync.m16n8k8` with a **native bf16
+// `mma.sync.m16n8k16`** (requires `-DB2M_BF16`).  P7-73 staged bf16 operands but kept the tf32
+// mma -- valid because bf16 is a strict subset of tf32, so the products stay exact and only the
+// fp32 accumulation order differs.  The remaining tf32 limitation (§47.6) is that `.tf32`
+// fragments are 32-bit, so there is **no 16-bit `ldmatrix`** and the operands must be read
+// straight from smem.  A native bf16 mma halves the mma instruction count (k16 vs k8) and admits
+// `.b16` operand feeding; this round isolates the ISA change (same staged bytes, same fragment
+// values -- the two-sided packing below yields the exact same operands as the k8 path, only the
+// k-grouping / instruction differs).  The GEMM core's direct smem reads are already
+// bank-conflict-free by the `OPS=BVK+8` row stride (see docs/07 §77), so `ldmatrix` is *not*
+// needed here -- the win looked for is the mma-issue count / tensor density.
+#ifndef B2M_BF16MMA
+#define B2M_BF16MMA 0
+#endif
+#if B2M_BF16MMA && !B2M_BF16
+#error "B2M_BF16MMA requires B2M_BF16 (bf16 staging)"
+#endif
 // P7-60: `-DB2M_PROD` compiles the *production* combination of all six non-GEMM segments in a
 // single kernel/launch (see the note further down for the rationale).  It forces the six
 // segment flags on, and must be defined before the per-segment `#ifndef` defaults below.
@@ -400,6 +417,9 @@ constexpr int OPS = BVP;
 #endif
 
 static_assert(VD % BVK == 0, "BVK must divide V=128");
+#if B2M_BF16MMA
+static_assert(BVK % 16 == 0, "B2M_BF16MMA contracts 16 V-columns per mma");
+#endif
 
 struct alignas(128) Stage {
 #if B2M_TMA_ON
@@ -561,6 +581,29 @@ DEV void mma8(float d[4], const uint32_t a[4], const uint32_t b[2], const float 
         : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
           "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
 }
+#if B2M_BF16MMA
+// P7-74: pack the two consecutive bf16 at `buf[row*OPS + col .. col+1]` into one 32-bit register
+// (little-endian: low half = col, high half = col+1).  This is exactly the per-lane payload of
+// the bf16 m16n8k16 A/B fragments.
+DEV uint32_t rd2(const __nv_bfloat16* buf, int row, int col) {
+    const unsigned short lo = __bfloat16_as_ushort(buf[row * OPS + col]);
+    const unsigned short hi = __bfloat16_as_ushort(buf[row * OPS + col + 1]);
+    return (uint32_t)lo | ((uint32_t)hi << 16);
+}
+// D = A*B + C, m16n8k16, A row-major, B col-major, bf16 x bf16 -> fp32.
+// A fragment (lane l, g=l>>2, t=l&3):  a0={A[g][2t],A[g][2t+1]}, a1={A[g+8][2t],A[g+8][2t+1]},
+//                                      a2={A[g][2t+8],A[g][2t+9]}, a3={A[g+8][2t+8],A[g+8][2t+9]}.
+// B fragment:                          b0={B[2t][g],B[2t+1][g]}, b1={B[2t+8][g],B[2t+9][g]}.
+// C fragment: identical to m16n8k8 (c0/c1 row g, cols 2t/2t+1; c2/c3 row g+8).
+DEV void mma16(float d[4], const uint32_t a[4], const uint32_t b[2], const float c[4]) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+        "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13};\n"
+        : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]),
+          "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]));
+}
+#endif
 
 // ---------------------------------------------------------------- stage prefetch
 #if !B2M_TMA_ON
@@ -900,6 +943,47 @@ b2mma_kernel(
 
         const Stage* st = &sh->st[it % NS];
 #endif
+#if B2M_BF16MMA
+        // P7-74: native bf16 `mma.m16n8k16` (k16 per instruction; same staged bytes/fragments).
+        const __nv_bfloat16* pdo = (const __nv_bfloat16*)st->do_;
+        const __nv_bfloat16* pvn = (const __nv_bfloat16*)st->vn;
+        const __nv_bfloat16* pdv = (const __nv_bfloat16*)st->dv;
+        const __nv_bfloat16* ph  = (const __nv_bfloat16*)st->h;
+        const __nv_bfloat16* pdh = (const __nv_bfloat16*)st->dh;
+        #pragma unroll
+        for (int kk = 0; kk < BVK / 16; ++kk) {
+            const int kc = kk * 16;
+            // A fragments (m16 x k16) from do/vn/dv:
+            //   a0={A[g][2t],A[g][2t+1]} a1={A[g+8][2t],..} a2={A[g][2t+8],..} a3={A[g+8][2t+8],..}
+            uint32_t aq[4], ak[4], aw[4];
+            aq[0] = rd2(pdo, g    , kc + 2 * t);
+            aq[1] = rd2(pdo, g + 8, kc + 2 * t);
+            aq[2] = rd2(pdo, g    , kc + 2 * t + 8);
+            aq[3] = rd2(pdo, g + 8, kc + 2 * t + 8);
+            ak[0] = rd2(pvn, g    , kc + 2 * t);
+            ak[1] = rd2(pvn, g + 8, kc + 2 * t);
+            ak[2] = rd2(pvn, g    , kc + 2 * t + 8);
+            ak[3] = rd2(pvn, g + 8, kc + 2 * t + 8);
+            aw[0] = rd2(pdv, g    , kc + 2 * t);
+            aw[1] = rd2(pdv, g + 8, kc + 2 * t);
+            aw[2] = rd2(pdv, g    , kc + 2 * t + 8);
+            aw[3] = rd2(pdv, g + 8, kc + 2 * t + 8);
+            #pragma unroll
+            for (int nt = 0; nt < 2; ++nt) {
+                const int krow = warp * BW + nt * 8 + g;   // output column = k = n index
+                // B (col-major k16 x n8): b0={B[2t][g],B[2t+1][g]}, b1={B[2t+8][g],B[2t+9][g]};
+                // with h[n][k] the B[k][n]=h[n][k] element is h[krow][kc+2t..].
+                uint32_t bh[2], bd[2];
+                bh[0] = rd2(ph , krow, kc + 2 * t);
+                bh[1] = rd2(ph , krow, kc + 2 * t + 8);
+                bd[0] = rd2(pdh, krow, kc + 2 * t);
+                bd[1] = rd2(pdh, krow, kc + 2 * t + 8);
+                mma16(accq[nt], aq, bh, accq[nt]);
+                mma16(acck[nt], ak, bd, acck[nt]);
+                mma16(accw[nt], aw, bh, accw[nt]);
+            }
+        }
+#else
         #pragma unroll
         for (int kk = 0; kk < BVK / 8; ++kk) {
             const int kc = kk * 8;
@@ -930,6 +1014,7 @@ b2mma_kernel(
                 mma8(accw[nt], aw, bh, accw[nt]);
             }
         }
+#endif
 #if !B2M_NODGK
   #if B2M_DGKCF
         // Conflict-free `dgk` column reduction.  smem word addr = kcol*BVP + vv with

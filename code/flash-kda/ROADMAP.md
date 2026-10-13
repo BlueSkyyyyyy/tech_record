@@ -950,6 +950,28 @@
       增大、**不是**线性「每 atom 对 +0.02」），**非 DRAM、非 SM 侧读**。**结论**：目标卡不需要 `BVK=128`，
        `BVK=64`（NAT=2）仍是原子拆分最优点；新增判据——L2 总字节含重触，须与 DRAM 字节、srcunit 读扇区
        **分开读**。见 `docs/07` §75。
+- [x] **P7-74** 兑现 P7-73（§76.6）列出的「bf16 原生 **mma**（`m16n8k16` + `ldmatrix`）」真需求：给
+       K2 形状 B2 GEMM 核加 `-DB2M_BF16MMA`（需 `-DB2M_BF16`），把主循环的 `mma.sync.m16n8k8.tf32`
+       换成**原生 bf16 `mma.sync.m16n8k16`**（`kk` 步长 8→16）。**只换 ISA、A/B 片段值一字不变**——A 片段
+       由两个相邻 bf16 打包成一个 32-bit 寄存器（`rd2`，低位=`col`/高位=`col+1`），得到与 k8 路径**逐值
+       相同**的操作数（布局 `a0..a3`/`b0,b1` 见 §77.1），C 布局与 m16n8k8 相同故全部 store 未动。**同时核验
+       `ldmatrix` 对本核多余**：GEMM 核 A/B 片段直读在 `OPS=BVK+8` 行距下 32 lane 全落不同 bank
+       （`20g+t` 覆盖 `0..31`），换 ISA 前后 bank conflict 恒 8.8M（§47.6 的 tf32 无-16bit-`ldmatrix`
+       在本核无可兑现成本）。新增 `harness/check_bwd_b2_bf16mma.py`（`check_bwd_b2_bf16mma.out.txt`，空闲卡）
+       + `harness/ncu_b2_bf16mma_driver.py` / `harness/probe_b2_bf16mma_ncu.sh`（`probe_b2_bf16mma_ncu.out.txt`）
+       + `docs/07` §77。**Part A**：`bmm` vs `bf16(tf32)` 只差 fp32 累加序（`dq 2.55e-7/dk 2.52e-7/dw 2.41e-7`、
+       `dgk` **逐位 0**——强证片段布局对）、vs `torch(bf16)` ~4.6e-7（无 tf32 截断）、四组含非整除 T=250。
+       **Part B**：kernel-only `dev` 大 shape **0.992×**（`B8T2048H8` 377.4→374.5）、小 shape
+       **0.888–0.914×**（`T250H3` 7.9→7.1、`T512H4` 8.2→7.5）。**Part C**：smem/regs 与 bf16 **完全相同**
+       （48640 B/65，ISA 不动 staging）。**SASS**：`24× HMMA.1688.F32.TF32` → **`12× HMMA.16816.F32.BF16`**
+       （mma 指令精确减半）。**`ncu`**：`inst_executed` 161.1M→**90.8M（0.56×）**、`tensor_cycles` 10.73→
+       **5.39%（减半=bf16 吞吐 2×tf32）**、Compute(SM) 45.3→27.4%、wavefronts 40.7→30.1M，但 **Duration 0.993×**
+       ——最紧 pipe 是 **L2 79.7→81.5%**（tensor 只 10.7%），故 ISA 红利在大 shape 换不来时间；`t512h4`
+       不 bound 于 L2（40%）则兑现 **0.92×**。**结论**：bf16 原生 mma 是正确、drop-in 的 ISA 换代（tensor 吞吐
+       2×、指令减半），但 **P7-73 的 bf16 核已 L2/DRAM bound，故它不是大 shape 杠杆**（小 shape 8–11%）；且
+       §76.6「可顺带消 §47.6 限制」**被证伪**（本核缺 `ldmatrix` 无成本）。目标卡 CUDA B2 部署 bf16 时应
+       **bf16 staging（§76）× bf16 mma** 零成本叠加，大 shape 优化预算投 L2/DRAM 字节而非 mma ISA。**边界**：
+       同 §76（非 TMA/基础 GEMM 核、`BVK%16==0`、输出 fp32、未落整链）；不改变 §45 的 `cf` 默认部署。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1404,13 +1426,39 @@
   1.28 GB、`l1tex__t_sectors...op_ld` 恒 0**——多出的纯是 **L2 内部边界/重触**（`atom64` 相对 `tma32` 的
   +0.04 GB 即此，**非线性「每 atom 对 +0.02」**）。故判「某布局多花的字节是否瓶颈」必须把这三者分开读，
   否则会把 L2 重触误当访存瓶颈（§51.6「省字节要落最紧 pipe」的镜像）。另：`BVK=128` 的 atom-major 单
-  stage = 155.6 KB，`NSTAGE=2` 即 311 KB **超 227 KB 动态 smem 上限**，launcher `cudaFuncSetAttribute`
-  直接 `rc=-3`（非静默），属**正确但不可用**（`VD/BVK=1` 还丢 V-tile 并行）。
+   stage = 155.6 KB，`NSTAGE=2` 即 311 KB **超 227 KB 动态 smem 上限**，launcher `cudaFuncSetAttribute`
+   直接 `rc=-3`（非静默），属**正确但不可用**（`VD/BVK=1` 还丢 V-tile 并行）。
+- **`ncu` 的 `sm__pipe_tensor_cycles_active` 不是 FLOP 利用率**（P7-74，§77.5）：H100 上 **bf16 mma 的吞吐是
+  tf32 的 2×**，故同一 FLOP 的 tensor 周期**减半**（本核 tf32→bf16 由 10.73%→5.39%）；把这个数当「tensor 更闲」
+  会读反——它是「tensor 管占用周期」，跨 dtype 不可直接比。要判「mma 是否是瓶颈」应看**最紧 pipe + 段占比**
+  （本核 L2 80% > DRAM 66% ≫ tensor 10.7%，故换 mma ISA 大 shape 只 0.99×）。同理 `inst_executed` 减半也
+  不等于更快（本核不缺发射槽）。**换 mma ISA 前先看核是否已 memory-bound**。
+- **核「缺 16-bit `ldmatrix`（tf32 限制）」是否真值钱，先做 bank 分析再换**（P7-74，§77.1）：`b2_mma_probe.cu`
+  GEMM 核的 A/B 片段**直读**在 `OPS=BVK+8`（bf16）行距下，32 lane 的字地址模 32 bank = `20g+t`（`g∈0..7,t∈0..3`）
+  恰好铺满 `0..31`，**本就无冲突**——实测换 mma ISA 前后 bank conflict 恒 **8.8M**（§47.6 记的 8.81M 冲突**不在**
+  GEMM 片段读、在 dgk 归约）。故 §76.6「bf16 原生 mma 可顺带消 §47.6 的 tf32 无-`ldmatrix` 限制」**被证伪**：
+  该限制在本核**没有可兑现的成本**。判「要不要上 `ldmatrix`」先数该读法的 bank 落点，别被「tf32 无 16-bit
+  `ldmatrix`」这句话牵着走。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-73 补测**。
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-74 补测**。
+  - P7-74（本轮）：**兑现 P7-73/§76.6 列出的「bf16 原生 mma（`m16n8k16`）」真需求——给 B2 K2-mma GEMM 核加
+    `-DB2M_BF16MMA`**（需 `-DB2M_BF16`），主循环 `mma.sync.m16n8k8.tf32` → **原生 bf16 `mma.sync.m16n8k16`**
+    （`kk` 步长 8→16）。**只换 ISA、A/B 片段值一字不变**（`rd2` 打包相邻 bf16，布局见 §77.1，C 布局同 m16n8k8
+    故 store 未动）。**Part A**：`bmm` vs `bf16(tf32)` 只差 fp32 **累加序**（`dq 2.55e-7/dk 2.52e-7/dw 2.41e-7`、
+    `dgk` **逐位 0**——强证片段布局对）、vs `torch(bf16)` ~4.6e-7，四组含非整除 T=250。**Part B**：kernel `dev`
+    大 shape **0.992×**、小 shape **0.888–0.914×**（`T250H3` 7.9→7.1）。**SASS**：`24× HMMA.1688.F32.TF32` →
+    `12× HMMA.16816.F32.BF16`（mma 指令精确减半）。**`ncu`**：`inst` 161→90.8M、`tensor_cycles` 10.73→**5.39%
+    （=bf16 吞吐 2×tf32）**、Compute(SM) 45→27%，但 **Duration 0.993×**——最紧 pipe 是 **L2 80%**（tensor 只
+    10.7%），故大 shape 换 ISA 换不来时间。**副产物**：核验 **`ldmatrix` 对本核多余**（片段直读 bank 无冲突、
+    两列恒 8.8M），§76.6「可消 §47.6 限制」**被证伪为无收益**。**结论**：bf16 原生 mma 正确且 drop-in，但
+    **P7-73 的 bf16 核已 L2/DRAM bound，它不是大 shape 杠杆**（小 shape 8–11%）；目标卡 B2 部署 bf16 时
+    `bf16 staging × bf16 mma` 零成本叠加，大 shape 优化预算投 L2/DRAM 字节。不改变 §45 的 `cf` 默认部署。
+    **下一步**：专题维持维护态——§45 的 `cf`（`dAv→CUDA-B1→融合 Triton B2/B3→cumsum`）仍是目标卡反向默认；
+    CUDA B2 研究形态的 **staging/dtype/mma-ISA/store/DA/TMA 旋钮至此全部关闭**（§67–§77 反复归因、明确不再追），
+    有明确新需求（新 shape/dtype/融合目标，如 bf16 入口叠 TMA、bf16 in 的生产核落链、K≠V）再动。
   - P7-73（本轮）：**兑现 ROADMAP 列出的「bf16 原生入口」真需求——给 K2 形状 B2 GEMM 核加 `-DB2M_BF16`**。
     五个 streamed 操作数（`do/vn/dv/h/dh`）改 **bf16 staging**（`Stage` 数组 `float→__nv_bfloat16`、行距
     `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16），`rd()` 读 bf16 扩到 fp32 再照旧 `to_tf32` 喂
@@ -2422,8 +2470,15 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-71 补测（+ P8-2 一页纸补全）**，进入收尾/维护。
-  **P8-2（本轮）**：补全 `docs/08-summary.md` 后半段（P7-46…P7-71 的「K2 形状 CUDA B2 反向终局」
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-74 补测（+ P8-2 一页纸补全）**，进入收尾/维护。
+  **P7-74（本轮）**：兑现 P7-73/§76.6 的「bf16 原生 mma（`m16n8k16`）」——加 `-DB2M_BF16MMA`，主循环
+  `mma.sync.m16n8k8.tf32`→**原生 bf16 `mma.sync.m16n8k16`**（只换 ISA、A/B 片段值一字不变）。与 tf32 路径
+  只差 fp32 累加序（`dq 2.55e-7/dk 2.52e-7/dw 2.41e-7`、`dgk` 逐位）、SASS `24×HMMA.1688.F32.TF32`→
+  `12×HMMA.16816.F32.BF16`（指令减半）、`ncu` tensor 周期减半（bf16 吞吐 2×tf32）；但核已 L2 bound
+  （80%），大 shape Duration 只 **0.992×**、小 shape **0.89–0.91×**。**副产物**：核验 `ldmatrix` 对本核多余
+  （片段直读 bank 无冲突、两列恒 8.8M），§76.6「可消 §47.6 tf32 无-16bit-`ldmatrix` 限制」**被证伪为无收益**。
+  见 `docs/07` §77。
+  **P8-2（上轮）**：补全 `docs/08-summary.md` 后半段（P7-46…P7-71 的「K2 形状 CUDA B2 反向终局」
   + 最终部署建议），并修正该篇仍写着的「张量图重编码＝host 税 1.65×（待验证）」——该结论 P7-40 已撤回
   （空闲卡 1.049×）。一页纸此前只叙述到 P7-45，缺失反向工程化的后 27 轮，本轮补齐；数字复用
   `docs/07` §49–§74、未新增实验。

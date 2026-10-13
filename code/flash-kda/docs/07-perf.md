@@ -7897,3 +7897,113 @@ bf16 精确减半到 **637 MB**——`ncu` 实测 1.28 GB→637.57 MB **逐值�
   swizzle，或 `SWIZZLE_NONE` 的 128 B 行）、非 GEMM 六段（`-DB2M_OUT/DKGB/DA/DB/GATE/SAND/INTRA` 按 fp32
   寻址读 staged 操作数）**未做**，`-DB2M_BF16` 与它们通过 `#error` 互斥；也**未落进完整反向链**（生产核里
   `bf16 in → 门控/输出仍 fp32 out` 的组合待测）。本核是研究形态，不改变 §45 的 `cf` 默认部署。
+
+## 77. B2 K2-mma GEMM 核的**原生 bf16 mma（`m16n8k16`）**：ISA 换代——指令数减半、tensor 吞吐翻倍，但大 shape 已 L2/DRAM bound、只值 ~1%（P7-74）
+
+P7-73（§76）给 B2 K2-mma GEMM 核加了 **bf16 原生入口**（`-DB2M_BF16`：五操作数按 bf16 staging，DRAM 读
+精确减半），但**保留了 tf32 mma**（`mma.sync.m16n8k8.tf32`）——这是合法的，因为 bf16 的 8 位尾数 ⊂ tf32 的
+10 位尾数，bf16→fp32→`cvt.rna.tf32` 是恒等，乘积精确、只剩 fp32 累加序差。§76.6 把「bf16 原生 **mma**」
+列为触发下一轮的需求，并点出它「可顺带消 §47.6 的 tf32 无 16-bit `ldmatrix` 限制」。本轮兑现这条：给核加
+`-DB2M_BF16MMA`（需 `-DB2M_BF16`），把 GEMM 核的 mma 换成 **原生 bf16 `mma.sync.m16n8k16`**。
+
+新增 `harness/check_bwd_b2_bf16mma.py`（`harness/check_bwd_b2_bf16mma.out.txt`）+ `harness/ncu_b2_bf16mma_driver.py`
+/ `harness/probe_b2_bf16mma_ncu.sh`（`harness/probe_b2_bf16mma_ncu.out.txt`，空闲卡）。
+
+### 77.1 设计：只换 **mma ISA**，A/B 片段值一字不变；GEMM 核本就不需要 `ldmatrix`
+
+`-DB2M_BF16MMA` 只改 GEMM 核的两处：`mma.m16n8k8.tf32`（k8）→ `mma.m16n8k16.bf16`（k16），主循环
+`kk` 步长 8→16。操作数**不重组**、字节数**不变化**——A 片段直接由两个相邻 bf16 打包成一个 32-bit 寄存器
+（`rd2`，低位=`col`、高位=`col+1`），得到与 k8 路径**逐值相同**的操作数：
+
+- A（m16k16，lane `l`，`g=l>>2`、`t=l&3`）：`a0={A[g][2t],A[g][2t+1]}`、`a1={A[g+8][2t],..}`、
+  `a2={A[g][2t+8],..}`、`a3={A[g+8][2t+8],..}`；
+- B（col-major k16n8，本核 B 即 `h[n][k]`，故 `B[k][n]=h[n][k]`）：`b0={B[2t][g],B[2t+1][g]}={h[g][kc+2t],h[g][kc+2t+1]}`、
+  `b1={B[2t+8][g],B[2t+9][g]}`；
+- C 片段布局与 m16n8k8 **完全相同**，故所有 store 代码一行未动。
+
+**为什么不用 `ldmatrix`**：§47.6 的 tf32 限制（32-bit 片段、无 16-bit `ldmatrix`）在本核**没有可兑现收益**——
+GEMM 核的 A/B 片段**直读**在 `OPS=BVK+8`（bf16）行距下**本就无 bank 冲突**：一次 A 片段读的字地址模 32 bank
+= `(20g + 8·(kc/16) + t) mod 32`，`g∈0..7`、`t∈0..3` 给出的 `20g+t` 恰好铺满 `0..31`；B 片段读 `krow=const+g`
+同构。实测印证：**bf16 与 bmm 两列的 shared-load bank conflict 恒 `8.90M / 8.81M`**（几乎不动），说明 §47 的
+8.8M 冲突**不在** GEMM 片段读里（换 ISA 后不变），`ldmatrix` 对本核是多余的。故本轮把「原生 bf16 mma」与
+「`ldmatrix`」解耦——只测 ISA 本身的收益。
+
+### 77.2 Part A：与 tf32 路径只差 fp32 累加序（≤2.5e-7），`dgk` 逐位相同——片段布局被钉死
+
+四组 shape（`BT=16`，含非整除 `T=250`，torch 参考关 tf32 走真 fp32），最坏 `max_rel`：
+
+| 量 | **bmm vs torch(bf16)** | **bmm vs bf16(tf32)** | **bmm vs fp32核**（吃 `bf16.float()`） |
+|---|---|---|---|
+| `dq` | 4.582e-7 | 2.547e-7 | 2.547e-7 |
+| `dk` | 3.676e-7 | 2.524e-7 | 2.524e-7 |
+| `dw` | 4.779e-7 | 2.409e-7 | 2.409e-7 |
+| `dgk` | 1.334e-7 | **0** | **0** |
+
+- **`bmm vs bf16(tf32)` ≤ 2.5e-7 且量级恰为 fp32 累加序**：两侧操作数逐值相同、乘积精确（bf16×bf16 在 fp32
+  精确），唯一差别是 k8×2 组 vs k16×1 组的 fp32 加法结合序。**这同时是对 A/B 片段布局的强证据**——若
+  `2t / 2t+8` 的行列映射写错，误差会是 O(1)（对照 §65.3/§74 的「指纹」用法）。
+- **`dgk` 逐位相同（`max_abs=0`）**：`dgk` 归约走的是 `rd`（bf16 扩 fp32 后点乘），不经 mma，故本次 ISA 改动
+  对它零影响——正确。
+- **`bmm vs torch(bf16)` ~4.6e-7**，与 §76.2 的 `bf16核 vs torch(bf16)`（~5e-7）同阶：bf16 输入 ⊂ tf32，
+  **无截断**，只剩累加序，故比 fp32 核 vs torch（~3e-4，被 tf32 截断主导）更贴真 fp32。
+
+### 77.3 Part B/C：kernel-only `dev` 大 shape 只 **0.99×**、小 shape **0.89–0.91×**；smem/regs 不变
+
+CUPTI `dev`（µs，kernel-only）：
+
+| shape | fp32 | bf16(tf32) | /fp32 | **bmm** | /fp32 | **bmm/bf16** |
+|---|---|---|---|---|---|---|
+| `B8 T2048 H8` | 519.1 | 377.4 | 0.727× | **374.5** | 0.721× | **0.992×** |
+| `B2 T1024 H8` | 71.5 | 53.0 | 0.741× | **51.7** | 0.723× | **0.976×** |
+| `T512 H4` | 9.4 | 8.2 | 0.877× | **7.5** | 0.802× | **0.914×** |
+| `T250 H3`（非整除） | 8.7 | 7.9 | 0.909× | **7.1** | 0.808× | **0.888×** |
+
+`wall` 同向（大 shape 0.99×，小 shape 被 host/launch 主导）。静态资源：bf16 与 bmm **完全相同**（smem
+48640 B=47.5 KB、regs 65、零 spill）——ISA 换代不动 staging，故不意外。
+
+### 77.4 SASS：`24× HMMA.1688.F32.TF32` → `12× HMMA.16816.F32.BF16`（mma 指令精确减半）
+
+`nvdisasm` 静态计数：bf16 核 **24 条** `HMMA.1688.F32.TF32`（m16n8k8），bmm 核 **12 条**
+`HMMA.16816.F32.BF16`（m16n8k16）——每条 k16 指令做两条 k8 的活，指令数**精确减半**，且是真 bf16 HMMA。
+
+### 77.5 `ncu`：指令数减半、tensor 周期**减半**（bf16 mma 吞吐是 tf32 的 2×），但核已 L2 bound
+
+`B8 T2048 H8`（`probe_b2_bf16mma_ncu.out.txt`）：
+
+| 指标 | bf16(tf32) | **bmm** | 变化 |
+|---|---|---|---|
+| `smsp__inst_executed` | 161.09 M | **90.83 M** | **0.564×** |
+| `sm__pipe_tensor_cycles_active` | 10.73% | **5.39%** | **≈减半** |
+| Compute (SM) Throughput | 45.27% | **27.42%** | 发压大降 |
+| shared-load wavefronts | 40.67 M | **30.11 M** | −26% |
+| bank conflict | 8.90 M | 8.81 M | 不动（不在 GEMM 片段读） |
+| L2 Cache Throughput | 79.67% | **81.52%** | 仍最高 pipe |
+| DRAM Throughput | 66.04% | 66.45% | 不变 |
+| DRAM 读/写 | 637.6 / 195.6 MB | 637.6 / 195.4 MB | 不变 |
+| Duration | 376.38 µs | **373.95 µs** | **0.993×** |
+
+**关键读数**：`sm__pipe_tensor_cycles_active` **减半**——H100 上 bf16 mma 的吞吐是 tf32 的 **2×**，故同样 FLOP
+只需一半 tensor 周期（注意：这个数**不是** FLOP 利用率，bf16 下它天然比 tf32 低一半，别误读成「tensor 更闲」）。
+指令数也减半。但 **Duration 几乎不动（0.993×）**：核的最紧 pipe 是 **L2（79.7→81.5%）**，而 tensor 只占
+10.7%、DRAM 66%。tf32→bf16 省下的**全是发射/tensor 槽位**，而这个核本就不缺发射槽——故大 shape 换 ISA
+换不来时间。`t512h4` 则不 bound 于 L2（39.96%），发压/指令红利得以兑现：Duration 10.59→**9.76 µs（0.92×）**、
+inst 2.52M→**1.42M**、tensor 7.97→4.50。
+
+### 77.6 结论与设计输入
+
+- **原生 bf16 mma 是正确的、drop-in 的 ISA 换代**：与 tf32 路径只差 fp32 累加序（≤2.5e-7）、`dgk` 逐位；与
+  §76 的 bf16 staging **正交**（smem/regs 不变）。SASS 由 `HMMA.1688.F32.TF32` 变 `HMMA.16816.F32.BF16`、
+  mma 指令精确减半，tensor 周期减半（bf16 吞吐 2× tf32）。
+- **但它不是大 shape 的杠杆**：P7-73 的 bf16 核已把核推到 **L2/DRAM bound**（L2 80%、DRAM 66%），tensor 只
+  10.7%，故 ISA 换代大 shape 只 **0.99×**。收益落在**存储不紧、发压主导**的小 shape（≤512 token）——
+  **0.89–0.91×**（8–11%）。
+- **`ldmatrix` 对本核是多余的（本轮副产物）**：GEMM 核的 A/B 片段直读在 `OPS=BVK+8` 行距下 32 lane 全落不同
+  bank（`20g+t` 覆盖 `0..31`），换 ISA 前后 bank conflict 恒 8.8M——§47.6 的 tf32 无-16bit-`ldmatrix` 限制
+  在本核**没有可兑现的成本**，8.8M 冲突在别处（dgk 归约）。故 §76 的「bf16 原生 mma 可顺带消 §47.6 限制」
+  **被证伪为无收益**（此核不因缺 `ldmatrix` 而冲突）。
+- **设计输入**：目标卡 CUDA B2 在部署 dtype 为 bf16 时，应走 **bf16-native staging（§76）× 原生 bf16 `m16n8k16`
+  mma**——两者零成本叠加；但若核已 L2/DRAM bound（大 shape），应把优化预算投给**降 L2/DRAM 字节**（TMA/向量化
+  store，§52/§73）而非 mma ISA。小 batch/短序列（launch/发压受限）则 ISA 红利可见。
+- **边界（诚实）**：只覆盖**非 TMA 的 `cp.async` staging + 基础 GEMM 核**（`-DB2M_BF16` 的同一范围，
+  `#error` 与 TMA/六段互斥）；`BVK∈{32,64}`（`static_assert BVK%16==0`）；输出仍 fp32；**未落进完整反向链**。
+  本核是研究形态，**不改变 §45 的 `cf` 默认部署**。

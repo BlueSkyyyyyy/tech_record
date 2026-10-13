@@ -1,0 +1,99 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_bmm_base.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_BF16 ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_bmm_bf16.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_BF16 -DB2M_BF16MMA ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_bmm_native.so
+====================================================================================================
+Part A: correctness
+  ref = torch fp32 of the *same* operands (allow_tf32=False); max_rel printed
+====================================================================================================
+
+# B8 T2048 H8  grid=(128, 64)
+    bf16mma vs torch(bf16)dq max_abs=1.526e-05  max_rel=4.582e-07  ref_max=3.330e+01
+    bf16mma vs bf16(tf32)  dq max_abs=7.629e-06  max_rel=2.291e-07  ref_max=3.330e+01
+    bf16mma vs fp32(cuda)  dq max_abs=7.629e-06  max_rel=2.291e-07  ref_max=3.330e+01
+    bf16mma vs torch(bf16)dk max_abs=1.144e-05  max_rel=2.945e-07  ref_max=3.886e+01
+    bf16mma vs bf16(tf32)  dk max_abs=7.629e-06  max_rel=1.963e-07  ref_max=3.886e+01
+    bf16mma vs fp32(cuda)  dk max_abs=7.629e-06  max_rel=1.963e-07  ref_max=3.886e+01
+    bf16mma vs torch(bf16)dw max_abs=1.431e-06  max_rel=4.779e-07  ref_max=2.994e+00
+    bf16mma vs bf16(tf32)  dw max_abs=7.153e-07  max_rel=2.389e-07  ref_max=2.994e+00
+    bf16mma vs fp32(cuda)  dw max_abs=7.153e-07  max_rel=2.389e-07  ref_max=2.994e+00
+    bf16mma vs torch(bf16)dgk max_abs=1.907e-06  max_rel=1.311e-07  ref_max=1.455e+01
+    bf16mma vs bf16(tf32)  dgk max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.455e+01
+    bf16mma vs fp32(cuda)  dgk max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.455e+01
+
+# B2 T1024 H8  grid=(64, 16)
+    bf16mma vs torch(bf16)dq max_abs=1.144e-05  max_rel=3.821e-07  ref_max=2.995e+01
+    bf16mma vs bf16(tf32)  dq max_abs=7.629e-06  max_rel=2.547e-07  ref_max=2.995e+01
+    bf16mma vs fp32(cuda)  dq max_abs=7.629e-06  max_rel=2.547e-07  ref_max=2.995e+01
+    bf16mma vs torch(bf16)dk max_abs=9.537e-06  max_rel=3.155e-07  ref_max=3.023e+01
+    bf16mma vs bf16(tf32)  dk max_abs=7.629e-06  max_rel=2.524e-07  ref_max=3.023e+01
+    bf16mma vs fp32(cuda)  dk max_abs=7.629e-06  max_rel=2.524e-07  ref_max=3.023e+01
+    bf16mma vs torch(bf16)dw max_abs=1.192e-06  max_rel=4.015e-07  ref_max=2.969e+00
+    bf16mma vs bf16(tf32)  dw max_abs=7.153e-07  max_rel=2.409e-07  ref_max=2.969e+00
+    bf16mma vs fp32(cuda)  dw max_abs=7.153e-07  max_rel=2.409e-07  ref_max=2.969e+00
+    bf16mma vs torch(bf16)dgk max_abs=1.907e-06  max_rel=1.334e-07  ref_max=1.429e+01
+    bf16mma vs bf16(tf32)  dgk max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.429e+01
+    bf16mma vs fp32(cuda)  dgk max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.429e+01
+
+# T512 H4  grid=(32, 4)
+    bf16mma vs torch(bf16)dq max_abs=9.537e-06  max_rel=3.503e-07  ref_max=2.723e+01
+    bf16mma vs bf16(tf32)  dq max_abs=5.722e-06  max_rel=2.102e-07  ref_max=2.723e+01
+    bf16mma vs fp32(cuda)  dq max_abs=5.722e-06  max_rel=2.102e-07  ref_max=2.723e+01
+    bf16mma vs torch(bf16)dk max_abs=9.537e-06  max_rel=3.676e-07  ref_max=2.594e+01
+    bf16mma vs bf16(tf32)  dk max_abs=5.722e-06  max_rel=2.206e-07  ref_max=2.594e+01
+    bf16mma vs fp32(cuda)  dk max_abs=5.722e-06  max_rel=2.206e-07  ref_max=2.594e+01
+    bf16mma vs torch(bf16)dw max_abs=8.345e-07  max_rel=2.998e-07  ref_max=2.783e+00
+    bf16mma vs bf16(tf32)  dw max_abs=4.768e-07  max_rel=1.713e-07  ref_max=2.783e+00
+    bf16mma vs fp32(cuda)  dw max_abs=4.768e-07  max_rel=1.713e-07  ref_max=2.783e+00
+    bf16mma vs torch(bf16)dgk max_abs=9.537e-07  max_rel=7.401e-08  ref_max=1.289e+01
+    bf16mma vs bf16(tf32)  dgk max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.289e+01
+    bf16mma vs fp32(cuda)  dgk max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.289e+01
+
+# T250 H3 (non-div)  grid=(16, 3)
+    bf16mma vs torch(bf16)dq max_abs=7.629e-06  max_rel=3.112e-07  ref_max=2.452e+01
+    bf16mma vs bf16(tf32)  dq max_abs=3.815e-06  max_rel=1.556e-07  ref_max=2.452e+01
+    bf16mma vs fp32(cuda)  dq max_abs=3.815e-06  max_rel=1.556e-07  ref_max=2.452e+01
+    bf16mma vs torch(bf16)dk max_abs=9.537e-06  max_rel=3.342e-07  ref_max=2.853e+01
+    bf16mma vs bf16(tf32)  dk max_abs=3.815e-06  max_rel=1.337e-07  ref_max=2.853e+01
+    bf16mma vs fp32(cuda)  dk max_abs=3.815e-06  max_rel=1.337e-07  ref_max=2.853e+01
+    bf16mma vs torch(bf16)dw max_abs=7.153e-07  max_rel=2.752e-07  ref_max=2.599e+00
+    bf16mma vs bf16(tf32)  dw max_abs=4.768e-07  max_rel=1.835e-07  ref_max=2.599e+00
+    bf16mma vs fp32(cuda)  dw max_abs=4.768e-07  max_rel=1.835e-07  ref_max=2.599e+00
+    bf16mma vs torch(bf16)dgk max_abs=9.537e-07  max_rel=8.138e-08  ref_max=1.172e+01
+    bf16mma vs bf16(tf32)  dgk max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.172e+01
+    bf16mma vs fp32(cuda)  dgk max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.172e+01
+
+worst max_rel over all cases:
+  dq    bf16mma/torch(bf16) 4.582e-07   bf16mma vs bf16(tf32) 2.547e-07   bf16mma vs fp32 cuda 2.547e-07
+  dk    bf16mma/torch(bf16) 3.676e-07   bf16mma vs bf16(tf32) 2.524e-07   bf16mma vs fp32 cuda 2.524e-07
+  dw    bf16mma/torch(bf16) 4.779e-07   bf16mma vs bf16(tf32) 2.409e-07   bf16mma vs fp32 cuda 2.409e-07
+  dgk   bf16mma/torch(bf16) 1.334e-07   bf16mma vs bf16(tf32) 0.000e+00   bf16mma vs fp32 cuda 0.000e+00
+
+====================================================================================================
+Part B: kernel-only timing -- fp32 / bf16(tf32) / bf16-mma (same program shape)
+====================================================================================================
+  case               |  fp32 dev |  bf16 dev bf16/fp32 |   bmm dev  bmm/fp32  bmm/bf16
+  B8 T2048 H8        |     519.1 |     377.4    0.727x |     374.5    0.721x    0.992x
+  B2 T1024 H8        |      71.5 |      53.0    0.741x |      51.7    0.723x    0.976x
+  T512 H4            |       9.4 |       8.2    0.877x |       7.5    0.802x    0.914x
+  T250 H3 (non-div)  |       8.7 |       7.9    0.909x |       7.1    0.808x    0.888x
+
+  wall (µs):
+  B8 T2048 H8        | fp32    521.2 | bf16    379.3 (0.728x) | bmm    376.8 (0.723x, 0.993x)
+  B2 T1024 H8        | fp32     73.3 | bf16     54.8 (0.748x) | bmm     53.7 (0.733x, 0.981x)
+  T512 H4            | fp32     28.0 | bf16     27.9 (0.998x) | bmm     27.9 (0.995x, 0.997x)
+  T250 H3 (non-div)  | fp32     28.3 | bf16     28.2 (0.995x) | bmm     28.1 (0.993x, 0.998x)
+
+====================================================================================================
+Part C: static cost
+====================================================================================================
+  fp32 : smem = 87552 B (85.5 KB), smem-limited blocks/SM ~ 2
+  bf16 : smem = 48640 B (47.5 KB), smem-limited blocks/SM ~ 4
+  bmm  : smem = 48640 B (47.5 KB), smem-limited blocks/SM ~ 4
+  ptxas fp32:     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | ptxas info    : Used 70 registers, used 1 barriers
+  ptxas bf16:     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | ptxas info    : Used 65 registers, used 1 barriers
+  ptxas bmm:     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | ptxas info    : Used 65 registers, used 1 barriers
+
+DONE
