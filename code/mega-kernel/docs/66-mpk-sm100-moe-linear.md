@@ -211,8 +211,8 @@ host 实测的 `sB_cp` stage 步长 `layout(0,0,0,1)=1024`，与手工 cp.async 
   w13→`TASK_MOE_W13_LINEAR_SM100`、w2→`TASK_MOE_W2_LINEAR_SM100`（`:3198/3200`）。
   常量：`MMA_M=128, MMA_N=16, bK=64, num_ab_stages=8, num_acc_stages=2, num_c_stages=4`
   （`:3061-3069`）；TMA `(B,M,S)=(3,3,3)`；`TILE_SIZE=64, OUTPUT_ATOM=128`。
-  `TMA_A` 取 `input_tma_desc_ptrs[1][0]`（权重，`:3103` 附近）；`mInput` 依 `w13_linear` 选 2D/3D layout
-  （`:3155-3168`）。
+  `TMA_A` 取 `input_tma_desc_ptrs[1][0]`（权重，`:3100`）；`mInput` 依 `w13_linear` 选 2D/3D layout
+  （`:3150-3167`）。
 - **include**：`tasks/blackwell/task_header.cuh:54`（host 探测 audit=1）。
 - **前端**：`moe_w13_linear_layer`（`persistent_kernel.py:2031`，`register_task(...,"moe_w13_linear_sm100",params)` `:2070`）、
   `moe_w2_linear_layer`（`:2282`，`register_task(...,"moe_w2_linear_sm100",params)` `:2319`）；bias 只在
