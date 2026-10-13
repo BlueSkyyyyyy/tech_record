@@ -43,5 +43,6 @@ categories: ["算子开发"]
 23. [MPK 源码走读手册：从模型到常驻 mega-kernel 的完整编译栈]({{< relref "mega-kernel-23-compiler-manual" >}}) —— 把 docs/06–08、14–21 十一篇源码走读收口成一张编译栈总图、判据总映射、双链分叉与「已实现未启用 / 论文落差」清单
 24. [MegaKernel 专题总纲 v2：结论地图、工程坑与实测校准]({{< relref "mega-kernel-24-capstone" >}}) —— 把 P0–P108 的 100+ 增量压成五层总图 + 六张实测校准表 + 工程坑清单 + 适用边界 v2
 25. [MPK 生产路径的 task 目录：`TaskType` 全表与代际 ID 分区]({{< relref "mega-kernel-25-mpk-task-catalog" >}}) —— 把 `register_task` 的 95 分支大表打开：116 条枚举、92 个被登记 `TaskType`、模型家族 ID 块与死码候选
+26. [MPK 前端的模型组装与请求/元数据管理层走读]({{< relref "mega-kernel-26-mpk-model-builder" >}}) —— 谁把 95 个 layer 拼成一个模型：builder 注册/组装、`MPKMetadata`、TP/EP 切分与集合通信选择
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

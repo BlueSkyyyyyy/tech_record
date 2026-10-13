@@ -2951,9 +2951,48 @@
       `TASK_ALLREDUCE` 注释 *"will be removed soon"*，后者旁证：`allreduce_layer` 实走
       `nvshmem_*`+`reduction`）；`TASK_ATTN_SM100` **确由 `paged_attention_sm100` 登记**（抽 7/8 输入
       由 `params[11]>0` 定）。§6 与论文 §4.1（自动路径）、`docs/02`（DeepGEMM MoE W13/W2）、
-      `docs/17`（两种 AllReduce）、`docs/23` §5「少而重」对照。判据不变（生产路径的 task 定义）。
-      配套博客 post `mega-kernel-25-mpk-task-catalog`（weight 26）并更新 `mega-kernel-00-index`
-      第 25 项。
+       `docs/17`（两种 AllReduce）、`docs/23` §5「少而重」对照。判据不变（生产路径的 task 定义）。
+       配套博客 post `mega-kernel-25-mpk-task-catalog`（weight 26）并更新 `mega-kernel-00-index`
+       第 25 项。
+
+### P111 前端模型组装与请求/元数据管理层源码走读（`docs/25-mpk-model-builder.md`）
+
+- [x] **P111-1** 补齐 `docs/14`（P100-1）**§7 明留的尾巴**——「未走读模型 builder 的完整组装逻辑
+      （`models/*/builder.py`）、分布式/张量并行切分（`multigpu.py`）、请求/元数据管理（`mpk.py` 的
+      `MPKMetadata`）」（`docs/24` §头部也把它列为不在其范围的三条尾巴之一）。见
+      `docs/25-mpk-model-builder.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，
+      与 `docs/06`–`docs/24` 同快照；**纯源码走读（资料分析），本轮无新实验**）。补的是
+      `docs/14`（层 API）与 `docs/24`（task 大表）之间**更上一层**的问题：**谁把 95 个手工
+      `*_layer()` 拼成一个模型**。headline——**megakernel 的融合边界是这一层用 Python 手写死的**：
+      模型架构知识被写成 `builder.py` 类，而非编译器从高层算子自动搜出（自动路径 `docs/15` 生产前端不调）。
+      结构：§0 定位（模型 builder + `MPKMetadata` 决定「哪些算子进同一张图/哪些中间量进对称显存」，
+      只划 C3 范围、不拿 C1/C2/C4/C5，`docs/22` §8）；§1 注册与发现（`model_registry.py:5-29` 装饰器
+      多别名 → `models/__init__.py:1-17` `rglob("builder.py")` 自动 import=注册 → `MPK.build():471-480`
+      取类，两入口 `build_from_model`/`build_from_config`；dflash/eagle3 不注册=草稿 builder）；
+      §2 `MPKMetadata`（`mpk.py:15-83` 六组字段）+ `MPK` 生命周期（`init_mpi:298-312`、
+      `compensate_meta_tensors:314-352`、`runner→generate_task_graph:482-489`(带 `num_gpus/my_gpu_id`)
+      →`compile:491-494`→`__call__:499-508`）+ **mode→`-DMODE_*` 宏**（`persistent_kernel.py:320-334`，
+      六种模式；容量常量 `-DMPK_MAX_*:336-345`）；§3 以 Qwen3 为规范样本逐段走
+      `build_from_dict:560-690`（vocab pad 153600、attach 输入/RoPE、`new_intermediate_tensors`、
+      embed、`build_layers`、final norm+lm_head、sampling/argmax 两段式）与 `build_layers:288-558`
+      （手写层序 + 手写 grid/block；**`use_splitk = target_cc==100` 的硬件代际分支**；残差靠张量身份
+      `self.x=` 串联）；§3.3 关键机制 **`new_intermediate_tensors` 两条路**（`online_notoken`=固定
+      tensor+`attach_input` 裸指针 vs 其它=`new_tensor`+`io_category`）——**`cuda_tensor` vs
+      `nvshmem_tensor` 由 builder 手选，决定哪些中间量进对称显存/跨卡**（对上 `docs/17` §3）；
+      §4 `models/utils.py`（`shuffle_tensors`/`inplace_shuffle_tensors` 权重交织、
+      `grid_for_rmsnorm_linear_layer:3-15`/`grid_for_splitk_linear_layer:17-34`（含 Qwen3-32B o_proj
+      的错位 TMA 描述符 bug 记录））证明前端仍是「人肉把维度换算成 task 网格」；§5 多卡
+      （builder 内 `//world_size` 手写切分 + `multigpu.py:17-298` 策略模式：`CollectiveCapabilities`
+      查 peer/VMM/multicast/posix 四项能力、`auto_select_allreduce_implementation:224-247`
+      `cc>=90+VMM+multicast+peer→NvshmemTile` 否则 `AllgatherReduce`、`allocate_nvshmem_teams:74-96`；
+      **allgather/broadcast/reduce_scatter 三种 `auto_select_*` 仍 `NotImplementedError`**）；
+      §6 其它模型家族（GLM-4.6/Inkling/GPT-OSS/DeepSeek-V3/DFlash/Eagle3 特色：MoE shared 折叠成
+      expert、MLA 权重吸收、FP8 UE8M0、投机草稿）——**正是 `docs/24` 家族 ID 块（350-399 Inkling /
+      400-449 GLM / 450-499 GPT-OSS）的前端生产者**；§7 同层附属件（`kv_planner.py` 异构 KV 流共享页池
+      → `PersistentKernel.kv_groups`；`base_dynamic_shard_loader.py` 声明式 TP/EP 分片加载；
+      `online_pinned_runtime.py` 双锁页环 host 泵=常驻 kernel 连续服务的落地）；§8 论文 §4.1 对照 +
+      **判据映射（本层不拿任何 C1–C5，只划 C3 范围 / 为 C4/C5 备输入）**；§9 局限；§10 坐标。
+      配套博客 post `mega-kernel-26-mpk-model-builder`（weight 27）并更新 `mega-kernel-00-index` 第 26 项。
 
 ## 每轮增量流程（autopilot）
 
@@ -3122,7 +3161,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P110-1 完成（1/1）**。补齐 `docs/14` §7 尾巴「未逐行走读全部 95 个任务分支」——把
+- 当前进度：**P111-1 完成（1/1）**。补齐 `docs/14` §7 尾巴「未走读模型 builder 的完整组装逻辑
+  （`models/*/builder.py`）、分布式/张量并行切分（`multigpu.py`）、请求/元数据管理（`mpk.py` 的
+  `MPKMetadata`）」——把「谁把 95 个手工 `*_layer()` 拼成一个模型」这一层打开：见
+  `docs/25-mpk-model-builder.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。headline——
+  **megakernel 的融合边界由这一层用 Python 手写死**：`models/<家族>/builder.py` 决定层序/手工
+  grid/权重交织吸收/**哪些中间量进对称显存（`io_category` cuda vs nvshmem）**，`MPKMetadata`+`MPK`
+  决定 serving 模式（六种 `-DMODE_*`）/容量常量（`-DMPK_MAX_*`）/多卡 world-rank/meta tensors 指针。
+  §1 注册与发现（`model_registry.py:5-29` + `models/__init__.py:1-17` 自动 import + `MPK.build:471-480`）；
+  §2 `MPKMetadata`/`MPK` 生命周期（`compensate_meta_tensors:314-352`、`generate_task_graph:482-489` 带
+  `num_gpus/my_gpu_id`、`mode→-DMODE_*:320-334`）；§3 Qwen3 规范样本（`build_from_dict:560-690`、
+  `build_layers:288-558`、`new_intermediate_tensors:120-287` 的 `cuda`/`nvshmem` 两路、`use_splitk=
+  target_cc==100` 硬件代际分支）；§4 `models/utils.py` 权重交织与 grid helper（含 Qwen3-32B o_proj
+  错位 TMA bug 记录）；§5 多卡（builder 内 `//world_size` 切分 + `multigpu.py` 能力查询与
+  `auto_select_allreduce_implementation:224-247`；其余三种集合通信仍 `NotImplementedError`）；
+  §6 其它家族（GLM/Inkling/GPT-OSS/DeepSeek-V3/DFlash/Eagle3）——**`docs/24` 家族 ID 块的前端生产者**；
+  §7 `kv_planner`/动态分片加载器/`online_pinned_runtime`；§8 判据映射（**本层只划 C3 范围、不拿
+  C1/C2/C4/C5**，`docs/22` §8）。配套博客 post `mega-kernel-26-mpk-model-builder`（weight 27）并更新
+  `mega-kernel-00-index` 第 26 项。
+- 此前：**P110-1 完成（1/1）**。补齐 `docs/14` §7 尾巴「未逐行走读全部 95 个任务分支」——把
   MPK 生产路径的 **`TaskType` 目录**打开：见 `docs/24-mpk-task-catalog.md`（快照 `f9eb70c`，
   **纯源码走读、无新实验**）。headline——**`enum TaskType` 按硬件代际/模型家族切成预留 ID 块**
   （0/10 控制、101-121 通用、150-198 Hopper、200-204 scheduler、230-299 SM100、300-349 多卡、
