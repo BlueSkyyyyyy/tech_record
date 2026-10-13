@@ -3761,7 +3761,38 @@
       `~1e-11`；B2 **负向对照**：含 `dq` 项 `dx relerr=1.09e-16`、**丢 `dq` 项 `6.18e-02`** 而
       `dfn/dgamma` 不变；C double 参考自身中心差分抽 7 个标量最差 `3.6e-11`；D 同一模板 device(fp32) vs
       double **relerr 8e-8~3.6e-7**、4×4 Sinkhorn VJP vs 有限差分 `~1e-11`。主 kernel UMMA/TMEM/
-      SplitBarrier **仅分析**。配套博客 `content/posts/mega-moe-130-mega-mhc-backward`（索引页新增第 130 篇）。
+       SplitBarrier **仅分析**。配套博客 `content/posts/mega-moe-130-mega-mhc-backward`（索引页新增第 130 篇）。
+
+### P121 增量（opt-in，把第 130 篇的 mHC 反向当成「待部署算子流水」做融合/roofline 账）
+
+- [x] **P121-1** **Mega mHC 反向的 H100 融合账**（`src/mhc_backward_fused.cu`、
+      `harness/exp_mhc_backward_fused.{py,sh,out.txt}`；语义源 `tests/test_mega_mhc.py:123-210`、
+      `impls/sm100_mega_mhc.cuh`、`epilogue/sm100_mega_mhc.cuh`、`csrc/apis/mega_mhc.hpp`）。
+      第 130 篇（P120-1）把 mHC 反向的**数学**补上了并证明「手写 VJP ≡ autograd」；本篇换**工程视角**：
+      把这条反向拆成**六段算子流水**（K0 重算残差混合 → G0 `u0=A@fnᵀ` → K1 系数反向（含 Sinkhorn VJP）
+      → G1a `dz=du0@fn` / G1b `dfn=du0ᵀ@A` → K2 残差混合反向）并量化「各段重在哪、算力还是带宽受限、
+      融合能省多少、目标卡上怎么映射」。**关键观察**：`g` 耦合项 `dq·2A`（元素级）已折进 K1 的
+      `dAbase`，只有 `du0@fn` 留作 GEMM——可融合的标量部分从 GEMM 里摘出去。→
+      `docs/131-mhc-backward-fused-account.md`（真实行号核对）。**正确性**（`src/mhc_backward_fused.cu`，
+      六段各一个真实 CUDA kernel + `k_reduce`）：device(fp32) 六段 vs host **单片 double 参考**
+      （第 130 篇同款）逐项对拍，`T=256 H=64 it=2/5` worst relerr **8.84e-07/6.55e-07**（normal/shifted
+      全覆盖，含 `dshift`）；真实形状（`H=7168`）手写 vs autograd 最坏 **2.36e-15**。**账（真实形状
+      H=7168 hc=4 D=28672 Nout=24）**：整条反向 **AI≈6.5**、三段 GEMM **AI≈24**，均 ≪ H100 bf16 拐点
+      **295** → **访存受限**；`T=16384` 整条反向访存下界 **3648.9 us**、三段 GEMM 计算下界仅 **68.4 us**
+      （**相差 53×**）。**H100 实测**：① 元素级三段真实设备代码（`T=65536 H=64`）：K0 **1005.8 GB/s**、
+      K2 **208.0 GB/s**、K1「内存部分」**153.2 GB/s**（`-sinkhorn` 计时归因开关），完整版掉到 **56.1 GB/s**
+      ——差的 **~2.4 ms 全在 Sinkhorn**（本参考把 4×4 Sinkhorn 串行在单线程、其余线程空等；是
+      `O(T·hc²·iters)` 固定成本、与 `D` 无关，真实 H 下被摊薄）；② **低基数原子是坑**：
+      `dgamma/dscales/dbases` 的全局 atomicAdd（约 3.9M 次落到 3/24/64 个地址）换成「per-token 部分和 +
+      并行归约」后 K1 从 **9.66 ms → 3.82 ms**（`K1r reduce` 自己仅 **152.7 us / 312.5 GB/s**）；
+      ③ 真实形状：三段 GEMM 合计 **3037.3 us / ~22.3 TFLOPS**（`Nout=24` 太窄，有效带宽 ~0.93 TB/s，
+      坐实访存受限；`T=4096` 738.4 us），而 torch **逐 op 元素级 62.3 ms**、**autograd 整条 119.5 ms**
+      （`T=4096` 15.9/31.0 ms）——比访存下界慢 **~33×**，融合空间主要在元素级段。**目标卡仅分析**：
+      三段窄 GEMM 复用 `sm100_bf16_gemm`/`sm100_fp8_fp4_gemm_1d1d`（`Nout=24` 需 padding，AI 小故
+      `set_tc_util` 有意义）；三段元素级按前向 `sm100_mega_mhc.cuh` 的 per-token worker 对偶融进
+      epilogue（同款 `shfl_xor` 做 Sinkhorn，把 G0 的 TMEM 累加器直接喂 K1 省一次 `u0` 往返）。
+      主 kernel SM100 专属、仅分析。配套博客
+      `content/posts/mega-moe-131-mhc-backward-fused-account`（索引页新增第 131 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3788,8 +3819,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P120 各增量完成（P15-1…P41-1、P42-1…P120-1）。**
-  本轮 P120-1：新建 `docs/130-mega-mhc-backward.md`
+- 当前进度：**P0~P14 全部完成；P15~P121 各增量完成（P15-1…P41-1、P42-1…P121-1）。**
+  本轮 P121-1：新建 `docs/131-mhc-backward-fused-account.md`
+  （+`harness/exp_mhc_backward_fused.{py,sh,out.txt}`、`src/mhc_backward_fused.cu`）——把第 130 篇的
+  mHC 反向当成**待部署算子流水**做融合/roofline 账：拆成**六段**（K0 重算混合 → G0 `u0=A@fnᵀ` → K1
+  系数反向（含 Sinkhorn VJP）→ G1a `dz=du0@fn` / G1b `dfn=du0ᵀ@A` → K2 混合反向），其中 `g` 耦合项
+  `dq·2A` 折进 K1、只有 `du0@fn` 留作 GEMM。**结论**：整条反向 **AI≈6.5**、三段 GEMM **AI≈24** ≪ 拐点
+  **295** → **访存受限**；`T=16384` 访存下界 **3648.9 us** vs GEMM 计算下界 **68.4 us**（**53×**）。
+  H100(sm90) 真机六段 kernel device(fp32) vs double 最坏 **8.84e-7**；元素级三段 K0 **1005.8 GB/s**、
+  K2 208.0、K1 内存部分 153.2（串行 Sinkhorn 拖到 56.1）、去低基数原子后 K1 **9.66→3.82 ms**；真实形状
+  三段 GEMM **3.04 ms / ~22.3 TFLOPS**、torch 逐 op 元素级 **62.3 ms**、autograd **119.5 ms**（比访存
+  下界慢 ~33×）。目标卡映射仅分析。索引页新增第 131 篇。
+  上一轮 P120-1：新建 `docs/130-mega-mhc-backward.md`
   （+`harness/exp_mega_mhc_backward.{py,sh,out.txt}`、`src/mega_mhc_backward.cu`）——补齐第 5 篇
   只做前向、第 117 篇只覆盖 Mega Gate 的 **Mega mHC（HyperConnection）变换反向**：残差多流混合 +
   投影 GEMM + sigmoid/仿射 + **Sinkhorn 迭代 VJP** + RMSNorm 的反向推导。**三个非平凡点**：Sinkhorn
@@ -5114,16 +5155,16 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P120 已完成（最新 **P120-1 Mega mHC（HyperConnection）变换的反向**：
-  残差多流混合 + 投影 GEMM + sigmoid/仿射 + **Sinkhorn 迭代 VJP** + RMSNorm 的梯度推导；
-  三个非平凡点——Sinkhorn 交替归一化整条序列逆放、`g` 把 24 个投影输出耦合到同一 `q` 的 `dq` 项、
-  两处 bf16 共享边界 + 投影路 `dz` 回流到 `s`；H100(sm90) 真机手写 VJP vs torch autograd 最坏
-  relerr 1.01e-15、device(fp32) vs double 8e-8~3.6e-7、丢 `dq` 负向对照 `dx relerr 6.18e-2`；
-  主 kernel SM100 专属、仅分析；索引页新增第 130 篇。
+- **下一步**：P0~P121 已完成（最新 **P121-1 Mega mHC 反向的 H100 融合账**：
+  把第 130 篇那条反向当成待部署算子流水拆成**六段**（K0/G0/K1/G1a/G1b/K2），量化 roofline：整条反向
+  **AI≈6.5**、三段 GEMM **AI≈24** ≪ H100 bf16 拐点 295 → **访存受限**；`T=16384` 访存下界 3648.9 us
+  vs GEMM 计算下界 68.4 us（53×）；H100 真机六段 kernel device(fp32) vs double 最坏 8.84e-7、元素级
+  K0 1005.8 GB/s、去低基数原子后 K1 9.66→3.82 ms、真实形状三段 GEMM 3.04 ms/~22.3 TFLOPS 而 torch
+  逐 op 元素级 62.3 ms、autograd 119.5 ms（比访存下界慢 ~33×）；目标卡映射仅分析；索引页新增第 131 篇。
   可继续（均为增量、非承诺）：
-  第 127 篇 Mega Gate 反向与第 130 篇 mHC 反向已把两条门控通路的梯度补齐；剩余可选：把 mHC 反向
-  （尤其 Sinkhorn VJP）在 SM100 上的 kernel 级实现做「仅分析」推演、或在 H100 上量化 fused mHC
-  backward 的算力/带宽账；另 P96/P97 的轻微漂移清单关键路径定点复核。详见上）。
+  第 127/130/131 篇已把两条门控反向（Mega Gate、mHC）的数学与算子账补齐；剩余可选：把本篇六段流水
+  在 SM100 上做 kernel 级「仅分析」细化（例如 G0 的 TMEM 累加器直喂 K1 省 `u0` 往返的接线推演）、
+  或对 P96/P97 的轻微漂移清单关键路径定点复核。另 DeepEP 端到端仍需 NCCL≥2.32.3（见「阻塞」）。详见上）。
   上一轮 P119-1：P0~P119 已完成（最新 **P119-1 DeepEP 的 CMake 调试构建链**：
   一套模板两个产物——`setup.py`（只编三个 host TU）vs `CMakeLists.txt`（`_C` 扩展 + `runtime_comm`/
   `runtime_driver` 两个 host 静态库 + `csrc/indexing/main.cu` 索引 TU）；`RUNTIME_CUDA_LIBRARIES` 的
