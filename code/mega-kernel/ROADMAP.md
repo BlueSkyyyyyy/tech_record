@@ -3656,6 +3656,40 @@
   `smem_row`/`norm_linear_hopper` 未重复走读、barrier ID 张力不判、`WORKER_NUM_THREADS` 运行期值未取。
   **本轮新增增量。**
 
+### P132 Eagle3 draft loop 走读：K=1 mbt 并行链 / K>1 slot-0 退化 / proper-chain 缺口（`docs/46-mpk-eagle3-draft-loop.md`）
+
+- [x] **P132-1** 补掉 `docs/40`/`docs/43`/`docs/44` 一直没打开的「谁把 K 个 draft step 拼成一张图」
+  ——即 `ROADMAP`「下一步候选」第一条 `eagle3_commit` 的 K>1「proper mbt-parallel chain」缺口
+  （`eagle3_ops.cuh:217` 自陈未实现）的**静态追述**。见 `docs/46-mpk-eagle3-draft-loop.md`
+  （快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与 `docs/06`–`docs/45` 同快照；
+  **纯源码走读（资料分析），本轮无新实验**；Eagle3 device 头只被 blackwell `task_header.cuh` include，
+  SM100 专属、本机不可执行）。三条 headline：
+  - **(A) draft loop 是一张「`for step in range(K)` 展开的单图」**：`Eagle3Builder.build_draft_loop`
+    （`models/eagle3/builder.py:271-449`）每 step 一整层 draft transformer（15 段算子链，`§2.2` 表），
+    中间张量全 `(mbt,…)` 且跨 step 复用（`_allocate_intermediates:220-269`），靠 `draft_hidden`(`:238`)
+    与 `target_token`(`:265`) 两条接力串行——**没有数据并行空间**。
+  - **(B) K 只改 attention 一处**：K=1 走默认 `paged_attention_layer`（`num_tokens=mbt`，产生
+    「mbt 条并行链」，每槽一个 `ac` 假设）；K>1 改 `q_len_override=1, tail_offset=K-step`
+    （builder `:381-382`，前端明记 "Eagle3 K>1 chain" `persistent_kernel.py:1360-1361`），device 侧
+    `num_tokens=1`（`attention_sm100.cuh:117-119`）、`seq_len` 回收 `TAIL_OFFSET`（`:128-130`）、
+    store loop 只写 1 行（`:737-746`）。因 demo 硬断言 `mbt==K+1`（`:267-269`），K>1 时 mbt 行里
+    **只有 1 行有效**；下游 `rmsnorm/linear/argmax(partial/reduce)/d2t/scatter` 全 mbt-wide
+    （`argmax_sm100.cuh:102/142`、`eagle3_ops.cuh:115-121`、`mtp_token_ops.cuh:45-48`）→
+    `all_draft_ids[1..mbt-1,:]` 全是 garbage → commit **被迫 `src_slot=0`**（`eagle3_ops.cuh:221`
+    `(K>1)?0:(ac-1)`）。
+  - **(C) 缺口 = 把 1 行有效推广回 mbt 行有效**：把 device 注释目标拆成 4 条必要条件（attention 要写
+    mbt 个输出行 / 每槽 `tail_offset` 需 per-slot / 下游簿记本已 per-batch 无需改 / KV 写回不能互踩），
+    并说清它与 `MAX_TOKENS=3` slot-0 bug family（`docs/38` §6 `"+f"`、`docs/44` §7、`docs/43` §4）
+    **共用同一段 attention 代码**（`MMA_ITERS_M:103` 的 m-loop 既是补齐前提也是候选修复面）。另记一处
+    静态落差：demo 注释描述的 flat-cache `eagle3_draft_chain_step_attn` 单 kernel（`:826-832`）与
+    builder 实走的 `paged_attention_layer`（`:357/:370`）是**两套并存 design**（快照无前者符号，
+    只记不判）。
+  判据：**本文贡献 C3 的「范围与分支」**，与 `docs/43` §8（commit 只贡献 C1+C3）互补。配套博客 post
+  `mega-kernel-47-mpk-eagle3-draft-loop`（weight 48）并更新 `mega-kernel-00-index` 第 47 项。
+  P132-1 新留尾巴（文档 §8）：未构建；「有效行 = slot 0 / `first_token_pos` 行」是静态推断（多请求未核）；
+  4 条必要条件系综合推断；`MAX_TOKENS=3` 分歧未独立复现；demo 注释落差只记不判。
+  **本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3926,7 +3960,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P131-1 完成（1/1）**。补掉 `docs/37` §4（P123-1 对 SM100 norm/rope 只给摘要）、
+- 当前进度：**P132-1 完成（1/1）**。补掉 `docs/40`/`docs/43`/`docs/44` 一直没打开的「谁把 K 个 draft
+  step 拼成一张图」，也即「下一步候选」第一条——`eagle3_commit` 的 K>1「proper mbt-parallel chain」
+  缺口（`eagle3_ops.cuh:217` 自陈未实现）的静态追述。见 `docs/46-mpk-eagle3-draft-loop.md`
+  （快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 专属、本机不可执行）。三条 headline：
+  **(A)** `Eagle3Builder.build_draft_loop`（`builder.py:271-449`）是「`for step in range(K)` 展开的
+  单图」，每 step 一整层 draft transformer（15 段算子链）、所有中间张量 `(mbt,…)` 跨 step 复用、
+  靠 `draft_hidden`/`target_token` 两条接力串行（无数据并行空间）；
+  **(B)** K 只改 attention 一处——K=1 默认处理全部 `mbt` 输入槽（「mbt 条并行链」），K>1 改
+  `q_len_override=1`+`tail_offset=K-step` 每 step 只写 1 行；因 `mbt==K+1`（demo 断言），K>1 只有
+  1 行有效、下游 mbt-wide 簿记把 garbage 写进 `all_draft_ids[1..]`，commit 被迫 `src_slot=0`；
+  **(C)** 把缺口拆成 4 条必要条件，并说清它与 `MAX_TOKENS=3` slot-0 bug family 共用同一段 attention
+  代码；另记 demo 注释的 flat-cache 单 kernel 与 builder 实走 `paged_attention_layer` 的静态落差。
+  判据贡献 C3、与 `docs/43` 互补。配套博客 post `mega-kernel-47-mpk-eagle3-draft-loop`（weight 48）
+  并更新 `mega-kernel-00-index` 第 47 项。P132-1 新留尾巴见文档 §8（未构建、「有效行=slot 0」系推断、
+  4 条必要条件系推断、slot-0 分歧未复现、注释落差只记不判）。
+- 下一步候选：可继续走其一——`docs/35` §9 遗留的其它未走读相邻层（CUTLASS `collective_builder` 侧
+  QK/PV atom——`mla_sm100_2sm.cuh` 的 CUTLASS 内部，`docs/36` §8 明留）；或 `Eagle3Builder` 尚未走的
+  `_prepare_weights`/`_attach_weights` 与 FLAT-CACHE draft attention 设计的完整追述（`docs/46` §6 落差）；
+  或 `docs/44` §10 仍余的 `smem_row` 内部与 `docs/07` §3.3 的 `norm_linear_hopper` 之外的融合层。
+- 此前：**P131-1 完成（1/1）**。补掉 `docs/37` §4（P123-1 对 SM100 norm/rope 只给摘要）、
   `docs/07` §3.1（只走 `rms_norm_hopper_impl`）与 `docs/44` §10（P130-1 明留「`rms_norm_sm100`/
   `rotary_embedding_hopper` 内部未逐行」）三处空白：把 norm/rope 当成**跨 Ampere/Hopper/Blackwell
   三代演化的 task 家族**逐行打开，见 `docs/45-mpk-norm-rope-tasks.md`（快照 `f9eb70c`，
