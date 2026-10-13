@@ -1,0 +1,39 @@
+== 环境坐标 ==
+057ca59 Public release 26/09/30 (#462)
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+Build cuda_13.2.r13.2/compiler.37668154_0
+7760eef80c6a38ee tcgen05.cuh
+49f167d1a23a65ba sm100_bmk_bnk_mn.cuh
+02e180967718a626 sm100_bmk_bnk_mn.hpp
+439c57d8aa4914c0 sm100.cuh
+
+== Part A: tcgen05 指令编译矩阵（sm_90a 应被 ptxas 拒绝 / sm_100a 应通过）==
+  f16bf16_ss     sm_90a=REJECT sm_100a=OK      | sm90 err: Instruction 'tcgen05.mma' not supported on .target
+  f16bf16_2x1    sm_90a=REJECT sm_100a=OK      | sm90 err: Instruction 'tcgen05.mma' not supported on .target
+  mxf8f6f4_ss    sm_90a=REJECT sm_100a=OK      | sm90 err: Instruction 'tcgen05.mma' not supported on .target
+  mxf4_ss        sm_90a=REJECT sm_100a=OK      | sm90 err: Instruction 'tcgen05.mma' not supported on .target
+  f16bf16_ws     sm_90a=REJECT sm_100a=OK      | sm90 err: Instruction 'tcgen05.mma.ws' not supported on .target
+  tmem_load_4    sm_90a=OK     sm_100a=OK    
+  umma_arrive    sm_90a=REJECT sm_100a=OK      | sm90 err: Instruction 'tcgen05.commit' not supported on .target
+  fences         sm_90a=REJECT sm_100a=OK      | sm90 err: Instruction 'tcgen05.fence' not supported on .target
+  (逐条日志见 /tmp/tcgen05_matrix/*.log)
+
+== 编译主实验（sm_90a，真机可运行部分）==
+build OK
+
+== 运行 ==
+### P100-1 tcgen05 UMMA 指令底座 + SM100 bmk_bnk_mn 实验（H100 sm90a）###
+include <deep_gemm/ptx/tcgen05.cuh> 与 <deep_gemm/mma/sm100.cuh> 在本 TU 解析成功
+
+== Part 1: STSM swizzle 公式 vs cute::Swizzle<3,4,3> ==
+  (row,col8) 双射检查 mismatch=0/1024
+  16B 组内展开后碰撞=0/16384
+== Part 2: 真实 TMA reduce-add 累积语义（plain, 128x128 fp32）==
+  0.5 + 3x(1.0) -> min=3.5000 max=3.5000 (期望 3.5)
+  (反例：若为覆盖写结果应为 1.0)
+== Part 3: swizzle-128 TMA reduce-add（对齐 bmk kernel D 描述符 + epilogue）==
+  D[:,0:32]+=2.0, D[:,32:64]+=3.0 -> mismatch=0/16384
+== Part 4: tcgen05.cuh 在 sm90a 下可解析 + 描述符常量 ==
+  sizeof(InstrDescriptor)=4 sizeof(InstrDescriptorBlockScaled)=4
+
+==== 汇总：PASS=7 FAIL=0 ====

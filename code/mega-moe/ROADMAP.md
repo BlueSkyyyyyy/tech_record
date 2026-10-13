@@ -3111,6 +3111,45 @@
       `EP_AVOID_RECORD_STREAM`（`record_stream` 对 graph 不感知）路线。配套博客
       `content/posts/mega-moe-109-cuda-graph-capture`（索引页新增第 109 篇）。
 
+### P100 增量（opt-in，补齐第 49 篇 SM90 WGMMA 底座的 SM100 对偶 + 第 17 篇只当对照的 SM100 分支）
+
+- [x] **P100-1** **SM100 的 UMMA 指令底座 `ptx/tcgen05.cuh`**（`deep_gemm/include/deep_gemm/
+      ptx/tcgen05.cuh` 219 行；消费者 `sm100_bmk_bnk_mn.cuh` / `sm100_bmk_bnk_mn.hpp`；
+      描述符层 `mma/sm100.cuh`；`cute/arch/copy_sm100.hpp` / `copy_sm90_tma.hpp`；
+      13 个 `#include` 它的设备文件）。第 49 篇（P39-1）把**所有 SM90 kernel 每一行 MMA 都在调**的
+      底座拆清了（`mma/sm90.cuh` + `ptx/wgmma.cuh`），第 35 篇（P25-1）拆了 SM100 稠密 GEMM 后端并
+      过了 `mma/sm100.cuh` 的 smem 描述符，但夹在中间、**13 个 SM100 设备文件都 include 的
+      `ptx/tcgen05.cuh`** 从没被单独读过——它是 SM100 上所有 `tcgen05.*` 裸指令（`mma`/`commit`/
+      `fence`/`ld`）的唯一封装点，是第 49 篇的严格对偶。**tcgen05 指令 SM100 专属、仅分析**
+      （§6.1 给出 ptxas 逐条拒绝的硬证据）；**它脚下的内存几何（STSM swizzle / TMA reduce-add）
+      H100(sm90a) 真机可跑**。
+      → `docs/110-sm100-tcgen05-umma.md`（真实行号核对）：**三层**——① **9 个 `*_SS::fma` 封装**
+      （`:12-187`，6 个 data kind × {1SM,2SM} + 1 个 `ws`）：`cta_group::1/2`、`kind::f16/f8f6f4/
+      mxf8f6f4.block_scale/mxf4.block_scale[.block32|.scale_vec::2X]`（CUDA≥12.9 分支 `:137-141/161-165`）、
+      **`desc >> 32` = 32 位 instruction descriptor**（`:25`，对应 `mma/sm100.cuh:144-148` 的 `<<32`）、
+      **`setp.ne.b32 p, scale_c, 0`**（`:22`）= `tcgen05.mma` 的「累积/清零」predicate（kernel 传
+      `s>0 or k>0`）；`F16BF16_WS_SS`/`F8F6F4_*` 在公开仓库**无调用点**。② **TMEM/commit/fence**——
+      `tmem_load_32dp32b<N>`（`:190-204`，6 档宽度，仅 MQA logits/Mega Gate 用）、
+      `umma_arrive_no_elect`（`:206-209`，不做 `elect`，由调用方保证）、`tcgen05_before/after_thread_sync`
+      （`:211-217`，after=等之后读之前、before=读之后同步之前）。③ **消费者 `sm100_bmk_bnk_mn.cuh`**
+      逐段——把第 17 篇 §6 的「三行对照」落到一个只用一个封装的**最小样本**：warp 角色/TMEM
+      `Allocator1Sm`（`:80-93`）、每 lane 预存 stage 描述符 + `__shfl_sync`（`:143-144/165-166`）、
+      `fma(...,0,s>0 or k>0,...)`（`:174`）、`ld_shared(tmem_ptr)==0` 唯一性（`:188-189`）、
+      epilogue `TMEM_LOAD_32dp32b4x`+`st_shared`+**`SM90_TMA_REDUCE_ADD_2D`**（`:245-255`）；
+      host 包装 `split_factor`（`:34`）/stage 回退（`:38-55`）/**D 描述符 `(n,m)` 方向**（`:69`）。
+      另给与第 49 篇的**八维对照表**（描述符/发指令主体/累加器/WGMMA wait_group vs tcgen05 commit→
+      mbarrier/fence/选择器）。**H100(sm90a) 实测**（`src/tcgen05_umma.cu` +
+      `harness/exp_tcgen05_umma.{sh,out.txt}`）**7 PASS / 0 FAIL**：① **ptxas 编译矩阵**——`tcgen05.mma/
+      .mma.ws/.commit/.fence` 在 `sm_90a` **逐条 REJECT**（`Feature '.cta_group::1' not supported` /
+      `Instruction '...' not supported on .target 'sm_90a'`）、`sm_100a` 全 OK；`tmem_load` 因 CUTLASS
+      arch 守卫（`copy_sm100.hpp:3474`）在 `sm_90a` **编得过但运行期 trap**（编得过≠跑得动）；
+      ② STSM swizzle 整数公式（`sm100_bmk_bnk_mn.cuh:223-249` 原样抽取）对 **128×8 全枚举** ==
+      `cute::Swizzle<3,4,3>`（mismatch 0/1024、16B 组内碰撞 0/16384）；③ **真实 TMA reduce-add**：
+      初值 0.5 + 3×1.0 → **3.5**（坐实是加非写，覆盖写应为 1.0）；④ swizzle-128 reduce-add 以 bmk 的
+      `(n,m)` 方向各打两段列 → **mismatch 0/16384**；⑤ `tcgen05.cuh`+`mma/sm100.cuh` 在 `sm_90a` 下
+      可 include、`InstrDescriptor`==4B。配套博客 `content/posts/mega-moe-110-sm100-tcgen05-umma`
+      （索引页新增第 110 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3136,8 +3175,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P99 各增量完成（P15-1…P41-1、P42-1…P99-1）。**
-  本轮 P99-1：新建 `docs/109-cuda-graph-capture.md`（+`harness/exp_cuda_graph_capture.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P100 各增量完成（P15-1…P41-1、P42-1…P100-1）。**
+  本轮 P100-1：新建 `docs/110-sm100-tcgen05-umma.md`（+`src/tcgen05_umma.cu`、
+  `harness/exp_tcgen05_umma.{sh,out.txt}`）——补齐**第 49 篇（SM90 WGMMA 底座）的 SM100 严格对偶**：
+  `deep_gemm/include/deep_gemm/ptx/tcgen05.cuh`（13 个 SM100 设备文件都 include，却从没单独读过）。
+  要点：① **9 个 `*_SS::fma`**（6 data kind × {1SM,2SM} + 1 个 `ws`）——`cta_group::1/2`、`kind::`、
+  **`desc >> 32` = 32 位 instruction descriptor**（对应 `mma/sm100.cuh:144-148` 的 `<<32`）、
+  **`setp.ne.b32 p, scale_c, 0`** = tcgen05.mma 的「累积/清零」predicate（kernel 传 `s>0 or k>0`）、
+  `MXF4` 的 CUDA≥12.9 `.block32` vs `.scale_vec::2X` 分支、`F16BF16_WS_SS`/`F8F6F4_*` 无调用点；
+  ② **TMEM/commit/fence**——`tmem_load_32dp32b<N>`（6 档，仅 MQA logits/Mega Gate 用）、
+  `umma_arrive_no_elect`、`tcgen05_before/after_thread_sync`（after=等之后读之前 / before=读之后同步之前）；
+  ③ **消费者 `sm100_bmk_bnk_mn.cuh`**（把第 17 篇 §6 三行对照落成只用 `F16BF16_SS` 的最小样本）——
+  `Allocator1Sm`/每 lane 预存描述符+`__shfl_sync`/`fma(...,0,s>0 or k>0,...)`/epilogue
+  `TMEM_LOAD_32dp32b4x`+`st_shared`+**`SM90_TMA_REDUCE_ADD_2D`**；再加 host 包装的 `split_factor`、
+  stage 回退、**D 描述符 `(n,m)` 方向**。**H100(sm90a) 真机 7 PASS / 0 FAIL**：**ptxas 编译矩阵**——
+  `tcgen05.{mma,mma.ws,commit,fence}` 在 `sm_90a` 逐条 REJECT（`Feature '.cta_group::1' not supported`
+  / `Instruction '...' not supported`）、`sm_100a` 全 OK，而 `tmem_load` 因 CUTLASS arch 守卫
+  （`copy_sm100.hpp:3474`）在 `sm_90a` **编得过但运行期 trap**；STSM swizzle 整数公式对 128×8 全枚举
+  == `cute::Swizzle<3,4,3>`（mismatch 0/1024）；**真实 TMA reduce-add**：0.5+3×1.0→**3.5**（是加非写）、
+  以 bmk `(n,m)` 方向两段列 mismatch 0/16384。另给与第 49 篇的八维对照表（描述符/发指令主体/累加器
+  TMEM/完成事件/fence/选择器…）。索引页新增第 110 篇。
+  上一轮 P99-1：新建 `docs/109-cuda-graph-capture.md`（+`harness/exp_cuda_graph_capture.{py,sh,out.txt}`）
   ——补齐**贯穿训练/推理部署、却一直没被单独讲过的 CUDA Graph 兼容性面与 capture 前的 warm-up 契约**。
   要点：三层时间轴（host 一次性初始化 / capture / replay）是根因——懒初始化落在捕获里会把「一次性」
   工作录进 DAG 并每次 replay 重放；DeepGEMM 三个 API（`get_split_barriers` `mega_mhc.hpp:26-39`、
@@ -4260,7 +4318,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P98 已完成（最新 **P98-1 DeepGEMM 通用 GEMM 任务调度器 `scheduler/gemm.cuh`**：
+- **下一步**：P0~P100 已完成（最新 **P100-1 SM100 UMMA 指令底座 `ptx/tcgen05.cuh`**：
+  第 49 篇 SM90 WGMMA 底座的 SM100 对偶——9 个 `*_SS::fma`（`cta_group::1/2`、`kind::`、`desc>>32`
+  =instruction descriptor、`setp.ne.b32` 累积谓词）、`tmem_load_32dp32b<N>`、`umma_arrive_no_elect`、
+  两条 `tcgen05.fence`；消费者 `sm100_bmk_bnk_mn.cuh`（把第 17 篇 §6 落成最小样本）；H100 真机
+  7 PASS/0 FAIL（ptxas 编译矩阵 sm90 逐条拒 / sm100 全过、STSM swizzle==`Swizzle<3,4,3>`、
+  真实 TMA reduce-add 0.5+3×1.0→3.5）；详见上）。
+  上一轮 P98-1：P0~P98 已完成（最新 **P98-1 DeepGEMM 通用 GEMM 任务调度器 `scheduler/gemm.cuh`**：
   一个 `Scheduler` 模板覆盖 7 种 `GemmType`，被五个 GEMM 内核复用（也是 MoE 反向 wgrad/dgrad 的
   任务枚举地基）；三个非平凡点——`get_num_1d_blocks_per_group` 编译期代理代价选 `{8,16}`、
   `get_swizzled_block_idx` 的 SM90 multicast 奇数分组修补 `#if __CUDA_ARCH__<1000`、
