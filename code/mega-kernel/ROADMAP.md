@@ -4308,6 +4308,31 @@
   `mega-kernel-00-index` 第 66 项。P151-1 新留尾巴见文档 §8（SMEM 224 KiB vs cosize 160 KiB 缺口未
   解释、warp6/7 空转系静态推断、只到试编未运行、未与 `moe_linear_sm100.cuh` 对走）。**本轮新增实验。**
 
+### P152 SM100 BF16 MoE linear device 身体走读（`docs/66-mpk-sm100-moe-linear.md`）
+
+- [x] **P152-1** 补掉 `docs/65`（P151-1）**§8 明留的尾巴**「未与 `moe_linear_sm100.cuh`（827 行
+  BF16 MoE linear）对走」——把 BF16 SM100 **grouped MoE** linear device 身体逐行打开，它是 dense
+  BF16 兄弟 `linear_sm100_mpk.cuh`（`docs/65`）与 FP8 MoE 兄弟 `fp8_group_gemm_sm100.cuh`
+  （`docs/33`）之间的中间支，也补 `docs/32` §5.4 的同族摘要。见
+  `docs/66-mpk-sm100-moe-linear.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`；
+  CUTLASS `deps/cutlass` `f3fde583`；**纯源码走读 + 1 个 host 侧结构探测**，SM100 本机不可执行）。
+  三条 headline：**(A)（headline）同一族里这一支把「MoE 三件事」全塞进一个 device task，且为此换了
+  数据通路**——只保留 A（权重）走 TMA、把 B（输入激活）改成**逐 token 的 `cp.async` gather**
+  （按 routing index 选 token、`topk_idx>0` 才拷，`:540-553`），输出改成**register 直接 scatter**
+  到 `[batch,topk,N]`（`:802-809`，`:801` 注释「use cp.async.bulk here」是 TODO）；未路由 token
+  在 SMEM 留旧值、会被 MMA 读到又在 scatter 时丢弃——这正是「gather + 谓词 + scatter」边界的代价；
+  **(B)（headline）** 与 dense 兄弟共享同一套 CuTe 描述符代数（连两处陈旧注释 `_32`→`_16` 都一样），
+  MoE 唯一多出 `sB_cp_layout`；host 探测证 A/B/`sB_cp` 的 stage 步长逐项与 CuTe 布局一致
+  （8192/1024/1024 全 `OK`），SMEM 预算 A+B=`147456 B`（**MoE 不再单开 C 缓冲**，C 在 TMEM + 寄存器
+  scatter），并解释 `b_full` arrival count 为何是 32（`cp_async_group_size=32/MMA_N=2` ⇒ 一个 warp5）；
+  **(C)（headline）** 生产六层全通（`TaskType 254/255`、`graph.cc:687/704`、`task_register.cc:3003`、
+  `task_header.cuh:54`、前端、四个 builder），`__forceinline__` 与 dense 兄弟的 `__noinline__` **相反**；
+  并记一枚跨代/跨精度落差——**`expert_stride` 三套来源**（本支硬编码 `w13?10:8` / FP8 版 `grid_dim.x`
+  / Hopper 版硬编码 `w13?5:4`，运行期 `expert_offset` 一律 `bid.x`），**只记不判**。判据只贡献 C3。
+  新实验 `src/moe_linear_sm100_layouts.cu` + `harness/moe_linear_sm100_layouts.{sh,out.txt}`
+  （目标卡 H100/sm90a，host 侧，device 3）。配套博客 post `mega-kernel-67-mpk-sm100-moe-linear`
+  （weight 68）并更新 `mega-kernel-00-index` 第 67 项。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4696,10 +4721,38 @@
   `col = r div 32`（组间列 stride **1**），K 交给 `sf_id`。二者「4 列足迹」的组间 stride 与 K 的落点
   都不同，**谁合 `tcgen05.mma...block_scale` 的硬件 TMEM SF 寻址契约，本机 H100/sm90 不可执行 SM100、
   无法核验**，故只记不判（要收敛须在 SM100 上做 CUTLASS 路径 vs MPK 路径逐位比对）。
+- **MoE grouped linear 的 `expert_stride` 有三套来源（只记不判）**（P152-1/`docs/66` §5.2）：
+  同一个 `expert_offset=bid.x`（`runtime.cc:358`）配的编译期 `EXPERT_STRIDE` 在三支里来源不同——
+  BF16 SM100（`moe_linear_sm100.cuh`）**硬编码** `w13?10:8`（`task_register.cc:3059`，与单测
+  `test_w13_linear.py:15`/`test_w2_linear.py:15` 的 10/8 一致）；FP8 SM100（`fp8_group_gemm_sm100.cuh`）
+  用 **`bgraph.grid_dim.x`**（`:3298`，注释「must match grid_dim.x」）；Hopper SM90
+  （`moe_linear_swapAB_hopper.cuh`）又**硬编码** `w13?5:4`（`:3664`）。而 DeepSeek-V3 builder 给 BF16
+  路径传 `grid_dim=(NUM_EXPERTS,1,1)`（`builder.py:976-984`）。**三套 stride 约定并存是快照事实**，
+  追「某个专家到底由哪个 CTA 处理」前先确认走的是哪一支/哪一代，本专题只记不判。
+- **`sm100_moe` 单测的 as-shipped 隐患（静态事实）**（P152-1/`docs/66` §5.3）：`sm100_moe/setup.py`
+  的 `depends` 列了**不存在的** `tasks/blackwell/utils.cuh`（快照只有 `sm100_utils.cuh`）；扩展名
+  `name='runtime_kernel_blackwell'` 与 `sm100_linear` 目录**撞名**（同 `docs/30` §2.1）。复制/构建
+  SM100 MoE 单测前先核 `depends` 与扩展名。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P151-1 完成（1/1）**。补掉 `docs/32`（P118-1）**§5.4 只给 10 行摘要**的第三支 SM100
+- 当前进度：**P152-1 完成（1/1）**。补掉 `docs/65`（P151-1）**§8 明留的尾巴**「未与
+  `moe_linear_sm100.cuh`（827 行 BF16 MoE linear）对走」。把 BF16 SM100 **grouped MoE** linear
+  device 身体逐行打开，见 `docs/66-mpk-sm100-moe-linear.md`（快照 `f9eb70c`，本地
+  `/ssd/mirage_mpk_build`；CUTLASS `f3fde583`；**纯源码走读 + 1 个 host 侧结构探测**）。三条 headline：
+  **(A)（headline）** 这一支把「MoE 三件事」全塞进一个 device task，且为此换了数据通路——只保留
+  A（权重）走 TMA、把 B（输入激活）改成**逐 token 的 `cp.async` gather**（route 谓词）、输出改成
+  **register 直接 scatter** 到 `[batch,topk,N]`；未路由 token 在 SMEM 留旧值、被 MMA 读到又在 scatter
+  丢弃（「gather + 谓词 + scatter」边界的代价）；**(B)（headline）** 与 dense 兄弟共享同一套 CuTe
+  描述符代数（连陈旧注释 `_32`→`_16` 都一样），MoE 独有 `sB_cp_layout`；host 探测证 A/B/`sB_cp`
+  stage 步长逐项一致（8192/1024/1024 全 `OK`）、SMEM 预算 A+B=`147456 B`（MoE 不再单开 C 缓冲，
+  C 在 TMEM + 寄存器 scatter）、并解释 `b_full` arrival count=32 的由来（`copyB` 恰 32 线程/warp5）；
+  **(C)（headline）** 生产六层全通（`TaskType` 254/255），`__forceinline__` 与 dense 兄弟
+  `__noinline__` 相反，并记 `expert_stride` 三套来源（本支 `w13?10:8` / FP8 `grid_dim.x` / Hopper
+  `w13?5:4`）。判据只贡献 C3。新实验 `src/moe_linear_sm100_layouts.cu` +
+  `harness/moe_linear_sm100_layouts.{sh,out.txt}`（目标卡 H100/sm90a，host 侧，device 3）。配套博客
+  post `mega-kernel-67-mpk-sm100-moe-linear`（weight 68）并更新 `mega-kernel-00-index` 第 67 项。
+- 此前：**P151-1 完成（1/1）**。补掉 `docs/32`（P118-1）**§5.4 只给 10 行摘要**的第三支 SM100
   手工线性身体，并兑现 P150-1（§12）明留的尾巴「`linear_sm100_mpk.cuh` 调度是否同构未核」。把
   `linear_sm100_mpk.cuh`（737 行，BF16/无 block-scale）逐行打开，见 `docs/65-mpk-sm100-bf16-linear.md`
   （快照 `f9eb70c`，本地 `/ssd/mirage_mpk_build`；CUTLASS `f3fde583`；DeepGEMM 对照 `057ca59`；**纯源码
@@ -4716,8 +4769,7 @@
   `mega-kernel-00-index` 第 66 项。
 - 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计
   （注：该 kernel 名 `eagle3_draft_chain_step_attn` 快照里 `grep` 零命中，**可能不可走**，须先核 demo
-  引用是否指向别处）；或 `moe_linear_sm100.cuh`（827 行 BF16 MoE linear，与本文同为 BF16 身体，未对走）；
-  或 `mla_mtp_decode_tp2/4/8_sm100.cuh` 三兄弟的内部未逐行处；或 SM100 专属布局的其余面
+  引用是否指向别处）；或 `mla_mtp_decode_tp2/4/8_sm100.cuh` 三兄弟的内部未逐行处；或 SM100 专属布局的其余面
   （`linear_fp8_sm100_cute_tie` 想表达的 CuTe 解构路径、`fp8_group_gemm_sm100.cuh` 的 SF 段逐行、
   WS 指令落地后的对照、稀疏 A 的 2:4 物理排布/E→A 槽映射（本文只到 trait 形状，未追硬件）逐行）。
   **SM100 BF16 手工线性身体（`linear_sm100_mpk.cuh`）已由 P151-1/`docs/65` 补掉**（`docs/32` §5.4 的摘要尾巴、
