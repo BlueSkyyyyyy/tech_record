@@ -1,0 +1,160 @@
+device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0  L2=50 MB  optin=232448  maxThreads/SM=2048
+worker/生产者 全共驻：grid = P + G = 132 SM。K=32 D=2 SMEM=22544 B (maxBlocks/SM@T256=6)
+静态数组 NDESC·DW·4 = 138.4 MB (≫ L2)
+
+===== §A 正确性：P 个 producer（分段子环+背压+head[p]/tail[p]），NDESC=8192, EDW=8, R=0 =====
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=8192   mode=0     0.0339 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4224   mode=2     0.0455 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4224   mode=1     0.7692 ms/rep  got=404219327039195
+      P=1 D=1  static==  sched==  gen==  (all vs static-ref)
+  P=1   G=128 EDW=8     K=32   D=2   R=0      PW=0      CAPp=8192   mode=0     0.0325 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=2   R=0      PW=0      CAPp=8448   mode=2     0.0464 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=2   R=0      PW=0      CAPp=8448   mode=1     0.7711 ms/rep  got=404219327039195
+      P=1 D=2  static==  sched==  gen==  (all vs static-ref)
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4096   mode=0     0.0323 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=2112   mode=2     0.0336 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=2112   mode=1     0.3914 ms/rep  got=404219327039195
+      P=2 D=1  static==  sched==  gen==  (all vs static-ref)
+  P=2   G=128 EDW=8     K=32   D=2   R=0      PW=0      CAPp=4096   mode=0     0.0323 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=2   R=0      PW=0      CAPp=4224   mode=2     0.0334 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=2   R=0      PW=0      CAPp=4224   mode=1     0.3915 ms/rep  got=404219327039195
+      P=2 D=2  static==  sched==  gen==  (all vs static-ref)
+  P=4   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=2048   mode=0     0.0323 ms/rep  got=404219327039195
+  P=4   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=1056   mode=2     0.0334 ms/rep  got=404219327039195
+  P=4   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=1056   mode=1     0.2058 ms/rep  got=404219327039195
+      P=4 D=1  static==  sched==  gen==  (all vs static-ref)
+  P=4   G=128 EDW=8     K=32   D=2   R=0      PW=0      CAPp=2048   mode=0     0.0324 ms/rep  got=404219327039195
+  P=4   G=128 EDW=8     K=32   D=2   R=0      PW=0      CAPp=2112   mode=2     0.0336 ms/rep  got=404219327039195
+  P=4   G=128 EDW=8     K=32   D=2   R=0      PW=0      CAPp=2112   mode=1     0.2039 ms/rep  got=404219327039195
+      P=4 D=2  static==  sched==  gen==  (all vs static-ref)
+
+===== §B 生产者块数 P 的标度（EDW=0, PW=0；grid=P+G=NSM 全共驻）=====
+  P=1   G=132 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     0.1689 ms/rep  got=20154739694231596
+      static(G=132, 无 producer) =    0.1689 ms  desc=   819.5 GB/s
+  P    G        gen(ms)    gen/st     gen*P   sched(ms)    sch/st     sch*P  gen Mdesc/s
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=1    36.4603 ms/rep  got=20154739694231596
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=2     1.3229 ms/rep  got=20154739694231596
+  1    131      36.4603   215.874    36.460      1.3229     7.833     1.323         10.8
+  P=2   G=130 EDW=0     K=32   D=2   R=0      PW=0      CAPp=196608 mode=1    18.3499 ms/rep  got=20154739694231596
+  P=2   G=130 EDW=0     K=32   D=2   R=0      PW=0      CAPp=196608 mode=2     0.7594 ms/rep  got=20154739694231596
+  2    130      18.3499   108.646    36.700      0.7594     4.496     1.519         21.4
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=1     9.2915 ms/rep  got=20154739694231596
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=2     0.4769 ms/rep  got=20154739694231596
+  4    128       9.2915    55.013    37.166      0.4769     2.824     1.908         42.3
+  P=8   G=124 EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=1     4.9980 ms/rep  got=20154739694231596
+  P=8   G=124 EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=2     0.3378 ms/rep  got=20154739694231596
+  8    124       4.9980    29.592    39.984      0.3378     2.000     2.702         78.7
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=1     2.6257 ms/rep  got=20154739694231596
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=2     0.2748 ms/rep  got=20154739694231596
+  16   116       2.6257    15.546    42.011      0.2748     1.627     4.398        149.8
+  P=32  G=100 EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=1     1.9293 ms/rep  got=20154739694231596
+  P=32  G=100 EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=2     0.2623 ms/rep  got=20154739694231596
+  32   100       1.9293    11.423    61.737      0.2623     1.553     8.393        203.8
+  P=64  G=68  EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=1     1.2605 ms/rep  got=20154739694231596
+  P=64  G=68  EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=2     0.3410 ms/rep  got=20154739694231596
+  64   68        1.2605     7.463    80.671      0.3410     2.019    21.821        312.0
+  P=128 G=4   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=1     7.4858 ms/rep  got=20154739694231596
+  P=128 G=4   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=2     5.2512 ms/rep  got=20154739694231596
+  128  4         7.4858    44.322   958.185      5.2512    31.091   672.149         52.5
+
+===== §C 额外计算 PW 随 P（gen 与 sched），static 对照 [EDW=0] =====
+  P=1   G=132 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     0.1690 ms/rep  got=20154739694231596
+      (static = 0.1690 ms)
+      --- P=1 ---
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=1    36.4317 ms/rep  got=20154739694231596
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=2     1.2959 ms/rep  got=20154739694231596
+        PW=0     -> gen=  36.4317 (gen/st 215.541)   sched=   1.2959 (sch/st  7.667)
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=64     CAPp=393216 mode=1    36.4292 ms/rep  got=20154739694231596
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=64     CAPp=393216 mode=2     1.4825 ms/rep  got=20154739694231596
+        PW=64    -> gen=  36.4292 (gen/st 215.527)   sched=   1.4825 (sch/st  8.771)
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=1024   CAPp=393216 mode=1    36.8933 ms/rep  got=20154739694231596
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=1024   CAPp=393216 mode=2     2.8644 ms/rep  got=20154739694231596
+        PW=1024  -> gen=  36.8933 (gen/st 218.273)   sched=   2.8644 (sch/st 16.947)
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=4096   CAPp=393216 mode=1    41.4183 ms/rep  got=20154739694231596
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=4096   CAPp=393216 mode=2     7.3327 ms/rep  got=20154739694231596
+        PW=4096  -> gen=  41.4183 (gen/st 245.044)   sched=   7.3327 (sch/st 43.383)
+      --- P=4 ---
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=1     9.2789 ms/rep  got=20154739694231596
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=2     0.4639 ms/rep  got=20154739694231596
+        PW=0     -> gen=   9.2789 (gen/st  54.897)   sched=   0.4639 (sch/st  2.745)
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=64     CAPp=98304  mode=1     9.2797 ms/rep  got=20154739694231596
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=64     CAPp=98304  mode=2     0.5102 ms/rep  got=20154739694231596
+        PW=64    -> gen=   9.2797 (gen/st  54.902)   sched=   0.5102 (sch/st  3.018)
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=1024   CAPp=98304  mode=1     9.3948 ms/rep  got=20154739694231596
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=1024   CAPp=98304  mode=2     0.8476 ms/rep  got=20154739694231596
+        PW=1024  -> gen=   9.3948 (gen/st  55.583)   sched=   0.8476 (sch/st  5.015)
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=4096   CAPp=98304  mode=1    10.5370 ms/rep  got=20154739694231596
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=4096   CAPp=98304  mode=2     1.9629 ms/rep  got=20154739694231596
+        PW=4096  -> gen=  10.5370 (gen/st  62.340)   sched=   1.9629 (sch/st 11.613)
+      --- P=16 ---
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=1     2.6269 ms/rep  got=20154739694231596
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=2     0.2705 ms/rep  got=20154739694231596
+        PW=0     -> gen=   2.6269 (gen/st  15.542)   sched=   0.2705 (sch/st  1.601)
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=64     CAPp=24576  mode=1     2.6171 ms/rep  got=20154739694231596
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=64     CAPp=24576  mode=2     0.2814 ms/rep  got=20154739694231596
+        PW=64    -> gen=   2.6171 (gen/st  15.484)   sched=   0.2814 (sch/st  1.665)
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=1024   CAPp=24576  mode=1     2.6348 ms/rep  got=20154739694231596
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=1024   CAPp=24576  mode=2     0.3596 ms/rep  got=20154739694231596
+        PW=1024  -> gen=   2.6348 (gen/st  15.588)   sched=   0.3596 (sch/st  2.128)
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=4096   CAPp=24576  mode=1     2.8914 ms/rep  got=20154739694231596
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=4096   CAPp=24576  mode=2     0.6384 ms/rep  got=20154739694231596
+        PW=4096  -> gen=   2.8914 (gen/st  17.106)   sched=   0.6384 (sch/st  3.777)
+
+===== §D 多 producer 的有界环容量（每 producer 窗口 CAPp）：太小 ⇒ 背压/死锁 [EDW=0,PW=0] =====
+  P=1   G=132 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     0.1695 ms/rep  got=20154739694231596
+      (static = 0.1695 ms)
+      --- P=1 (每 producer 窗口 = bp·K = 393216 条) ---
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=32     mode=1  2020.2476 ms/rep  got=0  ABORT
+        CAPp=32      (  0.01 MB total) -> 2020.2476 ms  (deadlock)
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=1    36.4321 ms/rep  got=20154739694231596
+        CAPp=49152   ( 17.30 MB total) ->   36.4321 ms
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=1    36.4326 ms/rep  got=20154739694231596
+        CAPp=98304   ( 34.60 MB total) ->   36.4326 ms
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=196608 mode=1    36.4309 ms/rep  got=20154739694231596
+        CAPp=196608  ( 69.21 MB total) ->   36.4309 ms
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=1    36.4315 ms/rep  got=20154739694231596
+        CAPp=393216  (138.41 MB total) ->   36.4315 ms
+      --- P=4 (每 producer 窗口 = bp·K = 98304 条) ---
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=32     mode=1  2020.2430 ms/rep  got=0  ABORT
+        CAPp=32      (  0.05 MB total) -> 2020.2430 ms  (deadlock)
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=1    31.9676 ms/rep  got=20154739694231596
+        CAPp=12288   ( 17.30 MB total) ->   31.9676 ms
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=1    28.5545 ms/rep  got=20154739694231596
+        CAPp=24576   ( 34.60 MB total) ->   28.5545 ms
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=1    21.7257 ms/rep  got=20154739694231596
+        CAPp=49152   ( 69.21 MB total) ->   21.7257 ms
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=1     9.2792 ms/rep  got=20154739694231596
+        CAPp=98304   (138.41 MB total) ->    9.2792 ms
+
+===== §E 接数据面：gen 扫 EDW（P=1 vs P=16；K=32,D=2,PW=0）=====
+  EDW         gen_P1     gen_P16   exec_only      static   gP1/max  gP16/max
+  P=1   G=132 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     0.1690 ms/rep  got=20154739694231596
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=1    36.4323 ms/rep  got=20154739694231596
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=1     2.6170 ms/rep  got=20154739694231596
+  P=1   G=132 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     0.1691 ms/rep  got=20154739694231596
+  0          36.4323      2.6170      0.1691      0.1690   215.423    15.474
+  P=1   G=132 EDW=16    K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     0.2064 ms/rep  got=17907072088884245
+  P=1   G=131 EDW=16    K=32   D=2   R=0      PW=0      CAPp=393216 mode=1    36.4331 ms/rep  got=17907072088884245
+  P=16  G=116 EDW=16    K=32   D=2   R=0      PW=0      CAPp=24576  mode=1     3.5417 ms/rep  got=17907072088884245
+  P=1   G=132 EDW=16    K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     0.2066 ms/rep  got=17907072088884245
+  16         36.4331      3.5417      0.2066      0.2064   176.353    17.143
+  P=1   G=132 EDW=64    K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     0.2437 ms/rep  got=14906724557505533
+  P=1   G=131 EDW=64    K=32   D=2   R=0      PW=0      CAPp=393216 mode=1    36.4530 ms/rep  got=14906724557505533
+  P=16  G=116 EDW=64    K=32   D=2   R=0      PW=0      CAPp=24576  mode=1     2.6948 ms/rep  got=14906724557505533
+  P=1   G=132 EDW=64    K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     0.2436 ms/rep  got=14906724557505533
+  64         36.4530      2.6948      0.2436      0.2437   149.574    11.057
+  P=1   G=132 EDW=256   K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     0.4684 ms/rep  got=14906926966776291
+  P=1   G=131 EDW=256   K=32   D=2   R=0      PW=0      CAPp=393216 mode=1    36.4388 ms/rep  got=14906926966776291
+  P=16  G=116 EDW=256   K=32   D=2   R=0      PW=0      CAPp=24576  mode=1     2.9101 ms/rep  got=14906926966776291
+  P=1   G=132 EDW=256   K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     0.4681 ms/rep  got=14906926966776291
+  256        36.4388      2.9101      0.4681      0.4684    77.792     6.213
+  P=1   G=132 EDW=1024  K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     1.3936 ms/rep  got=14908221078396349
+  P=1   G=131 EDW=1024  K=32   D=2   R=0      PW=0      CAPp=393216 mode=1    36.4563 ms/rep  got=14908221078396349
+  P=16  G=116 EDW=1024  K=32   D=2   R=0      PW=0      CAPp=24576  mode=1     3.8390 ms/rep  got=14908221078396349
+  P=1   G=132 EDW=1024  K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     1.3911 ms/rep  got=14908221078396349
+  1024       36.4563      3.8390      1.3911      1.3936    26.160     2.755
+  P=1   G=132 EDW=4096  K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     5.1535 ms/rep  got=14910556029607938
+  P=1   G=131 EDW=4096  K=32   D=2   R=0      PW=0      CAPp=393216 mode=1    36.5373 ms/rep  got=14910556029607938
+  P=16  G=116 EDW=4096  K=32   D=2   R=0      PW=0      CAPp=24576  mode=1     7.8153 ms/rep  got=14910556029607938
+  P=1   G=132 EDW=4096  K=32   D=2   R=0      PW=0      CAPp=393216 mode=0     5.1513 ms/rep  got=14910556029607938
+  4096       36.5373      7.8153      5.1513      5.1535     7.090     1.517
