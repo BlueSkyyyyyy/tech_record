@@ -2951,3 +2951,100 @@ B2 的 12）。`launch__occupancy_limit_registers = 1 block`（255 regs 钉死�
   计时 + Part C `V` 分区扫描）+ `harness/probe_fused_regs.py`（`harness/probe_fused_regs.out.txt`）+
   `harness/ncu_bwd_fused_driver.py` / `harness/probe_bwd_fused_ncu.sh`
   （`harness/probe_bwd_fused_ncu.out.txt`）。
+
+## 31. B3 `intra` 直接消费 B2 的累加器：消掉链外三个 `b2+b3` elementwise 求和（P7-28）
+
+§27.7 把 B3 的下一个杠杆定为「减少对角平铺的重复读 / 提升 L1 局部性」。回读链代码时先撞上一个
+**更便宜、且与 kernel 本体无关**的结构项：组装链（`check_bwd_b1_pipe_e2e.py:162-166`）让 B3 在
+**一份全新置零**的 `dq/dk/dg` 上跑，然后在 kernel **之外**物化三个整张 `[B,T,H,K]` 的 elementwise
+求和：
+
+```python
+b3 = intra_triton(intra_k, inp3, CHUNK, CHUNK)          # B3 内部 b_dq2 + load(zeros)
+dg = chunk_local_cumsum(b2["dg"] + b3["dg"], ...)        # 3 张 [B,T,H,K] 的加
+return dict(dq=b2["dq"] + b3["dq"], dk=b2["dk"] + b3["dk"], ..., dbeta=b2["db"] + b3["db"])
+```
+
+一次反向要为此付出 **3 ×（2 读 + 1 写）** 的 `B*T*H*K` fp32 流量，外加 3 个 `torch.zeros` 的
+memset kernel。这不是 FLA 的契约——FLA 的 `chunk_kda_bwd_intra` 把**传进来的 `dq/dk/dg` 当累加器**
+（读旧值、加块内贡献、写到**另一个** `dq2/dk2/dg2` 缓冲）：
+
+- `chunk_intra.py:554-560`：`p_dq`/`p_dq2`；`b_dq2 = b_dq2 + tl.load(p_dq)`；`tl.store(p_dq2, ...)`。
+- `chunk_intra.py:657-667`：`p_dk/p_dg`、`p_dk2/p_dg2`；`b_dg2 += ... + tl.load(p_dg)`、
+  `b_dk2 += tl.load(p_dk)`；分别 store 到 `dk2`/`dg2`。
+
+也就是说，FLA 的 intra 本就要求传入的 `dq` 是**非零累加器**（`wy_dqkg` 的输出），我们的「喂零 +
+链外求和」纯属 harness 的偷懒写法：既白读一遍零缓冲，又把 B3 的产出再读一遍、写一遍。
+
+本轮把 B3 改成**就地累积进 B2 的 `dq/dk/dg`**。合法性来自 grid：B3 的 `i_k`（K 分块）与内层
+子块轴**恰好划分**每个 `(token, k)`——任一元素只被一个 program 产出（`check_bwd_b3_mma.py:215-231`
+的 `grid=(NK*NC, NT, B*H)`），所以 `dq/dk/dg` 不需要跨 program 累加，就地读写无竞争；只有 `db`
+仍靠 `atomic_add`（`check_bwd_b3_mma.py:163`），而 B2 已把 `db` 全量 store 过（`torch.empty` +
+逐块 store），`atomic_add` 叠在其上即为 `b2.db + b3.db`。kernel 本体的**每一行算术、每一条
+`tl.load`/`tl.store` 地址都不动**（`check_bwd_b3_mma.py:160-162`、`207-210` 保持原样），只是指针
+从「新零缓冲」换成「B2 的缓冲」。
+
+### 31.1 Part A：语义核对——就地累积 == 零填充 + 链外求和（含 FLA 契约）
+
+`harness/check_bwd_b3_accum.out.txt`，三组 case（`T=512H4 D=128` 可整除、`T=250H3` 非整除、
+`BT=16` 部署粒度）：
+
+| 量 | `B=2 T=512 H=4 K=128` | `B=1 T=250 H=3`（非整除） | `B=1 T=128 H=2 BT=16` |
+|---|---|---|---|
+| `dq` | **0** | **0** | **0** |
+| `dk` | 9.60e-8 | 1.06e-7 | 5.48e-8 |
+| `db` | 1.25e-7 | 7.57e-8 | 8.91e-8 |
+| `dg` | **0** | **0** | **0** |
+
+`dq/dg` **逐位相同**；`dk/db` 的 ~1e-7 来自浮点结合序：kernel 里是 `(b_dk2 + 0) + b_dkt` 再由
+链外加 `acc`，就地版是 `(b_dk2 + acc) + b_dkt`，两者仅加法次序不同（`b + 0` 本身精确）。这不是
+误差、是 fp32 非结合性，量级 1e-7 = 单精度一个 ulp 量级。
+
+同时验证这**就是 FLA 的契约**（让 FLA 的 intra 吃非零 `dq/dk/dg`，再与「FLA(零)+acc」比）：
+`dq 0 / db 0 / dk 9.60e-8 / dg 1.03e-7`——与我们的就地版**同一组数**，证明「读旧值累加」是
+FLA 的原意，我们只是把这条语义落回自己的链。
+
+### 31.2 Part B/C：落链正确性不变、链 `dev` 降 12–16%
+
+`harness/check_bwd_b3_accum.out.txt`。**Part B**（六组，含非整除 `T=250/513`、`g=0`、`B=2`）：
+就地链 vs 现链的自身增量 `dq/dv/dg` **逐位 0**、`dk/dbeta ≤9.2e-8`；就地链 vs FLA autograd
+六项最坏 `dq 3.42e-3 / dk 3.02e-3 / dv 6.80e-3 / dbeta 6.01e-3 / dg 7.05e-3 / dh0 8.27e-3`
+——与 §25.2/§26.3/§27 的**同一组数**，即 bf16/tf32 底噪、无退化。
+
+**Part C**（`NS=3` pipe B1 + MMA B3，CUPTI `dev` + event `wall`，空闲卡 1）：
+
+| case | FLA `dev` | base `dev` | ip `dev` | ip/base | base `wall` | ip `wall` | wall× |
+|---|---|---|---|---|---|---|---|
+| `T=512 H=4` | 205.7 | 88.3 | **74.2** | **0.84×** | 384.3 | 291.6 | 0.76× |
+| `B2 T=1024 H=8` | 664.0 | 298.9 | **261.8** | **0.88×** | 398.1 | 307.4 | 0.77× |
+| `B8 T=2048 H=8` | 4144.6 | 1957.3 | **1685.2** | **0.86×** | 1984.6 | 1700.3 | 0.86× |
+| `T=250 H=3`（非整除） | 141.2 | 61.5 | **52.4** | **0.85×** | 393.0 | 301.4 | 0.77× |
+
+链 `dev` 降 **12–16%**、`wall` 降 **14–24%**。按 kernel 归因（`torch.profiler`
+`self_device_time_total`）能直接坐实机制——**消失的正是 elementwise 部分**：
+
+| case | elementwise/add `dev` base | ip | elementwise kernel 数/次 base | ip |
+|---|---|---|---|---|
+| `T=512 H=4` | 17.9 µs | **7.3** | 14 | **6** |
+| `B2 T=1024 H=8` | 52.6 | **14.3** | 15 | **7** |
+| `B8 T=2048 H=8` | 316.0 | **49.2** | 15 | **7** |
+| `T=250 H=3` | 16.7 | **7.0** | 14 | **6** |
+
+`B8 T=2048 H=8` 上 elementwise 归因从 316 µs → 49 µs（省 ~267 µs），与链 `dev` 的
+1957→1685（省 272 µs）吻合；每次反向少 **8 个 elementwise/memset kernel**（3 个 `torch.zeros`
+fill + 3 个加法 + cumsum 前的中间物化）。`ip dev / FLA dev` 落到 **0.36–0.41×**（FLA 绝对值在本
+窗口偏高，含 autograd 与 `retain_graph`，只作旁证，主口径仍是 ip/base 的同源比值）。
+
+### 31.3 结论与下一步
+
+- **B3 `intra` 应就地累积进 B2 的 `dq/dk/dg`**（FLA 的 `chunk_intra.py:559/662-663` 契约），
+  而不是「喂零 + 链外求和」。这是**纯链结构**改动：kernel 算术逐行不动，正确性只差 fp32 加法次序
+  （`dk/db ~1e-7`，`dq/dg` 逐位），链 `dev` **0.84–0.88×**、`wall` **0.76–0.86×**。
+- **代价与约束**：B3 的契约从「输出独立缓冲」变成「消费 B2 的缓冲」，故 B2 的输出在 B3 之后不可
+  再用（本链确实不再用）。若将来把 B2/B3 融成一个 kernel，需重新审视（那时 `dq/dk/dg` 的累加
+  可完全留在寄存器）。
+- **对 §27.7「减少对角平铺重复读」的定位**：本轮证明 B3 链级开销里有一块**与 kernel 无关**的
+  elementwise 税（`B8T2048H8` 上 316 µs≈16% 的链时间），先把它消掉再谈 kernel 内的 L1 局部性——
+  下一步才是 §27.7 说的「对角平铺 `dAqk/dAkk` 每 `i_k` 重读、k/g 每 `i_k` 重读」的 L1 局部性优化。
+- **产物**：`harness/check_bwd_b3_accum.py`（`harness/check_bwd_b3_accum.out.txt`，Part A 语义 +
+  Part B 落链正确性 + Part C 计时与 per-kernel 归因）。

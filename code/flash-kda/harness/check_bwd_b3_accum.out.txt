@@ -1,0 +1,169 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190  triton=3.6.0
+==============================================================================
+Part A: in-place accumulate == (zero B3) + outside add ; and FLA's contract
+==============================================================================
+
+=== B=2 T=512 H=4 K=128 BT=64 BC=16 seed=1 ===
+  -- in-place vs (zero + outside add) --
+    ip dq                    max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.914e+00
+    ip dk                    max_abs=4.768e-07  max_rel=9.596e-08  ref_max=4.969e+00
+    ip db                    max_abs=4.768e-07  max_rel=1.247e-07  ref_max=3.824e+00
+    ip dg                    max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.614e+00
+
+=== B=1 T=250 H=3 K=128 BT=64 BC=16 seed=2 ===
+  -- in-place vs (zero + outside add) --
+    ip dq                    max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.255e+00
+    ip dk                    max_abs=4.768e-07  max_rel=1.057e-07  ref_max=4.513e+00
+    ip db                    max_abs=2.384e-07  max_rel=7.572e-08  ref_max=3.149e+00
+    ip dg                    max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.545e+00
+
+=== B=1 T=128 H=2 K=64 BT=16 BC=16 seed=6 ===
+  -- in-place vs (zero + outside add) --
+    ip dq                    max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.374e+00
+    ip dk                    max_abs=2.384e-07  max_rel=5.476e-08  ref_max=4.354e+00
+    ip db                    max_abs=2.384e-07  max_rel=8.909e-08  ref_max=2.676e+00
+    ip dg                    max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.877e+00
+
+  -- FLA contract: intra(nonzero accum) == intra(zero) + accum --
+    fla dq                   max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.914e+00
+    fla dk                   max_abs=4.768e-07  max_rel=9.596e-08  ref_max=4.969e+00
+    fla db                   max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.824e+00
+    fla dg                   max_abs=4.768e-07  max_rel=1.033e-07  ref_max=4.614e+00
+
+worst-case max_rel:
+  db          1.247e-07
+  dg          0.000e+00
+  dk          1.057e-07
+  dq          0.000e+00
+  fla_db      0.000e+00
+  fla_dg      1.033e-07
+  fla_dk      9.596e-08
+  fla_dq      0.000e+00
+
+==============================================================================
+Part B: chain correctness -- in-place B3 vs current chain vs FLA autograd
+==============================================================================
+
+# T=128 H=2
+  -- in-place vs current chain --
+    delta dq                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.722e-01
+    delta dk                 max_abs=2.980e-08  max_rel=4.382e-08  ref_max=6.801e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.915e-02
+    delta dbeta              max_abs=2.980e-08  max_rel=7.462e-08  ref_max=3.994e-01
+    delta dg                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.462e-02
+  -- in-place chain vs FLA --
+    ip dq vs FLA             max_abs=9.193e-04  max_rel=1.368e-03  ref_max=6.721e-01
+    ip dk vs FLA             max_abs=8.084e-04  max_rel=1.188e-03  ref_max=6.802e-01
+    ip dv vs FLA             max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    ip dbeta vs FLA          max_abs=1.732e-03  max_rel=4.354e-03  ref_max=3.977e-01
+    ip dg vs FLA             max_abs=9.492e-05  max_rel=2.741e-03  ref_max=3.462e-02
+    ip dh0 vs FLA            max_abs=2.068e-04  max_rel=4.982e-03  ref_max=4.150e-02
+
+# T=256 H=4
+  -- in-place vs current chain --
+    delta dq                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.902e-01
+    delta dk                 max_abs=5.960e-08  max_rel=7.475e-08  ref_max=7.974e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.093e-02
+    delta dbeta              max_abs=2.980e-08  max_rel=5.036e-08  ref_max=5.918e-01
+    delta dg                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.437e-02
+  -- in-place chain vs FLA --
+    ip dq vs FLA             max_abs=1.441e-03  max_rel=2.087e-03  ref_max=6.908e-01
+    ip dk vs FLA             max_abs=1.198e-03  max_rel=1.501e-03  ref_max=7.980e-01
+    ip dv vs FLA             max_abs=2.517e-04  max_rel=4.128e-03  ref_max=6.098e-02
+    ip dbeta vs FLA          max_abs=3.258e-03  max_rel=5.522e-03  ref_max=5.900e-01
+    ip dg vs FLA             max_abs=2.124e-04  max_rel=6.184e-03  ref_max=3.436e-02
+    ip dh0 vs FLA            max_abs=2.451e-04  max_rel=7.172e-03  ref_max=3.418e-02
+
+# T=250 H=3 (non-div)
+  -- in-place vs current chain --
+    delta dq                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.177e-01
+    delta dk                 max_abs=2.980e-08  max_rel=5.728e-08  ref_max=5.203e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.824e-02
+    delta dbeta              max_abs=2.980e-08  max_rel=6.130e-08  ref_max=4.862e-01
+    delta dg                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.225e-02
+  -- in-place chain vs FLA --
+    ip dq vs FLA             max_abs=1.770e-03  max_rel=3.417e-03  ref_max=5.180e-01
+    ip dk vs FLA             max_abs=7.749e-04  max_rel=1.489e-03  ref_max=5.206e-01
+    ip dv vs FLA             max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    ip dbeta vs FLA          max_abs=2.716e-03  max_rel=5.586e-03  ref_max=4.863e-01
+    ip dg vs FLA             max_abs=3.249e-04  max_rel=5.236e-03  ref_max=6.205e-02
+    ip dh0 vs FLA            max_abs=2.924e-04  max_rel=5.322e-03  ref_max=5.493e-02
+
+# T=512 H=4 g=2
+  -- in-place vs current chain --
+    delta dq                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.623e-01
+    delta dk                 max_abs=5.960e-08  max_rel=9.243e-08  ref_max=6.448e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.782e-02
+    delta dbeta              max_abs=2.980e-08  max_rel=5.855e-08  ref_max=5.090e-01
+    delta dg                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.781e-02
+  -- in-place chain vs FLA --
+    ip dq vs FLA             max_abs=1.711e-03  max_rel=2.583e-03  ref_max=6.623e-01
+    ip dk vs FLA             max_abs=1.946e-03  max_rel=3.016e-03  ref_max=6.452e-01
+    ip dv vs FLA             max_abs=3.343e-04  max_rel=4.933e-03  ref_max=6.776e-02
+    ip dbeta vs FLA          max_abs=2.704e-03  max_rel=5.286e-03  ref_max=5.115e-01
+    ip dg vs FLA             max_abs=2.313e-04  max_rel=3.409e-03  ref_max=6.785e-02
+    ip dh0 vs FLA            max_abs=3.859e-04  max_rel=5.489e-03  ref_max=7.031e-02
+
+# B2 T=513 H=2 (non-div)
+  -- in-place vs current chain --
+    delta dq                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.018e-01
+    delta dk                 max_abs=2.980e-08  max_rel=4.473e-08  ref_max=6.663e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.469e-02
+    delta dbeta              max_abs=2.980e-08  max_rel=3.380e-08  ref_max=8.817e-01
+    delta dg                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.118e-02
+  -- in-place chain vs FLA --
+    ip dq vs FLA             max_abs=1.779e-03  max_rel=2.954e-03  ref_max=6.022e-01
+    ip dk vs FLA             max_abs=1.185e-03  max_rel=1.778e-03  ref_max=6.666e-01
+    ip dv vs FLA             max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    ip dbeta vs FLA          max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    ip dg vs FLA             max_abs=2.905e-04  max_rel=7.053e-03  ref_max=4.118e-02
+    ip dh0 vs FLA            max_abs=1.691e-04  max_rel=6.996e-03  ref_max=2.417e-02
+
+# T=192 H=2 g=0
+  -- in-place vs current chain --
+    delta dq                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.337e-01
+    delta dk                 max_abs=2.980e-08  max_rel=5.152e-08  ref_max=5.784e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.577e-02
+    delta dbeta              max_abs=2.980e-08  max_rel=7.406e-08  ref_max=4.024e-01
+    delta dg                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.073e-03
+  -- in-place chain vs FLA --
+    ip dq vs FLA             max_abs=4.187e-04  max_rel=7.844e-04  ref_max=5.337e-01
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+    ip dk vs FLA             max_abs=4.725e-04  max_rel=8.169e-04  ref_max=5.784e-01
+    ip dv vs FLA             max_abs=3.922e-04  max_rel=5.982e-03  ref_max=6.556e-02
+    ip dbeta vs FLA          max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    ip dg vs FLA             max_abs=3.708e-05  max_rel=6.105e-03  ref_max=6.074e-03
+    ip dh0 vs FLA            max_abs=5.197e-05  max_rel=8.267e-03  ref_max=6.287e-03
+
+worst-case max_rel (in-place chain):
+  dbeta             6.012e-03
+  delta_dbeta       7.462e-08
+  delta_dg          0.000e+00
+  delta_dk          9.243e-08
+  delta_dq          0.000e+00
+  delta_dv          0.000e+00
+  dg                7.053e-03
+  dh0               8.267e-03
+  dk                3.016e-03
+  dq                3.417e-03
+  dv                6.795e-03
+
+==============================================================================
+Part C: chain timing -- current (outside sum) vs in-place B3, dev + wall, + FLA
+==============================================================================
+  case               |  FLA dev base dev   ip dev  ip/base | base wall  ip wall  wall x
+  T=512 H=4          |    205.7     88.3     74.2    0.84x |     384.3    291.6   0.76x
+      elementwise/add-attributed dev: base=   17.9us  ip=    7.3us
+      total elementwise kernels: base=210  ip=90
+  B2 T=1024 H=8      |    664.0    298.9    261.8    0.88x |     398.1    307.4   0.77x
+      elementwise/add-attributed dev: base=   52.6us  ip=   14.3us
+      total elementwise kernels: base=225  ip=105
+  B8 T=2048 H=8      |   4144.6   1957.3   1685.2    0.86x |    1984.6   1700.3   0.86x
+      elementwise/add-attributed dev: base=  316.0us  ip=   49.2us
+      total elementwise kernels: base=225  ip=105
+  T=250 H=3 nondiv   |    141.2     61.5     52.4    0.85x |     393.0    301.4   0.77x
+      elementwise/add-attributed dev: base=   16.7us  ip=    7.0us
+      total elementwise kernels: base=210  ip=90
+
+DONE

@@ -249,3 +249,13 @@ bf16（不 `.float()`）→ B1 快 2.2–2.5×，B2T1024H8 已快过 FLA dhu**�
 **Triton 侧 B1 的工程化已收敛**，链级瓶颈明确转向 B2/B3（§15 已证整链跟到 64 净亏）。
 方法学：`docs/07` §25.5 指出**孤立小 grid kernel 的 CUPTI 归因比链内背靠背高 ~1.3×**（固定启停/
 排空被算进 device-active 窗口），此后 kernel-only 微观基准须以**链内归因**为链级口径。
+
+**P7-28（`docs/07` §31）**：消掉 B3 `intra` 的**链外 elementwise 税**——组装链此前让 B3 在**全新置零**
+的 `dq/dk/dg` 上跑、再在 kernel 外物化 3 张 `[B,T,H,K]` 的求和（`check_bwd_b1_pipe_e2e.py:162-166`），
+白读零缓冲 + 又读写一遍 B3 产出 + 3 个 memset。FLA 的 `chunk_kda_bwd_intra` 本就要求传入的
+`dq/dk/dg` 是**累加器**（`chunk_intra.py:554-560/657-667`：读旧值、加块内贡献、store 到独立缓冲）。
+改成 B3 **就地累积进 B2 缓冲**（grid 的 `i_k`×子块轴划分每个 `(token,k)`、无跨 program 竞争；`db`
+仍 `atomic_add`），**kernel 算术逐行不动**：`dq/dg` **逐位相同**、`dk/db ~1e-7`（fp32 加法次序），
+落链正确性 vs FLA 逐值同 §25/§26；链 `dev` **0.84–0.88×**、`wall` **0.76–0.86×**，per-kernel 归因
+显示 elementwise 从 **316→49 µs**（`B8T2048H8`）、每次少 8 个 elementwise/memset kernel。**约束**：
+B3 契约改为消费 B2 缓冲（其后 B2 输出不可再用）。下一步＝§27.7 剩下的 kernel 内对角平铺 L1 局部性优化。

@@ -433,6 +433,20 @@
       搬运 + 同 CTA 内 B1→B2 交接），而非把整条 `[K,V]` 塞进一个 monolithic Triton program。
       即「融合是唯一剩下的真结构项」成立，但**其前置是 K2 形状**、不是独立开关（同 §15/§17/§20）。
       **待验证**：K2 形状内融合（寄存器分片 + TMA + 同 CTA 交接）须在目标卡以 K2 为基座再测。
+- [x] **P7-28** 兑现 §27.7「B3 下一杠杆」里**与 kernel 无关**的那块税：组装链让 B3 在**全新置零**的
+      `dq/dk/dg` 上跑、再在 kernel 外物化三个整张 `[B,T,H,K]` 的求和（`check_bwd_b1_pipe_e2e.py:162-166`），
+      白读零缓冲 + 再读写一遍 B3 产出 + 3 个 memset。这不是 FLA 的契约：FLA `chunk_kda_bwd_intra`
+      把传入 `dq/dk/dg` 当**累加器**、写到独立 `dq2/dk2/dg2`（`chunk_intra.py:554-560/657-667`）。
+      改为 B3 **就地累积进 B2 的缓冲**（grid `i_k`×子块轴划分每个 `(token,k)`、无跨 program 竞争；
+      `db` 仍 `atomic_add` 叠在 B2 已 store 的值上），**kernel 算术逐行不动**。新增
+      `harness/check_bwd_b3_accum.py`（`harness/check_bwd_b3_accum.out.txt`）+ `docs/07` §31。**Part A**：
+      就地 vs「零填充 + 链外求和」`dq/dg` **逐位 0**、`dk/db ~1e-7`（纯 fp32 加法次序）；并验证 FLA 契约
+      （FLA intra 吃非零 acc == FLA(零)+acc）同组数。**Part B**：就地链 vs 现链自身增量 `dq/dv/dg`
+      **逐位 0**、`dk/dbeta ≤9.2e-8`，vs FLA 六项最坏 `dq 3.42e-3…dh0 8.27e-3` **逐值同 §25.2/§26.3**。
+      **Part C**：链 `dev` **0.84–0.88×**、`wall` **0.76–0.86×**；per-kernel 归因坐实机制——`B8T2048H8`
+      elementwise 归因 **316→49 µs**、每次少 **8 个** elementwise/memset kernel；`ip dev/FLA` 0.36–0.41×。
+      **结论**：先消掉这块「链外 elementwise 税」（B3 链时间的 ~16%），下一步才是 §27.7 的 kernel 内
+      对角平铺 L1 局部性优化。**约束**：B3 契约改为消费 B2 缓冲（其后 B2 输出不可再用；若 B2/B3 融合须重审）。
 
 ### P8 小结 / 一页纸
 
@@ -464,8 +478,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-27 补测**。
-  - P7-27（本轮）：兑现 §29.5「唯一剩下的真结构项」——**B1→B2 融合原型**（`dh` 不落盘）。
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-28 补测**。
+  - P7-28（本轮）：兑现 §27.7「B3 下一杠杆」里**与 kernel 无关**的那块税——组装链让 B3 在**全新置零**的
+    `dq/dk/dg` 上跑、再在 kernel 外物化三个整张 `[B,T,H,K]` 求和（`check_bwd_b1_pipe_e2e.py:162-166`）。
+    这不是 FLA 契约：FLA `chunk_kda_bwd_intra` 把传入 `dq/dk/dg` 当**累加器**写到独立缓冲
+    （`chunk_intra.py:554-560/657-667`）。改为 B3 **就地累积进 B2 缓冲**（grid 划分每个 `(token,k)`、
+    无竞争；`db` 仍 `atomic_add`），**kernel 算术逐行不动**。新增 `harness/check_bwd_b3_accum.py`
+    （`harness/check_bwd_b3_accum.out.txt`）+ `docs/07` §31。**Part A**：就地 vs「零+链外求和」
+    `dq/dg` **逐位 0**、`dk/db ~1e-7`（fp32 加法次序）；FLA 契约同组数。**Part B**：就地链 vs 现链
+    `dq/dv/dg` **逐位 0**、`dk/dbeta ≤9.2e-8`，vs FLA 六项最坏 `dq 3.42e-3…dh0 8.27e-3`（逐值同 §25/§26）。
+    **Part C**：链 `dev` **0.84–0.88×**、`wall` **0.76–0.86×**；per-kernel 归因 elementwise
+    **316→49 µs**（`B8T2048H8`）、每次少 **8 个** elementwise/memset kernel。**结论**：先消掉 B3 链时间
+    的 ~16%「链外 elementwise 税」，下一步才是 §27.7 的 kernel 内对角平铺 L1 局部性优化。**约束**：B3
+    契约改为消费 B2 缓冲（其后 B2 输出不可再用）。见 `docs/07` §31。
+  - P7-27（上轮）：兑现 §29.5「唯一剩下的真结构项」——**B1→B2 融合原型**（`dh` 不落盘）。
     无原子的最干净形态取 **`BV=V`**（一 program 管一个 `(b,h)`、逆序扫全块、`b_dS[K,V]` 常驻、
     每块 B1 完立刻做 B2；grid `(B·H,)`=**K2 形状**）。新增 `harness/check_bwd_fused.py`
     （`harness/check_bwd_fused.out.txt`，A 正确性 + B 计时 + C `V` 分区扫描）+ `harness/probe_fused_regs.py`
@@ -850,7 +876,14 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-27 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-28 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-28（`docs/07` §31）把 B3 的「链外 elementwise 税」消掉**：组装链让 B3 在**零缓冲**上跑、
+    再在 kernel 外物化 3 张 `[B,T,H,K]` 求和（`check_bwd_b1_pipe_e2e.py:162-166`）。FLA 的
+    `chunk_kda_bwd_intra` 把传入 `dq/dk/dg` 当**累加器**（`chunk_intra.py:554-560/657-667`）。改成
+    B3 **就地累积进 B2 缓冲**（grid 划分每个 `(token,k)`、`db` 仍 atomic），kernel 算术逐行不动：
+    `Part A` `dq/dg` 逐位 0、`dk/db ~1e-7`（加法次序）；`Part B` 落链 `dq/dv/dg` 逐位 0、vs FLA 逐值
+    同 §25/§26；`Part C` 链 `dev` **0.84–0.88×**、`wall` **0.76–0.86×**、elementwise 归因
+    **316→49 µs**（`B8T2048H8`）。**下一步**＝§27.7 剩下的 kernel 内对角平铺 L1 局部性优化。
   - **P7-27（`docs/07` §30）把 §29.5「唯一剩下的真结构项」＝ B1→B2 融合做成原型并证伪朴素形态**：
     融合 B1+B2 在代数/数值上**无损**（与未融合 `dq/dk/dv/dg/dh0` **逐位相同**），但朴素 `BV=V`
     单 kernel **溢出 1786、DRAM 流量爆 17×（31.9 GB vs 2.7 GB）、端到端慢 14–30×**，且融合强制的
