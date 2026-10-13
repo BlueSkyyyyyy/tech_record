@@ -2505,8 +2505,37 @@
     停顿与块调度状态，未做 ncu 归因）。
   判据 **C1–C5 全不满足**（纯数据面微基准，与 §71–§81 同档）。**本轮新增实验**；对 megakernel 的
   worker 块设计给出「寄存器预算只需到 max(自然需求,32) 下界、`T` 对 HBM/发射混合可自由凑 `Wsm`、
-  但对 L2 延迟受限 task 优先少而胖、并注意每块 SMEM 是第四占用率上限」的结论。P94-1 新留尾巴（§82.7）：
-  `U≤16`/`T` 5 档/每块 8 KiB 静态归约数组使小 `T` 混入 SMEM、§F 未 ncu 归因、只测 H100、未与 SM100 对跑。
+   但对 L2 延迟受限 task 优先少而胖、并注意每块 SMEM 是第四占用率上限」的结论。P94-1 新留尾巴（§82.7）：
+   `U≤16`/`T` 5 档/每块 8 KiB 静态归约数组使小 `T` 混入 SMEM、§F 未 ncu 归因、只测 H100、未与 SM100 对跑。
+
+### P95 实验扩展 74：§82.6「少而胖更好」的 ncu 归因（`docs/04-experiments.md` §83）
+
+- [x] **P95-1** 补掉 P94-1（§82）**§82.7 明留的尾巴**（原话）「§82.6 的『少而胖更好』只给**现象 +
+  机制假设**，未做 ncu 归因到具体的 L2 停顿/调度槽指标」。**复用 §82 同一内核不改一行**
+  （`src/hetero_sm_tax_T.cu` 的 `run` 模式），用 ncu warp stall-reason 直方图 + L2/L1 sector 命中 +
+  issue/warp-active，在固定 `Wsm=2048`（`U=8,R=32,bind`）下扫 `T∈{128,256,512}`，对混合
+  `scalar+l2res`（`seq=0,0,1,1`）及两单模式 + 控制组 `coal+scalar`（`seq=1,0,1,0`）归因。
+  见 `docs/04-experiments.md` **§83**，脚本 `harness/hetero_sm_tax_T_attr.sh`，原始输出
+  `harness/hetero_sm_tax_T_attr.out.txt`（目标卡 H100/sm90a、device 6、nvcc 13.2、
+  `ncu --replay-mode application --cache-control none`）。核心结论：
+  - **§A 先复现现象**：无 ncu 计时 `scalar+l2res` 混合 4330→4449→4518 GB/s（T=128/256/512，+4.3%），
+    与 §82.6 的 +4.7% 同形（绝对值低 ~8%，device/时钟差）；但幅度只有 ~4%、**在噪声地板附近**。
+  - **§B/§C（headline，机制假设被否）**：ncu **聚合**计数**不支持** §82.6 的猜测——
+    **(1)** 「L2 延迟停顿」`long_scoreboard` 与「调度槽争用」`not_selected` **都不随 `T` 变**：
+    `l2res` solo 的 `long_sb` 50.16%→50.26%、`not_selected` 9.08%→9.04%、`issue_active` 54.26%→54.96%
+    （L2 驻留侧**逐项 T-不变**）；混合 `not_selected` 恒 1.8%。**(2)** 唯一随 `T` 单向变的是
+    `warps_active`（混合 93.25→97.51）与 `lg_throttle`（**LSU 背压**：混合 11.57→8.95、
+    `scalar` solo 17.82→10.97、`coal+scalar` 11.44→5.29），是**块 prologue/占用率**与 **LSU 背压**
+    的次生效应、非 L2 停顿。**(3)** 按模式分解，**T 依赖住在 `scalar4B`（发射/LSU 受限）这一半**
+    （solo 吞吐 2372→2453→2425、`issue_active` 9.34→9.85、`lg_throttle` 大降），**L2 驻留的 `l2res`
+    这一半 T-不变** ⇒ **§82.6 把原因放错了半边**（不是「L2 延迟受限侧」而是「发射/LSU 受限侧」）。
+  - **§D 控制组 `coal+scalar`** 同样 `not_selected` 恒 <0.6%、`lg_throttle` 随 T 降（11.4→5.3），
+    与 §82.4「税只认 `Wsm`」一致。
+  - **含义**：块粒度对 L2/发射混合的收益应记在**发射受限 task 的 LSU 背压/驻留 warp** 上，而非
+    「减少 L2 停顿争用」；一阶旋钮仍是 `Wsm`（§78–§82），块粒度只是 ~3–5% 的次级量。
+    判据 **C1–C5 全不满足**（纯数据面微基准，与 §71–§82 同档）。**踩坑已记入「已知坑」**
+    （ncu application-replay 会放大程序**自报** `ms`/`GB/s` 约 2×，只能用硬件计数器与
+    `gpu__time_duration`）。**本轮新增实验（复用内核、无新 src）**。
 
 ## 每轮增量流程（autopilot）
 
@@ -2628,10 +2657,27 @@
 - **`__maxnreg__(R)` 可用非类型模板参数传入**（P93-1/§81）：`template<int U,int R> __global__ void
   __maxnreg__(R) k(...)` 在 nvcc 13.2/sm90a 编译通过，可把「寄存器预算」与「每线程 ILP」放进同一
   `U×R` 内核面；`R ≥ 自然需求`时是上限、`R <` 时精确等于 `R`（同 §69）。
+- **`ncu --replay-mode application` 会放大被测程序「自报」的计时约 2×**（P95-1/§83）：被 profile 的
+  app 在每个 replay pass 里用 CUDA event 自测的 `ms`/`GB/s` 不可信——本例 `scalar+l2res` T=128
+  自报 0.1145 ms，而无 ncu 只有 0.0613 ms（约 1.9×）；同一内核 ncu 的 `gpu__time_duration.sum`
+  = 60.96 µs 才是真值。**用 ncu 时只采信硬件计数器与 `gpu__time_duration`，不要采信程序自报计时**；
+  要绝对时间就另跑一遍无 ncu 的计时。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P94-1 完成（1/1）**。补掉 P93-1（§81）**§81.7 明留的两条尾巴**——(tail 1)「`T=256`
+- 当前进度：**P95-1 完成（1/1）**。补掉 P94-1（§82）**§82.7 明留的尾巴**「§82.6『少而胖更好』
+  未做 ncu 归因」——复用 §82 同一内核，用 ncu warp stall-reason 直方图 + L2/L1 命中 + issue/warp-active
+  在固定 `Wsm=2048` 下扫 `T`，对混合 `scalar+l2res` + 两单模式 + `coal+scalar` 控制组归因。见
+  `docs/04-experiments.md` **§83**，脚本 `harness/hetero_sm_tax_T_attr.sh`、原始输出
+  `harness/hetero_sm_tax_T_attr.out.txt`（目标卡 H100/sm90a、device 6、nvcc 13.2、
+  `ncu --replay-mode application`）。核心结论：**(1)** 先复现混合 T 趋势（4330→4449→4518 GB/s，+4.3%，
+  与 §82.6 +4.7% 同形，但效应在噪声地板附近）；**(2) 聚合计数否掉 §82.6 的机制假设**——「L2 延迟停顿」
+  `long_scoreboard` 与「调度槽争用」`not_selected` **都不随 `T` 变**（`l2res` solo 50.16%→50.26% /
+  9.08%→9.04%），唯一随 T 单向变的是 `warps_active`（升）与 `lg_throttle`（LSU 背压，降）；
+  **(3) 按模式分解**：T 依赖住在 `scalar4B`（发射/LSU 受限）这一半（solo +3.4%、`lg_throttle` 17.8→11.0），
+  L2 驻留的 `l2res` 这一半 T-不变 ⇒ **§82.6 把原因放错了半边**（不是 L2 延迟侧，而是发射/LSU 侧）。
+  **踩坑记入「已知坑」**（ncu application-replay 放大程序自报计时 ~2×）。**本轮新增实验（复用内核、无新 src）**。
+- 此前：**P94-1 完成（1/1）**。补掉 P93-1（§81）**§81.7 明留的两条尾巴**——(tail 1)「`T=256`
   固定、`R<32` 未测」；(tail 2)「§C 固定 `R=128` 时 `occ` 随 `U` 变（ILP 与占用率仍部分纠缠）」。
   把**每块线程数 `T`** 变成第三旋钮，令 `R=32` 让 `U≤16` 都 0 spill、`occ` 不随 `U` 变，做出
   「`Wsm` 钉 2048」的**纯 ILP 曲线**，并补 `R∈{24,28}` 下界角点。见 `docs/04-experiments.md` **§82**，
