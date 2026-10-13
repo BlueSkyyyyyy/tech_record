@@ -1,0 +1,48 @@
+NVIDIA H100 80GB HBM3, 9.0
+# indexer selection → real DSA main attention (per-head softmax + GQA/MQA shared support)
+# T=256 C=16384 H_q=32 D=128 dv=128 topk=2048 / indexer(H=32,d=64)
+# arch major = (9, 0), num_sms = 132
+
+== Part A: kernel 锚定 + 三档 token 级支持集（对全部 query 头共享）==
+  kernel vs torch-fp8 ref: max-abs-rel = 2.538e-04
+  [fp8       ] top-2048 recall = 0.9715 (flipped 58)
+  [mxfp8     ] top-2048 recall = 0.9708 (flipped 60)
+  [mxfp4     ] top-2048 recall = 0.8756 (flipped 255)
+
+== Part A2: 真实独立（未训练）q/k 主注意力 vs indexer 的经验逐头对齐 ρ_h ==
+  独立 q/k: ρ_h mean=-0.00000 std=0.00037 min=-0.00076 max=+0.00079  （iid 地板 ~1/sqrt(T·C)=4.88e-04）
+  用独立 q/k 打分、teacher vs fp8 支持集: 输出 relL2=2.389e-01 （≈随机支持集量级；未训练 q/k 下选择无意义 ⇒ 须用 ρ 参数化「已对齐」）
+  对照：本实验 ρ=0.9 构造的 head0 经验对齐 = +0.9000（≈旋钮值）
+
+== Part B: GQA/MQA 头共享 —— 下游输出误差 vs 组大小 G（rho=0.9）==
+   支持集逐 token 选出、对全部 query 头共享；G=1 即 MHA，G=H_q 即 MQA
+  G= 1 (Hkv=32):  fp8 relL2=1.134e-01/cos=0.993309  mxfp4 relL2=2.424e-01/cos=0.969781
+  G= 2 (Hkv=16):  fp8 relL2=1.134e-01/cos=0.993314  mxfp4 relL2=2.419e-01/cos=0.969916
+  G= 4 (Hkv= 8):  fp8 relL2=1.136e-01/cos=0.993290  mxfp4 relL2=2.424e-01/cos=0.969791
+  G= 8 (Hkv= 4):  fp8 relL2=1.140e-01/cos=0.993247  mxfp4 relL2=2.436e-01/cos=0.969516
+  G=32 (Hkv= 1):  fp8 relL2=1.141e-01/cos=0.993213  mxfp4 relL2=2.438e-01/cos=0.969434
+
+== Part B2: 平坦度校准（G=4, rho=0.9）—— 分数整体除 tau，teacher 支持集质量随 tau 变化 ==
+  tau=0.5 (质量=0.766):  fp8=1.840e-02  mxfp4=4.258e-02
+  tau=1.0 (质量=0.410):  fp8=1.136e-01  mxfp4=2.424e-01
+  tau=2.0 (质量=0.244):  fp8=1.796e-01  mxfp4=3.774e-01
+  tau=4.0 (质量=0.178):  fp8=2.104e-01  mxfp4=4.401e-01
+  （tau 越小越尖、支持集捕获质量越高、选择翻转越无关痛痒；第 172 篇 tau=8 的尖锐工作点（质量~0.95）对应这里 tau≪0.5，故其 2.6e-3 量级在本校准下可复现）
+
+== Part C: per-head 尖锐度敏感度（G=4, rho=0.9）—— 逐头输出误差 vs 该头注意力熵 ==
+  熵-误差 corr=+0.820
+  最平 8 头（熵~7.618）err=4.536e-01 | 最尖 8 头（熵~1.929）err=1.841e-03 | 平/尖=246.41x
+
+== Part D: 主注意力训练反向 dV 在 teacher vs 量化支持集下的相对误差（G=4）==
+  rho=1.0:  fp8 fwd=9.84e-02 dV=9.82e-02  mxfp4 fwd=2.11e-01 dV=2.11e-01
+  rho=0.9:  fp8 fwd=1.14e-01 dV=1.13e-01  mxfp4 fwd=2.42e-01 dV=2.42e-01
+  rho=0.7:  fp8 fwd=1.44e-01 dV=1.43e-01  mxfp4 fwd=3.04e-01 dV=3.04e-01
+  rho=0.4:  fp8 fwd=1.87e-01 dV=1.87e-01  mxfp4 fwd=3.92e-01 dV=3.92e-01
+
+== Part E: indexer KL 蒸馏训练反向（dw/dq）在不同支持集下的相对误差 ==
+  [fp8   ] dw relL2=2.243e-01 | dq relL2=2.661e-01 | dw cos=0.975018 | 仅换支持集 dw=3.901e-03 | 仅量化打分 dw=2.243e-01
+  [mxfp8 ] dw relL2=2.075e-01 | dq relL2=2.580e-01 | dw cos=0.978525 | 仅换支持集 dw=3.896e-03 | 仅量化打分 dw=2.076e-01
+  [mxfp4 ] dw relL2=6.632e-01 | dq relL2=7.679e-01 | dw cos=0.784319 | 仅换支持集 dw=1.281e-02 | 仅量化打分 dw=6.640e-01
+
+== 自检：dV 解析反向 vs torch.autograd（tiny, G=2）==
+  dV relL2=0.000e+00

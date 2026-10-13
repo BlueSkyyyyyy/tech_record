@@ -4908,6 +4908,29 @@
       `harness/exp_indexer_downstream.{py,sh,out.txt}`。配套博客
       `content/posts/mega-moe-172-indexer-selection-downstream`（索引页新增第 172 篇）。
 
+### P163 增量（opt-in，把 P162 留的「真实头结构」口子补上）
+
+- [x] **P163-1** **indexer 选择翻转接进真实头结构的 DSA 主注意力**（per-head softmax + GQA/MQA
+      头共享 + 另训 q/k）与**训练反向**（`csrc/apis/attention.hpp:18-44/67-134`、README `:88-110`；
+      DeepSeek-V3.2 技术报告 [arXiv:2512.02556](https://arxiv.org/abs/2512.02556) §2.1）。第 172 篇
+      把选择接进「单头、单 softmax」并留口子：真实 DSA 的 **per-head softmax**、**GQA/MQA 头共享**
+      未建模、与第 157~160 篇**训练反向**的联合误差未量。本篇补「真实头结构」：支持集
+      `S_t=Top-k(I_t,:)` 逐 token 选一次、对全部 `H_q` 个 query 头**共享**，每头各自
+      `softmax_{j∈S_t}(<q_main[t,h],k_main[j,h//G]>)/√d`；indexer 仍是**另训小模型**，用 `ρ` 旋钮 +
+      逐头 iid 噪声参数化「对齐但不相同」。**H100(sm90) 真机**（真实 SM90 `fp8_fp4_mqa_logits` 锚定
+      max-rel **2.538e-4**；`T=256,C=16384,H_q=32,D=128,topk=2048`）：① **头共享几乎不改变误差**——
+      G=1（MHA）→32（MQA）fp8 只从 `1.134e-1`→`1.141e-1`（**+0.6%**），因 DSA 支持集本就逐 token 共享、
+      `ε` 逐头 iid；② 用**真实独立（未训练）q/k** 坐实必须用 ρ 旋钮——逐头经验对齐 `ρ_h≈0`
+      （floor 4.88e-4）、此时换支持集输出差 `2.4e-1`（≈随机），而 `ρ=0.9` 构造经验对齐恰 `+0.9000`；
+      ③ **敏感度在逐头尖锐度里**——逐头温度扫出熵-误差 corr **+0.820**、最平 1/4 头误差 `4.536e-1`
+      vs 最尖 1/4 头 `1.841e-3`（**246×**），聚合误差是掩盖；④ 主注意力训练反向 `dV` 与正向
+      **同量级、不放大**（每个 ρ 下 `dV≈fwd`、随 `1-ρ` 升，`ρ=1` fp8 9.82e-2→`ρ=0.4` 1.87e-1），
+      自检 vs autograd **0.0**；⑤ indexer KL 蒸馏训练反向 `dw` 出错主因是**打分被量化**（fp8 `2.243e-1`）
+      而非**选择被换**（`3.901e-3`），差 **57×**（mxfp4 `dw` 0.663/cos 0.78）。主 kernel UMMA 部分
+      **SM100 专属、仅分析**。→ `docs/173-indexer-dsa-main-attention.md`（真实行号核对），实验
+      `harness/exp_indexer_head_shared.{py,sh,out.txt}`。配套博客
+      `content/posts/mega-moe-173-indexer-head-shared`（索引页新增第 173 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4945,8 +4968,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P162 各增量完成（P15-1…P41-1、P42-1…P162-1）。**
-  本轮 P162-1：新建 `docs/172-indexer-selection-downstream.md` +
+- 当前进度：**P0~P14 全部完成；P15~P163 各增量完成（P15-1…P41-1、P42-1…P163-1）。**
+  本轮 P163-1：新建 `docs/173-indexer-dsa-main-attention.md` + `harness/exp_indexer_head_shared.{py,sh,out.txt}`
+  ——把第 172 篇（P162-1）结尾「真实 DSA 的 per-head softmax、GQA/MQA 头共享未建模、与训练反向的
+  联合误差未量」补上。**H100(sm90) 真机**（真实 `fp8_fp4_mqa_logits` 锚定 max-rel 2.538e-4；
+  T=256,C=16384,H_q=32,D=128,topk=2048）：支持集逐 token 选一次、对全部 query 头**共享**，每头各自
+  per-head softmax；indexer 用 `ρ` 旋钮 + 逐头 iid 噪声参数化「另训、对齐但不相同」。**四条结论**：
+  ① **头共享几乎不改变误差**——G=1（MHA）→32（MQA）fp8 只从 1.134e-1→1.141e-1（**+0.6%**），因支持
+  集本就逐 token 共享、ε 逐头 iid；② 用**真实独立（未训练）q/k** 坐实必须用 ρ——逐头经验对齐 `ρ_h≈0`
+  （floor 4.88e-4）、换支持集输出差 2.4e-1（≈随机），`ρ=0.9` 构造经验对齐恰 +0.9000；③ **敏感度在逐头
+  尖锐度里**——熵-误差 corr **+0.820**、最平 1/4 头误差 4.536e-1 vs 最尖 1/4 头 1.841e-3（**246×**）；
+  ④ 主注意力反向 `dV` 与正向同量级、**不放大**（`dV≈fwd`、随 1-ρ 升，自检 vs autograd 0.0）；⑤ indexer
+  KL 蒸馏 `dw` 出错主因是**打分被量化**（fp8 2.243e-1）而非**选择被换**（3.901e-3）、差 **57×**。
+  主 kernel UMMA 部分仅分析。索引页新增第 173 篇。
+  上一轮 P162-1：新建 `docs/172-indexer-selection-downstream.md` +
   `harness/exp_indexer_downstream.{py,sh,out.txt}`——把第 171 篇（P161-1）结尾「④ 选择翻转对下游
   稀疏注意力输出的影响未量」补上。**H100(sm90) 真机**（真实 `fp8_fp4_mqa_logits` 锚定，T=1536,
   C=32768,topk=2048）：把选择接进**真实注意力输出**（softmax 只在支持集内归一化再对 V 加权）。
@@ -6752,16 +6787,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P162 已完成（最新 **P162-1 把第 171 篇留的「选择翻转对下游」口子补上**：
-  在 H100 上把 indexer 选择接进**真实稀疏注意力输出**，量出选择翻转是**二阶的**（量化选择误差
-  远小于稀疏近似本身，`tau=8` 约 21×）、输出误差 ≈ 丢掉质量、主权变量是 indexer 与注意力的
-  对齐 ρ（`ρ=0.4` 时 fp8 9.7e-2 > 精度贡献一个数量级）、块级翻得少但单次更重；详见 `docs/172`，
-  索引页新增第 172 篇）。上一轮 P161-1：indexer 选择稳定性（`docs/171`，recall 0.966/0.965/0.851，
-  诊断量是「阈值±σ 候选池」非 margin，iid 对照逐位相等）。
+- **下一步**：P0~P163 已完成（最新 **P163-1 把第 172 篇留的「真实头结构」口子补上**：
+  把 indexer 选择接进**真实 DSA 主注意力**（per-head softmax + GQA/MQA 共享支持集 + 另训 q/k）
+  并接上**训练反向**——头共享几乎不改变误差（G=1→32 差 0.6%）、敏感度在逐头尖锐度里（最平/最尖
+  246×、熵-误差 corr 0.82）、反向 `dV` 与正向同量级不放大、indexer `dw` 主因是量化打分而非选择
+  翻转（57×）；详见 `docs/173`，索引页新增第 173 篇）。上一轮 P162-1：indexer 选择翻转的下游
+  注意力输出（`docs/172`，选择翻转是二阶的、误差≈丢掉质量、主权变量是 ρ）。再上一轮 P161-1：
+  indexer 选择稳定性（`docs/171`，recall 0.966/0.965/0.851，诊断量是「阈值±σ 候选池」非 margin）。
   可继续（均为增量、非承诺）：① 把第 141/161 篇的多卡 EP 图**接进真实 DeepEP `EPBuffer.dispatch/combine`**
-  （需 NCCL≥2.32.3，见「阻塞」）；② indexer 剩余的 **varlen（SM100）**变体定点复核；**选择稳定性的
-  下游续**：把本篇的注意力输出误差接到**真实 DSA 主注意力**（另训 q/k、per-head softmax、GQA/MQA 头共享）
-  或与第 157~160 篇的**训练反向**做联合误差，或量 **MXFP4 indexer 的「排序精度 vs 2× 带宽」净收益**；
+  （需 NCCL≥2.32.3，见「阻塞」）；② indexer 剩余的 **varlen（SM100）**变体定点复核；**head 结构续**：
+  用**真实训练的** indexer↔主注意力（逐头 ρ_h 不均、低秩/共享 q/k）替换本轮的参数化建模，或量
+  **MXFP4 indexer 的「排序精度 vs 2× 带宽」净收益**、把逐头敏感度接到「蒸馏 loss 的逐头加权」；
   ③ **已由 P157-1 完成**：单进程「Mega-MoE-like 单 kernel」原型（结论：融合需异步张量核）；
   ④ **已由 P160-1 完成**：`deep_jit/utils/` 剩余 7 个支撑头；继续可选 DeepGEMM/DeepEP `csrc/utils/`
   或 `deep_jit/utils/` 之外的小角落做定点复核。详见上。
