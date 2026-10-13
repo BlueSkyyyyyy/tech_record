@@ -4862,8 +4862,28 @@
       `before=0/inside=0`（不重复释放）。**两个真坑**：① `write_file_sync` 传字符串字面量会退化成
       `string_view(const char*)` **在 NUL 截断**（首版 `len=6` 假 PASS）；② 直接 `echo x 1>&2` **测不到**
       `2>&1` 合并（追加重定向在内层之后），须 `sh -c`。另录 `gil.hpp:9` 的 `-Wattributes` 可见性告警。
-      至此 `deep_jit/utils/` **13 个头全部被专篇覆盖**。配套博客
-      `content/posts/mega-moe-170-deepjit-utils-layer`（索引页新增第 170 篇）。
+       至此 `deep_jit/utils/` **13 个头全部被专篇覆盖**。配套博客
+       `content/posts/mega-moe-170-deepjit-utils-layer`（索引页新增第 170 篇）。
+
+### P161 增量（opt-in，补齐 indexer 前向/反向之间从没量过的「选择」一环）
+
+- [x] **P161-1** **Lightning indexer 的 top-k KV（块）选择在量化前向下稳不稳**
+      （`deep_gemm/include/deep_gemm/impls/sm90_fp8_mqa_logits.cuh` 及 SM100 兄弟、
+      `csrc/apis/attention.hpp:22-29/59-72/77-134/126-127`、`tests/test_attention.py:51-76/78-101/442-475`、
+      `deep_gemm/utils/math.py:13-16/36/75-81/84-97/99-124`、README `:88-110`）。第 19/22/23/24 篇拆了
+      indexer 前向、第 157~160 篇补了训练反向四路梯度，但**支持集 `S_t=Top-k(I_t,:)` 本身是给定的**；
+      `I_t` 在生产里由 MXFP4/MXFP8 量化打分算子算出（`attention.hpp:22-29`），**「量化 → logits 扰动
+      → 排序抖动」从没量过**。**H100(sm90) 真机**用真实 `fp8_fp4_mqa_logits` 锚定（vs torch 复刻
+      max-rel 2.5e-4），再以纯 torch 复刻 FP8/MXFP8/MXFP4 三档量化。**结果**（T=1536,C=32768,H=32,D=64,
+      top-2048）：FP8 recall **0.966**（翻转 70/2048）、MXFP8 **0.965**（72）、MXFP4 **0.851**（306），
+      σ_r 1.15/1.19/5.07；**iid 噪声(σ=1.154) 对照 recall=0.9656 与真实 fp8 逐位相等** ⇒ 量化噪声在
+      排序意义上等价 iid 高斯；**关键洞察：诊断量不是 margin（0.0069≪σ，corr≈+0.05）而是「阈值±σ
+      候选池」**（fp8 355/行→翻转 70、mxfp4 1574→306，corr −0.41/−0.46）；块级（`max` 聚合）更稳
+      （fp8 7/128、mxfp4 28/128）；翻转的概率质量等量进出（fp8 丢掉/错补=2.11e-3/2.12e-3→相对丢失
+      **3.4%**、mxfp4 **15%**）；长上下文缩放缓（C=131072：fp8 0.957 / mxfp4 0.811）。主 kernel 的
+      MXFP4 UMMA 部分 **SM100 专属、仅分析**。→ `docs/171-indexer-selection-stability.md`（真实行号核对），
+      实验 `harness/exp_indexer_selection_stability.{py,sh,out.txt}`。配套博客
+      `content/posts/mega-moe-171-indexer-selection-stability`（索引页新增第 171 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4897,8 +4917,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P160 各增量完成（P15-1…P41-1、P42-1…P160-1）。**
-  本轮 P160-1：新建 `docs/170-deepjit-utils-layer.md` + `src/deepjit_utils.cpp` + `src/deepjit_gil.cpp` +
+- 当前进度：**P0~P14 全部完成；P15~P161 各增量完成（P15-1…P41-1、P42-1…P161-1）。**
+  本轮 P161-1：新建 `docs/171-indexer-selection-stability.md` +
+  `harness/exp_indexer_selection_stability.{py,sh,out.txt}`——补齐 indexer 前向/反向之间从没量过的
+  **「选择」一环**（第 157~160 篇把 `S_t=Top-k(I_t,:)` 当给定）。**H100(sm90) 真机**用真实
+  `fp8_fp4_mqa_logits` 锚定（vs torch 复刻 max-rel 2.5e-4），纯 torch 复刻 FP8/MXFP8/MXFP4 三档：
+  top-2048 recall **0.966 / 0.965 / 0.851**（翻转 70/72/306），iid 噪声对照（σ=1.154→recall 0.9656）
+  与真实 fp8 **逐位相等**；**诊断量是「阈值±σ 候选池」不是 margin**（margin 0.0069≪σ、corr≈+0.05；
+  候选池 fp8 355→翻转 70、mxfp4 1574→306）；块级更稳（fp8 7/128）；概率质量相对丢失 3.4%/15%；
+  长上下文缩放缓（C=131072 fp8 0.957/mxfp4 0.811）。主 kernel MXFP4 UMMA 仅分析。索引页新增第 171 篇。
+  上一轮 P160-1：新建 `docs/170-deepjit-utils-layer.md` + `src/deepjit_utils.cpp` + `src/deepjit_gil.cpp` +
   `harness/exp_deepjit_utils.{sh,py,out.txt}`——把 `deep_jit/utils/` 里被反复引用却从没单独读过的
   7 个支撑头（filesystem/command/str/uuid/json/gil/no_ref_ptr，共 377 行）拆透：
   `filesystem` 的分布式 FS 缓存发布（`safe_remove_all:88-108` **不用 `remove_all`**、`try_update_mtime:65-69`
@@ -6685,14 +6713,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P160 已完成（最新 **P160-1 把 `deep_jit/utils/` 里被反复引用却从没单独读过的 7 个
-  支撑头拆透**：filesystem/command/str/uuid/json/gil/no_ref_ptr（377 行），纯 host、架构无关，H100 真机
-  C++ 43/43 + Python 21/21 ALL PASS；至此 `deep_jit/utils/` 13 个头全部被专篇覆盖。详见 `docs/170`，
-  索引页新增第 170 篇）。上一轮 P159-1 补齐「反向图里的共享专家」并给出「一个训练步（前向+反向）的
-  分段成本账」（`docs/169`）。
+- **下一步**：P0~P161 已完成（最新 **P161-1 补齐 indexer 前向/反向之间从没量过的「选择」一环**：
+  `S_t=Top-k(I_t,:)` 在 FP8/MXFP8/MXFP4 量化下的 recall 0.966/0.965/0.851，诊断量是「阈值±σ 候选池」
+  而非 margin，iid 对照逐位相等；H100(sm90) 真实 kernel 锚定 + torch 复刻。详见 `docs/171`，
+  索引页新增第 171 篇）。上一轮 P160-1 把 `deep_jit/utils/` 剩余 7 个支撑头拆透（`docs/170`）。
   可继续（均为增量、非承诺）：① 把第 141/161 篇的多卡 EP 图**接进真实 DeepEP `EPBuffer.dispatch/combine`**
-  （需 NCCL≥2.32.3，见「阻塞」）；② 把 indexer 反向（连续/分页/稀疏/分页稀疏）**端到端接进真实前向 kernel**
-  （需目标卡 SM100，仅分析）+ indexer 的 **varlen（SM100）**变体定点复核；③ **已由 P157-1 完成**：单进程
+  （需 NCCL≥2.32.3，见「阻塞」）；② indexer 剩余的 **varlen（SM100）**变体定点复核；**选择稳定性的
+  下游**：把本篇的 top-k 翻转接进**真实稀疏注意力输出**量端到端影响（DSA 支持集变化 → attention 输出
+  误差），或量 **MXFP4 indexer 的「排序精度 vs 2× 带宽」净收益**；③ **已由 P157-1 完成**：单进程
   「Mega-MoE-like 单 kernel」原型（结论：融合需异步张量核）；④ **已由 P160-1 完成**：`deep_jit/utils/`
   剩余 7 个支撑头；继续可选 DeepGEMM/DeepEP `csrc/utils/` 或 `deep_jit/utils/` 之外的小角落做定点复核。
   详见上。
