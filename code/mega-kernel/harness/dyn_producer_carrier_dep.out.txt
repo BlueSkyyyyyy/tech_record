@@ -1,0 +1,163 @@
+########## §cbench：写端握手归因 × 三载体 ##########
+device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0  L2=50 MB
+
+===== §A 正确性：carrier1 正确档 vs static（有 worker，EDW=8）=====
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=8192   mode=0 gvar=3 win=1 S=1     0.0348 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=16896  mode=1 gvar=3 win=1 S=1     0.8432 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=16896  mode=1 gvar=3 win=1 S=1     0.9042 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=16896  mode=1 gvar=3 win=1 S=1     0.7924 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=16896  mode=11 gvar=3 win=1 S=4     0.8504 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=16896  mode=11 gvar=3 win=1 S=4     0.7329 ms/rep  got=404219327039195
+      P=1  static==  c0-ser==  c1-ser==  c2-ser==  c1-sbp==  c2-sbp==
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4096   mode=0 gvar=3 win=1 S=1     0.0332 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=8448   mode=1 gvar=3 win=1 S=1     0.4281 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=8448   mode=1 gvar=3 win=1 S=1     0.4594 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=8448   mode=1 gvar=3 win=1 S=1     0.4024 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=8448   mode=11 gvar=3 win=1 S=4     0.4330 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=8448   mode=11 gvar=3 win=1 S=4     0.3739 ms/rep  got=404219327039195
+      P=2  static==  c0-ser==  c1-ser==  c2-ser==  c1-sbp==  c2-sbp==
+
+===== §B 归因矩阵 × 载体（纯写 P=128，GB/s；BD=138.4 MB）=====
+  variant      |      tma  vs_ser |     regS  vs_ser |     regD  vs_ser
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=1 S=1     0.3238 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=1 S=1     0.3549 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=1 S=1     0.3037 ms/rep  got=0
+  ser          |    427.5   1.000 |    390.0   1.000 |    455.7   1.000
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-1 S=1     0.3091 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-1 S=1     0.3227 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-1 S=1     0.2695 ms/rep  got=0
+  nowait       |    447.8   1.048 |    428.9   1.100 |    513.6   1.127
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-4 S=1     0.2698 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-4 S=1     0.2887 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-4 S=1     0.2279 ms/rep  got=0
+  skipbp       |    513.0   1.200 |    479.4   1.229 |    607.4   1.333
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-5 S=1     0.2685 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-5 S=1     0.2768 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-5 S=1     0.2331 ms/rep  got=0
+  skiphd       |    515.5   1.206 |    500.1   1.282 |    593.7   1.303
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-6 S=1     0.2269 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-6 S=1     0.2351 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-6 S=1     0.1918 ms/rep  got=0
+  nobp         |    609.9   1.427 |    588.7   1.510 |    721.6   1.584
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-7 S=1     0.2872 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-7 S=1     0.3238 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-7 S=1     0.2695 ms/rep  got=0
+  relhead      |    482.0   1.128 |    427.5   1.096 |    513.5   1.127
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-8 S=1     0.3234 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-8 S=1     0.3540 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-8 S=1     0.3030 ms/rep  got=0
+  reltail      |    428.0   1.001 |    391.0   1.003 |    456.8   1.003
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-9 S=1     0.2864 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-9 S=1     0.3220 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-9 S=1     0.2690 ms/rep  got=0
+  relboth      |    483.3   1.131 |    429.8   1.102 |    514.6   1.129
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-16 S=1     0.2860 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-16 S=1     0.3149 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-16 S=1     0.2609 ms/rep  got=0
+  nobp_wa      |    483.9   1.132 |    439.5   1.127 |    530.6   1.164
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-17 S=1     0.2269 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-17 S=1     0.2353 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-17 S=1     0.1918 ms/rep  got=0
+  wa_only      |    610.0   1.427 |    588.2   1.508 |    721.5   1.583
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-15 S=1     0.2704 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-15 S=1     0.2888 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-15 S=1     0.2279 ms/rep  got=0
+  hd_nofence   |    511.9   1.198 |    479.2   1.229 |    607.4   1.333
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=8     0.2599 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=8     0.2710 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=8     0.2255 ms/rep  got=0
+  stridedall8  |    532.6   1.246 |    510.8   1.310 |    613.8   1.347
+
+===== §B2 地板与代价（纯写 P=128，GB/s）=====
+  carrier      floor(nobp)        ser    relhead  ser-nobp% floor/ser
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-6 S=1     0.2269 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=1 S=1     0.3237 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-7 S=1     0.2866 ms/rep  got=0
+  tma               609.9      427.5      483.0       29.9    1.427
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-6 S=1     0.2353 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=1 S=1     0.3545 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-7 S=1     0.3246 ms/rep  got=0
+  regS(smem)        588.3      390.4      426.4       33.6    1.507
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-6 S=1     0.1918 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=1 S=1     0.3037 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-7 S=1     0.2697 ms/rep  got=0
+  regD(reg)         721.7      455.8      513.3       36.8    1.584
+
+===== §C × P（纯写 GB/s；每格 = ser / nobp）=====
+  P    |              tma |       regS(smem) |        regD(reg)
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=9 gvar=3 win=1 S=1     2.5089 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=9 gvar=3 win=-6 S=1     1.7740 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=9 gvar=3 win=1 S=1     2.7192 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=9 gvar=3 win=-6 S=1     1.8415 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=9 gvar=3 win=1 S=1     2.3492 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=9 gvar=3 win=-6 S=1     1.4933 ms/rep  got=0
+  16   |    55.2/   78.0 |    50.9/   75.2 |    58.9/   92.7
+  P=32  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=9 gvar=3 win=1 S=1     1.2589 ms/rep  got=0
+  P=32  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=9 gvar=3 win=-6 S=1     0.8899 ms/rep  got=0
+  P=32  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=9 gvar=3 win=1 S=1     1.3719 ms/rep  got=0
+  P=32  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=9 gvar=3 win=-6 S=1     0.9234 ms/rep  got=0
+  P=32  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=9 gvar=3 win=1 S=1     1.1835 ms/rep  got=0
+  P=32  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=9 gvar=3 win=-6 S=1     0.7494 ms/rep  got=0
+  32   |   109.9/  155.5 |   100.9/  149.9 |   117.0/  184.7
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=9 gvar=3 win=1 S=1     0.6340 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=9 gvar=3 win=-6 S=1     0.4477 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=9 gvar=3 win=1 S=1     0.6888 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=9 gvar=3 win=-6 S=1     0.4646 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=9 gvar=3 win=1 S=1     0.5957 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=9 gvar=3 win=-6 S=1     0.3776 ms/rep  got=0
+  64   |   218.3/  309.2 |   201.0/  297.9 |   232.3/  366.5
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=1 S=1     0.3260 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-6 S=1     0.2268 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=1 S=1     0.3549 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-6 S=1     0.2354 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=1 S=1     0.3036 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-6 S=1     0.1919 ms/rep  got=0
+  128  |   424.6/  610.3 |   390.0/  587.9 |   455.9/  721.1
+
+===== §D 摊薄 stridedall 步长 S（纯写 P=128，GB/s）=====
+  S              tma          regS          regD
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=1     0.3250 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=1     0.3543 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=1     0.3035 ms/rep  got=0
+  1            425.9         390.6         456.0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=2     0.2958 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=2     0.3156 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=2     0.2665 ms/rep  got=0
+  2            467.9         438.5         519.4
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=4     0.2720 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=4     0.2856 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=4     0.2393 ms/rep  got=0
+  4            508.8         484.7         578.4
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=8     0.2597 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=8     0.2711 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=8     0.2258 ms/rep  got=0
+  8            532.9         510.5         613.0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=16     0.2533 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=16     0.2635 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=16     0.2191 ms/rep  got=0
+  16           546.5         525.4         631.8
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=32     0.2501 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=32     0.2598 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-12 S=32     0.2163 ms/rep  got=0
+  32           553.4         532.7         639.8
+
+===== §E 逐相位（纯写 P=128，cycles/batch）=====
+  car   variant         bp      wr     gen    store     pub      pw     sum
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=1 S=1     0.3271 ms/rep  got=0
+  tma   ser            847     262    3508      460    1302      95    6474
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-6 S=1     0.2280 ms/rep  got=0
+  tma   nobp            54     258    3526      459      50      95    4442
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-7 S=1     0.2890 ms/rep  got=0
+  tma   relhead        865     261    3508      460     448      95    5637
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=1 S=1     0.3566 ms/rep  got=0
+  regS  ser            855     261    3513      580    1721      95    7025
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-6 S=1     0.2363 ms/rep  got=0
+  regS  nobp            53     258    3519      584      74     114    4602
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-7 S=1     0.3273 ms/rep  got=0
+  regS  relhead        855     259    3516      576    1186      95    6487
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=1 S=1     0.3040 ms/rep  got=0
+  regD  ser            848     261     254     2933    1555      83    5934
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-6 S=1     0.1923 ms/rep  got=0
+  regD  nobp            55     257     257     2933      67      97    3666
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=9 gvar=3 win=-7 S=1     0.2701 ms/rep  got=0
+  regD  relhead        846     261     254     2934     872      83    5250

@@ -1589,6 +1589,37 @@
     P63-1 新留尾巴（§52.8）：SASS 计数是整 kernel 而非限定基本块、合成描述符、纯写口径无 worker、
     未与 DeepGEMM SM100 对跑。
 
+### P64 实验扩展 46：写端握手归因 × 写载体（`docs/04-experiments.md` §53）
+
+- [x] **P64-1** 补掉 P63-1（§52）§52.8 明留的尾巴——「**换栈（如 v4/coop 协作写，见 §49/§50）会改变它，
+  故本节比值不能外推到寄存器写载体**」。**唯一新变量 = 写载体**（同一 §52 骨架 + 同一六位正交握手
+  编码、同 `DW=88`/`K=32`/`D=2`/`SB=4`/`T=256`/`grid=P`、纯写 `mode 9`、min-of-7）：
+  carrier 0 = **TMA bulk store**（SMEM 暂存 → `cp.async.bulk`，= §52）；carrier 1 = **寄存器 copy-out**
+  （SMEM 暂存 → 全 block `uint4` load/store）；carrier 2 = **寄存器直写**（不落 SMEM，每线程生成
+  `uint4` 直写环 = §49/§50 的 v4 形态）。见 `docs/04-experiments.md` **§53**，源码
+  `src/dyn_producer_carrier_dep.cu`、脚本 `harness/dyn_producer_carrier_dep.sh`、原始输出
+  `harness/dyn_producer_carrier_dep.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2）。
+  核心结论：
+  - **§A 正确性**：三载体正确档（`ser` / `stridedbp`）与 static **逐位一致**（`got=404219327039195`）
+    ——换写载体不改变握手可见性契约。
+  - **§B/§B2（headline）§52 的 L 型加性、release 主导在**三载体上逐档同形****（排序三列一致：
+    `reltail≈ser < relhead≈relboth < skipbp≈skiphd < nobp`；`reltail` 全 ≈1.00 = acquire 免费；
+    `relhead` 全 ≈1.10–1.13 = release 收 ~10–13%）。**但绝对数值处处不同、快载体相对罚更狠**：
+    地板 `nobp` = **regD 721.6 > tma 609.9 > regS 588.7**，`ser` = **regD 455.7 > tma 427.5 >
+    regS 390.0**，`ser→nobp` 落差 **29.9%(tma) / 33.6%(regS) / 36.8%(regD)**（§52.8 的「比值不能外推」
+    被证实——但方向明确、排序不变）。**寄存器 store 只在直写不经 SMEM 时优于 TMA**；经 SMEM 暂存
+    （regS）反不如 TMA（588.7 < 609.9）。
+  - **§C × P**：三载体逐 P 同序（regD>tma>regS）、近似线性。
+  - **§D 摊薄**：对三载体都有效且都饱和（S≥16 +1–2%）；regD 在所有 S 恒最快（S=32 达 639.8，比 tma
+    高 16%）。
+  - **§E（headline 之二）逐相位 `clock64`**：载体差异落在 `gen`/`store` 此消彼长——tma/regS 的 `gen`
+    ≈3.5k cycles（协作写 SMEM）、regD 跳过 SMEM（`gen`=254）把生成折进 `store`（2933），净地板
+    regD 3666 < tma 4442 < regS 4602；协议代价落 `pub`（release 收回 tma≈854 / regS≈535 / regD≈683
+    cycles）。**握手税绝对值三载体相近（~2.0–2.4k cycles/batch），占比随地板抬升而变大** ⇒ 快载体
+    不能靠「更快」摊掉协议，反而暴露更高占比——给 MPK「预计算 `FullTaskDesc` + 批量/环形摊薄一次
+    release」以**更强**理由。判据 C1–C4、仍差 C5。**本轮新增实验**；P64-1 新留尾巴见 §53.9
+    （纯写无 worker、regD 的 store 段含生成计时、`DW/K/D` 未扫、合成描述符、未与 DeepGEMM SM100 对跑）。
+
 
 ## 每轮增量流程（autopilot）
 
@@ -1614,7 +1645,30 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P63-1 完成（1/1）**。补掉 P62-1（§51）§51.8 明留的**开放问题**——「§51.6 的『只拆背压
+- 当前进度：**P64-1 完成（1/1）**。补掉 P63-1（§52）§52.8 明留的尾巴——「**换栈（如 v4/coop 协作写，
+  见 §49/§50）会改变它，故本节比值不能外推到寄存器写载体**」。**唯一新变量 = 写载体**（同一 §52 骨架 +
+  同一六位正交握手编码、同 `DW=88`/`K=32`/`D=2`/`SB=4`/`T=256`/`grid=P`、纯写 `mode 9`、min-of-7）：
+  carrier 0 = **TMA bulk store**（= §52）；carrier 1 = **寄存器 copy-out**（SMEM→全 block `uint4`）；
+  carrier 2 = **寄存器直写**（不落 SMEM，每线程生成 `uint4` 直写 = §49/§50 v4 形态）。`docs/04-experiments.md`
+  新增 **§53**，源码 `src/dyn_producer_carrier_dep.cu`、脚本 `harness/dyn_producer_carrier_dep.sh`、原始输出
+  `harness/dyn_producer_carrier_dep.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2）。核心结论：
+  - **§A** 三载体正确档（`ser`/`stridedbp`）与 static **逐位一致**（`got=404219327039195`）。
+  - **§B/§B2（headline）§52 的 L 型加性、release 主导在三载体上逐档同形**（排序三列一致：
+    `reltail≈ser < relhead≈relboth < skipbp≈skiphd < nobp`；`reltail` 全 ≈1.00 = acquire 免费、
+    `relhead` 全 ≈1.10–1.13 = release 收 ~10–13%）；**但绝对数值不同、快载体相对罚更狠**：地板
+    `nobp` = **regD 721.6 > tma 609.9 > regS 588.7**，`ser→nobp` 落差 **29.9%/33.6%/36.8%**（§52.8
+    的「比值不能外推」被证实、但方向明确）。**寄存器 store 只在直写不经 SMEM 时优于 TMA**；经 SMEM
+    暂存（regS）反不如 TMA（588.7 < 609.9）。
+  - **§C×P** 三载体逐 P 同序（regD>tma>regS）、近似线性；**§D** 摊薄对三载体都有效且都饱和（S≥16
+    +1–2%），regD 在 S=32 达 639.8（比 tma 高 16%）。
+  - **§E（headline 之二）逐相位**：载体差异落 `gen`/`store` 此消彼长（tma/regS 的 `gen`≈3.5k、
+    regD `gen`=254 折进 `store`=2933；净地板 regD 3666 < tma 4442 < regS 4602）；协议代价落 `pub`
+    （release 收回 tma≈854/regS≈535/regD≈683）。**握手税绝对值三载体相近（~2.0–2.4k cycles/batch），
+    占比随地板抬升而变大** ⇒ 快载体不能靠「更快」摊掉协议，反而暴露更高占比——给 MPK「预计算
+    `FullTaskDesc` + 批量/环形摊薄一次 release」以**更强**理由。判据 C1–C4、仍差 C5。**本轮新增实验**；
+    P64-1 新留尾巴见 §53.9（纯写无 worker、regD 的 store 段含生成计时、`DW/K/D` 未扫、合成描述符、
+    未与 DeepGEMM SM100 对跑）。
+- 此前：**P63-1 完成（1/1）**。补掉 P62-1（§51）§51.8 明留的**开放问题**——「§51.6 的『只拆背压
   或只拆发布都回 664、两者同时才 454』**未钉到 SASS/依赖链一级**」。**唯一新变量 = 归因编码**：把
   「发布握手」从 §51 的**单整数互斥编码**换成**六个正交布尔位**（`WA`/`BP`/`HD`/`REL`/`ACQ`/`FENCE`），
   并补**逐相位 `clock64`** 与 **SASS 反汇编**。`docs/04-experiments.md` 新增 **§52**，源码
@@ -2473,7 +2527,10 @@
         **P58-1（§47）** 把「未叠动态生产者」补上（动态须落在**调度**、不能落在**生成**）；
         **P59-1–P62-1（§48–§51）** 把动态生产者标度到 P 块 / 向量化 / TMA store / 窗口握手；
         **P63-1（§52）** 用正交编码 + 逐相位 + SASS 修正 §51 的「只拆一个就够快」（编码假象），
-        钉死写端瓶颈 = **每批 `st.release` 的 GPU 级 MEMBAR + 会合 barrier**。
+        钉死写端瓶颈 = **每批 `st.release` 的 GPU 级 MEMBAR + 会合 barrier**；
+        **P64-1（§53）** 换写载体（TMA / 寄存器 copy-out / 寄存器直写）验「比值不可外推」——
+        分解同形、**握手税近似绝对（~2.0–2.4k cycles/batch）故占比随地板抬升而变大**（29.9%→36.8%），
+        寄存器 store 只在直写不经 SMEM 时优于 TMA。
 - **本轮（P50-1）**：`docs/04-experiments.md` 新增 **§39**「worker 侧取 task 的载体：`cp.async` 批量
   加载 TaskDesc 值多少」——新源码 `src/cpasync_desc_fetch.cu`、脚本 `harness/cpasync_desc_fetch.sh`、
   原始输出 `harness/cpasync_desc_fetch.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、
