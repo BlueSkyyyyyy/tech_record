@@ -655,28 +655,67 @@ static void make_map_e(CUtensorMap* m, void* ptr, int H, int NT, int B) {
 }
 #endif
 
+// P7-40: the set of tensor maps a single launch needs.  `cuTensorMapEncodeTiled` is a
+// host driver call: on a small (host-bound) chain it is pure per-call tax.  Production
+// allocates its workspaces once, so the maps are stable and only need encoding once.
+struct MapSet {
+    CUtensorMap qm, km, wm, dom, dvm;
+#ifdef B1T_ETMA
+    CUtensorMap em;
+#endif
+#ifdef B1T_TMADH
+    CUtensorMap dhm;
+#endif
+#ifdef B1T_TMADV
+    CUtensorMap dv2m;
+#endif
+};
+
+static void encode_maps(MapSet* M, void* q, void* k, void* w, void* do_, void* dv, void* etot,
+                        void* dh, void* dv2, int H, int T, int B, int NT, int BT) {
+    make_map(&M->qm, q, H, T, B, BT);
+    make_map(&M->km, k, H, T, B, BT);
+    make_map(&M->wm, w, H, T, B, BT);
+    make_map(&M->dom, do_, H, T, B, BT);
+    make_map(&M->dvm, dv, H, T, B, BT);
+#ifdef B1T_ETMA
+    make_map_e(&M->em, etot, H, NT, B);
+#endif
+#ifdef B1T_TMADH
+    make_map_dh(&M->dhm, dh, H, NT, B);
+#endif
+#ifdef B1T_TMADV
+    make_map_dv2(&M->dv2m, dv2, H, T, B, BT);
+#endif
+}
+
 // ------------------------------------------------------------------------- launch
+#ifdef B1T_MAPCACHE
+static long g_mapcache_miss = 0;
+#endif
 template <int BT, int NSTAGE>
 static int launch_impl(void* q, void* k, void* w, void* do_, void* dv, void* etot, void* dh,
                        void* dh0, void* dv2, void* dht, int B, int T, int H, int NT, float scale,
                        cudaStream_t s) {
-    CUtensorMap qm, km, wm, dom, dvm;
-    make_map(&qm, q, H, T, B, BT);
-    make_map(&km, k, H, T, B, BT);
-    make_map(&wm, w, H, T, B, BT);
-    make_map(&dom, do_, H, T, B, BT);
-    make_map(&dvm, dv, H, T, B, BT);
-#ifdef B1T_ETMA
-    CUtensorMap em;
-    make_map_e(&em, etot, H, NT, B);
-#endif
-#ifdef B1T_TMADH
-    CUtensorMap dhm;
-    make_map_dh(&dhm, dh, H, NT, B);
-#endif
-#ifdef B1T_TMADV
-    CUtensorMap dv2m;
-    make_map_dv2(&dv2m, dv2, H, T, B, BT);
+#ifdef B1T_MAPCACHE
+    // Encode-once: reuse the MapSet while every operand pointer and shape is unchanged
+    // (the production case).  Statics are per <BT,NSTAGE> instantiation, which is fine: a
+    // chain fixes both.  Any change of pointer/shape falls back to a full re-encode.
+    static MapSet cM;
+    static void *cq, *ck, *cw, *cdo, *cdv, *cetot, *cdh, *cdv2;
+    static int cH, cT, cB, cNT, cBT, have;
+    if (!(have && cq == q && ck == k && cw == w && cdo == do_ && cdv == dv && cetot == etot &&
+          cdh == dh && cdv2 == dv2 && cH == H && cT == T && cB == B && cNT == NT && cBT == BT)) {
+        encode_maps(&cM, q, k, w, do_, dv, etot, dh, dv2, H, T, B, NT, BT);
+        cq = q; ck = k; cw = w; cdo = do_; cdv = dv; cetot = etot; cdh = dh; cdv2 = dv2;
+        cH = H; cT = T; cB = B; cNT = NT; cBT = BT; have = 1;
+        ++g_mapcache_miss;
+    }
+    MapSet* M = &cM;
+#else
+    MapSet lM;
+    encode_maps(&lM, q, k, w, do_, dv, etot, dh, dv2, H, T, B, NT, BT);
+    MapSet* M = &lM;
 #endif
     dim3 grid(VD / BV, B * H);
     int smem = (int)sizeof(Shared<BT, NSTAGE>);
@@ -688,15 +727,15 @@ static int launch_impl(void* q, void* k, void* w, void* do_, void* dv, void* eto
         configured = 1;
     }
     b1_tma_kernel<BT, NSTAGE><<<grid, (NW + 1) * 32, smem, s>>>(
-        qm, km, wm, dom, dvm,
+        M->qm, M->km, M->wm, M->dom, M->dvm,
 #ifdef B1T_ETMA
-        em,
+        M->em,
 #endif
 #ifdef B1T_TMADH
-        dhm,
+        M->dhm,
 #endif
 #ifdef B1T_TMADV
-        dv2m,
+        M->dv2m,
 #endif
         (const float*)etot, (const float*)dht, (bf16*)dh, (float*)dh0, (bf16*)dv2, T, NT, H,
         scale);
@@ -742,6 +781,20 @@ extern "C" int b1t_launch_dht(int BT, int NSTAGE, void* q, void* k, void* w, voi
     return dispatch_launch(BT, NSTAGE, q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, V,
                            NT, scale, stream);
 }
+
+// P7-40 probe: time the *pure host-side* tensor-map encoding with no kernel launch, so the
+// encode cost can be separated from the launch cost.  Returns a byte of the map so the
+// encoder cannot be dead-code-eliminated.
+extern "C" int b1t_encode_only(int BT, void* q, void* k, void* w, void* do_, void* dv,
+                               void* etot, void* dh, void* dv2, int B, int T, int H, int NT) {
+    MapSet M;
+    encode_maps(&M, q, k, w, do_, dv, etot, dh, dv2, H, T, B, NT, BT);
+    return (int)(M.qm.opaque[0] & 0xff);
+}
+
+#ifdef B1T_MAPCACHE
+extern "C" long b1t_mapcache_miss() { return g_mapcache_miss; }
+#endif
 
 extern "C" int b1t_smem_bytes(int BT, int NSTAGE) {
     if (BT == 64) { if (NSTAGE == 1) return sizeof(Shared<64,1>); if (NSTAGE == 2) return sizeof(Shared<64,2>); }

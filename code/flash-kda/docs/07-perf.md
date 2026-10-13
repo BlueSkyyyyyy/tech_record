@@ -4290,3 +4290,73 @@ event 对包 `REPS=50` 次 launch** 的 wall（含 launch 开销但稳定），C
   的 `dv` 需 fp32；(b) `launch_impl` **每次 launch 重编码张量图**，小 shape 链是 host-bound，表现为
   `T=250` 的 1.65× 回归（**待验证**：张量图一次编码复用后消除）；(c) 孤立 µs 级 kernel 的 CUPTI 归因
   在本机双峰（~41 vs ~130µs），该场景一律用 event-pair wall。
+
+## 43. 关闭 §42 的 host 税待验证：张量图「一次编码复用」省不下那 1.65×——它是**不可复现**的（P7-40）
+
+§42.4/§42.6 把 CUDA-B1 链在 `T=250 H=3` 上的 **1.65×** 链级回归归因到「`launch_impl` 每次 launch
+都重新 `cuTensorMapEncodeTiled`（5–8 张图）+ `cudaFuncSetAttribute` 检查，小 shape 链是 host-bound」，
+并把它标为**待验证**（预期「一次性编码复用后消除」）。本轮（`harness/check_bwd_b1_launch_tax.py`
++ 输出 `harness/check_bwd_b1_launch_tax.out.txt`）把这个假设**直接测掉**，结论是：**张量图编码不是那
+笔 host 税，而 1.65× 本身在空闲卡上根本复现不出来。**
+
+### 43.1 加一个「一次编码复用」的 `B1T_MAPCACHE`（并证明它真的命中）
+
+把 `launch_impl` 里的 5–8 次 `make_map*` 收成一个 `MapSet` + `encode_maps`（`b1_tma_probe.cu:661-687`），
+再给 `-DB1T_MAPCACHE`：只要**所有操作数指针和 shape 都没变**就复用上一次的 `MapSet`，否则整组重编码
+（`b1_tma_probe.cu:700-714`）。指针/shape 全进 key，故「同 shape 换指针」也会重编码，不会串味。
+外加两个仅供探测的符号：`b1t_encode_only(...)`（只做编码、不 launch，`b1_tma_probe.cu:788`）与
+`b1t_mapcache_miss()`（未命中计数，`:796`）。命中计数实测：连续 200 次 launch，miss 只 +1
+（`harness/check_bwd_b1_launch_tax.out.txt`）⇒ **200 次里 199 次命中**，缓存确实生效。数值上
+`B1T_MAPCACHE` 是**纯 host 端复用**：Part B 在非零 `dht` 下，cache vs no-cache 的
+`dh/dh0/dv2` **逐位相同（max_abs=0，含非整除 T=250/513）**。
+
+### 43.2 Part A：纯编码 ≈3.9µs，但它在 launch 里几乎全被隐藏
+
+`process_time / call`（P7-6 口径，单线程 CPU）：
+
+| shape | launch（no-cache） | launch（cache） | 省下 | `b1t_encode_only`（纯编码） |
+|---|---|---|---|---|
+| tiny B1 T16 H1 | 7.72 µs | 6.99 µs | **0.73** | 3.86 µs |
+| T250 H3 | 18.68 µs | 18.45 µs | **0.23** | 3.86 µs |
+| B2 T1024 H8 | 62.78 µs | 62.41 µs | **0.37** | 3.87 µs |
+
+纯编码 **3.8–4.0µs/次**（8 张图，即每张 `cuTensorMapEncodeTiled` ≈0.5µs）——**但这 4µs 加进 launch
+里只看得见 ≤0.75µs**。原因是这段 `process_time` 循环已经被 **launch 队列反压**主导：`B2 T1024 H8`
+的 launch 读数 62.7µs 远大于其 kernel dev（§42 的 78µs @BT16 NS4 同量级，小 shape kernel 只有 10–20µs），
+即循环速率被 GPU/驱动吞吐卡住，CPU 侧的编码被藏在队列等待里。**所以**：`T=250` 的 host 税若真是
+编码，缓存应省 ~4µs/launch，实测只省 0.23µs——**不成立**。（顺带一个方法学点：用 `process_time`
+测「host 税」时，如果 launch 队列被打满，读数≈GPU 吞吐速率、不是纯 CPU；要拆纯 CPU 得用
+`b1t_encode_only` 这类**不发 launch** 的入口。）
+
+### 43.3 Part C：1.65× 不可复现，空闲卡上 CUDA/Triton 链 wall 只有 0.95–1.05×
+
+同一空闲卡（`CUDA_VISIBLE_DEVICES=1`）上重跑 §42 的链级口径（event-pair wall，3 轮取中位；
+`harness/check_bwd_b1_launch_tax.out.txt`）：
+
+| case | Triton-B1 链 wall | CUDA-B1（no-cache） | CUDA-B1（cache） | **CUDA/Triton** | cache/no-cache |
+|---|---|---|---|---|---|
+| T=512 H=4 | 312.6 µs | 335.9 µs | 327.1 µs | **1.046×** | 0.974 |
+| B8 T=2048 H=8 | 2251.1 µs | 2146.3 µs | 2146.4 µs | **0.954×** | 1.000 |
+| T=250 H=3 (non-div) | 313.2 µs | 327.6 µs | 328.5 µs | **1.049×** | 1.003 |
+
+`T=250 H=3` 现在是 **1.05×**，不是 §42.4 记的 1.65×。而且 §42.4 的 Triton baseline（245.9µs）本身在
+不同轮次漂得很大：本轮脚本内多次测到 **308 / 323 / 386µs**（同一 `make_chain_fn_pipe NS=3`），
+§42.4 的 245.9µs 是一个**低离群**——1.65× 基本就是「Triton 基线抽到低值」的产物，非稳定回归。
+`B1T_MAPCACHE` 对链 wall 的影响在噪声内（cache/no-cache 0.997–1.001），与 §43.2 一致。
+
+### 43.4 结论 / 对目标卡的设计输入
+
+- **撤回 §42.4 的 host 税归因**：`T=250 H=3` 的 1.65× **在空闲卡上不可复现**（实测 1.05×），且其
+  Triton 基线自身跨轮次 245→386µs 波动（±25%），该 case 的「回归」是**基线采样的低离群**，不是 CUDA
+  B1 的稳定慢。
+- **张量图编码不是瓶颈**：纯编码 3.8–4.0µs/launch，加进 launch 后（队列反压主导）只看得见 ≤0.75µs；
+  「一次编码复用」（`-DB1T_MAPCACHE`）**数值逐位无损、命中率 199/200**，但对链 wall 无可见收益。
+  故 §42.6 坑 (b) 的「待验证」**关闭**：目标卡落地做一次编码复用是**合理的整洁做法**（免费、逐位、
+  生产固定 workspace 时确实命中），但**它不解决任何已测到的性能问题**，不必再把它当优化项。
+- **诚实的剩余差距**：CUDA-B1 链 vs Triton-B1 链 **0.95–1.05×**（大 shape 快 5%、小 shape 慢 5%），
+  与 §42 的「换 B1 不拖慢整链、瓶颈在 B2/B3（§26）」一致；小 shape 的 ~5% 是 BT=16 下 CUDA 核本身
+  比 Triton 慢 ~1.2×（§42.4 kernel 归因，非 host），与 §37.3「BT=16 粒度差距」自洽。
+- **方法学（新）**：测「host 税」时，`process_time` 在 launch 队列被打满时读的是 **GPU 吞吐速率**、
+  不是纯 CPU；要隔离纯 CPU 须用**不发 launch** 的入口（本轮的 `b1t_encode_only`）。这与 §25.5
+  （归因窗口）、§37 dtype 对齐并列，进入本专题的计时口径清单。
+

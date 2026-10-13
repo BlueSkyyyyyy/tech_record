@@ -637,6 +637,22 @@
       的 CUPTI 归因双峰。**结论**：目标卡 CUDA 反向**第一次端到端可跑**（B1=CUDA、其余 Triton），
       drop-in 数值等价、链级不拖慢；链瓶颈仍是 B2/B3（§26），路线「先接受 Triton、CUDA 逐件替换」成立。
 
+- [x] **P7-40** 关闭 P7-39（§42.4/§42.6 坑 b）留下的 host 税**待验证**：把「CUDA-B1 链在
+      `T=250 H=3` 上的 1.65× 回归＝`launch_impl` 每次重编码张量图」这个假设直接测掉。给
+      `b1_tma_probe.cu` 加 **`-DB1T_MAPCACHE`**（`MapSet`+`encode_maps`，`b1_tma_probe.cu:661-687`；
+      指针/shape 全不变的 encode-once 复用，`:700-714`）+ 探测符号 `b1t_encode_only`（只编码不 launch，
+      `:788`）/ `b1t_mapcache_miss`（`:796`）。新增 `harness/check_bwd_b1_launch_tax.py`
+      （`harness/check_bwd_b1_launch_tax.out.txt`，空闲卡）+ `docs/07` §43。**Part A**：纯编码
+      **3.8–4.0µs/次**（8 张图），但加进 launch 后（队列反压主导）cache 只省 **0.15–0.75µs**
+      ⇒ 编码不是那笔税；cache 命中率 **199/200**。**Part B**：cache vs no-cache `dh/dh0/dv2`
+      **逐位相同（max_abs=0，含非整除 T=250/513）**。**Part C（关键）**：空闲卡重跑链 wall，
+      `T=250 H=3` 实为 **1.049×**（非 1.65×），`T512H4` 1.051×、`B8T2048H8` 0.951×；
+      且 §42.4 的 Triton baseline 245.9µs 是**低离群**（本轮同链测到 308/323/386µs，跨轮 ±25%）。
+      **结论**：**撤回**「张量图重编码＝host 税」的归因，1.65× 不可复现（基线采样产物）；一次编码复用
+      免费、逐位、生产该做，但**不解决任何已测性能问题**，不再当优化项。**方法学（新）**：`process_time`
+      在 launch 队列打满时读的是 **GPU 吞吐速率**、非纯 CPU；隔离纯 CPU 须用**不发 launch** 的入口。
+      见 `docs/07` §43。
+
 ### P8 小结 / 一页纸
 
 - [x] **P8-1** `docs/08-summary.md`：公式、结构、误差、性能、反向要点一页纸汇总
@@ -686,11 +702,28 @@
 - **`NSTAGE` 最优值依赖 store 路径 + BT**（P7-38，§41.4）：§24 在 BT=64/标量 `dh` store 上得
   「最优回到 `NS=1`」；换成 TMA store + `BT=16/32` 后 **深 pipeline 有正收益**（`B8T2048H8`
   1.6–1.7×，`NS=4` 附近最优）。跨配置不可外推，须实测。
+- **`process_time` 测「host 税」在 launch 队列打满时读的是 GPU 吞吐速率、非纯 CPU**（P7-40，§43.2）：
+  想把 host 端一项成本（如 `cuTensorMapEncodeTiled`）单独称出来，必须用**不发 launch**的入口
+  （本专题的 `b1t_encode_only`）；否则编码等 CPU 工作被藏在队列等待里（纯编码 3.8–4µs 加进 launch
+  后只看得见 ≤0.75µs）。跨实现的「小 shape host 回归」先做 run-to-run 复现（P7-40 的 1.65× 即
+  Triton 基线抽到低离群的产物，空闲卡实为 ~1.05×）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-39 补测**。
-  - P7-39（本轮）：**第一次把 K2 形状的手写 CUDA B1 落进完整反向链**（此前全是孤立 kernel
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-40 补测**。
+  - P7-40（本轮）：**关闭 P7-39 §42 的 host 税待验证**——把「`T=250 H=3` 的 1.65× 链回归＝
+    `launch_impl` 每次重编码张量图」直接测掉。给 `b1_tma_probe.cu` 加 `-DB1T_MAPCACHE`（`MapSet`+
+    `encode_maps`，`b1_tma_probe.cu:661-687`；encode-once 复用 `:700-714`）+ 探测符号
+    `b1t_encode_only`（只编码不 launch，`:788`）/ `b1t_mapcache_miss`（`:796`）。新增
+    `harness/check_bwd_b1_launch_tax.py`（`..._launch_tax.out.txt`，空闲卡）+ `docs/07` §43。
+    **Part A**：纯编码 **3.8–4.0µs/次**，加进 launch 后（队列反压主导）cache 只省 **0.15–0.75µs**
+    ⇒ 编码不是那笔税；cache 命中 **199/200**。**Part B**：cache vs no-cache `dh/dh0/dv2`
+    **逐位相同（max_abs=0，含非整除 T=250/513）**。**Part C（关键）**：空闲卡链 wall `T250H3`
+    实为 **1.049×**（非 1.65×）、`T512H4` 1.051×、`B8T2048H8` 0.951×；§42.4 的 Triton baseline
+    245.9µs 是**低离群**（本轮同链 308/323/386µs，±25%）。**结论**：**撤回** host 税归因，1.65×
+    不可复现；一次编码复用免费/逐位/生产该做，但不解决已测性能问题。**方法学**：`process_time`
+    在队列打满时读的是 GPU 吞吐速率、非纯 CPU，隔离纯 CPU 须用不发 launch 的入口。
+  - P7-39（上轮）：**第一次把 K2 形状的手写 CUDA B1 落进完整反向链**（此前全是孤立 kernel
     vs kernel，组装链 B1 一直是 Triton）。给 `b1_tma_probe.cu` 补 `dht`（终态伴随）入口
     （`b1_tma_probe.cu:258/341-357`，新增符号 `b1t_launch_dht` `:739`，语义对齐 Triton 的
     `HAS_DHT`），新增 `harness/check_bwd_b1_cuda_e2e.py`（`check_bwd_b1_cuda_e2e.out.txt`，空闲卡）
@@ -1226,14 +1259,22 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-39 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-40 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-40（`docs/07` §43）关闭 §42 的 host 税待验证**：加 `-DB1T_MAPCACHE`（张量图 encode-once
+    复用，`b1_tma_probe.cu:661-687/700-714`）+ 探测符号 `b1t_encode_only`/`b1t_mapcache_miss`，
+    新增 `harness/check_bwd_b1_launch_tax.py`（`..._launch_tax.out.txt`）。**纯编码 3.8–4.0µs/次**，
+    但加进 launch（队列反压主导）只省 **0.15–0.75µs**；cache 命中 **199/200**、数值**逐位无损**；
+    空闲卡链 wall `T250H3` 实为 **1.049×**（非 1.65×）、`B8T2048H8` 0.951×，§42.4 的 Triton
+    baseline 245.9µs 是**低离群**（±25%）。**结论**：**撤回**「张量图重编码＝host 税」的归因；
+    一次编码复用免费/生产该做但不解决性能问题；小 shape ~5% 差是 BT=16 CUDA 核本身（非 host）。
+    下一步工程重点仍是 B2/B3（链瓶颈 ~66%）与 CUDA B1 一起做成目标卡 CUDA。
   - **P7-39（`docs/07` §42）第一次把 K2 形状手写 CUDA B1 落进完整反向链**：补 `dht` 入口
     （`b1t_launch_dht`）、验证 CUDA-B1 是 Triton-B1 的逐位 drop-in（`dh/dv2/dh0` 1 bf16 ulp），
     CUDA-B1 链六项梯度 vs FLA 与 Triton 链同阶（`dq`/`dh0` 逐位相同），链级 wall 0.94–1.03× 不拖慢
-    （`B8T2048H8` 快 6%）。**遗留（待验证）**：(1) `launch_impl` 每次 `cuTensorMapEncodeTiled` 的
-    host 税在小 shape（`T=250`）显形为 1.65× 回归，生产须一次编码复用；(2) 部署粒度 `BT=16` 下
-    CUDA B1 相对 Triton 单核「依赖 shape」（小 shape 同档/略慢、大 shape 快 1.9×）。下一步工程重点
-    仍是把 B2/B3（链瓶颈，占 ~66%）与这个 CUDA B1 一起做成目标卡 CUDA。
+    （`B8T2048H8` 快 6%）。**遗留**：(1) ~~`launch_impl` 每次 `cuTensorMapEncodeTiled` 的 host 税
+    在小 shape（`T=250`）显形为 1.65× 回归~~ **已由 P7-40 关闭（结论：不可复现、非编码所致）**；
+    (2) 部署粒度 `BT=16` 下 CUDA B1 相对 Triton 单核「依赖 shape」（小 shape 同档/略慢、大 shape
+    快 1.9×）。下一步工程重点仍是把 B2/B3（链瓶颈，占 ~66%）与这个 CUDA B1 一起做成目标卡 CUDA。
   - **~~P7-36 的边界（待验证）~~（已解决）**：`tma2` 的 TMA store 侧复用握手（`dho`/`duo` + `cp.async.bulk`
     store + `bulk_group`）**已由 P7-37 补 `-DB1T_SPROXY`、并由 P7-38（`docs/07` §41）关闭边界**——把
     pipeline 加深到 `NS=6`、输出缓冲加深到 `SDEPTH=4`（含单缓冲极端）后，`tma2` 全族在 60 个配置上仍

@@ -1,0 +1,30 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY -DB1T_SPROXY ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1_tma_tax_nc.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY -DB1T_SPROXY -DB1T_MAPCACHE ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1_tma_tax_c.so
+================================================================================================
+Part A: host cost decomposition -- pure tensor-map encode vs full launch
+  process_time / call; 'cache' = -DB1T_MAPCACHE (encode-once reuse)
+================================================================================================
+  shape                  |  launch nc  launch c   enc nc   enc c?
+  tiny B1 T16 H1         |       7.72      6.99     3.86   (pure)
+  T250 H3                |      18.68     18.45     3.86   (pure)
+  B2 T1024 H8            |      62.78     62.41     3.87   (pure)
+  cache-hit proof: miss counter 3 -> 4 over 200 launches (so 199 hits)
+
+================================================================================================
+Part B: cache correctness -- cache vs no-cache (nonzero dht), max_abs must be 0
+================================================================================================
+  T128 H2                | dh max_abs=0.00e+00  dh0 max_abs=0.00e+00  dv2 max_abs=0.00e+00
+  T250 H3 (non-div)      | dh max_abs=0.00e+00  dh0 max_abs=0.00e+00  dv2 max_abs=0.00e+00
+  B2 T513 H2 (non-div)   | dh max_abs=0.00e+00  dh0 max_abs=0.00e+00  dv2 max_abs=0.00e+00
+
+====================================================================================================
+Part C: chain-wall reproducibility (idle card). Triton-B1 vs CUDA-B1(nc) vs CUDA-B1(c)
+  wall = event-pair / reps, R rounds; report median and min..max
+====================================================================================================
+  case               |                    Triton-B1 |                      CUDA nc |                       CUDA c |   c/nc  c/tri
+  T=512 H=4          |     312.6 (308..323) |     335.9 (333..359) |     327.1 (326..327) |  0.974  1.046
+  B8 T=2048 H=8      |    2251.1 (2244..2263) |    2146.3 (2136..2159) |    2146.4 (2136..2157) |  1.000  0.954
+  T=250 H=3 nondiv   |     313.2 (312..320) |     327.6 (327..328) |     328.5 (323..330) |  1.003  1.049
+
+DONE
