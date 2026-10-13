@@ -269,6 +269,9 @@ DEV void st2(float* p, float a, float b) {
 // final outputs, which share the exact mma-fragment layout) and `db` (merged into the `db`
 // reduction).  Supersedes the separate B3 kernel: B2+B3 become one K2-shape launch.
 // Requires the full production set (SAND's `daB`, GATE, DB, DKGB, DA) -- i.e. `B2M_PROD`.
+// P7-67: `B2M_INTRA` is now composable with `B2M_TMA` as well.  The production launch's TMA
+// branch originally omitted the trailing `dAqk` kernel argument (the two macros could not be
+// built together, docs/07 §67.4 boundary); it is now forwarded just like the non-TMA branch.
 #ifndef B2M_INTRA
 #define B2M_INTRA 0
 #endif
@@ -1928,6 +1931,9 @@ static int b2prod_launch_impl(const void* v, const void* vn, const void* h, cons
         (const float*)qptr, (const float*)kraw, (const float*)graw,
         (float*)dqg, (float*)dkg, (float*)dg, scale,
         (float*)db_out, (float*)dApre, (const float*)A4s, (float*)dAout,
+#if B2M_INTRA
+        (const float*)dAqk_in,
+#endif
         B, T, H, NT);
 #else
     b2mma_kernel<<<grid, NW * 32, smem, (cudaStream_t)stream>>>(

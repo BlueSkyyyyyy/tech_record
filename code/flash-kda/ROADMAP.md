@@ -847,6 +847,24 @@
        ~5–7%）；§67/§68 的默认建议不变。**坑**：`B2M_GATE` 下 raw `dq/dk` 缓冲**未初始化**（只存门控
        后的 `dqg/dkg`），误比 raw `dq/dk` 读出 O(1) 垃圾、误判成「mma 改坏门控」，须先查 flag 下哪些
        缓冲真被写。见 `docs/07` §69。
+- [x] **P7-67** 关闭 §67.4（P7-64）记录的边界「**`B2M_TMA` 与 `B2M_INTRA` 未打通（TMA 分支未传
+       `dAqk_in`）**」：`b2prod_launch_impl` 的 `#if B2M_TMA_ON` 分支启动内核时漏了 `B2M_INTRA` 下
+       内核签名末尾的 `const float* dAqk`（`b2_mma_probe.cu:707-709`），故 `-DB2M_TMA -DB2M_INTRA`
+       编不过（对照：删修复后 `error: too few arguments in function call`）。修复＝TMA 分支与非 TMA
+       分支写同一段 `#if B2M_INTRA (const float*)dAqk_in, #endif` 守卫（**算术一字未动**）；宿主
+       `b2prod_intra_launch` 本就 TMA-agnostic（张量图在 impl 内用指针现编码，`:1912-1919`），
+       harness 侧无需改 launcher。新增 `harness/check_bwd_b2_intra_tma.py`
+       （`harness/check_bwd_b2_intra_tma.out.txt`，空闲卡）+ `docs/07` §70。**Part A**：`prod_intra_tma`
+       vs `prod_intra` 六组 shape（含非整除 `T=250`、单 chunk `T=64`）**11 项输出 `max_abs=0`
+       （BIT-IDENTICAL）**——TMA 只换 stage 布局、不改任何 GEMM/门控/sandwich 算术（`dAqk` 两布局都
+       global 直读）。**Part B**：regs 144→128、smem 159.9→**149.1 KB**（−6.7%）、但 +12B spill；两者
+       都仍超 2 block/SM 的 smem 门槛、占用率仍 1 block/SM。**Part C（关键/诚实）**：CUPTI `dev`
+       TMA **一律慢 8–12%**（`B8T2048H8` 1642.7→1788.3；与 §66.4 的 1636.7 互证基线口径）、wall 大
+       shape ~9%。**结论**：边界关闭、开关随时可叠加且数值无损，但**目标卡 CUDA B2 默认取非 TMA**
+       ——TMA 在**孤立 GEMM 核**净赚 ~5%（§52），到**六段齐全的生产核**（§67/§68 已证非 DRAM bound）
+       反号成慢 8–12%（per-stage `mbar_wait+__syncthreads` 成净负）；再次印证「同一旋钮在孤立核与整核
+       可反号」（§61/§64）、「省字节要落最紧 pipe」（§51.6）。**待验证**：TMA × `-DB2M_DAMMA`、
+       TMA 版落 P7-64 整链（`pci` 变体）未做端到端。
 - [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
       边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
       （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
@@ -1265,8 +1283,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-66 补测**。
-  - P7-66（本轮）：**兑现 §68.5 点名的「唯一量级杠杆」——`mma.sync` 化 DA**。给 `b2_mma_probe.cu`
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-67 补测**。
+  - P7-67（本轮）：**关闭 §67.4（P7-64）记录的边界「`B2M_TMA` 与 `B2M_INTRA` 未打通」**。根因＝
+    `b2prod_launch_impl` 的 `#if B2M_TMA_ON` 分支漏传内核签名末尾的 `dAqk`（`:707-709`），
+    `-DB2M_TMA -DB2M_INTRA` 编不过（删修复后 `error: too few arguments`）。修复＝TMA 分支补
+    `#if B2M_INTRA (const float*)dAqk_in, #endif`（算术一字未动）；宿主 launcher 本就 TMA-agnostic。
+    新增 `harness/check_bwd_b2_intra_tma.py`（`check_bwd_b2_intra_tma.out.txt`，空闲卡）+ `docs/07` §70。
+    **Part A**：`prod_intra_tma` vs `prod_intra` 六组 shape（含非整除 T=250、单 chunk T=64）**11 项输出
+    逐位相同（max_abs=0）**。**Part B**：regs 144→128、smem 159.9→149.1 KB（−6.7%）+12B spill，仍
+    1 block/SM。**Part C（关键/诚实）**：CUPTI `dev` TMA **一律慢 8–12%**（B8T2048H8 1642.7→1788.3，
+    与 §66.4 的 1636.7 互证）。**结论**：边界关闭、开关可叠加且数值无损，但**目标卡 CUDA B2 默认取非
+    TMA**（孤立 GEMM 核净赚 ~5% 的旋钮，到六段齐全的生产核——已证非 DRAM bound——反号成慢 8–12%）。
     加 `-DB2M_DAMMA`（需 `B2M_DA`）：每 warp 用 `mma.sync.m16n8k8.tf32` 把 `dApre = dv@v^T - dw@kg^T`
     的每个 `[BT,BT]` partial 整块算出（2 n-tile × 每项 2 k-step，收缩自身 `BW=16` 切片），A/B 复用
     `dv/swall` 与 `vv/skg`（读法同 GEMM 核、tf32），partial 仍过 `dapart→da16` 归约。新增
@@ -2164,8 +2191,16 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-66 补测**，进入收尾/维护。
-  **P7-66（本轮）已兑现 §68.5 点名的「唯一量级杠杆」——`mma.sync` 化 DA**（`-DB2M_DAMMA`，需
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-67 补测**，进入收尾/维护。
+  **P7-67（本轮）已关闭 §67.4 的「`B2M_TMA` 与 `B2M_INTRA` 未打通」边界**：根因＝生产 launch 的
+  `#if B2M_TMA_ON` 分支漏传内核末尾的 `dAqk`（`b2_mma_probe.cu:707-709`），`-DB2M_TMA -DB2M_INTRA`
+  编不过（删修复后 `error: too few arguments`）。修复＝TMA 分支补同款 `#if B2M_INTRA` 守卫（算术一字
+  未动）；宿主 launcher 本就 TMA-agnostic。新增 `harness/check_bwd_b2_intra_tma.py`
+  （`check_bwd_b2_intra_tma.out.txt`）+ `docs/07` §70。**11 项输出逐位相同（max_abs=0，6 组含非整除
+  T=250/单 chunk）**；regs 144→128、smem 159.9→149.1KB（+12B spill）、仍 1 block/SM；**CUPTI `dev`
+  TMA 一律慢 8–12%**（B8T2048H8 1642.7→1788.3，与 §66.4 的 1636.7 互证）。**结论**：边界关闭、开关
+  可叠加且数值无损，但**目标卡 CUDA B2 默认取非 TMA**（孤立 GEMM 核净赚 ~5% 的旋钮在生产核反号）。
+  **P7-66 已兑现 §68.5 点名的「唯一量级杠杆」——`mma.sync` 化 DA**（`-DB2M_DAMMA`，需
   `B2M_DA`）：每 warp 用 `mma.sync.m16n8k8.tf32` 整块算 `dApre=dv@v^T - dw@kg^T` 的 `[BT,BT]`
   partial，partial 仍过 `dapart→da16` 归约。非 DA 七项输出**逐位不变**、只 `dApre/dA` 落 tf32 底噪；
   生产态 DA 边际（§68 的 L2→L3 消融）**185.4→83.3µs（0.45×）**、其余 shape 0.32–0.48×，**段内砍

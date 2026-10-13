@@ -7219,3 +7219,111 @@ row-major smem 直读（`rd`），所以 mma 只把冲突削掉 ~40%，不是 §
   `-DB2M_INTRA`/`-DB2M_TMA` 的整核组合只做了孤立正确性（TMA 逐位），**未做生产链端到端**（待验证）；
   未测 bf16 操作数下的 DA mma。
 
+## 70. 关闭 §67.4 的「`B2M_TMA` 与 `B2M_INTRA` 未打通」：一次实参转发的修复，逐位一致——但 TMA 在生产核里不划算（P7-67）
+
+§67.4（P7-64）在记录 K2 形状 CUDA B2 生产核落链时留下一条明确的边界：
+「**`B2M_TMA` 与 `B2M_INTRA` 未打通（TMA 分支未传 `dAqk_in`）**」。换句话说，P7-63 折叠进来的
+B3 对角 `intra`（`-DB2M_INTRA`）无法与 P7-49/§52 的 TMA 操作数布局（`-DB2M_TMA`）**同时编译**。
+本节把它关掉：定位根因（一处遗漏的实参转发）、修复、并核验「换布局不改数值」、再量清楚这对
+生产核到底有没有用。
+
+### 70.1 根因：生产 launch 的 TMA 分支漏传了内核的最后一个实参
+
+`b2_mma_probe.cu` 里 `b2prod_launch_impl` 按 `#if B2M_TMA_ON` 分成两条 `b2mma_kernel<<<...>>>`
+调用路径。内核签名在 `B2M_INTRA` 下于 SAND 参数之后多一个 `const float* dAqk`
+（`b2_mma_probe.cu:707-709`）：
+
+```c++
+#if B2M_INTRA
+             const float* __restrict__ dAqk,
+#endif
+             int B, int T, int H, int NT)
+```
+
+非 TMA 的 `#else` 分支把它传了（`b2_mma_probe.cu:1943-1945`），TMA 的 `#if B2M_TMA_ON` 分支
+（`b2_mma_probe.cu:1920-1931`）却在 `dAout` 之后直接跳到 `B, T, H, NT`——**漏掉了 `dAqk`**。
+于是 `-DB2M_TMA -DB2M_INTRA` 根本编不过。对照验证（把修复那 3 行删掉后编译）：
+
+```
+b2_nofix.cu(1934): error: argument of type "int" is incompatible with parameter of type "const float *"
+b2_nofix.cu(1934): error: too few arguments in function call
+```
+
+（首条是这个漏参数的典型连报：多出的 `int B` 落到了 `const float* dAqk` 形参上。）
+
+修复就是让 TMA 分支与非 TMA 分支写同一段守卫（**算术一字未动**）：
+
+```c++
+        (float*)db_out, (float*)dApre, (const float*)A4s, (float*)dAout,
+#if B2M_INTRA
+        (const float*)dAqk_in,
+#endif
+        B, T, H, NT);
+```
+
+值得注意的是 `b2prod_intra_launch` 的**宿主签名是 TMA-agnostic 的**：张量图是在
+`b2prod_launch_impl` **内部**用普通操作数指针现编码的（`b2_mma_probe.cu:1912-1919`），
+所以本次修复**不需要动 harness 侧**任何 launcher——同一个 `run_prod_intra` 对 TMA 与非 TMA
+两个 `.so` 都能用。
+
+### 70.2 Part A：换布局（cp.async → TMA）只改搬运、不改数值——11 项输出全 **逐位**
+
+在 `-DB2M_PROD -DB2M_INTRA` 基础上只多加 `-DB2M_TMA`，用**同一份操作数**跑
+（`harness/check_bwd_b2_intra_tma.py` Part A），逐项比 11 个输出：
+
+| case | NT | `dv2` | `dvb` | `dkgb` | `db` | `dApre` | `dA` | `dqg` | `dkg` | `dg` | `dw` | `dgk` |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| B8 T2048 H8 | 128 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| B2 T1024 H8 | 64 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| T512 H4 | 32 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| T256 H2 | 16 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| T250 H3 非整除 | 16 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| T64 H1 单 chunk | 4 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+
+**全表 `max_abs = 0.000e+00`（BIT-IDENTICAL）**，6 组 shape 含非整除 `T=250` 与单 chunk。
+这与 P7-49/§52、P7-60/§63 的结论一致：TMA 只换 stage 布局（`cp.async` → `cp.async.bulk.tensor`
++ per-stage `mbarrier`），所有 GEMM/门控/sandwich 的算术与累加序不变；而 `intra` 段的 `dAqk` 在
+两种布局下都从 global 直读（不进 TMA stage），故折叠进来的对角贡献也逐位不变。
+
+### 70.3 Part B：资源——TMA 反把 smem 降下来、寄存器略降，但多 12B spill
+
+| build | regs | spill | smem (B) |
+|---|---|---|---|
+| `prod_intra`（cp.async） | 144 | 0 | **159872** |
+| `prod_intra_tma`（TMA） | **128** | 12 | **149120** |
+
+TMA 版把 smem 从 159.9 KB 降到 149.1 KB（−6.7%），寄存器 144→128，但引入 12 B spill
+（`.B2M_DAMMA`，§69 同源）。两者都远超「2 block/SM」的 smem 门槛（227/2 ≈ 113.5 KB），
+**占用率仍被钉在 1 block/SM**——与 §63/§67 的 `prod` 形态相同。故资源侧的变化只影响 spill/指令数，
+不换占用率 regime。
+
+### 70.4 Part C：计时——TMA 在生产核里反而慢 8–12%（dev）
+
+| case | base dev (µs) | tma dev (µs) | **tma/base** | base wall | tma wall | wall ratio |
+|---|---|---|---|---|---|---|
+| B8 T2048 H8 | 1642.7 | 1788.3 | **1.089** | 1624.3 | 1770.4 | 1.090 |
+| B2 T1024 H8 | 214.6 | 232.3 | **1.082** | 219.1 | 236.8 | 1.081 |
+| T512 H4 | 23.6 | 25.8 | **1.092** | 76.6 | 77.7 | 1.015 |
+| T256 H2 | 21.6 | 24.0 | **1.107** | 77.2 | 78.4 | 1.016 |
+| T250 H3 非整除 | 22.5 | 25.0 | **1.110** | 77.9 | 79.3 | 1.018 |
+| T64 H1 单 chunk | 21.4 | 24.1 | **1.123** | 77.9 | 78.9 | 1.013 |
+
+CUPTI `dev` 上 TMA **在所有 shape 一律慢 8–12%**；event `wall` 大 shape 慢 ~9%、小 shape 被
+~77 µs host 税压平（~1.5%）。**交叉校验**：非 TMA 的 `prod_intra` dev `1642.7 µs` @`B8 T2048 H8`
+与 §66.4 的 `1636.7 µs` 互证（同一配置），说明本节基线口径正确。
+
+### 70.5 结论与设计输入
+
+- **边界关闭**：`-DB2M_TMA -DB2M_INTRA` 现在能编译，且 **11 项输出逐位一致**——「TMA 只换布局」
+  在含 `intra` 折叠的生产核上同样成立（补上 §67.4 的缺口）。
+- **但生产核默认取非 TMA**：在 **孤立 GEMM 核** 上 TMA 曾净赚 ~5%（P7-49/§52），到了**六段齐全的
+  生产核**（§67/§68 已证它是 `tensor 3%`、标量/发射受限、非 DRAM bound）就变成 **慢 8–12%**。
+  机制与本专题反复出现的判据一致：TMA 的收益来自「消 `cp.async` 的 L2 读放大 / 走独立引擎」，
+  而那**只有在核被 DRAM/L2 双侧钉住时才兑现**（§51.6「省字节要落最紧 pipe」）；生产核既已不是
+  带宽受限，TMA 增加的 per-stage `mbar_wait + __syncthreads` 反而成了净负。**「同一旋钮在孤立核
+  与整核里可以反号」**（同 §61/§64）。
+- **设计输入**：目标卡 CUDA B2 **默认用非 TMA 的 `prod[_hdw][_intra]`**；只有当核被重构成
+  `h/dh` 大操作数搬运主导、真正回到 DRAM-bound 时，`-DB2M_TMA` 才值得重开（届时用 §54 的
+  NAT 个 128 B swizzle atom）。本次修复保证这个开关**随时可叠加**且**数值无损**。
+- **边界/待验证**：只测 `K=V=128`、`BT=16`、fp32、`-DB2M_INTRA` 的折叠形态；`B2M_TMA` 与
+  `-DB2M_DAMMA`（§69）的组合、以及 TMA 版落进 P7-64 的整条反向链（`pci` 变体）未做端到端（待验证）。
