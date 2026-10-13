@@ -3651,6 +3651,33 @@
       `src/exception_bridge.cpp`）。配套博客 `content/posts/mega-moe-126-exception-layer`
       （索引页新增第 126 篇）。
 
+### P117 增量（opt-in，补齐第 4 篇只覆盖 softmax 那一路、第 5 篇只做前向的「路由反向」）
+
+- [x] **P117-1** **Mega Gate 路由的反向**（`csrc/apis/mega_gate.hpp` /
+      `deep_gemm/include/deep_gemm/impls/sm100_bf16_mega_gate.cuh` /
+      `deep_gemm/include/deep_gemm/epilogue/sm100_mega_gate.cuh`）：第 4 篇（P4-1）的 router 反向是
+      **softmax + 硬 top-k** 那一路，第 5/13 篇（P5-1）把 **Mega Gate** 前向拆透了，但它是
+      `sqrt(softplus(·))` 打分、**带 bias 排名、不带 bias 出权重**的另一套语义，且**只有前向、没有反向**
+      （DeepGEMM 不实现 gate 反向，主 kernel SM100 专属）。本篇补上这套打分的梯度推导并真机对拍。
+      → `docs/127-mega-gate-backward.md`（真实行号核对）：前向三件事——① 打分 `s=ssp(z)=sqrt(softplus(z))`
+      带**阈值 20 分支**（`epilogue:19-24`，`z>20` 直接 `sqrt(z)`）；② **排名用 `score+bias`、出权重用不带
+      bias 的 score**（`mega_gate.hpp:56-57` 注释 + `impls:397-398`），无 bias 时因 `ssp` 单调故**按 z 选 ≡
+      按 s 选**（`impls:420-423`）；③ 权重 `w_i=g·s_i/(Σ_j s_j + 1e-20)`（`epilogue:210-213`，`:212` 的
+      `+1e-20f`；共享专家槽恒 1.0、索引固定 `:194-195`）。反向三处非平凡：(1) 硬 top-k 是 straight-through
+      → **bias 对梯度路径完全透明**（只改「谁入选」）；(2) **归一化 Jacobian**
+      `ds_i = g(dy_i·S − Σ_j dy_j s_j)/S²`——与第 4 篇式 (6) 结构同构（分母换成 score 和、修正项换成 `Σ dy·s`）；
+      (3) **分段导数** `ssp'`：`z>20` 为 `1/(2√z)`、否则 `sigmoid(z)/(2√softplus(z))`，`z=20` 处连续。合起来
+      `dz_i=ds_i·ssp'(z_i)`（仅选中槽）、`dW_g=xᵀ dz`、`dx=dz·W_gᵀ`。**H100(sm90) 真机**
+      （`harness/exp_mega_gate_backward.{sh,py,out.txt}` + `src/mega_gate_backward.cu`）：A 前向/解析导数
+      vs double `2.52e-7`/`6.43e-8`、阈值探针 19.999/20/20.001 → 0.111806/0.111803/0.111801 **连续**；
+      B 无 bias「按 z 选 vs 按 s 选」**0/4096 不符**、有 bias **4096/4096 不符**；C 归一化 Jacobian vs
+      有限差分 `5.1e-11`；D 整 token gate 反向（T=4096,H=64,E=128,topk=6）device(fp32) vs double，
+      no-bias/with-bias 的 `dz/dW_g/dx` relerr 均 **~1.1e-7**；E `eps=1e-20` 影响 **0**；F 手写反向 vs
+      **torch autograd**（float64，6 组形状含/不含 bias）全部对齐到 **~2e-16** + 中心差分 `3.5e-9`。
+      边界：Mega Gate SM100 专属且只有前向，本篇的「反向」按它的语义推导；数值语义架构无关故可跑，
+      主 kernel UMMA/tcgen05/排序网络**仅分析**。配套博客 `content/posts/mega-moe-127-mega-gate-backward`
+      （索引页新增第 127 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3676,8 +3703,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P116 各增量完成（P15-1…P41-1、P42-1…P116-1）。**
-  本轮 P116-1：新建 `docs/126-deepgemm-deepep-exception-layer.md`
+- 当前进度：**P0~P14 全部完成；P15~P117 各增量完成（P15-1…P41-1、P42-1…P117-1）。**
+  本轮 P117-1：新建 `docs/127-mega-gate-backward.md`
+  （+`harness/exp_mega_gate_backward.{sh,py,out.txt}`、`src/mega_gate_backward.cu`）——补齐**第 4 篇只覆盖
+  softmax 那一路、第 5 篇只做前向的「路由反向」**：Mega Gate 是 `sqrt(softplus(·))` 打分、**带 bias 排名、
+  不带 bias 出权重**，且 DeepGEMM 只有前向。前向三件事（阈值 20 分段、排名/权重不同源、`w_i=g·s_i/(Σs+1e-20)`）；
+  反向三处非平凡（硬 top-k → bias 对梯度透明、归一化 Jacobian 与第 4 篇式 (6) 同构、`ssp'` 分段导数）。
+  H100(sm90) 真机：A 前向/导数 vs double 2.5e-7/6.4e-8、阈值连续；B 无 bias 单调等价 0/4096、有 bias 4096/4096；
+  C Jacobian vs 有限差分 5.1e-11；D 整 token 反向 device vs double ~1.1e-7；E eps 影响 0；
+  F 手写反向 vs torch autograd ~2e-16 + 中心差分 3.5e-9。索引页新增第 127 篇。
+  上一轮 P116-1：新建 `docs/126-deepgemm-deepep-exception-layer.md`
   （+`harness/exp_ep_dg_exception.{sh,py,out.txt}`、`src/exception_layer.cu`、
   `src/exception_bridge.cpp`）——补齐**所有 kernel 共用的「错误 / 断言层」**：两个异常类逐行对称
   （只差 `exception`/`error` 一词）、五个差异（单文件 vs 拆分、各自的 `*_CHECK`、

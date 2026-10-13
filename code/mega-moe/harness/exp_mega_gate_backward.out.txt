@@ -1,0 +1,52 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+--- CUDA (sm90) ---
+== A. sqrt_softplus 前向 / 解析导数 vs double (n=4194304, z~U[-60,60]) ==
+   forward  max_abs_err = 2.5244e-07
+   grad     max_abs_err = 6.4290e-08
+   阈值 20 连续性探针:
+   z= +19.9990  ssp=4.472024  d(ssp)/dz=0.111806
+   z= +20.0000  ssp=4.472136  d(ssp)/dz=0.111803
+   z= +20.0010  ssp=4.472248  d(ssp)/dz=0.111801
+   z= -60.0000  ssp=0.000000  d(ssp)/dz=0.000000
+   z=  +0.0000  ssp=0.832555  d(ssp)/dz=0.300281
+   z= +40.0000  ssp=6.324555  d(ssp)/dz=0.079057
+== B. 排名单调等价性 (T=4096, E=128, topk=8) ==
+   无 bias：按 z 选 vs 按 s=sqrt_softplus(z) 选 不符 = 0 / 4096
+   有 bias：按 z 选 vs 按 s+bias 选         不符 = 4096 / 4096 (bias 破坏单调，符合预期)
+== C. 权重归一化反向 Jacobian (k=8, g=1.50, eps=1e-20) ==
+   解析式 vs double 有限差分  max_abs_err = 5.1328e-11
+== D. 整 token gate 反向 (no bias, T=4096,H=64,E=128,topk=6,scaling=1.50) ==
+   dz  (device fp32) vs double : relerr = 1.1413e-07
+   dWg (由 device dz) vs double: relerr = 1.1387e-07
+   dx  (由 device dz) vs double: relerr = 1.1987e-07
+   (选中集合由 host double 给出，device 只算反向)
+== D. 整 token gate 反向 (with bias, T=4096,H=64,E=128,topk=6,scaling=1.50) ==
+   dz  (device fp32) vs double : relerr = 1.1173e-07
+   dWg (由 device dz) vs double: relerr = 1.1172e-07
+   dx  (由 device dz) vs double: relerr = 1.1359e-07
+   (选中集合由 host double 给出，device 只算反向)
+== E. eps=1e-20 的影响 (no bias) ==
+   dz  relerr(eps=0 vs 1e-20) = 0.0000e+00
+
+ALL DONE
+--- PYTHON ---
+Mega Gate 路由反向：手写推导 vs torch autograd (float64, CUDA)
+(DeepGEMM 的 Mega Gate 为 SM100 专属且只有前向；本实验验证其打分/权重语义的梯度)
+
+-- T=   64 H=  32 E=  64 K=4 scaling=1.5 bias=0
+     dWg relerr = 2.3520e-16   dx relerr = 2.2485e-16   dz relerr = 1.9671e-16
+-- T=   64 H=  32 E=  64 K=4 scaling=1.5 bias=1
+     dWg relerr = 2.7177e-16   dx relerr = 2.2177e-16   dz relerr = 1.9655e-16
+-- T=  256 H=  64 E= 128 K=6 scaling=1.5 bias=0
+     dWg relerr = 2.3708e-16   dx relerr = 2.2435e-16   dz relerr = 1.9517e-16
+-- T=  256 H=  64 E= 128 K=6 scaling=2.0 bias=1
+     dWg relerr = 2.6441e-16   dx relerr = 2.1205e-16   dz relerr = 1.7842e-16
+-- T=  512 H= 128 E= 256 K=8 scaling=1.5 bias=1
+     dWg relerr = 2.8830e-16   dx relerr = 2.2710e-16   dz relerr = 1.9075e-16
+-- T= 2048 H= 128 E= 256 K=6 scaling=1.0 bias=0
+     dWg relerr = 2.4664e-16   dx relerr = 2.1274e-16   dz relerr = 1.8011e-16
+
+-- 归一化 Jacobian 中心差分抽查 (T=8,E=32,K=5) --
+   解析 vs 中心差分 max_abs_err = 3.5417e-09
+
+ALL DONE
