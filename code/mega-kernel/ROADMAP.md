@@ -1620,6 +1620,33 @@
     release」以**更强**理由。判据 C1–C4、仍差 C5。**本轮新增实验**；P64-1 新留尾巴见 §53.9
     （纯写无 worker、regD 的 store 段含生成计时、`DW/K/D` 未扫、合成描述符、未与 DeepGEMM SM100 对跑）。
 
+### P65 实验扩展 47：写端握手归因的端到端形态（`docs/04-experiments.md` §54）
+
+- [x] **P65-1** 补掉 P64-1（§53）§53.9 明留的尾巴「**纯写口径**（`mode 9`、`grid=P`、无 worker）：
+  只量 producer 写端；**带 worker 的端到端归因未在本节跑**（§52.8 另一条尾巴）」，把 §52/§53 的
+  写端握手归因放回**有消费者**的流水，回答「有界环绑定时 §53 的握手税还看得见吗、谁在临界路径」。
+  见 `docs/04-experiments.md` **§54**，源码 `src/dyn_producer_carrier_e2e.cu`、脚本
+  `harness/dyn_producer_carrier_e2e.sh`、原始输出 `harness/dyn_producer_carrier_e2e.out.txt`
+  （目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`P=32 producer + G=100 worker`（grid=132
+  全共驻）、`DW=88`=352 B、`NDESC=393216`（138.4 MB ≫ L2）、`K=32`、`D=1`、`T=256`、min-of-3）。
+  新增 **mode 21 = 动态生产者(gen) + G worker + 可选数据面**（worker 用 TMA bulk load 取描述符并执行：
+  控制面折叠 + `uint4` 数据面流式读 + R 轮压舱）；复用 §52 六位正交编码与三写载体。核心结论：
+  - **§A 正确性**：mode21 `ser` 与无生产者 `static` **逐位一致**（`got=404219327039195`）。
+  - **§B（headline 一）有界环绑定（`CAPp`=16 批）时，背压×容量的乒乓往返主导（~20×）**：`BP=1`
+    的档全部塌到 ~5 GB/s（vs 纯写同协议 110 GB/s），而 `relhead`/`reltail` 与 `ser` 几乎重合
+    ——**内存序税被完全盖过**；`BP=0` 的 `skipbp`/`nobp_wa` 不被环窗卡住（105/101 GB/s ≈ 纯写）。
+    塌陷开关精确是**背压门**，不是 release/acquire、也不是载体。
+  - **§B2（headline 二）环容量不绑定（`CAP=NDESC`）时 §53 归因复现但衰减**：`reltail≈ser < relhead <
+    nobp_wa < skipbp < strall8`（`acquire` 免费、`release` 主因），但幅度从纯写的 **1.44×** 降到端到端
+    **1.17×（EDW=0）/1.12×（EDW=256）**——worker 侧与写侧部分重叠把固定缝摊掉一部分。
+  - **§C 临界路径**：`BP=0` 的端到端与纯写同量级（producer 写侧就是临界路径）；`BP=1` 端到端恒
+    ~4–5.5 且**与 P 几乎无关**（瓶颈从写吞吐换成环窗往返）→ 对 MPK 固定大队列 / DeepGEMM 容量上界 +
+    warmup wave / 「批量取 task」以**端到端**量化理由：**把窗开够大/批量取，比重写单条 release 重要一个量级**。
+  - **§D 载体**：`BP=1` 时载体差异被环窗抹平；`BP=0` 时复现 §53 的 `regD>tma>regS` 排序。
+  - 判据：`static`/`ser`/`nobp_wa` 均 C1–C4、**仍差 C5**（与 §47–§53 同档）。踩坑：**后台覆盖 `/tmp`
+    二进制重跑致 `nvcc` ETXTBSY 静默失败**（读到旧二进制，`strings` 分辨不出）——改用新路径编译+前台运行；
+    worker 跨步分配 + `D>1` 预取会跨 producer 子环边界**死锁**，端到端同步对照取 `D=1`。**本轮新增实验。**
+
 
 ## 每轮增量流程（autopilot）
 
@@ -1645,29 +1672,32 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P64-1 完成（1/1）**。补掉 P63-1（§52）§52.8 明留的尾巴——「**换栈（如 v4/coop 协作写，
-  见 §49/§50）会改变它，故本节比值不能外推到寄存器写载体**」。**唯一新变量 = 写载体**（同一 §52 骨架 +
-  同一六位正交握手编码、同 `DW=88`/`K=32`/`D=2`/`SB=4`/`T=256`/`grid=P`、纯写 `mode 9`、min-of-7）：
-  carrier 0 = **TMA bulk store**（= §52）；carrier 1 = **寄存器 copy-out**（SMEM→全 block `uint4`）；
-  carrier 2 = **寄存器直写**（不落 SMEM，每线程生成 `uint4` 直写 = §49/§50 v4 形态）。`docs/04-experiments.md`
-  新增 **§53**，源码 `src/dyn_producer_carrier_dep.cu`、脚本 `harness/dyn_producer_carrier_dep.sh`、原始输出
-  `harness/dyn_producer_carrier_dep.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2）。核心结论：
-  - **§A** 三载体正确档（`ser`/`stridedbp`）与 static **逐位一致**（`got=404219327039195`）。
-  - **§B/§B2（headline）§52 的 L 型加性、release 主导在三载体上逐档同形**（排序三列一致：
-    `reltail≈ser < relhead≈relboth < skipbp≈skiphd < nobp`；`reltail` 全 ≈1.00 = acquire 免费、
-    `relhead` 全 ≈1.10–1.13 = release 收 ~10–13%）；**但绝对数值不同、快载体相对罚更狠**：地板
-    `nobp` = **regD 721.6 > tma 609.9 > regS 588.7**，`ser→nobp` 落差 **29.9%/33.6%/36.8%**（§52.8
-    的「比值不能外推」被证实、但方向明确）。**寄存器 store 只在直写不经 SMEM 时优于 TMA**；经 SMEM
-    暂存（regS）反不如 TMA（588.7 < 609.9）。
-  - **§C×P** 三载体逐 P 同序（regD>tma>regS）、近似线性；**§D** 摊薄对三载体都有效且都饱和（S≥16
-    +1–2%），regD 在 S=32 达 639.8（比 tma 高 16%）。
-  - **§E（headline 之二）逐相位**：载体差异落 `gen`/`store` 此消彼长（tma/regS 的 `gen`≈3.5k、
-    regD `gen`=254 折进 `store`=2933；净地板 regD 3666 < tma 4442 < regS 4602）；协议代价落 `pub`
-    （release 收回 tma≈854/regS≈535/regD≈683）。**握手税绝对值三载体相近（~2.0–2.4k cycles/batch），
-    占比随地板抬升而变大** ⇒ 快载体不能靠「更快」摊掉协议，反而暴露更高占比——给 MPK「预计算
-    `FullTaskDesc` + 批量/环形摊薄一次 release」以**更强**理由。判据 C1–C4、仍差 C5。**本轮新增实验**；
-    P64-1 新留尾巴见 §53.9（纯写无 worker、regD 的 store 段含生成计时、`DW/K/D` 未扫、合成描述符、
-    未与 DeepGEMM SM100 对跑）。
+- 当前进度：**P65-1 完成（1/1）**。补掉 P64-1（§53）§53.9 明留的尾巴「**纯写口径**（`mode 9`、
+  `grid=P`、无 worker）：只量 producer 写端；**带 worker 的端到端归因未在本节跑**（§52.8 另一条尾巴）」，
+  把 §52/§53 的写端握手归因放回**有消费者**的流水。`docs/04-experiments.md` 新增 **§54**，源码
+  `src/dyn_producer_carrier_e2e.cu`、脚本 `harness/dyn_producer_carrier_e2e.sh`、原始输出
+  `harness/dyn_producer_carrier_e2e.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+  `P=32 producer + G=100 worker`（grid=132 全共驻）、`DW=88`=352 B、`NDESC=393216`（138.4 MB ≫ L2）、
+  `K=32`、`D=1`、`T=256`、min-of-3）。新增 **mode 21 = 动态生产者 + G worker + 可选数据面**。核心结论：
+  - **§A** mode21 `ser` 与无生产者 `static` **逐位一致**（`got=404219327039195`）。
+  - **§B（headline 一）有界环绑定（`CAPp`=16 批）时，背压×容量的乒乓往返主导（~20×）**：`BP=1` 的档
+    全部塌到 ~5 GB/s（vs 纯写同协议 110），`relhead`/`reltail` 与 `ser` 重合——**内存序税被完全盖过**；
+    `BP=0` 的 `skipbp`/`nobp_wa` 不被环窗卡住（105/101 GB/s ≈ 纯写）。开关精确是**背压门**。
+  - **§B2（headline 二）环容量不绑定（`CAP=NDESC`）时 §53 归因复现但衰减**：`reltail≈ser < relhead <
+    nobp_wa < skipbp < strall8`，幅度从纯写 1.44× 降到端到端 **1.17×（EDW=0）/1.12×（EDW=256）**。
+  - **§C 临界路径**：`BP=0` 端到端与纯写同量级（producer 临界）；`BP=1` 端到端恒 ~4–5.5 且**与 P 无关**
+    → 对 MPK 固定大队列 / DeepGEMM 容量上界 + warmup wave /「批量取 task」以**端到端**理由：**把窗开够大/
+    批量取，比重写单条 release 重要一个量级**。
+  - **§D 载体**：`BP=1` 时载体差异被环窗抹平；`BP=0` 时复现 `regD>tma>regS`。判据 C1–C4、**仍差 C5**。
+  踩坑：后台覆盖 `/tmp` 二进制重跑致 `nvcc` **ETXTBSY 静默失败**（读到旧二进制）——改新路径编译+前台运行；
+  worker 跨步分配 + `D>1` 预取会跨 producer 子环边界**死锁**，端到端同步对照取 `D=1`。**本轮新增实验。**
+- 此前：**P64-1 完成（1/1）**。补掉 P63-1（§52）§52.8 明留的尾巴——「**换栈（如 v4/coop 协作写，
+  见 §49/§50）会改变它，故本节比值不能外推到寄存器写载体**」。**唯一新变量 = 写载体**：
+  carrier 0 = **TMA bulk store**（= §52）；carrier 1 = **寄存器 copy-out**；carrier 2 = **寄存器直写**。
+  `docs/04` **§53**，源码 `src/dyn_producer_carrier_dep.cu`。核心结论：三载体正确档与 static 逐位一致；
+  `§52 的 L 型加性、release 主导在三载体上逐档同形`（`reltail≈ser`、`relhead` 收 ~10–13%），但绝对数值
+  不同、快载体相对罚更狠（`ser→nobp` 落差 29.9%/33.6%/36.8%）；寄存器 store 只在**直写不经 SMEM** 时
+  优于 TMA，经 SMEM 暂存（regS）反不如 TMA。判据 C1–C4、仍差 C5。
 - 此前：**P63-1 完成（1/1）**。补掉 P62-1（§51）§51.8 明留的**开放问题**——「§51.6 的『只拆背压
   或只拆发布都回 664、两者同时才 454』**未钉到 SASS/依赖链一级**」。**唯一新变量 = 归因编码**：把
   「发布握手」从 §51 的**单整数互斥编码**换成**六个正交布尔位**（`WA`/`BP`/`HD`/`REL`/`ACQ`/`FENCE`），
