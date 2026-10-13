@@ -15116,7 +15116,175 @@ occupancy 完全相同时**成立——**性能差来自每 round 的同步/交�
   2.13 vs 2.00、4.25 vs 4.00），可能来自 peak 参考口径或 kernel 起止边界，故**只采信同族相对值与
   「大 grid 滞后」的方向**，绝对驻留块数按 `eff` 校准；(2) ncu 串行化并抬高绝对时间，§A/§B 的
   deliver 取**未 profile 的计时行**（与 §93 同档：2691/4549/7007/6666）；(3) achieved occupancy 是
-  **时间平均**，未做逐 SM/逐波时间线；(4) 只测 H100/sm90a、单一 cluster 尺寸 `C=4`（未扫 `C` 对
-  放置墙的影响）；(5) 指令归因只取 4 个 aggregate counter，未把 `MBARRIER.ARRIVE` 单列
+   **时间平均**，未做逐 SM/逐波时间线；(4) 只测 H100/sm90a、单一 cluster 尺寸 `C=4`（未扫 `C` 对
+   放置墙的影响）——**已由 §100（P175-1）补掉**：扫 `C=2..16` 并用 `cudaOccupancyMaxActiveClusters`
+  对账，发现墙随 `C` 变化、`C=2` 无墙，且 grid 超过 `maxActiveClusters·C` 会「放置悬崖」；
+   (5) 指令归因只取 4 个 aggregate counter，未把 `MBARRIER.ARRIVE` 单列
   （`smsp__inst_executed_op_shared_atom.sum=0`，故 arrive 不计入 shared atom），故「省 arrive」
   以 `shared_ld` 减半 + 总指令 ×1.45 为代理证据。
+
+## 100. cluster 放置墙的细化：cluster 感知占用率 API 对账 + 扫 `C` + 找「放置悬崖」（P175-1）
+
+本节补掉 §99.8 明留的尾巴「只测 H100/sm90a、单一 cluster 尺寸 `C=4`（未扫 `C` 对放置墙的
+影响）」，并把 §99 的「`occ` 在 cluster kernel 上会高估 `eff`」从**现象**推进到**可用工具**：
+CUDA 提供的 **cluster 感知占用率 API** `cudaOccupancyMaxActiveClusters`（它**建模 cluster 的
+GPC 连续放置**，而 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` 不建模）。三个问题：
+Q1 三种占用率读数（blocks API / cluster API / ncu achieved）在扫 `C` 时谁对账谁不对账；
+Q2 放置墙随 `C` 的形状；Q3 墙在 grid 维度上会不会变成**悬崖**、能否被 cluster API 精确预测。
+
+### 100.1 问题
+
+- **Q1**：§93/§99 用 `occ`（`cudaOccupancyMaxActiveBlocksPerMultiprocessor`）与
+  `eff=min(occ, grid/nsm)` 解释吞吐；§99 发现它在 cluster kernel 上**高估**并发。换成
+  `cudaOccupancyMaxActiveClusters` 后，能否逐档对上 ncu 的 achieved occupancy？
+- **Q2**：§99 的「放置墙」是 `C=4` 的偶然，还是随 cluster 尺寸 `C` 变化？有没有「无墙」的 `C`？
+- **Q3**：墙若存在，在**提高 grid（请求更多块/SM）**时是平滑退化还是**悬崖**？悬崖位置能否
+  被 cluster API 提前算出？
+
+### 100.2 方法
+
+**复用**既有源码、不改任何既有语义：`src/multicast_occupancy.cu`（§93 的 load-path kernel
+`mcast_nat` / 广播 `B` 命令），本节只向该文件**新增一个只读子命令** `P <C> <grid> <KB> <L>
+<padKB> <maxr>`——用同一 SMEM/`TH=128`/cluster 配置调用 `cudaOccupancyMaxActiveClusters`
+并打印 `maxActiveClusters` 与折算的 `cluster_occ_blocks/SM = maxActiveClusters·C/nsm`。
+新增脚本 `harness/cluster_placement_wall.sh`、原始输出 `harness/cluster_placement_wall.out.txt`
+（目标卡 H100 / sm90a、**DEV 自动选最闲 device（本次落 device 6）**、nvcc 13.2、
+每配置独立进程以避免 sticky context）。`TH=128`（4 warp/块），故
+「ncu 驻留块/SM = `sm__warps_active.avg.pct_of_peak_sustained_active` × 64 / 4 / 100」。
+
+### 100.3 §A 三种占用率读数并置（`grid=1056`，`L=2`/16KB，`mode0`）
+
+```
+  C  cluster_req  maxActiveClusters  cluster-API 块/SM   blocks-API occ/eff   ncu achieved 块/SM
+ --- ----------- ------------------ ------------------ ------------------- -------------------
+   1    1056           1056              8.00              13 / 8                —
+   2     528            528              8.00              13 / 8               7.79
+   3     352            327              7.43              13 / 8                —
+   4     264            248              7.52              13 / 8               7.12
+   6     176            163              7.41              13 / 8                —
+   8     132            124              7.52              13 / 8               7.04
+  12      88             74              6.73              13 / 8                —
+  16      66             58              7.03              13 / 8               6.28
+```
+
+- **blocks API（`occ`/`eff`）对所有 `C` 恒报 8 块/SM**——它把 cluster 当普通 grid，**完全看不见
+  放置墙**，正是 §99.8 记的「静态上界不建模 cluster 放置」。
+- **cluster API 随 `C` 变化**：`C=2` 无墙（528 cluster = 8.00 块/SM，恰好等于请求），
+  `C≥4` 出现墙（7.52/7.52/7.03）。
+- **ncu achieved 与 cluster API 同序**：`C=2` 7.79 > `C=4` 7.12 > `C=8` 7.04 > `C=16` 6.28，
+  逐档低于 cluster API 约 3–11%（§99 同一口径 caveat：achieved 是时间平均、受机器争用）。
+  ⇒ **cluster API 才是这一族 kernel 的正确静态占用率预测器**。
+
+### 100.4 §B 扫 `C` 的 deliver 吞吐（`grid=1056`，`R=300`）
+
+```
+  C   cluster-API 块/SM   deliver GB/s
+ --- ------------------ ------------
+   2       8.00            9136
+   3       7.43            6381
+   4       7.52            6669
+   6       7.41            6706
+   8       7.52            6697
+  12       6.73            6304
+  16       7.03            6092
+```
+
+- **`C=2` 是唯一「无墙」档、也是唯一明显高出一档的吞吐（9.14 TB/s）**；`C≥3` 全落在
+  6.1–6.7 TB/s。
+- **注意 `C` 尺寸本身还带一笔同步成本**（每轮一次 `cluster.sync()`）：§F 用 `grid=128`
+  （1 块/SM、无放置压力）隔离出这笔——`C=2/4/8/16` = 2571/2611/2471/2238 GB/s，
+  `C=16` 比 `C=4` 慢 ~14%。故 §B 的 `C=2` 优势**混合了「无墙（+6% 占用率）」与「2 块同步更轻」**
+  两个机制，但两者量级都远小于实测的 37% 差——第三笔来自 §D 的**尾波**。
+
+### 100.5 §D（headline）放置悬崖：固定 `C=4` 扫 grid（cluster-API 上限 = 248 cluster = 992 块）
+
+```
+  grid   clusters   请求块/SM   deliver GB/s
+ ----- ---------- ----------- ------------
+   264     66         2          4547
+   528    132         4          7002
+   792    198         6          8837
+   896    224         7          9332
+   928    232         7          9410
+   992    248         8        9624   ← 峰值：恰 = maxActiveClusters(=248)×C
+  1024    256         8          7111   ← 悬崖：+3.2% 工作量，deliver −26%
+  1056    264         8          6661
+```
+
+- **cluster API 精确预测了悬崖位置**：`C=4` 的 `maxActiveClusters=248`，故 `248×4=992` 是
+  **能一次性驻留的最大 grid**；deliver 恰在 `grid=992` 达峰值 **9.62 TB/s**（甚至高于 §93/§99
+  记的「~7 TB/s 聚合墙」35%），**超过一格就崩**（`1024→7111`、`1056→6661`）。
+- **机制**：多出的 cluster（`grid>992` 时 8–16 个）挤不进一次驻留，形成**低占用的尾波**
+  （`wave`：`256/248=1.03`），尾波以远低于稳态的效率跑，把总时间拉长。**不是**带宽被
+  需求本身压垮，而是**放置约束把超出的 cluster 排队**。
+- 对照 `C=2`（cap = `528×2=1056`，`grid≤1056` 内**永不触墙**）：`grid=992→8880`、
+  `grid=1056→9146` 仍单调上升、无悬崖。
+- ⇒ **对 megakernel 的直接含义**：用 cluster 时**必须把 grid 停在 cluster API 给出的
+  `maxActiveClusters·C` 以内**，否则吞吐断崖式下跌；`cudaOccupancyMaxActiveClusters` 是把这条
+  算出来的工具。
+
+### 100.6 §E SMEM-pad 轴：`cluster API` vs `blocks API`（`grid=1056`）
+
+```
+  载体   pad   smem/块  blocks-API occ   cluster-API 块/SM
+ ------ ---- ------- --------------- -------------------
+  C=4     0    16KB        13              7.52
+  C=4    16    32KB         6              5.64
+  C=4    48    64KB         3              2.79
+  C=4    96   112KB         2              1.88
+  C=4   144   160KB         1              0.91
+  C=2     0    16KB        13              8.00   (= occ)
+  C=2    48    64KB         3              3.00   (= occ)
+  C=2    96   112KB         2              2.00   (= occ)
+  C=2   144   160KB         1              1.00   (= occ)
+```
+
+- **`C=2` 时 cluster API 逐档 == blocks API**（8/3/2/1）——**无墙的 `C` 上两 API 一致**。
+- **`C=4` 时 cluster API 逐档低于 blocks API 约 6–9%**（13→7.52、6→5.64、3→2.79、2→1.88、1→0.91；
+  `pad=144` 的 0.91 是同 §99 的 `grid/nsm` 折算口径）。§99 §B 的 achieved（6→5.20、3→2.94、
+  2→2.00、1→1.00）**正好夹在 blocks API 与 cluster API 之间/附近**——cluster API 把「墙」量到
+  了正确的档位。
+
+### 100.7 §F 隔离 cluster 同步成本（`grid=128`，1 块/SM，无放置压力）
+
+```
+  C   cluster-API 块/SM   deliver GB/s
+ --- ------------------ ------------
+   2       8.00            2571
+   4       7.52            2611
+   8       7.52            2471
+  16       7.03            2238
+```
+
+在无放置压力（`grid=128`，每 SM 只 1 块）时，`C` 对吞吐只有 ~14% 的影响（`C=16` 的
+`cluster.sync` 更贵），且**与 §B 的 `C` 排序不同**（此处 `C=4` 略高于 `C=2`）。⇒ §B 里
+`C=2` 相对 `C≥4` 的 ~37% 优势**不来自同步**，主体是 §D 的**驻留/尾波**效应。
+
+### 100.8 结论、判据与局限
+
+- **结论一（headline，Q1）**：**cluster 感知占用率 API（`cudaOccupancyMaxActiveClusters`）
+  是 cluster kernel 的正确静态预测器**——它逐档给出 `C=2/4/8/16 → 8.00/7.52/7.52/7.03` 块/SM，
+  与 ncu achieved 同序；而 §93/§99 用的 blocks API 恒报 8、**完全看不见墙**。建议把
+  §86–§99 里的 `occ`/`eff`（cluster kernel 段）改读 cluster API 口径。
+- **结论二（headline，Q2/Q3）**：**墙随 `C` 变化，且表现为「放置悬崖」**——`C=2` 无墙
+  （`grid≤1056` 内永不触顶）；`C=4` 的墙在 `grid=992`（=`maxActiveClusters·C`）处达 deliver
+  峰值 **9.62 TB/s**，`grid=1024` 即崩到 7111（−26%）。**cluster API 精确预测悬崖位置**。
+- **结论三（修正 §93/§99 的读法）**：§93 的「~7 TB/s 聚合墙」其实是 **`C=4`/`grid=1056`
+  这一放置受限工作点**的值，不是硬墙——把 grid 收到 `992`（同一 kernel）即达 9.6 TB/s，
+  `C=2` 在 `1056` 亦达 9.1 TB/s。
+- **结论四**：`C` 尺寸另带一笔 `cluster.sync` 同步成本（§F，`C=16` ~−14%），但与放置墙正交、
+  量级较小。
+- **对生产的印证**：DeepGEMM Mega MoE/Gate 的 `cluster_dim` 是**编译期固定的极小值**
+  （Mega MoE `(2,1,1)`、Mega Gate `num_mma_ctas`，`docs/02` §1.2/§1.5；本专题 §22/§23/§33），
+  正是**回避大 `C` 的放置墙**——`C=2` 既无 placement 墙、`cluster.sync` 又最轻。MPK 侧
+  in-kernel task 图不依赖 cluster 放置、用去中心化 event queue（`docs/06`）规避同类问题。
+  本节给「段级 mega-kernel 为什么用最小 cluster」一个可直接读出的硬件理由。
+- **判据（C1–C5，`docs/00` §3）**：`mcast_nat` 是 cluster load-path 微基准，与 §18/§19/§93/§99
+  同档（C1+C2+C3、`cluster.sync`/TMA 细化 **C4**、**非 C5**）。本节是计量学细化，不改机制。
+- **局限（诚实标注）**：(1) achieved occupancy 是**时间平均 + 受同机争用**，absolute 有 ±5%
+  抖动（§99 同配置曾报 41.88%，本节 44.52%），故只采信**同族相对排序与方向**；(2) deliver
+  取**未 profile 的计时行**（`mode0`，与 §93/§99 同档）；(3) 只测 H100/sm90a（132 SM / 8 GPC），
+  未测其它 SM 数的放置形状；(4) 只测 `mcast_nat` 一个 kernel、`L=2`/`KB=8` 一档，未扫 `mode1`
+  （multicast）与其它 chunk；(5) 尾波机制是**吞吐差的推断解释**（未做逐波时间线/逐 SM 占用），
+  仅 `C=4` 的悬崖位置由 cluster API 硬预测；(6) 未把 `MBARRIER.ARRIVE` 单列（ncu 无该 counter，
+  同 §99.8(5)）。

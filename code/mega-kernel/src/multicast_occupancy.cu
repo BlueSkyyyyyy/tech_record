@@ -27,6 +27,7 @@
 // 用法：见 harness/multicast_occupancy.sh（每配置独立进程 —— cluster launch failure 会 sticky 污染 context）
 //   O <L> <padKB>                 打印 mcast_nat 及各 __maxnreg__ 变体在该 SMEM 下的实测占用率
 //   B <C> <grid> <KB> <R> <mode> <L> <padKB> <maxr>
+//   P <C> <grid> <KB> <L> <padKB> <maxr>   cluster 感知占用率 API 读数（P175-1 §100，只读）
 //   目标卡 H100 / sm90a。
 // ============================================================================
 #include <cstdio>
@@ -309,6 +310,39 @@ int main(int argc, char** argv) {
              ms * 1e3, deliv / (ms / 1e3) / 1e9, deliv / (ms / 1e3) / 1e9 / grid,
              src_read / (ms / 1e3) / 1e9, err);
     else printf("FAILED\n");
+  } else if (!strcmp(cmd, "P")) {
+    // P175-1（§100）：cluster 感知占用率 API（cudaOccupancyMaxActiveClusters）的读数，
+    // 与 blocks-per-SM 占用率 API（cudaOccupancyMaxActiveBlocksPerMultiprocessor，不建模
+    // cluster 的 GPC 连续放置）对同一配置对账。**只读，不改任何既有语义。**
+    int C = atoi(argv[2]), grid = atoi(argv[3]), KB = atoi(argv[4]),
+        L = atoi(argv[5]), padKB = atoi(argv[6]), maxr = atoi(argv[7]);
+    int box1 = KB * 1024 / 4 / 256;
+    int chunk = 256 * box1;
+    size_t smem = (size_t)L * chunk * 4 + (size_t)padKB * 1024;
+    void* kern = pick_kernel(maxr);
+    cudaFuncSetAttribute((const void*)kern,
+                         cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+    if (smem >= 48 * 1024)
+      cudaFuncSetAttribute((const void*)kern,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+    int occ = 0;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, (const void*)kern, TH, smem);
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3(grid); cfg.blockDim = dim3(TH);
+    cfg.dynamicSmemBytes = smem; cfg.stream = 0;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeClusterDimension;
+    at[0].val.clusterDim.x = C; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+    cfg.attrs = at; cfg.numAttrs = 1;
+    int nclu = -1;
+    cudaError_t e = cudaOccupancyMaxActiveClusters(&nclu, (const void*)kern, &cfg);
+    int nsm = num_sm();
+    double req_clu = (double)grid / C;
+    double blk_sm = (nclu > 0) ? (double)nclu * C / nsm : -1;
+    printf("P C=%2d grid=%4d KB=%2d L=%2d pad=%3dKB maxr=%3d smem=%zuKB | occ=%2d blk/SM | "
+           "maxActiveClusters=%d (%s) | clusters_req=%.0f | cluster_occ_blocks/SM=%.2f\n",
+           C, grid, KB, L, padKB, maxr, smem / 1024, occ, nclu,
+           e == cudaSuccess ? "ok" : cudaGetErrorString(e), req_clu, blk_sm);
   } else { printf("unknown cmd %s\n", cmd); return 1; }
   return 0;
 }

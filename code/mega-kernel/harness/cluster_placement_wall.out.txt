@@ -1,0 +1,136 @@
+########## §100 cluster 放置墙的细化（P175-1） ##########
+# DEV=6  nvcc -O3 -arch=sm_90a  (CUDA 13.2)
+
+===== 编译（复用 src/multicast_occupancy.cu，新增只读子命令 P） =====
+ok: /tmp/mcast_occ_pw
+# numSM=132
+
+===== §A 三种占用率读数并置（grid=numSM·8=1056，L=2/16KB，KB=8，mode0） =====
+#   P 行 = cluster 感知 API（cudaOccupancyMaxActiveClusters）；B 行 = blocks/SM API 的 occ/eff
+$ MULTICAST_OCC P 1 1056 8 2 0 0
+P C= 1 grid=1056 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=1056 (ok) | clusters_req=1056 | cluster_occ_blocks/SM=8.00
+$ MULTICAST_OCC P 2 1056 8 2 0 0
+P C= 2 grid=1056 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=528 (ok) | clusters_req=528 | cluster_occ_blocks/SM=8.00
+$ MULTICAST_OCC P 3 1056 8 2 0 0
+P C= 3 grid=1056 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=327 (ok) | clusters_req=352 | cluster_occ_blocks/SM=7.43
+$ MULTICAST_OCC P 4 1056 8 2 0 0
+P C= 4 grid=1056 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=248 (ok) | clusters_req=264 | cluster_occ_blocks/SM=7.52
+$ MULTICAST_OCC P 6 1056 8 2 0 0
+P C= 6 grid=1056 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=163 (ok) | clusters_req=176 | cluster_occ_blocks/SM=7.41
+$ MULTICAST_OCC P 8 1056 8 2 0 0
+P C= 8 grid=1056 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=124 (ok) | clusters_req=132 | cluster_occ_blocks/SM=7.52
+$ MULTICAST_OCC P 12 1056 8 2 0 0
+P C=12 grid=1056 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=74 (ok) | clusters_req=88 | cluster_occ_blocks/SM=6.73
+$ MULTICAST_OCC P 16 1056 8 2 0 0
+P C=16 grid=1056 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=58 (ok) | clusters_req=66 | cluster_occ_blocks/SM=7.03
+
+===== §B ncu achieved occupancy 对账（grid=1056，R=300，mode0；应随 §A 的 cluster-API 排序） =====
+$ MULTICAST_OCC B 2 1056 8 300 0 2 0 0
+B C= 2 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  567.291 us | deliver  9149.5 GB/s | per-blk    8.7 GB/s | src-read  9149.5 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ} /tmp/mcast_occ_pw B 2 1056 8 300 0 2 0 0
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_shared_mem                      block           13
+        launch__waves_per_multiprocessor                                      0.62
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        48.68
+$ MULTICAST_OCC B 4 1056 8 300 0 2 0 0
+B C= 4 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  779.910 us | deliver  6655.2 GB/s | per-blk    6.3 GB/s | src-read  6655.2 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ} /tmp/mcast_occ_pw B 4 1056 8 300 0 2 0 0
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_shared_mem                      block           13
+        launch__waves_per_multiprocessor                                      0.62
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        44.52
+$ MULTICAST_OCC B 8 1056 8 300 0 2 0 0
+B C= 8 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  774.902 us | deliver  6698.2 GB/s | per-blk    6.3 GB/s | src-read  6698.2 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ} /tmp/mcast_occ_pw B 8 1056 8 300 0 2 0 0
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_shared_mem                      block           13
+        launch__waves_per_multiprocessor                                      0.62
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        44.02
+$ MULTICAST_OCC B 16 1056 8 300 0 2 0 0
+B C=16 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  846.838 us | deliver  6129.2 GB/s | per-blk    5.8 GB/s | src-read  6129.2 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ} /tmp/mcast_occ_pw B 16 1056 8 300 0 2 0 0
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_shared_mem                      block           13
+        launch__waves_per_multiprocessor                                      0.62
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        39.26
+
+===== §C 扫 C 的 deliver 吞吐（grid=1056，R=300；C=2 无放置墙 vs C≥4 有） =====
+$ MULTICAST_OCC B 2 1056 8 300 0 2 0 0
+B C= 2 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  568.107 us | deliver  9136.4 GB/s | per-blk    8.7 GB/s | src-read  9136.4 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 3 1056 8 300 0 2 0 0
+B C= 3 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  813.371 us | deliver  6381.4 GB/s | per-blk    6.0 GB/s | src-read  6381.4 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 4 1056 8 300 0 2 0 0
+B C= 4 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  778.358 us | deliver  6668.5 GB/s | per-blk    6.3 GB/s | src-read  6668.5 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 6 1056 8 300 0 2 0 0
+B C= 6 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  773.962 us | deliver  6706.3 GB/s | per-blk    6.4 GB/s | src-read  6706.3 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 8 1056 8 300 0 2 0 0
+B C= 8 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  775.030 us | deliver  6697.1 GB/s | per-blk    6.3 GB/s | src-read  6697.1 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 12 1056 8 300 0 2 0 0
+B C=12 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  823.360 us | deliver  6304.0 GB/s | per-blk    6.0 GB/s | src-read  6304.0 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 16 1056 8 300 0 2 0 0
+B C=16 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  852.019 us | deliver  6091.9 GB/s | per-blk    5.8 GB/s | src-read  6091.9 GB/s | maxerr 0.00000
+
+===== §D 放置悬崖：固定 C=4 扫 grid（cluster-API 上限 = 248 cluster = 992 块） =====
+$ MULTICAST_OCC B 4 264 8 300 0 2 0 0
+B C= 4 grid= 264 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 2 waves=1.00 |  285.354 us | deliver  4547.4 GB/s | per-blk   17.2 GB/s | src-read  4547.4 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 4 528 8 300 0 2 0 0
+B C= 4 grid= 528 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 4 waves=1.00 |  370.666 us | deliver  7001.5 GB/s | per-blk   13.3 GB/s | src-read  7001.5 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 4 792 8 300 0 2 0 0
+B C= 4 grid= 792 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 6 waves=1.00 |  440.496 us | deliver  8837.4 GB/s | per-blk   11.2 GB/s | src-read  8837.4 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 4 896 8 300 0 2 0 0
+B C= 4 grid= 896 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 6 waves=1.13 |  471.931 us | deliver  9331.9 GB/s | per-blk   10.4 GB/s | src-read  9331.9 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 4 928 8 300 0 2 0 0
+B C= 4 grid= 928 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 7 waves=1.00 |  484.712 us | deliver  9410.3 GB/s | per-blk   10.1 GB/s | src-read  9410.3 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 4 992 8 300 0 2 0 0
+B C= 4 grid= 992 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 7 waves=1.07 |  506.659 us | deliver  9623.6 GB/s | per-blk    9.7 GB/s | src-read  9623.6 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 4 1024 8 300 0 2 0 0
+B C= 4 grid=1024 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 7 waves=1.11 |  707.805 us | deliver  7111.0 GB/s | per-blk    6.9 GB/s | src-read  7111.0 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 4 1056 8 300 0 2 0 0
+B C= 4 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  779.237 us | deliver  6660.9 GB/s | per-blk    6.3 GB/s | src-read  6660.9 GB/s | maxerr 0.00000
+# C=2 对照（cap = 528 cluster = 1056 块，grid≤1056 内无墙）：
+$ MULTICAST_OCC B 2 992 8 300 0 2 0 0
+B C= 2 grid= 992 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 7 waves=1.07 |  549.110 us | deliver  8879.6 GB/s | per-blk    9.0 GB/s | src-read  8879.6 GB/s | maxerr 0.00000
+$ MULTICAST_OCC B 2 1056 8 300 0 2 0 0
+B C= 2 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  567.541 us | deliver  9145.5 GB/s | per-blk    8.7 GB/s | src-read  9145.5 GB/s | maxerr 0.00000
+
+===== §E SMEM-pad 轴：cluster API vs blocks API（grid=1056） =====
+# C=4（有墙）：blocks API=occ，cluster API 应低于 occ
+$ MULTICAST_OCC P 4 1056 8 2 0 0
+P C= 4 grid=1056 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=248 (ok) | clusters_req=264 | cluster_occ_blocks/SM=7.52
+$ MULTICAST_OCC P 4 1056 8 2 16 0
+P C= 4 grid=1056 KB= 8 L= 2 pad= 16KB maxr=  0 smem=32KB | occ= 6 blk/SM | maxActiveClusters=186 (ok) | clusters_req=264 | cluster_occ_blocks/SM=5.64
+$ MULTICAST_OCC P 4 1056 8 2 48 0
+P C= 4 grid=1056 KB= 8 L= 2 pad= 48KB maxr=  0 smem=64KB | occ= 3 blk/SM | maxActiveClusters=92 (ok) | clusters_req=264 | cluster_occ_blocks/SM=2.79
+$ MULTICAST_OCC P 4 1056 8 2 96 0
+P C= 4 grid=1056 KB= 8 L= 2 pad= 96KB maxr=  0 smem=112KB | occ= 2 blk/SM | maxActiveClusters=62 (ok) | clusters_req=264 | cluster_occ_blocks/SM=1.88
+$ MULTICAST_OCC P 4 1056 8 2 144 0
+P C= 4 grid=1056 KB= 8 L= 2 pad=144KB maxr=  0 smem=160KB | occ= 1 blk/SM | maxActiveClusters=30 (ok) | clusters_req=264 | cluster_occ_blocks/SM=0.91
+# C=2（无墙）：cluster API 应 == occ 逐档
+$ MULTICAST_OCC P 2 1056 8 2 0 0
+P C= 2 grid=1056 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=528 (ok) | clusters_req=528 | cluster_occ_blocks/SM=8.00
+$ MULTICAST_OCC P 2 1056 8 2 48 0
+P C= 2 grid=1056 KB= 8 L= 2 pad= 48KB maxr=  0 smem=64KB | occ= 3 blk/SM | maxActiveClusters=198 (ok) | clusters_req=528 | cluster_occ_blocks/SM=3.00
+$ MULTICAST_OCC P 2 1056 8 2 96 0
+P C= 2 grid=1056 KB= 8 L= 2 pad= 96KB maxr=  0 smem=112KB | occ= 2 blk/SM | maxActiveClusters=132 (ok) | clusters_req=528 | cluster_occ_blocks/SM=2.00
+$ MULTICAST_OCC P 2 1056 8 2 144 0
+P C= 2 grid=1056 KB= 8 L= 2 pad=144KB maxr=  0 smem=160KB | occ= 1 blk/SM | maxActiveClusters=66 (ok) | clusters_req=528 | cluster_occ_blocks/SM=1.00
+
+===== §F 隔离 cluster 同步成本：grid=numSM·1≈1 块/SM（grid=128，无放置压力）扫 C =====
+$ MULTICAST_OCC P 2 128 8 2 0 0
+P C= 2 grid= 128 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=528 (ok) | clusters_req=64 | cluster_occ_blocks/SM=8.00
+$ MULTICAST_OCC B 2 128 8 300 0 2 0 0
+B C= 2 grid= 128 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 1 waves=0.97 |  244.690 us | deliver  2571.2 GB/s | per-blk   20.1 GB/s | src-read  2571.2 GB/s | maxerr 0.00000
+$ MULTICAST_OCC P 4 128 8 2 0 0
+P C= 4 grid= 128 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=248 (ok) | clusters_req=32 | cluster_occ_blocks/SM=7.52
+$ MULTICAST_OCC B 4 128 8 300 0 2 0 0
+B C= 4 grid= 128 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 1 waves=0.97 |  240.949 us | deliver  2611.1 GB/s | per-blk   20.4 GB/s | src-read  2611.1 GB/s | maxerr 0.00000
+$ MULTICAST_OCC P 8 128 8 2 0 0
+P C= 8 grid= 128 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=124 (ok) | clusters_req=16 | cluster_occ_blocks/SM=7.52
+$ MULTICAST_OCC B 8 128 8 300 0 2 0 0
+B C= 8 grid= 128 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 1 waves=0.97 |  254.579 us | deliver  2471.3 GB/s | per-blk   19.3 GB/s | src-read  2471.3 GB/s | maxerr 0.00000
+$ MULTICAST_OCC P 16 128 8 2 0 0
+P C=16 grid= 128 KB= 8 L= 2 pad=  0KB maxr=  0 smem=16KB | occ=13 blk/SM | maxActiveClusters=58 (ok) | clusters_req=8 | cluster_occ_blocks/SM=7.03
+$ MULTICAST_OCC B 16 128 8 300 0 2 0 0
+B C=16 grid= 128 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 1 waves=0.97 |  281.104 us | deliver  2238.1 GB/s | per-blk   17.5 GB/s | src-read  2238.1 GB/s | maxerr 0.00000
+
+########## 完 ##########
