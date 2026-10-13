@@ -4635,8 +4635,38 @@
       （dgrad 279.2+699.3、**wgrad 1615.0+3234.1 仅 86 TFLOPS** = fp32 强制累积多卡复现）；
       ragged a2a dispatch/combine 各 **121.6MB/4945us（24.6 GB/s，受争用下界）** vs 平衡锚 **117–122 GB/s**
       （ragged ~4.7×）；EP kernel+通信 前向 **10878us** / 反向 **15720us** ⇒ **通信与计算同量级甚至更贵**。
-      融合 kernel SM100 专属、仅分析。→ `docs/161-ep-fp8-e2e-moe.md`。配套博客
-      `content/posts/mega-moe-161-ep-fp8-e2e-moe`（索引页新增第 161 篇）。
+       融合 kernel SM100 专属、仅分析。→ `docs/161-ep-fp8-e2e-moe.md`。配套博客
+       `content/posts/mega-moe-161-ep-fp8-e2e-moe`（索引页新增第 161 篇）。
+
+### P152 增量（opt-in，收口第 161 篇点名的「通信按 fp32 保守上界」）
+
+- [x] **P152-1** **多卡 EP MoE 的真实通信字节口径**（DeepEP `deep_ep/layout/ep/token.cuh`、
+       `deep_ep/utils/refs.py`、`deep_ep/utils/math.py`、`csrc/kernels/ep/{dispatch,combine}.hpp`、
+       `csrc/buffers/ep.hpp`、`README.md`；`docs/161-ep-fp8-e2e-moe.md:154/167-168/189`）。
+       第 161 篇把多卡 EP 图接上真实 SM90 FP8 kernel，但通信腿按 **fp32** 搬运（自认「保守上界」），
+       只给了「真机 dispatch FP8/1B、combine BF16/2B」的粗口径——漏掉 SF 与 per-token 元数据，
+       也没解释真 kernel 为何不按 5 条独立 a2a 发。本篇用 **DeepEP 真实头文件** 算权威 per-token
+       字节账 + 8×H100 按 `refs.py` 真实字段逐条量 a2a + dtype 伸缩。**per-token 布局**
+       `layout/ep/token.cuh:10-82` 的 `TokenLayout`：`num_bytes = align_RDMA(align_TMA(hidden)+
+       align_TMA(sf)+align_TMA(meta))`（`:32-41`；TMA=32B/RDMA=64B `common/compiled.cuh:67-68`），
+       `meta = topk·(int+float)+(with_metadata?(1+topk)·int:0)`（`:25-26`，topk_idx/weights/src/
+       linked_list）；`sf_pack_t`=4B 装 4 个 UE8M0（`compiled.cuh:59-62`）；dispatch =
+       `TokenLayout(hidden·elem, ceil_div(hidden,32)·4, topk, true)`（`dispatch.hpp:26-29`）、
+       combine = `TokenLayout(hidden·2, 0, topk, false)`（`combine.hpp:19-22`）。DeepSeek 形状实测
+       （`src/deepep_token_layout_bytes.cu` **直接 include 真实头文件编跑**）：**dispatch FP8 8160 B**
+       （data 7168+sf 896+meta 28；FP8 下 SF 占 11.0%，`ceil_div(H,32)·4` 是源码注释的过预留）、
+       **dispatch BF16 14432 B**、**combine BF16 14432 B**，`BF16/FP8=1.7686`；自检 meta=28 /
+       `get_num_bytes<false>`=8128 全 OK。**H100 真机 a2a**（`harness/exp_ep_comm_bytes.{py,sh,out.txt}`，
+       world=8,T_local=2048,H=7168,E=64,topk=2）：逐字段 `x(fp8) 29.36MB/4725us`、`sf 0.92MB/4637us`、
+       `topk_idx/w/src 各 ~0.03MB/4632us`——**字节差 1800 倍、时间全 ~4.6ms**，5 条独立 a2a 合计
+       **23.3ms** vs 打平一条 **4.8ms（4.9×）**（=DeepEP 单条记录布局的动机）；`y(bf16) 57.79MB/4796us`。
+       **dtype 伸缩**：fp32 117.44MB/4946us、bf16 58.72MB/4799us、fp8 29.36MB/4725us——**字节缩 4×
+       只省 4.5% 墙钟**（时延主导）；平衡锚 512 tok/rank 58.7MB/422us（**139.1 GB/s**）、2048
+       234.9MB/2048us（114.7 GB/s）。**校正预算**：dispatch FP8 **30.36MB/rank**（第161篇 fp32 的
+       **3.87×**）、combine BF16 **57.79MB**（2.00×）、合计 **88.15MB**（2.64×）——与第 144 篇
+       独立量到的 **88.1MB/rank 逐 MB 对上**。融合 kernel NVLink 直写/重叠 SM100 专属、仅分析。
+       → `docs/162-ep-comm-bytes.md`。配套博客 `content/posts/mega-moe-162-ep-comm-bytes`
+       （索引页新增第 162 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4670,8 +4700,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P151 各增量完成（P15-1…P41-1、P42-1…P151-1）。**
-  本轮 P151-1：新建 `docs/161-ep-fp8-e2e-moe.md` + `harness/exp_ep_fp8_e2e_moe.{py,sh,out.txt}`
+- 当前进度：**P0~P14 全部完成；P15~P152 各增量完成（P15-1…P41-1、P42-1…P152-1）。**
+  本轮 P152-1：新建 `docs/162-ep-comm-bytes.md` + `harness/exp_ep_comm_bytes.{py,sh,out.txt}`、
+  `src/deepep_token_layout_bytes.cu` + `harness/exp_deepep_token_layout_bytes.{sh,out.txt}`
+  ——收口第 161 篇（`docs/161:154/167-168/189`）自认的「通信按 fp32 搬运是保守上界」。
+  用 **DeepEP 真实头文件**（`layout/ep/token.cuh:10-82` 的 `TokenLayout`）算权威 per-token 字节：
+  DeepSeek 形状 **dispatch FP8 8160 B / BF16 14432 B / combine BF16 14432 B**（`BF16/FP8=1.7686`，
+  FP8 下 SF 占 11.0%）。8×H100 逐字段 a2a：字节差 **1800 倍**、时间全 ~4.6ms，**5 条独立 a2a 23.3ms
+  vs 打平一条 4.8ms（4.9×）**；dtype fp32→fp8 **字节缩 4× 只省 4.5% 墙钟**（时延主导），平衡锚
+  139 GB/s。**校正预算**：dispatch **30.36MB/rank**（3.87×）、combine **57.79MB**（2.00×）、合计
+  **88.15MB**（2.64×），与第 144 篇 **88.1MB/rank 逐 MB 对上**。索引页新增第 162 篇。
+  上一轮 P151-1：新建 `docs/161-ep-fp8-e2e-moe.md` + `harness/exp_ep_fp8_e2e_moe.{py,sh,out.txt}`
   ——收口第 141 篇（`docs/141:209-213`）点名的 opt-in：把多卡 EP MoE 图接上**真实 DeepGEMM SM90 FP8
   grouped kernel**（8×H100 `all_to_all_single` expand dispatch/combine + 真实 `m_grouped`/`k_grouped`
   前向/反向）。**结果**：前向三层误差分解——EP FP8 vs fp64 **6.396e-02/cos 0.997948**、ep vs「fp8 模拟」
@@ -6366,19 +6405,20 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P151 已完成（最新 **P151-1 把多卡 EP MoE 图接上真实 SM90 FP8 grouped kernel**
-  ——收口第 141 篇 `docs/141:209-213` 点名的 opt-in。8×H100 `all_to_all_single` expand dispatch/combine +
-  L1/L2 前向 + dgrad/wgrad 反向全部真实 `m_grouped`/`k_grouped`。**前向三层分解**：EP FP8 vs fp64
-  6.396e-02/cos 0.997948、ep vs「fp8 模拟」2.273e-02（kernel+布局+通信）、fp8 模拟 vs fp64 5.946e-02
-  （纯 FP8）⇒ 通信零误差、FP8 是地板；反向 dW1/dW2/dX ≈6.4e-2/cos≈0.998、每个 grouped kernel `vs deq`
-  全在 3e-4 内。预算：FP8 kernel 前向 985.9us / 反向 5827.6us（wgrad 仅 86 TFLOPS），ragged a2a
-  121.6MB/4945us（24.6 GB/s，受争用下界）vs 平衡锚 117–122 GB/s。索引页新增第 161 篇）。
+- **下一步**：P0~P152 已完成（最新 **P152-1 把第 161 篇自认的「fp32 通信保守上界」换成 DeepEP
+  真实字段口径**——收口第 161 篇 `docs/161:154/167-168/189` 点名的 opt-in。用 **DeepEP 真实头文件**
+  `layout/ep/token.cuh:10-82` 的 `TokenLayout` 算权威 per-token 字节：DeepSeek 形状 **dispatch
+  FP8 8160 B / BF16 14432 B / combine BF16 14432 B**（FP8 下 SF 占 11.0%）。8×H100 逐字段 a2a：
+  字节差 **1800 倍**、时间全 ~4.6ms，**5 条独立 a2a 23.3ms vs 打平一条 4.8ms（4.9×）**；dtype
+  fp32→fp8 **字节缩 4× 只省 4.5% 墙钟**（时延主导），平衡锚 139 GB/s。校正预算：dispatch
+  **30.36MB/rank**（3.87×）、combine **57.79MB**（2.00×）、合计 **88.15MB**（2.64×），与第 144 篇
+  **88.1MB/rank 逐 MB 对上**。索引页新增第 162 篇）。
   可继续（均为增量、非承诺）：① 把第 141/161 篇的多卡 EP 图**接进真实 DeepEP `EPBuffer.dispatch/combine`**
-  （需 NCCL≥2.32.3，见「阻塞」）；② 加 **FP8 dispatch（1B）/BF16 combine（2B）** 的真实字节口径并量
-  与计算的重叠（第 144 篇的 EP 版、独占卡安静环境）；③ 把 indexer 反向（连续/分页/稀疏/分页稀疏）
-  **端到端接进真实前向 kernel**（需目标卡 SM100，仅分析）+ indexer 的 **varlen（SM100）**变体定点复核；
-  ④ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落做定点复核。详见上。
-  上一轮 P150-1：收口 indexer 反向 2×2 矩阵的最后一格：分页 × 稀疏
+  （需 NCCL≥2.32.3，见「阻塞」）；② 在**独占卡安静环境**下量「EP 图跨 micro-batch 流水线重叠」
+  （dispatch_{i+1} ∥ compute_i），坐实/证伪第 144 篇侧流 NCCL 不重叠的结论（第 161/162 篇已给字节口径）；
+  ③ 把 indexer 反向（连续/分页/稀疏/分页稀疏）**端到端接进真实前向 kernel**（需目标卡 SM100，仅分析）
+  + indexer 的 **varlen（SM100）**变体定点复核；④ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落做定点复核。详见上。
+  上一轮 P151-1：把多卡 EP MoE 图接上真实 SM90 FP8 grouped kernel
   上一轮 P146-1：把「SwiGLU 反向落地成 SM100 `epilogue_class` operator」推到契约层——数值可行（真实
   `math.cuh` store 分支逐位复现，FP8 0/16777216、SF 0/524288），但契约是「单输出 + 无逐元素索引 + 无状态」，
   SwiGLU 反向要「逐元素读 gate/up + 两个输出 + 两个 SF」，只加一个 operator 结构体不够，须扩三处契约；
