@@ -238,8 +238,8 @@ approx_factor = safe_div(elapsed, elapsed - t_reduction)                    # :4
 （C2C/PCIe/NVLink TX/RX 吞吐与带宽）。
 
 每条以 `MetricSpec(name, metric, kind, category)` 描述，`kind` 决定后缀（见 4.3）。指标名带
-**TriageCompute 前缀**（如 `LTS.TriageCompute.lts__throughput`），那是因为它们在 GB100 的
-**PM-sampling 域**下才能取到时间序列。注释（`:70-76`）明确记了几处「对着 `ncu --query-metrics --chip gb100`
+**TriageCompute 前缀**（如 `LTS.TriageCompute.lts__throughput`），那是因为它们在目标卡的
+**PM-sampling 域**下才能取到时间序列。注释（`:70-76`）明确记了几处「对着 `ncu --query-metrics --chip <目标卡>`
 修正过」的名字，比如 L2 对 GCC 请求的吞吐用 `lts__t_sector_throughput_srcunit_gcc`、NVLink RX 用
 `NVLRX` 域。
 
@@ -300,7 +300,7 @@ def _probe_metric_series(report, metric_name):    # :201-224
 打类别标签。百分比的 y 轴固定 0–100，其余按峰值自适应。默认存成 `<report>.pm_sampling.png`
 （`:411-414`），`--interactive` 时开 Qt 窗口。
 
-> **H100 实测（E2）**：本机没有 GB100 的 PM-sampling 数据，但我们**真的在 H100 上生成 `.ncu-rep`
+> **H100 实测（E2）**：本机没有目标卡的 PM-sampling 数据，但我们**真的在 H100 上生成 `.ncu-rep`
 > 并跑 `ncu --import --page raw --csv`**，验证了取址格式：
 > ① 只请求一个**报告里存在**的 metric（`sm__maximum_warps_avg_per_active_cycle`）→ CSV 恰好 **12 列**，
 > `header[11]` = 指标名、`unit[11]='warp'`、`row[11]="32 (32)"`，`_probe_metric_series` 复刻出

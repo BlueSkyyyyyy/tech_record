@@ -108,7 +108,7 @@ def exp_quick_plot():
         'lts__throughput', 'lts__t_sector_throughput_srcunit_tex',
         'TriageCompute.ctx__throughput',  # 只有别名存在
     }
-    resolved, missing = qpm.resolve_metric_specs('gb100')
+    resolved, missing = qpm.resolve_metric_specs('TARGET_CHIP')
     c2c = [r for r in resolved if r.name == 'C2C Throughput']
     check('E2e C2C 别名回退到 ctx__throughput',
           len(c2c) == 1 and c2c[0].metric == 'TriageCompute.ctx__throughput', repr(c2c))
