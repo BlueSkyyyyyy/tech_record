@@ -585,6 +585,28 @@
       目标卡 CUDA B2 取 `BVK=64` 时用 **NAT 个 128 B swizzle atom**、勿用 `SWIZZLE_NONE`；可与 `-DB2M_VECST`
       无冲突叠加。**边界**：只测 `BVK∈{32,64}`、fp32、`BT=16`；`atom64` 的 L2 比 `tma32` 略高 0.04 GB 未归因。
 
+- [x] **P7-52** 兑现 §49.7「补非 GEMM 段」的**第一刀**：把 B2 的 `i_k==0` **输出支路**
+      `dv2 = beta·(A@dv)`（B2 里唯一不依赖门控链的**完整**输出）落进 K2 形状 CUDA B2 核。给
+      `b2_mma_probe.cu` 加 `-DB2M_OUT`（+ 独立符号 `b2out_launch`）：`acc2[2][4]` warp 私有
+      `[16(o_A),16(v)]` tile；**收缩维是 chunk 行 `o_t` 而非 V**，故 `Akk`（`[B,T,H,BT]`，`o_A` 连续）
+      喂 mma A 片段只需**索引重映射**（`:448-451`）、B 操作数**复用 GEMM 段已 staged 的 `dv` tile**
+      （`:456-458`），**不新增任何 `dv` 字节、无 smem 转置**；`beta[o_A]` 直读（`:530/534`）；`BVK` 的
+      stage 归属按 `local0=warp*BW-it*BVK` 守卫（`:441-444`）。新增 `harness/check_bwd_b2_out.py`
+      （`harness/check_bwd_b2_out.out.txt`，空闲卡）+ `harness/ncu_b2_out_driver.py` /
+      `harness/probe_b2_out_ncu.sh`（`harness/probe_b2_out_ncu.out.txt`）+ `docs/07` §55。**Part A**：
+      四组 shape（含非整除 `T=250`）`dv2` 落 tf32 底噪（`out`/`out_tma`/`out_tma64` vs torch
+      **3.63e-4**，**比 Triton B2 的 5.96e-4 更贴真 fp32**）、`dvb` 4.40e-4；`out` vs Triton 8.78e-4
+      （=两侧 tf32 分组差）；**`out` vs `out_tma64` 逐位相同（`max_abs=0`）**（把 §54 的布局正确性在新
+      算术上再证一遍）。**Part B**：输出支路只给 GEMM 核心加 **+12–25%**（`B8T2048H8` `out_tma`
+      555.0 vs `core_tma` 492.3=`1.13×`）；含 GEMM 的 CUDA 核到全 Triton B2 的 **0.62–0.74×**；
+      `out_tma64` 反回退（`BVK=64` 时 warp 只在 1 个 stage 有活）→ **输出支路偏好小 `BVK`**（与 GEMM
+      段相反）。**ncu（`B8T2048H8`)**：增量＝**DRAM 写 +130.6 MB**（`dv2`+`dvb` 两个 `[B,T,H,V]`）＋
+      `Duration +60.4 µs`（比 ≈2.16 TB/s，仍冲 HBM），DRAM SOL 仍 **87%**、occ/tensor **一动不动**
+      （24.63%/7.52%）；新增 global 读＝A 的 4.19 M sectors，bank conflict 8.73→9.41 M（小头）。
+      **结论**：§49.7 第一刀成立、独立可证、便宜；**关键使能是索引重映射**（收缩维在 chunk 行则不转置）；
+      剩余大头＝**门控链 + `dkgb=A@dw` + `dA` 的 `dA`/`db` 后处理**（下一步）。**边界**：`dA`/`db`/门控链
+      未进 CUDA、同 CTA 交接未做、`out` store 未接 `-DB2M_VECST`。
+
 - [x] **P7-32** 兑现 §34.4 的**待验证**：把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**，
       验证能否复现 §34.1「删掉 store」收益的那 33%。给 `b1_tma_probe.cu` 加 `-DB1T_TMADH`：per-warp
       `[KD,BW]=[128,16]` 未 padding tile 写入加进 `Shared` 的**双缓冲** `dho[2][NW][KD][BW]`，lane 0 发
@@ -939,8 +961,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-51 补测**。
-  - P7-51（本轮）：**兑现 §53.5 的唯一待验证路径——`TMA + BVK=64` 用两个 128 B swizzle atom 拆分，
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-52 补测**。
+  - P7-52（本轮）：**兑现 §49.7「补非 GEMM 段」第一刀——B2 输出支路 `dv2=beta·(A@dv)` 落进 K2 形状 CUDA B2**
+    （`docs/07` §55）。给 `b2_mma_probe.cu` 加 `-DB2M_OUT`（+ 符号 `b2out_launch`）：`Akk` 喂 mma 只需**索引
+    重映射**（收缩维是 chunk 行 `o_t` 而非 V，故无 smem 转置）、B 操作数**复用已 staged 的 `dv`**（不新增
+    `dv` 字节）。新增 `harness/check_bwd_b2_out.py`（`check_bwd_b2_out.out.txt`，空闲卡）+
+    `harness/ncu_b2_out_driver.py` / `harness/probe_b2_out_ncu.sh`（`probe_b2_out_ncu.out.txt`）。**Part A**：
+    `dv2`/`dvb` 落 tf32 底噪（vs torch **3.63e-4/4.40e-4**，比 Triton B2 的 5.96e-4 更贴真 fp32），
+    `out`≡`out_tma64` **逐位相同**（含非整除 T=250）。**Part B**：输出支路只给 GEMM 核心 **+12–25%**
+    （`B8T2048H8` `out_tma` 555.0 vs `core_tma` 492.3）；含 GEMM 的 CUDA 核到全 Triton B2 **0.62–0.74×**；
+    `BVK=64` 反回退→输出支路偏好小 `BVK`。**ncu**：增量＝DRAM 写 **+130.6 MB**（`dv2`+`dvb`）+60.4 µs
+    （≈2.16 TB/s，仍 DRAM-bound 87% SOL）、occ/tensor 不动。**下一步＝补门控链 + `dkgb=A@dw` + `dA`/`db`
+    后处理**（把 B2 全核搬进 CUDA）。
+  - P7-51（上轮）：**兑现 §53.5 的唯一待验证路径——`TMA + BVK=64` 用两个 128 B swizzle atom 拆分，
     正确、无冲突、且全程最快**（`docs/07` §54）。把 B2 K2-mma 核的 TMA 操作数布局改成 atom-major
     `[NAT=BVK/32][rows][32]`（每 atom 自己的 128 B swizzle TMA box，`rd` 按 `col>>5` 选 atom），算术一字未动。
     新增 `harness/check_bwd_b2_tma_atom.py`（`check_bwd_b2_tma_atom.out.txt`，空闲卡）+

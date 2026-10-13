@@ -5555,3 +5555,115 @@ CUPTI `dev`（kernel-only，µs；`wall` 含 host 派发，小 shape 被 ~20µs 
   可把「布局解码错」与「布局慢」分开（同 §53.5 教训）。
 - **边界（诚实）**：本轮只覆盖 `BVK∈{32,64}`、fp32 操作数、`BT=16`；`BVK=128`（4 atom）未测；`atom64` 的 L2
   2.39 GB 比 `tma32` 的 2.35 GB 略高（0.04 GB，多出的 atom 边界 L2 re-touch），未逐项归因。
+
+## 55. 「K2 形状 CUDA B2」补非 GEMM 段第一刀：**输出支路 `dv2 = beta·(A@dv)`** 落进 CUDA，数值落 tf32 底噪、只 +12%（P7-52）
+
+§49.7（P7-46）把 K2 形状 CUDA B2 的下一步写成「把本核作为 GEMM 段基座，**向其中补非 GEMM 段（同 CTA 内交接
+`dA`/`dv2`/`db`）**」。§50–§54（P7-47…51）随后把 GEMM 段的访存路径（`cp.async`→TMA、`BVK=64` atom 拆分、
+向量化 store）收口到贴 DRAM 地板，但**非 GEMM 段一直没进 CUDA**——§49.6 里「B2 全核 899 µs，本核只 517 µs，
+另 ~380 µs 是 GEMM 之外」还一直是差值推断。本轮落**第一刀**：B2 的 `i_k==0` **输出支路**
+
+    dvb[o_A, v] = sum_{o_t} Akk[o_t, o_A] · dv[o_t, v]   (== A @ dv)
+    dv2[o_A, v] = beta[o_A] · dvb[o_A, v]
+
+它是 B2 里**唯一一个不依赖门控链的完整输出**（torch golden / FLA 在 `i_k==0` 分支算完 `dv2` 后**从不改写**
+——`check_bwd_dqkg_kernel.py:294/297`），故可以**独立可证**。答案是：**逐位对得上自己的 GEMM 核心、落 tf32
+底噪，且只给核心加 12–25%**。
+
+证据：`harness/b2_mma_probe.cu`（新增 `-DB2M_OUT` + 符号 `b2out_launch`）+ `harness/check_bwd_b2_out.py`
+（`harness/check_bwd_b2_out.out.txt`，空闲卡）+ `harness/ncu_b2_out_driver.py` / `harness/probe_b2_out_ncu.sh`
+（`harness/probe_b2_out_ncu.out.txt`）。
+
+### 55.1 设计：为什么这段**不需要任何 smem 转置**（与三条 V-归约 GEMM 的关键差别）
+
+核心的三条 GEMM（`dq/dk/dw`）收缩的是 **V**、输出行是 chunk 行 `o_t`；而输出支路 `A@dv` **收缩的是 chunk
+行 `o_t`、输出行又是 chunk 行 `o_A`**。这带来两个便利：
+
+- **A 操作数**：`Akk`（`[B,T,H,BT]`，`o_A` 连续）= `A[o_A, o_t]`，喂 mma A 片段只需**把 `(o_A,o_t)` 索引
+  对调**——`a0=Akk(o_t=kc+t, o_A=g)`、`a1=Akk(o_t=kc+t, o_A=g+8)` …（`b2_mma_probe.cu:448-451`），**读的是
+  原存储、不做转置**（`a_base` 见 `:334`）。非整除尾块按 `(i_t*BT + o_t) < T` 屏蔽（`:448-451`）。
+- **B 操作数**：**直接复用 GEMM 段已经 stage 好的 `dv` tile**（`[BT,BVK]`，`:456-458`）——B 的 n 维是 `v`、
+  收缩维是 `o_t`，而 staged `dv` 恰好是 `[o_t][v]`，`rd()` 按 `(o_t, v)` 读即可。**因此输出支路不新增任何
+  `dv` 字节**。
+- **V 列按 warp 私有**：每个 warp 仍拥有 `[w·16, w·16+16)` 的 V 列；一个 stage（`BVK=64`）装 64 列，故 warp
+  只在**包含自己列的那一个 stage** 上做这 4 条 mma（`local0 = warp*BW - it*BVK` 守卫，`:441-444`），
+  `BVK=32` 时占 2 个 stage。累加器 `acc2[2][4]`（`:329`）是 warp 私有的 `[16(o_A),16(v)]` 小 tile。
+- **`beta[o_A]`**：行 `o_A` 与 token `i_t*BT+o_A` 同轴，直接读 global（`:530/534`）。
+
+新增访存只有 **A 的小读**（`BT×BT=256` float/块）与 `beta`；输出新增 `dv2`（完整）与 `dvb`（中间量，供直接
+核对 `A@dv`）两个 `[B,T,H,V]` 张量。
+
+### 55.2 Part A — 正确性：`dv2`/`dvb` 落 tf32 底噪，且三种 CUDA 布局**逐位相同**
+
+同操作数四组 shape（`BT=16`，含非整除 `T=250`；torch 参考关 tf32 走真 fp32）：
+
+| 量 | `out` vs torch | `out_tma` vs torch | `out_tma64` vs torch | Triton B2 `dv2` vs torch | `out` vs Triton | `out` vs `out_tma64` |
+|---|---|---|---|---|---|---|
+| `dv2` | 3.63e-4 | 3.63e-4 | 3.63e-4 | 5.96e-4 | 8.78e-4 | **0** |
+| `dvb` | 4.40e-4 | 4.40e-4 | 4.40e-4 | — | — | **0** |
+
+（表内为四组 shape 的最坏 `max_rel`；`ref_max≈0.36–0.45`。）
+
+三件事被钉死：(1) **CUDA 输出支路代数无误**——`dv2`/`dvb` 落 tf32 底噪（`~3.6e-4`），且**比 identical-op
+Triton B2 更贴真 fp32**（Triton `dv2` 5.96e-4，同 §49.2/§54.2）；(2) 与 Triton 的差 `8.78e-4` 是**两侧 tf32
+的分组差异**（CUDA m16n8k8 逐 k8 累加 vs Triton 的收缩序），非公式错；(3) **`out`≡`out_tma64` 逐位相同
+（`max_abs=0`）**——非 TMA / TMA@32 / TMA@64（atom 拆分）三种 stage 布局对输出支路**零影响**，等于把 §54 的
+布局解码正确性在**新的一段算术**上再证一遍。
+
+### 55.3 Part B — 计时：输出支路只给 GEMM 核心加 12–25%，且仍 DRAM-bound
+
+CUPTI `dev`（kernel-only，µs；`out` = `-DB2M_OUT` 非 TMA、`core_tma` = 只有 GEMM 的 TMA 基座）：
+
+| shape | `core` | `core_tma` | `out` | `out_tma` | `out_tma64` | 全 Triton B2 | `out/core` | `out_tma/core_tma` |
+|---|---|---|---|---|---|---|---|---|
+| `B8 T2048 H8` | 517.4 | 492.3 | 577.9 | 555.0 | 623.2 | 900.9 | 1.12× | 1.13× |
+| `B2 T1024 H8` | 70.8 | 68.1 | 80.1 | 77.4 | 89.4 | 121.7 | 1.13× | 1.14× |
+| `T512 H4` | 9.4 | 8.8 | 11.5 | 11.0 | 10.7 | 14.7 | 1.23× | 1.25× |
+| `T250 H3`（非整除） | 8.6 | 8.4 | 10.0 | 9.8 | 9.3 | 14.0 | 1.16× | 1.17× |
+
+- **非 GEMM 段第一刀很便宜**：加进 GEMM 核心只 **+12–25%**（大 shape +13%，小 shape 因固定开销占比高
+  +17–25%）。加完输出支路的 CUDA 核（含 GEMM）**已到全 Triton B2 的 0.62–0.74×**（`B8` 555 vs 901 µs）。
+- `out_tma` 比非 TMA `out` 略快（§52 的 TMA 读侧收益仍在）；但 **`out_tma64` 反而回退**（`B8` 623 µs）——`BVK=64`
+  时每个 warp 只在一个 stage 上有活，其余 stage 的 warp 空转于输出支路（4 条 mma），`BVK=32` 摊得更平。故
+  **输出支路偏好小 `BVK`**（与 GEMM 段偏好 `BVK=64` 相反，`out_tma` 非 TMA 是非整除小 shape 也稳）。
+
+### 55.4 `ncu` — 增量是 **+130 MB DRAM 写（`dv2`+`dvb`）**，仍贴 DRAM 地板；不引入新瓶颈
+
+`B8 T2048 H8`，同一批 fp32 操作数（`probe_b2_out_ncu.out.txt`）：
+
+| 变体 | DRAM 读 | DRAM 写 | DRAM SOL | L2 bytes | Duration | tensor% | occ | bank conflicts | l1tex 全局读 |
+|---|---|---|---|---|---|---|---|---|---|
+| `core_tma`（只有 GEMM） | 1.28 GB | 199.3 MB | 89.17% | 2.35 GB | 493.2 µs | 8.10% | 24.63% | 8.73 M | **0** |
+| `out_tma`（+ 输出支路） | 1.29 GB | **329.9 MB** | 87.04% | 2.66 GB | 553.6 µs | 7.52% | 24.63% | 9.41 M | 4.19 M |
+
+- **时间增量 = 写字节增量**：DRAM 写 `+130.6 MB`（= `dv2`+`dvb` 两个 `[B,T,H,V]` fp32 = `2×67 MB`），
+  `Duration +60.4 µs`，二者之比 **≈ 2.16 TB/s**，即新增的那段**仍在冲 HBM 带宽**——`out_tma` DRAM SOL 仍
+  **87%**、占用率/tensor 密度**一动不动**（24.63% / 7.52%），**没有把核从带宽受限打成延迟受限**。
+- 新增 global 读＝**A 的 4.19 M sectors（≈134 MB L2）**（`core_tma` 为 0，因 GEMM 段 A 不参与）；
+  `beta` 贡献可忽略。bank conflict `8.73→9.41 M`（+0.68 M，来自 `A@dv` 的两条 B-fragment 读），相对
+  §50 的 8.39 M `dgk` 冲突是小头、非新瓶颈。
+- SASS：`out_tma` `LDS` 88→96、`STG` 25→**41**（+16 = `dv2`/`dvb` 的标量 store；本例 store 是 32-bit
+  标量，接 §51 的 `-DB2M_VECST` 可向量化——本轮输出支路未接该开关，留给生产形态）。
+
+### 55.5 结论 / 对目标卡的设计输入
+
+- **§49.7 的「补非 GEMM 段」第一刀成立**：B2 输出支路 `dv2 = beta·(A@dv)` 进 CUDA 后**独立可证**（完整输出、落
+  tf32 底噪），**不新增 `dv` 字节**（复用 GEMM 段 staged 的 `dv`），成本仅 **+12–25%**、仍 DRAM-bound。关键
+  使能是**索引重映射**——`A@dv` 的收缩维是 chunk 行而非 V，故 A/B 操作数都**直接按原存储读、无 smem 转置**。
+- **设计输入**：目标卡 CUDA B2 里，凡「收缩维落在 chunk 行（`BT`）」的段（`A@dv`、`A@dw`、`dv@v^T`、最终的
+  `A^T diag(beta) A^T`）都可照此**原地读 `Akk` 片段**完成；「收缩维落在 V」的段（三条主 GEMM）则走 staged
+  `dv/do/vn` 的 B 操作数。两类段的操作数来源不同但共享同一份 stage。
+- **剩余头寸仍在门控链**：本轮只做 `i_k==0` 输出支路；§49.6 那 ~380 µs 里更大的一块是**门控链 + `dkgb=A@dw` +
+  `dA` 的 `dw@kg^T` 与 `A^T diag A^T` + `db`**（需 `q/k/g`/`A` 与跨 warp 归约）。下一步＝在 GEMM 段 + 本输出
+  支路之上补**门控链**（同为 chunk-行收缩，可复用同一套索引重映射），把 B2 全核搬进 CUDA。
+- **方法学**：「输出支路进 CUDA」的正确性**先按完整输出 `dv2` 对齐 torch 与 Triton，再证三种 stage 布局
+  （非 TMA/TMA32/TMA64）逐位相同**——把「算术错」与「布局解码错」分开（同 §53.5/§54.5）。
+
+### 55.6 边界 / 下一步（诚实）
+
+- 本轮**只**落 `i_k==0` 输出支路（`dv2` 完整、`dvb` 中间量）；`dA`/`db` 的**后处理项**（`dw@kg^T`、`A^T diag A^T`、
+  `dkgb`）与**门控链**（`dg`、`dk` 的 `exp2(g)` 标定）**未进 CUDA**（同 §49.7 未关闭）。
+- **同 CTA 交接尚未做**：本段仍把 `dv2`/`dvb` 落盘再返回，未与 GEMM 段在同一寄存器生命周期里交接（§47.6 的
+  「同 CTA 交接」目标）；本轮只证「能算对、加得便宜」。
+- 只覆盖 `K=V=128`、`BT=16`、fp32/tf32；`out` store 用标量 32-bit（`-DB2M_VECST` 未接到本段）；`beta` 未做
+  bf16。这些都不影响本节结论（增量机制＝写字节），但生产形态应接向量化 store。

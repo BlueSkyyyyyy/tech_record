@@ -113,6 +113,18 @@ constexpr int BW = 16;    // output columns per warp = KD / NW
 #else
 #define B2M_TMA_ON 0
 #endif
+// P7-52: the *first non-GEMM segment* of B2 in CUDA -- the output branch
+// (`i_k==0`):   dvb[o_A,v] = sum_{o_t} A[o_A,o_t] * dv[o_t,v]   (== A @ dv)
+//               dv2[o_A,v] = beta[o_A] * dvb[o_A,v]             (the complete B2 output `dv2`)
+// `dv2` is a *complete* B2 output (never touched by the gate chain afterwards, see
+// check_bwd_dqkg_kernel.py:294/297), so it is verifiable standalone.  `dvb` is stored too so
+// the A@dv GEMM can be checked directly.  The operand roles differ from the GEMM core: here
+// the *contraction* is over chunk rows `o_t` and the *output row* is also a chunk row
+// `o_A`, so A is read from `Akk` with a plain index remap (no smem transpose needed) and the
+// already-staged `dv` tile serves as the B operand.  See docs/07 §55.
+#ifndef B2M_OUT
+#define B2M_OUT 0
+#endif
 constexpr int BVK = B2M_BVK;   // V-tile (contraction) depth staged per pipeline stage
 constexpr int NS  = B2M_NS;    // pipeline stages
 #if B2M_TMA_ON
@@ -292,7 +304,12 @@ b2mma_kernel(
              const float* __restrict__ h, const float* __restrict__ dh,
              const float* __restrict__ do_, const float* __restrict__ dv,
              float* __restrict__ dq, float* __restrict__ dk, float* __restrict__ dw,
-             float* __restrict__ dgk, int B, int T, int H, int NT) {
+             float* __restrict__ dgk,
+#if B2M_OUT
+             const float* __restrict__ A4, const float* __restrict__ beta,
+             float* __restrict__ dv2, float* __restrict__ dvb,
+#endif
+             int B, int T, int H, int NT) {
     extern __shared__ char smem_raw[];
     Shared* sh = reinterpret_cast<Shared*>(smem_raw);
 
@@ -308,6 +325,14 @@ b2mma_kernel(
         for (int x = 0; x < 4; ++x) { accq[nt][x] = 0.f; acck[nt][x] = 0.f; accw[nt][x] = 0.f; }
     float gpart = 0.f;
     float gpart1 = 0.f;   // B2M_DGKCF second kcol half (kcol = warp*BW + 8 + c)
+#if B2M_OUT
+    float acc2[2][4];     // dvb[o_A, v] output tile (m16 x 2*n8), warp-private V columns
+    #pragma unroll
+    for (int nt = 0; nt < 2; ++nt)
+        #pragma unroll
+        for (int x = 0; x < 4; ++x) acc2[nt][x] = 0.f;
+    const int64_t a_base = ((int64_t)(n * T + i_t * BT) * H + hh) * (int64_t)BT;
+#endif
 
     const int nvt = VD / BVK;
 #if B2M_TMA_ON
@@ -408,6 +433,35 @@ b2mma_kernel(
         }
   #endif
 #endif
+#if B2M_OUT
+        // ---- output branch (P7-52): dvb = A @ dv, contraction over chunk rows o_t ----
+        // Warp `w` owns V columns [w*BW, w*BW+BW); only the stage whose V-tile contains
+        // them contributes.  A[o_A,o_t] = Akk[token=i_t*BT+o_t, o_A] (index remap, no
+        // transpose); the B operand is the already-staged `dv` tile.
+        {
+            const int local0 = warp * BW - it * BVK;
+            if (local0 >= 0 && local0 + BW <= BVK) {
+                #pragma unroll
+                for (int kk = 0; kk < BT / 8; ++kk) {
+                    const int kc = kk * 8;
+                    const int ot0 = kc + t, ot1 = kc + t + 4;
+                    const float a00 = (i_t * BT + ot0) < T ? A4[a_base + (int64_t)ot0 * (H * BT) + g]     : 0.f;
+                    const float a10 = (i_t * BT + ot0) < T ? A4[a_base + (int64_t)ot0 * (H * BT) + g + 8] : 0.f;
+                    const float a01 = (i_t * BT + ot1) < T ? A4[a_base + (int64_t)ot1 * (H * BT) + g]     : 0.f;
+                    const float a11 = (i_t * BT + ot1) < T ? A4[a_base + (int64_t)ot1 * (H * BT) + g + 8] : 0.f;
+                    const uint32_t af[4] = {to_tf32(a00), to_tf32(a10), to_tf32(a01), to_tf32(a11)};
+                    #pragma unroll
+                    for (int nt = 0; nt < 2; ++nt) {
+                        const int lc = local0 + nt * 8 + g;
+                        uint32_t bf[2];
+                        bf[0] = to_tf32(rd((const float*)st->dv, ot0, lc, BT));
+                        bf[1] = to_tf32(rd((const float*)st->dv, ot1, lc, BT));
+                        mma8(acc2[nt], af, bf, acc2[nt]);
+                    }
+                }
+            }
+        }
+#endif
         __syncthreads();
     }
 
@@ -461,6 +515,26 @@ b2mma_kernel(
         dgk[((int64_t)(n * NT + i_t) * H + hh) * KD + kcol] = gpart;
     }
   #endif
+#if B2M_OUT
+    // ---- store `dv2` (complete B2 output) and `dvb` = A@dv ----
+    #pragma unroll
+    for (int nt = 0; nt < 2; ++nt) {
+        const int col = warp * BW + nt * 8 + 2 * t;
+        const int tr0 = t0 + g, tr1 = t0 + g + 8;
+        const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * VD + col;
+        const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * VD + col;
+        if (tr0 < T) {
+            const float bt0 = beta[((int64_t)(n * T + tr0) * H + hh)];
+            dvb[o0] = acc2[nt][0]; dvb[o0 + 1] = acc2[nt][1];
+            dv2[o0] = bt0 * acc2[nt][0]; dv2[o0 + 1] = bt0 * acc2[nt][1];
+        }
+        if (tr1 < T) {
+            const float bt1 = beta[((int64_t)(n * T + tr1) * H + hh)];
+            dvb[o1] = acc2[nt][2]; dvb[o1 + 1] = acc2[nt][3];
+            dv2[o1] = bt1 * acc2[nt][2]; dv2[o1 + 1] = bt1 * acc2[nt][3];
+        }
+    }
+#endif
 }
 
 #if B2M_TMA_ON
@@ -498,10 +572,13 @@ static void make_map_hdh(CUtensorMap* m, void* ptr, int H, int NT, int B) {
 }
 #endif
 
-extern "C" int b2mma_launch(const void* v, const void* vn, const void* h, const void* dh,
-                            const void* dov, const void* dvv,
-                            void* dq, void* dk, void* dw, void* dgk,
-                            int B, int T, int H, int NT, void* stream) {
+static int b2mma_launch_impl(const void* v, const void* vn, const void* h, const void* dh,
+                             const void* dov, const void* dvv,
+                             void* dq, void* dk, void* dw, void* dgk,
+#if B2M_OUT
+                             const void* A4, const void* beta, void* dv2, void* dvb,
+#endif
+                             int B, int T, int H, int NT, void* stream) {
     dim3 grid(NT, B * H);
     int smem = (int)sizeof(Shared);
     static int configured = 0;
@@ -522,14 +599,45 @@ extern "C" int b2mma_launch(const void* v, const void* vn, const void* h, const 
         dom, vnm, dvm, hm, dhm,
         (const float*)v, (const float*)vn, (const float*)h, (const float*)dh,
         (const float*)dov, (const float*)dvv,
-        (float*)dq, (float*)dk, (float*)dw, (float*)dgk, B, T, H, NT);
+        (float*)dq, (float*)dk, (float*)dw, (float*)dgk,
+#if B2M_OUT
+        (const float*)A4, (const float*)beta, (float*)dv2, (float*)dvb,
+#endif
+        B, T, H, NT);
 #else
     b2mma_kernel<<<grid, NW * 32, smem, (cudaStream_t)stream>>>(
         (const float*)v, (const float*)vn, (const float*)h, (const float*)dh,
         (const float*)dov, (const float*)dvv,
-        (float*)dq, (float*)dk, (float*)dw, (float*)dgk, B, T, H, NT);
+        (float*)dq, (float*)dk, (float*)dw, (float*)dgk,
+#if B2M_OUT
+        (const float*)A4, (const float*)beta, (float*)dv2, (float*)dvb,
+#endif
+        B, T, H, NT);
 #endif
     return (int)cudaGetLastError();
 }
+
+extern "C" int b2mma_launch(const void* v, const void* vn, const void* h, const void* dh,
+                            const void* dov, const void* dvv,
+                            void* dq, void* dk, void* dw, void* dgk,
+                            int B, int T, int H, int NT, void* stream) {
+#if B2M_OUT
+    // Only meaningful when compiled without -DB2M_OUT; the output-branch build must use
+    // b2out_launch (this path would feed null A/beta/dv2/dvb into the kernel).
+    return -4;
+#else
+    return b2mma_launch_impl(v, vn, h, dh, dov, dvv, dq, dk, dw, dgk, B, T, H, NT, stream);
+#endif
+}
+
+#if B2M_OUT
+extern "C" int b2out_launch(const void* v, const void* vn, const void* h, const void* dh,
+                           const void* dov, const void* dvv, const void* A4, const void* beta,
+                           void* dq, void* dk, void* dw, void* dgk, void* dv2, void* dvb,
+                           int B, int T, int H, int NT, void* stream) {
+    return b2mma_launch_impl(v, vn, h, dh, dov, dvv, dq, dk, dw, dgk,
+                             A4, beta, dv2, dvb, B, T, H, NT, stream);
+}
+#endif
 
 extern "C" int b2mma_smem_bytes() { return (int)sizeof(Shared); }
