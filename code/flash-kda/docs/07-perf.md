@@ -6769,3 +6769,119 @@ CUPTI Part B 为 0.69×，两窗口不同源，方向一致，同 §25.5/§63.5�
 - **产物**：`harness/b3_intra_probe.cu` + `harness/check_bwd_b3_intra_cuda.py`
   （`check_bwd_b3_intra_cuda.out.txt`）+ `harness/ncu_b3_intra_cuda_driver.py` /
   `harness/probe_b3_intra_cuda_ncu.sh`（`probe_b3_intra_cuda_ncu.out.txt`）。
+
+## 66. B3 `intra` 折进**生产 launch**（`-DB2M_INTRA`）：逐位无损、单 kernel、单次 launch —— 但大 shape 不是净赢（P7-63）
+
+§65.6 留下的**唯一**工程步：把 P7-62 的 K2 形状 B3 `intra`（`b3_intra_probe.cu`，孤立核）并进
+`b2_mma_probe.cu` 的 `-DB2M_PROD` 生产 launch —— 用同一块 chunk 的**核内** sandwiched `dA`
+（SAND 落的 `daB`）、`dAqk` 输入与已可用的 `q/k/g` 算出对角贡献，加到门控段最终的 `dq/dk/dg` 上、
+并进 `db` 归约。本轮兑现它：新旗标 `-DB2M_INTRA`（要求 `-DB2M_PROD`；`b2_mma_probe.cu:217-230`）、
+新入口 `b2prod_intra_launch`（多一个 `dAqk` 入参，`:1854-1871`）。产物：
+`harness/check_bwd_b2_intra.py`（`harness/check_bwd_b2_intra.out.txt`）+ `harness/ncu_b2_intra_driver.py` /
+`harness/probe_b2_intra_ncu.sh`（`harness/probe_b2_intra_ncu.out.txt`）。
+
+### 66.1 设计：核内 `dAkk`、寄存器 merge、一次 launch
+
+关键观察（§65.1/§65.2）：部署 `BT=CHUNK=16 ⟹ NC=1` 下 B3 只剩**对角**那两个 `tl.dot` 等价式。折进方式：
+
+1. **`dAkk` 用核内结果**：`B2M_SAND` 落盘前 `daB[i][j]` 正是 sandwiched `X2`，而最终 `dA` =
+   `where(i>j, -X2, 0)`（`b2_mma_probe.cu:1124-1132`）。故 intra 直接以
+   `SAKK(a,j) = (a>j & valid) ? -daB[a][j] : 0`（`:1195`）读 B 的 A/B 片元，**无需 `dA` 落盘再读回**。
+2. **`dAqk` 进 smem**、`q/k/g` 合流进 `siq/sik/sig`（`:393-401`，`q/k/g` 行 `t<T` 置零），
+   唯一新输入是 `dAqk`。
+3. **四个 `[BT,BT]@[BT,KD]` tf32 mma**（`:1198-1225`）逐式照抄 `b3_intra_probe.cu`，门控在累加器片元
+   布局里逐元素做（`:1229-1254`），产出 `idq/idk/idg[2][4]`。
+4. **merge 到门控**：PROD 的 gate 片元布局（行 `g/g+8`、列 `nt*8+2t+(i&1)`）与 intra **逐位同构**，
+   故 `dqgv += idq`、`dkgv += idk`、`dgv += idg`（`:1319-1326`），`dg` 的 `m_last` 项照旧。
+5. **merge 到 `db`**：intra 的 `Σ_k dkpre·k` 按 warp 列求和写 `idbrow[NW][BT]`（`:1260-1270`），
+   在 `db` 段既有的跨 warp 归约里一并累加（`:1423-1426`）——**不新增 `db` 的 `__syncthreads`**。
+
+为让 intra 读得到 SAND 的 `daB`、又能把片元 merge 进 GATE，把 **DA + SAND 两块整体前移到 GATE/DB 之前**
+（纯文本重排，段内算术一字未动）；段间 buffer 两两不相交，新增仅 `siq/sik/sig`（24 KB）、`sda`（1 KB）、
+`idbrow`（0.5 KB）。
+
+### 66.2 Part A：折进 vs「prod + 独立 B3」**逐位相同**（`dg`/`db` 仅 fp32 加法序 ulp）
+
+`check_bwd_b2_intra.out.txt`，6 组 shape（含非整除 `T=250`、单 chunk `T=64`）。把折进结果与
+「`prod.<fld> + b3.<fld>`」（两者各自已锚定 torch/FLA）比，最坏 `max_abs`：
+
+| 对比 | `dqg` | `dkg` | `dg` | `db` |
+|---|---|---|---|---|
+| `prod_intra` vs `prod + b3` | **0** | **0** | 4.8e-7 | 9.5e-7 |
+
+`dq`/`dk` 的 merge 与参考同序（`dqf + idq`）故**逐位**；`dg` 在 gate 里先加 `idg` 再加 `m_last`
+项、参考是先 `+m_last` 再 `+idg`，`db` 折进的是 `Σ_w(dbrow+idbrow)`、参考是 `Σ_w dbrow + Σ_w idbrow`，
+两者仅**结合序**不同 → ulp 级（≤9.5e-7）。**未被 intra 触及的输出全部逐位不变**（`dv2/dvb/dkgb/dA/
+dApre/dw/dgk` max_abs=0）。且 `(prod_intra − prod).dqg` 非零（如 `B8` 的 max_abs=1.45），证贡献确实加进去了。
+
+### 66.3 Part B：资源 —— 寄存器反降、smem +26 KB、仍零 spill / 1 block/SM
+
+| build | regs | spill | smem (B) |
+|---|---|---|---|
+| `prod` | 146 | 0 | 133760 |
+| `prod_intra` | **144** | **0** | **159872** |
+
+prereg 未涨（编译器把 intra 片元复用进 gate 的空档），smem +26112 B（≈25.5 KB）——`prod` 本就在
+1 block/SM，新增 smem 后仍 1 block/SM（ncu `launch__occupancy_limit_shared_mem` 两者皆 1）。
+
+### 66.4 Part C：计时 —— 大 shape 略慢（1.04–1.06×），小 shape 净赢（0.88–0.89×）
+
+`check_bwd_b2_intra.out.txt`（CUPTI `dev`，均值；`prod+b3` = 老设计两次 launch）：
+
+| case | `prod` (µs) | `prod_intra` (µs) | `prod+b3` (µs) | `incl/prod` | `fold/(p+b3)` |
+|---|---|---|---|---|---|
+| B8 T2048 H8 | 1306.2 | 1636.7 | 1538.1 | 1.253 | **1.064** |
+| B2 T1024 H8 | 171.7 | 214.5 | 205.6 | 1.249 | **1.043** |
+| T512 H4 | 20.5 | 24.5 | 27.9 | 1.198 | **0.878** |
+| T256 H2 | 18.7 | 22.2 | 24.9 | 1.186 | **0.891** |
+| T250 H3（非整除） | 18.9 | 22.5 | 25.3 | 1.189 | **0.889** |
+| T64 H1（单 chunk） | 18.1 | 21.5 | 24.1 | 1.187 | **0.894** |
+
+折进后**总是**比 `prod` 慢 ~19–25%（`incl/prod`）——intra 段的活是**串行追加在每个 CTA 的关键路径尾部**
+（staging + 4 mma + 门控），不像独立 B3 那样是一批只做 intra 的 CTA。**小 shape** 省下一次 launch 摊薄
+（固定开销占比高）→ 净赢 **~11%**；**大 shape** launch 已摊薄，串行尾巴占上风 → 略慢 **4–6%**。
+
+### 66.5 Part D：`ncu` —— 占用率 / tensor% 不动，代价是 L2 流量 + bank conflict + 串行尾巴
+
+`probe_b2_intra_ncu.out.txt`（`b8t2048h8` 与 `b2t1024h8`；两者都非 TMA、`-DB2M_PROD`）：
+
+| 指标 | `prod` B8 | `prod_intra` B8 | `prod` B2 | `prod_intra` B2 |
+|---|---|---|---|---|
+| Duration | 1.30 ms | **1.64 ms** | 172.2 µs | **216.2 µs** |
+| DRAM read / write | 1.63 GB / 486 MB | 1.64 GB / 486 MB | 203 MB / 54 MB | 205 MB / 54 MB |
+| L2 bytes | 4.29 GB | **4.36 GB** | 536 MB | **542 MB** |
+| global ld sectors | 77.7 M | **84.3 M** | 9.72 M | **10.53 M** |
+| smem bank conflicts | 23.5 M | **36.3 M** | 2.94 M | **4.54 M** |
+| tensor pipe | 3.3% | 3.0% | 3.0% | 2.8% |
+| warps active | 12.46% | 12.46% | 12.46% | 12.46% |
+| registers/thread | 146 | 144 | 146 | 144 |
+
+读法：**DRAM 字节几乎不动**（`q/k/g` 本就被 gate 读过、命中 L2；仅 `dAqk` ~1 MB 新读），
+**占用率与 tensor% 完全不变**——代价是（a）`siq/sik/sig/sda` 的 smem 读写把 **bank conflict 抬 ~55%**、
+global ld sector +6.6 M（`q/k/g` 合流读）、L2 +70 MB；（b）一段**串行**的 staging+mma+门控尾。
+所以 `Duration +26%` 是**串行尾巴 + smem 流量**，不是新瓶颈（kernel 本就在 1 block/SM、
+12.5% 占用、tensor 3% 的标量/发射受限区）。
+
+### 66.6 结论与设计输入
+
+- **兑现 §65.6**：B3 对角 intra 已折进**单次** `-DB2M_PROD -DB2M_INTRA` launch，`dq/dk` **逐位**、
+  `dg/db` ulp 级、未触及输出**逐位不变**；`dA` 不再落盘、B2/B3 不再是两个 kernel。
+- **但不是大 shape 的净赢**：折进 vs「prod + 独立 B3」= 大 shape **1.04–1.06×（略慢）**、小 shape
+  **0.88–0.89×（净赢）**。原因：部署粒度下 B3 的绝对工作量太小，独立 launch 会被 executor 更好地
+  并行/流水掉，而**折进把它变成每个 CTA 关键路径尾部的一段串行尾巴**（并多扫一遍 `q/k/g` 的 smem staging）。
+- **设计输入（更新）**：目标卡**保持 B2 与 B3 为两个 kernel**，除非目标是**小 batch/短序列**的 launch
+  受限场景（此时折进净赢 ~11%）。这与 P7-41（CUTLASS 空杠杆）、P7-58（`q/k/g` 合流净亏）同属一类：
+  **「结构闭合」与「性能净赢」不是同一回事**，须分别计量。
+- **边界**：只测 `K=V=128`、`BT=16`、fp32 操作数；本折进只覆盖部署粒度 `NC=1` 的对角（非对角 Parts A/C
+  只在 `BT>BC` 时出现，本专题未覆盖）。
+
+### 66.7 坑与记录（诚实）
+
+- **merge 的对齐前提**：intra 累加器片元（行 `g/g+8`、列 `warp*BW+nt*8+2t+(i&1)`）必须与 gate 的最终
+  `dqgv/dkgv/dgv` **逐位同构**才可寄存器相加；P7-62 的独立核正是因为复用同一片元布局才能无缝折进。
+- **`dAkk` 掩码别漏**：`daB` 存的是**未掩码** `X2`，`SAKK` 必须自带 `(a>j) & valid`，否则 `Mk/Sk`
+  把上三角也吃进去（指纹：`dq` 对、`dk/dg` 错到 O(1)）。
+- **顺序与 ulp**：把 intra 的 `dg` 折在 gate 的 `m_last` 项**之前**、`db` 折成 `Σ_w(dbrow+idbrow)`，
+  只改结合序 → 实测 ≤9.5e-7；若要逐位，须把 `idg`/`idbrow` 与参考**同序**相加（可做但价值低）。
+- **段重排**：为让 intra 读到 SAND 的 `daB` 并把片元 merge 进 GATE，DA+SAND 必须前移到 GATE/DB 之前；
+  段间 buffer 不相交，故重排**不改任何段内算术**（Part A 的「未触及输出逐位=0」即证）。

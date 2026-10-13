@@ -775,7 +775,21 @@
       比 Triton 版快 1.3–1.45×。**坑**：门控循环漏乘 `dk2` 的 `2^{g}`（指纹＝只 `dq` 对、`dk/db/dg` 同比例
       偏大）。**下一步（未做）**＝并进生产 launch（在 `-DB2M_PROD` 里用核内 `dA`+`dAqk`+已 staging 的
       `q/k/g` 把对角贡献加到门控段最终 `dq/dk/dg` 并进 `db`），须处理寄存器/smem 峰值与累加器共享；
-      不改本轮已证代数。
+      不改本轮已证代数。**该下一步已由 P7-63 关闭**（逐位无损、单次 launch；但大 shape 非净赢，见 `docs/07` §66）。
+- [x] **P7-63** 兑现 §65.6 / P7-62 的「下一步」——**把 B3 对角 intra 折进生产 launch**（`-DB2M_INTRA`，
+      要求 `-DB2M_PROD`；新入口 `b2prod_intra_launch` 多一个 `dAqk` 入参）：用 SAND 的**核内** `daB`
+      （掩码 `-X2` = `dAkk`，不再落盘读回）+ `dAqk` + 合流 `q/k/g`，四个 `[BT,BT]@[BT,KD]` tf32 mma 产出
+      `idq/idk/idg`，**寄存器 merge** 进门控段最终的 `dq/dk/dg`（片元布局逐位同构）、`db` 的 `Σ_k dkpre·k`
+      并进既有跨 warp 归约；为读到 `daB` 把 DA+SAND 两块整体前移至 GATE/DB 之前（段内算术一字未动）。新增
+      `harness/check_bwd_b2_intra.py`（`check_bwd_b2_intra.out.txt`，空闲卡）+ `harness/ncu_b2_intra_driver.py`
+      / `harness/probe_b2_intra_ncu.sh`（`probe_b2_intra_ncu.out.txt`）+ `docs/07` §66。**Part A**：6 组 shape
+      （含非整除 `T=250`、单 chunk `T=64`）折进 vs「`prod` + 独立 B3」`dqg/dkg` **逐位（max_abs=0）**、
+      `dg` ≤4.8e-7 / `db` ≤9.5e-7（fp32 加法结合序）、**未触及输出全逐位不变**。**Part B**：regs 146→**144**、
+      **零 spill**、smem 133760→**159872 B**、仍 1 block/SM。**Part C（关键）**：折进 vs 两次 launch 大 shape
+      **1.04–1.06×（略慢）**、小 shape **0.88–0.89×（净赢）**（`B8T2048H8` 1538.1→**1636.7µs**）——折进把 intra
+      变成每 CTA 关键路径尾部的**串行尾巴**。**Part D（ncu）**：DRAM 字节几乎不动、占用率/tensor% **完全不变**，
+      代价＝bank conflict +55%、L2 +70 MB、global ld sector +6.6 M。**结论**：结构闭合兑现（单 kernel、`dA`
+      不落盘），但**目标卡应保持 B2/B3 为两个 kernel**，仅小 batch/短序列（launch 受限）时折进净赢。见 `docs/07` §66。
 - [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
       边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
       （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
@@ -1168,12 +1182,32 @@
 - **把 B3 对角 intra 的四个 `tl.dot` 手工翻译成 CUDA `mma` 时，逐支路的 `2^{±g}` 门控别漏乘**（P7-62，
   §65.3）：`dq2`/`dk2` 共享同一 B 操作数（`KG`）与同一门控因子 `2^{g}`，`dkt` 用 `2^{-g}`——第一版只在
   门控循环里写了 `adq *= 2^{g}` 而漏了 `adk *= 2^{g}`。指纹＝**同一 B 操作数、同一门控下只有 `dq` 对、
-  `dk`/`db`/`dg` 同比例偏大**（误差随 `g` 幅度放大，因 `db` 也取自 `dk2`）。
+   `dk`/`db`/`dg` 同比例偏大**（误差随 `g` 幅度放大，因 `db` 也取自 `dk2`）。
+- **「结构闭合」≠「性能净赢」**（P7-63，§66.4/§66.6）：把 B3 对角 intra 折进生产 launch（省一次 launch、
+  `dA` 不落盘）**大 shape 反而略慢 1.04–1.06×**——独立 B3 是一批只做 intra 的 CTA、其工作量在 executor
+  层被更好地流水掉，折进却把它变成**每个 CTA 关键路径尾部的串行尾巴**（并多扫一遍 `q/k/g` 的 smem
+  staging、bank conflict +55%）；只有小 shape/短序列（launch 受限）才净赢 0.88–0.89×。判据同 §64：**该活
+  在隔离核里能重叠、并进生产核后是否仍在关键路径之外**。另：折进的 `dg`（折在 `m_last` 项**之前**）与
+  `db`（折成 `Σ_w(dbrow+idbrow)`）只改 fp32 **结合序**，故与「两核相加」差 ulp（≤9.5e-7）而非逐位。
+- **核内复用 `dAkk` 时掩码别漏**（P7-63，§66.7）：`daB` 存的是 SAND 未掩码的 `X2`，intra 读它当 `dAkk`
+  必须自带 `(a>j) & valid` 掩码，否则 `Mk/Sk` 把上三角也吃进去（指纹＝`dq` 对、`dk/dg` 错到 O(1)）。
+
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-62 补测**。
-  - P7-62（本轮）：**兑现 §60.5 的 K2 形状 CUDA 化最后一条结构项——B3 `intra` 折进 K2 形状**。部署
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-63 补测**。
+  - P7-63（本轮）：**兑现 §65.6/P7-62 的「下一步」——把 B3 对角 intra 折进生产 launch**（`-DB2M_INTRA`，
+    需 `-DB2M_PROD`；新入口 `b2prod_intra_launch` 多 `dAqk` 入参）。用 SAND 的**核内** `daB`（掩码 `-X2`
+    = `dAkk`，不落盘读回）+ `dAqk` + 合流 `q/k/g`，四个 `[BT,BT]@[BT,KD]` tf32 mma 产出 `idq/idk/idg`，
+    寄存器 merge 进门控最终 `dq/dk/dg`（片元同构）、`db` 并进既有跨 warp 归约；DA+SAND 前移至 GATE/DB
+    之前（段内算术一字未动）。新增 `harness/check_bwd_b2_intra.py`（`check_bwd_b2_intra.out.txt`）+
+    `ncu_b2_intra_driver.py` / `probe_b2_intra_ncu.sh`（`probe_b2_intra_ncu.out.txt`）+ `docs/07` §66。
+    **Part A**：6 组 shape 折进 vs「`prod`+独立 B3」`dqg/dkg` **逐位=0**、`dg ≤4.8e-7`/`db ≤9.5e-7`
+    （fp32 结合序）、未触及输出全逐位不变。**Part B**：regs 146→144、零 spill、smem 133760→159872 B。
+    **Part C**：大 shape **1.04–1.06×（略慢）**、小 shape **0.88–0.89×（净赢）**。**Part D**：占用率
+    /tensor% 不动，代价＝bank conflict +55% + L2 +70 MB + 串行尾巴。**结论**：结构闭合（单 kernel、`dA`
+    不落盘），但目标卡**保持 B2/B3 两 kernel**，仅小 batch/短序列折进净赢。
+  - P7-62（上轮）：**兑现 §60.5 的 K2 形状 CUDA 化最后一条结构项——B3 `intra` 折进 K2 形状**。部署
     `NC=1` 下 B3 只剩对角（§27.1），把 §27 的对角 MMA 恒等式搬进 CUDA、做成 K2 形状核（`grid (NT,B*H)`、
     warp-per-k-column、四个 `mma.sync.tf32` + fp32 门控）。新增 `harness/b3_intra_probe.cu` +
     `harness/check_bwd_b3_intra_cuda.py`（`check_bwd_b3_intra_cuda.out.txt`）+ `ncu_b3_intra_cuda_driver.py`
@@ -2026,11 +2060,13 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-62 补测**，进入收尾/维护。
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-63 补测**，进入收尾/维护。
+  **P7-63 已兑现 P7-62/§65.6 的「唯一剩下的工程步」（B3 对角 intra 折进生产 launch）**：`-DB2M_INTRA`
+  （需 `-DB2M_PROD`）/ `b2prod_intra_launch` 把核内 `dAkk`（SAND 的 `daB` 掩码）+ `dAqk` + 合流 `q/k/g`
+  折进单次 launch，折进 vs「`prod`+独立 B3」`dqg/dkg` **逐位**、未触及输出逐位不变；但**大 shape 略慢
+  （1.04–1.06×）、小 shape 净赢（0.88–0.89×）**，故**目标卡保持 B2/B3 两 kernel**（`docs/07` §66）。
   **P7-62 已兑现 §60.5 的 K2 形状 CUDA 化最后一条结构项（B3 intra 折进 K2 形状）**：新增 K2 形状 CUDA
   核 `b3_intra_probe.cu`，vs Triton MMA B3 落 tf32 底噪（含非整除 T、g=0）、孤立 `dev` 快 1.3–1.45×；
-  **唯一剩下的工程步**＝把它并进 `-DB2M_PROD` 生产 launch（核内 `dA`+`dAqk`+已 staging `q/k/g` → 加到
-  门控段最终 `dq/dk/dg` 并进 `db`），须处理寄存器/smem 峰值与累加器共享——本轮已证代数、不做数值改动。
   **P7-61 已收口 §49.7/§63.6 的最后一条真结构项（同 CTA `dw` 交接）**：`prod_hdw` 十项输出 vs `prod`
   逐位相同、`dw` 从生产 ABI 消失、隔离段快 7–9% 但六段生产核里 wash；B2 六段的中间量至此**要么本就核内、
   要么可核内**，K2 形状 CUDA 化在**结构上闭合**（剩余头寸＝tensor 3% 的标量/发射受限，不在中间量搬运上）。

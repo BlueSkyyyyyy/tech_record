@@ -29,8 +29,9 @@
 // This file implements the GEMM core (like P7-44) so it is an apples-to-apples head-to-head
 // vs the identical-op Triton kernel; the B2 non-GEMM pieces are added as separate opt-in
 // segments: P7-52 `-DB2M_OUT` (output branch `dv2=beta*(A@dv)`) and P7-53 `-DB2M_DKGB`
-// (`dkgb=A@(-dw)`).  The remaining finalize (`dA` post-ops, `db`, gate chain) and the intra
-// fold are still not here (see docs/07 §49.7/§55.6/§56).
+// (`dkgb=A@(-dw)`).  P7-54/55/56/57 added the remaining `dA`/`db`/gate segments and P7-60
+// merged them into one production launch (`-DB2M_PROD`); P7-63 folds the B3 `intra` diagonal
+// into that production launch (`-DB2M_INTRA`).
 //
 // Build (inside kernel_lab):
 //   nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared b2_mma_probe.cu -o /tmp/b2_mma.so
@@ -214,6 +215,21 @@ DEV void st2(float* p, float a, float b) {
 #if B2M_SAND && !B2M_DA
 #error "B2M_SAND requires B2M_DA"
 #endif
+// P7-63: fold the B3 `intra` diagonal (the last K2-shape structural item, docs/07 §65.6 /
+// P7-62's "下一步") into the **production launch** `-DB2M_PROD`.  At deployment CHUNK=16 (NC=1)
+// B3 collapses to the diagonal Parts B/D (docs/07 §27.1); `b3_intra_probe.cu` (P7-62) verified
+// that diagonal as a K2-shape CUDA kernel.  Here, using the *in-kernel* sandwiched `dAkk`
+// (= the masked `-daB` that SAND already produced, so no `dA` round-trip) and the `dAqk` input,
+// the same four `[BT,BT]@[BT,KD]` tf32 mmas produce additive `dq/dk/dg` (merged into the gate's
+// final outputs, which share the exact mma-fragment layout) and `db` (merged into the `db`
+// reduction).  Supersedes the separate B3 kernel: B2+B3 become one K2-shape launch.
+// Requires the full production set (SAND's `daB`, GATE, DB, DKGB, DA) -- i.e. `B2M_PROD`.
+#ifndef B2M_INTRA
+#define B2M_INTRA 0
+#endif
+#if B2M_INTRA && !B2M_PROD
+#error "B2M_INTRA requires B2M_PROD"
+#endif
 // P7-56: the *fifth non-GEMM segment* of B2 in CUDA -- the per-token write-gate gradient
 //   db[o_A] = sum_v dvb[o_A,v] * v[o_A,v]  +  sum_k dkgb[o_A,k] * kg[o_A,k]
 // (FLA `chunk_bwd.py`, `check_bwd_dqkg_kernel.py:180-210`: `b_db = sum_V(b_dvb*b_v)` then
@@ -374,6 +390,17 @@ struct alignas(128) Shared {
     float sq[BT][QKGP];
     float skb[BT][QKGP];
     float sgb[BT][QKGP];
+#endif
+#if B2M_INTRA
+    // P7-63: the folded B3 `intra` diagonal.  Staged raw `q/k/g` [BT,KD] (rows t<T zeroed) and
+    // the `dAqk` input tile [BT,BT]; `dAkk` is read directly from SAND's `daB` (masked `-X2`),
+    // so no `dA` staging/round-trip.  `idbrow` is the `db` cross-warp reduction (merged into
+    // the `db` store).
+    float siq[BT][KD];
+    float sik[BT][KD];
+    float sig[BT][KD];
+    float sda[BT][BT];
+    float idbrow[NW][BT];
 #endif
 };
 
@@ -632,6 +659,9 @@ b2mma_kernel(
 #endif
              float* __restrict__ dAout,
 #endif
+#if B2M_INTRA
+             const float* __restrict__ dAqk,
+#endif
              int B, int T, int H, int NT) {
     extern __shared__ char smem_raw[];
     Shared* sh = reinterpret_cast<Shared*>(smem_raw);
@@ -648,6 +678,11 @@ b2mma_kernel(
         for (int x = 0; x < 4; ++x) { accq[nt][x] = 0.f; acck[nt][x] = 0.f; accw[nt][x] = 0.f; }
     float gpart = 0.f;
     float gpart1 = 0.f;   // B2M_DGKCF second kcol half (kcol = warp*BW + 8 + c)
+#if B2M_INTRA
+    // P7-63: folded B3 `intra` diagonal contributions (same mma-fragment layout as the gate's
+    // final `dq/dk/dg`), produced after SAND and merged into the GATE/DB stores below.
+    float idq[2][4], idk[2][4], idg[2][4];
+#endif
 #if B2M_OUT
     float acc2[2][4];     // dvb[o_A, v] output tile (m16 x 2*n8), warp-private V columns
     #pragma unroll
@@ -1041,6 +1076,203 @@ b2mma_kernel(
         if (tr1 < T) st2(&dkgb[o1], acc3[nt][2], acc3[nt][3]);
     }
 #endif
+#if B2M_DA
+    // ---- P7-54 post-loop: `dw @ kg^T` partial, reduce the 8 warps, store `dApre` ----
+    {
+        const int r = l >> 1, c0 = (l & 1) * 8;
+        // Mirror this warp's `dw` (=accw, mma-fragment layout: rows g/g+8, cols 2t/2t+1) into
+        // `swall[warp]` so any lane can read it in row-major order.
+        #pragma unroll
+        for (int nt = 0; nt < 2; ++nt) {
+            const int col = nt * 8 + 2 * t;
+            sh->swall[warp][g][col]         = accw[nt][0];
+            sh->swall[warp][g][col + 1]     = accw[nt][1];
+            sh->swall[warp][g + 8][col]     = accw[nt][2];
+            sh->swall[warp][g + 8][col + 1] = accw[nt][3];
+        }
+        __syncwarp();
+        // dw@kg^T partial over this warp's output k columns [warp*BW, warp*BW+BW).  FLA negates
+        // `dw`, so the term is *subtracted* from the base below (matches `chunk_bwd.py:280-281`).
+        #pragma unroll
+        for (int kk = 0; kk < BW; ++kk) {
+            const float w0 = sh->swall[warp][r][kk];
+            #pragma unroll
+            for (int i = 0; i < 8; ++i)
+                dkpart[i] += w0 * sh->skg[c0 + i][warp * BW + kk];
+        }
+        #pragma unroll
+        for (int i = 0; i < 8; ++i)
+            sh->dapart[warp][r][c0 + i] = dbpart[i] - dkpart[i];
+    }
+    __syncthreads();
+    {   // reduce the 8 warp partials (one thread per [BT,BT] entry)
+        const int idx = threadIdx.x, r = idx / BT, c = idx % BT;
+        float s = 0.f;
+        #pragma unroll
+        for (int w = 0; w < NW; ++w) s += sh->dapart[w][r][c];
+        sh->da16[r][c] = s;
+    }
+    __syncthreads();
+    {   // store `dApre` (row = o_t, col = o_u; rows o_t<T)
+        const int idx = threadIdx.x;
+        if (idx < BT * BT) {
+            const int r = idx / BT, c = idx % BT, tr = i_t * BT + r;
+            if (tr < T)
+                dApre[((int64_t)(n * T + tr) * H + hh) * BT + c] = sh->da16[r][c];
+        }
+    }
+#endif
+#if B2M_SAND
+    // ---- P7-55 final dA sandwich: dA = where(m_A, -(b_A @ ((dApre*beta_col) @ b_A)), 0) ----
+    // `sh->da16` still holds `dApre` [o_t,o_u]; all ops are fp32 scalar (no tf32), so the
+    // result is bit-comparable to a torch sandwich on the *same* `dApre`.
+    __syncthreads();
+    {   // dAm[r][c] = (r>c & valid) ? dApre[r][c]*beta[c] : 0
+        const int idx = threadIdx.x;
+        if (idx < BT * BT) {
+            const int r = idx / BT, c = idx % BT;
+            const bool v = (r > c) && (i_t * BT + r < T) && (i_t * BT + c < T);
+            sh->daB[r][c] = v ? sh->da16[r][c] * sh->sbeta[c] : 0.f;
+        }
+    }
+    __syncthreads();
+    {   // X1[i][j] = sum_p dAm[i][p] * b_A[p][j]   -> da16
+        for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
+            const int i = idx / BT, jj = idx % BT;
+            float s = 0.f;
+            #pragma unroll
+            for (int p = 0; p < BT; ++p) s += sh->daB[i][p] * sh->sA[p][jj];
+            sh->da16[i][jj] = s;
+        }
+    }
+    __syncthreads();
+    {   // X2[i][j] = sum_p b_A[i][p] * X1[p][j]     -> daB
+        for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
+            const int i = idx / BT, jj = idx % BT;
+            float s = 0.f;
+            #pragma unroll
+            for (int p = 0; p < BT; ++p) s += sh->sA[i][p] * sh->da16[p][jj];
+            sh->daB[i][jj] = s;
+        }
+    }
+    __syncthreads();
+    {   // store final `dA` = where(m_A, -X2, 0).  X2 first axis maps to the stored token row
+        // (golden/Triton use the same-index mapping, `check_bwd_dqkg_kernel.py:203`), so token
+        // row = i and column index = jj, with the mask (i>jj) applied on X2's own axes.
+        for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
+            const int i = idx / BT, jj = idx % BT;
+            const bool v = (i > jj) && (i_t * BT + i < T) && (i_t * BT + jj < T);
+            if (i_t * BT + i < T)
+                dAout[((int64_t)(n * T + i_t * BT + i) * H + hh) * BT + jj] = v ? -sh->daB[i][jj] : 0.f;
+        }
+    }
+#endif
+#if B2M_INTRA
+    // ---- P7-63: folded B3 `intra` diagonal (docs/07 §65/§66).  `daB` still holds SAND's
+    // sandwiched `X2`; `dAkk = (a>j & valid) ? -daB[a][j] : 0`.  Four `[BT,BT]@[BT,KD]` mmas
+    // (warp owns output k-columns [w*BW, w*BW+BW)) -> additive `dq/dk/dg/db`.
+    for (int idx = threadIdx.x; idx < BT * KD; idx += NW * 32) {
+        const int row = idx / KD, col = idx % KD, tt = i_t * BT + row;
+        float qv = 0.f, kv = 0.f, gv = 0.f;
+        if (tt < T) {
+            const int64_t off = ((int64_t)(n * T + tt) * H + hh) * KD + col;
+            qv = qptr[off]; kv = kraw[off]; gv = graw[off];
+        }
+        sh->siq[row][col] = qv; sh->sik[row][col] = kv; sh->sig[row][col] = gv;
+    }
+    for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
+        const int a = idx / BT, j = idx % BT;
+        const bool vv = (i_t * BT + a < T) && (i_t * BT + j < T);
+        const int64_t off = ((int64_t)(n * T + i_t * BT + a) * H + hh) * BT + j;
+        sh->sda[a][j] = vv ? dAqk[off] : 0.f;
+    }
+    __syncthreads();
+    {
+        float idt[2][4];
+        #pragma unroll
+        for (int nt = 0; nt < 2; ++nt)
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) { idq[nt][i] = 0.f; idk[nt][i] = 0.f; idt[nt][i] = 0.f; }
+        // in-kernel sandwiched `dAkk` = masked `-daB`
+        #define SAKK(a, j) (((a) > (j) && (i_t * BT + (a)) < T && (i_t * BT + (j)) < T) \
+                                ? -sh->daB[(a)][(j)] : 0.f)
+        #pragma unroll
+        for (int kk = 0; kk < BT / 8; ++kk) {
+            const int kc = kk * 8;
+            const int j0 = kc + t, j1 = kc + t + 4;
+            uint32_t mq[4] = {to_tf32(sh->sda[g][j0]),     to_tf32(sh->sda[g + 8][j0]),
+                              to_tf32(sh->sda[g][j1]),     to_tf32(sh->sda[g + 8][j1])};
+            uint32_t mk[4] = {to_tf32(SAKK(g, j0)),        to_tf32(SAKK(g + 8, j0)),
+                              to_tf32(SAKK(g, j1)),        to_tf32(SAKK(g + 8, j1))};
+            uint32_t sq_[4] = {to_tf32(sh->sda[j0][g]),    to_tf32(sh->sda[j0][g + 8]),
+                               to_tf32(sh->sda[j1][g]),    to_tf32(sh->sda[j1][g + 8])};
+            uint32_t sk_[4] = {to_tf32(SAKK(j0, g)),       to_tf32(SAKK(j0, g + 8)),
+                               to_tf32(SAKK(j1, g)),       to_tf32(SAKK(j1, g + 8))};
+            #pragma unroll
+            for (int nt = 0; nt < 2; ++nt) {
+                const int col = warp * BW + nt * 8 + g;
+                const float kg0 = sh->sik[j0][col] * exp2f(-sh->sig[j0][col]);
+                const float kg1 = sh->sik[j1][col] * exp2f(-sh->sig[j1][col]);
+                const float qg0 = sh->siq[j0][col] * exp2f(sh->sig[j0][col]);
+                const float qg1 = sh->siq[j1][col] * exp2f(sh->sig[j1][col]);
+                const float kd0 = sh->sik[j0][col] * sh->sbeta[j0] * exp2f(sh->sig[j0][col]);
+                const float kd1 = sh->sik[j1][col] * sh->sbeta[j1] * exp2f(sh->sig[j1][col]);
+                uint32_t b_kg[2]  = {to_tf32(kg0), to_tf32(kg1)};
+                uint32_t b_qg[2]  = {to_tf32(qg0), to_tf32(qg1)};
+                uint32_t b_kgd[2] = {to_tf32(kd0), to_tf32(kd1)};
+                mma8(idq[nt], mq, b_kg, idq[nt]);
+                mma8(idk[nt], mk, b_kg, idk[nt]);
+                mma8(idt[nt], sq_, b_qg, idt[nt]);
+                mma8(idt[nt], sk_, b_kgd, idt[nt]);
+            }
+        }
+        // gating (rows g/g+8, cols nt*8+2t+(i&1)); `dkpre` saved for `db`
+        float dkpre[2][4];
+        #pragma unroll
+        for (int nt = 0; nt < 2; ++nt) {
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const int rowrel = (i < 2) ? g : g + 8;
+                const int col = warp * BW + nt * 8 + 2 * t + (i & 1);
+                const float gg = sh->sig[rowrel][col];
+                idq[nt][i] *= exp2f(gg);                 // dq2 = 2^g ⊙ (Mq@KG)
+                idk[nt][i] *= exp2f(gg);                 // dk2 = 2^g ⊙ (Mk@KG)
+                idt[nt][i] *= exp2f(-gg);                // dkt = 2^-g ⊙ (Sq@QG + Sk@KGd)
+                dkpre[nt][i] = idk[nt][i];
+                idk[nt][i] *= sh->sbeta[rowrel];          // dk2 *= beta
+            }
+        }
+        #pragma unroll
+        for (int nt = 0; nt < 2; ++nt) {
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const int rowrel = (i < 2) ? g : g + 8;
+                const int col = warp * BW + nt * 8 + 2 * t + (i & 1);
+                const float kv = sh->sik[rowrel][col];
+                idg[nt][i] = sh->siq[rowrel][col] * idq[nt][i] + (idk[nt][i] - idt[nt][i]) * kv;
+                idk[nt][i] += idt[nt][i];                 // dk2 += dkt
+            }
+        }
+        // db partial: sum_k dkpre * k over this warp's k columns, then cross-warp
+        float pr0 = 0.f, pr1 = 0.f;
+        #pragma unroll
+        for (int nt = 0; nt < 2; ++nt) {
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const int rowrel = (i < 2) ? g : g + 8;
+                const int col = warp * BW + nt * 8 + 2 * t + (i & 1);
+                const float p = dkpre[nt][i] * sh->sik[rowrel][col];
+                if (i < 2) pr0 += p; else pr1 += p;
+            }
+        }
+        pr0 += __shfl_xor_sync(0xffffffffu, pr0, 1);
+        pr0 += __shfl_xor_sync(0xffffffffu, pr0, 2);
+        pr1 += __shfl_xor_sync(0xffffffffu, pr1, 1);
+        pr1 += __shfl_xor_sync(0xffffffffu, pr1, 2);
+        if (t == 0) { sh->idbrow[warp][g] = pr0; sh->idbrow[warp][g + 8] = pr1; }
+        #undef SAKK
+    }
+#endif
 #if B2M_GATE && !B2M_NODG
     // ---- P7-57: gate chain -> final `dq`/`dk`/`dg` (FLA `chunk_bwd.py:173-189`) ----
     __syncthreads();   // raw `dgk` stores visible block-wide before the read-back below
@@ -1086,9 +1318,15 @@ b2mma_kernel(
                 const float dkm = acck[nt][i] * gnm;
                 const float dgb = acc3[nt][i];
                 const float kdk = kv * dkm;
+#if B2M_INTRA
+                dgv[nt][i] = qv * dqf - kdk + kv * gk * dgb * bt + idg[nt][i];
+                dqgv[nt][i] = dqf + idq[nt][i];
+                dkgv[nt][i] = dkm + dgb * gk * bt + idk[nt][i];
+#else
                 dgv[nt][i] = qv * dqf - kdk + kv * gk * dgb * bt;
                 dqgv[nt][i] = dqf;
                 dkgv[nt][i] = dkm + dgb * gk * bt;
+#endif
                 if (i == 0 || i == 2) pk0 += kdk; else pk1 += kdk;
             }
 #if B2M_VECST
@@ -1184,99 +1422,12 @@ b2mma_kernel(
             float s = 0.f;
             #pragma unroll
             for (int w = 0; w < NW; ++w) s += sh->dbrow[w][idx];
+#if B2M_INTRA
+            #pragma unroll
+            for (int w = 0; w < NW; ++w) s += sh->idbrow[w][idx];
+#endif
             if (i_t * BT + idx < T)
                 db_out[((int64_t)(n * T + i_t * BT + idx) * H + hh)] = s;
-        }
-    }
-#endif
-#if B2M_DA
-    // ---- P7-54 post-loop: `dw @ kg^T` partial, reduce the 8 warps, store `dApre` ----
-    {
-        const int r = l >> 1, c0 = (l & 1) * 8;
-        // Mirror this warp's `dw` (=accw, mma-fragment layout: rows g/g+8, cols 2t/2t+1) into
-        // `swall[warp]` so any lane can read it in row-major order.
-        #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
-            const int col = nt * 8 + 2 * t;
-            sh->swall[warp][g][col]         = accw[nt][0];
-            sh->swall[warp][g][col + 1]     = accw[nt][1];
-            sh->swall[warp][g + 8][col]     = accw[nt][2];
-            sh->swall[warp][g + 8][col + 1] = accw[nt][3];
-        }
-        __syncwarp();
-        // dw@kg^T partial over this warp's output k columns [warp*BW, warp*BW+BW).  FLA negates
-        // `dw`, so the term is *subtracted* from the base below (matches `chunk_bwd.py:280-281`).
-        #pragma unroll
-        for (int kk = 0; kk < BW; ++kk) {
-            const float w0 = sh->swall[warp][r][kk];
-            #pragma unroll
-            for (int i = 0; i < 8; ++i)
-                dkpart[i] += w0 * sh->skg[c0 + i][warp * BW + kk];
-        }
-        #pragma unroll
-        for (int i = 0; i < 8; ++i)
-            sh->dapart[warp][r][c0 + i] = dbpart[i] - dkpart[i];
-    }
-    __syncthreads();
-    {   // reduce the 8 warp partials (one thread per [BT,BT] entry)
-        const int idx = threadIdx.x, r = idx / BT, c = idx % BT;
-        float s = 0.f;
-        #pragma unroll
-        for (int w = 0; w < NW; ++w) s += sh->dapart[w][r][c];
-        sh->da16[r][c] = s;
-    }
-    __syncthreads();
-    {   // store `dApre` (row = o_t, col = o_u; rows o_t<T)
-        const int idx = threadIdx.x;
-        if (idx < BT * BT) {
-            const int r = idx / BT, c = idx % BT, tr = i_t * BT + r;
-            if (tr < T)
-                dApre[((int64_t)(n * T + tr) * H + hh) * BT + c] = sh->da16[r][c];
-        }
-    }
-#endif
-#if B2M_SAND
-    // ---- P7-55 final dA sandwich: dA = where(m_A, -(b_A @ ((dApre*beta_col) @ b_A)), 0) ----
-    // `sh->da16` still holds `dApre` [o_t,o_u]; all ops are fp32 scalar (no tf32), so the
-    // result is bit-comparable to a torch sandwich on the *same* `dApre`.
-    __syncthreads();
-    {   // dAm[r][c] = (r>c & valid) ? dApre[r][c]*beta[c] : 0
-        const int idx = threadIdx.x;
-        if (idx < BT * BT) {
-            const int r = idx / BT, c = idx % BT;
-            const bool v = (r > c) && (i_t * BT + r < T) && (i_t * BT + c < T);
-            sh->daB[r][c] = v ? sh->da16[r][c] * sh->sbeta[c] : 0.f;
-        }
-    }
-    __syncthreads();
-    {   // X1[i][j] = sum_p dAm[i][p] * b_A[p][j]   -> da16
-        for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
-            const int i = idx / BT, jj = idx % BT;
-            float s = 0.f;
-            #pragma unroll
-            for (int p = 0; p < BT; ++p) s += sh->daB[i][p] * sh->sA[p][jj];
-            sh->da16[i][jj] = s;
-        }
-    }
-    __syncthreads();
-    {   // X2[i][j] = sum_p b_A[i][p] * X1[p][j]     -> daB
-        for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
-            const int i = idx / BT, jj = idx % BT;
-            float s = 0.f;
-            #pragma unroll
-            for (int p = 0; p < BT; ++p) s += sh->sA[i][p] * sh->da16[p][jj];
-            sh->daB[i][jj] = s;
-        }
-    }
-    __syncthreads();
-    {   // store final `dA` = where(m_A, -X2, 0).  X2 first axis maps to the stored token row
-        // (golden/Triton use the same-index mapping, `check_bwd_dqkg_kernel.py:203`), so token
-        // row = i and column index = jj, with the mask (i>jj) applied on X2's own axes.
-        for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
-            const int i = idx / BT, jj = idx % BT;
-            const bool v = (i > jj) && (i_t * BT + i < T) && (i_t * BT + jj < T);
-            if (i_t * BT + i < T)
-                dAout[((int64_t)(n * T + i_t * BT + i) * H + hh) * BT + jj] = v ? -sh->daB[i][jj] : 0.f;
         }
     }
 #endif
@@ -1633,6 +1784,9 @@ static int b2prod_launch_impl(const void* v, const void* vn, const void* h, cons
                               void* db_out,
                               void* dApre,
                               const void* A4s, void* dAout,
+#if B2M_INTRA
+                              const void* dAqk_in,
+#endif
                               int B, int T, int H, int NT, void* stream) {
     dim3 grid(NT, B * H);
     int smem = (int)sizeof(Shared);
@@ -1675,11 +1829,15 @@ static int b2prod_launch_impl(const void* v, const void* vn, const void* h, cons
         (const float*)qptr, (const float*)kraw, (const float*)graw,
         (float*)dqg, (float*)dkg, (float*)dg, scale,
         (float*)db_out, (float*)dApre, (const float*)A4s, (float*)dAout,
+#if B2M_INTRA
+        (const float*)dAqk_in,
+#endif
         B, T, H, NT);
 #endif
     return (int)cudaGetLastError();
 }
 
+#if !B2M_INTRA
 extern "C" int b2prod_launch(const void* v, const void* vn, const void* h, const void* dh,
                              const void* dov, const void* dvv,
                              const void* k, const void* g, const void* dwin,
@@ -1694,6 +1852,26 @@ extern "C" int b2prod_launch(const void* v, const void* vn, const void* h, const
                               dkgb, qptr, kraw, graw, dqg, dkg, dg, scale,
                               db_out, dApre, A4s, dAout, B, T, H, NT, stream);
 }
+#else
+// P7-63: production launch with the B3 `intra` diagonal folded in (extra `dAqk` input; the
+// merged `dq/dk/dg/db` already include the intra contribution).
+extern "C" int b2prod_intra_launch(const void* v, const void* vn, const void* h, const void* dh,
+                                   const void* dov, const void* dvv,
+                                   const void* k, const void* g, const void* dwin,
+                                   void* dq, void* dk, void* dw_out, void* dgk,
+                                   const void* A4, const void* beta, void* dv2, void* dvb,
+                                   void* dkgb, const void* qptr, const void* kraw,
+                                   const void* graw,
+                                   void* dqg, void* dkg, void* dg, float scale,
+                                   void* db_out, void* dApre, const void* A4s, void* dAout,
+                                   const void* dAqk, int B, int T, int H, int NT,
+                                   void* stream) {
+    return b2prod_launch_impl(v, vn, h, dh, dov, dvv, k, g, dwin,
+                              dq, dk, dw_out, dgk, A4, beta, dv2, dvb,
+                              dkgb, qptr, kraw, graw, dqg, dkg, dg, scale,
+                              db_out, dApre, A4s, dAout, dAqk, B, T, H, NT, stream);
+}
+#endif
 #endif  // B2M_PROD
 
 
