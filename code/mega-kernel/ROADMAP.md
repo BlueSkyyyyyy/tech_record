@@ -1295,6 +1295,8 @@
 - 新建博客 post 的 front matter `date` **不要写成未来时间**：Hugo 默认不构建 future 内容，
   会导致 `relref` 报 `REF_NOT_FOUND`（症状：`hugo list all` 能看到该页，但引它会失败）。
 - 容器 workdir 是 `code/kernel-opt`，`docker exec` 跑脚本要用**绝对路径**。
+- `cp.async.wait_group N` 的 `N` 必须是**立即数**：写 cp.async 深环（软件流水）时环深 `D` 得模板化
+  （见 P53-1/§42.7），且尾批要 `wait_group 0` 兜底否则漏等（§40.8 的 drain 坑）。
 
 ## 当前进度 / 下一步
 
