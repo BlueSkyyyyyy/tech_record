@@ -2701,6 +2701,44 @@
       deterministic 开关 config（`T=64` 关确定性 `splitK=8`、开确定性 `1`）。配套博客
       `content/posts/mega-moe-96-mega-moe-gate-jit-wrappers`（索引页新增第 96 篇）。
 
+### P87 增量（opt-in，补齐第 16 篇只写了 4 条 bullet 的 SM100 hc_prenorm + mega 家族最后一个 JIT 包装层）
+
+- [x] **P87-1** **SM100 HyperConnection prenorm GEMM 的 JIT 启动包装层与三段流水**
+      （`csrc/jit_kernels/impls/sm100_tf32_hc_prenorm_gemm.hpp`、
+      `deep_gemm/include/deep_gemm/impls/sm100_tf32_hc_prenorm_gemm.cuh`；
+      `csrc/jit_kernels/impls/sm90_tf32_hc_prenorm_gemm.hpp`、`csrc/apis/hyperconnection.hpp`）。
+      第 16 篇（P7-2）拆了 `tf32_hc_prenorm_gemm` 的独立算子形态，但 **SM100 分支只写了 4 条 bullet**
+      （标注「仅分析」）；第 79/86 篇补齐了另外四个 mega 家族（BF16/FP8 Mega MoE、Mega Gate、mHC）
+      的 JIT 启动包装层，唯独 `sm100_tf32_hc_prenorm_gemm.hpp`（113 行）缺席。本篇补齐这最后一块。
+      **host 包装层**（纯 host，H100 真机）：`block_m=block_k=64`、两个 warpgroup 各 128 线程、
+      `block_n=align(n,16)` 且 **n 上限从 SM90 的 32 放宽到 128**（`:28`）、`k%64==0`；
+      num_stages 预算循环（`:53-67`）与 SM90（`sm90_...hpp:55-79`）三处差异——**barrier 家族从
+      2 组变 4 组 + 1 个 tmem_full**（`(num_stages*4+1)*8`）、多 4B TMEM 指针、SM90 末尾把 smem
+      覆盖成满 227KB 而 SM100 保留算出的值；D 描述符在 split 时走 **3D `[num_splits,m,n]`**
+      （`:46-50`）；grid=`num_splits*ceil(m/64)`、block=256、10 个编译期模板常量。
+      **SM100 kernel**（仅分析）：与第 10/35 篇同源的「TMA→cast→MMA」三段流水，多出的
+      **cast-and-reduce warpgroup**（`:268-342`）承担「A bf16→fp32 写 TMEM」——因 UMMA 的 TS 形态
+      （`SM100_MMA_TF32_TS` `:169-170`）没有寄存器 A 操作数；并在转换同一拍用 `__ffma2_rn(v,v,sum)`
+      （`:316`）累加平方和（第 16 篇「省一遍 A 的读」的落点）。四组 mbarrier 的 init 计数
+      （`full_cast`=128 `:112`、其余=1 `:111/113/114/116`）、`UMMA_K=32/sizeof(float)=8`、
+      逐 K `fma`（`:203`）首条清零、`umma_arrive` 一次 commit 通知 empty/empty_cast（`:207-208`）
+      与末尾 `tmem_full`（`:212`）、TMEM 列预算 `BLOCK_K*kNumCastStages+BLOCK_N`（`:75`，
+      `get_num_aligned_tmem_cols` `utils.cuh:42-50`）；**split-K 分解**（`:126-134`：余数分给前
+      `kRemainKBlocks` 个 split、部分 D 落独立切片、`m_offset=shape_m*k_split_idx`、host 外部求和）；
+      **手写银行组 swizzle** `get_swizzled_smem_offset`（`:18-34`，STSM/LDSM 共用）。
+      H100 实测 `src/hc_prenorm_sm100.cu` + `harness/exp_hc_prenorm_sm100.{sh,out.txt}`
+      （nvcc 直接 include 真实头文件 + torch，**21 PASS / 0 FAIL**；文件 sha256
+      `sm100_...hpp bb44f58e…`/`sm90_...hpp 9570a7ce…`/`sm100_...cuh 37d28d51…`）：
+      ① host 预算表——`n=8/16` 12 stage、`n=24/32` 12 stage、`n=64` SM90 拒/SM100 9 stage、
+      `n=128` SM90 拒/SM100 5 stage，SM100 恰多 204B（`(2*12+1)*8+4`）；② split-K 恰好覆盖
+      （含余数 1/2）+ 部分和 == 完整 GEMM（`max|Δ|=1.144e-05`）+ 3D scratch 证实；
+      ③ **`get_swizzled_smem_offset<128,16>` 与 `cute::Swizzle<3,4,3>` 逐点 ALL MATCH**、
+      在 32×128B atom 上是 **16B chunk 双射**、mode-64 非 shortcut 分支无碰撞；
+      ④ cast-reduce 的 `warp_reduce_sum<4>` + `m_idx` 映射 64 行全对、`fma2` 平方 fp32 vs fp64
+      5.901e-08；⑤ SM100 wrapper 的 2D/3D TMA 描述符用真 torch 张量（`m=4096,k=7168`、`n∈{24,128}`）
+      成功构造且 2D/3D 指纹不同。配套博客 `content/posts/mega-moe-97-sm100-hc-prenorm-gemm`
+      （索引页新增第 97 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -2726,8 +2764,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P86 各增量完成（P15-1…P41-1、P42-1…P86-1）。**
-  本轮 P86-1：新建 `docs/96-mega-moe-gate-jit-wrappers.md`
+- 当前进度：**P0~P14 全部完成；P15~P87 各增量完成（P15-1…P41-1、P42-1…P87-1）。**
+  本轮 P87-1：新建 `docs/97-sm100-hc-prenorm-gemm.md`
+  （+`src/hc_prenorm_sm100.cu`、`harness/exp_hc_prenorm_sm100.{sh,out.txt}`）——
+  补齐第 16 篇（P7-2）**只写了 4 条 bullet** 的 SM100 HyperConnection prenorm GEMM，以及第 79/86 篇
+  漏掉的 mega 家族最后一个 JIT 启动包装层 `sm100_tf32_hc_prenorm_gemm.hpp`。
+  **host 包装层**：`n<=128`（SM90 仅 32）、`block_n=align(n,16)`、num_stages 循环与 SM90 三处差异
+  （barrier 家族 2→4 + tmem_full、+4B TMEM 指针、smem 不覆盖成满值）、split 时 D 走 3D
+  `[num_splits,m,n]`、grid=`num_splits*ceil(m/64)`。**SM100 kernel（仅分析）**：「TMA→cast→MMA」
+  三段流水 + **cast-and-reduce warpgroup**（A bf16→fp32 写 TMEM，因 UMMA TS 无寄存器 A 操作数，
+  同拍 `__ffma2_rn` 累平方和）；四组 mbarrier init 计数、`UMMA_K=8`、TMEM 列预算、split-K 分解、
+  手写银行组 swizzle。**H100(sm90) 直接 include 真实头文件 21 PASS / 0 FAIL**：
+  host 预算表、split-K 恰好覆盖且部分和==完整 GEMM、**`get_swizzled_smem_offset<128,16>` 与
+  `cute::Swizzle<3,4,3>` 逐点 ALL MATCH**（+双射）、cast-reduce 映射 64 行全对、2D/3D TMA 描述符
+  构造。索引页新增第 97 篇。
+  上一轮 P86-1：新建 `docs/96-mega-moe-gate-jit-wrappers.md`
   （+`src/mega_moe_gate_jit_wrapper.cu`、`harness/exp_mega_moe_gate_jit_wrapper.{sh,out.txt}`）——
   补齐第 89 篇（P79-1）**只当对照数了描述符、没拆**的两个 mega 家族 JIT 启动包装层：
   `sm100_fp8_fp4_mega_moe.hpp`（FP8/FP4 Mega MoE 满配版）与 `sm100_bf16_mega_gate.hpp`（Mega Gate），

@@ -1,0 +1,65 @@
+== 环境坐标 ==
+057ca59 Public release 26/09/30 (#462)
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+bb44f58ef1a08217c0c72cb6f065b11d5a2ddcbadb7cd963cd8fc905edae9bf2 sm100_tf32_hc_prenorm_gemm.hpp
+9570a7ce9465568b887c4b5ae16d581b83cd5b557781a40b2ff94cb89907b1cc sm90_tf32_hc_prenorm_gemm.hpp
+37d28d517a7805c65e75d233ddf4ea63fc91f132660ce2887d8732b09c10822b sm100_tf32_hc_prenorm_gemm.cuh
+0c73a4ad3f96d7ce59b8801aee423b715629b856e3845f87602e631fd3248dae hyperconnection.hpp
+Build cuda_13.2.r13.2/compiler.37668154_0
+
+== 编译（nvcc 直接 include 真实头文件 + torch）==
+build OK
+
+== 主实验 ==
+== H100(sm90) verification of SM100 tf32_hc_prenorm_gemm (P87-1) ==
+
+[Part 1] host num_stages / smem budget loop
+   n    block_n  swz_cd | sm90 stages   smem (cap 232448) | sm100 stages  smem (cap 232448)
+    8    16         64   |    12        151744   | 12        151948
+   16    16         64   |    12        151744   | 12        151948
+   24    32        128   |    12        204992   | 12        205196
+   32    32        128   |    12        204992   | 12        205196
+   64    64        128   | rejected  0             0   |  9        229676
+  128   128        128   | rejected  0             0   |  5        213164
+  PASS  SM100: n=24 -> num_stages>0 and fits smem_capacity
+  PASS  SM90:  n=24 -> num_stages>0 and fits smem_capacity
+  PASS  block_n = align(n, 16) (SM100 tallies max 128)
+  PASS  swizzle_cd_mode: block_n bytes >=128 -> 128B swizzle
+
+[Part 2] split-K K-block decomposition (BLOCK_K=64)
+  k=  384 splits= 4: K blocks=  6, per-split= 1, remainder=2 -> coverage-exactly-once=YES
+  PASS  split-K K blocks covered exactly once
+  k=  384 splits= 3: K blocks=  6, per-split= 2, remainder=0 -> coverage-exactly-once=YES
+  PASS  split-K K blocks covered exactly once
+  k= 7168 splits=16: K blocks=112, per-split= 7, remainder=0 -> coverage-exactly-once=YES
+  PASS  split-K K blocks covered exactly once
+  k=  448 splits= 6: K blocks=  7, per-split= 1, remainder=1 -> coverage-exactly-once=YES
+  PASS  split-K K blocks covered exactly once
+  partial-D sum vs full GEMM (m=64,n=24,k=384,splits=4): max|d| = 7.629e-06
+  PASS  sum of split-K partial D == full GEMM (fp32)
+  PASS  split D scratch is 3D [num_splits, m, n] (m_offset = shape_m * k_split_idx)
+
+[Part 3] get_swizzled_smem_offset vs cute::Swizzle<3,4,3> (128B swizzle)
+  mode-128: get_swizzled_smem_offset<128,16>(c,lane) == Swizzle<3,4,3>(lane*128+c*16) : ALL MATCH
+  PASS  128B swizzle offset == cute::Swizzle<3,4,3> (real device code)
+  PASS  128B swizzle is a bijection over the atom's 16B chunks
+  mode-64 general branch: distinct 16B cells = 128, no collision = YES
+  PASS  mode-64 general branch: no collision over the atom
+
+[Part 4] cast-and-reduce warpgroup mapping (warp_reduce_sum<4> + m_idx)
+  m_idx = m_block_idx*64 + sub*16 + lane/4 + u*8, warp_reduce_sum<4> group sum : ALL MATCH
+  PASS  cast-and-reduce m_idx mapping + warp_reduce_sum<4> (real device code)
+  fma2(v,v,0) square-sum fp32 vs fp64 rel = 1.602e-08
+  PASS  square accumulation in fp32 matches fp64
+
+[Part 5] SM100 wrapper TMA descriptors (2D / 3D split) with real tensors
+  PASS  n=24: A/B/D 2D TMA descriptors built (a=cf01 d2=5588)
+  n=24 (block_n=32, swz_cd=128): 2D D hash=5588, 3D D hash=7d4e (differ=YES)
+  PASS  3D split D descriptor constructed and distinct from 2D
+  PASS  B is fp32 and k % 64 == 0 (wrapper contract)
+  PASS  n=128: A/B/D 2D TMA descriptors built (a=cf01 d2=f713)
+  n=128 (block_n=128, swz_cd=128): 2D D hash=f713, 3D D hash=8b69 (differ=YES)
+  PASS  3D split D descriptor constructed and distinct from 2D
+  PASS  B is fp32 and k % 64 == 0 (wrapper contract)
+
+== SUMMARY: 21 PASS / 0 FAIL ==
