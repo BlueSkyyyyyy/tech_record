@@ -3050,6 +3050,33 @@
       预处理=空层）；§8 判据映射（**本层不贡献任何 C 判据，只是 C3 的输入准备**）；§9 局限；§10 坐标。
       配套博客 post `mega-kernel-28-mpk-weight-prep`（weight 29）并更新 `mega-kernel-00-index` 第 28 项。
 
+### P114 MPK 运行层「可执行规范」源码走读（`docs/28-mpk-testmode-harness.md`）
+
+- [x] **P114-1** 补齐 `docs/25`（P111-1）**§9 明留的尾巴**——「`MirageModelConfig` 的调用方
+      （如 `demo/`/`tests/`）未走读：本文只看库侧契约」。把「谁来验库里契约」这一层打开：见
+      `docs/28-mpk-testmode-harness.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，
+      与 `docs/06`–`docs/27` 同快照；**纯源码走读（资料分析），本轮无新实验**）。headline——**`test_mode`
+      把一张常驻 megakernel 图「跑一次就退」**：`-DMPK_TEST_MODE` 同时改**编译期**（缺 meta tensor 允许传空
+      指针 `persistent_kernel.py:3413`）与**设备端终止协议**（`persistent_kernel.cuh:328` 把生产里
+      「跑到 `max_seq_length`/EOS 才 done」的请求完成条件替换成 `if(true)`），于是每个测试都是一次
+      「单次 launch → 常驻 kernel 自终止 → 比 PyTorch 参考」的最小端到端。结构：§0 定位（测试套件 =
+      编译栈的**可执行规范**；一张图被驱动的 9 步共同骨架）；§1 `PersistentKernel` 公开 API 面
+      （`get_default_init_parameters:669`、`attach_input:746`、82 个 `*_layer()`（`:842-3128`）、
+      `compile:3207`、`__call__:3574`、`wait:3610`、`finalize:3614`、`target_cc:536`）与 worker/scheduler
+      划分（`utils.py:25-53`：目标卡 132 SM → **128 worker/16 scheduler**，对上 `docs/06`/`docs/07`）；
+      §2 `test_mode` 机理（`-DMPK_TEST_MODE:319`、`_apply_test_mode_meta_defaults:622`、设备端 `if(true)`
+      终止协议）并解释它与 `docs/09` §7–§11 用**同一批用例**诊断不收敛的关系；§3 **依赖分析（`docs/08`）
+      的可执行规范**——`fork_point`/`join_point`/`diamond_fork_join`（case 4）/`residual_stripping`
+      （假并行路径剥离）/`case2_case3_negative`（子进程查 stderr，接受两者耦合）五个用例把
+      `annotated_graph.cc` 的 fork/join 分类、case 2/3 拒绝、残余边剥离从源码规则变成可复现断言；
+      §4 `grid_dim_sweep`——event 数随 grid 标度（每 batch item 一个 fork event）；§5 `test_mode/`
+      其余 18 个用例的前端/device 契约目录（含 SM100 linear bias、GPT-OSS clamped SwiGLU、FP8 MoE
+      流水、滑窗/attention sink、sampling 边界、argmax vocab pad、`kv_planner`）；§6 `demo/` 入口对照
+      （`demo_rms_norm.py` 走 **superoptimize 自动路径**、测试套件**无一处** `superoptimize`——从调用面
+      再证 `docs/15` §7「生产前端不调 superoptimizer」）；§7 C1–C5 映射（`test_mode/` 是本专题唯一能在
+      **运行层**同时踩到 C1–C5 的源码面）；§8 局限；§9 坐标。配套博客 post
+      `mega-kernel-29-mpk-testmode`（weight 30）并更新 `mega-kernel-00-index` 第 29 项。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3217,7 +3244,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P113-1 完成（1/1）**。补齐 `docs/26`（P112-1）**§8 明留的尾巴**「`demo.py` 的权重预处理
+- 当前进度：**P114-1 完成（1/1）**。补齐 `docs/25`（P111-1）**§9 明留的尾巴**「`MirageModelConfig` 的调用方
+  （如 `demo/`/`tests/`）未走读」——把「谁来验库里契约」这一层打开：见 `docs/28-mpk-testmode-harness.md`
+  （快照 `f9eb70c`，**纯源码走读、无新实验**）。headline——**`test_mode` 把一张常驻 megakernel 图「跑一次
+  就退」**：`-DMPK_TEST_MODE` 同时改**编译期**（缺 meta tensor 允许传空指针 `persistent_kernel.py:3413`）与
+  **设备端终止协议**（`persistent_kernel.cuh:328` 把生产「跑到 `max_seq_length`/EOS 才 done」的请求完成条件
+  替换成 `if(true)`），于是每个测试都是一次「单次 launch → 常驻 kernel 自终止 → 比 PyTorch 参考」的最小端到端。
+  走读 `PersistentKernel` 公开 API（82 个 `*_layer()`、`compile:3207`、`__call__:3574`、`finalize:3614`；
+  worker/scheduler 划分 `utils.py:25-53`，目标卡 132 SM→**128/16** 对上 `docs/06`/`docs/07`）；把 `docs/08`
+  依赖分析器的 fork/join/case 2·3/residual-stripping 逐条配成**可执行规范**（5 个用例），`grid_dim_sweep`
+  给 event 数随 grid 的标度见证，§5 列出其余 18 个 test_mode 用例的契约目录；§6 从调用面再证 `docs/15` §7
+  「生产前端不调 superoptimizer」；§7 把 `docs/22` §8 判据总映射补成「运行层可运行断言表」。配套博客 post
+  `mega-kernel-29-mpk-testmode`（weight 30）并更新 `mega-kernel-00-index` 第 29 项。
+- 此前：**P113-1 完成（1/1）**。补齐 `docs/26`（P112-1）**§8 明留的尾巴**「`demo.py` 的权重预处理
   （Phase-2 吸收、gate_up 交织拆分）未走读」——把 megakernel 编译栈**最上游、最不像 kernel** 的一层打开：
   见 `docs/27-mpk-weight-prep.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。headline——**权重预处理层
   用普通 PyTorch 张量变换把「HF checkpoint 物理布局」改写成「builder 逻辑契约布局」**，且有**两条独立
