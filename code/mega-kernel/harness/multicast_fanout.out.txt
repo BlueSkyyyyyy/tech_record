@@ -1,0 +1,157 @@
+########## §94 TMA multicast 子集扇出 g + chunk 维度（P169-1） ##########
+# DEV=6  nvcc -O3 -arch=sm_90a
+
+===== ptxas -v：fanout_kernel 的寄存器 / spill =====
+ptxas info    : Function properties for _Z13fanout_kernel14CUtensorMap_stPfiiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 10 registers, used 1 barriers, 128 bytes smem
+# numSM=132
+
+===== §A（Q1）fan-out 扫描 g=0(plain)/1/2/4/8（C=8, chunk=8KB, L=2, grid=numSM*4, R=200, it=20）=====
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 8 200 2 0 20
+B C= 8 grid= 528 chunk= 8KB L= 2 R= 200 g= 0(plain) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  245.182 us | deliver  7056.6 GB/s | per-blk   13.4 GB/s | src-read  7056.6 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 8 200 2 1 20
+B C= 8 grid= 528 chunk= 8KB L= 2 R= 200 g= 1(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  465.190 us | deliver  3719.2 GB/s | per-blk    7.0 GB/s | src-read  3719.2 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 8 200 2 2 20
+B C= 8 grid= 528 chunk= 8KB L= 2 R= 200 g= 2(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  298.115 us | deliver  5803.6 GB/s | per-blk   11.0 GB/s | src-read  2901.8 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 8 200 2 4 20
+B C= 8 grid= 528 chunk= 8KB L= 2 R= 200 g= 4(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  249.637 us | deliver  6930.7 GB/s | per-blk   13.1 GB/s | src-read  1732.7 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 8 200 2 8 20
+B C= 8 grid= 528 chunk= 8KB L= 2 R= 200 g= 8(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  241.133 us | deliver  7175.1 GB/s | per-blk   13.6 GB/s | src-read   896.9 GB/s | maxerr 0.00000
+
+===== §A2 chunk×g 交互：g=0/4/8 在 chunk=2KB 与 16KB（C=8, L=2, grid=numSM*4, 固定总字节 2400KB, it=20）=====
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 2 1200 2 0 20
+B C= 8 grid= 528 chunk= 2KB L= 2 R=1200 g= 0(plain) it=20 | regs= 10 occ=16 eff= 4 waves=1.00 | 1257.214 us | deliver  2064.3 GB/s | per-blk    3.9 GB/s | src-read  2064.3 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 2 1200 2 4 20
+B C= 8 grid= 528 chunk= 2KB L= 2 R=1200 g= 4(mcast) it=20 | regs= 10 occ=16 eff= 4 waves=1.00 | 1230.058 us | deliver  2109.8 GB/s | per-blk    4.0 GB/s | src-read   527.5 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 2 1200 2 8 20
+B C= 8 grid= 528 chunk= 2KB L= 2 R=1200 g= 8(mcast) it=20 | regs= 10 occ=16 eff= 4 waves=1.00 | 1254.718 us | deliver  2068.4 GB/s | per-blk    3.9 GB/s | src-read   258.5 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 16 150 2 0 20
+B C= 8 grid= 528 chunk=16KB L= 2 R= 150 g= 0(plain) it=20 | regs= 10 occ= 6 eff= 4 waves=1.00 |  231.320 us | deliver 11219.2 GB/s | per-blk   21.2 GB/s | src-read 11219.2 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 16 150 2 4 20
+B C= 8 grid= 528 chunk=16KB L= 2 R= 150 g= 4(mcast) it=20 | regs= 10 occ= 6 eff= 4 waves=1.00 |  242.550 us | deliver 10699.7 GB/s | per-blk   20.3 GB/s | src-read  2674.9 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 16 150 2 8 20
+B C= 8 grid= 528 chunk=16KB L= 2 R= 150 g= 8(mcast) it=20 | regs= 10 occ= 6 eff= 4 waves=1.00 |  240.080 us | deliver 10809.8 GB/s | per-blk   20.5 GB/s | src-read  1351.2 GB/s | maxerr 0.00000
+
+===== §B（Q2）chunk 扫描（固定总字节 chunk*R=2400KB；C=8, L=2, grid=numSM*4, it=20）plain vs g=8 =====
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 2 1200 2 0 20
+B C= 8 grid= 528 chunk= 2KB L= 2 R=1200 g= 0(plain) it=20 | regs= 10 occ=16 eff= 4 waves=1.00 | 1255.040 us | deliver  2067.8 GB/s | per-blk    3.9 GB/s | src-read  2067.8 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 2 1200 2 8 20
+B C= 8 grid= 528 chunk= 2KB L= 2 R=1200 g= 8(mcast) it=20 | regs= 10 occ=16 eff= 4 waves=1.00 | 1253.944 us | deliver  2069.7 GB/s | per-blk    3.9 GB/s | src-read   258.7 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 4 600 2 0 20
+B C= 8 grid= 528 chunk= 4KB L= 2 R= 600 g= 0(plain) it=20 | regs= 10 occ=16 eff= 4 waves=1.00 |  660.701 us | deliver  3928.0 GB/s | per-blk    7.4 GB/s | src-read  3928.0 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 4 600 2 8 20
+B C= 8 grid= 528 chunk= 4KB L= 2 R= 600 g= 8(mcast) it=20 | regs= 10 occ=16 eff= 4 waves=1.00 |  658.038 us | deliver  3943.9 GB/s | per-blk    7.5 GB/s | src-read   493.0 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 8 300 2 0 20
+B C= 8 grid= 528 chunk= 8KB L= 2 R= 300 g= 0(plain) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  365.488 us | deliver  7100.7 GB/s | per-blk   13.4 GB/s | src-read  7100.7 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 8 300 2 8 20
+B C= 8 grid= 528 chunk= 8KB L= 2 R= 300 g= 8(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  359.021 us | deliver  7228.6 GB/s | per-blk   13.7 GB/s | src-read   903.6 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 16 150 2 0 20
+B C= 8 grid= 528 chunk=16KB L= 2 R= 150 g= 0(plain) it=20 | regs= 10 occ= 6 eff= 4 waves=1.00 |  231.541 us | deliver 11208.5 GB/s | per-blk   21.2 GB/s | src-read 11208.5 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 16 150 2 8 20
+B C= 8 grid= 528 chunk=16KB L= 2 R= 150 g= 8(mcast) it=20 | regs= 10 occ= 6 eff= 4 waves=1.00 |  241.187 us | deliver 10760.2 GB/s | per-blk   20.4 GB/s | src-read  1345.0 GB/s | maxerr 0.00000
+
+===== §C（Q3）C×g 交叉（chunk=8KB, L=2, grid=numSM*4, R=200, it=20）：缩减由 g 定还是 C 定？ =====
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 4 528 8 200 2 0 20
+B C= 4 grid= 528 chunk= 8KB L= 2 R= 200 g= 0(plain) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  246.949 us | deliver  7006.1 GB/s | per-blk   13.3 GB/s | src-read  7006.1 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 4 528 8 200 2 2 20
+B C= 4 grid= 528 chunk= 8KB L= 2 R= 200 g= 2(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  277.531 us | deliver  6234.1 GB/s | per-blk   11.8 GB/s | src-read  3117.0 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 4 528 8 200 2 4 20
+B C= 4 grid= 528 chunk= 8KB L= 2 R= 200 g= 4(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  241.662 us | deliver  7159.4 GB/s | per-blk   13.6 GB/s | src-read  1789.8 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 8 200 2 0 20
+B C= 8 grid= 528 chunk= 8KB L= 2 R= 200 g= 0(plain) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  245.006 us | deliver  7061.7 GB/s | per-blk   13.4 GB/s | src-read  7061.7 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 8 200 2 2 20
+B C= 8 grid= 528 chunk= 8KB L= 2 R= 200 g= 2(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  298.573 us | deliver  5794.7 GB/s | per-blk   11.0 GB/s | src-read  2897.4 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 8 200 2 4 20
+B C= 8 grid= 528 chunk= 8KB L= 2 R= 200 g= 4(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  249.347 us | deliver  6938.7 GB/s | per-blk   13.1 GB/s | src-read  1734.7 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 8 528 8 200 2 8 20
+B C= 8 grid= 528 chunk= 8KB L= 2 R= 200 g= 8(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  241.669 us | deliver  7159.2 GB/s | per-blk   13.6 GB/s | src-read   894.9 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 16 528 8 200 2 0 20
+B C=16 grid= 528 chunk= 8KB L= 2 R= 200 g= 0(plain) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  265.883 us | deliver  6507.2 GB/s | per-blk   12.3 GB/s | src-read  6507.2 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 16 528 8 200 2 4 20
+B C=16 grid= 528 chunk= 8KB L= 2 R= 200 g= 4(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  275.752 us | deliver  6274.3 GB/s | per-blk   11.9 GB/s | src-read  1568.6 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 16 528 8 200 2 8 20
+B C=16 grid= 528 chunk= 8KB L= 2 R= 200 g= 8(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  250.485 us | deliver  6907.2 GB/s | per-blk   13.1 GB/s | src-read   863.4 GB/s | maxerr 0.00000
+$ CUDA_VISIBLE_DEVICES=6 /tmp/multicast_fanout B 16 528 8 200 2 16 20
+B C=16 grid= 528 chunk= 8KB L= 2 R= 200 g=16(mcast) it=20 | regs= 10 occ=13 eff= 4 waves=1.00 |  250.578 us | deliver  6904.6 GB/s | per-blk   13.1 GB/s | src-read   431.5 GB/s | maxerr 0.00000
+
+===== §D（Q4）ncu：源侧 L2 请求是否按 1/g 缩放（C=8, chunk=8KB, L=2, R=100, grid=numSM*4）=====
+$ ncu ... B 8 grid=528 8 100 2 0 1  (g=0)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Mbyte         1.65
+    lts__t_bytes.sum                             Mbyte       457.64
+    lts__t_sectors.sum                          sector     14301097
+    lts__t_sectors_op_read.sum                  sector      7220288
+    lts__t_sectors_srcunit_tex_op_read.sum      sector      7166144
+$ ncu ... B 8 grid=528 8 100 2 1 1  (g=1)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Mbyte         1.65
+    lts__t_bytes.sum                             Gbyte         1.10
+    lts__t_sectors.sum                          sector     34411860
+    lts__t_sectors_op_read.sum                  sector     27088476
+    lts__t_sectors_srcunit_tex_op_read.sum      sector     27033600
+$ ncu ... B 8 grid=528 8 100 2 2 1  (g=2)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Mbyte         1.65
+    lts__t_bytes.sum                             Mbyte       667.12
+    lts__t_sectors.sum                          sector     20847551
+    lts__t_sectors_op_read.sum                  sector     13571220
+    lts__t_sectors_srcunit_tex_op_read.sum      sector     13516800
+$ ncu ... B 8 grid=528 8 100 2 4 1  (g=4)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Mbyte         1.65
+    lts__t_bytes.sum                             Mbyte       442.61
+    lts__t_sectors.sum                          sector     13831441
+    lts__t_sectors_op_read.sum                  sector      6812563
+    lts__t_sectors_srcunit_tex_op_read.sum      sector      6758400
+$ ncu ... B 8 grid=528 8 100 2 8 1  (g=8)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Mbyte         1.65
+    lts__t_bytes.sum                             Mbyte       311.04
+    lts__t_sectors.sum                          sector      9720077
+    lts__t_sectors_op_read.sum                  sector      3433351
+    lts__t_sectors_srcunit_tex_op_read.sum      sector      3379200
+
+-- §D2 chunk 对源侧 L2 请求的影响（plain vs g=8，固定总字节 2400KB）--
+$ ncu ... B 8 grid=528 2 1200 2 0 1  (chunk=2KB g=0)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Mbyte         4.92
+    lts__t_bytes.sum                             Gbyte         3.15
+    lts__t_sectors.sum                          sector     98492559
+    lts__t_sectors_op_read.sum                  sector     21950371
+    lts__t_sectors_srcunit_tex_op_read.sum      sector     21788796
+$ ncu ... B 8 grid=528 2 1200 2 8 1  (chunk=2KB g=8)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Mbyte         4.92
+    lts__t_bytes.sum                             Gbyte         2.67
+    lts__t_sectors.sum                          sector     83385835
+    lts__t_sectors_op_read.sum                  sector     10299875
+    lts__t_sectors_srcunit_tex_op_read.sum      sector     10137600
+$ ncu ... B 8 grid=528 8 300 2 0 1  (chunk=8KB g=0)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Mbyte         4.92
+    lts__t_bytes.sum                             Gbyte         1.37
+    lts__t_sectors.sum                          sector     42816058
+    lts__t_sectors_op_read.sum                  sector     21641779
+    lts__t_sectors_srcunit_tex_op_read.sum      sector     21484012
+$ ncu ... B 8 grid=528 8 300 2 8 1  (chunk=8KB g=8)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Mbyte         4.92
+    lts__t_bytes.sum                             Mbyte       938.27
+    lts__t_sectors.sum                          sector     29321055
+    lts__t_sectors_op_read.sum                  sector     10296953
+    lts__t_sectors_srcunit_tex_op_read.sum      sector     10137600
+$ ncu ... B 8 grid=528 16 150 2 0 1  (chunk=16KB g=0)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Mbyte         4.92
+    lts__t_bytes.sum                             Gbyte         1.09
+    lts__t_sectors.sum                          sector     34114166
+    lts__t_sectors_op_read.sum                  sector     22849896
+    lts__t_sectors_srcunit_tex_op_read.sum      sector     22692844
+$ ncu ... B 8 grid=528 16 150 2 8 1  (chunk=16KB g=8)
+    Metric Name                            Metric Unit Metric Value
+    dram__bytes_read.sum                         Mbyte         4.92
+    lts__t_bytes.sum                             Mbyte       692.18
+    lts__t_sectors.sum                          sector     21630657
+    lts__t_sectors_op_read.sum                  sector     10294645
+    lts__t_sectors_srcunit_tex_op_read.sum      sector     10137600

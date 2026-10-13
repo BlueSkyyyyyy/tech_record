@@ -4835,6 +4835,27 @@
    新留尾巴（§93.8）：只测 H100/sm90a、合成 `float`、占用率用静态上界未用 ncu achieved、未扫
    `chunk`/2D-3D cluster/multicast 子集掩码。
 
+### P169 实验扩展 70：TMA multicast 的「子集扇出 `g`」与「chunk 维度」（`docs/04-experiments.md` §94）
+
+- [x] **P169-1** 补掉 §93.8 明留的尾巴——**「未扫 `chunk`、未测 multicast 子集掩码」**：把 §19 的
+   **二值** multicast（mode0 每 CTA 各发 / mode1 整群广播）换成**连续旋钮 `g`（fan-out / 子集掩码）**，
+   并第一次扫 **`chunk`**。见 `docs/04-experiments.md` **§94**，源码 `src/multicast_fanout.cu`
+   （§19/§93 `bcast_kernel` 忠实复刻 + 连续分组 broadcast：`C` 个 CTA 按连续 `g` 个一组、组首发
+   `...multicast::cluster`、`mask=((1<<g)-1)<<group_start`；`g=0`=plain、`g=C`=整群广播），脚本
+   `harness/multicast_fanout.sh`、原始输出 `harness/multicast_fanout.out.txt`（目标卡 H100/sm90a、
+   numSM=132、**固定空闲 device 6**、nvcc 13.2、每配置独立进程）。五个 Section：§A fan-out 扫描 /
+   §A2 chunk×g / §B chunk 扫描 / §C C×g / §D ncu。核心结论：**(1)（headline）源侧 L2 读 sector
+   精确 = `delivered/(32·g)`**（g=1..8 逐档 1/g，比值 2.000/4.000/8.000），而 **plain 基线本身已有
+   ~3.7× 的 L2 合并**，故 **plain : 整群广播 = 2.10×**（复现 §19/§93 的「~2×」，非 8×）；
+   **(2)（headline）multicast 通路不是 plain 的免费替换**——`g=1` 打到自身比 plain **慢 ~2×**
+   （3719 vs 7050 GB/s）、`g=2` 仍慢 ~18%，**`g≥4` 才追平、`g=8` 略胜 ~2%**（墙钟非单调），量化了
+   §19/§93「收益 ≤5%」为一条**扇出阈值曲线**；**(3)（headline）delivery 认 `chunk` 不认总量**——
+   2KB→2.07、8KB→7.10、16KB→**11.22 TB/s**，**§93 的「~7 TB/s 聚合墙」是 `chunk=8KB` 的产物**，
+   `chunk` 不改源侧请求数（与 `g` 正交），且大 `chunk` 下 multicast 墙钟优势消失。判据：cluster
+   kernel C1+C2+C3、`cluster.sync`/multicast 细化 **C4**、**仍非 C5**。**本轮新增实验**；P169-1
+   新留尾巴（§94.7）：未测 2D/3D cluster × multicast、非连续/重叠子集掩码、multicast × 2SM
+   （`cta_group::2`）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -5346,10 +5367,39 @@
   首轮出现过 mode0 掉到 ~5800 GB/s 的点、重跑即回到 ~6650 GB/s；因该 kernel 各变体 `numRegs` 完全
   相同，离群**只能归因于同机干扰/热态**。故这类「属性 no-op」的对照尤其要**重跑确认**、且只采信
   同族相对排序，不能拿单轮绝对值下结论。
+- **`plain` TMA 不是「无 L2 合并」的基线，别拿它当 multicast 的 1× 参照**（P169-1/§94）：ncu
+  `lts__t_sectors_op_read` 在 `C=8` 的 plain（每 CTA 各发普通 TMA）下只有 `delivered/32 / 3.74`，
+  即**同 cluster 多个 CTA 对同一地址的并发 TMA 请求被 L2 合并 ~3.7×**（§93 §E 也见 plain 的 sector
+  数随 `C`/`L` 请求流结构变）。故 **plain : 整群广播 = 2.10×（非 8×）**；要量「同一路径下的纯
+  1/g 律」必须用 `g=1`（multicast 打到自身，sector 恰 = `delivered/32`）作参照，不能拿 plain。
+- **`...multicast::cluster` 打到「单个接收者」`g=1` 比 plain TMA 慢约 2×**（P169-1/§94）：multicast
+  走 copy-engine 通路，单笔代价约为 plain TMA 的 1.9×，靠「一笔多投」摊薄——`g=1`(0.53×)/`g=2`(0.82×)
+  /`g=4`(0.98×)/`g=8`(1.02×)，**墙钟非单调**。故「用 multicast 替代普通 TMA」在小组扇出下是**净亏**，
+  不能把 mode1 与 mode0 在低 `g` 处直接类比；写 multicast 实验时 `mask` 的单 bit 形态不是 plain。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P168-1 完成（1/1）**。补掉「下一步候选」长期点名的**未叠加组合**——「§19 的 TMA
+- 当前进度：**P169-1 完成（1/1）**。补掉 §93.8 明留的尾巴——**「未扫 `chunk`、未测 multicast 子集
+  掩码」**：把 §19 的**二值** multicast（mode0/mode1）换成**连续旋钮 `g`（fan-out / 子集掩码）**，
+  并第一次扫 `chunk`。见 `docs/04-experiments.md` **§94**，源码 `src/multicast_fanout.cu`、脚本
+  `harness/multicast_fanout.sh`、原始输出 `harness/multicast_fanout.out.txt`（目标卡 H100/sm90a、
+  numSM=132、**固定空闲 device 6**、nvcc 13.2、每配置独立进程）。三条 headline：**(1)** 源侧 L2 读
+  sector **精确 = `delivered/(32·g)`**（g=1..8 逐档 1/g），而 **plain 基线本身已有 ~3.7× 的 L2 合并**
+  ⇒ **plain : 整群广播 = 2.10×**（复现 §19/§93 的「~2×」，非 8×）；**(2)** **multicast 通路不是 plain
+  的免费替换**——`g=1` 打到自身比 plain **慢 ~2×**（3719 vs 7050 GB/s）、`g=2` 仍慢 ~18%，
+  **`g≥4` 才追平、`g=8` 略胜 ~2%**（墙钟非单调），把 §19/§93「收益 ≤5%」量化为一条**扇出阈值曲线**；
+  **(3)** **delivery 认 `chunk` 不认总量**——2KB→2.07、8KB→7.10、16KB→**11.22 TB/s**，**§93 的
+  「~7 TB/s 聚合墙」是 `chunk=8KB` 的产物**，`chunk` 不改源侧请求数（与 `g` 正交），大 `chunk` 下
+  multicast 墙钟优势消失。判据 cluster C1+C2+C3、细化 **C4**、**仍非 C5**。**本轮新增实验**；
+  新留尾巴（§94.7）：未测 2D/3D cluster × multicast、非连续/重叠子集掩码、multicast × 2SM；
+  新踩坑（plain 的 L2 合并不可当 1× 基线、multicast 打到单接收者慢 2×）已记入「已知坑」。
+- 下一步候选：可继续走实验侧**未叠加的组合**（`docs/04` 微基准到 §94）——如 **multicast × 2D/3D
+  cluster**（§20 的 2D/3D 未与 multicast 叠加）、**非连续/重叠子集掩码**（§94 只测连续分组）、
+  **cluster × 端到端骨架**（把 §62/§74 的骨架放进 cluster）、或 **ncu achieved occupancy 交叉验证**
+  （§93/§94 用静态上界）；也可回到源码走读主线（`docs/35` §9 余的「`bf16` 之外 SM100 task 家族未逐一
+  走读」）。**其余旧候选**：`docs/46` §6 的 FLAT-CACHE draft attention（已核零命中、**不可走读**，
+  仅供静态落差记录）。
+- 此前：**P168-1 完成（1/1）**。补掉「下一步候选」长期点名的**未叠加组合**——「§19 的 TMA
   multicast 尚未与占用率叠加」（§19 全部广播在 `grid=128`≈1 块/SM 上测、从未把每 SM 驻留块数当旋钮；
   §86 只量了 DSM 远端读/写路径对占用率的免疫，不是 TMA 载入路径），并检验 §19.6「deliver 饱和
   ~6.6 TB/s 是每 SM 常数墙」的未定论断。见 `docs/04-experiments.md` **§93**，源码
