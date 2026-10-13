@@ -4126,10 +4126,39 @@
       （204.1+24.2+111.1），epilogue 仅占 GEMM 的 ~7%；⑤ 前向两段计算 roofline 下界 182.3us、
       实测 315.2us（GEMM only）达 **58%**，与第 15 篇反向四段「55–63%」同一完成度；
       ⑥ 前向 step vs 反向四段 single-shot（1804us）→ **反向 ≈ 前向 5.3×**，差距全在 wgrad
-      （共 1498.7us，占反向 83%），前向没有对应形状。对照表：forward L1 203.7us/76.5% vs
-      d1g 194.3us/75.7%、forward L2 111.4us/66.4% vs d2g 111.0us/65.5%。**仅分析**：融合 kernel 的
-      UMMA/tcgen05/TMEM/UTCCP、L1 FP8 输出（2 TMA stage）；本机 8 卡节点共享，带宽数受争用。
-      配套博客 `content/posts/mega-moe-142-forward-roofline`（索引页新增第 142 篇）。
+       （共 1498.7us，占反向 83%），前向没有对应形状。对照表：forward L1 203.7us/76.5% vs
+       d1g 194.3us/75.7%、forward L2 111.4us/66.4% vs d2g 111.0us/65.5%。**仅分析**：融合 kernel 的
+       UMMA/tcgen05/TMEM/UTCCP、L1 FP8 输出（2 TMA stage）；本机 8 卡节点共享，带宽数受争用。
+       配套博客 `content/posts/mega-moe-142-forward-roofline`（索引页新增第 142 篇）。
+
+### P133 增量（opt-in，补全 P132 前向预算缺的「非 GEMM 段」）
+
+- [x] **P133-1** **Mega MoE 前向 single-step 预算（下）：L2 写回与 combine 归约，补全第 142 篇缺的
+       「非 GEMM 段」**（`impls/sm100_fp8_fp4_mega_moe.cuh:1254-1357`（L2 bf16 epilogue 写回）/
+       `:1365-1520`（combine 归约）；`layout/mega_moe.cuh:43-52`（`TokenSrcMetadata`）/`:326-343`
+       （`get_rank_buffer`/`get_data_buffer`）/`:447-449`（`combine_token_buffer` 邮箱）；
+       `common/math.cuh:80-84`（`cast_into_bf16_and_pack`）；`ptx/utils.cuh:65-74`（`ptx::accumulate`）；
+       `layout/sym_buffer.cuh:33-40`（`SymBuffer::map`）；对照第 1/11/44/58/85/142 篇）。
+       第 142 篇（P132-1）把前向预算算成 `L1 204.1us + L1 epilogue 24.2us + L2 111.1us = 339.4us`，
+       但**只到 L2 的 GEMM 输出**——融合 kernel 里 L2 结果还要经 **L2 bf16 epilogue 写回** +
+       **combine 归约** 两段才变成 `y`（第 142 篇明确把 L2 的 NVLink 直写列为「仅分析」未进预算）。
+       本篇补上。**顺带澄清术语**：Mega MoE 的 combine 与 DeepEP 的 combine **语义相同、方向相反**
+       （DeepEP 收方 pull 再本地求和；Mega MoE 专家 rank 主动 push 到源 rank 的
+       `combine_token_buffer[topk(+shared)][token][hidden]` 邮箱、源 rank 只做本地求和；
+       `get_rank_buffer` 的参数是**槽号**不是 rank、rank 在 `sym_buffer.map` 的地址里），两条腿
+       字节量都是 `T·topk·H·2B`（第 1 篇模型）。**H100(sm90) 真机**（`src/moe_forward_combine.cu`
+       **直接 include 真实 `common/math.cuh`/`ptx/utils.cuh`** 跑真实设备代码 +
+       `harness/exp_moe_forward_combine.{sh,py,out.txt}`，头文件 sha256 `math 576e9db1…`/
+       `utils 8a9d5e03…`）：A) scatter→reduce **邮箱逐位 0/12288、`y=Σ_slot bf16` 逐位 0/6144**
+       （纯 torch oracle 同判、漏一槽反例 8171/8192）；B) DeepSeek 量级（`T=2048,topk=2,H=7168`）
+       **combine 归约 106.5us · 827 GB/s**（读 topk 邮箱 58.7MB + 写 y 29.4MB）、
+       **L2 打包参照 73.4us · 1371 GB/s**、**2 卡远端邮箱搬运 186.1us · 315.6 GB/s**（受争用下界，
+       对照第 11 篇裸 peer streaming ~369 GB/s、本地 HBM 3.35 TB/s）。**结论**：L2 写回（~186us）+
+       combine（~107us）**合计 ~292us，与第 142 篇计算腿 339.4us 同量级**（计算 54% / 通信+归约 46%）
+       → 融合 kernel 必须把两腿**重叠**推进，第 142 篇的 339.4us 只是这台机器的**计算侧**；
+       通信腿瓶颈是远端带宽/延迟（第 11 篇远端延迟 2.83×本地）。融合 kernel 的 TMEM 读回 /
+       NVLink 远端直写 / readiness `st_rel_sys`+`ld_acq_sys`/`grid_sync` **SM100 专属、仅分析**。
+       配套博客 `content/posts/mega-moe-143-mega-moe-forward-combine`（索引页新增第 143 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4161,8 +4190,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P132 各增量完成（P15-1…P41-1、P42-1…P132-1）。**
-  本轮 P132-1：新建 `docs/142-forward-roofline.md`
+- 当前进度：**P0~P14 全部完成；P15~P133 各增量完成（P15-1…P41-1、P42-1…P133-1）。**
+  本轮 P133-1：新建 `docs/143-mega-moe-forward-combine.md`
+  （+`harness/exp_moe_forward_combine.{sh,py,out.txt}`、`src/moe_forward_combine.cu`）——第 142 篇
+  （P132-1）前向 step 预算的**补全**：把预算只到 L2 GEMM 输出之后缺的两段补上——**L2 bf16 epilogue
+  写回**（`impls:1254-1357`：TMEM→寄存器→`cast_into_bf16_and_pack`（RNE）→swizzle STSM→
+  `sym_buffer.map` **NVLink 远端直写**源 rank 的 combine 缓冲 `:1346-1351`）与 **combine 归约**
+  （`:1365-1520`：grid-index **水位线** readiness `:1405-1441` → 逐 chunk `tma_load_1d` 拉 top-k 贡献
+  `:1459` → `ptx::accumulate` bf16→fp32 累加 `:1485` → `__float22bfloat162_rn` 回 bf16 `:1499` →
+  TMA store 写 `y`）。**澄清术语**：Mega MoE combine 与 DeepEP combine 语义相同、方向相反
+  （DeepEP 收方 pull；Mega MoE 专家 rank push 到源 rank 的 `combine_token_buffer[topk(+shared)][token]`
+  邮箱 `layout/mega_moe.cuh:447-449`、源 rank 只本地求和；`get_rank_buffer` 的参数是**槽号**不是 rank，
+  rank 在 `sym_buffer.map` 地址里），字节量都是 `T·topk·H·2B`（第 1 篇模型）。**H100(sm90) 真机**
+  （`src/moe_forward_combine.cu` **直接 include 真实 `common/math.cuh`/`ptx/utils.cuh`**）：A) scatter→
+  reduce **邮箱逐位 0/12288、`y=Σ_slot bf16` 逐位 0/6144**（纯 torch oracle 同判、漏一槽反例 8171/8192）；
+  B) DeepSeek 量级（`T=2048,topk=2,H=7168`）**combine 归约 106.5us/827 GB/s**（读 topk 邮箱 58.7MB +
+  写 y 29.4MB）、**L2 打包参照 73.4us/1371 GB/s**、**2 卡远端邮箱搬运 186.1us/315.6 GB/s**（受争用下界；
+  对照第 11 篇裸 peer streaming ~369 GB/s、本地 HBM 3.35 TB/s）。**结论**：L2 写回（~186us）+
+  combine（~107us）**合计 ~292us，与第 142 篇计算腿 339.4us 同量级**（计算 54% / 通信+归约 46%）
+  → 融合 kernel 必须把两腿**重叠**推进，第 142 篇的 339.4us 只是这台机器的**计算侧**。融合 kernel 的
+  TMEM/NVLink 直写/readiness 原语 **SM100 专属、仅分析**。索引页新增第 143 篇。
+  上一轮 P132-1：新建 `docs/142-forward-roofline.md`
   （+`harness/exp_forward_roofline.{py,sh,out.txt}`、`src/moe_forward_epilogue.cu`）——第 15 篇
   （反向 ncu 归因）的**对偶**：把**前向**两段 routed GEMM（L1/L2 的 `m_grouped`）用同一套 ncu 方法
   量透，并加上前向特有的 **L1 epilogue（in-place SwiGLU + top-k 权重 + UE8M0 量化）**预算。
