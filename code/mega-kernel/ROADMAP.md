@@ -1647,6 +1647,39 @@
     二进制重跑致 `nvcc` ETXTBSY 静默失败**（读到旧二进制，`strings` 分辨不出）——改用新路径编译+前台运行；
     worker 跨步分配 + `D>1` 预取会跨 producer 子环边界**死锁**，端到端同步对照取 `D=1`。**本轮新增实验。**
 
+### P66 实验扩展 48：worker 取 task 的预取深度 D × 分配形态（`docs/04-experiments.md` §55）
+
+- [x] **P66-1** 补掉 P65-1（§54）§54.8 明留的两条尾巴——「worker 取 task 环深固定 `D=1`：**预取深度
+  是 §41/§42 的独立变量**」与坑②「**跨步分配 `bb=w+t*Gw` 的 `D>1` 预取跨 producer 子环边界 →
+  有界环死锁**」：把 §54 端到端流水里被钉死的「worker 取 task」维度放开，量 (1) 预取深度 `D` 能否把
+  §43「每批串行缝」藏住、抬高端到端吞吐，(2) **分配形态**（strided `bb=w+t*Gw` vs contig
+  `bb=w*chunk+t`）在动态生产者 + 有界环下谁是安全形态。见 `docs/04-experiments.md` **§55**，源码
+  `src/worker_prefetch_e2e.cu`、脚本 `harness/worker_prefetch_e2e.sh`、原始输出
+  `harness/worker_prefetch_e2e.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+  `P=32 producers + G=100 workers`（grid=132 全共驻）、`DW=88`=352 B、`NDESC=393216`（138.4 MB
+  ≫ L2）、`K=32`、`T=256`、min-of-3；新增 `wassign` 维度与 worker 侧守门狗）。核心结论：
+  - **§A 正确性**：宽松环下 mode21 `ser` × {strided,contig} × `D∈{1,2,4}` 与 static **逐位一致**
+    （`got=404219327039195`）——`D`/分配在环不紧张时不改数值。
+  - **§B（headline 一）`D` 的纯性能收益很小且立刻饱和**：宽松环端到端 `D=1→2` 仅 +2–3%
+    （EDW=0 85.6→88.1、EDW=256 68.8→70.3）、`D≥2` 饱和；**端到端由 producer 写侧主导**（§54）。
+  - **§C（headline 二）接入动态生产者 + 有界环后 `D>1` 不可得**：紧环 `CAPp=16` 批下 **strided
+    `D>1` 死锁**（`ABORT`，`got=0`；钉死 §54 坑②），**contig `D=1..8` 全部数值 WRONG（静默错）**
+    却"更快"（8.9 vs 正确 `ser` 4.8 GB/s）——错误形比死锁形更隐蔽；唯一正确形态是 **strided + D=1**
+    （4.8 GB/s，复现 §54 §C 的 `e2e_ser`）。
+  - **§E 机制隔离**：contig 错在 **per-producer 的 `tail` 是「前缀计数器」**——当 worker 边界与
+    producer 边界不对齐（`chunk≠bp`）时一个 producer 被相邻两个 worker 并发消费、高 batch 先被消费
+    → `tail` 越过未消费/在飞 slot → producer 覆写。实测 split(`chunk<bp`) WRONG/split(`chunk>bp`)
+    WRONG/aligned(`chunk==bp`，本机 `G=P=66`) OK；strided 三种都对（近似前缀序）。
+  - **§D worker 侧地板（无生产者 mode0）**：`D` 的纯上限 = **`D=1→2` +19%（EDW=0 557.9→663.2）/
+    +7%（EDW=256 215.8→230.9）**，`D=2` 精确饱和——§43 的每批取 task 缝在 worker 侧 `D=2` 可消。
+  - **含义**：**`D` 不是自由的性能旋钮，而是被环协议锁死的自由度**（性能上限小 + 端到端拿不到 +
+    有生产者时语义不可得）。要让 `D>1` 可用必须改环协议——把「前缀 `tail`」换成**每槽独立回收/就绪**
+    （MPK per-worker ring / DeepGEMM ring generation 逐槽发布）或保证「一个 producer ↔ 一个
+    consumer」拓扑；给 MPK「固定大队列 + 批量取 + 每 worker 独立环」以量化理由。判据 C1–C4、仍差 C5。
+    **本轮新增实验。** P66-1 新留尾巴（见 §55.8）：合成描述符、死锁边界未闭式扫描、contig 错是
+    「共享前缀 tail 协议」性质（换 per-slot 回收可正确）、未与 DeepGEMM SM100 对跑。
+
+
 
 ## 每轮增量流程（autopilot）
 
@@ -1672,7 +1705,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P65-1 完成（1/1）**。补掉 P64-1（§53）§53.9 明留的尾巴「**纯写口径**（`mode 9`、
+- 当前进度：**P66-1 完成（1/1）**。补掉 P65-1（§54）§54.8 明留的两条尾巴——「worker 取 task 环深固定
+  `D=1`（**预取深度是 §41/§42 的独立变量**）」与坑②「**跨步分配 `bb=w+t*Gw` 的 `D>1` 预取跨 producer
+  子环边界 → 有界环死锁**」：把 §54 端到端流水里被钉死的「worker 取 task」放开（`D` × 分配形态）。
+  `docs/04-experiments.md` 新增 **§55**，源码 `src/worker_prefetch_e2e.cu`、脚本
+  `harness/worker_prefetch_e2e.sh`、原始输出 `harness/worker_prefetch_e2e.out.txt`（目标卡 H100/sm90a、
+  **固定空闲 device 3**、nvcc 13.2、`P=32 producers + G=100 workers`（grid=132 全共驻）、`DW=88`=352 B、
+  `NDESC=393216`（138.4 MB ≫ L2）、`K=32`、`T=256`、min-of-3）。核心结论：**`D` 不是自由的性能旋钮，
+  而是被环协议锁死的自由度**——(1) 纯性能上限小且立刻饱和（§D 无生产者 worker 地板 `D=1→2` +19%
+  （EDW=0 557.9→663.2）/ +7%（EDW=256 215.8→230.9），`D=2` 精确饱和）；(2) 端到端拿不到（§B 宽松环
+  `D=1→2` 仅 +2–3%，被 producer 写侧主导）；(3) **接入动态生产者 + 有界环后语义不可得**（§C 紧环
+  `CAPp=16`：strided `D>1` **死锁**（`ABORT`/`got=0`，钉死 §54 坑②）、contig `D=1..8` **静默数值错**
+  却"更快"——错误形比死锁形更隐蔽；唯一正确形态是 **strided + D=1**=4.8 GB/s 复现 §54 §C）。§E 机制
+  隔离：contig 错在 **per-producer `tail` 是「前缀计数器」**——worker/producer 边界不对齐（`chunk≠bp`）
+  时 producer 被两 worker 并发消费、`tail` 越过未消费/在飞 slot 被覆写；对齐（`chunk==bp`，本机 G=P=66）
+  则 OK。要让 `D>1` 可用须改协议（每槽独立回收/就绪，MPK per-worker ring / DeepGEMM ring generation）。
+  判据 C1–C4、仍差 C5。**本轮新增实验。**
+- 此前：**P65-1 完成（1/1）**。补掉 P64-1（§53）§53.9 明留的尾巴「**纯写口径**（`mode 9`、
   `grid=P`、无 worker）：只量 producer 写端；**带 worker 的端到端归因未在本节跑**（§52.8 另一条尾巴）」，
   把 §52/§53 的写端握手归因放回**有消费者**的流水。`docs/04-experiments.md` 新增 **§54**，源码
   `src/dyn_producer_carrier_e2e.cu`、脚本 `harness/dyn_producer_carrier_e2e.sh`、原始输出
@@ -2561,6 +2610,11 @@
         **P64-1（§53）** 换写载体（TMA / 寄存器 copy-out / 寄存器直写）验「比值不可外推」——
         分解同形、**握手税近似绝对（~2.0–2.4k cycles/batch）故占比随地板抬升而变大**（29.9%→36.8%），
         寄存器 store 只在直写不经 SMEM 时优于 TMA。
+        **P65-1（§54）** 把写端握手归因放回**有消费者**的端到端流水（有界环绑定时背压×容量乒乓
+        主导 ~20×、盖过内存序税；不绑定时 §53 归因复现但衰减到 ~1.1–1.2×）。
+        **P66-1（§55）** 放开 §54 里被钉死为 `D=1` 的「worker 取 task」维度——**`D` 不是自由性能
+        旋钮而是被环协议锁死的自由度**（纯性能上限 `D=2` 已饱和 / 端到端被写侧盖住 / 动态生产者 +
+        有界环下 strided `D>1` 死锁、contig 静默错；唯一正确形态 strided+D=1）。
 - **本轮（P50-1）**：`docs/04-experiments.md` 新增 **§39**「worker 侧取 task 的载体：`cp.async` 批量
   加载 TaskDesc 值多少」——新源码 `src/cpasync_desc_fetch.cu`、脚本 `harness/cpasync_desc_fetch.sh`、
   原始输出 `harness/cpasync_desc_fetch.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、
