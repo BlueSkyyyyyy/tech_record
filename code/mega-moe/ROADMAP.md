@@ -3359,6 +3359,35 @@
       开关全命中、跨语言真值、`NCCL_WIN_STRIDE` 三例）。配套博客
       `content/posts/mega-moe-117-deepep-env-surface`（索引页新增第 117 篇）。
 
+### P108 增量（opt-in，补齐每个 DeepEP 测试跑之前都会执行的「进程 / 环境引导层」）
+
+- [x] **P108-1** **DeepEP 的测试 / 进程引导层**（`deep_ep/utils/envs.py` 的 `init_dist:89-133`、
+      `init_seed:40-51`、`get_local_seed:54-61`/`get_global_seed:64-71`、`dist_print:74-86`、
+      `EnvOverride:22-37`；消费点 `deep_ep/buffers/engram.py:81-85`、`deep_ep/utils/refs.py:6/151`、
+      `deep_ep/buffers/ep.py:18-21/639/813`、`tests/**/test_*.py`）。第 117 篇拆了 DeepEP 的 `EP_*`
+      环境变量面、第 40 篇拆了 **DeepGEMM 的** `init_dist`（`deep_gemm/utils/dist.py`），但 DeepEP
+      **自己的**这层「每个测试第一行 `init_dist(...)`、之后 `init_seed`/`dist_print`/`EnvOverride`」
+      从没单独成篇。**纯 host / Python，架构无关，H100 真机可跑**。
+      → `docs/118-deepep-process-bootstrap.md`（真实行号核对）：`init_dist` 三件 host 事——① 起组
+      （`rank = node_rank*num_local_ranks + local_rank` `:122`、`world_size = num_nodes*num_local_ranks`
+      `:121`、`tcp://MASTER_ADDR:MASTER_PORT` `:120`、`inspect.signature` 探测 `device_id` 兼容分支
+      `:124-126`），② 全局副作用（`set_default_dtype(bfloat16)` `:128`、`set_default_device('cuda')`
+      `:129`、`set_cuda_device(local_rank)` `:130`），③ 播种（`init_seed(seed)` `:132`）；返回**新建的
+      子组** `dist.new_group(...)` `:133`（不是 `WORLD`，集合操作）。**三个非平凡点**：`setdefault` 把
+      `NCCL_IB_SL`/`EP_OVERRIDE_RDMA_SL` 压到 1（注释 `:103-104`：测试用、生产用 SL 3，尊重用户
+      预置值）；`init_seed` 的 **`local = global + rank`**（`:48`）是「全局可复现、rank 间互异」的根，
+      `get_global_seed` 被 combine 参考实现 `refs.py:148-152` 的 `sin(float(seed))` 消费，而
+      `get_local_seed` **全库无消费者（死 API）**；`dist_print` 即使 `once_in_node` 静音也**必走 `:86`
+      的 barrier**（全 rank 都要调）、`_local_rank` 仅由 `init_dist:115` 写入（`:83` 裸断言）。
+      `EnvOverride` 三元 `enable` 标志（`:25` 过滤）+ 退出精确回滚（原值写回、原无则 `pop`；`__exit__`
+      吞异常签名 `:32`），唯一消费者 `engram.py:81-85`。H100 实测
+      `harness/exp_deepep_process_bootstrap.{sh,out.txt}`（`sys.modules` 注入合成 `deep_ep._C`/`comm`
+      绕过 `check_nccl_so`，**直接加载真实 `envs.py` 并真跑 `init_dist(0,1)` NCCL world_size=1**）
+      **30 PASS / 0 FAIL**：`init_seed` local/global 与 torch 流逐位；`init_dist` 七项副作用/返回值/
+      种子传播 + `setdefault` 不覆盖已设值；`EnvOverride` 九项（含异常回滚、engram 条件覆盖）；
+      `dist_print` 四项（静音仍屏障）；`check_torch_deterministic` 四组合；`get_local_seed` 死 API。
+      配套博客 `content/posts/mega-moe-118-deepep-process-bootstrap`（索引页新增第 118 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3384,8 +3413,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P107 各增量完成（P15-1…P41-1、P42-1…P107-1）。**
-  本轮 P107-1：新建 `docs/117-deepep-env-surface.md`
+- 当前进度：**P0~P14 全部完成；P15~P108 各增量完成（P15-1…P41-1、P42-1…P108-1）。**
+  本轮 P108-1：新建 `docs/118-deepep-process-bootstrap.md`
+  （+`harness/exp_deepep_process_bootstrap.{sh,out.txt}`）——补齐每个 DeepEP 测试跑之前都会执行、
+  却从没单独成篇的 **进程 / 环境引导层** `deep_ep/utils/envs.py`（与第 117 篇 `EP_*` 环境变量面、
+  第 40 篇 **DeepGEMM 的** `init_dist` 成对照；同名函数两仓库不同物）。要点：`init_dist:89-133` 三件
+  host 事（起组 / `set_default_dtype(bfloat16)`+`set_default_device('cuda')` 全局副作用 / `init_seed`）
+  + 返回**新建子组**（非 `WORLD`）+ `inspect.signature` 探测 `device_id` 兼容分支；`setdefault` 把
+  `NCCL_IB_SL`/`EP_OVERRIDE_RDMA_SL` 压到 1（测试不干扰生产 SL 3）；`init_seed` 的 `local=global+rank`、
+  `get_global_seed` 被 combine 参考实现消费、**`get_local_seed` 是死 API**；`dist_print` 静音仍必屏障；
+  `EnvOverride` 三元 `enable` + 精确回滚（唯一消费者 engram）。H100 真机 **30 PASS / 0 FAIL**（注入合成
+  `deep_ep._C`/`comm` 绕过 `check_nccl_so`，真跑 `init_dist(0,1)` NCCL world_size=1）。索引页新增第 118 篇。
+  上一轮 P107-1：新建 `docs/117-deepep-env-surface.md`
   （+`harness/exp_deepep_envs.{py,sh,out.txt}`、`harness/deepep_env_probe.cpp`）——补齐每次部署都要碰、
   却从没单独成篇的 **DeepEP 环境变量 / 开关面**（与第 38 篇 DeepGEMM `DG_*` 成对照）。
   要点：两个通道（安装期固化进生成的 `deep_ep/envs.py`，运行时 `__init__.py:8-16` **只补不覆盖**，
@@ -4600,7 +4639,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P107 已完成（最新 **P107-1 DeepEP 的环境变量 / 开关面**：
+- **下一步**：P0~P108 已完成（最新 **P108-1 DeepEP 的测试 / 进程引导层**：`init_dist` 三件 host 事
+  + 返回新建子组 + `device_id` 兼容、`setdefault` 压 SL 到 1、`init_seed` 的 `local=global+rank`、
+  `get_local_seed` 死 API、`dist_print` 静音仍屏障、`EnvOverride` 三元 enable + 精确回滚；
+  H100 真机 30 PASS / 0 FAIL；索引页新增第 118 篇。可继续（均为增量、非承诺）：
+  `semantic.py` 的 `weak_lru`/`find_pkgs` setup 侧（第 83/86 篇已覆盖大半）、
+  `check_nvlink_connections:146-181` 的 P2P 探测（第 86 篇一带而过），
+  或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  上一轮 P107-1：P0~P107 已完成（最新 **P107-1 DeepEP 的环境变量 / 开关面**：
   persistent envs 只补不覆盖、`get_env<T>` 的未初始化栈垃圾、全库 16 个带引号 `EP_*`（11 条运行时
   开关）、`EP_BUFFER_DEBUG` 跨语言分歧、`EP_NUM_MAX_LOCAL_RANKS`/`NCCL_WIN_STRIDE`、`check_nccl_so`
   三把尺子；H100 真机 38 PASS / 0 FAIL；索引页新增第 117 篇。可继续（均为增量、非承诺）：
