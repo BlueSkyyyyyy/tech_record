@@ -1,0 +1,99 @@
+== 环境坐标 ==
+93eb6eb Update README
+v1.2.1-41-g93eb6eb
+057ca59 Public release 26/09/30 (#462)
+v2.1.1.post3-24-g057ca59
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 cuda 13.2
+TypeError: expected str, bytes or os.PathLike object, not NoneType
+
+== 环境坐标 ==
+  ~/github/DeepEP  HEAD=93eb6eb
+  ~/github/DeepGEMM  HEAD=057ca59
+  find_pkgs.py      sha256[:16]=5464c1a307f36b5b
+  DeepEP/setup.py   sha256[:16]=bb360fb9775d95a3
+  DeepGEMM/setup.py sha256[:16]=7f67d3ec663b8fc8
+  python=3.12.3 platform=linux_x86_64
+  加载真实 find_pkgs: ['Optional', 'Path', 'distributions', 'find_nccl_root', 'find_pkg_root', 'functools', 'get_nccl_lib_name', 'os', 'sys']
+
+== Part A: find_pkg_root 的四层语义 ==
+  [PASS] A1a EP_NCCL_ROOT_DIR 优先于 NCCL_DIR =/from/EP_NCCL_ROOT_DIR
+  [PASS] A1b 无 EP_ 前缀时用 {NAME}_DIR =/from/NCCL_DIR
+  [PASS] A1c env 覆盖即使路径不存在也原样返回（不校验） 
+  [PASS] A2a `nvidia-nccl-cu13` 命中（substring 匹配） =/tmp/tmph62d8qhz/site/nvidia/nccl
+  [PASS] A2b `nvidia_nccl` 亦命中（下划线变体） 
+  [PASS] A2c 只匹配 `nvidia-{name}`，`nvidia-cudnn` 不算 nccl 
+  [PASS] A5 optional=True 找不到返回 None =None
+  [PASS] A3a 命中行在 lib/ 下 → root 退到包根 =/tmp/tmpdrum8o1d/site/nvidia/nccl
+  [PASS] A3b 命中行不在 lib/ 下 → root = 该目录 =/tmp/tmpdrum8o1d/site/nvidia/nccl/deep
+  [PASS] A4a sys.path 中更靠前者胜（与枚举顺序无关） =/tmp/tmpoj9eeymb/s9/nvidia/nccl
+  [PASS] A4b 反转枚举顺序仍取 sys.path 靠前者 
+  [PASS] A4c 同 priority 时枚举在后者覆盖前者（用 `>` 非 `>=`） =/tmp/tmpoj9eeymb/s9/nvidia/nccl
+  [PASS] A4d 同 priority 反转枚举 → 取另一个（坐实「后者胜」） =/tmp/tmpoj9eeymb/s0/nvidia/nccl
+  [PASS] A6a 真机 find_nccl_root 找到一个存在且含 libnccl.so* 的目录 root=/usr/local/lib/python3.12/dist-packages/nvidia/nccl
+    真机 NCCL root = /usr/local/lib/python3.12/dist-packages/nvidia/nccl
+
+== Part B: get_nccl_lib_name 的取值与排序 ==
+  [PASS] B1a 同时有 `libnccl.so` 与 `libnccl.so.2` → 取无版本名 =libnccl.so
+  [PASS] B1b 只剩 SONAME-only → 取 `libnccl.so.2` =libnccl.so.2
+  [PASS] B1c 多个版本名按 glob 字典序取首（.1 < .2） =libnccl.so.1
+  [PASS] B1d 一个都没有 → ModuleNotFoundError 
+    真机 get_nccl_lib_name = libnccl.so.2
+  [PASS] B2 `-l:{real_name}` 能被 ld 使用（名形如 libnccl.so[.*]） 
+
+== Part C: generate_default_envs 代码生成 + 运行时「只补不覆盖」 ==
+  DeepEP  persistent_env_names = ('EP_JIT_CACHE_DIR', 'EP_JIT_PRINT_COMPILER_COMMAND', 'EP_JIT_CPP_STANDARD', 'EP_NUM_TOPK_IDX_BITS', 'EP_NCCL_ROOT_DIR', 'EP_DEFAULT_RDMA_SL', 'EP_OVERRIDE_RDMA_SL')
+  DeepGEMM 持久化白名单      = ('DG_JIT_CACHE_DIR', 'DG_JIT_PRINT_COMPILER_COMMAND', 'DG_JIT_CPP_STANDARD')
+  [PASS] C0 DeepEP setup.py 的白名单恰 7 条 n=7
+  [PASS] C0b 两库白名单不重叠（EP_ 前缀 vs DG_ 前缀） 
+  [PASS] C1 只有「构建时已设」的变量进 persistent_envs ={'EP_JIT_CACHE_DIR': '/tmp/jit', 'EP_NCCL_ROOT_DIR': '/opt/nccl'}
+  [PASS] C2 值原样内联（字符串字面量） 
+  [PASS] C3 一个都没设 → 空 dict（仍写文件） ={}
+  [PASS] C4 运行时把 baked 值写入（若不存在） 
+  [PASS] C5 用户已设置 → 不覆盖（用户显式值胜出） 
+  [PASS] C6 安装现场存在生成的 deep_ep/envs.py（若 develop 安装则无） found=['/usr/local/lib/python3.12/dist-packages/deep_ep/envs.py']
+
+== Part D: get_package_version 的 git 干净断言 ==
+  [PASS] D1 DeepEP __version__ == 2.5.0 =2.5.0
+    DeepGEMM __version__ = 2.8.1
+  [PASS] D2 DeepEP 干净仓库 → `{ver}+<hash>` =2.5.0+93eb6eb
+  [PASS] D2b DeepEP git 调用失败（dubious ownership）→ 静默 `+local` =2.5.0+local
+  [PASS] D2 DeepGEMM 干净仓库 → `{ver}+<hash>` =2.8.1+057ca59
+  [PASS] D2b DeepGEMM git 调用失败（dubious ownership）→ 静默 `+local` =2.8.1+local
+  [PASS] D3 临时干净 git 仓库 → 9.9.9+<hash> =9.9.9+42f1d45
+  [PASS] D4 工作区脏 → **被 broad except 吞掉**，实际退成 `+local`（不报错） =9.9.9+local
+  [PASS] D4b 证明那条 `assert False` 确实被触发（去掉 broad except 即抛） 
+  [PASS] D5 DG_USE_LOCAL_VERSION=False → 纯公开版本（无 +hash/+local） =9.9.9
+  [PASS] D6 非 git 目录 → `+local` 回退（不抛） =1.0.0+local
+
+== Part E: get_wheel_url 文件名方案（真机 torch/CUDA） ==
+    torch=2.12.0a0+0291f960b6.nv26.04.48445190 cuda=13.2 cxx11abi=1
+    wheel filename = deep_gemm-2.8.1+cu13-torch2.12-cxx11abi1-cp312-linux_x86_64.whl
+  [PASS] E1 文件名含 cu{major}-torch{maj.min}-cxx11abi{k}-cp{xy}-linux_{arch} 
+  [PASS] E2 URL 指向 DeepSeek-AI/DeepGEMM 官方 release（非杜撰） 
+  [PASS] E3 tag = v{public}（不含 +hash，因版本号已在文件名里） 
+  [PASS] E4 本地版本含 `+hash` 时文件名出现双 `+`（`...+hash+cu...`） =deep_gemm-1.2.3+abc+cu13-torch2.12-cxx11abi1-cp312-linux_x86_64.whl
+
+== Part F: DG_SKIP_CUDA_BUILD → 空 ext_modules ==
+  [PASS] F1 DG_SKIP_CUDA_BUILD=1 → 不编译任何 ext 
+  [PASS] F2 DG_SKIP_CUDA_BUILD=0 → 编译 deep_gemm._C 
+  [PASS] F3 `ext_modules=[]` 使 `pip install` 可纯 Python 安装（本机就是这么装的） 
+
+== Part G: spec_from_file_location 不触发包 __init__ ==
+  [PASS] G1 按路径加载 find_pkgs 成功 
+  [PASS] G2 过程中**未** import 包 `deep_ep`（`__init__` 不执行） leaked=[]
+  [PASS] G3 直接 `import deep_ep` 在本机失败（撞 check_nccl_so，见路线图「阻塞」） rc=1
+  [PASS] G4 失败原因正是 NCCL 版本断言 
+    stderr tail: AssertionError: Invalid NCCL versions: /usr/lib/x86_64-linux-gnu/libnccl.so.2.29.7 (loaded) v.s. /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl
+
+== Part H: prepare_includes 拷 cute/cutlass（editable 安装的已知坑） ==
+  [PASS] H1 提取出的目录名恰为 cute / cutlass =['cute', 'cutlass']
+  [PASS] H2 源 `third-party/cutlass/include/{cute,cutlass}` 存在 
+  [PASS] H3 目标 `deep_gemm/include/{cute,cutlass}` 存在（build_py 或手动 cp 的结果） (若缺失，JIT 找不到 cute/cutlass —— 这正是 editable 安装所踩的坑）
+  [PASS] H4 `ignore_patterns("cmake-build-*")` 只滤掉匹配项（DeepEP 排除 CMake 调试产物） =['keep']
+  [PASS] H5 DeepGEMM 把 `csrc` + `docs` 拷进 wheel（agent 侧查错） 
+  [PASS] H6 DeepEP 把 `csrc` 拷进 wheel 
+
+== 汇总 ==
+  FAILS = 0
+  ALL PASS

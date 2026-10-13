@@ -3570,7 +3570,39 @@
        陷阱与 `typed`/`__slots__`）；Part D 普查 4 条；Part E 真实模块级缓存 10 条（含
        `find_nccl_root` 命中、`get_nvlink_gbs` 吞环境）；Part F 真实 `weak_lru` 复刻
        `lb_get_theoretical_num_sms` 同参只算一次。配套博客
-       `content/posts/mega-moe-123-deepep-python-caching`（索引页新增第 123 篇）。
+        `content/posts/mega-moe-123-deepep-python-caching`（索引页新增第 123 篇）。
+
+### P114 增量（opt-in，补齐「任何设备代码跑起来之前」的构建 / 打包 / 安装期地基）
+
+- [x] **P114-1** **两库的构建 / 打包 / 安装期地基**（`deep_ep/utils/find_pkgs.py`、`DeepEP/setup.py`、
+      `DeepGEMM/setup.py`、`DeepGEMM/scripts/generate_pyi.py`、`DeepEP/{build.sh,develop.sh,CMakeLists.txt}`）。
+      前面 123 篇把 kernel、host 编排、测试基座、JIT 缓存键、环境变量面、生命周期契约都拆遍了，
+      但有 78+140+222 行「**在任何一行设备代码跑起来之前就已定型**」的构建期代码从没单独讲过；它决定
+      「wheel 链到哪份 NCCL」「哪些环境变量被烤进包」「`DG_SKIP_CUDA_BUILD` 跳过什么」「editable 为何
+      找不到 `cute/cutlass`」，也正是本机 **DeepEP 运行期阻塞**的确切落点之一。**纯 host / Python、
+      架构无关，H100 真机实测**。
+      → `docs/124-build-packaging-foundation.md`（真实行号核对）：§1 `find_pkg_root:9-55` 四层语义
+      （`:22-25` env 覆盖 `EP_NCCL_ROOT_DIR`>`NCCL_DIR`、命中不校验；`:27-38` sys.path 优先级，
+      判据 `if priority > best_priority: continue` 严格大于 ⇒ 更小 priority 胜、**同 priority 枚举在后者
+      覆盖前者**；`:31-33` 元数据子串匹配；`:40-46` lib_name 根目录裁剪；`:52-55` optional）；
+      §2 `get_nccl_lib_name:72-78`（无版本名优先、否则 `sorted(libnccl.so.*)` 取首，真机 `libnccl.so.2`）
+      + `-l:{name}`/rpath 钉住 wheel 目录；§3 持久化环境变量代码生成（DeepEP `setup.py:14-15` 7 条 /
+      DeepGEMM `:148-155` 3 条）+ 运行时只补不覆盖（DeepEP `__init__.py:11-14` / DeepGEMM `:8-11`）；
+      §4 `spec_from_file_location:17-20` 绕开 `import deep_ep`（顶部 `check_nccl_so`+`import _C`）——
+      正是本机 `Invalid NCCL versions` 阻塞落点；§5 版本号 git 干净断言被 broad except **吞掉**
+      ⇒ 脏工作区/无 git/权限拒绝都退成 `+local`（垃圾桶）；§6 `get_wheel_url:80-96` 文件名方案
+      （真机 `deep_gemm-2.8.1+cu13-torch2.12-cxx11abi1-cp312-linux_x86_64.whl`）+ `CachedWheelsCommand:176-200`
+      （`urllib` `timeout=1` 下载）+ `get_ext_modules:99-108` 的 `DG_SKIP_CUDA_BUILD` → `ext_modules=[]`
+      （只跳 host `_C`，device kernel 全 JIT）；§7 `CustomBuildPy` 四个拷贝（`prepare_includes:157-173` 拷
+      `cute/cutlass` = **editable 已知坑**、`generate_default_envs`、`generate_pyi_file:136-146`、
+      `prepare_agent_files:128-134` 拷 `csrc`+`docs`），DeepEP `prepare_agent_files:54-61` 用
+      `ignore_patterns('cmake-build-*')`；§8 `CMakeLists.txt:1` 自称 only-for-debugging、
+      `build.sh`（bdist_wheel）vs `develop.sh`（build_ext + 软链）两条路。H100 实测
+      `harness/exp_build_packaging.{py,sh,out.txt}`（按路径加载真实 `find_pkgs.py` + AST 抽取两个
+      `setup.py`）：**54 PASS / 0 FAIL**——A 四层语义 14 项、B 库名取值 5 项、C envs 生成 8 项、
+      D 版本号 10 项（含 D4 脏工作区被吞成 `+local`、D4b 去掉 broad except 即抛）、E wheel 名 4 项、
+      F `DG_SKIP_CUDA_BUILD` 3 项、G spec 加载 4 项（含本机 `import deep_ep` 阻塞复现）、H 拷贝/过滤 6 项。
+      配套博客 `content/posts/mega-moe-124-build-packaging-foundation`（索引页新增第 124 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3597,8 +3629,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P113 各增量完成（P15-1…P41-1、P42-1…P113-1）。**
-  本轮 P113-1：新建 `docs/123-deepep-python-caching.md`
+- 当前进度：**P0~P14 全部完成；P15~P114 各增量完成（P15-1…P41-1、P42-1…P114-1）。**
+  本轮 P114-1：新建 `docs/124-build-packaging-foundation.md`
+  （+`harness/exp_build_packaging.{py,sh,out.txt}`）——补齐「任何设备代码跑起来之前」的
+  **构建 / 打包 / 安装期地基**（`find_pkgs.py` + 两个 `setup.py`）。要点：`find_pkg_root:9-55`
+  四层语义（env 覆盖 / sys.path 严格大优先级 + 同优先级后者胜 / 子串匹配 / lib_name 根裁剪）、
+  `get_nccl_lib_name:72-78` 的 SONAME-only 兜底、持久化环境变量的**代码生成 + 只补不覆盖**、
+  `spec_from_file_location` 绕开 `check_nccl_so`（=本机阻塞落点）、版本号 git 断言被 broad except
+  **吞成 `+local`**、DeepGEMM wheel 文件名方案 + `DG_SKIP_CUDA_BUILD`、`prepare_includes` 的
+  **editable 已知坑**。纯 host/Python、架构无关，H100(sm90) 真机 **54 PASS / 0 FAIL**。
+  索引页新增第 124 篇。
+  上一轮 P113-1：新建 `docs/123-deepep-python-caching.md`
   （+`harness/exp_deepep_python_caching.{sh,py,out.txt}`）——补齐 DeepEP 反复引用却从没单独读过的
   **Python 缓存基座**：`deep_ep/utils/semantic.py` 的 `weak_lru`（全仓库唯一的方法级缓存）。
   要点：`value_or` 仅 `None` 回退；`weak_lru` 把 key 从 `self` 换成 `weakref.ref(self)`（`:23`），
@@ -4864,14 +4905,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P113 已完成（最新 **P113-1 DeepEP 的 Python 缓存基座 `weak_lru`**：
-  方法级弱引用 LRU 把 key 从 `self` 换成 `weakref.ref(self)` 以防 buffer 泄漏；`value_or` 仅
-  `None` 回退；三个真实陷阱（ref 相等性委托 / 死引用条目不自动清 / `__slots__` 抛错）；全库普查判据
-  「只有 key 含 `self` 的实例方法才需要 `weak_lru`」；模块级缓存吞掉环境变化需 `cache_clear()`；
-  纯 Python、H100(sm90) 真机 **39 PASS / 0 FAIL**；索引页新增第 123 篇。
+- **下一步**：P0~P114 已完成（最新 **P114-1 两库的构建 / 打包 / 安装期地基**：`find_pkg_root` 四层
+  语义 + `get_nccl_lib_name` SONAME 兜底 + 持久化环境变量 codegen + `spec_from_file_location`
+  绕开 `check_nccl_so`（=阻塞落点）+ 版本号 broad-except 吞成 `+local` + wheel 文件名/`DG_SKIP_CUDA_BUILD`
+  + `prepare_includes` editable 坑；纯 Python、H100(sm90) 真机 **54 PASS / 0 FAIL**；索引页新增第 124 篇。
   可继续（均为增量、非承诺）：
-  `find_pkgs.py` 构建期 setup 侧（`setup.py:18-20` 按路径 exec / `-l:libnccl.so.2 -Wl,-rpath`，
-  第 86 篇已覆盖大半）、或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  `DeepEP/build.sh`+`develop.sh` 之外的 `cmake-build-*` 调试链、`DeepGEMM/scripts/generate_pyi.py`
+  的 `BracketTracker` 括号配平（本篇只带过）、或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  上一轮 P113-1：P0~P113 已完成（最新 **P113-1 DeepEP 的 Python 缓存基座 `weak_lru`**：
+  方法级弱引用 LRU 把 key 从 `self` 换成 `weakref.ref(self)` 以防 buffer 泄漏；`value_or` 仅
+  `None` 回退；三个真实陷阱；全库普查判据「只有 key 含 `self` 的实例方法才需要 `weak_lru`」；
+  纯 Python、H100(sm90) 真机 **39 PASS / 0 FAIL**；索引页新增第 123 篇。
   上一轮 P112-1：P0~P112 已完成（最新 **P112-1 DeepEP 两类非 all-to-all 原语（PP send/recv 与
   Engram fetch）的验收测试即正确性规范**：PP 的 `generate_stress_ops` 在途背压无死锁调度、
   Engram 的 all-gather+gather 参考 oracle 与 SF 复制；kernel 端到端仅分析、测试侧 H100(sm90)
