@@ -1,0 +1,31 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+--- PYTHON ---
+device: NVIDIA H100 80GB HBM3
+== 1) host 配置面（真实 _C，H100）==
+   R=8 E=64 S=0: fp8xfp8=2145.3MB fp8xfp4=2145.3MB bf16=2713.5MB  fp8xfp4==fp8xfp8:True 
+   R=8 E=256 S=1: fp8xfp8=2287.6MB fp8xfp4=2287.6MB bf16=2863.0MB  fp8xfp4==fp8xfp8:True 
+   view dtypes: x=torch.float8_e4m3fn l1_acts=torch.float8_e4m3fn x_sf=torch.int32 l1_acts_sf=torch.int32 l2_acts_sf=torch.int32 (SF 全 packed UE8M0=int32: True)
+   x_sf shape=(4096, 56)  l2_acts shape=(120960, 2048)
+   block_m 启发式（heuristics/mega_moe.hpp:88-127）：
+     R=8 E=64 T=8 K=2: block_m fp8xfp8=16 fp8xfp4=16 bf16=16 OK
+     R=8 E=256 T=64 K=2: block_m fp8xfp8=16 fp8xfp4=16 bf16=16 OK
+     R=8 E=8 T=8192 K=2: block_m fp8xfp8=240 fp8xfp4=240 bf16=240 OK
+     R=8 E=512 T=128 K=2: block_m fp8xfp8=16 fp8xfp4=16 bf16=16 OK
+
+== 2) packed FP4 表示契约（deep_gemm.utils.math）==
+   m=256 n=512: packed=(256, 256) dtype=torch.int8 sf=(256, 16) logical_K=512 roundtrip_bit_exact=True sf_is_pow2=True 
+   m=128 n=2048: packed=(128, 1024) dtype=torch.int8 sf=(128, 64) logical_K=2048 roundtrip_bit_exact=True sf_is_pow2=True 
+   m=64 n=7168: packed=(64, 3584) dtype=torch.int8 sf=(64, 224) logical_K=7168 roundtrip_bit_exact=True sf_is_pow2=True 
+
+== 3) transform_weights_for_mega_moe（FP4 tuple 分支）==
+   E=4 l1[2I=1024,H=256] -> l1w(4, 1024, 128) l1sf(4, 1024, 8)
+   l1 w 仅交错=True；l1 sf 与「交错后 UTCCP 转置」一致=True；l2 sf 仅转置=True；l2 w 原样（同对象）=True 
+   pack/unpack 与 N-交错可交换（逐位）: True (unpack∘interleave == interleave∘unpack: True)
+
+== 4) 小 MoE：FP8 权重 vs FP4 权重的端到端误差与字节数 ==
+   端到端 relerr vs fp64： 权重FP8=6.5932e-02  权重FP4=2.1096e-01（激活都 FP8 gran32）
+   权重量化本身（W1，相对 bf16）： FP8=2.6565e-02  FP4=1.1811e-01
+   每专家权重字节： FP8=786432B  FP4=393216.0B  比=2.00x
+   FP4 权重误差更大（True）且权重显存减半（True）: True
+
+ALL_OK = True

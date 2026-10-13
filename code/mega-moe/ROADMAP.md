@@ -2976,6 +2976,34 @@
       （~8.0ms）同量级。**主 kernel / 真实 EPBuffer 仅分析**；通信原语模型与 H100 实测全可跑。
       配套博客 `content/posts/mega-moe-104-moe-backward-communication`（索引页新增第 104 篇）。
 
+### P95 增量（opt-in，补齐 Mega MoE 的第二个 dtype 形态：FP4 路由权重）
+
+- [x] **P95-1** **Mega MoE 的 FP4 路由权重路径（`fp8xfp4` / `kPackedFP4`）**：第 3/9/10/11 篇逐段拆了
+      SM100 主 kernel、第 20 篇拆了它的 **BF16 变体**、第 35 篇拆了 SM100 稠密 GEMM 的 MXFP4/MXFP8、
+      第 37 篇拆了参考量化器、第 96 篇拆了 JIT 包装层，但**同一 kernel 的第二个 dtype 形态——路由权重走
+      FP4**——一直只在各处被一句「打包因子 2」带过。**主 kernel 的 MMA/TMA 路径 SM100 专属、仅分析**；
+      但 FP4 的张量表示契约、权重重排、参考量化、host 配置全架构无关，H100 真机实测.
+      → `docs/105-fp4-mega-moe-weights.md`（真实行号核对）：**全景** `"fp8xfp8"` 与 `"fp8xfp4"` 都映射到
+      同一个 `MmaKind::MXFP8FP4`（`heuristics/mega_moe.hpp:73-78`），差异只落在路由权重张量 dtype
+      （激活恒 FP8、共享专家恒 FP8、SF 恒 MN-major packed UE8M0 gran 32）。**FP4 表示**：
+      `kPackedFP4 = torch::kInt8`（`utils/math.hpp:11`），每字节 2 个 e2m1，逻辑 K 靠
+      `get_logical_shape`（`utils/layout.hpp:57-64`）与 TMA 描述符（`runtime_utils.hpp:301/316`）的「×2」
+      恢复；host 契约 recipe 恒 `(1,1,32)`、L1/L2 同 dtype、权重 SF 必须 `kInt`（`mega_moe.hpp:176-204`）。
+      **从 global 到 SMEM 的三层表示**：① 全局 2 元素/字节；② TMA 用
+      `CU_TENSOR_MAP_DATA_TYPE_16U4_ALIGN16B`（`fp4_unpacked_smem=true`）搬运时把 4-bit **摊成可寻址的
+      未打包形式**（`float_e2m1_unpacksmem_t`），SMEM 每元素仍 1 字节（`get_num_mma_elem_bytes=1`），故
+      tile 容量/流水级数不变，只有线字节减半——barrier 的 `expect_tx` 用 `/(kIsWeightFP8?1:2)` 精确对上
+      （kernel `:807-810`）；③ **因为 A=FP8、B=FP4 必须用 `MXF8F6F4`（unpacked，`UMMA_K=32`）而非
+      packed `MXF4`**（`UMMA_K=64`，要求两侧都 e2m1，`heuristics/config.hpp:36`）。**权重重排**：FP8/FP4
+      **共用同一条 tuple 路径**（`mega/__init__.py:146-164`），且证明 N 轴 gran-8 交错与 K 轴打包
+      **可交换（逐位）**。**host 唯一 FP4 专属位**：`block_m∈(192,240]` 时 `store_block_m_l1=24`
+      （BF16=40）、`block_m==240` 时 `store_block_m_l2=8`（`heuristics:112-115`，专为 FP8xFP4 prefill
+      省 SMEM 换更深 TMA 流水）。H100 真机 `harness/exp_fp4_mega_moe_weights.{py,sh,out.txt}`
+      **ALL_OK=True**：`symm buffer` fp8xfp4==fp8xfp8（2145.3MB）、`block_m` 与 dtype 无关、packed 往返
+      逐位、`unpack∘interleave == interleave∘unpack` 逐位、FP4 权重使 MoE 输出误差 ~3.2×（量化本身
+      ~4.4×）、权重显存**恰好减半**。配套博客 `content/posts/mega-moe-105-fp4-mega-moe-weights`
+      （索引页新增第 105 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3001,8 +3029,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P94 各增量完成（P15-1…P41-1、P42-1…P94-1）。**
-  本轮 P94-1：新建 `docs/104-moe-backward-communication.md`
+- 当前进度：**P0~P14 全部完成；P15~P95 各增量完成（P15-1…P41-1、P42-1…P95-1）。**
+  本轮 P95-1：新建 `docs/105-fp4-mega-moe-weights.md`
+  （+`harness/exp_fp4_mega_moe_weights.{py,sh,out.txt}`）——补齐 **Mega MoE 的第二个 dtype 形态：FP4 路由权重**。
+  要点：`fp8xfp8`/`fp8xfp4` 同映射到 `MmaKind::MXFP8FP4`，差异只在路由权重 dtype（`kPackedFP4=int8`，
+  每字节 2 个 e2m1，逻辑 K 靠「×2」恢复）；TMA 用 `16U4_ALIGN16B` 把 4-bit 摊成可寻址的未打包形式，
+  SMEM 每元素仍 1 字节（tile/流水不变、线字节减半，`expect_tx /(kIsWeightFP8?1:2)` 对上）；因 A=FP8、
+  B=FP4 必须走 `MXF8F6F4`（`UMMA_K=32`）而非 packed `MXF4`；权重重排 FP8/FP4 共用 tuple 路径且
+  N-交错与 K-打包逐位可交换；host 唯一 FP4 专属位是 FP8xFP4 prefill 的小 store block。**主 kernel
+  MMA/TMA 仅分析**；H100 真机 ALL_OK=True（packed 往返逐位、FP4 权重误差 ~3.2×、显存恰好减半）。
+  索引页新增第 105 篇。
+  上一轮 P94-1：新建 `docs/104-moe-backward-communication.md`
   （+`harness/exp_moe_backward_comm.{py,sh,out.txt}`）——补齐**反向侧一直缺席的通信量模型与 H100 实测**。
   要点：**反向通信不是更小、而是约 1.5× 前向**（布局不对称：前向 dispatch 去重 T·d·1B，combine/两个
   反向相位都在 expanded 空间 T·k·2B）；模型 B_bwd/B_fwd=4k/(d+2k)≈1.49；H100 8 卡真实 ragged
@@ -4077,7 +4114,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P94 已完成（最新 **P94-1 MoE 反向的通信量模型与 H100 实测**：
+- **下一步**：P0~P95 已完成（最新 **P95-1 Mega MoE 的 FP4 路由权重路径**：
+  `fp8xfp8`/`fp8xfp4` 同走 `MmaKind::MXFP8FP4`，差异只在路由权重 dtype（`kPackedFP4=int8`、每字节 2
+  个 e2m1）；TMA `16U4_ALIGN16B` 把 4-bit 摊成未打包形式、SMEM 每元素 1 字节（线字节减半）；A=FP8、
+  B=FP4 必须走 `MXF8F6F4`（`UMMA_K=32`）；权重重排 FP8/FP4 共用 tuple 路径且与打包逐位可交换；
+  host 唯一 FP4 专属位是小 store block（prefill）。主 kernel 仅分析，H100 真机 ALL_OK=True；
+  详见上）。
+  上一轮 P94-1：P0~P94 已完成（最新 **P94-1 MoE 反向的通信量模型与 H100 实测**：
   反向通信 ≈ **1.5× 前向**（布局不对称：dispatch 去重 T·d·1B vs combine/两个反向相位 expanded
   T·k·2B），模型 4k/(d+2k)≈1.49，H100 8 卡 ragged a2a 实测字节量比 1.49×/时间比 1.46–1.54×、
   单向 114–124 GB/s；反向无 mega-kernel 的真因是「四个独立 GEMM + 两张方向相反的网」，
@@ -4383,8 +4426,10 @@
       侧余下的运行期空档（Engram 真实 RDMA 与端到端、hybrid 的端到端）都要 NCCL GIN 设备 API，待环境。
       （bucket 的 `all_reduce/reduce_scatter` 内核已由 P62-1 补齐：布局/映射/归约/bf16 哈希/host 算术
       在 H100 真机跑真实设备代码 30 PASS，数据面仅分析。）
-  ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
-    shared expert 分支的更深精读；端到端需 SM100，当前不可行。
+   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）的
+    **FP4 路由权重路径已由 P95-1 补齐**（第 105 篇：`kPackedFP4` 表示、TMA `16U4` 解包、
+    `MXF8F6F4` vs `MXF4`、权重重排与打包可交换、FP4 vs FP8 精度/显存，H100 真机 ALL_OK）；
+    剩余：shared expert 分支的更深精读；端到端需 SM100，当前不可行。
   ⑤ **k-grouped SF 打包**：P16-1 已完成（host 契约 + device 逐行对拍，H100 真实设备代码）。
    ⑥ **cuBLASLt 回退/选核**：P17-1 已完成。
    ⑦ **选核启发式 `get_best_config`**：P18-1 已完成（SM90 定量代价模型 + SM100 词典序，
