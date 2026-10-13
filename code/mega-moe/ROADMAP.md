@@ -4614,6 +4614,30 @@
       → `docs/160-indexer-paged-sparse-backward.md`。配套博客
       `content/posts/mega-moe-160-indexer-paged-sparse-backward`（索引页新增第 160 篇）。
 
+### P151 增量（opt-in，收口第 141 篇点名的「EP + 真实 FP8 kernel」缺口）
+
+- [x] **P151-1** **多卡 EP MoE 接上真实 SM90 FP8 grouped kernel：EP 通信 × FP8 量化的端到端误差与预算**
+      （`harness/exp_ep_fp8_e2e_moe.{py,sh,out.txt}`；`csrc/apis/gemm.hpp:181/209/210/373/383/403`；
+      `sm90_fp8_gemm_1d1d.hpp:84`；`sm90_fp8_gemm_1d2d.hpp:81`；`docs/141:209-213`；
+      DeepEP `deep_ep/utils/refs.py:10-123/177-243`、`README.md:204-220`）。
+      第 141 篇（EP e2e 纯 torch）算完容错却没有 FP8；第 14 篇（单卡 FP8 反向）有 kernel 却没有多卡
+      通信；第 99 篇（前向 FP8 复刻）把通信折算成单卡。本篇把三者合一：8×H100 `all_to_all_single`
+      的 expand dispatch/combine + L1/L2 前向 + dgrad/wgrad 反向**全部真实 DeepGEMM SM90 FP8 grouped
+      kernel**。**契约**：前向/dgrad = M 轴分组 `m_grouped_fp8_fp4_gemm_nt_contiguous`（D 必 bf16
+      `:209`）；wgrad = K 轴分组 `k_grouped_fp8_gemm_nt_contiguous`（SM90 必 recipe `(1,1,128)` `:383`
+      且 C 必填 `:403`）；SM90 输出形态 1D1D 必 fp32+累积 vs 1D2D 必 bf16+无回读。**前向三层分解**
+      （vs fp64 同 routing）：EP FP8 vs fp64 **6.396e-02/cos 0.997948**；ep vs「fp8 模拟」**2.273e-02/
+      cos 0.999740**（kernel+布局+通信层，多为 L2 bf16 输出舍入）；fp8 模拟 vs fp64 **5.946e-02**
+      （纯 FP8 量化）⇒ **通信零误差、FP8 是地板**。**反向** dW1 6.44e-2/dW2 6.26e-2/dX 6.51e-2
+      （cos≈0.998）；**每个 grouped kernel `vs deq` 全在 3e-4 内**（dW1 3.018e-04/dW2 3.001e-04/
+      dact 3.210e-04/dx 3.497e-04）。**预算**（T=2048,topk=2,H=7168,I=2048,E=64，每 rank 收 4240 行）：
+      FP8 kernel 前向 **985.9us**（fwd-L1 707.8/393T、fwd-L2 278.2/500T）、反向 **5827.6us**
+      （dgrad 279.2+699.3、**wgrad 1615.0+3234.1 仅 86 TFLOPS** = fp32 强制累积多卡复现）；
+      ragged a2a dispatch/combine 各 **121.6MB/4945us（24.6 GB/s，受争用下界）** vs 平衡锚 **117–122 GB/s**
+      （ragged ~4.7×）；EP kernel+通信 前向 **10878us** / 反向 **15720us** ⇒ **通信与计算同量级甚至更贵**。
+      融合 kernel SM100 专属、仅分析。→ `docs/161-ep-fp8-e2e-moe.md`。配套博客
+      `content/posts/mega-moe-161-ep-fp8-e2e-moe`（索引页新增第 161 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4646,8 +4670,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P150 各增量完成（P15-1…P41-1、P42-1…P150-1）。**
-  本轮 P150-1：新建 `docs/160-indexer-paged-sparse-backward.md`
+- 当前进度：**P0~P14 全部完成；P15~P151 各增量完成（P15-1…P41-1、P42-1…P151-1）。**
+  本轮 P151-1：新建 `docs/161-ep-fp8-e2e-moe.md` + `harness/exp_ep_fp8_e2e_moe.{py,sh,out.txt}`
+  ——收口第 141 篇（`docs/141:209-213`）点名的 opt-in：把多卡 EP MoE 图接上**真实 DeepGEMM SM90 FP8
+  grouped kernel**（8×H100 `all_to_all_single` expand dispatch/combine + 真实 `m_grouped`/`k_grouped`
+  前向/反向）。**结果**：前向三层误差分解——EP FP8 vs fp64 **6.396e-02/cos 0.997948**、ep vs「fp8 模拟」
+  **2.273e-02**（kernel+布局+通信）、fp8 模拟 vs fp64 **5.946e-02**（纯 FP8）⇒ **通信零误差、FP8 是地板**；
+  反向 dW1/dW2/dX ≈6.4e-2/cos≈0.998，**每个 grouped kernel `vs deq` 全在 3e-4 内**；DeepSeek 量级 FP8
+  kernel 前向 **985.9us** / 反向 **5827.6us**（wgrad 仅 **86 TFLOPS**），ragged a2a 各 **121.6MB/4945us**
+  （24.6 GB/s，受争用下界）vs 平衡锚 **117–122 GB/s**。索引页新增第 161 篇。
+  上一轮 P150-1：新建 `docs/160-indexer-paged-sparse-backward.md`
   （+`src/mqa_indexer_backward_paged_sparse.cu`、`harness/exp_mqa_logits_paged_sparse_backward.{py,sh,out.txt}`）
   ——承接 P147-1/P148-1/P149-1，收口 indexer 反向 **2×2 矩阵（连续/分页 × 稠密/稀疏）的最后一格：
   分页 × 稀疏**（生产 long-context 训练真正跑的形态：物理页池 + block table 间接寻址 + 选中块打分 +
@@ -6334,18 +6366,19 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P150 已完成（最新 **P150-1 收口 indexer 反向 2×2 矩阵的最后一格：分页 × 稀疏**
-  ——生产 long-context 训练真正跑的形态：物理页池 + block table 间接寻址 + 选中块打分 + 压缩输出，
-  前向 `fp8_fp4_paged_sparse_mqa_logits` **SM100 专属**。反向是**两个伴随的复合**（支持集选择 scatter +
-  页表逆映射），要**依次**做两级逆映射 `support → logical KV token →（页表）→ physical slot`；页表公式与
-  metadata kernel 逐字等价（200 点 mismatch=0），两层别名（next_n + 跨请求共享页，最大共享度 9）都必须
-  scatter-add。H100(sm90) **PASS=17/0 FAIL** + CUDA 后端 `[A] ALL PASS`（对照「写」0.922），支持集 logits
-  == 官方 ref 1.571e-08、四路反向 ≤7.84e-17、真实 SM90 分页稠密 kernel 前向锚 1.176e-03。索引页新增第 160 篇）。
-  可继续（均为增量、非承诺）：① 把 indexer 反向（连续/分页/稀疏/分页稀疏）**端到端接进真实前向 kernel**
-  （需目标卡 SM100，仅分析）+ indexer 的 **varlen（SM100）**变体做定点复核；② 对 P96/P97/P123 的轻微漂移
-  清单关键路径定点复核；③ 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）；④ 或选
-  DeepGEMM/DeepEP `csrc/utils/` 剩余小角落做定点复核。
-  详见上。
+- **下一步**：P0~P151 已完成（最新 **P151-1 把多卡 EP MoE 图接上真实 SM90 FP8 grouped kernel**
+  ——收口第 141 篇 `docs/141:209-213` 点名的 opt-in。8×H100 `all_to_all_single` expand dispatch/combine +
+  L1/L2 前向 + dgrad/wgrad 反向全部真实 `m_grouped`/`k_grouped`。**前向三层分解**：EP FP8 vs fp64
+  6.396e-02/cos 0.997948、ep vs「fp8 模拟」2.273e-02（kernel+布局+通信）、fp8 模拟 vs fp64 5.946e-02
+  （纯 FP8）⇒ 通信零误差、FP8 是地板；反向 dW1/dW2/dX ≈6.4e-2/cos≈0.998、每个 grouped kernel `vs deq`
+  全在 3e-4 内。预算：FP8 kernel 前向 985.9us / 反向 5827.6us（wgrad 仅 86 TFLOPS），ragged a2a
+  121.6MB/4945us（24.6 GB/s，受争用下界）vs 平衡锚 117–122 GB/s。索引页新增第 161 篇）。
+  可继续（均为增量、非承诺）：① 把第 141/161 篇的多卡 EP 图**接进真实 DeepEP `EPBuffer.dispatch/combine`**
+  （需 NCCL≥2.32.3，见「阻塞」）；② 加 **FP8 dispatch（1B）/BF16 combine（2B）** 的真实字节口径并量
+  与计算的重叠（第 144 篇的 EP 版、独占卡安静环境）；③ 把 indexer 反向（连续/分页/稀疏/分页稀疏）
+  **端到端接进真实前向 kernel**（需目标卡 SM100，仅分析）+ indexer 的 **varlen（SM100）**变体定点复核；
+  ④ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落做定点复核。详见上。
+  上一轮 P150-1：收口 indexer 反向 2×2 矩阵的最后一格：分页 × 稀疏
   上一轮 P146-1：把「SwiGLU 反向落地成 SM100 `epilogue_class` operator」推到契约层——数值可行（真实
   `math.cuh` store 分支逐位复现，FP8 0/16777216、SF 0/524288），但契约是「单输出 + 无逐元素索引 + 无状态」，
   SwiGLU 反向要「逐元素读 gate/up + 两个输出 + 两个 SF」，只加一个 operator 结构体不够，须扩三处契约；
