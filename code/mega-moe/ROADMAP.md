@@ -3922,7 +3922,42 @@
       swizzle N=64/128 对合+双射+模型一致；打包 32 例 0 不符；尾块 `88→12/90→10/≥100→0`、分页 40 块 0 不符；
       压缩列 `[80,400)` 每列恰一次；线程 768/896、TMEM 8 档全对、SharedStorage 8 成员 offsetof 8/8；
       SF 转置 0/128。配套博客 `content/posts/mega-moe-136-sm100-sparse-mqa-logits-kernel`
-      （索引页新增第 136 篇）。
+       （索引页新增第 136 篇）。
+
+### P127 增量（opt-in，补齐第 22 篇对 SM100 sparse MQA logits 的 metadata kernel 只给的 30 行概览）
+
+- [x] **P127-1** **SM100 sparse MQA logits 的 metadata kernel 逐段精读**
+      （`deep_gemm/include/deep_gemm/scheduler/sm100_sparse_mqa_logits_metadata.cuh`，475 行；
+      `layout/sparse_mqa_logits.cuh`；`csrc/jit_kernels/impls/sm100_sparse_mqa_logits.hpp:135-200`；
+      `csrc/apis/attention.hpp:306-367`）。第 22 篇（P12-1）只给了 §3 约 30 行概览、第 136 篇（P126-1）
+      把**主 kernel** 做了完整逐段精读；本篇把 metadata kernel 补到同深度。**关键结论：整个 metadata
+      kernel 都架构无关**（只用 `ptx::` 整数/原子、`cp.async`、`math::cta_exclusive_sum`、`cute::` 下标，
+      **不碰 UMMA/tcgen05/UTCCP/TMA**），故 H100(sm90) 直接 include 真实头文件、用真实 launch 参数
+      **原样启动该 kernel**，与独立 host oracle 逐字段对拍。**主循环**：Q 块构造 + 有效块前缀
+      （`:204-236`，分页 `indices` 线性扫回 request 头、偶数偏移配对、否则 `atomic_add(next_q_offset)`
+      扔回全局游标无锁认领；`min(NB, ceil((kv_end-kv_begin)/SB))` + 对齐断言）；稀疏索引加载
+      （`:246-271`：非对齐同步 `ld_evict_first` + 就地 `*SB+ks%SB`、对齐 `cp_async_cg<256>` +
+      `cp_async_fence/wait`）。**归并路径分块**（`:273-291`）：输出按线程切、每线程**二分**求起点处
+      消耗了多少 q0（`logical[1][q1-1] >= logical[0][q0]`），把顺序归并变成「二分定位 + 局部归并」；
+      跨分区去重（`:293-298`）；打包（`:300-326`：每 16 位 `[present|slot15]`、`in_q0=in_q1⇔相等`、
+      `consume_q1 = in_q1 and remaining>in_q0` 把重复项留给下一分区）。`cta_exclusive_sum` 压缩 +
+      `atomic_add(num_kv_splits)` 按 Q 块一次预留连续 split、分页清零第二 token 的 `q_block_info`
+      （`:328-341`）。`write_merged_kv_block`（`:359-415`）：物理块三态（分页 block_table / 非对齐
+      =绝对起点 / 对齐=`logical*SB`）、`q*_slot_offset = slot - base` 只存相对偏移、split 首块写
+      header、**只看最后一块**判 `is_contiguous`（TMA 快路）/`has_partial_tail`（裁剪慢路）；
+      尾块 padding 成 `KVBlockInfo(0,0xFFFF,0xFFFF)`（`:431-436`）。**末 CTA 建调度**（`:443-472`）：
+      `atomic_add_rel(num_finished_ctas)==gridDim.x` + `ld_acq` 取回全部写入；连续版
+      `build_contiguous_schedule`（`:37-73`，均分 + 按 Q 块边界切 + `atomicMax` 波数）；分页版
+      `build_paged_schedule`（`:124-161`，每 token 切至多 `kNumKVSplitsPerEntry=8` split 的有界条目）
+      + `balance_wave_entries`（`:75-122`，**直方图排名排序 + 旋转**、两 wave 时第二 wave 反向使活跃
+      SM 互补）。H100(sm90) 实测 `src/sparse_mqa_logits_metadata.cu` +
+      `harness/exp_sparse_mqa_logits_metadata.{sh,out.txt}`（grid=1 消歧）**ALL PASS**：6 组样例
+      （连续对齐 A1/A2/A3、非对齐 B1、分页 C1/C2）共 **446 个 KV 块 / 36 个 split，0 不符**——
+      归并顺序、`base+offset` 反解、物理块三态、split 头全对；调度覆盖 `miss=dup=bad=0`，A3 连续
+      16 split/4SM=2 wave 每 SM 恰 4、C2 分页 `balance_wave_entries` 轮转（wave0 `[1,1,4,4]`/wave1
+      反向 `[4,1,0,0]`）。主 kernel 与 host `arch_major==10` 门控 SM100 专属、仅分析。
+      配套博客 `content/posts/mega-moe-137-sm100-sparse-mqa-logits-metadata-scheduler`
+      （索引页新增第 137 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3949,8 +3984,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P126 各增量完成（P15-1…P41-1、P42-1…P126-1）。**
-  本轮 P126-1：新建 `docs/136-sm100-sparse-mqa-logits-kernel.md`
+- 当前进度：**P0~P14 全部完成；P15~P127 各增量完成（P15-1…P41-1、P42-1…P127-1）。**
+  本轮 P127-1：新建 `docs/137-sm100-sparse-mqa-logits-metadata-scheduler.md`
+  （+`harness/exp_sparse_mqa_logits_metadata.{sh,out.txt}`、`src/sparse_mqa_logits_metadata.cu`）——把第 22 篇
+  对 metadata kernel 只给的 30 行概览补齐到与第 136 篇（主 kernel）同深度。**关键结论：整个 metadata
+  kernel 架构无关**（只用 `ptx::` 整数/原子、`cp.async`、`cta_exclusive_sum`、`cute::` 下标；不碰
+  UMMA/tcgen05/UTCCP/TMA），故 H100(sm90) **原样启动真实 kernel** 并与独立 host oracle 对拍。主循环：
+  Q 块构造 + 有效块前缀、稀疏索引加载（非对齐 `ld_evict_first` 就地平移 vs 对齐 `cp_async_cg<256>`）、
+  **归并路径二分分块**（输出按线程切、二分求起点消耗的 q0 数）、跨分区去重 + `consume_q1` carry、
+  `cta_exclusive_sum` 压缩 + `atomic_add` 按 Q 块预留连续 split、`write_merged_kv_block` 三态物理块 +
+  相对槽偏移 + 首块写 header（只看末块判 contiguous/tail）、尾块 padding；末 CTA（release-acquire 计数）
+  建调度：连续版均分 + Q 块边界切 + `atomicMax` 波数，分页版有界条目 + `balance_wave_entries` 直方图
+  排序/旋转/两 wave 反向。H100 真机 **ALL PASS**：6 组样例 **446 块 / 36 split 0 不符**、调度覆盖
+  `miss=dup=bad=0`、A3 每 SM 恰 4/C2 轮转 `[1,1,4,4]`→`[4,1,0,0]`。主 kernel + host `arch_major==10`
+  门控 SM100 专属、仅分析。索引页新增第 137 篇。
+  上一轮 P126-1：新建 `docs/136-sm100-sparse-mqa-logits-kernel.md`
   （+`harness/exp_sparse_mqa_logits_kernel.{sh,out.txt}`、`src/sparse_mqa_logits_kernel.cu`）——把第 22 篇
   对 SM100 sparse MQA logits 主 kernel 只给的 40 行概览补齐到与第 113 篇（dense 版）同深度。两个入口同一核心
   （唯一分叉是 `KVAccessor` 的两个静态布尔）；`UMMA_N=BLOCK_Q*kNumHeads≤64`（与 dense 钉死 128 不同）、
@@ -5333,7 +5381,18 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P126 已完成（最新 **P126-1 SM100 sparse MQA logits 主 kernel 逐段精读**：
+- **下一步**：P0~P127 已完成（最新 **P127-1 SM100 sparse MQA logits 的 metadata kernel 逐段精读**：
+   把第 22 篇对 metadata kernel 的 30 行概览补齐——**整个 kernel 架构无关**（只用 `ptx::` 整数/原子、
+  `cp.async`、`cta_exclusive_sum`、`cute::` 下标；不碰 UMMA/tcgen05/UTCCP/TMA），故 H100(sm90) 原样
+  启动真实 kernel 并与独立 host oracle 对拍。主循环：Q 块构造 + 有效块前缀（分页线性扫描配对 +
+  `atomic_add(next_q_offset)` 无锁认领）、稀疏索引加载（非对齐 `ld_evict_first` 就地平移 vs 对齐
+  `cp_async_cg<256>`）、**归并路径二分分块**、跨分区去重 + carry、`cta_exclusive_sum` + `atomic_add`
+  按 Q 块预留连续 split、`write_merged_kv_block` 三态物理块 + 相对槽偏移 + 只判末块 contiguous/tail、
+  尾块 padding；末 CTA（release-acquire 计数）建调度：连续版均分 + Q 块边界切 + `atomicMax`，
+  分页版有界条目 + `balance_wave_entries` 直方图排序/旋转/两 wave 反向。H100 真机 **ALL PASS**：
+  6 组样例 **446 块 / 36 split 0 不符**、调度覆盖 `miss=dup=bad=0`。主 kernel + host `arch_major==10`
+  门控 SM100 专属、仅分析。索引页新增第 137 篇。
+   上一轮 P126-1：P0~P126 已完成（**P126-1 SM100 sparse MQA logits 主 kernel 逐段精读**：
    把第 22 篇对主 kernel 的 40 行概览补齐到与第 113 篇（dense 版）同深度——两个入口同一核心、
    `UMMA_N≤64`（与 dense 钉死 128 不同）、`split_kv=fp4?640:512`、`num_kv_stages=fp4?5:3`；六类 warp；
    **gather 式 KV 走 `cp.async` 故需自定义 smem swizzle**（低 3 位 XOR bits[3,6)）与尾块零填充；
@@ -5341,11 +5400,10 @@
    `(base+slot)*SB+t` 双射；`SharedStorage` 4 组 `offsetof` 8/8、TMEM raw 376/428→512、线程 768/896。
    H100(sm90) 真机（**直接 include 真实 layout 头**）**ALL PASS**，主 kernel SM100 专属、仅分析。
    索引页新增第 136 篇。
-   可继续（均为增量、非承诺）：
-   可用同法把第 22 篇只做 overview 的**稀疏 metadata kernel 主循环**（`scheduler/sm100_sparse_mqa_logits_
-   metadata.cuh` 的归并去重/负载均衡，第 22 篇 §3 已给行号）再做逐段精读 + 真机验证；或把
-   `harness/check_refs.py` 接进 CI（退出码已就绪）、定期重跑 `triage_refs.py` 复核 `adjacent_code` 队列，
-   或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落做定点复核。DeepEP 端到端仍需 NCCL≥2.32.3（见「阻塞」）。详见上）。
+  可继续（均为增量、非承诺）：
+  稀疏 MQA logits 的 metadata + 主 kernel（第 22/136/137 篇）已闭环；可选：把
+  `harness/check_refs.py` 接进 CI（退出码已就绪）、定期重跑 `triage_refs.py` 复核 `adjacent_code` 队列，
+  或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落做定点复核。DeepEP 端到端仍需 NCCL≥2.32.3（见「阻塞」）。详见上）。
    上一轮 P125-1：P0~P125 已完成（最新 **P125-1 Mega mHC 反向的目标卡单 kernel 接线（下）**：
    把第 132 篇结尾的「真实 H=7168 warp-pair 分段 + G0 累加器直喂 K1」坐实成可核对几何——
    前向 Post worker 网格（`kNumRowsPerWarp=16`/`kNumRowGroupsPerWarp=8`/`kNumLanesPerRowGroup=4`、
