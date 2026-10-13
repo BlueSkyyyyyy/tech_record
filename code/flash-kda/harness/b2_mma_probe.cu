@@ -142,8 +142,9 @@ constexpr int BW = 16;    // output columns per warp = KD / NW
 // (the per-chunk within-chunk attention-matrix adjoint) *before* the final
 // `-A^T diag(beta) A^T` sandwich (which is the remaining step):
 //   dApre[o_t,o_u] = sum_v dv[o_t,v]*v[o_u,v]                 (base, FLA `dA += dv @ v^T`)
-//                  + sum_k dw[o_t,k]*kg[o_u,k]                 (FLA `dA += dw @ kg^T`)
-// with `kg = k * exp2(g)` and `dw` the GEMM core's `dw = dv @ h` output.  Both contractions
+//                  - sum_k dw[o_t,k]*kg[o_u,k]                 (FLA `b_dw = -b_dw; dA += b_dw @ kg^T`)
+// with `kg = k * exp2(g)` and `dw` the GEMM core's `dw = dv @ h` output.  NOTE the sign:
+// FLA negates `dw` (`chunk_bwd.py:280-281`), so the `dw@kg^T` term enters `dApre` *negated*.  Both contractions
 // live *here* (no cross-chunk coupling), so this segment is verifiable standalone like P7-52's
 // `dvb` / P7-53's `dkgb`.  The base contracts over V (warp `w` owns V columns [w*16,w*16+16),
 // exactly the warp-per-V-column split of the output branch), the `dw@kg^T` contracts over k
@@ -151,6 +152,21 @@ constexpr int BW = 16;    // output columns per warp = KD / NW
 // `[BT,BT]` partial, the 8 partials are summed through smem.
 #ifndef B2M_DA
 #define B2M_DA 0
+#endif
+// P7-55: the *fourth non-GEMM segment* of B2 in CUDA -- the final `dA` sandwich (the
+// remaining `dA` post-op §55.6/§56.6/§57.6 left open), i.e. the *complete* B2 `dA` output:
+//   A where m_A=(o_t>o_u) & valid:   dAm[o_t,o_u] = dApre[o_t,o_u] * beta[o_u]
+//   dA = -A^T diag(beta) A^T (dApre)  ==  where(m_A, -(b_A @ (dAm @ b_A)), 0)
+// where `b_A[p,j] = A[o_t=j, o_A=p]` (FLA/Triton `b_A` orientation, `check_bwd_dqkg_kernel.py:240`)
+// and `dApre` is P7-54's pre-sandwich `dv@v^T - dw@kg^T`.  This consumes `dApre` from the
+// in-kernel reduction (no re-read) and only adds two [BT,BT]@[BT,BT] fp32 matmuls + a `beta`
+// scale, so it is verifiable standalone against a torch sandwich on the *same* `dApre`
+// (bit-level, fp32 scalar) and against FLA's final `dA`.  Requires `B2M_DA`.
+#ifndef B2M_SAND
+#define B2M_SAND 0
+#endif
+#if B2M_SAND && !B2M_DA
+#error "B2M_SAND requires B2M_DA"
 #endif
 constexpr int BVK = B2M_BVK;   // V-tile (contraction) depth staged per pipeline stage
 constexpr int NS  = B2M_NS;    // pipeline stages
@@ -207,6 +223,12 @@ struct alignas(128) Shared {
     float swall[NW][BT][BW];
     float dapart[NW][BT][BT];
     float da16[BT][BT];
+#endif
+#if B2M_SAND
+    // b_A[p][j] = A[o_t=j, o_A=p]  (P7-55 sandwich operand; loaded once per chunk)
+    float sA[BT][BT];
+    float sbeta[BT];     // beta[o_t] (rows t<T)
+    float daB[BT][BT];   // scratch: masked dApre, then the second matmul result
 #endif
 };
 
@@ -439,6 +461,10 @@ b2mma_kernel(
 #if B2M_DA
              float* __restrict__ dApre,
 #endif
+#if B2M_SAND
+             const float* __restrict__ A4s, const float* __restrict__ beta,
+             float* __restrict__ dAout,
+#endif
              int B, int T, int H, int NT) {
     extern __shared__ char smem_raw[];
     Shared* sh = reinterpret_cast<Shared*>(smem_raw);
@@ -486,6 +512,20 @@ b2mma_kernel(
             sh->skg[row][col] = kv * exp2f(gv);
         }
     }
+#if B2M_SAND
+    // b_A[p][j] = A[b, t=i_t*BT+j, h, c=p]  (only rows t<T valid); beta[o_t] (rows t<T).
+    for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
+        const int j = idx / BT, p = idx % BT;
+        float av = 0.f;
+        if (i_t * BT + j < T)
+            av = A4s[((int64_t)(n * T + i_t * BT + j) * H + hh) * BT + p];
+        sh->sA[p][j] = av;
+    }
+    if (threadIdx.x < BT) {
+        const int r = threadIdx.x;
+        sh->sbeta[r] = (i_t * BT + r < T) ? beta[((int64_t)(n * T + i_t * BT + r) * H + hh)] : 0.f;
+    }
+#endif
     __syncthreads();
 #endif
 #if B2M_OUT || B2M_DKGB
@@ -768,7 +808,8 @@ b2mma_kernel(
             sh->swall[warp][g + 8][col + 1] = accw[nt][3];
         }
         __syncwarp();
-        // dw@kg^T partial over this warp's output k columns [warp*BW, warp*BW+BW).
+        // dw@kg^T partial over this warp's output k columns [warp*BW, warp*BW+BW).  FLA negates
+        // `dw`, so the term is *subtracted* from the base below (matches `chunk_bwd.py:280-281`).
         #pragma unroll
         for (int kk = 0; kk < BW; ++kk) {
             const float w0 = sh->swall[warp][r][kk];
@@ -778,7 +819,7 @@ b2mma_kernel(
         }
         #pragma unroll
         for (int i = 0; i < 8; ++i)
-            sh->dapart[warp][r][c0 + i] = dbpart[i] + dkpart[i];
+            sh->dapart[warp][r][c0 + i] = dbpart[i] - dkpart[i];
     }
     __syncthreads();
     {   // reduce the 8 warp partials (one thread per [BT,BT] entry)
@@ -795,6 +836,51 @@ b2mma_kernel(
             const int r = idx / BT, c = idx % BT, tr = i_t * BT + r;
             if (tr < T)
                 dApre[((int64_t)(n * T + tr) * H + hh) * BT + c] = sh->da16[r][c];
+        }
+    }
+#endif
+#if B2M_SAND
+    // ---- P7-55 final dA sandwich: dA = where(m_A, -(b_A @ ((dApre*beta_col) @ b_A)), 0) ----
+    // `sh->da16` still holds `dApre` [o_t,o_u]; all ops are fp32 scalar (no tf32), so the
+    // result is bit-comparable to a torch sandwich on the *same* `dApre`.
+    __syncthreads();
+    {   // dAm[r][c] = (r>c & valid) ? dApre[r][c]*beta[c] : 0
+        const int idx = threadIdx.x;
+        if (idx < BT * BT) {
+            const int r = idx / BT, c = idx % BT;
+            const bool v = (r > c) && (i_t * BT + r < T) && (i_t * BT + c < T);
+            sh->daB[r][c] = v ? sh->da16[r][c] * sh->sbeta[c] : 0.f;
+        }
+    }
+    __syncthreads();
+    {   // X1[i][j] = sum_p dAm[i][p] * b_A[p][j]   -> da16
+        for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
+            const int i = idx / BT, jj = idx % BT;
+            float s = 0.f;
+            #pragma unroll
+            for (int p = 0; p < BT; ++p) s += sh->daB[i][p] * sh->sA[p][jj];
+            sh->da16[i][jj] = s;
+        }
+    }
+    __syncthreads();
+    {   // X2[i][j] = sum_p b_A[i][p] * X1[p][j]     -> daB
+        for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
+            const int i = idx / BT, jj = idx % BT;
+            float s = 0.f;
+            #pragma unroll
+            for (int p = 0; p < BT; ++p) s += sh->sA[i][p] * sh->da16[p][jj];
+            sh->daB[i][jj] = s;
+        }
+    }
+    __syncthreads();
+    {   // store final `dA` = where(m_A, -X2, 0).  X2 first axis maps to the stored token row
+        // (golden/Triton use the same-index mapping, `check_bwd_dqkg_kernel.py:203`), so token
+        // row = i and column index = jj, with the mask (i>jj) applied on X2's own axes.
+        for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
+            const int i = idx / BT, jj = idx % BT;
+            const bool v = (i > jj) && (i_t * BT + i < T) && (i_t * BT + jj < T);
+            if (i_t * BT + i < T)
+                dAout[((int64_t)(n * T + i_t * BT + i) * H + hh) * BT + jj] = v ? -sh->daB[i][jj] : 0.f;
         }
     }
 #endif
@@ -946,7 +1032,7 @@ extern "C" int b2dkgb_launch(const void* v, const void* vn, const void* h, const
 #endif
 #endif  // !B2M_DA
 
-#if B2M_DA
+#if B2M_DA && !B2M_SAND
 // P7-54 dedicated launcher (`b2da_launch`): only valid when compiled with `-DB2M_DA` and
 // neither `-DB2M_OUT` nor `-DB2M_DKGB` (it assumes the bare `b2mma_kernel` signature).
 static int b2da_launch_impl(const void* v, const void* vn, const void* h, const void* dh,
@@ -993,6 +1079,60 @@ extern "C" int b2da_launch(const void* v, const void* vn, const void* h, const v
     return b2da_launch_impl(v, vn, h, dh, dov, dvv, k, g, dq, dk, dw, dgk, dApre,
                             B, T, H, NT, stream);
 }
-#endif  // B2M_DA
+#endif  // B2M_DA && !B2M_SAND
+
+#if B2M_SAND
+// P7-55 dedicated launcher (`b2sand_launch`): compiled with `-DB2M_DA -DB2M_SAND`
+// (plus the usual stage options).  Outputs both `dApre` (P7-54) and the final `dA`.
+static int b2sand_launch_impl(const void* v, const void* vn, const void* h, const void* dh,
+                              const void* dov, const void* dvv, const void* k, const void* g,
+                              const void* A4, const void* beta,
+                              void* dq, void* dk, void* dw, void* dgk, void* dApre, void* dA,
+                              int B, int T, int H, int NT, void* stream) {
+    dim3 grid(NT, B * H);
+    int smem = (int)sizeof(Shared);
+    static int configured = 0;
+    if (!configured) {
+        if (cudaFuncSetAttribute(b2mma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 smem) != cudaSuccess)
+            return -3;
+        configured = 1;
+    }
+#if B2M_TMA_ON
+    CUtensorMap dom, vnm, dvm, hm, dhm, vvm;
+    make_map_dov(&dom, (void*)dov, H, T, B);
+    make_map_dov(&vnm, (void*)vn,  H, T, B);
+    make_map_dov(&dvm, (void*)dvv, H, T, B);
+    make_map_dov(&vvm, (void*)v,   H, T, B);
+    make_map_hdh(&hm,  (void*)h,  H, NT, B);
+    make_map_hdh(&dhm, (void*)dh, H, NT, B);
+    b2mma_kernel<<<grid, NW * 32, smem, (cudaStream_t)stream>>>(
+        dom, vnm, dvm, hm, dhm, vvm,
+        (const float*)v, (const float*)vn, (const float*)h, (const float*)dh,
+        (const float*)dov, (const float*)dvv, (const float*)k, (const float*)g,
+        (float*)dq, (float*)dk, (float*)dw, (float*)dgk, (float*)dApre,
+        (const float*)A4, (const float*)beta, (float*)dA,
+        B, T, H, NT);
+#else
+    b2mma_kernel<<<grid, NW * 32, smem, (cudaStream_t)stream>>>(
+        (const float*)v, (const float*)vn, (const float*)h, (const float*)dh,
+        (const float*)dov, (const float*)dvv, (const float*)k, (const float*)g,
+        (float*)dq, (float*)dk, (float*)dw, (float*)dgk, (float*)dApre,
+        (const float*)A4, (const float*)beta, (float*)dA,
+        B, T, H, NT);
+#endif
+    return (int)cudaGetLastError();
+}
+
+extern "C" int b2sand_launch(const void* v, const void* vn, const void* h, const void* dh,
+                             const void* dov, const void* dvv, const void* k, const void* g,
+                             const void* A4, const void* beta,
+                             void* dq, void* dk, void* dw, void* dgk, void* dApre, void* dA,
+                             int B, int T, int H, int NT, void* stream) {
+    return b2sand_launch_impl(v, vn, h, dh, dov, dvv, k, g, A4, beta,
+                              dq, dk, dw, dgk, dApre, dA, B, T, H, NT, stream);
+}
+#endif  // B2M_SAND
+
 
 extern "C" int b2mma_smem_bytes() { return (int)sizeof(Shared); }

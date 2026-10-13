@@ -645,6 +645,23 @@
       `mma.sync`**（`X@Y^T` 形式可复用 GEMM 核 fragment 读法 + warp 分片归约），本轮为**先证代数**取标量实现。
       **边界**：**未落** `-A^T diag(beta) A^T` sandwich、`db` 的 `sum_k dkgb·kg`、门控链（§49.7/§55.6/§56.6 仍未关闭）。
 
+- [x] **P7-55** 兑现 §55.6/§56.6/§57.6「补非 GEMM 段」**第四刀**——把 §57 的 `dApre` **就地**接上最终
+      `-A^T diag(beta) A^T` sandwich，得到**完整 B2 `dA` 输出**：`dAm=where(m_A, dApre·beta[o_u],0)`、
+      `dA=where(m_A,-(b_A@(dAm@b_A)),0)`（`b_A[p,j]=A[o_t=j,o_A=p]`；FLA `chunk_bwd.py:300-304`）。给
+      `b2_mma_probe.cu` 加 `-DB2M_SAND`（需 `-DB2M_DA`；新符号 `b2sand_launch`，输出 `dApre`+`dA`）：`b_A`/`beta`
+      每 chunk 载入 smem（`sA/sbeta/daB`，~3KB），两个 `[BT,BT]@[BT,BT]` 的 **fp32 标量**矩阵乘 + 一次 `beta` 缩放，
+      **不重读 `dApre`**（直接吃 §57 的 `da16`）。新增 `harness/check_bwd_b2_sand.py`（`check_bwd_b2_sand.out.txt`，
+      空闲卡）+ `harness/ncu_b2_sand_driver.py` / `harness/probe_b2_sand_ncu.sh`（`probe_b2_sand_ncu.out.txt`）+
+      `docs/07` §58。**Part A**：`dA` vs torch（**同一份 `dApre`**）**逐位相同（max_abs=0）**、四种 stage 布局
+      （非 TMA/TMA@32/TMA@64）`dA`/`dApre` 都逐位、vs FLA 最终 `dA` 落 **tf32 底噪 1.56e-3~2.34e-3**（含非整除
+      T=250）。**Part B**：sandwich 很便宜——`sand/da` **1.02–1.06×**、`sand_tma/da_tma` **1.03–1.10×**（远低于
+      §57 的 +33–61%，因无新 `[BT,V]/[BT,K]` 收缩）；含完整 `dA` 的 TMA CUDA 核到全 Triton B2 **0.77×**。**ncu**：
+      增量＝`dA` 落盘 **+8.0MB** + `sA/beta` 标量读（+0.39M sector）+ `LDS 287→334`/`STG 26→31`，`Duration
+      655.8→703.5µs（+7.3%）`，bank conflict/占用率/tensor% 全不动。**关键副产物（更正 §57）**：接上 sandwich 对最终
+      `dA` 比 FLA 时暴露 §57 的**符号错误**——FLA `b_dw=-b_dw`（`chunk_bwd.py:280`）故第二项是 **`- dw@kg^T`**
+      （§57 写成 `+`，其自身参考两侧同号故未现形）；已改正 `.cu`（`dapart=dbpart-dkpart`）与 §57 参考/公式。
+      **边界**：`db` 与门控链仍未落 CUDA（下一步）。
+
 - [x] **P7-32** 兑现 §34.4 的**待验证**：把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**，
       验证能否复现 §34.1「删掉 store」收益的那 33%。给 `b1_tma_probe.cu` 加 `-DB1T_TMADH`：per-warp
       `[KD,BW]=[128,16]` 未 padding tile 写入加进 `Shared` 的**双缓冲** `dho[2][NW][KD][BW]`，lane 0 发
@@ -999,8 +1016,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-54 补测**。
-  - P7-54（本轮）：**兑现 §55.6/§56.6「补非 GEMM 段」第三刀——`dA` 的两个 GEMM 贡献（sandwich 之前）
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-55 补测**。
+  - P7-55（本轮）：**兑现 §55.6/§56.6/§57.6「补非 GEMM 段」第四刀——最终 `dA` sandwich `-A^T diag(beta) A^T`
+    落进 CUDA，补全 B2 `dA` 支路；并更正 §57 的 `dw` 符号**（`docs/07` §58）。给 `b2_mma_probe.cu` 加
+    `-DB2M_SAND`（需 `-DB2M_DA`；+ 符号 `b2sand_launch`，输出 `dApre`+`dA`）：`b_A`/`beta` 每 chunk 载入 smem
+    （`sA/sbeta/daB` ~3KB），两个 `[BT,BT]@[BT,BT]` 的 **fp32 标量**矩阵乘 + 一次 `beta` 缩放，**不重读 `dApre`**
+    （直接吃 §57 的 `da16`）。新增 `harness/check_bwd_b2_sand.py`（`check_bwd_b2_sand.out.txt`，空闲卡）+ 
+    `harness/ncu_b2_sand_driver.py` / `harness/probe_b2_sand_ncu.sh`（`probe_b2_sand_ncu.out.txt`）。**Part A**：
+    `dA` vs torch（**同一份 `dApre`**）**逐位相同（max_abs=0）**、四种 stage 布局（非 TMA/TMA@32/TMA@64）`dA`/`dApre`
+    都逐位、vs FLA 最终 `dA` 落 **tf32 底噪 1.56e-3~2.34e-3**（含非整除 T=250）。**Part B**：sandwich 很便宜
+    （`sand/da` **1.02–1.06×**、`sand_tma/da_tma` **1.03–1.10×**，远低于 §57 的 +33–61%，因无新 `[BT,V]/[BT,K]`
+    收缩）；含完整 `dA` 的 TMA CUDA 核到全 Triton B2 **0.77×**。**ncu**：增量＝`dA` 落盘 +8.0MB + `sA/beta` 标量读
+    + `LDS 287→334`/`STG 26→31`，`Duration 655.8→703.5µs（+7.3%）`，bank conflict/占用率/tensor% 全不动。
+    **关键副产物**：接上 sandwich 对最终 `dA` 比 FLA 时暴露 §57 的**符号错误**——FLA `b_dw=-b_dw`
+    （`chunk_bwd.py:280`）故 `dApre` 第二项是 **`- dw@kg^T`**（§57 写成 `+`，其自身参考两侧同号故未现形）；
+    已改正 `.cu`（`dapart=dbpart-dkpart`）与 §57 参考/公式（§57 数值不变，两侧同步翻转）。**边界**：`db` 的
+    `sum_k dkgb·kg`（跨 warp 归约）与门控链仍未落 CUDA。
+  - P7-54（上轮）：**兑现 §55.6/§56.6「补非 GEMM 段」第三刀——`dA` 的两个 GEMM 贡献（sandwich 之前）
     `dApre = Σ_v dv·v + Σ_k dw·kg` 落进 K2 形状 CUDA B2**（`docs/07` §57）。给 `b2_mma_probe.cu` 加
     `-DB2M_DA`（+ `b2da_launch`）：两个收缩维都**不是 `BT`**——base 按 warp 拥有 **V 列**（同输出支路分区）
     标量 `dv[r,v]*v[c,v]`、`dw@kg^T` 按 warp 拥有 **输出 k 列**（`accw` 镜像到 `swall`）标量点积；8 warp
@@ -1739,8 +1771,18 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-54 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
-  - **P7-54（`docs/07` §57）补非 GEMM 段第三刀——`dA` 的两个 GEMM 贡献 `dApre = Σ_v dv·v + Σ_k dw·kg`
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-55 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-55（`docs/07` §58）补非 GEMM 段第四刀——最终 `dA` sandwich `-A^T diag(beta) A^T` 落进 CUDA**：给
+    `b2_mma_probe.cu` 加 `-DB2M_SAND`（需 `-DB2M_DA`；+ `b2sand_launch`），`b_A`/`beta` 每 chunk 载入 smem
+    （`sA/sbeta/daB`），两个 `[BT,BT]@[BT,BT]` 的 **fp32 标量**矩阵乘 + 一次 `beta` 缩放，不重读 `dApre`；`dA`
+    vs torch（同一 `dApre`）**逐位相同**、四布局逐位、vs FLA 落 tf32 底噪 **1.56e-3~2.34e-3**；sandwich 只值
+    `sand/da` **1.02–1.06×**、`sand_tma/da_tma` **1.03–1.10×**（ncu Duration 655.8→703.5µs）。**副产物：更正
+    §57 的 `dw` 符号**（FLA `b_dw=-b_dw`，故 `dApre` 第二项为 `- dw@kg^T`，§57 写成 `+`；其自身参考两侧同号
+    故未现形，接上 sandwich 对最终 `dA` 比 FLA 才暴露）。新增 `harness/check_bwd_b2_sand.py`
+    （`check_bwd_b2_sand.out.txt`）+ `harness/ncu_b2_sand_driver.py` / `harness/probe_b2_sand_ncu.sh`
+    （`probe_b2_sand_ncu.out.txt`）。**下一步**：`db` 的 `sum_k dkgb·kg`（需 §55 `dvb`、§56 `dkgb` 的跨 warp
+    归约）与门控链，把 B2 六项全搬进 CUDA。
+  - **P7-54（`docs/07` §57）补非 GEMM 段第三刀——`dA` 的两个 GEMM 贡献 `dApre = Σ_v dv·v - Σ_k dw·kg`
     （sandwich 之前）落进 CUDA**：给 `b2_mma_probe.cu` 加 `-DB2M_DA`（+ `b2da_launch`），两个收缩维都**不是
     `BT`**——base 按 warp 拥有 **V 列**标量 `dv[r,v]*v[c,v]`、`dw@kg^T` 按 warp 拥有 **输出 k 列**（`accw`
     镜像到 `swall`）标量点积，8 warp 私有 `[BT,BT]` 部分和经 smem 归约后落盘。`dApre` vs torch 落 **fp32

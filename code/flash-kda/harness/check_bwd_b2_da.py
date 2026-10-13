@@ -126,7 +126,11 @@ def ref_dapre(inp, dw, BT):
     """torch(fp32) reference for exactly the `dApre` segment, using the *given* `dw` operand.
 
     base[o_t,o_u] = sum_v dv[o_t,v]*v[o_u,v]  (FLA line 264);
-    dApre        += sum_k dw[o_t,k]*kg[o_u,k],  kg=k*exp2(g)  (line 280-281).
+    dApre        -= sum_k dw[o_t,k]*kg[o_u,k],  kg=k*exp2(g)  (FLA negates dw, line 280-281).
+
+    NOTE (P7-55 correction): FLA does `b_dw = -b_dw; b_dA += b_dw @ kg^T`, i.e. the `dw@kg^T`
+    term enters `dApre` *negated*.  P7-54 originally added it; the standalone P7-54 check did
+    not catch it (both sides used `+`).  Only the full `dA` sandwich vs FLA exposes it.
     """
     B, T, H, K = inp["q"].shape
     V = inp["v"].shape[-1]
@@ -145,7 +149,7 @@ def ref_dapre(inp, dw, BT):
     dw4, kg4 = pad4(dwd), pad4(kg)        # [B,NT,H,BT,K]
     base = torch.matmul(dv4, v4.transpose(-1, -2))     # [B,NT,H,BT(o_t),BT(o_u)]
     dwkg = torch.matmul(dw4, kg4.transpose(-1, -2))    # [B,NT,H,BT(o_t),BT(o_u)]
-    dapre = (base + dwkg).permute(0, 1, 3, 2, 4).reshape(B, NT * BT, H, BT)[:, :T].contiguous()
+    dapre = (base - dwkg).permute(0, 1, 3, 2, 4).reshape(B, NT * BT, H, BT)[:, :T].contiguous()
     return dict(dApre=dapre)
 
 

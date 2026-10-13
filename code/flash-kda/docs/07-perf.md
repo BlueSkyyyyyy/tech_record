@@ -5780,7 +5780,7 @@ CUPTI `dev`（kernel-only，µs；`dkgb` = `-DB2M_DKGB` 非 TMA、`core_tma` = �
 - 只覆盖 `K=V=128`、`BT=16`、fp32/tf32；`dkgb` store 用标量 32-bit（`-DB2M_VECST` 未接到本段）；`dw` 未做
   bf16。这些都不影响本节结论（增量机制＝读/写字节），但生产形态应接向量化 store 并就地交接 `dw`。
 
-## 57. 「K2 形状 CUDA B2」补非 GEMM 段第三刀：**`dApre = dv@v^T + dw@kg^T`**（`dA` 的后处理 GEMM）落进 CUDA（P7-54）
+## 57. 「K2 形状 CUDA B2」补非 GEMM 段第三刀：**`dApre = dv@v^T - dw@kg^T`**（`dA` 的后处理 GEMM）落进 CUDA（P7-54）
 
 §55.6/§56.6 把 B2 非 GEMM 段的剩余工作列成「`dA` 的后处理项（`dw@kg^T`、`A^T diag A^T`）、`db` 的
 `sum_k dkgb·kg`（跨 warp 归约）与**门控链**」。§55 落了输出支路 `dvb = A@dv`、§56 落了 `dkgb = A@(-dw)`
@@ -5788,9 +5788,11 @@ CUPTI `dev`（kernel-only，µs；`dkgb` = `-DB2M_DKGB` 非 TMA、`core_tma` = �
 `-A^T diag(beta) A^T` sandwich **之前**），对应 FLA / torch 的
 
     dApre[o_t, o_u] = sum_v dv[o_t, v] · v[o_u, v]        (base;  `chunk_bwd.py:264` `b_dA += tl.dot(b_dv, v^T)`)
-                    + sum_k dw[o_t, k] · kg[o_u, k]        (`chunk_bwd.py:280-281` `b_dA += tl.dot(b_dw, kg^T)`)
+                    - sum_k dw[o_t, k] · kg[o_u, k]        (`chunk_bwd.py:280-281`: `b_dw = -b_dw; b_dA += tl.dot(b_dw, kg^T)`)
 
 （`kg = k·exp2(g)`，`dw` 是 GEMM 核心的 `dw = dv @ h` 输出；`check_bwd_dqkg_kernel.py:168/180-181`）。
+**更正（P7-55 / §58）**：第二项符号为 **`-`**——FLA 在 `chunk_bwd.py:280` 先 `b_dw = -b_dw` 再累加；
+§57 最初写成 `+`（其独立核对两侧一致，未暴露；只有把 sandwich 也接上、对最终 `dA` 比 FLA 时才现形）。
 这两项都是**块内**运算（无跨 chunk 耦合），故与 §55 暴露 `dvb`、§56 暴露 `dkgb` 一样，把 `dApre` 单独落盘以
 **独立核对这两段 GEMM**。答案是：**逐位对得上真 fp32（比前两刀的 tf32 还准）、三种 stage 布局逐位相同，但代价明显
 更大（+33–85% vs 前两刀的 +10–25%）**——因为这两项的**收缩维是完整的 `V` 和 `K`（各 128）**，而非 `BT=16`。
@@ -5875,7 +5877,7 @@ CUPTI `dev`（kernel-only，µs；`da` = `-DB2M_DA` 非 TMA、`core_tma` = 只�
 
 ### 57.5 结论 / 对目标卡的设计输入
 
-- **§55.6/§56.6 的「补非 GEMM 段」第三刀成立**：`dA` 的两个 GEMM 贡献 `dv@v^T` + `dw@kg^T`（pre-sandwich）
+- **§55.6/§56.6 的「补非 GEMM 段」第三刀成立**：`dA` 的两个 GEMM 贡献 `dv@v^T` 与 `-dw@kg^T`（pre-sandwich）
   进 CUDA 后**独立可证**、**逐位对得上真 fp32（5.3e-7）**、**三种 stage 布局逐位相同**（含非整除 `T=250`）。
 - **但不是「便宜」的一刀**：与前两刀最本质的差别是**收缩维不再是 `BT`**——`dApre` 收缩完整的 `V`/`K`
   （各 128），且本段用**标量 FMA**，故 `+33–61%`（TMA）。**设计输入**：目标卡 CUDA B2 里凡「收缩维 = `V` 或 `K`
@@ -5897,3 +5899,119 @@ CUPTI `dev`（kernel-only，µs；`da` = `-DB2M_DA` 非 TMA、`core_tma` = 只�
 - 只覆盖 `K=V=128`、`BT=16`、fp32/tf32；`dApre` store 用标量 32-bit（`-DB2M_VECST` 未接到本段）；**同 CTA 交接未做**
   （`v`/`k`/`g` 仍从 global 读、`dApre` 落盘再返回）；`k`/`g` 用标量全局读（可改 TMA/向量化）。这些都不影响本节
   结论（增量机制＝收缩维长度与访存机制），但生产形态应接向量化 store 并就地交接。
+
+## 58. 「K2 形状 CUDA B2」补非 GEMM 段第四刀：**最终 `dA` sandwich `-A^T diag(beta) A^T`** 落进 CUDA，并更正 §57 的 `dw` 符号（P7-55）
+
+§55.6/§56.6/§57.6 把 B2 非 GEMM 段的剩余工作列成「`dA` 的 `A^T diag A^T` 后处理、`db` 的 `sum_k dkgb·kg`
+（跨 warp 归约）与**门控链**」。§55 落了输出支路 `dvb=A@dv`、§56 落了 `dkgb=A@(-dw)`、§57 落了 `dApre`
+（在 sandwich 之前）。本轮落 **`dA` 的最后一步**：把 §57 的 `dApre` **就地**接上最终 sandwich，得到
+**完整的 B2 `dA` 输出**：
+
+    m_A[o_t,o_u] = (o_t > o_u) & valid
+    dAm          = where(m_A, dApre · beta[o_u], 0)
+    dA           = where(o_t > o_u & valid, -(b_A @ (dAm @ b_A)), 0)      # 存到 dA[o_t, o_A]
+
+其中 `b_A[p,j] = A[o_t=j, o_A=p]`（FLA/Triton 的 `b_A` 取向，`check_bwd_dqkg_kernel.py:240`；即 `A^T`），
+对应 FLA `chunk_bwd.py:300-304`（`tl.where(m_A, b_dA*beta[None,:],0)` → `tl.dot(b_dA,b_A)` →
+`tl.dot(b_A,b_dA)` → `tl.where(m_A,-b_dA,0)`）。sandwich 只吃**已经在 smem 里的** `dApre`、只加两个
+`[BT,BT]@[BT,BT]` 的 **fp32 标量** 矩阵乘与一个 `beta` 标量缩放，故**不重读 `dApre`**。
+
+> **本轮的意外收获（更正 §57）**：把 sandwich 接上、对**最终 `dA`** 比 FLA 时，暴露了 §57 的一个**符号错误**——
+> FLA 在 `chunk_bwd.py:280` 先 `b_dw = -b_dw` 再 `b_dA += tl.dot(b_dw, kg^T)`，即 `dApre` 的第二项是
+> **`- dw@kg^T`**；§57 写成了 `+`。§57 的独立核验没发现，是因为它只跟**自己**的 torch 参考比（两侧同为 `+`）。
+> 本轮已把 `.cu`（`dapart = dbpart - dkpart`）与 §57 参考（`base - dwkg`）改正；改后最终 `dA` vs FLA 落 tf32 底噪。
+
+证据：`harness/b2_mma_probe.cu`（新增 `-DB2M_SAND`，需 `-DB2M_DA`；新符号 `b2sand_launch`，输出 `dApre` 与
+`dA`）+ `harness/check_bwd_b2_sand.py`（`harness/check_bwd_b2_sand.out.txt`，空闲卡）+ `harness/ncu_b2_sand_driver.py`
+/ `harness/probe_b2_sand_ncu.sh`（`harness/probe_b2_sand_ncu.out.txt`）。
+
+### 58.1 设计：`dApre` 留在 smem，加两个 `[BT,BT]` 的 fp32 标量矩阵乘
+
+- **操作数**：`b_A`（`[BT,BT]`，每 chunk 从 `A[b,t,h,c]` 载入一次，行 `t<T`，pad 行零）与 `beta[o_t]`（每 chunk
+  载入一次）——放在 `skg` 同批预取里（`Shared` 加 `sA[BT][BT]`/`sbeta[BT]`/`daB[BT][BT]` ≈ 3 KB）。
+- **两步矩阵乘**：`X1 = dAm @ b_A`、`X2 = b_A @ X1`，用**标量 fp32 FMA**（`BT=16` 太小，不入 `mma`）；每个
+  256 线程 block 各摊 `[BT,BT]` 的 ~1 条目、内层 `#pragma unroll` 的 `BT` 次点积，`__syncthreads()` 分段。
+- **存储映射**：`X2` 的**第一个下标即最终 `dA` 的 token 行**（`dA[o_t,o_A] = X2[i,j]` 同下标，FLA/Triton
+  的 store 也是这个映射，`check_bwd_dqkg_kernel.py:203` 的 `permute` 不构成转置）；mask `(i>j)` 作用在 `X2`
+  自己的两个轴上。**坑**：`beta` 乘在 **`o_u`（列）** 上而非 `o_t`（`dApre·beta[o_u]`，`tl.where(..., b_dA*beta[None,:], ...)`
+  的广播把 `beta` 落到第二个轴），写反则 `max_rel≈1`。
+- **无重读**：`da16`（§57 归约后的 `dApre`）直接喂 `dAm`，`dApre` 落盘只是为了独立核对；生产可省。
+
+### 58.2 Part A — 正确性：`dA` 与 torch（同一 `dApre`）**逐位相同**，三种 stage 布局逐位相同，vs FLA 落 tf32 底噪
+
+同操作数四组 shape（`BT=16`，含非整除 `T=250`）。torch 参考吃**CUDA 自己产出的 `dApre`**（关 tf32 走真 fp32），
+故比较隔离的正是 sandwich 本身：
+
+| 量 | `sand` vs torch | `sand_tma` vs torch | `sand_tma64` vs torch | vs FLA 最终 `dA` |
+|---|---|---|---|---|
+| `dA` | **0** | **0** | **0** | 1.56e-3 ~ 2.34e-3 |
+
+（表内为四组 shape 最坏 `max_rel`；`sand` 内部逐位、`sand` vs `sand_tma` vs `sand_tma64` 的 `dA` 与 `dApre`
+都 **`max_abs=0`**。）三件事被钉死：(1) **CUDA sandwich 代数无误**——与 torch 在**同一份 `dApre`** 上**逐位相同
+（`max_abs=0`）**，且因用 fp32 标量、连 tf32 底噪都没有；(2) **三种 stage 布局（非 TMA / TMA@32 / TMA@64 atom
+拆分）对 `dA` 与 `dApre` 都零影响**；(3) **最终 `dA` vs FLA 落 tf32 底噪 1.6e-3~2.3e-3**——这里同时**证伪了 §57
+的 `+`**，并**证实更正后的 `-`**（改任一侧符号都会把该项抬到 `max_rel≈0.8`）。
+
+### 58.3 Part B — 计时：sandwich 只值 +2~6%（非 TMA）/ +3~10%（TMA）
+
+CUPTI `dev`（kernel-only，µs；`da` = P7-54 `dApre`、`sand` = +sandwich）：
+
+| shape | `da` | `da_tma` | `sand` | `sand_tma` | `sand_tma64` | 全 Triton B2 | `sand/da` | `sand_tma/da_tma` |
+|---|---|---|---|---|---|---|---|---|
+| `B8 T2048 H8` | 3075.4 | 2076.0 | 3252.2 | 2245.7 | 3223.6 | 2914.6 | 1.06× | 1.08× |
+| `B2 T1024 H8` | 363.0 | 216.1 | 371.3 | 222.8 | 369.0 | 358.4 | 1.02× | 1.03× |
+| `T512 H4` | 13.9 | 14.0 | 14.5 | 15.5 | 13.8 | 14.6 | 1.04× | 1.10× |
+| `T250 H3`（非整除） | 12.9 | 13.7 | 13.8 | 14.9 | 12.9 | 14.2 | 1.06× | 1.09× |
+
+- **这第四刀是「便宜」的**：sandwich 只加 `sand/da` **1.02–1.06×**、`sand_tma/da_tma` **1.03–1.10×**——远低于
+  §57 的 +33–61%。原因：`dApre` 已在 smem、sandwich 只做两个 `16×16` 的 fp32 标量乘（全块 ~8K MAC）+ 一次
+  `beta` 缩放 + 多一次 `dA` 落盘，**没有任何新的 `[BT,V]`/`[BT,K]` 收缩**。
+- **口径提醒**：本轮 CUPTI 绝对值是在**共享卡**上测得（同二进制比 P7-54 的 `check_bwd_b2_da.out.txt` 整体高
+  ~3×，如 `da_tma@B8` 654.7→2076），故上表**只用比值**；绝对量以本轮 `ncu` 为准（`da_tma` **655.8 µs** →
+  `sand_tma` **703.5 µs**，**+7.3%**，与比值自洽）。
+- 含 sandwich 的 CUDA 核到全 Triton B2：非 TMA `sand` **1.12×**、TMA `sand_tma` **0.77×**（`B8`）——即
+  **TMA 版 CUDA 核（含完整 `dA`）已比全 Triton B2 快 ~23%**，且仍比 §57 的 `da_tma`（0.72×）只贵一点。
+
+### 58.4 `ncu` — 增量＝`dA` 落盘（+8.4 MB）+ `sA/beta` 标量读 + barrier，冲突/占用/带宽都不动
+
+`B8 T2048 H8`，同一批 fp32 操作数（`probe_b2_sand_ncu.out.txt`）：
+
+| 变体 | DRAM 读 | DRAM 写 | Duration | L2 bytes | tensor% | occ | bank conflict | shared wavefronts | l1tex 全局读 sectors | SASS LDS | STG |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `da_tma`（P7-54） | 1.48 GB | 210.19 MB | 655.8 µs | 2.71 GB | 5.99% | 24.66% | 24.82 M | 69.58 M | 4.194 M | 287 | 26 |
+| `sand_tma`（本轮） | 1.49 GB | **218.22 MB** | **703.5 µs** | 2.75 GB | 5.58% | 24.67% | 24.87 M | 72.98 M | 4.588 M | 334 | **31** |
+
+- **增量就是把 `dA` 写下去 + 把 `b_A/beta` 读上来**：DRAM 写 `+8.0 MB`（=`dA` 一个 `[B,T,H,BT]` fp32 = 8.4 MB，
+  与 `dApre` 同尺寸）、DRAM 读 `+0.01 GB`、l1tex 全局读 sector `+0.39 M`（`b_A` 的 `[BT,BT]` 标量读 + `beta`）、
+  SASS `LDS 287→334`（+47 条标量 shared load = 两个 `[BT,BT]` 矩阵乘）、`STG 26→31`（+5 = `dA` 的标量 store）。
+- **不引入新瓶颈**：bank conflict（24.82→24.87 M）、占用率（24.66→24.67%）、tensor%（5.99→5.58，被标量段稀释）
+  都**纹丝不动**；`Duration +47.7 µs`、`L2 2.71→2.75 GB`、`DRAM SOL 76.73→72.29%`（核仍 DRAM-bound）。即这部分
+  是**加的一小块确定性工作**，不是新 bound。
+
+### 58.5 结论 / 对目标卡的设计输入
+
+- **B2 的 `dA` 支路在 CUDA 里闭环**：`dApre`（`dv@v^T - dw@kg^T`）→ sandwich（`-A^T diag(beta) A^T`）→ 完整
+  `dA`，**独立可证**（vs torch 逐位、vs FLA 落 tf32 底噪）、**四种 stage 布局逐位一致**（含非整除 `T=250`）。
+  sandwich 便宜（+2–10%），因为它纯做在 smem 的 `dApre` 上、无新收缩维。
+- **更正 §57 的符号**：`dApre` 第二项是 **`- dw@kg^T`**（FLA `chunk_bwd.py:280` 的 `b_dw=-b_dw`）。
+  **教训**：非 GEMM 段的独立核验若只跟**自己的**参考比，**符号/常数整体错**是查不出来的——必须让**下游
+  （这里是 sandwich）接上、对最终对外量比 FLA**，中间量的错误才会被放大现形（`+` 时 `dA` vs FLA 的
+  `max_rel≈0.83`，`-` 时 2e-3）。
+- **设计输入（更新 §57.5）**：目标卡 CUDA B2 里「收缩维是全维 `V`/`K`」的段（`dv@v^T`、`dw@kg^T`）应换
+  `mma.sync`（§57.5）；而**sandwich 这类 `[BT,BT]@[BT,BT]` 的小段**（本轮的 `-A^T diag A^T`）**留在标量 fp32
+  即可**——它只值 +2–10%，换 mma 的收益微乎其微，反而不如把工量投到仍缺的 `db` 与门控链。
+- **同 CTA 交接的收益**：`dApre` 不落盘、`dA` 就地交下游（B3/intra 或 dAv）可再省一次 `[B,T,H,BT]` 读写
+  （这里约 16–17 MB/核），是生产形态应做的（本轮为独立核对仍落盘）。
+
+### 58.6 边界 / 下一步（诚实）
+
+- 本轮只落 **sandwich**；`db` 的 `sum_k dkgb·kg`（跨 warp 归约）与**门控链**（`dg`、`dk` 的 `exp2(g)` 标定）
+  **仍未落 CUDA**——即 §58 的 4 刀把 `dA` 支路补全，但 B2 全核（`dq/dk/dv2/db/dg/dA` 六项）尚缺 `db`/门控链，
+  下一步＝在同一核里补 `db`（需 `dvb`(§55) 与 `dkgb`(§56) 的跨 warp 归约）与门控链（`dg` 的 `q·dq`/`kdk`/
+  `m_last·dgk`/`kg·dkgb·beta` 与 `dk += dkgb·gb`）。
+- 只覆盖 `K=V=128`、`BT=16`、fp32；sandwich 用标量 fp32、`dA` store 用标量 32-bit（`-DB2M_VECST` 未接）；
+  本轮 `-DB2M_SAND` 要求 `-DB2M_DA`（sandwich 吃 `dApre`），未与 §55/§56 的 `-DB2M_OUT`/`-DB2M_DKGB` 组合。
+  这些都不影响本节结论（增量机制＝一小块确定性 smem 工作 + 一次落盘）。
+- **本轮同时更正了 §57 的 `dw` 符号**并在 `check_bwd_b2_da.py`/`b2_mma_probe.cu` 落地；§57 的 `out.txt`
+  数值（CUDA vs 自身参考 `5.3e-7`、逐位一致、计时比值）在符号改正后**不变**（两侧同步翻转），故未重跑覆盖；
+  P7-54 的 ncu（字节/冲突/时长）与符号无关。
