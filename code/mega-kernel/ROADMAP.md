@@ -5071,6 +5071,37 @@
   新留尾巴（§102.9）：只测 H100/sm90a 一个拓扑、只测 `KB=8/L=2/R=300/padKB=0` 一个 load-path
   kernel、形状→墙面只用 `+1 cluster` 二分、未穷举全部因子分解、未对 2D/3D 重做逐块时间线。
 
+### P178 实验扩展 79：S2S bulk 的「非连续（2D/3D）搬运」（`docs/04-experiments.md` §103）
+
+- [x] **P178-1** 补掉 §97.9/§98.9 明留的同一条尾巴「**S2S 只搬连续段**，未测 tensor/2D
+  非连续」：§102 的附已用 ptxas 核实**静态前提**（PTX 的 `.tensor` 家族只支持 `.global` 源、
+  **不存在 S2S tensor 形式**，`harness/tensor_s2s_ptx_probe.cu`），本节把「**用多笔线性
+  `cp.async.bulk.shared::cluster` 拼一个带行距的二维 tile**」的**代价**量出来。见
+  `docs/04-experiments.md` **§103**，源码 `src/s2s_bulk_nd.cu`、脚本 `harness/s2s_bulk_nd.sh`、
+  原始输出 `harness/s2s_bulk_nd.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+  `TH=256`、`SLOTS=4`、min-of-20）。语义与 §97 `mtex` 同族（C 个 CTA 成环，每 round 把本 block
+  的 `rows×cols` 字二维 tile 从源 SMEM（行距 `pitch≥cols`）搬到对端打包 rcv 槽，`tid0` 一次远端
+  `arrive.expect_tx(payload 总字节)` + N 笔 bulk 落同一枚 mbarrier）。三变体（唯一变量=拆成几笔）：
+  连续（`pitch=cols,K=1`=1 笔）/ `rows` 笔（`K=1`）/ `rows·K` 笔；外加软件 `st.shared::cluster` 基线。
+  核心结论：
+  - **Q1 语义**：**`arrive.expect_tx(总字节)` + N 笔 bulk 落同一 mbarrier 的字节累加正确**
+    （`K=1..64`、最多 1024 笔全 `maxerr=0 bad=0 ok=20/20`）——§97/§98 可安全升级到多笔。
+  - **Q2（headline 之一）非连续性代价随行数放大**：同一二维 tile 连续 1 笔 vs 每行一笔
+    （1 KB/行），`rows=2→16` 吞吐差 **1.13×→1.62×**；且**大 `rows` 下「每行一笔 TMA」竟慢于软件
+    逐元素 `st.shared::cluster`**（`rows=16`：627 vs **740 GB/s**）——小段（1 KB）S2S bulk 不划算。
+  - **Q3（headline 之二）吞吐近似反比于笔数**：`rows=16` 扫 `K=1→64`（16→1024 笔），吞吐
+    `624.9→73.1 GB/s`，去掉固定项后每笔 wall 成本 **~26 ns**（`ns/xfer` 收敛 ~29 ns 地板）。
+  - **Q4 固定笔数时吞吐近似正比于段大小**：`rows=8` 扫 `cols=64→512`（256B→2KB），吞吐
+    `129→829 GB/s`（`ns/xfer` 近恒定）——**保持段大**是 S2S 搬运第一性约束（解释 §97 搬 `SEG·4`）。
+  - **Q5**：非连续/拆分笔在 `C=2`、`grid≤1056` 探针全 `3/3 ok`；`C=2→4` 吞吐同档（拓扑非变量，
+    对上 §102）；grid `132→264` 吞吐 `627→1214 GB/s`（单块侧延迟/issue 受限）。踩坑：`C=8 grid=132`
+    **`cluster misconfiguration`（grid 须逐维整除 `C`）**。
+  判据不变（cluster C1+C2+C3、细化 C4、**非 C5**）。含义：跨 SM 交付中间张量时，**让每段连续且够大**
+  才吃到 TMA bulk 红利（与 DeepGEMM symmetric memory / MPK rank 切片按整段连续 slab 自洽）；搬真二维块
+  应优先「先在 SMEM 打包成连续 / 软件 store / DSM 远端读」而非「逐行发很多笔小 bulk」。**本轮新增实验。**
+  新留尾巴（§103.8）：`nd_sw` 用软件 arrive 与 TMA 的 `expect_tx` 略不同（单变量隔离不完全，已证数值
+  全对且差量远小于笔数效应）、目的恒打包未测其它 pitch 组合、未做 ncu 源侧归因、未对 SM100。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -5654,7 +5685,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P177-1 完成（1/1）**。补「下一步候选」两条——「**2D/3D cluster × …**」与
+- 当前进度：**P178-1 完成（1/1）**。补掉 §97.9/§98.9 明留的同一条尾巴「**S2S 只搬连续段**，
+  未测 tensor/2D 非连续」：§102 的附已用 ptxas 核实静态前提（**PTX 无 S2S tensor 形式**），本节把
+  「**用多笔线性 `cp.async.bulk.shared::cluster` 拼一个带行距的二维 tile**」的代价量出来。见
+  `docs/04-experiments.md` **§103**，源码 `src/s2s_bulk_nd.cu`、脚本 `harness/s2s_bulk_nd.sh`、
+  原始输出 `harness/s2s_bulk_nd.out.txt`（目标卡 H100/sm90a、固定空闲 device 3、nvcc 13.2、
+  `TH=256`/`SLOTS=4`/min-of-20）。语义与 §97 `mtex` 同族（C 个 CTA 成环，每 round 把本 block 的
+  `rows×cols` 字二维 tile 从源 SMEM（行距 `pitch≥cols`）搬到对端打包槽，`tid0` 一次远端
+  `arrive.expect_tx(总字节)` + N 笔 bulk 落同一枚 mbarrier），唯一变量=拆成几笔：连续（1 笔）/
+  `rows` 笔 / `rows·K` 笔，外加软件 `st.shared::cluster` 基线。核心结论：**(1) Q1 语义**——
+  `expect_tx` + N 笔 bulk 落同一 mbarrier 的**字节累加正确**（最多 1024 笔全 `maxerr=0 ok=20/20`）；
+  **(2) Q2（headline 之一）非连续性代价随行数放大**——连续 1 笔 vs 每行一笔，`rows=2→16` 吞吐差
+  `1.13×→1.62×`，且大 `rows` 下「每行一笔 TMA」**慢于软件逐元素 store**（`rows=16` 627 vs 740 GB/s）；
+  **(3) Q3（headline 之二）吞吐近似反比于笔数**——`rows=16` 扫 `K=1→64`（16→1024 笔）`624.9→73.1 GB/s`，
+  每笔 wall 成本 ~26 ns（`ns/xfer` 收敛 ~29 ns 地板）；**(4) Q4 固定笔数时吞吐近似正比于段大小**——
+  `rows=8` 扫 `cols=64→512`（256B→2KB）`129→829 GB/s`；**(5) Q5** 非连续/拆分在 `C=2`/`grid≤1056`
+  探针全 `3/3 ok`，`C=2→4` 同档、grid `132→264` 吞吐 `627→1214 GB/s`。踩坑：`C=8 grid=132`
+  `cluster misconfiguration`（grid 须逐维整除 `C`）。判据不变（cluster C1+C2+C3、细化 C4、**非 C5**）。
+  含义：跨 SM 交付中间张量时**让每段连续且够大**才吃到 TMA bulk 红利（与 DeepGEMM symmetric memory /
+  MPK rank 切片按整段连续 slab 自洽）。**本轮新增实验。** 新留尾巴见 §103.8。
+- 此前：**P177-1 完成（1/1）**。补「下一步候选」两条——「**2D/3D cluster × …**」与
   「**`C` 放置墙的 SM 数/形状敏感性**」：§100/§101 的 cluster 放置墙**只用 1D cluster**
   （`clusterDim=(C,1,1)`），本节把 **cluster 形状**（固定 `C`，在各因子分解间变 1D/2D/3D）
   作为唯一变量。见 `docs/04-experiments.md` **§102**，**复用** `src/multicast_occupancy.cu`
@@ -5674,15 +5724,25 @@
   （2D/3D 便于二维 tile 分工），避墙唯一旋钮是**每 cluster 块数 `C`**（越小越好）。判据不变
   （cluster C1+C2+C3、细化 C4、**非 C5**），`maxerr=0.00000` 逐档。新留尾巴见 §102.9。
   **本轮新增实验。**
-- 下一步候选：实验侧**未叠加的组合**（`docs/04` 微基准到 §102）——如 **S2S bulk 的 tensor/2D
-  非连续搬运**（核实：PTX `cp.async.bulk` **只有 S2S 线性形式**，`cp.async.bulk.tensor` 仅
-  `.global` 源，故「S2S tensor」不存在——可作静态结论记录）、**S2S bulk 的 2D/3D 多笔线性搬运**
-  （用多笔 `cp.async.bulk.shared::cluster` 模拟非连续）、**multicast × 2SM（`cta_group::2`，需
-  SM100）**、**cluster × 端到端骨架**（把 §62/§74 的骨架放进 cluster）、**nsys 逐 SM/GPC 坐实
-  §101/§102 的尾波调度因果**（目前仅由驻留曲/吞吐推断）、或 **DSM 交换路径（§86–§98）的形状
-  敏感性**（本节只测 load-path）。也可回到源码走读主线（`docs/35` §9 余的「`bf16` 之外 SM100
-  task 家族未逐一走读」）。**其余旧候选**：`docs/46` §6 的 FLAT-CACHE draft attention（已核零命中、
-  **不可走读**，仅供静态落差记录）。
+- 下一步候选：实验侧**未叠加的组合**（`docs/04` 微基准到 §103）——**S2S 非连续搬运已由本节
+  补掉**（§102 附=静态前提「PTX 无 S2S tensor」、§103=多笔线性拼二维 tile 的代价），剩
+  **multicast × 2SM（`cta_group::2`，需 SM100）**、**cluster × 端到端骨架**（把 §62/§74 的骨架
+  放进 cluster）、**nsys 逐 SM/GPC 坐实 §101/§102 的尾波调度因果**（目前仅由驻留曲/吞吐推断）、
+  **DSM 交换路径（§86–§98）的形状敏感性**（§102 只测 load-path）、或 **S2S 段布局的其它 pitch
+  组合 / 源打包→目的带行距**（§103 只测目的打包）。也可回到源码走读主线（`docs/35` §9 余的
+  「`bf16` 之外 SM100 task 家族未逐一走读」）。**其余旧候选**：`docs/46` §6 的 FLAT-CACHE draft
+  attention（已核零命中、**不可走读**，仅供静态落差记录）。
+- 此前：**P177-1 完成（1/1）**。补「下一步候选」两条——「**2D/3D cluster × …**」与「**`C` 放置墙的
+  SM 数/形状敏感性**」：见 `docs/04-experiments.md` **§102**，**复用** `src/multicast_occupancy.cu`
+  （新增形状版 kernel `mcast_geo` + 只读子命令 `Y` + 加测子命令 `G`）、脚本 `harness/cluster_shape.sh`、
+  原始输出 `harness/cluster_shape.out.txt`（目标卡 H100/sm90a、DEV 落 device 6、nvcc 13.2、
+  `KB=8/L=2/R=300`）。三条 headline：**(1) API 只认 `C`**（同一 `C` 所有形状返回逐位相同
+  `maxActiveClusters`：`C=4`→248、`C=8`→124、`C=6`→163、`C=16`→58）；**(2) deliver 与墙面形状无关**
+  （`tot=cap=992` 上形状间 spread `<0.3%`；`C=4` 两形状都在 `996`（`+1` cluster）崩塌、比值
+  `1.233–1.234`，`C=8` 三形状都在 `1000` 崩塌、比值 `1.274–1.278`）；**(3) multicast 在 2D/3D 成立且
+  同速**（`~10.9 TB/s`、`mask` 语义不依赖维度）。**工程结论：cluster 形状在放置/吞吐上无取舍**，避墙
+  唯一旋钮是每 cluster 块数 `C`。判据不变（C1+C2+C3、细化 C4、非 C5），`maxerr=0`。新留尾巴见 §102.9。
+  **本轮新增实验。**
 - 此前：**P176-1 完成（1/1）**。补掉 §100.8(5) 明留的尾巴「尾波机制是吞吐差的推断解释
   （未做逐波时间线/逐 SM 占用）」，把 §100 的「放置悬崖」升级为**逐块时间线**直接证据。见
   `docs/04-experiments.md` **§101**，**复用** `src/multicast_occupancy.cu`（`mcast_body` 不变，
