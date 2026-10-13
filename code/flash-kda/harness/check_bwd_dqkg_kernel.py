@@ -205,9 +205,15 @@ def wy_dqkg_torch(inp, scale, BT):
 
 
 # ----------------------------------------------------------------------- triton
-def build_kernel():
+def build_kernel(nodh=False):
+    """Build the B2 (`wy_dqkg`) kernel.  ``nodh=True`` (P7-31) drops the per-chunk
+    `dh` global load and reuses the already-loaded `b_h` in its place — numerically
+    wrong, but it isolates the cost of the B1->B2 `dh` read (a K2-shaped fusion would
+    feed `dS` straight from B1's registers)."""
     import triton
     import triton.language as tl
+
+    NODH = tl.constexpr(bool(nodh))
 
     @triton.jit
     def _wy_dqkg_kernel(
@@ -268,7 +274,10 @@ def build_kernel():
                 p_h = h_ptr + ((i_b * NT + i_t) * H + i_h) * K * V + o_k[None, :] * V + o_v[:, None]
                 p_dh = dh_ptr + ((i_b * NT + i_t) * H + i_h) * K * V + o_k[None, :] * V + o_v[:, None]
                 b_h = tl.load(p_h, mask=m_h, other=0.0)           # [BV,BK]
-                b_dh = tl.load(p_dh, mask=m_h, other=0.0)
+                if NODH:   # P7-31: no `dh` read; reuse b_h (wrong value, timing-only)
+                    b_dh = b_h
+                else:
+                    b_dh = tl.load(p_dh, mask=m_h, other=0.0)
                 p_dv = dv_ptr + (i_b * T + o_t)[:, None] * (H * V) + i_h * V + o_v[None, :]
                 b_dv = tl.load(p_dv, mask=m_tv, other=0.0)
 

@@ -1,0 +1,48 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1_tma_e.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_NODH ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1_tma_en.so
+
+============================================================================================
+Part A: K2-shaped TMA B1 (ETMA) — `dh` store removed (B1T_NODH)
+   correctness: dv2/dh0 must be bit-identical; timing: CUPTI us/call
+============================================================================================
+  shape             BT  NS |   base us   nodh us nodh/base | dv2 max_abs  dh0 max_abs
+  B1 T512 H4       32   1 |      66.2      33.9     0.512 |    0.00e+00    0.00e+00
+  B1 T512 H4       32   2 |      67.0      26.7     0.399 |    0.00e+00    0.00e+00
+  B1 T512 H4       64   1 |      45.1      28.7     0.636 |    0.00e+00    0.00e+00
+  B1 T512 H4       64   2 |      43.0      25.2     0.585 |    0.00e+00    0.00e+00
+  B2 T1024 H8       32   1 |     144.6      68.8     0.476 |    0.00e+00    0.00e+00
+  B2 T1024 H8       32   2 |     133.8      49.0     0.366 |    0.00e+00    0.00e+00
+  B2 T1024 H8       64   1 |      91.2      58.6     0.642 |    0.00e+00    0.00e+00
+  B2 T1024 H8       64   2 |      84.2      45.9     0.545 |    0.00e+00    0.00e+00
+  B8 T2048 H8       32   1 |     296.8     163.1     0.550 |    0.00e+00    0.00e+00
+  B8 T2048 H8       32   2 |     351.6      98.7     0.281 |    0.00e+00    0.00e+00
+  B8 T2048 H8       64   1 |     195.8     130.7     0.667 |    0.00e+00    0.00e+00
+  B8 T2048 H8       64   2 |     208.1      89.2     0.429 |    0.00e+00    0.00e+00
+  B1 T250 H3       32   1 |      36.4      18.9     0.520 |    0.00e+00    0.00e+00
+  B1 T250 H3       32   2 |      35.7      15.8     0.441 |    0.00e+00    0.00e+00
+  B1 T250 H3       64   1 |      25.5      16.8     0.660 |    0.00e+00    0.00e+00
+  B1 T250 H3       64   2 |      24.7      15.6     0.634 |    0.00e+00    0.00e+00
+
+============================================================================================
+Part B: Triton B2 `wy_dqkg` — `dh` load removed (build_kernel(nodh=True))
+   (nodh is numerically wrong; timing-only).  CUPTI us/call
+============================================================================================
+  shape              K=V  BT |   base us   nodh us nodh/base | delta check (dq max_abs)
+  B2 T512 H4      128/128  64 |      37.1      34.3     0.924 |    0.00e+00
+  B2 T2048 H8      128/128  64 |     194.7     184.8     0.950 |    0.00e+00
+  B1 T512 H4      128/128  64 |      29.5      30.0     1.014 |    0.00e+00
+  B1 T250 H3       64/128  64 |      14.9      14.6     0.984 |    0.00e+00
+
+============================================================================================
+Part C: upper bound on a K2-shaped B1->B2 fusion (only the `dh` round-trip)
+   key = (dh store cost in B1) + (dh load cost in B2); chain refs from docs/07 §26
+============================================================================================
+  B2 T1024 H8 B1(BT=64 NS=1): base    91.2us  nodh    58.6us  => dh-store   32.6us (35.8%)
+  B2 T1024 H8 B1(BT=64 NS=2): base    84.2us  nodh    45.9us  => dh-store   38.3us (45.5%)
+  B8 T2048 H8 B1(BT=64 NS=1): base   195.8us  nodh   130.7us  => dh-store   65.2us (33.3%)
+  B8 T2048 H8 B1(BT=64 NS=2): base   208.1us  nodh    89.2us  => dh-store  118.9us (57.1%)
+
+DONE

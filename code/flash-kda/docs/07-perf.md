@@ -3301,3 +3301,103 @@ dbeta 6.012e-3/dg 7.054e-3/dh0 8.267e-3`，含非整除 `T=250/513`、`g=0`、`B
 - **产物**：`harness/check_bwd_b2b3_fused.py`（`check_bwd_b2b3_fused.out.txt`，Part A 正确性 +
   B 孤立计时 + D 寄存器读 + C 落链正确性/计时）+ `harness/ncu_b2b3_fused_driver.py` /
   `harness/probe_b2b3_fused_ncu.sh`（`probe_b2b3_fused_ncu.out.txt`）。
+
+## 34. 量化 §30.5「K2 形状内 B1→B2 融合」的收益上界：`dh` 落盘往返到底值多少（P7-31）
+
+§30.5 把「K2 形状内 B1→B2 融合」（寄存器常驻状态 + TMA + 同 CTA 内交接）列为**唯一剩下的真结构项**，
+却留在**待验证**——因为 P7-27 已证明朴素 `BV=V` 单 kernel 会被寄存器压垮。但这留下一个更前置的问题：
+**这个融合的收益上界是多少？** K2 形状把 $dS$ 常驻寄存器，相对「两个 kernel 的链」它**唯一能省掉的流量**
+就是每块的 `dh` 矩阵：
+
+```
+B1 写出 dh[c]  ->  DRAM   （每块 [K,V] 的 bf16）
+B2 读入 dh[c]  <-  DRAM
+```
+
+本节不构建（很大的）融合 kernel，而是用**受控消融**把这两半分别量清：
+
+- **Part A（B1 侧）**：K2 形状 TMA B1（`b1_tma_probe.cu`，取 §24 最优的 `-DB1T_ETMA`）编译两次：
+  基线 vs `-DB1T_NODH`（**删掉 `dh_g` 的全局 store**；op1 需要的 per-warp bf16 `sdh` 镜像**保留**）。
+  先证 `dv2/dh0` **逐位不变**，再用 CUPTI 计时——差值即 `dh` store 的成本。
+- **Part B（B2 侧）**：Triton B2（`wy_dqkg`，`build_kernel(nodh=True)`）编译两次：基线 vs
+  **不读 `dh`** 的变体（复用已加载的 `b_h` 顶替；值错，仅计时）。差值即 `dh` load 的成本。
+- **Part C**：把两半合成往返上界，与 §26 的链级拆解对照，裁定这个融合值不值得做。
+
+产物：`harness/check_bwd_dh_roundtrip.py`（`harness/check_bwd_dh_roundtrip.out.txt`）+ 编译开关
+`B1T_NODH`（`b1_tma_probe.cu`）+ `build_kernel(nodh=)`（`check_bwd_dqkg_kernel.py`）+
+`harness/ncu_dh_roundtrip_driver.py` / `harness/probe_dh_roundtrip_ncu.sh`
+（`harness/probe_dh_roundtrip_ncu.out.txt`）。
+
+### 34.1 Part A：`dh` store 是 B1 的主要成本（占 33–63%），且不是带宽
+
+`harness/check_bwd_dh_roundtrip.out.txt`（`ETMA` 变体，CUPTI `us/call`，空闲卡）。`dv2/dh0` 在**所有 16 组**
+配置下**逐位相同（`max_abs=0`）**，证明消融只动了 `dh` store：
+
+| shape | BT | NS | base µs | nodh µs | nodh/base | dh-store 占 |
+|---|---|---|---|---|---|---|
+| B1 T512 H4 | 64 | 1 | 45.1 | 28.7 | 0.636 | 36.4% |
+| B2 T1024 H8 | 64 | 1 | 91.2 | 58.6 | 0.642 | 35.8% |
+| B2 T1024 H8 | 32 | 2 | 133.8 | 49.0 | **0.366** | **63.4%** |
+| B8 T2048 H8 | 32 | 2 | 351.6 | 98.7 | **0.281** | **71.9%** |
+| B8 T2048 H8 | 64 | 1 | 195.8 | 130.7 | 0.667 | 33.3% |
+| B1 T250 H3 | 64 | 1 | 25.5 | 16.8 | 0.660 | 34.0% |
+
+`ncu`（`probe_dh_roundtrip_ncu.out.txt`）给出**为什么**（B8 T2048H8 BT=64 NS=1）：
+
+| 指标 | base | nodh | 说明 |
+|---|---|---|---|
+| Duration | 198.3 µs | **132.8** | −33% |
+| DRAM **read** | 170.5 MB | 168.9 | **不变**（不是读） |
+| DRAM **write** | 93.3 MB | **30.9** | 只降 62 MB（≈ `dh` 的 134 MB 被 L2 吸收一半） |
+| **L2 bytes** | 866.4 MB | **417.7** | **−52%**（一次 134 MB 的 store 在 L2 放大出 ~448 MB 流量） |
+| tensor % | 10.80 | **16.29** | mma 密度抬升 |
+| `smsp...stalled_lg_throttle` | **0.67** | **0.06** | **store 队列反压（真凶）** |
+| `stalled_long_scoreboard` | 3.84 | 2.56 | store 反压也拖慢后续 load |
+
+即：**`dh` store 的成本不是 DRAM 写带宽**（read 不变、write 仅 −62 MB），而是
+**每线程逐标量的 `st.global` 打满了 LSU/store 队列 → `lg_throttle` 0.67**，把整个 compute warp 的
+发射卡住，同时制造 ~3×（写字节）的 L2 流量。删掉后 `lg_throttle` 归零、`tensor%` 10.8→16.3。
+BT=32 NS=2 的极端档同理（`lg_throttle` 0.88→0.03、L2 161→57 MB、Duration 136.7→**50.5 µs**）。
+
+### 34.2 Part B：`dh` load 在 B2 只值 ~5%（DRAM 底噪）
+
+`wy_dqkg`（Triton，`build_kernel(nodh=True)`；`dq` 的 `max_abs` 非零证明确实动了 `dh`）：
+
+| shape | K=V | base µs | nodh µs | nodh/base |
+|---|---|---|---|---|
+| B2 T512 H4 | 128 | 37.1 | 34.3 | 0.924 |
+| B2 T2048 H8 | 128 | 194.7 | 184.8 | 0.950 |
+| B1 T512 H4 | 128 | 29.5 | 30.0 | 1.014（噪声） |
+| B1 T250 H3 | 64 | 14.9 | 14.6 | 0.984 |
+
+`ncu`（B8 T2048H8 BT=64）：read 763.8→**672.2 MB**（只降 92 MB，`dh` 的 134 MB ≈ 68% 进 DRAM）、
+Duration 754.9→**716.7 µs（−5.0%）**、`tensor%` 3.22→3.40、`long_sb` 16.57→15.38。**B2 是 DRAM bound 的
+大 kernel（`long_sb` 16.6），多读/少读一个 134 MB 张量只是一小块**，与 §26（`h`+`dh` bf16 只值 B2 内核 ~10%）
+和 §29 完全一致。
+
+### 34.3 Part C：往返上界 ≈ B1+B2 的 10%，且大头是「store 效率」不是「融合」
+
+把两半相加（B8 T2048H8 BT=64 NS=1）：**B1 store 65.2 µs（33.3%） + B2 load 38.2 µs（5.0%）≈ 103 µs**；
+对照链级 B1（~196 µs）+ B2（~755–900 µs，§26/§28）≈ **950–1100 µs**，即往返上界 **≈ 10%**。据此：
+
+1. **融合的收益上界只有 ~10%**，其中 **~2/3 在 B1 侧**、且 B1 侧那一大块已被 §34.1 定位成
+   **`lg_throttle`（store 发射/ L2 放大）**，不是一个「融合才能解决」的问题——**只要把 `dh` 的落盘
+   换成 TMA / 专职 STORE warp（镜像前向 K2 的 STORE warp，`fwd_kernel2.cuh`），就能在不做任何融合的
+   前提下吃掉 B1 侧的 33%**。
+2. **融合相对「高效 `dh` store」的净增量只剩 B2 侧的 `dh` load ≈ 5%**——与 §26/§29 对 `h/dh` 的
+   判定同阶。故 **不值得为它建一整个 K2 形状的融合 kernel**。
+3. **更新的设计输入（修正 §30.5）**：目标卡 CUDA 反向的**下一优先级 = 把 B1 的 `dh`（和 `dv2`）落盘
+   改成 TMA/专职 store 路径**（量级 ~30% 的 B1），**而不是 B1→B2 融合**；融合的边际收益（~5%）
+   排在很后面。
+
+### 34.4 边界 / 待验证
+
+- 本轮量的是**本原型 `b1_tma_probe.cu` 的朴素逐标量 store**的代价；`lg_throttle` 的幅度与具体 store
+  指令（标量 vs 向量化 vs TMA）强相关——**待验证**：把 `dh`/`dv2` 改成 TMA store / 专职 STORE warp 后，
+  能否复现这 33%（预期能吃掉大头，因为 TMA 有独立引擎、不求 LSU 发射）。
+- B1 侧消融是**删掉整个 store**，故 65 µs 是「store 总成本」的上界；TMA store 仍要付少量 DRAM 带宽
+  （~134 MB 的一半进 DRAM ≈ 30–45 µs），故实际收益应小于 65 µs、但显著大于 0——**待验证**用 TMA store
+  变体直接测。
+- Part B 的 nodh 是**数值错的**（顶替 `b_h`），只用于计时；其给出的 5% 与 ncu 的 read 字节下降自洽，
+  结论不依赖其数值。
+

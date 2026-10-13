@@ -262,7 +262,9 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
 
             // ---- publish S: global dh[c] + per-warp bf16 mirror ----
             {
+#ifndef B1T_NODH
                 const int64_t base = ((int64_t)(n * NT + c) * H + h) * KD * VD;
+#endif
                 #pragma unroll
                 for (int m = 0; m < MTK; ++m)
                     #pragma unroll
@@ -273,11 +275,15 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                         bf16 b2 = f2b(S[m][nn][2]), b3 = f2b(S[m][nn][3]);
                         sdh[r0][cc] = b0; sdh[r0][cc + 1] = b1;
                         sdh[r1][cc] = b2; sdh[r1][cc + 1] = b3;
+#ifndef B1T_NODH
+                        // P7-31: skip the per-chunk `dh` global store to measure the
+                        // B1->B2 round-trip a K2-shaped fusion would keep in registers.
                         int gc = vbase + cc;
                         dh_g[base + (int64_t)r0 * VD + gc] = b0;
                         dh_g[base + (int64_t)r0 * VD + gc + 1] = b1;
                         dh_g[base + (int64_t)r1 * VD + gc] = b2;
                         dh_g[base + (int64_t)r1 * VD + gc + 1] = b3;
+#endif
                     }
             }
             __syncwarp();

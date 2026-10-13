@@ -483,6 +483,21 @@
       纯减字节）。**结论**：融合**成立**（第三次尝试，前两次 B1→B2 朴素融合是反例），但**唯一使能条件
       是 `BK=K`+`BV=V`**（结构前提而非可选旋钮）；§32 的「B2/B3 融合」至此兑现。**闭包**：B1 由 §25
       流水解决、B2/B3 由本轮融合解决，Triton 侧反向三元组工程化收敛。
+- [x] **P7-31** 量化 §30.5 遗留的「K2 形状内 B1→B2 融合」**收益上界**（不建融合 kernel）：新增
+      `harness/check_bwd_dh_roundtrip.py`（`check_bwd_dh_roundtrip.out.txt`）+ 编译开关 `B1T_NODH`
+      （`b1_tma_probe.cu`，删 `dh` 全局 store、保留 op1 用的 `sdh` 镜像）+ `build_kernel(nodh=)`
+      （`check_bwd_dqkg_kernel.py`，B2 不读 `dh`）+ `harness/ncu_dh_roundtrip_driver.py` /
+      `harness/probe_dh_roundtrip_ncu.sh`（`probe_dh_roundtrip_ncu.out.txt`）+ `docs/07` §34。
+      **Part A**：`dv2/dh0` 逐位不变下，B1 去掉 `dh` store 快 **0.28–0.67×**（BT=64 占 33%，
+      BT=32 NS=2 占 **72%**）；`ncu` 定位为**不是带宽**（DRAM read 不变、write 仅 −62 MB）而是
+      **逐标量 `st.global` 打满 store 队列 → `lg_throttle` 0.67→0.06 + L2 流量放大 ~3×**（866→418 MB），
+      `tensor%` 10.8→16.3。**Part B**：B2 不读 `dh` 只值 **~5%**（`nodh/base 0.92–0.95`，ncu read −92 MB、
+      Duration 755→717、长 `long_sb`＝DRAM bound）。**Part C（关键）**：往返上界 ≈ B1+B2 的 **~10%**，
+      其中 **~2/3 在 B1 侧且是 `lg_throttle`（store 效率）而非融合专属**——**只要把 `dh` 落盘换成
+      TMA/专职 STORE warp（镜像前向 K2 的 STORE warp）就能在不做融合下吃掉 B1 侧 33%**；融合相对
+      「高效 `dh` store」的净增量只剩 B2 侧 ~5%（同 §26/§29）。**结论（修正 §30.5）**：目标卡 CUDA 反向
+      下一优先级＝**B1 的 `dh`/`dv2` 改 TMA store**，而非 B1→B2 融合。**待验证**：TMA store 变体能否
+      复现这 33%（预期能，TMA 有独立引擎、不求 LSU 发射）。
 
 ### P8 小结 / 一页纸
 
@@ -514,8 +529,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-30 补测**。
-  - P7-30（本轮）：兑现 §32.6/§31.3/§30.5 的「B2/B3 融合」，把 `dq/dk/dg` 累加器留寄存器。部署
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-31 补测**。
+  - P7-31（本轮）：量化 §30.5 遗留的「K2 形状内 B1→B2 融合」**收益上界**（不建融合 kernel）。用
+    受控消融把 `dh` 落盘往返拆两半：**Part A（B1 侧）** 给 `b1_tma_probe.cu` 加 `-DB1T_NODH` 删掉
+    `dh` 全局 store（保留 op1 用的 `sdh` 镜像）、`dv2/dh0` 逐位不变下 B1 快 **0.28–0.67×**（BT=64 占
+    33%、BT=32 NS=2 占 **72%**）；`ncu` 定位**不是带宽**（DRAM read 不变、write 仅 −62 MB）而是
+    **逐标量 `st.global` 打满 store 队列 → `lg_throttle` 0.67→0.06 + L2 流量放大 ~3×**（866→418 MB）、
+    `tensor%` 10.8→16.3。**Part B（B2 侧）** `wy_dqkg` 不读 `dh`（`build_kernel(nodh=True)`）只值
+    **~5%**（ncu read −92 MB、Duration 755→717、长 `long_sb`＝DRAM bound）。**Part C（关键）**：
+    往返上界 ≈ B1+B2 的 **~10%**，其中 **~2/3 在 B1 侧且是 `lg_throttle`（store 效率）而非融合专属**
+    → **只要把 `dh`/`dv2` 落盘换成 TMA/专职 STORE warp（镜像前向 K2 的 STORE warp）就能不融合地吃掉
+    B1 侧 33%**；融合净增量只剩 B2 侧 ~5%（同 §26/§29）。**结论（修正 §30.5）**：目标卡 CUDA 反向下一
+    优先级＝**B1 `dh` 改 TMA store**，而非 B1→B2 融合。新增 `harness/check_bwd_dh_roundtrip.py`
+    （`check_bwd_dh_roundtrip.out.txt`）+ `harness/ncu_dh_roundtrip_driver.py` /
+    `harness/probe_dh_roundtrip_ncu.sh`（`probe_dh_roundtrip_ncu.out.txt`）+ `docs/07` §34。
+    **待验证**：TMA store 变体能否复现这 33%。
+  - P7-30（上轮）：兑现 §32.6/§31.3/§30.5 的「B2/B3 融合」，把 `dq/dk/dg` 累加器留寄存器。部署
     粒度 `NC=1` 下 B3 只剩对角 Parts B/D（两个 `tl.dot`），折进 B2 的 `(NT,B*H)` program（B2 结束
     时已有完整 `dAkk`），加完 intra 再存一次、`dA` 不落盘。新增 `harness/check_bwd_b2b3_fused.py`
     （`check_bwd_b2b3_fused.out.txt`）+ `harness/ncu_b2b3_fused_driver.py` / `harness/probe_b2b3_fused_ncu.sh`
@@ -939,13 +968,18 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-30 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-31 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-31（`docs/07` §34）量化「K2 形状内 B1→B2 融合」收益上界**：受控消融拆 `dh` 落盘往返——
+    B1 去掉 `dh` store（`-DB1T_NODH`）快 **0.28–0.67×**（`dv2/dh0` 逐位），`ncu` 证明是**逐标量
+    `st.global` 的 `lg_throttle`（0.67→0.06）+ L2 放大 ~3×**、**不是带宽**；B2 不读 `dh` 只值 **~5%**。
+    **往返上界 ≈ B1+B2 的 ~10%，且 ~2/3 是 B1 侧 store 效率（非融合专属）**。**下一步（修正 §30.5）**：
+    目标卡 CUDA 反向优先把 **B1 的 `dh`/`dv2` 落盘改成 TMA/专职 STORE warp**（镜像前向 K2 的 STORE
+    warp），而非 B1→B2 融合（融合净增量只剩 ~5%）。**待验证**：TMA store 变体能否复现这 33%。
   - **P7-30（`docs/07` §33）B2/B3 融合兑现**：把 B3 对角（`NC=1` 只剩 Parts B/D）折进 B2，
     `dq/dk/dg` 累加器留寄存器、`dA` 不落盘；`dq/dv2` 逐位、其余 ≤2.2e-7（fp32 序），链 `dev`
     **0.83–0.93×**、`wall` **0.90–0.92×**、DRAM 字节 **−23%**。**唯一使能条件＝`BK=K`+`BV=V`+`nw=8`**
-    （把 `BK=K` 的溢出压到 42），是结构前提而非可选旋钮。**下一步（Triton 侧已收敛）**：把整条
-    反向做成 K2 形状的 CUDA（目标卡工作），或 §30.5 的「K2 形状内 B1→B2 融合」（待验证，须以 K2
-    为基座测）。
+    （把 `BK=K` 的溢出压到 42），是结构前提而非可选旋钮。（其「下一步：K2 形状融合」已由 P7-31 量化，
+    上界 ~10% 且多为 store 效率问题 → 降级。）
   - **P7-28（`docs/07` §31）把 B3 的「链外 elementwise 税」消掉**：组装链让 B3 在**零缓冲**上跑、
     再在 kernel 外物化 3 张 `[B,T,H,K]` 求和（`check_bwd_b1_pipe_e2e.py:162-166`）。FLA 的
     `chunk_kda_bwd_intra` 把传入 `dq/dk/dg` 当**累加器**（`chunk_intra.py:554-560/657-667`）。改成
