@@ -4836,8 +4836,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P157 各增量完成（P15-1…P41-1、P42-1…P157-1）。**
-  本轮 P157-1：新建 `docs/167-mega-moe-single-kernel-prototype.md` + `harness/exp_mega_moe_like_ws.{sh,out.txt}`
+- 当前进度：**P0~P14 全部完成；P15~P158 各增量完成（P15-1…P41-1、P42-1…P158-1）。**
+  本轮 P158-1：新建 `docs/168-mega-moe-forward-shared.md` + `harness/exp_mega_moe_forward_shared.{py,sh,out.txt}`
+  ——把第 99 篇（P89-1，路由分支 H100 复刻）与第 44 篇（P34-1，共享专家语义 + bf16 数值）两条线**合到同一张
+  H100 前向图**上：共享走 **dense FP8** `fp8_gemm_nt`、路由走 `m_grouped_fp8_gemm_nt_contiguous`、combine 把
+  共享项按 `kNumTopk` 槽 fp32 相加一次无权重。**三条语义真实行号**：`scheduler:181-185`（L1 沿 N / L2 沿 K）、
+  `kernel:1068/1094-1100`（共享 SwiGLU 不乘权重）、`kernel:1287-1288/1449-1450`（共享槽 = kNumTopk、只加一次）。
+  **H100(sm90) 真机**：端到端路由+共享 vs fp64 **6.28–6.34e-2/cos ≥0.9979**（与纯路由同量级，误差由 FP8
+  格式决定）；分层 kernel+布局路由/共享都 **1.469–1.474e-3**；反例共享加两次 **0.72–0.83**、加 topk 次 **2.14**；
+  DeepSeek 量级共享分支 **299/280 TFLOPS** vs 路由 **312/308**（同级），共享占整层 FLOP **31.4%**。主 kernel
+  SM100 专属、仅分析。索引页新增第 168 篇。
+  上一轮 P157-1：新建 `docs/167-mega-moe-single-kernel-prototype.md` + `harness/exp_mega_moe_like_ws.{sh,out.txt}`
   + `src/mega_moe_like_ws.cu`（CUDA-core FMA 计算腿）+ `src/mega_moe_like_ws_tc.cu`（WGMMA 异步张量核腿）
   ——把 ROADMAP「下一步」③（单进程 Mega-MoE-like 单 kernel 原型）做成真机实验：**单 kernel 内 1 comm
   warpgroup + 计算 warpgroup，按 Mega MoE 的 `setmaxnreg` 预算分区（comm→40）**，量它 vs「限块两 kernel
@@ -6598,11 +6607,9 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P157 已完成（最新 **P157-1 把「下一步」③ 做成真机原型**：单 kernel 内 comm warp +
-  计算 warp 按 Mega MoE 的 `setmaxnreg` 预算分区，量出 ① 寄存器分区**编译器可见**（216 vs 156 regs /
-  2.01×；极端形态 0 vs 2300B spill）；② H100 CUDA-core 计算下**单 kernel 融合只重叠 ~30–60%，限块两
-  kernel 空间隔离到 ~100%**；③ 计算腿换**真实 WGMMA**（异步张量核、同量级）后重叠效率 **0.62 → 0.93**
-  ⇒ 坐实 Mega MoE 融合的前提是**异步张量核 UMMA**（SM100 专属的根）。详见 `docs/167`。索引页新增第 167 篇）。
+- **下一步**：P0~P158 已完成（最新 **P158-1 把路由 + 共享专家 + combine 合成同一张 H100 前向数值闭环**：
+  共享走 dense FP8、路由走 grouped FP8，端到端 6.28–6.34e-2、共享占整层 FLOP 31.4%、吞吐与路由同级，
+  反例坐实「共享项只加一次无权重」。详见 `docs/168`。索引页新增第 168 篇）。
   可继续（均为增量、非承诺）：① 把第 141/161 篇的多卡 EP 图**接进真实 DeepEP `EPBuffer.dispatch/combine`**
   （需 NCCL≥2.32.3，见「阻塞」）；② 把 indexer 反向（连续/分页/稀疏/分页稀疏）**端到端接进真实前向 kernel**
   （需目标卡 SM100，仅分析）+ indexer 的 **varlen（SM100）**变体定点复核；③ **已由 P157-1 完成**：单进程
@@ -7199,9 +7206,11 @@
       （bucket 的 `all_reduce/reduce_scatter` 内核已由 P62-1 补齐：布局/映射/归约/bf16 哈希/host 算术
       在 H100 真机跑真实设备代码 30 PASS，数据面仅分析。）
    ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）的
-    **FP4 路由权重路径已由 P95-1 补齐**（第 105 篇：`kPackedFP4` 表示、TMA `16U4` 解包、
-    `MXF8F6F4` vs `MXF4`、权重重排与打包可交换、FP4 vs FP8 精度/显存，H100 真机 ALL_OK）；
-    剩余：shared expert 分支的更深精读；端到端需 SM100，当前不可行。
+     **FP4 路由权重路径已由 P95-1 补齐**（第 105 篇：`kPackedFP4` 表示、TMA `16U4` 解包、
+     `MXF8F6F4` vs `MXF4`、权重重排与打包可交换、FP4 vs FP8 精度/显存，H100 真机 ALL_OK）；
+     **路由 + 共享专家 + combine 的同图 H100 前向数值闭环已由 P158-1 补齐**（第 168 篇：共享走
+     dense FP8、路由走 grouped FP8，端到端 6.28–6.34e-2、共享占整层 FLOP 31.4%、吞吐与路由同级，
+     反例坐实「共享项只加一次无权重」）；端到端融合主 kernel 需 SM100，当前不可行。
   ⑤ **k-grouped SF 打包**：P16-1 已完成（host 契约 + device 逐行对拍，H100 真实设备代码）。
    ⑥ **cuBLASLt 回退/选核**：P17-1 已完成。
    ⑦ **选核启发式 `get_best_config`**：P18-1 已完成（SM90 定量代价模型 + SM100 词典序，
