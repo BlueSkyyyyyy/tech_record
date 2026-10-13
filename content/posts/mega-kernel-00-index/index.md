@@ -58,4 +58,6 @@ categories: ["算子开发"]
 
 38. [MPK SM100 非 GEMM / 非 MLA task 家族走读：路由、top-k、采样、位置编码、归一化、量化与小算子]({{< relref "mega-kernel-38-mpk-sm100-misc" >}}) —— 把常驻 megakernel 里「轻但必需」的薄 task 逐个打开：MoE 路由三兄弟（group-aware 向量化 `topk_sigmoid`、160 专家标量 `glm_moe_router`、logsigmoid-softmax `inkling_moe_router`）、argmax/sampling 两段式（partial+reduce）与 softmax_gather/prob_scatter 簿记、SMEM 原地 RoPE/RMSNorm 与融合 partial RoPE、UE8M0 per-token 分组量化（含 `blockIdx.x == worker id` 的 row-identity 修复）、以及非 MLA 的通用 paged / DFlash / Inkling attention，并核对它们在 `TaskType`/`graph.cc`/`persistent_kernel.py`/builder 四层的生产布线
 
+39. [MPK 共享原语层走读：`tasks/common/*` 与 `ampere/mma.cuh`]({{< relref "mega-kernel-39-mpk-common-primitives" >}}) —— 打开被所有 device task 反复 `#include` 却从未逐行读的 arch-agnostic 地基：FlashInfer 移植的一趟式 Gumbel-Max 采样（借 CUB `BlockReduce::Sum` 当 argmax 归约）、bf16/PTX/SMEM 助手、`cp.async`/`ldmatrix` 原语（正是本专题取 task 实测的 device 本体）、全局显存逻辑布局包装，以及跨代共用的手写 `m16n16k16` MMA 及其 load-bearing 的 `"+f"` in-place 累加器修复（决定 EAGLE3 投机解码 token 流正确）
+
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

@@ -3374,6 +3374,34 @@
   （§8）：`sampling_from_logits_kernel` 的 CUB 内部未展开、`mma_m16n16k16` 汇编未逐条、命名屏障 ID 6/7
   与 `docs/34` §3.5「须 ≥8」的口径张力**并存不判**、`mla_prefill_host.cu` 原型来源仍未走。**本轮新增增量。**
 
+### P124 MPK 共享原语层走读（`docs/38-mpk-common-primitives.md`）
+
+- [x] **P124-1** 补掉 `docs/37`（P123-1）**§8「局限」明留的两条尾巴**（原话）——「`sampling_from_logits_kernel`
+  （`tasks/common/sampling.cuh` 的 CUB BlockReduce 内部）未展开、`mma_m16n16k16`（`tasks/ampere/mma.cuh`）
+  汇编未逐条」与「`mla_prefill_host.cu` 原型来源仍未走」。`docs/06`–`docs/37` 走读了各代际「一个 task =
+  一个 device 身体」，但**它们全站在同一层从被反复 `#include` 却未逐行打开的「共享原语库」**上。见
+  `docs/38-mpk-common-primitives.md`（快照 `f9eb70c`，**纯源码走读、无新实验**——这些原语是
+  arch-agnostic/Hopper 的，且本文只读不构建）。三条 headline：**(A)** `tasks/common/` 是全部 device task 的
+  arch-agnostic 地基（7 头文件 919 行；伞状 `common_header.cuh:17-21` 被 **41 个** task 文件引用、`utils.cuh`
+  被 **33 个**直引；`ampere/mma.cuh` 被两个**非 MLA 的 SM100 attention** 引用）——**「Blackwell」目录的通用
+  attention 仍在用 Ampere 手写 `mma.sync` + `cp.async` + CUB**；**(B)** `common/sampling.cuh` 是 FlashInfer
+  移植的「一趟式 Gumbel-Max」（`SamplingDataAndIndex::operator+` 定义成取较大者 `:76-95`，借 CUB
+  `BlockReduce::Sum<VEC_SIZE>` 当 argmax 归约 `:212-215`；curand Philox 噪声 `:104-121`；只写 argmax index
+  `:219-221`），生产登记 `TASK_SAMPLING_SM100`（`task_register.cc:2543/2550`；`runtime_header.h:152`），
+  与 SM100 分块版共用同一 `TaskType`（`:2663`，`runtime_header.h:167-168`）；**(C)** `ampere/mma.cuh` 44 行
+  里藏着 load-bearing 的 codegen 坑——累加器从只写 `"=f"` + 独立 `"f"` 输入改成**单一读写 `"+f"(C[i])`**
+  （`:22-42`）修掉「K≥2/`MMA_ITERS_M`≥2 寄存器复用跨 fragment 污染」，`attention_sm100.cuh:506-516` 记其
+  下游后果（曾 `if(m>0) continue` 跳 tile → 损坏 EAGLE3 投机 token 流）。§2.4 记一处**口径落差**：
+  `utils.cuh:97-116` 的 `clear_smem_buffer` 以 `NUM_THREADS=128`（`worker_config.h:18`）跨步，而上层
+  Blackwell worker 是 256 线程（**只记录不判对错**）；§4 指出 `common/copy_sm80.cuh`（104 行）**正是本专题
+  `docs/04` §39–§56 实测的「取 task / 数据面载体」device 本体**（`cp.async.ca...L2::128B` + `ldmatrix.x4`）；
+  §7 把 `mla_prefill_host.cu` 尾巴**收口为「不在快照、外部来源」**（同族：`mla_prefill_tp8_sm100.cuh:17`
+  的 `src/kernel/mla_prefill_tp8.cu`、`mla_mtp_decode_tp8_sm100.cuh:3` 的 `ferret/*` 均不在仓库）。
+  判据**只贡献 C3**（与 `docs/29`–`docs/37` 同档）。配套博客 post `mega-kernel-39-mpk-common-primitives`
+  （weight 40）并更新 `mega-kernel-00-index` 第 39 项。P124-1 新留尾巴见 §9（CUB 内部未展开、`bfloat16.h`
+  278 行只读接口、`clear_smem_buffer` 128/256 线程口径并存不判、原型源文件缺失不可核、未与生产端到端对跑）。
+  **本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3602,10 +3630,23 @@
   触发 → 静默跳过下一个 task 身体 → 挂起**（`bugfix.md` Bug 14）；正确做法是只同步活跃半 CTA 的**命名
   屏障 `bar.sync 12,128`**（ID 须落 CUTLASS 用户区 `≥8`，误用保留区 ID 1–7 会留脏状态毒死后续 task，
   Bug 19）。`bugfix.md` 本身**不在快照里**，以上仅为源码注释自陈因果。
+- **共享原语层 `tasks/common/` 是按 Ampere 128 线程写的、上层常驻 worker 是 256 线程**（P124-1/`docs/38` §2.4）：
+  `worker_config.h:18` 硬编码 `NUM_THREADS=128`，`utils.cuh:97-116` 的 `clear_smem_buffer` 以
+  `i += NUM_THREADS`（128）跨步清零，而同文件 `vec_zero_t::fill_zero`（`:124-145`）用 `blockDim.x`——在
+  MPK 的 256 线程 Blackwell worker（`docs/34` §3.5）里前者只让前 128 线程参与 bulk 循环。**是否安全取决于
+  调用点是否另有覆盖，本文只记口径、不判对错**。写/移植常驻 device task 时，凡用到 `NUM_THREADS`/
+  `NUM_WARPS`/`clear_smem_buffer` 的公共助手，先确认它与所在 worker 的真实线程数一致。
+- **`ampere/mma.cuh` 的 in-place 累加器必须用单一读写 `"+f"`**（P124-1/`docs/38` §6）：`mma_m16n16k16_bf16bf16bf32`
+  若把累加器写成只写 `"=f"(D[i])` + 独立 `"f"(C[i])` 输入，`#pragma unroll` 下编译器会复用「已死亡」累加器的
+  寄存器、**跨 fragment 污染**（注释 `:22-30` 所称「K≥2/`MMA_ITERS_M`≥2 bug」）；`attention_sm100.cuh:506-516`
+  记其下游后果：曾 `if(m>0) continue` 跳过后继 m-tile → 损坏 EAGLE3 投机 token 流。写多 tile 展开的
+  `mma.sync` 手写 kernel 时，累加器务必 `"+f"`（源/目的同寄存器）。另：`common/copy_sm80.cuh:51/68` 的
+  `cp.async.ca.shared.global.L2::128B` 正是本专题 `docs/04` §39–§56 实测的取 task 原语本体。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P123-1 完成（1/1）**。补掉 `docs/35`（P121-1）**§9**与 `docs/36`（P122-1）**§8**
+- 当前进度：**P124-1 完成（1/1）**。补掉 `docs/37`（P123-1）**§8「局限」明留的两条尾巴**——「`sampling_from_logits_kernel`（`tasks/common/sampling.cuh` 的 CUB BlockReduce 内部）未展开、`mma_m16n16k16`（`tasks/ampere/mma.cuh`）汇编未逐条」与「`mla_prefill_host.cu` 原型来源仍未走」。见 `docs/38-mpk-common-primitives.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** `tasks/common/` 是全部 device task 的 arch-agnostic 地基（伞状 `common_header.cuh` 被 41 个 task 引用、`utils.cuh` 被 33 个直引；`ampere/mma.cuh` 被两个非 MLA SM100 attention 引用）——「Blackwell」目录的通用 attention 仍在用 Ampere 手写 `mma.sync` + `cp.async` + CUB；**(B)** `common/sampling.cuh` 是 FlashInfer 移植的一趟式 Gumbel-Max（借 CUB `BlockReduce::Sum` 当 argmax 归约），生产登记 `TASK_SAMPLING_SM100`、与 SM100 分块版共用同一 `TaskType`；**(C)** `ampere/mma.cuh` 的 `"+f"` in-place 累加器修复是 load-bearing 的（决定 `attention_sm100` `MMA_ITERS_M>1`、进而 EAGLE3 token 流正确）。另记 `clear_smem_buffer` 的 128/256 线程口径落差、`copy_sm80.cuh` 即 `docs/04` §39–§56 实测原语本体、`mla_prefill_host.cu` 收口为「不在快照、外部来源」。判据**只贡献 C3**。配套博客 post `mega-kernel-39-mpk-common-primitives`（weight 40）并更新 `mega-kernel-00-index` 第 39 项。P124-1 新留尾巴见 §9（CUB 内部未展开、`bfloat16.h` 只读接口、`clear_smem_buffer` 128/256 口径并存不判、原型源文件缺失不可核、未与生产端到端对跑）。
+- 此前：**P123-1 完成（1/1）**。补掉 `docs/35`（P121-1）**§9**与 `docs/36`（P122-1）**§8**
   明留的同一处相邻尾巴——「注意力之外的 SM100 task 家族」，见 `docs/37-mpk-sm100-misc-tasks.md`
   （快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 在目标卡 H100/sm90 不可执行）。把
   `tasks/blackwell/` 下「非 GEMM、非 MLA」的薄 task 逐个打开，并核对 `TaskType`/`graph.cc`/
