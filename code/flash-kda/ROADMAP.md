@@ -883,6 +883,23 @@
        切换**：mma DA 可同时开 TMA，标量 DA 则非 TMA」。**新判据**：`ncu` 的 bank-conflict 增量要
        按段实现形态读（同开关在标量/mma 段一负一零）。**边界/待验证**：链级只测到 `pci_tma`（标量
        DA 折叠版），`pci_mma/_tma`（DAMMA 进链）未做端到端。
+- [x] **P7-69** 关闭 §71.6（P7-68）记录的最后一条边界——`pci_mma`/`pci_mma_tma`（**DAMMA 进链**）
+       端到端。四个折叠核（`-DB2M_PROD -DB2M_HDW -DB2M_INTRA`）只差 DA 实现 × stage：`pci`（标量/
+       cp.async）/`pci_tma`/`pci_mma`（`mma.sync.tf32`）/`pci_mma_tma`，各自链成
+       `dAv→CUDA-B1→CUDA-B2-prod_intra→反向 cumsum`，4 组 TCASES（含非整除 `T=250`）。新增
+       `harness/check_bwd_b2_damma_e2e.py`（`check_bwd_b2_damma_e2e.out.txt`，空闲卡）+ `docs/07` §72。
+       **Part A**：`pci_mma_tma` vs `pci_mma` **六项梯度全部逐位（max_abs=0）**；`pci_mma` vs `pci`
+       `dq/dv/dh0` **逐位 = 0**、`dk≤5.45e-6/dbeta≤7.99e-6/dg≤9.89e-7`；四个变体 vs FLA 的 worst-case
+       **逐值完全相同**（`dq 3.949e-3/dk 3.196e-3/dv 9.500e-3/dbeta 5.456e-3/dg 4.659e-3/dh0 8.889e-3`）。
+       **关键副产物（修正 §71.2 的量级读法）**：捕获原始 B2 输出发现**真实链里 DA 的 tf32 改写量本身
+       就小 3 个数量级**（`dApre≤8.14e-6/dA≤6.26e-6`，且 `dqg` 逐位 0；而 §71.2 用 O(1) 合成操作数测得
+       1.2–1.9e-3）——tf32 误差随操作数幅度走，链里 DA 操作数（B1 bf16 出口的 `dv`、bf16 派生的
+       `v_new`/`h`）幅度小，故链级残留 ≈ 核级改写量（无放大、无额外衰减）。**Part B（关键）**：链
+       `dev` `pci_mma/pci` **0.975–1.001**（DAMMA 值 ~1–2.5%，`B8T2048H8` 2423→2362µs）、
+       `pci_mma_tma/pci_mma` **0.980–0.992**（**DAMMA 打开后 TMA 反号成快 ~1–2%**，兑现 §71.3 预测）、
+       `pci/FLA` 0.45–0.59、`pci/cf` ~1.68–1.73（复核 §67.3）。**结论**：DAMMA 进链数值无损、性能
+       ~1–2.5%，其上叠 TMA 再 ~1–2% 且免费，与 §71.6 设计输入一致；目标卡反向默认仍是 `cf`。
+       **边界**：仅 `K=V=128/BT=16/fp32 操作数`；只测折叠形态（非折叠 `pc` 的 DAMMA 未单独落链）。
 - [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
       边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
       （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
@@ -1301,8 +1318,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-68 补测**。
-  - P7-68（本轮）：**关闭 §70.6 的两条待验证（TMA × DAMMA 生产态、TMA 折叠版落整链）并修正 §70.5
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-69 补测**。
+  - P7-69（本轮）：**关闭 §71.6 的最后一条边界——`pci_mma`/`pci_mma_tma`（DAMMA 进链）端到端**。
+    新增 `harness/check_bwd_b2_damma_e2e.py`（`check_bwd_b2_damma_e2e.out.txt`，空闲卡）+ `docs/07` §72。
+    四个折叠核（`-DB2M_PROD -DB2M_HDW -DB2M_INTRA`）只差 DA 实现 × stage，各链成
+    `dAv→CUDA-B1→CUDA-B2-prod_intra→反向 cumsum`。**Part A**：`pci_mma_tma` vs `pci_mma` **六项梯度
+    逐位（max_abs=0）**；`pci_mma` vs `pci` `dq/dv/dh0` 逐位 0、`dk≤5.45e-6/dbeta≤7.99e-6/dg≤9.89e-7`；
+    四变体 vs FLA worst-case **逐值完全相同**。**关键副产物**：捕获原始 B2 输出证明**真实链里 DA 的
+    tf32 改写量本身只有 ~5–8e-6**（`dqg` 逐位 0），比 §71.2 合成操作数的 1.2–1.9e-3 小 3 个数量级
+    （tf32 误差随操作数幅度走）→ **修正 §71.2 的量级读法**。**Part B（关键）**：链 `dev`
+    `pci_mma/pci` **0.975–1.001**、`pci_mma_tma/pci_mma` **0.980–0.992**（**DAMMA 打开后 TMA 反号成
+    快 ~1–2%**，兑现 §71.3）、`pci/FLA` 0.45–0.59、`pci/cf` ~1.68–1.73。**结论**：DAMMA 进链数值无损、
+    ~1–2.5%，叠 TMA 再 ~1–2% 且免费；目标卡反向默认仍是 `cf`。**边界**：仅 `K=V=128/BT=16/fp32`；
+    非折叠 `pc` 的 DAMMA 未单独落链。**下一步（可选收尾）**：`-DB2M_VECST` 接 `pci*` 的 `dA`/`dApre`
+    小张量 store（§62 遗留）；或 CUDA B2 生产核与 Triton `cf` 的 ~1.7× 差已被 §67–§72 反复钉在
+    「六段非 GEMM 成本在同核累积」，明确**不再追**——专题维持 `cf` 默认部署、CUDA 只在 B1 净赢。
+  - P7-68（上轮）：**关闭 §70.6 的两条待验证（TMA × DAMMA 生产态、TMA 折叠版落整链）并修正 §70.5
     对 TMA 生产代价的归因**。新增 `harness/check_bwd_b2_tma_damma.py`（`check_bwd_b2_tma_damma.out.txt`，
     空闲卡）+ `harness/probe_b2_td_ncu.sh`（`probe_b2_td_ncu.out.txt`）+ `docs/07` §71。四变体
     `sc/sc_tma/mma/mma_tma`（`-DB2M_PROD -DB2M_HDW`；HDW 下 `dw` 是 scratch 须排除）。**Part A**：

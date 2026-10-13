@@ -7457,3 +7457,117 @@ shared-load bank conflict**——不是 per-stage `mbar_wait + __syncthreads` �
 - **边界/待验证**：链级只测到 `pci_tma`（折叠版、标量 DA）；`pci_mma`/`pci_mma_tma`
   （DAMMA 进链）未做端到端——按本节机制预计 `pci_mma_tma` 与 `pci_mma` 链级差 ~1%（TMA 免费），
   留待有需求时验证。仅 `K=V=128`、`BT=16`、fp32。
+
+## 72. 关闭 §71.6 的边界：`-DB2M_DAMMA`（mma 化 DA）落进**完整反向链**——链级数值无损（梯度差 ≤8e-6）、比标量 DA 链快 ~1–2.5%（P7-69）
+
+§71.6（P7-68）在关掉两条待验证后，仍留了一句话的边界：「链级只测到 `pci_tma`（折叠版、标量 DA）；
+`pci_mma`/`pci_mma_tma`（DAMMA 进链）未做端到端」。本节把这两条链补上，并回答一个此前只在
+**合成操作数**上量过的量：`-DB2M_DAMMA` 那段 tf32 改写（§69：孤立 `dApre` 差 3.4e-4、生产核
+`dApre/dA` 差 1.2–1.9e-3，§71.2）在**真实组装链**里到底还剩多少。
+
+### 72.1 方法
+
+四个折叠核（都是 `-DB2M_PROD -DB2M_HDW -DB2M_INTRA`，即 B2 六段齐全、`dw` 往返已删、B3 对角
+intra 折进单 launch，P7-61/§64 与 P7-63/§66），只有「DA 实现」与「stage 布局」两维：
+
+| tag | 额外 flags | DA 实现 | stage |
+|---|---|---|---|
+| `pci` | — | 标量 FMA | `cp.async` |
+| `pci_tma` | `-DB2M_TMA` | 标量 FMA | TMA |
+| `pci_mma` | `-DB2M_DAMMA` | `mma.sync.tf32` | `cp.async` |
+| `pci_mma_tma` | `-DB2M_DAMMA -DB2M_TMA` | `mma.sync` | TMA |
+
+每条都链成 `dAv(Triton) → CUDA-B1 → CUDA-B2-prod_intra → 反向 cumsum(B0)`，只吃 FlashKDA 的
+16-chunk K1 workspace（同 §67）。新增 `harness/check_bwd_b2_damma_e2e.py`
+（`harness/check_bwd_b2_damma_e2e.out.txt`，空闲卡），4 组 TCASES（含非整除 `T=250`）。Part A 除
+六项梯度外，还把每次 prod launch 的**原始 B2 输出**用 monkeypatch 捕获下来，直接对照「核级改写量」
+与「链级残留量」。
+
+### 72.2 Part A：`pci_mma_tma` 与 `pci_mma` **逐位相同**；`pci_mma` 与 `pci` 只差 ≤8e-6
+
+6 组 shape 的 `max_abs`（`pci_mma` vs `pci`，以及 `pci_mma_tma` vs `pci_mma`）：
+
+| case | `pci_mma_tma` vs `pci_mma` | `dq` | `dk` | `dv` | `dbeta` | `dg` | `dh0` |
+|---|---|---|---|---|---|---|---|
+| T512 H4 | 六项全 **BIT-IDENTICAL** | 0 | 1.03e-06 | 0 | 3.00e-07 | 1.36e-07 | 0 |
+| B2 T1024 H8 | 六项全 **BIT-IDENTICAL** | 0 | 1.29e-06 | 0 | 3.81e-07 | 1.02e-07 | 0 |
+| B8 T2048 H8 | 六项全 **BIT-IDENTICAL** | 0 | 5.45e-06 | 0 | 7.99e-06 | 9.89e-07 | 0 |
+| T250 H3 非整除 | 六项全 **BIT-IDENTICAL** | 0 | 1.77e-08 | 0 | 1.86e-09 | 1.40e-09 | 0 |
+
+- **`pci_mma_tma` vs `pci_mma`：六项梯度全部 `max_abs=0`（逐位）**——把 §71.2「TMA 只换 layout、
+  不改算术」的结论从核级推广到**整链**。
+- **`pci_mma` vs `pci`：`dq`/`dv`/`dh0` 逐位 = 0**（`dq` 由 `dAqk` 定、`dv`/`dh0` 完全由 B1 定，
+  与 DA 实现无关），`dk/dbeta/dg` 只差 **≤8.0e-6**。
+
+四个变体 vs FLA autograd 的最坏 `max_rel` **逐值完全相同**：
+
+| fld | 四变体（`pci`/`pci_tma`/`pci_mma`/`pci_mma_tma`） |
+|---|---|
+| `dq` | 3.949e-03 |
+| `dk` | 3.196e-03 |
+| `dv` | 9.500e-03 |
+| `dbeta` | 5.456e-03 |
+| `dg` | 4.659e-03 |
+| `dh0` | 8.889e-03 |
+
+即 **DAMMA 改写对「链级 vs FLA」的误差没有可测量的贡献**（打印精度内四个变体一致），与 §71.4 的
+`pci` 行逐值吻合。
+
+### 72.3 为什么链级残留只有 ~5e-6，而 §71.2 是 ~1e-3：**真实链的 DA 操作数小 3 个数量级**
+
+把 §72.2 的链级差值同每次 launch 的**原始 B2 输出**对照（同 4 组 shape，`max_abs`）：
+
+| case | B2 `dApre` | B2 `dA` | B2 `dkg` | B2 `dqg` | 链级 `dk` 残留 |
+|---|---|---|---|---|---|
+| T512 H4 | 5.60e-06 | 4.98e-06 | 1.03e-06 | **0** | 1.03e-06 |
+| B2 T1024 H8 | 6.32e-06 | 4.11e-06 | 1.29e-06 | **0** | 1.29e-06 |
+| B8 T2048 H8 | 8.14e-06 | 6.26e-06 | 5.45e-06 | **0** | 5.45e-06 |
+| T250 H3 非整除 | 2.37e-06 | 1.30e-06 | 1.77e-08 | **0** | 1.77e-08 |
+
+两个关键事实：
+
+1. **真实链里 DA 的 tf32 改写量本身就小 3 个数量级**（`dApre` ≤8.1e-6，而 §71.2 用 `make_inputs`
+   的 O(1) 合成操作数测到 1.2–1.9e-3）。根因是**操作数幅度**：链里 `dApre = dv@v^T − dw@kg^T` 的
+   `dv`（B1 的 bf16 出口）、`v_new`/`h`（K1 workspace 的 bf16 派生量）幅度小，tf32（10-bit 尾数）
+   的**绝对**舍入误差随幅度线性缩小——tf32 vs fp32 的差是相对 5e-4 量级，操作数一小，绝对差就小。
+   所以「DA 的 tf32 底噪」不是一个固定的绝对值，而是随那个 shape 的操作数幅度走（§71.2 的 1e-3
+   是合成操作数下的上界）。
+2. **`dqg`（门控后的最终 `dq`）在 B2 出口就是逐位 0**——`dq` 只由 `dAqk`（来自 dAv Triton 核）
+   决定，与 DA 段无关；DA 改写只经 `dkg` 影响 `dk/dbeta`。
+
+即：**链级残留 ≈ 核级 `dApre` 改写量本身（无放大、也无额外衰减）**——因为 intra 折进段把
+`dAkk = −daB`（掩码后的 sandwiched `dA`）直接喂 mma，扰动线性传过去；而 §71.2 那 1e-3 是
+**合成操作数**下的核级量，不该外推成链级量。
+
+### 72.4 Part B：DAMMA 链比标量链快 ~1–2.5%，其上 TMA 再快 ~1–2%（与 §71.3 预测同向）
+
+反向链 CUPTI `dev`（µs，空闲卡）：
+
+| case | FLA dev | `cf` dev | `pci` | `pci_tma` | `pci_mma` | `pci_mma_tma` | `pci_mma/pci` | `pci_mma_tma/pci_mma` | `pci/FLA` |
+|---|---|---|---|---|---|---|---|---|---|
+| T512 H4 | 204.9 | 74.2 | 94.3 | 94.8 | 93.5 | 92.5 | 0.991 | 0.989 | 0.46 |
+| B2 T1024 H8 | 660.0 | 256.4 | 388.6 | 395.8 | 381.2 | 374.1 | 0.981 | 0.981 | 0.59 |
+| B8 T2048 H8 | 4102.7 | 1400.3 | 2423.1 | 2481.0 | 2361.5 | 2313.1 | 0.975 | 0.980 | 0.59 |
+| T250 H3 非整除 | 141.4 | 50.3 | 63.9 | 65.2 | 64.0 | 63.5 | 1.001 | 0.992 | 0.45 |
+
+- **`pci_mma/pci` = 0.975–1.001**：DAMMA 在整链里兑现 ~1–2.5%（大 shape 更明显，`B8` 2423→2362µs），
+  与 §69 的「生产核 +5–7%、段占核 ~14%」自洽（链里还摊了 B1/dAv/cumsum，故比例更小）。
+- **`pci_mma_tma/pci_mma` = 0.980–0.992**：**DAMMA 打开后 TMA 从「慢 4–6%」反号成「快 ~1–2%」**，
+  兑现 §71.3/§71.6 的预测（TMA 代价本体是标量 DA 的 bank conflict，换成 mma DA 后免费）。
+  `cf`（融合 Triton B2/B3）仍是链级赢家：`pci/cf ≈ 1.68–1.73`，复核 §67.3。
+- `wall`（event-pair）远大于 `dev`（host 派发），数量级与 §71.4 一致，趋势同 `dev`。
+
+### 72.5 结论与设计输入
+
+- **§71.6 的边界关闭**：`pci_mma` / `pci_mma_tma`（DAMMA 进链）端到端核验——
+  **`pci_mma_tma` 与 `pci_mma` 六项梯度逐位相同、四个变体 vs FLA 的 worst-case 完全一致**，
+  **链级数值无损**。
+- **修正 §71.2 的量级读法**：「DA 改写落 tf32 底噪 1.2–1.9e-3」是**合成操作数**下的核级上界；
+  真实链里 DA 操作数小 3 个数量级，**核级改写只有 ~5–8e-6、链级残留同阶（≤8e-6）**。凡引用
+  「某段的 tf32 底噪」都要**区分合成操作数与真实链操作数**——tf32 误差随操作数幅度走。
+- **性能**：DAMMA 进链值 ~1–2.5%（大 shape），其上再加 TMA 再值 ~1–2%——两者**可叠加且免费/ch 正**，
+  与 §71.6 的设计输入一致（目标卡 CUDA B2 走 DAMMA 时可同时开 TMA）。
+- **默认部署不变**：目标卡反向默认仍是 §45 的 `cf`（`dAv→CUDA-B1→融合 Triton B2/B3→cumsum`）；
+  CUDA B2 生产核（`pci*`）是「正确但更慢 ~1.7×」的研究形态，DAMMA/TMA 只把它从 1.73× 收到 ~1.67×。
+- **边界**：仅 `K=V=128`、`BT=16`、fp32 操作数（B1 出口 bf16 转 fp32）；只测 `-DB2M_PROD -DB2M_HDW
+  -DB2M_INTRA` 折叠形态（非折叠 `pc` 的 DAMMA 未单独落链，机制相同）。
