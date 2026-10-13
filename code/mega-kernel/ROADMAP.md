@@ -3026,6 +3026,30 @@
       §9 局限；§10 坐标。配套博客 post `mega-kernel-27-mpk-family-builders`（weight 28）并更新
       `mega-kernel-00-index` 第 27 项。
 
+### P113 权重预处理层源码走读（`docs/27-mpk-weight-prep.md`）
+
+- [x] **P113-1** 补齐 `docs/26`（P112-1）**§8 明留的尾巴**——「`demo.py` 的权重预处理（Phase-2 吸收、
+      gate_up 交织拆分）未走读：DeepSeek-V3 多处注释指向 `demo.py` 的 load-time 处理」。见
+      `docs/27-mpk-weight-prep.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与
+      `docs/06`–`docs/26` 同快照；**纯源码走读（资料分析），本轮无新实验**）。headline——**这一层在
+      Python 里用普通 PyTorch 张量变换把「HF checkpoint 物理布局」改写成「builder 逻辑契约布局」**，
+      且存在**两条独立实现**：离线 `convert.py main()`（写 per-rank safetensors、反量化 BF16）vs
+      demo 内联 `Phase 1/2`（仅 `--layers` 选择性加载时跑、保留 FP8）。结构：§0 定位与两路径表；§1 输入
+      契约（`is_fp8:298`、`find_scale_for_weight:272-291`、`dequantize_fp8:75-123` 三档 scale）；
+      §2 MLA 吸收 `absorb_kv_into_q`（`convert.py:150-233`：per-head `k_nopeᵀ@q_nope`、concat rope、
+      `[H*576,q_lora]`）+ V 反吸收融进 `o_proj`（`einsum('dhn,hnk->dhk')` `demo.py:519`，`H*128→H*512`）
+      + 拆 `q_b_nope`/`q_b_pe` 双形态（chunked-prefill vs decode）；**并指出 Phase 2 的吸收块
+      `:553-632` 因 Phase 1 已 `del kv_key`（`:525`）而不会执行**（同型「已实现未跑」）；§3 FP8 重定标
+      `_quantize_f32_to_checkpoint_fp8:452-466`（128×128 块、`scale_inv=amax/448`）与 `dequantize_fp8`
+      互逆；§4 gate/up **按 chunk 交织**而非 `cat`（`shuffle_tensors` `utils.py:50-128`，`:118-126` 逐
+      chunk 交错），对照 Qwen3 demo 的 `mpk.shuffle_tensors`（`:563`/`:709`，`persistent_kernel.py:811`）；
+      §5 MoE 专家折叠 `w13=cat(gate,up)`/`w2=down`（`:663-691`）、共享专家留给 builder 折叠；§6 对齐
+      （16B，`:693-708`）+ TP 切分（内联 `_TP_SHARD_RULES:719-760`、w13 拆半再切 `:774-787`；对照离线
+      `_SHARD_RULES:439-499`）——**如实记录两条 shard 规则不一致**（embedding/lm_head/q_a_proj 离线切、
+      内联复制；专家离线复制、内联切），不判对；§7 输出键 ↔ builder 消费契约表（对照 GLM demo 无内联
+      预处理=空层）；§8 判据映射（**本层不贡献任何 C 判据，只是 C3 的输入准备**）；§9 局限；§10 坐标。
+      配套博客 post `mega-kernel-28-mpk-weight-prep`（weight 29）并更新 `mega-kernel-00-index` 第 28 项。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3193,7 +3217,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P112-1 完成（1/1）**。补齐 `docs/25`（P111-1）**§9 明留的尾巴**「未逐行展开每个家族的
+- 当前进度：**P113-1 完成（1/1）**。补齐 `docs/26`（P112-1）**§8 明留的尾巴**「`demo.py` 的权重预处理
+  （Phase-2 吸收、gate_up 交织拆分）未走读」——把 megakernel 编译栈**最上游、最不像 kernel** 的一层打开：
+  见 `docs/27-mpk-weight-prep.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。headline——**权重预处理层
+  用普通 PyTorch 张量变换把「HF checkpoint 物理布局」改写成「builder 逻辑契约布局」**，且有**两条独立
+  实现**（离线 `convert.py main()` 写 per-rank safetensors、反量化 BF16；demo 内联 Phase 1/2 保留 FP8，
+  仅 `--layers` 时跑）。走读 MLA 权重吸收（`absorb_kv_into_q`）+ V 反吸收融进 `o_proj` + 拆 `q_b_nope`/
+  `q_b_pe` 双形态、FP8 重定标（128×128 块、`scale_inv=amax/448`）、gate/up **按 chunk 交织**（非 `cat`）、
+  MoE 专家折叠 `w13`/`w2`、16B 对齐与 TP 切分；并指出 **Phase 2 的吸收块因 Phase 1 已删 `kv_key` 而不会
+  执行**（同型「已实现未跑」）、**离线/内联两条 shard 规则不一致**（只记录不判对）。判据映射：本层**不贡献
+  任何 C 判据**，只是 C3（融合范围）的输入准备。配套博客 post `mega-kernel-28-mpk-weight-prep`（weight 29）
+  并更新 `mega-kernel-00-index` 第 28 项。
+- 此前：**P112-1 完成（1/1）**。补齐 `docs/25`（P111-1）**§9 明留的尾巴**「未逐行展开每个家族的
   `_build_*`（GLM/Inkling/DeepSeek-V3 的 MoE/MLA 管线只给算子名与文件头架构说明）」——把「家族结构差异
   如何在 builder 层被折平」打开：见 `docs/26-mpk-family-builders.md`（快照 `f9eb70c`，**纯源码走读、
   无新实验**）。headline——**模型家族的结构差异全部在 builder 层被手工「折平」成统一的标准 task 管线**；
