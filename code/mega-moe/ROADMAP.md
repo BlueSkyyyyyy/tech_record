@@ -2952,6 +2952,30 @@
       `mk_alignment` 直接进 JIT 模板实参（`sm100_bf16_gemm.hpp` 附近），配置改动会**静默改变 kernel 形态**。
       配套博客 `content/posts/mega-moe-103-sm100-swap-ab-dgrad`（索引页新增第 103 篇）。
 
+### P94 增量（opt-in，补齐反向侧一直缺席的通信量模型与 H100 实测）
+
+- [x] **P94-1** **MoE 反向的通信量模型与 H100 实测：反向为什么没有 mega-kernel**
+      （`~/github/DeepEP/README.md:171-262`、`deep_ep/utils/refs.py:10-243`、
+      `deep_ep/include/deep_ep/impls/ep/dispatch.cuh:104`、`deep_ep/buffers/ep.py:518-562`）。
+      第 1 篇给了**前向**通信量模型、第 4/12/13/14 篇拆了反向**计算侧**、第 95 篇拆了反向**语义侧**
+      （dispatch/combine 互为转置），但反向**通信量**从没有模型与实测。
+      → `docs/104-moe-backward-communication.md`（真实行号核对）：**核心结论——反向通信不是更小、
+      而是约 1.5× 前向**。原因是**布局不对称**：前向 dispatch 在传输层按目标 rank 去重
+      （`dispatch.cuh:104` `ptx::deduplicate`、`refs.py:67` `mask_to_send`）→ T·d·H·1B（FP8）；
+      而 combine 与**两个反向相位**都在 expanded 空间（T·k·H·2B，BF16）——官方
+      `README.md:208/245` 明说「dispatch 的反向是 combine、combine 的反向是 dispatch」，且都带
+      `do_expand=True`（`:197-198/253-254`）。模型 B_bwd/B_fwd=4k/(d+2k)≈1.49（k=8,d≈5.4）。
+      H100 8 卡真实 ragged all-to-all 实测 `harness/exp_moe_backward_comm.{py,sh,out.txt}`
+      （30 次均值）：单向带宽 **114–124 GB/s**、反向/前向**字节量比 1.49×、时间比 1.46–1.54×**
+      （T∈{1024,4096,16384}）；ragged 相对 8 等分（第 1 篇 ~300+ GB/s）有 **2–3× 拆分惩罚**；
+      combine 本地按 token 求和的数据量（expanded 行数×H）与通信同级（PyTorch `index_add` 朴素路径
+      T=16384 达 25ms，仅示量级）；叠两流**只重叠 7.2%**（all-SM NCCL a2a 与 GEMM 争抢 SM）。
+      **反向无 mega-kernel 的真因**：计算天然分四个独立 grouped GEMM、通信是两张方向相反的网；
+      重叠改由通信库 `async_with_compute_stream=True`（`:217/252`）在 host 层做，且须像
+      `ep.py:518-532` 限制通信 `num_sms` 才有真重叠。反向四个 GEMM（第 14 篇 ~4.15ms）与两相位 a2a
+      （~8.0ms）同量级。**主 kernel / 真实 EPBuffer 仅分析**；通信原语模型与 H100 实测全可跑。
+      配套博客 `content/posts/mega-moe-104-moe-backward-communication`（索引页新增第 104 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -2977,8 +3001,15 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P93 各增量完成（P15-1…P41-1、P42-1…P93-1）。**
-  本轮 P93-1：新建 `docs/103-sm100-swap-ab-dgrad.md`
+- 当前进度：**P0~P14 全部完成；P15~P94 各增量完成（P15-1…P41-1、P42-1…P94-1）。**
+  本轮 P94-1：新建 `docs/104-moe-backward-communication.md`
+  （+`harness/exp_moe_backward_comm.{py,sh,out.txt}`）——补齐**反向侧一直缺席的通信量模型与 H100 实测**。
+  要点：**反向通信不是更小、而是约 1.5× 前向**（布局不对称：前向 dispatch 去重 T·d·1B，combine/两个
+  反向相位都在 expanded 空间 T·k·2B）；模型 B_bwd/B_fwd=4k/(d+2k)≈1.49；H100 8 卡真实 ragged
+  all-to-all 实测字节量比 1.49×、时间比 1.46–1.54×、单向带宽 114–124 GB/s、ragged 相对等分有
+  2–3× 惩罚；叠两流只重叠 7.2%→ 反向无 mega-kernel 的真因（四个独立 GEMM + 两张方向相反的网，
+  重叠交给 `async_with_compute_stream` + 限制通信 `num_sms`）。索引页新增第 104 篇。
+  上一轮 P93-1：新建 `docs/103-sm100-swap-ab-dgrad.md`
   （+`src/sm100_swap_ab_dgrad.cu`、`harness/exp_sm100_swap_ab_dgrad.{sh,out.txt}`）——补齐第 36 篇
   只在一条 bullet 里带过的 **SM100 BF16 GEMM `kSwapAB`（dgrad）分支**。要点：UMMA 的 M 维被钉死在
   64/128/256，而 m-grouped 的 M 是短且逐组变的维、N（hidden）才固定大；swap 在 MMA 里把 A/B 换轴，
@@ -4046,7 +4077,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P93 已完成（最新 **P93-1 SM100 BF16 GEMM 的 `kSwapAB`（dgrad）分支**：
+- **下一步**：P0~P94 已完成（最新 **P94-1 MoE 反向的通信量模型与 H100 实测**：
+  反向通信 ≈ **1.5× 前向**（布局不对称：dispatch 去重 T·d·1B vs combine/两个反向相位 expanded
+  T·k·2B），模型 4k/(d+2k)≈1.49，H100 8 卡 ragged a2a 实测字节量比 1.49×/时间比 1.46–1.54×、
+  单向 114–124 GB/s；反向无 mega-kernel 的真因是「四个独立 GEMM + 两张方向相反的网」，
+  重叠交给 `async_with_compute_stream` + 限制通信 `num_sms`；主 kernel 仅分析，通信原语真机可跑；
+  详见上）。
+  上一轮 P93-1：P0~P93 已完成（**P93-1 SM100 BF16 GEMM 的 `kSwapAB`（dgrad）分支**：
   host 启发式对 m-grouped 返回唯一 `swap_ab=1/block_n=128`、`block_m=mk_alignment`(128/256)，
   设备端 A/B 换轴 + 逐块动态 `UMMA_N`，转置写回 `sm100_store_cd_swap_ab`（16×128 store + 转置 STSM）；
   主 kernel SM100 专属仅分析，H100 host 半边真机 56 PASS / 0 FAIL；详见上）。
