@@ -53,11 +53,25 @@ DEV void cp16(void* dst, const void* src) {
 DEV void cp16(void* dst, const void* src) { __pipeline_memcpy_async(dst, src, 16); }
 #endif
 
-constexpr int KD = 128;   // K = D (output N)
-constexpr int VD = 128;   // V = D (contraction K')
+// P7-81: `KD` (K = key / output-N dim) and `VD` (V = value / contraction dim) are
+// independent compile-time sizes.  The K2-shaped **base GEMM core** (`dq/dk/dw/dgk`)
+// already indexes the two dims consistently (K-dim outputs use `KD`, V-dim operands
+// use `VD`; the TMA maps carry {VD,KD} separately), so the GEMM core is generic in
+// K != V -- this macro pair just lets a build instantiate a non-128 V.  The six
+// non-GEMM segments (`B2M_OUT`/`DB`/...) partition V by `BW = KD/NW`, so those still
+// require `VD == KD` (they are off in the base GEMM core).
+#ifndef B2M_KD
+#define B2M_KD 128
+#endif
+#ifndef B2M_VD
+#define B2M_VD 128
+#endif
+constexpr int KD = B2M_KD;   // K = D (output N)
+constexpr int VD = B2M_VD;   // V = D (contraction K')
 constexpr int BT = 16;    // chunk rows (M)
 constexpr int NW = 8;     // warps
-constexpr int BW = 16;    // output columns per warp = KD / NW
+constexpr int BW = KD / NW;    // output columns per warp = KD / NW
+static_assert(BW * NW == KD, "KD must equal NW*BW (warp output-column partition)");
 
 #ifndef B2M_BVK
 #define B2M_BVK 32
@@ -452,7 +466,17 @@ constexpr int OPS = BVP;
 #define OP_ZERO 0.0f
 #endif
 
-static_assert(VD % BVK == 0, "BVK must divide V=128");
+static_assert(VD % BVK == 0, "BVK must divide V");
+// P7-81: only the contraction dim `V` is scanned (K != V).  `K` stays 128 because the 16-wide
+// warp lane layouts are baked into the `dgk` column reduction (`l & 15`) and the gate chain.
+static_assert(KD == 128, "P7-81: only V is parameterized; K=128 is baked into the 16-wide warp reductions");
+// P7-81: the base GEMM core is generic in K != V (K-dim outputs/indexing use KD, V-dim
+// operands use VD).  The six non-GEMM B2 segments instead partition the V axis by the
+// warp output width `BW = KD/NW`, so they are only valid when VD == KD -- guard it.
+#if (B2M_OUT || B2M_DB || B2M_DA || B2M_INTRA || B2M_GATE || B2M_DKGB || B2M_HDW || B2M_VV_KG_ON) \
+    && (B2M_VD != B2M_KD)
+#error "P7-81: non-GEMM B2 segments partition V by BW=KD/NW; compile them with VD==KD (only the base GEMM core supports K!=V)"
+#endif
 #if B2M_BF16MMA
 static_assert(BVK % 16 == 0, "B2M_BF16MMA contracts 16 V-columns per mma");
 #endif

@@ -482,3 +482,19 @@ dtype 为 bf16 时取 **`-DB2M_BF16`（`cp.async` staging、`BVK=32`）+ 可选 
 **不开** `-DB2M_BF16_VDW`（除非某天寄存器预算允许、且为对齐 TMA 布局）——它的收益（smem −4 KB、读 −15%）被
 寄存器越过分块台阶的代价淹没。至此 CUDA B2 研究形态的 `staging/dtype/mma-ISA/store/DA/TMA/折叠/scratch-dtype`
 诸旋钮**全部关闭且无 `#error`**。
+
+- **§84（P7-81）K2 形状 CUDA B2 base GEMM core 的 `K≠V` 泛化——逐位可核验、且是唯一能跑 `V=256` 的实现**：
+  KDA 状态 $S\in\mathbb{R}^{K\times V}$，但 §49–§83 每轮都用单一常量 `KD=VD=128` 编译。本轮把两维宏参数化
+  （`b2_mma_probe.cu:64-74`，`BW=KD/NW` 导出），加两条守卫（`static_assert(KD==128)`、非 GEMM 段开即 `#error`
+  要求 `VD==KD`，`:469-478`），**算术一字未动**——core 本就分轴索引（K-dim 用 `KD`、V-dim 用 `VD`，
+  `make_map_hdh`/`make_map_dov` 各带 `VD`/`KD`，`hbase=KD*VD`、`nvt=VD/BVK`），故对 `K≠V` 零改动可用。
+  `check_bwd_b2_kv.py`：**Part A** `K=128`、`V∈{64,128,256}`（含非整除 `T=250`）`dq/dk/dw` 落 tf32 底噪
+  **3.1–4.0e-4**、`dgk` 1.6–2.1e-7，**`V=128` 行逐值复现 §49**（默认 build 逐字节等价）。**结构性优势**：
+  `V=256` 下 identical-op Triton core **smem OOM**（`311296>232448 B`，它整块常驻 `[V,K]`），而 CUDA core
+  smem 恒 **87552 B（与 V 无关）**——**唯一能跑 `V=256` 的实现**。**Part B** `V=128` 复现 §49（`B8` 0.91×）；
+  大 shape dev `64→128→256 = 297.3→517.7→994.5µs`（近似线性）。**边界**：只参数化 V（K 定 128）、只覆盖
+  base GEMM core（六段核仍 `VD==KD`）、TMA×K≠V 未测（待验证）。
+
+**最终部署建议（补充 `K≠V` 泛化，`docs/07` §84）**：默认路线 `cf` 不变。`B2M_KD/B2M_VD` 是为**泛化/健壮性**
+而加，`V=128` 部署**零行为差异**；若未来 KDA 出现 `V≠K` 的 head 配置，base GEMM core 可直接编出（K2 形状的
+流式 V-tile 是能跑 `V>K` 的必要条件），但六段非 GEMM 段须一并改造（现由 `#error` 挡住）。

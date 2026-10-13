@@ -1089,6 +1089,24 @@
         旋钮可核验但**不是杠杆**（与 §81「TMA/`BVK=64` 在六段核反号、bf16 收益全在占用率头寸」同构）；
         目标卡 $v$/$dw$ staging **维持现状**，默认部署仍 §45 的 `cf`。**边界**：`BT=16`/`K=V=128`/非 TMA/
         非折叠/未落链；`dw` 写侧未改。见 `docs/07` §83。
+- [x] **P7-81** 关闭「**只测 `K=V=128`**」边界（对 K2 形状 CUDA B2 的 **base GEMM core**）：把
+       `b2_mma_probe.cu` 的 `KD`/`VD` 宏参数化（`B2M_KD`/`B2M_VD`，默认 128；`BW=KD/NW` 导出 +
+       `static_assert(BW*NW==KD)`，`b2_mma_probe.cu:64-74`）并加两条守卫——`static_assert(KD==128)`
+       （只扫 V；K 被 `dgk` 列归约 `l&15`/门控链的 16 宽 lane 布局写死）与 **`#error`：任一非 GEMM
+       段打开即要求 `VD==KD`**（那六段按 `BW=KD/NW` 切 V 轴，`:469-478`）。**算术一字未动**——core
+       本就分轴索引（K-dim 用 `KD`、V-dim 用 `VD`、`make_map_hdh`/`make_map_dov` 各带 `VD`/`KD`、
+       `hbase=KD*VD`、`nvt=VD/BVK`），故对 `K≠V` 零改动可用。新增 `harness/check_bwd_b2_kv.py`
+       （`check_bwd_b2_kv.out.txt`，空闲卡，三档 V 各自编译）。**Part A**：`K=128`、`V∈{64,128,256}`、
+       四组 shape（含非整除 `T=250`）`dq/dk/dw` 落 tf32 底噪 **3.1–4.0e-4**、`dgk` 1.6–2.1e-7（fp32
+       归约序）；**`V=128` 行逐值复现 §49（P7-46）**（`cuda/torch dq 3.583e-4` 等），证宏参数化对默认
+       build **逐字节等价**。**结构性优势**：`V=256` 下 identical-op Triton core **smem OOM**
+       （`311296>232448 B`，它整块常驻 `[V,K]`），而 CUDA core smem 恒 **87552 B（与 V 无关，只按
+       `BVK` 流式摆一个 V-tile）**——**是唯一能跑 `V=256` 的实现**。**Part B**：`V=128` 复现 §49
+       （`B8` CUDA 517.7 vs Triton 567.4=`0.91×`、`B2` 0.87×）；大 shape dev `V:64→128→256 =
+       297.3→517.7→994.5µs`（近似线性）；`V=256` 无 Triton 对照（其 OOM）。**Part D**：smem
+       `87552 B` 三档恒定。**结论**：base GEMM core 对 `K≠V` 泛化且默认零行为差异；**边界**＝只参数化
+       V（K 固定 128）、只覆盖 base GEMM core（六段核仍 `VD==KD`，未做）；TMA 分支未随 V 复测（待验证）。
+       默认部署仍 §45 的 `cf`。见 `docs/07` §84。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1581,12 +1599,34 @@
   分块台阶**；ncu 的 `launch__occupancy_limit_registers` 是直接读数（别只看 `..._shared_mem`——它可能
   同时读 1 而 smem 明明够）。叠 `-DB2M_BF16MMA` 把 regs 拉回 108 才恢复 2 block/SM（中性）。
   **与 §81「省字节要落最紧 pipe / 别动占用率头寸」同构，但这次头寸是寄存器不是 smem。**
+- **base GEMM core 天然 `K≠V`，但六段非 GEMM 段按 `BW=KD/NW` 切 V 轴、必须 `VD==KD`**（P7-81，§84）：
+  `b2_mma_probe.cu` 的 K2 形状 base GEMM core **本就分轴索引**（K-dim 输出用 `KD`、V-dim 操作数用 `VD`，
+  `make_map_hdh`/`make_map_dov` 各带 `VD`/`KD`，`hbase=KD*VD`、`nvt=VD/BVK`），故参数化 `KD`/`VD` 后
+  **对 `K≠V` 零改动可用**、且默认 `V=128` 逐字节等价（复现 §49）。但**六段非 GEMM 段**（OUT/DB/DA/
+  INTRA/GATE/DKGB/HDW）按 warp 输出宽度 `BW=KD/NW` 去**切 V 轴**（`dv2` 的 `[w*BW,...)`、`dbv` 的 raw-v
+  镜像），`V≠K` 会错位——本轮加 `#error` 要求那六段 `VD==KD`。另：**`K` 固定 128**（`dgk` 列归约 `l&15`、
+  门控链的 16 宽 lane 布局写死，`static_assert(KD==128)`）。**推论**：因为操作数按 `BVK` **流式**、smem
+  与 `V` 无关（`V=64/128/256` 恒 87552 B），CUDA core 是**唯一能跑 `V=256`** 的实现——identical-op Triton
+  core 整块常驻 `[V,K]`，`V=256` 需 311 KB > 232 KB **直接编不出**。「K2 形状」在 `V>K` 上改变的是
+  「**能否运行**」而非仅速度。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-80 补测 + P8-3**。
-  - P7-80（本轮）：**关闭 §79 遗留的「raw `v`/`dw` 的 bf16 精度未单独消融」**——给非 TMA bf16 入口加
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-81 补测 + P8-3**。
+  - P7-81（本轮）：**关闭「只测 `K=V=128`」边界（K2 形状 CUDA B2 **base GEMM core**）**——`KD`/`VD`
+    宏参数化（`b2_mma_probe.cu:64-74`）+ 两条守卫（`static_assert(KD==128)`、非 GEMM 段开即 `#error`
+    要求 `VD==KD`，`:469-478`），**算术一字未动**。新增 `harness/check_bwd_b2_kv.py`（`..._kv.out.txt`，
+    空闲卡）。**Part A**：`K=128`、`V∈{64,128,256}`（含非整除 `T=250`）`dq/dk/dw` 落 tf32 底噪
+    **3.1–4.0e-4**、`dgk` 1.6–2.1e-7；**`V=128` 行逐值复现 §49**（默认 build 逐字节等价）。**结构性
+    优势**：`V=256` 下 identical-op Triton core **smem OOM**（`311296>232448`），CUDA smem 恒 **87552 B
+    （与 V 无关，只流式摆一个 `BVK` V-tile）** → **唯一能跑 `V=256` 的实现**。**Part B**：`V=128` 复现
+    §49（`B8` 0.91×）；大 shape dev `64→128→256 = 297.3→517.7→994.5µs`（近似线性）。**边界**＝只参数化
+    V（K 定 128）、只覆盖 base GEMM core（六段核仍 `VD==KD`）、TMA×K≠V 未测（待验证）。默认仍 §45 `cf`。
+    见 `docs/07` §84。**下一步**：专题维持维护态——§45 的 `cf` 仍是目标卡反向默认；CUDA B2 研究形态新增
+    `K≠V` 泛化后仍**无 `#error`**；明确新需求（**六段核 `K≠V`**、`dw` 写侧端到端 bf16、TMA×K≠V、真落
+    目标卡 CUDA）再动。
+  - P7-80（上轮）：**关闭 §79 遗留的「raw `v`/`dw` 的 bf16 精度未单独消融」**——给非 TMA bf16 入口加
     `-DB2M_BF16_VDW`（`vv`/`dwm` 也按 bf16 staging），**算术一字未动**。**Part A**：bf16 值下
     `prod_bf16_vdw == prod_bf16` 11 项 **max_abs=0**（含非整除 T=250）。**Part B**：全精度 `v`→`dApre/dA/db`
     1.4–1.9e-3、`dw`→`dkgb 2.7–3.0e-3/dkg 2.0–3.0e-4/dg 1.6–2.3e-4/db 5.7–9.2e-4`（scale-rel，=`dgk`
