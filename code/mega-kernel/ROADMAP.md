@@ -4224,7 +4224,32 @@
   合起来覆盖该文件 TMEM fragment **六件套**。判据只贡献 **C3**。新实验 `src/tmem_frg_traits.cu` +
   `harness/tmem_frg_traits.sh` + `harness/tmem_frg_traits.out.txt`（目标卡 H100/sm90a，host 侧，
   device 3，未 launch kernel）。配套博客 post `mega-kernel-63-mpk-tmem-frg-traits`（weight 64）并更新
-  `mega-kernel-00-index` 第 63 项。**本轮新增实验。**
+   `mega-kernel-00-index` 第 63 项。**本轮新增实验。**
+
+### P149 SM100 稀疏 UMMA 的 A 操作数通路（`docs/63-mpk-sparse-mma.md`）
+
+- [x] **P149-1** 补掉 `docs/62`（P148-1）§6 明留的尾巴——`docs/62` 只走了稀疏 MMA 的**元数据 E** 侧
+  （`tmem_e_frg`），未追 `tcgen05.mma.sp` 的**另一半输入 A**。见 `docs/63-mpk-sparse-mma.md`
+  （MPK `f9eb70c`、CUTLASS `deps/cutlass f3fde583`；**纯源码走读 + 1 个 host 侧结构探测**，
+  SM100 本体本机不可执行）。三条 headline：**(A)（headline）稀疏把「A 的 2:4 压缩」全折进
+  `sparse_elem<2,T>` 类型**（`ValTypeA`、`sizeof_bits = ratio(bits,2)`，host 实测 fp16 16→8 位、
+  tf32 32→16 位），而 A 的 fragment 类型 `FrgTypeA = UMMA::sparse_smem_desc` 与 dense `smem_desc`
+  **构造代码逐字相同**（`MakeTensor` :379-397 只多两条 `is_sparse`/`is_sparse_ptr` 断言）——**稀疏
+  不在 A 描述符里**，只在指令描述符的 `sparse_flag_` 位（`mma_sm100_desc.hpp:419`，实测 dense
+  `0x08200010`→sparse `0x08200014` 即 bit[2]）与那份 E；**(B)（headline）稀疏 SMEM 布局原子是
+  「dense 原子 MN 轴叠一层 S 倍 `blocked_product` + `smem_sparse_ptr_flag_bits` 门控指针」**
+  （`mma_traits_sm90_gmma_sparse.hpp:54-77`；host 实测 dense `(_64,_8)`→sparse `((_1,_64),(_2,_8))`，
+  swizzle 不变——故打拍行为不变，错配是编译期错而非静默错）；**(C)（headline）`sparse_ptr` 是
+  「逻辑索引 ÷ S → 物理槽、任意索引但 `i`/`i+1` 别名同一物理槽」**（`pointer_sparse.hpp:101-125`，
+  host 实测 `(ps+2)-buf=1`、`ps[0]==ps[1]`），且 CUTLASS 有完整 SM100 稀疏栈（12 支 `MMA_Traits`
+  + 12 个 `SM100_MMA_*_SS_SPARSE` 原子 + 7 个 sparse collective builder + SM90/SM120 swizzle
+  选择器）而 **MPK 对稀疏零引用**（`sparse_smem_desc`/`sparse_elem`/`SpAtom`/`make_sparse_ptr`
+  全 0）——与 `docs/60`（block-scaled，MPK 在用）合成「MPK 借了哪支、没借哪支」的正反两面。
+  另记 4-bit A 特例（`MXF4NVF4` 的 `ValTypeA = sparse_elem<4,uint8_t>`、`K=128` 硬编码，与
+  `512/sizeof_bits` 通式不一致，只记不判）。判据只贡献 **C3**。新实验 `src/sparse_mma_a.cu` +
+  `harness/sparse_mma_a.sh` + `harness/sparse_mma_a.out.txt`（目标卡 H100/sm90a，host 侧，
+  device 3，未 launch kernel）。配套博客 post `mega-kernel-64-mpk-sparse-mma`（weight 65）并更新
+  `mega-kernel-00-index` 第 64 项。**本轮新增实验。**
 
 ## 每轮增量流程（autopilot）
 
@@ -4617,7 +4642,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P148-1 完成（1/1）**。补掉 `docs/60`（P146-1）§9 与「下一步候选」都点名的缺口——
+- 当前进度：**P149-1 完成（1/1）**。补掉 `docs/62`（P148-1）§6 明留的尾巴——那篇只走了稀疏 MMA 的
+  **元数据 E** 侧（`tmem_e_frg`），未追 `tcgen05.mma.sp` 的**另一半输入 A**。见
+  `docs/63-mpk-sparse-mma.md`（MPK `f9eb70c`、CUTLASS `deps/cutlass f3fde583`；**纯源码走读 + 1 个
+  host 侧结构探测**，SM100 本体本机不可执行）。三条 headline：**(A)（headline）稀疏把「A 的 2:4
+  压缩」全折进 `sparse_elem<2,T>` 类型**（`ValTypeA`、`sizeof_bits = ratio(bits,2)`，host 实测
+  fp16 16→8、tf32 32→16 位），而 A 的 fragment 类型 `FrgTypeA = UMMA::sparse_smem_desc` 与 dense
+  `smem_desc` **构造代码逐字相同**（`MakeTensor` :379-397 只多两条 `is_sparse`/`is_sparse_ptr` 断言）
+  ——**稀疏不在 A 描述符里**，只在指令描述符的 `sparse_flag_` 位（`mma_sm100_desc.hpp:419`，实测
+  dense `0x08200010`→sparse `0x08200014`）与那份 E；**(B)（headline）稀疏 SMEM 布局原子是「dense
+  原子 MN 轴叠一层 S 倍 `blocked_product` + `smem_sparse_ptr_flag_bits` 门控指针」**
+  （`mma_traits_sm90_gmma_sparse.hpp:54-77`；host 实测 dense `(_64,_8)`→sparse `((_1,_64),(_2,_8))`，
+  swizzle 不变——打拍行为不变，错配是编译期错而非静默错）；**(C)（headline）`sparse_ptr` 是「逻辑
+  索引 ÷ S → 物理槽、任意索引但 `i`/`i+1` 别名」**（`pointer_sparse.hpp:101-125`），且 CUTLASS 有
+  完整 SM100 稀疏栈（12 支 `MMA_Traits` + 12 个 `SM100_MMA_*_SS_SPARSE` 原子 + 7 个 sparse
+  collective builder）而 **MPK 对稀疏零引用**（`sparse_smem_desc`/`sparse_elem`/`SpAtom`/
+  `make_sparse_ptr` 全 0）。判据只贡献 **C3**。新实验 `src/sparse_mma_a.cu` +
+  `harness/sparse_mma_a.sh` + `harness/sparse_mma_a.out.txt`（目标卡 H100/sm90a，host 侧，device 3，
+  未 launch kernel）。配套博客 post `mega-kernel-64-mpk-sparse-mma`（weight 65）并更新
+  `mega-kernel-00-index` 第 64 项。P149-1 新留尾巴见文档 §7（A 的 2:4 物理排布/E→A 槽映射未验证、
+  4-bit A 特例只记不判、`sparse_flag_` 逐格式语义未核、audit 是 grep 级）。
+- 此前：**P148-1 完成（1/1）**。补掉 `docs/60`（P146-1）§9 与「下一步候选」都点名的缺口——
   那篇只把 `mma_traits_sm100.hpp` 的**累加器 `tmem_frg`** 与 **block-scaled scale-factor
   `tmem_sf_frg`** 求出来，**其余两面未走**。见 `docs/62-mpk-tmem-frg-traits.md`（MPK `f9eb70c`、
   CUTLASS `deps/cutlass f3fde583`；**纯源码走读 + 1 个 host 侧结构探测**，SM100 本体本机不可执行）。
@@ -4660,12 +4705,13 @@
   （注：该 kernel 名 `eagle3_draft_chain_step_attn` 快照里 `grep` 零命中，**可能不可走**，须先核 demo
   引用是否指向别处）；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或 SM100 专属布局的其余面
   （`linear_fp8_1d2d_sm100_cute_tie` 想表达的 CuTe 解构路径、`fp8_group_gemm_sm100.cuh` 的 SF 段逐行、
-  稀疏 `MMA_Traits` 的 `sparse_smem_desc`/`tcgen05.mma.sp` 与 E 的硬件编码、WS 指令落地后的对照）
-  逐行。**`mma_traits_sm100.hpp` 的 `tmem_e_frg`/`tmem_frg_ws` 稀疏元数据与 WS 布局已由 P148-1/`docs/62`
-  补掉**；**Hopper CuTe WS GEMM device 家族已由 P147-1/`docs/61` 补掉**（顺带补掉 `docs/30` §5 只从
-  wrapper 视角的缺口）；**CUTLASS scale-factor TMEM trait 已由 P146-1/`docs/60` 补掉**；TMEM 列布局 /
-  UTCCP 重排已由 P145-1/`docs/59` 补掉；TMA 版 SMEM 布局已由 P144-1/`docs/58` 补掉；SM100 共享原语层
-  已由 P143-1/`docs/57` 补掉。
+  WS 指令落地后的对照、稀疏 A 的 2:4 物理排布/E→A 槽映射（本文只到 trait 形状，未追硬件）逐行）。
+  **`mma_traits_sm100.hpp` 的 `tmem_e_frg`/`tmem_frg_ws` 稀疏元数据与 WS 布局已由 P148-1/`docs/62`
+  补掉**；**稀疏 UMMA 的 A 操作数通路（`sparse_elem`/`SpAtom`/`sparse_smem_desc`/`sparse_flag_`）已由
+  P149-1/`docs/63` 补掉**（`tcgen05.mma.sp` 的 A+E+flag 三件套至此齐全）；**Hopper CuTe WS GEMM device
+  家族已由 P147-1/`docs/61` 补掉**（顺带补掉 `docs/30` §5 只从 wrapper 视角的缺口）；**CUTLASS
+  scale-factor TMEM trait 已由 P146-1/`docs/60` 补掉**；TMEM 列布局 / UTCCP 重排已由 P145-1/`docs/59`
+  补掉；TMA 版 SMEM 布局已由 P144-1/`docs/58` 补掉；SM100 共享原语层已由 P143-1/`docs/57` 补掉。
 - 此前：**P146-1 完成（1/1）**。补掉 `docs/59` §8 **点名的最直接下一步**（CUTLASS
   `mma_traits_sm100.hpp` 里 block-scaled scale-factor 的 TMEM 布局 trait），把 MPK 手工路径与 CUTLASS
   高层路径在「scale 落进 TMEM 的哪个槽、指令怎么找到它」上并置。见

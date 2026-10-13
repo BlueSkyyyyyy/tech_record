@@ -1,0 +1,46 @@
+$ CUDA_VISIBLE_DEVICES=3 /tmp/sparse_mma_a
+CUTLASS SM100 sparse UMMA A-operand probe (host-side, no SM100 needed)
+completes docs/62 (P148-1), which walked only the metadata E half
+
+=== (i) sparse_elem<S,T>: one physical elem represents S logical elems ===
+  sparse_elem<2,half_t> (fp16 A) raw=16 bits, S=2 -> sizeof_bits(sparse_elem)=8 (is_sparse=1)
+  sparse_elem<2,float>  (tf32 A) raw=32 bits, S=2 -> sizeof_bits(sparse_elem)=16 (is_sparse=1)
+  sparse_elem<2,uint8_t> (i8/f8 A) raw= 8 bits, S=2 -> sizeof_bits(sparse_elem)=4 (is_sparse=1)
+  sparse_elem<4,uint8_t> (E tf32) raw= 8 bits, S=4 -> sizeof_bits(sparse_elem)=2 (is_sparse=1)
+  sparse_elem<8,uint8_t> (E fp16) raw= 8 bits, S=8 -> sizeof_bits(sparse_elem)=1 (is_sparse=1)
+  -> dense half_t sizeof_bits=16; dense float sizeof_bits=32 (contrast)
+
+=== (ii) sparse_ptr<S,Iter>: op+ rounds to a multiple of S, op[] derefs i/S ===
+  is_sparse_ptr<sparse_ptr<2,SE*>> = 1 ; iter_value raw sizeof_bits = 8
+  (ps+0)-buf=0  (ps+2)-buf=1  (ps+4)-buf=2   (physical slots)
+  ps[0].elem_=10 ps[1].elem_=10 ps[2].elem_=11 ps[3].elem_=11 (0,1 alias; 2,3 alias)
+
+=== (iii) sparse SMEM layout atoms: same swizzle, S-extended MN-axis ===
+  dense  Layout_MN_SW128_Atom<half_t> Sw<3,4,3> o smem_ptr[16b](unset) o (_64,_8):(_1,_64)
+  sparse Layout_MN_SW128_SpAtom<half_t,2> Sw<3,4,3> o smem_sparse<2>_ptr[16b](unset) o ((_1,_64),(_2,_8)):((_0,_2),(_1,_128))
+  sparse Layout_MN_SW128_SpAtom<half_t,4> Sw<3,4,3> o smem_sparse<4>_ptr[16b](unset) o ((_1,_64),(_4,_8)):((_0,_4),(_1,_256))
+  sparse Layout_K_SW128_SpAtom<half_t,2> Sw<3,4,3> o smem_sparse<2>_ptr[16b](unset) o ((_1,_8),(_2,_64)):((_0,_128),(_1,_2))
+  sparse Layout_MN_INTER_SpAtom<half_t,2> Sw<0,4,3> o smem_sparse<2>_ptr[16b](unset) o ((_1,_8),(_2,_8)):((_0,_2),(_1,_16))
+  sparse Layout_MN_SW128_32B_SpAtom<half_t,2> Sw<2,5,2> o smem_sparse<2>_ptr[16b](unset) o ((_1,_64),(_2,_4)):((_0,_2),(_1,_128))
+  dense  MN_SW128 atom  shape = (_64,_8)
+  sparse MN_SW128 atom  shape = ((_1,_64),(_2,_8))
+
+=== (iv) UMMA::sparse_smem_desc is bit-identical to UMMA::smem_desc ===
+  UMMA::smem_desc<Major::K>         is DescriptorIterator subclass = 1
+  UMMA::sparse_smem_desc<Major::K>  is DescriptorIterator subclass = 1
+  MakeTensor<sparse_smem_desc<Major::K>> == MakeTensor<smem_desc<Major::K>> body (only static_asserts differ)   [source fact: mma_traits_sm100.hpp:379-397]
+
+=== (v) instruction descriptor: sparse_flag_ bit[2] and K = 512/bits ===
+  dense  desc = 0x08200010  (sparse_flag_=0)
+  sparse desc = 0x08200014  (sparse_flag_=1)  -> bit[2] set
+  sparse_id2_ = 0 (bitfield [0,2)); max_shift_ = 0 (bitfield [30,32))
+  sparse MMA K = 512/sizeof_bits<A>: half(16b)->32, tf32(32b)->16, i8(8b)->64 (dense is half of these)
+
+=== consumer audit (grep, CUTLASS /ssd/mirage_mpk_build/deps/cutlass) ===
+sparse MMA_Traits FrgTypeA = sparse_smem_desc : 12
+sparse MMA_Traits ValTypeA = sparse_elem<2,...> : 10
+sparse K = 512/sizeof_bits<A> sites           : 8
+SM100 sparse collective builders (CUTLASS)    : 7
+  -> sm100_blockscaled_sparse_umma_builder.inl sm100_sparse_umma_builder.inl sm120_blockscaled_sparse_mma_builder.inl sm120_sparse_mma_builder.inl sm1xx_sparse_config.inl sm90_sparse_config.inl sm90_sparse_gmma_builder.inl 
+MPK (f9eb70c) refs sparse_smem_desc/SpAtom/  : 0
+MPK (f9eb70c) refs sparse anywhere (runtime)  : 0
