@@ -3103,6 +3103,37 @@
       device task 数值正确」的回归网）；§7 局限（纯静态对照、未构建/未跑、不判对错）；§8 坐标。
       配套博客 post `mega-kernel-30-mpk-unit-tests`（weight 31）并更新 `mega-kernel-00-index` 第 30 项。
 
+### P116 单测 wrapper 家族走读（`docs/30-mpk-unit-wrappers.md`）
+
+- [x] **P116-1** 补齐 `docs/29`（P115-1）**§7 明留的尾巴**——「§3 只精读 `moe_linear`，**未逐行走读
+      12 个 blackwell wrapper、`cute/hopper/gemm.cu` 与 `attention_tail_wrapper.cu` 的内部**」。
+      见 `docs/30-mpk-unit-wrappers.md`（快照 `f9eb70c`，与 `docs/06`–`docs/29` 同快照；**纯源码走读
+      （资料分析），本轮无新实验**）。headline——**修正 `docs/29` §2「当前代际对齐」**：blackwell
+      家族有三类更隐蔽的失配——(a) **同名扩展撞名**：`sm100_linear/setup.py:22/25` 与
+      `sm100_moe/setup.py:25/28` 都 `name='runtime_kernel_blackwell'`，但符号互异
+      （linear 侧 `linear_sm100_mpk`/`linear_splitk_sm100` `:660-665` vs moe 侧 `topk_softmax_sm100`/
+      `moe_w13_linear_sm100`/`moe_w2_linear_sm100`/`mul_sum_add_sm100`/`silu_mul` `:697-711`），
+      两组测试都裸 `import runtime_kernel_blackwell` → 同一环境只能存在一个；
+      (b) **源文件缺失**：`sm100_mla_prefill_tp8/setup.py:17` 指向不存在的
+      `runtime_kernel_wrapper_mla_prefill_tp8.cu`（构建必失败）；(c) **无 setup/pybind 的 standalone
+      程序**：`sm100_mla_mtp_decode/test_tp{2,4,8}_wrapper.cu`（含 `int main:145`、thin `__global__
+      shim:24-67`）。§1 全景：**14 目录 / 18 `.cu`（含 3 standalone）/ 13 `setup*.py` / 6876 行**、
+      统一带 `-DMIRAGE_GRACE_BLACKWELL`（多数带 `-DMPK_ENABLE_TMA`）；§2 逐目录三方对照表
+      （撞名/缺源/standalone 三类 + 9 个逐条对齐扩展），统计 `blackwell/` 26 个 `test_*.py`（8 走
+      `PersistentKernel`、18 裸 import 扩展）；§3「一个 task = 一颗 kernel」在 SM100 的两形态——
+      形态 A `grid_dim(1,1,1)`+`block 256`+`cluster_dim(1,1,1)`+`smemBytes 224*1024`+
+      `cutlass::launch_kernel_on_cluster`（`sm100_linear` `:54-56/147/263-266/282`、`sm100_moe`
+      `:295-297/326-449`）、形态 B `hopper/attention_tail_wrapper.cu` 的 `extern "C" launch`
+      （`:74-91`，SMEM poison `:20-24`、`<<<1,256,205824>>>` `:60-73`，nvcc→`.so`
+      由 `test_attention_tail_hopper.py:54-56` 驱动）；§4 MoE wrapper 内部
+      （`moe_linear_sm100_task_impl` `moe_linear_sm100.cuh:50-55`、`SM100_MMA_F16BF16_SS` TiledMMA
+      `:66-73`、`mma_coord_vmnk = make_coord(0,_,_,_)` `:63`，即 tcgen05/UMMA/TMEM）；§5
+      `cute/hopper/gemm.cu`（CUTLASS standalone、只注册 `linear_mpk` `:554-556`、`linear` 被注释、
+      `grid(1)/block(256)/smem 100000` `:401-404`、dispatch 仅 `OUTPUT_SIZE=64`/`BATCH∈{8,16}`/
+      `REDUCTION=4096` `:485-530`）——「同一套惯用法实现了两遍」的第三个肉身；§6 `hopper-moe` 复核
+      （`:486-492` 与 `docs/29` §2 一致）；§7 判据**不贡献任何 C 判据**（同 `docs/29` §6）。
+      配套博客 post `mega-kernel-31-mpk-unit-wrappers`（weight 32）并更新 `mega-kernel-00-index` 第 31 项。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3267,10 +3298,32 @@
   **92 个被登记的 `TaskType`**。`docs/14` §3.2 说的「95 分支」指赋值数，不是枚举数；`TASK_ATTN_SM100`
   **由 `paged_attention_sm100` 登记**（不是死码），真正的无生产者可执行 `TaskType` 只有 3 个
   （`TASK_ATTENTION_2`/`TASK_PAGED_ATTENTION_2`/`TASK_ALLREDUCE`）。
+- **SM100 单测的两个不同职责扩展撞名 `runtime_kernel_blackwell`**（P116-1/`docs/30` §2.1）：
+  `tests/runtime_python/blackwell/sm100_linear/setup.py:22/25` 与 `blackwell/sm100_moe/setup.py:25/28`
+  **都**以 `name='runtime_kernel_blackwell'` 构建，但注册符号互异（linear 侧 `linear_sm100_mpk`/
+  `linear_splitk_sm100` `:660-665`，moe 侧 `topk_softmax_sm100`/`moe_w13_linear_sm100`/
+  `moe_w2_linear_sm100`/`mul_sum_add_sm100`/`silu_mul` `:697-711`），而两组测试都**裸**
+  `import runtime_kernel_blackwell`——同一 `sys.path` 里两个同名 `.so` 只能存在一个，失败症状是
+  **`AttributeError`（符号来自另一个扩展）**、随安装顺序而变，比「注册表裁剪」更难定位。复制/构建
+  SM100 单测前先确认目标目录的扩展名是否与邻居冲突。同层另两条：`sm100_mla_prefill_tp8/setup.py:17`
+  指向**不存在的**源文件（构建必失败）、`sm100_mla_mtp_decode/` 的 `test_tp*_wrapper.cu` 是**无
+  setup/pybind、含 `int main`** 的 standalone 程序（不在 pytest 收集内）。是否「真失败」取决于各目录的
+  build/`sys.path` 隔离，本文只记录静态事实、**不判对错**。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P115-1 完成（1/1）**。补齐 `docs/28`（P114-1）**§8 明留的尾巴**「未覆盖
+- 当前进度：**P116-1 完成（1/1）**。补齐 `docs/29`（P115-1）**§7 明留的尾巴**「§3 只精读 `moe_linear`，
+  未逐行走读 12 个 blackwell wrapper、`cute/hopper/gemm.cu` 与 `attention_tail_wrapper.cu` 的内部」——
+  见 `docs/30-mpk-unit-wrappers.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。headline——**修正
+  `docs/29` §2「当前代际对齐」**：blackwell 家族有三类更隐蔽的失配（**同名扩展撞名**
+  `runtime_kernel_blackwell`：`sm100_linear` vs `sm100_moe`，符号互异 / **源文件缺失**
+  `sm100_mla_prefill_tp8` / **无 setup/pybind 的 standalone 程序** `sm100_mla_mtp_decode/`）；
+  并补齐「一个 task = 一颗 kernel」在 SM100 的单 CTA+cluster 形态（`grid(1,1,1)`/224 KB SMEM/
+  `SM100_MMA_*`+TMEM）与两条**非 pybind**单测路线（`extern "C" launch` 的 attention_tail、
+  CUTLASS standalone 的 `cute/hopper/gemm.cu`）。判据**不贡献任何 C 判据**（同 `docs/29` §6）。
+  配套博客 post `mega-kernel-31-mpk-unit-wrappers`（weight 32）并更新 `mega-kernel-00-index` 第 31 项；
+  并把「SM100 单测同名扩展撞名」补进「已知坑」。
+- 此前：**P115-1 完成（1/1）**。补齐 `docs/28`（P114-1）**§8 明留的尾巴**「未覆盖
   `tests/runtime_python/` 的非 `test_mode` 部分（走 `runtime_kernel` pybind 直接调 device kernel、
   不经 `PersistentKernel` ——『单 kernel 单测』层，其 wrapper 未走读）」——把「一个 device task 当成
   一整颗 kernel 由 host 手写 `<<<>>>` 直接 launch」的这一层打开：见 `docs/29-mpk-unit-tests.md`
