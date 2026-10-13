@@ -4360,6 +4360,42 @@
   配套博客 post `mega-kernel-68-mpk-mla-mtp-tp`（weight 69）并更新 `mega-kernel-00-index` 第 68 项。
   **本轮新增增量。**
 
+### P154 MPK SM100 FP8 linear 支撑层走读（`docs/68-mpk-fp8-linear-support.md`）
+
+- [x] **P154-1** 补掉两处明留的尾巴——`docs/64`（P150-1）§12「`linear_fp8_sm100_tma_utils.cuh` /
+  `linear_fp8_sm100_sm100_utils.cuh` 只借用了行号……未逐行」与 `docs/57`（P143-1）§8
+  「committed 描述符的位编码未逐位展开／`make_smem_desc` 的 `version_`/`lbo_mode_` 只记写死值」：
+  把 `linear_fp8_sm100` 家族一直只有 `docs/32` §2.6 一页摘要的**支撑层三支**
+  （`linear_fp8_sm100_utils.cuh` 143 行 / `linear_fp8_sm100_sm100_utils.cuh` 232 行 /
+  `linear_fp8_sm100_tma_utils.cuh` 118 行）逐行打开，并把其中纯算术在 host 上逐字重放。
+  见 `docs/68-mpk-fp8-linear-support.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，
+  与 `docs/06`–`docs/67` 同快照；CUTLASS `deps/cutlass` `f3fde583`；**纯源码走读 + 1 个 host 侧
+  描述符位探针**——SM100 本体在目标卡 H100/sm90 不可执行）。三条 headline：
+  **(A)（headline）** 支撑层是「**一份完整版 + 一份 K-major 子集副本**」：身体 A 经
+  `linear_fp8_sm100_common.cuh:5` 用 `linear_fp8_sm100_sm100_utils.cuh`（含 `to_umma_layout_type`
+  `:48-79`、`get_atom_base`、`make_umma_desc` 的 K+MN 双分支、`float+MN` 强制 BASE32、swizzle-16
+  对调、`SM100_MMA_MXF8F6F4_2x1SM_SS`），身体 B/MoE（`linear_fp8_1d2d_sm100.cuh:41` /
+  `fp8_group_gemm_sm100.cuh:18`）用 `sm100_utils.cuh`（152 行，K-major 子集，
+  `advance_umma_desc_lo:79-80` 一行 `static_assert(kMajorMode==Major::K, "Current Mirage helper
+  only supports K-major path.")`）——**两处同名函数各定义一遍、能力不同**，不是简单复制。
+  **(B)（headline）描述符位编码逐位钉死**（补 `docs/57` §8）：host 探针重放 `make_smem_desc`
+  （`:13-28`）得三个字节偏移（`start/leading/stride_byte_offset_`）都**右移 4 位**、`version_` 落
+  bit[46,48)、`base_offset_` bit[49,52)、`lbo_mode_` bit[52]、`layout_type_` bit[61,64)；
+  `make_sf_desc = SWIZZLE_NONE + stride=8*16=128B + leading=0`；`InstrDescriptorBlockScaled` 对
+  M=128、N=16/128/256 实测 `desc32=0x08840000/0x08a00000/0x08c00000`（`n_dim_=N>>3`、`m_dim_=M>>4`）；
+  MPK `make_runtime_instr_desc_with_sf_id`（`:147-154`）=填 `sf_id` 后 `<<32`，与 CUTLASS
+  `make_instr_desc_block_scaled` 同名 constexpr **逐位 MATCH**（`to_umma_layout_type` 映射表、
+  K-major/MN-major `make_umma_desc` 的 stride/leading 实算、`get_num_aligned_tmem_cols` 分档
+  一并打表）。
+  **(C)（headline）`_tma_utils.cuh` 的三个 tensormap helper（`tensor_map_release_cta/acquire_cta/
+  replace_global_addr_in_smem`，`:93-116`）在整棵 MPK 树定义处之外 0 引用**；`tma_copy`（`:16-91`）
+  的 `num_tma_multicast` 四路分派（SM90 单 CTA vs SM100 `cta_group::2`）**只服务身体 A**、身体
+  B/MoE（走 CuTe TMA）0；`SM100_MMA_MXF8F6F4_2x1SM_SS`（`cta_group::2`）0 消费者——又一枚
+  「有实现未启用」（生产登记 `kNumMulticast=1`）。
+  判据只贡献 **C3**（同 `docs/07`/`docs/32`/`docs/57`）。配套博客 post
+  `mega-kernel-69-mpk-fp8-support`（weight 70）并更新 `mega-kernel-00-index` 第 69 项。
+  **本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4778,7 +4814,38 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P153-1 完成（1/1）**。补掉「下一步候选」明留的「`mla_mtp_decode_tp2/4/8_sm100.cuh`
+- 当前进度：**P154-1 完成（1/1）**。补掉 `docs/64` §12「`linear_fp8_sm100_tma_utils.cuh` /
+  `linear_fp8_sm100_sm100_utils.cuh` 只借用了行号……未逐行」与 `docs/57` §8「committed 描述符位编码
+  未逐位展开」两条尾巴：把 `linear_fp8_sm100` 家族的**支撑层三支**（`_utils` 143 行 / `_sm100_utils`
+  232 行 / `_tma_utils` 118 行）逐行打开，并在 host 上逐字重放描述符算术。见
+  `docs/68-mpk-fp8-linear-support.md`（快照 `f9eb70c`，本地 `/ssd/mirage_mpk_build`；CUTLASS
+  `f3fde583`；**纯源码走读 + 1 个 host 侧描述符位探针**，SM100 本体本机不可执行）。三条 headline：
+  **(A)（headline）** 支撑层是「**完整版 + K-major 子集副本**」——身体 A 用
+  `linear_fp8_sm100_sm100_utils.cuh`（`to_umma_layout_type`、MN-major、`float+MN` 强制 BASE32、
+  swizzle-16 对调、2SM MMA 结构体），身体 B/MoE 用 `sm100_utils.cuh`（`static_assert("Current Mirage
+  helper only supports K-major path.")`），**两处同名函数各定义一遍**；
+  **(B)（headline）描述符位编码逐位钉死**——`make_smem_desc` 三个字节偏移 `>>4`、`version_` bit[46,48)、
+  `lbo_mode_` bit[52]、`layout_type_` bit[61,64)；`make_sf_desc = SWIZZLE_NONE+stride 8*16`；
+  `InstrDescriptorBlockScaled` 对 N=16/128/256 得 `0x08840000/0x08a00000/0x08c00000`，
+  `make_runtime_instr_desc_with_sf_id = <<32` 与 CUTLASS 同名 constexpr 逐位 MATCH；
+  **(C)（headline）** `_tma_utils` 三个 tensormap helper 全仓零调用者、`tma_copy` 只服务身体 A、
+  2SM MMA 结构体零消费者。判据只贡献 C3。配套博客 post `mega-kernel-69-mpk-fp8-support`（weight 70）
+  并更新 `mega-kernel-00-index` 第 69 项。
+- 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计
+  （注：已核 demo 注释 `demo/qwen3/demo_30B_A3B_eagle3.py:839` 里的 `eagle3_draft_chain_step_attn`
+  快照全仓 `grep` **零命中**、builder 实走 `paged_attention_layer`，**不可走读**，仅供静态落差记录）；
+  或 SM100 专属布局的其余面——`fp8_group_gemm_sm100.cuh` 的 SF 段与 `linear_fp8_sm100.cuh` 的 SF
+  段**互相对照逐行**（`docs/33`/`docs/60`/本文各覆盖一部分、未并置对走）、WS 指令落地后的对照
+  （`docs/62` 记 CUTLASS `f3fde583` 无 `SM100_MMA_*_WS*`，可核 DeepGEMM 侧 WS 用法）、稀疏 A 的
+  2:4 物理排布/E→A 槽映射（`docs/63` 只到 trait 形状，未追硬件、`f9eb70c` 无 SM100 可跑）。
+  **`linear_fp8_sm100` 家族支撑层（`_utils`/`_sm100_utils`/`_tma_utils`）已由 P154-1/`docs/68` 补掉**；
+  **MLA-MTP TP 三兄弟已由 P153-1/`docs/67` 补掉**；**SM100 BF16 手工线性身体已由 P151-1/`docs/65`
+  补掉**；**BF16 MoE grouped linear 身体已由 P152-1/`docs/66` 补掉**；SM100 FP8 linear 内核内 tile
+  调度器已由 P150-1/`docs/64` 补掉；稀疏 UMMA 的 A 操作数通路已由 P149-1/`docs/63` 补掉；Hopper CuTe WS
+  GEMM device 家族已由 P147-1/`docs/61` 补掉；CUTLASS scale-factor TMEM trait 已由 P146-1/`docs/60`
+  补掉；TMEM 列布局 / UTCCP 重排已由 P145-1/`docs/59` 补掉；TMA 版 SMEM 布局已由 P144-1/`docs/58`
+  补掉；SM100 共享原语层已由 P143-1/`docs/57` 补掉。
+- 此前：**P153-1 完成（1/1）**。补掉「下一步候选」明留的「`mla_mtp_decode_tp2/4/8_sm100.cuh`
   三兄弟的内部未逐行处」（`docs/34`/P120-1 只给差异摘要），见 `docs/67-mpk-mla-mtp-tp.md`
   （快照 `f9eb70c`，本地 `/ssd/mirage_mpk_build`；**纯源码走读、无新实验**）。三条 headline：
   **(A)（headline）** 基版 `mla_mtp_decode_sm100.cuh` 是被运行期 `local_num_heads` 参数化过的「TP1
