@@ -1393,8 +1393,41 @@
   - 含义：**数据面认「总线程/SM」、控制面认「`K`」两个正交量** ⇒ 设计上应「用多块凑 1024 线程/SM、
     把 `K` 尽量做大」，二者在 SMEM 预算内可同时满足；把 §45 的 **warp specialization** 与本节的多
     block/SM 并列为「同 block 内 / 跨 block」两条兼顾路径。判据 C1–C4、无 C5（与 §36–§45 同档）。
-    **本轮新增实验**；P57-1 新留尾巴（§46.7）：合成 `uint4` 数据面、未观测到超饱和的争抢、未叠动态
-    生产者、未与 DeepGEMM SM100 路径对跑。
+     **本轮新增实验**；P57-1 新留尾巴（§46.7）：合成 `uint4` 数据面、未观测到超饱和的争抢、未叠动态
+     生产者、未与 DeepGEMM SM100 路径对跑。
+
+### P58 实验扩展 40：取 task × 动态生产者（`docs/04-experiments.md` §47）
+
+- [x] **P58-1** 补齐 §39.7/§40.8/§42.7/§43.7/§44.7/§45.7/§46.7 **每一节都明留的同一条尾巴**
+      「**未叠动态生产者**」：§39–§46 把「worker 取 task（控制面）」的载体/缓冲预算/占用率/HBM
+      饱和都量透了，但取数数组全是 **host 预写的静态块**；真实 megakernel 由设备侧 scheduler
+      **现场**把 task 推进 ready 队列。本节把「描述符来源」接进同一流水，并拆成两个正交成本：
+      **调度（预计算描述符 + 设备只推就绪）** vs **生成（设备现场造 352 B payload）**。
+      见 `docs/04-experiments.md` **§47**，源码 `src/dyn_producer_fetch.cu`、脚本
+      `harness/dyn_producer_fetch.sh`、原始输出 `harness/dyn_producer_fetch.out.txt`（目标卡
+      H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B、`NDESC=393216`（静态数组
+      138.4 MB ≫ L2）、`K=32,D=2,T=256`、worker `G=131`（producer 另占 1 块）、min-of-9）。
+      三模式：`static`（m0，host 预写数组）/`sched`（m2，预写数组 + producer 只推 `head` + worker
+      `ld.acquire` 等）/`gen`（m1，producer 现场生成 payload 写有界环 + 背压 + `fence.proxy.async`
+      + release 发布）。核心结论：
+      - **§A 三模式逐位一致**（D=1..4，`got=404219327039195`）——现场生成 + release 发布 +
+        TMA 跨 proxy 读 + 有界环背压这套协议**不动数值**。
+      - **§B（headline）动态分两层、差 ~27×**：`EDW=0` 下 `static` 0.1605 ms / 862.5 GB/s（0.41 ns/条）、
+        **`sched` 1.3614 ms（8.48×，3.46 ns/条 ≈ 285M task/s）**、**`gen` 36.489 ms（227.4×，92.8 ns/条）**。
+        现场生成的瓶颈是**单 SM 标量写吞吐**（`NDESC/256=1536` 轮 × ~0.9 µs），与 `G` 无关。
+      - **§C** `gen` 的额外计算被存储隐藏（`PW≤1024` 恒 227×），`sched` 的额外计算直接显形
+        （`PW=4096` → 42.4×）——生成瓶颈在**存**、调度瓶颈在**决策**。
+      - **§D 有界环容量**：死锁边界 ~`2·(G·K)`（`CAP=4192` 死锁、`8384` 活），安全容量之上吞吐不变
+        （安全阀非吞吐旋钮，与 §35 一致）。
+      - **§E 接数据面**：`sched` 固定成本 ~1.2 ms，`EDW=4096` 时被藏到 **1.014×**（询动态调度近乎
+        免费，与 §44–§46「控制面被数据面藏住」一致）；`gen` 恒 ~36.5 ms **不随数据面缩小**。
+      含义：**megakernel 的「动态」必须落在调度（推 task id），不能落在生成 payload**——正是 MPK
+      （`runtime.cc` 预计算 `FullTaskDesc`、scheduler 只映射入队，`docs/06` §2/§3/§7）与 DeepGEMM
+      （编译期静态角色）的做法；论文 §5.2 的 AOT/JIT 分野在此有量化理由。判据：`sched`/`gen` 单常驻
+      kernel + producer/worker 角色（C1–C4），producer 固定角色 + 设备侧动态发布就绪，**比 §36–§46 更
+      靠近 C5**，但 worker 仍静态分配 batch ⇒ **仍差 C5 一步**。**本轮新增实验**；P58-1 新留尾巴
+      （§47.8）：`gen` 单块 producer/标量写（可分散/向量化但方向不变）、`sched` 是单块循环上界
+      （MPK 16 scheduler SM 更低）、合成描述符/数据面、未与 DeepGEMM SM100 路径对跑。
 
 ## 每轮增量流程（autopilot）
 
@@ -1420,7 +1453,29 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P57-1 完成（1/1）**。补掉 P56-1（§45）§45.7 明留的第一条尾巴——§45 量出「数据面
+- 当前进度：**P58-1 完成（1/1）**。补掉 §39.7/§40.8/§42.7/§43.7/§44.7/§45.7/§46.7 **每一节都明留的
+  同一条尾巴**「**未叠动态生产者**」：§39–§46 把「worker 取 task」的载体/缓冲/占用率/HBM 饱和都量透，
+  但取数数组全是 **host 预写的静态块**；真实 megakernel 由设备侧 scheduler **现场**推进 task。
+  `docs/04-experiments.md` 新增 **§47**，源码 `src/dyn_producer_fetch.cu`、脚本
+  `harness/dyn_producer_fetch.sh`、原始输出 `harness/dyn_producer_fetch.out.txt`（目标卡 H100/sm90a、
+  **固定空闲 device 3**、nvcc 13.2、`DW=88`、`NDESC=393216`、`K=32,D=2,T=256`、worker `G=131`、min-of-9）。
+  三模式 = `static`（预写数组）/`sched`（预写数组 + producer 只推 `head` + worker acquire 等）/
+  `gen`（producer 现场生成 352 B payload 写有界环 + 背压 + `fence.proxy.async` + release 发布）。
+  核心结论：
+  - **§A** 三模式任意 `D=1..4` **逐位一致**（`got=404219327039195`）——现场生成 + release 发布 +
+    TMA 跨 proxy 读 + 有界环背压**不动数值**。
+  - **§B（headline）动态分两层、差 ~27×**：`EDW=0` 下 `static` **0.1605 ms/862.5 GB/s（0.41 ns/条）**、
+    `sched` **1.3614 ms（8.48×，3.46 ns/条）**、`gen` **36.489 ms（227.4×，92.8 ns/条）**。
+    现场生成瓶颈 = **单 SM 标量写吞吐**（1536 轮 × ~0.9 µs），与 `G` 无关。
+  - **§C** `gen` 的额外计算被存储隐藏（`PW≤1024` 恒 227×），`sched` 的额外计算直接显形（`PW=4096`→42.4×）。
+  - **§D** 死锁边界 ~`2·(G·K)`（`CAP=4192` 死锁、`8384` 活），安全容量之上吞吐不变（安全阀非旋钮）。
+  - **§E** `sched` 固定成本 ~1.2 ms，`EDW=4096` 时被藏到 **1.014×**（**动态调度近乎免费**，与 §44–§46
+    「控制面被数据面藏住」一致）；`gen` 恒 ~36.5 ms **不随数据面缩小**。
+  含义：**megakernel 的「动态」必须在调度（推 task id）、不能在生成 payload**——正是 MPK（`runtime.cc`
+  预计算 `FullTaskDesc`、scheduler 只映射入队）与 DeepGEMM（编译期静态角色）的做法，给论文 §5.2 的
+  AOT/JIT 分野以量化理由。判据 C1–C4，producer 固定角色 + 设备侧动态发布**比 §36–§46 更靠近 C5**，
+  但 worker 仍静态分配 batch ⇒ **仍差 C5 一步**。**本轮新增实验**；P58-1 新留尾巴见 §47.8。
+- 此前：**P57-1 完成（1/1）**。补掉 P56-1（§45）§45.7 明留的第一条尾巴——§45 量出「数据面
   要多线程（`T=256→1024` 抬到 2983 GB/s）vs 控制面要少线程（掉到 891 GB/s）」这对相反最优，但占用率
   被 SMEM 环锁在 1 block/SM，自陈「测多 block/SM 需小环，但小 `K` 让控制面低效，两者不可兼得」。
   `docs/04-experiments.md` 新增 **§46**，源码 `src/fetch_exec_multiblock.cu`、脚本
