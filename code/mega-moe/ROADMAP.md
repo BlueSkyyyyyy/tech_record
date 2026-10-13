@@ -3627,6 +3627,30 @@
        E `BracketTracker` 5 边界；F/G 18+11 映射；H 16 形参逐字；I 别名 10/10 缺；J 序位反例；K 死代码。
        配套博客 `content/posts/mega-moe-125-generate-pyi-stub-generator`（索引页新增第 125 篇）。
 
+### P116 增量（opt-in，补齐所有 kernel 共用的「错误 / 断言层」）
+
+- [x] **P116-1** **两库共用的错误 / 断言层**（`DeepEP/deep_ep/include/deep_ep/common/exception.cuh`、
+      `DeepGEMM/deep_gemm/include/deep_gemm/common/exception.cuh` + `csrc/utils/exception.hpp` +
+      `csrc/utils/compatibility.hpp` + `common/compile.cuh`）：前面 125 篇把每个 kernel / host 入口 /
+      调度器 / 布局都拆过，但「每一行 kernel 发射前/后都要踩」的断言与错误检查宏一直当空气。
+      → `docs/126-deepgemm-deepep-exception-layer.md`（真实行号核对）：两个异常类逐行对称
+      （`EPException:11-23` / `DGException:13-24`，都只继承 `std::exception`、`what()` 返回拼串，
+      **只差 `exception` vs `error` 一词**）；**五个差异** ① 单文件 vs host/device 拆两文件
+      （DeepEP 94 行；DeepGEMM device 43 + host 67）② DeepEP 独有 `CUDA_DRIVER_CHECK`（走
+      `lazy_cuGetError*`，须在 `namespace deep_ep` 内用）/`NCCL_CHECK`/`EPExceptionWithLineInfo`
+      （仅 2 处，`ep.hpp:661`），DeepGEMM 独有 `DG_CUBLASLT_CHECK`/`DG_TRAP_ONLY_DEVICE_ASSERT`
+      ③ **分派键** `EP_UNIFIED_ASSERT`=`__CUDA_ARCH__`（精确）vs `DG_UNIFIED_ASSERT`=
+      `DG_IN_CUDA_COMPILATION`（`compile.cuh:5-7`，nvcc 全程定义）→ **`.cu` host 段用
+      `DG_UNIFIED_ASSERT` 展开成 `asm("trap;")`、汇编报 `no such instruction: trap`**（真机负向
+      编译坐实）；牵连 `layout/mega_moe.cuh:119-125` 的 `DG_HOST_ASSERT` 顺序敏感 ④ 两库都无
+      `py::register_exception` → 统一翻成 Python `RuntimeError`、消息保留文件:行号（真机编译
+      真实 pybind11 模块验证 5 宏）⑤ `*_STATIC_ASSERT` 在 DeepGEMM 两头 `#ifndef` 重复定义。
+      设备五个断言宏各 trap（独立进程 `cudaDeviceSynchronize` 全 `cudaErrorLaunchFailure`）。
+      **纯 host C++、架构无关**，H100(sm90) 真机 **36 PASS / 0 FAIL**
+      （`harness/exp_ep_dg_exception.{sh,py,out.txt}` + `src/exception_layer.cu` +
+      `src/exception_bridge.cpp`）。配套博客 `content/posts/mega-moe-126-exception-layer`
+      （索引页新增第 126 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3652,8 +3676,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P115 各增量完成（P15-1…P41-1、P42-1…P115-1）。**
-  本轮 P115-1：新建 `docs/125-generate-pyi-stub-generator.md`
+- 当前进度：**P0~P14 全部完成；P15~P116 各增量完成（P15-1…P41-1、P42-1…P116-1）。**
+  本轮 P116-1：新建 `docs/126-deepgemm-deepep-exception-layer.md`
+  （+`harness/exp_ep_dg_exception.{sh,py,out.txt}`、`src/exception_layer.cu`、
+  `src/exception_bridge.cpp`）——补齐**所有 kernel 共用的「错误 / 断言层」**：两个异常类逐行对称
+  （只差 `exception`/`error` 一词）、五个差异（单文件 vs 拆分、各自的 `*_CHECK`、
+  `EP_UNIFIED_ASSERT`=`__CUDA_ARCH__` vs `DG_UNIFIED_ASSERT`=`DG_IN_CUDA_COMPILATION` 的
+  **`.cu` host 段 `asm("trap;")` 真实陷阱**、无 `py::register_exception` → Python `RuntimeError`
+  且消息带文件行号、`*_STATIC_ASSERT` 重复定义）。纯 host C++、架构无关，H100(sm90) 真机
+  **36 PASS / 0 FAIL**。索引页新增第 126 篇。
+  上一轮 P115-1：新建 `docs/125-generate-pyi-stub-generator.md`
   （+`harness/exp_generate_pyi.{py,sh,out.txt}`）——补齐 P114 只一句话带过的
   **Python 类型桩生成器 `scripts/generate_pyi.py`**（890 行纯 stdlib）。要点：主流程五段
   （真机 `m.def` 62 条 / C++ 函数索引 290 条）、`.pyi` 参数名/类型取自 **C++ 签名**而 `py::arg`
@@ -4936,16 +4968,19 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P115 已完成（最新 **P115-1 DeepGEMM 的 Python 类型桩生成器 `scripts/generate_pyi.py`**：
+- **下一步**：P0~P116 已完成（最新 **P116-1 两库共用的错误 / 断言层 `EPException`/`DGException`**：
+  两个异常类逐行对称、五个差异（单文件 vs 拆两文件、各自 `*_CHECK`、`EP_UNIFIED_ASSERT`=
+  `__CUDA_ARCH__` vs `DG_UNIFIED_ASSERT`=`DG_IN_CUDA_COMPILATION` 的 `.cu` host 段
+  `asm("trap;")` 真实陷阱、无 `py::register_exception`→Python `RuntimeError`、`*_STATIC_ASSERT`
+  重复定义）；纯 host C++、H100(sm90) 真机 **36 PASS / 0 FAIL**；索引页新增第 126 篇。
+  可继续（均为增量、非承诺）：
+  `DeepEP/build.sh`+`develop.sh` 之外的 `cmake-build-*` 调试链、`scripts/quick_plot_pm.py`
+  离线绘图（第 88 篇只带过）、P96/P97 的轻微漂移清单关键路径定点复核、或两库 `csrc/utils/`
+  其余小工具（`system.hpp`/`tensor.hpp`/`compatibility.hpp`）的剩余角落。详见上）。
+  上一轮 P115-1：P0~P115 已完成（最新 **P115-1 DeepGEMM 的 Python 类型桩生成器 `scripts/generate_pyi.py`**：
   890 行纯 stdlib，把 `csrc/**` 里的 62 条 `m.def` + C++ 签名变成 `_C.pyi`；`BracketTracker` 四括号
   语义、类型/默认值映射、三处真实边界（`m.attr` 10 个别名无 stub、`std::variant` 过宽正则、
   `default_args` 序位错配）；纯 Python、H100(sm90) 真机 **45 PASS / 0 FAIL**；索引页新增第 125 篇。
-  可继续（均为增量、非承诺）：
-  `DeepEP/build.sh`+`develop.sh` 之外的 `cmake-build-*` 调试链、`scripts/quick_plot_pm.py`
-  离线绘图（第 88 篇只带过）、`csrc/indexing/main.cu` 两个 `*.template` 索引生成器、
-  或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
-  上一轮 P114-1：P0~P114 已完成（最新 **P114-1 两库的构建 / 打包 / 安装期地基**：`find_pkg_root` 四层
-  语义 + `get_nccl_lib_name` SONAME 兜底 + 持久化环境变量 codegen + `spec_from_file_location`
   绕开 `check_nccl_so`（=阻塞落点）+ 版本号 broad-except 吞成 `+local` + wheel 文件名/`DG_SKIP_CUDA_BUILD`
   + `prepare_includes` editable 坑；纯 Python、H100(sm90) 真机 **54 PASS / 0 FAIL**；索引页新增第 124 篇。
   可继续（均为增量、非承诺）：

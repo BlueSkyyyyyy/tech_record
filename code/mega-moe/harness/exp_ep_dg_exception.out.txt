@@ -1,0 +1,116 @@
+== 编译 src/exception_layer.cu（真实头文件）==
+compiled: /tmp/exception_layer
+
+==============================================================================
+== 环境坐标 ==
+==============================================================================
+DeepEP  : ~/github/DeepEP 93eb6eb Update README
+DeepGEMM: ~/github/DeepGEMM 057ca59 Public release 26/09/30 (#462)
+  489616d28c7e    94  deep_ep/include/deep_ep/common/exception.cuh  (DeepEP)
+  ab6b2bd75c06    43  deep_gemm/include/deep_gemm/common/exception.cuh  (DeepGEMM)
+  162f410d0493    67  csrc/utils/exception.hpp  (DeepGEMM)
+  dedda83af6e4    12  csrc/utils/compatibility.hpp  (DeepGEMM)
+  a13373053608    18  deep_gemm/include/deep_gemm/common/compile.cuh  (DeepGEMM)
+
+==============================================================================
+== A. 真机跑 src/exception_layer.cu（真实头文件）==
+==============================================================================
+== A. EPException 消息格式 / 类层次 ==
+   what() = `Assertion exception (foo.cuh:42): cond failed`
+[PASS] A1 EPException.what() 含 name/文件/行/原因
+[PASS] A2 EPException 是 std::exception 子类
+   EPExceptionWithLineInfo = `Dispatch CPU wait exception (~/proj/tech_record/code/mega-moe/src/exception_layer.cu:74): buffer#0`
+[PASS] A3 EPExceptionWithLineInfo 注入 __FILE__/__LINE__ 且 name=Dispatch CPU wait
+== B. EP_HOST_ASSERT / EP_HOST_UNREACHABLE ==
+[PASS] B1 EP_HOST_ASSERT(true) 不抛
+[PASS] B2 EP_HOST_ASSERT(false) 抛 EPException（含 #cond 文本）
+[PASS] B3 EP_HOST_UNREACHABLE 抛 EPException
+== C. EP_UNIFIED_ASSERT 的 host 分派 ==
+[PASS] C1 host 下 EP_UNIFIED_ASSERT → EP_HOST_ASSERT（抛 EPException 而非 trap）
+== D. CUDA_RUNTIME_CHECK（DeepEP）==
+[PASS] D1 CUDA_RUNTIME_CHECK 把 cuda 错误翻成 EPException（name=CUDA runtime）
+== E. CUDA_DRIVER_CHECK（DeepEP，走 lazy_* 符号）==
+   CUDA driver exception (~/proj/tech_record/code/mega-moe/src/exception_layer.cu:46): 101 (CUDA_ERROR_INVALID_DEVICE, invalid device ordinal)
+[PASS] E1 CUDA_DRIVER_CHECK 翻成 EPException（name=CUDA driver，含 lazy_cuGetError* 文本）
+== F. NCCL_CHECK（DeepEP）==
+[PASS] F1 NCCL_CHECK 翻成 EPException（name=NCCL）
+== G. EP_STATIC_ASSERT（编译期）==
+[PASS] G1 EP_STATIC_ASSERT(true) 正常编译通过
+== H. DGException 消息格式 / 类层次 ==
+   what() = `Assertion error (bar.cuh:7): nope`
+[PASS] H1 DGException.what() 用 `error` 而非 `exception`
+[PASS] H2 DGException 是 std::exception 子类
+[PASS] H3 DG_HOST_ASSERT 抛 DGException（含 #cond）
+[PASS] H4 DG_HOST_UNREACHABLE 抛 DGException
+== I. DG_CUDA_RUNTIME_CHECK / DG_CUBLASLT_CHECK（DeepGEMM）==
+[PASS] I1 DG_CUDA_RUNTIME_CHECK 翻成 DGException（name=CUDA runtime）
+[PASS] I2 DG_CUBLASLT_CHECK 翻成 DGException（name=cuBLASLt）
+== J. DG_UNIFIED_ASSERT 的 host 分派键（真实陷阱）==
+[PASS] J1 nvcc 编译下 DG_IN_CUDA_COMPILATION 已定义 → DG_UNIFIED_ASSERT 走 DG_DEVICE_ASSERT
+   → 因此源文件里**不能**在 host 代码用 DG_UNIFIED_ASSERT（会展开出 asm("trap;")，汇编失败）
+
+HOST RESULT: PASS=18 FAIL=0
+[PASS] A0 host 模式全通过  :: PASS=18 FAIL=0
+
+-- 设备端 trap（每模式独立进程，避免 sticky 错误）--
+  DEVICE EP_DEVICE_ASSERT   sync=cudaErrorLaunchFailure (unspecified launch failure)
+[PASS] A-dev EP_DEVICE_ASSERT 触发设备端 trap（同步返回错误）  :: DEVICE EP_DEVICE_ASSERT   sync=cudaErrorLaunchFailure (unspecified launch failure)
+  DEVICE EP_UNIFIED_ASSERT  sync=cudaErrorLaunchFailure (unspecified launch failure)
+[PASS] A-dev EP_UNIFIED_ASSERT 触发设备端 trap（同步返回错误）  :: DEVICE EP_UNIFIED_ASSERT  sync=cudaErrorLaunchFailure (unspecified launch failure)
+  DEVICE DG_DEVICE_ASSERT   sync=cudaErrorLaunchFailure (unspecified launch failure)
+[PASS] A-dev DG_DEVICE_ASSERT 触发设备端 trap（同步返回错误）  :: DEVICE DG_DEVICE_ASSERT   sync=cudaErrorLaunchFailure (unspecified launch failure)
+  DEVICE DG_TRAP_ONLY       sync=cudaErrorLaunchFailure (unspecified launch failure)
+[PASS] A-dev DG_TRAP_ONLY 触发设备端 trap（同步返回错误）  :: DEVICE DG_TRAP_ONLY       sync=cudaErrorLaunchFailure (unspecified launch failure)
+  DEVICE DG_UNIFIED_ASSERT  sync=cudaErrorLaunchFailure (unspecified launch failure)
+[PASS] A-dev DG_UNIFIED_ASSERT 触发设备端 trap（同步返回错误）  :: DEVICE DG_UNIFIED_ASSERT  sync=cudaErrorLaunchFailure (unspecified launch failure)
+
+==============================================================================
+== B. pybind11 翻译：EPException/DGException → Python RuntimeError ==
+==============================================================================
+[PASS] B0 真实 EPException/DGException 头文件编译成 pybind 模块成功
+[PASS] B throw_ep_assert → RuntimeError 且消息含 'Assertion exception'/'ep assert from bridge'  :: RuntimeError: Assertion exception (~/proj/tech_record/code/mega-moe/src/exception_bridge.cpp:14): false && "ep assert from bridge"
+[PASS] B throw_ep_line → RuntimeError 且消息含 'Bridge exception'/'line-info payload'  :: RuntimeError: Bridge exception (~/proj/tech_record/code/mega-moe/src/exception_bridge.cpp:15): line-info payload
+[PASS] B throw_ep_unreach → RuntimeError 且消息含 'Assertion exception'/'ep unreachable from bridge'  :: RuntimeError: Assertion exception (~/proj/tech_record/code/mega-moe/src/exception_bridge.cpp:16): ep unreachable from bridge
+[PASS] B throw_dg_assert → RuntimeError 且消息含 'Assertion error'/'dg assert from bridge'  :: RuntimeError: Assertion error (~/proj/tech_record/code/mega-moe/src/exception_bridge.cpp:17): false && "dg assert from bridge"
+[PASS] B throw_dg_unreach → RuntimeError 且消息含 'Assertion error'/'dg unreachable from bridge'  :: RuntimeError: Assertion error (~/proj/tech_record/code/mega-moe/src/exception_bridge.cpp:18): dg unreachable from bridge
+
+==============================================================================
+== C. 两库 EP_*/DG_* 宏用法普查（真实计数）==
+==============================================================================
+DeepEP  (csrc + deep_ep/include):
+    286  EP_HOST_ASSERT
+     13  EP_DEVICE_ASSERT
+    133  EP_STATIC_ASSERT
+      2  EP_HOST_UNREACHABLE
+     10  EP_UNIFIED_ASSERT
+     16  CUDA_RUNTIME_CHECK
+     32  CUDA_DRIVER_CHECK
+     20  NCCL_CHECK
+      2  EPExceptionWithLineInfo
+      8  EPException
+DeepGEMM (csrc + deep_gemm/include):
+    605  DG_HOST_ASSERT
+     35  DG_DEVICE_ASSERT
+    370  DG_STATIC_ASSERT
+     23  DG_TRAP_ONLY_DEVICE_ASSERT
+     36  DG_HOST_UNREACHABLE
+     13  DG_UNIFIED_ASSERT
+      4  DG_CUDA_RUNTIME_CHECK
+     27  DG_CUBLASLT_CHECK
+      6  DGException
+[PASS] C1 DeepEP 断言宏总用例 > 0  :: 断言宏 = 444
+[PASS] C2 DeepGEMM 断言宏总用例 > 0  :: 断言宏 = 1082
+[PASS] C3 DeepEP 同时有 NCCL_CHECK 与 CUDA_DRIVER_CHECK（DeepGEMM 没有）
+[PASS] C4 DeepGEMM 独有 DG_TRAP_ONLY_DEVICE_ASSERT
+
+==============================================================================
+== D. DG_UNIFIED_ASSERT 在 nvcc host 段的负向编译（真实陷阱）==
+==============================================================================
+/tmp/_p116_neg_unified.cu: Assembler messages:
+/tmp/_p116_neg_unified.cu:4: Error: no such instruction: `trap'
+[PASS] D1 host 段 DG_UNIFIED_ASSERT 编译失败（展开成 asm trap）
+[PASS] D2 host 段 EP_UNIFIED_ASSERT 正常编译（__CUDA_ARCH__ 未定义 → EP_HOST_ASSERT）
+
+==============================================================================
+TOTAL: PASS=36 FAIL=0
+==============================================================================
