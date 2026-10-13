@@ -1,0 +1,139 @@
+DeepEP bucket 集合通信的 copy-engine 路径与分块层实验 —— H100 (sm90a)，真实代码路径
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+DeepEP bucket 集合通信的 copy-engine 路径与分块层实验 —— H100 (sm90a)，真实代码路径
+device=NVIDIA H100 80GB HBM3 sm=9.0
+
+=== Part D(真实编译): bucket 布局 sizeof/offsetof（layout/bucket/*.cuh）===
+  Bucket=16 (offset num_bytes=8)
+  BarrierSignals=64 CopyEngineSignals=8192 AllGatherSignals=524288
+  AllReduceSignals=131072 ReduceScatterSignals=131072
+  BucketSignals=794688  BucketWorkspace=274792960  ChunkStorage=268435456
+  [PASS] 真实 sizeof(Bucket)=16, offsetof(num_bytes)=8（comm/bucket.cuh:25-27）
+  [PASS] 真实 sizeof(BarrierSignals)=64
+  [PASS] 真实 sizeof(CopyEngineSignals)=8192
+  [PASS] 真实 sizeof(AllGatherSignals)=512KiB
+  [PASS] 真实 sizeof(AllReduceSignals)=128KiB
+  [PASS] 真实 sizeof(ReduceScatterSignals)=128KiB
+  [PASS] BucketSignals 无内部 padding（成员皆 64B 对齐）
+  [PASS] 真实 sizeof(ChunkStorage)=256MiB
+
+=== Part 1: copy_engine_push = cudaMemcpyBatchAsync（driver.cpp:64-77）===
+  [PASS] 64 个 D2D 批拷贝逐字节一致（cudaMemcpyFlagPreferOverlapWithCompute）
+  [PASS] 任意长度/任意对齐的段（{1,2,3,7,4096,100}）逐字节一致
+  [PASS] 空拷贝列表为 no-op（driver.cpp:66）
+
+=== Part 2: copy_engine_sync/wait = cuStreamBatchMemOp（driver.cpp:79-104）===
+  [PASS] WRITE_VALUE_64 后 WAIT_VALUE_GEQ 生效（signal=7）
+  [PASS] WAIT_VALUE_GEQ：100 >= 50 立即通过
+  [PASS] 600 个 mem-op 超过 kNumMaxBatchMemOps(255) 被正确分批（driver.cpp:42-49）
+  [PASS] 两条 stream 的 WRITE/WAIT 交替握手（GPU 侧阻塞，非 host）
+
+=== Part 4: ChunkIterator 分块覆盖（layout/bucket/chunk.cuh:58-102，真实设备代码）===
+  [PASS] 单遍 stride=1 nb=2：每块恰好访问一次（6 块）、字节和=41083、部分尾块=1
+  [PASS] stride=2 stride=2 nb=2：每块恰好访问一次（6 块）、字节和=41083、部分尾块=1
+  [PASS] stride=4 stride=4 nb=4：每块恰好访问一次（10 块）、字节和=65531、部分尾块=3
+  [PASS] stride=8 stride=8 nb=3：每块恰好访问一次（26 块）、字节和=204804、部分尾块=2
+  [PASS] stride=128 stride=128 nb=1：每块恰好访问一次（201 块）、字节和=1638433、部分尾块=1
+
+=== 汇总（Part1/2/4）：PASS=20 FAIL=0 ===
+dump -> /tmp/deepep_bucket_ce.txt
+EXIT(parts124)=0
+
+### Part 3：单 GPU 模拟纯 NVLink all-gather（copy engine，多逻辑 rank）
+DeepEP bucket 集合通信的 copy-engine 路径与分块层实验 —— H100 (sm90a)，真实代码路径
+device=NVIDIA H100 80GB HBM3 sm=9.0
+
+=== Part 3: 纯 NVLink all-gather（copy engine，R=2）===
+  [PASS] R=2 shard=4096KiB：每个 rank 的缓冲含全部 2 个 shard，逐字节一致
+=== Part3 汇总：PASS=1 FAIL=0 ===
+  EXIT(R=2)=0
+DeepEP bucket 集合通信的 copy-engine 路径与分块层实验 —— H100 (sm90a)，真实代码路径
+device=NVIDIA H100 80GB HBM3 sm=9.0
+
+=== Part 3: 纯 NVLink all-gather（copy engine，R=4）===
+  [PASS] R=4 shard=1024KiB：每个 rank 的缓冲含全部 4 个 shard，逐字节一致
+=== Part3 汇总：PASS=1 FAIL=0 ===
+  EXIT(R=4)=0
+DeepEP bucket 集合通信的 copy-engine 路径与分块层实验 —— H100 (sm90a)，真实代码路径
+device=NVIDIA H100 80GB HBM3 sm=9.0
+
+=== Part 3: 纯 NVLink all-gather（copy engine，R=8）===
+  EXIT(R=8)=124
+DeepEP bucket 集合通信的 copy-engine 路径与分块层实验 —— H100 (sm90a)，真实代码路径
+device=NVIDIA H100 80GB HBM3 sm=9.0
+
+=== Part 3: 纯 NVLink all-gather（copy engine，R=16）===
+  EXIT(R=16)=124
+
+### Part 5：真·多 GPU 纯 NVLink all-gather（copy engine + peer 内存）
+DeepEP bucket 集合通信的 copy-engine 路径与分块层实验 —— H100 (sm90a)，真实代码路径
+device=NVIDIA H100 80GB HBM3 sm=9.0
+
+=== Part 5: 真·2-GPU all-gather（copy engine 跨 NVLink peer，all_gather.hpp:62-108）===
+  [PASS] 真 2-GPU：每块 GPU 的缓冲都含全部 2 个 shard，逐字节一致（跨 NVLink peer）
+=== Part5 汇总：PASS=1 FAIL=0 ===
+  EXIT(R=2)=0
+DeepEP bucket 集合通信的 copy-engine 路径与分块层实验 —— H100 (sm90a)，真实代码路径
+device=NVIDIA H100 80GB HBM3 sm=9.0
+
+=== Part 5: 真·4-GPU all-gather（copy engine 跨 NVLink peer，all_gather.hpp:62-108）===
+  [PASS] 真 4-GPU：每块 GPU 的缓冲都含全部 4 个 shard，逐字节一致（跨 NVLink peer）
+=== Part5 汇总：PASS=1 FAIL=0 ===
+  EXIT(R=4)=0
+DeepEP bucket 集合通信的 copy-engine 路径与分块层实验 —— H100 (sm90a)，真实代码路径
+device=NVIDIA H100 80GB HBM3 sm=9.0
+
+=== Part 5: 真·8-GPU all-gather（copy engine 跨 NVLink peer，all_gather.hpp:62-108）===
+  [PASS] 真 8-GPU：每块 GPU 的缓冲都含全部 8 个 shard，逐字节一致（跨 NVLink peer）
+=== Part5 汇总：PASS=1 FAIL=0 ===
+  EXIT(R=8)=0
+
+=== Python: host 算术层（真实源码抽取 + 独立复刻 + 真实 nvidia-smi 读数）===
+Failed to get RDMA connection speed: [Errno 2] No such file or directory: 'ibstat'
+DeepEP bucket 集合通信 —— host 算术层独立复刻与对拍（架构无关）
+
+=== A/B: 真实 host 带宽模型与 get_theoretical_num_sms（抽真实源码执行） ===
+    [带宽] sm_read=180 GB/s sm_write=45 GB/s nvlink=430.304 GB/s rdma=0.000 GB/s
+  [PASS] 每 SM HBM 读/写 = 180/45 GB/s（envs.py:194-204，硬编码 TODO）
+  [PASS] nvlink=430.304 = Σlinks(478.1) × 0.9（envs.py:231）
+  [PASS] 9 个域配置 × 3 op：真实 get_theoretical_num_sms 与独立公式逐点一致
+    [H100 NVLink-only 8 rank] reduce_scatter: num_sms=6
+    [H100 NVLink-only 8 rank] all_reduce: num_sms=4
+
+=== C: hybrid all-gather 的 chunk 尺寸自选择（all_gather.hpp:116-148） ===
+    [chunk] shard=64MiB R=8 N=8: num_best_chunks=2 t=8.760ms num_chunk_bytes=32768KiB
+    [chunk] shard=256MiB R=8 N=8: num_best_chunks=2 t=34.979ms num_chunk_bytes=131072KiB
+    [chunk] shard=1024MiB R=16 N=8: num_best_chunks=3 t=279.702ms num_chunk_bytes=262144KiB
+    [chunk] shard=16MiB R=4 N=4: num_best_chunks=1 t=0.487ms num_chunk_bytes=16384KiB
+    [chunk] shard=4MiB R=2 N=2: num_best_chunks=1 t=0.030ms num_chunk_bytes=4096KiB
+  [PASS] chunk 自选择取全枚举最小 + 后处理对齐(512B)/clamp([4K,256M]) 全部满足
+
+=== D: bucket 信号/工作区布局（layout/bucket/*.cuh + common/compiled.cuh） ===
+  [PASS] sizeof(Bucket)=16（comm/bucket.cuh:25）
+  [PASS] sizeof(BarrierSignals)=64=64（layout/common/barrier.cuh:11-23）
+  [PASS] sizeof(CopyEngineSignals)=8192=8192（copy_engine.cuh:10-13）
+  [PASS] sizeof(AllGatherSignals)=524288=512KiB（all_gather.cuh:11-15）
+  [PASS] sizeof(AllReduceSignals)=131072=128KiB（all_reduce.cuh:11-15）
+  [PASS] sizeof(ReduceScatterSignals)=131072=128KiB（reduce_scatter.cuh:12-17）
+    [推导] BucketSignals 下界=794688 B（每成员 64B 对齐、无内部 padding）
+  [PASS] BucketSignals(794688)×kNumMaxContexts(8)=6357504 ≤ kNumMaxSignalBytes(16MiB)
+  [PASS] ChunkStorage::kNumBytes=256MiB（chunk.cuh:13）
+  [PASS] num_allocated_qps = kNumMaxQPs(1024) / num_rdma_ranks（bucket.hpp:86）
+  [PASS] kNumMaxBuckets=64（comm/bucket.cuh:10）
+  [PASS] Python 推导的布局大小与真实编译 sizeof 逐项相等（BucketSignals=794688）
+
+=== E: 设备侧 dump 解析 ===
+    [deepep_bucket_ce.txt] parts124 PASS 20 FAIL 0 result OK
+  [PASS] deepep_bucket_ce.txt 含有效结果
+    [mg_2.txt] R 2 shard_bytes 4194304 result OK
+  [PASS] mg_2.txt 含有效结果
+    [mg_4.txt] R 4 shard_bytes 1048576 result OK
+  [PASS] mg_4.txt 含有效结果
+    [mg_8.txt] R 8 shard_bytes 262144 result OK
+  [PASS] mg_8.txt 含有效结果
+    [p3_2.txt] R 2 shard_bytes 4194304 seq_idx 2 result OK
+  [PASS] p3_2.txt 含有效结果
+    [p3_4.txt] R 4 shard_bytes 1048576 seq_idx 2 result OK
+  [PASS] p3_4.txt 含有效结果
+
+=== 汇总：PASS=21 FAIL=0 ===

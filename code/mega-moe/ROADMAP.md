@@ -1650,6 +1650,34 @@
       0 FAIL**；scaleout RDMA 腿与并行混合编排为 NCCL GIN 专属，仅源码分析。配套博客
       `content/posts/mega-moe-63-deepep-comm-barrier`（索引页新增第 63 篇）。
 
+### P54 增量（opt-in，补齐 DeepEP 与 EP all-to-all 并列的 bucket 集合通信）
+
+- [x] **P54-1** **DeepEP bucket 集合通信：copy-engine 路径、分块布局与算法选型**
+      （`deep_ep/buffers/bucket.py`；`csrc/buffers/bucket.hpp`；`csrc/kernels/bucket/{all_gather,all_reduce,reduce_scatter}.hpp`；
+      `csrc/kernels/driver/driver.cpp`；`deep_ep/include/deep_ep/{layout/bucket/*,impls/bucket/*,comm/bucket.cuh}`；
+      `deep_ep/utils/envs.py`）。前面第 7/48/51/53/58/59/63 篇全在 **EP 的 all-to-all** 语义下，
+      本篇补 DeepEP 里**另一套并列的通信设施** `BucketBuffer`（`all_gather`/`reduce_scatter`/`all_reduce`）
+      ——MoE 训练同步专家梯度/优化器状态的原语。**纯 NVLink all-gather 连 SM kernel 都不用**，交给硬件
+      copy engine，故架构无关，H100 真机实测；all_reduce/reduce-scatter 内核用 NCCL GIN/multimem 仅分析。
+      → `docs/64-deepep-bucket-collectives.md`（真实行号核对）：**三类算子 × 三物理域**（纯 NVLink / 纯 RDMA /
+      hybrid）的分派（`bucket.py:236-293`、`bucket.hpp:86`）；**copy-engine 四原语**（`driver.cpp:14-86`）：
+      `copy_engine_push=cudaMemcpyBatchAsync`（`attrs.srcAccessOrder=Stream`+`PreferOverlapWithCompute`、
+      **必须非 legacy 流**）、`copy_engine_sync/wait=cuStreamBatchMemOp`（`WRITE_VALUE_64`+`WAIT_VALUE_GEQ`，
+      GPU 侧阻塞，`kNumMaxBatchMemOps=255` 切分）；**纯 NVLink all-gather 协议**（`all_gather.hpp:62-108`）：
+      `CopyEngineSignals.base[kNumMaxNVLRanks]` 每 rank 一槽、`get_sym_ptr` 对称偏移、per-context `seq_idx`
+      单调计数（GEQ 故不需同值）、「到达屏障 → push → 完成屏障」两次 sync；**分块层**（`chunk.cuh:12-102`）：
+      `ChunkStorage=256MiB`、`ChunkIterator` 固定 stride 恰好覆盖每个 chunk（仅末块可不满）、五种信号结构
+      大小（`CopyEngineSignals=8192/AllGatherSignals=512KiB/AllReduceSignals=ReduceScatterSignals=128KiB`、
+      `BucketSignals=794688`）；**hybrid all-gather chunk 自选**（`all_gather.hpp:120-148`）与带宽模型
+      `get_theoretical_num_sms`（每 SM 读/写 180/45 GB/s、nvlink×0.9）。**H100 实测** `src/deepep_bucket_copy_engine.cu`
+      + `harness/exp_deepep_bucket.{sh,py,out.txt}`：① `cudaMemcpyBatchAsync` 64 段任意长/对齐逐字节、空 no-op、
+      传 `0` 流报 `invalid argument`；② mem-op write/wait 顺序 + 跨 stream 握手 + 600 个 mem-op 分批；
+      ③ **真·多 GPU（每 rank 一块 H100、peer access）跨 NVLink all-gather R=2/4/8 逐字节一致**；④ 单 GPU 多 stream
+      模拟 R=2/4 通过、R≥8 互锁（并发限制）；⑤ `ChunkIterator` include 真实头文件跑设备代码 5 组覆盖恰好一次；
+      ⑥ 真实编译 `sizeof` 与 Python 推导逐项相等；⑦ 带宽模型 9 域配置×3 算子与独立公式逐点一致、`nvidia-smi nvlink`
+      430.3 GB/s。**设备 PASS=20 / Python PASS=21 / 0 FAIL**。配套博客
+      `content/posts/mega-moe-64-deepep-bucket-collectives`（索引页新增第 64 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1674,8 +1702,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P53 各增量完成（P15-1…P41-1、P42-1…P53-1）。**
-  本轮 P53-1：新建 `docs/63-deepep-comm-barrier.md`（+`src/deepep_comm_barrier.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P54 各增量完成（P15-1…P41-1、P42-1…P54-1）。**
+  本轮 P54-1：新建 `docs/64-deepep-bucket-collectives.md`（+`src/deepep_bucket_copy_engine.cu`、
+  `harness/exp_deepep_bucket.{sh,py,out.txt}`）——补上 DeepEP 里**与 EP all-to-all 并列的另一套通信设施**
+  `BucketBuffer`（`all_gather`/`reduce_scatter`/`all_reduce`），MoE 训练同步专家梯度/优化器状态的原语。
+  最大亮点：**纯 NVLink all-gather 不用任何 SM kernel**，完全交给硬件 copy engine——`copy_engine_push =
+  cudaMemcpyBatchAsync`（`srcAccessOrder=Stream`+`PreferOverlapWithCompute`、**必须非 legacy 流**）、
+  `copy_engine_sync/wait = cuStreamBatchMemOp(WRITE_VALUE_64 + WAIT_VALUE_GEQ)`（GPU 侧跨 stream 屏障、
+  255/批切分），信号是 `CopyEngineSignals.base[kNumMaxNVLRanks]`、per-context `seq_idx` 单调计数（GEQ 故
+  不要求同值），一遍「到达屏障 → push 我的 shard → 完成屏障」即可；RDMA/hybrid 用 `ChunkIterator`
+  （固定 stride 恰好覆盖每个 chunk、仅末块可不满）负载均衡分块，hybrid all-gather 还有显式代价模型自选
+  chunk 尺寸；`get_theoretical_num_sms` 是解析式带宽模型（每 SM 读/写 180/45 GB/s、nvlink×0.9）。**H100 真机**：
+  copy-engine 原语、`ChunkIterator`（include 真实头文件跑设备代码）、真实编译 `sizeof`、带宽模型全部真跑；
+  并靠 `cudaDeviceEnablePeerAccess` 做了**真·多 GPU（每 rank 一块 H100）跨 NVLink peer 的 all-gather，
+  R=2/4/8 逐字节一致**；单 GPU 多 stream 模拟时 R≥8 互锁，反证「重叠的正交性来自真实并发的执行单元」。
+  all_reduce/reduce-scatter 内核用 `ncclDevComm`/`ncclGin`/`multimem`（本机 NCCL 2.29.7 无 GIN）仅源码分析。
+  **设备 PASS=20 / Python PASS=21 / 0 FAIL**。配套博客 `content/posts/mega-moe-64-deepep-bucket-collectives`
+  （索引页新增第 64 篇）。
+  上一轮 P53-1：新建 `docs/63-deepep-comm-barrier.md`（+`src/deepep_comm_barrier.cu`、
   `harness/exp_deepep_comm_barrier.{sh,py,out.txt}`）——补上 DeepEP 里每个 dispatch/combine/bucket
   kernel **开始与结束**都调用、却从没单独拆过的 **`comm::barrier` 同步地基**。三层：① **对称窗口句柄
   `NCCLGin`**（`handle.cuh:11-255`）——`get_sym_ptr`（`:64-92`）把「本 rank offset」翻译成「目标 rank
