@@ -8488,3 +8488,143 @@ producer `p` 负责 `NB` 个 batch 中的 `[p·bp, (p+1)·bp)`（`bp = ceil(NB/P
   须 `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, …)`；③ 控制数组按
   「最大 `P`」与「最大 `P·CAPp`」**分别**追踪容量重分配，否则 `P` 变化后 `cudaMemset` 越界报
   `invalid argument`。
+
+## 57. 每 worker 独立环（一对一对齐）：把 `D` 从「被前缀协议锁死」真正解锁（P68-1）
+
+> 本节接续 §55/§56（P66-1/P67-1），把两节**都明留、却从未实现**的那条「出路」做出来。§55.7 与 §56.7
+> 的结论一致：**`D` 不是自由性能旋钮，而是被环协议/拓扑锁死的自由度**——
+> prefix 下 strided `D>1` 死锁、contig 静默错；perslot 只解锁「正确性」、看不穿性能，且把阈值收紧到
+> `CAPp ≥ bp`。两节结尾给出同一句话的出路：「**保证『一个 producer ↔ 一个 consumer』的拓扑，或
+> 每 worker 独立环**」（= MPK 快照 `per_worker_queue_len=8192` 的真实形态），但本机**从未跑过这个配置**。
+> 本节补上，并量化它的解锁与代价。
+
+### 57.1 机制：把「分配形态」换成「对齐拓扑」（唯一变量）
+
+骨架 = `P` 个 producer 块 + `G` 个 worker 块（`grid = P + G` 全共驻、单常驻 kernel），与 §47–§56 同：
+producer `p` 负责 `[p·bp,(p+1)·bp)`（`bp=ceil(NB/P)`），写进**环 `p`**（`CAPp` 槽×每槽 `K` 条描述符）；
+worker 用 **TMA bulk load** 取槽、折叠描述符，全 worker 之和 `sink` 与 host 参考逐位比。环协议**固定为
+prefix**（§55 原样，隔离拓扑这一唯一变量）：
+
+$$ \text{背压门 } tail[own]{+}CAPp \ge bl{+}1 \quad;\quad \text{发布 } head[own]=bl{+}1 \quad;\quad
+\text{就绪门 } head[own] \ge bl{+}1 \quad;\quad \text{回收 } atom.add.release\ tail[own]{+}{=}1 $$
+
+唯一机制变量 = **worker→batch 映射**（`wassign`），三条拓扑：
+
+| 拓扑 | 映射 | `own=bb/bp` | 环的消费者数 |
+|---|---|---|---|
+| `shared-strided` | `bb = w + t·Gw` | 每个 worker 的相邻批**跨多个 producer** | 每个环被**多个** worker 共享 |
+| `shared-contig` | `bb = w·chunk + t`，`P≠G`、`chunk≠bp` | worker 区间**跨** producer 边界 | 每个环被**多个** worker 共享 |
+| **`pair`**（本节新增） | `bb = w·chunk + t`，**`P==G`、`chunk==bp`** | **`own == w`** | **每个环恰好 1 个 worker** |
+
+**关键观察**：当 `P == G` 时 `chunk == bp`，于是全局 contig 分配下每个 worker 的连续区间
+`[w·chunk,(w+1)·chunk)` 恰好 == 一个 producer 的区间 `[w·bp,(w+1)·bp)`，`own == w`——**每个环恰好一个
+producer、一个 consumer**，前缀计数器「恰好等于该环完成数」→ 语义精确 → `D>1` 应当可用。这就是
+§55.7/§56.7 说的「一对一对齐拓扑 / 每 worker 独立环」，本节称 `pair`，本机首次实测。
+
+源码 `src/perworker_ring.cu`、脚本 `harness/perworker_ring.sh`、原始输出
+`harness/perworker_ring.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B、
+`K=32`、`T=256`、min-of-3/5；`pair` 用 `P=G=66`、`shared` 用 §55/§56 的 `P=32 G=100`，两者 `grid=132`）。
+
+### 57.2 §A 正确性（宽松环 `CAPp=bp`）：协议在无背压时不动数值
+
+宽松环 `CAPp=bp`（环装得下整个 producer 区间、背压永不触发），`host_ref = 281514573791934`，全部 `OK`：
+
+| 拓扑 | P/G | D=1 | D=2 | D=4 | D=8 |
+|---|---|---|---|---|---|
+| `shared-strided` | 66/66 | OK **86.9** | OK 89.9 | OK 90.2 | OK 89.9 |
+| **`pair`** | 66/66 | OK **126.9** | OK 130.9 | OK 129.1 | OK 126.2 |
+| `shared-contig` | 32/100 | OK 77.9 | OK 79.7 | OK 79.0 | OK 79.0 |
+
+（数字 = `descGB/s`。）**clean control**：`shared-strided` 与 `pair` **同 `P=G=66`、同 `grid=132`、同工作**，
+唯一差别是映射——`90 → 130 GB/s`（**1.45×**）。原因：`shared-strided` 下每个 worker 的相邻批跨多个
+producer，**每个 `tail[p]` 被多个 worker 并发 `atom.add.release`**（跨 worker 共享前缀计数器 + 各自的
+TMA 等待串起来）；`pair` 下 `tail[w]` 只被 worker `w` 一个消费者碰，前缀计数器无争用、且读的是连续
+环区（局域性好）。**即「每 worker 独立环」本身就不只是为了 `D`，还是端到端吞吐的 1.45×。**
+
+### 57.3 §B 紧环 `CAPp=4`：拓扑决定 `D` 能否用（headline）
+
+| 拓扑 | P/G | D=1 | D=2 | D=4 | D=8 |
+|---|---|---|---|---|---|
+| **`pair`** | 66/66 | **OK 129.1** | **OK 131.4** | **OK 85.5** | ABORT |
+| `shared-strided` | 32/100 | OK 15.9 | **ABORT** | ABORT | ABORT |
+| `shared-contig` | 32/100 | **WRONG** 8.1 | **WRONG** 4.2 | OK 1.4 | ABORT |
+
+- **headline**：`pair` 在 `D=1..4` 全部 `OK`（`D=8` 因 `4<D` 必死锁，见 §57.4），而**两种 `shared` 形态**
+  在 `D≥2` 全部 `ABORT`/`WRONG`——把 `chunk` 与 `bp` 对齐、让每个环只有一个消费者后，
+  **prefix + `D>1` 从「死锁/静默错」变为「正确」**。§55.7/§56.7 的出路预测**证实**。
+- 复现 §55/§56：`shared-strided + D=1` 是共享形态唯一正确的紧环档（15.9）；`shared-contig` 在 `D=1/2`
+  **静默错**（`WRONG`、且"更快"），`D=4` 侥幸 `OK` 但被强节流（1.4 GB/s），`D=8` 死锁。
+- `pair D=4 / CAPp=4` 虽 `OK` 但只有 85.5 GB/s（≈ `D=1` 的 66%）——`CAPp==D` 时 producer 频繁顶到
+  背压门空转，**`CAPp* = D` 是「正确」的临界、不是「满速」的临界**（见 §57.4）。
+
+### 57.4 §C `pair` 的解锁阈值：`CAPp* = D`（新闭式）
+
+`pair`、`NB=4096`、绑死 `D` 扫 `CAPp`（`ABORT` 时间 = 守门狗 ~1.1 s，非性能）：
+
+| D | CAPp=1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| 2 | ABORT | **OK** 84.6 | OK 131.4 | OK 131.3 | OK 131.2 |
+| 4 | ABORT | ABORT | **OK** 85.2 | OK 129.8 | OK 129.4 |
+| 8 | ABORT | ABORT | ABORT | **OK** 85.7 | OK 126.6 |
+
+- **正确性阈值精确 = `CAPp ≥ D`**：`pair` 下 worker 顺序消费自己区间，`issue(t+D)` 要的槽
+  `(t+D)%CAPp` 的上一个占用者是批 `t+D−CAPp ≤ t`，只要 `CAPp ≥ D` 就已被本 worker 消费过 → 永不
+  阻塞自己。逐行吻合。
+- **但 `CAPp==D` 只有 ~85 GB/s、`CAPp≥2D` 才回到 ~130**：等号处 producer 每写一批就要等 worker 腾一格，
+  **背压往返暴露**；多留 `D` 格缓冲（`CAPp≈2D`）才把写侧与消费侧解耦。故 **`CAPp* = D` 是下限，实用
+  取 `CAPp ≈ 2D`**——呼应 §41/§42/§54「环深只需 2 槽」在 `pair` 语义下的等价形态。
+
+### 57.5 §D/§E `D` 的**性能**增量很小，解锁的是「可用性」
+
+`pair` 宽松环、`NB=8192`，吞吐随 `D`：`126.0 → 133.6 → 132.7 → 131.4 GB/s`（`D=1→2` **+6%**，
+`D≥2` 饱和）。**即 `pair` 一旦让 `D` 可用，`D` 自身的性能收益只有 ~6%、`D=2` 即到顶**——与 §43（预取缝
+被 task 执行藏住）、§54（端到端被写侧主导）一致。`D` 的解锁是**「从死锁/静默错变成正确」**这一层，
+不是「`D` 越大越快」。
+
+§E 三拓扑同 `grid=132`、同工作（`NB=8192`、`D=1/2/4`）：`pair` 125.9/133.7/132.6 vs `shared-strided`
+78.4/80.5/80.4 vs `shared-contig` 78.5/80.5/80.1——`pair` ~1.6×，但此格 `pair` 的 `P=66` 是 `shared` 的
+`P=32` 的两倍，混入了 producer 侧并行度（clean control 见 §57.2 的同 `P/G` 对照 1.45×）。
+
+### 57.6 与 MPK / DeepGEMM 的对应
+
+- **`pair` = MPK 的 per-worker 环**：MPK 每个 worker 有独立队列（`per_worker_queue_len=8192`、
+  `persistent_kernel.cuh:1790-1791`），由 scheduler 单点填、worker 单点消费——正是「一个生产者一个消费者
+  的环」。本节把这条「各队列独立、前缀计数精确」的性质从「源码走读」落成**实测的解锁条件**。
+- **对齐 = 防死锁的第一性理由**：§31–§35 的「阻塞数 `B(π)`/容量上界」、§57 的「`own==w` 对齐」是同一件
+  事的两面——`D>1` 在共享前缀下把「跨 worker 的旧批」变成队列里的**先决依赖**，对齐把鱼骨剪成独立的
+  串。DeepGEMM 用编译期静态角色 + ring generation 逐槽发布来保证「每槽只有一个消费者」，等价于把
+  `own==w` 做进协议。
+- 与 `docs/06` §3（MPK 事件驱动入队）、`docs/02` §1.5（DeepGEMM ring barrier）交叉引用。
+
+### 57.7 结论与判据
+
+- **§55.7/§56.7 的「出路」证实**：把 worker→batch 映射对齐成 **`P==G`、`chunk==bp`**（每 worker 独立环、
+  一个 producer 一个 consumer）后，**prefix + `D>1` 从死锁/静默错变成正确**（§57.3），阈值 `CAPp* = D`
+  （§57.4）。这是本机此前一直缺的配置。
+- **解锁有两层价值**：(a) **可用性**——`D>1` 从不可用到可用；(b) **吞吐**——同 `P/G` 下 `pair` 相对
+  `shared-strided` 宽松环 **1.45×**（§57.2，去前缀计数器跨 worker 争用）。而 `D` 自身的性能增量很小
+  （+6%、`D=2` 饱和，§57.5）。
+- **代价**：要 `own==w` 就得 `P==G`——本模型里 producer 块数 = worker 块数（`grid=2G`）。真实系统用
+  **一个 scheduler 填 G 条 per-worker 环**（MPK 16 scheduler SM → 128 per-worker 队列）达到同样的
+  「每环一个消费者」，producer 侧不随 G 膨胀（见 §57.8）。
+- **判据**：三个拓扑的内核均 **C1–C4**（单常驻 kernel、多算子范围、设备内 `head/tail` + 环容量协调），
+  `P` 个固定角色 producer + `G` worker（静态 batch 分配）；**仍差 C5**（无动态 worker/scheduler 派发），
+  与 §47–§56 同档。`pair` 是这四个条件里唯一让「有界环 + 预取」**对任意分配形态可用**的骨架。
+
+### 57.8 局限与踩到的坑
+
+- **`pair` 强制 `P==G`**：本模型靠 producer 块数 = worker 块数来获得「一消费者一环」，于是 `grid=2G`
+  比共享形态多占 `G` 个 producer SM。真实 MPK/DeepGEMM 是「**少 producer（scheduler）× 多 per-worker
+  环**」——一个生产者顺序填多条环、每条环仍单生产者单消费者（前缀计数仍精确），producer 侧不随 G 膨胀。
+  本节未实现「少 producer 轮转填多环」，故 `pair` 的**吞吐绝对数偏低、且 `P` 与拓扑有混杂**（§57.5 §E）；
+  §57.2 的同 `P/G` clean control 才是干净的拓扑对照。
+- **合成描述符/控制面**（内容 = `gen_word` 折叠，非真实 GEMM/RMSNorm），`static` 档不含 producer 生成成本；
+  未与 DeepGEMM SM100 路径对跑（SM100 专属，本机不具备）。
+- **阈值 `CAPp*=D` 只在 `P=G=66`、`bp=63`、`DW=88`、`K=32` 单配置逐点验证**（未扫其他 `bp`/`Gw`）；
+  `shared` 形态的阈值随配置变（未闭式，§56.5 同）。
+- **`ABORT` 行的时间是守门狗 ~1.1 s、不是性能数字**；`D=8/CAPp=4` 的 `pair` 与 `D=4` 的 `shared-contig`
+  的 `OK` 都是**临界/节流**档（85.5 / 1.4 GB/s），不可当满速读。
+- **踩坑**：① 首版把 share factor 设计成「producer 区间内交错分配（`bl=sub+t·s`）」——`s=2` 时两个 worker
+  的 `bl%CAPp` 恰好落在**不相交的槽**上（奇数/偶数），"共享环"名不副实、测出假 `OK`；改成与 §55/§56
+  一致的**全局 strided/contig** 映射后才复现出死锁/静默错。② worker 侧 `wassign==0` 的 `bb_of` 与
+  `static` 参考共用一处 lambda，需保证 `static` 档不走 producer 门（`wait_ready` 直接 `true`）。

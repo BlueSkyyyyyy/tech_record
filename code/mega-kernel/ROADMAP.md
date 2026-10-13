@@ -1699,10 +1699,36 @@
   - **§D 解锁阈值（新闭式）**：`perslot+contig` 需 `CAPp ≥ D`；`perslot+strided` 需 `CAPp ≥ bp`
     （=128、**与 `D` 无关**，比 prefix 的 `CAPp≈32` 更严）；`prefix+strided+D=2` 在 `CAPp=32` 即 OK。
     ⇒ per-slot 把 strided 的门**收紧**到「必须恰好回收该槽」。
-  - **§E 协议开销**：宽松环 per-slot 比 prefix 只慢 ~1.3–1.4%（写侧地板掩盖）——代价在**解锁阈值**、
-    不在协议本身。判据 C1–C4、仍差 C5（与 §47–§55 同档）。**本轮新增实验。**
+   - **§E 协议开销**：宽松环 per-slot 比 prefix 只慢 ~1.3–1.4%（写侧地板掩盖）——代价在**解锁阈值**、
+     不在协议本身。判据 C1–C4、仍差 C5（与 §47–§55 同档）。**本轮新增实验。**
 
+### P68 实验扩展 50：每 worker 独立环（一对一对齐）解锁 prefix+D>1（`docs/04-experiments.md` §57）
 
+- [x] **P68-1** 把 §55.7 / §56.7 **两处都明留、却从未实现**的那条「出路」做出来——「**保证『一个
+  producer ↔ 一个 consumer』的拓扑，或每 worker 独立环**」（= MPK 快照 `per_worker_queue_len=8192`
+  的真实形态）。关键观察：**当 `P == G` 时全局 contig 分配（`bb=w·chunk+t`）的 `chunk==bp`、`own==w`，
+  即每个环恰好一个 producer、一个 consumer**，前缀计数器精确 → `D>1` 应可用；本节把该配置跑出来。
+  见 `docs/04-experiments.md` **§57**，源码 `src/perworker_ring.cu`、脚本 `harness/perworker_ring.sh`、
+  原始输出 `harness/perworker_ring.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+  `DW=88`=352 B、`K=32`、`T=256`、min-of-3/5；`pair` 用 `P=G=66`、`shared` 用 §55/§56 的 `P=32 G=100`，
+  两者 `grid=132`；prefix 协议固定，唯一变量 = worker→batch 映射）。核心结论：
+  - **§A 宽松环（`CAPp=bp`）全 OK**；**clean control（同 `P=G=66`）只换映射**：`shared-strided` 90 vs
+    `pair` 130 GB/s = **1.45×**（`pair` 去掉了「每个 `tail[p]` 被多 worker 并发 `atom.add.release`」的
+    跨 worker 前缀计数器争用）。**即每 worker 独立环本身就不只为 `D`，还是吞吐的 1.45×。**
+  - **§B（headline）紧环 `CAPp=4`**：**`pair` 在 `D=1..4` 全部 OK（129/131/85）**，而 `shared-strided`
+    `D≥2` 全 `ABORT`、`shared-contig` `D=1/2` 静默 `WRONG`——**对齐成「一消费者一环」后 prefix+`D>1`
+    从死锁/静默错变为正确**；§55.7/§56.7 出路预测**证实**。
+  - **§C 解锁阈值（新闭式）**：`pair` 正确性阈值精确 **`CAPp* = D`**（`CAPp<D` 死锁）；但 `CAPp==D`
+    只 ~85 GB/s、`CAPp≈2D` 才回 ~130（等号处背压往返暴露）——**`CAPp* = D` 是下限，实用取 `CAPp≈2D`**，
+    呼应 §41/§42/§54「环深只需 2 槽」。
+  - **§D/§E `D` 的纯性能增量很小**：`pair` `D=1→2` **+6%**、`D≥2` 饱和——解锁的是**可用性**（死锁/静默错
+    →正确）而非「`D` 越大越快」，与 §43/§54 一致。三拓扑同 grid 同工作：`pair` ~1.6×，但此格混入
+    `P=66 vs 32` 的 producer 并行度（干净对照见 §A 的 1.45×）。
+  - **代价/局限**：本节靠 `P==G` 获得「一消费者一环」，故 `grid=2G`（producer 侧随 G 膨胀）；真实
+    MPK/DeepGEMM 是「少 producer（scheduler）× 多 per-worker 环」——一生产者顺序填多环、每环仍单消费
+    单生产，producer 侧不膨胀（**本节未实现，记为局限**）。判据 C1–C4、仍差 C5（与 §47–§56 同档）。
+    **本轮新增实验**；P68-1 新留尾巴（§57.8）：未实现「少 producer 轮转填多 per-worker 环」、
+    `CAPp*=D` 只单配置验证、合成描述符、未与 DeepGEMM SM100 对跑。
 
 ## 每轮增量流程（autopilot）
 
@@ -1728,7 +1754,29 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P67-1 完成（1/1）**。补掉 P66-1（§55）§55.8 明留的两条尾巴——「**contig 的静默错是
+- 当前进度：**P68-1 完成（1/1）**。把 §55.7 / §56.7 **两处都明留、却从未实现**的那条「出路」
+  做出来——「**保证『一个 producer ↔ 一个 consumer』的拓扑，或每 worker 独立环**」（= MPK 快照
+  `per_worker_queue_len=8192` 的真实形态）。关键观察：**`P == G` 时全局 contig 分配的 `chunk==bp`、
+  `own==w`，即每个环恰好一个 producer、一个 consumer**，前缀计数器精确 → `D>1` 应可用；本节把该
+  一直缺的配置跑出来。`docs/04-experiments.md` 新增 **§57**，源码 `src/perworker_ring.cu`、脚本
+  `harness/perworker_ring.sh`、原始输出 `harness/perworker_ring.out.txt`（目标卡 H100/sm90a、**固定
+  空闲 device 3**、nvcc 13.2、`DW=88`=352 B、`K=32`、`T=256`、min-of-3/5；`pair` 用 `P=G=66`、
+  `shared` 用 §55/§56 的 `P=32 G=100`，两者 `grid=132`；prefix 协议固定，唯一变量 = worker→batch 映射）。
+  核心结论：
+  - **§A 宽松环全 OK**；**clean control（同 `P=G=66`）只换映射**：`shared-strided` 90 vs `pair` 130 GB/s
+    = **1.45×**（`pair` 去掉了「每个 `tail[p]` 被多 worker 并发 `atom.add.release`」的跨 worker 前缀
+    计数器争用）——**每 worker 独立环本身就不只为 `D`，还是吞吐的 1.45×**。
+  - **§B（headline）紧环 `CAPp=4`**：**`pair` 在 `D=1..4` 全部 OK（129/131/85）**，而 `shared-strided`
+    `D≥2` 全 `ABORT`、`shared-contig` `D=1/2` 静默 `WRONG`——**对齐成「一消费者一环」后 prefix+`D>1`
+    从死锁/静默错变为正确**；§55.7/§56.7 出路预测**证实**。
+  - **§C 解锁阈值（新闭式）**：`pair` 正确性阈值精确 **`CAPp* = D`**；但 `CAPp==D` 只 ~85 GB/s、
+    `CAPp≈2D` 才回 ~130（等号处背压往返暴露）→ **`CAPp* = D` 是下限、实用取 `CAPp≈2D`**（呼应
+    §41/§42/§54「环深只需 2 槽」）。
+  - **§D/§E `D` 的纯性能增量很小**：`pair` `D=1→2` **+6%**、`D≥2` 饱和——解锁的是**可用性**而非
+    「`D` 越大越快」（与 §43/§54 一致）。判据 C1–C4、仍差 C5（与 §47–§56 同档）。**本轮新增实验**；
+    P68-1 新留尾巴（§57.8）：未实现「少 producer 轮转填多 per-worker 环」（真实 MPK 形态）、
+    `CAPp*=D` 只单配置验证、合成描述符、未与 DeepGEMM SM100 对跑。
+- 此前：**P67-1 完成（1/1）**。补掉 P66-1（§55）§55.8 明留的两条尾巴——「**contig 的静默错是
   『共享前缀 `tail` 协议』的性质，不是『连续分配』固有的**——换 per-slot 回收协议后连续分配可正确」
   与「**死锁/错误的具体边界未做闭式扫描**」。把 §55 的**共享前缀**有界环换成**每槽独立回收/就绪**
   （perslot `ready`/`reclaim`；对齐 DeepGEMM Mega Gate ring generation、`scheduler/mega_gate.cuh:13-39`），
