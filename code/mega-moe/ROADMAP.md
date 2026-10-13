@@ -3150,6 +3150,33 @@
       可 include、`InstrDescriptor`==4B。配套博客 `content/posts/mega-moe-110-sm100-tcgen05-umma`
       （索引页新增第 110 篇）。
 
+### P101 增量（opt-in，补齐「反向」一直缺席的端到端误差分解）
+
+- [x] **P101-1** **MoE 反向的 H100 数值复刻与误差分解**（第 14 篇的反向是「kernel 接得对不对」、
+      第 99 篇的前向是「误差从哪来」；本篇是第 99 篇的**反向对偶**——问「四项梯度的误差从哪来、
+      能否可加拆开、梯度方向是否保住」）。Mega MoE 没有反向 mega-kernel（第 14 篇 §6），反向天然
+      是四个独立 grouped GEMM。**主 kernel（SM100 tcgen05/packed UE8M0）仅分析**；反向的
+      数学/量化/布局用 SM90 `k_grouped_*_nt_contiguous` / `m_grouped_*_contiguous` 复刻，**H100 真机**。
+      → `docs/111-moe-backward-emulation.md`（真实行号核对）：先钉语义——Mega MoE 把 top-k 权重
+      **提前乘进 L1 输出**（`sm100_fp8_fp4_mega_moe.cuh:1134` `__fmul2_rn(__fmul2_rn(gate,up),weights)`，
+      权重 `:1087-1097` 缓存广播、`:604` 写入），combine 退化成纯 fp32 求和（`:1477-1490`），
+      故反向里 `dY` 直传、`w` 只出现在 SwiGLU 反向。四个 GEMM 角色（`W1=[E,2I,H]`、`W2=[E,H,I]`）：
+      `dW2=dYᵀa`（K=token，两操作数都激活）、`dA=dY·W2`（M=token，B=权重）、`dW1=dGᵀx`、`dX=dG·W1`；
+      host 入口 `gemm.hpp:373/181`、K 对齐 `:69`。**两层实验**（`harness/exp_moe_backward_emul.{py,sh,out.txt}`）：
+      ① **真实 kernel 锚点**（`T=64,H=512,I=256,E=8,topk=2`）——`kernel vs deq` dW **2.6e-4**（与第 14 篇
+      逐位同量级）、dX 1.5e-3（dgrad 输出经两个 top-k 槽 bf16 scatter-add）、`kernel vs fp64` 2.4e-2~3.5e-2、
+      cos ≥0.9994；② **量化来源分解（架构无关）**——参考量化器（激活 per-token 1D、权重 per-128 块 2D、
+      `dY` per-token）在去量化操作数上做精确 GEMM，逐来源开关。**H100 实测**（fp64 手写反向 vs
+      `torch.autograd.grad` 逐位 0 不符）：`none` 只剩 fp32 累加地板 ~5e-4~7e-4；`fwd_only` 就把 dX 推到
+      **7.2e-2**（占 `full` 8.97e-2 的 **80%**）——**反向误差一大半是前向带进来的**（前向把已量化的
+      激活/权重存下来），反向四项合计只多 ~1.7e-2。逐梯度分工：`dW2` 对反向权重量化**完全免疫**
+      （`+bwd_w` 与 `fwd_only` 逐位相同，`dW2` 不含权重）、`dX` 对反向权重量化最敏感（7.23e-2→8.25e-2，
+      per-128 块 2D 比 per-token 1D 粗）、`dW1` 对反向激活更敏感。DeepSeek 量级（`T=2048,H=7168,I=2048`）
+      规律不变（前向主导 ~90%），最坏 `full` 下 dX cos=0.9927 / dW2 cos=0.9980，**方向全部 >0.99**。
+      与前向对照（第 99 篇激活/权重「各占一半」5.7e-2/4.6e-2）：反向 ≈ 带进来的前向误差 + 新引入的
+      ~1.7e-2——**实践含义：想提反向梯度精度先治前向的 block-scale 量化**。配套博客
+      `content/posts/mega-moe-111-moe-backward-emulation`（索引页新增第 111 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3175,8 +3202,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P100 各增量完成（P15-1…P41-1、P42-1…P100-1）。**
-  本轮 P100-1：新建 `docs/110-sm100-tcgen05-umma.md`（+`src/tcgen05_umma.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P101 各增量完成（P15-1…P41-1、P42-1…P101-1）。**
+  本轮 P101-1：新建 `docs/111-moe-backward-emulation.md`（+`harness/exp_moe_backward_emul.{py,sh,out.txt}`）
+  ——补齐**「反向」一直缺席的端到端误差分解**（第 99 篇前向复刻的**反向对偶**；第 14 篇只答「kernel
+  接得对不对」）。要点：Mega MoE 把 top-k 权重**提前乘进 L1 输出**（`kernel:1134`），combine 退化成
+  纯 fp32 求和（`:1477-1490`），故反向 `dY` 直传、`w` 只在 SwiGLU 反向；四个 grouped GEMM 角色
+  （`dW2=dYᵀa` 两侧激活、`dA=dY·W2` 含权重、`dW1=dGᵀx`、`dX=dG·W1` 含权重）。**H100 真机两层**：
+  ① 真实 SM90 kernel 锚点 `vs deq` dW **2.6e-4**（复现第 14 篇）、`vs fp64` 2.4e-2~3.5e-2、cos≥0.9994；
+  ② 参考量化器做的**可加来源分解**——`fwd_only` 就把 dX 推到 7.2e-2（占 `full` 8.97e-2 的 **80%**：
+  反向误差一大半是前向带进来的）、`dW2` 对反向权重量化完全免疫、`dX` 对反向权重最敏感；DeepSeek 量级
+  前向主导 ~90%、最坏 `full` 下 cos>0.99。主 kernel SM100 仅分析。索引页新增第 111 篇。
+  上一轮 P100-1：新建 `docs/110-sm100-tcgen05-umma.md`（+`src/tcgen05_umma.cu`、
   `harness/exp_tcgen05_umma.{sh,out.txt}`）——补齐**第 49 篇（SM90 WGMMA 底座）的 SM100 严格对偶**：
   `deep_gemm/include/deep_gemm/ptx/tcgen05.cuh`（13 个 SM100 设备文件都 include，却从没单独读过）。
   要点：① **9 个 `*_SS::fma`**（6 data kind × {1SM,2SM} + 1 个 `ws`）——`cta_group::1/2`、`kind::`、
@@ -4318,7 +4354,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P100 已完成（最新 **P100-1 SM100 UMMA 指令底座 `ptx/tcgen05.cuh`**：
+- **下一步**：P0~P101 已完成（最新 **P101-1 MoE 反向的 H100 数值复刻与误差分解**：
+  第 14 篇只答「kernel 接得对不对」、第 99 篇拆了前向误差分解——本篇补上**反向对偶**：四个 grouped
+  GEMM 的角色、参考量化器做的**可加来源分解**（前向量化主导 ~80–90%、`dW2` 对反向后重量化免疫、
+  `dX` 最敏感）、真实 SM90 kernel 锚点（`vs deq` dW 2.6e-4 复现第 14 篇）、DeepSeek 量级最坏
+  `full` 下 cos>0.99；主 kernel SM100 仅分析，反向数学/量化/布局 H100 真机；详见上）。
+  上一轮 P100-1：P0~P100 已完成（最新 **P100-1 SM100 UMMA 指令底座 `ptx/tcgen05.cuh`**：
   第 49 篇 SM90 WGMMA 底座的 SM100 对偶——9 个 `*_SS::fma`（`cta_group::1/2`、`kind::`、`desc>>32`
   =instruction descriptor、`setp.ne.b32` 累积谓词）、`tmem_load_32dp32b<N>`、`umma_arrive_no_elect`、
   两条 `tcgen05.fence`；消费者 `sm100_bmk_bnk_mn.cuh`（把第 17 篇 §6 落成最小样本）；H100 真机
