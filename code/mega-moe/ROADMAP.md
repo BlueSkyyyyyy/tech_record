@@ -4209,6 +4209,30 @@
       `harness/exp_wgrad_accum_cost.{py,sh,out.txt}`。配套博客
       `content/posts/mega-moe-145-wgrad-accum-cost`（索引页新增第 145 篇）。
 
+### P136 增量（opt-in，把 P135-1 结尾的「bf16 输出 2.2× 上界」落地并量精度代价）
+
+- [x] **P136-1** **MoE wgrad 换 bf16 输出的精度代价：2.2× 上界的落地与「归约税」**
+      （`csrc/apis/gemm.hpp:373-427/320-371`、`csrc/jit_kernels/impls/sm90_fp8_gemm_1d1d.hpp:84/94`、
+      `csrc/jit_kernels/impls/sm90_fp8_gemm_1d2d.hpp:81`、`sm90_fp8_gemm_1d1d.cuh:346-349`、
+      `deep_gemm/utils/math.py:26/52/62`、`sm100_fp8_fp4_gemm_1d1d.hpp:325`；对照第 12/15/145 篇）。
+      第 145 篇只量了「换 bf16 输出能快多少（2.23×）」，没量**精度代价**。本篇用真实 SM90 kernel 落地
+      并拆开。**合同**：SM90 只有两种输出形态、**没有「fp32 直写」**——1D1D `k_grouped` 必 fp32 且必累积
+      （`gemm.hpp:384/403`、`sm90_fp8_gemm_1d1d.hpp:84`、`SM90_TMA_REDUCE_ADD_2D`），1D2D 必 `not c` 且
+      `d==bf16`（`sm90_fp8_gemm_1d2d.hpp:81`）。**Part A 单步精度分解**（`dW2 M=2048,N=7168,E=8,k_e=512`，
+      逐专家 fp64 参考）：**FP8 输入量化噪声 3.63e-2**、REF fp32 累积 **1.18e-4**、**仅末次 bf16 舍入
+      1.41e-3**、ALT 1D2D bf16 **1.42e-3**、REF vs ALT 3.67e-2（≈FP8 噪声）；`cos=0.9993230`、
+      `GNS=3.68e-2`——**bf16 输出误差比 FP8 输入噪声小 25.8×**。**Part B 累积 S 步**：REF 1.18e-4→1.26e-4
+      （几乎不涨）、ALT 1.42e-3→1.63e-3（缓涨、相对误差近恒定 ~ε_bf16）、cos 稳在 0.99932。**Part C 落地计时**
+      （单步 **纯 GEMM 2.27×**：REF 500.5us/步 240 TFLOPS → ALT 220.8us/步 545 TFLOPS）后再扫 S：
+      端到端比 **S=1 0.83×（额外物化一份 fp32 反而更慢）→ S=2 1.07× → S=4 1.38× → S=8 1.54× → S=16 1.52×**，
+      **在 S≈8–16 封顶 ~1.55×**（归约每步读一份 bf16 `E·M·N·2B=235MB`、实测 ~2.4–2.8 TB/s=HBM 73–84%、
+      已是带宽最优，归约占 ALT 32–63%），渐近上界 ≈1.58×。**结论**：bf16 输出「精度免费、收益有条件」——
+      仍要物化 fp32 梯度就得赔归约税（~1.55× 封顶），**只有优化器直接吃 bf16 梯度**才拿回 2.2×；要吃到收益
+      是**协议改动**（放开 `k_grouped` 输出类型 / 改累积），不是 kernel 微调。**踩坑**：k_grouped host 操作数是 **group-major `[E,mn,k_g]`**（`quant_kg` 写 `xf.T.reshape(-1)`），
+      fp64 参考必须**逐组切片再拼列**（当成 `[mn,total_k]` 会让参考 O(1) 崩）。SM100 wgrad `tn` 同族 fp32 累积、
+      **仅分析**。H100(sm90) 真机、空闲 GPU1 单进程。`harness/exp_wgrad_bf16_output.{py,sh,out.txt}`。配套博客
+      `content/posts/mega-moe-146-wgrad-bf16-output`（索引页新增第 146 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4239,8 +4263,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P135 各增量完成（P15-1…P41-1、P42-1…P135-1）。**
-  本轮 P135-1：新建 `docs/145-wgrad-accum-cost.md`
+- 当前进度：**P0~P14 全部完成；P15~P136 各增量完成（P15-1…P41-1、P42-1…P136-1）。**
+  本轮 P136-1：新建 `docs/146-wgrad-bf16-output.md`
+  （+`harness/exp_wgrad_bf16_output.{sh,py,out.txt}`）——把第 145 篇结尾的「wgrad 换 bf16 输出的
+  2.2× 上界」**落地并量精度代价**。合同：SM90 只有两种输出形态、**没有 fp32 直写**（1D1D `k_grouped`
+  必 fp32 且必累积 `gemm.hpp:384/403`+`sm90_fp8_gemm_1d1d.hpp:84`；1D2D 必 `not c` 且 `d==bf16`
+  `sm90_fp8_gemm_1d2d.hpp:81`）。**精度分解**（逐专家 fp64）：FP8 输入噪声 3.63e-2、REF fp32 累积 1.18e-4、
+  **仅末次 bf16 舍入 1.41e-3**、ALT 1.42e-3、REF vs ALT 3.67e-2、cos 0.9993230——**bf16 输出误差比 FP8
+  输入噪声小 25.8× → 精度上基本免费**；累积 S=1→8 REF 几乎不涨、ALT 1.42e-3→1.63e-3（近恒定 ~ε_bf16）。
+  **落地计时（S=8）**：纯 GEMM **2.27×**（499.8→220.2us/步），加 `Σ` 一份 fp32 梯度 **838.5us
+  （2.80 TB/s≈HBM84%）**，**端到端只剩 1.54×** → 只有优化器直接吃 bf16 梯度才拿回 2.2×。**踩坑**：
+  k_grouped 操作数缓冲是 **group-major `[E,mn,k_g]`**，fp64 参考必须逐组切片拼接。SM100 `tn` 同族、仅分析。
+  索引页新增第 146 篇。
+  上一轮 P135-1：新建 `docs/145-wgrad-accum-cost.md`
   （+`harness/exp_wgrad_accum_cost.{sh,py,out.txt}`）——把第 15 篇「wgrad 被强制累积（D 回读）」这条
   根因**量化并拆开**。合同：`k_grouped_fp8_gemm_nt_contiguous` 必 1D1D（`gemm.hpp:384/403`）、`D` 必
   fp32 且累积（`sm90_fp8_gemm_1d1d.hpp:84`、kernel `SM90_TMA_REDUCE_ADD_2D` `:346-349`），dgrad 的
@@ -5759,7 +5794,20 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P135 已完成（最新 **P135-1 MoE wgrad 的强制累积代价量化**：
+- **下一步**：P0~P136 已完成（最新 **P136-1 MoE wgrad 换 bf16 输出的精度代价与 2.2× 上界落地**：
+  把第 145 篇结尾那条优化路线用真实 SM90 kernel 落地——SM90 只有两种输出形态（1D1D fp32/累积 vs 1D2D
+  bf16/无回读，`sm90_fp8_gemm_1d2d.hpp:81`），没有「fp32 直写」。**精度**：逐专家 fp64 参考下 bf16 输出
+  误差 1.41e-3 比 FP8 输入噪声 3.63e-2 小 **25.8×**、比 fp32 累积 1.18e-4 大 ~12×；累积 S=1→8 相对误差
+  近似恒定 ~ε_bf16、cos 稳在 0.99932。**性能**：单步纯 GEMM **2.27×**，但端到端扫 S 后
+  **S=1 0.83×（额外物化 fp32 反而更慢）→ S=8 1.54× → 封顶 ~1.55×**（归约每步读 235MB、~2.4–2.8 TB/s
+  =HBM73–84%、已是带宽最优）—— 只有优化器直接吃 bf16 梯度才拿回 2.2×。
+  **踩坑**：k_grouped 操作数是 group-major `[E,mn,k_g]`，fp64 参考须逐组切片拼接。SM100 `tn` 同族、仅分析。
+  H100 真机、空闲 GPU1。索引页新增第 146 篇）。
+  可继续（均为增量、非承诺）：
+  把「fp32 物化/归约税」这个条件进一步坐实——例如在 SM90 上用**融合进 epilogue 的 atomicAdd(fp32)** /
+  优化器侧直接消费 bf16 梯度，量它能把端到端从 1.54× 拉回多少；或对 P96/P97/P123 的轻微漂移清单关键路径
+  定点复核；或把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）。详见上）。
+  上一轮 P135-1 MoE wgrad 的强制累积代价量化（`docs/145`）：
   把第 15 篇「SM90 `k_grouped_nt` 强制累积（D 回读）→ 访存受限」这条根因用**同输出规模/同 FLOP**
   的四组对照拆开——真实 `k_grouped`(fp32,acc) / `E×`稠密 1D1D(fp32) / `E×`稠密 1D2D(bf16) /
   `m_grouped` 单组(求和)。**反直觉结论**：K 分组 kernel 本身不是问题（比手动发 8 个稠密快 14%），
