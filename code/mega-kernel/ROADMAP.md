@@ -3826,6 +3826,34 @@
   一致性只作推断、Ampere 无 params 通道「不能表达部分和」系静态推断、未追 `linear_with_bias_sm100`
   等其它残差约定。**本轮新增增量。**
 
+### P137 SMEM/DMEM 布局原语源码走读（`docs/51-mpk-smem-layout.md`）
+
+- [x] **P137-1** 补掉 `docs/44` §10 / `docs/48` §7 / P135-1 §10 **三处同时留的尾巴**
+      「`smem_row`/`ldsm`/`dmem_row` 布局定义未逐行」，把 `tasks/ampere/smem_layout.cuh`（514 行）
+      逐段打开。见 `docs/51-mpk-smem-layout.md`（快照 `mirage-project/mirage` 分支 `mpk` commit
+      `f9eb70c`，与 `docs/06`–`docs/50` 同快照；**纯源码走读（资料分析），本轮无新实验**）。三条 headline：
+      **(A)（headline）同一个 128 B swizzle 在文件里有三套并行写法**——位切片 `smem_row`/`smem_col`
+      （`:90-328`，`B/M/S` 参数、`icol ^= irow`；生产实例化 25+ 处，如 `attention_sm100.cuh:251-253`
+      的 `QOSmem=smem_row<T,3,3,3,…>`）、8×64 原子 `smem_row_tiled`（`:27-81`，硬编码
+      `AtomRBits=3`/`AtomCBits=6`，用于四个 Ampere paged-attention 变体）、CUTLASS 风格
+      `SwizzleOffsetCalculator`（`:330-344`，源码显式给 `cute/swizzle.hpp` 锚点）+ `smem_row_2drow/2dcol`/
+      `smem_col_2drow`（只被 `linear.cuh:150-151` 用）——同族于 `docs/20`「同一硬件惯用法实现两遍」。
+      **(B) 布局类型 = SMEM 的 ABI**：模板参数 `B/M/S` 编码 swizzle 模式（`B=M=S=0` 恒等=线性无 swizzle，
+      给 `cp.async` 写；`B=S=3`=128 B swizzle，给 `ldsm`/`ldmatrix` 读），是 `docs/38` §4 的
+      `copy_sm80.cuh`（写侧 `load_smem`）与 `ldsm`/`TMA`（读侧）之间的接口契约；跨代对照：Hopper
+      `multitoken_paged_attention_hopper.cuh` 走 TMA 故**不 include `smem_layout.cuh`**，而 Blackwell
+      `attention_sm100` 回到手写 `cp.async`+`ldsm`+`smem_row`（印证 `docs/38` §6）。**(C)** 逐行核
+      `dmem_layout.cuh`（108 行）三个全局逻辑包装 `dmem_row`/`dmem_row_const`/`dmem_col_const`
+      （`STRIDE` 与 `COL` 解耦、允许 padded；无 swizzle），并记两处工程坑：`dmem_*`(`<T,ROW,COL,STRIDE>`)
+      与 `smem_*`(`<T,B,M,S,…>`) 模板参数顺序不同；`smem_row_tiled_new`（`:281`/`:239` 注释）在快照里
+      不存在。判据**只贡献 C3**（device body 内部砖块）。配套博客 post
+      `mega-kernel-52-mpk-smem-layout`（weight 53）并更新 `mega-kernel-00-index` 第 52 项；把
+      「`smem_layout.cuh` 三套 swizzle 并存 + `dmem_*`/`smem_*` 参数序不同」补进「已知坑」。
+      P137-1 新留尾巴（文档 §8）：未构建；三套 swizzle 的数值等价性只按公式推断、未逐地址比对；
+      `smem_col` 消费者未全表；`SwizzleOffsetCalculator` 与 CUTLASS 未拉 commit 逐行比对；
+      `smem_row` 辅助 API（`get_phy_offset` 等）无外部调用者只记不判；未测 swizzle 对 bank 冲突/
+      `ldmatrix` 吞吐的量化影响。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4121,10 +4149,37 @@
   `silu_mul_linear`/`single_batch_extend`/`single_batch_gqa`/`norm_linear_hopper`/`prompt_lookup`/
   `target_verify` 等用裸名 `"common.h"`/`"../common.h"`——`tasks/` 下没有 `common.h`，即使把它们加进
   `task_header` 也编译不过（同 `docs/48`）。
+- **SMEM 布局层有三套并存的 swizzle 写法，且 `smem_*`/`dmem_*` 模板参数顺序不同**（P137-1/`docs/51`）：
+  `tasks/ampere/smem_layout.cuh` 里同一个 128 B swizzle 写了三遍——位切片 `smem_row`/`smem_col`
+  （`<T,B,M,S,ROW,COL,STRIDE>`，`icol ^= irow`，主用于手写 attention）、8×64 原子 `smem_row_tiled`
+  （硬编码 `AtomRBits=3`，四个 Ampere paged-attention 变体）、CUTLASS 风格 `SwizzleOffsetCalculator`
+  + `smem_row_2drow/2dcol`/`smem_col_2drow`（只被 `linear.cuh` 用）。**`B=M=S=0` 不是「非法」而是
+  「恒等/线性无 swizzle」**（`smem_row<T,0,0,0,…>` 给出 identity 映射，用于 `cp.async` 直写的输入缓冲
+  与 `zero_buffer`），`B=S=3` 才是 128 B swizzle（给 `ldsm`/`ldmatrix` 读）。另 **`smem_row` 的模板参数
+  是 `<T,B,M,S,ROW,COL,STRIDE>`、`dmem_row` 是 `<T,ROW,COL,STRIDE>`**（少三个 swizzle 参数、顺序也不同）
+  ——读/移植 device body 前先看它的 `using …Smem`/`…Dmem` 别名，别按名字猜参数序，否则静默算错 SMEM 地址。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P136-1 完成（1/1）**。兑现阶段「下一步候选」——补掉 `docs/48` **§7 明留的尾巴**「`my_gpu_id==0`
+- 当前进度：**P137-1 完成（1/1）**。补掉 `docs/44` §10 / `docs/48` §7 / P135-1 §10 **三处同时留的
+  尾巴**「`smem_row`/`ldsm`/`dmem_row` 布局定义未逐行」，把 `tasks/ampere/smem_layout.cuh`（514 行）
+  逐段打开。见 `docs/51-mpk-smem-layout.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：
+  **(A)（headline）同一个 128 B swizzle 有三套并行写法**——位切片 `smem_row`/`smem_col`（`B/M/S`
+  参数、`icol ^= irow`，生产 25+ 实例化）、8×64 原子 `smem_row_tiled`（硬编码 `AtomRBits=3`，四个
+  Ampere paged-attention 变体）、CUTLASS 风格 `SwizzleOffsetCalculator` + `*_2d*`（只被 `linear.cuh`
+  用，源码显式给 `cute/swizzle.hpp` 锚点）；**(B) 布局类型 = SMEM 的 ABI**（`B=M=S=0` 线性给
+  `cp.async` 写、`B=S=3` 128 B swizzle 给 `ldsm` 读；Hopper TMA 不 include 布局头、Blackwell
+  `attention_sm100` 回到手写 `cp.async`+`ldsm`+`smem_row`）；**(C)** 逐行核 `dmem_layout.cuh` 三个
+  逻辑包装 + 记两处坑（`dmem_*`/`smem_*` 参数序不同、`smem_row_tiled_new` 快照不存在）。判据只贡献 C3。
+  配套博客 post `mega-kernel-52-mpk-smem-layout`（weight 53）并更新 `mega-kernel-00-index` 第 52 项；
+  并把「三套 swizzle 并存 + `dmem_*`/`smem_*` 参数序」补进「已知坑」。
+- 下一步候选：可继续走其一——`docs/35` §9 遗留的其它未走读相邻层（CUTLASS `collective_builder` 侧
+  QK/PV atom——`mla_sm100_2sm.cuh` 的 CUTLASS 内部，`docs/36` §8 明留）；`docs/46` §6 的 FLAT-CACHE
+  draft attention 设计的完整追述；或 `docs/45`/`docs/44` 的 SMEM 片段仍余的内部未逐行处。
+  **`docs/48` §7 的「`my_gpu_id==0` 作 residual 的 TP 语义追链」已由 P136-1/`docs/50` 补掉**；
+  **`docs/44` §10 / `docs/48` §7 的布局层尾巴已由 P137-1/`docs/51` 补掉**（「无生产者融合算子扫描」
+  已由 **P135-1/`docs/49`** 全仓覆盖）。
+- 此前：**P136-1 完成（1/1）**。兑现阶段「下一步候选」——补掉 `docs/48` **§7 明留的尾巴**「`my_gpu_id==0`
   作 `residual` 的 TP 语义：未追 `runtime_config.my_gpu_id` 在多卡下的赋值链」。见
   `docs/50-mpk-multigpu-residual.md`（快照 `f9eb70c`，**纯源码走读、无新实验**——多卡需 ≥2 张 NVLink 卡 +
   NVSHMEM + MPI，本机不具备，与 `docs/17` 同）。三条 headline：**(A)** `my_gpu_id` 有两个互不相通来源——
