@@ -2801,6 +2801,34 @@
    本轮无新实验。** 配套博客 post `mega-kernel-19-mpk-transpiler`（weight 20）并更新
    `mega-kernel-00-index` 第 19 项。
 
+### P105 MPK runtime 模板库源码走读（`docs/19-mpk-runtime-templates.md`）
+
+- [x] **P105-1** 补齐 `docs/18`（P104-1）**§8 明留的尾巴**——「`include/mirage/transpiler/runtime/**`
+  （`kn::gemm` / `ElementUnaryKernel` / `ReductionKernel` / `InputAtom` / `Hopper_Matmul`）是被生成
+  代码调用的库，只当作黑盒引用」。见 `docs/19-mpk-runtime-templates.md`（快照
+  `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与 `docs/06`–`docs/18` 同一快照；纯源码走读、
+  无新实验）。把「被生成 CUDA 调用的运行期肉身」逐层走通——**23 个头、3017 行**。§0 两层 namespace
+  坐标（`kn::` = 一整个张量算子 = 一次 launch 的兜底；`tb::` = 在一个 `custom_kernel_N` 内按 thread
+  调用的算子实现）；§1 入口 `runtime.h`（前向声明生成函数 `:14/15`、`extern "C"` 首调用 `_init`
+  `:31-43`、Python wrapper `:47-60`；runtime `config.h` 的 `USE_NVSHMEM/NUM_GPUS` 开关 `:4-15`——
+  且注意 `threadblock/utils.h:3` 指的是另一个 `include/mirage/config.h`，`NUM_THREADS_PER_GROUP=128`
+  `:36-38`）；§2 `kn::` 四个整张量算子（element_unary `BLOCK_SIZE=512`、element_binary 的 stride-0
+  广播 `:52-89`、reduction 的 `REDUCTION_FACTOR` unroll、**matmul 直接包 `cublasGemmStridedBatchedEx`
+  `kernel/matmul.h:117-140`**）；§3 `tb::` 层——G↔S 四类拷贝原子（NonChunked/Chunked sync、
+  `cp.async.cg` 16B `input.h:150-152`、Hopper TMA `:166-254`、Blackwell TMA multicast `:353-384`）、
+  epilogue 寄存器链（`epilogues.h` 的 `Epilogue*→EpilogueStore`、`++epilogue_scalars` 指针前移）、
+  forloop_accum/reduction 含 **online-softmax 的 max/diff**（`reduction.h:82-150`）、三档 matmul
+  （通用 CuTe S2R/R2S + ldmatrix 选择 `matmul.h`、Hopper `GMMA::ss_op_selector` + cooperative 2-CTA
+  `hopper_matmul.h:90-107`、Blackwell UMMA+TMEM 累加器 `blackwell_matmul.h:125-192`）、流水
+  （`PipelineTmaAsync` / `PipelineTmaUmmaAsync` + cluster `pipeline_init_arrive/wait`）、profiler tag/
+  globaltimer、`wg_decrease/increase_regs` 受 `MIRAGE_GRACE_HOPPER` 门控（`utils.h:33-51`）；§4 生成
+  代码 ↔ 模板四条接口约定；§5 **headline——同一套硬件惯用法（warp specialization+TMA+wgmma/UMMA+
+  mbarrier+寄存器 epilogue）在仓库里实现了两遍**（`docs/07` 手写 MPK task vs 本 runtime 库），为
+  `docs/15` §7 的「工程落差」补运行期证据；§6 论文 §4.2 四项 intra-SM 优化逐条对照；§7 判据
+  **只贡献 C3**；§8 局限（纯走读未跑、未逐句展开 CuTe 模板装配、`triton_kernels.py`/参数生成逻辑未走、
+  Hopper/Blackwell 只给骨架）。**纯源码走读（资料分析），本轮无新实验。** 配套博客 post
+  `mega-kernel-20-mpk-runtime`（weight 21）并更新 `mega-kernel-00-index` 第 20 项。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2962,7 +2990,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P104-1 完成（1/1）**。补掉 `docs/15`（P101-1）**§9 末句明留的尾巴**——「`transpiler`
+- 当前进度：**P105-1 完成（1/1）**。补齐 `docs/18`（P104-1）**§8 明留的尾巴**——「`include/mirage/
+  transpiler/runtime/**` 是被生成代码调用的库，只当黑盒引用」。见 `docs/19-mpk-runtime-templates.md`
+  （快照 `f9eb70c`，纯源码走读无新实验）：把**被生成 CUDA 调用的 23 个 device/thread-block 模板头
+  （3017 行）**逐层走通——§0 两层 namespace（`kn::` 整算子兜底 / `tb::` 在 `custom_kernel_N` 内按
+  thread 调用）；§1 入口 `runtime.h` + 两个同名 `config.h` 坐标坑；§2 `kn::` 四算子（含 **matmul 直接
+  调 cuBLAS**）；§3 `tb::` 拷贝原子（cp.async/TMA/multicast）、epilogue 寄存器链、online-softmax 归约、
+  三档 matmul（CuTe / Hopper GMMA cooperative / Blackwell UMMA+TMEM）、mbarrier 流水、profiler、
+  `wg_*_regs`；§4 生成代码↔模板四条接口；§5 **headline：同一套硬件惯用法在仓库里实现了两遍**
+  （`docs/07` 手写 MPK task vs 本 runtime 库），补 `docs/15` §7 工程落差的运行期证据；§6 论文 §4.2
+  对照；§7 只贡献 C3；§8 局限。配套博客 post `mega-kernel-20-mpk-runtime`（weight 21）、更新
+  `mega-kernel-00-index` 第 20 项。
+- 此前：**P104-1 完成（1/1）**。补掉 `docs/15`（P101-1）**§9 末句明留的尾巴**——「`transpiler`
   只给管线结构（`src/transpiler/*` 约 8 千行），**未逐条读 SASS 级生成逻辑**」（P103-1 §11 记为
   「`docs/15` 另两条尾巴仍未覆盖」之一）。见 `docs/18-mpk-transpiler.md`（快照 `f9eb70c`，
   纯源码走读无新实验）：把一次 `KNGraph.compile()` 从 `kernel.py:396/431` → `core.pyx:1420` →
