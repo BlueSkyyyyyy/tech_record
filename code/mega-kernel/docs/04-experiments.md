@@ -13052,3 +13052,145 @@ DeepGEMM Mega MoE/Gate 用 `cluster_dim`（`impls/sm100_bf16_mega_moe.hpp:138`�
   环境 caveat——**卡上并发的其它 CUDA context 会让 cluster launch 间歇性失败**，本节计时项靠
   重试规避、边界项靠 3 次探针；`shift`（段位移）在 §18 已量、本节只作资源表项（26 regs + 32 B
   局部内存、与 `R` 无关）。
+
+## 87. cluster 跨 SM 交换：**远端读**（脆弱）vs **远端写 + 本地读**（稳）（P162-1）
+
+本节补掉 §86.7 明留的缓解建议——「**跨 SM 交换必须低并发/批量/环形化**（MPK ring barrier /
+DeepGEMM ring barrier）」——但 §86 只给了「重（8 笔在飞）/轻（1 笔在飞）」两点、**没扫在飞
+笔数 `U` 本身**，也没验证「批量/环形化」到底指哪种实现。生产 mega-kernel（DeepGEMM
+symmetric memory；MPK 对称显存 rank 切片，`docs/17` §3）实际用的是 **「远端写 + 本地读」**
+（生产者把结果写进对端 SMEM 的对称槽，消费者读**本地** SMEM），而**不是**「每线程拉一堆
+远端读」。本节把这两条路摆在一起。
+
+源码 `src/cluster_concurrency.cu`，脚本 `harness/cluster_concurrency.sh`，原始输出
+`harness/cluster_concurrency.out.txt`（目标卡 H100 / sm90a、**固定空闲 device 3**、nvcc 13.2、
+每配置独立进程——一次 cluster launch failure 会污染 CUDA context、计时项取 min-of-20 且报
+`ok=N/20`、边界项每配置起 3 个独立进程各 launch 1 次报 `ok/3`）。
+
+三条被测量载体（每 block 有 `snd`/`rcv` 两块 32 KB SMEM；每 block 每 round 移动
+`SEG = TH·U = 256·U` 个 `float` 的**远端字节**，两路字节数一致）：
+- `pull`：**远端读**——每线程 `U` 路在飞 `ld.shared::cluster` 读邻居 `snd`（= §86 的
+  `hread` 的可调 U 版），内层 `#pragma unroll`；
+- `pulls`：同 `pull` 但外层轮次 `#pragma unroll 1` **串行化**——用来验证「脆弱性来自编译器
+  把多轮 unroll 成多笔在飞」的原假设；
+- `push`：**远端写 + 本地读**——每线程 `U` 路 `st.shared::cluster` 把自己的 `snd` 推进邻居
+  `rcv`，`cluster.sync()` 后读**本地** `rcv` 累加（每 round 两次 `cluster.sync`：写完同步、
+  读完同步以防下轮覆写）。
+
+### 87.1 §A 资源表：三载体、U=1..16 全 0 spill、SMEM 把占用率钉在 3 blk/SM
+
+```
+  pull  U= 1..16  regs=30/32/32/32/32   localB=0
+  push  U= 1..16  regs=26/26/28/32/32   localB=0
+  pulls U= 1..16  regs=23/23/23/30/32   localB=0
+  占用率：三载体 × 全 U 都是 occ=3 blk/SM（动态 SMEM=64 KB 是唯一上限，§82.5）
+```
+
+`push` 的 `st.shared::cluster` 比 `pull` 的 `ld.shared::cluster` **少用几个寄存器**（U=1 时
+26 vs 30）——与本专题 §67/P79「SMEM 载体比直接寄存器读省」同向；且 `pulls` 的 `#pragma unroll 1`
+把寄存器压到 23（不展开轮次 ⇒ 在飞少 ⇒ 寄存器少），是下文串行化的对照组。
+
+### 87.2 §B（Q1）单次 launch 稳定性随「路径 × 总轮数」：pull 掉、push 全稳
+
+`C=2, U=8`，扫 `grid` 与 `rounds`（单次 launch、每配置 3 进程各 1 发）：
+
+```
+  pull   grid=396 rounds=4  3/3 | rounds=64  1/3
+  pull   grid=528 rounds=4  2/3 | rounds=64  0/3
+  pulls  grid=396 rounds=4  3/3 | rounds=64  1/3
+  pulls  grid=528 rounds=4  3/3 | rounds=64  0/3
+  push   grid=396 rounds=4  3/3 | rounds=64  3/3
+  push   grid=528 rounds=4  3/3 | rounds=64  3/3
+```
+
+- **单次 launch 就已能复现 §86.7**：`pull` 在 `grid=396` 由 `rounds=4` 的 3/3 掉到
+  `rounds=64` 的 **1/3**，`grid=528/rounds=64` **0/3**——**脆弱性随「累计远端读量」恶化**，
+  不只是瞬时在飞笔数。
+- **`push` 全稳**：所有 `grid`/`rounds` 组合 **3/3**。把「远端读」换成「远端写」后，同一
+  数据量、同一 cluster 拓扑下**不再出现 `unspecified launch failure`**。
+
+### 87.3 §C（Q2 headline）同一进程内重复 launch 20 次：push 恒 20/20，pull 的失败边界对源级 `U` **非单调**
+
+`C=2, grid=264, rounds=64`（每次 launch 一个 event 对，取 min-of-20、报成功次数）：
+
+```
+  pull   U=1   ok= 0/20   [unspecified launch failure]
+  pull   U=8   ok=20/20   46.6 µs | 2970.7 GB/s(远端) | 728 ns/lap
+  pull   U=16  ok= 0/20   [unspecified launch failure]
+  pulls  U=1 0/20 | pulls U=8 20/20 44.6 µs | 3100.6 GB/s | 698 ns/lap | pulls U=16 0/20
+  push   U=1   ok=20/20   79.7 µs |  217.1 GB/s(远端) | 1246 ns/lap
+  push   U=8   ok=20/20  100.8 µs | 1373.1 GB/s | 1575 ns/lap
+  push   U=16  ok=20/20  128.3 µs | 2157.3 GB/s | 2005 ns/lap
+```
+
+两点（一条 headline、一条**推翻原假设**）：
+- **headline：`push` 在 U=1/8/16 全部 20/20 稳定且数值正确（`maxerr=0`）；
+  `pull`/`pulls` 只在 U=8 时 20/20**——把远端读换成远端写后**可靠性从「看运气」变成「结构性稳」**。
+- **推翻「unroll 多笔在飞」假设**：`pulls`（`#pragma unroll 1`，刻意不让编译器跨轮展开）在
+  U=1/U=16 **同样 0/20**、U=8 同样 20/20——**失败边界不是「编译器把多轮 unroll 成多笔在飞」
+  的函数**（若如此，串行化的 `pulls` 应显著更稳，实际逐点与 `pull` 同形）。
+- **`U` 的边界非单调**（U=1、U=16 失败、U=8 通过）：说明脆弱性既不单由「源级在飞笔数」决定，
+  也非「越少越稳」——它落在 `ld.shared::cluster` 持续流量下的 driver/编译器实现细节上（与 §86.7
+  「边界随 body codegen 移动」一脉）。**这正是为什么工程上不应依赖「把 U 调小」来规避，而应
+  换掉路径本身**。
+
+### 87.4 §D（Q3）远端写 `push` 的吞吐随 `U` 近线性：216 → 2157 GB/s
+
+`C=2`，rounds=64（每条 20/20 稳）：
+
+```
+  grid=264:  U=1 216.5 | U=2 424.2 | U=4 730.9 | U=8 1367.9 | U=16 2151.4 GB/s
+  grid=528:  U=1 220.1 | U=2 432.5 | U=4 715.5 | U=8 1319.3 | U=16 1849.0 GB/s
+```
+
+`push` 吞吐随 `U` **近线性**（U=1→16 约 10×），因为每 round 两次 `cluster.sync()` 的固定开销
+被 `U` 条 `st.shared::cluster` 摊薄（对上 §79/§87.3 的「合量」观）。`push` 在低 `U` 时绝对吞吐
+低（216 GB/s）是**同步主导**（每 round 两屏障把 256 个 float 的搬运开销拉长）；`pull` 在其能跑的
+U=8 处达 ~3 TB/s，**但代价是随时可能 launch 失败**——这就是「快但不稳」与「稳但要多堆 `U`」的
+取舍。（`push` 的每 round 双 `cluster.sync` 是正确性所需：写完同步让邻居读到、读完同步防下轮覆写。）
+
+### 87.5 §E 更大 cluster：`C=4` 下 pull 连 `grid=132` 都 0/3，push 仍 3/3
+
+`C=4, U=8, rounds=64`：
+
+```
+  pull   grid=132 0/3 | grid=264 0/3
+  pulls  grid=132 0/3 | grid=264 0/3
+  push   grid=132 3/3 | grid=264 3/3
+```
+
+cluster 一变大（`C=4`），远端读的失稳区**向左扩到 `grid=132`（1×SM）**——与 §86.7「C 越大
+越脆弱」一致；而 `push` 在 `C=4` 下仍全稳。**远端写路径对 cluster 大小不敏感**。
+
+### 87.6 §F 轻通道对照：U=1、rounds=4 时两路都稳到 grid=1056
+
+```
+  pull  C=2 U=1 rounds=4: grid=264/528/1056 全 3/3
+  push  C=2 U=1 rounds=4: grid=264/528/1056 全 3/3
+```
+
+数据量很小时两条路都不触发脆弱性——再次说明**问题出在「持续/成规模的跨 SM 远端读流量」**，
+而非 cluster 原语本身（同 §86.7 的「轻通道稳到 1056」）。
+
+### 87.7 结论、判据与局限
+
+- **结论一（headline）**：生产 mega-kernel 的跨 SM 交换形态（**远端写 + 本地读**，DeepGEMM
+  symmetric memory / MPK 对称显存 rank 切片）在硬件原语层**结构性绕开了 §86.7 的
+  `ld.shared::cluster` 脆弱性**——`push` 在所有测试配置（`U=1..16`、`grid≤528`、`C=2/4`、
+  20 次重复 launch）下 **100% 稳定且数值正确**，而 `pull` 在同一条件下反复
+  `unspecified launch failure`。§86.7 的缓解措辞「低并发/批量/环形化」在本节有了具体落点：
+  **不是把远端读调小，而是把远端读换成远端写**。
+- **结论二（方法论，推翻原假设）**：`pull` 的失败边界对源级 `U` **非单调**（U=1/16 失败、
+  U=8 通过），且 `#pragma unroll 1` 串行化的 `pulls` **完全救不活它**——脆弱性不单由「编译器
+  unroll 出的在飞笔数」决定，而落在 `ld.shared::cluster` 持续流量的 driver/编译器实现里。
+  ⇒ **不想依赖「调参规避」，就必须换路径**。
+- **代价侧**：`push` 每 round 两次 `cluster.sync()` 使其低 `U` 吞吐偏低（216 GB/s），需靠
+  「批量 `U`」摊薄（U=16 → 2.15 TB/s）；真实实现用**环形缓冲 + 每槽 release/done**（而非每
+  round 全 cluster 同步）进一步摊薄（`docs/04` §35–§38、`docs/12` §4–§7）。
+- **判据**：三载体均单常驻 kernel、设备侧推进、`cluster.sync` 细化 **C4**，**仍非 C5**
+  （无固定角色 worker/scheduler 动态派发，与 §18–§23/§86 同档）。
+- **局限（诚实标注）**：只测 H100/sm90a（DSM 的真正家是 SM100 2SM，本机不可执行）；
+  `push` 的「远端写」是**逐线程 `st.shared::cluster`**，未测 `cp.async.bulk` SMEM→SMEM
+  （该 S2S bulk 在 sm90 上编译可过但运行时 `illegal instruction`，本快照不可用——记入「已知坑」）；
+  搬运的 `float` 是合成数据、非真实 task tile；`pulls` 只作对照、未扫更多 codegen 形态；计时取
+  min-of-20、绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**。

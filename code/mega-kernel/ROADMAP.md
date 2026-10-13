@@ -4622,6 +4622,38 @@
   本机不可执行）、`hread` 是合成多笔远端读、`__maxnreg__` 只到 R∈[32,255]、`shift` 只作资源表项、
   并发 context 会让 cluster launch 间歇失败（靠重试/探针规避）。
 
+### P162 实验扩展 63：cluster 跨 SM 交换的「远端读 vs 远端写+本地读」（`docs/04-experiments.md` §87）
+
+- [x] **P162-1** 补掉 §86.7（P161-1）明留的缓解建议——「**跨 SM 交换必须低并发/批量/环形化**
+  （MPK ring barrier / DeepGEMM ring barrier）」——但 §86 只给了「重（8 笔在飞）/轻（1 笔在飞）」
+  两点、**没扫在飞笔数 `U` 本身**，也没验证「批量/环形化」到底指哪种实现。生产 mega-kernel
+  （DeepGEMM symmetric memory / MPK 对称显存 rank 切片，`docs/17` §3）实际用的是
+  **「远端写 + 本地读」**，不是「每线程拉一堆远端读」。见 `docs/04-experiments.md` **§87**，
+  源码 `src/cluster_concurrency.cu`、脚本 `harness/cluster_concurrency.sh`、原始输出
+  `harness/cluster_concurrency.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+  每配置独立进程、计时取 min-of-20 且报 `ok=N/20`、边界项 3 独立进程各 1 发报 `ok/3`）。
+  三载体（每 block 每 round 移动同量远端字节 `SEG=256·U`）：`pull`（远端读，U 路在飞
+  `ld.shared::cluster`）/`pulls`（同 pull 但外层 `#pragma unroll 1` 串行化）/`push`（远端写
+  `st.shared::cluster` + `cluster.sync` 后读本地）。核心结论：
+  - **§A** 三载体 U=1..16 全 0 spill、SMEM 64 KB 把占用率钉在 3 blk/SM；`push` 的 store 路径
+    比 `pull` 的 load 路径省几个寄存器（U=1 26 vs 30，对上 §67/P79）。
+  - **§B（Q1）** 单次 launch 就复现 §86.7：`pull` 在 C=2 grid=396 由 rounds=4 的 3/3 掉到
+    rounds=64 的 **1/3**、grid=528/rounds=64 **0/3**——脆弱性随**累计远端读量**恶化；
+    `push` 所有 grid/rounds 组合恒 **3/3**。
+  - **§C（Q2 headline）** C=2 grid=264 rounds=64 重复 20 次：**`push` U=1/8/16 全 20/20、
+    数值正确**（2157 GB/s@U=16）；`pull`/`pulls` 只在 U=8 时 20/20、**U=1 与 U=16 均 0/20**
+    ——**失败边界对源级 `U` 非单调**，且 `#pragma unroll 1` 串行化的 `pulls` **完全救不活**
+    （推翻「编译器 unroll 多笔在飞」假设）。
+  - **§D（Q3）** `push` 吞吐随 `U` 近线性（grid=264 216→2151 GB/s），低 `U` 由每 round 两次
+    `cluster.sync` 主导、靠批量 `U` 摊薄。
+  - **§E** `C=4` 下 `pull`/`pulls` 连 grid=132（1×SM）都 0/3，`push` 仍 3/3——远端写路径对
+    cluster 大小不敏感。**§F** 轻通道（U=1/rounds=4）两路都稳到 grid=1056。
+  含义：**§86.7 的「低并发/批量/环形化」具体落点 = 把远端读换成远端写**——生产形态
+  （对称显存 store + 本地 load）在硬件原语层**结构性绕开了 `ld.shared::cluster` 多笔在飞的脆弱性**。
+  判据：三载体单常驻 kernel、`cluster.sync` 细化 **C4**、**仍非 C5**（与 §18–§23/§86 同档）。
+  **本轮新增实验**；P162-1 新留尾巴（§87.7）：只测 H100/sm90a、`push` 未用 `cp.async.bulk`
+  SMEM→SMEM（sm90 运行时 `illegal instruction`）、合成 `float`、未扫更多 codegen 形态。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -5048,10 +5080,41 @@
   驱动/编译器实现，不是程序越界。**跨 SM 交换应按 MPK 的做法低并发/批量/环形化**（ring barrier /
   event queue），不要每线程开多笔 DSM 读。另：**共享卡上并发的其它 CUDA context 会让 cluster
   launch 间歇性失败**——cluster 计时项要重试、可行性项要多发探针（本节 `try_run`/`probe`）。
+  **（P162-1/§87 补：缓解 = 换路径，不是调参）** 把「远端读」换成「**远端写 + 本地读**」
+  （`st.shared::cluster` 写对端 SMEM、`cluster.sync` 后读本地）后，**在 §86.7 全部失稳配置下
+  100% 稳定且数值正确**（`U=1..16`、`grid≤528`、`C=2/4`、重复 launch 20 次全 20/20）。且
+  `pull` 的失败边界对源级 `U` **非单调**（U=1/16 失败、U=8 通过）、`#pragma unroll 1` 串行化
+  **救不活**——**不要指望「把在飞笔数调小」规避，必须换掉 `ld.shared::cluster` 这条路**。
+- **`cp.async.bulk.shared::cluster.shared::cta`（SMEM→SMEM 的 cluster bulk）在 sm90 上不可用**
+  （P162-1/§87 实测）：`nvcc -arch=sm_90a` 对 `.mbarrier::complete_tx::bytes` 完成机制**编译可过**，
+  但**运行时 `illegal instruction`**；`.bulk_group` 完成机制则 ptxas 直接报
+  `Illegal modifier '.bulk_group'`。即该 S2S bulk 属 **SM100+**（Hopper 上「远端写 + 本地读」只能
+  逐线程 `st.shared::cluster`，或用 G2S 的 TMA multicast 代替——§19/§30）。别在 sm90 上按
+  CUTLASS/PTX 文档直接抄 S2S bulk。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P161-1 完成（1/1）**。兑现「下一步候选」的可选方向（3）「转实验侧——挑一条未叠加的
+- 当前进度：**P162-1 完成（1/1）**。兑现「下一步候选」点名的「**cluster.sync 的 batch/环形化
+  替代**（对上 §86.7 的脆弱性）」：把 §86.7 的缓解建议从「低并发/批量/环形化」的口号落到
+  **具体路径**——§86 只给了「重（8 笔在飞）/轻（1 笔在飞）」两点，本节把「远端读」与
+  「**远端写 + 本地读**」（生产形态：DeepGEMM symmetric memory / MPK 对称显存 rank 切片）
+  摆在一起、并扫在飞笔数 `U`。见 `docs/04-experiments.md` **§87**，源码
+  `src/cluster_concurrency.cu`、脚本 `harness/cluster_concurrency.sh`、原始输出
+  `harness/cluster_concurrency.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2）。
+  两条 headline：**(1)** `push`（远端写）在**所有**测试配置（`U=1..16`、`grid≤528`、`C=2/4`、
+  重复 launch 20 次）下 **100% 稳定且数值正确**，而 `pull`（远端读）在同一条件下反复
+  `unspecified launch failure`；**(2)** `pull` 的失败边界对源级 `U` **非单调**（U=1/16 失败、
+  U=8 通过），且 `#pragma unroll 1` 串行化的 `pulls` **完全救不活**——推翻「编译器 unroll 多笔
+  在飞」假设，说明**只能换路径、不能靠调参规避**。含义：§86.7 的「低并发/批量/环形化」具体
+  落点 = **把远端读换成远端写**。判据：单常驻 kernel + `cluster.sync` 细化 **C4**、**仍非 C5**。
+  **本轮新增实验。**
+- 下一步候选：可继续走实验侧**未叠加的组合**（`docs/04` 微基准到 §87）——如 **`__maxnreg__` ×
+  TMA multicast**（§19 的 multicast 尚未与占用率叠加）、**cluster × 端到端骨架**（把 §62/§74 的
+  骨架放进 cluster）；或**把 §87 的 `push` 换掉每 round 双 `cluster.sync` 为「环形缓冲 + 每槽
+  release/done」**（进一步抬低-`U` 吞吐、直接对上 §35–§38）；也可回到源码走读主线
+  （`docs/35` §9 余的「`bf16` 之外 SM100 task 家族未逐一走读」）。**其余旧候选**：`docs/46`
+  §6 的 FLAT-CACHE draft attention（已核零命中、**不可走读**，仅供静态落差记录）。
+- 此前：**P161-1 完成（1/1）**。兑现「下一步候选」的可选方向（3）「转实验侧——挑一条未叠加的
   组合，如 `__maxnreg__` × cluster」：把 §68–§85 的**占用率/寄存器预算**与 §18–§23 的
   **cluster/DSM** 叠加。见 `docs/04-experiments.md` **§86**，源码 `src/cluster_maxnreg.cu`、
   脚本 `harness/cluster_maxnreg.sh`、原始输出 `harness/cluster_maxnreg.out.txt`（目标卡
