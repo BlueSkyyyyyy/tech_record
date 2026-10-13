@@ -4181,6 +4181,34 @@
       H100(sm90) 真机负结果 8 组 + 正对照 8 组。配套博客
       `content/posts/mega-moe-144-forward-overlap`（索引页新增第 144 篇）。
 
+### P135 增量（opt-in，把 P7-1 的「wgrad 强制累积」根因量化出来）
+
+- [x] **P135-1** **MoE wgrad 的「强制累积」代价：`k_grouped_nt` 的 fp32 D 回读到底占多少**
+      （`csrc/apis/gemm.hpp:373-427/181-250/320-371`、`csrc/jit_kernels/impls/sm90_fp8_gemm_1d1d.hpp:84/94`、
+      `deep_gemm/include/deep_gemm/impls/sm90_fp8_gemm_1d1d.cuh:346-349`；对照第 7/12/15/22/104/144 篇）。
+      第 15 篇（P7-1）把 wgrad 慢归到三条根因，第二条是「SM90 `k_grouped_nt` 被强制累积、`D` 被回读、
+      流量翻倍、AI~120≪拐点 591」，但**从没一次对照实验**量化它、也没拆清「回读」与「每专家 fp32 输出」
+      各占多少。本篇补上。**合同**：`k_grouped_fp8_gemm_nt_contiguous` 必须 1D1D（`gemm.hpp:384` recipe
+      `(1,1,128)`）、`C` 必填（`:403`）、1D1D 的 `D` 必 fp32 且累积（`sm90_fp8_gemm_1d1d.hpp:84/94`，
+      kernel 走 `SM90_TMA_REDUCE_ADD_2D` `:346-349`）；dgrad 的 `m_grouped` 是 bf16 直写无回读（`:209`）。
+      **方法**：DeepSeek 量级（`T=2048,topk=2,E=8`→每专家 `k=512`）上做**同输出规模/同 FLOP** 的四组对照——
+      真实 `k_grouped`(fp32,acc) / `E×`稠密 1D1D(fp32,acc,同 G× 输出) / `E×`稠密 1D2D(bf16,同 G× 输出) /
+      `m_grouped` 单组(各专家**求和**,另一算子)。先验同数学：`k_grouped` 的 `∑_e dW[e]` 与 `m_grouped`
+      单组同一份 A/B 比 **relerr 3.68e-2**（FP8 噪声）。**反直觉核心结论**：① **K 轴分组 kernel 不是问题**
+      ——`k_grouped` 比手动发 `E=8` 个稠密 1D1D 快 **14%**（因子②=0.86×，省发射/调度）；② 主因是
+      **同 G× 输出规模下 fp32 累积 vs bf16 直写 = 2.58×**（因子③）；③ 输出 1× 的计算受限形状下纯累积
+      只值 1.37×（因子①）。**H100(sm90) 真机**（空闲 GPU1、单进程）：真实 wgrad `k_grouped` **240 TFLOPS**
+      （dW2 500.6us / `M=I=2048,N=H=7168`，dW1 997.0us / `M=H,N=2I=4096`），`E×`稠密 1D2D bf16 **537/767
+      TFLOPS（2.23×）**，`m_grouped` 单组 **~1240 TFLOPS（5.2×，另一算子）**。**访存账**（解析 + ncu 吻合
+      0.1%）：wgrad 总流量 **978.5MB / AI 122.9**（<591 → 访存受限）——**C 回读占 48%**、**每专家 fp32
+      输出（读+写）占 96%**；去掉回读 AI→236（仍访存受限、理论上限 ~2×），换 bf16 输出 AI→439。per-group
+      K 扫描（`k_e` 128→4096）wgrad **63→842 TFLOPS**（`m_grouped`(求和) 恒 ~1270）。**ncu 硬指标**（单次
+      launch 热 cache）：`sm90_fp8_gemm_1d1d_impl`(wgrad) 读 528.3/write 449.8MB/486.5us、
+      `sm90_fp8_gemm_1d2d_impl`(m_grouped) 41.0/19.4/99.5us。**该优化什么**：不是换 kernel，而是减小输出
+      精度/改累积协议；SM100 wgrad `tn`（`gemm.hpp:320-371`）同结构、**仅分析**。
+      `harness/exp_wgrad_accum_cost.{py,sh,out.txt}`。配套博客
+      `content/posts/mega-moe-145-wgrad-accum-cost`（索引页新增第 145 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4211,8 +4239,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P134 各增量完成（P15-1…P41-1、P42-1…P134-1）。**
-  本轮 P134-1：新建 `docs/144-forward-overlap.md`
+- 当前进度：**P0~P14 全部完成；P15~P135 各增量完成（P15-1…P41-1、P42-1…P135-1）。**
+  本轮 P135-1：新建 `docs/145-wgrad-accum-cost.md`
+  （+`harness/exp_wgrad_accum_cost.{sh,py,out.txt}`）——把第 15 篇「wgrad 被强制累积（D 回读）」这条
+  根因**量化并拆开**。合同：`k_grouped_fp8_gemm_nt_contiguous` 必 1D1D（`gemm.hpp:384/403`）、`D` 必
+  fp32 且累积（`sm90_fp8_gemm_1d1d.hpp:84`、kernel `SM90_TMA_REDUCE_ADD_2D` `:346-349`），dgrad 的
+  `m_grouped` bf16 直写无回读（`:209`）。**同输出规模/同 FLOP 四组对照**：真实 `k_grouped`(fp32,acc) /
+  `E×`稠密 1D1D(fp32,acc,同 G× 输出) / `E×`稠密 1D2D(bf16,同 G× 输出) / `m_grouped` 单组(各专家**求和**,
+  另一算子)——`∑_e dW[e]` 与单组 relerr 3.68e-2（同数学）。**反直觉结论**：① **K 分组 kernel 不是问题**
+  （`k_grouped` 比手动发 8 个稠密 1D1D 快 **14%**，因子②=0.86×）；② 主因是**同 G× 输出规模下 fp32 累积
+  vs bf16 直写 = 2.58×**（因子③）；③ 输出 1× 的计算受限形状下纯累积仅 1.37×。**H100(sm90) 真机**（空闲
+  GPU1）：真实 wgrad `k_grouped` **240 TFLOPS**、`E×`稠密 1D2D bf16 **537/767（2.23×）**、`m_grouped`
+  单组 **~1240（5.2×，另一算子）**。**访存账**（解析+ncu 吻合 0.1%）：978.5MB/AI 122.9（<591 访存受限），
+  **C 回读 48%**、**每专家 fp32 输出 96%**。per-group K 扫描 63→842 TFLOPS。ncu：wgrad 读 528.3/write
+  449.8MB/486.5us。**结论**：该动的是输出精度/累积协议，不是 kernel；SM100 `tn` 同结构、仅分析。
+  索引页新增第 145 篇。
+  上一轮 P134-1：新建 `docs/144-forward-overlap.md`
   （+`harness/exp_forward_overlap.{sh,py,out.txt}`、`src/forward_overlap_nvlink.cu`）——把 P142/P143
   「计算腿与通信+归约腿同量级 → 融合 kernel 必须重叠」的**串行推断**用真机坐实。**负结果**：NCCL a2a
   （dispatch fp8 + combine bf16 = 88.1MB/rank）发**侧流** × DeepGEMM **真实 grouped GEMM**（L1+L2，
@@ -5717,15 +5759,18 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P132 已完成（最新 **P132-1 Mega MoE 前向 single-step 的 H100 预算归因**：
-  第 15 篇反向 ncu 归因的**对偶**——前向 L1/L2 与反向 d1g/d2g 是 N↔K 转置对偶、都是计算受限
-  （L1 203.7us/76.5% vs d1g 194.3us/75.7%、L2 111.4us/66.4% vs d2g 111.0us/65.5%），前向没有
-  wgrad 的访存受限瓶颈；L1 epilogue 24.2us/3129.7 GB/s、前向 step 339.4us、反向≈前向 5.3×；
-  H100 真机 ncu+event+epilogue 对拍；索引页新增第 142 篇）。
+- **下一步**：P0~P135 已完成（最新 **P135-1 MoE wgrad 的强制累积代价量化**：
+  把第 15 篇「SM90 `k_grouped_nt` 强制累积（D 回读）→ 访存受限」这条根因用**同输出规模/同 FLOP**
+  的四组对照拆开——真实 `k_grouped`(fp32,acc) / `E×`稠密 1D1D(fp32) / `E×`稠密 1D2D(bf16) /
+  `m_grouped` 单组(求和)。**反直觉结论**：K 分组 kernel 本身不是问题（比手动发 8 个稠密快 14%），
+  主因是每专家一份 **fp32** 权重梯度（同 G× 输出规模下 fp32/acc vs bf16 = 2.58×）；wgrad 总流量
+  978.5MB/AI 122.9（<591 访存受限），C 回读占 48%、每专家 fp32 输出占 96%；真实 wgrad 240 TFLOPS
+  vs 同输出规模 bf16 537（2.23×）vs 求和 1240（另一算子）。H100 真机 + ncu（吻合 0.1%）；
+  SM100 `tn` 同结构、仅分析。索引页新增第 145 篇）。
   可继续（均为增量、非承诺）：
-  把前向 step 的**通信-计算重叠**在 8×H100 上用「真实 grouped GEMM × 限 SM 的 NCCL a2a」量出
-  overlap_factor（第 65/94 篇只量了通用/反向重叠）、或对 P96/P97/P123 的轻微漂移清单关键路径
-  定点复核。DeepEP 端到端仍需 NCCL≥2.32.3（见「阻塞」）。详见上）。
+  把「wgrad 换 bf16 输出 / 改累积协议（chunk 写 fresh + 归约）」的 **2.2× 上界**在 SM90 上用真实
+  kernel 试着落地并对照数值（wgrad 精度代价）；或对 P96/P97/P123 的轻微漂移清单关键路径定点复核；
+  或把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）。详见上）。
   上一轮 P130-1：新建 `docs/140-deepep-comm-context.md`
   上一轮 P129-1 MoE 路由负载均衡三件套（aux-loss / router z-loss /
   aux-loss-free bias）及其反向**：补齐训练侧一直缺席的「负载均衡」算子——第 4/127 篇把 `bias` 当常量是对的，
