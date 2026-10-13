@@ -4557,6 +4557,37 @@
   `mega-kernel-74-umma-descriptors`（weight 75）并更新 `mega-kernel-00-index` 第 74 项。
   **本轮新增增量。**
 
+### P160 DeepGEMM 自建 PTX UMMA 封装层逐条对照（`docs/74-umma-homegrown-layer.md`）
+
+- [x] **P160-1** 补掉「下一步候选」第一条点名的**三条「UMMA 原语对照」未完面**——`docs/72`（P158-1）
+  只对齐 `tcgen05.mma` **opcode 集合**、`docs/73`（P159-1）只对齐**描述符构造**，从无一篇把
+  DeepGEMM 自建 `ptx/tcgen05.cuh` 的**每个 struct / 每个 helper** 逐条对到 CUTLASS。见
+  `docs/74-umma-homegrown-layer.md`（快照 DeepGEMM `057ca59`、MPK `f9eb70c`、CUTLASS
+  `deps/cutlass f3fde583`；**纯源码走读 + 1 个 host 侧文本审计探针**；SM100 本体本机不可执行）。
+  三条 headline：**(A)（headline）** 8 个非 WS struct 去掉「三件机械约束」（内部 `elect_one_sync`、
+  `CUTE_ARCH_*_ENABLED` 编译门、dense 形态恒传的 disable-output-lane 掩码 `{%5,%6,%7,%8}`）后与
+  CUTLASS atom **逐字一致**——dense 四条 `strip_mask` 后相等（`F16BF16_SS` 4 vs 9 operand、
+  `F16BF16_2x1SM_SS` 4 vs 13、`F8F6F4_SS` 4 vs 8、`F8F6F4_2x1SM_SS` 4 vs 12），block-scaled 四条
+  本就逐字相等（operand 6=6，坐实 `docs/72` §4），`MXF4_SS` 只 copy 了 CUTLASS 的 `VS=32` 半（无
+  `mxf4nvf4`/VS=16）；唯一无对端的是死 `.mma.ws`（CUTLASS 0 个 `SM100_MMA_*_WS*`）。**(B)（headline）**
+  两个 helper 的减法各有出处——`tmem_load_32dp32b<K>` 是 CUTLASS 八个 `SM100_TMEM_LOAD_32dp32b<M>x`
+  在编译期挑一个（`K∈{4,8,16,32,64,128}`，探针证六个目标 struct 都存在），`umma_arrive_no_elect`
+  只是 CUTLASS `umma_arrive` 去掉内部 elect，而 CUTLASS 自己有 `umma_arrive_multicast_no_elect`
+  （注释 *"Temporary solution for sparse kernel"*）；另发现 `tcgen05.fence::before/after_thread_sync`
+  这套 fence 在 CUTLASS `f3fde583` **全仓 0 处**，由 DeepGEMM `:211-217` 与 MPK
+  `linear_fp8_sm100_sm100_utils.cuh:174-180` **各自重造**。**(C)（headline）** MPK 手写
+  `sm100_ptx::tcgen05_mma`/`tcgen05_commit` 是比 struct 更低一层的裸函数：asm 与 DeepGEMM
+  `SM100_MMA_F16BF16_SS` **raw 逐字相等**、与 CUTLASS 去掩码后相等、commit 与两侧 **squash 后相等**
+  ——同一颗 `tcgen05.mma.cta_group::1.kind::f16` 在四个代码库同形，差别只在「谁负责 elect」
+  （CUTLASS 模板 → DeepGEMM 无条件 struct → MPK 裸函数，逐级裁剪），与 `docs/73` 的「描述符从模板到
+  常数」是同一条退化曲线。caller audit：9 struct 中 `F8F6F4_SS`/`F8F6F4_2x1SM_SS`/`F16BF16_WS_SS`
+  **零调用者**（坐实 `docs/71`），`impls/` 里 elect 调用点 **115 处**（责任上移到调用点）。
+  判据只贡献 C3（`src/umma_homegrown_audit.cu` + `harness/umma_homegrown_audit.sh` +
+  `harness/umma_homegrown_audit.out.txt`，host 侧文本审计 + grep audit）。配套博客 post
+  `mega-kernel-75-umma-homegrown`（weight 76）并更新 `mega-kernel-00-index` 第 75 项。
+  P160-1 新留尾巴（§8）：纯 host 文本审计（strip_mask 是启发式、operand 计数含掩码）、`verbatim=Y`
+  不含 struct 外围、caller audit 是 grep 级、未主张 MPK 与 DeepGEMM 自建层的派生关系。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4975,7 +5006,28 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P159-1 完成（1/1）**。补掉「下一步候选」第一条点名的**「描述符构造并置」**——
+- 当前进度：**P160-1 完成（1/1）**。补掉「下一步候选」第一条点名的**三条「UMMA 原语对照」未完面**——
+  `docs/72` 只对齐 opcode 集合、`docs/73` 只对齐描述符构造，从无一篇把 DeepGEMM 自建
+  `ptx/tcgen05.cuh` 的每个 struct/helper 逐条对到 CUTLASS。见 `docs/74-umma-homegrown-layer.md`
+  （快照 DeepGEMM `057ca59`、MPK `f9eb70c`、CUTLASS `f3fde583`；**纯源码走读 + 1 个 host 侧文本审计
+  探针**，SM100 本体本机不可执行）。三条 headline：**(A)** 8 个非 WS struct 去掉三件机械约束
+  （elect/编译门/dense 掩码 `{%5,%6,%7,%8}`）后与 CUTLASS atom 逐字一致（dense 四条 strip 后相等、
+  block-scaled 四条本就相等、`MXF4_SS` 只 copy VS=32 半）；**(B)** 两个 helper 减法溯源
+  （`tmem_load_32dp32b<K>` 是 8 个 `SM100_TMEM_LOAD_32dp32b<M>x` 的编译期选择器、
+  `umma_arrive_no_elect` = CUTLASS `umma_arrive` 去掉内部 elect，CUTLASS 另有 `..._no_elect`；
+  `tcgen05.fence` 在 CUTLASS 全仓 0 处、DeepGEMM 与 MPK 各自重造）；**(C)** MPK 手写
+  `sm100_ptx::tcgen05_mma`/`commit` 是比 struct 更低一层的裸函数，asm 与 DeepGEMM 自建 raw 逐字等、
+  与 CUTLASS 去掩码后等——四库同形，差别只在 elect 责任。判据只贡献 C3
+  （`src/umma_homegrown_audit.cu` + `harness/umma_homegrown_audit.sh` + `.out.txt`，host 侧文本审计）。
+  配套博客 post `mega-kernel-75-umma-homegrown`（weight 76）并更新 `mega-kernel-00-index` 第 75 项。
+- 下一步候选：可继续走「UMMA 原语/描述符对照」或转别的面——但**该子系列的 opcode 集合（`docs/72`）、
+  描述符构造（`docs/73`）、封装逐条（`docs/74`）三面已基本收口**；可选方向：**(1)** `docs/72` 列的
+  「DeepGEMM 自建层两个 helper 与 CUTLASS 对照」已由本文 §4 补掉，余下可作 `umma_arrive_2x1SM`/
+  `multicast` 变体在 DeepGEMM 的**未用性**审计；**(2)** 回到更早的源码走读主线——`docs/35` §9 仍余的
+  「`bf16` 之外的 SM100 task 家族未逐一走读」；**(3)** 或转实验侧（`docs/04` 的微基准已到 §85，
+  可挑一条未叠加的组合，如 `__maxnreg__` × cluster）。**其余旧候选**：`docs/46` §6 的 FLAT-CACHE draft
+  attention（已核零命中、**不可走读**，仅供静态落差记录）。
+- 此前：**P159-1 完成（1/1）**。补掉「下一步候选」第一条点名的**「描述符构造并置」**——
   `docs/69` 只走 MPK 两份副本、`docs/72` 只对齐 `tcgen05.mma` 指令串层，从无一篇把「SMEM 描述符怎么
   算出来」的四条路径摆在一起。见 `docs/73-umma-descriptor-paths.md`（快照 MPK `f9eb70c`、CUTLASS
   `deps/cutlass f3fde583`、DeepGEMM `057ca59`；**纯源码走读 + 1 个 host 侧描述符算术探针**，SM100
