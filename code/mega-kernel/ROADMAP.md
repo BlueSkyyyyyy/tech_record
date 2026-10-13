@@ -1026,6 +1026,29 @@
   判据：四策略均单常驻 kernel、scheduler/worker 角色分离（C1–C4），**仍差 C5**（与 P42-1/P43-1 同档）；
   正确性 `rel=0.0e+00`。**本轮新增实验**；把 §31/§32 的防死锁理论收口到一般 DAG。
 
+### P45 实验扩展 27：事件驱动就地入队（`docs/04-experiments.md` §34）
+
+- [x] **P45-1** 补掉 P44-1 §33.8 明留的三条尾巴（`N≤70`、只验证 `G*` 与 `CAP*` 同行相等即「未独立扫
+  `G`」、`gated` 是**朴素扫描**实现）：把 §33 的「依赖门控 `gated`」从**调度器扫描**改成 **MPK §5.1
+  的真机制**——每个 task 一个**事件计数器**（未完成前驱数），由完成该前驱的 **worker 直接 push**
+  「计数归零」的后继进 ready 队列，scheduler 不参与准入。见 `docs/04-experiments.md` **§34**，源码
+  `src/event_driven_pool.cu`、脚本 `harness/event_driven_pool.sh`、原始输出
+  `harness/event_driven_pool.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`G=64`、
+  `work_iters=20000`）。四机制公平对照 `raw`（按序不查就绪 = §33 `wide`/`level`）/
+  `scan`（= §33 `gated`，就绪才准入）/ `topo`（预计算 Kahn 序）/ `event`（MPK §5.1 事件驱动）。核心结论：
+  - **§A 三机制数值逐位一致**（8/8 case 含不规则/乱序 `rel=0.0e+00`）；`event` 的「完成即 push」不动数值。
+  - **§B 死锁边界**：`raw` 复现 `B(π)+1`（`reg,scr=1` `B=16` → `CAP=1` 死锁、`CAP=17` 活）；
+    `scan`/`topo` 恒 `B≡0`；**`event` 更是 `CAP=1` 且 `G=1` 即活**（ready 队列只装就绪 task）。
+  - **§C 更大 `N`（补 §33.8 的 `N≤70`）**：`N` 64→4096，`scan/event` 1.3–3.0×（扫描随 `N` 变慢），
+    `topo≈event`（`topo/event` 0.95–0.98×）——两者都不扫描。
+  - **§D 独立扫 `G`（补 §33.8 的尾巴）**：不规则 `shrink,scr=1` 下 **`raw CAP* = raw G* = B+1`**
+    （6/30/126，精扫 `N=122,B=29`：`G=28/29` 死锁、`G=30` 活 → 须 `G>B`）；**`event G*≡1`**（单 worker
+    也活）——有界池死锁在事件驱动下**根本不存在**。
+  - **§E 扇入 `FIN`**：`FIN 2→16` 抬高 `scan/event` 到 **2.4–3.5×**；`event` push 代价近持平。
+  判据：四机制单常驻 kernel、scheduler/worker 角色分离（C1–C4），`event` 最接近 C5 但仍把 scheduler
+  角色留在 block 0，**与 §31–§33 同档、仍差 C5 一步**。**本轮新增实验**；把 §31–§33 的防死锁理论
+  从「调度器扫描/预排序」推进到「依赖事件天然触发」的 MPK 机制，并合上独立扫 `G` 与更大 `N`。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1048,7 +1071,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P44-1 完成（1/1）**。补掉 P43-1 §32.7 明留的「依赖模型是规则分层、**未测不规则/跨层
+- 当前进度：**P45-1 完成（1/1）**。补掉 P44-1 §33.8 明留的三条尾巴（`N≤70`、只验证 `G*` 与 `CAP*`
+  同行相等即「未独立扫 `G`」、`gated` 是**朴素扫描**实现）：把 §33 的「依赖门控 `gated`」从**调度器
+  扫描**改成 **MPK §5.1 的真机制**——每个 task 一个**事件计数器**（未完成前驱数），由完成该前驱的
+  **worker 直接 push**「计数归零」的后继进 ready 队列。`docs/04-experiments.md` 新增 **§34**，源码
+  `src/event_driven_pool.cu`、脚本 `harness/event_driven_pool.sh`、原始输出
+  `harness/event_driven_pool.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`G=64`、
+  `work_iters=20000`）。四机制对照 `raw`/`scan`/`topo`/`event`。核心结论：
+  - **§A 三机制数值逐位一致**（8/8 case 含不规则/乱序 `rel=0.0e+00`）；`event` 的「完成即 push」不动数值。
+  - **§B 死锁边界**：`raw` 复现 `B(π)+1`（`reg,scr=1` `B=16` → `CAP=1` 死锁、`CAP=17` 活）；
+    `scan`/`topo` 恒 `B≡0`；**`event` 更是 `CAP=1` 且 `G=1` 即活**（ready 队列只装就绪 task）。
+  - **§C 更大 `N`（补 `N≤70`）**：`N` 64→4096，`scan/event` 1.3–3.0×（扫描随 `N` 变慢），
+    `topo≈event`（`topo/event` 0.95–0.98×）——两者都不扫描。
+  - **§D 独立扫 `G`（补 §33.8）**：不规则 `shrink,scr=1` 下 **`raw CAP* = raw G* = B+1`**（6/30/126；
+    精扫 `N=122,B=29`：`G=28/29` 死锁、`G=30` 活 → 须 `G>B`）；**`event G*≡1`**——有界池死锁在事件
+    驱动下根本不存在。
+  - **§E 扇入 `FIN`**：`FIN 2→16` 抬高 `scan/event` 到 **2.4–3.5×**；`event` push 代价近持平。
+  判据：四机制单常驻 kernel、scheduler/worker 角色分离（C1–C4），`event` 最接近 C5 但仍把 scheduler
+  角色留在 block 0，**与 §31–§33 同档、仍差 C5 一步**。**本轮新增实验**；把 §31–§33 的防死锁理论
+  从「调度器扫描/预排序」推进到「依赖事件天然触发」的 MPK 机制。
+- 此前：**P44-1 完成（1/1）**。补掉 P43-1 §32.7 明留的「依赖模型是规则分层、**未测不规则/跨层
   依赖、多级扇入扇出混合**」尾巴：把 §32 的规则分层 DAG 推广到**不规则 DAG**（每层宽度不等 / 跨层
   skip 前向边 / 多级扇入 / **层号乱序**），并给出死锁边界的普适定义。`docs/04-experiments.md` 新增
   **§33**，源码 `src/irregular_pool.cu`、脚本 `harness/irregular_pool.sh`、原始输出
@@ -1513,7 +1555,10 @@
       **层号乱序时「层号升序」不再是拓扑序**→须真拓扑线性化）。
       **P44-1 新留尾巴**（见 `docs/04` §33.8）：`N≤70`、`scramble` 只是层号整体旋转（非任意图重编号）、
       未测更大 `N`/与真实 DeepGEMM SM100 路径对跑、未独立扫 `G` 在不规则图上的边界；`gated` 仍是
-      朴素扫描实现（其 ~1.7–2.5× 慢非语义固有）。
+      朴素扫描实现（其 ~1.7–2.5× 慢非语义固有）。其中「更大 `N`」「独立扫 `G`」「`gated` 是扫描」
+      三条已由 **P45-1（`docs/04` §34）** 处理：把 `gated` 换成 MPK §5.1 事件驱动就地入队，`N` 扩到
+      4096、独立扫 `G` 确认 `raw CAP*=G*=B+1` 而 `event G*≡1`；仍余「与真实 DeepGEMM SM100 路径对跑」
+      （SM100 专属，本机不具备）。
 - **本轮（P44-1）**：`docs/04-experiments.md` 新增 **§33**「有界 ready 池 × 不规则依赖 DAG」——
   新源码 `src/irregular_pool.cu`、脚本 `harness/irregular_pool.sh`、原始输出
   `harness/irregular_pool.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`G=64`）。

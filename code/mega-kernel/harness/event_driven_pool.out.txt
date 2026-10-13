@@ -1,0 +1,97 @@
+===== P45-1 event_driven_pool bench =====
+== device ==
+NVIDIA H100 80GB HBM3, sm_90, SMs=132
+默认：G=64, work_iters=20000, idle_cycles=100000000
+
+== A. 正确性：scan / topo / event 在不规则 scramble DAG 上逐位一致 ==
+   shape   | scr | N  | scan rel | topo rel | event rel | done(scan/topo/event)
+   --------+-----+----+----------+----------+-----------+-----------------------
+   reg     |   0 | 64 |  0.0e+00 |  0.0e+00 |   0.0e+00 | 64/64/64
+   reg     |   1 | 64 |  0.0e+00 |  0.0e+00 |   0.0e+00 | 64/64/64
+   grow    |   0 | 70 |  0.0e+00 |  0.0e+00 |   0.0e+00 | 70/70/70
+   grow    |   1 | 70 |  0.0e+00 |  0.0e+00 |   0.0e+00 | 70/70/70
+   shrink  |   0 | 58 |  0.0e+00 |  0.0e+00 |   0.0e+00 | 58/58/58
+   shrink  |   1 | 58 |  0.0e+00 |  0.0e+00 |   0.0e+00 | 58/58/58
+   zigzag  |   0 | 48 |  0.0e+00 |  0.0e+00 |   0.0e+00 | 48/48/48
+   zigzag  |   1 | 48 |  0.0e+00 |  0.0e+00 |   0.0e+00 | 48/48/48
+   (三机制对同一 DAG、同一 task 工作给出相同 sum；event 的 ready 队列只装就绪 task)
+
+== B. 死锁边界：raw(按序不查就绪) B(pi)>0、CAP*=G*=B+1；scan/topo B=0；event 无需预排序 ==
+   shape   | scr | N  | B_raw | raw CAP* | raw G* | scan ok@CAP=1 | topo ok@CAP=1 | event ok@CAP=1,G=1
+   --------+-----+----+-------+----------+--------+---------------+--------------+-----------------
+   reg     |   0 | 64 |     0 |        1 |      1 | ok            | ok           | ok             
+   reg     |   1 | 64 |    16 |       17 |     17 | ok            | ok           | ok             
+   shrink  |   0 | 58 |     0 |        1 |      1 | ok            | ok           | ok             
+   shrink  |   1 | 58 |    13 |       14 |     14 | ok            | ok           | ok             
+   (raw 在 scramble>0 下按名义层升序先发『名义浅层』，其真前驱在后 → B(pi)>0、CAP 或 G ≤B 死锁；
+    scan 靠『就绪才准入』把 B 归零、但每次 admission 扫剩余 order；topo 预计算拓扑序 → B=0；
+    event 由 worker 完成即 push 就绪后继 → 池内无阻塞 task、CAP=1/G=1 即活，且无需预排序)
+
+== C. 更大 N 的准入代价：scan vs topo vs event（CAP=G 富余、不含 scramble）==
+   shape   | L  | W0 | N    | scan ms | topo ms | event ms | scan/event | topo/event
+   --------+----+----+------+---------+---------+----------+------------+-----------
+   reg     |  4 | 16 |   64 |   0.336 |   0.200 |    0.204 |       1.64 |       0.98
+   reg     |  4 | 64 |  256 |   0.465 |   0.238 |    0.239 |       1.95 |       1.00
+   reg     |  4 | 256 | 1024 |   1.126 |   0.832 |    0.872 |       1.29 |       0.95
+   reg     |  4 | 1024 | 4096 |   4.282 |   3.193 |    3.341 |       1.28 |       0.96
+   shrink  |  4 | 16 |   58 |   0.312 |   0.199 |    0.203 |       1.53 |       0.98
+   shrink  |  4 | 64 |  250 |   0.464 |   0.229 |    0.236 |       1.97 |       0.97
+   shrink  |  4 | 256 | 1018 |   1.111 |   0.830 |    0.871 |       1.28 |       0.95
+   shrink  |  4 | 1024 | 4090 |   4.290 |   3.190 |    3.344 |       1.28 |       0.95
+   (scan 的扫描代价随 N 增长；topo 只需按序取；event 由完成者 push，无中央准入)
+
+== D. 独立扫 G：不规则图（shrink, scramble=1）下 raw 的 (CAP,G) 边界 vs scan/event ==
+   N  | B(pi) | raw CAP* | raw G* | scan ok@CAP=1 | event G*(@CAP=1) | event ms@G=1 | event ms@G=64
+   ---+-------+----------+--------+---------------+------------------+--------------+---------------
+   26 |     5 |        6 |      6 | ok            |                1 |        1.263 |         0.200
+   122 |    29 |       30 |     30 | ok            |                1 |        5.888 |         0.211
+   506 |   125 |      126 |    126 | ok            |                1 |       24.334 |         0.256
+   (raw 需 (CAP>B 且 G>B) 同时成立；scan 靠扫描免死锁但要 (CAP≥1,G≥1) 且付扫描账；
+    event 的 G*=1：ready 队列只装就绪 task，从不把阻塞 task 塞给 worker——无需 warmup/拓扑序)
+
+== E. 扇入 FIN 敏感（reg, N=256, CAP=G 富余）：scan 扫描 / event push 风暴 ==
+   FIN | B(order)| scan ms | topo ms | event ms | scan/event | topo/event
+   ----+--------+---------+---------+----------+------------+-----------
+     2 |      0 |   0.576 |   0.239 |    0.239 |       2.41 |       1.00
+     4 |      0 |   0.432 |   0.237 |    0.240 |       1.80 |       0.99
+     8 |      0 |   0.588 |   0.241 |    0.248 |       2.37 |       0.97
+    16 |      0 |   0.923 |   0.248 |    0.261 |       3.53 |       0.95
+   (event 的每完成一次要遍历后继并 atomicSub；FIN 增大提高『同时就绪』的宽度)
+
+>> 读法：
+>>  §A 三机制对同一 DAG 数值一致（含不规则/乱序）；event 的 ready 队列只装就绪 task。
+>>  §B raw(按序不查就绪) 在 scramble>0 下 B(pi)>0、CAP*=G*=B+1；scan/topo 恒 B=0；event CAP=1/G=1 即活。
+>>  §C 三种准入的代价标度：scan 随 N 扫描变慢，topo 按序取，event 无中央准入（topo≈0.95×event）。
+>>  §D 独立扫 G：raw 需 (CAP>B 且 G>B)，event 恒 G*=1——从机制上消掉有界池死锁。
+>>  §E 高扇入抬高 scan 的扫描代价（FIN 16 时 ~3.6×event），event 的 push 代价近持平。
+>>  deadlock 由设备侧无进度守门狗（clock64）检测并置 flag，kernel 正常返回（host 不挂）。
+
+===== §B 精扫：raw(reg,scramble=1) B=16 —— CAP=1 死锁、CAP=17 才活；event CAP=1/G=1 即活 =====
+  == device ==
+  NVIDIA H100 80GB HBM3, sm_90, SMs=132
+  run mode=raw   shape=reg    CAP=1 G=64 L=4 W0=16 FIN=2 span=1 scramble=1: N=64 B(pi)=16 deadlock=1 done=0/64 ms=50.707
+  == device ==
+  NVIDIA H100 80GB HBM3, sm_90, SMs=132
+  run mode=raw   shape=reg    CAP=17 G=64 L=4 W0=16 FIN=2 span=1 scramble=1: N=64 B(pi)=16 deadlock=0 done=64/64 ms=2.078
+  == device ==
+  NVIDIA H100 80GB HBM3, sm_90, SMs=132
+  run mode=event shape=reg    CAP=1 G=64 L=4 W0=16 FIN=2 span=1 scramble=1: N=64 B(pi)=16 deadlock=0 done=64/64 ms=0.348
+
+===== §D 精扫：shrink(W0=32,scramble=1) raw B=29 —— 独立扫 G：G=28 死锁、G=30 活（须 G>B） =====
+  == device ==
+  NVIDIA H100 80GB HBM3, sm_90, SMs=132
+  run mode=raw   shape=shrink CAP=256 G=28 L=4 W0=32 FIN=2 span=1 scramble=1: N=122 B(pi)=29 deadlock=1 done=0/122 ms=50.662
+  == device ==
+  NVIDIA H100 80GB HBM3, sm_90, SMs=132
+  run mode=raw   shape=shrink CAP=256 G=29 L=4 W0=32 FIN=2 span=1 scramble=1: N=122 B(pi)=29 deadlock=1 done=0/122 ms=50.662
+  == device ==
+  NVIDIA H100 80GB HBM3, sm_90, SMs=132
+  run mode=raw   shape=shrink CAP=256 G=30 L=4 W0=32 FIN=2 span=1 scramble=1: N=122 B(pi)=29 deadlock=0 done=122/122 ms=3.616
+--- 同图 scan(CAP=1)/event(CAP=1,G=1) 恒活 ---
+  == device ==
+  NVIDIA H100 80GB HBM3, sm_90, SMs=132
+  run mode=scan  shape=shrink CAP=1 G=64 L=4 W0=32 FIN=2 span=1 scramble=1: N=122 B(pi)=29 deadlock=0 done=122/122 ms=9.266
+  == device ==
+  NVIDIA H100 80GB HBM3, sm_90, SMs=132
+  run mode=event shape=shrink CAP=1 G=1 L=4 W0=32 FIN=2 span=1 scramble=1: N=122 B(pi)=29 deadlock=0 done=122/122 ms=6.033
+
