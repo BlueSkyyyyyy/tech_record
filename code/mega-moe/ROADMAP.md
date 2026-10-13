@@ -2484,9 +2484,36 @@
        真机 `get_mega_moe_config`（BF16 block_k=64 / FP8 128、BF16 `num_sf_ring_tokens=0`、BF16
        smem 218532 vs FP8 225700、共享回退逐字节别名）。**50/50 ALL PASS**。另一编译坑：真实头
        `DG_UNIFIED_ASSERT` 在 nvcc 单 TU host pass 落成 `asm("trap;")`，include 前钉到 host `assert`。
-       配套博客 `content/posts/mega-moe-89-mega-moe-mhc-jit-wrappers`（索引页新增第 89 篇）。
+        配套博客 `content/posts/mega-moe-89-mega-moe-mhc-jit-wrappers`（索引页新增第 89 篇）。
+
+### P80 增量（opt-in，补齐两库的「启动前地基」：驱动符号懒加载 / 版本闸门 / 张量视图 helper）
+
+- [x] **P80-1** **两库的底层地基**：DeepEP `csrc/utils/lazy_driver.hpp`（60 行）+ `csrc/utils/tensor.hpp`
+       （27 行）；DeepGEMM `csrc/utils/compatibility.hpp`（12 行）+ deep_jit `utils/lazy.hpp`（71 行）/
+       `backend/cuda/driver.hpp`（63 行）/ `utils/exception.hpp` + 最后一个未被任何 docs 引用的
+       `csrc/jit_kernels/impls/sm100_locality_domain.hpp`（41 行）。**纯 host、架构无关，H100 可跑**。
+       → `docs/90-lazy-driver-compat.md`（真实行号核对）。**三个非平凡点**：① DeepEP 的
+       `get_driver_handle:10-18`（`dlopen("libcuda.so.1", RTLD_LAZY|RTLD_LOCAL)` + 函数内 static）
+       与宏 `DECL_LAZY_CUDA_DRIVER_FUNCTION:23-34`（尾置 `decltype(name(args...))` 复原强类型、
+       函数内 `static FuncType` 缓存、首次 `dlsym`），`EP_CUDA_STRINGIFY:20-21` 为什么必须**先展开
+       别名再字符串化**（`cuda.h:96` 的 `#define cuMemGetAddressRange cuMemGetAddressRange_v2`，
+       故符号表写 `_v2`）；② deep_jit 版用**初始化器 IIFE + `const`**（语言级线程安全）+ `dlerror()`
+       可诊断报错（`lazy.hpp:42-54/58-71`），`LazyInit<T>:15-38` 的「null factory = 终态 / 工厂只跑
+       一次」；两库 handle 因 `dlopen` 引用计数**返回同一指针**；③ 版本闸门分层——`compatibility.hpp`
+       `:9-12` 卡 torch≥2.3 + `CUDA_VERSION/CUDART_VERSION≥12.9`（同时卡 driver/runtime 防混装头），
+       deep_jit `driver.hpp:8` 只卡 `CUDA≥12.4`；`check_cuda_driver:44-57` 用 lazy 的 GetErrorName/String
+       自举。另 `tensor.hpp` 的 `get_shape<kNumDims>`（index_sequence→tuple）与 `get_data_ptr`
+       （nullopt→nullptr）；`sm100_locality_domain.hpp:13-15` 探针常量 4096/128→**32 hops**。
+       H100 实测 `src/lazy_driver_compat.cu` + `harness/exp_lazy_driver_compat.{sh,out.txt}`：
+       两库共 **50 个驱动符号全可解析**（deep_jit 27 / DeepEP 23）、handle 同一指针、`lazy_cuDeviceGet`
+       ==直接 `cuDeviceGet`、**VMM + POSIX fd 可共享句柄导出→导入→跨句柄 2 MiB mismatch=0**（对称
+       内存地基）、libdw 8/8 + trace 带真实行号、`LazyInit` 工厂只跑一次、`get_shape/get_data_ptr`
+       四条全过、版本真实值 2.12/13020；**负样本**伪造 `CUDA_VERSION=11000` 被 `compatibility.hpp:11`
+       `static_assert` 拦下。**30 PASS / 0 FAIL + 1 编译期负样本**。配套博客
+       `content/posts/mega-moe-90-lazy-driver-compat`（索引页新增第 90 篇）。
 
 ## 每轮增量流程（autopilot）
+
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
 2. 写/改 `docs/<NN>-*.md`（会被内联到博客，**里面不要写 {{< >}} 短代码**）与必要的 `src/`、`harness/`。
@@ -2510,8 +2537,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P79 各增量完成（P15-1…P41-1、P42-1…P79-1）。**
-  本轮 P79-1：新建 `docs/89-mega-moe-mhc-jit-wrappers.md`
+- 当前进度：**P0~P14 全部完成；P15~P80 各增量完成（P15-1…P41-1、P42-1…P80-1）。**
+  本轮 P80-1：新建 `docs/90-lazy-driver-compat.md`
+  （+`src/lazy_driver_compat.cu`、`harness/exp_lazy_driver_compat.{sh,out.txt}`）——补齐两库的
+  **「启动前地基」**：DeepEP `csrc/utils/lazy_driver.hpp`（dlopen libcuda + `DECL_LAZY_CUDA_DRIVER_FUNCTION`
+  宏 + `EP_CUDA_STRINGIFY` 别名展开）与 `csrc/utils/tensor.hpp`（`get_shape`/`get_data_ptr`）；DeepGEMM
+  `csrc/utils/compatibility.hpp`（torch≥2.3 / CUDA≥12.9 三闸门）与 deep_jit `utils/lazy.hpp`（`LazyInit<T>`
+  + 两宏，与 DeepEP 版对照）、`backend/cuda/driver.hpp`（CUDA≥12.4、自举 `check_cuda_driver`）、
+  `utils/exception.hpp`（libdw 懒加载 + 回溯）；并补上最后一个未覆盖文件 `sm100_locality_domain.hpp`
+  （探针 4096/128→32 hops 的 host wrapper）。**纯 host、架构无关，H100 直接 include 真实头文件真机**：
+  两库共 50 个驱动符号全可解析、handle 同一指针、VMM + POSIX fd 可共享句柄跨句柄 **2 MiB mismatch=0**、
+  libdw 8/8 + trace 真实行号、负样本伪造 `CUDA_VERSION=11000` 被 `compatibility.hpp:11` 拦下——
+  **30 PASS / 0 FAIL + 1 编译期负样本**。索引页新增第 90 篇。
+  上一轮 P79-1：新建 `docs/89-mega-moe-mhc-jit-wrappers.md`
   （+`src/mega_moe_mhc_jit_wrapper.cu`、`harness/exp_mega_moe_mhc_jit_wrapper.{sh,out.txt}`）——补上
   Mega MoE / mHC 一直缺席的 **JIT 启动包装层** `sm100_bf16_mega_moe.hpp` / `sm100_mega_mhc.hpp`
   （host 张量 → 描述符 → 模板实参 → launch 的最后一公里）。**三个非平凡点**：① 描述符 swizzle 随
@@ -3424,7 +3462,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P79 已完成（最新 **P79-1 Mega MoE / mHC 的 JIT 启动包装层**：
+- **下一步**：P0~P80 已完成（最新 **P80-1 两库的「启动前地基」：驱动符号懒加载 / 版本闸门 / 张量视图 helper**：
+  DeepEP `csrc/utils/lazy_driver.hpp` + `tensor.hpp`；DeepGEMM `csrc/utils/compatibility.hpp` + deep_jit
+  `utils/lazy.hpp` / `backend/cuda/driver.hpp` / `utils/exception.hpp`；以及最后一个未覆盖文件
+  `sm100_locality_domain.hpp`。两库两套 dlopen/dlsym 宏对照、`EP_CUDA_STRINGIFY` 别名展开、`LazyInit<T>`
+  终态语义、版本闸门分层（DeepGEMM 12.9 vs DeepJIT 12.4）；纯 host、架构无关，H100 真机直接 include
+  真实头文件：50 符号全解析、VMM+POSIX fd 跨句柄 2 MiB mismatch=0、libdw 8/8、伪造低版本被 static_assert
+  拦下，**30 PASS/0 FAIL + 1 负样本**；详见上）。
+  上一轮 P79-1：P0~P79 已完成（最新 **P79-1 Mega MoE / mHC 的 JIT 启动包装层**：
   `sm100_bf16_mega_moe.hpp` / `sm100_mega_mhc.hpp`——host 张量→TMA 描述符→JIT 模板实参→launch；
   描述符 swizzle 随元素字节/通道宽度变化的补偿、常量/开关进模板、回退指针别名、mHC 的 route 当第三维
   + `MixArgs`/`NormArgs` POD；主 kernel SM100 仅分析，wrapper 纯 host，H100 真机 **50/50 ALL PASS**；

@@ -1,0 +1,82 @@
+== 环境坐标 ==
+93eb6eb Update README
+057ca59 Public release 26/09/30 (#462)
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+Build cuda_13.2.r13.2/compiler.37668154_0
+lazy_driver.hpp
+tensor.hpp
+compatibility.hpp
+lazy.hpp
+driver.hpp
+exception.hpp
+sm100_locality_domain.hpp
+
+== 编译（nvcc 直接 include 真实头文件 + torch）==
+build OK
+
+== 主实验 ==
+=== P80-1 懒加载 / 版本闸门 / 张量 helper 地基验证 ===
+device: 
+== Part A：懒加载符号清单在 libcuda.so.1 上的可解析性 ==
+  [PASS] dlopen(libcuda.so.1)
+  [PASS] 两库符号清单全部可解析 — deep_jit 27 个缺 0；DeepEP 23 个缺 0
+
+== Part B：两库各自 dlopen 的 handle 身份 ==
+  [PASS] deep_ep::get_driver_handle() == deep_jit::get_cuda_handle() — deep_ep=0x7fb5324f7ab0 deep_jit=0x7fb5324f7ab0
+  [PASS] 同一库 handle 幂等
+
+== Part C：懒加载 wrapper 与直接链接的结果一致性 ==
+  [PASS] lazy_cuDeviceGet == cuDeviceGet — lazy dev=0 direct dev=0 rc=(CUDA_SUCCESS: no error)
+  [PASS] lazy_cuDeviceGetAttribute == 直接调用 — lazy=9 direct=9
+  [PASS] deep_jit wrapper 与 DeepEP wrapper 一致 — deep_jit=9
+
+== Part D：VMM + 可共享句柄（POSIX fd）往返，全部经懒加载 ==
+  [PASS] cuMemGetAllocationGranularity — granularity=2097152 B (2048.0 KiB), rc=CUDA_SUCCESS: no error
+  [PASS] cuMemCreate(2 MiB) — CUDA_SUCCESS: no error
+  [PASS] cuMemExportToShareableHandle -> fd — CUDA_SUCCESS: no error
+  [PASS] cuMemImportFromShareableHandle — CUDA_SUCCESS: no error
+  [PASS] cuMemAddressReserve #1 — CUDA_SUCCESS: no error
+  [PASS] cuMemMap #1 — CUDA_SUCCESS: no error
+  [PASS] cuMemSetAccess #1 — CUDA_SUCCESS: no error
+  [PASS] cudaMemset 到 VMM 地址 — CUDA_SUCCESS: no error
+  [PASS] 导出的句柄与导入的句柄指向同一内存 — p1==p2 跨句柄 2097152 字节, mismatch=0
+  [PASS] cuMemGetAddressRange_v2 — base=0x7fb251e00000 range=2097152 (== p1=0x7fb251e00000 size=2097152)
+  [PASS] VMM 清理（unmap/release/addressFree）无异常
+
+== Part E：deep_jit::LazyInit<T> 语义 ==
+  [PASS] 工厂只执行一次且返回正确 — value=7 工厂调用次数=1
+  [PASS] null factory 解引用抛异常 — Assertion error (~/github/DeepGEMM/third-part
+
+== Part F：libdw 懒加载与 deep_jit 异常回溯 ==
+  [PASS] dlopen(libdw.so.1)
+  [PASS] 8 个 dwfl_* 符号全部可解析 — 解析 8/8
+---- 异常 what() ----
+Probe error (~/proj/tech_record/code/mega-moe/src/lazy_driver_compat.cu:284): intentional
+C++ trace (most recent call first):
+  #0 /tmp/lazy_driver_compat+0xa651 part_f() at ~/proj/tech_record/code/mega-moe/src/lazy_driver_compat.cu:284
+  #1 /tmp/lazy_driver_compat+0xb6bd main at ~/proj/tech_record/code/mega-moe/src/lazy_driver_compat.cu:342
+  #2 /lib/x86_64-linux-gnu/libc.so.6+0x2a1c9 <unknown function> at ??:0
+  #3 /lib/x86_64-linux-gnu/libc.so.6+0x2a28a __libc_start_main at ??:0
+  #4 /tmp/lazy_driver_compat+0x6f04 _start at ??:0
+
+---------------------
+  [PASS] 构造异常并打印回溯
+
+== Part G：tensor.hpp 的 get_shape / get_data_ptr ==
+  [PASS] get_shape<2> — shape=(3,5)
+  [PASS] get_data_ptr(nullopt) == nullptr
+  [PASS] get_data_ptr(present) == data_ptr
+  [PASS] get_shape 维度不符抛 EP_HOST_ASSERT
+
+== Part H：版本闸门 ==
+  TORCH_VERSION=2.12.0 (major=2 minor=12)
+  CUDA_VERSION=13020  CUDART_VERSION=13020
+  [PASS] DeepGEMM 闸门（torch>=2.3, CUDA>=12.9）编译期通过
+  [PASS] DeepJIT 闸门（CUDA>=12.4）编译期通过
+  [PASS] locality 探针 hops = 4096/128 = 32
+
+==== 汇总：PASS=30 FAIL=0 ====
+
+== 负面用例：版本闸门真的会拦下低版本（编译应失败）==
+  [PASS] 伪造 CUDA_VERSION=11000 被 static_assert 拦下；错误信息：
+    ~/github/DeepGEMM/csrc/utils/compatibility.hpp(11): error: static assertion failed with "DeepGEMM requires CUDA Driver API 12.9 or newer"
