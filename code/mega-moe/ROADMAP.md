@@ -1745,6 +1745,41 @@
       真实多 rank scaleout 编排为 NCCL 设备 API 专属，仅分析。配套博客
       `content/posts/mega-moe-66-deepep-symmetric-memory-alloc`（索引页新增第 66 篇）。
 
+### P57 增量（opt-in，补齐 Mega mHC 一直缺席的「验收测试即正确性规范」）
+
+- [x] **P57-1** **Mega mHC 的端到端验收测试与正确性 oracle**（`tests/test_mega_mhc.py`；
+      `csrc/apis/mega_mhc.hpp`；`deep_gemm/include/deep_gemm/layout/mega_mhc.cuh`；
+      `deep_gemm/include/deep_gemm/epilogue/sm100_mega_mhc.cuh`）。第 5 篇（P5-2）拆了 Mega mHC 的
+      **实现**、第 51 篇（P41-1）拆了 **Mega MoE**、第 57 篇（P47-1）拆了 **Mega Gate** 的验收测试，
+      本篇补上 Mega mHC **自己的**验收测试——它是「Mega mHC 的输出算什么对」的唯一规范，也是第 5 篇
+      反复引用的判据出处。**主体 kernel SM100 专属，仅分析**（`mega_mhc.hpp:223` 断言 `arch_major==10`）；
+      **参考实现 / SF 页布局 / 判据 / host 契约架构无关，H100 真机实测**。
+      → `docs/67-mega-mhc-test-oracle.md`（真实行号核对）：两个入口都被
+      `@test_filter(get_arch_major()==10)` 门控（H100 整体跳过，`:241/:318`）；`enumerate_cases:15-19`
+      **28 个形状**（`sf_layout∈{col,extra}×hidden∈{4096,7168}×T∈{1,64,65,200,1025,4096,32768}`，跨
+      64/512/1024/4096 边界）×normal/shifted；`make_inputs:22-56` 的「重复 token」装置（`:52-55` 把
+      63/64/511/512/T-1 行克隆成第 0 行，专抓 split-K 边界串台）与 `comb_res_mix` 三遍行/列归一化
+      （`:49-51`，最后一次列归一化→**列和精确=1、行和仅近似**）；`make_outputs:59-86` 三套 SF 布局
+      （`col`=`y_gemm_sf` stride `(1,align(T,4))`、`extra`=`y_routed_sf` 连续 + `y_shared_sf` 页布局，
+      存储行数 `ceil(T/block_m)*align(block_m,128)`）。**SF 页布局 `extra_sf_rows:96-104` 与 kernel
+      `get_shared_sf_row_idx`（`epilogue/sm100_mega_mhc.cuh:116-122`）逐字等价**（四段一一对应
+      `idx&~127` / `(idx&31)*4` / `(idx>>5)&3`；kernel 侧 `:252-256` 用同一 `shared_sf_row_idx`
+      同写 `y_primary_sf` 与 `y_shared_sf`）。`mhc_reference:123-210` 是语义权威（`new_residual` 先
+      cast bf16 = 共享数值边界 `:148`；`_sinkhorn_reference:114-120` 双随机）；独立 fp64 对拍 relerr
+      1.4e-5~2.8e-3。`check_correctness:229-238`（`y_fp8` 阈值 2e-4、其余 5e-5；`comparable:225-226`
+      把 int32 SF 视图成 uint8 逐字节比）。`test_mega_mhc_api_contract:241-315` 四条运行期不变式：
+      确定性逐位复现（`get_num_splits:15-24` 固定 `kDefaultNumSplits=16`，`layout:36`）、CUDA Graph
+      必须先预热（`get_split_barriers:26-39` 的 `:33` 断言 `CaptureStatus::None`，每 stream 一份）、
+      FP8-only 调用逐位稳定（`needs_bf16_scratch:229-238`）、多 stream 独立（split barrier 按
+      `CUDAStream` 分表 `:29-30`）。性能账目 `:347-357`（`logical_bytes`+`intermediate_io_bytes`
+      `=2·y_bf16(+new_residual)`）。H100 实测 `src/mhc_sf_row_idx.cu`（**直接 include 真实头文件**，
+      给 `__fmul2_rn` 提供 sm90 标量回退）+ `harness/exp_mega_mhc_test.{py,sh,out.txt}`：
+      ① 设备代码 `get_shared_sf_row_idx` vs `extra_sf_rows` 5 block_m×6 T **32 PASS/0 FAIL**（mismatch=0
+      且页内单射）；② Python **45 PASS/0 FAIL**——页布局 scatter/gather 逐位还原 + padding 全零、
+      fp64 对拍、Sinkhorn 行/列和=1、`calc_diff=1.221e-4` 的对「作 fp8 放行、作 bf16 拒绝」、
+      **host 契约 9 条逐条命中 `mega_mhc.hpp` 真实行号**（含「合法调用撞 `:223` arch 闸门」）。
+      配套博客 `content/posts/mega-moe-67-mega-mhc-test-oracle`（索引页新增第 67 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1769,8 +1804,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P56 各增量完成（P15-1…P41-1、P42-1…P56-1）。**
-  本轮 P56-1：新建 `docs/66-deepep-symmetric-memory-alloc.md`（+`src/deepep_symmetric_alloc.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P57 各增量完成（P15-1…P41-1、P42-1…P57-1）。**
+  本轮 P57-1：新建 `docs/67-mega-mhc-test-oracle.md`（+`src/mhc_sf_row_idx.cu`、
+  `harness/exp_mega_mhc_test.{py,sh,out.txt}`）——补上 Mega mHC 一直缺席的**端到端验收测试**
+  `tests/test_mega_mhc.py`（第 5 篇拆了实现、第 51/57 篇拆了 Mega MoE / Mega Gate 的测试）。
+  三个核心事实：① **SF 页布局是 Mega MoE 共享专家的 4×32 交错页**——测试 `extra_sf_rows:96-104`
+  与 kernel `get_shared_sf_row_idx`（`epilogue/sm100_mega_mhc.cuh:116-122`）**逐字等价**
+  （`idx&~127`/`(idx&31)*4`/`(idx>>5)&3` 四段一一对应），`src/mhc_sf_row_idx.cu` 直接 include 真实
+  头文件跑真实设备代码，5 个 block_m×6 个 T **mismatch=0 且页内单射**；② **两条判据分工**——
+  `calc_diff`（`y_fp8` 2e-4 / 其余 5e-5，把「实现误差」与「FP8 量化/bf16 舍入」分开）保证与 torch
+  参考一致，30 次重复的 `assert_bitwise_equal` 保证 kernel 自身确定性（确定性模式 split 固定=16）；
+  ③ **`test_mega_mhc_api_contract` 四条运行期不变式**（确定性逐位复现 / CUDA Graph 必须先预热否则
+  `CaptureStatus::None` / FP8-only 调用逐位稳定 / 多 stream 独立），根因是 split barrier **按 CUDAStream
+  分表**（`mega_mhc.hpp:26-39`）。**主 kernel SM100 专属，仅分析**；参考实现 / SF 页布局 / 判据 /
+  host 契约架构无关，**H100 真机设备 32 PASS + Python 45 PASS / 0 FAIL**——host 契约 9 条逐条命中
+  `mega_mhc.hpp` 真实行号（`:118/:120/:121/:122/:123/:141/:204/:210`），最后的边界是「合法调用撞
+  `:223` arch 闸门」。配套博客 `content/posts/mega-moe-67-mega-mhc-test-oracle`（索引页新增第 67 篇）。
+  上一轮 P56-1：新建 `docs/66-deepep-symmetric-memory-alloc.md`（+`src/deepep_symmetric_alloc.cu`、
   `harness/exp_deepep_symmetric_alloc.{sh,py,out.txt}`）——补上前面所有 DeepEP kernel 篇目（第 7/48/51/
   52/53/58/59/61/63/64）脚下的**「对称内存分配地基」**：`csrc/kernels/comm/symmetric.hpp` + `allocator.py`。
   这块内存是所有 dispatch/combine/bucket 的基础，却从没系统讲过。核心「为什么」：① 三层对齐里
