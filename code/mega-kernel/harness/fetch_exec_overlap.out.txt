@@ -1,0 +1,102 @@
+device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0  L2=50 MB  optin=232448  SMEM/SM=233472
+
+===== §A 正确性：D=1..4 多 worker，R=0 与 host 参考逐位一致（小 NDESC）=====
+  K=32   D=1    R=0      SMEM= 11272B  bad=0  ~ 155.500 ns/batch     72.4 GB/s  (0.040 ms/rep)
+  K=32   D=2    R=0      SMEM= 22544B  bad=0  ~  43.750 ns/batch    257.5 GB/s  (0.011 ms/rep)
+  K=32   D=3    R=0      SMEM= 33816B  bad=0  ~  44.000 ns/batch    256.0 GB/s  (0.011 ms/rep)
+  K=32   D=4    R=0      SMEM= 45088B  bad=0  ~  41.625 ns/batch    270.6 GB/s  (0.011 ms/rep)
+
+===== §A2 正确性：R=1024 下 D=1..4 的 sink 逐位相同（大 NDESC，交叉校验）=====
+  K=128  D=1    R=1024   fetch=1  ~  34.130 ns/batch   1320.1 GB/s  (0.105 ms/rep)
+      -> D=1 == reference
+  K=128  D=2    R=1024   fetch=1  ~  27.109 ns/batch   1662.0 GB/s  (0.083 ms/rep)
+      -> D=2 == reference
+  K=128  D=3    R=1024   fetch=1  ~  27.135 ns/batch   1660.4 GB/s  (0.083 ms/rep)
+      -> D=3 == reference
+  K=128  D=4    R=1024   fetch=1  ~  27.104 ns/batch   1662.3 GB/s  (0.083 ms/rep)
+      -> D=4 == reference
+
+===== §B 扫 task 计算强度 R：串行(D=1) vs 预取(D=3)，K=128, G=NSM =====
+  R        D=1 ns/batch  D=3 ns/batch  speedup  abs_save(ms)
+  K=128  D=1    R=0      fetch=1  ~  26.969 ns/batch   1670.7 GB/s  (0.083 ms/rep)
+  K=128  D=3    R=0      fetch=1  ~  19.920 ns/batch   2261.8 GB/s  (0.061 ms/rep)
+  0              26.969        19.920    1.354        0.0217
+  K=128  D=1    R=64     fetch=1  ~  28.434 ns/batch   1584.6 GB/s  (0.087 ms/rep)
+  K=128  D=3    R=64     fetch=1  ~  20.868 ns/batch   2159.1 GB/s  (0.064 ms/rep)
+  64             28.434        20.868    1.363        0.0232
+  K=128  D=1    R=128    fetch=1  ~  28.253 ns/batch   1594.7 GB/s  (0.087 ms/rep)
+  K=128  D=3    R=128    fetch=1  ~  21.306 ns/batch   2114.8 GB/s  (0.065 ms/rep)
+  128            28.253        21.306    1.326        0.0213
+  K=128  D=1    R=256    fetch=1  ~  28.830 ns/batch   1562.8 GB/s  (0.089 ms/rep)
+  K=128  D=3    R=256    fetch=1  ~  22.128 ns/batch   2036.1 GB/s  (0.068 ms/rep)
+  256            28.830        22.128    1.303        0.0206
+  K=128  D=1    R=512    fetch=1  ~  31.288 ns/batch   1440.0 GB/s  (0.096 ms/rep)
+  K=128  D=3    R=512    fetch=1  ~  23.715 ns/batch   1899.9 GB/s  (0.073 ms/rep)
+  512            31.288        23.715    1.319        0.0233
+  K=128  D=1    R=1024   fetch=1  ~  33.483 ns/batch   1345.7 GB/s  (0.103 ms/rep)
+  K=128  D=3    R=1024   fetch=1  ~  27.108 ns/batch   1662.1 GB/s  (0.083 ms/rep)
+  1024           33.483        27.108    1.235        0.0196
+  K=128  D=1    R=2048   fetch=1  ~  39.552 ns/batch   1139.2 GB/s  (0.122 ms/rep)
+  K=128  D=3    R=2048   fetch=1  ~  33.875 ns/batch   1330.1 GB/s  (0.104 ms/rep)
+  2048           39.552        33.875    1.168        0.0174
+  K=128  D=1    R=4096   fetch=1  ~  52.899 ns/batch    851.7 GB/s  (0.163 ms/rep)
+  K=128  D=3    R=4096   fetch=1  ~  47.444 ns/batch    949.7 GB/s  (0.146 ms/rep)
+  4096           52.899        47.444    1.115        0.0168
+  K=128  D=1    R=16384  fetch=1  ~ 136.625 ns/batch    329.8 GB/s  (0.420 ms/rep)
+  K=128  D=3    R=16384  fetch=1  ~ 131.122 ns/batch    343.6 GB/s  (0.403 ms/rep)
+  16384         136.625       131.122    1.042        0.0169
+  K=128  D=1    R=65536  fetch=1  ~ 476.288 ns/batch     94.6 GB/s  (1.463 ms/rep)
+  K=128  D=3    R=65536  fetch=1  ~ 470.458 ns/batch     95.8 GB/s  (1.445 ms/rep)
+  65536         476.288       470.458    1.012        0.0179
+  K=128  D=1    R=262144 fetch=1  ~1833.552 ns/batch     24.6 GB/s  (5.633 ms/rep)
+  K=128  D=3    R=262144 fetch=1  ~1828.101 ns/batch     24.6 GB/s  (5.616 ms/rep)
+  262144       1833.552      1828.101    1.003        0.0167
+
+===== §C 环深 D 扫描：K=128, R=1024, G=NSM（收益是否 D=1→2 拿满？）=====
+  K=128  D=1    R=1024   fetch=1  ~  33.389 ns/batch   1349.4 GB/s  (0.103 ms/rep)
+  K=128  D=2    R=1024   fetch=1  ~  28.229 ns/batch   1596.1 GB/s  (0.087 ms/rep)
+  K=128  D=3    R=1024   fetch=1  ~  27.135 ns/batch   1660.4 GB/s  (0.083 ms/rep)
+  K=128  D=4    R=1024   fetch=1  ~  27.097 ns/batch   1662.8 GB/s  (0.083 ms/rep)
+  K=128  D=5    R=1024   fetch=1  ~  27.062 ns/batch   1664.9 GB/s  (0.083 ms/rep)
+
+===== §D 决定性分解：fetch_only(R=0) / exec_only(do_fetch=0) / D=1 / D=3 =====
+  R         fetch(ms)    exec(ms)     D=1(ms)     D=3(ms) | D=1 vs f+e   D=3 vs max
+  K=128  D=3    R=0      fetch=1  ~  19.931 ns/batch   2260.6 GB/s  (0.061 ms/rep)
+  K=128  D=1    R=1024   fetch=0  ~  25.896 ns/batch   1739.9 GB/s  (0.080 ms/rep)
+  K=128  D=1    R=1024   fetch=1  ~  33.785 ns/batch   1333.6 GB/s  (0.104 ms/rep)
+  K=128  D=3    R=1024   fetch=1  ~  27.101 ns/batch   1662.5 GB/s  (0.083 ms/rep)
+  1024         0.0612      0.0796      0.1038      0.0833 | s/(f+e)=0.737  p/max=1.047
+  K=128  D=3    R=0      fetch=1  ~  19.955 ns/batch   2257.9 GB/s  (0.061 ms/rep)
+  K=128  D=1    R=4096   fetch=0  ~  46.306 ns/batch    973.0 GB/s  (0.142 ms/rep)
+  K=128  D=1    R=4096   fetch=1  ~  52.590 ns/batch    856.7 GB/s  (0.162 ms/rep)
+  K=128  D=3    R=4096   fetch=1  ~  47.431 ns/batch    949.9 GB/s  (0.146 ms/rep)
+  4096         0.0613      0.1423      0.1616      0.1457 | s/(f+e)=0.794  p/max=1.024
+  K=128  D=3    R=0      fetch=1  ~  19.931 ns/batch   2260.6 GB/s  (0.061 ms/rep)
+  K=128  D=1    R=16384  fetch=0  ~ 130.250 ns/batch    345.9 GB/s  (0.400 ms/rep)
+  K=128  D=1    R=16384  fetch=1  ~ 136.809 ns/batch    329.3 GB/s  (0.420 ms/rep)
+  K=128  D=3    R=16384  fetch=1  ~ 131.153 ns/batch    343.5 GB/s  (0.403 ms/rep)
+  16384        0.0612      0.4001      0.4203      0.4029 | s/(f+e)=0.911  p/max=1.007
+  K=128  D=3    R=0      fetch=1  ~  19.924 ns/batch   2261.4 GB/s  (0.061 ms/rep)
+  K=128  D=1    R=65536  fetch=0  ~ 469.306 ns/batch     96.0 GB/s  (1.442 ms/rep)
+  K=128  D=1    R=65536  fetch=1  ~ 476.201 ns/batch     94.6 GB/s  (1.463 ms/rep)
+  K=128  D=3    R=65536  fetch=1  ~ 470.528 ns/batch     95.8 GB/s  (1.445 ms/rep)
+  65536        0.0612      1.4417      1.4629      1.4455 | s/(f+e)=0.973  p/max=1.003
+  K=128  D=3    R=0      fetch=1  ~  20.076 ns/batch   2244.2 GB/s  (0.062 ms/rep)
+  K=128  D=1    R=262144 fetch=0  ~1826.865 ns/batch     24.7 GB/s  (5.612 ms/rep)
+  K=128  D=1    R=262144 fetch=1  ~1833.944 ns/batch     24.6 GB/s  (5.634 ms/rep)
+  K=128  D=3    R=262144 fetch=1  ~1828.260 ns/batch     24.6 GB/s  (5.616 ms/rep)
+  262144       0.0617      5.6121      5.6339      5.6164 | s/(f+e)=0.993  p/max=1.001
+
+===== §E 批量 K 扫描：R=1024, D=1 vs D=3, G=NSM =====
+  K=32   D=1    R=1024   fetch=1  ~  20.493 ns/batch    549.6 GB/s  (0.252 ms/rep)
+  K=32   D=3    R=1024   fetch=1  ~  17.752 ns/batch    634.5 GB/s  (0.218 ms/rep)
+      K=32 speedup D1/D3 = 1.154
+  K=64   D=1    R=1024   fetch=1  ~  22.550 ns/batch    999.0 GB/s  (0.139 ms/rep)
+  K=64   D=3    R=1024   fetch=1  ~  18.840 ns/batch   1195.7 GB/s  (0.116 ms/rep)
+      K=64 speedup D1/D3 = 1.197
+  K=128  D=1    R=1024   fetch=1  ~  33.351 ns/batch   1351.0 GB/s  (0.102 ms/rep)
+  K=128  D=3    R=1024   fetch=1  ~  27.149 ns/batch   1659.6 GB/s  (0.083 ms/rep)
+      K=128 speedup D1/D3 = 1.228
+  K=256  D=1    R=1024   fetch=1  ~  61.597 ns/batch   1462.9 GB/s  (0.095 ms/rep)
+  K=256  D=3    R=1024   SMEM=270360B  SKIP (exceeds optin)
+      K=256 speedup D1/D3 = inf
