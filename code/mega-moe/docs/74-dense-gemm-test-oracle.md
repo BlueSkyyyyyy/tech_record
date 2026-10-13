@@ -282,7 +282,7 @@ BF16 bf16_gemm_nt (m=4096,n=4096,k=4096):   333.0 us | 413 TFLOPS
 - FP4 相关：`(128,32,False,True)` / `(32,32,True,True)` 配置、FP4 kernel 入口、FP4↔FP8 交叉核对
   （`test_fp8_fp4.py:95-100/148-153/215-220/275-285`）。
 - `test_sf_k_padding` / K-grouped 打包 SF 的 padding（`:29/83-94/345-352`）。
-- `BF16StochasticRounding` 随机舍入（`test_bf16.py:49`、`test_fp8_fp4.py:60`）。
+- `BF16StochasticRounding` 随机舍入（`test_bf16.py:49-50`、`test_fp8_fp4.py:60`）。
 - `UE8M0` 打包（`get_ue8m0_usage` 在 sm90 恒 False）。
 - `ensure_zero_padding` 的 PSUM 零填充（only SM100，`generators.py:203`）。
 

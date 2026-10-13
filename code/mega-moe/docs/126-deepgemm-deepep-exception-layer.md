@@ -232,7 +232,7 @@ int main() { DG_UNIFIED_ASSERT(1 == 2); return 0; }
 → 落到 `EP_HOST_ASSERT`）。真机 `out.txt:112`。
 
 **为什么 DeepGEMM 线上没炸？** 因为它在 host 侧调用 `DG_UNIFIED_ASSERT` 的地方——例如
-`layout/mega_moe.cuh:119-125` 的 `MegaMoEWorkspace` 构造函数（`CUTLASS_HOST_DEVICE`，即
+`layout/mega_moe.cuh:119-125` 的 `Workspace` 构造函数（`CUTLASS_HOST_DEVICE`，即
 `__host__ __device__`）——分两种调用方式：
 
 1. **device 侧**：由 nvcc 编 kernel 时展开，`DG_IN_CUDA_COMPILATION` 定义 → `DG_DEVICE_ASSERT`

@@ -178,7 +178,7 @@ persistent_envs['EP_NCCL_ROOT_DIR'] = '/tmp/nccl229'
 ### 4.2 `EP_AVOID_RECORD_STREAM`：CUDA Graph 友好的流同步
 
 `record_stream` 是分配器的副作用、对 CUDA Graph 不感知，故 DeepEP 给了逃生门：打开后改用
-`EventHandle::tensors_to_record` 持有张量引用（`buffers/ep.hpp:163`、`buffers/bucket.hpp:51`）。
+`EventHandle::tensors_to_record` 持有张量引用（`buffers/ep.hpp:163-164`、`buffers/bucket.hpp:51-52`）。
 源码注释（`ep.hpp:162`）点明「**this environment only applies to V2 APIs**」——即只对
 `EPBuffer`/`BucketBuffer` 的 V2 流控制路径有效，老 V1 路径仍直接 `record_stream`。
 第 109 篇（CUDA Graph）已用过这条，此处补上它**只影响 V2** 的边界。

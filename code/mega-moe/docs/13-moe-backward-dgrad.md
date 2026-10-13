@@ -290,7 +290,7 @@ auto previous_group_offset = scheduler.template get_global_idx<true, sched::Inde
 | A1 contiguous，G=6、m=1024、`n(I)`=256、`k(H)`=512 | relerr(dA 有效行) **3.70e-2**；gap 行 303/1024（30%） |
 | A2 masked，G=6、max_m=160、`masked_m=[84,100,92,102,102,103]` | relerr **3.67e-2**；有效 583/存储 960 行（61%） |
 | A3 PSUM，前缀和 `[156,393,608,756,880,1057]` | relerr **3.67e-2** |
-| A4 contiguous `grouped_layout` 长度 383 ≠ m=384 | 被拒：`gemm.hpp:218` `m == m__` |
+| A4 contiguous `grouped_layout` 长度 383 ≠ m=384 | 被拒：`gemm.hpp:217-218` `m == m__` |
 | A5 DeepSeek 量级 dgrad（G=8、m=4352、n=2048、k=7168） | 349 us，**366 TFLOPS** |
 
 **B. 三种布局的同一性**（同一份 dgrad 数据，分别走 masked / PSUM / contiguous，取有效行比较）：

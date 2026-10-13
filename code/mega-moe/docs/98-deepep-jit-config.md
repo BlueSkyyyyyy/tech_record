@@ -170,7 +170,7 @@ inline void init_jit(const std::string& library_root_path, const std::string& nc
 五个参数（`deep_jit/runtime/config.hpp:12-30`）的含义：
 
 - **① `python_library_root`** = Python 包目录（`.../deep_ep`）。DeepJIT 用它拼 `post_hook`
-  的路径（`config.hpp:44` 的 `get_python_path`）。构造时断言**必须是绝对路径且非空**（`:32-36`）。
+  的路径（`config.hpp:48` 的 `get_python_path`）。构造时断言**必须是绝对路径且非空**（`:32-36`）。
 - **② `env_prefix = "EP"`** = DeepJIT `Env` 读环境变量的前缀（`EP_JIT_CACHE_DIR` 等的来源）。
   构造时断言非空、且**不许叫 `"DJ"`**（`:40-41`，`"DJ"` 是 DeepJIT 全局保留）。
 - **③ `extra_signature = {}`** = 空字符串。这是与 DeepGEMM 最显眼的不同（见 §5）。

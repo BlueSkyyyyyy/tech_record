@@ -19,7 +19,7 @@
   - `get_theoretical_num_sms`（`ep.py:430-431`，`@weak_lru(maxsize=None)`）；
   - `lb_get_theoretical_num_sms`（`ep.py:845-846`，`@weak_lru(maxsize=None)`）。
 - 对照——库内**其它所有**缓存都用普通 `functools.lru_cache`：
-  - 模块级：`find_pkgs.py:58`（`find_nccl_root`）、`envs.py:193/200/207/237/260`（5 个带宽/NIC 探测）；
+  - 模块级：`find_pkgs.py:58-59`（`find_nccl_root`）、`envs.py:193/200/207/237/260`（5 个带宽/NIC 探测）；
   - 静态方法级：`engram.py:129-130`（`@staticmethod` + `functools.lru_cache(maxsize=None)`）。
 
 **可跑边界**：`semantic.py` 只 `import weakref / functools / typing`，`find_pkgs.py` 只
@@ -191,7 +191,7 @@ bucket 的调用路径（每类 op 一次）则没必要。
 ## 7. 模块级缓存也会咬人：它吞掉「环境变化」
 
 模块级 `lru_cache` 看着无害，但它的键是**函数参数**，不看函数体读到的**外部状态**。实验 Part E
-用真实 `envs.py` 演示这个副作用：`get_nvlink_gbs`（`envs.py:207`）会 `subprocess.run` 解析
+用真实 `envs.py` 演示这个副作用：`get_nvlink_gbs`（`envs.py:207-208`）会 `subprocess.run` 解析
 `nvidia-smi nvlink -s`。我们把 `envs.subprocess.run` 换成假输出：
 
 1. 首次喂「2×100 GB/s」→ 返回 **200.0**；

@@ -34,7 +34,7 @@ warp 分工的流水 kernel**。整个 dispatch/combine 各自都是一个 coope
 ### 2.1 对称分配
 
 `EPBuffer` 构造时通过 `comm::Context` 分配一段**所有 rank 地址一致**的显存
-（`csrc/buffers/ep.hpp:71` 起）。物理分配走 CUDA VMM（`cuMemCreate`，`symmetric.hpp:79` 的
+（`csrc/buffers/ep.hpp:71` 起）。物理分配走 CUDA VMM（`cuMemCreate`，`symmetric.hpp:78-79` 的
 `cumem_create_with_fallback`，优先尝试 FABRIC handle）；分配出的段在
 `csrc/kernels/comm/context.cpp:186`：
 

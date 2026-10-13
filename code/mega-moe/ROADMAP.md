@@ -4397,7 +4397,32 @@
       vs bf16 参考 3.69e-2（=FP8 噪声层）。反直觉：G=32 均衡时 masked 反比 contiguous 慢 1.17×、偏斜追平。
       host 开销 ~7us（3%）。**测量注记**：8 卡共享节点，被跑满的卡上曾量出 1.58× 假象，绑空闲卡后稳定
       1.06–1.08×（脚本自动选 util 最低卡）。SM100 1D1D（`gemm.hpp:243/312`）共用同一份调度器、**仅分析**。
-      配套博客 `content/posts/mega-moe-152-moe-grouped-load-imbalance`（索引页新增第 152 篇）。
+       配套博客 `content/posts/mega-moe-152-moe-grouped-load-imbalance`（索引页新增第 152 篇）。
+
+### P143 增量（opt-in，把三次「引用体检」留下的 near_miss 清单做定点处置）
+
+- [x] **P143-1** **引用行号巡回复核：113 条 near_miss 逐条判定，修正 12 处（含 1 处写错的符号名）**
+      （`harness/check_refs.py` / `harness/triage_refs.py` / 新 `harness/fix_refs.py`；
+      审计文档 `docs/106`/`docs/107`/`docs/133`）。前面三次体检（P96/P97/P123）只到「分类 + 挑候选」，
+      `triage_refs.py` 的 7 条 `candidate off-by-one` 一直没人处置，`far_other`/`absent` 里的**真错误**
+      也不会被单独挑出。本篇补「逐条处置」：新工具 `fix_refs.py` 对每条 near_miss 对行内每个标识符给
+      六类**确定性判定**——`in_range` / `widened`（在 `l1±1`，可机械扩区间）/ `wrong_range` /
+      `wrong_file`（在**别的文件**）/ `unknown_symbol`（**全语料找不到**，多半写错符号名）/ `cross_talk`；
+      `--apply` 只自动改 `widened`（扩区间只可能更精确），其余只报告。**纯文件解析、架构无关**。
+      **结果**（`harness/exp_refs_drift_review.{sh,out.txt}`）：硬错误（无法解析/越界/空行/歧义）恒 **0**；
+      `near_miss` **113→102**、严格命中 **705→716**、召回（宽松命中 818）不变；修正 **12 处**：
+      **8 处区间加宽**（引 `if (env)` 守卫行、标识符在下一行：`ep.hpp:163→163-164`、`bucket.hpp:51→51-52`、
+      `find_pkgs.py:58→58-59`、`envs.py:207→207-208`、`gemm.hpp:218→217-218`、`allocator.py:11→10-11`、
+      `test_bf16.py:49→49-50`、`symmetric.hpp:79→78-79`）+ **3 处真错行号**（`event.py:73→70`、
+      `config.hpp:44→48`、`layout.hpp:35→101`——后者 35 行其实**是另一个函数** `check_major_type_cd`）+
+      **1 处写错的符号名**：`docs/126` 把 `layout/mega_moe.cuh` 里实际叫 **`Workspace`**（`:93` 定义、
+      `:105-126` 构造函数、`:119-125` 那 7 条 `DG_UNIFIED_ASSERT`）的结构体写成不存在的
+      `MegaMoEWorkspace`——正是 `unknown_symbol`/`wrong_file` 信号挑出来的唯一真错误。剩下 102 条经逐条
+      核对**全是 linter 粗粒规则的假阳性**（一行多标识符串扰；同名文件分辨率歧义，如 `52` 篇的
+      `runtime/runtime.hpp` 实际指 DeepJIT 那份），给出分类依据与代表性例子。由此引用审计从
+      「发现坏引用」→「分类」→「逐条处置」闭环。SM100/UMMA/tcgen05 无关；H100(sm90) 真机跑
+      `check_refs`/`triage_refs`/`fix_refs` 三件套 `harness/exp_refs_drift_review.out.txt`。
+      配套博客 `content/posts/mega-moe-153-refs-drift-review`（索引页新增第 153 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4429,8 +4454,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P142 各增量完成（P15-1…P41-1、P42-1…P142-1）。**
-  本轮 P142-1：新建 `docs/152-moe-grouped-load-imbalance.md`
+- 当前进度：**P0~P14 全部完成；P15~P143 各增量完成（P15-1…P41-1、P42-1…P143-1）。**
+  本轮 P143-1：新建 `docs/153-refs-drift-review.md`（+`harness/fix_refs.py`、
+  `harness/exp_refs_drift_review.{sh,out.txt}`）——把三次「引用体检」（P96/P97/P123）留下的
+  **near_miss 清单做逐条处置**：新工具 `fix_refs.py` 对每条 near_miss 给六类确定性判定
+  （`in_range`/`widened`/`wrong_range`/`wrong_file`/`unknown_symbol`/`cross_talk`），`--apply`
+  只机械扩区间。**结果**：硬错误恒 **0**、`near_miss` **113→102**、严格命中 **705→716**、召回不变；
+  修正 **12 处** = 8 处区间加宽（引守卫行、标识符在下一行）+ 3 处真错行号（`event.py:73→70`、
+  `config.hpp:44→48`、`layout.hpp:35→101`）+ **1 处写错的符号名**（`docs/126` 的 `MegaMoEWorkspace`
+  → 实际叫 `Workspace`，`layout/mega_moe.cuh:93`）。剩下 102 条全是 linter 粗粒规则的假阳性（附分类）。
+  索引页新增第 153 篇。
+  上一轮 P142-1：新建 `docs/152-moe-grouped-load-imbalance.md`
   （+`harness/exp_grouped_skew.{py,sh,out.txt}`）——把第 129 篇的「路由负载均衡」放回**计算侧**量：
   用 SM90 真实 DeepGEMM FP8 kernel（`m_grouped_*` dgrad 形状）扫 Dirichlet 偏斜，对照
   contiguous / masked / naive 稠密 bmm。**结论：grouped GEMM 对负载不均几乎免疫**——均匀→
@@ -6038,7 +6072,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P142 已完成（最新 **P142-1 把「路由负载均衡」放回计算侧量——grouped GEMM 对专家负载不均到底免不免疫**：
+- **下一步**：P0~P143 已完成（最新 **P143-1 把三次「引用体检」留下的 near_miss 清单做逐条处置**：
+  P96/P97/P123 只到「分类 + 挑候选」，`triage_refs.py` 的 7 条 `candidate off-by-one` 一直悬着。
+  新工具 `harness/fix_refs.py` 给每条 near_miss 六类确定性判定（`in_range`/`widened`/`wrong_range`/
+  `wrong_file`/`unknown_symbol`/`cross_talk`），`--apply` 只机械扩区间。H100(sm90) 真机跑三件套：
+  硬错误恒 0、`near_miss` **113→102**、严格命中 **705→716**、召回不变；修正 **12 处**（8 处区间加宽 +
+  3 处真错行号 `event.py:73→70`/`config.hpp:44→48`/`layout.hpp:35→101` + **1 处写错的符号名**
+  `MegaMoEWorkspace`→`Workspace`）。剩下 102 条全是 linter 粗粒规则的假阳性。索引页新增第 153 篇）。
+  上一轮 P142-1 把「路由负载均衡」放回计算侧量——grouped GEMM 对专家负载不均到底免不免疫：
   第 13 篇讲了 dgrad 三布局**语义**、第 129 篇讲了**路由层**均衡，但「token 分布偏斜时 grouped GEMM 慢多少」
   从没量过。用 SM90 真实 DeepGEMM FP8 kernel（`m_grouped_*` dgrad 形状 `G=8,M=8192,n=2048,k=7168`）扫
   Dirichlet 偏斜，对照 contiguous/masked/naive。**结论：几乎免疫**——均匀→`max_m=3.75×`均值，contiguous
@@ -6066,7 +6107,7 @@
   **三侧同时被关闭**。**结论**：要么折进 K（big-K，结构性最优）、要么退回 bf16 累积器（EPI-B，数值免费），
   FP8 累积器无立足点。SM100 `tn` 同结构、仅分析。索引页新增第 151 篇）。
   可继续（均为增量、非承诺）：
-  ① 对 P96/P97/P123 的轻微漂移清单关键路径定点复核；
+  ① **已由 P143-1 完成**：对 P96/P97/P123 的轻微漂移清单做了逐条处置（`fix_refs.py`，修正 12 处）；
   ② 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）；
   ③ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落 / einsum 家族剩余分支做定点复核。详见上）。
   上一轮 P140-1 把 wgrad 的 S 步累积折进收缩维 K（big-K 折叠）：每步累积税能不能消掉：

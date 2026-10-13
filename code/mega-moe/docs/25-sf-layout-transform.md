@@ -96,7 +96,7 @@ byte0=values[0]>>23、byte1=values[1]>>23、byte2=values[2]>>23、byte3=values[3
 
 ## 5. `check_sf_layout` 契约（`csrc/utils/layout.hpp:101-140`）
 
-无论哪条分支，进来先过 `check_sf_layout`（`layout.hpp:35`）：
+无论哪条分支，进来先过 `check_sf_layout`（`layout.hpp:101`）：
 
 - `:115` `sf.dim() == num_groups.has_value() + 2`（有分组则 3D）；
 - `:118` `sf.size(-2) == ceil_div(mn, gran_mn)`；

@@ -213,7 +213,7 @@ handle.register_hook_after_wait(hook_after_wait)
 注意三个「为什么」：
 
 1. **先取旧 hook 再置空**：`EventOverlap.register_hook_after_wait` 有
-   `assert self.hook_after_wait is None`（`event.py:73`），所以必须先把 `hook_after_wait`
+   `assert self.hook_after_wait is None`（`event.py:70`），所以必须先把 `hook_after_wait`
    拿出来、置 `None`，再注册新的。
 2. **用 data_ptr 判断是否需要回拷**：常规调用里用户传的 dst 就是 buffer 视图（in-place），
    `dst.data_ptr() == dst_buffer.data_ptr()`，`copy_pairs` 为空——**不产生任何多余拷贝**；

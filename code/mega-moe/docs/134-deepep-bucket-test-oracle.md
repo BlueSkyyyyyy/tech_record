@@ -199,7 +199,7 @@ assert len(buffer.contexts) == 2                    # :32  两个 group → 两�
 assert bucket_0.data_ptr() == buffer.storage.data_ptr()  # :33  首个分配落在存储起点
 ```
 
-`BufferAllocator`（`deep_ep/buffers/allocator.py:11`）的 `allocate`（`:18-24`）返回**meta 占位张量**，
+`BufferAllocator`（`deep_ep/buffers/allocator.py:10-11`）的 `allocate`（`:18-24`）返回**meta 占位张量**，
 按 `alignment = _C.get_num_allocation_alignment()`（2 MiB）记录 `(tensor, offset)`、累加
 `num_bytes`；`materialize`（`:26-36`）在拿到一块 `uint8` 存储后，对每个占位张量
 `storage.narrow(0, offset, nbytes).view(dtype).view(shape)` 并 `torch.utils.swap_tensors`（`:35`）
