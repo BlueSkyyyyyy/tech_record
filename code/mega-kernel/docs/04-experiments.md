@@ -5359,3 +5359,128 @@ task 后对每个后继 `atomicSub(dep_left[succ],1)`，归零者**直接 push**
   把重排窗口抹掉，测出 0。两坑都记在此，提醒「0 错」先要排查是不是试纸坏了。
 - **口径**：时钟换算用 H100 SM ~1.8 GHz（`ns = cycle / 1.8`），是近似口径；不同配置在不同空闲 device
   上可能有 ±几 % 抖动。目标卡 H100/sm90、device 3（固定空闲）。
+
+## 37. MPSC 队列的「发布协议」：多生产者下为什么必须「连续放行」（P48-1）
+
+> 本节接续 §36（P47-1）。§36 把 in-kernel 队列的「发布内存序」做成实测，但 §36.6 明确留了一条尾巴：
+> **「环未测多生产者（MPSC）」**。而真实 MPK 的调度队列**恰恰是 MPSC**——`sched_queues[sched_id]` 由
+> **多个 worker** 共同投递，其协议比单生产者多一环（连续 CAS 放行）。本节把它补上。
+>
+> 真实锚点（mirage 快照 `f9eb70c`）：`get_rand_sched_id()`（`persistent_kernel.cuh:857-869`）把
+> `worker_id` 静态映射到 `sched_id = worker_id / ceil(num_workers/num_schedulers)`——128 worker / 16
+> local scheduler（`docs/06` §5.1）⇒ **每个 `sched_queue` 有 8 个生产者**。worker 完成一个 task 后触发
+> event，push 路径（`persistent_kernel.cuh:1206-1228`）是三步：
+> ① `last_event_pos = atom.add.release.gpu.u64(&sched_queue_next_free_event_id[sched_id], 1)`
+> （**占位**，拿到一个全局分配号 `pos`）；② `st.relaxed.gpu.u64(&sched_queues[sched_id][pos % len], event_index)`
+> （**relaxed 写 payload**）；③ 连续放行
+> `do { old = atom.cas.release.gpu.u64(&sched_queue_last_ready_event_id[sched_id], pos, pos+1); } while (old != pos);`
+> ——只有「正好等于当前 `last_ready` 的那个 `pos`」能把游标 +1，其余自旋等待。
+>
+> 反过来，**scheduler→worker 的 `worker_queues[worker]` 是 SPSC**（每个队列只有一个生产者 =
+> scheduler，`persistent_kernel.cuh:1495-1502`），所以那里只需一条 `atom.add.release.gpu` 推游标。
+> 于是问题变成：**多生产者（MPSC）下，为什么不能用 SPSC 的写法？哪些替代会在结构上读错？代价多少？**
+>
+> 源码 `src/mpsc_ring.cu`，脚本 `harness/mpsc_ring.sh`，原始输出 `harness/mpsc_ring.out.txt`
+> （目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`__launch_bounds__` 由 `<<<P+1,32>>>` 决定、
+> 前 P block=生产者 / 末 block=消费者各 1 线程；所有等待循环带 `clock64` 守门狗，设备侧不挂）。
+
+### 37.1 机制：一个 MPSC 环形缓冲 + 四种发布协议
+
+单常驻 kernel，grid = `P + 1`（前 `P` 个 block = 生产者、各 1 线程；末 block = 消费者、1 线程）。
+每个生产者在**全局占位号** `r = 0..P*NS-1` 上工作：**占位号由 `next_free` 原子分配**，故三件事
+（占位 / 写 payload / 放行）在不同生产者间**乱序**发生——这正是 SPSC 不会有的情况。payload 自描述：
+槽首字 = 其占位号 `r`、其余字 = `mix(r,i)`（`PL` 字）。消费者**按占位号 `0,1,2,...` 顺序**消费
+（「连续放行」要保证的正是「读到游标 `=c` 时槽 `0..c-1` 全已写」），逐字校验首字 `== c`、其余
+`== mix(c,i)`；任何不符记一次 `bad`。这样「读到未写槽」（首字 `0xffffffff`）或「读到复用陈旧槽」
+（首字 = 上一代 `c-CAP`）都会被抓到。容量背压：生产者占位后等 `r - consumed < CAP` 才写；消费者读完后
+才放行 `consumed`。
+
+| 模式 | 生产者程序序 | 语义 |
+|---|---|---|
+| `mpk` | 占位(release atomicAdd) → 写 payload(relaxed) → **连续 CAS 放行(release)** | **MPK 的 MPSC 协议** |
+| `pertile` | 占位 → 写 payload → **`st.release` 逐槽 ready 标志** | 另一种正确解（无中央游标） |
+| `reserve_count` | 占位 → 写 payload → **`atomicAdd(done,1)` 非连续完成计数** | 结构不严谨 |
+| `pub_then_write` | 占位（把 `next_free` 当就绪游标）→ **后写 payload** | §36 的「发布先于写」在 MPSC 下的形态 |
+| `mpk_relaxed` | 同 `mpk`，但 CAS/load 用 relaxed | 测 release/acquire 是否必需 |
+| `spsc` | P=1 下 `atomicAdd(last_ready,1)` 推游标（relaxed，无 release） | §36 类无放行基线 |
+
+另外有一个**决定性正对照** `stall0`：让「持有前 4 个占位号（`r<4`）」的生产者在其写 payload 前停
+~110 µs，人为制造「低号槽未写、高号槽（`r=4..7`）已写」的偏斜（对标 §36 的 `pubslp`）。
+
+### 37.2 §A：两种完成门控的协议，任意生产者数、任意容量都 0 错
+
+`harness/mpsc_ring.out.txt` 行 4–12：`mpk`（P=1/2/4/8/32）、`pertile`（P=8）、紧容量 `CAP=32`、
+`spsc`（P=1）**全部 `bad=0`**。即**连续 CAS 放行（MPK）与逐槽 release 标志两种协议，在多生产者下
+逐位正确**：消费者看到游标/标志时，对应槽的 payload 一定已发布。P=32（32 个跨 SM 生产者）也 0 错。
+
+### 37.3 §B：结构不严谨的替代——自然时序下「侥幸」0 错
+
+`harness/mpsc_ring.out.txt` 行 15–21：`reserve_count`（P=8/P=2）**全 0 错**；`pub_then_write`
+（P=8/P=2）各 **1/400000、1/100000**（追加连跑 3 次得 0、1、1）；`mpk_relaxed` 全 0 错。
+
+这不是「结构正确」，而是与 §36.3 完全同源的**时序侥幸**：生产者占位后**立即**写 payload，且消费者
+（单线程、每项 ~2.3 µs，见 §37.5）**比生产者慢得多**，故生产者总是**近似按占位序**抢先把槽写完，
+消费者读到低号槽时它多半已落盘。「非连续完成计数」`done` 或「占位即就绪」`next_free` 都不保证
+「前 N 个槽已写」，但在本机自然节奏下这个窗口几乎不被命中——**「0 错」是运气，不是形式保证**。
+
+### 37.4 §B2：决定性正对照 `stall0`——完成门控 vs 非完成门控的分水岭
+
+把「低号槽」延迟 110 µs（`r<4`）后，`harness/mpsc_ring.out.txt` 行 23–30、62–86：
+
+- **`reserve_count` + `stall0`：`bad=8`（连跑 3/3 稳定 8）**；`pub_then_write` + `stall0`：**`bad=8`
+  （3/3 稳定）**（P=4 时 `reserve_count` 反而 0——因为 4 个生产者全拿到 `r<4`、无人写出高号槽，
+  没有任何偏斜；P=8 才有非阻塞的生产者去写高号槽）。
+- **`mpk` + `stall0`：`bad=0`（3/3）**；**`pertile` + `stall0`：`bad=0`（3/3）**。
+
+即：同一个「低号槽迟到」的扰动，**完成门控的协议把消费者挡在低号槽外**（`last_ready`/逐槽标志不放行就
+不消费），因此**不动数值**；而「非连续计数 / 占位即就绪」会让消费者提前读低号槽 → **必错**。这正是
+MPK 第 ③ 步「连续 CAS 放行」的全部理由：**占位号是乱序分配的，只有连续推进游标才能保证
+「游标 = N ⇒ 前 N 个槽已写」**。
+
+### 37.5 §C：放行代价 ≈ +0.38 µs/项（大 payload 摊薄）
+
+`harness/mpsc_ring.out.txt` 行 33–40。注意本实验的每项成本**被单线程消费者的同步往返主导**（约
+2.2–2.4 µs/项，P 基本无关），所以真正可比的是**同配置下的差值**：
+
+| payload | P | 模式 | ns/项 | 相对基线 |
+|---|---|---|---|---|
+| `PL=1` | 1 | `spsc`（无 release 基线） | 1170.3 | — |
+| `PL=1` | 1 | `mpk`（连续 CAS release） | 1551.4 | **+381.1（1.33×）** |
+| `PL=1` | 8 | `mpk` | 1175.3 | ~基线 |
+| `PL=1` | 8 | `pertile`（逐槽 release） | **1119.98** | 比 mpk 便宜 ~55 |
+| `PL=1` | 8 | `mpk_relaxed` | 1134.8 | ~pertile |
+| `PL=256` | 8 | `mpk` / `pertile` | 43581.7 / 43626.1 | 打平 |
+
+两点：**(1) P=1 时一次 release CAS 约 +381 ns/项，与 §36.4 的 +355–372 ns/项 一致**（同一根 fence
+成本）；**(2) P=8 后生产者并行把这点开销藏掉，且「逐槽 release」比「中央连续 CAS」略便宜**——因为
+消费者读各自的槽标志、生产者不争同一个 `last_ready` 缓存行。**大 payload（PL=256≈1 KB）时二者打平**，
+与 §36.4「fence 被访存摊薄」同一结论。
+
+### 37.6 与 §36 / MPK / DeepGEMM 的关系、判据
+
+- **对 §36.6 尾巴的收口**：SPSC 的结论（写 payload→推游标；或 relaxed 写+release 推游标+acquire 读）
+  在 MPSC 下**不够**——多生产者还要求**连续性**。本节把「发布内存序」补成「发布**协议**」：MPSC 必须
+  是「占位 → 写 → **连续放行**」（或等价的逐槽 release 标志），否则结构上不保证。
+- **对 MPK（本节的直接动机）**：MPK 的两类队列恰好对应两种协议——`sched_queue`（**MPSC**，8 worker/队列）
+  用**连续 CAS 放行**（`persistent_kernel.cuh:1213-1228`）；`worker_queue`（**SPSC**，仅 scheduler 一个
+  生产者）用**单条 `atom.add.release`**（`:1495-1502`）。**这不是随意选择，而是由生产者个数决定的**：
+  SPSC 无需连续性、MPSC 必须。`mpk_atoms.cuh:26/37/49/66/73` 的六条原语（`atom.add.release`、
+  `atom.cas.release`、`ld.acquire`、`st.relaxed`）正是这套协议的工程化。
+- **对 DeepGEMM**：ring barrier 的 `red.async.inc.release` + 无符号距离校验（`docs/04` §23 引
+  `scheduler/mega_gate.cuh:13-39`）是另一种「逐槽/单调序号」形态，与本节 `pertile` 同属「无中央游标的
+  完成门控」。
+- **判据（C1–C5）**：环本身是单常驻 kernel、设备侧推进（C1–C4），无固定角色 worker/scheduler 动态
+  派发，**仍差 C5 一步**（与 §31–§36 同档）。
+
+### 37.7 局限与踩到的坑
+
+- **消费者是单线程**，每项 ~2.3 µs 的同步往返主导了成本，因此 §C 只能看**同配置差值**；生产实现
+  dispatcher 会批量取 task（`docs/04` §15 的 K≈W/G）把这层摊薄。payload 是纯 `uint32`、未做真实
+  task 描述符。
+- **`stall0` 是人为扰动**（`r<4` 停 110 µs），只用于证明「完成门控是负载正确所必需」，不代表生产时序；
+  自然时序下两种不严谨写法**基本 0 错**（§37.3），这与 §36.3「没出事是侥幸」同源。
+- **`mpk_relaxed` 恒 0 错**不能读作「release 不必要」：sm90 保序 store→store（§36.2），且本节把它放在
+  一个结构正确的连续游标上；跨地址/跨生产者的可见性仍**无形式保证**。
+- **初始 bug（已修）**：首版生产者未做 `if (threadIdx.x != 0) return;`，导致每 block 的 32 个线程**都**
+  去占位/写，全部配置死锁（守门狗 ~2.4 s 后返回 `dead=1`）；修正后逐项正确。
+- **口径**：目标卡 H100/sm90、device 3（固定空闲），nvcc 13.2；`stall0` 的 110 µs 按 SM ~1.8 GHz 折算。

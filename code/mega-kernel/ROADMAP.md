@@ -1106,6 +1106,31 @@
   正在读的槽 → 假阳性 19995/20000；② SB litmus 在写读之间放了带原子的屏障、顺带 flush store 抹掉窗口
   → 测出 0。**本轮新增实验。**
 
+### P48 实验扩展 30：MPSC 队列的发布协议（`docs/04-experiments.md` §37）
+
+- [x] **P48-1** 补掉 P47-1（§36）§36.6 明留的尾巴「环仍是合成模型……未测多生产者（MPSC）」：
+  把 §36 的 SPSC 队列推广到**多生产者单消费者（MPSC）**，并把「发布内存序」升级为「发布**协议**」——
+  多生产者下「占位号乱序」逼出一个 SPSC 没有的新要求：**连续放行**。真实锚点（快照 `f9eb70c`）：
+  MPK 的 `sched_queue` 是 **MPSC**（128 worker / 16 scheduler，`get_rand_sched_id()`
+  `persistent_kernel.cuh:857-869` ⇒ 8 生产者/队列），push 三步 = 占位(`atom.add.release`) →
+  relaxed 写 payload → **连续 CAS 放行**(`atom.cas.release(last_ready,pos,pos+1)`，`:1206-1228`)；
+  而 `worker_queue` 是 SPSC（仅 scheduler 一个生产者）用单条 `atom.add.release`（`:1495-1502`）。
+  见 `docs/04-experiments.md` **§37**，源码 `src/mpsc_ring.cu`、脚本 `harness/mpsc_ring.sh`、原始输出
+  `harness/mpsc_ring.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2，grid=P+1、每 block 1 线程，
+  payload 自描述、逐字校验）。核心结论：
+  - **§A 两种完成门控协议多生产者下全对**：`mpk`（连续 CAS 放行）P=1/2/4/8/32、`pertile`（逐槽
+    release 标志）、紧容量 CAP=32、`spsc`（P=1）**全 `bad=0`**。
+  - **§B 结构不严谨的替代在自然时序下「侥幸」0 错**：`reserve_count`（非连续完成计数 `atomicAdd(done,1)`）
+    全 0；`pub_then_write`（占位即就绪）各 1/400000（连跑 0/1/1）——与 §36.3「时序侥幸非形式保证」同源。
+  - **§B2 决定性正对照 `stall0`（低号槽 `r<4` 延迟 ~110µs）分出胜负**：`reserve_count`/`pub_then_write`
+    **`bad=8` 稳定复现（3/3）**，而 `mpk`/`pertile` **恒 0（3/3）**——完成门控把消费者挡在低号槽外。
+    即 **MPK 第③步「连续 CAS 放行」是「占位乱序 ⇒ 必须连续」的必要工程**。
+  - **§C 放行代价 ≈ +0.38 µs/项**：`PL=1` 时 `mpk` P=1 相对 `spsc` 基线 +381 ns（与 §36.4 的 +355–372 ns
+    一致）；P=8 并行藏掉、`pertile` 比中央 CAS 略便宜（1120 vs 1175）；PL=256 打平（§36.4 同结论）。
+  判据：单常驻 kernel、设备侧推进（C1–C4）、仍差 C5 一步（与 §31–§36 同档）。**本轮新增实验**；
+  P47-1 新留尾巴（§37.7）：消费者单线程致每项 ~2.3µs 往返主导、`stall0` 为人为扰动、未做真实 task
+  描述符、litmus 仍未扫 SM 距离/`ncu` 内存序事件、未与 DeepGEMM SM100 路径对跑。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1128,7 +1153,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P47-1 完成（1/1）**。补掉 P46-1（§35）§35.7 明留的尾巴「入队是『先推 `tail`、后写数据』
+- 当前进度：**P48-1 完成（1/1）**。补掉 P47-1（§36）§36.6 明留的尾巴「未测多生产者（MPSC）」：
+  把 §36 的 SPSC 队列推广到 **MPSC**，并把「发布内存序」升级为「发布**协议**」。`docs/04-experiments.md`
+  新增 **§37**，源码 `src/mpsc_ring.cu`、脚本 `harness/mpsc_ring.sh`、原始输出 `harness/mpsc_ring.out.txt`
+  （目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2）。真实锚点：MPK `sched_queue` 是 MPSC
+  （128 worker/16 scheduler，`get_rand_sched_id` `persistent_kernel.cuh:857-869` ⇒ 8 生产者/队列；
+  push = 占位`atom.add.release` → relaxed 写 → **连续 CAS 放行** `:1206-1228`；`worker_queue` SPSC 用单条
+  `atom.add.release` `:1495-1502`）。核心结论：
+  - **§A 完成门控协议多生产者全对**：`mpk`（连续 CAS 放行）P=1..32、`pertile`（逐槽 release）、CAP=32、
+    `spsc` **全 bad=0**。
+  - **§B 结构不严谨替代自然时序侥幸 0 错**：`reserve_count`（非连续完成计数）全 0；`pub_then_write`
+    （占位即就绪）1/400000（0/1/1）——与 §36.3 同源。
+  - **§B2 `stall0` 决定性地分出胜负**：低号槽延迟后 `reserve_count`/`pub_then_write` **bad=8 稳定（3/3）**，
+    `mpk`/`pertile` **恒 0（3/3）**——证明「连续放行」是「占位乱序 ⇒ 必须连续」的必要工程。
+  - **§C 放行 ≈ +0.38 µs/项**（与 §36.4 一致）；P=8 藏掉、`pertile` 略便宜、大 payload 打平。
+  判据 C1–C4、仍差 C5 一步（与 §31–§36 同档）。**本轮新增实验。**
+- 此前：**P47-1 完成（1/1）**。补掉 P46-1（§35）§35.7 明留的尾巴「入队是『先推 `tail`、后写数据』
   （**无 release 发布**），理论上消费者可能在数据可见前读到槽；真实实现（MPK）用 release/acquire 把它
   做实——可作后续实验」：把「发布内存序」做成实测。`docs/04-experiments.md` 新增 **§36**，源码
   `src/pub_order_ring.cu`、脚本 `harness/pub_order_ring.sh`、原始输出 `harness/pub_order_ring.out.txt`
@@ -1657,8 +1697,15 @@
       **store→store 保序**（MP litmus 0/70M）、**store→load 可绕过**（正对照 SB 100%）；「发布先于写」
       自然时序 0 错但拉开窗口 `pubslp` 100% 错（检测器有效、§35「没出事」是时序侥幸）；正确序 `wro`
       无 fence 全对、MPK 协议 `rel` 全对，release/acquire 代价 ≈ **+0.36 µs/槽**（大 payload 摊薄 ~1.06×）。
-      **P47-1 新留尾巴**（`docs/04` §36.6）：litmus 只测 2 block×1 线程（未扫 SM 距离/`ncu` 内存序事件、
-      未给重排概率分布），环未测多生产者（MPSC）/真实 task 描述符/与 DeepGEMM SM100 路径对跑。
+       **P47-1 新留尾巴**（`docs/04` §36.6）：litmus 只测 2 block×1 线程（未扫 SM 距离/`ncu` 内存序事件、
+       未给重排概率分布），环未测多生产者（MPSC）/真实 task 描述符/与 DeepGEMM SM100 路径对跑。
+       其中「多生产者（MPSC）」已由 **P48-1（`docs/04` §37）** 处理：把 SPSC 推广到 MPSC，实测
+       **MPK 连续 CAS 放行 / 逐槽 release 在多生产者下全对**，而「非连续完成计数 / 占位即就绪」在决定性
+       正对照 `stall0` 下必错（bad=8），「自然时序 0 错」只是侥幸；放行代价 ≈ +0.38 µs/项（与 §36.4 一致），
+       并指出 **MPK 的两类队列对应两种协议（MPSC→连续 CAS、SPSC→单条 release）由生产者个数决定**。
+       **P48-1 新留尾巴**（`docs/04` §37.7）：消费者单线程致每项 ~2.3µs 往返主导（§C 只看差值）、
+       `stall0` 为人为扰动、未做真实 task 描述符、litmus 仍未扫 SM 距离/`ncu` 内存序事件、未与
+       DeepGEMM SM100 路径对跑。
 - **本轮（P44-1）**：`docs/04-experiments.md` 新增 **§33**「有界 ready 池 × 不规则依赖 DAG」——
   新源码 `src/irregular_pool.cu`、脚本 `harness/irregular_pool.sh`、原始输出
   `harness/irregular_pool.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`G=64`）。
