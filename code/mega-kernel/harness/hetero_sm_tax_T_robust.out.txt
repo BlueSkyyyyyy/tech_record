@@ -1,0 +1,285 @@
+########## §84 块粒度 T 次级效应的统计稳健性 + 内存延迟分解（P96-1，补 §83.5 尾巴） ##########
+# nvcc -O3 -arch=sm_90a；U=8 R=32 map=bind（与 §82/§83 同配置同内核）
+# DEV=4
+/usr/local/bin/ncu
+
+===== 构建（--ptxas-options=-v，与 §82 同内核）=====
+ptxas info    : Function properties for _Z5pat_TILi16ELi128EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 84 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi16ELi96EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 84 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi16ELi64EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 64 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi16ELi48EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 48 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi16ELi32EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi16ELi28EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    16 bytes stack frame, 28 bytes spill stores, 96 bytes spill loads
+ptxas info    : Used 28 registers, used 1 barriers, 16 bytes cumulative stack size, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi16ELi24EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    32 bytes stack frame, 72 bytes spill stores, 236 bytes spill loads
+ptxas info    : Used 24 registers, used 1 barriers, 32 bytes cumulative stack size, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi8ELi128EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 54 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi8ELi96EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 54 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi8ELi64EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 54 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi8ELi48EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 48 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi8ELi32EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi8ELi28EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    8 bytes stack frame, 16 bytes spill stores, 48 bytes spill loads
+ptxas info    : Used 28 registers, used 1 barriers, 8 bytes cumulative stack size, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi8ELi24EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    16 bytes stack frame, 32 bytes spill stores, 152 bytes spill loads
+ptxas info    : Used 24 registers, used 1 barriers, 16 bytes cumulative stack size, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi4ELi128EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi4ELi96EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi4ELi64EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi4ELi48EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi4ELi32EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 8200 bytes smem
+ptxas info    : Function properties for _Z5pat_TILi4ELi28EEvPKvxiiPKiS3_PKxS5_S5_S5_PiPjPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 28 registers, used 1 barriers, 8200 bytes smem
+
+===== §A 稳健计时（S=30 单采样 + round-robin 交错 + bootstrap 95% CI）=====
+########################################################################
+# §84 块粒度 T 次级效应的统计稳健性 + 内存延迟分解（补 §83.5 尾巴，P96-1）
+# 目标卡 H100/sm90a；numSM=132；逻辑总读 256 MiB（uint4 计）；U=8 R=32 map=bind
+# 关键：§82.6/§83.5 的 T 趋势只有 ~3–5%、只取 3 次 run（min-of-3），在噪声地板附近。
+# 本模式：每配置 S=30 次**单采样**、round-robin 交错（消除时钟/热漂移），给 min/median/mean/std
+#   + T512/T128、T256/T128 的 median 比与 bootstrap 95% CI（B=2000）。
+########################################################################
+
+===== 资源：每配置 occ / Wsm / grid =====
+  config                     T   occ    Wsm   grid
+  mixed scalar+l2res       128    16   2048   2112
+  mixed scalar+l2res       256     8   2048   1056
+  mixed scalar+l2res       512     4   2048    528
+  l2res16M solo            128    16   2048   2112
+  l2res16M solo            512     4   2048    528
+  scalar4B solo            128    16   2048   2112
+  scalar4B solo            512     4   2048    528
+
+===== §A 稳健计时（S=30，交错；GB/s = 256 MiB / 时间）=====
+  config                     T     min_ms     med_ms    mean_ms     std_%   GB/s(med)   GB/s(min)
+  mixed scalar+l2res       128     0.0562     0.0568     0.0569      0.80      4727.3      4774.4
+  mixed scalar+l2res       256     0.0543     0.0551     0.0552      1.67      4871.4      4946.1
+  mixed scalar+l2res       512     0.0537     0.0545     0.0545      0.92      4925.8      4999.2
+  l2res16M solo            128     0.0187     0.0191     0.0192      5.12     14074.8     14388.7
+  l2res16M solo            512     0.0192     0.0196     0.0197      4.15     13718.1     13957.8
+  scalar4B solo            128     0.1023     0.1039     0.1040      1.09      2583.5      2623.9
+  scalar4B solo            512     0.1005     0.1016     0.1018      0.89      2642.9      2669.8
+
+===== §B T 趋势是否超过噪声（median 比 + bootstrap 95% CI）=====
+  若 CI 含 1.000 => 该 T 比在 95% 置信下不可区分于噪声。
+  config                      T512/T128        CI95[T512/T128]      T256/T128        CI95[T256/T128]
+  mixed scalar+l2res             0.9586 [       0.9528,  0.9627]         0.9691 [       0.9624,  0.9741]
+  l2res16M solo                  1.0269 [       1.0218,  1.0345]              -                      -
+  scalar4B solo                  0.9777 [       0.9727,  0.9854]              -                      -
+
+===== §C 结论（自动判定）=====
+  mixed T512/T128 median 比 = 0.9586，CI95=[0.9528,0.9627] -> 显著（真效应）
+
+########## §84 robust 完成 ##########
+===== §B 内存延迟分解（ncu）：混合 scalar+l2res 扫 T =====
+----- [mixed scalar+l2res] U=8 R=32 T=128 map=1(bind) seq=0,0,1,1 -----
+    Metric Name                                                    Metric Unit Metric Value
+    -------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                 Mbyte       140.91
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                       %        71.10
+    gpu__time_duration.sum                                                  us        61.12
+    l1tex__t_sector_hit_rate.pct                                             %        48.28
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                      %        16.50
+    lts__t_sector_hit_rate.pct                                               %         9.88
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                        %        73.18
+    smsp__average_warp_latency.ratio                                     cycle     71508.22
+    smsp__average_warp_latency_issue_stalled_lg_throttle.ratio       inst/warp      8541.93
+    smsp__average_warp_latency_issue_stalled_long_scoreboard.ratio   inst/warp     53653.47
+    smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct             %        75.03
+    -------------------------------------------------------------- ----------- ------------
+
+----- [mixed scalar+l2res] U=8 R=32 T=256 map=1(bind) seq=0,0,1,1 -----
+    Metric Name                                                    Metric Unit Metric Value
+    -------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                 Mbyte       140.34
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                       %        73.47
+    gpu__time_duration.sum                                                  us        59.17
+    l1tex__t_sector_hit_rate.pct                                             %        45.85
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                      %        16.83
+    lts__t_sector_hit_rate.pct                                               %        10.15
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                        %        74.19
+    smsp__average_warp_latency.ratio                                     cycle     72996.50
+    smsp__average_warp_latency_issue_stalled_lg_throttle.ratio       inst/warp      7142.51
+    smsp__average_warp_latency_issue_stalled_long_scoreboard.ratio   inst/warp     56057.46
+    smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct             %        76.79
+    -------------------------------------------------------------- ----------- ------------
+
+----- [mixed scalar+l2res] U=8 R=32 T=512 map=1(bind) seq=0,0,1,1 -----
+    Metric Name                                                    Metric Unit Metric Value
+    -------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                 Mbyte       139.74
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                       %        74.95
+    gpu__time_duration.sum                                                  us        58.18
+    l1tex__t_sector_hit_rate.pct                                             %        40.23
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                      %        17.16
+    lts__t_sector_hit_rate.pct                                               %        12.06
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                        %        75.72
+    smsp__average_warp_latency.ratio                                     cycle     76587.64
+    smsp__average_warp_latency_issue_stalled_lg_throttle.ratio       inst/warp      6474.11
+    smsp__average_warp_latency_issue_stalled_long_scoreboard.ratio   inst/warp     56845.21
+    smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct             %        74.22
+    -------------------------------------------------------------- ----------- ------------
+
+===== §B2 单模式对照：l2res16M solo 扫 T =====
+----- [l2res16M solo] U=8 R=32 T=128 map=1(bind) seq=0,0,0,1 -----
+    Metric Name                                                    Metric Unit Metric Value
+    -------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                 Kbyte       140.29
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                       %         0.32
+    gpu__time_duration.sum                                                  us        15.65
+    l1tex__t_sector_hit_rate.pct                                             %        93.33
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                      %        61.42
+    lts__t_sector_hit_rate.pct                                               %        97.93
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                        %         5.21
+    smsp__average_warp_latency.ratio                                     cycle     23150.41
+    smsp__average_warp_latency_issue_stalled_lg_throttle.ratio       inst/warp      2123.15
+    smsp__average_warp_latency_issue_stalled_long_scoreboard.ratio   inst/warp     10908.50
+    smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct             %        47.12
+    -------------------------------------------------------------- ----------- ------------
+
+----- [l2res16M solo] U=8 R=32 T=512 map=1(bind) seq=0,0,0,1 -----
+    Metric Name                                                    Metric Unit Metric Value
+    -------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                 Kbyte       522.75
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                       %         1.20
+    gpu__time_duration.sum                                                  us        14.98
+    l1tex__t_sector_hit_rate.pct                                             %        74.99
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                      %        65.11
+    lts__t_sector_hit_rate.pct                                               %        96.78
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                        %        24.71
+    smsp__average_warp_latency.ratio                                     cycle     23748.63
+    smsp__average_warp_latency_issue_stalled_lg_throttle.ratio       inst/warp      1016.96
+    smsp__average_warp_latency_issue_stalled_long_scoreboard.ratio   inst/warp     12649.97
+    smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct             %        53.27
+    -------------------------------------------------------------- ----------- ------------
+
+===== §B3 单模式对照：scalar4B solo 扫 T =====
+----- [scalar4B solo] U=8 R=32 T=128 map=1(bind) seq=0,0,1,0 -----
+    Metric Name                                                    Metric Unit Metric Value
+    -------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                 Mbyte       303.42
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                       %        78.27
+    gpu__time_duration.sum                                                  us       120.48
+    l1tex__t_sector_hit_rate.pct                                             %         6.77
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                      %         9.07
+    lts__t_sector_hit_rate.pct                                               %         6.08
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                        %        78.13
+    smsp__average_warp_latency.ratio                                     cycle    204137.06
+    smsp__average_warp_latency_issue_stalled_lg_throttle.ratio       inst/warp     38963.56
+    smsp__average_warp_latency_issue_stalled_long_scoreboard.ratio   inst/warp    152045.55
+    smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct             %        74.48
+    -------------------------------------------------------------- ----------- ------------
+
+----- [scalar4B solo] U=8 R=32 T=512 map=1(bind) seq=0,0,1,0 -----
+    Metric Name                                                    Metric Unit Metric Value
+    -------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                 Mbyte       297.83
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                       %        80.33
+    gpu__time_duration.sum                                                  us       115.74
+    l1tex__t_sector_hit_rate.pct                                             %         8.25
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                      %         9.14
+    lts__t_sector_hit_rate.pct                                               %         5.95
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                        %        80.71
+    smsp__average_warp_latency.ratio                                     cycle    207388.86
+    smsp__average_warp_latency_issue_stalled_lg_throttle.ratio       inst/warp     22041.00
+    smsp__average_warp_latency_issue_stalled_long_scoreboard.ratio   inst/warp    172231.33
+    smsp__warp_issue_stalled_long_scoreboard_per_warp_active.pct             %        83.05
+    -------------------------------------------------------------- ----------- ------------
+
+===== §B4 MemoryWorkloadAnalysis_Tables（混合 T=512，--print-details all）=====
+    Section: Memory Workload Analysis Tables
+    ------------------------------------------ ----------- ------------
+    Metric Name                                Metric Unit Metric Value
+    ------------------------------------------ ----------- ------------
+    DRAM Throughput                                      %        74.22
+    L1TEX Hit Rate For Global Loads                      %        40.12
+    L1TEX Hit Rate For Global Stores                     %        88.56
+    L1TEX Hit Rate For Local Loads                       %            0
+    L1TEX Hit Rate For Local Stores                      %            0
+    L1TEX Sectors                                   sector      8948940
+    L1TEX Throughput Local Loads                  sector/s            0
+    L1TEX Throughput Local Stores                 sector/s            0
+    L1TEX Throughput                                     %        16.86
+    L2 Hit Rate For Loads                                %        11.45
+    L2 Hit Rate For Stores                               %       141.51
+    L2 Throughput Loads                          sector/ns       115.74
+    L2 Throughput Stores                         sector/us        33.99
+    L2 Throughput                                        %        75.31
+    Maximum Bytes Per Sector For Global Loads  byte/sector           32
+    Average Bytes Per Sector For Global Loads  byte/sector        30.05
+    Maximum Bytes Per Sector For Global Stores byte/sector           32
+    Average Bytes Per Sector For Global Stores byte/sector            4
+    Maximum Bytes Per Sector For Local Loads   byte/sector           32
+    Average Bytes Per Sector For Local Loads   byte/sector            0
+    Maximum Bytes Per Sector For Local Stores  byte/sector           32
+    Average Bytes Per Sector For Local Stores  byte/sector            0
+    ------------------------------------------ ----------- ------------
+    Memory Tables
+    Table Name : Shared Memory
+    ------------------------------------------------------------------------------------------------ ----------- ------------
+    Metric Name                                                                                      Metric Unit Metric Value
+    ------------------------------------------------------------------------------------------------ ----------- ------------
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared.sum                                                                   1348
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_atom.sum                                                              0
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                                              296
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ldgsts.sum                                                            0
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum                                                             1003
+    l1tex__data_pipe_lsu_wavefronts_mem_shared.sum                                                                     318448
+    l1tex__data_pipe_lsu_wavefronts_mem_shared.sum.pct_of_peak_sustained_elapsed                               %         2.07
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_atom.sum                                                                  0
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_atom.sum.pct_of_peak_sustained_elapsed                       %            0
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                                                54152
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum.pct_of_peak_sustained_elapsed                         %         0.35
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_st.sum                                                                36907
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_st.sum.pct_of_peak_sustained_elapsed                         %         0.24
+    smsp__inst_executed_op_ldgsts.sum                                                                       inst            0
+    smsp__inst_executed_op_ldsm.sum                                                                         inst            0
+    smsp__inst_executed_op_shared_atom.sum                                                                  inst            0
+    smsp__inst_executed_op_shared_stsm.sum                                                                  inst            0
+    smsp__sass_inst_executed_op_shared_ld.sum                                                               inst        38016
+    smsp__sass_inst_executed_op_shared_st.sum                                                               inst        19536
+    smsp__sass_l1tex_data_pipe_lsu_wavefronts_mem_shared_op_ldgsts.sum                                                      0
+    smsp__sass_l1tex_data_pipe_lsu_wavefronts_mem_shared_op_ldgsts.sum.pct_of_peak_sustained_elapsed           %            0
+    ------------------------------------------------------------------------------------------------ ----------- ------------
+    Table Name : L1/TEX Cache
+    -------------------------------------------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                                                                    Metric Unit Metric Value
+    -------------------------------------------------------------------------------------------------------------- ----------- ------------
+    ctc__rx_bytes_data_user.sum                                                                                                     (!) n/a
+    ctc__rx_bytes_data_user.sum.pct_of_peak_sustained_elapsed                                                                       (!) n/a
+
+########## §84 完成 ##########

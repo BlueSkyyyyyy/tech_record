@@ -2537,6 +2537,34 @@
     （ncu application-replay 会放大程序**自报** `ms`/`GB/s` 约 2×，只能用硬件计数器与
     `gpu__time_duration`）。**本轮新增实验（复用内核、无新 src）**。
 
+### P96 实验扩展 75：块粒度 T 次级效应的统计稳健性 + 内存延迟分解（`docs/04-experiments.md` §84）
+
+- [x] **P96-1** 补掉 P95-1（§83）**§83.5 明留的两条尾巴**（原话）「混合 T 趋势只有 ~4%、单模式
+  ~3–5%，**只取 3 次 run 均值**……据此只可说『L2 停顿不进 T』这条否定性结论，不可把 +4.3% 当成
+  确定的一阶现象」与「**未做 `--section MemoryWorkloadAnalysis` 的延迟分解**」。**复用 §82/§83 同一
+  内核**（`src/hetero_sm_tax_T.cu`，**新增 `robust` 子命令，不改 `run`/`bench` 语义**）：(1) 稳健计时
+  ——7 配置各 **S=30 次单采样 + round-robin 交错**，给 min/median/mean/std 与 `T512/T128`、
+  `T256/T128` 的 median 比 **+ bootstrap 95% CI（B=2000）**；(2) ncu 每 warp **绝对**停顿周期——
+  `long_scoreboard`（等 L2/global）与 `lg_throttle`（LSU 背压）随 `T` 的分解 +
+  `--section MemoryWorkloadAnalysis_Tables`。见 `docs/04-experiments.md` **§84**，脚本
+  `harness/hetero_sm_tax_T_robust.sh`、原始输出 `harness/hetero_sm_tax_T_robust.out.txt`
+  （目标卡 H100/sm90a、device 4、nvcc 13.2）。核心结论：
+  - **§A 统计判定：+4.3% 是真效应**——混合 `scalar+l2res` 的 `T512/T128 = 0.9586`（吞吐 **+4.3%**），
+    CI95 `[0.9528,0.9627]` **不含 1.000**；`T256/T128 = 0.9691` 同样显著。§83.5 的不敢定论来自
+    min-of-3 + 比值口径 + `T=128` 方差偏大；**但幅度确小、仍是次级量**（一阶仍 `Wsm`）。
+  - **§A 两端相反**：`scalar4B` 单模式 `T512/T128 = 0.9777`（**+2.3%**，显著），`l2res16M`
+    `= 1.0269`（**−2.6%**，显著）——混合净收益全来自发射受限侧，`l2res` 侧**轻度变差**（§83 的
+    「T-不变」是 min-of-3 比值口径的过粗结论）。
+  - **§B 延迟分解（headline）：`T` 不减轻 L2 延迟**——每 warp `long_scoreboard` 周期**随 T 升**
+    （混合 +6%、`scalar4B` +13%、`l2res16M` +16%）；唯一随 T 单调降的是 **`lg_throttle` LSU 背压**
+    （混合 **−24%**、`scalar4B` **−43%**）⇒ 「少而胖」的机制落点是**发射受限侧的 LSU 背压**，非
+    「减少 L2 停顿争用」（§82.6 猜测被否、§83 定性被绝对量确认）。
+  - **§B4** 混合同 `Wsm` 下 DRAM ~74%、L2 命中仅 11%、全局读 30.05/32 B/扇区 ⇒ 是 **DRAM + LSU**
+    题、非 L2 带宽题。**口径 caveat**：ncu `smsp__average_warp_latency` 绝对值在 replay 下方向与自然
+    计时相反，吞吐只采信 `robust` 计时、ncu 只作停顿项定性分解。
+  判据 **C1–C5 全不满足**（纯数据面微基准，与 §71–§83 同档）。**本轮新增实验（复用内核 + 新子命令 +
+  新脚本）**。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2662,10 +2690,28 @@
   自报 0.1145 ms，而无 ncu 只有 0.0613 ms（约 1.9×）；同一内核 ncu 的 `gpu__time_duration.sum`
   = 60.96 µs 才是真值。**用 ncu 时只采信硬件计数器与 `gpu__time_duration`，不要采信程序自报计时**；
   要绝对时间就另跑一遍无 ncu 的计时。
+- **ncu 的 `smsp__average_warp_latency*`（每 warp 绝对延迟）在 `--replay-mode application` 下方向可能
+  与自然计时相反**（P96-1/§84）：本专题数据面 body 在 `T=128→512` 自然计时**更快**（混合 +4.3%），
+  但 ncu 的 `smsp__average_warp_latency.ratio` 反而**升**（71508→76587 cycle）——块尾/replay 扰动。
+  **吞吐结论只采信无 ncu 的交错计时**；ncu 的 warp-latency 只用于**同口径相对趋势**（如
+  `long_scoreboard` vs `lg_throttle` 谁在动），不可拿绝对值判快慢。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P95-1 完成（1/1）**。补掉 P94-1（§82）**§82.7 明留的尾巴**「§82.6『少而胖更好』
+- 当前进度：**P96-1 完成（1/1）**。补掉 P95-1（§83）**§83.5 明留的两条尾巴**——「混合 T 趋势只有
+  ~4%、只取 3 次 run，在噪声地板附近」与「未做 MemoryWorkloadAnalysis 延迟分解」。复用 §82/§83
+  同一内核（`src/hetero_sm_tax_T.cu`，新增 `robust` 子命令），7 配置各 **S=30 次单采样 + round-robin
+  交错** + bootstrap 95% CI 判定趋势真伪，并用 ncu 每 warp **绝对**停顿周期做延迟分解。见
+  `docs/04-experiments.md` **§84**，脚本 `harness/hetero_sm_tax_T_robust.sh`、原始输出
+  `harness/hetero_sm_tax_T_robust.out.txt`（目标卡 H100/sm90a、device 4、nvcc 13.2）。核心结论：
+  **(1) +4.3% 的 T 趋势统计显著**（混合 `T512/T128=0.9586`，CI95 `[0.9528,0.9627]` 不含 1.0；
+  `T256/T128=0.9691`），§83.5 的不敢定论源于 min-of-3 + 比值口径 + `T=128` 方差偏大；**(2) 净收益
+  全来自发射受限侧**（`scalar4B +2.3%`、`l2res16M −2.6%`，均显著）；**(3) 延迟分解：`T` 不减轻 L2
+  延迟**（每 warp `long_scoreboard` 周期随 T 升 6–16%），随 T 单调降的是 **LSU 背压 `lg_throttle`
+  （−24%/−43%）**——「少而胖」机制落点是发射受限侧的 LSU 背压、非「减少 L2 停顿争用」；**(4)**
+  混合同 `Wsm` 下 DRAM ~74%、L2 命中仅 11% ⇒ 是 DRAM + LSU 题。判据 C1–C5 全不满足。
+  **本轮新增实验（复用内核 + 新子命令 + 新脚本）**。
+- 此前：**P95-1 完成（1/1）**。补掉 P94-1（§82）**§82.7 明留的尾巴**「§82.6『少而胖更好』
   未做 ncu 归因」——复用 §82 同一内核，用 ncu warp stall-reason 直方图 + L2/L1 命中 + issue/warp-active
   在固定 `Wsm=2048` 下扫 `T`，对混合 `scalar+l2res` + 两单模式 + `coal+scalar` 控制组归因。见
   `docs/04-experiments.md` **§83**，脚本 `harness/hetero_sm_tax_T_attr.sh`、原始输出

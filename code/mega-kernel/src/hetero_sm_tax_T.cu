@@ -40,6 +40,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <cuda_runtime.h>
 
 #define CK(x)                                                                        \
@@ -575,6 +576,178 @@ static Res run_mix_occ(int T, int U, int R, const int* seq, int* out_O, int* nsm
   return run(grid, 3);
 }
 
+// ============================================================================
+// P96-1（§84）稳健采样：§82.6/§83.5 的 T 趋势只有 ~3–5%、只取 3 次 run，**在噪声地板附近**。
+//   本模式把「每配置 S 次单采样 + round-robin 交错（消除时钟/热漂移）+ bootstrap 置信区间」
+//   做出来，直接判定该 T 趋势是真效应还是噪声；并配合 ncu MemoryWorkloadAnalysis 做内存延迟分解。
+// ============================================================================
+static double sample_once(int grid) {
+  cudaEvent_t e0, e1;
+  CK(cudaEventCreate(&e0));
+  CK(cudaEventCreate(&e1));
+  CK(cudaMemset(g_sink, 0, 8));
+  CK(cudaEventRecord(e0));
+  launch_T(grid);
+  CK(cudaEventRecord(e1));
+  CK(cudaEventSynchronize(e1));
+  float ms = 0;
+  CK(cudaEventElapsedTime(&ms, e0, e1));
+  CK(cudaEventDestroy(e0));
+  CK(cudaEventDestroy(e1));
+  return (double)ms;
+}
+
+static int cmp_d(const void* a, const void* b) {
+  double x = *(const double*)a, y = *(const double*)b;
+  return (x < y) ? -1 : ((x > y) ? 1 : 0);
+}
+static double median_of(const double* v, int n) {
+  double* c = (double*)malloc((size_t)n * sizeof(double));
+  memcpy(c, v, (size_t)n * sizeof(double));
+  qsort(c, n, sizeof(double), cmp_d);
+  double m = (n & 1) ? c[n / 2] : 0.5 * (c[n / 2 - 1] + c[n / 2]);
+  free(c);
+  return m;
+}
+static double mean_of(const double* v, int n) {
+  double s = 0; for (int i = 0; i < n; ++i) s += v[i]; return s / n;
+}
+static double std_of(const double* v, int n) {
+  double m = mean_of(v, n), s = 0;
+  for (int i = 0; i < n; ++i) { double d = v[i] - m; s += d * d; }
+  return (n > 1) ? sqrt(s / (n - 1)) : 0.0;
+}
+static double min_of(const double* v, int n) {
+  double m = v[0]; for (int i = 1; i < n; ++i) if (v[i] < m) m = v[i]; return m;
+}
+
+// 为稳健模式准备一个配置；solo_pat>=0 => 单模式（该模式独占整机 SM），否则按 seq 份额 alloc_sm。
+static int setup_config(const int* seq, int T, int U, int R, int solo_pat, int* out_occ) {
+  g_T = T; g_U = U; g_R = R;
+  int occ = occ_blocks(U, R, T);
+  int O = occ > 0 ? occ : 1; if (O > 64) O = 64;
+  int grid = g_numSm * O;
+  g_O = O;
+  int nsm[NPAT] = {0, 0, 0, 0};
+  if (solo_pat >= 0) nsm[solo_pat] = g_numSm;
+  else alloc_sm(seq, 0, nsm);
+  setup_bind(seq, nsm, O, grid);
+  if (out_occ) *out_occ = O;
+  return grid;
+}
+
+// bootstrap：ratio = median(b)/median(a) 的 95% CI（B 次重采样，各自有放回）。
+static void boot_ratio_ci(const double* a, const double* b, int n, int B,
+                          double* lo, double* hi, double* med) {
+  double* ra = (double*)malloc((size_t)n * sizeof(double));
+  double* rb = (double*)malloc((size_t)n * sizeof(double));
+  double* rs = (double*)malloc((size_t)B * sizeof(double));
+  srand(12345);
+  for (int t = 0; t < B; ++t) {
+    for (int i = 0; i < n; ++i) { ra[i] = a[rand() % n]; rb[i] = b[rand() % n]; }
+    double ma = median_of(ra, n), mb = median_of(rb, n);
+    rs[t] = (ma > 0) ? mb / ma : 0.0;
+  }
+  qsort(rs, B, sizeof(double), cmp_d);
+  *lo = rs[(int)(0.025 * B)];
+  *hi = rs[(int)(0.975 * B)];
+  *med = rs[B / 2];
+  free(ra); free(rb); free(rs);
+}
+
+#define ROB_NC 7
+#define ROB_S 30
+static void fill_all();
+struct RobCfg { const char* name; int seq[NPAT]; int T; int solo; int U; int R; };
+
+static void robust() {
+  CK(cudaDeviceGetAttribute(&g_numSm, cudaDevAttrMultiProcessorCount, 0));
+  printf("########################################################################\n");
+  printf("# §84 块粒度 T 次级效应的统计稳健性 + 内存延迟分解（补 §83.5 尾巴，P96-1）\n");
+  printf("# 目标卡 H100/sm90a；numSM=%d；逻辑总读 256 MiB（uint4 计）；U=8 R=32 map=bind\n", g_numSm);
+  printf("# 关键：§82.6/§83.5 的 T 趋势只有 ~3–5%%、只取 3 次 run（min-of-3），在噪声地板附近。\n");
+  printf("# 本模式：每配置 S=%d 次**单采样**、round-robin 交错（消除时钟/热漂移），给 min/median/mean/std\n", ROB_S);
+  printf("#   + T512/T128、T256/T128 的 median 比与 bootstrap 95%% CI（B=2000）。\n");
+  printf("########################################################################\n");
+
+  fill_all();
+
+  RobCfg cfgs[ROB_NC] = {
+      {"mixed scalar+l2res", {0, 0, 1, 1}, 128, -1, 8, 32},
+      {"mixed scalar+l2res", {0, 0, 1, 1}, 256, -1, 8, 32},
+      {"mixed scalar+l2res", {0, 0, 1, 1}, 512, -1, 8, 32},
+      {"l2res16M solo",      {0, 0, 0, 1}, 128,  3, 8, 32},
+      {"l2res16M solo",      {0, 0, 0, 1}, 512,  3, 8, 32},
+      {"scalar4B solo",      {0, 0, 1, 0}, 128,  2, 8, 32},
+      {"scalar4B solo",      {0, 0, 1, 0}, 512,  2, 8, 32},
+  };
+
+  int grid[ROB_NC], occ[ROB_NC];
+  for (int c = 0; c < ROB_NC; ++c)
+    grid[c] = setup_config(cfgs[c].seq, cfgs[c].T, cfgs[c].U, cfgs[c].R, cfgs[c].solo, &occ[c]);
+
+  printf("\n===== 资源：每配置 occ / Wsm / grid =====\n");
+  printf("  %-22s %5s %5s %6s %6s\n", "config", "T", "occ", "Wsm", "grid");
+  for (int c = 0; c < ROB_NC; ++c)
+    printf("  %-22s %5d %5d %6d %6d\n", cfgs[c].name, cfgs[c].T, occ[c], occ[c] * cfgs[c].T, grid[c]);
+
+  static double samp[ROB_NC][ROB_S];
+  // warmup：每配置先跑 3 次（时钟爬坡 + L2 预热；不采样）
+  for (int c = 0; c < ROB_NC; ++c) {
+    setup_config(cfgs[c].seq, cfgs[c].T, cfgs[c].U, cfgs[c].R, cfgs[c].solo, nullptr);
+    for (int w = 0; w < 3; ++w) (void)sample_once(grid[c]);
+  }
+  // 交错采样
+  for (int s = 0; s < ROB_S; ++s)
+    for (int c = 0; c < ROB_NC; ++c) {
+      setup_config(cfgs[c].seq, cfgs[c].T, cfgs[c].U, cfgs[c].R, cfgs[c].solo, nullptr);
+      samp[c][s] = sample_once(grid[c]);
+    }
+
+  printf("\n===== §A 稳健计时（S=%d，交错；GB/s = 256 MiB / 时间）=====\n", ROB_S);
+  printf("  %-22s %5s %10s %10s %10s %9s %11s %11s\n",
+         "config", "T", "min_ms", "med_ms", "mean_ms", "std_%", "GB/s(med)", "GB/s(min)");
+  for (int c = 0; c < ROB_NC; ++c) {
+    double mn = min_of(samp[c], ROB_S), md = median_of(samp[c], ROB_S), me = mean_of(samp[c], ROB_S);
+    double sd = std_of(samp[c], ROB_S);
+    double gmd = (double)TOT_U4 * 16.0 / (md * 1e-3) / 1e9;
+    double gmn = (double)TOT_U4 * 16.0 / (mn * 1e-3) / 1e9;
+    printf("  %-22s %5d %10.4f %10.4f %10.4f %9.2f %11.1f %11.1f\n",
+           cfgs[c].name, cfgs[c].T, mn, md, me, (me > 0 ? 100.0 * sd / me : 0.0), gmd, gmn);
+  }
+
+  printf("\n===== §B T 趋势是否超过噪声（median 比 + bootstrap 95%% CI）=====\n");
+  printf("  若 CI 含 1.000 => 该 T 比在 95%% 置信下不可区分于噪声。\n");
+  printf("  %-22s %14s %22s %14s %22s\n", "config",
+         "T512/T128", "CI95[T512/T128]", "T256/T128", "CI95[T256/T128]");
+  // 混合：c=0(128),1(256),2(512)
+  {
+    double lo, hi, md;
+    boot_ratio_ci(samp[0], samp[2], ROB_S, 2000, &lo, &hi, &md);
+    double lo2, hi2, md2;
+    boot_ratio_ci(samp[0], samp[1], ROB_S, 2000, &lo2, &hi2, &md2);
+    printf("  %-22s %14.4f [%13.4f,%8.4f] %14.4f [%13.4f,%8.4f]\n",
+           "mixed scalar+l2res", md, lo, hi, md2, lo2, hi2);
+    double loa, hia, mda;
+    boot_ratio_ci(samp[3], samp[4], ROB_S, 2000, &loa, &hia, &mda);
+    printf("  %-22s %14.4f [%13.4f,%8.4f] %14s %22s\n",
+           "l2res16M solo", mda, loa, hia, "-", "-");
+    double lob, hib, mdb;
+    boot_ratio_ci(samp[5], samp[6], ROB_S, 2000, &lob, &hib, &mdb);
+    printf("  %-22s %14.4f [%13.4f,%8.4f] %14s %22s\n",
+           "scalar4B solo", mdb, lob, hib, "-", "-");
+  }
+
+  printf("\n===== §C 结论（自动判定）=====\n");
+  {
+    double lo, hi, md;
+    boot_ratio_ci(samp[0], samp[2], ROB_S, 2000, &lo, &hi, &md);
+    printf("  mixed T512/T128 median 比 = %.4f，CI95=[%.4f,%.4f] -> %s\n", md, lo, hi,
+           (lo > 1.0 || hi < 1.0) ? "显著（真效应）" : "含 1.0（与噪声不可区分）");
+  }
+  printf("\n########## §84 robust 完成 ##########\n");
+}
+
 static void fill_all() {
   long long tot = TOT_U4 * SPARSE_STRIDE + TOT_U4 + L2N4 + 1024;
   ensure(tot, MAXGRID);
@@ -766,6 +939,7 @@ static void bench() {
 int main(int argc, char** argv) {
   CK(cudaFree(0));
   if (argc >= 2 && !strcmp(argv[1], "bench")) { bench(); return 0; }
+  if (argc >= 2 && !strcmp(argv[1], "robust")) { robust(); return 0; }
   if (argc >= 2 && !strcmp(argv[1], "run")) {
     if (argc < 7) { printf("usage: run <U> <R> <T> <map> <r0,r1,r2,r3>\n"); return 1; }
     g_U = atoi(argv[2]);
@@ -788,6 +962,6 @@ int main(int argc, char** argv) {
            r.unsupported ? "UNSUP" : "OK", r.ms, r.gbs);
     return 0;
   }
-  printf("usage: hetero_sm_tax_T {bench|run <U> <R> <T> <map> <r0,r1,r2,r3>}\n");
+  printf("usage: hetero_sm_tax_T {bench|robust|run <U> <R> <T> <map> <r0,r1,r2,r3>}\n");
   return 1;
 }
