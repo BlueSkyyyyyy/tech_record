@@ -3959,6 +3959,42 @@
       配套博客 `content/posts/mega-moe-137-sm100-sparse-mqa-logits-metadata-scheduler`
       （索引页新增第 137 篇）。
 
+### P128 增量（opt-in，补齐 `heuristics/` 目录里从没被单独读过的最底层公共工具）
+
+- [x] **P128-1** **DeepGEMM 启发式共用的「元素位宽 / TMA swizzle 模式」公共选择器 +
+      `GemmDesc` 的 dtype→MmaKind 派生管道 + Python 公开布局别名层**
+      （`csrc/jit_kernels/heuristics/utils.hpp` 32 行、`config.hpp:35-61`、
+      `deep_gemm/utils/layout.py` 13 行、`csrc/utils/math.hpp:11/13-27`）。第 28 篇把
+      `get_best_config` 的决策骨架讲透并给 `config.hpp` 五结构体列了**字段表**，但没讲派生量
+      **从哪来**；`heuristics/utils.hpp` 是全仓最短的启发式文件、从没被单独读过，却是**每个**
+      SM90/SM100 kernel 的 K 块宽度与 TMA swizzle 的**唯一出处**。**① `get_num_element_bits`**
+      （`:12-19`）把 `MmaKind`（`types.cuh:7-11`）翻成**逻辑位宽**（BF16 16 / MXFP8FP4 8 / MXF4 4）；
+      `block_k = 128*8/bits`（`sm90.hpp:60`、`sm100.hpp:32`）背后是**不变量 `block_k*bits == 1024`
+      =「K 块一行恰好 128 字节」**（TMA 最大 swizzle 即 128 B，故一份 kernel 通吃三种 MmaKind）。
+      **② `get_swizzle_mode`**（`:21-30`）返回 `{128,64,32,16}` 里最大可整除 `block_size*elem_size`
+      的档；注释点明「`>0`=交错」「**16=非 swizzle 仅交错**」→ 它**从不返回 0**，0 只在
+      「FP32 输出不 swizzle」处显式写（`sm90.hpp:138-139`）。**③ 两个位宽不同源**：
+      `get_num_element_bits` 用逻辑位、`get_swizzle_mode` 用存储字节 `c10::elementSize`
+      （`kPackedFP4=torch::kInt8` ⇒ elemSize=1）；SM100 先 `/ get_smem_pack_factor()`（MXF4 的 ÷2，
+      `sm100.hpp:176-184`）→ 三条 K-major 全落 128、**MN-major FP4=64**。**④ Mega MoE 是
+      「结论内联」的平行实现**（`heuristics/mega_moe.hpp:80-82/117/214-216`）：自带
+      `get_num_mma_elem_bytes`（BF16 2、其余 1、`block_k=128/elem`）并**硬编码 swizzle 128**
+      （FP4 权重在 smem 展开 8-bit ⇒ A/B 内维恒 128 B），只有「宽度减半」才现算
+      （`impls/sm100_fp8_fp4_mega_moe.hpp:69-76`，L1 输出 `128→64`）。**⑤ `GemmDesc` 派生管道**
+      （`config.hpp:35-61`）：`is_mxf4_mma`/`get_mma_kind`（只看 a==kBFloat16）/
+      `get_smem_pack_factor`（MXF4 才 2）+ `check_validity` 四类硬约束（BF16 两端 bf16；
+      block-scaled 两端各 ∈{FP8,packedFP4}；**FP8-D 仅 Batched 非累积** `:57`；
+      **`num_sms%2==0`** `:60`）+ `expected_*` 的 0=回退 + `ensure_zero_padding`。**⑥ Python 别名层**
+      `utils/layout.py`：7 个 `_C` 布局函数 + `get_m_/get_k_alignment_for_contiguous_layout`
+      **都指向同一 `get_mk_alignment_for_contiguous_layout`**（m/k 共用一把对齐旋钮）。
+      H100(sm90) 真机（**直接 include 真实头文件 + torch**）**43 PASS / 0 FAIL**：
+      `block_k*bits` 全 1024、`get_swizzle_mode` 在 **4096** 组上 0 不符且 `UNREACHABLE` 恰 3136 组、
+      `check_validity` 10 例矩阵全对（负例打印 `config.hpp:51/57/60`）、三条 K-major swizzle 全 128 /
+      MN-major FP4=64、`get_tma_aligned_size==align(x,16/elem)`、Python 段 `PY_OK`。
+      至此 `csrc/jit_kernels/heuristics/` 目录（`config`/`common`/`utils`/`sm90`/`sm100`/`mega_moe`/
+      `mega_gate`）**全部被专篇覆盖**。设备端用这些数字造 TMA/发 UMMA 仍 SM100/SM90 专属、仅分析。
+      配套博客 `content/posts/mega-moe-138-mma-kind-swizzle-selector`（索引页新增第 138 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3984,8 +4020,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P127 各增量完成（P15-1…P41-1、P42-1…P127-1）。**
-  本轮 P127-1：新建 `docs/137-sm100-sparse-mqa-logits-metadata-scheduler.md`
+- 当前进度：**P0~P14 全部完成；P15~P128 各增量完成（P15-1…P41-1、P42-1…P128-1）。**
+  本轮 P128-1：新建 `docs/138-mma-kind-swizzle-selector.md`
+  （+`harness/exp_mma_kind_swizzle.{sh,out.txt}`、`src/mma_kind_swizzle.cu`）——补齐 `heuristics/`
+  目录里唯一从没被单独读过、且是**每个** SM90/SM100 kernel 的 K 块宽度与 TMA swizzle **唯一出处**
+  的 `heuristics/utils.hpp`（32 行）+ `config.hpp:35-61` 的 `GemmDesc` 派生管道 + Python
+  `utils/layout.py`。**① `get_num_element_bits`**（逻辑位宽）与 **`block_k=128*8/bits` 的
+  `block_k*bits==1024` 不变量**（K 块一行恰 128 B = TMA 最大 swizzle）；**② `get_swizzle_mode`**
+  （`{128,64,32,16}` 最大可整除者；`16`=非 swizzle 仅交错，**从不返回 0**）；**③ 逻辑位 vs 存储
+  字节**两个位宽 + SM100 的 `/pack_factor`（MXF4 ÷2）→ K-major 全 128、MN-major FP4=64；
+  **④ Mega MoE 的平行实现**（自带 `get_num_mma_elem_bytes` + 硬编码 swizzle 128，
+  `sm100_fp8_fp4_mega_moe.hpp:69-76` 的半宽 `128→64`）；**⑤ `GemmDesc` 的 dtype→MmaKind 管道 +
+  `check_validity` 四类硬约束**；**⑥ Python `get_m_/get_k_` 共用一把对齐旋钮**。
+  H100(sm90) 真机直接 include 真实头文件 **43 PASS / 0 FAIL**：`block_k*bits` 全 1024、
+  `get_swizzle_mode` 4096 组 0 不符（UNREACHABLE 恰 3136 组）、`check_validity` 10 例矩阵全对、
+  K-major swizzle 全 128 / MN-major FP4=64。至此 `heuristics/` 目录全部被专篇覆盖。设备端
+  （TMA/UMMA）SM100/SM90 专属、仅分析。索引页新增第 138 篇。
+  上一轮 P127-1：新建 `docs/137-sm100-sparse-mqa-logits-metadata-scheduler.md`
   （+`harness/exp_sparse_mqa_logits_metadata.{sh,out.txt}`、`src/sparse_mqa_logits_metadata.cu`）——把第 22 篇
   对 metadata kernel 只给的 30 行概览补齐到与第 136 篇（主 kernel）同深度。**关键结论：整个 metadata
   kernel 架构无关**（只用 `ptx::` 整数/原子、`cp.async`、`cta_exclusive_sum`、`cute::` 下标；不碰
@@ -5381,7 +5432,18 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P127 已完成（最新 **P127-1 SM100 sparse MQA logits 的 metadata kernel 逐段精读**：
+- **下一步**：P0~P128 已完成（最新 **P128-1 DeepGEMM 启发式最底层的公共选择器
+  `heuristics/utils.hpp`（元素位宽 / TMA swizzle）+ `GemmDesc` 的 dtype→MmaKind 管道 + Python 别名层**：
+  第 28 篇只给 `config.hpp` 五结构体列**字段表**、`heuristics/utils.hpp` 从没被单独读过，而它是**每个**
+  SM90/SM100 kernel 的 K 块宽度与 TMA swizzle 的**唯一出处**。`get_num_element_bits`（逻辑位宽）+
+  `block_k=128*8/bits` 的 **`block_k*bits==1024` 不变量**（K 块一行恰 128 B = 最大 swizzle）；
+  `get_swizzle_mode`（`{128,64,32,16}` 最大可整除者；`16`=非 swizzle 仅交错、**从不返回 0**）；
+  **逻辑位 vs 存储字节**两个位宽 + SM100 的 `/pack_factor`（MXF4 ÷2）→ K-major 全 128、MN-major FP4=64；
+  Mega MoE 的**平行实现**（自带 `get_num_mma_elem_bytes` + 硬编码 128，半宽 `128→64`）；
+  `GemmDesc` 派生管道 + `check_validity`（BF16 两端 bf16 / FP8-D 仅 Batched 非累积 / `num_sms%2==0`）；
+  Python `get_m_/get_k_` 共用一把对齐旋钮。H100(sm90) 真机 **43 PASS / 0 FAIL**（4096 组 swizzle 0 不符、
+  UNREACHABLE 恰 3136 组、validity 10 例全对）。至此 `heuristics/` 目录全部被专篇覆盖。索引页新增第 138 篇。
+  上一轮 P127-1：SM100 sparse MQA logits 的 metadata kernel 逐段精读：
    把第 22 篇对 metadata kernel 的 30 行概览补齐——**整个 kernel 架构无关**（只用 `ptx::` 整数/原子、
   `cp.async`、`cta_exclusive_sum`、`cute::` 下标；不碰 UMMA/tcgen05/UTCCP/TMA），故 H100(sm90) 原样
   启动真实 kernel 并与独立 host oracle 对拍。主循环：Q 块构造 + 有效块前缀（分页线性扫描配对 +
