@@ -3814,8 +3814,32 @@
       5702.8 us**（**~5%**，被串行 Sinkhorn 的 **3813.5 us** 压制）；真实形状 `T=16384 H=7168
       D=28672` 省掉 **7.516 GB** 中间张量往返（`4·T·D·4`；H100 1 GiB D2D copy 实测 **908.8 GB/s**
       → 投影 8271 us，共享环境保守下界）。**目标卡单 kernel 接线仅分析**（本机只给 H≤64 微基准；
-      真实 `H=7168` 需前向 Post worker 那种 warp-pair 分段，落到 TMEM/mbarrier）。主 kernel SM100 专属、
-      仅分析。配套博客 `content/posts/mega-moe-132-mhc-backward-sm100-wiring`（索引页新增第 132 篇）。
+       真实 `H=7168` 需前向 Post worker 那种 warp-pair 分段，落到 TMEM/mbarrier）。主 kernel SM100 专属、
+       仅分析。配套博客 `content/posts/mega-moe-132-mhc-backward-sm100-wiring`（索引页新增第 132 篇）。
+
+### P123 增量（opt-in，收口 P96/P97 留下的 87 条引用 near_miss defer）
+
+- [x] **P123-1** **引用行号的 near_miss 定点复核：分裂区间合并 + 五分类 + 7 处修正**
+      （`harness/check_refs.py` 增强 + 新 `harness/triage_refs.{py,sh}`）。第 106 篇（P96-1）给全专题
+      约 1900 处 `file:line` 做体检、第 107 篇（P97-1）把它做成可复用 linter 并留下「10 条同名歧义 +
+      87 条轻微漂移（near_miss）」的 defer；歧义已消掉，**near_miss 一直没逐条落账**。本篇收口。
+      **① 修 linter 一个真缺口——分裂区间**：作者把区间写成两个反引号 token（`` `a.hpp:103`-`:105` ``）
+      时，`CITE` 只认带文件名的 `file:line`、终点被整个丢掉、区间退化成单行，**偶尔把正确引用误报成
+      near_miss**（`docs/01:116` 的 `ptx::deduplicate` 调用在 104、区间中段）。修法：新增 `CONT_RANGE`
+      （`check_refs.py:56-71`）先合并 `file:l1`-`:l2`/`file:l1`-`l2` 为 `file:l1-l2`，`strip_doc` 扫描前
+      过 `normalize_citations`（`:135`）、统计 `MERGED_RANGES`（`:62/69`）；当前语料合并 **13 条**。
+      **② 五分类**（`triage_refs.{py,sh}`：`citations_on:54`/`is_decl_head:68`/`nearest_occurrence:75`/
+      `triage:86`）：按「标识符最近出现行到被引区间的距离」分为 `in_range`/`same_line_other`/
+      `adjacent_decl`（相邻行是装饰器/注释/模板头/签名头）/`owner_body`（引体点名 owner）/`far_other`/
+      `absent`。**③ 闭环修 7 处**「引用少写定义/签名那一行」：`07:83`/`07:170`/`05:648`/`45:31`/
+      `58:136`/`78:311`/`84:150`。→ `docs/133-refs-near-miss-triage.md`。
+      **H100 实测**（纯文件解析、架构无关）：总引用 **2074**；near_miss **108 →（合并区间）106 →
+      （7 处修正）99**，严格命中 **640 → 642 → 649（73.67%）**；**标识符级**五分类：`owner_body` 59 /
+      `far_other` 25 / `absent` 22 / `same_line_other` 2 / `adjacent_decl` 1 均良性，待判的
+      `adjacent_code` 仅 **6** → **约 93% 的 near_miss 是「引用没错、判据太粗」**；剩余 6 条逐条判读
+      均为书写约定（引分支/引装饰器/引拒绝行）。`oob`/`unresolved`/`empty`/`ambiguous` 四类硬错误
+      **恒为 0**、CI 退出码 0。配套博客 `content/posts/mega-moe-133-refs-near-miss-triage`
+      （索引页新增第 133 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3842,8 +3866,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P122 各增量完成（P15-1…P41-1、P42-1…P122-1）。**
-  本轮 P122-1：新建 `docs/132-mhc-backward-sm100-wiring.md`
+- 当前进度：**P0~P14 全部完成；P15~P123 各增量完成（P15-1…P41-1、P42-1…P123-1）。**
+  本轮 P123-1：新建 `docs/133-refs-near-miss-triage.md`（+`harness/triage_refs.{py,sh,out.txt}`、
+  增强 `harness/check_refs.py`）——收口 P96/P97 留下的 near_miss defer。**① 修 linter 分裂区间缺口**
+  （`` `a.hpp:103`-`:105` `` 的终点被丢、区间退化单行 → 误报；新增 `CONT_RANGE`/`normalize_citations`
+  先合并，当前语料 **13 条**）；**② 把 near_miss 做五分类**（`owner_body`/`far_other`/`absent`/
+  `same_line_other`/`adjacent_decl`/`adjacent_code`）；**③ 闭环修 7 处**「引用少写定义/签名行」。
+  H100 纯文件解析：总引用 **2074**、near_miss **108→106→99**、严格命中 **640→642→649（73.67%）**、
+  四类硬错误恒 0；标识符级分类 **约 93% 为判据噪音**、待判 `adjacent_code` 仅 6（均为书写约定）。
+  索引页新增第 133 篇。
+  上一轮 P122-1：新建 `docs/132-mhc-backward-sm100-wiring.md`
   （+`harness/exp_mhc_backward_worker.{py,sh,out.txt}`、`src/mhc_backward_worker.cu`）——把第 131 篇
   结尾的目标卡接线推演坐实：前向机器真实行号（Post worker `impls:482-508`、TF32 TS UMMA
   `:235-238/273-275`、Sinkhorn/RMSNorm `epilogue:17-101`）+ **反向六段 → 目标卡对偶表** + 融合边界两条
@@ -5186,16 +5218,16 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P122 已完成（最新 **P122-1 Mega mHC 反向的目标卡接线 + per-token 融合 worker**：
-  把第 131 篇结尾那句目标卡接线推演坐实——前向机器真实行号（Post worker / TF32 TS UMMA /
-  Sinkhorn/RMSNorm epilogue）+ 反向六段 → 目标卡对偶表 + 融合边界两条判据；H100 真机融合 worker
-  6 组形状 vs host double 最坏 5.28e-7、`T=65536 H=64` 6000.3→5702.8 us（~5%）、真实形状省 7.516 GB
-  往返；目标卡单 kernel 接线仅分析；索引页新增第 132 篇。
+- **下一步**：P0~P123 已完成（最新 **P123-1 引用行号的 near_miss 定点复核**：
+  收口 P96/P97 的 near_miss defer——修 linter 分裂区间缺口（合并 13 条）+ 五分类（约 93% 为判据噪音）
+  + 闭环修 7 处；H100 纯文件解析：总引用 2074、near_miss 108→106→99、严格命中 640→649（73.67%）、
+  硬错误恒 0；索引页新增第 133 篇。
   可继续（均为增量、非承诺）：
-  第 127/130/131/132 篇已把两条门控反向（Mega Gate、mHC）的数学、算子账与目标卡接线补齐；剩余可选：
-  把融合 worker 在 SM100 上的「真实 H=7168 warp-pair 分段 + TMEM 累加器直喂 K1」写成可核对的
-  mbarrier/TMEM 接线图，或对 P96/P97 的轻微漂移清单关键路径定点复核。另 DeepEP 端到端仍需
-  NCCL≥2.32.3（见「阻塞」）。详见上）。
+  两条门控反向（Mega Gate、mHC）的数学、算子账与目标卡接线已齐；剩余可选：把融合 worker 在 SM100 上的
+  「真实 H=7168 warp-pair 分段 + TMEM 累加器直喂 K1」写成可核对的 mbarrier/TMEM 接线图。
+  另外，若后续新增/改动大量行号引用，可把 `harness/check_refs.py` 接进 CI（退出码已就绪），并定期重跑
+  `triage_refs.py` 复核 `adjacent_code` 队列。DeepEP 端到端仍需 NCCL≥2.32.3（见「阻塞」）。详见上）。
+  上一轮 P122-1：P0~P122 已完成（最新 **P122-1 Mega mHC 反向的目标卡接线 + per-token 融合 worker**
   上一轮 P121-1：P0~P121 已完成（最新 **P121-1 Mega mHC 反向的 H100 融合账**：
   把第 130 篇那条反向当成待部署算子流水拆成**六段**（K0/G0/K1/G1a/G1b/K2），量化 roofline：整条反向
   **AI≈6.5**、三段 GEMM **AI≈24** ≪ H100 bf16 拐点 295 → **访存受限**；`T=16384` 访存下界 3648.9 us

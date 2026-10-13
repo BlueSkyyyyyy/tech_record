@@ -147,7 +147,7 @@ expected_m_for_psum_layout = None
 （`use_psum_layout=False`），且 `ensure_zero_padding=True` 默认要求 gap 行清零——这是一个
 **正确性优先的默认**：宁可多写零也不要 kernel 读到脏 padding。
 
-**(c) `epilogue = nullptr` 与 `alpha` 简写**。`gemm.hpp:845` 等每个 GEMM 都有
+**(c) `epilogue = nullptr` 与 `alpha` 简写**。`gemm.hpp:844-845` 等每个 GEMM 都有
 `py::arg("epilogue") = nullptr` 与 `py::arg("alpha") = std::nullopt`；`epilogue_class.hpp:12`
 的注释点明两者关系：**`alpha` 与 FP8 的 `(d, sfd)` 输出对就是 `Alpha` 与 `FP8Quantization`
 的简写**。真机验证（`harness` Part G）：

@@ -28,7 +28,7 @@
    （`gemm.hpp:803-806`），四类非法输入全部被 `RuntimeError` 拒绝。
 5. 关系更近的 `einsum("bhd,bhr->hdr")`（`einsum.hpp:128-148`）也是**无条件 cuBLASLt**（源码
    `:146` 注释「TODO: investigate cuBLAS determinism」），但它是跨 batch 求和的权重梯度，
-   走的是另一条 `cublaslt_bhd_bhr_hdr`（`smxx_cublaslt.hpp:223-234`）。
+   走的是另一条 `cublaslt_bhd_bhr_hdr`（`smxx_cublaslt.hpp:222-235`）。
 
 ## 1. 为什么有这两个算子：Muon 的 Newton-Schulz
 

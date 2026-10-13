@@ -80,7 +80,7 @@ NCCL_CHECK(ncclGetLsaDevicePointer(window, offset, dst_nvl_rank_idx, &dst_ptr));
   （topk idx + topk weight + 源 rank/token 索引 + linked list）。各段的访问器：
   `get_hidden_ptr:51`、`get_sf_ptr:55`、`get_topk_idx_ptr:63`、`get_topk_weights_ptr:67`、
   `get_src_token_global_idx_ptr:71`、`get_linked_list_idx_ptr:75`、`get_mbarrier_ptr:79`。
-- **`BufferLayout`（`token.cuh:84`）**：`[num_ranks][num_max_tokens_per_rank]` 的二维数组，
+- **`BufferLayout`（`token.cuh:84-85`）**：`[num_ranks][num_max_tokens_per_rank]` 的二维数组，
   `get_rank_buffer(r):121` 定位到某 rank 那一段，`get_token_buffer(t):138` 定位到某 token。
   这正是「对称」落地的形态：rank 维 × token 维，各 rank 结构完全相同。
 
@@ -167,7 +167,7 @@ combine 的接收侧也不需要 topk 元数据时会置 false。
    - **本地归约**（`:145`-`:177`，`kAllowMultipleReduction`）：一份 token 的多个 topk 落在同一 rank 时，
      在**寄存器里做 bf16 加**（`combine_reduce`，`combine_utils.cuh:55`），
      `combine_utils.cuh:67`-`:70` 的 `enable_hadd_bypass` 用 bf16 直接相加而非转 float，省去 cast；
-     另有 `use_rank_layout`（`combine_utils.cuh:8`）在 `num_ranks <= num_topk` 时按 rank 而非 topk 排布；
+     另有 `use_rank_layout`（`combine_utils.cuh:8-9`）在 `num_ranks <= num_topk` 时按 rank 而非 topk 排布；
    - **expanded send**（`:178`-`:214`）：不复用 slot，每 topk 单独送。
 5. **写回**：NVLink 用 `tma_store_1d` 到远端；RDMA 先落 send buffer 再 `gin.put`（`:229`-`:237`）。
 6. **结束 barrier**（`:241`-`:243`）。

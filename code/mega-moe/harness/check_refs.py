@@ -45,10 +45,35 @@ EXCLUDE_DIRS = {".git", "build", "__pycache__", "node_modules", ".pytest_cache"}
 # 审计文档本身就是「引用体检」的输出，里面按设计引用了一堆坏引用（示例/名单），
 # 不纳入健康检查，否则第二次体检会把自己的示例当成错误（自指涉）。
 EXCLUDE_DOCS = {"106-deepgemm-source-index-audit.md",
-                "107-refs-linter-audit2.md"}
+                "107-refs-linter-audit2.md",
+                "133-refs-near-miss-triage.md"}
 
 CITE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_./\-]*\.(?:cuh|hpp|cpp|cu|py)):(\d+)(?:-(\d+))?")
 IDENT = re.compile(r"`([A-Za-z_][A-Za-z0-9_:]{2,})`")
+# 「分裂区间」：作者常把区间写成两个反引号 token，如 `` `dispatch.cuh:103`-`:105` ``。
+# 原 CITE 只认第一种 `file:103`，`-`:105` 里的终点会被整个丢掉，于是区间退化成单行，
+# 区间的标识符（如 104 行的调用）就误报成 near_miss。这里先把分裂区间合并成 `file:103-105`
+# 再交给 CITE。兼容 `` `a.hpp:10-20` ``（普通区间）与 `` `a.hpp:10`-20 ``（无冒号终点）。
+CONT_RANGE = re.compile(
+    r"([A-Za-z0-9_][A-Za-z0-9_./\-]*\.(?:cuh|hpp|cpp|cu|py):\d+)"  # file:start
+    r"(`?\s*[-–]\s*`?:)(\d+)"                                       # -:end（终点可带前导冒号）
+)
+
+
+MERGED_RANGES = [0]  # normalize_citations 合并掉的「分裂区间」条数（供报告使用）
+
+
+def normalize_citations(line, merges=None):
+    """把分裂区间 `file:l1`-`:l2` 合并为 `file:l1-l2`；无分裂时原样返回。
+
+    `merges` 为可选的 list（长度 1），用于**按文档**统计合并条数——只累加非排除文档，
+    避免把本体检文档自身示例里的分裂区间算进报告。
+    """
+    def _sub(m):
+        if "`" in m.group(2) or ":" in m.group(2):
+            (merges if merges is not None else MERGED_RANGES)[0] += 1
+        return m.group(1) + "-" + m.group(3)
+    return CONT_RANGE.sub(_sub, line)
 
 
 def _find_repo(name, env):
@@ -106,12 +131,13 @@ def build_index():
     return byname, allfiles
 
 
-def strip_doc(txt):
+def strip_doc(txt, merges=None):
     """返回 [(lineno, text, in_fence, ignored)]：去掉 fenced code block 与 ignore 区块。"""
     out = []
     in_fence = False
     ignore = False
     for i, line in enumerate(txt.splitlines(), 1):
+        line = normalize_citations(line, merges)
         s = line.strip()
         if s.startswith("```") or s.startswith("~~~"):
             in_fence = not in_fence
@@ -253,9 +279,12 @@ def audit_docs():
     resolve = make_resolver(byname)
 
     doc_lines = {}
+    doc_merges = {}
     for d in sorted(glob.glob(os.path.join(DOCS, "*.md"))):
         name = os.path.basename(d)
-        doc_lines[name] = strip_doc(open(d, encoding="utf-8", errors="replace").read())
+        m = [0]
+        doc_lines[name] = strip_doc(open(d, encoding="utf-8", errors="replace").read(), m)
+        doc_merges[name] = m[0]
 
     # 先算全语料 basename 引用偏好（哪些文件被引用得多）
     prefer = Counter()
@@ -280,7 +309,8 @@ def audit_docs():
 
     stats = dict(total=0, elided=0, unresolved=0, oob=0, empty=0,
                  ambiguous=0, content_total=0, strict=0, weak=0,
-                 files=set(), docs_excluded=sorted(EXCLUDE_DOCS))
+                 files=set(), docs_excluded=sorted(EXCLUDE_DOCS),
+                 merged_ranges=sum(v for k, v in doc_merges.items() if k not in EXCLUDE_DOCS))
     problems = dict(unresolved=[], oob=[], empty=[], ambiguous=[], near_miss=[])
     per_file = Counter()
 
@@ -344,6 +374,7 @@ def print_report(stats, problems, per_file, allfiles):
     print(f"索引源文件数（含 DeepJIT，vendored 拷贝按内容去重）: {len(allfiles)}")
     print(f"排除的审计文档  : {', '.join(stats['docs_excluded'])}")
     print()
+    print(f"合并的分裂区间        : {stats.get('merged_ranges', 0)}（`X:l1`-`:l2` → `X:l1-l2`）")
     print(f"总引用条数            : {stats['total']}")
     print(f"  · 占位省略（...）    : {stats['elided']}（非错误）")
     print(f"  · 无法解析到文件     : {stats['unresolved']}")
@@ -376,6 +407,7 @@ def main():
                oob=stats["oob"], empty=stats["empty"], ambiguous=stats["ambiguous"],
                content_total=stats["content_total"], strict=stats["strict"], weak=stats["weak"],
                near_miss=len(problems["near_miss"]), files=stats["files"],
+               merged_ranges=stats.get("merged_ranges", 0),
                source_files=len(allfiles))
     print()
     print(json.dumps(out, ensure_ascii=False, indent=2))

@@ -308,7 +308,7 @@ for mn, real_ks_cpu, aligned_ks_cpu, psum_layout, num_groups, gran_k, k_alignmen
 | `enumerate_k_grouped_sf_layout` | 48 | 48 |
 | `enumerate_k_grouped_psum_sf_layout` | 48 | 48 |
 
-`enumerate_sf_layout` 的差异来自 `generators.py:277`（arch9 只有 `gran_k=128`，arch10 多
+`enumerate_sf_layout` 的差异来自 `generators.py:276-277`（arch9 只有 `gran_k=128`，arch10 多
 `gran_k=32`）与 `:287-290`（arch10 额外两组 `sf_k=908/1211`）。两个 k-grouped 枚举器不含
 arch 分支（都由函数内部门控拦掉）。
 

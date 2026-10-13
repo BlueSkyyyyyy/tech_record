@@ -133,7 +133,7 @@ const bool enable_hadd_bypass =
 20 万随机三元组里 **22.10%** 与「fp32 累加后一次舍入」不同——这正是 `enable_hadd_bypass` 把上界卡在
 2 的原因。
 
-`ptx::accumulate` 本身也带架构分支：sm100 用一条融合 `add.rn.f32.bf16`（`ptx.cuh:594-597`），
+`ptx::accumulate` 本身也带架构分支：sm100 用一条融合 `add.rn.f32.bf16`（`ptx.cuh:593-597`），
 sm90 回退成 `__bfloat1622float2` 再两次 fp32 加（`:599-601`）——**语义相同、指令数不同**。
 
 ## 6. 两个调用点：本地归约与跨 rank 归约

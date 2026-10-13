@@ -645,7 +645,7 @@ wait:       while (ld_acq_gpu(ptr) != encode_state(grid_idx, kNumSplits));      
 
 ## 20. FP8 输出与三种 SF 布局（`mega_mhc.hpp:194-221`、`epilogue:117-136`）
 
-`y_fp8` 用 **gran_k=32、4 个 UE8M0 SF 打包进一个 int32**（`mega_mhc.hpp:81-82`）。三种 SF 布局由
+`y_fp8` 用 **gran_k=32、4 个 UE8M0 SF 打包进一个 int32**（`mega_mhc.hpp:81-83`）。三种 SF 布局由
 用途决定：
 
 - **`y_gemm_sf`**：列主序（`stride(0)==1`）+ TMA 对齐（`:204-206`），给后续 GEMM 直接当操作数。
