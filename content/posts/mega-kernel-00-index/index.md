@@ -31,5 +31,6 @@ categories: ["算子开发"]
 11. [手工 MegaKernel 先例精读：FlashMoE 与 Llama-1B megakernel]({{< relref "mega-kernel-11-precedents" >}}) —— 把 MPK 转引的两个手工 mega-kernel 回到一手资料
 12. [MegaKernel in-kernel scheduler 设计手册]({{< relref "mega-kernel-12-sched-design" >}}) —— 把 P42–P69 的调度器微基准收口成设计决策表
 13. [MegaKernel 的 SM 资源分配与异构 task 共驻成本手册]({{< relref "mega-kernel-13-coresidency" >}}) —— 把 P83–P97 的异构共驻微基准收口成 SM 资源/成本决策表
+14. [MegaKernel 端到端骨架与 worker 数据面能力手册]({{< relref "mega-kernel-14-endtoend-dataplane" >}}) —— 把 P71–P82 的端到端骨架与数据面旋钮收口成能力/成本决策表
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
