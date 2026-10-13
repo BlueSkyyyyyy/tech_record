@@ -1,0 +1,187 @@
+NVIDIA H100 80GB HBM3, 9.0
+
+==============================================================================
+Part A：test_layout.py 的顶层结构（真机 introspection）
+==============================================================================
+get_arch_major() = 9  (本机 H100 = sm90)
+test_layout.__file__ = ~/github/DeepGEMM/tests/test_layout.py
+测试函数：['test_k_grouped_psum_sf_layout_kernels', 'test_k_grouped_sf_layout_kernels', 'test_sf_layout_kernels']
+__main__ 调用序列：['test_sf_layout_kernels()', 'test_k_grouped_sf_layout_kernels()', 'test_k_grouped_psum_sf_layout_kernels()']
+两个纯 torch oracle（测试自带的参考实现，架构无关）：
+  - get_mn_major_tma_aligned_packed_ue8m0_tensor_torch_impl  (packed UE8M0 打包 oracle)
+arch 门控：test_k_grouped_sf_layout_kernels / test_k_grouped_psum_sf_layout_kernels 里
+          `if get_arch_major() != 10: print("Skipped..."); return`（sm90 跳过）
+[PASS] A: 模块结构可见: 3 个 test_* 函数
+
+==============================================================================
+Part B：纯 torch oracle vs 真实 kernel（enumerate_sf_layout 全枚举逐位对拍）
+==============================================================================
+枚举用例总数 = 108（其中 use_ue8m0=True = 54）
+  packed UE8M0：逐位不符 0、shape 不符 0、stride 不符 0
+[PASS] B: oracle 与真实 kernel 逐位一致: 54 个 UE8M0 用例逐位 0 不符
+
+==============================================================================
+Part C：三方互证——测试 oracle == 真实 binding == C++ 自带 torch 回退
+==============================================================================
+mn=4097 k=7168: 已 MN-major 输入 -> pack kernel vs oracle 逐位 True
+                     未 MN-major 输入 -> transpose_and_pack vs 同一 oracle 逐位 True
+[PASS] C: 两条 kernel 路径互证 + oracle: pack==transpose_and_pack==oracle
+负样本：packed int32 字 #0 加 1 -> torch.equal == False（应 False）
+[PASS] C(neg): 逐位 oracle 能抓 1 字扰动: 
+
+==============================================================================
+Part D：直接调用真实测试体 test_sf_layout_kernels()（H100，断言全过）
+==============================================================================
+Testing SF layout kernels:
+ > Perf (num_groups= 1, mn= 4096, k=  128, transpose=1, use_ue8m0=0, gran_k=128):    2 us |   19 GB/s
+ > Perf (num_groups= 2, mn= 4096, k=  128, transpose=1, use_ue8m0=0, gran_k=128):    2 us |   36 GB/s
+ > Perf (num_groups= 4, mn= 4096, k=  128, transpose=1, use_ue8m0=0, gran_k=128):    2 us |   69 GB/s
+ > Perf (num_groups= 1, mn= 4096, k= 7168, transpose=1, use_ue8m0=0, gran_k=128):    3 us |  633 GB/s
+ > Perf (num_groups= 2, mn= 4096, k= 7168, transpose=1, use_ue8m0=0, gran_k=128):    3 us | 1070 GB/s
+ > Perf (num_groups= 4, mn= 4096, k= 7168, transpose=1, use_ue8m0=0, gran_k=128):    5 us | 1539 GB/s
+ > Perf (num_groups= 1, mn= 4096, k= 7296, transpose=1, use_ue8m0=0, gran_k=128):    3 us |  554 GB/s
+ > Perf (num_groups= 2, mn= 4096, k= 7296, transpose=1, use_ue8m0=0, gran_k=128):    4 us |  985 GB/s
+ > Perf (num_groups= 4, mn= 4096, k= 7296, transpose=1, use_ue8m0=0, gran_k=128):    5 us | 1499 GB/s
+ > Perf (num_groups= 1, mn= 4097, k=  128, transpose=1, use_ue8m0=0, gran_k=128):    2 us |   19 GB/s
+ > Perf (num_groups= 2, mn= 4097, k=  128, transpose=1, use_ue8m0=0, gran_k=128):    2 us |   37 GB/s
+ > Perf (num_groups= 4, mn= 4097, k=  128, transpose=1, use_ue8m0=0, gran_k=128):    2 us |   68 GB/s
+ > Perf (num_groups= 1, mn= 4097, k= 7168, transpose=1, use_ue8m0=0, gran_k=128):    3 us |  642 GB/s
+ > Perf (num_groups= 2, mn= 4097, k= 7168, transpose=1, use_ue8m0=0, gran_k=128):    3 us | 1067 GB/s
+ > Perf (num_groups= 4, mn= 4097, k= 7168, transpose=1, use_ue8m0=0, gran_k=128):    5 us | 1536 GB/s
+ > Perf (num_groups= 1, mn= 4097, k= 7296, transpose=1, use_ue8m0=0, gran_k=128):    3 us |  554 GB/s
+ > Perf (num_groups= 2, mn= 4097, k= 7296, transpose=1, use_ue8m0=0, gran_k=128):    4 us |  967 GB/s
+ > Perf (num_groups= 4, mn= 4097, k= 7296, transpose=1, use_ue8m0=0, gran_k=128):    5 us | 1501 GB/s
+ > Perf (num_groups= 1, mn= 8192, k=  128, transpose=1, use_ue8m0=0, gran_k=128):    2 us |   37 GB/s
+ > Perf (num_groups= 2, mn= 8192, k=  128, transpose=1, use_ue8m0=0, gran_k=128):    2 us |   69 GB/s
+ > Perf (num_groups= 4, mn= 8192, k=  128, transpose=1, use_ue8m0=0, gran_k=128):    2 us |  129 GB/s
+ > Perf (num_groups= 1, mn= 8192, k= 7168, transpose=1, use_ue8m0=0, gran_k=128):    3 us | 1065 GB/s
+ > Perf (num_groups= 2, mn= 8192, k= 7168, transpose=1, use_ue8m0=0, gran_k=128):    5 us | 1534 GB/s
+ > Perf (num_groups= 4, mn= 8192, k= 7168, transpose=1, use_ue8m0=0, gran_k=128):    7 us | 2097 GB/s
+ > Perf (num_groups= 1, mn= 8192, k= 7296, transpose=1, use_ue8m0=0, gran_k=128):    4 us |  986 GB/s
+ > Perf (num_groups= 2, mn= 8192, k= 7296, transpose=1, use_ue8m0=0, gran_k=128):    5 us | 1495 GB/s
+ > Perf (num_groups= 4, mn= 8192, k= 7296, transpose=1, use_ue8m0=0, gran_k=128):    7 us | 2145 GB/s
+ > Perf (num_groups= 1, mn= 4096, k=  128, transpose=0, use_ue8m0=0, gran_k=128):    2 us |   19 GB/s
+ > Perf (num_groups= 2, mn= 4096, k=  128, transpose=0, use_ue8m0=0, gran_k=128):    2 us |   37 GB/s
+ > Perf (num_groups= 4, mn= 4096, k=  128, transpose=0, use_ue8m0=0, gran_k=128):    2 us |   71 GB/s
+ > Perf (num_groups= 1, mn= 4096, k= 7168, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 2, mn= 4096, k= 7168, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 4096, k= 7168, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 4096, k= 7296, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 2, mn= 4096, k= 7296, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 4096, k= 7296, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 4097, k=  128, transpose=0, use_ue8m0=0, gran_k=128):    2 us |   20 GB/s
+ > Perf (num_groups= 2, mn= 4097, k=  128, transpose=0, use_ue8m0=0, gran_k=128):    2 us |   37 GB/s
+ > Perf (num_groups= 4, mn= 4097, k=  128, transpose=0, use_ue8m0=0, gran_k=128):    2 us |   69 GB/s
+ > Perf (num_groups= 1, mn= 4097, k= 7168, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 2, mn= 4097, k= 7168, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 4097, k= 7168, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 4097, k= 7296, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 2, mn= 4097, k= 7296, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 4097, k= 7296, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 8192, k=  128, transpose=0, use_ue8m0=0, gran_k=128):    2 us |   38 GB/s
+ > Perf (num_groups= 2, mn= 8192, k=  128, transpose=0, use_ue8m0=0, gran_k=128):    2 us |   69 GB/s
+ > Perf (num_groups= 4, mn= 8192, k=  128, transpose=0, use_ue8m0=0, gran_k=128):    2 us |  126 GB/s
+ > Perf (num_groups= 1, mn= 8192, k= 7168, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 2, mn= 8192, k= 7168, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 8192, k= 7168, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 8192, k= 7296, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 2, mn= 8192, k= 7296, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 8192, k= 7296, transpose=0, use_ue8m0=0, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 4096, k=  128, transpose=1, use_ue8m0=1, gran_k=128):    2 us |   19 GB/s
+ > Perf (num_groups= 2, mn= 4096, k=  128, transpose=1, use_ue8m0=1, gran_k=128):    2 us |   34 GB/s
+ > Perf (num_groups= 4, mn= 4096, k=  128, transpose=1, use_ue8m0=1, gran_k=128):    2 us |   65 GB/s
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+ > Perf (num_groups= 1, mn= 4096, k= 7168, transpose=1, use_ue8m0=1, gran_k=128):    3 us |  356 GB/s
+ > Perf (num_groups= 2, mn= 4096, k= 7168, transpose=1, use_ue8m0=1, gran_k=128):    4 us |  596 GB/s
+ > Perf (num_groups= 4, mn= 4096, k= 7168, transpose=1, use_ue8m0=1, gran_k=128):    5 us |  948 GB/s
+ > Perf (num_groups= 1, mn= 4096, k= 7296, transpose=1, use_ue8m0=1, gran_k=128):    3 us |  369 GB/s
+ > Perf (num_groups= 2, mn= 4096, k= 7296, transpose=1, use_ue8m0=1, gran_k=128):    4 us |  616 GB/s
+ > Perf (num_groups= 4, mn= 4096, k= 7296, transpose=1, use_ue8m0=1, gran_k=128):    5 us |  987 GB/s
+ > Perf (num_groups= 1, mn= 4097, k=  128, transpose=1, use_ue8m0=1, gran_k=128):    2 us |   17 GB/s
+ > Perf (num_groups= 2, mn= 4097, k=  128, transpose=1, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 4097, k=  128, transpose=1, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 4097, k= 7168, transpose=1, use_ue8m0=1, gran_k=128):    3 us |  354 GB/s
+ > Perf (num_groups= 2, mn= 4097, k= 7168, transpose=1, use_ue8m0=1, gran_k=128):    4 us |  593 GB/s
+ > Perf (num_groups= 4, mn= 4097, k= 7168, transpose=1, use_ue8m0=1, gran_k=128):    5 us |  944 GB/s
+ > Perf (num_groups= 1, mn= 4097, k= 7296, transpose=1, use_ue8m0=1, gran_k=128):    3 us |  363 GB/s
+ > Perf (num_groups= 2, mn= 4097, k= 7296, transpose=1, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 4097, k= 7296, transpose=1, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 8192, k=  128, transpose=1, use_ue8m0=1, gran_k=128):    2 us |   36 GB/s
+ > Perf (num_groups= 2, mn= 8192, k=  128, transpose=1, use_ue8m0=1, gran_k=128):    2 us |   63 GB/s
+ > Perf (num_groups= 4, mn= 8192, k=  128, transpose=1, use_ue8m0=1, gran_k=128):    3 us |   95 GB/s
+ > Perf (num_groups= 1, mn= 8192, k= 7168, transpose=1, use_ue8m0=1, gran_k=128):    4 us |  592 GB/s
+ > Perf (num_groups= 2, mn= 8192, k= 7168, transpose=1, use_ue8m0=1, gran_k=128):    5 us |  941 GB/s
+ > Perf (num_groups= 4, mn= 8192, k= 7168, transpose=1, use_ue8m0=1, gran_k=128):    8 us | 1162 GB/s
+ > Perf (num_groups= 1, mn= 8192, k= 7296, transpose=1, use_ue8m0=1, gran_k=128):    4 us |  628 GB/s
+ > Perf (num_groups= 2, mn= 8192, k= 7296, transpose=1, use_ue8m0=1, gran_k=128):    5 us |  996 GB/s
+ > Perf (num_groups= 4, mn= 8192, k= 7296, transpose=1, use_ue8m0=1, gran_k=128):    8 us | 1238 GB/s
+ > Perf (num_groups= 1, mn= 4096, k=  128, transpose=0, use_ue8m0=1, gran_k=128):    2 us |   19 GB/s
+ > Perf (num_groups= 2, mn= 4096, k=  128, transpose=0, use_ue8m0=1, gran_k=128):    2 us |   36 GB/s
+ > Perf (num_groups= 4, mn= 4096, k=  128, transpose=0, use_ue8m0=1, gran_k=128):    2 us |   64 GB/s
+ > Perf (num_groups= 1, mn= 4096, k= 7168, transpose=0, use_ue8m0=1, gran_k=128):    4 us |  296 GB/s
+ > Perf (num_groups= 2, mn= 4096, k= 7168, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 4096, k= 7168, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 4096, k= 7296, transpose=0, use_ue8m0=1, gran_k=128):    4 us |  306 GB/s
+ > Perf (num_groups= 2, mn= 4096, k= 7296, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 4096, k= 7296, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 4097, k=  128, transpose=0, use_ue8m0=1, gran_k=128):    2 us |   17 GB/s
+ > Perf (num_groups= 2, mn= 4097, k=  128, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 4097, k=  128, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 4097, k= 7168, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 2, mn= 4097, k= 7168, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 4097, k= 7168, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 4097, k= 7296, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 2, mn= 4097, k= 7296, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 4097, k= 7296, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 8192, k=  128, transpose=0, use_ue8m0=1, gran_k=128):    2 us |   35 GB/s
+ > Perf (num_groups= 2, mn= 8192, k=  128, transpose=0, use_ue8m0=1, gran_k=128):    2 us |   67 GB/s
+ > Perf (num_groups= 4, mn= 8192, k=  128, transpose=0, use_ue8m0=1, gran_k=128):    3 us |   96 GB/s
+ > Perf (num_groups= 1, mn= 8192, k= 7168, transpose=0, use_ue8m0=1, gran_k=128):    4 us |  567 GB/s
+ > Perf (num_groups= 2, mn= 8192, k= 7168, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 8192, k= 7168, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 1, mn= 8192, k= 7296, transpose=0, use_ue8m0=1, gran_k=128):    4 us |  585 GB/s
+ > Perf (num_groups= 2, mn= 8192, k= 7296, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+ > Perf (num_groups= 4, mn= 8192, k= 7296, transpose=0, use_ue8m0=1, gran_k=128):    0 us |    0 GB/s
+
+[PASS] D: test_sf_layout_kernels 真实运行: no assertion violated
+
+==============================================================================
+Part E：两个 k-grouped 函数在 sm90 被门控跳过 + host 契约被拒
+==============================================================================
+test_k_grouped_sf_layout_kernels: Skipped（SM100 专属）  <- Testing k-grouped SF layout kernels:
+ > Skipped (packed k-grouped SF only suppor
+test_k_grouped_psum_sf_layout_kernels: Skipped（SM100 专属）  <- Testing k-grouped psum SF layout kernels:
+ > Skipped (packed k-grouped SF only s
+k-grouped host API (sm90)：rejected=True  RuntimeError: Assertion error (csrc/apis/../jit_kernels/impls/smxx_layout.hpp:224): jit->device.get_arch_major() == 10 and (gran_k == 32 or gran_k == 128)
+[PASS] E: sm90 门控 + host 契约: 两个函数跳过且 API 被拒
+
+==============================================================================
+Part F：真实 profiler 区分「发射 CUDA kernel」vs「host 早退 / torch 回退」
+==============================================================================
+用例特征 -> 实际发射的 kernel（host 早退/torch 回退时为 {} 空集）：
+  use_ue8m0=1, mn=4097 k=7168 transpose=1（-> transpose_and_pack）   -> ['void deep_gemm::transpose_and_pack_fp32_into_ue8m0<512u, 48u, 56u, 128u, 1u, false>']
+  use_ue8m0=1, mn=4096 k=7168 transpose=0（已 MN-major -> pack 快路）   -> ['void deep_gemm::pack_fp32_into_ue8m0<1u, 512u, 128u, 16u, true, false>']
+  use_ue8m0=1, mn=8192 k=128  transpose=1                          -> ['void deep_gemm::transpose_and_pack_fp32_into_ue8m0<512u, 48u, 1u, 128u, 1u, false>']
+  use_ue8m0=0, mn=4097 k=7168 transpose=1（K-major 连续 -> transpose_fp32） -> ['void deep_gemm::transpose_fp32<512u, 64u, 56u, 128u, 57u>']
+  use_ue8m0=0, mn=4097 k=7168 transpose=0（列主序非连续 -> torch copy 回退） -> {} (host 早退/torch 回退)
+  use_ue8m0=0, mn=4096 k=7168 transpose=0（已列主序 -> 早退）              -> {} (host 早退/torch 回退)
+[PASS] F: profiler 区分 kernel/早退/回退: 4/6 发射了真实 kernel
+
+==============================================================================
+Part G：枚举计数 arch9 vs 假 arch10 + 真实 bench_kineto 吞吐
+==============================================================================
+enumerate_sf_layout:            arch9=108  arch10=218
+enumerate_k_grouped_sf_layout:  arch9=48  arch10=48
+enumerate_k_grouped_psum:       arch9=48  arch10=48
+
+真实 bench_kineto 吞吐（透明报告 host 早退的 0us 用例）：
+  mn=4096 k=7168 transpose=1 ue8m0=1 ng=1:      3 us
+  mn=8192 k=7168 transpose=1 ue8m0=1 ng=4:      8 us
+  mn=4096 k=7168 transpose=0 ue8m0=0 ng=1:      0 us  (host 早退/无 kernel)
+  mn=4097 k=7168 transpose=0 ue8m0=0 ng=1:      0 us  (host 早退/无 kernel)
+[PASS] G: 枚举计数 + 真实吞吐: sf_layout arch9=108/arch10=218
+
+==============================================================================
+总计：8 PASS / 0 FAIL  (共 8 项)
+==============================================================================

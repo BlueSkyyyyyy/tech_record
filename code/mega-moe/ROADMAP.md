@@ -2087,6 +2087,42 @@
       0/1024**；唯一例外是 `copy_nd` 的 `__CUDA_ARCH__>=1000` 2-SM 分支（SM100 专属，仅分析）。
       配套博客 `content/posts/mega-moe-77-deepgemm-tma-copy-ring-pipeline`（索引页新增第 77 篇）。
 
+### P68 增量（opt-in，补齐 SF 布局家族一直缺席的「验收测试即正确性规范」）
+
+- [x] **P68-1** **SF 布局家族的验收测试即正确性规范**（`tests/test_layout.py`；
+      `tests/generators.py:276-308`；`deep_gemm/utils/layout.py`；`csrc/apis/layout.hpp`；
+      `csrc/jit_kernels/impls/smxx_layout.hpp`）。第 25 篇（P15-1）拆了单组 SF 布局变换的**实现**、
+      第 26 篇（P16-1）拆了 K 轴分组 SF 打包，但「变换后的布局算什么对」的唯一规范
+      `tests/test_layout.py` 一直只被顺带引用。本篇把它当**可执行规格**拆透。**三个 kernel
+      （`transpose_fp32`/`transpose_and_pack_fp32_into_ue8m0`/`pack_fp32_into_ue8m0`）非 SM100 专属，
+      H100 真机可跑**；两个 k-grouped 函数 SM100 专属（arch 门控跳过），但 host 契约/枚举/纯 torch
+      oracle 架构无关，H100 真机实测。→ `docs/78-sf-layout-test-oracle.md`（真实行号核对）：
+      **纯 torch oracle** `get_mn_major_tma_aligned_packed_ue8m0_tensor_torch_impl:20-42`
+      （`x.view(torch.int) >> 23` 取 UE8M0 最高字节 `:24`、`aligned_mn=get_tma_aligned_size(mn,4)`
+      `:32` 与 `aligned_k=align(k,4)` `:33` 两个对齐口径、`padded.view(-1).view(dtype=torch.int)`
+      `:36` 4 字节小端合成 int32、`empty(...).mT` `:39-40` 转成 MN 连续），与 C++ 自带同构 torch 回退
+      `smxx_layout.hpp:108-131` 同一条数学。三个测试函数：`test_sf_layout_kernels:45-80`（UE8M0 路
+      `:54-60` 卡「值逐位+shape+stride」`torch.equal:58`；转置路 `:61-70` 卡「shape+stride+值不变」
+      `torch.equal(fp32_sf,transposed_sf):70`；perf 容错吞 `AssertionError→t=0:74-77`）、
+      `test_k_grouped_sf_layout_kernels:83-115`（arch 门控 `:85-87`；**每组切出套单组 oracle 再拼回**
+      `:102-104`；尾块补零逐位 `:106-107`）、`test_k_grouped_psum_sf_layout_kernels:118-154`
+      （逻辑 K vs 物理 K `:127-128`、PSUM `:138`、未同步/空 ks 上界 `:142-147`）。C++ 侧：
+      `preprocess_sf:48-58`、`get_mn_major_tma_aligned_tensor:60-106`（早退 `:64-65`、torch copy
+      回退 `:71-74`、`transpose_fp32` `:83-93`）、`get_mn_major_tma_aligned_packed_ue8m0_tensor:133-216`
+      （torch 回退 `:152-153`/`:187-188`、PSUM `:141-149`、`transpose_and_pack` `:163-173`、pack 快路
+      `:185-214`）、`get_k_grouped...:218-283`（arch 断言 `:224`）；`csrc/apis/layout.hpp` 四分派
+      `:38-39/42-43/46-51/54-55`、k-grouped `:89-116`（arch `:100-101`、SM90 `:104-105`）。
+      H100 实测 `harness/exp_sf_layout_test_oracle.{sh,py,out.txt}`（**直接 import 真实测试模块复用其
+      oracle 与测试体**）**8 PASS / 0 FAIL**：① `enumerate_sf_layout` 108 用例（54 UE8M0）逐位/shape/
+      stride **0 不符**；② 两条 kernel 路径（已 MN-major 走 `pack` 快路 / 未 MN-major 走
+      `transpose_and_pack`）与同一 oracle 逐位相等、1 字扰动被 `torch.equal` 抓到；③ 直接调真实
+      `test_sf_layout_kernels()` 断言全过；④ 两个 k-grouped 函数打印 `Skipped`、host API 被
+      `smxx_layout.hpp:224` 断言拒（RuntimeError）；⑤ **profiler 坐实**同一 `impl` 调用有的发射真
+      kernel（`transpose_and_pack<512u,48u,56u,128u,1u,false>` / `pack_fp32_into_ue8m0<1u,512u,128u,16u,true,false>`
+      / `transpose_fp32<512u,64u,56u,128u,57u>`）、有的走 host 早退或 `out.copy_` torch 回退；
+      ⑥ 枚举 arch9 108 / 假 arch10 218。配套博客
+      `content/posts/mega-moe-78-sf-layout-test-oracle`（索引页新增第 78 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2111,8 +2147,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P67 各增量完成（P15-1…P41-1、P42-1…P67-1）。**
-  本轮 P67-1：新建 `docs/77-deepgemm-tma-copy-ring-pipeline.md`
+- 当前进度：**P0~P14 全部完成；P15~P68 各增量完成（P15-1…P41-1、P42-1…P68-1）。**
+  本轮 P68-1：新建 `docs/78-sf-layout-test-oracle.md`
+  （+`harness/exp_sf_layout_test_oracle.{sh,py,out.txt}`）——补上 SF 布局家族一直缺席的
+  **「验收测试即正确性规范」** `tests/test_layout.py`：测试自带的纯 torch oracle
+  `get_mn_major_tma_aligned_packed_ue8m0_tensor_torch_impl:20-42`（UE8M0=`>>23`、两个对齐口径、
+  4 字节小端合成 int32、`mT` 转 MN 连续）与 C++ 同构回退 `smxx_layout.hpp:108-131` 同一条数学；
+  判据分两档（UE8M0 路卡「值逐位+shape+stride」、转置路卡「shape+stride+值不变」）；k-grouped 用
+  「每组切出套单组 oracle 再拼回」+ 尾块补零逐位。**H100(sm90) 真机直接 import 真实测试模块复用
+  oracle/测试体 8 PASS / 0 FAIL**：`enumerate_sf_layout` 108 用例（54 UE8M0）逐位 0 不符、两条
+  kernel 路径互证、1 字扰动被 `torch.equal` 抓到、真实 `test_sf_layout_kernels` 断言全过、两个
+  k-grouped 函数被门控跳过且 host API 被 `smxx_layout.hpp:224` 拒、**profiler 坐实**同一 `impl`
+  调用有的发射真 kernel、有的 host 早退/`out.copy_` 回退；枚举 arch9 108 / 假 arch10 218。索引页新增第 78 篇。
+  上一轮 P67-1：新建 `docs/77-deepgemm-tma-copy-ring-pipeline.md`
   （+`harness/exp_tma_copy_ring.{sh,out.txt}`、`src/tma_copy_ring.cu`）——补上所有 impl 共用的
   **TMA 发射层**与**环形流水线**：`common/tma_copy.cuh`（`get_inner_block_atom_size` 的原子宽度 /
   `LoadOps<2..5>` 三原语 / `copy_nd` 的原子循环与三条静态断言 / sm90 多播 vs sm100 2-SM 两分支 /
