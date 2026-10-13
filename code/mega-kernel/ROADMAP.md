@@ -4464,6 +4464,36 @@
   配套博客 post `mega-kernel-71-mpk-sparse-metadata`（weight 72）并更新 `mega-kernel-00-index` 第 71 项。
   **本轮新增增量。**
 
+### P157 WS（weight-stationary）UMMA 指令落地现状对照（`docs/71-ws-instruction.md`）
+
+- [x] **P157-1** 补掉「下一步候选」第一条残留——`docs/62`（P148-1）记 CUTLASS `f3fde583` 无
+  `SM100_MMA_*_WS*`、「可核 DeepGEMM 侧 WS 用法」。见 `docs/71-ws-instruction.md`
+  （快照 MPK `f9eb70c`、CUTLASS `deps/cutlass f3fde583`、DeepGEMM `057ca59`；**纯源码走读 +
+  1 个 host 侧结构探针 + grep audit**——SM100 本体在目标卡 H100/sm90 不可执行）。三条 headline：
+  - **(A)（headline）三份 CUTLASS 是同一个 commit（`f3fde583`）、逐字节相同**——DeepGEMM vendored
+    副本（`deep_gemm/include`）、其 submodule（`third-party/cutlass`）、MPK `deps/cutlass` 对
+    `cute/atom/mma_traits_sm100.hpp`、`cute/arch/mma_sm100_desc.hpp`、`cute/arch/mma_sm100_umma.hpp`
+    的 **md5 完全一致**（`0f6fc14f…`/`6cf440a0…`/`a05326ed…`），故 `docs/62` 的「WS 布局
+    `tmem_frg_ws`/`tmem_e_frg_ws` 齐全、只有 `max_shift_ : 2` 预留、0 个 `SM100_MMA_*_WS*` atom」
+    对 DeepGEMM 同样成立（host 在 DeepGEMM 副本上复算 WS layout，逐值与 `docs/62` 一致）。
+  - **(B)（headline）但 DeepGEMM 在 CUTLASS 之外自建了一层 PTX UMMA 封装，里面「有」WS 指令——只是无人调用**：
+    `deep_gemm/include/deep_gemm/ptx/tcgen05.cuh`（9 个 `SM100_MMA_*` struct、被整个 SM100 mega 家族
+    13 个 impls/epilogue 文件共享 include），其中 `SM100_MMA_F16BF16_WS_SS:172-187` 相对
+    `SM100_MMA_F16BF16_SS`（`:12-27`）**只差 asm 里一个 `.ws` token**（`tcgen05.mma.ws.cta_group::1.
+    kind::f16 [%0], %1, %2, %3, p`），签名/操作数逐字相同；caller audit——9 个 struct 中 **3 个零调用者**
+    （`F8F6F4_SS`/`F8F6F4_2x1SM_SS`/`F16BF16_WS_SS`）、且**全 DeepGEMM 树 `.mma.ws` 只此 1 处**；
+    该封装随 `7f2a703`（`Public release 26/04 — Introducing Mega MoE`）加入后再未被引用。
+  - **(C)（headline）「布局备好、指令未落地」在两侧同时成立、三条证据闭环**——`MaxShift`/`max_shift` 在
+    DeepGEMM 自建代码（`deep_gemm/include/deep_gemm`+`csrc`）与 MPK 自建代码（`include`+`src`+`python`）
+    均 **0 引用**；`FrgTypeC/D = UMMA::tmem_frg_ws`、`FrgTypeE = UMMA::tmem_e_frg_ws` 在两个 CUTLASS
+    副本均 **0**；`struct SM100_MMA.*_WS` 均 **0**。即 WS 的 TMEM 布局（CUTLASS 侧）与 WS 指令 wrapper
+    （DeepGEMM 自建侧）是**两处互相不知道对方存在的死代码**；DeepGEMM mega 家族的生产 UMMA 入口用
+    `ptx::SM100_MMA_{F16BF16,MXF8F6F4,MXF4}*`（外加 `cute::SM100_MMA_TF32_TS`），WS 零引用。
+  判据只贡献 **C3**。新实验 `src/ws_instruction_probe.cu` + `harness/ws_instruction_probe.sh` +
+  `harness/ws_instruction_probe.out.txt`（目标卡 H100/sm90a，host 侧结构探测 + grep audit，未 launch
+  kernel）。配套博客 post `mega-kernel-72-ws-instruction`（weight 73）并更新 `mega-kernel-00-index`
+  第 72 项。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4882,26 +4912,31 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P156-1 完成（1/1）**。补掉「下一步候选」第二条残留——`docs/62` §6 与 `docs/63` §7 都明留的
-  「E 的**硬件**编码（2:4 索引位序、每 atom 的 bit 打包）未展开」「哪些元素被丢弃、E 的索引如何映射到 A 的
-  偶数/奇数槽未验证」。见 `docs/70-sparse-e-metadata.md`（快照 `f9eb70c`；CUTLASS `f3fde583`；DeepGEMM
-  `057ca59`；**纯源码走读 + 1 个 host 侧算术探针**，SM90/SM100 张量核本机不可执行）。三条 headline：
-  **(A)（headline）** E 的内容 = 每 2:4 chunk 一个 4-bit nibble，**直接编码「保留哪两个位置」**——`MetadataOneChunk2to4`
-  （`sm90_sparse_gemm_compressor.hpp:255-286`）的码恰等于被保留元素的逻辑下标、`bits[0:2]`=槽 0 来源、
-  `bits[2:4]`=槽 1 来源，host 重放全 6 种 2:4 模式得完整真值表；TF32 用另一编码器 `MetadataOneChunk1to2`
-  给 4-bit 码（只记不判）；**(B)（headline）** A 压缩是 E 的镜像（`PhysicalAPerChunk=Logical/2`、`fill_layoutA`
-  的 K 轴 `(2,K/2)`），host 实测 M=64/K=128 raw=16384 B、compressed=8192 B（**0.50×**）、E=2048 B，另记
-  <32-bit 专属单非零 corner case（`:428-446`，重放显示**从不产出 `pos0>=pos1`**，疑硬件合法性约束只记不判）；
-  **(C)（headline）** gmem 的 E 是 swizzled CuTe atom（F16 `((8,2,8),(16,2,4))` 等），SM90 源码直接引 PTX
-  `sparse-wgmma-metadata-64n32-f16bf16`；consumer audit——**MPK 零引用**、**DeepGEMM 的 sparse 是 block-sparse
-  MQA logits 非 2:4**（同名陷阱）。判据只贡献 C3（`src/sparse_e_metadata.cu` + `harness/sparse_e_metadata.out.txt`）。
-  配套博客 post `mega-kernel-71-mpk-sparse-metadata`（weight 72）并更新 `mega-kernel-00-index` 第 71 项。
-- 下一步候选：可继续走「其余未走读相邻层」的残留——WS 指令落地后的对照（`docs/62` 记 CUTLASS `f3fde583`
-  无 `SM100_MMA_*_WS*`，可核 DeepGEMM 侧 WS 用法），`docs/46` §6 的 FLAT-CACHE draft attention 设计（已核
-  `eagle3_draft_chain_step_attn` 快照零命中、**不可走读**，仅供静态落差记录）。**稀疏 A 的 2:4 物理排布/
-  E→A 槽映射已由 P156-1/`docs/70` 补掉**；**SF 段并置已由 P155-1/`docs/69` 补掉**；`linear_fp8_sm100` 家族
-  支撑层已由 P154-1/`docs/68` 补掉；MLA-MTP TP 三兄弟已由 P153-1/`docs/67` 补掉；SM100 BF16 手工线性/
-  MoE linear 已由 P151-1/`docs/65`、P152-1/`docs/66` 补掉。
+- 当前进度：**P157-1 完成（1/1）**。补掉「下一步候选」第一条残留——`docs/62`（P148-1）记 CUTLASS
+  `f3fde583` 无 `SM100_MMA_*_WS*`、「可核 DeepGEMM 侧 WS 用法」。见 `docs/71-ws-instruction.md`
+  （快照 MPK `f9eb70c`、CUTLASS `deps/cutlass f3fde583`、DeepGEMM `057ca59`；**纯源码走读 + 1 个 host
+  侧结构探针 + grep audit**，SM100 本体本机不可执行）。三条 headline：
+  **(A)（headline）** 三份 CUTLASS 是同一个 commit（`f3fde583`）、**逐字节相同**——DeepGEMM vendored
+  （`deep_gemm/include`）、其 submodule（`third-party/cutlass`）、MPK `deps/cutlass` 对 `mma_traits_sm100.hpp`/
+  `mma_sm100_desc.hpp`/`mma_sm100_umma.hpp` 的 md5 完全一致（`0f6fc14f…`/`6cf440a0…`/`a05326ed…`），故
+  `docs/62` 的「WS 布局齐全、只有 `max_shift_ : 2` 预留、0 个 `SM100_MMA_*_WS*` atom」对 DeepGEMM 同样成立；
+  **(B)（headline）** 但 DeepGEMM 在 CUTLASS 之外**自建了一层 PTX UMMA 封装**（`deep_gemm/include/deep_gemm/
+  ptx/tcgen05.cuh`，9 个 struct，被整个 SM100 mega 家族 13 文件共享 include），其中 `SM100_MMA_F16BF16_WS_SS`
+  （`:172-187`）相对 `SM100_MMA_F16BF16_SS`（`:12-27`）**只差 asm 里一个 `.ws`**、签名逐字相同，而 9 个
+  struct 中 **3 个零调用者**、**全树 `.mma.ws` 只此 1 处**（随 `7f2a703`「Introducing Mega MoE」加入后再未
+  被引用）；**(C)（headline）** 「布局备好、指令未落地」两侧同时成立——`MaxShift`/`max_shift` 在 DeepGEMM 与
+  MPK 自建代码均 **0 引用**、`FrgTypeC/D/E = …_ws` 在两个 CUTLASS 副本均 **0**、`struct SM100_MMA.*_WS` 均
+  **0**（WS 布局与 WS wrapper 是两处互不知情的死代码）。判据只贡献 C3（`src/ws_instruction_probe.cu` +
+  `harness/ws_instruction_probe.out.txt`）。配套博客 post `mega-kernel-72-ws-instruction`（weight 73）并更新
+  `mega-kernel-00-index` 第 72 项。
+- 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计（已核
+  `eagle3_draft_chain_step_attn` 快照零命中、**不可走读**，仅供静态落差记录）；或 SM100 专属布局的其余面——
+  DeepGEMM 自建 PTX UMMA 封装层（`ptx/tcgen05.cuh`，9 struct，本专题只从 WS 角度扫过一眼）与 MPK/CUTLASS
+  三条 UMMA 原语通路的**并置对照**（`docs/57` 记 SM100 原语「实现不止一遍」，未与 DeepGEMM 自建层对走）。
+  **WS 指令落地现状已由 P157-1/`docs/71` 补掉**；**稀疏 A 的 2:4 物理排布/E→A 槽映射已由 P156-1/`docs/70`
+  补掉**；**SF 段并置已由 P155-1/`docs/69` 补掉**；`linear_fp8_sm100` 家族支撑层已由 P154-1/`docs/68` 补掉；
+  MLA-MTP TP 三兄弟已由 P153-1/`docs/67` 补掉；SM100 BF16 手工线性/MoE linear 已由 P151-1/`docs/65`、
+  P152-1/`docs/66` 补掉。
 - 此前：**P155-1 完成（1/1）**。补掉「下一步候选」第一条残留——把 MPK SM100 block-scaled FP8
   的 **SF（scale factor）段**在两条 device 身体上**并置逐行对走**（`docs/33`/`docs/34`/`docs/59`/
   `docs/60`/`docs/68` 各覆盖一部分、从未并置）。见 `docs/69-mpk-sf-segments.md`（快照 `f9eb70c`；
