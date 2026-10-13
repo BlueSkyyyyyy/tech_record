@@ -1944,6 +1944,36 @@
       （mm/broadcast warps、chunk KB、slots）与信号预算上限全对。配套博客
       `content/posts/mega-moe-72-bucket-allreduce-reduce-scatter`（索引页新增第 72 篇）。
 
+### P63 增量（opt-in，补齐 DeepEP dispatch/combine 的「开多少 SM / QP」自动选择模型）
+
+- [x] **P63-1** **DeepEP dispatch / combine 的自动 SM / QP 选择模型与带宽探测层**
+      （`deep_ep/buffers/ep.py:431-541/543-560/846-852`；`deep_ep/utils/envs.py:193-283`；
+      `csrc/kernels/comm/context.cpp:52-63/166-183`）。前面第 7/48/58/61/63/71 篇把 dispatch/combine
+      的 **kernel 本体**拆得很细，却一直没回答上游问题：**每次 dispatch/combine 开多少 SM、多少 QP？**
+      本篇补上这层 host 侧**解析式 roofline**。**纯 host / Python、不碰 CUDA/NCCL 设备 API、不依赖
+      SM100 → H100 真机可跑**（`import deep_ep` 的 `check_nccl_so` 用 `sys.modules` 注入合成
+      `deep_ep._C`/`deep_ep.comm` stub 绕过；`ast` 从真实 `ep.py` 抽取三个方法源码运行**未修改的真实
+      方法体**）。→ `docs/73-deepep-sm-qp-autotuning.md`（真实行号核对）：**带宽探测层**——每 SM HBM
+      读/写 `get_sm_read_gbs=180`/`get_sm_write_gbs=45`（`:193-204`）、`get_nvlink_gbs` 解析
+      `nvidia-smi nvlink -s` 求和 ×0.9（`:207-234`）、`get_rdma_gbs` 解析 `ibstat` Rate÷8（`:260-283`）、
+      `check_fast_rdma_atomic_support` 看 CA type `MT4131`（`:237-257`），全部 `lru_cache`。
+      **域大小**：物理域 `(num_rdma_ranks=rank数/LSA, num_nvlink_ranks=ncclTeamLsa.nRanks)`、
+      逻辑域 hybrid 时等于物理域、否则 `(1, num_ranks)`（`context.cpp:52-63/174-183`）。
+      **SM 模型**（`:431-541`）四步：① 期望命中组数 `get_expected_topk` 组合式（`:473-475`，强断言
+      `E % num_groups == 0`）；② 「每 token 流量账」：HBM 读/写 + RDMA/NVLink，hybrid 与 direct 两分支
+      （`:483-509`）；③ 取**预计耗时最长**的链路当标尺（`:511-515`）；④ 用每 SM HBM 带宽反推 SM 数，
+      取四候选最大、`×1.3` 余量、`align 4`、`max(4,...)`，`prefer_overlap` 关时 `max(.,64)`，硬上限
+      `device_sms//2*2`（`:517-532`）——这就是「通信—计算重叠」的预算来源。**QP 模型**（`:543-560`）：
+      direct `min(num_sms,9)` 省 doorbell、hybrid `num_sms*16+1`（16 channel + 1 notify），受
+      `num_allocated_qps` 钳制；默认分配 direct 17 / hybrid(+fast atomic) 65 / 否则 129（`:327-335`）。
+      消费点 `ep.py:641-645`（dispatch）与 `:780` 起（combine）。**H100 真机**
+      `harness/exp_deepep_sm_qp.{sh,py,out.txt}`（真实 `envs.py` sha256 `23843e16…`、`ep.py`
+      `a8f72c39…`）：**16 PASS / 0 FAIL**——真实带宽探测（nvlink 430.3、rdma 0、fast-atomic False）；
+      9 配置真实方法 vs 独立 oracle 逐位一致；QP 模型逐位一致；`get_expected_topk` 6 组对拍暴力枚举
+      差 ≤4.4e-16；边界（4 倍数/≤132/≥4/overlap 关 ≥64/EP1=132）；**三个真实边界**：`E%num_groups==0`、
+      本机无 IB 时 hybrid 自动探测 `ZeroDivisionError`、direct `min(num_sms,9)`。配套博客
+      `content/posts/mega-moe-73-deepep-sm-qp-autotuning`（索引页新增第 73 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1968,8 +1998,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P62 各增量完成（P15-1…P41-1、P42-1…P62-1）。**
-  本轮 P62-1：新建 `docs/72-bucket-allreduce-reduce-scatter.md`（+`src/deepep_bucket_collectives.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P63 各增量完成（P15-1…P41-1、P42-1…P63-1）。**
+  本轮 P63-1：新建 `docs/73-deepep-sm-qp-autotuning.md`（+`harness/exp_deepep_sm_qp.{sh,py,out.txt}`）
+  ——补上 DeepEP dispatch/combine 一直缺席的**上游问题**：每次 `dispatch()`/`combine()` 开多少 SM / QP？
+  答案不是超参，而是 host 侧**解析式 roofline** `EPBuffer.get_theoretical_num_sms:431-541` /
+  `get_theoretical_num_qps:543-560`：把通信拆成「HBM 读 / HBM 写 / RDMA / NVLink」四本**每 token 流量账**，
+  用 group-limited gate 的期望命中组数 `get_expected_topk=G·(1−C(E−E/G,k)/C(E,k))` 归一化，取**预计耗时
+  最长**的链路当标尺，用每 SM HBM 带宽（读 180/写 45）换算 SM 数，三个安全阀 = `×1.3` + `align 4` +
+  **硬上限半卡** `device_sms//2*2`——这就是「通信—计算重叠」的预算来源。QP 与之解耦：direct `min(n,9)`、
+  hybrid `n*16+1`，预分配 direct 17 / hybrid 65 或 129。带宽探测走真实 `nvidia-smi nvlink -s`(×0.9) /
+  `ibstat`(÷8)。**纯 host、H100 真机**用 `ast` 从真实 `ep.py` 抽取三个方法源码跑**未修改真实方法体**，
+  与独立 oracle 对拍：**16 PASS / 0 FAIL**；并坐实三个真实边界（`E%num_groups==0`、无 IB 时 hybrid 自动
+  探测 `ZeroDivisionError`、overlap 关时 ≥64）。配套博客
+  `content/posts/mega-moe-73-deepep-sm-qp-autotuning`（索引页新增第 73 篇）。
+  上一轮 P62-1：新建 `docs/72-bucket-allreduce-reduce-scatter.md`（+`src/deepep_bucket_collectives.cu`、
   `harness/exp_deepep_bucket_collectives.{sh,py,out.txt}`）——补上第 64 篇（P54-1）只当「仅源码分析」
   放过的两个 bucket 集合算子 `all_reduce`/`reduce_scatter`。与 all-gather（纯搬运、copy engine）不同，
   这两个**要归约、必须有 SM kernel**：纯 NVLink 腿 `multimem.ld_reduce.add` 硬件归约（流量降到 O(1)）、
@@ -2687,10 +2729,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P62 已完成（最新 **P62-1 DeepEP bucket 的 `all_reduce`/`reduce_scatter`**：
+- **下一步**：P0~P63 已完成（最新 **P63-1 DeepEP dispatch/combine 的自动 SM/QP 选择模型 + 带宽探测层**：
+  host 侧解析式 roofline（四本每 token 流量账 + 期望命中组数 + 瓶颈链路标尺 + 每 SM HBM 带宽换算），
+  纯 host、H100 真机 ast 抽取真实方法体跑 **16 PASS / 0 FAIL**；详见上）。
+  上一轮 P62-1：**DeepEP bucket 的 `all_reduce`/`reduce_scatter`**：
   三后端（NVLink multimem / RDMA 反向环 / hybrid 三级）+ 信用环 head/tail 背压 + bf16 随机舍入归约；
   数据面 NCCL GIN / `cvt.rs` 仅分析，布局/映射/归约/hash/host 算术在 H100 真机跑**真实设备代码**
-  **30 PASS / 0 FAIL**；详见上）。
+  **30 PASS / 0 FAIL**；见上）。
   上一轮 P61-1：**DeepEP 的两级（hybrid）EP dispatch/combine**
   （`hybrid_dispatch.cuh` + `hybrid_combine.cuh`，即 Mega MoE 在 EP8/EP16 上真正跑的两级域路径）：
   数据面 NCCL GIN 仅分析；就绪哨兵 / tail 增量 / `do_psum` 前缀和 / round-robin 分片调度四个架构无关

@@ -1,0 +1,89 @@
+DeepEP dispatch/combine 自动 SM/QP 选择模型 + 带宽探测层 —— H100 真机
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 nccl (2, 29, 7) sms 132
+DeepEP 源码：93eb6eb
+
+================================================================================================
+P63-1 DeepEP dispatch/combine 自动 SM/QP 选择模型 + 带宽探测层 —— H100 真机
+================================================================================================
+DeepEP@ ~/github/DeepEP
+sha256(deep_ep/utils/envs.py) = 23843e168a6f5d43b58f7583201d4b53ec4fe9df0075ce6cb91bdc63dd878c7c
+sha256(deep_ep/buffers/ep.py) = a8f72c3975bbf0433b7c2bad7574053c2b8b42296c2d692336beade92b4ed737
+  抽取 get_theoretical_num_sms()  : ep.py:431-541
+  抽取 get_theoretical_num_qps()  : ep.py:543-560
+  抽取 lb_get_theoretical_num_sms()  : ep.py:846-852
+
+Part A —— 带宽探测层（真实 envs.py，H100 真机）
+Failed to get RDMA connection speed: [Errno 2] No such file or directory: 'ibstat'
+  get_sm_read_gbs()  = 180   (每 SM HBM 读带宽默认值)
+  get_sm_write_gbs() = 45   (每 SM HBM 写带宽默认值)
+  get_nvlink_gbs()   = 430.3   (nvidia-smi nvlink -s 求和 x 0.9)
+  get_rdma_gbs()     = 0   (ibstat 缺失 → 0)
+  check_fast_rdma_atomic_support() = False
+  [PASS] A1 sm_read_gbs == 180 & sm_write_gbs == 45
+  [PASS] A2 nvlink_gbs == sum(links)*0.9 (真实解析)  links=18 sum=478.1
+  [PASS] A3 带宽缓存生效（lru_cache：二次调用返回同一对象）
+
+Part B —— get_theoretical_num_sms：真实方法体 vs 独立 oracle（逐配置）
+  direct EP8/LSA8  (single node, no RDMA)  num_sms=  16  (oracle   16)  devices=132
+  hybrid EP16 (2 nodes x LSA8)            num_sms=  16  (oracle   16)  devices=132
+  hybrid EP32 (4 nodes x LSA8)            num_sms=   8  (oracle    8)  devices=132
+  hybrid EP64 (8 nodes x LSA8)            num_sms=   8  (oracle    8)  devices=132
+  hybrid EP128 (16 nodes x LSA8)          num_sms=   4  (oracle    4)  devices=132
+  direct EP8, not preferring overlap      num_sms=  64  (oracle   64)  devices=132
+  hybrid EP16, RDMA slow (bottleneck RDMA)  num_sms=   4  (oracle    4)  devices=132
+  direct EP4 (1 node, 4 ranks)            num_sms=  20  (oracle   20)  devices=132
+  direct EP1 (no traffic)                 num_sms= 132  (oracle  132)  devices=132
+  [PASS] B1 8 配置真实方法与 oracle 逐位一致
+
+Part C —— get_theoretical_num_qps 与分配默认值
+  direct EP8/LSA8  (single node, no RDMA)  num_qps=   9  (oracle    9)  allocated=17
+  hybrid EP16 (2 nodes x LSA8)            num_qps=  65  (oracle   65)  allocated=65
+  hybrid EP32 (4 nodes x LSA8)            num_qps= 129  (oracle  129)  allocated=129
+  hybrid EP64 (8 nodes x LSA8)            num_qps= 129  (oracle  129)  allocated=129
+  hybrid EP128 (16 nodes x LSA8)          num_qps=  65  (oracle   65)  allocated=129
+  direct EP8, not preferring overlap      num_qps=   9  (oracle    9)  allocated=17
+  hybrid EP16, RDMA slow (bottleneck RDMA)  num_qps=  65  (oracle   65)  allocated=65
+  direct EP4 (1 node, 4 ranks)            num_qps=   9  (oracle    9)  allocated=17
+  direct EP1 (no traffic)                 num_qps=   9  (oracle    9)  allocated=17
+  [PASS] C1 num_qps 真实方法与 oracle 逐位一致
+  [PASS] C2 默认分配：direct=17 / hybrid+(fast atomic)=65 / hybrid 否则 129  见 ep.py:328-335（本机 check_fast_rdma_atomic_support=False → 129）
+  [PASS] C3 hybrid QP 公式 num_sms*16+1 命中（16 个 channel + 1 notify）  got 65
+
+Part D —— get_expected_topk 组合数学（对拍暴力枚举）
+  E= 8 k=2 G=2: expected_groups=1.571429  brute=1.571429  diff=0.00e+00
+  E= 8 k=3 G=4: expected_groups=2.571429  brute=2.571429  diff=4.44e-16
+  E=12 k=2 G=3: expected_groups=1.727273  brute=1.727273  diff=2.22e-16
+  E=16 k=4 G=4: expected_groups=2.912088  brute=2.912088  diff=4.44e-16
+  E= 9 k=2 G=3: expected_groups=1.750000  brute=1.750000  diff=2.22e-16
+  E=10 k=3 G=5: expected_groups=2.666667  brute=2.666667  diff=0.00e+00
+  [PASS] D1 get_expected_topk 公式 == 暴力枚举（6 组）
+  V3 真实配置 E=256,k=8,G=8 → expected_topk=5.294652 (group-limited 下平均命中 5.295 个专家)
+  [PASS] D2 隐含假设 E % num_groups == 0（256/18 被断言拒绝，EP144 无法套用该模型）  (256, 18)→False, (256, 16)→True, (256, 8)→True
+
+Part E —— 边界 / 单调性 / 越界钳制
+  R=  2 scaleout= 1 → num_sms= 28
+  R=  4 scaleout= 1 → num_sms= 20
+  R=  8 scaleout= 1 → num_sms= 16
+  R= 16 scaleout= 2 → num_sms= 16
+  R= 32 scaleout= 4 → num_sms=  8
+  R= 64 scaleout= 8 → num_sms=  8
+  R=128 scaleout=16 → num_sms=  4
+  [PASS] E1 num_sms 恒为 4 的倍数（align(...,4)）
+  [PASS] E2 num_sms <= device_sms//2*2 == 132 的一半
+  [PASS] E3 num_sms >= 4
+  [PASS] E4 prefer_overlap_with_compute=False 时 num_sms >= 64  got 64
+  [PASS] E5 EP1（无流量）返回 device_sms//2*2=132  got 132
+
+Part F —— 本机 hybrid 自动探测的「坑」：ibstat 缺失 → rdma_gbs=0 → 除零
+  [PASS] F1 本机（无 IB）hybrid 自动探测会 ZeroDivisionError（真实行为）  rdma_traffic / rdma_gbs 除零（rdma_gbs=0）
+
+Part G —— lb_get_theoretical_num_sms（对照：EPLB 预取权重的 SM 模型）
+  nvlink_gbs/get_sm_read_gbs  = 430.3/180 = 2.3906
+  nvlink_gbs/get_sm_write_gbs = 430.3/45  = 9.5623
+  lb_get_theoretical_num_sms  = 10  (ceil(max(...))→align 2)
+  [PASS] G1 lb 模型 = align(ceil(max(nv/180, nv/45)),2)
+
+================================================================================================
+总结：PASS=16  FAIL=0  （共 16 项）
+================================================================================================
