@@ -4256,9 +4256,37 @@
       收回「物化税」（省掉 reduce 写 fp32 + 优化器再读回共 8B/elem）；但 **2.27× 不可达**：每步 bf16
       梯度至少被消费端读一遍（~76us/步），叠加在 219.6us/步 GEMM 上。**2.27× 隐含「这份读是免费的」——
       它从来不是**（修正第 146 篇「融合=2.2×」的半句话）。SM100 `tn` 同族 fp32 累积、**仅分析**。
-      H100(sm90) 真机、空闲 GPU1 单进程。`harness/exp_wgrad_reduce_consumer.{sh,py,out.txt}`（`.cu`
-      sha256 `3e65de90…`）。配套博客 `content/posts/mega-moe-147-wgrad-materialization-tax`
-      （索引页新增第 147 篇）。
+       H100(sm90) 真机、空闲 GPU1 单进程。`harness/exp_wgrad_reduce_consumer.{sh,py,out.txt}`（`.cu`
+       sha256 `3e65de90…`）。配套博客 `content/posts/mega-moe-147-wgrad-materialization-tax`
+       （索引页新增第 147 篇）。
+
+### P138 增量（opt-in，把 P137-1 结尾的「归约能否藏进 GEMM」走到能核对的数）
+
+- [x] **P138-1** **把 wgrad 的 S 步归约藏进 GEMM：epilogue 融合 / 侧流重叠到底行不行**
+      （`csrc/apis/gemm.hpp:373-427/384/403`、`csrc/jit_kernels/impls/sm90_fp8_gemm_1d1d.hpp:84`、
+      `sm90_fp8_gemm_1d2d.hpp:81`、`sm90_fp8_gemm_1d1d.cuh:346-349`、
+      `csrc/jit_kernels/heuristics/sm90.hpp:14/148-188`、`sm100_fp8_fp4_gemm_1d1d.hpp:325`；
+      对照第 12/15/144/145/146/147 篇）。第 147 篇把 wgrad 换 bf16 输出的端到端钉在 **1.67×**，
+      留下「每步 bf16 梯度必须串行读一遍（~76us/步）」这个口子，可继续①问：**把它融进 GEMM 的
+      epilogue、或与下一步 GEMM 重叠，能不能藏掉？** 本篇补上，得到**双重否定的负结果**。
+      **（1）字节账**：`G=1.17e8`（bf16 235MB/fp32 470MB），S 步总线上字节——批量 `SEQ`（=ALT-OPT）
+      `470·S+940`、侧流增量 `INC-F`(fp32 master RMW) `1410·S`、`INC-B`(bf16 acc RMW) `940·S`，
+      **同 kernel 的 epilogue 融合 `EPI-B`(bf16 acc) 反而最少 `470·S`**（省掉 fresh-write+读回与末次
+      fp32 master 940MB）。**（2）消费侧内核**（`src/wgrad_epilogue_overlap.cu`，架构无关，H100 真跑真实
+      设备代码，vs CPU double 5.96e-8）：纯读 235MB **3005 GB/s**、`fused_all S=8` 2820MB **3084 GB/s**、
+      `fused_step` 1175MB 2923、`acc_bf16` 705MB 2970；**块数 ≥264（~2/SM）即打满 HBM**（132 block 只
+      2494）。**（3）真机重叠**（真实 SM90 `fp8_gemm_nt` 1D2D bf16，单步 **218us**）：`SEQ8` 2672us 对
+      `OVL8-INC-F` 4912us / `OVL8-INC-B` 3597us，比值恒 **0.54–0.84×（比串行尾收还慢）**；`set_num_sms`
+      限核 32→132 只把比值 0.54→0.68、绝对值更差；扫消费者块数恒 ~0.58 → **瓶颈不是吞吐而是根本不并行**。
+      **（4）决定性控制**（可调动态 smem 的伪 epilogue 生产者 `k_gen_bf16`）：smem 0→128KB 消费者被藏住
+      53%→92%，**227KB 时 −0.1%（完全串行）**——坐实 **DeepGEMM 的 `232448 B/SM`（`sm90.hpp:14`）让侧流
+      block 无从 co-reside**（与第 144 篇「必须先按 SM 预算分区」一致）。**（5）数值**：bf16 累加器 S=16
+      relerr **5.03e-3**、cos 0.9999875，比 FP8 输入噪声 3.6e-2 小 7×（精度免费）。**结论**：唯一剩余门是
+      **同 kernel 的 `EPI-B`**（字节最优，上界 `REF/(S·t_gemm)≈2.29×`、下界（+235MB/步不藏）≈1.69×，
+      需改 DeepGEMM 1D2D epilogue fresh-write→bf16 累加器 RMW）；侧流/外部融合被 smem 占用堵死。
+      SM100 `tn` 同族、**仅分析**。`harness/exp_wgrad_epilogue_overlap.{sh,py,out.txt}`
+      （`.cu` sha256 `ea2ec399…`）。配套博客 `content/posts/mega-moe-148-wgrad-epilogue-overlap`
+      （索引页新增第 148 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4290,8 +4318,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P137 各增量完成（P15-1…P41-1、P42-1…P137-1）。**
-  本轮 P137-1：新建 `docs/147-wgrad-materialization-tax.md`
+- 当前进度：**P0~P14 全部完成；P15~P138 各增量完成（P15-1…P41-1、P42-1…P138-1）。**
+  本轮 P138-1：新建 `docs/148-wgrad-epilogue-overlap.md`
+  （+`src/wgrad_epilogue_overlap.cu`、`harness/exp_wgrad_epilogue_overlap.{sh,py,out.txt}`）——量化第 147 篇
+  留下的「每步 bf16 梯度要串行读一遍」口子能否藏进 GEMM。**字节账**：批量 ALT-OPT `470·S+940`；侧流增量
+  INC-F `1410·S`/INC-B `940·S`；**同 kernel epilogue 融合 EPI-B `470·S`（最少）**。**消费核**（架构无关、
+  H100 真跑、vs CPU double 5.96e-8）：纯读 3005 GB/s、fused_all S=8 3084 GB/s、≥264 block 即满带宽。
+  **真机重叠**：单步 GEMM 218us，`SEQ8` 2672us 对 OVL8-INC-F 4912 / INC-B 3597 → **0.54–0.84×（比串行还慢）**；
+  `set_num_sms` 限核只把比值 0.54→0.68；**决定性控制**：伪 epilogue 生产者动态 smem 0→128KB 藏住 53%→92%、
+  **227KB（=DeepGEMM `sm90.hpp:14`）时 −0.1%（完全串行）**——坐实 `232448 B/SM` 让侧流 block 无从 co-reside。
+  **数值**：bf16 累加器 S=16 relerr 5.03e-3、cos 0.9999875（< FP8 噪声 3.6e-2）。**结论**：唯一剩余门是**同 kernel
+  epilogue 融合 EPI-B**（上界 ~2.29×、下界 ~1.69×，需改 1D2D epilogue）；侧流/外部融合在 SM90 被 smem 占用
+  堵死。SM100 `tn` 同族、仅分析。索引页新增第 148 篇。
+  上一轮 P137-1：新建 `docs/147-wgrad-materialization-tax.md`
   （+`src/wgrad_reduce_consumer.cu`、`harness/exp_wgrad_reduce_consumer.{sh,py,out.txt}`）——把第 146 篇
   结尾那句「只有优化器直接吃 bf16 才拿回 2.2×」**量化落地**。三协议（`REF` fp32 累积 / `ALT-R` bf16 +
   `torch.sum` + opt / `ALT-OPT` bf16 + **融合进优化器**）；消费侧内核架构无关、H100 真机跑真实设备代码
@@ -5830,7 +5869,23 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P137 已完成（最新 **P137-1 MoE wgrad 的「fp32 物化/归约税」量化：融合进优化器能拉回多少 2.2×**：
+- **下一步**：P0~P138 已完成（最新 **P138-1 把 wgrad 的 S 步归约藏进 GEMM：epilogue 融合 / 侧流重叠到底行不行**：
+  第 147 篇留的口子（「每步 bf16 梯度要串行读一遍」，可继续①）**走到了能核对的数，是个双重否定的负结果**。
+  ① **字节账**：批量 ALT-OPT `470·S+940`；侧流增量 INC-F `1410·S` / INC-B `940·S`（每步 RMW master）；
+  **同 kernel epilogue 融合 EPI-B `470·S`（最少）**。② **消费核**（`src/wgrad_epilogue_overlap.cu`，架构无关、
+  H100 真跑、vs CPU double 5.96e-8）：纯读 3005 GB/s、fused_all S=8 3084 GB/s、≥264 block 即满带宽。
+  ③ **真机重叠**（真实 SM90 1D2D bf16，单步 218us）：`SEQ8` 2672us 对 OVL8-INC-F 4912 / INC-B 3597 →
+  **0.54–0.84×（比串行还慢）**；`set_num_sms` 限核、扫消费者块数都救不了（恒 ~0.58）→ 不是吞吐而是不并行。
+  ④ **决定性控制**：伪 epilogue 生产者动态 smem 0→128KB 消费者藏住 53%→92%、**227KB（=DeepGEMM
+  `sm90.hpp:14` `232448`）时 −0.1%（完全串行）**——`232448 B/SM` 让侧流 block 无从 co-reside（印证第 144 篇）。
+  ⑤ **数值**：bf16 累加器 S=16 relerr 5.03e-3、cos 0.9999875（< FP8 噪声 3.6e-2，精度免费）。**结论**：唯一剩余门
+  是**同 kernel 的 EPI-B**（字节最优，上界 `REF/(S·t_gemm)≈2.29×`、下界 ≈1.69×，需改 DeepGEMM 1D2D
+  epilogue），侧流/外部融合在 SM90 被 smem 占用堵死。SM100 `tn` 同族、仅分析。索引页新增第 148 篇）。
+  可继续（均为增量、非承诺）：
+  ① 若环境允许，在一个**可改的** SM90 GEMM 分支上做 EPI-B 端到端验证（epilogue fresh bf16 store → bf16
+  累加器 RMW），量「多出来的 235MB/步读」到底藏没藏进去；② 对 P96/P97/P123 的轻微漂移清单关键路径定点复核；
+  ③ 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）。详见上）。
+  上一轮 P137-1 MoE wgrad 的「fp32 物化/归约税」量化：融合进优化器能拉回多少 2.2×：
   把第 146 篇结尾「只有优化器直接吃 bf16 才拿回 2.2×」落地。三协议（`REF` 每步 1D1D fp32 累积 /
   `ALT-R` 每步 bf16 + `torch.sum` + 优化器 / `ALT-OPT` 每步 bf16 + **融合进优化器**、不落地 fp32 梯度）；
   消费侧内核（`src/wgrad_reduce_consumer.cu`）架构无关、H100 真机跑真实设备代码 ~3.08 TB/s（HBM 92%），
