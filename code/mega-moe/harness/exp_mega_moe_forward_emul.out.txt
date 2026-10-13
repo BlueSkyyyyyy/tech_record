@@ -1,0 +1,27 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+--- PYTHON ---
+deep_gemm 2.8.1, arch_major=9, device=NVIDIA H100 80GB HBM3
+SM100 fuse 的 Mega MoE 主 kernel 本机不可跑；本实验用 SM90 grouped FP8/BF16 kernel 逐段复刻其前向数学与量化语义。
+====================================================================================================
+## A. 端到端误差与分解（小配置）
+T=  64 H=  512 I= 256 E= 8 topk=2 | m_total=  1024 (align 128) counts=[13, 18, 18, 14, 17, 20, 14, 14]
+   端到端 vs fp64:  fp8-kernel rel=6.2934e-02 cos=0.998031 | bf16-torch rel=5.1812e-03 | fp32-torch rel=5.1207e-04
+   分层:  kernel+布局 L1 rel=1.4705e-03  L2 rel=1.4688e-03  端到端 vs 反量化参考 rel=3.2897e-04
+   消融(反量化参考 vs fp64): none=1.5422e-03  仅激活=5.7187e-02  仅权重=4.5868e-02  两者=6.2940e-02
+T= 256 H= 1024 I= 512 E= 8 topk=2 | m_total=  1024 (align 128) counts=[66, 72, 66, 53, 58, 71, 67, 59]
+   端到端 vs fp64:  fp8-kernel rel=6.3376e-02 cos=0.997991 | bf16-torch rel=5.1704e-03 | fp32-torch rel=5.1597e-04
+   分层:  kernel+布局 L1 rel=1.4703e-03  L2 rel=1.4725e-03  端到端 vs 反量化参考 rel=3.2982e-04
+   消融(反量化参考 vs fp64): none=1.5509e-03  仅激活=5.7590e-02  仅权重=4.6208e-02  两者=6.3378e-02
+T= 512 H= 1024 I= 512 E=16 topk=4 | m_total=  3200 (align 128) counts=[109, 114, 136, 140, 138, 125, 113, 139, 132, 126, 132, 144, 132, 113, 140, 115]
+   端到端 vs fp64:  fp8-kernel rel=6.3381e-02 cos=0.997994 | bf16-torch rel=5.1817e-03 | fp32-torch rel=5.0911e-04
+   分层:  kernel+布局 L1 rel=1.4691e-03  L2 rel=1.4723e-03  端到端 vs 反量化参考 rel=3.3212e-04
+   消融(反量化参考 vs fp64): none=1.5476e-03  仅激活=5.7560e-02  仅权重=4.5998e-02  两者=6.3382e-02
+
+## B. DeepSeek 量级（T=2048,H=7168,I=2048,E=8,topk=2, m-grouped，1D2D FP8）
+   m_total=4480 counts=[667, 517, 505, 484, 494, 468, 473, 488]
+   端到端 vs fp64: fp8-kernel rel=6.2832e-02 cos=0.998023 | bf16-torch rel=5.0388e-03
+   分层: kernel+布局 L1 rel=1.4714e-03 L2 rel=1.4687e-03 | 端到端 vs 反量化参考 rel=3.2086e-04
+   消融: none=1.5454e-03 仅激活=5.7037e-02 仅权重=4.5806e-02 两者=6.2833e-02
+   吞吐: L1 m=4480 N=4096 K=7168 t=843us 312 TFLOPS | L2 N=7168 K=2048 t=434us 303 TFLOPS
+
+ALL DONE

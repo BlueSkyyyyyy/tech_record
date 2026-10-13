@@ -2771,6 +2771,26 @@
       9 条 flag 字面量逐字一致。配套博客 `content/posts/mega-moe-98-deepep-jit-config`
       （索引页新增第 98 篇）。
 
+### P89 增量（opt-in，补齐「前向」一直缺席的端到端数值复刻与误差分解）
+
+- [x] **P89-1** **Mega MoE 前向流水线在 H100 上的数值复刻与误差分解**（
+      `harness/exp_mega_moe_forward_emul.{py,sh,out.txt}`；
+      参考 `impls/sm100_fp8_fp4_mega_moe.cuh`、`csrc/apis/gemm.hpp`、`csrc/apis/mega_moe.hpp`；
+      对照第 41 篇 `tests/test_mega_moe.py`、第 4/12/13/14 篇反向实验）。第 3/9/10/11 篇拆了
+      SM100 主 kernel、第 41 篇拆了端到端验收测试、第 4/12/13/14 篇把**反向**四个 grouped GEMM
+      真的接进图里跑了，但**前向**一直缺「用 H100 可跑算子逐段复刻 + 误差分解」。**主 kernel
+      SM100 专属、仅分析**；前向的数学/量化语义架构无关，用 SM90 `m_grouped_fp8_gemm_nt_contiguous`
+      （1D2D）+ `m_grouped_bf16_gemm_nt_contiguous` 复刻。**语义钉死**：linear1
+      （`kernel:161-164`）→ SwiGLU（gate/up 先 round bf16 `:1117-1118`、clamp、`silu*up`、**乘
+      top-k 权重** `:1135`）→ L1 输出 UE8M0 per-token 量化（`:1160-1192`，MN-major SF `:1205-1213`）
+      → linear2 → combine（`:1412-1519`，**不再乘权重**，`ptx::accumulate` fp32 求和 `:1477-1490`）。
+      **H100 实测**：① 端到端 fp8-kernel vs fp64 在 4 组形状（含 DeepSeek 量级）上 rel
+      **6.28–6.34e-2**、cos ≥0.9980（bf16-torch 5.0e-3 / fp32-torch 5.1e-4）；② 分层——kernel
+      vs 反量化参考端到端仅 **3.2e-4**、单层 **1.47e-3**（bf16 输出地板）→ 6.3e-2 的 99% 来自量化；
+      ③ 消融 仅激活 5.70e-2 / 仅权重 4.58e-2 / 两者 6.28e-2 / 不量化 1.55e-3，**两侧同量级**；
+      ④ 吞吐 L1/L2 **312/303 TFLOPS**（843/434us）；⑤ 记吞吐陷阱（每调用 empty+sync 把 312 误测
+      成 54）。配套博客 `content/posts/mega-moe-99-mega-moe-forward-emulation`（索引页新增第 99 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -2796,8 +2816,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P88 各增量完成（P15-1…P41-1、P42-1…P88-1）。**
-  本轮 P88-1：新建 `docs/98-deepep-jit-config.md`
+- 当前进度：**P0~P14 全部完成；P15~P89 各增量完成（P15-1…P41-1、P42-1…P89-1）。**
+  本轮 P89-1：新建 `docs/99-mega-moe-forward-emulation.md`
+  （+`harness/exp_mega_moe_forward_emul.{py,sh,out.txt}`）——补齐**前向**一直缺席的
+  **端到端数值复刻与误差分解**。主 kernel SM100 专属、仅分析；用 SM90
+  `m_grouped_fp8_gemm_nt_contiguous`（1D2D）+ `m_grouped_bf16_gemm_nt_contiguous` 逐段复刻
+  dispatch→L1→SwiGLU→L2→combine 的数学与量化语义（权重在 L1 输出、L2 量化之前乘，combine 只求和）。
+  **H100 真机**：端到端 fp8-kernel vs fp64 rel **6.28–6.34e-2**（bf16-torch 5.0e-3 / fp32 5.1e-4）；
+  分层 kernel vs 反量化参考 3.2e-4、单层 1.47e-3；消融 仅激活 5.70e-2 / 仅权重 4.58e-2 /
+  两者 6.28e-2 → **量化是主因、两侧同量级**；吞吐 L1/L2 **312/303 TFLOPS**。索引页新增第 99 篇。
+  上一轮 P88-1：新建 `docs/98-deepep-jit-config.md`
   （+`src/deepep_compiled_abi.cu`、`harness/deepep_jit_config_probe.cpp`、
   `harness/exp_deepep_jit_config.{sh,out.txt}`）——补齐 DeepEP「任何设备代码跑起来之前」的**编译配置面**：
   `deep_ep/include/deep_ep/common/compiled.cuh` 的编译期 ABI（`topk_idx_t` 位宽 / `sf_pack_t` UE8M0
@@ -3818,7 +3846,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P88 已完成（最新 **P88-1 DeepEP 的编译期配置面与 DeepJIT 接入**：
+- **下一步**：P0~P89 已完成（最新 **P89-1 Mega MoE 前向流水线在 H100 上的数值复刻与误差分解**：
+  用 SM90 `m_grouped_fp8_gemm_nt_contiguous`（1D2D）+ bf16 grouped kernel 逐段复刻
+  dispatch→L1→SwiGLU→L2→combine；把 top-k 权重在 L1 输出/L2 量化前乘、combine 只求和；端到端
+  fp8-kernel vs fp64 rel 6.28–6.34e-2（bf16 5.0e-3 / fp32 5.1e-4）、分层 3.2e-4、消融仅激活 5.70e-2
+  / 仅权重 4.58e-2 → 量化主导且两侧同量级；吞吐 L1/L2 312/303 TFLOPS；主 kernel SM100 仅分析，
+  H100 真机跑整条前向；详见上）。
+  上一轮 P88-1：P0~P88 已完成（最新 **P88-1 DeepEP 的编译期配置面与 DeepJIT 接入**：
   `csrc/runtime/jit.hpp::init_jit` 的 `Config` 五参 + 8 条 nvcc flag（GIN GDAKI）+ `compiled.cuh`
   的编译期 ABI（`topk_idx_t`/`sf_pack_t`/对齐/通信上限）；核心洞察是「NCCL include 路径进缓存键、
   DeepEP 自身头按内容进键」；纯 host/编译期、架构无关，H100 真机 48 PASS / 0 FAIL；详见上）。
