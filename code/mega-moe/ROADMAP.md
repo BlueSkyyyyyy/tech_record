@@ -2248,7 +2248,38 @@
       有效行 3.06e-09；⑤ 判据利齿：`calc_diff` 对 `d*0.999` 仅 5.0e-07、单行归零漏（1.5e-05）、
       1/8 行归零抓（6.8e-02）、1-ulp 只有逐位抓；真实 perf m-grouped（G=8,m=33792,n=7168,k=7168）
       **223.1 TFLOPS/115 GB/s**、k-grouped（G=4,m=4096,n=7168,k=33792）**52.5 TFLOPS/33 GB/s**。
-      配套博客 `content/posts/mega-moe-82-legacy-test-oracle`（索引页新增第 82 篇）。
+       配套博客 `content/posts/mega-moe-82-legacy-test-oracle`（索引页新增第 82 篇）。
+
+### P73 增量（opt-in，补齐 DeepEP 一直缺席的 host Python 编排层与句柄契约）
+
+- [x] **P73-1** **DeepEP 的 `EPHandle` 句柄契约与 `dispatch`/`combine` 的 host 编排层**
+      （`deep_ep/buffers/ep.py:27-906`；`deep_ep/utils/{semantic,math,event,envs}.py`；
+      `deep_ep/buffers/allocator.py`；消费方 `~/github/DeepGEMM/tests/test_mega_moe.py:307-333`）。
+      DeepEP 的**设备侧**路径都已拆透（第 7/11/48/51/52/53/61/63/65 篇），但把它们拼起来的
+      **host Python 编排层**与 **`EPHandle` 本身**从没被单独讲清。**纯 host / Python，H100 可跑**。
+      → `docs/83-deepep-epbuffer-handle-orchestration.md`（真实行号核对）：`EPHandle`（`:27-207`）
+      的两个身份——① **接口**（`test_mega_moe.py:307-333` 把 `handle.psum_num_recv_tokens_per_expert`
+      当 grouped GEMM 的 PSUM 布局）、② **反向缓存**（`ep.py:613-615` 只换 `topk_weights` 复用 expand
+      布局）。**字段契约最易读错点**：两种 psum 语义不同（`:43-53`）——`...per_scaleup_rank` 是**去重**
+      后每 rank 含端点前缀和（末元素=总数，`deterministic_sort` 在 `do_cpu_sync=False` 时当有效行数
+      `:141`）；`...per_expert` 非 expand 是普通前缀和、expand 是「`psum[i]=align(psum[i-1],alignment)
+      +专家 i 未对齐真实计数`」（真实计数=`psum[i]-align(psum[i-1])`、`i+1` 起点=`align(psum[i])`）。
+      `topk_idx` 是带**版本守卫**的 property（`:103-111`，inference 张量守卫关闭）。**dispatch 五段**
+      （`:562-757`）：`:638` 禁 `do_handle_copy`+`:639` `check_torch_deterministic`（确定性算法 ∧
+      `fill_uninitialized_memory` 同开报错，因 `torch.empty` 初始化内核会与通信流重叠）→ `:641-645`
+      auto SM/QP（`num_topk` 从 `topk_idx.shape[1]` 推、`num_qps<=num_allocated_qps` 断言）→ `:647-671`
+      SF 解包 + 缓存句柄三断言（`:662` 上下文一致是**裸断言**）→ `:673-699` `value_or` 回填默认 + 调
+      runtime → `:702-747` `finalize_dispatch`（句柄装配/复用 + 确定性 hook vs 立即 + 返回形状归一化）；
+      `:749-757` **deferred epilogue** 返回 `EventOverlap`、`wait()` 才 finalize。**combine**（`:770-843`）：
+      SM 默认**复用 `handle.num_sms`**、直接喂 handle 的 6 字段、`_unpack_bias` 支持 0/1/2 bias。
+      辅助基座 `value_or`/`weak_lru`（弱引用防泄漏，`semantic.py:5-26`）/`align`。H100 实测
+      `harness/exp_deepep_epbuffer_handle.{py,sh,out.txt}` **51 PASS / 0 FAIL**：注入合成 `deep_ep._C`/
+      `comm` 桩后**按文件路径 exec 真实文件**、把**未修改的真实方法体**绑到假 buffer 逐字段核对
+      （编排不碰 NCCL，等价验证）；`deterministic_sort` 用真实 CUDA 张量在 H100 跑。实测要点：auto SM
+      干净地从 `topk_idx.shape[1]` 推 `num_topk`、缓存 handle 返回同一对象且强制关 CPU 同步、
+      `num_experts` 不一致被 `:662` 裸断言拦下（消息实测为**空串**）、deferred/确定性两条接线分支、
+      `value_or(0/False)` 不误判。配套博客 `content/posts/mega-moe-83-deepep-epbuffer-handle-orchestration`
+      （索引页新增第 83 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2274,8 +2305,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P72 各增量完成（P15-1…P41-1、P42-1…P72-1）。**
-  本轮 P72-1：新建 `docs/82-legacy-test-oracle.md`
+- 当前进度：**P0~P14 全部完成；P15~P73 各增量完成（P15-1…P41-1、P42-1…P73-1）。**
+  本轮 P73-1：新建 `docs/83-deepep-epbuffer-handle-orchestration.md`
+  （+`harness/exp_deepep_epbuffer_handle.{py,sh,out.txt}`）——补上 DeepEP 一直缺席的
+  **host Python 编排层与 `EPHandle` 句柄契约**。`EPHandle`（`ep.py:27-207`）的两个身份：
+  ① **接口**（`test_mega_moe.py:307-333` 把 `handle.psum_num_recv_tokens_per_expert` 当 grouped
+  GEMM 的 PSUM 布局）、② **反向缓存**（`:613-615` 只换 `topk_weights` 复用 expand 布局）。
+  **两种 psum 语义不同**（`:43-53`，expand 的 `psum[i]=align(psum[i-1])+未对齐真实计数`）；
+  `topk_idx` 是带**版本守卫**的 property（`:103-111`）。**dispatch 五段**（`:562-757`）：守卫
+  （`:638-639`，确定性 ∧ `fill_uninitialized_memory` 同开报错）→ auto SM/QP（`:641-645`）→
+  SF 解包+缓存句柄三断言（`:662` 是**裸断言**）→ 默认回填+runtime（`:673-699`）→
+  `finalize_dispatch`（`:702-747`，确定性 hook vs 立即）；deferred epilogue（`:749-757`）。
+  **combine**（`:770-843`）SM 默认复用 `handle.num_sms`、直喂 handle 6 字段、`_unpack_bias`。
+  辅助 `value_or`/`weak_lru`/`align`。**H100 真机 51 PASS / 0 FAIL**：注入合成 `deep_ep._C`/`comm`
+  桩后按文件路径 exec 真实文件、把未修改的真实方法体绑到假 buffer 逐字段核对（编排不碰 NCCL），
+  `deterministic_sort` 用真实 CUDA 张量跑。索引页新增第 83 篇。
+  上一轮 P72-1：新建 `docs/82-legacy-test-oracle.md`
   （+`harness/exp_legacy_test_oracle.{py,sh,out.txt}`）——补上整条测试栈里**最后一个还没被单独拆过的
   顶层规格文件** `tests/test_legacy.py`（95 行、两个顶层函数、**无 arch 门控**、只测 bf16）：
   legacy Triton grouped GEMM 的**分组语义规范**。m-grouped 枚举 32 配置（含未透传的 psum 轴，
@@ -3108,11 +3153,15 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P72 已完成（最新 **P72-1 legacy Triton grouped GEMM 的验收测试即正确性规范**：
-  `tests/test_legacy.py`（95 行，两个顶层函数，无 arch 门控，只测 bf16）——m-grouped 枚举 32 配置
-  （psum 轴未透传、仅 16 唯一）+ `expand×test_alias` 128 次发射，`test_alias` 是主序别名薄壳
-  （`nn`≡`nt` 逐位）、`expand` 恒等行索引（≡`m_grouped` 逐位）；k-grouped 四因子闸门 arch9 no-op /
-  伪造 arch10 拦 119/126；H100 真机直接驱动真实测试体 **19 PASS / 0 FAIL**；详见上）。
+- **下一步**：P0~P73 已完成（最新 **P73-1 DeepEP 的 `EPHandle` 句柄契约与 dispatch/combine 的
+  host 编排层**：`deep_ep/buffers/ep.py:27-906`——`EPHandle` 的两个身份（grouped GEMM 的 PSUM 布局
+  接口 / 反向缓存）、两种 psum 语义（expand 的 `align(psum[i-1])+未对齐真实计数`）、`topk_idx` 版本守卫、
+  dispatch 五段编排（守卫 / auto SM+QP / SF 解包+缓存句柄三断言 / 默认回填+调 runtime / finalize 与
+  确定性钩子）+ deferred epilogue、combine 复用 `handle.num_sms`；H100 真机注入 `_C` 桩后 exec 真实
+  文件、把未修改真实方法体绑假 buffer 逐字段核对 **51 PASS / 0 FAIL**；详见上）。
+  上一轮 P72-1：**legacy Triton grouped GEMM 的验收测试即正确性规范**：
+  `tests/test_legacy.py`（95 行、两个顶层函数、无 arch 门控、只测 bf16）——m-grouped 32 配置（仅 16
+  唯一）+ `expand×test_alias` 128 次发射、k-grouped 四因子闸门；H100 真机 **19 PASS / 0 FAIL**；详见上。
   上一轮 P71-1：**SM 局部域的验收测试即正确性规范**：
   `tests/test_locality_domain.py`（167 行，纯 host / API 层，一个 GPU kernel 都不启动）——5 个顶层函数、
   `assert_raises` 只吞 RuntimeError（域越界 vs MLOPart 不可用分成两种异常）、域表四断言（TPC 成对 /
