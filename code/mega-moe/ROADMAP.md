@@ -3601,8 +3601,31 @@
       `harness/exp_build_packaging.{py,sh,out.txt}`（按路径加载真实 `find_pkgs.py` + AST 抽取两个
       `setup.py`）：**54 PASS / 0 FAIL**——A 四层语义 14 项、B 库名取值 5 项、C envs 生成 8 项、
       D 版本号 10 项（含 D4 脏工作区被吞成 `+local`、D4b 去掉 broad except 即抛）、E wheel 名 4 项、
-      F `DG_SKIP_CUDA_BUILD` 3 项、G spec 加载 4 项（含本机 `import deep_ep` 阻塞复现）、H 拷贝/过滤 6 项。
-      配套博客 `content/posts/mega-moe-124-build-packaging-foundation`（索引页新增第 124 篇）。
+       F `DG_SKIP_CUDA_BUILD` 3 项、G spec 加载 4 项（含本机 `import deep_ep` 阻塞复现）、H 拷贝/过滤 6 项。
+       配套博客 `content/posts/mega-moe-124-build-packaging-foundation`（索引页新增第 124 篇）。
+
+### P115 增量（opt-in，P114 延伸：DeepGEMM 的 Python 类型桩生成器）
+
+- [x] **P115-1** **Python 类型桩生成器 `scripts/generate_pyi.py`**（890 行纯 stdlib）：第 124 篇只在
+       `setup.py:136-146` 一句话带过的 `generate_pyi_file`。这份 `.pyi` 是**用户唯一能看到的 Python
+       接口契约**（IDE 补全 / 类型检查 / 文档站签名）。**纯 Python、架构无关，H100 真机实测**。
+       → `docs/125-generate-pyi-stub-generator.md`（真实行号核对）：主流程五段 `:872-890`
+       （`build_cpp_function_index:5-94` 真机 290 条 / `extract_m_def_statements:151-222` 真机 62 条 /
+       `parse_mdef_and_attach_cpp_signatures:389-414` / `extract_cpp_signature_details:581-605` /
+       `generate_pyi_file_content:828-869`）。**反直觉**：参数名/类型来自 **C++ 签名**，`py::arg` 只贡献
+       个数 + 默认值。**`BracketTracker:97-148`**：四括号分别计数、`<>` 仅当 `()[]{}` 全 0 才算模板括号
+       （`foo(a<b)` 安全）、`>` 须 `angle>0` 才减（`->`/`a>b` 安全、`>>` 双闭环）；`is_top_level` 四计数
+       全 0 用于切顶层逗号。`parse_parameter_declaration:494-578` 从右往左顶层回扫 + 类型关键字黑名单。
+       `cpp_type_to_python_type:608-696`（ORDER MATTERS）、`cpp_default_to_python_default:723-778`。
+       **三处真实边界**：① `m.attr` 造的 **10 个别名**（含 `fp8_gemm_nt`/`fp4_gemm_nt`）**全无 stub**；
+       ② `std::variant<int,...>` 被 `\bint\b` **过宽正则**误标 `int`；③ `default_args` 是**相对 `py::arg`
+       的序位**、消费端按 **C++ 形参序位**取（当前巧合对齐）。另两瑕疵：顶层 `<<` 误计、行内尾注释
+       `...; // m.def(` 仍被采集；死代码 `extract_cpp_signature_from_content:345-386`（无调用点）。
+       H100 实测 `harness/exp_generate_pyi.{py,sh,out.txt}`（importlib 按路径加载**真实**脚本）：
+       **45 PASS / 0 FAIL**——A 端到端两次生成逐位一致（sha `57a06883344d96b5`，612 行/62 函数）
+       且与既有 `stubs/_C.pyi` 逐位一致；B/C/D 扫 m.def（含注释边界）、拆实参、建索引（首定义胜）；
+       E `BracketTracker` 5 边界；F/G 18+11 映射；H 16 形参逐字；I 别名 10/10 缺；J 序位反例；K 死代码。
+       配套博客 `content/posts/mega-moe-125-generate-pyi-stub-generator`（索引页新增第 125 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3629,8 +3652,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P114 各增量完成（P15-1…P41-1、P42-1…P114-1）。**
-  本轮 P114-1：新建 `docs/124-build-packaging-foundation.md`
+- 当前进度：**P0~P14 全部完成；P15~P115 各增量完成（P15-1…P41-1、P42-1…P115-1）。**
+  本轮 P115-1：新建 `docs/125-generate-pyi-stub-generator.md`
+  （+`harness/exp_generate_pyi.{py,sh,out.txt}`）——补齐 P114 只一句话带过的
+  **Python 类型桩生成器 `scripts/generate_pyi.py`**（890 行纯 stdlib）。要点：主流程五段
+  （真机 `m.def` 62 条 / C++ 函数索引 290 条）、`.pyi` 参数名/类型取自 **C++ 签名**而 `py::arg`
+  只给个数+默认值、`BracketTracker` 的四括号语义与 `<>` 边界、类型/默认值映射表、
+  **三处真实边界**（`m.attr` 10 个别名全无 stub、`std::variant` 过宽正则误标 `int`、
+  `default_args` 序位错配）+ 死代码。纯 stdlib、架构无关，H100(sm90) 真机 **45 PASS / 0 FAIL**
+  （端到端与既有 `stubs/_C.pyi` 逐位一致 sha `57a06883344d96b5`）。索引页新增第 125 篇。
+  上一轮 P114-1：新建 `docs/124-build-packaging-foundation.md`
   （+`harness/exp_build_packaging.{py,sh,out.txt}`）——补齐「任何设备代码跑起来之前」的
   **构建 / 打包 / 安装期地基**（`find_pkgs.py` + 两个 `setup.py`）。要点：`find_pkg_root:9-55`
   四层语义（env 覆盖 / sys.path 严格大优先级 + 同优先级后者胜 / 子串匹配 / lib_name 根裁剪）、
@@ -4905,7 +4936,15 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P114 已完成（最新 **P114-1 两库的构建 / 打包 / 安装期地基**：`find_pkg_root` 四层
+- **下一步**：P0~P115 已完成（最新 **P115-1 DeepGEMM 的 Python 类型桩生成器 `scripts/generate_pyi.py`**：
+  890 行纯 stdlib，把 `csrc/**` 里的 62 条 `m.def` + C++ 签名变成 `_C.pyi`；`BracketTracker` 四括号
+  语义、类型/默认值映射、三处真实边界（`m.attr` 10 个别名无 stub、`std::variant` 过宽正则、
+  `default_args` 序位错配）；纯 Python、H100(sm90) 真机 **45 PASS / 0 FAIL**；索引页新增第 125 篇。
+  可继续（均为增量、非承诺）：
+  `DeepEP/build.sh`+`develop.sh` 之外的 `cmake-build-*` 调试链、`scripts/quick_plot_pm.py`
+  离线绘图（第 88 篇只带过）、`csrc/indexing/main.cu` 两个 `*.template` 索引生成器、
+  或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  上一轮 P114-1：P0~P114 已完成（最新 **P114-1 两库的构建 / 打包 / 安装期地基**：`find_pkg_root` 四层
   语义 + `get_nccl_lib_name` SONAME 兜底 + 持久化环境变量 codegen + `spec_from_file_location`
   绕开 `check_nccl_so`（=阻塞落点）+ 版本号 broad-except 吞成 `+local` + wheel 文件名/`DG_SKIP_CUDA_BUILD`
   + `prepare_includes` editable 坑；纯 Python、H100(sm90) 真机 **54 PASS / 0 FAIL**；索引页新增第 124 篇。

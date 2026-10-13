@@ -1,0 +1,153 @@
+== 环境坐标 ==
+v2.1.1.post3-24-g057ca59
+057ca59 Public release 26/09/30 (#462)
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+python 3.12.3
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 cuda 13.2
+
+DeepGEMM root : ~/github/DeepGEMM
+generator     : ~/github/DeepGEMM/scripts/generate_pyi.py
+csrc root     : ~/github/DeepGEMM/csrc
+__version__   : 2.8.1
+
+== A. 端到端：确定性与 gold（.pyi 逐位） ==
+Warning: Unrecognized C++ type: const at::ScalarType
+Warning: Unrecognized C++ type: const at::ScalarType
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+.pyi file generated: /tmp/tmpq3d_r1gx/r1/_C.pyi
+Warning: Unrecognized C++ type: const at::ScalarType
+Warning: Unrecognized C++ type: const at::ScalarType
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+.pyi file generated: /tmp/tmpq3d_r1gx/r2/_C.pyi
+  generated lines=612 funcs=62 sha=57a06883344d96b5
+  [PASS] A1 两次生成逐位一致（确定性） 57a06883344d==57a06883344d
+  [PASS] A2 函数条数 == csrc 里 m.def 数（62） got 62
+  [PASS] A3 import 行 = "from typing import Any, Optional" got 'from typing import Any, Optional'
+  [PASS] A4 只 import torch、不 import numpy 
+  [PASS] A5 与仓库既有 stubs/_C.pyi（构建产物）逐位一致 gold sha=57a06883344d
+
+== B. extract_m_def_statements（扫 m.def） ==
+  [PASS] B1 真机共 62 条 m.def got 62
+  [PASS] B2 分布在 9 个 apis/*.hpp {'mega_moe.hpp': 5, 'attention.hpp': 8, 'mega_mhc.hpp': 1, 'config.hpp': 11, 'gemm.hpp': 25, 'hyperconnection.hpp': 1, 'einsum.hpp': 2, 'mega_gate.hpp': 1, 'layout.hpp': 8}
+  [PASS] B3 整行注释 `// m.def` 被跳过，只取真实调用 got ['  m.def("real", &g);']
+  [PASS] B4 **边界**：行内尾注释 `...; // m.def(` 仍被当成语句采集 got 2: ['  int x = 0;  // m.def("inline_fake", &g);', '  m.def("real", &g);']
+  [PASS] B5 `m.attr` 别名（20 处调用 / 10 个别名）不被采集 m.attr( 出现 20 次
+
+== C. parse_m_def_statement（拆顶层实参） ==
+  [PASS] C1 fp8_fp4_gemm_nt：非 lambda + cpp 名归一化 
+  [PASS] C2 fp8_fp4_gemm_nt：num_args == 11（py::arg 计 11 个） got 11
+  [PASS] C3 fp8_fp4_gemm_nt：默认值索引 {3..10} got [3, 4, 5, 6, 7, 8, 9, 10]
+  [PASS] C4 compiled_dims 默认 = "\"nk\"" 
+  [PASS] C5 init 是 lambda（`[&](...)`）→ is_lambda=True 
+  [PASS] C6 mega_moe 无 py::arg → num_args=0、无默认值 
+  [PASS] C7 `&deep_gemm::gemm::foo` → cpp 名只留末段 `foo` got foo
+  [PASS] C8 lambda 起始 `[` → is_lambda=True 且 cpp 名 None 
+  [PASS] C9 参数不足 2 个应抛 ValueError [m.def("z")] m.def has insufficient arguments
+
+== D. build_cpp_function_index（建 C++ 签名索引） ==
+  [PASS] D1 真机索引 290 条 got 290
+  [PASS] D2 命中 fp8_fp4_mega_moe 且返回 `static void` 
+  [PASS] D3 命中 batched_syrk（单行声明） 'static void batched_syrk(const torch::Tensor& a, const torch::Tensor& d)'
+  [PASS] D4 同名多声明只保留首条（`if base_name not in func_index`） 'int foo(int a)'
+
+== E. BracketTracker（四括号嵌套语义） ==
+  [PASS] E1 `std::vector<std::pair<int, int>>` 顶层（`>>` 两次闭环） 
+  [PASS] E2 `->` 里的 `>` 不计数（angle=0） 
+  [PASS] E3 括号内 `<`（比较）不误当模板：`foo(a<b)` 顶层 
+  [PASS] E4 比较 `a > b` 的 `>` 不计数 
+  [PASS] E5 **边界**：顶层移位 `a << b` 被误算成 2 层模板（非顶层） got (False, (0, 0, 0, 2))
+
+== F. cpp_type_to_python_type（类型映射） ==
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>&
+  [PASS] F1 18 个映射全部正确 
+  [PASS] F2 **过宽正则**：`std::variant<int, std::tuple<int, int>>` 落到 `int` 'int'
+
+== G. cpp_default_to_python_default（默认值映射） ==
+  [PASS] G1 11 个默认值映射全部正确 
+Warning: Unrecognized default value: SomeMacroX
+  [PASS] G2 未识别默认值回退 None（并告警） 
+
+== H. parse_cpp_signature / parse_parameter_declaration ==
+  [PASS] H1 返回类型取 `(` 前除末 token 外全部：`static void` 'static void'
+  [PASS] H2 16 个形参 got 16
+  [PASS] H3 形参名与源码一致（y, l1_weights_tuple, ...） ['y', 'l1_weights_tuple', 'l2_weights_tuple', 'shared_l1_weights_tuple_opt']
+  [PASS] H4 类型剥离 `const`/`&`：第 4 参 = const std::optional<...> 'const std::optional<std::tuple<torch::Tensor, torch::Tensor>>'
+  [PASS] H5 parse_parameter_declaration 拆 `const std::string& name` 
+  [PASS] H6 无参名返回 name=None 
+
+== I. 别名缺口：m.attr 造的公开名不在 .pyi 里 ==
+Warning: Unrecognized C++ type: const at::ScalarType
+Warning: Unrecognized C++ type: const at::ScalarType
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+.pyi file generated: /tmp/tmptuw7imtq/_C.pyi
+  [PASS] I1 gemm.hpp 里 10 个别名 LHS 名 ['fp4_gemm_nt', 'fp8_gemm_nn', 'fp8_gemm_nt', 'fp8_gemm_tn', 'fp8_gemm_tt', 'm_grouped_fp4_gemm_nt_contiguous', 'm_grouped_fp4_gemm_nt_masked', 'm_grouped_fp8_gemm_nn_contiguous', 'm_grouped_fp8_gemm_nt_contiguous', 'm_grouped_fp8_gemm_nt_masked']
+  [PASS] I2 所有 10 个别名都缺 stub（含最常用的 fp8_gemm_nt） missing 10/10
+  [PASS] I3 但被别名的原名 `fp8_fp4_gemm_nt` 有 stub 
+
+== J. default_args 的「py::arg 序位 vs C++ 形参序位」语义 ==
+  [PASS] J1 当前对齐：py_args 数 == C++ 形参数（fp8_fp4_gemm_nt 11==11） 
+  [PASS] J2 反例：默认值索引相对 py::arg 而非 C++ 形参（{0,1}） [0, 1]
+
+== K. 死代码审计 ==
+  [PASS] K1 `extract_cpp_signature_from_content` 只有定义、无调用（== 1 次出现） 1 次（含定义）
+
+============================================================
+RESULT: ALL PASS
+============================================================
