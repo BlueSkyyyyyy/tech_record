@@ -4201,6 +4201,31 @@
   P147-1 新留尾巴见文档 §8（前端注释只记不判、`KSTAGES` 矛盾只记不判、实验只覆盖单测实例化的两档
   与单 CTA、未跑生产 JIT 路径、未走完协同版 CLC/寄存器重分配的每个分支）。**本轮新增增量。**
 
+### P148 SM100 TMEM fragment trait 家族的其余两面（`docs/62-mpk-tmem-frg-traits.md`）
+
+- [x] **P148-1** 补掉 `docs/60`（P146-1）§9 与「下一步候选」都点名的缺口——`docs/60` 只把
+  `mma_traits_sm100.hpp` 的**累加器 `tmem_frg`** 与 **block-scaled scale-factor `tmem_sf_frg`**
+  求出来，**其余两面未走**：稀疏 MMA 的**元数据 E**（`tmem_e_frg`/`tmem_e_frg_ws`）与
+  weight-stationary 的 **C/D**（`tmem_frg_ws`）。见 `docs/62-mpk-tmem-frg-traits.md`
+  （MPK `f9eb70c`、CUTLASS `deps/cutlass f3fde583`；**纯源码走读 + 1 个 host 侧结构探测**，
+  SM100 本体本机不可执行）。三条 headline：**(A)（headline）`tmem_e_frg` 的原子宽度恰 =
+  `512/sizeof_bits<A>`**（32b→`128x16`、16b→`128x32`、8b→`128x64`、4b→`128x128`，返回
+  `sparse_elem<N,uint8_t>`），与稀疏 `MMA_Traits` 的 `K = 512/sizeof_bits`（`:1454`「SparseMma
+  consume double mma-k bits」）同源；host 求值把 fp16 E 的 M 拆 `(8,2,8)`、E 列拆 `(16,2)` 钉死，
+  并追清消费路径——E 经 `MMA_Traits::with(E)`（`:1513-1517`）存进 `sparse_args_`，`mma_unpack`
+  （`:1496-1504`）拆成「**低 1 位 `sparse_id2_`** 填指令描述符 + 其余地址作为**独立 TMEM 操作数
+  `[%9]`** 传给 `tcgen05.mma.sp`」（`mma_sm100_umma.hpp:341-370`），而 `mma_sm100_desc.hpp:543-546`
+  的注释「idescE 低 32 位 = E 地址」**在 1SM 稀疏 asm 里未实现**（又一处「按注释推断会错」）；
+  **(B)（headline）weight-stationary 两 trait 是死代码**——`tmem_frg_ws`（1x4/2x2/4x1 数据通路，
+  实测 M=64 的 N 后半段落 `dp+64`、M=32 的 N 四段各落 `dp+32k`）与 `tmem_e_frg_ws` 定义完整，但
+  consumer audit 显示 `FrgTypeC/D = tmem_frg_ws`、`FrgTypeE = tmem_e_frg_ws` **均 0**、全仓 **0 个
+  `SM100_MMA_*_WS*` 原子**（仅描述符 `max_shift_ : 2` 为 WS 预留比特）；
+  **(C)（headline）MPK 对这两个 trait 零引用**（稀疏/WS 两支 CUTLASS 契约 MPK 未用），与 `docs/60`
+  合起来覆盖该文件 TMEM fragment **六件套**。判据只贡献 **C3**。新实验 `src/tmem_frg_traits.cu` +
+  `harness/tmem_frg_traits.sh` + `harness/tmem_frg_traits.out.txt`（目标卡 H100/sm90a，host 侧，
+  device 3，未 launch kernel）。配套博客 post `mega-kernel-63-mpk-tmem-frg-traits`（weight 64）并更新
+  `mega-kernel-00-index` 第 63 项。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4592,7 +4617,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P147-1 完成（1/1）**。补掉「`docs/07` 只一行旁注、`docs/30` §5 只从**单测 wrapper** 视角、
+- 当前进度：**P148-1 完成（1/1）**。补掉 `docs/60`（P146-1）§9 与「下一步候选」都点名的缺口——
+  那篇只把 `mma_traits_sm100.hpp` 的**累加器 `tmem_frg`** 与 **block-scaled scale-factor
+  `tmem_sf_frg`** 求出来，**其余两面未走**。见 `docs/62-mpk-tmem-frg-traits.md`（MPK `f9eb70c`、
+  CUTLASS `deps/cutlass f3fde583`；**纯源码走读 + 1 个 host 侧结构探测**，SM100 本体本机不可执行）。
+  三条 headline：**(A)（headline）稀疏元数据 E `tmem_e_frg` 的原子宽度恰 = `512/sizeof_bits<A>`**
+  （32b→`128x16`、16b→`128x32`、8b→`128x64`、4b→`128x128`，返回 `sparse_elem<N,uint8_t>`），与稀疏
+  `MMA_Traits` 的 `K = 512/sizeof_bits`（`:1454`）同源；host 求值把 fp16 E 的 M 拆 `(8,2,8)`、E 列
+  拆 `(16,2)` 钉死，并追清消费路径——E 经 `MMA_Traits::with(E)`（`:1513-1517`）存进 `sparse_args_`，
+  `mma_unpack`（`:1496-1504`）拆成「**低 1 位 `sparse_id2_`** 填指令描述符 + 其余地址作为**独立 TMEM
+  操作数 `[%9]`** 传给 `tcgen05.mma.sp`」（`mma_sm100_umma.hpp:341-370`），而
+  `mma_sm100_desc.hpp:543-546` 的注释「idescE 低 32 位 = E 地址」**在 1SM 稀疏 asm 里未实现**
+  （又一处「按注释推断会错」）；**(B)（headline）weight-stationary 两 trait 是死代码**——
+  `tmem_frg_ws`（1x4/2x2/4x1 数据通路，实测 M=64 的 N 后半段落 `dp+64`、M=32 的 N 四段各落 `dp+32k`）
+  与 `tmem_e_frg_ws` 定义完整，但 consumer audit 显示 `FrgTypeC/D = tmem_frg_ws`、
+  `FrgTypeE = tmem_e_frg_ws` **均 0**、全仓 **0 个 `SM100_MMA_*_WS*` 原子**（仅描述符
+  `max_shift_ : 2` 为 WS 预留比特）；**(C)（headline）MPK 对这两个 trait 零引用**（稀疏/WS 两支
+  CUTLASS 契约 MPK 未用），与 `docs/60` 合起来覆盖该文件 TMEM fragment **六件套**。判据只贡献 **C3**。
+  新实验 `src/tmem_frg_traits.cu` + `harness/tmem_frg_traits.sh` + `harness/tmem_frg_traits.out.txt`
+  （目标卡 H100/sm90a，host 侧，device 3）。配套博客 post `mega-kernel-63-mpk-tmem-frg-traits`
+  （weight 64）并更新 `mega-kernel-00-index` 第 63 项。P148-1 新留尾巴见文档 §6。
+- 此前：**P147-1 完成（1/1）**。补掉「`docs/07` 只一行旁注、`docs/30` §5 只从**单测 wrapper** 视角、
   `docs/58` 只借一行」留下的缺口——把 **CUTLASS/CuTe 包装的 Hopper GEMM device 家族**
   `tasks/cute/hopper/`（6 文件 2346 行）当一层逐行打开，并**在目标卡 H100/sm90a 上把它的单测入口
   `linear_mpk` 真跑通**。见 `docs/61-mpk-cute-hopper-ws-gemm.md`（MPK `f9eb70c`；纯源码走读 + 1 个
@@ -4614,12 +4659,13 @@
 - 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计
   （注：该 kernel 名 `eagle3_draft_chain_step_attn` 快照里 `grep` 零命中，**可能不可走**，须先核 demo
   引用是否指向别处）；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或 SM100 专属布局的其余面
-  （`mma_traits_sm100.hpp` 的 `tmem_e_frg`/`tmem_frg_ws` 稀疏元数据与 WS 布局、
-  `linear_fp8_1d2d_sm100_cute_tie` 想表达的 CuTe 解构路径、`fp8_group_gemm_sm100.cuh` 的 SF 段逐行）
-  逐行。**Hopper CuTe WS GEMM device 家族已由 P147-1/`docs/61` 补掉**（顺带补掉 `docs/30` §5 只从 wrapper
-  视角的缺口）；**CUTLASS scale-factor TMEM trait 已由 P146-1/`docs/60` 补掉**；TMEM 列布局 / UTCCP 重排
-  已由 P145-1/`docs/59` 补掉；TMA 版 SMEM 布局已由 P144-1/`docs/58` 补掉；SM100 共享原语层已由
-  P143-1/`docs/57` 补掉。
+  （`linear_fp8_1d2d_sm100_cute_tie` 想表达的 CuTe 解构路径、`fp8_group_gemm_sm100.cuh` 的 SF 段逐行、
+  稀疏 `MMA_Traits` 的 `sparse_smem_desc`/`tcgen05.mma.sp` 与 E 的硬件编码、WS 指令落地后的对照）
+  逐行。**`mma_traits_sm100.hpp` 的 `tmem_e_frg`/`tmem_frg_ws` 稀疏元数据与 WS 布局已由 P148-1/`docs/62`
+  补掉**；**Hopper CuTe WS GEMM device 家族已由 P147-1/`docs/61` 补掉**（顺带补掉 `docs/30` §5 只从
+  wrapper 视角的缺口）；**CUTLASS scale-factor TMEM trait 已由 P146-1/`docs/60` 补掉**；TMEM 列布局 /
+  UTCCP 重排已由 P145-1/`docs/59` 补掉；TMA 版 SMEM 布局已由 P144-1/`docs/58` 补掉；SM100 共享原语层
+  已由 P143-1/`docs/57` 补掉。
 - 此前：**P146-1 完成（1/1）**。补掉 `docs/59` §8 **点名的最直接下一步**（CUTLASS
   `mma_traits_sm100.hpp` 里 block-scaled scale-factor 的 TMEM 布局 trait），把 MPK 手工路径与 CUTLASS
   高层路径在「scale 落进 TMEM 的哪个槽、指令怎么找到它」上并置。见
