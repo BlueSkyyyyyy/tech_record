@@ -1,0 +1,102 @@
+# P40-1 小实验原始输出：L2 常驻（persisting L2 / access policy window）作为损失三的中间量落点
+# date: 2026-10-13T08:43:25+08:00
+# cmd: scripts/lab.sh exec "bash harness/l2_residency.sh"  (DEV=3)
+# gpu: H100 80GB HBM3 x8, sm90, driver 570.211.01（固定在空闲 device 3）
+# cuda: nvcc release 13.2, V13.2.78
+# note: X=Z=256 MB 流式数组, polluter=512 MB, 中间量 y 尺寸 S=4..64 MB, L2=50 MB / maxPersistingL2=31 MB
+== A. K2-only 计时表（S × {base,pollute,persist,pfull}，iters=30）==
+== device ==
+NVIDIA H100 80GB HBM3, sm_90, SMs=132, L2=50 MB, maxPersistingL2=31 MB, maxWindow=128 MB
+grid=1056 (threads=256, occupancy-capped)
+iters=30, X=256 MB, Z=256 MB, polluter=512 MB, 中间量 S 扫描 4..64 MB（L2=50 MB）
+
+      | K2ms pollute | base/pollute | persist/pollute | pfull/pollute
+------+--------------+--------------+-----------------+---------------
+   4 MB |       0.0090 |        0.748 |           0.900 |         1.502
+   8 MB |       0.0119 |        0.677 |           0.829 |         1.532
+  16 MB |       0.0181 |        0.651 |           0.864 |         1.541
+  32 MB |       0.0301 |        0.828 |           1.468 |         1.469
+  48 MB |       0.0421 |        0.947 |           2.171 |         2.154
+  64 MB |       0.0539 |        0.970 |           2.200 |         2.205
+
+correctness (S=16MB): max|z_base - z_persist| = 0.000e+00 (expect 0)
+
+>> 读法（K2-only 耗时，基准 = pollute；y 命中 L2 越快）：
+>>  base/pollute < 1：不插 polluter 时 y 靠「最近性」留在 L2；polluter 把它逐出。
+>>  persist：carveout=min(S,maxPersist)，给 y 挂 accessPolicyWindow(persisting)。
+>>  pfull  ：carveout=maxPersist（整块 persisting 都划走）——测过度预留的代价。
+>>  真实 DRAM 读字节 / L2 命中率见 `l2_residency one <mode> <S_MB>` 的 ncu 采样。
+
+== B. ncu：K2 读中间量 y 的 DRAM 读字节 + L2 命中率（--replay-mode application --cache-control none）==
+S=4 base
+    dram__bytes_read.sum             Kbyte         6.66
+    lts__t_sector_hit_rate.pct           %        95.93
+S=4 pollute
+    dram__bytes_read.sum             Mbyte         4.20
+    lts__t_sector_hit_rate.pct           %        55.71
+S=4 persist
+    dram__bytes_read.sum             Mbyte         3.20
+    lts__t_sector_hit_rate.pct           %        62.81
+S=4 pfull
+    dram__bytes_read.sum             Mbyte         3.08
+    lts__t_sector_hit_rate.pct           %        64.43
+S=8 base
+    dram__bytes_read.sum             Kbyte         6.66
+    lts__t_sector_hit_rate.pct           %        96.37
+S=8 pollute
+    dram__bytes_read.sum             Mbyte         8.40
+    lts__t_sector_hit_rate.pct           %        53.57
+S=8 persist
+    dram__bytes_read.sum             Mbyte         5.99
+    lts__t_sector_hit_rate.pct           %        62.51
+S=8 pfull
+    dram__bytes_read.sum             Mbyte         6.77
+    lts__t_sector_hit_rate.pct           %        60.87
+S=16 base
+    dram__bytes_read.sum             Mbyte         1.68
+    lts__t_sector_hit_rate.pct           %        89.92
+S=16 pollute
+    dram__bytes_read.sum             Mbyte        16.79
+    lts__t_sector_hit_rate.pct           %        51.98
+S=16 persist
+    dram__bytes_read.sum             Mbyte        11.88
+    lts__t_sector_hit_rate.pct           %        61.68
+S=16 pfull
+    dram__bytes_read.sum             Mbyte        11.85
+    lts__t_sector_hit_rate.pct           %        62.41
+S=32 base
+    dram__bytes_read.sum             Mbyte        24.82
+    lts__t_sector_hit_rate.pct           %        60.60
+S=32 pollute
+    dram__bytes_read.sum             Mbyte        33.56
+    lts__t_sector_hit_rate.pct           %        51.20
+S=32 persist
+    dram__bytes_read.sum             Mbyte        28.60
+    lts__t_sector_hit_rate.pct           %        57.28
+S=32 pfull
+    dram__bytes_read.sum             Mbyte        28.70
+    lts__t_sector_hit_rate.pct           %        57.38
+S=48 base
+    dram__bytes_read.sum             Mbyte        48.06
+    lts__t_sector_hit_rate.pct           %        52.72
+S=48 pollute
+    dram__bytes_read.sum             Mbyte        50.34
+    lts__t_sector_hit_rate.pct           %        51.12
+S=48 persist
+    dram__bytes_read.sum             Mbyte        50.06
+    lts__t_sector_hit_rate.pct           %        52.86
+S=48 pfull
+    dram__bytes_read.sum             Mbyte        50.07
+    lts__t_sector_hit_rate.pct           %        52.95
+S=64 base
+    dram__bytes_read.sum             Mbyte        66.61
+    lts__t_sector_hit_rate.pct           %        51.43
+S=64 pollute
+    dram__bytes_read.sum             Mbyte        67.12
+    lts__t_sector_hit_rate.pct           %        51.02
+S=64 persist
+    dram__bytes_read.sum             Mbyte        67.10
+    lts__t_sector_hit_rate.pct           %        52.42
+S=64 pfull
+    dram__bytes_read.sum             Mbyte        67.10
+    lts__t_sector_hit_rate.pct           %        52.66

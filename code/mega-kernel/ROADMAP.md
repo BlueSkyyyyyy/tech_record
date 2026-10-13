@@ -893,6 +893,33 @@
       server**（`no CUDA-capable device`），须 server 设 CVD、client 不设；server 用独立 pipe 目录、
       实验后 `echo quit` 清理，仅影响 device 3。**本轮新增实验。**
 
+### P40 实验扩展 22：L2 常驻作为损失三的第三档落点（`docs/04-experiments.md` §29）
+
+- [x] **P40-1** 兑现 `docs/04` §17.7（P24-1）明确留的假设「若张量能整块驻留 L2（≤50 MB），eager 的
+      中间量往返可能命中 L2 而不落 DRAM——损失三在工作集超过 L2 时才充分显现」，并把「中间量的内存落点」
+      从已有的**寄存器**（P5-2 融合）/ **SMEM+DSM**（P29-1）/ **HBM**（P24-1）补上缺失的 **L2** 一档。
+      见 `docs/04-experiments.md` §29，源码 `src/l2_residency.cu`、脚本 `harness/l2_residency.sh`、
+      原始输出 `harness/l2_residency.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、
+      iters=30，X=Z=256 MB 流式、polluter=512 MB、中间量 `y` 尺寸 S=4..64 MB，H100 L2=50 MB /
+      maxPersistingL2=31 MB / maxWindow=128 MB）。序列 = `K1(读 x→写 y) → polluter(512MB 冲刷) → K2(读 y→写 z)`，
+      四模式公平对照 `base`（不插 polluter，y 靠最近性）/ `pollute`（插 polluter，y 落 HBM）/
+      `persist`（`cudaAccessPolicyWindow` persisting，carveout=min(S,31MB)）/ `pfull`（carveout=max 31MB）。
+      计时 K2-only + ncu `dram__bytes_read.sum`/`lts__t_sector_hit_rate.pct`。核心结论：
+      - **Q1 中间量在不在 L2 由「写读之间流过什么」决定，不是尺寸单独决定**：`base` 在 S≤16 MB 时 K2
+        几乎全命中 L2（DRAM 读 6.7 KB–1.7 MB、命中 90–96%），一插 512 MB polluter 立刻涨到**恰好 = S**、
+        命中 52%（y 被逐出）。
+      - **Q2 `persisting` 能保护但只部分且零和**：`persist` 把 K2 的 DRAM 读相对 `pollute` 降
+        **~23%（S=4）–30%（S=8/16）**（命中抬到 62%）；但 S≥32 MB 一旦超过 31 MB carveout 就**反噬**
+        （计时 1.47×→**2.20×**），而 `pfull`（carveout 拉满）即便 S 小也稳定慢 **~1.5×**——
+        **persisting 是拿普通 L2 换常驻 L2 的零和交易，应按中间量大小配、不该拉满**。
+      - `base` 的「免费 L2」有硬边界：S=32 MB 起退化（24.8/32 MB 从 DRAM）、S≥48 MB 等价 `pollute`。
+      判据：四模式都是 kernel-per-operator（K1/K2 两次 launch），谈的是中间量落点、不改 C 判据；
+      `base`/`persist` 的 `z` 逐位一致（max|Δ|=0）。**含义**：megakernel / MPK 让整图很多张量同时流经 L2
+      （= 「polluter 恒存在」），故「指望中间量留在 L2」是整图融合里**最不可依赖**的一档（31 MB 硬上限 +
+      与 normal 流量零和）——从内存层级解释了 MPK §5.3 为何用 **paged shared memory** 而非 L2、最稳的仍是
+      融合进寄存器（P5-2）与锁进 SMEM（P29-1）。踩坑：ncu 默认 `--cache-control=all` 会在 replay 前 flush L2，
+      首版三模式字节完全相同；须 `--replay-mode application --cache-control none`。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -915,7 +942,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P39-1 完成（1/1）**。补齐 `docs/04` §27.6 明确留的「**未测 MPS**（Multi-Process
+- 当前进度：**P40-1 完成（1/1）**。兑现 `docs/04` §17.7（P24-1）明确留的假设「若张量能整块驻留
+  L2（≤50 MB），eager 的中间量往返可能命中 L2 而不落 DRAM——损失三在工作集超过 L2 时才充分显现」，
+  把「中间量的内存落点」从已有的**寄存器**（P5-2 融合）/ **SMEM+DSM**（P29-1）/ **HBM**（P24-1）
+  补上缺失的 **L2** 一档。`docs/04-experiments.md` 新增 **§29**，源码 `src/l2_residency.cu`、脚本
+  `harness/l2_residency.sh`、原始输出 `harness/l2_residency.out.txt`（目标卡 H100/sm90、**固定空闲
+  device 3**、nvcc 13.2、iters=30，X=Z=256 MB 流式、polluter=512 MB、中间量 `y` 尺寸 S=4..64 MB，
+  H100 L2=50 MB / maxPersistingL2=31 MB）。序列 `K1(读x→写y)→polluter(512MB 冲刷)→K2(读y→写z)`，
+  四模式 `base`/`pollute`/`persist`(carveout=min(S,31MB))/`pfull`(carveout=max)。核心结论：
+  - **中间量在不在 L2 由「写读之间流过什么」决定，不是尺寸单独决定**：`base` 在 S≤16 MB 时 K2
+    几乎全命中 L2（DRAM 读 6.7 KB–1.7 MB、命中 90–96%），插 512 MB polluter 立刻涨到**恰好 = S**、命中 52%。
+  - **`persisting` 只部分保护且零和**：`persist` 相对 `pollute` 把 K2 的 DRAM 读降 **~23%（S=4）–30%
+    （S=8/16）**；S≥32 MB 超过 31 MB carveout 即**反噬**（计时到 **2.20×**），`pfull` 拉满 carveout
+    即便 S 小也稳定慢 **~1.5×**——persisting 是「普通 L2 ↔ 常驻 L2」的零和交易，应按中间量大小配。
+  - `base` 的「免费 L2」边界：S=32 MB 起退化、S≥48 MB 等价 `pollute`。判据不变（kernel-per-operator，
+    谈落点）；`base`/`persist` 的 `z` 逐位一致。踩坑：ncu 默认 `--cache-control=all` 会 replay 前 flush
+    L2，须 `--replay-mode application --cache-control none`。**本轮新增实验。**
+- 此前：**P39-1 完成（1/1）**。补齐 `docs/04` §27.6 明确留的「**未测 MPS**（Multi-Process
   Service）作为另一条隔离路线」尾巴，把 §27 的**进程内**共存（两条流 / green context）推进到**跨进程**
   维度：无 MPS 时不同进程的 kernel 不能真并发（驱动时分/抢占），MPS 才允许跨进程真并发并可用
   `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=P` 设「线程容量 / 可见 SM 上限」。`docs/04-experiments.md` 新增
@@ -1280,6 +1323,17 @@
      **至此「下一步」剩余可选方向全部完成**；随后 **P36-1/P37-1/P38-1/P39-1** 又各自补掉了
      `docs/04` 明留的尾巴（条件节点 `cwhile`、device graph launch、Green Contexts 分区、MPS 跨进程
      隔离），**全专题无遗留必做项**。
+- **本轮（P40-1）**：`docs/04-experiments.md` 新增 **§29**「L2 常驻：损失三的第三档中间量落点」——
+  兑现 §17.7（P24-1）的假设，把「中间量的内存落点」补上 **L2** 这一档（寄存器/SMEM+DSM/HBM 之外）。
+  源码 `src/l2_residency.cu`、脚本 `harness/l2_residency.sh`、原始输出 `harness/l2_residency.out.txt`
+  （目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、iters=30）。序列 `K1→polluter(512MB)→K2`、
+  四模式 `base`/`pollute`/`persist`/`pfull`、ncu 取 K2 的 DRAM 读字节 + L2 命中率。核心结论：
+  (1) 中间量的 L2 常驻由「写读之间流过什么」决定而非尺寸——`base` S≤16 MB 命中 90–96%、插 polluter
+  立刻涨到 = S（命中 52%）；(2) `persisting` 只降 DRAM 读 **~23–30%**、且超 31 MB carveout 即**反噬**
+  （**2.20×**），拉满 carveout（`pfull`）即便 S 小也慢 **~1.5×**——零和交易；(3) `base` 免费 L2 边界
+  在 S≈32 MB。含义：整图融合里「靠 L2 留中间量」最不可依赖，解释了 MPK §5.3 用 paged SMEM。
+  踩坑：ncu 默认 `--cache-control=all` 会 flush L2，须 `--replay-mode application --cache-control none`。
+  **本轮新增实验。**
 - **本轮（P39-1）**：`docs/04-experiments.md` 新增 **§28**「多租户共存隔离的第二条路线：MPS」——
   新源码 `src/mps_isolation.cu`、脚本 `harness/mps_isolation.sh`、原始输出 `harness/mps_isolation.out.txt`
   （目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2）。补 §27.6「未测 MPS」尾巴，把共存从「进程内

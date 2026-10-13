@@ -4181,3 +4181,142 @@ persist 进程打印的「可见 SM 数」随 cap 变化（`PERSIST dev=... SMs=
 - 未测：**cap 加在 victim 侧**、多 client（>2）、MPS 的 `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT`、
   与 Green Contexts 叠加；也未测 MPS 内 cluster/`smCoscheduledAlignment` 交互（§27.6 同一条尾巴）。
 - MPS 官方语义见 NVIDIA 文档 “Multi-Process Service”（`https://docs.nvidia.com/deploy/mps/index.html`）。
+
+## 29. L2 常驻：损失三的第三档中间量落点（寄存器 → L2 → HBM）（P40-1）
+
+> §17（P24-1）用 ncu 直接量了损失三（中间张量的 HBM 往返）的字节，其 §17.7 明留一条假设：
+> 「若张量能整块驻留 L2（≤50 MB），eager 的中间量往返可能命中 L2 而不落 DRAM，损失三会小于本节
+> 数字——megakernel 的损失三在『工作集超过 L2』时才充分显现。」本节把这条假设测出来，并回答：
+> 中间量除了「寄存器」（P5-2 融合）与「HBM」（P24-1 损失三）之外，能不能落在 **L2** 这一档？
+> 源码 `src/l2_residency.cu`、脚本 `harness/l2_residency.sh`、原始输出 `harness/l2_residency.out.txt`
+> （目标卡 H100 / sm90，**固定空闲 device 3**，nvcc 13.2，iters=30）。
+
+### 29.1 背景与问题
+
+中间量在内存层级里的落点，本专题已测到两档：
+
+- **寄存器**：把算子融合进同一个 kernel，中间量根本不落内存（P5-2 §2、P24-1 §17 的 `fused`，8 B/elem 恒定）；
+- **HBM**：kernel-per-operator 每个算子把中间量写回 HBM、下个算子再读回（P24-1 §17，`eager` 字节 ≈ `Q`×全张量往返）。
+
+中间还有一档没测：**L2**。H100 有 **50 MB** L2——足够装下小模型一个 batch 的若干中间张量。如果中间量
+在一次写、一次读之间能留在 L2，那么「损失三」的 HBM 往返本可以省掉。§17.7 的假设正是这个。但
+L2 是**共享、按需分配、可被任何并发流量逐出**的：真实 serving（尤其 megakernel 让整图很多张量同时
+流经 L2）里，写读之间总会流过别的张量。于是关键问题不是「尺寸够不够装」，而是：
+
+- **Q1**：中间量的 L2 常驻，是被「尺寸」决定，还是被「写读之间流过什么」决定？
+- **Q2**：`cudaAccessPolicyWindow` 的 **persisting**（常驻）机制能不能把它保护住？代价是什么？
+
+### 29.2 方法
+
+构造一条 kernel-per-operator 序列（三算子，中间量 `y` 尺寸 `S` 可变）：
+
+```
+K1:  读 x(256 MB)  → 写 y(S)
+polluter: 流式读+写 512 MB      ← 模拟「写读之间流过的并发流量」，把 L2 冲干净
+K2:  读 y(S)       → 写 z(256 MB)
+```
+
+`K2` 从哪读 `y` 就是「中间量落在哪一档」的判据。四个模式：
+
+| 模式 | polluter | 中间量 `y` 的 L2 处理 | 语义 |
+|---|---|---|---|
+| `base` | 不插 | 无 | 靠「最近性」自然留在 L2（写读紧邻） |
+| `pollute` | 插 | 无 | `y` 被逐出 → 落 HBM（= 损失三） |
+| `persist` | 插 | `accessPolicyWindow` persisting，carveout=`min(S, maxPersist)` | 按中间量大小配常驻区（合理用法） |
+| `pfull` | 插 | 同上，但 carveout=`maxPersist`（31 MB 全划走） | 测「过度预留常驻区」的代价 |
+
+L2 常驻用标准 API：`cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, bytes)` 划出 persisting set-aside，
+`cudaStreamSetAttribute(st, cudaStreamAttributeAccessPolicyWindow, &w)` 给 `y` 挂窗口
+（`hitProp=cudaAccessPropertyPersisting`、`missProp=cudaAccessPropertyStreaming`、`hitRatio=1.0`），
+模式切换时用 `cudaCtxResetPersistingL2Cache()` 清干净。H100 上
+`cudaDevAttrMaxPersistingL2CacheSize` = **31 MB**、`cudaDevAttrMaxAccessPolicyWindowSize` = 128 MB。
+
+- **计时**：K2-only（每 iter 先跑 pre、再用一对 CUDA event 只夹 K2），iters=30；基准是 `pollute`（= 中间量
+  必落 HBM），`base/pollute`、`persist/pollute` 越低说明 `y` 越命中 L2。
+- **字节/命中率**：ncu `-k regex:l2_k2` 取 `dram__bytes_read.sum`（K2 读 `y` 的真实 DRAM 字节，标称 `S`）
+  与 `lts__t_sector_hit_rate.pct`（L2 读命中率）。
+
+> **关键踩坑（首版就栽在这）**：ncu 默认 `--cache-control=all` 会在**每次 replay 前 flush L2**，三个模式
+> 的 DRAM 读字节在第一版里**完全一样（都 = S）**，看不出任何常驻差异。必须显式
+> `--replay-mode application --cache-control none`，让每个 pass 重放整个 app、保留自然的 L2 演化，才看得到。
+
+### 29.3 原始结果
+
+**计时表**（K2-only，ms；比值相对 `pollute`）：
+
+```text
+      | K2ms pollute | base/pollute | persist/pollute | pfull/pollute
+------+--------------+--------------+-----------------+---------------
+   4 MB |       0.0090 |        0.748 |           0.900 |         1.502
+   8 MB |       0.0119 |        0.677 |           0.829 |         1.532
+  16 MB |       0.0181 |        0.651 |           0.864 |         1.541
+  32 MB |       0.0301 |        0.828 |           1.468 |         1.469
+  48 MB |       0.0421 |        0.947 |           2.171 |         2.154
+  64 MB |       0.0539 |        0.970 |           2.200 |         2.205
+```
+
+**ncu：K2 读 `y` 的 DRAM 字节 / L2 命中率**（标称 `S` 即「`y` 全从 HBM 读」的上限）：
+
+```text
+   S  | base DRAM read (hit%) | pollute DRAM read (hit%) | persist DRAM read (hit%) | pfull DRAM read (hit%)
+------+-----------------------+--------------------------+--------------------------+-----------------------
+  4MB | 6.66 KB    (95.9%)    | 4.20 MB    (55.7%)       | 3.20 MB    (62.8%)       | 3.08 MB    (64.4%)
+  8MB | 6.66 KB    (96.4%)    | 8.40 MB    (53.6%)       | 5.99 MB    (62.5%)       | 6.77 MB    (60.9%)
+ 16MB | 1.68 MB    (89.9%)    | 16.79 MB   (52.0%)       | 11.88 MB   (61.7%)       | 11.85 MB   (62.4%)
+ 32MB | 24.82 MB   (60.6%)    | 33.56 MB   (51.2%)       | 28.60 MB   (57.3%)       | 28.70 MB   (57.4%)
+ 48MB | 48.06 MB   (52.7%)    | 50.34 MB   (51.1%)       | 50.06 MB   (52.9%)       | 50.07 MB   (53.0%)
+ 64MB | 66.61 MB   (51.4%)    | 67.12 MB   (51.0%)       | 67.10 MB   (52.4%)       | 67.10 MB   (52.7%)
+```
+
+正确性：`base` 与 `persist` 的 `z` 逐位一致（S=16MB `max|Δ|=0.000e+00`）——四种模式**只改中间量的
+内存落点，不动数值**（persisting 是纯性能提示）。
+
+### 29.4 读法
+
+1. **中间量在不在 L2，由「写读之间流过什么」决定，而不是尺寸单独决定**（Q1）。`base` 在 `S≤16 MB`
+   时 K2 几乎全命中 L2（DRAM 读 6.7 KB–1.7 MB、命中 90–96%），只要 K1 后紧接 K2（中间没有别的流量）；
+   一插 512 MB 的 polluter（`pollute`），K2 的 DRAM 读立刻涨到**恰好 = S**、命中掉到 52%——`y` 被逐出。
+   即「写读紧邻」本身就是一种隐式的 L2 常驻，一旦有并发流量就失效。
+2. **`persisting` 窗口能保护，但只部分**（Q2）：`persist`（carveout 按 `S` 配）把 K2 的 DRAM 读相对
+   `pollute` 降 **~23%（S=4）到 ~30%（S=8/16）**，命中率抬到 62%——**方向对、量级有限**。原因：能常驻
+   的只有 31 MB carveout（H100 上限 = 50 MB L2 的 62%），且窗口内所有行都要挤这块小产区。
+3. **超出 carveout 后 `persisting` 反噬**：`S≥32 MB` 时 `persist` 相对 `pollute` **更慢**（32 MB→1.47×、
+   48 MB→**2.17×**、64 MB→**2.20×**）——中间量装不进常驻区却在里面反复换入换出，比直接走 HBM 还差。
+   **损失三在 `S` 超过 persisting carveout 后无可回避**（对上 §17.7 的假设，且给出精确边界）。
+4. **过度预留 carveout 本身有代价**（`pfull`）：即便 `S` 很小（4–16 MB）、匹配用法（`persist`）已经
+   在赚，把 31 MB carveout 全划走的 `pfull` 却 **稳定慢 ~1.5×**——因为它压缩了留给普通（normal）访问
+   的 L2，`x`/`z`/polluter 的流式流量吃不到 L2。**persisting 是拿普通 L2 换常驻 L2 的零和交易**，
+   该按中间量大小配、不该拉满。
+5. **`base` 的「免费 L2」有硬边界**：`S=32 MB` 起 `base` 也退化（K2 从 DRAM 读 24.8 / 32 MB），
+   `S≥48 MB` 完全等价于 `pollute`（≈ 50–67 MB 全从 HBM）。**只有当中间量 ≤ ~L2/3 且写读之间无干扰时，
+   「留在 L2」才近乎免费。**
+
+### 29.5 与判据 / MPK / 生产案例的关系
+
+- **它补的是「中间量的内存落点」这一维**，与损失三（P24-1 §17）互补：中间量共四档 =
+  **寄存器**（P5-2 融合，`fused` 8 B/elem）→ **SMEM/DSM**（P29-1 §18，片上显式管理）→
+  **L2**（本节，硬件自动/可提示，≤31 MB 且与普通流量争）→ **HBM**（P24-1，损失三）。
+- **对 megakernel 的含义**：megakernel / MPK 的价值恰恰是让**整图很多张量同时流经 L2**
+  （`docs/09` 的多算子图、MPK §5 的跨 task 流水），也就是**「polluter 恒存在」**的场景——因此「指望中间量
+  自然留在 L2」在整图融合里是**最不可依赖**的一档；`persisting` 有硬上限（31 MB = L2 的 62%）且与
+  normal 流量零和。这从**内存层级**角度解释了 MPK §5.3（快照行 1312–1325）为何用 **paged shared
+  memory**（片上、可显式管理、不与他人争）而不是依赖 L2，也解释了为什么最稳的仍是**融合进寄存器**
+  （P5-2/P24-1）与**锁进 SMEM**（P29-1）。
+- **判据（C1–C5）**：四模式都是 kernel-per-operator（K1、K2 两次 launch），本节谈的是**中间量的落点**，
+  不改 C 判据；`fused`（寄存器档）才满足 C1–C3。判据映射同 §17。
+- **与生产案例**：DeepGEMM mega 家族把中间量锁在**寄存器/SMEM**并按 `Kstages` 流水（`docs/07` §1.2），
+  而非指望 L2；MPK 的 intermediate 分页也是显式 SMEM 而非 L2——本节给出量化理由：**在整机融合里，
+  L2 常驻要么免费但脆弱（无干扰才成立）、要么受 31 MB 硬上限且零和**。
+
+### 29.6 局限与踩到的坑
+
+- **合成负载**：K1/K2 是逐元素 `float4`，polluter 是 512 MB 流式读写；倍数以**量级/方向**读。
+- **ncu 口径**：必须 `--replay-mode application --cache-control none`（默认 `--cache-control all` 会 flush L2，
+  测不到常驻差异，见 §29.2）；每次采样仍受 replay 影响，命中率绝对值为参考、**跨模式相对关系**是结论。
+- **只测单窗口、单 stream、单一 persisting 段**：未测多窗口（`cudaStreamSetAttribute` 每流一个窗口）、
+  多 stream 各自窗口、`hitRatio<1` 的概率化分区、以及 `cudaMemAdvise`/`cudaMemPrefetchAsync` 等其它
+  张量放置手段；`S` 只扫 6 点。
+- **H100 参数**：`maxPersistingL2CacheSize`=31 MB、L2=50 MB；不同代 GPU（A100 40 MB L2、B200 更大）
+  的边界会移动，结论的**形状**（免费 L2 脆弱、persisting 部分且零和、超 carveout 反噬）应保持。
+- **`pfull` 与 `persist` 在大 `S` 时曲线重合**（都超 carveout，保护失效），属预期。
+- device 3（固定空闲）；计时绝对值随驱动/频率略变，比值稳定。
