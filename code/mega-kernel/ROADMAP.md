@@ -3690,6 +3690,43 @@
   4 条必要条件系综合推断；`MAX_TOKENS=3` 分歧未独立复现；demo 注释落差只记不判。
   **本轮新增增量。**
 
+### P133 Eagle3 权重/中间张量装配层走读：shuffle 布局 / attach 缓存 / pad→argmax→d2t 契约链（`docs/47-mpk-eagle3-weight-prep.md`）
+
+- [x] **P133-1** 补掉 `docs/46`（P132-1）**§9「参考坐标」里列出、正文却一直没打开**的
+  `Eagle3Builder` 前三步——`_prepare_weights:119`、`_attach_weights:190`、
+  `_allocate_intermediates:220`，即「下一步候选」第二条 `Eagle3Builder` 尚未走的
+  `_prepare_weights`/`_attach_weights`。见 `docs/47-mpk-eagle3-weight-prep.md`
+  （快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与 `docs/06`–`docs/46` 同快照；
+  **纯源码走读（资料分析），本轮无新实验**；Eagle3 device 头只被 blackwell `task_header.cuh` include，
+  SM100 专属、本机不可执行）。三条 headline：
+  - **(A) `_prepare_weights` 是布局契约层、不是数值层**：把 `q/k/v` 用
+    `shuffle_tensors([q,k,v], num_kv_heads, 0)`（`models/utils.py:50-128`，纯 `torch.empty`+切片、
+    无算数）按 GQA KV 头交错成 fused 布局 `[Q_g0,K_0,V_0,Q_g1,…]`（输入维 `2H`，对应
+    `concat([embed_normed,hidden_normed])` + `fused_outdim_qkv`）；`gate/up` 用
+    `shuffle_tensors([gate,up], rmsnorm_num_tasks//2, 0)` 交错，组数 = `grid_for_rmsnorm_linear_layer(2*I)//2`
+    与下游 `silu_mul` grid `gateup_num_tasks//2` 一一对应；`d2t` 转 int64 + contiguous，约定
+    `target_id = hot_id + d2t[hot_id]`（`eagle3_ops.cuh:85-88`）。
+  - **(B) 三处硬编码 padding/dummy 是上游 task 接口的最小满足**：`lm_head` 32000 行补零到 **32256
+    = 96×336**，同时服务「`grid_for_rmsnorm_linear_layer` 返回 96 整除」与「336 行 bf16 = 672 B =
+    42×16 B 的 OUTPUT TMA 对齐」；`paged_attention_layer` 硬断言 `q_norm/k_norm` 非空
+    （`persistent_kernel.py:1345-1352`），故塞 `(head_dim,)` 全零 dummy + `enable_qk_norm=False`；
+    paged draft KV cache 是 `(max_num_pages,page_size,num_kv_heads,head_dim)` 的**自持独立** buffer。
+  - **(C) `_attach`/`_new` 用一个 `_attach_cache` 兼「去重 + 张量注册表」**，`_attach` 把 torch tensor
+    存 `_kept_tensors` 防 GC（常驻 kernel 存裸 GPU 指针，`attach_input:772-774` 注释）；demo 从
+    `eagle3._attach_cache["eagle3_all_draft_ids"]` 取 scatter 的 dst（demo `:882`）。
+    **最有价值的隐藏契约链（§5）**：`_prepare_weights` 制造全零 padding（`:155-174`）→ builder 调
+    `argmax_partial_layer` **不传 `vocab_size`**（`:425-429`）故补零行（logit=0）在真实 logits 全负时
+    会获胜 → 下游 `eagle3_d2t_remap_layer(draft_vocab_real=32000)` 在 device 侧
+    `eagle3_d2t_remap_kernel`（`eagle3_ops.cuh:116-120`）对 `hot_id≥32000` 写 **sentinel 0** 兜底。
+    三处任一改动都要同时核对另外两处。
+  判据：**本文贡献 C3 的「权重/中间量清单与布局契约」**，与 `docs/46`（C3 范围/分支）、`docs/44`
+  （commit/d2t device 身体）互补。配套博客 post `mega-kernel-48-mpk-eagle3-weight-prep`（weight 49）
+  并更新 `mega-kernel-00-index` 第 48 项。P133-1 新留尾巴（文档 §7）：未构建；`shuffle_tensors` 布局
+  未与 device 端 QKV 解包逐元素对照；`draft_vocab_size`/`intermediate_size` 取自注释/断言未加载真实
+  ckpt；`_allocate_intermediates` buffer 生命周期/alias 未做数据流分析；§5 契约链是静态推断
+  （「argmax 选中补零行」需真实 logits 全负这一前提，未构造实例证明）；未与其它 family builder 对照。
+  **本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3960,7 +3997,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P132-1 完成（1/1）**。补掉 `docs/40`/`docs/43`/`docs/44` 一直没打开的「谁把 K 个 draft
+- 当前进度：**P133-1 完成（1/1）**。补掉 `docs/46` §9「参考坐标」里列出、正文却没打开的
+  `Eagle3Builder` 前三步（`_prepare_weights:119`/`_attach_weights:190`/`_allocate_intermediates:220`），
+  即「下一步候选」第二条 `Eagle3Builder` 尚未走的 `_prepare_weights`/`_attach_weights`。见
+  `docs/47-mpk-eagle3-weight-prep.md`（快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 专属、本机
+  不可执行）。三条 headline：**(A)** `_prepare_weights` 是**布局契约层**——`shuffle_tensors`
+  按 GQA KV 头 / 按 rmsnorm-linear 任务块把 QKV、gate/up 交错成 fused 布局（纯 `torch.empty`+切片、
+  无算数），`d2t` 的 `target_id = hot_id + d2t[hot_id]`；**(B)** 三处硬编码 padding/dummy 是上游
+  task 接口的最小满足——`lm_head` 32000→32256（96×336，服务 96 grid 整除 + 336 行 16 B TMA 输出对齐）、
+  `paged_attention_layer` 硬断言需要的 dummy qk-norm、自持 paged draft KV cache；**(C)** `_attach`/`_new`
+  用同一 `_attach_cache` 兼去重层与张量注册表（裸 GPU 指针须 `_kept_tensors` 防 GC）。并接出**最有价值的
+  隐藏契约链**（§5）：补零 → `argmax` 不传 `vocab_size` 允许 padding 获胜 → `d2t_remap` 对
+  `hot_id≥32000` 写 sentinel 0 兜底。判据贡献 C3 的「权重/中间量清单与布局契约」，与 `docs/46`/`docs/44`
+  互补。配套博客 post `mega-kernel-48-mpk-eagle3-weight-prep`（weight 49）并更新 `mega-kernel-00-index`
+  第 48 项。P133-1 新留尾巴见文档 §7（未构建、shuffle 布局未与 device 端 QKV 解包逐元素对照、
+  数值取自注释/断言未加载真实 ckpt、buffer 生命周期未做数据流分析、§5 契约链系静态推断）。
+- 此前：**P132-1 完成（1/1）**。补掉 `docs/40`/`docs/43`/`docs/44` 一直没打开的「谁把 K 个 draft
   step 拼成一张图」，也即「下一步候选」第一条——`eagle3_commit` 的 K>1「proper mbt-parallel chain」
   缺口（`eagle3_ops.cuh:217` 自陈未实现）的静态追述。见 `docs/46-mpk-eagle3-draft-loop.md`
   （快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 专属、本机不可执行）。三条 headline：
@@ -3976,8 +4028,9 @@
   并更新 `mega-kernel-00-index` 第 47 项。P132-1 新留尾巴见文档 §8（未构建、「有效行=slot 0」系推断、
   4 条必要条件系推断、slot-0 分歧未复现、注释落差只记不判）。
 - 下一步候选：可继续走其一——`docs/35` §9 遗留的其它未走读相邻层（CUTLASS `collective_builder` 侧
-  QK/PV atom——`mla_sm100_2sm.cuh` 的 CUTLASS 内部，`docs/36` §8 明留）；或 `Eagle3Builder` 尚未走的
-  `_prepare_weights`/`_attach_weights` 与 FLAT-CACHE draft attention 设计的完整追述（`docs/46` §6 落差）；
+  QK/PV atom——`mla_sm100_2sm.cuh` 的 CUTLASS 内部，`docs/36` §8 明留）；或 `Eagle3Builder` 的
+  FLAT-CACHE draft attention 设计的完整追述（`docs/46` §6 落差；`_prepare_weights`/`_attach_weights`
+  已由 `docs/47` 补掉，余 flash-cache 单 kernel 与 `paged_attention_layer` 两套并存 design 的追述）；
   或 `docs/44` §10 仍余的 `smem_row` 内部与 `docs/07` §3.3 的 `norm_linear_hopper` 之外的融合层。
 - 此前：**P131-1 完成（1/1）**。补掉 `docs/37` §4（P123-1 对 SM100 norm/rope 只给摘要）、
   `docs/07` §3.1（只走 `rms_norm_hopper_impl`）与 `docs/44` §10（P130-1 明留「`rms_norm_sm100`/
