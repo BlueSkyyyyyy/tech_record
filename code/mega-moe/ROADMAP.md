@@ -1678,6 +1678,43 @@
       430.3 GB/s。**设备 PASS=20 / Python PASS=21 / 0 FAIL**。配套博客
       `content/posts/mega-moe-64-deepep-bucket-collectives`（索引页新增第 64 篇）。
 
+### P55 增量（opt-in，补齐所有 DeepEP kernel 篇目的「语义规范」层）
+
+- [x] **P55-1** **DeepEP 的 dispatch/combine 参考实现（语义规范）与流量/基准生成器**
+      （`deep_ep/utils/refs.py`；`deep_ep/utils/gate.py`；`deep_ep/utils/testing.py`；
+      `deep_ep/utils/math.py`；`tests/utils/test_gate.py`）。前面第 7/48/51/52/53/58/59/61/63/64 篇
+      一直在拆 DeepEP 的 **kernel**，但它们**「算什么才对」的定义**从没系统讲过——本篇补上这层地基：
+      `deep_ep/utils/` 三个**纯 PyTorch** 模块。**架构无关、H100 真机可跑**（`refs.dispatch` 只用
+      torch 自带 NCCL 的 `all_to_all_single`，不碰 DeepEP C++/NCCL 设备 API；唯一障碍是
+      `import deep_ep` 的 `check_nccl_so()`，用 `sys.modules` 注入合成包 + stub `envs` 绕过）。
+      → `docs/65-deepep-refs-and-testing.md`（真实行号核对）：**`refs.dispatch:10-123`** 用「mask +
+      定长 `all_to_all_single`」精确复刻 DeepEP 语义——逐 dst rank 收集（`:63-81`，不属于该 rank 的
+      top-k 槽改 `-1`，故**同一 token 会发给多个 dst**）、`src_token_global_idx = rank*num_max + local`
+      （`:88-90`）、交换计数再交换数据（`:92-110`）、接收侧 `-=expert_start` + 越界 `-1`
+      （`:112-117`）；三大不变量（不展开 / 按 src 全局索引升序 / OOB=-1）。**`generate_pre_combine_data:126-153`**
+      的素数 `131071` 定种子 + `sin` 合成、**`ordered_accumulate:156-175`** 固定顺序 fp32 累加。
+      **`combine:177-243`** 的 `grouped_reduce:201-236`——组内 **stable sort**、沿 top-k **严格升序**
+      累加、结果写**组最右槽**、其余置零；三配置 hybrid/non-hybrid/disabled（`:237-240`）与 `bias`
+      语义（`:241`，docstring 强调 scaleout==1 时 `reduce_in_scaleup` T/F 仍因 bias 不等价）。
+      **`gate.py`**：`generate_rank_count:32-113`（特殊 rank=0、`upper_bound=int((R-1)/ratio)+1`、
+      `must_mask=(a==R)` 全 rank 覆盖 token）、`generate_topk_idx:4-30`、precise/random 两种
+      `get_unbalanced_scores:176-180`；判据 `tests/utils/test_gate.py:39-40` 的
+      `practical_ratio=count[0]/min(count[1:])`、`inequality<1.02`。**`testing.py`**：`flush_l2_cache:14-23`
+      （256MB）、`bench:26-62`（event + 丢首样本 `:61`）、`bench_kineto:113-221`（两批取第二批 + 名字子串
+      + `ms/us` 换算 + chrome trace 周期聚合 + `EP_USE_NVIDIA_TOOLS` 旁路 `:145`）、`suppress_stdout_stderr:74-110`
+      （`dup2` 到 devnull）、`parse_num_bytes:224-239`；`math.py:5-9 calc_diff` 是**余弦相似度型**、
+      与 DeepGEMM 的归一化平方误差不同。H100 实测 `harness/exp_deepep_refs.py` + `.sh`/`.out.txt`
+      （真实源码路径加载，打印 sha256 `refs c5f551b4…`/`gate 5372e456…`/`testing 9a6f1407…`）：
+      ① `refs.dispatch` 8×H100 all_to_all（T=512,E=32,k=4）本 rank 收 1753 行、每来源计数
+      `[207,225,206,232,210,222,230,221]`，与**独立 oracle**（纯 Python 按 `(src,local)` 重建）
+      **逐项 PASS**（升序 / src / topk_idx / x 逐位 / 计数 / OOB=-1）；② `refs.combine` 五种配置
+      （三降约配置 + bias/bias_pair）与独立 oracle **逐位相等**，坐实 `(T,T)≠(T,F)` bias 效应、
+      `(F,T)` 被 assert 拒；③ `gate.py` precise 主扫 `E/r∈{4,8}×R∈{8,16}×k∈{1,2,4,6}×ratio∈{1,2,4}`
+      **98/98 PASS**（practical 与目标差 <10%、inequality<1.02）；④ `testing.py` `parse_num_bytes` 6 例 +
+      4 非法、`bench` 51.4us vs `bench_kineto` 47.7us、`flush_l2` 抖动（共享 GPU 离群点）、
+      `EP_USE_NVIDIA_TOOLS` 旁路、`suppress_stdout_stderr` 全 PASS。配套博客
+      `content/posts/mega-moe-65-deepep-refs-and-testing`（索引页新增第 65 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1702,8 +1739,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P54 各增量完成（P15-1…P41-1、P42-1…P54-1）。**
-  本轮 P54-1：新建 `docs/64-deepep-bucket-collectives.md`（+`src/deepep_bucket_copy_engine.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P55 各增量完成（P15-1…P41-1、P42-1…P55-1）。**
+  本轮 P55-1：新建 `docs/65-deepep-refs-and-testing.md`（+`harness/exp_deepep_refs.{py,sh,out.txt}`）
+  ——补上前面所有 DeepEP kernel 篇目（第 7/48/51/52/53/58/59/61/63/64）的**语义规范层**：
+  `deep_ep/utils/refs.py`（dispatch/combine 纯 PyTorch 参考实现）+ `gate.py`（精确不平衡流量生成器）
+  + `testing.py`（bench/bench_kineto/parse_num_bytes）+ `math.py`（`calc_diff` 是余弦相似度型，
+  与 DeepGEMM 的归一化平方误差不同）。核心「为什么」：DeepEP 的 dispatch **不做 ragged all-to-all**，
+  而是用「mask + 定长 `all_to_all_single`」精确复刻——同一 token 因 top-k 专家分散会**发给多个 dst**、
+  每份把不属于该 dst 的槽置 `-1`，接收侧再按 `src_token_global_idx` 升序（这就是全 DeepEP 的坐标约定）；
+  combine 的 `grouped_reduce` 用 **stable sort + 组内严格升序累加 + 结果落组最右槽**，三种降约配置
+  hybrid/non-hybrid/disabled 与 bias 语义（scaleout==1 时 T/F 仍因 bias 不等价）由此定义。
+  **H100 真机**（绕过 `import deep_ep` 的 `check_nccl_so`：`sys.modules` 注入合成包 + stub envs，
+  按文件路径 exec 真实源码并打印 sha256）：8 卡 `refs.dispatch` 真实 all_to_all 与**独立 oracle
+  逐项 PASS**（升序/src/topk_idx/x 逐位/计数/OOB=-1）；`refs.combine` 五配置与 oracle **逐位相等**；
+  `gate.py` precise 主扫 **98/98 PASS**；`testing.py` 5/5 PASS。配套博客
+  `content/posts/mega-moe-65-deepep-refs-and-testing`（索引页新增第 65 篇）。
+  上一轮 P54-1：新建 `docs/64-deepep-bucket-collectives.md`（+`src/deepep_bucket_copy_engine.cu`、
   `harness/exp_deepep_bucket.{sh,py,out.txt}`）——补上 DeepEP 里**与 EP all-to-all 并列的另一套通信设施**
   `BucketBuffer`（`all_gather`/`reduce_scatter`/`all_reduce`），MoE 训练同步专家梯度/优化器状态的原语。
   最大亮点：**纯 NVLink all-gather 不用任何 SM kernel**，完全交给硬件 copy engine——`copy_engine_push =

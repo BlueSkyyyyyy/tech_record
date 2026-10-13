@@ -1,0 +1,101 @@
+DeepEP dispatch/combine 参考实现（语义规范）+ 流量/基准生成器 —— H100 真机
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 nccl (2, 29, 7)
+DeepEP 源码：93eb6eb
+
+torch 2.12.0a0+0291f960b6.nv26.04.48445190  world=8
+DeepEP dispatch/combine 参考实现（语义规范）+ 流量/基准生成器 —— H100 真机
+================================================================================================
+### Part A：真实源码加载（sha256）
+  refs.py    sha256=c5f551b49e55b448…  dispatch/combine 参考实现
+  gate.py    sha256=5372e45604c53b0b…  流量/负载不均衡生成器
+  testing.py sha256=9a6f140744f53dc8…  bench/bench_kineto/parse_num_bytes
+  math.py    sha256=ed0dfb4bf9893769…
+  refs 函数: ['dispatch', 'generate_pre_combine_data', 'ordered_accumulate', 'combine']
+
+### Part B：refs.dispatch 语义（8×H100 NCCL all_to_all，num_tokens=512, E=32, k=4）
+  本 rank 收到 1753 行；全 grid 收到 1753 行；每来源 rank 计数 = [207, 225, 206, 232, 210, 222, 230, 221]
+  recv_src 前 8 个全局索引 = [0, 4, 10, 11, 13, 21, 29, 30]
+  [PASS] recv_src 升序
+  [PASS] recv_src == oracle
+  [PASS] recv_topk_idx == oracle
+  [PASS] recv_x == oracle
+  [PASS] num_recv_tokens_per_rank == oracle
+  [PASS] 越界专家被置 -1
+  [PASS] recv_topk_weights 形状/有限
+
+  [PASS] hybrid    (local=T, scaleup=T)  输出 (64, 32) torch.bfloat16  与 oracle 逐位相等=True
+  [PASS] non-hybrid(local=T, scaleup=F)  输出 (64, 32) torch.bfloat16  与 oracle 逐位相等=True
+  [PASS] multi-red-disabled(F,F)         输出 (64, 32) torch.bfloat16  与 oracle 逐位相等=True
+  [PASS] hybrid + bias                   输出 (64, 32) torch.bfloat16  与 oracle 逐位相等=True
+  [PASS] hybrid + bias_pair              输出 (64, 32) torch.bfloat16  与 oracle 逐位相等=True
+  scaleout=1 下 (local,scaleup)=(T,T) vs (T,F) 不同 = True（文档所述 bias 效应）
+  [PASS] (F,T) 非法组合被 assert 拒绝
+
+### Part D：流量/负载不均衡生成器 gate.py（判据镜像 tests/utils/test_gate.py）
+  --- generate_topk_idx：反推 rank_count ---
+  [PASS] generate_topk_idx 反推 rank_count 逐元素一致
+  [PASS] 非法 rank_count（和 != k）被 assert 拒绝
+  --- get_unbalanced_scores 主扫（precise 检查 ratio<10% & 其余 rank 不平等<1.02）---
+  [PASS] precise E/r=4 R= 8 k=1 ratio=1.0: practical=1.000 inequality=1.000
+  [PASS] precise E/r=4 R= 8 k=1 ratio=2.0: practical=2.002 inequality=1.000
+  [PASS] precise E/r=4 R= 8 k=1 ratio=4.0: practical=4.000 inequality=1.002
+  [PASS] precise E/r=4 R= 8 k=2 ratio=1.0: practical=1.001 inequality=1.000
+  [PASS] precise E/r=4 R= 8 k=2 ratio=2.0: practical=2.000 inequality=1.000
+  [PASS] precise E/r=4 R= 8 k=2 ratio=4.0: practical=3.999 inequality=1.001
+  [PASS] precise E/r=4 R= 8 k=4 ratio=1.0: practical=1.000 inequality=1.000
+  [PASS] precise E/r=4 R= 8 k=4 ratio=2.0: practical=2.000 inequality=1.000
+  [PASS] precise E/r=4 R= 8 k=4 ratio=4.0: practical=3.997 inequality=1.000
+  [PASS] precise E/r=4 R= 8 k=6 ratio=1.0: practical=1.000 inequality=1.000
+  [PASS] precise E/r=4 R= 8 k=6 ratio=2.0: practical=2.000 inequality=1.000
+  [PASS] precise E/r=4 R= 8 k=6 ratio=4.0: practical=3.996 inequality=1.000
+  [PASS] precise E/r=4 R=16 k=1 ratio=1.0: practical=1.000 inequality=1.000
+  [PASS] precise E/r=4 R=16 k=1 ratio=2.0: practical=1.996 inequality=1.000
+  [PASS] precise E/r=4 R=16 k=1 ratio=4.0: practical=3.997 inequality=1.002
+  [PASS] precise E/r=4 R=16 k=2 ratio=1.0: practical=1.001 inequality=1.001
+  [PASS] precise E/r=4 R=16 k=2 ratio=2.0: practical=2.001 inequality=1.001
+  [PASS] precise E/r=4 R=16 k=2 ratio=4.0: practical=3.999 inequality=1.001
+  [PASS] precise E/r=4 R=16 k=4 ratio=1.0: practical=1.001 inequality=1.000
+  [PASS] precise E/r=4 R=16 k=4 ratio=2.0: practical=2.001 inequality=1.000
+  [PASS] precise E/r=4 R=16 k=4 ratio=4.0: practical=4.000 inequality=1.001
+  [PASS] precise E/r=4 R=16 k=6 ratio=1.0: practical=1.000 inequality=1.000
+  [PASS] precise E/r=4 R=16 k=6 ratio=2.0: practical=2.000 inequality=1.000
+  [PASS] precise E/r=4 R=16 k=6 ratio=4.0: practical=4.000 inequality=1.000
+  [PASS] precise E/r=8 R= 8 k=1 ratio=1.0: practical=1.000 inequality=1.000
+  [PASS] precise E/r=8 R= 8 k=1 ratio=2.0: practical=2.002 inequality=1.000
+  [PASS] precise E/r=8 R= 8 k=1 ratio=4.0: practical=4.000 inequality=1.001
+  [PASS] precise E/r=8 R= 8 k=2 ratio=1.0: practical=1.001 inequality=1.000
+  [PASS] precise E/r=8 R= 8 k=2 ratio=2.0: practical=2.000 inequality=1.000
+  [PASS] precise E/r=8 R= 8 k=2 ratio=4.0: practical=4.000 inequality=1.001
+  [PASS] precise E/r=8 R= 8 k=4 ratio=1.0: practical=1.000 inequality=1.000
+  [PASS] precise E/r=8 R= 8 k=4 ratio=2.0: practical=2.000 inequality=1.000
+  [PASS] precise E/r=8 R= 8 k=4 ratio=4.0: practical=3.999 inequality=1.001
+  [PASS] precise E/r=8 R= 8 k=6 ratio=1.0: practical=1.000 inequality=1.000
+  [PASS] precise E/r=8 R= 8 k=6 ratio=2.0: practical=2.000 inequality=1.000
+  [PASS] precise E/r=8 R= 8 k=6 ratio=4.0: practical=3.996 inequality=1.000
+  [PASS] precise E/r=8 R=16 k=1 ratio=1.0: practical=1.000 inequality=1.000
+  [PASS] precise E/r=8 R=16 k=1 ratio=2.0: practical=1.996 inequality=1.000
+  [PASS] precise E/r=8 R=16 k=1 ratio=4.0: practical=3.995 inequality=1.001
+  [PASS] precise E/r=8 R=16 k=2 ratio=1.0: practical=1.002 inequality=1.001
+  [PASS] precise E/r=8 R=16 k=2 ratio=2.0: practical=2.000 inequality=1.001
+  [PASS] precise E/r=8 R=16 k=2 ratio=4.0: practical=4.000 inequality=1.001
+  [PASS] precise E/r=8 R=16 k=4 ratio=1.0: practical=1.001 inequality=1.000
+  [PASS] precise E/r=8 R=16 k=4 ratio=2.0: practical=2.001 inequality=1.000
+  [PASS] precise E/r=8 R=16 k=4 ratio=4.0: practical=4.000 inequality=1.000
+  [PASS] precise E/r=8 R=16 k=6 ratio=1.0: practical=1.000 inequality=1.000
+  [PASS] precise E/r=8 R=16 k=6 ratio=2.0: practical=2.000 inequality=1.000
+  [PASS] precise E/r=8 R=16 k=6 ratio=4.0: practical=3.999 inequality=1.000
+  （precise 未达标数=0；random 模式按设计不校验）
+  → Part D: 98/98 PASS
+
+### Part E：基准/工具 testing.py
+  [PASS] parse_num_bytes 6 例: [1073741824, 67108864, 524288, 1048576, 2147483648, 1099511627776]
+  [PASS] parse_num_bytes 非法输入拒绝 4/4
+  [PASS] bench(no flush) avg/min/max = 51.4/50.9/52.0 us
+        bench(flush_l2) avg/min/max = 302.3/50.9/4814.6 us  (flush 多 488.2%)
+        bench_kineto("gemm") = 47.7 us
+  [PASS] EP_USE_NVIDIA_TOOLS=1 → bench_kineto 返回 (1, 1)
+  [PASS] suppress_stdout_stderr 进入换 stdout=True / 退出恢复=True
+  → Part E: 5/5 PASS
+
+NCCL version 2.29.7+cuda13.2
