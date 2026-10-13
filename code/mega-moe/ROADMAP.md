@@ -4450,6 +4450,26 @@
       CUDA 融合核的 **10×**（物化 fp32 中间张量）。配套博客
       `content/posts/mega-moe-154-moe-backward-activation-segment`（索引页新增第 154 篇）。
 
+### P145 增量（opt-in，把反向的 SwiGLU 段折进 dgrad 的 epilogue）
+
+- [x] **P145-1** **把反向的 SwiGLU 反向 + 激活梯度重量化折进 dgrad 的 epilogue**：承接 P144-1 的口子
+      （「把它折进邻近 GEMM 的 epilogue」），量字节账 + H100 真机输出侧原型。**为什么能折**：`d(act)` 唯一
+      消费者就是这一小段（wgrad 的 B、d1g 的 A 都吃 `d(gate)/d(up)`）；d2g 输出 D 必 bf16
+      （`csrc/apis/gemm.hpp:209`、`sm90_fp8_gemm_1d2d.hpp:81`），现实现 epilogue 是 `SM90_TMA_STORE_2D`
+      （`sm90_fp8_gemm_1d2d.cuh:437`）；SM100 侧 `epilogue_class` 机制已存在（`gemm.hpp:242-247`、
+      `epilogue_class.hpp:67-89` 的 `FP8QuantizationEpilogue`，但无 SwiGLU 反向 operator），SM90 拒绝
+      自定义 epilogue（`gemm.hpp:238` "Custom epilogues require SM100"）。**字节账**（d2g 输出形状
+      `[Σt=4096,I=2048]`）：现实现 10 B/元素 → 折叠 6 B/元素（省 `d(act)` 往返 4 B/元素、-40%）。
+      **H100(sm90) 真机**（`src/moe_backward_activation_fused.cu` +
+      `harness/exp_moe_backward_fused.{sh,py,out.txt}`）：① 正确性 `FUSED` vs `FRESH→独立段`
+      **FP8 字节 0/16777216、SF 0/524288**；② 算力扫描 kIters 0→768：`SEQ/FUSED` 恒 **1.057–1.317×**
+      （永不亏）、净节省 ~13–15us；③ 融合 epilogue 边际 `fused−fresh≈25us` 几乎不随算力变（本原型线程内
+      串行 → 最保守上界）；④ 真实 d2g anchor：event 125.7us/957 TFLOPS、`ncu` 109.3us / DRAM 读 180.9
+      写 15.3MB（≈1.79 TB/s、峰值 53%、余量 ~1.5 TB/s）；⑤ 预算：现实现 126+39=166us、折叠 126–136us，
+      但该段仅占反向 1.10% ⇒ **整步收益 <0.2%**。前提：前向 L1 epilogue（`sm100_fp8_fp4_mega_moe.cuh:1108-1219`）
+      不单独存 gate/up，折叠需前向 dump 或反向重算。→ `docs/155-fuse-activation-into-dgrad.md`。
+      配套博客 `content/posts/mega-moe-155-fuse-activation-into-dgrad`（索引页新增第 155 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4482,8 +4502,15 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P144 各增量完成（P15-1…P41-1、P42-1…P144-1）。**
-  本轮 P144-1：新建 `docs/154-moe-backward-activation-segment.md`（+`src/moe_backward_activation.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P145 各增量完成（P15-1…P41-1、P42-1…P145-1）。**
+  本轮 P145-1：新建 `docs/155-fuse-activation-into-dgrad.md`（+`src/moe_backward_activation_fused.cu`、
+  `harness/exp_moe_backward_fused.{sh,py,out.txt}`）——承接 P144-1 的口子，把反向的「SwiGLU 反向 + 激活
+  梯度重量化」段**折进 dgrad 的 epilogue**。**结论：能折、无损、永不更差，但不是性能杠杆。** 字节账
+  d2g 输出形状 10→6 B/元素（省 `d(act)` 往返 4 B/元素、-40%）；H100(sm90) 真机 `FUSED` vs `FRESH→独立段`
+  **逐位无损（FP8 0/16777216、SF 0/524288）**，`SEQ/FUSED` 恒 1.057–1.317×、净省 ~13–15us；真实 d2g
+  anchor 125.7us/957 TFLOPS（ncu 109.3us、DRAM 196MB≈1.79 TB/s）；但该段仅占反向 1.10% ⇒ 整步收益
+  <0.2%。前提：前向不单独存 gate/up。索引页新增第 155 篇。
+  上一轮 P144-1：新建 `docs/154-moe-backward-activation-segment.md`（+`src/moe_backward_activation.cu`、
   `harness/exp_moe_backward_activation.{sh,py,out.txt}`）——补齐**反向一直缺席的「非 GEMM 段」**：
   夹在两个 dgrad GEMM 之间的「SwiGLU 反向 + 激活梯度的 FP8/UE8M0 重量化」。它是前向 L1 epilogue
   （`sm100_fp8_fp4_mega_moe.cuh:1108-1219`）的逐元素逆；wgrad 的 B 操作数是 FP8 对（`gemm.hpp:373-411`）
@@ -6109,14 +6136,16 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P144 已完成（最新 **P144-1 补齐反向一直缺席的「非 GEMM 段」**：夹在两个 dgrad GEMM
-  之间的「SwiGLU 反向 + 激活梯度 FP8/UE8M0 重量化」——前向 L1 epilogue 的逐元素逆。H100(sm90) 真机
-  正确性 0/32768 SF、0/1048576 FP8 字节；量化路径 20.1us/1668 GB/s；误差分层 bf16-round ~1.7e-3、
-  +FP8 ~2.7e-2（cos 0.99965，压在 FP8 输入噪声之内）；放回预算 d2g+激活+d1g+w2g+w1g=1822.9us，
-  激活段仅 1.10%。索引页新增第 154 篇）。
-  可继续（均为增量、非承诺）：① 把这段也做成「折进邻近 GEMM 的 epilogue」（对照第 148/149 篇的同
-  kernel 融合思路）量它能否藏进 d2g 或 d1g 的 epilogue；② 对 P96/P97/P123 的轻微漂移清单关键路径
-  定点复核；③ 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）。详见上。
+- **下一步**：P0~P145 已完成（最新 **P145-1 把反向的 SwiGLU 段折进 dgrad 的 epilogue**——承接 P144-1
+  的口子。结论：能折、逐位无损、永不更差（字节 10→6 B/元素、`SEQ/FUSED` 1.057–1.317×、净省 ~13–15us），
+  但该段仅占反向 1.10% ⇒ 整步收益 <0.2%、不是性能杠杆；前提是前向不单独存 gate/up。索引页新增第 155 篇）。
+  可继续（均为增量、非承诺）：① 把这段折叠在 **SM100** 上用新写的 `epilogue_class` operator 落地（当前
+  SM100 只有 `FP8QuantizationEpilogue`、无 SwiGLU 反向 operator；SM90 拒绝自定义 epilogue）；② 对
+  P96/P97/P123 的轻微漂移清单关键路径定点复核；③ 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）。详见上。
+  上一轮 P144-1：补齐反向一直缺席的「非 GEMM 段」（SwiGLU 反向 + 激活梯度 FP8/UE8M0 重量化）——
+  前向 L1 epilogue 的逐元素逆。H100(sm90) 真机正确性 0/32768 SF、0/1048576 FP8 字节；量化路径
+  20.1us/1668 GB/s；误差分层 bf16-round ~1.7e-3、+FP8 ~2.7e-2（cos 0.99965）；放回预算
+  d2g+激活+d1g+w2g+w1g=1822.9us、激活段仅 1.10%。索引页新增第 154 篇。
   上一轮 P143-1 把三次「引用体检」留下的 near_miss 清单做逐条处置：
   P96/P97/P123 只到「分类 + 挑候选」，`triage_refs.py` 的 7 条 `candidate off-by-one` 一直悬着。
   新工具 `harness/fix_refs.py` 给每条 near_miss 六类确定性判定（`in_range`/`widened`/`wrong_range`/

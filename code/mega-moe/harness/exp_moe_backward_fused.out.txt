@@ -1,0 +1,63 @@
+== 内核源码 ==
+80580c50270ca254296de369e831ce03a66c360558a9189f0fc23a6c6b551084  ~/proj/tech_record/code/mega-moe/src/moe_backward_activation_fused.cu
+
+== 编译（sm_90）==
+  built /tmp/moe_backward_activation_fused
+
+== 设备端自带报告（src/moe_backward_activation_fused.cu，单进程，空闲 GPU）==
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+[env] device=NVIDIA H100 80GB HBM3 sm_90 smem/SM=228 KiB
+[A] 正确性（T=4096,I=2048, d2g 输出形状）: FUSED vs (FRESH→独立段) —— FP8 字节不符 0 / 16777216，SF 不符 0 / 524288
+
+[B] d2g 输出侧原型（T=4096,I=2048 = d2g 输出形状；同一份算力，只差 epilogue）
+    字节：FRESH 写 2B；FUSED 读 gate+up 4B + 写 2B；独立段 读 dact+gate+up 6B + 写 2B
+    kIters   fresh_us    fused_us    fused-fresh seg_us      SEQ_us      SEQ/FUSED  saving_us  
+    0        13.53       40.04       26.50       39.19       52.72       1.317      12.68      
+    32       22.76       47.08       24.31       39.17       61.93       1.316      14.86      
+    96       39.44       63.97       24.53       39.10       78.54       1.228      14.57      
+    192      64.52       89.16       24.63       39.08       103.60      1.162      14.44      
+    384      114.98      140.51      25.53       39.13       154.11      1.097      13.60      
+    768      215.75      241.25      25.50       39.20       254.94      1.057      13.69      
+    注：kIters=0 是纯访存下界；kIters 越大越计算受限。SEQ = FRESH + 独立段（现实现的串行流水）。
+    fused-fresh = 融合 epilogue 的边际成本（含读 gate/up + SwiGLU 反向 + 半 warp 归约 + 写 FP8）；
+    saving = seg - (fused-fresh) = 折叠相对两 kernel 串行流水的净节省（≈ d(act) 往返 - 内联开销）。
+
+[done] 架构无关；d2g/d1g 真实 kernel 与 SM100 epilogue_class 机制见 .sh/.py。
+
+== Python：字节账 + 真实 d2g anchor + 预算组装（空闲 GPU）==
+torch 2.12.0a0+0291f960b6.nv26.04.48445190, cuda 13.2, device NVIDIA H100 80GB HBM3
+== Part A：每元素字节账（d2g 的输出形状 [Σt, I]，bf16）==
+  现实现 = d2g 写 d(act) + 独立段读 d(act)/gate/up + 写 FP8 对：
+    d2g epilogue 写 d(act)          : 2 B/元素（bf16）
+    独立段 读 d(act) + gate + up     : 6 B/元素（3×bf16）
+    独立段 写 d(gate)+d(up) FP8      : 2 B/元素（2×E4M3，SF 另 ~0.06）
+    小计（d2g 算力之外）            : 10 B/元素
+  折叠实现 = d2g 的 epilogue 里就地反解 + 量化（d(act) 不出寄存器）：
+    d2g epilogue 读 gate + up        : 4 B/元素
+    d2g epilogue 写 d(gate)+d(up) FP8: 2 B/元素
+    小计（d2g 算力之外）            : 6 B/元素
+  → 折叠省掉 d(act) 的「写 2 + 读 2」= **4 B/元素（-40%）**；gate/up 两次都要读，不是额外负担。
+  → 代价：d2g 的 epilogue 从「写」变成「读 4 + 写 2」，extra 4 B/元素读。它能否藏进算力是 .cu 段一 [B] 的问题。
+
+== Part B：真实 SM90 d2g anchor（现实现的输出侧）==
+  d2g = m_grouped fp8 (D bf16)：m=4096 N=I=2048 K=H=7168 E=8
+    单次 launch（热启 3 次，7 次取最小）: 125.7 us  957 TFLOPS
+    输出 d(act) [Σt=4096, I=2048] bf16 = 16.8 MB
+    它是 compute-bound（第 15/142 篇 ncu：SM 65.5%、DRAM 1.85 TB/s）⇒ 有带宽余量可藏 epilogue 的 extra 读。
+
+== Part C：反向 single-step 预算（把激活段折进 d2g 的投影）==
+  现实现：d2g 125.7us（含写 d(act)） + 激活段 ~40.2us（d2g 形状，读 d(act)）
+    = 165.9us（这两段的合计；段仅占 24.2%）
+  折叠后：d2g 的 epilogue 就地出 FP8 对，省掉 d(act) 往返（-4B/元素）。
+    最乐观（extra 读全藏）：t ≈ d2g 算力本身 ≈ 111us ⇒ 相对现实现 ~1.16×。
+    最悲观（extra 读全露、按 HBM 峰值）：+4B×8.39M/3.35TB/s ≈ +10us ⇒ ~121us ⇒ ~1.09×。
+  结论：折叠的收益在**单段**上是 ~10–16%（省 d(act) 往返），但激活段本就只占反向 1.1%（第 154 篇），
+        所以整步收益 <0.2%——**它是对的工程习惯（少一轮全局往返），但绝不是反向的性能杠杆**。
+        真正的杠杆仍是四个 grouped GEMM（wgrad 占 83%）与通信。
+
+
+== ncu：真实 d2g 单次 launch 的 DRAM 读/写（带宽余量）==
+    dram__bytes_read.sum                            Mbyte       180.86
+    dram__bytes_write.sum                           Mbyte        15.28
+    gpu__time_duration.sum                             us       109.31
+    sm__inst_executed_pipe_tensor_op_gmma.sum        inst       630784
