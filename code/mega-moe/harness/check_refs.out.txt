@@ -2,18 +2,18 @@
 P97-1 · docs 引用行号 linter（check_refs.py）
 ================================================================================================
 DeepGEMM=~/github/DeepGEMM  DeepEP=~/github/DeepEP
-索引源文件数（含 DeepJIT，vendored 拷贝按内容去重）: 2568
+索引源文件数（含 DeepJIT，vendored 拷贝按内容去重）: 2569
 排除的审计文档  : 106-deepgemm-source-index-audit.md, 107-refs-linter-audit2.md
 
-总引用条数            : 1699
+总引用条数            : 1703
   · 占位省略（...）    : 6（非错误）
   · 无法解析到文件     : 0
   · 行号越界/文件缺失  : 0
   · 被引行全为空       : 0
   · 同名歧义未消解     : 0
-内容抽查（同行有标识符）: 741
-  · 严格命中           : 530 (71.52%)
-  · 宽松命中（符号在文件内）: 617 (83.27%)
+内容抽查（同行有标识符）: 744
+  · 严格命中           : 533 (71.64%)
+  · 宽松命中（符号在文件内）: 620 (83.33%)
   · 轻微漂移（在文件、不在被引行）: 87
 覆盖的源文件数        : 236
 
@@ -107,16 +107,16 @@ DeepGEMM=~/github/DeepGEMM  DeepEP=~/github/DeepEP
   98-deepep-jit-config.md  271  backend/cuda/options.hpp:136-138  DeepGEMM/third-party/deep_jit/include/deep_jit/backend/cuda/options.hpp  ['nvcc_flags']
 
 {
-  "total": 1699,
+  "total": 1703,
   "elided": 6,
   "unresolved": 0,
   "oob": 0,
   "empty": 0,
   "ambiguous": 0,
-  "content_total": 741,
-  "strict": 530,
-  "weak": 617,
+  "content_total": 744,
+  "strict": 533,
+  "weak": 620,
   "near_miss": 87,
   "files": 236,
-  "source_files": 2568
+  "source_files": 2569
 }

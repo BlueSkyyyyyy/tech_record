@@ -3048,6 +3048,39 @@
       与同行多引用串扰），保留在 `.out.txt`。配套博客 `content/posts/mega-moe-107-refs-linter-audit2`
       （索引页新增第 107 篇）。
 
+### P98 增量（opt-in，补齐所有 GEMM / 反向 grouped GEMM 重复复用却一直没被单独读过的「任务调度器」）
+
+- [x] **P98-1** **DeepGEMM 的通用 GEMM 任务调度器 `scheduler/gemm.cuh`**：
+      `deep_gemm/include/deep_gemm/scheduler/gemm.cuh`（314 行）+ 五个调用方
+      （`impls/sm90_bf16_gemm.cuh:135`、`sm90_fp8_gemm_1d1d.cuh:161`、`sm90_fp8_gemm_1d2d.cuh:153`、
+      `sm100_bf16_gemm.cuh:158`、`sm100_fp8_fp4_gemm_1d1d.cuh:199`）+ `common/types.cuh:13-21` 的
+      7 种 `GemmType`。前面 107 篇把它当「`scheduler/gemm.cuh:xxx`」引用了 15+ 次，却从没单独拆透；
+      它正是 MoE 反向 **wgrad（k-grouped）/ dgrad（m-grouped）** 的任务枚举地基（第 4/12/13/14 篇的
+      计算侧、第 26/91 篇的 SF 打包、第 103 篇的 swap-AB 尾块都指向它）。**唯一架构分支是
+      `#if __CUDA_ARCH__ < 1000`（SM90 multicast 修补），其余全是整数索引、不碰 UMMA/TMA，H100(sm90)
+      可直接 include 真实头文件跑真实设备代码**。
+      → `docs/108-deepgemm-gemm-scheduler.md`（真实行号核对）：`get_num_1d_blocks_per_group:14-26`
+      （编译期在 `{8,16}` 用「组跨度 + 每 SM 迭代数」代理代价选 `N1D`，随 `kIsMulticastOnA` 换主轴）；
+      `Scheduler:30-39` + `kKAlignment%128==0` 静态断言 `:42-43`；`get_next_k_group:71-82`（非 psum
+      前缀和 vs psum「起点对齐 `kKAlignment`、长度=未对齐结尾−对齐起点」）；构造 `:85-106`；
+      `get_swizzled_block_idx:108-144`（L2 组 swizzle + `#if __CUDA_ARCH__<1000` 的 SM90 奇数分组
+      拆最后 1 块 `:120-133`）；`get_global_idx:146-174`（7 形态 × {MN,K,SF_K} 偏移；
+      `MGroupedContiguous` 读**第 4 参** `m_block_idx` 指向的 `grouped_layout[m*BLOCK_M]`，
+      A 只传 3 参/ B 才传 4 参）；`get_aligned_effective_m_in_block:176-183`（swap-AB+psum+关零填充
+      尾块裁到 16）；`get_next_block:185-272`（网格步进 + 六分支：Masked/psum 逐组变 `num_m_blocks`、
+      k-grouped 更新 `k_start`/`sf_cumsum`、Batched `current_group_idx=nbi/num_blocks`）；SM90 专属
+      `is_tma_multicast_valid:274-292`（MGroupedContiguous onM 要求 peer CTA 同组）与
+      `is_computation_valid:294-309`。H100 实测 `src/gemm_scheduler.cu` +
+      `harness/exp_gemm_scheduler.{sh,out.txt}`（同 `.cu` 编 `sm_90a` 运行 + `sm_100a` 仅编译覆盖；
+      源 sha256 `f48dfef6…`）**51 PASS / 0 FAIL**：① 启发式 6/6 vs 暴力；② swizzle 对
+      `[0,num_m*num_n)` 穷举 10 组全部双射、与独立复刻逐位相等，`7x5` 的 `fixup_hits=35` /
+      `8x6=0` 坐实 SM90 修补非摆设；③ 8 种形态任务枚举是 `[0,N)` 的排列（`N` 由规范独立算出，
+      含 Batched 96 / Masked 27 / psum 24），k-grouped 逐组 `(k_start,sf_cumsum)` 含不齐整端点
+      `KA=256` 全 `bad=0`；④ psum 尾块有效 M=16、非尾块 128；⑤ multicast 对端一致（peer-eq=1 /
+      peer-neq=0）；⑥ `get_global_idx` 七形态偏移全对（`MGroupedContiguous` 同一条调用随
+      `grouped_layout` 从 256256 变 1256）。SM100 分支仅编译期覆盖、本机不可运行。配套博客
+      `content/posts/mega-moe-108-deepgemm-gemm-scheduler`（索引页新增第 108 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3073,8 +3106,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P97 各增量完成（P15-1…P41-1、P42-1…P97-1）。**
-  本轮 P97-1：新建 `docs/107-refs-linter-audit2.md`
+- 当前进度：**P0~P14 全部完成；P15~P98 各增量完成（P15-1…P41-1、P42-1…P98-1）。**
+  本轮 P98-1：新建 `docs/108-deepgemm-gemm-scheduler.md`（+`src/gemm_scheduler.cu`、
+  `harness/exp_gemm_scheduler.{sh,out.txt}`）——补齐**所有 GEMM / 反向 grouped GEMM 共用、
+  被 15+ 次引用却从没单独读过的任务调度器** `scheduler/gemm.cuh`（314 行）。要点：`Scheduler` 一个模板
+  覆盖 7 种 `GemmType`；三个非平凡点——① `get_num_1d_blocks_per_group` 编译期用代理代价在 `{8,16}`
+  选块分组大小且随 `kIsMulticastOnA` 换主轴；② `get_swizzled_block_idx` 的 `#if __CUDA_ARCH__<1000`
+  是 SM90 TMA multicast 必须成对的修补（奇数分组拆最后 1 块）；③ k-grouped 的 `get_next_k_group`
+  定义「物理 K 起点对齐 `kKAlignment`、长度=未对齐结尾−对齐起点」与 SF-K 前缀和。另讲清
+  `get_global_idx` 7 形态偏移、`get_aligned_effective_m_in_block` 尾块 16 对齐、SM90 的 multicast/计算
+  有效性校验。**H100(sm90) 直接 include 真实头文件跑真实设备代码 51 PASS / 0 FAIL**（swizzle 穷举
+  10 组双射、8 形态任务覆盖恰一次、k-grouped 含 `KA=256` 不齐整端点 `bad=0`、`fixup_hits=35` 坐实
+  修补非摆设）；SM100 分支仅编译期覆盖。索引页新增第 108 篇。
+  上一轮 P97-1：新建 `docs/107-refs-linter-audit2.md`
   （+`harness/check_refs.{py,sh,out.txt}`）——第 106 篇（引用体检）的第二遍：把体检重写成**可复用
   linter**，并收口 P96 的 defer 项。要点：P96 脚本自身有三个**会静默误判**的方法学问题——索引扫进
   vendored `third-party/*` 致同名爆炸、消歧排序键没用「被引行是否为空」、占位 `...` 被当错误；
@@ -4174,7 +4218,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P95 已完成（最新 **P95-1 Mega MoE 的 FP4 路由权重路径**：
+- **下一步**：P0~P98 已完成（最新 **P98-1 DeepGEMM 通用 GEMM 任务调度器 `scheduler/gemm.cuh`**：
+  一个 `Scheduler` 模板覆盖 7 种 `GemmType`，被五个 GEMM 内核复用（也是 MoE 反向 wgrad/dgrad 的
+  任务枚举地基）；三个非平凡点——`get_num_1d_blocks_per_group` 编译期代理代价选 `{8,16}`、
+  `get_swizzled_block_idx` 的 SM90 multicast 奇数分组修补 `#if __CUDA_ARCH__<1000`、
+  `get_next_k_group` 的物理 K 起点对齐 + SF-K 前缀和；另拆 `get_global_idx`/`get_aligned_effective_m`
+  /SM90 multicast 与计算有效性。H100(sm90) 直接 include 真实头文件跑真实设备代码 **51 PASS / 0 FAIL**，
+  SM100 分支仅编译期覆盖；详见上）。
+  上一轮 P95-1：P0~P95 已完成（最新 **P95-1 Mega MoE 的 FP4 路由权重路径**：
   `fp8xfp8`/`fp8xfp4` 同走 `MmaKind::MXFP8FP4`，差异只在路由权重 dtype（`kPackedFP4=int8`、每字节 2
   个 e2m1）；TMA `16U4_ALIGN16B` 把 4-bit 摊成未打包形式、SMEM 每元素 1 字节（线字节减半）；A=FP8、
   B=FP4 必须走 `MXF8F6F4`（`UMMA_K=32`）；权重重排 FP8/FP4 共用 tuple 路径且与打包逐位可交换；
