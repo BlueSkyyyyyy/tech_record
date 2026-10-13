@@ -1070,6 +1070,25 @@
         再证 §25.5/§63.5「比值以 CUPTI/wall 为准」。**结论**：`BF16MMA`/`DAMMA` 免费、可叠加、逐位/底噪
         无损；目标卡 CUDA B2 **折叠**形态建议 `-DB2M_BF16 -DB2M_BF16MMA [-DB2M_DAMMA]`，**默认部署仍
         是 §45 的 `cf`**。**边界**：`BT=16`/`K=V=128`/fp32 输出/非 TMA。见 `docs/07` §82。
+- [x] **P7-80** 关闭 §79（P7-76）遗留的**唯一精度问题**——「bf16+TMA 下 `vv`/`dwm` 降 bf16，但**生产核里
+        raw `v`/`dw` 的 bf16 精度未单独消融**」：给非 TMA 的 bf16 入口加 staging-dtype 旋钮
+        **`-DB2M_BF16_VDW`**，让 `vv`（raw `v`）/`dwm`（`dw`）也按 bf16（`op_t`/`OPS` 行距）搬入 smem
+        （`prefetch` 改 bf16 粒度 U=8，`rds()` 折叠成与 `rd()` 相同的精确扩宽），**算术一字未动**。新增
+        `harness/check_bwd_b2_bf16_vdw.py`（`check_bwd_b2_bf16_vdw.out.txt`，空闲卡）+
+        `harness/probe_b2_vdw_ncu.sh`（`probe_b2_vdw_ncu.out.txt`，复用改造的 `ncu_b2_bf16_prod_driver.py`）。
+        **Part A（逐位）**：bf16 值下 `prod_bf16_vdw == prod_bf16` 11 项全 **max_abs=0**（4 组含非整除
+        T=250）——纯布局、代数惰性。**Part B（精度消融）**：全精度 `v`/`dw` 各自量化到 bf16，
+        `v`→`dApre/dA/db` scale-rel 1.4–1.9e-3、`dw`→`dkgb 2.7–3.0e-3 / dkg 2.0–3.0e-4 / dg 1.6–2.3e-4 /
+        db 5.7–9.2e-4`（=`dgk`/`dv2/dvb/dw/dqg` 逐位不动），最坏 ≈3e-3 = bf16 底噪；且部署里 raw `v`
+        本就是 bf16，真正新增代价只有 `dw` 侧（且需 `dw` 写侧也改 bf16，本节未做）。**Part C/D（关键
+        反例）**：`vdw` **单独开**是 **1.4–1.5× 回归**（`B8 885→1346µs`，smem 反而 94848→90752 更小）；
+        `ncu` 归因＝**寄存器 128→140 越过 2-block/SM 门槛**（`128·256·2=65536` 恰好 2；`140·256·2=71680>65536`
+        →`launch__occupancy_limit_registers` 2→1），achieved warps **24.64→12.46% 减半**，而 DRAM/L2 反降
+        （`v`/`dw` 读减半）、bank conflict 仅 +8%——省字节落在不最紧 pipe、占用率被腰斩。**叠
+        `-DB2M_BF16MMA`**（108 regs）恢复 2 block/SM → `vdw_mma/bf16` **0.98–1.02×（中性）**。**结论**：
+        旋钮可核验但**不是杠杆**（与 §81「TMA/`BVK=64` 在六段核反号、bf16 收益全在占用率头寸」同构）；
+        目标卡 $v$/$dw$ staging **维持现状**，默认部署仍 §45 的 `cf`。**边界**：`BT=16`/`K=V=128`/非 TMA/
+        非折叠/未落链；`dw` 写侧未改。见 `docs/07` §83。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1554,12 +1573,31 @@
   按 **字节** 工作，128 B 行距无论 32×fp32 还是 64×bf16 都把 `row` 搬进 bit 7，故 `b ^= ((b>>7)&7)<<4` 通用；
   只需把 atom 内宽、`NAT=BVK/TAW`、字节数按 `sizeof(tma_t)` 参数化，并 `static_assert` bf16 的 `BVK∈{64,128}`
   （部署默认 `BVK=32` 不是合法 bf16 atom 数）。别以为 bf16 要重写一套 swizzle。
+- **「改 staging dtype 省 smem/字节」的隐藏账单是寄存器——先数 `regs×256×blocks`**（P7-80，§83.3）：
+  把 `vv`/`dwm` 从 fp32 换 bf16 staging 让 smem **94848→90752 B**、`v`/`dw` DRAM 读减 ~15%，但
+  **regs 128→140**：H100 上 `128×256×2=65536`（恰 2 block/SM）、`140×256×2=71680>65536`（→1 block），
+  `launch__occupancy_limit_registers` 2→1、achieved warps **24.64→12.46% 减半**，端到端 **1.4–1.5× 变慢**。
+  判据：凡「换操作数 dtype / 改 staging 布局」的改动，**先看 regs 是否越过 `floor(65536/(regs·threads))` 的
+  分块台阶**；ncu 的 `launch__occupancy_limit_registers` 是直接读数（别只看 `..._shared_mem`——它可能
+  同时读 1 而 smem 明明够）。叠 `-DB2M_BF16MMA` 把 regs 拉回 108 才恢复 2 block/SM（中性）。
+  **与 §81「省字节要落最紧 pipe / 别动占用率头寸」同构，但这次头寸是寄存器不是 smem。**
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-79 补测 + P8-3**。
-  - P7-79（本轮）：**把原生 bf16 mma（`-DB2M_BF16MMA`）与 mma 化 DA（`-DB2M_DAMMA`）落进 bf16 折叠
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-80 补测 + P8-3**。
+  - P7-80（本轮）：**关闭 §79 遗留的「raw `v`/`dw` 的 bf16 精度未单独消融」**——给非 TMA bf16 入口加
+    `-DB2M_BF16_VDW`（`vv`/`dwm` 也按 bf16 staging），**算术一字未动**。**Part A**：bf16 值下
+    `prod_bf16_vdw == prod_bf16` 11 项 **max_abs=0**（含非整除 T=250）。**Part B**：全精度 `v`→`dApre/dA/db`
+    1.4–1.9e-3、`dw`→`dkgb 2.7–3.0e-3/dkg 2.0–3.0e-4/dg 1.6–2.3e-4/db 5.7–9.2e-4`（scale-rel，=`dgk`
+    等逐位不动），最坏 ≈3e-3=bf16 底噪。**Part C/D（反例）**：`vdw` 单独开 **1.4–1.5× 回归**，`ncu`
+    归因＝**regs 128→140 关掉 2-block/SM 窗口**（`occupancy_limit_registers` 2→1、achieved warps 减半），
+    而 DRAM/L2 反降、bank conflict 仅 +8%；**叠 `-DB2M_BF16MMA`（108 regs）回到中性 0.98–1.02×**。
+    **结论**：旋钮可核验但**非杠杆**（同 §81），$v$/$dw$ staging 维持现状、默认部署仍 §45 的 `cf`。
+    见 `docs/07` §83。**下一步**：专题维持维护态——§45 的 `cf` 仍是目标卡反向默认；CUDA B2 研究形态的
+    `staging/dtype/mma-ISA/store/DA/TMA/折叠/scratch-dtype` 诸旋钮至此**全部关闭且无 `#error`**，有明确
+    新需求（如六段核 `K≠V`、`dw` 写侧端到端 bf16、真落目标卡 CUDA）再动。
+  - P7-79（上轮）：**把原生 bf16 mma（`-DB2M_BF16MMA`）与 mma 化 DA（`-DB2M_DAMMA`）落进 bf16 折叠
     生产链**。§75 的链级变体是非 DAMMA、native bf16 mma 只在 kernel-only 量过（§78 Part C 0.659×），
     §81.4 推荐却未验；本轮补上，关掉 §78.5/§81.6 的「非 BF16MMA / 非 DAMMA 进链」边界。新增
     `harness/check_bwd_b2_bf16mma_e2e.py`（`check_bwd_b2_bf16mma_e2e.out.txt`，空闲卡）+

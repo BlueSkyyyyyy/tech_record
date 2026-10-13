@@ -469,3 +469,16 @@ dtype 为 bf16 时取 **`-DB2M_BF16`（`cp.async` staging、`BVK=32`）+ 可选 
 **`-DB2M_DAMMA`（免费 ~3–6%）**；注意**折叠已把 smem 顶到 116 KB / 1 block/SM**，非折叠形态的 2-block 红利在折叠里
 拿不到——大小 shape 的「两 kernel vs 折叠」取舍同 §66.6。CUDA B2 的 `staging/dtype/mma-ISA/store/DA/TMA/折叠`
 诸旋钮至此**全部关闭且无 `#error`**。
+
+- **§83（P7-80）raw `v`/`dw` 的 bf16 staging（`-DB2M_BF16_VDW`）——可核验但非杠杆**：非 TMA bf16 入口的
+  `vv`/`dwm` 也可按 bf16 staging（`prefetch` U=8、`rds()` 精确扩宽，算术未动）。bf16 值下与 fp32 staging
+  **逐位相同**（11 项 max_abs=0，含非整除 T=250）；全精度 `v`→`dApre/dA/db` 1.4–1.9e-3、`dw`→
+  `dkgb 2.7–3.0e-3/dkg 2.0–3.0e-4/dg 1.6–2.3e-4/db 5.7–9.2e-4`（scale-rel，=bf16 底噪）。**但单独开是
+  1.4–1.5× 回归**——smem 更小（94848→90752 B）、读更少，却被 **regs 128→140 关掉 2-block/SM 窗口**
+  （`launch__occupancy_limit_registers` 2→1、achieved warps 24.64→12.46%）；叠 `-DB2M_BF16MMA`（108 regs）
+  才回到中性 0.98–1.02×。**结论**：`v`/`dw` staging 维持现状（非 TMA fp32、TMA bf16），默认部署仍 `cf`。
+
+**最终部署建议（补充 scratch-dtype，`docs/07` §83）**：默认路线 `cf` 不变。CUDA B2 的 `v`/`dw` scratch staging
+**不开** `-DB2M_BF16_VDW`（除非某天寄存器预算允许、且为对齐 TMA 布局）——它的收益（smem −4 KB、读 −15%）被
+寄存器越过分块台阶的代价淹没。至此 CUDA B2 研究形态的 `staging/dtype/mma-ISA/store/DA/TMA/折叠/scratch-dtype`
+诸旋钮**全部关闭且无 `#error`**。

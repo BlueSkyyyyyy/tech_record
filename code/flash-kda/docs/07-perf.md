@@ -8577,3 +8577,96 @@ dAv(Triton) -> CUDA-B1 -> CUDA-B2-prod-fold[-DB2M_BF16][-DB2M_BF16MMA][-DB2M_DAM
   `dAv→CUDA-B1→融合 Triton B2/B3→cumsum`（`cf`）。
 - **边界（诚实）**：仅 `BT=16`、`K=V=128`、fp32 输出、非 TMA；`pcib`/`pcibm` 有小 spill（8/0 B）；
   `ncu` 只测 `b8t2048h8`/`b2t1024h8` 两档（机制由 §77/§78/§81 的 ncu 与本节 smem/bank-conflict 读清）。
+
+## 83. 关闭 §79 遗留的「raw `v`/`dw` 的 bf16 精度未单独消融」：新增 `-DB2M_BF16_VDW`——逐位可核验、精度代价 ≤3e-3，但**单独开是 1.4–1.5× 回归**（寄存器 128→140 关掉 2-block/SM 窗口），叠 `BF16MMA` 才中性（P7-80）
+
+§79（P7-76）把「bf16 原生入口 × TMA」拼通后，边界一句写明：「bf16+TMA 下 `vv`/`dwm` 被降为 bf16
+（生产核组合时 raw `v`/`dw` 的 bf16 精度未单独消融）」。本节把这条**唯一遗留的精度问题**关掉：给
+非 TMA 的 bf16 入口加一个 **staging-dtype 旋钮 `-DB2M_BF16_VDW`**，让 `vv`（raw `v`）与 `dwm`（`dw`）
+也按 bf16（`op_t`/`OPS` 行距）搬入 smem——即 TMA 路径的布局在 `cp.async` 路径上补齐；`prefetch` 改用
+bf16 粒度（U=8），`rds()` 折叠成与 `rd()` 相同的 bf16→fp32 精确扩宽。改动是**纯布局/搬运 dtype**，
+`b2_mma_probe.cu` 的算术一字未动。
+
+### 83.1 Part A：bf16 值下与 fp32 staging **逐位相同**（旋钮代数惰性）
+
+`prod_bf16_vdw`（`-DB2M_BF16 -DB2M_BF16_VDW`，`v`/`dw` 走 bf16 线上）对 `prod_bf16`（`v`/`dw`
+走 fp32 线上、fp32 staging）——两边喂**同一个 bf16 值**（一边 `bf16(x)` 张量、一边 `bf16(x).float()`）：
+
+| case | 11 项输出 max_abs | 判定 |
+|---|---|---|
+| B8 T2048 H8 | 0.000e+00 | 逐位相同 |
+| B2 T1024 H8 | 0.000e+00 | 逐位相同 |
+| T512 H4 | 0.000e+00 | 逐位相同 |
+| T250 H3（非整除） | 0.000e+00 | 逐位相同 |
+
+因为 bf16→fp32 扩宽精确，把 bf16 值以 fp32 或 bf16 落 smem 得到**逐字节相同的 fp32 操作数**，
+故 11 项输出全逐位（含非整除 `T=250`）。**这证明 `-DB2M_BF16_VDW` 只改布局、不改代数**。
+
+### 83.2 Part B：全精度 `v`/`dw` 的 bf16 量化代价——scale-relative ≤3e-3（=bf16 底噪）
+
+把**全精度** `v`/`dw` 分别量化到 bf16 再喂 `prod_bf16`（fp32 staging），对未量化基线比；度量用
+`max_abs/|ref|max`（避免近零抵消元素的 `max_rel` 噪声）。四组 shape（含非整除）：
+
+| 量化对象 | 受影响输出 | `max_abs/|ref|max`（四组区间） |
+|---|---|---|
+| **`v` only** | `dApre` / `dA`（SAND 的 `dv@v^T`）、`db`（`Σ dkgb·kg` 里带 `v`） | `dApre` 1.42–1.74e-3、`dA` 1.68–1.94e-3、`db` 1.53–1.78e-3 |
+| **`dw` only** | `dkgb`（DKGB 的 `A@-dw`）、`dkg`/`dg`（门控链吃 `dkgb`）、`db` | `dkgb` 2.69–3.01e-3、`dkg` 2.0–3.0e-4、`dg` 1.6–2.3e-4、`db` 5.7–9.2e-4 |
+| **both** | = 两者并集 | 与「各自量化」同阶叠加（`dkgb 2.69e-3 … dA 1.94e-3`） |
+
+- `dgk`（GEMM 核输出）与 `dv2/dvb/dw/dqg` **逐位不受影响**（`vv`/`dwm` 只进 SAND/DKGB/DB 后处理）。
+- 「两边都量化、一边 fp32 staging、一边 bf16 staging」的交叉核对仍是 **max_abs=0**（Part A 的机制）。
+- **量级**：最坏 `dkgb` ≈3e-3，与 §78 已存在的 bf16 操作数底噪（`dq 3.9e-3` 等）**同阶**。且部署里
+  **raw `v` 本就是 bf16**（`vv` 侧代价只对「v 是 fp32 却硬降 bf16」成立、生产不成立），真正新增的代价
+  只有 `dw` 侧（`dkgb` ~3e-3）——而 `dw` 是 B2 自己的 fp32 GEMM 中间量，要降 bf16 还须让 `dw` 的
+  **store 出口也改 bf16**（本节只做读侧 staging 消融，写侧留作边界）。
+
+### 83.3 Part C/D：`vdw` 单独开是**寄存器回归**（2→1 block/SM），叠 `BF16MMA` 才中性
+
+静态（ptxas）与 CUPTI（空闲卡，一次生产 launch）：
+
+| build | regs | spill | smem (B) |
+|---|---|---|---|
+| `prod` | 146 | 0 | 133760 |
+| `prod_bf16` | 128 | 4 | 94848 |
+| `prod_bf16_vdw` | **140** | 0 | **90752** |
+| `prod_bf16_vdw_mma` | **108** | 0 | 90752 |
+
+| case | `bf16` µs | `vdw` µs（×bf16） | `vdw_mma` µs（×bf16） |
+|---|---|---|---|
+| B8 T2048 H8 | 885.4 | **1346.0（1.520×）** | 870.1（0.983×） |
+| B2 T1024 H8 | 125.0 | **175.6（1.404×）** | 122.4（0.979×） |
+| T512 H4 | 19.4 | 20.8（1.070×） | 19.8（1.020×） |
+| T250 H3（非整除） | 19.0 | 20.1（1.061×） | 19.3（1.017×） |
+
+**机制（`ncu`，`b8t2048h8`）**：`vdw` 的 smem **更小**（90752 < 94848）但**慢 1.5×**，根因**不是**
+访存也不是 bank conflict，而是**寄存器数 128→140 越过了 2-block/SM 的寄存器门槛**：
+
+| 读数 | `bf16` | `bf16_vdw` |
+|---|---|---|
+| `launch__registers_per_thread` | 128 | **140** |
+| `launch__occupancy_limit_registers` | **2** | **1** |
+| `sm__warps_active`（achieved） | 24.64% | **12.46%** |
+| `dram__bytes_read` | 1.07 GB | 916 MB |
+| `lts__t_bytes` | 3.01 GB | 2.64 GB |
+| bank conflict（shared ld） | 24.87M | 26.84M |
+| `gpu__time_duration` | 879.8 µs | 1340 µs |
+
+H100 寄存器堆 65536/SM：`128×256×2 = 65536`（恰好 2 block），而 `140×256×2 = 71680 > 65536`（→1 block），
+achieved warps 也正好**减半**（24.64→12.46%）。`vdw` 的 DRAM/L2 反而更低（`v`/`dw` 读减半，−15%/‑12%）、
+bank conflict 只 +8%——**省下的字节落在不最紧的 pipe，而占用率被寄存器腰斩，净亏**。叠 `-DB2M_BF16MMA`
+后 regs 落到 **108**（≤128）→ 恢复 2 block/SM，故 `vdw_mma` 回到中性（0.98–1.02×）。
+
+### 83.4 结论与设计输入
+
+- **边界关闭**：`vv`/`dwm` 的 bf16 staging 在非 TMA 路径上可开、**逐位可核验**（bf16 值下 max_abs=0）、
+  精度代价 **≤3e-3（`dkgb`，=bf16 底噪）**；`b2_mma_probe.cu` 算术未动。
+- **但它不是杠杆**：`-DB2M_BF16_VDW` **单独开**把 regs 128→140、关掉 2-block/SM 窗口 → **大 shape
+  1.4–1.5× 回归**；**叠 `-DB2M_BF16MMA`**（108 regs）仅回到**中性**（0.98–1.02×），smem 省 4 KB、
+  `v`/`dw` 读减 ~15% 都**换不来时间**。与 §81「TMA/`BVK=64` 在六段核反号、bf16 收益全在
+  `cp.async`×`BVK=32` 的占用率头寸」**同构**——**再省一点字节的前提是别动 2-block/SM 头寸**。
+- **目标卡 CUDA B2 部署输入（不变）**：$v$/$dw$ 的 staging **维持现状**（非 TMA 走 fp32、TMA 已 bf16），
+  **默认部署仍是 §45 的 `cf`**；`-DB2M_BF16_VDW` 只作「若某天寄存器允许（例如叠 `BF16MMA`）可零成本
+  对齐 TMA 布局」的备选，非建议开项。
+- **边界（诚实）**：只测 `BT=16`、`K=V=128`、非 TMA、非折叠、未落整链；`dw` **写侧**（`dw_out` store）
+  未改 bf16（故「`dw` 端到端 bf16」需生产侧一并改，属未做）；`ncu` 只取 `b8t2048h8`（机制由
+  regs/`occupancy_limit_registers`/achieved warps 三者自洽钉死）。

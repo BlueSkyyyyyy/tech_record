@@ -38,15 +38,18 @@ def main():
     K = V = 128
     NT = (T + BT - 1) // BT
     bf16 = os.environ.get("B2BP_BF16", "0") == "1"
+    vdw = os.environ.get("B2BP_VDW", "0") == "1"
     gg = torch.Generator(device=dev).manual_seed(0)
     mk = lambda *s: torch.empty(*s, device=dev)
     # the five streamed operands: bf16 under B2BP_BF16, else fp32
     st5 = dict(dtype=torch.bfloat16) if bf16 else dict()
-    v = torch.randn(B, T, H, V, device=dev, generator=gg)             # raw v: always fp32 (vv)
+    # P7-80: raw v / dw are bf16 on the wire under B2BP_VDW (the `-DB2M_BF16_VDW` build)
+    stvdw = dict(dtype=torch.bfloat16) if vdw else dict()
+    v = torch.randn(B, T, H, V, device=dev, generator=gg, **stvdw)            # raw v: bf16 under VDW
     vn = torch.randn(B, T, H, V, device=dev, generator=gg, **st5)
     do = torch.randn(B, T, H, V, device=dev, generator=gg, **st5)
     dv = torch.randn(B, T, H, V, device=dev, generator=gg, **st5)
-    dw = torch.randn(B, T, H, K, device=dev, generator=gg)
+    dw = torch.randn(B, T, H, K, device=dev, generator=gg, **stvdw)           # dw: bf16 under VDW
     k = torch.nn.functional.normalize(torch.randn(B, T, H, K, device=dev, generator=gg), dim=-1)
     q = torch.nn.functional.normalize(torch.randn(B, T, H, K, device=dev, generator=gg), dim=-1)
     g = -torch.rand(B, T, H, K, device=dev, generator=gg)
@@ -76,8 +79,7 @@ def main():
         if rc != 0:
             raise SystemExit(f"b2prod_launch rc={rc}")
     torch.cuda.synchronize()
-    print(f"b2prod_launch ok  shape={args.shape} reps={args.reps} bf16={bf16}")
-
+    print(f"b2prod_launch ok  shape={args.shape} reps={args.reps} bf16={bf16} vdw={vdw}")
 
 if __name__ == "__main__":
     main()

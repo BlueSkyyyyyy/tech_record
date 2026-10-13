@@ -1,0 +1,155 @@
+== prebuild (outside ncu) ==
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(932): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(396): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(932): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(396): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+  built bf16
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(932): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(396): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(932): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(396): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+  built bf16_vdw
+
+################################################################################
+# b2prod_launch  shape=b8t2048h8  bf16
+################################################################################
+b2prod_launch ok  shape=b8t2048h8 reps=6 bf16=True vdw=False
+[3125736] python3.12@127.0.0.1
+  b2mma_kernel(const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, int, int, int, int) (128, 64, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Gbyte         1.07
+    dram__bytes_write.sum                                                             Mbyte       487.03
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        52.80
+    gpu__time_duration.sum                                                               us       879.81
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    24873580
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                        71731820
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector     57802752
+    launch__occupancy_limit_shared_mem                                                block            2
+    launch__registers_per_thread                                            register/thread          128
+    lts__t_bytes.sum                                                                  Gbyte         3.01
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        70.60
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         4.86
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        34.55
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        24.64
+    smsp__inst_executed.sum                                                            inst    290504704
+    ----------------------------------------------------------------------- --------------- ------------
+
+
+################################################################################
+# b2prod_launch  shape=b8t2048h8  bf16_vdw
+################################################################################
+b2prod_launch ok  shape=b8t2048h8 reps=6 bf16=True vdw=True
+[3125845] python3.12@127.0.0.1
+  b2mma_kernel(const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, int, int, int, int) (128, 64, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Mbyte       916.06
+    dram__bytes_write.sum                                                             Mbyte       480.88
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        31.04
+    gpu__time_duration.sum                                                               ms         1.34
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    26840033
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                        77892577
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector     55705600
+    launch__occupancy_limit_shared_mem                                                block            1
+    launch__registers_per_thread                                            register/thread          140
+    lts__t_bytes.sum                                                                  Gbyte         2.64
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        43.06
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         3.17
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        23.15
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        12.46
+    smsp__inst_executed.sum                                                            inst    298754048
+    ----------------------------------------------------------------------- --------------- ------------
+
+
+################################################################################
+# b2prod_launch  shape=b2t1024h8  bf16
+################################################################################
+b2prod_launch ok  shape=b2t1024h8 reps=6 bf16=True vdw=False
+[3125954] python3.12@127.0.0.1
+  b2mma_kernel(const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, int, int, int, int) (64, 16, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Mbyte       133.91
+    dram__bytes_write.sum                                                             Mbyte        50.93
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        44.80
+    gpu__time_duration.sum                                                               us       123.14
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                     3099618
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                         8956898
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector      7225344
+    launch__occupancy_limit_shared_mem                                                block            2
+    launch__registers_per_thread                                            register/thread          128
+    lts__t_bytes.sum                                                                  Mbyte       377.21
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        63.32
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         4.32
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        30.70
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        23.57
+    smsp__inst_executed.sum                                                            inst     36313088
+    ----------------------------------------------------------------------- --------------- ------------
+
+
+################################################################################
+# b2prod_launch  shape=b2t1024h8  bf16_vdw
+################################################################################
+b2prod_launch ok  shape=b2t1024h8 reps=6 bf16=True vdw=True
+[3126063] python3.12@127.0.0.1
+  b2mma_kernel(const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, int, int, int, int) (64, 16, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Mbyte       114.47
+    dram__bytes_write.sum                                                             Mbyte        50.52
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        28.35
+    gpu__time_duration.sum                                                               us       173.63
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                     3357136
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                         9738704
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector      6963200
+    launch__occupancy_limit_shared_mem                                                block            1
+    launch__registers_per_thread                                            register/thread          140
+    lts__t_bytes.sum                                                                  Mbyte       332.62
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        41.39
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         2.99
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        21.83
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        12.46
+    smsp__inst_executed.sum                                                            inst     37344256
+    ----------------------------------------------------------------------- --------------- ------------
+

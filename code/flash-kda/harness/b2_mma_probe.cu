@@ -156,6 +156,21 @@ DEV void st2(float* p, float a, float b) {
 #if B2M_BF16MMA && !B2M_BF16
 #error "B2M_BF16MMA requires B2M_BF16 (bf16 staging)"
 #endif
+// P7-80: `-DB2M_BF16_VDW` extends the bf16-native operand entry to the two **scratch / raw**
+// operands `vv` (raw `v`) and `dwm` (`dw`), which P7-75 kept fp32 in the non-TMA `cp.async` path
+// (only the TMA path already staged them bf16, §79).  Under this flag the non-TMA layout matches
+// the TMA one: `vv`/`dwm` are `op_t`-strided (`OPS`) bf16 tiles, `prefetch` moves them at the bf16
+// `cp.async` granularity (U=8) and `rds()` widens bf16 -> fp32 exactly as `rd()`.  The flag is a
+// pure *layout / staging dtype* knob: on bf16-valued `v`/`dw` it is bit-identical to the fp32
+// staging (bf16->fp32 widening is exact); the open question it answers is the **precision cost**
+// when `v`/`dw` carry full-precision values (docs/07 §83).  It is a no-op under `-DB2M_TMA`
+// (already bf16) and requires `-DB2M_BF16`.
+#ifndef B2M_BF16_VDW
+#define B2M_BF16_VDW 0
+#endif
+#if B2M_BF16_VDW && !B2M_BF16
+#error "B2M_BF16_VDW requires B2M_BF16 (bf16 staging)"
+#endif
 // P7-60: `-DB2M_PROD` compiles the *production* combination of all six non-GEMM segments in a
 // single kernel/launch (see the note further down for the rationale).  It forces the six
 // segment flags on, and must be defined before the per-segment `#ifndef` defaults below.
@@ -465,10 +480,18 @@ struct alignas(128) Stage {
     op_t h  [KD][OPS];   // h  [k, v]  (rows = output N index, cols = contraction v)
     op_t dh [KD][OPS];   // dh [k, v]
 #if B2M_VV_KG_ON
+#if B2M_BF16_VDW
+    op_t  vv [BT][OPS];   // raw v [t, v]  (bf16 under BF16+VDW)
+#else
     float vv [BT][BVP];   // raw v [t, v]
 #endif
+#endif
 #if B2M_DKGB && !B2M_HDW
+#if B2M_BF16_VDW
+    op_t  dwm[BT][OPS];   // dw [t, k]  (bf16 under BF16+VDW)
+#else
     float dwm[BT][BVP];   // dw [t, k]
+#endif
 #endif
 #endif
 };
@@ -562,9 +585,14 @@ DEV float rdp(const float* buf, int row, int col) { return buf[row * BVP + col];
 // P7-75: read an **fp32** scratch operand (`vv` raw v / `dwm`) that shares neither the bf16
 // de-quantization of `rd` (which would misread fp32 as bf16 under `-DB2M_BF16`) nor, under TMA,
 // the atom layout.  Non-TMA: padded fp32 (BVP stride).  TMA: the usual atom-swizzled decode.
+// P7-80: under `-DB2M_BF16_VDW` the non-TMA scratch tiles are also bf16 (`op_t`/`OPS`), so the
+// read collapses to the same bf16 widening as `rd`.
 DEV float rds(const void* buf, int row, int col, int rows) {
 #if B2M_TMA_ON
     return rd(buf, row, col, rows);
+#elif B2M_BF16_VDW
+    (void)rows;
+    return __bfloat162float(((const __nv_bfloat16*)buf)[row * OPS + col]);
 #else
     (void)rows;
     return ((const float*)buf)[row * BVP + col];
@@ -704,32 +732,48 @@ DEV void prefetch(Stage* st, const float* __restrict__ v, const float* __restric
     // P7-75: the **fp32** scratch operands (`vv` raw v for base dA / `db`, and `dwm` for the
     // `A@-dw` segment) are staged at the fp32 cp.async granularity (U4=4), independent of the bf16
     // `op_t` operands above (whose U is 8 under `-DB2M_BF16`).
+    // P7-80: under `-DB2M_BF16_VDW` they are staged as bf16 (U4=8 on the bf16 wire), matching the
+    // TMA path's `tma_t` layout; the element index arithmetic is unchanged.
 #if B2M_VV_KG_ON || (B2M_DKGB && !B2M_HDW)
     {
+#if B2M_BF16_VDW
+        constexpr int U4 = 8;   // bf16 per 16-byte cp.async
+        const __nv_bfloat16* gv = (const __nv_bfloat16*)v;
+  #if B2M_DKGB && !B2M_HDW
+        const __nv_bfloat16* gdw = (const __nv_bfloat16*)dw;
+  #endif
+        using vdw_t = __nv_bfloat16;
+#else
         constexpr int U4 = 4;   // fp32 per 16-byte cp.async
+        const float* gv = v;
+  #if B2M_DKGB && !B2M_HDW
+        const float* gdw = dw;
+  #endif
+        using vdw_t = float;
+#endif
         for (int idx = tid; idx < BT * (BVK / U4); idx += nthr) {
             int row = idx / (BVK / U4), cg = idx % (BVK / U4), t = t0 + row;
 #if B2M_VV_KG_ON
-            float* pvv = &st->vv[row][cg * U4];
+            vdw_t* pvv = &st->vv[row][cg * U4];
   #if B2M_NODOV
-            for (int j = 0; j < U4; ++j) pvv[j] = 0.f;
+            for (int j = 0; j < U4; ++j) pvv[j] = (vdw_t)0;
   #else
             if (t < T) {
                 const int64_t off = ((int64_t)(n * T + t) * H + hh) * VD + v0 + cg * U4;
-                cp16(pvv, v + off);
+                cp16(pvv, gv + off);
             } else {
-                for (int j = 0; j < U4; ++j) pvv[j] = 0.f;
+                for (int j = 0; j < U4; ++j) pvv[j] = (vdw_t)0;
             }
   #endif
 #endif
 #if B2M_DKGB && !B2M_HDW
             // dw [BT, BVK] (token rows; k-tiled).  Same [B,T,H,K] layout as do/vn/dv, KD==VD.
-            float* pn = &st->dwm[row][cg * U4];
+            vdw_t* pn = &st->dwm[row][cg * U4];
             if (t < T) {
                 const int64_t off = ((int64_t)(n * T + t) * H + hh) * KD + v0 + cg * U4;
-                cp16(pn, dw + off);
+                cp16(pn, gdw + off);
             } else {
-                for (int j = 0; j < U4; ++j) pn[j] = 0.f;
+                for (int j = 0; j < U4; ++j) pn[j] = (vdw_t)0;
             }
 #endif
         }
