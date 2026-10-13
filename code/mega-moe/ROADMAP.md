@@ -3894,6 +3894,36 @@
       「直喂」省 12.6 MB——收益是**省 1024 次 global round-trip 的延迟**，K1+G1a **AI≈0.75** → 访存受限。
       配套博客 `content/posts/mega-moe-135-mhc-backward-worker-geometry`（索引页新增第 135 篇）。
 
+### P126 增量（opt-in，补齐第 22 篇对 SM100 sparse MQA logits 主 kernel 只给的 40 行概览）
+
+- [x] **P126-1** **SM100 sparse MQA logits 主 kernel 逐段精读**（`deep_gemm/include/deep_gemm/impls/
+      sm100_sparse_mqa_logits.cuh`，688 行；`layout/sparse_mqa_logits.cuh`；
+      `csrc/jit_kernels/impls/sm100_sparse_mqa_logits.hpp`；`csrc/apis/attention.hpp:303-442`）。
+      第 22 篇（P12-1）只给了 §4 约 40 行概览，而同一主 kernel 的 **dense 版**后来在第 113 篇（P103-1）做了
+      完整逐段精读；本篇把稀疏版补齐到同深度。**主 kernel UMMA/tcgen05/UTCCP/2-SM TMA SM100 专属、
+      仅分析**；架构无关的六段 H100(sm90) 直接 include 真实头文件跑真实设备代码。
+      → `docs/136-sm100-sparse-mqa-logits-kernel.md`（真实行号核对）：**两个入口同一核心**——
+      连续 `sm100_sparse_mqa_logits`（`:647-665`）与分页 `sm100_paged_sparse_mqa_logits`（`:667-686`）
+      都调 `..._core_impl`（`:146-645`），唯一分叉是 `KVAccessor` 的
+      `kSupportsContiguousTMA`/`kNeedsTailMask`（`:36-37/103-104`）。几何（`:157-166`）：`UMMA_M=128`、
+      **`UMMA_N=BLOCK_Q*kNumHeads≤64`（与 dense 钉死 128 不同）**、`SPLIT_KV=nwg*128`、
+      `split_kv=fp4?640:512`、`num_kv_stages=fp4?5:3`。**六类 warp**（`get_num_threads=(nwg+1+nwg/4)*128`）：
+      math 0..nwg*4-1（`:551-641`）、Q/metadata 生产者（`:263-322`）、SF 转置（`:323-369`）、
+      UMMA（`:370-415`）、KV copy（`:416-550`）、填充（`:642`）；fp8=768 线程/fp4=896。
+      **六段架构无关逻辑**：A `get_swizzled_kv_chunk_idx`（`:28-32`，**gather 式 KV 走 `cp.async` 故需
+      自定义 smem swizzle**：低 3 位与 bits[3,6) XOR，对合置换）；B `KVSplitHeader`/`KVBlockInfo`
+      （`layout:31-72`，标记位 + 双 Q 槽 16+16 位打包）；C 连续 `get_num_valid_tokens`（`:96-98`，尾块裁剪）
+      + 分页 `resolve_kv_block`（`:121-131`，`PAGE%SB==0` 保证块不跨页、SF 区在页内 KV 区之后）；
+      D math warp 压缩列映射（`:588-590/627-633`，token 双射 + slot 解码 + `(base+slot)*SB+t` 双射）；
+      E 资源账（`get_num_aligned_tmem_cols` raw fp8 376/fp4 428 → 512；`SharedStorage` 4 组
+      fp8sb16 222208/fp4sb8 230912 `< smem_capacity 232448`）；F SF 4×32→32×4 转置（`:325-333`）。
+      H100(sm90) 实测 `src/sparse_mqa_logits_kernel.cu` +
+      `harness/exp_sparse_mqa_logits_kernel.{sh,out.txt}`（**直接 include 真实 layout 头**）**ALL PASS**：
+      swizzle N=64/128 对合+双射+模型一致；打包 32 例 0 不符；尾块 `88→12/90→10/≥100→0`、分页 40 块 0 不符；
+      压缩列 `[80,400)` 每列恰一次；线程 768/896、TMEM 8 档全对、SharedStorage 8 成员 offsetof 8/8；
+      SF 转置 0/128。配套博客 `content/posts/mega-moe-136-sm100-sparse-mqa-logits-kernel`
+      （索引页新增第 136 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3919,8 +3949,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P125 各增量完成（P15-1…P41-1、P42-1…P125-1）。**
-  本轮 P125-1：新建 `docs/135-mhc-backward-sm100-worker-wiring.md`
+- 当前进度：**P0~P14 全部完成；P15~P126 各增量完成（P15-1…P41-1、P42-1…P126-1）。**
+  本轮 P126-1：新建 `docs/136-sm100-sparse-mqa-logits-kernel.md`
+  （+`harness/exp_sparse_mqa_logits_kernel.{sh,out.txt}`、`src/sparse_mqa_logits_kernel.cu`）——把第 22 篇
+  对 SM100 sparse MQA logits 主 kernel 只给的 40 行概览补齐到与第 113 篇（dense 版）同深度。两个入口同一核心
+  （唯一分叉是 `KVAccessor` 的两个静态布尔）；`UMMA_N=BLOCK_Q*kNumHeads≤64`（与 dense 钉死 128 不同）、
+  `SPLIT_KV=nwg*128`、`split_kv=fp4?640:512`、`num_kv_stages=fp4?5:3`（FP4 半字节→更深流水）。六段架构无关
+  逻辑 H100(sm90) 真机 **ALL PASS**（`src/sparse_mqa_logits_kernel.cu` 直接 include 真实 layout 头）：
+  A gather 式 KV 的自定义 smem swizzle（低 3 位 XOR bits[3,6)，对合置换）；B metadata 标记位 + 双 Q 槽
+  16+16 位打包；C 连续尾块裁剪 + 分页页内映射（`PAGE%SB==0`）；D math warp 压缩列 `(base+slot)*SB+t` 双射；
+  E `SharedStorage` 4 组 fp8sb16 222208/fp4sb8 230912 `< 232448`、TMEM raw 376/428→512、线程 768/896；
+  F SF 4×32→32×4 转置。主 kernel SM100 专属、仅分析。索引页新增第 136 篇。
+  上一轮 P125-1：新建 `docs/135-mhc-backward-sm100-worker-wiring.md`
   （+`harness/exp_mhc_backward_segment.{sh,py,out.txt}`、`src/mhc_backward_segment.cu`）——收口 P122 结尾
   「真实 H=7168 warp-pair 分段」这句：把 mHC 反向单 kernel 接线的**几何**钉死。**前向 Post worker 网格**
   （`impls:108-113`：`kNumRowsPerWarp=16`/`kNumRowGroupsPerWarp=8`/`kNumLanesPerRowGroup=4`；lane 拥有
@@ -5293,17 +5333,26 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P125 已完成（最新 **P125-1 Mega mHC 反向的目标卡单 kernel 接线（下）**：
+- **下一步**：P0~P126 已完成（最新 **P126-1 SM100 sparse MQA logits 主 kernel 逐段精读**：
+   把第 22 篇对主 kernel 的 40 行概览补齐到与第 113 篇（dense 版）同深度——两个入口同一核心、
+   `UMMA_N≤64`（与 dense 钉死 128 不同）、`split_kv=fp4?640:512`、`num_kv_stages=fp4?5:3`；六类 warp；
+   **gather 式 KV 走 `cp.async` 故需自定义 smem swizzle**（低 3 位 XOR bits[3,6)）与尾块零填充；
+   metadata 标记位 + 双 Q 槽 16+16 位打包；分页 `PAGE%SB==0` 保证块不跨页；math warp 压缩列映射
+   `(base+slot)*SB+t` 双射；`SharedStorage` 4 组 `offsetof` 8/8、TMEM raw 376/428→512、线程 768/896。
+   H100(sm90) 真机（**直接 include 真实 layout 头**）**ALL PASS**，主 kernel SM100 专属、仅分析。
+   索引页新增第 136 篇。
+   可继续（均为增量、非承诺）：
+   可用同法把第 22 篇只做 overview 的**稀疏 metadata kernel 主循环**（`scheduler/sm100_sparse_mqa_logits_
+   metadata.cuh` 的归并去重/负载均衡，第 22 篇 §3 已给行号）再做逐段精读 + 真机验证；或把
+   `harness/check_refs.py` 接进 CI（退出码已就绪）、定期重跑 `triage_refs.py` 复核 `adjacent_code` 队列，
+   或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落做定点复核。DeepEP 端到端仍需 NCCL≥2.32.3（见「阻塞」）。详见上）。
+   上一轮 P125-1：P0~P125 已完成（最新 **P125-1 Mega mHC 反向的目标卡单 kernel 接线（下）**：
    把第 132 篇结尾的「真实 H=7168 warp-pair 分段 + G0 累加器直喂 K1」坐实成可核对几何——
    前向 Post worker 网格（`kNumRowsPerWarp=16`/`kNumRowGroupsPerWarp=8`/`kNumLanesPerRowGroup=4`、
    两 worker 按 UMMA 原子切、各覆盖全 64 行、WG3 相加）、`warp_reduce_sum<4>` 归约树、TMEM 列预算
    `256+32=288<512`。H100(sm90) 真机（**直接 include 真实头文件**）：几何 0 错误、分段归约 vs double
    **rel 4–6e-8** vs 全 32-lane **rel 2.47**（结构性错误）、分段网格 vs 朴素 **2.03–10.93×**；
-   真实形状 K1+G1a **AI≈0.75** 访存受限。主 kernel SM100 专属、仅分析。索引页新增第 135 篇。
-   可继续（均为增量、非承诺）：
-   两条门控反向（Mega Gate、mHC）的数学、算子账、目标卡几何现已齐；剩余可选：把 `harness/check_refs.py`
-   接进 CI（退出码已就绪）、定期重跑 `triage_refs.py` 复核 `adjacent_code` 队列，或选 DeepGEMM/DeepEP
-   `csrc/utils/` 剩余小角落做定点复核。DeepEP 端到端仍需 NCCL≥2.32.3（见「阻塞」）。详见上）。
+   真实形状 K1+G1a **AI≈0.75** 访存受限。主 kernel SM100 专属、仅分析。索引页新增第 135 篇）。
    上一轮 P124-1：P0~P124 已完成（最新 **P124-1 DeepEP 验收测试栈最后三份收口**：
    `test_all_gather`/`test_session`/`test_allocation`；H100 8 卡真机 ALL PASS、索引页新增第 134 篇）。
   上一轮 P122-1：P0~P122 已完成（最新 **P122-1 Mega mHC 反向的目标卡接线 + per-token 融合 worker**

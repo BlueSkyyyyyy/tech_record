@@ -1,0 +1,75 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+=== P126-1 SM100 sparse MQA logits 主 kernel 架构无关逻辑验证 (H100/sm90) ===
+device: NVIDIA H100 80GB HBM3  SMs=132  sm=90
+
+## 常量
+  kBlockQ=2  kHeadDim=128  kNumMaxHeads=32  kNumSparseSlotBits=16  kInvalidSparseSlot=0xffff
+  split_kv: fp8=512 fp4=640  num_kv_stages: fp8=3 fp4=5  kNumQStages=2 kNumTmemStages=5  (hpp:15-49)
+
+## Part A. get_swizzled_kv_chunk_idx (:28-32) — KV smem 16B-chunk swizzle
+  N(fp8/4) kMask    bijection  involution   =model
+  64       3        yes        yes          yes
+  128      7        yes        yes          yes
+  结论：把 chunk 低 3 位与该块内 bits[3,6) 做 XOR（精简版 Swizzle），是块内对合置换。
+
+## Part B. KVSplitHeader / KVBlockInfo 打包解码 (layout:31-72)
+  打包/解码 32 例，不一致 0  OK
+  说明：packed_num_kv_blocks 高 2 位是 contiguous/partial-tail 标记，低位是块数（:50-60）。
+
+## Part C. KV 访问几何：连续尾块裁剪 + 分页页内映射
+  C1) 连续版 get_num_valid_tokens (:96-98)：SB=16, num_kv=100（kv_block_ref 是 token 起点）
+     block_ref  valid      expect     check
+     0          16         16         OK
+     5          16         16         OK
+     84         16         16         OK
+     88         12         12         OK
+     90         10         10         OK
+     100        0          0          OK
+     200        0          0          OK
+     结论：起点 0..84 满 16；起点 88 只剩 12、90 只剩 10；>=100 为 0（不越界读）。
+  C2) 分页版 resolve_kv_block (:121-131)：PAGE=64, SB=16, bytes/tok=128
+     blk=0   -> page=0 in_page=0  kv_off=0 sf_off=8192
+     blk=1   -> page=0 in_page=1  kv_off=2048 sf_off=8208
+     blk=2   -> page=0 in_page=2  kv_off=4096 sf_off=8224
+     blk=3   -> page=0 in_page=3  kv_off=6144 sf_off=8240
+     blk=4   -> page=1 in_page=0  kv_off=8448 sf_off=16640
+     40 块映射不一致 0  OK（sparse 块不跨页，页内偏移连续）
+     说明：SF 基址 = 页基址 + PAGE*bytes/tok（fused cache 里 KV 区在前、SF 区在后，:129）。
+
+## Part D. math warp 压缩列映射 (:588-590, :627-633) 双射
+  token 分解：512/512 唯一、分解错误 0
+  压缩列：base=5 valid=20 -> 有效列 [80,400) 每列恰写一次；不一致 0
+  slot 解码：q0=3 q1=0xffff（invalid=0xffff）  OK
+  Part D OK
+
+## Part E. 资源账：线程数 / TMEM 列预算 / SharedStorage
+  E1) get_num_threads (layout:19-21)：fp8 nwg=4 -> 768 ; fp4 nwg=5 -> 896
+  E2) 真实 TMEM 列对齐 get_num_aligned_tmem_cols (utils.cuh:42-50)
+     raw      device(get_) model        check
+     32       32           32           OK
+     33       64           64           OK
+     64       64           64           OK
+     128      128          128          OK
+     256      256          256          OK
+     376      512          512          OK
+     428      512          512          OK
+     512      512          512          OK
+     各配置 kNumTmemCols = UMMA_N*5 + kNumQStages*SFQcols + kNumKVStages*(split/32)：
+       fp8/sb8  heads=32 raw=376  aligned=512  <=512 OK
+       fp8/sb16 heads=32 raw=376  aligned=512  <=512 OK
+       fp4/sb8  heads=32 raw=428  aligned=512  <=512 OK
+       fp4/sb16 heads=32 raw=428  aligned=512  <=512 OK
+  E3) 每 copy warp 的 KV 块数（UMMA_M/SB）与 SF 块数（SB*4/16）
+     SB=8   kNumKVBlocksPerWarp=16 kNumSFChunksPerKVBlock=2  kvb%2==0 && kvb*sfch==32  OK
+     SB=16  kNumKVBlocksPerWarp=8 kNumSFChunksPerKVBlock=4  kvb%2==0 && kvb*sfch==32  OK
+  E4) SharedStorage (layout:103-138) offsetof/sizeof vs 独立字节模型
+     fp8/sb16 sizeof=222208  8 个数据成员 offsetof 命中 8/8  OK
+     fp4/sb16 sizeof=229376  8 个数据成员 offsetof 命中 8/8  OK
+     fp8/sb8  sizeof=223232  8 个数据成员 offsetof 命中 8/8  OK
+     fp4/sb8  sizeof=230912  8 个数据成员 offsetof 命中 8/8  OK
+     结论：数据成员的 alignas/顺序就是共享内存布局本身（第 82 篇），host 直接 sizeof 即用。
+
+## Part F. SF warp 4x32 -> 32x4 transpose (:325-333)
+  dst[lane*4+i] == src[i*32+lane]：不一致 0 / 128  OK
+
+=== 汇总: ALL PASS ===
