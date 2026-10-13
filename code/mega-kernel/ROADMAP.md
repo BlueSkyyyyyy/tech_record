@@ -2184,6 +2184,35 @@
       共驻映射是「按 block 交错」而非真实「按 task 类型分区/SM 角色绑定」、`O·T≤2048`、未扫非 8 倍数
       strided/非对齐、未与 DeepGEMM SM100 对跑。
 
+### P85 实验扩展 64：按 SM 角色绑定 vs 按 block 交错（`docs/04-experiments.md` §73）
+
+- [x] **P85-1** 补掉 P84-1（§72）**§72.8 明文尾巴**「共驻映射是『按 block 交错』，非真实 megakernel 的
+      『按 task 类型分区/SM 角色绑定』」：把 §72 的**同一组模式**从「按 block 交错」（共享 SM）换成
+      「**按 SM 角色绑定**」（每个 SM 只跑一种模式，`mode = mode_of_sm[smid]`），**保持逻辑工作份额
+      `f_p` 不变**，判定共驻税/超加和是**SM 内（发射槽共享）还是 SM 间（HBM/L2/全机）**现象，并对照
+      `bind`（SM 数 ∝ 份额）与 `bind_bal`（SM 数 ∝ 份额/每SM速率）。见 `docs/04-experiments.md` **§73**，
+      源码 `src/hetero_sm_bind.cu`、脚本 `harness/hetero_sm_bind.sh`、原始输出
+      `harness/hetero_sm_bind.out.txt`（目标卡 H100/sm90a、**自动选最闲 device（落 device 6）**、
+      nvcc 13.2、`numSM=132`、逻辑总读 1 GiB、`__maxnreg__(32)`、`U=4`、min-of-3；`pat_hetero`
+      32 regs、0 spill；`bind` 用 O=1/T=1024、每 SM 一 block 独占区、无原子，与 §72 同 32 warp/SM）。
+      核心结论：
+      - **§A** `interleave`/`bind` 折叠 `sink` 均逐位对 host 参考（`OK`），不同 SM 数 132/132 均匀。
+      - **§B** 单模式基线复现 §71/§72（coal 3113.5 / sparse 707.8 / scalar 2902.6 / l2res 16241 GB/s）。
+      - **§C（headline 一）`bind ≈ interleave`**：五个混合的 `meas/E` **逐行几乎重合（差 ≤1.1%）**
+        ——equal4 1.039/1.033、coal+scalar **0.902/0.898**、coal+sparse 1.030/1.021、
+        coal+l2res **1.112/1.113**、scalar+l2res 0.789/0.792。⇒ **共驻税与 `l2res` 超加和是全局
+        （SM 间/HBM/L2）现象、不是 SM 内发射槽共享**；**证伪 §72.8 缓解方向 (a)「把发射受限 task 聚到
+        一起/SM 隔离」能收回该税**。§F ncu：`bind` 与 `interleave` 的 `dram__bytes_read`(1.07 GB)、
+        L1 sector(33567072)、活跃 warp(49.99%)、`inst/cycle`(0.04) **逐项相同**。
+      - **§C（headline 二）`bind_bal` 反而更差**：SM 数 ∝ `1/r1` 均分时 `equal4` **0.753**、
+        `coal+l2res` 0.854、`coal+sparse` 0.933（仅 `scalar+l2res` 0.964 例外）——因 `sparse`/`l2res`
+        **低 SM 数即饱和 HBM/L2**、每 SM 速率对 SM 数**非线性**，「按常数 `1/r1` 分配 SM」前提不成立。
+      - **§E** `coal+scalar` 扫 scalar 的 SM 份额：内点最优 sc≈96 仅 **0.935**（仍欠 ~6.5%），
+        份额过小/过大都塌——**即便最优分区也收不回税**，再次指向全局机制。
+      判据 **C1–C5 全不满足**（纯数据面微基准）。**本轮新增实验**；P85-1 新留尾巴（§73.8）：
+      `bind` 用 O=1（未测每 SM 多块角色绑定）、`bind_bal` 用常数每 SM 速率模型（未按「SM 数→速率」
+      曲线最优配平）、合成访问、单 `U=4`/`__maxnreg__(32)`、未对 SM100。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2234,10 +2263,35 @@
   反之 **L2 驻留 task 与 HBM 流式 task 共驻是超加和净收益**（1.111×，L2 停顿藏进 HBM 停顿）。故
   「一个常驻 kernel 里 task 类型越杂越难一套参数通吃」应细化为**「访存模式之间近似可通吃、发射受限
   × 访存受限不可通吃」**。
+- **共驻税不能用「SM 角色绑定/空间隔离」绕开**（P85-1/§73）：把 §72 的按 block 交错换成**每 SM 只跑
+  一种模式**（保持逻辑工作份额不变），五个混合的 `meas/E` **逐行不变**（`coal+scalar` 0.90、
+  `coal+l2res` 1.11、`scalar+l2res` 0.79），ncu 的 DRAM 字节/sector/活跃 warp/`inst/cycle` **逐项相同**
+  ⇒ `scalar` 的 ~10% 发射受限税与 `l2res` 超加和住在**全局（SM 间/HBM/L2/全机发射）**、不在 SM 内
+  发射槽。**缓解只能改 task 的访存形态（向量化/降发射）或占比，不能靠分区/SM 归属**。另：「按 `1/r1`
+  分 SM」的 balanced 分区**反而更差**（`sparse`/`l2res` 低 SM 数即饱和 HBM/L2、每 SM 速率非线性）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P84-1 完成（1/1）**。补掉 P83-1（§71）**§71.7 明文尾巴**「四模式此前都是**单独整机
+- 当前进度：**P85-1 完成（1/1）**。补掉 P84-1（§72）**§72.8 明文尾巴**「共驻映射是『按 block 交错』，
+  非真实 megakernel 的『按 task 类型分区/SM 角色绑定』」：把 §72 的同一组模式从「按 block 交错」
+  （共享 SM）换成「**按 SM 角色绑定**」（每 SM 只跑一种模式，`mode = mode_of_sm[smid]`）、**保持逻辑
+  工作份额不变**，判定共驻税/超加和是 **SM 内还是 SM 间**现象。见 `docs/04-experiments.md` **§73**，
+  源码 `src/hetero_sm_bind.cu`、脚本 `harness/hetero_sm_bind.sh`、原始输出
+  `harness/hetero_sm_bind.out.txt`（目标卡 H100/sm90a、自动选最闲 device（落 device 6）、nvcc 13.2、
+  `numSM=132`、逻辑总读 1 GiB、`__maxnreg__(32)`、`U=4`、min-of-3；`pat_hetero` 32 regs、0 spill；
+  `bind` 用 O=1/T=1024 每 SM 一 block 独占区、无原子，与 §72 同 32 warp/SM）。核心结论：
+  **(1) §A 两种映射折叠 `sink` 均逐位对 host 参考、132/132 SM 均匀；§B 单模式基线复现 §71/§72；
+  (2) §C headline 一 `bind ≈ interleave`**——五混合 `meas/E` 逐行几乎重合（差 ≤1.1%）：
+  equal4 1.039/1.033、coal+scalar **0.902/0.898**、coal+sparse 1.030/1.021、coal+l2res **1.112/1.113**、
+  scalar+l2res 0.789/0.792 ⇒ **共驻税与 `l2res` 超加和是全局（SM 间/HBM/L2）现象、不是 SM 内发射槽
+  共享**，**证伪 §72.8 缓解方向 (a)**；§F ncu 显示 `bind` 与 `interleave` 的 DRAM 字节/sector/活跃 warp/
+  `inst/cycle` **逐项相同**；**(3) §C headline 二 `bind_bal`（SM 数 ∝ 1/r1）反而更差**（equal4 0.753、
+  coal+l2res 0.854）——`sparse`/`l2res` 低 SM 数即饱和 HBM/L2，每 SM 速率非线性，「按常数 1/r1 分 SM」
+  前提不成立；**(4) §E** coal+scalar 扫 scalar 的 SM 份额，内点最优 sc≈96 仍仅 **0.935**（最优分区也
+  收不回税）。判据 **C1–C5 全不满足**（纯数据面微基准）。**本专题此前 P0–P84 全完成，本轮为其新增的
+  实验增量**；P85-1 新留尾巴见 §73.8（`bind` O=1 未测每 SM 多块、`bind_bal` 常数速率模型未按曲线
+  最优配平、合成访问、单 `U=4`/`__maxnreg__(32)`、未对 SM100）。
+- 此前：**P84-1 完成（1/1）**。补掉 P83-1（§71）**§71.7 明文尾巴**「四模式此前都是**单独整机
   跑、未测同一 grid 内多模式共驻**」：把四种访存模式塞进**同一个常驻 grid**（每 block 按 `assign[]`
   选模式、host 误差扩散法**交错**分配保跨 SM 共驻），复检 §71.7 headline 四「一个常驻 kernel 内
   task 类型越杂、越难一套调度参数通吃」。见 `docs/04-experiments.md` **§72**，源码
