@@ -931,6 +931,25 @@
       **结论**：边界关闭——B2 生产核所有 store 变体（片段跨步/相邻列）在**隔离核与整链**两处都核验
       逐位无损；VECST 是研究形态内部免费收尾，**不改变 §45 的 `cf` 默认部署**。**边界**：仅 `BT=16`、
       `K=V=128`、fp32 操作数。
+- [x] **P7-72** 关闭 §54.5（P7-51）的两条遗留：(1) `BVK=128`（NAT=4）未测；(2) `atom64` 的 L2
+      （2.39 GB）比 `tma32`（2.35 GB）高 0.04 GB **未逐项归因**。`b2_mma_probe.cu` 只放宽一处
+      `static_assert`（`BVK ∈ {32,64,128}`，atom-major 布局本就 `NAT=BVK/32` 泛化，算术一字未动）。
+      新增 `harness/check_bwd_b2_tma_atom128.py`（`harness/check_bwd_b2_tma_atom128.out.txt`，空闲卡）+
+      `harness/probe_b2_tma_atom128_ncu.sh`（`harness/probe_b2_tma_atom128_ncu.out.txt`）+ `docs/07` §75。
+      **关键实验设计**：`BVK=128` 的 atom-major 单 stage = **155.6 KB**，两 stage 311 KB **超 227 KB 动态
+      smem 上限**（launcher `rc=-3`），故 BVK=128 **必须 `NSTAGE=1`**——为不混淆「atom 数」与「流水深度」，
+      把 `atom32/atom64/atom128` **全钉在 `NSTAGE=1`** 做 NAT 扫描。**Part A**：`atom128` vs `base128`
+      `dq/dk/dw` **逐位相同（max_abs=0）**、`base128` vs `base64` 的 `dq/dk/dw` 逐位（证 k8 累加序不随
+      `BVK` 变；`dgk` 3.8e-6=fp32 分组）、`atom128` vs torch 落 tf32 底噪 **3.6e-4**（比 Triton 更贴真
+      fp32；含非整除 T=250）。**Part B**：`NSTAGE=1` NAT=`32/64/128` 的 `dev` = **498.9/486.1/502.5**µs
+      （`B8`）——`atom64` 最优、`BVK=128` 反慢（`VD/BVK=1` 丢 V-tile 并行 + NS 钉死），**「正确但不可用」**。
+      **Part D（ncu）**：读侧修复与 bank conflict 在 `BVK=128` 下都健康（l1tex 全局读=0、SASS `UBLKCP`
+      10→20、bank conflict **8.39M** 不升反最低），**L2 归因**：把 L2 bytes 排成 NAT×NS 二维——NS=1 下
+      NAT 1/2/4 = **2.35/2.36/2.42**、NAT=2 下 NS 1/2 = **2.36/2.39**，而 **srcunit 读恒 39.85M、DRAM 读
+      恒 1.28 GB、l1tex 全局读恒 0** ⟹ §54.5 的 +0.04 GB 确认是 **「atom 边界 L2 重触」**（随 `NAT×NS`
+      增大、**不是**线性「每 atom 对 +0.02」），**非 DRAM、非 SM 侧读**。**结论**：目标卡不需要 `BVK=128`，
+      `BVK=64`（NAT=2）仍是原子拆分最优点；新增判据——L2 总字节含重触，须与 DRAM 字节、srcunit 读扇区
+      **分开读**。见 `docs/07` §75。
 - [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
       边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
       （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
@@ -1359,12 +1378,38 @@
   基本恒正（`B2`/`B8`/`T250` 1–3%，最小 shape 噪声内），但**非 TMA 版收益更大**（`pci*` 0.970–0.986）**、TMA 版更小**（`pci_tma*` 0.984–0.997）
   ——TMA 把操作数访存从 LSU 发射挪到独立引擎后，store 指令数本就不再是最紧的发射项。判「向量化 store
   值多少」除了看线程→地址映射与 bound 类型（§73.6），还要看**同核里访存的发射压力是否已被 TMA 分流**。
+- **「L2 总字节」含重触、与「DRAM 字节」「srcunit 读扇区」是三个口径**（P7-72，§75.4）：TMA atom 拆分下
+  `lts__t_bytes.sum` 随 **`NAT×NS`（在飞 box 数）** 增大（NS=1 下 NAT 1/2/4 = 2.35/2.36/2.42 GB；NAT=2 下
+  NS 1/2 = 2.36/2.39），而 **`lts__t_sectors_srcunit_tex_op_read` 恒 39.85M、`dram__bytes_read` 恒
+  1.28 GB、`l1tex__t_sectors...op_ld` 恒 0**——多出的纯是 **L2 内部边界/重触**（`atom64` 相对 `tma32` 的
+  +0.04 GB 即此，**非线性「每 atom 对 +0.02」**）。故判「某布局多花的字节是否瓶颈」必须把这三者分开读，
+  否则会把 L2 重触误当访存瓶颈（§51.6「省字节要落最紧 pipe」的镜像）。另：`BVK=128` 的 atom-major 单
+  stage = 155.6 KB，`NSTAGE=2` 即 311 KB **超 227 KB 动态 smem 上限**，launcher `cudaFuncSetAttribute`
+  直接 `rc=-3`（非静默），属**正确但不可用**（`VD/BVK=1` 还丢 V-tile 并行）。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-71 补测**。
-  - P8-2（本轮）：**补全 P8-1 一页纸汇总的后半段**（`docs/08-summary.md`）。此前该篇正文只叙述到
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-72 补测**。
+  - P7-72（本轮）：**关闭 §54.5（P7-51）的两条遗留——`BVK=128`（NAT=4）未测、`atom64` 的 L2 +0.04 GB
+    未归因**。`b2_mma_probe.cu` 只放宽一处 `static_assert`（`BVK ∈ {32,64,128}`；atom-major 布局本就
+    `NAT=BVK/32` 泛化，算术一字未动）。新增 `harness/check_bwd_b2_tma_atom128.py`
+    （`check_bwd_b2_tma_atom128.out.txt`，空闲卡）+ `harness/probe_b2_tma_atom128_ncu.sh`
+    （`probe_b2_tma_atom128_ncu.out.txt`）+ `docs/07` §75。**关键**：`BVK=128` 单 stage=155.6 KB、两 stage
+    311 KB 超 227 KB 上限→**必须 `NSTAGE=1`**；为不混淆 atom 数与流水深度，把 `atom32/64/128` **全钉
+    `NSTAGE=1`** 扫描。**Part A**：`atom128≡base128` 的 `dq/dk/dw` **逐位（max_abs=0）**、`base128≡base64`
+    的 `dq/dk/dw` 逐位、vs torch 落 tf32 底噪 3.6e-4（含非整除 T=250）。**Part B**：NSTAGE=1 下
+    NAT=32/64/128 的 `dev`=**498.9/486.1/502.5**µs（`B8`）——`atom64` 最优、`BVK=128` 反慢（无 V-tile 并行
+    + NS 钉死），**正确但不可用**。**Part D（ncu）**：`BVK=128` 读侧修复/bank conflict 都健康
+    （l1tex 全局读=0、`UBLKCP` 10→20、bank conflict **8.39M** 最低）；**L2 归因**：L2 bytes 排成 NAT×NS
+    二维——NS=1 下 NAT 1/2/4=**2.35/2.36/2.42**、NAT=2 下 NS 1/2=**2.36/2.39**，而 **srcunit 读恒 39.85M、
+    DRAM 读恒 1.28 GB、l1tex 全局读恒 0** ⟹ +0.04 GB = **「atom 边界 L2 重触」**（随 `NAT×NS` 增大，非
+    线性/每 atom 对），**非 DRAM、非 SM 侧读**。**结论**：目标卡不需要 `BVK=128`，`BVK=64`（NAT=2）仍是
+    atom 拆分最优点；新增判据＝L2 总字节含重触须与 DRAM 字节、srcunit 读**分开读**。**下一步**：专题维持
+    维护态——§45 的 `cf`（`dAv→CUDA-B1→融合 Triton B2/B3→cumsum`）仍是目标卡反向默认；CUDA B2 研究形态
+    的 store/DA/stage/TMA 旋钮至此**全部关闭**（§67–§75 反复归因、明确不再追），有明确新需求（新 shape/
+    dtype/融合目标，如 bf16 原生入口、K≠V）再动。
+  - P8-2（上轮）：**补全 P8-1 一页纸汇总的后半段**（`docs/08-summary.md`）。此前该篇正文只叙述到
     **P7-45**（§43–§48 收尾段），缺失整个 **P7-46…P7-71**——即「K2 形状 CUDA B2 反向的
     **可行（§49 首个跑赢同 op Triton）→ 贵（§62–§68 六段并入单核、整核 ~1.6–1.7× 慢）→ 收口
     （§69–§74 DAMMA/TMA/VECST 三向、逐位无损）**」的全过程，以及**最终部署建议**。本轮为该篇新增

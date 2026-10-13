@@ -358,7 +358,12 @@ constexpr int NS  = B2M_NS;    // pipeline stages
 // Each operand is staged as NAT atom-major `[NAT][rows][32]` sub-buffers, each written by
 // its own 128 B-swizzled TMA box (inner width 32).  BVK==32 -> NAT=1 (identical to P7-49).
 constexpr int NAT = BVK / 32;
-static_assert(BVK == 32 || BVK == 64, "TMA supports BVK==32 or BVK==64 (128 B atoms)");
+// P7-72: BVK==128 -> NAT=4 atoms.  §54.5 left "BVK=128 (4 atom) 未测" open; the loop over
+// `a<NAT` and the `[NAT][rows][32]` Stage layout are NAT-generic, so BVK=128 needs no code
+// change -- only a larger dynamic smem, which forces NSTAGE=1 (one 155.6 KB stage > half of
+// the 227 KB opt-in budget).  Kept as a *coverage/attribution* point, not a deploy win.
+static_assert(BVK == 32 || BVK == 64 || BVK == 128,
+              "TMA supports BVK in {32,64,128} (128 B atoms)");
 #else
 #endif
 // padded row stride for the *non-TMA-staged* scratch buffers (skg/swall/dapart/da16), used by
