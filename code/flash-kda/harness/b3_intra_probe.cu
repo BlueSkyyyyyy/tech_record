@@ -40,10 +40,22 @@
 
 #define DEV __device__ __forceinline__
 
-constexpr int KD = 128;   // K = D
+// P7-92: `KD` is now a compile-time macro so this standalone reference can be built at
+// `K!=128` -- the independent `b3intra` the folded `prod_intra` is checked against (docs/07
+// §95).  The intra diagonal is entirely a **K-axis** computation (`q/k/g`, `dAqk`, `dAkk`,
+// `Mq/Sq`), so nothing but the output-column sharding depends on `KD`: warp `w` owns
+// `BW = KD/NW` output columns = `NBW = BW/8` mma `n=8` tiles.  Default 128 keeps every
+// pre-existing caller (which passes no macro) byte-identical.
+#ifndef B3I_KD
+#define B3I_KD 128
+#endif
+constexpr int KD = B3I_KD;   // K = D
 constexpr int BT = 16;    // chunk rows
 constexpr int NW = 8;     // warps
-constexpr int BW = 16;    // output columns per warp = KD / NW
+static_assert(KD % NW == 0, "KD must be a multiple of NW (warp output-column partition)");
+constexpr int BW = KD / NW;               // output columns per warp
+static_assert(BW == 8 || BW == 16 || BW == 32, "warp K-slice must be 8/16/32 columns");
+constexpr int NBW = BW / 8;               // mma `n=8` tiles per warp over the output-K axis
 
 DEV uint32_t to_tf32(float x) {
     uint32_t r;
@@ -107,9 +119,9 @@ b3intra_kernel(const float* __restrict__ q, const float* __restrict__ k,
     __syncthreads();
 
     // ---- four [BT,BT]@[BT,KD-slice] matmuls + gating (warp owns 16 k columns) ----
-    float adq[2][4], adk[2][4], adt[2][4];   // dq2, dk2, dkt fragments (2 x n8)
+    float adq[NBW][4], adk[NBW][4], adt[NBW][4];   // dq2, dk2, dkt fragments (NBW x n8)
     #pragma unroll
-    for (int nt = 0; nt < 2; ++nt)
+    for (int nt = 0; nt < NBW; ++nt)
         #pragma unroll
         for (int i = 0; i < 4; ++i) { adq[nt][i] = 0.f; adk[nt][i] = 0.f; adt[nt][i] = 0.f; }
 
@@ -128,7 +140,7 @@ b3intra_kernel(const float* __restrict__ q, const float* __restrict__ k,
         uint32_t sk_[4] = {to_tf32(sh->sAkk[j0][grp]),  to_tf32(sh->sAkk[j0][grp + 8]),
                            to_tf32(sh->sAkk[j1][grp]),  to_tf32(sh->sAkk[j1][grp + 8])};
         #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
+        for (int nt = 0; nt < NBW; ++nt) {
             const int col = warp * BW + nt * 8 + grp;   // B-operand N column
             const float kg0 = sh->sk[j0][col] * exp2f(-sh->sg[j0][col]);
             const float kg1 = sh->sk[j1][col] * exp2f(-sh->sg[j1][col]);
@@ -147,9 +159,9 @@ b3intra_kernel(const float* __restrict__ q, const float* __restrict__ k,
     }
 
     // ---- gating + outputs.  Accumulator fragment: rows grp/grp+8, cols nt*8+2t+(i&1). ----
-    float dkpre[2][4];
+    float dkpre[NBW][4];
     #pragma unroll
-    for (int nt = 0; nt < 2; ++nt) {
+    for (int nt = 0; nt < NBW; ++nt) {
         #pragma unroll
         for (int i = 0; i < 4; ++i) {
             const int rowrel = (i < 2) ? grp : grp + 8;
@@ -162,9 +174,9 @@ b3intra_kernel(const float* __restrict__ q, const float* __restrict__ k,
             adk[nt][i] *= sh->sbeta[rowrel];          // dk2 *= beta
         }
     }
-    float dgv[2][4];
+    float dgv[NBW][4];
     #pragma unroll
-    for (int nt = 0; nt < 2; ++nt) {
+    for (int nt = 0; nt < NBW; ++nt) {
         #pragma unroll
         for (int i = 0; i < 4; ++i) {
             const int rowrel = (i < 2) ? grp : grp + 8;
@@ -177,7 +189,7 @@ b3intra_kernel(const float* __restrict__ q, const float* __restrict__ k,
 
     // ---- store warp-owned columns ----
     #pragma unroll
-    for (int nt = 0; nt < 2; ++nt) {
+    for (int nt = 0; nt < NBW; ++nt) {
         const int cl = nt * 8 + 2 * t;
         const int c0 = warp * BW + cl, c1 = c0 + 1;
         const int tr0 = t0 + grp, tr1 = t0 + grp + 8;
@@ -199,7 +211,7 @@ b3intra_kernel(const float* __restrict__ q, const float* __restrict__ k,
     {
         float pr0 = 0.f, pr1 = 0.f;
         #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
+        for (int nt = 0; nt < NBW; ++nt) {
             #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 const int rowrel = (i < 2) ? grp : grp + 8;

@@ -1284,8 +1284,24 @@
        `bf16` 比值 **0.64/0.63/0.57**（纯 `h/dh` 减半）；占用率修复只在 `K=64/128`（smem 2→3、1→2）、
        `K=256` 恒 1 block/SM 且 DRAM% 61.7→36.9（不再 bound）→ `dur 3.06→3.19ms`；`vdw` 再省 raw-`v`
        且 `K=64` 占用 3→4，`dur` 持平。**结论**：空白 (1) 全关（bf16 入口 × `K≠128` 逐位无损）、
-       `BF16` 一侧 pipe 归因与 §92/§79 同构；`intra` 折叠 × `K≠128` 纠错仍缺（待验证）、默认部署
-       仍 §45 的 `cf`。见 `docs/07` §94。
+        `BF16` 一侧 pipe 归因与 §92/§79 同构；`intra` 折叠 × `K≠128` 纠错仍缺（待验证）、默认部署
+        仍 §45 的 `cf`。见 `docs/07` §94。
+- [x] **P7-92** 关闭 §94.7（P7-91）的最后一条边界——**`intra` 折叠（`-DB2M_INTRA`）× `K≠128` 的纠错**。
+       §94.7 点名了它没做的**具体原因**：独立参照 `b3_intra_probe.cu` 把 `KD==128` 写死、无法在别的 `K`
+       上编译做第二方。本轮先把该参照 **`KD` 参数化**（`-DB3I_KD` 宏 + `BW=KD/NW`/`NBW=BW/8`，`nt<2→nt<NBW`；
+       `BW==16` 下逐字等价），再做逐位核对。**`b2_mma_probe.cu` 一行未改**（折叠的 K 轴累加器 P7-90 已
+       `nt<NBW` 泛化，`prod_intra` 在 `K=64/128/256` 均编得过）。新增 `harness/check_bwd_b2_k128_intra.py`
+       （`check_bwd_b2_k128_intra.out.txt`，空闲卡）+ `docs/07` §95。**Part A0**：泛化后 `b3_intra_probe.cu`
+       （`-DB3I_KD=128`）vs `git HEAD` **`dq/dk/db/dg` 4 shape 全逐位（`max_abs=0`）**。**Part A（关键）**：
+       `V=K`、4 shape（含非整除 `T=250`/单 chunk `T=64`），`prod_intra` vs `prod + 独立 b3intra(K)`——
+       **`K=64/128` 的 `dqg/dkg` 全逐位（`max_abs=0`）**、`dg/db` ≤**7.15e-7**（fp32 加法序 ulp，同 §66.2）、
+       未触及输出 `dv2/dvb/dkgb/dA/dApre/dgk` 全逐位；sanity `(prod_intra-prod).dqg` 与 `b3.dq` 逐值一致到
+       ≤1.19e-7。**`K=256` 因 smem 278656 B（272.1 KiB）> 227 KiB 不可行**（非正确性失败；折叠加
+       `3·BT·KD·4` q/k/g staging）。**Part B**：smem 增量随 `K` 线性（+13.8/26.1/50.7 KB）。**Part C（dev）**：
+       `fold/(prod+b3)` `K=64` **0.842–0.905×（净赢）**、`K=128` 大 shape 1.049×/小 shape 0.922×（同 §66.3 方向）。
+       **结论**：`K∈{64,128}` 折叠逐位正确；缺口只因参照写死 `KD`、非折叠本身；`K=256` 是资源而非正确性边界。
+       默认部署仍 §45 的 `cf`。见 `docs/07` §95。**边界**：`K=256` 不可行、只 `V=K`、非 TMA/非 bf16、
+       `intra`×`K≠128` 的 `ncu` 未做。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1793,12 +1809,32 @@
   整片错位——指纹＝「十项输出全 `max_abs` O(1)」，**不是**「只有 raw-`v` 相关项错」。对拍 `BF16_VDW`
   时两侧要喂**同一个 bf16 值**的 `v`（vdw 侧 bf16 tensor、bf16 侧 bf16-valued fp32 拷贝）；把「bf16⊂tf32
   扩宽精确」误推成「喂 fp32 也无妨」是本轮唯一 bug（harness 侧）。
+- **`intra` 折叠的 smem 增量是 `3·BT·KD·4`（q/k/g staging），`K=256` 会越 227 KiB 上限**（P7-92，§95.3）：
+  `b2_mma_probe.cu` 的折叠 staging `siq/sik/sig[BT][KD]`（`:598-608`）额外占 `3·16·KD·4` B
+  （`K=64 +13.8 KB / K=128 +26.1 KB / K=256 +50.7 KB`），而 `prod` 在 `K=256` 已 227968 B——加 intra 后
+  **278656 B = 272.1 KiB > 231424/232448**，`cudaFuncSetAttribute` 失败（launch `rc=-3`）。凡「折叠/staging
+  随 `K` 线性」的改动，先算 `smem_prod + 增量 ≤ 227 KiB`。**是资源边界、非正确性**；要收 `K=256` 需先复用
+  已在 smem 的 `kg`（`skg`）或降 staging dtype。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-91 补测 + P8-3**。
-  - P7-91（本轮）：**关闭 §93.6（P7-90）点名的「无 pipe 归因」空白——六段生产核的 bf16 原生入口
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-92 补测 + P8-3**。
+  - P7-92（本轮）：**关闭 §94.7（P7-91）的最后一条边界——`intra` 折叠（`-DB2M_INTRA`）× `K≠128` 的
+    纠错**。§94.7 点名「`b3_intra_probe.cu` 的 standalone 参照 `KD=128` 写死，需先 K 泛化才能做独立核对」。
+    本轮先做该泛化（`-DB3I_KD` 宏 + `BW=KD/NW`/`NBW=BW/8`、`nt<2→nt<NBW`；`BW==16` 下逐字等价），再逐位核对；
+    **`b2_mma_probe.cu` 一行未改**（折叠的 K 轴累加器 `idq/idk/idg` P7-90 已 `nt<NBW` 泛化，`prod_intra` 在
+    `K=64/128/256` 均编得过）。新增 `harness/check_bwd_b2_k128_intra.py`（`..._k128_intra.out.txt`，空闲卡）
+    + `docs/07` §95。**Part A0**：泛化后 `b3_intra_probe.cu`（`-DB3I_KD=128`）vs `git HEAD` **`dq/dk/db/dg`
+    4 shape 全逐位（`max_abs=0`）**。**Part A（关键）**：`V=K`、4 shape（含非整除 `T=250`/单 chunk `T=64`），
+    `prod_intra` vs `prod + 独立 b3intra(K)`——**`K=64/128` 的 `dqg/dkg` 全逐位（`max_abs=0`）**、`dg/db`
+    ≤**7.15e-7**（fp32 加法序 ulp，同 §66.2）、未触及输出 `dv2/dvb/dkgb/dA/dApre/dgk` 全逐位；sanity
+    `(prod_intra-prod).dqg` 与 `b3.dq` 逐值一致到 ≤1.19e-7。**`K=256` 因 smem 278656 B（272.1 KiB）> 227 KiB
+    不可行**（非正确性失败；折叠加 `3·BT·KD·4` q/k/g staging）。**Part B**：smem 增量随 `K` 线性
+    （+13.8/26.1/50.7 KB）。**Part C（CUPTI dev）**：`fold/(prod+b3)` `K=64` **0.842–0.905×（净赢）**、`K=128`
+    大 shape 1.049×/小 shape 0.922×（同 §66.3 方向）。**结论**：`K∈{64,128}` 折叠逐位正确；缺口只因参照写死
+    `KD`、非折叠本身；`K=256` 是资源而非正确性边界。默认部署仍 §45 的 `cf`。见 `docs/07` §95。
+  - P7-91（上轮）：**关闭 §93.6（P7-90）点名的「无 pipe 归因」空白——六段生产核的 bf16 原生入口
     × `K≠128`**（`BF16`/`BF16MMA`/`BF16_VDW`；P7-89 只做 base GEMM core、P7-83 只做六段核 K=128、
     P7-90 只做六段核 fp32，从没组合过），并把 §93.6 明确标的 `-DB2M_BF16_VDW` × 六段 `K≠128`
     「待验证」变成「逐位」。`b2_mma_probe.cu` 一行未改。新增 `harness/check_bwd_b2_k128_dtype.py`
@@ -3120,8 +3156,17 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-90 补测（+ P8-2/P8-3 一页纸补全）**，进入收尾/维护。
-  **P7-90（本轮）**：关闭 §92.7 点名的最后一条 `K≠V` 工程边界——**把 `K` 参数化扩到六段生产核**：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-92 补测（+ P8-2/P8-3 一页纸补全）**，进入收尾/维护。
+  **P7-92（本轮）**：关闭 §94.7 的最后一条边界——**`intra` 折叠（`-DB2M_INTRA`）× `K≠128` 的纠错**。
+  §94.7 点名「`b3_intra_probe.cu` 的 standalone 参照 `KD=128` 写死，需先 K 泛化才能做独立核对」；本轮先
+  泛化该参照（`-DB3I_KD` 宏 + `BW=KD/NW`/`NBW=BW/8`、`nt<2→nt<NBW`，`BW==16` 逐字等价），再逐位核对。
+  **`b2_mma_probe.cu` 一行未改**（折叠 K 轴累加器 P7-90 已 `nt<NBW`，`prod_intra` 在 `K=64/128/256` 均编得过）。
+  **Part A0**：泛化后 `b3`（`-DB3I_KD=128`）vs `git HEAD` **`dq/dk/db/dg` 4 shape 全逐位（`max_abs=0`）**。
+  **Part A**：`V=K`、4 shape，`prod_intra` vs `prod + 独立 b3intra(K)`——**`K=64/128` 的 `dqg/dkg` 全逐位
+  （`max_abs=0`）**、`dg/db` ≤7.15e-7（fp32 加法序 ulp）、未触及输出全逐位；**`K=256` 因 smem 272.1 KiB > 227 KiB
+  不可行**（资源非正确性）。**Part C（dev）**：`fold/(prod+b3)` `K=64` 0.842–0.905×（净赢）、`K=128` 1.049×/0.922×
+  （同 §66.3）。默认部署仍 §45 的 `cf`。见 `docs/07` §95。
+  **P7-90（上轮）**：关闭 §92.7 点名的最后一条 `K≠V` 工程边界——**把 `K` 参数化扩到六段生产核**：
   六段里所有硬编码 `nt<2`（BW=16）的 K 轴累加器（`acc3`、门控/`intra` 的 `idq/idk/idg`、`swall` 镜像、
   `db` 的 `dkgb*kg` 项）改 `nt<NBW`、数组 `[2][4]→[NBW][4]`、删 `#error`（共 27 处、算术一字未动）。
   `KD=VD=128` 改后 vs `git HEAD` **十项逐位相同**；`K∈{64,128,256}`+交叉 K 轴 `dqg` 逐位 0、`dkg/dg/dgk
