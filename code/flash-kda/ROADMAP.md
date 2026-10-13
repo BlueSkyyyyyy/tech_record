@@ -1051,6 +1051,25 @@
         `BVK=32`）+ 可选 `-DB2M_BF16MMA`，**生产核里 TMA 与 `BVK=64` 都不开**。**边界**：仅 `BT=16`/`K=V=128`/fp32
         输出/非 INTRA/HDW/DAMMA；`prod_bf16` 有 4 B spill；未做 ncu（机制由 §78/79/80 的 ncu + 本节 smem/占用率
         读清）、链级未测。**不改变 §45 的 `cf` 默认部署。** 见 `docs/07` §81。
+- [x] **P7-79** 把原生 bf16 mma（`-DB2M_BF16MMA`，P7-74）与 mma 化 DA（`-DB2M_DAMMA`，P7-66）
+        **落进 bf16 折叠生产链**（此前 §75 的链级变体是**非 DAMMA**、native bf16 mma **只在 kernel-only
+        量过**，§81.4 推荐却未验）——关掉 §78.5/§81.6 的「非 BF16MMA / 非 DAMMA 进链」边界。新增
+        `harness/check_bwd_b2_bf16mma_e2e.py`（`check_bwd_b2_bf16mma_e2e.out.txt`，空闲卡）+
+        `harness/ncu_b2_bf16mma_e2e_driver.py` / `harness/probe_bf16mma_e2e_ncu.sh`
+        （`probe_bf16mma_e2e_ncu.out.txt`）。**`b2_mma_probe.cu` 一行未改**（只组合已有旋钮）。变体
+        `pcb`（bf16 非折叠）/`pcib`（bf16 折叠）/`pcibm`（`+BF16MMA`）/`pcibmd`（`+BF16MMA+DAMMA`）。
+        **Part A**：四变体 vs FLA 六项 worst-case `dq 3.922e-3…dh0 9.365e-3` **与 §67/§75 逐值相同**；
+        `pcibm vs pcib` 只差累加序（`dq 9.0e-8/dk 6.9e-8/dg 1.1e-7`、`dv/dbeta/dh0` **逐位**）、
+        `pcibmd vs pcib` 再加 tf32-DA（`dk 3.5e-6/dbeta 3.0e-6/dg 4.0e-6`、`dq/dv/dh0` 逐位）。**Part B
+        （链级）**：`pcibm/pcib` **0.981–0.992**（4/4 稳定为正）、`pcibmd/pcib` **0.94–0.97**（`B8` 1918→
+        1805.5µs，叠 DAMMA 拿 ~3–6%）；`pcibm/cf` 1.06–1.36（`cf` 仍最快，默认部署不变）。**Part D（ncu）**：
+        折叠把 dyn smem 顶到 **116.35 KB → 1 block/SM**（非折叠 bf16 `prod_bf16` 仅 94848 B/2 blocks）——
+        **折叠让出 §78 的 2-block 红利**；native bf16 mma 的 `tensor% 3.14→1.90` 是 **bf16 吞吐 2×tf32
+        的口径产物**（同 §77.5 告警，本核 24% SM vs 25% DRAM vs 36% L2，本就不 tensor-bound）；`DAMMA`
+        把 bank conflict **40.7M→29.7M（−27%）** 正是那 3–6% 的机制；ncu `wait/long_sb` 反而变差而链更快，
+        再证 §25.5/§63.5「比值以 CUPTI/wall 为准」。**结论**：`BF16MMA`/`DAMMA` 免费、可叠加、逐位/底噪
+        无损；目标卡 CUDA B2 **折叠**形态建议 `-DB2M_BF16 -DB2M_BF16MMA [-DB2M_DAMMA]`，**默认部署仍
+        是 §45 的 `cf`**。**边界**：`BT=16`/`K=V=128`/fp32 输出/非 TMA。见 `docs/07` §82。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1539,8 +1558,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-78 补测 + P8-3**。
-  - P8-3（本轮）：**再次补全一页纸 `docs/08-summary.md`——此前正文收在 P7-73，缺失整个 bf16 原生入口收口弧
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-79 补测 + P8-3**。
+  - P7-79（本轮）：**把原生 bf16 mma（`-DB2M_BF16MMA`）与 mma 化 DA（`-DB2M_DAMMA`）落进 bf16 折叠
+    生产链**。§75 的链级变体是非 DAMMA、native bf16 mma 只在 kernel-only 量过（§78 Part C 0.659×），
+    §81.4 推荐却未验；本轮补上，关掉 §78.5/§81.6 的「非 BF16MMA / 非 DAMMA 进链」边界。新增
+    `harness/check_bwd_b2_bf16mma_e2e.py`（`check_bwd_b2_bf16mma_e2e.out.txt`，空闲卡）+
+    `ncu_b2_bf16mma_e2e_driver.py` / `probe_bf16mma_e2e_ncu.sh`（`probe_bf16mma_e2e_ncu.out.txt`）；
+    **`b2_mma_probe.cu` 一行未改**。**Part A**：四变体 vs FLA 六项 worst-case **与 §67/§75 逐值相同**
+    （`dq 3.922e-3…dh0 9.365e-3`）；`pcibm vs pcib` 只差累加序（`dv/dbeta/dh0` 逐位）、
+    `pcibmd vs pcib` 再加 tf32-DA（`dq/dv/dh0` 逐位）。**Part B**：`pcibm/pcib` **0.981–0.992**
+    （native bf16 mma 免费 ~1–2%）、`pcibmd/pcib` **0.94–0.97**（叠 DAMMA ~3–6%，`B8` 1918→1805.5µs）；
+    `pcibm/cf` 1.06–1.36。**Part D（ncu）**：折叠把 dyn smem 顶到 **116.35 KB → 1 block/SM**（让出 §78
+    非折叠 bf16 的 2-block 红利）；`tensor% 3.14→1.90` 是 bf16 吞吐 2×tf32 的口径产物；`DAMMA` 把
+    bank conflict **40.7M→29.7M** 正是那 3–6% 的机制。**结论**：`BF16MMA`/`DAMMA` 免费、可叠加、逐位
+    无损；折叠形态建议 `-DB2M_BF16 -DB2M_BF16MMA [-DB2M_DAMMA]`。**不改变 §45 的 `cf` 默认部署。**
+    见 `docs/07` §82。**下一步**：专题维持维护态——§45 的 `cf` 仍是目标卡反向默认；CUDA B2 研究形态的
+    staging/dtype/mma-ISA/store/DA/TMA/折叠 旋钮至此**全部关闭且无 `#error`**，有明确新需求（如
+    raw `v`/`dw` 也 bf16 / 六段核 `K≠V` / 六段核叠 `BF16MMA×TMA` 进链）再动。
+  - P8-3（上轮）：**再次补全一页纸 `docs/08-summary.md`——此前正文收在 P7-73，缺失整个 bf16 原生入口收口弧
     P7-74…P7-78（`docs/07` §77–§81）**。新增一段「P7-74…P7-78……『bf16 原生入口』的收口：从基础 GEMM 核
     到六段生产核、从 `cp.async` 到 TMA」逐条复述五轮结论（§77 原生 bf16 mma `m16n8k16` drop-in、大 shape
     因核已 L2-bound 仅 0.99×／§79 `BF16×TMA` 可组合但 TMA 在 bf16 核变 wash／§80 `BF16MMA×TMA` 可组合、

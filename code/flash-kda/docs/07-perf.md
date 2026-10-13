@@ -8476,3 +8476,104 @@ CUPTI `dev`（kernel-only，`b2mma_launch` 单次）：
 - **边界（诚实）**：仅 `BT=16`、`K=V=128`、fp32 输出、非 `INTRA`/非 `HDW`/非 `DAMMA`；`prod_bf16` 有
   **4 B spill**（vs 其余 0，量级噪声内）；`ncu` 未做（机制已由 §78/§79/§80 的 ncu 与本节 smem/占用率读清）；
   链级未测（§78.5 已有 bf16 生产核落链的结论，本节的差异只在 staging 机制、不改链级结论）。
+
+## 82. 把原生 bf16 mma（`-DB2M_BF16MMA`）与 mma 化 DA（`-DB2M_DAMMA`）落进 **bf16 折叠生产链**：逐位等价、链级 `pcibm/pcib` 0.98–0.99×、`pcibmd/pcib` 0.94–0.97×（P7-79）
+
+§75（P7-75）把 `-DB2M_BF16` 落进链（`pcb`/`pcib`），但链级只测到 **非 DAMMA**、且 §81.4 推荐的
+`-DB2M_BF16MMA`（原生 bf16 `mma.sync.m16n8k16`，P7-74）**只在基础 GEMM 核/生产核上 kernel-only 量过**
+（§78 Part C：`prod_bf16_mma` 0.659×、`prod_bf16` 0.684×），**从未进链**。本轮把这两个 bf16 原生入口
+一起接进完整反向链，关掉 §78.5/§81.6 的「非 BF16MMA / 非 DAMMA 进链」边界，并量出折叠形态下它们的边际。
+新增 `harness/check_bwd_b2_bf16mma_e2e.py`（`check_bwd_b2_bf16mma_e2e.out.txt`，空闲卡）+
+`harness/ncu_b2_bf16mma_e2e_driver.py` / `harness/probe_bf16mma_e2e_ncu.sh`
+（`probe_bf16mma_e2e_ncu.out.txt`，空闲卡）。**本轮 `b2_mma_probe.cu` 一行未改**——只把已有旋钮组合起来。
+
+组装链只吃 FlashKDA 16-chunk K1 workspace：
+
+```
+dAv(Triton) -> CUDA-B1 -> CUDA-B2-prod-fold[-DB2M_BF16][-DB2M_BF16MMA][-DB2M_DAMMA] -> 反向 cumsum
+```
+
+变体：`pc`/`pci`（fp32，§64 基线）、`pcb`（bf16 非折叠）、`pcib`（bf16 折叠，§75 基线）、
+`pcibm`（`+ -DB2M_BF16MMA`）、`pcibmd`（`+ -DB2M_BF16MMA -DB2M_DAMMA`）、`cf`（§45 最优链）。
+
+### 82.1 Part A：bf16 原生 mma / DAMMA 都是**代数无损**（只改 fp32 累加序 / tf32-DA）
+
+各变体 vs FLA autograd 的六项梯度 worst-case `max_rel`（4 组 CASES，含非整除 `T=250`、`g=0`、`B=2`）：
+
+| 字段 | `pcb` | `pcib` | `pcibm` | `pcibmd` | `pcibm` vs `pcib` | `pcibmd` vs `pcib` |
+|---|---|---|---|---|---|---|
+| `dq` | 3.922e-3 | 3.916e-3 | 3.916e-3 | 3.916e-3 | **9.0e-8** | **9.0e-8** |
+| `dk` | 3.455e-3 | 3.456e-3 | 3.456e-3 | 3.456e-3 | **6.9e-8** | 3.5e-6 |
+| `dv` | 6.795e-3 | 6.795e-3 | 6.795e-3 | 6.795e-3 | **0（逐位）** | **0（逐位）** |
+| `dbeta` | 6.012e-3 | 6.012e-3 | 6.012e-3 | 6.012e-3 | **0（逐位）** | 3.0e-6 |
+| `dg` | 7.790e-3 | 7.854e-3 | 7.854e-3 | 7.854e-3 | **1.1e-7** | 4.0e-6 |
+| `dh0` | 9.365e-3 | 9.365e-3 | 9.365e-3 | 9.365e-3 | **0（逐位）** | **0（逐位）** |
+
+- **四个变体 vs FLA 的 worst-case 与 §67/§75 逐值相同**（`dq 3.9e-3 … dh0 9.365e-3`）：bf16 staging、
+  折叠、原生 bf16 mma、mma 化 DA 都不改「梯度对 FLA 的落点」，全在 bf16/tf32 底噪上。
+- **`pcibm` vs `pcib`**：只有换 mma ISA 的 fp32 **累加序**（`dq/dk ~1e-7`、`dg 1.1e-7`），`dv/dbeta/dh0`
+  **逐位**（由 B1 / 门控定，不经 GEMM 核的累加序）。这与 §77.2「`bmm` vs `bf16(tf32)` 只差累加序、
+  `dgk` 逐位」同源。
+- **`pcibmd` vs `pcib`**：再加 DAMMA 的 **tf32-DA** 改写（`dk 3.5e-6 / dbeta 3.0e-6 / dg 4.0e-6`），
+  `dq/dv/dh0` 逐位——与 §72.1「真实链里 DA 的 tf32 改写量本身只有 ~1e-6 量级」互证。
+
+### 82.2 Part B：链级收益——`pcibm` 稳赢 ~1–2%，`pcibmd`（叠 DAMMA）~3–6%
+
+反向链 `dev`（CUPTI，空闲卡；wall 见原始输出，比值同向）：
+
+| case | FLA | `cf` | `pc` | `pci` | `pcb` | `pcib` | `pcibm` | `pcibmd` | `pcibm/pcib` | `pcibm/cf` |
+|---|---|---|---|---|---|---|---|---|---|---|
+| T512 H4 | 203.1 | 74.4 | 116.0 | 95.3 | 104.4 | 80.2 | 79.0 | 78.0 | 0.986 | 1.062 |
+| B2 T1024 H8 | 662.8 | 258.4 | 464.8 | 390.0 | 353.3 | 320.0 | 317.4 | 304.9 | 0.992 | 1.228 |
+| B8 T2048 H8 | 4130.4 | 1402.4 | 2907.6 | 2423.5 | 2035.5 | 1918.4 | 1901.9 | 1805.5 | 0.991 | 1.356 |
+| T250 H3 non-div | 141.1 | 50.3 | 83.0 | 65.6 | 78.6 | 59.6 | 58.5 | 56.7 | 0.981 | 1.163 |
+
+- **`pcibm/pcib` = 0.981–0.992（4/4 稳定为正）**：原生 bf16 mma 在整链上是真实但**小幅**的赢
+  （~1–2%），与 §77.3「大 shape 已 L2-bound 故 kernel-only 0.99×」一致——ISA 减半在这里换不到更多。
+- **`pcibmd/pcib` = 0.94–0.97**：再叠 **mma 化 DA** 拿 ~3–6%（`B8` 1918→1805.5）。这与 §69.4「DA 段内
+  2–3×、整核 +5–7%」同阶，是**本轮链级最大的单项**。
+- `cf` 仍是全场最快（`pcibm/cf` 1.06–1.36）：与前几轮「CUDA B2 生产核正确但更慢」的结论一致，
+  **默认部署不变**（§45 的 `cf`）。
+
+### 82.3 Part C/D：折叠形态把 bf16 的「占用率红利」吃掉；native bf16 mma 的 tensor% 下降是**口径产物**
+
+静态（ptxas）与 `ncu`（`b8t2048h8`，同一份操作数）：
+
+| build | regs | spill | dyn smem | occ-limit (smem/reg) | achieved warps | tensor% | bank-conflict | `long_sb` | `wait` |
+|---|---|---|---|---|---|---|---|---|---|
+| `b_fold` | 128 | 8 | **116.35 KB** | 1 / 2 | 12.46% | 3.14 | 40.7M | 2.92 | 1.01 |
+| `b_fold_mma` | 136 | 0 | 116.35 KB | 1 / **1** | 12.45% | **1.90** | 40.7M | **3.91** | 1.29 |
+| `b_fold_mma_da` | 128 | 0 | 116.35 KB | 1 / 2 | 12.45% | 2.25 | **29.7M** | 4.37 | 1.34 |
+
+三个读数：
+
+1. **折叠形态下 bf16 的 2-block/SM 红利消失**：非折叠 bf16 生产核 smem 仅 **94848 B → 2 blocks/SM**
+   （§78.4，`prod_bf16` 0.677× 的来源），但折进 `intra` 后 dyn smem 涨到 **116.35 KB > 227/2 KB**，
+   `launch__occupancy_limit_shared_mem = 1`——**折叠把 §78 那份占用率红利整条让出去了**。这也解释为何
+   `pcib` 相对 `pcb` 的链级优势（`B8` 2035.5→1918.4）**不是**来自占用率，而是来自「少一次 B3 kernel +
+   不落盘 `dA`」。
+2. **native bf16 mma 的 `tensor%` 从 3.14 降到 1.90 是口径产物、不是「tensor 更闲」**：H100 上 bf16 mma
+   吞吐是 tf32 的 **2×**，同一 FLOP 的 tensor 周期**减半**（同 §77.5 的告警）。SASS 上 mma 指令精确减半，
+   但本核本就不 tensor-bound（`sm__throughput` 24% vs `dram` 25%、`lts` 36%），故链级只值 ~1–2%。
+   顺带：`b_fold_mma` regs 128→136 使 **reg-limit 也降到 1**（65536/(136·256)=1.88），但 achieved 占用
+   **不变**（smem 已钉死 1 block），故寄存器不是旋钮。
+3. **DAMMA 的收益落点是 bank conflict**：`b_fold_mma_da` 把 shared-load bank conflict 从 **40.7M 砍到
+   29.7M**（−27%），与 §69.6/§71.4「标量 DA 是 bank-conflict 大户、mma 化削 ~40%」一致——这正是
+   `pcibmd` 那 3–6% 链级赢的机制。
+4. **ncu `wait`/`long_sb` 反而变差**（1.01→1.29 / 2.92→3.91）而链级 CUPTI 更快：再次踩到
+   §25.5/§63.5「`ncu` 窗口与 CUPTI/wall 不同源、可反号」——**比值以 CUPTI `dev`/wall 为准**，ncu 只读
+   静态量（smem/占用率/字节/bank conflict）。
+
+### 82.4 结论与设计输入
+
+- **边界关闭**：`-DB2M_BF16 × -DB2M_BF16MMA × -DB2M_DAMMA × [-DB2M_INTRA]` 在**完整反向链**上可跑、
+  **逐位/底噪等价**（六项 vs FLA 与 §67/§75 逐值相同），`b2_mma_probe.cu` 一字未改。
+- **链级边际**：`pcibm/pcib` **0.98–0.99×**（native bf16 mma，~1–2%）、`pcibmd/pcib` **0.94–0.97×**
+  （再叠 mma 化 DA，~3–6%）。**两者可叠加、都免费**（只换 mma ISA / DA 实现，不改布局）。
+- **目标卡 CUDA B2 bf16 部署输入（在 §81.4 基础上补充）**：若走**折叠**（单 launch、`dA` 不落盘）形态，
+  建议 **`-DB2M_BF16 -DB2M_BF16MMA [-DB2M_DAMMA]`**——`BF16MMA` 免费 ~1–2%、`DAMMA` 免费 ~3–6%；
+  但注意**折叠已把 smem 顶到 116 KB / 1 block/SM**，非折叠形态的 2-block 红利在折叠里拿不到，
+  取舍同 §66.6（大 shape 保两 kernel、小 shape 折叠）。**默认部署仍不变**：§45 的
+  `dAv→CUDA-B1→融合 Triton B2/B3→cumsum`（`cf`）。
+- **边界（诚实）**：仅 `BT=16`、`K=V=128`、fp32 输出、非 TMA；`pcib`/`pcibm` 有小 spill（8/0 B）；
+  `ncu` 只测 `b8t2048h8`/`b2t1024h8` 两档（机制由 §77/§78/§81 的 ncu 与本节 smem/bank-conflict 读清）。

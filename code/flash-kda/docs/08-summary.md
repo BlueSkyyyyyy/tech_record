@@ -453,3 +453,19 @@ dtype 为 bf16 时取 **`-DB2M_BF16`（`cp.async` staging、`BVK=32`）+ 可选 
 ——这是把 §67.4「`.float()` 往返部署税」在链级消掉（`pcb/pc 0.70–0.93×`、`pcb/FLA 0.49–0.55`）的唯一组合。**六段生产核里
 `TMA` 与 `BVK=64` 都不开**（前者净负、后者吃掉占用率头寸），故 §52/§54 在 **fp32 基础核**上成立的「TMA 读侧修复」**不
 外推**到 bf16 六段核；bf16 入口至此**无任何 `#error`**、且 `staging/dtype/mma-ISA/store/DA/TMA` 诸旋钮全部关阖。
+
+- **§82（P7-79）原生 bf16 mma / mma 化 DA 落进 bf16 折叠生产链（边界关闭、免费叠加）**：把 §81.4 推荐却未验的
+  `-DB2M_BF16MMA`（原生 bf16 `mma.sync.m16n8k16`）与 §66 的 `-DB2M_DAMMA`（mma 化 DA）一起接进完整反向链
+  （`pcb`/`pcib`/`pcibm`/`pcibmd`；`.cu` 一行未改）。**逐位/底噪等价**：四变体对 FLA 六项 worst-case 与 §67/§75
+  **逐值相同**（`dq 3.922e-3…dh0 9.365e-3`）；`pcibm vs pcib` 只差累加序（`dv/dbeta/dh0` 逐位）、
+  `pcibmd vs pcib` 再加 tf32-DA（`dq/dv/dh0` 逐位）。**链级**：`pcibm/pcib` **0.981–0.992**、`pcibmd/pcib`
+  **0.94–0.97**（`B8` 1918→1805.5µs）。**`ncu` 机制**：折叠把 dyn smem 顶到 **116.35 KB → 1 block/SM**
+  （让出 §78 非折叠 bf16 的 2-block 红利——故 `pcib` 相对 `pcb` 的赢来自「少一次 B3 kernel + `dA` 不落盘」而非占用率）；
+  native bf16 mma 的 `tensor% 3.14→1.90` 是 **bf16 吞吐 2×tf32 的口径产物**（本核不 tensor-bound）；
+  `DAMMA` 把 bank conflict **40.7M→29.7M（−27%）** 正是那 3–6% 的机制。
+
+**最终部署建议（补充 bf16 折叠形态，`docs/07` §82）**：默认路线 `cf`（上上条）不变。**若**目标卡选择 **CUDA B2 且走
+折叠**（单 launch、`dA` 不落盘），则在 `-DB2M_BF16` 基础上叠 **`-DB2M_BF16MMA`（免费 ~1–2%）** 与可选
+**`-DB2M_DAMMA`（免费 ~3–6%）**；注意**折叠已把 smem 顶到 116 KB / 1 block/SM**，非折叠形态的 2-block 红利在折叠里
+拿不到——大小 shape 的「两 kernel vs 折叠」取舍同 §66.6。CUDA B2 的 `staging/dtype/mma-ISA/store/DA/TMA/折叠`
+诸旋钮至此**全部关闭且无 `#error`**。
