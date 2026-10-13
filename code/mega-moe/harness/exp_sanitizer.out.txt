@@ -1,0 +1,84 @@
+NVIDIA H100 80GB HBM3, 9.0
+NVIDIA (R) Compute Sanitizer
+Copyright (c) 2020-2026 NVIDIA Corporation
+======================================================================
+A) 静态核对真实 tests/test_sanitizer.py
+======================================================================
+  env 清单:
+    CUDA_LAUNCH_BLOCKING = 1
+    DG_JIT_CHECK_NO_SPILLS = 1
+    DG_USE_NVIDIA_TOOLS = 1
+    DG_USE_TEMP_CUBLASLT_WORKSPACE = 1
+    PYTORCH_NO_CUDA_MEMORY_CACHING = 1
+    TORCH_SHOW_CPP_STACKTRACES = 1
+  [PASS] env 集合与预期一致 (6 项)
+  [PASS] flag --target-processes=application-only 存在 
+  [PASS] flag --destroy-on-device-error=context 存在 
+  [PASS] flag --force-blocking-launches 存在 
+  [PASS] flag --check-api-memory-access=no 存在 
+  [PASS] --kernel-name-exclude kns=nvjet 存在 
+  [PASS] 默认 tools = memcheck,synccheck 
+  [PASS] 默认 funcs = all 
+  exclude_files = ['test_sanitizer.py', 'generators.py', 'test_mega_moe.py', 'test_locality_domain.py']
+  [PASS] exclude test_sanitizer.py 
+  [PASS] exclude generators.py 
+  [PASS] exclude test_mega_moe.py 
+  [PASS] exclude test_locality_domain.py 
+
+  自动发现普查（复刻 test_sanitizer.py:42-49）:
+    test_attention         -> ['test_mqa_logits', 'test_paged_mqa_logits', 'test_sparse_mqa_logits']
+    test_bf16              -> ['test_cublaslt_batched_symm', 'test_cublaslt_batched_syrk', 'test_cublaslt_gemm', 'test_gemm', 'test_k_grouped_gemm_contiguous', 'test_m_grouped_gemm_contiguous', 'test_m_grouped_gemm_masked']
+    test_einsum            -> ['test_bhd_bhr_hdr', 'test_bhd_hdr_bhr', 'test_bhr_hdr_bhd', 'test_bmk_bnk_mn', 'test_fp8_bhd_bhr_hdr', 'test_fp8_bhd_hdr_bhr', 'test_fp8_bhr_hdr_bhd']
+    test_fp8_fp4           -> ['test_gemm', 'test_k_grouped_gemm_contiguous', 'test_m_grouped_gemm_contiguous', 'test_m_grouped_gemm_masked']
+    test_hyperconnection   -> ['test_hc_prenorm_gemm']
+    test_layout            -> ['test_k_grouped_psum_sf_layout_kernels', 'test_k_grouped_sf_layout_kernels', 'test_sf_layout_kernels']
+    test_lazy_init         -> []
+    test_legacy            -> ['test_k_grouped_gemm_contiguous_tl', 'test_m_grouped_gemm_contiguous_tl']
+    test_mega_gate         -> ['test_mega_gate', 'test_mega_gate_api_contract']
+    test_mega_mhc          -> ['test_mega_mhc', 'test_mega_mhc_api_contract']
+    utils                  -> []
+  [PASS] 自动发现 >= 20 个测试函数 (31)
+  [PASS] test_filter 装饰函数仍在列表里（运行期由装饰器跳过） 
+
+======================================================================
+B) 负样本控制 src/sanitizer_negctl.cu
+======================================================================
+  [PASS] negctl 编译成功 
+  [PASS] memcheck  clean      errors==0 (got=0)
+  [PASS] memcheck  oob        errors>0 (got=3) [Invalid __global__ write]
+  [PASS] memcheck  misalign   errors>0 (got=130) [misaligned]
+  [PASS] memcheck  mask_big   errors==0 (got=0)
+  [PASS] memcheck  mask_exact errors>0 (got=3) [out of bounds]
+  [PASS] synccheck clean      errors==0 (got=0)
+  [PASS] synccheck sync       errors>0 (got=64) [Barrier error]
+  [PASS] racecheck race       errors>0 (got=1) [Race reported]
+
+======================================================================
+C) 真实 test_sanitizer.py 驱动（H100 可跑的测试函数）
+======================================================================
+    test_hyperconnection.test_hc_prenorm_gemm [memcheck] 原始: ========= ERROR SUMMARY: 0 errors
+  [PASS] test_hyperconnection.test_hc_prenorm_gemm [memcheck] rc==0 且 0 errors (rc=0, errors=0, runs=1)
+    test_hyperconnection.test_hc_prenorm_gemm [synccheck] 原始: ========= ERROR SUMMARY: 0 errors
+  [PASS] test_hyperconnection.test_hc_prenorm_gemm [synccheck] rc==0 且 0 errors (rc=0, errors=0, runs=1)
+    test_layout.test_sf_layout_kernels [memcheck] 原始: ========= ERROR SUMMARY: 0 errors
+  [PASS] test_layout.test_sf_layout_kernels [memcheck] rc==0 且 0 errors (rc=0, errors=0, runs=1)
+    test_layout.test_sf_layout_kernels [synccheck] 原始: ========= ERROR SUMMARY: 0 errors
+  [PASS] test_layout.test_sf_layout_kernels [synccheck] rc==0 且 0 errors (rc=0, errors=0, runs=1)
+
+======================================================================
+D) 缓存分配器屏蔽效应（PYTORCH_NO_CUDA_MEMORY_CACHING 的“为什么”）
+======================================================================
+  caching=ON : gap=4194304 size_bytes=4194304 allocated=8388608 reserved=20971520 segment_gt_tensor=True
+  caching=OFF: gap=4194304 size_bytes=4194304 allocated=0 reserved=0 segment_gt_tensor=False
+  [PASS] caching=ON：reserved > allocated（大 segment 复用） 
+  [PASS] caching=OFF：reserved == 0（每 tensor 独立 cudaMalloc） 
+
+======================================================================
+E) DG_USE_NVIDIA_TOOLS 旁路 bench_kineto
+======================================================================
+  bench_kineto returned: 1 int
+  [PASS] DG_USE_NVIDIA_TOOLS=1 时 bench_kineto 直接返回 1 
+
+======================================================================
+总判定: 30 PASS / 0 FAIL
+======================================================================

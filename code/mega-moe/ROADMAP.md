@@ -1838,6 +1838,37 @@
       → `docs/69-deepep-engram-fetch.md`。配套博客 `content/posts/mega-moe-69-deepep-engram-fetch`
       （索引页新增第 69 篇）。
 
+### P60 增量（opt-in，补齐测试栈「内存安全 / 同步正确性」维度）
+
+- [x] **P60-1** **DeepGEMM 的内存安全验证层 `tests/test_sanitizer.py`（compute-sanitizer 驱动）**
+      （`tests/test_sanitizer.py`；`deep_gemm/testing/bench.py:87-90`；`csrc/runtime/runtime.hpp:45-48`；
+      `third-party/deep_jit/.../cuda/{options,backend}.hpp`；`deep_gemm/testing/utils.py:11-22`；
+      负样本 `src/sanitizer_negctl.cu`）。第 40 篇拆了计时/判对基座、第 41 篇生成器、第 43 篇逐位
+      断言——它们答「结果对不对」；本篇补另一个维度：**内存访问安不安全、同步用没用错**。
+      **架构无关（host/Python + 内联 PTX），H100 真机可跑**。
+      → `docs/70-deepgemm-sanitizer.md`（真实行号核对）：**驱动器**——`test_template:12-26`（每
+      用例单开子进程 + 固定 seed + `sys.path.append`）、自动发现 `:40-49`（遍历 `test*`、排 4 文件）、
+      CLI `:30-39`；**排除了谁/为什么**（`test_mega_moe`=多 rank+SM100、`test_locality_domain`=MPS
+      MLOPart）。**六个 env 的「为什么」**：`CUDA_LAUNCH_BLOCKING`、`DG_JIT_CHECK_NO_SPILLS`
+      （`options.hpp:47/117-118` + `backend.hpp:120-122` 扫 nvcc 输出命中 `spilled to local memory`
+      即断言失败）、`DG_USE_NVIDIA_TOOLS`（`bench.py:87-90` 返回 1 跳过 kineto）、
+      `DG_USE_TEMP_CUBLASLT_WORKSPACE`（`runtime.hpp:45-48` 躲 `cudaErrorCudartUnloading`）、
+      `PYTORCH_NO_CUDA_MEMORY_CACHING`（缓存分配器把越界藏进同段）、`TORCH_SHOW_CPP_STACKTRACES`。
+      **六个 flag 的「为什么」**：`--target-processes=application-only`（不插桩 JIT 子进程）、
+      `--destroy-on-device-error=context`（斩级联）、`--force-blocking-launches`、
+      `--check-api-memory-access=no`、`--kernel-name-exclude kns=nvjet`（`kns=`=mangled 名子串，
+      排 cuBLASLt）。H100 实测 `harness/exp_sanitizer.{py,sh,out.txt}` **30 PASS / 0 FAIL**：
+      A) 静态清单核对（env/flag/exclude/31 个自动发现函数）；B) 负样本 `src/sanitizer_negctl.cu`：
+      memcheck `clean=0`/`oob` 3（`1 bytes after the nearest allocation of size 1024 bytes`）/
+      `misalign` 130 / `mask_big=0`（缓存屏蔽）/`mask_exact` 3（命中）；synccheck `sync` 64
+      （`Barrier error: Divergent thread(s)`，且坐实 ptxas 会 if-convert 掉朴素发散 barrier）;
+      **racecheck** `race` 1（坐实 synccheck 抓不到数据竞争，而这不在默认 tools 里）；C) 真实
+      `test_sanitizer.py` 驱动 `test_hc_prenorm_gemm`/`test_sf_layout_kernels` × memcheck/synccheck
+      全 `0 errors` rc=0（`DG_USE_NVIDIA_TOOLS` 让 perf 打印 1000000us）；D) 缓存分配器
+      `reserved 20MiB > allocated 8MiB` vs 关闭后 `reserved=0`；E) `bench_kineto` 旁路返回 1。
+      **盲区**：不跑 racecheck/initcheck、排除 mega_moe/locality_domain、`kns=nvjet` 排除 cuBLASLt。
+      配套博客 `content/posts/mega-moe-70-deepgemm-sanitizer`（索引页新增第 70 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1862,8 +1893,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P59 各增量完成（P15-1…P41-1、P42-1…P59-1）。**
-  本轮 P59-1：新建 `docs/69-deepep-engram-fetch.md`（+`src/deepep_engram_fetch.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P60 各增量完成（P15-1…P41-1、P42-1…P60-1）。**
+  本轮 P60-1：新建 `docs/70-deepgemm-sanitizer.md`（+`src/sanitizer_negctl.cu`、
+  `harness/exp_sanitizer.{py,sh,out.txt}`）——补上测试栈的**第四个维度：内存安全 / 同步正确性**
+  （前三层是第 40 篇计时判对、第 41 篇生成器、第 43 篇逐位断言，都在问「结果对不对」）。
+  它不是一个测试用例，而是**驱动器** `tests/test_sanitizer.py`：把 `tests/` 下每个 `test*` 放进
+  `compute-sanitizer`、**独立子进程**重跑（sanitizer 命中精确错误会销毁 context，JIT/singleton
+  状态也不可跨用例复用）。拆透**六个 env + 六个 flag 的「为什么」**：`DG_JIT_CHECK_NO_SPILLS`
+  在 `backend.hpp:120-122` 把 ptxas 的 "spilled to local memory" 警告**升级为断言失败**；
+  `DG_USE_NVIDIA_TOOLS`（`bench.py:87-90`）跳过与 sanitizer 冲突的 kineto；
+  `DG_USE_TEMP_CUBLASLT_WORKSPACE`（`runtime.hpp:45-48`）躲开 driver 先卸载的
+  `cudaErrorCudartUnloading`；**最关键**的 `PYTORCH_NO_CUDA_MEMORY_CACHING`——缓存分配器会把越界
+  藏进同一大段，memcheck 视为合法；`--kernel-name-exclude kns=nvjet` 用 mangled 名子串排掉
+  cuBLASLt 预编译核。**H100 真机 30 PASS / 0 FAIL**：负样本控制证明这把尺子有效（`oob` 3 条
+  `1 bytes after the nearest allocation of size 1024 bytes`；`misalign` 130；synccheck `sync` 64；
+  **racecheck** `race` 1），并坐实两个反直觉点——缓存分配器**屏蔽**越界（`mask_big=0` vs
+  `mask_exact=3`）、`synccheck` **抓不到数据竞争**（只有 racecheck 抓，而它不在默认 tools）；
+  真实 `test_sanitizer.py` 驱动 `test_hc_prenorm_gemm`/`test_sf_layout_kernels` 在
+  memcheck+synccheck 下**全 0 errors**。盲区：不跑 racecheck/initcheck、排除
+  `test_mega_moe`/`test_locality_domain`。配套博客 `content/posts/mega-moe-70-deepgemm-sanitizer`
+  （索引页新增第 70 篇）。
+  上一轮 P59-1：新建 `docs/69-deepep-engram-fetch.md`（+`src/deepep_engram_fetch.cu`、
   `harness/exp_deepep_engram.{sh,py,out.txt}`）——补上 DeepEP **第四类通信原语 Engram**：
   **带索引的随机远程读（indexed RDMA gather）**，把「外部键值存储 / 记忆库 / 长上下文缓存」
   按全局索引从主人 rank 拉回本地、每层一个完成钩子。三个核心设计：① **数据面走 RDMA / SF 面走
@@ -2539,7 +2589,10 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P53 已完成（新增 **P53-1 DeepEP 的多 rank 屏障与 symmetric-memory 句柄层**：
+- **下一步**：P0~P60 已完成（最新 **P60-1 DeepGEMM 内存安全验证层 `tests/test_sanitizer.py`**：
+  compute-sanitizer 驱动的独立子进程测试栈 + 六 env/六 flag 的「为什么」；H100 真机 30 PASS 含
+  racecheck/synccheck/memcheck 负样本与缓存分配器屏蔽实证；详见上）。
+  上一轮 **P53-1 DeepEP 的多 rank 屏障与 symmetric-memory 句柄层**：
   每个 dispatch/combine/bucket kernel 起止都调的 `comm::barrier`——`NCCLGin` 对称窗口句柄
   （`get_sym_ptr` 同 offset 翻译）、`gpu_barrier` 两级域编排（scaleup NVLink + scaleout RDMA）、
   `nvlink_barrier_wo_local_sync` 的**免复位双相位协议**、`get_qp_mode` 的 SM↔QP 映射、
