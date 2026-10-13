@@ -1,0 +1,70 @@
+== 内核源码 ==
+5c74e74975e4c5088ee0f76187c7a59867994eabee90b5ffcc03f1ddd0b7abca  ~/proj/tech_record/code/mega-moe/src/mqa_indexer_backward.cu
+
+== 编译（sm_90）==
+  built /tmp/mqa_indexer_backward
+
+== 设备端自带报告（src/mqa_indexer_backward.cu，单进程）==
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+== [A] 正确性：CUDA 反向 vs host fp64 参考 ==
+  dq        relerr = 8.107e-08
+  dw        relerr = 8.724e-08
+  dkv_data  relerr = 1.003e-07
+  dkv_scale relerr = 9.484e-07
+  => [A] ALL PASS
+
+== [B] 吞吐（含 scatter 原子归约，受争用下界）==
+  T=1024,H=8,KV=512,D=128      2.039 ms/call  ~1.1 GFLOP/s
+  T=1024,H=8,KV=2048,D=128     8.480 ms/call  ~1.0 GFLOP/s
+  T=4096,H=8,KV=512,D=128      6.798 ms/call  ~1.3 GFLOP/s
+  注：dkv 的 `atomicAdd` scatter 量 O(T·KV·H·D)，是 indexer 反向的固有归约代价；
+      DeepSeek-V3.2 稀疏阶段每 query token 选 2048 KV（arXiv:2512.02556 §2.1）、
+      且 indexer 头数 H 很小，正是为了压住这个量。
+
+== 总判定：ALL PASS ==
+
+== Python：KL 蒸馏梯度 + 打分算子反向 + top-k 直通 + FP8 STE ===
+========================================================================
+MQA logits（lightning indexer）训练反向：KL 蒸馏 + 打分算子反向
+torch=2.12.0a0+0291f960b6.nv26.04.48445190  device=cuda  dtype=torch.float64
+gpu=NVIDIA H100 80GB HBM3
+========================================================================
+
+=== Part A: KL 蒸馏损失对 logits 的梯度 dL/dI = softmax(I) - p ===
+  [PASS] L 值一致                                                        L=8.152456
+  [PASS] dL/dI 解析 vs autograd                                         relerr=2.28e-17
+  [PASS] 无效位置 dL/dI = 0                                               max=0.0e+00
+  [PASS] 目标分布 p 每行 L1 归一化                                             max|sum-1|=1.1e-16
+  [PASS] dL/dI 行和 = 0（softmax 平移不变）                                   max=2.7e-16
+  [PASS] dL/dI 恰好等于 softmax - p                                       relerr=0.00e+00
+
+=== Part A2: 稀疏阶段式 (4)——只在 top-k 选中集 S_t 上算 KL ===
+  [PASS] S_t 恰含 topk 个且互异                                             topk=16
+  [PASS] 选中集外 dL/dI = 0                                               max=0.0e+00
+  [PASS] softmax 只在 S_t 内归一化                                          max|sum-1|=2.2e-16
+  [PASS] 式 (4) 解析 vs autograd                                         relerr=3.51e-17
+  [PASS] 稀疏梯度只占全序列的一部分                                                |dI_S|/|dI_full|=0.5509
+
+=== Part B: 打分算子反向（dL/dw, dq, dkv_data, dkv_scale）===
+  [PASS] dL/dw  解析 vs autograd                                        relerr=0.00e+00
+  [PASS] dL/dq  解析 vs autograd                                        relerr=0.00e+00
+  [PASS] dL/d(kv_data) 解析 vs autograd                                 relerr=1.84e-16
+  [PASS] dL/d(kv_scale) 解析 vs autograd                                relerr=1.87e-16
+
+=== Part C: 中心差分核验（对解析反查）===
+  [PASS] 4 个标量位置中心差分 vs 解析                                            最差 relerr=1.32e-08
+
+=== Part D: top-k 选择的直通（梯度只在选中集）===
+  [PASS] 未选中位置梯度严格 0                                                  max=0.0e+00
+  [PASS] 『全序列 softmax + 只算 S 的 loss』与式 (4) 不同                         relerr=0.2803
+
+=== Part E: FP8 量化 STE（straight-through estimator）===
+  [PASS] STE: dL/dw 解析 vs autograd                                    relerr=0.00e+00
+  [PASS] STE: dL/dq 解析 vs autograd                                    relerr=0.00e+00
+  [PASS] STE: dL/dkv 解析 vs autograd                                   relerr=9.12e-17
+  [PASS] 反例：舍入值不回接 → kv 不在图里（梯度 None/0）                               g=None
+  [PASS] FP8 量化误差量级（E4M3）                                             relerr=0.0109
+
+========================================================================
+总计：PASS=23  FAIL=0
+========================================================================

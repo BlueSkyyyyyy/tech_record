@@ -4500,6 +4500,29 @@
       → `docs/156-moe-backward-activation-epilogue-operator.md`。配套博客
       `content/posts/mega-moe-156-moe-backward-activation-epilogue-operator`（索引页新增第 156 篇）。
 
+### P147 增量（opt-in，补齐 MQA logits / lightning indexer 一直缺席的「训练反向」）
+
+- [x] **P147-1** **MQA logits（lightning indexer）的训练反向**（`csrc/apis/attention.hpp:18-44/45-65`；
+      `README.md:88-108`；`tests/test_attention.py:45/51/59/74/78-101/270-283`；
+      `deep_gemm/utils/math.py:26-49`；论文 DeepSeek-V3.2 技术报告 [arXiv:2512.02556](https://arxiv.org/abs/2512.02556) §2.1 式 (3)/(4)）。
+      第 19/60 篇把 MQA logits 的**前向**（连续/分页/稀疏）与**验收测试**拆透了，但 DeepGEMM **只实现
+      前向打分**——DeepSeek-V3.2 的 lightning indexer 是要**训练**的，反向梯度一直没讲。**主 kernel
+      SM100/SM90 专属、仅分析**；但**数学 / 量化 / 直通语义架构无关，H100(sm90) 真机可跑**。
+      → `docs/157-mqa-logits-indexer-backward.md`（真实行号核对）。**要点**：训练目标是**对主注意力
+      分布做 KL 蒸馏**（arXiv §2.1：目标 `p` = 各头分数求和后 L1 归一化（式 (3)，全序列）或只在
+      top-k 选中集 `S_t` 上（式 (4)，每 query 选 2048 KV），**indexer 输入 detach**、只由 `L_I` 训）。
+      **梯度三段**：① KL 梯度 `dL/dI = softmax(I) - p`（行和 0、无效位置 0；稀疏版在 `S_t` 内重新
+      归一化）；② 打分算子四路反向 `dw=Σ_s dI·relu(z)`、`dz=dI·w·1[z>0]`、`dq=Σ_s dz·k̂`、
+      `dkv_data=dL/dk̂·sf`、`dkv_scale=Σ_d dL/dk̂·kv`；③ top-k 直通（选择不可微、梯度只在选中集）+ FP8
+      STE（`x+(quant(x)-x).detach()`）。H100 实测 `harness/exp_mqa_logits_indexer_backward.{py,sh,out.txt}`
+      **23 PASS / 0 FAIL**：KL 梯度 vs autograd 2.28e-17、式 (4) 3.51e-17、四路反向 0/0/1.84e-16/1.87e-16、
+      中心差分 1.32e-8、top-k 直通未选中严格 0、FP8 STE ≤9.12e-17 且反例梯度 `None`、E4M3 误差 0.0109。
+      **CUDA 反向后端** `src/mqa_indexer_backward.cu`（grid=T、block=(32,H)、warp 归约 + dkv `atomicAdd`，
+      sha256 `5c74e749…`）：`[A]` 正确性 dq 8.1e-8 / dw 8.7e-8 / dkv_data 1.0e-7 / dkv_scale 9.5e-7 **ALL PASS**；
+      `[B]` 吞吐 `T=1024,KV=2048,D=128` **8.48ms**（~1 GFLOP/s，瓶颈是 `dkv` 跨 token **scatter 归约**
+      O(T·KV·H·D)——坐实「indexer 头数很小 / 只选 2048 KV」的工程动机）。与 MoE 反向对照表。配套博客
+      `content/posts/mega-moe-157-mqa-logits-indexer-backward`（索引页新增第 157 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4532,8 +4555,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P146 各增量完成（P15-1…P41-1、P42-1…P146-1）。**
-  本轮 P146-1：新建 `docs/156-moe-backward-activation-epilogue-operator.md`（+`src/moe_backward_activation_epilogue.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P147 各增量完成（P15-1…P41-1、P42-1…P147-1）。**
+  本轮 P147-1：新建 `docs/157-mqa-logits-indexer-backward.md`（+`src/mqa_indexer_backward.cu`、
+  `harness/exp_mqa_logits_indexer_backward.{py,sh,out.txt}`）——补齐 MQA logits（lightning indexer）
+  一直缺席的**训练反向**：第 19/60 篇只拆了**前向**，而 DeepGEMM 只有前向打分、indexer 却要训练。
+  训练目标是对主注意力分布做 **KL 蒸馏**（arXiv:2512.02556 §2.1 式 (3)/(4)：目标 `p` = 各头分数求和后
+  L1 归一化；稀疏阶段只在 top-k 选中集 `S_t` 上、每 query 选 2048 KV；**indexer 输入 detach**）。
+  **梯度三段**：① `dL/dI = softmax(I) - p`（行和 0、无效 0）；② 打分算子四路反向（`dw/dq/dkv_data/dkv_scale`）；
+  ③ top-k 直通 + FP8 STE。H100(sm90) 真机 **23 PASS / 0 FAIL**（vs autograd fp64 ≤2e-16、中心差分 1.3e-8）
+  + CUDA 反向后端 `src/mqa_indexer_backward.cu` `[A] ALL PASS`、揭示瓶颈是 `dkv` 跨 token **scatter 归约**
+  （~1 GFLOP/s，坐实「indexer 头数小 / 只选 2048 KV」）。索引页新增第 157 篇。
+  上一轮 P146-1：新建 `docs/156-moe-backward-activation-epilogue-operator.md`（+`src/moe_backward_activation_epilogue.cu`、
   `harness/exp_moe_backward_activation_epilogue.{sh,py,out.txt}`）——承接 P145-1 的口子①，把「SwiGLU 反向
   落地成 SM100 `epilogue_class` operator」推到**契约层**。**结论：数值上完全可行（真实原语逐位可复现），
   但「只加一个 operator 结构体」不够——epilogue 契约是「单输出 + 无逐元素索引 + 无状态」，SwiGLU 反向要
@@ -6177,13 +6209,19 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P146 已完成（最新 **P146-1 把「SwiGLU 反向落地成 SM100 `epilogue_class` operator」
-  推到契约层**——承接 P145-1 口子①。结论：数值上完全可行（真实 `math.cuh` store 分支逐位复现，
-  FP8 0/16777216、SF 0/524288），但 epilogue 契约是「单输出 + 无逐元素索引 + 无状态」，SwiGLU 反向要
-  「逐元素读 gate/up + 两个输出 + 两个 SF」，只加一个 operator 结构体不够，须扩三处契约；`EpilogueOperatorArgs`
-  24→64 B（每个 SM100 GEMM 都涨）；收益仍是第 155 篇的 <0.2% ⇒ 应留在独立元素级 kernel。索引页新增第 156 篇）。
+- **下一步**：P0~P147 已完成（最新 **P147-1 补齐 MQA logits / lightning indexer 一直缺席的「训练反向」**
+  ——第 19/60 篇只拆前向，DeepGEMM 也只有前向打分，而 DeepSeek-V3.2 的 indexer 要训练。训练目标是对
+  主注意力分布做 **KL 蒸馏**（arXiv:2512.02556 §2.1 式 (3)/(4)，目标 `p` = 各头分数求和后 L1 归一化，
+  稀疏阶段只在 top-k 选中集 `S_t`、每 query 选 2048 KV，indexer 输入 detach）；梯度三段：`dL/dI = softmax(I)-p`、
+  打分算子四路反向、top-k 直通 + FP8 STE。H100(sm90) 真机 **23 PASS/0 FAIL** + CUDA 反向后端 `[A] ALL PASS`，
+  揭示瓶颈是 `dkv` 跨 token **scatter 归约**。索引页新增第 157 篇）。
   可继续（均为增量、非承诺）：① 对 P96/P97/P123 的轻微漂移清单关键路径定点复核；② 把空出的 DeepEP
-  端到端留给 NCCL≥2.32.3 环境（见「阻塞」）；③ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落做定点复核。详见上。
+  端到端留给 NCCL≥2.32.3 环境（见「阻塞」）；③ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落 / indexer
+  的**分页 / 稀疏**反向变体做定点复核。详见上。
+  上一轮 P146-1：把「SwiGLU 反向落地成 SM100 `epilogue_class` operator」推到契约层——数值可行（真实
+  `math.cuh` store 分支逐位复现，FP8 0/16777216、SF 0/524288），但契约是「单输出 + 无逐元素索引 + 无状态」，
+  SwiGLU 反向要「逐元素读 gate/up + 两个输出 + 两个 SF」，只加一个 operator 结构体不够，须扩三处契约；
+  `EpilogueOperatorArgs` 24→64 B（每个 SM100 GEMM 都涨）；收益 <0.2% ⇒ 应留独立元素级 kernel。索引页新增第 156 篇）。
   上一轮 P145-1：把反向的 SwiGLU 段折进 dgrad 的 epilogue——能折、逐位无损、永不更差（字节 10→6 B/元素、
   `SEQ/FUSED` 1.057–1.317×、净省 ~13–15us），但该段仅占反向 1.10% ⇒ 整步收益 <0.2%；前提是前向不单独存 gate/up。
   上一轮 P144-1：补齐反向一直缺席的「非 GEMM 段」（SwiGLU 反向 + 激活梯度 FP8/UE8M0 重量化）——
