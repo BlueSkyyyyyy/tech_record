@@ -3134,6 +3134,37 @@
       （`:486-492` 与 `docs/29` §2 一致）；§7 判据**不贡献任何 C 判据**（同 `docs/29` §6）。
       配套博客 post `mega-kernel-31-mpk-unit-wrappers`（weight 32）并更新 `mega-kernel-00-index` 第 31 项。
 
+### P117 FP8 单测 wrapper 与 TP standalone 走读（`docs/31-mpk-fp8-wrappers.md`）
+
+- [x] **P117-1** 补掉 `docs/30`（P116-1）**§9「局限」明留的两条尾巴**——「**未逐行走读
+      `sm100_linear_fp8`（1107 行）/`sm100_fp8_moe`（810 行）等大 wrapper 的 fp8 scale 重排与 UMMA 内部**，
+      只核了注册符号与构建宏」与「`test_tp*_wrapper.cu` 的内部（`shim` 之后的 TP 切分）**未展开**」。
+      见 `docs/31-mpk-fp8-wrappers.md`（快照 `f9eb70c`，与 `docs/06`–`docs/30` 同快照；**纯源码走读
+      （资料分析），本轮无新实验**——SM100 在目标卡 H100/sm90 不可执行）。headline：
+      **(1) fp8 家族 host 侧有一层 `docs/30` 漏掉的共享层** `tests/runtime_python/blackwell/common/`——
+      **UE8M0 packed scale 的布局契约**：同时接受 **row-major**（stride `[packed_k,1]`）与 **DeepGEMM
+      column-major**（stride `[1,ceil16(outer)]`）两种布局，`detect_scale_layout`
+      （`sm100_fp8_runtime_registry.h:95-110`）在 C++ 与 Python（`sm100_fp8_scale_layout.py:52-62`）**逐行
+      同构**；`materialize_internal_scale_tensor`（wrapper `:174-200`）把非 DeepGEMM 布局**物化**成列主序；
+      **(2) 同一「128K 块 + UE8M0」语义在仓库有两种载体**——`sm100_linear_fp8` 把 UE8M0 **打包在 host**
+      （uint32），`sm100_fp8_moe` 传 **fp32 scale** 由 device **现场转 UE8M0**（`fp8_group_gemm_sm100.cuh:76-87`
+      + `fp8_tcgen05_after_thread_sync:153`，走 UTCCP→TMEM + `SM100_MMA_MXF8F6F4_SS`，7-warp 特化
+      `:89-108`）；**(3) fp8 MoE 单测 wrapper 的 2D grid 手推 `blockIdx.y` 指针**，注释自陈在
+      **「emulating the MPK runtime's per-CTA pointer offset logic from `runtime.cc`」**（`:13-14/112-113/
+      128-143`）——与 `docs/29` 的 `MIRAGE_UNIT_TEST` 同源；**(4) headline：`sm100_linear_fp8` 引用了
+      `f9eb70c` 快照里不存在的头文件** `blackwell/linear_fp8_sm100_splitk.cuh`（`#include` 在文件顶部
+      `:19`，全仓无此文件；split-K 符号 `kernel::linear_fp8_sm100_splitk_wrapper` `:812` 亦无定义）⇒
+      该扩展在快照里**无法编译**（连非 split-K 路径也编译不过）——是 `docs/30` 报的 `sm100_mla_prefill_tp8`
+      「缺源文件」的**同族、更靠前**一处；**(5) TP standalone**（`sm100_mla_mtp_decode/test_tp{2,4,8}_wrapper.cu`）
+      是**对外部 standalone 内核（`v037_tp*`）的机械 port 验证器**（`__global__→__device__ __noinline__`、
+      **删 PDL** `cudaTriggerProgrammaticLaunchCompletion`、加 thread guard，头部注释 `:1-13`），TP =
+      **head 维切分**（`NUM_HEADS = 128/64/32/16`），且 tp2/tp4/tp8 **各自重定义一份 `ptx` 命名空间**
+      （`elect_sync`/`mbar_*`/`tcgen05_mma`/`tcgen05_commit`）——「同一套惯用法实现 N 遍」的又一肉身。
+      判据**不贡献任何 C 判据**（同 `docs/29` §6/`docs/30` §7）；唯一与 C1–C5 有关的事实是 TP port
+      **删掉了 PDL**（MPK 运行时不支持，对上 `docs/03` §2.5）。配套博客 post
+      `mega-kernel-32-mpk-fp8-wrappers`（weight 33）并更新 `mega-kernel-00-index` 第 32 项；
+      并把「快照里 `sm100_linear_fp8` 缺头文件」补进「已知坑」。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3309,10 +3340,35 @@
   指向**不存在的**源文件（构建必失败）、`sm100_mla_mtp_decode/` 的 `test_tp*_wrapper.cu` 是**无
   setup/pybind、含 `int main`** 的 standalone 程序（不在 pytest 收集内）。是否「真失败」取决于各目录的
   build/`sys.path` 隔离，本文只记录静态事实、**不判对错**。
+- **快照 `f9eb70c` 里 `sm100_linear_fp8` 引用不存在的头文件**（P117-1/`docs/31` §6）：
+  `tests/runtime_python/blackwell/sm100_linear_fp8/runtime_kernel_wrapper_sm100.cu:19`
+  `#include "blackwell/linear_fp8_sm100_splitk.cuh"`，但全仓**无此文件**；且 split-K 符号
+  `kernel::linear_fp8_sm100_splitk_wrapper`（`:812`）在快照里**无定义**（仅此一处提及）——因 include
+  在文件顶部**无条件**，连 `split_k==1` 的非 split-K 路径也编译不过。与 `docs/30` 报的
+  `sm100_mla_prefill_tp8`（setup `sources=` 指向缺失 `.cu`）是**同族、更靠前**一处：**读单测 wrapper
+  时不能只看 `setup.py` 的 `sources=`/`name=`/注册表，必须读它的 `#include` 头**。静态事实、**不判对错**。
+- **`sm100_fp8_moe` 的 scale 是 fp32、`sm100_linear_fp8` 的 scale 是 UE8M0 packed uint32**（P117-1/`docs/31`
+  §2/§5）：同为「128K 块 + UE8M0」语义，`linear` 在 host 打包成 uint32 并支持 row-major/DeepGEMM
+  列主序两种布局（`common/sm100_fp8_scale_layout.*`），`moe` 传 fp32 由 device 现场转 UE8M0
+  （`fp8_group_gemm_sm100.cuh:76-87`）。比对两者 scale 契约前先确认载体，别把两种约定的张量互喂。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P116-1 完成（1/1）**。补齐 `docs/29`（P115-1）**§7 明留的尾巴**「§3 只精读 `moe_linear`，
+- 当前进度：**P117-1 完成（1/1）**。补齐 `docs/30`（P116-1）**§9「局限」明留的两条尾巴**
+  （fp8 大 wrapper 内部 / `test_tp*_wrapper.cu` 内部）——把 `sm100_linear_fp8` / `sm100_fp8_moe` /
+  `sm100_mla_mtp_decode` 三个「重目录」打开，见 `docs/31-mpk-fp8-wrappers.md`（快照 `f9eb70c`，
+  **纯源码走读、无新实验**）。headline：**(a) 补上 `docs/30` 漏掉的共享层** `common/`
+  （`sm100_fp8_scale_layout.{h,py}` + `sm100_fp8_runtime_registry.h`）——**UE8M0 packed scale 的
+  row-major / DeepGEMM 列主序布局契约**，C++ 与 Python 逐行同构；host 侧把非 DeepGEMM 布局**物化**成
+  列主序；**(b) 同一「128K+UE8M0」语义两种载体**（linear host 打包 uint32 vs MoE device 现场转，
+  走 UTCCP→TMEM + `MXF8F6F4` 7-warp 特化）；**(c) fp8 MoE 单测 2D grid 手推 `blockIdx.y` 指针**，
+  注释自陈 emulating `runtime.cc`；**(d) headline：`sm100_linear_fp8` 引用快照里不存在的头文件
+  `linear_fp8_sm100_splitk.cuh`（+ 未定义符号），该扩展不可编译**；**(e) TP standalone** 是对外部
+  `v037_tp*` 内核的**机械 port 验证器**（删 PDL、加 thread guard），TP = head 维切分
+  （`NUM_HEADS=128/64/32/16`），三个变体各自重定义 `ptx`。判据**不贡献任何 C 判据**（同 `docs/29`/`docs/30`）。
+  配套博客 post `mega-kernel-32-mpk-fp8-wrappers`（weight 33）并更新 `mega-kernel-00-index` 第 32 项；
+  并把「`sm100_linear_fp8` 缺头文件」补进「已知坑」。
+- 此前：**P116-1 完成（1/1）**。补齐 `docs/29`（P115-1）**§7 明留的尾巴**「§3 只精读 `moe_linear`，
   未逐行走读 12 个 blackwell wrapper、`cute/hopper/gemm.cu` 与 `attention_tail_wrapper.cu` 的内部」——
   见 `docs/30-mpk-unit-wrappers.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。headline——**修正
   `docs/29` §2「当前代际对齐」**：blackwell 家族有三类更隐蔽的失配（**同名扩展撞名**

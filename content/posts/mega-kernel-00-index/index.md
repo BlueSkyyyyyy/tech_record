@@ -49,5 +49,6 @@ categories: ["算子开发"]
 29. [MPK 运行层「可执行规范」走读：`test_mode` 套件与 `PersistentKernel` API]({{< relref "mega-kernel-29-mpk-testmode" >}}) —— `test_mode` 如何把常驻 kernel 变成「跑一次就退」的测试装置，fork/join/case 2·3/residual-stripping 的可执行规范，以及 C1–C5 的运行层见证
 30. [MPK 单 kernel 单测层走读：`runtime_kernel_wrapper` 与 `tests/runtime_python`]({{< relref "mega-kernel-30-mpk-unit-tests" >}}) —— 夹在 device task 与 megakernel 端到端之间的「一个 task = 一整颗 kernel」回归网：五套 pybind extension、大面积注册失配，以及 `MIRAGE_UNIT_TEST` 宏的语义
 31. [MPK 单测 wrapper 家族走读：blackwell 家族与 cute/hopper 的两类落地]({{< relref "mega-kernel-31-mpk-unit-wrappers" >}}) —— 14 个 SM100 目录的扩展名/符号/测试三方对照（同名扩展撞名、缺源文件、standalone 程序），以及「一个 task = 一颗 kernel」的单 CTA/cluster 形态与 `extern "C"`/CUTLASS 两条非 pybind 路线
+32. [MPK FP8 单测 wrapper 与 TP standalone 走读：UE8M0 scale 布局契约与机械 port]({{< relref "mega-kernel-32-mpk-fp8-wrappers" >}}) —— 把 `sm100_linear_fp8`/`sm100_fp8_moe`/`sm100_mla_mtp_decode` 两个重目录打开：UE8M0 packed scale 的 row-major/DeepGEMM 列主序布局探测层、UTCCP+UMMA 的 warp 特化、2D grid 手推指针（emulating `runtime.cc`），以及 TP=2/4/8 对外部 standalone 的机械 port
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
