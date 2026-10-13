@@ -4288,6 +4288,37 @@
       （`.cu` sha256 `ea2ec399…`）。配套博客 `content/posts/mega-moe-148-wgrad-epilogue-overlap`
       （索引页新增第 148 篇）。
 
+### P139 增量（opt-in，把 P138-1 结尾的 EPI-B「同 kernel 融合」在真 kernel 上落地验证）
+
+- [x] **P139-1** **EPI-B 落到真 kernel：多出来的 235MB/步读，到底藏住了吗**
+      （`csrc/apis/gemm.hpp:488-535/519-521/529`、`csrc/jit_kernels/impls/sm90_bf16_gemm.hpp:89/91`、
+      `deep_gemm/include/deep_gemm/impls/sm90_bf16_gemm.cuh:302-349/381-384`、
+      `csrc/jit_kernels/impls/sm90_fp8_gemm_1d1d.hpp:84`、`sm90_fp8_gemm_1d2d.hpp:81`、
+      `csrc/jit_kernels/heuristics/sm90.hpp:14`；对照第 12/15/19/27/135/136/145/146/147/148 篇）。
+      第 148 篇把「把 S 步归约藏进 GEMM」走到双重否定，只剩**同 kernel 的 `EPI-B`**（epilogue
+      fresh bf16 store → **bf16 累加器 RMW**），给了字节账（`470·S` 最少）与上/下界（~2.29×/~1.69×），
+      但**从没在真 kernel 上落地**（原话「本机无法改 SM90 kernel 做端到端验证」）。**本篇发现**：
+      DeepGEMM 的 **SM90 BF16 稠密 `bf16_gemm_nt` 本来就支持 bf16 累加器 RMW**——`c=d`（bf16）时
+      `GemmDesc.with_accumulation=true`（`sm90_bf16_gemm.hpp:91`、`.cd_dtype=d.scalar_type()` `:89`），
+      epilogue 由 `SM90_TMA_STORE_2D` 换成 **`SM90_TMA_REDUCE_ADD_2D`**（`sm90_bf16_gemm.cuh:381-384`，
+      smem 亦 bf16 `:302-349`）：**不用改任何 kernel 即可端到端落地 EPI-B**（`use_deterministic_algorithms
+      (True)` 强制走 DeepGEMM 自身 kernel、否则回退 cuBLASLt `gemm.hpp:519-521`）。**H100 实测**
+      （空闲 GPU 单进程，`dW2 [E·M,N]=[16384,N=7168]`，一份 bf16 D=235MB，`harness/exp_wgrad_epib.{sh,py,out.txt}`）：
+      ① **Part A**：`bf16_gemm_nt(a,b,d,c=d)` 两步 == `2·(a@b)`（relerr 1.409e-3 与单步一致）、fp32 累积
+      4.075e-7，profile 抓到模板尾 `kWithAccumulation` 由 `false`→`true`；② **Part B** 三协议端到端
+      （K=512/步，单步 fresh 197.8us/608 TFLOPS、EPI-B 307.2us、fp32 累积 545.1us）：`SEQ`（每步 fresh
+      bf16 + `torch.sum`）对 `EPI-B` 在 `S=1` 是 **1.88×**、`S≥8` 只有 **0.96–0.97×（略慢）**，
+      而 `EPI-B/REF`（fp32 累积）稳定 **1.73–1.77×**、几乎正好落在第 148 篇**下界 1.69×**；③ **Part C**
+      藏不藏只看算术强度：同一份 RMW 读的暴露比例随 `K=512→2048→4096` 为 **157%/161%/47%**
+      （wgrad K 仅 512、最不计算受限）；带宽锚 读一份 bf16 D 235MB=**88.0us/2.67 TB/s**；
+      ④ **`ncu` 单 launch**：fresh DRAM 读 74.78MB/写 215.10MB/202.5us，EPI-B 读 **312.75MB**（多出
+      **237.97MB = 恰好一份 D**）/写 214.33MB/300.5us，`238MB/98us=2.43 TB/s`——**这份读按满速露在墙上、
+      没被计算盖住**。**结论**：EPI-B 是真的、可跑的（`TMA_REDUCE_ADD_2D`），但「多出来的 235MB/步读」
+      在 wgrad 形状下**彻底暴露（157%）**，EPI-B 只拿回对 fp32 累积的 1.7×、并不优于「批量 fresh +
+      一次流式归约」。载体是 BF16 操作数（FP8 1D2D `sm90_fp8_gemm_1d2d.hpp:81` 不支持累加），
+      SM100 wgrad `tn` 同族 fp32 累积、**仅分析**。配套博客
+      `content/posts/mega-moe-149-wgrad-epib-accumulate`（索引页新增第 149 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4318,8 +4349,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P138 各增量完成（P15-1…P41-1、P42-1…P138-1）。**
-  本轮 P138-1：新建 `docs/148-wgrad-epilogue-overlap.md`
+- 当前进度：**P0~P14 全部完成；P15~P139 各增量完成（P15-1…P41-1、P42-1…P139-1）。**
+  本轮 P139-1：新建 `docs/149-wgrad-epib-accumulate.md`
+  （+`harness/exp_wgrad_epib.{sh,py,out.txt}`）——把第 148 篇留下的「同 kernel EPI-B」**在真 kernel 上落地**。
+  **发现**：SM90 BF16 稠密 `bf16_gemm_nt(c=d)` 本就是 **bf16 累加器 RMW**（`sm90_bf16_gemm.hpp:91`
+  `with_accumulation`；epilogue `SM90_TMA_REDUCE_ADD_2D` `sm90_bf16_gemm.cuh:381-384`），**无需改 kernel**。
+  **H100 实测**（空闲 GPU，`dW2 [16384,7168]`、一份 bf16 D=235MB）：Part A RMW 两步 == `2·(a@b)`、profile
+  模板 bool `false→true`；Part B 单步 fresh 197.8us/608 TFLOPS、EPI-B 307.2us、fp32 累积 545.1us，`EPI-B/REF`
+  稳定 **1.73–1.77×（顶到第 148 篇下界 1.69×）**，但 `SEQ/EPI-B` 在 S≥8 只有 **0.96–0.97×（略慢）**；
+  Part C 同一份 RMW 读的暴露比例 `K=512/2048/4096 → 157%/161%/47%`（藏不藏只看算术强度，wgrad K=512 最不
+  计算受限）；带宽锚读一份 D 235MB=88.0us/2.67 TB/s。**`ncu`**：fresh 读 74.78MB/写 215.10MB/202.5us，
+  EPI-B 读 **312.75MB（+237.97MB=恰好一份 D）**/写 214.33MB/300.5us → **多读的那份 D 按满速 2.43 TB/s
+  露在墙上**。**结论**：EPI-B 真实可跑，但「多出来的 235MB/步读」在 wgrad 形状下**彻底暴露（157%）**，
+  它只拿回对 fp32 累积的 1.7×、并不优于「批量 fresh + 一次流式归约」；要再快只剩「减少字节」的路。索引页新增第 149 篇。
+  上一轮 P138-1：新建 `docs/148-wgrad-epilogue-overlap.md`
   （+`src/wgrad_epilogue_overlap.cu`、`harness/exp_wgrad_epilogue_overlap.{sh,py,out.txt}`）——量化第 147 篇
   留下的「每步 bf16 梯度要串行读一遍」口子能否藏进 GEMM。**字节账**：批量 ALT-OPT `470·S+940`；侧流增量
   INC-F `1410·S`/INC-B `940·S`；**同 kernel epilogue 融合 EPI-B `470·S`（最少）**。**消费核**（架构无关、
@@ -5869,8 +5912,24 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P138 已完成（最新 **P138-1 把 wgrad 的 S 步归约藏进 GEMM：epilogue 融合 / 侧流重叠到底行不行**：
-  第 147 篇留的口子（「每步 bf16 梯度要串行读一遍」，可继续①）**走到了能核对的数，是个双重否定的负结果**。
+- **下一步**：P0~P139 已完成（最新 **P139-1 把 wgrad 的 EPI-B 落到真 kernel：多出来的 235MB/步读，藏住了吗**：
+  第 148 篇留的口子（「在一个可改的 SM90 GEMM 分支上做 EPI-B 端到端验证」，可继续①）**落地了**。**发现**：
+  DeepGEMM SM90 BF16 稠密 `bf16_gemm_nt(c=d)` 本就是 **bf16 累加器 RMW**（`sm90_bf16_gemm.hpp:91`
+  `with_accumulation`；epilogue `SM90_TMA_REDUCE_ADD_2D` `sm90_bf16_gemm.cuh:381-384`），**无需改 kernel**。
+  **H100 实测**（空闲 GPU，`dW2 [16384,7168]`、一份 bf16 D=235MB）：Part A RMW 两步 == `2·(a@b)`、profile
+  模板 bool `false→true`；Part B 单步 fresh 197.8us/608 TFLOPS、EPI-B 307.2us、fp32 累积 545.1us，`EPI-B/REF`
+  稳定 **1.73–1.77×（顶到第 148 篇下界 1.69×）**，但 `SEQ/EPI-B` 在 S≥8 只有 **0.96–0.97×（略慢）**；
+  Part C 同一份 RMW 读的暴露比例 `K=512/2048/4096 → 157%/161%/47%`（藏不藏只看算术强度，wgrad K=512 最不
+  计算受限）；带宽锚读一份 D 235MB=88.0us/2.67 TB/s。**`ncu`**：fresh 读 74.78MB/写 215.10MB/202.5us，
+  EPI-B 读 **312.75MB（+237.97MB=恰好一份 D）**/写 214.33MB/300.5us → **多读的那份 D 按满速 2.43 TB/s
+  露在墙上**。**结论**：EPI-B 真实可跑，但「多出来的 235MB/步读」在 wgrad 形状下**彻底暴露（157%）**，
+  它只拿回对 fp32 累积的 1.7×、并不优于「批量 fresh + 一次流式归约」；要再快只剩「减少字节」的路。索引页新增第 149 篇）。
+  可继续（均为增量、非承诺）：
+  ① 把「减少字节」的路走深——例如让 wgrad 的累加器/输出更小（FP8 累加器、或把「读一份 bf16 D」也省掉的分块
+  归约），量端到端能否越过 1.77×；② 对 P96/P97/P123 的轻微漂移清单关键路径定点复核；
+  ③ 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）。详见上）。
+  上一轮 P138-1 把 wgrad 的 S 步归约藏进 GEMM：epilogue 融合 / 侧流重叠到底行不行：
+  第 147 篇留的口子（「每步 bf16 梯度要串行读一遍」）**走到了能核对的数，是个双重否定的负结果**。
   ① **字节账**：批量 ALT-OPT `470·S+940`；侧流增量 INC-F `1410·S` / INC-B `940·S`（每步 RMW master）；
   **同 kernel epilogue 融合 EPI-B `470·S`（最少）**。② **消费核**（`src/wgrad_epilogue_overlap.cu`，架构无关、
   H100 真跑、vs CPU double 5.96e-8）：纯读 3005 GB/s、fused_all S=8 3084 GB/s、≥264 block 即满带宽。
@@ -5878,13 +5937,7 @@
   **0.54–0.84×（比串行还慢）**；`set_num_sms` 限核、扫消费者块数都救不了（恒 ~0.58）→ 不是吞吐而是不并行。
   ④ **决定性控制**：伪 epilogue 生产者动态 smem 0→128KB 消费者藏住 53%→92%、**227KB（=DeepGEMM
   `sm90.hpp:14` `232448`）时 −0.1%（完全串行）**——`232448 B/SM` 让侧流 block 无从 co-reside（印证第 144 篇）。
-  ⑤ **数值**：bf16 累加器 S=16 relerr 5.03e-3、cos 0.9999875（< FP8 噪声 3.6e-2，精度免费）。**结论**：唯一剩余门
-  是**同 kernel 的 EPI-B**（字节最优，上界 `REF/(S·t_gemm)≈2.29×`、下界 ≈1.69×，需改 DeepGEMM 1D2D
-  epilogue），侧流/外部融合在 SM90 被 smem 占用堵死。SM100 `tn` 同族、仅分析。索引页新增第 148 篇）。
-  可继续（均为增量、非承诺）：
-  ① 若环境允许，在一个**可改的** SM90 GEMM 分支上做 EPI-B 端到端验证（epilogue fresh bf16 store → bf16
-  累加器 RMW），量「多出来的 235MB/步读」到底藏没藏进去；② 对 P96/P97/P123 的轻微漂移清单关键路径定点复核；
-  ③ 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）。详见上）。
+  ⑤ **数值**：bf16 累加器 S=16 relerr 5.03e-3、cos 0.9999875（< FP8 噪声 3.6e-2，精度免费）。索引页新增第 148 篇）。
   上一轮 P137-1 MoE wgrad 的「fp32 物化/归约税」量化：融合进优化器能拉回多少 2.2×：
   把第 146 篇结尾「只有优化器直接吃 bf16 才拿回 2.2×」落地。三协议（`REF` 每步 1D1D fp32 累积 /
   `ALT-R` 每步 bf16 + `torch.sum` + 优化器 / `ALT-OPT` 每步 bf16 + **融合进优化器**、不落地 fp32 梯度）；
