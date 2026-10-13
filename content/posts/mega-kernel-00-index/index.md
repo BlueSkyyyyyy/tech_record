@@ -50,5 +50,6 @@ categories: ["算子开发"]
 30. [MPK 单 kernel 单测层走读：`runtime_kernel_wrapper` 与 `tests/runtime_python`]({{< relref "mega-kernel-30-mpk-unit-tests" >}}) —— 夹在 device task 与 megakernel 端到端之间的「一个 task = 一整颗 kernel」回归网：五套 pybind extension、大面积注册失配，以及 `MIRAGE_UNIT_TEST` 宏的语义
 31. [MPK 单测 wrapper 家族走读：blackwell 家族与 cute/hopper 的两类落地]({{< relref "mega-kernel-31-mpk-unit-wrappers" >}}) —— 14 个 SM100 目录的扩展名/符号/测试三方对照（同名扩展撞名、缺源文件、standalone 程序），以及「一个 task = 一颗 kernel」的单 CTA/cluster 形态与 `extern "C"`/CUTLASS 两条非 pybind 路线
 32. [MPK FP8 单测 wrapper 与 TP standalone 走读：UE8M0 scale 布局契约与机械 port]({{< relref "mega-kernel-32-mpk-fp8-wrappers" >}}) —— 把 `sm100_linear_fp8`/`sm100_fp8_moe`/`sm100_mla_mtp_decode` 两个重目录打开：UE8M0 packed scale 的 row-major/DeepGEMM 列主序布局探测层、UTCCP+UMMA 的 warp 特化、2D grid 手推指针（emulating `runtime.cc`），以及 TP=2/4/8 对外部 standalone 的机械 port
+33. [MPK SM100 手工线性 task 走读：`linear_fp8_sm100` 家族与生产布线]({{< relref "mega-kernel-33-mpk-sm100-linear" >}}) —— 把 SM100 block-scaled FP8 线性 task 的 device 身体打开（TMA 生产者/UMMA leader/UTCCP scale 转置/TMEM epilogue 四角色、两条独立身体），并与生产 `register_task` 的 `kNumSMs=1`/`kNumStages=25` 适配逐参数对照
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

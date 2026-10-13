@@ -3165,6 +3165,38 @@
       `mega-kernel-32-mpk-fp8-wrappers`（weight 33）并更新 `mega-kernel-00-index` 第 32 项；
       并把「快照里 `sm100_linear_fp8` 缺头文件」补进「已知坑」。
 
+### P118 SM100 手工线性 task device 内部走读（`docs/32-mpk-sm100-linear-tasks.md`）
+
+- [x] **P118-1** 补掉 `docs/31`（P117-1）**§10「局限」明留的两条尾巴**——「`linear_fp8_sm100` 的家族里
+      `_scheduler`/`_epilogue_utils`/`_cute_tie` 未逐行走」与「`docs/24` 的 `TaskType` 目录里这些 SM100
+      task 的**登记/接线未复核**」。见 `docs/32-mpk-sm100-linear-tasks.md`（快照 `f9eb70c`，与
+      `docs/06`–`docs/31` 同快照；**纯源码走读（资料分析），本轮无新实验**——SM100 `sm_100f` 在目标卡
+      H100/sm90 不可执行）。headline：
+      **(A) device 内部**：`linear_fp8_sm100` 家族实为 **10 个文件**（`docs/31` §4 写「11 个头」是笔误），
+      且是**两套互不相干的 device 身体**——身体 A `linear_fp8_sm100.cuh`（828 行）是**手写 SMEM 描述符 +
+      裸 PTX `tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale`** 的四角色 warp 特化
+      （warp0 TMA 生产者 `:290-402` / warp1 UMMA leader `:403-534`（`mma_t :486-487`、UTCCP scale
+      copy `:463-483`）/ warp2 UTCCP scale 转置 `:535-575` / epilogue warps `:576-734` 走 TMEM→寄存器
+      （`SM100_TMEM_LOAD_32dp32b{4,8}x`）→残差加→BF16 pack→`SM90_TMA_STORE`），`Allocator1Sm`/`2Sm`
+      按 `kNumMulticast` 选（`:61-63`）但**只实例化了单 CTA 的 `SM100_MMA_MXF8F6F4_SS`**；身体 B
+      `linear_fp8_1d2d_sm100.cuh`（727 行）是 CuTe 高层实现（`make_tiled_mma`/`local_tile`/
+      `tile_to_mma_shape :117-188`）；**公开 pybind `linear_fp8_1d2d_sm100` 实际走身体 A**，身体 B
+      **只有 `task_header.cuh:37` 的 `#include`、全仓无调用者**（同 `docs/16`/`20`/`22` 的「已实现未接线」）。
+      **(B) 生产布线（补「未与生产路径对跑」）**：op `linear_fp8_sm100`/`linear_fp8_with_residual_sm100`
+      （`graph.cc:852-858`）→ `TASK_LINEAR_FP8_SM100=276`/`…_WITH_RESIDUAL=277`（`runtime_header.h:163-164`）
+      → `register_linear_fp8_sm100_task`（`task_register.cc:4772`）生成 `linear_fp8_sm100_task_impl<…>`
+      （`:4826-4868`），实参为 `BLOCK 32/16/128`、**`kNumStages=25`（压 207 KB SMEM）**、
+      **`kNumMulticast=1`（不用 2SM/cluster）**、**`GemmType::Normal` + `EpilogueIdentity`**；
+      **顶部有明确标注的 HACK**（`:4817-4825`）：持久化内核里 `blockIdx.x` 是 **worker 索引**，
+      故把 `kNumSMs` 设为 `MPK_MAX_NUM_WORKERS` 使**单 CTA 一趟处理完所有 tile**——与
+      `_scheduler.cuh:170-172` 的注释同源，把「one task = one CTA」从 `docs/07` 的 Hopper 形态推进到
+      SM100 block-scaled 形态；BF16 同族 `linear_sm100_mpk.cuh`（生产登记 `TASK_LINEAR_SM100=253`，
+      `task_register.cc:2151/2304`）无 block scale，与 FP8 版/MoE 版三足对照。
+      判据**不贡献任何 C 判据**（同 `docs/29` §6/`docs/30` §7/`docs/31` §9；C1/C2 由运行层拿）。
+      配套博客 post `mega-kernel-33-mpk-sm100-linear`（weight 34）并更新 `mega-kernel-00-index` 第 33 项；
+      并把「公开 `linear_fp8_1d2d_sm100` 实际走 1d1d 身体 / 身体 B 未接线」与「SM100 手写 GEMM 的
+      `kNumSMs=1` 适配」补进「已知坑」。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3351,10 +3383,33 @@
   §2/§5）：同为「128K 块 + UE8M0」语义，`linear` 在 host 打包成 uint32 并支持 row-major/DeepGEMM
   列主序两种布局（`common/sm100_fp8_scale_layout.*`），`moe` 传 fp32 由 device 现场转 UE8M0
   （`fp8_group_gemm_sm100.cuh:76-87`）。比对两者 scale 契约前先确认载体，别把两种约定的张量互喂。
+- **「1d2d」公开符号 ≠ 「1d2d」device 身体**（P118-1/`docs/32` §3）：`sm100_linear_fp8` 的 pybind 名是
+  `linear_fp8_1d2d_sm100`（`runtime_kernel_wrapper_sm100.cu:1101`），但其 dispatch 实际调
+  `launch_linear_fp8_1d1d_sm100`（`:962`，身体 `linear_fp8_sm100.cuh`）；同目录的
+  `linear_fp8_1d2d_sm100.cuh`（727 行，CuTe 风格 `linear_fp8_1d2d_sm100_task_impl`）在快照里
+  **只有 `task_header.cuh:37` 的 `#include`、全仓无调用者**。按名字/目录推断「哪份 device 代码在跑」
+  会错，须回到 wrapper 的 dispatch + `grep` 调用者。
+- **SM100 手写 GEMM 进持久化内核时用 `kNumSMs=1` 收成单 CTA**（P118-1/`docs/32` §5.3）：`linear_fp8_sm100`
+  本是「`blockIdx.x` 当 tile scheduler」的多 CTA GEMM，但 MPK 的持久化 worker 里 `blockIdx.x` 是
+  **worker 索引**，`register_linear_fp8_sm100_task` 只能把 `kNumSMs` 设成 `MPK_MAX_NUM_WORKERS`
+  使首块恒有效、单 CTA 一趟遍历所有 tile（`task_register.cc:4817-4840` 的 HACK 注释 + `kNumStages=25`
+  压 207 KB SMEM）。读这类 task 的 grid/block 语义前先确认「它是单 CTA 循环还是多 CTA grid」。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P117-1 完成（1/1）**。补齐 `docs/30`（P116-1）**§9「局限」明留的两条尾巴**
+- 当前进度：**P118-1 完成（1/1）**。补齐 `docs/31`（P117-1）**§10「局限」明留的两条尾巴**
+  （`linear_fp8_sm100` 家族内部 / SM100 task 的生产登记未复核）——把 SM100 block-scaled FP8 线性
+  task 的 device 身体与生产布线打开，见 `docs/32-mpk-sm100-linear-tasks.md`（快照 `f9eb70c`，
+  **纯源码走读、无新实验**）。headline：**(A) `linear_fp8_sm100` 家族实为 10 文件、两套 device 身体**
+  （A：手写描述符+裸 PTX `tcgen05…block_scale` 的四角色 warp 特化；B：CuTe 高层实现）——公开 pybind
+  `linear_fp8_1d2d_sm100` 实走身体 A，**身体 B 只有 `#include`、无调用者**；**(B) 生产布线**：op→
+  `TASK_LINEAR_FP8_SM100=276`→`register_linear_fp8_sm100_task`，`kNumStages=25`/`kNumMulticast=1`/
+  `GemmType::Normal`/`EpilogueIdentity`，并有**明确标注的 `kNumSMs=1` HACK**（持久化内核里
+  `blockIdx.x` 是 worker 索引）⇒「one task = one CTA」在 SM100 的具体适配；BF16 同族
+  `linear_sm100_mpk`（`TASK_LINEAR_SM100=253`）。判据**不贡献任何 C 判据**（同 `docs/29`–`docs/31`）。
+  配套博客 post `mega-kernel-33-mpk-sm100-linear`（weight 34）并更新 `mega-kernel-00-index` 第 33 项；
+  并把两条坑补进「已知坑」。
+- 此前：**P117-1 完成（1/1）**。补齐 `docs/30`（P116-1）**§9「局限」明留的两条尾巴**
   （fp8 大 wrapper 内部 / `test_tp*_wrapper.cu` 内部）——把 `sm100_linear_fp8` / `sm100_fp8_moe` /
   `sm100_mla_mtp_decode` 三个「重目录」打开，见 `docs/31-mpk-fp8-wrappers.md`（快照 `f9eb70c`，
   **纯源码走读、无新实验**）。headline：**(a) 补上 `docs/30` 漏掉的共享层** `common/`
