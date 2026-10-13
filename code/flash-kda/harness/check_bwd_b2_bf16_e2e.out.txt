@@ -1,0 +1,180 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+B1 flags: -lcuda -DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY -DB1T_SPROXY
+building CUDA B1 ...
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY -DB1T_SPROXY ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1_tma_deploy.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_PROD=1 -DB2M_HDW=1 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_prod_e2e_hdw.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_PROD=1 -DB2M_HDW=1 -DB2M_INTRA=1 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_prod_e2e_hdw_intra.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_PROD=1 -DB2M_HDW=1 -DB2M_BF16=1 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_prod_e2e_hdw_bf16.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_PROD=1 -DB2M_HDW=1 -DB2M_INTRA=1 -DB2M_BF16=1 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_prod_e2e_hdw_intra_bf16.so
+====================================================================================================
+Part A: bf16 prod chains vs FLA autograd, and vs the fp32 `pc` chain
+  pcb  = CUDA-B1 + (prod_hdw_bf16 + Triton B3 intra);  pcib = prod_hdw_bf16_intra
+====================================================================================================
+
+# T=128 H=2  B=1 T=128 H=2 seed=0 g_scale=1.0
+    pcb   dq vs FLA          max_abs=8.790e-04  max_rel=1.308e-03  ref_max=6.721e-01
+    pcib  dq vs FLA          max_abs=9.189e-04  max_rel=1.367e-03  ref_max=6.721e-01
+    pcb   dq vs pc           max_abs=2.702e-04  max_rel=4.019e-04  ref_max=6.723e-01
+    pcb   dq vs pci          max_abs=2.771e-04  max_rel=4.122e-04  ref_max=6.722e-01
+    pcb   dk vs FLA          max_abs=9.227e-04  max_rel=1.357e-03  ref_max=6.802e-01
+    pcib  dk vs FLA          max_abs=9.793e-04  max_rel=1.440e-03  ref_max=6.802e-01
+    pcb   dk vs pc           max_abs=2.765e-04  max_rel=4.065e-04  ref_max=6.804e-01
+    pcb   dk vs pci          max_abs=2.878e-04  max_rel=4.229e-04  ref_max=6.805e-01
+    pcb   dv vs FLA          max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    pcib  dv vs FLA          max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    pcb   dv vs pc           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.915e-02
+    pcb   dv vs pci          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.915e-02
+    pcb   dbeta vs FLA       max_abs=1.810e-03  max_rel=4.552e-03  ref_max=3.977e-01
+    pcib  dbeta vs FLA       max_abs=1.810e-03  max_rel=4.552e-03  ref_max=3.977e-01
+    pcb   dbeta vs pc        max_abs=3.871e-06  max_rel=9.691e-06  ref_max=3.994e-01
+    pcb   dbeta vs pci       max_abs=3.871e-06  max_rel=9.691e-06  ref_max=3.994e-01
+    pcb   dg vs FLA          max_abs=1.446e-04  max_rel=4.177e-03  ref_max=3.462e-02
+    pcib  dg vs FLA          max_abs=1.413e-04  max_rel=4.080e-03  ref_max=3.462e-02
+    pcb   dg vs pc           max_abs=3.935e-05  max_rel=1.136e-03  ref_max=3.463e-02
+    pcb   dg vs pci          max_abs=4.716e-05  max_rel=1.362e-03  ref_max=3.463e-02
+    pcb   dh0 vs FLA         max_abs=1.912e-04  max_rel=4.608e-03  ref_max=4.150e-02
+    pcib  dh0 vs FLA         max_abs=1.912e-04  max_rel=4.608e-03  ref_max=4.150e-02
+
+# T=256 H=4  B=1 T=256 H=4 seed=1 g_scale=1.0
+    pcb   dq vs FLA          max_abs=1.628e-03  max_rel=2.357e-03  ref_max=6.908e-01
+    pcib  dq vs FLA          max_abs=1.627e-03  max_rel=2.356e-03  ref_max=6.908e-01
+    pcb   dq vs pc           max_abs=5.569e-04  max_rel=8.062e-04  ref_max=6.907e-01
+    pcb   dq vs pci          max_abs=5.581e-04  max_rel=8.078e-04  ref_max=6.908e-01
+    pcb   dk vs FLA          max_abs=1.326e-03  max_rel=1.662e-03  ref_max=7.980e-01
+    pcib  dk vs FLA          max_abs=1.373e-03  max_rel=1.720e-03  ref_max=7.980e-01
+    pcb   dk vs pc           max_abs=3.236e-04  max_rel=4.054e-04  ref_max=7.983e-01
+    pcb   dk vs pci          max_abs=3.899e-04  max_rel=4.885e-04  ref_max=7.982e-01
+    pcb   dv vs FLA          max_abs=2.755e-04  max_rel=4.518e-03  ref_max=6.098e-02
+    pcib  dv vs FLA          max_abs=2.755e-04  max_rel=4.518e-03  ref_max=6.098e-02
+    pcb   dv vs pc           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.093e-02
+    pcb   dv vs pci          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.093e-02
+    pcb   dbeta vs FLA       max_abs=3.443e-03  max_rel=5.835e-03  ref_max=5.900e-01
+    pcib  dbeta vs FLA       max_abs=3.442e-03  max_rel=5.834e-03  ref_max=5.900e-01
+    pcb   dbeta vs pc        max_abs=5.215e-06  max_rel=8.811e-06  ref_max=5.919e-01
+    pcb   dbeta vs pci       max_abs=5.215e-06  max_rel=8.811e-06  ref_max=5.919e-01
+    pcb   dg vs FLA          max_abs=2.389e-04  max_rel=6.953e-03  ref_max=3.436e-02
+    pcib  dg vs FLA          max_abs=2.379e-04  max_rel=6.924e-03  ref_max=3.436e-02
+    pcb   dg vs pc           max_abs=5.510e-05  max_rel=1.603e-03  ref_max=3.438e-02
+    pcb   dg vs pci          max_abs=5.362e-05  max_rel=1.560e-03  ref_max=3.437e-02
+    pcb   dh0 vs FLA         max_abs=3.201e-04  max_rel=9.365e-03  ref_max=3.418e-02
+    pcib  dh0 vs FLA         max_abs=3.201e-04  max_rel=9.365e-03  ref_max=3.418e-02
+
+# T=250 H=3 (non-div)  B=1 T=250 H=3 seed=2 g_scale=1.0
+    pcb   dq vs FLA          max_abs=2.031e-03  max_rel=3.922e-03  ref_max=5.180e-01
+    pcib  dq vs FLA          max_abs=2.028e-03  max_rel=3.916e-03  ref_max=5.180e-01
+    pcb   dq vs pc           max_abs=4.709e-04  max_rel=9.089e-04  ref_max=5.181e-01
+    pcb   dq vs pci          max_abs=4.703e-04  max_rel=9.076e-04  ref_max=5.182e-01
+    pcb   dk vs FLA          max_abs=9.084e-04  max_rel=1.745e-03  ref_max=5.206e-01
+    pcib  dk vs FLA          max_abs=9.086e-04  max_rel=1.745e-03  ref_max=5.206e-01
+    pcb   dk vs pc           max_abs=5.829e-04  max_rel=1.119e-03  ref_max=5.208e-01
+    pcb   dk vs pci          max_abs=5.820e-04  max_rel=1.118e-03  ref_max=5.208e-01
+    pcb   dv vs FLA          max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    pcib  dv vs FLA          max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    pcb   dv vs pc           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.824e-02
+    pcb   dv vs pci          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.824e-02
+    pcb   dbeta vs FLA       max_abs=2.509e-03  max_rel=5.159e-03  ref_max=4.863e-01
+    pcib  dbeta vs FLA       max_abs=2.509e-03  max_rel=5.159e-03  ref_max=4.863e-01
+    pcb   dbeta vs pc        max_abs=8.374e-06  max_rel=1.722e-05  ref_max=4.862e-01
+    pcb   dbeta vs pci       max_abs=8.374e-06  max_rel=1.722e-05  ref_max=4.862e-01
+    pcb   dg vs FLA          max_abs=3.703e-04  max_rel=5.968e-03  ref_max=6.205e-02
+    pcib  dg vs FLA          max_abs=3.713e-04  max_rel=5.985e-03  ref_max=6.205e-02
+    pcb   dg vs pc           max_abs=8.454e-05  max_rel=1.357e-03  ref_max=6.231e-02
+    pcb   dg vs pci          max_abs=8.354e-05  max_rel=1.341e-03  ref_max=6.231e-02
+    pcb   dh0 vs FLA         max_abs=2.849e-04  max_rel=5.187e-03  ref_max=5.493e-02
+    pcib  dh0 vs FLA         max_abs=2.849e-04  max_rel=5.187e-03  ref_max=5.493e-02
+
+# T=512 H=4 g=2  B=1 T=512 H=4 seed=3 g_scale=2.0
+    pcb   dq vs FLA          max_abs=2.131e-03  max_rel=3.218e-03  ref_max=6.623e-01
+    pcib  dq vs FLA          max_abs=2.132e-03  max_rel=3.219e-03  ref_max=6.623e-01
+    pcb   dq vs pc           max_abs=1.074e-03  max_rel=1.622e-03  ref_max=6.625e-01
+    pcb   dq vs pci          max_abs=1.075e-03  max_rel=1.622e-03  ref_max=6.625e-01
+    pcb   dk vs FLA          max_abs=2.229e-03  max_rel=3.455e-03  ref_max=6.452e-01
+    pcib  dk vs FLA          max_abs=2.230e-03  max_rel=3.456e-03  ref_max=6.452e-01
+    pcb   dk vs pc           max_abs=5.820e-04  max_rel=9.018e-04  ref_max=6.454e-01
+    pcb   dk vs pci          max_abs=5.801e-04  max_rel=8.988e-04  ref_max=6.454e-01
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+    pcb   dv vs FLA          max_abs=3.856e-04  max_rel=5.691e-03  ref_max=6.776e-02
+    pcib  dv vs FLA          max_abs=3.856e-04  max_rel=5.691e-03  ref_max=6.776e-02
+    pcb   dv vs pc           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.782e-02
+    pcb   dv vs pci          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.782e-02
+    pcb   dbeta vs FLA       max_abs=3.072e-03  max_rel=6.006e-03  ref_max=5.115e-01
+    pcib  dbeta vs FLA       max_abs=3.072e-03  max_rel=6.006e-03  ref_max=5.115e-01
+    pcb   dbeta vs pc        max_abs=1.830e-05  max_rel=3.592e-05  ref_max=5.094e-01
+    pcb   dbeta vs pci       max_abs=1.830e-05  max_rel=3.592e-05  ref_max=5.094e-01
+    pcb   dg vs FLA          max_abs=2.652e-04  max_rel=3.909e-03  ref_max=6.785e-02
+    pcib  dg vs FLA          max_abs=2.611e-04  max_rel=3.848e-03  ref_max=6.785e-02
+    pcb   dg vs pc           max_abs=1.722e-04  max_rel=2.537e-03  ref_max=6.787e-02
+    pcb   dg vs pci          max_abs=1.730e-04  max_rel=2.547e-03  ref_max=6.789e-02
+    pcb   dh0 vs FLA         max_abs=4.717e-04  max_rel=6.708e-03  ref_max=7.031e-02
+    pcib  dh0 vs FLA         max_abs=4.717e-04  max_rel=6.708e-03  ref_max=7.031e-02
+
+# B2 T=513 H=2 (non-div)  B=2 T=513 H=2 seed=4 g_scale=1.0
+    pcb   dq vs FLA          max_abs=1.832e-03  max_rel=3.042e-03  ref_max=6.022e-01
+    pcib  dq vs FLA          max_abs=1.831e-03  max_rel=3.041e-03  ref_max=6.022e-01
+    pcb   dq vs pc           max_abs=5.525e-04  max_rel=9.170e-04  ref_max=6.026e-01
+    pcb   dq vs pci          max_abs=5.531e-04  max_rel=9.175e-04  ref_max=6.028e-01
+    pcb   dk vs FLA          max_abs=1.460e-03  max_rel=2.190e-03  ref_max=6.666e-01
+    pcib  dk vs FLA          max_abs=1.472e-03  max_rel=2.209e-03  ref_max=6.666e-01
+    pcb   dk vs pc           max_abs=4.364e-04  max_rel=6.543e-04  ref_max=6.670e-01
+    pcb   dk vs pci          max_abs=4.343e-04  max_rel=6.508e-04  ref_max=6.673e-01
+    pcb   dv vs FLA          max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    pcib  dv vs FLA          max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    pcb   dv vs pc           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.473e-02
+    pcb   dv vs pci          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.473e-02
+    pcb   dbeta vs FLA       max_abs=2.641e-03  max_rel=2.992e-03  ref_max=8.827e-01
+    pcib  dbeta vs FLA       max_abs=2.641e-03  max_rel=2.992e-03  ref_max=8.827e-01
+    pcb   dbeta vs pc        max_abs=4.120e-06  max_rel=4.671e-06  ref_max=8.821e-01
+    pcb   dbeta vs pci       max_abs=4.120e-06  max_rel=4.671e-06  ref_max=8.821e-01
+    pcb   dg vs FLA          max_abs=3.208e-04  max_rel=7.790e-03  ref_max=4.118e-02
+    pcib  dg vs FLA          max_abs=3.235e-04  max_rel=7.854e-03  ref_max=4.118e-02
+    pcb   dg vs pc           max_abs=9.486e-05  max_rel=2.303e-03  ref_max=4.120e-02
+    pcb   dg vs pci          max_abs=9.224e-05  max_rel=2.240e-03  ref_max=4.118e-02
+    pcb   dh0 vs FLA         max_abs=1.439e-04  max_rel=5.954e-03  ref_max=2.417e-02
+    pcib  dh0 vs FLA         max_abs=1.439e-04  max_rel=5.954e-03  ref_max=2.417e-02
+
+# T=192 H=2 g=0  B=1 T=192 H=2 seed=5 g_scale=0.0
+    pcb   dq vs FLA          max_abs=3.464e-04  max_rel=6.491e-04  ref_max=5.337e-01
+    pcib  dq vs FLA          max_abs=3.184e-04  max_rel=5.965e-04  ref_max=5.337e-01
+    pcb   dq vs pc           max_abs=7.365e-05  max_rel=1.379e-04  ref_max=5.339e-01
+    pcb   dq vs pci          max_abs=2.007e-04  max_rel=3.761e-04  ref_max=5.337e-01
+    pcb   dk vs FLA          max_abs=4.225e-04  max_rel=7.305e-04  ref_max=5.784e-01
+    pcib  dk vs FLA          max_abs=4.489e-04  max_rel=7.760e-04  ref_max=5.784e-01
+    pcb   dk vs pc           max_abs=2.682e-04  max_rel=4.635e-04  ref_max=5.785e-01
+    pcb   dk vs pci          max_abs=2.692e-04  max_rel=4.654e-04  ref_max=5.784e-01
+    pcb   dv vs FLA          max_abs=3.565e-04  max_rel=5.438e-03  ref_max=6.556e-02
+    pcib  dv vs FLA          max_abs=3.565e-04  max_rel=5.438e-03  ref_max=6.556e-02
+    pcb   dv vs pc           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.577e-02
+    pcb   dv vs pci          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.577e-02
+    pcb   dbeta vs FLA       max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    pcib  dbeta vs FLA       max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    pcb   dbeta vs pc        max_abs=1.043e-06  max_rel=2.592e-06  ref_max=4.024e-01
+    pcb   dbeta vs pci       max_abs=1.043e-06  max_rel=2.592e-06  ref_max=4.024e-01
+    pcb   dg vs FLA          max_abs=2.044e-05  max_rel=3.366e-03  ref_max=6.074e-03
+    pcib  dg vs FLA          max_abs=3.704e-05  max_rel=6.099e-03  ref_max=6.074e-03
+    pcb   dg vs pc           max_abs=7.177e-06  max_rel=1.181e-03  ref_max=6.076e-03
+    pcb   dg vs pci          max_abs=3.703e-05  max_rel=6.094e-03  ref_max=6.077e-03
+    pcb   dh0 vs FLA         max_abs=4.727e-05  max_rel=7.519e-03  ref_max=6.287e-03
+    pcib  dh0 vs FLA         max_abs=4.727e-05  max_rel=7.519e-03  ref_max=6.287e-03
+
+worst-case max_rel across cases:
+  pcb          9.365e-03
+  pcib         9.365e-03
+  pcb_vs_pc    2.537e-03
+  pcb_vs_pci   6.094e-03
+
+========================================================================================================
+Part B: backward-only chain dev/wall (idle card): FLA vs cf vs pc vs pcb / pcib
+  wall = event-pair / reps (primary); dev = CUPTI over-attributes tiny launches.
+========================================================================================================
+  case               |  FLA dev |  cf dev  pc dev  pcb dev pcib dev |  pc/FLA  pcb/FLA  pcb/pc
+  T=512 H=4          |    204.8 |    75.9   116.1    104.8     84.0 |    0.57     0.51    0.90
+      wall pc/pcb/pcib = 465.1/443.9/321.7 us   | pcb kernels B1 41.3 prod 20.6
+  B2 T=1024 H=8      |    661.0 |   257.1   463.0    352.0    326.2 |    0.70     0.53    0.76
+      wall pc/pcb/pcib = 495.4/457.8/345.2 us   | pcb kernels B1 78.3 prod 120.5
+  B8 T=2048 H=8      |   4150.6 |  1409.6  2905.4   2043.7   1973.5 |    0.70     0.49    0.70
+      wall pc/pcb/pcib = 2927.6/2089.5/1991.6 us   | pcb kernels B1 183.2 prod 858.9
+  T=250 H=3 nondiv   |    141.6 |    50.2    83.5     77.4     58.5 |    0.59     0.55    0.93
+      wall pc/pcb/pcib = 462.8/444.7/321.2 us   | pcb kernels B1 22.6 prod 18.1
+
+DONE

@@ -972,6 +972,28 @@
        §76.6「可顺带消 §47.6 限制」**被证伪**（本核缺 `ldmatrix` 无成本）。目标卡 CUDA B2 部署 bf16 时应
        **bf16 staging（§76）× bf16 mma** 零成本叠加，大 shape 优化预算投 L2/DRAM 字节而非 mma ISA。**边界**：
        同 §76（非 TMA/基础 GEMM 核、`BVK%16==0`、输出 fp32、未落整链）；不改变 §45 的 `cf` 默认部署。
+- [x] **P7-75** 兑现 §76.6/§77.6 点名的「**bf16 in 的生产核落链**」：把 P7-73 的 `-DB2M_BF16` 从「基础
+       GEMM 核」放开到**六段生产核**（`-DB2M_PROD`）并端到端接进反向链。放开只需把六段读操作数的路径**按
+       dtype 分流**：五操作数 `do/vn/dv/h/dh` 仍走 `rd()`（bf16 下精确扩宽，六段读到同一 fp32 值），**fp32
+       scratch**（`vv`=raw `v`、`dwm`=`dw`）改走新增的 `rds()`（非 TMA 按 fp32 padded 行距读、TMA 退回 `rd`
+       的 atom 解码），`prefetch` 把 `vv`/`dwm` 从主循环拆出、单独按 **fp32 `U4=4`** 搬（主循环按 `op_t`
+       的 `U=8`）；唯一保留的 `#error` 是 `-DB2M_BF16 && -DB2M_TMA`（需 bf16 张量图）。新增
+       `harness/check_bwd_b2_bf16_prod.py`（`check_bwd_b2_bf16_prod.out.txt`）+ `harness/ncu_b2_bf16_prod_driver.py`
+       / `harness/probe_b2_bf16_prod_ncu.sh`（`probe_b2_bf16_prod_ncu.out.txt`）+ `harness/check_bwd_b2_bf16_e2e.py`
+       （`check_bwd_b2_bf16_e2e.out.txt`，空闲卡）+ `docs/07` §78。**Part A（关键）**：`prod_bf16`（bf16 操作数）
+       vs fp32 `prod`（喂 `bf16(x).float()`）**11 项输出全逐位相同（`max_abs=0`，四组含非整除 T=250）**；
+       `-DB2M_BF16MMA` 叠加只差累加序（直通 `dv2/dvb/db` 逐位、其余 ≤9.5e-7，`dgk` 逐位 0）；`dv2 vs torch`
+       6.6–9.9e-6（tf32 底噪）。**Part B/C**：regs 146→128、smem **133760→94848 B（−29%）**、kernel-only `dev`
+       大 shape **0.684×**（B8 1299→888µs）、`bf16mma` 0.659×；小 shape ±1%。**`ncu`**：DRAM 读 **1.63→1.07 GB
+       （−0.56）**、L2 4.22→**3.01 GB（−29%）**、全局读 sector −26%，但六段 smem 流量（bank conflict/wavefronts）
+       **不动**；**核本就不 DRAM bound（49–53% SOL）**，故 0.68× 的大头是 **smem 减半把占用率 1→2 block/SM
+       （12.46→24.64%）**——修正 §76.4 把 bf16 收益单纯归因为「字节」的口径（同一旋钮在 DRAM-bound 的基础 GEMM
+       核 vs 发射受限的六段核上机制不同）。**Part B（链级）**：`dAv→CUDA-B1→CUDA-B2-prod[-DB2M_BF16]→[Triton intra]
+       →cumsum`，`pcb`/`pcib` 六项 vs FLA worst **9.365e-3**（同 §67 `pc`）、`pcb vs pc` ≤2.537e-3（`dv` 逐位 0）；
+       链 `dev` **`pcb/pc` 0.70–0.93×**、`pcb/FLA` 0.49–0.55、链 `wall` B8 2928→2090µs。**结论**：§67.4 的
+       `.float()` 部署税在链级整个消掉；但 `cf`（融合 Triton B2/B3）仍更快（B8 1409 vs 2043），**默认部署不变**，
+       本核是「目标卡选 CUDA B2 时 bf16 端到端原生」的收口。**边界**：仍仅非 TMA、输出 fp32、`vv`/`dwm` 未降
+       bf16、`K=V=128/BT=16`。见 `docs/07` §78。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1443,8 +1465,29 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-74 补测**。
-  - P7-74（本轮）：**兑现 P7-73/§76.6 列出的「bf16 原生 mma（`m16n8k16`）」真需求——给 B2 K2-mma GEMM 核加
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-75 补测**。
+  - P7-75（本轮）：**兑现 §76.6/§77.6 点名的「bf16 in 的生产核落链」——把 `-DB2M_BF16` 从基础 GEMM 核
+    放开到六段生产核（`-DB2M_PROD`）并端到端接进反向链**。放开只需按 dtype 分流六段的操作数读路径：五操作数
+    `do/vn/dv/h/dh` 仍走 `rd()`（bf16 精确扩宽，六段读到同一 fp32 值），**fp32 scratch**（`vv`=raw `v`、
+    `dwm`=`dw`）改走新增 `rds()`（非 TMA 按 fp32 padded 行距、TMA 退回 `rd` 的 atom 解码），`prefetch` 把
+    `vv`/`dwm` 拆出按 **fp32 `U4=4`** 搬（主循环按 `op_t` 的 `U=8`）；唯一保留 `#error`＝`BF16 && TMA`。新增
+    `harness/check_bwd_b2_bf16_prod.py`（`check_bwd_b2_bf16_prod.out.txt`）+ `ncu_b2_bf16_prod_driver.py` /
+    `probe_b2_bf16_prod_ncu.sh`（`probe_b2_bf16_prod_ncu.out.txt`）+ `harness/check_bwd_b2_bf16_e2e.py`
+    （`check_bwd_b2_bf16_e2e.out.txt`，空闲卡）+ `docs/07` §78。**Part A**：`prod_bf16` vs fp32 `prod`（喂
+    `bf16(x).float()`）**11 项输出全逐位相同（`max_abs=0`，四组含非整除 T=250）**；`-DB2M_BF16MMA` 叠加只差
+    累加序（直通 `dv2/dvb/db` 逐位、其余 ≤9.5e-7，`dgk` 逐位 0）；`dv2 vs torch` 6.6–9.9e-6。**Part B/C**：
+    regs 146→128、smem **133760→94848 B（−29%）**、kernel-only `dev` 大 shape **0.684×**（B8 1299→888µs）、
+    `bf16mma` 0.659×。**`ncu`**：DRAM 读 **1.63→1.07 GB**、L2 **4.22→3.01 GB**、全局读 sector −26%，但六段 smem
+    流量不动；**核本就不 DRAM bound（49–53% SOL）**，故大头是 **smem 减半把占用率 1→2 block/SM
+    （12.46→24.64%）**——修正 §76.4「收益=字节」的口径。**Part B（链级）**：`dAv→CUDA-B1→CUDA-B2-prod[-DB2M_BF16]
+    →[Triton intra]→cumsum`，`pcb`/`pcib` 六项 vs FLA worst **9.365e-3**（同 §67 `pc`）、`pcb vs pc` ≤2.537e-3
+    （`dv` 逐位 0）；链 `dev` **`pcb/pc` 0.70–0.93×**、`pcb/FLA` 0.49–0.55、链 `wall` B8 2928→2090µs。**结论**：
+    §67.4 的 `.float()` 部署税在链级整个消掉；但 `cf` 仍更快（B8 1409 vs 2043），**默认部署不变**，本核是
+    「目标卡选 CUDA B2 时 bf16 端到端原生」的收口。**边界**：仍仅非 TMA、输出 fp32、`vv`/`dwm` 未降 bf16、
+    `K=V=128/BT=16`。**下一步**：专题维持维护态——§45 的 `cf`（`dAv→CUDA-B1→融合 Triton B2/B3→cumsum`）仍是
+    目标卡反向默认；CUDA B2 研究形态的 staging/dtype/mma-ISA/store/DA/TMA 旋钮全部关闭（§67–§78 反复归因、
+    明确不再追），有明确新需求（如 bf16 入口叠 TMA / raw `v`/`dw` 也 bf16 / K≠V）再动。
+  - P7-74（上轮）：**兑现 P7-73/§76.6 列出的「bf16 原生 mma（`m16n8k16`）」真需求——给 B2 K2-mma GEMM 核加
     `-DB2M_BF16MMA`**（需 `-DB2M_BF16`），主循环 `mma.sync.m16n8k8.tf32` → **原生 bf16 `mma.sync.m16n8k16`**
     （`kk` 步长 8→16）。**只换 ISA、A/B 片段值一字不变**（`rd2` 打包相邻 bf16，布局见 §77.1，C 布局同 m16n8k8
     故 store 未动）。**Part A**：`bmm` vs `bf16(tf32)` 只差 fp32 **累加序**（`dq 2.55e-7/dk 2.52e-7/dw 2.41e-7`、
@@ -2470,8 +2513,14 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-74 补测（+ P8-2 一页纸补全）**，进入收尾/维护。
-  **P7-74（本轮）**：兑现 P7-73/§76.6 的「bf16 原生 mma（`m16n8k16`）」——加 `-DB2M_BF16MMA`，主循环
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-75 补测（+ P8-2 一页纸补全）**，进入收尾/维护。
+  **P7-75（本轮）**：兑现 §76.6/§77.6 的「bf16 in 的生产核落链」——把 `-DB2M_BF16` 从基础 GEMM 核放开到
+  六段生产核（`-DB2M_PROD`）并端到端接进反向链（按 dtype 分流：五操作数走 `rd()` 的 bf16 精确扩宽、fp32
+  scratch `vv`/`dwm` 走新增 `rds()`、`prefetch` 按 `U=8`/`U4=4` 双粒度搬）。`prod_bf16` vs fp32 `prod`
+  **11 项输出全逐位（`max_abs=0`）**；smem −29%、大 shape kernel 0.684×、DRAM 读 1.63→1.07 GB，且**占用率
+  1→2 block/SM**（核本就不 DRAM bound，故大头是并行度）；链 `pcb/pc` **0.70–0.93×**、`pcb/FLA` 0.49–0.55，
+  §67.4 的 `.float()` 部署税消掉，但 `cf` 仍更快 → **默认部署不变**。见 `docs/07` §78。
+  **P7-74（上轮）**：兑现 P7-73/§76.6 的「bf16 原生 mma（`m16n8k16`）」——加 `-DB2M_BF16MMA`，主循环
   `mma.sync.m16n8k8.tf32`→**原生 bf16 `mma.sync.m16n8k16`**（只换 ISA、A/B 片段值一字不变）。与 tf32 路径
   只差 fp32 累加序（`dq 2.55e-7/dk 2.52e-7/dw 2.41e-7`、`dgk` 逐位）、SASS `24×HMMA.1688.F32.TF32`→
   `12×HMMA.16816.F32.BF16`（指令减半）、`ncu` tensor 周期减半（bf16 吞吐 2×tf32）；但核已 L2 bound

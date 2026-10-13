@@ -399,12 +399,15 @@ static_assert(BVK == 32 || BVK == 64 || BVK == 128,
 // P7-54 regardless of the stage layout.
 constexpr int BVP = BVK + 4;   // padded row stride (16B keeps 4-float cp.async aligned)
 
-// P7-73: bf16-native operand entry (see the macro block at the top).  Only the base non-TMA
-// GEMM core is supported this round (the non-GEMM segments read the staged operands with
-// fp32-only addressing; TMA staging needs a bf16 tensor map / narrower swizzle).
-#if B2M_BF16 && (B2M_TMA_ON || B2M_OUT || B2M_DKGB || B2M_DA || B2M_DB || B2M_GATE || \
-                 B2M_SAND || B2M_INTRA || B2M_HDW || B2M_VV_KG_ON)
-#error "B2M_BF16 (P7-73) covers only the base non-TMA GEMM core"
+// P7-73: bf16-native operand entry (see the macro block at the top).  P7-75 lifts the P7-73
+// restriction (base GEMM core only) so `-DB2M_BF16` also covers the full non-TMA production
+// launch (`-DB2M_PROD`, all six non-GEMM segments).  The six segments read the five bf16-streamed
+// operands (`do/vn/dv/h/dh`) through `rd()` (now bf16-aware) and the **fp32** scratch operands
+// (`vv` raw v, `dwm`) through `rds()` (a padded/atom reader that never de-quants bf16); `prefetch`
+// stages the fp32 scratch at the fp32 cp.async granularity (U4=4) independently of `op_t`.
+// Only TMA staging stays excluded (it needs a bf16 tensor map / 128 B-wide swizzle atom).
+#if B2M_BF16 && B2M_TMA_ON
+#error "B2M_BF16 covers only the non-TMA cp.async staging path"
 #endif
 #if B2M_BF16
 using op_t = __nv_bfloat16;
@@ -530,6 +533,17 @@ DEV float rd(const void* buf, int row, int col, int rows) {
 
 // P7-54: padded (never TMA-swizzled) row-major read for the `skg`/scratch buffers.
 DEV float rdp(const float* buf, int row, int col) { return buf[row * BVP + col]; }
+// P7-75: read an **fp32** scratch operand (`vv` raw v / `dwm`) that shares neither the bf16
+// de-quantization of `rd` (which would misread fp32 as bf16 under `-DB2M_BF16`) nor, under TMA,
+// the atom layout.  Non-TMA: padded fp32 (BVP stride).  TMA: the usual atom-swizzled decode.
+DEV float rds(const void* buf, int row, int col, int rows) {
+#if B2M_TMA_ON
+    return rd(buf, row, col, rows);
+#else
+    (void)rows;
+    return ((const float*)buf)[row * BVP + col];
+#endif
+}
 
 #if B2M_TMA_ON
 // ---- mbarrier / TMA (same primitives as b1_tma_probe.cu) --------------------
@@ -634,41 +648,53 @@ DEV void prefetch(Stage* st, const float* __restrict__ v, const float* __restric
         op_t* pd = &st->do_[row][cg * U];
         op_t* pv = &st->vn [row][cg * U];
         op_t* pw = &st->dv [row][cg * U];
-#if B2M_VV_KG_ON
-        float* pvv = &st->vv[row][cg * U];
-#endif
 #if B2M_NODOV
         for (int j = 0; j < U; ++j) { pd[j] = OP_ZERO; pv[j] = OP_ZERO; pw[j] = OP_ZERO; }
-  #if B2M_VV_KG_ON
-        for (int j = 0; j < U; ++j) pvv[j] = 0.f;
-  #endif
 #else
         if (t < T) {
             const int64_t off = ((int64_t)(n * T + t) * H + hh) * VD + v0 + cg * U;
             cp16(pd, gdo + off);
             cp16(pv, gvn + off);
             cp16(pw, gdv + off);
-  #if B2M_VV_KG_ON
-            cp16(pvv, v + off);
-  #endif
         } else {
             for (int j = 0; j < U; ++j) { pd[j] = OP_ZERO; pv[j] = OP_ZERO; pw[j] = OP_ZERO; }
-  #if B2M_VV_KG_ON
-            for (int j = 0; j < U; ++j) pvv[j] = 0.f;
-  #endif
-        }
-#endif
-#if B2M_DKGB && !B2M_HDW
-        // dw [BT, BVK] (token rows; k-tiled).  Same [B,T,H,K] layout as do/vn/dv, KD==VD.
-        float* pn = &st->dwm[row][cg * U];
-        if (t < T) {
-            const int64_t off = ((int64_t)(n * T + t) * H + hh) * KD + v0 + cg * U;
-            cp16(pn, dw + off);
-        } else {
-            for (int j = 0; j < U; ++j) pn[j] = 0.f;
         }
 #endif
     }
+    // P7-75: the **fp32** scratch operands (`vv` raw v for base dA / `db`, and `dwm` for the
+    // `A@-dw` segment) are staged at the fp32 cp.async granularity (U4=4), independent of the bf16
+    // `op_t` operands above (whose U is 8 under `-DB2M_BF16`).
+#if B2M_VV_KG_ON || (B2M_DKGB && !B2M_HDW)
+    {
+        constexpr int U4 = 4;   // fp32 per 16-byte cp.async
+        for (int idx = tid; idx < BT * (BVK / U4); idx += nthr) {
+            int row = idx / (BVK / U4), cg = idx % (BVK / U4), t = t0 + row;
+#if B2M_VV_KG_ON
+            float* pvv = &st->vv[row][cg * U4];
+  #if B2M_NODOV
+            for (int j = 0; j < U4; ++j) pvv[j] = 0.f;
+  #else
+            if (t < T) {
+                const int64_t off = ((int64_t)(n * T + t) * H + hh) * VD + v0 + cg * U4;
+                cp16(pvv, v + off);
+            } else {
+                for (int j = 0; j < U4; ++j) pvv[j] = 0.f;
+            }
+  #endif
+#endif
+#if B2M_DKGB && !B2M_HDW
+            // dw [BT, BVK] (token rows; k-tiled).  Same [B,T,H,K] layout as do/vn/dv, KD==VD.
+            float* pn = &st->dwm[row][cg * U4];
+            if (t < T) {
+                const int64_t off = ((int64_t)(n * T + t) * H + hh) * KD + v0 + cg * U4;
+                cp16(pn, dw + off);
+            } else {
+                for (int j = 0; j < U4; ++j) pn[j] = 0.f;
+            }
+#endif
+        }
+    }
+#endif
     // h/dh [KD, BVK]  (chunk-granular, always full)
     const int64_t hbase = ((int64_t)(n * NT + c) * H + hh) * KD * VD;
     for (int idx = tid; idx < KD * (BVK / U); idx += nthr) {
@@ -1094,8 +1120,8 @@ b2mma_kernel(
                     for (int nt = 0; nt < 2; ++nt) {
                         const int lc = local0 + nt * 8 + g;
                         uint32_t bf[2];
-                        bf[0] = to_tf32(-rd((const float*)st->dwm, ot0, lc, BT));
-                        bf[1] = to_tf32(-rd((const float*)st->dwm, ot1, lc, BT));
+                        bf[0] = to_tf32(-rds(st->dwm, ot0, lc, BT));
+                        bf[1] = to_tf32(-rds(st->dwm, ot1, lc, BT));
                         mma8(acc3[nt], af, bf, acc3[nt]);
                     }
                 }
@@ -1115,7 +1141,7 @@ b2mma_kernel(
                     const float dvr = rd((const float*)st->dv, r, local0 + j, BT);
                     #pragma unroll
                     for (int i = 0; i < 8; ++i)
-                        dbpart[i] += dvr * rd((const float*)st->vv, c0 + i, local0 + j, BT);
+                        dbpart[i] += dvr * rds(st->vv, c0 + i, local0 + j, BT);
                 }
             }
         }
@@ -1138,8 +1164,8 @@ b2mma_kernel(
                     #pragma unroll
                     for (int nt = 0; nt < 2; ++nt) {
                         uint32_t b[2];
-                        b[0] = to_tf32(rd((const float*)st->vv, nt * 8 + g, kc + t,     BT));
-                        b[1] = to_tf32(rd((const float*)st->vv, nt * 8 + g, kc + t + 4, BT));
+                        b[0] = to_tf32(rds(st->vv, nt * 8 + g, kc + t,     BT));
+                        b[1] = to_tf32(rds(st->vv, nt * 8 + g, kc + t + 4, BT));
                         mma8(dAacc[nt], a, b, dAacc[nt]);
                     }
                 }
@@ -1154,7 +1180,7 @@ b2mma_kernel(
             if (local0 >= 0 && local0 + BW <= BVK) {
                 for (int idx = l; idx < BT * BW; idx += 32) {
                     const int r = idx / BW, j = idx % BW;
-                    sh->dbv[warp][r][j] = rd((const float*)st->vv, r, local0 + j, BT);
+                    sh->dbv[warp][r][j] = rds(st->vv, r, local0 + j, BT);
                 }
             }
         }
