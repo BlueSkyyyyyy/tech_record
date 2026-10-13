@@ -1,0 +1,89 @@
+########## §72 异构访存模式共驻（P84-1，补 §71.7 尾巴） ##########
+# nvcc -O3 -arch=sm_90a --ptxas-options=-v；DEV=2
+
+===== ptxas -v：pat_mix 的 registers / spill =====
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 15 registers, used 0 barriers
+ptxas info    : Function properties for _Z7pat_mixPKvxxPKiPy
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 8192 bytes smem
+
+===== 运行 bench（§A 正确性 / §B 单模式基线 / §C 混合矩阵 / §D (T,O) 通吃 / §E 稀疏份额 / §F）=====
+########################################################################
+# §72 异构访存模式**共驻**：同一常驻 grid 内不同 block 跑不同模式
+#   复检 §71.7 headline 四「一个常驻 kernel 内 task 类型越杂、越难一套调度参数通吃」
+# 目标卡 H100/sm90a；numSM=132；逻辑总读 1 GiB（uint4 计）；reg U=4；__maxnreg__(32)
+# 混合 = 误差扩散交错 assign[]；期望 = 各模式单独吞吐按逻辑字节份额的调和平均
+########################################################################
+
+===== §A 正确性（NBLK=16，BP=4096，assign=4/4/4/4 交错）vs host 参考 =====
+  mix : sink=1148061188 ref=1148061188 -> OK
+
+===== §B 单模式 baseline（pat_mix 全同 assign）：逻辑 GB/s =====
+  coalesced    T=256,O=4 (OT=1024)= 3041.0  T=1024,O=1 (OT=1024)= 3143.3  T=256,O=8 (OT=2048)= 3026.2
+  sparse8x     T=256,O=4 (OT=1024)=  710.3  T=1024,O=1 (OT=1024)=  705.7  T=256,O=8 (OT=2048)=  709.4
+  scalar4B     T=256,O=4 (OT=1024)= 2598.1  T=1024,O=1 (OT=1024)= 2901.6  T=256,O=8 (OT=2048)= 2412.8
+  l2res16M     T=256,O=4 (OT=1024)=25247.9  T=1024,O=1 (OT=1024)=15176.1  T=256,O=8 (OT=2048)=21732.1
+
+===== §C 混合（T=256,O=4，OT=1024）：measured vs 期望(时间切片) / 比 =====
+  mixture(coal,sp,sc,l2)   measured   expected meas/exp
+  50/50 coal+sparse          1168.8     1151.6    1.015
+  50/50 coal+scalar          2430.2     2802.2    0.867
+  50/50 coal+l2res           6029.5     5428.2    1.111
+  50/50 scalar+l2res         4085.0     4711.4    0.867
+  50/50 sparse+l2res         1422.6     1381.8    1.030
+  equal 25x4                 1722.4     1850.8    0.931
+  50/25/25 coal/sp/l2        1671.0     1900.1    0.879
+  25/50/25 coal/sp/l2        1268.2     1256.2    1.010
+  75/25 coal+sparse          1489.7     1670.6    0.892
+
+===== §D 混合扫 (T,O)：一套静态配置能否通吃多样混合？ =====
+  --- equal 25x4 ---
+    OT=1024 T=128   O=8 ->  1557.6 (expected  1829.6, 0.851)
+    OT=1024 T=256   O=4 ->  1725.9 (expected  1850.8, 0.932)
+    OT=1024 T=512   O=2 ->  1831.9 (expected  1874.5, 0.977)
+    OT=1024 T=1024  O=1 ->  1951.7 (expected  1872.8, 1.042)
+    -> best single (T=1024,O=1)=1951.7 ; oracle(各模式各自最优)=1895.5 ; 异质性税=1.030
+  --- 50/50 coal+scalar ---
+    OT=1024 T=128   O=8 ->  2457.3 (expected  2752.1, 0.893)
+    OT=1024 T=256   O=4 ->  2447.6 (expected  2821.6, 0.867)
+    OT=1024 T=512   O=2 ->  2628.8 (expected  3018.8, 0.871)
+    OT=1024 T=1024  O=1 ->  2624.5 (expected  3020.5, 0.869)
+    -> best single (T=512,O=2)=2628.8 ; oracle(各模式各自最优)=3017.6 ; 异质性税=0.871
+  --- 50/50 coal+sparse ---
+    OT=1024 T=128   O=8 ->  1127.5 (expected  1149.3, 0.981)
+    OT=1024 T=256   O=4 ->  1169.3 (expected  1154.4, 1.013)
+    OT=1024 T=512   O=2 ->  1179.0 (expected  1149.6, 1.026)
+    OT=1024 T=1024  O=1 ->  1185.8 (expected  1154.8, 1.027)
+    -> best single (T=1024,O=1)=1185.8 ; oracle(各模式各自最优)=1158.8 ; 异质性税=1.023
+     [各模式跨配置最优：coal=3143.3 sp=710.3 sc=2901.6 l2=25247.9]
+
+===== §E coal+sparse 份额扫描（T=256,O=4）：逻辑吞吐 vs 物理吞吐 =====
+  sp%%       measured   expected   physGB/s meas/exp
+  0            3092.0     3041.0     3092.0    1.017
+  10           1957.8     2289.7     2545.1    0.855
+  20           1666.0     1836.1     2665.6    0.907
+  30           1402.7     1532.5     2665.2    0.915
+  50           1169.5     1151.6     2923.7    1.015
+  70            892.6      922.4     2767.1    0.968
+  90            763.1      769.3     2823.5    0.992
+  100           708.1      710.3     2832.3    0.997
+
+===== §F 结论 =====
+  - §C meas/exp > 1 => 混合**优于**时间切片（共驻互补）；< 1 => 共驻**干扰**（抢 HBM）。
+  - §D 异质性税 = 混合最佳单一 (T,O) / oracle(各模式各自最优)。<1 即『一套参数通吃』的代价。
+  - §E physGB/s(≈4× 稀疏流量) 应逼近 HBM 天花板 => 逻辑塌是**物理流量墙**、非额外干扰。
+
+########## §72 完成 ##########
+
+===== §C ncu 归因：equal-4way 混合（T=256,O=4）的 DRAM 读 / L1 sectors =====
+--- mix equal 1,1,1,1 ---
+==PROF== Profiling "pat_mix": Application replay pass 1
+  pat_mix(const void *, long long, long long, const int *, unsigned long long *) (528, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                 Gbyte         1.61
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum      sector     41947224
+--- mix 50/50 coal+sparse 1,1,0,0 ---
+==PROF== Profiling "pat_mix": Application replay pass 1
+  pat_mix(const void *, long long, long long, const int *, unsigned long long *) (528, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                 Gbyte         2.68
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum      sector     50335824
