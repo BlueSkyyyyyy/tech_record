@@ -2059,6 +2059,34 @@
       真机坑：fp32 `bmk,bnk->mn` 不传 `c` 段错误（契约 `einsum.hpp:25-26`）。配套博客
       `content/posts/mega-moe-76-einsum-test-oracle`（索引页新增第 76 篇）。
 
+### P67 增量（opt-in，补齐所有 impl 共用的「TMA 发射层」与环形流水线）
+
+- [x] **P67-1** **DeepGEMM 的共享 TMA 拷贝层 `common/tma_copy.cuh` + 环形流水线
+      `common/ring_pipeline.cuh`**：第 44 篇补齐了设备端公共地板
+      `common/{math,utils,types,packing,compile,exception,cute_tie}.cuh`、第 56 篇补了 128 字节
+      `CUtensorMap` 的**来源**（`runtime_utils.hpp` 的 `make_tma_*`），但夹在中间那层——
+      **「描述符造好之后谁发 TMA、发几次、搬到 smem 哪里」**——从没被单独讲过。它就是
+      `deep_gemm/include/deep_gemm/common/tma_copy.cuh`（106 行，被 **16 个 impl** include）：
+      `get_inner_block_atom_size:12-15`（`swizzle==0 ? BLOCK_INNER/pack : swizzle_bytes/sizeof(dtype)`）、
+      `LoadOps<2..5>:17-37`（`Load`/`LoadMulticast`/`Load2SM` 三原语）、`copy_nd:39-77`（三条静态断言
+      守坐标数/cache hint/打包混算；沿 inner 方向**逐原子发**，smem 用 storage、gmem 坐标用 logical；
+      `num_tma_multicast>1` 时分化出 **sm90 多播** rank0 发 `LoadMulticast`、mask `(1<<n)-1`，
+      与 **sm100 2-SM** 只给 leader 发信号）、`copy:96-104`（`kIs3DTMA` 批处理包装）。
+      Mega MoE 权重是 **4D 描述符**（`sm100_fp8_fp4_mega_moe.cuh:793` 的 `tma::copy_nd<...,4>`
+      坐标 `(k, 半区, 上下半, 专家号)`）。`ring_pipeline.cuh:13-38` 把「环形 stage + 相位翻转 +
+      返回旧状态」标准化（2 的幂走位运算、非 2 的幂走减法，契约 `step ≤ kNumStages`），
+      MQA logits / 稀疏 MQA / Mega mHC 都用 `CUTE_TIE_DECL(p.advance(), stage, phase)` 接住；
+      取代第 29 篇 `sm90_bf16_gemm.cuh:138-145` 手写的 `advance_pipeline` lambda。
+      → `docs/77-deepgemm-tma-copy-ring-pipeline.md`（真实行号核对）。
+      **H100(sm90) 真机** `harness/exp_tma_copy_ring.{sh,out.txt}` + `src/tma_copy_ring.cu`
+      （nvcc 直接 include 真实头文件跑真实设备代码，需 `--expt-relaxed-constexpr`）：
+      **27 PASS / 0 FAIL**——constexpr 原子/打包（bf16 sw128→64、fp8 sw128→128、fp4 sw128→128 storage、
+      pack=2，10 条）；`RingPipeline` 9 组（含非 2 的幂 3/5、step=1/2/3/N）共 245 次调用 0 不符；
+      真实 `tma::copy` 的 **atom 循环**（`BLOCK_INNER=256` 展开成 4 条 `cp.async.bulk.tensor.2d`）
+      拼出 **0/4096 逐字节**、3D 批次坐标 0/1024、**sm90 多播 cluster=2 两 CTA 各自 barrier 收 tx
+      0/1024**；唯一例外是 `copy_nd` 的 `__CUDA_ARCH__>=1000` 2-SM 分支（SM100 专属，仅分析）。
+      配套博客 `content/posts/mega-moe-77-deepgemm-tma-copy-ring-pipeline`（索引页新增第 77 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2083,8 +2111,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P66 各增量完成（P15-1…P41-1、P42-1…P66-1）。**
-  本轮 P66-1：新建 `docs/76-einsum-test-oracle.md`
+- 当前进度：**P0~P14 全部完成；P15~P67 各增量完成（P15-1…P41-1、P42-1…P67-1）。**
+  本轮 P67-1：新建 `docs/77-deepgemm-tma-copy-ring-pipeline.md`
+  （+`harness/exp_tma_copy_ring.{sh,out.txt}`、`src/tma_copy_ring.cu`）——补上所有 impl 共用的
+  **TMA 发射层**与**环形流水线**：`common/tma_copy.cuh`（`get_inner_block_atom_size` 的原子宽度 /
+  `LoadOps<2..5>` 三原语 / `copy_nd` 的原子循环与三条静态断言 / sm90 多播 vs sm100 2-SM 两分支 /
+  4D 权重描述符）+ `common/ring_pipeline.cuh`（环形 stage + 相位翻转 + 返回旧状态，2 的幂走位运算）。
+  **H100(sm90) 真机直接 include 真实头文件跑真实设备代码 27 PASS / 0 FAIL**：atom 循环展开成 4 条
+  TMA 拼出 0/4096 逐字节、3D 批次坐标、sm90 多播 cluster=2 两 CTA 收 tx 0/1024；sm100 2-SM 分支
+  仅分析。索引页新增第 77 篇。
+  上一轮 P66-1：新建 `docs/76-einsum-test-oracle.md`
   （+`harness/exp_einsum_test_oracle.{sh,py,out.txt}`）——补上 DeepGEMM **einsum 家族**一直缺席的
   「验收测试即正确性规范」：`tests/test_einsum.py`（276 行）作为「einsum 算什么对」的可执行规格。
   拆透七个函数（`bmk,bnk->mn` 批归约 / MLA 双向投影 / 权重梯度 / 三个 FP8 变体）、两个
@@ -2848,7 +2884,11 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P66 已完成（最新 **P66-1 DeepGEMM einsum 家族的验收测试即正确性规范**：
+- **下一步**：P0~P67 已完成（最新 **P67-1 DeepGEMM 的共享 TMA 拷贝层与环形流水线**：
+  `common/tma_copy.cuh`（原子宽度 / `LoadOps` 三原语 / `copy_nd` 原子循环 / sm90 多播 vs sm100 2-SM）
+  + `common/ring_pipeline.cuh`（环形 stage + 相位翻转）；H100 真机直接 include 真实头文件跑真实设备代码
+  **27 PASS / 0 FAIL**；详见上）。
+  上一轮 P66-1：**DeepGEMM einsum 家族的验收测试即正确性规范**：
   `tests/test_einsum.py`——七个函数 / 两个 arch 门控 / `calc_diff` 阈值表 / 逐位 oracle（direct==FP32
   累积、随机舍入哈希、FP8 输出对==生产管线）；H100 真机直接驱动真实测试体 **15 PASS / 0 FAIL**；
   详见上）。
