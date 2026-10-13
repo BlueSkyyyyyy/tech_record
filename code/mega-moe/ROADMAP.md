@@ -3385,8 +3385,44 @@
       绕过 `check_nccl_so`，**直接加载真实 `envs.py` 并真跑 `init_dist(0,1)` NCCL world_size=1**）
       **30 PASS / 0 FAIL**：`init_seed` local/global 与 torch 流逐位；`init_dist` 七项副作用/返回值/
       种子传播 + `setdefault` 不覆盖已设值；`EnvOverride` 九项（含异常回滚、engram 条件覆盖）；
-      `dist_print` 四项（静音仍屏障）；`check_torch_deterministic` 四组合；`get_local_seed` 死 API。
-      配套博客 `content/posts/mega-moe-118-deepep-process-bootstrap`（索引页新增第 118 篇）。
+       `dist_print` 四项（静音仍屏障）；`check_torch_deterministic` 四组合；`get_local_seed` 死 API。
+       配套博客 `content/posts/mega-moe-118-deepep-process-bootstrap`（索引页新增第 118 篇）。
+
+### P109 增量（opt-in，补齐 `envs.py` 里最后一个被点名却从未单独读过的守卫）
+
+- [x] **P109-1** **DeepEP 的 NVLink 连接自检 `check_nvlink_connections` 与 H100 P2P 拓扑**
+      （`deep_ep/utils/envs.py:146-181`；消费点 `deep_ep/buffers/{ep.py:325,engram.py:67}`；
+      对照 `get_physical_domain_size:136-143` → `comm/handle.py:80-85` →
+      `csrc/kernels/comm/context.cpp:52-63`）。第 73 篇拆了 SM/QP 自动选型、第 86 篇拆了 NCCL 通信域
+      绑定、第 118 篇拆了进程引导层，但 `envs.py` 里只剩**最后一个被反复点名、却从没单独读过**的
+      函数。它是 DeepEP 对「节点内 GPU 两两 NVLink 全互联」假设的**唯一运行时自检**（对称内存 /
+      `num_nvlink_ranks` 域 / `nvlink_barrier` / Mega MoE L2 远端直写 combine 都建立在它之上）。
+      **纯 host / Python + NVML + CUDA 运行时，架构无关，H100 真机可跑**。
+      → `docs/119-deepep-nvlink-p2p-check.md`（真实行号核对）：**三段逻辑**——① **字符串门**
+      `:156` `if 'PCIE' in torch.cuda.get_device_name()`（H100 SXM 名 `NVIDIA H100 80GB HBM3`
+      **不含 `PCIE`** ⇒ H100 上是 **no-op**；脆弱点，源码 `TODO :155` 自认可检查不全）；② PCIe 下
+      **硬上限** `assert group.size() <= 2` `:157`（A100 PCIE 只有两两配对 NVLink），**先于任何 P2P
+      探测**的粗闸门；③ 否则 `pynvml.nvmlInit()` `:159-161` → `CUDA_VISIBLE_DEVICES` 把**逻辑→物理**
+      设备号翻译 `:163-165`（`int(devices[torch.cuda.current_device()])`，最易错一行）→
+      `dist.all_gather_object` 汇聚 `:166-167` → 对所有**无序对** `i<j` 查
+      `nvmlDeviceGetP2PStatus(..., NVML_P2P_CAPS_INDEX_NVLINK) == NVML_P2P_STATUS_OK` `:169-178`
+      → `nvmlShutdown()` `:180-181`。**检查的是离散 NVLink 能力状态、不是带宽**；与权威域大小
+      （NCCL 的 `ncclTeamLsa.nRanks`）分工是「**NCCL 定域、NVML 自检**」。两个消费点在 buffer 构造：
+      `ep.py:325`（EPBuffer）、`engram.py:67`（构造 shared handle 前）。**H100 真机 16 PASS / 0 FAIL**
+      （`harness/exp_deepep_nvlink_p2p.{sh,out.txt}` 直接加载真实 `envs.py` + `src/nvlink_p2p_matrix.cu`）：
+      **A** 真机调用返回 `None`（no-op），伪装 `'… PCIE'` + group 8 → 命中 `:157`；**B** NVML 8×8 的
+      `NVLINK`/`WRITE`/`ATOMICS` 三能力 **56/56 非对角对全 OK**（满互联）；**C**
+      `torch.cuda.can_device_access_peer` **56/56** 且与 NVML 状态矩阵 **0 处不一致**（但 CUDA 那个
+      布尔**不区分 NVLink/PCIe**，故必须借 NVML）；**D** 模拟 PCIe 分支真机跑全三条路径（no-op /
+      `:157` / `:177` 断言 + all_gather），用**假 pynvml** 让 `(0,1)` 非 OK 触发
+      `GPU 0 and GPU 1 are not connected via NVLink`（断言在 `nvmlShutdown` 之前抛出、异常路径下
+      NVML 不显式关）；`CUDA_VISIBLE_DEVICES` 解析 4 边界全对；**E** `cudaMemcpyPeerAsync` 8×8 有向
+      带宽：56 对全 **> 212 GB/s**（远高于 PCIe Gen5 ~64 GB/s，坐实每对走 NVLink、同/跨 NUMA 无差异），
+      唯一异常是**目的列 `dst0`**（写到 GPU0 仅 ~213，写其他 ~373）——不是拓扑而是**该 GPU 被共享任务
+      占用**，坐实「带宽探测必须与 NVML 能力探测分开」。附 **pynvml 绑定坑**：`NVML_P2P_CAPS_INDEX_READ`
+      在本机版本被导出成 tuple `(0,)`、直接调用抛 `ctypes.ArgumentError`（DeepEP 用 `NVLINK` int
+      不受影响）。附 vLLM 同款实现链接（源码注释 `:170`）。配套博客
+      `content/posts/mega-moe-119-deepep-nvlink-p2p-check`（索引页新增第 119 篇）。
 
 ## 每轮增量流程（autopilot）
 
