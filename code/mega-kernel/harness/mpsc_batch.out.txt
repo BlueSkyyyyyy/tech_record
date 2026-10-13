@@ -1,0 +1,52 @@
+device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+
+===== §A 正确性（真实描述符 DW=32=128B，三档消费者应 0 bad） =====
+  mb serial K=1  DW=32(128B) P=8  bad=0 / 800000  dead=0  ~6353.85 ns/item  (5083.084 ms/rep)
+  mb batch  K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~5477.01 ns/item  (4381.607 ms/rep)
+  mb warp   K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~302.34 ns/item  (241.874 ms/rep)
+
+===== §B 单线程消费者：批量出队把「每项往返」摊薄（DW=8=32B，P=8） =====
+  mb serial K=1  DW=8 ( 32B) P=8  bad=0 / 800000  dead=0  ~2144.63 ns/item  (1715.701 ms/rep)
+  mb batch  K=2  DW=8 ( 32B) P=8  bad=0 / 800000  dead=0  ~1792.81 ns/item  (1434.251 ms/rep)
+  mb batch  K=4  DW=8 ( 32B) P=8  bad=0 / 800000  dead=0  ~1616.05 ns/item  (1292.842 ms/rep)
+  mb batch  K=8  DW=8 ( 32B) P=8  bad=0 / 800000  dead=0  ~1528.66 ns/item  (1222.928 ms/rep)
+  mb batch  K=16 DW=8 ( 32B) P=8  bad=0 / 800000  dead=0  ~1484.46 ns/item  (1187.565 ms/rep)
+  mb batch  K=32 DW=8 ( 32B) P=8  bad=0 / 800000  dead=0  ~1462.61 ns/item  (1170.091 ms/rep)
+
+===== §C 多线程（warp）消费者：并行校验一批 K=32（扫 DW，P=8） =====
+  mb serial K=1  DW=8 ( 32B) P=8  bad=0 / 800000  dead=0  ~2144.62 ns/item  (1715.700 ms/rep)
+  mb warp   K=32 DW=8 ( 32B) P=8  bad=0 / 800000  dead=0  ~272.79 ns/item  (218.233 ms/rep)
+  mb serial K=1  DW=16( 64B) P=8  bad=0 / 800000  dead=0  ~3677.69 ns/item  (2942.150 ms/rep)
+  mb batch  K=32 DW=16( 64B) P=8  bad=0 / 800000  dead=0  ~2804.65 ns/item  (2243.719 ms/rep)
+  mb warp   K=32 DW=16( 64B) P=8  bad=0 / 800000  dead=0  ~307.39 ns/item  (245.915 ms/rep)
+  mb serial K=1  DW=32(128B) P=8  bad=0 / 800000  dead=0  ~6353.50 ns/item  (5082.799 ms/rep)
+  mb batch  K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~5476.76 ns/item  (4381.411 ms/rep)
+  mb warp   K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~302.08 ns/item  (241.666 ms/rep)
+
+===== §D 描述符大小 × 校验粒度（warp K=32，P=8） =====
+  mb warp   K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~303.31 ns/item  (242.650 ms/rep)
+  mb warp   K=32 DW=32(128B) P=8 route  bad=0 / 800000  dead=0  ~301.00 ns/item  (240.800 ms/rep)
+  mb batch  K=32 DW=32(128B) P=8 route  bad=0 / 800000  dead=0  ~341.64 ns/item  (273.313 ms/rep)
+  mb serial K=1  DW=32(128B) P=8 route  bad=0 / 800000  dead=0  ~1218.49 ns/item  (974.791 ms/rep)
+
+===== §E 稳定性 / 生产者数（DW=32=128B，batch K=32 与 warp K=32） =====
+  mb batch  K=32 DW=32(128B) P=1  bad=0 / 100000  dead=0  ~5469.67 ns/item  (546.967 ms/rep)
+  mb batch  K=32 DW=32(128B) P=4  bad=0 / 400000  dead=0  ~5469.22 ns/item  (2187.689 ms/rep)
+  mb batch  K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~5476.99 ns/item  (4381.593 ms/rep)
+  mb warp   K=32 DW=32(128B) P=1  bad=0 / 100000  dead=0  ~1786.49 ns/item  (178.649 ms/rep)
+  mb warp   K=32 DW=32(128B) P=4  bad=0 / 400000  dead=0  ~447.69 ns/item  (179.075 ms/rep)
+  mb warp   K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~303.09 ns/item  (242.471 ms/rep)
+
+===== 追加：正确性连跑 3 次（DW=32=128B，P=8，batch/warp K=32） =====
+  device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+    mb batch  K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~5476.89 ns/item  (4381.512 ms/rep)
+  device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+    mb batch  K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~5477.37 ns/item  (4381.894 ms/rep)
+  device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+    mb batch  K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~5477.06 ns/item  (4381.647 ms/rep)
+  device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+    mb warp   K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~303.09 ns/item  (242.469 ms/rep)
+  device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+    mb warp   K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~303.06 ns/item  (242.445 ms/rep)
+  device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+    mb warp   K=32 DW=32(128B) P=8  bad=0 / 800000  dead=0  ~302.95 ns/item  (242.357 ms/rep)

@@ -1131,6 +1131,38 @@
   P47-1 新留尾巴（§37.7）：消费者单线程致每项 ~2.3µs 往返主导、`stall0` 为人为扰动、未做真实 task
   描述符、litmus 仍未扫 SM 距离/`ncu` 内存序事件、未与 DeepGEMM SM100 路径对跑。
 
+### P49 实验扩展 31：MPSC 批量出队 + 多线程消费者 + 真实描述符（`docs/04-experiments.md` §38）
+
+- [x] **P49-1** 补掉 P48-1（§37.7）明留的两条尾巴——「消费者是**单线程**、每项 ~2.3µs 同步往返主导成本」
+  （生产实现会**批量取 task**，`docs/04` §15 的 K≈W/G）与「payload 是纯 `uint32`、**未做真实 task 描述符**」：
+  把 §37 的 MPSC 队列升级为「**批量出队 + 一个 warp 的并行校验 + 128 B 真实 `TaskDesc`**」。
+  真实锚点（快照 `f9eb70c`）：worker 拉取 task 不是逐条——`thread0` 先读 task 区间、再用 **128-bit
+  `cp.async` 把 `TaskDesc` 批量搬进 SMEM**（`persistent_kernel.cuh:1063-1078`）；`TaskDesc`
+  （`runtime_header.h:296-336`，`alignas(16)`，`input_ptrs[8]`/`output_ptrs[3]` `:327-328`）~128 B；
+  `per_worker_queue_len=8192`（`:1790-1791`）；`prepare_next_batch`（`:1378-1423`）。见
+  `docs/04-experiments.md` **§38**，源码 `src/mpsc_batch.cu`、脚本 `harness/mpsc_batch.sh`、原始输出
+  `harness/mpsc_batch.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2，grid=P+1；
+  生产者协议与 §37 `mpk` 逐字一致）。消费者三档（唯一变量）：`serial`（1 线程逐条）/ `batchK`
+  （1 线程一次等 K 条、一次放行 K 槽）/ `warpK`（1 warp，每 lane 并行校验 1 条）；描述符
+  `w0=task id/w1=op/w2=layer/w3=iter/w[i>=4]=mix`，`DW∈{8,16,32}`=32/64/128 B，另测「只查 task id」路由粒度。
+  核心结论：
+  - **§A 批量/多线程出队不动数值**：`DW=32`、`P=8` 下 `serial`/`batchK=32`/`warpK=32` **全 `bad=0 / 800000`**
+    （连续 CAS 游标保证「读到 `last_ready=c+K` ⇒ 前 `c+K` 槽已写」，批量读安全）；连跑 3 次恒 0。
+  - **§B 单线程批量只收回「放行往返」，约 1.2–1.5× 封顶**：`DW=8`、`P=8`，K=1→32 为
+    2144.63→1462.61 ns/item（**1.466×**，K≥16 饱和）；`DW` 越大收益越小（1.47→1.31→1.16×），
+    说明瓶颈从「放行往返」转到「**串行读 payload**」。
+  - **§C/§D 多线程（warp）并行读描述符，128 B 下快 21×**：`serial` vs `warp`，`DW=8` 2144.62→272.79
+    （**7.86×**）、`DW=16` 3677.69→307.39（**11.96×**）、`DW=32` 6353.50→302.08（**21.03×**）；
+    `serial` 随描述符线性变贵（~170 ns/字）而 `warp` 几乎不变。§D 拆因（`DW=32`）：`serial` 路由 1218 vs
+    全校验 6353（**5.2×**）、`batch` 路由 341.64 vs 5477（**16.0×**）、而 `warp` 路由 301 vs 303（**几乎
+    相同**）——**能否并行读 payload 是「路由型」与「全描述符型」消费的分水岭**。
+  - **§E 多线程把瓶颈从消费者翻到生产者**：`DW=32` 下 `batch` 与 `P` 无关（恒 ~5.47µs，消费者自卡）；
+    `warp` 随 P 快速下降（P=1→1786、4→448、8→**303** ns/item），到 P=8 已接近生产者侧成本。
+  判据：单常驻 kernel、设备侧推进（C1–C4）、`warp` 并行取 task 但无固定角色动态派发，**仍差 C5 一步**
+  （与 §31–§37 同档）。**本轮新增实验**；收口 §37.7 两条尾巴并指出「批量」同时是**正确性前提**与**性能出路**。
+  P49-1 新留尾巴（§38.7）：描述符仍是 `mix` 合成布局、未实测 `cp.async` 批量加载本身收益、未扫更大 `P`/
+  多消费者 block、未与 DeepGEMM SM100 路径对跑；§37.7 的「litmus 扫 SM 距离/`ncu`」仍余。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1153,21 +1185,36 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P48-1 完成（1/1）**。补掉 P47-1（§36）§36.6 明留的尾巴「未测多生产者（MPSC）」：
+- 当前进度：**P49-1 完成（1/1）**。补掉 P48-1（§37.7）明留的两条尾巴——「消费者是**单线程**、
+  每项 ~2.3µs 同步往返主导成本」（生产实现会批量取 task）与「payload 是纯 `uint32`、**未做真实 task
+  描述符**」：把 §37 的 MPSC 队列升级为「**批量出队 + 一个 warp 的并行校验 + 128 B 真实 `TaskDesc`**」。
+  `docs/04-experiments.md` 新增 **§38**，源码 `src/mpsc_batch.cu`、脚本 `harness/mpsc_batch.sh`、原始输出
+  `harness/mpsc_batch.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、grid=P+1；
+  生产者协议与 §37 `mpk` 逐字一致）。真实锚点：worker 用线程 0 读区间 + **128-bit `cp.async` 批量搬
+  `TaskDesc` 进 SMEM**（`persistent_kernel.cuh:1063-1078`）；`TaskDesc`（`runtime_header.h:296-336`，
+  `alignas(16)`，`input_ptrs[8]`/`output_ptrs[3]` `:327-328`）~128 B；`per_worker_queue_len=8192`
+  （`:1790-1791`）；`prepare_next_batch`（`:1378-1423`）。消费者三档 `serial`/`batchK`/`warpK`，
+  描述符 `DW∈{8,16,32}`=32/64/128 B，另测「只查 task id」路由粒度。核心结论：
+  - **§A 批量/多线程不动数值**：`DW=32`、`P=8` 下 `serial`/`batchK=32`/`warpK=32` **全 `bad=0 / 800000`**；
+    连跑 3 次恒 0（连续 CAS 游标保证「读到 `last_ready=c+K` ⇒ 前 `c+K` 槽已写」）。
+  - **§B 单线程批量只收回「放行往返」，1.2–1.5× 封顶**：`DW=8`、`P=8`，K=1→32 为 2144.63→1462.61 ns/item
+    （**1.466×**，K≥16 饱和）；`DW` 越大收益越小（1.47→1.31→1.16×）——瓶颈从「往返」转到「串行读 payload」。
+  - **§C/§D 多线程（warp）并行读描述符，128 B 下快 21×**：`serial`→`warp`，`DW=8` 7.86×、`DW=16` 11.96×、
+    `DW=32` **21.03×**（6353.50→302.08 ns/item）；`serial` 随描述符线性变贵（~170 ns/字）而 `warp` 几乎
+    不变。§D 拆因：`serial` 路由 1218 vs 全校验 6353（5.2×）、`batch` 341.64 vs 5477（16.0×）、`warp`
+    301 vs 303（几乎相同）——**能否并行读 payload 是「路由型」与「全描述符型」消费的分水岭**。
+  - **§E 多线程把瓶颈从消费者翻到生产者**：`batch` 与 `P` 无关（恒 ~5.47µs）；`warp` 随 P 下降
+    （1→1786、4→448、8→303 ns/item）到 P=8 接近生产者侧成本。
+  判据 C1–C4、仍差 C5 一步（与 §31–§37 同档）。**本轮新增实验**；收口 §37.7 两条尾巴。
+- 此前：**P48-1 完成（1/1）**。补掉 P47-1（§36）§36.6 明留的尾巴「未测多生产者（MPSC）」：
   把 §36 的 SPSC 队列推广到 **MPSC**，并把「发布内存序」升级为「发布**协议**」。`docs/04-experiments.md`
   新增 **§37**，源码 `src/mpsc_ring.cu`、脚本 `harness/mpsc_ring.sh`、原始输出 `harness/mpsc_ring.out.txt`
   （目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2）。真实锚点：MPK `sched_queue` 是 MPSC
   （128 worker/16 scheduler，`get_rand_sched_id` `persistent_kernel.cuh:857-869` ⇒ 8 生产者/队列；
   push = 占位`atom.add.release` → relaxed 写 → **连续 CAS 放行** `:1206-1228`；`worker_queue` SPSC 用单条
-  `atom.add.release` `:1495-1502`）。核心结论：
-  - **§A 完成门控协议多生产者全对**：`mpk`（连续 CAS 放行）P=1..32、`pertile`（逐槽 release）、CAP=32、
-    `spsc` **全 bad=0**。
-  - **§B 结构不严谨替代自然时序侥幸 0 错**：`reserve_count`（非连续完成计数）全 0；`pub_then_write`
-    （占位即就绪）1/400000（0/1/1）——与 §36.3 同源。
-  - **§B2 `stall0` 决定性地分出胜负**：低号槽延迟后 `reserve_count`/`pub_then_write` **bad=8 稳定（3/3）**，
-    `mpk`/`pertile` **恒 0（3/3）**——证明「连续放行」是「占位乱序 ⇒ 必须连续」的必要工程。
-  - **§C 放行 ≈ +0.38 µs/项**（与 §36.4 一致）；P=8 藏掉、`pertile` 略便宜、大 payload 打平。
-  判据 C1–C4、仍差 C5 一步（与 §31–§36 同档）。**本轮新增实验。**
+  `atom.add.release` `:1495-1502`）。核心结论：`mpk`/`pertile` 多生产者全对；结构不严谨替代自然时序
+  侥幸 0 错但 `stall0` 下 `bad=8`（3/3）、正确协议恒 0；放行 ≈ +0.38 µs/项。判据 C1–C4、仍差 C5 一步。
+  **（P48-1 全专题任务清单已完成。）**
 - 此前：**P47-1 完成（1/1）**。补掉 P46-1（§35）§35.7 明留的尾巴「入队是『先推 `tail`、后写数据』
   （**无 release 发布**），理论上消费者可能在数据可见前读到槽；真实实现（MPK）用 release/acquire 把它
   做实——可作后续实验」：把「发布内存序」做成实测。`docs/04-experiments.md` 新增 **§36**，源码
@@ -1706,6 +1753,16 @@
        **P48-1 新留尾巴**（`docs/04` §37.7）：消费者单线程致每项 ~2.3µs 往返主导（§C 只看差值）、
        `stall0` 为人为扰动、未做真实 task 描述符、litmus 仍未扫 SM 距离/`ncu` 内存序事件、未与
        DeepGEMM SM100 路径对跑。
+- **本轮（P49-1）**：`docs/04-experiments.md` 新增 **§38**「MPSC 批量出队 + 多线程消费者 + 真实描述符」——
+  新源码 `src/mpsc_batch.cu`、脚本 `harness/mpsc_batch.sh`、原始输出 `harness/mpsc_batch.out.txt`（目标卡
+  H100/sm90、**固定空闲 device 3**、nvcc 13.2、grid=P+1）。补 §37.7「单线程消费者 ~2.3µs/项往返」
+  与「未做真实 task 描述符」两条尾巴：消费者三档 `serial`/`batchK`/`warpK`、描述符 `DW∈{8,16,32}`（真实
+  `TaskDesc` 128 B = `runtime_header.h:296-336`）、生产者协议 = §37 `mpk`（`persistent_kernel.cuh:1206-1228`）。
+  核心结论：**(1) 批量/多线程 8/8 case `bad=0`**（连续 CAS 保证批量读安全）；**(2) 单线程批量只收回「放行
+  往返」1.2–1.5× 封顶**（DW 越大越少）；**(3) warp 并行读描述符在 128 B 下快 21×**（`serial` 随描述符
+  ~170 ns/字线性变贵、`warp` 恒 ~300 ns/item，§D 拆因证明分水岭是「能否并行读 payload」）；**(4) warp
+  把瓶颈从消费者翻到生产者**（P=8 时 303 ns/item 接近生产者侧成本）。判据 C1–C4、仍差 C5 一步。
+  **本轮新增实验**；收口 §37.7 两条尾巴。
 - **本轮（P44-1）**：`docs/04-experiments.md` 新增 **§33**「有界 ready 池 × 不规则依赖 DAG」——
   新源码 `src/irregular_pool.cu`、脚本 `harness/irregular_pool.sh`、原始输出
   `harness/irregular_pool.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`G=64`）。
