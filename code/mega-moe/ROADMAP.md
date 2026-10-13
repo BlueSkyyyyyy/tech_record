@@ -4422,7 +4422,33 @@
       `runtime/runtime.hpp` 实际指 DeepJIT 那份），给出分类依据与代表性例子。由此引用审计从
       「发现坏引用」→「分类」→「逐条处置」闭环。SM100/UMMA/tcgen05 无关；H100(sm90) 真机跑
       `check_refs`/`triage_refs`/`fix_refs` 三件套 `harness/exp_refs_drift_review.out.txt`。
-      配套博客 `content/posts/mega-moe-153-refs-drift-review`（索引页新增第 153 篇）。
+       配套博客 `content/posts/mega-moe-153-refs-drift-review`（索引页新增第 153 篇）。
+
+### P144 增量（opt-in，补齐反向一直缺席的「非 GEMM 段」：SwiGLU 反向 + 激活梯度重量化）
+
+- [x] **P144-1** **MoE 反向的「非 GEMM 段」：SwiGLU 反向 + L1 激活梯度的 FP8/UE8M0 重量化**
+      （`deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh:1108-1219`；`common/math.cuh:114-147`；
+      `csrc/apis/mega_moe.hpp:188-204`；`csrc/apis/gemm.hpp:373-411`；对照第 10/104/111/132/135/142/143 篇）。
+      前向 single-step 预算已被第 142/143 篇补全（GEMM 339.4us + L2 写回/combine 292us），反向四个 grouped
+      GEMM 与累积协议被第 15/135~151 篇挖到底、两段通信由第 104 篇补上。但**夹在两个 dgrad GEMM 之间的那段
+      元素级算子**——把 L2 dgrad 出来的 `d(act)` 反解成 gate/up 的激活梯度、再量化成 FP8（供 wgrad 的 B 操作数，
+      `gemm.hpp:373-411` 的 `std::pair<Tensor,Tensor>` FP8 对、recipe `(1,1,128)`）——从没被单独量过。
+      它就是前向 L1 epilogue（`kernel:1108-1219`：gate/up 先 `__float22bfloat162_rn` 入 bf16 `:1112-1113`、
+      `silu(g)=g/(1+e^{-g})` `:1122-1135`、per-32 UE8M0 量化 `:1137-1181`）的**逐元素逆**。**数学**：
+      `d(gate)=dact·w·ũ·σ(1+g̃(1-σ))`、`d(up)=dact·w·g̃·σ`（σ=sigmoid），bf16 舍入走 straight-through；
+      量化语义与前向 L1 输出一致（`mega_moe.hpp:200-204` 的 `kGranK=32`），SF 逐位复刻 `math.cuh:114-147`。
+      **主 kernel SM100 专属、仅分析**；本段架构无关，H100(sm90) 用真实内核跑。→
+      `docs/154-moe-backward-activation-segment.md`（真实行号核对）。H100 实测
+      `src/moe_backward_activation.cu`（warp 内半 warp `__shfl_xor_sync` 归约 + `__nv_bfloat162` 向量化）+
+      `harness/exp_moe_backward_activation.{sh,py,out.txt}`：① 正确性 **SF 逐位不符 0/32768、FP8 字节
+      0/1048576**；② 带宽 量化路径 **20.12us/1668 GB/s**（T=2048,I=2048）、**68.41us/1962 GB/s**（T=8192）、
+      **60.44us/1943 GB/s**（T=2048,I=7168），bf16 路径 ~2.5 TB/s（HBM ~75%）；③ 误差分层（torch fp64 oracle）：
+      bf16 数据路径 **~1.7e-3**、再叠 FP8 量化 **~2.7e-2、cos 0.99965**——**恰好压在 FP8 输入噪声地板
+      （第 111 篇 ~3.6e-2）之内，数值上基本免费**；④ **反向 single-step 预算**：d2g 111.0 + 激活段 20.0 +
+      d1g 194.3 + w2g 500.6 + w1g 997.0 = **1822.9us**，激活段仅 **1.10%**，与前向 L1 epilogue（第 142 篇
+      24.2us）同量级；反向的钱仍在四个 GEMM（wgrad 占 83%）与通信；⑤ torch 朴素元素级实现 199.8us =
+      CUDA 融合核的 **10×**（物化 fp32 中间张量）。配套博客
+      `content/posts/mega-moe-154-moe-backward-activation-segment`（索引页新增第 154 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4456,8 +4482,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P143 各增量完成（P15-1…P41-1、P42-1…P143-1）。**
-  本轮 P143-1：新建 `docs/153-refs-drift-review.md`（+`harness/fix_refs.py`、
+- 当前进度：**P0~P14 全部完成；P15~P144 各增量完成（P15-1…P41-1、P42-1…P144-1）。**
+  本轮 P144-1：新建 `docs/154-moe-backward-activation-segment.md`（+`src/moe_backward_activation.cu`、
+  `harness/exp_moe_backward_activation.{sh,py,out.txt}`）——补齐**反向一直缺席的「非 GEMM 段」**：
+  夹在两个 dgrad GEMM 之间的「SwiGLU 反向 + 激活梯度的 FP8/UE8M0 重量化」。它是前向 L1 epilogue
+  （`sm100_fp8_fp4_mega_moe.cuh:1108-1219`）的逐元素逆；wgrad 的 B 操作数是 FP8 对（`gemm.hpp:373-411`）
+  故 `d(gate)/d(up)` 必须量化。H100(sm90) 真机：正确性 **0/32768 SF、0/1048576 FP8 字节**；量化路径
+  **20.1us/1668 GB/s**（T=2048,I=2048）；误差分层 bf16-round ~1.7e-3、+FP8 ~2.7e-2（cos 0.99965，
+  压在 FP8 输入噪声 ~3.6e-2 之内、数值基本免费）；放回预算 d2g+激活+d1g+w2g+w1g 合计 **1822.9us**，
+  激活段仅 **1.10%**（与前向 L1 epilogue 24.2us 同量级），反向的钱仍在四个 GEMM + 通信。
+  索引页新增第 154 篇。
+  上一轮 P143-1：新建 `docs/153-refs-drift-review.md`（+`harness/fix_refs.py`、
   `harness/exp_refs_drift_review.{sh,out.txt}`）——把三次「引用体检」（P96/P97/P123）留下的
   **near_miss 清单做逐条处置**：新工具 `fix_refs.py` 对每条 near_miss 给六类确定性判定
   （`in_range`/`widened`/`wrong_range`/`wrong_file`/`unknown_symbol`/`cross_talk`），`--apply`
@@ -6074,7 +6109,15 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P143 已完成（最新 **P143-1 把三次「引用体检」留下的 near_miss 清单做逐条处置**：
+- **下一步**：P0~P144 已完成（最新 **P144-1 补齐反向一直缺席的「非 GEMM 段」**：夹在两个 dgrad GEMM
+  之间的「SwiGLU 反向 + 激活梯度 FP8/UE8M0 重量化」——前向 L1 epilogue 的逐元素逆。H100(sm90) 真机
+  正确性 0/32768 SF、0/1048576 FP8 字节；量化路径 20.1us/1668 GB/s；误差分层 bf16-round ~1.7e-3、
+  +FP8 ~2.7e-2（cos 0.99965，压在 FP8 输入噪声之内）；放回预算 d2g+激活+d1g+w2g+w1g=1822.9us，
+  激活段仅 1.10%。索引页新增第 154 篇）。
+  可继续（均为增量、非承诺）：① 把这段也做成「折进邻近 GEMM 的 epilogue」（对照第 148/149 篇的同
+  kernel 融合思路）量它能否藏进 d2g 或 d1g 的 epilogue；② 对 P96/P97/P123 的轻微漂移清单关键路径
+  定点复核；③ 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）。详见上。
+  上一轮 P143-1 把三次「引用体检」留下的 near_miss 清单做逐条处置：
   P96/P97/P123 只到「分类 + 挑候选」，`triage_refs.py` 的 7 条 `candidate off-by-one` 一直悬着。
   新工具 `harness/fix_refs.py` 给每条 near_miss 六类确定性判定（`in_range`/`widened`/`wrong_range`/
   `wrong_file`/`unknown_symbol`/`cross_talk`），`--apply` 只机械扩区间。H100(sm90) 真机跑三件套：
