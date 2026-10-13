@@ -566,7 +566,24 @@
       **把 tile 拆成两个 128 B swizzle `[·,32]` atom**（未做，唯一待验证）。当前可用最优=cp.async@64
       （0.964×）或 TMA@32（0.949×），**二者尚未叠加**。**方法学**：跨 `BVK` 先用逐位校验判布局解码
       （`base32==base64` 即证累加序不随 `BVK` 变），再单独归因时间差；初版 `#if` 误用 `constexpr`（非宏）
-      致 `tma32` 也走稠密、被逐位校验立刻暴露。
+      致 `tma32` 也走稠密、被逐位校验立刻暴露。**该唯一待验证（两个 128 B swizzle atom 拆分）已由 P7-51
+      关闭（答案：逐位正确、无 bank 冲突、全程最快，见 `docs/07` §54）。**
+- [x] **P7-51** 兑现 §53.5 的**唯一**待验证路径——`TMA + BVK=64` 改走**两个 128 B swizzle atom 拆分**
+      （而非 `SWIZZLE_NONE` 稠密 256 B 行）：把 B2 K2-mma 核的 TMA 操作数布局从「一块 `[rows][BVK]`、box 宽
+      `BVK`」改成 **atom-major `[NAT=BVK/32][rows][32]`**（每个 32-float/128 B 宽的 atom 自己的 TMA box、
+      恒 `SWIZZLE_128B`），`rd` 按 `col>>5` 选 atom 后做 `Swizzle<3,4,3>` 解码，**算术一字未动**
+      （`b2_mma_probe.cu:130-165/260-278/463-485`）。新增 `harness/check_bwd_b2_tma_atom.py`
+      （`harness/check_bwd_b2_tma_atom.out.txt`，空闲卡）+ `harness/probe_b2_tma_atom_ncu.sh`
+      （`harness/probe_b2_tma_atom_ncu.out.txt`）+ `docs/07` §54。**Part A**：`atom64` 与 `base64`
+      `dq/dk/dw/dgk` **逐位相同（max_abs=0，含非整除 T=250）**、与 `tma32` 的 `dq/dk/dw` 也逐位（证
+      `BVK=32/64` 拼出同一 `k` 收缩序）、vs torch tf32 底噪 3.6e-4（比 Triton 更贴 fp32）；4 组 shape。
+      **Part B**：`atom64/base32` dev **0.853–0.974×**、`atom64/base64` **0.927–0.976×**——**§49.5「BVK=64
+      最优分块」× §52「TMA 读侧修复」两收获首次叠加**（对照 §53.3 `SWIZZLE_NONE` 版 2.5–3.0×）。**Part D
+      （ncu）**：读侧修复仍在（L2 3.02→**2.39 GB**、srcunit 59.77M→**39.85M**、l1tex 全局读 **=0**、SASS
+      `LDGSTS`→`UBLKCP` 10→20），且 bank conflict **8.39M**（=base64，**不再是 `SWIZZLE_NONE` 的 272.6M**），
+      DRAM SOL **90.6%**（最高）、Duration **485.9 µs**（518.9→485.9，全档最短）。**结论**：§53.5 待验证成立，
+      目标卡 CUDA B2 取 `BVK=64` 时用 **NAT 个 128 B swizzle atom**、勿用 `SWIZZLE_NONE`；可与 `-DB2M_VECST`
+      无冲突叠加。**边界**：只测 `BVK∈{32,64}`、fp32、`BT=16`；`atom64` 的 L2 比 `tma32` 略高 0.04 GB 未归因。
 
 - [x] **P7-32** 兑现 §34.4 的**待验证**：把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**，
       验证能否复现 §34.1「删掉 store」收益的那 33%。给 `b1_tma_probe.cu` 加 `-DB1T_TMADH`：per-warp
@@ -922,8 +939,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-50 补测**。
-  - P7-50（本轮）：**关闭 §52.6 的硬边界——把 B2 TMA 输入从 `BVK==32` 扩到 `BVK=64`，结论是
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-51 补测**。
+  - P7-51（本轮）：**兑现 §53.5 的唯一待验证路径——`TMA + BVK=64` 用两个 128 B swizzle atom 拆分，
+    正确、无冲突、且全程最快**（`docs/07` §54）。把 B2 K2-mma 核的 TMA 操作数布局改成 atom-major
+    `[NAT=BVK/32][rows][32]`（每 atom 自己的 128 B swizzle TMA box，`rd` 按 `col>>5` 选 atom），算术一字未动。
+    新增 `harness/check_bwd_b2_tma_atom.py`（`check_bwd_b2_tma_atom.out.txt`，空闲卡）+
+    `harness/probe_b2_tma_atom_ncu.sh`（`probe_b2_tma_atom_ncu.out.txt`）。**Part A**：`atom64`≡`base64`
+    （`dq/dk/dw/dgk` max_abs=0，含非整除 T=250）、`atom64`≡`tma32` 的 `dq/dk/dw` 逐位、vs torch 3.6e-4。
+    **Part B**：`atom64/base32` dev **0.853–0.974×**、`atom64/base64` 0.927–0.976×——**§49.5「BVK=64 最优分块」
+    × §52「TMA 读侧修复」两收获首次叠加**（对照 `SWIZZLE_NONE` 版 `tma64/base64` 的 2.5–3.0×）。**ncu**：
+    L2 3.02→2.39 GB、srcunit 59.77M→39.85M、l1tex 全局读=0、**bank conflict 8.39M（非 SWIZZLE_NONE 的 272.6M）**、
+    DRAM SOL 90.6%（最高）、Duration 518.9→**485.9 µs**。**结论**：目标卡 CUDA B2 取 `BVK=64` 时用 NAT 个 128 B
+    swizzle atom、勿用 `SWIZZLE_NONE`；可与向量化 store 无冲突叠加。
+  - P7-50（上轮）：**关闭 §52.6 的硬边界——把 B2 TMA 输入从 `BVK==32` 扩到 `BVK=64`，结论是
     `SWIZZLE_NONE` 捷径「正确但不可用」**（`docs/07` §53）。给 `b2_mma_probe.cu` 加 `TMA_SWZ128`
     宏（`BVK==32` 走 `SWIZZLE_128B`、`BVK==64` 改 `SWIZZLE_NONE` 稠密 256 B 行；`rd`/两张张量图按
     宏二选一，算术一字未动）。新增 `harness/check_bwd_b2_tma64.py`（`check_bwd_b2_tma64.out.txt`，空闲卡）
@@ -1616,7 +1644,17 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-48 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-51 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-51（`docs/07` §54）兑现 §53.5 的唯一待验证路径——`TMA + BVK=64` 用两个 128 B swizzle atom 拆分**：
+    把 K2-mma 核的 TMA 操作数改成 atom-major `[NAT=BVK/32][rows][32]`（每 atom 自己的 128 B swizzle box，
+    `rd` 按 `col>>5` 选 atom），算术一字未动。`atom64`≡`base64` **逐位相同**（含非整除 T=250）、≡`tma32` 的
+    `dq/dk/dw` 逐位；`atom64/base32` dev **0.853–0.974×**、`atom64/base64` 0.927–0.976×——**§49.5「BVK=64 最优
+    分块」× §52「TMA 读侧修复」两收获首次叠加**（对照 `SWIZZLE_NONE` 版 2.5–3.0×）。ncu：L2 3.02→2.39 GB、
+    srcunit 59.77M→39.85M、l1tex 全局读=0、**bank conflict 8.39M（非 SWIZZLE_NONE 的 272.6M）**、DRAM SOL
+    90.6%、Duration 518.9→**485.9 µs**。新增 `harness/check_bwd_b2_tma_atom.py`（`check_bwd_b2_tma_atom.out.txt`）
+    + `harness/probe_b2_tma_atom_ncu.sh`（`probe_b2_tma_atom_ncu.out.txt`）。**设计输入**：目标卡 CUDA B2 取
+    `BVK=64` 时用 NAT 个 128 B swizzle atom、勿用 `SWIZZLE_NONE`；可与 `-DB2M_VECST` 叠加。**边界**：只测
+    `BVK∈{32,64}`、fp32、`BT=16`。
   - **P7-48（`docs/07` §51）闭环 §50.5 的唯一待查线索：B2 K2-mma 核的「L2 字节 +35%（3.03 vs 2.24 GB）」**，
     受控字节消融拆成两条独立、分别可消的机制——**(a) 读侧 +0.64 GB＝`cp.async` `.BYPASS` 路径属性**
     （`h/dh`、`do/vn/dv` 各 1.50×、DRAM 读不变＝L2 re-touch；`-DB2M_NOASYNC` 同 16B 同访问模式的普通

@@ -1,0 +1,110 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+================================================================================================
+Part A: correctness -- tma_atom64 vs base64 BIT-IDENTICAL; base32==base64; tf32 floor
+================================================================================================
+
+# B8 T2048 H8  grid=(128, 64)  nvt(32)=4 nvt(64)=2
+    tma_atom64 vs torch dq   max_abs=1.059e-02  max_rel=3.178e-04  ref_max=3.333e+01
+    trit vs torch dq         max_abs=2.547e-02  max_rel=7.641e-04  ref_max=3.333e+01
+  dq    atom64-vs-base64=0.000e+00  atom64-vs-tma32=0.000e+00  base32-vs-base64=0.000e+00  (vs torch: atom64 3.178e-04 / trit 7.641e-04)
+    tma_atom64 vs torch dk   max_abs=1.014e-02  max_rel=2.608e-04  ref_max=3.888e+01
+    trit vs torch dk         max_abs=2.555e-02  max_rel=6.571e-04  ref_max=3.888e+01
+  dk    atom64-vs-base64=0.000e+00  atom64-vs-tma32=0.000e+00  base32-vs-base64=0.000e+00  (vs torch: atom64 2.608e-04 / trit 6.571e-04)
+    tma_atom64 vs torch dw   max_abs=1.020e-03  max_rel=3.408e-04  ref_max=2.993e+00
+    trit vs torch dw         max_abs=2.503e-03  max_rel=8.363e-04  ref_max=2.993e+00
+  dw    atom64-vs-base64=0.000e+00  atom64-vs-tma32=0.000e+00  base32-vs-base64=0.000e+00  (vs torch: atom64 3.408e-04 / trit 8.363e-04)
+    tma_atom64 vs torch dgk  max_abs=2.861e-06  max_rel=1.967e-07  ref_max=1.455e+01
+    trit vs torch dgk        max_abs=1.907e-06  max_rel=1.311e-07  ref_max=1.455e+01
+  dgk   atom64-vs-base64=0.000e+00  atom64-vs-tma32=2.861e-06  base32-vs-base64=2.861e-06  (vs torch: atom64 1.967e-07 / trit 1.311e-07)
+
+# B2 T1024 H8  grid=(64, 16)  nvt(32)=4 nvt(64)=2
+    tma_atom64 vs torch dq   max_abs=9.860e-03  max_rel=3.292e-04  ref_max=2.995e+01
+    trit vs torch dq         max_abs=2.472e-02  max_rel=8.255e-04  ref_max=2.995e+01
+  dq    atom64-vs-base64=0.000e+00  atom64-vs-tma32=0.000e+00  base32-vs-base64=0.000e+00  (vs torch: atom64 3.292e-04 / trit 8.255e-04)
+    tma_atom64 vs torch dk   max_abs=9.924e-03  max_rel=3.281e-04  ref_max=3.025e+01
+    trit vs torch dk         max_abs=2.474e-02  max_rel=8.179e-04  ref_max=3.025e+01
+  dk    atom64-vs-base64=0.000e+00  atom64-vs-tma32=0.000e+00  base32-vs-base64=0.000e+00  (vs torch: atom64 3.281e-04 / trit 8.179e-04)
+    tma_atom64 vs torch dw   max_abs=8.987e-04  max_rel=3.025e-04  ref_max=2.971e+00
+    trit vs torch dw         max_abs=2.407e-03  max_rel=8.102e-04  ref_max=2.971e+00
+  dw    atom64-vs-base64=0.000e+00  atom64-vs-tma32=0.000e+00  base32-vs-base64=0.000e+00  (vs torch: atom64 3.025e-04 / trit 8.102e-04)
+    tma_atom64 vs torch dgk  max_abs=2.384e-06  max_rel=1.668e-07  ref_max=1.429e+01
+    trit vs torch dgk        max_abs=1.907e-06  max_rel=1.335e-07  ref_max=1.429e+01
+  dgk   atom64-vs-base64=0.000e+00  atom64-vs-tma32=2.861e-06  base32-vs-base64=2.861e-06  (vs torch: atom64 1.668e-07 / trit 1.335e-07)
+
+# T512 H4  grid=(32, 4)  nvt(32)=4 nvt(64)=2
+    tma_atom64 vs torch dq   max_abs=8.778e-03  max_rel=3.225e-04  ref_max=2.722e+01
+    trit vs torch dq         max_abs=2.440e-02  max_rel=8.967e-04  ref_max=2.722e+01
+  dq    atom64-vs-base64=0.000e+00  atom64-vs-tma32=0.000e+00  base32-vs-base64=0.000e+00  (vs torch: atom64 3.225e-04 / trit 8.967e-04)
+    tma_atom64 vs torch dk   max_abs=8.017e-03  max_rel=3.092e-04  ref_max=2.592e+01
+    trit vs torch dk         max_abs=2.243e-02  max_rel=8.654e-04  ref_max=2.592e+01
+  dk    atom64-vs-base64=0.000e+00  atom64-vs-tma32=0.000e+00  base32-vs-base64=0.000e+00  (vs torch: atom64 3.092e-04 / trit 8.654e-04)
+    tma_atom64 vs torch dw   max_abs=8.188e-04  max_rel=2.940e-04  ref_max=2.785e+00
+    trit vs torch dw         max_abs=2.042e-03  max_rel=7.331e-04  ref_max=2.785e+00
+  dw    atom64-vs-base64=0.000e+00  atom64-vs-tma32=0.000e+00  base32-vs-base64=0.000e+00  (vs torch: atom64 2.940e-04 / trit 7.331e-04)
+    tma_atom64 vs torch dgk  max_abs=1.907e-06  max_rel=1.480e-07  ref_max=1.288e+01
+    trit vs torch dgk        max_abs=1.431e-06  max_rel=1.110e-07  ref_max=1.288e+01
+  dgk   atom64-vs-base64=0.000e+00  atom64-vs-tma32=1.907e-06  base32-vs-base64=1.907e-06  (vs torch: atom64 1.480e-07 / trit 1.110e-07)
+
+# T250 H3 (non-div)  grid=(16, 3)  nvt(32)=4 nvt(64)=2
+    tma_atom64 vs torch dq   max_abs=8.778e-03  max_rel=3.583e-04  ref_max=2.449e+01
+    trit vs torch dq         max_abs=2.058e-02  max_rel=8.401e-04  ref_max=2.449e+01
+  dq    atom64-vs-base64=0.000e+00  atom64-vs-tma32=0.000e+00  base32-vs-base64=0.000e+00  (vs torch: atom64 3.583e-04 / trit 8.401e-04)
+    tma_atom64 vs torch dk   max_abs=8.287e-03  max_rel=2.903e-04  ref_max=2.855e+01
+    trit vs torch dk         max_abs=2.157e-02  max_rel=7.556e-04  ref_max=2.855e+01
+  dk    atom64-vs-base64=0.000e+00  atom64-vs-tma32=0.000e+00  base32-vs-base64=0.000e+00  (vs torch: atom64 2.903e-04 / trit 7.556e-04)
+    tma_atom64 vs torch dw   max_abs=7.644e-04  max_rel=2.941e-04  ref_max=2.599e+00
+    trit vs torch dw         max_abs=2.005e-03  max_rel=7.713e-04  ref_max=2.599e+00
+  dw    atom64-vs-base64=0.000e+00  atom64-vs-tma32=0.000e+00  base32-vs-base64=0.000e+00  (vs torch: atom64 2.941e-04 / trit 7.713e-04)
+    tma_atom64 vs torch dgk  max_abs=1.907e-06  max_rel=1.628e-07  ref_max=1.172e+01
+    trit vs torch dgk        max_abs=9.537e-07  max_rel=8.138e-08  ref_max=1.172e+01
+  dgk   atom64-vs-base64=0.000e+00  atom64-vs-tma32=1.907e-06  base32-vs-base64=1.907e-06  (vs torch: atom64 1.628e-07 / trit 8.138e-08)
+
+worst (over all shapes):
+  dq    atom64-vs-base64 0.000e+00   atom64-vs-torch 3.583e-04
+  dk    atom64-vs-base64 0.000e+00   atom64-vs-torch 3.281e-04
+  dw    atom64-vs-base64 0.000e+00   atom64-vs-torch 3.408e-04
+  dgk   atom64-vs-base64 0.000e+00   atom64-vs-torch 1.967e-07
+
+================================================================================================
+Part B: head-to-head kernel-only -- BVK=32/64 x cp.async/TMA(atom)
+================================================================================================
+
+  B8 T2048 H8:
+    base32       dev=    519.4us  wall=    521.2us   dev/base32=1.000x  dev/base64=1.046x
+    tma32        dev=    494.0us  wall=    495.2us   dev/base32=0.951x  dev/base64=0.995x
+    base64       dev=    496.4us  wall=    498.3us   dev/base32=0.956x  dev/base64=1.000x
+    tma_atom64   dev=    484.6us  wall=    487.2us   dev/base32=0.933x  dev/base64=0.976x
+    base64v      dev=    493.9us  wall=    495.6us   dev/base32=0.951x  dev/base64=0.995x
+    tma_atom64v  dev=    483.0us  wall=    485.2us   dev/base32=0.930x  dev/base64=0.973x
+    -> atom64/base64 dev 0.976x  atom64/base32 0.933x  tma32/base32 0.951x
+
+  B2 T1024 H8:
+    base32       dev=     70.7us  wall=     72.7us   dev/base32=1.000x  dev/base64=0.988x
+    tma32        dev=     68.3us  wall=     70.1us   dev/base32=0.965x  dev/base64=0.954x
+    base64       dev=     71.6us  wall=     73.2us   dev/base32=1.012x  dev/base64=1.000x
+    tma_atom64   dev=     68.9us  wall=     71.6us   dev/base32=0.974x  dev/base64=0.962x
+    base64v      dev=     69.9us  wall=     71.6us   dev/base32=0.988x  dev/base64=0.977x
+    tma_atom64v  dev=     68.0us  wall=     70.1us   dev/base32=0.961x  dev/base64=0.950x
+    -> atom64/base64 dev 0.962x  atom64/base32 0.974x  tma32/base32 0.965x
+
+  T512 H4:
+    base32       dev=      9.4us  wall=     29.2us   dev/base32=1.000x  dev/base64=1.045x
+    tma32        dev=      8.9us  wall=     30.2us   dev/base32=0.951x  dev/base64=0.994x
+    base64       dev=      9.0us  wall=     29.2us   dev/base32=0.957x  dev/base64=1.000x
+    tma_atom64   dev=      8.3us  wall=     30.0us   dev/base32=0.887x  dev/base64=0.927x
+    base64v      dev=      8.5us  wall=     28.5us   dev/base32=0.906x  dev/base64=0.946x
+    tma_atom64v  dev=      6.9us  wall=     29.4us   dev/base32=0.736x  dev/base64=0.769x
+    -> atom64/base64 dev 0.927x  atom64/base32 0.887x  tma32/base32 0.951x
+
+  T250 H3 (non-div):
+    base32       dev=      8.5us  wall=     29.2us   dev/base32=1.000x  dev/base64=1.139x
+    tma32        dev=      8.3us  wall=     30.0us   dev/base32=0.979x  dev/base64=1.116x
+    base64       dev=      7.4us  wall=     28.8us   dev/base32=0.878x  dev/base64=1.000x
+    tma_atom64   dev=      7.2us  wall=     30.0us   dev/base32=0.853x  dev/base64=0.972x
+    base64v      dev=      7.0us  wall=     29.1us   dev/base32=0.822x  dev/base64=0.937x
+    tma_atom64v  dev=      6.3us  wall=     29.8us   dev/base32=0.745x  dev/base64=0.848x
+    -> atom64/base64 dev 0.972x  atom64/base32 0.853x  tma32/base32 0.979x
+
+DONE
