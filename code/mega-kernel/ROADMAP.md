@@ -1775,6 +1775,30 @@
       描述符、判据普遍停 C4、未对 SM100）。配套博客 post `mega-kernel-12-sched-design`（weight 13）
       并更新 `mega-kernel-00-index` 目录第 12 项。**本专题任务清单此前全完成，本轮为其新增的汇总增量。**
 
+### P71 实验扩展 24：真实 HBM 数据面下的 producer:worker 配比（`docs/04-experiments.md` §59）
+
+- [x] **P71-1** 补掉 §58.10 明留的尾巴——「**`CW` 是纯 ALU 延迟，只拉长 task、不产生真实 HBM
+      流量**；真实 task 的『重』是访存+计算混合，`PS*`-vs-`CW` 曲线**形状可信、精确拐点只对本微基准
+      成立**」。给 §58 的 worker 加一条**真实 HBM 数据面**（每 batch 用 `__ldcs` 绕 L2 流式读 `MD` 个
+      `uint4`），把「喂饱 G 个 worker 所需 producer 数 `PS*`」随 task 重量的曲线从**纯 ALU** 推进到
+      **访存主导**。见 `docs/04-experiments.md` §59，源码 `src/sched_perworker_ring_mem.cu`、脚本
+      `harness/sched_perworker_ring_mem.sh`、原始输出 `harness/sched_perworker_ring_mem.out.txt`
+      （目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B、`K=32`、`T=256`、`G=100`、
+      宽松环、`D=2`、min-of-3）。五 Section：
+      - **§A 数据面不改数值**：`MD` 计入 `sink` 后仍**逐位对 host 参考**（0/16/128 KB 全 `OK`）。
+      - **§B headline**：`PS*` 随**访存重量 `MD`** 单调下降——`MD=0/8192→PS*≥32≈G`、
+        `MD=32768（512 KB）→PS*=16（1:6.25）`、**`MD=131072（2 MB）→PS*≈4（1:25）`**；
+        **与 §58 纯计算档同族、对上 MPK 的 1:32**——「重 task 少 producer」对**访存型 task 同样成立**。
+      - **§C 对照复现 §58**：`CW=2^16→PS*=16`、`CW=2^18→PS*≈4`（本节 `NB=1000` vs §58 `NB=8192`，
+        总工作量不同故差一档、形状一致）。
+      - **§D 两笔重量同向叠加**：`CW=65536` 单独 `PS*=16`，叠加 `MD=32768` 后 `PS*=8`。
+      - **§E 控制面不争 HBM**：achieved 数据面带宽随 `PS` 只升不降（650→952 GB/s），producer 写描述符
+        （~5 GB/s）可忽略——**控制面瓶颈在每批 `st.release` 的 MEMBAR/会合，不在 HBM 带宽**。
+      判据：内核 **C1–C4**、仍差 C5（与 §47–§58 同档）。踩坑：`prepare_data` 早于 `ensure()`、须惰性
+      分配 `g_dref`/`g_data`。局限：数据面只到 ~950 GB/s、**未把 HBM 推到饱和**，真饱和争用未测。
+      **本轮新增实验**；补齐 §58.10 唯一未覆盖的「重量维度」，与 §47–§58 合成调度器**取 task/环协议/
+      配比**链条的闭合。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1799,7 +1823,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P70-1 完成（1/1）**。把 P42–P69（`docs/04-experiments.md` §31–§58）这一长串**调度器
+- 当前进度：**P71-1 完成（1/1）**。补掉 §58.10 明留的尾巴——**§58 的 task 重量旋钮 `CW` 是纯 ALU
+  延迟、不产生真实 HBM 流量**。给 §58 的 worker 加一条**真实 HBM 数据面**（每 batch `__ldcs` 流式读
+  `MD` 个 `uint4`、绕 L2），把「喂饱 G 个 worker 所需 producer 数 `PS*`」-vs-task 重量曲线从**纯 ALU**
+  推进到**访存主导**。见 `docs/04-experiments.md` **§59**，源码 `src/sched_perworker_ring_mem.cu`、脚本
+  `harness/sched_perworker_ring_mem.sh`、原始输出 `harness/sched_perworker_ring_mem.out.txt`（目标卡
+  H100/sm90a、固定空闲 device 3、`DW=88`、`K=32`、`T=256`、`G=100`）。五 Section 核心结论：
+  (1) **数据面不改数值**（`MD` 计入 `sink` 后逐位对 host 参考，全 `OK`）；(2) **`PS*` 随访存重量 `MD`
+  单调下降**——`MD=0/8192→PS*≥32≈G`、`MD=512 KB→PS*=16`、**`MD=2 MB→PS*≈4`（`PS*:G≈1:25`）**，与
+  §58 纯计算档同族、**对上 MPK 的 4:128=1:32**（「重 task 少 producer」对访存型 task 同样成立）；
+  (3) 复现 §58（`CW=2^16→PS*=16`、`CW=2^18→PS*≈4`，总工作量差一档、形状一致）；(4) **两笔重量同向叠加**
+  （`CW=65536` 单独 `PS*=16`、叠加 `MD=32768` 后 `PS*=8`）；(5) **控制面不争 HBM**——achieved 数据面
+  带宽随 `PS` 只升不降（650→952 GB/s），producer 写描述符 ~5 GB/s 可忽略（控制面瓶颈在 MEMBAR/会合）。
+  判据 C1–C4、仍差 C5。局限：数据面只到 ~950 GB/s、未把 HBM 推到饱和，真饱和争用未测。
+  **本专题任务清单此前 P0–P70 全完成，本轮为其新增的实验增量。**
+- 此前：**P70-1 完成（1/1）**。把 P42–P69（`docs/04-experiments.md` §31–§58）这一长串**调度器
   微基准**收口成一张**可操作设计手册** `docs/11-in-kernel-scheduler-design.md`（纯资料汇总，无新实验），
   配套博客 post `mega-kernel-12-sched-design`（weight 13）并更新目录第 12 项。核心是在 `docs/04` 的
   400 KB 原始实验之外，给出**调度器内部机制层**的综合：§1 六部件参考架构；§3 ready 结构死锁的**两个
@@ -1808,7 +1846,7 @@
   （大 K+D=2、预取缝固定长度、数据面认总线程/SM、控制面认 K）；§6 描述符来源（预计算 vs 现场生成
   27×、release MEMBAR 税、端到端环窗主导）；§7 环协议（`D` 被协议锁死、一消费者一环、
   `PS*:G≈1:25~1:32` 对上 MPK 4:128）；§8 成本模型速查表（12 条实测）；§9 设计决策表（14 条）；
-  §10 对 MPK/DeepGEMM 逐条印证；§11 局限。**本专题任务清单此前 P0–P69 全完成，本轮为其新增的汇总增量。**
+  §10 对 MPK/DeepGEMM 逐条印证；§11 局限。
 - 此前：**P69-1 完成（1/1）**。补掉 §57.8 明留的**头号尾巴**——真实 MPK 形态是「**少
   producer（scheduler）× 多 per-worker 环**」：一个 producer 顺序/轮转填多条环、每条环仍单生产者单
   消费者（前缀精确），**producer 侧不随 G 膨胀**（§57 的 `pair` 靠 `P==G`、`grid=2G`）。见
