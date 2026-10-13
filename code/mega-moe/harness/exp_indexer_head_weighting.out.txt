@@ -1,0 +1,63 @@
+NVIDIA H100 80GB HBM3, 9.0
+# indexer distillation per-head loss weighting: which heads should the shared target up-weight?
+# T=256 C=16384 H_q=32 H_kv=8 G=4 D=128 dv=64 topk=2048 / indexer(H=32,d=64)
+# arch major = (9, 0), num_sms = 132
+
+== Part A: 真实 SM90 fp8_fp4_mqa_logits 锚定 + 三档支持集 ==
+  kernel vs torch-fp8 ref: max-abs-rel = 2.538e-04
+  [fp8   ] top-2048 recall = 0.9715
+  [mxfp8 ] top-2048 recall = 0.9708
+  [mxfp4 ] top-2048 recall = 0.8756
+
+== Part B: 逐头统计（熵 = 尖锐度；ν = 下游输出重要度）==
+  熵 ent_h:  min=0.806 max=9.699 mean=7.158
+  值范数 ν_h: min=0.344 max=2.826 mean=1.591
+  corr(ent, ν) = +0.031  （≈0 ⇒ 熵与下游重要度解耦，可分开检验）
+
+== Part C: 逐头权重方案 λ → 共享支持集 Top-k(p_λ) → 下游输出误差 ==
+  （δ_equal = 各头等权输出误差；δ_value = 按 ν 加权输出误差；越低越好）
+  λ=uniform      δ_equal=5.3467e-02  δ_value=4.8455e-02  （recall vs uniform = 1.0000）
+  λ=entropy(+)   δ_equal=5.3566e-02  δ_value=4.8541e-02  （recall vs uniform = 0.9856）
+  λ=inv-entropy  δ_equal=5.3436e-02  δ_value=4.8435e-02  （recall vs uniform = 0.9811）
+  λ=value-norm   δ_equal=5.3364e-02  δ_value=4.8288e-02  （recall vs uniform = 0.9748）
+  λ=sharp-only   δ_equal=5.7602e-02  δ_value=5.2326e-02  （recall vs uniform = 0.7931）
+
+== Part C2: 逐头 oracle（每头各自 top-k，头共享的理论下界）==
+  oracle      δ_equal=4.7717e-02  δ_value=4.3018e-02
+
+== Part C3: ρ 扫描——ρ 越小头之间越不一致，逐头权重的影响越大 ==
+  （报 δ_value；gain = (δ_entropy − δ_value)/δ_value，正 = 按熵加权更差）
+  rho=1.0: uniform=4.1829e-02 entropy=4.1829e-02 value=4.1829e-02  熵罚=+0.000%  值范数收益=+0.000%
+  rho=0.9: uniform=4.8455e-02 entropy=4.8541e-02 value=4.8288e-02  熵罚=+0.177%  值范数收益=+0.346%
+  rho=0.7: uniform=6.7073e-02 entropy=6.8753e-02 value=6.6127e-02  熵罚=+2.504%  值范数收益=+1.410%
+  rho=0.5: uniform=8.9530e-02 entropy=9.5925e-02 value=8.7069e-02  熵罚=+7.142%  值范数收益=+2.750%
+
+== Part C4: λ = ν^p 扫描（p=0 均匀、p=1 值范数）；δ_value 随聚焦强度单调下降至饱和 ==
+  p=0.0: δ_value=4.8455e-02  δ_equal=5.3467e-02
+  p=0.5: δ_value=4.8353e-02  δ_equal=5.3395e-02
+  p=1.0: δ_value=4.8288e-02  δ_equal=5.3364e-02
+  p=2.0: δ_value=4.8209e-02  δ_equal=5.3354e-02
+  p=3.0: δ_value=4.8243e-02  δ_equal=5.3451e-02
+  p=4.0: δ_value=4.8296e-02  δ_equal=5.3560e-02
+
+== Part D: 由实测逐头误差反推「最优权重」并与熵/ν 对照 ==
+  corr(ent_h, 均匀支持下的逐头误差 err_h) = +0.837  （复现第 173 篇：熵是「误差出现在哪」的诊断量）
+  corr(ν_h,  均匀支持下的逐头误差 err_h) = -0.255
+
+== Part E: KL 不动点自检 —— 训练 indexer 打分 I 去匹配 p_λ（证明 λ 决定学到什么）==
+  收敛后 KL=8.063e+00  |  支持集 recall: 训练前=0.1251 → 训练后 vs Top-k(p_λ)=1.0000
+  ||softmax(I) − p_λ||₁ (mean/token) = 3.015e-07  （→0 坐实：逐头权重 λ 唯一决定 indexer 学到的目标排序）
+
+== Part F: 量化档下逐头权重的影响 vs 量化噪声 ==
+  [fp8   ] λ=uniform     δ_value=1.2102e-01
+  [fp8   ] λ=entropy(+)  δ_value=1.2107e-01
+  [fp8   ] λ=value-norm  δ_value=1.2097e-01
+  [mxfp4 ] λ=uniform     δ_value=4.9174e-01
+  [mxfp4 ] λ=entropy(+)  δ_value=4.9178e-01
+  [mxfp4 ] λ=value-norm  δ_value=4.9172e-01
+
+== Part G: 若各头下游等权（ν≡const），均匀应最优、按熵加权应变差 ==
+  λ=uniform     δ_equal=5.3467e-02
+  λ=entropy(+)  δ_equal=5.3566e-02
+  λ=inv-entropy δ_equal=5.3436e-02
+  λ=value-norm  δ_equal=5.3364e-02
