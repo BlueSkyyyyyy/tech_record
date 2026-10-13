@@ -530,6 +530,23 @@
       10%+）；(2) 读侧下一杠杆＝**TMA 输入**（普通 load 净亏 21%，与 §20/§24 收敛）；(3) 省字节须落在**最紧
       pipe**（`vecst` 后 L2 反降到 85%、不再最紧）。**边界**：读侧 1.5× 微架构成因待验证；`noasync*` 破坏
       流水/可能有竞态，仅作字节诊断；bf16/大 `BVK` 未测。
+- [x] **P7-49** 兑现 §51.6 的「读侧下一杠杆 = TMA 输入」：把 B2 K2-mma 核（`b2_mma_probe.cu`）的操作数
+      路径从 `cp.async`（`.BYPASS`）换成 **`cp.async.bulk.tensor`（TMA）+ SWIZZLE_128B**，看能否既消掉
+      §51.4 的 +0.64 GB L2 读放大、又**不像 `noasync` 那样丢流水（−21%）**。新增 `-DB2M_TMA`：`do/vn/dv`
+      用 4D 张量图 `{V,T,H,B}`/box `{BVK,BT,1,1}`、`h/dh` 用 5D 张量图 `{V,K,H,NT,B}`/box `{BVK,K,1,1,1}`，
+      单线程每 stage 发 5 条 TMA + per-stage `mbarrier`（`expect_tx`），OOB 尾行由 TMA 零填充。新增
+      `harness/check_bwd_b2_tma.py`（`check_bwd_b2_tma.out.txt`，空闲卡）+ `harness/probe_b2_tma_ncu.sh`
+      （`probe_b2_tma_ncu.out.txt`）+ `docs/07` §52。**Part A**：`tma`/`tma_vecst` 与 `base` 的 `dq/dk/dw/dgk`
+      **逐位相同（max_abs=0，含非整除 T=250）**、vs torch 落 tf32 底噪（与 §49.2 同）。**ncu（`B8T2048H8`）**：
+      读放大**整条消失**——srcunit 读 **59.77M→39.85M（=DRAM 扇区数 1.0×，与 `noasync` 预测逐值吻合）**、
+      l1tex 全局读请求 **=0**（SASS `base` 10×`LDGSTS`→`tma` 10×`UBLKCP`），DRAM 读 1.28 GB 不变；L2 3.02→
+      **2.35 GB**、`tma_vecst`→**2.25 GB（Triton 2.23）**。**且兑现时间**：`base` 最紧 pipe 是 L2 89.0%>DRAM
+      84.6%，删读放大后 L2 降 87.5%、**DRAM 89.0% 成最高 pipe**，Duration **519.8→494.2 µs**；`tma_vecst`
+      491.0 µs（比 identical-op Triton 核 ~551 快 **1.12×**）。**CUPTI `dev`**：`tma` 0.951×（B8）/0.955×（B2）/
+      0.933×（T512）/0.955×（T250），`tma_vecst` 0.946/0.926/0.794/0.857——**全 shape 净赢**（对比 `noasync`
+      的 −21%）。**结论**：TMA 保留异步、走独立引擎，故**消放大且净赚 ~5%**；目标卡 CUDA B2 操作数路径应直接上
+      TMA；「省字节落最紧 pipe」再得正例。**边界**：128 B swizzle 强绑 `BVK==32`（`BVK=64` 需拆 atom，未做）、
+      bf16/非 GEMM 段未覆盖；本核 `tma_vecst` 已贴 DRAM 地板 1.11×。
 
 - [x] **P7-32** 兑现 §34.4 的**待验证**：把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**，
       验证能否复现 §34.1「删掉 store」收益的那 33%。给 `b1_tma_probe.cu` 加 `-DB1T_TMADH`：per-warp
@@ -878,11 +895,30 @@
 - **「L2 字节」不是唯一指标，省字节要落最紧 pipe**（P7-48，§51.6）：B2 K2-mma 核部署 shape 是
   **DRAM 84.7% + L2 85–89% 双 bound**，`vecst` 消掉写放大后 L2 反降到 85%（不再最紧）；与 §50 的
   `dgk`/冲突「省了却不兑现时间」同构。改访存前先看 ncu 哪个 pipe 最高。
+- **同一笔「读放大」用普通 load 消是净亏、用 TMA 消是净赚**（P7-49，§52.3）：`cp.async` `.BYPASS` 的
+  1.5× L2 读放大，`noasync`（换同步 `float4`）能消掉但**−21%**（丢异步预取）；`cp.async.bulk.tensor`（TMA）
+  消掉同样多（59.77M→39.85M 扇区）+ **净 +5%**——因为 TMA 保留异步、且走独立引擎（l1tex 全局读请求=0）。
+  **测「换访存机制」不能只看字节，要同口径比机制本身的开销**。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-48 补测**。
-  - P7-48（本轮）：**闭环 §50.5 唯一的待查线索——B2 K2-mma 核的「L2 字节 +35%（3.03 vs 2.24 GB）」**，
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-49 补测**。
+  - P7-49（本轮）：**兑现 §51.6 的「读侧下一杠杆 = TMA 输入」——B2 K2-mma 核的读放大整条消失、且净赢 ~5%**
+    （`docs/07` §52）。给 `b2_mma_probe.cu` 加 `-DB2M_TMA`：操作数 `do/vn/dv`（4D 图 `{V,T,H,B}`/box
+    `{BVK,BT,1,1}`）与 `h/dh`（5D 图 `{V,K,H,NT,B}`/box `{BVK,K,1,1,1}`）改 **`cp.async.bulk.tensor` +
+    SWIZZLE_128B**，单线程每 stage 发 5 条 + per-stage `mbarrier`（`expect_tx`），OOB 尾行 TMA 零填充。
+    新增 `harness/check_bwd_b2_tma.py`（`check_bwd_b2_tma.out.txt`）+ `harness/probe_b2_tma_ncu.sh`
+    （`probe_b2_tma_ncu.out.txt`）。**Part A**：`tma`/`tma_vecst` 与 `base` `dq/dk/dw/dgk` **逐位相同
+    （max_abs=0，含非整除 T=250）**、vs torch 落 tf32 底噪。**ncu（`B8T2048H8`）**：读放大**整条消失**——
+    srcunit 读 **59.77M→39.85M（=DRAM 扇区数 1.0×，与 §51.4 `noasync` 预测逐值吻合）**、l1tex 全局读请求
+    **=0**（SASS 10×`LDGSTS`→10×`UBLKCP`）、DRAM 读 1.28 GB 不变；L2 3.02→**2.35 GB**、`tma_vecst`→
+    **2.25 GB（Triton 2.23）**。`base` 最紧 pipe L2 89.0%>DRAM 84.6%，删读放大后 **DRAM 89.0% 成最高 pipe**、
+    Duration **519.8→494.2 µs**；`tma_vecst` **491.0 µs**（比 identical-op Triton 核 ~551 快 **1.12×**）。
+    **CUPTI `dev`**：`tma` 0.951×/0.955×/0.933×/0.955×，`tma_vecst` 0.946×/0.926×/0.794×/0.857×（B8/B2/T512/T250）
+    ——**全 shape 净赢**（对比 `noasync` 的 −21%：TMA 保留异步 + 走独立引擎）。**结论**：目标卡 CUDA B2 操作数
+    路径应直接上 TMA；「省字节落最紧 pipe」再得正例（§50 的 `dgk` 是反例）。**边界**：128 B swizzle 强绑
+    `BVK==32`（`BVK=64` 需拆 atom，未做）、bf16/非 GEMM 段未覆盖；本核 `tma_vecst` 已贴 DRAM 地板 1.11×。
+  - P7-48（上轮）：**闭环 §50.5 唯一的待查线索——B2 K2-mma 核的「L2 字节 +35%（3.03 vs 2.24 GB）」**，
     用受控字节消融拆成两条独立、可分别消除的机制。给 `b2_mma_probe.cu` 加 `-DB2M_NOHDH`/`-DB2M_NODOV`
     （跳操作数 `cp.async`、零填充）、`-DB2M_VECST`（输出 `float2` store）、`-DB2M_NOASYNC`（同 16B 同访问
     模式换普通 `float4` load）。新增 `harness/check_bwd_b2_l2.py`（`check_bwd_b2_l2.out.txt`，空闲卡）+

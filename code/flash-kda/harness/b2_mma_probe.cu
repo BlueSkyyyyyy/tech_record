@@ -35,7 +35,9 @@
 // Host entry `extern "C" b2mma_launch(...)`, called from check_bwd_b2_mma.py via ctypes.
 #include <cuda_runtime.h>
 #include <cuda_pipeline.h>
+#include <cuda.h>
 #include <cstdint>
+#include <cstdio>
 
 #define DEV __device__ __forceinline__
 
@@ -92,9 +94,26 @@ constexpr int BW = 16;    // output columns per warp = KD / NW
 #ifndef B2M_NOASYNC
 #define B2M_NOASYNC 0
 #endif
+//   B2M_TMA (P7-49): stage the operands with `cp.async.bulk.tensor` (TMA) instead of
+//                 `cp.async`.  §51.4 pinned the read-side +0.64 GB to the `cp.async`
+//                 `.BYPASS` path (L1-bypass loses cross-lane 128 B coalescing) and named
+//                 "读侧下一杠杆 = TMA 输入".  TMA issues per-tile descriptor copies off
+//                 the LSU, into a SWIZZLE_128B smem layout (BVK*4 = 128 B rows), using a
+//                 per-stage `mbarrier` (`complete_tx::bytes`) handshake.  Requires BVK==32.
+#ifdef B2M_TMA
+#include <cuda.h>
+#define B2M_TMA_ON 1
+#else
+#define B2M_TMA_ON 0
+#endif
 constexpr int BVK = B2M_BVK;   // V-tile (contraction) depth staged per pipeline stage
 constexpr int NS  = B2M_NS;    // pipeline stages
+#if B2M_TMA_ON
+constexpr int BVP = BVK;       // TMA SWIZZLE_128B layout: dense rows, no padding
+static_assert(BVK == 32, "TMA SWIZZLE_128B needs a 128 B inner box -> BVK==32");
+#else
 constexpr int BVP = BVK + 4;   // padded row stride (16B keeps 4-float cp.async aligned)
+#endif
 
 static_assert(VD % BVK == 0, "BVK must divide V=128");
 
@@ -105,7 +124,60 @@ struct alignas(128) Stage {
     float h  [KD][BVP];   // h  [k, v]  (rows = output N index, cols = contraction v)
     float dh [KD][BVP];   // dh [k, v]
 };
-struct alignas(128) Shared { Stage st[NS]; };
+struct alignas(128) Shared {
+    Stage st[NS];
+#if B2M_TMA_ON
+    uint64_t full[NS];    // per-stage TMA-completion mbarrier (arrive count 1)
+#endif
+};
+
+// logical element read from a stage tile -- identity for the padded layout, and the
+// inverse SWIZZLE_128B decode (Swizzle<3,4,3> on the byte offset) for the TMA layout.
+DEV float rd(const float (*reg)[BVP], int row, int col) {
+#if B2M_TMA_ON
+    int b = (row * BVP + col) * 4;
+    b = b ^ (((b >> 7) & 7) << 4);
+    return *(const float*)((const char*)&reg[0][0] + b);
+#else
+    return reg[row][col];
+#endif
+}
+
+#if B2M_TMA_ON
+// ---- mbarrier / TMA (same primitives as b1_tma_probe.cu) --------------------
+DEV uint32_t saddr(const void* p) { return (uint32_t)__cvta_generic_to_shared(p); }
+DEV void mbar_init(uint64_t* b, uint32_t cnt) {
+    asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(saddr(b)), "r"(cnt));
+}
+DEV void mbar_arrive_tx(uint64_t* b, uint32_t bytes) {
+    asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n"
+                 ::"r"(saddr(b)), "r"(bytes) : "memory");
+}
+DEV void mbar_wait(uint64_t* b, int ph) {
+    asm volatile(
+        "{\n\t.reg .pred P;\n"
+        "LAB_%=:\n\t"
+        "mbarrier.try_wait.parity.shared::cta.b64 P, [%0], %1;\n\t"
+        "@!P bra LAB_%=;\n}\n" ::"r"(saddr(b)), "r"(ph) : "memory");
+}
+DEV void tma4d_load(const CUtensorMap* m, void* sm, int c0, int c1, int c2, int c3,
+                    uint64_t* bar) {
+    asm volatile(
+        "cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes "
+        "[%0], [%1, {%2,%3,%4,%5}], [%6];\n"
+        ::"r"(saddr(sm)), "l"(m), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(saddr(bar))
+        : "memory");
+}
+DEV void tma5d_load(const CUtensorMap* m, void* sm, int c0, int c1, int c2, int c3, int c4,
+                    uint64_t* bar) {
+    asm volatile(
+        "cp.async.bulk.tensor.5d.shared::cluster.global.mbarrier::complete_tx::bytes "
+        "[%0], [%1, {%2,%3,%4,%5,%6}], [%7];\n"
+        ::"r"(saddr(sm)), "l"(m), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4),
+          "r"(saddr(bar))
+        : "memory");
+}
+#endif
 
 DEV uint32_t to_tf32(float x) {
     uint32_t r;
@@ -162,9 +234,32 @@ DEV void prefetch(Stage* st, const float* __restrict__ v, const float* __restric
     }
 }
 
+#if B2M_TMA_ON
+// Single-thread TMA issue for one V-tile stage: do/vn/dv [BT,BVK] + h/dh [KD,BVK].  OOB
+// token rows (non-divisible T) are zero-filled by TMA automatically.  `bar` is the stage's
+// `full` mbarrier; `expect_tx` is the *full box* byte count (TMA counts zero-filled bytes).
+DEV void issue_tma(Stage* st, const CUtensorMap* dom, const CUtensorMap* vnm,
+                   const CUtensorMap* dvm, const CUtensorMap* hm, const CUtensorMap* dhm,
+                   int n, int hh, int c, int v0, uint64_t* bar) {
+    const int t0 = c * BT;
+    mbar_arrive_tx(bar, (uint32_t)((3 * BT + 2 * KD) * BVK * 4));
+    tma4d_load(dom, st->do_, v0, t0, hh, n, bar);
+    tma4d_load(vnm, st->vn,  v0, t0, hh, n, bar);
+    tma4d_load(dvm, st->dv,  v0, t0, hh, n, bar);
+    tma5d_load(hm,  st->h,   v0, 0, hh, c, n, bar);
+    tma5d_load(dhm, st->dh,  v0, 0, hh, c, n, bar);
+}
+#endif
+
 // ---------------------------------------------------------------------- kernel
 __global__ void __launch_bounds__(NW * 32)
-b2mma_kernel(const float* __restrict__ v, const float* __restrict__ vn,
+b2mma_kernel(
+#if B2M_TMA_ON
+             const __grid_constant__ CUtensorMap dom, const __grid_constant__ CUtensorMap vnm,
+             const __grid_constant__ CUtensorMap dvm, const __grid_constant__ CUtensorMap hm,
+             const __grid_constant__ CUtensorMap dhm,
+#endif
+             const float* __restrict__ v, const float* __restrict__ vn,
              const float* __restrict__ h, const float* __restrict__ dh,
              const float* __restrict__ do_, const float* __restrict__ dv,
              float* __restrict__ dq, float* __restrict__ dk, float* __restrict__ dw,
@@ -186,6 +281,31 @@ b2mma_kernel(const float* __restrict__ v, const float* __restrict__ vn,
     float gpart1 = 0.f;   // B2M_DGKCF second kcol half (kcol = warp*BW + 8 + c)
 
     const int nvt = VD / BVK;
+#if B2M_TMA_ON
+    if (threadIdx.x == 0) {
+        #pragma unroll
+        for (int s = 0; s < NS; ++s) mbar_init(&sh->full[s], 1);
+        asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory");
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        for (int s = 0; s < NS - 1; ++s)
+            if (s < nvt)
+                issue_tma(&sh->st[s], &dom, &vnm, &dvm, &hm, &dhm, n, hh, i_t, s * BVK,
+                          &sh->full[s]);
+    }
+    for (int it = 0; it < nvt; ++it) {
+        if (threadIdx.x == 0) {
+            const int snext = it + NS - 1;
+            if (snext < nvt)
+                issue_tma(&sh->st[snext % NS], &dom, &vnm, &dvm, &hm, &dhm, n, hh, i_t,
+                          snext * BVK, &sh->full[snext % NS]);
+        }
+        mbar_wait(&sh->full[it % NS], (it / NS) & 1);
+        __syncthreads();
+
+        const Stage* st = &sh->st[it % NS];
+#else
     for (int s = 0; s < NS - 1; ++s) {
         if (s < nvt) prefetch(&sh->st[s], v, vn, h, dh, do_, dv, n, hh, T, H, NT, i_t, s * BVK);
         __pipeline_commit();
@@ -200,31 +320,32 @@ b2mma_kernel(const float* __restrict__ v, const float* __restrict__ vn,
         __syncthreads();
 
         const Stage* st = &sh->st[it % NS];
+#endif
         #pragma unroll
         for (int kk = 0; kk < BVK / 8; ++kk) {
             const int kc = kk * 8;
             // A fragments (m16 x k8) from do/vn/dv: A[row=g/g+8][col=t/t+4]
             uint32_t aq[4], ak[4], aw[4];
-            aq[0] = to_tf32(st->do_[g    ][kc + t]);
-            aq[1] = to_tf32(st->do_[g + 8][kc + t]);
-            aq[2] = to_tf32(st->do_[g    ][kc + t + 4]);
-            aq[3] = to_tf32(st->do_[g + 8][kc + t + 4]);
-            ak[0] = to_tf32(st->vn[g    ][kc + t]);
-            ak[1] = to_tf32(st->vn[g + 8][kc + t]);
-            ak[2] = to_tf32(st->vn[g    ][kc + t + 4]);
-            ak[3] = to_tf32(st->vn[g + 8][kc + t + 4]);
-            aw[0] = to_tf32(st->dv[g    ][kc + t]);
-            aw[1] = to_tf32(st->dv[g + 8][kc + t]);
-            aw[2] = to_tf32(st->dv[g    ][kc + t + 4]);
-            aw[3] = to_tf32(st->dv[g + 8][kc + t + 4]);
+            aq[0] = to_tf32(rd(st->do_, g    , kc + t));
+            aq[1] = to_tf32(rd(st->do_, g + 8, kc + t));
+            aq[2] = to_tf32(rd(st->do_, g    , kc + t + 4));
+            aq[3] = to_tf32(rd(st->do_, g + 8, kc + t + 4));
+            ak[0] = to_tf32(rd(st->vn, g    , kc + t));
+            ak[1] = to_tf32(rd(st->vn, g + 8, kc + t));
+            ak[2] = to_tf32(rd(st->vn, g    , kc + t + 4));
+            ak[3] = to_tf32(rd(st->vn, g + 8, kc + t + 4));
+            aw[0] = to_tf32(rd(st->dv, g    , kc + t));
+            aw[1] = to_tf32(rd(st->dv, g + 8, kc + t));
+            aw[2] = to_tf32(rd(st->dv, g    , kc + t + 4));
+            aw[3] = to_tf32(rd(st->dv, g + 8, kc + t + 4));
             #pragma unroll
             for (int nt = 0; nt < 2; ++nt) {
                 const int krow = warp * BW + nt * 8 + g;   // output column = k = n index
                 uint32_t bh[2], bd[2];
-                bh[0] = to_tf32(st->h [krow][kc + t]);
-                bh[1] = to_tf32(st->h [krow][kc + t + 4]);
-                bd[0] = to_tf32(st->dh[krow][kc + t]);
-                bd[1] = to_tf32(st->dh[krow][kc + t + 4]);
+                bh[0] = to_tf32(rd(st->h , krow, kc + t));
+                bh[1] = to_tf32(rd(st->h , krow, kc + t + 4));
+                bd[0] = to_tf32(rd(st->dh, krow, kc + t));
+                bd[1] = to_tf32(rd(st->dh, krow, kc + t + 4));
                 mma8(accq[nt], aq, bh, accq[nt]);
                 mma8(acck[nt], ak, bd, acck[nt]);
                 mma8(accw[nt], aw, bh, accw[nt]);
@@ -243,7 +364,7 @@ b2mma_kernel(const float* __restrict__ v, const float* __restrict__ vn,
                 const int kcol = warp * BW + ph * 8 + c;
                 float p = 0.f;
                 for (int vv = s; vv < BVK; vv += 4)
-                    p += st->h[kcol][vv] * st->dh[kcol][vv];
+                    p += rd(st->h, kcol, vv) * rd(st->dh, kcol, vv);
                 if (ph == 0) gpart += p; else gpart1 += p;
             }
         }
@@ -253,7 +374,7 @@ b2mma_kernel(const float* __restrict__ v, const float* __restrict__ vn,
             const int kcol = warp * BW + (l & 15);
             float p = 0.f;
             for (int vv = (l >> 4); vv < BVK; vv += 2)
-                p += st->h[kcol][vv] * st->dh[kcol][vv];
+                p += rd(st->h, kcol, vv) * rd(st->dh, kcol, vv);
             gpart += p;
         }
   #endif
@@ -313,6 +434,40 @@ b2mma_kernel(const float* __restrict__ v, const float* __restrict__ vn,
   #endif
 }
 
+#if B2M_TMA_ON
+// do/vn/dv are [B, T, H, V] fp32 contiguous.  dims {V, T, H, B}, box {BVK, BT, 1, 1},
+// SWIZZLE_128B (inner BVK*4 == 128 B).  OOB token rows of a non-divisible T zero-fill.
+static void make_map_dov(CUtensorMap* m, void* ptr, int H, int T, int B) {
+    cuuint64_t gdim[4] = {(cuuint64_t)VD, (cuuint64_t)T, (cuuint64_t)H, (cuuint64_t)B};
+    cuuint64_t gstr[3] = {(cuuint64_t)H * VD * 4, (cuuint64_t)VD * 4,
+                          (cuuint64_t)T * H * VD * 4};
+    cuuint32_t box[4] = {(cuuint32_t)BVK, (cuuint32_t)BT, 1, 1};
+    cuuint32_t estr[4] = {1, 1, 1, 1};
+    if (cuTensorMapEncodeTiled(m, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4, ptr, gdim, gstr, box,
+                               estr, CU_TENSOR_MAP_INTERLEAVE_NONE,
+                               CU_TENSOR_MAP_SWIZZLE_128B,
+                               CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                               CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS)
+        fprintf(stderr, "cuTensorMapEncodeTiled(dov) failed\n");
+}
+// h/dh are [B, NT, H, KD, VD] fp32 contiguous.  dims {VD, KD, H, NT, B},
+// box {BVK, KD, 1, 1, 1}, SWIZZLE_128B (128 B rows; swizzle repeats every 8 rows).
+static void make_map_hdh(CUtensorMap* m, void* ptr, int H, int NT, int B) {
+    cuuint64_t gdim[5] = {(cuuint64_t)VD, (cuuint64_t)KD, (cuuint64_t)H, (cuuint64_t)NT,
+                          (cuuint64_t)B};
+    cuuint64_t gstr[4] = {(cuuint64_t)VD * 4, (cuuint64_t)KD * VD * 4,
+                          (cuuint64_t)H * KD * VD * 4, (cuuint64_t)NT * H * KD * VD * 4};
+    cuuint32_t box[5] = {(cuuint32_t)BVK, (cuuint32_t)KD, 1, 1, 1};
+    cuuint32_t estr[5] = {1, 1, 1, 1, 1};
+    if (cuTensorMapEncodeTiled(m, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 5, ptr, gdim, gstr, box,
+                               estr, CU_TENSOR_MAP_INTERLEAVE_NONE,
+                               CU_TENSOR_MAP_SWIZZLE_128B,
+                               CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                               CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS)
+        fprintf(stderr, "cuTensorMapEncodeTiled(hdh) failed\n");
+}
+#endif
+
 extern "C" int b2mma_launch(const void* v, const void* vn, const void* h, const void* dh,
                             const void* dov, const void* dvv,
                             void* dq, void* dk, void* dw, void* dgk,
@@ -326,10 +481,24 @@ extern "C" int b2mma_launch(const void* v, const void* vn, const void* h, const 
             return -3;
         configured = 1;
     }
+#if B2M_TMA_ON
+    CUtensorMap dom, vnm, dvm, hm, dhm;
+    make_map_dov(&dom, (void*)dov, H, T, B);
+    make_map_dov(&vnm, (void*)vn,  H, T, B);
+    make_map_dov(&dvm, (void*)dvv, H, T, B);
+    make_map_hdh(&hm,  (void*)h,  H, NT, B);
+    make_map_hdh(&dhm, (void*)dh, H, NT, B);
+    b2mma_kernel<<<grid, NW * 32, smem, (cudaStream_t)stream>>>(
+        dom, vnm, dvm, hm, dhm,
+        (const float*)v, (const float*)vn, (const float*)h, (const float*)dh,
+        (const float*)dov, (const float*)dvv,
+        (float*)dq, (float*)dk, (float*)dw, (float*)dgk, B, T, H, NT);
+#else
     b2mma_kernel<<<grid, NW * 32, smem, (cudaStream_t)stream>>>(
         (const float*)v, (const float*)vn, (const float*)h, (const float*)dh,
         (const float*)dov, (const float*)dvv,
         (float*)dq, (float*)dk, (float*)dw, (float*)dgk, B, T, H, NT);
+#endif
     return (int)cudaGetLastError();
 }
 

@@ -1,0 +1,83 @@
+== prebuild variants (outside ncu) ==
+  built base
+  built vecst
+  built tma
+  built tma_vecst
+
+################################################################################
+# b2mma_kernel variant=base  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                     Gbyte         1.28
+    dram__bytes_write.sum                                    Mbyte       199.44
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        84.62
+    gpu__time_duration.sum                                      us       519.84
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                     2490368
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                     1638400
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum          sector     44826624
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum          sector     12713984
+    lts__t_bytes.sum                                         Gbyte         3.02
+    lts__t_sectors_op_read.sum                              sector     79697463
+    lts__t_sectors_op_write.sum                             sector     14027838
+    lts__t_sectors_srcunit_tex_op_read.sum                  sector     59768832
+    lts__t_sectors_srcunit_tex_op_write.sum                 sector      9349742
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        88.97
+
+################################################################################
+# b2mma_kernel variant=vecst  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                     Gbyte         1.28
+    dram__bytes_write.sum                                    Mbyte       199.48
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        85.51
+    gpu__time_duration.sum                                      us       514.46
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                     2490368
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                      851968
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum          sector     44826624
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum          sector      6422528
+    lts__t_bytes.sum                                         Gbyte         2.89
+    lts__t_sectors_op_read.sum                              sector     79696338
+    lts__t_sectors_op_write.sum                             sector      9633890
+    lts__t_sectors_srcunit_tex_op_read.sum                  sector     59768832
+    lts__t_sectors_srcunit_tex_op_write.sum                 sector      6422528
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        85.04
+
+################################################################################
+# b2mma_kernel variant=tma  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                     Gbyte         1.28
+    dram__bytes_write.sum                                    Mbyte       199.11
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        88.99
+    gpu__time_duration.sum                                      us       494.21
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                           0
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                     1638400
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum          sector            0
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum          sector     12713984
+    lts__t_bytes.sum                                         Gbyte         2.35
+    lts__t_sectors_op_read.sum                              sector     59775602
+    lts__t_sectors_op_write.sum                             sector     12949464
+    lts__t_sectors_srcunit_tex_op_read.sum                  sector     39845888
+    lts__t_sectors_srcunit_tex_op_write.sum                 sector      8632389
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        87.50
+
+################################################################################
+# b2mma_kernel variant=tma_vecst  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                     Gbyte         1.28
+    dram__bytes_write.sum                                    Mbyte       199.11
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        89.57
+    gpu__time_duration.sum                                      us       491.01
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                           0
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                      851968
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum          sector            0
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum          sector      6422528
+    lts__t_bytes.sum                                         Gbyte         2.25
+    lts__t_sectors_op_read.sum                              sector     59774831
+    lts__t_sectors_op_write.sum                             sector      9635564
+    lts__t_sectors_srcunit_tex_op_read.sum                  sector     39845888
+    lts__t_sectors_srcunit_tex_op_write.sum                 sector      6422528
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        84.22
+
+== SASS load widths (base uses LDGSTS=cp.async; tma uses UBLKCP=TMA) ==
+  base   LDGSTS=10  UBLKCP/UTMALDG=0  STG.E(32b)=25  STG.E.64=0
+  tma    LDGSTS=0  UBLKCP/UTMALDG=10  STG.E(32b)=25  STG.E.64=0
+
+DONE

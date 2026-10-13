@@ -5242,3 +5242,120 @@ overlap，证明那 0.64 GB 的「读放大」是 **async 流水的代价，不�
   仅用于字节归因，**不得**作正确性/部署结论。
 - `vecst` 只在 `BT=16/K=V=128`、fp32/tf32 部署 mix 上测；bf16 变体与更大 `BVK` 未测。
 - 读侧 TMA 端口（把 `h/dh/do/vn/dv` 改 `cp.async.bulk.tensor`）**未做**，是本核读侧下一杠杆。
+
+## 52. 兑现 §51.6 的「读侧下一杠杆 = TMA 输入」：K2-mma 核的读放大**整条消失**且**净赢 5%**（P7-49）
+
+§51（P7-48）把 B2 K2-mma 核相对 identical-op Triton 的「L2 字节 +35%」拆成读侧 `cp.async` `.BYPASS`
+的 **+0.64 GB** 与写侧逐标量 store 的 +0.13 GB，并点名读侧的下一步——**TMA**（只有它能同时「大块搬运 +
+深流水」；`noasync` 换普通 `float4` 虽同样消掉读放大却因丢流水**净亏 21%**）。本轮就是把 B2 GEMM 核的
+操作数路径从 `cp.async` 换成 **`cp.async.bulk.tensor`（TMA）+ SWIZZLE_128B**，验证「读放大消失」且
+**兑现成时间**。答案是：读放大**整条消失**（srcunit 读 59.77M→39.85M = DRAM 扇区数 1.0×）、且**没有**
+`noasync` 的流水代价——部署主 shape 端到端**快 5%**（516.7→491.2 µs）。
+
+证据：`harness/b2_mma_probe.cu`（新增 `-DB2M_TMA`）+ `harness/check_bwd_b2_tma.py`
+（`harness/check_bwd_b2_tma.out.txt`，空闲卡）+ `harness/probe_b2_tma_ncu.sh`
+（`harness/probe_b2_tma_ncu.out.txt`）。
+
+### 52.1 设计：TMA 输入 + 128 B swizzle + per-stage mbarrier
+
+被隔离的对象与 §49/§50/§51 **完全相同**（同一份 `dq/dk/dw/dgk` 四条 op、同一批 fp32 操作数、`K=V=128`、
+部署 `BT=16`、`B8 T2048 H8`）。只改「操作数怎么进 smem」：
+
+- `do/vn/dv`（`[B,T,H,V]` token-major）用 **4D 张量图** `{V,T,H,B}`、box `{BVK,BT,1,1}`、
+  **SWIZZLE_128B**（内维 `BVK*4 == 128 B`）；`h/dh`（`[B,NT,H,K,V]`）用 **5D 张量图**
+  `{V,K,H,NT,B}`、box `{BVK,K,1,1,1}`、同样 SWIZZLE_128B（`b2_mma_probe.cu:make_map_dov/make_map_hdh`）。
+- 每 stage 一个 `mbarrier`（`full[s]`，arrive count 1）；**单线程**（`threadIdx.x==0`）每 stage 发 5 条
+  TMA（`expect_tx = (3·BT + 2·KD)·BVK·4`），全体 warp `mbarrier.try_wait.parity` 等满（`b2_mma_probe.cu:issue_tma`）。
+  稳态每 stage 两条 `__syncthreads()`（wait 后一次、compute 后一次保护 WAR），未做 producer/consumer
+  warp 特化——本核 warp 数少（8），先把「TMA 输入」这条杠杆单独验出来。
+- 128 B swizzle 的行内 16 B 子块按 `(row & 7)` 异或（`Swizzle<3,4,3>`）；mma 片段读改走 `rd()`
+  （`b2_mma_probe.cu:rd`，非 TMA 时为恒等）。该映射下 A/B 片段读的 bank = `t + 4·((2kk^g)&7)` 恰好铺满
+  `0..31`，**无冲突**（与 §49 的 `BVP=36` padding 等价，但省掉 padding）。
+- 非整除 `T` 的尾块 token 行由 **TMA OOB 零填充**自动处理（无需在 `prefetch` 里手写 `t<T` 的置零）。
+
+TMA 的内维必须 ≤128 B，故 `-DB2M_TMA` 下强制 `BVK==32`（`static_assert`，`BVK*4=128 B`）；宿主端用
+`cuTensorMapEncodeTiled`（需 `-lcuda`）。
+
+### 52.2 Part A — 正确性：`tma` 与 `base` **逐位相同**
+
+同操作数四组 shape（含非整除 `T=250`；torch 参考关 tf32 走真 fp32）：
+
+| 量 | `tma` vs torch(fp32) | Triton(tf32) vs torch | **base vs tma** |
+|---|---|---|---|
+| `dq` | 3.58e-4 | 8.40e-4 | **max_abs = 0** |
+| `dk` | 3.28e-4 | 8.18e-4 | **max_abs = 0** |
+| `dw` | 3.41e-4 | 8.36e-4 | **max_abs = 0** |
+| `dgk` | 1.63e-7 | 1.34e-7 | **max_abs = 0** |
+
+`tma`/`tma_vecst` 与 `base` 的 `dq/dk/dw/dgk` **逐位相同（max_abs=0，含 `T=250`）**——同一份操作数、
+同一套 `mma.sync.m16n8k8.tf32`、逐条 op 序不变，只是搬运方式不同；OOB 零填充让尾块与显式置零**逐位一致**。
+vs torch 落 **tf32 底噪**（与 §49.2 完全相同），且 CUDA(tf32) 比 Triton 更贴 fp32。
+
+### 52.3 `ncu` 字节分解（`B8 T2048 H8`，同一份操作数）
+
+| 变体 | L2 字节 | srcunit 读扇区 | srcunit 写扇区 | l1tex ld 扇区 | l1tex st 扇区 | DRAM 读 | Duration | L2 SOL | DRAM SOL |
+|---|---|---|---|---|---|---|---|---|---|
+| `base` | 3.02 GB | 59.77 M | 9.34 M | 44.83 M | 12.71 M | 1.28 GB | 519.8 µs | 89.0% | 84.6% |
+| `vecst` | 2.89 GB | 59.77 M | 6.42 M | 44.83 M | 6.42 M | 1.28 GB | 514.5 µs | 85.0% | 85.5% |
+| `tma` | **2.35 GB** | **39.85 M** | 8.63 M | **0** | 12.71 M | 1.28 GB | **494.2 µs** | 87.5% | **89.0%** |
+| `tma_vecst` | **2.25 GB** | **39.85 M** | **6.42 M** | **0** | **6.42 M** | 1.28 GB | **491.0 µs** | 84.2% | **89.6%** |
+| Triton identical-op 核 | 2.23 GB | 39.85 M | 6.42 M | 39.85 M | 6.42 M | 1.28 GB | ~551 µs | 77.8% | 79.9% |
+
+读法：
+
+1. **读放大整条消失**：`tma` 的 srcunit 读扇区 **59.77M → 39.85M**，正好等于 DRAM 扇区数（**1.00×**）——
+   与 §51.4 的 `noasync` 预测**逐值吻合**（`.BYPASS` 路径的 1.5× 是属性、非 16B 宽度/访问模式）。DRAM 读
+   两侧都是 **1.28 GB 不变**，故多出的 0.64 GB 本就是 **L2 re-touch**；TMA 把它整条拿掉。
+2. **且确实走 TMA 引擎、不占 LSU**：`tma` 的 `l1tex__t_sectors_pipe_lsu_mem_global_op_ld` = **0**
+   （全局读请求全部由 TMA 发），SASS 里 `base` 的 **10 × `LDGSTS`** 全换成 **10 × `UBLKCP`**（TMA）——
+   这也是它**不**像 `noasync` 那样丢流水的原因。
+3. **省字节落在「最紧 pipe」上、并兑现时间**：`base` 的最高 pipe 是 **L2 89.0% > DRAM 84.6%**；删掉
+   0.64 GB 后 `tma` 的 L2 降到 87.5%、**DRAM 升到 89.0% 成最高 pipe**——绑定点从 L2 转到 DRAM，Duration
+   **519.8→494.2 µs（0.951×）**。这正是 §51.6「省字节要落最紧 pipe 才兑现时间」的正例：读放大虽被 L2 吸收、
+   不增 DRAM 字节，却**压在最紧的 L2 pipe 上**，去掉即净赚。
+4. **`tma_vecst` 与 Triton 逐值**：叠上 §51 的 `vecst`（写侧 `float2`）后 L2 **2.25 GB**、srcunit 读写
+   `39.85M/6.42M`、l1tex st `6.42M` 与 Triton 的 2.23 GB 只差 1%（差在 dgk/边界）；Duration **491.0 µs**，
+   比 identical-op Triton 核心（~551 µs）**快 1.12×**。§51 的两条放大至此**双双消除**。
+
+### 52.4 Part B — 计时：TMA 在所有 shape 都是净赢
+
+CUPTI kernel-only `dev`（`check_bwd_b2_tma.out.txt`）：
+
+| shape | `base` | `vecst` | `tma` | `tma_vecst` | `tma/base` | `tma_vecst/base` |
+|---|---|---|---|---|---|---|
+| `B8 T2048 H8` | 516.7 | 512.5 | **491.2** | **488.8** | **0.951×** | **0.946×** |
+| `B2 T1024 H8` | 71.9 | 69.9 | **68.7** | **66.6** | **0.955×** | **0.926×** |
+| `T512 H4` | 9.4 | 8.2 | 8.8 | **7.5** | 0.933× | 0.794× |
+| `T250 H3 (非整除)` | 8.5 | 7.6 | 8.1 | **7.3** | 0.955× | 0.857× |
+
+- **大 shape（部署主 shape）**：`tma` 单换读侧就 **0.951×**、叠 `vecst` **0.946×**；与 §49.5 的 `base`
+  最优 `BVK=64/NS=2`（499.1 µs）相比，`tma`（`BVK=32`）**还更快**（491.2）。读侧 TMA 比「扫 `BVK`」更值。
+- **小 shape**：`dev` 上 `tma` 0.93–0.96×、`tma_vecst` **0.79–0.86×**（`wall` 被 ~28 µs 的 host 派发钉死，
+  不反映 kernel 收益，同 §49.3「小 shape 按 `dev` 选核」）。§49.5 曾说小 shape 交给 Triton 短核；现在
+  `tma_vecst` 把小 shape `dev` 压到 ~7.5 µs，是否仍切 Triton 值得重估（本核 TMA prologue 的固定段是唯一的
+  延迟成分，`vecst` 的指令数减半在小 shape 最显著）。
+
+### 52.5 结论 / 对目标卡的设计输入
+
+- **§51.6 的「读侧下一杠杆 = TMA 输入」兑现**：`cp.async` `.BYPASS` 的 +0.64 GB L2 读放大被 TMA **整条
+  消除**（srcunit 读 59.77M→39.85M=1.0×），且 TMA 走独立引擎（l1tex 全局读请求 = 0）、**保留异步流水**——
+  所以是**净 +5%**而非 `noasync` 的 −21%。**目标卡 CUDA B2 的操作数路径应直接上 TMA**（与 B1 §22–24 同课）。
+- **「省字节落最紧 pipe」再得正例**：读放大不增 DRAM 字节、只压 L2（`base` L2 89% > DRAM 84.6%），去掉后
+  绑定点转到 DRAM、Duration −5%。**看 `ncu` 哪个 pipe 最高再决定改哪条访存**（§50 的 `dgk`/冲突是反例：省了
+  却不兑现）。
+- **两条 §51 修复可叠加**：`tma_vecst` = **2.25 GB**（Triton 2.23）、Duration 491 µs，比 identical-op
+  Triton 核快 **1.12×**，且 `tma`/`tma_vecst` 与 `base` **逐位相同**——两条都免费、位级安全。
+- **本核自身下一杠杆**：`tma_vecst` 后 DRAM SOL **89.6%**、L2 84.2%，**DRAM 成唯一最高 pipe**——本核已基本
+  贴住 DRAM 地板（§47.5 的 442 µs 地板 = `tma_vecst` 491 µs 的 1.11×）。**剩下的是**：把 `dgk` 无冲突映射
+  （§50 的 `-DB2M_DGKCF`，仅小 shape 值）、以及 §47.6 的**非 GEMM 段**（finalize/`dA`/`dv2`/`db` + intra 折叠，
+  不在本核内）。
+
+### 52.6 边界 / 下一步（诚实）
+
+- `-DB2M_TMA` 因 128 B swizzle 内维约束**强绑 `BVK==32`**（`static_assert`）；§49.5 的 `BVK=64` 需拆两个
+  32 列 swizzle atom 或改 `SWIZZLE_NONE`，**未做**。`B2M_NOHDH/NODOV/NOASYNC` 与本变体**不组合**。
+- 本核仍是 **GEMM 段隔离核**（三条 V-归约 GEMM + `dgk`），finalize/`dA`/`dv2`/`db`/intra 折叠**未进 CUDA**
+  （同 §47.6）；故这 5% 是 GEMM 段（占完整 B2 约 57%）的收益。
+- bf16 变体未测（本轮刻意保持部署 fp32/tf32 mix，与 Triton 同 dtype 对照）。
+- **下一步**：把本核（`-DB2M_TMA -DB2M_VECST`）作为 GEMM 段基座，补非 GEMM 段与同 CTA 内交接；并把
+  `BVK=64` 的 TMA swizzle 变体补上，看能否再压 DRAM 地板那 1.11×。
