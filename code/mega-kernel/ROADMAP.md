@@ -2766,6 +2766,41 @@
    **纯源码走读（资料分析），本轮无新实验。** 配套博客 post `mega-kernel-18-mpk-multigpu`（weight 19）
    并更新 `mega-kernel-00-index` 第 18 项。
 
+### P104 MPK 编译器 codegen 源码走读（`docs/18-mpk-transpiler.md`）
+
+- [x] **P104-1** 补掉 `docs/15`（P101-1）**§9 末句明留的尾巴**——「`transpiler` 只给管线结构
+   （`src/transpiler/*` 约 8 千行），**未逐条读 SASS 级生成逻辑**」（P103-1 §11 记为「`docs/15`
+   另两条尾巴仍未覆盖」之一）。把前半段 `docs/15` §5 停在「`transpile()` → resolve 阶段」的
+   **下半段**走完：一次 `KNGraph.compile()` 怎样把 thread-block 图变成能被 `nvcc` 编译、能 launch 的
+   CUDA。见 `docs/18-mpk-transpiler.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，
+   与 `docs/06`/`07`/`08`/`14`/`15`/`16`/`17` 同一快照；纯源码走读、无新实验）。§0 入口链路
+   （`kernel.py:396/431` → `core.pyx:1420` → `transpile.cc:461/793` → `transpiler.h:128`；
+   生成的 `.cu` 与 `runtime.h:14/15/31/47` 的两个生成函数 + `HARD_CODE` 拼成 `.so`）；§1 ctor 两段
+   **图归一化**（online-softmax 重写 `transpile.cc:101/276-301`；把复合 TB 算子拆原语
+   `transpile.cc:482-767`：`FORLOOP_ACCUM_RED_LD_SUM`→accum+reduction `:669`、`RED_LD_RMS` `:682`、
+   `RMS_NORM` `:734`；收尾断言 `:769-789`）——这是论文 §4.1「decomposition」在编译器侧的落点；
+   §2 五步 resolve（`transpiler.h:52` / `resolve_dtensor_meta.cc:27` / `resolve_tb_fusion.cc:11`
+   （只融「单消费者 elementwise unary 或 accum_no_red」到前驱）/ `resolve_tensor_layout.cc:121` /
+   `plan_dtensor_memory.cc:22`（**只分配不复用、128B 对齐**））；§3 `transpile_ugraph`
+   （`transpiler_kn.cc:332`：header/`_execute_mugraph` 逐 op 展开、非 custom 算子→`kn::gemm`/
+   `ElementUnaryKernel`/`ElementBinaryKernel`/`ReductionKernel`、`get_dtensor_ptr:92` 三类指针、
+   `KN_CUSTOMIZED_OP:614` 按 cc 分派三后端、Hopper `<<<>>>`/Blackwell `launch_kernel_on_cluster`、
+   `TranspileResult:857`）；§4 单个 custom op 的 **schedule + swizzle + memory plan 三件套**
+   （`sched_tb_graph.cc:144`：`TBSchedOpMeta` 决策含 chunked/async `:19-70`、**192 寄存器预算决定
+   accum 在寄存器** `:239-260`、三段 `pre/loop/post`、`ops2sched` 插 `SYNCTHREADS` + `refine_opmeta_on_chain`；
+   swizzle `plan_tb_swizzle.cc:9` XOR/shift；memory `plan_stensor_memory.cc:256` 含双缓冲偏移）；
+   §5 codegen 形态（`transpiler_tb.cc:253`：签名 `:280`、SMEM 视图 `:322`、`Input*Copy` 原子 `:342`、
+   软件流水 prologue `:836` + 主循环 `:1421` + `cp_async_fence/wait<1>` + `SWAP` 双缓冲、融合 epilogue
+   `:861`；Hopper 升格 **warp specialization**——producer warpgroup 发 TMA `transpiler_tb_hopper.cc:900`、
+   consumer 跑 wgmma `:1426`、`hopper_async_pipeline.consumer_wait/release` `:283/1472`；`tma_reg`/`mma_reg`
+   的 `wg_decrease/increase_regs` **被注释** `:902-906`，与 `docs/07` §2 同一事实）；§6 与论文 §4.2
+   四项 intra-SM 优化逐条对照（software pipelining / register reuse / layout-swizzle 均有落点，§4.1
+   自动分区落在搜索器）；§7 判据 **只贡献 C3**（跨 customized op 仍 kernel-per-operator，C1/C4/C5 缺位）；
+   §8 局限（纯走读未跑、未逐句展开 CuTe 模板装配、Hopper/Blackwell 只给骨架、runtime 模板当黑盒、
+   未复现 benchmark、`docs/transpiler/transpiler.md` 快照里不存在）。**纯源码走读（资料分析），
+   本轮无新实验。** 配套博客 post `mega-kernel-19-mpk-transpiler`（weight 20）并更新
+   `mega-kernel-00-index` 第 19 项。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2927,7 +2962,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P103-1 完成（1/1）**。补齐 `docs/15`（P101-1）**§9 明留的尾巴** 与 `docs/16`（P102-1）
+- 当前进度：**P104-1 完成（1/1）**。补掉 `docs/15`（P101-1）**§9 末句明留的尾巴**——「`transpiler`
+  只给管线结构（`src/transpiler/*` 约 8 千行），**未逐条读 SASS 级生成逻辑**」（P103-1 §11 记为
+  「`docs/15` 另两条尾巴仍未覆盖」之一）。见 `docs/18-mpk-transpiler.md`（快照 `f9eb70c`，
+  纯源码走读无新实验）：把一次 `KNGraph.compile()` 从 `kernel.py:396/431` → `core.pyx:1420` →
+  `transpile.cc:461/793` → `transpiler.h:128` 的下半段走完——§1 ctor 两段**图归一化**（online-softmax
+  重写 + 复合 TB 算子拆原语，收尾断言只留原语）；§2 五步 resolve（元数据/融合/布局/显存，显存**只分配
+  不复用**）；§3 `transpile_ugraph` 逐 op 展开成 `_init`+`_execute_mugraph`（非 custom 算子→runtime 模板，
+  custom 算子按 cc 分派三后端、Hopper `<<<>>>`/Blackwell cluster launch）；§4 单个 custom op 的
+  **schedule/swizzle/memory plan** 三件套（含 **192 寄存器预算决定 accum 进寄存器**、三段调度插
+  `SYNCTHREADS`、XOR/shift swizzle）；§5 codegen 形态（双缓冲软件流水；Hopper **warp specialization**
+  producer-TMA/consumer-wgmma，`wg_decrease/increase_regs` 被注释）；§6 与论文 §4.2 四项 intra-SM 优化
+  逐条对照；§7 判据**只贡献 C3**（跨 customized op 仍 kernel-per-operator）。配套博客 post
+  `mega-kernel-19-mpk-transpiler`（weight 20）、更新 `mega-kernel-00-index` 第 19 项。
+- 此前：**P103-1 完成（1/1）**。补齐 `docs/15`（P101-1）**§9 明留的尾巴** 与 `docs/16`（P102-1）
   **§6 转引的同一条**——「**多 GPU/NVSHMEM 路径未展开**」。见 `docs/17-mpk-multigpu.md`（快照
   `f9eb70c`，纯源码走读无新实验）：把前面六篇单卡走读之外的**多卡路径**逐段走通——§0 编译栈各层
   「GPU 维」坐标表（MPK 未为多卡另造 runtime）；§1 MPI 定 world/rank + `nvshmemx_init_attr` +
