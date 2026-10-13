@@ -39,6 +39,14 @@
 
 #define DEV __device__ __forceinline__
 
+#if B2M_NOASYNC
+DEV void cp16(void* dst, const void* src) {
+    *reinterpret_cast<float4*>(dst) = *reinterpret_cast<const float4*>(src);
+}
+#else
+DEV void cp16(void* dst, const void* src) { __pipeline_memcpy_async(dst, src, 16); }
+#endif
+
 constexpr int KD = 128;   // K = D (output N)
 constexpr int VD = 128;   // V = D (contraction K')
 constexpr int BT = 16;    // chunk rows (M)
@@ -61,6 +69,28 @@ constexpr int BW = 16;    // output columns per warp = KD / NW
 #endif
 #ifndef B2M_DGKCF
 #define B2M_DGKCF 0
+#endif
+// P7-48 diagnostics: localize §49.4.3's "L2 bytes +35% vs the identical-op Triton core"
+// (3.03 vs 2.24 GB), which §50.5 left as the open lead.
+//   B2M_NOHDH : skip the h/dh global cp.async (zero-fill smem) -> bytes side of h/dh.
+//   B2M_NODOV : skip the do/vn/dv global cp.async (zero-fill smem).
+//   B2M_VECST : write the three outputs with 64-bit (`float2`) stores instead of the
+//               default two scalar 32-bit `STG.E` (candidate fix for half-sector stores).
+#ifndef B2M_NOHDH
+#define B2M_NOHDH 0
+#endif
+#ifndef B2M_NODOV
+#define B2M_NODOV 0
+#endif
+#ifndef B2M_VECST
+#define B2M_VECST 0
+#endif
+//   B2M_NOASYNC : replace the 16B `cp.async` (`LDGSTS.E.BYPASS.128`) with a synchronous
+//                 16B `float4` load+store -> same bytes, normal (L1-allocating) ld path.
+//                 Isolates whether the 1.5x L2-read-sector amplification is specific to
+//                 the cp.async/bypass path or to the access pattern itself.
+#ifndef B2M_NOASYNC
+#define B2M_NOASYNC 0
 #endif
 constexpr int BVK = B2M_BVK;   // V-tile (contraction) depth staged per pipeline stage
 constexpr int NS  = B2M_NS;    // pipeline stages
@@ -105,22 +135,30 @@ DEV void prefetch(Stage* st, const float* __restrict__ v, const float* __restric
         float* pd = &st->do_[row][cg * 4];
         float* pv = &st->vn [row][cg * 4];
         float* pw = &st->dv [row][cg * 4];
+#if B2M_NODOV
+        for (int j = 0; j < 4; ++j) { pd[j] = 0.f; pv[j] = 0.f; pw[j] = 0.f; }
+#else
         if (t < T) {
             const int64_t off = ((int64_t)(n * T + t) * H + hh) * VD + v0 + cg * 4;
-            __pipeline_memcpy_async(pd, do_ + off, 16);
-            __pipeline_memcpy_async(pv, vn  + off, 16);
-            __pipeline_memcpy_async(pw, dv  + off, 16);
+            cp16(pd, do_ + off);
+            cp16(pv, vn  + off);
+            cp16(pw, dv  + off);
         } else {
             for (int j = 0; j < 4; ++j) { pd[j] = 0.f; pv[j] = 0.f; pw[j] = 0.f; }
         }
+#endif
     }
     // h/dh [KD, BVK]  (chunk-granular, always full)
     const int64_t hbase = ((int64_t)(n * NT + c) * H + hh) * KD * VD;
     for (int idx = tid; idx < KD * (BVK / 4); idx += nthr) {
         int row = idx / (BVK / 4), cg = idx % (BVK / 4);
         const int64_t off = hbase + (int64_t)row * VD + v0 + cg * 4;
-        __pipeline_memcpy_async(&st->h [row][cg * 4], h  + off, 16);
-        __pipeline_memcpy_async(&st->dh[row][cg * 4], dh + off, 16);
+#if B2M_NOHDH
+        for (int j = 0; j < 4; ++j) { st->h[row][cg * 4 + j] = 0.f; st->dh[row][cg * 4 + j] = 0.f; }
+#else
+        cp16(&st->h [row][cg * 4], h  + off);
+        cp16(&st->dh[row][cg * 4], dh + off);
+#endif
     }
 }
 
@@ -232,14 +270,26 @@ b2mma_kernel(const float* __restrict__ v, const float* __restrict__ vn,
         const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
         const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
         if (tr0 < T) {
+#if B2M_VECST
+            *reinterpret_cast<float2*>(&dq[o0]) = make_float2(accq[nt][0], accq[nt][1]);
+            *reinterpret_cast<float2*>(&dk[o0]) = make_float2(acck[nt][0], acck[nt][1]);
+            *reinterpret_cast<float2*>(&dw[o0]) = make_float2(accw[nt][0], accw[nt][1]);
+#else
             dq[o0] = accq[nt][0]; dq[o0 + 1] = accq[nt][1];
             dk[o0] = acck[nt][0]; dk[o0 + 1] = acck[nt][1];
             dw[o0] = accw[nt][0]; dw[o0 + 1] = accw[nt][1];
+#endif
         }
         if (tr1 < T) {
+#if B2M_VECST
+            *reinterpret_cast<float2*>(&dq[o1]) = make_float2(accq[nt][2], accq[nt][3]);
+            *reinterpret_cast<float2*>(&dk[o1]) = make_float2(acck[nt][2], acck[nt][3]);
+            *reinterpret_cast<float2*>(&dw[o1]) = make_float2(accw[nt][2], accw[nt][3]);
+#else
             dq[o1] = accq[nt][2]; dq[o1 + 1] = accq[nt][3];
             dk[o1] = acck[nt][2]; dk[o1 + 1] = acck[nt][3];
             dw[o1] = accw[nt][2]; dw[o1 + 1] = accw[nt][3];
+#endif
         }
     }
   #if B2M_DGKCF

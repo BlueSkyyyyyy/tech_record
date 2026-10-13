@@ -509,6 +509,27 @@
       「高效 `dh` store」的净增量只剩 B2 侧 ~5%（同 §26/§29）。**结论（修正 §30.5）**：目标卡 CUDA 反向
       下一优先级＝**B1 的 `dh`/`dv2` 改 TMA store**，而非 B1→B2 融合。**待验证**：TMA store 变体能否
       复现这 33%（预期能，TMA 有独立引擎、不求 LSU 发射）。
+- [x] **P7-48** 拆开 §50.5 留下的唯一待查线索——B2 K2-mma 核的「L2 字节比 identical-op Triton 高 35%
+      （3.03 vs 2.24 GB）」。给 `b2_mma_probe.cu` 加**受控字节消融**：`-DB2M_NOHDH`/`-DB2M_NODOV`
+      （跳过操作数 `cp.async`、smem 零填充）、`-DB2M_VECST`（输出改 64-bit `float2` store）、
+      `-DB2M_NOASYNC`（同 16B、同访问模式，换成普通走 L1 的 `float4` load）。新增
+      `harness/check_bwd_b2_l2.py`（`check_bwd_b2_l2.out.txt`，空闲卡）+ `harness/probe_b2_l2_ncu.sh`
+      （`probe_b2_l2_ncu.out.txt`）+ `docs/07` §51。**结论（0.79 GB 全部拆开、无第三项）**：
+      **(a) 读侧 +0.64 GB = `cp.async` 的 `.BYPASS` 路径属性**——`h/dh` 与 `do/vn/dv` **各自** 1.50×
+      （`h/dh` 50.33 M 扇区=1.61 GB vs 数据 1.07 GB；`do/vn/dv` 9.44 M vs 6.29 M），DRAM 读两侧都 1.28 GB
+      不变（多出的是 L2 re-touch）；`noasync` 同请求数（2,490,368）把 L1TEX 扇区 18→**16/请求**、srcunit 读
+      59.77 M→**39.85 M（1.0×）** → 是 BYPASS 路径**非** 16B 宽度/访问模式（扇区级成因**待验证**）。
+      **(b) 写侧 +0.09 GB = 25 条逐标量 32-bit `STG.E`**（4 lane 各写 4B 到 sector 的 `{0,8,16,24}` →
+      每次 store 只覆盖半 sector，l1tex st **12.71 M=1.98×**）；`vecst` 合 `float2` 后 l1tex st/srcunit 写
+      **12.71/9.34 M→6.42 M**，与 Triton 逐位相同。**叠满 `noasync_vecst`=2.23 GB=Triton 逐值**。
+      **Part A**：`vecst` vs `base` `dq/dk/dw/dgk` **逐位相同（max_abs=0，含非整除 T=250）**、vs torch 同落
+      tf32 底噪；SASS `base` 25×STG.E(32b) → `vecst` 1×STG.E+**12×STG.E.64**。**Part B**：`vecst` CUPTI `dev`
+      **0.99×（B8）/0.98×（B2）/0.87×（T512）/0.89×（T250）**（大 shape L2/DRAM 双 bound 只值 ~1%、小 shape
+      store 指令减半值 10–13%）；`noasync` 字节降到 2.39 GB 但 **Duration +21%**（丢流水）→ 读放大是 async 的
+      代价、不能用普通 load 换。**设计输入**：(1) 目标卡 CUDA B2 **一律向量化 store**（免费、逐位、小 shape
+      10%+）；(2) 读侧下一杠杆＝**TMA 输入**（普通 load 净亏 21%，与 §20/§24 收敛）；(3) 省字节须落在**最紧
+      pipe**（`vecst` 后 L2 反降到 85%、不再最紧）。**边界**：读侧 1.5× 微架构成因待验证；`noasync*` 破坏
+      流水/可能有竞态，仅作字节诊断；bf16/大 `BVK` 未测。
 
 - [x] **P7-32** 兑现 §34.4 的**待验证**：把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**，
       验证能否复现 §34.1「删掉 store」收益的那 33%。给 `b1_tma_probe.cu` 加 `-DB1T_TMADH`：per-warp
@@ -844,14 +865,38 @@
   `b2_mma_probe.cu` 因此有 **8.81M shared-load bank conflict**（Triton 的 swizzle+`ldmatrix` 为 0）。
   要消它须走 CUTLASS 式手工 smem 重排（或改 bf16 用 `ldmatrix`），不能只靠 padding（§20 已证 padding
   反噬占用率）。
-- **`cp.async` 16B 粒度会让 L2 字节放大**（P7-46）：`b2_mma_probe.cu` 的 A/B 操作数按 16B 拷、每请求落
-  32B sector，实测 **L2 3.03GB vs Triton 同 op 核 2.24GB（+35%）**（DRAM 读字节相同）；大 shape 上 L2
-  88.8% 成最高 pipe。放宽 `cp.async` 到 32B/128B 或按行整拷是下一杠杆。
+- **`cp.async` 的 L2 读放大是 `.BYPASS` 路径属性、不是 16B 宽度**（P7-48，§51.4；更正 §49.6/P7-46 的
+  旧归因）：`b2_mma_probe.cu` 的 `LDGSTS.E.BYPASS.128` 读路径比**同 16B、同访问模式**的普通 `float4`
+  `ld.global` 多 **1.5×** L2 读扇区（`h/dh`、`do/vn/dv` 各 1.5×；L1TEX 计 18 vs 16 扇区/请求、L2 srcunit
+  计 24 vs 16），DRAM 读两侧不变（多出的是 L2 re-touch）。**故「放宽 cp.async 到 32B/128B」是错的**——
+  16B 已是 cp.async 上限且宽度无关；也不能换成普通 load（丢流水 **+21%**）。要同时「大块搬运 + 深流水」
+  只能上 **TMA**（`cp.async.bulk.tensor`）。
+- **逐标量 32-bit `STG.E` 让 L2 写字节翻倍**（P7-48，§51.4）：4 个 lane 各写 4B 到同一 sector 的
+  `{0,8,16,24}` 偏移 → **每次 store 指令只覆盖半个 sector**，l1tex st 扇区 = 数据扇区的 **1.98×**。
+  合成 **64-bit `float2` store**（`b2_mma_probe.cu` 的 `-DB2M_VECST`）后立刻回到 1.0×、与 Triton 逐位。
+  与 B1 §35/§36「逐标量 store 打满队列」同课——**store 一律向量化**（本专题多次踩到）。
+- **「L2 字节」不是唯一指标，省字节要落最紧 pipe**（P7-48，§51.6）：B2 K2-mma 核部署 shape 是
+  **DRAM 84.7% + L2 85–89% 双 bound**，`vecst` 消掉写放大后 L2 反降到 85%（不再最紧）；与 §50 的
+  `dgk`/冲突「省了却不兑现时间」同构。改访存前先看 ncu 哪个 pipe 最高。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-47 补测**。
-  - P7-47（本轮）：**更正 §49.4.3 的 bank conflict 归因：B2 K2-mma 核那 8.81M smem bank conflict
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-48 补测**。
+  - P7-48（本轮）：**闭环 §50.5 唯一的待查线索——B2 K2-mma 核的「L2 字节 +35%（3.03 vs 2.24 GB）」**，
+    用受控字节消融拆成两条独立、可分别消除的机制。给 `b2_mma_probe.cu` 加 `-DB2M_NOHDH`/`-DB2M_NODOV`
+    （跳操作数 `cp.async`、零填充）、`-DB2M_VECST`（输出 `float2` store）、`-DB2M_NOASYNC`（同 16B 同访问
+    模式换普通 `float4` load）。新增 `harness/check_bwd_b2_l2.py`（`check_bwd_b2_l2.out.txt`，空闲卡）+
+    `harness/probe_b2_l2_ncu.sh`（`probe_b2_l2_ncu.out.txt`）+ `docs/07` §51。**(a) 读侧 +0.64 GB＝
+    `cp.async` `.BYPASS` 路径属性**（`h/dh`、`do/vn/dv` 各 1.50×，DRAM 读不变＝L2 re-touch；`noasync`
+    同请求数把 srcunit 读 59.77M→39.85M＝1.0×，故非 16B 宽度/访问模式）；**(b) 写侧 +0.09 GB＝25 条逐标量
+    32-bit `STG.E` 半 sector 写**（`vecst` 后 l1tex st 12.71M→6.42M，与 Triton 逐位相同）。**叠满
+    `noasync_vecst`＝2.23 GB＝Triton 逐值（无第三项）**。**Part A**：`vecst` vs `base` **逐位相同
+    （max_abs=0，含非整除 T=250）**、vs torch 同落 tf32 底噪。**Part B**：`vecst` CUPTI `dev` 0.99×（B8）/
+    0.98×（B2）/0.87×（T512）/0.89×（T250）；`noasync` 字节虽降但 **+21%**（丢流水）。**设计输入**：
+    (1) 目标卡 CUDA B2 **一律向量化 store**（免费逐位、小 shape 10%+）；(2) 读侧下一杠杆＝**TMA 输入**；
+    (3) 省字节须落**最紧 pip**（`vecst` 后 L2 反降 85%、不再最紧）。**边界**：读侧 1.5× 微架构成因待验证；
+    `noasync*` 破坏流水/可能竞态仅作诊断；bf16/大 `BVK` 未测。
+  - P7-47（上轮）：**更正 §49.4.3 的 bank conflict 归因：B2 K2-mma 核那 8.81M smem bank conflict
     ≈97% 来自 `dgk` 列归约（16-`kcol` 别名），不是 mma 片段读**。受控消融给 `b2_mma_probe.cu` 加
     `-DB2M_NODGK`（删整段 `dgk`）与 `-DB2M_DGKCF`（无冲突映射：一条指令只用 8 个 `kcol`，`c=l&7`/`s=l>>3`
     使 bank `4c+s` 铺满 `0..31`，两半 `ph=0/1` 覆盖 `kcol` 0–7/8–15，`__shfl_xor` 归约）。新增
@@ -1501,13 +1546,24 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-47 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-48 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-48（`docs/07` §51）闭环 §50.5 的唯一待查线索：B2 K2-mma 核的「L2 字节 +35%（3.03 vs 2.24 GB）」**，
+    受控字节消融拆成两条独立、分别可消的机制——**(a) 读侧 +0.64 GB＝`cp.async` `.BYPASS` 路径属性**
+    （`h/dh`、`do/vn/dv` 各 1.50×、DRAM 读不变＝L2 re-touch；`-DB2M_NOASYNC` 同 16B 同访问模式的普通
+    `float4` load 把 srcunit 读 59.77M→**39.85M＝1.0×**，证明非 16B 宽度/访问模式）；**(b) 写侧 +0.09 GB＝
+    25 条逐标量 32-bit `STG.E` 半 sector 写**（`-DB2M_VECST` 合 `float2` 后 l1tex st **12.71M→6.42M**、与
+    Triton 逐位相同）。**叠满 `noasync_vecst`＝2.23 GB＝Triton 逐值（无第三项）**。`vecst` vs `base` `dq/dk/dw/
+    dgk` **逐位相同（含非整除 T=250）**；CUPTI `dev` **0.99×（B8）/0.98×（B2）/0.87×（T512）/0.89×（T250）**；
+    `noasync` 字节降但 **+21%**（丢流水）。新增 `harness/check_bwd_b2_l2.py`（`check_bwd_b2_l2.out.txt`）+
+    `harness/probe_b2_l2_ncu.sh`（`probe_b2_l2_ncu.out.txt`）。**设计输入**：目标卡 CUDA B2 一律**向量化 store**、
+    读侧下一杠杆＝**TMA 输入**、省字节要落**最紧 pipe**。**边界**：读侧 1.5× 微架构成因待验证；`noasync*` 仅诊断。
   - **P7-47（`docs/07` §50）更正 §49.4.3 的 bank conflict 归因：8.81M 冲突 ≈97% 来自 `dgk` 列归约**（16-`kcol`
     别名），不是 mma 片段读。受控消融（`-DB2M_NODGK` 删 `dgk` / `-DB2M_DGKCF` 无冲突映射）：`dq/dk/dw` 逐位，
     冲突 **8.81M→0.29M/0.33M**、wavefronts 42.65M→25.45M/34.09M；但部署主 shape **Duration/L2 字节纹丝不动**
     （DRAM 84.6%/L2 88.7% bound），小 shape `dgkcf` 省 **3–4%**、`nodgk` 省 20–23%。新增
     `harness/check_bwd_b2_dgk.py`（`..._b2_dgk.out.txt`）+ `harness/probe_b2_dgk_ncu.sh`（`..._b2_dgk_ncu.out.txt`）。
-    **新待查线索**：§49.4.3 的 L2 +35%（3.03 vs 2.24GB）与 `dgk`/冲突无关，须直接定位 `cp.async` 粒度/`h/dh` L2 复用。
+    **其「新待查线索」（§49.4.3 的 L2 +35% 与 `dgk`/冲突无关）已由 P7-48/§51 关闭（答案：cp.async BYPASS 读侧
+    +0.64 GB + 逐标量 store +0.09 GB）。**
   - **P7-46（`docs/07` §49）「K2 形状 CUDA 化」第二刀＝B2 GEMM 核保留 `mma.sync` + 流式操作数，首次正面**：
     保留 tensor core，把 `h/dh/do/vn/dv` 按 V 分块经 `cp.async` 流式喂 smem、寄存器只留每 warp `[16,16]`
     小累加器。`B8T2048H8` **517µs vs identical-op Triton 554µs＝0.93×**（离地板 1.17×、Triton 1.25×）、

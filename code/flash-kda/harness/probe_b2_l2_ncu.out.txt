@@ -1,0 +1,147 @@
+== prebuild variants (outside ncu) ==
+  built base
+  built nohdh
+  built nodov
+  built nohdh_nodov
+  built vecst
+  built noasync
+  built noasync_vecst
+
+################################################################################
+# b2mma_kernel variant=base  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                     Gbyte         1.28
+    dram__bytes_write.sum                                    Mbyte       199.42
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        84.67
+    gpu__time_duration.sum                                      us       519.52
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                     2490368
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                     1638400
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum          sector     44826624
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum          sector     12713984
+    lts__t_bytes.sum                                         Gbyte         3.02
+    lts__t_sectors_op_read.sum                              sector     79696427
+    lts__t_sectors_op_read_lookup_hit.sum                   sector     26774989
+    lts__t_sectors_op_write.sum                             sector     14010883
+    lts__t_sectors_srcunit_tex_op_read.sum                  sector     59768832
+    lts__t_sectors_srcunit_tex_op_write.sum                 sector      9340176
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        88.82
+
+################################################################################
+# b2mma_kernel variant=nohdh  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                     Mbyte       201.36
+    dram__bytes_write.sum                                    Mbyte       189.47
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        36.04
+    gpu__time_duration.sum                                      us       323.52
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                      393216
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                     1638400
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum          sector      7077888
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum          sector     12713984
+    lts__t_bytes.sum                                         Mbyte       872.43
+    lts__t_sectors_op_read.sum                              sector     12588249
+    lts__t_sectors_op_read_lookup_hit.sum                   sector      4231313
+    lts__t_sectors_op_write.sum                             sector     14442700
+    lts__t_sectors_srcunit_tex_op_read.sum                  sector      9437184
+    lts__t_sectors_srcunit_tex_op_write.sum                 sector      9626815
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        56.62
+
+################################################################################
+# b2mma_kernel variant=nodov  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                     Gbyte         1.07
+    dram__bytes_write.sum                                    Mbyte       198.78
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        84.70
+    gpu__time_duration.sum                                      us       448.19
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                     2097152
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                     1638400
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum          sector     37748736
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum          sector     12713984
+    lts__t_bytes.sum                                         Gbyte         2.61
+    lts__t_sectors_op_read.sum                              sector     67114067
+    lts__t_sectors_op_read_lookup_hit.sum                   sector     22548290
+    lts__t_sectors_op_write.sum                             sector     13818572
+    lts__t_sectors_srcunit_tex_op_read.sum                  sector     50331648
+    lts__t_sectors_srcunit_tex_op_write.sum                 sector      9210686
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        88.96
+
+################################################################################
+# b2mma_kernel variant=nohdh_nodov  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                     Kbyte        30.98
+    dram__bytes_write.sum                                    Mbyte       185.27
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        17.64
+    gpu__time_duration.sum                                      us       313.31
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                           0
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                     1638400
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum          sector            0
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum          sector     12713984
+    lts__t_bytes.sum                                         Mbyte       437.95
+    lts__t_sectors_op_read.sum                              sector         5665
+    lts__t_sectors_op_read_lookup_hit.sum                   sector         4547
+    lts__t_sectors_op_write.sum                             sector     13561661
+    lts__t_sectors_srcunit_tex_op_read.sum                  sector            0
+    lts__t_sectors_srcunit_tex_op_write.sum                 sector      9039745
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        34.59
+
+################################################################################
+# b2mma_kernel variant=vecst  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                     Gbyte         1.28
+    dram__bytes_write.sum                                    Mbyte       199.59
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        85.55
+    gpu__time_duration.sum                                      us       514.27
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                     2490368
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                      851968
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum          sector     44826624
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum          sector      6422528
+    lts__t_bytes.sum                                         Gbyte         2.89
+    lts__t_sectors_op_read.sum                              sector     79696323
+    lts__t_sectors_op_read_lookup_hit.sum                   sector     26774929
+    lts__t_sectors_op_write.sum                             sector      9637657
+    lts__t_sectors_srcunit_tex_op_read.sum                  sector     59768832
+    lts__t_sectors_srcunit_tex_op_write.sum                 sector      6422528
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        85.00
+
+################################################################################
+# b2mma_kernel variant=noasync  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                     Gbyte         1.28
+    dram__bytes_write.sum                                    Mbyte       200.00
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        70.08
+    gpu__time_duration.sum                                      us       627.97
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                     2490368
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                     1638400
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum          sector     39845888
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum          sector     12713984
+    lts__t_bytes.sum                                         Gbyte         2.39
+    lts__t_sectors_op_read.sum                              sector     59776505
+    lts__t_sectors_op_read_lookup_hit.sum                   sector         5544
+    lts__t_sectors_op_write.sum                             sector     14354904
+    lts__t_sectors_srcunit_tex_op_read.sum                  sector     39845888
+    lts__t_sectors_srcunit_tex_op_write.sum                 sector      9567886
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        77.84
+
+################################################################################
+# b2mma_kernel variant=noasync_vecst  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                     Gbyte         1.28
+    dram__bytes_write.sum                                    Mbyte       199.90
+    dram__throughput.avg.pct_of_peak_sustained_elapsed           %        72.62
+    gpu__time_duration.sum                                      us       605.92
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                     2490368
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                      851968
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum          sector     39845888
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum          sector      6422528
+    lts__t_bytes.sum                                         Gbyte         2.23
+    lts__t_sectors_op_read.sum                              sector     59775917
+    lts__t_sectors_op_read_lookup_hit.sum                   sector         5488
+    lts__t_sectors_op_write.sum                             sector      9634444
+    lts__t_sectors_srcunit_tex_op_read.sum                  sector     39845888
+    lts__t_sectors_srcunit_tex_op_write.sum                 sector      6422528
+    lts__throughput.avg.pct_of_peak_sustained_elapsed            %        73.06
+
+== SASS store/load widths (base vs vecst) ==
+  base   STG.E(32b)=25  STG.E.64=0  LDGSTS=10
+  vecst  STG.E(32b)=1  STG.E.64=12  LDGSTS=10
+
+DONE
