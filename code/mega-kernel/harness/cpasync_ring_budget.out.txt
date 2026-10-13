@@ -1,0 +1,93 @@
+device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0  L2=50 MB  SMEM/block(req)=49152 optin=232448  SMEM/SM=233472
+
+===== §A 正确性：cp.async D 深环（多 worker）checksum 一致（DW=88=352B, G=NSM, lanes=128） =====
+  ca   K=1    D=1    SMEM=   352B(  0.3KB) G=132  lanes=128   bad=0  ~   6.386 ns/item     55.1 GB/s  (4.869 ms/rep)
+  ca   K=1    D=2    SMEM=   704B(  0.7KB) G=132  lanes=128   bad=0  ~   4.018 ns/item     87.6 GB/s  (3.064 ms/rep)
+  ca   K=1    D=4    SMEM=  1408B(  1.4KB) G=132  lanes=128   bad=0  ~   4.007 ns/item     87.8 GB/s  (3.055 ms/rep)
+  ca   K=1    D=8    SMEM=  2816B(  2.8KB) G=132  lanes=128   bad=0  ~   4.008 ns/item     87.8 GB/s  (3.056 ms/rep)
+  ca   K=4    D=1    SMEM=  1408B(  1.4KB) G=132  lanes=128   bad=0  ~   1.637 ns/item    215.0 GB/s  (1.248 ms/rep)
+  ca   K=4    D=2    SMEM=  2816B(  2.8KB) G=132  lanes=128   bad=0  ~   1.007 ns/item    349.4 GB/s  (0.768 ms/rep)
+  ca   K=4    D=4    SMEM=  5632B(  5.5KB) G=132  lanes=128   bad=0  ~   1.004 ns/item    350.6 GB/s  (0.765 ms/rep)
+  ca   K=4    D=8    SMEM= 11264B( 11.0KB) G=132  lanes=128   bad=0  ~   1.003 ns/item    350.8 GB/s  (0.765 ms/rep)
+  ca   K=16   D=1    SMEM=  5632B(  5.5KB) G=132  lanes=128   bad=0  ~   0.541 ns/item    650.2 GB/s  (0.413 ms/rep)
+  ca   K=16   D=2    SMEM= 11264B( 11.0KB) G=132  lanes=128   bad=0  ~   0.342 ns/item   1028.5 GB/s  (0.261 ms/rep)
+  ca   K=16   D=4    SMEM= 22528B( 22.0KB) G=132  lanes=128   bad=0  ~   0.342 ns/item   1029.5 GB/s  (0.261 ms/rep)
+  ca   K=16   D=8    SMEM= 45056B( 44.0KB) G=132  lanes=128   bad=0  ~   0.342 ns/item   1030.0 GB/s  (0.261 ms/rep)
+  ca   K=64   D=1    SMEM= 22528B( 22.0KB) G=132  lanes=128   bad=0  ~   0.232 ns/item   1519.6 GB/s  (0.177 ms/rep)
+  ca   K=64   D=2    SMEM= 45056B( 44.0KB) G=132  lanes=128   bad=0  ~   0.159 ns/item   2209.3 GB/s  (0.121 ms/rep)
+  ca   K=64   D=4    SMEM= 90112B( 88.0KB) G=132  lanes=128   bad=0  ~   0.158 ns/item   2226.6 GB/s  (0.121 ms/rep)
+  ca   K=64   D=8    SMEM=180224B(176.0KB) G=132  lanes=128   bad=0  ~   0.158 ns/item   2231.3 GB/s  (0.120 ms/rep)
+
+===== §B 载体对照 K×SMEM 联合约束：cp.async vs TMA bulk（DW=88, G=NSM, lanes=128） =====
+  --- S=65536 B (64.0 KB) ---
+  bulk K=1    D=32   SMEM= 11520B( 11.2KB) G=132  lanes=128   bad=0  ~   4.941 ns/item     71.2 GB/s  (3.767 ms/rep)
+  ca   K=1    D=32   SMEM= 11264B( 11.0KB) G=132  lanes=128   bad=0  ~   4.003 ns/item     87.9 GB/s  (3.052 ms/rep)
+  bulk K=8    D=23   SMEM= 64952B( 63.4KB) G=132  lanes=128   bad=0  ~   0.628 ns/item    560.2 GB/s  (0.479 ms/rep)
+  ca   K=8    D=23   SMEM= 64768B( 63.2KB) G=132  lanes=128   bad=0  ~   0.543 ns/item    648.3 GB/s  (0.414 ms/rep)
+  bulk K=32   D=5    SMEM= 56360B( 55.0KB) G=132  lanes=128   bad=0  ~   0.289 ns/item   1217.7 GB/s  (0.220 ms/rep)
+  ca   K=32   D=5    SMEM= 56320B( 55.0KB) G=132  lanes=128   bad=0  ~   0.274 ns/item   1284.8 GB/s  (0.209 ms/rep)
+  bulk K=64   D=2    SMEM= 45072B( 44.0KB) G=132  lanes=128   bad=0  ~   0.159 ns/item   2217.7 GB/s  (0.121 ms/rep)
+  ca   K=64   D=2    SMEM= 45056B( 44.0KB) G=132  lanes=128   bad=0  ~   0.159 ns/item   2214.8 GB/s  (0.121 ms/rep)
+  bulk K=128  D=1    SMEM= 45064B( 44.0KB) G=132  lanes=128   bad=0  ~   0.187 ns/item   1882.0 GB/s  (0.143 ms/rep)
+  ca   K=128  D=1    SMEM= 45056B( 44.0KB) G=132  lanes=128   bad=0  ~   0.212 ns/item   1662.5 GB/s  (0.161 ms/rep)
+  --- S=131072 B (128.0 KB) ---
+  bulk K=1    D=32   SMEM= 11520B( 11.2KB) G=132  lanes=128   bad=0  ~   4.934 ns/item     71.3 GB/s  (3.762 ms/rep)
+  ca   K=1    D=32   SMEM= 11264B( 11.0KB) G=132  lanes=128   bad=0  ~   3.999 ns/item     88.0 GB/s  (3.050 ms/rep)
+  bulk K=8    D=32   SMEM= 90368B( 88.2KB) G=132  lanes=128   bad=0  ~   0.628 ns/item    560.2 GB/s  (0.479 ms/rep)
+  ca   K=8    D=32   SMEM= 90112B( 88.0KB) G=132  lanes=128   bad=0  ~   0.536 ns/item    656.4 GB/s  (0.409 ms/rep)
+  bulk K=32   D=11   SMEM=123992B(121.1KB) G=132  lanes=128   bad=0  ~   0.289 ns/item   1216.9 GB/s  (0.221 ms/rep)
+  ca   K=32   D=11   SMEM=123904B(121.0KB) G=132  lanes=128   bad=0  ~   0.274 ns/item   1284.4 GB/s  (0.209 ms/rep)
+  bulk K=64   D=5    SMEM=112680B(110.0KB) G=132  lanes=128   bad=0  ~   0.158 ns/item   2227.9 GB/s  (0.120 ms/rep)
+  ca   K=64   D=5    SMEM=112640B(110.0KB) G=132  lanes=128   bad=0  ~   0.159 ns/item   2216.3 GB/s  (0.121 ms/rep)
+  bulk K=128  D=2    SMEM= 90128B( 88.0KB) G=132  lanes=128   bad=0  ~   0.136 ns/item   2586.8 GB/s  (0.104 ms/rep)
+  ca   K=128  D=2    SMEM= 90112B( 88.0KB) G=132  lanes=128   bad=0  ~   0.145 ns/item   2421.9 GB/s  (0.111 ms/rep)
+
+===== §C 环深 D 扫描：cp.async vs bulk（K=8, DW=88, G=NSM, lanes=128） =====
+  bulk K=8    D=1    SMEM=  2824B(  2.8KB) G=132  lanes=128   bad=0  ~   0.894 ns/item    393.9 GB/s  (0.681 ms/rep)
+  ca   K=8    D=1    SMEM=  2816B(  2.8KB) G=132  lanes=128   bad=0  ~   0.857 ns/item    410.6 GB/s  (0.654 ms/rep)
+  bulk K=8    D=2    SMEM=  5648B(  5.5KB) G=132  lanes=128   bad=0  ~   0.628 ns/item    560.7 GB/s  (0.479 ms/rep)
+  ca   K=8    D=2    SMEM=  5632B(  5.5KB) G=132  lanes=128   bad=0  ~   0.537 ns/item    655.7 GB/s  (0.409 ms/rep)
+  bulk K=8    D=3    SMEM=  8472B(  8.3KB) G=132  lanes=128   bad=0  ~   0.628 ns/item    560.8 GB/s  (0.479 ms/rep)
+  ca   K=8    D=3    SMEM=  8448B(  8.2KB) G=132  lanes=128   bad=0  ~   0.550 ns/item    640.1 GB/s  (0.419 ms/rep)
+  bulk K=8    D=4    SMEM= 11296B( 11.0KB) G=132  lanes=128   bad=0  ~   0.628 ns/item    560.8 GB/s  (0.479 ms/rep)
+  ca   K=8    D=4    SMEM= 11264B( 11.0KB) G=132  lanes=128   bad=0  ~   0.536 ns/item    657.1 GB/s  (0.408 ms/rep)
+  bulk K=8    D=6    SMEM= 16944B( 16.5KB) G=132  lanes=128   bad=0  ~   0.628 ns/item    560.6 GB/s  (0.479 ms/rep)
+  ca   K=8    D=6    SMEM= 16896B( 16.5KB) G=132  lanes=128   bad=0  ~   0.550 ns/item    640.4 GB/s  (0.419 ms/rep)
+  bulk K=8    D=8    SMEM= 22592B( 22.1KB) G=132  lanes=128   bad=0  ~   0.628 ns/item    560.8 GB/s  (0.479 ms/rep)
+  ca   K=8    D=8    SMEM= 22528B( 22.0KB) G=132  lanes=128   bad=0  ~   0.536 ns/item    657.1 GB/s  (0.408 ms/rep)
+  bulk K=8    D=12   SMEM= 33888B( 33.1KB) G=132  lanes=128   bad=0  ~   0.632 ns/item    557.4 GB/s  (0.482 ms/rep)
+  ca   K=8    D=12   SMEM= 33792B( 33.0KB) G=132  lanes=128   bad=0  ~   0.550 ns/item    640.4 GB/s  (0.419 ms/rep)
+  bulk K=8    D=16   SMEM= 45184B( 44.1KB) G=132  lanes=128   bad=0  ~   0.629 ns/item    559.7 GB/s  (0.480 ms/rep)
+  ca   K=8    D=16   SMEM= 45056B( 44.0KB) G=132  lanes=128   bad=0  ~   0.540 ns/item    651.9 GB/s  (0.412 ms/rep)
+  bulk K=8    D=24   SMEM= 67776B( 66.2KB) G=132  lanes=128   bad=0  ~   0.629 ns/item    559.4 GB/s  (0.480 ms/rep)
+  ca   K=8    D=24   SMEM= 67584B( 66.0KB) G=132  lanes=128   bad=0  ~   0.547 ns/item    643.4 GB/s  (0.417 ms/rep)
+  bulk K=8    D=32   SMEM= 90368B( 88.2KB) G=132  lanes=128   bad=0  ~   0.629 ns/item    559.5 GB/s  (0.480 ms/rep)
+  ca   K=8    D=32   SMEM= 90112B( 88.0KB) G=132  lanes=128   bad=0  ~   0.537 ns/item    655.6 GB/s  (0.409 ms/rep)
+
+===== §D 取 task 载体对下游 task 的寄存器足迹（G=528=4 blk/SM, lanes=128, reps=200） =====
+  kernel                     |  regs |   localB |   blk/SM | warps/SM
+  ---------------------------+-------+----------+----------+---------
+  fetch_task_reg<0>          |    19 |        0 |       16 |       64
+  fetch_task_ca<0>           |    28 |        0 |       16 |       64
+  fetch_task_reg<32>         |    40 |        0 |       12 |       48
+  fetch_task_ca<32>          |    40 |        0 |       12 |       48
+  fetch_task_reg<128>        |   168 |        0 |        3 |       12
+  fetch_task_ca<128>         |   168 |        0 |        3 |       12
+  fetch_task_reg<192>        |   254 |        0 |        2 |        8
+  fetch_task_ca<192>         |   254 |        0 |        2 |        8
+
+  --- 端到端时间（fetch K=8 描述符 + 下游 task H） ---
+  H=0    reg  :   0.1764 ms
+  H=0    ca   :   0.1821 ms
+  H=8    reg  :   0.1790 ms
+  H=8    ca   :   0.1847 ms
+  H=16   reg  :   0.1810 ms
+  H=16   ca   :   0.1876 ms
+  H=32   reg  :   0.1847 ms
+  H=32   ca   :   0.1945 ms
+  H=64   reg  :   0.1934 ms
+  H=64   ca   :   0.2072 ms
+  H=128  reg  :   0.3768 ms
+  H=128  ca   :   0.4052 ms
+  H=192  reg  :   0.4013 ms
+  H=192  ca   :   0.4205 ms

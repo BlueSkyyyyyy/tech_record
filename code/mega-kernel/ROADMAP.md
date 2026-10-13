@@ -1245,8 +1245,36 @@
         的「描述符暂存页」应按一整批开。判据 C1–C4、无 C5（与 §36–§40 同档）。踩坑：`NDESC` 未按
         `K` 截断致 `bad=1`/假 41 TB/s；mbarrier 数组放静态 `__shared__` 与动态 SMEM 叠加超 opt-in
         报 `invalid argument`（改放动态 SMEM 尾部）。**本轮新增实验**；P52-1 新留尾巴（§41.8）：
-        未跑 16 B `cp.async` 深环载体、无动态生产者、未测 `cp.async` 释放寄存器对下游 task 的收益、
-        未与 DeepGEMM SM100 路径对跑。
+        ~~未跑 16 B `cp.async` 深环载体~~、~~未测 `cp.async` 释放寄存器对下游 task 的收益~~（**均已由
+        P53-1/§42 补掉**：16 B cp.async 深环与 bulk 在同一 K×D 平面对跑、载体高下随 K 翻转；cp.async
+        并不省寄存器，价值在「成本与描述符大小无关」+「零寄存器代价预取」）、
+        无动态生产者、未与 DeepGEMM SM100 路径对跑。
+
+### P53 实验扩展 35：取 task 深环的第三种载体（`docs/04-experiments.md` §42）
+
+- [x] **P53-1** 补掉 P52-1（§41.8）明留的两条尾巴——「载体固定为 TMA bulk + mbarrier，**未同时跑
+      16 B `cp.async` 环**（其预取机制 `wait_group` 是软件计数，深环写法见 §40.8 的 drain 坑）」与
+      「**未测 `cp.async` 释放的寄存器对下游 task 执行的实际收益**」：把快照的**原生**取 task 载体
+      （16 B `cp.async` 进 SMEM，`persistent_kernel.cuh:1063-1078`）放回 §41 的 `K×D` 平面对跑，
+      并单独量载体对下游 task 寄存器足迹的影响。见 `docs/04-experiments.md` **§42**，源码
+      `src/cpasync_ring_budget.cu`、脚本 `harness/cpasync_ring_budget.sh`、原始输出
+      `harness/cpasync_ring_budget.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+      DW=88=352 B 对齐 MPK §6.1）。两条环载体 `bulk`（TMA bulk+硬件 mbarrier，运行时 D）与 `ca`
+      （每 lane 16 B `cp.async.cg` + 软件 `wait_group(D-1)`，**模板 D=1…32**，尾批 `wait_group 0` 兜底）。
+      核心结论：
+      - **§A 任意 (K,D) 多 worker `bad=0`**（16 组）；cp.async 预取增益也**全在 `D=1→2`**（1.45–1.62×）、
+        `D≥2` 平坦，与 §41 bulk 同构。
+      - **§B（headline）载体高下随 `K` 翻转**：`K≤32` cp.async 反超 **1.06–1.23×**、`K=64` 打平、
+        `K=128` bulk 反超 **1.07–1.13×**——根因是 **cp.async 发指令条数随 `K` 线性增长**（`K=128`
+        整批 2816 条、每 lane 22 条）而 bulk 一条指令搬整批。
+      - **§C** `K=8`：两载体都在 `D≥2` 平坦（bulk 恒 ~560、ca 恒 ~640–657），**稳态 cp.async 高 ~1.17×**；
+        「取 task 环只需 2 槽」对两载体都成立。
+      - **§D「cp.async 释放寄存器」被否证**：`H=0` 时 `fetch_task_ca` **28** regs vs `fetch_task_reg` **19**
+        ——SMEM 寻址/逐 16 B 地址增量抵消了省；下游 task 一重（`H≥32`）两者 `numRegs` **完全相同**（40/168/254）、
+        无 spill；取数侧 ca 恒慢 3–7%（每批两次 `__syncthreads`）。故 cp.async 的价值是「成本与描述符
+        大小无关」（§39）与「**零寄存器代价预取**」（`D` 个批放 SMEM），**不是**取数代码省寄存器。
+      判据 C1–C4、无 C5（与 §36–§41 同档）。**本轮新增实验**；P53-1 新留尾巴（§42.7）：1D 非 TensorMap、
+      无动态生产者、未叠动态入队、未与 DeepGEMM SM100 路径对跑。
 
 ## 每轮增量流程（autopilot）
 
@@ -1270,7 +1298,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P52-1 完成（1/1）**。补掉 P51-1（§40.8）明留的第一条尾巴「**未测 `K` 与 SMEM 容量的
+- 当前进度：**P53-1 完成（1/1）**。补掉 P52-1（§41.8）明留的两条尾巴——「载体固定为 TMA bulk +
+  mbarrier，未同时跑 16 B `cp.async` 环」与「未测 `cp.async` 释放的寄存器对下游 task 执行的实际收益」：
+  把快照**原生**取 task 载体（16 B `cp.async` 进 SMEM）放回 §41 的 `K×D` 平面对跑。`docs/04-experiments.md`
+  新增 **§42**，源码 `src/cpasync_ring_budget.cu`、脚本 `harness/cpasync_ring_budget.sh`、原始输出
+  `harness/cpasync_ring_budget.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、DW=88=352 B）。
+  两载体 `bulk`（TMA bulk+硬件 mbarrier，运行时 D）vs `ca`（每 lane 16 B `cp.async.cg`+软件 `wait_group(D-1)`，
+  **模板 D=1…32**、尾批 `wait_group 0` 兜底）。核心结论：**§A** 任意 (K,D) `bad=0`、两载体预取增益全在
+  `D=1→2`（1.45–1.62×）；**§B 载体高下随 K 翻转**——`K≤32` cp.async 反超 1.06–1.23×、`K=64` 打平、
+  `K=128` bulk 反超 1.07–1.13×（cp.async 发指令条数随 K 线性增长）；**§C** `K=8` 两载体都 D≥2 平坦、
+  稳态 ca 高 ~1.17×；**§D「cp.async 释放寄存器」被否证**——`H=0` 时 ca 28 regs vs reg 19、下游 task 一重
+  两者齐平（40/168/254，无 spill），故 cp.async 的价值是「成本与描述符大小无关」+「零寄存器代价预取」。
+  判据 C1–C4、无 C5。**本轮新增实验**；P53-1 新留尾巴见 §42.7。
+- 此前：**P52-1 完成（1/1）**。补掉 P51-1（§40.8）明留的第一条尾巴「**未测 `K` 与 SMEM 容量的
   联合约束**」：把 §40 的「双缓冲」推广成 **D 深环形缓冲**（每槽 K 条 `TaskDesc`），描述符暂存 SMEM
   = `D·K·352 B`，量「同等 SMEM 预算下大批量浅环 vs 小批量深环」。`docs/04-experiments.md` 新增 **§41**，
   源码 `src/fetch_smem_budget.cu`、脚本 `harness/fetch_smem_budget.sh`、原始输出
@@ -1286,8 +1326,8 @@
     带宽守住 **2.3–2.7 TB/s**（大 K 在飞字节补偿 worker 数下降）；最优 K=8（5.5 KB、16 block/SM）
     2672 GB/s。⇒ 取 task 的 SMEM 是**软约束**，正确姿势是**堆到批量 K（≈32–128）、预取深度只 2**，
     对应 MPK §5.3 paged SMEM（行 1313-1325）。判据 C1–C4、无 C5。**本轮新增实验**；P52-1 新留尾巴
-    （§41.8）：未跑 16 B `cp.async` 深环载体、无动态生产者、未测 `cp.async` 释放寄存器对下游 task 的
-    收益、未与 DeepGEMM SM100 路径对跑。
+    （§41.8）：~~未跑 16 B `cp.async` 深环载体~~、~~未测 `cp.async` 释放寄存器对下游 task 的收益~~
+    （**均已由 P53-1/§42 补掉**）、无动态生产者、未与 DeepGEMM SM100 路径对跑。
 - 此前：**P51-1 完成（1/1）**。补掉 P50-1（§39.7）明留的两条尾巴——「**单 block** 测的是『取一批
   的延迟』而非『访存带宽』，要多 worker 的带宽标度需另做多 block 实验」与「**`mbarrier` 形态未测**」：
   把 §39 的「单 block 消费者」扩成 **G 个 worker block**，并新增两条 **TMA bulk + 硬件 mbarrier** 取数
