@@ -9364,3 +9364,100 @@ reader `rdsvv()`（`B2M_VVSTRIDE==0` 时与 `rds` 逐字等价；已证 stride �
   `K≠128`（lane 布局重写）；`dur` 取 ncu 单次窗口，不与 CUPTI `dev` 逐值可比（§63.5）。
 - `B2M_VVSTRIDE` 是**诊断宏**（默认 0），不得进部署 build。
 - 不改变目标卡部署输入（同 §87.5/§88.5）。
+
+## 90. 关闭 §89.7 的 `BF16_VDW × TMA`（及其三旋钮扩展 `× BF16MMA`）边界：它是一个**编译期 no-op**——逐位无损、计时与 `ncu` 计数均不变（P7-87）
+
+§89.7（P7-86）的边界原话点名「未测 `BF16_VDW×TMA`、三旋钮叠加、`K≠128`（lane 布局重写）」。
+本轮关掉前两条，得到的却是一个**结构性**结论而非新的性能数字：在 `-DB2M_TMA` 下 `-DB2M_BF16_VDW`
+**根本不可达**（源代码证明），所以「它俩叠加会怎样」的正确答案是「编译后一字不差、无物可测」——
+把这条边界从「未测」变成「无需测」。剩下的唯一 K≠V 边界收敛为 `K≠128`（§90.5）。新增
+`harness/check_bwd_b2_kv4.py`（`harness/check_bwd_b2_kv4.out.txt`）+ `harness/check_bwd_b2_kv4_timing.py`
+（`harness/check_bwd_b2_kv4_timing.out.txt`）+ `harness/probe_b2_kv4_ncu.sh`
+（`harness/probe_b2_kv4_ncu.out.txt`，空闲卡）。`b2_mma_probe.cu` **一行未改**。
+
+### 90.1 为什么是编译期 no-op（贴真实行号）
+
+`-DB2M_BF16_VDW`（P7-80，`b2_mma_probe.cu:191-196`）的全部作用点都在**非 TMA** 分支里：
+
+| 作用点 | 行 | 所在区段 | `-DB2M_TMA` 下是否可达 |
+|---|---|---|---|
+| `Stage` 里 `vv`/`dwm` 的 bf16 声明 | `:528`/`:535` | `#else`（`:520`）of `#if B2M_TMA_ON`（`:507`/`:541`） | 否 |
+| `rds()` 的只读分支 | `:638` | `#elif B2M_BF16_VDW`（`#if B2M_TMA_ON return rd` 优先，`:636-637`） | 否 |
+| `rdsvv()` 的只读分支 | `:651` | 同上（`:649` 先 `return rd`） | 否 |
+| `prefetch()` 的 bf16 粒度搬入 | `:795` | `#if !B2M_TMA_ON`（`:747`） | 否 |
+
+而 TMA 分支自己的 `vv`/`dwm` 本来就是 `tma_t`——在 `-DB2M_BF16` 下 `tma_t == __nv_bfloat16`
+（`:507` 起的 `tma_t`/`TAW` 定义，`:515`/`:518` 的声明），与 `BF16_VDW` 想要的「raw `v`/`dw` 也走 bf16
+staging」逐字一致。读侧的 TMA 路径 `rds()` 在 `:636` 就 `return rd(...)`（`rd` 的 TMA 分支按 `tma_t`
+解码，`:606-617`），根本不看 `BF16_VDW`。唯一的 `#error` 守卫（`:204`）只挂在**诊断宏**
+`B2M_VVSTRIDE` 上，与 `BF16_VDW × TMA` 无关。
+
+> 一句话：**TMA 路径已经就是 VDW 想要的形态**，`BF16_VDW` 只是把**非 TMA** path 对齐到它；
+> 打开 TMA 后这个 flag 没有任何可作用的代码。
+
+### 90.2 Part A：逐位相同（`check_bwd_b2_kv4.py`，`B2 T1024 H8`）
+
+由于源级惰性，期望是精确逐位。为排除 dtype 假象，所有操作数在线上都是 bf16（bf16→fp32 扩宽精确）：
+
+| 对比 | V=64 | V=128 | V=256 |
+|---|---|---|---|
+| (A) `bf16_vdw_tma` vs `bf16tma` | `max_abs=0` | `max_abs=0` | `max_abs=0` |
+| (B) `bf16_vdw_mma_tma` vs `bf16mma_tma` | `max_abs=0` | `max_abs=0` | `max_abs=0` |
+| (C) `bf16_vdw`（非 TMA）vs `bf16` 锚 | `max_abs=0` | `max_abs=0` | `max_abs=0` |
+
+（A/B 的 11 项输出 = `dv2/dvb/dkgb/db/dApre/dA/dqg/dkg/dg/dgk`；即 §89 的两条 K≠V 双旋钮交叉，
+各再叠一层 `BF16_VDW`。）(C) 是**对照**：`BF16_VDW` 在**非 TMA** 上确实改了 staging 布局（P7-80），
+但因为喂的是 bf16 值、扩宽精确，所以仍逐位——这正好把「(A) 的逐位」归因到**布局惰性**而非
+「VDW 在两种路径下同一实现」。
+
+### 90.3 Part B：event 计时（`check_bwd_b2_kv4_timing.py`，`B8 T2048 H8`，一次 event 对包 100 次）
+
+| V | `bf16tma` µs | `bf16_vdw_tma` µs | vdw/anchor | `bf16mma_tma` µs | `bf16_vdw_mma_tma` µs | vdw/anchor |
+|---|---|---|---|---|---|---|
+| 64 | 611.6 | 608.8 | **0.9955** | 570.9 | 571.2 | **1.0006** |
+| 128 | 1275.0 | 1280.3 | **1.0041** | 1159.5 | 1168.2 | **1.0075** |
+| 256 | 2375.2 | 2365.0 | **0.9957** | 2194.2 | 2196.5 | **1.0011** |
+
+六对比值全落 **±0.8%**——编译期 no-op 在墙上时间里就是一次噪声。注意 `bf16mma_tma` 比 `bf16tma`
+稳定快（570.9 vs 611.6、1159.5 vs 1275.0、2194.2 vs 2375.2），复现 §89 的「原生 bf16 mma 在 TMA 底座上
+赢 6–9%」；但这是 `BF16MMA` 的功劳，与 `BF16_VDW` 无关。
+
+### 90.4 Part C：`ncu` 计数（`probe_b2_kv4_ncu.sh`，`B8 T2048 H8`）
+
+`ncu` 的**整数计数**（bank conflict / shared wavefront / global-ld sector / regs / occupancy limit）
+在孪生对之间逐值相同（`ldsec`、`regs`、`occ*` 三档 V 全等）：
+
+| V | pair | bank-conflict | shared wavefronts | global-ld sectors | regs |
+|---|---|---|---|---|---|
+| 64 | tma vs vdw_tma | 18949344 / 18942844 | 49816800 / 49810300 | 27131904 / 27131904 | 92 / 92 |
+| 128 | tma vs vdw_tma | 27844608 / 27844608 | 78897152 / 78897152 | 28180480 / 28180480 | 128 / 128 |
+| 256 | tma vs vdw_tma | 47767552 / 47767552 | 139190272 / 139190272 | 30277632 / 30277632 | 104 / 104 |
+
+V≥128 的 bank conflict / wavefront **精确相等**；V=64 那对差 ~0.03%，但**独立重跑**同一对得
+`bf16tma=18965114 / bf16_vdw_tma=18959672`——同一份代码两次跑本身就差 ~0.1%（`ncu` 多次 replay 的
+非确定性），孪生差始终落在重跑方差内。故判定：计数层面亦无可测差异。`v`/`dw` 的 DRAM 字节两侧也
+不变（`dram__bytes_read` = 550.26/882.24/1570 MB vs 550.45/882.25/1570 MB，V=64/128/256，随 V
+成比例、孪生差落噪声；写侧同理）。
+
+### 90.5 结论与设计输入（更新 §89.7）
+
+- **`BF16_VDW × TMA` 与 `BF16_VDW × BF16MMA × TMA` 两条边界关闭，答案为「编译期 no-op」**：
+  逐位相同（`max_abs=0`）、计时 ±0.8%、`ncu` 整数计数相同。目标卡 CUDA B2 **在 TMA 部署下无需
+  再携带 `BF16_VDW`**——TMA staging 已经是 bf16；该 flag 只是「非 TMA cp.async path 对齐到 TMA」
+  的开关（§80）。这是本核 K≠V 旋钮空间的**最后两条**未测交叉。
+- **K≠V 的旋钮空间至此走完**：`bf16`/`bf16mma`/`damma`/`vdw`/`tma` 及其两两、三三交叉全部有
+  正确性 +（`ncu` 或 event）双口径记录。**留下的唯一 K≠V 边界是 `K≠128`**——它不是「再开一个旋钮」，
+  而是 `b2_mma_probe.cu:491` 的 `static_assert(KD == 128, "… K=128 is baked into the 16-wide warp
+  reductions")` 所钉死的**lane 布局重写**（`dgk` 的列归约 `l&15`、门控链的 16 宽 lane），属独立的
+  结构性工程、非本轮「关闭一个交叉」的量级，明确**defer**。
+- **不改变目标卡部署输入**：默认反向仍是 §45 的 `cf`；对 `V=128` 零行为差异。
+
+### 90.6 边界（诚实）
+
+- 只覆盖 `K=128`、`BT=16`、`NS=2`、`-DB2M_HDW`、`V∈{64,128,256}`，正确性 shape `B2 T1024 H8`、
+  `ncu`/计时 shape `B8 T2048 H8`；bf16-TMA 强绑 `BVK=64`。
+- `BF16_VDW` 的**非 TMA × 非 BF16MMA** 单旋钮性能（§83 的 1.4–1.5× 寄存器回归）不在本轮范围内，
+  本轮只做「× TMA」的关闭。
+- `ncu` 的 `gpu__time_duration` 与 event 口径不同源（§63.5），本轮以 event 为准；V=64 的计数
+  非确定性已用独立重跑界定。
+- 不改变目标卡部署输入（同 §87.5/§88.5/§89.7）。

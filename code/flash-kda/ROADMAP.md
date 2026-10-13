@@ -1186,7 +1186,28 @@
        `∈{0,8,16,24,32}` **完全免疫（49.0–49.2 M）** ⟹ 是 **bf16 2 B vs fp32 4 B 的访存宽度**、非行相位。
        **新判据**：TMA 形态的核里 `mma` 化 DA 的性价比比 cp.async 高 2–3×。**边界**＝一个 shape、
        bf16-TMA 强绑 `BVK=64`、未测 `BF16_VDW×TMA`/三旋钮叠加/`K≠128`。默认部署仍 §45 的 `cf`。
-       见 `docs/07` §89。
+               见 `docs/07` §89。
+- [x] **P7-87** 关闭 §89.7（P7-86）点名的「`BF16_VDW×TMA` + 三旋钮叠加」边界，答案为**编译期
+       no-op**（结构性结论而非新数字）：在 `-DB2M_TMA` 下 `-DB2M_BF16_VDW`（P7-80）**全部作用点都
+       在非 TMA 分支**——`Stage` 的 `vv`/`dwm` bf16 声明（`b2_mma_probe.cu:528/535`，在 `#else`(`:520`)
+       of `#if B2M_TMA_ON`(`:507/541`)）、`rds()`/`rdsvv()` 的只读分支（`:638/651`，TMA 下 `:636/649`
+       先 `return rd`）、`prefetch()`（`:795`，在 `#if !B2M_TMA_ON`(`:747`)）；而 TMA 路径自己的
+       `vv`/`dwm` 本就在 `-DB2M_BF16` 下是 `tma_t`=`__nv_bfloat16`（`:507/515/518`）——**TMA 已经是
+       VDW 想要的形态**。唯一 `#error`（`:204`）只挂诊断宏 `B2M_VVSTRIDE`。`b2_mma_probe.cu` **一行
+       未改**。新增 `harness/check_bwd_b2_kv4.py`（`check_bwd_b2_kv4.out.txt`）+
+       `harness/check_bwd_b2_kv4_timing.py`（`check_bwd_b2_kv4_timing.out.txt`）+ `harness/probe_b2_kv4_ncu.sh`
+       （`probe_b2_kv4_ncu.out.txt`，空闲卡）。**Part A**：`bf16_vdw_tma` vs `bf16tma`、
+       `bf16_vdw_mma_tma` vs `bf16mma_tma`（11 项输出）+ 非 TMA 对照 `bf16_vdw` vs `bf16`，`V∈{64,128,256}`
+       **全逐位（`max_abs=0`）**（bf16 值、扩宽精确）。**Part B（event，`B8T2048H8`）**：六对比值全
+       **±0.8%**（V=64 0.9955/1.0006、V=128 1.0041/1.0075、V=256 0.9957/1.0011）＝噪声；
+       `bf16mma_tma` 仍稳定快 `bf16tma` 6–9%（复现 §89，但与 VDW 无关）。**Part C（ncu）**：
+       bank-conflict/shared-wavefront/`ldsec`/regs/occupancy **整数计数孪生逐值相同**（V≥128 精确相等、
+       V=64 差 ~0.03% 已用独立重跑界定为 `ncu` replay 非确定性），DRAM 读 550.26/882.24/1570 MB 两侧不变。
+       **结论（更新 §89.7）**：目标卡 CUDA B2 **TMA 部署下无需再带 `BF16_VDW`**；K≠V 旋钮空间
+       （`bf16/bf16mma/damma/vdw/tma` 及两两、三三交叉）至此**全部走完**，唯一剩余 K≠V 边界＝
+       **`K≠128`**——`b2_mma_probe.cu:491` 的 `static_assert(KD==128)` 钉死的**lane 布局重写**
+       （`dgk` 列归约 `l&15`、门控链 16 宽 lane），属独立结构性工程，明确 **defer**。默认部署仍 §45 的 `cf`。
+       见 `docs/07` §90。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1693,8 +1714,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-86 补测 + P8-3**。
-  - P7-86（本轮）：**关闭 §88.5（P7-85）点名的两条边界——(a) `K≠V` 上双旋钮交叉的 `ncu`、
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-87 补测 + P8-3**。
+  - P7-87（本轮）：**关闭 §89.7（P7-86）点名的「`BF16_VDW×TMA` + 三旋钮叠加」边界，答案为编译期
+    no-op**。`-DB2M_BF16_VDW`（P7-80）的全部作用点都在**非 TMA** 分支（`Stage` 的 `vv`/`dwm` bf16
+    声明 `b2_mma_probe.cu:528/535` 在 `#else`(`:520`) of `#if B2M_TMA_ON`(`:507/541`)、`rds`/`rdsvv`
+    的只读分支 `:638/:651`（TMA 下 `:636/:649` 先 `return rd`）、`prefetch` `:795` 在 `#if !B2M_TMA_ON`
+    (`:747`)）；而 TMA 路径自己的 `vv`/`dwm` 在 `-DB2M_BF16` 下本就是 `tma_t`=`__nv_bfloat16`
+    （`:507/515/518`）——**TMA 已经是 VDW 想要的形态**。`b2_mma_probe.cu` **一行未改**。新增
+    `harness/check_bwd_b2_kv4.py`（`check_bwd_b2_kv4.out.txt`）+ `harness/check_bwd_b2_kv4_timing.py`
+    （`check_bwd_b2_kv4_timing.out.txt`）+ `harness/probe_b2_kv4_ncu.sh`（`probe_b2_kv4_ncu.out.txt`，
+    空闲卡）。**Part A**：`bf16_vdw_tma` vs `bf16tma`、`bf16_vdw_mma_tma` vs `bf16mma_tma` + 非 TMA
+    对照，`V∈{64,128,256}` **全逐位（`max_abs=0`）**。**Part B（event）**：六对比值全 **±0.8%**＝噪声
+    （`bf16mma_tma` 仍稳定快 `bf16tma` 6–9%，与 VDW 无关）。**Part C（ncu）**：整数计数（bconf/
+    wavefront/`ldsec`/regs/occupancy）孪生逐值相同（V≥128 精确相等、V=64 ~0.03% 经独立重跑界定为
+    replay 非确定性），DRAM 读两侧不变。**结论**：目标卡 CUDA B2 **TMA 部署下无需带 `BF16_VDW`**；
+    K≠V 旋钮空间至此**走完**，唯一剩余边界＝**`K≠128`**（`:491` 的 `static_assert(KD==128)` 钉死的
+    lane 布局重写）明确 **defer**。见 `docs/07` §90。
+  - P7-86（上轮）：**关闭 §88.5（P7-85）点名的两条边界——(a) `K≠V` 上双旋钮交叉的 `ncu`、
     (b) 证伪 `vdw@V=256` 的 bank-conflict 行 stride 假设**。新增 `harness/probe_b2_kv3_ncu.sh`
     （`probe_b2_kv3_ncu.out.txt`，空闲卡）+ `harness/check_bwd_b2_kv3_timing.py`
     （`check_bwd_b2_kv3_timing.out.txt`）+ 正确性 `harness/check_bwd_b2_kv3.py`
@@ -2940,8 +2976,13 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-86 补测（+ P8-2/P8-3 一页纸补全）**，进入收尾/维护。
-  **P7-86（本轮）**：关闭 §88.5 的两条边界——`K≠V` 双旋钮交叉（`bf16tma`/`BF16MMA×TMA`/`DAMMA×TMA`）
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-87 补测（+ P8-2/P8-3 一页纸补全）**，进入收尾/维护。
+  **P7-87（本轮）**：关闭 §89.7 点名的「`BF16_VDW×TMA` + 三旋钮叠加」，答案为**编译期 no-op**——
+  `-DB2M_BF16_VDW` 在 `-DB2M_TMA` 下全部作用点都在非 TMA 分支（TMA 的 `vv`/`dwm` 本就是 bf16 `tma_t`）。
+  逐位（`max_abs=0`，`V∈{64,128,256}`）、计时 ±0.8%、`ncu` 整数计数孪生相同。**K≠V 旋钮空间至此走完**，
+  唯一剩余 K≠V 边界＝ `K≠128`（`b2_mma_probe.cu:491` 的 `static_assert` 钉死的 lane 布局重写）明确 defer。
+  见 `docs/07` §90。
+  **P7-86（上轮）**：关闭 §88.5 的两条边界——`K≠V` 双旋钮交叉（`bf16tma`/`BF16MMA×TMA`/`DAMMA×TMA`）
   的 `ncu`（`bf16tma` 仍受 smem 占用台阶支配、`bf16mma_tma` 稳定 6–9%、`damma_tma` 把 DAMMA 的相对
   收益从 3–7% 放大到 6–15%），并**证伪** `vdw@V=256` 的 bconf 行-stride 假设（对 `vv` 行 stride 完全
   免疫 ⟹ 是访存宽度效应）。见 `docs/07` §89。
