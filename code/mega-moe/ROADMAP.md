@@ -2456,7 +2456,35 @@
        argv（num-peers=3、-o 按 rank、预热无 NCU）；真实 `.ncu-rep` 跑 `--page raw --csv`
        （12/266 列）验证取址；真实 `test_mega_moe.py` 公式抽取执行 9 项；真实 `generate_pyi.py`
        逐字节复现 + 强制退化复现；**47/47 PASS**。配套博客
-       `content/posts/mega-moe-88-deepgemm-profiling-infra`（索引页新增第 88 篇）。
+        `content/posts/mega-moe-88-deepgemm-profiling-infra`（索引页新增第 88 篇）。
+
+### P79 增量（opt-in，补齐 Mega MoE / mHC 的 JIT 启动包装层）
+
+- [x] **P79-1** **Mega MoE / Mega mHC 的 JIT 启动包装层**（`csrc/jit_kernels/impls/sm100_bf16_mega_moe.hpp`
+       157 行 / `csrc/jit_kernels/impls/sm100_mega_mhc.hpp` 149 行）：前面第 5/10/42 篇分别拆过
+       **kernel 本体**与 **Python/host 缓冲区编排**，这两份夹在 `csrc/apis/*.hpp` 与 SM100 主体 kernel
+       之间的包装层却一直没人单独读过。主 kernel SM100 专属、仅分析，但 wrapper 是**纯 host C++**。
+       → `docs/89-mega-moe-mhc-jit-wrappers.md`（真实行号核对）：三段式结构；BF16 wrapper
+       `:33-44`（形状二次推导 + `MmaKind::BF16` + `store_block_m_l1==l2` 断言）、`:46-86`
+       10 个描述符（v.s. FP8 `sm100_fp8_fp4_mega_moe.hpp:50-139` 的 20 个含 SF）、`:65-86`
+       共享专家**指针别名回退**、`:96-130` 20 个模板实参 + `to_string(activation_clamp)` hexfloat +
+       `fast_math`、`:132-154` launch（grid=num_sms、block=512、cluster=2）。**关键差异**：L1 输出
+       swizzle BF16 取 `swizzle_acts_mode`（128）/ FP8 取 `/2`（64），靠 `make_tma_2d_desc`
+       `runtime_utils.hpp:130-131` 的 `smem_inner=swizzle/elem` 规整补偿（二者 smem 内层 64 元素、
+       swizzle 字节数随元素大小减半；BF16 照抄 `/2` 会被压成 32）。mHC wrapper `:37-51` 三个 TMA
+       lambda（`make_residual_tma_desc` **route 当第三维** + 两个显式 stride）、`:68-73` `fn` 三维
+       描述符 `allow_tf32=true`→`TFLOAT32`、`:74-78` coeff swizzle 0 vs 64、`:82-107`
+       `MixArgs`/`NormArgs` POD（`layout/mega_mhc.cuh:45-71`）、`:109-126` 7 个模板实参（三个 bool
+       由指针空值推出）+ launch（无 cluster、768 线程）、`:56-62` `DG_PRINT_CONFIGS`；上游
+       `csrc/apis/mega_mhc.hpp:89-252`（num_splits/scratch/借用 bf16 尾部/primary SF）。H100 实测
+       `src/mega_moe_mhc_jit_wrapper.cu` + `harness/exp_mega_moe_mhc_jit_wrapper.{sh,out.txt}`
+       （nvcc 直接 include 真实头文件 + torch）：`to_string` 7 有限值字面量 `strtof` 逐位回原值、
+       ±inf→`infinity()`、NaN 被拒；22 个 `offsetof` + `MixArgs`=64/`NormArgs`=88 逐项相等；
+       mHC 四个描述符与独立直连编码逐字节相等 + **真实 3D TMA 载入 route 当第三维 0/32768 不符**；
+       真机 `get_mega_moe_config`（BF16 block_k=64 / FP8 128、BF16 `num_sf_ring_tokens=0`、BF16
+       smem 218532 vs FP8 225700、共享回退逐字节别名）。**50/50 ALL PASS**。另一编译坑：真实头
+       `DG_UNIFIED_ASSERT` 在 nvcc 单 TU host pass 落成 `asm("trap;")`，include 前钉到 host `assert`。
+       配套博客 `content/posts/mega-moe-89-mega-moe-mhc-jit-wrappers`（索引页新增第 89 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2482,8 +2510,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P78 各增量完成（P15-1…P41-1、P42-1…P78-1）。**
-  本轮 P78-1：新建 `docs/88-deepgemm-profiling-infra.md`
+- 当前进度：**P0~P14 全部完成；P15~P79 各增量完成（P15-1…P41-1、P42-1…P79-1）。**
+  本轮 P79-1：新建 `docs/89-mega-moe-mhc-jit-wrappers.md`
+  （+`src/mega_moe_mhc_jit_wrapper.cu`、`harness/exp_mega_moe_mhc_jit_wrapper.{sh,out.txt}`）——补上
+  Mega MoE / mHC 一直缺席的 **JIT 启动包装层** `sm100_bf16_mega_moe.hpp` / `sm100_mega_mhc.hpp`
+  （host 张量 → 描述符 → 模板实参 → launch 的最后一公里）。**三个非平凡点**：① 描述符 swizzle 随
+  元素字节/通道宽度变化（BF16 128 vs FP8 64，靠 `smem_inner=swizzle/elem` 补偿）；② 常量/开关进模板
+  （`activation_clamp` hexfloat、三个 bool 由指针空值推出）；③ 回退用指针别名。**主 kernel SM100 专属、
+  仅分析；wrapper 纯 host，H100(sm90) 直接 include 真实头文件真机 50/50 ALL PASS**（含真实 3D TMA
+  载入 route 当第三维 0/32768 不符、真机 `get_mega_moe_config`）。索引页新增第 89 篇。
+  上一轮 P78-1：新建 `docs/88-deepgemm-profiling-infra.md`
   （+`harness/exp_megamoe_profiling.{sh,py,out.txt}`）——补上 Mega MoE 一直缺席的**官方 profiling 基础设施**：
   `run_ncu_mega_moe.sh`（多进程 NCU 驱动：参数解析 / `DG_JIT_WITH_LINEINFO` / JIT 预热 / PmSampling+
   SourceCounters / 每 rank 一个 ncu 并行）、`test_mega_moe.py` 的 `--ncu-profile-only`/`--local-rank-idx`/
@@ -3388,7 +3424,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P78 已完成（最新 **P78-1 官方 profiling 基础设施 + 自动生成的覆盖面清单**：
+- **下一步**：P0~P79 已完成（最新 **P79-1 Mega MoE / mHC 的 JIT 启动包装层**：
+  `sm100_bf16_mega_moe.hpp` / `sm100_mega_mhc.hpp`——host 张量→TMA 描述符→JIT 模板实参→launch；
+  描述符 swizzle 随元素字节/通道宽度变化的补偿、常量/开关进模板、回退指针别名、mHC 的 route 当第三维
+  + `MixArgs`/`NormArgs` POD；主 kernel SM100 仅分析，wrapper 纯 host，H100 真机 **50/50 ALL PASS**；
+  详见上）。
+  上一轮 P78-1：P0~P78 已完成（最新 **P78-1 官方 profiling 基础设施 + 自动生成的覆盖面清单**：
   `scripts/run_ncu_mega_moe.sh` / `tests/test_mega_moe.py` 的 `--ncu-profile-only`/`--local-rank-idx` /
   `scripts/quick_plot_pm.py` / `scripts/generate_pyi.py`+`stubs/_C.pyi` / `csrc/indexing/main.cu`+CMake——
   多进程 NCU 编排、PM-sampling 时间序列解析（raw CSV 第 11 列）、62-def 类型桩（漏 10 个 `m.attr`）
