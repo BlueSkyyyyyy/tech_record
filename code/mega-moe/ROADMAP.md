@@ -4097,6 +4097,40 @@
       **语义**、不复刻 SM 内重叠。配套博客 `content/posts/mega-moe-141-ep-e2e-moe`
       （索引页新增第 141 篇）。
 
+### P132 增量（opt-in，补齐反向 ncu 归因（第 15 篇）的对偶：前向的性能来源）
+
+- [x] **P132-1** **Mega MoE 前向 single-step 的 H100 预算归因：前向是 dgrad 的转置对偶**。
+      第 15 篇（P7-1）用 ncu 把**反向**四段归因清楚了（wgrad 访存受限 AI~120、dgrad 计算受限 AI~600），
+      但**前向的性能来源从没被单独量过**（第 99 篇只给端到端吞吐 312/303 TFLOPS，没拆「为什么」）。
+      本篇补上它的**对偶**：同一套 ncu 方法量前向两段 routed GEMM，并加上前向特有的 **L1 epilogue
+      （in-place SwiGLU + top-k 权重 + UE8M0 量化）**的定时预算。**核心理念**：前向 L1
+      （`m4096 N=2I4096 K=H7168`）与反向 **d1g**（`N=H K=2I`）是 **N↔K 转置对偶**、前向 L2（`N=H K=I`）
+      与 **d2g** 同理——两者 FLOP 相同、实测时长/利用率**几乎逐格吻合**；**前向没有 wgrad 那种
+      访存受限瓶颈**——wgrad 收缩维是 token（K=512，仅 4 个 BLOCK_K）且写巨大 fp32 权重梯度
+      （w1g 940MB / w2g 470MB）→ AI~120 ≪ 拐点 591，而前向收缩维是隐藏维（H/I，大）、输出是 bf16
+      激活 → AI 805/651 > 591 → **计算受限**。
+      → `docs/142-forward-roofline.md`（真实行号核对）。形状契约
+      `csrc/apis/mega_moe.hpp:188-197`（`intermediate_hidden_2 == 2*intermediate_hidden` `:197`、
+      `num_tokens <= num_max_tokens_per_rank` `:194`、arch 门控 `:256/367`）；L1 epilogue
+      `sm100_fp8_fp4_mega_moe.cuh:1112-1192`（gate/up 先 RNE→bf16 `:1112-1113`、clamp `:1116-1119`、
+      `__expf`+`fast_rcp` `:1125-1132`、`__fmul2_rn(gate,up,weights)` `:1134`、`get_ue8m0_sf_exp/_inv`
+      `:1173-1176`、`__nv_fp8x4_e4m3` `:1181`、UE8M0 定义 `common/math.cuh:114-147`）；SM90 m_grouped
+      FP8 契约 `sm90_fp8_gemm_1d2d.hpp:148`（D 必 bf16）。H100 真机
+      `harness/exp_forward_roofline.{py,sh,out.txt}` + `src/moe_forward_epilogue.cu`：
+      ① ncu 单次 launch L1 **203.7us / Compute(SM) 76.5% / DRAM 读 345.5MB 写 31.6MB / GMMA
+      1 261 568**、L2 **111.4us / 66.4% / 131.2MB+49.2MB / 622 592**（GMMA 比 2.03 = FLOP 比，
+      指令效率一致；kernel 名 `sm90_fp8_gemm_1d2d_impl`）；② event 稳态 L1 204.1us/1178 TFLOPS
+      （59.5%）、L2 111.1us/1082 TFLOPS（54.7%）、single-shot 229.9/139.7us；③ **L1 epilogue**
+      逐行移植后 **24.2us / 3129.7 GB/s（≈93% of HBM 3.35TB/s）**、UE8M0 scale 与 fp64 参考
+      **逐位同**、`max|Δ|/amax 5.5e-2`（fp8 一个 ulp）；④ **前向 step 预算 339.4us**
+      （204.1+24.2+111.1），epilogue 仅占 GEMM 的 ~7%；⑤ 前向两段计算 roofline 下界 182.3us、
+      实测 315.2us（GEMM only）达 **58%**，与第 15 篇反向四段「55–63%」同一完成度；
+      ⑥ 前向 step vs 反向四段 single-shot（1804us）→ **反向 ≈ 前向 5.3×**，差距全在 wgrad
+      （共 1498.7us，占反向 83%），前向没有对应形状。对照表：forward L1 203.7us/76.5% vs
+      d1g 194.3us/75.7%、forward L2 111.4us/66.4% vs d2g 111.0us/65.5%。**仅分析**：融合 kernel 的
+      UMMA/tcgen05/TMEM/UTCCP、L1 FP8 输出（2 TMA stage）；本机 8 卡节点共享，带宽数受争用。
+      配套博客 `content/posts/mega-moe-142-forward-roofline`（索引页新增第 142 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4127,8 +4161,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P131 各增量完成（P15-1…P41-1、P42-1…P131-1）。**
-  本轮 P131-1：新建 `docs/141-ep-e2e-moe.md`
+- 当前进度：**P0~P14 全部完成；P15~P132 各增量完成（P15-1…P41-1、P42-1…P132-1）。**
+  本轮 P132-1：新建 `docs/142-forward-roofline.md`
+  （+`harness/exp_forward_roofline.{py,sh,out.txt}`、`src/moe_forward_epilogue.cu`）——第 15 篇
+  （反向 ncu 归因）的**对偶**：把**前向**两段 routed GEMM（L1/L2 的 `m_grouped`）用同一套 ncu 方法
+  量透，并加上前向特有的 **L1 epilogue（in-place SwiGLU + top-k 权重 + UE8M0 量化）**预算。
+  **核心结论**：前向 L1/L2 与反向 **d1g/d2g 是 N↔K 转置对偶**（FLOP 相同、时长/利用率几乎逐格吻合：
+  L1 203.7us/76.5% vs d1g 194.3us/75.7%、L2 111.4us/66.4% vs d2g 111.0us/65.5%），都是**计算受限**；
+  **前向没有 wgrad 那种访存受限瓶颈**（wgrad 收缩维是 token K=512、输出巨大 fp32 权重梯度 AI~120；
+  前向收缩维是隐藏维、输出 bf16 激活 AI 805/651 > 拐点 591）。**H100 实测**（SM90
+  `sm90_fp8_gemm_1d2d`）：ncu L1 203.7us/SM 76.5%/DRAM 345.5+31.6MB/GMMA 1 261 568、L2 111.4us/
+  66.4%；event 稳态 L1 204.1us/1178 TFLOPS、L2 111.1us/1082 TFLOPS；L1 epilogue **24.2us/3129.7 GB/s
+  （≈93% HBM）**、UE8M0 scale 与 fp64 **逐位同**；**前向 step 339.4us**（epilogue 仅 ~7%）、
+  计算 roofline 达 **58%**；**反向 ≈ 前向 5.3×**（差距全在 wgrad，占反向 83%）。融合 kernel
+  UMMA/TMEM/UTCCP、L1 FP8 输出 **SM100 专属 / 仅分析**。索引页新增第 142 篇。
+  上一轮 P131-1：新建 `docs/141-ep-e2e-moe.md`
   （+`harness/exp_ep_e2e_moe.{py,sh,out.txt}`）——把「通信」真正放回 MoE 图：在 **8×H100** 上用真实
   NCCL `all_to_all_single` 实现 expand 版 dispatch/combine，把 `dispatch→L1→SwiGLU→L2→combine`
   与其 autograd 反向逐张量与**单卡稠密参考**对拍。补的空档：第 99 篇（前向）/第 111 篇（反向）
@@ -5586,11 +5633,16 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P130 已完成（最新 **P130-1 DeepEP 的 host 通信上下文 `comm::Context`**：
-  GIN 需求逐字段 + NCCL 运行时版本闸门（厘清本机「阻塞」是**两个独立闸门**：本处不要求相等、
-  真正卡住的是 `deep_ep/__init__.py:19-41` 的 `check_nccl_so` 二进制比对）+ 对称窗口 / RDMA
-  storage 窗口字节布局 + `get_sym_ptr` 偏移翻译 + `finalize()` 拆除逆序；NCCL 设备 API 仅分析，
-  host 算术 H100 真机 **29 PASS / 0 FAIL**；索引页新增第 140 篇）。
+- **下一步**：P0~P132 已完成（最新 **P132-1 Mega MoE 前向 single-step 的 H100 预算归因**：
+  第 15 篇反向 ncu 归因的**对偶**——前向 L1/L2 与反向 d1g/d2g 是 N↔K 转置对偶、都是计算受限
+  （L1 203.7us/76.5% vs d1g 194.3us/75.7%、L2 111.4us/66.4% vs d2g 111.0us/65.5%），前向没有
+  wgrad 的访存受限瓶颈；L1 epilogue 24.2us/3129.7 GB/s、前向 step 339.4us、反向≈前向 5.3×；
+  H100 真机 ncu+event+epilogue 对拍；索引页新增第 142 篇）。
+  可继续（均为增量、非承诺）：
+  把前向 step 的**通信-计算重叠**在 8×H100 上用「真实 grouped GEMM × 限 SM 的 NCCL a2a」量出
+  overlap_factor（第 65/94 篇只量了通用/反向重叠）、或对 P96/P97/P123 的轻微漂移清单关键路径
+  定点复核。DeepEP 端到端仍需 NCCL≥2.32.3（见「阻塞」）。详见上）。
+  上一轮 P130-1：新建 `docs/140-deepep-comm-context.md`
   上一轮 P129-1 MoE 路由负载均衡三件套（aux-loss / router z-loss /
   aux-loss-free bias）及其反向**：补齐训练侧一直缺席的「负载均衡」算子——第 4/127 篇把 `bias` 当常量是对的，
   但「bias 从哪来、怎么更新」与 aux/z loss 的梯度从没写过。三种机制的前向公式 + 梯度 + 与 Mega Gate 的
