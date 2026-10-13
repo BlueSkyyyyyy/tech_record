@@ -3676,7 +3676,35 @@
       **torch autograd**（float64，6 组形状含/不含 bias）全部对齐到 **~2e-16** + 中心差分 `3.5e-9`。
       边界：Mega Gate SM100 专属且只有前向，本篇的「反向」按它的语义推导；数值语义架构无关故可跑，
       主 kernel UMMA/tcgen05/排序网络**仅分析**。配套博客 `content/posts/mega-moe-127-mega-gate-backward`
-      （索引页新增第 127 篇）。
+       （索引页新增第 127 篇）。
+
+### P118 增量（opt-in，补齐 P78/P88 只一句话带过的 profiling 最后一公里）
+
+- [x] **P118-1** **NCU PM-sampling 离线绘图工具 `scripts/quick_plot_pm.py`**（448 行纯 host/Python）：
+      第 78 篇（P78-1）扫官方 profiling 基础设施时只带过它、第 88 篇（P88-1）拆了
+      `run_ncu_mega_moe.sh` 的 NCU 编排，但「把 `.ncu-rep` 变成一眼能读的时间序列图」这最后一公里
+      从没单独读过。它是内核内 `common/probe.cuh`（第 55 篇，per-warp `%clock64` 时间线）
+      **互补的另一套观测**：PM sampling 看整段 kernel 执行期间 SM/L1/L2/DRAM/NVLink 的**实时**
+      利用率起伏——对通信-计算重叠的 Mega MoE 尤为关键。→ `docs/128-quick-plot-pm.md`（真实行号核对）：
+      五个小结构 `:21-74`（`MetricSpec` 的展示名/无后缀基础名/`kind`/`category`/`aliases`、
+      `ResolvedMetricSpec`、`MetricSeries`、`CATEGORY_ORDER`、`KIND_SUFFIXES` 的 9 种后缀候选，
+      `pct` 带两个回退）；45 条 curated 指标 `:77-125`（类别 Overview5/SM12/L1 8/L2 8/DRAM4/互连 8），
+      metric 名三形态（`.TriageCompute.` 中缀全名 / 裸名 / 分组域前缀），`_metric_candidates:156-161`
+      双候选（完整名 + `split(...,1)` 去前缀）**为跨代 chip 而设**；host 管线——
+      `_run_csv_command:126-132` 的「非零且 stdout 空才 None」、`_query_available_metrics:134-153`
+      只留含 `__` 的行、`resolve_metric_specs:164-181` 只查 chip 能力无需报告、
+      `_parse_metric_values:184-198` 无正则拆三格式、`_probe_metric_series:201-224` 三硬约定
+      （固定三行 / 目标列写死 `idx==11` / 取第一条数据行）、`collect_metric_series:227-248`
+      后缀回退 + `len(values)>1` 闸门；`plot_pm:274-417`（`GridSpec` 竖向叠图共享 x 轴、按
+      `CATEGORY_ORDER` 排序分组 + 类别色带、`unit=="%"` 固定 `ylim=(0,100)`、`_format_value` 的
+      T/G/M/K 分档且 0 特判、输出 `.pm_sampling.png`）。H100(sm90) 真机 `harness/exp_quick_plot_pm.{sh,py,out.txt}`：
+      importlib 加载真实脚本、纯 host 架构无关，**73 PASS / 0 FAIL**；`ncu 2026.1.1.0 --chip gh100`
+      查得 **3728** 个 metric，`resolve_metric_specs('gh100')` = **resolved 34 / missing 11**，
+      缺失 11 条逐条确认候选查无（**SM TMEM Pipe Throughput** `sm__mem_tensor_cycles_active_realtime`
+      等）——坐实这份 curated 清单**面向目标卡 realtime 域**、在 H100 上仍可用 34 条；
+      合成 4 序列渲染 55 KB PNG、空输入早退。**漂移**：注释 `:66` 引用的 `scripts/ncu-metrics.txt`
+      在仓库缺失；`idx==11` 依赖 NCU CSV 列布局（改动会静默变 None）。
+      配套博客 `content/posts/mega-moe-128-quick-plot-pm`（索引页新增第 128 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3703,8 +3731,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P117 各增量完成（P15-1…P41-1、P42-1…P117-1）。**
-  本轮 P117-1：新建 `docs/127-mega-gate-backward.md`
+- 当前进度：**P0~P14 全部完成；P15~P118 各增量完成（P15-1…P41-1、P42-1…P118-1）。**
+  本轮 P118-1：新建 `docs/128-quick-plot-pm.md`
+  （+`harness/exp_quick_plot_pm.{sh,py,out.txt}`）——补齐 P78/P88 只一句话带过的 profiling
+  「最后一公里」：`scripts/quick_plot_pm.py`（448 行纯 host/Python）把 `.ncu-rep` 变成按物理域
+  分组的 PM-sampling 时间序列面板，与第 55 篇的内核内 `%clock64` 探针互补（一个 warp 级时间线、
+  一个整卡单元实时利用率）。要点：五结构 + 45 条 curated 指标（三种 metric 名形态、`
+  .TriageCompute.` 双候选跨代适配）、host 管线三约定（`idx==11` / 固定三行 / `len>1` 闸门）、
+  `plot_pm` 的 `CATEGORY_ORDER` 分组与 `%` 固定 `ylim`。H100(sm90) 真机 **73 PASS / 0 FAIL**：
+  `ncu 2026.1.1.0 --chip gh100` 得 3728 metric，`resolve_metric_specs('gh100')` = resolved 34 /
+  missing 11（TMEM 等目标卡专属），合成渲染 55 KB PNG。漂移：注释引用的 `scripts/ncu-metrics.txt`
+  在仓库缺失。索引页新增第 128 篇。
+  上一轮 P117-1：新建 `docs/127-mega-gate-backward.md`
   （+`harness/exp_mega_gate_backward.{sh,py,out.txt}`、`src/mega_gate_backward.cu`）——补齐**第 4 篇只覆盖
   softmax 那一路、第 5 篇只做前向的「路由反向」**：Mega Gate 是 `sqrt(softplus(·))` 打分、**带 bias 排名、
   不带 bias 出权重**，且 DeepGEMM 只有前向。前向三件事（阈值 20 分段、排名/权重不同源、`w_i=g·s_i/(Σs+1e-20)`）；
@@ -5003,15 +5041,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P116 已完成（最新 **P116-1 两库共用的错误 / 断言层 `EPException`/`DGException`**：
-  两个异常类逐行对称、五个差异（单文件 vs 拆两文件、各自 `*_CHECK`、`EP_UNIFIED_ASSERT`=
-  `__CUDA_ARCH__` vs `DG_UNIFIED_ASSERT`=`DG_IN_CUDA_COMPILATION` 的 `.cu` host 段
-  `asm("trap;")` 真实陷阱、无 `py::register_exception`→Python `RuntimeError`、`*_STATIC_ASSERT`
-  重复定义）；纯 host C++、H100(sm90) 真机 **36 PASS / 0 FAIL**；索引页新增第 126 篇。
+- **下一步**：P0~P118 已完成（最新 **P118-1 NCU PM-sampling 离线绘图工具 `scripts/quick_plot_pm.py`**：
+  448 行纯 host/Python，把 `.ncu-rep` 变成按物理域分组的 PM-sampling 时间序列面板；与第 55 篇内核内
+  `%clock64` 探针互补；五结构 + 45 条 curated（三种 metric 名形态、跨代双候选）+ host 管线三约定
+  （`idx==11`/固定三行/`len>1` 闸门）；H100(sm90) 真机 `ncu --chip gh100` **73 PASS / 0 FAIL**，
+  resolved 34 / missing 11；索引页新增第 128 篇。
   可继续（均为增量、非承诺）：
-  `DeepEP/build.sh`+`develop.sh` 之外的 `cmake-build-*` 调试链、`scripts/quick_plot_pm.py`
-  离线绘图（第 88 篇只带过）、P96/P97 的轻微漂移清单关键路径定点复核、或两库 `csrc/utils/`
-  其余小工具（`system.hpp`/`tensor.hpp`/`compatibility.hpp`）的剩余角落。详见上）。
+  `DeepEP/build.sh`+`develop.sh` 之外的 `cmake-build-*` 调试链、P96/P97 的轻微漂移清单关键路径
+  定点复核、或两库 `csrc/utils/` 其余小工具（DeepEP `system.hpp`/`event.hpp`）的剩余角落。详见上）。
+  上一轮 P117-1：P0~P117 已完成（最新 **P117-1 Mega Gate 路由的反向**：`sqrt(softplus)` 打分、
+  带 bias 排名 / 不带 bias 出权重、归一化 Jacobian 与分段导数；H100 真机手写反向 vs torch autograd
+  ~2e-16；索引页新增第 127 篇）。详见上。
   上一轮 P115-1：P0~P115 已完成（最新 **P115-1 DeepGEMM 的 Python 类型桩生成器 `scripts/generate_pyi.py`**：
   890 行纯 stdlib，把 `csrc/**` 里的 62 条 `m.def` + C++ 签名变成 `_C.pyi`；`BracketTracker` 四括号
   语义、类型/默认值映射、三处真实边界（`m.attr` 10 个别名无 stub、`std::variant` 过宽正则、
