@@ -3794,6 +3794,29 @@
       主 kernel SM100 专属、仅分析。配套博客
       `content/posts/mega-moe-131-mhc-backward-fused-account`（索引页新增第 131 篇）。
 
+### P122 增量（opt-in，把 P121 结尾的目标卡接线推演坐实 + per-token 融合 worker 真机化）
+
+- [x] **P122-1** **Mega mHC 反向的目标卡接线 + per-token 融合 worker**（`src/mhc_backward_worker.cu`、
+      `harness/exp_mhc_backward_worker.{py,sh,out.txt}`；源码 `impls/sm100_mega_mhc.cuh`、
+      `epilogue/sm100_mega_mhc.cuh`）。第 131 篇（P121-1）把 mHC 反向拆成六段并留下一个**目标卡级**的
+      接线问题（「三段元素级按前向 per-token worker 对偶融进 epilogue，把 G0 的 TMEM 累加器直喂 K1」）；
+      本篇把它坐实。**前向机器（真实行号）**：残差多流混合 Post worker（`impls:482-508`，bf16 round
+      `:497` 是共享数值边界、`q=ΣA²` 融合 `:501`）、系数投影**一条 TF32 TS UMMA**
+      （`:235-238/273-275`，A 在 TMEM/B=`fn` 在 SMEM）、系数 epilogue（`epilogue:17-101`：split 归约得
+      `hc_rms_scale :43`、仿射+sigmoid `:52-56`、Sinkhorn `:63-86` 的两次 `shfl_xor` 列和 `:71-76`、
+      RMSNorm `run_normal_worker :141`/`:216-220`）。**反向六段 → 目标卡对偶表**：G0 复用前向同一条
+      TF32 TS UMMA、K1 的 Sinkhorn VJP 复用同一 warp 布局逆放、K2 复用 Post worker 反向。**融合边界两条
+      判据**：① 必须跨 token 归约（G1b `dfn` wgrad）→ 落全局；② 必须喂独立 GEMM（`du0`）→ 落全局；
+      其余 `dAbase[T,D]` 与 G1a 的 `dz[T,D]` 可留片上。→ `docs/132-mhc-backward-sm100-wiring.md`。
+      **H100 实测**（融合 worker = 一 block 一 token、K1+G1a+K2 全在片上、不写 `dAbase`/`dz`）：
+      6 组形状（normal/shifted）device(fp32) vs host 单片 double 参考最坏 relerr **5.28e-07**，
+      与六段 **5.92e-07** 同量级、同 worst 张量族；`T=65536 H=64` 元素级 K1+dz+K2 **6000.3 us →
+      5702.8 us**（**~5%**，被串行 Sinkhorn 的 **3813.5 us** 压制）；真实形状 `T=16384 H=7168
+      D=28672` 省掉 **7.516 GB** 中间张量往返（`4·T·D·4`；H100 1 GiB D2D copy 实测 **908.8 GB/s**
+      → 投影 8271 us，共享环境保守下界）。**目标卡单 kernel 接线仅分析**（本机只给 H≤64 微基准；
+      真实 `H=7168` 需前向 Post worker 那种 warp-pair 分段，落到 TMEM/mbarrier）。主 kernel SM100 专属、
+      仅分析。配套博客 `content/posts/mega-moe-132-mhc-backward-sm100-wiring`（索引页新增第 132 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3819,8 +3842,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P121 各增量完成（P15-1…P41-1、P42-1…P121-1）。**
-  本轮 P121-1：新建 `docs/131-mhc-backward-fused-account.md`
+- 当前进度：**P0~P14 全部完成；P15~P122 各增量完成（P15-1…P41-1、P42-1…P122-1）。**
+  本轮 P122-1：新建 `docs/132-mhc-backward-sm100-wiring.md`
+  （+`harness/exp_mhc_backward_worker.{py,sh,out.txt}`、`src/mhc_backward_worker.cu`）——把第 131 篇
+  结尾的目标卡接线推演坐实：前向机器真实行号（Post worker `impls:482-508`、TF32 TS UMMA
+  `:235-238/273-275`、Sinkhorn/RMSNorm `epilogue:17-101`）+ **反向六段 → 目标卡对偶表** + 融合边界两条
+  判据（跨 token 归约/喂 GEMM 落全局）。H100 真机 **per-token 融合 worker**（一 block 一 token，
+  K1+G1a+K2 全在片上、不写 `dAbase`/`dz`）：6 组形状 vs host double 最坏 **5.28e-07**（六段 5.92e-07）、
+  `T=65536 H=64` **6000.3→5702.8 us**（~5%，Sinkhorn-bound）；真实形状省 **7.516 GB** 往返
+  （实测 908.8 GB/s → 8271 us）。目标卡单 kernel 接线仅分析。索引页新增第 132 篇。
+  上一轮 P121-1：新建 `docs/131-mhc-backward-fused-account.md`
   （+`harness/exp_mhc_backward_fused.{py,sh,out.txt}`、`src/mhc_backward_fused.cu`）——把第 130 篇的
   mHC 反向当成**待部署算子流水**做融合/roofline 账：拆成**六段**（K0 重算混合 → G0 `u0=A@fnᵀ` → K1
   系数反向（含 Sinkhorn VJP）→ G1a `dz=du0@fn` / G1b `dfn=du0ᵀ@A` → K2 混合反向），其中 `g` 耦合项
@@ -5155,7 +5186,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P121 已完成（最新 **P121-1 Mega mHC 反向的 H100 融合账**：
+- **下一步**：P0~P122 已完成（最新 **P122-1 Mega mHC 反向的目标卡接线 + per-token 融合 worker**：
+  把第 131 篇结尾那句目标卡接线推演坐实——前向机器真实行号（Post worker / TF32 TS UMMA /
+  Sinkhorn/RMSNorm epilogue）+ 反向六段 → 目标卡对偶表 + 融合边界两条判据；H100 真机融合 worker
+  6 组形状 vs host double 最坏 5.28e-7、`T=65536 H=64` 6000.3→5702.8 us（~5%）、真实形状省 7.516 GB
+  往返；目标卡单 kernel 接线仅分析；索引页新增第 132 篇。
+  可继续（均为增量、非承诺）：
+  第 127/130/131/132 篇已把两条门控反向（Mega Gate、mHC）的数学、算子账与目标卡接线补齐；剩余可选：
+  把融合 worker 在 SM100 上的「真实 H=7168 warp-pair 分段 + TMEM 累加器直喂 K1」写成可核对的
+  mbarrier/TMEM 接线图，或对 P96/P97 的轻微漂移清单关键路径定点复核。另 DeepEP 端到端仍需
+  NCCL≥2.32.3（见「阻塞」）。详见上）。
+  上一轮 P121-1：P0~P121 已完成（最新 **P121-1 Mega mHC 反向的 H100 融合账**：
   把第 130 篇那条反向当成待部署算子流水拆成**六段**（K0/G0/K1/G1a/G1b/K2），量化 roofline：整条反向
   **AI≈6.5**、三段 GEMM **AI≈24** ≪ H100 bf16 拐点 295 → **访存受限**；`T=16384` 访存下界 3648.9 us
   vs GEMM 计算下界 68.4 us（53×）；H100 真机六段 kernel device(fp32) vs double 最坏 8.84e-7、元素级
