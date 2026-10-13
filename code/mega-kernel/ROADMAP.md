@@ -4432,6 +4432,38 @@
   **4×** 行数账、4×32 转置双射）。配套博客 post `mega-kernel-70-mpk-sf-segments`（weight 71）并更新
   `mega-kernel-00-index` 第 70 项。**本轮新增增量。**
 
+### P156 结构稀疏元数据 E 的内容走读（`docs/70-sparse-e-metadata.md`）
+
+- [x] **P156-1** 补掉「下一步候选」第二条残留——`docs/62`（P148-1）§6 与 `docs/63`（P149-1）§7 都明留的
+  「E 的**硬件**编码（2:4 索引位序、每 atom 的 bit 打包）未展开」「哪些元素被丢弃、E 的索引如何映射到
+  A 的偶数/奇数槽未验证」。见 `docs/70-sparse-e-metadata.md`（快照 `mirage-project/mirage` 分支 `mpk`
+  commit `f9eb70c`，与 `docs/06`–`docs/69` 同快照；CUTLASS `deps/cutlass f3fde583`；DeepGEMM 对照
+  `057ca59`；**纯源码走读 + 1 个 host 侧算术探针**——SM90/SM100 张量核本体在目标卡 H100/sm90 不可执行）。
+  三条 headline：
+  - **(A)（headline）E 的内容 = 每 2:4 chunk 一个 4-bit nibble，直接编码「保留哪两个位置」**：编码器
+    `MetadataOneChunk2to4`（`sm90_sparse_gemm_compressor.hpp:255-286`）的码**恰等于被保留元素的逻辑下标**
+    （`case 0..3 → 0b00..0b11`），`bits[0:2]` = 物理槽 0 的来源位置、`bits[2:4]` = 槽 1 的来源位置；host
+    重放全 `C(4,2)=6` 种 2:4 模式得完整真值表（`[a 0 0 d]→0xC`、`[0 b c 0]→0x9`、`[0 b 0 d]→0xD`…）。
+    TF32 是特例：chunk 只有 2 个逻辑元素、保留 1 个，用另一编码器 `MetadataOneChunk1to2`（`:226-252`）给
+    **4-bit** 码（`keep 0→0b0100`、`keep 1→0b1110`，只记不判）。
+  - **(B)（headline）A 压缩是 E 的镜像，2 个一拍紧挨**：`PhysicalElemsAPerChunk = Logical/2`
+    （`sm1xx_sparse_config.inl:109`），`fill_layoutA`（`:236-281`）把 K 轴声明成 `(2, K/2)`（K-major 步长
+    `(1,2)`、MN-major `(1,M*2)`）；host 用 `StructuredSparseCompressorUtility` 对 M=64/K=128 实测
+    **raw=16384 B、compressed=8192 B（0.50×）**、物理 `k=64`、E=2048 B。另记 <32-bit 专属**单非零
+    corner case**（`:428-446`：唯一非零在末格才被规范成 `{0,3}` 并把数据搬到槽 1），重放显示编码器
+    **从不产出 `pos0 >= pos1`**（疑硬件 metadata 合法性约束，只记不判）。
+  - **(C)（headline）gmem 里的 E 是 swizzled CuTe atom、MPK 零引用、DeepGEMM 的「sparse」是另一回事**：
+    `TensorEAtom` 按元素宽度换形（F16 `((8,2,8),(16,2,4))`、TF32 `((8,2,8),(8,2,4))`、F8 `(128,128)`、
+    F4 `(128,256)`，`sm1xx_sparse_config.inl:116-131`），SM90 侧源码直接引 PTX 定义
+    `sparse-wgmma-metadata-64n32-f16bf16`（`sm90_sparse_config.inl:101`）；consumer audit——**MPK 对
+    `Sm1xx/Sm90GemmSparseConfig`、`StructuredSparseCompressor` 零引用**，而 **DeepGEMM 里名为 sparse 的
+    两处（`sm100_sparse_mqa_logits.hpp`/`apis/attention.hpp`）是 block-sparse MQA logits（按 KV block 选择），
+    与 `tcgen05.mma.sp` 的 2:4 结构稀疏无关**——同名陷阱。
+  判据只贡献 **C3**。新实验 `src/sparse_e_metadata.cu` + `harness/sparse_e_metadata.sh` +
+  `harness/sparse_e_metadata.out.txt`（目标卡 H100/sm90a，host 侧算术重放 + grep audit，未 launch kernel）。
+  配套博客 post `mega-kernel-71-mpk-sparse-metadata`（weight 72）并更新 `mega-kernel-00-index` 第 71 项。
+  **本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4850,7 +4882,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P155-1 完成（1/1）**。补掉「下一步候选」第一条残留——把 MPK SM100 block-scaled FP8
+- 当前进度：**P156-1 完成（1/1）**。补掉「下一步候选」第二条残留——`docs/62` §6 与 `docs/63` §7 都明留的
+  「E 的**硬件**编码（2:4 索引位序、每 atom 的 bit 打包）未展开」「哪些元素被丢弃、E 的索引如何映射到 A 的
+  偶数/奇数槽未验证」。见 `docs/70-sparse-e-metadata.md`（快照 `f9eb70c`；CUTLASS `f3fde583`；DeepGEMM
+  `057ca59`；**纯源码走读 + 1 个 host 侧算术探针**，SM90/SM100 张量核本机不可执行）。三条 headline：
+  **(A)（headline）** E 的内容 = 每 2:4 chunk 一个 4-bit nibble，**直接编码「保留哪两个位置」**——`MetadataOneChunk2to4`
+  （`sm90_sparse_gemm_compressor.hpp:255-286`）的码恰等于被保留元素的逻辑下标、`bits[0:2]`=槽 0 来源、
+  `bits[2:4]`=槽 1 来源，host 重放全 6 种 2:4 模式得完整真值表；TF32 用另一编码器 `MetadataOneChunk1to2`
+  给 4-bit 码（只记不判）；**(B)（headline）** A 压缩是 E 的镜像（`PhysicalAPerChunk=Logical/2`、`fill_layoutA`
+  的 K 轴 `(2,K/2)`），host 实测 M=64/K=128 raw=16384 B、compressed=8192 B（**0.50×**）、E=2048 B，另记
+  <32-bit 专属单非零 corner case（`:428-446`，重放显示**从不产出 `pos0>=pos1`**，疑硬件合法性约束只记不判）；
+  **(C)（headline）** gmem 的 E 是 swizzled CuTe atom（F16 `((8,2,8),(16,2,4))` 等），SM90 源码直接引 PTX
+  `sparse-wgmma-metadata-64n32-f16bf16`；consumer audit——**MPK 零引用**、**DeepGEMM 的 sparse 是 block-sparse
+  MQA logits 非 2:4**（同名陷阱）。判据只贡献 C3（`src/sparse_e_metadata.cu` + `harness/sparse_e_metadata.out.txt`）。
+  配套博客 post `mega-kernel-71-mpk-sparse-metadata`（weight 72）并更新 `mega-kernel-00-index` 第 71 项。
+- 下一步候选：可继续走「其余未走读相邻层」的残留——WS 指令落地后的对照（`docs/62` 记 CUTLASS `f3fde583`
+  无 `SM100_MMA_*_WS*`，可核 DeepGEMM 侧 WS 用法），`docs/46` §6 的 FLAT-CACHE draft attention 设计（已核
+  `eagle3_draft_chain_step_attn` 快照零命中、**不可走读**，仅供静态落差记录）。**稀疏 A 的 2:4 物理排布/
+  E→A 槽映射已由 P156-1/`docs/70` 补掉**；**SF 段并置已由 P155-1/`docs/69` 补掉**；`linear_fp8_sm100` 家族
+  支撑层已由 P154-1/`docs/68` 补掉；MLA-MTP TP 三兄弟已由 P153-1/`docs/67` 补掉；SM100 BF16 手工线性/
+  MoE linear 已由 P151-1/`docs/65`、P152-1/`docs/66` 补掉。
+- 此前：**P155-1 完成（1/1）**。补掉「下一步候选」第一条残留——把 MPK SM100 block-scaled FP8
   的 **SF（scale factor）段**在两条 device 身体上**并置逐行对走**（`docs/33`/`docs/34`/`docs/59`/
   `docs/60`/`docs/68` 各覆盖一部分、从未并置）。见 `docs/69-mpk-sf-segments.md`（快照 `f9eb70c`；
   CUTLASS `f3fde583`；DeepGEMM `057ca59`；**纯源码走读 + 1 个 host 侧算术探针**，SM100 本机不可

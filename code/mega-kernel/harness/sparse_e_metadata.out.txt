@@ -1,0 +1,81 @@
+$ CUDA_VISIBLE_DEVICES=3 /tmp/sparse_e_metadata
+CUTLASS structured-sparse E metadata probe (host-side, no SM90/SM100 tensor core)
+completes docs/62 (E trait shape) and docs/63 (A operand type/layout)
+
+=== (i) SM100 Sm1xxGemmSparseConfig: chunk sizes and E bit budget ===
+  dtype    IsK | LogicalAPerChunk | PhysicalAPerChunk | EBits/chunk | EBits/Aelem | EAtomM | EAtomK | EAlignK
+  F16        1 |                4 |                 2 |           4 |          2 |    128 |    128 |     128
+  BF16       1 |                4 |                 2 |           4 |          2 |    128 |    128 |     128
+  TF32       1 |                2 |                 1 |           4 |          4 |    128 |     64 |      64
+  F8         1 |                4 |                 2 |           4 |          2 |    128 |    128 |     128
+  I8         1 |                4 |                 2 |           4 |          2 |    128 |    128 |     128
+  F4         1 |                8 |                 4 |           4 |          2 |    128 |    256 |     256
+  note: LogicalAPerChunk = logical A elems per 2:4 chunk (F4=8 nibbles, TF32=2, else 4);
+        PhysicalAPerChunk = Logical/2; EBits/Aelem = 2 (4-bit pos code per kept elem)
+        except TF32 = 4 (a 4-bit code per chunk of 2 logical elems -- see (v)).
+
+=== (ii) SM90 Sm90GemmSparseConfig: constants + gmem E atom ===
+  16bit  lAPerChunk=4 pAPerChunk=2 EBits/chunk=4 EBits/elem=2 BlockK=32 NumK=4 EAtomM=64 EAtomK=128
+          EAtom = ((_8,_2,_4),(_16,_2,_4)):((_128,_16,_2048),(_1,_1024,_32))
+  32bit  lAPerChunk=2 pAPerChunk=1 EBits/chunk=4 EBits/elem=4 BlockK=16 NumK=8 EAtomM=64 EAtomK=128
+          EAtom = ((_8,_2,_4),(_8,_2,_8)):((_128,_8,_2048),(_1,_1024,_16))
+  8bit   lAPerChunk=4 pAPerChunk=2 EBits/chunk=4 EBits/elem=2 BlockK=64 NumK=2 EAtomM=64 EAtomK=128
+          EAtom = (_64,_128):(_128,_1)
+  source cites the PTX def:
+    docs.nvidia.com/cuda/parallel-thread-execution/...#sparse-wgmma-metadata-64n32-f16bf16
+
+=== (iii) SM100 gmem E layout atom (TensorEAtom), in units of E logical elems ===
+  F16    EAtom = ((_8,_2,_8),(_16,_2,_4)):((_128,_16,_2048),(_1,_1024,_32))
+         cosize(EAtom)=16384 (E elems) ; raw E elem = 8 bits
+  TF32   EAtom = ((_8,_2,_8),(_8,_2,_4)):((_64,_8,_1024),(_1,_512,_16))
+         cosize(EAtom)=8192 (E elems) ; raw E elem = 8 bits
+  F8     EAtom = (_128,_128):(_128,_1)
+         cosize(EAtom)=16384 (E elems) ; raw E elem = 8 bits
+  F4     EAtom = (_128,_256):(_256,_1)
+         cosize(EAtom)=32768 (E elems) ; raw E elem = 8 bits
+
+=== (iv) deduce_layoutA / deduce_layoutE (SM100), concretized with M=64,N=1,K=128,L=1 ===
+  F16 K-major  layoutA = (64,(_2,64),1):(128,(_1,_2),0)
+  F16 K-major  layoutE = (((_8,_2,_8),1),((_16,_2,_4),1),1):(((_128,_16,_2048),_16384),((_1,_1024,_32),16384),0)
+  F16 MN-major layoutA = (64,(_2,64),1):(_2,(_1,128),0)
+      (K axis = (2, K/2): physical pair-of-kept-slots x chunk index; A is half as wide)
+
+=== (ivb) byte accounting (StructuredSparseCompressorUtility, M=64 N=1 K=128 L=1) ===
+  A logical: M=64 K=128 ; physical: m=64 k=64
+  A bytes: raw=16384  compressed=8192  (ratio 0.50)
+  E bytes=2048  (metadata M=128 K=16)
+
+=== (v) E encoder replay: SM90StructuredSparseCompressor (2:4 -> one nibble) ===
+  MetadataOneChunk2to4: code(elt_log_idx) = elt_log_idx (2 bits), packed [pos1:pos0]
+  dense chunk [a b c d]   kept(logical pos)   char  nibble  (binary)
+  [10 20  0  0]  {0,1}         ab  0x4  0b0100
+  [10  0 30  0]  {0,2}         ac  0x8  0b1000
+  [10  0  0 40]  {0,3}         ad  0xC  0b1100
+  [ 0 20 30  0]  {1,2}         bc  0x9  0b1001
+  [ 0 20  0 40]  {1,3}         bd  0xD  0b1101
+  [ 0  0 30 40]  {2,3}         cd  0xE  0b1110
+  single-nonzero corner cases (sizeof<32):
+  only a at pos 0: [10  0  0  0] -> recorded pos {0,3}  nibble 0xC
+  only b at pos 1: [ 0 10  0  0] -> recorded pos {1,3}  nibble 0xD
+  only c at pos 2: [ 0  0 10  0] -> recorded pos {2,3}  nibble 0xE
+  only d at pos 3: [ 0  0  0 10] -> recorded pos {0,3}  nibble 0xC
+  MetadataOneChunk1to2 (TF32: chunk = 2 logical elems, 1 physical, 4-bit code):
+  chunk [x 0] -> keep logical 0 -> code 0b0100 (0x4)
+  chunk [0 x] -> keep logical 1 -> code 0b1110 (0xE)
+     (4-bit code; its exact hardware meaning is not derivable from source -- only-noted;
+      TF32 is 32-bit so the single-nonzero corner case above does not apply to it.)
+
+=== (vi) worked row: dense A row (2:4) -> compressed A order + E nibble ===
+  dense A row (K=8) = [7 0 0 9 | 0 5 0 0]
+    chunk 0: [7 0 0 9] -> compressed slots [x x]  E nibble 0xC  (pos {0,3})
+    chunk 1: [0 5 0 0] -> compressed slots [x 0]  E nibble 0xD  (pos {1,3})
+  => physical A is half as wide; E holds one 4-bit nibble per chunk.
+
+=== consumer audit (grep, CUTLASS /ssd/mirage_mpk_build/deps/cutlass) ===
+SM100 SparseConfig (Sm1xxGemmSparseConfig) defs   : 1
+SM90  SparseConfig (Sm90GemmSparseConfig) defs    : 1
+E encoder structs (MetadataOneChunk*to*)         : 2
+StructuredSparseCompressor selector arms          : 3
+MPK (f9eb70c) refs Sm1xx/Sm90GemmSparseConfig    : 0
+DeepGEMM (057ca59) refs GemmSparseConfig/compressor: 0
+DeepGEMM "sparse" files (block-sparse, NOT 2:4)  : 2
