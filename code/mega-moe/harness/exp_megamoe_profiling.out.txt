@@ -1,0 +1,147 @@
+== 真实源码 sha256 / 规模 ==
+ac0e10ccc20f34fe916bad1bc6dc75dc8f31e09d9af4ff9c9203c5bc46b00934  scripts/run_ncu_mega_moe.sh
+f67be05a2b303ac77480f32c175cff319367aa6088509e7cb0e7bfe10e281806  scripts/quick_plot_pm.py
+f0d0e7e9da88cf28b5808e60b024ff4bec3c42acf1099d23d3bb9e35b13c695c  scripts/generate_pyi.py
+57a06883344d96b518c87bd61f4f5769248e5370512361dd96c28149c7f06b45  stubs/_C.pyi
+66d358a51832b73e3aae4a5476d06b316b58129f9bfec71564a1c30b49ba69ba  csrc/indexing/main.cu
+   89 ~/github/DeepGEMM/scripts/run_ncu_mega_moe.sh
+  448 ~/github/DeepGEMM/scripts/quick_plot_pm.py
+  890 ~/github/DeepGEMM/scripts/generate_pyi.py
+  467 ~/github/DeepGEMM/tests/test_mega_moe.py
+  612 ~/github/DeepGEMM/stubs/_C.pyi
+   36 ~/github/DeepGEMM/csrc/indexing/main.cu
+ 2542 total
+NVIDIA H100 80GB HBM3, 9.0
+
+== E1: run_ncu_mega_moe.sh 的 ncu 命令行构造（桩 ncu/python 捕获真实 argv）==
+--- 捕获到的 python 调用（第一行应为 JIT 预热）---
+python tests/test_mega_moe.py --ncu-profile-only --num-processes 3 --foo bar 
+--- 捕获到的 ncu 调用（每 rank 一条）---
+ncu[ncu.8vRaLn]: --config-file off --force-overwrite --kernel-name sm100_fp8_fp4_mega_moe_impl --import-source yes --replay-mode application --section PmSampling --section SourceCounters --rule LocalMemoryUsage --launch-skip 0 --launch-count 1 --lockstep-kernel-launch --communicator tcp --clock-control none --pm-sampling-interval 1000 --pm-sampling-max-passes 1 --disable-pm-warp-sampling --communicator-tcp-num-peers 3 --kill yes --app-replay-buffer memory -o /tmp/megamoe_prof/work/mega-moe.1 python tests/test_mega_moe.py --local-rank-idx=1 --ncu-profile-only --num-processes 3 --foo bar 
+ncu[ncu.KxvVLL]: --config-file off --force-overwrite --kernel-name sm100_fp8_fp4_mega_moe_impl --import-source yes --replay-mode application --section PmSampling --section SourceCounters --rule LocalMemoryUsage --launch-skip 0 --launch-count 1 --lockstep-kernel-launch --communicator tcp --clock-control none --pm-sampling-interval 1000 --pm-sampling-max-passes 1 --disable-pm-warp-sampling --communicator-tcp-num-peers 3 --kill yes --app-replay-buffer memory -o /tmp/megamoe_prof/work/mega-moe.0 python tests/test_mega_moe.py --local-rank-idx=0 --ncu-profile-only --num-processes 3 --foo bar 
+ncu[ncu.qCNnxd]: --config-file off --force-overwrite --kernel-name sm100_fp8_fp4_mega_moe_impl --import-source yes --replay-mode application --section PmSampling --section SourceCounters --rule LocalMemoryUsage --launch-skip 0 --launch-count 1 --lockstep-kernel-launch --communicator tcp --clock-control none --pm-sampling-interval 1000 --pm-sampling-max-passes 1 --disable-pm-warp-sampling --communicator-tcp-num-peers 3 --kill yes --app-replay-buffer memory -o /tmp/megamoe_prof/work/mega-moe.2 python tests/test_mega_moe.py --local-rank-idx=2 --ncu-profile-only --num-processes 3 --foo bar 
+--- 输出目录 ---
+total 8
+drwxr-xr-x 2 root root 4096 Oct 13 05:14 .
+drwxr-xr-x 5 root root 4096 Oct 13 05:14 ..
+--- run_ncu stdout ---
+Python Args: --num-processes 3 --foo bar
+Num Processes: 3
+Output Dir: /tmp/megamoe_prof/work
+Warm up JIT cache
+Run Job
+Waiting
+Done
+
+== E2 准备：真实 ncu --import --page raw --csv ==
+raw_present.csv 第 3 行（真实取址来源）：
+"0","2489310","tiny","127.0.0.1","busy(float *)","1","7","(32, 1, 1)","(1, 1, 1)","0","9.0","32 (32)"
+raw_present.csv 列数: 12
+raw_all.csv   列数: 266
+
+== E2/E3/E4：Python 判定（真实 parse / 真实 test 代码抽取 / 真实 pyi 生成）==
+P78-1 Mega MoE profiling infrastructure experiment (H100/sm90)
+repo: ~/github/DeepGEMM  gen_dir: /tmp/megamoe_prof
+
+=== E2: scripts/quick_plot_pm.py 解析/归约/画图 ===
+[PASS] E2a 单 metric raw CSV 恰好 12 列  -- ncols=[12, 12, 12]
+[PASS] E2a header[11]==metric 名  -- sm__maximum_warps_avg_per_active_cycle
+[PASS] E2a unit[11] 非空  -- unit='warp'
+[PASS] E2a _probe_metric_series 复刻真实取址  -- ('sm__maximum_warps_avg_per_active_cycle', 'warp', (32.0,))
+[PASS] E2b 全量 raw 列数 = 11 + 采集到的 metric 数  -- ncols=266
+[PASS] E2b 缺列（<=11 列）时 _probe_metric_series 返回 None
+[PASS] E2c 单个值 "32 (32)" -> (32.0,)
+[PASS] E2c 聚合+序列 "1.5 (1,000 ; 2,000 ; 3,000)"
+[PASS] E2c 纯括号 "(10;20;30)"
+[PASS] E2c "no data" -> ()
+[PASS] E2c 空串 -> ()
+[PASS] E2c 非数值 -> ()
+[PASS] E2d _metric_candidates 生成 [原名, 去前缀名]  -- ['LTS.TriageCompute.lts__throughput', 'lts__throughput']
+[PASS] E2e curated 指标数 = 45  -- n=45
+[PASS] E2e 六个分类齐全  -- {'Overview': 5, 'SM': 12, 'L1': 8, 'L2': 8, 'DRAM': 4, 'Interconnect': 8}
+[PASS] E2e 所有 kind 都在 KIND_SUFFIXES 中
+[PASS] E2e C2C 别名回退到 ctx__throughput  -- [ResolvedMetricSpec(name='C2C Throughput', metric='TriageCompute.ctx__throughput', kind='pct_peak', category='Interconnect')]
+[PASS] E2e 其余大量指标缺失被正确分类  -- resolved=3 missing=42
+[PASS] E2f 单值序列被跳过（要求 len(values)>1）
+[PASS] E2f 多值序列被收下
+[PASS] E2g _format_value 1.5e12 -> "1.50 T"
+[PASS] E2g _format_value 0 -> "0"
+Saved: /tmp/megamoe_prof/plot/fake.pm_sampling.png
+[PASS] E2h plot_pm 生成非空 PNG  -- fake.pm_sampling.png 47447B
+
+=== E3: tests/test_mega_moe.py 的性能账目公式（真实抽取执行）===
+[PASS] E3 抽到性能账目代码块  -- 2287 字符
+[PASS] E3 num_routed_flops 公式
+[PASS] E3 num_shared_flops 公式
+[PASS] E3 num_total_flops = routed+shared
+[PASS] E3 routed L1 权重字节（fp4=0.5B）  -- 6.744e+09
+[PASS] E3 num_nvlink_bytes = recv*hidden*3
+[PASS] E3 t_reduction 公式  -- 126.47 us
+[PASS] E3 bf16 路径 HBM 更大（权重 2B vs fp4 0.5B）  -- bf16=2.663e+10 vs fp4=6.744e+09
+[PASS] E3 safe_div(0,0)=nan
+
+=== E4: scripts/generate_pyi.py 与 stubs/_C.pyi（自动生成的 API 面）===
+[PASS] E4a 已提交 _C.pyi 有 62 个 def  -- n=62
+[PASS] E4b 其中 14 个是 lambda/未解析 -> *args,**kwargs 回退  -- fallback=14 / resolved=48
+Warning: Unrecognized C++ type: const at::ScalarType
+Warning: Unrecognized C++ type: const at::ScalarType
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+.pyi file generated: /tmp/megamoe_prof/pyi/_C.pyi
+[PASS] E4c 本环境复现的 .pyi 与已提交版本逐字节相等  -- diff_lines=0
+[PASS] E4d 只看 csrc/utils 时抓到真定义  -- 'static int get_tma_aligned_size(const int& x, const int& element_size)'
+[PASS] E4d 只看 csrc/jit_kernels 时抓到调用点  -- 'make_tma_2d_desc(sf_kv,\n                                    '
+[PASS] E4d 同一函数名在两个子树下解析完全不同 -> 索引依赖目录布局
+      (本环境全 csrc 索引抓到的是: 真定义)
+Warning: Unrecognized C++ type: const at::ScalarType
+Warning: Unrecognized C++ type: const at::ScalarType
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+Warning: Unrecognized C++ type: const std::shared_ptr<EpilogueClass>
+.pyi file generated: /tmp/megamoe_prof/pyi/_C.pyi
+[PASS] E4d 用「调用点索引」强制生成 -> 恰好 get_tma_aligned_size 退化成 *args  -- diff_lines=8 changed={'get_tma_aligned_size'}
+[PASS] E4d 结论：stubs/_C.pyi 不可复现——同一脚本在不同目录遍历顺序下产出不同  -- 本环境=全 csrc 索引碰巧命中真定义，host 上则命中调用点
+[PASS] E4e 源码 m.def 总数 = 62  -- 62
+[PASS] E4e 源码 m.attr 别名赋值 = 10（pyi 完全不含 attr）  -- attr=10
+[PASS] E4e pyi 覆盖面 = 62 个 m.def（不含 10 别名）
+[PASS] E4f indexing TU include 了 17 个 impl（一共 19 个 impl 文件）  -- n=17 on_disk=19
+[PASS] E4f indexing TU 漏了 2 个较晚加入的 impl（mhc / sparse_mqa_logits）  -- missing={'sm100_mega_mhc.cuh', 'sm100_sparse_mqa_logits.cuh'}
+[PASS] E4f CMake 把 indexing TU 编成静态库（仅供 IDE 索引）
+[PASS] E4f CMake 注释声明「真正的编译走 JIT」
+
+=== SUMMARY: 47/47 PASS ===

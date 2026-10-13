@@ -2421,8 +2421,42 @@
       两信号槽每 4 次精确归零；**真实 8 卡** UVA peer 对称缓冲 × 30 轮 **mismatch=0**（`st_rel_sys`
       写、barrier 后 `ld_acq_sys` 读全部 8 peer）；cluster relaxed **1/1**（记录，非保证）。
       另记录一个坑：`grid_sync` 是同步点不是读保护，首版每轮复用同槽产生误报、改每轮独立槽后归零。
-      总判定 **ALL PASS**。配套博客 `content/posts/mega-moe-87-mega-moe-sync-primitives`
-      （索引页新增第 87 篇）。
+       总判定 **ALL PASS**。配套博客 `content/posts/mega-moe-87-mega-moe-sync-primitives`
+       （索引页新增第 87 篇）。
+
+### P78 增量（opt-in，补齐 Mega MoE 一直缺席的「官方 profiling 基础设施」）
+
+- [x] **P78-1** **DeepGEMM 自带的 Mega MoE profiling 基础设施 + 自动生成的「覆盖面清单」**
+       （`scripts/run_ncu_mega_moe.sh` / `tests/test_mega_moe.py` 的 profile 模式 /
+       `scripts/quick_plot_pm.py` / `scripts/generate_pyi.py` + `stubs/_C.pyi` /
+       `csrc/indexing/main.cu` + `CMakeLists.txt`）。第 3/9/10/11 篇拆了主 kernel 内部、
+       第 15 篇用 `ncu` 量了反向 SM90 的**平均** metric、第 41 篇讲 `test_mega_moe.py` 的**正确性**、
+       第 84 篇人工枚举 Python API 面；本篇补**官方的性能验证与工具链面**。**目标 kernel SM100+DeepEP
+       端到端仅分析**；但外壳全部 H100(sm90) 真机验证。
+       → `docs/88-deepgemm-profiling-infra.md`（真实行号核对）：`run_ncu_mega_moe.sh`（`:8-46` 自写参数
+       解析、`:48` `DG_JIT_WITH_LINEINFO=1`、`:50-53` 预热+sleep、`:55-74` ncu 参数每条为什么
+       （`--kernel-name sm100_fp8_fp4_mega_moe_impl`、`--section PmSampling`+`SourceCounters`、
+       `--replay-mode application`+`--communicator tcp`+`--communicator-tcp-num-peers` 三件套、
+       `--clock-control none`、`--disable-pm-warp-sampling`）、`:79-88` 每 rank 一个 ncu 并行 + wait；
+       `test_mega_moe.py` 的 `--ncu-profile-only`（`:233-241`）/`--local-rank-idx`（`:461-463`，NCU
+       不能 wrap `mp.spawn`）/`--dump-profile-traces`（`:362-363` `bench_kineto` trace）+ 性能账目
+       （`:370-410`：FLOP×3、HBM 按 `num_touched_experts`、NVLink `recv·H·3`、`t_reduction` 串行归约
+       近似与 `approx_factor`）；`quick_plot_pm.py` 45 条 curated 指标 6 类（`:77-123`）、
+       `_query_available_metrics` chip 查询+去 TriageCompute 前缀+别名回退（`:134-181`）、
+       `_probe_metric_series` 从 raw CSV **第 11 列**取实例序列（`:201-224`，`len<=11` 缺列返回 None）、
+       `_parse_metric_values` 三形态（`:184-198`）、`collect_metric_series` 只收 `len>1`（`:227-248`）、
+       `plot_pm`（`:274-417`）。配套：`generate_pyi.py`（`:5-94` 正则 C++ 函数索引、`:151-343`
+       `m.def` 抽取+BracketTracker、`:608-826` 类型翻译）→ `stubs/_C.pyi`（62 def = 48 真签名
+       + 14 lambda 回退；**不含 10 个 `m.attr` 别名**，故 62≠运行时 76 名）；`csrc/indexing/main.cu`
+       + CMake（IDE 索引单 TU，「真正编译走 JIT」），漏 `sm100_mega_mhc.cuh`/`sm100_sparse_mqa_logits.cuh`
+       （17/19）。**发现不可复现 bug**：`build_cpp_function_index` 用 `rglob`、同名只留首次命中，
+       `get_tma_aligned_size`（真定义 `csrc/utils/math.hpp:23`）在 `csrc/jit_kernels/impls/sm100_mqa_logits.hpp:240`
+       的调用点会被误抓 → 遍历顺序不同则 pyi 不同；强制构造确定性复现「唯一退化函数」。
+       H100 实测 `harness/exp_megamoe_profiling.{sh,py,out.txt}`：桩 `ncu`/`python` 拦截真实脚本捕获
+       argv（num-peers=3、-o 按 rank、预热无 NCU）；真实 `.ncu-rep` 跑 `--page raw --csv`
+       （12/266 列）验证取址；真实 `test_mega_moe.py` 公式抽取执行 9 项；真实 `generate_pyi.py`
+       逐字节复现 + 强制退化复现；**47/47 PASS**。配套博客
+       `content/posts/mega-moe-88-deepgemm-profiling-infra`（索引页新增第 88 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2448,8 +2482,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P77 各增量完成（P15-1…P41-1、P42-1…P77-1）。**
-  本轮 P77-1：新建 `docs/87-mega-moe-sync-primitives.md`
+- 当前进度：**P0~P14 全部完成；P15~P78 各增量完成（P15-1…P41-1、P42-1…P78-1）。**
+  本轮 P78-1：新建 `docs/88-deepgemm-profiling-infra.md`
+  （+`harness/exp_megamoe_profiling.{sh,py,out.txt}`）——补上 Mega MoE 一直缺席的**官方 profiling 基础设施**：
+  `run_ncu_mega_moe.sh`（多进程 NCU 驱动：参数解析 / `DG_JIT_WITH_LINEINFO` / JIT 预热 / PmSampling+
+  SourceCounters / 每 rank 一个 ncu 并行）、`test_mega_moe.py` 的 `--ncu-profile-only`/`--local-rank-idx`/
+  `--dump-profile-traces` 与性能账目公式、`quick_plot_pm.py`（raw CSV 第 11 列取 PM 采样时间序列）。
+  另补两份自动生成的「覆盖面清单」：`generate_pyi.py`→`stubs/_C.pyi`（62 def，漏 10 个 `m.attr`）、
+  `csrc/indexing/main.cu`+CMake（17/19 impl，漏 mhc/sparse）。**发现一处不可复现工具 bug**：
+  `build_cpp_function_index` 的 `rglob` 遍历顺序决定 `get_tma_aligned_size` 命中定义还是调用点 → pyi 不可复现。
+  **目标 kernel SM100+DeepEP 端到端仅分析**，但外壳全部 H100(sm90) 真机验证，**47/47 PASS**。索引页新增第 88 篇。
+  上一轮 P77-1：新建 `docs/87-mega-moe-sync-primitives.md`
   （+`src/comm_barrier.cu`、`harness/exp_comm_barrier.{sh,out.txt}`）——补上 Mega MoE 一直缺席的
   **「跨 SM / 跨 rank 同步地基」`comm/barrier.cuh`**：第 11 篇只列了原语表两行、第 38 篇只当内存序调用点
   并注明「仅源码解读」。四原语 `wait_until`（60s@2GHz 超时自旋）/ `cluster_sync_with_relaxed_arrive`
@@ -3345,7 +3388,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P77 已完成（最新 **P77-1 跨 SM / 跨 rank 同步原语 `comm/barrier.cuh`**：
+- **下一步**：P0~P78 已完成（最新 **P78-1 官方 profiling 基础设施 + 自动生成的覆盖面清单**：
+  `scripts/run_ncu_mega_moe.sh` / `tests/test_mega_moe.py` 的 `--ncu-profile-only`/`--local-rank-idx` /
+  `scripts/quick_plot_pm.py` / `scripts/generate_pyi.py`+`stubs/_C.pyi` / `csrc/indexing/main.cu`+CMake——
+  多进程 NCU 编排、PM-sampling 时间序列解析（raw CSV 第 11 列）、62-def 类型桩（漏 10 个 `m.attr`）
+  与 IDE 索引单 TU（17/19 impl）；**发现 pyi 生成器不可复现 bug**（`rglob` 顺序决定抓定义还是调用点）；
+  目标 kernel SM100+DeepEP 仅分析，外壳 H100 真机 **47/47 PASS**；详见上）。
+  上一轮 P77-1：**跨 SM / 跨 rank 同步原语 `comm/barrier.cuh`**：
   `deep_gemm/include/deep_gemm/comm/barrier.cuh` + `layout/sym_buffer.cuh`——`grid_sync` 的
   「和恰好 2³¹、只翻最高位、免复位」与 `nvlink_barrier` 的 `counter&3`→(phase,sign) 状态机
   (+N 加满 / −1 清回 0)、`wait_until` 超时自旋、`cluster_sync_with_relaxed_arrive`、`SymBuffer`
