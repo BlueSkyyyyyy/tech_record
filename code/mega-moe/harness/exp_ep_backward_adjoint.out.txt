@@ -1,0 +1,33 @@
+MoE dispatch/combine 的反向（伴随）语义与路由权重梯度 —— H100 真机
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 nccl (2, 29, 7)
+DeepEP 源码：93eb6eb
+
+torch 2.12.0a0+0291f960b6.nv26.04.48445190  world=8
+MoE dispatch/combine 的反向（伴随）语义与路由权重梯度 —— H100 真机
+================================================================================================
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+### Part 0：真实源码加载（sha256）
+  refs.py sha256=c5f551b49e55b448…  dispatch:10-123 / combine:177-243 / ordered_accumulate:156-174
+  math.py sha256=ed0dfb4bf9893769…
+  RefEP@93eb6eb  README.md:158-289（训练/推理示例）+ ep.py:562-843（dispatch/combine 签名）
+
+### Part A：单进程纯张量（R=3, T=8, H=6, E=12, K=3）
+  接收行总数 = 16（非 expand：每 token 每「有本地专家的目的 rank」一行）
+  [PASS] A1 <D(x),g> == <x,Dᵀ(g)>   LHS=0.765600 RHS=0.765601
+  [PASS] A2 <G(w),gw> == <w,Gᵀ(gw)> LHS=-0.466352 RHS=-0.466353
+  [PASS] A3 <C(y),v> == <y,D(v)>   LHS=-5.027745 RHS=-5.027744
+  [PASS] A4 plain-sum combine == 真实 refs.combine（单 rank 全专家）
+  [PASS] A5a ∂L/∂y[t,k,h] == w[t,k]·g[t,h]（autograd 对拍）
+  [PASS] A5b ∂L/∂w[t,k] == <y[t,k], g[t]>（autograd 对拍）
+  [PASS] A6 dispatch_backward == combine（grad_x=Dᵀ(grad_recv_x) / grad_w=Dᵀ(grad_recv_w)）形状 (8, 6) (8, 3)
+
+### Part B：8×H100 真机 NCCL（真实 refs.dispatch，T=128, H=64, E=32, K=4）
+  本 rank 收到 437 行（各来源 rank 合计）
+  [PASS] B1 跨 rank <D(x),g> == <x,Dᵀ(g)>  LHS=100.3833 RHS=100.3833
+  [PASS] B2 跨 rank <G(w),gw> == <w,Gᵀ(gw)>  LHS=-18.4716 RHS=-18.4716
+  [PASS] B3 非 expand 按目的 rank 复制：Σ recv_w == degree·w （平均 degree=3.328）
+
+### 总判定：Part A PASS · Part B PASS · ALL PASS
+NCCL version 2.29.7+cuda13.2

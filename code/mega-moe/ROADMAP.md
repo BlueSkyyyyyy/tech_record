@@ -2632,7 +2632,43 @@
       1-ulp、容差放行）、perf 规范 6/6、真实 `measure` 1/1。**环境发现**：DeepEP@93eb6eb 用的
       `reduce_scatter_single`/`all_gather_single` 在本机 torch 2.12.0a0 不存在，用 `*_tensor` 兼容别名
       驱动（继第 86 篇 NCCL 版本后又一条「测试所需环境」）。配套博客
-      `content/posts/mega-moe-94-deepep-bucket-mixed-test-oracle`（索引页新增第 94 篇）。
+       `content/posts/mega-moe-94-deepep-bucket-mixed-test-oracle`（索引页新增第 94 篇）。
+
+### P85 增量（opt-in，补齐 EP 通信的反向侧：dispatch / combine 的伴随语义与路由权重梯度）
+
+- [x] **P85-1** **MoE dispatch / combine 的反向（伴随）语义与路由权重梯度**
+      （`README.md:158-289` 训练/推理四个 helper；`deep_ep/buffers/ep.py:562-757/770-843`；
+      `deep_ep/utils/refs.py:10-123/156-174/177-243`；`tests/ep/test_ep.py:514`；
+      `impls/ep/combine_utils.cuh:58-119`、`impls/ep/combine_reduce_epilogue.cuh:22-139`）。
+      第 4 篇推了 MoE 反向的**数学**、第 12/13/14 篇拆了反向 grouped GEMM、第 43 篇拆了 EPLB
+      权重预取/梯度归约、第 7/51/58/61/71 篇拆了 dispatch/combine 设备 kernel，但把前向通信接回反向
+      的那层——「dispatch 的反向是 combine、combine 的反向是 dispatch 为什么成立、`w` 的梯度怎么走」
+      ——一直只在第 7 篇 §8 与 README 里一句话带过。**纯线性代数 + host/Python 语义，与 SM100/NCCL
+      设备 API 无关；端到端 `EPBuffer` 反向 helper 依赖 NCCL ≥2.31 → 仅分析**。→
+      `docs/95-ep-backward-adjoint.md`（真实行号核对）：把 dispatch 看成**复制/置换**算子
+      `D:ℝ^{T×H}→ℝ^{N×H}`、combine 的 token 求和看成 `Dᵀ`，**两原语互为转置** → 三行「反向用什么
+      原语」表：`grad_x=Dᵀ(grad_recv_x)`（combine 求和）、`grad_w=Dᵀ(grad_recv_w)`（combine 权重
+      reduce）、`grad_y=Cᵀ(grad_combined_x)`（dispatch 复制）；逐字对上 `README.md:204-220`
+      （`dispatch_backward` 调 `combine(grad_recv_x, topk_weights=grad_recv_w)`）与 `:242-258`
+      （`combine_backward` 调 `dispatch(..., do_expand=True, do_zero_padding=True)`）。**精确定义**：
+      `refs.dispatch:67` 非 expand 按**目的 rank**复制（一个 token 对一个目的 rank 一行、带**整行** `w`
+      `:75`）、`:85-90` 按源全局索引升序、`:50-53/:112-117` 契约；`refs.combine:177-243` 是分组**求和**
+      （`combine_reduce:58-119` 设备侧同语义），README `:279` 明说权重乘法在 combine **之前**由专家
+      计算融合。**一个只在复制语义下成立的巧妙设计**：按目的 rank 复制使一个 token 的 `w` 被复制 `d`
+      份，朴素求和得 `d·w`，故 `combined_topk_weights` 必须**选择而非求和**（
+      `combine_reduce_epilogue.cuh:128-139` 的 `master_lane_idx`+`get_topk_weights_ptr`），才能满足
+      `test_ep.py:514` 的 `== topk_weights`。**训练图路由权重梯度**：`z=Σ_k w·y` →
+      `∂L/∂y=w·g`（复制=dispatch）、`∂L/∂w=<y,g>`（沿 k 归约=combine 的权重 reduce）；`EPHandle`
+      （`ep.py:103-111/613-615`、README `:281`）存路由账本，反向只换数据。**H100 真机 ALL PASS**
+      （`harness/exp_ep_backward_adjoint.{sh,py,out.txt}`，refs.py sha256 `c5f551b4…`）：Part A 单进程
+      纯张量四条恒等式 `<D(x),g>==<x,Dᵀ(g)>`（0.765600/0.765601）、`<G(w),gw>==<w,Gᵀ(gw)>`
+      （−0.466352/−0.466353）、`<C(y),v>==<y,D(v)>`（−5.027745/−5.027744）、朴素求和 combine == 真实
+      `refs.combine`（逐位）、权重梯度对拍 autograd（fp64 ≤1e-12）、`dispatch_backward==combine`；
+      Part B **8×H100 真机 NCCL 用真实 `refs.dispatch`**（`all_to_all_single`）跨 rank 验伴随
+      `<D(x),g>==<x,Dᵀ(g)>`（100.3833/100.3833）、`<G(w),gw>==<w,Gᵀ(gw)>`（−18.4716/−18.4716）、
+      复制语义 `Σrecv_w==degree·w`（平均 degree 3.328）。配套博客
+      `content/posts/mega-moe-95-ep-backward-adjoint`（索引页新增第 95 篇）。
+
 
 ## 每轮增量流程（autopilot）
 
@@ -2659,8 +2695,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P84 各增量完成（P15-1…P41-1、P42-1…P84-1）。**
-  本轮 P84-1：新建 `docs/94-deepep-bucket-mixed-test-oracle.md`
+- 当前进度：**P0~P14 全部完成；P15~P85 各增量完成（P15-1…P41-1、P42-1…P85-1）。**
+  本轮 P85-1：新建 `docs/95-ep-backward-adjoint.md`（+`harness/exp_ep_backward_adjoint.{sh,py,out.txt}`）
+  ——补齐 EP 通信一直缺席的**反向侧**：MoE dispatch / combine 的**伴随恒等式**与**路由权重梯度**。
+  把 dispatch 看成复制/置换算子 `D`、combine 的 token 求和看成 `Dᵀ`，**两原语互为转置**，于是反向不需要
+  新通信 kernel——`dispatch_backward`（`README.md:204-220`）就是 `combine(grad_recv_x, topk_weights=
+  grad_recv_w)`、`combine_backward`（`:242-258`）就是 `dispatch(grad_combined_x)`。**核心洞察**：非 expand
+  按**目的 rank**复制（`refs.py:67`）使一个 token 的整行 `w` 被复制 `d` 份，朴素求和得 `d·w`，故
+  `combined_topk_weights` 必须**选择而非求和**（`combine_reduce_epilogue.cuh:128-139` 的 `master_lane_idx`），
+  才能满足 `test_ep.py:514` 的 `== topk_weights`；训练图把权重乘法融进专家计算（`README.md:279`），
+  反向 `∂L/∂y=w·g`（复制=dispatch）、`∂L/∂w=<y,g>`（沿 k 归约=combine）。**纯语义/纯张量，H100 真机
+  ALL PASS**：Part A 单进程四条恒等式 + 权重梯度对拍 autograd（fp64 ≤1e-12）；Part B **8×H100 真机 NCCL
+  用真实 `refs.dispatch`** 跨 rank 验伴随 `<D(x),g>==<x,Dᵀ(g)>`（100.3833/100.3833）、`<G(w),gw>==<w,Gᵀ(gw)>`
+  （−18.4716/−18.4716）、复制语义 `Σrecv_w==degree·w`（平均 degree 3.328）。端到端 `EPBuffer` 反向 helper
+  依赖 NCCL ≥2.31 → 仅分析。索引页新增第 95 篇。
+  上一轮 P84-1：新建 `docs/94-deepep-bucket-mixed-test-oracle.md`
   （+`harness/exp_deepep_bucket_test_oracle.{sh,py,out.txt}`）——补齐 DeepEP bucket 一直缺席的
   **「验收测试即正确性规范」**：`tests/bucket/test_mixed.py`（373 行，**混合**算子的**多轮**随机编排）
   与 `tests/bucket/test_perf.py`（273 行，NCCL profile 基准）。五个规范组件——**能力门控**
@@ -3627,7 +3676,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P84 已完成（最新 **P84-1 DeepEP bucket 混合集合算子的验收测试即正确性规范**：
+- **下一步**：P0~P85 已完成（最新 **P85-1 MoE dispatch / combine 的反向（伴随）语义与路由权重梯度**：
+  把 dispatch 看成复制/置换算子 `D`、combine 的 token 求和看成 `Dᵀ`，两原语互为转置 → 反向不需要新通信
+  kernel（`dispatch_backward`=combine、`combine_backward`=dispatch）；核心洞察是「非 expand 按目的 rank
+  复制 → `combined_topk_weights` 必须选择而非求和」；训练图 `∂L/∂y=w·g` / `∂L/∂w=<y,g>`；H100 真机
+  Part A 四条伴随恒等式 + autograd 对拍、Part B 8×H100 真机 NCCL 跨 rank 验伴随，**ALL PASS**；详见上）。
+  上一轮 P84-1：P0~P84 已完成（最新 **P84-1 DeepEP bucket 混合集合算子的验收测试即正确性规范**：
   `tests/bucket/test_mixed.py`（373 行）+ `tests/bucket/test_perf.py`（273 行）——混合算子的多轮随机
   编排（三流 / scale / exact / session / 外部输入）+ 五个规范组件（`supported` 门控、`make_sizes`
   `quantum=lcm(g·32)`、`make_schedule`、`make_groups` 拓扑、`nccl_reference`）与逐位判据 `verify`；
