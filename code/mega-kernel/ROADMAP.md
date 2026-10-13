@@ -3402,6 +3402,41 @@
   278 行只读接口、`clear_smem_buffer` 128/256 线程口径并存不判、原型源文件缺失不可核、未与生产端到端对跑）。
   **本轮新增增量。**
 
+### P125 MPK 投机解码 device 层走读（`docs/39-mpk-speculative-decoding.md`）
+
+- [x] **P125-1** 补掉 `docs/14`/`docs/24`/`docs/26` 只在**前端/枚举/家族**层列过名字、`docs/34`–`docs/37`
+  只走 **MLA-MTP attention** 身体的那一整层 device 目录——`include/mirage/persistent_kernel/tasks/
+  speculative_decoding/`（5 头文件 1014 行：`target_verify.cuh`/`prompt_lookup.cuh`/`target_verify_mtp.cuh`/
+  `mtp_token_ops.cuh`/`eagle3_ops.cuh`）。见 `docs/39-mpk-speculative-decoding.md`（快照 `f9eb70c`，
+  **纯源码走读、无新实验**；MTP/Eagle3 是 SM100 路径、prompt-lookup 虽 arch-generic 但按 B1/B2 不构建）。
+  三条 headline：**(A)** 这批 task 全是「把答案查出来 / 把 token 搬对位置」的**簿记型 device 身体、无一吃
+  TC**（最长 `eagle3_ops.cuh` 317 行也只有 memcpy/dim-1 concat/d2t 查表/commit；`target_verify_*` 全在
+  `t_id==0` 单线程串行判定），却是投机正确性枢纽（`accepted_count`/`new_token_nums`/`tokens[]` 落位→
+  运行时 `prepare_next_batch` 步进），是 `docs/04` §8/§10「task 数/事件扇入扇出」的典型来源；**(B)** 同一
+  「验证 draft」语义仓库里**三套并行实现、接线各异**——prompt-lookup 贪心 `target_verify_greedy_kernel`
+  （`target_verify.cuh:21`，`TaskType 114`）、DeepSeek-V3 MTP 的 strict/probabilistic/commit
+  （`target_verify_mtp.cuh:44/112/255`，`TaskType 271/283/272`）、以及 **`target_verify_synthetic_kernel`
+  （`:191-242`）与 `find_ngram_global_kernel_sequential`（`prompt_lookup.cuh:142`）两枚「有定义、全仓零
+  调用者、无登记无 `TaskType`」死代码**（同 `docs/16`/`docs/20` 的「已实现未接线」族）；**(C)** Eagle3
+  Python 侧落差——`Eagle3Builder` 类注释（`eagle3/builder.py:34-56`）声明完整 verify 管线，但
+  `build_draft_loop`（`:271-449`）**只跑 draft loop 并 `return all_draft_ids`**，`copy_layer` 与
+  `eagle3_commit_layer` 在快照 Python 侧**无调用者**。§1 记一处**静态接线落差只记不判**：生产 include
+  入口 `persistent_kernel.cuh:48-52` 按 arch 三选一，**只有 blackwell** `task_header.cuh:62-64` 引了 MTP/
+  Eagle3 三件；`target_verify.cuh`/`prompt_lookup.cuh` **不被任何生产 `task_header` include**，只在单测
+  wrapper（`runtime_kernel_wrapper.cu:13/27/1845` 的 `using`/`m.def` 均**被注释**）出现，而 register/
+  frontend（`TaskType 112/113/114`）是活的；两文件用 `../common.h`（快照不存在，同族见
+  `hopper/norm_linear_hopper.cuh:18` 与多个 `ampere/*.cuh`）。§5 坐实 `request_id` 而非 `blockIdx.x`
+  取批号（常驻 kernel `blockIdx.x` 是 worker 索引，同 `docs/32` §5.3/`docs/34` §3.5/`docs/37` §2）；
+  §6.3 转述 `eagle3_commit_kernel` 注释里一段真 bug 调查（K=2 接受率 18.6% vs K=1 45.6%，device-side
+  trace 定位到 `paged_attention_sm100` `MAX_TOKENS=3` 的 slot-0 输出分歧，候选点 `attention_sm100.cuh:519`
+  causal mask 与 `MMA_ITERS_M=2` 的 `-inf` NaN 传播——同 `docs/38` §6 `"+f"` 修复的 MMA_ITERS_M>1 family）。
+  判据**只贡献 C1（并入单 launch）+ C3（段级多 task 管线）**，与 `docs/29`–`docs/38` device task 走读同档。
+  配套博客 post `mega-kernel-40-mpk-speculative-decoding`（weight 41）并更新 `mega-kernel-00-index`
+  第 40 项。P125-1 新留尾巴见 §9（include 落差只记不判、`softmax_gather`/`prob_scatter`/`prob_extract`
+  三个概率簿记身体未逐行、`paged_attention_sm100` `MAX_TOKENS=3` slot-0 分歧未独立复现只转述注释、
+  接受率数字为源码注释自报、`lookahead`/`eagle3` handler 字典缺失只记 `ValueError`）。
+  **本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3642,10 +3677,31 @@
   记其下游后果：曾 `if(m>0) continue` 跳过后继 m-tile → 损坏 EAGLE3 投机 token 流。写多 tile 展开的
   `mma.sync` 手写 kernel 时，累加器务必 `"+f"`（源/目的同寄存器）。另：`common/copy_sm80.cuh:51/68` 的
   `cp.async.ca.shared.global.L2::128B` 正是本专题 `docs/04` §39–§56 实测的取 task 原语本体。
+- **投机解码 device 头「被登记」≠「被编进生产」（P125-1/`docs/39` §1）**：生产 device 编译入口
+  `persistent_kernel.cuh:48-52` 按 arch 三选一 include `tasks/<arch>/task_header.cuh`，**只有 blackwell**
+  的 `task_header.cuh:62-64` 引了 MTP/Eagle3 三件；`tasks/speculative_decoding/target_verify.cuh`
+  与 `prompt_lookup.cuh`（`TaskType 112/113/114` 的 device 身体）**不被任何生产 `task_header` include**，
+  只在单测 wrapper（`tests/runtime_python/runtime_kernel_wrapper.cu:13/27/1845`）出现且其 `using`/`m.def`
+  **都被注释**——而 `graph.cc:541-552` 的 register 与前端 handler 是活的。**「`grep` 到注册/前端/TaskType」
+  不代表该 device 头真进了常驻 kernel 的编译单元**；判 prompt-lookup 路径可用性须同时核 `task_header.cuh`
+  的 include 集与单测接线（本专题只记静态事实、不判对错）。同目录另两枚「有定义、全仓零调用者」死代码：
+  `target_verify_synthetic_kernel`（`target_verify_mtp.cuh:191-242`）、`find_ngram_global_kernel_sequential`
+  （`prompt_lookup.cuh:142-153`）。另：`target_verify.cuh`/`prompt_lookup.cuh` 用 `#include "../common.h"`
+  而 `target_verify_mtp.cuh`/`mtp_token_ops.cuh`/`eagle3_ops.cuh` 用 `"tasks/common/common_header.cuh"`
+  （快照无 `tasks/common.h`；同族写法见 `hopper/norm_linear_hopper.cuh:18`、多个 `ampere/*.cuh`）——
+  读这批头时先确认它的 include 约定与所在的 `task_header` 是否真在编译路径上。
+- **常驻 kernel 里 batch/request 号只能取 `task_metadata.request_id`，不能取 `blockIdx.x`**
+  （P125-1/`docs/39` §5）：`mtp_prepare_verify_input_kernel`（`mtp_token_ops.cuh:101-104`）、
+  `mtp_build_embed_input_kernel`、`eagle3_commit_kernel` 都显式用 `request_id`；因为常驻 kernel 里
+  `blockIdx.x` 是 **worker 索引**（同 `docs/32` §5.3 的 `kNumSMs=1`、`docs/34` §3.5 TMEM-warp、
+  `docs/37` §2 薄 task「遍历全 row」）。写/移植设备端投机/采样 task 时，凡按 `batch`/`req` 索引
+  全局缓冲，一律走 `task_metadata.request_id`。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P124-1 完成（1/1）**。补掉 `docs/37`（P123-1）**§8「局限」明留的两条尾巴**——「`sampling_from_logits_kernel`（`tasks/common/sampling.cuh` 的 CUB BlockReduce 内部）未展开、`mma_m16n16k16`（`tasks/ampere/mma.cuh`）汇编未逐条」与「`mla_prefill_host.cu` 原型来源仍未走」。见 `docs/38-mpk-common-primitives.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** `tasks/common/` 是全部 device task 的 arch-agnostic 地基（伞状 `common_header.cuh` 被 41 个 task 引用、`utils.cuh` 被 33 个直引；`ampere/mma.cuh` 被两个非 MLA SM100 attention 引用）——「Blackwell」目录的通用 attention 仍在用 Ampere 手写 `mma.sync` + `cp.async` + CUB；**(B)** `common/sampling.cuh` 是 FlashInfer 移植的一趟式 Gumbel-Max（借 CUB `BlockReduce::Sum` 当 argmax 归约），生产登记 `TASK_SAMPLING_SM100`、与 SM100 分块版共用同一 `TaskType`；**(C)** `ampere/mma.cuh` 的 `"+f"` in-place 累加器修复是 load-bearing 的（决定 `attention_sm100` `MMA_ITERS_M>1`、进而 EAGLE3 token 流正确）。另记 `clear_smem_buffer` 的 128/256 线程口径落差、`copy_sm80.cuh` 即 `docs/04` §39–§56 实测原语本体、`mla_prefill_host.cu` 收口为「不在快照、外部来源」。判据**只贡献 C3**。配套博客 post `mega-kernel-39-mpk-common-primitives`（weight 40）并更新 `mega-kernel-00-index` 第 39 项。P124-1 新留尾巴见 §9（CUB 内部未展开、`bfloat16.h` 只读接口、`clear_smem_buffer` 128/256 口径并存不判、原型源文件缺失不可核、未与生产端到端对跑）。
+- 当前进度：**P125-1 完成（1/1）**。补掉 `docs/14`/`docs/24`/`docs/26` 只列名字、`docs/34`–`docs/37` 只走 MLA-MTP attention 的那一整层 device 目录 `tasks/speculative_decoding/`（5 头文件 1014 行），见 `docs/39-mpk-speculative-decoding.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** 全部是「查答案 / 搬 token」的簿记型 device 身体、无一吃 TC，却是投机正确性枢纽（`accepted_count`/`new_token_nums`/`tokens[]` 落位→运行时步进），是 `docs/04` §8/§10「task 数/事件扇入扇出」来源；**(B)** 同一「验证 draft」语义三套并行实现接线各异——prompt-lookup 贪心（`TaskType 114`）、DeepSeek-V3 MTP strict/probabilistic/commit（`271/283/272`）、两枚「有定义零调用者」死代码（`target_verify_synthetic_kernel`、`find_ngram_global_kernel_sequential`）；**(C)** Eagle3 Python 落差——类注释声明完整 verify 管线但 `build_draft_loop` 只跑 draft loop，`copy_layer`/`eagle3_commit_layer` 快照无调用者。§1 记静态 include 落差（`target_verify.cuh`/`prompt_lookup.cuh` 不在生产 `task_header` include 集、单测 `using`/`m.def` 被注释，只记不判）；§6.3 转述 `eagle3_commit_kernel` 注释里 `paged_attention_sm100` `MAX_TOKENS=3` slot-0 分歧的 bug 调查（同 `docs/38` §6 `"+f"` 的 MMA_ITERS_M>1 family）。判据**只贡献 C1+C3**。配套博客 post `mega-kernel-40-mpk-speculative-decoding`（weight 41）并更新 `mega-kernel-00-index` 第 40 项。P125-1 新留尾巴见 §9（include 落差只记不判、`softmax_gather`/`prob_scatter`/`prob_extract` 三身体未逐行、`MAX_TOKENS=3` slot-0 分歧未独立复现、接受率数字为注释自报、`lookahead`/`eagle3` handler 字典缺失只记 `ValueError`）。
+- 下一步候选：`tasks/speculative_decoding/` 已闭合；可继续沿 `docs/39` §9 尾巴走（三个概率簿记 device 身体 `softmax_gather_sm100.cuh`/`prob_scatter_sm100.cuh`/`prob_extract_sm100.cuh` 未逐行）或打开尚未走读的 `tasks/deprecated/paged_attention.cuh`（退役实现，`tasks/deprecated/` 此前各篇均「不涉」）。
+- 此前：**P124-1 完成（1/1）**。补掉 `docs/37`（P123-1）**§8「局限」明留的两条尾巴**——「`sampling_from_logits_kernel`（`tasks/common/sampling.cuh` 的 CUB BlockReduce 内部）未展开、`mma_m16n16k16`（`tasks/ampere/mma.cuh`）汇编未逐条」与「`mla_prefill_host.cu` 原型来源仍未走」。见 `docs/38-mpk-common-primitives.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** `tasks/common/` 是全部 device task 的 arch-agnostic 地基（伞状 `common_header.cuh` 被 41 个 task 引用、`utils.cuh` 被 33 个直引；`ampere/mma.cuh` 被两个非 MLA SM100 attention 引用）——「Blackwell」目录的通用 attention 仍在用 Ampere 手写 `mma.sync` + `cp.async` + CUB；**(B)** `common/sampling.cuh` 是 FlashInfer 移植的一趟式 Gumbel-Max（借 CUB `BlockReduce::Sum` 当 argmax 归约），生产登记 `TASK_SAMPLING_SM100`、与 SM100 分块版共用同一 `TaskType`；**(C)** `ampere/mma.cuh` 的 `"+f"` in-place 累加器修复是 load-bearing 的（决定 `attention_sm100` `MMA_ITERS_M>1`、进而 EAGLE3 token 流正确）。另记 `clear_smem_buffer` 的 128/256 线程口径落差、`copy_sm80.cuh` 即 `docs/04` §39–§56 实测原语本体、`mla_prefill_host.cu` 收口为「不在快照、外部来源」。判据**只贡献 C3**。配套博客 post `mega-kernel-39-mpk-common-primitives`（weight 40）并更新 `mega-kernel-00-index` 第 39 项。P124-1 新留尾巴见 §9（CUB 内部未展开、`bfloat16.h` 只读接口、`clear_smem_buffer` 128/256 口径并存不判、原型源文件缺失不可核、未与生产端到端对跑）。
 - 此前：**P123-1 完成（1/1）**。补掉 `docs/35`（P121-1）**§9**与 `docs/36`（P122-1）**§8**
   明留的同一处相邻尾巴——「注意力之外的 SM100 task 家族」，见 `docs/37-mpk-sm100-misc-tasks.md`
   （快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 在目标卡 H100/sm90 不可执行）。把

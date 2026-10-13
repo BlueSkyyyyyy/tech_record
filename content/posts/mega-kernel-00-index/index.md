@@ -60,4 +60,6 @@ categories: ["算子开发"]
 
 39. [MPK 共享原语层走读：`tasks/common/*` 与 `ampere/mma.cuh`]({{< relref "mega-kernel-39-mpk-common-primitives" >}}) —— 打开被所有 device task 反复 `#include` 却从未逐行读的 arch-agnostic 地基：FlashInfer 移植的一趟式 Gumbel-Max 采样（借 CUB `BlockReduce::Sum` 当 argmax 归约）、bf16/PTX/SMEM 助手、`cp.async`/`ldmatrix` 原语（正是本专题取 task 实测的 device 本体）、全局显存逻辑布局包装，以及跨代共用的手写 `m16n16k16` MMA 及其 load-bearing 的 `"+f"` in-place 累加器修复（决定 EAGLE3 投机解码 token 流正确）
 
+40. [MPK 投机解码 device 层走读：`tasks/speculative_decoding/*`]({{< relref "mega-kernel-40-mpk-speculative-decoding" >}}) —— 打开 `docs/14`/`docs/24`/`docs/26` 只列过名字、`docs/34`–`docs/37` 只走 attention 的投机解码 device 层：prompt-lookup 的 n-gram 查找（partial/global/global_sequential 三档）与贪心验证、DeepSeek-V3 MTP 的 strict/probabilistic/synthetic 三段验证 + accept/commit、vLLM-aligned 的 MTP 嵌入输入构造，以及 Eagle3 的 aux hidden 抓取/dim-1 concat/d2t 查表/verify-aware commit（含 `paged_attention_sm100` `MAX_TOKENS=3` slot-0 分歧的源码自陈 bug 调查），并核对五层生产布线（`TaskType`/`graph.cc`/`register`/前端/builder）与两处「有实现未接线」
+
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
