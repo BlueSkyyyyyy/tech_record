@@ -1,0 +1,75 @@
+== 内核源码 ==
+1a84ace1b0217de5973f6bd770542babf4b7073f0aa06d8328070cbc1eb503c6  ~/proj/tech_record/code/mega-moe/src/moe_backward_activation_epilogue.cu
+
+== 编译（sm_90；包含真实 DeepGEMM 头 types.cuh / common/math.cuh）==
+  built /tmp/moe_backward_activation_epilogue
+
+== 设备端自带报告（单进程，空闲 GPU）==
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+[env] device=NVIDIA H100 80GB HBM3 sm_90
+
+[A] epilogue 契约尺寸账（types.cuh:47-52 / sm100_*_gemm.cuh 的 sizeof 断言）
+    sizeof(EpilogueOperatorArgs)           = 24 B （真实头，types.cuh:47-52）
+    sizeof(SwiGLUEpilogueArgs)（提议扩展）  = 64 B
+    断言 `sizeof(epilogue_operator_t) == sizeof(EpilogueOperatorArgs)`：
+      - 只加**行为**（apply_values）时成立；
+      - 加**状态**（gate/up/dup 指针）必须进共享基类，于是**每个** SM100 GEMM 的 kernel 参数
+        从 24 B 涨到 64 B（+40 B）——不是只影响 SwiGLU 这一个 kernel。
+
+[B] 提议算子（真实 math.cuh store 分支） vs 手写独立参考段（T=4096,I=2048）
+    FP8 字节不符 0 / 16777216（dgate+dup 两输出），SF 不符 0 / 524288
+
+[C] 单输出共享 SF 的代价：dgate/dup 每 32 元素独立 SF；若强行共用一个 SF，
+    dup 的等效比例偏差 RMS = 0.8506（SF 比值 2^(e_dgate-e_dup) 偏离 1 的均方根）。
+    两输出 SF 分布不同 ⇒ 契约必须给**两个** SFD。
+
+[C2] 只走「单输出」分支（two_output=0）：dup 非零元素 0 / 8388608
+     第二输出**根本不会被写**——不是精度问题，是契约留不出第二个张量。
+
+[done] 架构无关；SM100 专属部分（TMEM/TMA/UTCCP 与 24 B 的 __grid_constant__ args）见 .sh/.py。
+
+== Python：host 接线与契约缺口 ==
+
+======================================================================
+① host 类 → device operator 的类型字符串映射
+======================================================================
+  epilogue_class.hpp 返回的 operator 类型字符串（4 个）：
+    epilogue::operators::Identity              -> operators.cuh struct Identity                 [OK]
+    epilogue::operators::ScaleByAlpha          -> operators.cuh struct ScaleByAlpha             [OK]
+    epilogue::operators::QuantizeToFP8         -> operators.cuh struct QuantizeToFP8            [OK]
+    epilogue::operators::StochasticRoundToBF16 -> operators.cuh struct StochasticRoundToBF16    [OK]
+  operators.cuh 定义的 operator struct：['Identity', 'ScaleByAlpha', 'StochasticRoundToBF16', 'QuantizeToFP8']
+  => host 类型字符串与 device operator 1:1；新增 operator 的**唯一**接线点就是这里多返回一个字符串。
+
+======================================================================
+② JIT 源码注入：类型字符串成了 kernel 模板实参
+======================================================================
+  sm100_bf16_gemm.hpp 的 JIT 模板体有 26 个 '{}' 占位符。
+  模板实参里与 epilogue 相关的两个（sm100_bf16_gemm.hpp:69-70）：
+    args.epilogue_class->get_epilogue_operator_type(),
+    args.gemm_desc.tc_util), args.epilogue_class->compiler_options());
+  => operator 的**类型**随字符串注入 .cu；operator 的**状态**随 `__grid_constant__` 参数传入
+     （sm100_bf16_gemm.cuh:39、sm100_fp8_fp4_gemm_1d1d.cuh:41）。
+
+======================================================================
+③ resolve_epilogue_class 的互斥（epilogue_class.hpp:111-127 的 Python 复刻）
+======================================================================
+    默认（三者都无）                         -> IdentityEpilogue (默认)
+    alpha=0.5                        -> AlphaEpilogue (check: d bf16/fp32)
+    sfd（FP8 输出对）                     -> FP8QuantizationEpilogue (单输出 D + 单 SFD)
+    sfd + c（非法）                      -> ASSERT: FP8 量化要求 not c 且 d==E4M3
+    sfd + d=fp32（非法）                 -> ASSERT: FP8 量化要求 not c 且 d==E4M3
+    epilogue_class + alpha（非法）       -> ASSERT: epilogue_class / alpha / sfd 三者互斥
+    epilogue_class + sfd（非法）         -> ASSERT: epilogue_class / alpha / sfd 三者互斥
+
+======================================================================
+④ 单输出契约放不下 SwiGLU 反向（要 2 张量 + 2 SFD）
+======================================================================
+  当前 EpilogueClass 只表达：1 个 D（tensor_map_cd）+ 可选 1 个 SFD（`output_sfd()` :38）。
+  FP8 输出对还要求 `not c`（epilogue_class.hpp:84）——连 C 都被占掉。
+  SwiGLU 反向需要：d(gate) 张量 + d(up) 张量 + 各自 SFD = 2 数据 + 2 SF。
+  => 必须扩 3 处契约：(a) EpilogueOperatorArgs 加逐元素输入/第二输出指针；
+     (b) resolve/check 支持双输出；(c) sm100_store_cd.cuh 的 is_same_v 分支加一条双写。
+  SM90 分支直接拒绝自定义 epilogue：gemm.hpp:238 “Custom epilogues require SM100”。
+
+[done] host 接线与契约缺口核对完成；数值逐位对拍见 src/moe_backward_activation_epilogue.cu。

@@ -4468,7 +4468,37 @@
       写 15.3MB（≈1.79 TB/s、峰值 53%、余量 ~1.5 TB/s）；⑤ 预算：现实现 126+39=166us、折叠 126–136us，
       但该段仅占反向 1.10% ⇒ **整步收益 <0.2%**。前提：前向 L1 epilogue（`sm100_fp8_fp4_mega_moe.cuh:1108-1219`）
       不单独存 gate/up，折叠需前向 dump 或反向重算。→ `docs/155-fuse-activation-into-dgrad.md`。
-      配套博客 `content/posts/mega-moe-155-fuse-activation-into-dgrad`（索引页新增第 155 篇）。
+       配套博客 `content/posts/mega-moe-155-fuse-activation-into-dgrad`（索引页新增第 155 篇）。
+
+### P146 增量（opt-in，把 P145 的口子①「在 SM100 上落地 epilogue operator」走到契约层）
+
+- [x] **P146-1** **把 SwiGLU 反向落地成 SM100 dgrad 的 `epilogue_class` operator：契约缺口精读 + H100 原型**
+      （承接 P145-1 口子①）：`csrc/jit_kernels/impls/epilogue_class.hpp`、
+      `deep_gemm/include/deep_gemm/epilogue/{operators.cuh,sm100_store_cd.cuh}`、
+      `deep_gemm/include/deep_gemm/common/{types.cuh,math.cuh}`、
+      `deep_gemm/include/deep_gemm/impls/sm100_{fp8_fp4_gemm_1d1d,bf16_gemm}.cuh`、
+      `csrc/jit_kernels/impls/sm100_{bf16_gemm,fp8_fp4_gemm_1d1d}.hpp`、`csrc/apis/gemm.hpp`。
+      **问题**：第 155 篇只做了 SM90 输出侧原型，口子①是「用新写的 `epilogue_class` operator 在 SM100 落地」。
+      本篇回答「只加一个 operator 结构体够不够」——**不够**。**epilogue 契约是「单输出 + 无逐元素索引 +
+      无状态」的**：`operators.cuh:9-15` 明说算子只加行为不加状态，kernel 用
+      `sizeof(epilogue_operator_t)==sizeof(EpilogueOperatorArgs)` 硬断言（`sm100_fp8_fp4_gemm_1d1d.cuh:57-58`、
+      `sm100_bf16_gemm.cuh:59-60`）；`apply_values(values)` **拿不到 (row,n)**（只有 store 路径的
+      `sm100_store_cd.cuh:101` row_idx / `operators.cuh:78` store_sf 有索引）；`EpilogueClass` 只有**一个**
+      D + 可选**一个** SFD（`epilogue_class.hpp:38/84`、`sm100_store_cd.cuh:32`）。而 SwiGLU 反向要
+      「逐元素读 gate/up」+「`d(gate)`/`d(up)` **两个** FP8 张量 + **两个** SF」。**host 接线**：
+      类型字符串 1:1 映射 `operators.cuh` struct（`epilogue_class.hpp:43/56/73/93`）+ `std::format` 注入
+      kernel 模板实参（`sm100_bf16_gemm.hpp:30-53/69`）+ `__grid_constant__` 传状态（`sm100_bf16_gemm.cuh:39`）。
+      **H100(sm90) 真机**（`src/moe_backward_activation_epilogue.cu` **包含真实 DeepGEMM 头** +
+      `harness/exp_moe_backward_activation_epilogue.{sh,py,out.txt}`）：① 契约尺寸账 `sizeof(EpilogueOperatorArgs)`
+      **24 B** vs 提议扩展 **64 B**（+40 B，**每个** SM100 GEMM 都涨）；② 用真实 `common/math.cuh` 逐行复刻
+      `sm100_store_cd.cuh:144-198` 的 FP8 分支套到 dact→SwiGLU 反向→dgate/dup，与手写独立参考
+      **FP8 字节 0/16777216、SF 0/524288**；③ 双 SF 不可互换：共享 SF 时 dup 等效比例偏差 RMS **0.8506**；
+      ④ 单输出分支下 dup 非零元素 **0/8388608**（第二张量根本写不出）；⑤ host 复刻 `resolve_epilogue_class`
+      互斥 + 类型字符串映射 + JIT 占位符。**结论**：数值上完全可行（真实原语逐位可复现、无需新写量化），
+      但要扩**三处**契约（args / resolve-check / store 双写 + 第二 tensor map）——为占反向 1.10% 的边角付这个
+      协议成本不划算；若要做应把 SwiGLU 反向留在独立元素级 kernel（第 154 篇那条路）。SM100 的 TMEM/TMA/UTCCP 仅分析。
+      → `docs/156-moe-backward-activation-epilogue-operator.md`。配套博客
+      `content/posts/mega-moe-156-moe-backward-activation-epilogue-operator`（索引页新增第 156 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4502,8 +4532,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P145 各增量完成（P15-1…P41-1、P42-1…P145-1）。**
-  本轮 P145-1：新建 `docs/155-fuse-activation-into-dgrad.md`（+`src/moe_backward_activation_fused.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P146 各增量完成（P15-1…P41-1、P42-1…P146-1）。**
+  本轮 P146-1：新建 `docs/156-moe-backward-activation-epilogue-operator.md`（+`src/moe_backward_activation_epilogue.cu`、
+  `harness/exp_moe_backward_activation_epilogue.{sh,py,out.txt}`）——承接 P145-1 的口子①，把「SwiGLU 反向
+  落地成 SM100 `epilogue_class` operator」推到**契约层**。**结论：数值上完全可行（真实原语逐位可复现），
+  但「只加一个 operator 结构体」不够——epilogue 契约是「单输出 + 无逐元素索引 + 无状态」，SwiGLU 反向要
+  「逐元素读 gate/up + 两个输出 + 两个 SF」**。H100(sm90) 真机（**包含真实 DeepGEMM 头**）：① `sizeof(EpilogueOperatorArgs)`
+  **24 B** vs 提议扩展 **64 B**（+40 B，每个 SM100 GEMM 都涨）；② 真实 `common/math.cuh` 逐行复刻
+  `sm100_store_cd.cuh:144-198` 的 FP8 分支接在 SwiGLU 反向上，与手写独立参考 **FP8 0/16777216、SF 0/524288**；
+  ③ 共享 SF 时 dup 等效比例偏差 RMS **0.8506**；④ 单输出分支下 dup 非零 **0/8388608**；⑤ host 复刻
+  `resolve_epilogue_class` 互斥 + 类型字符串 1:1 映射 + JIT 占位符（`sm100_bf16_gemm.hpp:30-53/69`）。
+  要落地须扩三处契约（args / resolve-check / store 双写 + 第二 tensor map）；为占反向 1.10% 的边角付此成本
+  不划算，应把 SwiGLU 反向留在独立元素级 kernel（第 154 篇）。索引页新增第 156 篇。
+  上一轮 P145-1：新建 `docs/155-fuse-activation-into-dgrad.md`（+`src/moe_backward_activation_fused.cu`、
   `harness/exp_moe_backward_fused.{sh,py,out.txt}`）——承接 P144-1 的口子，把反向的「SwiGLU 反向 + 激活
   梯度重量化」段**折进 dgrad 的 epilogue**。**结论：能折、无损、永不更差，但不是性能杠杆。** 字节账
   d2g 输出形状 10→6 B/元素（省 `d(act)` 往返 4 B/元素、-40%）；H100(sm90) 真机 `FUSED` vs `FRESH→独立段`
@@ -6136,12 +6177,15 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P145 已完成（最新 **P145-1 把反向的 SwiGLU 段折进 dgrad 的 epilogue**——承接 P144-1
-  的口子。结论：能折、逐位无损、永不更差（字节 10→6 B/元素、`SEQ/FUSED` 1.057–1.317×、净省 ~13–15us），
-  但该段仅占反向 1.10% ⇒ 整步收益 <0.2%、不是性能杠杆；前提是前向不单独存 gate/up。索引页新增第 155 篇）。
-  可继续（均为增量、非承诺）：① 把这段折叠在 **SM100** 上用新写的 `epilogue_class` operator 落地（当前
-  SM100 只有 `FP8QuantizationEpilogue`、无 SwiGLU 反向 operator；SM90 拒绝自定义 epilogue）；② 对
-  P96/P97/P123 的轻微漂移清单关键路径定点复核；③ 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）。详见上。
+- **下一步**：P0~P146 已完成（最新 **P146-1 把「SwiGLU 反向落地成 SM100 `epilogue_class` operator」
+  推到契约层**——承接 P145-1 口子①。结论：数值上完全可行（真实 `math.cuh` store 分支逐位复现，
+  FP8 0/16777216、SF 0/524288），但 epilogue 契约是「单输出 + 无逐元素索引 + 无状态」，SwiGLU 反向要
+  「逐元素读 gate/up + 两个输出 + 两个 SF」，只加一个 operator 结构体不够，须扩三处契约；`EpilogueOperatorArgs`
+  24→64 B（每个 SM100 GEMM 都涨）；收益仍是第 155 篇的 <0.2% ⇒ 应留在独立元素级 kernel。索引页新增第 156 篇）。
+  可继续（均为增量、非承诺）：① 对 P96/P97/P123 的轻微漂移清单关键路径定点复核；② 把空出的 DeepEP
+  端到端留给 NCCL≥2.32.3 环境（见「阻塞」）；③ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落做定点复核。详见上。
+  上一轮 P145-1：把反向的 SwiGLU 段折进 dgrad 的 epilogue——能折、逐位无损、永不更差（字节 10→6 B/元素、
+  `SEQ/FUSED` 1.057–1.317×、净省 ~13–15us），但该段仅占反向 1.10% ⇒ 整步收益 <0.2%；前提是前向不单独存 gate/up。
   上一轮 P144-1：补齐反向一直缺席的「非 GEMM 段」（SwiGLU 反向 + 激活梯度 FP8/UE8M0 重量化）——
   前向 L1 epilogue 的逐元素逆。H100(sm90) 真机正确性 0/32768 SF、0/1048576 FP8 字节；量化路径
   20.1us/1668 GB/s；误差分层 bf16-round ~1.7e-3、+FP8 ~2.7e-2（cos 0.99965）；放回预算
