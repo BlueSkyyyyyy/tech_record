@@ -89,6 +89,17 @@ constexpr int BW = 16;    // output columns per warp = KD / NW
 #ifndef B2M_VECST
 #define B2M_VECST 0
 #endif
+// P7-59: pairwise store helper -- under `B2M_VECST` emit one 64-bit `STG.E.64` (`float2`),
+// else two 32-bit scalar stores.  Applied to the non-GEMM segment stores (`dv2/dvb`, `dkgb`,
+// the gate chain's `dqg/dkg/dg`) which P7-52/53/56/57 left scalar.  Pairwise columns are
+// contiguous and even-indexed (`KD=128`, col even) so the `float2` is 8 B aligned.
+DEV void st2(float* p, float a, float b) {
+#if B2M_VECST
+    *reinterpret_cast<float2*>(p) = make_float2(a, b);
+#else
+    p[0] = a; p[1] = b;
+#endif
+}
 //   B2M_NOASYNC : replace the 16B `cp.async` (`LDGSTS.E.BYPASS.128`) with a synchronous
 //                 16B `float4` load+store -> same bytes, normal (L1-allocating) ld path.
 //                 Isolates whether the 1.5x L2-read-sector amplification is specific to
@@ -920,13 +931,13 @@ b2mma_kernel(
         const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * VD + col;
         if (tr0 < T) {
             const float bt0 = beta[((int64_t)(n * T + tr0) * H + hh)];
-            dvb[o0] = acc2[nt][0]; dvb[o0 + 1] = acc2[nt][1];
-            dv2[o0] = bt0 * acc2[nt][0]; dv2[o0 + 1] = bt0 * acc2[nt][1];
+            st2(&dvb[o0], acc2[nt][0], acc2[nt][1]);
+            st2(&dv2[o0], bt0 * acc2[nt][0], bt0 * acc2[nt][1]);
         }
         if (tr1 < T) {
             const float bt1 = beta[((int64_t)(n * T + tr1) * H + hh)];
-            dvb[o1] = acc2[nt][2]; dvb[o1 + 1] = acc2[nt][3];
-            dv2[o1] = bt1 * acc2[nt][2]; dv2[o1 + 1] = bt1 * acc2[nt][3];
+            st2(&dvb[o1], acc2[nt][2], acc2[nt][3]);
+            st2(&dv2[o1], bt1 * acc2[nt][2], bt1 * acc2[nt][3]);
         }
     }
 #endif
@@ -938,8 +949,8 @@ b2mma_kernel(
         const int tr0 = t0 + g, tr1 = t0 + g + 8;
         const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
         const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
-        if (tr0 < T) { dkgb[o0] = acc3[nt][0]; dkgb[o0 + 1] = acc3[nt][1]; }
-        if (tr1 < T) { dkgb[o1] = acc3[nt][2]; dkgb[o1 + 1] = acc3[nt][3]; }
+        if (tr0 < T) st2(&dkgb[o0], acc3[nt][0], acc3[nt][1]);
+        if (tr1 < T) st2(&dkgb[o1], acc3[nt][2], acc3[nt][3]);
     }
 #endif
 #if B2M_GATE && !B2M_NODG
@@ -953,6 +964,7 @@ b2mma_kernel(
         const int64_t gl_base = ((int64_t)(n * T + last) * H + hh) * KD;
 #endif
         float dgv[2][4];
+        float dqgv[2][4], dkgv[2][4];
         #pragma unroll
         for (int nt = 0; nt < 2; ++nt) {
             const int cl = nt * 8 + 2 * t;                // column within the warp's owned 16
@@ -987,13 +999,32 @@ b2mma_kernel(
                 const float dgb = acc3[nt][i];
                 const float kdk = kv * dkm;
                 dgv[nt][i] = qv * dqf - kdk + kv * gk * dgb * bt;
-                if (row < T) {
-                    const int64_t off = ((int64_t)(n * T + row) * H + hh) * KD + col;
-                    dqg[off] = dqf;
-                    dkg[off] = dkm + dgb * gk * bt;
-                }
+                dqgv[nt][i] = dqf;
+                dkgv[nt][i] = dkm + dgb * gk * bt;
                 if (i == 0 || i == 2) pk0 += kdk; else pk1 += kdk;
             }
+#if B2M_VECST
+            // pair (c0,c1) -> one `STG.E.64` per row (row tr0 for i={0,1}, tr1 for i={2,3})
+            {
+                const int64_t r0 = ((int64_t)(n * T + tr0) * H + hh) * KD + c0;
+                const int64_t r1 = ((int64_t)(n * T + tr1) * H + hh) * KD + c0;
+                if (tr0 < T) { st2(&dqg[r0], dqgv[nt][0], dqgv[nt][1]);
+                               st2(&dkg[r0], dkgv[nt][0], dkgv[nt][1]); }
+                if (tr1 < T) { st2(&dqg[r1], dqgv[nt][2], dqgv[nt][3]);
+                               st2(&dkg[r1], dkgv[nt][2], dkgv[nt][3]); }
+            }
+#else
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const int row = (i < 2) ? tr0 : tr1;
+                const int col = (i & 1) ? c1 : c0;
+                if (row < T) {
+                    const int64_t off = ((int64_t)(n * T + row) * H + hh) * KD + col;
+                    dqg[off] = dqgv[nt][i];
+                    dkg[off] = dkgv[nt][i];
+                }
+            }
+#endif
             // `sum_t kdk` over the chunk: reduce over the mma groupID (lane bits 2..4)
             pk0 += __shfl_xor_sync(0xffffffffu, pk0, 4);
             pk0 += __shfl_xor_sync(0xffffffffu, pk0, 8);
@@ -1013,6 +1044,16 @@ b2mma_kernel(
             const int c0 = warp * BW + cl, c1 = c0 + 1;
             const float dl0 = sh->sdgkt[c0], dl1 = sh->sdgkt[c1];
             const int tr0 = t0 + g, tr1 = t0 + g + 8;
+#if B2M_VECST
+            const float a00 = (g == lastrow) ? dl0 : 0.f;
+            const float a01 = (g == lastrow) ? dl1 : 0.f;
+            const float a10 = (g + 8 == lastrow) ? dl0 : 0.f;
+            const float a11 = (g + 8 == lastrow) ? dl1 : 0.f;
+            const int64_t r0 = ((int64_t)(n * T + tr0) * H + hh) * KD + c0;
+            const int64_t r1 = ((int64_t)(n * T + tr1) * H + hh) * KD + c0;
+            if (tr0 < T) st2(&dg[r0], dgv[nt][0] + a00, dgv[nt][1] + a01);
+            if (tr1 < T) st2(&dg[r1], dgv[nt][2] + a10, dgv[nt][3] + a11);
+#else
             #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 const int row = (i < 2) ? tr0 : tr1;
@@ -1024,6 +1065,7 @@ b2mma_kernel(
                     dg[((int64_t)(n * T + row) * H + hh) * KD + col] = dgv[nt][i] + add;
                 }
             }
+#endif
         }
     }
 #endif

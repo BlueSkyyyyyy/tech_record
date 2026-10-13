@@ -6341,3 +6341,82 @@ CUPTI `dev`（kernel-only，µs；`qkg`=合流，`qkgp`=合流+pad 行距）：
   `-DB2M_QKGP` 仅用于受控归因（消 bank conflict），非部署项。
 - 「DRAM/L2 双 bound → 删 L1 散读不兑现」这一归因由 `gate_tma`（一对换算子只改取数来源、occupancy 不变）
   作受控对照，故非小 shape 噪声；小 shape（`T512/T250`）合流更慢还叠加了 staging 的固定延迟。
+
+## 62. 「K2 形状 CUDA B2」把非 GEMM 段的 store 全部向量化：逐位无损、小 shape −8~16%（P7-59）
+
+§51（P7-48）在 B2 **GEMM 核**上确立过：默认 store 是 25 条**逐标量 32-bit `STG.E`**，4 个 lane 各写 4 B 到同一
+sector 的 `{0,8,16,24}` 偏移 ⇒ **每条 store 只覆盖半个 sector**（`l1tex st` 扇区 = 数据扇区的 **1.98×**），
+换成合成的 64-bit **`float2` store**（`-DB2M_VECST`）后立刻回到 1.0×、**逐位相同**、且免费偏正（0.87–0.99×，
+小 shape 10%+）。但 P7-52（`dv2/dvb`）、P7-53（`dkgb`）、P7-56（`db`）、P7-57（门控 `dqg/dkg/dg`）四轮
+各自建在那支核上时，**本段的 store 都留成了标量**——每一轮的「边界」都写着「本段 store 未接 `-DB2M_VECST`」。
+本节把这条边界收口。
+
+### 62.1 设计：一个 `st2()` 成对 store，覆盖四段的 token-major 大输出
+
+- `st2(float* p, float a, float b)`（`b2_mma_probe.cu:96`）：`B2M_VECST` 下一条
+  `*reinterpret_cast<float2*>(p) = make_float2(a,b)`，否则两条标量 `p[0]=a; p[1]=b;`。成对的两列在
+  store 里**地址相邻且列号为偶**（`KD=128` 且 `col=warp*BW+nt*8+2*t` 恒为偶）⇒ `float2` 天然 **8 B 对齐**。
+- 落到四处（都只换取数/存数指令，**算术一字未动**）：
+  - 输出支路 `dv2/dvb`（`:934-940`）；
+  - `dkgb`（`:952-953`）；
+  - 门控链 `dqg/dkg`——把原先 i-循环内逐元素 store 改成先写 `dqgv/dkgv[2][4]`（`:967`），循环后按行对
+    成对存（`:1011-1014`）；`dg`（`:1054-1055`）——每行的 `last`-行补偿 `add`（`sh->sdgkt`）按列取 `dl0/dl1`，
+    成对后即 `(dgv+a00, dgv+a01)`。
+- `[BT,BT]` 的 `dA`/`dApre`（`B2M_DA`/`B2M_SAND`）**未动**：它是 `[B,T,H,BT]` 小张量、且是
+  thread-per-entry 布局（一 thread 一个元素），向量化收益远小于四段的 `[B,T,H,K]`/`[B,T,H,V]` token-major 大输出。
+
+### 62.2 证据
+
+`harness/b2_mma_probe.cu`（新增 `st2` + 四处改写）+ `harness/check_bwd_b2_vecst_seg.py`
+（`harness/check_bwd_b2_vecst_seg.out.txt`，空闲卡 GPU1）。**同一份编译源**跑两遍：base（无 `B2M_VECST`）
+vs vecst（`-DB2M_VECST=1`），四段各建一份的 base/vecst 同源对照。
+
+### 62.3 Part A — 正确性：全部段、全部 shape **逐位相同（`max_abs=0`）**
+
+四组 shape（`B8 T2048 H8` / `B2 T1024 H8` / `T512 H4` / `T250 H3` 非整除）逐输出 `base vs vecst`：
+
+| 段 | 输出 | 四组最坏 `max_abs` |
+|---|---|---|
+| `out` | `dq`/`dk`/`dw`/`dv2`/`dvb` | **0 / 0 / 0 / 0 / 0** |
+| `dkgb` | `dq`/`dk`/`dw`/`dkgb` | **0 / 0 / 0 / 0** |
+| `db` | `dv2`/`dvb`/`dkgb`/`db` | **0 / 0 / 0 / 0** |
+| `gate` | `dqg`/`dkg`/`dg` | **0 / 0 / 0** |
+
+即向量化**逐位无损**（含非整除 `T=250`）；`db` 的 `db` 输出（`B2M_VECST` 未触及、thread-per-row 布局）也
+逐位相同。门控 vecst 对 FLA 的最坏 `max_rel` `dqg 1.051e-3 / dkg 9.466e-4 / dg 1.010e-3`——**与 P7-57 的
+tf32 底噪逐值一致**，证明换 store 指令不动语义。
+
+### 62.4 Part B — 计时：**全为正**（vecst/base，CUPTI `dev`）
+
+| 段 | `B8 T2048 H8` | `B2 T1024 H8` | `T512 H4` | `T250 H3` |
+|---|---|---|---|---|
+| `out` | 0.983× | 0.950× | **0.835×** | **0.865×** |
+| `dkgb` | 0.990× | 0.962× | **0.876×** | **0.887×** |
+| `db` | **0.940×** | **0.943×** | **0.942×** | **0.913×** |
+| `gate` | 0.987× | 0.959× | **0.919×** | **0.900×** |
+
+- **所有 16 个格子全为正**：小 shape（`T512/T250`，store 指令数占比高、且本就延迟主导）**−8~16%**，大 shape
+  （`B8T2048H8`，DRAM/L2 双 bound、store 字节被带宽掩盖）−1~2%。
+- `db` 段（= OUT+DKGB+DB，一次把 `dv2/dvb/dkgb` 三个大张量都向量化）在大 shape 也吃到 **6%**，是全表大 shape
+  最大收益——因为它的标量 store 密度最高。
+
+### 62.5 机制：SASS 从 50 条标量 `STG.E` 降到 24 条 `STG.E.64`
+
+`db` build 的 `cuobjdump -sass`（同源 base vs vecst）：
+
+| 变体 | `STG.E`(32-bit) | `STG.E.64` |
+|---|---|---|
+| base | **50** | 0 |
+| vecst | 2 | **24** |
+
+50→24+2：`dv2/dvb`（4×2×2=… per row pair）+ `dkgb` 的成对 store 合成 64-bit；残留的 2 条标量是
+`dgk`（列归约，非成对）与 `db_out`（thread-per-row）——都非 `float2` 形态，符合 §62.1 的边界。与 §51.4
+「半 sector 标量写」是同一课：**store 一律向量化**，本次把 B2 四段补齐。
+
+### 62.6 结论 / 边界
+
+- **收口 §51.6 的「向量化 store 一律做」到非 GEMM 四段**：`dv2/dvb`、`dkgb`、门控 `dqg/dkg/dg` 全改
+  `float2`（`st2`），**逐位无损**、小 shape **−8~16%**、大 shape −1~6%。目标卡 CUDA B2 的**所有 token-major
+  store** 都应走 64-bit（乃至更宽）向量化。
+- **边界**：`[BT,BT]` 的 `dA`/`dApre` 未向量化（小张量 + thread-per-entry 布局）；`dgk`/`db_out` 非成对形态
+  仍标量；仅覆盖 `K=V=128`、`BT=16`、fp32。至此 §51.6 的设计输入在 B2 全核（含四段非 GEMM）落地。

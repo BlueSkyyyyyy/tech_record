@@ -720,8 +720,19 @@
       **不必**为 `q/k/g` 单设 smem staging；`q` 保持直读 global 更划算；若合流须不增 smem 峰值且不掉占用率
       ——但本轮已证即便做到仍 +8.7%，故**不作为优化项**。**方法学**：把「ncu 计数里的散读」当成本前，须用
       「换算子只改取数来源、occupancy 不变」的受控对拍验证它是否在关键路径上。
-
-
+- [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
+      边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
+      （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
+      `dkgb`（`:952-953`）、门控链 `dqg/dkg`（先写 `dqgv/dkgv[2][4]`，循环后成对存 `:1011-1014`）与 `dg`
+      （`:1054-1055`）——**算术一字未动**。新增 `harness/check_bwd_b2_vecst_seg.py`
+      （`harness/check_bwd_b2_vecst_seg.out.txt`，空闲卡）。**Part A**：四段 base vs vecst 同源对照，四组
+      shape（含非整除 `T=250`）**全部逐位相同（`max_abs=0`）**；门控 vecst vs FLA `dqg 1.051e-3/dkg 9.466e-4/
+      dg 1.010e-3` **逐值同 P7-57**（tf32 底噪）。**Part B（关键）**：CUPTI `dev` vecst/base **16/16 全为正**
+      ——小 shape（`T512/T250`）**0.835–0.919×**、大 shape（`B8T2048H8`）**0.983–0.990×**，`db` 段（一次
+      向量化 `dv2/dvb/dkgb` 三个大张量）大 shape 也 **0.940×**。**机制**：`db` build 的 SASS `STG.E`
+      **50→2**、`STG.E.64` 0→**24**（残留 2 条标量为 `dgk` 列归约与 `db_out` thread-per-row，非成对形态）。
+      见 `docs/07` §62。**边界**：`[BT,BT]` 的 `dA`/`dApre` 未向量化（小张量 + thread-per-entry 布局）；
+      仅 `K=V=128`、`BT=16`、fp32。至此 B2 全核（含四段非 GEMM）的 token-major store 全部 64-bit 向量化。
 - [x] **P7-32** 兑现 §34.4 的**待验证**：把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**，
       验证能否复现 §34.1「删掉 store」收益的那 33%。给 `b1_tma_probe.cu` 加 `-DB1T_TMADH`：per-warp
       `[KD,BW]=[128,16]` 未 padding tile 写入加进 `Shared` 的**双缓冲** `dho[2][NW][KD][BW]`，lane 0 发
@@ -1088,8 +1099,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-58 补测**。
-  - P7-58（本轮）：**兑现 §60.5「门控链的下一杠杆＝把 `q/k/g` 合流载入 smem 收回 +30%」（待验证），
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-59 补测**。
+  - P7-59（本轮）：**收口 §51.6「向量化 store 一律做」在 B2 非 GEMM 四段上留下的边界**（P7-52/53/56/57
+    每轮边界都写「本段 store 未接 `-DB2M_VECST`」）。给 `b2_mma_probe.cu` 加 `st2()` 成对 store 助手
+    （`:96`：`B2M_VECST` 下一条 `STG.E.64`、否则两条标量），落到 `dv2/dvb`（`:934-940`）、`dkgb`
+    （`:952-953`）、门控 `dqg/dkg`（改先写 `dqgv/dkgv[2][4]`，循环后成对存 `:1011-1014`）与 `dg`
+    （`:1054-1055`）——**算术一字未动**。新增 `harness/check_bwd_b2_vecst_seg.py`
+    （`harness/check_bwd_b2_vecst_seg.out.txt`，空闲卡）。**Part A**：四段 base vs vecst 同源对照、四组
+    shape（含非整除 `T=250`）**全部逐位相同（`max_abs=0`）**；门控 vecst vs FLA `dqg 1.051e-3/dkg 9.466e-4/
+    dg 1.010e-3` 逐值同 P7-57。**Part B**：CUPTI `dev` vecst/base **16/16 全为正**，小 shape `T512/T250`
+    **0.835–0.919×**、大 shape `B8T2048H8` 0.983–0.990×、`db` 段大 shape 也 **0.940×**。**机制**：`db` build
+    SASS `STG.E` **50→2**、`STG.E.64` 0→**24**。见 `docs/07` §62。**边界**：`dA`/`dApre` 未向量化（小张量 +
+    thread-per-entry）；仅 `K=V=128/BT=16/fp32`。**下一步＝维护/收尾**：§49.7–§60.5 的六段已全进 CUDA、合流
+    已证伪（P7-58）、四段 store 已向量化（本轮），K2 形状 CUDA B2 的廉价/半廉价项全部关闭；若继续，唯一
+    剩余的真结构项仍是 §55.6/§56.6 已点名的「六段**合成单一生产 launch**（OUT+SAND+DB+GATE 组合，目前各段
+    仍分 launcher）」与「B3 intra 折进 K2 形状」（须先合并 kernel 签名、处理寄存器/smem 峰值）。
     结论＝证伪（净亏）**（`docs/07` §61）。给 `b2_mma_probe.cu` 加 `-DB2M_QKG`（需 `B2M_GATE`；诊断
     `-DB2M_QKGP` 把 staging 行距 `KD`→`KD+4` 消固定列 row-aliasing 冲突）：chunk 开头一次合流 `[BT,KD]`
     staging 读 `q/k/g`（`:643-654`，与 `kg` 同构），门控改读 `sh->sq/skb/sgb[rowrel][col]`（`:960-976`，
