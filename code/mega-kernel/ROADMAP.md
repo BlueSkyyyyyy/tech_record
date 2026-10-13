@@ -4251,6 +4251,33 @@
   device 3，未 launch kernel）。配套博客 post `mega-kernel-64-mpk-sparse-mma`（weight 65）并更新
   `mega-kernel-00-index` 第 64 项。**本轮新增实验。**
 
+### P150 SM100 block-scaled FP8 linear 的内核内 tile 调度器走读（`docs/64-mpk-fp8-scheduler.md`）
+
+- [x] **P150-1** 补掉 `docs/32`（P119-1）**§2.3/§7 明留的「未展开」**——「`_scheduler`/`_epilogue_utils`/
+  `_cute_tie` 未逐行走」（其中 `_cute_tie` 已由 P146-1/`docs/60` §6 补掉）。把
+  `linear_fp8_sm100_scheduler.cuh`（199 行）+ `linear_fp8_sm100_epilogue_utils.cuh`（30 行）逐行打开，
+  并把「MPK 为什么和 DeepGEMM 不一样」量出来。见 `docs/64-mpk-fp8-scheduler.md`（快照
+  `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，本地 `/ssd/mirage_mpk_build`；DeepGEMM 对照
+  `~/github/DeepGEMM` commit `057ca59`；**纯源码走读 + 1 个 host 侧算术探针**，SM100 本机不可执行）。
+  三条 headline：**(A)（headline）** MPK 把 DeepGEMM 的「多 SM 摊 tile」调度器改成「**单 CTA 顺序全扫**」
+  ——`get_next_block` 的 tile 偏移硬编码 `+0`（`_scheduler.cuh:172`；DeepGEMM `gemm.cuh:186` 是
+  `+ blockIdx.x`）、生产发射 `kNumSMs=1`（`task_register.cc:4839`）；host 实测 `kNumSMs=1` 覆盖**全部**
+  tile，而同一条 HACK 注释（`:4818-4825`）提议的 `MPK_MAX_NUM_WORKERS`（**全仓唯一出现处就是这条注释、
+  无定义**）代入后只覆盖 **1 个** tile——是「持久化内核里 `blockIdx.x` 是 worker 序号」这个 launch
+  约定逼出的改写；**(B)（headline）** MPK 的 `Scheduler` 是 DeepGEMM 的**严格子集**（199 vs 314 行）
+  ——删掉 `get_next_block` 的 3 个 grouped 分支、`is_tma_multicast_valid`、
+  `get_aligned_effective_m_in_block`、SM90 `#if __CUDA_ARCH__<1000` multicast 修正与
+  `kEnsureZeroPadding`/`kKAlignment`/`kSFKSpan` 三参数，故只对 `GemmType::Normal`/`Batched` 返回 tile，
+  生产恰好只发 `Normal`（MoE grouped 走 `fp8_group_gemm_sm100.cuh`，`docs/33`）；**(C)（headline）**
+  「顺序扫 × swizzle」是 tile **双射**（host 实测 M=32×N=32 / 13×5 / 1×9 / 17×3 全 `BIJECTION OK`、
+  无越界无重复），单 CTA 全扫与 DeepGEMM 132-CTA 摊分在**覆盖集合**上等价；连 30 行的
+  `_epilogue_utils.cuh` 也藏一枚零调用点的 `EpilogueHeadSplits`（只有 `EpilogueIdentity` 被生产/单测用）。
+  判据只贡献 C3。新实验 `src/fp8_scheduler_order.cu` + `harness/fp8_scheduler_order.sh` +
+  `harness/fp8_scheduler_order.out.txt`（目标卡 H100/sm90a，host 侧算术，device 3，未 launch kernel）。
+  配套博客 post `mega-kernel-65-mpk-fp8-scheduler`（weight 66）并更新 `mega-kernel-00-index` 第 65 项。
+  P150-1 新留尾巴见文档 §12（未构建/未运行、grouped 静默产 0 tile 系静态推断、未与 DeepGEMM SM100 对跑、
+  `linear_sm100_mpk.cuh` 调度是否同构未核、`_tma_utils`/`_sm100_utils` 只借用行号）。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4642,7 +4669,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P149-1 完成（1/1）**。补掉 `docs/62`（P148-1）§6 明留的尾巴——那篇只走了稀疏 MMA 的
+- 当前进度：**P150-1 完成（1/1）**。补掉 `docs/32`（P119-1）§2.3/§7 明留的「`_scheduler`/`_epilogue_utils`/
+  `_cute_tie` 未逐行走」（`_cute_tie` 已由 P146-1/`docs/60` 补），把 `linear_fp8_sm100_scheduler.cuh`
+  （199 行）+ `linear_fp8_sm100_epilogue_utils.cuh`（30 行）逐行打开，见 `docs/64-mpk-fp8-scheduler.md`
+  （快照 `f9eb70c`，本地 `/ssd/mirage_mpk_build`；DeepGEMM 对照 `057ca59`；**纯源码走读 + 1 个 host 侧
+  算术探针**）。三条 headline：**(A)（headline）** MPK 把 DeepGEMM 的多 SM 摊 tile 调度器改成「单 CTA
+  顺序全扫」——tile 偏移硬编码 `+0`（`_scheduler.cuh:172` vs DeepGEMM `gemm.cuh:186` 的 `+blockIdx.x`）、
+  生产 `kNumSMs=1`（`task_register.cc:4839`）；host 实测 `kNumSMs=1` 覆盖全部 tile，而同一条 HACK 注释
+  （`:4818-4825`）提议的 `MPK_MAX_NUM_WORKERS`（全仓无定义、唯一出现在注释）代入后只覆盖 **1 个** tile；
+  **(B)（headline）** MPK `Scheduler` 是 DeepGEMM 的严格子集（199 vs 314 行），删掉 3 个 grouped 分支 +
+  `is_tma_multicast_valid` + `get_aligned_effective_m_in_block` + SM90 multicast 修正 + 3 模板参数，
+  只对 `Normal`/`Batched` 返回 tile，生产只发 `Normal`；(C)（headline）顺序扫 × swizzle 是 tile 双射
+  （host 实测 5 组形状全 `BIJECTION OK`），30 行 `_epilogue_utils` 也藏零调用点的 `EpilogueHeadSplits`。
+  判据只贡献 C3。新实验 `src/fp8_scheduler_order.cu` + `harness/fp8_scheduler_order.{sh,out.txt}`（目标卡
+  H100/sm90a，host 侧，device 3）。配套博客 post `mega-kernel-65-mpk-fp8-scheduler`（weight 66）并更新
+  `mega-kernel-00-index` 第 65 项。
+- 此前：**P149-1 完成（1/1）**。补掉 `docs/62`（P148-1）§6 明留的尾巴——那篇只走了稀疏 MMA 的
   **元数据 E** 侧（`tmem_e_frg`），未追 `tcgen05.mma.sp` 的**另一半输入 A**。见
   `docs/63-mpk-sparse-mma.md`（MPK `f9eb70c`、CUTLASS `deps/cutlass f3fde583`；**纯源码走读 + 1 个
   host 侧结构探测**，SM100 本体本机不可执行）。三条 headline：**(A)（headline）稀疏把「A 的 2:4
@@ -4706,7 +4748,9 @@
   引用是否指向别处）；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或 SM100 专属布局的其余面
   （`linear_fp8_1d2d_sm100_cute_tie` 想表达的 CuTe 解构路径、`fp8_group_gemm_sm100.cuh` 的 SF 段逐行、
   WS 指令落地后的对照、稀疏 A 的 2:4 物理排布/E→A 槽映射（本文只到 trait 形状，未追硬件）逐行）。
-  **`mma_traits_sm100.hpp` 的 `tmem_e_frg`/`tmem_frg_ws` 稀疏元数据与 WS 布局已由 P148-1/`docs/62`
+  **SM100 FP8 linear 的内核内 tile 调度器（`linear_fp8_sm100_scheduler.cuh` / `_epilogue_utils.cuh`）已由
+  P150-1/`docs/64` 补掉**（`docs/32` §2.3/§7 的尾巴）；**`mma_traits_sm100.hpp` 的
+  `tmem_e_frg`/`tmem_frg_ws` 稀疏元数据与 WS 布局已由 P148-1/`docs/62`
   补掉**；**稀疏 UMMA 的 A 操作数通路（`sparse_elem`/`SpAtom`/`sparse_smem_desc`/`sparse_flag_`）已由
   P149-1/`docs/63` 补掉**（`tcgen05.mma.sp` 的 A+E+flag 三件套至此齐全）；**Hopper CuTe WS GEMM device
   家族已由 P147-1/`docs/61` 补掉**（顺带补掉 `docs/30` §5 只从 wrapper 视角的缺口）；**CUTLASS
