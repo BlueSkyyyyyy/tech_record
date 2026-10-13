@@ -1798,8 +1798,24 @@
        `bmt_intra/bmt` **1.203–2.204×**（折叠串行尾巴，同 §66/§95；最差 `(128,64)=2.204×` 因折叠把 TMA
        救回的 2-block 占用顶回 1）、`bmt_da_intra` 介于两者。**结论**：§107.6 边界关闭；默认部署仍 §45 的 `cf`、
        六段核 bf16 取 `-DB2M_BF16[MMA]` 不开 TMA/BVK64（§81.4/§107.5）；bf16-TMA 底座上取舍＝`DAMMA` 免费赢、
-       `INTRA` 仍是按 `K` 切换的串行尾巴。**边界**：单卡/`BT=16`/fp32 输出、`K=256` 叠 `INTRA` 不可启动
-       （资源）、未做 `ncu`（沿用 §107 读侧剖析）、其它两两组合未逐一。
+        `INTRA` 仍是按 `K` 切换的串行尾巴。**边界**：单卡/`BT=16`/fp32 输出、`K=256` 叠 `INTRA` 不可启动
+        （资源）、未做 `ncu`（沿用 §107 读侧剖析）、其它两两组合未逐一。
+- [x] **P7-106** 关闭 §108.6（P7-105）明确留下的最后一条边界——`bf16mma_tma` 多旋钮叠加的 **`ncu`**（P7-105
+       只证「数值可叠加」，未看资源/pipe）。新增 `harness/ncu_b2_stack_driver.py`（支持
+       `b2prod_launch`/`b2prod_intra_launch` 两入口；**坑**：`INTRA` 的 `dAqk` 指针在 `SCALE` 之后的第二组
+       指针里，放错组报 `argument 25: wrong type`）+ `harness/probe_b2_stack_ncu.sh`
+       （`harness/probe_b2_stack_ncu.out.txt`）；`b2_mma_probe.cu` 一行未改。四 build
+       （`bmt/bmt_da/bmt_intra/bmt_da_intra`）× `(K,V)=(128,128)/(128,64)`、`B8T2048H8`、单次 launch。
+       **结论＝干净的可加模型**：`DAMMA`＝**纯 bank-conflict/wavefront 项**（两 `(K,V)` 下全局 ld/st sectors
+       与 `dram__bytes` **逐位中性**，只 bank conflict −39.5%/−32.8%）；`INTRA`＝**全局 ld sectors
+       +6,553,600（与 `V` 无关**、＝`q/k/g` 重读 `3·BT·KD·4`+`dAqk`，与 §104.3 解析式逐值吻合）
+       ＋ smem 顶破占用台阶（`(128,64)` 2→1 block/SM、warps 24.55→12.45%）＋ bank conflict +46%/+63%，
+       而**写 sectors 与 `dram__bytes_write` 逐位不变**。**叠加逐项可加**：bank conflict `(128,128)`
+       `27.84−11.01+12.85=29.68M`＝观测 `29,679,619`（逐位级）、wavefronts／ld sectors／时间
+       （`1.18+(1.02−1.18)+(1.52−1.18)=1.36 ms`＝观测 1.36 ms）同样可加。**唯一交互在寄存器**：`INTRA`
+       抬 regs 128→153、`DAMMA` 压 DA regs 92→80，叠加后 regs＝base 128——但**不改 achieved 占用率**
+       （由 smem 决定，`sm__warps_active` 恒由占用台阶钉死）。**设计输入**：该底座上 `DAMMA`/`INTRA`
+       代价线性叠加、从不争同一资源，可独立取舍（与 §108.4 一致）；默认部署仍 §45 的 `cf`。见 `docs/07` §109。
 
 ### P8 小结 / 一页纸
 
@@ -1872,6 +1888,13 @@
        与「最终部署建议」的 `bf16mma_tma` 底座旋钮取舍补句，弧标题 `P7-97…P7-103`→`P7-97…P7-105`（同时修正
        P8-9 未同步的弧标题）、口径标 `§100–§107`→`§100–§108`、文档头 `P8-1…P8-9`→`P8-1…P8-10`。数字全部复用
        `docs/07` §108 本机实测、未新增实验（遵循 P8-1…P8-9 口径）。
+- [x] **P8-11** 补全一页纸（`docs/08-summary.md`）——把「比写量」判据收口弧从 **§100–§108** 扩到 **§100–§109**：
+       新增 **§109 bullet**（`bf16mma_tma` 多旋钮叠加的 `ncu` pipe 归因——`DAMMA` 纯 bank-conflict 项/字节
+       中性、`INTRA` 全局读 `+6,553,600`＋smem 占用台阶，叠加后 bank conflict/wavefronts/ld sectors/时间
+       **逐项可加**，唯一交互是 `DAMMA` 抵消 `INTRA` 的寄存器增长而不改占用率），并在「最终部署建议」的
+       `bf16mma_tma` 底座旋钮取舍补「代价线性叠加、从不争同一资源」补句；弧标题 `P7-97…P7-105`→`P7-97…P7-106`、
+       口径标 `§100–§108`→`§100–§109`、文档头 `P8-1…P8-10`→`P8-1…P8-11`。数字全部复用 `docs/07` §109
+       本机实测、未新增实验（遵循 P8-1…P8-10 口径）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2119,12 +2142,29 @@
   `zeros_like` 模板 mask `q/k/g`（宽 `K`），故此前**只在 `K==V` 上 index-correct**（`K≠V` 报 shape mismatch
   或静默错）。已修为 `q4/k4/g4` 形状；`K==V` 逐位不变。另它把 `[B,T,H,·]` view 成 `[B,NT,BT,H,·]`，故
   **非整除 `T` 下不可用**（用 FLA 参考）。
+- **`ncu_b2_stack_driver.py` 的 ctypes 签名：`INTRA` 入口多出的 `dAqk` 指针属于 `SCALE` 之后的第二组指针**
+  （P7-106，§109）：`b2prod_intra_launch` 的实参序是 `…, dg, SCALE, db, dApre, A, dA, **dAqk**, B,T,H,NT,stream`，
+  故 `argtypes = [c_void_p]*24 + [c_float] + [c_void_p]*5 + [c_int]*4 + [c_void_p]`（非 `[c_void_p]*25 + [c_float]…`）。
+  放错组会报 `ctypes.ArgumentError: argument 25: TypeError: wrong type`（在 `fn(*args)` 处），而非内核错。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-105 补测 + P8-3…P8-10**。
-  - P8-10（本轮，**文档-only**）：补全一页纸（`docs/08-summary.md`）——把「比写量」判据收口弧从 **§100–§107**
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-106 补测 + P8-3…P8-11**。
+  - P7-106 + P8-11（本轮）：**关闭 §108.6（P7-105）明确留下的最后一条边界——`bf16mma_tma` 多旋钮叠加的
+    `ncu`**（P7-105 只证「数值可叠加」，未看资源/pipe）。新增 `harness/ncu_b2_stack_driver.py`（两入口
+    `b2prod_launch`/`b2prod_intra_launch`；**坑**：`INTRA` 的 `dAqk` 指针属 `SCALE` 之后的第二组指针）+
+    `harness/probe_b2_stack_ncu.sh`（`harness/probe_b2_stack_ncu.out.txt`，空闲卡）；`b2_mma_probe.cu`
+    一行未改。四 build × `(K,V)=(128,128)/(128,64)`、`B8T2048H8`、单次 launch。**结论＝干净的可加模型**：
+    `DAMMA`＝纯 bank-conflict/wavefront 项（全局 ld/st sectors 与 `dram__bytes` 逐位中性，只 bank conflict
+    −39.5%/−32.8%）；`INTRA`＝全局 ld sectors **+6,553,600（与 `V` 无关**、＝`q/k/g` 重读 `3·BT·KD·4`+`dAqk`）
+    ＋ smem 顶破占用台阶（`(128,64)` 2→1 block/SM、warps 24.55→12.45%）＋ bank conflict +46%/+63%，写 sectors
+    逐位不变。**叠加逐项可加**（bank conflict `(128,128)` `27.84−11.01+12.85=29.68M`＝观测 `29,679,619`；
+    时间 `1.36 ms`＝观测）；**唯一交互＝寄存器**（`DAMMA` 把 `INTRA` 抬的 128→153 拉回 base 128，但不改
+    achieved 占用率）。`docs/07` §109 + `docs/08-summary.md` 弧 `§100–§109`。**下一步（可选）**：专题维持
+    维护态——§45 的 `cf` 仍是目标卡反向默认；该底座的多旋钮取舍已从「值/资源/计时」补到「pipe 可加性」，
+    值不值得测的格子已无剩余（§109.5）。
+  - P8-10（上轮，**文档-only**）：补全一页纸（`docs/08-summary.md`）——把「比写量」判据收口弧从 **§100–§107**
     扩到 **§100–§108**：新增 **§108 bullet**（`bf16mma_tma` 底座上 `DAMMA`/`INTRA`/`BF16_VDW` 多旋钮叠加的
     正确性/资源/计时三段：`bmt_vdw ≡ bmt` 10 项逐位 0、`bmt_da` 只动 `dApre/dA`、`bmt_intra` vs
     `bmt+b3intra(K)` `dqg/dkg` 逐位 0；`DAMMA` 略降 regs、`INTRA` smem 只随 `K`、`K=256` 越界不可启动；

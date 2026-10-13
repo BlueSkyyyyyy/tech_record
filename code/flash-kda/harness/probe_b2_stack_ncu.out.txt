@@ -1,0 +1,595 @@
+== prebuild (outside ncu) ==
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+  built bmt K=128 V=128
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+  built bmt_da K=128 V=128
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+  built bmt_intra K=128 V=128
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+  built bmt_da_intra K=128 V=128
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+  built bmt K=128 V=64
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+  built bmt_da K=128 V=64
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+  built bmt_intra K=128 V=64
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1378): warning #177-D: variable "o0" was declared but never referenced
+          const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
+                        ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1379): warning #177-D: variable "o1" was declared but never referenced
+          const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
+                        ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(1024): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(455): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(506): warning #177-D: variable "OPS" was declared but never referenced
+  constexpr int OPS = BVK + 8;
+                ^
+
+  built bmt_da_intra K=128 V=64
+
+################################################################################
+# b2prod_launch  shape=b8t2048h8  K=128  V=128  tag=bmt
+################################################################################
+b2prod ok  shape=b8t2048h8 K=128 V=128 tag=bmt reps=6
+[3867859] python3.12@127.0.0.1
+  b2mma_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, int, int, int, int) (128, 64, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Mbyte       882.18
+    dram__bytes_write.sum                                                             Mbyte       414.03
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        32.73
+    gpu__time_duration.sum                                                               ms         1.18
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    27844608
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                        68411392
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector     28180480
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum                                   sector     26476544
+    launch__occupancy_limit_registers                                                 block            2
+    launch__occupancy_limit_shared_mem                                                block            1
+    launch__registers_per_thread                                            register/thread          128
+    lts__t_bytes.sum                                                                  Gbyte         2.26
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        42.71
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         1.99
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        27.71
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        12.45
+    ----------------------------------------------------------------------- --------------- ------------
+
+
+################################################################################
+# b2prod_launch  shape=b8t2048h8  K=128  V=128  tag=bmt_da
+################################################################################
+b2prod ok  shape=b8t2048h8 K=128 V=128 tag=bmt_da reps=6
+[3867968] python3.12@127.0.0.1
+  b2mma_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, int, int, int, int) (128, 64, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Mbyte       882.18
+    dram__bytes_write.sum                                                             Mbyte       414.38
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        37.99
+    gpu__time_duration.sum                                                               ms         1.02
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    16834560
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                        44687360
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector     28180480
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum                                   sector     26476544
+    launch__occupancy_limit_registers                                                 block            2
+    launch__occupancy_limit_shared_mem                                                block            1
+    launch__registers_per_thread                                            register/thread          128
+    lts__t_bytes.sum                                                                  Gbyte         2.26
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        48.35
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         2.59
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        22.98
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        12.45
+    ----------------------------------------------------------------------- --------------- ------------
+
+
+################################################################################
+# b2prod_launch  shape=b8t2048h8  K=128  V=128  tag=bmt_intra
+################################################################################
+b2prod_intra ok  shape=b8t2048h8 K=128 V=128 tag=bmt_intra reps=6
+[3868241] python3.12@127.0.0.1
+  b2mma_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, const float *, int, int, int, int) (128, 64, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Mbyte       890.69
+    dram__bytes_write.sum                                                             Mbyte       414.37
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        25.61
+    gpu__time_duration.sum                                                               ms         1.52
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    40689664
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                        86695936
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector     34734080
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum                                   sector     26476544
+    launch__occupancy_limit_registers                                                 block            1
+    launch__occupancy_limit_shared_mem                                                block            1
+    launch__registers_per_thread                                            register/thread          153
+    lts__t_bytes.sum                                                                  Gbyte         2.35
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        33.48
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         1.99
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        25.24
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        12.45
+    ----------------------------------------------------------------------- --------------- ------------
+
+
+################################################################################
+# b2prod_launch  shape=b8t2048h8  K=128  V=128  tag=bmt_da_intra
+################################################################################
+b2prod_intra ok  shape=b8t2048h8 K=128 V=128 tag=bmt_da_intra reps=6
+[3868549] python3.12@127.0.0.1
+  b2mma_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, const float *, int, int, int, int) (128, 64, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Mbyte       890.58
+    dram__bytes_write.sum                                                             Mbyte       414.71
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        28.53
+    gpu__time_duration.sum                                                               ms         1.36
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    29679619
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                        62971907
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector     34734080
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum                                   sector     26476544
+    launch__occupancy_limit_registers                                                 block            2
+    launch__occupancy_limit_shared_mem                                                block            1
+    launch__registers_per_thread                                            register/thread          128
+    lts__t_bytes.sum                                                                  Gbyte         2.34
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        36.67
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         2.40
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        21.97
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        12.45
+    ----------------------------------------------------------------------- --------------- ------------
+
+
+################################################################################
+# b2prod_launch  shape=b8t2048h8  K=128  V=64  tag=bmt
+################################################################################
+b2prod ok  shape=b8t2048h8 K=128 V=64 tag=bmt reps=6
+[3868705] python3.12@127.0.0.1
+  b2mma_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, int, int, int, int) (128, 64, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Mbyte       550.57
+    dram__bytes_write.sum                                                             Mbyte       344.75
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        46.14
+    gpu__time_duration.sum                                                               us       578.82
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    18819879
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                        44444455
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector     27131904
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum                                   sector     22282240
+    launch__occupancy_limit_registers                                                 block            2
+    launch__occupancy_limit_shared_mem                                                block            2
+    launch__registers_per_thread                                            register/thread           92
+    lts__t_bytes.sum                                                                  Gbyte         1.69
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        58.31
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         2.13
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        36.09
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        24.54
+    ----------------------------------------------------------------------- --------------- ------------
+
+
+################################################################################
+# b2prod_launch  shape=b8t2048h8  K=128  V=64  tag=bmt_da
+################################################################################
+b2prod ok  shape=b8t2048h8 K=128 V=64 tag=bmt_da reps=6
+[3868839] python3.12@127.0.0.1
+  b2mma_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, int, int, int, int) (128, 64, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Mbyte       550.32
+    dram__bytes_write.sum                                                             Mbyte       344.69
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        49.11
+    gpu__time_duration.sum                                                               us       543.68
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    12644050
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                        29748946
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector     27131904
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum                                   sector     22282240
+    launch__occupancy_limit_registers                                                 block            3
+    launch__occupancy_limit_shared_mem                                                block            2
+    launch__registers_per_thread                                            register/thread           80
+    lts__t_bytes.sum                                                                  Gbyte         1.66
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        60.32
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         2.71
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        32.17
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        24.53
+    ----------------------------------------------------------------------- --------------- ------------
+
+
+################################################################################
+# b2prod_launch  shape=b8t2048h8  K=128  V=64  tag=bmt_intra
+################################################################################
+b2prod_intra ok  shape=b8t2048h8 K=128 V=64 tag=bmt_intra reps=6
+[3869038] python3.12@127.0.0.1
+  b2mma_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, const float *, int, int, int, int) (128, 64, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Mbyte       554.59
+    dram__bytes_write.sum                                                             Mbyte       345.29
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        20.97
+    gpu__time_duration.sum                                                               ms         1.28
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    30744696
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                        61808760
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector     33685504
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum                                   sector     22282240
+    launch__occupancy_limit_registers                                                 block            2
+    launch__occupancy_limit_shared_mem                                                block            1
+    launch__registers_per_thread                                            register/thread          128
+    lts__t_bytes.sum                                                                  Gbyte         1.67
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        28.08
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         1.49
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        22.04
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        12.45
+    ----------------------------------------------------------------------- --------------- ------------
+
+
+################################################################################
+# b2prod_launch  shape=b8t2048h8  K=128  V=64  tag=bmt_da_intra
+################################################################################
+b2prod_intra ok  shape=b8t2048h8 K=128 V=64 tag=bmt_da_intra reps=6
+[3869147] python3.12@127.0.0.1
+  b2mma_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, const float *, int, int, int, int) (128, 64, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Mbyte       554.61
+    dram__bytes_write.sum                                                             Mbyte       345.55
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        22.02
+    gpu__time_duration.sum                                                               ms         1.22
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    24444994
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                        46989378
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector     33685504
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum                                   sector     22282240
+    launch__occupancy_limit_registers                                                 block            2
+    launch__occupancy_limit_shared_mem                                                block            1
+    launch__registers_per_thread                                            register/thread          128
+    lts__t_bytes.sum                                                                  Gbyte         1.71
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        30.69
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         1.76
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        20.20
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        12.44
+    ----------------------------------------------------------------------- --------------- ------------
+
+
+== DONE ==

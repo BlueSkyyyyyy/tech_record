@@ -11586,3 +11586,108 @@ CUPTI `dev`（`B8 T2048 H8`，µs，30 次）：
 * `INTRA × bf16mma_tma × K=256` 不可启动（资源），未做数值；`BF16_VDW × DAMMA` 等其它两两组合未逐一；
   `TMA` 的 `ncu` 读侧判据沿用 §107（本轮未重复剖析）。
 * 外部锚点 `FLA` 只能给「all-bf16」非同口径上界（§105.6），同口径参照是纯 torch。
+
+---
+
+## 109. 关闭 §108.6 的最后一条边界——`bf16mma_tma` 多旋钮叠加的 `ncu`：`DAMMA`/`INTRA` 的 pipe 代价**可加且互不相交**，唯一交互是 `DAMMA` 的寄存器节省抵消 `INTRA` 的寄存器增长（P7-106）
+
+§108（P7-105）把 `-DB2M_DAMMA` / `-DB2M_INTRA` / `BF16_VDW` 叠在 `bmt = -DB2M_PROD -DB2M_HDW
+-DB2M_BF16 -DB2M_BF16MMA -DB2M_BVK=64 -DB2M_TMA=1` 底座上，证明了它们**数值上**逐条同构/惰性、可自由
+叠加，但没有看**资源/pipe** 层面的行为——其 §108.5 明确留了「`ncu` 未做」。本轮补上：四个 build
+（`bmt` / `bmt_da` / `bmt_intra` / `bmt_da_intra`）× `(K,V)=(128,128)` 与 `(128,64)`（后者正是 §108.3
+最差的 `INTRA` 回归档、也是 §107.4 里唯一被 TMA「救回」2-block/SM 的 `K≠V` 档），`B8 T2048 H8`，
+每 build 单次 `b2mma_kernel` launch（`-k regex:b2mma_kernel -c 1 --launch-skip 3`）。
+
+工具：新增 `harness/ncu_b2_stack_driver.py`（唯一改动＝同一 driver 支持两个入口
+`b2prod_launch` / `b2prod_intra_launch`：`INTRA` 版在内核签名末尾多一个 `dAqk` 指针，紧随 `dA`
+之后、再是 `B,T,H,NT,stream`；**坑**：该指针属于 `SCALE` 之后的第二组指针，不是第一组，放错组会报
+`ctypes.ArgumentError: argument 25: wrong type`）+ `harness/probe_b2_stack_ncu.sh`
+（`harness/probe_b2_stack_ncu.out.txt`）。`b2_mma_probe.cu` **一行未改**（只组合既有宏）。
+
+### 109.1 Part A：`(K,V)=(128,128)` 的逐 pipe 读数
+
+| 指标 | `bmt` | `bmt_da` | `bmt_intra` | `bmt_da_intra` |
+|---|---|---|---|---|
+| `dram__bytes_read` (MB) | 882.21 | 882.16 | 890.69 | 890.58 |
+| `dram__bytes_write` (MB) | 414.14 | 414.42 | 414.37 | 414.71 |
+| `l1tex` global **ld** sectors | 28,180,480 | 28,180,480 | 34,734,080 | 34,734,080 |
+| `l1tex` global **st** sectors | 26,476,544 | 26,476,544 | 26,476,544 | 26,476,544 |
+| shared-ld **bank conflicts** | 27,844,608 | 16,834,560 | 40,689,664 | 29,679,619 |
+| shared-ld wavefronts | 68,411,392 | 44,687,360 | 86,695,936 | 62,971,907 |
+| `lts__t_bytes` (GB) | 2.26 | 2.27 | 2.35 | 2.34 |
+| `gpu__time_duration` | 1.18 ms | 1.02 ms | 1.52 ms | 1.36 ms |
+| registers / `occ_limit_reg` | 128 / 2 | 128 / 2 | **153 / 1** | **128 / 2** |
+| `occ_limit_shared_mem` | 1 | 1 | 1 | 1 |
+| `sm__warps_active` % | 12.45 | 12.45 | 12.45 | 12.45 |
+| tensor % / `sm` % | 1.99 / 27.73 | 2.57 / 22.86 | 1.99 / 25.24 | 2.40 / 21.97 |
+
+### 109.2 Part B：`(K,V)=(128,64)` 的逐 pipe 读数
+
+| 指标 | `bmt` | `bmt_da` | `bmt_intra` | `bmt_da_intra` |
+|---|---|---|---|---|
+| `dram__bytes_read` (MB) | 550.57 | 550.32 | 554.59 | 554.61 |
+| `dram__bytes_write` (MB) | 344.75 | 344.69 | 345.29 | 345.55 |
+| `l1tex` global **ld** sectors | 27,131,904 | 27,131,904 | 33,685,504 | 33,685,504 |
+| `l1tex` global **st** sectors | 22,282,240 | 22,282,240 | 22,282,240 | 22,282,240 |
+| shared-ld **bank conflicts** | 18,819,879 | 12,644,050 | 30,744,696 | 24,444,994 |
+| shared-ld wavefronts | 44,444,455 | 29,748,946 | 61,808,760 | 46,989,378 |
+| `gpu__time_duration` | 578.8 µs | 543.7 µs | 1.28 ms | 1.22 ms |
+| registers / `occ_limit_reg` | 92 / 2 | **80 / 3** | **128 / 2** | **128 / 2** |
+| `occ_limit_shared_mem` | 2 | 2 | **1** | **1** |
+| `sm__warps_active` % | 24.55 | 24.53 | **12.45** | **12.44** |
+| tensor % / `sm` % | 2.13 / 36.09 | 2.71 / 32.17 | 1.49 / 22.04 | 1.76 / 20.20 |
+
+### 109.3 两个旋钮的 pipe 代价**可加**（唯一交互在寄存器）
+
+把「孤立增量」与「叠加后的观测」直接对：
+
+* **`DAMMA` 是纯 bank-conflict / shared-wavefront 项，字节逐位中性**：`bmt_da` 相对 `bmt`，两个 `(K,V)`
+  下 `l1tex` 全局 ld/st sectors、`dram__bytes_read/write` **全部逐位相同**（表格里 col2≡col1），只有
+  bank conflict 与 wavefronts 下降——`(128,128)` 27.84M→16.83M（**−39.5%**）、`(128,64)` 18.82M→12.64M
+  （**−32.8%**），wavefronts 同步 −34.7%/−33.1%。这正是 §66/§69/§86 里 `DAMMA` 的机制（TF32 `mma.sync`
+  的 DA 段替掉标量 FMA 的 smem 取数），在 **bf16 原生 mma + TMA** 底座上**原样复现**。
+* **`INTRA` 折叠的代价全在两处，且都**与 `V` 无关**：`bmt_intra` 相对 `bmt`，
+  (1) **全局 ld sectors +6,553,600（两个 `(K,V)` 完全相同）**＝`q/k/g` 重读 `3·BT·KD·4`＋`dAqk`
+  `BT·BT·4`（K=128 时 `25600 B/block`、grid `8192` 块、/32 = 6.5536M），**与 §104.3 的解析式逐值吻合**；
+  (2) **全局 st sectors 与 `dram__bytes_write` 逐位不变**（INTRA 只改 `dqg/dkg/dg/db` 的值、不新增 store，
+  同 §101/§102）；轻量的 `dram__bytes_read` +8.5/+4.0 MB 就是那点 `dAqk`。而代价的**大头是 smem 与 bank
+  conflict**：`(128,64)` 的 `occ_limit_shared_mem` 2→**1**（§108.3 的 `140928 B` 顶破 `116224 B` 门槛），
+  使 achieved warps 24.55→**12.45%**；bank conflict `(128,128)` +46%、`(128,64)` +63%。
+* **叠加后**：
+  * **bank conflict 可加**：`(128,128)` 孤立增量 `Δda=−11.0M`、`Δintra=+12.85M`，`bmt + Δda + Δintra =
+    29.68M`＝观测值 `29,679,619`（**逐位级吻合**）；`(128,64)` 预测 `24.56M` vs 观测 `24.44M`（差 0.5%）。
+    shared wavefronts 同理：`(128,128)` `68.41−23.72+18.28 = 62.97M`＝观测 `62,971,907`。
+  * **全局 ld/st sectors 可加**：叠加 = base + `INTRA` 的 `+6.55M`（`DAMMA` 中性），观测完全一致。
+  * **时间可加**：`(128,128)` `1.18 + (1.02−1.18) + (1.52−1.18) = 1.36 ms`＝观测 **1.36 ms**；
+    `(128,64)` 预测 `1.245 ms` vs 观测 `1.22 ms`（2% 内）。
+  * **唯一的交互在寄存器**：`INTRA` 单独把 regs 抬到 **153 / 128**（`(128,128) / (128,64)`）、
+    `occ_limit_reg` 打到 1；`DAMMA` 单独把 DA 寄存器压小（`(128,64)` 92→**80**、`occ_limit_reg` 2→3）。
+    **叠加后 regs = base（128）**——`DAMMA` 的寄存器节省**恰好抵消** `INTRA` 的增长。但这**不改
+    achieved 占用率**：`(128,128)` 本就 smem-bound（`occ_limit_smem=1`）、`(128,64)` 的占用由 `INTRA`
+    的 smem 决定（2→1），故 `bmt_da_intra` 的 warps 仍 12.44–12.45%（＝`bmt_intra`），与 §108.3 的
+    `dai/bmt` 计时介于两者之间自洽。
+* **`sm__warps_active` 全程只由占用率台阶决定**：`(128,128)` 四个 build 恒 12.45%（1 block/SM）、
+  `(128,64)` 的 `bmt`/`bmt_da` 恒 24.5%（2 blocks/SM）、`bmt_intra`/`bmt_da_intra` 恒 12.45%（1 block/SM）——
+  **再一次印证「本核非占用率受限」（§61/§63/§68/§70）：`DAMMA` 把 reg 门槛从 2 提到 3 也换不到任何
+  achieved warps。**
+
+### 109.4 结论与设计输入
+
+* **§108.6 的「多旋钮叠加未做 `ncu`」边界关闭**。答案是一个**干净的可加模型**：在该生产核上，`DAMMA`
+  与 `INTRA` 作用在**互不相交的 pipe**（前者只动 shared-load bank conflict/wavefront、字节中性；后者加
+  全局读 + smem staging、字节中性于写），其 `ncu` 代价（bank conflict、wavefront、ld sectors、时长）
+  **逐项可加**，无第三项交互；唯一非加性的是寄存器（`DAMMA` 抵消 `INTRA`），且不影响 achieved 占用率。
+* **设计输入**：目标卡 CUDA B2 若走 `bf16mma_tma` 底座，`DAMMA`（免费、且**顺带抵消 `INTRA` 的寄存器
+  增长**）与 `INTRA`（按 `K` 计费的 smem 串行尾巴）可**独立取舍、代价线性叠加**，与 §108.4 的部署建议
+  （默认仍是 §45 的 `cf`；该底座上取舍＝`DAMMA` 净赢、`INTRA` 按 `K` 切换）一致；本轮把「为什么可加」
+  钉在 pipe 上：二者从不争同一资源。
+* **口径**：`ncu` 的 `gpu__time_duration` 与 §108.3 的 CUPTI `dev` 不同源（同 §25.5/§63.5），但比值方向
+  一致（`bmt_da/bmt` at (128,64) `543.7/578.8=0.940` 落在 §108.3 的 0.819–0.941 内；`bmt_intra/bmt` at
+  (128,64) `1.28/0.579=2.21×`＝§108.3 的 2.204×）。**比值以 CUPTI/`wall` 为准，`ncu` 只用于 pipe 归因。**
+
+### 109.5 边界（诚实）
+
+* 单卡、`BT=16`、`B8 T2048 H8`、fp32 输出、`(K,V)∈{(128,128),(128,64)}`（两点标定可加性，未扫全
+  `K,V∈{64,128,256}` 网格；`(64,128)` 与 `K=256` 未剖析）。`BF16_VDW` 未进本轮 `ncu`（§87/§90/§108 已证
+  为 TMA 下的编译期 no-op）；`bmt_da_intra` 的数值正确性沿用 §108。`ncu` 单次 replay、非确定性在
+  ≤0.1%（`(128,64)` 的 bank conflict/base 两次读数 18.814M vs 18.820M）。
