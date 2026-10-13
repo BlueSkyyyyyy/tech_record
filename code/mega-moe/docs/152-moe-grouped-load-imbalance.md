@@ -72,7 +72,7 @@ DeepGEMM 的两个 host 入口（`csrc/apis/gemm.hpp`）分别对应两种把 `m
 
 关键在 `deep_gemm/include/deep_gemm/scheduler/gemm.cuh` 的 `Scheduler`。它把「M 块 × N 块」的
 二维工作摊到一个 **persistent grid**（`grid_dim = num_sms`，`sm90_fp8_gemm_1d2d.hpp:197-207`）上，
-worker 用 `next_block_idx = (++current_iter)*kNumSMs + blockIdx.x` 领取（`:186`）。
+worker 用 `next_block_idx = (++current_iter)*kNumSMs + blockIdx.x` 领取（`:185`）。
 
 **contiguous：一个 M 池。** 构造时 `num_blocks = num_m_blocks * num_n_blocks`（`:92-93`），
 把整段物理 M（含每专家末尾的 128 对齐 gap）当成一个连续池。取址只按块首行定组：
