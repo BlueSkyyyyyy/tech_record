@@ -2628,6 +2628,36 @@
   目录第 14 项。**P99-1 尾部**：至此 `docs/11`（§31–§58）/`docs/12`（§71–§85）/`docs/13`（§59–§70）
   三本手册合拢「调度机制 / 共驻税 / 端到端+数据面」闭环；`docs/04` 再无未并入手册的微基准节。
 
+### P100 前端/算子层源码走读（`docs/14-mpk-frontend.md`）
+
+- [x] **P100-1** 补齐 `docs/06`（运行层）/`docs/07`（单 task device）/`docs/08`（依赖分析器）三篇
+      **共同的上游空白**：这三篇都从「已存在的 bGraph / `task_configs`」讲起，而「一张算子图是谁、
+      怎么建出来的」一直没走；`docs/08` §对照表明写「算子分解不在 `annotated_graph.cc`；由
+      `task_configs` + bgraph `grid_dim` 提供，分解策略本身在 `task_register.cc`/前端」。见
+      `docs/14-mpk-frontend.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与
+      `docs/06`/`07`/`08` 同快照）。七节：§0 编译栈四层（前端/依赖分析/运行层/device）与本文件定位；
+      §1 前端三层对象 `KNGraph`（`kernel.py:208`，高层算子 API `:240-282` vs 手工 task API `:283/:802`）、
+      `TBGraph`（`threadblock.py:4`，`new_input` `:8-15`）、`PersistentKernel`（`persistent_kernel.py:413`，
+      `:501` 建 `KNGraph(disable_fingerprint=True)`）；§2 一个 layer 的三步骨架（以 `rmsnorm_layer`
+      `:865-881`/`embed_layer` `:842-863`/`linear_layer` `:2390-2456`/`allreduce_layer` `:2488-2512`
+      为例——建 `CyTBGraph(grid_dim,block_dim,1,64)`、`new_input(tensor,input_map,forloop_dim,store_in_dmem)`
+      声明 grid→tensor 映射、`customized`+`register_task` 固化；`input_map`/`output_map` 就是
+      `docs/08` 里 `EdgeInfo`/`TaskView::axis_map` 的来源；`grid_for_rmsnorm_linear_layer`
+      `models/utils.py:3-14`）；§3 C++ 侧 `KNOperator`（`operator.h:29-53`，不含 bGraph）vs
+      `KNCustomizedOp`（`customized.h:40` 带 bGraph）、`Graph::customized`→`create_customized_op`
+      （`customized.cc:35-105`，按位置校验 `inputs` 与 `TB_INPUT_OP` 对齐）、`Graph::register_task`
+      （`graph.cc:439`，取 `operators.back()`、**95 分支** name→`(num_inputs,num_outputs,TaskType,
+      variant_id)`、写 `task_config` 成员 `graph.h:230-233`）、`core.pyx:1118-1129` 里 `bgraph` 形参
+      被绑定层丢弃；§4 消费侧（`runtime.cc:222-243` `build_annotated_graph`；`annotated_graph.cc:278-283`
+      **只认 `KN_CUSTOMIZED_OP`** → 高层算子不进 tGraph；`runtime.cc:1395-1420` 用 `bgraph.grid_dim`
+      展开 task；`view/narrow/split` 是虚拟张量不进 `operators` → `is_barrier_edge`）；§5 与论文
+      §4.1（行 462–468）/§4.2（行 1126–1146）逐条对照——**论文描述自动分解、`mpk` 生产前端是手工
+      任务图**（对上 `docs/07` §0 的「superoptimizer vs 手写/CUTLASS 并存」）；§6 判据映射——前端只
+      决定 C3 的**范围**（每 `customized()` 一个算子），C1/C2/C4/C5 由运行层保证；§7 局限（纯走读未构建、
+      未逐行走 95 个 task、模型 builder/多卡切分未深挖、自动 superoptimizer 路径未覆盖）。**纯源码走读
+      （资料分析），本轮无新实验。** 配套博客 post `mega-kernel-15-mpk-frontend`（weight 16）并更新
+      `mega-kernel-00-index` 目录第 15 项。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2771,7 +2801,14 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P99-1 完成（1/1）**。补掉 P98-1（`docs/12` §10 末句）明留的尾巴——把
+- 当前进度：**P100-1 完成（1/1）**。补齐 `docs/06`/`docs/07`/`docs/08` 三篇**共同的上游空白**——
+  「一张算子图是谁、怎么建出来的」。见 `docs/14-mpk-frontend.md`（快照 `f9eb70c`，纯源码走读无新实验）：
+  MPK 线上前端不是「高层算子自动分解」的编译器，而是一套**手工作者 task API**——每个 `*_layer()` 建一张
+  bGraph（`customized()`）+ 一条 `task_config`（`register_task()`），95 个手工分支登记 95 个 TaskType；
+  `annotated_graph.cc:278-283` 只认 `KN_CUSTOMIZED_OP`，前端 `new_input` 的 `input_map`/`output_map` 正是
+  `docs/08` 依赖分析的输入。§5 与论文 §4.1/§4.2 对照，§6 判据映射（前端只定 C3 的范围）。配套博客 post
+  `mega-kernel-15-mpk-frontend`（weight 16）、更新 `mega-kernel-00-index` 第 15 项。
+- 此前：**P99-1 完成（1/1）**。补掉 P98-1（`docs/12` §10 末句）明留的尾巴——把
   P71-1–P82-1（`docs/04-experiments.md` §59–§70）这一串**端到端调度骨架 + worker 数据面微基准**
   收口成第三本手册 `docs/13-endtoend-dataplane.md`（**纯资料汇总、无新增 H100 实验**；数字全部引自
   `docs/04` §59–§70 及 `harness/*.out.txt`）。七节：§0 手册在链条里的位置 → §1 数据面能到多快 /
