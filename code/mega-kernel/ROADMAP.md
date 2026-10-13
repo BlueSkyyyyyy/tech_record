@@ -2890,6 +2890,31 @@
   （资料分析），本轮无新实验。** 配套博客 post `mega-kernel-22-mpk-blackwell-transpiler`（weight 23）
   并更新 `mega-kernel-00-index` 第 22 项。
 
+### P108 汇总 5：MPK 源码走读手册（`docs/22-mpk-compiler-manual.md`）
+
+- [x] **P108-1** 把 P7–P11、P21、P100–P107（`docs/06`–`docs/08`、`docs/14`–`docs/21` 共**十一篇**
+      MPK 线上实现源码走读）收口成**一页编译栈总图 + 决策表 + 落差清单**（补齐 `docs/05` 只覆盖到 P6、
+      `docs/11`–`docs/13` 只覆盖实验侧、源码走读系列**无汇总手册**的缺口）。见
+      `docs/22-mpk-compiler-manual.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，
+      CuTe/CUTLASS 用快照自带 `deps/cutlass` 本机 `f3fde583`；**纯资料汇总，无新实验**）。结构：
+      §0 headline——**源码里有两条链、共用 `KNGraph` 后在 `KNCustomizedOp` 处分叉**（生产路径
+      `annotated_graph`→runtime→常驻 megakernel 拿 C1–C5；自动路径 `superoptimize`→transpiler→
+      kernel-per-operator 只到 C3）；§1 编译栈七层坐标表（前端/搜索/图 IR/codegen/运行层/device/多卡 →
+      哪条链用哪层 → 分篇）；§2 生产路径逐层（`docs/14`/`docs/08`/`docs/06`/`docs/07`：论文 §4.1 五步 →
+      `annotated_graph.cc` 十步 (a)–(j)，normalization = 拒绝 case2/3 + LCM 降级；128 worker/16
+      scheduler；单 task = 一个 CTA）；§3 自动路径逐层（`docs/15`/`docs/16`/`docs/18`/`docs/19`/
+      `docs/20`/`docs/21`：一台 superoptimizer 的 CUDA/NVCC、runtime 模板库、Triton、Blackwell 四个
+      后端）；§4 多卡（`docs/17`：C1 从优化变硬约束）；§5「**同一套惯用法实现了两遍**」三行清单；
+      §6「**已实现但未启用/未接线**」十一行清单（跨 `docs/08`/`docs/16`/`docs/18`/`docs/19`/`docs/20`/
+      `docs/21` 汇合，含 `check_range return true`、`instantiate_symbolic_graph return false`、
+      `search_c.cc:16 backend` 未引用、旧 Triton codegen 死代码、两份缺失的自引用文档、两处被注释的
+      `setmaxnreg`、生产前端不调 `superoptimize`）；§7 论文描述 vs 线上实现落差清单；§8 判据 C1–C5
+      逐层总映射（**只有运行层拿 C1/C2/C4/C5**）；§9 源码坐标总表（文件/行数/角色/分篇）；§10 局限；
+      §11 关键坐标。**纯资料汇总（资料分析），本轮无新实验**；配套博客 post
+      `mega-kernel-23-compiler-manual`（weight 24）并更新 `mega-kernel-00-index` 第 23 项。
+      **本专题任务清单此前全完成，本轮为源码走读系列新增的汇总增量；与 `docs/11`/`docs/12`/`docs/13`
+      （实验侧三本手册）并列。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3051,7 +3076,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P107-1 完成（1/1）**。补齐 `docs/18`（P104-1）**§8 明留的尾巴**——「Hopper/Blackwell
+- 当前进度：**P108-1 完成（1/1）**。把 P7–P11、P21、P100–P107（`docs/06`–`docs/08`、`docs/14`–`docs/21`
+  共**十一篇** MPK 线上实现源码走读）收口成**一页编译栈总图 + 决策表 + 落差清单**（补齐 `docs/05` 只到
+  P6、`docs/11`–`docs/13` 只覆盖实验侧、**源码走读系列无汇总手册**的缺口）。见
+  `docs/22-mpk-compiler-manual.md`（快照 `f9eb70c`，CuTe/CUTLASS 本机 `f3fde583`；**纯资料汇总、无
+  新实验**）。headline——**源码里有两条链、共用 `KNGraph` 后在 `KNCustomizedOp` 处分叉**：生产路径
+  （手工前端 → `annotated_graph` → runtime → **常驻 megakernel，拿 C1–C5**）vs 自动路径
+  （`superoptimize` → transpiler → **kernel-per-operator，只到 C3**）。§0 双链分叉；§1 七层坐标表；
+  §2 生产路径逐层（`docs/14`/`08`/`06`/`07`：论文 §4.1 五步 ↔ `annotated_graph.cc` 十步 (a)–(j)，
+  normalization = 拒绝 case2/3 + LCM 降级；128 worker/16 scheduler；单 task = 一个 CTA）；§3 自动路径
+  （`docs/15`/`16`/`18`/`19`/`20`/`21`：一台 superoptimizer 的 CUDA/runtime 模板库/Triton/Blackwell
+  四后端）；§4 多卡（`docs/17`：C1 变硬约束）；§5「**同一套惯用法实现两遍**」清单；§6「**已实现未
+  启用/未接线**」十一条清单（跨篇汇合）；§7 论文 vs 实现落差清单；§8 C1–C5 逐层总映射（**只有运行层
+  拿 C1/C2/C4/C5**）；§9 源码坐标总表；§10/§11 局限与坐标。配套博客 post
+  `mega-kernel-23-compiler-manual`（weight 24）并更新 `mega-kernel-00-index` 第 23 项。**与
+  `docs/11`/`docs/12`/`docs/13`（实验侧三本手册）并列，源码走读系列首次成册。**
+- 此前：**P107-1 完成（1/1）**。补齐 `docs/18`（P104-1）**§8 明留的尾巴**——「Hopper/Blackwell
   只给骨架；Blackwell 的 `2sm_mma` / `launch_kernel_on_cluster` 只标出调用点与行号，未逐行走读其内部」
   （Hopper 的一半已由 `docs/07` 覆盖）。见 `docs/21-mpk-blackwell-transpiler.md`（快照 `f9eb70c`，
   CuTe/CUTLASS 用快照自带 `deps/cutlass`、本机 `f3fde583`；**纯源码走读、无新实验**——Blackwell/SM100
