@@ -1342,6 +1342,26 @@
         b3」、`K=64` 用折叠的按 K 切换，或未来 warp-specialization 重叠），`K=256` 的 **bf16 staging 是容量
         （非速度）杠杆**。默认部署仍 §45 的 `cf`。见 `docs/07` §97。**边界**：单一 `ncu` shape、只试两种 pad
         （`P∈{0,4,8,16}`）、未做一般 swizzle（但「冲突大降、时长不动」已否定量级项）。
+- [x] **P7-97** 关闭 §99.7（P7-96）明确留下的边界——**`-DB2M_TMA` / `-DB2M_BF16MMA` 未用 §99 的写侧
+       三口径分解复测**（当时顾虑「TMA 走独立引擎、写侧口径不同」）。六个生产形态（全部
+       `-DB2M_PROD -DB2M_HDW`、`B8T2048H8`、`V∈{128,256}`）＝dtype（fp32/bf16/bf16 mma）× staging
+       （`cp.async`/TMA），另补 `prod64`（fp32、`BVK=64`）隔离 `BVK`。**`b2_mma_probe.cu` 一行未改**。
+       新增 `harness/probe_b2_write_knobs_ncu.sh`（`harness/probe_b2_write_knobs_ncu.out.txt`，空闲卡）。
+       **Part A**：**六个形态的 L1 全局 store 扇区全逐位相同（`V=256 34 865 152` / `V=128 26 476 544`）、
+       store 请求也逐位相同**——**§99 的新判据穿越 TMA/BF16MMA 仍成立**（TMA 的独立引擎只在**输入侧**，
+       输出仍是 generic `st.global`，故在 L1 扇区里可见；§99.7 的「TMA 写侧口径不同」不成立）。
+       **关键**：`+35 MB` **不是 dtype 效应、也不是 TMA 效应**——DRAM 写
+       `bf16 591.0 > bf16mma 583.2 > prod 555.7 ≈ prod64 555.7 > bf16tma ≈ bf16mmatma 550.9`，
+       TMA 两列**比解析输出还低**。`prod` vs `prod64` 证明 **`BVK` 对写侧零影响**（555.67 vs 555.72）。
+       **Part B（散点）**：解析输出 $U$=558.4 MB，$\Delta=D-U$ 横跨 **`bf16 +32.6 / bf16mma +24.8 /
+       prod −2.7 / prod64 −2.7 / bf16tma −7.5 / bf16mmatma −7.4` MB**——**方向可正可负、非 dtype/非 TMA/
+       非 duration（`bf16mma` 1.29ms 比 `bf16` 1.43ms 快却少写 8MB）/非占用率的单调函数**，纯 L2 写回
+       窗口残影（把 §99.5 从「bf16 专属单点」扩成「跨配置 [−8,+33] MB 散点」）。**Part C**：`bf16tma`
+       跨 `--launch-skip∈{0,1,5}` 极差 ≤1.2 MB、L1 扇区逐位复现（确定性，同 §99.4）。**结论**：判据加强
+       ——目标卡 CUDA B2 写量比一律用 `l1tex__t_sectors_pipe_lsu_mem_global_op_st`（对 dtype/`BVK`/
+       staging/mma ISA 全逐位不变）或解析输出，`dram__bytes_write` 对有 bf16/TMA 输入的形态都禁用；
+       TMA 读侧收益（2.98→1.58 GB）与部署结论不变。见 `docs/07` §100。**边界**：单 shape、`K=128`、
+       `BT=16`、只两 `V`；`INTRA`/`DAMMA`/`K≠V` 交叉未测；「为何恰 ±」的 L2 replacement 级成因仍待验证。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1887,14 +1907,34 @@
   +在飞 CTA 更多改变了写/读在 L2 的时间交错），非「多写」。**判据**：本核跨配置比写量用
   **`l1tex__t_sectors_pipe_lsu_mem_global_op_st`**（store 指令流，与 dtype/占用率无关）或解析输出大小，
   不用 `dram__bytes_write`；`lts__t_sectors_op_write` 次之（L2 收到的量）。同 §75.4 的三口径，反过来
-  用在**写侧**（§75.4 是读侧）。要隔离占用率变量可用诊断宏 `-DB2M_SMEM_SLACK`（预留无用动态 smem、
-  默认 0、不改指令）。
+   用在**写侧**（§75.4 是读侧）。要隔离占用率变量可用诊断宏 `-DB2M_SMEM_SLACK`（预留无用动态 smem、
+   默认 0、不改指令）。**推广（P7-97，§100）**：该判据对 **`-DB2M_TMA` / `-DB2M_BF16MMA` 同样成立**
+   ——六形态（dtype×staging）的 L1 全局 store 扇区**逐位相同**（TMA 的独立引擎只在输入侧、输出仍是
+   generic `st.global`）；`dram__bytes_write` 相对解析输出的偏差是**跨配置 [−8,+33] MB 的散点、正负
+   都有**（`bf16tma` 比解析输出还低），且**非 dtype/非 TMA/非 duration/非占用率的单调函数**（`bf16mma`
+   更快却少写）。`BVK` 对写侧零影响（`prod`==`prod64`）。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-96 补测 + P8-3/P8-4**。
-  - P7-96（本轮）：**关闭 §87.5（P7-84）明确留的最后一条「待验证」——bf16 写侧 `dram__bytes_write`
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-97 补测 + P8-3/P8-4**。
+  - P7-97（本轮）：**关闭 §99.7（P7-96）明确留下的边界——`-DB2M_TMA` / `-DB2M_BF16MMA` 未用 §99 的
+    写侧三口径分解复测**（当时顾虑「TMA 走独立引擎、写侧口径不同」）。六个生产形态（`-DB2M_PROD
+    -DB2M_HDW`、`B8T2048H8`、`V∈{128,256}`）＝dtype（fp32/bf16/bf16-mma）×staging（`cp.async`/TMA），
+    另补 `prod64`（fp32、`BVK=64`）隔离 `BVK`；**`b2_mma_probe.cu` 一行未改**。新增
+    `harness/probe_b2_write_knobs_ncu.sh`（`harness/probe_b2_write_knobs_ncu.out.txt`，空闲卡）。
+    **Part A（关键）**：**六形态 L1 全局 store 扇区全逐位相同**（V=256 `34 865 152`、V=128 `26 476 544`）
+    ⟹ **§99 的新判据穿越 TMA/BF16MMA 仍成立**（TMA 独立引擎只在**输入侧**、输出仍是 generic `st.global`；
+    §99.7 的「TMA 写侧口径不同」不成立）。**`+35 MB` 既非 dtype 也非 TMA 效应**：DRAM 写
+    `bf16 591.0 > bf16mma 583.2 > prod 555.7 ≈ prod64 555.7 > bf16tma ≈ bf16mmatma 550.9`（TMA 两列比
+    解析输出还低）；`prod`==`prod64` 证 `BVK` 对写侧零影响。**Part B（散点）**：$\Delta=D-U$（$U$=558.4）
+    横跨 **`+32.6/+24.8/−2.7/−2.7/−7.5/−7.4` MB**——方向可正可负，**非 dtype/非 TMA/非 duration
+    （bf16mma 更快却少写）/非占用率的单调函数**，纯 L2 写回窗口残影（§99.5 从单点扩成散点）。
+    **Part C**：`bf16tma` 跨 `skip∈{0,1,5}` 极差 ≤1.2 MB、L1 扇区逐位复现（确定性）。**设计输入**：写量比
+    一律用 `l1tex__t_sectors_pipe_lsu_mem_global_op_st` 或解析输出，对有 bf16/TMA 输入的形态
+    `dram__bytes_write` 都禁用；TMA 读侧收益（2.98→1.58 GB）与部署结论不变。**边界**：单 shape/`K=128`/
+    `BT=16`/两 `V`；`INTRA`/`DAMMA`/`K≠V` 交叉未测；「为何恰 ±」的成因仍待验证。见 `docs/07` §100。
+  - P7-96（上轮）：**关闭 §87.5（P7-84）明确留的最后一条「待验证」——bf16 写侧 `dram__bytes_write`
     在 `V=256` 反高 +35 MB（590.9 vs 555.8），结论＝它写的是同一个东西、差在下游 L2 脏行写回窗口，
     `dram__bytes_write` 对本核不可跨配置比较**。给 launcher 加**诊断宏 `-DB2M_SMEM_SLACK`**（预留
     不被代码使用的动态 smem，默认 0、一条指令不动，`b2_mma_probe.cu:1975/2093/2143/2198/2274`）把
