@@ -227,6 +227,24 @@ DEV void st2(float* p, float a, float b) {
 #ifndef B2M_DA
 #define B2M_DA 0
 #endif
+// P7-66 (this revision): `-DB2M_DAMMA` -- re-express the P7-54 `dApre` segment (both contractions)
+// with `mma.sync.m16n8k8.tf32` instead of the scalar FMA loops.  §68.4 pinned DA's `184 us`
+// (30% of the bare core) to **scalar shared-memory math** -- it doubles the smem bank conflict
+// (9.4M -> 20.8M) while leaving `tensor%` at 1.6% -- and §68.5 named "mma-ize DA" the *only*
+// remaining magnitude lever.  Both terms are `X @ Y^T` with the contraction over the full V (base)
+// or K (`dw@kg^T`):
+//   base :  dApre[o_t,o_u] = sum_{v in warp V-slice} dv[o_t,v] * v[o_u,v]
+//   dwkg :  dApre[o_t,o_u]-= sum_{k in warp k-slice} dw[o_t,k] * kg[o_u,k]
+// Each warp owns a BW=16-wide contraction slice and computes the *whole* [BT,BT] partial into an
+// mma accumulator (2 n-tiles) with 2 mma k-steps per term, then the 8 partials are summed through
+// `dapart` exactly as before.  Arithmetic is tf32 (like OUT/DKGB/GEMM), so the standalone check
+// moves from the fp32 scalar floor (~5e-7) to the tf32 floor (~3.6e-4).  Requires `B2M_DA`.
+#ifndef B2M_DAMMA
+#define B2M_DAMMA 0
+#endif
+#if B2M_DAMMA && !B2M_DA
+#error "B2M_DAMMA requires B2M_DA"
+#endif
 // P7-55: the *fourth non-GEMM segment* of B2 in CUDA -- the final `dA` sandwich (the
 // remaining `dA` post-op §55.6/§56.6/§57.6 left open), i.e. the *complete* B2 `dA` output:
 //   A where m_A=(o_t>o_u) & valid:   dAm[o_t,o_u] = dApre[o_t,o_u] * beta[o_u]
@@ -724,10 +742,19 @@ b2mma_kernel(
         #pragma unroll
         for (int x = 0; x < 4; ++x) acc3[nt][x] = 0.f;
 #endif
-#if B2M_DA
+#if B2M_DA && !B2M_DAMMA
     float dbpart[8], dkpart[8];   // per-lane partials: 8 [r,c] entries each (r=l>>1, c=(l&1)*8+i)
     #pragma unroll
     for (int i = 0; i < 8; ++i) { dbpart[i] = 0.f; dkpart[i] = 0.f; }
+#endif
+#if B2M_DA && B2M_DAMMA
+    // P7-66: mma accumulators -- each warp computes the *full* [BT,BT] partial (2 n-tiles of
+    // m16n8) for both terms, over its own BW-wide contraction slice.  Same C layout as accq.
+    float dAacc[2][4], dKacc[2][4];
+    #pragma unroll
+    for (int nt = 0; nt < 2; ++nt)
+        #pragma unroll
+        for (int x = 0; x < 4; ++x) { dAacc[nt][x] = 0.f; dKacc[nt][x] = 0.f; }
 #endif
 #if B2M_VV_KG_ON
     // `kg = k*exp2(g)` for this chunk (rows t<T; pad rows zeroed).  One load per chunk (not per
@@ -936,7 +963,7 @@ b2mma_kernel(
             }
         }
 #endif
-#if B2M_DA && !B2M_OFF_DA
+#if B2M_DA && !B2M_DAMMA && !B2M_OFF_DA
         // ---- P7-54 base dA: dApre[o_t,o_u] += sum_{v in warp V cols} dv[o_t,v]*v[o_u,v] ----
         // Warp `w` owns V columns [w*BW, w*BW+BW) (only its matching stage contributes).
         // Lane `l` owns the 8 entries (r = l>>1, c = (l&1)*8 + i, i=0..7) of the [BT,BT] partial.
@@ -950,6 +977,32 @@ b2mma_kernel(
                     #pragma unroll
                     for (int i = 0; i < 8; ++i)
                         dbpart[i] += dvr * rd((const float*)st->vv, c0 + i, local0 + j, BT);
+                }
+            }
+        }
+#endif
+#if B2M_DA && B2M_DAMMA && !B2M_OFF_DA
+        // ---- P7-66 base dA via mma: dApre[o_t,o_u] += dv @ v^T over the warp's V slice ----
+        // A = dv[o_t, v], B = v[o_u, v] (row.col -> B is read as v[o_u,k]); contraction = warp's
+        // BW=16 V columns (2 mma k-steps of 8); the whole [BT,BT] partial lives in 2 n-tiles.
+        {
+            const int local0 = warp * BW - it * BVK;
+            if (local0 >= 0 && local0 + BW <= BVK) {
+                #pragma unroll
+                for (int kk = 0; kk < BW / 8; ++kk) {
+                    const int kc = local0 + kk * 8;
+                    const uint32_t a[4] = {
+                        to_tf32(rd((const float*)st->dv, g,     kc + t,     BT)),
+                        to_tf32(rd((const float*)st->dv, g + 8, kc + t,     BT)),
+                        to_tf32(rd((const float*)st->dv, g,     kc + t + 4, BT)),
+                        to_tf32(rd((const float*)st->dv, g + 8, kc + t + 4, BT))};
+                    #pragma unroll
+                    for (int nt = 0; nt < 2; ++nt) {
+                        uint32_t b[2];
+                        b[0] = to_tf32(rd((const float*)st->vv, nt * 8 + g, kc + t,     BT));
+                        b[1] = to_tf32(rd((const float*)st->vv, nt * 8 + g, kc + t + 4, BT));
+                        mma8(dAacc[nt], a, b, dAacc[nt]);
+                    }
                 }
             }
         }
@@ -1106,7 +1159,9 @@ b2mma_kernel(
 #if B2M_DA && !B2M_OFF_DA
     // ---- P7-54 post-loop: `dw @ kg^T` partial, reduce the 8 warps, store `dApre` ----
     {
+#if !B2M_DAMMA
         const int r = l >> 1, c0 = (l & 1) * 8;
+#endif
         // Mirror this warp's `dw` (=accw, mma-fragment layout: rows g/g+8, cols 2t/2t+1) into
         // `swall[warp]` so any lane can read it in row-major order.
         #pragma unroll
@@ -1118,6 +1173,34 @@ b2mma_kernel(
             sh->swall[warp][g + 8][col + 1] = accw[nt][3];
         }
         __syncwarp();
+#if B2M_DAMMA
+        // P7-66: `dw@kg^T` via mma over this warp's output k columns [warp*BW,warp*BW+BW).
+        // A = dw = swall[warp][o_t, k-local], B = kg = skg[o_u, warp*BW + k-local].  FLA negates
+        // `dw` (chunk_bwd.py:280-281), so this term is *subtracted* from the base below.
+        #pragma unroll
+        for (int kk = 0; kk < BW / 8; ++kk) {
+            const int kc = kk * 8;
+            const uint32_t a[4] = {
+                to_tf32(sh->swall[warp][g][kc + t]),     to_tf32(sh->swall[warp][g + 8][kc + t]),
+                to_tf32(sh->swall[warp][g][kc + t + 4]), to_tf32(sh->swall[warp][g + 8][kc + t + 4])};
+            #pragma unroll
+            for (int nt = 0; nt < 2; ++nt) {
+                uint32_t b[2];
+                b[0] = to_tf32(sh->skg[nt * 8 + g][warp * BW + kc + t]);
+                b[1] = to_tf32(sh->skg[nt * 8 + g][warp * BW + kc + t + 4]);
+                mma8(dKacc[nt], a, b, dKacc[nt]);
+            }
+        }
+        // write the [BT,BT] partial (mma C layout) as dAacc - dKacc
+        #pragma unroll
+        for (int nt = 0; nt < 2; ++nt) {
+            const int c = nt * 8 + 2 * t;
+            sh->dapart[warp][g][c]             = dAacc[nt][0] - dKacc[nt][0];
+            sh->dapart[warp][g][c + 1]         = dAacc[nt][1] - dKacc[nt][1];
+            sh->dapart[warp][g + 8][c]         = dAacc[nt][2] - dKacc[nt][2];
+            sh->dapart[warp][g + 8][c + 1]     = dAacc[nt][3] - dKacc[nt][3];
+        }
+#else
         // dw@kg^T partial over this warp's output k columns [warp*BW, warp*BW+BW).  FLA negates
         // `dw`, so the term is *subtracted* from the base below (matches `chunk_bwd.py:280-281`).
         #pragma unroll
@@ -1130,6 +1213,7 @@ b2mma_kernel(
         #pragma unroll
         for (int i = 0; i < 8; ++i)
             sh->dapart[warp][r][c0 + i] = dbpart[i] - dkpart[i];
+#endif
     }
     __syncthreads();
     {   // reduce the 8 warp partials (one thread per [BT,BT] entry)
