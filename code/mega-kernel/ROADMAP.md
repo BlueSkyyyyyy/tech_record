@@ -4393,8 +4393,44 @@
   B/MoE（走 CuTe TMA）0；`SM100_MMA_MXF8F6F4_2x1SM_SS`（`cta_group::2`）0 消费者——又一枚
   「有实现未启用」（生产登记 `kNumMulticast=1`）。
   判据只贡献 **C3**（同 `docs/07`/`docs/32`/`docs/57`）。配套博客 post
-  `mega-kernel-69-mpk-fp8-support`（weight 70）并更新 `mega-kernel-00-index` 第 69 项。
-  **本轮新增增量。**
+   `mega-kernel-69-mpk-fp8-support`（weight 70）并更新 `mega-kernel-00-index` 第 69 项。
+   **本轮新增增量。**
+
+### P155 SF 段并置走读：dense linear vs grouped MoE（`docs/69-mpk-sf-segments.md`）
+
+- [x] **P155-1** 补掉「下一步候选」第一条残留——`docs/33`（MoE group-GEMM）/`docs/34`（dense
+  block-scaled 线性）/`docs/59`（UTCCP 重排）/`docs/60`（`tmem_sf_frg`）/`docs/68`（支撑层描述符）
+  各覆盖了 **SF（scale factor）段**的一部分，却**从未把两条 device 身体的 SF 段并置逐行对走**。
+  见 `docs/69-mpk-sf-segments.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与
+  `docs/06`–`docs/68` 同快照；CUTLASS `deps/cutlass` `f3fde583`；DeepGEMM 对照 `~/github/DeepGEMM`
+  `057ca59`；**纯源码走读 + 1 个 host 侧算术探针**——SM100 本体在目标卡 H100/sm90 不可执行）。
+  对走的两个文件：`linear_fp8_sm100.cuh`（dense，828 行）与 `fp8_group_gemm_sm100.cuh`（grouped
+  MoE，1567 行）。三条 headline：
+  - **(A)（headline）同一个 `sf_id` 机制服务两种粒度、但语义在两条身体里相反**：dense 的
+    `shape_sfa_k = ceil(K/512)`（`:93`）⇒ 一个 uint32 装 **4 个不同**的 128-K 块 UE8M0，
+    `sfa_id = k_block_idx % 4`（`:495-498`）**按 `sf_id` 选到具体字节**（真地址选择）；MoE 硬编码
+    per-128（`bK=128`，`:452`）、把 1 个 scale **复制 4 份**（`:1379`/`:1402`，源码注释 `:197-198`
+    自陈 *"all 4 bytes identical"*），`sfa_id=sfb_id=k_sub`（`:1232-1233`）是**空操作**——同一硬件
+    接口的两种极端用法。
+  - **(B)（headline）「谁来搬/谁来转/谁等谁」被按 warp 预算切成两种拓扑**：dense = TMA（warp0，
+    SF 字节并进 A/B 的 `arrive_and_expect_tx`，`:400`）→ **专职转置 warp2**（`:535-575`，独立
+    `with_sf_full_barriers`，`:227-229`/`:573`，两跳握手）→ UMMA warp1（`:463-524`）；MoE =
+    **单 warp6 全包**（标量读 fp32 → UE8M0 → 复制打包 → 转置 → `sf_ready`，`:1339-1419`），
+    MMA warp4 只等 `sf_ready` 后发 UTCCP（`:1171-1198`）——省一个 warp 与 TMA 描述符，代价是标量
+    读 + **显式等 `ab_empty` 防覆写**（`FIX 2026-04-22`，`:1357-1368`）。
+  - **(C)（headline）host 侧打包粒度决定 device 侧转换点**：dense 的 SF 张量是 host 已打包的
+    `[M, K/512]` uint32、device 不转换（`docs/31` §2）；MoE 的 SF 是 `[·, K/128]` fp32、device
+    用 `(>>23)&0xFF` 现场转（`:1378`/`:1399`）——**转换点不同 ⇒ 载入载体不同（TMA vs 标量）⇒
+    barrier 结构不同 ⇒ warp 角色不同**，一条从 host 约定传导到 device warp 划分的因果链。
+  另核：生产实例化 `task_register.cc:4826-4848`（`kGranKA=kGranKB=128`、`BLOCK_M=32/BLOCK_N=16/
+  BLOCK_K=128`、`kNumStages=25`、`kNumSMs=1`）；DeepGEMM `1d1d.cuh:460-496` 的**无 XOR** 转置与
+  **最多 2 个转置 warp**；`make_sf_desc` 两个真实调用点（dense `:417` / MoE `:1057`，后者另有一枚
+  `docs/33` 记录的未接线本地版 `:283-296`）；一处命名落差（两文件顶部「SFA=weight/SFB=input」与
+  生产接线 `:4852-4859` 相反，**只记不判**）。判据只贡献 **C3**。新实验 `src/sf_segments_probe.cu` +
+  `harness/sf_segments_probe.{sh,out.txt}`（目标卡 H100/sm90a，host 侧算术，device 3，未 launch
+  kernel：UE8M0 转换表、dense/MoE 打包差异 `0x817D807E` vs `0x80808080`、`K/512` vs `K/128` 的
+  **4×** 行数账、4×32 转置双射）。配套博客 post `mega-kernel-70-mpk-sf-segments`（weight 71）并更新
+  `mega-kernel-00-index` 第 70 项。**本轮新增增量。**
 
 ## 每轮增量流程（autopilot）
 
@@ -4814,7 +4850,32 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P154-1 完成（1/1）**。补掉 `docs/64` §12「`linear_fp8_sm100_tma_utils.cuh` /
+- 当前进度：**P155-1 完成（1/1）**。补掉「下一步候选」第一条残留——把 MPK SM100 block-scaled FP8
+  的 **SF（scale factor）段**在两条 device 身体上**并置逐行对走**（`docs/33`/`docs/34`/`docs/59`/
+  `docs/60`/`docs/68` 各覆盖一部分、从未并置）。见 `docs/69-mpk-sf-segments.md`（快照 `f9eb70c`；
+  CUTLASS `f3fde583`；DeepGEMM `057ca59`；**纯源码走读 + 1 个 host 侧算术探针**，SM100 本机不可
+  执行）。对走 `linear_fp8_sm100.cuh`（dense，828 行）vs `fp8_group_gemm_sm100.cuh`（MoE，1567 行）。
+  三条 headline：**(A)（headline）** 同一个 `sf_id` 机制服务两种粒度但**语义相反**——dense 的
+  `[M,K/512]` uint32 装 **4 个不同** 128-K 尺度、`sfa_id=k_block_idx%4` 是真地址选择（`:93`/`:495-498`），
+  MoE 把 1 个 per-128 scale **复制 4 份**、`sfa_id=k_sub` 是空操作（`:1379`/`:197-198`/`:1232-1233`）；
+  **(B)（headline）** 「谁来搬/转/等」按 warp 预算切成两种拓扑——dense TMA(warp0)+专职转置 warp2
+  （两跳 `with_sf_full`）+ UMMA warp1 vs MoE **单 warp6 全包**（标量读→UE8M0→复制打包→转置→`sf_ready`）
+  + MMA warp4，后者代价是显式等 `ab_empty`（`FIX 2026-04-22`）；**(C)（headline）** **host 侧打包粒度
+  决定 device 侧转换点**（`[M,K/512]` UE8M0 packed vs `[·,K/128]` fp32），因果链从 host 约定传导到
+  device warp 划分。另核生产实例化（`task_register.cc:4826-4848`，gran 128/128、BLOCK 32/16/128、
+  stages 25、kNumSMs 1）、DeepGEMM `1d1d.cuh:460-496` 的无 XOR 转置（最多 2 转置 warp）、一处
+  SFA/SFB 顶部注释命名落差（只记不判）。判据只贡献 C3。新实验 `src/sf_segments_probe.cu` +
+  `harness/sf_segments_probe.{sh,out.txt}`（target H100/sm90a，host 侧，device 3：UE8M0 表、
+  `0x817D807E` vs `0x80808080`、`K/512` vs `K/128` 的 4× 账、4×32 转置双射）。配套博客 post
+  `mega-kernel-70-mpk-sf-segments`（weight 71）并更新 `mega-kernel-00-index` 第 70 项。
+- 下一步候选：可继续走「其余未走读相邻层」的残留——WS 指令落地后的对照（`docs/62` 记 CUTLASS
+  `f3fde583` 无 `SM100_MMA_*_WS*`，可核 DeepGEMM 侧 WS 用法，`)` 稀疏 A 的 2:4 物理排布/E→A 槽映射
+  （`docs/63` 只到 trait 形状、未追硬件）、`docs/46` §6 的 FLAT-CACHE draft attention 设计（已核
+  `eagle3_draft_chain_step_attn` 快照零命中、**不可走读**，仅供静态落差记录）。**SF 段并置已由
+  P155-1/`docs/69` 补掉**；`linear_fp8_sm100` 家族支撑层已由 P154-1/`docs/68` 补掉；MLA-MTP TP
+  三兄弟已由 P153-1/`docs/67` 补掉；SM100 BF16 手工线性/ MoE linear 已由 P151-1/`docs/65`、
+  P152-1/`docs/66` 补掉。
+- 此前：**P154-1 完成（1/1）**。补掉 `docs/64` §12「`linear_fp8_sm100_tma_utils.cuh` /
   `linear_fp8_sm100_sm100_utils.cuh` 只借用了行号……未逐行」与 `docs/57` §8「committed 描述符位编码
   未逐位展开」两条尾巴：把 `linear_fp8_sm100` 家族的**支撑层三支**（`_utils` 143 行 / `_sm100_utils`
   232 行 / `_tma_utils` 118 行）逐行打开，并在 host 上逐字重放描述符算术。见
