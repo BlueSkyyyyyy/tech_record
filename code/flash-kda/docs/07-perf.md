@@ -4154,3 +4154,139 @@ shape）。即加深 pipeline/缓冲只改时序、不改数值（与 `SDEPTH` �
 - **方法学（补充 §38.3/§40.6）**：(1) 确定性扫描的 `NR` 要足够大且覆盖**部署最强变体本身**；
   (2) 「更深/更极端」不必然放大竞态窗口（`scalar` 在 `NS=5/6` racy 概率反降），故 clean 的
   观测**只在被扫过的配置上**成立；(3) 性能旋钮（`NSTAGE`）的最优值依赖 store 路径 + BT，须实测。
+
+## 42. 把 K2 形状的 CUDA B1 落进**完整反向链**：补 `dht` 入口、drop-in 核验与链级计时（P7-39）
+
+§15–§41 把目标卡形状的 CUDA B1（`b1_tma_probe.cu`：状态常驻寄存器 + 裸 `mma.sync`/`ldmatrix` +
+TMA 操作数流水 + TMA `dh`/`dv2` store + 两侧 `fence.proxy.async`）在**孤立情形**做到了收敛，部署配置为
+
+```
+-DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY -DB1T_SPROXY      (NSTAGE>=1)
+```
+
+但所有那些轮次都是 **kernel vs kernel**；CUDA B1 **从未**接进组装好的反向链
+（`dAv -> B1 -> B2(wy_dqkg) -> B3(intra) -> 反向 cumsum`），而后者的 B1 一直是 **Triton** 版
+（`dhu_bf16_pipe`，§25）。于是有两件事一直悬着：**(i) 接口**——CUDA 核没有 `dht`（终态伴随）
+入口，而 Triton B1 有（`HAS_DHT`，P6-7）；**(ii) 链级图像**——换成 CUDA B1 后六项梯度是否仍
+在 bf16 底噪、部署粒度 `BT=CHUNK=16` 下的链级时间如何。本节（`harness/check_bwd_b1_cuda_e2e.py`
++ 输出 `harness/check_bwd_b1_cuda_e2e.out.txt`）把这两件事一次做掉。
+
+### 42.1 接口：给 CUDA B1 补 `dht` 入口
+
+新增 kernel 参数 `const float* dht`（`b1_tma_probe.cu:258`），在 compute warp 的寄存器状态
+初始化处按 [K,V] 片段布局写入（`b1_tma_probe.cu:341-357`）：
+
+```cpp
+float S[MTK][2][4];
+if (dht != nullptr) {                       // [B,H,KD,VD] fp32，行=K、列=V
+    const int64_t dbase = (int64_t)nh * KD * VD;
+    for (int m...) for (int nn...) {
+        int r0 = m*16+g, r1 = r0+8;         // mma C 片段的行（g=lane/4）
+        int gc = v0 + warp*BW + nn*8 + t*2; // 该 warp 的 V 列（t=lane%4）
+        S[m][nn][0] = dht[dbase + r0*VD + gc];   // (r0,gc)
+        ...                                       // x=0..3 对应 (r0/1, gc/1)
+    }
+} else { /* 原路径：S=0 */ }
+```
+
+数值上与 Triton B1 的 `HAS_DHT` 完全相同：后者在反向扫描前置 `b_dh = dht`
+（`check_bwd_b1_bf16_e2e.py:77-80`）。为不动既有调用者，新增独立符号 `b1t_launch_dht`
+（`b1_tma_probe.cu:739`），`b1t_launch` 仍传 `nullptr`；两者共用 `dispatch_launch`
+（`b1_tma_probe.cu:706`）。
+
+### 42.2 Part A：drop-in 核验（同一份 workspace 操作数、`dht=dfin≠0`）
+
+用组装链的真实操作数（`reconstruct` 出来的 workspace 场 + `dav` 的输出 `dv`），把 CUDA B1 与
+Triton B1（`dhu_bf16_pipe`，`NS=3`）并排跑，`dht=dfin`（非零）。6 组 case（含非整除 T=250/513、
+g=0、B=2）：
+
+| 量 | CUDA vs Triton `max_abs` 区间 | 说明 |
+|---|---|---|
+| `dh`  | 1.24e-4 … 3.68e-4 | = **1 bf16 ulp**（参考量级 0.04–0.09），CUDA 落盘 `dh` 是 bf16、Triton 链保持 fp32 |
+| `dv2` | 1.18e-4 … 2.35e-4 | 同上 |
+| `dh0` | 1.41e-5 … 1.54e-4 | 同上（`dh0` 双方都 fp32） |
+
+把 `dht` 去掉（`dht=None`）后 `dh` 与带 `dht` 的差 `max_abs` 高达 **3.8e-2 … 4.5e-2**
+（`max_rel` 0.52–5.4）——证明 `dht` 入口确实生效、且是终态上游梯度的**必要**输入。**结论**：在
+bf16 落盘精度内，CUDA B1 是 Triton B1 的**逐位等价 drop-in**。
+
+### 42.3 Part B：六项梯度链 vs FLA autograd
+
+把 CUDA B1（`BT=16`、`NSTAGE=4`）接进 §25 的同一条链（`dav -> B1 -> wy_dqkg -> intra -> 反向
+cumsum`），与 Triton B1 链（`NS=3`）同输入、与 FLA `chunk_kda` autograd（`torch.autograd`）比。
+6 组 case 的最坏 `max_rel`：
+
+| 项 | CUDA-B1 链 vs FLA | Triton-B1 链 vs FLA | CUDA vs Triton |
+|---|---|---|---|
+| `dq`     | 3.423e-3 | 3.423e-3 | **0.000e+00（逐位）** |
+| `dk`     | 3.308e-3 | 3.024e-3 | 1.898e-3 |
+| `dv`     | 6.795e-3 | 6.795e-3 | 2.338e-3 |
+| `dbeta`  | 6.012e-3 | 6.012e-3 | 1.609e-3 |
+| `dg`     | 7.064e-3 | 7.064e-3 | 1.088e-3 |
+| `dh0`    | 9.365e-3 | 8.267e-3 | 0.000e+00（逐位） |
+
+`dq` 与 `dh0` 两链**逐位相同**（`dq` 只经 `do@h`、不碰 B1 的 `dh`/`dv2`；`dh0` 是 B1 的终态输出里
+不含 `dh` 落盘的那部分）。其余四项两链差 ≤2.3e-3，全部落 bf16 底噪。**结论**：CUDA B1 换进去后，
+整条反向链的六项梯度与 FLA 仍同阶、与 Triton 链等价。
+
+### 42.4 Part C：链级计时（wall 为主口径）
+
+反向-only，同一口径（`wall` = 一个 CUDA event 对包 `REPS=30` 次取均值、3 轮中位；`dev` = CUPTI）。
+CUDA-B1 链的计时闭包内**只保留部署本就需要**的类型转换（`dv` 转 bf16、`dv2` 回 fp32 喂 B2），
+不像 P7-39 早期版本那样把 `dh`/`dv2` 整体 `.float()`（那会在 `B8T2048H8` 上凭空多出 ~1.5ms 的
+elementwise 税，是本轮先踩到的坑）。
+
+| case | FLA wall | Triton-B1 链 wall | CUDA-B1 链 wall (NS2/NS4) | CUDA/Triton |
+|---|---|---|---|---|
+| T=512 H=4        | 685.7  | 274.9  | 282.2 / 283.1 | **1.03×** |
+| B2 T=1024 H=8    | 2093.4 | 1155.3 | 1175.2 / 1176.4 | **1.02×** |
+| B8 T=2048 H=8    | 13588.8| 7465.4 | 7047.2 / 7036.2 | **0.94×** |
+| T=250 H=3 (non)  | 777.3  | 245.9  | 406.8 / 407.0 | **1.65×** |
+
+kernel 级归因（CUPTI，同一窗口）：小 shape 上 CUDA B1 比 Triton B1 慢 ~1.2×（T512H4 40.8 vs 34.8、
+B2T1024H8 79.2 vs 62.1、T250H3 22.6 vs 18.8），但在 `B8T2048H8` 上 `NS=4` 只有 **181.7µs vs
+Triton 939.3µs**（CUPTI 在此形状读数波动大，见 §42.5，此处仅说明趋势）。链级 wall 因此**在
+T 可整除的三个 shape 上是 0.94–1.03×**（大 shape 反而快 6%），与 Triton B1 链同档——即**把 B1
+换成目标卡 CUDA 版不会拖慢整链**；`B8T2048H8` 的 6% 正是 §42.5 那个大 shape B1 优势被 B2/B3
+（§26 已证占链 ~66%）稀释后的净效果。
+
+`T=250 H=3` 的 **1.65× 回归**要单列：该 case 下 CUDA B1 的 kernel dev 只有 22.6µs（与 Triton 同档），
+但链 wall 从上一轮（去掉多余 `.float()` 前）的 252µs 跳到 **407µs**——这是 **host 侧的开销**：
+`launch_impl`（`b1_tma_probe.cu:660-684`）**每次 launch 都重新 `cuTensorMapEncodeTiled`**（×5–8 张
+张量图）+ `cudaFuncSetAttribute` 检查，小 shape 的链是 host-bound，这笔账就显出来了。生产实现里
+张量图应**一次性编码、跨 launch 复用**（目标卡落地时必须做），故此回归标为**待验证**（预期消除）。
+
+### 42.5 Part D：部署粒度 `BT=16` 的 B1 单核头对头（wall 口径）
+
+用 `torch.profiler` 的 CUPTI 归因测**孤立小 grid 的 B1** 在本机是**双峰**的（同一 kernel 相邻两次
+可读成 ~41µs 或 ~130µs，§25.5 的窗口效应在这类 µs 级 kernel 上被放大），故 Part D 改用**一个
+event 对包 `REPS=50` 次 launch** 的 wall（含 launch 开销但稳定），CUDA/Triton 交替测以抵消时钟漂移：
+
+| shape | CUDA `NSTAGE` 最优 | Triton `NS` 最优 | 最优比 |
+|---|---|---|---|
+| B1 T512 H4   | 150µs | 143µs | 1.05× |
+| B2 T1024 H8  | 285µs | 175µs | **1.63×** |
+| B8 T2048 H8  | 581µs | 1094µs| **0.53×** |
+| B1 T250 H3   | 38µs  | 34µs  | 1.11× |
+
+**读数**：部署粒度 `BT=16` 下，手写 CUDA B1 在**小 shape 上与 Triton 同档或略慢**（1.05–1.63×），
+但在 **`B8T2048H8` 上快 1.9×**——手写 TMA/深流水只有在**有足够并行度把延迟摊开**时才兑现，与 §41.4
+「TMA store + BT=16/32 上深 pipeline 有正收益」自洽；小 shape 反而是 Triton 编译器流水更好。
+
+### 42.6 结论 / 对目标卡的设计输入
+
+- **接口补齐**：CUDA B1 现支持 `dht`（终态伴随）入口（`b1t_launch_dht`），与 Triton B1 的
+  `HAS_DHT` 语义一致；去掉它会丢终态上游梯度（`dh` 变 ~50–500%）。
+- **drop-in 成立**：CUDA-B1 链的六项梯度 vs FLA autograd 最坏
+  `dq 3.42e-3 / dk 3.31e-3 / dv 6.80e-3 / dbeta 6.01e-3 / dg 7.06e-3 / dh0 9.37e-3`，与 Triton-B1 链
+  **同阶**（`dq`/`dh0` 两链逐位相同），全部落 bf16 底噪。至此「目标卡 CUDA 反向」第一次**端到端
+  可跑**（B1 是 CUDA、其余 Triton），不再只是孤立 kernel。
+- **链级时间**：CUDA-B1 链在 T 可整除的 shape 上 **0.94–1.03×** Triton-B1 链（大 shape 快 6%），
+  即换 B1 不拖慢整链；链的瓶颈仍是 **B2/B3**（§26），与「先接受 Triton、CUDA 版逐件替换」的路线一致。
+- **单核头对头**：部署 `BT=16` 下 CUDA B1 小 shape 与 Triton 同档/略慢、大 shape 快 ~1.9×——
+  「手写 CUDA 是否比 Triton 快」**依赖 shape**，不是无条件。
+- **坑（新）**：(a) 早期把 CUDA B1 的 bf16 `dh`/`dv2` 整体 `.float()` 喂 B2，等于凭空加 elementwise
+  税（`B8T2048H8` 上链 wall 从 7047 变 8600），**应让 B2 直接吃 bf16 `dh`**，只有 B2 里进 `tl.dot`
+  的 `dv` 需 fp32；(b) `launch_impl` **每次 launch 重编码张量图**，小 shape 链是 host-bound，表现为
+  `T=250` 的 1.65× 回归（**待验证**：张量图一次编码复用后消除）；(c) 孤立 µs 级 kernel 的 CUPTI 归因
+  在本机双峰（~41 vs ~130µs），该场景一律用 event-pair wall。

@@ -1,0 +1,198 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY -DB1T_SPROXY ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1_tma_deploy.so
+============================================================================================
+Part A: CUDA-B1 vs Triton-B1 (same workspace operands, nonzero dht=dfin)
+  dh/dv2 in bf16 (CUDA) vs fp32 (Triton chain) => ~1 bf16 ulp is the floor
+============================================================================================
+
+# T=128 H=2
+  dh  cuda vs triton         max_abs=1.241e-04  max_rel=3.286e-03  ref_max=3.777e-02
+  dv2 cuda vs triton         max_abs=1.192e-04  max_rel=1.795e-03  ref_max=6.641e-02
+  dh0 cuda vs triton         max_abs=7.952e-05  max_rel=1.914e-03  ref_max=4.155e-02
+  dh  dht vs no-dht          max_abs=3.784e-02  max_rel=1.047e+00  ref_max=3.613e-02
+
+# T=256 H=4
+  dh  cuda vs triton         max_abs=2.104e-04  max_rel=3.522e-03  ref_max=5.973e-02
+  dv2 cuda vs triton         max_abs=1.558e-04  max_rel=1.630e-03  ref_max=9.558e-02
+  dh0 cuda vs triton         max_abs=7.496e-05  max_rel=2.209e-03  ref_max=3.393e-02
+  dh  dht vs no-dht          max_abs=4.443e-02  max_rel=7.429e-01  ref_max=5.981e-02
+
+# T=250 H=3 (non-div)
+  dh  cuda vs triton         max_abs=3.266e-04  max_rel=4.967e-03  ref_max=6.576e-02
+  dv2 cuda vs triton         max_abs=1.232e-04  max_rel=1.557e-03  ref_max=7.910e-02
+  dh0 cuda vs triton         max_abs=8.664e-05  max_rel=1.576e-03  ref_max=5.496e-02
+  dh  dht vs no-dht          max_abs=4.419e-02  max_rel=6.754e-01  ref_max=6.543e-02
+
+# T=512 H=4 g=2
+  dh  cuda vs triton         max_abs=3.679e-04  max_rel=4.256e-03  ref_max=8.644e-02
+  dv2 cuda vs triton         max_abs=2.165e-04  max_rel=2.286e-03  ref_max=9.472e-02
+  dh0 cuda vs triton         max_abs=1.536e-04  max_rel=2.185e-03  ref_max=7.032e-02
+  dh  dht vs no-dht          max_abs=4.492e-02  max_rel=5.198e-01  ref_max=8.643e-02
+
+# B2 T=513 H=2 (non-div)
+  dh  cuda vs triton         max_abs=2.225e-04  max_rel=2.839e-03  ref_max=7.839e-02
+  dv2 cuda vs triton         max_abs=2.353e-04  max_rel=3.031e-03  ref_max=7.764e-02
+  dh0 cuda vs triton         max_abs=5.867e-05  max_rel=2.420e-03  ref_max=2.424e-02
+  dh  dht vs no-dht          max_abs=4.492e-02  max_rel=5.714e-01  ref_max=7.861e-02
+
+# T=192 H=2 g=0
+  dh  cuda vs triton         max_abs=1.212e-04  max_rel=2.813e-03  ref_max=4.311e-02
+  dv2 cuda vs triton         max_abs=1.176e-04  max_rel=1.505e-03  ref_max=7.812e-02
+  dh0 cuda vs triton         max_abs=1.405e-05  max_rel=2.229e-03  ref_max=6.303e-03
+  dh  dht vs no-dht          max_abs=4.321e-02  max_rel=5.405e+00  ref_max=7.996e-03
+
+============================================================================================
+Part B: six-gradient chain (CUDA-B1 NSTAGE=4 BT=16) vs Triton-B1 chain (NS=3) vs FLA
+============================================================================================
+
+# T=128 H=2  B=1 T=128 H=2 seed=0 g_scale=1.0
+    cuda   dq vs FLA         max_abs=9.900e-04  max_rel=1.473e-03  ref_max=6.721e-01
+    triton dq vs FLA         max_abs=9.900e-04  max_rel=1.473e-03  ref_max=6.721e-01
+    cuda   dq vs triton      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.723e-01
+    cuda   dk vs FLA         max_abs=9.718e-04  max_rel=1.429e-03  ref_max=6.802e-01
+    triton dk vs FLA         max_abs=5.912e-04  max_rel=8.692e-04  ref_max=6.802e-01
+    cuda   dk vs triton      max_abs=4.317e-04  max_rel=6.344e-04  ref_max=6.804e-01
+    cuda   dv vs FLA         max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    triton dv vs FLA         max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    cuda   dv vs triton      max_abs=9.197e-05  max_rel=1.871e-03  ref_max=4.915e-02
+    cuda   dbeta vs FLA      max_abs=1.810e-03  max_rel=4.551e-03  ref_max=3.977e-01
+    triton dbeta vs FLA      max_abs=1.733e-03  max_rel=4.356e-03  ref_max=3.977e-01
+    cuda   dbeta vs triton   max_abs=4.650e-04  max_rel=1.164e-03  ref_max=3.994e-01
+    cuda   dg vs FLA         max_abs=9.607e-05  max_rel=2.775e-03  ref_max=3.462e-02
+    triton dg vs FLA         max_abs=9.607e-05  max_rel=2.775e-03  ref_max=3.462e-02
+    cuda   dg vs triton      max_abs=1.850e-05  max_rel=5.344e-04  ref_max=3.462e-02
+    cuda   dh0 vs FLA        max_abs=1.912e-04  max_rel=4.608e-03  ref_max=4.150e-02
+    triton dh0 vs FLA        max_abs=2.068e-04  max_rel=4.982e-03  ref_max=4.150e-02
+
+# T=256 H=4  B=1 T=256 H=4 seed=1 g_scale=1.0
+    cuda   dq vs FLA         max_abs=1.445e-03  max_rel=2.092e-03  ref_max=6.908e-01
+    triton dq vs FLA         max_abs=1.445e-03  max_rel=2.092e-03  ref_max=6.908e-01
+    cuda   dq vs triton      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.907e-01
+    cuda   dk vs FLA         max_abs=1.195e-03  max_rel=1.498e-03  ref_max=7.980e-01
+    triton dk vs FLA         max_abs=1.200e-03  max_rel=1.504e-03  ref_max=7.980e-01
+    cuda   dk vs triton      max_abs=4.829e-04  max_rel=6.049e-04  ref_max=7.983e-01
+    cuda   dv vs FLA         max_abs=2.755e-04  max_rel=4.518e-03  ref_max=6.098e-02
+    triton dv vs FLA         max_abs=2.517e-04  max_rel=4.128e-03  ref_max=6.098e-02
+    cuda   dv vs triton      max_abs=1.268e-04  max_rel=2.080e-03  ref_max=6.093e-02
+    cuda   dbeta vs FLA      max_abs=3.443e-03  max_rel=5.835e-03  ref_max=5.900e-01
+    triton dbeta vs FLA      max_abs=3.258e-03  max_rel=5.521e-03  ref_max=5.900e-01
+    cuda   dbeta vs triton   max_abs=6.881e-04  max_rel=1.163e-03  ref_max=5.918e-01
+    cuda   dg vs FLA         max_abs=2.127e-04  max_rel=6.192e-03  ref_max=3.436e-02
+    triton dg vs FLA         max_abs=2.127e-04  max_rel=6.192e-03  ref_max=3.436e-02
+    cuda   dg vs triton      max_abs=1.790e-05  max_rel=5.208e-04  ref_max=3.438e-02
+    cuda   dh0 vs FLA        max_abs=3.201e-04  max_rel=9.365e-03  ref_max=3.418e-02
+    triton dh0 vs FLA        max_abs=2.451e-04  max_rel=7.172e-03  ref_max=3.418e-02
+
+# T=250 H=3 (non-div)  B=1 T=250 H=3 seed=2 g_scale=1.0
+    cuda   dq vs FLA         max_abs=1.773e-03  max_rel=3.423e-03  ref_max=5.180e-01
+    triton dq vs FLA         max_abs=1.773e-03  max_rel=3.423e-03  ref_max=5.180e-01
+    cuda   dq vs triton      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.181e-01
+    cuda   dk vs FLA         max_abs=9.804e-04  max_rel=1.883e-03  ref_max=5.206e-01
+    triton dk vs FLA         max_abs=7.557e-04  max_rel=1.452e-03  ref_max=5.206e-01
+    cuda   dk vs triton      max_abs=5.482e-04  max_rel=1.052e-03  ref_max=5.208e-01
+    cuda   dv vs FLA         max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    triton dv vs FLA         max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    cuda   dv vs triton      max_abs=9.894e-05  max_rel=2.051e-03  ref_max=4.824e-02
+    cuda   dbeta vs FLA      max_abs=2.509e-03  max_rel=5.159e-03  ref_max=4.863e-01
+    triton dbeta vs FLA      max_abs=2.717e-03  max_rel=5.587e-03  ref_max=4.863e-01
+    cuda   dbeta vs triton   max_abs=4.805e-04  max_rel=9.882e-04  ref_max=4.862e-01
+    cuda   dg vs FLA         max_abs=3.221e-04  max_rel=5.191e-03  ref_max=6.205e-02
+    triton dg vs FLA         max_abs=3.221e-04  max_rel=5.191e-03  ref_max=6.205e-02
+    cuda   dg vs triton      max_abs=2.444e-05  max_rel=3.927e-04  ref_max=6.225e-02
+    cuda   dh0 vs FLA        max_abs=2.849e-04  max_rel=5.187e-03  ref_max=5.493e-02
+    triton dh0 vs FLA        max_abs=2.924e-04  max_rel=5.322e-03  ref_max=5.493e-02
+
+# T=512 H=4 g=2  B=1 T=512 H=4 seed=3 g_scale=2.0
+    cuda   dq vs FLA         max_abs=1.722e-03  max_rel=2.600e-03  ref_max=6.623e-01
+    triton dq vs FLA         max_abs=1.722e-03  max_rel=2.600e-03  ref_max=6.623e-01
+    cuda   dq vs triton      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.625e-01
+    cuda   dk vs FLA         max_abs=2.134e-03  max_rel=3.308e-03  ref_max=6.452e-01
+    triton dk vs FLA         max_abs=1.951e-03  max_rel=3.024e-03  ref_max=6.452e-01
+    cuda   dk vs triton      max_abs=1.225e-03  max_rel=1.898e-03  ref_max=6.454e-01
+    cuda   dv vs FLA         max_abs=3.856e-04  max_rel=5.691e-03  ref_max=6.776e-02/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+
+    triton dv vs FLA         max_abs=3.343e-04  max_rel=4.933e-03  ref_max=6.776e-02
+    cuda   dv vs triton      max_abs=1.245e-04  max_rel=1.836e-03  ref_max=6.782e-02
+    cuda   dbeta vs FLA      max_abs=3.072e-03  max_rel=6.006e-03  ref_max=5.115e-01
+    triton dbeta vs FLA      max_abs=2.704e-03  max_rel=5.286e-03  ref_max=5.115e-01
+    cuda   dbeta vs triton   max_abs=8.189e-04  max_rel=1.609e-03  ref_max=5.090e-01
+    cuda   dg vs FLA         max_abs=2.371e-04  max_rel=3.495e-03  ref_max=6.785e-02
+    triton dg vs FLA         max_abs=2.371e-04  max_rel=3.495e-03  ref_max=6.785e-02
+    cuda   dg vs triton      max_abs=6.944e-05  max_rel=1.023e-03  ref_max=6.787e-02
+    cuda   dh0 vs FLA        max_abs=4.717e-04  max_rel=6.708e-03  ref_max=7.031e-02
+    triton dh0 vs FLA        max_abs=3.859e-04  max_rel=5.489e-03  ref_max=7.031e-02
+
+# B2 T=513 H=2 (non-div)  B=2 T=513 H=2 seed=4 g_scale=1.0
+    cuda   dq vs FLA         max_abs=1.761e-03  max_rel=2.925e-03  ref_max=6.022e-01
+    triton dq vs FLA         max_abs=1.761e-03  max_rel=2.925e-03  ref_max=6.022e-01
+    cuda   dq vs triton      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.026e-01
+    cuda   dk vs FLA         max_abs=1.517e-03  max_rel=2.276e-03  ref_max=6.666e-01
+    triton dk vs FLA         max_abs=1.213e-03  max_rel=1.820e-03  ref_max=6.666e-01
+    cuda   dk vs triton      max_abs=4.756e-04  max_rel=7.131e-04  ref_max=6.670e-01
+    cuda   dv vs FLA         max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    triton dv vs FLA         max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    cuda   dv vs triton      max_abs=1.279e-04  max_rel=2.338e-03  ref_max=5.469e-02
+    cuda   dbeta vs FLA      max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    triton dbeta vs FLA      max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    cuda   dbeta vs triton   max_abs=8.295e-04  max_rel=9.408e-04  ref_max=8.817e-01
+    cuda   dg vs FLA         max_abs=2.909e-04  max_rel=7.064e-03  ref_max=4.118e-02
+    triton dg vs FLA         max_abs=2.909e-04  max_rel=7.064e-03  ref_max=4.118e-02
+    cuda   dg vs triton      max_abs=3.489e-05  max_rel=8.469e-04  ref_max=4.120e-02
+    cuda   dh0 vs FLA        max_abs=1.439e-04  max_rel=5.954e-03  ref_max=2.417e-02
+    triton dh0 vs FLA        max_abs=1.691e-04  max_rel=6.996e-03  ref_max=2.417e-02
+
+# T=192 H=2 g=0  B=1 T=192 H=2 seed=5 g_scale=0.0
+    cuda   dq vs FLA         max_abs=3.464e-04  max_rel=6.491e-04  ref_max=5.337e-01
+    triton dq vs FLA         max_abs=3.464e-04  max_rel=6.491e-04  ref_max=5.337e-01
+    cuda   dq vs triton      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.339e-01
+    cuda   dk vs FLA         max_abs=3.380e-04  max_rel=5.843e-04  ref_max=5.784e-01
+    triton dk vs FLA         max_abs=3.378e-04  max_rel=5.840e-04  ref_max=5.784e-01
+    cuda   dk vs triton      max_abs=2.879e-04  max_rel=4.976e-04  ref_max=5.785e-01
+    cuda   dv vs FLA         max_abs=3.565e-04  max_rel=5.438e-03  ref_max=6.556e-02
+    triton dv vs FLA         max_abs=3.922e-04  max_rel=5.982e-03  ref_max=6.556e-02
+    cuda   dv vs triton      max_abs=7.084e-05  max_rel=1.077e-03  ref_max=6.577e-02
+    cuda   dbeta vs FLA      max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    triton dbeta vs FLA      max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    cuda   dbeta vs triton   max_abs=2.658e-04  max_rel=6.604e-04  ref_max=4.024e-01
+    cuda   dg vs FLA         max_abs=2.060e-05  max_rel=3.391e-03  ref_max=6.074e-03
+    triton dg vs FLA         max_abs=2.060e-05  max_rel=3.391e-03  ref_max=6.074e-03
+    cuda   dg vs triton      max_abs=6.609e-06  max_rel=1.088e-03  ref_max=6.076e-03
+    cuda   dh0 vs FLA        max_abs=4.727e-05  max_rel=7.519e-03  ref_max=6.287e-03
+    triton dh0 vs FLA        max_abs=5.197e-05  max_rel=8.267e-03  ref_max=6.287e-03
+
+worst-case max_rel across cases:
+  fld     cuda vs FLA  triton vs FLA  cuda vs triton
+  dq        3.423e-03      3.423e-03       0.000e+00
+  dk        3.308e-03      3.024e-03       1.898e-03
+  dv        6.795e-03      6.795e-03       2.338e-03
+  dbeta     6.012e-03      6.012e-03       1.609e-03
+  dg        7.064e-03      7.064e-03       1.088e-03
+  dh0       9.365e-03      8.267e-03       0.000e+00
+
+====================================================================================================
+Part C: backward-only chain timing (idle card): CUDA-B1 vs Triton-B1 vs FLA
+  wall = event-pair / reps (primary); dev = CUPTI (over-attributes tiny launches).
+====================================================================================================
+  case               | FLA wall  FLA dev | Tri wall Tri dev |  cNS2 wall     dev |  cNS4 wall     dev
+  T=512 H=4          |    685.7    204.1 |    274.9    97.9 |      282.2   104.2 |      283.1   105.1
+      B1 kernel dev: Triton    34.8us | CUDA NS2=  40.8us | CUDA NS4=  41.3us  (wall Tri 275 vs CUDA 282/283)
+  B2 T=1024 H=8      |   2093.4   1602.5 |   1155.3   654.6 |     1175.2   988.5 |     1176.4   989.1
+      B1 kernel dev: Triton    62.1us | CUDA NS2=  79.2us | CUDA NS4=  78.2us  (wall Tri 1155 vs CUDA 1175/1176)
+  B8 T=2048 H=8      |  13588.8  13570.2 |   7465.4  7258.9 |     7047.2  6856.7 |     7036.2  6858.5
+      B1 kernel dev: Triton   939.3us | CUDA NS2= 200.8us | CUDA NS4= 181.7us  (wall Tri 7465 vs CUDA 7047/7036)
+  T=250 H=3 nondiv   |    777.3    145.2 |    245.9    69.8 |      406.8    75.9 |      407.0    75.7
+      B1 kernel dev: Triton    18.8us | CUDA NS2=  22.6us | CUDA NS4=  22.7us  (wall Tri 246 vs CUDA 407/407)
+
+====================================================================================================
+Part D: isolated B1 at deployment granularity BT=16: CUDA NSTAGE vs Triton NS
+  (event-pair wall / launch, not CUPTI: tiny-kernel CUPTI attribution is bimodal
+   here; wall includes ~launch overhead but is stable.  interleaved, reps=50)
+====================================================================================================
+  shape            | c  1 c  2 c  3 c  4 | t  1 t  2 t  3 t  4
+  B1 T512 H4      |  169  150  151  150 |  154  145  143  143  best 150/143=1.05x
+  B2 T1024 H8      |  443  286  285  286 |  427  296  176  175  best 285/175=1.63x
+  B8 T2048 H8      |  988  698  581  680 | 1366 1111 1094 1110  best 581/1094=0.53x
+  B1 T250 H3      |  141   39   39   38 |   39   34   35   34  best 38/34=1.11x
+
+DONE

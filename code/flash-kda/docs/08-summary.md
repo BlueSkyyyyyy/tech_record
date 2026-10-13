@@ -332,3 +332,13 @@ V-slice 跨连续若干 chunk**（WAR 指纹）。`proxy/base`=**0.96–1.02（�
 BT16 `NS=1→4` 1.69×、BT32 `NS=1→3` 1.63×），**`NSTAGE` 建议 ≥4（修正 §24 的「回到 NS=1」**，那是
 BT=64/标量 store 的结论）；`SDEPTH` 非旋钮。数值深配置与 `NS=1`/`scalar_p` **逐位相同**、vs bf16
 FLA 仍 1 ulp。
+
+**P7-39（`docs/07` §42）**：第一次把 K2 形状的**手写 CUDA B1 落进完整反向链**（此前全是孤立 kernel
+vs kernel；组装链 B1 一直是 Triton）。给 `b1_tma_probe.cu` 补 `dht`（终态伴随）入口
+（`b1t_launch_dht`，语义对齐 Triton 的 `HAS_DHT`）。**drop-in 核验**：同 workspace 操作数、`dht≠0`
+下 CUDA-B1 vs Triton-B1 `dh/dv2/dh0` `max_abs` 1.4e-5~3.7e-4（=1 bf16 ulp）。**链级正确性**：
+CUDA-B1 链（`BT=16`、`NSTAGE=4`）vs FLA 六项最坏 `dq 3.42e-3…dh0 9.37e-3`，与 Triton-B1 链同阶
+（`dq`/`dh0` 逐位相同）。**链级 wall**：CUDA-B1 链 0.94–1.03× Triton-B1（`B8T2048H8` 快 6%），
+不拖慢整链；`T250H3` 的 1.65× 回归＝launch 每次重编码张量图的 host 税（**待验证**）。**单核**：
+部署 `BT=16` 下小 shape CUDA 1.05–1.63×、大 shape **0.53×**（1.9× 快）——「手写 CUDA 是否比
+Triton 快」**依赖 shape**。至此目标卡 CUDA 反向**第一次端到端可跑**（B1=CUDA、其余 Triton）。

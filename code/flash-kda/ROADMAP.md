@@ -614,6 +614,29 @@
       BT=64/标量 store 的结论）。**方法学**：clean 只在被扫过的配置上成立；性能旋钮最优值依赖
       store 路径 + BT。
 
+- [x] **P7-39** 第一次把 K2 形状的**手写 CUDA B1 落进完整反向链**（此前 §15–§41 全是孤立
+      kernel vs kernel，组装链的 B1 一直是 Triton）。新增 `harness/check_bwd_b1_cuda_e2e.py`
+      （`check_bwd_b1_cuda_e2e.out.txt`，空闲卡）+ `docs/07` §42。**接口**：给 `b1_tma_probe.cu`
+      补 `dht`（终态伴随）入口——kernel 参数 + 寄存器状态按 [K,V] 片段布局初始化
+      （`b1_tma_probe.cu:258/341-357`），新增独立符号 `b1t_launch_dht`（`:739`）、`b1t_launch`
+      仍传 `nullptr`，语义对齐 Triton B1 的 `HAS_DHT`。**Part A（drop-in）**：同一份 workspace
+      操作数、`dht=dfin≠0`，CUDA-B1 vs Triton-B1 `dh/dv2/dh0` `max_abs` 1.4e-5~3.7e-4
+      （=**1 bf16 ulp**，CUDA 落盘 bf16）；去掉 `dht` 后 `dh` 差 3.8e-2~4.5e-2（证明入口生效）。
+      **Part B（链级正确性）**：CUDA-B1 链（`BT=16`、`NSTAGE=4`）vs FLA autograd 六项最坏
+      `dq 3.423e-3/dk 3.308e-3/dv 6.795e-3/dbeta 6.012e-3/dg 7.064e-3/dh0 9.365e-3`，与
+      Triton-B1 链**同阶**（`dq`/`dh0` 两链**逐位相同**、其余 ≤2.3e-3），全落 bf16 底噪；6 组含
+      非整除 T=250/513、g=0、B=2。**Part C（链级 wall）**：CUDA-B1 链 0.94–1.03× Triton-B1 链
+      （`B8T2048H8` **1.5→0.94×** 快 6%、`T512H4` 1.03×、`B2T1024H8` 1.02×）；`T250H3` 1.65×
+      回归＝host 侧 `launch_impl` **每次重编码张量图**（`b1_tma_probe.cu:660-684`）打在小 shape
+      host-bound 链上，**待验证**（生产须一次编码复用）。**Part D（部署粒度 `BT=16` 单核）**：
+      event-pair wall（孤立 µs 级 kernel 的 CUPTI 归因本机**双峰** ~41/130µs，故弃用）——小 shape
+      CUDA 与 Triton 同档/略慢（1.05–1.63×），`B8T2048H8` 快 **1.9×**（0.53×）；「手写 CUDA 是否
+      比 Triton 快」**依赖 shape**。**三坑**：(a) 早期把 CUDA 的 bf16 `dh`/`dv2` 整体 `.float()`
+      喂 B2 = 凭空 elementwise 税（`B8T2048H8` 链 wall 8600 vs 7047），应让 B2 直接吃 bf16 `dh`、
+      只有进 `tl.dot` 的 `dv` 需 fp32；(b) launch 每次重编码张量图（见上）；(c) 孤立 µs 级 kernel
+      的 CUPTI 归因双峰。**结论**：目标卡 CUDA 反向**第一次端到端可跑**（B1=CUDA、其余 Triton），
+      drop-in 数值等价、链级不拖慢；链瓶颈仍是 B2/B3（§26），路线「先接受 Triton、CUDA 逐件替换」成立。
+
 ### P8 小结 / 一页纸
 
 - [x] **P8-1** `docs/08-summary.md`：公式、结构、误差、性能、反向要点一页纸汇总
@@ -666,8 +689,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-38 补测**。
-  - P7-38（本轮）：**关闭 P7-37（§40.6）留下的唯一边界**——把 pipeline 加深（`NSTAGE` 到 6）、
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-39 补测**。
+  - P7-39（本轮）：**第一次把 K2 形状的手写 CUDA B1 落进完整反向链**（此前全是孤立 kernel
+    vs kernel，组装链 B1 一直是 Triton）。给 `b1_tma_probe.cu` 补 `dht`（终态伴随）入口
+    （`b1_tma_probe.cu:258/341-357`，新增符号 `b1t_launch_dht` `:739`，语义对齐 Triton 的
+    `HAS_DHT`），新增 `harness/check_bwd_b1_cuda_e2e.py`（`check_bwd_b1_cuda_e2e.out.txt`，空闲卡）
+    + `docs/07` §42。**Part A**：同 workspace 操作数、`dht≠0`，CUDA-B1 vs Triton-B1 `dh/dv2/dh0`
+    `max_abs` 1.4e-5~3.7e-4（=1 bf16 ulp）；去 `dht` 后 `dh` 差 3.8e-2~4.5e-2（入口生效）。
+    **Part B**：CUDA-B1 链 vs FLA 六项最坏 `dq 3.423e-3/dk 3.308e-3/dv 6.795e-3/dbeta 6.012e-3/
+    dg 7.064e-3/dh0 9.365e-3`，与 Triton-B1 链同阶（`dq`/`dh0` 两链逐位相同）。**Part C**：链级
+    wall CUDA-B1 0.94–1.03× Triton-B1（`B8T2048H8` 快 6%）；`T250H3` 1.65× 回归＝launch 每次重编码
+    张量图的 host 税（**待验证**）。**Part D**：部署粒度 `BT=16` 单核，小 shape CUDA 1.05–1.63×、
+    大 shape **0.53×**（1.9× 快）——依赖 shape。**结论**：目标卡 CUDA 反向第一次端到端可跑
+    （B1=CUDA、其余 Triton），drop-in 数值等价、链级不拖慢；瓶颈仍是 B2/B3。
+  - P7-38（上轮）：**关闭 P7-37（§40.6）留下的唯一边界**——把 pipeline 加深（`NSTAGE` 到 6）、
     store 时序推极端（新增 `-DB1T_SDEPTH=N`，输出 tile 缓冲 1–4 深 / `i % SDEPTH` 复用），看
     输出侧（及 TMA 形状下输入侧）`fence.proxy.async` 竞态是否变得可观测。新增
     `harness/check_bwd_b1_deep_ns.py`（`check_bwd_b1_deep_ns.out.txt`，空闲卡）+ `docs/07` §41。
@@ -1191,7 +1226,14 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-38 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-39 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-39（`docs/07` §42）第一次把 K2 形状手写 CUDA B1 落进完整反向链**：补 `dht` 入口
+    （`b1t_launch_dht`）、验证 CUDA-B1 是 Triton-B1 的逐位 drop-in（`dh/dv2/dh0` 1 bf16 ulp），
+    CUDA-B1 链六项梯度 vs FLA 与 Triton 链同阶（`dq`/`dh0` 逐位相同），链级 wall 0.94–1.03× 不拖慢
+    （`B8T2048H8` 快 6%）。**遗留（待验证）**：(1) `launch_impl` 每次 `cuTensorMapEncodeTiled` 的
+    host 税在小 shape（`T=250`）显形为 1.65× 回归，生产须一次编码复用；(2) 部署粒度 `BT=16` 下
+    CUDA B1 相对 Triton 单核「依赖 shape」（小 shape 同档/略慢、大 shape 快 1.9×）。下一步工程重点
+    仍是把 B2/B3（链瓶颈，占 ~66%）与这个 CUDA B1 一起做成目标卡 CUDA。
   - **~~P7-36 的边界（待验证）~~（已解决）**：`tma2` 的 TMA store 侧复用握手（`dho`/`duo` + `cp.async.bulk`
     store + `bulk_group`）**已由 P7-37 补 `-DB1T_SPROXY`、并由 P7-38（`docs/07` §41）关闭边界**——把
     pipeline 加深到 `NS=6`、输出缓冲加深到 `SDEPTH=4`（含单缓冲极端）后，`tma2` 全族在 60 个配置上仍

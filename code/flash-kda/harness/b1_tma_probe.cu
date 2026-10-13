@@ -255,6 +255,7 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
               const __grid_constant__ CUtensorMap dv2map,
 #endif
               const float* __restrict__ etot,
+              const float* __restrict__ dht,   // [B,H,KD,VD] fp32 terminal state adjoint (or null)
               bf16* __restrict__ dh_g, float* __restrict__ dh0_g, bf16* __restrict__ dv2_g,
               int T, int NT, int H, float scale) {
     extern __shared__ __align__(1024) char smem_raw[];
@@ -337,12 +338,31 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
         constexpr int KT2 = BT / 16;
 
         float S[MTK][2][4];
-        #pragma unroll
-        for (int m = 0; m < MTK; ++m)
+        if (dht != nullptr) {
+            // P7-39: seed the running state adjoint with the terminal (final-state) upstream
+            // gradient, exactly like the Triton B1's HAS_DHT path (`b_dh = dht` before the
+            // reverse sweep).  `dht` is [B,H,KD,VD] fp32, row r == K index, col == V index.
+            const int64_t dbase = (int64_t)nh * KD * VD;
             #pragma unroll
-            for (int nn = 0; nn < 2; ++nn)
+            for (int m = 0; m < MTK; ++m)
                 #pragma unroll
-                for (int x = 0; x < 4; ++x) S[m][nn][x] = 0.f;
+                for (int nn = 0; nn < 2; ++nn) {
+                    int r0 = m * 16 + g, r1 = r0 + 8;
+                    int gc = v0 + warp * BW + nn * 8 + t * 2;
+                    bool ok = gc < VD;
+                    S[m][nn][0] = ok ? dht[dbase + (int64_t)r0 * VD + gc] : 0.f;
+                    S[m][nn][1] = ok ? dht[dbase + (int64_t)r0 * VD + gc + 1] : 0.f;
+                    S[m][nn][2] = ok ? dht[dbase + (int64_t)r1 * VD + gc] : 0.f;
+                    S[m][nn][3] = ok ? dht[dbase + (int64_t)r1 * VD + gc + 1] : 0.f;
+                }
+        } else {
+            #pragma unroll
+            for (int m = 0; m < MTK; ++m)
+                #pragma unroll
+                for (int nn = 0; nn < 2; ++nn)
+                    #pragma unroll
+                    for (int x = 0; x < 4; ++x) S[m][nn][x] = 0.f;
+        }
 
         const __nv_bfloat162 scale2 = __floats2bfloat162_rn(scale, scale);
 
@@ -638,7 +658,7 @@ static void make_map_e(CUtensorMap* m, void* ptr, int H, int NT, int B) {
 // ------------------------------------------------------------------------- launch
 template <int BT, int NSTAGE>
 static int launch_impl(void* q, void* k, void* w, void* do_, void* dv, void* etot, void* dh,
-                       void* dh0, void* dv2, int B, int T, int H, int NT, float scale,
+                       void* dh0, void* dv2, void* dht, int B, int T, int H, int NT, float scale,
                        cudaStream_t s) {
     CUtensorMap qm, km, wm, dom, dvm;
     make_map(&qm, q, H, T, B, BT);
@@ -678,33 +698,49 @@ static int launch_impl(void* q, void* k, void* w, void* do_, void* dv, void* eto
 #ifdef B1T_TMADV
         dv2m,
 #endif
-        (const float*)etot, (bf16*)dh, (float*)dh0, (bf16*)dv2, T, NT, H,
+        (const float*)etot, (const float*)dht, (bf16*)dh, (float*)dh0, (bf16*)dv2, T, NT, H,
         scale);
     return (int)cudaGetLastError();
+}
+
+static int dispatch_launch(int BT, int NSTAGE, void* q, void* k, void* w, void* do_, void* dv,
+                           void* etot, void* dh, void* dh0, void* dv2, void* dht,
+                           int B, int T, int H, int V, int NT, float scale, void* stream) {
+    if (V % BV != 0) return -2;
+    cudaStream_t s = (cudaStream_t)stream;
+    if (BT == 64) {
+        if (NSTAGE == 1) return launch_impl<64, 1>(q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, NT, scale, s);
+        if (NSTAGE == 2) return launch_impl<64, 2>(q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, NT, scale, s);
+    } else if (BT == 32) {
+        if (NSTAGE == 1) return launch_impl<32, 1>(q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, NT, scale, s);
+        if (NSTAGE == 2) return launch_impl<32, 2>(q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, NT, scale, s);
+        if (NSTAGE == 3) return launch_impl<32, 3>(q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, NT, scale, s);
+        if (NSTAGE == 4) return launch_impl<32, 4>(q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, NT, scale, s);
+    } else if (BT == 16) {
+        if (NSTAGE == 1) return launch_impl<16, 1>(q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, NT, scale, s);
+        if (NSTAGE == 2) return launch_impl<16, 2>(q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, NT, scale, s);
+        if (NSTAGE == 3) return launch_impl<16, 3>(q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, NT, scale, s);
+        if (NSTAGE == 4) return launch_impl<16, 4>(q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, NT, scale, s);
+        if (NSTAGE == 5) return launch_impl<16, 5>(q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, NT, scale, s);
+        if (NSTAGE == 6) return launch_impl<16, 6>(q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, NT, scale, s);
+    }
+    return -1;
 }
 
 extern "C" int b1t_launch(int BT, int NSTAGE, void* q, void* k, void* w, void* do_, void* dv,
                           void* etot, void* dh, void* dh0, void* dv2, int B, int T, int H, int V,
                           int NT, float scale, void* stream) {
-    if (V % BV != 0) return -2;
-    cudaStream_t s = (cudaStream_t)stream;
-    if (BT == 64) {
-        if (NSTAGE == 1) return launch_impl<64, 1>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
-        if (NSTAGE == 2) return launch_impl<64, 2>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
-    } else if (BT == 32) {
-        if (NSTAGE == 1) return launch_impl<32, 1>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
-        if (NSTAGE == 2) return launch_impl<32, 2>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
-        if (NSTAGE == 3) return launch_impl<32, 3>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
-        if (NSTAGE == 4) return launch_impl<32, 4>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
-    } else if (BT == 16) {
-        if (NSTAGE == 1) return launch_impl<16, 1>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
-        if (NSTAGE == 2) return launch_impl<16, 2>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
-        if (NSTAGE == 3) return launch_impl<16, 3>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
-        if (NSTAGE == 4) return launch_impl<16, 4>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
-        if (NSTAGE == 5) return launch_impl<16, 5>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
-        if (NSTAGE == 6) return launch_impl<16, 6>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
-    }
-    return -1;
+    return dispatch_launch(BT, NSTAGE, q, k, w, do_, dv, etot, dh, dh0, dv2, nullptr, B, T, H, V,
+                           NT, scale, stream);
+}
+
+// P7-39: same launch but with the terminal state adjoint `dht` ([B,H,KD,VD] fp32) seeding the
+// running S.  Kept as a separate symbol so all existing `b1t_launch` callers are untouched.
+extern "C" int b1t_launch_dht(int BT, int NSTAGE, void* q, void* k, void* w, void* do_, void* dv,
+                              void* etot, void* dht, void* dh, void* dh0, void* dv2, int B, int T,
+                              int H, int V, int NT, float scale, void* stream) {
+    return dispatch_launch(BT, NSTAGE, q, k, w, do_, dv, etot, dh, dh0, dv2, dht, B, T, H, V,
+                           NT, scale, stream);
 }
 
 extern "C" int b1t_smem_bytes(int BT, int NSTAGE) {
