@@ -3077,6 +3077,32 @@
       **运行层**同时踩到 C1–C5 的源码面）；§8 局限；§9 坐标。配套博客 post
       `mega-kernel-29-mpk-testmode`（weight 30）并更新 `mega-kernel-00-index` 第 29 项。
 
+### P115 MPK「单 kernel 单测」层源码走读（`docs/29-mpk-unit-tests.md`）
+
+- [x] **P115-1** 补齐 `docs/28`（P114-1）**§8 明留的尾巴**——「**未覆盖 `tests/runtime_python/` 的非
+      `test_mode` 部分**（`test_rmsnorm.py` 等走 `runtime_kernel` pybind 直接调 device kernel，不经
+      `PersistentKernel`——那是『单 kernel 单测』，与 megakernel 端到端是两层，其 wrapper
+      `runtime_kernel_wrapper.cu` 未走读）」。见 `docs/29-mpk-unit-tests.md`（快照
+      `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与 `docs/06`–`docs/28` 同快照；
+      **纯源码走读（资料分析），本轮无新实验**）。headline——**这一层把「一个 device task」当成
+      「一整颗 kernel」由 host 手写 `<<<>>>` 直接 launch**，不经 `PersistentKernel`/event/tGraph/
+      worker-scheduler，只和一个逐张量 PyTorch/numpy 参考比数值；论文从未提及（实现质量层）。
+      §1 五套彼此独立的 pybind extension（主 `runtime_kernel` 1895 行三档 gencode + `-DMIRAGE_UNIT_TEST`；
+      hopper 1405 行；hopper-moe 492 行；blackwell 家族 12 个 `setup*.py`；cute/hopper `gemm.cu` 556 行），
+      并指出 `MIRAGE_UNIT_TEST` 全仓仅两处引用（`setup.py:44` 定义 / `tasks/ampere/moe_linear.cuh:256`
+      消费：用 `blockIdx.y` 手动推进 expert 指针，注释 *"don't need in real MPK"*）；
+      §2 **headline：pybind 接线大面积失配**——主 wrapper 只注册 3 个（`moe_linear`/`multitoken_paged_
+      attention`/`sampling_from_logits`，`:1848/1887/1890`）而 19 个主目录测试调用 14 个符号（16 个
+      导入/调用即失败），hopper wrapper 只注册 `linear_swapAB` 一个（`:1400`），而 hopper-moe 与
+      blackwell 家族（当前代际）逐条对齐——「通用历史层失配、当前代际对齐」，是同专题「同一套惯用法
+      实现了两遍」母题的测试层翻版；§3 单测形态解剖（`moe_linear`：`__global__` 只转发一次、把
+      `blockIdx.x` 当 worker id、`launch_*` 手算 grid/block/96KiB SMEM、host 按形状硬编码派发模板、
+      末尾 `cudaDeviceSynchronize`）；§4 与 megakernel 端到端（`docs/28`）逐维对照（task=整核 vs
+      task=CTA 内一段；手写尺寸 vs 编译器算）；§5 CI 现状（`gpu-tests.yml` 已失效、现役 `mpk-qwen-ci`
+      不跑本层——与 §2 失配互为因果）；§6 判据映射（**本层不贡献任何 C 判据**，只是 C3 范围内「单
+      device task 数值正确」的回归网）；§7 局限（纯静态对照、未构建/未跑、不判对错）；§8 坐标。
+      配套博客 post `mega-kernel-30-mpk-unit-tests`（weight 31）并更新 `mega-kernel-00-index` 第 30 项。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3244,7 +3270,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P114-1 完成（1/1）**。补齐 `docs/25`（P111-1）**§9 明留的尾巴**「`MirageModelConfig` 的调用方
+- 当前进度：**P115-1 完成（1/1）**。补齐 `docs/28`（P114-1）**§8 明留的尾巴**「未覆盖
+  `tests/runtime_python/` 的非 `test_mode` 部分（走 `runtime_kernel` pybind 直接调 device kernel、
+  不经 `PersistentKernel` ——『单 kernel 单测』层，其 wrapper 未走读）」——把「一个 device task 当成
+  一整颗 kernel 由 host 手写 `<<<>>>` 直接 launch」的这一层打开：见 `docs/29-mpk-unit-tests.md`
+  （快照 `f9eb70c`，**纯源码走读、无新实验**）。headline——**五套独立 pybind extension；主/hopper
+  wrapper 的注册大面积失配（主只注册 3 个而测试调用 14 个、hopper 只注册 1 个）、hopper-moe 与
+  blackwell 家族逐条对齐**；`MIRAGE_UNIT_TEST` 宏全仓仅 `setup.py:44` 定义、`moe_linear.cuh:256`
+  消费（用 `blockIdx.y` 手推 expert 指针、真实 MPK 不需要）；本层**不贡献任何 C 判据**，只是 C3 范围内
+  「单 device task 数值正确」的回归网，且现役 CI（`mpk-qwen-ci`）已不跑它。配套博客 post
+  `mega-kernel-30-mpk-unit-tests`（weight 31）并更新 `mega-kernel-00-index` 第 30 项。
+- 此前：**P114-1 完成（1/1）**。补齐 `docs/25`（P111-1）**§9 明留的尾巴**「`MirageModelConfig` 的调用方
   （如 `demo/`/`tests/`）未走读」——把「谁来验库里契约」这一层打开：见 `docs/28-mpk-testmode-harness.md`
   （快照 `f9eb70c`，**纯源码走读、无新实验**）。headline——**`test_mode` 把一张常驻 megakernel 图「跑一次
   就退」**：`-DMPK_TEST_MODE` 同时改**编译期**（缺 meta tensor 允许传空指针 `persistent_kernel.py:3413`）与

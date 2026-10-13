@@ -47,5 +47,6 @@ categories: ["算子开发"]
 27. [MPK 模型家族 builder 走读：MLA 吸收、FP8 UE8M0、MoE 与投机 draft]({{< relref "mega-kernel-27-mpk-family-builders" >}}) —— 家族结构差异如何在 builder 层被"折平"成标准 task 管线：DeepSeek-V3 / GLM-4.6 / Inkling / GPT-OSS 与 DFlash/Eagle3
 28. [MPK 权重预处理层走读：从 HF checkpoint 到 builder 的 state_dict]({{< relref "mega-kernel-28-mpk-weight-prep" >}}) —— MLA 权重吸收、V 反吸收进 o_proj、gate/up 交织、MoE 专家折叠、FP8 重定标与 TP 切分，以及离线/内联两条路径的 shard 规则差异
 29. [MPK 运行层「可执行规范」走读：`test_mode` 套件与 `PersistentKernel` API]({{< relref "mega-kernel-29-mpk-testmode" >}}) —— `test_mode` 如何把常驻 kernel 变成「跑一次就退」的测试装置，fork/join/case 2·3/residual-stripping 的可执行规范，以及 C1–C5 的运行层见证
+30. [MPK 单 kernel 单测层走读：`runtime_kernel_wrapper` 与 `tests/runtime_python`]({{< relref "mega-kernel-30-mpk-unit-tests" >}}) —— 夹在 device task 与 megakernel 端到端之间的「一个 task = 一整颗 kernel」回归网：五套 pybind extension、大面积注册失配，以及 `MIRAGE_UNIT_TEST` 宏的语义
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
