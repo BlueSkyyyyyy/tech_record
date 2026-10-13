@@ -83,10 +83,26 @@ DEV void tma5d_store(const CUtensorMap* m, const void* sm, int c0, int c1, int c
         ::"l"(m), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4), "r"(saddr(sm))
         : "memory");
 }
+#endif
+#if defined(B1T_TMADH) || defined(B1T_TMADV)
 DEV void tma_store_commit() { asm volatile("cp.async.bulk.commit_group;\n" ::: "memory"); }
 template <int N>
 DEV void tma_store_wait_read() {
     asm volatile("cp.async.bulk.wait_group.read %0;\n" ::"n"(N) : "memory");
+}
+#endif
+#ifdef B1T_TMADV
+// P7-33: same idea as B1T_TMADH but for the per-chunk `dv2` output [BT,BW].  `dv2` is
+// token-major [B,T,H,VD], so the per-warp slice is [BT tokens, BW cols]; a 4D tensor map
+// (dims {VD,T,H,B}, box {BW,BT,1,1}, SWIZZLE_NONE) stores it off the LSU path, and TMA
+// clips the OOB token rows of a non-divisible T automatically (the scalar path needs an
+// explicit `tr<T`).
+DEV void tma4d_store(const CUtensorMap* m, const void* sm, int c0, int c1, int c2, int c3) {
+    asm volatile(
+        "cp.async.bulk.tensor.4d.global.shared::cta.bulk_group "
+        "[%0, {%1,%2,%3,%4}], [%5];\n"
+        ::"l"(m), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(saddr(sm))
+        : "memory");
 }
 #endif
 #ifdef B1T_ETMA
@@ -190,6 +206,10 @@ struct alignas(1024) Shared {
     // double-buffered per-warp `dh` store tile, unpadded [KD,BW] (TMA needs exact stride)
     alignas(1024) bf16 dho[2][NW][KD][BW];
 #endif
+#ifdef B1T_TMADV
+    // double-buffered per-warp `dv2` store tile, unpadded [BT,BW] (token-major output)
+    alignas(1024) bf16 duo[2][NW][BT][BW];
+#endif
     alignas(8) uint64_t full[NSTAGE];
     alignas(8) uint64_t empty[NSTAGE];
 };
@@ -207,6 +227,9 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
 #endif
 #ifdef B1T_TMADH
               const __grid_constant__ CUtensorMap dhmap,
+#endif
+#ifdef B1T_TMADV
+              const __grid_constant__ CUtensorMap dv2map,
 #endif
               const float* __restrict__ etot,
               bf16* __restrict__ dh_g, float* __restrict__ dh0_g, bf16* __restrict__ dv2_g,
@@ -289,9 +312,12 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
 
             // ---- publish S: per-warp bf16 mirror (+ `dh` store: scalar or TMA) ----
             {
+#if defined(B1T_TMADH) || defined(B1T_TMADV)
+                // P7-33: free the double buffer before either store tile is (re)written.
+                if (i >= 2 && l == 0) tma_store_wait_read<1>();
+#endif
 #if defined(B1T_TMADH)
                 bf16 (*dho)[BW] = sh->dho[i & 1][warp];
-                if (i >= 2 && l == 0) tma_store_wait_read<1>();
                 __syncwarp();
 #elif !defined(B1T_NODH)
                 const int64_t base = ((int64_t)(n * NT + c) * H + h) * KD * VD;
@@ -325,7 +351,11 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
 #if defined(B1T_TMADH)
             if (l == 0) {
                 tma5d_store(&dhmap, &sh->dho[i & 1][warp][0][0], vbase, 0, h, c, n);
+#ifndef B1T_TMADV
+                // P7-33: when the `dv2` store is also TMA, both are committed together
+                // at the end of the chunk (one bulk group per chunk keeps the wait<1>).
                 tma_store_commit();
+#endif
             }
 #endif
             // ---- op1: cdu[BT,BW] = k[BT,KD] @ S[KD,BW] ----
@@ -367,6 +397,13 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                         bf16 b0 = f2b(d0), b1 = f2b(d1), b2 = f2b(d2), b3 = f2b(d3);
                         sdu[r0][cc] = b0; sdu[r0][cc + 1] = b1;
                         sdu[r1][cc] = b2; sdu[r1][cc + 1] = b3;
+#if defined(B1T_TMADV)
+                        // P7-33: stage into the per-warp [BT,BW] tile; lane 0 issues the
+                        // TMA store after the loop.  Rows with tr>=T are written too but
+                        // TMA clips them against the tensor bound (dim1 == T).
+                        sh->duo[i & 1][warp][r0][cc] = b0; sh->duo[i & 1][warp][r0][cc + 1] = b1;
+                        sh->duo[i & 1][warp][r1][cc] = b2; sh->duo[i & 1][warp][r1][cc + 1] = b3;
+#elif !defined(B1T_NODV2)
                         if (tr0 < T) {
                             int64_t o0 = ((int64_t)(n * T + tr0) * H + h) * VD + vbase + cc;
                             dv2_g[o0] = b0; dv2_g[o0 + 1] = b1;
@@ -375,9 +412,16 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                             int64_t o1 = ((int64_t)(n * T + tr1) * H + h) * VD + vbase + cc;
                             dv2_g[o1] = b2; dv2_g[o1 + 1] = b3;
                         }
+#endif
                     }
             }
             __syncwarp();
+#ifdef B1T_TMADV
+            if (l == 0) {
+                tma4d_store(&dv2map, &sh->duo[i & 1][warp][0][0], vbase, c * BT, h, n);
+                tma_store_commit();
+            }
+#endif
 
             // ---- op2/op3: S = S*e + scale*(q^T @ do) - (w^T @ du) ----
             #pragma unroll
@@ -475,6 +519,26 @@ static void make_map_dh(CUtensorMap* m, void* ptr, int H, int NT, int B) {
 }
 #endif
 
+#ifdef B1T_TMADV
+// dv2 is [B, T, H, VD] bf16 (token-major, contiguous).  dims {VD, T, H, B},
+// box {BW, BT, 1, 1}, SWIZZLE_NONE (inner dim BW*2 = 32 B); one store per compute warp,
+// OOB token rows clipped by the T bound.
+static void make_map_dv2(CUtensorMap* m, void* ptr, int H, int T, int B, int BT) {
+    cuuint64_t gdim[4] = {(cuuint64_t)VD, (cuuint64_t)T, (cuuint64_t)H, (cuuint64_t)B};
+    // gstr[i] is the byte stride of dim i+1: {H: VD*2, T: H*VD*2, B: T*H*VD*2}.
+    cuuint64_t gstr[3] = {(cuuint64_t)H * VD * 2, (cuuint64_t)VD * 2,
+                          (cuuint64_t)T * H * VD * 2};
+    cuuint32_t box[4] = {(cuuint32_t)BW, (cuuint32_t)BT, 1, 1};
+    cuuint32_t estr[4] = {1, 1, 1, 1};
+    if (cuTensorMapEncodeTiled(m, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 4, ptr, gdim, gstr, box,
+                               estr, CU_TENSOR_MAP_INTERLEAVE_NONE,
+                               CU_TENSOR_MAP_SWIZZLE_NONE,
+                               CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                               CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS)
+        fprintf(stderr, "cuTensorMapEncodeTiled(dv2) failed\n");
+}
+#endif
+
 #ifdef B1T_ETMA
 // E^tot is [B, NT, H, KD] fp32 (contiguous).  dims {KD, NT*H, B}, box {KD,1,1}, no swizzle.
 static void make_map_e(CUtensorMap* m, void* ptr, int H, int NT, int B) {
@@ -510,6 +574,10 @@ static int launch_impl(void* q, void* k, void* w, void* do_, void* dv, void* eto
     CUtensorMap dhm;
     make_map_dh(&dhm, dh, H, NT, B);
 #endif
+#ifdef B1T_TMADV
+    CUtensorMap dv2m;
+    make_map_dv2(&dv2m, dv2, H, T, B, BT);
+#endif
     dim3 grid(VD / BV, B * H);
     int smem = (int)sizeof(Shared<BT, NSTAGE>);
     static int configured = 0;
@@ -526,6 +594,9 @@ static int launch_impl(void* q, void* k, void* w, void* do_, void* dv, void* eto
 #endif
 #ifdef B1T_TMADH
         dhm,
+#endif
+#ifdef B1T_TMADV
+        dv2m,
 #endif
         (const float*)etot, (bf16*)dh, (float*)dh0, (bf16*)dv2, T, NT, H,
         scale);

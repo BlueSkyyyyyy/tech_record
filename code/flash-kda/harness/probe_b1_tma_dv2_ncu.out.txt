@@ -1,0 +1,188 @@
+GPU: NVIDIA H100 80GB HBM3
+ncu: Version 2026.1.1.0 (build 37634170) (public-release)
+
+################################################################################
+# base  scalar dh+dv2 (B8 T2048H8 BT=64 NS=1)
+#   B=8 T=2048 H=8 bt=64 ns=1
+################################################################################
+[2448431] python3.12@127.0.0.1
+  void b1_tma_kernel<64, 1>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, __nv_bfloat16 *, float *, __nv_bfloat16 *, int, int, int, float) (2, 64, 1)x(160, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                            Mbyte       169.68
+    dram__bytes_write.sum                                                           Mbyte        91.59
+    gpu__time_duration.sum                                                             us       198.46
+    lts__t_bytes.sum                                                                Mbyte       863.42
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %        10.85
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        14.47
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             inst         0.66
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         3.86
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.91
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.24
+    ------------------------------------------------------------------------- ----------- ------------
+
+
+################################################################################
+# tma   TMA dh only  (B8 T2048H8 BT=64 NS=1)
+#   B=8 T=2048 H=8 bt=64 ns=1
+################################################################################
+[2448725] python3.12@127.0.0.1
+  void b1_tma_kernel<64, 1>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, __nv_bfloat16 *, float *, __nv_bfloat16 *, int, int, int, float) (2, 64, 1)x(160, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                            Mbyte       168.88
+    dram__bytes_write.sum                                                           Mbyte        91.71
+    gpu__time_duration.sum                                                             us       155.07
+    lts__t_bytes.sum                                                                Mbyte       490.65
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %        13.98
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        19.17
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             inst         0.04
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         2.51
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.80
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.36
+    ------------------------------------------------------------------------- ----------- ------------
+
+
+################################################################################
+# tma2  TMA dh+dv2   (B8 T2048H8 BT=64 NS=1)
+#   B=8 T=2048 H=8 bt=64 ns=1
+################################################################################
+[2449019] python3.12@127.0.0.1
+  void b1_tma_kernel<64, 1>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, __nv_bfloat16 *, float *, __nv_bfloat16 *, int, int, int, float) (2, 64, 1)x(160, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                            Mbyte       168.89
+    dram__bytes_write.sum                                                           Mbyte        91.17
+    gpu__time_duration.sum                                                             us       141.41
+    lts__t_bytes.sum                                                                Mbyte       416.20
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %        15.48
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        17.87
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             inst         0.04
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         2.81
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.75
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.40
+    ------------------------------------------------------------------------- ----------- ------------
+
+
+################################################################################
+# nodv2 no dv2       (B8 T2048H8 BT=64 NS=1)
+#   B=8 T=2048 H=8 bt=64 ns=1
+################################################################################
+[2449313] python3.12@127.0.0.1
+  void b1_tma_kernel<64, 1>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, __nv_bfloat16 *, float *, __nv_bfloat16 *, int, int, int, float) (2, 64, 1)x(160, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                            Mbyte       169.38
+    dram__bytes_write.sum                                                           Mbyte        61.01
+    gpu__time_duration.sum                                                             us       180.03
+    lts__t_bytes.sum                                                                Mbyte       642.98
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %        12.01
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        13.71
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             inst         0.83
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         4.03
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.79
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.38
+    ------------------------------------------------------------------------- ----------- ------------
+
+
+################################################################################
+# base  scalar dh+dv2 (B2 T1024H8 BT=32 NS=2)
+#   B=2 T=1024 H=8 bt=32 ns=2
+################################################################################
+[2449607] python3.12@127.0.0.1
+  void b1_tma_kernel<32, 2>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, __nv_bfloat16 *, float *, __nv_bfloat16 *, int, int, int, float) (2, 16, 1)x(160, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                            Mbyte        21.30
+    dram__bytes_write.sum                                                           Mbyte         7.49
+    gpu__time_duration.sum                                                             us       134.30
+    lts__t_bytes.sum                                                                Mbyte       160.98
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %         7.98
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %         3.31
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             inst         0.90
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         2.87
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         2.24
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.34
+    ------------------------------------------------------------------------- ----------- ------------
+
+
+################################################################################
+# tma   TMA dh only  (B2 T1024H8 BT=32 NS=2)
+#   B=2 T=1024 H=8 bt=32 ns=2
+################################################################################
+[2449901] python3.12@127.0.0.1
+  void b1_tma_kernel<32, 2>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, __nv_bfloat16 *, float *, __nv_bfloat16 *, int, int, int, float) (2, 16, 1)x(160, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                            Mbyte        21.27
+    dram__bytes_write.sum                                                           Mbyte         7.05
+    gpu__time_duration.sum                                                             us        74.78
+    lts__t_bytes.sum                                                                Mbyte        85.80
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %        14.83
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %         5.96
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             inst         0.06
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.82
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.83
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.51
+    ------------------------------------------------------------------------- ----------- ------------
+
+
+################################################################################
+# tma2  TMA dh+dv2   (B2 T1024H8 BT=32 NS=2)
+#   B=2 T=1024 H=8 bt=32 ns=2
+################################################################################
+[2450195] python3.12@127.0.0.1
+  void b1_tma_kernel<32, 2>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, __nv_bfloat16 *, float *, __nv_bfloat16 *, int, int, int, float) (2, 16, 1)x(160, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                            Mbyte        21.26
+    dram__bytes_write.sum                                                           Mbyte         7.14
+    gpu__time_duration.sum                                                             us        65.06
+    lts__t_bytes.sum                                                                Mbyte        75.52
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %        16.89
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %         6.20
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             inst         0.07
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         0.77
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.68
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.52
+    ------------------------------------------------------------------------- ----------- ------------
+
+
+################################################################################
+# nodv2 no dv2       (B2 T1024H8 BT=32 NS=2)
+#   B=2 T=1024 H=8 bt=32 ns=2
+################################################################################
+[2450489] python3.12@127.0.0.1
+  void b1_tma_kernel<32, 2>(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, __nv_bfloat16 *, float *, __nv_bfloat16 *, int, int, int, float) (2, 16, 1)x(160, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                                            Mbyte        21.27
+    dram__bytes_write.sum                                                           Mbyte         4.73
+    gpu__time_duration.sum                                                             us       114.78
+    lts__t_bytes.sum                                                                Mbyte       139.21
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %         9.33
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %         3.51
+    smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio             inst         0.92
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         2.78
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         1.82
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.30
+    ------------------------------------------------------------------------- ----------- ------------
+
+
+DONE

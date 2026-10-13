@@ -516,6 +516,23 @@
       优先级＝B1 `dh`（及 `dv2`）改 TMA store（独立、低风险、逐位无损），B1→B2 融合净增量只剩 B2 侧 ~5%。
       **待验证**：`dv2` 的 TMA store 推广未实测（本节只改 `dh`，与 §34.1 口径一致）。
 
+- [x] **P7-33** 兑现 §35.5 的**待验证**：把 TMA store 从 `dh` 推广到同一逐标量循环里的 **`dv2`**（输出支路）。
+      给 `b1_tma_probe.cu` 加 `-DB1T_TMADV`：per-warp `[BT,BW]` 未 padding tile 写进 `Shared` 的双缓冲
+      `duo[2][NW][BT][BW]`，lane 0 发一条 `cp.async.bulk.tensor.4d`（`make_map_dv2`：dims `{VD,T,H,B}`、
+      box `{BW,BT,1,1}`、`SWIZZLE_NONE`），OOB 尾行由 TMA 按 `T` 边界自动裁（免显式 `tr<T`）；`dh`/`dv2`
+      **共用一个 bulk group**（每块一次 commit，`wait_group.read 1` 语义不变）。另加 `-DB1T_NODV2` 消融。
+      新增 `harness/check_bwd_b1_tma_dv2.py`（`check_bwd_b1_tma_dv2.out.txt`）+ `ncu_b1_tma_dv2_driver.py` /
+      `probe_b1_tma_dv2_ncu.sh`（`probe_b1_tma_dv2_ncu.out.txt`）+ `docs/07` §36。**Part A**：16 组
+      （`BT=32/64`、`NS=1/2`、含非整除 `T=250`）tma2 vs scalar `dh/dv2/dh0` **逐位相同（max_abs=0）**、vs FLA
+      仍 bf16 1 ulp。**Part B**：`tma2/tma` = **0.84–0.95（均值 ~0.89，16/16 组为正）**、`tma2/base` =
+      **0.39–0.71（均值 0.58）**、对「两条全删」上界恢复 **0.62–0.83（均值 0.75）**；`base−nodv2` 只 7–16%
+      （证实 `dv2` 是「小块」）。**Part D（ncu）**：`lg_throttle` **0.66→0.04 / 0.90→0.07**（nodv2 列仍 0.83/0.92，
+      证明 `dv2` 标量写也是反压源）、DRAM write **91.6→91.2 / 7.49→7.14**（不是带宽）、L2 字节 **tma 再 −15%**
+      （490.7→416.2 / 85.8→75.5，−52% vs base）、tensor **15.48/16.89%**。**坑**：4D 张量图 `globalStrides`
+      按 **dim 从 1** 起算，首版把 T/H 两维 stride 写反——`H==1` 全对、只有 `H>1` 时 `dv2` 错（`dh/dh0` 仍逐位），
+      指纹=「仅 `dv2` 错且仅多 head 错」。**结论**：§35.5 答案=**能且逐位无损**——`dh`+`dv2` 全改 TMA 后
+      `lg_throttle` 归零、恢复全删上界 75%，B1 下一块瓶颈只剩每 warp 发射效率（`wait` 1.40 / tensor 15.5%）。
+
 ### P8 小结 / 一页纸
 
 - [x] **P8-1** `docs/08-summary.md`：公式、结构、误差、性能、反向要点一页纸汇总
@@ -546,8 +563,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-32 补测**。
-  - P7-32（本轮）：兑现 §34.4 的**待验证**——把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-33 补测**。
+  - P7-33（本轮）：兑现 §35.5 的**待验证**——把 TMA store 从 `dh` 推广到同一逐标量循环里的 **`dv2`**
+    （`-DB1T_TMADV`：per-warp `[BT,BW]` tile + 双缓冲 `duo` + `cp.async.bulk.tensor.4d`，与 `dh` 共用一个
+    bulk group）。`dh/dv2/dh0` 与 scalar **逐位相同**（16 组，含非整除 `T=250`）；`tma2/tma` =
+    **0.84–0.95（均值 ~0.89，全为正）**、`tma2/base` **0.39–0.71**、对「两条 store 全删」上界恢复
+    **0.62–0.83（均值 0.75）**；`ncu` 把 `lg_throttle` **0.66→0.04 / 0.90→0.07**（nodv2 列仍 0.83/0.92，
+    证明 `dv2` 标量写也是反压源）、DRAM write 基本不变（**不是带宽**）、L2 再 **−15%**、tensor 抬到
+    **15.5/16.9%**。**坑**：4D 张量图 `globalStrides` 按 dim 从 1 起算，首版写反 T/H stride，`H==1` 全对、
+    只有 `H>1` 时 `dv2` 错（指纹=「仅 `dv2`、仅多 head」）。**结论**：§35.5 答案=**能且逐位无损**；
+    `dh`+`dv2` 全改 TMA 后 B1 下一块瓶颈只剩每 warp 发射效率（`wait` 1.40 / tensor 15.5%）。新增
+    `harness/check_bwd_b1_tma_dv2.py`（`check_bwd_b1_tma_dv2.out.txt`）+ `ncu_b1_tma_dv2_driver.py` /
+    `probe_b1_tma_dv2_ncu.sh`（`probe_b1_tma_dv2_ncu.out.txt`）+ `docs/07` §36。
+  - P7-32（上轮）：兑现 §34.4 的**待验证**——把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**
     （`-DB1T_TMADH`：per-warp `[KD,BW]` 未 padding tile + 双缓冲 `dho` + `cp.async.bulk.tensor.5d`），
     验证能否复现 §34.1「删掉 store」收益的那 33%。`dv2/dh0/dh` 与 scalar **逐位相同**；CUPTI 恢复占比
     `(base−tma)/(base−nodh)` = **0.58–0.84（均值 ~0.72）**、base→tma 提速 **1.28–2.48×**；`ncu` 把
@@ -996,14 +1024,23 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-32 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-33 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-33（`docs/07` §36）把 TMA store 从 `dh` 推广到 `dv2`**：`-DB1T_TMADV`（per-warp `[BT,BW]` tile +
+    双缓冲 `duo` + `cp.async.bulk.tensor.4d`，与 `dh` 共用一个 bulk group，OOB 尾行由 TMA 按 `T` 裁）。
+    `dh/dv2/dh0` 与 scalar **逐位相同**（16 组，含非整除 `T=250`）；`tma2/tma` = **0.84–0.95（均值 ~0.89，
+    全为正）**、`tma2/base` **0.39–0.71**、对全删上界恢复 **0.62–0.83（均值 0.75）**；`ncu` `lg_throttle`
+    **0.66→0.04 / 0.90→0.07**（nodv2 仍 0.83/0.92）、DRAM write 不变（**不是带宽**）、L2 再 **−15%**、
+    tensor **15.5/16.9%**。坑：4D 张量图 `globalStrides` 按 dim 从 1 起算，写反 T/H stride 时 `H==1` 全对、
+    仅 `H>1` 时 `dv2` 错。**结论**：§35.5 答案=**能且逐位无损**；B1 的 `dh`+`dv2` 全改 TMA 后下一块瓶颈
+    只剩每 warp 发射效率（`wait` 1.40 / tensor 15.5%）。**下一步**：此专题实际工作已全部收敛（两条 store
+    优化 + 全部 bound 定位），仅剩「CUTLASS `PipelineTmaAsync` 换手写 mbarrier」这一更大工程，留待有需求时做。
   - **P7-32（`docs/07` §35）兑现 §34.4 待验证＝把 B1 的 `dh` 落盘改成 TMA store**：`-DB1T_TMADH`
     （per-warp `[KD,BW]` tile + 双缓冲 + `cp.async.bulk.tensor.5d`），`dh/dv2/dh0` 与 scalar **逐位相同**；
     CUPTI 恢复占比 **0.58–0.84（均值 ~0.72）**、base→tma **1.28–2.48×**；`ncu` 把 `lg_throttle`
     **0.66→0.04 / 0.89→0.05**（坐实真凶）、DRAM write 基本不变（**不是带宽**）、L2 **−43%**、theoretical occ
     腰斩但 achieved 不动。**答案：能**——TMA store 不融合即吃掉那 33% 大头。**下一步**：目标卡 CUDA 反向
     第一优先级＝B1 `dh`（及 `dv2`）改 TMA store；B1→B2 融合降到最后（净增量只剩 B2 侧 ~5%）。
-    **待验证**：`dv2` 的 TMA store 推广未实测。
+    **该待验证（`dv2` 推广）已由 P7-33 关闭（答案：能且逐位无损）。**
   - **P7-31（`docs/07` §34）量化「K2 形状内 B1→B2 融合」收益上界**：受控消融拆 `dh` 落盘往返——
     B1 去掉 `dh` store（`-DB1T_NODH`）快 **0.28–0.67×**（`dv2/dh0` 逐位），`ncu` 证明是**逐标量
     `st.global` 的 `lg_throttle`（0.67→0.06）+ L2 放大 ~3×**、**不是带宽**；B2 不读 `dh` 只值 **~5%**。

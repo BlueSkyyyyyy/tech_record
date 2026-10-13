@@ -280,3 +280,13 @@ DRAM 字节 **−23%**、L2 **−17%**（`B8T2048H8`；`ncu` Duration 1193→105
 故**往返上界 ≈ B1+B2 的 ~10%，且 ~2/3 在 B1 侧且属 store 效率（非融合专属）**。**修正 §30.5 的下一步**：
 目标卡 CUDA 反向优先把 **B1 的 `dh`/`dv2` 落盘改成 TMA / 专职 STORE warp**（镜像前向 K2 的 STORE warp），
 而非 B1→B2 融合——融合相对「高效 `dh` store」的净增量只剩 ~5%（同 §26/§29 对 `h/dh` 的判定）。
+
+**P7-32（`docs/07` §35）/ P7-33（`docs/07` §36）**：兑现上条的**待验证**——把 B1 的 `dh`（§35，`-DB1T_TMADH`）
+与 `dv2`（§36，`-DB1T_TMADV`）两条逐标量 `st.global` **都换成 TMA store**（per-warp 未 padding tile + 双缓冲 +
+一块一个 bulk group，OOB 尾行由 TMA 按 `T` 自动裁）。两条均与 scalar 路径 **逐位相同**（含非整除 `T`）；
+`dh` TMA 恢复「删 store」上界 58–84%，`dh`+`dv2` 全 TMA 后 `tma2/base` = **0.39–0.71**、对「两条全删」上界
+恢复 **62–83%（均值 75%）**；`ncu` 把 `lg_throttle` **0.66/0.90→0.04/0.07**（坐实「逐标量 store 打满队列」）、
+DRAM write 基本不变（**不是带宽**）、L2 字节 **−52%**、tensor 抬到 **15.5/16.9%**。至此 B1 的 store 侧收敛，
+下一块瓶颈只剩**每 warp 发射效率**（`wait` 1.40），即 §24.5 的手写 mbarrier 结构上限（需换 CUTLASS
+`PipelineTmaAsync`，属更大工程）。**坑**：TMA 张量图 `globalStrides` 按 dim 从 1 起算，写反 T/H stride 时
+`H==1` 全对、仅 `H>1` 时 `dv2` 错。
