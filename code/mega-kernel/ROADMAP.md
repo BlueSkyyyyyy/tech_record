@@ -1049,6 +1049,32 @@
   角色留在 block 0，**与 §31–§33 同档、仍差 C5 一步**。**本轮新增实验**；把 §31–§33 的防死锁理论
   从「调度器扫描/预排序」推进到「依赖事件天然触发」的 MPK 机制，并合上独立扫 `G` 与更大 `N`。
 
+### P46 实验扩展 28：有界 ready 环形缓冲（`docs/04-experiments.md` §35）
+
+- [x] **P46-1** 补掉 P45-1（§34）§34.9 明留的尾巴「`event` 的 ready 队列**无界**（按 `N+4` 开数组）、
+  真实实现要**环形缓冲 + 容量上界**」：把 §34 的事件驱动调度装进一个**有界** ready 环形缓冲 +
+  **阻塞式背压**，测「有界」会付出什么代价。真实锚点：MPK 固定 `per_worker_queue_len=8192` /
+  `per_sched_queue_len=4096`（快照 `f9eb70c`，`persistent_kernel.cuh:1790-1791`）+ 不溢出 `assert`
+  （`:1027`），注释 `:1782-1789` 明说容量是被**速率**逼上去的；DeepGEMM Mega MoE
+  `get_num_max_live_pool_blocks()`（`scheduler/mega_moe.cuh:47-80`）闭式给容量上界 +
+  `get_num_l1_warmup_waves()`（`:15-45`）防死锁。见 `docs/04-experiments.md` **§35**，源码
+  `src/bounded_event_ring.cu`、脚本 `harness/bounded_event_ring.sh`、原始输出
+  `harness/bounded_event_ring.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`G=64`、
+  `work_iters=20000`）。`unb`（=§34 无界）vs `bnd`（有界 `CAP` + 阻塞背压）。核心结论：
+  - **§A/§B 两类容量下界别混用**：`unb` 恒可完成；`bnd` 需一个小容量，`G ≤ W_max` 时
+    **`CAP_safe + G ≈ W_max + 1`**（`W_max`=最大层宽）——G 个 worker 在飞、环只缓冲宽层里
+    `W_max−G` 个未被取走的就绪 task；`G ≥ W_max` 时触底 ~2。**与 §31–§34 的 `B(π)+1` 不同**：
+    后者是**准入顺序/依赖深度**决定的图静态量，这里是**并发就绪数 ÷ worker 数**的排队量。
+  - **§C 容量是安全阀不是吞吐旋钮**：`CAP<CAP_safe` 必死锁（守门狗），`CAP≥CAP_safe` 后延迟完全
+    持平（0.375 ms，差 <1%）——区别于 §31 §C「容量是吞吐硬下界」（那里 worker 会占着未就绪 task 自旋）。
+  - **§D 正确性**：`unb` 与 `bnd(CAP=W_max+1)` 8/8 case **逐位相同 `sum`**（`rel` 1.5e-9–2.4e-9）——
+    有界/无界只改「何时入队」不改「算什么」。
+  - **§E 规模标度**：`CAP_safe ≈ max(2, W_max − G + O(1))`，随 `W_max` 增、随 `G` 降；MPK/DeepGEMM
+    取远超峰值就绪数的固定常量保守兜底，正兜住本节量出的「实际需求很小、但边界不确定」。
+  - **headline caveat**：靠近安全边界时**单次可完成、多次可能死锁**（`CAP_hard < CAP_safe`），
+    边界是「环满 + 无 worker 在 pop 相」的时序竞态。判据：`unb`/`bnd` 均单常驻 kernel、设备侧
+    推进（C1–C4），仍差 C5 一步（与 §31–§34 同档）。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1071,7 +1097,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P45-1 完成（1/1）**。补掉 P44-1 §33.8 明留的三条尾巴（`N≤70`、只验证 `G*` 与 `CAP*`
+- 当前进度：**P46-1 完成（1/1）**。补掉 P45-1（§34）§34.9 明留的尾巴「`event` 的 ready 队列**无界**
+  （按 `N+4` 开数组）、真实实现要**环形缓冲 + 容量上界**」：把 §34 的事件驱动调度装进一个**有界**
+  ready 环形缓冲 + **阻塞式背压**，测「有界」付出什么代价。`docs/04-experiments.md` 新增 **§35**，
+  源码 `src/bounded_event_ring.cu`、脚本 `harness/bounded_event_ring.sh`、原始输出
+  `harness/bounded_event_ring.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`G=64`、
+  `work_iters=20000`）。`unb`（=§34 无界）vs `bnd`（有界 `CAP` + 阻塞背压）。核心结论：
+  - **§A/§B 两类容量下界别混用**：`unb` 恒可完成；`bnd` 需一个小容量，`G ≤ W_max` 时
+    **`CAP_safe + G ≈ W_max + 1`**（`W_max`=最大层宽）——G 个 worker 在飞、环只缓冲宽层里
+    `W_max−G` 个未被取走的就绪 task；`G ≥ W_max` 时触底 ~2。**与 §31–§34 的 `B(π)+1` 不同**：
+    后者是**准入顺序/依赖深度**决定的图静态量，这里是**并发就绪数 ÷ worker 数**的排队量。
+  - **§C 容量是安全阀不是吞吐旋钮**：`CAP<CAP_safe` 必死锁（守门狗），`CAP≥CAP_safe` 后延迟完全
+    持平（0.375 ms，差 <1%）——区别于 §31 §C「容量是吞吐硬下界」。
+  - **§D 正确性**：`unb` 与 `bnd(CAP=W_max+1)` 8/8 case **逐位相同 `sum`**（`rel` 1.5e-9–2.4e-9）。
+  - **§E 规模标度**：`CAP_safe ≈ max(2, W_max − G + O(1))`；MPK 固定 8192/4096 + `assert`
+    （`persistent_kernel.cuh:1790-1791/:1027`）、DeepGEMM `get_num_max_live_pool_blocks`
+    （`scheduler/mega_moe.cuh:47-80`）都是「取远超峰值就绪数的固定常量保守兜底」。
+  - **headline caveat**：靠近安全边界时**单次可完成、多次可能死锁**（`CAP_hard < CAP_safe`），
+    边界是「环满 + 无 worker 在 pop 相」的时序竞态。判据：`unb`/`bnd` 均单常驻 kernel、设备侧
+    推进（C1–C4），仍差 C5 一步（与 §31–§34 同档）。**本轮新增实验。**
+- 此前：**P45-1 完成（1/1）**。补掉 P44-1 §33.8 明留的三条尾巴（`N≤70`、只验证 `G*` 与 `CAP*`
   同行相等即「未独立扫 `G`」、`gated` 是**朴素扫描**实现）：把 §33 的「依赖门控 `gated`」从**调度器
   扫描**改成 **MPK §5.1 的真机制**——每个 task 一个**事件计数器**（未完成前驱数），由完成该前驱的
   **worker 直接 push**「计数归零」的后继进 ready 队列。`docs/04-experiments.md` 新增 **§34**，源码
@@ -1558,7 +1603,12 @@
       朴素扫描实现（其 ~1.7–2.5× 慢非语义固有）。其中「更大 `N`」「独立扫 `G`」「`gated` 是扫描」
       三条已由 **P45-1（`docs/04` §34）** 处理：把 `gated` 换成 MPK §5.1 事件驱动就地入队，`N` 扩到
       4096、独立扫 `G` 确认 `raw CAP*=G*=B+1` 而 `event G*≡1`；仍余「与真实 DeepGEMM SM100 路径对跑」
-      （SM100 专属，本机不具备）。
+      （SM100 专属，本机不具备）。**P45-1 新留尾巴**（`docs/04` §34.9）：`event` 的 ready 队列用的是
+      **无界**数组（`N+4`），真实实现要**环形缓冲 + 容量上界**——已由 **P46-1（`docs/04` §35）** 处理：
+      给事件驱动加上**有界环形缓冲 + 阻塞背压**，量出 `CAP_safe + G ≈ W_max + 1`（排队量，非 §31–§34 的
+      静态 `B(π)+1`）、安全容量以上不加吞吐、边界不确定；仍余「与真实 DeepGEMM SM100 路径对跑」。**P46-1
+      新留尾巴**（`docs/04` §35.7）：入队内存序是「先发布 tail 后写数据」（未加 release 发布）；
+      真实实现用 release 语义做实（MPK `docs/06` §3）——可作后续实验（用 release/seqlock 发布对比）。
 - **本轮（P44-1）**：`docs/04-experiments.md` 新增 **§33**「有界 ready 池 × 不规则依赖 DAG」——
   新源码 `src/irregular_pool.cu`、脚本 `harness/irregular_pool.sh`、原始输出
   `harness/irregular_pool.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`G=64`）。
