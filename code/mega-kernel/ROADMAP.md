@@ -4017,7 +4017,58 @@
       Gumbel-Max（噪声 key 到 **token id** 保确定性）、以及旧版 CUB `BlockReduce::Sum` 当 argmax 的废弃实现。
       判据只贡献 C3。配套博客 post `mega-kernel-57-mpk-sampling`（weight 58）并更新 `mega-kernel-00-index`
       第 57 项。P142-1 新留尾巴见文档 §8（未构建未对跑；`258/259` 反序只记不判；命名屏障 6/7 口径张力；
-      `MPK_MAX_NUM_BATCHED_*` 实际取值由构建配置给；CUB BlockReduce 内部未展开）。**本轮新增增量。**
+       `MPK_MAX_NUM_BATCHED_*` 实际取值由构建配置给；CUB BlockReduce 内部未展开）。**本轮新增增量。**
+
+### P143 SM100 共享原语层走读（`docs/57-mpk-sm100-primitives.md`）
+
+- [x] **P143-1** 兑现阶段「下一步候选」第三条残留——`docs/22` §3.2 只给摘要（「TMEM 累加 →
+  `tcgen05.commit...multicast::cluster` 会合」）、`docs/38` **只走 `tasks/common/*` + `ampere/mma.cuh`**
+  的缺口：把 `tasks/blackwell/` 那层「**SM100 共享原语**」（被 `docs/32`–`docs/37`/`docs/51`/`docs/52`
+  作为依赖反复引用、却从未当作一层逐行打开）走通，重点兑现 ROADMAP 原话「**tcgen05 commit / TMEM
+  分配的运行期契约**」。见 `docs/57-mpk-sm100-primitives.md`（MPK `f9eb70c`，**纯源码走读、无新实验**；
+  SM100 专属、本机（目标卡 H100/sm90）不可编译更不可运行）。四条 headline：
+  **(A)（headline）SM100 张量核原语「实现不止一遍」——「两遍变三遍」**：两条主脉
+  (a) `sm100_ptx.cuh`（`namespace kernel::sm100_ptx`，裸 PTX `elect_sync`/`mbar_init/wait/tx`/
+  `desc_enc`+`make_desc`/`tcgen05_mma`/`tcgen05_commit`，供手写 MLA decode/MTP）与
+  (b) `sm100_utils.cuh`（`namespace kernel::sm100`，源码首行自陈 *"adapted from the DeepGEMM SM100
+  Blackwell path"*，UMMA/SF 描述符 + `SM100_MMA_MXF8F6F4_SS`，供 block-scaled FP8 linear 家族）；
+  **同一个 `tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale` 有三份封装**——
+  `kernel::sm100::SM100_MMA_MXF8F6F4_SS`（`sm100_utils.cuh:127-150`）、
+  `mirage::blackwell::linear_fp8_sm100::sm100::SM100_MMA_MXF8F6F4_SS`
+  （`linear_fp8_sm100_sm100_utils.cuh:182-205`，与前者近乎逐行相同，另有 `_2x1SM_SS:207-230` 为
+  `cta_group::2`）与 CUTLASS 模板 `cute::SM100_MMA_MXF8F6F4_SS<T,...>`；`linear_fp8_1d2d_sm100.cuh`
+  **一次用两份**（`:132` `mma_issue_t` = `kernel::sm100::…`、`:134` `mma_plumbing_t` = `cute::…<>`），
+  且 tp2/4/8 各在私有 `namespace …::ptx` 重定义一份 `sm100_ptx`（第四份）——是 `docs/22` §5
+  「同一惯用法实现两遍」在 SM100 层的实例化；
+  **(B)（headline）`tcgen05.commit` + TMEM alloc/dealloc 构成明确的运行期契约，是「一个 task = 一个
+  CTA、单 warp 持有 TMEM」硬约束的根**：commit 是把异步 MMA 完成事件 `arrive` 到**一个 mbarrier**
+  （`tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64`，`sm100_ptx.cuh:82-86`；
+  per-stage `mma_bar+stage*8` + 收尾 `mainloop_bar`，`mla_decode_sm100.cuh:200/202`），消费者
+  `mbar_wait(mainloop_bar,0)`（`:206`）+ `tcgen05.fence::after_thread_sync`（`:189/209`）+
+  `tcgen05.ld`+`tcgen05.wait::ld`（`:236-255`）；TMEM 由**单 warp** `tcgen05.alloc/dealloc`
+  （手写路径：结果写 `__shared__ int` 再 `__syncthreads` 广播，`mla_decode_sm100.cuh:109-116/452-457`；
+  列数上限 512、对齐到 {32,64,128,256,512}，`linear_fp8_sm100_sm100_utils.cuh:156-172`）或 CuTe
+  `TmemAllocator`+`NamedBarrier tmem_allocation_result_barrier`（FP8 家族）分配；**同一 worker 上共驻
+  的所有 SM100 task 必须同 warp**（`mla_mtp_decode_tp2_sm100.cuh:190-195` 的 `NOTE` 原文），但
+  **base tp1/旧 decode 仍用 warp1 alloc**（`mla_mtp_decode_sm100.cuh:146`、`mla_decode_sm100.cuh:108`）
+  而 tp2/4/8 已改 warp0（`:196/:184/:177`）——一条**静态不对称**（只记不判，本机无 SM100 无法证伪生产
+  是否真并发 FP8）；与 `docs/34` §3.5「TMEM-warp 一致」坑呼应，说明 megakernel 把「框架帮你做的
+  TMEM 生命周期」下沉成「task 之间必须约定的资源归属」；
+  **(C) `storage.cuh` = FP8 线性家族的 SMEM ABI，`tensor_init.cuh` 是唯一纯 arch-agnostic 薄身体**：
+  四个 pipeline storage 结构体（`PipedSharedStorage:25-55`、`PipedSharedStorageWithSF:57-100`、
+  `GateTopKSharedStorage:102-130`、`MoESharedStorage:132-165`）把「A/B/C(+SFA/SFB) + 四组
+  `ab/acc_full/empty` mbarrier 数组 + `tmem_base_ptr`（+`tmem_columns`/`expert_mask`/
+  `reduce_values_buffer[32]`）」按固定对齐（数据 `alignas(128)`、mbarrier `alignas(16)`）打包，是
+  `docs/51`「布局类型即 SMEM 的 ABI」的**数据侧镜像**；`tensor_init.cuh`（30 行、纯逐元素填 `init_val`、
+  `TASK_TENSOR_INIT=262`）虽在 `blackwell/` 目录却完全不依赖 SM100 原语——另一处「`_sm100` 后缀 ≠
+  SM100 专属」（对上 `docs/56`），判 task 能否在目标卡跑须看指令内容而非目录；
+  **(D)** 记一条注释落差：`task_header.cuh:43-44` 称 `sm100_ptx.cuh` 必须在 `mla_mtp_decode_sm100.cuh`
+  **之前** include，但实际直接 include 在 `:59`（`mla_mtp` 在 `:46`），靠 `#pragma once` 兜住（注释已滞后，
+  `docs/34` 已点过一次）。判据只贡献 C3；TMEM-warp 契约间接约束 C2（哪些 task 能安全共驻）。
+  配套博客 post `mega-kernel-58-mpk-sm100-primitives`（weight 59）并更新 `mega-kernel-00-index` 第 58 项。
+  P143-1 新留尾巴见文档 §8（未构建/未运行；warp 不对称只记不判；CuTe `TmemAllocator`/`cute::SM100_MMA_*`
+  内部未展开；三份 MMA 封装只核 PTX 串逐字相同、未做等价性证明；描述符位编码未逐位展开；`storage.cuh`
+  对齐未实例化验证）。**本轮新增增量。**
 
 ## 每轮增量流程（autopilot）
 
@@ -4351,10 +4402,48 @@
   与新版 `sampling_reduce_sm100`（`sampling_sm100.cuh:276`）的号，只有 `sampling_partial_sm100` 是独立号 279；
   且 **`TASK_ARGMAX_REDUCE_SM100=258`、`TASK_ARGMAX_PARTIAL_SM100=259` 的名称顺序与号相反**
   （`runtime_header.h:145-146`）。读 `TaskType` 表要按 `register_task_variant` 的实际参数而非号值猜身体。
+- **SM100 常驻 task 的 TMEM alloc warp 在快照里不一致**（P143-1/`docs/57` §4.1）：CuTe 的 TMEM
+  分配器要求 `tcgen05.alloc/dealloc` 由**同一 warp** 在所有共驻于常驻 kernel 的 task 里发出
+  （`mla_mtp_decode_tp2_sm100.cuh:190-195` 的 `NOTE`），FP8 CUTLASS 家族（`linear_fp8`/`moe_linear`/
+  `fp8_group_gemm`）全用 **warp 0**。tp2/tp4/tp8 的 MLA-MTP 已改成 **warp0 alloc/dealloc**
+  （`:196`/`:184`/`:177`），但**旧版 base `mla_mtp_decode_sm100.cuh`（生产注册路径，`docs/24` P121-1）
+  与 `mla_decode_sm100.cuh` 仍用 warp 1 alloc**（`:146`/`:108`）、dealloc 用 warp 0——**一条静态
+  不对称**（只记不判：同一 task 内 alloc≠dealloc 在 PTX 语义下未必非法，真正风险点是**跨 task 的 CuTe
+  分配器锁**）。写/移植常驻 SM100 task 时先确认它与邻居用同一 warp 做 TMEM 生命周期。
+- **`blackwell/` 目录里有两套互不共享的 SM100 张量核原语**（P143-1/`docs/57` §2/§3）：裸 PTX
+  `sm100_ptx.cuh`（`namespace kernel::sm100_ptx`，供手写 MLA decode/MTP）与 DeepGEMM 派生
+  `sm100_utils.cuh`（`namespace kernel::sm100`，供 block-scaled FP8 linear 家族）；同一个
+  block-scaled MMA 指令有**三份封装**（`kernel::sm100` / `mirage::blackwell::linear_fp8_sm100::sm100`
+  / `cute::` 模板），`linear_fp8_1d2d_sm100.cuh:132/134` 一次用两份。读 SM100 task 时别假设
+  `tcgen05_*`/`make_*_desc` 来自同一实现，先看它的 `namespace` 与 `#include`。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P142-1 完成（1/1）**。兑现阶段「下一步候选」第一条残留——`docs/37` §3 只给摘要、
+- 当前进度：**P143-1 完成（1/1）**。兑现阶段「下一步候选」第三条残留——`docs/22` §3.2 只给摘要、
+  `docs/38` 只走 `tasks/common/*` 的缺口：把 `tasks/blackwell/` 那层「SM100 共享原语」当作一层逐行打开，
+  重点兑现 ROADMAP 原话「**tcgen05 commit / TMEM 分配的运行期契约**」。见 `docs/57-mpk-sm100-primitives.md`
+  （MPK `f9eb70c`，**纯源码走读、无新实验**；SM100 专属、本机不可运行）。四条 headline：
+  **(A)（headline）SM100 张量核原语「实现不止一遍」**——手写路径 `sm100_ptx.cuh`（裸 PTX
+  `elect_sync`/`mbar_*`/`make_desc`/`tcgen05_mma`/`tcgen05_commit`）vs DeepGEMM 派生 `sm100_utils.cuh`
+  （UMMA/SF 描述符 + block-scaled MMA），且同一个 `tcgen05.mma...kind::mxf8f6f4.block_scale` 有**三份封装**
+  （`kernel::sm100` / `mirage::blackwell::linear_fp8_sm100::sm100` / `cute::` 模板，
+  `linear_fp8_1d2d_sm100.cuh:132/134` 一次用两份）、tp2/4/8 又各私有一份 `ptx` namespace——`docs/22` §5
+  「实现两遍」的「两遍变三遍」；**(B)（headline）`tcgen05.commit`+TMEM alloc/dealloc 运行期契约**：commit
+  把异步 MMA 完成事件 `arrive` 到一个 mbarrier（per-stage `mma_bar` + 收尾 `mainloop_bar`、`shared::cluster`
+  作用域），TMEM 由**单 warp** 分配（手写 `tcgen05.alloc/dealloc`+SMEM 广播 / CuTe `TmemAllocator`+NamedBarrier），
+  **同一 worker 共驻 task 必须同 warp**（`mla_mtp_decode_tp2_sm100.cuh:190-195` 的 `NOTE`），但 base tp1/旧
+  decode 仍 warp1 alloc、tp2/4/8 改 warp0——**静态不对称**（只记不判）；= 「一个 task=一个 CTA、单 warp
+  持有 TMEM」硬约束的根；**(C)** `storage.cuh` 四结构体 = FP8 线性家族的 **SMEM ABI**（数据侧镜像
+  `docs/51`），`tensor_init.cuh`（30 行）是唯一纯 arch-agnostic 薄身体（`TASK_TENSOR_INIT=262`，又一处
+  「`_sm100` 后缀 ≠ SM100 专属」）；**(D)** `task_header.cuh:43-44` 注释与 include 顺序落差。判据只贡献 C3。
+  配套博客 post `mega-kernel-58-mpk-sm100-primitives`（weight 59）并更新 `mega-kernel-00-index` 第 58 项。
+  P143-1 新留尾巴见文档 §8（未构建/未运行、warp 不对称只记不判、CuTe 内部未展开、三份封装等价比未证、
+  描述符位编码未逐位展开、`storage.cuh` 对齐未实例化验证）。
+- 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计的完整
+  追述；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或 `docs/51` §? 仍余的 `dmem_layout`/
+  `smem_row` 之外 SM100 专属布局（TMEM 列布局、UTCCP 重排细节）逐行。**SM100 共享原语层已由 P143-1/
+  `docs/57` 补掉**；采样链两段式已补完（P142-1/`docs/56`）；路由三兄弟全部补完（P140-1/P141-1）。
+- 此前：**P142-1 完成（1/1）**。兑现阶段「下一步候选」第一条残留——`docs/37` §3 只给摘要、
   `docs/42` 只覆盖 `softmax_gather`/`prob_scatter`/`prob_extract` 的中间缺口：把「一个 task = 一个 CTA」
   的 partial + reduce 两段式采样逐行打开。见 `docs/56-mpk-sampling.md`（MPK `f9eb70c`，**纯源码走读、
   无新实验**）。三条 headline：**(A)（headline）采样链两段间只传「每 chunk 极值 + 归一化配平量」**——
@@ -4373,7 +4462,8 @@
 - 下一步候选：可继续走「`docs/35` §9 遗留的其它未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE
   draft attention 设计的完整追述；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或
   `docs/22`/`docs/38` 里仍未逐行的 SM100 原语（如 tcgen05 commit/TMEM 分配的运行期契约）。
-  **采样链两段式已补完**（P142-1/`docs/56`）；路由三兄弟全部补完（P140-1/P141-1）。
+  **（SM100 共享原语层这一条已由 P143-1/`docs/57` 补掉）** **采样链两段式已补完**（P142-1/`docs/56`）；
+  路由三兄弟全部补完（P140-1/P141-1）。
 - 此前：**P141-1 完成（1/1）**。兑现阶段「下一步候选」第一条残留——`docs/37` §2 只给摘要的
   **路由三兄弟**里除 Inkling（已由 P140-1/`docs/54` 补）之外的**两支**：`topk_sigmoid_sm100` 与
   `glm_moe_router_sm100`。见 `docs/55-mpk-routers.md`（MPK `f9eb70c`，**纯源码走读、无新实验**）。
