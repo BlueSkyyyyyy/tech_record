@@ -4677,3 +4677,126 @@ Part B 的「降寄存器反而变慢」——**那 44% 不是靠降寄存器能
   traffic 等价核**测地板——它一次性给出(a)是否延迟受限（地板远低于实核）、(b)收益上界（实核/地板比）、
   (c)能否靠占用率拿到（配 `maxnreg` 受控扫）。这比直接 ncu「Est. Speedup」启发式可靠（后者在 K2/B1
   两次误报、且本轮给出的 44% 明确**不可**由降寄存器兑现）。
+
+## 47. 「K2 形状 CUDA 化」的第一刀：B2 GEMM 核的**手写 SIMT CUDA** 被证明是**反向**方向（P7-44）
+
+§46.6 把「融合 B2/B3 → K2 形状 CUDA」的首位动作写成「**把 `dq/dk/dw [BT,K]` 累加器按 warp 分片常驻
+寄存器（先）**」。这句话有两种读法：(a) 在**保留 tensor core**（`ldmatrix`/`mma.sync`）的前提下把累加器分片
+到多 warp 的寄存器（即 B1 §19–§24 的配方）；(b) 干脆**放弃 `tl.dot`、用普通 SIMT fp32 FMA** 写一个高占用、
+寄存器常驻的核。这一轮先用**最便宜、最没有歧义**的方式把 (b) 试掉——因为它一次编译、逐位可核、可隔离
+「寄存器常驻 + 高占用」本身值多少——结论是**负的**，从而把 (a) 钉成唯一方向。
+
+证据：`harness/b2_core_probe.cu`（`b2_core_launch`）+ `harness/check_bwd_b2_core.py`
+（`harness/check_bwd_b2_core.out.txt`，空闲卡）+ 调度器段 `harness/probe_b2_core_ncu.sh` /
+`harness/ncu_b2_core_driver.py`（`harness/probe_b2_core_ncu.out.txt`）。
+
+**被隔离的对象**：B2 (`wy_dqkg`) 里 FLOP 占大头的三条 V-归约 GEMM + 一条列归约——
+`dq[t,k]=Σ_v do[t,v]·h[k,v]`、`dk=Σ_v v_new·dh`、`dw=Σ_v dv·h`、`dgk[k]=Σ_v h·dh`（`b_h[v,k]=h[k,v]`）。
+**不**含 finalize（门链、`dkgb=A@dw`、`dA=dv@v^T`）、`dv2`/`db` 与 intra 对角折入（见 §47.6 边界）。
+
+### 47.1 手写 SIMT 核的设计（为什么它「理应」代表 (b)）
+
+`b2_core_probe.cu`：block = 256（8 warp），thread `tid` 固定拥有**列 `kk=tid%K`** 与 **8 行 `tbase..tbase+7`**
+（`tbase=(tid/K)*8`），于是 `dq/dk/dw` 是每线程 **24 个 fp32 寄存器**累加器（8 行 ×3）、`dgk` 1 个；
+warp 内 32 lane 拥有 32 个连续 `kk`（`h/dh` 的 smem 读拍成连续），`do/v_new/dv` 在同一 warp 内是广播读。
+V 方向按 `BVT=32` 分 4 个 tile 暂存进 38 KB smem，无流水、无 TMA、无 tensor core——就是一个干净的高占用
+SIMT GEMM。**它只用了 84 寄存器、38 KB smem**（`ncu` 实测，§47.4），解析/实测占用都远高于 Triton 版。
+
+### 47.2 Part A — 正确性：手写核**逐位 = 真 fp32**（替身证明代数无误）
+
+同操作数、`B2C_MODE=a`（四组 shape 含非整除 `T=250`；torch 参考关掉 tf32 走真 fp32）：
+
+| 量 | CUDA vs torch(fp32) 最坏 `max_rel` | Triton 同 op 核 vs torch | CUDA vs Triton |
+|---|---|---|---|
+| `dq` | **0.000e+00（逐位）** | 8.97e-4 | 8.98e-4 |
+| `dk` | **0.000e+00（逐位）** | 8.65e-4 | 8.66e-4 |
+| `dw` | **0.000e+00（逐位）** | 8.36e-4 | 8.37e-4 |
+| `dgk` | 5.2e-7 | 1.3e-7 | 5.2e-7 |
+
+三点：**(1)** 手写核与真 fp32 torch **逐位相同**——所以下面它的慢**不是 bug**，是结构；**(2)** 同 op 的 Triton
+核是 **tf32 底噪 8.4–9.8e-4**（`tl.dot` 默认 tf32，与 §6.6 一致）；**(3)** 即手写 SIMT 核**精度更高**
+（真 fp32），但这在下面被证明**毫无价值**。
+
+### 47.3 Part B/C — 头对头：SIMT 核**全部输给**同 op 的 Triton 核 3–5×
+
+同操作数、只比这四条 op 的 kernel-only `dev`（`B2C_MODE=b/c`，CUPTI）：
+
+| shape | CUDA core `dev` | Triton core `dev` (nw=8) | **CUDA/Triton** | 全 Triton B2 | 融合 B2/B3 | CUDA 核 GF/s |
+|---|---|---|---|---|---|---|
+| `B8 T2048 H8` | 1727.7 µs | **556.2 µs** | **3.11×** | 903.0 µs | 1053.1 µs | 7409 |
+| `B2 T1024 H8` | 228.4 µs | 82.2 µs | 2.78× | 121.9 µs | 144.5 µs | 7229 |
+| `T512 H4` | 30.8 µs | 6.9 µs | 4.44× | 15.8 µs | 13.6 µs | 6642 |
+| `T250 H3 (非整除)` | 30.9 µs | 6.0 µs | 5.20× | 14.1 µs | 10.8 µs | 2451 |
+
+读法：**(1)** 手写 SIMT ~7.4 TFLOP/s，只有 H100 fp32 峰值的 ~11%、也远低于 Triton `tl.dot`——**放弃 tensor
+core 是净亏**；**(2)** 关键结构数：**同 op 的 Triton GEMM 核（556 µs）已是完整 B2（903 µs）的 62%**，即
+剩下 38% 才是 finalize + 读 `q/k/g/A/beta`（§47.5 用它重新定位 §46 的 1.94×）；**(3)** 手写核 1728 µs
+**比完整的 Triton B2 还慢 1.93×**——「高占用寄存器常驻」这单个性质**不可能**是收益来源（否则 2 block/SM、
+24.8% 占用的 SIMT 核不会全面落后 12.5% 占用的 Triton 核）。
+
+### 47.4 ncu — 为什么慢：SIMT 核卡在 **L1/TEX 吞吐**（操作数重读），Triton 核卡在 **DRAM 带宽**
+
+`probe_b2_core_ncu.sh`（`B8 T2048 H8`，两个核**读/写字节完全相同**——`dram__bytes_read.sum` 均为
+1.28 GB、写 ~201 MB，是干净对照）：
+
+| 指标 | 手写 SIMT 核 | Triton 同 op 核 (nw=8) | 含义 |
+|---|---|---|---|
+| Duration | 1739 µs | 552 µs | 3.15× |
+| DRAM SOL / 有效带宽 | 25.3% / 0.85 TB/s | **79.8% / 2.67 TB/s** | SIMT 远离带宽；Triton 已带宽饱和 |
+| **L1/TEX SOL** | **89.6%** | 41.1% | **SIMT 的真瓶颈**＝L1 管道 |
+| FMA / tensor SOL | 14.3% / 0.01% | 2.3% / 7.4% | SIMT 算力也没打满 |
+| regs / smem | 84 / 38 KB | 226 / 155.7 KB | 手写核更轻 |
+| block/SM（theo） | **2**（reg 限） | **1**（reg+smem 双限） | 手写核占用更高 |
+| 实测占用 | **24.8%** | 12.5% | —— |
+| eligible warps/sched | 0.46 | 0.11 | Triton 更「发射饥饿」 |
+| `long_scoreboard` | **9.42（59%）** | 4.13 | SIMT 在等 L1 数据 |
+| bank conflict（shared-ld） | 151529 / 1.29e8 = **0.12%** | 0 | 都不是 bank conflict |
+
+机制很清楚：SIMT 版每做 **24 个 FMA 要发 26 次 shared 读**（`do/v_new/dv` 各 8 行 + `h/dh` 各 1，
+§47.1 的线程映射），**算术强度 ~0.9 op/word** → L1 管道 89.6% 打满、FMA 只 14%；而 Triton 用 `tl.dot`
+（tensor core，一个 mma 吃 16×16×16）把每字节能做的乘加提高一个量级，于是同样的 1.28 GB 直接**撞到
+DRAM 带宽（79.8% SOL）**，反而在 12.5% 占用下更快。**「寄存器常驻 + 高占用」并不能替代 tensor core 的
+算术强度**——这正是 (b) 的失败点。
+
+Triton 核的 552 µs 对照它的**同字节 DRAM 地板** `(1.28+0.20)GB / 3.35 TB/s = 442 µs` 只有 **1.25×**——
+即**B2 的 GEMM 本身几乎无头寸**。
+
+### 47.5 结论：这把 §46 的 1.94× 重新定位到**非 GEMM 段**，并钉死 K2 形状必须**保留 tensor core**
+
+把 §46（融合核）与本轮（核内 GEMM）的字节/地板拆开：
+
+| | 读+写字节 | HBM 地板 | 实测 `dev` | 实测/地板 |
+|---|---|---|---|---|
+| B2 GEMM 核（本轮 Triton） | 1.48 GB | 442 µs | 552 µs | **1.25×** |
+| 融合 B2/B3（§46） | 1.96 GB | 586 µs | 988 µs | 1.69× |
+
+融合核比 GEMM 核只多 **0.48 GB ≈ 146 µs** 的地板，实测却多 **436 µs**（988−552）。**所以 §46 的 ~1.9× 头寸
+不在 GEMM 算术里（那部分已经 1.25× 贴地板），而在:(a) finalize/`dA`/`dv2`/`db` 与多出来的操作数
+（`q/k/g/A/beta`）造成的寄存器/smem 压力与发射饥饿；(b) `h/dh` 流量本身（1.07 GB = GEMM 核读的 **84%**）。
+
+**对目标卡的设计输入（修正/收窄 §46.6）**：
+
+1. **K2 形状 CUDA 端口「必须保留 `ldmatrix`/`mma.sync` tensor core」**——本轮把「放弃 `tl.dot` 改 SIMT」这条
+   显式证伪（3–5× 慢、且比完整 Triton B2 还慢 1.93×）。「寄存器分片常驻累加器」是与 tensor core **配套**
+   的手段（B1 §22 的配方），不是可以单独拿来替代它的手段。
+2. **GEMM 段（`dq/dk/dw/dgk`）不值得为它重写**：Triton 同 op 核已 1.25× 贴 DRAM 地板；重写的收益上界只有这
+   25%。真正的头寸在**非 GEMM 段 + `h/dh` 流量**。
+3. **最大单笔流量是 `h/dh`（fp32，1.07 GB = 84%）**——与 §26/§29 一致；B1→B2 融合（`dh` 不落盘）或 `h/dh`
+   走 bf16 出口是比「重写 GEMM」更直接的减字节杠杆（§29 已量化 `h/dh` bf16 值内核 ~10%）。
+4. **重排 §46.6 的动作顺序**：先做「**非 GEMM 段**的寄存器常驻分片 + 与 GEMM 段同 CTA 交接 + `h/dh` 少搬」，
+   再谈 TMA 流水；**不要**从「用 SIMT 省掉 `tl.dot` 的 smem staging」入手。
+5. **判据（方法学）**：判断「一个 SIMT/tensor 决策」时，先看**算术强度**（op/word）——本轮 SIMT 核
+   ~0.9 op/word → 必撞 L1；`tl.dot` 的 mma 是把它抬到 10+ op/word 的手段。`ncu` 的 L1/TEX SOL 与
+   `long_scoreboard` 是这条判据的直接读数。
+
+### 47.6 边界 / 下一步（诚实）
+
+- 本轮**只**隔离了 B2 的 GEMM 核；finalize/`dA`/`dv2`/`db` 与 intra 折叠**未**进 CUDA（在 §47.5 里作为
+  「非 GEMM 段」按字节/时间差定位，但未单独建核量化）。**下一步（真正工程化）**：以本轮为反面依据，直接建
+  **保留 `mma.sync` 的 K2 形状 B2/B3**（累加器按 warp 分片、操作数 TMA/`ldmatrix` 整块、非 GEMM 段同 CTA
+  交接），并按 §47.5 优先减 `h/dh` 字节。
+- 手写 SIMT 核若做**寄存器分块**（每线程 8×8 tile）可把算术强度抬到 ~8 op/word、脱离 L1 bound，但 tensor
+  core 的 mma 已达 16 op/word 量级且 Triton 核已带宽饱和——因此**不值得**再往 SIMT 方向投入（本轮已判死）。
+- **踩坑**：(a) `dgk` 输出首版错用了 `h/dh` 的 `KD*VD` large base offset（应 `((b*NT+c)*H+h)*K`），
+  触发非法访存、错误只在**下一次 triton 载入**时才以 `illegal memory access` 冒出来；(b) torch 参考若不开
+  `allow_tf32=False` 会走 cublas tf32，把「CUDA vs torch」污染成 ~3e-4（看起来像 bug），关掉后手写核**逐位=0**。

@@ -711,8 +711,30 @@
       不是占用率旋钮）。**结论**：融合 B2/B3 是延迟受限、有 **~1.9×** 头寸，且该头寸**在 Triton 里够不着**
       （regs+smem 双钉、`BV=V` 无循环可流水）→ **「K2 形状 CUDA 化」被数据支持**（首位动作＝把
       `dq/dk/dw`/`dA` 累加器按 warp 分片常驻寄存器，TMA 流水其次）。**新方法学**：用「同字节、去 compute 的
-      traffic 等价核」测地板，一次给出延迟受限判据 + 收益上界，比 ncu「Est. Speedup」启发式可靠
-      （后者 K2/B1 两次误报，本轮 44% 也明确不可由降寄存器兑现）。
+       traffic 等价核」测地板，一次给出延迟受限判据 + 收益上界，比 ncu「Est. Speedup」启发式可靠
+       （后者 K2/B1 两次误报，本轮 44% 也明确不可由降寄存器兑现）。
+- [x] **P7-44** 兑现 §46.6 首位动作的**第一种读法（放弃 `tl.dot`、手写高占用 SIMT fp32）并以反面结论收口**：
+       新增 `harness/b2_core_probe.cu`（`b2_core_launch`）+ `harness/check_bwd_b2_core.py`
+       （`..._b2_core.out.txt`，空闲卡）+ `harness/probe_b2_core_ncu.sh` / `ncu_b2_core_driver.py`
+       （`..._b2_core_ncu.out.txt`）+ `docs/07` §47。隔离 B2 的 **GEMM 核**（`dq/dk/dw/dgk` 四条 op，
+       不含 finalize/`dA`/`dv2`/`db`/intra）。**设计**：block 256、thread 固定列 `kk=tid%K` + 8 行
+       `tbase..tbase+7`，24 个 fp32 寄存器累加器、38KB smem、V 方向 4 tile。**Part A**：手写核 vs 真
+       fp32 torch **`dq/dk/dw` 逐位相同（max_abs=0）**、`dgk` 5.2e-7（替身证明代数无误）；同 op Triton 核
+       =tf32 底噪 8.4–9.8e-4。**Part B/C（关键，反面）**：手写 SIMT 核 `dev` **全面慢同 op Triton 核 3.11×
+       （B8T2048H8 1727.7 vs 556.2）/2.78×/4.44×/5.20×**，仅 ~7.4 TFLOP/s（峰值 ~11%），
+       **比完整 Triton B2 还慢 1.93×**；同 op Triton GEMM 核（556µs）**已是完整 B2（903µs）的 62%**。
+       **Part D（ncu，两核字节完全相同作对照：读 1.28GB/写 201MB）**：手写核 **L1/TEX 89.6% bound**
+       （`long_sb` 9.42=59%、FMA 14%、DRAM 25%、0.12% bank conflict、2 block/SM/24.8% occ）；Triton 核
+       **DRAM 79.8% bound（2.67 TB/s）**、tensor 7.4%、1 block/SM/12.5% occ。机制＝SIMT 每 24 FMA 发 26
+       次 shared 读（算术强度 ~0.9 op/word）→ 撞 L1；`tl.dot` 的 mma 把强度提高一量级 → 直接撞带宽。
+       **结论（修正/收窄 §46.6）**：(1) **K2 形状端口必须保留 `ldmatrix`/`mma.sync` tensor core**——
+       「用 SIMT 省掉 `tl.dot`」被显式证伪；(2) **GEMM 段不值得重写**（Triton 同 op 核 552µs vs 同字节
+       HBM 地板 442µs 只 **1.25×**，头寸仅 25%）；(3) **§46 的 1.94× 重新定位到非 GEMM 段**（融合核比 GEMM 核
+       多 0.48GB≈146µs 地板却多 436µs）**与 `h/dh` 流量**（fp32 1.07GB＝GEMM 核读的 84%）；(4) 动作顺序改为
+       「非 GEMM 段寄存器常驻分片 + 同 CTA 交接 + 少搬 `h/dh`」先于 TMA 流水。**新方法学**：SIMT/tensor 决策
+       先看**算术强度（op/word）**，`ncu` 的 L1/TEX SOL + `long_scoreboard` 是直接读数。**两坑**：
+       `dgk` 输出错用 `KD*VD` large base（应 `((b*NT+c)*H+h)*K`，非法访存在下一次 triton 载入才冒头）；
+       torch 参考须 `allow_tf32=False`（否则 cublas tf32 把逐位=0 污染成 3e-4）。
 
 ### P8 小结 / 一页纸
 
@@ -767,12 +789,32 @@
   想把 host 端一项成本（如 `cuTensorMapEncodeTiled`）单独称出来，必须用**不发 launch**的入口
   （本专题的 `b1t_encode_only`）；否则编码等 CPU 工作被藏在队列等待里（纯编码 3.8–4µs 加进 launch
   后只看得见 ≤0.75µs）。跨实现的「小 shape host 回归」先做 run-to-run 复现（P7-40 的 1.65× 即
-  Triton 基线抽到低离群的产物，空闲卡实为 ~1.05×）。
+  Triton   基线抽到低离群的产物，空闲卡实为 ~1.05×）。
+- **判 SIMT vs tensor 决策先看「算术强度 op/word」**（P7-44，§47.4）：手写 SIMT fp32 GEMM 每做 24 个 FMA
+  要发 26 次 shared 读（强度 ~0.9 op/word）→ **必撞 L1/TEX**（实测 89.6% SOL bound，DRAM 只 25%），
+  比同 op 的 `tl.dot`（mma 把强度抬高一个量级、直接 DRAM bound）慢 3–5×。`ncu` 的 L1/TEX SOL +
+  `long_scoreboard` 是这条判据的直接读数；「寄存器常驻 + 高占用」**不能**替代 tensor core 的算术强度。
+- **torch 参考做对拍前先关 `torch.backends.cuda.matmul.allow_tf32=False`**（P7-44）：默认 cublas 走 tf32，
+  会把「手写 fp32 核 vs torch」从**逐位=0** 污染成 ~3e-4（看起来像 bug）；而 `tl.dot` 默认就是 tf32，
+  与 torch-enable-tf32 同底噪。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-43 补测**。
-  - P7-43（本轮）：**给「融合 B2/B3 → K2 形状 CUDA」一个 go/no-go 与收益上界（不建 CUDA 核）**——
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-44 补测**。
+  - P7-44（本轮）：**K2 形状 CUDA 端口的第一刀，以「SIMT 是反向方向」收口**——把 §46.6 首位动作的
+    「放弃 `tl.dot`、手写高占用 SIMT fp32」读法试掉。新增 `harness/b2_core_probe.cu` +
+    `harness/check_bwd_b2_core.py`（`..._b2_core.out.txt`）+ `harness/probe_b2_core_ncu.sh` /
+    `ncu_b2_core_driver.py`（`..._b2_core_ncu.out.txt`）+ `docs/07` §47。隔离 B2 GEMM 核（`dq/dk/dw/dgk`
+    四条 op）。**Part A**：手写核 vs 真 fp32 torch `dq/dk/dw` **逐位相同（max_abs=0）**（替身证明代数无误）。
+    **Part B/C（反面）**：手写 SIMT 核全面慢同 op Triton 核 **3.11/2.78/4.44/5.20×**（`B8T2048H8` 1727.7
+    vs 556.2µs）、仅 7.4 TFLOP/s、比完整 Triton B2 还慢 1.93×；同 op Triton GEMM 核（556µs）已是完整 B2
+    （903µs）的 **62%**。**Part D（ncu，两核字节相同对照）**：手写核 **L1/TEX 89.6% bound**（`long_sb`
+    9.42、2 block/SM、24.8% occ），Triton 核 **DRAM 79.8% bound**（2.67TB/s、1 block/SM、tensor 7.4%）。
+    **结论**：**端口必须保留 `mma.sync` tensor core**（SIMT 判死）；**GEMM 段不值得重写**（Triton 同 op 核
+    552µs vs 同字节地板 442µs 只 **1.25×**）；**§46 的 1.94× 重定位到非 GEMM 段 + `h/dh` 流量**（fp32
+    1.07GB＝GEMM 核读的 84%）；动作顺序＝非 GEMM 段寄存器分片 + 同 CTA 交接 + 少搬 `h/dh` 先于 TMA 流水。
+    **新方法学**：SIMT/tensor 决策先看算术强度（op/word）。
+  - P7-43（上轮）：**给「融合 B2/B3 → K2 形状 CUDA」一个 go/no-go 与收益上界（不建 CUDA 核）**——
     §45.3 点名的剩余大头，但动 900 行 CUDA 前先量清。新增 `harness/check_bwd_b2b3_bound.py`
     （`..._bound.out.txt`）+ `harness/probe_b2b3_bound_ncu.sh`（`..._bound_ncu.out.txt`）+ `docs/07` §46。
     **Part A**：deploy `B8T2048H8` 融合核 `dev 1003µs`、`regs 255/spills 34/smem 114KB`、占用率
@@ -1368,7 +1410,18 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-43 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-44 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-44（`docs/07` §47）K2 形状 CUDA 端口的第一刀＝把「放弃 `tl.dot`、手写 SIMT」证伪**：新增
+    `harness/b2_core_probe.cu` + `harness/check_bwd_b2_core.py`（`..._b2_core.out.txt`）+
+    `harness/probe_b2_core_ncu.sh` / `ncu_b2_core_driver.py`（`..._b2_core_ncu.out.txt`）。隔离 B2 GEMM 核
+    （`dq/dk/dw/dgk`）。手写核 vs 真 fp32 torch `dq/dk/dw` **逐位=0**（代数无误）；但全面慢同 op Triton 核
+    **3.11/2.78/4.44/5.20×**（`B8T2048H8` 1727.7 vs 556.2µs）、仅 7.4 TFLOP/s、比完整 B2 还慢 1.93×；
+    同 op Triton GEMM 核已是完整 B2 的 **62%**。ncu（两核字节相同）：手写核 **L1/TEX 89.6% bound**、
+    Triton 核 **DRAM 79.8% bound**（`tl.dot` 抬高算术强度 → 直接撞带宽）。**结论**：端口**必须保留
+    `mma.sync`**（SIMT 判死）；GEMM 段不值得重写（同 op 核 552µs vs 同字节地板 442µs 只 1.25×）；§46 的
+    1.94× 重定位到**非 GEMM 段 + `h/dh` 流量**（fp32 1.07GB＝GEMM 核读的 84%）。**下一步（真正工程化）**＝
+    **保留 `mma.sync` 的 K2 形状 B2/B3**（累加器 warp 分片 + TMA/`ldmatrix` 整块 + 非 GEMM 段同 CTA 交接），
+    并按 §47.5 优先减 `h/dh` 字节。**方法学**：SIMT/tensor 决策先看算术强度（op/word）。
   - **P7-43（`docs/07` §46）给「融合 B2/B3 → K2 形状 CUDA」go/no-go 与收益上界**（不建 CUDA 核）：
     新增 `harness/check_bwd_b2b3_bound.py`（`..._bound.out.txt`）+ `harness/probe_b2b3_bound_ncu.sh`
     （`..._bound_ncu.out.txt`）。deploy `B8T2048H8` 融合核 `dev~1000µs`、`255 regs/34 spills/114KB smem`、
