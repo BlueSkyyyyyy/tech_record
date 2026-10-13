@@ -1,0 +1,115 @@
+~/github/DeepGEMM/deep_gemm/utils/mlopart.py:37: UserWarning: MLOPart is unavailable; localization has been disabled
+  warnings.warn('MLOPart is unavailable; localization has been disabled')
+Traceback (most recent call last):
+  File "~/github/DeepGEMM/deep_gemm/utils/mlopart.py", line 134, in <module>
+    main(int(sys.argv[1]), sys.argv[2])
+  File "~/github/DeepGEMM/deep_gemm/utils/mlopart.py", line 127, in main
+    serve(sock)
+  File "~/github/DeepGEMM/deep_gemm/utils/mlopart.py", line 99, in serve
+    assert num_devices.value == NUM_LOCALITY_DOMAINS, f'{num_devices.value} MLOPart devices'
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 1 MLOPart devices
+
+==============================================================================
+Part A：test_locality_domain.py 的顶层结构
+==============================================================================
+deep_gemm 根目录 : ~/github/DeepGEMM
+test 文件        : ~/github/DeepGEMM/tests/test_locality_domain.py  (167 行)
+平台             : linux  |  device: NVIDIA H100 80GB HBM3 (sm90)
+常量             : NUM_SMS_PER_TPC = 2
+
+5 个用例 + 2 个 helper：
+  assert_raises              :  19  
+  random_bytes               :  27  
+  test_sm_locality_domains   :  32  
+  test_empty                 :  52  
+  as_plain                   :  67  
+  test_localize              :  73  
+  test_mlopart               : 108  
+  test_without_mlopart       : 133  
+
+__main__ 顺序（前 5 个用例 + seed）：
+  torch.manual_seed(0)
+  test_sm_locality_domains()
+  test_empty()
+  test_localize()
+  test_mlopart()
+  test_without_mlopart()
+[PASS] A: 模块可 import、5 用例 + 2 helper 可见: 用例 5 个、helper assert_raises/random_bytes/as_plain 均在
+
+==============================================================================
+Part B：环境能力矩阵 + 每条能力的「为什么」
+==============================================================================
+  get_num_locality_domains()       = 2
+  get_granularity()                = 2097152
+  is_localization_available()      = False
+  num_sms (device)                 = 132
+
+为什么 is_localization_available() == False：
+  mlopart.is_available() → 子进程起 MPS + `start_server -mlopart`，serve() 断言
+  `num_devices == NUM_LOCALITY_DOMAINS(2)`（mlopart.py:99）；本机 MPS 只暴露 1 个 device，
+  断言失败 → 子进程退出 → MLOPart 通知不可用 → 顶层打印一次 UserWarning。
+[PASS] B: 能力矩阵与第 34 篇一致（2 域 / 2 MiB / 不可用）: domains=2, granularity=2MiB, available=False
+
+==============================================================================
+Part C：原样跑两个可跑的用例（真实测试体）
+==============================================================================
+
+--- test_sm_locality_domains() ---
+Testing SM locality domains:
+ > [66, 66] SMs per domain, balanced [66, 66]
+
+[PASS] C: 真实测试体 test_sm_locality_domains(): OK
+
+--- test_without_mlopart() ---
+Testing without MLOPart:
+ > detected, `localize` refused, SM table available
+
+[PASS] C: 真实测试体 test_without_mlopart(): OK
+
+==============================================================================
+Part D：独立复刻 host 数学 + 逐条核对测试的规格断言
+==============================================================================
+真实 sm_domains   : [66, 66] SMs/域, dtype=torch.uint8
+真实 balanced     : [66, 66] SMs/域
+独立 get_even 复刻 与真实 sm_domains 逐位相等: True
+独立 balance 复刻 与真实 balanced  逐位相等: True
+[PASS] D: 独立复刻 get_even == 真实 sm_domains（本机走 even 回退）: 逐位相等 → 坐实第 34 篇「不可用时等于 get_even」
+[PASS] D: 独立复刻 balance == 真实 balanced: 逐位相等
+[PASS] D: 规格断言 ① 0<sum<num_sms 且 dtype 均 uint8: 
+[PASS] D: 规格断言 ② TPC 内两 SM 同域（sm + balanced）: 
+[PASS] D: 规格断言 ③ balanced.sum()*2 == num_sms（精确 50/50）: 
+[PASS] D: 规格断言 ④ 搬运 TPC 数 == |sum-num_sms/2|/2（0 == 0）: 
+[PASS] D: 利齿——surplus 误取前半段会被规格断言③抓住: 错误变体 balanced=[0, 132] → ③ 不成立
+  balance(all-0 (占满一个域)         ) -> [66, 66], moved=33, 公式期望=33
+  balance(all-1 (占满另一个域)        ) -> [66, 66], moved=33, 公式期望=33
+  balance(TPC 一致 40/26          ) -> [66, 66], moved=7, 公式期望=7
+  balance(已 50/50               ) -> [66, 66], moved=0, 公式期望=0
+
+==============================================================================
+Part E：契约负样本（与 MLOPart 无关，H100 可跑）
+==============================================================================
+[PASS] E1: assert_raises 只吞 RuntimeError: AssertionError 穿透、RuntimeError 被吞
+[PASS] E2: is_localized(plain)=False；is_localized(plain.mT) 抛 RuntimeError: 'Assertion error (utils/layout.hpp:150): localized or t.is_contiguous()'
+[PASS] E3: empty 的 domain 越界（-1/2）抛 RuntimeError（与 MLOPart 无关）: 'Assertion error (locality_domain.hpp:36): 0 <= domain_idx and domain_idx < get_num_locality_domains()'
+[PASS] E4: 无 MLOPart 时 empty(合法域)/localize 抛 AssertionError「MLOPart is unavailable」: AssertionError: MLOPart is unavailable, so no localized memory can be alloca
+
+==============================================================================
+Part F：跑不了的 3 个用例——阻塞行与目标卡上的样子
+==============================================================================
+  test_empty      : tld 先在 :58 对合法域调 locality_domain.empty(...,0)；→ csrc/apis/locality_domain.hpp:38 map → runtime/locality_domain.hpp:37 mlopart::create_memory → Python `assert self.available`（mlopart.py:40）失败
+  test_localize   : tld:77 assert deep_gemm.is_localization_available() 直接失败（本机 False）
+  test_mlopart    : tld:113 起 MLOPart(device_uuid) 后 :115 create_memory；serve() 断言 2 device 失败 → 客户端 recv 得到不可用 → create_memory 断言失败
+Testing tensors in one locality domain:
+  [test_empty] 预期失败于 AssertionError: MLOPart is unavailable, so no localized memory can be allocated
+Testing `localize`:
+  [test_localize] 预期失败于 AssertionError: 
+[PASS] F: 3 个用例的阻塞点定位到具体行（需 MLOPart / instance 才可跑）: test_empty/test_localize/test_mlopart
+
+==============================================================================
+汇总
+==============================================================================
+16 PASS / 0 FAIL  (共 16)
+参考版本：~/github/DeepGEMM commit 057ca59（v2.8.1）。
+本机 H100：MLOPart 不可用 → 5 个用例中 2 个（域表 / 无 MLOPart）真机通过，
+其余 3 个的阻塞点已定位；其与 MLOPart 无关的契约断言已在 Part E 单独验证。

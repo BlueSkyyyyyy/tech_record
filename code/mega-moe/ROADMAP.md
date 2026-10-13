@@ -2180,6 +2180,40 @@
       `true/false/abc` 被 `DJ_PANIC` 拒）；⑤ fork safety 8/8 `exit 0`。与 GPU 架构无关，H100 整份可跑。
       配套博客 `content/posts/mega-moe-80-lazy-init-test-oracle`（索引页新增第 80 篇）。
 
+### P71 增量（opt-in，补齐 SM 局部域一直缺席的「验收测试即正确性规范」）
+
+- [x] **P71-1** **SM 局部域的验收测试即正确性规范**（`tests/test_locality_domain.py`；
+      `deep_gemm/locality_domain.py`；`deep_gemm/utils/mlopart.py`；`csrc/apis/locality_domain.hpp`；
+      `csrc/runtime/locality_domain.hpp`；`csrc/runtime/mlopart.hpp`；`csrc/utils/layout.hpp:142-152`；
+      `deep_gemm/include/deep_gemm/common/types.cuh:54`）。
+      第 34 篇（P24-1）拆了局部域的**实现**（pointer-chase 探针 / `try_probe` 两闸门 / MLOPart + CUDA VMM
+      本地化分配 / 调度器按域分区），本篇补上其「对外行为算什么对」的唯一规范——`tests/test_locality_domain.py`
+      （167 行，**纯 host / API 层，一个 GPU kernel 都不启动**）。没用 `unittest`，5 个顶层函数按序调用
+      （`:160-167`）；两个 helper 定契约——`assert_raises`（`:19-24`）**只吞 `RuntimeError`**（把「越界」与
+      「不可用」编码成两种异常）、`as_plain`（`:67-70`）是 `localize` 的逆变换。**环境分水岭**：
+      `is_localization_available()` 跨语言链（`apis:25-27` → `mlopart.hpp:24-26` → `mlopart.py:63-64/55-60/
+      28-37/113-130/94-110`），末端 `serve()` 断言 2 个 device（`mlopart.py:99`）；本机 MPS 只给 1 个 →
+      `available=False` + 告警一次（`mlopart.py:37`），本地化分配全线不可用
+      （`empty`→`apis:34-40`→`runtime:72-81/34-38`→`mlopart.py:39-44`）。**域表规范**
+      `test_sm_locality_domains:32-49` 四条断言：两域非空/dtype uint8 `:39`、TPC 内两 SM 同域 `:42`、
+      恰好 50/50 `:45`、只搬最少 TPC `:47`；`get_sm`（`apis:120-124`）缓存在 `Runtime`、不可用走
+      `get_even`（`:103-106`，132 SM → 66/66），`balance`（`:126-136`）的 `slice(0, num_tpcs/2)` 是
+      **start 不是长度** → `surplus` 取多数域 TPC 的**后半段**（保证「已 50/50 时不动」）；把它读成
+      「前一半」会把均衡输入翻成 `[0,132]`，被断言③当场抓（本实验利齿负样本）。**本地化内存规范**：
+      `test_empty:52-64`（连续 + 逐位拷贝 + 域越界必须 `RuntimeError`；越界分支先于 MLOPart（`runtime:36`），
+      **无 MLOPart 的 H100 也能验**）、`test_localize:73-105`（`:77` 硬门控；形状 `:86`、`stride(0)` 对齐粒度且
+      浪费≤一个粒度 `:88-89`、`is_localized` 三分 `:90-94` 落点 `layout.hpp:150`）。**生命周期规范**：
+      `test_mlopart:108-130`（起/服务/退 + 内存比分配器活得久 + 自动重启；`release_mlopart` 先算域表再
+      `mlopart::release` `apis:144-147`）、`test_without_mlopart:133-157`（「剥掉 `-mlopart` 的假 MPS」模拟
+      老宿主，断言**告警一次 + 拒绝 `localize` + 域表照给 even** = 优雅退化契约）。H100 实测
+      `harness/exp_locality_domain_test_oracle.{py,sh,out.txt}` **16 PASS / 0 FAIL**：原样跑两个可跑用例
+      （`test_sm_locality_domains` → `[66,66]`、`test_without_mlopart` → `detected, localize refused,
+      SM table available`）；独立复刻 `get_even`/`balance` 与真实 API **逐位相等**、四条规格断言全过、利齿
+      变体 `[0,132]` 被③抓；契约负样本 E1–E4（`assert_raises` 只吞 RuntimeError、`is_localized(plain.mT)` 抛
+      `layout.hpp:150`、`empty` 越界抛 `runtime:36`、无 MLOPart 时 `empty(合法域)`/`localize` 抛
+      `AssertionError`）；跑不了的 3 用例阻塞点全部定位到具体行。**与 GPU 架构完全无关**。配套博客
+      `content/posts/mega-moe-81-locality-domain-test-oracle`（索引页新增第 81 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2204,8 +2238,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P70 各增量完成（P15-1…P41-1、P42-1…P70-1）。**
-  本轮 P70-1：新建 `docs/80-lazy-init-test-oracle.md`
+- 当前进度：**P0~P14 全部完成；P15~P71 各增量完成（P15-1…P41-1、P42-1…P71-1）。**
+  本轮 P71-1：新建 `docs/81-locality-domain-test-oracle.md`
+  （+`harness/exp_locality_domain_test_oracle.{py,sh,out.txt}`）——补上 SM 局部域一直缺席的
+  **「验收测试即正确性规范」** `tests/test_locality_domain.py`（167 行，**纯 host / API 层**，
+  一个 GPU kernel 都不启动）。5 个顶层函数按序调用（`:160-167`）；helper `assert_raises`（`:19-24`）
+  **只吞 RuntimeError**（把「域越界」与「MLOPart 不可用」分成两种异常）、`as_plain`（`:67-70`）是
+  `localize` 的逆变换。**环境分水岭**：`is_localization_available()` 末端 `serve()` 断言 2 个 device
+  （`mlopart.py:99`），本机 MPS 只给 1 个 → False + 告警一次，本地化分配全线不可用。**域表规范**
+  `test_sm_locality_domains:32-49` 四断言（TPC 成对 `:42`、恰好 50/50 `:45`、只搬最少 `:47`）；
+  `balance` 的 `slice(0, num_tpcs/2)` 是 **start 不是长度** → `surplus` 取多数域 TPC **后半段**
+  （保证已均衡时不动）——读成「前一半」会把 66/66 翻成 `[0,132]` 被断言③抓（本实验利齿负样本）。
+  `test_empty` 的域越界契约先于 MLOPart（`runtime:36`），**无 MLOPart 也能验**；`test_localize`
+  定义切片形状/`stride(0)` 粒度/`is_localized` 三分（落点 `layout.hpp:150`）；`test_without_mlopart`
+  用「剥掉 `-mlopart` 的假 MPS」断言**告警一次 + 拒绝 localize + 域表照给 even**（优雅退化契约）。
+  **H100 真机 16 PASS / 0 FAIL**：原样跑 2 个可跑用例（`[66,66]` / `detected, localize refused,
+  SM table available`）+ 独立复刻 `get_even`/`balance` 逐位相等 + 契约负样本 E1–E4 + 3 个跑不了用例
+  阻塞点定位到行。索引页新增第 81 篇。
+  上一轮 P70-1：新建 `docs/80-lazy-init-test-oracle.md`
   （+`harness/exp_lazy_init_test_oracle.{py,sh,out.txt}`）——补上 DeepGEMM **顶层运行时**一直缺席的
   **「验收测试即正确性规范」** `tests/test_lazy_init.py`（199 行，架构无关、H100 整份可跑）。
   **核心看点：用 `LD_PRELOAD` 探针把 cuBLASLt 换成可计数的假库**——探针导出同名
@@ -3011,7 +3061,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P70 已完成（最新 **P70-1 DeepGEMM 顶层运行时的验收测试即正确性规范**：
+- **下一步**：P0~P71 已完成（最新 **P71-1 SM 局部域的验收测试即正确性规范**：
+  `tests/test_locality_domain.py`（167 行，纯 host / API 层，一个 GPU kernel 都不启动）——5 个顶层函数、
+  `assert_raises` 只吞 RuntimeError（域越界 vs MLOPart 不可用分成两种异常）、域表四断言（TPC 成对 /
+  恰好 50/50 / 只搬最少）、`balance` 的 `slice(0,n/2)` 是 start 不是长度（`surplus` 取后半段，读错被断言③抓）、
+  `test_without_mlopart` 的优雅退化契约；H100 真机原样跑 2 个可跑用例 + 独立复刻逐位相等
+  **16 PASS / 0 FAIL**；详见上）。
+  上一轮 P70-1：**DeepGEMM 顶层运行时的验收测试即正确性规范**：
   `tests/test_lazy_init.py`（架构无关，H100 整份可跑）——用 `LD_PRELOAD` 探针把 cuBLASLt 换成可计数
   假库，三个 magic exit code 锁死退出期 use-after-free / 泄漏 / 重复销毁；6 用例矩阵（假 handle 绕开
   CUDA）+ `MALLOC_PERTURB_` 逼出退出竞态 + workspace 退出释放 ≥2×16 MiB + fork safety 8/8；
