@@ -4931,6 +4931,37 @@
       `harness/exp_indexer_head_shared.{py,sh,out.txt}`。配套博客
       `content/posts/mega-moe-173-indexer-head-shared`（索引页新增第 173 篇）。
 
+### P164 增量（opt-in，补齐 indexer 一直把 Q/KV 当同一档精度、没拆过的「精度分配」）
+
+- [x] **P164-1** **indexer 打分的混合精度分配：Q × KV 二维精度矩阵 + 误差归因 + 带宽账**
+      （`deep_gemm/utils/math.py:13-49/75-125/155-176`；`csrc/apis/attention.hpp:18-44/67-134`；
+      `tests/test_attention.py:29/59-72/78-101`；`deep_gemm/include/deep_gemm/impls/sm90_fp8_mqa_logits.cuh`；
+      README `:88-110`）。第 171~173 篇把 indexer 的选择稳定性 / 下游影响 / 真实头结构与训练反向
+      都量了，但始终把 **Q 与 KV 当成同一档精度**。生产里两者**根本不对称**：KV 是逐 token 存下来的
+      长上下文缓存 `[C, head_dim]`（`C` 可达 128K），Q 只有当前 token 的 `[T, num_heads, head_dim]`
+      （`T ≪ C`），而打分算子**访存受限**（要读完 KV cache）⇒ 字节几乎全在 KV 上。本篇把
+      **精度分配**单独拆开：谁主导带宽、谁主导误差、混档能拿回什么。**H100(sm90) 真机**用真实
+      SM90 `fp8_fp4_mqa_logits` 锚定 fp8 档（max-abs-rel `2.722e-04`，与第 171/173 篇同量级），
+      MXFP8/MXFP4 为 SM100 专属、用纯 torch 复刻同一套语义（逐 32 + UE8M0，仅分析）。
+      **H100 实测** `harness/exp_indexer_mixed_precision.{py,sh,out.txt}`（`T=256, C=65536, H=32,
+      D=64, top-2048`）**七组结论**：① **KV 是带宽主导项**——`C/T·H=8` 时 KV 已占总字节 **89.5%**，
+      KV 从 fp8 换 mxfp4 使总字节降到 **0.55×**；② **KV 换 MXFP8 几乎免费**（字节 0.97×、
+      recall `0.9616→0.9602`）；③ **只有把 Q 也压 MXFP4 才伤精度**——`fp8/mxfp4` recall `0.8743`
+      vs 全 mxfp4 `0.8293`，而 Q 从 fp8 换 mxfp4 只省 **0.05×** 总字节却砸 4.5 个 recall 点
+      ⇒ **最优 MXFP4 配方是「Q 保 8 位、KV 压 MXFP4」**；④ **误差上 Q/KV 近乎对称**（只量化 Q 的
+      score σ `0.850` vs 只量化 KV `0.800`，mxfp4 各 `3.65`，方差近似可加）——不能靠「只压 KV」
+      白嫖，但**字节上 Q 便宜得多**、省位该省在 KV；⑤ **bf16 的 Q 在 fp8 与 mxfp8 下实际不可分**
+      （逐元素最大差 `9.77e-4` ≈ 1 个 e4m3 次正规台阶）：`per_token_cast_to_fp8` 的
+      `sf=ceil_to_ue8m0(amax/448)`（`math.py:37`）是 2 的幂、只平移指数，round-trip 在正规区与直接
+      舍入等价；⑥ **下游二阶**（复现第 172 篇）——尖锐工作点 `tau=0.25`（支持集捕获质量 0.977）下
+      仅换支持集 loss `1.64e-2`，量化配方只抬到 `1.66e-2`(fp8/fp8)/`1.79e-2`(fp8/mxfp4)/
+      `1.93e-2`(全 mxfp4)，recall 掉 13.8% 只换输出误差 **+18%**；⑦ **逐 indexer 头分配精度无用**
+      ——只压单头时 score σ 的 max/min 仅 `1.16×`、与 `|w_h|` 相关 `0.86`，逐头权重已编码重要性。
+      **边界**：本机只能跑 fp8 档真实 kernel（`attention.hpp:126-129`），MX 档与「时间∝字节」的
+      访存受限推断为 SM100 专属、仅分析；字节账按理想紧凑 SF（真实 packed int32/TMA 对齐使其略大，
+      对 `head_dim=128` 恰一致）。→ `docs/174-indexer-mixed-precision.md`（真实行号核对）。配套博客
+      `content/posts/mega-moe-174-indexer-mixed-precision`（索引页新增第 174 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4968,8 +4999,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P163 各增量完成（P15-1…P41-1、P42-1…P163-1）。**
-  本轮 P163-1：新建 `docs/173-indexer-dsa-main-attention.md` + `harness/exp_indexer_head_shared.{py,sh,out.txt}`
+- 当前进度：**P0~P14 全部完成；P15~P164 各增量完成（P15-1…P41-1、P42-1…P164-1）。**
+  本轮 P164-1：新建 `docs/174-indexer-mixed-precision.md` +
+  `harness/exp_indexer_mixed_precision.{py,sh,out.txt}`——把第 171~173 篇一直「把 Q 与 KV 当成
+  同一档精度」这个前提拆开。生产里 KV 是长上下文缓存 `[C,head_dim]`、Q 只有当前 token
+  `[T,H,head_dim]`，打分算子访存受限 ⇒ 字节几乎全在 KV。**H100(sm90) 真机**（真实
+  `fp8_fp4_mqa_logits` 锚定 2.722e-04；`T=256,C=65536,H=32,D=64,top-2048`；MX 档纯 torch 复刻、
+  仅分析）：① KV 占总字节 **89.5%**、换 mxfp4 使总字节 **0.55×**；② KV 换 MXFP8 几乎免费
+  （0.97×、recall 0.9616→0.9602）；③ 只有把 Q 也压 MXFP4 才伤精度（`fp8/mxfp4` 0.8743 vs 全 mxfp4
+  0.8293），**最优配方 = Q 保 8 位 + KV 压 MXFP4**；④ 误差上 Q/KV 近乎对称（σ 0.850 vs 0.800）
+  但字节上 Q 极便宜 ⇒ 省位省在 KV；⑤ bf16 的 Q 在 fp8/mxfp8 下不可分（差 9.77e-4=1 次正规台阶）；
+  ⑥ 下游二阶（recall 掉 13.8% → 输出误差 +18%）；⑦ 逐 indexer 头分配精度无用（σ 1.16×、与
+  `|w_h|` 相关 0.86）。索引页新增第 174 篇。
+  上一轮 P163-1：新建 `docs/173-indexer-dsa-main-attention.md` + `harness/exp_indexer_head_shared.{py,sh,out.txt}`
   ——把第 172 篇（P162-1）结尾「真实 DSA 的 per-head softmax、GQA/MQA 头共享未建模、与训练反向的
   联合误差未量」补上。**H100(sm90) 真机**（真实 `fp8_fp4_mqa_logits` 锚定 max-rel 2.538e-4；
   T=256,C=16384,H_q=32,D=128,topk=2048）：支持集逐 token 选一次、对全部 query 头**共享**，每头各自
@@ -6787,11 +6829,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P163 已完成（最新 **P163-1 把第 172 篇留的「真实头结构」口子补上**：
-  把 indexer 选择接进**真实 DSA 主注意力**（per-head softmax + GQA/MQA 共享支持集 + 另训 q/k）
-  并接上**训练反向**——头共享几乎不改变误差（G=1→32 差 0.6%）、敏感度在逐头尖锐度里（最平/最尖
-  246×、熵-误差 corr 0.82）、反向 `dV` 与正向同量级不放大、indexer `dw` 主因是量化打分而非选择
-  翻转（57×）；详见 `docs/173`，索引页新增第 173 篇）。上一轮 P162-1：indexer 选择翻转的下游
+- **下一步**：P0~P164 已完成（最新 **P164-1 把「Q 与 KV 同精度」这个前提拆开**：
+  给出 indexer 打分的**混合精度分配**——KV 主导带宽（总字节 89.5%、换 mxfp4 到 0.55×）、
+  Q 保 8 位是廉价保险（最优配方 = Q FP8/MXFP8 + KV MXFP4）、误差上 Q/KV 对称但字节上 Q 极便宜、
+  下游二阶、逐头分配精度无用；详见 `docs/174`，索引页新增第 174 篇）。
+  上一轮 P163-1：把 indexer 选择接进**真实 DSA 主注意力**（per-head softmax + GQA/MQA 共享支持集 +
+  另训 q/k）并接上**训练反向**——头共享几乎不改变误差（G=1→32 差 0.6%）、敏感度在逐头尖锐度里
+  （最平/最尖 246×、熵-误差 corr 0.82）、反向 `dV` 与正向同量级不放大、indexer `dw` 主因是量化打分
+  而非选择翻转（57×）；详见 `docs/173`）。再上一轮 P162-1：indexer 选择翻转的下游
   注意力输出（`docs/172`，选择翻转是二阶的、误差≈丢掉质量、主权变量是 ρ）。再上一轮 P161-1：
   indexer 选择稳定性（`docs/171`，recall 0.966/0.965/0.851，诊断量是「阈值±σ 候选池」非 margin）。
   可继续（均为增量、非承诺）：① 把第 141/161 篇的多卡 EP 图**接进真实 DeepEP `EPBuffer.dispatch/combine`**
