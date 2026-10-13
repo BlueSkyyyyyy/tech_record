@@ -99,7 +99,8 @@ constexpr int BW = 16;    // output columns per warp = KD / NW
 //                 `.BYPASS` path (L1-bypass loses cross-lane 128 B coalescing) and named
 //                 "读侧下一杠杆 = TMA 输入".  TMA issues per-tile descriptor copies off
 //                 the LSU, into a SWIZZLE_128B smem layout (BVK*4 = 128 B rows), using a
-//                 per-stage `mbarrier` (`complete_tx::bytes`) handshake.  Requires BVK==32.
+//                 per-stage `mbarrier` (`complete_tx::bytes`) handshake.  BVK==32 uses
+//                 SWIZZLE_128B; BVK==64 (P7-50) uses SWIZZLE_NONE (dense 256 B rows).
 #ifdef B2M_TMA
 #include <cuda.h>
 #define B2M_TMA_ON 1
@@ -109,8 +110,17 @@ constexpr int BW = 16;    // output columns per warp = KD / NW
 constexpr int BVK = B2M_BVK;   // V-tile (contraction) depth staged per pipeline stage
 constexpr int NS  = B2M_NS;    // pipeline stages
 #if B2M_TMA_ON
-constexpr int BVP = BVK;       // TMA SWIZZLE_128B layout: dense rows, no padding
-static_assert(BVK == 32, "TMA SWIZZLE_128B needs a 128 B inner box -> BVK==32");
+constexpr int BVP = BVK;       // TMA layout: dense rows, no padding
+// P7-50: 128 B swizzle constrains the inner box to <= 128 B (BVK*4), so fp32 SWIZZLE_128B
+// only admits BVK==32.  For BVK==64 use SWIZZLE_NONE (dense 256 B rows), which the codebase
+// already trusts for large-row maps (P7-21's 3D `E^tot` map, 512 B rows).
+#if B2M_BVK == 32
+  #define TMA_SWZ128 1
+#else
+  #define TMA_SWZ128 0
+#endif
+static_assert(BVK == 32 || BVK == 64,
+              "TMA supports BVK==32 (SWIZZLE_128B) or BVK==64 (SWIZZLE_NONE)");
 #else
 constexpr int BVP = BVK + 4;   // padded row stride (16B keeps 4-float cp.async aligned)
 #endif
@@ -135,9 +145,13 @@ struct alignas(128) Shared {
 // inverse SWIZZLE_128B decode (Swizzle<3,4,3> on the byte offset) for the TMA layout.
 DEV float rd(const float (*reg)[BVP], int row, int col) {
 #if B2M_TMA_ON
+  #if TMA_SWZ128
     int b = (row * BVP + col) * 4;
     b = b ^ (((b >> 7) & 7) << 4);
     return *(const float*)((const char*)&reg[0][0] + b);
+  #else
+    return reg[row][col];   // SWIZZLE_NONE: dense
+  #endif
 #else
     return reg[row][col];
 #endif
@@ -443,9 +457,10 @@ static void make_map_dov(CUtensorMap* m, void* ptr, int H, int T, int B) {
                           (cuuint64_t)T * H * VD * 4};
     cuuint32_t box[4] = {(cuuint32_t)BVK, (cuuint32_t)BT, 1, 1};
     cuuint32_t estr[4] = {1, 1, 1, 1};
+    CUtensorMapSwizzle swz = TMA_SWZ128 ? CU_TENSOR_MAP_SWIZZLE_128B
+                                           : CU_TENSOR_MAP_SWIZZLE_NONE;
     if (cuTensorMapEncodeTiled(m, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4, ptr, gdim, gstr, box,
-                               estr, CU_TENSOR_MAP_INTERLEAVE_NONE,
-                               CU_TENSOR_MAP_SWIZZLE_128B,
+                               estr, CU_TENSOR_MAP_INTERLEAVE_NONE, swz,
                                CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
                                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS)
         fprintf(stderr, "cuTensorMapEncodeTiled(dov) failed\n");
@@ -459,9 +474,10 @@ static void make_map_hdh(CUtensorMap* m, void* ptr, int H, int NT, int B) {
                           (cuuint64_t)H * KD * VD * 4, (cuuint64_t)NT * H * KD * VD * 4};
     cuuint32_t box[5] = {(cuuint32_t)BVK, (cuuint32_t)KD, 1, 1, 1};
     cuuint32_t estr[5] = {1, 1, 1, 1, 1};
+    CUtensorMapSwizzle swz = TMA_SWZ128 ? CU_TENSOR_MAP_SWIZZLE_128B
+                                           : CU_TENSOR_MAP_SWIZZLE_NONE;
     if (cuTensorMapEncodeTiled(m, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 5, ptr, gdim, gstr, box,
-                               estr, CU_TENSOR_MAP_INTERLEAVE_NONE,
-                               CU_TENSOR_MAP_SWIZZLE_128B,
+                               estr, CU_TENSOR_MAP_INTERLEAVE_NONE, swz,
                                CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
                                CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS)
         fprintf(stderr, "cuTensorMapEncodeTiled(hdh) failed\n");

@@ -548,6 +548,26 @@
       TMA；「省字节落最紧 pipe」再得正例。**边界**：128 B swizzle 强绑 `BVK==32`（`BVK=64` 需拆 atom，未做）、
       bf16/非 GEMM 段未覆盖；本核 `tma_vecst` 已贴 DRAM 地板 1.11×。
 
+- [x] **P7-50** 关闭 §52.6 的硬边界——**把 B2 TMA 输入从 `BVK==32` 扩到 `BVK=64`**（§49.5 的
+      cp.async 最优分块恰是 `BVK=64`，此前两收获无法叠加）。给 `b2_mma_probe.cu` 加 `TMA_SWZ128`
+      宏（`BVK==32` 走 `SWIZZLE_128B`、`BVK==64` 改 **`SWIZZLE_NONE`** 稠密 256 B 行；`rd`/两张张量图
+      按宏二选一，`b2_mma_probe.cu:117-122/148/460/477`，**算术一字未动**）。新增
+      `harness/check_bwd_b2_tma64.py`（`check_bwd_b2_tma64.out.txt`，空闲卡）+ `harness/probe_b2_tma64_ncu.sh`
+      （`probe_b2_tma64_ncu.out.txt`）+ `docs/07` §53。**Part A**：`tma64` 与 `base64` **逐位相同
+      （`dq/dk/dw/dgk` max_abs=0）**、`base32==base64` 的 `dq/dk/dw` 也逐位（证 k8 累加序不随 `BVK`
+      变；`dgk` 2.9e-6=fp32 分组）、`tma64` vs torch 3.6e-4（tf32 底噪、比 Triton 更贴真 fp32）。
+      **Part B（关键）**：`tma64/base64` **恒 2.5–3.0×（慢）**、`tma64/base32` 2.6–2.8×——`SWIZZLE_NONE`
+      把「最优点 3%」倒赔成 −180%。**Part D（ncu）**：`tma64` 读侧修复**仍在**（L2 2.35 GB=`tma32`、
+      srcunit 39.85M、l1tex 全局读=0、SASS `LDGSTS`→`UBLKCP`），但 **bank conflict 8.39M→272.6M（32×）**、
+      shared-load wavefront 37.7M→302.0M（8×）、DRAM SOL 30%、Duration 1470 µs。**根因**：稠密行 stride
+      256 B=64 float，`64≡0 (mod 32)` ⟹ 固定列下 128 个 `h` 行全落同 bank（mma 片段恰是固定列扫行）；
+      `base` 的 `BVP=BVK+4`（68 mod 32=4）与 `tma32` 的行内 swizzle 都消失，唯独 `SWIZZLE_NONE` 两者皆无。
+      **结论**：`SWIZZLE_NONE` 捷径**正确但不可用**（证伪）；`TMA+BVK=64` 只能走 §52.6 另一条路——
+      **把 tile 拆成两个 128 B swizzle `[·,32]` atom**（未做，唯一待验证）。当前可用最优=cp.async@64
+      （0.964×）或 TMA@32（0.949×），**二者尚未叠加**。**方法学**：跨 `BVK` 先用逐位校验判布局解码
+      （`base32==base64` 即证累加序不随 `BVK` 变），再单独归因时间差；初版 `#if` 误用 `constexpr`（非宏）
+      致 `tma32` 也走稠密、被逐位校验立刻暴露。
+
 - [x] **P7-32** 兑现 §34.4 的**待验证**：把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**，
       验证能否复现 §34.1「删掉 store」收益的那 33%。给 `b1_tma_probe.cu` 加 `-DB1T_TMADH`：per-warp
       `[KD,BW]=[128,16]` 未 padding tile 写入加进 `Shared` 的**双缓冲** `dho[2][NW][KD][BW]`，lane 0 发
@@ -902,8 +922,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-49 补测**。
-  - P7-49（本轮）：**兑现 §51.6 的「读侧下一杠杆 = TMA 输入」——B2 K2-mma 核的读放大整条消失、且净赢 ~5%**
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-50 补测**。
+  - P7-50（本轮）：**关闭 §52.6 的硬边界——把 B2 TMA 输入从 `BVK==32` 扩到 `BVK=64`，结论是
+    `SWIZZLE_NONE` 捷径「正确但不可用」**（`docs/07` §53）。给 `b2_mma_probe.cu` 加 `TMA_SWZ128`
+    宏（`BVK==32` 走 `SWIZZLE_128B`、`BVK==64` 改 `SWIZZLE_NONE` 稠密 256 B 行；`rd`/两张张量图按
+    宏二选一，算术一字未动）。新增 `harness/check_bwd_b2_tma64.py`（`check_bwd_b2_tma64.out.txt`，空闲卡）
+    + `harness/probe_b2_tma64_ncu.sh`（`probe_b2_tma64_ncu.out.txt`）。**Part A**：`tma64≡base64`
+    **逐位相同（四位 max_abs=0）**、`base32==base64` 的 `dq/dk/dw` 也逐位（证 k8 累加序不随 `BVK` 变，
+    `dgk` 2.9e-6=fp32 分组）、`tma64` vs torch 3.6e-4（tf32 底噪、比 Triton 更贴真 fp32）。**Part B**：
+    `tma64/base64` **2.5–3.0×（慢）**——`SWIZZLE_NONE` 把最优点 3% 倒赔成 −180%。**ncu**：读侧修复仍在
+    （L2 2.35 GB=`tma32`、srcunit 39.85M、l1tex 全局读=0、`LDGSTS`→`UBLKCP`），但 **bank conflict
+    8.39M→272.6M（32×）**、shared-load wavefront 37.7M→302.0M、DRAM SOL 30%、Duration 1470 µs。**根因**：
+    稠密行 stride 256 B=64 float，`64≡0 (mod 32)` ⟹ 固定列下 128 个 `h` 行全落同 bank（mma 片段恰是
+    固定列扫行）。**结论**：`TMA+BVK=64` 只能走 §52.6 另一条路——**拆两个 128 B swizzle `[·,32]` atom**
+    （未做，唯一待验证）；当前可用最优=cp.async@64（0.964×）或 TMA@32（0.949×），二者未叠加。**方法学**：
+    跨 `BVK` 先用逐位校验判布局解码（初版 `#if` 误用 `constexpr` 非宏致 `tma32` 也走稠密、被逐位校验暴露）。
+  - P7-49（上轮）：**兑现 §51.6 的「读侧下一杠杆 = TMA 输入」——B2 K2-mma 核的读放大整条消失、且净赢 ~5%**
     （`docs/07` §52）。给 `b2_mma_probe.cu` 加 `-DB2M_TMA`：操作数 `do/vn/dv`（4D 图 `{V,T,H,B}`/box
     `{BVK,BT,1,1}`）与 `h/dh`（5D 图 `{V,K,H,NT,B}`/box `{BVK,K,1,1,1}`）改 **`cp.async.bulk.tensor` +
     SWIZZLE_128B**，单线程每 stage 发 5 条 + per-stage `mbarrier`（`expect_tx`），OOB 尾行 TMA 零填充。

@@ -5359,3 +5359,102 @@ CUPTI kernel-only `dev`（`check_bwd_b2_tma.out.txt`）：
 - bf16 变体未测（本轮刻意保持部署 fp32/tf32 mix，与 Triton 同 dtype 对照）。
 - **下一步**：把本核（`-DB2M_TMA -DB2M_VECST`）作为 GEMM 段基座，补非 GEMM 段与同 CTA 内交接；并把
   `BVK=64` 的 TMA swizzle 变体补上，看能否再压 DRAM 地板那 1.11×。
+
+## 53. 把 B2 TMA 输入从 `BVK==32` 扩到 `BVK=64`：SWIZZLE_NONE 捷径**正确但不可用**（P7-50）
+
+§52.6 留下一处硬边界：`-DB2M_TMA` 因 128 B swizzle 的内维约束被 `static_assert` 钉死在 `BVK==32`，
+而 §49.5 的编译扫描里 cp.async 的**最优分块恰恰是 `BVK=64`**（`B8 T2048 H8`：`64/2` 499.1 µs vs
+`32/2` 517.3 µs）——两个收获（TMA 读侧修复 + 最优分块）此前**永远无法同时出现**。本轮兑现 §52.6
+点名的两条备选里最省的一条：`BVK==64` 时改用 **`SWIZZLE_NONE`**（内维 256 B，>128 B 故不能套 128 B
+swizzle；同一 codebase 在 P7-21 的 512 B 行 `E^tot` 图已证明大内维配 `SWIZZLE_NONE` 可用）。
+
+证据：`harness/b2_mma_probe.cu`（`-DB2M_TMA` 泛化到 `BVK∈{32,64}`）+ `harness/check_bwd_b2_tma64.py`
+（`harness/check_bwd_b2_tma64.out.txt`，空闲卡）+ `harness/probe_b2_tma64_ncu.sh`
+（`harness/probe_b2_tma64_ncu.out.txt`）。结论先给：**数值逐位正确，但太慢（2.6–2.8×）**——根因是稠密
+256 B 行布局的 smem bank 全别名，`SWIZZLE_NONE` 这条捷径**被证伪**，`BVK=64` 的 TMA 只能走 §52.6 的
+另一条路（两个 128 B swizzle atom 拆分）。
+
+### 53.1 设计：只加一个 swizzle 选择，不动任何算术
+
+对 `b2_mma_probe.cu` 的改动是**纯布局**，mma/累加序一字未动：
+
+- 新增编译期宏 `TMA_SWZ128 = (B2M_BVK == 32)`（`b2_mma_probe.cu:117-121`），`BVP = BVK`（TMA 下稠密、
+  无 padding，`:113`），`static_assert(BVK == 32 || BVK == 64)`（`:122`）。
+- `rd()` 的 swizzle 逆变换按 `TMA_SWZ128` 二选一：`BVK==32` 走 `Swizzle<3,4,3>` 字节异或，`BVK==64`
+  恒等（`:148`）。
+- 两张张量图（`make_map_dov`/`make_map_hdh`）的 swizzle 参数改成
+  `TMA_SWZ128 ? SWIZZLE_128B : SWIZZLE_NONE`（`:460` / `:477`），box 内维随 `BVK`。
+
+因此三条变体同源对照：`base*`（cp.async + `BVP=BVK+4` padding）、`tma32`（TMA + `SWIZZLE_128B`）、
+`tma64`（TMA + `SWIZZLE_NONE`）。`expect_tx` 仍为整 box 字节数 `(3·BT+2·KD)·BVK·4`，`rd` 之外的
+kernel 主体不变。
+
+### 53.2 Part A — 正确性：`tma64` 与 `base64` **逐位相同**、且 `base32==base64`
+
+同操作数四组 shape（`BT=16`，含非整除 `T=250`；torch 参考关 tf32 走真 fp32）：
+
+| 量 | `base64` vs `tma64` | `base32` vs `base64` | `tma64` vs torch(fp32) | Triton(tf32) vs torch |
+|---|---|---|---|---|
+| `dq` | **max_abs = 0** | **0** | 3.58e-4 | 8.40e-4 |
+| `dk` | **0** | **0** | 3.28e-4 | 8.18e-4 |
+| `dw` | **0** | **0** | 3.41e-4 | 8.10e-4 |
+| `dgk` | **0** | 2.86e-6 | 1.97e-7 | 1.31e-7 |
+
+两件事被钉死：(1) `SWIZZLE_NONE` 的字节解码**无误**（`tma64` 与 cp.async 的 `base64` 逐位相同，四位全 0）；
+(2) **`base32==base64` 的 `dq/dk/dw` 逐位相同**——因为 mma 对收缩维的 k8 分块累加序不随 `BVK` 变（`BVK=32`
+的 4 个 tile × 4 个 kk 与 `BVK=64` 的 2 个 tile × 8 个 kk 拼出同一条 `k=0,8,…,120` 序列）；只有 `dgk`
+的标量列归约分组随 tile 拆分不同，差 2.86e-6 fp32 舍入（与 §49/§50 的稳定性一致）。`tma64` 本身仍落
+tf32 底噪（3.6e-4），且**比 Triton 更贴真 fp32**（同 §49.2 的 CUDA-vs-Triton 微优势）。
+
+### 53.3 Part B — 计时：`BVK=64` 的 TMA **慢 2.6–2.8×**
+
+CUPTI `dev`（kernel-only，`B8 T2048 H8` 主 shape）：
+
+| 变体 | `dev` (µs) | vs `base32` | vs `base64` |
+|---|---|---|---|
+| `base32`（cp.async, BVK=32） | 517.8 | 1.000× | 1.038× |
+| `tma32`（TMA, BVK=32） | 491.4 | **0.949×** | 0.985× |
+| `base64`（cp.async, BVK=64） | 499.0 | 0.964× | 1.000× |
+| `tma64`（TMA, BVK=64） | **1415.5** | **2.734×** | **2.837×** |
+| `tma64v`（+vecst） | 1388.8 | 2.682× | 2.783× |
+
+四组 shape 一致：`base64/base32` 0.92–1.03×（复现 §49.5 的「64 略优」）、`tma32/base32` 0.92–0.96×
+（复现 §52 的「TMA 净赢 5%」）、而 **`tma64/base64` 恒 2.5–3.0×**。即：`SWIZZLE_NONE` 不但没吃到
+「最优分块」的 3%，反而把 TMA 的全部收益倒赔进去还多亏 ~2.8×。
+
+### 53.4 `ncu` — 根因：稠密 256 B 行的 smem bank **全别名**（不是字节、不是带宽）
+
+`B8 T2048 H8`，同一批 fp32 操作数（`probe_b2_tma64_ncu.out.txt`）：
+
+| 变体 | L2 bytes | srcunit 读 | l1tex 全局读 | **bank conflicts** | shared-load wavefronts | DRAM SOL | Duration |
+|---|---|---|---|---|---|---|---|
+| `base32` | 3.02 GB | 59.77M | 44.83M | 8.81M | 38.17M | 84.5% | 520.8 µs |
+| `tma32` | 2.35 GB | 39.85M | **0** | 8.69M | 38.05M | 89.1% | 493.6 µs |
+| `base64` | 2.96 GB | 59.77M | 44.83M | 8.39M | 37.75M | 88.2% | 499.7 µs |
+| `tma64` | 2.35 GB | 39.85M | **0** | **272.6M** | **302.0M** | 30.0% | **1470 µs** |
+
+- **读侧修复仍然在**：`tma64` 的 L2 bytes 2.35 GB = `tma32`、srcunit 读 39.85M（=DRAM 扇区 1.0×）、
+  `l1tex__t_sectors_pipe_lsu_mem_global_op_ld = 0`（SASS `LDGSTS`→`UBLKCP`）——即 §52 的 `.BYPASS`
+  读放大在 `BVK=64` 下同样消掉了，DRAM 读 1.28 GB 不变。
+- **但 bank conflict 爆了 32×**（8.39M→**272.6M**），shared-load wavefront 同步涨 8×（37.7M→302.0M），
+  DRAM SOL 掉到 **30%**、`sm__throughput` 掉到 8.9%。机制：`SWIZZLE_NONE` 稠密行 stride = 256 B =
+  **64 个 float**，而 bank = `word_addr & 31`，`64 ≡ 0 (mod 32)` ⟹ 对固定列 `col`，**128 个 `h` 行全部
+  落同一 bank**。而 mma 片段读恰是「固定列扫行」（`krow = warp*16 + …`、`col` 固定），于是 128-way
+  别名。`base` 用 `BVP=BVK+4` 把行 stride 打成 68（mod 32 = 4，错开 bank），`tma32` 用 128 B swizzle 的
+  行内异或把 bank 铺满 `0..31`——两条路都消失，唯独 `SWIZZLE_NONE` 的 256 B 行两者都占不到。
+
+### 53.5 结论 / 对目标卡的设计输入
+
+- **`SWIZZLE_NONE` 不是 `BVK=64` TMA 的可行捷径**：数值**逐位正确**（§53.2）但 **~2.8× 慢**（§53.3），
+  根因是稠密 256 B 行让 smem bank 全别名（§53.4）。这与 §20/§50「省字节/消冲突要落对 pipe」同课——
+  这里连「省到的字节」（L2 2.35 GB）都在 bank 重放里被淹没。
+- **要 `TMA + BVK=64` 只能走 §52.6 的另一条路**：把每个操作数 tile 拆成**两个 128 B swizzle `[·,32]`
+  atom**（各写一块独立 smem 子缓冲，`rd` 按 `col>>5` 选 atom 再做 `Swizzle<3,4,3>` 解码），而非把
+  256 B 行整块交给 `SWIZZLE_NONE`。这条拆分**未做**，是本结果留下的**唯一**待验证路径。
+- **当前可用最优组合不变**：cp.async 侧取 `BVK=64`（`base64` 0.964× `base32`），TMA 侧取 `BVK=32`
+  （`tma32` 0.949×）——**分别最优**，二者尚未叠加。`tma32 ≈ base64`（0.985×）说明「TMA@32」与
+  「cp.async@64」基本同档，真正要再进一步必须把两者合起来（即上面的 atom 拆分）。
+- **方法学**：跨 `BVK` 对照时可**先用逐位校验**判断布局解码是否正确（`base32==base64` 逐位相同即证
+  k8 累加序不随 `BVK` 变），再把时间/`ncu` 差异单独归因到布局——避免把「解码错」误判成「布局慢」。
+  （本轮初版即因 `#if` 误用了 `constexpr` 而非宏，把 `BVK=32` 的 `rd` 也走成稠密而短暂出现
+  「`tma32≠tma64`」，逐位校验立刻暴露。）
