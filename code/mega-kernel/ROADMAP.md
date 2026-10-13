@@ -4278,6 +4278,36 @@
   P150-1 新留尾巴见文档 §12（未构建/未运行、grouped 静默产 0 tile 系静态推断、未与 DeepGEMM SM100 对跑、
   `linear_sm100_mpk.cuh` 调度是否同构未核、`_tma_utils`/`_sm100_utils` 只借用行号）。**本轮新增实验。**
 
+### P151 SM100 BF16 linear device 身体走读（`docs/65-mpk-sm100-bf16-linear.md`）
+
+- [x] **P151-1** 补掉 `docs/32`（P118-1）**§5.4 只给 10 行摘要**的第三支 SM100 手工线性身体，并兑现
+  P150-1（§12）**明留的尾巴**（原话）「`linear_sm100_mpk.cuh` 调度是否同构未核」。把
+  `linear_sm100_mpk.cuh`（737 行，BF16/无 block-scale）逐行打开，见
+  `docs/65-mpk-sm100-bf16-linear.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，
+  本地 `/ssd/mirage_mpk_build`；CUTLASS `deps/cutlass` `f3fde583`；DeepGEMM 对照 `~/github/DeepGEMM`
+  `057ca59`；**纯源码走读 + 1 个 host 侧结构探测**，SM100 本机不可执行）。三条 headline：
+  **(A)（headline）** 这是本专题唯一「**CuTe 高层描述符 + 手写 TMA**」合体的 device 身体——MMA 走
+  `make_tiled_mma(SM100_MMA_F16BF16_SS)` → `partition_shape_{A,B,C}` → `UMMA::tile_to_mma_shape` →
+  `make_fragment_A/B` → `cute::gemm`（`:61-68/170-219/380-391/536-542`），而 TMA/pipeline 全手写
+  （`smem_tma` 视图 + `tma_cp_async`/`tma_store_async` + 自管 mbarrier，`:328-347/414-482/565-724`）；
+  host 探测证明**同一块 SMEM 的两套表示一致**——`sA/sB` 是 `Sw<3,4,3>`（SW128）、`sC` 是 `Sw<0,4,3>`
+  （恒等），且**手写 stage 步长逐项等于 CuTe 布局 stage 步长**（A 8192 / B 1024 / C 2048，全 `OK`）；
+  **(B)（headline）** 它把「1 CTA、6 warp、2 空转」的三角色 pipeline 塞进一个 device task——`warp5`
+  TMA / `warp4` MMA / `warps0-3` epilogue（`:414/483/565`），是 FP8 身体去掉 SCALE warp 后的形状
+  （BF16 无 scale），同步 = 4 对 mbarrier + 2 个 NamedBarrier；host 探测复现**两处注释失真**：
+  `mma_shape_B/C` 注释写 `_32`（实际 `_16`，`MMA_N=16`）、`sA/sB/sC_layout` 注释贴的是 **ArithTuple
+  坐标张量**（不是 swizzle SMEM 布局）；**(C)（headline）** 生产六层全通（`TASK_LINEAR_SM100=253`/
+  `+RESIDUAL=252`/`SPLITK=251`；`register_*` `task_register.cc:2013/2178`；`graph.cc:626-641`；
+  `task_header.cuh:39`），单测 wrapper 自带 `__global__`，但 **as-shipped 编不过**——它连带拉进的
+  `sampling_sm100.cuh:137/143` 需要 `MPK_MAX_NUM_BATCHED_REQUESTS`/`_TOKENS`（只在
+  `persistent_kernel.cuh:58-59` 被注释、实由 JIT 提供），试编报未定义；`setup.py` 还硬编码
+  `/usr/local/cuda-12.8`、`depends` 指向不存在的 `blackwell/utils.cuh`。判据只贡献 C3。新实验
+  `src/linear_sm100_bf16_layouts.cu` + `harness/linear_sm100_bf16_layouts.sh` +
+  `harness/linear_sm100_bf16_layouts.out.txt`（目标卡 H100/sm90a，host 侧求值，device 3，未 launch
+  kernel）。配套博客 post `mega-kernel-66-mpk-sm100-bf16-linear`（weight 67）并更新
+  `mega-kernel-00-index` 第 66 项。P151-1 新留尾巴见文档 §8（SMEM 224 KiB vs cosize 160 KiB 缺口未
+  解释、warp6/7 空转系静态推断、只到试编未运行、未与 `moe_linear_sm100.cuh` 对走）。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4669,7 +4699,35 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P150-1 完成（1/1）**。补掉 `docs/32`（P119-1）§2.3/§7 明留的「`_scheduler`/`_epilogue_utils`/
+- 当前进度：**P151-1 完成（1/1）**。补掉 `docs/32`（P118-1）**§5.4 只给 10 行摘要**的第三支 SM100
+  手工线性身体，并兑现 P150-1（§12）明留的尾巴「`linear_sm100_mpk.cuh` 调度是否同构未核」。把
+  `linear_sm100_mpk.cuh`（737 行，BF16/无 block-scale）逐行打开，见 `docs/65-mpk-sm100-bf16-linear.md`
+  （快照 `f9eb70c`，本地 `/ssd/mirage_mpk_build`；CUTLASS `f3fde583`；DeepGEMM 对照 `057ca59`；**纯源码
+  走读 + 1 个 host 侧结构探测**）。三条 headline：**(A)（headline）** 本专题唯一「CuTe 高层描述符 + 手写
+  TMA」合体的 device 身体——MMA 走 `make_tiled_mma`/`partition_shape_*`/`UMMA::tile_to_mma_shape`/
+  `cute::gemm`，TMA/pipeline 全手写；host 探测证明同一块 SMEM 的两套表示一致（`sA/sB`=`Sw<3,4,3>`、
+  `sC`=`Sw<0,4,3>`，手写 stage 步长 A 8192/B 1024/C 2048 逐项 `OK`）；**(B)（headline）** 1 CTA / 6 warp /
+  2 空转的三角色 pipeline（warp5 TMA / warp4 MMA / warps0-3 epilogue），并复现两处注释失真（`mma_shape_B/C`
+  注释写 `_32` 实为 `_16`；`sA/sB/sC_layout` 注释贴的是 ArithTuple 坐标张量）；**(C)（headline）** 生产六层
+  全通（`TaskType` 251/252/253），但 as-shipped 单测编不过（连带拉进 `sampling_sm100.cuh` 需要的
+  `MPK_MAX_NUM_BATCHED_*` 宏只在 `persistent_kernel.cuh:58-59` 被注释、实由 JIT 提供）。判据只贡献 C3。
+  新实验 `src/linear_sm100_bf16_layouts.cu` + `harness/linear_sm100_bf16_layouts.{sh,out.txt}`（目标卡
+  H100/sm90a，host 侧，device 3）。配套博客 post `mega-kernel-66-mpk-sm100-bf16-linear`（weight 67）并更新
+  `mega-kernel-00-index` 第 66 项。
+- 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计
+  （注：该 kernel 名 `eagle3_draft_chain_step_attn` 快照里 `grep` 零命中，**可能不可走**，须先核 demo
+  引用是否指向别处）；或 `moe_linear_sm100.cuh`（827 行 BF16 MoE linear，与本文同为 BF16 身体，未对走）；
+  或 `mla_mtp_decode_tp2/4/8_sm100.cuh` 三兄弟的内部未逐行处；或 SM100 专属布局的其余面
+  （`linear_fp8_sm100_cute_tie` 想表达的 CuTe 解构路径、`fp8_group_gemm_sm100.cuh` 的 SF 段逐行、
+  WS 指令落地后的对照、稀疏 A 的 2:4 物理排布/E→A 槽映射（本文只到 trait 形状，未追硬件）逐行）。
+  **SM100 BF16 手工线性身体（`linear_sm100_mpk.cuh`）已由 P151-1/`docs/65` 补掉**（`docs/32` §5.4 的摘要尾巴、
+  兼 P150-1 §12 的「调度是否同构未核」）；**SM100 FP8 linear 的内核内 tile 调度器
+  （`linear_fp8_sm100_scheduler.cuh` / `_epilogue_utils.cuh`）已由 P150-1/`docs/64` 补掉**；**CUTLASS
+  `tmem_e_frg`/`tmem_frg_ws` 稀疏元数据与 WS 布局已由 P148-1/`docs/62` 补掉**；**稀疏 UMMA 的 A 操作数
+  通路已由 P149-1/`docs/63` 补掉**；**Hopper CuTe WS GEMM device 家族已由 P147-1/`docs/61` 补掉**；**CUTLASS
+  scale-factor TMEM trait 已由 P146-1/`docs/60` 补掉**；TMEM 列布局 / UTCCP 重排已由 P145-1/`docs/59`
+  补掉；TMA 版 SMEM 布局已由 P144-1/`docs/58` 补掉；SM100 共享原语层已由 P143-1/`docs/57` 补掉。
+- 此前：**P150-1 完成（1/1）**。补掉 `docs/32`（P119-1）§2.3/§7 明留的「`_scheduler`/`_epilogue_utils`/
   `_cute_tie` 未逐行走」（`_cute_tie` 已由 P146-1/`docs/60` 补），把 `linear_fp8_sm100_scheduler.cuh`
   （199 行）+ `linear_fp8_sm100_epilogue_utils.cuh`（30 行）逐行打开，见 `docs/64-mpk-fp8-scheduler.md`
   （快照 `f9eb70c`，本地 `/ssd/mirage_mpk_build`；DeepGEMM 对照 `057ca59`；**纯源码走读 + 1 个 host 侧
