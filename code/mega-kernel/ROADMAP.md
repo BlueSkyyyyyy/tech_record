@@ -3263,6 +3263,41 @@
   「已知坑」（常驻 kernel 内 TMEM alloc/dealloc 必须同一 warp）。**本专题此前任务清单全完成，本轮为其
   新增的增量。**
 
+### P121 SM100 MLA attention 家族走读（`docs/35-mpk-sm100-mla-family.md`）
+
+- [x] **P121-1** 补掉 `docs/34`（P120-1）**§6「局限」明留的尾巴**（原话）「未走读的相邻层：
+  `mla_prefill_sm100.cuh`/`mla_prefill_tp8_sm100.cuh`、`mla_decode_sm100.cuh`、`mla_kv_cache_gather*`、
+  `mla_sm100_2sm.cuh`、注意力之外的 SM100 task 家族仍未逐行」中**除 `mla_sm100_2sm.cuh` 与注意力之外
+  家族以外**的 MLA attention 段——把 KV gather（两变体）/ decode / reduce / prefill（吸收版）/
+  prefill_tp8（未吸收版）逐行走完。见 `docs/35-mpk-sm100-mla-family.md`（快照 `mirage-project/mirage`
+  分支 `mpk`，commit `f9eb70c`，与 `docs/06`–`docs/34` 同快照；**纯源码走读（资料分析），本轮无新实验**
+  ——SM100 `sm_100f` 在目标卡 H100/sm90 不可执行）。三条 headline：
+  - **(A) KV gather 与 prefill 是真接线的 device 身体**：`mla_kv_cache_gather_sm100.cuh`（160 行，
+    grid=`(max_num_batched_requests,1,1)`、block=128）做「append 新 token 进页式缓存 + gather 成连续
+    `[max_seq_len,576]`」，其中 gather 用**扁平化 `(seq_pos×d8)` + 4 路 ILP**（注释自陈原两级循环在
+    GB300 上慢 ~2.5×，`:119-157`）；`mla_kv_cache_gather_split_sm100.cuh`（138 行）输出分块
+    `ckv_sep[·,512]`+`kpe_sep[·,64]`（chunked prefill 布局，`:113-135`）；`mla_prefill_sm100.cuh`
+    （715 行，吸收版：`D_CKV=512`+`D_KPE=64`、cp.async + Ampere `m16n8k16`、256 线程、**单 stage 受
+    常驻 SMEM 预算约束** `:44-51`、dual-dispatch gate `:220-250`、命名屏障保留区纪律 `:525-531`）。
+  - **(B) 旧 decode/reduce 被 PR 651 MTP 版顶替、同族内成死代码**：`mla_decode_sm100.cuh`（460 行）
+    的 `mla_decode_sm100_task_impl` 全仓**只被一个 standalone 单测 wrapper 调用**
+    （`tests/.../runtime_kernel_wrapper_mla_decode.cu:24`），生产 `register_mla_decode_sm100_task`
+    （`task_register.cc:4102`）发射的是 **`mla_mtp_decode_sm100_task_impl<false>`**（`:4168`，注释
+    *"Use PR 651 MLA MTP decode kernel"*）；`mla_reduce_sm100.cuh`（77 行，per-thread-per-head 三趟）
+    的 `mla_reduce_sm100_task_impl` **全仓零调用者**，生产 reduce 走 `mla_mtp_reduce_sm100_task_impl<256>`
+    （`:4248`）。是本专题「已实现未接线」的第三种形态（同文件族内被后继实现覆盖）。
+  - **(C) prefill 两条身体对应两种并行策略**：吸收版（`mla_prefill_sm100`）与未吸收 TP8 版
+    （`mla_prefill_tp8_sm100.cuh`，486 行：`D_QK=192`、TMA 载 K/V `:290-302`、**128 线程守卫 +
+    `bar.sync 3,128`** `:191-213`、SMEM 1024 对齐 `:223-230`）由 DeepSeek-V3 builder 的编译期开关
+    `self._use_prefill = mbt >= 32`（`builder.py:245`）选路，并配合 prefill/decode 两条 dual-dispatch
+    gate（定义域不重叠）。
+  生产布线逐条核对：`graph.cc:767/772/777/784/861/866`、`task_register.cc:4102/4206/4275/4369/4878/4940`、
+  `runtime_header.h:153-189`（TaskType 266/267/268/278/293/295）、`persistent_kernel.py:1569/1594/1627/
+  1660/1690/1720`。判据**不贡献任何 C 判据**（同 `docs/29`–`docs/34`；C1/C2/C4/C5 由运行层拿）。
+  配套博客 post `mega-kernel-36-mpk-sm100-mla`（weight 37）并更新 `mega-kernel-00-index` 第 36 项。
+  P121-1 新留尾巴（§9）：**`mla_sm100_2sm.cuh`（3165 行，2SM 协作 attention）未逐行**（最直接的下一步）、
+  注意力之外的 SM100 task 家族未覆盖、split gather 未做扁平化 ILP、未与生产端到端对跑。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3409,7 +3444,16 @@
   (b) 符号路径 `instantiate_symbolic_graph` **首行 `++num_symbolic_graphs; return false;`**
   （`search.cc:836-842`），后面的候选赋值枚举/`to_kernel_graph`/`verify` 走不到；
   (c) `generate_kernel_graphs_symbolic`（`search.cc:446`）**无任何调用者**（`search_c.cc:106` 只调
-  `generate_kernel_graphs`）。引用这些函数的行为前先确认它真被调用。
+   `generate_kernel_graphs`）。引用这些函数的行为前先确认它真被调用。
+  **（P121-1/`docs/35` 补：第三种形态——「同文件族内被后继实现顶替」）** 有些实现**有调用者、也在生产
+  注册路径上**，但注册函数发射的是**另一个文件**的实现：`register_mla_decode_sm100_task`
+  （`task_register.cc:4102`）注释写 *"Use PR 651 MLA MTP decode kernel"*、`:4168` 发射的是
+  `mla_mtp_decode_sm100_task_impl<false>`（不是同名的 `mla_decode_sm100_task_impl`）；
+  `register_mla_reduce_sm100_task`（`:4206`）发射 `mla_mtp_reduce_sm100_task_impl<256>`（`:4248`）。
+  于是 `mla_decode_sm100.cuh` 的 impl **只剩 standalone 单测 wrapper 调用**
+  （`tests/.../runtime_kernel_wrapper_mla_decode.cu:24`）、`mla_reduce_sm100.cuh` 的 impl **零调用者**。
+  判「一个 device 身体是否真在生产跑」不能只看「有定义/被 include/有 Python layer 同名 API」——须追到
+  注册函数**实际 `code.e(...)` 发射的那个符号名**。
 - **符号搜索的约束可满足性有两套引擎、精度不对称**（P102-1/`docs/16` §3.3）：`SymbolicTBGraph::conds`
   是 `TensorDimConstraints`（可回退集合 + **z3** `s.check()`，`tensor_dim_constraints.cc:38-47`），
   精确；`SymbolicKNGraph::conds` 只是 `unordered_set` + `check_satisfiability`
@@ -3485,7 +3529,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P120-1 完成（1/1）**。把 `docs/32`（P118-1）**§7 明留、`docs/33` §11 明确「未处理」的两条
+- 当前进度：**P121-1 完成（1/1）**。补掉 `docs/34`（P120-1）**§6「局限」明留的 MLA attention 段尾巴**
+  （KV gather 两变体 / decode / reduce / prefill 吸收版 / prefill_tp8 未吸收版），见
+  `docs/35-mpk-sm100-mla-family.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：
+  **(A)** KV gather（扁平化 ILP gather `:119-157`）与 prefill（吸收版 715 行 / 未吸收 TP8 版 486 行、
+  单 stage 受常驻 SMEM 预算约束、dual-dispatch gate）是**真接线**的 device 身体；**(B)** 旧
+  `mla_decode_sm100`/`mla_reduce_sm100` 被 PR 651 MTP 版顶替——`mla_decode_sm100_task_impl` 只有
+  standalone 单测 caller、`mla_reduce_sm100_task_impl` **零调用者**，生产走
+  `mla_mtp_decode_sm100_task_impl<false>`/`mla_mtp_reduce_sm100_task_impl<256>`（`task_register.cc:4168/4248`），
+  是「已实现未接线」的第三种形态（同族内被后继覆盖）；**(C)** prefill 两条身体由 DeepSeek-V3 builder
+  `_use_prefill = mbt >= 32`（`builder.py:245`）选路。判据**不贡献任何 C 判据**。配套博客 post
+  `mega-kernel-36-mpk-sm100-mla`（weight 37）并更新 `mega-kernel-00-index` 第 36 项。P121-1 新留尾巴见
+  §9（头号：`mla_sm100_2sm.cuh` 2SM 协作版未逐行）。
+- 此前：**P120-1 完成（1/1）**。把 `docs/32`（P118-1）**§7 明留、`docs/33` §11 明确「未处理」的两条
   尾巴**一起走完——**身体 B**（`linear_fp8_1d2d_sm100.cuh` 的 CuTe 主循环）与 **`mla_mtp_tpN_main` 主体**。
   见 `docs/34-mpk-sm100-cute-tasks.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。headline：**(A)** 身体 B
   是「CuTe 高层」第二实现（727 行四段流水、`PipedSharedStorageWithSF`），**生产未接线**（无调用者、pybind
