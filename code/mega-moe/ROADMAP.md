@@ -2123,6 +2123,34 @@
       ⑥ 枚举 arch9 108 / 假 arch10 218。配套博客
       `content/posts/mega-moe-78-sf-layout-test-oracle`（索引页新增第 78 篇）。
 
+### P69 增量（opt-in，补齐 HyperConnection prenorm GEMM 一直缺席的「验收测试即正确性规范」）
+
+- [x] **P69-1** **HyperConnection prenorm GEMM 的验收测试即正确性规范**
+      （`tests/test_hyperconnection.py`；`deep_gemm/testing/{utils,numeric,bench}.py`；
+      `deep_gemm/utils/math.py`；`csrc/apis/hyperconnection.hpp`；
+      `csrc/jit_kernels/impls/sm90_tf32_hc_prenorm_gemm.hpp` / `sm100_tf32_hc_prenorm_gemm.hpp`）。
+      第 16 篇（P7-2）拆了 `tf32_hc_prenorm_gemm` 的**实现**，本篇补上「这份算子算什么对」的
+      唯一规范 `tests/test_hyperconnection.py`（57 行）。它门控极宽
+      （`@test_filter(get_arch_major() >= 9)`，**H100 可跑**），用例矩阵 24 个 deterministic 形状。
+      **核心看点：判据编码了实现事实**——`allow_tf32=True`（`:17-18`）不是加速，而是「kernel 是
+      TF32」在参考侧的必要镜像；`ref_d = a.float() @ b.T`（`:34`）只上转 A、不动 B，精确对应
+      kernel 的数据路径；FLOP 口径 `2*m*n*k`（`:43`）**不含 S**，坐实融合=搭车。判据
+      `calc_diff < 1e-8`（`:38`）是「TF32 同层残差之下、关 TF32 失配之上」的分离带。
+      → `docs/79-hc-prenorm-test-oracle.md`（真实行号核对）：测试顶层结构（`test_hc_prenorm_gemm:14-45`
+      + `__main__:50-57`）、`@test_filter`（`testing/utils.py:11-22`）/`get_arch_major`（`:6-8`）、
+      用例矩阵（`:21-23`）、参考数学与判据（`:24-38`）、FLOP/byte 账目（`:40-44`）、
+      `calc_diff`（`numeric.py:5-11`）/`count_bytes`（`:14-21`）；host 契约两层
+      `hyperconnection.hpp:16-18/21/26-40/43-44` + `sm90_...hpp:21-31`（SM100 差异 `n<=128`
+      `sm100_...hpp:29`）。H100 实测 `harness/exp_hc_prenorm_test_oracle.{py,sh,out.txt}`
+      **8 PASS / 0 FAIL**：① 直接 import 真实测试模块、驱动真实测试体（打桩 `bench_kineto` 只留
+      断言）24 用例**全部 assert 过**；② 真实 `bench_kineto` 跑通测试自带 perf 路径（共享 GPU 抖动大，
+      性能结论仍以第 16 篇为准）；③ **关 `allow_tf32` 使 `calc_diff(D, 真fp32)` = 2.15e-08 /
+      2.39e-08 越过 1e-8**（坐实测试为何必须开 TF32）；④ SM90 host 契约真的会拒
+      （`sm90_...hpp:30` 的 `n=64`/`n=20`、`:31` 的 `k=4104`；`n=24/32` 通过）；⑤ split-K 的 D/S
+      可加性 `calc_diff` 1.28e-10 / 4.22e-14、16 split 范数 ±1.3%；⑥ `2mnk=11.27 GFLOP`、
+      `count_bytes=473.33 MB`（A 占 469.76）、`AI=23.82 FLOP/B`。SM100 分支仅分析。
+      配套博客 `content/posts/mega-moe-79-hc-prenorm-test-oracle`（索引页新增第 79 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2147,8 +2175,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P68 各增量完成（P15-1…P41-1、P42-1…P68-1）。**
-  本轮 P68-1：新建 `docs/78-sf-layout-test-oracle.md`
+- 当前进度：**P0~P14 全部完成；P15~P69 各增量完成（P15-1…P41-1、P42-1…P69-1）。**
+  本轮 P69-1：新建 `docs/79-hc-prenorm-test-oracle.md`
+  （+`harness/exp_hc_prenorm_test_oracle.{py,sh,out.txt}`）——补上 HyperConnection prenorm GEMM
+  的**「验收测试即正确性规范」** `tests/test_hyperconnection.py`（57 行，`@test_filter(arch>=9)`，
+  H100 可跑）。**核心看点：判据编码实现事实**——`allow_tf32=True`（`:17-18`）是「kernel 是 TF32」
+  在参考侧的必要镜像（关掉它 `calc_diff(D,真fp32)` → 2.15e-08/2.39e-08 越过 1e-8）；`a.float()@b.T`
+  只上转 A、不动 B，对应 kernel 数据路径；`2*m*n*k` 不含 S（融合=搭车）。**H100 真机 8 PASS/0 FAIL**：
+  直接 import 真实测试模块、驱动真实测试体（打桩 `bench_kineto` 只留断言）24 用例全过；契约拒
+  `n=64/n=20/k=4104`（`sm90_...hpp:30/31`）；split-K 可加性 1.28e-10/4.22e-14；`AI=23.82 FLOP/B`。
+  SM100 分支（`n<=128`）仅分析。索引页新增第 79 篇。
+  上一轮 P68-1：新建 `docs/78-sf-layout-test-oracle.md`
   （+`harness/exp_sf_layout_test_oracle.{sh,py,out.txt}`）——补上 SF 布局家族一直缺席的
   **「验收测试即正确性规范」** `tests/test_layout.py`：测试自带的纯 torch oracle
   `get_mn_major_tma_aligned_packed_ue8m0_tensor_torch_impl:20-42`（UE8M0=`>>23`、两个对齐口径、
@@ -2931,10 +2968,16 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P67 已完成（最新 **P67-1 DeepGEMM 的共享 TMA 拷贝层与环形流水线**：
-  `common/tma_copy.cuh`（原子宽度 / `LoadOps` 三原语 / `copy_nd` 原子循环 / sm90 多播 vs sm100 2-SM）
-  + `common/ring_pipeline.cuh`（环形 stage + 相位翻转）；H100 真机直接 include 真实头文件跑真实设备代码
-  **27 PASS / 0 FAIL**；详见上）。
+- **下一步**：P0~P69 已完成（最新 **P69-1 HyperConnection prenorm GEMM 的验收测试即正确性规范**：
+  `tests/test_hyperconnection.py`（`@test_filter(arch>=9)`，H100 可跑）——判据编码实现事实
+  （`allow_tf32=True` 是「kernel 是 TF32」的镜像、`a.float()@b.T` 只转 A、`2*m*n*k` 不含 S）；
+  H100 真机直接驱动真实测试体 24 用例全过 **8 PASS / 0 FAIL**；详见上）。
+  上一轮 P68-1：**SF layout 家族的验收测试即正确性规范**：
+  `tests/test_layout.py`——纯 torch oracle + 两档判据 + k-grouped 每组套单组；H100 真机 8 PASS / 0 FAIL；
+  详见上）。
+  上一轮 P67-1：**DeepGEMM 的共享 TMA 拷贝层与环形流水线**：
+  `common/tma_copy.cuh` + `common/ring_pipeline.cuh`；H100 真机直接跑真实设备代码 **27 PASS / 0 FAIL**；
+  详见上）。
   上一轮 P66-1：**DeepGEMM einsum 家族的验收测试即正确性规范**：
   `tests/test_einsum.py`——七个函数 / 两个 arch 门控 / `calc_diff` 阈值表 / 逐位 oracle（direct==FP32
   累积、随机舍入哈希、FP8 输出对==生产管线）；H100 真机直接驱动真实测试体 **15 PASS / 0 FAIL**；
