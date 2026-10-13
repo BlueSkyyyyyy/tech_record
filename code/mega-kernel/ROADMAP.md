@@ -3727,6 +3727,43 @@
   （「argmax 选中补零行」需真实 logits 全负这一前提，未构造实例证明）；未与其它 family builder 对照。
   **本轮新增增量。**
 
+### P134 段内融合 task 家族走读 + 接线审计（`docs/48-mpk-fusion-tasks.md`）
+
+- [x] **P134-1** 补掉「下一步候选」（§「当前进度/下一步」）第三条残留——「`docs/07` §3.3 的
+  `norm_linear_hopper` 之外的融合层」：把整个**段内融合 task 家族**（Ampere `norm_linear` /
+  `norm_linear_new` / `silu_mul_linear` + Hopper `norm_linear_hopper`）逐行打开，并做一次
+  **接线审计**。见 `docs/48-mpk-fusion-tasks.md`（快照 `mirage-project/mirage` 分支 `mpk` commit
+  `f9eb70c`，与 `docs/06`–`docs/47` 同快照；**纯源码走读（资料分析），本轮无新实验**）。三条 headline：
+  - **(A) 融合边界存在、且跨代各写一遍**：`norm_linear`（RMSNorm+Linear）与 `silu_mul_linear`
+    （SiLU×mul+Linear[+residual]）在仓库有**四份独立 device 身体**——Ampere `norm_linear.cuh`
+    （461 行：`mul_broadcast_row` 现算归一化 + `SQUARE/MULSCALAR` → `reduction_sum_col ADDSCALAR/SQRT`
+    + `div_col`，`K_PIPE_MAX=2`、`NUM_ITERS_M=1` 注释自陈 batch>16 会错）、同名第二版
+    `norm_linear_new.cuh`（465 行：多 `num_active_tokens`、`smem_row<3,3,3>` swizzle、新 SMEM 公式、
+    有效性检查改用 active-token）、`silu_mul_linear.cuh`（371 行：gate/up 拼接输入
+    `d_mul=input+REDUCTION_SIZE`、SMEM 现算 SiLU、可选 residual）、Hopper
+    `norm_linear_hopper.cuh`（367 行：四组 K-stage `Barrier` + TMA 三段流 + wgmma 的 warp 特化、
+    `TILE_SIZE=64`→batch 须 64 倍数、`wg_decrease/increase_regs` 被注释）。
+  - **(B)（headline）整个家族在快照里「已实现、未编入」**：`TaskType`（`TASK_RMS_NORM_LINEAR=102`、
+    `TASK_SILU_MUL_LINEAR_WITH_RESIDUAL=105`）、`graph.cc:453/522`、`task_register.cc:489/826` 发射器、
+    前端 `rmsnorm_linear_layer:883`/`silu_mul_linear_with_residual_layer:2570` **四层全通**，但——
+    **没有任何生产 `task_header.cuh`（ampere/hopper/blackwell）include 这四个头**；唯一引用的单测
+    `runtime_kernel_wrapper.cu` 把调用整段包在**从未定义的 `#ifdef DEPRECATED_TESTS`** 里（`using`
+    别名 `:17/:23` 也被注释）、Hopper wrapper `:21/:28` 全被注释；且四头自身的 `#include "common.h"`
+    （Ampere）/`"../common.h"`（Hopper）指向快照里**不存在的文件**——**即使加进 `task_header` 也编译不过**。
+    是「已实现未接线」在**融合算子**层的整族实例（对照 `docs/37`/`docs/38` 薄 task「每个都有真实 builder
+    调用」正好相反）。
+  - **(C) 生产实际走「拆开的薄 task」**：Qwen3 MLP 段是 `rmsnorm_layer:505`→`linear_layer:512`→
+    `silu_mul_layer:520`→`linear_with_residual_layer:540` 四次注册，融合版在 `models/` **零调用者**；
+    历史指纹 `models/utils.py:3` 的 `grid_for_rmsnorm_linear_layer` 名字残留自融合时代、却被拆开后的
+    norm/linear 用来算 grid。与 `docs/23` §5 / `docs/40`「拆开是 task 可复用/可调度的先决条件」一致——
+    这次被拆掉的是**归一化**。
+  另修正 `docs/07` §3.3 的默认读法（`norm_linear_hopper` 是**未编入**的融合实现，机理描述仍对）；判据
+  只贡献 **C3 的范围**（同 `docs/22` §8）。配套博客 post `mega-kernel-49-mpk-fusion-tasks`（weight 50）
+  并更新 `mega-kernel-00-index` 第 49 项；并把「融合 task 家族未编入 + include 陈旧不可编译」补进「已知坑」。
+  P134-1 新留尾巴（文档 §7）：未构建（未验证修 `common.h` 后能否编译）；`norm_linear` vs
+  `norm_linear_new` 取舍系静态推断不判；`my_gpu_id==0` 作 residual 的 TP 语义未追多卡赋值链；未扫其它
+  「无生产者」融合算子；`docs/44` §10 仍余的 `smem_row`/`ldsm`/`dmem_row` 布局内部未逐行。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3994,10 +4031,35 @@
   `docs/33` §9.4、`docs/38`、`docs/16`/`docs/20`）——判 rope 走哪条必须追 `attention_sm100` 的
   **实际调用符号**。同族口径坑还有：本家族 `NUM_THREADS` 有四种来源（全局 128 / hopper-rmsnorm 模板
   默认 256 / hopper-rope 默认 128 / hopper SMEM-rmsnorm 显式模板参）并存，barrier ID 用 6/7/9。
+- **段内融合 task 家族「四层布线全通、却一个编译单元都没进」**（P134-1/`docs/48` §4）：
+  `TASK_RMS_NORM_LINEAR=102`/`TASK_SILU_MUL_LINEAR_WITH_RESIDUAL=105` 的 `graph.cc` 分支、
+  `task_register` 发射器（发射 arch-agnostic 名 `kernel::norm_linear_task_impl`/
+  `silu_mul_linear_task_impl`）与前端 `rmsnorm_linear_layer`/`silu_mul_linear_with_residual_layer`
+  都是活的，但**没有任何生产 `task_header.cuh` include 这四个头**（`ampere/norm_linear.cuh`/
+  `norm_linear_new.cuh`/`silu_mul_linear.cuh`/`hopper/norm_linear_hopper.cuh`）；唯一引用它们的
+  `tests/runtime_python/runtime_kernel_wrapper.cu` 把调用整段包在**全仓从未 `#define` 的
+  `#ifdef DEPRECATED_TESTS`** 里、`using` 别名（`:17/:23`）也被注释，Hopper wrapper `:21/:28` 亦被注释；
+  且四头自身 `#include "common.h"`/`"../common.h"` **指向快照里不存在的文件**（不存在 `tasks/common.h`，
+  只有 `tasks/common/common_header.cuh`）。故「`grep` 到 `TaskType`/注册/前端」**不等于该 device 身体被
+  编进任何 kernel**——判一个融合 task 是否真能被点亮，必须核对 `task_header.cuh` 的 include 集**且**该头
+  自己的 include 能解析（同 `docs/32` §3、`docs/45` §3.3、`docs/24` §4 的「名字/注册会骗人」族）。
+  另：`norm_linear` 与 `norm_linear_new` **同名互斥**（都定义 `norm_linear_task_impl`，靠 include 选择、
+  同时 include 会重定义），当前两版都没进任何编译单元。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P133-1 完成（1/1）**。补掉 `docs/46` §9「参考坐标」里列出、正文却没打开的
+- 当前进度：**P134-1 完成（1/1）**。补掉「下一步候选」第三条残留——`docs/07` §3.3 的
+  `norm_linear_hopper` 之外的**段内融合 task 家族**，并做一次**接线审计**。见
+  `docs/48-mpk-fusion-tasks.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：
+  **(A)** 融合边界存在且跨代各写一遍——Ampere `norm_linear.cuh`（461 行）、同名第二版
+  `norm_linear_new.cuh`（465 行）、`silu_mul_linear.cuh`（371 行）、Hopper `norm_linear_hopper.cuh`
+  （367 行 TMA+wgmma warp 特化）；**(B)（headline）整个家族「已实现、未编入」**——`TaskType 102/105`、
+  `graph.cc`、`task_register` 发射器、前端 layer 四层全通，却**无任何 `task_header` include 这四个头**、
+  唯一引用的单测整段包在从未定义的 `#ifdef DEPRECATED_TESTS` 里、四头自身的 `#include "common.h"`
+  指向快照里不存在的文件；**(C)** 生产实际走「拆开的薄 task」（Qwen3 `rmsnorm_layer`→`linear_layer`→
+  `silu_mul_layer`→`linear_with_residual_layer`）。并修正 `docs/07` §3.3 的默认读法。配套博客 post
+  `mega-kernel-49-mpk-fusion-tasks`（weight 50）并更新 `mega-kernel-00-index` 第 49 项。
+- 此前：**P133-1 完成（1/1）**。补掉 `docs/46` §9「参考坐标」里列出、正文却没打开的
   `Eagle3Builder` 前三步（`_prepare_weights:119`/`_attach_weights:190`/`_allocate_intermediates:220`），
   即「下一步候选」第二条 `Eagle3Builder` 尚未走的 `_prepare_weights`/`_attach_weights`。见
   `docs/47-mpk-eagle3-weight-prep.md`（快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 专属、本机
@@ -4028,10 +4090,10 @@
   并更新 `mega-kernel-00-index` 第 47 项。P132-1 新留尾巴见文档 §8（未构建、「有效行=slot 0」系推断、
   4 条必要条件系推断、slot-0 分歧未复现、注释落差只记不判）。
 - 下一步候选：可继续走其一——`docs/35` §9 遗留的其它未走读相邻层（CUTLASS `collective_builder` 侧
-  QK/PV atom——`mla_sm100_2sm.cuh` 的 CUTLASS 内部，`docs/36` §8 明留）；或 `Eagle3Builder` 的
-  FLAT-CACHE draft attention 设计的完整追述（`docs/46` §6 落差；`_prepare_weights`/`_attach_weights`
-  已由 `docs/47` 补掉，余 flash-cache 单 kernel 与 `paged_attention_layer` 两套并存 design 的追述）；
-  或 `docs/44` §10 仍余的 `smem_row` 内部与 `docs/07` §3.3 的 `norm_linear_hopper` 之外的融合层。
+  QK/PV atom——`mla_sm100_2sm.cuh` 的 CUTLASS 内部，`docs/36` §8 明留）；或 `docs/44` §10 仍余的
+  `smem_row`/`ldsm`/`dmem_row` 布局内部（`docs/48` §7 亦记为尾巴）；或 `docs/48` §7 新留的其它
+  「无生产者」融合算子扫描 + `my_gpu_id==0` 作 residual 的 TP 语义追链；或 `docs/46` §6 的
+  FLAT-CACHE draft attention 设计的完整追述（`docs/47` 已补 `_prepare_weights`/`_attach_weights`）。
 - 此前：**P131-1 完成（1/1）**。补掉 `docs/37` §4（P123-1 对 SM100 norm/rope 只给摘要）、
   `docs/07` §3.1（只走 `rms_norm_hopper_impl`）与 `docs/44` §10（P130-1 明留「`rms_norm_sm100`/
   `rotary_embedding_hopper` 内部未逐行」）三处空白：把 norm/rope 当成**跨 Ampere/Hopper/Blackwell
