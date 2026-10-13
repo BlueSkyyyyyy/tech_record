@@ -735,6 +735,25 @@
        先看**算术强度（op/word）**，`ncu` 的 L1/TEX SOL + `long_scoreboard` 是直接读数。**两坑**：
        `dgk` 输出错用 `KD*VD` large base（应 `((b*NT+c)*H+h)*K`，非法访存在下一次 triton 载入才冒头）；
        torch 参考须 `allow_tf32=False`（否则 cublas tf32 把逐位=0 污染成 3e-4）。
+- [x] **P7-45** 兑现 §47.6 的显式缺口——把融合 B2/B3 的「非 GEMM 段 + `h/dh` 流量」从**差值推断**变成
+       **受控字节消融**：同一份融合核上**只把选定的输入 `tl.load` 换成 `tl.zeros`**（`tl.dot` 全保留、
+       store 全保留、程序形状不变），干净分开「字节」与「compute/发射」。新增
+       `harness/check_bwd_b2b3_seg.py`（`harness/check_bwd_b2b3_seg.out.txt`，空闲卡）+
+       `harness/probe_b2b3_seg_ncu.sh` / `ncu_b2b3_seg_driver.py`（`harness/probe_b2b3_seg_ncu.out.txt`）+
+       `docs/07` §48。变体 `full`/`no_hdh`/`bf16_hdh`/`no_qkg`/`no_odv`/`no_all`。**Part A**：被门控的
+       `full` 与未改动融合核 5 组 shape（含非整除 T=250/513、K=64）**逐位相同（max_abs=0）**。**Part B
+       （`B8T2048H8`，1745MB）**：`full` 1051µs；`no_hdh`（去 1074MB）**590µs=0.56×**；`bf16_hdh`（h/dh
+       字节砍半）**ncu 1.04ms＝与 full 持平（wash）**；`no_qkg`（只去 201MB）**762µs=0.73×**；`no_all`
+       （所有大操作数不读）**170µs=0.16×**。**`ncu`（关键）**：`full` DRAM 只 **55.9% SOL**、tensor 6.21%、
+       issue 0.14/cyc、255 regs/166KB smem/occ 12.49% → **延迟/发射受限**；`h/dh`＝**1.09GB＝DRAM 读的 55%**；
+       `no_hdh` **occ 纹丝不动（12.46%）**、DRAM% 反降到 38% → 收益**既非占用率也非带宽**；`bf16_hdh` 省
+       537MB 却 **Duration 不变**；`no_qkg` **regs 255→165** 才是不成比例加速的真因。**结论（收窄 §47.5）**：
+       融合核头寸**既不是纯字节、也不是占用率，而是「大操作数（尤其 h/dh）常驻寄存器 → spill/发射饥饿」**；
+       **`h/dh` bf16 不作为独立杠杆**（本实验为 wash，与 §29 上界 ~10% 自洽）；K2 形状端口首位动作＝
+       **把大操作数从寄存器保活里拿掉、只留 warp 分片的小累加器**，判据补「**减的是字节还是寄存器保活？**」。
+       **坑**：第一版「关 `tl.dot`＋秩-1 归约替身」触发 Triton 跨 lane 布局转换 → `no_post` **4964 spills
+       /32 regs/慢 50×**（编译器病态，非测量），故改「只渡字节」；`bf16_hdh` 的 `dev/wall` 含 harness
+       `h/dh.to(bf16)` 税（同 §26.5/§29.1），干净口径取 `ncu Duration`；`no_all` 的 `ncu` 记录为空（卡住）。
 
 ### P8 小结 / 一页纸
 
@@ -797,11 +816,34 @@
 - **torch 参考做对拍前先关 `torch.backends.cuda.matmul.allow_tf32=False`**（P7-44）：默认 cublas 走 tf32，
   会把「手写 fp32 核 vs torch」从**逐位=0** 污染成 ~3e-4（看起来像 bug）；而 `tl.dot` 默认就是 tf32，
   与 torch-enable-tf32 同底噪。
+- **Triton 里「关掉一个 `tl.dot` 但保字节」不能用秩-1 归约替身**（P7-45）：`tl.sum(X,1)[:,None]*tl.sum(Y,0)`
+  要读同样操作数，但 Triton 为这些跨 lane 归约做**布局转换**（MMA layout ⇄ blocked），实测 `no_post`
+  变体 **4964 spills / 32 regs / 慢 50×**——是**编译器病态**、不是测量。要分离「字节 vs compute」应改用
+  **只渡输入字节**（`tl.load` → `tl.zeros`，`tl.dot` 全留），既不扰 compute 图也不触发 DCE。
+- **同一个「h/dh 换 bf16」实验，`wall`/CUPTI `dev` 与 `ncu Duration` 会差一个数量级**（P7-45）：若
+  harness 在计时闭包里做 `.to(bf16)`（本专题 `check_bwd_b2b3_seg.py`、§26.5/§29.1 亦然），两个 elementwise
+  kernel 被算进 `dev`，把「wash」夸大成「1.49× 慢」。**核内改 dtype 的干净口径一律取 `ncu Duration`**。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-44 补测**。
-  - P7-44（本轮）：**K2 形状 CUDA 端口的第一刀，以「SIMT 是反向方向」收口**——把 §46.6 首位动作的
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-45 补测**。
+  - P7-45（本轮）：**把融合 B2/B3 的「头寸在字节还是发射」问清楚**——受控**字节消融**（同核只把选定
+    输入 `tl.load` 换 `tl.zeros`，`tl.dot`/store/形状不动）。新增 `harness/check_bwd_b2b3_seg.py`
+    （`harness/check_bwd_b2b3_seg.out.txt`）+ `harness/probe_b2b3_seg_ncu.sh` / `ncu_b2b3_seg_driver.py`
+    （`harness/probe_b2b3_seg_ncu.out.txt`）+ `docs/07` §48。变体 `full`/`no_hdh`/`bf16_hdh`/`no_qkg`/
+    `no_odv`/`no_all`。**Part A**：门控 `full` 与未改动融合核 5 组 shape **逐位相同（max_abs=0）**。
+    **Part B（`B8T2048H8` 1745MB）**：`full` 1051µs；`no_hdh`（−1074MB）**590µs=0.56×**；`bf16_hdh`
+    （h/dh 字节砍半）ncu **1.04ms=与 full 持平**；`no_qkg`（只 −201MB）**762µs=0.73×**；`no_all`（大操作数
+    全不读）**170µs=0.16×**。**`ncu`**：`full` DRAM 仅 **55.9% SOL**、tensor 6.21%、issue 0.14/cyc、
+    255 regs/166KB smem/occ 12.49% → **延迟/发射受限**；`h/dh`=**1.09GB=DRAM 读的 55%**；`no_hdh` occ
+    **不动**、DRAM% 反降到 38%（既非占用率也非带宽）；`bf16_hdh` 省 537MB 却 Duration 不变；`no_qkg`
+    **regs 255→165** 是不成比例加速真因。**结论（收窄 §47.5）**：融合核头寸＝**「大操作数（尤其 h/dh）
+    常驻寄存器 → spill/发射饥饿」**，**不是**纯字节、**不是**占用率；**`h/dh` bf16 非独立杠杆**（wash，与
+    §29 上界 ~10% 自洽）；K2 形状端口首位动作＝**把大操作数从寄存器保活里拿掉、只留 warp 分片小累加器**，
+    判据补「**减的是字节还是寄存器保活？**」。**坑**：第一版「关 `tl.dot`＋归约替身」触发跨 lane 布局
+    转换 → `no_post` **4964 spills/慢 50×**（编译器病态），故改「只渡字节」；`bf16_hdh` 的 `dev/wall`
+    含 harness `.to(bf16)` 税（同 §26.5/§29.1），干净口径取 `ncu Duration`；`no_all` 的 ncu 记录为空。
+  - P7-44（上轮）：**K2 形状 CUDA 端口的第一刀，以「SIMT 是反向方向」收口**——把 §46.6 首位动作的
     「放弃 `tl.dot`、手写高占用 SIMT fp32」读法试掉。新增 `harness/b2_core_probe.cu` +
     `harness/check_bwd_b2_core.py`（`..._b2_core.out.txt`）+ `harness/probe_b2_core_ncu.sh` /
     `ncu_b2_core_driver.py`（`..._b2_core_ncu.out.txt`）+ `docs/07` §47。隔离 B2 GEMM 核（`dq/dk/dw/dgk`
@@ -1410,7 +1452,15 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-44 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-45 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-45（`docs/07` §48）把融合 B2/B3 的「头寸在字节还是发射」用受控字节消融问清楚**：同核只把
+    选定输入 `tl.load` 换 `tl.zeros`（`tl.dot`/store/形状不动）。`full` 1051µs、`no_hdh`（−1074MB）
+    **590µs=0.56×**、`bf16_hdh`（h/dh 砍半）**1.04ms=wash**、`no_qkg`（−201MB）**0.73×**、`no_all`
+    **170µs=0.16×**；ncu：`full` DRAM 55.9% SOL、tensor 6.21%、issue 0.14/cyc、1 block/SM。
+    **结论**：头寸＝**大操作数（h/dh）常驻寄存器→spill/发射饥饿**，非纯字节、非占用率；`h/dh` bf16
+    非独立杠杆；K2 形状端口首位动作＝**大操作数出寄存器保活、只留 warp 分片小累加器**。新增
+    `harness/check_bwd_b2b3_seg.py`（`..._seg.out.txt`）+ `harness/probe_b2b3_seg_ncu.sh` /
+    `ncu_b2b3_seg_driver.py`（`..._seg_ncu.out.txt`）。
   - **P7-44（`docs/07` §47）K2 形状 CUDA 端口的第一刀＝把「放弃 `tl.dot`、手写 SIMT」证伪**：新增
     `harness/b2_core_probe.cu` + `harness/check_bwd_b2_core.py`（`..._b2_core.out.txt`）+
     `harness/probe_b2_core_ncu.sh` / `ncu_b2_core_driver.py`（`..._b2_core_ncu.out.txt`）。隔离 B2 GEMM 核

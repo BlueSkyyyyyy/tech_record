@@ -342,3 +342,15 @@ CUDA-B1 链（`BT=16`、`NSTAGE=4`）vs FLA 六项最坏 `dq 3.42e-3…dh0 9.37e
 不拖慢整链；`T250H3` 的 1.65× 回归＝launch 每次重编码张量图的 host 税（**待验证**）。**单核**：
 部署 `BT=16` 下小 shape CUDA 1.05–1.63×、大 shape **0.53×**（1.9× 快）——「手写 CUDA 是否比
 Triton 快」**依赖 shape**。至此目标卡 CUDA 反向**第一次端到端可跑**（B1=CUDA、其余 Triton）。
+
+**P7-40…P7-45（`docs/07` §43–§48）——收尾段**：P7-40 撤回 §42 的「张量图重编码＝host 税」（1.65× 不可
+复现、纯编码 3.9µs 被 launch 隐藏）；P7-41 把 B1 手写 mbarrier 换 CUTLASS `PipelineTmaAsync`＝**空杠杆**
+（`cut2/hnd 0.985–1.003`、ncu 逐指标重合），手写已到结构上限；P7-42 把 CUDA B1 与融合 B2/B3 **合成一条链**
+（可加、`cf/cu 0.67–0.71×`、`dev/FLA 0.31–0.37×`），B1 按 grid 切换、B2/B3 一律融合；P7-43 给「融合 B2/B3
+→ K2 形状 CUDA」**go/no-go**：延迟受限、同字节地板核 509µs vs 融合核 988µs＝**1.94× 头寸**、Triton 够不着；
+P7-44 把「放弃 `tl.dot` 手写 SIMT」读法**证伪**（慢同 op Triton 核 3–5×、L1/TEX bound），端口必须保留
+`mma.sync`；**P7-45** 用受控**字节消融**（同核只把选定输入 `tl.load`→`tl.zeros`）把 §47 的「头寸在字节还是
+发射」问清：`no_hdh` −1074MB→**0.56×**、`bf16_hdh`（h/dh 砍半）**Duration 持平（wash）**、`no_qkg` −201MB→
+0.73×、`no_all`（大操作数不读）**170µs=0.16×**；ncu：`full` DRAM 55.9% SOL、tensor 6.21%、issue 0.14/cyc、
+1 block/SM。**结论**：头寸＝**大操作数（h/dh）常驻寄存器→spill/发射饥饿**，非纯字节、非占用率；`h/dh` bf16
+非独立杠杆；K2 形状端口首位动作＝**大操作数出寄存器保活、只留 warp 分片小累加器**。

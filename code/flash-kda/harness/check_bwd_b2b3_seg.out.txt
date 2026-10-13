@@ -1,0 +1,110 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190  triton=3.6.0
+============================================================================================
+Part A: correctness -- gated `full` variant vs untouched fused kernel (bit-identical)
+============================================================================================
+
+# B8 T2048 H8  K=128 V=128
+    full dq vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.465e+00
+    full dk vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.064e+01
+    full dv2 vs fused        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.232e-01
+    full db vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.460e+00
+    full dg vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.711e+00
+
+# B2 T1024 H8  K=128 V=128
+    full dq vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.924e+00
+    full dk vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.040e+01
+    full dv2 vs fused        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.994e-01
+    full db vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.832e+00
+    full dg vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.753e+00
+
+# T512 H4  K=128 V=128
+    full dq vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.664e+00
+    full dk vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.375e+01
+    full dv2 vs fused        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.435e-01
+    full db vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.367e+00
+    full dg vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.444e+00
+
+# T250 H3 (non-div)  K=128 V=128
+    full dq vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.000e+00
+    full dk vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.386e+01
+    full dv2 vs fused        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.190e-01
+    full db vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.764e+00
+    full dg vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.924e+00
+
+# K64V128 T513  K=64 V=128
+    full dq vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.568e+00
+    full dk vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.217e+01
+    full dv2 vs fused        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.469e-01
+    full db vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.025e+00
+    full dg vs fused         max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.851e+00
+
+worst max_rel (gated full vs untouched fused):
+  db     0.000e+00
+  dg     0.000e+00
+  dk     0.000e+00
+  dq     0.000e+00
+  dv2    0.000e+00
+
+============================================================================================
+Part B: timing -- byte-ablation variants, CUPTI dev + wall (fp32 operands, deployed mix)
+============================================================================================
+
+# B8 T2048 H8  K=128 V=128   (full bytes=1745MB read=1476 store=269)
+  variant   bytes[MB]   dev[us]  wall[us]  dev/full  dBytes[MB]  dDev[us]
+  full           1745    1050.8    1044.2     1.00x           0       0.0
+  no_hdh          672     589.8     585.2     0.56x        1074     461.0
+  bf16_hdh       1208    1566.2    1560.5     1.49x         537    -515.4
+  no_qkg         1544     762.4     757.5     0.73x         201     288.4
+  no_odv         1544     928.0     924.0     0.88x         201     122.7
+  no_all          269     170.1     167.9     0.16x        1476     880.7
+
+# B2 T1024 H8  K=128 V=128   (full bytes=218MB read=185 store=34)
+  variant   bytes[MB]   dev[us]  wall[us]  dev/full  dBytes[MB]  dDev[us]
+  full            218     144.3     146.3     1.00x           0       0.0
+  no_hdh           84      77.1      78.9     0.53x         134      67.2
+  bf16_hdh        151     205.7     210.6     1.43x          67     -61.4
+  no_qkg          193     109.1     111.2     0.76x          25      35.2
+  no_odv          193     126.4     128.2     0.88x          25      17.9
+  no_all           34      22.0      45.2     0.15x         185     122.3
+
+# T512 H4  K=128 V=128   (full bytes=27MB read=23 store=4)
+  variant   bytes[MB]   dev[us]  wall[us]  dev/full  dBytes[MB]  dDev[us]
+  full             27      13.5      44.9     1.00x           0       0.0
+  no_hdh           10       7.4      44.9     0.54x          17       6.2
+  bf16_hdh         19      27.0      68.3     2.00x           8     -13.5
+  no_qkg           24       9.3      44.9     0.69x           3       4.2
+  no_odv           24      10.4      45.1     0.77x           3       3.2
+  no_all            4       4.1      44.9     0.30x          23       9.4
+
+# T250 H3 (non-div)  K=128 V=128   (full bytes=10MB read=9 store=2)
+  variant   bytes[MB]   dev[us]  wall[us]  dev/full  dBytes[MB]  dDev[us]
+  full             10      10.9      44.9     1.00x           0       0.0
+  no_hdh            4       7.1      45.7     0.65x           6       3.8
+  bf16_hdh          7      14.3      69.3     1.32x           3      -3.4
+  no_qkg            9       8.4      45.1     0.77x           1       2.5
+  no_odv            9       9.5      45.2     0.87x           1       1.4
+  no_all            2       3.7      45.7     0.34x           9       7.2
+
+# K64V128 T513  K=64 V=128   (full bytes=16MB read=13 store=3)
+  variant   bytes[MB]   dev[us]  wall[us]  dev/full  dBytes[MB]  dDev[us]
+  full             16       8.7      45.4     1.00x           0       0.0
+  no_hdh            7       6.4      45.5     0.74x           9       2.3
+  bf16_hdh         12      12.3      68.8     1.41x           4      -3.6
+  no_qkg           14       7.4      45.5     0.84x           2       1.4
+  no_odv           13       6.5      45.6     0.75x           3       2.2
+  no_all            3       3.5      45.9     0.40x          13       5.2
+
+============================================================================================
+Part C: static register/spill/smem per variant (B8 T2048 H8, nw=8)
+============================================================================================
+  variant     regs  spills  smem[KB]
+  full         255      42     162.0
+  no_hdh       253       0      34.0
+  bf16_hdh     255      66      50.0
+  no_qkg       165       0     162.5
+  no_odv       255      16     130.0
+  no_all        85       0       9.0
+
+DONE
