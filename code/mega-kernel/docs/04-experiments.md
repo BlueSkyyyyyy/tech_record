@@ -13655,3 +13655,162 @@ suspend-hint）与 `mbarb0`（同 mbarb，但单线程等待用 `try_wait` hint=
   只作 caveat；搬运的是合成 `float`、非真实 task tile；计时取 min-of-20，绝对值受同机 HBM/调度
   噪声影响，**只采信同族内相对排序**；未做 ncu 归因（§90.3 的「`__syncthreads` 主导」是
   「资源同档 + 单变量改变」的对照推断）。
+
+## 91. cluster 跨 SM 交换：在「每线程」与「每 block」之间补上「每 warp 一次 arrive」——warp 级会合可行，但显式 cluster fence 让它成为最慢形态（P166-1）
+
+本节补掉 §90.6 明留的尾巴——`mbar`（§89：**每线程**每槽 arrive，`count=TH`）与 `mbarb`（§90：**每
+block** 一次 arrive，`count=1` + `__syncthreads` 包裹）之间，还有一档没测：**每 warp 一次 arrive**
+（`count=NW=blockDim/32` + `__syncwarp` 包裹）。§90 的结论是「会合（`__syncthreads`）比 arrive 条数
+更贵」，那**把会合从块级降到 warp 级、同时把 arrive 从 512 次压到 16 次**是否能把两者的账同时赚回来？
+这正是本节要答的。语义/拓扑/数据量与 §89 `mbar`/§90 `mbarb` 逐字相同，**唯一设计变量 = arrive / 等待 /
+会合的粒度**。
+
+源码复用 `src/cluster_concurrency.cu`（**新增两条载体**：`mbarw`（每 warp 一次 arrive，warp 写完
+`__syncwarp()` 后由 lane0 走 `fence.acq_rel.cluster` + 远端 arrive；等待端每 warp 的 lane0 单点
+`try_wait`（hint=0）、`__syncwarp()` 后本 warp 读；定义见 `:507-559`）与诊断变体 `mbarw0`（与 `mbarw`
+逐字相同，**只去掉 lane0 的显式 `fence.acq_rel.cluster`**，定义见 `:570-621`），**不改**
+`pull`/`push`/`pulls`/`ring`/`ring1`/`mbar`/`mbarb`/`mbarb0` 语义）。`mbarw`/`mbarw0` 走新 path 8/9
+（`pick` 见 `:673/679`；命令行 `V`/`T` = mbarw、`U`/`J` = mbarw0）。脚本 `harness/cluster_mbar_warp.sh`，
+原始输出 `harness/cluster_mbar_warp.out.txt`、racecheck 输出 `harness/cluster_mbar_warp_san.out.txt`
+（目标卡 H100 / sm90a、**固定空闲 device 6**、nvcc 13.2、每配置独立进程以规避 sticky context；计时
+项 min-of-20 且报 `ok/20`、探针报 `ok/N`）。
+
+被测量载体（每 block 有 `snd`/`rcv` 两块 SMEM；每 block 每 round 移动 `SEG = TH·U = 256·U` 个 `float`
+的**远端字节**，数据量/结果与 §87–§90 逐字相同）：
+
+```
+  载体    arrive 粒度            每 round 每 block 跨 SM arrive    每 round 会合   每 round cluster fence
+  mbar    每线程 (count=TH=256)             512                      无                    0
+  mbarw   每 warp (count=NW=8)               16                4× __syncwarp            16
+  mbarw0  每 warp (count=NW=8)               16                4× __syncwarp             0
+  mbarb   每 block (count=1)                  2              4× __syncthreads           2
+  ring1   ——（单次 cluster.sync/round）       0                    1× cluster.sync          0
+```
+
+### 91.1 §A 资源表：`mbarw`/`mbarw0` 与 `mbar`/`mbarb` 同档占用率
+
+`sb=32KB, T=256`（`run A`，完整表见 `.out.txt` §A）：
+
+```
+  载体    U=1            U=2            U=4            U=8            U=16
+  mbar   regs=18 occ=6  regs=18 occ=5  regs=18 occ=4  regs=26 occ=3  regs=32 occ=3
+  mbarw  regs=20 occ=6  regs=20 occ=5  regs=22 occ=4  regs=30 occ=3  regs=32 occ=3
+  mbarw0 regs=20 occ=6  regs=20 occ=5  regs=22 occ=4  regs=28 occ=3  regs=32 occ=3
+  mbarb  regs=18 occ=6  regs=18 occ=5  regs=20 occ=4  regs=25 occ=3  regs=32 occ=3
+  ring1  regs=31 occ=3  regs=32 occ=3  regs=32 occ=3  regs=32 occ=3  regs=32 occ=3
+```
+
+`mbarw`/`mbarw0` 的 `occ` 与 `mbar`/`mbarb` **逐档相同**（U=1 occ=6、U=8 occ=3），`localB=0`；寄存器
+只比 `mbar` 多 2–4（多出的 `lane`/`NW` 与 warp 分支），远小于 `ring1`。故后面 `mbarw`/`mbarw0` 与
+`mbar`/`mbarb` 的吞吐差**只能归因 arrive/会合/fence 的粒度**（资源同档、无 spill）。
+
+### 91.2 §B（Q1）`mbarw`/`mbarw0` 稳定到 `grid=1056`（与 `mbar`/`ring1` 同档）
+
+`C=2, U=8, rounds=64`，单发探针扫 `grid`：`mbarw`（`T`）与 `mbarw0`（`J`）在
+`grid=2/16/32/64/132/264/528/792/1056` **全部 `1/1 ok`**、重复 3 发 `3/3 ok`，与 §89 `mbar`、
+§88 `ring1` **逐点同档**（对照组见 `.out.txt` §B）。
+
+⇒ **「每 warp 一次 arrive」的中间形态同样可行且稳定**，没有引入 §88 `ring`（纯 `volatile` 握手）
+那类 `unspecified launch failure`；`__syncwarp` 版本与 `__syncthreads` 版本在可行性上没有区别。
+
+### 91.3 §C（headline）吞吐排序出现完整光谱：`mbar > mbarw0 > mbarb > mbarw`，fenced 的 `mbarw` 最慢
+
+`grid=264`，min-of-20，五载体对跑（`.out.txt` §C，下表取 `C=2`，单位 GB/s 远端）：
+
+```
+  C=2      U=1     U=2     U=4     U=8     U=16
+  mbar    163.7   321.4   592.0  1084.9   1852.0   （每线程 arrive，零会合）
+  mbarw0  134.3   268.9   513.3   933.6   1575.4   （每 warp arrive，__syncwarp，无 fence）
+  mbarb   112.9   219.9   426.9   826.1   1405.5   （每 block arrive，__syncthreads）
+  mbarw    89.7   178.4   343.6   646.9   1144.6   （每 warp arrive，__syncwarp，带 fence）
+  ring1   323.9   519.1   956.1  1610.9   2427.3   （单次 cluster.sync/round）
+```
+
+（`C=8` 同序，见 `.out.txt` §C；大 grid 528/1056 同形，见 §91.4。）
+
+- **在每一个 `U` 上，四种 mbarrier 形态严格有序 `mbar > mbarw0 > mbarb > mbarw`**；两端仍是 §89 的
+  `mbar` 与 §88 的 `ring1`（`ring1` 在所有 `U` 上最快）。
+- **「每 warp 一次 arrive」的中间档确实存在**：`mbarw0`（无 fence）落在 `mbar` 与 `mbarb` 之间——
+  `U=8` 时 `mbarw0/mbar = 0.861×`、`mbarb/mbar = 0.762×`。即**把会合从块级降到 warp 级**确实能
+  比 `__syncthreads` 版本少亏一点（`mbarw0/mbarb = 1.13×`）。
+- **但带显式 fence 的 `mbarw` 是五种载体里最慢的一个，连块级的 `mbarb` 都不如**
+  （`U=8`：`mbarw/mbar = 0.596×`、`mbarw/mbarb = 0.783×`、`mbarw/mbarw0 = 0.693×`）。
+  机制：`mbarw` 每 round 每 block 有 `NW×2 = 16` 条 **cluster 作用域 fence**（`mbarb` 只有 2 条），
+  而 `mbar` 一条都没有（`mbarrier.arrive.release.cluster` 自带 release）。**在延迟受限的跨 SM
+  ping-pong 里，cluster fence 的条数比 arrive 的条数更贵**。
+
+### 91.4 §D 大 `grid` 下同一结论成立（`C=2, grid=528/1056`）
+
+`.out.txt` §D：`grid=1056, U=8` → `mbar` 1493.7、`mbarw0` 1275.4、`mbarw` 921.6、`ring1` 2151.4 GB/s；
+`U=16` → 2384.6 / 2045.7 / 1576.9 / 3019.7。排序不变，`mbarw` 仍是最矮的那根。
+
+### 91.5 §E 环深 `S` 不是一阶旋钮（与 §89.5/§90.5 同结论）
+
+`mbarw0`，`C=2, grid=264, rounds=64`，扫 `S∈{1,2,4,8}`：
+
+```
+   U=1    S=1 125.4 | S=2 135.4 | S=4 136.3 | S=8 136.3  GB/s
+   U=8    S=1 912.9 | S=2 927.4 | S=4 938.1 | S=8 936.0  GB/s
+```
+
+吞吐几乎不动（`S=1→2` 抬 ~8% 后即平，`U=8` 极差 2.7%）——每 round 的固定代价仍是「单点等 + 会合」
+的往返，背压 `ack` 等待很少绑定，`S` 摊薄不了它。
+
+### 91.6 §F（fence 归因）同一配置连跑 6 次：差异是确定性的、来自显式 fence
+
+`C=2 grid=264 U=8`：`mbarw`（带 fence）6 次 **642.6–647.4 GB/s**（±0.4%），`mbarw0`（无 fence）6 次
+**927.0–935.6 GB/s**。二者都**干净单峰、无 §90.4 那种双模态**，故这一档 ~31% 的差距**确定性地**来自
+「lane0 每 round 一条显式 cluster fence × 8 warp」，不是调度噪声、也不是「单线程等待 + suspend-hint」
+耦合（两条载体都用 hint=0）。
+
+### 91.7 §G 正确性压力与 racecheck
+
+- **数值**（`.out.txt` §G）：`mbarw0` 在 `C=2/4`、`grid=132/264/528`、`U=1/4/8/16` 共 24 组 × `reps=8`
+  重复探针 **全部 `8/8 ok`**；计时项 `maxerr 0 bad 0`。三种 mbarrier 载体的输出与解析参考逐位一致。
+- **racecheck**（`compute-sanitizer --tool racecheck`，`harness/cluster_mbar_warp_san.out.txt`，
+  `C=2 grid=16 sb=32KB U=4 rounds=8` 单配置）：
+
+  ```
+    mbar (B)    0 hazards
+    ring1 (M)   0 hazards
+    mbarb (Q)   53 hazards (52 errors, 1 warning)
+    mbarw (V)   56 hazards
+    mbarw0 (U)  56 hazards
+  ```
+
+  即 racecheck **只放行「每个读线程本身参与同步」的形态**（`mbar` 的每线程 arrive/wait、`ring1` 的
+  `cluster.sync`），而**把所有「一个线程等、其余走本地屏障」的形态全标红**——**包括 §90 已确认数值
+  正确、稳定到 `grid=1056` 的 `mbarb`**。故这些 hazards 反映的是 racecheck 对「远端写 → mbarrier
+  phase 完成 → 本地 `__syncthreads`/`__syncwarp` 传递」这条链**建模不出**，**不能**用来判定 fenced/
+  unfenced 谁对谁错（`mbarw` 带 fence 同样被标红）。本节因此**不把 `mbarw0` 的「无显式 fence」当作
+  可发布形态**——发布默认仍取 `mbarw`（保留 lane0 的 `fence.acq_rel.cluster`，发布语义**不依赖**内存
+  模型累积性），`mbarw0` 只作**归因诊断**。
+
+### 91.8 §G 结论、判据与局限
+
+- **结论一（肯定性）**：`mbar` 与 `mbarb` 之间的**「每 warp 一次 arrive」中间形态（`mbarw`/`mbarw0`）
+  可行、稳定、逐位正确**（`grid≤1056`、`C≤8`、`U≤16`、`reps` 全过），资源与 `mbar`/`mbarb` 同档
+  （occ 逐档相同、无 spill）。
+- **结论二（headline，否定性）**：**但「每 warp 一次 arrive」不是更优折中**——去掉显式 fence 的
+  `mbarw0` 只落在 `mbar` 与 `mbarb` 之间（`U=8` 为 `mbar` 的 0.861×），而**保留发布语义所需显式
+  cluster fence 的 `mbarw` 反而是五种载体里最慢的**（`U=8` 仅 `mbar` 的 0.596×、比块级的 `mbarb`
+  还慢 0.78×）。⇒ 在延迟受限的跨 SM ping-pong 里，**arrive/等待/会合的粒度有一条完整光谱，而
+  「会合粒度」与「发布所需的 cluster fence 条数」是两笔独立的账；后者（每 warp 一条 fence）常常更贵**。
+  最优档仍是两端：`mbar`（每线程 arrive、零会合、零 fence）与 `ring1`（每 round 一次 `cluster.sync`）。
+- **结论三（诊断方法学）**：racecheck **只放行每读线程自同步的形态**（`mbar`/`ring1`），把 `mbarb`/
+  `mbarw`/`mbarw0` 一律标红——**连已被 §90 接受为正确的 `mbarb` 也被标红**，说明它对该类「单等待者 +
+  本地屏障 + 远端 mbarrier」模式存在**系统性建模盲区**；用它做跨 SM 交换的判据须谨慎（配合数值/重复
+  压力交叉验证）。
+- **结论四**：环深 `S` **不是**一阶旋钮（与 §89.5/§90.5 同）。
+- **对 MPK / 生产案例的印证**：MPK 的 ring barrier / event queue（`docs/12` §4–§7）与 DeepGEMM 的
+  symmetric-memory ring barrier（`docs/17` §3）都用「**每步一个硬件同步点 + 环形槽降频 + 批量搬运**」。
+  本节从硬件原语层再补一笔：**它们没有、也不该选「每 warp 一次 arrive」这种中间粒度**——省下的
+  arrive 条数（512→16）会被发布所需的显式 cluster fence（0→16 条）吃掉还倒亏；要么停在最省的
+  「每线程 arrive」（零 fence、零会合），要么直接用「每步一次 `cluster.sync`」。
+- **判据（C1–C5，`docs/00` §3）**：五载体均单常驻 kernel、设备侧推进、`cluster.sync`/`mbarrier`
+  细化 **C4**；**仍不是 C5**（无固定角色 worker/scheduler 动态派发，与 §18–§23/§86–§90 同档）。
+- **局限（诚实标注）**：只测 H100/sm90a（DSM 的真正家是 SM100 2SM，本机不可执行）；`mbarw`/
+  `mbarw0` 只在 `T=256`（`NW=8`）上测，未扫 `NW`（每 warp 形式对 `T` 的依赖未测）；搬运的是合成
+  `float`、非真实 task tile；计时取 min-of-20，绝对值受同机 HBM/调度噪声影响，**只采信同族内相对
+  排序**；racecheck 的单配置结论（含 `mbarb` 被标红）未用 `--tool memcheck`/`synccheck` 复核；未做
+  ncu 归因（「16 条 cluster fence 主导」是「资源同档 + 单变量去 fence」的对照推断）。

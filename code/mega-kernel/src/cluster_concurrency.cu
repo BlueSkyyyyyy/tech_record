@@ -494,6 +494,133 @@ DEF_MBARB(1) DEF_MBARB(2) DEF_MBARB(4) DEF_MBARB(8) DEF_MBARB(16)
 DEF_MBARB0(1) DEF_MBARB0(2) DEF_MBARB0(4) DEF_MBARB0(8) DEF_MBARB0(16)
 #undef DEF_MBARB0
 
+// ---------- 环形槽 + 每槽 mbarrier 的「每 warp 一次 arrive」中间形态（mbarw）----------
+// §90.6 明留的尾巴：`mbarb` 把每 round 的跨 SM arrive 从 `2·TH` 压到 2，却被每 round 3–4 个
+// `__syncthreads()` 全部吃掉并倒亏；未测「每 warp 一次 arrive」的中间形态。本节补上：
+// 数据仍由全 block 协作写，但**以 warp 为单位**——每个 warp 写完自己那部分后 `__syncwarp()`，
+// 由 lane0 用 `fence.acq_rel.cluster` + 远端 arrive 一次；consumer 端每个 warp 的 lane0 单点
+// 等（hint=0，沿用 §90.4 的教训）、`__syncwarp()` 后本 warp 读。每槽 readyBar/ackBar 的 count
+// 从 `TH`(mbar) / `1`(mbarb) 变成 `NW=blockDim/32`（T=256 时 8）；每 round 每 block 的跨 SM
+// arrive 从 `2·TH=512`(mbar) / `2`(mbarb) 变成 `2·NW=16`，会合从 `__syncthreads` 降为
+// `__syncwarp`（warp 作用域）。故它是 arrive 条数与会合代价之间的中间档：
+//   mbar（512 arrive / 0 会合）  <->  mbarw（16 arrive / 3×8 warp 会合）  <->  mbarb（2 arrive / 3× block 会合）
+#define DEF_MBARW(U)                                                                    \
+  __global__ void mbarw_##U(float* __restrict__ out, int rounds, int sb, int Sr) {      \
+    extern __shared__ float sm[];                                                       \
+    int SEG = TH * U;                                                                   \
+    int tiles = sb / SEG;                                                               \
+    int S = Sr < tiles ? Sr : tiles;                                                    \
+    float* snd = sm;                                                                    \
+    float* rcv = sm + sb;                                                               \
+    uint64_t* readyBar = (uint64_t*)(rcv + (size_t)S * SEG);                            \
+    uint64_t* ackBar = readyBar + S;                                                    \
+    cg::cluster_group cl = cg::this_cluster();                                          \
+    int C = cl.num_blocks();                                                            \
+    int rank = cl.block_rank();                                                        \
+    int tid = threadIdx.x;                                                             \
+    int lane = tid & 31;                                                                \
+    int NW = blockDim.x >> 5;   /* 每 block 的 warp 数 = mbarrier count */                \
+    for (int i = tid; i < sb; i += blockDim.x) snd[i] = fval(i, rank);                  \
+    if (tid == 0)                                                                      \
+      for (int j = 0; j < S; j++) { mbar_init(cvta_smem(&readyBar[j]), NW);            \
+                                    mbar_init(cvta_smem(&ackBar[j]), NW); }             \
+    __syncthreads();                                                                    \
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");                  \
+    cl.sync();                                                                          \
+    int dstRank = (rank + 1) % C, srcRank = (rank - 1 + C) % C;                         \
+    float* dst = (float*)cl.map_shared_rank(rcv, dstRank);                              \
+    unsigned rBar = cvta_smem(&readyBar[0]), aBar = cvta_smem(&ackBar[0]);              \
+    long long acc = 0;                                                                  \
+    for (int r = 0; r < rounds; r++) {                                                  \
+      int j = r % S;                                                                    \
+      int off = (r % tiles) * SEG;                                                      \
+      int m = r / S;                                                                    \
+      if (m >= 1) {                                                                     \
+        if (lane == 0) mbar_wait0(aBar + 8 * (unsigned)j, (unsigned)((m - 1) & 1));     \
+        __syncwarp();                                                                   \
+      }                                                                                 \
+      _Pragma("unroll") for (int u = 0; u < U; u++) dst[j * SEG + u * TH + tid] = snd[off + u * TH + tid]; \
+      __syncwarp();                                                                     \
+      if (lane == 0) {                                                                  \
+        asm volatile("fence.acq_rel.cluster;" ::: "memory");                            \
+        mbar_arrive_remote(rBar + 8 * (unsigned)j, dstRank);                            \
+        mbar_wait0(rBar + 8 * (unsigned)j, (unsigned)(m & 1));                          \
+      }                                                                                 \
+      __syncwarp();                                                                     \
+      _Pragma("unroll") for (int u = 0; u < U; u++) acc += (long long)rcv[j * SEG + u * TH + tid]; \
+      __syncwarp();                                                                     \
+      if (lane == 0) {                                                                  \
+        asm volatile("fence.acq_rel.cluster;" ::: "memory");                            \
+        mbar_arrive_remote(aBar + 8 * (unsigned)j, srcRank);                            \
+      }                                                                                 \
+    }                                                                                   \
+    cl.sync();   /* teardown：确保所有远端 arrive 落定、无人提前退出释放 SMEM */           \
+    if (tid == 0) out[blockIdx.x] = (float)acc;                                         \
+  }
+DEF_MBARW(1) DEF_MBARW(2) DEF_MBARW(4) DEF_MBARW(8) DEF_MBARW(16)
+#undef DEF_MBARW
+
+// ---------- mbarw 的「无显式 fence」变体（mbarw0）：诊断每-warp 形态慢在哪 ----------
+// 与 `mbarw` 逐字相同，唯一区别 = 去掉 lane0 在 `__syncwarp()` 之后、远端 arrive 之前的那条
+// `fence.acq_rel.cluster`，改为依赖 `__syncwarp()`（warp 作用域 acquire-release）+ `mbarrier.arrive
+// .release.cluster`（arrive 自带 release）这一「因果累积」发布 warp 内其余 lane 的写。加它的动机：
+// §90 已证「会合」比 arrive 条数贵；mbarw 每 round 每 block 有 8 warp × 2 = 16 条 **cluster 作用域
+// fence**（mbarb 只有 2 条），若 mbarw 慢在 fence 而非 `__syncwarp`，则去掉 fence 应显著变快。
+// 这是个**双面探针**：既测「每-warp 发布是否必须显式 cluster fence」，又测 fence 的真实代价。
+#define DEF_MBARW0(U)                                                                   \
+  __global__ void mbarw0_##U(float* __restrict__ out, int rounds, int sb, int Sr) {     \
+    extern __shared__ float sm[];                                                       \
+    int SEG = TH * U;                                                                   \
+    int tiles = sb / SEG;                                                               \
+    int S = Sr < tiles ? Sr : tiles;                                                    \
+    float* snd = sm;                                                                    \
+    float* rcv = sm + sb;                                                               \
+    uint64_t* readyBar = (uint64_t*)(rcv + (size_t)S * SEG);                            \
+    uint64_t* ackBar = readyBar + S;                                                    \
+    cg::cluster_group cl = cg::this_cluster();                                          \
+    int C = cl.num_blocks();                                                            \
+    int rank = cl.block_rank();                                                        \
+    int tid = threadIdx.x;                                                             \
+    int lane = tid & 31;                                                                \
+    int NW = blockDim.x >> 5;                                                           \
+    for (int i = tid; i < sb; i += blockDim.x) snd[i] = fval(i, rank);                  \
+    if (tid == 0)                                                                      \
+      for (int j = 0; j < S; j++) { mbar_init(cvta_smem(&readyBar[j]), NW);            \
+                                    mbar_init(cvta_smem(&ackBar[j]), NW); }             \
+    __syncthreads();                                                                    \
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");                  \
+    cl.sync();                                                                          \
+    int dstRank = (rank + 1) % C, srcRank = (rank - 1 + C) % C;                         \
+    float* dst = (float*)cl.map_shared_rank(rcv, dstRank);                              \
+    unsigned rBar = cvta_smem(&readyBar[0]), aBar = cvta_smem(&ackBar[0]);              \
+    long long acc = 0;                                                                  \
+    for (int r = 0; r < rounds; r++) {                                                  \
+      int j = r % S;                                                                    \
+      int off = (r % tiles) * SEG;                                                      \
+      int m = r / S;                                                                    \
+      if (m >= 1) {                                                                     \
+        if (lane == 0) mbar_wait0(aBar + 8 * (unsigned)j, (unsigned)((m - 1) & 1));     \
+        __syncwarp();                                                                   \
+      }                                                                                 \
+      _Pragma("unroll") for (int u = 0; u < U; u++) dst[j * SEG + u * TH + tid] = snd[off + u * TH + tid]; \
+      __syncwarp();                                                                     \
+      if (lane == 0) {                                                                  \
+        mbar_arrive_remote(rBar + 8 * (unsigned)j, dstRank);                            \
+        mbar_wait0(rBar + 8 * (unsigned)j, (unsigned)(m & 1));                          \
+      }                                                                                 \
+      __syncwarp();                                                                     \
+      _Pragma("unroll") for (int u = 0; u < U; u++) acc += (long long)rcv[j * SEG + u * TH + tid]; \
+      __syncwarp();                                                                     \
+      if (lane == 0) {                                                                  \
+        mbar_arrive_remote(aBar + 8 * (unsigned)j, srcRank);                            \
+      }                                                                                 \
+    }                                                                                   \
+    cl.sync();                                                                          \
+    if (tid == 0) out[blockIdx.x] = (float)acc;                                         \
+  }
+DEF_MBARW0(1) DEF_MBARW0(2) DEF_MBARW0(4) DEF_MBARW0(8) DEF_MBARW0(16)
+#undef DEF_MBARW0
+
 // ============================ host dispatch ============================
 static void* pick_pull(int U) {
 #define P(UU) if (U == UU) return (void*)pull_##UU;
@@ -543,6 +670,18 @@ static void* pick_mbarb0(int U) {
 #undef P
   return nullptr;
 }
+static void* pick_mbarw(int U) {
+#define P(UU) if (U == UU) return (void*)mbarw_##UU;
+  P(1) P(2) P(4) P(8) P(16)
+#undef P
+  return nullptr;
+}
+static void* pick_mbarw0(int U) {
+#define P(UU) if (U == UU) return (void*)mbarw0_##UU;
+  P(1) P(2) P(4) P(8) P(16)
+#undef P
+  return nullptr;
+}
 
 // out[bx] 只存 thread0 的 acc；参考取 tid=0。
 static void reference_t0(int grid, int C, int sb, int rounds, int U, int is_push,
@@ -581,17 +720,18 @@ static int run(const char* tag, int C, int grid, int sbKB, int rounds, int U, in
   int SEG = TH * U;
   if (SEG > sb) { printf("%s C=%d grid=%d sb=%dKB U=%d | SKIP(SEG>sb)\n", tag, C, grid, sbKB, U); return 3; }
   int tiles = sb / SEG, S = tiles < 4 ? tiles : 4;
-  if (path >= 5) S = (Sp > 0 && Sp < tiles) ? Sp : S;   // mbar/mbarb/mbarb0 的环深 S 可独立指定
+  if (path >= 5) S = (Sp > 0 && Sp < tiles) ? Sp : S;   // mbar/mbarb/mbarb0/mbarw/mbarw0 的环深 S 可独立指定
   size_t smem = path == 3
       ? (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * TH * 4   // snd + S*rcv + ready/ack
-      : (path == 5 || path == 6 || path == 7)
+      : (path == 5 || path == 6 || path == 7 || path == 8 || path == 9)
       ? (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * 8        // snd + S*rcv + ready/ack mbarrier
       : (size_t)2 * sb * 4;                                            // snd + rcv
-  int is_push = (path == 1 || path == 3 || path == 4 || path == 5 || path == 6 || path == 7);
+  int is_push = (path == 1 || path == 3 || path == 4 || path == 5 || path == 6 || path == 7 || path == 8 || path == 9);
   void* fn = path == 1 ? pick_push(U) : (path == 2 ? pick_pulls(U)
              : (path == 3 ? pick_ring(U) : (path == 4 ? pick_ring1(U)
              : (path == 5 ? pick_mbar(U) : (path == 6 ? pick_mbarb(U)
-             : (path == 7 ? pick_mbarb0(U) : pick_pull(U)))))));
+             : (path == 7 ? pick_mbarb0(U) : (path == 8 ? pick_mbarw(U)
+             : (path == 9 ? pick_mbarw0(U) : pick_pull(U)))))))));
   float* out; CK(cudaMalloc(&out, (size_t)grid * sizeof(float)));
   cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   cudaFuncAttributes a; CK(cudaFuncGetAttributes(&a, fn));
@@ -606,7 +746,8 @@ static int run(const char* tag, int C, int grid, int sbKB, int rounds, int U, in
 #define FN(UU) (path == 1 ? (void*)push_##UU : (path == 2 ? (void*)pulls_##UU \
               : (path == 3 ? (void*)ring_##UU : (path == 4 ? (void*)ring1_##UU \
               : (path == 5 ? (void*)mbar_##UU : (path == 6 ? (void*)mbarb_##UU \
-              : (path == 7 ? (void*)mbarb0_##UU : (void*)pull_##UU)))))))
+              : (path == 7 ? (void*)mbarb0_##UU : (path == 8 ? (void*)mbarw_##UU \
+              : (path == 9 ? (void*)mbarw0_##UU : (void*)pull_##UU)))))))))
 #define TIME(UU) if (U == UU) {                                                        \
     for (int i = 0; i < N; i++) {                                                      \
       cudaEventRecord(e0);                                                             \
@@ -651,16 +792,18 @@ static int probe(int C, int grid, int sbKB, int U, int reps, int path, int round
       ? (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * 8
       : (size_t)2 * sb * 4;
   float* out; CK(cudaMalloc(&out, (size_t)grid * sizeof(float)));
-  void* pfn = path == 5 ? pick_mbar(U) : (path == 6 ? pick_mbarb(U) : (path == 7 ? pick_mbarb0(U)
-            : (path == 1 ? pick_push(U) : (path == 2 ? pick_pulls(U)
-            : (path == 3 ? pick_ring(U) : (path == 4 ? pick_ring1(U) : pick_pull(U)))))));
+  void* pfn = path == 5 ? pick_mbar(U) : path == 6 ? pick_mbarb(U) : path == 7 ? pick_mbarb0(U)
+            : path == 8 ? pick_mbarw(U) : path == 9 ? pick_mbarw0(U)
+            : path == 1 ? pick_push(U) : path == 2 ? pick_pulls(U)
+            : path == 3 ? pick_ring(U) : path == 4 ? pick_ring1(U) : pick_pull(U);
   cudaFuncSetAttribute(pfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   int ok = 0;
   for (int i = 0; i < reps; i++) {
     cudaError_t e;
 #define GO(UU) if (U == UU) e = (path >= 5) \
     ? launch_cluster(C, dim3(grid), dim3(TH), smem, \
-        path == 6 ? (void*)mbarb_##UU : (path == 7 ? (void*)mbarb0_##UU : (void*)mbar_##UU), \
+        path == 6 ? (void*)mbarb_##UU : (path == 7 ? (void*)mbarb0_##UU \
+        : (path == 8 ? (void*)mbarw_##UU : (path == 9 ? (void*)mbarw0_##UU : (void*)mbar_##UU))), \
         out, rounds, sb, S) \
     : launch_cluster(C, dim3(grid), dim3(TH), smem, \
     path == 1 ? (void*)push_##UU : (path == 2 ? (void*)pulls_##UU \
@@ -672,21 +815,24 @@ static int probe(int C, int grid, int sbKB, int U, int reps, int path, int round
     else cudaGetLastError();
   }
   printf("%s C=%d grid=%4d U=%2d rounds=%3d | %d/%d ok\n",
-         path == 1 ? "W" : (path == 2 ? "S" : (path == 3 ? "N"
-         : (path == 4 ? "M" : (path == 5 ? "B" : (path == 6 ? "Q" : (path == 7 ? "Z" : "R")))))),
+         path == 1 ? "W" : path == 2 ? "S" : path == 3 ? "N" : path == 4 ? "M"
+         : path == 5 ? "B" : path == 6 ? "Q" : path == 7 ? "Z" : path == 8 ? "V"
+         : path == 9 ? "U" : "R",
          C, grid, U, rounds, ok, reps);
   cudaFree(out);
   return reps - ok;
 }
 
 int main(int argc, char** argv) {
-  if (argc < 2) { printf("usage: cluster_concurrency <A|R|W|S|N|M|B|Q|Z|F|G|K|O|L|P|Y|X> ...\n"); return 1; }
+  if (argc < 2) { printf("usage: cluster_concurrency <A|R|W|S|N|M|B|Q|Z|V|U|F|G|K|O|L|P|Y|X|T|J> ...\n"); return 1; }
   const char* cmd = argv[1];
   // path：0=pull（远端读），1=push（远端写+本地读），2=pulls（远端读串行），
   //       3=ring（无 cluster.sync 的每槽 release/done），4=ring1（环形槽 + 单次 cluster.sync/round），
   //       5=mbar（环形槽 + 每槽 cluster 作用域 mbarrier 的 release/done，无 cluster.sync）
   //       6=mbarb（同 mbar，但每 block 一次 arrive（count=1）+ __syncthreads 包裹的省 arrive 形态）
   //       7=mbarb0（同 mbarb，但单线程等待用 try_wait hint=0，消除 suspend-hint 造成的性能双模态）
+  //       8=mbarw（同 mbar，但**每 warp 一次 arrive**（count=NW=blockDim/32）+ __syncwarp 包裹的中间形态）
+  //       9=mbarw0（同 mbarw，但去掉 lane0 显式 `fence.acq_rel.cluster`，测每-warp 形态是否慢在 cluster fence）
   int path = 0;
   if (!strcmp(cmd, "W") || !strcmp(cmd, "G")) path = 1;
   else if (!strcmp(cmd, "S") || !strcmp(cmd, "K")) path = 2;
@@ -695,8 +841,11 @@ int main(int argc, char** argv) {
   else if (!strcmp(cmd, "B") || !strcmp(cmd, "P")) path = 5;
   else if (!strcmp(cmd, "Q") || !strcmp(cmd, "Y")) path = 6;
   else if (!strcmp(cmd, "Z") || !strcmp(cmd, "X")) path = 7;
-  const char* tag = path == 1 ? "W" : (path == 2 ? "S" : (path == 3 ? "N"
-             : (path == 4 ? "M" : (path == 5 ? "B" : (path == 6 ? "Q" : (path == 7 ? "Z" : "R"))))));
+  else if (!strcmp(cmd, "V") || !strcmp(cmd, "T")) path = 8;
+  else if (!strcmp(cmd, "U") || !strcmp(cmd, "J")) path = 9;
+  const char* tag = path == 1 ? "W" : path == 2 ? "S" : path == 3 ? "N" : path == 4 ? "M"
+             : path == 5 ? "B" : path == 6 ? "Q" : path == 7 ? "Z" : path == 8 ? "V"
+             : path == 9 ? "U" : "R";
 
   if (!strcmp(cmd, "A")) {
     printf("# §87 §A / §88 §A 资源表（T=%d，sb=32KB；pull/push/pulls SMEM=64KB，ring 见下）\n", TH);
@@ -706,19 +855,20 @@ int main(int argc, char** argv) {
       int SEG = TH * U, tiles = sb / SEG, S = tiles < 4 ? tiles : 4;
       size_t smem_r = (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * TH * 4;
       size_t smem_m = (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * 8;
-      for (int P = 0; P < 8; P++) {
+      for (int P = 0; P < 10; P++) {
         size_t smem = P == 3 ? smem_r : ((P >= 5) ? smem_m : (size_t)2 * sb * 4);
         void* fn = P == 0 ? pick_pull(U) : (P == 1 ? pick_push(U)
                  : (P == 2 ? pick_pulls(U) : (P == 3 ? pick_ring(U)
                  : (P == 4 ? pick_ring1(U) : (P == 5 ? pick_mbar(U)
-                 : (P == 6 ? pick_mbarb(U) : pick_mbarb0(U)))))));
+                 : (P == 6 ? pick_mbarb(U) : (P == 7 ? pick_mbarb0(U)
+                 : (P == 8 ? pick_mbarw(U) : pick_mbarw0(U)))))))));
         cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
         cudaFuncAttributes a; CK(cudaFuncGetAttributes(&a, fn));
         int occ = 0; CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, fn, TH, smem));
-        printf("  %-5s U=%2d regs=%d localB=%zu occ=%d blk/SM%s\n",
+        printf("  %-6s U=%2d regs=%d localB=%zu occ=%d blk/SM%s\n",
                P == 0 ? "pull" : (P == 1 ? "push" : (P == 2 ? "pulls"
                : (P == 3 ? "ring" : (P == 4 ? "ring1" : (P == 5 ? "mbar"
-               : (P == 6 ? "mbarb" : "mbarb0")))))), U,
+               : (P == 6 ? "mbarb" : (P == 7 ? "mbarb0" : (P == 8 ? "mbarw" : "mbarw0")))))))), U,
                a.numRegs, (size_t)a.localSizeBytes, occ,
                (P == 3 || P >= 5) ? " (S=min(4,tiles))" : "");
       }
@@ -726,14 +876,16 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (!strcmp(cmd, "R") || !strcmp(cmd, "W") || !strcmp(cmd, "S") || !strcmp(cmd, "N")
-      || !strcmp(cmd, "M") || !strcmp(cmd, "B") || !strcmp(cmd, "Q") || !strcmp(cmd, "Z")) {
+      || !strcmp(cmd, "M") || !strcmp(cmd, "B") || !strcmp(cmd, "Q") || !strcmp(cmd, "Z")
+      || !strcmp(cmd, "V") || !strcmp(cmd, "U")) {
     int C = atoi(argv[2]), grid = atoi(argv[3]), sbKB = atoi(argv[4]);
     int rounds = atoi(argv[5]), U = atoi(argv[6]);
     int Sp = argc > 7 ? atoi(argv[7]) : 0;
     return run(tag, C, grid, sbKB, rounds, U, path, Sp);
   }
   if (!strcmp(cmd, "F") || !strcmp(cmd, "G") || !strcmp(cmd, "K") || !strcmp(cmd, "O")
-      || !strcmp(cmd, "L") || !strcmp(cmd, "P") || !strcmp(cmd, "Y") || !strcmp(cmd, "X")) {
+      || !strcmp(cmd, "L") || !strcmp(cmd, "P") || !strcmp(cmd, "Y") || !strcmp(cmd, "X")
+      || !strcmp(cmd, "T") || !strcmp(cmd, "J")) {
     int C = atoi(argv[2]), grid = atoi(argv[3]), sbKB = atoi(argv[4]);
     int U = atoi(argv[5]), reps = atoi(argv[6]);
     int rounds = argc > 7 ? atoi(argv[7]) : 4;

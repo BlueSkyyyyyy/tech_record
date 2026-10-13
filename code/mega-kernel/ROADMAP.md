@@ -4748,8 +4748,45 @@
      稳定——记为「**单线程等待应用 hint=0 持续轮询**」的工程警示、保留 `mbarb0`，**不宣称可复现的
      固有代价**。§E 复证环深 `S`（1..8）不是一阶旋钮（与 §89.5 同）。判据：五载体单常驻 kernel +
      `cluster.sync`/`mbarrier` 细化 **C4**、**仍非 C5**（与 §18–§23/§86–§89 同档）。**本轮新增实验。**
-     P165-1 新留尾巴（§90.6）：只测 H100/sm90a、未测「每 warp 一次 arrive」中间形态、双模态未受控
-     重复、合成 `float`、未做 ncu 归因（`__syncthreads` 主导系同档资源+单变量对照推断）。
+      P165-1 新留尾巴（§90.6）：只测 H100/sm90a、未测「每 warp 一次 arrive」中间形态、双模态未受控
+      重复、合成 `float`、未做 ncu 归因（`__syncthreads` 主导系同档资源+单变量对照推断）。
+
+### P166 实验扩展 67：cluster 跨 SM 交换的「每 warp 一次 arrive」中间形态（`docs/04-experiments.md` §91）
+
+- [x] **P166-1** 补掉 P165-1（§90）**§90.6 明留的尾巴**——「`mbarb` 的『每 block 一次 arrive』用
+    `__syncthreads` 会合，**未测『每 warp 一次 arrive』的中间形态**」。在 §89 的**每线程** arrive
+    （`count=TH`）与 §90 的**每 block** 一次 arrive（`count=1`）之间补上**每 warp 一次 arrive**
+    （`count=NW=blockDim/32` + `__syncwarp`），其余（拓扑/数据量/环形槽/零 `cluster.sync`）逐字相同，
+    **唯一设计变量 = arrive/等待/会合的粒度**；并加一条「去掉显式 cluster fence」的诊断变体把成本
+    拆开。见 `docs/04-experiments.md` **§91**，源码复用 `src/cluster_concurrency.cu`（**新增载体
+    `mbarw`（`:507-559`）与诊断变体 `mbarw0`（`:570-621`）**，不改
+    `pull`/`push`/`pulls`/`ring`/`ring1`/`mbar`/`mbarb`/`mbarb0` 语义；新 path 8/9）、脚本
+    `harness/cluster_mbar_warp.sh`、原始输出 `harness/cluster_mbar_warp.out.txt` 与 racecheck
+    `harness/cluster_mbar_warp_san.out.txt`（目标卡 H100/sm90a、**固定空闲 device 6**、nvcc 13.2、
+    每配置独立进程、min-of-20 报 `ok/20`）。四条 headline：
+    - **§A/§B 可行且稳定**：`mbarw`/`mbarw0` 与 `mbar`/`mbarb` **资源同档**（U=1 都 20 regs/occ=6、
+      U=8 30/28 vs 26/25 regs/occ=3、`localB=0`）；`grid≤1056`、`C≤8`、`U≤16` 全稳（单发 1/1、重复
+      3/3）、逐位正确——warp 级会合的省 arrive 形态没有引入 §88 `ring` 那类 launch failure。
+    - **§C（headline，否定性）「每 warp」不是更优折中**：`C=2 grid=264`，`U=1/8/16` 的
+      `mbarw` = **89.7 / 646.9 / 1144.6 GB/s**，是四种 mbarrier 形态里**最慢的一个**（连块级 `mbarb`
+      的 112.9/826.1/1405.5 都不如；`U=8` `mbarw/mbar = 0.596×`、`mbarw/mbarb = 0.783×`）；去掉显式
+      fence 的 `mbarw0` 才回到中间档（134.3/933.6/1575.4，`U=8` 为 `mbar` 的 0.861×、`mbarb` 的
+      1.13×）。**完整光谱 `mbar > mbarw0 > mbarb > mbarw`**（两端 `ring1` 恒最快）。机制：`mbarw`
+      每 round 每 block 有 `NW×2=16` 条 **cluster 作用域 fence**（`mbarb` 2 条、`mbar` 0 条），
+      **cluster fence 的条数比 arrive 的条数更贵**（§F 连跑 6 次确定性复现，`mbarw` 642.6–647.4、
+      `mbarw0` 927.0–935.6 GB/s，无 §90.4 双模态）。大 grid 528/1056 同形（§D）。§E 复证环深 `S`
+      不是一阶旋钮（与 §89.5/§90.5 同）。
+    - **§G 正确性压力**：`mbarw0` 在 `C=2/4`、`grid=132/264/528`、`U=1/4/8/16` 共 24 组 × `reps=8`
+      全过、逐位一致。
+    - **§G 方法学（racecheck 盲区）**：`compute-sanitizer --tool racecheck`（`C=2 grid=16 U=4`）只放行
+      **每读线程自同步**的 `mbar`/`ring1`（0 hazards），把「单等待者 + 本地屏障」的 `mbarb`（53）、
+      `mbarw`（56）、`mbarw0`（56）**一律标红**——**连 §90 已确认正确的 `mbarb` 也标红**，故这是
+      racecheck 对「远端写 → mbarrier phase → 本地屏障」链的**建模盲区**，不能判别 fenced/unfenced；
+      发布默认仍取保留 `fence.acq_rel.cluster` 的 `mbarw`，`mbarw0` 只作归因诊断。判据：五载体单常驻
+      kernel + `cluster.sync`/`mbarrier` 细化 **C4**、**仍非 C5**（与 §18–§23/§86–§90 同档）。
+      **本轮新增实验。** P166-1 新留尾巴（§91.8）：只测 H100/sm90a、只在 `T=256`（`NW=8`）、未扫
+      `NW`（每 warp 形式对 `T` 的依赖未测）、racecheck 单配置未用 memcheck/synccheck 复核、未做 ncu
+      归因（「fence 主导」系同档资源+单变量对照推断）、合成 `float`。
 
 ## 每轮增量流程（autopilot）
 
@@ -5231,10 +5268,45 @@
   更稳。**`mapa` 只能用在真正的 cluster launch 里**（非 cluster kernel 里发 `mapa.shared::cluster`
   会直接 `unspecified launch failure`）；且要求各 CTA 的 SMEM 布局偏移一致（本专题的 barrier 都
   放动态 SMEM 同一偏移处）。
+- **每-warp arrive 的显式 cluster fence 很贵 + racecheck 对跨 SM mbarrier 有建模盲区**
+  （P166-1/§91，H100/sm90a）：把 arrive 粒度做成「**每 warp 一次**」（`mbarw`：warp 写完
+  `__syncwarp()`、lane0 `fence.acq_rel.cluster` + 远端 arrive）虽然可行、稳定、逐位正确，但每 round
+  每 block 要发 `NW×2=16` 条 **cluster 作用域 fence**，**比它省下的 arrive 条数更贵**——`C=2 grid=264
+  U=8` 时 `mbarw` 646.9 GB/s，远低于 `mbar`（1084.9，每线程 arrive、零 fence）、甚至低于 `mbarb`
+  （826.1，每 block arrive、只 2 条 fence）；去掉显式 fence 的 `mbarw0` 才回到 933.6。⇒ 想省 arrive
+  就**用每线程 arrive（`mbar`）**，不要停在「每 warp 一次 arrive」这档。另：**`compute-sanitizer
+  --tool racecheck` 只放行「每读线程自身参与同步」的形态**（`mbar`/`ring1` = 0 hazards），把
+  「单等待者 + 本地屏障 + 远端 mbarrier」形态（`mbarb`/`mbarw`/`mbarw0`）**一律标红**——**连 §90 已
+  确认数值正确、稳定到 `grid=1056` 的 `mbarb` 也被标红**，故它对这类模式是**建模盲区、不能当判据**，
+  须配数值/重复压力交叉验证。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P165-1 完成（1/1）**。补掉 P164-1（§89）**§89.7 明留的第一条尾巴**——「`mbar` 是
+- 当前进度：**P166-1 完成（1/1）**。补掉 P165-1（§90）**§90.6 明留的尾巴**——「`mbarb` 的『每
+  block 一次 arrive』用 `__syncthreads` 会合，未测『**每 warp 一次 arrive**』中间形态」。见
+  `docs/04-experiments.md` **§91**，源码复用 `src/cluster_concurrency.cu`（**新增载体 `mbarw`
+  `:507-559` 与诊断变体 `mbarw0` `:570-621`**，不改既有语义；新 path 8/9）、脚本
+  `harness/cluster_mbar_warp.sh`、原始输出 `harness/cluster_mbar_warp.out.txt` 与 racecheck
+  `harness/cluster_mbar_warp_san.out.txt`（目标卡 H100/sm90a、**固定空闲 device 6**、nvcc 13.2、
+  每配置独立进程、min-of-20 报 `ok/20`）。四条 headline：**(1)** 每 warp arrive 形态**可行且稳定**
+  （资源与 `mbar`/`mbarb` 同档、`grid≤1056`/`C≤8`/`U≤16` 全稳、逐位正确）；**(2)（headline，否定性）
+  但「每 warp」不是更优折中**——`C=2 grid=264`，`U=1/8/16`：`mbarw` = **89.7/646.9/1144.6**、去掉
+  显式 fence 的 `mbarw0` = 134.3/933.6/1575.4、`mbar` = 163.7/1084.9/1852.0、`mbarb` =
+  112.9/826.1/1405.5、`ring1` = 323.9/1610.9/2427.3 GB/s，**完整光谱 `mbar > mbarw0 > mbarb >
+  mbarw`**（`U=8` `mbarw/mbar = 0.596×`、`mbarw/mbarb = 0.783×`）⇒ 慢在每 round `NW×2=16` 条
+  **cluster fence**（`mbarb` 2 条、`mbar` 0 条）而非 `__syncwarp`；**(3)** §F 连跑 6 次确定性复现
+  （无 §90.4 双模态），§E 复证环深 `S` 非一阶旋钮；**(4)（方法学）** racecheck **只放行每读线程
+  自同步的 `mbar`/`ring1`（0 hazards）**，把 `mbarb`（53）/`mbarw`（56）/`mbarw0`（56）一律标红——
+  **连 §90 已确认正确的 `mbarb` 也被标红**⇒ racecheck 对「远端写→mbarrier phase→本地屏障」链有
+  建模盲区，不能判别 fenced/unfenced（发布默认仍取带 fence 的 `mbarw`）。判据：单常驻 kernel +
+  `cluster.sync`/`mbarrier` 细化 **C4**、**仍非 C5**。**本轮新增实验**。
+- 下一步候选：可继续走实验侧**未叠加的组合**（`docs/04` 微基准到 §91）——如 **`__maxnreg__` × TMA
+  multicast**（§19 的 multicast 尚未与占用率叠加）、**cluster × 端到端骨架**（把 §62/§74 的骨架放进
+  cluster）、**用 `expect_tx`（TMA 事务计数）做每槽 done**（§89 §F 未测、§90/§91 仍未测）、或 **`mbarw`
+  每 warp 形式的 `NW` 依赖**（§91.8 只在 `T=256`，未扫 `NW`/`T`）；也可回到源码走读主线（`docs/35`
+  §9 余的「`bf16` 之外 SM100 task 家族未逐一走读」）。**其余旧候选**：`docs/46` §6 的 FLAT-CACHE
+  draft attention（已核零命中、**不可走读**，仅供静态落差记录）。
+- 此前：**P165-1 完成（1/1）**。补掉 P164-1（§89）**§89.7 明留的第一条尾巴**——「`mbar` 是
   每线程每槽 arrive（`count=TH`），未测『每 block 一次 arrive（`count=1`）+ `__syncthreads` 包裹』
   的省 arrive 形态」。见 `docs/04-experiments.md` **§90**，源码复用 `src/cluster_concurrency.cu`
   （**新增载体 `mbarb`/`mbarb0`**，不改既有语义）、脚本 `harness/cluster_mbar_bulk.sh`、原始输出
@@ -5247,12 +5319,6 @@
   与 `mbarb0`（hint=0）逐点重合，但开发期受扰会话里单线程+长 hint 出现过 ~15× 塌陷（数值仍对），
   记为工程警示、保留 `mbarb0`（**不宣称可复现固有代价**）；环深 `S` 复证非一阶旋钮。判据：单常驻
   kernel + `cluster.sync`/`mbarrier` 细化 **C4**、**仍非 C5**。**本轮新增实验**。
-- 下一步候选：可继续走实验侧**未叠加的组合**（`docs/04` 微基准到 §90）——如 **`__maxnreg__` × TMA
-  multicast**（§19 的 multicast 尚未与占用率叠加）、**cluster × 端到端骨架**（把 §62/§74 的骨架放进
-  cluster）、**用 `expect_tx`（TMA 事务计数）做每槽 done**（§89 §F 未测、§90 仍未测）、或 **`mbarb` 的
-  「每 warp 一次 arrive」中间形态**（§90.6 未测）；也可回到源码走读主线（`docs/35` §9 余的「`bf16`
-  之外 SM100 task 家族未逐一走读」）。**其余旧候选**：`docs/46` §6 的 FLAT-CACHE draft attention
-  （已核零命中、**不可走读**，仅供静态落差记录）。
 - 此前：**P164-1 完成（1/1）**。兑现 P163-1（§88）§88.7 的两条尾巴：把每槽 handshake 从纯 `volatile`+
   `fence` 换成硬件 cluster 作用域 `mbarrier`（`arrive.release.cluster` 远端到达 + 本地 `try_wait.parity`），
   `mbar` 在 `grid≤1056`、`U≤16` 全稳、逐位正确（`ring` 的 `volatile` 版在 `grid=16` 已 2/3、264 0/3）
