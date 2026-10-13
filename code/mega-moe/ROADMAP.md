@@ -2151,6 +2151,35 @@
       `count_bytes=473.33 MB`（A 占 469.76）、`AI=23.82 FLOP/B`。SM100 分支仅分析。
       配套博客 `content/posts/mega-moe-79-hc-prenorm-test-oracle`（索引页新增第 79 篇）。
 
+### P70 增量（opt-in，补齐 DeepGEMM 顶层运行时一直缺席的「验收测试即正确性规范」）
+
+- [x] **P70-1** **DeepGEMM 顶层运行时的验收测试即正确性规范**（`tests/test_lazy_init.py`；
+      `csrc/runtime/runtime.hpp`；`csrc/apis/config.hpp`；`deep_gemm/__init__.py`）。
+      第 23 篇（P23-1）拆了 DeepJIT 编译/缓存/加载/发射管线；第 40 篇（P40-1，`docs/50`）拆了顶层
+      `Runtime` 单例的**生命周期实现**，但只在 §6.5 用一句「直接跑上游测试：Ran 3 tests / OK」引用了
+      `tests/test_lazy_init.py`（199 行）。本篇把这份测试当**可执行规格**单独拆透。
+      **核心是「用 `LD_PRELOAD` 探针把 cuBLASLt 换成可计数的假库」**：探针导出同名
+      `cublasLtCreate/Destroy`（`:38/:45`），三个 magic exit code = 三把尺子——`_Exit(91)`
+      （`backend_dead` 后仍销毁 = 退出期 use-after-free，`:46`）、`_Exit(92)`（`live_handles!=0` =
+      泄漏，`:30`）、`_Exit(93)`（销毁陌生/重复 handle，`:47`）；`initialize_probe` 是
+      `__attribute__((constructor))`（`:34`）故 `verify_cleanup` **最后跑**（注释 `:33`）。
+      → `docs/80-lazy-init-test-oracle.md`（真实行号核对）：顶层结构（一个
+      `TestNativeRuntimeShutdown:56` + Linux 门控 `:55` + `setUpClass` 两道 skip 闸门 `:60-64` + 编译
+      探针 `:70-71`；`__main__:187-199` 先 8×`mp.Process` 断言 `exit 0` 再 unittest）、
+      探针源码 `:22-52` 逐行解码、6 用例矩阵（`:85-92`）语义、子进程三环境
+      （`CUDA_VISIBLE_DEVICES=''`:104 / `DG_USE_PYTORCH_CUBLASLT_HANDLE`:105 / `LD_PRELOAD`:106）
+      + preamble 断言导入本地构建（`:99`）、`test_real_cublaslt_shutdown:116-139` 的
+      `MALLOC_PERTURB_=165`+关 tcache（`:131-132`，把退出竞态变可复现崩溃）、
+      `test_cuda_workspaces_are_released:141-184` 的 atexit 在 shutdown 之后跑（`:154-155`）、
+      退出时至少释放 2×16 MiB（`:152`）。H100 实测 `harness/exp_lazy_init_test_oracle.{py,sh,out.txt}`
+      **7 PASS / 0 FAIL**：① 原样跑真实测试模块 `Ran 3 tests in 25.1s / OK`（**unittest 输出在 stderr**）；
+      ② 逐字取出 `_PROBE_SOURCE` 编译复刻 6 用例矩阵，create/destroy/clean 全对（独立佐证）；
+      ③ `shutdown` 幂等且终态——之后 `get_tc_util()` 抛 `RuntimeError`（正文带 `lazy.hpp:27`）；
+      **E1 必须真给 GPU**（无探针时真库报 `the library was not initialized`，`runtime.hpp:51`）；
+      ④ `DG_USE_PYTORCH_CUBLASLT_HANDLE` 是**整数**不是布尔（`0→create1`、`1/2→0`、`-1→1`、
+      `true/false/abc` 被 `DJ_PANIC` 拒）；⑤ fork safety 8/8 `exit 0`。与 GPU 架构无关，H100 整份可跑。
+      配套博客 `content/posts/mega-moe-80-lazy-init-test-oracle`（索引页新增第 80 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2175,8 +2204,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P69 各增量完成（P15-1…P41-1、P42-1…P69-1）。**
-  本轮 P69-1：新建 `docs/79-hc-prenorm-test-oracle.md`
+- 当前进度：**P0~P14 全部完成；P15~P70 各增量完成（P15-1…P41-1、P42-1…P70-1）。**
+  本轮 P70-1：新建 `docs/80-lazy-init-test-oracle.md`
+  （+`harness/exp_lazy_init_test_oracle.{py,sh,out.txt}`）——补上 DeepGEMM **顶层运行时**一直缺席的
+  **「验收测试即正确性规范」** `tests/test_lazy_init.py`（199 行，架构无关、H100 整份可跑）。
+  **核心看点：用 `LD_PRELOAD` 探针把 cuBLASLt 换成可计数的假库**——探针导出同名
+  `cublasLtCreate/Destroy`（`:38/:45`），三个 magic exit code = 三把尺子：`_Exit(91)` 退出期
+  use-after-free、`_Exit(92)` handle 泄漏、`_Exit(93)` 重复/陌生销毁；`initialize_probe` 是
+  `__attribute__((constructor))`（`:34`）故 `verify_cleanup` 最后跑（`:33`）。6 用例矩阵
+  （`:85-92`）在 `CUDA_VISIBLE_DEVICES=''` 下跑（探针返回假 handle 绕开 CUDA），坐实它测纯 host
+  对象计数。`MALLOC_PERTURB_=165`+关 tcache（`:131-132`）把退出竞态变可复现崩溃；workspace atexit
+  断言退出释放 ≥2×16 MiB（`:152`）。`__main__`（`:187-199`）先 8×`mp.Process` 断言 exit 0。
+  **H100 真机 7 PASS/0 FAIL**：原样跑真实测试模块 `Ran 3 tests / OK`（**unittest 输出在 stderr**）；
+  独立逐字取出探针复刻 6 用例 create/destroy/clean 全对；`shutdown` 幂等且终态（之后 `get_tc_util()`
+  抛 `RuntimeError`，正文带 `lazy.hpp:27`；E1 必须真给 GPU）；env 是**整数**不是布尔
+  （`true/false/abc` 被 `DJ_PANIC` 拒）；fork safety 8/8。索引页新增第 80 篇。
+  上一轮 P69-1：新建 `docs/79-hc-prenorm-test-oracle.md`
   （+`harness/exp_hc_prenorm_test_oracle.{py,sh,out.txt}`）——补上 HyperConnection prenorm GEMM
   的**「验收测试即正确性规范」** `tests/test_hyperconnection.py`（57 行，`@test_filter(arch>=9)`，
   H100 可跑）。**核心看点：判据编码实现事实**——`allow_tf32=True`（`:17-18`）是「kernel 是 TF32」
@@ -2968,7 +3011,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P69 已完成（最新 **P69-1 HyperConnection prenorm GEMM 的验收测试即正确性规范**：
+- **下一步**：P0~P70 已完成（最新 **P70-1 DeepGEMM 顶层运行时的验收测试即正确性规范**：
+  `tests/test_lazy_init.py`（架构无关，H100 整份可跑）——用 `LD_PRELOAD` 探针把 cuBLASLt 换成可计数
+  假库，三个 magic exit code 锁死退出期 use-after-free / 泄漏 / 重复销毁；6 用例矩阵（假 handle 绕开
+  CUDA）+ `MALLOC_PERTURB_` 逼出退出竞态 + workspace 退出释放 ≥2×16 MiB + fork safety 8/8；
+  H100 真机原样跑真实测试 + 独立复刻 **7 PASS / 0 FAIL**；详见上）。
+  上一轮 P69-1：**HyperConnection prenorm GEMM 的验收测试即正确性规范**：
   `tests/test_hyperconnection.py`（`@test_filter(arch>=9)`，H100 可跑）——判据编码实现事实
   （`allow_tf32=True` 是「kernel 是 TF32」的镜像、`a.float()@b.T` 只转 A、`2*m*n*k` 不含 S）；
   H100 真机直接驱动真实测试体 24 用例全过 **8 PASS / 0 FAIL**；详见上）。
