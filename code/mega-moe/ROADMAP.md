@@ -4373,7 +4373,31 @@
       （省 S×）、误差与 S 无关；本路线省 4× 却误差随 S 涨、时间只快 1.64×——**三侧同时被关闭**。
       **结论**：要么折进 K（big-K，结构性最优）、要么退回 bf16 累积器（EPI-B，数值免费），FP8 累积器
       无立足点。SM100 `tn`（`gemm.hpp:320-371`）同结构、**仅分析**。配套博客
-      `content/posts/mega-moe-151-wgrad-fp8-accumulator`（索引页新增第 151 篇）。
+       `content/posts/mega-moe-151-wgrad-fp8-accumulator`（索引页新增第 151 篇）。
+
+### P142 增量（opt-in，把「路由负载均衡」放回计算侧量：偏斜对 grouped GEMM 的代价）
+
+- [x] **P142-1** **MoE grouped GEMM 在专家负载不均下的计算侧代价**（`csrc/apis/gemm.hpp:181-318`、
+      `deep_gemm/include/deep_gemm/scheduler/gemm.cuh:92-95/147-156/188-204/296-309/109-143`、
+      `csrc/jit_kernels/impls/sm90_fp8_gemm_1d2d.hpp:139-214/216-283`；对照第 04/13/108/120/129/139/142/143 篇）。
+      前面 151 篇把 wgrad/dgrad/前向都拆到底，第 13 篇讲了 dgrad 三布局的**语义**、第 129 篇讲了**路由层**
+      负载均衡，但「**token 分布偏斜时 grouped GEMM 到底慢多少、慢在哪里**」从没量过——grouped kernel
+      对负载不均到底免不免疫？本篇用 **SM90 真实 DeepGEMM FP8 kernel**（`m_grouped_*` dgrad 形状
+      `G=8, M=8192, n=2048, k=7168`）扫 Dirichlet 偏斜，对照 contiguous / masked / **naive**（每专家补到
+      `max_m` 的稠密 bmm）。**H100 实测**（`harness/exp_grouped_skew.{sh,py,out.txt}`，绑空闲 GPU）：
+      均匀→`max_m=3.75×`均值，contiguous **190→201us（+6%）**、masked **188→214us（+14%）**，
+      `Σal/M` 1.00→1.08（时间正比它）；G=32「一个专家吃 60%」contiguous **239→269us（+13%）**、
+      power-law +16%。**机制**：调度器把所有专家的 M 块汇入**同一个 persistent grid**——contiguous
+      `num_blocks=num_m·num_n` 当一池（`:92-93`）、取址用块首行组号（`:152`）、`is_computation_valid`
+      跳过整块 gap（`:299-300`）；masked 按组 `num_m_blocks=ceil_div(masked_m[g],BLOCK_M)`（`:188-204`）
+      并掩掉末块越界行（`:301-302`）。偏斜只付「每段向上取整到 BLOCK_M」的税，**不产生每专家尾波**。
+      **真正代价在朴素做法**：naive 计算量正比 `G·max_m`，`naive/masked` 从 1.64× 涨到 **4.93×**（max_m=3840）、
+      G=32 one-heavy **20.9×**。**显存**：masked 预留 `G·max_m`（极端 **19.5×** 有效行）但计算只认领
+      `ceil(m_g/BLOCK_M)` 块 →「存储大 ≠ 计算慢」。**正确性**：masked 有效行与 contiguous **逐位 True**、
+      vs bf16 参考 3.69e-2（=FP8 噪声层）。反直觉：G=32 均衡时 masked 反比 contiguous 慢 1.17×、偏斜追平。
+      host 开销 ~7us（3%）。**测量注记**：8 卡共享节点，被跑满的卡上曾量出 1.58× 假象，绑空闲卡后稳定
+      1.06–1.08×（脚本自动选 util 最低卡）。SM100 1D1D（`gemm.hpp:243/312`）共用同一份调度器、**仅分析**。
+      配套博客 `content/posts/mega-moe-152-moe-grouped-load-imbalance`（索引页新增第 152 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4405,8 +4429,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P141 各增量完成（P15-1…P41-1、P42-1…P141-1）。**
-  本轮 P141-1：新建 `docs/151-wgrad-fp8-accumulator.md`
+- 当前进度：**P0~P14 全部完成；P15~P142 各增量完成（P15-1…P41-1、P42-1…P142-1）。**
+  本轮 P142-1：新建 `docs/152-moe-grouped-load-imbalance.md`
+  （+`harness/exp_grouped_skew.{py,sh,out.txt}`）——把第 129 篇的「路由负载均衡」放回**计算侧**量：
+  用 SM90 真实 DeepGEMM FP8 kernel（`m_grouped_*` dgrad 形状）扫 Dirichlet 偏斜，对照
+  contiguous / masked / naive 稠密 bmm。**结论：grouped GEMM 对负载不均几乎免疫**——均匀→
+  `max_m=3.75×`均值 contiguous **190→201us（+6%）**、masked **188→214us（+14%）**、G=32「一个专家 60%」
+  contiguous **239→269us（+13%）**。**机制**：所有专家的 M 块汇入同一 persistent grid（`scheduler/gemm.cuh:92-95`），
+  contiguous 取址用块首行组号（`:152`）、masked 按组 `ceil_div(masked_m[g],BLOCK_M)`（`:188-204`），
+  偏斜只付「每段对齐到 BLOCK_M」的税（时间正比 `Σal/M` 1.00→1.08），无每专家尾波。**真正代价在朴素做法**：
+  naive 正比 `G·max_m`，`naive/masked` 从 1.64× 涨到 **4.93×**（max_m=3840）、G=32 one-heavy **20.9×**；
+  **显存**：masked 预留 `G·max_m`（极端 **19.5×** 有效行）但计算只认领 ceil 块 →「存储大 ≠ 计算慢」。
+  正确性 masked 有效行与 contiguous **逐位 True**、vs bf16 参考 3.69e-2（FP8 噪声）。SM100 1D1D 共用调度器、
+  仅分析。**测量注记**：8 卡共享，被跑满的卡上曾量出 1.58× 假象，绑空闲卡后稳定 1.06–1.08×
+  （`exp_grouped_skew.sh` 自动选 util 最低卡）。索引页新增第 152 篇。
+  上一轮 P141-1：新建 `docs/151-wgrad-fp8-accumulator.md`
   （+`src/fp8_accum_rmw.cu`、`harness/exp_wgrad_fp8_accum.{sh,py,out.txt}`）——把第 150 篇结尾的
   「FP8 累加器」路线 ①（把每步 RMW 的 8B 压到 2B）走到能核对的数，给出它对 big-K 的**误差-字节边界**、
   坐实第 150 篇预判（「跨 S 步随机符号求和误差预计不可用」）。**路线为何在 DeepGEMM 里不存在**：SM90
@@ -6001,7 +6038,18 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P141 已完成（最新 **P141-1 把 wgrad 的 FP8 累加器路线走到误差-字节边界——它到底能不能省下那 4× 字节**：
+- **下一步**：P0~P142 已完成（最新 **P142-1 把「路由负载均衡」放回计算侧量——grouped GEMM 对专家负载不均到底免不免疫**：
+  第 13 篇讲了 dgrad 三布局**语义**、第 129 篇讲了**路由层**均衡，但「token 分布偏斜时 grouped GEMM 慢多少」
+  从没量过。用 SM90 真实 DeepGEMM FP8 kernel（`m_grouped_*` dgrad 形状 `G=8,M=8192,n=2048,k=7168`）扫
+  Dirichlet 偏斜，对照 contiguous/masked/naive。**结论：几乎免疫**——均匀→`max_m=3.75×`均值，contiguous
+  **190→201us（+6%）**、masked **188→214us（+14%）**、G=32「一个专家 60%」contiguous **239→269us（+13%）**；
+  偏斜只付「每段对齐 BLOCK_M」的税（时间正比 `Σal/M` 1.00→1.08）、无每专家尾波（所有 M 块同一 persistent grid，
+  `scheduler/gemm.cuh:92-95/147-156/188-204/296-309`）。**真正代价在朴素做法**：naive 稠密 bmm 正比 `G·max_m`，
+  `naive/masked` 1.64×→**4.93×**（max_m=3840）、G=32 one-heavy **20.9×**；**显存** masked 预留 `G·max_m`
+  （极端 19.5×）但计算只认领 ceil 块（存储大≠计算慢）。正确性 masked 有效行与 contiguous **逐位 True**。
+  **测量注记**：8 卡共享，被跑满的卡上曾量出 1.58× 假象、绑空闲卡后 1.06–1.08×。SM100 1D1D 共用调度器、仅分析。
+  索引页新增第 152 篇）。
+  上一轮 P141-1 把 wgrad 的 FP8 累加器路线走到误差-字节边界——它到底能不能省下那 4× 字节：
   承接第 150 篇结尾留下的路线 ①（更小的累加器：把每步 RMW 的 8B 压到 2B），把它走到能核对的数、坐实其预判。
   **路线为何在 DeepGEMM 里不存在**：SM90 只有两种互斥输出形态——`k_grouped`(1D1D) 必传 `c`
   （`gemm.hpp:403`）且必 fp32（`sm90_fp8_gemm_1d1d.hpp:84`）、epilogue `SM90_TMA_REDUCE_ADD_2D`
