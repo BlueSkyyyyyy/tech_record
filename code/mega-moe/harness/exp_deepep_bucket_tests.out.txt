@@ -1,0 +1,41 @@
+NVIDIA H100 80GB HBM3, 9.0
+==============================================================================
+torch 2.12.0a0+0291f960b6.nv26.04.48445190  cuda=13.2  gpus=8  cc=(9, 0)
+==============================================================================
+
+== Part C: test_session/test_allocation 缓冲区算术 + BufferAllocator 物化 ==
+  [PASS] C numel=524288 对齐 num_ranks*4
+  [PASS] C session 缓冲=6291456 3 段+2MiB 对齐
+  [PASS] C allocate 返回 meta 占位张量
+  [PASS] C plan.num_bytes=4194304 == 4 MiB (两次 2MiB 对齐段)
+  [PASS] C 物化后占位张量变 CUDA
+  [PASS] C 首个分配落在存储起点
+  [PASS] C 第二个分配落在 2 MiB 偏移
+  [PASS] C 物化张量可写回读
+  [PASS] C bump 分配 64B 对齐 (0, 64)
+  [PASS] C bump 越界抛 RuntimeError
+
+== Part D: get_context_idx 多 group + get_theoretical_num_sms ==
+  [PASS] D 单 group：group=None → context 0
+  [PASS] D 多 group：显式 group → index
+  [PASS] D 多 group + group=None 被断言拦下（test_allocation 的意义）
+  [PASS] D get_theoretical_num_sms(all_gather) == 0（copy-engine 不占 SM）
+  [PASS] D align(x,y)=ceil(x/y)*y
+
+== Part A/B: 8×H100 NCCL 参考语义与容差梯度 ==
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+  [PASS] A all_gather_into_tensor 逐位(shard=8)
+  [PASS] A all_gather_into_tensor 逐位(shard=8192)
+  [PASS] A all_gather_into_tensor 逐位(shard=524288)
+  [INFO] torch 2.12.0a0+0291f960b6.nv26.04.48445190: dist.all_gather_single 存在=False (test_all_gather/session 的 *_single 是 DeepEP 补丁)
+  [PASS] B all_gather 逐位(rtol=0 依据)
+  [PASS] B reduce_scatter 反序环重建 relerr=0.000e+00 < 1e-5
+  [INFO] 反序环重建 vs reduce_scatter_tensor 逐位=True （实测 8×NVLink 恰好逐位，但测试仍保守用 1e-5——逐位非契约）
+  [INFO] test_reduce_scatter.py 的 RDMA 路径用 rtol=0，因其自研 kernel 的求和序与参考 (rank-i)%R 逐字相同；NVLink 路径的"同序"不可依赖
+  [PASS] B all_reduce sum*scale=0.25 匹配
+NCCL version 2.29.7+cuda13.2
+
+==============================================================================
+总判定: ALL PASS
+==============================================================================

@@ -3841,6 +3841,33 @@
       **恒为 0**、CI 退出码 0。配套博客 `content/posts/mega-moe-133-refs-near-miss-triage`
       （索引页新增第 133 篇）。
 
+### P124 增量（opt-in，DeepEP 验收测试栈最后三份收口）
+
+- [x] **P124-1** **DeepEP bucket / buffer 家族最后三份验收测试即正确性规范**
+      （`tests/bucket/test_all_gather.py` 117 行 / `tests/bucket/test_session.py` 101 行 /
+      `tests/buffer/test_allocation.py` 54 行；`deep_ep/buffers/bucket.py`、`deep_ep/buffers/allocator.py`、
+      `deep_ep/utils/math.py:5/26`、`deep_ep/utils/testing.py:113/224`、
+      `deep_ep/include/deep_ep/common/compiled.cuh:68-69`、`csrc/python_api.cpp:24/26`）。
+      前面已把 DeepEP 七个子目录的验收测试逐份拆过（EP 第 75/85、bucket mixed/perf 第 84、EPLB
+      第 90、barrier 第 91、pp/engram 第 112、gate 第 106），只剩这三份没读过。**bucket 设备 kernel
+      （NCCL GIN / copy engine）本机阻塞 → 端到端仅分析**；测试侧全纯 PyTorch / NCCL 主机 API，
+      H100 8 卡真机复现。→ `docs/134-deepep-bucket-test-oracle.md`（真实行号核对）：**① all-gather
+      纯 NVLink copy-engine 语义**（`test_all_gather.py:18`；`dst.data_ptr()==gathered.data_ptr()` `:54`
+      + `torch.equal` `:55`；`num_sms=0`（`bucket.py:290-291`）；「越界输入」仅 `num_rdma_ranks==1`
+      `:58`；`:77` `del srcs` 测 `EventOverlap` 生命周期）。**② `test_session.py` 会话内 bump 分配**
+      （缓冲区量 `:25-29`；`BucketSession.__enter__` 实例属性遮蔽 `bucket.py:29-43`、`_allocate`
+      `:56-65` 64B bump+越界 `RuntimeError`；容差梯度 all_gather `rtol=0` `:62/75` vs
+      reduce_scatter/all_reduce `1e-5` `:65/68`）。**③ `test_allocation.py` 多样式分配**
+      （`BufferAllocator` meta→cuda `allocator.py:26-36`、`data_ptr`/`contexts`/多 group `:31-33`；
+      `get_context_idx` 多 group 断言 `bucket.py:295-297`）。**H100 实测**
+      `harness/exp_deepep_bucket_tests.{py,sh,out.txt}` **ALL PASS**：Part C `numel=524288`、session
+      缓冲 `6291456` B、`plan.num_bytes=4194304`、第二分配偏移 2 MiB、bump `(0,64)`+越界抛错；
+      Part D 多 group 断言 + `get_theoretical_num_sms(all_gather)==0`；Part A/B **8×H100 NCCL**——
+      `all_gather_into_tensor` shard∈{8,8192,524288} **逐位**、all_gather 逐位、reduce_scatter 反序环
+      重建 relerr **0.000e+00**（该机 8×NVLink 恰好逐位、测试仍保守用 1e-5）、all_reduce `sum*scale`
+      匹配；坐实 `dist.all_gather_single` 在 stock torch 2.12 **不存在**。配套博客
+      `content/posts/mega-moe-134-deepep-bucket-test-oracle`（索引页新增第 134 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3866,8 +3893,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P123 各增量完成（P15-1…P41-1、P42-1…P123-1）。**
-  本轮 P123-1：新建 `docs/133-refs-near-miss-triage.md`（+`harness/triage_refs.{py,sh,out.txt}`、
+- 当前进度：**P0~P14 全部完成；P15~P124 各增量完成（P15-1…P41-1、P42-1…P124-1）。**
+  本轮 P124-1：新建 `docs/134-deepep-bucket-test-oracle.md`
+  （+`harness/exp_deepep_bucket_tests.{py,sh,out.txt}`）——收口 DeepEP 验收测试栈最后三份：
+  `tests/bucket/test_all_gather.py`、`tests/bucket/test_session.py`、`tests/buffer/test_allocation.py`。
+  **① all-gather 纯 NVLink copy-engine 语义**（原地 `data_ptr` 判据 + `torch.equal`、`num_sms=0`、
+  越界输入仅纯 NVLink、`del srcs` 生命周期守卫）；**② `test_session` 会话内 bump 分配 + 容差梯度**
+  （all_gather `rtol=0` vs reduce_scatter/all_reduce `1e-5`）；**③ `test_allocation` 多样式分配**
+  （`BufferAllocator` meta→cuda 物化、多 group context）。H100 实测 **ALL PASS**：Part C `plan.num_bytes`
+  =4194304、2 MiB 偏移、bump 越界抛错；Part A/B **8×H100 NCCL** all_gather 逐位、reduce_scatter 反序环
+  重建 relerr **0.000e+00**（8×NVLink 恰好逐位、测试保守 1e-5）、all_reduce `sum*scale` 匹配；坐实
+  `dist.all_gather_single` 在 stock torch 2.12 不存在。bucket 设备 kernel 仅分析。至此 DeepEP 七个子目录
+  验收测试全部被单独拆过。索引页新增第 134 篇。
+  上一轮 P123-1：新建 `docs/133-refs-near-miss-triage.md`（+`harness/triage_refs.{py,sh,out.txt}`、
   增强 `harness/check_refs.py`）——收口 P96/P97 留下的 near_miss defer。**① 修 linter 分裂区间缺口**
   （`` `a.hpp:103`-`:105` `` 的终点被丢、区间退化单行 → 误报；新增 `CONT_RANGE`/`normalize_citations`
   先合并，当前语料 **13 条**）；**② 把 near_miss 做五分类**（`owner_body`/`far_other`/`absent`/
@@ -5218,10 +5256,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P123 已完成（最新 **P123-1 引用行号的 near_miss 定点复核**：
-  收口 P96/P97 的 near_miss defer——修 linter 分裂区间缺口（合并 13 条）+ 五分类（约 93% 为判据噪音）
-  + 闭环修 7 处；H100 纯文件解析：总引用 2074、near_miss 108→106→99、严格命中 640→649（73.67%）、
-  硬错误恒 0；索引页新增第 133 篇。
+- **下一步**：P0~P124 已完成（最新 **P124-1 DeepEP 验收测试栈最后三份收口**：
+  `test_all_gather`/`test_session`/`test_allocation`——all-gather 纯 NVLink copy-engine 语义、
+  会话内 bump 分配 + 容差梯度（all_gather `rtol=0` vs reduce_scatter/all_reduce `1e-5`）、
+  `BufferAllocator` meta→cuda 物化 + 多 group；H100 8 卡真机 ALL PASS（`plan.num_bytes=4194304`、
+  2 MiB 偏移、all_gather 逐位、reduce_scatter 反序环重建 relerr 0.000e+00）；至此 DeepEP 七个子目录
+  验收测试全部被单独拆过；索引页新增第 134 篇。
   可继续（均为增量、非承诺）：
   两条门控反向（Mega Gate、mHC）的数学、算子账与目标卡接线已齐；剩余可选：把融合 worker 在 SM100 上的
   「真实 H=7168 warp-pair 分段 + TMEM 累加器直喂 K1」写成可核对的 mbarrier/TMEM 接线图。
