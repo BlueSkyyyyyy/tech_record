@@ -59,6 +59,12 @@ DEV void mbar_arrive_tx(uint64_t* b, uint32_t bytes) {
 DEV void fence_proxy_async() {
     asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
 }
+// B1T_SPROXY (P7-37): the *store* direction of the same ordering.  The compute warp writes
+// the per-warp `dh`/`dv2` tile into smem via the generic proxy, then `cp.async.bulk.tensor`
+// (async proxy) reads it back out; that RAW needs a `fence.proxy.async` between the writes
+// and the store issue, exactly as the input side needs it for the WAR (§39).  Placed after
+// `__syncwarp()` so all 32 lanes have written, and executed by *all* lanes (the fence orders
+// the executing thread's prior generic writes against the async proxy).
 DEV void mbar_wait(uint64_t* b, int ph) {
     asm volatile(
         "{\n\t.reg .pred P;\n"
@@ -393,7 +399,10 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                     }
             }
             __syncwarp();
-#if defined(B1T_TMADH)
+#if defined(B1T_SPROXY)
+            fence_proxy_async();
+#endif
+#ifdef B1T_TMADH
             if (l == 0) {
                 tma5d_store(&dhmap, &sh->dho[i & 1][warp][0][0], vbase, 0, h, c, n);
 #ifndef B1T_TMADV
@@ -461,6 +470,9 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                     }
             }
             __syncwarp();
+#if defined(B1T_SPROXY)
+            fence_proxy_async();
+#endif
 #ifdef B1T_TMADV
             if (l == 0) {
                 tma4d_store(&dv2map, &sh->duo[i & 1][warp][0][0], vbase, c * BT, h, n);

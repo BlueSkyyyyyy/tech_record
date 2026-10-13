@@ -575,6 +575,25 @@
       **逐位相同（max_abs=0，12 格）**→ 多 stage 数值不受影响。**撤回 §38.4 回授**：多 stage 安全**不需要**
       换 CUTLASS `PipelineTmaAsync`，一条 fence 即可。**边界**：本轮在标量 store 的 `-DB1T_ETMA` 上做，
       `+TMADH/+TMADV`（`tma2`）store 侧的复用握手同样建议补 fence（**待验证**）。
+- [x] **P7-37** 关闭 §39.5 的 `tma2` **store 侧**待验证：`tma2`（`-DB1T_ETMA -DB1T_TMADH -DB1T_TMADV`）
+      在输出侧新增一对 generic↔async——compute warp 用 generic store 写 `dh`/`dv2` tile 进 smem、
+      `cp.async.bulk.tensor`（async proxy）读出去（**RAW**），与输入侧 `st->e` 的 WAR（§39）机制对称。
+      加 `-DB1T_SPROXY`：在 `dh`（`b1_tma_probe.cu:402-403`）/`dv2`（`:473-474`）两处**写完 tile、
+      `__syncwarp()` 之后、lane 0 发 store 之前**各插一条 `fence_proxy_async()`（全 32 lane 执行，
+      同 CUTLASS `tma_store_fence`）。新增 `harness/check_bwd_b1_tma2_race.py`
+      （`check_bwd_b1_tma2_race.out.txt`，空闲卡）+ `docs/07` §40。**Part A（关键/诚实）**：同一 kernel
+      `NR=40` 确定性扫描（`B8T2048H8`）——`scalar` 三次大配置全 racy（39/40），而 **`tma2` 全族
+      （含两侧都没 fence 的 `tma2`）全 `0/40`**：**输出侧 RAW/WAR 在本探针观测不到**（与 §35/§36「逐位
+      相同」的观测一致；推断是 `cp.async.bulk` store 的节奏把 §39 输入侧覆写窗口拱出敏感区）。**但
+      「观测 clean≠有保证 clean」**（§38.3 教训），故部署仍取两侧 fence。**Part B**：`tma2_full`
+      vs `scalar_p` 16 格 `dh/dv2/dh0` **逐位相同（max_abs=0，含非整除 T=250）**、vs 直接 bf16 FLA
+      `dhu` 仍 1 ulp（4.88e-4/2.44e-4）——fence 纯 ordering、不改数值。**Part C**：`full/tma2` =
+      **0.997–1.081（噪声内）**，store 侧 fence **免费**；`scalar_p/tma2_full` 仍 1.42–2.93（§35/§36
+      TMA store 收益不受影响）。**Part D**：`tma2_full` `NS=2/3` vs `NS=1` `dh` **逐位相同**。**结论**：
+      部署配置＝`-DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY -DB1T_SPROXY`、`NSTAGE` 可 >1；
+      「输入/输出两个方向的 TMA 复用缓冲都需 `fence.proxy.async`」收口。**唯一剩余边界（待验证）**：
+      更深 pipeline / 不同 store tile 形状改变写→store 时序时，输出侧可观测性可能变化，届时仍以
+      `tma2_full` 为准。
 
 ### P8 小结 / 一页纸
 
@@ -612,11 +631,30 @@
   proxy**）回填同一 stage 缓冲时，WAR 未定序 → 间歇性读到被覆写的字节。指纹＝**整段 warp V-slice
   错、跨连续 chunk、`NSTAGE≥2` 且 `NSTAGE=1` 免疫**；`__threadfence_block`/`volatile`/`__syncwarp`
   修不了，`fence.proxy.async.shared::cta`（`b1_tma_probe.cu:59-61`）修得掉且免费。
+- **`fence.proxy.async` 要覆盖两个方向**（P7-37）：不止输入侧 `st->e` 的 WAR（consumer `ld` 读
+  被 TMA 回填的缓冲，§39），输出侧的 `dh`/`dv2` tile 也有 **RAW**（generic store 写 tile →
+  `cp.async.bulk.tensor...bulk_group` 读出去）——凡「generic 写/读」与「async proxy（TMA）读/写」
+  共用同一块 smem，都要显式 fence。部署取 `-DB1T_EPROXY -DB1T_SPROXY`（代价噪声内、数值逐位不变）。
+  诚实边界：输出侧 RAW 在 `X_FLASHKDA` 探针 **`NR=40` 观测不到**（`tma2` 全族 0/40），只有输入侧在
+  标量 store 基线可复现——「观测 clean≠有保证 clean」（§38.3）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-36 补测**。
-  - P7-36（本轮）：**定位并修掉 P7-35 遗留的 `NSTAGE≥2` run-to-run 竞态**——根因是手写 TMA 流水
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-37 补测**。
+  - P7-37（本轮）：**关闭 §39.5 的 `tma2` store 侧待验证**——给 `b1_tma_probe.cu` 加
+    `-DB1T_SPROXY`（写完 `dh`/`dv2` tile 后、`cp.async.bulk.tensor` store 前一条
+    `fence.proxy.async`，与 §39 输入侧对称）。新增 `harness/check_bwd_b1_tma2_race.py`
+    （`check_bwd_b1_tma2_race.out.txt`，空闲卡）+ `docs/07` §40。**Part A（关键/诚实）**：`NR=40`
+    确定性扫描（`B8T2048H8`）`scalar` 三次大配置全 racy（39/40），而 **`tma2` 全族（含无 fence 的
+    `tma2`）全 0/40**——**输出侧 RAW/WAR 在本探针观测不到**；「观测 clean≠有保证 clean」，部署仍取
+    两侧 fence。**Part B**：`tma2_full` vs `scalar_p` 16 格 `dh/dv2/dh0` **逐位相同（含非整除
+    T=250）**、vs 直接 bf16 FLA `dhu` 1 ulp（4.88e-4/2.44e-4）。**Part C**：`full/tma2`
+    **0.997–1.081（噪声内，免费）**；`scalar_p/tma2_full` 1.42–2.93（TMA store 收益不变）。
+    **Part D**：`tma2_full` `NS=2/3` vs `NS=1` `dh` 逐位相同。**结论**：目标卡 CUDA B1 部署配置＝
+    `-DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY -DB1T_SPROXY`（`NSTAGE` 可 >1）；输入/输出两
+    方向的 TMA 复用缓冲都需 `fence.proxy.async` 收口。**唯一边界（待验证）**：更深 pipeline / 不同
+    store tile 形状改变写→store 时序时其可观测性可能变化，届时仍以 `tma2_full` 为准。
+  - P7-36（上轮）：**定位并修掉 P7-35 遗留的 `NSTAGE≥2` run-to-run 竞态**——根因是手写 TMA 流水
     复用的 stage 缓冲缺一条 **`fence.proxy.async`**（generic proxy 的普通 `ld` 读 vs async proxy 的
     TMA 回填，WAR 未定序），不是 §38.3 猜的 `full`/`empty` parity。新增 `harness/check_bwd_b1_race.py`
     （`check_bwd_b1_race.out.txt`，空闲卡）+ `docs/07` §39；探针加 `-DB1T_EPROXY`/`_PRO`/`_CON`/`_ECOPY`。

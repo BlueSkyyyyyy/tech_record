@@ -1,0 +1,79 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1tma2race_scalar.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_EPROXY ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1tma2race_scalar_p.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_TMADH -DB1T_TMADV ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1tma2race_tma2.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_SPROXY ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1tma2race_tma2_s.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1tma2race_tma2_in.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY -DB1T_SPROXY ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1tma2race_tma2_full.so
+
+============================================================================================================
+Part A: determinism scan on the full `tma2` build matrix -- NR runs of the SAME
+   kernel, `dh` compared run-to-run;  shape B8 T2048 H8, NR=40
+   nbad>0 == NOT run-to-run reproducible (intermittent race)
+============================================================================================================
+   BT  NS |     scalar   scalar_p       tma2     tma2_s    tma2_in  tma2_full
+  ---------------------------------------------------------------------------
+   16   2 |    39/40       0/40       0/40       0/40       0/40       0/40  
+   16   3 |    39/40       0/40       0/40       0/40       0/40       0/40  
+   32   3 |    39/40       0/40       0/40       0/40       0/40       0/40  
+   32   2 |     0/40       0/40       0/40       0/40       0/40       0/40  
+   64   2 |     0/40       0/40       0/40       0/40       0/40       0/40  
+  (cell = #runs whose `dh` differs from run 0 / NR.  `scalar` is the known-racy
+   control; `scalar_p`/`tma2_full` should be 0.  If `tma2_in` is also 0 everywhere
+   then the store-side RAW/WAR is not observable in this probe -- the fence is
+   still added as the documented requirement, gratis (Part C).)
+
+============================================================================================================
+Part B: the store-side fence changes nothing numerically (fence = ordering only)
+   `tma2_full` vs `scalar_p`: dh/dv2/dh0 must be bit-identical;  vs bf16 FLA: 1 ulp
+============================================================================================================
+  shape             BT  NS |  dh max_abs  dv2 max_abs  dh0 max_abs |  vsFLA dh  vsFLA dv2
+  B2 T1024 H8       32   1 |    0.00e+00     0.00e+00     0.00e+00 |        --   4.88e-04
+  B2 T1024 H8       32   2 |    0.00e+00     0.00e+00     0.00e+00 |        --   4.88e-04
+  B2 T1024 H8       64   1 |    0.00e+00     0.00e+00     0.00e+00 |  4.88e-04   4.88e-04
+  B2 T1024 H8       64   2 |    0.00e+00     0.00e+00     0.00e+00 |  4.88e-04   4.88e-04
+  B8 T2048 H8       32   1 |    0.00e+00     0.00e+00     0.00e+00 |        --   6.10e-04
+  B8 T2048 H8       32   2 |    0.00e+00     0.00e+00     0.00e+00 |        --   6.10e-04
+  B8 T2048 H8       64   1 |    0.00e+00     0.00e+00     0.00e+00 |  4.88e-04   4.88e-04
+  B8 T2048 H8       64   2 |    0.00e+00     0.00e+00     0.00e+00 |  4.88e-04   4.88e-04
+  B1 T512 H4       32   1 |    0.00e+00     0.00e+00     0.00e+00 |        --   4.88e-04
+  B1 T512 H4       32   2 |    0.00e+00     0.00e+00     0.00e+00 |        --   4.88e-04
+  B1 T512 H4       64   1 |    0.00e+00     0.00e+00     0.00e+00 |  4.88e-04   4.88e-04
+  B1 T512 H4       64   2 |    0.00e+00     0.00e+00     0.00e+00 |  4.88e-04   4.88e-04
+  B1 T250 H3       32   1 |    0.00e+00     0.00e+00     0.00e+00 |        --   3.66e-04
+  B1 T250 H3       32   2 |    0.00e+00     0.00e+00     0.00e+00 |        --   3.66e-04
+  B1 T250 H3       64   1 |    0.00e+00     0.00e+00     0.00e+00 |  4.88e-04   2.44e-04
+  B1 T250 H3       64   2 |    0.00e+00     0.00e+00     0.00e+00 |  4.88e-04   2.44e-04
+
+============================================================================================================
+Part C: cost of the store-side fence vs the unfixed deployed `tma2` (CUPTI us/call)
+============================================================================================================
+  shape             BT  NS |      tma2  tma2_full  scalar_p |  full/tma2 full/scalar_p
+  B2 T1024 H8       16   1 |     137.7      140.7     239.3 |      1.021         1.701
+  B2 T1024 H8       16   2 |      76.4       82.6     205.9 |      1.081         2.492
+  B2 T1024 H8       32   1 |      90.3       91.9     143.2 |      1.018         1.558
+  B2 T1024 H8       32   3 |      56.3       56.9     133.4 |      1.011         2.343
+  B2 T1024 H8       64   1 |      62.6       63.6      93.1 |      1.017         1.464
+  B2 T1024 H8       64   2 |      47.3       47.2      84.5 |      0.998         1.791
+  B8 T2048 H8       16   1 |     296.0      300.8     502.5 |      1.016         1.670
+  B8 T2048 H8       16   2 |     199.3      200.5     587.7 |      1.006         2.932
+  B8 T2048 H8       32   1 |     197.7      201.2     295.0 |      1.018         1.466
+  B8 T2048 H8       32   3 |     125.3      124.9     354.6 |      0.997         2.839
+  B8 T2048 H8       64   1 |     137.8      139.6     198.3 |      1.013         1.420
+  B8 T2048 H8       64   2 |      99.4       99.2     206.1 |      0.998         2.078
+
+============================================================================================================
+Part D: after the fix, multi-stage (NS=2/3) is bit-identical to NS=1
+   `tma2_full` NS=2/3 vs `tma2_full` NS=1 (max_abs of dh;  -- = OOM)
+============================================================================================================
+  shape             BT |   NS=2 vs NS=1   NS=3 vs NS=1
+  B2 T1024 H8       16 |      0.000e+00      0.000e+00
+  B2 T1024 H8       32 |      0.000e+00      0.000e+00
+  B2 T1024 H8       64 |      0.000e+00             --
+  B8 T2048 H8       16 |      0.000e+00      0.000e+00
+  B8 T2048 H8       32 |      0.000e+00      0.000e+00
+  B8 T2048 H8       64 |      0.000e+00             --
+
+DONE

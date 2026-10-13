@@ -313,3 +313,12 @@ consumer 用普通 `ld` 读 `st->e`、producer 用 `cp.async.bulk.tensor`（**as
 V-slice 跨连续若干 chunk**（WAR 指纹）。`proxy/base`=**0.96–1.02（免费）**，`proxy` `NS=2/3` vs `base`
 `NS=1` `dh` **逐位相同**。**回授撤回**：多 stage 安全不需要 CUTLASS `PipelineTmaAsync`，`-DB1T_EPROXY`
 即修复；手写「TMA 复用缓冲」的握手必须显式 `fence.proxy.async`（`__threadfence_block`/`volatile` 会漏）。
+
+**P7-37（`docs/07` §40）**：关闭上条的 **store 侧待验证**——`tma2` 输出侧也有对称的一对 generic↔async
+（generic store 写 `dh`/`dv2` tile → `cp.async.bulk.tensor` 读出去，**RAW**）。加 `-DB1T_SPROXY`（写完 tile、
+`__syncwarp()` 后、lane 0 发 store 前一条 `fence.proxy.async`，全 lane 执行）。`NR=40` 确定性扫描：
+`scalar` 三次大配置全 racy（39/40），而 **`tma2` 全族（含无 fence 的 `tma2`）全 0/40**——输出侧 RAW/WAR
+**在本探针观测不到**（但「观测 clean≠有保证 clean」，部署仍取两侧 fence）。`tma2_full` vs `scalar_p` 16 格
+`dh/dv2/dh0` **逐位相同（含非整除 T=250）**、vs bf16 FLA 1 ulp；`full/tma2`=**0.997–1.081（噪声内，免费）**；
+`tma2_full` `NS=2/3` vs `NS=1` 逐位相同。**部署配置**＝`-DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY
+-DB1T_SPROXY`（`NSTAGE` 可 >1）；「输入/输出两个方向的 TMA 复用缓冲都需 `fence.proxy.async`」收口。

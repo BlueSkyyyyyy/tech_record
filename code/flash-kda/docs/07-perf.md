@@ -3968,3 +3968,116 @@ CUPTI `us/call`，空闲卡：
   `+TMADH/+TMADV`（`tma2`）的 store 路径用的是 `cp.async.bulk` store + `bulk_group`，其复用握手
   同样建议补 fence，**待验证**（本轮未对其做同样的确定性扫描修复，但 §38 Part A 的 `tma2/base`
   逐位一致结果不受影响）。
+
+## 40. 关闭 §39.5 的 `tma2` store 侧待验证——同一条 `fence.proxy.async`，但本探针观测不到该竞态（P7-37）
+
+§39 把 §38 的 `NSTAGE≥2` 竞态根因钉死为**输入侧**的 generic↔async WAR（consumer 普通 `ld` 读
+被 TMA 回填的 `st->e`），并给出 `-DB1T_EPROXY` 修法。但它把**输出侧**留作**待验证**：`tma2`
+（`-DB1T_ETMA -DB1T_TMADH -DB1T_TMADV`，当前最强组合）新增了一对反向的 generic↔async——
+compute warp 用 generic store 把 per-warp `dh`/`dv2` tile 写进 smem，再由 `cp.async.bulk.tensor`
+（async proxy）读出去（**RAW**），且 tile 被双重缓冲复用（由 `cp.async.bulk.wait_group.read` 兜
+WAR）。本轮补上这条 fence 并做与 §39 同款的确定性扫描，同时把扫描对象从「标量 store 的 `base`」
+扩到**部署最强变体 `tma2` 本身**。新增 `harness/check_bwd_b1_tma2_race.py`
+（`harness/check_bwd_b1_tma2_race.out.txt`，空闲卡 `CUDA_VISIBLE_DEVICES=1`）。
+
+### 40.1 实现：写 tile 与 `cp.async.bulk` store 之间的一条 fence
+
+给 `b1_tma_probe.cu` 加 `-DB1T_SPROXY`：在 `dh`（`:402-403`）与 `dv2`（`:473-474`）两处**写完
+smem tile、`__syncwarp()` 之后、lane 0 发 `tma5d_store`/`tma4d_store` 之前**各插一条
+`fence_proxy_async()`（即 `fence.proxy.async.shared::cta`，`:59-60`）。放在 `if (l == 0)` **之外**，
+由全 32 lane 执行——这条 fence 只定序**执行线程自己**先前的 generic 写与后续 async proxy 访问，
+而每个 lane 各写自己的行/列，故必须全 lane 都 fence，再由 lane 0 发射（`__syncwarp()` 已把全 warp
+的写汇齐）。语义上与 CUTLASS 的 `tma_store_fence`（`fence_view_async_shared`）一致。
+
+变体矩阵（都以 `-DB1T_ETMA` 为基）：
+
+| 名 | flags | 含义 |
+|---|---|---|
+| `scalar` | `-DB1T_ETMA` | §38 的 racy 对照（标量 `dh`/`dv2`，无任何 fence） |
+| `scalar_p` | `+ -DB1T_EPROXY` | 输入侧修好、无 store TMA（store 侧无 hazard） |
+| `tma2` | `+ -DB1T_TMADH -DB1T_TMADV` | **部署最强**（§38），两侧都无 fence |
+| `tma2_s` | `+ -DB1T_SPROXY` | 只加 store 侧 fence |
+| `tma2_in` | `+ -DB1T_EPROXY` | 只加输入侧 fence（store RAW 仍开着） |
+| `tma2_full` | `+ -DB1T_EPROXY -DB1T_SPROXY` | 两侧都修（安全部署配置） |
+
+### 40.2 Part A：`scalar` 复现 racy，而 **`tma2` 全族（含无 fence 的 `tma2`）本探针观测为 clean**
+
+同一 kernel 连跑 `NR=40`、逐次比 `dh`（大 grid `B8 T2048 H8`，§38/§39 的复现区间）：
+
+| BT | NS | scalar | scalar_p | tma2 | tma2_s | tma2_in | tma2_full |
+|---|---|---|---|---|---|---|---|
+| 16 | 2 | **39/40** | 0/40 | 0/40 | 0/40 | 0/40 | 0/40 |
+| 16 | 3 | **39/40** | 0/40 | 0/40 | 0/40 | 0/40 | 0/40 |
+| 32 | 3 | **39/40** | 0/40 | 0/40 | 0/40 | 0/40 | 0/40 |
+| 32 | 2 | 0/40 | 0/40 | 0/40 | 0/40 | 0/40 | 0/40 |
+| 64 | 2 | 0/40 | 0/40 | 0/40 | 0/40 | 0/40 | 0/40 |
+
+（cell = 与第 0 次不同的 run 数 / 40。`scalar` 三次大配置**全 racy（39/40）**，与 §38/§39 一致。）
+
+**读法（诚实口径）**：
+
+- **`scalar`（标量 store）稳定复现输入侧竞态**，说明扫描本身有效、探针处于敏感窗口。
+- **`tma2` 全族（含**两侧都没 fence**的 `tma2`）在本探针 `NR=40` 下都 0/40**——即**输出侧的
+  generic→async RAW/WAR 在本探针上观测不到**。这与 §35/§36 当时「16 组逐位相同」的**观测**一致。
+  机制推断：换成 `cp.async.bulk` store 后，`st->e` 的消费时点相对 producer 的 TMA 回填被推后
+  （store 引擎与 `bulk_group` 等待改变了指令节奏），把 §39 那个输入侧覆写窗口拱出了敏感区。
+- **但这只是「观测到 clean」，不是「有保证 clean」**（正是 §38.3 的教训）：`st->e` 的输入侧
+  hazard 依旧存在（`tma2` 未加 `EPROXY`），只是本轮窗口没撞上；输出侧 RAW 同理。故**部署配置仍取
+  `tma2_full`**（两侧 fence），代价见 Part C。
+
+### 40.3 Part B：fence 只定序、不改数值——`tma2_full` vs `scalar_p` **逐位相同**
+
+`tma2_full`（两侧 fence 的 TMA store）与 `scalar_p`（标量 store）在同一份操作数上比
+`dh/dv2/dh0`，4 组 shape（含非整除 `T=250`）× `BT=32/64` × `NS=1/2` 共 16 格，**max_abs 全为
+`0.00e+00`**；vs 直接 bf16 FLA `dhu` 仍 **1 ulp**（`dh` 4.88e-4、`dv2` 4.88e-4/6.10e-4、
+`T=250` 的 `dv2` 2.44e-4）——与 §35/§36/§38 逐值一致：
+
+| shape | BT | `dh` | `dv2` | `dh0` | vsFLA `dh` | vsFLA `dv2` |
+|---|---|---|---|---|---|---|
+| B2 T1024 H8 | 32/64 | 0.00e+00 | 0.00e+00 | 0.00e+00 | 4.88e-4 (BT64) | 4.88e-04 |
+| B8 T2048 H8 | 32/64 | 0.00e+00 | 0.00e+00 | 0.00e+00 | 4.88e-4 (BT64) | 4.88e-04 / 6.10e-04 |
+| B1 T512 H4 | 32/64 | 0.00e+00 | 0.00e+00 | 0.00e+00 | 4.88e-4 (BT64) | 4.88e-04 |
+| B1 T250 H3 | 32/64 | 0.00e+00 | 0.00e+00 | 0.00e+00 | 4.88e-4 (BT64) | 3.66e-04 / 2.44e-04 |
+
+即：**store 侧 fence 是纯 ordering，不引入任何数值差异**（`dh` 只在 `BT=64` 与 FLA chunk 对齐时
+才可逐元素比，故 `BT=32` 行 vsFLA `dh` 记 `--`）。
+
+### 40.4 Part C：store 侧 fence 的代价在噪声内（CUPTI `us/call`）
+
+| shape | BT | NS | tma2 | tma2_full | scalar_p | full/tma2 | scalar_p/full |
+|---|---|---|---|---|---|---|---|
+| B2 T1024 H8 | 16 | 1 | 137.7 | 140.7 | 239.3 | 1.021 | 1.70 |
+| B2 T1024 H8 | 16 | 2 | 76.4 | 82.6 | 205.9 | 1.081 | 2.49 |
+| B2 T1024 H8 | 32 | 3 | 56.3 | 56.9 | 133.4 | 1.011 | 2.34 |
+| B2 T1024 H8 | 64 | 1 | 62.6 | 63.6 | 93.1 | 1.017 | 1.46 |
+| B8 T2048 H8 | 32 | 1 | 197.7 | 201.2 | 295.0 | 1.018 | 1.47 |
+| B8 T2048 H8 | 32 | 3 | 125.3 | 124.9 | 354.6 | 0.997 | 2.84 |
+| B8 T2048 H8 | 64 | 1 | 137.8 | 139.6 | 198.3 | 1.013 | 1.42 |
+| B8 T2048 H8 | 64 | 2 | 99.4 | 99.2 | 206.1 | 0.998 | 2.08 |
+
+**`full/tma2` = 0.997–1.081（多数 ~1.01，噪声内）**——加两条 store 侧 fence **免费**（与 §39 Part C
+的输入侧 fence 同为噪声内）。顺带复核 `tma2_full` 相对标量 store 的累计优势仍在
+（`scalar_p/tma2_full` = 1.42–2.93），即 §35/§36 的 TMA store 收益不受本轮影响。
+
+### 40.5 Part D：`tma2_full` 多 stage 与 `NS=1` **逐位相同**
+
+`tma2_full` 在 `NS=2/3` vs `NS=1`，`dh` **max_abs 全 `0.000e+00`**（`BT=16/32/64`、两组 shape、
+`BT=64` 的 `NS=3` 因 smem OOM 记 `--`）。与 §39 Part D 合并：**两侧各一条 `fence.proxy.async` 后，
+手写 TMA 流水在 `NSTAGE≥2` 既 run-to-run 确定、又与单 stage 数值完全一致**。
+
+### 40.6 结论 / 对目标卡的设计输入
+
+- **同一条 `fence.proxy.async` 覆盖两个方向**：输入侧（`st->e` 的 WAR，§39）与输出侧（`dh`/`dv2`
+  tile 的 RAW，本轮）。二者机制对称——**凡是「generic proxy 写/读」与「async proxy（TMA）读/写」
+  共用同一块 smem 缓冲**，都必须显式 `fence.proxy.async`，`full`/`empty` mbarrier 只定序 generic
+  proxy 内部。
+- **本轮诚实定位**：输出侧 RAW/WAR 在 `X_FLASHKDA` 探针上**观测不到**（`tma2` 全族 0/40），只有
+  输入侧在标量 store 基线可复现；但「观测 clean」不等于「有保证 clean」（§38.3 教训），故**部署
+  配置取 `tma2_full`**（`-DB1T_EPROXY -DB1T_SPROXY`），代价在噪声内、数值逐位不变。
+- **对目标卡 CUDA B1 的最终配置**：`-DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY -DB1T_SPROXY`，
+  `NSTAGE` 可按需 >1（已确定性 + 逐位无损）；§22–§36 的 `xFLA`（大 shape ≤1.15、小 shape 2.0–2.7）
+  具此配置不变。
+- **方法学（补充 §38.3）**：确定性扫描应覆盖**部署最强变体本身**、而非只扫一个基座——本轮把
+  §39 的「输入侧已定位、输出侧待验证」收口为「输出侧同需要 fence、但探针观测不到」，并留下唯一
+  边界**待验证**：若换用更深 pipeline 或不同 store tile 形状（改变写→store 的时序），输出侧竞态的
+  可观测性可能变化，届时仍以 `tma2_full` 为准。
