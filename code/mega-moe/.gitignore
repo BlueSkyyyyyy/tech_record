@@ -1,6 +1,7 @@
 # 编译/运行产物
 *.out
 *.o
+*.so
 *.cubin
 *.ptx
 *.ncu-rep
