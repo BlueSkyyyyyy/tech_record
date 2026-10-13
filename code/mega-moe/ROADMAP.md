@@ -2281,6 +2281,34 @@
       `value_or(0/False)` 不误判。配套博客 `content/posts/mega-moe-83-deepep-epbuffer-handle-orchestration`
       （索引页新增第 83 篇）。
 
+### P74 增量（opt-in，补齐「DeepGEMM 的 Python 绑定面」）
+
+- [x] **P74-1** **DeepGEMM 的 Python 绑定面**（`csrc/python_api.cpp` + 11 个 `register_apis`
+      在 `csrc/apis/*.hpp` + `deep_gemm/__init__.py` + `deep_gemm/mega/__init__.py`）。
+      前面 83 篇把**内核/测试**拆得很细，但「它们在 Python 里到底怎么被调到」从没单独讲清。
+      **整层是 pybind11 host 绑定，与 SM100/UMMA 无关，H100 可跑、真机实测**。
+      → `docs/84-deepgemm-python-api-surface.md`（真实行号核对）：`python_api.cpp:24-49` 的
+      `PYBIND11_MODULE(_C)` 装配（1 个 `deep_jit::register_python_api` + 11 个 `register_apis`、
+      `mega::` 排在 `gemm` 之后的「C++ 裸入口先注册、Python 包装后转发」）；`_C` 顶层 **76 名**
+      = 62 `m.def` + 10 `m.attr` 别名 + {`Runtime`,`get_jit`} + {`epilogue`,`locality_domain`}
+      （真机对账 0 多余 0 缺失）。**三组默认值契约**：① `compiled_dims` 随主序变（`nt/nn`=`nk`、
+      `tn/tt`=`mn`，`gemm.hpp:842/850/858/866`，18 入口 18/18）；② `recipe` 按 dtype 分
+      （`k_grouped_fp8`=`(1,1,128)`、`k_grouped_fp4`=`(1,1,32)`、`fp8_einsum`=`(1,128,128)`，
+      `gemm.hpp:895-919`/`einsum.hpp:304-308`）；③ `alpha`/FP8 输出对是 `Alpha`/`FP8Quantization`
+      的**同义简写**（`epilogue_class.hpp:11-12`），真机 `alpha=2.0` ≡ `epilogue.Alpha(2.0)`
+      **逐位**。**别名机制** `gemm.hpp:920-930` 的 `m.attr("新") = m.attr("旧")`（FP8/FP4 统一命名）
+      = **同一 pybind 函数对象**（`is` 10/10，非复制）。**两个子模块**：`epilogue`（基类 + 4 工厂
+      类，`isinstance` 继承链为真、`Alpha` 无参抛 `TypeError`）、`locality_domain`（9 函数）。
+      **公开 vs 隐藏**：`__init__.py:16-127` 显式 re-export，5 个入口**故意隐藏**（`Runtime`/
+      `get_jit`/`init`/`get_symm_buffer_size_for_mega_moe`/`get_token_alignment_for_mega_moe`），
+      5 个是 **Python-only mega 包装**（`.mega` 把 `SymmBuffer` 拆成裸参数转调 `_C`）；无 `py::arg`
+      的入口退化为 `argN`（`get_block_m_for_mega_moe` 末位是 `activation`）。两行副作用
+      `_C.init(dirname)` + `atexit.register(shutdown)`（对应第 33/50 篇）。H100 实测
+      `harness/exp_deepgemm_python_api.{py,sh,out.txt}` **51/51 PASS**（解析源码 vs 真机 `_C`
+      逐条对账、别名同一性、`compiled_dims`/`recipe` 默认值、子模块工厂、隐藏面、`bf16_gemm_nt`
+      冒烟 relerr 1.77e-5、`alpha`≡`epilogue.Alpha` 逐位）。配套博客
+      `content/posts/mega-moe-84-deepgemm-python-api-surface`（索引页新增第 84 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2305,8 +2333,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P73 各增量完成（P15-1…P41-1、P42-1…P73-1）。**
-  本轮 P73-1：新建 `docs/83-deepep-epbuffer-handle-orchestration.md`
+- 当前进度：**P0~P14 全部完成；P15~P74 各增量完成（P15-1…P41-1、P42-1…P74-1）。**
+  本轮 P74-1：新建 `docs/84-deepgemm-python-api-surface.md`
+  （+`harness/exp_deepgemm_python_api.{py,sh,out.txt}`）——补上一直缺席的
+  **「DeepGEMM 在 Python 里怎么被调到」**：`python_api.cpp:24-49` 的 `PYBIND11_MODULE(_C)`
+  装配（1 JIT 注册 + 11 `register_apis`）+ `deep_gemm/__init__.py:16-127` 的显式 re-export。
+  `_C` 顶层 **76 名** = 62 `m.def` + 10 `m.attr` 别名 + {`Runtime`,`get_jit`} +
+  {`epilogue`,`locality_domain`}（对账 0 多余 0 缺失）。三组默认值：① `compiled_dims` 随主序
+  （`nt/nn`=nk、`tn/tt`=mn，18/18）；② `recipe` 按 dtype（`(1,1,128)`/`(1,1,32)`/`(1,128,128)`）；
+  ③ `alpha`/FP8 输出对 = `Alpha`/`FP8Quantization` 同义简写（`alpha=2.0` ≡ `epilogue.Alpha(2.0)`
+  逐位）。别名 `m.attr`=**同一函数对象**（`is` 10/10）。两子模块 `epilogue`（基类+4 工厂类）/
+  `locality_domain`（9 函数）；5 个隐藏入口、5 个 Python-only mega 包装（`.mega` 拆 `SymmBuffer`）；
+  无 `py::arg` 入口退化 `argN`；`_C.init(dirname)`+`atexit(shutdown)`。**H100 真机 51/51 PASS**。
+  索引页新增第 84 篇。
+  上一轮 P73-1：新建 `docs/83-deepep-epbuffer-handle-orchestration.md`
   （+`harness/exp_deepep_epbuffer_handle.{py,sh,out.txt}`）——补上 DeepEP 一直缺席的
   **host Python 编排层与 `EPHandle` 句柄契约**。`EPHandle`（`ep.py:27-207`）的两个身份：
   ① **接口**（`test_mega_moe.py:307-333` 把 `handle.psum_num_recv_tokens_per_expert` 当 grouped

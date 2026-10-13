@@ -1,0 +1,159 @@
+DeepGEMM Python 绑定面 —— H100 真机
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 cuda 13.2
+DeepGEMM 源码：057ca59  (2026-09-30 09:48:05 +0800)
+
+==============================================================================
+DeepGEMM Python 绑定面 —— H100(sm90) 真机
+==============================================================================
+deep_gemm 2.8.1  from ~/github/DeepGEMM/deep_gemm/__init__.py
+torch 2.12.0a0+0291f960b6.nv26.04.48445190  cuda 13.2  cc (9, 0)  NVIDIA H100 80GB HBM3
+DeepGEMM 源码 ~/github/DeepGEMM
+
+--- A. 源码解析（csrc/apis/*.hpp）---
+  m.def 条目 62、m.attr 别名 10、submodule.def 9、def_submodule ['epilogue', 'locality_domain']
+    def  batched_symm                                      gemm.hpp
+    def  batched_syrk                                      gemm.hpp
+    def  bf16_gemm_nn                                      gemm.hpp
+    def  bf16_gemm_nt                                      gemm.hpp
+    def  bf16_gemm_tn                                      gemm.hpp
+    def  bf16_gemm_tt                                      gemm.hpp
+    def  bf16_mega_gate                                    mega_gate.hpp
+    def  bf16_mega_moe                                     mega_moe.hpp
+    def  cublaslt_gemm_nn                                  gemm.hpp
+    def  cublaslt_gemm_nt                                  gemm.hpp
+    def  cublaslt_gemm_tn                                  gemm.hpp
+    def  cublaslt_gemm_tt                                  gemm.hpp
+    def  cublaslt_nvfp4_gemm_nt                            gemm.hpp
+    def  einsum                                            einsum.hpp
+    def  fp8_einsum                                        einsum.hpp
+    def  fp8_fp4_gemm_nn                                   gemm.hpp
+    def  fp8_fp4_gemm_nt                                   gemm.hpp
+    def  fp8_fp4_gemm_tn                                   gemm.hpp
+    def  fp8_fp4_gemm_tt                                   gemm.hpp
+    def  fp8_fp4_mega_moe                                  mega_moe.hpp
+    def  fp8_fp4_mqa_logits                                attention.hpp
+    def  fp8_fp4_paged_mqa_logits                          attention.hpp
+    def  fp8_fp4_paged_sparse_mqa_logits                   attention.hpp
+    def  fp8_fp4_sparse_mqa_logits                         attention.hpp
+    def  get_block_m_for_mega_moe                          mega_moe.hpp
+    def  get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor  layout.hpp
+    def  get_mk_alignment_for_contiguous_layout            layout.hpp
+    def  get_mn_major_tma_aligned_packed_ue8m0_tensor      layout.hpp
+    def  get_mn_major_tma_aligned_tensor                   layout.hpp
+    def  get_mqa_logits_metadata                           attention.hpp
+    def  get_num_sms                                       config.hpp
+    def  get_paged_mqa_logits_metadata                     attention.hpp
+    def  get_paged_sparse_mqa_logits_metadata              attention.hpp
+    def  get_pdl                                           config.hpp
+    def  get_sparse_mqa_logits_metadata                    attention.hpp
+    def  get_symm_buffer_size_for_mega_moe                 mega_moe.hpp
+    def  get_tc_util                                       config.hpp
+    def  get_theoretical_mk_alignment_for_contiguous_layout  layout.hpp
+    def  get_tma_aligned_size                              layout.hpp
+    def  get_token_alignment_for_mega_moe                  mega_moe.hpp
+    def  init                                              config.hpp
+    def  k_grouped_bf16_gemm_tn_contiguous                 gemm.hpp
+    def  k_grouped_fp4_gemm_nt_contiguous                  gemm.hpp
+    def  k_grouped_fp8_gemm_nt_contiguous                  gemm.hpp
+    def  k_grouped_fp8_gemm_tn_contiguous                  gemm.hpp
+    def  m_grouped_bf16_gemm_nn_contiguous                 gemm.hpp
+    def  m_grouped_bf16_gemm_nt_contiguous                 gemm.hpp
+    def  m_grouped_bf16_gemm_nt_masked                     gemm.hpp
+    def  m_grouped_fp8_fp4_gemm_nn_contiguous              gemm.hpp
+    def  m_grouped_fp8_fp4_gemm_nt_contiguous              gemm.hpp
+    def  m_grouped_fp8_fp4_gemm_nt_masked                  gemm.hpp
+    def  mega_mhc                                          mega_mhc.hpp
+    def  set_block_size_multiple_of                        config.hpp
+    def  set_ignore_compile_dims                           config.hpp
+    def  set_mk_alignment_for_contiguous_layout            layout.hpp
+    def  set_num_sms                                       config.hpp
+    def  set_pdl                                           config.hpp
+    def  set_tc_util                                       config.hpp
+    def  shutdown                                          config.hpp
+    def  tf32_hc_prenorm_gemm                              hyperconnection.hpp
+    def  transform_sf_into_required_layout                 layout.hpp
+    def  use_deterministic_algorithms                      config.hpp
+    attr fp4_gemm_nt                                       = fp8_fp4_gemm_nt
+    attr fp8_gemm_nn                                       = fp8_fp4_gemm_nn
+    attr fp8_gemm_nt                                       = fp8_fp4_gemm_nt
+    attr fp8_gemm_tn                                       = fp8_fp4_gemm_tn
+    attr fp8_gemm_tt                                       = fp8_fp4_gemm_tt
+    attr m_grouped_fp4_gemm_nt_contiguous                  = m_grouped_fp8_fp4_gemm_nt_contiguous
+    attr m_grouped_fp4_gemm_nt_masked                      = m_grouped_fp8_fp4_gemm_nt_masked
+    attr m_grouped_fp8_gemm_nn_contiguous                  = m_grouped_fp8_fp4_gemm_nn_contiguous
+    attr m_grouped_fp8_gemm_nt_contiguous                  = m_grouped_fp8_fp4_gemm_nt_contiguous
+    attr m_grouped_fp8_gemm_nt_masked                      = m_grouped_fp8_fp4_gemm_nt_masked
+
+--- B. `_C` 顶层名字 vs 源码 ---
+  [PASS] m.def 全部出现在 _C  缺 []
+  [PASS] m.attr 别名全部出现在 _C
+  [PASS] def_submodule 顶层可见  ['epilogue', 'locality_domain']
+  [PASS] _C 顶层无多余项  多 []
+  _C 顶层共 76 个：62 m.def + 10 attr + ['Runtime', 'get_jit'] + ['epilogue', 'locality_domain'] = 76
+
+--- C. 别名 `m.attr` 是同一函数对象 ---
+  [PASS] fp4_gemm_nt is fp8_fp4_gemm_nt
+  [PASS] fp8_gemm_nn is fp8_fp4_gemm_nn
+  [PASS] fp8_gemm_nt is fp8_fp4_gemm_nt
+  [PASS] fp8_gemm_tn is fp8_fp4_gemm_tn
+  [PASS] fp8_gemm_tt is fp8_fp4_gemm_tt
+  [PASS] m_grouped_fp4_gemm_nt_contiguous is m_grouped_fp8_fp4_gemm_nt_contiguous
+  [PASS] m_grouped_fp4_gemm_nt_masked is m_grouped_fp8_fp4_gemm_nt_masked
+  [PASS] m_grouped_fp8_gemm_nn_contiguous is m_grouped_fp8_fp4_gemm_nn_contiguous
+  [PASS] m_grouped_fp8_gemm_nt_contiguous is m_grouped_fp8_fp4_gemm_nt_contiguous
+  [PASS] m_grouped_fp8_gemm_nt_masked is m_grouped_fp8_fp4_gemm_nt_masked
+
+--- D. `compiled_dims` 默认值（随主序变）---
+  [PASS] fp8_fp4_gemm_nt.compiled_dims = nk  got=nk
+  [PASS] fp8_fp4_gemm_nn.compiled_dims = nk  got=nk
+  [PASS] fp8_fp4_gemm_tn.compiled_dims = mn  got=mn
+  [PASS] fp8_fp4_gemm_tt.compiled_dims = mn  got=mn
+  [PASS] m_grouped_fp8_fp4_gemm_nt_contiguous.compiled_dims = nk  got=nk
+  [PASS] m_grouped_fp8_fp4_gemm_nn_contiguous.compiled_dims = nk  got=nk
+  [PASS] m_grouped_fp8_fp4_gemm_nt_masked.compiled_dims = nk  got=nk
+  [PASS] k_grouped_fp8_gemm_tn_contiguous.compiled_dims = mn  got=mn
+  [PASS] k_grouped_fp8_gemm_nt_contiguous.compiled_dims = mn  got=mn
+  [PASS] k_grouped_fp4_gemm_nt_contiguous.compiled_dims = mn  got=mn
+  [PASS] bf16_gemm_nt.compiled_dims = nk  got=nk
+  [PASS] bf16_gemm_nn.compiled_dims = nk  got=nk
+  [PASS] bf16_gemm_tn.compiled_dims = mn  got=mn
+  [PASS] bf16_gemm_tt.compiled_dims = mn  got=mn
+  [PASS] m_grouped_bf16_gemm_nt_contiguous.compiled_dims = nk  got=nk
+  [PASS] m_grouped_bf16_gemm_nn_contiguous.compiled_dims = nk  got=nk
+  [PASS] m_grouped_bf16_gemm_nt_masked.compiled_dims = nk  got=nk
+  [PASS] k_grouped_bf16_gemm_tn_contiguous.compiled_dims = mn  got=mn
+
+--- D2. `recipe` 默认值 ---
+  [PASS] k_grouped_fp8_gemm_tn_contiguous.recipe = (1, 1, 128)  got=(1, 1, 128)
+  [PASS] k_grouped_fp8_gemm_nt_contiguous.recipe = (1, 1, 128)  got=(1, 1, 128)
+  [PASS] k_grouped_fp4_gemm_nt_contiguous.recipe = (1, 1, 32)  got=(1, 1, 32)
+  [PASS] fp8_einsum.recipe = (1, 128, 128)  got=(1, 128, 128)
+
+--- D3. 无 py::arg 的入口 → 位置参数名为 arg0.. ---
+  [PASS] get_block_m_for_mega_moe 用 argN 占位  arg0: typing.SupportsInt, arg1: typing.SupportsInt, arg2: typing.SupportsInt, arg3: typing.SupportsInt, arg4: typing.SupportsInt, arg5: str
+  [PASS] get_tma_aligned_size 用 argN 占位  arg0: typing.SupportsInt, arg1: typing.SupportsInt
+  [PASS] get_mn_major_tma_aligned_tensor 用 argN 占位  arg0: torch.Tensor
+
+--- E. 子模块 ---
+  [PASS] epilogue 基类 + 4 算子  ['Alpha', 'BF16StochasticRounding', 'Epilogue', 'FP8Quantization', 'Identity']
+  [PASS] locality_domain 9 个  9 submodule.def 对账: True
+  [PASS] epilogue 四类可实例化
+  [PASS] Alpha 无参被拒  (TypeError)
+  [PASS] Alpha 是 Epilogue 子类
+
+--- F. `deep_gemm` 公开面 vs `_C` ---
+  在 _C 但未在 deep_gemm 顶层 re-export：['Runtime', 'get_jit', 'get_symm_buffer_size_for_mega_moe', 'get_token_alignment_for_mega_moe', 'init']
+  [PASS] 隐藏入口符合预期  ['Runtime', 'get_jit', 'get_symm_buffer_size_for_mega_moe', 'get_token_alignment_for_mega_moe', 'init']
+  [PASS] Mega MoE 公开入口来自 .mega（Python 包装）  ['SymmBuffer', 'bf16_mega_moe', 'fp8_fp4_mega_moe', 'get_symm_buffer_for_mega_moe', 'transform_weights_for_mega_moe']
+  [PASS] get_block_m_for_mega_moe 是 _C 直通（辅助），非 .mega
+  [PASS] _C.fp8_fp4_mega_moe 有 pybind 签名  fp8_fp4_mega_moe(arg0: torch.Tensor, arg1: tuple[torch.Tensor, torch.T
+
+--- G. 冒烟：真实调用（arch 无关）---
+  [PASS] bf16_gemm_nt 真实发射 + 数值合理  relerr=1.771e-05
+  [PASS] alpha=2.0 简写 ≈ 输出乘 2  relerr=1.771e-05
+  [PASS] epilogue.Alpha(2.0) 与 alpha=2.0 逐位一致
+
+==============================================================================
+TOTAL 51/51 PASS   FAIL=[]
+==============================================================================
