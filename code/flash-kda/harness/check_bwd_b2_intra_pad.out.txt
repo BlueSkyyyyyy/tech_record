@@ -1,0 +1,123 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+============================================================================================
+Part A: correctness -- each pad variant vs unpadded prod_intra (must be bit-identical)
+============================================================================================
+  built pad0   K= 64  smem=  93568 B  91.4 KiB
+  built q8     K= 64  smem=  95104 B  92.9 KiB
+  built q16    K= 64  smem=  96640 B  94.4 KiB
+  built s4     K= 64  smem=  93824 B  91.6 KiB
+  built q8s4   K= 64  smem=  95360 B  93.1 KiB
+
+# K=64 B2 T1024 H8  NT=64
+    q8     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q16    vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    s4     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q8s4   vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+
+# K=64 T512 H4  NT=32
+    q8     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q16    vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    s4     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q8s4   vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+
+# K=64 T250 H3 (non-div)  NT=16
+    q8     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q16    vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    s4     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q8s4   vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+
+# K=64 T64 H1 (single chunk)  NT=4
+    q8     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q16    vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    s4     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q8s4   vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+  built pad0   K=128  smem= 155264 B  151.6 KiB
+  built q8     K=128  smem= 156800 B  153.1 KiB
+  built q16    K=128  smem= 158336 B  154.6 KiB
+  built s4     K=128  smem= 155520 B  151.9 KiB
+  built q8s4   K=128  smem= 157056 B  153.4 KiB
+
+# K=128 B2 T1024 H8  NT=64
+    q8     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q16    vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    s4     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q8s4   vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+
+# K=128 T512 H4  NT=32
+    q8     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q16    vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    s4     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q8s4   vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+
+# K=128 T250 H3 (non-div)  NT=16
+    q8     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q16    vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    s4     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q8s4   vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+
+# K=128 T64 H1 (single chunk)  NT=4
+    q8     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q16    vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    s4     vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+    q8s4   vs pad0  worst max_abs=0.000e+00  [BIT-IDENTICAL]
+
+Part A worst max_abs over all variants/cases: 0.000e+00  [BIT-IDENTICAL]
+
+============================================================================================
+Part B: resources (registers / spill / dynamic smem)
+============================================================================================
+  build              regs   spill      smem  occupancy
+  K= 64 pad0           90       0     93568         ok
+  K= 64 q8             89       0     95104         ok
+  K= 64 q16            89       0     96640         ok
+  K= 64 s4             90       0     93824         ok
+  K= 64 q8s4           89       0     95360         ok
+  K=128 pad0          128       4    155264         ok
+  K=128 q8            128       4    156800         ok
+  K=128 q16           128       4    158336         ok
+  K=128 s4            128       0    155520         ok
+  K=128 q8s4          128       4    157056         ok
+
+============================================================================================
+Part C: timing (CUPTI dev, kernel-only) -- prod_intra per variant + prod reference
+============================================================================================
+
+# K=64 B8 T2048 H8
+  variant     dev(us)    vs pad0
+  __prod__      413.1      0.783
+  pad0          527.9      1.000
+  q8            526.9      0.998
+  q16           529.5      1.003
+  s4            519.0      0.983
+  q8s4          518.8      0.983
+
+# K=64 B2 T1024 H8
+  variant     dev(us)    vs pad0
+  __prod__       63.1      0.843
+  pad0           74.8      1.000
+  q8             75.0      1.003
+  q16            75.2      1.006
+  s4             74.2      0.992
+  q8s4           74.1      0.991
+
+# K=128 B8 T2048 H8
+  variant     dev(us)    vs pad0
+  __prod__     1288.5      0.796
+  pad0         1619.5      1.000
+  q8           1591.4      0.983
+  q16          1593.1      0.984
+  s4           1601.9      0.989
+  q8s4         1580.2      0.976
+
+# K=128 B2 T1024 H8
+  variant     dev(us)    vs pad0
+  __prod__      167.4      0.791
+  pad0          211.8      1.000
+  q8            208.0      0.982
+  q16           209.1      0.987
+  s4            210.3      0.993
+  q8s4          208.3      0.984
+
+DONE

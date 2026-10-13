@@ -355,6 +355,24 @@ DEV void st2(float* p, float a, float b) {
 #if B2M_INTRA && !B2M_PROD
 #error "B2M_INTRA requires B2M_PROD"
 #endif
+// P7-94: pad the folded-`intra` smem staging row stride (a degenerate swizzle) -- the cheap
+// controlled experiment docs/07 §96.5 named as the way to flip the K==128 fold's ~26.6%
+// serial-tail.  §96.3 attributed that tail to the **shared-memory read pipe** (`bank conflicts`
+// x2.18/x1.55, `shared wavefronts` x1.43/x1.26), not to bytes/tensor.  The staging tiles
+// `siq/sik/sig[BT][KD]` are read in the intra mma loop as `sh->sik[j0][col]` with `j0 = kc + t`
+// (`t = lane&3`) and `col = warp*BW + nt*8 + g` (`g = lane>>2`); at the natural stride `KD`
+// (a multiple of 32) the four lanes that share `g` but differ in `t` land on the **same bank**.
+// A stride of `KD + P` with `P=8` spreads them (`8*t` fully decorrelates the four `t`).
+// `sda[BT][BT]` gets a separate pad: at `BT=16` (`stride%32 in {0,16}`) the `sh->sda[g][j0]`
+// pattern collides; `SP=4` gives `20*g % 32 in {0,20,8,28,16,4,24,12}` (conflict-free).
+// Both default to 0 (byte-identical to the unpadded kernel -- the reader/writer index with the
+// **same** 2-D `[row][col]` so only the declared row stride changes, no reader edits).
+#ifndef B2M_INTRA_PAD
+#define B2M_INTRA_PAD 0
+#endif
+#ifndef B2M_INTRA_SPAD
+#define B2M_INTRA_SPAD 0
+#endif
 // P7-56: the *fifth non-GEMM segment* of B2 in CUDA -- the per-token write-gate gradient
 //   db[o_A] = sum_v dvb[o_A,v] * v[o_A,v]  +  sum_k dkgb[o_A,k] * kg[o_A,k]
 // (FLA `chunk_bwd.py`, `check_bwd_dqkg_kernel.py:180-210`: `b_db = sum_V(b_dvb*b_v)` then
@@ -600,10 +618,10 @@ struct alignas(128) Shared {
     // the `dAqk` input tile [BT,BT]; `dAkk` is read directly from SAND's `daB` (masked `-X2`),
     // so no `dA` staging/round-trip.  `idbrow` is the `db` cross-warp reduction (merged into
     // the `db` store).
-    float siq[BT][KD];
-    float sik[BT][KD];
-    float sig[BT][KD];
-    float sda[BT][BT];
+    float siq[BT][KD + B2M_INTRA_PAD];
+    float sik[BT][KD + B2M_INTRA_PAD];
+    float sig[BT][KD + B2M_INTRA_PAD];
+    float sda[BT][BT + B2M_INTRA_SPAD];
     float idbrow[NW][BT];
 #endif
 };

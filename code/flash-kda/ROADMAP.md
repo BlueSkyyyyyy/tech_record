@@ -1318,8 +1318,30 @@
        （K 翻倍相对成本减半、§95 ~30%→~20%），而折叠增量稳定 ~26–28% ⟹ K=64 净赢（b3 30% > 增量 28%）、
        K=128 略输；`fold/prod=1.266` 配 `b3≈20%` ⟹ `fold/(p+b3)≈1.055`，与 §95 的 1.049 自洽。**设计输入**：
        K=128 折叠要翻正，预算投 **smem staging 布局**（`q/k/g`/intra A-B swizzle/pad 或 bf16 staging），非省字节。
-       默认部署仍 §45 的 `cf`。**边界**：单 shape `b8t2048h8`、`K=V∈{64,128}`、fp32/HDW/非 TMA/非 bf16；
-       `K=256` 折叠仍不可行（smem）。
+        默认部署仍 §45 的 `cf`。**边界**：单 shape `b8t2048h8`、`K=V∈{64,128}`、fp32/HDW/非 TMA/非 bf16；
+        `K=256` 折叠仍不可行（smem）。
+- [x] **P7-94** 用最便宜的受控实验检验 §96.5 给 `intra` 折叠 K==128 尾指名的「**smem staging 布局**
+        （swizzle/pad）」杠杆——给折叠对角的 staging 行 stride 加 padding（退化版 swizzle）。**为什么该有用**：
+        折叠的四个 `[BT,BT]@[BT,KD]` tf32 mma 读 `sh->sik[j0][col]`（`j0=kc+t, t=lane&3`、
+        `col=warp*BW+nt*8+g, g=lane>>2`，`b2_mma_probe.cu:1655-1660`），自然 `stride=KD`（32 倍数）令 4 个
+        `t` 落**同一 bank**（4-way），`KD+8` 用 `8t` 错开。加编译开关 `B2M_INTRA_PAD`（`siq/sik/sig`）/
+        `B2M_INTRA_SPAD`（`sda`），**默认 0 逐字节等价**（reader/writer 同用 `[row][col]`，只改**声明** stride，
+        **零 reader 修改**）。新增 `harness/check_bwd_b2_intra_pad.py`（`check_bwd_b2_intra_pad.out.txt`）+
+        `harness/probe_b2_intra_pad_ncu.sh`（`probe_b2_intra_pad_ncu.out.txt`，空闲卡）+ `docs/07` §97。
+        **Part A**：`K=V∈{64,128}`、4 shape（含非整除 `T=250`/单 chunk `T=64`），`q8/q16/s4/q8s4` 十项输出 vs
+        `pad0` **全逐位（`max_abs=0`）**；smem 增量小（`K=128` 155264→156800/158336/155520/157056 B，均 1 block/SM）、
+        regs 不变。**Part C（关键）**：`K=128` 最优（`q8`/`q8s4`）只 **0.975×**（B8T2048H8 1622.7→1582.7µs）、
+        `B2T1024H8` 0.984×，`K=64` 噪声内（`q16` 1.006–1.015 略慢）。**Part D（ncu，`K=128` `b8t2048h8`）**：
+        bank conflict **36.36→26.96→25.40M（×0.74/×0.70）**、shared wavefront **88.53→79.13→77.57M（×0.89/×0.88）**，
+        但 `dur` 1.62→1.59→1.60ms（**×0.98/×0.99**）、global-ld sector/DRAM/L2 字节**逐位不变**、
+        `tensor%`/`sm%`/`warps_active` **逐值不变**（`pad0` 逐值复现 §96.3 的 `prod_intra`）。**归因修正**：
+        冲突砍 ~28% 而时长不动 ⟹ §96.5 的「布局杠杆」是 **~1.02× 分项、不是量级项**；K==128 折叠的 ~26.6%
+        尾指是**多出来的串行工作量本身**（四个 mma+`exp2f`+staging 在关键路径），不是其中 smem 读的重放次数
+        （与 P7-17 的 `B1_PAD`：冲突 76%→19–25% 而 `wait` 纹丝不动同构）。**设计输入**：撤回 §96.5 的材质暗示，
+        默认保持 `B2M_INTRA_PAD=0`；翻正 K=128 折叠要靠**把它移出关键路径/减少这段活**（`K=128` 用「prod+独立
+        b3」、`K=64` 用折叠的按 K 切换，或未来 warp-specialization 重叠），`K=256` 的 **bf16 staging 是容量
+        （非速度）杠杆**。默认部署仍 §45 的 `cf`。见 `docs/07` §97。**边界**：单一 `ncu` shape、只试两种 pad
+        （`P∈{0,4,8,16}`）、未做一般 swizzle（但「冲突大降、时长不动」已否定量级项）。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1841,13 +1863,36 @@
   （tf32 无 16-bit `ldmatrix`，§47.6）。**推论**：`K=128` 折叠要翻正、`K=256` 要可行，预算应投 **staging
   布局**（swizzle/pad 或 bf16 降位），**不是省字节**。**判 crossover 的杠杆是「被替代的独立核相对成本」**：
   独立 `b3` ∝ `T·BT·KD`、`prod` ∝ `T·KD·V` ⟹ `b3/prod ∝ BT/K`（K 翻倍减半），故折叠在 `K=64` 净赢、
-  `K=128` 略输——**不是折叠本身变贵，是被替代者变便宜**。
+   `K=128` 略输——**不是折叠本身变贵，是被替代者变便宜**。
+- **「消掉某段 smem 读的 bank conflict」≠「消掉那段的时长」——先证它是量级项再动布局**（P7-94，§97）：
+  给 `intra` 折叠的 staging 行 stride 加 pad（`B2M_INTRA_PAD`），**bank conflict 36.36→25.40M（×0.70）、
+  shared wavefront 88.53→77.57M（×0.88）**，`dur` 却只 **1.62→1.60ms（×0.99）**、字节/`tensor%`/占用率
+  **逐位不变**（逐位无损、smem +1.5KB）。即 §96.3 的「代价落 bank conflict」是**分项 ~1.02×**、**不是**
+  §96.5 以为的量级项；K==128 折叠的 ~26.6% 是**多出来的串行工作量本身**在关键路径（同 P7-17 `B1_PAD`：
+  冲突 76%→19–25%、`wait` 纹丝不动）。**判据**：改 smem 布局前，先做「pad/swizzle 使冲突大降、看时长是否
+  随比例动」的受控实验——动了才是量级项，不动就别花预算在布局上。**不要**把「某段在隔离核里能重叠」的
+  结论外推（§64/§66；折叠是每 CTA 尾部的串行尾巴，改布局只改变重放次数不改变这段活的量）。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-93 补测 + P8-3**。
-  - P7-93（本轮）：**关闭 §95.6/§94.7 空白 (2) 的另一半——`intra` 折叠 × `K≠128` 的 `ncu` pipe 归因**。
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-94 补测 + P8-3**。
+  - P7-94（本轮）：**用最便宜受控实验检验 §96.5 给 `intra` 折叠 K==128 尾指名的「smem staging 布局
+    （pad/swizzle）」杠杆——答案是空：bank conflict 砍 ~28% 而时长几乎不动**。新增两个默认 0 的编译开关
+    `B2M_INTRA_PAD`（`siq/sik/sig` 行 stride）/ `B2M_INTRA_SPAD`（`sda`），**reader 零修改、默认逐字节等价**。
+    新增 `harness/check_bwd_b2_intra_pad.py`（`check_bwd_b2_intra_pad.out.txt`）+
+    `harness/probe_b2_intra_pad_ncu.sh`（`probe_b2_intra_pad_ncu.out.txt`，空闲卡）+ `docs/07` §97。
+    **Part A**：`K=V∈{64,128}`、4 shape（含非整除 `T=250`/单 chunk `T=64`），`q8/q16/s4/q8s4` 十项输出 vs
+    `pad0` **全逐位（`max_abs=0`）**；**Part B**：smem 小增、regs 不变（`K=128` 均 1 block/SM）。
+    **Part C**：`K=128` 最优 `q8/q8s4` **0.975×**（B8T2048H8 1622.7→1582.7µs）/ `B2T1024H8` **0.984×**，`K=64`
+    噪声内（`q16` 1.006–1.015 略慢）。**Part D（ncu）**：bank conflict **36.36→26.96→25.40M（×0.74/×0.70）**、
+    wavefront **88.53→79.13→77.57M（×0.89/×0.88）**，但 `dur` **1.62→1.59→1.60ms（×0.98/×0.99）**、
+    global-ld sector / DRAM / L2 字节**逐位不变**、`tensor%`/`sm%`/`warps_active` **逐值不变**（`pad0` 逐值
+    复现 §96.3）。**归因修正**：§96.5 的「smem staging 布局」是 **~1.02× 分项、非量级项**；K==128 折叠的
+    ~26.6% 是**多出来的串行工作量本身**（同 P7-17 `B1_PAD`）。**设计输入**：撤回 §96.5 的材质暗示、默认
+    `B2M_INTRA_PAD=0`；翻正 K=128 折叠靠**移出关键路径/减少段活**（`K=128` 用 prod+独立 b3、`K=64` 用折叠的
+    按 K 切换），`K=256` 的 **bf16 staging 是容量杠杆非速度杠杆**。默认部署仍 §45 的 `cf`。见 `docs/07` §97。
+  - P7-93（上轮）：**关闭 §95.6/§94.7 空白 (2) 的另一半——`intra` 折叠 × `K≠128` 的 `ncu` pipe 归因**。
     在同一个 `b2mma_kernel` 上对比 `prod`（`-DB2M_PROD -DB2M_HDW`）vs `prod_intra`（`+ -DB2M_INTRA`）
     （`K=V∈{64,128}`、`b8t2048h8`）；**`b2_mma_probe.cu` 一行未改**。新增
     `harness/ncu_b2_k128_intra_driver.py` + `harness/probe_b2_k128_intra_ncu.sh`
