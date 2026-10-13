@@ -916,7 +916,21 @@
       **方法学（新）**：同叫「标量 store」危害可以相反——先看**线程→地址映射**（是否连续）、再看核是
       **扇区 bound** 还是**发射 bound**。**边界**：只测到 `prod_hdw`（非 TMA/非 INTRA 折叠），未与
       `pci*` 整链、`-DB2M_TMA` 交叉重测（机制同、store 与 stage 布局无关）；是研究形态内部免费收尾、
-      不改变 §45 的 `cf` 默认部署。
+      不改变 §45 的 `cf` 默认部署。**该边界已由 P7-71 关闭**（八变体三向交叉、孪生逐位、链级 1–3%）。
+- [x] **P7-71** 关闭 §73.6（P7-70）的边界：把 `-DB2M_VECST` 落进**完整反向链**、并与 TMA / DAMMA
+      **三向交叉**。八份 fold 内核 = `{scalar DA, mma DA} × {非 TMA, TMA} × {标量 store, VECST}`
+      （全 `-DB2M_PROD -DB2M_HDW -DB2M_INTRA`），各链成 `dAv→CUDA-B1→CUDA-B2-prod_intra→反向 cumsum`，
+      只吃 FlashKDA 16-chunk K1 workspace。新增 `harness/check_bwd_b2_vecst_e2e.py`
+      （`harness/check_bwd_b2_vecst_e2e.out.txt`，空闲卡）+ `docs/07` §74。**Part A**：四对孪生
+      （`pci_vec/pci`、`pci_tma_vec/pci_tma`、`pci_mma_vec/pci_mma`、`pci_mma_tma_vec/pci_mma_tma`）
+      六项梯度**全部逐位相同（`max_abs=0`，4 组含非整除 `T=250`/`B=2`）**；八变体 vs FLA worst-case
+      `max_rel` **逐值完全同 §72**（`dq 3.949e-3…dh0 8.889e-3`）。**Part B**：链 `dev` VECST
+      **0.968–1.003×**（`B2`/`B8`/`T250` 落 0.968–0.995、最小 shape `T512` 噪声内），且**非 TMA > TMA**（`pci*` 0.968–0.998 vs `pci_tma*` 0.985–1.003，
+      因 TMA 版把访存压力从 LSU 发射挪走、store 本就不是其最紧项）；`pci_tma/pci` 1.002–1.027、
+      `pci_mma_tma/pci_mma` 0.976–0.987（DAMMA 把 TMA 反号为正，兑现 §71/§72）、`cf/pci` 0.67–0.78。
+      **结论**：边界关闭——B2 生产核所有 store 变体（片段跨步/相邻列）在**隔离核与整链**两处都核验
+      逐位无损；VECST 是研究形态内部免费收尾，**不改变 §45 的 `cf` 默认部署**。**边界**：仅 `BT=16`、
+      `K=V=128`、fp32 操作数。
 - [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
       边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
       （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
@@ -1336,12 +1350,27 @@
   改**字节**；而 `dA`/`dApre` 的 `col=idx%BT` 型**相邻列** store **本就完全合并（扇区已最小）**，向量化只**砍指令数**
   （`STG.E.32` 37→19、`STG.E.64` 0→18），收益靠**本核发射受限**兑现（生产核 0.93–0.96×）。判「该不该/为何值钱」
   先看**线程→地址映射**（是否连续），再看核是**扇区 bound**还是**发射 bound**——别把 P7-48 的「半 sector」当通解。
+- **同一个 store 旋钮的收益随「访存是否走 TMA」而缩**（P7-71，§74.2）：`-DB2M_VECST` 在整链上
+  基本恒正（`B2`/`B8`/`T250` 1–3%，最小 shape 噪声内），但**非 TMA 版收益更大**（`pci*` 0.970–0.986）**、TMA 版更小**（`pci_tma*` 0.984–0.997）
+  ——TMA 把操作数访存从 LSU 发射挪到独立引擎后，store 指令数本就不再是最紧的发射项。判「向量化 store
+  值多少」除了看线程→地址映射与 bound 类型（§73.6），还要看**同核里访存的发射压力是否已被 TMA 分流**。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-70 补测**。
-  - P7-70（本轮）：**关闭 §57.6/§58.6/§62.6 留下的最后一条「store 未向量化」边界**——`[BT,BT]`
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-71 补测**。
+  - P7-71（本轮）：**关闭 §73.6（P7-70）的边界——`-DB2M_VECST` 落进完整反向链、并与 TMA/DAMMA
+    三向交叉**。八份 fold 内核 `{scalar/mma DA}×{非TMA/TMA}×{标量 store/VECST}` 各链成
+    `dAv→CUDA-B1→CUDA-B2-prod_intra→反向 cumsum`。新增 `harness/check_bwd_b2_vecst_e2e.py`
+    （`check_bwd_b2_vecst_e2e.out.txt`，空闲卡）+ `docs/07` §74。**Part A**：四对孪生六项梯度**全部
+    逐位相同（max_abs=0，含非整除 T=250/B=2）**、八变体 vs FLA worst-case **逐值同 §72**。**Part B**：
+    链 `dev` VECST **0.968–1.003×**（`B2`/`B8`/`T250` 0.968–0.995、`T512` 噪声内）、且**非 TMA > TMA**（TMA 版 store 本就不是最紧发射项）；
+    `pci_tma/pci` 1.002–1.027、`pci_mma_tma/pci_mma` 0.976–0.987（DAMMA 把 TMA 反号为正，兑现
+    §71/§72）。**结论**：B2 生产核所有 store 变体在隔离核与整链两处都核验逐位无损；研究形态内部
+    免费收尾，**不改变 §45 的 `cf` 默认部署**。**下一步**：专题维持维护态——§45 的 `cf` 仍是目标卡
+    反向默认，CUDA B2 生产核整体慢 ~1.7×（§67–§72 已反复归因、明确不再追）；CUDA B2 研究形态的
+    store/DA/stage 旋钮至此**全部关闭**，有明确新需求（新 shape/dtype/融合目标）再动。
+  - P7-70（上轮）：**关闭 §57.6/§58.6/§62.6 留下的最后一条「store 未向量化」边界**——`[BT,BT]`
     的 `dA`/`dApre` store（§59 明确没做的那两处）改按**相邻列成对**（`st2`），**算术一字未动**。新增
     `harness/check_bwd_b2_vecst_da.py`（`check_bwd_b2_vecst_da.out.txt`，空闲卡）+ `docs/07` §73。
     **关键区别**：§51/§59 是**片段跨步**（半 sector）store，向量化改**字节**；`dA`/`dApre` 是
