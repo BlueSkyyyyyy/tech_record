@@ -3581,6 +3581,43 @@
   P129-1 新留尾巴（§9）：`paged_attention_sm100` 内部未逐行、验收率/根因系源码注释自报、
   causal-mask 行号漂移只记不判、demo 只读接线段、未构建。**本轮新增增量。**
 
+### P130 通用 paged attention device 身体走读（`docs/44-mpk-paged-attention-sm100.md`）
+
+- [x] **P130-1** 补掉三条明留的尾巴——`docs/37` §5.1（只给 750 行摘要）、`docs/39` §6.3
+  （`paged_attention_sm100` `MAX_TOKENS=3` slot-0 分歧只按注释转述）、`docs/43` §9 头号
+  （「`paged_attention_sm100` 内部未逐行，只引其 `MAX_TOKENS`/`MMA_ITERS_M`/`"+f"` 三处注释」）。
+  把 MPK **唯一的通用 paged GQA attention** device 身体逐行打开，见
+  `docs/44-mpk-paged-attention-sm100.md`（快照 `mirage-project/mirage` 分支 `mpk` commit
+  `f9eb70c`，与 `docs/06`–`docs/43` 同快照；`attention_sm100.cuh` 恰 750 行、唯一 device 函数
+  `multitoken_paged_attention_sm100_task_impl:62-748`；**纯源码走读（资料分析），本轮无新实验**；
+  SM100 专属、本机不可执行）。三条 headline：
+  - **(A)** 它是 MPK 里**唯一**用 Ampere 手写 `m16n16k16` `mma.sync`（非 wgmma/UMMA）的通用
+    paged GQA attention：一个 task = 一个 (request, KV head)（`request_id` 入参 + 输入按 KV head
+    切片），在 per-token 在线 softmax（`m`/`d`/`o` 全在寄存器）里流式扫完整条 KV cache；
+    QK^T `1x4x1`（warp 切 key，`:503-531`）、PV `1x1x4`（warp 切 p，`:624-639`）；把
+    **QK-norm / partial RoPE / sliding window / attention sink / 输出重排**全编进单 task
+    （14 模板参 + 15 运行期入参，`:34-82`）。
+  - **(B)** §2 把「为压进 Blackwell SMEM 上限」的**重构史**坐实：**O 复用 Q 段**（`:187-196`，
+    issue #740，砍掉 `MAX_TOKENS*NUM_QO_PER_KV*HEAD_DIM` 元素才让 mbt 过 25）、**跨 warp 归约的
+    `m`/`d`/`o` buffer 只存一个 MMA m-tile**（`:209-228`，issue #702，让 GQA ≥8:1 放得下）；
+    `static_assert(S_TOTAL_OFFSET<=MAX_DYNAMIC_SHARED_MEMORY_SIZE)`（`:230-231`）。是 C2（常驻）
+    对 device task 的直接约束（同 `docs/33` §5「TMEM free 不释放锁」）。
+  - **(C)** 把 `MAX_TOKENS=3` slot-0 bug family 钉回源码级（§7）：**真正因果/窗口掩码在
+    `:556-559` 的 `is_valid`**（`docs/39`/`docs/43` 转述的「causal mask 在 `:519`」是行号漂移，
+    `:519` 是 k 循环头）；`:505-516` 注释自陈旧 workaround `if(m>0) continue` 丢弃 query 槽
+    `≥16/NUM_QO_PER_KV`、败坏 EAGLE3 K≥2 token 流，根因 = `"=f"`+`"f"` 别名累加器在 `unroll`
+    下跨 fragment 污染，修复 = `"+f"`（`ampere/mma.cuh`，`docs/38` §6）——本篇补上 attention
+    侧消费者 `:529`；并校正「`-inf` NaN 传播」在当前快照**已被两处守卫覆盖**（`:591-595`、
+    `:651-652`）。
+  §8 给五层布线（`TaskType 257`/`task_register.cc:2326-2438`/`graph.cc:643-649`/
+  `persistent_kernel.py:1303-1432`/builder 四家族）；命名的 `NamedBarrier(128, id=6/7)`
+  （`:83-89`）与 `docs/34` §3.5「须 ≥8」的口径冲突**只记不判**（同 `docs/37` §8）。判据
+  **只贡献 C1+C3**，与 `docs/29`–`docs/43` device task 走读同档。配套博客 post
+  `mega-kernel-45-mpk-paged-attention-sm100`（weight 46）并更新 `mega-kernel-00-index` 第 45 项。
+  P130-1 新留尾巴（§10）：`MAX_TOKENS=3` slot-0 分歧未独立复现、命名屏障 ID 6/7 只记不判、
+  `rms_norm_sm100`/`rotary_embedding_hopper`/`smem_row` 内部未逐行、sink 数值影响未实测、
+  grid 第二轴与 task 粒度映射系静态推断、未构建。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3843,10 +3880,28 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P129-1 完成（1/1）**。补掉 `docs/39`（P125-1）**§9「未展开的更深层」**明留的尾巴
-  「`eagle3_commit_kernel` 的 device 身体（`eagle3_ops.cuh:157-315`，§6.3 已摘要、未逐行）与
-  `accept_hist` 调试历史」，也即 `ROADMAP`「下一步候选」第二条剩余。见
-  `docs/43-mpk-eagle3-commit.md`（快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 专属）。
+- 当前进度：**P130-1 完成（1/1）**。补掉三条明留的尾巴——`docs/37` §5.1（只给 750 行摘要）、
+  `docs/39` §6.3、`docs/43` §9 头号（「`paged_attention_sm100` 内部未逐行」）。把 MPK 唯一的
+  通用 paged GQA attention device 身体逐行打开，见 `docs/44-mpk-paged-attention-sm100.md`
+  （快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 专属、本机不可执行）。三条 headline：
+  **(A)** 唯一用 Ampere 手写 `m16n16k16` `mma.sync`（非 wgmma/UMMA）的通用 paged GQA：
+  一个 task = 一个 (request, KV head)、在线 softmax 全在寄存器、QK^T `1x4x1` / PV `1x1x4`、
+  QK-norm / partial RoPE / sliding window / attention sink 全编进单 task；
+  **(B)** §2 坐实「为压进 Blackwell SMEM 上限」的重构史——O 复用 Q 段（`:187-196`，issue #740）、
+  跨 warp 归约的 m/d/o buffer 只存一个 tile（`:209-228`，issue #702），是 C2 对 device task 的约束；
+  **(C)** §7 把 `MAX_TOKENS=3` slot-0 bug family 钉回源码级——真正因果/窗口掩码在 `:556-559`
+  （转述的 `:519` 是行号漂移）、`:505-516` 的 `if(m>0) continue` workaround → `"=f"`/`"f"` 别名
+  累加器跨 fragment 污染 → `"+f"` 修复（补上 `ampere/mma.cuh` 的 attention 侧消费者 `:529`），
+  并校正「`-inf` NaN 传播」已被 `:591-595`/`:651-652` 两处守卫覆盖。判据只贡献 C1+C3。配套博客
+  post `mega-kernel-45-mpk-paged-attention-sm100`（weight 46）并更新 `mega-kernel-00-index` 第 45 项。
+  P130-1 新留尾巴见 §10（slot-0 分歧未独立复现、命名屏障 ID 6/7 只记不判、未构建等）。
+- 下一步候选：可继续走其一——`eagle3_commit` 的 K>1「proper mbt-parallel chain」缺口（源码注释
+  `eagle3_ops.cuh:217` 自陈未实现）的静态追述；或 `docs/35` §9 遗留的其它未走读相邻层
+  （`mla_prefill_host.cu` 原型、CUTLASS `collective_builder` 侧 QK/PV atom）；或把本次新留的
+  `rms_norm_sm100`（`norm_sm100.cuh`）/`rotary_embedding_hopper` 内部逐行（此前只引调用点）。
+- 此前：**P129-1 完成（1/1）**。补掉 `docs/39`（P125-1）**§9「未展开的更深层」**明留的尾巴
+  「`eagle3_commit_kernel` 的 device 身体（`eagle3_ops.cuh:157-315`）与 `accept_hist` 调试历史」。
+  见 `docs/43-mpk-eagle3-commit.md`（快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 专属）。
   三条 headline：**(A)** `eagle3_commit_kernel` 是全仓唯一「verify-aware 收尾 task」，一次调用做完
   四件事（写 verified 前缀 + 写 K draft + `new_token_nums` 步进 + `drafts_prev` 跨迭代快照），
   `src_slot` 是 K=1 `ac-1`/K>1 强制 0 的已知坑；**修正 `docs/39` 两处**——接口是 **`(5,2)`**
@@ -3856,13 +3911,7 @@
   （`persistent_kernel.cuh:295-316`）；**(C)** `accept_hist`（`:254-309`）是 device 侧自陈 bug 调查史，
   根因指向 `paged_attention_sm100` `MAX_TOKENS=3` slot-0 分歧，与 `docs/38` §6 的 `"+f"` MMA 修复
   同一 family。判据只贡献 C1+C3。配套博客 post `mega-kernel-44-mpk-eagle3-commit`（weight 45）
-  并更新 `mega-kernel-00-index` 第 44 项。P129-1 新留尾巴见 §9（`paged_attention_sm100` 内部未逐行、
-  验收率/根因系源码注释自报、行号漂移只记不判、demo 只读接线段、未构建）。
-- 下一步候选：`ROADMAP`「下一步候选」第二条已闭合；可继续走其一——`docs/35` §9 遗留的其它未走读
-  相邻层（`mla_prefill_host.cu` 原型、CUTLASS `collective_builder` 侧 QK/PV atom），或把
-  `docs/43` §9 明留的 `paged_attention_sm100`（`attention_sm100.cuh` 750 行）内部逐行打开
-  （把 §4.4 转述的 `MAX_TOKENS=3` slot-0 分歧回到源码级），或 `eagle3_commit` 的 K>1「proper
-  mbt-parallel chain」缺口（源码注释 `:217` 自陈未实现）的静态追述。
+  并更新 `mega-kernel-00-index` 第 44 项。P129-1 新留尾巴见 §9。
 - 此前：**P128-1 完成（1/1）**。补掉 `docs/41`（P127-1）**§6 明留的两条尾巴**——「`mtp_float_scatter`
   的 device 身体（`mtp_token_ops.cuh`）未逐行」与「`target_verify_*` 如何消费 `prob_extract` 的输出
   （拒绝采样比较 `P_target > u·P_draft`）只按注释转述」，也即 `ROADMAP`「下一步候选」第二条。见

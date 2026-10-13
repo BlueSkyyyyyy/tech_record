@@ -70,4 +70,6 @@ categories: ["算子开发"]
 
 44. [MPK Eagle3 commit device 身体走读：verify-aware 写回、跨迭代快照与 accept_hist 调试史]({{< relref "mega-kernel-44-mpk-eagle3-commit" >}}) —— 把 `eagle3_ops.cuh` 四个 body 逐行打开：`copy`/`concat`/`d2t_remap` 三个簿记搬运，以及全仓唯一的「verify-aware 收尾 task」`eagle3_commit_kernel`（四职责 = 写 verified 前缀 + 写 K 个新 draft + 发 `new_token_nums` 步进信号 + `drafts_prev` 跨迭代快照；`src_slot` 的 K=1 `ac-1`/K>1 强制 0 已知坑），核对「5 入 2 出」接口与运行时 `MPK_SPEC_DECODE` 消费端，并整理 device 侧自陈的 `accept_hist` bug 调查史（`paged_attention_sm100` `MAX_TOKENS=3` slot-0 分歧 → `attention_sm100.cuh` 的 `"+f"` MMA 修复同一 family）
 
+45. [MPK 通用 paged attention device 身体走读：`attention_sm100.cuh`]({{< relref "mega-kernel-45-mpk-paged-attention-sm100" >}}) —— 把 MPK 唯一的「通用 paged GQA attention」750 行 device 身体逐行打开：packed QKV → NHD 页缓存、`m16n16k16` 手写 `mma.sync`（QK^T `1x4x1` 切 key、PV `1x1x4` 切 p）、per-token 在线 softmax、按 MMA m-tile 分块的跨 warp 归约、partial RoPE / sliding window / attention sink / QK-norm 融合，以及为压进 Blackwell SMEM 上限而生的两处让步（O 复用 Q 段、m/d/o buffer 只存一个 tile），并把 `MAX_TOKENS=3` slot-0 分歧的因果（`if(m>0) continue` workaround → `"+f"` in-place 累加器修复）钉回源码级
+
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
