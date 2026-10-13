@@ -2390,7 +2390,39 @@
       销毁语义、缓存清理；域算术 8 配置 vs oracle、`ginSignalCount=num_ranks+4`、对称偏移不变；版本闸门
       `>=2.31` 走 `useRuntimeVersion` 但仍被 Python 闸门先拦。**结论**：阻塞=两个闸门（Python 二进制
       核对 + C++ 设备 API 版本）都要求 `_C` 与 PyTorch 共用同一份 ≥2.31 的 NCCL。配套博客
-      `content/posts/mega-moe-86-deepep-nccl-comm-binding`（索引页新增第 86 篇）。
+       `content/posts/mega-moe-86-deepep-nccl-comm-binding`（索引页新增第 86 篇）。
+
+### P77 增量（opt-in，补齐 Mega MoE 的跨 SM / 跨 rank 同步地基）
+
+- [x] **P77-1** **DeepGEMM 的跨 SM / 跨 rank 同步原语 `comm/barrier.cuh`**
+      （`deep_gemm/include/deep_gemm/comm/barrier.cuh`；`layout/sym_buffer.cuh`；
+      `layout/mega_moe.cuh`；`impls/sm100_fp8_fp4_mega_moe.cuh` / `sm100_bf16_mega_moe.cuh`）。
+      第 11 篇在 dispatch/combine 的「原语表」只列了 `grid_sync:33-51`/`nvlink_barrier:53-92` 两行；
+      第 38 篇拆 PTX 层时只把它们当内存序调用点，并注明「`grid_sync` 整体语义因共享 GPU 会死锁，
+      仅源码解读」。本篇把这层**单独**拆开。**代码全架构无关（不碰 UMMA/TMA），H100(sm90) 直接
+      include 真实头文件跑真实设备代码**。→ `docs/87-mega-moe-sync-primitives.md`（真实行号核对）：
+      四原语 `wait_until:14-24`（`kNumTimeoutCycles=60s@2GHz :12`、`clock64` 超时 + `print_timeout`
+      + `DG_DEVICE_ASSERT`）、`cluster_sync_with_relaxed_arrive:26-31`（`cute::cluster_arrive_relaxed`
+      + `cluster_wait`，弱序，只用于 2-CTA TMEM 分配 `impls:237-238`）、`grid_sync:33-51`、
+      `nvlink_barrier:53-92`；设备端对称指针 `SymBuffer`（`sym_buffer.cuh:9-42`：`base`+`offsets[72]`
+      **相对偏移**（`:23-24`）而非绝对指针 → 同一张表可编进所有 rank 的 `__grid_constant__`；
+      `map:33-40` 单行翻译、`kNumRanks==1` 快路 `:35-36`；`kNumMaxRanks=72 :7`）。
+      **两个免复位设计**：① `grid_sync` 每轮增量之和**恰好 2³¹**（`kFinishSumTag=0x80000000 :38`；
+      `sm_idx==0` 加 `2³¹-(N-1)`、其余 +1 `:42-43`），只翻最高位、两轮回到原值、永不需清零，
+      `(new^old)&0x80000000` 即「全体到齐」（`:45`）；② `nvlink_barrier` 的 `counter&3` 编码
+      `(phase,sign)`（`:69-70`），phase 交替用 `signal[2]` 两槽、sign 每两次翻转让 `signal[phase]`
+      先 +`kNumRanks` 加满再 −1 清回 0（`:75/80-85`），4 次一个周期、自动归零。跨设备必须
+      `red_add_rel_sys`/`ld_acq_sys`（`:75/82`）。信号住 `MegaMoESignals`（`layout/mega_moe.cuh:55/62-64`，
+      `get_*_ptr` `:151-167`）；调用点 `impls:238/393-396/422-428/683-689/1412-1415/1440`（dispatch 用
+      `GridSyncIndex=0`、epilogue 用 1 `:338-339`；两个 NVLink `kTag=1/2 :323-324`）。**H100 实测**
+      `src/comm_barrier.cu` + `harness/exp_comm_barrier.{sh,out.txt}`：`grid_sync` 6 组 SM 数
+      （1/2/8/16/64/7，含奇数）× **2000 轮 mismatch=0**，计数器按 `(r·2³¹) mod 2³²` 在 `0/2³¹` 翻转
+      （免复位坐实）；`nvlink_barrier` 单卡虚拟 N∈{2,8}（offsets 全 0）状态机 **trace_bad=0**、
+      两信号槽每 4 次精确归零；**真实 8 卡** UVA peer 对称缓冲 × 30 轮 **mismatch=0**（`st_rel_sys`
+      写、barrier 后 `ld_acq_sys` 读全部 8 peer）；cluster relaxed **1/1**（记录，非保证）。
+      另记录一个坑：`grid_sync` 是同步点不是读保护，首版每轮复用同槽产生误报、改每轮独立槽后归零。
+      总判定 **ALL PASS**。配套博客 `content/posts/mega-moe-87-mega-moe-sync-primitives`
+      （索引页新增第 87 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2416,8 +2448,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P76 各增量完成（P15-1…P41-1、P42-1…P76-1）。**
-  本轮 P76-1：新建 `docs/86-deepep-nccl-comm-binding.md`
+- 当前进度：**P0~P14 全部完成；P15~P77 各增量完成（P15-1…P41-1、P42-1…P77-1）。**
+  本轮 P77-1：新建 `docs/87-mega-moe-sync-primitives.md`
+  （+`src/comm_barrier.cu`、`harness/exp_comm_barrier.{sh,out.txt}`）——补上 Mega MoE 一直缺席的
+  **「跨 SM / 跨 rank 同步地基」`comm/barrier.cuh`**：第 11 篇只列了原语表两行、第 38 篇只当内存序调用点
+  并注明「仅源码解读」。四原语 `wait_until`（60s@2GHz 超时自旋）/ `cluster_sync_with_relaxed_arrive`
+  （弱序，仅用于 2-CTA TMEM 分配）/ `grid_sync` / `nvlink_barrier` + 设备端对称指针 `SymBuffer`
+  （相对偏移 → 同一张表编进所有 rank 的 `__grid_constant__`）。两个免复位设计：`grid_sync` 每轮和恰好
+  2³¹（只翻最高位、两轮回原值、`(new^old)&0x80000000` 判到齐）；`nvlink_barrier` 的 `counter&3` 编码
+  `(phase,sign)`、phase 交替 + sign 每两次翻转（+N 加满 / −1 清回 0，4 次一周期）。**架构无关设备代码，
+  H100 直接 include 真实头文件跑真机**：grid_sync 6 组 SM 数 ×2000 轮 mismatch=0 + 计数器翻转坐实免复位；
+  虚拟 N∈{2,8} 状态机 trace_bad=0；**真实 8 卡** UVA peer ×30 轮 mismatch=0；cluster relaxed 1/1。
+  另记一坑：grid_sync 是同步点非读保护（首版复用同槽误报，改每轮独立槽归零）。总判定 ALL PASS。
+  索引页新增第 87 篇。
+  上一轮 P76-1：新建 `docs/86-deepep-nccl-comm-binding.md`
   （+`harness/exp_deepep_nccl_binding.{py,sh,out.txt}`）——补上 DeepEP 一直缺席的
   **「NCCL 通信域绑定 + Python 引导层」**：`import deep_ep` 的引导协议（persistent_envs →
   `check_nccl_so` → `init_jit` → 之后才 import `_C` 消费者）、包发现 `find_pkgs.py`
@@ -3301,7 +3345,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P76 已完成（最新 **P76-1 DeepEP 的 NCCL 通信域绑定与 Python 引导层**：
+- **下一步**：P0~P77 已完成（最新 **P77-1 跨 SM / 跨 rank 同步原语 `comm/barrier.cuh`**：
+  `deep_gemm/include/deep_gemm/comm/barrier.cuh` + `layout/sym_buffer.cuh`——`grid_sync` 的
+  「和恰好 2³¹、只翻最高位、免复位」与 `nvlink_barrier` 的 `counter&3`→(phase,sign) 状态机
+  (+N 加满 / −1 清回 0)、`wait_until` 超时自旋、`cluster_sync_with_relaxed_arrive`、`SymBuffer`
+  相对偏移；架构无关设备代码，H100 真机 grid_sync ×2000 轮 + 真实 8 卡 ×30 轮 **ALL PASS**；详见上）。
+  上一轮 P76-1：**DeepEP 的 NCCL 通信域绑定与 Python 引导层**：
   `deep_ep/__init__.py` / `find_pkgs.py` / `comm/{handle,barrier}.py` / `csrc/kernels/comm/context.cpp`
   / `setup.py`——引导协议、三闸门 `check_nccl_so`、`Context` 构造（版本闸门/GIN/两域拆分/对称
   window）、`get_sym_ptr`/`finalize`、Python comm 层；纯 host/Python，H100 真机 **35 PASS / 0 FAIL**，
