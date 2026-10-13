@@ -34,9 +34,9 @@ K = 128
 SCALE = 1.0 / (128 ** 0.5)
 
 # tags whose **five streamed operands** (`vn/do/dv/h/dh`) are bf16 on the wire
-FIVE_BF16 = {"bf16", "bf16mma", "vdw", "bf16tma"}
+FIVE_BF16 = {"bf16", "bf16mma", "vdw", "bf16tma", "bf16mma_tma"}
 # tags whose **raw `v`** is bf16 on the wire (BF16_VDW, or bf16 TMA staging both stage it bf16)
-V_BF16 = {"vdw", "bf16tma"}
+V_BF16 = {"vdw", "bf16tma", "bf16mma_tma"}
 
 
 def ptr(t):

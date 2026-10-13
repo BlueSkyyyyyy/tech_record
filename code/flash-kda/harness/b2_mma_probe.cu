@@ -194,6 +194,16 @@ DEV void st2(float* p, float a, float b) {
 #if B2M_BF16_VDW && !B2M_BF16
 #error "B2M_BF16_VDW requires B2M_BF16 (bf16 staging)"
 #endif
+// P7-86 (diagnostic only): extra bf16 padding (in elements) on the raw-`v` staging tile row stride
+// under `-DB2M_BF16_VDW`.  Default 0 = the normal `OPS = BVK + 8`.  It exists solely to test the
+// section 88.5 hypothesis that the `V=256` bank-conflict uptick of the `vdw` build comes from the
+// bf16 `vv` row-stride phase; it must stay 0 in every deployment build.
+#ifndef B2M_VVSTRIDE
+#define B2M_VVSTRIDE 0
+#endif
+#if B2M_VVSTRIDE && (!B2M_BF16_VDW || B2M_TMA_ON)
+#error "B2M_VVSTRIDE is a non-TMA BF16_VDW diagnostic knob"
+#endif
 // P7-60: `-DB2M_PROD` compiles the *production* combination of all six non-GEMM segments in a
 // single kernel/launch (see the note further down for the rationale).  It forces the six
 // segment flags on, and must be defined before the per-segment `#ifndef` defaults below.
@@ -516,7 +526,7 @@ struct alignas(128) Stage {
     op_t dh [KD][OPS];   // dh [k, v]
 #if B2M_VV_KG_ON
 #if B2M_BF16_VDW
-    op_t  vv [BT][OPS];   // raw v [t, v]  (bf16 under BF16+VDW)
+    op_t  vv [BT][OPS + B2M_VVSTRIDE];   // raw v [t, v]  (bf16 under BF16+VDW)
 #else
     float vv [BT][BVP];   // raw v [t, v]
 #endif
@@ -630,6 +640,17 @@ DEV float rds(const void* buf, int row, int col, int rows) {
     return __bfloat162float(((const __nv_bfloat16*)buf)[row * OPS + col]);
 #else
     (void)rows;
+    return ((const float*)buf)[row * BVP + col];
+#endif
+}
+// P7-86 (diagnostic): reader for the raw-`v` staging tile, honoring the `B2M_VVSTRIDE` extra
+// padding.  Identical to `rds` at the default `B2M_VVSTRIDE == 0`.
+DEV float rdsvv(const void* buf, int row, int col) {
+#if B2M_TMA_ON
+    return rd(buf, row, col, BT);
+#elif B2M_BF16_VDW
+    return __bfloat162float(((const __nv_bfloat16*)buf)[row * (OPS + B2M_VVSTRIDE) + col]);
+#else
     return ((const float*)buf)[row * BVP + col];
 #endif
 }
@@ -1260,7 +1281,7 @@ b2mma_kernel(
                     const float dvr = rd((const float*)st->dv, r, local0 + j, BT);
                     #pragma unroll
                     for (int i = 0; i < 8; ++i)
-                        dbpart[i] += dvr * rds(st->vv, c0 + i, local0 + j, BT);
+                        dbpart[i] += dvr * rdsvv(st->vv, c0 + i, local0 + j);
                 }
             }
         }
@@ -1284,8 +1305,8 @@ b2mma_kernel(
                     #pragma unroll
                     for (int nt = 0; nt < 2; ++nt) {
                         uint32_t b[2];
-                        b[0] = to_tf32(rds(st->vv, nt * 8 + g, kc + t,     BT));
-                        b[1] = to_tf32(rds(st->vv, nt * 8 + g, kc + t + 4, BT));
+                        b[0] = to_tf32(rdsvv(st->vv, nt * 8 + g, kc + t));
+                        b[1] = to_tf32(rdsvv(st->vv, nt * 8 + g, kc + t + 4));
                         mma8(dAacc[nt], a, b, dAacc[nt]);
                     }
                 }
@@ -1300,7 +1321,7 @@ b2mma_kernel(
             if (local0 >= 0 && local0 + BVW <= BVK) {
                 for (int idx = l; idx < BT * BVW; idx += 32) {
                     const int r = idx / BVW, j = idx % BVW;
-                    sh->dbv[warp][r][j] = rds(st->vv, r, local0 + j, BT);
+                    sh->dbv[warp][r][j] = rdsvv(st->vv, r, local0 + j);
                 }
             }
         }
