@@ -384,15 +384,28 @@ constexpr int QKGP = KD + (B2M_QKGP ? 4 : 0);   // staged q/k/g row stride (word
 constexpr int BVK = B2M_BVK;   // V-tile (contraction) depth staged per pipeline stage
 constexpr int NS  = B2M_NS;    // pipeline stages
 #if B2M_TMA_ON
-// Each operand is staged as NAT atom-major `[NAT][rows][32]` sub-buffers, each written by
-// its own 128 B-swizzled TMA box (inner width 32).  BVK==32 -> NAT=1 (identical to P7-49).
-constexpr int NAT = BVK / 32;
+// Each operand is staged as NAT atom-major `[NAT][rows][TAW]` sub-buffers, each written by
+// its own 128 B-swizzled TMA box.  fp32: 32 elements = 128 B (P7-49/§52).  bf16 (P7-76): an
+// atom is 64 elements = 128 B, so NAT=BVK/64 and BVK must be a multiple of 64 (the deployment
+// default BVK=32 is not a valid bf16 atom count).  The swizzle decode is byte-identical in both
+// (`b ^= ((b>>7)&7)<<4`), because the 128 B atom row stride shifts `row` into bit 7 either way.
 // P7-72: BVK==128 -> NAT=4 atoms.  §54.5 left "BVK=128 (4 atom) 未测" open; the loop over
-// `a<NAT` and the `[NAT][rows][32]` Stage layout are NAT-generic, so BVK=128 needs no code
+// `a<NAT` and the atom-major Stage layout are NAT-generic, so BVK=128 needs no code
 // change -- only a larger dynamic smem, which forces NSTAGE=1 (one 155.6 KB stage > half of
 // the 227 KB opt-in budget).  Kept as a *coverage/attribution* point, not a deploy win.
+#if B2M_BF16
+using tma_t = __nv_bfloat16;
+constexpr int TAW = 64;        // atom inner width in elements (64*2 == 128 B)
+constexpr int NAT = BVK / 64;
+static_assert(BVK == 64 || BVK == 128,
+              "bf16 TMA supports BVK in {64,128} (64-element == 128 B atoms)");
+#else
+using tma_t = float;
+constexpr int TAW = 32;        // atom inner width in elements (32*4 == 128 B)
+constexpr int NAT = BVK / 32;
 static_assert(BVK == 32 || BVK == 64 || BVK == 128,
               "TMA supports BVK in {32,64,128} (128 B atoms)");
+#endif
 #else
 #endif
 // padded row stride for the *non-TMA-staged* scratch buffers (skg/swall/dapart/da16), used by
@@ -405,9 +418,15 @@ constexpr int BVP = BVK + 4;   // padded row stride (16B keeps 4-float cp.async 
 // operands (`do/vn/dv/h/dh`) through `rd()` (now bf16-aware) and the **fp32** scratch operands
 // (`vv` raw v, `dwm`) through `rds()` (a padded/atom reader that never de-quants bf16); `prefetch`
 // stages the fp32 scratch at the fp32 cp.async granularity (U4=4) independently of `op_t`.
-// Only TMA staging stays excluded (it needs a bf16 tensor map / 128 B-wide swizzle atom).
-#if B2M_BF16 && B2M_TMA_ON
-#error "B2M_BF16 covers only the non-TMA cp.async staging path"
+// P7-76: `-DB2M_BF16` now also covers the **TMA staging path** (`-DB2M_TMA`).  A bf16 TMA box is
+// 64 elements (128 B) wide, so `NAT=BVK/64` (BVK in {64,128}); the swizzle decode is unchanged
+// (see the atom-layout note above).  This removes the last `#error` of the bf16 entry.  Under
+// BF16+TMA the fp32 scratch operands (`vv`/`dwm`) are also staged bf16 (raw `v` is already bf16
+// on the wire; `dw` is a GEMM intermediate the DKGB mma consumes as tf32 anyway), so a single
+// bf16 tensor map per operand suffices.  The native-bf16 mma (`B2M_BF16MMA`) is *not* composed
+// with TMA here (`rd2` has no atom decode); that combination stays excluded.
+#if B2M_BF16MMA && B2M_TMA_ON
+#error "B2M_BF16MMA is not composed with B2M_TMA (rd2 has no TMA atom decode)"
 #endif
 #if B2M_BF16
 using op_t = __nv_bfloat16;
@@ -426,16 +445,18 @@ static_assert(BVK % 16 == 0, "B2M_BF16MMA contracts 16 V-columns per mma");
 
 struct alignas(128) Stage {
 #if B2M_TMA_ON
-    float do_[NAT][BT][32];   // do  [t, v], atom-major (each atom = 128 B-swizzled [BT][32])
-    float vn [NAT][BT][32];   // v_new[t, v]
-    float dv [NAT][BT][32];   // dv  [t, v]
-    float h  [NAT][KD][32];   // h  [k, v]  (rows = output N index, cols = contraction v)
-    float dh [NAT][KD][32];   // dh [k, v]
+    // P7-76: `tma_t`/`TAW` = bf16/64 under `-DB2M_BF16`, else fp32/32.  Each atom is a 128 B
+    // SWIZZLE_128B sub-buffer `[rows][TAW]`.
+    tma_t do_[NAT][BT][TAW];   // do  [t, v], atom-major (each atom = 128 B-swizzled [BT][TAW])
+    tma_t vn [NAT][BT][TAW];   // v_new[t, v]
+    tma_t dv [NAT][BT][TAW];   // dv  [t, v]
+    tma_t h  [NAT][KD][TAW];   // h  [k, v]  (rows = output N index, cols = contraction v)
+    tma_t dh [NAT][KD][TAW];   // dh [k, v]
 #if B2M_VV_KG_ON
-    float vv [NAT][BT][32];   // raw v [t, v]  (base dA / `db` operand)
+    tma_t vv [NAT][BT][TAW];   // raw v [t, v]  (base dA / `db` operand; bf16 under BF16+TMA)
 #endif
 #if B2M_DKGB && !B2M_HDW
-    float dwm[NAT][BT][32];   // dw [t, k]  (P7-53: B-operand of `A @ -dw`, k-tiled)
+    tma_t dwm[NAT][BT][TAW];   // dw [t, k]  (P7-53: B-operand of `A @ -dw`, k-tiled)
 #endif
 #else
     // P7-73: op_t/OPS are `float`/BVP by default, `__nv_bfloat16`/BVK+8 under -DB2M_BF16.
@@ -517,10 +538,16 @@ struct alignas(128) Shared {
 // `row & 7` XOR as the single-atom BVK==32 case.
 DEV float rd(const void* buf, int row, int col, int rows) {
 #if B2M_TMA_ON
-    const int atom = col >> 5, cc = col & 31;
-    int b = ((atom * rows + row) * 32 + cc) * 4;
+    // P7-76: generalized to `TAW` (32 fp32 / 64 bf16) elements per 128 B atom; the swizzle
+    // decode is identical because the 128 B atom row stride shifts `row` into bit 7 either way.
+    const int atom = col / TAW, cc = col % TAW;
+    int b = ((atom * rows + row) * TAW + cc) * (int)sizeof(tma_t);
     b = b ^ (((b >> 7) & 7) << 4);
+#if B2M_BF16
+    return __bfloat162float(*(const __nv_bfloat16*)((const char*)buf + b));
+#else
     return *(const float*)((const char*)buf + b);
+#endif
 #else
     (void)rows;
 #if B2M_BF16
@@ -732,10 +759,10 @@ DEV void issue_tma(Stage* st, const CUtensorMap* dom, const CUtensorMap* vnm,
 #if B2M_DKGB && !B2M_HDW
                                     + 1
 #endif
-                                   ) * BT + 2 * KD) * BVK * 4));
+                                   ) * BT + 2 * KD) * BVK * (int)sizeof(tma_t)));
     #pragma unroll
     for (int a = 0; a < NAT; ++a) {
-        const int va = v0 + a * 32;
+        const int va = v0 + a * TAW;
         tma4d_load(dom, &st->do_[a][0][0], va, t0, hh, n, bar);
         tma4d_load(vnm, &st->vn [a][0][0], va, t0, hh, n, bar);
         tma4d_load(dvm, &st->dv [a][0][0], va, t0, hh, n, bar);
@@ -1719,13 +1746,19 @@ b2mma_kernel(
 // do/vn/dv are [B, T, H, V] fp32 contiguous.  dims {V, T, H, B}, box {32, BT, 1, 1},
 // SWIZZLE_128B (inner 32*4 == 128 B).  One box per 128 B atom (NAT of them per operand).
 // OOB token rows of a non-divisible T zero-fill.
+// P7-76: element type / size / atom inner width follow `tma_t` (bf16/2/64 under -DB2M_BF16,
+// else fp32/4/32).  `esz` is in bytes so the global strides scale with the datatype.
+static constexpr cuuint64_t TMA_ESZ = sizeof(tma_t);
+static constexpr cuuint32_t TMA_INW = TAW;
+static constexpr CUtensorMapDataType TMA_DT =
+    B2M_BF16 ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16 : CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
 static void make_map_dov(CUtensorMap* m, void* ptr, int H, int T, int B) {
     cuuint64_t gdim[4] = {(cuuint64_t)VD, (cuuint64_t)T, (cuuint64_t)H, (cuuint64_t)B};
-    cuuint64_t gstr[3] = {(cuuint64_t)H * VD * 4, (cuuint64_t)VD * 4,
-                          (cuuint64_t)T * H * VD * 4};
-    cuuint32_t box[4] = {32, (cuuint32_t)BT, 1, 1};
+    cuuint64_t gstr[3] = {(cuuint64_t)H * VD * TMA_ESZ, (cuuint64_t)VD * TMA_ESZ,
+                          (cuuint64_t)T * H * VD * TMA_ESZ};
+    cuuint32_t box[4] = {TMA_INW, (cuuint32_t)BT, 1, 1};
     cuuint32_t estr[4] = {1, 1, 1, 1};
-    if (cuTensorMapEncodeTiled(m, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4, ptr, gdim, gstr, box,
+    if (cuTensorMapEncodeTiled(m, TMA_DT, 4, ptr, gdim, gstr, box,
                                estr, CU_TENSOR_MAP_INTERLEAVE_NONE,
                                CU_TENSOR_MAP_SWIZZLE_128B,
                                CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
@@ -1737,11 +1770,11 @@ static void make_map_dov(CUtensorMap* m, void* ptr, int H, int T, int B) {
 static void make_map_hdh(CUtensorMap* m, void* ptr, int H, int NT, int B) {
     cuuint64_t gdim[5] = {(cuuint64_t)VD, (cuuint64_t)KD, (cuuint64_t)H, (cuuint64_t)NT,
                           (cuuint64_t)B};
-    cuuint64_t gstr[4] = {(cuuint64_t)VD * 4, (cuuint64_t)KD * VD * 4,
-                          (cuuint64_t)H * KD * VD * 4, (cuuint64_t)NT * H * KD * VD * 4};
-    cuuint32_t box[5] = {32, (cuuint32_t)KD, 1, 1, 1};
+    cuuint64_t gstr[4] = {(cuuint64_t)VD * TMA_ESZ, (cuuint64_t)KD * VD * TMA_ESZ,
+                          (cuuint64_t)H * KD * VD * TMA_ESZ, (cuuint64_t)NT * H * KD * VD * TMA_ESZ};
+    cuuint32_t box[5] = {TMA_INW, (cuuint32_t)KD, 1, 1, 1};
     cuuint32_t estr[5] = {1, 1, 1, 1, 1};
-    if (cuTensorMapEncodeTiled(m, CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 5, ptr, gdim, gstr, box,
+    if (cuTensorMapEncodeTiled(m, TMA_DT, 5, ptr, gdim, gstr, box,
                                estr, CU_TENSOR_MAP_INTERLEAVE_NONE,
                                CU_TENSOR_MAP_SWIZZLE_128B,
                                CU_TENSOR_MAP_L2_PROMOTION_L2_128B,

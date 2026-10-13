@@ -994,6 +994,27 @@
        `.float()` 部署税在链级整个消掉；但 `cf`（融合 Triton B2/B3）仍更快（B8 1409 vs 2043），**默认部署不变**，
        本核是「目标卡选 CUDA B2 时 bf16 端到端原生」的收口。**边界**：仍仅非 TMA、输出 fp32、`vv`/`dwm` 未降
        bf16、`K=V=128/BT=16`。见 `docs/07` §78。
+- [x] **P7-76** 关闭 bf16 原生入口的**最后一个 `#error`**——`-DB2M_BF16 × -DB2M_TMA` 可组合：bf16 的
+       128 B swizzle atom 是 **64 个元素**（`NAT=BVK/64`，要求 `BVK∈{64,128}`），**解码公式一字不变**（`b ^=
+       ((b>>7)&7)<<4` 作用在字节地址上，128 B 行距无论 fp32/bf16 都把 `row` 搬进 bit 7）。改动＝`b2_mma_probe.cu`
+       引入 `tma_t`/`TAW`（bf16/64 vs fp32/32）、`rd()` 泛化到 `TAW*sizeof(tma_t)`、`issue_tma` 字节数 `*sizeof(tma_t)`
+       且 atom 列偏移 `a*TAW`、`make_map_*` 走 `TMA_DT`/`TMA_ESZ`/`TMA_INW`（bf16 图）；bf16+TMA 下 `vv`/`dwm`
+       一并降 bf16（一张图覆盖全操作数）。保留 `#error` 仅 `BF16MMA × TMA`（`rd2` 无 atom 解码）。新增
+       `harness/check_bwd_b2_bf16_tma.py`（`harness/check_bwd_b2_bf16_tma.out.txt`，空闲卡）+
+       `harness/ncu_b2_bf16_tma_driver.py` / `harness/probe_b2_bf16_tma_ncu.sh`
+       （`harness/probe_b2_bf16_tma_ncu.out.txt`）+ `docs/07` §79。**Part A**：四组 shape（含非整除 `T=250`）
+       `bftma64` vs `bf16_64`（cp.async）**四项全逐位（`max_abs=0`）**，`tma64` vs `base64` 的 `dq/dk/dw` 亦逐位
+       （`dgk` 2.861e-6＝fp32 分组，同 §53）；vs torch `bftma64 ≤6.4e-7`（bf16 底噪）、`tma64 ≤3.6e-4`（tf32）。
+       **Part B/C（关键）**：fp32 上 TMA 净赢（`tma64/base64` **0.852–0.966×**），**bf16 上 TMA 是 wash**
+       （`bftma64/bf16_64` **0.973–1.029×**）；bf16 TMA smem **76.1 KB**（< bf16 cp.async 85.5 KB，−11%）、
+       regs 65→125、但占用率都仍 2 block/SM。**Part D（ncu，`B8T2048H8`）**：TMA 的读侧修复对 bf16 **依旧生效**
+       （`srcunit` 读 **29.88M→19.92M（×0.667）**、L2 **1.70→1.39 GB（−18%）**——`cp.async .BYPASS` 的 1.5× 放大
+       在 bf16 下同样存在、同样被消掉），**但不兑现时间**（`Duration` 312.7→**319.3µs，+2%**）：bf16 核已从 fp32 的
+       「L2/DRAM 双紧」推成「延迟/发射主导」（DRAM 88.6→79.6%、tensor 8.3→**13.2%**、occ 12.5→**24.4%**），
+       省下的字节**落在不最紧的 pipe**（判据同 §51.6/§61.4）。**结论**：bf16 原生入口**至此不再有 `#error`**（只剩
+       `BF16MMA×TMA`），但目标卡 CUDA B2 在 bf16 部署时**操作数走 bf16 staging 即可、TMA 非必需**（fp32 留的 TMA
+       代码零成本可叠、逐位无损，但别指望它在 bf16 下再给时间）；TMA 的真杠杆场景仍是 **fp32/tf32 的 DRAM/L2-bound 核**
+       （§52）。**边界**：仅基础 GEMM 核、`BVK=64`、非 `BF16MMA`、链级未测。见 `docs/07` §79。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1461,12 +1482,42 @@
   GEMM 片段读、在 dgk 归约）。故 §76.6「bf16 原生 mma 可顺带消 §47.6 的 tf32 无-`ldmatrix` 限制」**被证伪**：
   该限制在本核**没有可兑现的成本**。判「要不要上 `ldmatrix`」先数该读法的 bank 落点，别被「tf32 无 16-bit
   `ldmatrix`」这句话牵着走。
+- **同一「读侧修复」在 dtype 变了以后可能不再兑现——先看最紧 pipe 是否还在 L2**（P7-76，§79.4）：TMA 消
+  `cp.async .BYPASS` 的 1.5× L2 读放大，在 fp32 核上净赢 0.85–0.97×（§52）；换到 **bf16** 核后，**放大照样
+  被消掉**（`srcunit` 读 29.88M→19.92M、L2 1.70→1.39 GB），但 `Duration` 反而 +2%——因为 bf16 staging 已把核
+  从「L2/DRAM 双紧」推成「延迟/发射主导」（DRAM 88.6→79.6%、tensor 8.3→13.2%、occ 12.5→24.4%），省下的字节
+  **落在不最紧的 pipe**。判据仍是 §51.6/§61.4「省字节要落最紧 pipe」，但**要连着 dtype 一起重判**：同一个
+  访存机制旋钮，操作数减半后其收益可以整个归零。
+- **bf16 的 TMA swizzle atom 是「64 个元素」而非 32——但解码公式一字不改**（P7-76，§79.1）：`SWIZZLE_128B`
+  按 **字节** 工作，128 B 行距无论 32×fp32 还是 64×bf16 都把 `row` 搬进 bit 7，故 `b ^= ((b>>7)&7)<<4` 通用；
+  只需把 atom 内宽、`NAT=BVK/TAW`、字节数按 `sizeof(tma_t)` 参数化，并 `static_assert` bf16 的 `BVK∈{64,128}`
+  （部署默认 `BVK=32` 不是合法 bf16 atom 数）。别以为 bf16 要重写一套 swizzle。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-75 补测**。
-  - P7-75（本轮）：**兑现 §76.6/§77.6 点名的「bf16 in 的生产核落链」——把 `-DB2M_BF16` 从基础 GEMM 核
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-76 补测**。
+  - P7-76（本轮）：**关闭 bf16 原生入口的最后一个 `#error`——`-DB2M_BF16 × -DB2M_TMA` 可组合**。bf16 的
+    128 B swizzle atom 是 **64 个元素**（`NAT=BVK/64`，要求 `BVK∈{64,128}`），**解码公式一字不变**（`b ^=
+    ((b>>7)&7)<<4` 作用在字节地址上、128 B 行距无论 fp32/bf16 都把 `row` 搬进 bit 7）。改动＝`b2_mma_probe.cu`
+    引入 `tma_t`/`TAW`、`rd()` 泛化、`issue_tma` 字节数 `*sizeof(tma_t)` 且 atom 列偏移 `a*TAW`、`make_map_*`
+    走 `TMA_DT`/`TMA_ESZ`/`TMA_INW`；bf16+TMA 下 `vv`/`dwm` 一并降 bf16。保留 `#error` 仅 `BF16MMA×TMA`。
+    新增 `harness/check_bwd_b2_bf16_tma.py`（`check_bwd_b2_bf16_tma.out.txt`，空闲卡）+ `ncu_b2_bf16_tma_driver.py`
+    / `probe_b2_bf16_tma_ncu.sh`（`probe_b2_bf16_tma_ncu.out.txt`）+ `docs/07` §79。**Part A**：四组 shape（含非整除
+    `T=250`）`bftma64` vs `bf16_64` **四项全逐位（`max_abs=0`）**，`tma64` vs `base64` 的 `dq/dk/dw` 亦逐位；vs torch
+    `bftma64 ≤6.4e-7`/`tma64 ≤3.6e-4`。**Part B/C（关键）**：fp32 上 TMA 净赢（`tma64/base64` **0.852–0.966×**），
+    **bf16 上 TMA 是 wash**（`bftma64/bf16_64` **0.973–1.029×**）；bf16 TMA smem **76.1 KB**（−11%）、regs 65→125、
+    占用率都仍 2 block/SM。**Part D（ncu）**：TMA 读侧修复对 bf16 **依旧生效**（`srcunit` **29.88M→19.92M（×0.667）**、
+    L2 **1.70→1.39 GB**——`cp.async .BYPASS` 的 1.5× 放大在 bf16 下同样存在、同样被消掉），**但不兑现时间**
+    （`Duration` 312.7→**319.3µs，+2%**）：bf16 核已从 fp32 的「L2/DRAM 双紧」推成「延迟/发射主导」（DRAM
+    88.6→79.6%、tensor 8.3→**13.2%**、occ 12.5→**24.4%**），省下的字节**落在不最紧的 pipe**（判据同 §51.6/§61.4）。
+    **结论**：bf16 原生入口**至此不再有 `#error`**（只剩 `BF16MMA×TMA`），但目标卡 CUDA B2 在 bf16 部署时
+    **操作数走 bf16 staging 即可、TMA 非必需**（fp32 留的 TMA 代码零成本可叠、逐位无损，但别指望它在 bf16 下再给时间）；
+    TMA 的真杠杆场景仍是 **fp32/tf32 的 DRAM/L2-bound 核**（§52）。**边界**：仅基础 GEMM 核、`BVK=64`、非 `BF16MMA`、链级未测。
+    **下一步**：专题维持维护态——§45 的 `cf`（`dAv→CUDA-B1→融合 Triton B2/B3→cumsum`）仍是目标卡反向默认；
+    CUDA B2 研究形态的 staging/dtype/mma-ISA/store/DA/TMA 旋钮至此**全部关闭**（§67–§79 反复归因、明确不再追），
+    有明确新需求（如 `BF16MMA×TMA` / raw `v`/`dw` 也 bf16 / K≠V）再动。
+  - P7-75（上轮）：**兑现 §76.6/§77.6 点名的「bf16 in 的生产核落链」——把 `-DB2M_BF16` 从基础 GEMM 核
     放开到六段生产核（`-DB2M_PROD`）并端到端接进反向链**。放开只需按 dtype 分流六段的操作数读路径：五操作数
     `do/vn/dv/h/dh` 仍走 `rd()`（bf16 精确扩宽，六段读到同一 fp32 值），**fp32 scratch**（`vv`=raw `v`、
     `dwm`=`dw`）改走新增 `rds()`（非 TMA 按 fp32 padded 行距、TMA 退回 `rd` 的 atom 解码），`prefetch` 把

@@ -1,0 +1,95 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_bftma_base64.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_TMA=1 -DB2M_BVK=64 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_bftma_tma64.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_BF16=1 -DB2M_BVK=64 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_bftma_bf16_64.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_TMA=1 -DB2M_BF16=1 -DB2M_BVK=64 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_bftma_bftma64.so
+================================================================================================
+Part A: correctness -- {bftma64==bf16_64} and {tma64==base64} must be BIT-IDENTICAL
+================================================================================================
+
+# B8 T2048 H8  grid=(128, 64)
+    bftma64 vs torch(bf16) dq max_abs=1.717e-05  max_rel=5.154e-07  ref_max=3.330e+01
+    tma64   vs torch(fp32) dq max_abs=1.059e-02  max_rel=3.178e-04  ref_max=3.333e+01
+  dq    bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=0.000e+00   (vs torch: bftma 5.154e-07 / tma 3.178e-04)
+    bftma64 vs torch(bf16) dk max_abs=1.526e-05  max_rel=3.927e-07  ref_max=3.886e+01
+    tma64   vs torch(fp32) dk max_abs=1.014e-02  max_rel=2.608e-04  ref_max=3.888e+01
+  dk    bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=0.000e+00   (vs torch: bftma 3.927e-07 / tma 2.608e-04)
+    bftma64 vs torch(bf16) dw max_abs=1.907e-06  max_rel=6.371e-07  ref_max=2.994e+00
+    tma64   vs torch(fp32) dw max_abs=1.020e-03  max_rel=3.408e-04  ref_max=2.993e+00
+  dw    bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=0.000e+00   (vs torch: bftma 6.371e-07 / tma 3.408e-04)
+    bftma64 vs torch(bf16) dgk max_abs=1.907e-06  max_rel=1.311e-07  ref_max=1.455e+01
+    tma64   vs torch(fp32) dgk max_abs=2.861e-06  max_rel=1.967e-07  ref_max=1.455e+01
+  dgk   bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=2.861e-06   (vs torch: bftma 1.311e-07 / tma 1.967e-07)
+
+# B2 T1024 H8  grid=(64, 16)
+    bftma64 vs torch(bf16) dq max_abs=1.526e-05  max_rel=5.094e-07  ref_max=2.995e+01
+    tma64   vs torch(fp32) dq max_abs=9.860e-03  max_rel=3.292e-04  ref_max=2.995e+01
+  dq    bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=0.000e+00   (vs torch: bftma 5.094e-07 / tma 3.292e-04)
+    bftma64 vs torch(bf16) dk max_abs=1.335e-05  max_rel=4.416e-07  ref_max=3.023e+01
+    tma64   vs torch(fp32) dk max_abs=9.924e-03  max_rel=3.281e-04  ref_max=3.025e+01
+  dk    bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=0.000e+00   (vs torch: bftma 4.416e-07 / tma 3.281e-04)
+    bftma64 vs torch(bf16) dw max_abs=1.669e-06  max_rel=5.621e-07  ref_max=2.969e+00
+    tma64   vs torch(fp32) dw max_abs=8.987e-04  max_rel=3.025e-04  ref_max=2.971e+00
+  dw    bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=0.000e+00   (vs torch: bftma 5.621e-07 / tma 3.025e-04)
+    bftma64 vs torch(bf16) dgk max_abs=1.907e-06  max_rel=1.334e-07  ref_max=1.429e+01
+    tma64   vs torch(fp32) dgk max_abs=2.384e-06  max_rel=1.668e-07  ref_max=1.429e+01
+  dgk   bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=2.861e-06   (vs torch: bftma 1.334e-07 / tma 1.668e-07)
+
+# T512 H4  grid=(32, 4)
+    bftma64 vs torch(bf16) dq max_abs=1.144e-05  max_rel=4.203e-07  ref_max=2.723e+01
+    tma64   vs torch(fp32) dq max_abs=8.778e-03  max_rel=3.225e-04  ref_max=2.722e+01
+  dq    bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=0.000e+00   (vs torch: bftma 4.203e-07 / tma 3.225e-04)
+    bftma64 vs torch(bf16) dk max_abs=1.144e-05  max_rel=4.412e-07  ref_max=2.594e+01
+    tma64   vs torch(fp32) dk max_abs=8.017e-03  max_rel=3.092e-04  ref_max=2.592e+01
+  dk    bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=0.000e+00   (vs torch: bftma 4.412e-07 / tma 3.092e-04)
+    bftma64 vs torch(bf16) dw max_abs=1.073e-06  max_rel=3.855e-07  ref_max=2.783e+00
+    tma64   vs torch(fp32) dw max_abs=8.188e-04  max_rel=2.940e-04  ref_max=2.785e+00
+  dw    bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=0.000e+00   (vs torch: bftma 3.855e-07 / tma 2.940e-04)
+    bftma64 vs torch(bf16) dgk max_abs=9.537e-07  max_rel=7.401e-08  ref_max=1.289e+01
+    tma64   vs torch(fp32) dgk max_abs=1.907e-06  max_rel=1.480e-07  ref_max=1.288e+01
+  dgk   bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=1.907e-06   (vs torch: bftma 7.401e-08 / tma 1.480e-07)
+
+# T250 H3 (non-div)  grid=(16, 3)
+    bftma64 vs torch(bf16) dq max_abs=1.049e-05  max_rel=4.278e-07  ref_max=2.452e+01
+    tma64   vs torch(fp32) dq max_abs=8.778e-03  max_rel=3.583e-04  ref_max=2.449e+01
+  dq    bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=0.000e+00   (vs torch: bftma 4.278e-07 / tma 3.583e-04)
+    bftma64 vs torch(bf16) dk max_abs=9.537e-06  max_rel=3.342e-07  ref_max=2.853e+01
+    tma64   vs torch(fp32) dk max_abs=8.287e-03  max_rel=2.903e-04  ref_max=2.855e+01
+  dk    bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=0.000e+00   (vs torch: bftma 3.342e-07 / tma 2.903e-04)
+    bftma64 vs torch(bf16) dw max_abs=9.537e-07  max_rel=3.670e-07  ref_max=2.599e+00
+    tma64   vs torch(fp32) dw max_abs=7.644e-04  max_rel=2.941e-04  ref_max=2.599e+00
+  dw    bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=0.000e+00   (vs torch: bftma 3.670e-07 / tma 2.941e-04)
+    bftma64 vs torch(bf16) dgk max_abs=9.537e-07  max_rel=8.138e-08  ref_max=1.172e+01
+    tma64   vs torch(fp32) dgk max_abs=1.907e-06  max_rel=1.628e-07  ref_max=1.172e+01
+  dgk   bftma64-vs-bf16_64 max_abs=0.000e+00   tma64-vs-base64 max_abs=1.907e-06   (vs torch: bftma 8.138e-08 / tma 1.628e-07)
+
+worst over all cases:
+  dq    bftma64==bf16_64 0.000e+00   tma64==base64 0.000e+00   | bftma64/torch 5.154e-07   tma64/torch 3.583e-04
+  dk    bftma64==bf16_64 0.000e+00   tma64==base64 0.000e+00   | bftma64/torch 4.416e-07   tma64/torch 3.281e-04
+  dw    bftma64==bf16_64 0.000e+00   tma64==base64 0.000e+00   | bftma64/torch 6.371e-07   tma64/torch 3.408e-04
+  dgk   bftma64==bf16_64 0.000e+00   tma64==base64 2.861e-06   | bftma64/torch 1.334e-07   tma64/torch 1.967e-07
+
+================================================================================================
+Part B: kernel-only timing -- base64 / tma64 / bf16_64 / bftma64
+================================================================================================
+  case               |   base64 |    tma64 |  bf16_64 |  bftma64 | tma64/base bftma/bf16
+  B8 T2048 H8        |    519.9 |    484.7 |    308.4 |    317.3 |      0.932      1.029
+  B2 T1024 H8        |     71.5 |     69.0 |     47.9 |     46.6 |      0.966      0.973
+  T512 H4            |      9.3 |      8.2 |      8.4 |      8.6 |      0.886      1.028
+  T250 H3 (non-div)  |      8.6 |      7.4 |      7.5 |      7.7 |      0.852      1.024
+
+================================================================================================
+Part C: static cost
+================================================================================================
+  base64  : smem = 87552 B (85.5 KB)
+  tma64   : smem = 155776 B (152.1 KB)
+  bf16_64 : smem = 87552 B (85.5 KB)
+  bftma64 : smem = 77952 B (76.1 KB)
+  ptxas base64  :     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | ptxas info    : Used 70 registers, used 1 barriers
+  ptxas tma64   :     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | ptxas info    : Used 123 registers, used 1 barriers
+  ptxas bf16_64 :     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | ptxas info    : Used 65 registers, used 1 barriers
+  ptxas bftma64 :     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads | ptxas info    : Used 125 registers, used 1 barriers
+
+DONE
