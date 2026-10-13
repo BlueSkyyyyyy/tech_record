@@ -1,0 +1,34 @@
+P134-1 Mega MoE 前向 step 的通信-计算重叠 —— H100 真机
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 nccl (2, 29, 7) sms 132
+
+======================================================================
+A) 负结果：侧流 NCCL a2a（dispatch fp8 + combine bf16，~88MB/rank）
+   × 真实 grouped GEMM（DeepGEMM SM90 L1+L2，DeepSeek 量级），扫 NCCL_MAX_NCHANNELS
+======================================================================
+RESULT maxch=0 reps=1 t_comm=987.3us t_comp=319.7us serial=1651.6us overlap=1641.6us ovf=1.006 ideal_overlap=987.3us eff_vs_ideal=0.601 hidden_frac=0.031 comm_bw=89.2GB/s comp_tflops=1128 bitsame=True
+RESULT maxch=0 reps=3 t_comm=992.5us t_comp=955.1us serial=2003.8us overlap=1981.3us ovf=1.011 ideal_overlap=992.5us eff_vs_ideal=0.501 hidden_frac=0.024 comm_bw=88.7GB/s comp_tflops=1133 bitsame=True
+RESULT maxch=8 reps=1 t_comm=1985.3us t_comp=319.2us serial=2587.9us overlap=2566.9us ovf=1.008 ideal_overlap=1985.3us eff_vs_ideal=0.773 hidden_frac=0.066 comm_bw=44.4GB/s comp_tflops=1130 bitsame=True
+RESULT maxch=8 reps=3 t_comm=1983.0us t_comp=955.6us serial=3367.6us overlap=3383.8us ovf=0.995 ideal_overlap=1983.0us eff_vs_ideal=0.586 hidden_frac=-0.017 comm_bw=44.4GB/s comp_tflops=1133 bitsame=True
+RESULT maxch=16 reps=1 t_comm=1268.3us t_comp=320.3us serial=1697.6us overlap=1692.3us ovf=1.003 ideal_overlap=1268.3us eff_vs_ideal=0.749 hidden_frac=0.017 comm_bw=69.4GB/s comp_tflops=1126 bitsame=True
+RESULT maxch=16 reps=3 t_comm=1268.6us t_comp=959.9us serial=2558.2us overlap=2541.2us ovf=1.007 ideal_overlap=1268.6us eff_vs_ideal=0.499 hidden_frac=0.018 comm_bw=69.4GB/s comp_tflops=1128 bitsame=True
+RESULT maxch=32 reps=1 t_comm=996.0us t_comp=320.3us serial=1650.1us overlap=1624.7us ovf=1.016 ideal_overlap=996.0us eff_vs_ideal=0.613 hidden_frac=0.079 comm_bw=88.4GB/s comp_tflops=1126 bitsame=True
+RESULT maxch=32 reps=3 t_comm=952.0us t_comp=958.2us serial=1997.4us overlap=1992.2us ovf=1.003 ideal_overlap=958.2us eff_vs_ideal=0.481 hidden_frac=0.006 comm_bw=92.5GB/s comp_tflops=1130 bitsame=True
+
+======================================================================
+B) 正对照：单进程 8 卡 NVLink 限块数 peer scatter ∥ 计算受限 kernel
+   （SM 预算分区 B 给通信、其余给计算）
+======================================================================
+visible GPUs = 8
+SM count = 132, per-rank comm bytes = 88.0 MB (11.0 MB/peer)
+compute leg alone at full SM (528 blocks) = 610.7 us
+
+B_comm  t_comm_us   t_comp_us  serial_us    ovlp_us   ideal_us      ovf  comm_GB/s
+4          3289.0       323.8     3631.8     3319.4     3289.0    1.094       24.5
+8          1661.3       331.6     2011.8     1672.8     1661.3    1.203       48.6
+16          857.2       369.9     1227.6      885.3      857.2    1.387       94.2
+32          507.9       415.2      914.6      527.7      507.9    1.733      159.0
+48          411.2       395.6      828.4      418.3      411.2    1.980      196.3
+64          387.4       488.7      893.5      499.6      488.7    1.788      208.4
+96          388.5       632.8     1028.7      644.1      632.8    1.597      207.8
+120         405.7      1435.6     1839.5     1499.6     1435.6    1.227      199.0

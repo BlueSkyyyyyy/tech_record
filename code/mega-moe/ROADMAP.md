@@ -4160,6 +4160,27 @@
        NVLink 远端直写 / readiness `st_rel_sys`+`ld_acq_sys`/`grid_sync` **SM100 专属、仅分析**。
        配套博客 `content/posts/mega-moe-143-mega-moe-forward-combine`（索引页新增第 143 篇）。
 
+### P134 增量（opt-in，把 P142/P143 的「必须重叠」结论用真机坐实）
+
+- [x] **P134-1** **Mega MoE 前向 step 的通信-计算重叠真机量化**（`harness/exp_forward_overlap.py`；
+      `src/forward_overlap_nvlink.cu`；参考 `impls/sm100_fp8_fp4_mega_moe.cuh:329-334/342-344/393`、
+      `scheduler/mega_moe.cuh:344-370`；DeepEP `deep_ep/utils/envs.py:193-204`、
+      `deep_ep/buffers/ep.py:431-541`；对照第 65/94/63/142/143 篇）。
+      第 142 篇给了前向**计算侧**预算（339.4us）、第 143 篇补了**通信+归约侧**（~292us）并推出
+      「两腿同量级→必须重叠」，但那是**串行相加**、**从没真机量过前向的 overlap_factor**。
+      本篇补上。**负结果**：NCCL a2a（dispatch fp8 + combine bf16 = **88.1MB/rank**）发**侧流** ×
+      **真实 grouped GEMM**（DeepGEMM SM90 L1+L2，319.7us）发**主**流，扫 `NCCL_MAX_NCHANNELS`
+      ×reps：**ovf ≈ 1.0（1.003–1.016）**、`eff_vs_ideal` 0.48–0.77、`hidden_frac`≤0.08——
+      **侧流 NCCL 与 grouped GEMM 几乎不重叠**（NCCL kernel 占满 SM）；限 channel 反使 `t_comm`
+      990→1985us（2.0×）而重叠收益为零（净亏）。本机 a2a **89GB/s**（受争用下界；NCCL a2a ≠ NVLink
+      直连）。**正对照**：单进程 8 卡 NVLink **限块数** peer scatter ∥ 计算受限 kernel，
+      `overlap ≈ max(t_comm,t_comp)`，`ovf` 从 B=4 的 1.09 升到 **B*=48 的 1.980**（t_comm≈t_comp）
+      再降到 B=120 的 1.227——**存在最优 SM 预算**，且 NVLink 只需 ~48 SM 跑满 ~200GB/s。
+      **为什么 Mega MoE 单 kernel + warp 解耦**：寄存器级 SM 分区（`kNumDispatchRegisters=48/96`、
+      `kNumEpilogueRegisters=208/168`、总和 ≤64512 `:329-334`）。融合 kernel 本体 SM100 专属、仅分析。
+      H100(sm90) 真机负结果 8 组 + 正对照 8 组。配套博客
+      `content/posts/mega-moe-144-forward-overlap`（索引页新增第 144 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4190,8 +4211,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P133 各增量完成（P15-1…P41-1、P42-1…P133-1）。**
-  本轮 P133-1：新建 `docs/143-mega-moe-forward-combine.md`
+- 当前进度：**P0~P14 全部完成；P15~P134 各增量完成（P15-1…P41-1、P42-1…P134-1）。**
+  本轮 P134-1：新建 `docs/144-forward-overlap.md`
+  （+`harness/exp_forward_overlap.{sh,py,out.txt}`、`src/forward_overlap_nvlink.cu`）——把 P142/P143
+  「计算腿与通信+归约腿同量级 → 融合 kernel 必须重叠」的**串行推断**用真机坐实。**负结果**：NCCL a2a
+  （dispatch fp8 + combine bf16 = 88.1MB/rank）发**侧流** × DeepGEMM **真实 grouped GEMM**（L1+L2，
+  319.7us）/1163 TFLOPS）发**主**流，扫 `NCCL_MAX_NCHANNELS`×reps：**ovf ≈ 1.0（1.003–1.016）**、
+  `eff_vs_ideal` 0.48–0.77、`hidden_frac`≤0.08 → **侧流 NCCL 与 grouped GEMM 几乎不重叠**（NCCL
+  kernel 占满 SM）；限 channel 反使 `t_comm` 990→1985us（2.0×）而重叠收益为零（净亏）。本机 a2a
+  **89GB/s**（受争用下界；NCCL a2a ≠ NVLink 直连）。**正对照**：单进程 8 卡 NVLink **限块数** peer
+  scatter ∥ 计算受限 kernel，`overlap ≈ max(t_comm,t_comp)`，`ovf` 从 B=4 的 1.09 升到 **B*=48 的
+  1.980**（t_comm≈t_comp，411 vs 396us）再降到 B=120 的 1.227——**存在最优 SM 预算**，NVLink 只需
+  ~48 SM 跑满 ~200GB/s（正是第 63 篇 `get_theoretical_num_sms` 的物理来源）。**为什么 Mega MoE
+  用单 kernel + warp 解耦**：寄存器级 SM 分区（`kNumDispatchRegisters=48/96`、`kNumEpilogueRegisters
+  =208/168`、总和 ≤64512 `impls:329-334`，dispatch warp `:342-344`）。结论：**不是「并行发两条 stream」
+  就能重叠，而是必须先按 SM 预算分区**。融合 kernel 本体 SM100 专属、仅分析。H100 真机负结果 8 组 +
+  正对照 8 组。索引页新增第 144 篇。
+  上一轮 P133-1：新建 `docs/143-mega-moe-forward-combine.md`
   （+`harness/exp_moe_forward_combine.{sh,py,out.txt}`、`src/moe_forward_combine.cu`）——第 142 篇
   （P132-1）前向 step 预算的**补全**：把预算只到 L2 GEMM 输出之后缺的两段补上——**L2 bf16 epilogue
   写回**（`impls:1254-1357`：TMEM→寄存器→`cast_into_bf16_and_pack`（RNE）→swizzle STSM→
