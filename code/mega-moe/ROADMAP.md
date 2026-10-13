@@ -3993,7 +3993,37 @@
       MN-major FP4=64、`get_tma_aligned_size==align(x,16/elem)`、Python 段 `PY_OK`。
       至此 `csrc/jit_kernels/heuristics/` 目录（`config`/`common`/`utils`/`sm90`/`sm100`/`mega_moe`/
       `mega_gate`）**全部被专篇覆盖**。设备端用这些数字造 TMA/发 UMMA 仍 SM100/SM90 专属、仅分析。
-      配套博客 `content/posts/mega-moe-138-mma-kind-swizzle-selector`（索引页新增第 138 篇）。
+       配套博客 `content/posts/mega-moe-138-mma-kind-swizzle-selector`（索引页新增第 138 篇）。
+
+### P129 增量（opt-in，补齐训练侧一直缺席的「路由负载均衡」算子与反向）
+
+- [x] **P129-1** **MoE 路由负载均衡三件套：aux load-balancing loss / router z-loss /
+      aux-loss-free bias（DeepSeek-V3）及其反向**（`csrc/apis/mega_gate.hpp`、
+      `impls/sm100_bf16_mega_gate.cuh`、`epilogue/sm100_mega_gate.cuh`、`tests/test_mega_gate.py`；
+      公式参考 Switch 2101.03961、ST-MoE 2202.08906、DeepSeek-V2 2405.04434、DeepSeek-V3 2412.19437）。
+      专题到第 138 篇已把前向、反向、Mega Gate/mHC 与三条门控反向逐个拆开，但**「路由的负载均衡」这一
+      决定 MoE 能否收敛的训练侧算子一直没讲**：第 4 篇 router 反向、第 127 篇 Mega Gate 反向都把 `bias`
+      当**给定常量**（stop-grad），而 DeepGEMM 的 Mega Gate 确实只**消费** `bias`（`mega_gate.hpp:41-43`）、
+      **不产生**它。**① aux load-balancing loss**（$\mathcal{L}=\alpha E\sum_i f_iP_i$，$f_i$=top-k 硬计数、
+      **必须 stop-grad**、$P_i$=平均门控概率可微）：梯度只走软概率
+      $\partial\mathcal{L}/\partial z_{t,j}=\frac{\alpha E}{T}p_{t,j}(f_j-g_t)$；不变量 $\sum_i f_i=k$
+      且均匀 $P$ 时 $\mathcal{L}=\alpha k$（与 $f$ 分布无关）。**② router z-loss**
+      （$\mathcal{L}_z=\beta\overline{\mathrm{lse}^2}$，$\partial\mathcal{L}_z/\partial z=\frac{2\beta}{T}\mathrm{lse}\,p$）。
+      **③ aux-loss-free bias**（DeepSeek-V3 `e_score_correction_bias`）：$b_i$ **只进排名、不进权重**、
+      每步 $b_i\mathrel{+}=\gamma\operatorname{sign}(\text{target}-\text{load}_i)$、**零梯度**（控制回路）。
+      **与 Mega Gate 对接（真实行号）**：`mega_gate.hpp:56-57`「rank on score+bias, weights are the
+      unbiased scores」、`impls:283` `kHasScoringBias`、`impls:380-383/396-398`（排名加 bias、图像 token 换
+      `image_bias`）、`impls:404`（在带 bias 分上选 top-k）、`epilogue:212-213`（权重用
+      `selected_unbiased_score`）、`tests/test_mega_gate.py:130-139`（`ranking=scores+ranking_bias` /
+      `reference_weights` 用无偏 `scores`）——**DeepGEMM 只做消费端，b 的产生/更新在框架训练循环里**。
+      H100(sm90) 真机 `harness/exp_moe_load_balance.{py,sh,out.txt}`（纯 PyTorch float64、架构无关）
+      **21 PASS / 0 FAIL**：Part A 解析梯度 vs autograd **2.20e-15** / 中心差分 7.97e-06 / 均匀 $P$ 时
+      $L=\alpha k$；Part B z-loss vs autograd **4.95e-16**、放大 logits 尺度 L 2.54e-2→2.89e-1；
+      Part C 无 bias 硬负载 max/min **28.04** → bias 800 步 **1.0178**（各专家占比偏差 <3.05e-4、
+      过载专家 bias 更低方向正确、$\gamma$ 10× 则 40 步达 1.105）；Part D **核心结论**——aux-loss 梯度是
+      **弱杠杆**（作用于软概率、对阶跃的硬 top-k 仅 8.50→5.44），bias 符号更新是**强杠杆**（直接改排名、
+      800 步 28.04→1.03），**坐实 DeepSeek-V3 aux-loss-free 的工程动机**。本层纯 host/Python、架构无关。
+      配套博客 `content/posts/mega-moe-139-moe-load-balance`（索引页新增第 139 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4020,8 +4050,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P128 各增量完成（P15-1…P41-1、P42-1…P128-1）。**
-  本轮 P128-1：新建 `docs/138-mma-kind-swizzle-selector.md`
+- 当前进度：**P0~P14 全部完成；P15~P129 各增量完成（P15-1…P41-1、P42-1…P129-1）。**
+  本轮 P129-1：新建 `docs/139-moe-load-balance.md`
+  （+`harness/exp_moe_load_balance.{py,sh,out.txt}`）——补齐训练侧一直缺席的**路由负载均衡**算子与反向。
+  第 4 篇 router 反向 / 第 127 篇 Mega Gate 反向都把 `bias` 当给定常量（stop-grad），而 DeepGEMM 的
+  Mega Gate 只**消费** `bias`（`mega_gate.hpp:41-43`）、不产生它。**三种机制**：**① aux load-balancing
+  loss**（$\alpha E\sum_i f_iP_i$，$f$ stop-grad、梯度只走软概率 $P$，$\partial\mathcal{L}/\partial z=
+  \frac{\alpha E}{T}p(f-g)$，不变量 $\sum f_i=k$、均匀 $P\Rightarrow\mathcal{L}=\alpha k$）；**② router
+  z-loss**（$\beta\overline{\mathrm{lse}^2}$，$\partial\mathcal{L}_z/\partial z=\frac{2\beta}{T}\mathrm{lse}\,p$）；
+  **③ aux-loss-free bias**（DeepSeek-V3，$b_i$ 只进排名不进权重、$b\mathrel{+}=\gamma\operatorname{sign}(\cdot)$、
+  零梯度）。**与 Mega Gate 对接**（`mega_gate.hpp:56-57`、`impls:283/380-383/396-398/404`、
+  `epilogue:212-213`、`test_mega_gate.py:130-139`）。H100(sm90) 真机 **21 PASS / 0 FAIL**：
+  aux-loss 解析梯度 vs autograd **2.20e-15**、z-loss **4.95e-16**；无 bias 硬负载 max/min **28.04** →
+  bias 800 步 **1.0178**；**核心结论**——aux-loss 梯度是**弱杠杆**（8.50→5.44）、bias 是**强杠杆**
+  （28.04→1.03），坐实 DeepSeek-V3 aux-loss-free 动机。纯 host/Python、架构无关。索引页新增第 139 篇。
+  上一轮 P128-1：新建 `docs/138-mma-kind-swizzle-selector.md`
   （+`harness/exp_mma_kind_swizzle.{sh,out.txt}`、`src/mma_kind_swizzle.cu`）——补齐 `heuristics/`
   目录里唯一从没被单独读过、且是**每个** SM90/SM100 kernel 的 K 块宽度与 TMA swizzle **唯一出处**
   的 `heuristics/utils.hpp`（32 行）+ `config.hpp:35-61` 的 `GemmDesc` 派生管道 + Python
@@ -5432,7 +5475,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P128 已完成（最新 **P128-1 DeepGEMM 启发式最底层的公共选择器
+- **下一步**：P0~P129 已完成（最新 **P129-1 MoE 路由负载均衡三件套（aux-loss / router z-loss /
+  aux-loss-free bias）及其反向**：补齐训练侧一直缺席的「负载均衡」算子——第 4/127 篇把 `bias` 当常量是对的，
+  但「bias 从哪来、怎么更新」与 aux/z loss 的梯度从没写过。三种机制的前向公式 + 梯度 + 与 Mega Gate 的
+  对接（`mega_gate.hpp:56-57`、`impls:396-398`、`epilogue:212-213`）全部讲清，H100 真机 21 PASS / 0 FAIL：
+  aux-loss 梯度 vs autograd 2.20e-15、z-loss 4.95e-16；**核心对照**——aux-loss 对硬 top-k 负载是弱杠杆
+  （8.50→5.44），bias 符号更新是强杠杆（28.04→1.03），坐实 DeepSeek-V3 aux-loss-free 的工程动机。
+  纯 host/Python、架构无关。索引页新增第 139 篇。
+  上一轮 P128-1 DeepGEMM 启发式最底层的公共选择器
   `heuristics/utils.hpp`（元素位宽 / TMA swizzle）+ `GemmDesc` 的 dtype→MmaKind 管道 + Python 别名层**：
   第 28 篇只给 `config.hpp` 五结构体列**字段表**、`heuristics/utils.hpp` 从没被单独读过，而它是**每个**
   SM90/SM100 kernel 的 K 块宽度与 TMA swizzle 的**唯一出处**。`get_num_element_bits`（逻辑位宽）+
