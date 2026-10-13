@@ -3881,6 +3881,44 @@
       产生、未逐位展开 `InstrDescriptor`/TMA descriptor 编码；`B2B` 仍未细究；MPK 自建 mainloop 与
       CUTLASS `CollectiveMma::mma` 的数值等价未验证。**本轮新增增量。**
 
+### P139 DFlash task 家族源码走读（`docs/53-mpk-dflash-family.md`）
+
+- [x] **P139-1** 补掉 `docs/35` §9 明留的「**注意力之外的 SM100 task 家族**（`dflash_*`/`inkling_*`/…）
+  未逐行」这条尾巴里的一支：把 Kimi-K2.6 投机解码草稿 **DFlash 家族**三个 device 身体从 `docs/37` §5.2
+  的摘要推进到**逐行**。见 `docs/53-mpk-dflash-family.md`（快照 `mirage-project/mirage` 分支 `mpk`
+  commit `f9eb70c`，与 `docs/06`–`docs/52` 同快照；**纯源码走读（资料分析），本轮无新实验**——SM100
+  在目标卡 H100/sm90 不可执行）。三条 headline：
+  - **(A)** DFlash 是「**单次非因果 block attention**」——`B` 个 block query 非因果地看
+    `[context（`ctx_len`） ++ block（`B`）]` 全体 key（`dflash_attention_sm100.cuh:24-61`），绝对位置
+    `context j→j`、`block i→ctx_len+i`（`:41-42`），sliding window 按**绝对距离 `|q_pos−key_pos|`**
+    （非因果），故**不复用** `attention_sm100`（`docs/44`/`docs/45`）的因果掩码/在线 softmax。
+  - **(B)（headline）一个 body 两条实现、编译期 shape 分派**：`USE_MMA = (sizeof(T)==2) &&
+    (B*NUM_QO_PER_KV==64) && (HEAD_DIM%64==0) && (HEAD_DIM<=128)`（`:195-198`）——不满足走标量参考
+    `dflash_attention_sm100_ref`（一 warp 一个 `(query,q_head)`、`DPT=HEAD_DIM/32`、`shfl_xor` 蝶形
+    归约、在线 softmax，`:62-175`）；满足走 tensor-core 路径（`:177-566`）——per kv head 的 64 行
+    组成 MMA M 维、4 warp 各持一个 16 行 m-tile、**softmax/O 累加完全 warp-local 无跨 warp 归约**
+    （`:359-362`/`:538-539`），K/V 用 `cp.async` **双缓冲 64-key tile** 流式（`:372-414`），sliding
+    window **整 tile 跳过**（`:246-251`）；另记工程细节：Q 载入时把一行 `NUM_QO_PER_KV` 头拆成 smem 行
+    （`:325-337`）、QK f32 累加器碎片 **`convert_f32_to_bf16_uint32` 复用为 PV 的 A 操作数**（`:511-530`）、
+    `NamedBarrier 6`（`:229`）、`smem_row<T,3,3,3>` 128 B swizzle ABI（`:289-290`，`docs/51`）。
+  - **(C)** 家族另两个 task = 「把写回/预处理各拆成一段独立身体」：`dflash_norm_rope_sm100`
+    （90 行，一线程一 `(token,head)` 走寄存器做 per-head RMSNorm+NeoX RoPE、`v` 不做，`:53-86`）与
+    `dflash_kv_store_sm100`（66 行，按 slot 散射写 draft **自己的** paged cache；因页物理连续故
+    slot→扁平下标化简，`:55-63`）——与 `docs/40`/`docs/41` 的「**把写回从 attention 拆出去是 task
+    可复用的先决条件**」同向；核五层接线（`TaskType` 296/297/298、`graph.cc:457-470`、
+    `task_register.cc:126-256`、前端 `persistent_kernel.py:970-1048`、`builder.py`）。
+  - **两条静态落差（只记不判）**：`builder.py:51-53` 的 docstring 引参考单测
+    `tests/.../sm100_dflash/{test_dflash_full_step_testmode.py, test_dflash_paged_xiter.py}`，但快照
+    **该目录不存在**（只有 `sm100_dflash_attention/`）；`DFlashBuilder` 全仓**零实例化**（唯一消费者
+    是单测直接调 `dflash_attention_layer`）——「device 家族 + builder 已实现、上层生产者尚未接上」，
+    是 `docs/49`/`docs/50`「有实现 ≠ 已接线」在**模型 builder 层**的又一实例。
+  判据只贡献 **C3 的「DFlash 段范围与融合边界」**（device body 层不涉 C1/C2/C4/C5）。配套博客 post
+  `mega-kernel-54-mpk-dflash-family`（weight 55）并更新 `mega-kernel-00-index` 第 54 项。
+  P139-1 新留尾巴（文档 §7）：未构建；ref 与 mma 路径数值等价只由单测 `atol=rtol=2e-2` 声明未跑；
+  Kimi-K2.6 模型侧（`hidden_size=7168`/`num_layers=6`/`num_q_heads=64`/`num_kv_heads=8`）取自
+  `draft_config` 未加载真实 ckpt；`M_ROWS==64` 之外哪些生产 shape 回退 ref 未穷举；未与 DeepGEMM
+  SM100 路径对跑。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4198,7 +4236,30 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P138-1 完成（1/1）**。兑现阶段「下一步候选」第一条——补掉 `docs/36` §8 明留的尾巴
+- 当前进度：**P139-1 完成（1/1）**。兑现阶段「下一步候选」第一条的残留——`docs/35` §9 明留的
+  「注意力之外的 SM100 task 家族（`dflash_*`/`inkling_*`/…）未逐行」里的一支，把 Kimi-K2.6 投机解码草稿
+  **DFlash 家族**三个 device 身体从 `docs/37` §5.2 的摘要推进到逐行。见 `docs/53-mpk-dflash-family.md`
+  （MPK `f9eb70c`，**纯源码走读、无新实验**；SM100 专属、本机不可执行）。三条 headline：
+  **(A)** DFlash 是「单次**非因果** block attention」——`B` 个 block query 非因果地看 `[context ++ block]`
+  全体 key、绝对位置 `ctx_len+i`、sliding window 按 `|q_pos−key_pos|`，故不复用通用 paged attention
+  （`docs/44`）；**(B)（headline）一个 body 两条实现、编译期 shape 分派**——`USE_MMA = (sizeof(T)==2)
+  && (B*NUM_QO_PER_KV==64) && (HEAD_DIM%64==0) && (HEAD_DIM<=128)`；mma 路径 4 warp 各持 16 行 m-tile、
+  **softmax/O 累加 warp-local 无跨 warp 归约**、K/V `cp.async` 双缓冲 64-key tile、窗口整 tile 跳过，
+  标量 ref 一 warp 一 `(query,q_head)`；另记 QK 累加器复用为 PV 的 A、一行 4 thread 持 + `shfl_xor`
+  归约；**(C)** 家族另两个 task = 独立 `dflash_norm_rope`（一线程一 (token,head) 走寄存器 per-head
+  RMSNorm+NeoX RoPE、`v` 不做）与 `dflash_kv_store`（按 slot 散射写 draft 自己的页缓存、页连续 ⇒
+  扁平 slot），与 `docs/40`/`docs/41`「拆写回是 task 可复用的先决条件」同向。核五层接线 + 两条静态落差
+  （builder docstring 引的端到端单测目录不存在、`DFlashBuilder` 全仓零实例化）。判据只贡献 C3。
+  配套博客 post `mega-kernel-54-mpk-dflash-family`（weight 55）并更新 `mega-kernel-00-index` 第 54 项。
+  P139-1 新留尾巴见文档 §7（未构建、ref/mma 数值等价未跑、K2.6 模型侧未核、回退 shape 未穷举）。
+- 下一步候选：可继续走「`docs/35` §9 遗留的其它未走读相邻层」的残留——同族的 **Inkling task 家族**
+  （`inkling_attention_sm100` 245 行 / `inkling_sconv_sm100` 94 行 / `inkling_moe_router_sm100` 168 行，
+  `docs/37` §5.3 只有摘要）；或 `docs/46` §6 的 FLAT-CACHE draft attention 设计的完整追述；
+  或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处。**`docs/35` §9 的 CUTLASS `collective_builder`
+  侧 QK/PV atom 已由 **P138-1/`docs/52`** 补掉**；**`docs/48` §7 的「`my_gpu_id==0` 作 residual 的 TP
+  语义追链」已由 P136-1/`docs/50` 补掉**；**`docs/44` §10 / `docs/48` §7 的布局层尾巴已由 P137-1/
+  `docs/51` 补掉**；**DFlash 家族已由 **P139-1/`docs/53`** 补掉**。
+- 此前：**P138-1 完成（1/1）**。兑现阶段「下一步候选」第一条——补掉 `docs/36` §8 明留的尾巴
   「CUTLASS `collective_builder` 侧 QK/PV atom（`mla_sm100_2sm.cuh` 的 CUTLASS 内部）未展开」，
   把 `mla_sm100_2sm.cuh` 的**依赖方** `deps/cutlass`（submodule 钉死 `f3fde583`）打开。见
   `docs/52-mpk-mla-2sm-cutlass.md`（MPK `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：
