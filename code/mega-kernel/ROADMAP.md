@@ -4856,6 +4856,28 @@
    新留尾巴（§94.7）：未测 2D/3D cluster × multicast、非连续/重叠子集掩码、multicast × 2SM
    （`cta_group::2`）。
 
+### P170 实验扩展 71：TMA multicast 掩码的「非连续形状」与「分裂发送」（`docs/04-experiments.md` §95）
+
+- [x] **P170-1** 补掉 §94.7 明留的尾巴——**「未测非连续 / 重叠子集掩码」**：把 §19/§20/§93/§94 的
+   **连续**掩码换成**离散（交错）位图**，并把「一个组由单个发起者发」换成**多个组内 CTA 分头发**。
+   见 `docs/04-experiments.md` **§95**，源码 `src/multicast_mask_shape.cu`（§94 `fanout_kernel` 忠实
+   复刻 + `pattern` 旋钮：0=contig 连续分组 / 1=stride 交错分组 `{q,q+S,q+2S,...}` / 2=contig-split
+   `L` 槽由组首与组首+1 轮流发 / 3=stride-split `q` 与 `q+S` 轮流发；每个 CTA 恒为唯一一次接收者、
+   `expect_tx` 恒 `chunk·L`，四种 pattern 的**总字节/笔数/每笔 popcount 完全相同**），脚本
+   `harness/multicast_mask_shape.sh`、原始输出 `harness/multicast_mask_shape.out.txt`（目标卡 H100/sm90a、
+   numSM=132、**固定空闲 device 6**、nvcc 13.2、每配置独立进程；`shape_kernel` 12 regs/0 spill）。
+   五个 Section：§A 形状不变性 / §B 分裂发送 / §C C×pattern / §D ncu / §E 复跑。核心结论：
+   **(1)（headline）形状不变性**——连续 vs 离散掩码墙钟 **0.983/1.003/1.001×**（g=2/4/8）、源侧 L2
+   sector **逐位相同**，成本只由「popcount `g` + 发起者数」定、与位图形状无关；**(2)（headline）
+   发起者身份自由**——把 `L` 槽从「组首一人发」改成「组内次席轮流发」墙钟 ±1.5% 内（`g=2/4/8`），
+   发起者不必是组首（唯一约束：须落在自己掩码内），给调度器自由度（产出 tile 的 CTA 直接广播）；
+   **(3) 推广 §94.6**——`srcunit_tex = delivered/(32·g)` 对**任意位图**成立（contig/stride 逐位相同，
+   g=4 6,758,400、g=8 3,379,200）；**(4)（方法学）** 首轮 §B `pattern2,g=8` 单点 808 µs（3.3×）不能复现
+   （字节相同的 `pattern3,g=8` 同轮 242 µs），复跑 3×3 回到 242 µs ⇒ 共享机器瞬时离群，非机制效应。
+   判据：cluster kernel C1+C2+C3、`cluster.sync`/multicast 细化 **C4**、**仍非 C5**。**本轮新增实验**；
+   新留尾巴（§95.7）：真正的**重叠掩码**（同一 CTA 被多笔 multicast 打到**同一 SMEM 槽**的竞争序）
+   未测、2D/3D cluster × 非连续掩码、multicast × 2SM 仍未测。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -5376,10 +5398,38 @@
   走 copy-engine 通路，单笔代价约为 plain TMA 的 1.9×，靠「一笔多投」摊薄——`g=1`(0.53×)/`g=2`(0.82×)
   /`g=4`(0.98×)/`g=8`(1.02×)，**墙钟非单调**。故「用 multicast 替代普通 TMA」在小组扇出下是**净亏**，
   不能把 mode1 与 mode0 在低 `g` 处直接类比；写 multicast 实验时 `mask` 的单 bit 形态不是 plain。
+- **multicast 的发起者必须在自己的掩码内，否则发起 CTA 自己会挂**（P170-1/§95）：每个接收 CTA 用自己的
+  `mbar` 等 `expect_tx(chunk·L)`；若某 CTA 发 multicast 但其 `mask` **不含自己**，它自己的 `mbar` 收不到
+  那笔投递、会永远等下去。本节四种 pattern 都让**发起者是接收者之一**（连续=组首、交错=组内最小 rank、
+  分裂=组首与组内次席），故每个 CTA 恒为唯一一次接收者。要测「专用广播者（不接收）」须让非接收者
+  **不发** `expect_tx`——留作尾巴。
+- **共享机器单点瞬时离群可大到一个数量级，机制结论必须靠复跑**（P170-1/§95）：首轮 `pattern2,g=8` 单点
+  报 **808 µs**（正常 242 µs 的 3.3×），而**逐字节相同**的 `pattern3,g=8`（C=8 时 leader/second/mask 完全
+  一致）同轮报 242 µs；独立复跑 3×3 后 `pattern2,g=8` 回到 **241.7–242.1 µs**，与其余 pattern 逐点重合。
+  ⇒ 该离群是同机干扰，非机制效应。**比 §93/§94 记录的 ~13% 大得多**——对比同一内核内字节相同的变体，
+  是识破这类离群最快的办法。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P169-1 完成（1/1）**。补掉 §93.8 明留的尾巴——**「未扫 `chunk`、未测 multicast 子集
+- 当前进度：**P170-1 完成（1/1）**。补掉 §94.7 明留的尾巴——**「未测非连续 / 重叠子集掩码」**：
+  把 §19/§20/§93/§94 的**连续**掩码换成**离散（交错）位图**，并把「一个组由单个发起者发」换成
+  **多个组内 CTA 分头发**。见 `docs/04-experiments.md` **§95**，源码 `src/multicast_mask_shape.cu`、
+  脚本 `harness/multicast_mask_shape.sh`、原始输出 `harness/multicast_mask_shape.out.txt`
+  （目标卡 H100/sm90a、numSM=132、**固定空闲 device 6**、nvcc 13.2、每配置独立进程）。三条 headline：
+  **(1)** **形状不变性**——连续 vs 交错掩码墙钟 0.983/1.003/1.001×（g=2/4/8）、源侧 L2 sector
+  **逐位相同**，成本只由「popcount `g` + 发起者数」定、与位图形状无关；**(2)** **发起者身份自由**
+  ——把 `L` 槽从「组首一人发」改成「组内次席轮流发」墙钟 ±1.5% 内，发起者不必是组首（须落在自己
+  掩码内），产出 tile 的 CTA 可直接广播；**(3)** `srcunit_tex = delivered/(32·g)` 对**任意位图**成立
+  （推广 §94.6，g=4 6,758,400、g=8 3,379,200，contig/stride 逐位相同）。方法学坑：首轮单点 808 µs
+  （3.3×）系共享机器瞬时离群、复跑 3×3 回到 242 µs，已记入「已知坑」。判据 cluster C1+C2+C3、
+  细化 **C4**、**仍非 C5**。**本轮新增实验**；新留尾巴（§95.7）：真正的重叠掩码（同槽多笔竞争序）未测。
+- 下一步候选：可继续走实验侧**未叠加的组合**（`docs/04` 微基准到 §95）——如 **2D/3D cluster ×
+  非连续掩码**（§20 的 2D/3D 未与非连续掩码叠加）、**multicast × 2SM（`cta_group::2`）**、
+  **真正的重叠掩码**（§95 只测了「每 CTA 唯一一次接收」，同槽多笔 multicast 的竞争序未验证）、
+  **cluster × 端到端骨架**（把 §62/§74 的骨架放进 cluster）、或 **ncu achieved occupancy 交叉验证**
+  （§93/§94/§95 用静态上界）；也可回到源码走读主线（`docs/35` §9 余的「`bf16` 之外 SM100 task 家族
+  未逐一走读」）。**其余旧候选**：`docs/46` §6 的 FLAT-CACHE draft attention（已核零命中、**不可走读**）。
+- 此前：**P169-1 完成（1/1）**。补掉 §93.8 明留的尾巴——**「未扫 `chunk`、未测 multicast 子集
   掩码」**：把 §19 的**二值** multicast（mode0/mode1）换成**连续旋钮 `g`（fan-out / 子集掩码）**，
   并第一次扫 `chunk`。见 `docs/04-experiments.md` **§94**，源码 `src/multicast_fanout.cu`、脚本
   `harness/multicast_fanout.sh`、原始输出 `harness/multicast_fanout.out.txt`（目标卡 H100/sm90a、
