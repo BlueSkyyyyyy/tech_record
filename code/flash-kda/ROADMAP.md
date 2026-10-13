@@ -1360,8 +1360,28 @@
        跨 `--launch-skip∈{0,1,5}` 极差 ≤1.2 MB、L1 扇区逐位复现（确定性，同 §99.4）。**结论**：判据加强
        ——目标卡 CUDA B2 写量比一律用 `l1tex__t_sectors_pipe_lsu_mem_global_op_st`（对 dtype/`BVK`/
        staging/mma ISA 全逐位不变）或解析输出，`dram__bytes_write` 对有 bf16/TMA 输入的形态都禁用；
-       TMA 读侧收益（2.98→1.58 GB）与部署结论不变。见 `docs/07` §100。**边界**：单 shape、`K=128`、
-       `BT=16`、只两 `V`；`INTRA`/`DAMMA`/`K≠V` 交叉未测；「为何恰 ±」的 L2 replacement 级成因仍待验证。
+        TMA 读侧收益（2.98→1.58 GB）与部署结论不变。见 `docs/07` §100。**边界**：单 shape、`K=128`、
+        `BT=16`、只两 `V`；`INTRA`/`DAMMA`/`K≠V` 交叉未测；「为何恰 ±」的 L2 replacement 级成因仍待验证。
+- [x] **P7-98** 关闭 §100.6（P7-97）明确留下的三处从未复测的交叉——**`-DB2M_INTRA` / `-DB2M_DAMMA` /
+        `K≠V`**，放回 §99/§100 的写侧三段分解；并把 `S_L1` 首次标定到解析输出。新增
+        `harness/probe_b2_write_cross_ncu.sh`（`harness/probe_b2_write_cross_ncu.out.txt`，空闲卡）+
+        `harness/check_bwd_b2_write_cross.py`（`..._cross.out.txt`）+ `harness/probe_b2_write_cross_sass.out.txt`；
+        **`b2_mma_probe.cu` 一行未改**（仅组合已有旋钮）；`ncu_b2_kv_driver.py` 放开 `B2KV_K` 与
+        `intra`/`bf16` 子串 tag 解析。**Part A（`INTRA`/`DAMMA`，`K=V=128`、`V=256`）**：七形态
+        `prod/damma/intra/intra_damma/bf16/bf16_damma/bf16_intra` 的 **L1 store 扇区 = `34 865 152`、
+        请求 = `4 399 104` 全逐位相同**（折叠只改 `dqg/dkg`、DAMMA 只改 `dApre/dA` 算法，张量集合/形状不变）
+        ——判据穿越两旋钮成立。**关键副产物**：`bf16`(591.05, +32.7) 叠 `DAMMA` 即掉到 **550.49 (−7.9)**、
+        叠 `INTRA` 552.67——**bf16 的写侧 `+35 MB` 连「bf16 专属」都不成立**（只换 DA/IPIN 段算法翻符号，
+        占用率不变），正面支持「$D$ 由 L2 逐出时机定」。**Part B（`K≠V`，fp32 `prod`）**：
+        `(K,V)∈{(64,128),(128,128),(256,128),(64,256),(256,256)}` 的 **$S_{L1}\cdot32/U = 1.99–2.00**
+        （$U$ 按六段解析式）——`S_L1` 是输出体积的固定线性函数、与 K/V 无关。**Part C（store 向量化）**：
+        默认（无 `-DB2M_VECST`）SASS `78×STG.E`（无 64-bit）⟹ **$S_{L1}\cdot32=2U$（半 sector store）**；
+        开 `-DB2M_VECST` 后 `S_L1` **减半（0.504/0.505）**、$S_{L1}\cdot32/U\to1.007/1.009$（SASS
+        `2×STG.E + 38×STG.E.64`）——**证明 2× 就是可回收的 store 指令/扇区**。**口径修正**：`S_L1` 随
+        store 向量化会跳变（它是指令流）、`U`/`lts__t_sectors_op_write` 不会；且 `prod V=256` 跨两次
+        `ncu` 重放差 **~19 MB**（577.13 vs 558.30，远超 §100 的 ≤3 MB），**`dram__bytes_write` 全面禁用**。
+        见 `docs/07` §101。**边界**：单 shape/`BT=16`；`K≠V` 只 fp32 `prod`；`INTRA`/`DAMMA` 只 `V=256`
+        未叠 TMA/BF16MMA；`bf16` 跨 ncu 抖动的成因标待验证。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1917,8 +1937,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-97 补测 + P8-3/P8-4**。
-  - P7-97（本轮）：**关闭 §99.7（P7-96）明确留下的边界——`-DB2M_TMA` / `-DB2M_BF16MMA` 未用 §99 的
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-98 补测 + P8-3/P8-4**。
+  - P7-98（本轮）：**关闭 §100.6（P7-97）明确留下的三处从未复测的交叉——`-DB2M_INTRA` / `-DB2M_DAMMA` /
+    `K≠V`**，放回 §99/§100 的写侧三段分解，并把 `S_L1` 首次标定到解析输出。新增
+    `harness/probe_b2_write_cross_ncu.sh`（`probe_b2_write_cross_ncu.out.txt`）+ `harness/check_bwd_b2_write_cross.py`
+    （`check_bwd_b2_write_cross.out.txt`）+ `probe_b2_write_cross_sass.out.txt`；**`b2_mma_probe.cu` 一行未改**。
+    **Part A**：七形态（`prod/damma/intra/intra_damma/bf16/bf16_damma/bf16_intra`，`K=V=128`、`V=256`）
+    **L1 store 扇区 `34 865 152`、请求 `4 399 104` 全逐位相同**——判据穿越 `INTRA`/`DAMMA`。**副产物**：
+    `bf16`(591.05,+32.7) 叠 `DAMMA` 掉到 **550.49(−7.9)**——写侧 `+35 MB` 连 bf16 专属都不成立。**Part B**：
+    `K≠V` 五档 **$S_{L1}\cdot32/U=1.99–2.00$**（$S_{L1}$ = 输出体积的固定线性函数）。**Part C**：默认
+    `78×STG.E` ⟹ **$2U$（半 sector）**；开 `-DB2M_VECST` 后 `S_L1` 减半（0.504/0.505）、$S_{L1}\cdot32/U\to
+    1.007$ ⟹ 2× 即可回收的 store 指令/扇区。**口径修正**：`S_L1` 随 store 向量化跳变（它是指令流），
+    且 `prod V=256` 跨 ncu 重放差 **~19 MB**（>§100 的 ≤3 MB）——`dram__bytes_write` 全面禁用。见 `docs/07` §101。
+    **下一步（可选）**：把 `INTRA`/`DAMMA` 交叉补 `V=128` 与 TMA/BF16MMA 三向；或专题维持维护态。
+  - P7-97（上轮）：**关闭 §99.7（P7-96）明确留下的边界——`-DB2M_TMA` / `-DB2M_BF16MMA` 未用 §99 的
     写侧三口径分解复测**（当时顾虑「TMA 走独立引擎、写侧口径不同」）。六个生产形态（`-DB2M_PROD
     -DB2M_HDW`、`B8T2048H8`、`V∈{128,256}`）＝dtype（fp32/bf16/bf16-mma）×staging（`cp.async`/TMA），
     另补 `prod64`（fp32、`BVK=64`）隔离 `BVK`；**`b2_mma_probe.cu` 一行未改**。新增
@@ -3349,8 +3381,14 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-93 补测（+ P8-2/P8-3 一页纸补全）**，进入收尾/维护。
-  **P7-93（本轮）**：关闭 §95.6/§94.7 空白 (2) 的另一半——**`intra` 折叠 × `K≠128` 的 `ncu` pipe 归因**。
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-98 补测（+ P8-2…P8-4 一页纸补全）**，进入收尾/维护。
+  **P7-98（本轮）**：关闭 §100.6（P7-97）留下的三处交叉——`-DB2M_INTRA`/`-DB2M_DAMMA`/`K≠V` 的写侧三段分解。
+  七形态（`K=V=128`/`V=256`）**L1 store 扇区 `34 865 152`、请求 `4 399 104` 全逐位相同**；`K≠V` 五档
+  **$S_{L1}\cdot32/U=1.99–2.00$**；默认 `-DB2M_VECST` 关闭时 **$S_{L1}\cdot32=2U$（半 sector）**、开启后
+  减半到 **$U$**；`prod V=256` 跨 ncu 重放差 ~19 MB ⟹ `dram__bytes_write` 全面禁用。新增
+  `harness/probe_b2_write_cross_ncu.sh` + `harness/check_bwd_b2_write_cross.py`（`b2_mma_probe.cu` 一行未改）。
+  见 `docs/07` §101。**下一步（可选）**：`INTRA`/`DAMMA` 补 `V=128` 与 TMA/BF16MMA 三向；或专题维持维护态。
+  **P7-93（上轮）**：关闭 §95.6/§94.7 空白 (2) 的另一半——**`intra` 折叠 × `K≠128` 的 `ncu` pipe 归因**。
   同核 `prod` vs `prod_intra`（`K=V∈{64,128}`、`b8t2048h8`），`b2_mma_probe.cu` 一行未改；新增
   `harness/ncu_b2_k128_intra_driver.py` + `harness/probe_b2_k128_intra_ncu.sh`
   （`probe_b2_k128_intra_ncu.out.txt`）+ `docs/07` §96。**读数**：`dur` 1.277×/1.266×；字节中性

@@ -38,11 +38,11 @@ def main():
     args = ap.parse_args()
     B, T, H = SHAPES[args.shape]
     dev = "cuda"
-    K = 128
+    K = int(os.environ.get("B2KV_K", "128"))
     V = int(os.environ.get("B2KV_V", "128"))
     tag = os.environ.get("B2KV_TAG", "fp32")
-    intra = tag == "intra"
-    bf16 = tag.startswith("bf16")
+    intra = "intra" in tag
+    bf16 = "bf16" in tag
     NT = (T + BT - 1) // BT
     gg = torch.Generator(device=dev).manual_seed(0)
     mk = lambda *s: torch.empty(*s, device=dev)

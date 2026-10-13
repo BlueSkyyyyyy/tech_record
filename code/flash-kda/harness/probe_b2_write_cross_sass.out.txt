@@ -1,0 +1,5 @@
+== prod : /tmp/b2wc_prod_k128_v256.so ==
+     78 STG.E
+== prodvec : /tmp/b2wc_prodvec_k128_v256.so ==
+     38 STG.E.64
+      2 STG.E
