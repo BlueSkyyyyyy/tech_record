@@ -2307,7 +2307,51 @@
       `harness/exp_deepgemm_python_api.{py,sh,out.txt}` **51/51 PASS**（解析源码 vs 真机 `_C`
       逐条对账、别名同一性、`compiled_dims`/`recipe` 默认值、子模块工厂、隐藏面、`bf16_gemm_nt`
       冒烟 relerr 1.77e-5、`alpha`≡`epilogue.Alpha` 逐位）。配套博客
-      `content/posts/mega-moe-84-deepgemm-python-api-surface`（索引页新增第 84 篇）。
+        `content/posts/mega-moe-84-deepgemm-python-api-surface`（索引页新增第 84 篇）。
+
+### P75 增量（opt-in，补齐 DeepEP 侧一直缺席的「验收测试即正确性规范」）
+
+- [x] **P75-1** **DeepEP 的 EP dispatch / combine 端到端验收测试即正确性规范**
+      （`tests/ep/test_ep.py` 616 行；`deep_ep/buffers/ep.py:27-105` 的 `EPHandle` 字段契约；
+      `deep_ep/utils/{refs,gate,math,testing}.py`；消费方 `~/github/DeepGEMM/tests/test_mega_moe.py:307-333`）。
+      DeepGEMM 侧测试栈已全部拆过（第 40/41/43/51/57/60/67/74/76/78/79/80/81/82 篇），DeepEP 侧也拆过
+      `refs/gate/testing`（P55-1）与 `EPHandle` host 编排（P73-1），但把 dispatch/combine
+      **「算什么对」**定义清楚的旗舰验收测试本身从没被单独拆过。本篇补上——它是第 7/11/48/51/52/61/
+      63/71/83 篇里反复引用的「逐位一致 / expand 不变量 / 两套 psum」判据的出处，也是运行时 SM/QP、
+      overlap、带宽数字的来源。**端到端 buffer 路径依赖 DeepEP 的 C++/NCCL 设备 API
+      （`ncclDevComm`/`ncclGin`），本机 NCCL 2.29.7 不匹配、运行需 ≥2.31 → 端到端仅分析**；
+      **测试侧纯 Python/张量逻辑架构无关，H100(sm90) 真机实测**。
+      → `docs/85-deepep-ep-test-oracle.md`（真实行号核对）：**顶层结构**（`enumerate_ep_modes:22-30` /
+      `launch:33-43` / `fold_expanded:46-58` / `test_dispatch_combine:61-523` / `test_loop:527-567` /
+      CLI `:570-616`；mp.spawn 默认 8 进程）。**模式矩阵**（六维：`expert_alignment∈{128,1}` ×
+      `use_fp8_dispatch` × `num_bias∈{0,1,2}` × `with_previous_event` × `async_with_compute_stream` ×
+      `allocate_on_comm_stream`，后两者受 `with_previous_event` 约束）组合数公式
+      `2 × fp8 × 3 × Σ_prev(async × alloc)`；实测 72/36/36/18（`--fp8-dispatch-only`、`--defer-epilogue`
+      各钉一维）。**五种 dispatch + 两种 combine**：普通（`:146-155`）/ expand（`:159-162`，
+      `do_expand`+`use_tma_aligned_col_major_sf`）/ cached（`:165-172`，只传 handle 复用布局）/
+      cached-expand-零填充（`:175-179`）/ FP8 激活（`:97/103-107`）；combine 普通（`:211-219`）与
+      reduced（`:221-233`），配方 `(reduce_in_local,reduce_in_scaleup)`（`:116-126`）对应 P55-1 的
+      hybrid/non-hybrid/disabled 三配置。**逐位判据**：`ref_dispatch`/`ref_combine`（`:110-142`）为参照，
+      **排序后**比 `torch.equal(ref_recv_src_token_idx, sorted(recv_src_metadata[:,0]))`（`:188-192`，
+      排除 dispatch 行序自由度）、按来源 rank 切段用 `sorted_metadata.indices` 重排再逐位比
+      （`:478-507`，权重额外按 `ref_mask=ref_recv_topk_idx<0` 屏蔽）；combine `torch.equal`
+      （`:510/512`）+ 结构性断言 `combined_topk_weights==topk_weights`（`:514`）。**三条不变量**：
+      ① `fold_expanded`（`:46-58`，expand 同 token 各有效槽内容必须相同，`(gathered==folded)|~mask`
+      全真，tuple 递归）；② handle 两套 psum 恒等式（`:452-476`，非 expand `psum[i+1]-psum[i]==
+      align(count_i,a)`；expand `psum[i+1]-align(psum[i],a)==count_i`；scaleup 前缀和去重、末元素=总数）；
+      ③ 零填充（`:431-435`，`[psum[i],align(psum[i],a))` 全零）与确定性双跑（`:394-411`）。
+      **带宽账目** `get_combine_bytes`（`:298-343`）的 `get_unique_and_valid_dst_count`（`:302-315`，
+      行内去重 + 忽略项折成同一哨兵值只计一次；三归约配方）+ bench_kineto 按名拆
+      `dispatch_impl`/`dispatch_copy_epilogue_impl`、`combine_impl`/`combine_reduce_epilogue_impl`。
+      `EPHandle` 契约（`ep.py:27-60`）：`handle.topk_idx is topk_idx`（`:371-373`，P73-1 版本守卫的意义）、
+      `dst_buffer_slot_idx`/两套 psum/cached 三方逐位（`:442-450`）、`recv_src_metadata[:,2:]` 的 expand
+      槽位（`:390-392`）、`cumulative_local_expert_recv_stats`（`:413-416/458-459`）。**H100 实测**
+      `harness/exp_deepep_ep_test.{py,sh,out.txt}`（`sys.modules` 桩绕过 `check_nccl_so`、按文件路径
+      exec 真实 `refs/gate/math`、`ast` 抽取顶层函数原样运行、8×H100 NCCL 跑 `refs.dispatch`）：
+      **17 项 ALL PASS**——模式矩阵 4/4、`fold_expanded` 3/3、psum 恒等式 4/4、去重计数 2/2、
+      8×H100 `refs.dispatch` 4/4（本 rank 收 1753 行、每来源计数 `[207,225,206,232,210,222,230,221]`）。
+      `tests/ep/test_ep.py` sha256 `7346d98a17bce91e…`。配套博客
+      `content/posts/mega-moe-85-deepep-ep-test-oracle`（索引页新增第 85 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2333,8 +2377,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P74 各增量完成（P15-1…P41-1、P42-1…P74-1）。**
-  本轮 P74-1：新建 `docs/84-deepgemm-python-api-surface.md`
+- 当前进度：**P0~P14 全部完成；P15~P75 各增量完成（P15-1…P41-1、P42-1…P75-1）。**
+  本轮 P75-1：新建 `docs/85-deepep-ep-test-oracle.md`
+  （+`harness/exp_deepep_ep_test.{py,sh,out.txt}`）——补上 DeepEP 侧一直缺席的
+  **「验收测试即正确性规范」** `tests/ep/test_ep.py`（616 行）。它是 dispatch/combine「算什么对」的
+  可执行定义，也是第 7/11/48/51/52/61/63/71/83 篇反复引用的判据出处。**端到端 buffer 路径依赖
+  DeepEP 的 C++/NCCL 设备 API，本机 NCCL 2.29.7 不匹配、运行需 ≥2.31 → 端到端仅分析**；
+  **测试侧纯 Python/张量逻辑架构无关，H100(sm90) 真机 17 项 ALL PASS**。要点：模式矩阵
+  `enumerate_ep_modes`（六维，实测 72/36/36/18）；五种 dispatch + 两种 combine；逐位判据
+  （`torch.equal` + 排序后比 ref + 权重按 `-1` 屏蔽）；`fold_expanded` 不变量；handle 两套 psum
+  恒等式（`align` 语义）；`get_unique_and_valid_dst_count` 去重计数；`EPHandle` 字段契约。
+  实测：`sys.modules` 桩绕过 `check_nccl_so`、`ast` 抽取真实顶层函数原样运行、8×H100 真机跑
+  `refs.dispatch` 坐实「按 src 升序」。索引页新增第 85 篇。
+  上一轮 P74-1：新建 `docs/84-deepgemm-python-api-surface.md`
   （+`harness/exp_deepgemm_python_api.{py,sh,out.txt}`）——补上一直缺席的
   **「DeepGEMM 在 Python 里怎么被调到」**：`python_api.cpp:24-49` 的 `PYBIND11_MODULE(_C)`
   装配（1 JIT 注册 + 11 `register_apis`）+ `deep_gemm/__init__.py:16-127` 的显式 re-export。
@@ -3193,8 +3248,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P73 已完成（最新 **P73-1 DeepEP 的 `EPHandle` 句柄契约与 dispatch/combine 的
-  host 编排层**：`deep_ep/buffers/ep.py:27-906`——`EPHandle` 的两个身份（grouped GEMM 的 PSUM 布局
+- **下一步**：P0~P75 已完成（最新 **P75-1 DeepEP 的 EP dispatch/combine 端到端验收测试即正确性规范**：
+  `tests/ep/test_ep.py`（616 行）——模式矩阵 `enumerate_ep_modes`（六维，实测 72/36/36/18）、五种
+  dispatch + 两种 combine、逐位判据（`torch.equal` + 排序后比 ref + 权重按 `-1` 屏蔽）、`fold_expanded`
+  不变量、handle 两套 psum 恒等式、`get_unique_and_valid_dst_count` 去重计数、`EPHandle` 字段契约；
+  端到端 buffer 仅分析，测试侧 H100 真机 **17 PASS / 0 FAIL**；详见上）。
+  上一轮 P74-1：**DeepGEMM 的 Python 绑定面**：
+  `csrc/python_api.cpp:24-49` + `deep_gemm/__init__.py:16-127`——`_C` 顶层 76 名对账 0 多余 0 缺失、
+  `compiled_dims`/`recipe`/`alpha` 三组默认值、`m.attr` 别名同一函数对象、两子模块与隐藏面；
+  H100 真机 **51/51 PASS**；详见上）。
+  上一轮 P73-1：**DeepEP 的 `EPHandle` 句柄契约与 dispatch/combine 的 host 编排层**：
+  `deep_ep/buffers/ep.py:27-906`——`EPHandle` 的两个身份（grouped GEMM 的 PSUM 布局
   接口 / 反向缓存）、两种 psum 语义（expand 的 `align(psum[i-1])+未对齐真实计数`）、`topk_idx` 版本守卫、
   dispatch 五段编排（守卫 / auto SM+QP / SF 解包+缓存句柄三断言 / 默认回填+调 runtime / finalize 与
   确定性钩子）+ deferred epilogue、combine 复用 `handle.num_sms`；H100 真机注入 `_C` 桩后 exec 真实
