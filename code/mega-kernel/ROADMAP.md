@@ -1558,6 +1558,37 @@
     「只拆一个就够快」的**组合交互未钉到 SASS/依赖链一级**（开放问题）、合成描述符、纯写口径无 worker、
     未与 DeepGEMM SM100 对跑。
 
+### P63 实验扩展 45：TMA store 握手的三维正交归因（`docs/04-experiments.md` §52）
+
+- [x] **P63-1** 补掉 P62-1（§51）§51.8 明留的**开放问题**——「§51.6 量出『只拆背压（`skipbp`）或只拆
+  发布（`skiphd`）都回 664、两者同时才 454』，但未到 **SASS/依赖链一级给出因果**（可能是 loop-carried
+  依赖阻止软件流水）」。**唯一新变量 = 归因编码**：把「发布握手」从 §51 的**单整数互斥编码**换成
+  **六个正交布尔位**（`WA` 完成等待 / `BP` 背压 / `HD` 发布 / `REL` head release↔relaxed /
+  `ACQ` tail acquire↔relaxed / `FENCE` proxy fence），并补**逐相位 `clock64` 计时**与 **SASS 反汇编**。
+  见 `docs/04-experiments.md` **§52**，源码 `src/dyn_producer_tma_dep.cu`、脚本
+  `harness/dyn_producer_tma_dep.sh`、原始输出 `harness/dyn_producer_tma_dep.out.txt`（目标卡 H100/sm90a、
+  **固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B、`NDESC=393216`（138.4 MB ≫ L2）、`K=32`、`D=2`、
+  `T=256`、`grid=132` 全共驻、min-of-7 + `cuobjdump -sass`）。核心结论：
+  - **§A 正确性**：正交重编码的正确档 `ser`(mode1) / 摊薄背压(mode11) / 摊薄发布(mode13) /
+    两者摊薄(mode12) 与 static **逐位一致**（`got=404219327039195`）——摊薄是**合法**进度协议。
+  - **§B（headline 一）§51.6 的「只拆一个就够快」是编码假象**：§51 的 `nobp=(win<=-3)` **吞掉**
+    `win=-4(skipbp)/-5(skiphd)`，那两行**实际都等于 `nobp`**。正交编码给出真实 L 型加性分解（P=128 纯写）：
+    store-only 地板 **630**；**只加 release 发布 → 521**；**只加背压会合 → 527**；**两者同加 → 455**；
+    **再叠完成等待 → 437**。**`ld.acquire`→relaxed 完全无效**（435≈ser）、`fence` 免费（517≈skipbp）、
+    **`st.release`→relaxed 收回 +13.7%（497）**——**贵的是 release store，不是 acquire/fence**。
+  - **§B2**：摊薄「发布」比摊薄「背压」更值钱；两者一起摊薄 `S=32` 达 **569**（**+30%**）但**仍差地板
+    630 的 10%**（摊薄减频、不能归零）；`S` 单调但饱和（`S=8→32` 仅 +3.5%）。
+  - **§C × P**：结论在 `P∈{16..128}` 逐档不变、**近似线性**（单 producer SM 瓶颈）。
+  - **§D（headline 二）逐相位 + SASS 钉死因果**：`gen`=3426 cycles/batch 恒定（固定成本）；`bp` 段
+    背压时 ~840–907（`skipbp` 时 43，**主因是 `__syncthreads`/`BAR.SYNC` 而非 acquire**）；`pub` 段
+    `ser`=1359 / `nowait`=927 / `relhead`=432 / `skiphd`=65。反汇编 `dptd_kernel` 见发布路径原样
+    `MEMBAR.ALL.CTA → MEMBAR.ALL.GPU → ST.E.64.STRONG.GPU`——**`st.release.gpu` 落成两条 GPU 级 MEMBAR
+    + 强序 store**，每批把该 SM 访存流水 order 一次。⇒ 写端瓶颈 = **每批 release 的 MEMBAR + 会合 barrier**，
+    正是 MPK「预计算 `FullTaskDesc` + scheduler 只映射 + 批量/环形摊薄一次 release」绕开的那本账
+    （`persistent_kernel.cuh:1254-1523`；`docs/06` §5.3）。判据 C1–C4、仍差 C5。**本轮新增实验**；
+    P63-1 新留尾巴（§52.8）：SASS 计数是整 kernel 而非限定基本块、合成描述符、纯写口径无 worker、
+    未与 DeepGEMM SM100 对跑。
+
 
 ## 每轮增量流程（autopilot）
 
@@ -1583,7 +1614,31 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P62-1 完成（1/1）**。补掉 P61-1（§50）§50.7 明留的**「最值得做的下一条尾巴」**——把动态
+- 当前进度：**P63-1 完成（1/1）**。补掉 P62-1（§51）§51.8 明留的**开放问题**——「§51.6 的『只拆背压
+  或只拆发布都回 664、两者同时才 454』**未钉到 SASS/依赖链一级**」。**唯一新变量 = 归因编码**：把
+  「发布握手」从 §51 的**单整数互斥编码**换成**六个正交布尔位**（`WA`/`BP`/`HD`/`REL`/`ACQ`/`FENCE`），
+  并补**逐相位 `clock64`** 与 **SASS 反汇编**。`docs/04-experiments.md` 新增 **§52**，源码
+  `src/dyn_producer_tma_dep.cu`、脚本 `harness/dyn_producer_tma_dep.sh`、原始输出
+  `harness/dyn_producer_tma_dep.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+  `DW=88`=352 B、`NDESC=393216`（138.4 MB ≫ L2）、`K=32`、`D=2`、`T=256`、`grid=132` 全共驻、
+  min-of-7 + `cuobjdump -sass`）。核心结论：
+  - **§A** 正交重编码的正确档（`ser`/摊薄背压/摊薄发布/两者摊薄）与 static **逐位一致**
+    （`got=404219327039195`）——摊薄是**合法**进度协议。
+  - **§B（headline 一）§51.6 的「只拆一个就够快」是编码假象**：§51 的 `nobp=(win<=-3)` **吞掉**
+    `win=-4/-5`，那两行**实际都等于 `nobp`**。真实 L 型加性分解（P=128 纯写）：地板 **630** →
+    **只加 release 发布 521** / **只加背压会合 527** → **两者同加 455** → **再叠完成等待 437**；
+    **`ld.acquire`→relaxed 完全无效（435≈ser）**、`fence` 免费、**`st.release`→relaxed +13.7%（497）**
+    ——**贵的是 release store，不是 acquire/fence**。
+  - **§B2** 摊薄「发布」比「背压」值钱；两者一起摊薄 `S=32` 达 **569（+30%）**但**仍差地板 10%**。
+  - **§C × P**：结论 `P∈{16..128}` 逐档不变、近似线性（单 producer SM 瓶颈）。
+  - **§D（headline 二）逐相位 + SASS**：`gen`=3426 cycles/batch 恒定；`bp` 段背压时 ~840–907
+    （**主因是 `__syncthreads`，非 acquire**）；`pub` 段 `ser`1359/`nowait`927/`relhead`432/`skiphd`65。
+    反汇编发布路径 = `MEMBAR.ALL.CTA → MEMBAR.ALL.GPU → ST.E.64.STRONG.GPU`——**`st.release.gpu` 每批把
+    该 SM 访存流水 order 一次**。⇒ 写端瓶颈 = **每批 release 的 MEMBAR + 会合 barrier**，正是 MPK
+    「预计算 `FullTaskDesc` + scheduler 只映射 + 批量/环形摊薄一次 release」绕开的那本账
+    （`persistent_kernel.cuh:1254-1523`）。判据 C1–C4、仍差 C5。**本轮新增实验**；P63-1 新留尾巴见 §52.8
+    （SASS 计数是整 kernel、合成描述符、纯写口径无 worker、未与 DeepGEMM SM100 对跑）。
+- 此前：**P62-1 完成（1/1）**。补掉 P61-1（§50）§50.7 明留的**「最值得做的下一条尾巴」**——把动态
   生产者 TMA bulk store 的**发布握手**从 serialized（每批 `wait_group 0` 全 drain）换成**窗口流水**
   （FIFO commit + 发布第 `bj-win+1` 批 head 前只 `wait_group (win-1)`、head 落后 win 批），看能否把 §50
   的 472 GB/s 拉回 rolling 的 ~722–828。`docs/04-experiments.md` 新增 **§51**，源码
@@ -2413,7 +2468,12 @@
         `cp.async` 深环与 bulk 对跑、`cp.async` 不省寄存器）；**P54-1（§43）** 把「取 task」与「执行
         task」放进同一环（预取完全藏住取数）；**P55-1（§44）** 给执行接上吃 HBM 的数据面（未饱和区间
         仍不争）；**P56-1（§45）** 把数据面推到 **HBM 饱和**（`T=1024` 达 ~2983 GB/s），确认控制面
-        **仍被藏住**（`p/max` 1.015–1.132），并量出「控制面要少线程、数据面要多线程」这对相反最优。
+        **仍被藏住**（`p/max` 1.015–1.132），并量出「控制面要少线程、数据面要多线程」这对相反最优；
+        **P57-1（§46）** 用多 block/SM 化解该矛盾（数据面认「总线程/SM」、控制面认 `K`）；
+        **P58-1（§47）** 把「未叠动态生产者」补上（动态须落在**调度**、不能落在**生成**）；
+        **P59-1–P62-1（§48–§51）** 把动态生产者标度到 P 块 / 向量化 / TMA store / 窗口握手；
+        **P63-1（§52）** 用正交编码 + 逐相位 + SASS 修正 §51 的「只拆一个就够快」（编码假象），
+        钉死写端瓶颈 = **每批 `st.release` 的 GPU 级 MEMBAR + 会合 barrier**。
 - **本轮（P50-1）**：`docs/04-experiments.md` 新增 **§39**「worker 侧取 task 的载体：`cp.async` 批量
   加载 TaskDesc 值多少」——新源码 `src/cpasync_desc_fetch.cu`、脚本 `harness/cpasync_desc_fetch.sh`、
   原始输出 `harness/cpasync_desc_fetch.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、

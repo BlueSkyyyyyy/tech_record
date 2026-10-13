@@ -7620,3 +7620,224 @@ ncu 归因（P=128，纯写，`win=1` vs `win=-3`，`harness/dyn_producer_tma_pi
   用 switch 展开到 15（见 `docs/04` 已知坑）；深窗 `sb=16` 的 SMEM 暂存 180 KB，须 `cudaFuncSetAttribute` opt-in。
 - **踩坑**：`mode 7`（无 `is_gen`）与 `mode 9`（`is_gen`）走**同构**的 store 循环，但 `mode 9` 带背压 + `head`
   发布、`mode 7` 不带——两者 733 vs 463 的差距**正是本节要归因的那本账**（§50 误记为 `wait_group 0`）。
+
+## 52. 把「只拆一个就够快」钉到依赖链一级：动态生产者 TMA store 握手的三维正交归因（P63-1）
+
+> 本节接续 §51（P62-1），补掉 §51.8 明留的**开放问题**：
+>
+> - 「**『只拆一个就够快』的交互未钉死**：`nobp`/`skipbp`/`skiphd` 三者恒 ~664，说明贵在
+>   『背压会合 + `head` release』的**组合**而非单操作；本节用 ncu 给出**症状**……但**未到 SASS/依赖链
+>   一级给出因果**（可能是一个 loop-carried 依赖阻止了编译器软件流水）。**记为开放问题。**」
+>
+> §51.6 在 P=128 纯写口径上得到一组反直觉的归因：serialized `ser` = 453.6 GB/s，而「**只拆背压**
+> （`skipbp`）」「**只拆 head 发布**（`skiphd`）」「**两者都拆**（`nobp`）」三档都恒 ~664 GB/s。
+> 本节把同一个骨架的**握手**拆成**六个正交布尔位**（而不是 §51 那种单整数互斥编码）重跑，并补上
+> **内存序哨兵**（release↔relaxed、acquire↔relaxed、fence↔nofence）与**逐相位 `clock64` 计时**、
+> **SASS 反汇编**。两个意料之外的结果：
+>
+> - **§51.6 的「只拆一个就够快」是编码假象**：它的 `win=-4`（`skipbp`）与 `win=-5`（`skiphd`）
+>   都同时命中 `nobp = (win <= -3)`，因此那两行**实际等于 `nobp`**（背压与发布都被 `nobp` 关掉），
+>   所谓「组合」从未被独立测到。
+> - **真正的三维分解**（正交编码、P=128 纯写）：store-only 地板 **630 GB/s**；**只留 release 发布**
+>   → **521**；**只留背压会合** → **527**；**两者都在** → **455**；**再叠完成等待** → **437**。
+>   而把 `st.release` 换成 `st.relaxed`（其余不变）回到 **497**、把 `ld.acquire` 换成 `ld.relaxed`
+>   **完全无效**（**435** ≈ `ser`）——**贵的是 release store 的 GPU 级 `MEMBAR`、不是 acquire、也不是 fence**。
+>
+> 三个问题：
+>
+> **Q1（§A）** 正交重编码后的「正确档」（serialized / 摊薄背压 / 摊薄发布 / 两者都摊薄）写出的
+> payload 是否仍与 static 逐位一致？
+> **Q2（§B headline）** §51 的「只拆一个就够快」是否成立？真实分解是什么？
+> **Q3（§C/§D）** 贵在哪一维——内存序语义（release/acquire/fence）、每批会合（barrier）、还是
+> 每批报进度的簿记本身？逐相位与 SASS 能否给出因果？
+>
+> 真实锚点（mirage 快照 `f9eb70c`，与 docs/06–docs/09 同快照）：MPK 的队列协议是
+> 「`st.relaxed.gpu` 写数据 + 单条 `atom.add/.cas.release.gpu` 推游标」，靠**批量/环形**摊薄一次
+> release/acquire（`persistent_kernel.cuh:1254-1523` 的 `execute_scheduler` 只做「事件→task id」映射，
+> payload 来自编译期预计算的 `FullTaskDesc`；`docs/06` §5.3 / 本专题 P47-1 §36）。本节量的是 MPK
+> **没有采用**的「设备侧现场生成」路线的握手，结论给「**为什么预计算 + 读**」补上 SASS 级的理由。
+>
+> 源码 `src/dyn_producer_tma_dep.cu`，脚本 `harness/dyn_producer_tma_dep.sh`，原始输出
+> `harness/dyn_producer_tma_dep.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+> `DW=88`=352 B（对齐论文 §6.1）、`NDESC=393216`（静态数组 138.4 MB ≫ 50 MB L2）、`K=32`、`D=2`、
+> `T=256`、`grid=P+G=132=NSM`（全共驻）、每配置 2 次不计时 warmup + **min-of-7**；SASS 由
+> `cuobjdump -sass -arch sm_90a` 反汇编同一二进制）。
+
+### 52.1 机制：把握手拆成六个正交布尔位（唯一新变量 = 归因编码）
+
+沿用 §50/§51 的骨架（`DW=88`=352 B 自描述描述符、TMA bulk store 整批 11 KB 落环、`sb=4` 槽 SMEM
+暂存、P 段子环 + 每生产者游标 + 有界背压），写载体固定 **TMA bulk store**。与 §51 的唯一区别是
+**把「发布握手」用六个正交位显式编码**，而不是 §51 那种**单整数互斥**编码：
+
+| 位 | 含义 | 关闭时 |
+|---|---|---|
+| `WA` | 完成等待 `cp.async.bulk.wait_group 0`（写完成可见） | 发布前不 drain（**哨兵**，跨 proxy 可见性无保证） |
+| `BP` | 背压：`tail[p]` 的 `ld.acquire` 轮询 + 该批 `__syncthreads()` | 不检查环余量 |
+| `HD` | 发布 `head[p] = (bj+1)·K` | 不发布（消费侧无从推进） |
+| `REL` | `head` 用 `st.release.gpu`（否则 `st.relaxed.gpu`） | 只 weak 写 head（**哨兵**） |
+| `ACQ` | `tail` 用 `ld.acquire.gpu`（否则 `ld.relaxed.gpu`） | 只 weak 读 tail（**哨兵**） |
+| `FENCE` | 发布前 `fence.proxy.async.global` | 跳过（**哨兵**） |
+
+档位编码（`win`）：`ser`=`WA·BP·HD·REL·ACQ·FENCE 全开`（正确 serialized，= §51 `ser`）；
+`nowait`=`~WA`；`skipbp`=`~WA·~BP`；`skiphd`=`~WA·~HD`；`nobp`=`~WA·~BP·~HD`；
+`relhead`=`~REL`（其余含 `WA` 全开）；`reltail`=`~ACQ`；`relboth`=`~REL·~ACQ`；
+`hd_nofence`=`~WA·~BP·~FENCE`；`nobp_wa`=`~BP`（保留 `WA`）；`wa_only`=`~BP·~HD`（只等完成）；
+`stridedbp/pub/all`=背压 / 发布 / 两者按步长 `S` 摊薄（`S=1` 退化为 `ser`）。
+**所有 `~BP` / `~HD` / `~WA` 之外的哨兵档都故意不保证可见性，只用于拆代价**（与 §51 的 `win<0` 同性质）；
+正确性只由 `ser` 与摊薄正确版（`mode 11/12/13`）保证。
+
+关键差异：**§51 的 `nowait/nofence/nobp/skipbp/skiphead` 是单整数互斥编码**，其中
+`nowait=(win<=-1)`、`nofence=(win<=-2)`、`nobp=(win<=-3)`、`skipbp=(win==-4)`、`skiphead=(win==-5)`，
+且背压/发布分别门控于 `!nobp && !skipbp` / `!nobp && !skiphead`。于是 **`win=-4`（`skipbp`）与
+`win=-5`（`skiphead`）都满足 `nobp`**，两行**实际都是「背压+发布都关」**——§51.6 表格里的
+「只拆一个」两行从未独立存在。本节的正交编码把这件事暴露出来。
+
+### 52.2 §A 正确性：正交重编码后的正确档与 static 逐位一致
+
+`P∈{1,2}`（`G=128`） × 有 worker（`mode 1` serialized / `mode 11` 摊薄背压 `S=4` / `mode 13` 摊薄发布
+`S=4` / `mode 12` 两者摊薄 `S=4`）：
+
+- **全部逐位一致**（`got=404219327039195`，与 §48–§51 同值）。
+  这说明：(1) 正交编码没有改变正确档语义；(2) **「一次预留 `S` 批容量」的摊薄背压**与
+  **「每 `S` 批发布累积 `head`」的摊薄发布**都是**合法**的进度协议（不是哨兵）。
+
+### 52.3 §B（headline）§51 的「只拆一个就够快」是编码假象；真实分解是「L 型」加性
+
+P=128 纯写（无 worker，`bd=138.4 MB`），正交编码逐档（GB/s，`vs_ser` 相对 `ser`）：
+
+| 档 | WA | BP | HD | REL | ACQ | ms | GB/s | vs_ser |
+|---|---|---|---|---|---|---|---|---|
+| `ser` | 1 | 1 | 1 | 1 | 1 | 0.3170 | **436.6** | 1.000 |
+| `nowait` | 0 | 1 | 1 | 1 | 1 | 0.3043 | 454.9 | 1.042 |
+| `skipbp`（真：`~WA·~BP`） | 0 | 0 | 1 | 1 | 1 | 0.2654 | **521.5** | 1.194 |
+| `skiphd`（真：`~WA·~HD`） | 0 | 1 | 0 | 1 | 1 | 0.2626 | **527.1** | 1.207 |
+| `nobp` | 0 | 0 | 0 | 1 | 1 | 0.2197 | **630.0** | 1.443 |
+| `wa_only`（`~BP·~HD`） | 1 | 0 | 0 | 1 | 1 | 0.2202 | 628.6 | 1.446 |
+| `relhead`（`~REL`） | 1 | 1 | 1 | 0 | 1 | 0.2788 | **496.5** | 1.137 |
+| `reltail`（`~ACQ`） | 1 | 1 | 1 | 1 | 0 | 0.3180 | **435.2** | **0.997** |
+| `relboth` | 1 | 1 | 1 | 0 | 0 | 0.2781 | 497.7 | 1.140 |
+| `hd_nofence`（`~WA·~BP·~FENCE`） | 0 | 0 | 1 | 1 | 1 | 0.2677 | 517.0 | 1.189 |
+| `nobp_wa`（`~BP`，留 WA） | 1 | 0 | 1 | 1 | 1 | 0.2825 | 490.0 | 1.127 |
+| `stridedbp`(S=4) | 1 | 1/4 | 1 | 1 | 1 | 0.3001 | 461.3 | 1.061 |
+| `stridedpub`(S=4) | 1 | 1 | 1/4 | 1 | 1 | 0.2828 | 489.4 | 1.126 |
+| `stridedall`(S=4) | 1 | 1/4 | 1/4 | 1 | 1 | 0.2625 | 527.3 | 1.213 |
+| `nowa_relhead`（`~WA·~REL`） | 0 | 1 | 1 | 0 | 1 | 0.2669 | 518.5 | 1.193 |
+
+三条结论：
+
+1. **§51.6 的「只拆任一个就够快」被证伪**：真·`skipbp`（只关背压）= **521**、真·`skiphd`（只关发布）
+   = **527**，**都不是 664**；只有**两者都关**（`nobp`）= **630**、且**关掉 `WA` 后再两者都关**
+   （§51 的 `win≤-3` 档）才等于 664。§51.6 表格的「`skipbp`=664.5 / `skiphd`=664.8」两行是
+   `nobp` 的**同一配置被重复计数**（`nobp=(win<=-3)` 吞掉了 `win=-4/-5`）。
+2. **真实分解是「L 型加性」**：store-only 地板 **630**；**单加 release 发布** → **521**（-17%）；
+   **单加背压会合** → **527**（-16%）；**两者同加** → **455**（-28%，**次可加**：单独各 -17%/-16%，
+   叠加只 -28% 而非 -33%）；**再叠完成等待 `WA`** → **437**（-31%）。即每批的跨 SM 进度簿记
+   **每多一维就掉一档**，不存在「加一个刚好、加两个才贵」的悬崖。
+3. **内存序语义的定位**：`reltail`（`ld.acquire`→`ld.relaxed`）**完全无效**（435 ≈ ser）——
+   **acquire 不是瓶颈**；`relhead`（`st.release`→`st.relaxed`）回到 **497**（**+13.7%**，收回 `ser` 与
+   `nowait` 之间大半差距）——**贵的是 release store**；`hd_nofence`（去掉 proxy fence）**与 `skipbp`
+   相同**（517 ≈ 521）——**`fence.proxy.async.global` 免费**。`nowa_relhead`（518.5）又比 `relhead`
+   （496.5）快——**release 与 `WA` 有交互**（二者都在时最贵）。
+
+### 52.4 §B2 摊薄步长 `S` 的标度：摊薄「发布」比摊薄「背压」更值钱、两者一起最接近地板
+
+P=128 纯写，步长 `S`（GB/s）：
+
+| S | `stridedbp` | `stridedpub` | `stridedall` | `nowa_strpub` | `nowa_strbp` |
+|---|---|---|---|---|---|
+| 1 | 434.9 | 435.2 | 433.9 | 454.8 | 456.0 |
+| 2 | 449.1 | 470.5 | 488.7 | 471.4 | 471.7 |
+| 4 | 461.2 | 489.4 | 527.9 | 491.0 | 486.5 |
+| 8 | 466.9 | 499.8 | **549.9** | 500.5 | 494.3 |
+| 16 | 469.5 | 504.9 | **562.8** | 504.6 | 497.9 |
+| 32 | 473.7 | 507.0 | **569.1** | 507.4 | 499.8 |
+
+- **摊薄「发布」比摊薄「背压」更值钱**（`S=8` 时 pub 499.8 > bp 466.9）——与 §52.3 的
+  「release store 是主因、acquire 不是」一致。
+- **两者一起摊薄**（`stridedall`）**最接近地板**：`S=32` 达 **569**，但仍差 `nobp` 的 630（**-10%**）
+  与 `wa_only` 的 629——说明**每 `S` 批一次进度簿记**仍留下固定缝，摊薄**只减频、不能归零**。
+- `S` 单调但**饱和**（`S=8→32` 只 +3.5%）——与 §51.5「深窗饱和 +1.6%」同调：**簿记频率不是唯一旋钮**。
+
+### 52.5 §C 归因矩阵 × P：结论在 P∈{16..128} 上一致（每档 ~线性于 P）
+
+纯写吞吐（GB/s）：
+
+| P | `ser` | `nowait` | `skipbp` | `skiphd` | `relhead` | `reltail` | `relboth` | `strall(S8)` | `nowa_rhead` |
+|---|---|---|---|---|---|---|---|---|---|
+| 16 | 56.7 | 58.7 | 67.7 | 67.8 | 63.4 | 56.8 | 63.5 | 70.8 | 66.4 |
+| 32 | 112.9 | 117.0 | 134.6 | 135.1 | 126.3 | 113.4 | 126.7 | 141.2 | 132.6 |
+| 64 | 223.6 | 231.2 | 267.2 | 268.4 | 250.4 | 223.9 | 250.9 | 280.5 | 263.1 |
+| 128 | 437.3 | 454.6 | 520.2 | 527.7 | 495.6 | 434.9 | 497.1 | 549.8 | 518.3 |
+
+每档随 P **近似线性**（单 SM 瓶颈、无争抢），且**排序逐 P 不变**：
+`reltail≈ser < relhead≈relboth < skipbp≈skiphd≈nowa_rhead ≈ strall < nobp`。即 §52.3 的 L 型分解
+**不是 P=128 的特例**，而是**每个 producer SM 的单核瓶颈**（这正是「取 task 是一堆独立 SPSC 子环」
+的结构，见 §48）。
+
+### 52.6 §D（headline 之二）逐相位 `clock64` + SASS：贵在「release store 的 GPU 级 MEMBAR」
+
+lane0 每批的 `clock64` 分段（cycles/batch，P=128 纯写；段：`bp`=背压会合 / `wr`=回收槽
+`wait_group.read` / `gen`=协作生成 SMEM / `store`=bulk store 发射+commit / `pub`=完成等待+fence+发布 /
+`pw`=压舱）：
+
+| 档 | bp | wr | gen | store | pub | pw | sum |
+|---|---|---|---|---|---|---|---|
+| `ser` | 838 | 285 | 3426 | 370 | **1359** | 99 | 6377 |
+| `nowait` | 841 | 285 | 3426 | 365 | **927** | 99 | 5943 |
+| `skipbp` | **43** | 284 | 3428 | 377 | 974 | 99 | 5205 |
+| `skiphd` | **907** | 284 | 3426 | 375 | **65** | 99 | 5156 |
+| `relhead` | 863 | 283 | 3426 | 365 | **432** | 99 | 5468 |
+
+（`gen`=3426 三档恒定，是**固定成本**——每批 11 KB / 256 线程协作生成 SMEM；`sum` 与墙钟一致：
+0.3170 ms / 96 批/producer ≈ 3.32 µs/batch ≈ 6400 cycles @~1.9 GHz。）
+
+- **`bp` 段**在背压存在时 ~840–907、`skipbp` 时 **43**——但 §52.3 已证 `ld.acquire`→`ld.relaxed` 无效，
+  故这 ~860 cycles **主要是背压那一步的 `__syncthreads()`（`BAR.SYNC`）**，不是 acquire 本身。
+- **`pub` 段**：`ser` **1359**、`nowait`（去 `WA`）**927**、`relhead`（去 release）**432**、`skiphd`
+  **65**。⇒ **(a) 完成等待 `WA` 约 430 cycles；(b) `st.release` 相对 `st.relaxed` 约 500 cycles；
+  (c) 二者叠在 `ser` 上。** 与 §52.3 的墙钟排序一致。
+- **SASS 依赖链证据**：反汇编 `dptd_kernel`（`harness` 中 `cuobjdump -sass`）计数——
+  `LD.E.64.STRONG.GPU` × **12**、`BAR.SYNC` × **9**、`MEMBAR.ALL.CTA` × **4**、`MEMBAR.ALL.GPU` × **3**、
+  `ST.E.64.STRONG.GPU` × **3**、`FENCE.VIEW.ASYNC.{S,G}` × **7**。关键一处（发布路径）原样为
+  `MEMBAR.ALL.CTA` → `MEMBAR.ALL.GPU` → `ST.E.64.STRONG.GPU`——即 **`st.release.gpu` 落成
+  「两条 GPU 级 `MEMBAR` + 强序 store」**，把该 SM 的访存流水**每批 order 一次**；这正是
+  `relhead` 能收回 ~500 cycles 的物理原因。`ld.acquire` 落成单条 `LD.E.64.STRONG.GPU`（无尾随
+  `MEMBAR`），与「acquire 免费」实测吻合。
+
+### 52.7 结论与判据
+
+- **修正 §51.6**：§51 的 `nowait/nofence/nobp/skipbp/skiphead` **单整数互斥编码有重叠**
+  （`nobp=(win<=-3)` 吞掉 `win=-4/-5`），故其「只拆背压或只拆发布都回 664」两行**实际都是 `nobp`**；
+  **「拆任一个就够快」不成立**。
+- **真实因果（SASS 级）**：动态生产者 TMA store 的正确握手，**每批**要在单 producer SM 的
+  临界路径上插入 (1) `st.release.gpu` → **两条 GPU 级 `MEMBAR` + 强序 store**（~500 cycles）、
+  (2) 背压的 `__syncthreads()`（~860 cycles）、(3) 完成等待 `WA`（~430 cycles）。三者**线性叠加**
+  把 store-only 的 630 GB/s 压到 437。**不是 acquire、不是 proxy fence，也主要不是 DMA 语义**。
+- **对描述符通路的画像（收口 §39–§52）**：worker **读**端 809–3000 GB/s；producer **写**端任何载体
+  ≤ 885（coop）、正确握手 TMA store **437–497**（本节）——**写端瓶颈 = 每批 release 的 `MEMBAR`
+  + 会合 barrier**。MPK 用「编译期预计算 `FullTaskDesc` + scheduler 只做事件→id 映射、批量/环形
+  摊薄一次 release」（`persistent_kernel.cuh:1254-1523`）**正好绕开「每批对 GPU 做一次 order」**，
+  本节给出了它为什么必须绕开的 SASS 级依据。
+- **合法优化**：若确要设备侧生成，应把**发布按 `S` 批摊薄**（`stridedall` `S=32` → 569，**+30%**）、
+  且**只对 head 用 release、tail 用 relaxed**（acquire 无用）——但**仍达不到 store-only 地板**。
+- **判据**：`ser` 及全部摊薄正确版均 **C1–C4**（单 kernel、persistent、多算子范围、设备内协调），
+  比 §36–§51 更接近 C5（P 个固定角色 producer）但 worker 仍静态分配 batch ⇒ **仍差 C5 一步**。
+
+### 52.8 局限与踩到的坑
+
+- **哨兵档故意不正确**（`~WA` 不保证 store 完成可见、`~REL`/`~ACQ` 只弱序、`~FENCE` 跳过跨 proxy
+  fence、`~BP`/`~HD` 不保证进度协议）：只用于**拆代价**，其数值**不可**当正确实现；正确性由
+  §A 的 `mode 1/11/12/13` 保证。
+- **产物是合成描述符**（内容 = `gen_word`，非真实 GEMM/RMSNorm）；未与 DeepGEMM SM100 路径对跑
+  （SM100 专属，本机不具备）。
+- **SASS 计数是整个 `dptd_kernel` 的**（含 worker 路径与 register-store 路径），非严格限定到
+  producer 主循环的基本块；但 `MEMBAR.ALL.*`/`ST.E.64.STRONG.GPU` 的发布路径基本块可由上下文定位
+  （反汇编行 3679–4701 一带），结论不依赖精确到单个基本块。
+- **纯写口径无 worker**：`BP` 在纯写档是「CAP 取满 → 背压为空操作」，故纯写测的是**握手本身**的
+  代价；带 worker 的正确性见 §A，但带 worker 的归因矩阵本节未跑（`ser` 相对 `static` 3.5–5.3×，
+  与 §51 §B 一致）。
+- **`gen`=3426 cycles 是固定成本**（每批协作生成 SMEM 暂存槽），是本节所有档的公共底噪；**换栈**
+  （如 v4/coop 协作写，见 §49/§50）会改变它，故本节比值不能外推到寄存器写载体。
+- **踩坑**：初版 `§A` 误用 `mode 5/9`（纯写，`grid=P`、无 worker）做正确性检查 → `got=0`（假
+  `!=`）；改用 `mode 1/11/12/13`（含 worker）后逐位一致。同一坑在 §50/§51 的骨架里也存在
+  （`mode 5/9/7/6` 都 `grid=P`）。
