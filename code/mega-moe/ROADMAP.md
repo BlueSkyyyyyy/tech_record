@@ -2739,6 +2739,38 @@
       成功构造且 2D/3D 指纹不同。配套博客 `content/posts/mega-moe-97-sm100-hc-prenorm-gemm`
       （索引页新增第 97 篇）。
 
+### P88 增量（opt-in，补齐 DeepEP 的「任何设备代码跑起来之前」的编译配置面）
+
+- [x] **P88-1** **DeepEP 的编译期配置面与 DeepJIT 接入**（`deep_ep/include/deep_ep/common/compiled.cuh`、
+      `csrc/runtime/jit.hpp`、`csrc/utils/system.hpp`；`setup.py`、`csrc/python_api.cpp`）。
+      第 33 篇拆了 DeepGEMM 的 DeepJIT 接入、第 47 篇拆了 DeepJIT post-hook、第 86 篇拆了 DeepEP 的
+      Python 引导层（`__init__.py:44-51` 的 `init_jit` **调用点**），但同一个 `init_jit` 的 C++ 实现
+      （`csrc/runtime/jit.hpp`）与它引出的 `compiled.cuh` 一直没被系统读过——本篇补齐。
+      **两个编译面**：host `_C`（`setup.py:96-98` cxx `-DEP_NUM_TOPK_IDX_BITS`）与 device JIT
+      （`jit.hpp:38` 同一宏进每个 kernel 的 nvcc），必须一致；`compiled.cuh:45-47` 缺省 64。
+      **`compiled.cuh` 五件事**：① `#undef` torch 的五个 `__CUDA_NO_{HALF,BFLOAT16}*`（`:10-25`）；
+      ② 256-bit LD/ST 兼容（`:33-43`，CUDART≥13 用 `longlong4_32a`）；③ `topk_idx_t=int_with_bits<
+      EP_NUM_TOPK_IDX_BITS>`（`:45-57`，只特化 8/16/32/64）；④ `sf_pack_t` 4B union +
+      `kNumAlignedSFPacks=16/sizeof=4`（`:59-64`，SF token 维 4 对齐的来历 `ep.hpp:693`）；
+      ⑤ 32/64/2MiB 三档对齐 + 两条整除 `static_assert` + 通信上限（`:66-82`，是 `layout/ep/workspace.cuh:15-20`
+      的数组维度、`bucket.hpp:86` 的 QP 划分、`context.cpp:95/137` 的断言来源）。**`init_jit`**：
+      `Config` 五参（`library_root`/`"EP"`/空 `extra_signature`/`{include}`/`{"deep_ep/"}`）+
+      8 条 nvcc flag（2 诊断 + `-I<nccl>` + `-DEP_NUM_TOPK_IDX_BITS` + 4 条 GIN GDAKI）+ 条件
+      `EP_GIN_GDAKI_DEBUG`；`get_env`（`system.hpp:12-29`，只支持 string/int，非支持类型抛异常）
+      + `LazyInit` + `register_apis`。**缓存键**：`deep_jit/runtime/runtime.hpp:92-97` 键 =
+      `extra_signature + nvcc 版本 + options.update_hash(str::join(get_flags())) + post_hook +
+      parser.parse_into_hash(source)`；`-I<nccl>` 在 `nvcc_flags` 里 → 进第 ③ 段（NCCL include 路径
+      进键），DeepEP 自身头按内容进第 ⑤ 段（`include_prefixes={"deep_ep/"}`，路径无关）——与 DeepGEMM
+      把 CUTLASS 版本编进 `extra_signature` 对照。**完全 host / 编译期、架构无关**，H100(sm90) 真机
+      `src/deepep_compiled_abi.cu` + `harness/deepep_jit_config_probe.cpp` +
+      `harness/exp_deepep_jit_config.{sh,out.txt}` **48 PASS / 0 FAIL**：`compiled.cuh` 默认 64 /
+      覆盖 32 两个编译单元各 15 PASS、`longlong4_t` 32B/32-align（`CUDART_VERSION=13020`）、
+      `get_env` 四条正常路径（含 `"123abc"`→123）+ `get_env<bool>` 抛 `EPException`（真实行号
+      `system.hpp:27`）+ `Config` 五参与三条负样本（相对根 / 空前缀 / 保留字 `"DJ"`）+ flag 哈希
+      （`nccl-A 7b47f9c3…` vs `nccl-B 1a00ac53…` vs `debug 63643454…`）+ Python 解析 `jit.hpp`
+      9 条 flag 字面量逐字一致。配套博客 `content/posts/mega-moe-98-deepep-jit-config`
+      （索引页新增第 98 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -2764,8 +2796,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P87 各增量完成（P15-1…P41-1、P42-1…P87-1）。**
-  本轮 P87-1：新建 `docs/97-sm100-hc-prenorm-gemm.md`
+- 当前进度：**P0~P14 全部完成；P15~P88 各增量完成（P15-1…P41-1、P42-1…P88-1）。**
+  本轮 P88-1：新建 `docs/98-deepep-jit-config.md`
+  （+`src/deepep_compiled_abi.cu`、`harness/deepep_jit_config_probe.cpp`、
+  `harness/exp_deepep_jit_config.{sh,out.txt}`）——补齐 DeepEP「任何设备代码跑起来之前」的**编译配置面**：
+  `deep_ep/include/deep_ep/common/compiled.cuh` 的编译期 ABI（`topk_idx_t` 位宽 / `sf_pack_t` UE8M0
+  打包单元 / 32-64-2MiB 三档对齐 / 写死成数组维度的通信上限）与 `csrc/runtime/jit.hpp::init_jit`
+  的 `Config` 五参 + 8 条 nvcc flag（GIN GDAKI 家族），并讲清**为什么 NCCL include 路径进 DeepJIT
+  缓存键、DeepEP 自身头按内容进键**（对照 DeepGEMM 的 `cutlass-<ver>` extra_signature）。
+  **H100(sm90) 真机 48 PASS / 0 FAIL**（`compiled.cuh` 默认 64/覆盖 32 各 15 PASS、`get_env`/`Config`
+  16 PASS、Python 解析 `jit.hpp` 2 PASS）。索引页新增第 98 篇。
+  上一轮 P87-1：新建 `docs/97-sm100-hc-prenorm-gemm.md`
   （+`src/hc_prenorm_sm100.cu`、`harness/exp_hc_prenorm_sm100.{sh,out.txt}`）——
   补齐第 16 篇（P7-2）**只写了 4 条 bullet** 的 SM100 HyperConnection prenorm GEMM，以及第 79/86 篇
   漏掉的 mega 家族最后一个 JIT 启动包装层 `sm100_tf32_hc_prenorm_gemm.hpp`。
@@ -3777,11 +3818,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P85 已完成（最新 **P85-1 MoE dispatch / combine 的反向（伴随）语义与路由权重梯度**：
-  把 dispatch 看成复制/置换算子 `D`、combine 的 token 求和看成 `Dᵀ`，两原语互为转置 → 反向不需要新通信
-  kernel（`dispatch_backward`=combine、`combine_backward`=dispatch）；核心洞察是「非 expand 按目的 rank
-  复制 → `combined_topk_weights` 必须选择而非求和」；训练图 `∂L/∂y=w·g` / `∂L/∂w=<y,g>`；H100 真机
-  Part A 四条伴随恒等式 + autograd 对拍、Part B 8×H100 真机 NCCL 跨 rank 验伴随，**ALL PASS**；详见上）。
+- **下一步**：P0~P88 已完成（最新 **P88-1 DeepEP 的编译期配置面与 DeepJIT 接入**：
+  `csrc/runtime/jit.hpp::init_jit` 的 `Config` 五参 + 8 条 nvcc flag（GIN GDAKI）+ `compiled.cuh`
+  的编译期 ABI（`topk_idx_t`/`sf_pack_t`/对齐/通信上限）；核心洞察是「NCCL include 路径进缓存键、
+  DeepEP 自身头按内容进键」；纯 host/编译期、架构无关，H100 真机 48 PASS / 0 FAIL；详见上）。
+  上一轮 P87-1：P0~P87 已完成（最新 **P87-1 SM100 HyperConnection prenorm GEMM 的 JIT 启动包装层与三段流水**：
+  host 包装层 `n<=128`/`block_n=align(n,16)`/barrier 家族 4 组(split 时 D 走 3D)、SM100 kernel 的
+  cast-and-reduce warpgroup 与 `get_swizzled_smem_offset`；H100 真机 21 PASS / 0 FAIL；详见上）。
   上一轮 P84-1：P0~P84 已完成（最新 **P84-1 DeepEP bucket 混合集合算子的验收测试即正确性规范**：
   `tests/bucket/test_mixed.py`（373 行）+ `tests/bucket/test_perf.py`（273 行）——混合算子的多轮随机
   编排（三流 / scale / exact / session / 外部输入）+ 五个规范组件（`supported` 门控、`make_sizes`

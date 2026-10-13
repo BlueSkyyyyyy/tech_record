@@ -1,0 +1,95 @@
+== 环境坐标 ==
+93eb6eb Update README
+057ca59 Public release 26/09/30 (#462)
+2efdab4 Add MIT license (#21)
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+5adc25fabb787db1106387f01693c8cbdd7d302545ee11c3794529b1e4720f0f compiled.cuh
+582d04c1aff270055b8186ca1553c4e3cf4e2450387f6d619b49aa395e5bfb2e jit.hpp
+6bd24a20a8138f86351f5d522ae6f866d42370ba07c45d2fa614d27999f181a1 system.hpp
+Build cuda_13.2.r13.2/compiler.37668154_0
+g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+
+############ Part 1: compiled.cuh ABI（nvcc 直接 include 真实头文件）############
+> build (default EP_NUM_TOPK_IDX_BITS=64) OK
+== Part 1: compiled.cuh ABI (EP_NUM_TOPK_IDX_BITS=64) ==
+  [PASS] topk_idx_t == int64_t (default)
+  sizeof(topk_idx_t) = 8
+  [PASS] int_with_bits<8>  -> 1 byte
+  [PASS] int_with_bits<16> -> 2 bytes
+  [PASS] int_with_bits<32> -> 4 bytes
+  [PASS] int_with_bits<64> -> 8 bytes
+  [PASS] sf_pack_t == 4B (fp32|ue8m0x4)
+  [PASS] kNumAlignedSFPacks == 4
+  fp32=1.0 -> ue8m0x4=0x3f800000 (bit-reinterpret, size 4)
+  CUDART_VERSION=13020 longlong4_t: sizeof=32 alignof=32
+  [PASS] longlong4_t == 32B/32-align
+  align: TMA=32 RDMA=64 ALLOC=2097152
+  [PASS] alignment triple 32/64/2MiB
+  [PASS] 64 % 32 == 0
+  [PASS] 2MiB % 64 == 0
+  limits: maxRanks=1024 maxRDMARanks=1024 maxNVLRanks=1024 scaleout=1024 scaleup=1024 ctx=8 QPs=1024 QPDepth=1024 signalBytes=16777216
+  [PASS] rank caps all 1024
+  [PASS] kNumMaxContexts == 8
+  [PASS] QP caps 1024/1024
+  [PASS] kNumMaxSignalBytes == 16 MiB
+Part 1 RESULT: 15 PASS / 0 FAIL
+
+> build (-DEP_NUM_TOPK_IDX_BITS=32) OK
+== Part 1: compiled.cuh ABI (EP_NUM_TOPK_IDX_BITS=32) ==
+  [PASS] topk_idx_t == int32_t (overridden)
+  sizeof(topk_idx_t) = 4
+  [PASS] int_with_bits<8>  -> 1 byte
+  [PASS] int_with_bits<16> -> 2 bytes
+  [PASS] int_with_bits<32> -> 4 bytes
+  [PASS] int_with_bits<64> -> 8 bytes
+  [PASS] sf_pack_t == 4B (fp32|ue8m0x4)
+  [PASS] kNumAlignedSFPacks == 4
+  fp32=1.0 -> ue8m0x4=0x3f800000 (bit-reinterpret, size 4)
+  CUDART_VERSION=13020 longlong4_t: sizeof=32 alignof=32
+  [PASS] longlong4_t == 32B/32-align
+  align: TMA=32 RDMA=64 ALLOC=2097152
+  [PASS] alignment triple 32/64/2MiB
+  [PASS] 64 % 32 == 0
+  [PASS] 2MiB % 64 == 0
+  limits: maxRanks=1024 maxRDMARanks=1024 maxNVLRanks=1024 scaleout=1024 scaleup=1024 ctx=8 QPs=1024 QPDepth=1024 signalBytes=16777216
+  [PASS] rank caps all 1024
+  [PASS] kNumMaxContexts == 8
+  [PASS] QP caps 1024/1024
+  [PASS] kNumMaxSignalBytes == 16 MiB
+Part 1 RESULT: 15 PASS / 0 FAIL
+
+############ Part 2: get_env / Config / 缓存键（g++ host，deep_jit 真实头）############
+> build OK
+== Part 2: get_env / Config / 缓存键 ==
+  [PASS] get_env unset -> default 7
+  [PASS] get_env int -> 42
+  [PASS] get_env int sscanf 取前缀 -> 123
+  [PASS] get_env string -> "hello world"
+  get_env<bool> threw: Assertion exception (~/github/DeepEP/csrc/utils/system.hpp:27): false and "Unexpected type"
+  [PASS] get_env<bool> -> EP_HOST_ASSERT(false) throws
+  config.to_json = {"python_library_root":"/tmp/deepep_pkg","extra_signature":"","include_dirs":["/tmp/deepep_pkg/include"],"include_prefixes":["deep_ep/"]}
+  [PASS] extra_signature is empty (DeepGEMM 则是 "cutlass-<ver>")
+  [PASS] include_prefixes == {"deep_ep/"}
+  [PASS] get_python_path 相对拼接到 library_root
+  [PASS] relative python_library_root -> DJ_HOST_ASSERT
+  [PASS] empty env_prefix -> DJ_HOST_ASSERT
+  [PASS] "DJ" reserved -> DJ_HOST_ASSERT
+  flags(base, nccl-A) = --diag-suppress=39,161,174,177,186,940,3012 --compiler-options=-Wno-deprecated-declarations,-Wno-abi -I/opt/nccl-A/include -DEP_NUM_TOPK_IDX_BITS=64 -DNCCL_GIN_GDAKI_ENABLE=1 -DNCCL_GIN_PROXY_ENABLE=0 -DNCCL_GIN_GPI_ENABLE=0 -DNCCL_GIN_EFA_GDA_ENABLE=0
+  flags(base, nccl-B) = --diag-suppress=39,161,174,177,186,940,3012 --compiler-options=-Wno-deprecated-declarations,-Wno-abi -I/opt/nccl-B/include -DEP_NUM_TOPK_IDX_BITS=64 -DNCCL_GIN_GDAKI_ENABLE=1 -DNCCL_GIN_PROXY_ENABLE=0 -DNCCL_GIN_GPI_ENABLE=0 -DNCCL_GIN_EFA_GDA_ENABLE=0
+  flags(debug, nccl-A) = --diag-suppress=39,161,174,177,186,940,3012 --compiler-options=-Wno-deprecated-declarations,-Wno-abi -I/opt/nccl-A/include -DEP_NUM_TOPK_IDX_BITS=64 -DNCCL_GIN_GDAKI_ENABLE=1 -DNCCL_GIN_PROXY_ENABLE=0 -DNCCL_GIN_GPI_ENABLE=0 -DNCCL_GIN_EFA_GDA_ENABLE=0 -DNCCL_DEVICE_GIN_GDAKI_ENABLE_DEBUG=1
+  [PASS] 8 条 unconditional flag
+  [PASS] EP_GIN_GDAKI_DEBUG 打开后 9 条
+  hash(nccl-A) = 7b47f9c349771301c78afe4b96fb8a82
+  hash(nccl-B) = 1a00ac53b21d91388fa541a06d5136d1
+  hash(debug)  = 63643454f9f46bbbacf44068468be36c
+  [PASS] 换 NCCL include 路径 -> flags 哈希变化（进缓存键）
+  [PASS] 开 debug flag -> flags 哈希变化（进缓存键）
+  [PASS] DeepEP 自身 include 路径不出现在 flags（保持路径无关）
+Part 2 RESULT: 16 PASS / 0 FAIL
+
+############ Part 3: 从 jit.hpp 源码交叉核对 flag 清单（python 解析真实文件）############
+  提取到 emplace_back 字面量: 9 条（常量 7 / 动态 2 ）
+  constants: ['--diag-suppress=39,161,174,177,186,940,3012', '--compiler-options=-Wno-deprecated-declarations,-Wno-abi', '-DNCCL_GIN_GDAKI_ENABLE=1', '-DNCCL_GIN_PROXY_ENABLE=0', '-DNCCL_GIN_GPI_ENABLE=0', '-DNCCL_GIN_EFA_GDA_ENABLE=0', '-DNCCL_DEVICE_GIN_GDAKI_ENABLE_DEBUG=1']
+  dynamic chains: ['-I', '-DEP_NUM_TOPK_IDX_BITS=']
+  [PASS] flag 清单与源码逐字一致；EP_GIN_GDAKI_DEBUG 为条件守卫
+  [PASS] 动态两条：-I<nccl_include_dir> 与 -DEP_NUM_TOPK_IDX_BITS=<bits>
