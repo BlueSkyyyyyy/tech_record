@@ -1984,6 +1984,30 @@
       合成描述符/数据面、cp.async 为单缓冲（深环预取未在本阶梯内测）、co-residency 未严格、
       未与 DeepGEMM SM100 对跑。
 
+### P78 实验扩展 57：worker 侧取 task 载体第四种——`cp.async` **深环**（`docs/04-experiments.md` §66）
+
+- [x] **P78-1** 补掉 P77-1（§65）**§65.9 明留的尾巴**「**cp.async 是单缓冲**（快照形态），
+      **未做 `D` 深环预取**（§42 的 cp.async 深环已量『预取增益全在 D=1→2』）」：把 cp.async 从
+      **单缓冲**升级成 **`DCA` 槽软件流水深环**（`cp.async.wait_group (DCA-1)`、尾批 `wait_group 0`
+      兜底、逐槽复用 `__syncthreads()`），接进 §64/§65 的端到端 worker 阶梯。见
+      `docs/04-experiments.md` **§66**，源码 `src/worker_carrier_cpasync_ring.cu`、脚本
+      `harness/worker_carrier_cpasync_ring.sh`、原始输出 `harness/worker_carrier_cpasync_ring.out.txt`
+      （目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B、`K=32`、TMA `D=2`、
+      `PS=8`、占用率固定 `T=256,MINB=8,U=4`、`NB=2048`、`MD=65536`、min-of-3；新增 `WMODE 6=ca-ring`
+      / `7=ca-ring+d`，`WMODE`/`DCA` 均编译期 template）。核心结论：
+      - **§A 正确性**：单缓冲 + 深环 `DCA=2/4/8` 共 9 档 `sink` 逐位对 host 参考（全 `OK`）。
+      - **§B/§C/§G headline**：**深环没有任何一个点快过单缓冲**——`ca-single ≡ plain`（±1%）；
+        `DCA=2` 掉到 ≈ TMA 档（`caD2/plain` 1.08→1.35× 随 `G` 增大）、`DCA=4` 更差（1.23→1.61×）。
+        §G（`G=132,chunk=8`）扫 `DCA=1..8` **单调变慢**：1206→1136→1041→893 taskGB/s。
+      - **§E 两笔净成本**：(a) 逐批**槽复用 `__syncthreads()`**；(b) **SMEM 足迹随 `DCA` 线性增长**
+        拉低占用率（`DCA=2`→8、`DCA=4`→5、`DCA=8`→2 blk/SM）。
+      - **含义**：§42 的「预取增益全在 D=1→2」**不迁移**到端到端阶梯——352 B/task 取数已被 HBM
+        数据面/producer 就绪等待藏住（§65），深环**无缝可回收**，只剩足迹与同步；再次确认 MPK 用
+        **16 B `cp.async` 单缓冲**（`persistent_kernel.cuh:1063-1078`）是经过取舍的选择。判据 C1–C4、
+        仍差 C5。**本轮新增实验**；P78-1 新留尾巴（§66.9）：与 §65 存在**跨二进制 codegen 偏移**
+        （本版 plain `localB=8` 有 8 B 溢出、`G≤132` 慢 ~1.6×，故只采信同族内相对排序）、小 `G`
+        受同机争用抖动、合成描述符/数据面、未与 DeepGEMM SM100 对跑。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2007,10 +2031,32 @@
   （见 P53-1/§42.7），且尾批要 `wait_group 0` 兜底否则漏等（§40.8 的 drain 坑）。
 - 16 B `cp.async` 的 SMEM 目的地址须 **16 B 对齐**：`extern __shared__` 显式 `__align__(16)`
   （见 P77-1/§65.9）。
+- **多载体 kernel 的载体选择要放编译期 template**：把载体选择留在运行期 `if (wmode==…)`，未走的
+  分支会把寄存器压力顶上去 → **局部溢出（`localB>0`）→ 整核降速**（P78-1/§66.9：plain 路径
+  `numRegs=32/localB=8`、`G≤132` 比 §65 同配置慢 ~1.6×）。`if constexpr` + 模板参数可消除；但
+  比较深环等同一内核内变体时应只采信**同族相对排序**。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P77-1 完成（1/1）**。补掉 §64.9 明留的尾巴「载体是寄存器读（plain）/ TMA，
+- 当前进度：**P78-1 完成（1/1）**。补掉 P77-1（§65）**§65.9 明留的尾巴**「**cp.async 是单缓冲**
+  （快照形态），**未做 `D` 深环预取**（§42 已量『预取增益全在 D=1→2』）」：把 cp.async 从单缓冲升级成
+  **`DCA` 槽软件流水深环**（`cp.async.wait_group (DCA-1)`、尾批 `wait_group 0`、逐槽复用
+  `__syncthreads()`），接进 §64/§65 的端到端 worker 阶梯。见 `docs/04-experiments.md` **§66**，源码
+  `src/worker_carrier_cpasync_ring.cu`、脚本 `harness/worker_carrier_cpasync_ring.sh`、原始输出
+  `harness/worker_carrier_cpasync_ring.out.txt`（目标卡 H100/sm90a、固定空闲 device 3、nvcc 13.2、
+  `DW=88`=352 B、`K=32`、TMA `D=2`、`PS=8`、占用率固定 `T=256,MINB=8,U=4`、`NB=2048`、`MD=65536`、
+  min-of-3；新增 `WMODE 6=ca-ring`/`7=ca-ring+d`，`WMODE`/`DCA` 均编译期 template）。核心结论：
+  (1) **§A 正确性**：单缓冲 + 深环 `DCA=2/4/8` 共 9 档 `sink` 逐位对 host 参考（全 `OK`）；
+  (2) **§B/§C/§G（headline）深环没有任何一个点快过单缓冲**——`ca-single ≡ plain`（±1%）；
+  `DCA=2` 掉到 ≈ TMA 档（`caD2/plain` 随 `G` 从 1.08 涨到 1.35×）、`DCA=4` 更差（1.23→1.61×）；
+  §G（`G=132,chunk=8`）扫 `DCA=1..8` **单调变慢** 1206→1136→1041→893 taskGB/s；
+  (3) **§E 两笔净成本**：逐批**槽复用 `__syncthreads()`** + **SMEM 足迹随 `DCA` 线性增长**拉低占用率
+  （`DCA=2`→8、`DCA=4`→5、`DCA=8`→2 blk/SM）；
+  (4) **含义**：§42 的「预取增益全在 D=1→2」**不迁移**到端到端阶梯——352 B/task 取数已被 HBM 数据面/
+  producer 就绪等待藏住，深环无缝可回收，只剩足迹与同步；再次确认 MPK 用 16 B `cp.async` 单缓冲
+  （`persistent_kernel.cuh:1063-1078`）是经过取舍的选择。判据 C1–C4、仍差 C5。
+  **本专题此前 P0–P77 全完成，本轮为其新增的实验增量。**
+- 此前：**P77-1 完成（1/1）**。补掉 §64.9 明留的尾巴「载体是寄存器读（plain）/ TMA，
   **未含 `cp.async`**（§42 的第三种载体）」：把 MPK worker 的**原生**取 task 载体（16 B `cp.async`
   单缓冲进 SMEM，快照 `persistent_kernel.cuh:1063-1078` 的 `cp_async_wait<0>`）加进 §64 的 worker 侧
   复杂度阶梯，在同一骨架、同一占用率（`T=256,MINB=8,U=4`=8 blk/SM）下与 plain / TMA 对跑。见

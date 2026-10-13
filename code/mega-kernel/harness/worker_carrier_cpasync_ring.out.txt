@@ -1,0 +1,187 @@
+########## §66 worker 侧取 task 载体第四种：cp.async 深环（补 §65.9 尾巴） ##########
+########################################################################
+# §66 worker 侧取 task 载体第四种：cp.async **深环**（补 §65.9 的尾巴）
+# 目标卡 H100/sm90a，DW=88(352B)，K=32，TMA D=2，PS=8，占用率固定 T=256,MINB=8,U=4
+# 阶梯：0=plain 1=tma 2=tma+data 3=data-only 4=cpasync 5=cpasync+data 6=ca-ring 7=ca-ring+data
+########################################################################
+
+===== §A 正确性（G=100，NB=512，MD=8192）：单缓冲 vs 深环 DCA=2/4/8 =====
+  (host ref: desc=35433623159893 data=9002495294165032)
+  A-plain       plain        PS=8   G=100  chunk=6   NB=512  D=2 DCA=2  MD=0       U=4 -> OK     ms=0.2212 descGB/s=26.1    taskGB/s=0.0    
+  A-ca-single   cpasync      PS=8   G=100  chunk=6   NB=512  D=2 DCA=2  MD=0       U=4 -> OK     ms=0.2193 descGB/s=26.3    taskGB/s=0.0    
+  A-ca-ring     ca-ring      PS=8   G=100  chunk=6   NB=512  D=2 DCA=2  MD=0       U=4 -> OK     ms=0.2198 descGB/s=26.2    taskGB/s=0.0    
+  A-ca-ring     ca-ring      PS=8   G=100  chunk=6   NB=512  D=2 DCA=4  MD=0       U=4 -> OK     ms=0.2222 descGB/s=26.0    taskGB/s=0.0    
+  A-ca-ring     ca-ring      PS=8   G=100  chunk=6   NB=512  D=2 DCA=8  MD=0       U=4 -> OK     ms=0.2242 descGB/s=25.7    taskGB/s=0.0    
+  A-ca-single+d cpasync+d    PS=8   G=100  chunk=6   NB=512  D=2 DCA=2  MD=8192    U=4 -> OK     ms=0.2344 descGB/s=24.6    taskGB/s=286.3  
+  A-ca-ring+d   ca-ring+d    PS=8   G=100  chunk=6   NB=512  D=2 DCA=2  MD=8192    U=4 -> OK     ms=0.2490 descGB/s=23.2    taskGB/s=269.6  
+  A-ca-ring+d   ca-ring+d    PS=8   G=100  chunk=6   NB=512  D=2 DCA=4  MD=8192    U=4 -> OK     ms=0.2763 descGB/s=20.9    taskGB/s=242.9  
+  A-ca-ring+d   ca-ring+d    PS=8   G=100  chunk=6   NB=512  D=2 DCA=8  MD=8192    U=4 -> OK     ms=0.3046 descGB/s=18.9    taskGB/s=220.3  
+
+===== §B 固定 NB=2048，扫 G：cp.async **深环** vs 单缓冲 vs plain/TMA =====
+  B-plain       plain        PS=8   G=100  chunk=21  NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7468 descGB/s=30.9    taskGB/s=0.0    
+  B-tma         tma          PS=8   G=100  chunk=21  NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7520 descGB/s=30.7    taskGB/s=0.0    
+  B-caD1        ca-ring      PS=8   G=100  chunk=21  NB=2048 D=2 DCA=1  MD=0       U=4 -> OK     ms=0.7459 descGB/s=30.9    taskGB/s=0.0    
+  B-caD2        ca-ring      PS=8   G=100  chunk=21  NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7488 descGB/s=30.8    taskGB/s=0.0    
+  B-caD4        ca-ring      PS=8   G=100  chunk=21  NB=2048 D=2 DCA=4  MD=0       U=4 -> OK     ms=0.7509 descGB/s=30.7    taskGB/s=0.0    
+  B-plain+d     plain        PS=8   G=100  chunk=21  NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=2.3075 descGB/s=10.0    taskGB/s=930.6  
+  B-tma+d       tma+data     PS=8   G=100  chunk=21  NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.8668 descGB/s=12.4    taskGB/s=1150.4 
+  B-caSingle+d  cpasync      PS=8   G=100  chunk=21  NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=2.2535 descGB/s=10.2    taskGB/s=953.0  
+  B-caD2+d      ca-ring      PS=8   G=100  chunk=21  NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=2.3196 descGB/s=9.9     taskGB/s=925.8  
+  B-caD4+d      ca-ring      PS=8   G=100  chunk=21  NB=2048 D=2 DCA=4  MD=65536   U=4 -> OK     ms=2.3884 descGB/s=9.7     taskGB/s=899.1  
+  B-data        data-only    PS=0   G=100  chunk=21  NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.3383 descGB/s=17.2    taskGB/s=1604.6 
+  B-plain       plain        PS=8   G=132  chunk=16  NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7294 descGB/s=31.6    taskGB/s=0.0    
+  B-tma         tma          PS=8   G=132  chunk=16  NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7359 descGB/s=31.3    taskGB/s=0.0    
+  B-caD1        ca-ring      PS=8   G=132  chunk=16  NB=2048 D=2 DCA=1  MD=0       U=4 -> OK     ms=0.7304 descGB/s=31.6    taskGB/s=0.0    
+  B-caD2        ca-ring      PS=8   G=132  chunk=16  NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7322 descGB/s=31.5    taskGB/s=0.0    
+  B-caD4        ca-ring      PS=8   G=132  chunk=16  NB=2048 D=2 DCA=4  MD=0       U=4 -> OK     ms=0.7362 descGB/s=31.3    taskGB/s=0.0    
+  B-plain+d     plain        PS=8   G=132  chunk=16  NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.8125 descGB/s=12.7    taskGB/s=1184.8 
+  B-tma+d       tma+data     PS=8   G=132  chunk=16  NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.5049 descGB/s=15.3    taskGB/s=1427.0 
+  B-caSingle+d  cpasync      PS=8   G=132  chunk=16  NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.7771 descGB/s=13.0    taskGB/s=1208.5 
+  B-caD2+d      ca-ring      PS=8   G=132  chunk=16  NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.8440 descGB/s=12.5    taskGB/s=1164.6 
+  B-caD4+d      ca-ring      PS=8   G=132  chunk=16  NB=2048 D=2 DCA=4  MD=65536   U=4 -> OK     ms=1.9307 descGB/s=11.9    taskGB/s=1112.3 
+  B-data        data-only    PS=0   G=132  chunk=16  NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.0648 descGB/s=21.7    taskGB/s=2016.8 
+  B-plain       plain        PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7095 descGB/s=32.5    taskGB/s=0.0    
+  B-tma         tma          PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7149 descGB/s=32.3    taskGB/s=0.0    
+  B-caD1        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=1  MD=0       U=4 -> OK     ms=0.7096 descGB/s=32.5    taskGB/s=0.0    
+  B-caD2        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7126 descGB/s=32.4    taskGB/s=0.0    
+  B-caD4        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=4  MD=0       U=4 -> OK     ms=0.7168 descGB/s=32.2    taskGB/s=0.0    
+  B-plain+d     plain        PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.0847 descGB/s=21.3    taskGB/s=1979.8 
+  B-tma+d       tma+data     PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.0387 descGB/s=22.2    taskGB/s=2067.6 
+  B-caSingle+d  cpasync      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.0724 descGB/s=21.5    taskGB/s=2002.5 
+  B-caD2+d      ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.1680 descGB/s=19.8    taskGB/s=1838.6 
+  B-caD4+d      ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=4  MD=65536   U=4 -> OK     ms=1.3357 descGB/s=17.3    taskGB/s=1607.7 
+  B-data        data-only    PS=0   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.7338 descGB/s=31.4    taskGB/s=2926.4 
+  B-plain       plain        PS=8   G=528  chunk=4   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7256 descGB/s=31.8    taskGB/s=0.0    
+  B-tma         tma          PS=8   G=528  chunk=4   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7370 descGB/s=31.3    taskGB/s=0.0    
+  B-caD1        ca-ring      PS=8   G=528  chunk=4   NB=2048 D=2 DCA=1  MD=0       U=4 -> OK     ms=0.7300 descGB/s=31.6    taskGB/s=0.0    
+  B-caD2        ca-ring      PS=8   G=528  chunk=4   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7343 descGB/s=31.4    taskGB/s=0.0    
+  B-caD4        ca-ring      PS=8   G=528  chunk=4   NB=2048 D=2 DCA=4  MD=0       U=4 -> OK     ms=0.7392 descGB/s=31.2    taskGB/s=0.0    
+  B-plain+d     plain        PS=8   G=528  chunk=4   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.8668 descGB/s=26.6    taskGB/s=2477.4 
+  B-tma+d       tma+data     PS=8   G=528  chunk=4   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.0092 descGB/s=22.9    taskGB/s=2127.8 
+  B-caSingle+d  cpasync      PS=8   G=528  chunk=4   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.8631 descGB/s=26.7    taskGB/s=2488.2 
+  B-caD2+d      ca-ring      PS=8   G=528  chunk=4   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.0350 descGB/s=22.3    taskGB/s=2074.8 
+  B-caD4+d      ca-ring      PS=8   G=528  chunk=4   NB=2048 D=2 DCA=4  MD=65536   U=4 -> OK     ms=1.3671 descGB/s=16.9    taskGB/s=1570.9 
+  B-data        data-only    PS=0   G=528  chunk=4   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.7009 descGB/s=32.9    taskGB/s=3063.8 
+  B-plain       plain        PS=8   G=1040 chunk=2   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7718 descGB/s=29.9    taskGB/s=0.0    
+  B-tma         tma          PS=8   G=1040 chunk=2   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7775 descGB/s=29.7    taskGB/s=0.0    
+  B-caD1        ca-ring      PS=8   G=1040 chunk=2   NB=2048 D=2 DCA=1  MD=0       U=4 -> OK     ms=0.7777 descGB/s=29.7    taskGB/s=0.0    
+  B-caD2        ca-ring      PS=8   G=1040 chunk=2   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7757 descGB/s=29.7    taskGB/s=0.0    
+  B-caD4        ca-ring      PS=8   G=1040 chunk=2   NB=2048 D=2 DCA=4  MD=0       U=4 -> OK     ms=0.7409 descGB/s=31.1    taskGB/s=0.0    
+  B-plain+d     plain        PS=8   G=1040 chunk=2   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.9035 descGB/s=25.5    taskGB/s=2376.8 
+  B-tma+d       tma+data     PS=8   G=1040 chunk=2   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.2074 descGB/s=19.1    taskGB/s=1778.6 
+  B-caSingle+d  cpasync      PS=8   G=1040 chunk=2   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.9041 descGB/s=25.5    taskGB/s=2375.2 
+  B-caD2+d      ca-ring      PS=8   G=1040 chunk=2   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.2208 descGB/s=18.9    taskGB/s=1759.1 
+  B-caD4+d      ca-ring      PS=8   G=1040 chunk=2   NB=2048 D=2 DCA=4  MD=65536   U=4 -> OK     ms=1.2705 descGB/s=18.2    taskGB/s=1690.3 
+  B-data        data-only    PS=0   G=1040 chunk=2   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.6859 descGB/s=33.6    taskGB/s=3130.8 
+
+===== §C 消歧：NB=4·G（chunk 恒=4），扫 G——单缓冲 vs 深环 per-block prologue =====
+  C-plain+d     plain        PS=8   G=100  chunk=4   NB=400  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.4744 descGB/s=9.5     taskGB/s=884.1  
+  C-tma+d       tma+data     PS=8   G=100  chunk=4   NB=400  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.4150 descGB/s=10.9    taskGB/s=1010.7 
+  C-caSingle+d  cpasync+d    PS=8   G=100  chunk=4   NB=400  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.4602 descGB/s=9.8     taskGB/s=911.4  
+  C-caD2+d      ca-ring+d    PS=8   G=100  chunk=4   NB=400  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.5002 descGB/s=9.0     taskGB/s=838.6  
+  C-caD4+d      ca-ring+d    PS=8   G=100  chunk=4   NB=400  D=2 DCA=4  MD=65536   U=4 -> OK     ms=0.5692 descGB/s=7.9     taskGB/s=736.9  
+  C-data        data-only    PS=0   G=100  chunk=4   NB=400  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.2607 descGB/s=17.3    taskGB/s=1608.8 
+  C-plain+d     plain        PS=8   G=132  chunk=4   NB=528  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.4930 descGB/s=12.1    taskGB/s=1123.0 
+  C-tma+d       tma+data     PS=8   G=132  chunk=4   NB=528  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.4499 descGB/s=13.2    taskGB/s=1230.7 
+  C-caSingle+d  cpasync+d    PS=8   G=132  chunk=4   NB=528  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.4838 descGB/s=12.3    taskGB/s=1144.4 
+  C-caD2+d      ca-ring+d    PS=8   G=132  chunk=4   NB=528  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.5335 descGB/s=11.1    taskGB/s=1037.8 
+  C-caD4+d      ca-ring+d    PS=8   G=132  chunk=4   NB=528  D=2 DCA=4  MD=65536   U=4 -> OK     ms=0.6229 descGB/s=9.5     taskGB/s=888.8  
+  C-data        data-only    PS=0   G=132  chunk=4   NB=528  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.2715 descGB/s=21.9    taskGB/s=2039.1 
+  C-plain+d     plain        PS=8   G=264  chunk=4   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.5834 descGB/s=20.4    taskGB/s=1898.1 
+  C-tma+d       tma+data     PS=8   G=264  chunk=4   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.5995 descGB/s=19.8    taskGB/s=1847.0 
+  C-caSingle+d  cpasync+d    PS=8   G=264  chunk=4   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.5776 descGB/s=20.6    taskGB/s=1917.2 
+  C-caD2+d      ca-ring+d    PS=8   G=264  chunk=4   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.6680 descGB/s=17.8    taskGB/s=1657.6 
+  C-caD4+d      ca-ring+d    PS=8   G=264  chunk=4   NB=1056 D=2 DCA=4  MD=65536   U=4 -> OK     ms=0.8447 descGB/s=14.1    taskGB/s=1310.9 
+  C-data        data-only    PS=0   G=264  chunk=4   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.3800 descGB/s=31.3    taskGB/s=2913.9 
+  C-plain+d     plain        PS=8   G=528  chunk=4   NB=2112 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.8943 descGB/s=26.6    taskGB/s=2476.2 
+  C-tma+d       tma+data     PS=8   G=528  chunk=4   NB=2112 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.0559 descGB/s=22.5    taskGB/s=2097.4 
+  C-caSingle+d  cpasync+d    PS=8   G=528  chunk=4   NB=2112 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.8918 descGB/s=26.7    taskGB/s=2483.3 
+  C-caD2+d      ca-ring+d    PS=8   G=528  chunk=4   NB=2112 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.0744 descGB/s=22.1    taskGB/s=2061.2 
+  C-caD4+d      ca-ring+d    PS=8   G=528  chunk=4   NB=2112 D=2 DCA=4  MD=65536   U=4 -> OK     ms=1.4196 descGB/s=16.8    taskGB/s=1560.1 
+  C-data        data-only    PS=0   G=528  chunk=4   NB=2112 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.7099 descGB/s=33.5    taskGB/s=3119.6 
+  C-plain+d     plain        PS=8   G=1040 chunk=4   NB=4160 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.7170 descGB/s=27.3    taskGB/s=2540.5 
+  C-tma+d       tma+data     PS=8   G=1040 chunk=4   NB=4160 D=2 DCA=2  MD=65536   U=4 -> OK     ms=2.0707 descGB/s=22.6    taskGB/s=2106.6 
+  C-caSingle+d  cpasync+d    PS=8   G=1040 chunk=4   NB=4160 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.7184 descGB/s=27.3    taskGB/s=2538.5 
+  C-caD2+d      ca-ring+d    PS=8   G=1040 chunk=4   NB=4160 D=2 DCA=2  MD=65536   U=4 -> OK     ms=2.0604 descGB/s=22.7    taskGB/s=2117.1 
+  C-caD4+d      ca-ring+d    PS=8   G=1040 chunk=4   NB=4160 D=2 DCA=4  MD=65536   U=4 -> OK     ms=2.7589 descGB/s=17.0    taskGB/s=1581.1 
+  C-data        data-only    PS=0   G=1040 chunk=4   NB=4160 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.3652 descGB/s=34.3    taskGB/s=3195.2 
+
+===== §D 固定 G=264：扫数据面 MD（0→131072），plain / ca-single / ca-ring =====
+  D-plain       plain        PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7335 descGB/s=31.4    taskGB/s=0.0    
+  D-tma         tma          PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7397 descGB/s=31.2    taskGB/s=0.0    
+  D-caSingle    cpasync      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7365 descGB/s=31.3    taskGB/s=0.0    
+  D-caD2        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=0       U=4 -> OK     ms=0.7373 descGB/s=31.3    taskGB/s=0.0    
+  D-caD4        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=4  MD=0       U=4 -> OK     ms=0.7352 descGB/s=31.4    taskGB/s=0.0    
+  D-plain       plain        PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=8192    U=4 -> OK     ms=0.7535 descGB/s=30.6    taskGB/s=356.3  
+  D-tma         tma          PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=8192    U=4 -> OK     ms=0.7710 descGB/s=29.9    taskGB/s=348.2  
+  D-caSingle    cpasync      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=8192    U=4 -> OK     ms=0.7592 descGB/s=30.4    taskGB/s=353.6  
+  D-caD2        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=8192    U=4 -> OK     ms=0.7712 descGB/s=29.9    taskGB/s=348.1  
+  D-caD4        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=4  MD=8192    U=4 -> OK     ms=0.7968 descGB/s=29.0    taskGB/s=336.9  
+  D-plain       plain        PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=32768   U=4 -> OK     ms=0.7902 descGB/s=29.2    taskGB/s=1358.9 
+  D-tma         tma          PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=32768   U=4 -> OK     ms=0.8270 descGB/s=27.9    taskGB/s=1298.4 
+  D-caSingle    cpasync      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=32768   U=4 -> OK     ms=0.7909 descGB/s=29.2    taskGB/s=1357.5 
+  D-caD2        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=32768   U=4 -> OK     ms=0.8507 descGB/s=27.1    taskGB/s=1262.2 
+  D-caD4        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=4  MD=32768   U=4 -> OK     ms=0.9660 descGB/s=23.9    taskGB/s=1111.5 
+  D-plain       plain        PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.0763 descGB/s=21.4    taskGB/s=1995.3 
+  D-tma         tma          PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.0292 descGB/s=22.4    taskGB/s=2086.6 
+  D-caSingle    cpasync      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.0697 descGB/s=21.6    taskGB/s=2007.5 
+  D-caD2        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.1644 descGB/s=19.8    taskGB/s=1844.3 
+  D-caD4        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=4  MD=65536   U=4 -> OK     ms=1.3316 descGB/s=17.3    taskGB/s=1612.7 
+  D-plain       plain        PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=131072  U=4 -> OK     ms=2.0257 descGB/s=11.4    taskGB/s=2120.3 
+  D-tma         tma          PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=131072  U=4 -> OK     ms=1.8473 descGB/s=12.5    taskGB/s=2325.0 
+  D-caSingle    cpasync      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=131072  U=4 -> OK     ms=2.0201 descGB/s=11.4    taskGB/s=2126.1 
+  D-caD2        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=2  MD=131072  U=4 -> OK     ms=2.1172 descGB/s=10.9    taskGB/s=2028.6 
+  D-caD4        ca-ring      PS=8   G=264  chunk=8   NB=2048 D=2 DCA=4  MD=131072  U=4 -> OK     ms=2.2923 descGB/s=10.1    taskGB/s=1873.6 
+
+===== §F 固定 G=132、扫 chunk：单缓冲缝 vs 深环预取 =====
+  F-plain+d     plain        PS=8   G=132  chunk=1   NB=132  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.1608 descGB/s=9.2     taskGB/s=860.8  
+  F-tma+d       tma+data     PS=8   G=132  chunk=1   NB=132  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.1380 descGB/s=10.8    taskGB/s=1003.3 
+  F-caSingle+d  cpasync+d    PS=8   G=132  chunk=1   NB=132  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.1580 descGB/s=9.4     taskGB/s=876.1  
+  F-caD2+d      ca-ring+d    PS=8   G=132  chunk=1   NB=132  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.1608 descGB/s=9.2     taskGB/s=860.6  
+  F-caD4+d      ca-ring+d    PS=8   G=132  chunk=1   NB=132  D=2 DCA=4  MD=65536   U=4 -> OK     ms=0.1603 descGB/s=9.3     taskGB/s=863.7  
+  F-data        data-only    PS=0   G=132  chunk=1   NB=132  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.0741 descGB/s=20.1    taskGB/s=1867.6 
+  F-plain+d     plain        PS=8   G=132  chunk=2   NB=264  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.2711 descGB/s=11.0    taskGB/s=1021.2 
+  F-tma+d       tma+data     PS=8   G=132  chunk=2   NB=264  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.2713 descGB/s=11.0    taskGB/s=1020.5 
+  F-caSingle+d  cpasync+d    PS=8   G=132  chunk=2   NB=264  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.2666 descGB/s=11.2    taskGB/s=1038.5 
+  F-caD2+d      ca-ring+d    PS=8   G=132  chunk=2   NB=264  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.3138 descGB/s=9.5     taskGB/s=882.2  
+  F-caD4+d      ca-ring+d    PS=8   G=132  chunk=2   NB=264  D=2 DCA=4  MD=65536   U=4 -> OK     ms=0.3121 descGB/s=9.5     taskGB/s=887.1  
+  F-data        data-only    PS=0   G=132  chunk=2   NB=264  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.1396 descGB/s=21.3    taskGB/s=1982.3 
+  F-plain+d     plain        PS=8   G=132  chunk=4   NB=528  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.4904 descGB/s=12.1    taskGB/s=1129.0 
+  F-tma+d       tma+data     PS=8   G=132  chunk=4   NB=528  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.4497 descGB/s=13.2    taskGB/s=1231.1 
+  F-caSingle+d  cpasync+d    PS=8   G=132  chunk=4   NB=528  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.4820 descGB/s=12.3    taskGB/s=1148.6 
+  F-caD2+d      ca-ring+d    PS=8   G=132  chunk=4   NB=528  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.5322 descGB/s=11.2    taskGB/s=1040.3 
+  F-caD4+d      ca-ring+d    PS=8   G=132  chunk=4   NB=528  D=2 DCA=4  MD=65536   U=4 -> OK     ms=0.6230 descGB/s=9.5     taskGB/s=888.6  
+  F-data        data-only    PS=0   G=132  chunk=4   NB=528  D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.2729 descGB/s=21.8    taskGB/s=2028.6 
+  F-plain+d     plain        PS=8   G=132  chunk=8   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.9355 descGB/s=12.7    taskGB/s=1183.6 
+  F-tma+d       tma+data     PS=8   G=132  chunk=8   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.8042 descGB/s=14.8    taskGB/s=1377.0 
+  F-caSingle+d  cpasync+d    PS=8   G=132  chunk=8   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.9160 descGB/s=13.0    taskGB/s=1208.8 
+  F-caD2+d      ca-ring+d    PS=8   G=132  chunk=8   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.9718 descGB/s=12.2    taskGB/s=1139.5 
+  F-caD4+d      ca-ring+d    PS=8   G=132  chunk=8   NB=1056 D=2 DCA=4  MD=65536   U=4 -> OK     ms=1.0625 descGB/s=11.2    taskGB/s=1042.1 
+  F-data        data-only    PS=0   G=132  chunk=8   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.5405 descGB/s=22.0    taskGB/s=2048.7 
+  F-plain+d     plain        PS=8   G=132  chunk=16  NB=2112 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.8212 descGB/s=13.1    taskGB/s=1216.0 
+  F-tma+d       tma+data     PS=8   G=132  chunk=16  NB=2112 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.5229 descGB/s=15.6    taskGB/s=1454.2 
+  F-caSingle+d  cpasync+d    PS=8   G=132  chunk=16  NB=2112 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.7899 descGB/s=13.3    taskGB/s=1237.3 
+  F-caD2+d      ca-ring+d    PS=8   G=132  chunk=16  NB=2112 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.8561 descGB/s=12.8    taskGB/s=1193.2 
+  F-caD4+d      ca-ring+d    PS=8   G=132  chunk=16  NB=2112 D=2 DCA=4  MD=65536   U=4 -> OK     ms=1.9444 descGB/s=12.2    taskGB/s=1138.9 
+  F-data        data-only    PS=0   G=132  chunk=16  NB=2112 D=2 DCA=2  MD=65536   U=4 -> OK     ms=1.0753 descGB/s=22.1    taskGB/s=2059.5 
+  F-plain+d     plain        PS=8   G=132  chunk=32  NB=4224 D=2 DCA=2  MD=65536   U=4 -> OK     ms=3.6846 descGB/s=12.9    taskGB/s=1202.1 
+  F-tma+d       tma+data     PS=8   G=132  chunk=32  NB=4224 D=2 DCA=2  MD=65536   U=4 -> OK     ms=2.9753 descGB/s=16.0    taskGB/s=1488.7 
+  F-caSingle+d  cpasync+d    PS=8   G=132  chunk=32  NB=4224 D=2 DCA=2  MD=65536   U=4 -> OK     ms=3.5781 descGB/s=13.3    taskGB/s=1237.9 
+  F-caD2+d      ca-ring+d    PS=8   G=132  chunk=32  NB=4224 D=2 DCA=2  MD=65536   U=4 -> OK     ms=3.6650 descGB/s=13.0    taskGB/s=1208.5 
+  F-caD4+d      ca-ring+d    PS=8   G=132  chunk=32  NB=4224 D=2 DCA=4  MD=65536   U=4 -> OK     ms=3.7552 descGB/s=12.7    taskGB/s=1179.5 
+  F-data        data-only    PS=0   G=132  chunk=32  NB=4224 D=2 DCA=2  MD=65536   U=4 -> OK     ms=2.1379 descGB/s=22.3    taskGB/s=2071.8 
+
+===== §G 固定 chunk=8、G=132：扫环深 DCA=1..8（深环增益是否全在 1→2？）=====
+  G-caSingle+d  cpasync      PS=8   G=132  chunk=8   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.9183 descGB/s=13.0    taskGB/s=1205.8 
+  G-caRing+d    ca-ring+d    PS=8   G=132  chunk=8   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.9749 descGB/s=12.2    taskGB/s=1135.8 
+  G-caRing+d    ca-ring+d    PS=8   G=132  chunk=8   NB=1056 D=2 DCA=4  MD=65536   U=4 -> OK     ms=1.0642 descGB/s=11.2    taskGB/s=1040.5 
+  G-caRing+d    ca-ring+d    PS=8   G=132  chunk=8   NB=1056 D=2 DCA=8  MD=65536   U=4 -> OK     ms=1.2396 descGB/s=9.6     taskGB/s=893.3  
+  G-data        data-only    PS=0   G=132  chunk=8   NB=1056 D=2 DCA=2  MD=65536   U=4 -> OK     ms=0.5379 descGB/s=22.1    taskGB/s=2058.6 
+
+===== §E 占用率/寄存器报告 =====
+  numRegs=32 localB=8
+  TMA D=2                  smem=22608  -> blk/SM(T=256)=8
+  ca single                smem=11328  -> blk/SM(T=256)=8
+  ca ring DCA=2/4/8 smem=22592/45120/90176 -> blk/SM=8/5/2
+
+########## §66 完成 ##########
