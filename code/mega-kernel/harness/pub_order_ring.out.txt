@@ -1,0 +1,51 @@
+device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+
+===== §A message-passing litmus (P: data=1; flag=1  Q: while(flag==0); r1=data) =====
+  litmus relaxed  T=20000000 reps=1  fail=0 / 20000000  (0.00e+00)   cycle=53911741745  ~1497.55 ns/trial
+  litmus relaxed  T=20000000 reps=1  fail=0 / 20000000  (0.00e+00)   cycle=54015286578  ~1500.42 ns/trial
+  litmus rel+acq  T=20000000 reps=1  fail=0 / 20000000  (0.00e+00)   cycle=80135506485  ~2225.99 ns/trial
+  litmus rel+acq  T=20000000 reps=1  fail=0 / 20000000  (0.00e+00)   cycle=80112698129  ~2225.35 ns/trial
+  >> relaxed 共 lost=0（store→store 未重排），release/acquire 共 lost=0
+  >> 正对照 store-buffering（应可观测 store→load 重排）：
+  litmus SB       T=5000000 reps=1  both-zero=5000000 / 5000000  (1.00e+00)   cycle=5344634357  ~593.85 ns/trial
+  litmus SB       T=5000000 reps=1  both-zero=5000000 / 5000000  (1.00e+00)   cycle=5390195820  ~598.91 ns/trial
+  >> SB both-zero=10000000（>0 说明本机弱内存重排可观测、检测器有效）
+
+===== §B in-kernel 生产者→消费者环形队列（payload=PL 字，可逐字校验） =====
+  正对照（人为拉长「发布→写 payload」窗口 ~2.2us，检测器应抓错）：
+  ring pubslp NS=20000 CAP=64 PL=256 G=34 reps=1  bad=20000 / 20000  dead=0  cycle=320315909  ~8897.66 ns/slot  0.1 slot/us
+  ring pubslp NS=2000 CAP=4 PL=8192 G=2 reps=1  bad=2000 / 2000  dead=0  cycle=722509918  ~200697.20 ns/slot  0.0 slot/us
+  自然「先发布后写」（= P46 §35 的真实写法，无 fence）：
+  ring pub   NS=200000 CAP=256 PL=256 G=34 reps=1  bad=0 / 200000  dead=0  cycle=2347871895  ~6521.87 ns/slot  0.2 slot/us
+  ring pub   NS=20000 CAP=4 PL=8192 G=2 reps=1  bad=0 / 20000  dead=0  cycle=21712414887  ~603122.64 ns/slot  0.0 slot/us
+  「写一半就发布」（无 fence）：
+  ring half  NS=200000 CAP=256 PL=256 G=34 reps=1  bad=0 / 200000  dead=0  cycle=1729465654  ~4804.07 ns/slot  0.2 slot/us
+  正确程序序对照（wro = 无 fence / rel = MPK release+acquire）：
+  ring wro   NS=200000 CAP=256 PL=256 G=34 reps=1  bad=0 / 200000  dead=0  cycle=2268406747  ~6301.13 ns/slot  0.2 slot/us
+  ring rel   NS=200000 CAP=256 PL=256 G=34 reps=1  bad=0 / 200000  dead=0  cycle=2398744311  ~6663.18 ns/slot  0.2 slot/us
+  ring wro   NS=20000 CAP=4 PL=8192 G=2 reps=1  bad=0 / 20000  dead=0  cycle=21712804179  ~603133.45 ns/slot  0.0 slot/us
+  ring rel   NS=20000 CAP=4 PL=8192 G=2 reps=1  bad=0 / 20000  dead=0  cycle=21726100584  ~603502.79 ns/slot  0.0 slot/us
+
+===== §C release/acquire 的代价（小 payload 放大队列机制本身，ns/slot 差 = 每槽 fence） =====
+  ring wro   NS=400000 CAP=64 PL=1 G=2 reps=1  bad=0 / 400000  dead=0  cycle=806786333  ~1120.54 ns/slot  0.9 slot/us
+  ring rel   NS=400000 CAP=64 PL=1 G=2 reps=1  bad=0 / 400000  dead=0  cycle=1074679934  ~1492.61 ns/slot  0.7 slot/us
+  ring wro   NS=400000 CAP=64 PL=1 G=34 reps=1  bad=0 / 400000  dead=0  cycle=277207036  ~385.01 ns/slot  2.6 slot/us
+  ring rel   NS=400000 CAP=64 PL=1 G=34 reps=1  bad=0 / 400000  dead=0  cycle=532850779  ~740.07 ns/slot  1.4 slot/us
+  大 payload（fence 被访存摊薄）：
+  ring wro   NS=200000 CAP=256 PL=256 G=34 reps=1  bad=0 / 200000  dead=0  cycle=2268413779  ~6301.15 ns/slot  0.2 slot/us
+  ring rel   NS=200000 CAP=256 PL=256 G=34 reps=1  bad=0 / 200000  dead=0  cycle=2398750050  ~6663.19 ns/slot  0.2 slot/us
+
+===== 追加：litmus relaxed 连跑 3 次（稳定性） =====
+  device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+    litmus relaxed  T=10000000 reps=1  fail=0 / 10000000  (0.00e+00)   cycle=26954390320  ~1497.47 ns/trial
+  device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+    litmus relaxed  T=10000000 reps=1  fail=0 / 10000000  (0.00e+00)   cycle=26953672957  ~1497.43 ns/trial
+  device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+    litmus relaxed  T=10000000 reps=1  fail=0 / 10000000  (0.00e+00)   cycle=26955994584  ~1497.56 ns/trial
+===== 追加：litmus release/acquire 连跑 3 次（恒 0） =====
+  device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+    litmus rel+acq  T=10000000 reps=1  fail=0 / 10000000  (0.00e+00)   cycle=40069782099  ~2226.10 ns/trial
+  device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+    litmus rel+acq  T=10000000 reps=1  fail=0 / 10000000  (0.00e+00)   cycle=40067659780  ~2225.98 ns/trial
+  device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0
+    litmus rel+acq  T=10000000 reps=1  fail=0 / 10000000  (0.00e+00)   cycle=40069259701  ~2226.07 ns/trial

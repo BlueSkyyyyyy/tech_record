@@ -1075,6 +1075,37 @@
     边界是「环满 + 无 worker 在 pop 相」的时序竞态。判据：`unb`/`bnd` 均单常驻 kernel、设备侧
     推进（C1–C4），仍差 C5 一步（与 §31–§34 同档）。**本轮新增实验。**
 
+### P47 实验扩展 29：in-kernel 队列的发布内存序（`docs/04-experiments.md` §36）
+
+- [x] **P47-1** 补掉 P46-1（§35）§35.7 明留的尾巴「入队是『先推 `tail`、后写数据』（**无 release 发布**），
+  理论上消费者可能在数据可见前读到槽；真实实现（MPK）用 release/acquire 把它做实——可作后续实验」：
+  把「发布内存序」从资料分析做成实测（此前本专题所有合成队列都默认 relaxe+侥幸）。真实锚点：MPK
+  队列协议「`st.relaxed.gpu` 写数据 + `atom.add/.cas.release.gpu` 推游标 / `ld.acquire.gpu` 读游标 +
+  `ld.relaxed.gpu` 读数据」（快照 `f9eb70c`，`mpk_atoms.cuh:17-96`；worker 入队 `:1215-1228`、
+  scheduler 出队 `:1340`/`:1357-1360`、派发 `:1495-1502`；`docs/06` §5.3）；DeepGEMM ring barrier
+  的 `red.async.inc.release` + 无符号距离 wait（`docs/04` §23 引 `scheduler/mega_gate.cuh:13-39`）。
+  见 `docs/04-experiments.md` **§36**，源码 `src/pub_order_ring.cu`、脚本 `harness/pub_order_ring.sh`、
+  原始输出 `harness/pub_order_ring.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2）。
+  三 Section：A message-passing litmus（store→store）relaxed vs release/acquire + store-buffering
+  litmus（正对照）；B 单常驻 in-kernel 生产者→消费者环（payload `mix(s,i)` 逐字校验，五发布序
+  `wro`/`rel`/`pub`/`half`/`pubslp`）；C 每槽 release/acquire 的代价。核心结论：
+  - **§A sm90 序画像 = store→store 保序、store→load 可绕过**：MP litmus relaxed **0/70M**（store→store
+    未重排，`wro` 的「写→推」正属此类）；正对照 SB litmus relaxed **100%（5M/5M×2）**（store→load
+    重排完全可观测，**证明试纸有效**）。MP relaxed 1497.5 vs rel+acq 2226 ns/trial（一对 fence ~+728 ns）。
+  - **§B 「发布先于写」在本机自然时序下 0 错、但拉开窗口 100% 错**：`pub`（= §35/§34 真实程序序）
+    与 `half` 在 `PL=256`/`8192`、百万级槽上**全 0 错**（producer 的 payload store 早在消费者
+    轮询→CAS→读 的往返内落盘、总是抢先）；而人为拉长窗口的 `pubslp` **20000/20000、2000/2000 全错**
+    ——证明**检测器有效**，§34/§35「没出事」是**时序侥幸、非形式保证**（§35.7 判断正确）。正确程序序
+    `wro`（无 fence）与 MPK 协议 `rel` **全 0 错**。
+  - **§C release/acquire ≈ +0.36 µs/槽（几乎恒定）**：`wro`→`rel` 差 `PL=1,G=2 +372.1`（1.33×）、
+    `PL=1,G=34 +355.1`（1.92×）、`PL=256,G=34 +362.1`（**1.06×**）——fence 是固定成本，大 payload
+    摊薄后近免费。解释 MPK 为何「relaxed 写数据 + **单条** `atom.cas.release.gpu` 推游标」而非全程 fence
+    （每队列操作只付一次 release+一次 acquire，靠批量取 task / 环形缓冲摊薄）。
+  判据：litmus/环与「几个常驻 kernel」正交，是队列**内存正确性**地基；环满足 C1–C4、仍差 C5 一步
+  （与 §31–§35 同档）。踩坑（已修，记入 §36.6）：① 背压误用 `head`（抢槽即自增）导致生产者覆盖消费者
+  正在读的槽 → 假阳性 19995/20000；② SB litmus 在写读之间放了带原子的屏障、顺带 flush store 抹掉窗口
+  → 测出 0。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1097,7 +1128,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P46-1 完成（1/1）**。补掉 P45-1（§34）§34.9 明留的尾巴「`event` 的 ready 队列**无界**
+- 当前进度：**P47-1 完成（1/1）**。补掉 P46-1（§35）§35.7 明留的尾巴「入队是『先推 `tail`、后写数据』
+  （**无 release 发布**），理论上消费者可能在数据可见前读到槽；真实实现（MPK）用 release/acquire 把它
+  做实——可作后续实验」：把「发布内存序」做成实测。`docs/04-experiments.md` 新增 **§36**，源码
+  `src/pub_order_ring.cu`、脚本 `harness/pub_order_ring.sh`、原始输出 `harness/pub_order_ring.out.txt`
+  （目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2）。核心结论：
+  - **§A sm90 序画像 = store→store 保序、store→load 可绕过**：MP litmus relaxed **0/70M**；
+    正对照 SB litmus relaxed **100%（5M/5M×2）**（证明试纸有效）。MP relaxed 1497.5 vs rel+acq
+    2226 ns/trial（一对 fence ~+728 ns）。
+  - **§B「发布先于写」自然时序 0 错、拉开窗口 100% 错**：`pub`（= §35/§34 真实程序序）/`half` 百万槽
+    全 0 错（producer 抢先）；`pubslp`（人为拉长窗口 ~2.2µs）**20000/20000、2000/2000 全错**（检测器有效）
+    ——故 §34/§35「没出事」是**时序侥幸非形式保证**；正确序 `wro`（无 fence）与 MPK 协议 `rel` 全 0 错。
+  - **§C release/acquire ≈ +0.36 µs/槽（恒定）**：`PL=1,G=2 +372.1`（1.33×）、`PL=1,G=34 +355.1`（1.92×）、
+    `PL=256,G=34 +362.1`（**1.06×**）；解释 MPK 用「relaxed 写 + 单条 `atom.cas.release.gpu` 推游标」
+    而非全程 fence。判据 C1–C4、仍差 C5 一步（与 §31–§35 同档）。**本轮新增实验。**
+- 此前：**P46-1 完成（1/1）**。补掉 P45-1（§34）§34.9 明留的尾巴「`event` 的 ready 队列**无界**
   （按 `N+4` 开数组）、真实实现要**环形缓冲 + 容量上界**」：把 §34 的事件驱动调度装进一个**有界**
   ready 环形缓冲 + **阻塞式背压**，测「有界」付出什么代价。`docs/04-experiments.md` 新增 **§35**，
   源码 `src/bounded_event_ring.cu`、脚本 `harness/bounded_event_ring.sh`、原始输出
@@ -1608,7 +1653,12 @@
       给事件驱动加上**有界环形缓冲 + 阻塞背压**，量出 `CAP_safe + G ≈ W_max + 1`（排队量，非 §31–§34 的
       静态 `B(π)+1`）、安全容量以上不加吞吐、边界不确定；仍余「与真实 DeepGEMM SM100 路径对跑」。**P46-1
       新留尾巴**（`docs/04` §35.7）：入队内存序是「先发布 tail 后写数据」（未加 release 发布）；
-      真实实现用 release 语义做实（MPK `docs/06` §3）——可作后续实验（用 release/seqlock 发布对比）。
+      真实实现用 release 语义做实（MPK `docs/06` §3）——已由 **P47-1（`docs/04` §36）** 处理：实测 sm90
+      **store→store 保序**（MP litmus 0/70M）、**store→load 可绕过**（正对照 SB 100%）；「发布先于写」
+      自然时序 0 错但拉开窗口 `pubslp` 100% 错（检测器有效、§35「没出事」是时序侥幸）；正确序 `wro`
+      无 fence 全对、MPK 协议 `rel` 全对，release/acquire 代价 ≈ **+0.36 µs/槽**（大 payload 摊薄 ~1.06×）。
+      **P47-1 新留尾巴**（`docs/04` §36.6）：litmus 只测 2 block×1 线程（未扫 SM 距离/`ncu` 内存序事件、
+      未给重排概率分布），环未测多生产者（MPSC）/真实 task 描述符/与 DeepGEMM SM100 路径对跑。
 - **本轮（P44-1）**：`docs/04-experiments.md` 新增 **§33**「有界 ready 池 × 不规则依赖 DAG」——
   新源码 `src/irregular_pool.cu`、脚本 `harness/irregular_pool.sh`、原始输出
   `harness/irregular_pool.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`G=64`）。

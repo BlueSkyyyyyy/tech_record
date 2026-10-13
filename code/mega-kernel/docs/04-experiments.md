@@ -5217,3 +5217,145 @@ task 后对每个后继 `atomicSub(dep_left[succ],1)`，归零者**直接 push**
 - **仍是合成依赖模型**：`N≤4096`、`scramble` 仍是层号整体旋转（非任意图重编号）、正确性只查 `sum`
   （float 量级 `rel=0.0e+00`），未逐 task 比对；未与真实 DeepGEMM SM100 路径对跑（SM100 专属）。
   目标卡 H100/sm90、device 3（固定空闲）。
+
+## 36. in-kernel 队列的「发布内存序」：不 release 会不会读错？release/acquire 值多少代价？（P47-1）
+
+> 本节接续 §35（P46-1）。§35 把事件驱动调度的 ready 队列从「无界」装进「有界环形缓冲」，但 §35.7
+> 明确留了一条尾巴：**入队是「先 `atomicAdd`/`CAS` 推 `tail`、后写数据」（无 release 发布），理论上
+> 消费者可能在数据可见前读到槽；真实 MPK 用 release/acquire 把它做实**——可作后续实验。本节把它补上。
+>
+> 这不是合成实现独有的写法。**MPK**（mirage 快照 `f9eb70c`）的队列协议是**明确配对**的
+> 「**`st.relaxed.gpu` 写数据 + `atom.add/.cas.release.gpu` 推游标 / `ld.acquire.gpu` 读游标 +
+> `ld.relaxed.gpu` 读数据**」：内存序原语集中在 `mpk_atoms.cuh:17-96`
+> （`atom.add.release.gpu.u64:26`、`atom.cas.release.gpu.b64:37`、`ld.acquire.gpu.u64:49`、
+> `ld.acquire.sys.u64:56`、`ld.relaxed.gpu.u64:66`、`st.relaxed.gpu.u64:73`）；worker 入队
+> `st.relaxed.gpu` 写事件索引（`persistent_kernel.cuh:1215-1218`）后用 `atom.cas.release.gpu` 放行读游标
+> （`:1222-1228`）；scheduler 出队 `ld.acquire.gpu` 读 `sched_queue_last_ready_event_id`（`:1340`）再
+> `ld.relaxed.gpu` 取 event_id（`:1357-1360`）；每次派发同样是「`st.relaxed.gpu` 写 worker 队列槽 →
+> `atom.add.release.gpu` 放行游标」（`:1495-1502`）。**DeepGEMM** 的 ring barrier 亦同（`
+> red.async.inc.release` + 无符号距离 wait）。而本专题 §31–§35 的合成队列是
+> **「先推 `tail`、后写 payload」**（`src/bounded_event_ring.cu` 的 `unb`：`slot = atomicAdd(tail,1);
+> pool[slot]=u; __threadfence();`；`bnd` 同理）——**程序序本身就是发布在前、写在后的**。
+>
+> 所以本节要回答三件事：**（Q1）sm90 的弱内存模型下，这个「发布先于写」到底会不会真的读错？
+> （Q2）把语义写成 `release/acquire` 值多少代价？（Q3）MPK 为什么要拆成「relaxed 写 + release 推游标」？**
+>
+> 源码 `src/pub_order_ring.cu`，脚本 `harness/pub_order_ring.sh`，原始输出
+> `harness/pub_order_ring.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`__launch_bounds__(32)`、
+> litmus 用 2 block×1 线程、环用 block0=生产者/其余=消费者；所有等待循环带 `clock64` 守门狗，设备侧不挂）。
+
+### 36.1 机制：litmus 与 in-kernel 环形队列
+
+**§A（litmus）**：GPU 弱内存的经典试纸，验证「本机的重排到底可观测在哪一类」。两条：
+
+- **message-passing（MP，store→store）**：`P: data=1; flag=1` / `Q: while(flag==0); r1=data`（都 relaxed）。
+  `r1==0`（即 `flag` 已置位却没看到 `data`）就是「发布先于写」要担心的那种重排。控制通道
+  （`setup`/`consumed`）两模式都带 `__threadfence()`，**只操控 `data→flag` 通道**；`mode1` 在
+  `data` 写后、`flag` 写前加 release fence，在 `flag` 读后加 acquire fence。两线程分处两 block（必然跨 SM）。
+- **store-buffering（SB，store→load）**：`P: x=1; r1=y` / `Q: y=1; r2=x`（都 relaxed），观测
+  `r1==0 && r2==0`。**正对照**：若它可观测、而 MP 不可观测，说明 sm90 保序的是 store→store、
+  允许 store→load 绕过（经典 GPU 弱内存特征）。注意**同步只放在读之后**——若在写与读之间放一根
+  带原子的屏障，它会顺带 flush store，把窗口抹掉（本实现初版即因此测出 0，已修正）。
+
+**§B（环）**：单常驻 kernel，`block0`=生产者（1 线程），其余 `G-1` block=消费者（各 1 线程），全局环形缓冲
+`CAP` 槽 × `PL` 字 payload，`payload[s][i]=mix(s,i)` 可逐字校验。生产者按模式「写 payload / 推 tail」，
+用**已完全消费计数**（读+校验完才 `atomicAdd(consumed,1)`）做容量背压（`tail - consumed < CAP`）——
+注意不能拿 `head`（抢槽即自增）当背压，否则生产者会在消费者读完前覆盖槽（本实现初版即踩此坑，
+换来 19995/20000 的假阳性，已修）。消费者 `atomicCAS(head)` 抢槽、逐字校验，任何一字不符记一次 `bad`。
+五种发布序：
+
+| 模式 | 生产者程序序 | fence | 说明 |
+|---|---|---|---|
+| `wro` | 写 payload → 推 `tail` | 无 | **正确程序序**的最小实现 |
+| `rel` | 写 payload → **`__threadfence()`** → 推 `tail` | prod release / cons acquire | **MPK 协议** |
+| `pub` | 推 `tail` → 写 payload | 无 | **§35/§34 的真实写法**（发布在前） |
+| `half` | 写半个 payload → 推 `tail` → 写另一半 | 无 | 更宽的「发布先于写」 |
+| `pubslp` | 推 `tail` → 空转 ~2.2 µs → 写 payload | 无 | **正对照**（人为拉长窗口，检测器应抓错） |
+
+### 36.2 Section A：sm90 保序 store→store，但允许 store→load
+
+`harness/pub_order_ring.out.txt` 行 4–12：
+
+- **MP litmus relaxed：`lost=0 / 20M`（×2）+ `0 / 10M`（×3，连跑）= 0 / 70M**；release/acquire 也 0。
+  即 **sm90 上 `data=1; flag=1`（都 relaxed）从未被观测到「`flag` 置位却看不到 `data`」**——store→store
+  在硬件上保序（`wro` 的「写 payload→推 tail」正是这一类）。
+- **SB litmus relaxed：`both-zero = 5M/5M`（×2）= 100%**——**store→load 重排则完全可观测**
+  （每个线程的读绕过了对方刚发出的写）。这**证明了试纸有效**：本机弱内存确实会重排，不是「怎么测都是 0」。
+  两条合起来给出本机的序画像：**store→store 保序、store→load 可绕过**。
+
+代价侧（行 32 vs 31、行 4 vs 6 的 cycle）也顺带量到：MP **relaxed 1497.5 ns/trial** vs **rel+acq 2226 ns/trial**，
+每 trial 一对 `__threadfence()` 约 +728 ns；SB 593.9 ns/trial。
+
+### 36.3 Section B：环的发布序——`pubslp` 必错、`pub`/`half`/`wro`/`rel` 在本机实测 0 错
+
+`harness/pub_order_ring.out.txt` 行 15–27：
+
+```
+   ring pubslp NS=20000  CAP=64  PL=256  G=34  bad=20000 / 20000   （正对照：应错）
+   ring pubslp NS=2000   CAP=4   PL=8192 G=2   bad=2000  / 2000
+   ring pub    NS=200000 CAP=256 PL=256  G=34  bad=0 / 200000      （§35 真实写法：发布在前，无 fence）
+   ring pub    NS=20000  CAP=4   PL=8192 G=2   bad=0 / 20000
+   ring half   NS=200000 CAP=256 PL=256  G=34  bad=0 / 200000
+   ring wro    NS=200000 CAP=256 PL=256  G=34  bad=0 / 200000      （正确程序序，无 fence）
+   ring rel    NS=200000 CAP=256 PL=256  G=34  bad=0 / 200000      （MPK release+acquire）
+   ring wro    NS=20000  CAP=4   PL=8192 G=2   bad=0 / 20000
+   ring rel    NS=20000  CAP=4   PL=8192 G=2   bad=0 / 20000
+```
+
+三件事：
+
+1. **检测器有效**：`pubslp`（强行拉长「发布→写」窗口 ~2.2 µs）**20000/20000、2000/2000 全错**——
+   一旦消费者在 payload 落盘前读到槽，逐字校验立刻抓到。故「0 错」不等于「检测器瞎」。
+2. **「发布先于写」在本机自然时序下读不出错**：`pub`（= §35/§34 的 `slot=atomicAdd(tail,1); pool[slot]=u;`
+   真实程序序）与 `half` 在 `PL=256`/`PL=8192`、百万级槽上**全 0 错**。原因与 §36.2 一致：
+   producer 的 payload store 在消费者「轮询 `tail` → CAS 抢槽 → 读槽」的往返（几百 ns 起）内早已落盘，
+   producer 总是抢先——所以 §34/§35 **「没出错」是时序侥幸、不是形式保证**（§35.7 的判断正确）。
+3. **正确程序序（`wro`）与 MPK 协议（`rel`）本机实测全 0 错**：`wro` 无 fence 也全对，
+   因为 sm90 保序 store→store（§36.2），payload 先写、`tail` 后推，消费者只会看到「payload 已就绪」的槽。
+
+### 36.4 Section C：release/acquire 的代价 ≈ +0.36 µs/槽（几乎恒定）
+
+`harness/pub_order_ring.out.txt` 行 29–36。比较 `wro` 与 `rel`（差额即生产者一次 release + 消费者一次 acquire）：
+
+| payload | G | `wro` ns/槽 | `rel` ns/槽 | 差 | 倍率 |
+|---|---|---|---|---|---|
+| `PL=1` | 2 | 1120.5 | 1492.6 | **+372.1** | 1.33× |
+| `PL=1` | 34 | 385.0 | 740.1 | **+355.1** | 1.92× |
+| `PL=256` | 34 | 6301.2 | 6663.2 | **+362.1** | 1.06× |
+
+**每槽 release+acquire 的代价 ≈ 355–372 ns，几乎与 payload 大小、worker 数无关**（是 fence 的固定成本）：
+在**小 payload**（`PL=1`、队列机制本身占主导）时它是 1.3–1.9× 的显著开销；在 **256 字 payload**（≈1 KB）时
+被访存摊薄到 **1.06×**。这解释了 MPK 为什么把协议拆成「`st.relaxed.gpu` 写数据 + **单条**
+`atom.cas.release.gpu` 推游标」而不是全程 fence——**每队列操作只付一次 release（prod）+ 一次 acquire（cons）**，
+且靠「批量取 task」（`docs/04` §15 的 K≈W/G）、环形缓冲摊薄到可忽略。
+
+### 36.5 与 §31–§35 / MPK / DeepGEMM 的关系、判据
+
+- **对 §35.7 的收口**：§35/§34 的队列是**发布先于写**（程序序错误），在本机「没出事」纯属时序侥幸；
+  只要窗口被拉开（`pubslp`）就 100% 读错。**修法有两条**：(a) 把程序序倒过来——先写 payload 再推游标
+  （`wro`；sm90 保序 store→store，连 fence 都不必，但非形式保证）；(b) 写 payload 后 release 推游标、
+  读游标后 acquire 读 payload（`rel`，MPK 做法，形式保证），代价 ~0.36 µs/槽（大 payload 摊薄后 ~1.06×）。
+- **对 MPK**：`mpk_atoms.cuh:17-96` 的六条原语正是 `rel` 的工程化——不是「更保守」，而是**唯一**
+  在任意 payload/任意消费者速度下都成立的写法；`docs/06` §5.3 的「relaxed 写数据 + release 推游标 /
+  acquire 读游标 + relaxed 读数据」与本节 `rel` 逐字对应。**这也解释了 §35.7 的注脚不是杞人忧天**：
+  生产实现必须写 release，合成实验可以侥幸。
+- **对 DeepGEMM**：ring barrier 用 `red.async.inc.release` + 无符号距离拒绝陈旧标签
+  （`docs/04` §23 引 `scheduler/mega_gate.cuh:13-39`），把「release 发布 + 单调序号校验」做到
+  单条 PTX，是本节「fence 是固定成本、要靠单条原子吸收」的同一条工程经验。
+- **判据（C1–C5）**：litmus 与环都与「几个常驻 kernel / 设备内协调」正交，是队列**内存正确性**的
+  地基；环本身是单常驻 kernel、设备侧推进（C1–C4），无固定角色 worker/scheduler 动态派发，
+  **仍差 C5 一步**（与 §31–§35 同档）。
+
+### 36.6 局限与踩到的坑
+
+- **litmus 的窗口**：MP/SB 都是「2 block×1 线程」的最小形态，未扫 SM 距离、未与 `ncu` 的内存序事件对拍；
+  SB 的 100% 是「读紧跟写、对方写尚未广播」的必然结果，**只说明重排可观测、不给出概率分布的真实意义**。
+  MP 的 0/70M 是「未观测到」，不是「不可能」（GPU 弱内存模型不保证 store→store 保序；本机实现恰好保序）。
+- **环仍是合成模型**：payload 是 `mix(s,i)` 纯写、消费者逐字校验；未做真实 task 描述符、未扫多生产者
+  （MPSC）、未与 DeepGEMM SM100 路径对跑。`pubslp` 的 2.2 µs 窗口是**人为**构造的最坏情形，
+  用于证明检测器有效，不代表生产时序。
+- **初版两个 bug（已修）**：① 背压用 `head`（抢槽即自增）而非「已消费」计数，导致生产者覆盖消费者
+  正在读的槽，所有模式假阳性 19995/20000；② SB litmus 在写与读之间放了带原子的屏障，屏障顺带 flush store、
+  把重排窗口抹掉，测出 0。两坑都记在此，提醒「0 错」先要排查是不是试纸坏了。
+- **口径**：时钟换算用 H100 SM ~1.8 GHz（`ns = cycle / 1.8`），是近似口径；不同配置在不同空闲 device
+  上可能有 ±几 % 抖动。目标卡 H100/sm90、device 3（固定空闲）。
