@@ -13354,3 +13354,172 @@ ring1 359.4  1687.0   2275.3   GB/s   (1.60x / 1.37x / 1.23x)
   `S` 未单独扫（固定 `min(4,tiles)`）；搬运的是合成 `float`、非真实 task tile；计时取 min-of-20，
   绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**；`C=8` 某些单独 `push` 计时曾出现离群
   （harness 内已复测，取 harness 的 min-of-20 为准）。
+
+## 89. cluster 跨 SM 交换：用 **cluster 作用域 mbarrier** 做每槽 release/done——「零 `cluster.sync`」的环形通道**能跑起来**了，但比单次 `cluster.sync` 的 `ring1` 慢（P164-1）
+
+本节补掉 §88.7 明留的两条尾巴之一、也是 §88.5 否定性结论的直接追问——「把同步**完全去掉**、改用
+最朴素的『每槽 release/done』纯握手（`ring`）在 H100 DSM 上不可用；**能用的形态是保留一个便宜的
+同步点（`cluster.sync`/mbarrier）**」。§88 只把「同步点」具体化成 `cluster.sync`，并**没有**测
+它点名的另一个候选——**cluster 作用域 `mbarrier`**（硬件认可的跨 SM 原语）。本节问：**把每槽
+handshake 从「纯 `volatile` 标志 + `fence`」换成真正的硬件原语 `mbarrier`，教科书式的「无
+`cluster.sync` 的每槽 release/done」到底能不能跑起来？跑起来后又值不值得（对比 `ring1` 的单次
+`cluster.sync`）？** 并把 §88.7 的另一条尾巴「环深 `S` 未单独扫」一并扫掉。
+
+源码复用 `src/cluster_concurrency.cu`（**新增一条载体 `mbar`，不改 `pull`/`push`/`pulls`/`ring`/
+`ring1` 语义**），脚本 `harness/cluster_mbar.sh`，原始输出 `harness/cluster_mbar.out.txt`（目标卡
+H100 / sm90a、**固定空闲 device 6**、nvcc 13.2、每配置独立进程以规避 sticky context；计时项
+min-of-20 且报 `ok/20`、单发探针报 `ok/1`、重复探针报 `ok/N`）。
+
+被测量载体（每 block 有 `snd`/`rcv` 两块 SMEM；每 block 每 round 移动 `SEG = TH·U = 256·U` 个
+`float` 的**远端字节**，数据量/结果与 §87 `push`/§88 `ring` 逐字相同）：
+- `mbar`（**新**，每槽 **cluster 作用域 `mbarrier`** 的 release/done，**零 `cluster.sync`**）：
+  本 block 把 `snd` 的一段写进 `(rank+1)%C` 的槽 `j=r%S`；每线程写完后用
+  `mbarrier.arrive.release.cluster.shared::cluster` 远端到达**下游 block 那个槽的 `readyBar[j]`**
+  （经 `mapa.shared::cluster` 由本地 SMEM 偏移 + 远端 cta rank 算出目标地址，CUTLASS 同款），再
+  本地 `mbarrier.try_wait.parity` 等**本 block 的 `readyBar[j]`**（由上游写进本 block SMEM）；
+  读完后对称地远端到达**上游 block 的 `ackBar[j]`** 做背压。每槽两枚 mbarrier，`count=TH`
+  （每线程每 slot 每 round 到达一次）。**循环内零 `cluster.sync`、零 `__syncthreads`**，只在
+  **循环末尾补一个 teardown `cluster.sync()`**（原因见 §89.6 坑 2）。
+- 对照载体 `ring1`（§88：环形槽 + 单次 `cluster.sync`/round）、`push`（§87：双 `cluster.sync`/
+  round）、`ring`（§88：纯 `volatile` 每槽 release/done，**无** `cluster.sync`）。
+
+### 89.1 §A 资源表：`mbar` 寄存器更省、低 `U` 占用率更高（SMEM 更小）
+
+`sb=32KB, T=256`（完整表见 `.out.txt` §A）：
+
+```
+  载体   U=1            U=2            U=4            U=8            U=16
+  push  regs=26 occ=3  regs=26 occ=3  regs=28 occ=3  regs=32 occ=3  regs=32 occ=3
+  ring1 regs=31 occ=3  regs=32 occ=3  regs=32 occ=3  regs=32 occ=3  regs=32 occ=3
+  ring  regs=27 occ=5  regs=30 occ=4  regs=32 occ=4  regs=32 occ=3  regs=32 occ=3
+  mbar  regs=18 occ=6  regs=18 occ=5  regs=18 occ=4  regs=26 occ=3  regs=32 occ=3
+```
+
+`mbar` 把「每槽 release/done」从软件 `volatile` 标志换成 mbarrier，省掉了标志指针/序号寄存器
+（低 `U` 只 18 regs，vs `push` 26、`ring1` 31），且 `rcv` 只留 `S` 个槽、标志区换成 `2·S·8 B` 的
+mbarrier，SMEM 比 `push`/`ring1` 的 `2·sb` 更小 ⇒ **低 `U` 占用率更高**（U=1 occ=6 vs 两者 3）。
+但 `U≥8` 时 SMEM（`sb + S·SEG` + 标志）逼近 `push`/`ring1`，`occ` 收敛到 3——故 `U=8/16` 的
+`mbar` vs `ring1` 是「占用率相同的可比对照」，`U=1/2/4` 则 `mbar` 多占了块。
+
+### 89.2 §B（Q1 headline 一）**`mbar` 稳到 `grid=1056`——§88.5 的「零同步不可用」被硬件原语救活**
+
+`C=2, U=8, rounds=64`，单发/重复探针扫 `grid`：
+
+```
+     grid | mbar(P,1发) | ring1(L,1发) | ring(N,3发,对照)
+  --------+-------------+--------------+------------------
+        2 |    1/1      |    1/1       |   3/3
+       16 |    1/1      |    1/1       |   2/3
+       32 |    1/1      |    1/1       |
+       64 |    1/1      |    1/1       |
+      132 |    1/1      |    1/1       |
+      264 |    1/1 (3/3)|    1/1       |   0/3
+      528 |    1/1 (3/3)|    1/1       |
+      792 |    1/1      |    1/1       |
+     1056 |    1/1 (3/3)|    1/1       |
+```
+
+**把纯 `volatile` 的每槽握手换成 cluster 作用域 mbarrier，通道从「任何规模都只是碰运气」（`ring`
+在 `grid=16` 已 2/3、`grid=264` 0/3）变成「`grid≤1056` 全稳、重复 3 发全过」**，与单次
+`cluster.sync` 的 `ring1` **逐点同档**。⇒ §88.5 的否定性结论应精确化为：**不是「零 `cluster.sync`
+不可行」，而是「用软件 `volatile` 标志表达的每槽 release/done 不可行」**——换成硬件 mbarrier
+原语后，无 `cluster.sync` 的环形 release/done **是能跑的**。
+
+### 89.3 §C（Q2 headline 二）但 `mbar` 比单次 `cluster.sync` 的 `ring1` **慢 1.3–1.9×**
+
+`grid=264`，min-of-20，三载体对跑（完整见 `.out.txt` §C）：
+
+```
+  C=2      U=1      U=2      U=4      U=8      U=16     GB/s(远端)
+  mbar   166.1    323.7    599.2   1087.3   1863.6
+  ring1  318.2    524.9    950.6   1621.8   2464.6
+  push   213.6    422.7    745.2   1377.1   2161.1
+  C=8      U=1      U=2      U=4      U=8      U=16
+  mbar   165.6    326.1    594.6   1032.8   1663.0
+  ring1  269.4    500.9    938.3   1442.8   2063.1
+  push   173.9    334.6    608.4   1072.0   1722.6
+```
+
+`mbar` 在所有 `U`、所有 `C` 上都**慢于 `ring1`**（比值 `ring1/mbar`：`U=1` 1.92×、`U=2` 1.62×、
+`U=4` 1.59×、`U=8` 1.49×、`U=16` 1.32×；`C=8` 同形）；只在**低 `U`** 时略快于双 sync 的 `push`
+（`U=1` `C=2` 166 vs 214）。原因在 `mbar` 的每 round 临界路径里串了**两次依赖的跨 SM handshake**
+（`ready` 到达→本地等→读→`ack` 到达）——`ring1` 只有**一次** `cluster.sync`（把两块压在同一步，
+写与下轮写之间不需要第二笔往返）。`U` 越大、单轮搬运占比越高，二者的绝对差被摊薄，但**排序不变**。
+
+### 89.4 §D 大 `grid` 下同一结论：`mbar` 反而先到墙
+
+`C=2`，`grid=528/1056`：
+
+```
+          grid=528 U=8   grid=528 U=16  grid=1056 U=8  grid=1056 U=16
+  mbar     1140.2          1820.4          1496.8          2379.7  GB/s
+  ring1    1677.8          2258.4          2150.6          3013.4  GB/s
+```
+
+`mbar` 在大 `grid` 被拉得更开（`grid=1056 U=16`：2380 vs 3013，`ring1` 1.27×）——每 block 的每 round
+都有两次跨 SM 往返，`grid` 越大越容易被跨 SM 流量/延迟吃掉。
+
+### 89.5 §E（Q3）环深 `S` **不是**有效旋钮（补 §88.7 尾巴）
+
+`C=2, grid=264, rounds=64`，`mbar` 扫 `S∈{1,2,4,8}`（`S` 越大 SMEM 越大、`occ` 越低）：
+
+```
+   U=1   S=1 167.2 | S=2 165.9 | S=4 163.1 | S=8 164.7  GB/s
+   U=8   S=1 1115.4| S=2 1090.1| S=4 1079.2| S=8 1085.7 GB/s
+```
+
+`S` 从 1 到 8 吞吐**几乎不动**（`U=1` 极差 1.02×、`U=8` 1.03×，`S=1` 略优）。机制：`S` 的
+意义是「多深才触发背压 `ack` 等待」，但本节每 round 的**固定代价是跨 SM handshake 的往返延迟**
+（§89.3），背压 `ack` 等待很少成为瓶颈 ⇒ **`S` 摊薄的是同步频率，而 mbarrier 形态下每 round
+同步不可避免（`ready` 必须等），故 `S` 无用**。这与 §88 用 `cluster.sync`（每 round 一次、可被
+`U` 摊薄）时「`S≥2` 即可」的形态一致：**§88.7「`S` 未单独扫」的答案是——它不是一阶旋钮**。
+
+### 89.6 §F 本轮踩到的三个实现坑（已记入「已知坑」）
+
+- **坑 1（静默错误，最隐蔽）：`mbarrier.arrive.shared::cluster` 的默认 sem/scope 不是 cluster。**
+  用 CUTLASS 原样的 `mbarrier.arrive.shared::cluster.b64 _, [r];`（不带 `.release.cluster`）时，
+  **所有 launch 都成功、但结果全是错的**（`U=1..16` 全 `maxerr>0`，`check` 报 `bad` 若干 block），
+  因为 arrive 的 release 语义没有覆盖到 cluster 作用域的远端 `st.shared::cluster` 数据。改成
+  **`mbarrier.arrive.release.cluster.shared::cluster.b64`**（显式 sem/scope）后逐位正确
+  （`maxerr 0 bad 0`）。**「launch 不报错」不能当「握手对」的证据**——必须逐位对参考。
+- **坑 2（间歇 `unspecified launch failure`）：循环末尾必须补一个 teardown `cluster.sync()`。**
+  每轮只做每槽 handshake 时，先跑完 `rounds` 的 block 会**提前退出并释放自己的动态 SMEM**，而
+  邻块可能还在给它的槽做**远端 arrive**（`mapa` 目标地址已失效）→ `unspecified launch failure`。
+  症状极具误导性：小 `grid`/小 `U` 偶发通过、大 `grid`/大 `U` 几近必挂（时序偏斜越大越易触发），
+  且**边界随代码微调漂移**（对上 §86.7「边界对 body codegen 敏感」）。补一个**循环末尾的**
+  `cluster.sync()`（不改变「循环内零 `cluster.sync`」的性质，只是一次 stop-the-world 收尾）后，
+  `grid≤1056`、`U≤16` 全部 `20/20` 稳且逐位正确。
+- **坑 3（紧旋饿死远端通道）：`try_wait` 要用 suspend-time-hint。** 用无 hint 的
+  `mbarrier.try_wait.parity.shared::cta.b64 P,[a],phase;` 紧旋时，`256` 线程把 SMEM/LSU 单元打满、
+  拖慢远端 arrive 落地，稳定性边界明显下移（早期边界一度只在 `grid≈numSM`）；改用 CUTLASS 同款
+  四操作数 `..., phase, 0x989680;`（potential-blocking）后边界上移、最终配合坑 2 修复合一。
+
+### 89.7 §G 结论、判据与局限
+
+- **结论一（headline，肯定性）**：**「无 `cluster.sync` 的每槽 release/done」在 H100 DSM 上是可行的
+  ——前提是把 handshake 从软件 `volatile` 标志换成硬件 **cluster 作用域 `mbarrier`**。** `mbar` 在
+  `grid≤1056`、`U≤16` 全稳（重复 3 发全过）且逐位正确，与单次 `cluster.sync` 的 `ring1` 同档稳定。
+  ⇒ **§88.5 的「教科书式 SPSC release/done 不能搬到 cluster DSM」应改写为「用 `volatile`+`fence`
+  表达的不行、用 mbarrier 原语表达的可以」**。
+- **结论二（headline，否定性/工程取舍）**：**但硬件原语不等于更快。** `mbar` 在 `U=1..16`、`C=2/8`
+  上**一律慢于单次 `cluster.sync` 的 `ring1`（1.32–1.92×）**，大 `grid` 差距更大——因为每 round 串了
+  **两次依赖的跨 SM mbarrier 往返**（`ready`+`ack`），而 `ring1` 只有**一次** `cluster.sync`。故
+  **「最便宜的可用同步点」仍是每 round 一次 `cluster.sync`（`ring1`），不是每槽 mbarrier 环形通道**。
+  ⇒ 给生产实现（MPK ring barrier / DeepGEMM symmetric-memory ring barrier）一个量化注脚：**它们
+  选「每格/每步一个 `cluster.barrier`/`mbarrier` + 环形槽摊薄」是对的，而不必把同步粒度降到「每槽
+  每线程一对 mbarrier」**——后者的往返开销反而吃掉摊薄收益。
+- **结论三（补 §88.7 尾巴）**：环深 `S` **不是**一阶旋钮（`S=1..8` 吞吐差 ≤3%）——mbarrier 形态下
+  每 round 的跨 SM 往返是固定代价、背压 `ack` 很少绑定。
+- **对 `docs/17`（DeepGEMM 对称显存）/`docs/12`（MPK ring barrier）的印证**：两处生产实现的
+  ring barrier 都**保留一个每步硬件同步点**（`cluster.barrier`/mbarrier）并用环形槽降频——本节
+  从硬件原语层给出的理由更细：**换成 mbarrier 后「零 `cluster.sync`」确实可行，但每槽一对 mbarrier
+  的往返比「每步一个同步点」更贵**，所以「保留一个便宜同步点」不是因为「零同步不可行」，而是
+  **因为它就是更快的那个**。
+- **判据（C1–C5，`docs/00` §3）**：四条载体均单常驻 kernel、设备侧推进、`cluster.sync`/`mbarrier`
+  细化 **C4**；**仍不是 C5**（无固定角色 worker/scheduler 动态派发，与 §18–§23/§86–§88 同档）。
+- **局限（诚实标注）**：只测 H100/sm90a（DSM 的真正家是 SM100 2SM，本机不可执行）；`mbar` 是
+  **每线程**每槽 arrive（`count=TH`），未测「每 block 一次 arrive（`count=1`）+ `__syncthreads` 包裹」
+  的省 arrive 形态（早期试过但因坑 1 的 scope 问题与坑 2 同时存在、未单独定性）；只用 `ready`/`ack`
+  两枚 mbarrier，未测 `expect_tx`（TMA 事务计数）形态；搬运的是合成 `float`、非真实 task tile；
+  计时取 min-of-20，绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**；本轮未做 ncu 归因
+  （结论二的「两次往返」是**时序推断**，未用 `gpu__time_duration` 拆分单次 mbarrier 往返）。
