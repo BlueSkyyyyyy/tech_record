@@ -1,0 +1,109 @@
+DeepEP PP send/recv 与 Engram fetch 的验收测试即正确性规范 —— H100 真机（测试侧）
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 nccl (2, 29, 7)
+DeepEP 源码：93eb6eb
+tests/pp/test_pp.py        sha256[:16] a4a4368bcc9f52fb
+tests/engram/test_engram.py sha256[:16] 23d15e87d1ee9851
+
+############################################################################################
+# P112-1 DeepEP PP send/recv 与 Engram fetch 的验收测试即正确性规范 —— H100 真机
+############################################################################################
+DeepEP=~/github/DeepEP
+GPU=NVIDIA H100 80GB HBM3 cc=(9, 0)
+torch=2.12.0a0+0291f960b6.nv26.04.48445190
+loaded deep_ep.utils.math by path, sha256[:16]=ed0dfb4bf9893769
+
+============================================================================================
+Part A：PP send/recv 压力调度的规范（tests/pp/test_pp.py:19-50）
+============================================================================================
+  抽取顶层函数：['generate_stress_ops']（tests/pp/test_pp.py sha256[:16]=a4a4368bcc9f52fb）
+  [PASS] ast 抽取到真实 generate_stress_ops
+  [PASS] R=2 seed=42: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=2 seed=42 N=1: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=2 seed=43: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=2 seed=43 N=1: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=2 seed=44: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=2 seed=44 N=1: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=4 seed=42: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=4 seed=42 N=2: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=4 seed=43: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=4 seed=43 N=2: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=4 seed=44: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=4 seed=44 N=2: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=4 seed=42: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=4 seed=42 N=4: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=4 seed=43: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=4 seed=43 N=4: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=4 seed=44: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=4 seed=44 N=4: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=8 seed=42: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=8 seed=42 N=4: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=8 seed=43: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=8 seed=43 N=4: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=8 seed=44: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=8 seed=44 N=4: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=8 seed=42: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=8 seed=42 N=1: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=8 seed=43: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=8 seed=43 N=1: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=8 seed=44: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=8 seed=44 N=1: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=3 seed=42: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=3 seed=42 N=3: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=3 seed=43: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=3 seed=43 N=3: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  [PASS] R=3 seed=44: 所有 op 都指向相邻 rank（R 环）
+  [PASS] R=3 seed=44 N=3: 全局时间线下每 pair 在途 <= N（无溢出/无负）
+  背压修正后：最大在途=3（配置里 N 最大 4）；非单调 send pair=0 / recv pair=0
+  背压修正命中次数（send_i 被抬高到 recv_(i-N)+1）= 31（配置×seed=18）
+  [PASS] 背压修正后每个 pair 的 send 时间戳仍单调（FIFO 可配对）
+  [PASS] 背压修正后每个 pair 的 recv 时间戳仍单调（FIFO 可配对）
+  [PASS] 利齿负样本：去掉 send_i>=recv_(i-N)+1 修正后，31 处容量溢出被击穿
+  [PASS] 同步 RNG 后同一 (pair,i) 的 send/recv 张量逐位一致（32 对，mismatch=0）
+  [PASS] 判据利齿：原样克隆 torch.equal 为真
+  [PASS] 判据利齿：单元素 +1 后 torch.equal 为假
+
+============================================================================================
+Part B：Engram 带索引远程抓取的参考 oracle（tests/engram/test_engram.py:42-96）
+============================================================================================
+  源 sha256[:16]=23d15e87d1ee9851；deep_ep/utils/math.py sha256[:16]=ed0dfb4bf9893769
+  [PASS] seed=0: indices 形状 == [L,T,npt] = (2, 128, 24)
+  [PASS] seed=0: 所有 index 落在 [0, R*num_entries)
+  [PASS] seed=0: 每个槽 range 不相交（table_offsets=slot*table_size）
+  [PASS] seed=0: 同一 token 内 24 个 entry 严格递增（互不相同）
+    left-over（floor 除法未覆盖的条目/层）=[8, 4]
+  [PASS] seed=0: gather-oracle == 逐元素远程读模型（owner/row 映射）逐位
+  [PASS] seed=0: 正序等待 == 逆序等待（层无关）
+  [PASS] seed=0: 判据利齿——global[0,0]+1 后第 0 层 torch.equal 为假
+  [PASS] seed=1: indices 形状 == [L,T,npt] = (2, 128, 24)
+  [PASS] seed=1: 所有 index 落在 [0, R*num_entries)
+  [PASS] seed=1: 每个槽 range 不相交（table_offsets=slot*table_size）
+  [PASS] seed=1: 同一 token 内 24 个 entry 严格递增（互不相同）
+    left-over（floor 除法未覆盖的条目/层）=[8, 4]
+  [PASS] seed=1: gather-oracle == 逐元素远程读模型（owner/row 映射）逐位
+  [PASS] seed=1: 正序等待 == 逆序等待（层无关）
+  [PASS] seed=1: 判据利齿——global[0,0]+1 后第 0 层 torch.equal 为假
+  [PASS] seed=2: indices 形状 == [L,T,npt] = (2, 128, 24)
+  [PASS] seed=2: 所有 index 落在 [0, R*num_entries)
+  [PASS] seed=2: 每个槽 range 不相交（table_offsets=slot*table_size）
+  [PASS] seed=2: 同一 token 内 24 个 entry 严格递增（互不相同）
+    left-over（floor 除法未覆盖的条目/层）=[8, 4]
+  [PASS] seed=2: gather-oracle == 逐元素远程读模型（owner/row 映射）逐位
+  [PASS] seed=2: 正序等待 == 逆序等待（层无关）
+  [PASS] seed=2: 判据利齿——global[0,0]+1 后第 0 层 torch.equal 为假
+  [PASS] FP8: 复制后的 SF gather 形状 == [T,npt*2]
+  [PASS] FP8: owner/row 显式远程读 SF == 复制后 gather 得到的 SF 逐位
+  [PASS] FP8 分支（per_token_cast_to_fp8 + 复制 SF）参考 oracle 跑通
+
+============================================================================================
+Part C：端到端 kernel 路径的阻塞落点（仅分析，H100 跑不了）
+============================================================================================
+  [PASS] import deep_ep 非零退出（code=1）：ModuleNotFoundError: No module named 'deep_ep._C'
+  [PASS] 阻塞落在编译扩展 deep_ep._C（早于设备 kernel 发射）
+  [PASS] EngramBuffer 的 storage-size/qp 推断都经 _C（设备侧仅分析）
+  [PASS] PPBuffer 直接构造 _C.PPBuffer（设备侧仅分析）
+  [PASS] dist.all_gather_single 既不在本 torch 也不在 deep_ep Python 树（补丁/扩展提供）
+
+############################################################################################
+# 总计 72 PASS / 0 FAIL
+############################################################################################

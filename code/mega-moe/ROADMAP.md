@@ -3498,6 +3498,45 @@
       且未销毁 runtime / 二次销毁幂等）；Part 3 源解析四个家族五要素齐全 + 顶层 re-export。
       配套博客 `content/posts/mega-moe-121-deepep-bufferbase-lifecycle`（索引页新增第 121 篇）。
 
+### P112 增量（opt-in，补齐 DeepEP 两类非 all-to-all 原语一直缺席的「验收测试即正确性规范」）
+
+- [x] **P112-1** **DeepEP 的两类非 all-to-all 通信原语（PP send/recv 与 Engram fetch）的
+      验收测试即正确性规范**（`tests/pp/test_pp.py`（152 行）+ `tests/engram/test_engram.py`（155 行）；
+      `deep_ep/buffers/pp.py`（72 行）/ `deep_ep/buffers/engram.py`（169 行）；
+      `deep_ep/utils/math.py:31-41`；`deep_ep/__init__.py:55`）。前面 121 篇已把 DeepEP 每一族的
+      **验收测试**陆续做成「测试即正确性规范」（EP 第 75/85、bucket 第 83/84/94、EPLB 第 100、
+      barrier 第 101 篇），唯独**流水线并行 send/recv**（第 68 篇实现）与 **Engram 远程抓取**
+      （第 69 篇实现）这两族的测试从没被单独读过。本篇补上——它们定义的**不是数值而是协议/索引语义**。
+      **kernel 端到端仅分析**（`_C.PPBuffer` `pp.py:37`、`_C.EngramBuffer` `engram.py:87`、
+      `check_nccl_so` `__init__.py:55`、`deep_ep._C` 本机不可导入）；测试侧纯 Python/张量逻辑
+      H100(sm90) 真机可跑。
+      → `docs/122-deepep-pp-engram-test-oracle.md`（真实行号核对，`test_pp.py` sha256[:16]
+      `a4a4368bcc9f52fb`、`test_engram.py` `23d15e87d1ee9851`、`math.py` `ed0dfb4bf9893769`）。
+      **PP 侧（协议）**：`generate_stress_ops:19-50` 用整数时间戳编排**在途背压下的无死锁收发序列**
+      ——dst 被 `:27` 限死在环上邻居 ±1；对每个有向 pair，第 i 次 send 必须晚于第 (i−N) 次 recv
+      （`:40-42` 的 `sorted_send[i]=max(sorted_send[i], sorted_recv[i-N]+1)`），使全局时间排序下每 pair
+      在途上界恰为 `num_max_inflight_tensors=N`（`:43` 再保证 recv 晚于 send → 在途 ≤ N）；`:44`
+      每 pair 造一张 `torch.randn` 张量、`:45-48` 分挂 src 的 send 与 dst 的 recv（同一次随机收发对）、
+      `:49` 按 `(时间戳, i)` 排序。`:78-79` **两条 RNG（`torch`+`random`）都同步**才能靠 `:89`
+      `torch.equal` 判「收到的正是对端发的」；`:91-92` 用 `torch.cuda._sleep` 把时间戳差翻成真实时序
+      压力。profiling（`:97-130`）：`hide_rdma_latency × num_concurrent` 矩阵、`:111` 大张量冲 L2、
+      `:115` sleep 掉估算 RDMA 往返、`:126-129` 带宽账目（send 恒 2×、recv hide 时 2×）。
+      **Engram 侧（索引语义）**：`:42-56` 每 rank 写本地 shard，FP8 时 `per_token_cast_to_fp8`
+      （参考量化器第 114 篇）后把 SF 用 `all_gather_single` **复制到本地**（`:49-50`，注释 `:48`
+      点明「任何 rank 都能本地抓到 entry 的 SF」）；`gen_indices:58-67` 把全局表按 `npt` 切成
+      `table_size=(R*ne)//npt` 的**不相交槽**、每槽随机取（同 token 内严格递增；floor 除法**留空**
+      `[8,4]` 行永不取到）；参考 `:80-83` all-gather 出全局表再 `global[idx]`，`:78` **正序/逆序两种
+      层序**都验证（层间独立）、`:93`/`:95` `torch.equal`；profiling `:111-116` 按名拆
+      `engram_fetch_impl`/`engram_fetch_wait_impl`、`:118` 总等待乘层数。**H100(sm90) 实测**
+      `harness/exp_deepep_pp_engram_test.{py,sh,out.txt}` **72 PASS / 0 FAIL**：Part A 原样 ast 抽取
+      `generate_stress_ops` 跑 18 组 `(R,N,seed)`——每 op 指向相邻 rank、每 pair 在途 ≤ N、背压抬高
+      命中 **31 次**且修正后 send/recv 序列**仍单调**（FIFO 可配对）、**利齿负样本去掉修正后 31 处
+      容量溢出被击穿**、同步 RNG 后 send/recv 张量**逐位一致**；Part B 复刻 oracle——索引形状/范围/
+      槽不相交/唯一、`owner=idx//ne`/`row=idx%ne` 逐元素远程读 == gather-oracle **逐位**、正逆序一致、
+      FP8 SF 复制通路逐位；Part C 定位阻塞（`import deep_ep` 非零退出落在 `deep_ep._C`、
+      `dist.all_gather_single` 全仓无定义、由 DeepEP 补丁 torch 提供）。配套博客
+      `content/posts/mega-moe-122-deepep-pp-engram-test-oracle`（索引页新增第 122 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3523,8 +3562,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P111 各增量完成（P15-1…P41-1、P42-1…P111-1）。**
-  本轮 P111-1：新建 `docs/121-deepep-bufferbase-lifecycle.md`
+- 当前进度：**P0~P14 全部完成；P15~P112 各增量完成（P15-1…P41-1、P42-1…P112-1）。**
+  本轮 P112-1：新建 `docs/122-deepep-pp-engram-test-oracle.md`
+  （+`harness/exp_deepep_pp_engram_test.{sh,py,out.txt}`）——补齐 DeepEP 两类非 all-to-all 通信原语
+  （PP send/recv 与 Engram fetch）一直缺席的「验收测试即正确性规范」：`tests/pp/test_pp.py`（152 行）+
+  `tests/engram/test_engram.py`（155 行）。要点：PP 测试定义的是**协议**——`generate_stress_ops`
+  用整数时间戳编排「在途张量背压下无死锁的收发序列」（`send_i ≥ recv_(i−N)+1` 使每 pair 在途上界恰为
+  `num_max_inflight_tensors=N`），靠 `torch.equal` 确认「收到的正是对端发的」、靠 `torch.cuda._sleep`
+  把时间戳翻成真实时序压力；Engram 测试定义的是**索引语义**——all-gather 出全局表再 `global[idx]`
+  的参考 oracle、SF 复制到本地、正序/逆序两种层序都验证。kernel 端到端仅分析（`_C.PPBuffer`/
+  `_C.EngramBuffer` + `check_nccl_so`），测试侧纯 Python/张量 H100(sm90) 真机 **72 PASS / 0 FAIL**：
+  18 组调度每 pair 在途 ≤ N、背压抬高 31 次且修正后仍单调、利齿负样本去掉修正后 31 处容量溢出被击穿、
+  Engram `owner/row` 逐元素远程读 == gather-oracle 逐位。索引页新增第 122 篇。
+  上一轮 P111-1：新建 `docs/121-deepep-bufferbase-lifecycle.md`
   （+`harness/exp_deepep_bufferbase_lifecycle.{sh,py,out.txt}`、`src/bufferbase_lifecycle.cpp`）——补齐
   DeepEP 四个 Buffer 家族都继承、却从没被单独读过的公共基类 `BufferBase`（`deep_ep/buffers/base.py`
   27 行 + `csrc/buffers/base.hpp` 63 行）。要点：Python ABC 与 C++ pybind **两条平行继承链**（靠
@@ -4769,13 +4819,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P111 已完成（最新 **P111-1 DeepEP 四个 Buffer 家族共享的生命周期契约
-  `BufferBase`**：Python ABC 与 C++ pybind **两条平行继承链**、`destroy_on_destruction` 三分支
-  状态机、`~BufferBase() noexcept(false)` 的用意、二次 `destroy()` 的跨语言分歧（Python 幂等 /
-  C++ 抛异常）；纯 host、架构无关，H100(sm90) 真机 **32 PASS / 0 FAIL**；索引页新增第 121 篇。
+- **下一步**：P0~P112 已完成（最新 **P112-1 DeepEP 两类非 all-to-all 原语（PP send/recv 与
+  Engram fetch）的验收测试即正确性规范**：PP 的 `generate_stress_ops` 在途背压无死锁调度、
+  Engram 的 all-gather+gather 参考 oracle 与 SF 复制；kernel 端到端仅分析、测试侧 H100(sm90)
+  真机 **72 PASS / 0 FAIL**；索引页新增第 122 篇。
   可继续（均为增量、非承诺）：
   `semantic.py` 的 `weak_lru`/`find_pkgs` setup 侧（第 83/86 篇已覆盖大半）、
   或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  上一轮 P111-1：P0~P111 已完成（最新 **P111-1 DeepEP 四个 Buffer 家族共享的生命周期契约
+  `BufferBase`**：Python ABC 与 C++ pybind **两条平行继承链**、`destroy_on_destruction` 三分支
+  状态机、`~BufferBase() noexcept(false)` 的用意、二次 `destroy()` 的跨语言分歧（Python 幂等 /
+  C++ 抛异常）；纯 host、架构无关，H100(sm90) 真机 **32 PASS / 0 FAIL**；索引页新增第 121 篇。
   上一轮 P110-1：P0~P110 已完成（最新 **P110-1 Mega MoE 主 kernel 的任务调度器
   `scheduler/mega_moe.cuh`（481 行）**：补全四个调度器的最后一格——行容量公式
   `get_num_max_live_pool_blocks`/`get_num_l1_warmup_waves`（host ring 分配的唯一几何契约）、
