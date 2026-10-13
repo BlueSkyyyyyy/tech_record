@@ -2693,6 +2693,42 @@
   未复现 benchmark 数；多 GPU/NVSHMEM 未展开）。**纯源码走读（资料分析），本轮无新实验。**
   配套博客 post `mega-kernel-16-mpk-superoptimizer`（weight 17）并更新 `mega-kernel-00-index` 第 16 项。
 
+### P102 搜索器辅助模块源码走读（`docs/16-mpk-search-passes.md`）
+
+- [x] **P102-1** 补掉 `docs/15`（P101-1）**§9 明留的尾巴**——「只精读主搜索循环；`abstract_expr/`（代数
+  表达式等价类）、`range_propagation/`（range 推导）、`symbolic_graph/`（符号化搜索）三块只给了接口，
+  未逐行走读其内部算法」。把主搜索循环之外的**三个判断器**逐行走通。见
+  `docs/16-mpk-search-passes.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与
+  `docs/06`/`07`/`08`/`14`/`15` 同快照；纯源码走读、无新实验）。七节：
+  §0 定位（`abstract_expr` 管「算的是什么」/`range_propagation` 管「读哪一段」/`symbolic_graph` 管
+  「形状是变量否」三块正交，附主循环调用点表）；§1 `abstract_expr`——C++ 15 个节点类型
+  （`abstract_expr.h:42-231`，`RMS`/`Red` 把归约长度折进节点身份，`abstract_expr.cc:328-330` degree 1
+  = 不归约）双表示 `to_string`/`to_egg`，Rust egg e-graph（`abstract_subexpr/src/lib.rs`：代数律
+  `:38-53`、`sum` 换序 `:55-62`、**动态质因数分解规则**给定 `(sum N a)⇄(sum j (sum k a))` `:72-105`、
+  饱和 runner `with_iter/time/node_limit` `:133-144`、`get_egraph`/`egg_equiv` FFI `:121-183`），
+  `preprocess` 对每个输出 `initialize_final_expr`（`search.cc:487-495`）、候选 `check_abstract_expr`
+  查子表达式（`search.cc:504-519`，**`constraints` 参数有默认值但函数体未用**）；§2 `range_propagation`
+  ——`Range`(`range.h`)/`RangeSet`+`PropagationPath` 防环(`range_set.h:41-51`)/`TBRange`(tensor|block|
+  forloop `tbrange.h:30-34`)；forward/backward/multiplicative_interact 逐算子规则（`irange.cc:291-464`，
+  `EXP_AS_IDENTITY` `:296-305`、matmul 转置扩维 `:443-452`）、跨 KN/TB 递归（`:472-521`）、d2s/s2d 网格
+  映射（`:55-268`，明注只处理单 STensor 情形 `:88-90`）、驱动器 `range_propagate`（`:1050-1062`）、
+  入口 `preprocess` 建 `init/target_ranges`（`search.cc:482-484`）、`check_range`（`search.cc:338`）
+  ——**但两个 `check_range` 重载都在首行 `return true;`（`irange.cc:1068-1069,1085-1086`）⇒ 算法已写完
+  但当前不贡献剪枝**；§3 `symbolic_graph`——`TensorDimExpr` 树(Var/Const/Add/Mul/Div/Pow/Ite)带
+  `get_value`+`to_z3`（含 **log-scaled** 把乘变加 `tensor_dim_expr.cc:355-382`）、`SymbolicTensorDim`
+  结构等值、`SymbolicMap` 映射矩阵（默认给每格一个布尔变量 `symbolic_map.cc:6-16`）、`SymbolicKN/TBGraph`
+  与按语义生成的维度约束（matmul 批量维=1+收缩维相等 `symbolic_graph.cc:209-224`、add/mul `EQUAL_OR_ONE`
+  `:152-161`、映射矩阵行/列 0-1 `:308-330`）；**关键落差**：约束可满足性**两套引擎**——TB 用
+  `TensorDimConstraints`+**z3** `s.check()`（`tensor_dim_constraints.cc:38-47`），KN 用
+  `check_satisfiability` 的 **rule-based 启发式**（注释 `// rule-based checking for now`、
+  `tensor_dim_constraint.cc:88-148`，几乎不拒绝）；§4 符号路径三处「已实现未接线」——
+  `instantiate_symbolic_graph` 首行 `++counter; return false;`（`search.cc:836-842`）、
+  `generate_kernel_graphs_symbolic` **无任何调用者**（`search_c.cc:106` 只调 `generate_kernel_graphs`）；
+  §4 调用点汇总表（哪一步真剪枝：代数子表达式/算子序=是，维度约束联合/区间范围=否）；§5 与论文
+  §4.1/§4.2 对照 + 判据映射（三块都只贡献 C3）；§6 局限（纯走读、未量化剪枝收益、egg 规则集/z3 与
+  启发式等价性未证）。**纯源码走读（资料分析），本轮无新实验。**
+  配套博客 post `mega-kernel-17-mpk-search-passes`（weight 18）并更新 `mega-kernel-00-index` 第 17 项。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2833,10 +2869,43 @@
 - **跨进程复现时把编译期/运行期状态也当变量**（P97-1/§85）：`xproc` 每 runner 用 seed 驱动
   Fisher-Yates 打乱每 round 的配置访问顺序——固定 round-robin 顺序会把「固定顺序 × 时钟漂移」这个
   系统性混淆带进「进程间差」里，误当成真实的进程间方差。
+- **读 `mpk` 快照源码时，「有实现」≠「已启用」**（P102-1/`docs/16`）：`src/search/` 里至少三处
+  「算法写完但未接线」——(a) `range_propagation` 的两个 `check_range` 重载**首行就 `return true;`**
+  （`irange.cc:1068-1069,1085-1086`），后面 ~1100 行区间推理当前**根本不执行**、不贡献剪枝；
+  (b) 符号路径 `instantiate_symbolic_graph` **首行 `++num_symbolic_graphs; return false;`**
+  （`search.cc:836-842`），后面的候选赋值枚举/`to_kernel_graph`/`verify` 走不到；
+  (c) `generate_kernel_graphs_symbolic`（`search.cc:446`）**无任何调用者**（`search_c.cc:106` 只调
+  `generate_kernel_graphs`）。引用这些函数的行为前先确认它真被调用。
+- **符号搜索的约束可满足性有两套引擎、精度不对称**（P102-1/`docs/16` §3.3）：`SymbolicTBGraph::conds`
+  是 `TensorDimConstraints`（可回退集合 + **z3** `s.check()`，`tensor_dim_constraints.cc:38-47`），
+  精确；`SymbolicKNGraph::conds` 只是 `unordered_set` + `check_satisfiability`
+  （`tensor_dim_constraint.cc:88-148`，注释 `// rule-based checking for now`，只对常量相等/
+  `const/var` 除法做启发式、**其余一律返回 `true`**），几乎不拒绝。别把「KN 级约束通过」当成合法性证明。
+  （另：`TensorDimConstraints::satisfiable()` 每加一条约束就 `std::cerr` 打印整组约束
+  `tensor_dim_constraints.cc:43`，是调试残留、会污染 stderr。）
+- **`check_abstract_expr` 的维度约束参数是「摆设」**（P102-1/`docs/16` §1.3）：签名带
+  `TensorDimConstraints const &constraints = {}`（`search.h:90-91`），但函数体只用
+  `subexpr_to_final_expr` 查 egg 子表达式、**完全没用 `constraints`**（`search.cc:504-519`）。
+  代数的（e-graph）与几何的（range）两路剪枝当前只有前者生效。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P101-1 完成（1/1）**。补掉 `docs/14`（P100-1）**§7 明留的尾巴**——「未覆盖自动
+- 当前进度：**P102-1 完成（1/1）**。补掉 `docs/15`（P101-1）**§9 明留的尾巴**——「只精读主搜索
+  循环；`abstract_expr/`、`range_propagation/`、`symbolic_graph/` 三块未逐行走读其内部算法」。
+  见 `docs/16-mpk-search-passes.md`（快照 `f9eb70c`，纯源码走读无新实验）：把主搜索循环之外的**三个
+  判断器**逐行走通——§1 `abstract_expr`（C++ 15 节点 + Rust **egg** e-graph：代数律/`sum` 换序/动态
+  质因数分解规则 `lib.rs:72-105`、饱和 runner、`get_egraph`/`egg_equiv` FFI；对最终输出建 e-graph、
+  候选查子表达式 `search.cc:504-519`，**`constraints` 参数体未用**）；§2 `range_propagation`（区间代数
+  `Range`/`RangeSet`+`PropagationPath` 防环/`TBRange`(tensor|block|forloop)、forward/backward/
+  multiplicative_interact 逐算子规则、d2s/s2d 网格映射、`range_propagate` 驱动器——**但两个
+  `check_range` 首行 `return true`（`irange.cc:1068/1085`）⇒ 已实现未接线、当前不剪枝**）；§3
+  `symbolic_graph`（`TensorDimExpr` 树 + `to_z3` 含 log-scaled、`SymbolicMap` 映射矩阵、按语义生成的
+  维度约束；**约束可满足性两套引擎：TB 用 z3（`tensor_dim_constraints.cc:38-47`）、KN 用 rule-based
+  启发式（`tensor_dim_constraint.cc:88-148`，几乎不拒绝）**）；§4 指出符号路径三处「已实现未接线」
+  （`instantiate_symbolic_graph` 首行 `return false` `search.cc:836-842`、`generate_kernel_graphs_symbolic`
+  **无调用者**）并汇总「哪一步真剪枝」；§5 论文对照 + 判据（三块都只贡献 C3）。配套博客 post
+  `mega-kernel-17-mpk-search-passes`（weight 18）、更新 `mega-kernel-00-index` 第 17 项。
+- 此前：**P101-1 完成（1/1）**。补掉 `docs/14`（P100-1）**§7 明留的尾巴**——「未覆盖自动
   （superoptimizer）路径」。见 `docs/15-mpk-superoptimizer.md`（快照 `f9eb70c`，纯源码走读无新实验）：
   把论文 §4.1「operator decomposition」与 §4.2「thread-block 级 superoptimization」在源码里逐段走通——
   `KNGraph.superoptimize()`（`kernel.py:543`）→ `cython_search`（`search_c.cc:21`）→
