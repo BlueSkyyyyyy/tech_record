@@ -1,0 +1,52 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+================================================================================================
+Part A: correctness -- CUDA dApre = dv@v^T + dw@kg^T vs torch(fp32), dw from CUDA core
+================================================================================================
+
+# B8 T2048 H8  grid=(128, 64)
+    da dApre vs torch        max_abs=3.338e-06  max_rel=5.308e-07  ref_max=6.289e+00
+    da_tma dApre vs torch    max_abs=3.338e-06  max_rel=5.308e-07  ref_max=6.289e+00
+    da_tma64 dApre vs torch  max_abs=3.338e-06  max_rel=5.308e-07  ref_max=6.289e+00
+    da vs da_tma64           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.289e+00
+    da vs da_tma             max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.289e+00
+
+# B2 T1024 H8  grid=(64, 16)
+    da dApre vs torch        max_abs=2.384e-06  max_rel=4.149e-07  ref_max=5.747e+00
+    da_tma dApre vs torch    max_abs=2.384e-06  max_rel=4.149e-07  ref_max=5.747e+00
+    da_tma64 dApre vs torch  max_abs=2.384e-06  max_rel=4.149e-07  ref_max=5.747e+00
+    da vs da_tma64           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.747e+00
+    da vs da_tma             max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.747e+00
+
+# T512 H4  grid=(32, 4)
+    da dApre vs torch        max_abs=9.537e-07  max_rel=1.852e-07  ref_max=5.150e+00
+    da_tma dApre vs torch    max_abs=9.537e-07  max_rel=1.852e-07  ref_max=5.150e+00
+    da_tma64 dApre vs torch  max_abs=9.537e-07  max_rel=1.852e-07  ref_max=5.150e+00
+    da vs da_tma64           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.150e+00
+    da vs da_tma             max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.150e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    da dApre vs torch        max_abs=1.907e-06  max_rel=4.443e-07  ref_max=4.293e+00
+    da_tma dApre vs torch    max_abs=1.907e-06  max_rel=4.443e-07  ref_max=4.293e+00
+    da_tma64 dApre vs torch  max_abs=1.907e-06  max_rel=4.443e-07  ref_max=4.293e+00
+    da vs da_tma64           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.293e+00
+    da vs da_tma             max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.293e+00
+
+worst max_rel over all shapes:
+  da_dapre             5.308e-07
+  da_tma_dapre         5.308e-07
+  da_tma64_dapre       5.308e-07
+  da_vs_tma            0.000e+00
+  da_vs_tma64          0.000e+00
+
+================================================================================================
+Part B: timing -- dA kernel vs GEMM-only core and vs full Triton B2
+================================================================================================
+  case               |    core core_tma |      da  da_tma da_tma64 |  fullB2 |  da/core  da_tma/ctma
+  B8 T2048 H8        |   517.2    492.7 |   952.9   654.7    891.1 |   903.7 |    1.84x        1.33x
+  B2 T1024 H8        |    71.9     69.2 |   129.0    97.7    122.4 |   121.8 |    1.79x        1.41x
+  T512 H4            |     9.3      8.9 |    13.8    13.9     12.7 |    15.2 |    1.49x        1.55x
+  T250 H3 (non-div)  |     8.6      8.4 |    12.8    13.5     11.5 |    14.1 |    1.49x        1.61x
+
+DONE

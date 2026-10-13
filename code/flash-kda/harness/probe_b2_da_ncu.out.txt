@@ -1,0 +1,43 @@
+== prebuild (outside ncu) ==
+  built core_tma
+  built da_tma
+
+################################################################################
+# b2mma_kernel variant=core_tma  mode=ours_core  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                                          Gbyte         1.28
+    dram__bytes_write.sum                                                         Mbyte       199.36
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                %        88.87
+    gpu__time_duration.sum                                                           us       494.91
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                 8739551
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                    38099679
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                               sector            0
+    lts__t_bytes.sum                                                              Gbyte         2.34
+    lts__t_sectors_srcunit_tex_op_read.sum                                       sector     39845888
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                 %        87.27
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed           %         8.04
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                  %        38.05
+    sm__warps_active.avg.pct_of_peak_sustained_active                                 %        24.63
+
+################################################################################
+# b2mma_kernel variant=da_tma  mode=ours_da  b8t2048h8
+################################################################################
+    dram__bytes_read.sum                                                          Gbyte         1.48
+    dram__bytes_write.sum                                                         Mbyte       209.79
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                %        76.17
+    gpu__time_duration.sum                                                           us       660.38
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                24812520
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                    69573608
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                               sector      4194304
+    lts__t_bytes.sum                                                              Gbyte         2.71
+    lts__t_sectors_srcunit_tex_op_read.sum                                       sector     46137344
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                 %        81.67
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed           %         6.00
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                  %        43.53
+    sm__warps_active.avg.pct_of_peak_sustained_active                                 %        24.66
+
+== SASS shared-load / store counts: da_tma vs core_tma ==
+  core_tma  LDS=88  LDSM=0  STG=25  LDGSTS/UBLKCP=10
+  da_tma    LDS=287  LDSM=0  STG=26  LDGSTS/UBLKCP=12
+
+DONE

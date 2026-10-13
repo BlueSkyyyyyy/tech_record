@@ -627,6 +627,23 @@
       最终 `A^T diag(beta) A^T`）都走**同一套「原地读 `Akk` + staged 操作数」**；`dw` 这类中间量生产形态应
       **就地交接**（本轮为独立可证而落盘，多读/写 67 MB）。**边界**：`dA` 后处理项（`dw@kg^T`、`A^T diag A^T`）、
       `db`（`sum_k dkgb·kg` 需跨 warp 归约）与门控链未进 CUDA；本段 store 未接 `-DB2M_VECST`。
+- [x] **P7-54** 兑现 §55.6/§56.6「补非 GEMM 段」**第三刀**——`dA` 的两个 GEMM 贡献（最终 `-A^T diag(beta) A^T`
+      sandwich **之前**）落进 K2 形状 CUDA B2 核：`dApre[o_t,o_u] = Σ_v dv·v` (base, `chunk_bwd.py:264`) `+ Σ_k dw·kg`
+      (`:280-281`, `kg=k·exp2(g)`)。给 `b2_mma_probe.cu` 加 `-DB2M_DA`（+ 符号 `b2da_launch`）：两个收缩维都**不是
+      `BT`**——base 按 warp 拥有 **V 列**（同输出支路分区，`local0` 守卫）标量 `dv[r,v]*v[c,v]`、`dw@kg^T` 按 warp 拥有
+      **输出 k 列**（`accw` 从 mma 片段镜像到 `swall`）标量点积；8 warp 私有 `[BT,BT]` 部分和经 smem 归约后落盘。
+      新增 `harness/check_bwd_b2_da.py`（`check_bwd_b2_da.out.txt`，空闲卡）+ `harness/ncu_b2_da_driver.py` /
+      `harness/probe_b2_da_ncu.sh`（`probe_b2_da_ncu.out.txt`）+ `docs/07` §57。**Part A**：`dApre` vs torch 落
+      **fp32 底噪 5.31e-7**（比 §55 `dvb`/§56 `dkgb` 的 tf32 3.6e-4 低 3 个量级，因本段用**标量 FMA** 非 mma）、
+      `da`≡`da_tma`≡`da_tma64` **逐位相同（max_abs=0，含非整除 T=250，含新 staged 的 `v`）**。**Part B（关键）**：
+      本段**贵得多**——`da/core` **1.49–1.84×**、`da_tma/core_tma` **1.33–1.61×**（远高于前两刀的 +10–25%），根因＝
+      收缩维是完整的 `V`/`K`（各 128，8× MAC）+ 标量 FMA；含本段 CUDA 核到全 Triton B2 仍 **0.72–0.81×**。
+      **Part D（ncu）**：`l1tex` shared wavefronts **38.10→69.57M（+82%）**、bank conflict **8.74→24.81M（×2.8）**、
+      SASS `LDS 88→287`、`DRAM SOL 88.87→76.17%`、`tensor 8.04→6.00%`、`Duration 494.9→660.4µs`（增量≈标量 smem
+      流量、非带宽：新增 DRAM 读写只 ~0.21GB / 165µs≈1.27TB/s）。**设计输入（更新 §56.5）**：「收缩维落在 chunk 行」
+      的段走「原地读 `Akk` + staged 操作数」；「收缩维是全维 `V`/`K`」的段（本轮 `dApre`）**应像三条主 GEMM 一样用
+      `mma.sync`**（`X@Y^T` 形式可复用 GEMM 核 fragment 读法 + warp 分片归约），本轮为**先证代数**取标量实现。
+      **边界**：**未落** `-A^T diag(beta) A^T` sandwich、`db` 的 `sum_k dkgb·kg`、门控链（§49.7/§55.6/§56.6 仍未关闭）。
 
 - [x] **P7-32** 兑现 §34.4 的**待验证**：把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**，
       验证能否复现 §34.1「删掉 store」收益的那 33%。给 `b1_tma_probe.cu` 加 `-DB1T_TMADH`：per-warp
@@ -982,8 +999,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-53 补测**。
-  - P7-53（本轮）：**兑现 §55.6「补非 GEMM 段」第二刀——`dkgb = A @ (-dw)` 落进 K2 形状 CUDA B2**
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-54 补测**。
+  - P7-54（本轮）：**兑现 §55.6/§56.6「补非 GEMM 段」第三刀——`dA` 的两个 GEMM 贡献（sandwich 之前）
+    `dApre = Σ_v dv·v + Σ_k dw·kg` 落进 K2 形状 CUDA B2**（`docs/07` §57）。给 `b2_mma_probe.cu` 加
+    `-DB2M_DA`（+ `b2da_launch`）：两个收缩维都**不是 `BT`**——base 按 warp 拥有 **V 列**（同输出支路分区）
+    标量 `dv[r,v]*v[c,v]`、`dw@kg^T` 按 warp 拥有 **输出 k 列**（`accw` 镜像到 `swall`）标量点积；8 warp
+    私有 `[BT,BT]` 部分和经 smem 归约后落盘。新增 `harness/check_bwd_b2_da.py`（`check_bwd_b2_da.out.txt`，
+    空闲卡）+ `harness/ncu_b2_da_driver.py` / `harness/probe_b2_da_ncu.sh`（`probe_b2_da_ncu.out.txt`）。
+    **Part A**：`dApre` vs torch 落 **fp32 底噪 5.31e-7**（比前两刀的 tf32 3.6e-4 低 3 量级，因用标量 FMA）、
+    `da`≡`da_tma`≡`da_tma64` **逐位相同（max_abs=0，含非整除 T=250）**。**Part B（关键）**：本段**贵得多**——
+    `da/core` **1.49–1.84×**、`da_tma/core_tma` **1.33–1.61×**（远高于 +10–25%），根因＝收缩维是完整的
+    `V`/`K`（各 128，8× MAC）+ 标量 FMA；含本段 CUDA 核到全 Triton B2 仍 **0.72–0.81×**。**ncu**：shared
+    wavefronts **+82%**、bank conflict **×2.8**、`LDS 88→287`、`DRAM SOL 88.87→76.17%`、`tensor 8.04→6.00%`、
+    `Duration 494.9→660.4µs`（增量≈标量 smem 流量、非带宽）。**设计输入**：「收缩维 = 全维 `V`/`K`」的段应像
+    三条主 GEMM 一样用 `mma.sync`（本轮先证代数取标量）。**下一步＝`-A^T diag(beta) A^T` sandwich + `db`
+    的 `sum_k dkgb·kg`（跨 warp 归约）+ 门控链（`dg`/`dk` 的 `exp2(g)` 标定）**，把 B2 全核搬进 CUDA。
+  - P7-53（上轮）：**兑现 §55.6「补非 GEMM 段」第二刀——`dkgb = A @ (-dw)` 落进 K2 形状 CUDA B2**
     （`docs/07` §56）。给 `b2_mma_probe.cu` 加 `-DB2M_DKGB`（+ `b2dkgb_launch`）：与 §55 输出支路同构
     （A 操作数走同一套索引重映射、无转置），B 操作数换成新 staged 的 `dw`（`Stage::dwm`，k-tiled）并在
     B-fragment 取负。新增 `harness/check_bwd_b2_dkgb.py`（`check_bwd_b2_dkgb.out.txt`，空闲卡）+
@@ -1708,7 +1739,17 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-53 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-54 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-54（`docs/07` §57）补非 GEMM 段第三刀——`dA` 的两个 GEMM 贡献 `dApre = Σ_v dv·v + Σ_k dw·kg`
+    （sandwich 之前）落进 CUDA**：给 `b2_mma_probe.cu` 加 `-DB2M_DA`（+ `b2da_launch`），两个收缩维都**不是
+    `BT`**——base 按 warp 拥有 **V 列**标量 `dv[r,v]*v[c,v]`、`dw@kg^T` 按 warp 拥有 **输出 k 列**（`accw`
+    镜像到 `swall`）标量点积，8 warp 私有 `[BT,BT]` 部分和经 smem 归约后落盘。`dApre` vs torch 落 **fp32
+    底噪 5.31e-7**（比前两刀 tf32 3.6e-4 低 3 量级）、`da`≡`da_tma`≡`da_tma64` **逐位相同**；本段**贵得多**
+    （`da_tma/core_tma` **1.33–1.61×**，收缩维是全维 `V`/`K` + 标量 FMA）、CUDA 核到全 Triton B2 **0.72–0.81×**；
+    ncu shared wavefronts **+82%**、bank conflict **×2.8**、`LDS 88→287`、`DRAM SOL 88.87→76.17%`。新增
+    `harness/check_bwd_b2_da.py`（`check_bwd_b2_da.out.txt`）+ `harness/ncu_b2_da_driver.py` /
+    `harness/probe_b2_da_ncu.sh`（`probe_b2_da_ncu.out.txt`）。**下一步**：`-A^T diag(beta) A^T` sandwich、`db`
+    （跨 warp 归约）、门控链；并把「收缩维 = 全维」的段改 `mma.sync`。
   - **P7-53（`docs/07` §56）兑现 §55.6「补非 GEMM 段」第二刀——`dkgb = A @ (-dw)` 落进 CUDA**：给
     `b2_mma_probe.cu` 加 `-DB2M_DKGB`（+ `b2dkgb_launch`），与 §55 输出支路同构（A 操作数走同一套索引
     重映射、无转置；`b2_mma_probe.cu:516-519` vs `:546-549` 逐字相同），B 操作数换成新 staged 的 `dw`

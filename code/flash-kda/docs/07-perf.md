@@ -5779,3 +5779,121 @@ CUPTI `dev`（kernel-only，µs；`dkgb` = `-DB2M_DKGB` 非 TMA、`core_tma` = �
   （`dw@kg^T`、`A^T diag A^T`）、`db` 的 `sum_k dkgb·kg`（跨 warp 归约）与门控链未进 CUDA。
 - 只覆盖 `K=V=128`、`BT=16`、fp32/tf32；`dkgb` store 用标量 32-bit（`-DB2M_VECST` 未接到本段）；`dw` 未做
   bf16。这些都不影响本节结论（增量机制＝读/写字节），但生产形态应接向量化 store 并就地交接 `dw`。
+
+## 57. 「K2 形状 CUDA B2」补非 GEMM 段第三刀：**`dApre = dv@v^T + dw@kg^T`**（`dA` 的后处理 GEMM）落进 CUDA（P7-54）
+
+§55.6/§56.6 把 B2 非 GEMM 段的剩余工作列成「`dA` 的后处理项（`dw@kg^T`、`A^T diag A^T`）、`db` 的
+`sum_k dkgb·kg`（跨 warp 归约）与**门控链**」。§55 落了输出支路 `dvb = A@dv`、§56 落了 `dkgb = A@(-dw)`
+（两者都**收缩维落在 chunk 行 `BT`**）。本轮落**第三刀**：`dA` 的**两个 GEMM 贡献**（在最终
+`-A^T diag(beta) A^T` sandwich **之前**），对应 FLA / torch 的
+
+    dApre[o_t, o_u] = sum_v dv[o_t, v] · v[o_u, v]        (base;  `chunk_bwd.py:264` `b_dA += tl.dot(b_dv, v^T)`)
+                    + sum_k dw[o_t, k] · kg[o_u, k]        (`chunk_bwd.py:280-281` `b_dA += tl.dot(b_dw, kg^T)`)
+
+（`kg = k·exp2(g)`，`dw` 是 GEMM 核心的 `dw = dv @ h` 输出；`check_bwd_dqkg_kernel.py:168/180-181`）。
+这两项都是**块内**运算（无跨 chunk 耦合），故与 §55 暴露 `dvb`、§56 暴露 `dkgb` 一样，把 `dApre` 单独落盘以
+**独立核对这两段 GEMM**。答案是：**逐位对得上真 fp32（比前两刀的 tf32 还准）、三种 stage 布局逐位相同，但代价明显
+更大（+33–85% vs 前两刀的 +10–25%）**——因为这两项的**收缩维是完整的 `V` 和 `K`（各 128）**，而非 `BT=16`。
+
+证据：`harness/b2_mma_probe.cu`（新增 `-DB2M_DA` + 符号 `b2da_launch`）+ `harness/check_bwd_b2_da.py`
+（`harness/check_bwd_b2_da.out.txt`，空闲卡）+ `harness/ncu_b2_da_driver.py` / `harness/probe_b2_da_ncu.sh`
+（`harness/probe_b2_da_ncu.out.txt`）。
+
+### 57.1 设计：两个**跨 warp 的部分和**，smem 归约后再落盘
+
+与 §55/§56 的「收缩维落在 chunk 行」不同，本段的两个收缩维**都不是 `BT`**，故 warp 列归属按**自然分区**：
+
+- **base `dv@v^T`（收缩维 `V`）**：warp `w` 拥有 **V 列** `[w·16, w·16+16)`（输出支路同款分区，`local0 =
+  warp*BW - it*BVK` 守卫，只在含自己 V 列的 stage 累加）；lane `l` 拥有 `[BT,BT]` 部分和的 8 个条目
+  （`r=l>>1, c=(l&1)·8 + i, i=0..7`），做成标量 `dv[r,v]*v[c,v]` 的 16 次循环。
+- **`dw@kg^T`（收缩维 `K`）**：warp `w` 拥有**输出 k 列** `[w·16, w·16+16)`（GEMM 核心同款分区），故
+  `dw=accw` 的这 16 列正好是 warp 私有；把它从 mma 片段镜像到 `swall[warp]`（row-major），再与
+  `skg[o_u, k]=k·exp2(g)` 做标量点积（同样 8 条目/lane）。
+- **归约**：8 个 warp 各写私有 `[BT,BT]` 部分和到 `dapart[w]`，`__syncthreads()` 后每线程一个条目求和成
+  `da16[BT,BT]`，再落盘 `dApre[o_t,o_u]`（行 `o_t<T`）。
+- `kg` 每 chunk 载入一次（`skg[BT,KD]`，**非** V-tiled；`k,g` 为 `[B,T,H,K]` 标量读，pad 行零）。
+
+> 注：与 §55/§56 的「A-fragment 索引重映射、无转置」不同，本段两个操作数都**不是** `Akk`，而是
+> `dv/v`（`[BT,V]`）与 `dw/kg`（`[BT,K]`）；`dw@kg^T` 还需要把 `accw` 从 mma 片段**镜像到 smem** 才能按
+> row-major 重用（本段用**标量 FMA** 而非 mma，见下）。
+
+### 57.2 Part A — 正确性：`dApre` 落 **fp32 底噪**（5.3e-7），且三种 stage 布局**逐位相同**
+
+同操作数四组 shape（`BT=16`，含非整除 `T=250`；`dw` 操作数由 **CUDA GEMM 核心**产出，故两侧吃的都是同一份
+tf32 `dw`；torch 参考关 tf32 走真 fp32）：
+
+| 量 | `da` vs torch | `da_tma` vs torch | `da_tma64` vs torch | `da` vs `da_tma` | `da` vs `da_tma64` |
+|---|---|---|---|---|---|
+| `dApre` | 5.31e-7 | 5.31e-7 | 5.31e-7 | **0** | **0** |
+
+（表内为四组 shape 的最坏 `max_rel`；`ref_max≈4.3–6.3`，`max_abs` 最坏 3.34e-6。）
+
+两件事被钉死：(1) **CUDA `dApre` 代数无误**——且落的是 **fp32 底噪 `5.3e-7`**，比 §55 `dvb`/§56 `dkgb` 的
+**tf32 底噪 `3.6e-4` 低约 3 个数量级**。原因：本段的两条收缩用**标量 fp32 FMA**（不是 `mma.sync.tf32`），
+所以只有 `dw` 操作数带 tf32 舍入（且参考吃同一份 `dw`）——**收缩本身是真 fp32**。这是「便宜 vs 精度」的一个
+显式取舍点（下方 §57.3 代价正是它换来的）。(2) **`da`≡`da_tma`≡`da_tma64` 逐位相同（`max_abs=0`）**——非 TMA /
+TMA@32 / TMA@64（atom 拆分）对这段**零影响**，把 §54 的布局解码正确性在**第三段新算术**上再证一遍
+（且这段含 `st->vv` 这个**新 staged 操作数**，等于把 TMA 的 `v` 图也证了一遍）。
+
+### 57.3 Part B — 计时：本段明显贵于前两刀（**+33–85%**），因收缩维是完整的 `V`/`K`
+
+CUPTI `dev`（kernel-only，µs；`da` = `-DB2M_DA` 非 TMA、`core_tma` = 只有 GEMM 的 TMA 基座）：
+
+| shape | `core` | `core_tma` | `da` | `da_tma` | `da_tma64` | 全 Triton B2 | `da/core` | `da_tma/core_tma` |
+|---|---|---|---|---|---|---|---|---|
+| `B8 T2048 H8` | 517.2 | 492.7 | 952.9 | 654.7 | 891.1 | 903.7 | 1.84× | 1.33× |
+| `B2 T1024 H8` | 71.9 | 69.2 | 129.0 | 97.7 | 122.4 | 121.8 | 1.79× | 1.41× |
+| `T512 H4` | 9.3 | 8.9 | 13.8 | 13.9 | 12.7 | 15.2 | 1.49× | 1.55× |
+| `T250 H3`（非整除） | 8.6 | 8.4 | 12.8 | 13.5 | 11.5 | 14.1 | 1.49× | 1.61× |
+
+- **第三刀贵得多**：非 TMA 下 `da/core` **1.49–1.84×**，TMA 下 `da_tma/core_tma` **1.33–1.61×**——远高于 §55 输出支路
+  的 +12–25% 与 §56 `dkgb` 的 +9–13%。**根因是算术量**：`A@dv`/`A@dw` 的收缩维是 **`BT=16`**，而本段是
+  **`V=128` 与 `K=128`**（各 8× 的 MAC 数），且用**标量 FMA**（无 tensor core）→ 每条 FMA 要 2 次 smem 读
+  （算术强度 ~0.5 op/word）。含本段的 CUDA 核到全 Triton B2 只 **0.72–0.81×**（`B8` 655 vs 904 µs）——**仍不亏**，
+  但已不是「白送」。
+- `da_tma` 明显快过非 TMA `da`（§52 的 TMA 读侧收益在 `v` 上仍在）；`da_tma64` 在 `BVK=64` 大 shape 回退
+  （同 §55.3/§56.3：warp 只在一个 stage 上有活，`[BT,BT]` 归约摊不平）。
+
+### 57.4 `ncu` — 增量＝**标量 smem 流量翻倍 + bank conflict×2.8**，把核从 89% DRAM-bound 拉成 mix
+
+`B8 T2048 H8`，同一批 fp32 操作数（`probe_b2_da_ncu.out.txt`）：
+
+| 变体 | DRAM 读 | DRAM 写 | DRAM SOL | L2 bytes | Duration | tensor% | occ | bank conflicts | shared wavefronts | l1tex 全局读 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `core_tma`（只有 GEMM） | 1.28 GB | 199.36 MB | 88.87% | 2.34 GB | 494.9 µs | 8.04% | 24.63% | 8.74 M | 38.10 M | **0** |
+| `da_tma`（+ `dApre` 段） | **1.48 GB** | **209.79 MB** | 76.17% | 2.71 GB | 660.4 µs | 6.00% | 24.66% | **24.81 M** | **69.57 M** | 4.19 M |
+
+- **时间增量 ≈ 标量 smem 流量**：DRAM 读 `+0.20 GB`（=`v` 一个 `[B,T,H,V]` fp32 = 67 MB × TMA + `k`,`g` 的
+  标量全局读 4.19 M sectors ≈134 MB）、DRAM 写 `+10.4 MB`（=`dApre` 一个 `[B,T,H,BT]` fp32 ≈8.4 MB），
+  但 **`Duration +165.5 µs`**——`(0.20+0.010) GB / 165.5 µs ≈ 1.27 TB/s`，**远低于**核的 ~2.9 TB/s 上限，
+  即**新增段不是带宽、是延迟/发射**。`sm__throughput` 38.05→43.53%、`tensor` 8.04→**6.00%**（被标量段稀释）、
+  `DRAM SOL` 反降到 76.17%——**核从 89% DRAM-bound 被拉成 mix**。
+- **机制直接读数**：`l1tex` 共享读 wavefronts **38.10M→69.57M（+82%）**、bank conflict **8.74M→24.81M（×2.8，
+  占 wavefront 的 ~36%）**、SASS `LDS 88→287`（+199 条标量 shared load）——这正是「标量 FMA 的 2 reads/FMA」
+  与 `skg`/`swall` 行优先读的银行冲突。新增 global 读＝`k`/`g` 的 4.19 M sectors（1 sector/元素，标量读）。
+- `STG 25→26`（+1 = `dApre` 的 store）、`LDGSTS/UBLKCP 10→12`（+2 = `v` 的 TMA + `k/g`？实为 `v` 的 TMA atom）。
+
+### 57.5 结论 / 对目标卡的设计输入
+
+- **§55.6/§56.6 的「补非 GEMM 段」第三刀成立**：`dA` 的两个 GEMM 贡献 `dv@v^T` + `dw@kg^T`（pre-sandwich）
+  进 CUDA 后**独立可证**、**逐位对得上真 fp32（5.3e-7）**、**三种 stage 布局逐位相同**（含非整除 `T=250`）。
+- **但不是「便宜」的一刀**：与前两刀最本质的差别是**收缩维不再是 `BT`**——`dApre` 收缩完整的 `V`/`K`
+  （各 128），且本段用**标量 FMA**，故 `+33–61%`（TMA）。**设计输入**：目标卡 CUDA B2 里凡「收缩维 = `V` 或 `K`
+  全维」的段（`dv@v^T`、`dw@kg^T`，以及后续 `A^T diag A^T` 的 `[BT,BT]@[BT,BT]`），**应像三条主 GEMM 一样用
+  `mma.sync`**（base `dv@v^T` 与 `dw@kg^T` 都是 `X @ Y^T` 形式，可直接复用 GEMM 核心的 A/B fragment 读法、
+  warp 按 `V`/`K` 分片后 smem 归约），把 `LDS`/bank-conflict 压下去——本轮为**先证代数**取标量实现。
+- **精度取舍**：标量收缩给 **fp32 底噪**（§55/§56 的 mma 是 tf32 底噪）；生产若走 mma 会回到 tf32 底噪，但
+  如 §6.11/§35 所述目标卡对这类量用 bf16 出口更省钱——须按部署 dtype 重测。
+- **设计输入（更新 §56.5）**：「收缩维落在 chunk 行」的段（`A@dv`、`A@dw`）走**原地读 `Akk` + staged 操作数**；
+  「收缩维是全维 `V`/`K`」的段（本轮 `dApre`）走**GEMM 核心同款 mma + 部分和归约**。这两类要分开设计。
+
+### 57.6 边界 / 下一步（诚实）
+
+- 本轮只落 **`dApre`（`dw@kg^T` + base `dv@v^T`）**，**未落**最终的 `-A^T diag(beta) A^T` sandwich（§55.6 的另一半
+  `dA` 后处理）、`db` 的 `sum_k dkgb·kg`（跨 warp 归约）与**门控链**（`dg`、`dk` 的 `exp2(g)` 标定）——即
+  §49.7/§55.6/§56.6 仍未关闭。
+- 本段的 base 与 `dw@kg^T` 用**标量 FMA**（非 tensor core），是「先证代数、后优化」的取舍；代价已在 §57.3/§57.4
+  量化（+33–61%、LDS×3.3、bank conflict×2.8），下一步应换 mma。
+- 只覆盖 `K=V=128`、`BT=16`、fp32/tf32；`dApre` store 用标量 32-bit（`-DB2M_VECST` 未接到本段）；**同 CTA 交接未做**
+  （`v`/`k`/`g` 仍从 global 读、`dApre` 落盘再返回）；`k`/`g` 用标量全局读（可改 TMA/向量化）。这些都不影响本节
+  结论（增量机制＝收缩维长度与访存机制），但生产形态应接向量化 store 并就地交接。
