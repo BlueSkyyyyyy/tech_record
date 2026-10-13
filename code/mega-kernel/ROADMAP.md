@@ -1891,6 +1891,38 @@
       P74-1 新留尾巴（§62.10）：只到数据面 94%、合成描述符/环、`G`↔`chunk` 耦合、co-residency 未严格、
       未与 DeepGEMM SM100 对跑。
 
+### P75 实验扩展 54：producer 服务模型（每环服务成本 vs 环数）（`docs/04-experiments.md` §63）
+
+- [x] **P75-1** 补掉 P74-1（§62）§62.10 明留的尾巴「`G` 与 `chunk` 天然耦合（`chunk=⌈NB/G⌉`）……
+  **更细的 producer 服务模型（每环服务成本 vs 环数）留待后续**」：把 §62 **完整端到端骨架**里
+  的 **producer 写端单独抽出来**（无 worker / 无背压 / 无数据面），用**唯一控制变量**——每个
+  producer 连续服务的**环数 `wpp`**（固定每 producer 总批数 `Btot=chunk*wpp`）——直接量「每环
+  服务成本」，再在同一二进制里加回 **plain-load consumer** 做对照，把 §62.7 口头归因的
+  「producer 轮转服务多 per-worker 环的扇出」钉到 producer 侧（或证伪）。见
+  `docs/04-experiments.md` **§63**，源码 `src/producer_service_model.cu`、脚本
+  `harness/producer_service_model.sh`、原始输出 `harness/producer_service_model.out.txt`
+  （目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、批=11264 B（`DW=88`=352 B/行）、`T=256`、
+  min-of-20）。六个 Section：
+  - **§A 正确性**：producer 写值（block 归约）**逐位**命中 host 参考（`sink=ref=1485236534821600`）；
+    §F 带 consumer 档 `sink=2×ref`（写值+读回值）逐位命中。
+  - **§B（headline）固定每 producer 工作量，吞吐不随环数下降**：`PS=32`、`Btot=64`，`wpp=1→64`
+    吞吐 **158.2→166.0**（略升后平台）、`cyc/batch` **4336→4126**（±2.5%）——**不存在可测的『每环
+    服务成本』**（`wpp=1` 略慢是同一条 `head` cache line 连续 64 次 release 的轻微串行化）。
+  - **§C** `wpp=1` 扫 `Btot`：`cyc/batch` **恒 ~4335–4357**、吞吐只随 `Btot` 小幅爬升=一次性启动摊薄
+    ——producer 成本结构是**纯每批**。
+  - **§D** `PS=1→32` 线性（5.2→165.1 GB/s），每 producer 独立 ~5.2 GB/s、无跨 producer 争用。
+  - **§F（对照）** `PS=8`、`NB=2048`、扫 `R=128→1024`：**producer-only 恒 42.6–42.7**、
+    **+plain-load consumer 只降 ~12% 且同样平**（37.3–37.4）——consumer 只加一笔**固定**开销、
+    **不随环数放大**。
+  - **结论/修正**：producer 服务成本 = **每批一次 `fence+st.release`+两次 `__syncthreads`**
+    （`cyc/batch≈4135–4357`≈**~2.1 µs**、单 SM 描述符天花板 **~5.2 GB/s**，对上 §52 的 release 税）；
+    **§62.7 的「producer 环扇出」归因被隔离证伪**——§62 端到端「`G` 越大越慢」只能住在 **worker 侧**
+    （TMA 取 task / 折叠 / 数据面）或其**占用率/共驻**（§62.3 的上限）里。对 MPK/DeepGEMM 的意义：
+    event→task 直取 / AOT 预入队 / ring generation 位复用绕的是**每批固定 release 税**，不是「多环
+    服务成本」；`PS*:G≈1:25~1:32` 的压力来自**单 producer ~5 GB/s 上限**而非每环一罚。判据：写端
+    单 measure、不含 TMA/折叠/数据面，**不完整满足 C1–C5**。局限：consumer 是 plain-load、合成
+    描述符、寄存器写载体、无背压、未与 DeepGEMM SM100 对跑。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1915,7 +1947,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P74-1 完成（1/1）**。补掉 §61.10 明留的两条尾巴——(a)「纯读微基准是能力上界、非
+- 当前进度：**P75-1 完成（1/1）**。补掉 §62.10 明留的尾巴「更细的 producer 服务模型（每环服务
+  成本 vs 环数）留待后续」：把 §62 完整骨架里的 **producer 写端单独抽出来**（无 worker/背压/数据面），
+  唯一控制变量 = 每个 producer 服务的**环数 `wpp`**（固定每 producer 总批数 `Btot=chunk*wpp`），
+  再加回 **plain-load consumer** 对照。见 `docs/04-experiments.md` **§63**，源码
+  `src/producer_service_model.cu`、脚本 `harness/producer_service_model.sh`、原始输出
+  `harness/producer_service_model.out.txt`（目标卡 H100/sm90a、固定空闲 device 3、nvcc 13.2、
+  批=11264 B、`T=256`、min-of-20）。核心结论：
+  (1) **无『每环服务成本』**——`PS=32,Btot=64`，`wpp=1→64` 吞吐 158.2→166.0 略升后平台、
+  `cyc/batch` 4336→4126（±2.5%）；
+  (2) **producer 成本 = 纯每批**（`wpp=1` 扫 `Btot` 的 `cyc/batch` 恒 ~4335–4357、吞吐只随 `Btot`
+  爬升=启动摊薄），每批 `fence+st.release`+两次 `__syncthreads` ≈ **~2.1 µs**、单 SM 天花板
+  **~5.2 GB/s**（对上 §52 release 税）；
+  (3) **§D** `PS=1→32` 线性（5.2→165.1 GB/s）、无跨 producer 争用；
+  (4) **§F 对照** `PS=8,NB=2048` 扫 `R=128→1024`：producer-only 恒 42.6–42.7、**+plain-load
+  consumer 只降 ~12% 且同样平**（37.3–37.4）——consumer 只加一笔**固定**开销、不随环数放大；
+  (5) **修正 §62.7**：producer 环扇出归因**被隔离证伪**，§62 端到端「`G` 越大越慢」只能住在
+  **worker 侧**（TMA/折叠/数据面）或其**占用率/共驻**里。判据：写端单 measure，不完整满足 C1–C5。
+  **本专题此前 P0–P74 全完成，本轮为其新增的实验增量。**
+- 此前：**P74-1 完成（1/1）**。补掉 §61.10 明留的两条尾巴——(a)「纯读微基准是能力上界、非
   端到端吞吐，与 §60 端到端的差即『调度/取 task/折叠的夹层成本』」(b)「争用 writer 是合成写、非真实
   描述符/环协议」。把 §61 的**占用率旋钮**（多 block/SM + `__launch_bounds__(TB,MINB)`）搬回 §60 的
   **完整骨架**，在**同一二进制**内用三档 `mode`（2=data-only / 0=+fold / 1=full）逐层剥开夹层。见

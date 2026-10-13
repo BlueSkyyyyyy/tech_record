@@ -9466,3 +9466,125 @@ per-worker 环」的扇出**：`G` 个环要靠 `PS` 个 producer 逐条服务�
 - **踩坑**：① `__launch_bounds__(TB,MINB)` 的 `TB` **必须是真实 blockDim**（否则寄存器预算按错误的
   线程数算）；② 沿用 §61 的 `dp_kernel` 静态 `red[MAXT]`（8 KB）会与动态 SMEM 抢占用率——本节
   改用 **warp shuffle + 32 槽 shared** 归约，才让 `T=256*8 blk/SM` 的 22.6 KB 动态 SMEM 装下。
+
+## 63. producer 服务模型：每环服务成本 vs 环数（P75-1）
+
+补掉 `docs/04` **§62.10 明留的尾巴**：「`G` 与 `chunk` 天然耦合（`chunk=⌈NB/G⌉`）……**更细的
+producer 服务模型（每环服务成本 vs 环数）留待后续**」。
+
+§62 在**完整端到端骨架**上看到：固定 `NB=2048`、`PS=8` 时，端到端 `taskGB/s` 随 worker 环数 `G`
+增大**反而下降**（2058@G=528 → 1768@G=1040），并把成本**口头归因**到「**少 producer 轮转服务多
+per-worker 环的扇出**」（§62.7）。但那笔成本是在 producer 与 worker **同时在场**的骨架里量的，
+**无法区分是 producer 写侧的环扇出，还是 worker 读侧（TMA/折叠/数据面/占用率）**。
+
+本节把 **producer 写端单独抽出来**，用**唯一控制变量**——每个 producer 连续服务的**环数** `wpp`
+（并固定每个 producer 写的**总批数** `Btot = chunk*wpp`）——直接把「每环服务成本」量出来，
+再在**同一二进制**里加回一个 plain-load consumer，看代价是否只在有消费者时出现。
+
+> 源码 `src/producer_service_model.cu`、脚本 `harness/producer_service_model.sh`、原始输出
+> `harness/producer_service_model.out.txt`（目标卡 H100/sm90a，nvcc 13.2，固定空闲 device 3，
+> 描述符批次 = `K*DW` 字 = `32*88*4 = 11264 B`（「`DW=88`=352 B/行」），`T=256`，
+> `grid=PS`（§A–§E 纯 producer）或 `grid=PS+R`（§F 带 consumer），min-of-20）。
+
+### 63.1 机制：纯 producer 写端 + 环数唯一变量
+
+- **producer**（`grid=PS`，无 worker、无背压、无数据面）：`R` 个环、每环 `chunk` 个描述符批次，
+  producer `s` 连续服务 `wpp=⌈R/PS⌉` 个环，逐「轮」`r` 轮转写每个环第 `r` 个批次，写完整批后
+  `fence.proxy.async.global` + `st.release.gpu` 发布 `head[w]=r+1`（**逐批一次 release**，与
+  §62/§54 完全同协议）。环容量 `CAPp=chunk`（无消费者 → 背压为空操作）。
+- **唯一控制变量**：固定 `PS`、固定**每 producer 总批数** `Btot=chunk*wpp`，只让 `wpp` 变化
+  （`chunk=Btot/wpp`）。于是「同一份写工作量**摊到多少条环**」被单独拎出来——若存在「每环服务
+  成本」，吞吐必随 `wpp` 下降。
+- **§F 对照**：`grid=PS+R`，`R` 个 plain-load consumer（逐环 `ld.acquire(head)` 等批 → 读环 →
+  `atom.add.release(tail)` 回收），**无 TMA / 无 SMEM 折叠 / 无 HBM 数据面**——只加「有消费者」
+  这一维。
+
+### 63.2 §A 正确性：producer 写值逐位对 host 参考
+
+`PS=8,R=32,chunk=8`：`sink`（各线程写入值之和，block 归约）**逐位等于** host 参考
+（`Σ_{gid}Σ_i gen_word(gid,i%DW)`）：`sink=ref=1485236534821600 -> OK`。`gid` 按 producer 连续
+覆盖 `[0,PS·Btot)`；§F 的带 consumer 档 `sink=2×ref`（写值 + 同一批读回值），逐位命中。
+
+### 63.3 §B headline：固定每 producer 工作量，吞吐**不随环数下降**
+
+`PS=32`、`Btot=64`、扫 `wpp`（原始输出 §B）：
+
+| wpp（每 producer 环数） | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
+|--------------------------|---|---|---|---|----|----|----|
+| descGB/s | 158.2 | 162.1 | 164.0 | 165.0 | 165.6 | 166.0 | 166.0 |
+| cyc/batch | 4336 | 4230 | 4176 | 4150 | 4136 | 4130 | 4126 |
+
+**吞吐不但没随环数下降，反而略升后平台化**（`wpp=1→64` 只 +5%，且方向是**变快**）。`cyc/batch`
+近似恒定（4336→4126，±2.5%）。即：**「每 producer 服务 1 条环」与「服务 64 条环」的单位批成本
+几乎相同**——**不存在可测的『每环服务成本』**。（`wpp=1,chunk=64` 略慢，是**连续 64 次 release
+打到同一条 `head` cache line** 的轻微串行化，摊到多条环反而分散了。）
+
+### 63.4 §C 对照：每批成本恒定，吞吐只随总批数小幅爬升
+
+`wpp=1`（每 producer 一环）、扫 `Btot=chunk`（原始输出 §C）：
+
+| Btot | 8 | 16 | 32 | 64 | 128 | 256 |
+|------|---|---|----|----|-----|-----|
+| descGB/s | 127.1 | 143.4 | 153.1 | 158.3 | 160.8 | 162.2 |
+| cyc/batch | 4357 | 4345 | 4339 | 4335 | 4337 | 4335 |
+
+`cyc/batch` **完全恒定**（~4335–4357），吞吐随 `Btot` 上升只是**一次性启动/流水填充**（kernel
+ramp、首次 mbarrier/release 的固定开销）被摊薄——**producer 的成本结构是纯「每批」的**。
+
+### 63.5 §D producer 数标度：线性
+
+`wpp=8,Btot=64`、扫 `PS`（原始输出 §D）：`descGB/s` = 5.2 / 10.3 / 20.7 / 41.4 / 82.7 / 165.1
+（`PS=1→32`），**每个 producer 独立贡献 ~5.2 GB/s**（`cyc/batch` 恒 ~4150）——无跨 producer 争用
+（环是连续分段、每环单写者）。
+
+### 63.6 §F 对照：加回 plain-load consumer，仍**不随环数恶化**
+
+`PS=8`、`NB=R·chunk=2048`（工作量恒定）、扫 `R`（原始输出 §F）：
+
+| R | 128 | 256 | 512 | 1024 |
+|---|-----|-----|-----|------|
+| producer-only descGB/s | 42.6 | 42.7 | 42.7 | 42.7 |
+| +consumer descGB/s | 37.4 | 37.4 | 37.3 | 37.3 |
+
+- **producer-only 完全平**（42.6–42.7，与 §D 的 `PS=8→41.4` 同档）。
+- **带 consumer 只降 ~12% 且同样平**（37.3–37.4，`R=128→1024` 无趋势）——consumer 的加入带来
+  一笔**固定**的读侧/握手开销（`cyc/batch` 4140→4630，+12%），但**不随环数放大**。
+
+### 63.7 与 §62 / MPK 的对应：修正「扇出」归因
+
+- **§62.7 的「producer 轮转服务多环的扇出」在本节被隔离并证伪**：把 producer 写端单独拿出来，
+  把唯一变量设成「服务的环数」，**每批成本与吞吐都不随环数变化**。因此 §62 端到端
+  「`G` 越大越慢」**不可能**来自 producer 侧的环扇出——它只可能住在 **worker 侧**（TMA 取 task /
+  SMEM 折叠 / HBM 数据面）或其**占用率/共驻**（§62 §C 的 `G` 也是 worker 块数，`G+PS` 逼近
+  §62.3 的占用上限）里。§F 的 plain-load consumer 也平，进一步把嫌疑收窄到 **TMA+折叠路径**或
+  **worker 块的占用率/共驻**，而非「环数」本身。
+- **producer 的真实成本结构 = 每批一次 release**：`cyc/batch ≈ 4135–4357` ≈ **~2.1 µs/batch**
+  （H100 ~1.98 GHz），即**单个 producer SM 写描述符的天花板 ~5.2 GB/s**（`§D`），与 §52 的结论
+  一致——**贵的是每批 `st.release.gpu` 的 MEMBAR + 两次 `__syncthreads()`**，不是环数、不是地址。
+- **对 MPK 的意义**：MPK §5.1 用 **event→task 直取 + AOT 预入队** 把「每 task 一次 release」摊薄
+  （`docs/11` §4/§6），DeepGEMM 用 ring 的 generation 位复用减少发布次数——它们要绕的是**每批的
+  固定 release 税**，而**不是**「多环服务成本」；「少 producer（`PS*:G≈1:25~1:32`）」的压力来自
+  **单 producer 的 ~5 GB/s 上限 × 需要喂的环数=消耗速率**，不是每环有一笔固定罚。
+
+### 63.8 结论与判据
+
+- **§62.10 尾巴补齐**（producer 服务模型）：producer 服务成本 = **纯每批成本**（恒定 `cyc/batch`），
+  **与服务的环数无关**（`wpp=1→64` 吞吐持平）；加回 plain-load consumer 也只加一笔固定开销、
+  不随环数放大。**`§62.7` 的「producer 环扇出」归因被隔离证伪**，§62 的 `G` 依赖须记在 worker
+  侧（TMA/折叠/数据面/占用率）。
+- **数值安全**：producer-only 与带 consumer 两档 `sink` 均逐位命中 host 参考（§63.2）。
+- **判据**：本微基准是**写端单 measure**，只含 producer（+可选 plain-load consumer），
+  不含 TMA 取 task / 折叠 / 数据面，**不完整满足 C1–C5**；立场是给 §62 的「控制面成本」做一次
+  **producer/consumer 归因切分**。
+
+### 63.9 局限与踩到的坑
+
+- **不是 §62 的完整复刻**：consumer 是 **plain-load**（非 TMA/非折叠/非数据面），故「加 consumer
+  仍平」只能证「环数本身无成本」，**不能**直接证明 §62 的 `G` 依赖来自 TMA 路径——那需要把
+  TMA+折叠+数据面按 §62 加回（本节刻意不加，以隔离）。
+- **合成描述符**（`gen_word`，11264 B/批），非真实 MPK task；`WU4`/`gen` 生成成本与真实
+  `FullTaskDesc` 不同。
+- **writer 是寄存器 store**（非 TMA bulk store，§53 证载体影响绝对值）；故 ~5.2 GB/s/SM 是
+  **寄存器写载体**的 producer 天花板。
+- **无背压**（`CAPp=chunk`）：本节只测「服务速率」，不测有界环的背压/死锁（那由 §31–§35/§42–§44 覆盖）。
+- **未与 DeepGEMM SM100 路径对跑**（SM100 专属，本机不具备）。

@@ -1,0 +1,49 @@
+########## §63 producer 服务模型：每环服务成本 vs 环数 ##########
+########################################################################
+# §63 producer 服务模型：每环服务成本 vs 环数（target H100/sm90a）
+# DW=88(352B/batch)，K=32，T=256，纯 producer（§A–§E 无 worker/背压/数据面）
+########################################################################
+
+===== §A 正确性（PS=8,R=32,chunk=8）：producer-only sink 对 host 参考 =====
+  sink=1485236534821600 ref=1485236534821600 -> OK
+
+===== §B 固定 Btot=64（每 producer 总批数恒定），扫每 producer 环数 wpp（producer-only）=====
+  wpp-scan    prod PS=32  R=32    wpp=1   chunk=64   -> descGB/s=158.2   cyc/prod=277493    cyc/batch=4335.8  (OK)
+  wpp-scan    prod PS=32  R=64    wpp=2   chunk=32   -> descGB/s=162.1   cyc/prod=270717    cyc/batch=4230.0  (OK)
+  wpp-scan    prod PS=32  R=128   wpp=4   chunk=16   -> descGB/s=164.0   cyc/prod=267249    cyc/batch=4175.8  (OK)
+  wpp-scan    prod PS=32  R=256   wpp=8   chunk=8    -> descGB/s=165.0   cyc/prod=265570    cyc/batch=4149.5  (OK)
+  wpp-scan    prod PS=32  R=512   wpp=16  chunk=4    -> descGB/s=165.6   cyc/prod=264711    cyc/batch=4136.1  (OK)
+  wpp-scan    prod PS=32  R=1024  wpp=32  chunk=2    -> descGB/s=166.0   cyc/prod=264298    cyc/batch=4129.6  (OK)
+  wpp-scan    prod PS=32  R=2048  wpp=64  chunk=1    -> descGB/s=166.0   cyc/prod=264083    cyc/batch=4126.3  (OK)
+
+===== §C 对照：wpp=1（每 producer 一环），扫 Btot=chunk（纯每批成本标度）=====
+  chunk-scan  prod PS=32  R=32    wpp=1   chunk=8    -> descGB/s=127.1   cyc/prod=34858     cyc/batch=4357.3  (OK)
+  chunk-scan  prod PS=32  R=32    wpp=1   chunk=16   -> descGB/s=143.4   cyc/prod=69523     cyc/batch=4345.2  (OK)
+  chunk-scan  prod PS=32  R=32    wpp=1   chunk=32   -> descGB/s=153.1   cyc/prod=138844    cyc/batch=4338.9  (OK)
+  chunk-scan  prod PS=32  R=32    wpp=1   chunk=64   -> descGB/s=158.3   cyc/prod=277443    cyc/batch=4335.0  (OK)
+  chunk-scan  prod PS=32  R=32    wpp=1   chunk=128  -> descGB/s=160.8   cyc/prod=555181    cyc/batch=4337.4  (OK)
+  chunk-scan  prod PS=32  R=32    wpp=1   chunk=256  -> descGB/s=162.2   cyc/prod=1109863   cyc/batch=4335.4  (OK)
+
+===== §D producer 数标度：固定 wpp=8、Btot=64（chunk=8），扫 PS =====
+  PS-scan     prod PS=1   R=8     wpp=8   chunk=8    -> descGB/s=5.2     cyc/prod=265737    cyc/batch=4152.1  (OK)
+  PS-scan     prod PS=2   R=16    wpp=8   chunk=8    -> descGB/s=10.3    cyc/prod=265992    cyc/batch=4156.1  (OK)
+  PS-scan     prod PS=4   R=32    wpp=8   chunk=8    -> descGB/s=20.7    cyc/prod=265735    cyc/batch=4152.1  (OK)
+  PS-scan     prod PS=8   R=64    wpp=8   chunk=8    -> descGB/s=41.4    cyc/prod=266137    cyc/batch=4158.4  (OK)
+  PS-scan     prod PS=16  R=128   wpp=8   chunk=8    -> descGB/s=82.7    cyc/prod=265561    cyc/batch=4149.4  (OK)
+  PS-scan     prod PS=32  R=256   wpp=8   chunk=8    -> descGB/s=165.1   cyc/prod=265578    cyc/batch=4149.7  (OK)
+
+===== §F 对照：PS=8、NB=2048（R*chunk=2048），扫环数 R；同配置 producer-only vs +consumer =====
+  F-prod      prod PS=8   R=128   wpp=16  chunk=16   -> descGB/s=42.6    cyc/prod=1060268   cyc/batch=4141.7  (OK)
+  F-cons      +cons PS=8   R=128   wpp=16  chunk=16   -> descGB/s=37.4    cyc/prod=1206162   cyc/batch=4711.6  (OK)
+     (+consumer 校验 sink=23632534573120896 2*ref=23632534573120896 -> OK)
+  F-prod      prod PS=8   R=256   wpp=32  chunk=8    -> descGB/s=42.7    cyc/prod=1060408   cyc/batch=4142.2  (OK)
+  F-cons      +cons PS=8   R=256   wpp=32  chunk=8    -> descGB/s=37.4    cyc/prod=1204320   cyc/batch=4704.4  (OK)
+     (+consumer 校验 sink=23632534573120896 2*ref=23632534573120896 -> OK)
+  F-prod      prod PS=8   R=512   wpp=64  chunk=4    -> descGB/s=42.7    cyc/prod=1058730   cyc/batch=4135.7  (OK)
+  F-cons      +cons PS=8   R=512   wpp=64  chunk=4    -> descGB/s=37.3    cyc/prod=1197997   cyc/batch=4679.7  (OK)
+     (+consumer 校验 sink=23632534573120896 2*ref=23632534573120896 -> OK)
+  F-prod      prod PS=8   R=1024  wpp=128 chunk=2    -> descGB/s=42.7    cyc/prod=1058350   cyc/batch=4134.2  (OK)
+  F-cons      +cons PS=8   R=1024  wpp=128 chunk=2    -> descGB/s=37.3    cyc/prod=1184369   cyc/batch=4626.4  (OK)
+     (+consumer 校验 sink=23632534573120896 2*ref=23632534573120896 -> OK)
+
+########## §63 完成 ##########
