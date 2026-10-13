@@ -1,0 +1,99 @@
+### P7-65 CUDA B2 production-kernel cumulative segment ablation
+
+==================================================================================
+Part A: each level's surviving outputs are bit-identical to level 6's (ablation = compute-only)
+==================================================================================
+
+# B8 T2048 H8
+    L1.dv2    vs L6.dv2        max_abs=0.000e+00  [OK ]
+    L1.dvb    vs L6.dvb        max_abs=0.000e+00  [OK ]
+    L2.dkgb   vs L6.dkgb       max_abs=0.000e+00  [OK ]
+    L3.dApre  vs L6.dApre      max_abs=0.000e+00  [OK ]
+    L4.dA     vs L6.dA         max_abs=0.000e+00  [OK ]
+    L5.db     vs L6.db         max_abs=0.000e+00  [OK ]
+    L0.dgk     vs L6.dgk       max_abs=0.000e+00  [OK ]
+
+# B2 T1024 H8
+    L1.dv2    vs L6.dv2        max_abs=0.000e+00  [OK ]
+    L1.dvb    vs L6.dvb        max_abs=0.000e+00  [OK ]
+    L2.dkgb   vs L6.dkgb       max_abs=0.000e+00  [OK ]
+    L3.dApre  vs L6.dApre      max_abs=0.000e+00  [OK ]
+    L4.dA     vs L6.dA         max_abs=0.000e+00  [OK ]
+    L5.db     vs L6.db         max_abs=0.000e+00  [OK ]
+    L0.dgk     vs L6.dgk       max_abs=0.000e+00  [OK ]
+
+# T512 H4
+    L1.dv2    vs L6.dv2        max_abs=0.000e+00  [OK ]
+    L1.dvb    vs L6.dvb        max_abs=0.000e+00  [OK ]
+    L2.dkgb   vs L6.dkgb       max_abs=0.000e+00  [OK ]
+    L3.dApre  vs L6.dApre      max_abs=0.000e+00  [OK ]
+    L4.dA     vs L6.dA         max_abs=0.000e+00  [OK ]
+    L5.db     vs L6.db         max_abs=0.000e+00  [OK ]
+    L0.dgk     vs L6.dgk       max_abs=0.000e+00  [OK ]
+
+# T250 H3 (non-div)
+    L1.dv2    vs L6.dv2        max_abs=0.000e+00  [OK ]
+    L1.dvb    vs L6.dvb        max_abs=0.000e+00  [OK ]
+    L2.dkgb   vs L6.dkgb       max_abs=0.000e+00  [OK ]
+    L3.dApre  vs L6.dApre      max_abs=0.000e+00  [OK ]
+    L4.dA     vs L6.dA         max_abs=0.000e+00  [OK ]
+    L5.db     vs L6.db         max_abs=0.000e+00  [OK ]
+    L0.dgk     vs L6.dgk       max_abs=0.000e+00  [OK ]
+
+  worst: max_abs=0.000e+00  [OK]
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+==================================================================================
+Part B: dev (CUPTI) per level -> per-segment marginal cost in the production kernel
+==================================================================================
+
+# B8 T2048 H8   (dev us per level; marginal delta = segment added over previous level)
+   L         adds       dev     delta  delta%core
+   0            -     610.5       0.0        0.0%
+   1          OUT     761.6     151.1       24.7%
+   2         DKGB     840.8      79.2       13.0%
+   3           DA    1024.7     183.8       30.1%
+   4         SAND    1021.6      -3.0       -0.5%
+   5           DB    1057.8      36.2        5.9%
+   6 GATE(+INTRA)    1262.1     204.3       33.5%
+
+# B2 T1024 H8   (dev us per level; marginal delta = segment added over previous level)
+   L         adds       dev     delta  delta%core
+   0            -      85.5       0.0        0.0%
+   1          OUT     102.2      16.8       19.6%
+   2         DKGB     113.0      10.8       12.7%
+   3           DA     136.2      23.2       27.1%
+   4         SAND     136.2      -0.0       -0.0%
+   5           DB     140.5       4.4        5.1%
+   6 GATE(+INTRA)     166.8      26.2       30.7%
+
+# T512 H4   (dev us per level; marginal delta = segment added over previous level)
+   L         adds       dev     delta  delta%core
+   0            -      10.0       0.0        0.0%
+   1          OUT      11.8       1.8       18.0%
+   2         DKGB      13.7       1.9       19.4%
+   3           DA      16.8       3.1       30.8%
+   4         SAND      16.7      -0.1       -1.3%
+   5           DB      17.5       0.9        8.8%
+   6 GATE(+INTRA)      20.4       2.8       28.5%
+
+# T250 H3 (non-div)   (dev us per level; marginal delta = segment added over previous level)
+   L         adds       dev     delta  delta%core
+   0            -       7.8       0.0        0.0%
+   1          OUT      10.2       2.4       31.4%
+   2         DKGB      11.9       1.7       22.1%
+   3           DA      15.4       3.5       44.8%
+   4         SAND      15.2      -0.2       -2.6%
+   5           DB      15.8       0.6        7.5%
+   6 GATE(+INTRA)      19.1       3.3       42.1%
+==================================================================================
+Part C: resources (regs / spill / smem) per level
+==================================================================================
+   L         adds   regs   spill      smem
+   0            -     31       0    129152
+   1          OUT     32       0    129152
+   2         DKGB     48       0    129152
+   3           DA     62       0    129152
+   4         SAND     64      36    129152
+   5           DB     79       0    129152
+   6 GATE(+INTRA)    112       0    129152

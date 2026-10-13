@@ -147,6 +147,33 @@ DEV void st2(float* p, float a, float b) {
 #define B2M_DB   1
 #define B2M_GATE 1
 #endif
+// P7-65: cumulative **segment ablation** for attribution (`-DB2M_PROD -DB2M_LEVEL=k`, k in 0..6).
+// Unlike the isolated builds (each a separate launcher with its own kernel signature), this keeps
+// *every* flag / launch signature / staging path intact and only removes the segment **bodies**
+// in reverse dependency order, so the marginal cost `T(k) - T(k-1)` is exactly what segment `k`
+// adds *on top of the production kernel*.  Add order: 1=OUT 2=DKGB 3=DA 4=SAND 5=DB 6=GATE
+// (INTRA rides with GATE; it needs the full production set).  Level 6 == the P7-60 production
+// kernel.  Levels < 5 leave `acc2/acc3` unwritten by design -- this build is for **timing only**.
+#if B2M_PROD
+#  ifndef B2M_LEVEL
+#    define B2M_LEVEL 6
+#  endif
+#  define B2M_OFF_OUT   (B2M_LEVEL < 1)
+#  define B2M_OFF_DKGB  (B2M_LEVEL < 2)
+#  define B2M_OFF_DA    (B2M_LEVEL < 3)
+#  define B2M_OFF_SAND  (B2M_LEVEL < 4)
+#  define B2M_OFF_DB    (B2M_LEVEL < 5)
+#  define B2M_OFF_GATE  (B2M_LEVEL < 6)
+#  define B2M_OFF_INTRA (B2M_OFF_GATE)
+#else
+#  define B2M_OFF_OUT   0
+#  define B2M_OFF_DKGB  0
+#  define B2M_OFF_DA    0
+#  define B2M_OFF_SAND  0
+#  define B2M_OFF_DB    0
+#  define B2M_OFF_GATE  0
+#  define B2M_OFF_INTRA 0
+#endif
 // P7-52: the *first non-GEMM segment* of B2 in CUDA -- the output branch
 // (`i_k==0`):   dvb[o_A,v] = sum_{o_t} A[o_A,o_t] * dv[o_t,v]   (== A @ dv)
 //               dv2[o_A,v] = beta[o_A] * dvb[o_A,v]             (the complete B2 output `dv2`)
@@ -850,7 +877,7 @@ b2mma_kernel(
         }
   #endif
 #endif
-#if B2M_OUT
+#if B2M_OUT && !B2M_OFF_OUT
         // ---- output branch (P7-52): dvb = A @ dv, contraction over chunk rows o_t ----
         // Warp `w` owns V columns [w*BW, w*BW+BW); only the stage whose V-tile contains
         // them contributes.  A[o_A,o_t] = Akk[token=i_t*BT+o_t, o_A] (index remap, no
@@ -879,7 +906,7 @@ b2mma_kernel(
             }
         }
 #endif
-#if B2M_DKGB && !B2M_HDW
+#if B2M_DKGB && !B2M_HDW && !B2M_OFF_DKGB
         // ---- second non-GEMM segment (P7-53): dkgb = A @ (-dw), contraction over o_t ----
         // Structurally identical to the output branch above (A-operand index remap, no
         // transpose), except the B-operand is the freshly-staged `dw` tile (k-tiled, warp
@@ -909,7 +936,7 @@ b2mma_kernel(
             }
         }
 #endif
-#if B2M_DA
+#if B2M_DA && !B2M_OFF_DA
         // ---- P7-54 base dA: dApre[o_t,o_u] += sum_{v in warp V cols} dv[o_t,v]*v[o_u,v] ----
         // Warp `w` owns V columns [w*BW, w*BW+BW) (only its matching stage contributes).
         // Lane `l` owns the 8 entries (r = l>>1, c = (l&1)*8 + i, i=0..7) of the [BT,BT] partial.
@@ -927,7 +954,7 @@ b2mma_kernel(
             }
         }
 #endif
-#if B2M_DB && !B2M_NODB
+#if B2M_DB && !B2M_NODB && !B2M_OFF_DB
         // ---- P7-56: mirror the raw `v` of this warp's owned V columns into `dbv` (the staged
         // `vv` tile is overwritten before `acc2` is complete, so `db`'s `dvb*v` term needs a copy).
         {
@@ -1009,7 +1036,7 @@ b2mma_kernel(
         dgk[((int64_t)(n * NT + i_t) * H + hh) * KD + kcol] = gpart;
     }
   #endif
-#if B2M_OUT
+#if B2M_OUT && !B2M_OFF_OUT
     // ---- store `dv2` (complete B2 output) and `dvb` = A@dv ----
     #pragma unroll
     for (int nt = 0; nt < 2; ++nt) {
@@ -1029,7 +1056,7 @@ b2mma_kernel(
         }
     }
 #endif
-#if B2M_DKGB && B2M_HDW
+#if B2M_DKGB && B2M_HDW && !B2M_OFF_DKGB
     // ---- P7-61 same-CTA handoff: run `dkgb = A @ (-dw)` **post-loop** off the in-kernel
     // `dw` (=accw, complete only after all V-tiles) instead of a global round-trip.  Mirror
     // this warp's `dw` fragment into `swall` exactly as the P7-54 `dw@kg^T` path does, then
@@ -1064,7 +1091,7 @@ b2mma_kernel(
         }
     }
 #endif
-#if B2M_DKGB
+#if B2M_DKGB && !B2M_OFF_DKGB
     // ---- store `dkgb` = A @ (-dw) (row = o_A token axis, col = output k) ----
     #pragma unroll
     for (int nt = 0; nt < 2; ++nt) {
@@ -1076,7 +1103,7 @@ b2mma_kernel(
         if (tr1 < T) st2(&dkgb[o1], acc3[nt][2], acc3[nt][3]);
     }
 #endif
-#if B2M_DA
+#if B2M_DA && !B2M_OFF_DA
     // ---- P7-54 post-loop: `dw @ kg^T` partial, reduce the 8 warps, store `dApre` ----
     {
         const int r = l >> 1, c0 = (l & 1) * 8;
@@ -1122,7 +1149,7 @@ b2mma_kernel(
         }
     }
 #endif
-#if B2M_SAND
+#if B2M_SAND && !B2M_OFF_SAND
     // ---- P7-55 final dA sandwich: dA = where(m_A, -(b_A @ ((dApre*beta_col) @ b_A)), 0) ----
     // `sh->da16` still holds `dApre` [o_t,o_u]; all ops are fp32 scalar (no tf32), so the
     // result is bit-comparable to a torch sandwich on the *same* `dApre`.
@@ -1167,7 +1194,7 @@ b2mma_kernel(
         }
     }
 #endif
-#if B2M_INTRA
+#if B2M_INTRA && !B2M_OFF_INTRA
     // ---- P7-63: folded B3 `intra` diagonal (docs/07 §65/§66).  `daB` still holds SAND's
     // sandwiched `X2`; `dAkk = (a>j & valid) ? -daB[a][j] : 0`.  Four `[BT,BT]@[BT,KD]` mmas
     // (warp owns output k-columns [w*BW, w*BW+BW)) -> additive `dq/dk/dg/db`.
@@ -1273,7 +1300,7 @@ b2mma_kernel(
         #undef SAKK
     }
 #endif
-#if B2M_GATE && !B2M_NODG
+#if B2M_GATE && !B2M_NODG && !B2M_OFF_GATE
     // ---- P7-57: gate chain -> final `dq`/`dk`/`dg` (FLA `chunk_bwd.py:173-189`) ----
     __syncthreads();   // raw `dgk` stores visible block-wide before the read-back below
     {
@@ -1395,7 +1422,7 @@ b2mma_kernel(
         }
     }
 #endif
-#if B2M_DB && !B2M_NODB
+#if B2M_DB && !B2M_NODB && !B2M_OFF_DB
     // ---- P7-56: db = sum_v dvb*v + sum_k dkgb*kg (cross-warp reduction of column sums) ----
     // acc2/acc3 fragment rows are g/g+8, cols nt*8+2t,nt*8+2t+1 (within the warp's owned slice).
     // `skg` is persistent (ensures the `dkgb*kg` term can be read post-loop); `dbv` mirrors the
@@ -1422,7 +1449,7 @@ b2mma_kernel(
             float s = 0.f;
             #pragma unroll
             for (int w = 0; w < NW; ++w) s += sh->dbrow[w][idx];
-#if B2M_INTRA
+#if B2M_INTRA && !B2M_OFF_INTRA
             #pragma unroll
             for (int w = 0; w < NW; ++w) s += sh->idbrow[w][idx];
 #endif

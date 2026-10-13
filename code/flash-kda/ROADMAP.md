@@ -807,6 +807,26 @@
        B1 净赢）；CUDA B2 生产核当前是**正确但更慢**的研究产物，下一杠杆＝把六段**重新融合回寄存器**
        （同 CTA 交接、消 `dA`/门控中间量落盘），但收益上界已被端到端钉在 ~1.6×。**边界**：`B2M_TMA`
        与 `B2M_INTRA` 未打通（TMA 分支未传 `dAqk_in`）；`pc` 的独立 Triton `intra` 计时含链外加法。
+- [x] **P7-65** 把 §67.4 的「六段非 GEMM 成本在同一个 1 block/SM 核里累积」**逐段归因**（此前每段成本都在
+       **各段独立**的 kernel/launch 里量，生产形态下的边际不可见）：给 `b2_mma_probe.cu` 加
+       `-DB2M_PROD -DB2M_HDW -DB2M_LEVEL=k`（k∈0..6，`b2_mma_probe.cu:150-176`），**保留所有 flag/launch
+       签名/staging**、只按逆依赖序删段的**函数体**（`1=OUT 2=DKGB 3=DA 4=SAND 5=DB 6=GATE(+INTRA)`，
+       INTRA 随 GATE）——与 P7-52…P7-57 的「独立 launcher」（连 kernel 签名一起换）根本不同，故能共存于
+       生产核内做增量扫描；`LEVEL=6` 即 P7-60 生产核、`LEVEL=0` 是带全套 staging 的裸 GEMM 核。新增
+       `harness/check_bwd_b2_prod_levels.py`（`check_bwd_b2_prod_levels.out.txt`，空闲卡）+
+       `harness/probe_b2_levels_ncu.sh`（`probe_b2_levels_ncu.out.txt`）+ `docs/07` §68。**Part A**：各 level
+       存活输出与 level 6 **逐位相同（max_abs=0，四组 shape 含非整除 T=250）**（消融纯 compute-only）。
+       **Part B/C**（`dev` µs，`B8T2048H8`，regs 31→112）：`OUT 151(24.7%)/DKGB 79(13%)/DA 184(30%)/
+       SAND −3/DB 36(5.9%)/GATE 204(33.5%)`——总非 GEMM 开销 **651.6µs**（与 §67 的 1265.8 互证），**OUT+DA+
+       GATE 三段吃 83%**；曲线**≈加性**、与各段独立数字同阶（修正 §67.4「累积」措辞）。**`ncu`**（逐值吻合
+       CUPTI，7/7）：**OUT 成本=交付物写 +130.8MB**（`dv2+dvb` 两个 `[B,T,H,V]`）、**GATE=交付物写 +198.2MB**
+       （`dqg+dkg+dg`）+散读 70MB+`exp2f`、**DA=标量数学**（只写 8MB 却把 bank-conflict 9.4M→20.8M ×2.2、
+       tensor 纹丝不动 1.61%）；SAND/DB 本就 ~0/36µs 且中间量早已核内（§55/§56/§64）。**结论（修正 §67.4）**：
+       「把六段**重新融合回寄存器**」上界只有 SAND+DB ≈ 40µs（=§67.3 的 ~4%），**不是 1.6×**——三段的钱花在
+       **交付物 IO 与 DA 的标量数学**上，重融合删不掉；**唯一有量级的单项杠杆＝把 DA 从标量 FMA 改成
+       `mma.sync`**（DA 是唯一仍标量、收缩维=全维 V/K 的非 GEMM 段，§57.6 早已写下该设计输入），把 184µs
+       压到 OUT 那样的 mma 量级即可补掉与 Triton 998µs 的 264µs 缺口大半。目标卡默认反向仍推荐 §45 的
+       `dAv→B1→融合 Triton B2/B3→cumsum`。
 - [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
       边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
       （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
@@ -1219,8 +1239,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-64 补测**。
-  - P7-64（本轮）：**把 K2 形状 CUDA B2 生产核第一次落进完整反向链**（此前验证全在段间/合成操作数）。
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-65 补测**。
+  - P7-65（本轮）：**把 §67.4 的「六段非 GEMM 成本在同一个 1 block/SM 核里累积」逐段归因**（此前每段
+    都在各段独立的 kernel/launch 里量）。给 `b2_mma_probe.cu` 加 `-DB2M_PROD -DB2M_HDW -DB2M_LEVEL=k`
+    （保留所有 flag/签名/staging、只按逆依赖序删段函数体，`b2_mma_probe.cu:150-176`）。新增
+    `harness/check_bwd_b2_prod_levels.py`（`check_bwd_b2_prod_levels.out.txt`，空闲卡）+
+    `harness/probe_b2_levels_ncu.sh`（`probe_b2_levels_ncu.out.txt`）+ `docs/07` §68。**Part A**：各 level
+    存活输出 vs level 6 **逐位相同**（四组 shape）。**Part B（关键）**：`B8T2048H8` 上 `OUT 151(24.7%)/
+    DKGB 79/DA 184(30%)/SAND −3/DB 36/GATE 204(33.5%)`，总非 GEMM **651.6µs**，**OUT+DA+GATE 占 83%**，
+    曲线**≈加性**（与各段独立数字同阶）。**`ncu`**：OUT/GATE 的成本=**交付物字节**（+130.8 / +198.2 MB
+    最终梯度写）、DA=**标量数学**（bank-conflict ×2.2、tensor 不动）。**结论（修正 §67.4）**：目标卡的
+    「重新融合回寄存器」上界仅 ~40µs（~4%）、**不做**；**唯一有量级杠杆＝`mma.sync` 化 DA**。
+  - P7-64（上轮）：**把 K2 形状 CUDA B2 生产核第一次落进完整反向链**（此前验证全在段间/合成操作数）。
     新增 `harness/check_bwd_prod_e2e.py`（`check_bwd_prod_e2e.out.txt`，空闲卡）+ `docs/07` §67。组装
     `dAv(Triton)→CUDA-B1→CUDA-B2-prod[→Triton B3 intra]→反向 cumsum`（只吃 K1 workspace），两变体
     `pc`（`prod_hdw`+独立 intra）/`pci`（`prod_hdw_intra` 单 launch）。**Part A**：6 组 shape（含非整除
@@ -2093,7 +2123,12 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-63 补测**，进入收尾/维护。
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-65 补测**，进入收尾/维护。
+  **P7-65（本轮）已把 §67.4 的「六段非 GEMM 累积」逐段归因**（`-DB2M_PROD -DB2M_HDW -DB2M_LEVEL=k`，
+  只删段函数体、保留签名）：`B8T2048H8` 上 `OUT 151/DA 184/GATE 204` 三段吃非 GEMM 开销的 83%、曲线≈
+  加性；`ncu` 证 OUT/GATE 成本=交付物字节、DA=标量数学。**结论（修正 §67.4）**：目标卡「重融合回寄存器」
+  上界仅 ~4%、**不做**；唯一有量级杠杆＝**`mma.sync` 化 DA**（把 184µs 压到 mma 量级可补 §67 与 Triton
+  融合核 264µs 缺口的大半）。默认反向仍推荐 §45 的 `dAv→B1→融合 Triton B2/B3→cumsum`（`docs/07` §68）。
   **P7-63 已兑现 P7-62/§65.6 的「唯一剩下的工程步」（B3 对角 intra 折进生产 launch）**：`-DB2M_INTRA`
   （需 `-DB2M_PROD`）/ `b2prod_intra_launch` 把核内 `dAkk`（SAND 的 `daB` 掩码）+ `dAqk` + 合流 `q/k/g`
   折进单次 launch，折进 vs「`prod`+独立 B3」`dqg/dkg` **逐位**、未触及输出逐位不变；但**大 shape 略慢
