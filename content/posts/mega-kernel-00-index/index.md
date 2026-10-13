@@ -68,4 +68,6 @@ categories: ["算子开发"]
 
 43. [MPK MTP 验证链走读：scatter → verify → commit 的消费链与批元素契约]({{< relref "mega-kernel-43-mpk-mtp-verify-chain" >}}) —— 把 draft 概率 / target 概率 / 拒绝采样 / 提交接成一条跨迭代链：`mtp_float_scatter`（编译期槽）与 `prob_scatter`（运行期 `step`）两路写法 + `prob_extract` 的 device 侧硬编码 `offset+1` 位移，`target_verify_probabilistic` 的 `P_target > u·P_draft` LCG 采样与贪心回退，以及 `mtp_token_ops` 四身体的两套索引契约（批并行 scatter vs request 级 prepare/embed）与 verify/commit 家族「无 `request_id`、从 0 索引」的批元素契约，并记 builder 侧三处静态落差（死 `draft_probs`、双 `rng_seed`、guard 外调用）
 
+44. [MPK Eagle3 commit device 身体走读：verify-aware 写回、跨迭代快照与 accept_hist 调试史]({{< relref "mega-kernel-44-mpk-eagle3-commit" >}}) —— 把 `eagle3_ops.cuh` 四个 body 逐行打开：`copy`/`concat`/`d2t_remap` 三个簿记搬运，以及全仓唯一的「verify-aware 收尾 task」`eagle3_commit_kernel`（四职责 = 写 verified 前缀 + 写 K 个新 draft + 发 `new_token_nums` 步进信号 + `drafts_prev` 跨迭代快照；`src_slot` 的 K=1 `ac-1`/K>1 强制 0 已知坑），核对「5 入 2 出」接口与运行时 `MPK_SPEC_DECODE` 消费端，并整理 device 侧自陈的 `accept_hist` bug 调查史（`paged_attention_sm100` `MAX_TOKENS=3` slot-0 分歧 → `attention_sm100.cuh` 的 `"+f"` MMA 修复同一 family）
+
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

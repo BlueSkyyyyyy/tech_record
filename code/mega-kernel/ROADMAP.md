@@ -3547,8 +3547,39 @@
   `docs/29`–`docs/41` device task 走读同档；跨度对应 `docs/08` §2 的跨迭代 view/barrier 边。
   配套博客 post `mega-kernel-43-mpk-mtp-verify-chain`（weight 44）并更新 `mega-kernel-00-index`
   第 43 项。P128-1 新留尾巴（§7）：`seed` 实际初始化位置未追、`comment/落差`只记不判、
-  `_draft_prob_buffer` 是 probabilistic 专属、`mtp_build_embed_input` 多 block 覆写整向量只记不判、
-  未构建、未与生产端到端对跑。**本轮新增增量。**
+   `_draft_prob_buffer` 是 probabilistic 专属、`mtp_build_embed_input` 多 block 覆写整向量只记不判、
+   未构建、未与生产端到端对跑。**本轮新增增量。**
+
+### P129 Eagle3 commit device 身体走读（`docs/43-mpk-eagle3-commit.md`）
+
+- [x] **P129-1** 补掉 `docs/39`（P125-1）**§9「未展开的更深层」**明留的尾巴——「`eagle3_commit_kernel`
+  的 device 身体（`eagle3_ops.cuh:157-315`，§6.3 已摘要、未逐行）与 `accept_hist` 调试历史」，
+  也即 `ROADMAP`「下一步候选」第二条剩余。见 `docs/43-mpk-eagle3-commit.md`（快照
+  `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与 `docs/06`–`docs/42` 同快照；**纯源码走读
+  （资料分析），本轮无新实验**；四个 body 只被 blackwell `task_header.cuh` include，SM100 专属，
+  本机不可执行）。三条 headline：
+  - **(A)** `eagle3_commit_kernel` 是全仓唯一的「verify-aware 收尾 task」，一次 device 调用做完四件事
+    （写 verified 前缀 `:197-202` + 写 K 个新 draft `:231-236` + `new_token_nums` 步进信号 `:311-314`
+    + `drafts_prev` 跨迭代快照 `:244-252`）；`src_slot` 是 K=1 `ac-1` / K>1 **强制 0** 的已知坑
+    （`:204-227`，K>1 走 `Q_LEN_OVERRIDE=1` 只写 slot 0）。**修正 `docs/39` 两处**：接口是
+    **`(5,2)`**（`graph.cc:920`）而非「7 入 2 出」、`eagle3_commit_layer` **在 demo 有调用者**
+    （`demo/qwen3/demo_30B_A3B_eagle3.py:880`）而非「无任何调用者」。
+  - **(B)** 「verify 需要上一轮 draft」的跨迭代依赖被 **attach_input 快照**绕过（不建图边、靠批间
+    屏障），运行时消费端是 `prepare_next_batch` 的 `#ifdef MPK_SPEC_DECODE` 分支
+    （`persistent_kernel.cuh:295-316`：`step += new_token_nums[req]`，<1 兜底 1）；同一 commit 内
+    `tokens`/`step` 按 `request_id`、而 `accepted_count[0]`/`drafts_prev[t_id]` 固定批元素 0
+    （与 `docs/42` §C 同现象）。
+  - **(C)** `accept_hist`（`:254-309`）是一段 device 侧自陈的 bug 调查史——原子直方图（`:288-290`）
+    + 前 16 迭代 trace（布局 `[0..K+1]` bin / `[K+2]` 计数器 / 每记录 `2K+2` int，`:291-308`）；
+    根因定位到 `paged_attention_sm100` 的 `MAX_TOKENS=3` slot-0 输出与 `MAX_TOKENS=2` 不一致
+    （`:264-287`），候选修复点指向 `attention_sm100.cuh` 的 `MMA_ITERS_M`/causal mask；与 `docs/38`
+    §6 的 `m16n16k16` `"+f"` in-place 累加器修复是**同一 family**（当前快照
+    `attention_sm100.cuh:505-523` 注释明确「corrupted the committed EAGLE3 token stream at K>=2」）。
+  §7 与 MTP commit（`docs/42`）逐维对照（职责数 2 vs 4、新增 `drafts_prev`、`accept_hist`）；
+  判据**只贡献 C1+C3**，与 `docs/29`–`docs/42` device task 走读同档。配套博客 post
+  `mega-kernel-44-mpk-eagle3-commit`（weight 45）并更新 `mega-kernel-00-index` 第 44 项。
+  P129-1 新留尾巴（§9）：`paged_attention_sm100` 内部未逐行、验收率/根因系源码注释自报、
+  causal-mask 行号漂移只记不判、demo 只读接线段、未构建。**本轮新增增量。**
 
 ## 每轮增量流程（autopilot）
 
@@ -3812,7 +3843,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P128-1 完成（1/1）**。补掉 `docs/41`（P127-1）**§6 明留的两条尾巴**——「`mtp_float_scatter`
+- 当前进度：**P129-1 完成（1/1）**。补掉 `docs/39`（P125-1）**§9「未展开的更深层」**明留的尾巴
+  「`eagle3_commit_kernel` 的 device 身体（`eagle3_ops.cuh:157-315`，§6.3 已摘要、未逐行）与
+  `accept_hist` 调试历史」，也即 `ROADMAP`「下一步候选」第二条剩余。见
+  `docs/43-mpk-eagle3-commit.md`（快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 专属）。
+  三条 headline：**(A)** `eagle3_commit_kernel` 是全仓唯一「verify-aware 收尾 task」，一次调用做完
+  四件事（写 verified 前缀 + 写 K draft + `new_token_nums` 步进 + `drafts_prev` 跨迭代快照），
+  `src_slot` 是 K=1 `ac-1`/K>1 强制 0 的已知坑；**修正 `docs/39` 两处**——接口是 **`(5,2)`**
+  （`graph.cc:920`）而非「7 入 2 出」、`eagle3_commit_layer` **在 demo 有调用者**
+  （`demo/qwen3/demo_30B_A3B_eagle3.py:880`）而非「无任何调用者」；**(B)** 跨迭代 draft 依赖由
+  attach_input 快照绕过，运行时消费端是 `prepare_next_batch` 的 `#ifdef MPK_SPEC_DECODE`
+  （`persistent_kernel.cuh:295-316`）；**(C)** `accept_hist`（`:254-309`）是 device 侧自陈 bug 调查史，
+  根因指向 `paged_attention_sm100` `MAX_TOKENS=3` slot-0 分歧，与 `docs/38` §6 的 `"+f"` MMA 修复
+  同一 family。判据只贡献 C1+C3。配套博客 post `mega-kernel-44-mpk-eagle3-commit`（weight 45）
+  并更新 `mega-kernel-00-index` 第 44 项。P129-1 新留尾巴见 §9（`paged_attention_sm100` 内部未逐行、
+  验收率/根因系源码注释自报、行号漂移只记不判、demo 只读接线段、未构建）。
+- 下一步候选：`ROADMAP`「下一步候选」第二条已闭合；可继续走其一——`docs/35` §9 遗留的其它未走读
+  相邻层（`mla_prefill_host.cu` 原型、CUTLASS `collective_builder` 侧 QK/PV atom），或把
+  `docs/43` §9 明留的 `paged_attention_sm100`（`attention_sm100.cuh` 750 行）内部逐行打开
+  （把 §4.4 转述的 `MAX_TOKENS=3` slot-0 分歧回到源码级），或 `eagle3_commit` 的 K>1「proper
+  mbt-parallel chain」缺口（源码注释 `:217` 自陈未实现）的静态追述。
+- 此前：**P128-1 完成（1/1）**。补掉 `docs/41`（P127-1）**§6 明留的两条尾巴**——「`mtp_float_scatter`
   的 device 身体（`mtp_token_ops.cuh`）未逐行」与「`target_verify_*` 如何消费 `prob_extract` 的输出
   （拒绝采样比较 `P_target > u·P_draft`）只按注释转述」，也即 `ROADMAP`「下一步候选」第二条。见
   `docs/42-mpk-mtp-verify-chain.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：
@@ -3829,10 +3880,6 @@
   `mega-kernel-43-mpk-mtp-verify-chain`（weight 44）并更新 `mega-kernel-00-index` 第 43 项。
   P128-1 新留尾巴见 §7（`seed` 初始化未追、落差只记不判、`_draft_prob_buffer` probabilistic 专属、
   `mtp_build_embed_input` 多 block 覆写只记不判、未构建）。
-- 下一步候选：`docs/41` §6 两条尾巴与 `ROADMAP`「下一步候选」第二条已闭合；可继续走
-  `ROADMAP`「下一步候选」第二条剩余——`docs/35` §9 遗留的其它未走读相邻层（`mla_prefill_host.cu`
-  原型、CUTLASS `collective_builder` 侧 QK/PV atom），或 `eagle3_commit_kernel` 的 device 身体
-  （`eagle3_ops.cuh:157-315`，`docs/39` §6.3 已摘要、未逐行）与 `accept_hist` 调试历史。
 - 此前：**P127-1 完成（1/1）**。补掉 `docs/39`（P125-1）**§9「未展开的更深层」**第一句与
   `ROADMAP`「下一步候选」第一条——把 `softmax_gather_sm100.cuh`/`prob_scatter_sm100.cuh`（含
   `prob_extract_task_impl`）三个概率簿记 device 身体逐行打开，见 `docs/41-mpk-prob-bookkeeping.md`
