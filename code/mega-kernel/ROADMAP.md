@@ -3437,6 +3437,39 @@
   接受率数字为源码注释自报、`lookahead`/`eagle3` handler 字典缺失只记 `ValueError`）。
   **本轮新增增量。**
 
+### P126 MPK 退役实现走读（`docs/40-mpk-deprecated-paged-attention.md`）
+
+- [x] **P126-1** 补掉 `docs/39`（P125-1）**§9「局限」第二句**与 `docs/37`/`docs/38` 都点到、却
+  从未逐行打开的那一处尾巴——「`tasks/deprecated/` 此前各篇均『不涉』，其唯一成员
+  `paged_attention.cuh`（496 行）可直接走读」（`ROADMAP`「下一步候选」第二条）。见
+  `docs/40-mpk-deprecated-paged-attention.md`（快照 `mirage-project/mirage` 分支 `mpk` commit
+  `f9eb70c`，与 `docs/06`–`docs/39` 同快照；**纯源码走读（资料分析），本轮无新实验**）。
+  三条 headline：
+  - **(A) 它是仓库里唯一把「paged-attention 计算」与「新 token K/V 写回页缓存」融进同一个 task 的
+    device 身体**（`:473-484` 把最后 tile 第 `(seq_len-1)%64` 行写回最后一页）；而今天的实现把这件事
+    拆成两个 task（`multitoken_paged_attention*` 只读、注释 `:99-102` 明说「页已预分配、数据后拷」，
+    KV 写入走 `mla_kv_cache_gather_sm100`/`dflash_kv_store_sm100`）——**融合边界不是越融越好，
+    「把写回从读里拆出去」是让 task 可复用/可调度的先决条件**，对上 `docs/05`/`docs/23`「少而重 vs
+    多而杂」。
+  - **(B) 自包含单 batch × 单 KV head × 单 CTA 的 FA2 手写实现**：`m16n16k16` mma（1x4x1 做 QK^T、
+    1x1x4 做 PV）、在线 softmax（`m/d/o` 三段 rescale，`d=1.f` 初始化 quirk 经首轮 `rescale=0`
+    清零）、4 warp 分片 + warp0 全量 `m/d/o` buffer 合并（对照 `docs/37` §5.1 issue #702/#740 的
+    m-tile 分块与 Q/O SMEM 复用）、融合 QK-norm/RoPE、NHD 页缓存 + 双缓冲 64-key tile——功能是后世
+    全部特性的最早期快照。
+  - **(C) 接线状态是「彻底的孤儿」**：全仓无任何文件 `#include` 它（唯一引用在单测 wrapper
+    `runtime_kernel_wrapper.cu:363`，被 `#ifdef DEPRECATED_TESTS` 包住，而 `DEPRECATED_TESTS`
+    全仓无人 `#define`）；`using kernel::paged_attention_task_impl;`（`:18`）与
+    `m.def("paged_attention", …)`（`:1886`）**全被注释**；且 wrapper 只 include ampere/blackwell
+    `task_header`（`:2-3`）从不 include 本文件——比 `docs/16`/`docs/20`/`docs/29` 的「已实现未接线」
+    更彻底：**连同接线尝试一起被归档**。
+  另记两条**静态观察只记不判**：`page_indices` 只写尾段（`:165-171`）、`S_O_BUFFER_SIZE` 被注释
+  （`:136`）而 `s_o_buffer` 按 `threadIdx.x<<5` 使用（`:419`）；旧式裸 include 约定（`common.h` 等）
+  在当前目录布局下已不可解析。判据**只贡献 C3 的范围**（一个 paged-attention 段 = 一个 task），
+  且是**被淘汰的 C3 范围划分**（与 `docs/29`–`docs/39` 同档）。配套博客 post
+  `mega-kernel-41-mpk-deprecated-paged-attention`（weight 42）并更新 `mega-kernel-00-index` 第 41 项。
+  P126-1 新留尾巴（§5）：退役原因是从两代代码并置推断（无 deprecation notice/提交记录可核）、
+  `dmem_layout`/`smem_layout`/ampere `rms_norm`/`rotary_embedding` 内部未展开、未构建。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3699,8 +3732,9 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P125-1 完成（1/1）**。补掉 `docs/14`/`docs/24`/`docs/26` 只列名字、`docs/34`–`docs/37` 只走 MLA-MTP attention 的那一整层 device 目录 `tasks/speculative_decoding/`（5 头文件 1014 行），见 `docs/39-mpk-speculative-decoding.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** 全部是「查答案 / 搬 token」的簿记型 device 身体、无一吃 TC，却是投机正确性枢纽（`accepted_count`/`new_token_nums`/`tokens[]` 落位→运行时步进），是 `docs/04` §8/§10「task 数/事件扇入扇出」来源；**(B)** 同一「验证 draft」语义三套并行实现接线各异——prompt-lookup 贪心（`TaskType 114`）、DeepSeek-V3 MTP strict/probabilistic/commit（`271/283/272`）、两枚「有定义零调用者」死代码（`target_verify_synthetic_kernel`、`find_ngram_global_kernel_sequential`）；**(C)** Eagle3 Python 落差——类注释声明完整 verify 管线但 `build_draft_loop` 只跑 draft loop，`copy_layer`/`eagle3_commit_layer` 快照无调用者。§1 记静态 include 落差（`target_verify.cuh`/`prompt_lookup.cuh` 不在生产 `task_header` include 集、单测 `using`/`m.def` 被注释，只记不判）；§6.3 转述 `eagle3_commit_kernel` 注释里 `paged_attention_sm100` `MAX_TOKENS=3` slot-0 分歧的 bug 调查（同 `docs/38` §6 `"+f"` 的 MMA_ITERS_M>1 family）。判据**只贡献 C1+C3**。配套博客 post `mega-kernel-40-mpk-speculative-decoding`（weight 41）并更新 `mega-kernel-00-index` 第 40 项。P125-1 新留尾巴见 §9（include 落差只记不判、`softmax_gather`/`prob_scatter`/`prob_extract` 三身体未逐行、`MAX_TOKENS=3` slot-0 分歧未独立复现、接受率数字为注释自报、`lookahead`/`eagle3` handler 字典缺失只记 `ValueError`）。
-- 下一步候选：`tasks/speculative_decoding/` 已闭合；可继续沿 `docs/39` §9 尾巴走（三个概率簿记 device 身体 `softmax_gather_sm100.cuh`/`prob_scatter_sm100.cuh`/`prob_extract_sm100.cuh` 未逐行）或打开尚未走读的 `tasks/deprecated/paged_attention.cuh`（退役实现，`tasks/deprecated/` 此前各篇均「不涉」）。
+- 当前进度：**P126-1 完成（1/1）**。补掉 `docs/39`（P125-1）§9 尾巴与 `ROADMAP`「下一步候选」第二条——把仓库里**唯一归档在 `tasks/deprecated/` 下的 task** `paged_attention.cuh`（496 行）逐段打开，见 `docs/40-mpk-deprecated-paged-attention.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** 它是仓库里唯一把「paged-attention 计算 + 新 token K/V 写回页缓存」融进同一 task 的 device 身体（`:473-484`），而今天拆成「只读 attention + 独立 KV store + 独立 norm/rope」——**融合边界不是越融越好，「把写回从读里拆出去」是 task 可复用/可调度的先决条件**；**(B)** 自包含单 batch×单 KV head×单 CTA 的 FA2 手写实现（`m16n16k16` mma 的 1x4x1/1x1x4、在线 softmax、4 warp 分片 + warp0 全量合并、融合 QK-norm/RoPE、NHD 页缓存 + 双缓冲 64-key tile），是后世全部特性的最早期快照；**(C)** 接线是「彻底的孤儿」——无任何 include、`DEPRECATED_TESTS` 全仓无人 `#define`、`using`/`m.def` 全被注释、wrapper 只 include ampere/blackwell `task_header`。另记两条静态观察只记不判（`page_indices` 只写尾段、`S_O_BUFFER_SIZE` 被注释）与旧式裸 include 约定。判据**只贡献 C3 的范围**（且是被淘汰的划分）。配套博客 post `mega-kernel-41-mpk-deprecated-paged-attention`（weight 42）并更新 `mega-kernel-00-index` 第 41 项。P126-1 新留尾巴见 §5（退役原因系推断、布局/旧 norm/rope 内部未展开、未构建）。
+- 下一步候选：`tasks/deprecated/` 已闭合（唯一成员走完）。可继续沿 `docs/39` §9 剩余尾巴走（三个概率簿记 device 身体 `softmax_gather_sm100.cuh`/`prob_scatter_sm100.cuh` 的**逐行**内部——`docs/37` §3.3 只给了行号级摘要、`docs/39` §9 记为「未逐行」），或打开 `docs/35` §9 遗留的其它未走读相邻层（`mla_prefill_host.cu` 原型、CUTLASS `collective_builder` 侧 QK/PV atom）。
+- 此前：**P125-1 完成（1/1）**。补掉 `docs/14`/`docs/24`/`docs/26` 只列名字、`docs/34`–`docs/37` 只走 MLA-MTP attention 的那一整层 device 目录 `tasks/speculative_decoding/`（5 头文件 1014 行），见 `docs/39-mpk-speculative-decoding.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** 全部是「查答案 / 搬 token」的簿记型 device 身体、无一吃 TC，却是投机正确性枢纽（`accepted_count`/`new_token_nums`/`tokens[]` 落位→运行时步进），是 `docs/04` §8/§10「task 数/事件扇入扇出」来源；**(B)** 同一「验证 draft」语义三套并行实现接线各异——prompt-lookup 贪心（`TaskType 114`）、DeepSeek-V3 MTP strict/probabilistic/commit（`271/283/272`）、两枚「有定义零调用者」死代码（`target_verify_synthetic_kernel`、`find_ngram_global_kernel_sequential`）；**(C)** Eagle3 Python 落差——类注释声明完整 verify 管线但 `build_draft_loop` 只跑 draft loop，`copy_layer`/`eagle3_commit_layer` 快照无调用者。§1 记静态 include 落差（`target_verify.cuh`/`prompt_lookup.cuh` 不在生产 `task_header` include 集、单测 `using`/`m.def` 被注释，只记不判）；§6.3 转述 `eagle3_commit_kernel` 注释里 `paged_attention_sm100` `MAX_TOKENS=3` slot-0 分歧的 bug 调查（同 `docs/38` §6 `"+f"` 的 MMA_ITERS_M>1 family）。判据**只贡献 C1+C3**。配套博客 post `mega-kernel-40-mpk-speculative-decoding`（weight 41）并更新 `mega-kernel-00-index` 第 40 项。P125-1 新留尾巴见 §9（include 落差只记不判、`softmax_gather`/`prob_scatter`/`prob_extract` 三身体未逐行、`MAX_TOKENS=3` slot-0 分歧未独立复现、接受率数字为注释自报、`lookahead`/`eagle3` handler 字典缺失只记 `ValueError`）。
 - 此前：**P124-1 完成（1/1）**。补掉 `docs/37`（P123-1）**§8「局限」明留的两条尾巴**——「`sampling_from_logits_kernel`（`tasks/common/sampling.cuh` 的 CUB BlockReduce 内部）未展开、`mma_m16n16k16`（`tasks/ampere/mma.cuh`）汇编未逐条」与「`mla_prefill_host.cu` 原型来源仍未走」。见 `docs/38-mpk-common-primitives.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** `tasks/common/` 是全部 device task 的 arch-agnostic 地基（伞状 `common_header.cuh` 被 41 个 task 引用、`utils.cuh` 被 33 个直引；`ampere/mma.cuh` 被两个非 MLA SM100 attention 引用）——「Blackwell」目录的通用 attention 仍在用 Ampere 手写 `mma.sync` + `cp.async` + CUB；**(B)** `common/sampling.cuh` 是 FlashInfer 移植的一趟式 Gumbel-Max（借 CUB `BlockReduce::Sum` 当 argmax 归约），生产登记 `TASK_SAMPLING_SM100`、与 SM100 分块版共用同一 `TaskType`；**(C)** `ampere/mma.cuh` 的 `"+f"` in-place 累加器修复是 load-bearing 的（决定 `attention_sm100` `MMA_ITERS_M>1`、进而 EAGLE3 token 流正确）。另记 `clear_smem_buffer` 的 128/256 线程口径落差、`copy_sm80.cuh` 即 `docs/04` §39–§56 实测原语本体、`mla_prefill_host.cu` 收口为「不在快照、外部来源」。判据**只贡献 C3**。配套博客 post `mega-kernel-39-mpk-common-primitives`（weight 40）并更新 `mega-kernel-00-index` 第 39 项。P124-1 新留尾巴见 §9（CUB 内部未展开、`bfloat16.h` 只读接口、`clear_smem_buffer` 128/256 口径并存不判、原型源文件缺失不可核、未与生产端到端对跑）。
 - 此前：**P123-1 完成（1/1）**。补掉 `docs/35`（P121-1）**§9**与 `docs/36`（P122-1）**§8**
   明留的同一处相邻尾巴——「注意力之外的 SM100 task 家族」，见 `docs/37-mpk-sm100-misc-tasks.md`

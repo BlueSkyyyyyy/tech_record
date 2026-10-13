@@ -62,4 +62,6 @@ categories: ["算子开发"]
 
 40. [MPK 投机解码 device 层走读：`tasks/speculative_decoding/*`]({{< relref "mega-kernel-40-mpk-speculative-decoding" >}}) —— 打开 `docs/14`/`docs/24`/`docs/26` 只列过名字、`docs/34`–`docs/37` 只走 attention 的投机解码 device 层：prompt-lookup 的 n-gram 查找（partial/global/global_sequential 三档）与贪心验证、DeepSeek-V3 MTP 的 strict/probabilistic/synthetic 三段验证 + accept/commit、vLLM-aligned 的 MTP 嵌入输入构造，以及 Eagle3 的 aux hidden 抓取/dim-1 concat/d2t 查表/verify-aware commit（含 `paged_attention_sm100` `MAX_TOKENS=3` slot-0 分歧的源码自陈 bug 调查），并核对五层生产布线（`TaskType`/`graph.cc`/`register`/前端/builder）与两处「有实现未接线」
 
+41. [MPK 退役实现走读：`tasks/deprecated/paged_attention.cuh`]({{< relref "mega-kernel-41-mpk-deprecated-paged-attention" >}}) —— 打开仓库里唯一归档在 `deprecated/` 下的 task：一套自包含「paged attention + 新 token K/V 写回页缓存 + 融合 QK-norm/RoPE」的单 CTA FA2 手写实现（m16n16k16 mma 的 1x4x1/1x1x4 warp 布局、在线 softmax、双缓冲 64-key tile、warp0 跨 warp 合并），与今天「只读 attention + 独立 KV store + 独立 norm/rope」的拆分解法并置对比，并坐实它「连同接线尝试一起被归档」的彻底孤儿状态（无 include、`DEPRECATED_TESTS` 未定义、`using`/`m.def` 全被注释）
+
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
