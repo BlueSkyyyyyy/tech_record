@@ -1907,6 +1907,43 @@
        → `bytes<false>=7360/bytes<true>=7392`）。**设备 7 PASS / Python oracle 6 PASS / 0 FAIL**。
        配套博客 `content/posts/mega-moe-71-deepep-hybrid-dispatch-combine`（索引页新增第 71 篇）。
 
+### P62 增量（opt-in，补齐 P54 只当「仅分析」放过的两个 bucket 集合算子）
+
+- [x] **P62-1** **DeepEP bucket 的 `all_reduce` / `reduce_scatter` 三后端 + 信用环 + bf16 随机舍入**
+      （`csrc/kernels/bucket/{all_reduce,reduce_scatter}.hpp`；
+      `deep_ep/include/deep_ep/impls/bucket/{all_reduce,reduce_scatter}/{nvlink,rdma,hybrid}.cuh`；
+      `layout/bucket/{all_reduce,reduce_scatter,workspace,chunk}.cuh`、`comm/bucket.cuh`；
+      `deep_ep/buffers/bucket.py`；`tests/bucket/test_{all_reduce,reduce_scatter}.py`；
+      `third-party/tilelang_ops/stochastic_rounding.py`）。第 64 篇（P54-1）只把**纯 NVLink all-gather**
+      （copy engine 驱动、无 SM kernel）讲透，`all_reduce`/`reduce_scatter` 因「用 NCCL GIN 设备 API」
+      被留作仅分析。本篇补齐：与 all-gather 不同，这两个**要归约、必须有 SM kernel**——纯 NVLink 腿用
+      `multimem.ld_reduce.add` 硬件归约（`all_reduce/nvlink.cuh:36-51` "fused reduce-scatter +
+      multicast-store all-gather"，把每 rank NVLink 流量降到 O(1)），RDMA 腿反向环 + `cp.reduce.async.bulk
+      .add.f32`（`ptx.cuh:148`）累加、`kWithScale` 时末 peer 留给寄存器只乘一次 scale（`all_reduce/rdma
+      .cuh:153/199-242`），hybrid 三级（multimem→RDMA→broadcast，`all_reduce/hybrid.cuh:145-332`、
+      `reduce_scatter/hybrid.cuh:102-278`）。**三个非平凡点**：① **两种完全不同的分块映射**——
+      all_reduce rank-major（`all_reduce/rdma.cuh:96-104`：`dst=ci%R, slot=(ci/R)%S, gen=ci/R/S`）、
+      reduce_scatter slot-major（`reduce_scatter/rdma.cuh:100-101`：`slot=ci%S, gen=ci/S`），R=4 时
+      8191/8192 个 chunk 的 (slot,gen) 不同；② **信用环 head/tail 背压**（发送等 `head≥gen`、接收等
+      `tail≥gen+1`、消费完回 `head`，`reduce_scatter/rdma.cuh:109-222`，**最后一个用槽的 chunk 免信用**
+      `:137`）；③ **fp32 求和顺序**——kernel「本地先行 + 反序环 `(rank-i)%R`」与测试参考
+      （`test_reduce_scatter.py:78-87`）**逐字一致**，正是 `rtol=0` 逐位判等的根因。bf16 路径
+      （`reduce_scatter/rdma.cuh:235-635`，仅 RDMA-only）用**随机舍入**消除截断偏差，哈希
+      `:401-412`（四常数 + fmix + 两终端乘子）与 **DeepGEMM `StochasticRoundToBF16` 同源**
+      （`0x846CA68B`/`0xD35A2D97`）；真实舍入指令 `cvt.rs.bf16x2.f32`（`ptx.cuh:604`）SM100 专属。
+      `cvt.rs`/`multimem`/`gin` 数据面**仅分析**；但布局几何、`ChunkIterator` 覆盖、两种映射、
+      `get_head_ptr/get_tail_ptr`、`fadd4/fmul4` 归约、bf16 哈希、host 配置算术**架构无关**。
+      H100(sm90a) 实测 `src/deepep_bucket_collectives.cu` +
+      `harness/exp_deepep_bucket_collectives.{sh,py,out.txt}`：**直接 include 真实头文件跑真实设备代码**，
+      与独立 host oracle 对拍 **PASS=30 / FAIL=0**——A) 8 个结构 `sizeof`/`offsetof` + `BucketSignals
+      =794688`/`BucketWorkspace=274792960` + 16MiB 预算全对；B1) `ChunkIterator` 3 桶 7 块恰好覆盖一次、
+      每块 offset/bytes 一致；B2/B3) 两种映射 0 不符 + 8191/8192 不同；B4) 信用环寻址
+      `(rank*S+slot)*8` 0 不符；C1) 反序环累加×scale vs `np.float32` 同序**逐位 0/16384**、升序朴素
+      922/4096 bit 不同；C2) all_reduce 环求和×scale 逐位 0/4096、vs fp64 relerr 1.40e-07；
+      D) bf16 哈希 vs tilelang 参考逐位 **0/4096**、随机位有熵、乘子与 DeepGEMM 同；E) host 配置算术
+      （mm/broadcast warps、chunk KB、slots）与信号预算上限全对。配套博客
+      `content/posts/mega-moe-72-bucket-allreduce-reduce-scatter`（索引页新增第 72 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1931,8 +1968,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P61 各增量完成（P15-1…P41-1、P42-1…P61-1）。**
-  本轮 P61-1：新建 `docs/71-deepep-hybrid-dispatch-combine.md`（+`src/deepep_hybrid.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P62 各增量完成（P15-1…P41-1、P42-1…P62-1）。**
+  本轮 P62-1：新建 `docs/72-bucket-allreduce-reduce-scatter.md`（+`src/deepep_bucket_collectives.cu`、
+  `harness/exp_deepep_bucket_collectives.{sh,py,out.txt}`）——补上第 64 篇（P54-1）只当「仅源码分析」
+  放过的两个 bucket 集合算子 `all_reduce`/`reduce_scatter`。与 all-gather（纯搬运、copy engine）不同，
+  这两个**要归约、必须有 SM kernel**：纯 NVLink 腿 `multimem.ld_reduce.add` 硬件归约（流量降到 O(1)）、
+  RDMA 腿反向环 + `cp.reduce.async.bulk.add.f32`、hybrid 三级（multimem→RDMA→broadcast）。三要点：
+  ① 两种**完全不同**的分块映射（all_reduce rank-major / reduce_scatter slot-major，R=4 时
+  8191/8192 不同）；② 信用环 head/tail 背压（最后一个用槽的 chunk 免信用）；③ fp32 反序环求和顺序
+  与测试参考逐字一致（`rtol=0` 逐位判等的根因）；bf16 路径随机舍入哈希与 DeepGEMM 同源。数据面
+  NCCL GIN / `cvt.rs` 仅分析；架构无关部分在 H100(sm90a) **直接 include 真实头文件跑真实设备代码**，
+  与独立 host oracle 对拍 **30 PASS / 0 FAIL**（反序环累加逐位 0/16384、bf16 哈希逐位 0/4096、
+  升序朴素 922/4096 bit 不同）。配套博客
+  `content/posts/mega-moe-72-bucket-allreduce-reduce-scatter`（索引页新增第 72 篇）。
+  上一轮 P61-1：新建 `docs/71-deepep-hybrid-dispatch-combine.md`（+`src/deepep_hybrid.cu`、
   `harness/exp_deepep_hybrid.{sh,py,out.txt}`）——补上 DeepEP 的**两级（hybrid = scale-out RDMA ×
   scale-up NVLink）EP dispatch/combine**（`hybrid_dispatch.cuh` 674 行 + `hybrid_combine.cuh` 627 行），
   即 Mega MoE 在 EP8/EP16 上真正跑的那条路（第 7/48/61 篇讲的都是 `num_scaleout_ranks==1` 的单级）。
@@ -2638,7 +2687,11 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P61 已完成（最新 **P61-1 DeepEP 的两级（hybrid）EP dispatch/combine**
+- **下一步**：P0~P62 已完成（最新 **P62-1 DeepEP bucket 的 `all_reduce`/`reduce_scatter`**：
+  三后端（NVLink multimem / RDMA 反向环 / hybrid 三级）+ 信用环 head/tail 背压 + bf16 随机舍入归约；
+  数据面 NCCL GIN / `cvt.rs` 仅分析，布局/映射/归约/hash/host 算术在 H100 真机跑**真实设备代码**
+  **30 PASS / 0 FAIL**；详见上）。
+  上一轮 P61-1：**DeepEP 的两级（hybrid）EP dispatch/combine**
   （`hybrid_dispatch.cuh` + `hybrid_combine.cuh`，即 Mega MoE 在 EP8/EP16 上真正跑的两级域路径）：
   数据面 NCCL GIN 仅分析；就绪哨兵 / tail 增量 / `do_psum` 前缀和 / round-robin 分片调度四个架构无关
   内核在 H100 真机跑**真实设备代码**，设备 7 PASS / Python 6 PASS / 0 FAIL；详见上）。
@@ -2795,8 +2848,9 @@
       布局/发射映射/请求索引/SF 拷贝 H100 真机设备 5 + Python 32 PASS）；**EP 的两级域 hybrid
       dispatch/combine 已由 P61-1 补齐**（`hybrid_dispatch.cuh`/`hybrid_combine.cuh`：数据面 NCCL GIN
       仅分析，就绪哨兵/tail 增量/`do_psum`/round-robin 四个架构无关内核 H100 真机 7+6 PASS）。DeepEP
-      侧余下的运行期空档（bucket 的 `all_reduce/reduce_scatter` 内核、Engram 真实 RDMA 与端到端、
-      hybrid 的端到端）都要 NCCL GIN 设备 API，待环境。
+      侧余下的运行期空档（Engram 真实 RDMA 与端到端、hybrid 的端到端）都要 NCCL GIN 设备 API，待环境。
+      （bucket 的 `all_reduce/reduce_scatter` 内核已由 P62-1 补齐：布局/映射/归约/bf16 哈希/host 算术
+      在 H100 真机跑真实设备代码 30 PASS，数据面仅分析。）
   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
     shared expert 分支的更深精读；端到端需 SM100，当前不可行。
   ⑤ **k-grouped SF 打包**：P16-1 已完成（host 契约 + device 逐行对拍，H100 真实设备代码）。
