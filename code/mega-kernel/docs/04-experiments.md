@@ -7297,3 +7297,159 @@ P=16 固定、扫数据面 `EDW`（`gen` 感知的数据面字数），三档时
 - **run-to-run 抖动**：P=64 的 `gen` 两次独立 bench 落在 1.19/1.40 ms（~18%），故绝对值作量级看，
   但「v4 砍标量 ~3.5×、饱和点右移、仍追不平 static」的**方向稳健**（§C 纯写各 P 的 v4/标量恒 3.48–3.99，极稳）。
 - **`mode 5` 不校验数值**（`got=0`）：它是隔离写入路径的纯吞吐口径，正确性由 §A 的 `gen` 档保证。
+
+## 50. 动态生产者的第三种写载体：TMA bulk store（SMEM→global）能追平「读」的带宽吗（P61-1）
+
+> 本节接续 §49（P60-1），补掉 §49.7 明留的**「最值得做的下一条尾巴」**：
+>
+> - 「**`uint4`（16 B）是『寄存器 store』的上限**；真实系统可用 **TMA bulk store**
+>   （`cp.async.bulk.global.shared::cta`，从 SMEM 落到 global）——理论可把写也接上**近 HBM 的整机写带宽**
+>   （§49 coop 到 P=128 已 875 GB/s，接近读路径 809 GB/s 量级），但**代价是必须先在 SMEM 造好**
+>   （SMEM↔寄存器搬运与 SMEM 预算是否划算未测）。这是最值得做的下一条尾巴。」
+>
+> §49 把动态生产者「现场生成描述符」的写入形态分成 **存储宽度**（4 B→16 B）与 **coalescing** 两个旋钮，
+> 实测 v4 砍 3.5×、coop 再 ~1.9×，纯写天花板 207→875 GB/s。但它自陈用的都是**寄存器 store**；
+> 「把写载体换到**最宽的 TMA store** 能不能追平读带宽」这条**没有实测**。本节把它做出来：
+> **同一套协议（分段子环 + 背压 + 每生产者游标 + TMA 取数 + 同数值），只把 producer 的写载体换成
+> TMA bulk store**，并额外拆出「SMEM 暂存本身的代价」与「TMA store 的引擎上限」。
+>
+> 四个问题：
+>
+> **Q1（§A）** TMA store 写出的 payload 是否与寄存器写逐位一致（跨 async proxy 的一组内存序是否正确）？
+> **Q2（§B，headline）** TMA store 把 `gen` 相对 static 的代价压到多少？能追平甚至超过 static 的读吗？
+> **Q3（§C/§C2/§C3/§C4）** 纯写吞吐：TMA store 的整机写带宽到哪？SMEM 暂存占多少？在飞深度/大块 store 能否补上？
+> **Q4（§D）** 接上数据面（EDW>0）后，「生成盖不住执行」是否被 TMA store 进一步收窄？
+>
+> 真实锚点（mirage 快照 `f9eb70c`，与 docs/06–docs/09 同快照）：MPK 的 worker **取 task 用 TMA bulk 1D**
+> （`cp.async.bulk.shared::cta.global.mbarrier::complete_tx::bytes`，取 task 路径）；producer 侧
+> （scheduler）**不现场生成**——`execute_scheduler`（`persistent_kernel.cuh:1254-1523`）只做「事件→task id」
+> 映射入队，payload 来自编译期**一次性 emit 的 `FullTaskDesc` 数组**（`runtime.cc`）。故本节量的是
+> MPK **没有采用**的路线：现场生成即使接上最宽写载体（TMA store）也救不回多少，给「预计算 + 读」以量化理由。
+> worker 数是 H100 配置 **128 worker / 16 scheduler**（`utils.py:25-29`）。
+>
+> 源码 `src/dyn_producer_tma.cu`，脚本 `harness/dyn_producer_tma.sh`，原始输出
+> `harness/dyn_producer_tma.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+> `DW=88`=352 B（对齐论文 §6.1）、`NDESC=393216`（静态数组 138.4 MB ≫ 50 MB L2）、`K=32`、`D=2`、`T=256`、
+> `grid=P+G=132=NSM`（全共驻）、每配置 2 次不计时 warmup + **min-of-7**）。
+
+### 50.1 机制：第四种写载体（唯一新变量 `gvar=3`）与两个隔离口径
+
+沿用 §48/§49 的骨架（`DW=88`=352 B 自描述描述符、TMA bulk + 硬件 mbarrier 取数、`D` 槽环、执行 =
+控制面折叠 + 数据面流式读 + `R` 轮 LCG、P 段子环 + 背压 + 每生产者游标），在前面三种写载体
+（`gvar 0` 标量 / `1` 逐线程 `uint4` / `2` 协作 coalesced）之外新增：
+
+- **`gvar 3`（TMA bulk store）**：producer 按 **batch 粒度**（`K` 条描述符 = `K·DW·4 = 11264 B`）协作
+  生成到 **SMEM 暂存槽**（`SB=4` 个环形槽；协作时每线程写 `K·DW/256 ≈ 11` 个字），
+  `fence.proxy.async.shared::cta` 让 generic 写对 async proxy 可见，再由 lane0 发一条
+  `cp.async.bulk.global.shared::cta.bulk_group`（整批一条 11 KB 落到环槽）、`cp.async.bulk.commit_group`——
+  **一次 SMEM→global 搬运整批**，而不是每条描述符 88 条寄存器 store。
+
+两个隔离口径：
+
+- **`mode 5 pure`**：只 launch P 个 producer、无 worker、无背压，量**纯写吞吐**（四种载体同口径）。
+- **`mode 6 sgen`**：只生成到 SMEM、**不发 global store**（`gvar3`），把「SMEM 暂存/生成本身的代价」
+  从「TMA store 的代价」里拆出来；`bulk_wait_read`/`commit` 都跳过。
+- **`mode 7 pure-big`**：纯写，但每 **`NB` 个 batch** 合成**一次大块** TMA store（`NB·K·DW·4` B，双缓冲
+  SMEM），用于回答「TMA store 是否只是被 11 KB 的小 store 拖累」。
+
+**正确握手的关键**：跨 SM 的 TMA **store**（async proxy 写）要能被另一 SM 的 TMA **load**（async proxy 读）
+看到，必须 `cp.async.bulk.wait_group 0`（等写**完成**）→ `fence.proxy.async.global` → 再 `st.release` 发布
+`head[p]`。`wait_group.read` 只保证**源读完**，不足以保证写可见。故 `gen` 档每批都付一次 `wait_group 0`
+（**serialized**，见 §50.4）；`mode 7` 只滚动 `wait_group.read` 回收槽（**可重叠，但不是正确握手**）——
+两者刻意分开，量「正确握手要付的代价」。
+
+### 50.2 §A 正确性：TMA store 与寄存器写逐位一致
+
+`P∈{1,2}` × `gvar∈{0,1,2,3}`、`static`/`sched`/`gen` 三档，有界子环 + 背压 + 每生产者游标：
+
+- 四种写载体、2 种 P 下，`gen` 与 `static` **全部逐位一致**（`got=404219327039195`，与 §48/§49 同值）——
+  **跨 async proxy 的 store→load 握手（`wait_group 0` + `fence.proxy.async.global` + release/acquire）
+  不动数值**。这是本节的前置条件：TMA store 作为写载体在语义上是透明的。
+
+### 50.3 §B（headline）TMA store 追不平 static，也追不平寄存器 v4/coop
+
+static（G=132，无 producer）= **0.1698 ms / 815 GB/s**（138.4 MB 描述符流）。四种写载体下 `gen` 相对 static：
+
+| P | G | gen_s (ms) | ×static | gen_v4 (ms) | ×static | gen_co (ms) | ×static | gen_tma (ms) | ×static | tma/s | tma/co |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 131 | 36.61 | 215.6× | 10.46 | 61.6× | 19.36 | 114.0× | **35.14** | **206.9×** | 0.96 | 1.82 |
+| 4 | 128 | 9.32 | 54.9× | 2.78 | 16.4× | 5.00 | 29.5× | 8.99 | 52.9× | 0.96 | 1.80 |
+| 16 | 116 | 2.62 | 15.5× | 0.889 | 5.24× | 1.444 | 8.50× | 2.451 | 14.4× | 0.93 | 1.70 |
+| 32 | 100 | 1.92 | 11.3× | 0.657 | 3.87× | 0.880 | 5.18× | 1.378 | 8.12× | 0.72 | 1.57 |
+| 64 | 68 | 1.25 | 7.38× | 0.627 | 3.69× | 0.706 | 4.16× | 0.964 | 5.68× | 0.77 | 1.37 |
+
+- **TMA store（正确握手档）几乎等于标量**：`tma/s` 恒 0.72–0.96（P=1 时 35.14 vs 36.61 ms，只快 4%），
+  离 v4（`tma` 比 v4 慢 ~2–4×）和 coop（`tma/co` 1.37–1.82）都**远**。**§49 的假设「TMA store 可接上
+  近 HBM 写带宽」在 `gen` 这条正确握手路径上被直接证伪**。
+- 原因见 §50.4：`gen` 每批 `wait_group 0` 把 TMA store 串行化；即便不串行（§50.5 rolling），也追不平。
+
+### 50.4 §C/§C2/§C3 纯写：TMA store 的引擎短板与「正确握手」的代价
+
+`mode 5`（只有 P 个 producer）纯写吞吐（138.4 MB / 时间，GB/s）：
+
+| P | 标量 | v4 | coop | tma(ser) | tma(roll) | roll/v4 |
+|---|---|---|---|---|---|---|
+| 1 | 3.8 | 13.2 | 7.2 | 3.9 | 5.8 | **0.44** |
+| 16 | 57.0 | 203.1 | 113.9 | 62.6 | 92.9 | 0.46 |
+| 64 | 174.8 | 653.4 | 449.7 | 245.5 | 367.6 | 0.56 |
+| 128 | 206.5 | 812.4 | **881.7** | 472.6 | 722.5 | 0.89 |
+
+- **serialized（正确握手，`gen` 用的形态）**：P=128 只 **472.6 GB/s** = 0.58× v4、0.54× coop、2.29× 标量。
+- **rolling（`mode 7`，不算正确握手，仅测引擎上限）**：P=128 **722.5 GB/s**，仍 **0.89× v4、0.82× coop**——
+  **任何 P 下 TMA store 都不超过 16 B 寄存器 store**（`roll/v4` 0.44→0.89）。
+- **§C2 拆代价**（P=128）：只生成到 SMEM（`sgen`）= **766 GB/s**；加 serialized store 掉到 **471**；
+  加 rolling store 只掉到 **722**。⇒ **(a)「SMEM 生成」这一跳本身只有 ~766 GB/s**（寄存器→SMEM→global 是
+  两跳，比寄存器→global 多一跳）；**(b) rolling 的 TMA store 本身几乎不额外花钱（722 ≈ 766 的 94%）**；
+  **(c) 真正贵的是正确握手所要求的每批 `wait_group 0`（766→471，砍 39%）**。
+- **§C3 在飞深度无感**：serialized 路径扫 `wait_group.read` 深度 `tw=1/2/3`，P=128 = 475.9/471.5/473.0 GB/s
+  **完全相同**——`gen` 每批已经 `wait_group 0` 清空队列，深度旋钮失效；瓶颈是**每批 store 完成延迟**而非队列深度。
+
+### 50.5 §C4 store 粒度：大块能把 rolling 抬到 ~828，但仍不及 coop
+
+`mode 7 pure-big`：每次 store = `NB·K·DW·4` B（`NB=1` 时 11 KB、`NB=8` 时 90 KB；双缓冲 SMEM）：
+
+| P | NB=1 | NB=2 | NB=4 | NB=8 | coop（寄存器，对照） |
+|---|---|---|---|---|---|
+| 16 | 92.9 | 101.2 | 106.1 | 108.6 | 113.9 |
+| 64 | 367.6 | 399.8 | 418.2 | 427.0 | 449.2 |
+| 128 | 722.5 | 784.7 | 816.6 | **827.8** | **881.5** |
+
+- **store 粒度确实值钱**：P=128 从 NB=1（11 KB）722.5 抬到 NB=8（90 KB）**827.8 GB/s**，
+  每次 store 大 8× 就把吞吐抬 15%，说明 11 KB 的小 store 有可观的**每 store 固定开销**（async 引擎
+  issue/fence/commit）。
+- **但仍有硬顶**：即使 NB=8（占 180 KB SMEM 双缓冲），827.8 GB/s 仍 **0.94× coop（881.5）**、
+  与 v4（812）基本打平——**大块 TMA store 最好只是追平 16 B 寄存器 store，从未超过**。SMEM 也吃紧
+  （NB=16 需 360 KB 双缓冲，超过 H100 opt-in 上限 232448 B，做不了）。
+
+### 50.6 结论与判据
+
+- **§49 的假设被证伪**：把写载体换成最宽的 **TMA bulk store**，在 H100 上**不能**把「写」接上近 HBM 带宽。
+  最好情形（大块、rolling、非正确握手）~828 GB/s ≈ 寄存器 v4/coop；**正确握手（serialized）只有 472 GB/s**，
+  比标量仅快 2.3×、比 v4 慢 1.7×。三条量化原因：(a) 寄存器→SMEM→global 多一跳（`sgen` 上限 766）；
+  (b) 跨 proxy 正确握手要求每批 `wait_group 0`（766→472）；(c) 小 11 KB store 的固定开销（722→828 靠大块收回）。
+- **对「描述符通路」的统一画像**：§39–§46 量的是 worker **读**描述符（TMA bulk load，可达 **809–3000 GB/s**、
+  逼近 HBM 峰值）；本节量 producer **写**（任何载体 ≤ **828**、正确握手 472）——**读端可达 HBM 峰值、写端
+  无论多宽都到不了**，与 §49 的「单 SM 寄存器写上限 ~13 GB/s」互为表里。故 **预计算 + 读**是描述符通路的
+  唯一可行形态。
+- **对 MPK 的意义**：MPK 用**编译期预计算 `FullTaskDesc` + scheduler 只做事件→id 映射入队**
+  （`runtime.cc` / `persistent_kernel.cuh:1254-1523`），**根本不在设备侧现场造 payload**——本节给出更强理由：
+  **即使把现场生成接上最宽的写载体（TMA store），也救不回量级**。DeepGEMM 的段级 mega-kernel 更极端
+  （静态 warp 角色 + 编译期常量，没有运行时生成描述符这一步）。
+- **判据**：四种 `gen` 均 C1–C4（单 kernel、persistent、多算子范围、设备内协调）、比 §36–§49 更接近 C5
+  （P 个固定角色 producer），但 worker 仍静态分配 batch ⇒ **仍差 C5 一步**。
+
+### 50.7 局限与踩到的坑
+
+- **产物是合成描述符**（内容 = `gen_word`，非真实 GEMM/RMSNorm）；未与 DeepGEMM SM100 路径对跑（SM100 专属，本机不具备）。
+- **「正确握手 + 流水」的组合未测**：本节最坏的 472 GB/s 来自「每批 `wait_group 0`」这一**过保守**的握手；
+  一个**流水但正确**的形态（FIFO commit 后、发布第 j 批 head 前只 `cp.async.bulk.wait_group (win-1)`
+  保证最老批完成、`head` 落后 `win` 批发布）**未做**——理论可把 serialized 的 472 拉回 rolling 的 ~722–828
+  且保持正确。**这是最值得做的下一条尾巴。**
+- **高 P 下 `gen` < 纯写**（§D EDW=0：P=16 `gen_tma` 2.43 ms vs 纯写 2.21 ms）：producer 写与 worker 读争 HBM，
+  本节未单独量化读写配比（承 §49 同一条尾巴）。
+- **store 粒度受 SMEM 限**：H100 单 block opt-in 232448 B 双缓冲 ⇒ `NB≤8`；更大粒度（跨 block 协作 stage）未测。
+- **`mode 5/6/7` 不校验数值**（`got=0`）：它们是隔离写路径的纯吞吐口径，正确性由 §A 的 `gen` 档保证。
+- **踩坑**：TMA 路径初版错误地对 `mode 2`（sched，payload 预写、不分配 `ring`）也生效，向未分配的 `ring`
+  发 `cp.async.bulk` → **`illegal memory access` / 后续 kernel 挂起**；修正为仅 `is_gen || smem_only`
+  才走 TMA 写路径后恢复正常。另：`-G`/`-lineinfo` + cuda-gdb attach 显示挂起时 worker 全停在 `wait_head`
+  的自旋（`wait_head` 循环），producer 已退出——即**上游指向未分配的环**，与本条一致。

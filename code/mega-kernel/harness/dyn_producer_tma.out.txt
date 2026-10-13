@@ -1,0 +1,228 @@
+device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0  L2=50 MB  optin=232448  maxThreads/SM=2048
+worker/生产者 全共驻：grid = P + G = 132 SM。K=32 D=2 SMEM=22544 B  stage(SB=4)=45056 B
+静态数组 NDESC·DW·4 = 138.4 MB (≫ L2)
+
+===== §A 正确性：四种写入形态（0 标量/1 v4/2 coop/3 TMA store），NDESC=8192, EDW=8, R=0 =====
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=8192   mode=0 gvar=0     0.0344 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4224   mode=2 gvar=0     0.0467 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4224   mode=1 gvar=0     0.7722 ms/rep  got=404219327039195
+      P=1 gvar=0  static==  sched==  gen==  (all vs static-ref 404219327039195)
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=8192   mode=0 gvar=1     0.0327 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4224   mode=2 gvar=1     0.0452 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4224   mode=1 gvar=1     0.2274 ms/rep  got=404219327039195
+      P=1 gvar=1  static==  sched==  gen==  (all vs static-ref 404219327039195)
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=8192   mode=0 gvar=2     0.0325 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4224   mode=2 gvar=2     0.0458 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4224   mode=1 gvar=2     0.4124 ms/rep  got=404219327039195
+      P=1 gvar=2  static==  sched==  gen==  (all vs static-ref 404219327039195)
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=8192   mode=0 gvar=3     0.0326 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4224   mode=2 gvar=3     0.0460 ms/rep  got=404219327039195
+  P=1   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4224   mode=1 gvar=3     0.7436 ms/rep  got=404219327039195
+      P=1 gvar=3  static==  sched==  gen==  (all vs static-ref 404219327039195)
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4096   mode=0 gvar=0     0.0323 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=2112   mode=2 gvar=0     0.0340 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=2112   mode=1 gvar=0     0.3927 ms/rep  got=404219327039195
+      P=2 gvar=0  static==  sched==  gen==  (all vs static-ref 404219327039195)
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4096   mode=0 gvar=1     0.0326 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=2112   mode=2 gvar=1     0.0340 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=2112   mode=1 gvar=1     0.1207 ms/rep  got=404219327039195
+      P=2 gvar=1  static==  sched==  gen==  (all vs static-ref 404219327039195)
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4096   mode=0 gvar=2     0.0324 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=2112   mode=2 gvar=2     0.0339 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=2112   mode=1 gvar=2     0.2131 ms/rep  got=404219327039195
+      P=2 gvar=2  static==  sched==  gen==  (all vs static-ref 404219327039195)
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=4096   mode=0 gvar=3     0.0327 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=2112   mode=2 gvar=3     0.0340 ms/rep  got=404219327039195
+  P=2   G=128 EDW=8     K=32   D=1   R=0      PW=0      CAPp=2112   mode=1 gvar=3     0.3785 ms/rep  got=404219327039195
+      P=2 gvar=3  static==  sched==  gen==  (all vs static-ref 404219327039195)
+
+===== §B gen 写载体 × 生产者块数 P 的标度（EDW=0, PW=0；grid=P+G=NSM 全共驻）=====
+  P=1   G=132 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     0.1698 ms/rep  got=20154739694231596
+      static(G=132, 无 producer) =    0.1698 ms  desc=   815.0 GB/s
+  P    G      gen_s(ms)    g_s/st  gen_v4(ms)     v4/st  gen_co(ms)     co/st gen_tma(ms)    tma/st       tma/s    tma/co
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=1 gvar=0    36.6142 ms/rep  got=20154739694231596
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=1 gvar=1    10.4572 ms/rep  got=20154739694231596
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=1 gvar=2    19.3587 ms/rep  got=20154739694231596
+  P=1   G=131 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=1 gvar=3    35.1363 ms/rep  got=20154739694231596
+  1    131      36.6142   215.601     10.4572    61.577     19.3587   113.993     35.1363   206.898       0.960       1.815
+  P=2   G=130 EDW=0     K=32   D=2   R=0      PW=0      CAPp=196608 mode=1 gvar=0    18.4183 ms/rep  got=20154739694231596
+  P=2   G=130 EDW=0     K=32   D=2   R=0      PW=0      CAPp=196608 mode=1 gvar=1     5.3403 ms/rep  got=20154739694231596
+  P=2   G=130 EDW=0     K=32   D=2   R=0      PW=0      CAPp=196608 mode=1 gvar=2     9.7767 ms/rep  got=20154739694231596
+  P=2   G=130 EDW=0     K=32   D=2   R=0      PW=0      CAPp=196608 mode=1 gvar=3    17.7277 ms/rep  got=20154739694231596
+  2    130      18.4183   108.455      5.3403    31.446      9.7767    57.570     17.7277   104.389       0.963       1.813
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=1 gvar=0     9.3235 ms/rep  got=20154739694231596
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=1 gvar=1     2.7846 ms/rep  got=20154739694231596
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=1 gvar=2     5.0044 ms/rep  got=20154739694231596
+  P=4   G=128 EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=1 gvar=3     8.9906 ms/rep  got=20154739694231596
+  4    128       9.3235    54.901      2.7846    16.397      5.0044    29.468      8.9906    52.940       0.964       1.797
+  P=8   G=124 EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=1 gvar=0     4.9978 ms/rep  got=20154739694231596
+  P=8   G=124 EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=1 gvar=1     1.5143 ms/rep  got=20154739694231596
+  P=8   G=124 EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=1 gvar=2     2.6243 ms/rep  got=20154739694231596
+  P=8   G=124 EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=1 gvar=3     4.6283 ms/rep  got=20154739694231596
+  8    124       4.9978    29.429      1.5143     8.917      2.6243    15.453      4.6283    27.253       0.926       1.764
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=0     2.6243 ms/rep  got=20154739694231596
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=1     0.8891 ms/rep  got=20154739694231596
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=2     1.4437 ms/rep  got=20154739694231596
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=3     2.4506 ms/rep  got=20154739694231596
+  16   116       2.6243    15.453      0.8891     5.236      1.4437     8.501      2.4506    14.430       0.934       1.697
+  P=32  G=100 EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=1 gvar=0     1.9245 ms/rep  got=20154739694231596
+  P=32  G=100 EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=1 gvar=1     0.6571 ms/rep  got=20154739694231596
+  P=32  G=100 EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=1 gvar=2     0.8797 ms/rep  got=20154739694231596
+  P=32  G=100 EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=1 gvar=3     1.3784 ms/rep  got=20154739694231596
+  32   100       1.9245    11.332      0.6571     3.869      0.8797     5.180      1.3784     8.116       0.716       1.567
+  P=64  G=68  EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=1 gvar=0     1.2533 ms/rep  got=20154739694231596
+  P=64  G=68  EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=1 gvar=1     0.6265 ms/rep  got=20154739694231596
+  P=64  G=68  EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=1 gvar=2     0.7062 ms/rep  got=20154739694231596
+  P=64  G=68  EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=1 gvar=3     0.9644 ms/rep  got=20154739694231596
+  64   68        1.2533     7.380      0.6265     3.689      0.7062     4.159      0.9644     5.679       0.769       1.366
+
+===== §C 纯写吞吐（mode 5 pure，grid=P，无 worker 消费）：写载体 × P =====
+  P           w_s       w_v4       w_co   w_tma(ser)  w_tma(roll)      roll/v4
+  P=1   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=5 gvar=0    36.6161 ms/rep  got=0
+  P=1   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=5 gvar=1    10.4608 ms/rep  got=0
+  P=1   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=5 gvar=2    19.3370 ms/rep  got=0
+  P=1   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=5 gvar=3    35.1960 ms/rep  got=0
+  P=1   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=7 gvar=3    23.7497 ms/rep  got=0
+  1           3.8       13.2        7.2          3.9          5.8        0.440
+  P=2   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=196608 mode=5 gvar=0    18.3116 ms/rep  got=0
+  P=2   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=196608 mode=5 gvar=1     5.2326 ms/rep  got=0
+  P=2   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=196608 mode=5 gvar=2     9.6726 ms/rep  got=0
+  P=2   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=196608 mode=5 gvar=3    17.6241 ms/rep  got=0
+  P=2   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=196608 mode=7 gvar=3    11.8776 ms/rep  got=0
+  2           7.6       26.5       14.3          7.9         11.7        0.441
+  P=4   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=5 gvar=0     9.1576 ms/rep  got=0
+  P=4   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=5 gvar=1     2.6192 ms/rep  got=0
+  P=4   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=5 gvar=2     4.8369 ms/rep  got=0
+  P=4   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=5 gvar=3     8.7928 ms/rep  got=0
+  P=4   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=7 gvar=3     5.9415 ms/rep  got=0
+  4          15.1       52.8       28.6         15.7         23.3        0.441
+  P=8   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=5 gvar=0     4.8633 ms/rep  got=0
+  P=8   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=5 gvar=1     1.3562 ms/rep  got=0
+  P=8   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=5 gvar=2     2.4236 ms/rep  got=0
+  P=8   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=5 gvar=3     4.4116 ms/rep  got=0
+  P=8   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=49152  mode=7 gvar=3     2.9735 ms/rep  got=0
+  8          28.5      102.1       57.1         31.4         46.5        0.456
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=5 gvar=0     2.4293 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=5 gvar=1     0.6815 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=5 gvar=2     1.2155 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=5 gvar=3     2.2110 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=7 gvar=3     1.4895 ms/rep  got=0
+  16         57.0      203.1      113.9         62.6         92.9        0.458
+  P=32  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=5 gvar=0     1.4816 ms/rep  got=0
+  P=32  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=5 gvar=1     0.3973 ms/rep  got=0
+  P=32  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=5 gvar=2     0.6104 ms/rep  got=0
+  P=32  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=5 gvar=3     1.1115 ms/rep  got=0
+  P=32  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=12288  mode=7 gvar=3     0.7475 ms/rep  got=0
+  32         93.4      348.3      226.8        124.5        185.2        0.532
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=5 gvar=0     0.7917 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=5 gvar=1     0.2118 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=5 gvar=2     0.3078 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=5 gvar=3     0.5638 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=7 gvar=3     0.3765 ms/rep  got=0
+  64        174.8      653.4      449.7        245.5        367.6        0.563
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=5 gvar=0     0.6704 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=5 gvar=1     0.1704 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=5 gvar=2     0.1570 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=5 gvar=3     0.2929 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=7 gvar=3     0.1916 ms/rep  got=0
+  128       206.5      812.4      881.7        472.6        722.5        0.889
+
+===== §C2 SMEM 暂存代价（mode 6 sgen 只生成到 SMEM）× P =====
+  P          sgen(ms)   sgen(GB/s) tma_ser(GB/s) tma_roll(GB/s)
+  P=1   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=6 gvar=3    22.4196 ms/rep  got=0
+  P=1   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=5 gvar=3    35.0270 ms/rep  got=0
+  P=1   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=7 gvar=3    23.7497 ms/rep  got=0
+  1           22.4196          6.2          4.0          5.8
+  P=4   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=6 gvar=3     5.6089 ms/rep  got=0
+  P=4   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=5 gvar=3     8.7439 ms/rep  got=0
+  P=4   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=98304  mode=7 gvar=3     5.9415 ms/rep  got=0
+  4            5.6089         24.7         15.8         23.3
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=6 gvar=3     1.4062 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=5 gvar=3     2.2131 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=7 gvar=3     1.4895 ms/rep  got=0
+  16           1.4062         98.4         62.5         92.9
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=6 gvar=3     0.3557 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=5 gvar=3     0.5629 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=7 gvar=3     0.3766 ms/rep  got=0
+  64           0.3557        389.1        245.9        367.6
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=6 gvar=3     0.1807 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=5 gvar=3     0.2937 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=7 gvar=3     0.1916 ms/rep  got=0
+  128          0.1807        766.0        471.3        722.3
+
+===== §C3 正确握手路径（serialized：每批 wait_group 0）的在飞深度 tw × P =====
+  P      tw=1(GB/s)   tw=2(GB/s)   tw=3(GB/s)   coop(GB/s)
+  P=1   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=5 gvar=3    35.0501 ms/rep  got=0
+  P=1   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=5 gvar=3    35.2360 ms/rep  got=0
+  P=1   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=5 gvar=3    35.2051 ms/rep  got=0
+  P=1   G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=5 gvar=2    19.3159 ms/rep  got=0
+  1             3.9          3.9          3.9          7.2
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=5 gvar=3     2.2143 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=5 gvar=3     2.2259 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=5 gvar=3     2.2238 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=5 gvar=2     1.2156 ms/rep  got=0
+  16           62.5         62.2         62.2        113.9
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=5 gvar=3     0.5632 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=5 gvar=3     0.5661 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=5 gvar=3     0.5656 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=5 gvar=2     0.3080 ms/rep  got=0
+  64          245.8        244.5        244.7        449.4
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=5 gvar=3     0.2908 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=5 gvar=3     0.2936 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=5 gvar=3     0.2926 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=5 gvar=2     0.1569 ms/rep  got=0
+  128         475.9        471.5        473.0        882.0
+
+===== §C4 TMA store 粒度 NB（mode 7 pure-big，每次 store = NB·K·DW·4 B）× P =====
+  P           NB=1        NB=2        NB=4        NB=8        coop
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=7 gvar=3     1.4895 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=7 gvar=3     1.3678 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=7 gvar=3     1.3049 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=7 gvar=3     1.2745 ms/rep  got=0
+  P=16  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=5 gvar=2     1.2155 ms/rep  got=0
+  16          92.9       101.2       106.1       108.6       113.9
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=7 gvar=3     0.3765 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=7 gvar=3     0.3462 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=7 gvar=3     0.3309 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=7 gvar=3     0.3242 ms/rep  got=0
+  P=64  G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=6144   mode=5 gvar=2     0.3081 ms/rep  got=0
+  64         367.6       399.8       418.2       427.0       449.2
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=7 gvar=3     0.1916 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=7 gvar=3     0.1764 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=7 gvar=3     0.1695 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=7 gvar=3     0.1672 ms/rep  got=0
+  P=128 G=0   EDW=0     K=32   D=2   R=0      PW=0      CAPp=3072   mode=5 gvar=2     0.1570 ms/rep  got=0
+  128        722.5       784.7       816.6       827.8       881.5
+
+===== §D 接数据面：gen 扫 EDW（P=16，gvar 0 vs 3；K=32,D=2,PW=0）=====
+  EDW          gen_s     gen_tma   exec_only      static     s/max   tma/max
+  P=1   G=132 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     0.1697 ms/rep  got=20154739694231596
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=0     2.6228 ms/rep  got=20154739694231596
+  P=16  G=116 EDW=0     K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=3     2.4256 ms/rep  got=20154739694231596
+  P=1   G=132 EDW=0     K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     0.0849 ms/rep  got=21102824369160192
+  0           2.6228      2.4256      0.0849      0.1697    15.456    14.294
+  P=1   G=132 EDW=16    K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     0.2068 ms/rep  got=17907072088884245
+  P=16  G=116 EDW=16    K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=0     2.6643 ms/rep  got=17907072088884245
+  P=16  G=116 EDW=16    K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=3     2.4700 ms/rep  got=17907072088884245
+  P=1   G=132 EDW=16    K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     0.1308 ms/rep  got=18104748667790313
+  16          2.6643      2.4700      0.1308      0.2068    12.885    11.945
+  P=1   G=132 EDW=64    K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     0.2435 ms/rep  got=14906724557505533
+  P=16  G=116 EDW=64    K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=0     2.6995 ms/rep  got=14906724557505533
+  P=16  G=116 EDW=64    K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=3     2.5074 ms/rep  got=14906724557505533
+  P=1   G=132 EDW=64    K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     0.1730 ms/rep  got=15105470583268305
+  64          2.6995      2.5074      0.1730      0.2435    11.087    10.298
+  P=1   G=132 EDW=256   K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     0.4681 ms/rep  got=14906926966776291
+  P=16  G=116 EDW=256   K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=0     3.7969 ms/rep  got=14906926966776291
+  P=16  G=116 EDW=256   K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=3     2.7782 ms/rep  got=14906926966776291
+  P=1   G=132 EDW=256   K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     0.3987 ms/rep  got=15105866266067383
+  256         3.7969      2.7782      0.3987      0.4681     8.111     5.935
+  P=1   G=132 EDW=1024  K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     1.3926 ms/rep  got=14908221078396349
+  P=16  G=116 EDW=1024  K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=0     3.8417 ms/rep  got=14908221078396349
+  P=16  G=116 EDW=1024  K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=3     3.7263 ms/rep  got=14908221078396349
+  P=1   G=132 EDW=1024  K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     1.3430 ms/rep  got=15107323586444689
+  1024        3.8417      3.7263      1.3430      1.3926     2.759     2.676
+  P=1   G=132 EDW=4096  K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     5.1484 ms/rep  got=14910556029607938
+  P=16  G=116 EDW=4096  K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=0     8.7796 ms/rep  got=14910556029607938
+  P=16  G=116 EDW=4096  K=32   D=2   R=0      PW=0      CAPp=24576  mode=1 gvar=3     7.7752 ms/rep  got=14910556029607938
+  P=1   G=132 EDW=4096  K=32   D=2   R=0      PW=0      CAPp=393216 mode=0 gvar=0     5.1266 ms/rep  got=15110358617325526
+  4096        8.7796      7.7752      5.1266      5.1484     1.705     1.510

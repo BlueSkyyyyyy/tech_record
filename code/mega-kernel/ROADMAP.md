@@ -1494,8 +1494,40 @@
       含义：给 MPK「**编译期预计算 `FullTaskDesc` + scheduler 只做事件→id 映射**」（`runtime.cc` /
       `persistent_kernel.cuh:1254-1523`）与 DeepGEMM「静态角色 + 编译期常量」以量化理由——**造一趟描述符
       比读回来贵一个量级**，且要吃生产者 SM。判据 C1–C4、仍差 C5 一步。**本轮新增实验**；P60-1 新留尾巴
-      （§49.7）：**TMA bulk store（SMEM→global）作更宽写载体未测**（最值得做的下一条）、高 P 读写争抢
-      未单独量化、合成描述符、未与 DeepGEMM SM100 对跑。
+       （§49.7）：**TMA bulk store（SMEM→global）作更宽写载体未测**（最值得做的下一条）、高 P 读写争抢
+       未单独量化、合成描述符、未与 DeepGEMM SM100 对跑。
+
+### P61 实验扩展 43：TMA bulk store 作写载体（`docs/04-experiments.md` §50）
+
+- [x] **P61-1** 补掉 P60-1（§49）§49.7 明留的**「最值得做的下一条尾巴」**——「`uint4`（16 B）是寄存器
+  store 的上限；**TMA bulk store**（`cp.async.bulk.global.shared::cta`）理论可把「写」接上近 HBM 整机写
+  带宽（§49 coop 到 P=128 已 875 GB/s），但须先在 SMEM 造好（SMEM 搬运/预算是否划算未测）」。
+  见 `docs/04-experiments.md` **§50**，源码 `src/dyn_producer_tma.cu`、脚本
+  `harness/dyn_producer_tma.sh`、原始输出 `harness/dyn_producer_tma.out.txt`（目标卡 H100/sm90a、**固定空闲
+  device 3**、nvcc 13.2、`DW=88`=352 B、`NDESC=393216`（138.4 MB ≫ L2）、`K=32`、`D=2`、`T=256`、
+  `grid=P+G=132=NSM` 全共驻、min-of-7）。新增 `gvar 3`（batch 粒度协作生成到 SMEM 暂存槽 →
+  `cp.async.bulk` 整批 11 KB 落 global）、`mode 6 sgen`（只生成到 SMEM 隔离暂存代价）、`mode 7 pure-big`
+  （每 `NB` 个 batch 合成一次大块 store）。六 Section 核心结论：
+  - **§A**：四载体（标量/v4/coop/TMA）× P∈{1,2}、static/sched/gen **逐位一致**（`got=404219327039195`）
+    ——跨 async proxy 的 store→load 握手（`wait_group 0` + `fence.proxy.async.global` + release/acquire）语义透明。
+  - **§B（headline）证伪 §49 假设**：static=0.1698 ms/815 GB/s；TMA store 的 `gen` **几乎等于标量**
+    （`tma/s` 0.72–0.96，P=1 35.14 vs 36.61 ms），比 v4 慢 2–4×、比 coop 慢 1.37–1.82×——
+    **TMA store 接不上读带宽**。
+  - **§C 纯写**：P=128 标量 206.5 / v4 812.4 / coop 881.7 / **tma(serialized，正确握手) 472.6** /
+    **tma(rolling) 722.5** GB/s。**任何 P 下 TMA 都不超过 16 B 寄存器 store**（roll/v4 0.44–0.89）。
+  - **§C2 拆代价**（P=128）：只生成到 SMEM（`sgen`）**766 GB/s** → rolling store **722**（几乎白送）→
+    serialized store **471**（正确握手的每批 `wait_group 0` 砍 39%）。两跳（reg→SMEM→global）上限 766。
+  - **§C3**：serialized 路径的 `wait_group.read` 深度 `tw=1/2/3` 在 P=128 = 475.9/471.5/473.0 GB/s
+    **完全相同**（每批已 `wait_group 0`，深度旋钮失效）。
+  - **§C4 粒度**：大块 store 值钱——P=128 从 NB=1（11 KB）722.5 抬到 NB=8（90 KB）**827.8 GB/s**，
+    但仍 **0.94× coop（881.5）**、与 v4 打平，**从未超过**；`NB=16` 超 H100 opt-in 上限做不了。
+  含义：**「现场生成描述符」这条路的写端天花板，即使接上最宽写载体也是 ~828（rolling）/472（正确握手）**，
+  远低于 worker **读**端的 809–3000 GB/s——给 MPK「编译期预计算 `FullTaskDesc` + scheduler 只映射」
+  与 DeepGEMM「静态角色/编译期常量」以**更强**量化理由。判据 C1–C4、仍差 C5 一步。**本轮新增实验**；
+  P61-1 新留尾巴（§50.7）：**「正确握手 + 流水」的组合未测**（FIFO commit + 发布 head 前只
+  `wait_group (win-1)`，理论把 472 拉回 722–828 且保持正确——最值得做的下一条）、高 P 读写争抢未量化、
+  store 粒度受 SMEM 限（跨 block 协作 stage 未测）、合成描述符、未与 DeepGEMM SM100 对跑。
+
 
 ## 每轮增量流程（autopilot）
 
@@ -1521,7 +1553,30 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P60-1 完成（1/1）**。补掉 P59-1（§48）§48.8 明留的**尾巴②**——「`gen` 仍是**标量
+- 当前进度：**P61-1 完成（1/1）**。补掉 P60-1（§49）§49.7 明留的**「最值得做的下一条尾巴」**——把动态
+  生产者的写载体从寄存器 store（标量/v4/coop）扩到最宽的 **TMA bulk store**（`cp.async.bulk.global.shared::cta`，
+  SMEM→global），看它能否把「写」接上近 HBM 带宽。`docs/04-experiments.md` 新增 **§50**，源码
+  `src/dyn_producer_tma.cu`、脚本 `harness/dyn_producer_tma.sh`、原始输出 `harness/dyn_producer_tma.out.txt`
+  （目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B、`NDESC=393216`、`K=32`、`D=2`、
+  `T=256`、`grid=132` 全共驻、min-of-7）。核心结论（**证伪 §49 假设**）：
+  - **§A** 四载体 × static/sched/gen **逐位一致**（`got=404219327039195`）——跨 async proxy store→load
+    握手（`wait_group 0`+`fence.proxy.async.global`+release/acquire）语义透明。
+  - **§B（headline）** static=0.1698 ms/815 GB/s；TMA store 的 `gen` **几乎等于标量**（`tma/s` 0.72–0.96，
+    P=1 35.14 vs 36.61 ms），比 v4 慢 2–4×、比 coop 1.37–1.82×。**TMA store 接不上读带宽。**
+  - **§C/§C2** 纯写 P=128：v4 812 / coop 882 / **tma(serialized 正确握手) 472.6** / **tma(rolling) 722.5**
+    GB/s；`sgen`（只生成到 SMEM）766 → rolling 722（store 几乎白送）→ serialized 471（正确握手每批
+    `wait_group 0` 砍 39%）。**两跳上限 766、任何 P 下 TMA 都 ≤ 16 B 寄存器 store（roll/v4 0.44–0.89）。**
+  - **§C3** serialized 的 `wait_group.read` 深度 tw=1/2/3 在 P=128 恒 ~474（深度旋钮失效）。
+  - **§C4** 大块 store 值钱：NB=1(11KB) 722.5 → NB=8(90KB) **827.8 GB/s**，但仍 **0.94× coop**、与 v4 打平，
+    **从未超过**；NB=16 超 H100 opt-in 上限。
+  含义：**写端天花板（最宽载体）~828（rolling）/472（正确握手）≪ 读端 809–3000 GB/s**——给 MPK
+  「预计算 `FullTaskDesc` + scheduler 只映射」与 DeepGEMM「静态角色/编译期常量」以更强量化理由。
+  判据 C1–C4、仍差 C5。**本轮新增实验**；P61-1 新留尾巴见 §50.7（**「正确握手+流水」未测**——FIFO commit +
+  发布 head 前只 `wait_group (win-1)`，理论把 472 拉回 722–828 且保持正确，**最值得做的下一条**；高 P 读写
+  争抢未量化、store 粒度受 SMEM 限、合成描述符、未与 DeepGEMM SM100 对跑）
+  （构建期踩坑：TMA 写路径初版对 `mode 2` 误生效向未分配 `ring` 发 bulk store → `illegal memory access`/
+  后续挂起；修正为仅 `is_gen||smem_only` 走 TMA 写路径后恢复）。
+- 此前：**P60-1 完成（1/1）**。补掉 P59-1（§48）§48.8 明留的**尾巴②**——「`gen` 仍是**标量
   strided 写**；向量化/协作写未单独做」：把 producer 写入形态分解成 **存储宽度**（4 B→16 B `uint4`）
   与 **coalescing**（逐线程 strided vs 协作连续）两个正交旋钮，实测各自贡献与饱和点。`docs/04-experiments.md`
   新增 **§49**，源码 `src/dyn_producer_vector.cu`、脚本 `harness/dyn_producer_vector.sh`、原始输出
