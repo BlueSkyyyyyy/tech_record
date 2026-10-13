@@ -1,0 +1,117 @@
+########## §56 per-slot 回收 vs 共享前缀：有界环 × 分配形态 × 预取深度 D ##########
+########################################################################
+# §56 per-slot 回收 vs 共享前缀：有界环 × 分配形态 × 预取深度 D
+# 目标卡 H100/sm90a，DW=88(352B)，K=32，T=256，P=32 producer + G=100 worker (grid=132)
+########################################################################
+
+===== §A 正确性（宽松环：CAPp=128 >= bp=128，无停顿）=====
+  host_ref = 281514573791934
+  P=32  G=100 NB=4096   K=32  DW=88  D=1  CAPp=128   proto=static  asg=strided -> REF    ms=0.1698 descGB/s=271.8 sink=ref done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=128   proto=static  asg=strided -> REF    ms=0.1549 descGB/s=297.8 sink=ref done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=128   proto=static  asg=strided -> REF    ms=0.1547 descGB/s=298.2 sink=ref done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=1  CAPp=128   proto=static  asg=contig  -> REF    ms=0.1691 descGB/s=272.9 sink=ref done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=128   proto=static  asg=contig  -> REF    ms=0.1548 descGB/s=298.1 sink=ref done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=128   proto=static  asg=contig  -> REF    ms=0.1545 descGB/s=298.6 sink=ref done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=1  CAPp=128   proto=prefix  asg=strided -> OK     ms=0.5717 descGB/s=80.7 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=128   proto=prefix  asg=strided -> OK     ms=0.5634 descGB/s=81.9 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=128   proto=prefix  asg=strided -> OK     ms=0.5565 descGB/s=82.9 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=1  CAPp=128   proto=prefix  asg=contig  -> OK     ms=0.5669 descGB/s=81.4 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=128   proto=prefix  asg=contig  -> OK     ms=0.5543 descGB/s=83.2 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=128   proto=prefix  asg=contig  -> OK     ms=0.5588 descGB/s=82.6 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=1  CAPp=128   proto=perslot asg=strided -> OK     ms=0.5678 descGB/s=81.3 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=128   proto=perslot asg=strided -> OK     ms=0.5581 descGB/s=82.7 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=128   proto=perslot asg=strided -> OK     ms=0.5580 descGB/s=82.7 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=1  CAPp=128   proto=perslot asg=contig  -> OK     ms=0.5679 descGB/s=81.2 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=128   proto=perslot asg=contig  -> OK     ms=0.5577 descGB/s=82.7 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=128   proto=perslot asg=contig  -> OK     ms=0.5576 descGB/s=82.7 sink=ref done=132
+
+===== §B 紧环（CAPp=16 批，背压真正触发）=====
+  host_ref = 281514573791934
+  P=32  G=100 NB=4096   K=32  DW=88  D=1  CAPp=16    proto=prefix  asg=strided -> OK     ms=2.6706 descGB/s=17.3 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=16    proto=prefix  asg=strided -> ABORT  ms=1010.1073 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=16    proto=prefix  asg=strided -> ABORT  ms=1010.1227 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=16    proto=prefix  asg=strided -> ABORT  ms=1010.1120 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=1  CAPp=16    proto=prefix  asg=contig  -> WRONG  ms=2.4118 descGB/s=19.1 sink=MISMATCH done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=16    proto=prefix  asg=contig  -> WRONG  ms=2.4563 descGB/s=18.8 sink=MISMATCH done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=16    proto=prefix  asg=contig  -> WRONG  ms=3.0058 descGB/s=15.3 sink=MISMATCH done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=16    proto=prefix  asg=contig  -> WRONG  ms=3.7931 descGB/s=12.2 sink=MISMATCH done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=1  CAPp=16    proto=perslot asg=strided -> OK     ms=2.7024 descGB/s=17.1 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=16    proto=perslot asg=strided -> ABORT  ms=1010.1075 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=16    proto=perslot asg=strided -> ABORT  ms=1010.1088 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=16    proto=perslot asg=strided -> ABORT  ms=1010.1319 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=1  CAPp=16    proto=perslot asg=contig  -> OK     ms=13.2233 descGB/s=3.5 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=16    proto=perslot asg=contig  -> OK     ms=13.2432 descGB/s=3.5 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=16    proto=perslot asg=contig  -> OK     ms=13.6874 descGB/s=3.4 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=16    proto=perslot asg=contig  -> OK     ms=15.4282 descGB/s=3.0 sink=ref done=132
+
+===== §C 紧环 CAPp=16，contig 边界对齐敏感性（chunk vs bp）=====
+  --- P=32 G=100 bp=128 chunk=41 (split) ---
+  P=32  G=100 NB=4096   K=32  DW=88  D=1  CAPp=16    proto=prefix  asg=contig  -> WRONG  ms=2.4128 descGB/s=19.1 sink=MISMATCH done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=1  CAPp=16    proto=perslot asg=contig  -> OK     ms=13.2209 descGB/s=3.5 sink=ref done=132
+  --- P=100 G=32 bp=41 chunk=128 (split) ---
+  P=100 G=32  NB=4096   K=32  DW=88  D=1  CAPp=16    proto=prefix  asg=contig  -> WRONG  ms=3.2715 descGB/s=14.1 sink=MISMATCH done=132
+  P=100 G=32  NB=4096   K=32  DW=88  D=1  CAPp=16    proto=perslot asg=contig  -> OK     ms=17.1004 descGB/s=2.7 sink=ref done=132
+  --- P=66 G=66 bp=63 chunk=63 (aligned) ---
+  P=66  G=66  NB=4096   K=32  DW=88  D=1  CAPp=16    proto=prefix  asg=contig  -> OK     ms=0.2984 descGB/s=154.6 sink=ref done=132
+  P=66  G=66  NB=4096   K=32  DW=88  D=1  CAPp=16    proto=perslot asg=contig  -> OK     ms=0.3074 descGB/s=150.1 sink=ref done=132
+
+===== §D 边界闭式：CAPp 扫描（P=32 G=100，Gw=100，bp=128，chunk=41）=====
+  --- D=2（strided 预测边界 CAPp > D*Gw=200；contig 预测边界 CAPp > D=2）---
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=4     proto=perslot asg=strided -> ABORT  ms=1010.1077 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=8     proto=perslot asg=strided -> ABORT  ms=1010.1213 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=16    proto=perslot asg=strided -> ABORT  ms=1010.1116 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=32    proto=perslot asg=strided -> ABORT  ms=1010.1075 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=64    proto=perslot asg=strided -> ABORT  ms=1010.1083 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=128   proto=perslot asg=strided -> OK     ms=0.5598 descGB/s=82.4 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=256   proto=perslot asg=strided -> OK     ms=0.5576 descGB/s=82.7 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=512   proto=perslot asg=strided -> OK     ms=0.5548 descGB/s=83.2 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=4     proto=perslot asg=contig  -> OK     ms=18.2240 descGB/s=2.5 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=8     proto=perslot asg=contig  -> OK     ms=16.4042 descGB/s=2.8 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=16    proto=perslot asg=contig  -> OK     ms=13.2379 descGB/s=3.5 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=32    proto=perslot asg=contig  -> OK     ms=11.3474 descGB/s=4.1 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=64    proto=perslot asg=contig  -> OK     ms=8.5256 descGB/s=5.4 sink=ref done=132
+  --- D=4（strided 预测边界 CAPp > D*Gw=400；contig 预测边界 CAPp > D=4）---
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=4     proto=perslot asg=strided -> ABORT  ms=1010.1082 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=8     proto=perslot asg=strided -> ABORT  ms=1010.1089 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=16    proto=perslot asg=strided -> ABORT  ms=1010.1097 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=32    proto=perslot asg=strided -> ABORT  ms=1010.1080 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=64    proto=perslot asg=strided -> ABORT  ms=1010.1135 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=128   proto=perslot asg=strided -> OK     ms=0.5553 descGB/s=83.1 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=256   proto=perslot asg=strided -> OK     ms=0.5554 descGB/s=83.1 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=512   proto=perslot asg=strided -> OK     ms=0.5549 descGB/s=83.1 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=4     proto=perslot asg=contig  -> OK     ms=29.2443 descGB/s=1.6 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=8     proto=perslot asg=contig  -> OK     ms=17.2986 descGB/s=2.7 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=16    proto=perslot asg=contig  -> OK     ms=13.6882 descGB/s=3.4 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=32    proto=perslot asg=contig  -> OK     ms=11.4776 descGB/s=4.0 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=4  CAPp=64    proto=perslot asg=contig  -> OK     ms=8.6598 descGB/s=5.3 sink=ref done=132
+  --- D=8（strided 预测边界 CAPp > D*Gw=800；contig 预测边界 CAPp > D=8）---
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=4     proto=perslot asg=strided -> ABORT  ms=1010.1072 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=8     proto=perslot asg=strided -> ABORT  ms=1010.1094 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=16    proto=perslot asg=strided -> ABORT  ms=1010.1094 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=32    proto=perslot asg=strided -> ABORT  ms=1010.1078 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=64    proto=perslot asg=strided -> ABORT  ms=1010.1147 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=128   proto=perslot asg=strided -> OK     ms=0.5537 descGB/s=83.3 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=256   proto=perslot asg=strided -> OK     ms=0.5555 descGB/s=83.1 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=512   proto=perslot asg=strided -> OK     ms=0.5554 descGB/s=83.1 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=4     proto=perslot asg=contig  -> ABORT  ms=1010.1077 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=8     proto=perslot asg=contig  -> OK     ms=27.5191 descGB/s=1.7 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=16    proto=perslot asg=contig  -> OK     ms=15.4277 descGB/s=3.0 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=32    proto=perslot asg=contig  -> OK     ms=11.7337 descGB/s=3.9 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=8  CAPp=64    proto=perslot asg=contig  -> OK     ms=8.9028 descGB/s=5.2 sink=ref done=132
+  --- prefix 对照（strided D=2）---
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=4     proto=prefix  asg=strided -> ABORT  ms=1010.1076 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=8     proto=prefix  asg=strided -> ABORT  ms=1010.1091 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=16    proto=prefix  asg=strided -> ABORT  ms=1010.1088 descGB/s=0.0 sink=- done=100
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=32    proto=prefix  asg=strided -> OK     ms=3.1362 descGB/s=14.7 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=64    proto=prefix  asg=strided -> OK     ms=1.9868 descGB/s=23.2 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=128   proto=prefix  asg=strided -> OK     ms=0.5464 descGB/s=84.4 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=256   proto=prefix  asg=strided -> OK     ms=0.5465 descGB/s=84.4 sink=ref done=132
+  P=32  G=100 NB=4096   K=32  DW=88  D=2  CAPp=512   proto=prefix  asg=strided -> OK     ms=0.5471 descGB/s=84.3 sink=ref done=132
+
+===== §E 协议开销（宽松环 CAPp=bp=256、strided、D=1/2）：prefix vs perslot =====
+  P=32  G=100 NB=8192   K=32  DW=88  D=1  CAPp=256   proto=prefix  asg=strided -> OK     ms=1.1085 descGB/s=83.2 sink=ref done=132
+  P=32  G=100 NB=8192   K=32  DW=88  D=2  CAPp=256   proto=prefix  asg=strided -> OK     ms=1.0837 descGB/s=85.1 sink=ref done=132
+  P=32  G=100 NB=8192   K=32  DW=88  D=1  CAPp=256   proto=perslot asg=strided -> OK     ms=1.1238 descGB/s=82.1 sink=ref done=132
+  P=32  G=100 NB=8192   K=32  DW=88  D=2  CAPp=256   proto=perslot asg=strided -> OK     ms=1.1003 descGB/s=83.9 sink=ref done=132
+
+########## §56 完成 ##########

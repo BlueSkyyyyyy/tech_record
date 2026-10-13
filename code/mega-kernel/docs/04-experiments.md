@@ -8326,3 +8326,165 @@ producer 覆写该槽（在飞 TMA 读到脏数据）。`chunk == bp`（本机�
 - **worker 守门狗 ~2×10⁹ cycle（~1.1 s）**：死锁配置每 rep 付一次（`ABORT` 行 ~2 s/rep），故死锁列
   的绝对时间不是有效性能数字，只作「是否死锁」判别。
 - **run-to-run 抖动**：min-of-3，宽松环各格抖动 <1%；紧环正确档（4.8）与 §54 一致。
+
+## 56. 共享前缀 vs 每槽回收：环协议对分配形态与预取深度 D 的解锁（P67-1）
+
+> 本节接续 §55（P66-1），补掉 §55.8 明留的两条尾巴：
+>
+> - 「**contig 的静默错是『共享前缀 `tail` 协议』的性质，不是『连续分配』固有的**——换 per-slot
+>   回收协议后连续分配可正确；本节隔离的是**分配 × 前缀计数器**这一组合，不外推为『contig 一定错』」；
+> - 「**死锁/错误的具体边界未做闭式扫描**：§55.4 只取 `CAPp=16`、`K=32`」。
+>
+> §55 的结论是「**`D` 不是自由性能旋钮，而是被环协议锁死的自由度**」：strided（跨步）`D>1` 在紧环下
+> **死锁**、contig（连续分块）**静默错**，唯一正确的紧环形态是 `strided + D=1`。它把根因归到「per-producer
+> 的 `tail` 是**共享前缀计数器**」，并**预测**「换成**每槽独立回收/就绪**（MPK 的 per-worker ring、
+> DeepGEMM 的 ring generation 逐槽发布）后连续分配可正确」。本节把该预测实测——实现一个**每槽回收**
+> 的有界环，与 §55 的**共享前缀**环在同一骨架 / 同一工作 / 同一分配形态上对跑。
+
+### 56.1 机制：两种环协议（唯一机制变量）
+
+骨架 = `P` 个 producer 块 + `G` 个 worker 块（`grid = P + G` 全共驻、单常驻 kernel），与 §47–§55 同。
+producer `p` 负责 `NB` 个 batch 中的 `[p·bp, (p+1)·bp)`（`bp = ceil(NB/P)`），每个 batch = `K` 条描述符、
+每条 `DW` 字；**环按 producer 分区**（producer `p` 的子环 = `CAPp` 个槽、每槽一个 batch）。worker 用
+**TMA bulk load** 把槽搬进 SMEM、折叠描述符内容，全 worker 之和 `sink` 与 host 参考逐位比（正确性哨兵）。
+分配形态 `wassign`：`0` strided（`bb = w + t·Gw`）、`1` contig（`bb = w·chunk + t`）。预取深度 `D`：worker
+在消费第 `t` 批前先发第 `t+D` 批的 TMA load（`D=1` = 单缓冲）。
+
+两种环协议（**唯一机制变量**）：
+
+| | producer 写槽前等 | producer 写完发布 | worker 读前等 | worker 消费后回收 |
+|---|---|---|---|---|
+| **prefix**（§55 原样） | `tail[p] + CAPp ≥ bj+1`（**前缀**已消费计数） | `head[p] = bj+1` | `head[p] ≥ bl+1` | `atom.add.release tail[p] += 1` |
+| **perslot**（本节新增） | `reclaim[p][s] > bj − CAPp`（**该槽**上一占用者已回收，`s=bj%CAPp`） | `ready[p][s] = bj+1` | `ready[p][s] ≥ bl+1` | `st.release reclaim[p][s] = bl+1` |
+
+`prefix` 的门与发布都是**一个前缀计数器**（无符号距离、单点）；`perslot` 是**每槽独立的
+`reclaim`/`ready` 一对 64-bit 单元**（对齐 DeepGEMM Mega Gate 的 ring generation 逐槽发布、
+`scheduler/mega_gate.cuh:13-39` 的 64-bit 状态）。发布侧仍是「普通 store → `fence.proxy.async.global`
+→ `st.release`」，回收侧 `st.release`。
+
+真实锚点与 §47–§55 同：MPK 的 per-worker 环 + 环容量上界（`per_worker_queue_len=8192`，
+`persistent_kernel.cuh:1790-1791`）。
+
+源码 `src/perslot_ring.cu`、脚本 `harness/perslot_ring.sh`、原始输出
+`harness/perslot_ring.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+`P=32 producer + G=100 worker`（`grid=132` 全共驻）、`DW=88`=352 B、`K=32`、`T=256`、min-of-3）。
+
+### 56.2 §A 正确性（宽松环 `CAPp=bp`，无停顿）：两协议、两分配、任意 D 全部逐位一致
+
+`CAPp = bp = 128`（环装得下整个 producer 区间、背压永不触发），`static` 参考 `sink = host_ref =
+281514573791934`：
+
+| proto | asg | D=1 | D=2 | D=4 |
+|---|---|---|---|---|
+| static | 两种 | REF 0.170 ms / 272 GB/s | REF 0.155 / 298 | REF 0.155 / 298 |
+| prefix | strided | OK 80.7 | OK 81.9 | OK 82.9 |
+| prefix | contig | OK 81.4 | OK 83.2 | OK 82.6 |
+| perslot | strided | OK 81.3 | OK 82.7 | OK 82.7 |
+| perslot | contig | OK 81.2 | OK 82.7 | OK 82.7 |
+
+**两点**：(1) 环不紧张时两种协议、两种分配、任意 `D` 的 `sink` 全部 = 参考——协议与分配在无背压时
+**不动数值**；(2) `static`（无 producer、worker 只读 host 预填数组）达 **298 GB/s**、带 producer 只
+**~82 GB/s**——**producer 写侧是端到端瓶颈**（§47–§55 一致），本节所有「协议差」都在这条写侧地板之上。
+
+### 56.3 §B 紧环 `CAPp=16`：per-slot 让 contig 正确（§55.8 预测证实）
+
+| proto | asg | D=1 | D=2 | D=4 | D=8 |
+|---|---|---|---|---|---|
+| prefix | strided | **OK** 17.3 | ABORT | ABORT | ABORT |
+| prefix | contig | WRONG 19.1 | WRONG 18.8 | WRONG 15.3 | WRONG 12.2 |
+| perslot | strided | **OK** 17.1 | ABORT | ABORT | ABORT |
+| perslot | contig | **OK** 3.5 | **OK** 3.5 | **OK** 3.4 | **OK** 3.0 |
+
+- **复现 §55**：`prefix + strided + D=1` 是唯一正确的紧环形态（17.3 GB/s）；`prefix + strided + D>1`
+  死锁（`ABORT`），`prefix + contig` 静默错（`WRONG`、且"更快"）。
+- **headline（预测证实）**：`perslot + contig` 在 `D=1..8` **全部 OK**——把共享前缀 `tail` 换成**每槽独立
+  回收**后，连续分配**不再静默错**。§55.8 的「contig 的错是共享前缀协议的性质」被实测证实。
+- **但 contig 正确档慢**（~3.0–3.5 GB/s，比 strided 17 GB/s 慢 ~5×）：contig 下 worker `w` 的连续区间跨
+  多个 producer（`chunk=41 > bp=...` 不，此格 `chunk=41 < bp=128`），worker 要先等它区间起点那几个
+  producer 把前面的 batch 送出来——**producer 的产出与 worker 的消费顺序强耦合**，破坏了 strided 那种
+  「所有 producer 齐头并进」的并行度。故 **per-slot 解锁的是「正确性」而非「性能」**。
+- **perslot 没有解锁 strided `D>1`**：`perslot + strided + D>1` 仍 `ABORT`——见 §56.5 的机制。
+
+### 56.4 §C 边界对齐敏感性：prefix 的错与 perslot 的对，与「对齐」无关
+
+紧环 `CAPp=16`、`D=1`、contig：
+
+| P | G | bp | chunk | 关系 | prefix | perslot |
+|---|---|---|---|---|---|---|
+| 32 | 100 | 128 | 41 | split（`chunk<bp`） | WRONG | **OK** |
+| 100 | 32 | 41 | 128 | split（`chunk>bp`） | WRONG | **OK** |
+| 66 | 66 | 63 | 63 | aligned（`chunk==bp`） | OK | **OK** |
+
+§55.5 曾把 contig 错归到「producer 被拆到多个 worker（`chunk≠bp`）」。本节证明：**在共享前缀协议下
+确实只有对齐才不炸；但换成 per-slot 回收后，两种 split 都 OK**——错的载体是**前缀计数器**，不是
+「边界是否对齐」。对齐格 `66/66` 下 prefix 也 OK，正是因为没有 producer 被拆。
+
+### 56.5 §D 死锁边界扫描：两种协议的解锁阈值不同（补 §55.8「未闭式扫描」）
+
+紧环扫 `CAPp`（`P=32 G=100`，`bp=128`，`chunk=41`），`OK`/`ABORT`：
+
+| proto / asg | D | `CAPp=4` | 8 | 16 | 32 | 64 | 128 | 256 | 512 |
+|---|---|---|---|---|---|---|---|---|---|
+| perslot / strided | 2 | ABORT | ABORT | ABORT | ABORT | ABORT | **OK** | OK | OK |
+| perslot / strided | 4 | ABORT | ABORT | ABORT | ABORT | ABORT | **OK** | OK | OK |
+| perslot / strided | 8 | ABORT | ABORT | ABORT | ABORT | ABORT | **OK** | OK | OK |
+| perslot / contig | 2 | OK | OK | OK | OK | — | — | — | — |
+| perslot / contig | 4 | OK | OK | OK | OK | — | — | — | — |
+| perslot / contig | 8 | **ABORT**(`=4`) | OK | OK | OK | — | — | — | — |
+| prefix / strided | 2 | ABORT | ABORT | ABORT | **OK** 14.7 | OK 23.2 | OK 84.4 | OK | OK |
+
+两条**不同**的解锁阈值：
+
+- **`perslot + contig`：阈值 `CAPp ≥ D`**。worker 连续消费，`issue(t+D)` 需要的「槽上一占用者」是
+  `bb−CAPp`，只要 `CAPp ≥ D`，这个批 `t+D−CAPp ≤ t` 已经被本 worker 消费过（worker 顺序消费自己的
+  区间）→ 永远不阻塞自己。`D=8`/`CAPp=4` 是唯一 `ABORT`（`4<8`），逐行吻合 `CAPp ≥ D`。
+- **`perslot + strided`：阈值 `CAPp ≥ bp`（= 128），且与 `D` 无关**。strided 下「槽上一占用者」
+  `bb−CAPp` 属于**同一个 producer**（当 `CAPp<bp`），而它的消费 worker 可能是**另一个正卡在
+  `issue(t+D)` 上的 worker** → 循环等待（§55.4 死锁的同一根因）；只有 `CAPp ≥ bp`（环装得下整个
+  producer 区间、producer **永不等回收**）才解锁。**注意这比 prefix 更难**——`prefix + strided + D=2`
+  在 `CAPp=32` 就 OK（前缀门只要求「累计消费够」、不绑定某个具体槽的占用者），per-slot 反而把门**收紧**
+  到「必须恰好回收该槽」。
+- 因此「per-slot 回收」**不是万能钥匙**：它把 contig 从「静默错」救成「正确」，代价是把 strided 的
+  解锁阈值从 `CAPp≈32` 抬到 `CAPp≈bp`。**和 §55 的『按 prefix 与 per-slot 各有代价』一致**。
+
+### 56.6 §E 协议开销：每槽回收比前缀慢 ~1.3–1.4%（宽松环）
+
+`CAPp=bp=256`、`NB=8192`、strided，`D=1/2`：prefix 83.2 / 85.1 GB/s，perslot 82.1 / 83.9 GB/s——
+**per-slot 多一张 `ready`/`reclaim` 数组 + 逐槽 `release`，端到端只慢 ~1.3–1.4%**（写侧地板掩盖大部分，
+与 §47–§55「控制面被写侧/数据面藏住」一致）。即 **per-slot 的代价在「正确性协议」本身很便宜，真正的
+代价是它改变了**解锁阈值（§56.5）。
+
+### 56.7 结论与判据
+
+- **§55.8 预测证实**：「contig 的静默错是**共享前缀 `tail` 协议**的性质」——换 **per-slot 回收**后
+  `perslot + contig` 在 `D=1..8` 全 OK、两种边界 split 都对（§56.3/§56.4）；对齐格 prefix 也 OK 正
+  因为无 producer 被拆。
+- **但 per-slot 不是免费午餐**：它不解锁 `strided + D>1`（阈值从 prefix 的 `CAPp≈32` 抬到 `CAPp≥bp`，
+  §56.5）——`strided` 的瓶颈是「槽的上一占用者可能属于另一个卡住的 worker」，per-slot 把门收紧到
+  「必须恰好回收该槽」，反而更严；break 约束的办法是**保证「一个 producer 一个 consumer」的拓扑**或
+  **每 worker 独立环**（MPK `per_worker_queue_len`、DeepGEMM ring generation），这正是 §55.7 给的出路。
+- **两协议的解锁阈值**（本节新增的闭式，补 §55.8）：`perslot + contig`：`CAPp ≥ D`；
+  `perslot + strided`：`CAPp ≥ bp`（与 `D` 无关）；`prefix + strided`：约 `CAPp ≥ 32`（本配置）。
+- **性能上 contig 正确档很慢**（~3–3.5 GB/s vs strided ~17）：per-slot 解锁的是**正确性**，续接的
+  **性能出路仍是 per-worker 独立环/对齐拓扑**，与 §55.7 同。
+- **判据**：`static`（C1/C2）、两个环协议的 kernel 均 **C1–C4**（单常驻 kernel、多算子范围、设备内
+  `head/tail`/`ready/reclaim` + 环容量协调），`P` 个固定角色 producer + `G` worker（静态 batch 分配）；
+  **仍差 C5**。与 §47–§55 同档。
+
+### 56.8 局限与踩到的坑
+
+- **合成描述符/数据面**（内容 = `gen_word` 折叠，非真实 GEMM/RMSNorm）；未与 DeepGEMM SM100 路径
+  对跑（SM100 专属，本机不具备）。
+- **边界阈值是单配置（`P=32 G=100 bp=128`）实测的点**：`perslot+contig` 的 `CAPp≥D` 与
+  `perslot+strided` 的 `CAPp≥bp` 只在该配置逐点验证（未扫其他 `bp`/`Gw`/`P`）；`prefix+strided` 的
+  阈值随配置变（未闭式）。
+- **`prefix+strided D=2` 在 `CAPp∈{32,64}` 是「OK 但被强节流」**（14.7/23.2 GB/s vs 84），故「OK」
+  不等于「可用」；死锁列（`ABORT`）的时间是守门狗 ~1.1 s、**不是性能数字**。
+- **`static` 档用普通/`TMA` 读 host 预填数组**，不含 producer 生成成本；`static` 与带 producer 档的
+  83→298 GB/s 差即写侧地板（§47），非协议差。
+- **踩坑**：① worker 的 TMA issue/`mbarrier` 初始化曾用 `lane == 0`（`lane = tid&31`）——每个 warp 的
+  lane 0 都触发 `mbarrier.arrive.expect_tx`、8 个 warp 争一个 count=1 的 mbarrier（`SYNCS.ARRIVE.TRANS64`
+  报 `unspecified launch failure`），改用 `tid == 0` 修复；② `D≥8` 时动态 SMEM >48 KB 触发默认上限，
+  须 `cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, …)`；③ 控制数组按
+  「最大 `P`」与「最大 `P·CAPp`」**分别**追踪容量重分配，否则 `P` 变化后 `cudaMemset` 越界报
+  `invalid argument`。

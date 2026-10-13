@@ -1679,6 +1679,29 @@
     **本轮新增实验。** P66-1 新留尾巴（见 §55.8）：合成描述符、死锁边界未闭式扫描、contig 错是
     「共享前缀 tail 协议」性质（换 per-slot 回收可正确）、未与 DeepGEMM SM100 对跑。
 
+### P67 实验扩展 49：共享前缀 vs 每槽回收的环协议（`docs/04-experiments.md` §56）
+
+- [x] **P67-1** 补掉 P66-1（§55）§55.8 明留的两条尾巴——「**contig 的静默错是『共享前缀 `tail` 协议』
+  的性质，不是『连续分配』固有的**——换 per-slot 回收协议后连续分配可正确」与「**死锁/错误的具体
+  边界未做闭式扫描**」。把 §55 的**共享前缀**（prefix head/tail）有界环换成**每槽独立回收/就绪**
+  （perslot `ready`/`reclaim`，对齐 DeepGEMM Mega Gate ring generation、`scheduler/mega_gate.cuh:13-39`），
+  在同一骨架 / 同一工作 / 同一分配形态上对跑。见 `docs/04-experiments.md` **§56**，源码
+  `src/perslot_ring.cu`、脚本 `harness/perslot_ring.sh`、原始输出 `harness/perslot_ring.out.txt`
+  （目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`P=32 producer + G=100 worker`（grid=132
+  全共驻）、`DW=88`=352 B、`K=32`、`T=256`、min-of-3）。核心结论：
+  - **§A 宽松环**：两协议、两分配、任意 `D` 的 `sink` 全部 = 参考（协议不动数值）；`static` 298 GB/s
+    vs 带 producer ~82 GB/s = 写侧地板。
+  - **§B 紧环 `CAPp=16`（§55.8 预测证实）**：`prefix+strided+D>1` 死锁、`prefix+contig` 静默错；
+    **`perslot+contig` 在 `D=1..8` 全部 OK**——换 per-slot 回收后连续分配**不再错**。但 contig 正确档慢
+    （~3–3.5 vs strided 17 GB/s）：解锁的是**正确性**不是性能。
+  - **§C 边界对齐**：`prefix` 下只有「无 producer 被拆」（`chunk==bp`，`66/66`）才 OK、两种 split 都
+    WRONG；`perslot` 下两种 split 都 OK——错的载体是**前缀计数器**，不是「对齐」。
+  - **§D 解锁阈值（新闭式）**：`perslot+contig` 需 `CAPp ≥ D`；`perslot+strided` 需 `CAPp ≥ bp`
+    （=128、**与 `D` 无关**，比 prefix 的 `CAPp≈32` 更严）；`prefix+strided+D=2` 在 `CAPp=32` 即 OK。
+    ⇒ per-slot 把 strided 的门**收紧**到「必须恰好回收该槽」。
+  - **§E 协议开销**：宽松环 per-slot 比 prefix 只慢 ~1.3–1.4%（写侧地板掩盖）——代价在**解锁阈值**、
+    不在协议本身。判据 C1–C4、仍差 C5（与 §47–§55 同档）。**本轮新增实验。**
+
 
 
 ## 每轮增量流程（autopilot）
@@ -1705,7 +1728,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P66-1 完成（1/1）**。补掉 P65-1（§54）§54.8 明留的两条尾巴——「worker 取 task 环深固定
+- 当前进度：**P67-1 完成（1/1）**。补掉 P66-1（§55）§55.8 明留的两条尾巴——「**contig 的静默错是
+  『共享前缀 `tail` 协议』的性质，不是『连续分配』固有的**——换 per-slot 回收协议后连续分配可正确」
+  与「**死锁/错误的具体边界未做闭式扫描**」。把 §55 的**共享前缀**有界环换成**每槽独立回收/就绪**
+  （perslot `ready`/`reclaim`；对齐 DeepGEMM Mega Gate ring generation、`scheduler/mega_gate.cuh:13-39`），
+  同一骨架 / 同一工作 / 同一分配形态对跑。`docs/04-experiments.md` 新增 **§56**，源码
+  `src/perslot_ring.cu`、脚本 `harness/perslot_ring.sh`、原始输出 `harness/perslot_ring.out.txt`
+  （目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`P=32 producer + G=100 worker`（grid=132
+  全共驻）、`DW=88`=352 B、`K=32`、`T=256`、min-of-3）。核心结论：
+  - **§55.8 预测证实**：紧环 `CAPp=16` 下 `perslot + contig` 在 `D=1..8` **全部 OK**（`prefix+contig`
+    则全 `WRONG`）——共享前缀 `tail` 换成每槽回收后连续分配**不再静默错**；但 contig 正确档慢
+    （~3–3.5 vs strided 17 GB/s）：解锁的是**正确性**不是性能。
+  - **§C 边界对齐**：`prefix` 下只有「无 producer 被拆」（`chunk==bp`，`66/66`）才 OK、两种 split 都
+    WRONG；`perslot` 下两种 split 都 OK——**错的载体是前缀计数器，不是「对齐」**。
+  - **§D 解锁阈值（新闭式，补 §55.8）**：`perslot + contig` 需 `CAPp ≥ D`；`perslot + strided` 需
+    `CAPp ≥ bp`（=128、**与 `D` 无关**）；`prefix + strided + D=2` 在 `CAPp≈32` 即 OK。⇒ per-slot 把
+    strided 的门**收紧**到「必须恰好回收该槽」——**per-slot 不是万能钥匙**。
+  - **§E 协议开销**：宽松环 per-slot 比 prefix 只慢 ~1.3–1.4%（写侧地板掩盖）——代价在**解锁阈值**、
+    不在协议本身。判据 C1–C4、仍差 C5（与 §47–§55 同档）。**本轮新增实验。**
+- 此前：**P66-1 完成（1/1）**。补掉 P65-1（§54）§54.8 明留的两条尾巴——「worker 取 task 环深固定
   `D=1`（**预取深度是 §41/§42 的独立变量**）」与坑②「**跨步分配 `bb=w+t*Gw` 的 `D>1` 预取跨 producer
   子环边界 → 有界环死锁**」：把 §54 端到端流水里被钉死的「worker 取 task」放开（`D` × 分配形态）。
   `docs/04-experiments.md` 新增 **§55**，源码 `src/worker_prefetch_e2e.cu`、脚本
