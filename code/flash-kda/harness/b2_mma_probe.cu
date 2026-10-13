@@ -1227,12 +1227,16 @@ b2mma_kernel(
         sh->da16[r][c] = s;
     }
     __syncthreads();
-    {   // store `dApre` (row = o_t, col = o_u; rows o_t<T)
+    {   // store `dApre` (row = o_t, col = o_u; rows o_t<T).  P7-70: pair adjacent columns
+        // (c, c+1) into one `st2` (`STG.E.64` under `B2M_VECST`, two scalar otherwise); the
+        // `BT*BT` thread-per-entry store was already fully coalesced, this only halves the
+        // store instruction count.  BT is even so the row splits into `BT/2` column pairs.
         const int idx = threadIdx.x;
-        if (idx < BT * BT) {
-            const int r = idx / BT, c = idx % BT, tr = i_t * BT + r;
+        if (idx < BT * (BT / 2)) {
+            const int r = idx / (BT / 2), c = 2 * (idx % (BT / 2)), tr = i_t * BT + r;
             if (tr < T)
-                dApre[((int64_t)(n * T + tr) * H + hh) * BT + c] = sh->da16[r][c];
+                st2(&dApre[((int64_t)(n * T + tr) * H + hh) * BT + c],
+                    sh->da16[r][c], sh->da16[r][c + 1]);
         }
     }
 #endif
@@ -1273,11 +1277,13 @@ b2mma_kernel(
     {   // store final `dA` = where(m_A, -X2, 0).  X2 first axis maps to the stored token row
         // (golden/Triton use the same-index mapping, `check_bwd_dqkg_kernel.py:203`), so token
         // row = i and column index = jj, with the mask (i>jj) applied on X2's own axes.
-        for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
-            const int i = idx / BT, jj = idx % BT;
-            const bool v = (i > jj) && (i_t * BT + i < T) && (i_t * BT + jj < T);
-            if (i_t * BT + i < T)
-                dAout[((int64_t)(n * T + i_t * BT + i) * H + hh) * BT + jj] = v ? -sh->daB[i][jj] : 0.f;
+        for (int idx = threadIdx.x; idx < BT * (BT / 2); idx += NW * 32) {
+            const int i = idx / (BT / 2), jj = 2 * (idx % (BT / 2));
+            const bool v0 = (i > jj) && (i_t * BT + i < T) && (i_t * BT + jj < T);
+            const bool v1 = (i > jj + 1) && (i_t * BT + i < T) && (i_t * BT + jj + 1 < T);
+            if (i_t * BT + i < T)   // P7-70: pair columns (jj, jj+1) into one `st2`
+                st2(&dAout[((int64_t)(n * T + i_t * BT + i) * H + hh) * BT + jj],
+                    v0 ? -sh->daB[i][jj] : 0.f, v1 ? -sh->daB[i][jj + 1] : 0.f);
         }
     }
 #endif
