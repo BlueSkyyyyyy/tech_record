@@ -1014,7 +1014,24 @@
        省下的字节**落在不最紧的 pipe**（判据同 §51.6/§61.4）。**结论**：bf16 原生入口**至此不再有 `#error`**（只剩
        `BF16MMA×TMA`），但目标卡 CUDA B2 在 bf16 部署时**操作数走 bf16 staging 即可、TMA 非必需**（fp32 留的 TMA
        代码零成本可叠、逐位无损，但别指望它在 bf16 下再给时间）；TMA 的真杠杆场景仍是 **fp32/tf32 的 DRAM/L2-bound 核**
-       （§52）。**边界**：仅基础 GEMM 核、`BVK=64`、非 `BF16MMA`、链级未测。见 `docs/07` §79。
+        （§52）。**边界**：仅基础 GEMM 核、`BVK=64`、非 `BF16MMA`、链级未测。见 `docs/07` §79。
+- [x] **P7-77** 关闭 bf16 原生入口的**最后一个 `#error`**（P7-76 遗留）——`-DB2M_BF16MMA × -DB2M_TMA` 可组合：
+        `rd2()`（把一个 bf16 对读成一个 32-bit mma 片段）泛化到与 `rd()` 同一套 `[…][TAW]` 128 B swizzle 解码
+        （k16 片段列偏移恒为偶数，`col`/`col+1` 必同原子、同 16 B 单元），签名加 `rows`（A→`BT`/B→`KD`），
+        删 `b2_mma_probe.cu:428-430` 的 `#error`，**算术一字未动**。新增 `harness/check_bwd_b2_bf16mma_tma.py`
+        （`check_bwd_b2_bf16mma_tma.out.txt`，空闲卡）+ `harness/ncu_b2_bf16mma_tma_driver.py` /
+        `probe_b2_bf16mma_tma_ncu.sh`（`probe_b2_bf16mma_tma_ncu.out.txt`）+ `docs/07` §80。**Part A**：四组
+        shape（含非整除 `T=250`）`bmm_tma64` vs `bmm64` **四项全逐位（`max_abs=0`）**（TMA 只换 smem 布局、
+        连累加序都不动）；`bmm64` vs `bf16_64` 只差换 ISA 的 fp32 累加序（≤7.6e-6）；vs torch ≤4.8e-7。**Part B/C**：
+        `bmmtma/bmm` **0.96–1.04×**（大 shape **0.96×**、小 shape 1.01–1.04×）——**TMA 在原生 bf16 mma 核上从
+        §79.3 的 wash 变为大 shape 净赢**；`bmm_tma64` regs **66**（vs `bmm64` 73、`bf16_tma64` 125）、smem
+        76.1 KB、零 spill。**`ncu`**：TMA 依旧消掉 `cp.async .BYPASS` 的 1.5× L2 读放大（`srcunit` 29.88M→
+        **19.92M**、L2 1.68→**1.44 GB**、DRAM 读不变 637.6 MB），且这次**兑现成时间**（`short_sb` 1.27→**0.38**、
+        `wait` 1.51→**1.10**、`Duration` 290.2→**279.7µs=0.964×**）——换到指令数减半的 bf16 mma 后 smem/发射侧
+        成了可兑现项（对比 §79.4 的 tf32-mma bf16 核被 mma 依赖钉死故 wash）。**结论**：bf16 原生入口**至此不再有
+        任何 `#error`**；**修正 §79.5**「bf16 上 TMA 不是杠杆」——准确说法是「取决于该 bf16 核是否还留有 smem/
+        发射侧头寸」。**边界**：仅基础 GEMM 核、`BVK=64`、`BT=16`、`K=V=128`、链级未测；`ncu` 小 shape 的
+        `Duration` 与 CUPTI `dev` 不同源（以 `dev` 为准）。**不改变 §45 的 `cf` 默认部署。** 见 `docs/07` §80。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1496,8 +1513,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-76 补测**。
-  - P7-76（本轮）：**关闭 bf16 原生入口的最后一个 `#error`——`-DB2M_BF16 × -DB2M_TMA` 可组合**。bf16 的
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-77 补测**。
+  - P7-77（本轮）：**关闭 bf16 原生入口的最后一个 `#error`（P7-76 遗留）——`-DB2M_BF16MMA × -DB2M_TMA` 可组合**。
+    k16 bf16 片段的列偏移恒为偶数，`col`/`col+1` 必落同一 128 B 原子、同一 16 B swizzle 单元，故 `rd2()` 只需
+    套 `rd()` 那套 `b ^= ((b>>7)&7)<<4` 解码一次 `col` 的字节地址、再连读两个 bf16；签名加 `rows`（A→`BT`/B→`KD`），
+    删 `#error`，**算术一字未动**。新增 `harness/check_bwd_b2_bf16mma_tma.py`（`check_bwd_b2_bf16mma_tma.out.txt`，
+    空闲卡）+ `ncu_b2_bf16mma_tma_driver.py` / `probe_b2_bf16mma_tma_ncu.sh`（`probe_b2_bf16mma_tma_ncu.out.txt`）
+    + `docs/07` §80。**Part A**：四组 shape（含非整除 `T=250`）`bmm_tma64` vs `bmm64` **四项全逐位（`max_abs=0`）**
+    （TMA 只换布局、连累加序都不动）；`bmm64` vs `bf16_64` 只差换 ISA 的 fp32 累加序（≤7.6e-6）；vs torch ≤4.8e-7。
+    **Part B/C**：`bmmtma/bmm` **0.96–1.04×**（大 shape **0.96×**、小 shape 1.01–1.04×）——**TMA 在原生 bf16 mma 核上
+    从 §79.3 的 wash 变为大 shape 净赢**；`bmm_tma64` regs **66**（vs `bmm64` 73、`bf16_tma64` 125）、smem 76.1 KB、
+    零 spill。**Part D（ncu）**：TMA 依旧消掉 `cp.async .BYPASS` 的 1.5× L2 读放大（`srcunit` 29.88M→**19.92M**、
+    L2 1.68→**1.44 GB**、DRAM 读不变 637.6 MB），且这次**兑现成时间**（`short_sb` 1.27→**0.38**、`wait` 1.51→**1.10**、
+    `Duration` 290.2→**279.7µs=0.964×**）——换到指令数减半的 bf16 mma 后 smem/发射侧成了可兑现项（对比 §79.4 的
+    tf32-mma bf16 核被 mma 依赖钉死故 wash）。**结论**：bf16 原生入口**至此不再有任何 `#error`**；**修正 §79.5**
+    「bf16 上 TMA 不是杠杆」——准确说法是「取决于该 bf16 核是否还留有 smem/发射侧头寸」。**边界**：仅基础 GEMM 核、
+    `BVK=64`、`BT=16`、`K=V=128`、链级未测；`ncu` 小 shape 的 `Duration` 与 CUPTI `dev` 不同源（以 `dev` 为准）。
+    **不改变 §45 的 `cf` 默认部署。** 见 `docs/07` §80。**下一步**：专题维持维护态——§45 的 `cf`
+    （`dAv→CUDA-B1→融合 Triton B2/B3→cumsum`）仍是目标卡反向默认；CUDA B2 研究形态的 staging/dtype/mma-ISA/
+    store/DA/TMA 旋钮至此**全部关闭且不再有 `#error`**（§67–§80 反复归因、明确不再追），有明确新需求（如六段生产核
+    叠 `BF16MMA×TMA` / raw `v`/`dw` 也 bf16 / K≠V）再动。
+  - P7-76（上轮）：**关闭 bf16 原生入口的最后一个 `#error`——`-DB2M_BF16 × -DB2M_TMA` 可组合**。bf16 的
     128 B swizzle atom 是 **64 个元素**（`NAT=BVK/64`，要求 `BVK∈{64,128}`），**解码公式一字不变**（`b ^=
     ((b>>7)&7)<<4` 作用在字节地址上、128 B 行距无论 fp32/bf16 都把 `row` 搬进 bit 7）。改动＝`b2_mma_probe.cu`
     引入 `tma_t`/`TAW`、`rd()` 泛化、`issue_tma` 字节数 `*sizeof(tma_t)` 且 atom 列偏移 `a*TAW`、`make_map_*`

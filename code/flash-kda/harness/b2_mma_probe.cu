@@ -423,11 +423,10 @@ constexpr int BVP = BVK + 4;   // padded row stride (16B keeps 4-float cp.async 
 // (see the atom-layout note above).  This removes the last `#error` of the bf16 entry.  Under
 // BF16+TMA the fp32 scratch operands (`vv`/`dwm`) are also staged bf16 (raw `v` is already bf16
 // on the wire; `dw` is a GEMM intermediate the DKGB mma consumes as tf32 anyway), so a single
-// bf16 tensor map per operand suffices.  The native-bf16 mma (`B2M_BF16MMA`) is *not* composed
-// with TMA here (`rd2` has no atom decode); that combination stays excluded.
-#if B2M_BF16MMA && B2M_TMA_ON
-#error "B2M_BF16MMA is not composed with B2M_TMA (rd2 has no TMA atom decode)"
-#endif
+// bf16 tensor map per operand suffices.  P7-77 (this revision) composes the native-bf16 mma
+// (`B2M_BF16MMA`) with TMA as well: `rd2` is generalized to the same `TAW`-atom swizzle decode as
+// `rd` (both bf16 of a k16 pair live in the same 128 B atom / 16 B swizzle unit since `col` is
+// even), so the combination is no longer excluded.
 #if B2M_BF16
 using op_t = __nv_bfloat16;
 constexpr int OPS = BVK + 8;   // padded bf16 row stride (16 B alignment = 8 bf16)
@@ -626,9 +625,23 @@ DEV void mma8(float d[4], const uint32_t a[4], const uint32_t b[2], const float 
 // P7-74: pack the two consecutive bf16 at `buf[row*OPS + col .. col+1]` into one 32-bit register
 // (little-endian: low half = col, high half = col+1).  This is exactly the per-lane payload of
 // the bf16 m16n8k16 A/B fragments.
-DEV uint32_t rd2(const __nv_bfloat16* buf, int row, int col) {
-    const unsigned short lo = __bfloat16_as_ushort(buf[row * OPS + col]);
-    const unsigned short hi = __bfloat16_as_ushort(buf[row * OPS + col + 1]);
+// P7-77: under `-DB2M_TMA` the operand lives in the same `[NAT][rows][TAW]` 128 B-swizzle atom
+// layout `rd` decodes; `col` is even (k16 fragment pairs 2t/2t+8), so `col` and `col+1` fall in
+// the same atom and the same 16 B swizzle unit -> decode `col`'s byte address once, read 2 bf16.
+DEV uint32_t rd2(const void* buf, int row, int col, int rows) {
+#if B2M_TMA_ON
+    const int atom = col / TAW, cc = col % TAW;
+    int b = ((atom * rows + row) * TAW + cc) * (int)sizeof(tma_t);
+    b = b ^ (((b >> 7) & 7) << 4);
+    const unsigned short lo =
+        __bfloat16_as_ushort(*(const __nv_bfloat16*)((const char*)buf + b));
+    const unsigned short hi =
+        __bfloat16_as_ushort(*(const __nv_bfloat16*)((const char*)buf + b + (int)sizeof(tma_t)));
+#else
+    (void)rows;
+    const unsigned short lo = __bfloat16_as_ushort(((const __nv_bfloat16*)buf)[row * OPS + col]);
+    const unsigned short hi = __bfloat16_as_ushort(((const __nv_bfloat16*)buf)[row * OPS + col + 1]);
+#endif
     return (uint32_t)lo | ((uint32_t)hi << 16);
 }
 // D = A*B + C, m16n8k16, A row-major, B col-major, bf16 x bf16 -> fp32.
@@ -1009,28 +1022,28 @@ b2mma_kernel(
             // A fragments (m16 x k16) from do/vn/dv:
             //   a0={A[g][2t],A[g][2t+1]} a1={A[g+8][2t],..} a2={A[g][2t+8],..} a3={A[g+8][2t+8],..}
             uint32_t aq[4], ak[4], aw[4];
-            aq[0] = rd2(pdo, g    , kc + 2 * t);
-            aq[1] = rd2(pdo, g + 8, kc + 2 * t);
-            aq[2] = rd2(pdo, g    , kc + 2 * t + 8);
-            aq[3] = rd2(pdo, g + 8, kc + 2 * t + 8);
-            ak[0] = rd2(pvn, g    , kc + 2 * t);
-            ak[1] = rd2(pvn, g + 8, kc + 2 * t);
-            ak[2] = rd2(pvn, g    , kc + 2 * t + 8);
-            ak[3] = rd2(pvn, g + 8, kc + 2 * t + 8);
-            aw[0] = rd2(pdv, g    , kc + 2 * t);
-            aw[1] = rd2(pdv, g + 8, kc + 2 * t);
-            aw[2] = rd2(pdv, g    , kc + 2 * t + 8);
-            aw[3] = rd2(pdv, g + 8, kc + 2 * t + 8);
+            aq[0] = rd2(pdo, g    , kc + 2 * t, BT);
+            aq[1] = rd2(pdo, g + 8, kc + 2 * t, BT);
+            aq[2] = rd2(pdo, g    , kc + 2 * t + 8, BT);
+            aq[3] = rd2(pdo, g + 8, kc + 2 * t + 8, BT);
+            ak[0] = rd2(pvn, g    , kc + 2 * t, BT);
+            ak[1] = rd2(pvn, g + 8, kc + 2 * t, BT);
+            ak[2] = rd2(pvn, g    , kc + 2 * t + 8, BT);
+            ak[3] = rd2(pvn, g + 8, kc + 2 * t + 8, BT);
+            aw[0] = rd2(pdv, g    , kc + 2 * t, BT);
+            aw[1] = rd2(pdv, g + 8, kc + 2 * t, BT);
+            aw[2] = rd2(pdv, g    , kc + 2 * t + 8, BT);
+            aw[3] = rd2(pdv, g + 8, kc + 2 * t + 8, BT);
             #pragma unroll
             for (int nt = 0; nt < 2; ++nt) {
                 const int krow = warp * BW + nt * 8 + g;   // output column = k = n index
                 // B (col-major k16 x n8): b0={B[2t][g],B[2t+1][g]}, b1={B[2t+8][g],B[2t+9][g]};
                 // with h[n][k] the B[k][n]=h[n][k] element is h[krow][kc+2t..].
                 uint32_t bh[2], bd[2];
-                bh[0] = rd2(ph , krow, kc + 2 * t);
-                bh[1] = rd2(ph , krow, kc + 2 * t + 8);
-                bd[0] = rd2(pdh, krow, kc + 2 * t);
-                bd[1] = rd2(pdh, krow, kc + 2 * t + 8);
+                bh[0] = rd2(ph , krow, kc + 2 * t, KD);
+                bh[1] = rd2(ph , krow, kc + 2 * t + 8, KD);
+                bd[0] = rd2(pdh, krow, kc + 2 * t, KD);
+                bd[1] = rd2(pdh, krow, kc + 2 * t + 8, KD);
                 mma16(accq[nt], aq, bh, accq[nt]);
                 mma16(acck[nt], ak, bd, acck[nt]);
                 mma16(accw[nt], aw, bh, accw[nt]);
