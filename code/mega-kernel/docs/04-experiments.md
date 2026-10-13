@@ -4320,3 +4320,144 @@ L2 常驻用标准 API：`cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, byt
   的边界会移动，结论的**形状**（免费 L2 脆弱、persisting 部分且零和、超 carveout 反噬）应保持。
 - **`pfull` 与 `persist` 在大 `S` 时曲线重合**（都超 carveout，保护失效），属预期。
 - device 3（固定空闲）；计时绝对值随驱动/频率略变，比值稳定。
+
+## 30. L2 persisting 的精细化调参 + 多窗口/多流共存（P41-1）
+
+> §29（P40-1）把 L2 常驻测成「损失三的第三档中间量落点」，结论里有两条尾巴：**persisting 是「普通 L2 ↔
+> 常驻 L2」的零和交易**（`pfull` 拉满 31 MB carveout 即便中间量很小也稳定慢 ~1.5×），且 §29.6 明写
+> 「只测单窗口、单 stream、单一 persisting 段，**未测多窗口、多 stream 各自窗口、`hitRatio<1` 的概率化
+> 分区**」。本节把这条补上——它正好对应 megakernel 的真实处境：整图很多中间量**同时**活着、分属不同
+> task/流，要争同一个 carveout。源码 `src/l2_persist_tuning.cu`、脚本 `harness/l2_persist_tuning.sh`、
+> 原始输出 `harness/l2_persist_tuning.out.txt`（目标卡 H100 / sm90，**固定空闲 device 3**，nvcc 13.2，
+> `iters=30`，X=Z=256 MB 流式、polluter=512 MB、中间量 `y` 每段 8–16 MB，L2=50 MB /
+> maxPersistingL2=31 MB / maxWindow=128 MB）。
+
+### 30.1 背景与问题
+
+CUDA persisting 的两个旋钮（`driver_types.h:1390-1415`、`cuda_runtime_api.h:426`）：
+
+- **carveout**：`cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, C)` 在 50 MB L2 里划出一块
+  device 级 **set-aside**（H100 上限 **31 MB**）给 persisting 行专用；
+- **access policy window**：`cudaStreamSetAttribute(..., accessPolicyWindow)` 给**一条 stream 挂一个**
+  连续窗口 `[base, base+num_bytes)`，窗口内按 `hitRatio=f` 的概率把访问标 `hitProp=Persisting`、其余标
+  `missProp`。头文件注释（`driver_types.h:1401-1408`）明确：窗口被切成多段，**`sum(hit segments)/window
+  ≈ hitRatio`**——所以 **`hitRatio` 就是「概率化分区」旋钮**：只有 `f×访问量` 真正去挤 carveout。
+- **一条 stream 只能挂一个窗口** → 「多窗口」只能落在**多条 stream**上。
+
+§29 只用了 `f=1.0`、单窗口、`carveout=min(S,31)`。三个新问题：
+
+- **Q1**：固定 carveout，把 `hitRatio` 从 1.0 降到 `f`，保护量是否≈ `f×S`？时间上能否更优？
+- **Q2**：`pfull`（carveout 拉满 31 MB）的 ~1.5× 代价，能否用「**更小 carveout + `hitRatio<1`**」收回？
+- **Q3**：两个并发中间量 `y1`/`y2` 各挂窗口、共享一个 carveout，保护能否**叠加**？carveout 小于总需求
+  （megakernel 的常态）时会怎样？
+
+### 30.2 方法
+
+沿用 §29 的三算子序列 `K1(读 x→写 y) → polluter(512 MB 冲刷) → K2(读 y→写 z)`，只夹 K2 计时；ncu 用
+`--replay-mode application --cache-control none`（§29.2 的坑）取 K2 的 `dram__bytes_read.sum` +
+`lts__t_sector_hit_rate.pct`。新增两个模式：
+
+- **`one win <S> <f> <carve>`**：单窗口，扫 `f` 与 `carveout`；
+- **`one2 <S> <fA> <carve> [fB]`**：`y1`（stream stA）、`y2`（stream stB）各挂窗口（`<0` 表示不挂），
+  序列 `K1a,K1b → polluter → K2a,K2b`（K2a/K2b 串行、各自输出到独立 `z`/`z2`，排除写缓冲共享的干扰）。
+
+### 30.3 原始结果
+
+**§A 单窗口 hitRatio 扫描**（S=16 MB, carveout=16 MB，对 `pollute` 基准的比）：
+
+```text
+   hitRatio |  K2 ms  | vs pollute   ||  K2 DRAM 读 y  |  L2 命中率
+   ---------+---------+--------------++----------------+-----------
+       0.00 |  0.0223 |   1.221      ||  16.65 MB      |  52.6%
+       0.25 |  0.0209 |   1.149      ||  15.77 MB      |  54.3%
+       0.50 |  0.0194 |   1.065      ||  14.53 MB      |  56.6%
+       0.75 |  0.0177 |   0.969      ||  12.80 MB      |  60.0%
+       1.00 |  0.0158 |   0.869      ||  11.58 MB      |  62.1%
+   (基准 pollute：17.9 µs / 16.78 MB / 51.8%；base 无 polluter：11.9 µs / 0.33 MB / 93.3%)
+```
+
+**§B carveout × hitRatio 联合**（S=16 MB，对 `pollute` 的比；`f=0.00` 列 = 纯 carveout 代价）：
+
+```text
+   carveout |   f=0.00  |   f=0.25  |   f=0.50  |   f=0.75  |   f=1.00
+   ---------+-----------+-----------+-----------+-----------+----------
+       4 MB |    0.996  |    0.959  |    0.970  |    0.993  |    1.008
+       8 MB |    0.981  |    0.931  |    0.918  |    0.947  |    1.001
+      16 MB |    1.204  |    1.132  |    1.066  |    0.962  |    0.860
+      31 MB |    1.921  |    1.877  |    1.782  |    1.625  |    1.504
+```
+
+单窗口 carveout 边界（S=8 MB, f=1.0，ncu）：carveout 8→**6.05 MB**、16→6.42、31→6.96；无窗口 8.40。
+（S=16 MB, f=1.0：carveout 16→11.29、31→11.75。）
+
+**§C 多窗口/多 stream 共存**（`y1`=`y2`=8 MB，总需求 16 MB；K2a/K2b 串行、独立输出；和相对无窗口）：
+
+```text
+   场景                        | K2a ms | K2b ms | vs 无窗口(和)
+   ----------------------------+--------+--------+--------------
+   no window                  | 0.0137 | 0.0125 |      1.000
+   carve=16 y1 only f=1       | 0.0110 | 0.0146 |      0.979
+   carve=16 both f=1.0        | 0.0113 | 0.0099 |      0.814
+   carve=16 both f=0.5        | 0.0131 | 0.0123 |      0.972
+   carve=8  both f=1.0        | 0.0148 | 0.0120 |      1.026
+   carve=8  both f=0.5        | 0.0118 | 0.0112 |      0.879
+   carve=31 both f=1.0        | 0.0186 | 0.0165 |      1.343
+```
+
+ncu 双窗口读数（carveout=16 MB）：仅 stA 窗口 → K2a 6.77 / K2b 8.40；仅 stB 窗口 → 8.40 / 8.29；两个都挂
+→ 7.42 / 8.35；carveout=8 两个都挂 → 8.28 / 8.32；诊断「stB 单独使用」→ 6.30。
+
+正确性：`z` 在有/无窗口下**逐位一致**（S=16 MB `max|Δ|=0.000e+00`）——persisting 是纯性能提示。
+
+### 30.4 读法
+
+1. **零和代价的开关是 carveout 大小，不是 hitRatio**（Q2）。§B 的 `f=0.00` 列（挂了窗口但全部按
+   `Streaming` 走、等于「只划 carveout 不保护」）随 carveout 单调恶化：4 MB→0.996、8 MB→0.981、
+   **16 MB→1.204、31 MB→1.921**。即 `pfull` 的 ~1.5× 惩罚**主要**来自 carveout 抢走普通 L2，
+   **无法用 `hitRatio` 收回**（31 MB 行从 f=0 的 1.921 只降到 f=1 的 1.504，仍 ≫1）。
+2. **正确姿势：carveout ≈ 中间量实际大小，且配得上时 `f` 取高**（Q1/Q2）。§A/§B 的最优都在
+   **carveout=16、f=1.0 → 0.860×**；单窗口 ncu 也显示 **carveout=8（=S）** 比 16/31 保护得更好
+   （6.05 vs 6.42/6.96 MB）。**把 carveout 拉到最大是最差的选择**，与 §29.4 的结论一致，只是这里把
+   「谁在付账」量清了：**是 carveout 大小，不是 `hitRatio`**。
+3. **`hitRatio<1` 真正有用的地方：carveout 被压得比需求还小时「救火」**（Q3）。§C 里
+   **carveout=8 MB < 总需求 16 MB、两个都挂 f=1.0 → 1.026×（崩，thrash）**；把 `f` 降到 **0.5**（只让
+   8 MB 需求去挤 8 MB carveout）→ **0.879×（反超）**。这是「概率化分区」的**唯一**价值场景：**carveout
+   固定且偏小时，用 `f≈carveout/需求` 把 persisting 需求裁到装得下**，避免超配抖动。
+4. **多窗口保护可以叠加，但要求 carveout ≥ 总需求**（Q3）。`carve=16、both f=1.0 → 0.814×`（两个 K2
+   都快），而 `carve=31、both f=1.0 → 1.343×`（过度预留的惩罚盖过保护）。**两个并发中间量不是简单地
+   「各保护一半」**：carveout 必须按**同一时刻存活的中间量总量**配。
+5. **ncu 在「多 kernel + replay」下会失真**：自然运行时 §C 的 `carve=16 both f=1.0` 让 K2a/K2b **都**加速
+   （0.0113/0.0099），但 ncu 读数却显示只有 stA 侧 `y1` 受益（7.42/8.35）；单 stream 的 `oneB` 又证明
+   stB 单独用完全能保护（6.30）。故**多窗口的 split 归因以自然计时为准，ncu 的逐 kernel 拆分受 replay
+   干扰**，只作参考（§29.2 已提示 replay 会扰动 L2 演化，此处更明显）。
+6. **保护上限仍 ~30%**：单窗口即使 `f=1.0`、carveout 配平，也只把 K2 的 DRAM 读削 ~30%（S=16 时
+   16.78→11.58；S=8 时 8.40→6.05）——与 §29 的 ~23–30% 一致。persisting 是**提示**、不是承诺。
+
+### 30.5 与判据 / MPK / 生产案例的关系
+
+- **补的是 §29 留下的「怎么配 carveout / 多窗口」这一维**，把「L2 常驻」这一档从「能不能用」推进到
+  「**怎么用才不亏**」：从内存层级看，L2 中间量档的三条边界是 **31 MB 硬上限**、**~30% 保护上限**、
+  **carveout 与普通流量零和**；本节补上第四条——**多窗口不叠加、carveout 必须按同活中间量总量配**。
+- **对 megakernel 的含义**：megakernel / MPK 恰恰让**整图很多中间量同时活着**（`docs/09` 多算子图、
+  MPK §5 跨 task 流水），也就是「同一时刻多个 persisting 段争一个 carveout」——本节证明这条路
+  **最多只能护住 ~一个中间量的量级**（31 MB 上限 + ~30% 命中 + 不叠加），且一旦 carveout 配大就净亏。
+  这从**机制上**解释了 MPK §5.3（快照行 1312–1325）为何用 **paged shared memory**（片上、可显式管理、
+  不受 31 MB 上限、不与他人零和）而不是依赖 L2；也再次指向最稳的两档：**融合进寄存器**（P5-2/P24-1）
+  与**锁进 SMEM/DSM**（P29-1）。
+- **判据（C1–C5）**：本节仍是 kernel-per-operator（K1/K2 两次 launch），谈的是**中间量的落点/调参**，
+  不改 C 判据；`fused`（寄存器档）才满足 C1–C3。
+- **与生产案例**：DeepGEMM mega 家族把中间量锁在寄存器/SMEM 并按 `Kstages` 流水（`docs/07` §1.2），
+  MPK 的 intermediate 分页也是显式 SMEM——本节给出「为什么不用 L2 persisting」的量化理由：**它挡得住
+  一次往返的 ~30%，但挡不住整图的同时多张量**。
+
+### 30.6 局限与踩到的坑
+
+- **合成负载**：K1/K2 逐元素 `float4`、polluter 512 MB 流式；倍数以**量级/方向**读，绝对值随驱动/频率略变。
+- **ncu 与自然运行的背离**：多 kernel + 多流场景下，ncu `--replay-mode application` 的逐 kernel DRAM 读
+  与自然计时不一致（§30.4 第 5 点）；**跨模式相对关系**仍是结论，逐 kernel 拆分谨慎使用。这是本节的
+  主要口径 caveat。
+- **只测本机 H100、两个窗口、`f∈{0,0.25,0.5,0.75,1}`**：未测 >2 窗口、`hitRatio<1` 下的多段错峰、
+  `cudaMemAdvise`/`cudaMemPrefetchAsync` 等其它放置手段，也未跑到论文级的真实 serving 中间量尺寸分布。
+- **H100 参数**：L2=50 MB、`maxPersistingL2CacheSize`=31 MB；不同代 GPU（A100 40 MB L2、B200 更大）
+  数值会移，但结论的**形状**（carveout 大小是零和开关、`f<1` 只救小 carveout、多窗口不叠加）应保持。
+- device 3（固定空闲）；每配置独立进程跑 ncu，避免 persisting 状态串扰。

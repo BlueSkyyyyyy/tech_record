@@ -920,6 +920,30 @@
       融合进寄存器（P5-2）与锁进 SMEM（P29-1）。踩坑：ncu 默认 `--cache-control=all` 会在 replay 前 flush L2，
       首版三模式字节完全相同；须 `--replay-mode application --cache-control none`。**本轮新增实验。**
 
+### P41 实验扩展 23：L2 persisting 的精细化调参 + 多窗口/多流共存（`docs/04-experiments.md` §30）
+
+- [x] **P41-1** 补齐 `docs/04` §29.6（P40-1）明确留的「只测单窗口、单 stream、单一 persisting 段，
+  未测多窗口、多 stream 各自窗口、`hitRatio<1` 的概率化分区」尾巴，把「L2 常驻」从「能不能用」推进到
+  「**怎么配才不亏**」，直接对应 megakernel「整图很多中间量同时活着、争同一个 carveout」的处境。
+  见 `docs/04-experiments.md` §30，源码 `src/l2_persist_tuning.cu`、脚本 `harness/l2_persist_tuning.sh`、
+  原始输出 `harness/l2_persist_tuning.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、
+  `iters=30`，X=Z=256 MB 流式、polluter=512 MB、每段 8–16 MB，L2=50 MB / maxPersist=31 MB）。
+  三个新问题：Q1 固定 carveout 扫 `hitRatio` 的保护/时间标度；Q2 `pfull`（carveout 拉满）的 ~1.5× 代价
+  能否用小 carveout + `hitRatio<1` 收回；Q3 两个并发中间量各挂窗口共享一个 carveout 能否叠加。核心结论：
+  - **零和代价的开关是 carveout 大小而非 hitRatio**：`f=0.00`（挂窗但全 Streaming = 只划 carveout 不保护）
+    随 carveout 单调恶化 **4 MB→0.996、8 MB→0.981、16 MB→1.204、31 MB→1.921**；`pfull` 的 ~1.5× 惩罚
+    **无法用 hitRatio 收回**（31 MB 行 f=0→1.921 仅降到 f=1→1.504）。
+  - **正确姿势：carveout ≈ 中间量实际大小、配得上时 f 取高**——最优 `carveout=16, f=1.0 → 0.860×`；
+    单窗口 ncu 亦证 `carveout=8`（=S）比 16/31 保护更好（S=8：6.05 vs 6.42/6.96 MB vs 无窗 8.40）。
+  - **`hitRatio<1` 的唯一价值场景**：carveout 被压到 < 需求时救火——两个 8 MB 窗口、**carveout=8 < 总需求
+    16、f=1.0 → 1.026×（thrash 崩）**，把 **f 降到 0.5 → 0.879×（反超）**。
+  - **多窗口保护可叠加但要求 carveout ≥ 同活中间量总量**：`carve=16 both f=1.0 → 0.814×`（两个 K2 都快），
+    而 `carve=31 both f=1.0 → 1.343×`（过度预留盖过保护）。
+  - **保护上限仍 ~30%**（单窗口 f=1 削 DRAM 读 ~30%，与 §29 一致）；persisting 是提示非承诺。
+  - **口径 caveat**：多 kernel + 多流下 ncu replay 的逐 kernel DRAM 读与自然计时背离（ncu 显示只有 stA
+    侧受保护、但自然计时两个 K2 都加速、`oneB` 单 stream 又证明 stB 完全能保护），故**多窗口 split 归因
+    以自然计时为准、ncu 逐 kernel 拆分只作参考**。判据不变（kernel-per-operator，谈落点）。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -942,7 +966,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P40-1 完成（1/1）**。兑现 `docs/04` §17.7（P24-1）明确留的假设「若张量能整块驻留
+- 当前进度：**P41-1 完成（1/1）**。补齐 `docs/04` §29.6（P40-1）明确留的「只测单窗口、单 stream、
+  单一 persisting 段，**未测多窗口、多 stream 各自窗口、`hitRatio<1` 的概率化分区**」尾巴，把「L2 常驻」
+  从「能不能用」推进到「**怎么配才不亏**」，直接对应 megakernel「整图很多中间量同时活着、争同一个
+  carveout」的处境。`docs/04-experiments.md` 新增 **§30**，源码 `src/l2_persist_tuning.cu`、脚本
+  `harness/l2_persist_tuning.sh`、原始输出 `harness/l2_persist_tuning.out.txt`（目标卡 H100/sm90、
+  **固定空闲 device 3**、nvcc 13.2、iters=30，X=Z=256 MB 流式、polluter=512 MB、每段 8–16 MB，
+  L2=50 MB / maxPersist=31 MB）。核心结论：
+  - **零和代价的开关是 carveout 大小而非 hitRatio**：`f=0.00`（挂窗但全 Streaming = 只划 carveout 不保护）
+    随 carveout 单调恶化 **4 MB→0.996、8 MB→0.981、16 MB→1.204、31 MB→1.921**；`pfull` 的 ~1.5× 惩罚
+    **无法用 hitRatio 收回**（31 MB 行 f=0→1.921 仅降到 f=1→1.504）。
+  - **正确姿势：carveout ≈ 中间量实际大小、配得上时 f 取高**——最优 `carveout=16, f=1.0 → 0.860×`；
+    单窗口 ncu 亦证 carveout=8（=S）比 16/31 保护更好（S=8：6.05 vs 6.42/6.96 MB vs 无窗 8.40）。
+  - **`hitRatio<1` 的唯一价值场景**：carveout 被压到 < 需求时救火——两个 8 MB 窗口、**carveout=8 < 总需求
+    16、f=1.0 → 1.026×（thrash 崩）**，把 **f 降到 0.5 → 0.879×（反超）**。
+  - **多窗口保护可叠加但要求 carveout ≥ 同活中间量总量**：`carve=16 both f=1.0 → 0.814×`；而
+    `carve=31 both f=1.0 → 1.343×`（过度预留盖过保护）。保护上限仍 ~30%。
+  - **口径 caveat**：多 kernel + 多流下 ncu replay 的逐 kernel DRAM 读与自然计时背离（ncu 显示只有 stA
+    侧受保护、自然计时两个 K2 都加速、单 stream 又证明 stB 完全能保护），**多窗口 split 归因以自然计时为准**。
+  判据不变（kernel-per-operator，谈落点）。**本轮新增实验。**
+- 此前：**P40-1 完成（1/1）**。兑现 `docs/04` §17.7（P24-1）明确留的假设「若张量能整块驻留
   L2（≤50 MB），eager 的中间量往返可能命中 L2 而不落 DRAM——损失三在工作集超过 L2 时才充分显现」，
   把「中间量的内存落点」从已有的**寄存器**（P5-2 融合）/ **SMEM+DSM**（P29-1）/ **HBM**（P24-1）
   补上缺失的 **L2** 一档。`docs/04-experiments.md` 新增 **§29**，源码 `src/l2_residency.cu`、脚本
