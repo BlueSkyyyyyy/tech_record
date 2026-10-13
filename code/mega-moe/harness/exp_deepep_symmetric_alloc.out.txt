@@ -1,0 +1,127 @@
+symmetric.hpp sha256(前16): fa24a2333e387330
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+DeepEP 对称内存分配层实验 —— 直接 include 真实 symmetric.hpp，H100(sm90) 真机
+
+=== Part 1: DeviceContext 分配属性构造（symmetric.hpp:21-75） ===
+  [info] device=0 host_numa=0 fabric_supported=1 gpu_direct_rdma_vmm=1
+  [PASS] DeviceContext.numa_idx == HOST_NUMA_ID (0 == 0)
+  [PASS] H100 暴露 host NUMA id (>=0)
+  [PASS] gpu prop.type == PINNED (1 == 1)
+  [PASS] gpu prop.location DEVICE (1 == 1)
+  [PASS] gpu prop.location.id == device_idx (0 == 0)
+  [PASS] cpu prop.location HOST_NUMA (3 == 3)
+  [PASS] cpu prop.location.id == numa_idx (0 == 0)
+  [PASS] requestedHandleTypes 含 POSIX_FILE_DESCRIPTOR
+  [PASS] gpu prop.allocFlags.gpuDirectRDMACapable == 1（:65-66 断言通过） (1 == 1)
+  [PASS] cpu prop 不设 gpuDirectRDMACapable (0 == 0)
+  [PASS] gpu prop 的 FABRIC 位 == 设备属性 fabric_supported
+  [info] granularity recommended=2097152 minimum=2097152 ; kNumAllocationAlignmentBytes=2097152
+  [PASS] kNumAllocationAlignmentBytes == 2 MiB（compiled.cuh:69） (2097152 == 2097152)
+  [PASS] 2 MiB 整除 recommended granularity（:72 断言）
+  [PASS] recommended granularity >= minimum granularity
+  [info] cpu-alloc recommended granularity=2097152
+  [PASS] 2 MiB 整除 cpu recommended granularity
+
+=== Part 2: cumem_create_with_fallback 的 FABRIC→POSIX_FD 回退（symmetric.hpp:79-93） ===
+  [PASS] POSIX_FD-only prop：cuMemCreate 成功（else 分支）
+  [PASS] 强制 FABRIC 请求：回退逻辑后 cuMemCreate 仍成功
+  [PASS] 回退后 FABRIC 位被清（或设备原生支持 FABRIC）
+    [info] 最终 requestedHandleTypes = 0x1
+
+=== Part 3: ElasticSymmetricMemory：GPU 段 + 独立 storage 段共享一段连续 VA（symmetric.hpp:139-190） ===
+  -- GPU-backed storage --
+  [PASS] GPU-backed storage：symmetric::alloc 成功
+  [PASS] GPU-backed storage：num_sym_bytes 记录正确 (4194304 == 4194304)
+  [PASS] GPU-backed storage：返回指针 2 MiB 对齐（:178 断言）
+    [info] ptr=0x7fc67a800000
+  [PASS] GPU-backed storage：主对称内存段 kernel 铺/读 0x5a 一致
+  [PASS] GPU-backed storage：storage 段 kernel 铺/读 0xa5 一致
+  [PASS] GPU-backed storage：两段物理 backing 独立（可同时持有不同值）
+  -- CPU(NUMA)-backed storage --
+  [PASS] CPU(NUMA)-backed storage：symmetric::alloc 成功
+  [PASS] CPU(NUMA)-backed storage：num_sym_bytes 记录正确 (4194304 == 4194304)
+  [PASS] CPU(NUMA)-backed storage：返回指针 2 MiB 对齐（:178 断言）
+    [info] ptr=0x7fc67a800000
+  [PASS] CPU(NUMA)-backed storage：主对称内存段 kernel 铺/读 0x5a 一致
+  [PASS] CPU(NUMA)-backed storage：storage 段 kernel 铺/读 0xa5 一致
+  [PASS] CPU(NUMA)-backed storage：两段物理 backing 独立（可同时持有不同值）
+
+=== Part 4: create_shared_handle 的 POSIX-FD 导出 + 本进程再导入（symmetric.hpp:281-299） ===
+  [PASS] GPU storage handle：导出得到合法 FD
+  [PASS] GPU storage handle：handle.pid == 本进程 pid (2327712 == 2327712)
+    [info] (pid=2327712, fd=67)
+  [PASS] GPU storage handle：本进程导入 FD + map + set_access 成功
+  [PASS] GPU storage handle：导入段 kernel 铺/读 0x3c 一致
+  [PASS] CPU storage handle：导出得到合法 FD
+  [PASS] CPU storage handle：handle.pid == 本进程 pid (2327712 == 2327712)
+    [info] (pid=2327712, fd=67)
+  [PASS] CPU storage handle：本进程导入 FD + map + set_access 成功
+  [PASS] CPU storage handle：导入段 kernel 铺/读 0x3c 一致
+
+=== Part 5: HybridElasticSymmetricMemory 的多 shard 连续映射（symmetric.hpp:193-262） ===
+  [PASS] hybrid alloc 成功（num_scaleup=3，全部 local pid → 走 local_fd 直用分支）
+  [PASS] num_sym_bytes 仍为主段大小 (2097152 == 2097152)
+  [PASS] hybrid 指针 2 MiB 对齐（:221 断言）
+  [PASS] 主段 + 3 个 shard 各自 kernel 铺/读一致（物理段独立，VA 连续）
+  [PASS] shard 写入未污染主段
+
+=== Part 6: 跨进程 pidfd 共享（HybridElasticSymmetricMemory 的 pidfd_open/pidfd_getfd 路径，:232-238） ===
+  [PASS] 父进程收到子进程公布的 (pid, fd)
+    [info] child pid=2327724 (fork=2327724), child fd=67
+  [PASS] pidfd_open(child) 成功（:233）
+  [PASS] pidfd_getfd 跨进程拿到 FD 副本（:235）
+  [PASS] 父进程导入对端段并映射到自己的 VA
+  [PASS] 父进程读到子进程写的 MAGIC_CHILD（跨进程同物理内存可见）
+  [PASS] 子进程读回父写的 MAGIC_PARENT（exit=0）
+    [info] child exit code = 0
+
+=== Part 7: GPUSymmetricMemory = ncclMemAlloc 包装（symmetric.hpp:120-135） ===
+  [PASS] num_rdma_storage_bytes==0 → 走 GPUSymmetricMemory（:321-323）
+  [PASS] num_sym_bytes 正确 (4194304 == 4194304)
+  [PASS] ncclMemAlloc 返回 2 MiB 对齐（:125 断言）
+    [info] ncclMemAlloc ptr=0x7fc67a800000
+  [PASS] ncclMemAlloc 段 kernel 铺/读 0x77 一致
+  [PASS] 非 2 MiB 倍数被 :123 断言拒绝
+  [PASS] 0 字节被 :123 断言拒绝
+
+=== SUMMARY ===
+PASS=55 FAIL=0
+
+=== Python: 真实 BufferAllocator 源码计划/落地 + 与设备常量交叉核对 ===
+DeepEP 对称内存分配层实验 —— 纯 Python BufferAllocator（真实源码）
+
+=== Part A: 常量与对齐（allocator.py:14；compiled.cuh:69） ===
+  [PASS] align(0, 2MiB) == 0
+  [PASS] align(1, 2MiB) == 2MiB
+  [PASS] align 幂等
+  [PASS] 设备打印的常量 == 2 MiB (2097152)
+  [PASS] torch 可用
+
+=== Part B: allocate 的规划语义（allocator.py:19-26） ===
+  [PASS] BufferAllocator.alignment == get_num_allocation_alignment()
+  [PASS] allocate 返回 meta 占位张量
+  [PASS] planning 阶段 materialized==False
+  [PASS] 每个偏移 2 MiB 对齐且与 oracle 一致 [0, 2097152, 4194304, 6291456] == [0, 2097152, 4194304, 6291456]
+  [PASS] 总字节与 oracle 一致 (8388608 == 8388608)
+  [PASS] 所有偏移都是 2 MiB 的倍数
+  [PASS] 总字节也是 2 MiB 的倍数
+
+=== Part C: materialize 落地为单块连续 storage（allocator.py:28-36） ===
+  [PASS] materialize 后 materialized==True
+  [PASS] 每个张量都是 storage 上对应偏移的连续视图（data_ptr 精确吻合）
+  [PASS] 写 int32 张量后 raw storage 字节同步变化（同一块内存）
+  [PASS] 写 uint8 张量后 storage 首字节同步
+
+=== Part D: 契约与负例（allocator.py:21/29-31） ===
+  [PASS] materialized 后再 allocate 引发 AssertionError
+  [PASS] materialize 传入错误大小 storage 被拒
+  [PASS] materialize 传入非 uint8 storage 被拒
+  [PASS] materialize 传入非 CUDA storage 被拒
+  [PASS] 二次 materialize 引发 AssertionError
+
+=== Part E: 真实 MoE/EP 规模的一次规划 ===
+  [PASS] 总分配 >= 各段之和（33554432 >= 29361664）
+  [PASS] 真实规模下每段仍 2 MiB 对齐
+
+=== SUMMARY ===
+PASS=23 FAIL=0

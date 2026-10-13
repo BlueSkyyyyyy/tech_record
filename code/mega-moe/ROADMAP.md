@@ -1715,6 +1715,36 @@
       `EP_USE_NVIDIA_TOOLS` 旁路、`suppress_stdout_stderr` 全 PASS。配套博客
       `content/posts/mega-moe-65-deepep-refs-and-testing`（索引页新增第 65 篇）。
 
+### P56 增量（opt-in，补齐所有 DeepEP kernel 篇目脚下的「对称内存分配地基」）
+
+- [x] **P56-1** **DeepEP 的对称内存分配层：GPU/CPU 弹性段、跨进程 shard 与 copy-engine 窗口的地基**
+      （`csrc/kernels/comm/symmetric.hpp`；`deep_ep/buffers/allocator.py`；`csrc/buffers/base.hpp`；
+      `csrc/kernels/comm/context.cpp` 的 alloc/window 段）。前面第 7/48/51/52/53/58/59/61/63/64 篇
+      全都默认「有一块布局一致、可对称寻址的对称内存」，但**这块内存谁分配、怎么在 GPU 与 CPU 之间
+      弹性拼接、怎么跨进程把对端 shard 映射进本地 VA** 从没系统讲过。本篇补这层地基。**纯 host-side
+      CUDA VMM + NCCL 主机 API + Linux pidfd，与 UMMA/tcgen05/GIN 无关，H100 真机可跑**——直接
+      `#include` 真实头文件调真实类。→ `docs/66-deepep-symmetric-memory-alloc.md`（真实行号核对）：
+      三层对齐（TMA 32B / RDMA 64B / **分配 2MiB**，`compiled.cuh:67-71`）；`DeviceContext`（`:21-75`）
+      与 `build_alloc_prop` 的四步（PINNED + location、requestedHandleTypes 含 POSIX_FD/FABRIC、
+      GPUDirect-RDMA-with-VMM 断言、granularity 整除 2MiB）；`cumem_create_with_fallback`（`:79-93`）
+      的 **FABRIC→POSIX_FD 就地清位重试**；三个分配器——`GPUSymmetricMemory`（`:120-135`，包
+      `ncclMemAlloc`）、`ElasticSymmetricMemory`（`:139-190`，**reserve 一段连续 VA 后 map「GPU 主段 +
+      独立 storage 段」**）、`HybridElasticSymmetricMemory`（`:193-300`，按 rank 依次把对端 shard 贴到
+      `num_sym_bytes + i*storage`）；`create_shared_handle`（`:281-299`，`cuMemExportToShareableHandle`
+      后 **`cuMemRelease` 靠 fd 续命**）；`context.cpp` 的 window 消费（`:186-231`：`symmetric::alloc` →
+      `ncclCommWindowRegister` → `ncclGetLsaDevicePointer` → `get_sym_ptr` 的 offset 翻译）；Python
+      `BufferAllocator`（`allocator.py:19-36`：`meta` 占位 + 2MiB 对齐偏移 + `swap_tensors` 落地单块
+      storage）。**H100 真机**（`src/deepep_symmetric_alloc.cu`，`sha256(symmetric.hpp)=fa24a233…`）：
+      **设备 PASS=55 / Python PASS=23 / 0 FAIL**——① 属性普查 `host_numa=0`、`fabric_supported=1`、
+      `gpu_direct_rdma_vmm=1`、granularity **2 MiB**；② **真坑**：属性说 FABRIC 支持，但强制请求时
+      `cuMemCreate` 仍被拒 → 回退分支就地清位到 `0x1`（POSIX_FD）；③ Elastic 的 GPU / CPU-NUMA 两种
+      backing 都连续 VA、两段物理独立；④ `create_shared_handle` GPU/CPU 导出→导入往返；⑤ hybrid 3 个
+      shard 连续映射、偏移布局、不污染主段；⑥ **真·跨进程**（`fork`+`exec` 子进程，**不能 fork-after-CUDA**）
+      `pidfd_open`/`pidfd_getfd` → 子写父读、父写子读 magic 往返；⑦ `ncclMemAlloc` 2MiB 对齐 + 非对齐
+      /0 字节断言负例；Python 侧真实 `allocator.py` 源码规划/落地/契约/真实 MoE 规模。window/GIN 与
+      真实多 rank scaleout 编排为 NCCL 设备 API 专属，仅分析。配套博客
+      `content/posts/mega-moe-66-deepep-symmetric-memory-alloc`（索引页新增第 66 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1739,8 +1769,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P55 各增量完成（P15-1…P41-1、P42-1…P55-1）。**
-  本轮 P55-1：新建 `docs/65-deepep-refs-and-testing.md`（+`harness/exp_deepep_refs.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P56 各增量完成（P15-1…P41-1、P42-1…P56-1）。**
+  本轮 P56-1：新建 `docs/66-deepep-symmetric-memory-alloc.md`（+`src/deepep_symmetric_alloc.cu`、
+  `harness/exp_deepep_symmetric_alloc.{sh,py,out.txt}`）——补上前面所有 DeepEP kernel 篇目（第 7/48/51/
+  52/53/58/59/61/63/64）脚下的**「对称内存分配地基」**：`csrc/kernels/comm/symmetric.hpp` + `allocator.py`。
+  这块内存是所有 dispatch/combine/bucket 的基础，却从没系统讲过。核心「为什么」：① 三层对齐里
+  **分配粒度 2 MiB** 必须整除 CUDA VMM 的 recommended granularity（`compiled.cuh:67-71`）；
+  ② `ElasticSymmetricMemory` 把**GPU 主段和独立 storage 段 map 进同一段连续 VA**，因为设备端只用
+  「一个基址 + 对称偏移」寻址；③ `HybridElasticSymmetricMemory` 把域内对端 rank 的 storage shard
+  按序贴到 `num_sym_bytes + i*storage`，用 `pidfd_open`/`pidfd_getfd` 跨进程拿 fd；④ `create_shared_handle`
+  导出 POSIX FD 后 **`cuMemRelease` 分配句柄、靠 fd 续命**。**纯 host-side CUDA VMM + NCCL 主机 API，
+  H100 真机可跑**（直接 include 真实头文件）。**设备 PASS=55 / Python PASS=23 / 0 FAIL**：真坑是
+  **属性说支持 FABRIC 但 `cuMemCreate` 被拒 → 回退分支清位到 0x1**；另做了真·跨进程 pidfd 共享
+  （子写父读/父写子读，且踩过「不能 fork-after-CUDA、要 fork+exec」）；Python 侧加载真实 `allocator.py`
+  验证「meta 占位 + 2MiB 对齐偏移 + `swap_tensors` 落地」。配套博客
+  `content/posts/mega-moe-66-deepep-symmetric-memory-alloc`（索引页新增第 66 篇）。
+  上一轮 P55-1：新建 `docs/65-deepep-refs-and-testing.md`（+`harness/exp_deepep_refs.{py,sh,out.txt}`）
   ——补上前面所有 DeepEP kernel 篇目（第 7/48/51/52/53/58/59/61/63/64）的**语义规范层**：
   `deep_ep/utils/refs.py`（dispatch/combine 纯 PyTorch 参考实现）+ `gate.py`（精确不平衡流量生成器）
   + `testing.py`（bench/bench_kineto/parse_num_bytes）+ `math.py`（`calc_diff` 是余弦相似度型，
@@ -2478,7 +2522,8 @@
     已由 P49-1 补齐**（`common/ptx.cuh` 等，H100 真机 41 PASS）；**与运行期无关的「确定性 dispatch 排序」
     已由 P52-1 补齐**（`EPHandle.deterministic_sort`，纯 host/Python，H100 抽取真实源码 7 PASS）；
     **多 rank 屏障与 symmetric-memory 句柄层已由 P53-1 补齐**（`comm/{barrier,handle}.cuh`，NVLink 腿
-    逐行抽取 + 对称指针桩 H100 真机 19 PASS）。DeepEP
+    逐行抽取 + 对称指针桩 H100 真机 19 PASS）；**「对称内存」的物理分配/映射/跨进程 shard 地基已由
+    P56-1 补齐**（`comm/symmetric.hpp` + `allocator.py`，H100 真机 55+23 PASS）。DeepEP
     侧余下的运行期空档（bucket 集合通信 `all_gather/all_reduce/reduce_scatter`、`pp_send_recv`、`engram`）
     都要 NCCL 设备 API，待环境。
   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
