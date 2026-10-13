@@ -1,0 +1,53 @@
+[L1] register_task 名字数 = 95
+[L1] 涉及 TaskType = 92
+[L2] *_layer 方法数 = 75
+[L3] 生产闭包（并集）文件数 = 112；ampere=29，hopper=48，blackwell=99
+
+== [L2] 登记名从未被任何 layer 活跃发射 ==
+    embedding_hopper -> ('register_embedding_hopper_task', 'TASK_EMBEDDING_HOPPER')
+    linear_cutlass_hopper -> ('register_linear_cutlass_hopper_task', 'TASK_LINEAR_CUTLASS_HOPPER')
+    linear_cutlass_with_residual_hopper -> ('register_linear_cutlass_hopper_task', 'TASK_LINEAR_CUTLASS_WITH_RESIDUAL_HOPPER')
+    linear_hopper -> ('register_linear_hopper_task', 'TASK_LINEAR_HOPPER')
+    linear_with_residual_hopper -> ('register_linear_hopper_task', 'TASK_LINEAR_WITH_RESIDUAL_HOPPER')
+    silu_mul_hopper -> ('register_silu_mul_hopper_task', 'TASK_SILU_MUL_HOPPER')
+
+== [L3] device 头不在任何生产 task_header 闭包内 ==
+    tasks/ampere/norm_linear.cuh
+    tasks/ampere/norm_linear_new.cuh
+    tasks/ampere/silu_mul_linear.cuh
+    tasks/ampere/single_batch_decoding.cuh
+    tasks/ampere/single_batch_extend.cuh
+    tasks/ampere/single_batch_gqa.cuh
+    tasks/deprecated/paged_attention.cuh
+    tasks/hopper/matmul_demo_hopper.cuh
+    tasks/hopper/norm_linear_hopper.cuh
+    tasks/speculative_decoding/prompt_lookup.cuh
+    tasks/speculative_decoding/target_verify.cuh
+
+== [L3] 发射符号 -> 定义头（不在生产闭包者标 ORPHAN） ==
+   ORPHAN find_ngram_global_kernel                      -> ['tasks/speculative_decoding/prompt_lookup.cuh']
+   ORPHAN find_ngram_partial_kernel                     -> ['tasks/speculative_decoding/prompt_lookup.cuh']
+   ORPHAN norm_linear_task_impl                         -> ['tasks/ampere/norm_linear.cuh', 'tasks/ampere/norm_linear_new.cuh']
+   ORPHAN silu_mul_linear_task_impl                     -> ['tasks/ampere/silu_mul_linear.cuh']
+   ORPHAN single_batch_decoding_kernel                  -> ['tasks/ampere/single_batch_decoding.cuh']
+   ORPHAN single_batch_extend_kernel                    -> ['tasks/ampere/single_batch_extend.cuh']
+   ORPHAN target_verify_greedy_kernel                   -> ['tasks/speculative_decoding/target_verify.cuh']
+
+== [L4] layer 无生产模型 builder 调用 ==
+   rmsnorm_linear_layer                          L883-903 regs=['rmsnorm_linear'] demo=Y
+   attention_layer                               L904-969 regs=['attention'] demo=Y
+   single_batch_extend_attention_layer           L1204-1302 regs=['single_batch_extend_attention'] demo=Y
+   paged_attention_split_kv_layer                L1435-1524 regs=['paged_attention_split_kv_hopper', 'paged_attention_split_kv_sm100'] demo=Y
+   paged_attention_split_kv_merge_layer          L1525-1568 regs=['paged_attention_split_kv_merge_sm100'] demo=Y
+   mla_decode_layer                              L1627-1659 regs=['mla_decode_sm100'] demo=n
+   mla_reduce_layer                              L1660-1689 regs=['mla_reduce_sm100'] demo=n
+   mla_prefill_tp8_layer                         L1720-1748 regs=['mla_prefill_tp8_sm100'] demo=n
+   identity_layer                                L2529-2549 regs=['identity'] demo=n
+   silu_mul_linear_with_residual_layer           L2570-2590 regs=['silu_mul_linear_with_residual'] demo=Y
+   argmax_layer                                  L2591-2602 regs=['argmax'] demo=n
+   sampling_sm100_layer                          L2659-2684 regs=['sampling_sm100'] demo=n
+   find_ngram_partial_layer                      L2769-2779 regs=['find_ngram_partial'] demo=n
+   find_ngram_global_layer                       L2780-2843 regs=['find_ngram_global'] demo=n
+   target_verify_greedy_layer                    L2844-2894 regs=['target_verify_greedy'] demo=n
+   copy_layer                                    L3103-3127 regs=['copy'] demo=Y
+   eagle3_commit_layer                           L3154-3183 regs=['eagle3_commit'] demo=Y

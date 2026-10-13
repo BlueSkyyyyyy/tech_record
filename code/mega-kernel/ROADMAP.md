@@ -3762,7 +3762,40 @@
   并更新 `mega-kernel-00-index` 第 49 项；并把「融合 task 家族未编入 + include 陈旧不可编译」补进「已知坑」。
   P134-1 新留尾巴（文档 §7）：未构建（未验证修 `common.h` 后能否编译）；`norm_linear` vs
   `norm_linear_new` 取舍系静态推断不判；`my_gpu_id==0` 作 residual 的 TP 语义未追多卡赋值链；未扫其它
-  「无生产者」融合算子；`docs/44` §10 仍余的 `smem_row`/`ldsm`/`dmem_row` 布局内部未逐行。**本轮新增增量。**
+  「无生产者」融合算子；  `docs/44` §10 仍余的 `smem_row`/`ldsm`/`dmem_row` 布局内部未逐行。**本轮新增增量。**
+
+### P135 生产 task 接线可达性全仓审计（`docs/49-mpk-wiring-audit.md`）
+
+- [x] **P135-1** 兑现阶段「下一步候选」第三条残留（`docs/48` §7）：「`graph.cc`/`task_register` 里是否还
+  残留其它「无生产者」的融合算子」——把它升格为**一次全仓、跨层的接线可达性审计**。见
+  `docs/49-mpk-wiring-audit.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与
+  `docs/06`–`docs/48` 同快照；**纯源码走读（资料分析），本轮无新实验**）。审计脚本/原始输出
+  `harness/mpk_wiring_audit.py` / `harness/mpk_wiring_audit.out.txt`。三条 headline：
+  **(A)** 定义四层可达性——**L1 登记**（`graph.cc:439` 大表，95 名 / 92 `TaskType`）、
+  **L2 前端发射**（`persistent_kernel.py` 75 个 `*_layer`）、**L3 编入**（三个生产 `task_header.cuh` 的
+  **传递 include 闭包** ampere 29 / hopper 48 / blackwell 99 文件）、**L4 生产者**（`models/*/builder.py` +
+  `demo/` 调用）；孤儿按失败层分三类——**编不进**（L3）/ **没人产**（L2/L4）/ **只 demo 用**（L4）。
+  **(B)（headline）新发现两枚「编不进」的孤儿**：`attention`（`TASK_ATTENTION_1`，`register_attention_task`
+  `task_register.cc:534` 在 `:569` 发 `kernel::single_batch_decoding_kernel`，只定义在
+  `tasks/ampere/single_batch_decoding.cuh:38`，不在任何生产闭包；前端 `attention_layer:904` 仅
+  `demo/qwen3/demo_chat.py:150` 调用、单测 `runtime_kernel_wrapper.cu:24` 的 `using` 被注释且整段在从未
+  `#define` 的 `#ifdef DEPRECATED_TESTS` 里）与 `single_batch_extend_attention`
+  （`task_register.cc:671` → `:709` `single_batch_extend_kernel`，只定义在
+  `tasks/ampere/single_batch_extend.cuh:41`；生产调用 `models/qwen3/builder.py:386` 被注释、`:399` 改走
+  `paged_attention_layer`；该头还 `#include "common.h"` 指向快照 `tasks/` 下不存在的文件）——**这两条 demo
+  路连 demo 都编不过**；另 `tasks/ampere/single_batch_gqa.cuh`/`tasks/hopper/matmul_demo_hopper.cuh`
+  是「无发射的死头」。
+  **(C)** 前端「生产者」侧也有一批空名：**6 个登记名从未被任何 layer 活跃发射**（`embedding_hopper`/
+  `silu_mul_hopper`——`embed_layer:863`/`silu_mul_layer:2527` 三元两支同名；`linear_hopper`/
+  `linear_with_residual_hopper`——`linear_layer:2436-2447` Hopper 分支只发 `linear_swapAB_hopper`；
+  `linear_cutlass_hopper`/`linear_cutlass_with_residual_hopper`——register 调用 `:2441`/`:2479` 被注释）、
+  **11 个 device 头不在任何生产闭包**、**17 个 layer 无生产 builder 调用**（含 `identity`/`argmax`/
+  `sampling_sm100`/`mla_decode`/`mla_reduce`/`mla_prefill_tp8` 6 个零调用者）。结论：**「登记表 = 能力上界」
+  之内还有一层「接线有效性」过滤**，且过滤掉的能精确分到三个正交层面。判据只贡献 **C3 的有效范围**。
+  配套博客 post `mega-kernel-50-mpk-wiring-audit`（weight 51）并更新 `mega-kernel-00-index` 第 50 项。
+  P135-1 新留尾巴（文档 §10）：未构建验证；L3 闭包是文本递归（不处理条件 include/宏拼接）；L2 靠正则
+  （动态拼名已人工复核）；`single_batch_decoding` 的单测编译单元能否解析裸 include 未核；
+  `docs/44` §10 仍余的 `smem_row`/`ldsm`/`dmem_row` 布局内部未逐行（继续留作下一步）。**本轮新增增量。**
 
 ## 每轮增量流程（autopilot）
 
@@ -4045,10 +4078,36 @@
   自己的 include 能解析（同 `docs/32` §3、`docs/45` §3.3、`docs/24` §4 的「名字/注册会骗人」族）。
   另：`norm_linear` 与 `norm_linear_new` **同名互斥**（都定义 `norm_linear_task_impl`，靠 include 选择、
   同时 include 会重定义），当前两版都没进任何编译单元。
+- **读 MPK task 的「可达性」要做四层，别只看登记/`grep`**（P135-1/`docs/49`）：一个 task 真能进常驻
+  megakernel 要过**四道门**——L1 `graph.cc` 登记 → L2 前端 `*_layer` **活跃发射**（去注释后再匹配；三元
+  表达式两支可能写成同一个名字）→ L3 发射的**设备符号定义头**落在某生产 `task_header.cuh` 的**传递
+  include 闭包**内 → L4 有 builder/demo 调用。本快照落空的例子：`attention`/`single_batch_extend_attention`
+  （L3 失败，身体 `single_batch_decoding_kernel`/`single_batch_extend_kernel` 只在
+  `tasks/ampere/single_batch_{decoding,extend}.cuh`，后者还 `#include "common.h"` 指向不存在的文件）、
+  `embedding_hopper`/`silu_mul_hopper`/`linear_hopper`/`linear_cutlass_*`（L2 失败，前端永不发该名）、
+  `identity`/`argmax`/`sampling_sm100`/`mla_decode`/`mla_reduce`/`mla_prefill_tp8`（L4 失败，零调用者）。
+  审计脚本 `harness/mpk_wiring_audit.py` 给出全表；判「某 task 在生产跑」须四层齐查。
+- **孤儿 device 头用旧式裸 include（`#include "common.h"`）**：活的 Ampere 头用全路径
+  `#include "tasks/common/common_header.cuh"`（`tasks/ampere/argmax.cuh:16`），而 `norm_linear*`/
+  `silu_mul_linear`/`single_batch_extend`/`single_batch_gqa`/`norm_linear_hopper`/`prompt_lookup`/
+  `target_verify` 等用裸名 `"common.h"`/`"../common.h"`——`tasks/` 下没有 `common.h`，即使把它们加进
+  `task_header` 也编译不过（同 `docs/48`）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P134-1 完成（1/1）**。补掉「下一步候选」第三条残留——`docs/07` §3.3 的
+- 当前进度：**P135-1 完成（1/1）**。兑现阶段「下一步候选」第三条残留（`docs/48` §7）——把「是否还残留
+  其它『无生产者』融合算子」升格为**一次全仓、跨层的接线可达性审计**。见
+  `docs/49-mpk-wiring-audit.md`（快照 `f9eb70c`，**纯源码走读、无新实验**），脚本/输出
+  `harness/mpk_wiring_audit.py`/`.out.txt`。四层 = L1 登记（95 名/92 `TaskType`）→ L2 前端发射
+  （75 个 `*_layer`）→ L3 生产 `task_header` 传递 include 闭包（ampere 29/hopper 48/blackwell 99）→
+  L4 生产者（builder/demo 调用）；孤儿按失败层分三类。三条 headline：**(A)** 审计方法 + 三类孤儿；
+  **(B)（headline）新发现两枚「编不进」的孤儿** `attention`/`single_batch_extend_attention`（身体
+  `single_batch_decoding_kernel`/`single_batch_extend_kernel` 只在 `tasks/ampere/single_batch_{decoding,extend}.cuh`，
+  不在任何生产闭包；生产调用被注释、仅 demo；后者还 `#include "common.h"` 指向不存在的文件）；
+  **(C)** **6 个登记名无任何 layer 发射** + **11 个 device 头不在生产闭包** + **17 个 layer 无生产 builder
+  调用**（含 6 个零调用者）。结论：「登记表=能力上界」之内还有一层接线有效性过滤。配套博客 post
+  `mega-kernel-50-mpk-wiring-audit`（weight 51）并更新 `mega-kernel-00-index` 第 50 项。
+- 此前：**P134-1 完成（1/1）**。补掉「下一步候选」第三条残留——`docs/07` §3.3 的
   `norm_linear_hopper` 之外的**段内融合 task 家族**，并做一次**接线审计**。见
   `docs/48-mpk-fusion-tasks.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：
   **(A)** 融合边界存在且跨代各写一遍——Ampere `norm_linear.cuh`（461 行）、同名第二版
@@ -4091,9 +4150,10 @@
   4 条必要条件系推断、slot-0 分歧未复现、注释落差只记不判）。
 - 下一步候选：可继续走其一——`docs/35` §9 遗留的其它未走读相邻层（CUTLASS `collective_builder` 侧
   QK/PV atom——`mla_sm100_2sm.cuh` 的 CUTLASS 内部，`docs/36` §8 明留）；或 `docs/44` §10 仍余的
-  `smem_row`/`ldsm`/`dmem_row` 布局内部（`docs/48` §7 亦记为尾巴）；或 `docs/48` §7 新留的其它
-  「无生产者」融合算子扫描 + `my_gpu_id==0` 作 residual 的 TP 语义追链；或 `docs/46` §6 的
-  FLAT-CACHE draft attention 设计的完整追述（`docs/47` 已补 `_prepare_weights`/`_attach_weights`）。
+  `smem_row`/`ldsm`/`dmem_row` 布局内部（`docs/48` §7 亦记为尾巴，P135-1 亦再留）；或 `docs/48` §7 的
+  `my_gpu_id==0` 作 residual 的 TP 语义追链（「无生产者融合算子扫描」已由 **P135-1/`docs/49`** 全仓覆盖）；
+  或 `docs/46` §6 的 FLAT-CACHE draft attention 设计的完整追述（`docs/47` 已补
+  `_prepare_weights`/`_attach_weights`）。
 - 此前：**P131-1 完成（1/1）**。补掉 `docs/37` §4（P123-1 对 SM100 norm/rope 只给摘要）、
   `docs/07` §3.1（只走 `rms_norm_hopper_impl`）与 `docs/44` §10（P130-1 明留「`rms_norm_sm100`/
   `rotary_embedding_hopper` 内部未逐行」）三处空白：把 norm/rope 当成**跨 Ampere/Hopper/Blackwell
