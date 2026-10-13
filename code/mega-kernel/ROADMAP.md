@@ -4333,6 +4333,33 @@
   （目标卡 H100/sm90a，host 侧，device 3）。配套博客 post `mega-kernel-67-mpk-sm100-moe-linear`
   （weight 68）并更新 `mega-kernel-00-index` 第 67 项。**本轮新增增量。**
 
+### P153 MPK MLA-MTP decode 的 TP 三兄弟走读（`docs/67-mpk-mla-mtp-tp.md`）
+
+- [x] **P153-1** 补掉「下一步候选」明留的「`mla_mtp_decode_tp2/4/8_sm100.cuh` 三兄弟的**内部未逐行处**」
+  （`docs/34`/P120-1 只对 TP 变体给了一段**差异摘要**、未逐行打开三份主体）。见
+  `docs/67-mpk-mla-mtp-tp.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与
+  `docs/06`–`docs/66` 同快照；**纯源码走读（资料分析），本轮无新实验**——三份身体 SM100 专属、
+  目标卡 H100/sm90 不可执行）。三条 headline：
+  **(A)（headline）** 「基版」`mla_mtp_decode_sm100.cuh` 不是单卡版、而是被运行期 `local_num_heads`
+  参数化过的**TP1 父版**（收已分解 `gi/si/bi`、`hpb=local_num_heads/num_head_groups`）；三兄弟另起
+  文件、硬编码 `NUM_HEADS=64/32/16` 并改收**原始 `block_x/block_y`** 自己拆包（`gi=block_x/sk`、
+  `si=block_x%sk`）——因为 TP 前端把网格从基版 3D `(num_splits,num_head_groups,max_req)` 换成 2D
+  `(num_groups*num_splits*x_mul, max_req, 1)`，把 `(group,split)` 压成扁平 x 维（`persistent_kernel.py:1837-1840`）。
+  **(B)（headline）** tp4/tp8 各有一处「MPK 逼出来的形状适配」——**tp4 把 V-split 折进 `block_x` 最低位**
+  （`PV_CHUNKS=V_CHUNKS/2`、两个 V half 写不相交 TMEM 列、`La` 只由 `v_half==0` 写；注释自陈
+  *"Mirage MPK has only a flat task index, no z-dim launch"*，`tp4:141-145`），**tp8 把 `Q_LEN` pad 成
+  偶数**（多一个 `Q_LEN_real` 入参、下界/因果判断全用真实值、grid 用 pad 值 `num_groups=Q_LEN/qpg` 无
+  `ceil`，`tp8:124/135-136/146/346-357`）。
+  **(C)（headline）** 三兄弟共用同一份「部分量 ABI」——`Oa`（bf16、`[batch*num_groups*sk, D_V, 128]`）与
+  `La`（fp32、`log2f(max(row_sum,1e-30))+row_max`）是未归一化输出 + log2-LSE，reduce 做 online LSE 归并
+  （`exp2` 递推预测权重）后按 `inv_sum` 归一化；TP 只改 `NUM_HEADS/qpg/RD_DV`（基版 `RD_DV=4/RD_TB=512`、
+  TP `RD_DV=2/RD_TB=256`），跨 rank 的 head 归并**不在 device 侧**（每 rank 各写本 rank 的 `O` 段）。
+  另核：`world_size` 2/4/8 选路（`builder.py:743-772`）、三份 `register` 的 `params`/`grid`/`qpg` 对照、
+  `TaskType 287–292`、`ss` 软缩放（`1/sqrt(192)·mscale²`）、以及**四份复制的 `ptx` 命名空间**（基版 + 三 TP
+  各一份，既不复用 `sm100_ptx.cuh` 也不互复用）。判据只贡献 C3（同 `docs/34`）。
+  配套博客 post `mega-kernel-68-mpk-mla-mtp-tp`（weight 69）并更新 `mega-kernel-00-index` 第 68 项。
+  **本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4733,10 +4760,52 @@
   的 `depends` 列了**不存在的** `tasks/blackwell/utils.cuh`（快照只有 `sm100_utils.cuh`）；扩展名
   `name='runtime_kernel_blackwell'` 与 `sm100_linear` 目录**撞名**（同 `docs/30` §2.1）。复制/构建
   SM100 MoE 单测前先核 `depends` 与扩展名。
+- **MPK 里 `mla_mtp_decode` 有「基版（TP1 父版）+ tp2/4/8 三兄弟」四条路，块索引契约不同**（P153-1/
+  `docs/67`）：基版 `mla_mtp_decode_sm100_task_impl` 收**已分解**的 `gi/si/bi` 且 `hpb = 运行期
+  local_num_heads/num_head_groups`（可表达任意 per-rank 头数，默认 128）；三兄弟是独立文件、硬编码
+  `NUM_HEADS=64/32/16`、收**原始 `block_x/block_y`** 在 kernel 内 `gi=block_x/sk`、`si=block_x%sk`
+  （因为 TP 前端把网格从基版 3D `(num_splits,num_head_groups,max_req)` 换成 2D
+  `(num_groups*num_splits*x_mul, max_req, 1)`）。`world_size` 2/4/8 → tp2/tp4/tp8，否则基版
+  （`models/deepseek_v3/builder.py:743-772`）。**读/移植任何一支前先确认网格维度与 `block_x` 的打包**：
+  tp4 把 **V-split（`v_half`）折进 `block_x` 最低位**（`PV_CHUNKS=V_CHUNKS/2`、两 half 写不相交 TMEM 列、
+  `La` 只由 `v_half==0` 写；注释自陈 MPK 无 z 维 launch），tp8 把 **`Q_LEN` pad 成偶数**（多一个
+  `Q_LEN_real` 入参，下界/因果判断全用真实值、grid 用 pad 值且 `num_groups=Q_LEN/qpg` 无 `ceil`）。
+- **MTP attention 这一族的 PTX 助手复制了四份**（P153-1/`docs/67` §8）：基版 + tp2/tp4/tp8 各定义一份
+  私有 `namespace ptx { elect_sync/mbar_*/make_desc/tcgen05_mma/tcgen05_commit }`，**既不复用
+  `blackwell/sm100_ptx.cuh`、也不互相复用**（同 `docs/57` §2「blackwell 有两套互不共享的 SM100 原语」）。
+  `make_desc` 等按「128B swizzle、K 主序、fp16」硬编码（`SBO=8*128` 等），改一处 swizzle 契约要改四处；
+  引用某条 `tcgen05_*` 行为时先看它来自哪个文件/命名空间（同 `docs/22` §5「实现多遍」母题）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P152-1 完成（1/1）**。补掉 `docs/65`（P151-1）**§8 明留的尾巴**「未与
+- 当前进度：**P153-1 完成（1/1）**。补掉「下一步候选」明留的「`mla_mtp_decode_tp2/4/8_sm100.cuh`
+  三兄弟的内部未逐行处」（`docs/34`/P120-1 只给差异摘要），见 `docs/67-mpk-mla-mtp-tp.md`
+  （快照 `f9eb70c`，本地 `/ssd/mirage_mpk_build`；**纯源码走读、无新实验**）。三条 headline：
+  **(A)（headline）** 基版 `mla_mtp_decode_sm100.cuh` 是被运行期 `local_num_heads` 参数化过的「TP1
+  父版」（收已分解 `gi/si/bi`）；三兄弟另起文件、硬编码 `NUM_HEADS=64/32/16` 并改收**原始
+  `block_x/block_y`** 自己拆包（`gi=block_x/sk`、`si=block_x%sk`）——因 TP 前端把网格从基版 3D
+  `(num_splits,num_head_groups,max_req)` 换成 2D `(num_groups*num_splits*x_mul, max_req, 1)`、把
+  `(group,split)` 压成扁平 x 维；**(B)（headline）** tp4 把 **V-split 折进 `block_x` 最低位**
+  （`PV_CHUNKS=V_CHUNKS/2`、两 half 写不相交 TMEM 列、`La` 只由 `v_half==0` 写；注释自陈 *"Mirage MPK
+  has only a flat task index, no z-dim launch"*），tp8 把 **`Q_LEN` pad 成偶数**（多一个 `Q_LEN_real`
+  入参、下界/因果用真实值、grid 用 pad 值 `num_groups=Q_LEN/qpg` 无 `ceil`）；**(C)（headline）**
+  三兄弟共用同一「部分量 ABI」（`Oa` bf16 `[batch*num_groups*sk,D_V,128]` + `La` fp32 log2-LSE，
+  reduce 做 online LSE 归并），TP 只改 `NUM_HEADS/qpg/RD_DV`，跨 rank 归并**不在 device 侧**。
+  另核 `world_size` 选路（`builder.py:743-772`）、三份 `register` 参数对照、`TaskType 287–292`、
+  **四份复制的 `ptx` 命名空间**。判据只贡献 C3。配套博客 post `mega-kernel-68-mpk-mla-mtp-tp`
+  （weight 69）并更新 `mega-kernel-00-index` 第 68 项。
+- 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计
+  （注：该 kernel 名 `eagle3_draft_chain_step_attn` 快照里 `grep` 零命中，**可能不可走**，须先核 demo
+  引用是否指向别处）；或 SM100 专属布局的其余面（`linear_fp8_sm100_cute_tie` 想表达的 CuTe 解构路径、
+  `fp8_group_gemm_sm100.cuh` 的 SF 段逐行、WS 指令落地后的对照、稀疏 A 的 2:4 物理排布/E→A 槽映射
+  （`docs/63` 只到 trait 形状，未追硬件）逐行）。**`mla_mtp_decode_tp2/4/8` 三兄弟已由 P153-1/`docs/67`
+  补掉**；**SM100 BF16 手工线性身体（`linear_sm100_mpk.cuh`）已由 P151-1/`docs/65` 补掉**；**BF16 MoE
+  grouped linear 身体（`moe_linear_sm100.cuh`）已由 P152-1/`docs/66` 补掉**；SM100 FP8 linear 内核内
+  tile 调度器已由 P150-1/`docs/64` 补掉；稀疏 UMMA 的 A 操作数通路已由 P149-1/`docs/63` 补掉；Hopper
+  CuTe WS GEMM device 家族已由 P147-1/`docs/61` 补掉；CUTLASS scale-factor TMEM trait 已由 P146-1/
+  `docs/60` 补掉；TMEM 列布局 / UTCCP 重排已由 P145-1/`docs/59` 补掉；TMA 版 SMEM 布局已由 P144-1/
+  `docs/58` 补掉；SM100 共享原语层已由 P143-1/`docs/57` 补掉。
+- 此前：**P152-1 完成（1/1）**。补掉 `docs/65`（P151-1）**§8 明留的尾巴**「未与
   `moe_linear_sm100.cuh`（827 行 BF16 MoE linear）对走」。把 BF16 SM100 **grouped MoE** linear
   device 身体逐行打开，见 `docs/66-mpk-sm100-moe-linear.md`（快照 `f9eb70c`，本地
   `/ssd/mirage_mpk_build`；CUTLASS `f3fde583`；**纯源码走读 + 1 个 host 侧结构探测**）。三条 headline：
