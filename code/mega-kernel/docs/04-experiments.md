@@ -9588,3 +9588,155 @@ ramp、首次 mbarrier/release 的固定开销）被摊薄——**producer 的�
   **寄存器写载体**的 producer 天花板。
 - **无背压**（`CAPp=chunk`）：本节只测「服务速率」，不测有界环的背压/死锁（那由 §31–§35/§42–§44 覆盖）。
 - **未与 DeepGEMM SM100 路径对跑**（SM100 专属，本机不具备）。
+
+## 64. worker 侧复杂度阶梯 × 环数 G 归因（P76-1）
+
+补掉 `docs/04` **§63.9 明留的尾巴**：「consumer 是 **plain-load**（非 TMA/非折叠/非数据面），故
+『加 consumer 仍平』只能证『环数本身无成本』，**不能**直接证明 §62 的 `G` 依赖来自 TMA 路径——
+那需要把 TMA+折叠+数据面按 §62 加回」。
+
+§62 在**完整端到端骨架**上量到「固定 `NB=2048`、`PS=8`，端到端 `taskGB/s` 随 worker 环数 `G`
+增大反而下降」（2058@G=528 → 1768@G=1040，`docs/04` §62.3）；§63 把 **producer 写端**单独抽出，
+证明 producer 成本是**纯每批、与环数无关**（§63.3/§63.6），把归因赶到 **worker 侧**，但没把
+worker 侧拆开。本节把 **worker 侧**放上一条**复杂度阶梯**，在**同一二进制、同一占用率**下扫 `G`，
+逐层加回 worker 机制，把「`G` 越大越慢」钉到**哪一层**。
+
+源码 `src/worker_side_attribution.cu`、脚本 `harness/worker_side_attribution.sh`、原始输出
+`harness/worker_side_attribution.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+`DW=88`=352 B/task、`K=32`、`D=2`、`PS=8`、占用率固定 `T=256, MINB=8, U=4`（8 blk/SM，= §62 §D
+配置）、`NB=2048`、`MD=65536`=1 MiB/batch（全图数据面总读 ≈ 2.0 GiB）、min-of-3）。
+
+### 64.1 机制：worker 侧复杂度阶梯 + 环数唯一变量
+
+**同一 kernel、同一个 producer 写 per-worker 环的骨架**（`gen_word` 生成 352 B/task、`fence +
+st.release head`、worker 回 `atom.add.release tail`），worker 侧用 `wmode` 逐层加回机制：
+
+- `wmode 0 = plain`：worker 直接 `ld` 把环上 task 读进寄存器 + 折叠（= §63 的 consumer，**无 TMA、
+  无 SMEM**）；
+- `wmode 1 = tma`：worker **TMA bulk 取 task 进 SMEM** + 从 SMEM 折叠（加回 MPK 真载体）；
+- `wmode 2 = tma+data`：再加 **HBM 数据面**（每 batch `__ldcs` 流式读 `MD` 个 `uint4`）= §62 full；
+- `wmode 3 = data-only`：无 producer / 无环 / 无 TMA，worker 只做数据面（占用率参照 = §62 mode2）。
+
+占用率固定（`T=256,MINB=8,U=4`，`numRegs=32` ⇒ **8 blk/SM**，§64.6 §E），故 `G` 是唯一变量。
+两条扫描：(i) **固定 `NB=2048`**（`chunk=⌈NB/G⌉` 随 `G` 变小，= §62 口径）；(ii) **`NB=4·G`**
+（`chunk` 恒定 = 4），分离「块数 `G`」与「每环批数 `chunk`」。
+
+### 64.2 §A 正确性：四档阶梯逐位对 host 参考
+
+`G=100`、`NB=512`、`MD=8192` 下四档 `sink` 逐位命中 host 参考（`desc` / `desc+data` / `data`）：
+
+| 档 | plain | tma | tma+data | data-only |
+|----|-------|-----|----------|-----------|
+| sink 判定 | OK | OK | OK | OK |
+| ms | 0.2219 | 0.2209 | 0.2467 | 0.0861 |
+
+即 **TMA 跨 proxy 取 task + SMEM 折叠 + HBM 数据面 + 有界环**都不动数值（沿用 §62 的校验口径）。
+
+### 64.3 §B headline：固定 `NB=2048`，复现 §62 的 `G` 依赖
+
+| `G` | chunk | data-only | plain+d | tma+d | full 相对数据面跌幅（tma+d） |
+|-----|-------|-----------|---------|-------|------------------------------|
+| 100 | 20/21 | 977.2 | 922.9 | 933.9 | −4.4% |
+| 132 | 15/16 | 1258.6 | 1190.1 | 1181.2 | −6.2% |
+| 264 | 7/8 | 2227.5 | 1993.3 | 1865.9 | −16.2% |
+| 528 | 3/4 | 3013.7 | 2476.8 | 2079.5 | −31.0% |
+| 1040 | 1/2 | 3076.4 | 2321.4 | 1740.0 | −43.4% |
+
+（单位 taskGB/s；`PS=8`。）
+
+- **复现 §62**：`tma+d` 随 `G` 升到 `G=528` 后**反降**，`G=1040` 处 **1740 GB/s**（§62 §C 同配置
+  报 **1768**，差 <2%）。
+- **`plain` 与 `tma`（无数据面）逐点相等**（`G=1040`：29.9 vs 30.1；`G=264`：32.4 vs 32.4）——
+  两者都被 **producer 写侧**（`PS=8`，~31 GB/s）钉住，故在这里 TMA 看不出代价。**§63 的
+  「consumer 平」正是被 producer 盖住，不等于 consumer 免费。**
+- **`data-only` 随 `G` 单调升到 3076 GB/s（HBM3 峰值 3.35 TB/s 的 92%）**，无 `G` 依赖——纯数据面
+  只认占用率（对上 §61/§62「数据面认总线程/SM」）。
+- 关键：`plain+d` **也**随 `G` 下降（2476@528 → 2321@1040），只是不如 `tma+d` 陡；即 **`G` 依赖
+  在 plain 上就存在**，TMA 把它放大。
+
+### 64.4 §C headline：固定 `chunk=4`，`G` 依赖 = 每 block 一笔固定开销
+
+把每环批数钉在 `chunk=4`（`NB=4·G`），再扫 `G`：
+
+| `G` | data-only | plain+d | tma+d | plain 相对数据面 | tma 相对数据面 |
+|-----|-----------|---------|-------|------------------|----------------|
+| 100 | 993.4 | 891.6 | 851.8 | −10.3% | −14.3% |
+| 132 | 1278.6 | 1126.9 | 1050.9 | −11.9% | −17.8% |
+| 264 | 2251.8 | 1901.4 | 1664.6 | −15.6% | −26.1% |
+| 528 | 3022.2 | 2484.9 | 2076.0 | −17.8% | −31.3% |
+| 1040 | 3166.7 | 2509.2 | 2083.2 | −20.8% | −34.2% |
+
+把开销折算成**每 block**（`(full−data)/G`，µs/block）：
+
+| `G` | 100 | 132 | 264 | 528 | 1040 |
+|-----|-----|-----|-----|-----|------|
+| plain+d | +0.48 | +0.44 | +0.34 | +0.30 | +0.35 |
+| tma+d | +0.70 | +0.71 | +0.66 | +0.63 | +0.69 |
+| TMA 额外（tma−plain） | +0.22 | +0.27 | +0.31 | +0.33 | +0.34 |
+
+**两笔都是「每 block 固定」、跨 `G` 恒定**：
+
+1. **环消费者 prologue（plain 就付）≈ +0.35 µs/block**：每个 worker block 一次性的
+   `ld.acquire head` 跨 SM 自旋、block 归约、每 batch `tail` 回收——`chunk` 固定时按 block 摊，
+   与 `G` 成正比。
+2. **TMA 取 task 额外 prologue ≈ +0.3 µs/block**：`mbarrier.init ×D`、首次 TMA 发射、`mbar_wait`
+   ——**TMA 取 task 相对 plain 寄存器读，把每 block 的固定成本从 ~0.35 抬到 ~0.69 µs**。
+
+⇒ §62 的「`G` 越大越慢」**不是 producer（§63 已证伪）、不是 fold、也不只是 TMA**，而是
+**worker 侧每 block 一笔固定 prologue**，在 `chunk` 小到不能摊薄时按 `G` 显形；**TMA 载体把这笔
+prologue 翻倍**。§C 把 `chunk` 钉死在 4 后，`G=1040` 的 full 从 §B 的 1740 抬到 **2083**——大
+`chunk`（每 worker 多吃 task）是对这笔每 block 成本的直接对冲。
+
+### 64.5 §D 固定 `G=264`：扫数据面 `MD`，plain vs tma
+
+| `MD` | 0 | 8192 | 32768 | 65536 | 131072 |
+|------|---|------|-------|-------|--------|
+| plain+d (taskGB/s) | 0 | 355.1 | 1354.5 | **1989.1** | **2133.8** |
+| tma+d (taskGB/s) | 0 | 347.6 | 1268.8 | 1859.1 | 2052.8 |
+| plain vs tma | = | −2% | −6% | **−6.5%** | **−3.8%** |
+
+- `MD=0` 时 plain 与 tma **完全相同**（都 producer 钉住）。
+- 数据面一上来，`tma` 立刻比 `plain` 慢 **~4–6%**（折算 `(1.1551−1.0796)/264 = +0.29 µs/block`，
+  与 §C 的 TMA 额外 +0.3 µs/block 一致）——**TMA 的代价只在有数据面/在快路径上才可见**。
+
+### 64.6 §E 占用率/寄存器
+
+`numRegs=32`、`localB=0`，`smem=22608` B/block：`T=256,MINB=8` → **8 blk/SM**；`T=512,MINB=4`
+→ 4；`T=1024,MINB=2` → 2。四档阶梯同占用率，故 §B–§D 的比较不受占用率混淆。
+
+### 64.7 与 MPK / DeepGEMM 的对应
+
+- **每 block 固定 prologue ⇒ 「一 task 一 block」是错的用法**。MPK 的 worker 是**常驻 block 长
+  循环**（`persistent_kernel.cuh` 的 worker 主循环逐 task 推进、`AOT` 预入队），把 prologue 付**一次
+  每 SM**；DeepGEMM 段级 mega-kernel 的 worker **少而大**（`docs/02`），每 block 吃很长的 task 流。
+  这与 §62.8「设计压力是调度器服务速率而非并行度」互为因果：**并行度拉满 = `G` 拉满 = 每 block
+  prologue 拉满**。
+- **TMA 取 task 的定位**：本节证明它把每 block prologue 从 ~0.35 抬到 ~0.69 µs。它的价值不在「更
+  快的取 task」，而在 §39 的**成本与描述符大小无关**、§42 的**零寄存器预取**、§61/§62 的**省寄存器
+  抬占用率**——代价是每 block 一笔固定 setup，须靠 **paged SMEM + 预取深度 `D`**（`docs/06` §5.3）
+  把 setup 摊到整段常驻期。
+- **`data-only` 到 3076 GB/s（峰值 92%）** 再次确认：worker 一旦被喂饱就能逼近 HBM，**瓶颈在
+  「把 task 送进 worker」的每 block 开销**。
+
+### 64.8 结论与判据
+
+- **§63.9 尾巴补齐**：把 TMA + 折叠 + 数据面按 §62 加回后，**`G` 依赖的全部来源被拆开**——它住在
+  **worker 侧每 block 一笔固定 prologue**（plain ~0.35 µs/block、TMA ~0.69 µs/block），**不是
+  producer**（§63）、**不是 fold**（§62 fold ≈ 免费）、也**不只 TMA**（plain 就有，TMA 翻倍）。
+- **载体对比**：无数据面时 plain ≡ tma（都被 producer 钉住）；有数据面时 **plain 比 tma 快 4–6%**
+  （+0.3 µs/block）。
+- **数值安全**：四档阶梯 `sink` 逐位对 host 参考（§64.2 全 `OK`）。
+- **判据**：骨架 **C1–C4**（单 kernel、常驻、多算子范围、设备内协调），worker 仍**静态序列取
+  task**、producer 固定角色但 worker 非固定角色，**仍差 C5**（C5 由 §9 覆盖）。立场是给 §62 的
+  「控制面成本」做一次 **worker 侧分层归因**。
+
+### 64.9 局限与踩到的坑
+
+- **合成描述符**（`gen_word`，352 B/task）与**合成数据面**（`data_word`），非真实 MPK task / GEMM tile。
+- **载体是寄存器读（plain）/ TMA（tma），未含 `cp.async`**（§42 的第三种载体）；`TMA vs plain`
+  的 +0.3 µs/block 只对本形态成立。
+- **`co-residency` 未严格**：`grid=PS+G` 在 `G=1040` 时 `1048 ≤ 1056`（8 blk/SM），基本共驻；更大
+  `G` 靠守门狗兜死锁，本节所有点均 `OK` 无 `ABORT`。
+- **未与 DeepGEMM SM100 路径对跑**（SM100 专属，本机不具备）。
+- **踩坑**：`prepare_data` 首次调用时 `g_dref` 未分配（`ensure()` 在 `run()` 内才跑），
+  `cudaMemset(g_dref,...)` 报 `invalid argument`——改为在 `prepare_data` 内惰性分配 `g_dref` 后恢复。

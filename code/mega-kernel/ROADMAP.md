@@ -1923,6 +1923,33 @@
     单 measure、不含 TMA/折叠/数据面，**不完整满足 C1–C5**。局限：consumer 是 plain-load、合成
     描述符、寄存器写载体、无背压、未与 DeepGEMM SM100 对跑。**本轮新增实验。**
 
+### P76 实验扩展 55：worker 侧复杂度阶梯 × 环数 G 归因（`docs/04-experiments.md` §64）
+
+- [x] **P76-1** 补掉 P75-1（§63）§63.9 明留的尾巴——「consumer 是 **plain-load**，故『加 consumer
+  仍平』只能证『环数本身无成本』，**不能**直接证明 §62 的 `G` 依赖来自 TMA 路径——需把
+  TMA+折叠+数据面按 §62 加回」。把 §62 骨架里的 **worker 侧**放上一条**复杂度阶梯**（`wmode`
+  0=plain 寄存器读环 / 1=+TMA 取 task 进 SMEM / 2=+HBM 数据面 / 3=仅数据面），在**同一二进制、
+  同一占用率**（`T=256,MINB=8,U=4`=8 blk/SM）下扫 worker 环数 `G`，把 §62 的「`G` 越大越慢」
+  钉到**哪一层 worker 机制**。见 `docs/04-experiments.md` **§64**，源码
+  `src/worker_side_attribution.cu`、脚本 `harness/worker_side_attribution.sh`、原始输出
+  `harness/worker_side_attribution.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+  `DW=88`=352 B/task、`K=32`、`D=2`、`PS=8`、`NB=2048`、`MD=65536`=1 MiB/batch、min-of-3）。
+  核心结论：
+  - **§A** 四档阶梯 `sink` 逐位对 host 参考（全 `OK`）。
+  - **§B headline（固定 NB，chunk 随 G 缩小）复现 §62**：`tma+d` 1740@G=1040（§62 报 1768，<2%）；
+    相对 `data-only`（3076）跌 **−43.4%**；`plain` ≡ `tma`（无数据面时都被 `PS=8` producer ~31 GB/s
+    钉住）——**§63 的「consumer 平」是被 producer 盖住、不等于免费**。
+  - **§C headline（固定 chunk=4，`NB=4·G`）拆出闭式**：把开销折成**每 block**——**环消费者 prologue
+    ≈ +0.35 µs/block（plain 就付）**、**TMA 取 task 额外 ≈ +0.3 µs/block（tma 合计 ~0.69）**，
+    **跨 `G=100..1040` 恒定**（plain +0.48/0.44/0.34/0.30/0.35；tma +0.70/0.71/0.66/0.63/0.69）——
+    **§62 的 `G` 依赖 = worker 侧每 block 一笔固定 prologue**，`chunk` 越小越显形，TMA 把它翻倍；
+    `chunk=4` 下 `G=1040` full 从 §B 的 1740 抬到 **2083**。
+  - **§D** 固定 `G=264` 扫 `MD`：`MD=0` 时 plain ≡ tma，数据面一上来 **plain 比 tma 快 4–6%**
+    （+0.29 µs/block，与 §C 同）——**TMA 的代价只在快路径上可见**。
+  - **§E** 四档同占用率（`numRegs=32`、8 blk/SM），比较不受占用率混淆。
+  判据 C1–C4、仍差 C5（与 §47–§63 同档）。**本轮新增实验**；P76-1 新留尾巴（§64.9）：合成描述符/
+  数据面、载体未含 `cp.async`、co-residency 未严格、未与 DeepGEMM SM100 对跑。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1947,7 +1974,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P75-1 完成（1/1）**。补掉 §62.10 明留的尾巴「更细的 producer 服务模型（每环服务
+- 当前进度：**P76-1 完成（1/1）**。补掉 §63.9 明留的尾巴「consumer 是 plain-load，不能直接证明
+  §62 的 `G` 依赖来自 TMA 路径——需把 TMA+折叠+数据面按 §62 加回」：把 §62 骨架里的 **worker 侧**
+  放上一条**复杂度阶梯**（`wmode` 0=plain 寄存器读环 / 1=+TMA 进 SMEM / 2=+HBM 数据面 / 3=仅数据面），
+  **同一二进制、同一占用率**（`T=256,MINB=8,U=4`=8 blk/SM）下扫 worker 环数 `G`。见
+  `docs/04-experiments.md` **§64**，源码 `src/worker_side_attribution.cu`、脚本
+  `harness/worker_side_attribution.sh`、原始输出 `harness/worker_side_attribution.out.txt`
+  （目标卡 H100/sm90a、固定空闲 device 3、nvcc 13.2、`DW=88`=352 B、`K=32`、`D=2`、`PS=8`、
+  `NB=2048`、`MD=65536`=1 MiB/batch、min-of-3）。核心结论：
+  (1) **§B 复现 §62**——固定 `NB`、`chunk` 随 `G` 缩小，`tma+d` 1740@G=1040（§62 报 1768），
+  相对 `data-only`（3076）跌 **−43.4%**；`plain`≡`tma`（都被 `PS=8` producer ~31 GB/s 钉住），
+  **§63 的「consumer 平」是被 producer 盖住、不等于免费**；
+  (2) **§C 拆出闭式（`chunk=4`、`NB=4·G`）**——开销折成**每 block 恒定**：**环消费者 prologue
+  ≈ +0.35 µs/block（plain 就付）**、**TMA 额外 ≈ +0.3（tma 合计 ~0.69）µs/block**，跨
+  `G=100..1040` 稳定；**§62 的 `G` 依赖 = worker 每 block 一笔固定 prologue**，TMA 翻倍；`chunk=4`
+  把 `G=1040` full 从 1740 抬到 **2083**；
+  (3) **§D** 固定 `G=264` 扫 `MD`：`MD=0` 时 plain≡tma，有数据面后 **plain 比 tma 快 4–6%**
+  （+0.29 µs/block）——**TMA 代价只在快路径可见**。判据骨架 **C1–C4**、仍差 C5。**本专题此前
+  P0–P75 全完成，本轮为其新增的实验增量。**
+- 此前：**P75-1 完成（1/1）**。补掉 §62.10 明留的尾巴「更细的 producer 服务模型（每环服务
   成本 vs 环数）留待后续」：把 §62 完整骨架里的 **producer 写端单独抽出来**（无 worker/背压/数据面），
   唯一控制变量 = 每个 producer 服务的**环数 `wpp`**（固定每 producer 总批数 `Btot=chunk*wpp`），
   再加回 **plain-load consumer** 对照。见 `docs/04-experiments.md` **§63**，源码
