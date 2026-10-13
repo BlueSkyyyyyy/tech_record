@@ -6,14 +6,18 @@
 # **value-independent** on the `bmt` base (bit-identical twins).  This script reads the pipe-level
 # mechanism: are their **resource / pipe** effects independent when stacked?
 #
+# P7-107 extends the `(K,V)` grid to the **full `{64,128,256}²`** (9 points) to close §109.5's
+# verbatim boundary ("未扫全 K,V∈{64,128,256} 网格；(64,128) 与 K=256 未剖析").  `-DB2M_INTRA`
+# folds the B3 diagonal and `static_assert`s no K, but its smem staging (`3·BT·K·4`) also depends only
+# on K: `K=256` `intra` builds cannot launch (smem > 227 KiB, rc=-3, verified) -> for `K=256` only the
+# `DAMMA` axis is scanned.
+#
 # Tags (all `-DB2M_PROD -DB2M_HDW -DB2M_BF16 -DB2M_BF16MMA -DB2M_BVK=64 -DB2M_TMA=1` = "bmt"):
 #   bmt            base (bf16mma_tma)
 #   bmt_da         + -DB2M_DAMMA             (DA -> mma.sync.tf32)
 #   bmt_intra      + -DB2M_INTRA             (B3 diagonal folded; extra `dAqk` arg)
 #   bmt_da_intra   + -DB2M_DAMMA -DB2M_INTRA (both; the new corner)
 #
-# `(K,V)` grid: `(128,128)` (square) + `(128,64)` (the worst INTRA regression of §108.3; also the
-# only `K!=V` arch where TMA pulls the smem occupancy across the 2-block/SM threshold, §107.4).
 # Shape fixed at `B8T2048H8`.
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
@@ -45,11 +49,14 @@ extra() {  # tag
     *) echo "bad tag $1" >&2; exit 1 ;;
   esac
 }
-TAGS="bmt bmt_da bmt_intra bmt_da_intra"
-PAIRS="128:128 128:64"
+# tags per K: `intra` staging `3·BT·K·4` exceeds the 227 KiB smem cap at K=256 (rc=-3)
+tags_for() {  # K
+  if [ "$1" = 256 ]; then echo "bmt bmt_da"; else echo "bmt bmt_da bmt_intra bmt_da_intra"; fi
+}
+PAIRS="64:64 64:128 64:256 128:64 128:128 128:256 256:64 256:128 256:256"
 for kv in $PAIRS; do
   K=${kv%%:*}; V=${kv##*:}
-  for tag in $TAGS; do
+  for tag in $(tags_for "$K"); do
     build "$tag" "$K" "$V" $(extra "$tag")
   done
 done
@@ -85,7 +92,7 @@ prof() {  # shape K V tag
 
 for kv in $PAIRS; do
   K=${kv%%:*}; V=${kv##*:}
-  for tag in $TAGS; do
+  for tag in $(tags_for "$K"); do
     prof b8t2048h8 "$K" "$V" "$tag"
   done
 done
