@@ -3177,6 +3177,33 @@
       ~1.7e-2——**实践含义：想提反向梯度精度先治前向的 block-scale 量化**。配套博客
       `content/posts/mega-moe-111-moe-backward-emulation`（索引页新增第 111 篇）。
 
+### P102 增量（opt-in，补齐 P54 只当「仅分析」4 行带过的两个 all_gather SM kernel 后端）
+
+- [x] **P102-1** **DeepEP bucket all_gather 的两个 SM kernel 后端（pure-RDMA / hybrid）**
+      （`csrc/kernels/bucket/all_gather.hpp`、`csrc/buffers/bucket.hpp:245-330`、
+      `deep_ep/include/deep_ep/impls/bucket/all_gather/{rdma,hybrid}.cuh`、
+      `deep_ep/include/deep_ep/layout/bucket/{all_gather,copy_engine,workspace}.cuh`、
+      `csrc/kernels/driver/driver.cpp:14-87`、`deep_ep/buffers/bucket.py:361-392`、
+      `tests/bucket/test_all_gather.py`）。第 54 篇（P54-1）拆了 `BucketBuffer` 但只把**纯 NVLink
+      all-gather**（copy engine、无 SM kernel）讲透；第 62 篇（P62-1）补齐了 `all_reduce`/`reduce_scatter`
+      三后端——唯独 all_gather 的 **pure-RDMA 与 hybrid 两个 SM kernel** 两处都只 4 行带过。本篇补全，
+      「三类算子 × 三物理域」矩阵拼完。**host** `launch_all_gather`（`all_gather.hpp:24-230`）按物理域三分支：
+      pure RDMA（`:36-61`，512 线程满卡）、pure NVLink CE（`:62-108`）、hybrid（`:109-229`，`grid=num_rdma_ranks`）。
+      **pure-RDMA kernel**（`rdma.cuh:11-49`）：rail 域、`global_warp_idx` 步进认领目标 rank、lane 步进 bucket、
+      `gin.put<ncclTeamTagRail>` 发自己那份 shard。**hybrid kernel**（`hybrid.cuh:11-80`）：SM=目标 RDMA rank、
+      warp=QP，先清 `tails` + 入口屏障 + 退避（`:34-51`），按 bucket→chunk→QP 发，每 chunk
+      `num_bytes_per_qp=align(ceil_div(chunk,QPs),64)`、`qp_offset=min(warp*per,chunk)`（`:61-64`），
+      **空 QP 也照发 signal**（`:66-76`）。**chunk 自选择代价模型**（`:116-148`）：`push_t/rdma_t/forward_t`
+      + CE 每波 10us，枚举 `i≤64` 取最小，`clamp(align(ceil_div(B,best),8*64),4KiB,256MiB)`；
+      `kNumMinChunkBytes=4MiB` = 「每 QP 至少 512KiB」NIC 经验。**完成协议**：每 `(chunk,QP)` 远端
+      `tails[qp][chunk]` +1，host `copy_engine_wait` 按 `WAIT_VALUE_GEQ, target=num_rdma_ranks-1` 等。
+      数据面 NCCL GIN → **仅分析**；信号布局/寻址/协议架构无关，H100(sm90a) 直接 include 真实头文件跑真实设备代码
+      + 真实驱动 mem-op（`src/bucket_allgather_backends.cu` + `harness/exp_bucket_allgather_backends.{sh,py,out.txt}`）：
+      `AllGatherSignals`=524288(512KiB)/`BucketSignals`=794688 + 字段偏移；4 组 `(R,SMs)` 每非己 rank 恰 1 warp、
+      每桶覆盖一次；10 组 chunk QP 拆分覆盖恰好一次/64B 对齐/尾段可非 64 倍数；完成协议四场景（每槽恰 R-1 /
+      per-chunk 独立 / GEQ 过计通过 / 未达阈值不通过）；Python host 算术层独立复刻一致（2 带宽 × 5 拓扑 ×
+      6 shard）。配套博客 `content/posts/mega-moe-112-bucket-allgather-sm-backends`（索引页新增第 112 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3202,8 +3229,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P101 各增量完成（P15-1…P41-1、P42-1…P101-1）。**
-  本轮 P101-1：新建 `docs/111-moe-backward-emulation.md`（+`harness/exp_moe_backward_emul.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P102 各增量完成（P15-1…P41-1、P42-1…P102-1）。**
+  本轮 P102-1：新建 `docs/112-bucket-allgather-sm-backends.md`
+  （+`src/bucket_allgather_backends.cu`、`harness/exp_bucket_allgather_backends.{sh,py,out.txt}`）
+  ——补齐 P54 只当「仅分析」4 行带过的 **DeepEP bucket all_gather 的两个 SM kernel 后端**
+  （pure-RDMA `rdma_all_gather` / hybrid `hybrid_all_gather`），把「三类算子 × 三物理域」矩阵拼完。
+  要点：`launch_all_gather`（`all_gather.hpp:24-230`）按物理域三分支；pure-RDMA 每 warp 一个目标 rank
+  发 `gin.put`；hybrid 是 SM=目标 RDMA rank、warp=QP，每 chunk 按 8 QP 均分（64B 对齐）、空 QP 也发 signal；
+  chunk 尺寸由显式代价模型自选（每 QP ≥512KiB）、完成协议是每 `(chunk,QP)` 远端 tail +1 + host
+  `WAIT_VALUE_GEQ(target=num_rdma_ranks-1)`。数据面 NCCL GIN 仅分析；信号布局/寻址/协议架构无关，
+  H100(sm90a) 直接 include 真实头文件跑真实设备代码 + 真实驱动 mem-op：4 组 `(R,SMs)` 分解、10 组 chunk
+  QP 拆分、完成协议四场景全 OK，Python host 算术层独立复刻一致。索引页新增第 112 篇。
+  上一轮 P101-1：新建 `docs/111-moe-backward-emulation.md`（+`harness/exp_moe_backward_emul.{py,sh,out.txt}`）
   ——补齐**「反向」一直缺席的端到端误差分解**（第 99 篇前向复刻的**反向对偶**；第 14 篇只答「kernel
   接得对不对」）。要点：Mega MoE 把 top-k 权重**提前乘进 L1 输出**（`kernel:1134`），combine 退化成
   纯 fp32 求和（`:1477-1490`），故反向 `dY` 直传、`w` 只在 SwiGLU 反向；四个 grouped GEMM 角色
@@ -4354,7 +4391,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P101 已完成（最新 **P101-1 MoE 反向的 H100 数值复刻与误差分解**：
+- **下一步**：P0~P102 已完成（最新 **P102-1 DeepEP bucket all_gather 的两个 SM kernel 后端
+  pure-RDMA / hybrid**：第 54 篇只把纯 NVLink copy-engine 路径讲透、第 62 篇补了 all_reduce/reduce_scatter
+  三后端，本篇补齐 all_gather 的跨节点两条腿——`launch_all_gather` 三物理域分派、pure-RDMA 每 warp
+  一个目标 rank 的 `gin.put`、hybrid 的 SM=目标 RDMA rank / warp=QP 与每 chunk 8-QP 均分、显式代价模型
+  自选 chunk（每 QP ≥512KiB）、`(chunk,QP)` tail+GEQ 完成协议；数据面 NCCL GIN 仅分析，信号布局/寻址/
+  协议架构无关，H100(sm90a) 直接 include 真实头文件跑真实设备代码 + 真实驱动 mem-op，设备 4 部分 +
+  Python host 算术层全 OK；索引页新增第 112 篇。详见上）。
+  上一轮 P101-1：P0~P101 已完成（最新 **P101-1 MoE 反向的 H100 数值复刻与误差分解**：
   第 14 篇只答「kernel 接得对不对」、第 99 篇拆了前向误差分解——本篇补上**反向对偶**：四个 grouped
   GEMM 的角色、参考量化器做的**可加来源分解**（前向量化主导 ~80–90%、`dW2` 对反向后重量化免疫、
   `dX` 最敏感）、真实 SM90 kernel 锚点（`vs deq` dW 2.6e-4 复现第 14 篇）、DeepSeek 量级最坏
