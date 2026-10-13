@@ -4494,6 +4494,38 @@
   kernel）。配套博客 post `mega-kernel-72-ws-instruction`（weight 73）并更新 `mega-kernel-00-index`
   第 72 项。**本轮新增增量。**
 
+### P158 UMMA 原语多实现并置审计（`docs/72-umma-primitive-paths.md`）
+
+- [x] **P158-1** 补掉「下一步候选」点名的**「DeepGEMM 自建 PTX UMMA 封装层（`ptx/tcgen05.cuh`，9 struct，
+  本专题只从 WS 角度扫过一眼）与 MPK/CUTLASS 三条 UMMA 原语通路的并置对照**——`docs/57`（P143-1）
+  只走 MPK 的 `tasks/blackwell/` 原语层、`docs/71`（P157-1）只从 WS 一角切入 DeepGEMM 自建层，从无一篇
+  把「几条通路」摆在一起。见 `docs/72-umma-primitive-paths.md`（快照 MPK `f9eb70c`、CUTLASS
+  `deps/cutlass f3fde583`、DeepGEMM `057ca59`；**纯源码走读 + 1 个 host 侧文本审计探针**；SM100
+  指令/TMEM 本体本机不可执行）。三条 headline：
+  - **(A)（headline）「同一颗张量核指令、几条独立封装」在能力上是严格包含关系**——host 审计抽到
+    CUTLASS `cute/arch/mma_sm100_umma.hpp`（36 个 `SM100_MMA_*` 模板）**40 个 distinct opcode** ⊃
+    DeepGEMM 自建 `ptx/tcgen05.cuh`（9 struct）**11 个**（少 `sparse`/`tf32`/`i8`/`mxf4nvf4`/2SM-tf32；
+    多唯一一枚死 `.ws`）⊃ MPK 三条通路（`sm100_ptx` f16 / `kernel::sm100` mxf8f6f4 / `mirage::…::sm100`
+    mxf8f6f4 1·2SM）**4 个**；生产实现各自只抄「自己真正用到的形态」。
+  - **(B)（headline）DeepGEMM 自建层是「CUTLASS atom 减去三件机械约束」**——头注释自陈 *"UMMA versions
+    with relaxed assertions"*（`:11`）：(1) 去掉内部 `cute::elect_one_sync()` 守卫（母本 `:105`，DeepGEMM
+    调用点自己写 `if (cute::elect_one_sync())`，全 `impls/` 共 **115 处**）、(2) 去掉
+    `CUTE_ARCH_TCGEN05_*_MMA_ENABLED` 编译门、(3) 非 block-scale dense 形态去掉母本恒传的全零
+    `disable-output-lane` 掩码 `{%5,%6,%7,%8}`（母本 `:106/:111`）；模板化外移到主机侧
+    `make_runtime_instr_desc`（自建层 `desc>>32` 与母本 `idescE>>32` 同约定），TMEM/描述符/累加谓词约定
+    逐字一致。
+  - **(C)（headline）同一颗 `mxf8f6f4.block_scale` 在四个互相独立的代码库里逐字相同（host 证实）**——
+    DeepGEMM 自建 `ptx::SM100_MMA_MXF8F6F4_SS`（`:46-65`）、CUTLASS `cute::SM100_MMA_MXF8F6F4_SS`
+    （`:990-1026`）、MPK `kernel::sm100::SM100_MMA_MXF8F6F4_SS`（`sm100_utils.cuh:127-150`）、MPK
+    `mirage::…::sm100::SM100_MMA_MXF8F6F4_SS`（`linear_fp8_sm100_sm100_utils.cuh:182-205`）归一化后
+    **完全一致**（4/4 YES；2SM 版在提供它的 3 份里也 YES），`docs/57` 的「三份封同一颗」加上 DeepGEMM
+    自建层是**第四份**。另记 MPK 内部 `linear_fp8_1d2d_sm100.cuh:132/134` **同一 task 同时用两份**
+    （`kernel::sm100` 直发 + `cute::` 供 `make_tiled_mma`）与 MLA 三兄弟**各抄一份私有 `namespace ptx`**。
+  判据只贡献 **C3**（多算子范围 / 设备体内指令契约）。新实验 `src/umma_paths_audit.cu` +
+  `harness/umma_paths_audit.sh` + `harness/umma_paths_audit.out.txt`（目标卡 H100/sm90，host 侧文本
+  审计 + grep audit，未 launch kernel）。配套博客 post `mega-kernel-73-umma-paths`（weight 74）并更新
+  `mega-kernel-00-index` 第 73 项。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4912,7 +4944,29 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P157-1 完成（1/1）**。补掉「下一步候选」第一条残留——`docs/62`（P148-1）记 CUTLASS
+- 当前进度：**P158-1 完成（1/1）**。补掉「下一步候选」点名的**「DeepGEMM 自建 PTX UMMA 封装层
+  （`ptx/tcgen05.cuh`，9 struct）与 MPK/CUTLASS 三条 UMMA 原语通路的并置对照」**（`docs/57` 只走 MPK
+  原语层、`docs/71` 只从 WS 一角切入，从无一篇把几条通路摆在一起）。见 `docs/72-umma-primitive-paths.md`
+  （快照 MPK `f9eb70c`、CUTLASS `deps/cutlass f3fde583`、DeepGEMM `057ca59`；**纯源码走读 + 1 个 host 侧
+  文本审计探针**，SM100 本体本机不可执行）。三条 headline：**(A)** 能力上是严格包含链——CUTLASS
+  `mma_sm100_umma.hpp`（36 个 `SM100_MMA_*` 模板）**40 个 distinct opcode** ⊃ DeepGEMM 自建 9 struct
+  **11 个**（少 sparse/tf32/i8/mxf4nvf4/2SM-tf32，多唯一死 `.ws`）⊃ MPK 三条通路 **4 个**；**(B)**
+  DeepGEMM 自建层 = CUTLASS atom 减去 `elect_one_sync` 内部守卫 / `CUTE_ARCH_*` 编译门 / dense 形态的
+  全零 `disable-output-lane` 掩码（模板化外移到主机侧 `make_runtime_instr_desc`）；**(C)** 同一颗
+  `mxf8f6f4.block_scale` 在四个独立代码库（DeepGEMM 自建 / CUTLASS / MPK `kernel::sm100` / MPK
+  `mirage::…::sm100`）**逐字相同**（4/4 YES；2SM 版 3/3 YES），是 `docs/57`「三份封同一颗」的第四份；
+  另记 MPK `linear_fp8_1d2d_sm100.cuh:132/134` 同一 task 同用两份、MLA 三兄弟各抄一份私有 `namespace ptx`。
+  判据只贡献 C3（`src/umma_paths_audit.cu` + `harness/umma_paths_audit.sh` + `harness/umma_paths_audit.out.txt`，
+  host 侧文本审计 + grep audit）。配套博客 post `mega-kernel-73-umma-paths`（weight 74）并更新
+  `mega-kernel-00-index` 第 73 项。
+- 下一步候选：可继续走「UMMA 原语对照」的**未完面**——本文只对 `mxf8f6f4.block_scale` 做了跨库逐字
+  比较，其余 8 个自建 struct（尤其 `kind::f16` 因母本带掩码而不逐字相等）的跨库对照未逐条做；
+  DeepGEMM 自建层的两个 helper（`tmem_load_32dp32b`/`umma_arrive_no_elect`）与 CUTLASS 同名
+  `cute::SM100_TMEM_LOAD_*`/带 elect 的 commit 对照未展开；MPK `sm100_ptx::make_desc`（固定 128B
+  swizzle 描述符，`:62-67`）与 `sm100_utils::make_umma_desc`/DeepGEMM `advance_umma_desc_lo` 的**描述符
+  构造并置**（`docs/69` 提过 MPK 侧、未与 DeepGEMM 自建层对走）可作后续。**其余旧候选**：`docs/46` §6 的
+  FLAT-CACHE draft attention（已核零命中、**不可走读**，仅供静态落差记录）。
+- 此前：**P157-1 完成（1/1）**。补掉「下一步候选」第一条残留——`docs/62`（P148-1）记 CUTLASS
   `f3fde583` 无 `SM100_MMA_*_WS*`、「可核 DeepGEMM 侧 WS 用法」。见 `docs/71-ws-instruction.md`
   （快照 MPK `f9eb70c`、CUTLASS `deps/cutlass f3fde583`、DeepGEMM `057ca59`；**纯源码走读 + 1 个 host
   侧结构探针 + grep audit**，SM100 本体本机不可执行）。三条 headline：
