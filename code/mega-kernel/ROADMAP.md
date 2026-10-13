@@ -809,6 +809,33 @@
       档）而非图循环，量级证据支持这一选择。判据：四策略均不满足 C1–C5（kinternal 仅 C1/C2）。
       与 §24（依赖维度→调度级）正交，合起来给出 CUDA Graph 降级路线的天花板。**本轮新增实验。**
 
+### P37 Device Graph Launch 作为「in-kernel 分发」（`docs/04-experiments.md` §26）
+
+- [x] **P37-1** 补齐 `docs/04` §1.6（P4-1）留下的判词「**device graph launch 仍停在 kernel 级**」：
+      把「设备自己发图」这条**最直接的设备侧派发**路线量出来，并与 P36-1（§25）的 `kinternal`
+      （in-kernel 循环）/`cwhile`（条件节点重分发）对照。见 `docs/04-experiments.md` §26，源码
+      `src/device_graph.cu`、脚本 `harness/device_graph.sh`、原始输出 `harness/device_graph.out.txt`
+      （主配置 N=20000×reps=5）与 `harness/device_graph_sens.out.txt`（敏感性 N=2000×reps=20）
+      （目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`-arch=sm_90a -rdc=true -lcudadevrt`）。
+      §26.2 头文件核对：`cudaGraphInstantiateFlagDeviceLaunch`=4（`driver_types.h:3910`）、
+      `cudaGraphUpload`（`cuda_runtime_api.h:12940`）、device 侧 `cudaGraphLaunch`
+      （`cuda_device_runtime_api.h:290`）+ 三个特殊流句柄 `cudaStreamGraph{TailLaunch,FireAndForget,
+      FireAndForgetAsSibling}`（`:175-177`）+ 自引用 `cudaGetCurrentGraphExec()`（`:311`，读
+      `%current_graph_exec`）。**结论**：
+      (A) **两条实测约束**——把调用 `cudaGraphLaunch` 的 kernel 直接 `<<<>>>` 启动 → **`operation not
+      supported`**（发起者必须是 graph 节点）；host-graph 节点内对**同一 exec 连发两次** → 第 1 次
+      ok、第 2 次 **`invalid argument`**（**单实例在飞**，故循环只能走**自重启图**）。
+      (B) **设备侧发图不比 host 便宜**：每单元 `eager`（host 发 kernel）2078.5 / `hgraph`（host 发
+      1-node 图）2370.7（1.14×）/ **`srelaunch`（设备自重启图）4285.4（2.06×）** / `kinternal`（常驻
+      内核内循环）**39.3 ns（0.019×）**；敏感性与逐位 `sink` 全对。
+      (C) **单次 device 图启动往返 4128 ns ≈ `srelaunch` 每行程 4.29 µs**——成本就是「一次设备图启动」
+      本身，与自重启体无关。
+      **含义**：device graph launch / 条件节点重分发（§25 `cwhile` 4.6 µs）/ 自重启图都落在**同一个
+      ~4 µs 的「设备侧 kernel/图重分发」地板**，而 in-kernel 边界只要 ~40 ns；**设备能发图 ≠ 设备发图
+      便宜**，要把单价从 ~4 µs 压到 ~40 ns 只能**留在同一个常驻 kernel 内**（MPK in-kernel event queue /
+      DeepGEMM ring barrier）。判据：四策略均不满足 C1–C5（`srelaunch` 由设备发起但粒度仍是整个图）。
+      **本轮新增实验**；与 §24/§25 合成「CUDA Graph 降级路线天花板」的第三块（设备侧派发）。
+
 
 ## 每轮增量流程（autopilot）
 
@@ -832,7 +859,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P36-1 完成（1/1）**。补齐 CUDA Graph 的**控制流**维度——CUDA 12.3+ 的
+- 当前进度：**P37-1 完成（1/1）**。补齐 `docs/04` §1.6（P4-1）留下的判词「**device graph launch 仍停在
+  kernel 级**」——把「设备自己发图」这条**最直接的设备侧派发**路线量出来，并与 P36-1（§25）的
+  `kinternal`/`cwhile` 对照。`docs/04-experiments.md` 新增 **§26**，源码 `src/device_graph.cu`、脚本
+  `harness/device_graph.sh`、原始输出 `harness/device_graph.out.txt`（主配置 N=20000×reps=5）与
+  `harness/device_graph_sens.out.txt`（敏感性 N=2000×reps=20）（目标卡 H100/sm90、**固定空闲 device 3**、
+  nvcc 13.2、`-arch=sm_90a -rdc=true -lcudadevrt`）。四策略公平对照 **eager**（host 发 kernel）/
+  **hgraph**（host 发 1-node 图）/ **srelaunch**（device-launchable 图自重启 = 设备派发）/
+  **kinternal**（常驻内核内循环）。核心结论：
+  (A) **两条实测约束**——调用 `cudaGraphLaunch` 的 kernel 直接 `<<<>>>` 启动 → **`operation not
+  supported`**（发起者必须是 graph 节点）；host-graph 节点内对**同一 exec 连发两次** → 第 2 次
+  **`invalid argument`**（单实例在飞，故循环只能走**自重启图**）。
+  (B) **设备侧发图不比 host 便宜**：每单元 `eager` 2078.5 / `hgraph` 2370.7（1.14×）/ **`srelaunch`
+  4285.4（2.06×）** / `kinternal` **39.3 ns（0.019×）**；敏感性逐项复现（2105.9/2394.8/4294.1/40.0），
+  `sink` 全对（=100000）。
+  (C) **单次 device 图启动往返 4128 ns ≈ `srelaunch` 每行程 4.29 µs**——成本就是设备图启动本身。
+  **含义**：device graph launch / `cwhile`（§25，4.6 µs）/ 自重启图都落在**同一个 ~4 µs 的「设备侧
+  kernel/图重分发」地板**，而 in-kernel 边界只要 ~40 ns；**设备能发图 ≠ 设备发图便宜**，要把单价压到
+  ~40 ns 只能**留在同一个常驻 kernel 内**（MPK in-kernel event queue / DeepGEMM ring barrier）。
+  判据：四策略均不满足 C1–C5（`srelaunch` 由设备发起但粒度仍是整个图）。**本轮新增实验**；与
+  §24/§25 合成「CUDA Graph 降级路线天花板」的第三块（设备侧派发）。
+  此前 **P36-1 完成（1/1）**。补齐 CUDA Graph 的**控制流**维度——CUDA 12.3+ 的
   **conditional graph nodes**（IF/WHILE/SWITCH，设备侧求值条件）能否让**一张图**表达「数据相关 /
   可变行程」控制流，对照 MPK「每 batch size 一张静态图」局限（`docs/01` §5.8）与运行层 in-kernel
   `iteration` 循环（`docs/06` §2/§4）。`docs/04-experiments.md` 新增 **§25**，源码
@@ -1068,7 +1115,10 @@
   系统视作绕过、精度缩减判作弊）/ 与 DeepGEMM、MPK 对照表 / 四段式工程结论」。核心判断：
   **megakernel 产业进展呈「需求(K3 训练套件)→路线(hpc-ops roadmap)→落地(DeepGEMM 段级 T4)→
   自动化(MPK 整图 T4)」四段式**。纯资料分析。
-- **下一步：全专题继续（P0–P36 全部完成）**。P36-1 已把 CUDA Graph 的**控制流**维度补成实测
+- **下一步：全专题继续（P0–P37 全部完成）**。P37-1 已把 P4-1 §1.6 的「device graph launch 仍停在
+  kernel 级」补成实测（`docs/04` §26：设备侧自重启图 4.29 µs/单元 ≈ 2× host kernel launch、单次
+  device 图启动往返 4.13 µs，与 §25 条件节点 4.6 µs 同落 ~4 µs 地板；in-kernel 循环仅 ~40 ns；两条
+  约束=发起者须为 graph 节点 / 同一 exec 单实例在飞）。P36-1 已把 CUDA Graph 的**控制流**维度补成实测
   （`docs/04` §25：conditional graph nodes 一图覆盖可变行程/数据相关分支，但每行程一次设备侧
   kernel 重分发，比 in-kernel 循环贵 ~20×——「表达能力」而非「性能」）。P35-1 已把 §13.6/§21.6 两条「Graph 显式构图 /
   programmatic 边」的尾巴补成实测（`docs/04` §24：programmatic 边把下游**调度点**前移到上游完成之前、

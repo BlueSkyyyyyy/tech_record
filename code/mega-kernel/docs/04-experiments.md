@@ -3761,3 +3761,139 @@ launch，循环在 kernel 内）。**关键**：`cwhile` 的每行程成本 ~4.3
 - **只测 IF / WHILE**：未测 SWITCH、嵌套条件、条件体内的 memcpy/memset/child graph（语义已由头文件
   界定，未实测）。
 - **device 3**、`iters=50` 平均摊薄首个 launch 的冷启动。
+
+## 26. Device Graph Launch：设备侧图启动能不能当「in-kernel 分发」用（P37-1）
+
+### 26.1 问题
+
+`docs/04` §1（P4-1）走 CUDA Graph 时留下一句未核实的判词——**「device graph launch 仍停在 kernel 级」**：
+CUDA 允许把一个图**实例化到可从设备启动**（`cudaGraphInstantiateFlagDeviceLaunch`），再由一个**设备上
+运行的 kernel** 用 `cudaGraphLaunch` 启动它。这正好是「设备自己当派发器（dispatcher）」的最直接形态，
+与 megakernel 的 **in-kernel 分发**（MPK worker/scheduler、DeepGEMM ring barrier，`docs/06` §3 / `docs/02`
+§1.5）是同一个诉求的**最粗版本**。§25（P36-1）已把「设备侧 kernel 重分发」在**条件节点**里量到
+**~4.3–4.6 µs/行程**、把 in-kernel 循环量到 **~0.23 µs/行程**。本节把 device graph launch 这一路也量出来，
+回答：**设备侧启动一个图，比 host 启动便宜吗？能不能替代常驻内核自己的循环？**
+
+### 26.2 资料分析：device graph launch 的 API 与约束（头文件一手核对，CUDA 13.2）
+
+- **实例化**：`cudaGraphInstantiateWithFlags(&exec, g, cudaGraphInstantiateFlagDeviceLaunch)`，标志值
+  **4**；头文件注明「只能用于支持 unified addressing 的平台，且**不能**与
+  `cudaGraphInstantiateFlagAutoFreeOnLaunch` 并用」（`driver_types.h:3910`）。
+- **上传**：`cudaGraphUpload(exec, stream)`（`cuda_runtime_api.h:12940`）后图才驻留在设备上可被设备启动。
+- **设备侧入口**：`__device__ cudaGraphLaunch(cudaGraphExec_t, cudaStream_t)`
+  （`cuda_device_runtime_api.h:290`）。设备侧只能用三个**特殊流句柄**：
+  `cudaStreamGraphTailLaunch`（`0x0100…`，父图完成后以「尾巴」方式串行启动）、
+  `cudaStreamGraphFireAndForget`（`0x0200…`，与父并发、无人等待）、
+  `cudaStreamGraphFireAndForgetAsSibling`（`0x0300…`）（`cuda_device_runtime_api.h:175-177`）。
+- **自引用**：`__device__ cudaGetCurrentGraphExec()`（`cuda_device_runtime_api.h:311`，读
+  `%current_graph_exec`）返回**当前正在执行的 exec**——这是「图自重启 / 常驻图循环」的关键原语。
+- **构建约束**：设备侧 CUDA runtime（含 `cudaGetLastError` 等）需要**分离编译**
+  （`nvcc -rdc=true … -lcudadevrt`），否则 `ptxas` 报 `Unresolved extern function '__cudaCDP2GetLastError'`
+  （本轮编译踩到）。
+
+### 26.3 方法
+
+程序 `src/device_graph.cu`，脚本 `harness/device_graph.sh`，原始输出 `harness/device_graph.out.txt`
+（主配置 `N=20000, reps=5`）与 `harness/device_graph_sens.out.txt`（敏感性 `N=2000, reps=20`）
+（目标卡 H100 / sm90、`-arch=sm_90a -rdc=true -lcudadevrt`、nvcc 13.2、**固定空闲 device 3**）。
+一条「单元」= 一次 `tick`（对 `sink` 做一次 `atomicAdd`）。要跑 N 个单元，四种「分发缝」公平对照：
+
+| 策略 | 谁派发 | 每单元怎么走 |
+|---|---|---|
+| `eager` | host | 循环 N 次 `tick<<<1,1>>>`（host 派发 kernel） |
+| `hgraph` | host | 循环 N 次 `cudaGraphLaunch(1-node graph)`（host 派发 graph） |
+| `srelaunch` | **device** | device-launchable 图，节点用 `cudaGraphLaunch(cudaGetCurrentGraphExec(), TailLaunch)` **自重启** N 次；host 只提交 **1 次** |
+| `kinternal` | **device（常驻）** | 单 kernel 内 `for N` 循环（= P36-1 的 `kinternal` 档） |
+
+host 循环用 CUDA event 计时，`srelaunch` 用一次 host 提交 + event（每 rep 前 `cudaMemset(cnt,0)`），
+全部 `sink` 必须 `= N×reps`。另外：Section A 量两条**使用约束**；Section C 用 host-graph 里的 launcher
+节点 `TailLaunch` 一个子图，测**一次 device 图启动的往返**（`%globaltimer` 打点，launcher 入口→子图入口）。
+
+### 26.4 结果
+
+**A. 两条使用约束（实测复现）**
+
+```text
+[Section A] 设备侧 cudaGraphLaunch 的使用约束
+  A1 plain <<<>>> launcher 直接调 device cudaGraphLaunch -> operation not supported
+  A2 dual_launch (host graph 节点内连发两次): 1st=no error 2nd=invalid argument
+```
+
+- **A1**：把「调用 `cudaGraphLaunch` 的 kernel」直接用 `<<<>>>` 启动 → `cudaErrorOperationNotSupported`
+  （`operation not supported`）——**发起者 kernel 必须本身是 graph 节点**（放进一个 host-launched 图里才跑得通，
+  本节后续、以及 A2/自重启都遵此）。这也解释了为什么「随便丢个 host kernel 进去当派发器」不行。
+- **A2**：在 host-graph 的节点里对**同一个 exec** 连发两次 device launch：**第一次成功、第二次
+  `cudaErrorInvalidValue`（`invalid argument`）**——**同一时刻同一 exec 只能有一个实例在飞**。换言之，一个
+  launcher 节点**不能**靠「循环 launch 同一个 exec」来跑多行程；要循环只能走**自重启图**（`srelaunch`）。
+
+**B. 每个单元的分发缝成本（ns/unit；主配置 N=20000×reps=5）**
+
+```text
+  eager          2078.5    sink=100000 (exp 100000)   [host loop ok]
+  hgraph         2370.7    sink=100000 (exp 100000)   [host loop ok]
+  kinternal        39.3    sink=100000 (exp 100000)
+  srelaunch      4285.4    sink=100000 (exp 100000)   cnt/rep=20000
+  ratios vs eager: hgraph=1.14x  kinternal=0.0189x  srelaunch=2.06x
+```
+
+敏感性配置（N=2000×reps=20）逐项复现：`eager 2105.9 / hgraph 2394.8 / kinternal 40.0 / srelaunch 4294.1`，
+比值 `1.14x / 0.019x / 2.04x`，`sink` 全对。
+
+- **`srelaunch`（设备派发图）≈ 2.06× eager（host 派发 kernel）**：设备侧自重启一次图要 **~4.29 µs**，
+  比 host 直接 launch 一个 kernel（~2.08 µs）**还贵一倍**。
+- **`hgraph`（host 派发 1-node 图）≈ 1.14× eager**：单节点图从 host 启动反而**略贵于**直接 launch kernel，
+  与 P4-1「图只在摊薄很多节点后才赢」一致。
+- **`kinternal`（常驻内核自己的循环）≈ 0.019× eager（~40 ns/单元）**：数量级最低——因为它**根本不跨
+  kernel/图分发边界**。
+
+**C. 一次 device 图启动的往返**
+
+```text
+  device-graph-launch round-trip = 4128.0 ns (feasible=50/50)
+```
+
+host-graph 的 launcher 节点写 `t0` → `TailLaunch` 子图 → 子图入口写 `t1`，`Δ = 4128 ns`，与 Section B
+的 `srelaunch` 每行程 **4.29 µs** 同量级——即 **`srelaunch` 的成本几乎就是「一次 device 图启动」本身**，
+与自重启循环体的工作量无关。
+
+### 26.5 读法
+
+1. **设备侧启动一个图并不比 host 便宜**：`srelaunch` 4.29 µs ≈ host 直接 launch 的 **2×**、≈ host 启动
+   1-node 图的 **1.8×**。设备「能发图」不等于设备「发图便宜」——**分发缝的代价在硬件派发本身**，
+   与发起者是 host 还是 device 无关。
+2. **device graph launch 与 P36-1 的条件节点落在同一个 ~4 µs 地板**：`cwhile` 4.3–4.6 µs/行程（§25）
+   vs 本节 `srelaunch` 4.29 µs/行程 vs 单次 device 图启动 4.13 µs——**「设备侧 kernel/图重分发」这种
+   机制无论披什么外衣（条件节点 WHILE / 自重启图 / device graph launch），单价都在 ~4 µs**。
+3. **唯一的数量级更低来自「不跨边界」**：`kinternal` ~40 ns/单元说明，只要执行体**留在同一个常驻
+   kernel 内**，单元之间就没有 ~2–4 µs 的分发缝。这正是 megakernel 把「下一轮/下一个 task」做成
+   **设备内 event/队列**而不是「设备再发一个 kernel/图」的根本原因。
+4. **约束进一步削弱它**：发起者必须是图节点（A1）、同一 exec 只能单实例在飞（A2）——要循环就得
+   **自重启图**（每行程一次设备图启动），这正是本节量到 4.29 µs 的形态。
+
+### 26.6 与判据 / MPK / 生产案例的关系
+
+- **判据（C1–C5，`docs/00` §3）**：四策略**均不满足 C1–C5**。`eager`/`hgraph` 是 host 提交的多次
+  kernel 边界；`srelaunch` 虽**由设备发起**，但每次重启仍是**一整个图（= kernel 级）**的分发，kernel
+  仍会结束、**没有 task 级设备内调度**；`kinternal` 满足 C1/C2（单次 launch + 常驻）但**没有** C3/C4/C5。
+- **与 MPK 的关系**：MPK 的 in-kernel scheduler（`docs/06` §3）在**一个常驻 kernel 内**用事件计数 + 原子
+  ring 把 task 派给 worker，**不产生新的 kernel/图分发缝**——量级上就是本节 `kinternal` 那一档；而
+  device graph launch 是「设备侧派发」的**最粗版本**（粒度 = 整个图、发起者必须是图节点、单实例在飞），
+  其单价（~4 µs）远达不到 MPK 需要的 task 级粒度。这与 P4-1 的判词一致，并把它从「资料判断」升级为
+  **实测**：**设备侧图启动仍停在 kernel 级**。
+- **与生产案例**：DeepGEMM Mega 家族用**单 kernel 内的原子 ring barrier**（`docs/02` §1.5）、MPK 用
+  in-kernel event queue（`docs/07` §4 两套同步机制）——都不走「设备再发一个 kernel/图」，理由正是本节
+  量到的 ~4 µs 分发缝 vs ~40 ns 的 in-kernel 边界。
+
+### 26.7 局限与踩到的坑
+
+- **合成 workload / 单 block**：`tick` 与 `kinternal` 的单元都是「单 block 一次 atomicAdd」，绝对数以
+  **量级**读；`srelaunch`/`fireonce` 的 ~4 µs 是「分发缝」本身，不含真实 task 工作。
+- **`hgraph` 用 1-node 图**：故它 **不**代表「多节点图的摊薄收益」（那是 P4-1/§25 的主题）；本节用它
+  只为对齐「host 发一个图」的单价。
+- **A2 只证「同 exec 连发第二次失败」**：未穷举 `FireAndForget`/`TailLaunch`/`AsSibling` 三种流的差异
+  （主线自重启用的是 `TailLaunch`）；亦未测「两个不同 exec 从同一 kernel 并发 launch」。
+- **未测**用**多 block / 有真实工作量**的图自重启，也未测 `kinternal` 里再套一层日付的 dispatch；
+  `%globaltimer` 已消除跨 SM 时钟差，但 Section C 取 50 次最小值。
+- **构建坑**：device 侧 runtime 必须 `-rdc=true -lcudadevrt`，否则链接期 `ptxas` 报
+  `Unresolved extern function '__cudaCDP2GetLastError'`。
+- **device 3**（固定空闲），主配置与敏感性两轮结果一致。

@@ -1,0 +1,17 @@
+$ CUDA_VISIBLE_DEVICES=3 /tmp/device_graph 2000 20
+=== P37-1 device graph launch ===
+device=NVIDIA H100 80GB HBM3 sm_90  N=2000 reps=20  total_units=40000
+
+[Section A] 设备侧 cudaGraphLaunch 的使用约束
+  A1 plain <<<>>> launcher 直接调 device cudaGraphLaunch -> operation not supported
+  A2 dual_launch (host graph 节点内连发两次): 1st=no error 2nd=invalid argument
+
+[Section B] 每个单元的分发缝成本（ns/unit）
+  eager          2105.9    sink=40000 (exp 40000)   [host loop ok]
+  hgraph         2394.8    sink=40000 (exp 40000)   [host loop ok]
+  kinternal        40.0    sink=40000 (exp 40000)
+  srelaunch      4294.1    sink=40000 (exp 40000)   cnt/rep=2000
+  ratios vs eager: hgraph=1.14x  kinternal=0.0190x  srelaunch=2.04x
+
+[Section C] host-graph launcher 节点 TailLaunch 一个子图：
+  device-graph-launch round-trip = 4128.0 ns (feasible=50/50)
