@@ -1032,6 +1032,25 @@
         任何 `#error`**；**修正 §79.5**「bf16 上 TMA 不是杠杆」——准确说法是「取决于该 bf16 核是否还留有 smem/
         发射侧头寸」。**边界**：仅基础 GEMM 核、`BVK=64`、`BT=16`、`K=V=128`、链级未测；`ncu` 小 shape 的
         `Duration` 与 CUPTI `dev` 不同源（以 `dev` 为准）。**不改变 §45 的 `cf` 默认部署。** 见 `docs/07` §80。
+- [x] **P7-78** 关闭 bf16 原生入口在**六段生产核**里的最后一条边界——`-DB2M_PROD × -DB2M_BF16 × -DB2M_TMA`
+        （及 `+ -DB2M_BF16MMA`）可编译、**逐位无损**，但**同一 TMA 旋钮在六段核里反号为净负**。P7-75（§78）把
+        bf16 扩到生产核却留「仍仅非 TMA」；P7-76/77（§79/80）打通 `BF16×TMA` 与 `BF16MMA×TMA` 却界定「仅基础
+        GEMM 核」——本轮补上两者交叉。**`b2_mma_probe.cu` 一行未改**（P7-75 的 `rds()` 与 P7-76 的 bf16 TMA 图
+        早已并存，只差同时打开两个旋钮的验证）。新增 `harness/check_bwd_b2_bf16_tma_prod.py`
+        （`harness/check_bwd_b2_bf16_tma_prod.out.txt`，空闲卡）。**Part A**：四组 shape（含非整除 `T=250`）bf16-valued
+        操作数下，`prod_bf16_tma ≡ prod_tma`（同 TMA/`BVK=64`）与 `prod_bf16 ≡ prod`（同 cp.async/`BVK=32`）
+        两两 **11 项输出全逐位（`max_abs=0`）**；`prod_tma` vs `prod`（跨 `BVK`）非 `dgk` ≤9.5e-7、`dgk` ≤1.9e-6
+        （fp32 分组）；`bf16mma_tma` vs `bf16_tma` 只差累加序（直通 `dv2/dvb/db` 逐位 0）；Part D `dv2` vs torch
+        6.6–9.9e-6（bf16 底噪）。**Part B/C（关键，反例）**：fp32 TMA 一律不划算（`tma32/prod` 1.15–1.21×、
+        `tma64/prod` 1.02–1.06×）；bf16 的收益**全在 `cp.async` staging × `BVK=32`**（`prod_bf16/prod` 大 shape
+        **0.677×**，smem 133760→**94848 B** 把占用率 1→2 blocks/SM）——`BVK=64`（smem 141952 B）或 TMA
+        （123008 B）都把 smem 顶回 1 block/SM、**整条丢掉**（0.934× / 0.999×）；同 `BVK=64` 下 TMA 仍慢
+        **1.07–1.11×**；叠 `-DB2M_BF16MMA` 找回一半（0.908–0.935×）。**结论（修正 §80.5 适用范围）**：§80 在
+        基础 GEMM 核测得 TMA 是 bf16 小杠杆（0.96×），到六段生产核反号——**TMA 是否兑现取决于该核是否还有
+        2-block/SM 的 smem 头寸**（与 §51.6/§61/§70 同构）。目标卡 CUDA B2 bf16 部署取 `-DB2M_BF16`（cp.async、
+        `BVK=32`）+ 可选 `-DB2M_BF16MMA`，**生产核里 TMA 与 `BVK=64` 都不开**。**边界**：仅 `BT=16`/`K=V=128`/fp32
+        输出/非 INTRA/HDW/DAMMA；`prod_bf16` 有 4 B spill；未做 ncu（机制由 §78/79/80 的 ncu + 本节 smem/占用率
+        读清）、链级未测。**不改变 §45 的 `cf` 默认部署。** 见 `docs/07` §81。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1513,8 +1532,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-77 补测**。
-  - P7-77（本轮）：**关闭 bf16 原生入口的最后一个 `#error`（P7-76 遗留）——`-DB2M_BF16MMA × -DB2M_TMA` 可组合**。
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-78 补测**。
+  - P7-78（本轮）：**关闭 bf16 原生入口在六段生产核里的最后一条边界——`-DB2M_PROD × -DB2M_BF16 × -DB2M_TMA`
+    （及 `+ -DB2M_BF16MMA`）可编译、逐位无损，但同一 TMA 旋钮在六段核里反号为净负**。P7-75 把 bf16 扩到生产核
+    却留「仍仅非 TMA」、P7-76/77 打通 `BF16×TMA`/`BF16MMA×TMA` 却界定「仅基础 GEMM 核」，两者交叉从未验。
+    **`b2_mma_probe.cu` 一行未改**（P7-75 的 `rds()` 与 P7-76 的 bf16 TMA 图早已并存）。新增
+    `harness/check_bwd_b2_bf16_tma_prod.py`（`check_bwd_b2_bf16_tma_prod.out.txt`，空闲卡）+ `docs/07` §81。
+    **Part A**：四组 shape（含非整除 `T=250`）bf16-valued 操作数下 `prod_bf16_tma ≡ prod_tma`（同 TMA/`BVK=64`）
+    与 `prod_bf16 ≡ prod`（同 cp.async/`BVK=32`）两两 **11 项输出全逐位（`max_abs=0`）**；`prod_tma` vs `prod`
+    非 `dgk` ≤9.5e-7、`dgk` ≤1.9e-6（fp32 分组）；`bf16mma_tma` vs `bf16_tma` 只差累加序（`dv2/dvb/db` 逐位 0）。
+    **Part B/C（关键，反例）**：fp32 TMA 一律不划算（`tma32/prod` 1.15–1.21×、`tma64/prod` 1.02–1.06×）；bf16 收益
+    **全在 `cp.async` staging × `BVK=32`**（`prod_bf16/prod` 大 shape **0.677×**，smem 133760→**94848 B** → 占用率
+    1→2 blocks/SM）；`BVK=64`（141952 B）或 TMA（123008 B）都把 smem 顶回 1 block/SM、**收益整条丢掉**（0.934× /
+    0.999×）；同 `BVK=64` 下 TMA 仍慢 **1.07–1.11×**；叠 `-DB2M_BF16MMA` 找回一半（0.908–0.935×）。**结论（修正
+    §80.5 适用范围）**：§80 在基础 GEMM 核测得 TMA 是 bf16 小杠杆（0.96×），到六段生产核反号——**TMA 是否兑现
+    取决于该核是否还有 2-block/SM 的 smem 头寸**（同 §51.6/§61/§70）。目标卡 CUDA B2 bf16 部署取 `-DB2M_BF16`
+    （cp.async、`BVK=32`）+ 可选 `-DB2M_BF16MMA`，**生产核里 TMA 与 `BVK=64` 都不开**。**踩坑**：`-DB2M_BF16` 下
+    raw `v`/`dw` 的线上 dtype 随 TMA 开关变（非 TMA 走 `rds()` 期望 fp32、TMA 走 bf16 图期望 bf16），首版 harness
+    喂错 dtype 致 `db/dApre/dA` O(1) 差、按表分流后全逐位。**边界**：仅 `BT=16`/`K=V=128`/fp32 输出/非
+    INTRA/HDW/DAMMA；未做 ncu、链级未测。**不改变 §45 的 `cf` 默认部署。**
+  - P7-77（上轮）：**关闭 bf16 原生入口的最后一个 `#error`（P7-76 遗留）——`-DB2M_BF16MMA × -DB2M_TMA` 可组合**。
     k16 bf16 片段的列偏移恒为偶数，`col`/`col+1` 必落同一 128 B 原子、同一 16 B swizzle 单元，故 `rd2()` 只需
     套 `rd()` 那套 `b ^= ((b>>7)&7)<<4` 解码一次 `col` 的字节地址、再连读两个 bf16；签名加 `rows`（A→`BT`/B→`KD`），
     删 `#error`，**算术一字未动**。新增 `harness/check_bwd_b2_bf16mma_tma.py`（`check_bwd_b2_bf16mma_tma.out.txt`，

@@ -8384,3 +8384,95 @@ CUPTI `dev`（kernel-only，`b2mma_launch` 单次）：
   `b8t2048h8` / `t512h4` 两点；链级未测（基础 GEMM 核不落链，机制与 §78.5 一致）。`ncu` 的 `t512h4`
   `Duration`（9.66→10.40 µs，+7.7%）与 Part B 的 CUPTI（1.002×）**不同源**——小 shape 的 `Duration` 受
   replay/时钟影响，判趋势以 CUPTI `dev` 为准。**不改变 §45 的 `cf` 默认部署。**
+
+## 81. 关闭 bf16 原生入口在**六段生产核**里的最后一条边界：`-DB2M_PROD × -DB2M_BF16 × -DB2M_TMA` 逐位无损，但 **TMA 在六段核里不是 bf16 的杠杆**（P7-78）
+
+§78（P7-75）把 bf16 原生 staging 从基础 GEMM 核扩到**六段生产核**（`-DB2M_PROD`），明确留下边界
+「**仍仅非 TMA**」；§79/§80（P7-76/77）把 `-DB2M_BF16 × -DB2M_TMA` 与 `-DB2M_BF16MMA × -DB2M_TMA`
+打通，但都明确界定在「**仅基础 GEMM 核**」。也就是说，**bf16 入口与 TMA 的交叉从未在六段生产核上验过**。
+本轮补上：`-DB2M_PROD -DB2M_BF16 -DB2M_TMA [-DB2M_BF16MMA]` 可编译（无 `#error`）、**逐位正确**，并第一次
+量出——**同一旋钮在基础 GEMM 核（§80 大 shape 净赢 0.96×）与六段生产核（本节 1.07–1.11×）反号**，因为
+六段核的 bf16 收益本就来自 `cp.async` bf16 staging 把 smem 压到 2 blocks/SM，TMA/`BVK=64` 又把 smem 顶回
+1 block/SM、把这份收益吃掉。
+
+新增 `harness/check_bwd_b2_bf16_tma_prod.py`（`harness/check_bwd_b2_bf16_tma_prod.out.txt`，空闲卡）。
+**本轮 `b2_mma_probe.cu` 一行未改**——P7-75 的 `rds()`（fp32 scratch）与 P7-76 的 bf16 TMA 张量图早已并存，
+生产核只差「把两个旋钮一起打开」的验证。
+
+### 81.1 一个必须先说清的**线上格式**差异：`v`/`dw` 到底喂 fp32 还是 bf16
+
+`-DB2M_BF16` 下 staged 操作数分两类，两条路径的**线上 dtype 不同**，这是移植时最容易踩的一处：
+
+| 操作数 | 读法 | 非 TMA `-DB2M_BF16`（§78） | TMA `-DB2M_BF16`（§79） |
+|---|---|---|---|
+| `do/vn/dv/h/dh`（`op_t`） | `rd()` | **bf16** | **bf16** |
+| raw `v`（`vv`）、`dw`（`dwm`） scratch | `rds()` | **fp32**（P7-75） | **bf16**（P7-76，一张 bf16 图覆盖全操作数） |
+
+故 `prod_bf16`（非 TMA）只期待 `do/vn/dv/h/dh` 是 bf16、raw `v`/`dw` 仍是 fp32；而 `prod_bf16_tma` 期待
+**全部**是 bf16。**首版 harness 把 bf16 张量的 `v` 指针喂给非 TMA build（其内核按 `const float*` 读）**，
+`db/dApre/dA` 立刻出现 O(1)（6.6–8.8）的差——不是 kernel bug，是喂错了 dtype。按上表分流后全部逐位（§81.2）。
+**移植判据**：切 `-DB2M_TMA` 开关的同时，调用方对 `v`/`dw` 的 dtype 也要跟着切。
+
+### 81.2 Part A：`prod_bf16_tma` 与 `prod_tma`、`prod_bf16` 与 `prod` **双向逐位相同**（含非整除 `T=250`）
+
+四组 shape（`B8 T2048 H8` / `B2 T1024 H8` / `T512 H4` / `T250 H3`），全部操作数取 **bf16-valued**（`bf16(x).float()`
+喂 fp32 build），11 项输出（`dv2/dvb/dkgb/db/dApre/dA/dqg/dkg/dg/dw/dgk`）：
+
+| 对比 | 含义 | worst `max_abs` |
+|---|---|---|
+| `prod_bf16_tma` vs `prod_tma`（同 TMA/`BVK=64`） | bf16 staging 对 bf16-valued 操作数是**精确**的 | **0（逐位）** |
+| `prod_bf16` vs `prod`（同 cp.async/`BVK=32`） | 同上（非 TMA 路径，§78 的延续） | **0（逐位）** |
+| `prod_tma` vs `prod`（fp32，跨布局） | `BVK=64` vs `BVK=32` 的 V-归约分组 | 非 `dgk` **≤9.5e-7**；`dgk` **≤1.9e-6** |
+| `prod_bf16mma_tma` vs `prod_bf16_tma`（原生 bf16 mma） | k16 vs k8 的 fp32 累加序 | 直通 `dv2/dvb/db` **逐位 0**；其余 ≤9.5e-7 |
+
+- **`prod_bf16_tma ≡ prod_tma` 全 11 项逐位**（含非整除 `T=250`）：bf16 staging 在 bf16-valued 操作数上
+  与 fp32 staging 读到**同一个 fp32 值**（bf16→fp32 扩宽精确、`cvt.rna.tf32` 恒等），TMA 只改 smem 布局——
+  这是 §78.2/§79.2/§80.2 那条等式在**六段生产核**上的重现，六段非 GEMM 段读到的操作数完全相同。
+- `prod_tma` vs `prod` 的差异只在 `dgk`（V 方向 Σ 的分组）与一处 `dg`：与 §53.2「`base32==base64` 的
+  `dq/dk/dw` 逐位、`dgk` 因 fp32 分组差 ~1e-6」同源，跨 `BVK` 的既有事实，非 bf16 引入。
+- Part D 交叉核验：`prod_bf16_tma` 的 `dv2 = beta*(A@dv)` vs torch（同一 bf16-valued 操作数）落
+  **6.6–9.9e-6**，与 §78 同档（bf16/tf32 底噪）。
+
+### 81.3 Part B/C：**bf16 的收益全在 `cp.async` bf16 staging × `BVK=32`；TMA 与 `BVK=64` 都把它吃掉**
+
+静态（Part B）与 CUPTI `dev`（Part C，kernel-only 单次 `prod` launch）：
+
+| build | smem | regs | spill | `B8 T2048 H8` dev | ×prod | `B2 T1024 H8` | `T512 H4` | `T250 H3` |
+|---|---|---|---|---|---|---|---|---|
+| `prod`（fp32 cp.async 32） | 133760 B | 146 | 0 | 1298.9 µs | 1.000 | 169.2 | 19.2 | 18.7 |
+| `prod_tma32`（fp32 TMA 32） | 123008 B | 128 | 0 | 1503.2 | **1.157** | 1.149 | 1.208 | 1.204 |
+| `prod_tma`（fp32 TMA 64） | 209024 B | 112 | 0 | 1327.7 | 1.022 | 1.050 | 1.062 | 1.029 |
+| `prod_bf16`（**bf16 cp.async 32**） | **94848 B** | 128 | 4 | **879.2** | **0.677** | **0.726** | 1.006 | 1.013 |
+| `prod_bf16_64`（bf16 cp.async 64） | 141952 B | 104 | 0 | 1213.5 | 0.934 | 0.944 | 0.956 | 0.963 |
+| `prod_bf16_tma`（bf16 TMA 64） | 123008 B | 112 | 0 | 1297.3 | 0.999 | 1.016 | 1.061 | 1.073 |
+| `prod_bf16mma_tma`（bf16 TMA 64 + bf16 mma） | 123008 B | 128 | 0 | 1179.3 | 0.908 | 0.910 | 0.928 | 0.935 |
+
+三个关键读数：
+
+1. **fp32 上 TMA 在六段核里一律不划算**：`prod_tma32/prod` **1.15–1.21×**、`prod_tma/prod` 1.02–1.06×
+   （大 `BVK` 把 TMA 的固定代价摊薄、但仍不快）。与 §67/§70/§71「六段生产核非 DRAM bound，TMA 是净负」一致。
+2. **bf16 的收益来自 `BVK=32` 的 `cp.async` staging，不是 TMA**：`prod_bf16/prod` 大 shape **0.677×**
+   （与 §78.4 的 0.684× 互证）——smem **133760→94848 B**，把占用率从 **1 顶到 2 blocks/SM**（2×94.8=189.7 KB
+   < 227 KB）。一旦把 `BVK` 提到 64（`prod_bf16_64`，smem 141952 B > 227/2 KB）或改用 TMA（`prod_bf16_tma`，
+   123008 B > 227/2 KB），smem 又越过 2-block 门槛、退回 1 block/SM，**0.677× 的收益整条丢掉**（0.934× / 0.999×）。
+   **同 `BVK=64` 下 TMA 相对 cp.async 仍慢 1.07–1.11×**（`bf16_tma64/bf16_64`）。
+3. **原生 bf16 mma 在 TMA 之上把丢掉的收益找回来一半**：`prod_bf16mma_tma/prod` **0.908–0.935×**
+   （smem 不变 123008 B、regs 112→128）——默认部署应同时开 bf16 staging × 原生 bf16 mma，但**不要**为了让
+   操作数走 TMA 而把 `BVK` 顶到 64。
+
+### 81.4 结论与设计输入
+
+- **正确性收口**：`-DB2M_PROD × -DB2M_BF16 × -DB2M_TMA`（及 `+ -DB2M_BF16MMA`）可编译、**逐位无损**
+  （11 项输出、含非整除 `T=250`），且与 fp32 `prod` 在 bf16-valued 操作数上**逐位相同**。bf16 原生入口
+  在**六段生产核**里的 TMA 边界至此关闭——`b2_mma_probe.cu` 一字未改（P7-75/76 的代码已并存）。
+- **性能结论（修正 §80.5 的适用范围）**：§80 在**基础 GEMM 核**上测得 `bmm_tma64/bmm64` 大 shape **0.96×**
+  （TMA 是 bf16 的小杠杆）；本轮同旋钮在**六段生产核**上反号为 **1.07–1.11× 变慢**。**判据**：TMA 的收益
+  取决于该核**是否在 smem 上有 2-block 头寸**——基础 GEMM 核 bf16 TMA 后 smem 76 KB 仍 2 blocks/SM，
+  生产核 bf16 TMA 后 123 KB 只剩 1 block/SM。这与 §51.6/§61/§70「同一旋钮在孤立核与整核可反号」同构。
+- **目标卡 CUDA B2 部署输入**：bf16 部署时取 **`-DB2M_BF16`（`cp.async` staging，`BVK=32`）**，把 smem 压到
+  2 blocks/SM 是第一杠杆；**TMA 与 `BVK=64` 在六段生产核里都不开**（前者净负、后者吃掉占用率）；若追求
+  mma 密度可叠 **`-DB2M_BF16MMA`**（原生 bf16 mma，smem 不变、指令减半）。这与 §78.5「bf16 是 B2 侧
+  `.float()` 部署税的收口」一致，只是明确了**生产核里 TMA 不参与这条路线**。**不改变 §45 的 `cf` 默认部署。**
+- **边界（诚实）**：仅 `BT=16`、`K=V=128`、fp32 输出、非 `INTRA`/非 `HDW`/非 `DAMMA`；`prod_bf16` 有
+  **4 B spill**（vs 其余 0，量级噪声内）；`ncu` 未做（机制已由 §78/§79/§80 的 ncu 与本节 smem/占用率读清）；
+  链级未测（§78.5 已有 bf16 生产核落链的结论，本节的差异只在 staging 机制、不改链级结论）。
