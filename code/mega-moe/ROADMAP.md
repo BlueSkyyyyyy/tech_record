@@ -4087,7 +4087,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P130 各增量完成（P15-1…P42-1、P42-1…P130-1）。**
+- 当前进度：**P0~P14 全部完成；P15~P130 各增量完成（P15-1…P41-1、P42-1…P130-1）。**
   本轮 P130-1：新建 `docs/140-deepep-comm-context.md`
   （+`harness/exp_deepep_context.{py,sh,out.txt}`、`src/deepep_context_arith.cu`）——补齐 DeepEP 所有
   通信篇目脚下的 **host 通信上下文 `comm::Context`**（`csrc/kernels/comm/context.cpp`，268 行）。
