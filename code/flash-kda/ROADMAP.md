@@ -697,6 +697,22 @@
       dev 快 ~2.7–3.2×，且不含其前向重算）。**结论**：目标卡 CUDA 反向最终形态＝`dAv→B1→融合 B2/B3→
       反向 cumsum`，**B1 按 grid 切换实现、B2/B3 一律融合**；合成实验（本轮新增方法学）证明可加、并暴露
       单链看不到的「B1 随 shape 切换」部署约束；剩余大头＝把融合 B2/B3 从 Triton 搬成 K2 形状 CUDA。
+- [x] **P7-43** 动「K2 形状 CUDA 化」前先给 go/no-go 与收益上界（**不建 CUDA 核**）：新增
+      `harness/check_bwd_b2b3_bound.py`（`harness/check_bwd_b2b3_bound.out.txt`，空闲卡）+
+      `harness/probe_b2b3_bound_ncu.sh`（`harness/probe_b2b3_bound_ncu.out.txt`）+ `docs/07` §46。
+      **Part A**（deploy 基线）：`B8T2048H8` 融合核 `dev 1003µs`、`regs 255/spills 34/smem 114KB`、
+      占用率 **1 block/SM（12.5%）被 regs 与 smem 同时钉死**。**Part B**（`maxnreg` 受控扫 255→80）：
+      占用率**一动不动**（smem 卡住），每档都换算成线性 spill（34→320）与变慢（最坏 **3.05×**）
+      ——「降寄存器腾占用率」在 Triton 走不通。**Part C（关键）**：同指针/掩码/字节、**无 `tl.dot`** 的
+      traffic 等价核（0 spill、0 smem、3 block/SM、带宽饱和 ~3.0 TB/s）**509µs**，融合核 **988µs**
+      高它 **1.94×**（`T512H4` 2.43×）；ncu 字节口径地板 586µs（1.79×）互证。**Part D（ncu）**：
+      Active/Eligible Warps per Scheduler **1.99 / 0.18**、issue 0.14/cyc（每 7 周期一条）、
+      `long_sb` 5.80=41.7%、`Block Limit Registers=1 且 Shared Mem=1`——**发射饥饿**（不是带宽，
+      不是占用率旋钮）。**结论**：融合 B2/B3 是延迟受限、有 **~1.9×** 头寸，且该头寸**在 Triton 里够不着**
+      （regs+smem 双钉、`BV=V` 无循环可流水）→ **「K2 形状 CUDA 化」被数据支持**（首位动作＝把
+      `dq/dk/dw`/`dA` 累加器按 warp 分片常驻寄存器，TMA 流水其次）。**新方法学**：用「同字节、去 compute 的
+      traffic 等价核」测地板，一次给出延迟受限判据 + 收益上界，比 ncu「Est. Speedup」启发式可靠
+      （后者 K2/B1 两次误报，本轮 44% 也明确不可由降寄存器兑现）。
 
 ### P8 小结 / 一页纸
 
@@ -755,8 +771,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-42 补测**。
-  - P7-42（本轮）：**把两条分别收敛的反向优化合成一条链**——CUDA B1（§15–§41）此前只在 §42 落过链
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-43 补测**。
+  - P7-43（本轮）：**给「融合 B2/B3 → K2 形状 CUDA」一个 go/no-go 与收益上界（不建 CUDA 核）**——
+    §45.3 点名的剩余大头，但动 900 行 CUDA 前先量清。新增 `harness/check_bwd_b2b3_bound.py`
+    （`..._bound.out.txt`）+ `harness/probe_b2b3_bound_ncu.sh`（`..._bound_ncu.out.txt`）+ `docs/07` §46。
+    **Part A**：deploy `B8T2048H8` 融合核 `dev 1003µs`、`regs 255/spills 34/smem 114KB`、占用率
+    **1 block/SM（regs 与 smem 同时钉死）**。**Part B**（`maxnreg` 255→80）：占用率**不动**、只有线性
+    spill（34→320）与变慢（最坏 **3.05×**）→「降寄存器腾占用率」在 Triton 走不通。**Part C（关键）**：
+    同字节、**无 `tl.dot`** 的 traffic 等价核（0 spill/0 smem/3 block/SM/带宽饱和 ~3.0 TB/s）**509µs**，
+    融合核 988µs 高它 **1.94×**（`T512H4` 2.43×；ncu 字节口径 1.79× 互证）。**Part D（ncu）**：
+    Eligible Warps/Scheduler **0.18**、issue 0.14/cyc、`long_sb` 41.7%、regs+smem 双 1 →**发射饥饿**。
+    **结论**：融合 B2/B3 延迟受限、有 **~1.9×** 头寸且 **Triton 里够不着** → **K2 形状 CUDA 化被数据支持**
+    （首位动作＝`dq/dk/dw`/`dA` 累加器按 warp 分片常驻，TMA 流水其次）。**新方法学**：用「同字节、去
+    compute 的 traffic 等价核」测地板（延迟判据 + 收益上界 + 占用率能否兑现三合一）。
+  - P7-42（上轮）：**把两条分别收敛的反向优化合成一条链**——CUDA B1（§15–§41）此前只在 §42 落过链
     （那条链用**未融合** B2/B3），B2/B3 融合（§31–§33）此前只在 §33 落过链（那条链用 **Triton** pipe B1），
     **两条最新收获从未同时出现**。新增 `harness/check_bwd_cudab1_fused_e2e.py`
     （`harness/check_bwd_cudab1_fused_e2e.out.txt`，空闲卡）+ `docs/07` §45；拼成
@@ -1340,7 +1368,16 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-42 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-43 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-43（`docs/07` §46）给「融合 B2/B3 → K2 形状 CUDA」go/no-go 与收益上界**（不建 CUDA 核）：
+    新增 `harness/check_bwd_b2b3_bound.py`（`..._bound.out.txt`）+ `harness/probe_b2b3_bound_ncu.sh`
+    （`..._bound_ncu.out.txt`）。deploy `B8T2048H8` 融合核 `dev~1000µs`、`255 regs/34 spills/114KB smem`、
+    **1 block/SM（regs+smem 双钉）**；`maxnreg` 255→80 占用率不动、只加 spill（34→320）与变慢（最坏 3.05×）；
+    **同字节、无 dot 的 traffic 等价核 509µs**（带宽饱和 ~3.0 TB/s）→ 融合核高它 **1.94×**；ncu `Eligible
+    Warps/Scheduler 0.18`、issue 0.14/cyc、`long_sb` 41.7% = 发射饥饿。**结论**：有 ~1.9× 延迟头寸、Triton
+    够不着 → **K2 形状 CUDA 化被数据支持**；**下一步（真正的工程化）**＝把 `dq/dk/dw [BT,K]` + `dA [BT,BT]`
+    累加器按 warp 分片常驻寄存器（先），TMA 输入流水（次），即 B1 §19–§24 的配方。**新方法学**：同字节去
+    compute 的 traffic 等价核测地板。
   - **P7-42（`docs/07` §45）把两条分别收敛的反向优化合成一条链**：CUDA B1 与 B2/B3 融合此前从未同时在
     一条链里（§42 链用未融合 B2/B3、§33 链用 Triton B1）。拼成 `dAv -> CUDA B1 -> fused B2+B3 -> 反向
     cumsum`（`harness/check_bwd_cudab1_fused_e2e.py`）。**Part A**：`cf` vs FLA 六项 worst-case 与

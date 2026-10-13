@@ -1,0 +1,52 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190  triton=3.6.0
+==========================================================================================
+Part A: fused B2/B3 isolated baseline (deploy config BV=128 nw=8) + static cost
+==========================================================================================
+
+# B8 T2048 H8  grid=(128, 64)
+  fused dev=  1002.7us  wall=   992.6us  regs=255  spills=34  smem=114.0KB
+  analytic occupancy: 1 block/SM  8 warps/SM  12.50%
+
+# T512 H4  grid=(32, 4)
+  fused dev=    12.2us  wall=    45.8us  regs=255  spills=34  smem=114.0KB
+  analytic occupancy: 1 block/SM  8 warps/SM  12.50%
+
+==========================================================================================
+Part B: register-pressure knob -- explicit `maxnreg` ceiling on the fused kernel
+  (does the 255-register / 1-block/SM cost buy speed, or is it just an occupancy cap?)
+==========================================================================================
+   maxnreg    dev us  regs  spills  smem KB  occ(blk,warps,%)
+      base     986.8   255      34    114.0  (1,8,12.5) 1.00x
+       224    1096.7   224      58    114.0  (1,8,12.5) 1.11x
+       192    1234.6   192      92    114.0  (1,8,12.5) 1.25x
+       160    1503.6   160     136    114.0  (1,8,12.5) 1.52x
+       128    1845.7   128     186    114.0  (1,8,12.5) 1.87x
+        96    2455.7    96     264    114.0  (1,8,12.5) 2.49x
+        80    3007.0    80     320    114.0  (1,8,12.5) 3.05x
+
+==========================================================================================
+Part C: memory floor -- traffic-equivalent kernel (same bytes, no tl.dot), high occ
+==========================================================================================
+
+# B8 T2048 H8
+  fused                       dev=   988.4us
+  traffic nw=4 (no dot)      dev=   510.7us  wall=  513.0  regs=134 spills=0 smem=0.0KB  occ=(3,12,18.8)  fused/traffic=1.94x
+  traffic nw=8 (no dot)      dev=   508.8us  wall=  511.4  regs=80 spills=0 smem=0.0KB  occ=(3,24,37.5)  fused/traffic=1.94x
+  --> best traffic/quasi-floor 508.8us; fused is 1.94x above it
+
+# T512 H4
+  fused                       dev=    12.2us
+  traffic nw=4 (no dot)      dev=     5.1us  wall=   45.0  regs=134 spills=0 smem=0.0KB  occ=(3,12,18.8)  fused/traffic=2.40x
+  traffic nw=8 (no dot)      dev=     5.0us  wall=   45.1  regs=80 spills=0 smem=0.0KB  occ=(3,24,37.5)  fused/traffic=2.43x
+  --> best traffic/quasi-floor 5.0us; fused is 2.43x above it
+
+==========================================================================================
+Part D: DRAM floor from the §30 byte counts (fused B8T2048H8)
+==========================================================================================
+  reads=1.58GB writes=0.38GB total=1.96GB
+  DRAM-peak floor = (reads+writes)/peak = 586us   (§30 fused dev ~1050us => 1.79x above floor)
+  breakdown of reads: h(fp32,0.5G)+dh(bf16,0.25G) ~48%, q/k/g/v_new/do/dv(fp32) ~ answer Part A/C.
+
+DONE
