@@ -837,6 +837,32 @@
       **本轮新增实验**；与 §24/§25 合成「CUDA Graph 降级路线天花板」的第三块（设备侧派发）。
 
 
+### P38 实验扩展 20：多租户共存与 SM 分区（`docs/04-experiments.md` §27）
+
+- [x] **P38-1** 把「megakernel = 单次 launch 占满整机」这一被前面所有小节默认接受的前提**翻到成本面**：
+  整机持久化内核对**共存负载**（另一模型/租户/profiler/通信）的干扰，以及 Hopper **Green Contexts**
+  SM 分区能否硬隔离。补齐 MPK §5「worker/scheduler 分配固定在 launch 时、匹配物理 SM 数」（快照行 1168）
+  的**部署含义**，并把 P10-1（占用率上限）/P14-1（占用率代价）从「单 kernel 内」推进到「跨 kernel」维度。
+  见 `docs/04-experiments.md` §27，源码 `src/green_ctx_sched.cu`、脚本 `harness/green_ctx_sched.sh`、
+  原始输出 `harness/green_ctx_sched.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、
+  buf=256 MB、rounds=64，device 1 复现同量级）。被测 = 访存为主的整机 `persist_kernel`（网格按占用率
+  上限铺满）与普通 `victim_kernel`（多 block 求和，末 block 写 mapped-pinned `done`）。四 Section：
+  - **A 干扰**：persist 铺满 132 SM 但每 SM 仅 1/8 槽位（Gp=132）→ victim **1.0× 基线**（可共驻）；
+    Gp=1056（8 blk/SM 占满整机）→ victim 被饿死到 **134.5× 基线**（5.613 ms ≈ persist 自身 5.59 ms）
+    ——**干扰的开关是「剩余占用率槽位」而非「占了几张 SM」**（对上 P10-1/P14-1）。
+  - **B Green Contexts 分区**：`cudaDevSmResourceSplit` 把 132 SM 切成 A=64/B=68（B 组用 backfill 拿余数）
+    + `cudaGreenCtxCreate`。B1 persist 占满 A、victim 在 B → **0.76× 基线**（≈ 无干扰），且 persist 自身
+    **7.56 ms 与 D 段 smA=64 单独跑 7.55 ms 一致** → **隔离双向**；B2 对照（victim 放 A 的同分区另一流）
+    → 又饿死到 **184.3× 基线**——**隔离来自分区本身、不是「换个 context」**。
+  - **C 流优先级**：persist 低优 / victim 高优 → victim 仍 **133.65× 基线**——**优先级不抢占已运行的
+    block**，不能替代分区。
+  - **D 分区代价**：persist 吞吐随分到的 SM 近似线性——32→1335、64→2277、96→2821 GB/s（96 SM 近整机
+    HBM 上限后饱和）。**给共存租户留 SM = 按比例削减 megakernel 可达带宽**。
+  判据：三者均为单 kernel、`persist` 满足 C1/C2；Green Contexts 是 **C4 的更粗一层**（launch 前定死
+  「谁用哪些 SM」，与 P29-1 cluster 的片内分区同目标），**均不涉 C3/C5**。踩坑：H100 的 132 SM 与
+  `smCoscheduledAlignment=8` 不整除，第二组必须 `cudaDevSmResourceGroupBackfill`；`smA=128` 余 4 SM
+  小于最小分组而 split 失败。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -859,7 +885,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P37-1 完成（1/1）**。补齐 `docs/04` §1.6（P4-1）留下的判词「**device graph launch 仍停在
+- 当前进度：**P38-1 完成（1/1）**。把「megakernel = 单次 launch **占满整机**」这一被前面所有小节默认
+  接受的前提**翻到成本面**：整机持久化内核对**共存负载**（另一模型/租户）的干扰，以及 Hopper
+  **Green Contexts** SM 分区能否硬隔离——补齐 MPK §5「worker/scheduler 分配固定在 launch 时、匹配物理
+  SM 数」（快照行 1168）的**部署含义**，把 P10-1（占用率上限）/P14-1（占用率代价）从「单 kernel 内」
+  推进到「跨 kernel」维度。`docs/04-experiments.md` 新增 **§27**，源码 `src/green_ctx_sched.cu`、脚本
+  `harness/green_ctx_sched.sh`、原始输出 `harness/green_ctx_sched.out.txt`（目标卡 H100/sm90、
+  **固定空闲 device 3**、nvcc 13.2、buf=256 MB、rounds=64，device 1 复现同量级）。四 Section 核心结论：
+  - **A 干扰**：persist 铺满 132 SM 但每 SM 仅 1/8 槽位（Gp=132）→ victim **1.0× 基线**（可共驻）；
+    Gp=1056（占满整机）→ victim 被饿死 **134.5× 基线**（等满 persist 的 5.59 ms）——**干扰的开关是
+    「剩余占用率槽位」而非「占了几张 SM」**（对上 P10-1/P14-1）。
+  - **B Green Contexts 分区**：132 SM 切 A=64/B=68（`cudaDevSmResourceSplit` + backfill）→ B1 隔离下
+    victim **0.76× 基线**、persist 自身 7.56 ms ≈ 单独跑 7.55 ms（**双向隔离**）；B2 对照（victim 放
+    A 的同分区另一流）又饿死 **184.3×**——**隔离来自分区本身**。
+  - **C 流优先级**：persist 低优 / victim 高优 → 仍 **133.65×**——**优先级不抢占已运行 block**。
+  - **D 分区代价**：persist 吞吐随 SM 近似线性（32→1335、64→2277、96→2821 GB/s）——**给共存租户留 SM
+    = 按比例削减 megakernel 可达带宽**。
+  判据：均单 kernel、`persist` C1/C2；Green Contexts 是 **C4 的更粗一层**（launch 前定死 SM 归属，
+  与 P29-1 cluster 片内分区同目标），均不涉 C3/C5。踩坑：H100 的 132 SM 与 `smCoscheduledAlignment=8`
+  不整除，第二组须 `cudaDevSmResourceGroupBackfill`。**本轮新增实验，全专题任务清单仍全部完成。**
+
+- 此前：**P37-1 完成（1/1）**。补齐 `docs/04` §1.6（P4-1）留下的判词「**device graph launch 仍停在
   kernel 级**」——把「设备自己发图」这条**最直接的设备侧派发**路线量出来，并与 P36-1（§25）的
   `kinternal`/`cwhile` 对照。`docs/04-experiments.md` 新增 **§26**，源码 `src/device_graph.cu`、脚本
   `harness/device_graph.sh`、原始输出 `harness/device_graph.out.txt`（主配置 N=20000×reps=5）与

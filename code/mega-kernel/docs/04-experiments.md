@@ -3897,3 +3897,129 @@ host-graph 的 launcher 节点写 `t0` → `TailLaunch` 子图 → 子图入口�
 - **构建坑**：device 侧 runtime 必须 `-rdc=true -lcudadevrt`，否则链接期 `ptxas` 报
   `Unresolved extern function '__cudaCDP2GetLastError'`。
 - **device 3**（固定空闲），主配置与敏感性两轮结果一致。
+
+## 27. 多租户共存：整机 megakernel 的干扰 & Green Contexts SM 分区（P38-1）
+
+> 本节把「megakernel = 单次 launch 占满整机」这一前提**翻到成本面**：当它真的占满整机时，
+> 同机的**其它 kernel（另一个模型、另一个租户、一个 profiler、一次通信）还能不能跑**？
+> 以及对 MPK §5「按物理 SM 数固定分配 worker/scheduler」的部署含义。源码 `src/green_ctx_sched.cu`、
+> 脚本 `harness/green_ctx_sched.sh`、原始输出 `harness/green_ctx_sched.out.txt`
+> （目标卡 H100 / sm90，**固定空闲 device 3**，nvcc 13.2，buf=256 MB，rounds=64；
+> 同一份程序在 device 1 上复现同量级数字）。
+
+### 27.1 背景与问题
+
+「megakernel 把整张图融进一个常驻 kernel」有一个被前面所有小节默认接受的前提：**它独占整机**
+——MPK §5 原文（快照行 1168）：
+
+> "The allocation of workers and schedulers is **fixed at kernel-launch time and matches the GPU's
+> physical SM count**, avoiding any dynamic role-switching overhead inside the kernel."
+
+本专题 P10-1（网格按**占用率**选 `min(占用上限, N)`）、P14-1（异构 task 融合把轻 task 的占用率拉低）
+都在**单一 kernel 内部**谈占用率；本节问的是**跨 kernel**：一个把占用率槽位占满的持久化内核，
+对**共存的普通 kernel**意味着什么？换成部署语言：serving 集群里 Megakernel 与其它负载共享一张卡时，
+谁来保证公平？分成三个可测的问题：
+
+- **Q1（干扰）**：整机 persistent kernel 会不会把共存 kernel **饿死**？量级多大？
+- **Q2（隔离）**：Hopper **Green Contexts** 的 SM 分区能否给共存负载硬隔离、且对 persistent 自身无损？
+- **Q3（替代）**：流优先级能不能替代分区？分区的代价（persistent 自己少拿 SM）有多大？
+
+### 27.2 方法
+
+被测对象是一个「访存为主的整机 persistent kernel」（`persist_kernel`：`rounds` 轮 grid-stride 求和，
+网格按占用率上限铺满），以及一个「victim」普通 kernel（`victim_kernel`：多 block grid-stride 求和，
+最后一个完成的 block 写 mapped-pinned 的 `done` 标志）。三者对照：
+
+- **无隔离**：persist 与 victim 同在默认 context 的两条流上（`sp` / `sv`）。
+- **Green Contexts 分区**：`cudaDeviceGetDevResource` 取整机 SM → `cudaDevSmResourceSplit` 切成
+  A/B 两组 → `cudaGreenCtxCreate` 建两个 green context（各带自己的 stream）。persist 在 A、victim 在 B。
+- **流优先级**：persist 挂低优流、victim 挂高优流（`cudaStreamCreateWithPriority`，本机 `hi=-5`）。
+
+计时：victim 的 host 墙钟（launch 前 `t0` → 轮询 `done` 返回），预热 5 次取 min 作基线；
+干扰场景每次**重新起一个 persistent**、只采**第一次** victim（只有 «persistent 还在跑» 的那次才可能被饿死），
+重复 3 次取 min。persist 自身的设备侧时长用 `%globaltimer` 记录。
+
+### 27.3 原始结果
+
+```text
+=== P38-1 persistent kernel 共存干扰 / Green Contexts 分区 ===
+device=NVIDIA H100 80GB HBM3 sm_90 SMs=132  buf=256MB rounds=64
+occupancy: victim 8 blk/SM, persist 8 blk/SM -> 整机 cap=1056 blocks
+
+[Section A] 整机 persistent 对同机 kernel 的干扰（无隔离，默认 context 两条流）
+  A0 victim alone (baseline, min/5)         : 0.042 ms
+  A1 Gp=132 （仅 1 blk/SM）[有空槽位可共驻] | victim=0.040 ms  (1.0x baseline) | persist 23.85 ms
+  A1 Gp=1056（占满整机）[被饿死→等 persistent 结束] | victim=5.613 ms  (134.5x baseline) | persist 5.59 ms
+
+[Section B] Green Contexts SM 分区隔离（A 放 persistent，B 放 victim）
+  [gc] total=132 align=8 -> A=64 SM, B=68 SM
+  B0 victim alone in gcB(68 SM)              : 0.041 ms (baseline)
+  B1 persist@A(64 SM 占满) + victim@B(隔离)  : victim=0.031 ms (0.76x baseline) | persist 7.56 ms
+  B2 persist@A + victim@A(同分区,另流,对照)  : victim=7.593 ms (184.30x baseline) | persist 7.52 ms
+
+[Section C] 流优先级不能替代分区（默认 context，persist 低优 / victim 高优）
+  priority range: low=0 high=-5
+  C0 victim(高优) alone                       : 0.042 ms
+  C1 persist(低优,占满) + victim(高优)        : victim=5.615 ms (133.65x baseline) | persist 5.60 ms
+
+[Section D] 分区的代价：persistent 自身吞吐 vs 分到的 SM 数
+  [gc] total=132 align=8 -> A=32 SM, B=100 SM
+  D smA=32   (gcA=32 SM) grid=256   persist=12.87 ms  1335.3 GB/s
+  [gc] total=132 align=8 -> A=64 SM, B=68 SM
+  D smA=64   (gcA=64 SM) grid=512   persist=7.55 ms  2276.7 GB/s
+  [gc] total=132 align=8 -> A=96 SM, B=36 SM
+  D smA=96   (gcA=96 SM) grid=768   persist=6.09 ms  2821.3 GB/s
+
+OK
+```
+
+### 27.4 读法
+
+1. **干扰的开关是「剩余占用率槽位」，不是「占了几张 SM」**（A1）：Gp=132 时 persistent 铺满**全部
+   132 个 SM**，但每 SM 只占 1/8 个 block 槽位 → victim **1.0× 基线**（可共驻）；Gp=1056（8 blk/SM
+   占满整机）→ victim 被饿死到 **134.5× 基线**（5.613 ms ≈ persistent 自身 5.59 ms）。这与 P10-1
+   「并行度在**占用率上限**而非 #SM 处饱和」、P14-1「占用率被拉低」是同一变量的跨 kernel 形态。
+2. **Green Contexts 的 SM 分区给硬隔离，且互不拖慢**（B1）：persist 占满 gcA(64 SM)、victim 在
+   gcB(68 SM) → victim **0.76× 基线**（≈ 无干扰），而 persist 自身 **7.56 ms 与 D 段 smA=64 单独跑
+   的 7.55 ms 一致** → **隔离是双向的**（victim 不拖 persistent、persistent 不拖 victim）。
+3. **隔离来自分区本身、不是「换个 context」**（B2 对照）：把 victim 放进 **A 的同分区另一条流** →
+   又被饿死到 **184.3× 基线**（等满 persistent 的 7.52 ms）。同一对 green context，只是 victim 落 A 还是落 B。
+4. **流优先级不能替代分区**（C1）：persist 低优、victim **高优**，victim 仍被饿死到 **133.65× 基线**
+   —— 优先级只影响**就绪 block 的派发顺序**，**不会抢占已在 SM 上运行的 block**；要把整机 persistent
+   挤开，只能改**它拿多少 SM**（分区），不能改**谁优先**。
+5. **分区的代价是 linear scaling**（D）：persist 吞吐随分到的 SM 数近似线性——32 SM→1335 GB/s、
+   64→2277、96→2821 GB/s（96 SM 已接近整机 HBM 上限，之后饱和）。换言之，**给共存租户留 SMs =
+   按比例削减 megakernel 的可达带宽**，是必须显式付的账。
+
+### 27.5 与判据 / MPK / 生产案例的关系
+
+- **判据（C1–C5，`docs/00` §3）**：本节三者都是**单个 kernel**，判据落在「kernel 级」：`persist_kernel`
+  满足 C1/C2（单次 launch + 常驻），`victim_kernel` 是普通 kernel-per-operator；**Green Contexts 是
+  C4 的更粗一层实现**（设备内/资源层协调，把「谁用哪些 SM」在 launch 前定死，本专题 P29-1 的
+  cluster 分区是它在**片内**的同目标形态）。**均不涉及 C3/C5**——本节谈的**不是** megakernel 内部调度，
+  而是它**占满整机**这一外部性。
+- **与 MPK 的关系**：MPK §5（行 1168）明确「worker/scheduler 分配**固定在 launch 时、匹配物理 SM 数**」
+  ——这正是 A1 的 Gp=cap/1056 形态：megakernel 在**语义上**就假定独占整机。因此当**同卡还有别的负载**
+  时，MPK 只能靠**外来约束**（green context 给它一个 `smCount < 132` 的资源、或 MPS/独占调度）来共存，
+  而 kernel 内部无法感知「少给了我几个 SM」——这与 MPK §7「per-task codegen 是唯一硬件相关部分、
+  寄存器固定为各 task 最大值」一样，是**资源假设**层面的边界。
+- **与生产案例**：DeepGEMM mega 家族（`docs/02` §1）同样按整机 CTA/warpgroup 铺静态角色；真实 serving
+  往往一卡多模型。本节给出**量化结论**：**「整机 megakernel + 共存负载」不分区就会把对方饿死
+  ~130–180×，Green Contexts 分区可恢复到 ≈ 基线（代价是 megakernel 自身按 SM 数线性降带宽）**。
+  这与 P29-1 的结论互补：cluster 是**片内**局部性分区（≤16 block、同一 GPC），green context 是
+  **整机**租户分区（A/B 两片 SM），二者都是「按需局部化」的不同粒度。
+
+### 27.6 局限与踩到的坑
+
+- **victim 是合成访存 kernel**（多 block 求和），数字以**量级**读；A1 两种 Gp 的「共驻 vs 饿死」结论
+  对具体 workload 稳健，但绝对倍数随 victim 工作量而变。
+- **依赖 mapped-pinned 的 `done` + host 轮询**计时：host 墙钟含 host 提交延迟（~µs 级），基线 0.042 ms
+  已高于它；被饿死时信号（>5 ms）远大于噪声。
+- **未测 MPS**（Multi-Process Service）作为另一条隔离路线，也未测 **green context 内的 cluster/`smCoscheduledAlignment` 交互**；
+  Section D 只扫 32/64/96 SM（`smA=128` 因 132 个 SM **不是 `smCoscheduledAlignment`=8 的整数倍**、
+  余 4 个 SM 小于最小分组而 split 失败——**踩坑：H100 的 132 SM 与 8 对齐不整除，第二组必须用
+  `cudaDevSmResourceGroupBackfill` 才能拿到余数**）。
+- **Green Contexts 的 runtime API**（`cudaDevSmResourceSplit`/`cudaGreenCtxCreate`/`cudaExecutionCtxStreamCreate`）
+  在本容器 CUDA 13.2 可用；更早 CUDA 只有 driver API 版本。官方语义见 NVIDIA CUDA C Programming Guide
+  的 “Green Contexts” 一节（`https://docs.nvidia.com/cuda/cuda-c-programming-guide/`）。
+- **device 3**（固定空闲），device 1 复现同量级（A1 5.612/5.613 ms、B1 0.031/0.031、D 同）。
